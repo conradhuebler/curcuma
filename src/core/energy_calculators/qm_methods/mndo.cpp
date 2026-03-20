@@ -9,6 +9,7 @@
  */
 
 #include "mndo.h"
+#include "nddo_params.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
 #include "ParallelEigenSolver.hpp"
@@ -48,70 +49,36 @@ MNDO::MNDO()
 
 void MNDO::initializeMNDOParameters()
 {
-    // Claude Generated: MNDO parameters from original 1977 publication
-    // Reference: M. J. S. Dewar, W. Thiel, J. Am. Chem. Soc. 1977, 99, 4899
+    // Claude Generated: Load MNDO parameters from centralized NDDO database
+    // Parameters extracted from Ulysses MNDO.hpp
+    // Ref: M. J. S. Dewar, W. Thiel, J. Am. Chem. Soc. 1977, 99, 4899
     // Note: MNDO does NOT use Gaussian expansions (unlike PM3/AM1)
 
-    // CRITICAL: Parameters stored in eV, must convert to Hartree
-    // Reference: Ulysses MNDO.hpp line 6597: "return ulx/au2eV"
-    const double eV2Hartree = 27.211386245988;
+    const auto& nddo = NDDOParams::getMNDOParams();
 
-    // Hydrogen (Z=1)
-    MNDOParams H;
-    H.U_ss = -12.848;  // eV (MNDO original)
-    H.zeta_s = 1.331967;
-    H.beta_s = -6.173787;
-    H.alpha = 2.544520;
-    H.D1 = 0.0;      // H has no p-orbitals
-    H.D2 = 0.0;
-    H.rho_s = 2.0 / H.zeta_s;
-    H.rho_p = 0.0;
-    m_mndo_params[1] = H;
-
-    // Carbon (Z=6)
-    MNDOParams C;
-    C.U_ss = -51.089653;
-    C.U_pp = -39.614239;
-    C.zeta_s = 1.787537;
-    C.zeta_p = 1.787537;
-    C.beta_s = -15.385236;
-    C.beta_p = -7.719283;
-    C.alpha = 2.648426;
-    C.D1 = 0.8074; // MNDO value in Å
-    C.D2 = 0.0;
-    C.rho_s = 2.0 / C.zeta_s;
-    C.rho_p = 2.0 / C.zeta_p;
-    m_mndo_params[6] = C;
-
-    // Nitrogen (Z=7)
-    MNDOParams N;
-    N.U_ss = -71.862080;
-    N.U_pp = -57.167581;
-    N.zeta_s = 2.255614;
-    N.zeta_p = 2.255614;
-    N.beta_s = -20.299110;
-    N.beta_p = -18.238666;
-    N.alpha = 2.947286;
-    N.D1 = 0.6577; // MNDO value
-    N.D2 = 0.0;
-    N.rho_s = 2.0 / N.zeta_s;
-    N.rho_p = 2.0 / N.zeta_p;
-    m_mndo_params[7] = N;
-
-    // Oxygen (Z=8)
-    MNDOParams O;
-    O.U_ss = -97.830000;
-    O.U_pp = -78.262380;
-    O.zeta_s = 3.108032;
-    O.zeta_p = 2.524039;
-    O.beta_s = -29.272773;
-    O.beta_p = -29.272773;
-    O.alpha = 4.455371;
-    O.D1 = 0.5346; // MNDO value
-    O.D2 = 0.0;
-    O.rho_s = 2.0 / O.zeta_s;
-    O.rho_p = 2.0 / O.zeta_p;
-    m_mndo_params[8] = O;
+    for (const auto& [Z, ep] : nddo) {
+        MNDOParams p;
+        p.U_ss = ep.U_ss;
+        p.U_pp = ep.U_pp;
+        p.beta_s = ep.beta_s;
+        p.beta_p = ep.beta_p;
+        p.zeta_s = ep.zeta_s;
+        p.zeta_p = ep.zeta_p;
+        p.alpha = ep.alpha;
+        p.D1 = ep.D1;
+        p.D2 = ep.D2;
+        p.rho_s = ep.rho_s;
+        p.rho_p = ep.rho_p;
+        p.Gss = ep.Gss;
+        p.Gpp = ep.Gpp;
+        p.Gsp = ep.Gsp;
+        p.Gp2 = ep.Gp2;
+        p.Hsp = ep.Hsp;
+        p.Eisol = ep.Eisol;
+        p.n_valence = ep.n_valence;
+        p.n_principal = ep.n_principal;
+        m_mndo_params[Z] = p;
+    }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("MNDO parameters loaded for {} elements",
@@ -343,10 +310,8 @@ int MNDO::buildBasisSet()
             }
         }
 
-        // Count valence electrons
-        if (Z == 1) m_num_electrons += 1;
-        else if (Z >= 2 && Z <= 10) m_num_electrons += (Z - 2) + 2;  // 2s² + np^x
-        else m_num_electrons += Z;  // Simplified
+        // Count valence electrons from parametrized data
+        m_num_electrons += params.n_valence;
     }
 
     return static_cast<int>(m_basis.size());
@@ -542,20 +507,63 @@ double MNDO::calculateTwoElectronIntegral(int mu, int nu, int lambda, int sigma)
     int atom_B = atom_lambda;
 
     if (atom_A == atom_B) {
-        // One-center integrals
+        // =====================================================================
+        // ONE-CENTER INTEGRALS: (μν|λσ) with all orbitals on same atom
+        // Claude Generated: Correct implementation using Gss/Gpp/Gsp/Gp2/Hsp
+        // Reference: Dewar & Thiel, Theor. Chim. Acta 1977, 46, 89-104
+        // =====================================================================
+
         int Z = m_atoms[atom_A];
         const MNDOParams& params = m_mndo_params.at(Z);
 
         STO::OrbitalType type_mu = m_basis[mu].type;
+        STO::OrbitalType type_nu = m_basis[nu].type;
         STO::OrbitalType type_lambda = m_basis[lambda].type;
+        STO::OrbitalType type_sigma = m_basis[sigma].type;
 
-        if (type_mu == STO::S && type_lambda == STO::S) {
-            return params.U_ss / eV2Eh;
-        } else if (type_mu != STO::S && type_lambda != STO::S) {
-            return params.U_pp / eV2Eh;
-        } else {
-            return (params.U_ss + params.U_pp) / (2.0 * eV2Eh);
+        auto is_s = [](STO::OrbitalType t) { return t == STO::S; };
+
+        // (ss|ss) = Gss
+        if (is_s(type_mu) && is_s(type_nu) && is_s(type_lambda) && is_s(type_sigma)) {
+            return params.Gss / eV2Eh;
         }
+
+        // (ss|pipi) = Gsp
+        if (is_s(type_mu) && is_s(type_nu) && !is_s(type_lambda) && type_lambda == type_sigma) {
+            return params.Gsp / eV2Eh;
+        }
+
+        // (pipi|ss) = Gsp
+        if (!is_s(type_mu) && type_mu == type_nu && is_s(type_lambda) && is_s(type_sigma)) {
+            return params.Gsp / eV2Eh;
+        }
+
+        // (pipi|pjpj) = Gpp if i==j, Gp2 if i!=j
+        if (!is_s(type_mu) && type_mu == type_nu && !is_s(type_lambda) && type_lambda == type_sigma) {
+            return (type_mu == type_lambda) ? params.Gpp / eV2Eh : params.Gp2 / eV2Eh;
+        }
+
+        // (pipj|pipj) or (pipj|pjpi) = Hpp = 0.5*(Gpp - Gp2) — rotational invariance
+        if (!is_s(type_mu) && !is_s(type_nu) && type_mu != type_nu &&
+            !is_s(type_lambda) && !is_s(type_sigma) && type_lambda != type_sigma) {
+            if ((type_mu == type_lambda && type_nu == type_sigma) ||
+                (type_mu == type_sigma && type_nu == type_lambda)) {
+                return 0.5 * (params.Gpp - params.Gp2) / eV2Eh;
+            }
+        }
+
+        // (spi|spi) and permutations = Hsp
+        bool bra_sp = (is_s(type_mu) != is_s(type_nu));
+        bool ket_sp = (is_s(type_lambda) != is_s(type_sigma));
+        if (bra_sp && ket_sp) {
+            STO::OrbitalType p_bra = is_s(type_mu) ? type_nu : type_mu;
+            STO::OrbitalType p_ket = is_s(type_lambda) ? type_sigma : type_lambda;
+            if (p_bra == p_ket) {
+                return params.Hsp / eV2Eh;
+            }
+        }
+
+        return 0.0;
 
     } else {
         // Two-center integrals using MNDO multipole expansion

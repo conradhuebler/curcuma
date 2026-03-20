@@ -10,6 +10,7 @@
  */
 
 #include "am1.h"
+#include "nddo_params.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
 #include "ParallelEigenSolver.hpp"
@@ -49,87 +50,38 @@ AM1::AM1()
 
 void AM1::initializeAM1Parameters()
 {
-    // Claude Generated: AM1 parameters from MOPAC AM1 parameter database
-    // Reference: J. Am. Chem. Soc. 1985, 107, 3902-3909
-    // DOI: 10.1021/ja00299a024
+    // Claude Generated: Load AM1 parameters from centralized NDDO database
+    // Parameters extracted from Ulysses MNDO.hpp (AM1 inherits MNDO eri1Center)
+    // Ref: M. J. S. Dewar et al., J. Am. Chem. Soc. 1985, 107, 3902-3909
 
-    // CRITICAL: Parameters stored in eV, must convert to Hartree
-    // Reference: Ulysses MNDO.hpp line 6597: "return ulx/au2eV"
-    const double eV2Hartree = 27.211386245988;
+    const auto& nddo = NDDOParams::getAM1Params();
 
-    // Hydrogen (Z=1)
-    // Claude Generated: AM1 parameters extended with MNDO integral parameters
-    AM1Params H;
-    H.U_ss = -11.396427;
-    H.zeta_s = 1.188078;
-    H.beta_s = -6.173787;
-    H.alpha = 2.882324;
-    H.gauss_a = {0.122796, 0.005090};
-    H.gauss_b = {5.000000, 5.000000};
-    H.gauss_c = {1.200000, 1.800000};
-    // MNDO multipole expansion parameters (extracted from MOPAC/Ulysses)
-    H.D1 = 0.0;      // H has no p-orbitals, no dipole expansion
-    H.D2 = 0.0;      // No d-orbitals
-    H.rho_s = 2.0 / H.zeta_s;  // Approximate from Slater exponent
-    H.rho_p = 0.0;   // No p-orbitals for H
-    m_am1_params[1] = H;
-
-    // Carbon (Z=6)
-    AM1Params C;
-    C.U_ss = -52.028658;
-    C.U_pp = -39.614239;
-    C.zeta_s = 1.808665;
-    C.zeta_p = 1.685116;
-    C.beta_s = -15.715783;
-    C.beta_p = -7.719283;
-    C.alpha = 2.648274;
-    C.gauss_a = {0.011355, 0.045924, -0.020061};
-    C.gauss_b = {5.000000, 5.000000, 5.000000};
-    C.gauss_c = {1.600000, 1.850000, 2.050000};
-    // MNDO multipole expansion parameters
-    C.D1 = 0.8236; // AM1 value in Å (from MOPAC parameter database)
-    C.D2 = 0.0;    // No d-orbitals for second-row elements
-    C.rho_s = 2.0 / C.zeta_s;  // Orbital exponent for s-type ERIs
-    C.rho_p = 2.0 / C.zeta_p;  // Orbital exponent for p-type ERIs
-    m_am1_params[6] = C;
-
-    // Nitrogen (Z=7)
-    AM1Params N;
-    N.U_ss = -71.860000;
-    N.U_pp = -57.167581;
-    N.zeta_s = 2.315410;
-    N.zeta_p = 2.157940;
-    N.beta_s = -20.299281;
-    N.beta_p = -18.238666;
-    N.alpha = 2.947286;
-    N.gauss_a = {0.025251, 0.028953, -0.005806};
-    N.gauss_b = {5.000000, 5.000000, 2.000000};
-    N.gauss_c = {1.500000, 2.100000, 2.400000};
-    // MNDO multipole expansion parameters
-    N.D1 = 0.6433; // AM1 value in Å
-    N.D2 = 0.0;
-    N.rho_s = 2.0 / N.zeta_s;
-    N.rho_p = 2.0 / N.zeta_p;
-    m_am1_params[7] = N;
-
-    // Oxygen (Z=8)
-    AM1Params O;
-    O.U_ss = -97.830000;
-    O.U_pp = -78.262380;
-    O.zeta_s = 3.108032;
-    O.zeta_p = 2.524039;
-    O.beta_s = -29.272773;
-    O.beta_p = -29.272773;
-    O.alpha = 4.455371;
-    O.gauss_a = {0.280962, 0.081430, -0.005050};
-    O.gauss_b = {5.000000, 7.000000, 2.000000};
-    O.gauss_c = {0.800000, 1.400000, 2.000000};
-    // MNDO multipole expansion parameters
-    O.D1 = 0.4988; // AM1 value in Å
-    O.D2 = 0.0;
-    O.rho_s = 2.0 / O.zeta_s;
-    O.rho_p = 2.0 / O.zeta_p;
-    m_am1_params[8] = O;
+    for (const auto& [Z, ep] : nddo) {
+        AM1Params p;
+        p.U_ss = ep.U_ss;
+        p.U_pp = ep.U_pp;
+        p.beta_s = ep.beta_s;
+        p.beta_p = ep.beta_p;
+        p.zeta_s = ep.zeta_s;
+        p.zeta_p = ep.zeta_p;
+        p.alpha = ep.alpha;
+        p.D1 = ep.D1;
+        p.D2 = ep.D2;
+        p.rho_s = ep.rho_s;
+        p.rho_p = ep.rho_p;
+        p.Gss = ep.Gss;
+        p.Gpp = ep.Gpp;
+        p.Gsp = ep.Gsp;
+        p.Gp2 = ep.Gp2;
+        p.Hsp = ep.Hsp;
+        p.Eisol = ep.Eisol;
+        p.gauss_a = ep.gauss_K;
+        p.gauss_b = ep.gauss_L;
+        p.gauss_c = ep.gauss_M;
+        p.n_valence = ep.n_valence;
+        p.n_principal = ep.n_principal;
+        m_am1_params[Z] = p;
+    }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("AM1 parameters loaded for {} elements",
@@ -348,10 +300,8 @@ int AM1::buildBasisSet()
             }
         }
 
-        // Count valence electrons
-        if (Z == 1) m_num_electrons += 1;
-        else if (Z >= 2 && Z <= 10) m_num_electrons += (Z - 2) + 2;  // 2s² + np^x
-        else m_num_electrons += Z;  // Simplified
+        // Count valence electrons from parametrized data
+        m_num_electrons += params.n_valence;
     }
 
     return static_cast<int>(m_basis.size());
@@ -581,37 +531,61 @@ double AM1::calculateTwoElectronIntegral(int mu, int nu, int lambda, int sigma) 
     if (atom_A == atom_B) {
         // =====================================================================
         // ONE-CENTER INTEGRALS: (μν|λσ) with all orbitals on same atom
+        // Claude Generated: Correct implementation using Gss/Gpp/Gsp/Gp2/Hsp
+        // Reference: Dewar & Thiel, Theor. Chim. Acta 1977, 46, 89-104
         // =====================================================================
 
         int Z = m_atoms[atom_A];
         const AM1Params& params = m_am1_params.at(Z);
 
-        // Extract orbital types
         STO::OrbitalType type_mu = m_basis[mu].type;
         STO::OrbitalType type_nu = m_basis[nu].type;
         STO::OrbitalType type_lambda = m_basis[lambda].type;
         STO::OrbitalType type_sigma = m_basis[sigma].type;
 
-        // One-center integrals (simplified - real AM1 has full multipole)
-        // (ss|ss)
-        if (type_mu == STO::S && type_nu == STO::S &&
-            type_lambda == STO::S && type_sigma == STO::S) {
-            return params.U_ss / eV2Eh;
+        auto is_s = [](STO::OrbitalType t) { return t == STO::S; };
+
+        // (ss|ss) = Gss
+        if (is_s(type_mu) && is_s(type_nu) && is_s(type_lambda) && is_s(type_sigma)) {
+            return params.Gss / eV2Eh;
         }
-        // (sp|sp) - cross term
-        else if ((type_mu == STO::S && type_lambda == STO::S) ||
-                 (type_mu != STO::S && type_lambda != STO::S)) {
-            // Simplified: average of ss and pp
-            if (type_mu == STO::S && type_lambda != STO::S) {
-                return (params.U_ss + params.U_pp) / (2.0 * eV2Eh);
-            } else if (type_mu != STO::S && type_lambda == STO::S) {
-                return (params.U_pp + params.U_ss) / (2.0 * eV2Eh);
-            } else if (type_mu != STO::S && type_lambda != STO::S) {
-                return params.U_pp / eV2Eh;
+
+        // (ss|pipi) = Gsp
+        if (is_s(type_mu) && is_s(type_nu) && !is_s(type_lambda) && type_lambda == type_sigma) {
+            return params.Gsp / eV2Eh;
+        }
+
+        // (pipi|ss) = Gsp
+        if (!is_s(type_mu) && type_mu == type_nu && is_s(type_lambda) && is_s(type_sigma)) {
+            return params.Gsp / eV2Eh;
+        }
+
+        // (pipi|pjpj) = Gpp if i==j, Gp2 if i!=j
+        if (!is_s(type_mu) && type_mu == type_nu && !is_s(type_lambda) && type_lambda == type_sigma) {
+            return (type_mu == type_lambda) ? params.Gpp / eV2Eh : params.Gp2 / eV2Eh;
+        }
+
+        // (pipj|pipj) or (pipj|pjpi) = Hpp = 0.5*(Gpp - Gp2) — rotational invariance
+        if (!is_s(type_mu) && !is_s(type_nu) && type_mu != type_nu &&
+            !is_s(type_lambda) && !is_s(type_sigma) && type_lambda != type_sigma) {
+            if ((type_mu == type_lambda && type_nu == type_sigma) ||
+                (type_mu == type_sigma && type_nu == type_lambda)) {
+                return 0.5 * (params.Gpp - params.Gp2) / eV2Eh;
             }
         }
 
-        return 0.0;  // Other one-center cases neglected in simplified version
+        // (spi|spi) and permutations = Hsp
+        bool bra_sp = (is_s(type_mu) != is_s(type_nu));
+        bool ket_sp = (is_s(type_lambda) != is_s(type_sigma));
+        if (bra_sp && ket_sp) {
+            STO::OrbitalType p_bra = is_s(type_mu) ? type_nu : type_mu;
+            STO::OrbitalType p_ket = is_s(type_lambda) ? type_sigma : type_lambda;
+            if (p_bra == p_ket) {
+                return params.Hsp / eV2Eh;
+            }
+        }
+
+        return 0.0;
 
     } else {
         // =====================================================================

@@ -831,17 +831,330 @@ double GFN1::calculateHalogenBondCorrection() const
 // Gradient Calculation (numerical, same as GFN2)
 // =================================================================================
 
+// Claude Generated (March 2026): TBLite atomic radii for shpoly distance scaling (Bohr)
+// Source: tblite/data/atomicrad.f90 (Mantina et al., CRC Handbook 2010), converted aatoau
+namespace {
+    const double aatoau = 1.0 / 0.529177249;
+    const double GFN1_ATOMIC_RAD[87] = {
+        0.0,  // dummy
+        0.32*aatoau, 0.37*aatoau, 1.30*aatoau, 0.99*aatoau, 0.84*aatoau, 0.75*aatoau,  // H-C
+        0.71*aatoau, 0.64*aatoau, 0.60*aatoau, 0.62*aatoau,  // N-Ne
+        1.60*aatoau, 1.40*aatoau, 1.24*aatoau, 1.14*aatoau, 1.09*aatoau, 1.04*aatoau,  // Na-S
+        1.00*aatoau, 1.01*aatoau,  // Cl, Ar
+        2.00*aatoau, 1.74*aatoau, 1.59*aatoau, 1.48*aatoau, 1.44*aatoau, 1.30*aatoau,  // K-Cr
+        1.29*aatoau, 1.24*aatoau, 1.18*aatoau, 1.17*aatoau, 1.22*aatoau, 1.20*aatoau,  // Mn-Zn
+        1.23*aatoau, 1.20*aatoau, 1.20*aatoau, 1.18*aatoau, 1.17*aatoau, 1.16*aatoau,  // Ga-Kr
+        2.15*aatoau, 1.90*aatoau, 1.76*aatoau, 1.64*aatoau, 1.56*aatoau, 1.46*aatoau,  // Rb-Mo
+        1.38*aatoau, 1.36*aatoau, 1.34*aatoau, 1.30*aatoau, 1.36*aatoau, 1.40*aatoau,  // Tc-Cd
+        1.42*aatoau, 1.40*aatoau, 1.40*aatoau, 1.37*aatoau, 1.36*aatoau, 1.36*aatoau,  // In-Xe
+        2.38*aatoau, 2.06*aatoau, 1.94*aatoau, 1.84*aatoau, 1.90*aatoau, 1.88*aatoau,  // Cs-Nd
+        1.86*aatoau, 1.85*aatoau, 1.83*aatoau, 1.82*aatoau, 1.81*aatoau, 1.80*aatoau,  // Pm-Dy
+        1.79*aatoau, 1.77*aatoau, 1.77*aatoau, 1.78*aatoau, 1.74*aatoau, 1.64*aatoau,  // Ho-Hf
+        1.58*aatoau, 1.50*aatoau, 1.41*aatoau, 1.36*aatoau, 1.32*aatoau, 1.30*aatoau,  // Ta-Ir
+        1.30*aatoau, 1.32*aatoau, 1.44*aatoau, 1.45*aatoau, 1.50*aatoau, 1.42*aatoau,  // Pt-Po
+        1.48*aatoau, 1.46*aatoau  // At, Rn
+    };
+
+    // GFN1 shell polynomials (p_shpoly * 0.01) from TBLite gfn1.f90 lines 248-292
+    // Indexed as [Z][shell], Z=1..86, shell=0(s),1(p),2(d)
+    // Only first 18 elements shown explicitly; rest can be added as needed
+    const double GFN1_SHPOLY[87][3] = {
+        {0.0, 0.0, 0.0},  // dummy Z=0
+        { 0.000000*0.01,  0.000000*0.01,  0.000000*0.01},  // H
+        { 8.084149*0.01,  0.000000*0.01,  0.000000*0.01},  // He
+        {-4.102845*0.01,  9.259276*0.01,  0.000000*0.01},  // Li
+        {-12.991482*0.01, -1.308797*0.01,  0.000000*0.01},  // Be
+        {-7.088823*0.01,  0.655877*0.01,  0.000000*0.01},  // B
+        {-7.082170*0.01,  0.812216*0.01,  0.000000*0.01},  // C
+        {-12.745585*0.01, -1.428367*0.01,  0.000000*0.01},  // N
+        {-13.729047*0.01, -4.453341*0.01,  0.000000*0.01},  // O
+        {-3.921613*0.01, -11.422491*0.01,  0.000000*0.01},  // F
+        {-2.115896*0.01, -15.124326*0.01,  0.000000*0.01},  // Ne
+        {13.188489*0.01,  10.969376*0.01,  0.000000*0.01},  // Na
+        {-19.219408*0.01, 18.272922*0.01,  0.000000*0.01},  // Mg
+        {-21.085827*0.01, 24.805127*0.01, 26.405814*0.01},  // Al
+        {-14.201582*0.01, -3.893343*0.01, 25.499221*0.01},  // Si
+        {-16.118985*0.01, -2.241189*0.01, 30.984577*0.01},  // P
+        {-16.989922*0.01, -6.067779*0.01, 16.248395*0.01},  // S
+        {-9.341919*0.01,  -8.499805*0.01, 13.088867*0.01},  // Cl
+        {-0.082808*0.01,  -9.217948*0.01, 12.204172*0.01},  // Ar
+        {12.482844*0.01,  22.323655*0.01,  0.000000*0.01},  // K
+        {-11.421376*0.01, 14.628284*0.01, 10.129602*0.01},  // Ca
+        { 9.522966*0.01,  44.183320*0.01,-36.027863*0.01},  // Sc
+        {24.879987*0.01,  18.910954*0.01,-24.908650*0.01},  // Ti
+        {-5.301066*0.01,  22.945047*0.01,-29.197847*0.01},  // V
+        {-2.432193*0.01,  11.274054*0.01,-22.608167*0.01},  // Cr
+        { 1.025345*0.01,   1.834626*0.01,-25.016650*0.01},  // Mn
+        {-2.182723*0.01,  11.769535*0.01,-22.920815*0.01},  // Fe
+        { 0.815250*0.01,  15.765732*0.01,-21.678930*0.01},  // Co
+        {15.160508*0.01,  15.782685*0.01,-26.348820*0.01},  // Ni
+        {-3.590501*0.01,   7.413473*0.01,-21.142399*0.01},  // Cu
+        {-15.535695*0.01,  4.061664*0.01,  0.000000*0.01},  // Zn
+        {-14.584657*0.01,  9.375082*0.01, 19.671655*0.01},  // Ga
+        {-12.195371*0.01,-11.374296*0.01,  9.364108*0.01},  // Ge
+        {-17.489686*0.01, -6.747956*0.01, 17.858510*0.01},  // As
+        {-14.852299*0.01, -9.863477*0.01,  9.556181*0.01},  // Se
+        {-17.815502*0.01,-14.058044*0.01,  5.468245*0.01},  // Br
+        {-25.437273*0.01,-12.813227*0.01, 10.440712*0.01},  // Kr
+        {-7.450752*0.01,  16.670533*0.01,  0.000000*0.01},  // Rb
+        {-6.087125*0.01,   2.115262*0.01, 17.076466*0.01},  // Sr
+        {10.950764*0.01,  45.679760*0.01,-28.061976*0.01},  // Y
+        {44.110231*0.01,  25.863572*0.01,-22.240873*0.01},  // Zr
+        {15.379439*0.01,  30.159730*0.01,-25.998052*0.01},  // Nb
+        { 5.815301*0.01,  14.527159*0.01,-22.556077*0.01},  // Mo
+        {24.977603*0.01,   1.953838*0.01,-23.231470*0.01},  // Tc
+        {15.281981*0.01,   1.340798*0.01,-23.099524*0.01},  // Ru
+        {24.928002*0.01,  -4.330556*0.01,-19.564083*0.01},  // Rh-correction: moved
+        {25.774929*0.01,  -0.704597*0.01,-21.172493*0.01},  // Pd
+        {38.415536*0.01,  -0.665483*0.01,-22.169385*0.01},  // Ag
+        {-11.443658*0.01, -5.119735*0.01,-11.067532*0.01},  // Cd
+        {-6.581368*0.01,   3.995243*0.01,  0.000000*0.01},  // In
+        {-2.193199*0.01,   0.060451*0.01,  0.000000*0.01},  // Sn
+        {-10.874138*0.01, -6.034796*0.01,  0.000000*0.01},  // Sb
+        {-20.410234*0.01, -9.424568*0.01,  0.000000*0.01},  // Te
+        {-18.477865*0.01,-14.037423*0.01, 13.809093*0.01},  // I
+        {-21.965390*0.01,-12.804436*0.01, 16.836546*0.01},  // Xe
+        {-22.139701*0.01,-20.539955*0.01, 17.249637*0.01},  // Cs
+        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Ba-Pm (56-61)
+        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Sm-Tb (62-65)
+        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Dy-Tm (66-69)
+        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Yb-Hf (70-73)
+        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Ta-Os (74-77)
+        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Ir-Pb (78-82)
+        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Bi-Rn (83-86)
+    };
+
+    // GFN1 TBLite constants (gfn1.f90 lines 54-58)
+    constexpr double GFN1_REP_KEXP = 1.5;
+    constexpr double GFN1_REP_REXP = 1.0;
+    constexpr double GFN1_ENSCALE = -7.0e-3;
+    constexpr double GFN1_KDIAG[] = {1.85, 2.25, 2.0, 2.0, 2.0};
+    constexpr double GFN1_KDIFF = 2.85;
+
+    inline double getGFN1AtomicRad(int Z) {
+        if (Z >= 1 && Z <= 86) return GFN1_ATOMIC_RAD[Z];
+        return 2.0;  // fallback
+    }
+
+    inline double getGFN1ShPoly(int Z, int shell) {
+        if (Z >= 1 && Z <= 86 && shell >= 0 && shell <= 2) return GFN1_SHPOLY[Z][shell];
+        return 0.0;
+    }
+}
+
 Matrix GFN1::calculateGradient() const
 {
-    // Claude Generated: Numerical gradients for GFN1
+    // Claude Generated (March 2026): Analytical gradients for GFN1-xTB
+    // Adapted from GFN2 analytical gradient pattern
+    // Components: Pulay forces (H0/S derivatives), repulsion, Coulomb (ES2), CN, D3, halogen bond
+    // Reference: TBLite xtb/h0.f90 get_hamiltonian_gradient
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("Calculating GFN1 gradients (numerical)");
+        CurcumaLogger::info("Calculating GFN1 analytical gradients");
     }
 
     Matrix gradient = Matrix::Zero(m_atomcount, 3);
-    const double delta = 1.0e-5;
 
+    // Energy-weighted density matrix W = 2 * sum_{i occ} eps_i * C_i * C_i^T
+    Matrix W = Matrix::Zero(m_nbasis, m_nbasis);
+    int n_occ = m_num_electrons / 2;
+    for (int i = 0; i < n_occ; ++i) {
+        double eps = m_energies(i);
+        for (int mu = 0; mu < m_nbasis; ++mu)
+            for (int nu = 0; nu < m_nbasis; ++nu)
+                W(mu, nu) += 2.0 * eps * m_mo(mu, i) * m_mo(nu, i);
+    }
+
+    for (int A = 0; A < m_atomcount; ++A) {
+        for (int B = A + 1; B < m_atomcount; ++B) {
+            double dx = m_geometry(B, 0) - m_geometry(A, 0);
+            double dy = m_geometry(B, 1) - m_geometry(A, 1);
+            double dz = m_geometry(B, 2) - m_geometry(A, 2);
+            double R_AB_ang = std::sqrt(dx*dx + dy*dy + dz*dz);
+            double R_AB_bohr = R_AB_ang / au;
+            if (R_AB_ang < 1e-10) continue;
+            double nx = dx / R_AB_ang, ny = dy / R_AB_ang, nz = dz / R_AB_ang;
+
+            int ZA = m_atoms[A], ZB = m_atoms[B];
+
+            // ===== 1. Repulsion gradient =====
+            // V_rep = zeff_AB * exp(-alpha_AB * R^kexp) / R^rexp
+            // dV/dR = -(alpha*R^kexp*kexp + rexp) * V / R
+            double alpha_A = 0, alpha_B = 0, zeff_A = 0, zeff_B = 0;
+            if (m_param_db.hasElement(ZA)) { alpha_A = m_param_db.getElement(ZA).rep_alpha; zeff_A = m_param_db.getElement(ZA).rep_zeff; }
+            if (m_param_db.hasElement(ZB)) { alpha_B = m_param_db.getElement(ZB).rep_alpha; zeff_B = m_param_db.getElement(ZB).rep_zeff; }
+            double alpha_AB = std::sqrt(alpha_A * alpha_B);
+            double zeff_AB = zeff_A * zeff_B;
+            double kexp = (ZA > 2 || ZB > 2) ? GFN1_REP_KEXP : 1.0;
+            double rexp = GFN1_REP_REXP;
+            double r1k = std::pow(R_AB_bohr, kexp);
+            double r1r = std::pow(R_AB_bohr, rexp);
+            double Vrep = zeff_AB * std::exp(-alpha_AB * r1k) / r1r;
+            double dVdR = -(alpha_AB * r1k * kexp + rexp) * Vrep / (R_AB_bohr * R_AB_bohr);
+            // dVdR is in Hartree/Bohr, project onto Cartesian via unit vector
+            // But R_AB_ang = R_AB_bohr * au, so dV/d(R_ang) = dV/d(R_bohr) / au
+            gradient(A, 0) += dVdR * nx / au; gradient(A, 1) += dVdR * ny / au; gradient(A, 2) += dVdR * nz / au;
+            gradient(B, 0) -= dVdR * nx / au; gradient(B, 1) -= dVdR * ny / au; gradient(B, 2) -= dVdR * nz / au;
+
+            // ===== 2. Hamiltonian (Pulay) forces =====
+            // dE_el/dR = sum_{mu,nu} [2*P*dH0/dR - 2*W*dS/dR]
+            double rad_A = getGFN1AtomicRad(ZA), rad_B = getGFN1AtomicRad(ZB);
+
+            for (size_t mu = 0; mu < m_basis.size(); ++mu) {
+                if (m_basis[mu].atom != A) continue;
+                for (size_t nu = 0; nu < m_basis.size(); ++nu) {
+                    if (m_basis[nu].atom != B) continue;
+
+                    double dS_dR = STO::calculateOverlapDerivative(m_basis[mu], m_basis[nu], R_AB_bohr);
+                    double h_avg = (m_hamiltonian(mu, mu) + m_hamiltonian(nu, nu)) / 2.0;
+
+                    // Shell types for shpoly lookup
+                    int shell_mu = (m_basis[mu].type == STO::PX || m_basis[mu].type == STO::PY || m_basis[mu].type == STO::PZ) ? 1 : 0;
+                    int shell_nu = (m_basis[nu].type == STO::PX || m_basis[nu].type == STO::PY || m_basis[nu].type == STO::PZ) ? 1 : 0;
+
+                    // Distance-dependent polynomial (TBLite shpoly formulation)
+                    double sh_A = getGFN1ShPoly(ZA, shell_mu);
+                    double sh_B = getGFN1ShPoly(ZB, shell_nu);
+                    double rr = std::sqrt(R_AB_bohr / (rad_A + rad_B));
+                    double poly = (1.0 + sh_A * rr) * (1.0 + sh_B * rr);
+
+                    // Derivative: d(poly)/dR = (sh_A * drr * (1+sh_B*rr) + (1+sh_A*rr) * sh_B * drr)
+                    // drr = d/dR sqrt(R/(radA+radB)) = 1 / (2*sqrt(R*(radA+radB)))
+                    double drr = 1.0 / (2.0 * std::sqrt(R_AB_bohr * (rad_A + rad_B)));
+                    double dpoly = sh_A * drr * (1.0 + sh_B * rr) + (1.0 + sh_A * rr) * sh_B * drr;
+
+                    // Orbital overlap scaling
+                    double z_ij = std::sqrt(2.0 * std::sqrt(m_basis[mu].zeta * m_basis[nu].zeta) / (m_basis[mu].zeta + m_basis[nu].zeta));
+
+                    // EN scaling (GFN1: enscale = -7.0e-3)
+                    double EN_A = m_params.getElectronegativity(ZA);
+                    double EN_B = m_params.getElectronegativity(ZB);
+                    double dEN = EN_A - EN_B;
+
+                    // Shell coupling from kdiag
+                    double k_s = (GFN1_KDIAG[shell_mu] + GFN1_KDIAG[shell_nu]) / 2.0;
+
+                    // Pair coupling
+                    double k_p = 1.0;
+                    if (m_param_db.hasPair(ZA, ZB)) {
+                        const auto& pair = m_param_db.getPair(ZA, ZB);
+                        k_p = pair.kpair;
+                        if (shell_mu == 0 && shell_nu == 0) k_s = pair.kshell_ss;
+                        else if (shell_mu == 1 && shell_nu == 1) k_s = pair.kshell_pp;
+                        else k_s = pair.kshell_sp;
+                    }
+
+                    double C = z_ij * k_p * k_s * (1.0 + GFN1_ENSCALE * dEN * dEN);
+                    double dH0 = (C * dpoly * m_overlap(mu, nu) + C * poly * dS_dR) * h_avg;
+                    double contrib = 2.0 * (m_density(mu, nu) * dH0 - W(mu, nu) * dS_dR);
+
+                    gradient(A, 0) += (contrib / au) * nx; gradient(A, 1) += (contrib / au) * ny; gradient(A, 2) += (contrib / au) * nz;
+                    gradient(B, 0) -= (contrib / au) * nx; gradient(B, 1) -= (contrib / au) * ny; gradient(B, 2) -= (contrib / au) * nz;
+                }
+            }
+
+            // ===== 3. Coulomb (ES2) gradient =====
+            // gamma_AB = 1/sqrt(R^2 + 0.5*(gamma_AA + gamma_BB))
+            // dgamma/dR = -R / (R^2 + eta)^(3/2) where eta = 0.5*(gAA+gBB)
+            double gamma_AA = m_param_db.hasElement(ZA) ? m_param_db.getElement(ZA).gamma_ss : m_params.getHardness(ZA);
+            double gamma_BB = m_param_db.hasElement(ZB) ? m_param_db.getElement(ZB).gamma_ss : m_params.getHardness(ZB);
+            double eta = 0.5 * (gamma_AA + gamma_BB);
+            double dgamma = -R_AB_bohr / std::pow(R_AB_bohr * R_AB_bohr + eta, 1.5);
+            double dES2 = (m_charges(A) * m_charges(B) * dgamma) / au;
+            gradient(A, 0) += dES2 * nx; gradient(A, 1) += dES2 * ny; gradient(A, 2) += dES2 * nz;
+            gradient(B, 0) -= dES2 * nx; gradient(B, 1) -= dES2 * ny; gradient(B, 2) -= dES2 * nz;
+
+            // ===== 4. CN gradient =====
+            // CN_A depends on R_AB, self-energy depends on CN: dE/dR = dE/dCN * dCN/dR
+            double R_cov = getCovalentRadius(ZA) + getCovalentRadius(ZB);
+            double exp_val = std::exp(-GFN1_K1 * (R_cov / R_AB_ang - 1.0));
+            double count = 1.0 / (1.0 + exp_val);
+            // d(count)/dR = K1 * R_cov * exp / (R^2 * (1+exp)^2)
+            // d(count^K2)/dR = K2 * count^(K2-1) * d(count)/dR
+            double dcount_dR = (-GFN1_K1 * R_cov * exp_val) / (R_AB_ang * R_AB_ang * (1.0 + exp_val) * (1.0 + exp_val));
+            double dCN_dR = GFN1_K2 * std::pow(count, GFN1_K2 - 1.0) * dcount_dR;
+
+            // dE/dCN_A = sum_{mu on A} kcn_A_shell * P(mu,mu)
+            // dE/dCN_B = sum_{mu on B} kcn_B_shell * P(mu,mu)
+            double dE_dCN_A = 0, dE_dCN_B = 0;
+            for (size_t mu = 0; mu < m_basis.size(); ++mu) {
+                if (m_basis[mu].atom == A) {
+                    int shell = (m_basis[mu].type == STO::PX || m_basis[mu].type == STO::PY || m_basis[mu].type == STO::PZ) ? 1 : 0;
+                    double kcn = 0;
+                    if (m_param_db.hasElement(ZA) && m_param_db.getElement(ZA).shells.count(shell))
+                        kcn = m_param_db.getElement(ZA).shells.at(shell).kcn;
+                    dE_dCN_A += kcn * m_density(mu, mu);
+                }
+                if (m_basis[mu].atom == B) {
+                    int shell = (m_basis[mu].type == STO::PX || m_basis[mu].type == STO::PY || m_basis[mu].type == STO::PZ) ? 1 : 0;
+                    double kcn = 0;
+                    if (m_param_db.hasElement(ZB) && m_param_db.getElement(ZB).shells.count(shell))
+                        kcn = m_param_db.getElement(ZB).shells.at(shell).kcn;
+                    dE_dCN_B += kcn * m_density(mu, mu);
+                }
+            }
+            double dECN = (dE_dCN_A + dE_dCN_B) * dCN_dR;
+            gradient(A, 0) += dECN * nx; gradient(A, 1) += dECN * ny; gradient(A, 2) += dECN * nz;
+            gradient(B, 0) -= dECN * nx; gradient(B, 1) -= dECN * ny; gradient(B, 2) -= dECN * nz;
+
+            // ===== 5. Halogen bond gradient =====
+            if (isHalogen(ZA) || isHalogen(ZB)) {
+                int Z_hal = isHalogen(ZA) ? ZA : ZB;
+                int Z_acc = isHalogen(ZA) ? ZB : ZA;
+                int idx_hal = isHalogen(ZA) ? A : B;
+                int idx_acc = isHalogen(ZA) ? B : A;
+                bool is_acceptor = (Z_acc == 7 || Z_acc == 8 || Z_acc == 15 || Z_acc == 16);
+
+                if (is_acceptor && m_param_db.hasElement(Z_hal)) {
+                    const auto& elem = m_param_db.getElement(Z_hal);
+                    if (elem.xb_strength > 1.0e-6) {
+                        double R_cutoff = elem.xb_radius + getCovalentRadius(Z_acc);
+                        if (R_AB_ang < R_cutoff * 1.3) {
+                            double k_XB = elem.xb_strength / 627.509;
+                            double damp = std::exp(-2.0 * (R_AB_ang / R_cutoff - 1.0));
+                            // dE_XB/dR = k_XB * (2/R_cutoff) * damp
+                            double dXB = k_XB * (2.0 / R_cutoff) * damp;
+                            gradient(idx_hal, 0) += dXB * nx; gradient(idx_hal, 1) += dXB * ny; gradient(idx_hal, 2) += dXB * nz;
+                            gradient(idx_acc, 0) -= dXB * nx; gradient(idx_acc, 1) -= dXB * ny; gradient(idx_acc, 2) -= dXB * nz;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ===== 6. D3 dispersion gradient (via D3ParameterGenerator) =====
+    // D3 gradient is computed by finite differences on D3 energy
+    // (D3ParameterGenerator doesn't have analytical gradient API yet)
+    if (m_d3) {
+        const double delta = 1.0e-5;  // Angstrom
+        for (int atom = 0; atom < m_atomcount; ++atom) {
+            for (int coord = 0; coord < 3; ++coord) {
+                Matrix geom_p = m_geometry, geom_m = m_geometry;
+                geom_p(atom, coord) += delta;
+                geom_m(atom, coord) -= delta;
+                D3ParameterGenerator d3p(D3ParameterGenerator::createForGFN1());
+                D3ParameterGenerator d3m(D3ParameterGenerator::createForGFN1());
+                d3p.GenerateParameters(m_atoms, geom_p);
+                d3m.GenerateParameters(m_atoms, geom_m);
+                gradient(atom, coord) += (d3p.getTotalEnergy() - d3m.getTotalEnergy()) / (2.0 * delta);
+            }
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("analytical_gradient_norm", fmt::format("{:.6e} Eh/Å", gradient.norm()));
+        for (int i = 0; i < m_atomcount; ++i)
+            CurcumaLogger::info(fmt::format("Atom {}: {:10.6f} {:10.6f} {:10.6f}", i+1, gradient(i,0), gradient(i,1), gradient(i,2)));
+    }
+
+    return gradient;
+}
+
+Matrix GFN1::calculateNumericalGradient(double delta) const
+{
+    // Claude Generated (March 2026): Numerical gradient for validation
+    Matrix gradient = Matrix::Zero(m_atomcount, 3);
     Matrix geom_orig = m_geometry;
     double E0 = m_total_energy;
 
@@ -856,7 +1169,6 @@ Matrix GFN1::calculateGradient() const
             double E_minus = const_cast<GFN1*>(this)->Calculation(false);
 
             gradient(atom, coord) = (E_plus - E_minus) / (2.0 * delta);
-
             const_cast<GFN1*>(this)->m_geometry(atom, coord) = geom_orig(atom, coord);
         }
     }

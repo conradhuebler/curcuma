@@ -56,6 +56,7 @@ struct ShellParams {
     double kcn;          ///< CN shift coefficient (Hartree/CN)
     double gexp;         ///< Gaussian exponent for STO
     double refocc;       ///< Reference occupation
+    double shpoly;       ///< Shell polynomial for distance-dependent H scaling (from TBLite p_shpoly * 0.01)
 };
 
 /**
@@ -77,6 +78,9 @@ struct ElementParams {
     // Repulsion parameters
     double rep_alpha;    ///< Repulsion exponent
     double rep_zeff;     ///< Effective nuclear charge for repulsion
+
+    // Hamiltonian scaling parameters (Claude Generated March 2026)
+    double rad;          ///< Atomic radius for shpoly distance scaling (Bohr, from TBLite atomicrad)
 
     // Coulomb parameters
     double gamma_ss;     ///< Chemical hardness (s-s Coulomb integral)

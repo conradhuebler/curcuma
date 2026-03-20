@@ -66,6 +66,7 @@ bool ParameterDatabase::loadDefaultGFN1()
 
     H.rep_alpha = 1.23;
     H.rep_zeff = 1.0;
+    H.rad = 0.32 * 1.8897259886;  // Angstrom to Bohr
     H.gamma_ss = 0.468040;
     H.gamma_sp = 0.0;
     H.gamma_pp = 0.0;
@@ -96,6 +97,7 @@ bool ParameterDatabase::loadDefaultGFN1()
 
     C.rep_alpha = 2.523620;
     C.rep_zeff = 4.0;
+    C.rad = 0.75 * 1.8897259886;
     C.gamma_ss = 0.337871;
     C.gamma_sp = 0.290000;
     C.gamma_pp = 0.240000;
@@ -125,6 +127,7 @@ bool ParameterDatabase::loadDefaultGFN1()
 
     N.rep_alpha = 2.891520;
     N.rep_zeff = 5.0;
+    N.rad = 0.71 * 1.8897259886;
     N.gamma_ss = 0.433135;
     N.gamma_sp = 0.370000;
     N.gamma_pp = 0.310000;
@@ -154,6 +157,7 @@ bool ParameterDatabase::loadDefaultGFN1()
 
     O.rep_alpha = 3.150803;
     O.rep_zeff = 6.0;
+    O.rad = 0.64 * 1.8897259886;
     O.gamma_ss = 0.528430;
     O.gamma_sp = 0.450000;
     O.gamma_pp = 0.380000;
@@ -233,6 +237,7 @@ bool ParameterDatabase::loadCompleteGFN1()
 
     F.rep_alpha = 3.375281;
     F.rep_zeff = 7.0;
+    F.rad = 0.60 * 1.8897259886;
     F.gamma_ss = 0.625000;
     F.gamma_sp = 0.530000;
     F.gamma_pp = 0.450000;
@@ -262,6 +267,7 @@ bool ParameterDatabase::loadCompleteGFN1()
 
     Na.rep_alpha = 1.569755;
     Na.rep_zeff = 1.0;
+    Na.rad = 1.60 * 1.8897259886;
     Na.gamma_ss = 0.180000;
     Na.gamma_sp = 0.150000;
     Na.gamma_pp = 0.120000;
@@ -289,6 +295,7 @@ bool ParameterDatabase::loadCompleteGFN1()
 
     Mg.rep_alpha = 1.889503;
     Mg.rep_zeff = 2.0;
+    Mg.rad = 1.40 * 1.8897259886;
     Mg.gamma_ss = 0.240000;
     Mg.gamma_sp = 0.200000;
     Mg.gamma_pp = 0.160000;
@@ -316,6 +323,7 @@ bool ParameterDatabase::loadCompleteGFN1()
 
     Al.rep_alpha = 2.018026;
     Al.rep_zeff = 3.0;
+    Al.rad = 1.24 * 1.8897259886;
     Al.gamma_ss = 0.280000;
     Al.gamma_sp = 0.240000;
     Al.gamma_pp = 0.200000;
@@ -343,6 +351,7 @@ bool ParameterDatabase::loadCompleteGFN1()
 
     Si.rep_alpha = 2.236550;
     Si.rep_zeff = 4.0;
+    Si.rad = 1.14 * 1.8897259886;
     Si.gamma_ss = 0.320000;
     Si.gamma_sp = 0.270000;
     Si.gamma_pp = 0.230000;
@@ -370,6 +379,7 @@ bool ParameterDatabase::loadCompleteGFN1()
 
     P.rep_alpha = 2.413832;
     P.rep_zeff = 5.0;
+    P.rad = 1.09 * 1.8897259886;
     P.gamma_ss = 0.380000;
     P.gamma_sp = 0.320000;
     P.gamma_pp = 0.270000;
@@ -397,6 +407,7 @@ bool ParameterDatabase::loadCompleteGFN1()
 
     S.rep_alpha = 2.587370;
     S.rep_zeff = 6.0;
+    S.rad = 1.04 * 1.8897259886;
     S.gamma_ss = 0.450000;
     S.gamma_sp = 0.380000;
     S.gamma_pp = 0.320000;
@@ -424,6 +435,7 @@ bool ParameterDatabase::loadCompleteGFN1()
 
     Cl.rep_alpha = 2.761199;
     Cl.rep_zeff = 7.0;
+    Cl.rad = 1.00 * 1.8897259886;
     Cl.gamma_ss = 0.520000;
     Cl.gamma_sp = 0.440000;
     Cl.gamma_pp = 0.370000;
@@ -451,6 +463,7 @@ bool ParameterDatabase::loadCompleteGFN1()
 
     Ar.rep_alpha = 2.935028;
     Ar.rep_zeff = 8.0;
+    Ar.rad = 1.01 * 1.8897259886;
     Ar.gamma_ss = 0.590000;
     Ar.gamma_sp = 0.500000;
     Ar.gamma_pp = 0.420000;
@@ -480,6 +493,7 @@ bool ParameterDatabase::loadCompleteGFN1()
 
     Br.rep_alpha = 2.342857;
     Br.rep_zeff = 7.0;
+    Br.rad = 1.17 * 1.8897259886;
     Br.gamma_ss = 0.480000;
     Br.gamma_sp = 0.410000;
     Br.gamma_pp = 0.350000;
@@ -509,6 +523,7 @@ bool ParameterDatabase::loadCompleteGFN1()
 
     I.rep_alpha = 2.013089;
     I.rep_zeff = 7.0;
+    I.rad = 1.36 * 1.8897259886;
     I.gamma_ss = 0.420000;
     I.gamma_sp = 0.360000;
     I.gamma_pp = 0.310000;

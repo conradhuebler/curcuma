@@ -111,7 +111,8 @@ private:
     double calculateHalogenBondCorrection() const;  // GFN1-specific XB correction
 
     // Gradients
-    Matrix calculateGradient() const;
+    Matrix calculateGradient() const;         ///< Analytical gradients
+    Matrix calculateNumericalGradient(double h = 1.0e-5) const;  ///< For validation
 
     // Data members
     ArrayParameters m_params;                  ///< Legacy GFN1 parameters (for compatibility)

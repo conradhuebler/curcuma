@@ -129,20 +129,29 @@ private:
 
     // PM6 Parameters
     struct PM6Params {
-        double U_ss;  // One-center, one-electron integral (s)
-        double U_pp;  // One-center, one-electron integral (p)
-        double beta_s;  // Resonance integral parameter (s)
-        double beta_p;  // Resonance integral parameter (p)
+        double U_ss;  // One-center, one-electron integral (s) [eV]
+        double U_pp;  // One-center, one-electron integral (p) [eV]
+        double beta_s;  // Resonance integral parameter (s) [eV]
+        double beta_p;  // Resonance integral parameter (p) [eV]
         double zeta_s;  // Slater exponent (s)
         double zeta_p;  // Slater exponent (p)
-        double alpha;  // Core repulsion parameter
-        double D1;    // Dipole expansion parameter (for MNDO multipole integrals)
-        double D2;    // Quadrupole expansion parameter (for d-orbitals, =0 for sp)
-        double rho_s; // Orbital exponent for s-type ERIs (ρ_s)
-        double rho_p; // Orbital exponent for p-type ERIs (ρ_p)
-        std::vector<double> gauss_a;  // Gaussian expansion coefficients
-        std::vector<double> gauss_b;  // Gaussian expansion exponents
-        std::vector<double> gauss_c;  // Gaussian expansion centers
+        double alpha;  // Core repulsion parameter [1/Å]
+        double D1;    // Dipole expansion parameter [Å]
+        double D2;    // Quadrupole expansion parameter [Å]
+        double rho_s; // Orbital exponent for s-type ERIs [Å]
+        double rho_p; // Orbital exponent for p-type ERIs [Å]
+        // One-center two-electron integrals [eV]
+        double Gss;   // (ss|ss)
+        double Gpp;   // (pp|pp)
+        double Gsp;   // (ss|pp) = (pp|ss)
+        double Gp2;   // (pp|p'p') different p directions
+        double Hsp;   // (sp|sp)
+        double Eisol; // Isolated atom energy [Hartree]
+        std::vector<double> gauss_a;  // Gaussian correction amplitudes [eV]
+        std::vector<double> gauss_b;  // Gaussian correction exponents
+        std::vector<double> gauss_c;  // Gaussian correction centers [Å]
+        int n_valence;    // Number of valence electrons
+        int n_principal;  // Principal quantum number
     };
 
     std::map<int, PM6Params> m_pm6_params;  // Element-specific parameters

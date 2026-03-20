@@ -59,20 +59,26 @@ void PM6::initializePM6Parameters()
     const double eV2Hartree = 27.211386245988;  // 1 Hartree = 27.2114 eV
 
     // Hydrogen (Z=1)
-    // Claude Generated: PM6 parameters extended with MNDO integral parameters
+    // Claude Generated: PM6 parameters with MNDO-type one-center ERIs
+    // Note: PM6 is not in Ulysses; one-center ERIs from MNDO parametrization
+    // TODO: Replace with proper PM6 one-center ERIs from MOPAC when available
     PM6Params H;
-    H.U_ss = -13.073321;  // Convert eV → Hartree
+    H.U_ss = -13.073321;
     H.zeta_s = 0.967807;
-    H.beta_s = -5.626512;  // Convert eV → Hartree
+    H.beta_s = -5.626512;
     H.alpha = 2.544134;
     H.gauss_a = {0.122796, 0.005090, -0.000116};
     H.gauss_b = {5.000000, 5.000000, 2.000000};
     H.gauss_c = {1.220000, 1.800000, 2.100000};
-    // MNDO multipole expansion parameters (extracted from MOPAC/Ulysses)
-    H.D1 = 0.0;      // H has no p-orbitals, no dipole expansion
-    H.D2 = 0.0;      // No d-orbitals
-    H.rho_s = 2.0 / H.zeta_s;  // Approximate from Slater exponent
-    H.rho_p = 0.0;   // No p-orbitals for H
+    H.D1 = 0.0;
+    H.D2 = 0.0;
+    H.rho_s = 2.0 / H.zeta_s;
+    H.rho_p = 0.0;
+    H.Gss = 12.848;  // [eV] from MNDO parametrization
+    H.Gpp = 0.0; H.Gsp = 0.0; H.Gp2 = 0.0; H.Hsp = 0.0;
+    H.Eisol = -0.4721164;
+    H.n_valence = 1;
+    H.n_principal = 1;
     m_pm6_params[1] = H;
 
     // Carbon (Z=6)
@@ -87,11 +93,15 @@ void PM6::initializePM6Parameters()
     C.gauss_a = {0.000000, 0.011355, 0.045924, -0.020061};
     C.gauss_b = {0.000000, 5.000000, 5.000000, 5.000000};
     C.gauss_c = {0.000000, 1.600000, 1.850000, 2.050000};
-    // MNDO multipole expansion parameters
-    C.D1 = 0.8332; // PM6 value in Å (from MOPAC parameter database)
-    C.D2 = 0.0;    // No d-orbitals for second-row elements
-    C.rho_s = 2.0 / C.zeta_s;  // Orbital exponent for s-type ERIs
-    C.rho_p = 2.0 / C.zeta_p;  // Orbital exponent for p-type ERIs
+    C.D1 = 0.8332;
+    C.D2 = 0.0;
+    C.rho_s = 2.0 / C.zeta_s;
+    C.rho_p = 2.0 / C.zeta_p;
+    C.Gss = 12.23;  C.Gsp = 11.47;  C.Gpp = 11.08;
+    C.Gp2 = 9.84;   C.Hsp = 0.62;
+    C.Eisol = -4.719249;
+    C.n_valence = 4;
+    C.n_principal = 2;
     m_pm6_params[6] = C;
 
     // Nitrogen (Z=7)
@@ -106,11 +116,15 @@ void PM6::initializePM6Parameters()
     N.gauss_a = {0.000000, 0.025251, 0.028953, -0.005806};
     N.gauss_b = {0.000000, 5.000000, 5.000000, 2.000000};
     N.gauss_c = {0.000000, 1.500000, 2.100000, 2.400000};
-    // MNDO multipole expansion parameters
-    N.D1 = 0.6433; // PM6 value in Å
+    N.D1 = 0.6433;
     N.D2 = 0.0;
     N.rho_s = 2.0 / N.zeta_s;
     N.rho_p = 2.0 / N.zeta_p;
+    N.Gss = 13.59;  N.Gsp = 12.66;  N.Gpp = 12.98;
+    N.Gp2 = 11.59;  N.Hsp = 0.70;
+    N.Eisol = -10.070562;
+    N.n_valence = 5;
+    N.n_principal = 2;
     m_pm6_params[7] = N;
 
     // Oxygen (Z=8)
@@ -125,11 +139,15 @@ void PM6::initializePM6Parameters()
     O.gauss_a = {0.280962, 0.081430, -0.005050};
     O.gauss_b = {5.000000, 7.000000, 2.000000};
     O.gauss_c = {0.847918, 1.445071, 2.000000};
-    // MNDO multipole expansion parameters
-    O.D1 = 0.5346; // PM6 value in Å
+    O.D1 = 0.5346;
     O.D2 = 0.0;
     O.rho_s = 2.0 / O.zeta_s;
     O.rho_p = 2.0 / O.zeta_p;
+    O.Gss = 15.42;  O.Gsp = 14.48;  O.Gpp = 14.52;
+    O.Gp2 = 12.98;  O.Hsp = 0.77;
+    O.Eisol = -17.372529;
+    O.n_valence = 6;
+    O.n_principal = 2;
     m_pm6_params[8] = O;
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -356,10 +374,8 @@ int PM6::buildBasisSet()
             }
         }
 
-        // Count valence electrons
-        if (Z == 1) m_num_electrons += 1;
-        else if (Z >= 2 && Z <= 10) m_num_electrons += (Z - 2) + 2;  // 2s² + np^x
-        else m_num_electrons += Z;  // Simplified
+        // Count valence electrons from parametrized data
+        m_num_electrons += params.n_valence;
     }
 
     return static_cast<int>(m_basis.size());
@@ -590,37 +606,61 @@ double PM6::calculateTwoElectronIntegral(int mu, int nu, int lambda, int sigma) 
     if (atom_A == atom_B) {
         // =====================================================================
         // ONE-CENTER INTEGRALS: (μν|λσ) with all orbitals on same atom
+        // Claude Generated: Correct implementation using Gss/Gpp/Gsp/Gp2/Hsp
+        // Reference: Dewar & Thiel, Theor. Chim. Acta 1977, 46, 89-104
         // =====================================================================
 
         int Z = m_atoms[atom_A];
         const PM6Params& params = m_pm6_params.at(Z);
 
-        // Extract orbital types
         STO::OrbitalType type_mu = m_basis[mu].type;
         STO::OrbitalType type_nu = m_basis[nu].type;
         STO::OrbitalType type_lambda = m_basis[lambda].type;
         STO::OrbitalType type_sigma = m_basis[sigma].type;
 
-        // One-center integrals (simplified - real PM6 has full multipole)
-        // (ss|ss)
-        if (type_mu == STO::S && type_nu == STO::S &&
-            type_lambda == STO::S && type_sigma == STO::S) {
-            return params.U_ss / eV2Eh;
+        auto is_s = [](STO::OrbitalType t) { return t == STO::S; };
+
+        // (ss|ss) = Gss
+        if (is_s(type_mu) && is_s(type_nu) && is_s(type_lambda) && is_s(type_sigma)) {
+            return params.Gss / eV2Eh;
         }
-        // (sp|sp) - cross term
-        else if ((type_mu == STO::S && type_lambda == STO::S) ||
-                 (type_mu != STO::S && type_lambda != STO::S)) {
-            // Simplified: average of ss and pp
-            if (type_mu == STO::S && type_lambda != STO::S) {
-                return (params.U_ss + params.U_pp) / (2.0 * eV2Eh);
-            } else if (type_mu != STO::S && type_lambda == STO::S) {
-                return (params.U_pp + params.U_ss) / (2.0 * eV2Eh);
-            } else if (type_mu != STO::S && type_lambda != STO::S) {
-                return params.U_pp / eV2Eh;
+
+        // (ss|pipi) = Gsp
+        if (is_s(type_mu) && is_s(type_nu) && !is_s(type_lambda) && type_lambda == type_sigma) {
+            return params.Gsp / eV2Eh;
+        }
+
+        // (pipi|ss) = Gsp
+        if (!is_s(type_mu) && type_mu == type_nu && is_s(type_lambda) && is_s(type_sigma)) {
+            return params.Gsp / eV2Eh;
+        }
+
+        // (pipi|pjpj) = Gpp if i==j, Gp2 if i!=j
+        if (!is_s(type_mu) && type_mu == type_nu && !is_s(type_lambda) && type_lambda == type_sigma) {
+            return (type_mu == type_lambda) ? params.Gpp / eV2Eh : params.Gp2 / eV2Eh;
+        }
+
+        // (pipj|pipj) or (pipj|pjpi) = Hpp = 0.5*(Gpp - Gp2) — rotational invariance
+        if (!is_s(type_mu) && !is_s(type_nu) && type_mu != type_nu &&
+            !is_s(type_lambda) && !is_s(type_sigma) && type_lambda != type_sigma) {
+            if ((type_mu == type_lambda && type_nu == type_sigma) ||
+                (type_mu == type_sigma && type_nu == type_lambda)) {
+                return 0.5 * (params.Gpp - params.Gp2) / eV2Eh;
             }
         }
 
-        return 0.0;  // Other one-center cases neglected in simplified version
+        // (spi|spi) and permutations = Hsp
+        bool bra_sp = (is_s(type_mu) != is_s(type_nu));
+        bool ket_sp = (is_s(type_lambda) != is_s(type_sigma));
+        if (bra_sp && ket_sp) {
+            STO::OrbitalType p_bra = is_s(type_mu) ? type_nu : type_mu;
+            STO::OrbitalType p_ket = is_s(type_lambda) ? type_sigma : type_lambda;
+            if (p_bra == p_ket) {
+                return params.Hsp / eV2Eh;
+            }
+        }
+
+        return 0.0;
 
     } else {
         // =====================================================================
