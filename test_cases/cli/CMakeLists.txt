@@ -135,6 +135,18 @@ add_cli_test(errors 04_typo_method)
 add_cli_test(errors 05_method_not_compiled)
 add_cli_test(errors 06_list_methods)
 
-message(STATUS "Added 35+ CLI test scenarios with build directory isolation")
+# =============================================================================
+# SQM Method Validation Tests (5 scenarios)
+# Native semi-empirical methods vs Ulysses/TBLite reference energies
+# Claude Generated (March 2026): Test infrastructure for PM3/AM1/MNDO/GFN1/GFN2
+# =============================================================================
+
+add_cli_test(sqm 01_pm3_singlepoint)
+add_cli_test(sqm 02_am1_singlepoint)
+add_cli_test(sqm 03_mndo_singlepoint)
+add_cli_test(sqm 04_gfn1_singlepoint)
+add_cli_test(sqm 05_gfn2_singlepoint)
+
+message(STATUS "Added 40+ CLI test scenarios with build directory isolation")
 message(STATUS "  - Tests execute from: ${CMAKE_CURRENT_BINARY_DIR}/category/test_name")
 message(STATUS "  - Source tree remains clean (all outputs in build directory)")
