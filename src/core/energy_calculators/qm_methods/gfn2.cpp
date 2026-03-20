@@ -17,6 +17,7 @@
  */
 
 #include "gfn2.h"
+#include "diis_accelerator.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
 #include "ParallelEigenSolver.hpp"
@@ -445,12 +446,15 @@ Vector GFN2::calculateCoordinationNumbers()
 
 bool GFN2::runSCF()
 {
+    // Claude Generated (March 2026): GFN2 SCF with DIIS acceleration
+    // DIIS (Pulay 1980) is essential for convergence on molecules with >5 atoms.
+    // Without it, simple damping cannot converge C6H6, caffeine, etc.
+
     m_density = Matrix::Zero(m_nbasis, m_nbasis);
     double prev_energy = 0.0;
     double energy_diff = 0.0;
 
-    // Claude Generated (March 2026): Compute S^(-1/2) once before SCF loop
-    // S does not change during SCF — recomputing it every iteration was 2-3x slower
+    // Compute S^(-1/2) once before SCF loop
     ParallelEigenSolver solver(500, 128, 1.0e-10, false);
     solver.setThreadCount(m_threads);
     if (!solver.computeS_1_2(m_overlap, m_S_inv_sqrt, m_threads)) {
@@ -458,9 +462,21 @@ bool GFN2::runSCF()
         return false;
     }
 
+    DIISAccelerator diis(8);  // Keep last 8 Fock matrices
+    const int diis_start = 2;  // Start DIIS after this many iterations
+
     for (int iter = 0; iter < m_scf_max_iterations; ++iter) {
         m_fock = buildFockMatrix(m_density);
-        bool success = solver.solveWithPrecalculatedS_1_2(m_S_inv_sqrt, m_fock, m_energies, m_mo, m_threads, true);
+
+        // DIIS: store Fock matrix and extrapolate when enough vectors available
+        Matrix F_scf = m_fock;
+        if (iter >= diis_start) {
+            diis.push(m_fock, m_density, m_overlap);
+            if (diis.size() >= 2)
+                F_scf = diis.extrapolate();
+        }
+
+        bool success = solver.solveWithPrecalculatedS_1_2(m_S_inv_sqrt, F_scf, m_energies, m_mo, m_threads, true);
         if (!success) {
             if (CurcumaLogger::get_verbosity() >= 1)
                 CurcumaLogger::warn("SCF: Eigenvalue solver failed at iteration " + std::to_string(iter + 1));
@@ -469,7 +485,6 @@ bool GFN2::runSCF()
 
         Matrix density_new = buildDensityMatrix(m_mo, m_energies);
 
-        // Claude Generated (March 2026): Vectorized trace using Eigen cwiseProduct
         double current_energy = 0.5 * (density_new.cwiseProduct(m_hamiltonian + m_fock)).sum();
 
         if (iter > 0) energy_diff = std::abs(current_energy - prev_energy);
@@ -491,8 +506,13 @@ bool GFN2::runSCF()
             return true;
         }
 
-        // Apply damping
-        m_density = m_scf_damping * density_new + (1.0 - m_scf_damping) * m_density;
+        // Iteration 0: use full new density (zero → damping creates artificial charges)
+        // All other iterations: damping for stability (DIIS handles Fock extrapolation)
+        if (iter == 0) {
+            m_density = density_new;
+        } else {
+            m_density = m_scf_damping * density_new + (1.0 - m_scf_damping) * m_density;
+        }
     }
 
     if (CurcumaLogger::get_verbosity() >= 1)
@@ -538,11 +558,45 @@ Matrix GFN2::buildFockMatrix(const Matrix& density)
 
 Matrix GFN2::buildDensityMatrix(const Matrix& mo_coefficients, const Vector& mo_energies)
 {
-    // Claude Generated (March 2026): Replaced triple-loop with Eigen GEMM
-    // P = 2 * C_occ * C_occ^T  (uses BLAS DGEMM when available)
-    int n_occ = m_num_electrons / 2;
-    auto C_occ = mo_coefficients.leftCols(n_occ);
-    return 2.0 * C_occ * C_occ.transpose();
+    // Claude Generated (March 2026): Two occupation schemes controlled by m_electronic_temperature
+    //   etemp == 0  → integer closed-shell (2/0 occupation)
+    //   etemp > 0   → Fermi-Dirac smearing (fractional occupation)
+    int nbas = mo_coefficients.rows();
+
+    if (m_electronic_temperature <= 0.0) {
+        int n_occ = m_num_electrons / 2;
+        auto C_occ = mo_coefficients.leftCols(n_occ);
+        return 2.0 * C_occ * C_occ.transpose();
+    }
+
+    const double kT = m_electronic_temperature * 3.166808e-6;  // K → Hartree
+    int n_elec = m_num_electrons;
+
+    double mu_lo = mo_energies.minCoeff() - 1.0;
+    double mu_hi = mo_energies.maxCoeff() + 1.0;
+    for (int bisect = 0; bisect < 100; ++bisect) {
+        double mu = 0.5 * (mu_lo + mu_hi);
+        double n_sum = 0.0;
+        for (int i = 0; i < nbas; ++i) {
+            double x = (mo_energies(i) - mu) / kT;
+            n_sum += 2.0 / (1.0 + std::exp(std::min(x, 500.0)));
+        }
+        if (n_sum > n_elec) mu_hi = mu;
+        else mu_lo = mu;
+        if (mu_hi - mu_lo < 1e-14) break;
+    }
+    double mu = 0.5 * (mu_lo + mu_hi);
+
+    Matrix P = Matrix::Zero(nbas, nbas);
+    for (int i = 0; i < nbas; ++i) {
+        double x = (mo_energies(i) - mu) / kT;
+        double f_i = 2.0 / (1.0 + std::exp(std::min(x, 500.0)));
+        if (f_i < 1e-12) continue;
+        for (int mu_idx = 0; mu_idx < nbas; ++mu_idx)
+            for (int nu_idx = 0; nu_idx < nbas; ++nu_idx)
+                P(mu_idx, nu_idx) += f_i * mo_coefficients(mu_idx, i) * mo_coefficients(nu_idx, i);
+    }
+    return P;
 }
 
 double GFN2::calculateElectronicEnergy() const {

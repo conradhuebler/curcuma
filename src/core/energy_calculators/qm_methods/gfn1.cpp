@@ -17,6 +17,7 @@
  */
 
 #include "gfn1.h"
+#include "diis_accelerator.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
 #include "ParallelEigenSolver.hpp"
@@ -53,7 +54,7 @@ GFN1::GFN1()
     , m_energy_coulomb(0.0)
     , m_energy_dispersion(0.0)
     , m_energy_halogen_bond(0.0)
-    , m_scf_max_iterations(100)
+    , m_scf_max_iterations(250)
     , m_scf_threshold(1.0e-6)
     , m_scf_damping(0.4)
     , m_scf_converged(false)
@@ -81,7 +82,7 @@ GFN1::GFN1(const ArrayParameters& params)
     , m_energy_coulomb(0.0)
     , m_energy_dispersion(0.0)
     , m_energy_halogen_bond(0.0)
-    , m_scf_max_iterations(100)
+    , m_scf_max_iterations(250)
     , m_scf_threshold(1.0e-6)
     , m_scf_damping(0.4)
     , m_scf_converged(false)
@@ -277,6 +278,7 @@ int GFN1::buildBasisSet()
                 orbital.zeta = zeta;
                 orbital.VSIP = 0.0;
                 orbital.atom = i;
+                orbital.shell = shell;
 
                 m_basis.push_back(orbital);
             }
@@ -520,10 +522,15 @@ Vector GFN1::calculateCoordinationNumbers()
 
 bool GFN1::runSCF()
 {
-    m_density = Matrix::Zero(m_nbasis, m_nbasis);
+    // Claude Generated (March 2026): GFN1 SCF with DIIS acceleration
+    // DIIS (Pulay 1980) is essential for convergence on molecules with >5 atoms.
+    // Without it, simple damping oscillates and never converges for C6H6, caffeine, etc.
 
-    // Claude Generated (March 2026): Compute S^(-1/2) once before SCF loop
-    // S does not change during SCF — recomputing it every iteration was 2-3x slower
+    m_density = Matrix::Zero(m_nbasis, m_nbasis);
+    double prev_energy = 0.0;
+    double energy_diff = 0.0;
+
+    // Compute S^(-1/2) once before SCF loop
     ParallelEigenSolver solver(500, 128, 1.0e-10, false);
     solver.setThreadCount(m_threads);
     if (!solver.computeS_1_2(m_overlap, m_S_inv_sqrt, m_threads)) {
@@ -531,10 +538,23 @@ bool GFN1::runSCF()
         return false;
     }
 
+    DIISAccelerator diis(8);  // Keep last 8 Fock matrices
+    const int diis_start = 2;  // Start DIIS after this many iterations
+
     for (int iter = 0; iter < m_scf_max_iterations; ++iter) {
         m_fock = buildFockMatrix(m_density);
 
-        bool success = solver.solveWithPrecalculatedS_1_2(m_S_inv_sqrt, m_fock, m_energies, m_mo, m_threads, false);
+        // DIIS: store Fock matrix and extrapolate when enough vectors available
+        Matrix F_scf = m_fock;
+        if (iter >= diis_start) {
+            diis.push(m_fock, m_density, m_overlap);
+            if (diis.size() >= 2)
+                F_scf = diis.extrapolate();
+        }
+
+        // Claude Generated (March 2026): Fixed transformMOs=true (was false)
+        // Without back-transform, MOs are in orthonormal basis → P = 2*C*C^T gives Tr(PS) ≠ N_elec
+        bool success = solver.solveWithPrecalculatedS_1_2(m_S_inv_sqrt, F_scf, m_energies, m_mo, m_threads, true);
 
         if (!success) {
             CurcumaLogger::error("Eigenvalue solution failed in GFN1 SCF");
@@ -542,46 +562,155 @@ bool GFN1::runSCF()
         }
 
         Matrix density_new = buildDensityMatrix(m_mo, m_energies);
-        double delta_P = (density_new - m_density).norm();
 
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param(fmt::format("SCF_iter_{}", iter+1),
-                               fmt::format("ΔP = {:.6e}", delta_P));
+        // Energy convergence tracking
+        double current_energy = 0.5 * (density_new.cwiseProduct(m_hamiltonian + m_fock)).sum();
+        if (iter > 0) energy_diff = std::abs(current_energy - prev_energy);
+        prev_energy = current_energy;
+
+        double density_change = (density_new - m_density).norm();
+        bool converged = (density_change < m_scf_threshold) && (energy_diff < m_scf_threshold * 0.1);
+
+        if (CurcumaLogger::get_verbosity() >= 2 && (iter % 10 == 0 || converged || iter == 0)) {
+            CurcumaLogger::info(fmt::format("GFN1 SCF iter {:3d}: E = {:15.8f} Eh, ΔE = {:8.2e}, ΔP = {:8.2e}",
+                                          iter + 1, current_energy, energy_diff, density_change));
         }
 
-        if (delta_P < m_scf_threshold) {
+        if (converged) {
             m_density = density_new;
             m_scf_converged = true;
-
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::success(fmt::format("GFN1 SCF converged in {} iterations", iter+1));
-            }
-
+            if (CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::success(fmt::format("GFN1 SCF converged in {} iterations (ΔE = {:.2e})", iter + 1, energy_diff));
             return true;
         }
 
-        m_density = m_scf_damping * m_density + (1.0 - m_scf_damping) * density_new;
+        // Iteration 0: use full new density (zero → damping creates artificial charges)
+        // All other iterations: damping for stability (DIIS handles Fock extrapolation)
+        if (iter == 0) {
+            m_density = density_new;
+        } else {
+            m_density = m_scf_damping * density_new + (1.0 - m_scf_damping) * m_density;
+        }
     }
 
-    CurcumaLogger::warn(fmt::format("GFN1 SCF did not converge in {} iterations", m_scf_max_iterations));
+    CurcumaLogger::warn(fmt::format("GFN1 SCF did not converge in {} iterations (ΔE = {:.2e})",
+                                   m_scf_max_iterations, energy_diff));
     m_scf_converged = false;
     return false;
 }
 
 Matrix GFN1::buildFockMatrix(const Matrix& density)
 {
-    // Simplified Fock matrix: F = H + G(P)
-    // For GFN1, we use H₀ and add Coulomb contributions in energy calculation
-    return m_hamiltonian;
+    // Claude Generated (March 2026): Self-consistent Fock matrix with Coulomb potential
+    // F = H₀ - 0.5 * S * (V[μ] + V[ν])
+    // This is essential for SCF self-consistency — without it, the density never responds
+    // to charge redistribution and the SCF just returns the H₀ eigenstates.
+    // Reference: GFN2::buildFockMatrix pattern (gfn2.cpp:504-536)
+    //
+    // GFN1 uses atom-resolved Hubbard (gamma_ss for all shells), not shell-resolved.
+
+    Matrix F = m_hamiltonian;
+    Matrix PS = density * m_overlap;
+
+    // Compute shell populations per atom
+    std::vector<std::map<int, double>> shell_pop(m_atomcount);
+    for (int mu = 0; mu < m_nbasis; ++mu) {
+        int A = m_basis[mu].atom;
+        int l = (m_basis[mu].type == STO::PX || m_basis[mu].type == STO::PY || m_basis[mu].type == STO::PZ) ? 1 : 0;
+        shell_pop[A][l] += PS(mu, mu);
+    }
+
+    // Delta-charges per shell and per atom using refocc
+    std::vector<std::map<int, double>> dq(m_atomcount);
+    Vector atomic_charges = Vector::Zero(m_atomcount);
+    for (int A = 0; A < m_atomcount; ++A) {
+        int Z_A = m_atoms[A];
+        for (auto& [s, pop] : shell_pop[A]) {
+            double ref = 0.0;
+            if (m_param_db.hasElement(Z_A) && m_param_db.getElement(Z_A).shells.count(s))
+                ref = m_param_db.getElement(Z_A).shells.at(s).refocc;
+            dq[A][s] = ref - pop;
+            atomic_charges(A) += dq[A][s];
+        }
+    }
+    m_charges = atomic_charges;
+
+    // Skip Coulomb contribution for zero density (first SCF iteration)
+    if (density.norm() < 1e-10) return F;
+
+    // Compute Coulomb potential V[μ] for each basis function
+    // GFN1: atom-resolved gamma_ss for all shells (simpler than GFN2's shell-resolved)
+    std::vector<double> V(m_nbasis, 0.0);
+    for (int mu = 0; mu < m_nbasis; ++mu) {
+        int A = m_basis[mu].atom;
+        double gamma_AA = m_param_db.hasElement(m_atoms[A])
+                          ? m_param_db.getElement(m_atoms[A]).gamma_ss
+                          : m_params.getHardness(m_atoms[A]);
+
+        for (int B = 0; B < m_atomcount; ++B) {
+            double R_AB = (A == B) ? 0.0 : (m_geometry.row(A) - m_geometry.row(B)).norm() / au;
+            double gamma_BB = m_param_db.hasElement(m_atoms[B])
+                              ? m_param_db.getElement(m_atoms[B]).gamma_ss
+                              : m_params.getHardness(m_atoms[B]);
+            // Klopman-Ohno Coulomb kernel (same formula as corrected calculateCoulombEnergy)
+            double gamma_AB = 1.0 / std::sqrt(R_AB * R_AB + std::pow(2.0 / (gamma_AA + gamma_BB), 2.0));
+            V[mu] += atomic_charges(B) * gamma_AB;
+        }
+    }
+
+    // Modify Fock matrix: F(μ,ν) -= 0.5 * S(μ,ν) * (V[μ] + V[ν])
+    for (int mu = 0; mu < m_nbasis; ++mu)
+        for (int nu = 0; nu < m_nbasis; ++nu)
+            F(mu, nu) -= 0.5 * m_overlap(mu, nu) * (V[mu] + V[nu]);
+
+    return F;
 }
 
 Matrix GFN1::buildDensityMatrix(const Matrix& mo_coefficients, const Vector& mo_energies)
 {
-    // Claude Generated (March 2026): Replaced triple-loop with Eigen GEMM
-    // P = 2 * C_occ * C_occ^T  (uses BLAS DGEMM when available)
-    int n_occ = m_num_electrons / 2;
-    auto C_occ = mo_coefficients.leftCols(n_occ);
-    return 2.0 * C_occ * C_occ.transpose();
+    // Claude Generated (March 2026): Two occupation schemes controlled by m_electronic_temperature
+    //   etemp == 0  → integer closed-shell (2/0 occupation)
+    //   etemp > 0   → Fermi-Dirac smearing (fractional occupation)
+    // Default: 300K (consistent with TBLite). Set via -etemp CLI parameter.
+    int nbas = mo_coefficients.rows();
+
+    if (m_electronic_temperature <= 0.0) {
+        // Standard closed-shell: P = 2 * C_occ * C_occ^T
+        int n_occ = m_num_electrons / 2;
+        auto C_occ = mo_coefficients.leftCols(n_occ);
+        return 2.0 * C_occ * C_occ.transpose();
+    }
+
+    // Fermi-Dirac smearing: f_i = 2 / (1 + exp((ε_i - μ) / kT))
+    const double kT = m_electronic_temperature * 3.166808e-6;  // K → Hartree
+    int n_elec = m_num_electrons;
+
+    // Find Fermi level by bisection
+    double mu_lo = mo_energies.minCoeff() - 1.0;
+    double mu_hi = mo_energies.maxCoeff() + 1.0;
+    for (int bisect = 0; bisect < 100; ++bisect) {
+        double mu = 0.5 * (mu_lo + mu_hi);
+        double n_sum = 0.0;
+        for (int i = 0; i < nbas; ++i) {
+            double x = (mo_energies(i) - mu) / kT;
+            n_sum += 2.0 / (1.0 + std::exp(std::min(x, 500.0)));
+        }
+        if (n_sum > n_elec) mu_hi = mu;
+        else mu_lo = mu;
+        if (mu_hi - mu_lo < 1e-14) break;
+    }
+    double mu = 0.5 * (mu_lo + mu_hi);
+
+    Matrix P = Matrix::Zero(nbas, nbas);
+    for (int i = 0; i < nbas; ++i) {
+        double x = (mo_energies(i) - mu) / kT;
+        double f_i = 2.0 / (1.0 + std::exp(std::min(x, 500.0)));
+        if (f_i < 1e-12) continue;
+        for (int mu_idx = 0; mu_idx < nbas; ++mu_idx)
+            for (int nu_idx = 0; nu_idx < nbas; ++nu_idx)
+                P(mu_idx, nu_idx) += f_i * mo_coefficients(mu_idx, i) * mo_coefficients(nu_idx, i);
+    }
+    return P;
 }
 
 // =================================================================================
@@ -715,7 +844,10 @@ double GFN1::calculateCoulombEnergy() const
             double dz = m_geometry(A, 2) - m_geometry(B, 2);
             double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz) / au;
 
-            double gamma_AB = 1.0 / std::sqrt(R_AB*R_AB + 0.5 * (gamma_AA + gamma_BB));
+            // Claude Generated (March 2026): Fixed Coulomb kernel — must match GFN2::calculateCoulombKernel
+            // Old formula: 1/sqrt(R² + 0.5*(γA+γB)) — wrong: on-site gives 1/sqrt(γ), not γ
+            // Correct Klopman-Ohno: 1/sqrt(R² + (2/(γA+γB))²) — on-site gives (γA+γB)/2 = γ ✓
+            double gamma_AB = 1.0 / std::sqrt(R_AB*R_AB + std::pow(2.0 / (gamma_AA + gamma_BB), 2.0));
 
             E_ES2 += charges(A) * charges(B) * gamma_AB;
         }

@@ -671,6 +671,8 @@ private:
     int m_scf_max_iterations;                  ///< Maximum SCF iterations (default: 100)
     double m_scf_threshold;                    ///< Convergence threshold (default: 1.0e-6)
     double m_scf_damping;                      ///< Density damping factor (default: 0.4)
-
     bool m_scf_converged;                      ///< SCF convergence status
+
+    // Occupation scheme: etemp > 0 → Fermi-Dirac smearing, etemp == 0 → integer (2/0)
+    double m_electronic_temperature = 0.0;     ///< Electronic temperature in K (0 = integer occupation)
 };

@@ -146,4 +146,7 @@ private:
     double m_scf_threshold;
     double m_scf_damping;
     bool m_scf_converged;
+
+    // Occupation scheme: etemp > 0 → Fermi-Dirac smearing, etemp == 0 → integer (2/0)
+    double m_electronic_temperature = 0.0;  ///< Electronic temperature in K (0 = integer occupation)
 };
