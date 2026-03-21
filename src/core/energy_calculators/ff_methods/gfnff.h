@@ -25,6 +25,11 @@
 #include "json.hpp"
 #include "src/core/config_manager.h"
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
+
+// Claude Generated (March 2026): Forward declaration for GPU workspace (USE_CUDA only)
+#ifdef USE_CUDA
+class FFWorkspaceGPU;
+#endif
 #include "src/core/energy_calculators/ff_methods/ff_workspace.h"  // Claude Generated (Mar 2026): Unified workspace
 #include "src/core/energy_calculators/ff_methods/eeq_solver.h"  // EEQ charge calculation (Dec 2025 - Phase 3)
 #include "src/core/energy_calculators/ff_methods/huckel_solver.h"  // Full Hückel calculation (Jan 2026 - Phase 1)
@@ -473,6 +478,32 @@ public:
      */
     TopologyInfo calculateTopologyInfo() const;
 
+    /**
+     * @brief Generate GFN-FF parameters as native C++ structs (no JSON)
+     * @return GFNFFParameterSet with all interaction parameters
+     *
+     * Claude Generated (March 2026): Primary parameter generation path.
+     * Made public to allow GPU wrapper (GGFNFFComputationalMethod) to
+     * extract parameters and upload them to FFWorkspaceGPU at init time.
+     * Called after InitialiseMolecule() when topology is available.
+     */
+    GFNFFParameterSet generateGFNFFParameterSet();
+
+    /**
+     * @brief Inject GPU workspace — intercepts workspace::calculate() call.
+     *
+     * Claude Generated (March 2026): When set, GFNFF::Calculation() routes
+     * energy/gradient computation through FFWorkspaceGPU instead of the CPU
+     * FFWorkspace.  The GPU workspace must already contain uploaded interaction
+     * parameters (done once in GGFNFFComputationalMethod constructor).
+     * Per-step state (geometry, CN, charges) is set by Calculation() itself.
+     *
+     * @param ws Non-owning pointer to FFWorkspaceGPU; nullptr disables GPU path.
+     */
+#ifdef USE_CUDA
+    void setGPUWorkspace(FFWorkspaceGPU* ws) { m_gpu_workspace = ws; }
+#endif
+
 private:
     /**
      * @brief Initialize GFN-FF force field and generate parameters
@@ -488,15 +519,6 @@ private:
      * Kept for backward compatibility with file-based parameter caching.
      */
     json generateGFNFFParameters();
-
-    /**
-     * @brief Generate GFN-FF parameters as native C++ structs (no JSON)
-     * @return GFNFFParameterSet with all interaction parameters
-     *
-     * Claude Generated (March 2026): Primary parameter generation path.
-     * Returns native structs for direct in-memory transfer to ForceField.
-     */
-    GFNFFParameterSet generateGFNFFParameterSet();
 
     /**
      * @brief Calculate topology and connectivity for GFN-FF
@@ -1821,6 +1843,10 @@ private:
     ForceField* m_forcefield; ///< Force field engine using modern structure
     std::unique_ptr<FFWorkspace> m_workspace; ///< Claude Generated (Mar 2026): Unified workspace (replaces ForceField path)
     bool m_use_workspace = false; ///< Use FFWorkspace path instead of ForceField
+
+#ifdef USE_CUDA
+    FFWorkspaceGPU* m_gpu_workspace = nullptr; ///< Claude Generated (Mar 2026): GPU workspace (injected, non-owning)
+#endif
     Matrix m_geometry_bohr; ///< Geometry in Bohr (GFN-FF parameters are in Bohr)
 
     // EEQ charge calculation (Dec 2025 - Phase 3: Extraction and delegation)

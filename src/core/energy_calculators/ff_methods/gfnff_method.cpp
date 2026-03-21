@@ -17,6 +17,9 @@
  */
 
 #include "gfnff.h"
+#ifdef USE_CUDA
+#include "cuda/ff_workspace_gpu.h"
+#endif
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
@@ -613,6 +616,12 @@ double GFNFF::Calculation(bool gradient)
             m_workspace->setGeometry(m_geometry_bohr);
             m_workspace->setD3CN(cn);
         }
+#ifdef USE_CUDA
+        if (m_gpu_workspace) {
+            m_gpu_workspace->setGeometry(m_geometry_bohr);
+            m_gpu_workspace->setD3CN(cn);
+        }
+#endif
 
         // Prepare EEQ topology input (needed for both paths)
         EEQSolver::TopologyInput eeq_topo;
@@ -689,10 +698,21 @@ double GFNFF::Calculation(bool gradient)
                     m_workspace->setDC6DCNPtr(&m_d4_generator->getDC6DCN());
                 }
             }
+#ifdef USE_CUDA
+            if (m_gpu_workspace) {
+                m_gpu_workspace->setCNDerivatives(cn, cnf, dcn);
+                if (m_d4_generator) {
+                    m_gpu_workspace->setDC6DCNPtr(&m_d4_generator->getDC6DCN());
+                }
+            }
+#endif
 
             if (do_eeq && new_charges.size() == m_atomcount) {
                 if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
                 if (m_workspace) m_workspace->setEEQCharges(new_charges);
+#ifdef USE_CUDA
+                if (m_gpu_workspace) m_gpu_workspace->setEEQCharges(new_charges);
+#endif
                 m_charges = new_charges;
             }
 
@@ -713,6 +733,9 @@ double GFNFF::Calculation(bool gradient)
                 if (new_charges.size() == m_atomcount) {
                     if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
                     if (m_workspace) m_workspace->setEEQCharges(new_charges);
+#ifdef USE_CUDA
+                    if (m_gpu_workspace) m_gpu_workspace->setEEQCharges(new_charges);
+#endif
                     m_charges = new_charges;
                 }
             }
@@ -814,6 +837,11 @@ double GFNFF::Calculation(bool gradient)
     auto t_ff_start = std::chrono::high_resolution_clock::now();
     double energy_hartree;
 
+#ifdef USE_CUDA
+    if (m_gpu_workspace) {
+        energy_hartree = m_gpu_workspace->calculate(gradient);
+    } else
+#endif
     if (m_use_workspace && m_workspace) {
         energy_hartree = m_workspace->calculate(gradient);
     } else {
@@ -861,6 +889,11 @@ double GFNFF::Calculation(bool gradient)
         // Previous division by BOHR_TO_ANGSTROM was also incorrect and reduced gradients
         // Correct approach: Use gradient directly as returned by ForceField
         Matrix grad_hartree;
+#ifdef USE_CUDA
+        if (m_gpu_workspace) {
+            grad_hartree = m_gpu_workspace->gradient();
+        } else
+#endif
         if (m_use_workspace && m_workspace) {
             grad_hartree = m_workspace->gradient();
         } else {

@@ -144,6 +144,37 @@ endif()
 add_test(NAME test_eeq_two_phase
          COMMAND test_eeq_two_phase)
 
+# Claude Generated (March 2026): GPU GFN-FF Validation Test (ggfnff vs gfnff CPU)
+# Only built and registered when USE_CUDA=ON
+if(USE_CUDA)
+    add_executable(test_ggfnff test_ggfnff.cpp)
+    target_link_libraries(test_ggfnff curcuma_core CUDA::cudart)
+
+    if(USE_PCH)
+        target_precompile_headers(test_ggfnff REUSE_FROM curcuma_core)
+    endif()
+
+    # Built-in molecule test (water, methane, ethanol) — no arguments
+    add_test(NAME ggfnff_builtin_molecules
+             COMMAND test_ggfnff
+             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(ggfnff_builtin_molecules
+        PROPERTIES TIMEOUT 120 LABELS "ggfnff;gpu;validation")
+
+    # Per-molecule tests using the same reference data as CPU GFN-FF validation
+    foreach(REF_FILE ${GFNFF_REF_FILES})
+        get_filename_component(MOL_NAME ${REF_FILE} NAME_WE)
+        set(BUILD_REF_FILE "${CMAKE_CURRENT_BINARY_DIR}/reference_data/${MOL_NAME}.ref.json")
+        set(GPU_TEST_NAME "ggfnff_vs_cpu_${MOL_NAME}")
+
+        add_test(NAME ${GPU_TEST_NAME}
+                 COMMAND test_ggfnff ${BUILD_REF_FILE}
+                 WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+        set_tests_properties(${GPU_TEST_NAME}
+            PROPERTIES TIMEOUT 120 LABELS "ggfnff;gpu;validation")
+    endforeach()
+endif()
+
 # Claude Generated: CLI argument validation test suite (October 2025)
 # Include comprehensive Bash-based CLI tests for all capabilities
 add_subdirectory(cli)

@@ -29,6 +29,9 @@
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
 #include "qm_methods/gfnff_method.h"
+#ifdef USE_CUDA
+#include "qm_methods/ggfnff_method.h"
+#endif
 #ifdef USE_TBLITE
 #include "qm_methods/tblite_method.h"
 #endif
@@ -46,7 +49,7 @@ using namespace std;
 // =================================================================================
 
 const std::vector<std::string> MethodFactory::m_ff_methods = {
-    "uff", "uff-d3", "d3", "qmdff", "gfnff", "gfnff-d3"
+    "uff", "uff-d3", "d3", "qmdff", "gfnff", "gfnff-d3", "ggfnff"
 };
 
 const std::vector<std::string> MethodFactory::m_tblite_methods = {
@@ -348,6 +351,19 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         CurcumaLogger::success("Method 'gfnff' resolved to native GFN-FF");
         return std::make_unique<GFNFFComputationalMethod>("gfnff", config);
     }
+
+    // GPU-accelerated GFN-FF (requires USE_CUDA build)
+#ifdef USE_CUDA
+    if (method == "ggfnff") {
+        CurcumaLogger::success("Method 'ggfnff' resolved to GPU-accelerated GFN-FF");
+        return std::make_unique<GGFNFFComputationalMethod>("ggfnff", config);
+    }
+#else
+    if (method == "ggfnff") {
+        throw std::runtime_error(
+            "Method 'ggfnff' requires a CUDA build. Recompile with: cmake -DUSE_CUDA=ON");
+    }
+#endif
 
     // Force field methods (always available)
     if (method == "uff" || method == "uff-d3" || method == "qmdff") {
