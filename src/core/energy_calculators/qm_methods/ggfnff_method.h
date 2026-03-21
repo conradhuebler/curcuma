@@ -88,7 +88,13 @@ private:
     bool initGPUWorkspace();
 
     std::unique_ptr<GFNFF>          m_gfnff;
-    std::unique_ptr<FFWorkspaceGPU> m_gpu_workspace;
+    // NOTE: GPU params intentionally leaked (raw ptr, never freed).
+    // FFWorkspaceGPU's CUDA allocations corrupt adjacent heap metadata, making
+    // the GFNFFParameterSet unfreeable.  Cost: ~100 KB one-time leak.
+    // TODO: Investigate CUDA driver heap corruption root cause.
+    GFNFFParameterSet*              m_gpu_params_leaked = nullptr;
+    std::unique_ptr<FFWorkspace>    m_cpu_residual;  ///< CPU workspace for HB/XB/ATM/BATM (must outlive m_gpu_workspace)
+    std::unique_ptr<FFWorkspaceGPU> m_gpu_workspace; ///< Destroyed first (holds raw ptr to m_cpu_residual)
 
     json             m_parameters;
     std::string      m_method_name;

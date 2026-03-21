@@ -63,7 +63,6 @@ bool GGFNFFComputationalMethod::setMolecule(const Mol& mol)
 bool GGFNFFComputationalMethod::initGPUWorkspace()
 {
     try {
-        // Atom types were stored in setMolecule() from the Mol struct
         const std::vector<int>& atom_types = m_atom_types;
         const int natoms = static_cast<int>(atom_types.size());
         if (natoms == 0) {
@@ -73,11 +72,23 @@ bool GGFNFFComputationalMethod::initGPUWorkspace()
             return false;
         }
 
-        // Generate parameter set (CPU, one-time cost)
-        GFNFFParameterSet params = m_gfnff->generateGFNFFParameterSet();
+        // Claude Generated (March 2026): Consume pre-generated params from initializeForceField().
+        // CRITICAL: Do NOT call generateGFNFFParameterSet() again — causes heap corruption.
+        std::unique_ptr<GFNFFParameterSet> pending = m_gfnff->consumePendingGPUParams();
+        if (!pending) {
+            m_has_error = true;
+            m_error_message = "GGFNFFComputationalMethod: no pending GPU params (was InitialiseMolecule called?)";
+            CurcumaLogger::error(m_error_message);
+            return false;
+        }
 
         // Create GPU workspace — uploads all static SoA data
-        m_gpu_workspace = std::make_unique<FFWorkspaceGPU>(params, natoms, atom_types);
+        m_gpu_workspace = std::make_unique<FFWorkspaceGPU>(*pending, natoms, atom_types);
+
+        // WORKAROUND: Leak the parameter set — FFWorkspaceGPU's CUDA allocations corrupt
+        // adjacent heap metadata, making the GFNFFParameterSet unfreeable ("double free or
+        // corruption (out)").  Cost: ~100 KB one-time.  TODO: investigate CUDA root cause.
+        m_gpu_params_leaked = pending.release();
 
         // Inject non-owning pointer into GFNFF so Calculation() routes to GPU
         m_gfnff->setGPUWorkspace(m_gpu_workspace.get());

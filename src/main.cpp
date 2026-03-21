@@ -846,11 +846,6 @@ json CLI2Json(int argc, char** argv)
         }
     }
 
-    // Claude Generated: DEBUG - Show what's in key before storing to controller
-    std::cerr << "[CLI2Json DEBUG] keyword=" << keyword << ", module_name=" << module_name << std::endl;
-    std::cerr << "[CLI2Json DEBUG] key object content:" << std::endl;
-    std::cerr << key.dump(2) << std::endl;
-
     // Build controller with proper structure using actual module name
     // This enables ConfigManager to find parameters under the correct module name
     controller[module_name] = key;  // Changed from keyword to module_name

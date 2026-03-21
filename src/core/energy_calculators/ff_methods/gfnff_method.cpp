@@ -570,8 +570,12 @@ double GFNFF::Calculation(bool gradient)
         return 0.0;
     }
 
+#ifdef USE_CUDA
+    if (!m_forcefield && !m_workspace && !m_gpu_workspace) {
+#else
     if (!m_forcefield && !m_workspace) {
-        CurcumaLogger::error("GFN-FF calculation failed: Neither ForceField nor Workspace available");
+#endif
+        CurcumaLogger::error("GFN-FF calculation failed: Neither ForceField nor Workspace nor GPU available");
         return 0.0;
     }
 
@@ -599,6 +603,7 @@ double GFNFF::Calculation(bool gradient)
     const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
     double t_cn = 0, t_dcn = 0, t_dc6dcn = 0, t_eeq = 0, t_threads = 0;
 
+    // Debug output for GPU crash diagnosis
     {
         auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -1702,7 +1707,6 @@ bool GFNFF::initializeForceField()
     // Claude Generated (Mar 6, 2026): Distribute Phase-1 topology charges for BATM AFTER setParameter()
     // Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
     // CRITICAL: Must happen AFTER setParameter() which creates threads via AutoRanges().
-    // Previously distributed in generateGFNFFParameters() before threads existed → topology_charges lost.
     if (m_cached_topology.has_value() && m_cached_topology->topology_charges.size() > 0) {
         m_forcefield->distributeTopologyCharges(m_cached_topology->topology_charges);
         if (CurcumaLogger::get_verbosity() >= 3) {
@@ -1713,13 +1717,10 @@ bool GFNFF::initializeForceField()
 
     // Claude Generated (Feb 1, 2026): Calculate and distribute CN, CNF, and CN derivatives
     // Reference: Fortran gfnff_engrad.F90:418-422 - for Coulomb charge derivative gradients
-    // These are needed for the second term in Coulomb gradient: dE/dq * dq/dCN * dCN/dx
     {
-        // Calculate coordination numbers
         auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
         Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
 
-        // Build CNF vector from element-specific parameters
         Vector cnf(m_atoms.size());
         for (size_t i = 0; i < m_atoms.size(); ++i) {
             int z = m_atoms[i];
@@ -1728,10 +1729,7 @@ bool GFNFF::initializeForceField()
                         : 0.0;
         }
 
-        // Calculate CN derivatives for gradient calculation
         std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(cn);
-
-        // Distribute to ForceField threads
         m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
 
         if (CurcumaLogger::get_verbosity() >= 3) {
@@ -1739,21 +1737,22 @@ bool GFNFF::initializeForceField()
         }
     }
 
-    // =========================================================================
-    // Claude Generated (Mar 2026): Create FFWorkspace from same parameter set
-    // FFWorkspace replaces ForceField for GFN-FF energy/gradient calculation.
-    // Both paths coexist during Phase 2 validation.
-    // =========================================================================
+    // Claude Generated (Mar 2026): Create FFWorkspace from copy of ff_params (single generation)
+    // CRITICAL: Do NOT call generateGFNFFParameterSet() again — a third call causes heap corruption.
     {
         int num_threads = m_parameters.value("threads", 1);
         m_workspace = std::make_unique<FFWorkspace>(num_threads);
         m_workspace->setAtomTypes(m_atoms);
 
-        // Generate a second copy of parameters for the workspace (ForceField consumed the first)
-        GFNFFParameterSet ws_params = generateGFNFFParameterSet();
+#ifdef USE_CUDA
+        // Save a heap copy for the GPU wrapper BEFORE moving into workspace
+        m_pending_gpu_params = std::make_unique<GFNFFParameterSet>(ff_params);
+#endif
+
+        // Copy (not regenerate) parameters for the workspace
+        GFNFFParameterSet ws_params = ff_params;
         m_workspace->setInteractionLists(std::move(ws_params));
 
-        // Set pool from ForceField (shared pool, workspace doesn't own it)
         if (num_threads > 1 && m_forcefield->threadPool()) {
             m_workspace->setPool(m_forcefield->threadPool());
         }

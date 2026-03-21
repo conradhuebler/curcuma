@@ -489,6 +489,7 @@ public:
      */
     GFNFFParameterSet generateGFNFFParameterSet();
 
+
     /**
      * @brief Inject GPU workspace — intercepts workspace::calculate() call.
      *
@@ -502,6 +503,15 @@ public:
      */
 #ifdef USE_CUDA
     void setGPUWorkspace(FFWorkspaceGPU* ws) { m_gpu_workspace = ws; }
+
+    /**
+     * @brief Consume pre-generated GPU parameters (avoids extra generateGFNFFParameterSet call).
+     *
+     * Claude Generated (March 2026): initializeForceField() stores a heap copy of the
+     * parameter set.  The GPU wrapper calls this once to take ownership; subsequent
+     * calls return nullptr.
+     */
+    std::unique_ptr<GFNFFParameterSet> consumePendingGPUParams() { return std::move(m_pending_gpu_params); }
 #endif
 
 private:
@@ -1943,6 +1953,11 @@ private:
     // Cached topology and bond detection to avoid redundant calculations
     mutable std::optional<TopologyInfo> m_cached_topology;
     mutable std::optional<std::vector<std::pair<int,int>>> m_cached_bond_list;
+
+    // Claude Generated (March 2026): Heap-stored parameter copy for GPU wrapper.
+    // Set in initializeForceField(), consumed once by GGFNFFComputationalMethod::initGPUWorkspace().
+    // unique_ptr keeps the data off the GFNFF stack to avoid layout-dependent corruption.
+    std::unique_ptr<GFNFFParameterSet> m_pending_gpu_params;
 
     // Conversion factors
     static constexpr double HARTREE_TO_KCAL = 627.5094740631;

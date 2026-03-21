@@ -338,7 +338,8 @@ struct FFWorkspaceGPUImpl {
 };
 
 // ============================================================================
-// Helper: convert Eigen N×3 col-major matrix to flat row-major double array
+// Helper: extract Eigen N×3 RowMajor matrix to flat [x0,y0,z0,x1,...] array
+// Note: Matrix (global.h) is already RowMajor — element-by-element copy is safe
 // ============================================================================
 
 static std::vector<double> toRowMajor(const Matrix& m) {
@@ -378,27 +379,13 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     upload_rcov_d3(s_rcov_d3_bohr, 87);
 
     // --- Upload static SoA interaction lists ---
-
-    // Dispersion: use `dispersions` field regardless of d3/d4 label
     m_impl->disp.upload(params.dispersions, stream);
-
-    // Repulsion (bonded + non-bonded)
     m_impl->bonded_rep.upload(params.bonded_repulsions, stream);
     m_impl->nonbonded_rep.upload(params.nonbonded_repulsions, stream);
-
-    // Coulomb (gamma + cutoff only; charges uploaded dynamically)
     m_impl->coulomb.upload(params.coulombs, stream);
-
-    // Bonds
     m_impl->bonds.upload(params.bonds, stream);
-
-    // Angles (with atom types for distance damping)
     m_impl->angles.upload(params.angles, atom_types, stream);
-
-    // Dihedrals (standard + extra combined into one SoA)
     m_impl->dihedrals.upload(params.dihedrals, params.extra_dihedrals, atom_types, stream);
-
-    // Inversions
     m_impl->inversions.upload(params.inversions, stream);
 
     // --- Allocate dynamic per-step buffers ---
@@ -451,7 +438,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
         m_eeq_charges = params.eeq_charges;
     m_e0 = params.e0;
 
-    // --- Synchronise: wait for all uploads to finish ---
+    // Synchronise: wait for all uploads to finish
     checkCuda(cudaStreamSynchronize(stream), "init sync");
 
     if (CurcumaLogger::get_verbosity() >= 2) {
@@ -470,8 +457,12 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
 
 FFWorkspaceGPU::~FFWorkspaceGPU()
 {
-    if (m_impl && m_impl->stream)
+    if (m_impl && m_impl->stream) {
+        // Synchronize before destroying: pending async ops must finish
+        // before CudaBuffer destructors free GPU memory
+        cudaStreamSynchronize(m_impl->stream);
         cudaStreamDestroy(m_impl->stream);
+    }
 }
 
 // ============================================================================
@@ -481,17 +472,20 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
 void FFWorkspaceGPU::setEEQCharges(const Vector& q)
 {
     m_eeq_charges = q;
+    if (m_cpu_residual) m_cpu_residual->setEEQCharges(q);
 }
 
 void FFWorkspaceGPU::setTopologyCharges(const Vector& q)
 {
     m_topology_charges = q;
+    if (m_cpu_residual) m_cpu_residual->setTopologyCharges(q);
 }
 
 void FFWorkspaceGPU::setD3CN(const Vector& cn)
 {
     // Store D3 CN for bond r0 calculation on GPU
     m_cn = cn;
+    if (m_cpu_residual) m_cpu_residual->setD3CN(cn);
 }
 
 void FFWorkspaceGPU::setCNDerivatives(const Vector& cn, const Vector& cnf,
@@ -500,11 +494,13 @@ void FFWorkspaceGPU::setCNDerivatives(const Vector& cn, const Vector& cnf,
     m_cn  = cn;
     m_cnf = cnf;
     m_dcn = dcn;
+    if (m_cpu_residual) m_cpu_residual->setCNDerivatives(cn, cnf, dcn);
 }
 
 void FFWorkspaceGPU::setDC6DCNPtr(const Matrix* ptr)
 {
     m_dc6dcn_ptr = ptr;
+    if (m_cpu_residual) m_cpu_residual->setDC6DCNPtr(ptr);
 }
 
 void FFWorkspaceGPU::setE0(double e0)
@@ -688,7 +684,10 @@ double FFWorkspaceGPU::calculate(bool gradient)
     // =========================================================================
     // 4. Synchronise and download results
     // =========================================================================
-    checkCuda(cudaStreamSynchronize(stream), "calculate sync");
+    // Synchronize device-wide: ensures all async kernel operations complete
+    // and any kernel errors (illegal memory access, etc.) propagate as exceptions.
+    checkCuda(cudaGetLastError(), "kernel launch check");
+    checkCuda(cudaDeviceSynchronize(), "calculate device sync");
 
     // Download total GPU energy
     double e_gpu = 0.0;
@@ -748,7 +747,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
 }
 
 // ============================================================================
-// setGeometry — converts Eigen N×3 col-major to row-major and uploads to GPU
+// setGeometry — extract N×3 RowMajor matrix to flat array and upload to GPU
 // ============================================================================
 
 void FFWorkspaceGPU::setGeometry(const Matrix& geom)
@@ -757,9 +756,12 @@ void FFWorkspaceGPU::setGeometry(const Matrix& geom)
     const int N = m_natoms;
     if (geom.rows() != N) return;
 
-    // Eigen MatrixXd is col-major; GPU kernels expect row-major coords[3*i+d]
+    // Extract RowMajor matrix to flat [x0,y0,z0,x1,...] array for GPU kernels
     std::vector<double> h_coords = toRowMajor(geom);
     impl.d_coords.upload(h_coords.data(), 3*N, impl.stream);
+
+    // Forward geometry to CPU residual workspace (HB/XB/ATM/BATM)
+    if (m_cpu_residual) m_cpu_residual->setGeometry(geom);
 }
 
 // ============================================================================
@@ -840,6 +842,12 @@ void FFWorkspaceGPU::postProcessCPU(bool gradient)
 
 const Matrix& FFWorkspaceGPU::gradient() const
 {
+    // Debug: Check if result is properly sized
+    if (m_result_gradient.rows() != m_natoms || m_result_gradient.cols() != 3) {
+        std::cout << "[DEBUG FFWorkspaceGPU::gradient] WARNING: gradient size mismatch! "
+                  << "rows=" << m_result_gradient.rows() << " cols=" << m_result_gradient.cols()
+                  << " expected (" << m_natoms << ", 3)\n" << std::flush;
+    }
     return m_result_gradient;
 }
 

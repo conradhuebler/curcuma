@@ -60,13 +60,17 @@ struct CudaBuffer {
     }
 
     /// Upload count elements from host to GPU (auto-allocates if needed)
-    void upload(const T* host_data, int count, cudaStream_t stream = nullptr) {
+    /// Uses synchronous cudaMemcpy because callers often pass temporary host
+    /// buffers (std::vector locals in SoA::upload) that are destroyed before
+    /// any stream synchronisation point.  Async copy from freed memory was
+    /// the root cause of the "double free or corruption" crash.
+    void upload(const T* host_data, int count, cudaStream_t /*stream*/ = nullptr) {
         if (count <= 0) return;
         if (n < count) alloc(count);
-        cudaError_t err = cudaMemcpyAsync(ptr, host_data, count * sizeof(T),
-                                          cudaMemcpyHostToDevice, stream);
+        cudaError_t err = cudaMemcpy(ptr, host_data, count * sizeof(T),
+                                     cudaMemcpyHostToDevice);
         if (err != cudaSuccess)
-            throw std::runtime_error(std::string("cudaMemcpyAsync H2D failed: ") + cudaGetErrorString(err));
+            throw std::runtime_error(std::string("cudaMemcpy H2D failed: ") + cudaGetErrorString(err));
     }
 
     /// Upload from std::vector

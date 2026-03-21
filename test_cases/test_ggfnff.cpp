@@ -96,15 +96,18 @@ TestResult runComparisonTest(const std::string& mol_name, const Mol& mol)
     // =========================================================================
     // CPU path: run gfnff via GFNFF class
     // =========================================================================
+    std::cout << "[DEBUG] Step 1: Creating CPU GFNFF instance\n" << std::flush;
     json cpu_config;
     GFNFF cpu_gfnff(cpu_config);
 
+    std::cout << "[DEBUG] Step 2: CPU InitialiseMolecule\n" << std::flush;
     if (!cpu_gfnff.InitialiseMolecule(mol)) {
         std::cout << "  [SKIP] CPU InitialiseMolecule failed\n";
         ++g_failed;
         return result;
     }
 
+    std::cout << "[DEBUG] Step 3: CPU Calculation\n" << std::flush;
     const double E_cpu = cpu_gfnff.Calculation(/*gradient=*/true);
     const Matrix G_cpu = cpu_gfnff.Gradient();
 
@@ -116,24 +119,45 @@ TestResult runComparisonTest(const std::string& mol_name, const Mol& mol)
     // =========================================================================
     // GPU path: generate parameter set from CPU GFNFF, upload to GPU workspace
     // =========================================================================
+    std::cout << "[DEBUG] Step 4: Creating GPU GFNFF instance\n" << std::flush;
     json gpu_config;
     GFNFF gpu_gfnff(gpu_config);
 
+    std::cout << "[DEBUG] Step 5: GPU InitialiseMolecule\n" << std::flush;
     if (!gpu_gfnff.InitialiseMolecule(mol)) {
         std::cout << "  [SKIP] GPU InitialiseMolecule failed\n";
         ++g_failed;
         return result;
     }
 
-    GFNFFParameterSet params = gpu_gfnff.generateGFNFFParameterSet();
+    std::cout << "[DEBUG] Step 6: Consuming pending GPU params\n" << std::flush;
+    std::unique_ptr<GFNFFParameterSet> pending = gpu_gfnff.consumePendingGPUParams();
+    if (!pending) {
+        std::cout << "  [FAIL] No pending GPU params after InitialiseMolecule\n";
+        ++g_failed;
+        return result;
+    }
+    const GFNFFParameterSet& params = *pending;
     const int natoms = mol.m_number_atoms;
+
+    std::cout << "[DEBUG]   Parameter counts: bonds=" << params.bonds.size()
+              << " angles=" << params.angles.size()
+              << " dihedrals=" << params.dihedrals.size()
+              << " inversions=" << params.inversions.size() << "\n" << std::flush;
+    std::cout << "[DEBUG]   Non-bonded: disp=" << params.dispersions.size()
+              << " coul=" << params.coulombs.size()
+              << " brep=" << params.bonded_repulsions.size()
+              << " nbrep=" << params.nonbonded_repulsions.size() << "\n" << std::flush;
 
     // Build atom type vector
     std::vector<int> atom_types = mol.m_atoms;
 
+    std::cout << "[DEBUG] Step 7: Creating FFWorkspaceGPU (natoms=" << natoms << ")\n" << std::flush;
     std::unique_ptr<FFWorkspaceGPU> gpu_ws;
     try {
         gpu_ws = std::make_unique<FFWorkspaceGPU>(params, natoms, atom_types);
+        std::cout << "[DEBUG]   GPU workspace created: disp=" << gpu_ws->dispersionCount()
+                  << " bonds=" << gpu_ws->bondCount() << "\n" << std::flush;
     } catch (const std::exception& e) {
         std::cout << "  [FAIL] FFWorkspaceGPU init: " << e.what() << "\n";
         ++g_failed;
@@ -141,8 +165,12 @@ TestResult runComparisonTest(const std::string& mol_name, const Mol& mol)
     }
 
     // Inject GPU workspace and run
+    std::cout << "[DEBUG] Step 8: Setting GPU workspace\n" << std::flush;
     gpu_gfnff.setGPUWorkspace(gpu_ws.get());
+
+    std::cout << "[DEBUG] Step 9: GPU Calculation\n" << std::flush;
     const double E_gpu = gpu_gfnff.Calculation(/*gradient=*/true);
+    std::cout << "[DEBUG] Step 10: Getting GPU gradient\n" << std::flush;
     const Matrix G_gpu = gpu_gfnff.Gradient();
 
     std::cout << "  GPU energy: " << std::setprecision(12) << E_gpu << " Eh\n";
