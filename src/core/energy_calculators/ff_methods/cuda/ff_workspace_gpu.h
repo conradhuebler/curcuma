@@ -105,6 +105,9 @@ public:
     /// Set baseline energy (e0 from parameter set, added to total)
     void setE0(double e0);
 
+    /// Update per-bond HB coordination numbers (for egbond_hb alpha modulation)
+    void updateBondHBCN(const std::vector<double>& hb_cn_values);
+
     /**
      * @brief Provide Coulomb self-energy parameters (size N each).
      *

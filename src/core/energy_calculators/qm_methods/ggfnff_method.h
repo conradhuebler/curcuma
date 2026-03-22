@@ -3,7 +3,6 @@
  * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * Claude Generated (March 2026): ComputationalMethod adapter for ggfnff.
- * Thin wrapper around GFNFF + FFWorkspaceGPU.
  * Available only when compiled with USE_CUDA=ON.
  *
  * Usage:
@@ -16,6 +15,7 @@
 
 #include "../computational_method.h"
 #include "../ff_methods/gfnff.h"
+#include "../ff_methods/ff_workspace.h"
 #include "../ff_methods/cuda/ff_workspace_gpu.h"
 
 #include <memory>
@@ -23,32 +23,32 @@
 /**
  * @brief GPU-accelerated GFN-FF via CUDA (method name: "ggfnff")
  *
- * Claude Generated (March 2026): Replaces FFWorkspace CPU calculation with
- * FFWorkspaceGPU while keeping all CPU-side logic (EEQ charges, CN, topology)
- * in the existing GFNFF class unchanged.
+ * Claude Generated (March 2026): Clean GPU/CPU separation architecture.
+ * GFNFF is a pure CPU class (no GPU knowledge). This wrapper orchestrates:
  *
  * Architecture:
- *   - m_gfnff          : GFNFF instance (CPU topology + EEQ + H/X-bonds)
- *   - m_gpu_workspace  : FFWorkspaceGPU (dispersion, repulsion, Coulomb TERM 1,
- *                        bonds, angles, dihedrals, inversions on GPU)
- *   - H-bonds, X-bonds, ATM, BATM: remain in CPU GFNFF (Phase 1)
+ *   - m_gfnff          : GFNFF instance (CPU topology + EEQ charges + CN)
+ *   - m_gpu_workspace  : FFWorkspaceGPU (bonds, angles, dihedrals, inversions,
+ *                        dispersion, repulsion, Coulomb on GPU)
+ *   - m_cpu_residual   : FFWorkspace (HB, XB, ATM, BATM, sTors on CPU)
+ *   - FFWorkspaceGPU::calculate() automatically adds m_cpu_residual results
  *
  * Initialization flow:
  *   1. setMolecule() → m_gfnff->InitialiseMolecule() (topology, params)
- *   2. m_gfnff->generateGFNFFParameterSet() → FFWorkspaceGPU ctor (upload to GPU)
- *   3. m_gfnff->setGPUWorkspace(m_gpu_workspace.get()) (inject non-owning ptr)
+ *   2. consumeCachedParameterSet() → split into GPU params + CPU residual params
+ *   3. FFWorkspaceGPU(full_params) + FFWorkspace(residual_params)
+ *   4. m_gpu_workspace->setCPUResidualWorkspace(m_cpu_residual)
  *
- * Per-step calculation:
- *   calculateEnergy() → m_gfnff->Calculation() which:
- *     a. Computes CN (CPU)
- *     b. Computes EEQ charges (CPU)
- *     c. Calls m_gpu_workspace->setGeometry/setD3CN/setEEQCharges/setCNDerivatives
- *     d. Dispatches to m_gpu_workspace->calculate() instead of CPU workspace
+ * Per-step calculation (orchestrated here, NOT delegated to GFNFF::Calculation):
+ *   1. m_gfnff->prepareCNAndEEQ(gradient)  — CN + EEQ on CPU
+ *   2. Distribute state to GPU + CPU-residual workspaces
+ *   3. m_gfnff->updateHBXBIfNeeded(m_cpu_residual)  — dynamic HB/XB
+ *   4. m_gpu_workspace->calculate()  — GPU terms + CPU residual automatically
  */
 class GGFNFFComputationalMethod : public ComputationalMethod {
 public:
     explicit GGFNFFComputationalMethod(const std::string& method_name, const json& config);
-    ~GGFNFFComputationalMethod() = default;
+    ~GGFNFFComputationalMethod();
 
     // === ComputationalMethod interface ===
 
@@ -81,7 +81,7 @@ public:
 
 private:
     /**
-     * @brief Initialize GPU workspace from GFNFF parameter set.
+     * @brief Initialize GPU + CPU-residual workspaces from GFNFF parameter set.
      * Called after m_gfnff->InitialiseMolecule() succeeds.
      * @return true on success; sets m_has_error on CUDA failure.
      */
@@ -93,8 +93,8 @@ private:
     // the GFNFFParameterSet unfreeable.  Cost: ~100 KB one-time leak.
     // TODO: Investigate CUDA driver heap corruption root cause.
     GFNFFParameterSet*              m_gpu_params_leaked = nullptr;
-    std::unique_ptr<FFWorkspace>    m_cpu_residual;  ///< CPU workspace for HB/XB/ATM/BATM (must outlive m_gpu_workspace)
-    std::unique_ptr<FFWorkspaceGPU> m_gpu_workspace; ///< Destroyed first (holds raw ptr to m_cpu_residual)
+    std::unique_ptr<FFWorkspace>    m_cpu_residual;  ///< CPU workspace for HB/XB/ATM/BATM/sTors
+    std::unique_ptr<FFWorkspaceGPU> m_gpu_workspace; ///< GPU workspace (holds raw ptr to m_cpu_residual)
 
     json             m_parameters;
     std::string      m_method_name;

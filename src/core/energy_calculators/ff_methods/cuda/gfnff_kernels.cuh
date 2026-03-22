@@ -89,6 +89,8 @@ __global__ void k_bonds(
     const double* __restrict__ ff,
     const double* __restrict__ fc,
     const double* __restrict__ alpha,
+    const int*    __restrict__ nr_hb,      ///< HB count per bond
+    const double* __restrict__ hb_cn_H,    ///< HB coordination number of H
     const double* __restrict__ coords,
     const double* __restrict__ cn,     ///< [N] D3 coordination numbers
     double*                    grad,
@@ -147,6 +149,10 @@ __global__ void k_inversions(
     const int*    __restrict__ idx_j,
     const int*    __restrict__ idx_k,
     const int*    __restrict__ idx_l,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const int*    __restrict__ atl,
     const double* __restrict__ fc,
     const double* __restrict__ omega0,
     const double* __restrict__ C0,

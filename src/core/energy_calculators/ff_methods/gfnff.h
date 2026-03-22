@@ -26,10 +26,6 @@
 #include "src/core/config_manager.h"
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
 
-// Claude Generated (March 2026): Forward declaration for GPU workspace (USE_CUDA only)
-#ifdef USE_CUDA
-class FFWorkspaceGPU;
-#endif
 #include "src/core/energy_calculators/ff_methods/ff_workspace.h"  // Claude Generated (Mar 2026): Unified workspace
 #include "src/core/energy_calculators/ff_methods/eeq_solver.h"  // EEQ charge calculation (Dec 2025 - Phase 3)
 #include "src/core/energy_calculators/ff_methods/huckel_solver.h"  // Full Hückel calculation (Jan 2026 - Phase 1)
@@ -483,36 +479,53 @@ public:
      * @return GFNFFParameterSet with all interaction parameters
      *
      * Claude Generated (March 2026): Primary parameter generation path.
-     * Made public to allow GPU wrapper (GGFNFFComputationalMethod) to
-     * extract parameters and upload them to FFWorkspaceGPU at init time.
      * Called after InitialiseMolecule() when topology is available.
      */
     GFNFFParameterSet generateGFNFFParameterSet();
 
 
     /**
-     * @brief Inject GPU workspace — intercepts workspace::calculate() call.
-     *
-     * Claude Generated (March 2026): When set, GFNFF::Calculation() routes
-     * energy/gradient computation through FFWorkspaceGPU instead of the CPU
-     * FFWorkspace.  The GPU workspace must already contain uploaded interaction
-     * parameters (done once in GGFNFFComputationalMethod constructor).
-     * Per-step state (geometry, CN, charges) is set by Calculation() itself.
-     *
-     * @param ws Non-owning pointer to FFWorkspaceGPU; nullptr disables GPU path.
-     */
-#ifdef USE_CUDA
-    void setGPUWorkspace(FFWorkspaceGPU* ws) { m_gpu_workspace = ws; }
-
-    /**
-     * @brief Consume pre-generated GPU parameters (avoids extra generateGFNFFParameterSet call).
+     * @brief Consume cached parameter set for external use.
      *
      * Claude Generated (March 2026): initializeForceField() stores a heap copy of the
-     * parameter set.  The GPU wrapper calls this once to take ownership; subsequent
-     * calls return nullptr.
+     * parameter set. External consumers (GPU wrapper, etc.) call consumeCachedParameterSet()
+     * once to take ownership; subsequent calls return nullptr.
      */
-    std::unique_ptr<GFNFFParameterSet> consumePendingGPUParams() { return std::move(m_pending_gpu_params); }
-#endif
+    /**
+     * @brief Consume cached parameter set (avoids extra generateGFNFFParameterSet call).
+     *
+     * Claude Generated (March 2026): initializeForceField() stores a heap copy of the
+     * parameter set. External callers (e.g. GPU wrapper) call this once to take ownership;
+     * subsequent calls return nullptr.
+     */
+    std::unique_ptr<GFNFFParameterSet> consumeCachedParameterSet() { return std::move(m_cached_parameter_set); }
+
+    // === GPU orchestration helpers (Claude Generated March 2026) ===
+    // These expose internal CN/EEQ computation so that GGFNFFComputationalMethod
+    // can orchestrate GPU + CPU-residual without duplicating logic.
+
+    /**
+     * @brief Compute CN, EEQ charges, and (if gradient) CN derivatives for current geometry.
+     * Results are stored internally and distributed to m_forcefield/m_workspace.
+     * Call getters below to retrieve results for external workspaces.
+     */
+    void prepareCNAndEEQ(bool gradient);
+
+    /**
+     * @brief Re-detect HB/XB pairs if geometry has changed enough (RMSD > 0.3 Bohr).
+     * Updates the given workspace with new HB/XB interaction lists.
+     * @param ws External workspace to update (e.g. CPU residual workspace for GPU path)
+     */
+    void updateHBXBIfNeeded(FFWorkspace* ws);
+
+    // Getters for CN/EEQ results (valid after prepareCNAndEEQ)
+    const Vector& getLastCN() const { return m_last_cn; }
+    const Vector& getLastCharges() const { return m_charges; }
+    const Matrix& getGeometryBohr() const { return m_geometry_bohr; }
+    const std::vector<SpMatrix>& getLastCNDerivatives() const { return m_last_dcn; }
+    const Vector& getLastCNF() const { return m_last_cnf; }
+    const Matrix* getDC6DCNPtr() const { return m_d4_generator ? &m_d4_generator->getDC6DCN() : nullptr; }
+    FFWorkspace* getWorkspace() const { return m_workspace.get(); }
 
 private:
     /**
@@ -1854,9 +1867,6 @@ private:
     std::unique_ptr<FFWorkspace> m_workspace; ///< Claude Generated (Mar 2026): Unified workspace (replaces ForceField path)
     bool m_use_workspace = false; ///< Use FFWorkspace path instead of ForceField
 
-#ifdef USE_CUDA
-    FFWorkspaceGPU* m_gpu_workspace = nullptr; ///< Claude Generated (Mar 2026): GPU workspace (injected, non-owning)
-#endif
     Matrix m_geometry_bohr; ///< Geometry in Bohr (GFN-FF parameters are in Bohr)
 
     // EEQ charge calculation (Dec 2025 - Phase 3: Extraction and delegation)
@@ -1954,10 +1964,14 @@ private:
     mutable std::optional<TopologyInfo> m_cached_topology;
     mutable std::optional<std::vector<std::pair<int,int>>> m_cached_bond_list;
 
-    // Claude Generated (March 2026): Heap-stored parameter copy for GPU wrapper.
-    // Set in initializeForceField(), consumed once by GGFNFFComputationalMethod::initGPUWorkspace().
-    // unique_ptr keeps the data off the GFNFF stack to avoid layout-dependent corruption.
-    std::unique_ptr<GFNFFParameterSet> m_pending_gpu_params;
+    // Claude Generated (March 2026): Heap-stored parameter copy for external consumers.
+    // Set in initializeForceField(), consumed once via consumeCachedParameterSet().
+    std::unique_ptr<GFNFFParameterSet> m_cached_parameter_set;
+
+    // Claude Generated (March 2026): State from last prepareCNAndEEQ() call
+    Vector m_last_cn;    ///< Coordination numbers
+    Vector m_last_cnf;   ///< CN-dependent EEQ factors per atom
+    std::vector<SpMatrix> m_last_dcn; ///< CN derivatives (gradient only)
 
     // Conversion factors
     static constexpr double HARTREE_TO_KCAL = 627.5094740631;

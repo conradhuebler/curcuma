@@ -222,6 +222,8 @@ __global__ void k_bonds(
     const double* __restrict__ ff,
     const double* __restrict__ fc,
     const double* __restrict__ alpha,
+    const int*    __restrict__ nr_hb,
+    const double* __restrict__ hb_cn_H,
     const double* __restrict__ coords,
     const double* __restrict__ cn,
     double*                    grad,
@@ -250,7 +252,17 @@ __global__ void k_bonds(
     }
 
     double dr      = rij - r0_ij;
-    double alp     = alpha[tid];
+    double alpha_orig = alpha[tid];
+    double alp     = alpha_orig;
+
+    // HB X-H bond alpha modification
+    // Reference: Fortran gfnff_engrad.F90:957-958
+    if (nr_hb[tid] >= 1) {
+        constexpr double VBOND_SCALE = 0.9;
+        double t1 = 1.0 - VBOND_SCALE;
+        alp = (-t1 * hb_cn_H[tid] + 1.0) * alpha_orig;
+    }
+
     double exp_v   = exp(-alp * dr * dr);
     double E       = fc[tid] * exp_v;
     atomicAdd(energy, E);
@@ -384,10 +396,10 @@ __global__ void k_angles(
     double r_jk_sq = dkj_x*dkj_x + dkj_y*dkj_y + dkj_z*dkj_z;
 
     const double atcuta = 0.595;
-    double rcut_ij = atcuta * (rcov_i + rcov_j);
-    double rcut_jk = atcuta * (rcov_j + rcov_k);
-    double rcut_ij_sq = rcut_ij * rcut_ij;
-    double rcut_jk_sq = rcut_jk * rcut_jk;
+    double sum_ij = rcov_i + rcov_j;
+    double sum_jk = rcov_j + rcov_k;
+    double rcut_ij_sq = atcuta * sum_ij * sum_ij;
+    double rcut_jk_sq = atcuta * sum_jk * sum_jk;
 
     double rr_ij  = (r_ij_sq > 1e-10) ? (r_ij_sq / rcut_ij_sq) : 0.0;
     rr_ij  = rr_ij  * rr_ij;
@@ -588,7 +600,8 @@ __global__ void k_dihedrals(
 
     double atcutt = is_nci[tid] ? 0.305 : 0.505;
 
-    // Damping pairs: (i,k), (j,k), (j,l)
+    // Damping pairs: (i,j), (j,k), (k,l) — bonded chain distances
+    // Reference: ff_workspace_gfnff.cpp:335-337
     auto sq_dist = [&](int a, int b) {
         double dx=coords[3*b]-coords[3*a];
         double dy=coords[3*b+1]-coords[3*a+1];
@@ -597,31 +610,32 @@ __global__ void k_dihedrals(
     };
 
     auto make_damp = [&](double r2_sq, double ra, double rb) {
-        double rcut = atcutt*(ra+rb);
-        double rr = r2_sq / (rcut*rcut);
+        double sum = ra + rb;
+        double rcut_sq = atcutt * sum * sum;
+        double rr = r2_sq / rcut_sq;
         rr = rr*rr;
         return 1.0/(1.0+rr);
     };
     auto make_damp2 = [&](double r2_sq, double ra, double rb) {
-        double rcut = atcutt*(ra+rb);
-        double rcut2 = rcut*rcut;
-        double rr = r2_sq / rcut2;
+        double sum = ra + rb;
+        double rcut_sq = atcutt * sum * sum;
+        double rr = r2_sq / rcut_sq;
         rr = rr*rr;
-        return (r2_sq > 1e-8) ? -2.0*2.0*rr/(r2_sq*(1.0+rr)*(1.0+rr)) : 0.0;
+        return (r2_sq > 1e-8) ? -4.0*rr/(r2_sq*(1.0+rr)*(1.0+rr)) : 0.0;
     };
 
-    double rik2 = sq_dist(ai, ak);
+    double rij2 = sq_dist(ai, aj);
     double rjk2 = sq_dist(aj, ak);
-    double rjl2 = sq_dist(aj, al);
+    double rkl2 = sq_dist(ak, al);
 
-    double d_ik = make_damp(rik2, ri, rk);
+    double d_ij = make_damp(rij2, ri, rj);
     double d_jk = make_damp(rjk2, rj, rk);
-    double d_jl = make_damp(rjl2, rj, rl);
-    double damp  = d_ik * d_jk * d_jl;
+    double d_kl = make_damp(rkl2, rk, rl);
+    double damp  = d_ij * d_jk * d_kl;
 
-    double d2_ik = make_damp2(rik2, ri, rk);
+    double d2_ij = make_damp2(rij2, ri, rj);
     double d2_jk = make_damp2(rjk2, rj, rk);
-    double d2_jl = make_damp2(rjl2, rj, rl);
+    double d2_kl = make_damp2(rkl2, rk, rl);
 
     // Dihedral angle + gradient
     double derivate[4][3];
@@ -642,26 +656,27 @@ __global__ void k_dihedrals(
                  dEdphi * damp * derivate[a][2]);
     }
 
-    // Gradient from damping: E_raw * d(damp)/d(rXY) * 2*rXY_vec
-    // (i,k) pair
+    // Gradient from damping: E_raw * d(damp)/d(rXY²) * rXY_vec
+    // Reference: ff_workspace_gfnff.cpp:360-376 (pairs: i-j, j-k, k-l)
+    // (i,j) pair
     {
-        double dx=coords[3*ak]-coords[3*ai], dy=coords[3*ak+1]-coords[3*ai+1], dz=coords[3*ak+2]-coords[3*ai+2];
-        double fac = E_raw * d2_ik * d_jk * d_jl;
+        double dx=coords[3*aj]-coords[3*ai], dy=coords[3*aj+1]-coords[3*ai+1], dz=coords[3*aj+2]-coords[3*ai+2];
+        double fac = E_raw * d2_ij * d_jk * d_kl;
         add_grad(grad, ai,  fac*dx,  fac*dy,  fac*dz);
-        add_grad(grad, ak, -fac*dx, -fac*dy, -fac*dz);
+        add_grad(grad, aj, -fac*dx, -fac*dy, -fac*dz);
     }
     // (j,k) pair
     {
         double dx=coords[3*ak]-coords[3*aj], dy=coords[3*ak+1]-coords[3*aj+1], dz=coords[3*ak+2]-coords[3*aj+2];
-        double fac = E_raw * d_ik * d2_jk * d_jl;
+        double fac = E_raw * d_ij * d2_jk * d_kl;
         add_grad(grad, aj,  fac*dx,  fac*dy,  fac*dz);
         add_grad(grad, ak, -fac*dx, -fac*dy, -fac*dz);
     }
-    // (j,l) pair
+    // (k,l) pair
     {
-        double dx=coords[3*al]-coords[3*aj], dy=coords[3*al+1]-coords[3*aj+1], dz=coords[3*al+2]-coords[3*aj+2];
-        double fac = E_raw * d_ik * d_jk * d2_jl;
-        add_grad(grad, aj,  fac*dx,  fac*dy,  fac*dz);
+        double dx=coords[3*al]-coords[3*ak], dy=coords[3*al+1]-coords[3*ak+1], dz=coords[3*al+2]-coords[3*ak+2];
+        double fac = E_raw * d_ij * d_jk * d2_kl;
+        add_grad(grad, ak,  fac*dx,  fac*dy,  fac*dz);
         add_grad(grad, al, -fac*dx, -fac*dy, -fac*dz);
     }
 }
@@ -748,6 +763,10 @@ __global__ void k_inversions(
     const int*    __restrict__ idx_j,
     const int*    __restrict__ idx_k,
     const int*    __restrict__ idx_l,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const int*    __restrict__ atl,
     const double* __restrict__ fc,
     const double* __restrict__ omega0,
     const double* __restrict__ C0,
@@ -761,7 +780,44 @@ __global__ void k_inversions(
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
+    // Atom layout: i=center, j=nb1, k=nb2, l=nb3
     int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid], l = idx_l[tid];
+
+    // Distance damping (matches CPU ff_workspace_gfnff.cpp:509-513, 537-549)
+    // Reference: gfnff_engrad.F90:1356-1365
+    const double rcov_scale = 4.0 / 3.0;
+    const double atcutt = 0.505;
+
+    int zi = ati[tid]-1, zj = atj[tid]-1, zk = atk[tid]-1, zl = atl[tid]-1;
+    double rcov_c = (zi >= 0 && zi < 87) ? d_rcov_d3[zi] * rcov_scale : 1.0 * rcov_scale;
+    double rcov_1 = (zj >= 0 && zj < 87) ? d_rcov_d3[zj] * rcov_scale : 1.0 * rcov_scale;
+    double rcov_2 = (zk >= 0 && zk < 87) ? d_rcov_d3[zk] * rcov_scale : 1.0 * rcov_scale;
+    double rcov_3 = (zl >= 0 && zl < 87) ? d_rcov_d3[zl] * rcov_scale : 1.0 * rcov_scale;
+
+    // Damping pairs: nb1-center, nb1-nb2, nb1-nb3 (hub = nb1 = j)
+    auto sq_dist3 = [&](int a, int b) {
+        double dx=coords[3*b]-coords[3*a];
+        double dy=coords[3*b+1]-coords[3*a+1];
+        double dz=coords[3*b+2]-coords[3*a+2];
+        return dx*dx+dy*dy+dz*dz;
+    };
+
+    double rij_sq = sq_dist3(j, i);   // nb1-center
+    double rjk_sq = sq_dist3(j, k);   // nb1-nb2
+    double rjl_sq = sq_dist3(j, l);   // nb1-nb3
+
+    auto calc_damp = [&](double rsq, double ra, double rb) -> double {
+        double sum = ra + rb;
+        double rcut_sq = atcutt * sum * sum;
+        double rr = (rsq / rcut_sq);
+        rr = rr * rr;
+        return 1.0 / (1.0 + rr);
+    };
+
+    double damp_ij = calc_damp(rij_sq, rcov_c, rcov_1);
+    double damp_jk = calc_damp(rjk_sq, rcov_2, rcov_1);
+    double damp_jl = calc_damp(rjl_sq, rcov_3, rcov_1);
+    double damp    = damp_ij * damp_jk * damp_jl;
 
     double derivate[4][3];
     double omega = inversion_angle_grad(coords, i, j, k, l, derivate, true);
@@ -772,7 +828,7 @@ __global__ void k_inversions(
     if (potential_type[tid] == 0) {
         // E = fc * (1 - cos(omega))
         E_raw  = fc[tid] * (1.0 - cos_om);
-        dEdcos = -fc[tid];                    // ∂E/∂cos(omega)
+        dEdcos = -fc[tid];
     } else {
         // E = fc * (cos(omega) - cos(omega0))^2
         double dcos = cos_om - cos_om0;
@@ -780,11 +836,10 @@ __global__ void k_inversions(
         dEdcos = 2.0 * fc[tid] * dcos;
     }
 
-    atomicAdd(energy, E_raw);
+    atomicAdd(energy, E_raw * damp);
 
-    // ∂E/∂r = (∂E/∂cos_om) * (∂cos_om/∂omega) * (∂omega/∂r)
-    // ∂cos_om/∂omega = -sin(omega)
-    double dEdOmega = dEdcos * (-sin(omega));
+    // Gradient: angle part with damping
+    double dEdOmega = dEdcos * (-sin(omega)) * damp;
 
     int atoms[4] = {i, j, k, l};
     for (int a = 0; a < 4; ++a) {
@@ -792,6 +847,43 @@ __global__ void k_inversions(
                  dEdOmega * derivate[a][0],
                  dEdOmega * derivate[a][1],
                  dEdOmega * derivate[a][2]);
+    }
+
+    // Gradient from damping: E_raw * d(damp)/d(r²) * r_vec
+    auto calc_ddamp = [&](double rsq, double ra, double rb) -> double {
+        if (rsq < 1e-8) return 0.0;
+        double sum = ra + rb;
+        double rcut_sq = atcutt * sum * sum;
+        double rr = (rsq / rcut_sq);
+        rr = rr * rr;
+        double opr = 1.0 + rr;
+        return -4.0 * rr / (rsq * opr * opr);
+    };
+
+    double dd_ij = calc_ddamp(rij_sq, rcov_c, rcov_1);
+    double dd_jk = calc_ddamp(rjk_sq, rcov_2, rcov_1);
+    double dd_jl = calc_ddamp(rjl_sq, rcov_3, rcov_1);
+
+    // (j,i) pair — nb1 to center
+    {
+        double dx=coords[3*i]-coords[3*j], dy=coords[3*i+1]-coords[3*j+1], dz=coords[3*i+2]-coords[3*j+2];
+        double fac = E_raw * dd_ij * damp_jk * damp_jl;
+        add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
+        add_grad(grad, i, -fac*dx, -fac*dy, -fac*dz);
+    }
+    // (j,k) pair — nb1 to nb2
+    {
+        double dx=coords[3*k]-coords[3*j], dy=coords[3*k+1]-coords[3*j+1], dz=coords[3*k+2]-coords[3*j+2];
+        double fac = E_raw * damp_ij * dd_jk * damp_jl;
+        add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
+        add_grad(grad, k, -fac*dx, -fac*dy, -fac*dz);
+    }
+    // (j,l) pair — nb1 to nb3
+    {
+        double dx=coords[3*l]-coords[3*j], dy=coords[3*l+1]-coords[3*j+1], dz=coords[3*l+2]-coords[3*j+2];
+        double fac = E_raw * damp_ij * damp_jk * dd_jl;
+        add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
+        add_grad(grad, l, -fac*dx, -fac*dy, -fac*dz);
     }
 }
 

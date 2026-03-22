@@ -149,6 +149,8 @@ struct BondSoA {
     CudaBuffer<double> cnfak_j;    ///< CN sensitivity of atom j's covalent radius
     CudaBuffer<double> r0_base_i;  ///< Base r0 for atom i (r0_gfnff[Z-1])
     CudaBuffer<double> r0_base_j;  ///< Base r0 for atom j
+    CudaBuffer<int>    nr_hb;      ///< HB count for bond (>= 1 triggers alpha modification)
+    CudaBuffer<double> hb_cn_H;    ///< HB coordination number of H atom
     int n = 0;
 
     void upload(const std::vector<Bond>& v, cudaStream_t stream = nullptr);
@@ -191,11 +193,14 @@ struct DihedralSoA {
 // ============================================================================
 struct InversionSoA {
     CudaBuffer<int>    idx_i, idx_j, idx_k, idx_l;
+    CudaBuffer<int>    ati, atj, atk, atl;  ///< Atomic numbers for rcov damping lookup
     CudaBuffer<double> fc, omega0, C0, C1, C2;
     CudaBuffer<int>    potential_type;
     int n = 0;
 
-    void upload(const std::vector<Inversion>& v, cudaStream_t stream = nullptr);
+    void upload(const std::vector<Inversion>& v,
+                const std::vector<int>& atom_types,
+                cudaStream_t stream = nullptr);
 };
 
 #endif // USE_CUDA

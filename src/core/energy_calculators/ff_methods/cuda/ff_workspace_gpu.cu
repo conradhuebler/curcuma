@@ -173,9 +173,10 @@ void BondSoA::upload(const std::vector<Bond>& v, cudaStream_t stream)
     n = static_cast<int>(v.size());
     if (n == 0) return;
 
-    std::vector<int>    h_i(n), h_j(n);
+    std::vector<int>    h_i(n), h_j(n), h_nr_hb(n);
     std::vector<double> h_r0(n), h_fc(n), h_alpha(n), h_rabshift(n), h_ff(n);
     std::vector<double> h_cnfak_i(n), h_cnfak_j(n), h_rb_i(n), h_rb_j(n);
+    std::vector<double> h_hb_cn_H(n);
 
     for (int k = 0; k < n; ++k) {
         h_i[k]       = v[k].i;
@@ -189,6 +190,8 @@ void BondSoA::upload(const std::vector<Bond>& v, cudaStream_t stream)
         h_cnfak_j[k] = v[k].cnfak_j;
         h_rb_i[k]    = v[k].r0_base_i;
         h_rb_j[k]    = v[k].r0_base_j;
+        h_nr_hb[k]   = v[k].nr_hb;
+        h_hb_cn_H[k] = v[k].hb_cn_H;
     }
 
     idx_i.upload(h_i, stream);
@@ -202,6 +205,8 @@ void BondSoA::upload(const std::vector<Bond>& v, cudaStream_t stream)
     cnfak_j.upload(h_cnfak_j, stream);
     r0_base_i.upload(h_rb_i, stream);
     r0_base_j.upload(h_rb_j, stream);
+    nr_hb.upload(h_nr_hb, stream);
+    hb_cn_H.upload(h_hb_cn_H, stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -281,17 +286,25 @@ void DihedralSoA::upload(const std::vector<Dihedral>& standard,
 }
 
 // ---------------------------------------------------------------------------
-void InversionSoA::upload(const std::vector<Inversion>& v, cudaStream_t stream)
+void InversionSoA::upload(const std::vector<Inversion>& v,
+                           const std::vector<int>& atom_types,
+                           cudaStream_t stream)
 {
     n = static_cast<int>(v.size());
     if (n == 0) return;
 
+    const int nat = static_cast<int>(atom_types.size());
     std::vector<int>    h_i(n), h_j(n), h_k(n), h_l(n), h_pt(n);
+    std::vector<int>    h_ati(n), h_atj(n), h_atk(n), h_atl(n);
     std::vector<double> h_fc(n), h_om(n), h_C0(n), h_C1(n), h_C2(n);
 
     for (int m = 0; m < n; ++m) {
         h_i[m]  = v[m].i;  h_j[m] = v[m].j;
         h_k[m]  = v[m].k;  h_l[m] = v[m].l;
+        h_ati[m] = (v[m].i < nat) ? atom_types[v[m].i] : 0;
+        h_atj[m] = (v[m].j < nat) ? atom_types[v[m].j] : 0;
+        h_atk[m] = (v[m].k < nat) ? atom_types[v[m].k] : 0;
+        h_atl[m] = (v[m].l < nat) ? atom_types[v[m].l] : 0;
         h_fc[m] = v[m].fc;
         h_om[m] = v[m].omega0;
         h_C0[m] = v[m].C0;
@@ -302,6 +315,8 @@ void InversionSoA::upload(const std::vector<Inversion>& v, cudaStream_t stream)
 
     idx_i.upload(h_i, stream); idx_j.upload(h_j, stream);
     idx_k.upload(h_k, stream); idx_l.upload(h_l, stream);
+    ati.upload(h_ati, stream); atj.upload(h_atj, stream);
+    atk.upload(h_atk, stream); atl.upload(h_atl, stream);
     fc.upload(h_fc, stream);
     omega0.upload(h_om, stream);
     C0.upload(h_C0, stream);
@@ -332,6 +347,16 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_grad;      ///< [N*3] gradient output (atomicAdd)
     CudaBuffer<double> d_dEdcn;     ///< [N] bond dE/dCN (atomicAdd)
     CudaBuffer<double> d_energy;    ///< [1] total GPU energy (atomicAdd)
+
+    // Claude Generated (March 2026): Per-term energy accumulators for debugging
+    CudaBuffer<double> d_e_disp;        ///< [1] dispersion energy
+    CudaBuffer<double> d_e_bonded_rep;  ///< [1] bonded repulsion energy
+    CudaBuffer<double> d_e_nb_rep;      ///< [1] non-bonded repulsion energy
+    CudaBuffer<double> d_e_coulomb;     ///< [1] Coulomb TERM 1 energy
+    CudaBuffer<double> d_e_bond;        ///< [1] bond stretching energy
+    CudaBuffer<double> d_e_angle;       ///< [1] angle bending energy
+    CudaBuffer<double> d_e_dihedral;    ///< [1] dihedral torsion energy
+    CudaBuffer<double> d_e_inversion;   ///< [1] inversion energy
 
     int N = 0;
     cudaStream_t stream = nullptr;
@@ -386,7 +411,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_impl->bonds.upload(params.bonds, stream);
     m_impl->angles.upload(params.angles, atom_types, stream);
     m_impl->dihedrals.upload(params.dihedrals, params.extra_dihedrals, atom_types, stream);
-    m_impl->inversions.upload(params.inversions, stream);
+    m_impl->inversions.upload(params.inversions, atom_types, stream);
 
     // --- Allocate dynamic per-step buffers ---
     const int N3 = 3 * natoms;
@@ -396,6 +421,16 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_impl->d_grad.alloc(N3);
     m_impl->d_dEdcn.alloc(natoms);
     m_impl->d_energy.alloc(1);
+
+    // Per-term energy accumulators (Claude Generated March 2026)
+    m_impl->d_e_disp.alloc(1);
+    m_impl->d_e_bonded_rep.alloc(1);
+    m_impl->d_e_nb_rep.alloc(1);
+    m_impl->d_e_coulomb.alloc(1);
+    m_impl->d_e_bond.alloc(1);
+    m_impl->d_e_angle.alloc(1);
+    m_impl->d_e_dihedral.alloc(1);
+    m_impl->d_e_inversion.alloc(1);
 
     // --- Pre-allocate CPU result buffers ---
     m_result_gradient.resize(natoms, 3);
@@ -508,6 +543,13 @@ void FFWorkspaceGPU::setE0(double e0)
     m_e0 = e0;
 }
 
+void FFWorkspaceGPU::updateBondHBCN(const std::vector<double>& hb_cn_values)
+{
+    const int nb = m_impl->bonds.n;
+    if (nb == 0 || static_cast<int>(hb_cn_values.size()) != nb) return;
+    m_impl->bonds.hb_cn_H.upload(hb_cn_values.data(), nb);
+}
+
 void FFWorkspaceGPU::setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
                                                   const Vector& alp,     const Vector& cnf,
                                                   const Vector& chi_static)
@@ -541,11 +583,19 @@ double FFWorkspaceGPU::calculate(bool gradient)
     constexpr int BLOCK = 256;
 
     // =========================================================================
-    // 1. Zero GPU accumulators
+    // 1. Zero GPU accumulators (total + per-term)
     // =========================================================================
     cudaMemsetAsync(impl.d_energy.ptr, 0, sizeof(double),         stream);
     cudaMemsetAsync(impl.d_grad.ptr,   0, 3*N*sizeof(double),     stream);
     cudaMemsetAsync(impl.d_dEdcn.ptr,  0, N*sizeof(double),       stream);
+    cudaMemsetAsync(impl.d_e_disp.ptr,       0, sizeof(double), stream);
+    cudaMemsetAsync(impl.d_e_bonded_rep.ptr, 0, sizeof(double), stream);
+    cudaMemsetAsync(impl.d_e_nb_rep.ptr,     0, sizeof(double), stream);
+    cudaMemsetAsync(impl.d_e_coulomb.ptr,    0, sizeof(double), stream);
+    cudaMemsetAsync(impl.d_e_bond.ptr,       0, sizeof(double), stream);
+    cudaMemsetAsync(impl.d_e_angle.ptr,      0, sizeof(double), stream);
+    cudaMemsetAsync(impl.d_e_dihedral.ptr,   0, sizeof(double), stream);
+    cudaMemsetAsync(impl.d_e_inversion.ptr,  0, sizeof(double), stream);
 
     // =========================================================================
     // 2. Upload per-step charges and CN
@@ -571,114 +621,118 @@ double FFWorkspaceGPU::calculate(bool gradient)
     if (m_dispersion_enabled && impl.disp.n > 0) {
         k_dispersion<<<gridFor(impl.disp.n, BLOCK), BLOCK, 0, stream>>>(
             impl.disp.n,
-            impl.disp.idx_i,  impl.disp.idx_j,
-            impl.disp.C6,     impl.disp.r4r2ij,
-            impl.disp.r0_sq,  impl.disp.zetac6,
-            impl.disp.r_cut,
-            impl.d_coords,
-            impl.d_grad,
-            impl.d_energy);
+            impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
+            impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
+            impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
+            impl.disp.r_cut.ptr,
+            impl.d_coords.ptr,
+            impl.d_grad.ptr,
+            impl.d_e_disp.ptr);
     }
 
     // --- Bonded repulsion ---
     if (m_repulsion_enabled && impl.bonded_rep.n > 0) {
         k_repulsion<<<gridFor(impl.bonded_rep.n, BLOCK), BLOCK, 0, stream>>>(
             impl.bonded_rep.n,
-            impl.bonded_rep.idx_i,  impl.bonded_rep.idx_j,
-            impl.bonded_rep.alpha,  impl.bonded_rep.repab,
-            impl.bonded_rep.r_cut,
-            impl.d_coords,
-            impl.d_grad,
-            impl.d_energy);
+            impl.bonded_rep.idx_i.ptr,  impl.bonded_rep.idx_j.ptr,
+            impl.bonded_rep.alpha.ptr,  impl.bonded_rep.repab.ptr,
+            impl.bonded_rep.r_cut.ptr,
+            impl.d_coords.ptr,
+            impl.d_grad.ptr,
+            impl.d_e_bonded_rep.ptr);
     }
 
     // --- Non-bonded repulsion ---
     if (m_repulsion_enabled && impl.nonbonded_rep.n > 0) {
         k_repulsion<<<gridFor(impl.nonbonded_rep.n, BLOCK), BLOCK, 0, stream>>>(
             impl.nonbonded_rep.n,
-            impl.nonbonded_rep.idx_i,  impl.nonbonded_rep.idx_j,
-            impl.nonbonded_rep.alpha,  impl.nonbonded_rep.repab,
-            impl.nonbonded_rep.r_cut,
-            impl.d_coords,
-            impl.d_grad,
-            impl.d_energy);
+            impl.nonbonded_rep.idx_i.ptr,  impl.nonbonded_rep.idx_j.ptr,
+            impl.nonbonded_rep.alpha.ptr,  impl.nonbonded_rep.repab.ptr,
+            impl.nonbonded_rep.r_cut.ptr,
+            impl.d_coords.ptr,
+            impl.d_grad.ptr,
+            impl.d_e_nb_rep.ptr);
     }
 
     // --- Coulomb TERM 1 (pairwise erf-damped) ---
     if (m_coulomb_enabled && impl.coulomb.n > 0) {
         k_coulomb<<<gridFor(impl.coulomb.n, BLOCK), BLOCK, 0, stream>>>(
             impl.coulomb.n,
-            impl.coulomb.idx_i,  impl.coulomb.idx_j,
-            impl.coulomb.gamma_ij,
-            impl.coulomb.r_cut,
-            impl.d_coords,
-            impl.d_charges,
-            impl.d_grad,
-            impl.d_energy);
+            impl.coulomb.idx_i.ptr,  impl.coulomb.idx_j.ptr,
+            impl.coulomb.gamma_ij.ptr,
+            impl.coulomb.r_cut.ptr,
+            impl.d_coords.ptr,
+            impl.d_charges.ptr,
+            impl.d_grad.ptr,
+            impl.d_e_coulomb.ptr);
     }
 
     // --- Bond stretching (with CN-dependent r0 and dEdcn accumulation) ---
     if (impl.bonds.n > 0) {
         k_bonds<<<gridFor(impl.bonds.n, BLOCK), BLOCK, 0, stream>>>(
             impl.bonds.n,
-            impl.bonds.idx_i,     impl.bonds.idx_j,
-            impl.bonds.r0,
-            impl.bonds.r0_base_i, impl.bonds.r0_base_j,
-            impl.bonds.cnfak_i,   impl.bonds.cnfak_j,
-            impl.bonds.rabshift,
-            impl.bonds.ff,
-            impl.bonds.fc,
-            impl.bonds.alpha,
-            impl.d_coords,
-            impl.d_cn,
-            impl.d_grad,
-            impl.d_dEdcn,
-            impl.d_energy);
+            impl.bonds.idx_i.ptr,     impl.bonds.idx_j.ptr,
+            impl.bonds.r0.ptr,
+            impl.bonds.r0_base_i.ptr, impl.bonds.r0_base_j.ptr,
+            impl.bonds.cnfak_i.ptr,   impl.bonds.cnfak_j.ptr,
+            impl.bonds.rabshift.ptr,
+            impl.bonds.ff.ptr,
+            impl.bonds.fc.ptr,
+            impl.bonds.alpha.ptr,
+            impl.bonds.nr_hb.ptr,
+            impl.bonds.hb_cn_H.ptr,
+            impl.d_coords.ptr,
+            impl.d_cn.ptr,
+            impl.d_grad.ptr,
+            impl.d_dEdcn.ptr,
+            impl.d_e_bond.ptr);
     }
 
     // --- Angle bending (cosine + distance damping) ---
     if (impl.angles.n > 0) {
         k_angles<<<gridFor(impl.angles.n, BLOCK), BLOCK, 0, stream>>>(
             impl.angles.n,
-            impl.angles.idx_i,  impl.angles.idx_j,  impl.angles.idx_k,
-            impl.angles.ati,    impl.angles.atj,    impl.angles.atk,
-            impl.angles.fc,     impl.angles.theta0,
-            impl.d_coords,
-            nullptr,            // rcov_d3 unused (constant memory)
-            impl.d_grad,
-            impl.d_energy);
+            impl.angles.idx_i.ptr,  impl.angles.idx_j.ptr,  impl.angles.idx_k.ptr,
+            impl.angles.ati.ptr,    impl.angles.atj.ptr,    impl.angles.atk.ptr,
+            impl.angles.fc.ptr,     impl.angles.theta0.ptr,
+            impl.d_coords.ptr,
+            (double*)nullptr,       // rcov_d3 unused (constant memory)
+            impl.d_grad.ptr,
+            impl.d_e_angle.ptr);
     }
 
     // --- Dihedrals (standard + extra, Fourier + distance damping) ---
     if (impl.dihedrals.n > 0) {
         k_dihedrals<<<gridFor(impl.dihedrals.n, BLOCK), BLOCK, 0, stream>>>(
             impl.dihedrals.n,
-            impl.dihedrals.idx_i, impl.dihedrals.idx_j,
-            impl.dihedrals.idx_k, impl.dihedrals.idx_l,
-            impl.dihedrals.ati,   impl.dihedrals.atj,
-            impl.dihedrals.atk,   impl.dihedrals.atl,
-            impl.dihedrals.V,
-            impl.dihedrals.phi0,
-            impl.dihedrals.n_period,
-            impl.dihedrals.is_nci,
-            impl.d_coords,
-            nullptr,              // rcov_d3 unused (constant memory)
-            impl.d_grad,
-            impl.d_energy);
+            impl.dihedrals.idx_i.ptr, impl.dihedrals.idx_j.ptr,
+            impl.dihedrals.idx_k.ptr, impl.dihedrals.idx_l.ptr,
+            impl.dihedrals.ati.ptr,   impl.dihedrals.atj.ptr,
+            impl.dihedrals.atk.ptr,   impl.dihedrals.atl.ptr,
+            impl.dihedrals.V.ptr,
+            impl.dihedrals.phi0.ptr,
+            impl.dihedrals.n_period.ptr,
+            impl.dihedrals.is_nci.ptr,
+            impl.d_coords.ptr,
+            (double*)nullptr,         // rcov_d3 unused (constant memory)
+            impl.d_grad.ptr,
+            impl.d_e_dihedral.ptr);
     }
 
     // --- Out-of-plane inversions ---
     if (impl.inversions.n > 0) {
         k_inversions<<<gridFor(impl.inversions.n, BLOCK), BLOCK, 0, stream>>>(
             impl.inversions.n,
-            impl.inversions.idx_i, impl.inversions.idx_j,
-            impl.inversions.idx_k, impl.inversions.idx_l,
-            impl.inversions.fc,    impl.inversions.omega0,
-            impl.inversions.C0,    impl.inversions.C1,    impl.inversions.C2,
-            impl.inversions.potential_type,
-            impl.d_coords,
-            impl.d_grad,
-            impl.d_energy);
+            impl.inversions.idx_i.ptr, impl.inversions.idx_j.ptr,
+            impl.inversions.idx_k.ptr, impl.inversions.idx_l.ptr,
+            impl.inversions.ati.ptr,   impl.inversions.atj.ptr,
+            impl.inversions.atk.ptr,   impl.inversions.atl.ptr,
+            impl.inversions.fc.ptr,    impl.inversions.omega0.ptr,
+            impl.inversions.C0.ptr,    impl.inversions.C1.ptr,    impl.inversions.C2.ptr,
+            impl.inversions.potential_type.ptr,
+            impl.d_coords.ptr,
+            impl.d_grad.ptr,
+            impl.d_e_inversion.ptr);
     }
 
     // =========================================================================
@@ -689,10 +743,17 @@ double FFWorkspaceGPU::calculate(bool gradient)
     checkCuda(cudaGetLastError(), "kernel launch check");
     checkCuda(cudaDeviceSynchronize(), "calculate device sync");
 
-    // Download total GPU energy
-    double e_gpu = 0.0;
-    checkCuda(cudaMemcpy(&e_gpu, impl.d_energy.ptr, sizeof(double),
-                         cudaMemcpyDeviceToHost), "energy download");
+    // Download per-term GPU energies
+    double e_disp = 0, e_brep = 0, e_nbrep = 0, e_coul1 = 0;
+    double e_bond = 0, e_angle = 0, e_dihedral = 0, e_inversion = 0;
+    checkCuda(cudaMemcpy(&e_disp,      impl.d_e_disp.ptr,       sizeof(double), cudaMemcpyDeviceToHost), "disp energy download");
+    checkCuda(cudaMemcpy(&e_brep,      impl.d_e_bonded_rep.ptr, sizeof(double), cudaMemcpyDeviceToHost), "brep energy download");
+    checkCuda(cudaMemcpy(&e_nbrep,     impl.d_e_nb_rep.ptr,     sizeof(double), cudaMemcpyDeviceToHost), "nbrep energy download");
+    checkCuda(cudaMemcpy(&e_coul1,     impl.d_e_coulomb.ptr,    sizeof(double), cudaMemcpyDeviceToHost), "coul1 energy download");
+    checkCuda(cudaMemcpy(&e_bond,      impl.d_e_bond.ptr,       sizeof(double), cudaMemcpyDeviceToHost), "bond energy download");
+    checkCuda(cudaMemcpy(&e_angle,     impl.d_e_angle.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "angle energy download");
+    checkCuda(cudaMemcpy(&e_dihedral,  impl.d_e_dihedral.ptr,   sizeof(double), cudaMemcpyDeviceToHost), "dihedral energy download");
+    checkCuda(cudaMemcpy(&e_inversion, impl.d_e_inversion.ptr,  sizeof(double), cudaMemcpyDeviceToHost), "inversion energy download");
 
     // Download gradient
     if (gradient) {
@@ -716,12 +777,17 @@ double FFWorkspaceGPU::calculate(bool gradient)
     }
 
     // =========================================================================
-    // 5. Populate energy components and run CPU post-processing
+    // 5. Populate energy components (per-term from GPU)
     // =========================================================================
     m_result_energy.reset();
-    // Store raw GPU total in dispersion field temporarily (all terms combined)
-    // Per-term decomposition would require separate GPU accumulators.
-    m_result_energy.dispersion = e_gpu;  // placeholder: GPU total in one bucket
+    m_result_energy.dispersion  = e_disp;
+    m_result_energy.bonded_rep  = e_brep;
+    m_result_energy.nonbonded_rep = e_nbrep;
+    m_result_energy.coulomb     = e_coul1;  // TERM 1 only; TERM 2+3 added in postProcessCPU
+    m_result_energy.bond        = e_bond;
+    m_result_energy.angle       = e_angle;
+    m_result_energy.dihedral    = e_dihedral;
+    m_result_energy.inversion   = e_inversion;
 
     postProcessCPU(gradient);
 

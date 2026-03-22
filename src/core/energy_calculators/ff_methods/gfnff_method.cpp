@@ -17,9 +17,6 @@
  */
 
 #include "gfnff.h"
-#ifdef USE_CUDA
-#include "cuda/ff_workspace_gpu.h"
-#endif
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
@@ -549,6 +546,203 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
     return *m_cached_bond_list;
 }
 
+// ---------------------------------------------------------------------------
+// prepareCNAndEEQ — CN + EEQ calculation extracted from Calculation()
+// Claude Generated (March 2026): Exposed for GPU orchestration
+// ---------------------------------------------------------------------------
+
+void GFNFF::prepareCNAndEEQ(bool gradient)
+{
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+    Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+    m_last_cn = cn;
+
+    // Distribute D3 CN to ForceField and workspace
+    if (m_forcefield) m_forcefield->distributeD3CN(cn);
+    if (m_workspace) {
+        m_workspace->setGeometry(m_geometry_bohr);
+        m_workspace->setD3CN(cn);
+    }
+
+    // Prepare EEQ topology input
+    EEQSolver::TopologyInput eeq_topo;
+    const TopologyInfo* topo_ptr = nullptr;
+    bool do_eeq = (m_eeq_solver && !m_skip_eeq_recalc);
+    if (do_eeq) {
+        topo_ptr = &getCachedTopology();
+        eeq_topo.neighbor_lists = topo_ptr->neighbor_lists;
+        eeq_topo.nfrag = topo_ptr->nfrag;
+        eeq_topo.fraglist = topo_ptr->fraglist;
+        eeq_topo.qfrag = topo_ptr->qfrag;
+        eeq_topo.covalent_radii.resize(m_atomcount);
+        for (int i = 0; i < m_atomcount; ++i) {
+            int z = m_atoms[i];
+            if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
+                eeq_topo.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
+            } else {
+                eeq_topo.covalent_radii[i] = 1.0;
+            }
+        }
+    }
+
+    if (gradient) {
+        Vector cnf(m_atoms.size());
+        for (size_t i = 0; i < m_atoms.size(); ++i) {
+            int z = m_atoms[i];
+            cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
+                        ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
+        }
+        m_last_cnf = cnf;
+
+        int total_threads = m_parameters.value("threads", 1);
+        auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+        if (pool) pool->setActiveThreadCount(total_threads);
+
+        std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(cn, 1600.0, pool, total_threads);
+        m_last_dcn = dcn;
+
+        if (m_d4_generator) {
+            m_d4_generator->updateCNValuesForGradient(cn_vec, pool, total_threads);
+        }
+
+        Vector new_charges;
+        if (do_eeq) {
+            new_charges = m_eeq_solver->calculateFinalCharges(
+                m_atoms, m_geometry_bohr, m_charge,
+                topo_ptr->topology_charges, cn,
+                topo_ptr->hybridization, eeq_topo,
+                true, topo_ptr->alpeeq, pool, total_threads);
+        }
+
+        // Distribute to ForceField
+        if (m_forcefield) {
+            m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
+            if (m_d4_generator) {
+                m_forcefield->setDispersionDC6DCNPtr(&m_d4_generator->getDC6DCN());
+            }
+        }
+
+        // Distribute to workspace
+        if (m_workspace) {
+            m_workspace->setCNDerivatives(cn, cnf, dcn);
+            if (m_d4_generator) {
+                m_workspace->setDC6DCNPtr(&m_d4_generator->getDC6DCN());
+            }
+        }
+
+        if (do_eeq && new_charges.size() == m_atomcount) {
+            if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
+            if (m_workspace) m_workspace->setEEQCharges(new_charges);
+            m_charges = new_charges;
+        }
+    } else {
+        // Energy-only path
+        m_last_cnf = Vector();
+        m_last_dcn.clear();
+
+        if (m_forcefield) m_forcefield->distributeCNOnly(cn);
+
+        if (do_eeq) {
+            Vector new_charges = m_eeq_solver->calculateFinalCharges(
+                m_atoms, m_geometry_bohr, m_charge,
+                topo_ptr->topology_charges, cn,
+                topo_ptr->hybridization, eeq_topo,
+                true, topo_ptr->alpeeq);
+            if (new_charges.size() == m_atomcount) {
+                if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
+                if (m_workspace) m_workspace->setEEQCharges(new_charges);
+                m_charges = new_charges;
+            }
+        }
+    }
+
+    if (m_skip_eeq_recalc && CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Phase-2 EEQ recalculation SKIPPED (charge injection mode)");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// updateHBXBIfNeeded — Dynamic HB/XB re-detection extracted from Calculation()
+// Claude Generated (March 2026): Exposed for GPU orchestration
+// ---------------------------------------------------------------------------
+
+void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
+{
+    if (!shouldUpdateHBXB(m_geometry_bohr))
+        return;
+
+    // Store old counts for verbose output
+    int old_hb_count = m_hb_reference ? m_hb_reference->nhb_count : 0;
+    int old_xb_count = m_hb_reference ? m_hb_reference->nxb_count : 0;
+    int old_disp_count = m_forcefield ? m_forcefield->getDispersionPairCount()
+                       : (m_workspace ? m_workspace->dispersionPairCount() : 0);
+
+    // Get current topology with updated geometry
+    const TopologyInfo& topo = getCachedTopology();
+
+    // Re-detect HB/XB pairs with Phase-1 charges (topology_charges)
+    auto new_hbonds_native = detectHydrogenBondsNative(topo.topology_charges);
+    auto new_xbonds_native = detectHalogenBondsNative(topo.topology_charges);
+
+    // Update ForceField parameters (JSON path for legacy ForceFieldThread)
+    if (m_forcefield) {
+        json hb_json = json::array();
+        for (const auto& hb : new_hbonds_native) {
+            json j;
+            j["type"] = "hydrogen_bond"; j["case_type"] = hb.case_type;
+            j["i"] = hb.i; j["j"] = hb.j; j["k"] = hb.k;
+            j["basicity_A"] = hb.basicity_A; j["basicity_B"] = hb.basicity_B;
+            j["acidity_A"] = hb.acidity_A; j["acidity_B"] = hb.acidity_B;
+            j["q_H"] = hb.q_H; j["q_A"] = hb.q_A; j["q_B"] = hb.q_B;
+            j["r_cut"] = hb.r_cut;
+            j["neighbors_A"] = hb.neighbors_A; j["neighbors_B"] = hb.neighbors_B;
+            if (hb.case_type == 3) {
+                j["acceptor_parent_index"] = hb.acceptor_parent_index;
+                j["neighbors_C"] = hb.neighbors_C;
+            }
+            hb_json.push_back(j);
+        }
+        json xb_json = json::array();
+        for (const auto& xb : new_xbonds_native) {
+            json j;
+            j["type"] = "halogen_bond";
+            j["i"] = xb.i; j["j"] = xb.j; j["k"] = xb.k;
+            j["basicity_B"] = xb.basicity_B; j["acidity_X"] = xb.acidity_X;
+            j["q_X"] = xb.q_X; j["q_B"] = xb.q_B; j["r_cut"] = xb.r_cut;
+            xb_json.push_back(j);
+        }
+        m_forcefield->updateGFNFFHBonds(hb_json);
+        m_forcefield->updateGFNFFXBonds(xb_json);
+    }
+
+    // Update internal workspace
+    if (m_workspace) {
+        m_workspace->updateHBonds(new_hbonds_native);
+        m_workspace->updateXBonds(new_xbonds_native);
+    }
+
+    // Update external workspace (e.g. CPU residual for GPU path)
+    if (extra_ws) {
+        extra_ws->updateHBonds(new_hbonds_native);
+        extra_ws->updateXBonds(new_xbonds_native);
+    }
+
+    // Update reference geometry for next check
+    m_hb_reference = HBReferenceGeometry{};
+    m_hb_reference->reference_positions = m_geometry_bohr;
+    m_hb_reference->nhb_count = static_cast<int>(new_hbonds_native.size());
+    m_hb_reference->nxb_count = static_cast<int>(new_xbonds_native.size());
+    m_hb_reference->needs_update = false;
+
+    // Verbose output at level 2
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("GFNFF: RMSD-based re-evaluation triggered");
+        CurcumaLogger::param("HB pairs", fmt::format("{} → {}", old_hb_count, m_hb_reference->nhb_count));
+        CurcumaLogger::param("XB pairs", fmt::format("{} → {}", old_xb_count, m_hb_reference->nxb_count));
+        CurcumaLogger::param("Dispersion pairs", std::to_string(old_disp_count) + " (static)");
+    }
+}
+
 double GFNFF::Calculation(bool gradient)
 {
     // Claude Generated (February 2026): Start total calculation timer for verbosity 1+
@@ -570,12 +764,8 @@ double GFNFF::Calculation(bool gradient)
         return 0.0;
     }
 
-#ifdef USE_CUDA
-    if (!m_forcefield && !m_workspace && !m_gpu_workspace) {
-#else
     if (!m_forcefield && !m_workspace) {
-#endif
-        CurcumaLogger::error("GFN-FF calculation failed: Neither ForceField nor Workspace nor GPU available");
+        CurcumaLogger::error("GFN-FF calculation failed: Neither ForceField nor Workspace available");
         return 0.0;
     }
 
@@ -599,235 +789,22 @@ double GFNFF::Calculation(bool gradient)
     //   2. Phase-2 EEQ charges (CNF term in RHS of linear system)
     // Phase-1 charges (topo%qa) remain fixed (topology-dependent only).
 
-    // Claude Generated (Mar 2026, Phase 2): Timing infrastructure for sequential sections
+    // Claude Generated (Mar 2026): Timing infrastructure for sequential sections
     const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
-    double t_cn = 0, t_dcn = 0, t_dc6dcn = 0, t_eeq = 0, t_threads = 0;
+    double t_cn = 0, t_threads = 0;
 
-    // Debug output for GPU crash diagnosis
+    // Phase A: CN + EEQ calculation (delegated to extracted helper)
     {
         auto t0 = std::chrono::high_resolution_clock::now();
-
-        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-        Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
-
+        prepareCNAndEEQ(gradient);
         if (do_timing) {
-            auto t1 = std::chrono::high_resolution_clock::now();
-            t_cn = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        }
-
-        // Distribute D3 CN to ForceField and workspace
-        if (m_forcefield) m_forcefield->distributeD3CN(cn);
-        if (m_workspace) {
-            m_workspace->setGeometry(m_geometry_bohr);
-            m_workspace->setD3CN(cn);
-        }
-#ifdef USE_CUDA
-        if (m_gpu_workspace) {
-            m_gpu_workspace->setGeometry(m_geometry_bohr);
-            m_gpu_workspace->setD3CN(cn);
-        }
-#endif
-
-        // Prepare EEQ topology input (needed for both paths)
-        EEQSolver::TopologyInput eeq_topo;
-        const TopologyInfo* topo_ptr = nullptr;
-        bool do_eeq = (m_eeq_solver && !m_skip_eeq_recalc);
-        if (do_eeq) {
-            topo_ptr = &getCachedTopology();
-            eeq_topo.neighbor_lists = topo_ptr->neighbor_lists;
-            eeq_topo.nfrag = topo_ptr->nfrag;
-            eeq_topo.fraglist = topo_ptr->fraglist;
-            eeq_topo.qfrag = topo_ptr->qfrag;
-            eeq_topo.covalent_radii.resize(m_atomcount);
-            for (int i = 0; i < m_atomcount; ++i) {
-                int z = m_atoms[i];
-                if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
-                    eeq_topo.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
-                } else {
-                    eeq_topo.covalent_radii[i] = 1.0;
-                }
-            }
-        }
-
-        if (gradient) {
-            Vector cnf(m_atoms.size());
-            for (size_t i = 0; i < m_atoms.size(); ++i) {
-                int z = m_atoms[i];
-                cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
-                            ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
-            }
-
-            int total_threads = m_parameters.value("threads", 1);
-            auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
-            if (pool) pool->setActiveThreadCount(total_threads);
-
-            std::vector<SpMatrix> dcn;
-            Vector new_charges;
-
-            auto t_phase_a = std::chrono::high_resolution_clock::now();
-
-            // Sequential, but each function uses ALL T pool workers internally
-            dcn = calculateCoordinationNumberDerivatives(cn, 1600.0, pool, total_threads);
-
-            if (m_d4_generator) {
-                m_d4_generator->updateCNValuesForGradient(cn_vec, pool, total_threads);
-            }
-
-            if (do_eeq) {
-                new_charges = m_eeq_solver->calculateFinalCharges(
-                    m_atoms, m_geometry_bohr, m_charge,
-                    topo_ptr->topology_charges, cn,
-                    topo_ptr->hybridization, eeq_topo,
-                    true, topo_ptr->alpeeq, pool, total_threads);
-            }
-
-            if (do_timing) {
-                auto t_now = std::chrono::high_resolution_clock::now();
-                t_dcn = std::chrono::duration<double, std::milli>(t_now - t_phase_a).count();
-                t_dc6dcn = 0;
-                t_eeq = 0;
-            }
-
-            // Distribute results to ForceField
-            if (m_forcefield) {
-                m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
-                if (m_d4_generator) {
-                    m_forcefield->setDispersionDC6DCNPtr(&m_d4_generator->getDC6DCN());
-                }
-            }
-
-            // Distribute results to workspace
-            if (m_workspace) {
-                m_workspace->setCNDerivatives(cn, cnf, dcn);
-                if (m_d4_generator) {
-                    m_workspace->setDC6DCNPtr(&m_d4_generator->getDC6DCN());
-                }
-            }
-#ifdef USE_CUDA
-            if (m_gpu_workspace) {
-                m_gpu_workspace->setCNDerivatives(cn, cnf, dcn);
-                if (m_d4_generator) {
-                    m_gpu_workspace->setDC6DCNPtr(&m_d4_generator->getDC6DCN());
-                }
-            }
-#endif
-
-            if (do_eeq && new_charges.size() == m_atomcount) {
-                if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
-                if (m_workspace) m_workspace->setEEQCharges(new_charges);
-#ifdef USE_CUDA
-                if (m_gpu_workspace) m_gpu_workspace->setEEQCharges(new_charges);
-#endif
-                m_charges = new_charges;
-            }
-
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("Phase A complete: dcn + dc6dcn + EEQ ({} pool workers)", total_threads));
-            }
-        } else {
-            // Energy-only: CN distribution + sequential EEQ
-            if (m_forcefield) m_forcefield->distributeCNOnly(cn);
-
-            auto t_eeq_start = std::chrono::high_resolution_clock::now();
-            if (do_eeq) {
-                Vector new_charges = m_eeq_solver->calculateFinalCharges(
-                    m_atoms, m_geometry_bohr, m_charge,
-                    topo_ptr->topology_charges, cn,
-                    topo_ptr->hybridization, eeq_topo,
-                    true, topo_ptr->alpeeq);
-                if (new_charges.size() == m_atomcount) {
-                    if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
-                    if (m_workspace) m_workspace->setEEQCharges(new_charges);
-#ifdef USE_CUDA
-                    if (m_gpu_workspace) m_gpu_workspace->setEEQCharges(new_charges);
-#endif
-                    m_charges = new_charges;
-                }
-            }
-            if (do_timing) {
-                t_eeq = std::chrono::duration<double, std::milli>(
-                    std::chrono::high_resolution_clock::now() - t_eeq_start).count();
-            }
-        }
-        if (m_skip_eeq_recalc && CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info("Phase-2 EEQ recalculation SKIPPED (charge injection mode)");
+            t_cn = std::chrono::duration<double, std::milli>(
+                std::chrono::high_resolution_clock::now() - t0).count();
         }
     }
 
-    // Claude Generated (Feb 15, 2026): Dynamic HB/XB update for MD simulations
-    // Reference: Fortran gfnff_engrad.F90:246-260, gfnff_ini2.f90:700-768
-    //
-    // During MD simulations, hydrogen bonds and halogen bonds can form or break
-    // as molecular geometry changes. Fortran GFN-FF re-evaluates these lists when
-    // the per-atom RMSD from the reference geometry exceeds 0.3 Bohr.
-    //
-    // This ensures HB/XB lists remain consistent with current geometry during MD.
-    if (shouldUpdateHBXB(m_geometry_bohr)) {
-        // Store old counts for verbose output
-        int old_hb_count = m_hb_reference ? m_hb_reference->nhb_count : 0;
-        int old_xb_count = m_hb_reference ? m_hb_reference->nxb_count : 0;
-        int old_disp_count = m_forcefield ? m_forcefield->getDispersionPairCount()
-                           : (m_workspace ? m_workspace->dispersionPairCount() : 0);
-
-        // Get current topology with updated geometry
-        const TopologyInfo& topo = getCachedTopology();
-
-        // Re-detect HB/XB pairs with Phase-1 charges (topology_charges)
-        auto new_hbonds_native = detectHydrogenBondsNative(topo.topology_charges);
-        auto new_xbonds_native = detectHalogenBondsNative(topo.topology_charges);
-
-        // Update ForceField parameters (JSON path for legacy ForceFieldThread)
-        if (m_forcefield) {
-            json hb_json = json::array();
-            for (const auto& hb : new_hbonds_native) {
-                json j;
-                j["type"] = "hydrogen_bond"; j["case_type"] = hb.case_type;
-                j["i"] = hb.i; j["j"] = hb.j; j["k"] = hb.k;
-                j["basicity_A"] = hb.basicity_A; j["basicity_B"] = hb.basicity_B;
-                j["acidity_A"] = hb.acidity_A; j["acidity_B"] = hb.acidity_B;
-                j["q_H"] = hb.q_H; j["q_A"] = hb.q_A; j["q_B"] = hb.q_B;
-                j["r_cut"] = hb.r_cut;
-                j["neighbors_A"] = hb.neighbors_A; j["neighbors_B"] = hb.neighbors_B;
-                if (hb.case_type == 3) {
-                    j["acceptor_parent_index"] = hb.acceptor_parent_index;
-                    j["neighbors_C"] = hb.neighbors_C;
-                }
-                hb_json.push_back(j);
-            }
-            json xb_json = json::array();
-            for (const auto& xb : new_xbonds_native) {
-                json j;
-                j["type"] = "halogen_bond";
-                j["i"] = xb.i; j["j"] = xb.j; j["k"] = xb.k;
-                j["basicity_B"] = xb.basicity_B; j["acidity_X"] = xb.acidity_X;
-                j["q_X"] = xb.q_X; j["q_B"] = xb.q_B; j["r_cut"] = xb.r_cut;
-                xb_json.push_back(j);
-            }
-            m_forcefield->updateGFNFFHBonds(hb_json);
-            m_forcefield->updateGFNFFXBonds(xb_json);
-        }
-
-        // Update workspace HB/XB with native structs
-        if (m_workspace) {
-            m_workspace->updateHBonds(new_hbonds_native);
-            m_workspace->updateXBonds(new_xbonds_native);
-        }
-
-        // Update reference geometry for next check
-        m_hb_reference = HBReferenceGeometry{};
-        m_hb_reference->reference_positions = m_geometry_bohr;
-        m_hb_reference->nhb_count = static_cast<int>(new_hbonds_native.size());
-        m_hb_reference->nxb_count = static_cast<int>(new_xbonds_native.size());
-        m_hb_reference->needs_update = false;
-
-        // Verbose output at level 2
-        if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info("GFNFF: RMSD-based re-evaluation triggered");
-            CurcumaLogger::param("HB pairs", fmt::format("{} → {}", old_hb_count, m_hb_reference->nhb_count));
-            CurcumaLogger::param("XB pairs", fmt::format("{} → {}", old_xb_count, m_hb_reference->nxb_count));
-            CurcumaLogger::param("Dispersion pairs", std::to_string(old_disp_count) + " (static)");
-        }
-    }
+    // Dynamic HB/XB re-detection (delegated to extracted helper)
+    updateHBXBIfNeeded(nullptr);
 
     // Claude Generated (Feb 21, 2026): Enable per-component gradient storage for invariance diagnosis
     if (gradient && CurcumaLogger::get_verbosity() >= 2) {
@@ -842,11 +819,6 @@ double GFNFF::Calculation(bool gradient)
     auto t_ff_start = std::chrono::high_resolution_clock::now();
     double energy_hartree;
 
-#ifdef USE_CUDA
-    if (m_gpu_workspace) {
-        energy_hartree = m_gpu_workspace->calculate(gradient);
-    } else
-#endif
     if (m_use_workspace && m_workspace) {
         energy_hartree = m_workspace->calculate(gradient);
     } else {
@@ -894,11 +866,6 @@ double GFNFF::Calculation(bool gradient)
         // Previous division by BOHR_TO_ANGSTROM was also incorrect and reduced gradients
         // Correct approach: Use gradient directly as returned by ForceField
         Matrix grad_hartree;
-#ifdef USE_CUDA
-        if (m_gpu_workspace) {
-            grad_hartree = m_gpu_workspace->gradient();
-        } else
-#endif
         if (m_use_workspace && m_workspace) {
             grad_hartree = m_workspace->gradient();
         } else {
@@ -1026,12 +993,10 @@ double GFNFF::Calculation(bool gradient)
     // Claude Generated (Mar 2026, Phase 2): Sequential section timing breakdown
     if (do_timing) {
         double t_total = std::chrono::duration<double, std::milli>(calc_end - calc_start).count();
-        double t_seq = t_cn + t_dcn + t_dc6dcn + t_eeq;
         CurcumaLogger::info(fmt::format(
-            "GFN-FF Timing: CN={:.1f}ms EEQ={:.1f}ms dCN={:.1f}ms dC6dCN={:.1f}ms "
-            "Threads={:.1f}ms Total={:.1f}ms SeqFrac={:.0f}%",
-            t_cn, t_eeq, t_dcn, t_dc6dcn, t_threads, t_total,
-            t_total > 0 ? 100.0 * t_seq / t_total : 0.0));
+            "GFN-FF Timing: CN+EEQ={:.1f}ms Threads={:.1f}ms Total={:.1f}ms SeqFrac={:.0f}%",
+            t_cn, t_threads, t_total,
+            t_total > 0 ? 100.0 * t_cn / t_total : 0.0));
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -1744,10 +1709,8 @@ bool GFNFF::initializeForceField()
         m_workspace = std::make_unique<FFWorkspace>(num_threads);
         m_workspace->setAtomTypes(m_atoms);
 
-#ifdef USE_CUDA
-        // Save a heap copy for the GPU wrapper BEFORE moving into workspace
-        m_pending_gpu_params = std::make_unique<GFNFFParameterSet>(ff_params);
-#endif
+        // Save a heap copy for external consumers BEFORE moving into workspace
+        m_cached_parameter_set = std::make_unique<GFNFFParameterSet>(ff_params);
 
         // Copy (not regenerate) parameters for the workspace
         GFNFFParameterSet ws_params = ff_params;

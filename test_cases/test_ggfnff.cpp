@@ -22,6 +22,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/global.h"
 #include "src/core/energy_calculators/ff_methods/gfnff.h"
+#include "src/core/energy_calculators/ff_methods/ff_workspace.h"
 #include "src/core/energy_calculators/ff_methods/cuda/ff_workspace_gpu.h"
 #include "src/tools/formats.h"
 #include "json.hpp"
@@ -117,7 +118,7 @@ TestResult runComparisonTest(const std::string& mol_name, const Mol& mol)
     section("GPU ggfnff: " + mol_name);
 
     // =========================================================================
-    // GPU path: generate parameter set from CPU GFNFF, upload to GPU workspace
+    // GPU path: orchestrate GPU + CPU-residual (same as GGFNFFComputationalMethod)
     // =========================================================================
     std::cout << "[DEBUG] Step 4: Creating GPU GFNFF instance\n" << std::flush;
     json gpu_config;
@@ -130,32 +131,35 @@ TestResult runComparisonTest(const std::string& mol_name, const Mol& mol)
         return result;
     }
 
-    std::cout << "[DEBUG] Step 6: Consuming pending GPU params\n" << std::flush;
-    std::unique_ptr<GFNFFParameterSet> pending = gpu_gfnff.consumePendingGPUParams();
+    std::cout << "[DEBUG] Step 6: Consuming cached parameter set\n" << std::flush;
+    std::unique_ptr<GFNFFParameterSet> pending = gpu_gfnff.consumeCachedParameterSet();
     if (!pending) {
-        std::cout << "  [FAIL] No pending GPU params after InitialiseMolecule\n";
+        std::cout << "  [FAIL] No cached params after InitialiseMolecule\n";
         ++g_failed;
         return result;
     }
-    const GFNFFParameterSet& params = *pending;
     const int natoms = mol.m_number_atoms;
-
-    std::cout << "[DEBUG]   Parameter counts: bonds=" << params.bonds.size()
-              << " angles=" << params.angles.size()
-              << " dihedrals=" << params.dihedrals.size()
-              << " inversions=" << params.inversions.size() << "\n" << std::flush;
-    std::cout << "[DEBUG]   Non-bonded: disp=" << params.dispersions.size()
-              << " coul=" << params.coulombs.size()
-              << " brep=" << params.bonded_repulsions.size()
-              << " nbrep=" << params.nonbonded_repulsions.size() << "\n" << std::flush;
-
-    // Build atom type vector
     std::vector<int> atom_types = mol.m_atoms;
 
+    std::cout << "[DEBUG]   Parameter counts: bonds=" << pending->bonds.size()
+              << " angles=" << pending->angles.size()
+              << " dihedrals=" << pending->dihedrals.size()
+              << " inversions=" << pending->inversions.size() << "\n" << std::flush;
+    std::cout << "[DEBUG]   Non-bonded: disp=" << pending->dispersions.size()
+              << " coul=" << pending->coulombs.size()
+              << " brep=" << pending->bonded_repulsions.size()
+              << " nbrep=" << pending->nonbonded_repulsions.size() << "\n" << std::flush;
+    std::cout << "[DEBUG]   CPU-residual: HB=" << pending->hbonds.size()
+              << " XB=" << pending->xbonds.size()
+              << " ATM=" << pending->atm_triples.size()
+              << " BATM=" << pending->batm_triples.size()
+              << " sTors=" << pending->storsions.size() << "\n" << std::flush;
+
+    // Create GPU workspace
     std::cout << "[DEBUG] Step 7: Creating FFWorkspaceGPU (natoms=" << natoms << ")\n" << std::flush;
     std::unique_ptr<FFWorkspaceGPU> gpu_ws;
     try {
-        gpu_ws = std::make_unique<FFWorkspaceGPU>(params, natoms, atom_types);
+        gpu_ws = std::make_unique<FFWorkspaceGPU>(*pending, natoms, atom_types);
         std::cout << "[DEBUG]   GPU workspace created: disp=" << gpu_ws->dispersionCount()
                   << " bonds=" << gpu_ws->bondCount() << "\n" << std::flush;
     } catch (const std::exception& e) {
@@ -164,14 +168,49 @@ TestResult runComparisonTest(const std::string& mol_name, const Mol& mol)
         return result;
     }
 
-    // Inject GPU workspace and run
-    std::cout << "[DEBUG] Step 8: Setting GPU workspace\n" << std::flush;
-    gpu_gfnff.setGPUWorkspace(gpu_ws.get());
+    // Create CPU residual workspace (HB/XB/ATM/BATM/sTors)
+    std::cout << "[DEBUG] Step 7b: Creating CPU residual workspace\n" << std::flush;
+    GFNFFParameterSet residual_params;
+    residual_params.hbonds = pending->hbonds;
+    residual_params.xbonds = pending->xbonds;
+    residual_params.atm_triples = pending->atm_triples;
+    residual_params.batm_triples = pending->batm_triples;
+    residual_params.storsions = pending->storsions;
+    residual_params.bond_hb_data = pending->bond_hb_data;
+    residual_params.eeq_charges = pending->eeq_charges;
+    residual_params.topology_charges = pending->topology_charges;
+    residual_params.method_type = pending->method_type;
 
-    std::cout << "[DEBUG] Step 9: GPU Calculation\n" << std::flush;
-    const double E_gpu = gpu_gfnff.Calculation(/*gradient=*/true);
-    std::cout << "[DEBUG] Step 10: Getting GPU gradient\n" << std::flush;
-    const Matrix G_gpu = gpu_gfnff.Gradient();
+    auto cpu_residual = std::make_unique<FFWorkspace>(1);
+    cpu_residual->setAtomTypes(atom_types);
+    cpu_residual->setInteractionLists(std::move(residual_params));
+    cpu_residual->setTopologyCharges(pending->topology_charges);
+    cpu_residual->partition();
+
+    gpu_ws->setCPUResidualWorkspace(cpu_residual.get());
+
+    // Leak params (same workaround as GGFNFFComputationalMethod)
+    GFNFFParameterSet* leaked = pending.release();
+    (void)leaked;
+
+    // Orchestrate calculation (same flow as GGFNFFComputationalMethod::calculateEnergy)
+    std::cout << "[DEBUG] Step 8: prepareCNAndEEQ\n" << std::flush;
+    gpu_gfnff.prepareCNAndEEQ(/*gradient=*/true);
+
+    std::cout << "[DEBUG] Step 9: Distributing state to GPU workspace\n" << std::flush;
+    gpu_ws->setGeometry(gpu_gfnff.getGeometryBohr());
+    gpu_ws->setD3CN(gpu_gfnff.getLastCN());
+    gpu_ws->setEEQCharges(gpu_gfnff.getLastCharges());
+    gpu_ws->setCNDerivatives(gpu_gfnff.getLastCN(), gpu_gfnff.getLastCNF(), gpu_gfnff.getLastCNDerivatives());
+    if (gpu_gfnff.getDC6DCNPtr()) {
+        gpu_ws->setDC6DCNPtr(gpu_gfnff.getDC6DCNPtr());
+    }
+
+    gpu_gfnff.updateHBXBIfNeeded(cpu_residual.get());
+
+    std::cout << "[DEBUG] Step 10: GPU + CPU-residual calculation\n" << std::flush;
+    const double E_gpu = gpu_ws->calculate(/*gradient=*/true);
+    const Matrix G_gpu = gpu_ws->gradient();
 
     std::cout << "  GPU energy: " << std::setprecision(12) << E_gpu << " Eh\n";
     std::cout << "  GPU gradient norm: " << G_gpu.norm() << " Eh/Bohr\n";
