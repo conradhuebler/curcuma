@@ -19,6 +19,7 @@
 #include "../ff_methods/cuda/ff_workspace_gpu.h"
 
 #include <memory>
+#include <unordered_map>
 
 /**
  * @brief GPU-accelerated GFN-FF via CUDA (method name: "ggfnff")
@@ -55,6 +56,7 @@ public:
     bool setMolecule(const Mol& mol) override;
     double calculateEnergy(bool gradient = false) override;
     Matrix getGradient() const override;
+    void copyGradientTo(Matrix& target) const override;
     Vector getCharges() const override;
     Vector getBondOrders() const override;
     Position getDipole() const override;
@@ -103,6 +105,12 @@ private:
     bool             m_has_error     = false;
     std::string      m_error_message;
     double           m_last_energy   = 0.0;
+    Matrix           m_cached_gradient; ///< Cached gradient (copied from GPU workspace after calculate)
+
+    // Pre-allocated buffers for per-step HB coordination number computation.
+    // Avoids heap allocations on CUDA-corrupted heap during MD/Opt iterations.
+    std::vector<double> m_hb_cn_values;                ///< [n_bonds] HB CN per bond
+    std::unordered_map<int, double> m_hb_cn_map;       ///< H-atom → CN (cleared+reused each step)
 };
 
 #endif // USE_CUDA

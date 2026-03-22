@@ -518,6 +518,11 @@ public:
      */
     void updateHBXBIfNeeded(FFWorkspace* ws);
 
+    /// True if updateHBXBIfNeeded() ran and changed lists since last call
+    bool consumeHBXBUpdate() { bool r = m_hbxb_updated; m_hbxb_updated = false; return r; }
+    const std::vector<GFNFFHydrogenBond>& getLastHBonds() const { return m_last_hbonds; }
+    const std::vector<GFNFFHalogenBond>& getLastXBonds() const { return m_last_xbonds; }
+
     // Getters for CN/EEQ results (valid after prepareCNAndEEQ)
     const Vector& getLastCN() const { return m_last_cn; }
     const Vector& getLastCharges() const { return m_charges; }
@@ -1967,6 +1972,11 @@ private:
     // Claude Generated (March 2026): Heap-stored parameter copy for external consumers.
     // Set in initializeForceField(), consumed once via consumeCachedParameterSet().
     std::unique_ptr<GFNFFParameterSet> m_cached_parameter_set;
+
+    // Claude Generated (March 2026): Last re-detected HB/XB lists from updateHBXBIfNeeded()
+    std::vector<GFNFFHydrogenBond> m_last_hbonds;
+    std::vector<GFNFFHalogenBond> m_last_xbonds;
+    bool m_hbxb_updated = false;  ///< True if updateHBXBIfNeeded() ran since last check
 
     // Claude Generated (March 2026): State from last prepareCNAndEEQ() call
     Vector m_last_cn;    ///< Coordination numbers

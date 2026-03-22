@@ -727,11 +727,16 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
         extra_ws->updateXBonds(new_xbonds_native);
     }
 
+    // Store re-detected lists for external consumers (e.g. GPU SoA re-upload)
+    m_last_hbonds = std::move(new_hbonds_native);
+    m_last_xbonds = std::move(new_xbonds_native);
+    m_hbxb_updated = true;
+
     // Update reference geometry for next check
     m_hb_reference = HBReferenceGeometry{};
     m_hb_reference->reference_positions = m_geometry_bohr;
-    m_hb_reference->nhb_count = static_cast<int>(new_hbonds_native.size());
-    m_hb_reference->nxb_count = static_cast<int>(new_xbonds_native.size());
+    m_hb_reference->nhb_count = static_cast<int>(m_last_hbonds.size());
+    m_hb_reference->nxb_count = static_cast<int>(m_last_xbonds.size());
     m_hb_reference->needs_update = false;
 
     // Verbose output at level 2

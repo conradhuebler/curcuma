@@ -14,6 +14,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <unordered_map>
 
 // ---------------------------------------------------------------------------
@@ -156,6 +157,14 @@ bool GGFNFFComputationalMethod::initGPUWorkspace()
         // Cost: ~100 KB one-time.  TODO: investigate CUDA root cause.
         m_gpu_params_leaked = pending.release();
 
+        // Pre-allocate cached gradient BEFORE any CUDA operations that may corrupt heap
+        m_cached_gradient = Matrix::Zero(natoms, 3);
+
+        // Pre-allocate HB-CN staging buffers (reused every step without heap allocs)
+        if (m_gpu_params_leaked) {
+            m_hb_cn_values.resize(m_gpu_params_leaked->bonds.size(), 0.0);
+        }
+
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::success(fmt::format(
                 "ggfnff: GPU workspace ready ({} atoms, {} bonds, {} disp pairs, "
@@ -226,7 +235,8 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
         constexpr double rcov_scal = 1.78;
         constexpr double thr = 900.0;
 
-        std::unordered_map<int, double> hb_cn_map;
+        // Reuse pre-allocated map and vector (no heap allocs on corrupted heap)
+        m_hb_cn_map.clear();
         for (const auto& entry : m_gpu_params_leaked->bond_hb_data) {
             int H = entry.H;
             int ati = m_atom_types[H];
@@ -240,24 +250,24 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
                 double r = std::sqrt(r2);
                 double rcovij = rcov_scal * rcov_43 * (rcov_base[ati - 1] + rcov_base[atj - 1]);
                 double arg = -kn * (r - rcovij) / rcovij;
-                hb_cn_map[H] += 0.5 * (1.0 + std::erf(arg));
+                m_hb_cn_map[H] += 0.5 * (1.0 + std::erf(arg));
             }
         }
 
         const auto& bonds = m_gpu_params_leaked->bonds;
         const int nb = static_cast<int>(bonds.size());
-        std::vector<double> hb_cn_values(nb, 0.0);
+        std::fill(m_hb_cn_values.begin(), m_hb_cn_values.end(), 0.0);
         for (int b = 0; b < nb; ++b) {
             if (bonds[b].nr_hb < 1) continue;
             int H = -1;
             if (m_atom_types[bonds[b].i] == 1) H = bonds[b].i;
             else if (m_atom_types[bonds[b].j] == 1) H = bonds[b].j;
             if (H >= 0) {
-                auto it = hb_cn_map.find(H);
-                hb_cn_values[b] = (it != hb_cn_map.end()) ? it->second : 0.0;
+                auto it = m_hb_cn_map.find(H);
+                m_hb_cn_values[b] = (it != m_hb_cn_map.end()) ? it->second : 0.0;
             }
         }
-        m_gpu_workspace->updateBondHBCN(hb_cn_values);
+        m_gpu_workspace->updateBondHBCN(m_hb_cn_values);
     }
 
     auto t2 = std::chrono::high_resolution_clock::now();
@@ -265,6 +275,12 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
     // === Step 3: Dynamic HB/XB re-detection ===
     // Updates m_cpu_residual (and internal GFNFF m_workspace/m_forcefield)
     m_gfnff->updateHBXBIfNeeded(m_cpu_residual.get());
+
+    // If HB/XB lists changed, re-upload SoA to GPU workspace
+    if (m_gfnff->consumeHBXBUpdate()) {
+        m_gpu_workspace->updateHBonds(m_gfnff->getLastHBonds(), m_atom_types);
+        m_gpu_workspace->updateXBonds(m_gfnff->getLastXBonds(), m_atom_types);
+    }
     auto t3 = std::chrono::high_resolution_clock::now();
 
     // === Step 4: Calculate — GPU terms + CPU residual (HB/XB/ATM/BATM) ===
@@ -300,6 +316,18 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
         CurcumaLogger::param("  ATM", fmt::format("{:.10f} Eh", comp.atm));
         CurcumaLogger::param("  BATM", fmt::format("{:.10f} Eh", comp.batm));
         CurcumaLogger::param("  sTors", fmt::format("{:.10f} Eh", comp.stors));
+
+    }
+
+    // Cache gradient immediately — use raw memcpy into pre-allocated buffer
+    // to avoid Eigen heap allocation (CUDA corrupts adjacent heap metadata)
+    if (gradient && m_gpu_workspace) {
+        const Matrix& gpu_grad = m_gpu_workspace->gradient();
+        if (gpu_grad.rows() == m_cached_gradient.rows() &&
+            gpu_grad.cols() == m_cached_gradient.cols()) {
+            std::memcpy(m_cached_gradient.data(), gpu_grad.data(),
+                        gpu_grad.rows() * gpu_grad.cols() * sizeof(double));
+        }
     }
 
     return m_last_energy;
@@ -317,11 +345,22 @@ bool GGFNFFComputationalMethod::updateGeometry(const Matrix& geometry)
 
 Matrix GGFNFFComputationalMethod::getGradient() const
 {
-    // Gradient comes from GPU workspace (includes CPU residual contribution)
-    if (m_gpu_workspace) {
-        return m_gpu_workspace->gradient();
+    // Return cached gradient (copied immediately after calculate() to avoid
+    // heap corruption issues when copying from GPU workspace later)
+    return m_cached_gradient;
+}
+
+void GGFNFFComputationalMethod::copyGradientTo(Matrix& target) const
+{
+    // Claude Generated (March 2026): Direct memcpy into pre-allocated target.
+    // Avoids temporary Matrix creation (heap alloc) that crashes on CUDA-corrupted heap.
+    if (m_cached_gradient.size() > 0 && target.rows() == m_cached_gradient.rows()
+        && target.cols() == m_cached_gradient.cols()) {
+        std::memcpy(target.data(), m_cached_gradient.data(),
+                     m_cached_gradient.size() * sizeof(double));
+    } else {
+        target = m_cached_gradient;
     }
-    return Matrix();
 }
 
 Vector GGFNFFComputationalMethod::getCharges() const

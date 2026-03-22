@@ -25,6 +25,11 @@ struct Inversion;
 struct GFNFFDispersion;
 struct GFNFFRepulsion;
 struct GFNFFCoulomb;
+struct GFNFFSTorsion;
+struct ATMTriple;
+struct GFNFFBatmTriple;
+struct GFNFFHalogenBond;
+struct GFNFFHydrogenBond;
 
 // ============================================================================
 // CudaBuffer<T>: RAII wrapper around cudaMalloc / cudaFree
@@ -199,6 +204,99 @@ struct InversionSoA {
     int n = 0;
 
     void upload(const std::vector<Inversion>& v,
+                const std::vector<int>& atom_types,
+                cudaStream_t stream = nullptr);
+};
+
+// ============================================================================
+// STorsionSoA: Triple bond torsions (simple cos(2φ))
+// Claude Generated (March 2026): GPU port of calcSTorsions
+// ============================================================================
+struct STorsionSoA {
+    CudaBuffer<int>    idx_i, idx_j, idx_k, idx_l;
+    CudaBuffer<double> erefhalf;
+    int n = 0;
+
+    void upload(const std::vector<GFNFFSTorsion>& v, cudaStream_t stream = nullptr);
+};
+
+// ============================================================================
+// BATMSoA: Bonded ATM 3-body with topology charge scaling
+// Claude Generated (March 2026): GPU port of calcBATM
+// ============================================================================
+struct BATMSoA {
+    CudaBuffer<int>    idx_i, idx_j, idx_k;
+    CudaBuffer<double> zb3atm_i, zb3atm_j, zb3atm_k;
+    int n = 0;
+
+    void upload(const std::vector<GFNFFBatmTriple>& v, cudaStream_t stream = nullptr);
+};
+
+// ============================================================================
+// ATMSoA: Axilrod-Teller-Muto 3-body dispersion
+// Claude Generated (March 2026): GPU port of calcATM + calcATMGradient
+// ============================================================================
+struct ATMSoA {
+    CudaBuffer<int>    idx_i, idx_j, idx_k;
+    CudaBuffer<int>    ati, atj, atk;  ///< Atomic numbers for rcov lookup
+    CudaBuffer<double> C6_ij, C6_ik, C6_jk;
+    CudaBuffer<double> s9, a1, a2, alp, triple_scale;
+    int n = 0;
+
+    void upload(const std::vector<ATMTriple>& v,
+                const std::vector<int>& atom_types,
+                cudaStream_t stream = nullptr);
+};
+
+// ============================================================================
+// XBondSoA: Halogen bonds (3-body A-X...B)
+// Claude Generated (March 2026): GPU port of calcHalogenBonds
+// ============================================================================
+struct XBondSoA {
+    CudaBuffer<int>    idx_i, idx_j, idx_k;   ///< A, X, B
+    CudaBuffer<int>    elem_A, elem_B;         ///< Atomic numbers for vdW radii
+    CudaBuffer<double> q_X, q_B, acidity_X;
+    CudaBuffer<double> r_cut;
+    int n = 0;
+
+    void upload(const std::vector<GFNFFHalogenBond>& v,
+                const std::vector<int>& atom_types,
+                cudaStream_t stream = nullptr);
+};
+
+// ============================================================================
+// HBondSoA: Hydrogen bonds (3-body A-H...B) with packed neighbor lists
+// Claude Generated (March 2026): GPU port of calcHydrogenBonds
+// Variable-length neighbors packed into flat arrays with per-HB offsets.
+// ============================================================================
+struct HBondSoA {
+    CudaBuffer<int>    idx_i, idx_j, idx_k;   ///< A, H, B
+    CudaBuffer<int>    elem_A, elem_B;         ///< Atomic numbers for vdW radii
+    CudaBuffer<double> q_H, q_A, q_B;
+    CudaBuffer<double> basicity_A, basicity_B;
+    CudaBuffer<double> acidity_A, acidity_B;
+    CudaBuffer<double> r_cut;
+    CudaBuffer<int>    case_type;
+
+    // Packed neighbor indices for case 2+ (neighbors_B)
+    CudaBuffer<int>    nb_B_offset, nb_B_count; ///< [n] offset and count into nb_B_flat
+    CudaBuffer<int>    nb_B_flat;               ///< Flat array of all neighbor_B indices
+
+    // Case 3: acceptor parent index
+    CudaBuffer<int>    acceptor_parent;         ///< [n] acceptor_parent_index (-1 if N/A)
+
+    // Case 3: packed neighbors_C for torsion calculation
+    CudaBuffer<int>    nb_C_offset, nb_C_count; ///< [n] offset and count into nb_C_flat
+    CudaBuffer<int>    nb_C_flat;               ///< Flat array of all neighbor_C indices
+
+    // Case 4: repz values for LP distance
+    CudaBuffer<double> repz_B;                  ///< [n] GFNFFParameters::repz[Z_B-1]
+
+    int n = 0;
+    int total_nb_B = 0;  ///< Total packed neighbor_B count
+    int total_nb_C = 0;  ///< Total packed neighbor_C count
+
+    void upload(const std::vector<GFNFFHydrogenBond>& v,
                 const std::vector<int>& atom_types,
                 cudaStream_t stream = nullptr);
 };

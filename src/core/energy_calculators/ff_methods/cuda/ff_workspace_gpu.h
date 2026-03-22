@@ -108,6 +108,14 @@ public:
     /// Update per-bond HB coordination numbers (for egbond_hb alpha modulation)
     void updateBondHBCN(const std::vector<double>& hb_cn_values);
 
+    /// Re-upload HBond SoA after dynamic re-detection (called after updateHBXBIfNeeded)
+    void updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
+                      const std::vector<int>& atom_types);
+
+    /// Re-upload XBond SoA after dynamic re-detection
+    void updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
+                      const std::vector<int>& atom_types);
+
     /**
      * @brief Provide Coulomb self-energy parameters (size N each).
      *
@@ -206,6 +214,10 @@ private:
     // DC6/DCN pointer for D4 CN gradient
     const Matrix* m_dc6dcn_ptr = nullptr;
 
+    // CPU-side dispersion pairs (for dEdcn chain-rule, not computed on GPU)
+    std::vector<GFNFFDispersion> m_dispersions_cpu;
+    Matrix m_geometry_cpu;  ///< Last geometry (Bohr) for CPU-side dispersion dEdcn
+
     // Term enable flags
     bool m_dispersion_enabled = true;
     bool m_hbond_enabled      = true;
@@ -214,6 +226,13 @@ private:
 
     // Optional CPU residual for H/X-bonds and three-body terms
     FFWorkspace* m_cpu_residual = nullptr;
+
+    // Pre-allocated staging buffers (avoid heap allocs on corrupted heap)
+    // Claude Generated (March 2026): CUDA operations corrupt C++ heap metadata.
+    // Repeated std::vector allocations in setGeometry/calculate cause segfaults
+    // during iterative MD/Opt. Pre-allocating these buffers once avoids the issue.
+    std::vector<double> m_h_coords;  ///< [3*N] staging buffer for geometry upload
+    std::vector<double> m_h_grad;    ///< [3*N] staging buffer for gradient download
 
     // Results
     Matrix             m_result_gradient;

@@ -325,6 +325,210 @@ void InversionSoA::upload(const std::vector<Inversion>& v,
     potential_type.upload(h_pt, stream);
 }
 
+// ---------------------------------------------------------------------------
+void STorsionSoA::upload(const std::vector<GFNFFSTorsion>& v, cudaStream_t stream)
+{
+    n = static_cast<int>(v.size());
+    if (n == 0) return;
+
+    std::vector<int>    h_i(n), h_j(n), h_k(n), h_l(n);
+    std::vector<double> h_eref(n);
+
+    for (int m = 0; m < n; ++m) {
+        h_i[m]    = v[m].i;
+        h_j[m]    = v[m].j;
+        h_k[m]    = v[m].k;
+        h_l[m]    = v[m].l;
+        h_eref[m] = v[m].erefhalf;
+    }
+
+    idx_i.upload(h_i, stream);  idx_j.upload(h_j, stream);
+    idx_k.upload(h_k, stream);  idx_l.upload(h_l, stream);
+    erefhalf.upload(h_eref, stream);
+}
+
+// ---------------------------------------------------------------------------
+void BATMSoA::upload(const std::vector<GFNFFBatmTriple>& v, cudaStream_t stream)
+{
+    n = static_cast<int>(v.size());
+    if (n == 0) return;
+
+    std::vector<int>    h_i(n), h_j(n), h_k(n);
+    std::vector<double> h_zi(n), h_zj(n), h_zk(n);
+
+    for (int m = 0; m < n; ++m) {
+        h_i[m]  = v[m].i;
+        h_j[m]  = v[m].j;
+        h_k[m]  = v[m].k;
+        h_zi[m] = v[m].zb3atm_i;
+        h_zj[m] = v[m].zb3atm_j;
+        h_zk[m] = v[m].zb3atm_k;
+    }
+
+    idx_i.upload(h_i, stream);  idx_j.upload(h_j, stream);  idx_k.upload(h_k, stream);
+    zb3atm_i.upload(h_zi, stream);
+    zb3atm_j.upload(h_zj, stream);
+    zb3atm_k.upload(h_zk, stream);
+}
+
+// ---------------------------------------------------------------------------
+void ATMSoA::upload(const std::vector<ATMTriple>& v,
+                     const std::vector<int>& atom_types,
+                     cudaStream_t stream)
+{
+    n = static_cast<int>(v.size());
+    if (n == 0) return;
+
+    const int nat = static_cast<int>(atom_types.size());
+    std::vector<int>    h_i(n), h_j(n), h_k(n);
+    std::vector<int>    h_ati(n), h_atj(n), h_atk(n);
+    std::vector<double> h_c6ij(n), h_c6ik(n), h_c6jk(n);
+    std::vector<double> h_s9(n), h_a1(n), h_a2(n), h_alp(n), h_tscale(n);
+
+    for (int m = 0; m < n; ++m) {
+        h_i[m]      = v[m].i;
+        h_j[m]      = v[m].j;
+        h_k[m]      = v[m].k;
+        h_ati[m]    = (v[m].i < nat) ? atom_types[v[m].i] : 0;
+        h_atj[m]    = (v[m].j < nat) ? atom_types[v[m].j] : 0;
+        h_atk[m]    = (v[m].k < nat) ? atom_types[v[m].k] : 0;
+        h_c6ij[m]   = v[m].C6_ij;
+        h_c6ik[m]   = v[m].C6_ik;
+        h_c6jk[m]   = v[m].C6_jk;
+        h_s9[m]     = v[m].s9;
+        h_a1[m]     = v[m].a1;
+        h_a2[m]     = v[m].a2;
+        h_alp[m]    = v[m].alp;
+        h_tscale[m] = v[m].triple_scale;
+    }
+
+    idx_i.upload(h_i, stream);  idx_j.upload(h_j, stream);  idx_k.upload(h_k, stream);
+    ati.upload(h_ati, stream);  atj.upload(h_atj, stream);  atk.upload(h_atk, stream);
+    C6_ij.upload(h_c6ij, stream);
+    C6_ik.upload(h_c6ik, stream);
+    C6_jk.upload(h_c6jk, stream);
+    s9.upload(h_s9, stream);
+    a1.upload(h_a1, stream);
+    a2.upload(h_a2, stream);
+    alp.upload(h_alp, stream);
+    triple_scale.upload(h_tscale, stream);
+}
+
+// ---------------------------------------------------------------------------
+void XBondSoA::upload(const std::vector<GFNFFHalogenBond>& v,
+                       const std::vector<int>& atom_types,
+                       cudaStream_t stream)
+{
+    n = static_cast<int>(v.size());
+    if (n == 0) return;
+
+    const int nat = static_cast<int>(atom_types.size());
+    std::vector<int>    h_i(n), h_j(n), h_k(n);
+    std::vector<int>    h_eA(n), h_eB(n);
+    std::vector<double> h_qX(n), h_qB(n), h_aX(n), h_rcut(n);
+
+    for (int m = 0; m < n; ++m) {
+        h_i[m]    = v[m].i;   // donor A
+        h_j[m]    = v[m].j;   // halogen X
+        h_k[m]    = v[m].k;   // acceptor B
+        h_eA[m]   = (v[m].i < nat) ? atom_types[v[m].i] : 0;
+        h_eB[m]   = (v[m].k < nat) ? atom_types[v[m].k] : 0;
+        h_qX[m]   = v[m].q_X;
+        h_qB[m]   = v[m].q_B;
+        h_aX[m]   = v[m].acidity_X;
+        h_rcut[m] = v[m].r_cut;
+    }
+
+    idx_i.upload(h_i, stream);  idx_j.upload(h_j, stream);  idx_k.upload(h_k, stream);
+    elem_A.upload(h_eA, stream);  elem_B.upload(h_eB, stream);
+    q_X.upload(h_qX, stream);
+    q_B.upload(h_qB, stream);
+    acidity_X.upload(h_aX, stream);
+    r_cut.upload(h_rcut, stream);
+}
+
+// ---------------------------------------------------------------------------
+void HBondSoA::upload(const std::vector<GFNFFHydrogenBond>& v,
+                       const std::vector<int>& atom_types,
+                       cudaStream_t stream)
+{
+    n = static_cast<int>(v.size());
+    if (n == 0) return;
+
+    const int nat = static_cast<int>(atom_types.size());
+    std::vector<int>    h_i(n), h_j(n), h_k(n);
+    std::vector<int>    h_eA(n), h_eB(n), h_case(n);
+    std::vector<double> h_qH(n), h_qA(n), h_qB(n);
+    std::vector<double> h_basA(n), h_basB(n), h_aciA(n), h_aciB(n);
+    std::vector<double> h_rcut(n);
+    std::vector<int>    h_nbB_offset(n), h_nbB_count(n);
+    std::vector<int>    h_acc_parent(n);
+    std::vector<int>    h_nbC_offset(n), h_nbC_count(n);
+    std::vector<double> h_repz(n);
+
+    // First pass: count total neighbors
+    int total_B = 0, total_C = 0;
+    for (int m = 0; m < n; ++m) {
+        total_B += static_cast<int>(v[m].neighbors_B.size());
+        total_C += static_cast<int>(v[m].neighbors_C.size());
+    }
+
+    std::vector<int> h_nbB_flat(total_B);
+    std::vector<int> h_nbC_flat(total_C);
+    int offB = 0, offC = 0;
+
+    for (int m = 0; m < n; ++m) {
+        h_i[m]     = v[m].i;   // donor A
+        h_j[m]     = v[m].j;   // hydrogen H
+        h_k[m]     = v[m].k;   // acceptor B
+        h_eA[m]    = (v[m].i < nat) ? atom_types[v[m].i] : 0;
+        h_eB[m]    = (v[m].k < nat) ? atom_types[v[m].k] : 0;
+        h_qH[m]    = v[m].q_H;
+        h_qA[m]    = v[m].q_A;
+        h_qB[m]    = v[m].q_B;
+        h_basA[m]  = v[m].basicity_A;
+        h_basB[m]  = v[m].basicity_B;
+        h_aciA[m]  = v[m].acidity_A;
+        h_aciB[m]  = v[m].acidity_B;
+        h_rcut[m]  = v[m].r_cut;
+        h_case[m]  = v[m].case_type;
+        h_acc_parent[m] = v[m].acceptor_parent_index;
+
+        // repz_B for case 4
+        int zB = (v[m].k < nat) ? atom_types[v[m].k] : 0;
+        h_repz[m] = (zB >= 1 && zB <= 86) ? GFNFFParameters::repz[zB - 1] : 1.0;
+
+        // Pack neighbors_B
+        h_nbB_offset[m] = offB;
+        h_nbB_count[m]  = static_cast<int>(v[m].neighbors_B.size());
+        for (int nb : v[m].neighbors_B) h_nbB_flat[offB++] = nb;
+
+        // Pack neighbors_C
+        h_nbC_offset[m] = offC;
+        h_nbC_count[m]  = static_cast<int>(v[m].neighbors_C.size());
+        for (int nb : v[m].neighbors_C) h_nbC_flat[offC++] = nb;
+    }
+
+    total_nb_B = total_B;
+    total_nb_C = total_C;
+
+    idx_i.upload(h_i, stream);  idx_j.upload(h_j, stream);  idx_k.upload(h_k, stream);
+    elem_A.upload(h_eA, stream);  elem_B.upload(h_eB, stream);
+    q_H.upload(h_qH, stream);  q_A.upload(h_qA, stream);  q_B.upload(h_qB, stream);
+    basicity_A.upload(h_basA, stream);  basicity_B.upload(h_basB, stream);
+    acidity_A.upload(h_aciA, stream);   acidity_B.upload(h_aciB, stream);
+    r_cut.upload(h_rcut, stream);
+    case_type.upload(h_case, stream);
+    nb_B_offset.upload(h_nbB_offset, stream);
+    nb_B_count.upload(h_nbB_count, stream);
+    if (total_B > 0) nb_B_flat.upload(h_nbB_flat, stream);
+    acceptor_parent.upload(h_acc_parent, stream);
+    nb_C_offset.upload(h_nbC_offset, stream);
+    nb_C_count.upload(h_nbC_count, stream);
+    if (total_C > 0) nb_C_flat.upload(h_nbC_flat, stream);
+    repz_B.upload(h_repz, stream);
+}
+
 // ============================================================================
 // FFWorkspaceGPUImpl — CUDA-internal state (not visible outside this .cu)
 // ============================================================================
@@ -340,15 +544,23 @@ struct FFWorkspaceGPUImpl {
     DihedralSoA    dihedrals;       ///< Standard + extra torsions (combined)
     InversionSoA   inversions;      ///< Out-of-plane inversions
 
+    // Phase 2 SoA buffers (March 2026): formerly CPU residual, now all GPU
+    STorsionSoA    storsions;       ///< Triple bond torsions
+    BATMSoA        batm;            ///< Bonded ATM 3-body
+    ATMSoA         atm;             ///< Axilrod-Teller-Muto 3-body dispersion
+    XBondSoA       xbonds;          ///< Halogen bonds
+    HBondSoA       hbonds;          ///< Hydrogen bonds
+
     // Dynamic buffers (reset + upload each calculation step)
     CudaBuffer<double> d_coords;    ///< [N*3] row-major (x,y,z per atom)
     CudaBuffer<double> d_charges;   ///< [N] EEQ charges
     CudaBuffer<double> d_cn;        ///< [N] D3 coordination numbers
+    CudaBuffer<double> d_topo_charges; ///< [N] topology charges (for BATM)
     CudaBuffer<double> d_grad;      ///< [N*3] gradient output (atomicAdd)
     CudaBuffer<double> d_dEdcn;     ///< [N] bond dE/dCN (atomicAdd)
     CudaBuffer<double> d_energy;    ///< [1] total GPU energy (atomicAdd)
 
-    // Claude Generated (March 2026): Per-term energy accumulators for debugging
+    // Per-term energy accumulators
     CudaBuffer<double> d_e_disp;        ///< [1] dispersion energy
     CudaBuffer<double> d_e_bonded_rep;  ///< [1] bonded repulsion energy
     CudaBuffer<double> d_e_nb_rep;      ///< [1] non-bonded repulsion energy
@@ -357,6 +569,11 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_e_angle;       ///< [1] angle bending energy
     CudaBuffer<double> d_e_dihedral;    ///< [1] dihedral torsion energy
     CudaBuffer<double> d_e_inversion;   ///< [1] inversion energy
+    CudaBuffer<double> d_e_stors;       ///< [1] triple bond torsion energy
+    CudaBuffer<double> d_e_batm;        ///< [1] bonded ATM energy
+    CudaBuffer<double> d_e_atm;         ///< [1] ATM dispersion energy
+    CudaBuffer<double> d_e_xbond;       ///< [1] halogen bond energy
+    CudaBuffer<double> d_e_hbond;       ///< [1] hydrogen bond energy
 
     int N = 0;
     cudaStream_t stream = nullptr;
@@ -393,6 +610,13 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     if (dev_count == 0)
         throw std::runtime_error("FFWorkspaceGPU: no CUDA device found");
 
+    // Pre-allocate CPU staging buffers BEFORE any CUDA operations.
+    // CUDA corrupts C++ heap metadata; subsequent heap allocs crash.
+    // These buffers are reused every step without new allocations.
+    m_h_coords.resize(3 * natoms);
+    m_h_grad.resize(3 * natoms);
+    m_geometry_cpu = Matrix::Zero(natoms, 3);
+
     m_impl = std::make_unique<FFWorkspaceGPUImpl>();
     m_impl->N = natoms;
 
@@ -402,6 +626,16 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
 
     // Upload covalent radii to constant memory (used by angle/dihedral distance damping)
     upload_rcov_d3(s_rcov_d3_bohr, 87);
+
+    // Upload covalent radii for HB/XB vdW radii lookup (Å units)
+    upload_covalent_radii(GFNFFParameters::covalent_radii.data(),
+                          static_cast<int>(GFNFFParameters::covalent_radii.size()));
+
+    // Store dispersion pairs on CPU for dEdcn chain-rule (not computed in GPU kernel)
+    m_dispersions_cpu = params.dispersions;
+
+    // Store topology charges for BATM kernel (uploaded to GPU each calculate() call)
+    m_topology_charges = params.topology_charges;
 
     // --- Upload static SoA interaction lists ---
     m_impl->disp.upload(params.dispersions, stream);
@@ -413,16 +647,24 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_impl->dihedrals.upload(params.dihedrals, params.extra_dihedrals, atom_types, stream);
     m_impl->inversions.upload(params.inversions, atom_types, stream);
 
+    // Phase 2 SoA uploads (March 2026): HB/XB/ATM/BATM/sTors — all on GPU
+    m_impl->storsions.upload(params.storsions, stream);
+    m_impl->batm.upload(params.batm_triples, stream);
+    m_impl->atm.upload(params.atm_triples, atom_types, stream);
+    m_impl->xbonds.upload(params.xbonds, atom_types, stream);
+    m_impl->hbonds.upload(params.hbonds, atom_types, stream);
+
     // --- Allocate dynamic per-step buffers ---
     const int N3 = 3 * natoms;
     m_impl->d_coords.alloc(N3);
     m_impl->d_charges.alloc(natoms);
     m_impl->d_cn.alloc(natoms);
+    m_impl->d_topo_charges.alloc(natoms);
     m_impl->d_grad.alloc(N3);
     m_impl->d_dEdcn.alloc(natoms);
     m_impl->d_energy.alloc(1);
 
-    // Per-term energy accumulators (Claude Generated March 2026)
+    // Per-term energy accumulators
     m_impl->d_e_disp.alloc(1);
     m_impl->d_e_bonded_rep.alloc(1);
     m_impl->d_e_nb_rep.alloc(1);
@@ -431,6 +673,11 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_impl->d_e_angle.alloc(1);
     m_impl->d_e_dihedral.alloc(1);
     m_impl->d_e_inversion.alloc(1);
+    m_impl->d_e_stors.alloc(1);
+    m_impl->d_e_batm.alloc(1);
+    m_impl->d_e_atm.alloc(1);
+    m_impl->d_e_xbond.alloc(1);
+    m_impl->d_e_hbond.alloc(1);
 
     // --- Pre-allocate CPU result buffers ---
     m_result_gradient.resize(natoms, 3);
@@ -478,11 +725,14 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format(
-            "FFWorkspaceGPU: {} atoms | disp={} brep={} nbrep={} coul={} bond={} ang={} dih={} inv={}",
+            "FFWorkspaceGPU: {} atoms | disp={} brep={} nbrep={} coul={} bond={} ang={} dih={} inv={}"
+            " stors={} batm={} atm={} xb={} hb={}",
             natoms,
             m_impl->disp.n, m_impl->bonded_rep.n, m_impl->nonbonded_rep.n,
             m_impl->coulomb.n, m_impl->bonds.n, m_impl->angles.n,
-            m_impl->dihedrals.n, m_impl->inversions.n));
+            m_impl->dihedrals.n, m_impl->inversions.n,
+            m_impl->storsions.n, m_impl->batm.n, m_impl->atm.n,
+            m_impl->xbonds.n, m_impl->hbonds.n));
     }
 }
 
@@ -529,13 +779,15 @@ void FFWorkspaceGPU::setCNDerivatives(const Vector& cn, const Vector& cnf,
     m_cn  = cn;
     m_cnf = cnf;
     m_dcn = dcn;
-    if (m_cpu_residual) m_cpu_residual->setCNDerivatives(cn, cnf, dcn);
+    // NOT forwarded to CPU residual — postProcessCPU() handles CN chain-rule
+    // centrally for ALL terms (GPU + residual).  Forwarding would double-count
+    // the Coulomb TERM 1b qtmp correction.
 }
 
 void FFWorkspaceGPU::setDC6DCNPtr(const Matrix* ptr)
 {
     m_dc6dcn_ptr = ptr;
-    if (m_cpu_residual) m_cpu_residual->setDC6DCNPtr(ptr);
+    // NOT forwarded to CPU residual — same reason as setCNDerivatives.
 }
 
 void FFWorkspaceGPU::setE0(double e0)
@@ -559,6 +811,21 @@ void FFWorkspaceGPU::setCoulombSelfEnergyParams(const Vector& chi_base, const Ve
     m_coul_alp        = alp;
     m_coul_cnf        = cnf;
     m_coul_chi_static = chi_static;
+}
+
+void FFWorkspaceGPU::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
+                                    const std::vector<int>& atom_types)
+{
+    // Re-upload HBond SoA after dynamic re-detection.
+    // Claude Generated (March 2026): Needed because updateHBXBIfNeeded() may find
+    // additional HBonds on re-detection that weren't in the initial parameter set.
+    m_impl->hbonds.upload(hbonds, atom_types, m_impl->stream);
+}
+
+void FFWorkspaceGPU::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
+                                    const std::vector<int>& atom_types)
+{
+    m_impl->xbonds.upload(xbonds, atom_types, m_impl->stream);
 }
 
 void FFWorkspaceGPU::setDispersionEnabled(bool v)  { m_dispersion_enabled = v; }
@@ -596,6 +863,11 @@ double FFWorkspaceGPU::calculate(bool gradient)
     cudaMemsetAsync(impl.d_e_angle.ptr,      0, sizeof(double), stream);
     cudaMemsetAsync(impl.d_e_dihedral.ptr,   0, sizeof(double), stream);
     cudaMemsetAsync(impl.d_e_inversion.ptr,  0, sizeof(double), stream);
+    cudaMemsetAsync(impl.d_e_stors.ptr,      0, sizeof(double), stream);
+    cudaMemsetAsync(impl.d_e_batm.ptr,       0, sizeof(double), stream);
+    cudaMemsetAsync(impl.d_e_atm.ptr,        0, sizeof(double), stream);
+    cudaMemsetAsync(impl.d_e_xbond.ptr,      0, sizeof(double), stream);
+    cudaMemsetAsync(impl.d_e_hbond.ptr,      0, sizeof(double), stream);
 
     // =========================================================================
     // 2. Upload per-step charges and CN
@@ -611,6 +883,11 @@ double FFWorkspaceGPU::calculate(bool gradient)
     // Upload D3 CN
     if (m_cn.size() == N) {
         impl.d_cn.upload(m_cn.data(), N, stream);
+    }
+
+    // Upload topology charges (used by BATM kernel)
+    if (m_topology_charges.size() == N) {
+        impl.d_topo_charges.upload(m_topology_charges.data(), N, stream);
     }
 
     // =========================================================================
@@ -735,6 +1012,79 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.d_e_inversion.ptr);
     }
 
+    // --- Triple bond torsions ---
+    if (impl.storsions.n > 0) {
+        k_storsions<<<gridFor(impl.storsions.n, BLOCK), BLOCK, 0, stream>>>(
+            impl.storsions.n,
+            impl.storsions.idx_i.ptr, impl.storsions.idx_j.ptr,
+            impl.storsions.idx_k.ptr, impl.storsions.idx_l.ptr,
+            impl.storsions.erefhalf.ptr,
+            impl.d_coords.ptr,
+            impl.d_grad.ptr,
+            impl.d_e_stors.ptr);
+    }
+
+    // --- Bonded ATM (3-body charge-scaled) ---
+    if (impl.batm.n > 0) {
+        k_batm<<<gridFor(impl.batm.n, BLOCK), BLOCK, 0, stream>>>(
+            impl.batm.n,
+            impl.batm.idx_i.ptr, impl.batm.idx_j.ptr, impl.batm.idx_k.ptr,
+            impl.batm.zb3atm_i.ptr, impl.batm.zb3atm_j.ptr, impl.batm.zb3atm_k.ptr,
+            impl.d_coords.ptr,
+            impl.d_topo_charges.ptr,
+            impl.d_grad.ptr,
+            impl.d_e_batm.ptr);
+    }
+
+    // --- ATM 3-body dispersion ---
+    if (impl.atm.n > 0) {
+        k_atm<<<gridFor(impl.atm.n, BLOCK), BLOCK, 0, stream>>>(
+            impl.atm.n,
+            impl.atm.idx_i.ptr, impl.atm.idx_j.ptr, impl.atm.idx_k.ptr,
+            impl.atm.ati.ptr,   impl.atm.atj.ptr,   impl.atm.atk.ptr,
+            impl.atm.C6_ij.ptr, impl.atm.C6_ik.ptr, impl.atm.C6_jk.ptr,
+            impl.atm.s9.ptr, impl.atm.a1.ptr, impl.atm.a2.ptr, impl.atm.alp.ptr,
+            impl.atm.triple_scale.ptr,
+            impl.d_coords.ptr,
+            impl.d_grad.ptr,
+            impl.d_e_atm.ptr);
+    }
+
+    // --- Halogen bonds (3-body A-X...B) ---
+    if (impl.xbonds.n > 0) {
+        k_xbonds<<<gridFor(impl.xbonds.n, BLOCK), BLOCK, 0, stream>>>(
+            impl.xbonds.n,
+            impl.xbonds.idx_i.ptr, impl.xbonds.idx_j.ptr, impl.xbonds.idx_k.ptr,
+            impl.xbonds.elem_A.ptr, impl.xbonds.elem_B.ptr,
+            impl.xbonds.q_X.ptr, impl.xbonds.q_B.ptr, impl.xbonds.acidity_X.ptr,
+            impl.xbonds.r_cut.ptr,
+            impl.d_coords.ptr,
+            impl.d_grad.ptr,
+            impl.d_e_xbond.ptr);
+    }
+
+    // --- Hydrogen bonds (3-body A-H...B, all 4 cases) ---
+    if (m_hbond_enabled && impl.hbonds.n > 0) {
+        k_hbonds<<<gridFor(impl.hbonds.n, BLOCK), BLOCK, 0, stream>>>(
+            impl.hbonds.n,
+            impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr,
+            impl.hbonds.elem_A.ptr, impl.hbonds.elem_B.ptr,
+            impl.hbonds.q_H.ptr, impl.hbonds.q_A.ptr, impl.hbonds.q_B.ptr,
+            impl.hbonds.basicity_A.ptr, impl.hbonds.basicity_B.ptr,
+            impl.hbonds.acidity_A.ptr,  impl.hbonds.acidity_B.ptr,
+            impl.hbonds.r_cut.ptr,
+            impl.hbonds.case_type.ptr,
+            impl.hbonds.nb_B_offset.ptr, impl.hbonds.nb_B_count.ptr,
+            impl.hbonds.nb_B_flat.ptr,
+            impl.hbonds.acceptor_parent.ptr,
+            impl.hbonds.nb_C_offset.ptr, impl.hbonds.nb_C_count.ptr,
+            impl.hbonds.nb_C_flat.ptr,
+            impl.hbonds.repz_B.ptr,
+            impl.d_coords.ptr,
+            impl.d_grad.ptr,
+            impl.d_e_hbond.ptr);
+    }
+
     // =========================================================================
     // 4. Synchronise and download results
     // =========================================================================
@@ -746,6 +1096,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
     // Download per-term GPU energies
     double e_disp = 0, e_brep = 0, e_nbrep = 0, e_coul1 = 0;
     double e_bond = 0, e_angle = 0, e_dihedral = 0, e_inversion = 0;
+    double e_stors = 0, e_batm = 0, e_atm = 0, e_xbond = 0, e_hbond = 0;
     checkCuda(cudaMemcpy(&e_disp,      impl.d_e_disp.ptr,       sizeof(double), cudaMemcpyDeviceToHost), "disp energy download");
     checkCuda(cudaMemcpy(&e_brep,      impl.d_e_bonded_rep.ptr, sizeof(double), cudaMemcpyDeviceToHost), "brep energy download");
     checkCuda(cudaMemcpy(&e_nbrep,     impl.d_e_nb_rep.ptr,     sizeof(double), cudaMemcpyDeviceToHost), "nbrep energy download");
@@ -754,23 +1105,25 @@ double FFWorkspaceGPU::calculate(bool gradient)
     checkCuda(cudaMemcpy(&e_angle,     impl.d_e_angle.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "angle energy download");
     checkCuda(cudaMemcpy(&e_dihedral,  impl.d_e_dihedral.ptr,   sizeof(double), cudaMemcpyDeviceToHost), "dihedral energy download");
     checkCuda(cudaMemcpy(&e_inversion, impl.d_e_inversion.ptr,  sizeof(double), cudaMemcpyDeviceToHost), "inversion energy download");
+    checkCuda(cudaMemcpy(&e_stors,     impl.d_e_stors.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "stors energy download");
+    checkCuda(cudaMemcpy(&e_batm,      impl.d_e_batm.ptr,       sizeof(double), cudaMemcpyDeviceToHost), "batm energy download");
+    checkCuda(cudaMemcpy(&e_atm,       impl.d_e_atm.ptr,        sizeof(double), cudaMemcpyDeviceToHost), "atm energy download");
+    checkCuda(cudaMemcpy(&e_xbond,     impl.d_e_xbond.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "xbond energy download");
+    checkCuda(cudaMemcpy(&e_hbond,     impl.d_e_hbond.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "hbond energy download");
 
-    // Download gradient
+    // Download gradient (using pre-allocated staging buffer — no heap allocs)
     if (gradient) {
-        std::vector<double> h_grad(3 * N);
-        checkCuda(cudaMemcpy(h_grad.data(), impl.d_grad.ptr,
+        checkCuda(cudaMemcpy(m_h_grad.data(), impl.d_grad.ptr,
                              3*N*sizeof(double), cudaMemcpyDeviceToHost),
                   "gradient download");
 
-        m_result_gradient.resize(N, 3);
         for (int i = 0; i < N; ++i) {
-            m_result_gradient(i, 0) = h_grad[3*i+0];
-            m_result_gradient(i, 1) = h_grad[3*i+1];
-            m_result_gradient(i, 2) = h_grad[3*i+2];
+            m_result_gradient(i, 0) = m_h_grad[3*i+0];
+            m_result_gradient(i, 1) = m_h_grad[3*i+1];
+            m_result_gradient(i, 2) = m_h_grad[3*i+2];
         }
 
         // Download dEdcn (for CN chain-rule in postProcessCPU)
-        m_dEdcn_total.resize(N);
         checkCuda(cudaMemcpy(m_dEdcn_total.data(), impl.d_dEdcn.ptr,
                              N*sizeof(double), cudaMemcpyDeviceToHost),
                   "dEdcn download");
@@ -780,31 +1133,53 @@ double FFWorkspaceGPU::calculate(bool gradient)
     // 5. Populate energy components (per-term from GPU)
     // =========================================================================
     m_result_energy.reset();
-    m_result_energy.dispersion  = e_disp;
-    m_result_energy.bonded_rep  = e_brep;
+    m_result_energy.dispersion    = e_disp;
+    m_result_energy.bonded_rep    = e_brep;
     m_result_energy.nonbonded_rep = e_nbrep;
-    m_result_energy.coulomb     = e_coul1;  // TERM 1 only; TERM 2+3 added in postProcessCPU
-    m_result_energy.bond        = e_bond;
-    m_result_energy.angle       = e_angle;
-    m_result_energy.dihedral    = e_dihedral;
-    m_result_energy.inversion   = e_inversion;
-
-    postProcessCPU(gradient);
+    m_result_energy.coulomb       = e_coul1;  // TERM 1 only; TERM 2+3 added in postProcessCPU
+    m_result_energy.bond          = e_bond;
+    m_result_energy.angle         = e_angle;
+    m_result_energy.dihedral      = e_dihedral;
+    m_result_energy.inversion     = e_inversion;
+    m_result_energy.stors         = e_stors;
+    m_result_energy.batm          = e_batm;
+    m_result_energy.atm           = e_atm;
+    m_result_energy.xbond         = e_xbond;
+    m_result_energy.hbond         = e_hbond;
 
     // =========================================================================
-    // 6. CPU residual: H-bonds, X-bonds, ATM, BATM (Phase 1 stays on CPU)
+    // 5b. Dispersion dEdcn (CPU-side): GPU kernel doesn't compute dc6/dcn
+    //     chain-rule.  CPU postProcess needs this for CN chain-rule gradient.
+    //     Reference: ff_workspace_gfnff.cpp:696-702 (calcDispersion dEdcn)
     // =========================================================================
-    if (m_cpu_residual) {
-        double e_cpu = m_cpu_residual->calculate(gradient);
-        const auto& cpu_comp = m_cpu_residual->energyComponents();
-        m_result_energy.hbond += cpu_comp.hbond;
-        m_result_energy.xbond += cpu_comp.xbond;
-        m_result_energy.atm   += cpu_comp.atm;
-        m_result_energy.batm  += cpu_comp.batm;
-        if (gradient) {
-            m_result_gradient += m_cpu_residual->gradient();
+    if (gradient && m_dc6dcn_ptr && m_dc6dcn_ptr->size() > 0
+        && !m_dispersions_cpu.empty() && m_geometry_cpu.rows() == N) {
+        for (const auto& disp : m_dispersions_cpu) {
+            Eigen::Vector3d ri = m_geometry_cpu.row(disp.i);
+            Eigen::Vector3d rj = m_geometry_cpu.row(disp.j);
+            double rij = (ri - rj).norm();
+            if (rij > disp.r_cut || rij < 1e-8) continue;
+
+            double r2 = rij * rij;
+            double r6 = r2 * r2 * r2;
+            double r0_6 = disp.r0_squared * disp.r0_squared * disp.r0_squared;
+            double t6 = 1.0 / (r6 + r0_6);
+            double r8 = r6 * r2;
+            double r0_8 = r0_6 * disp.r0_squared;
+            double t8 = 1.0 / (r8 + r0_8);
+
+            double disp_value = (t6 + 2.0 * disp.r4r2ij * t8) * disp.zetac6;
+            if (disp.i < m_dc6dcn_ptr->rows() && disp.j < m_dc6dcn_ptr->cols()) {
+                m_dEdcn_total(disp.i) -= (*m_dc6dcn_ptr)(disp.i, disp.j) * disp_value;
+                m_dEdcn_total(disp.j) -= (*m_dc6dcn_ptr)(disp.j, disp.i) * disp_value;
+            }
         }
     }
+
+    // =========================================================================
+    // 6. postProcessCPU: CN chain-rule gradient + Coulomb TERM 2+3
+    // =========================================================================
+    postProcessCPU(gradient);
 
     // =========================================================================
     // 7. Add E0 (baseline energy from parameter set) and return
@@ -822,9 +1197,16 @@ void FFWorkspaceGPU::setGeometry(const Matrix& geom)
     const int N = m_natoms;
     if (geom.rows() != N) return;
 
-    // Extract RowMajor matrix to flat [x0,y0,z0,x1,...] array for GPU kernels
-    std::vector<double> h_coords = toRowMajor(geom);
-    impl.d_coords.upload(h_coords.data(), 3*N, impl.stream);
+    // Store CPU copy (needed for dispersion dEdcn chain-rule computation)
+    m_geometry_cpu = geom;  // no realloc (pre-allocated in constructor, same size)
+
+    // Fill pre-allocated staging buffer in-place (replaces toRowMajor heap alloc)
+    for (int i = 0; i < N; ++i) {
+        m_h_coords[3*i+0] = geom(i, 0);
+        m_h_coords[3*i+1] = geom(i, 1);
+        m_h_coords[3*i+2] = geom(i, 2);
+    }
+    impl.d_coords.upload(m_h_coords.data(), 3*N, impl.stream);
 
     // Forward geometry to CPU residual workspace (HB/XB/ATM/BATM)
     if (m_cpu_residual) m_cpu_residual->setGeometry(geom);

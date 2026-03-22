@@ -165,6 +165,112 @@ __global__ void k_inversions(
 );
 
 // ============================================================================
+// Phase 2 kernels: CPU residual terms ported to GPU (March 2026)
+// ============================================================================
+
+/// Triple bond torsions: E = -erefhalf * cos(2φ) + erefhalf
+/// Reference: ff_workspace_gfnff.cpp:calcSTorsions, Fortran gfnff_engrad.F90:3454
+__global__ void k_storsions(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ idx_l,
+    const double* __restrict__ erefhalf,
+    const double* __restrict__ coords,
+    double*                    grad,
+    double*                    energy
+);
+
+/// Bonded ATM (BATM): 3-body charge-scaled angular term for 1,4-pairs
+/// Reference: ff_workspace_gfnff.cpp:calcBATM, Fortran gfnff_engrad.F90:3267-3334
+__global__ void k_batm(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const double* __restrict__ zb3atm_i,
+    const double* __restrict__ zb3atm_j,
+    const double* __restrict__ zb3atm_k,
+    const double* __restrict__ coords,
+    const double* __restrict__ topo_charges, ///< [N] Phase-1 topology charges
+    double*                    grad,
+    double*                    energy
+);
+
+/// ATM (Axilrod-Teller-Muto): 3-body dispersion with BJ damping (energy + gradient)
+/// Reference: ff_workspace_gfnff.cpp:calcATM+calcATMGradient
+__global__ void k_atm(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const double* __restrict__ C6_ij,
+    const double* __restrict__ C6_ik,
+    const double* __restrict__ C6_jk,
+    const double* __restrict__ s9,
+    const double* __restrict__ a1,
+    const double* __restrict__ a2,
+    const double* __restrict__ alp,
+    const double* __restrict__ triple_scale,
+    const double* __restrict__ coords,
+    double*                    grad,
+    double*                    energy
+);
+
+/// Halogen bonds (3-body A-X...B): distance damped electrostatic
+/// Reference: ff_workspace_gfnff.cpp:calcHalogenBonds, Fortran rbxgfnff_eg
+__global__ void k_xbonds(
+    int n,
+    const int*    __restrict__ idx_i,     ///< donor A
+    const int*    __restrict__ idx_j,     ///< halogen X
+    const int*    __restrict__ idx_k,     ///< acceptor B
+    const int*    __restrict__ elem_A,
+    const int*    __restrict__ elem_B,
+    const double* __restrict__ q_X,
+    const double* __restrict__ q_B,
+    const double* __restrict__ acidity_X,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ coords,
+    double*                    grad,
+    double*                    energy
+);
+
+/// Hydrogen bonds (3-body A-H...B): multi-case with neighbor damping
+/// Reference: ff_workspace_gfnff.cpp:calcHydrogenBonds, Fortran abhgfnff_eg*
+__global__ void k_hbonds(
+    int n,
+    const int*    __restrict__ idx_i,     ///< donor A
+    const int*    __restrict__ idx_j,     ///< hydrogen H
+    const int*    __restrict__ idx_k,     ///< acceptor B
+    const int*    __restrict__ elem_A,
+    const int*    __restrict__ elem_B,
+    const double* __restrict__ q_H,
+    const double* __restrict__ q_A,
+    const double* __restrict__ q_B,
+    const double* __restrict__ basicity_A,
+    const double* __restrict__ basicity_B,
+    const double* __restrict__ acidity_A,
+    const double* __restrict__ acidity_B,
+    const double* __restrict__ r_cut,
+    const int*    __restrict__ case_type,
+    const int*    __restrict__ nb_B_offset,
+    const int*    __restrict__ nb_B_count,
+    const int*    __restrict__ nb_B_flat,
+    const int*    __restrict__ acceptor_parent,
+    const int*    __restrict__ nb_C_offset,
+    const int*    __restrict__ nb_C_count,
+    const int*    __restrict__ nb_C_flat,
+    const double* __restrict__ repz_B,
+    const double* __restrict__ coords,
+    double*                    grad,
+    double*                    energy
+);
+
+// ============================================================================
 // Utility: zero device array
 // ============================================================================
 __global__ void k_zero_double(double* arr, int n);
@@ -173,5 +279,10 @@ __global__ void k_zero_double(double* arr, int n);
 // Upload covalent radii table to GPU constant memory
 // ============================================================================
 void upload_rcov_d3(const double* rcov, int n);
+
+// ============================================================================
+// Upload covalent radii table for HB/XB vdW radii to GPU constant memory
+// ============================================================================
+void upload_covalent_radii(const double* radii, int n);
 
 #endif // USE_CUDA

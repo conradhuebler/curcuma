@@ -406,7 +406,6 @@ void FFWorkspace::postProcess(bool gradient)
                 m_result_gradient.col(dim) += m_dcn[dim] * dEdcn_combined;
             }
         }
-
         // Per-component CN corrections
         if (m_store_components) {
             Vector dEdcn_disp = m_dEdcn_total - m_dEdcn_bond_total;
