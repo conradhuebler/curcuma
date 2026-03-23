@@ -558,7 +558,24 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_topo_charges; ///< [N] topology charges (for BATM)
     CudaBuffer<double> d_grad;      ///< [N*3] gradient output (atomicAdd)
     CudaBuffer<double> d_dEdcn;     ///< [N] bond dE/dCN (atomicAdd)
+    CudaBuffer<double> d_dlogdcn;  ///< [N] logistic squashing factor for CN chain-rule
     CudaBuffer<double> d_energy;    ///< [1] total GPU energy (atomicAdd)
+
+    // CN chain-rule pair list (uploaded once, used every step)
+    CudaBuffer<int>    d_cn_idx_i;     ///< [n_cn_pairs]
+    CudaBuffer<int>    d_cn_idx_j;     ///< [n_cn_pairs]
+    CudaBuffer<double> d_cn_rcov_sum;  ///< [n_cn_pairs]
+    int                n_cn_pairs = 0;
+
+    // Coulomb self-energy parameters (uploaded once)
+    CudaBuffer<double> d_coul_chi_base; ///< [N]
+    CudaBuffer<double> d_coul_cnf;      ///< [N]
+    CudaBuffer<double> d_coul_gam;      ///< [N]
+    CudaBuffer<double> d_coul_alp;      ///< [N]
+    bool               coul_self_on_gpu = false;
+
+    // Per-term energy: Coulomb self (TERM 2+3)
+    CudaBuffer<double> d_e_coul_self;   ///< [1]
 
     // Per-term energy accumulators
     CudaBuffer<double> d_e_disp;        ///< [1] dispersion energy
@@ -713,6 +730,9 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
                 seen[c.j] = true;
             }
         }
+        // Upload Coulomb self-energy parameters to GPU for k_coulomb_self kernel
+        setCoulombSelfEnergyParams(m_coul_chi_base, m_coul_gam, m_coul_alp,
+                                   m_coul_cnf, m_coul_chi_static);
     }
 
     // Store initial charges and E0 from parameter set
@@ -811,6 +831,22 @@ void FFWorkspaceGPU::setCoulombSelfEnergyParams(const Vector& chi_base, const Ve
     m_coul_alp        = alp;
     m_coul_cnf        = cnf;
     m_coul_chi_static = chi_static;
+
+    // Upload Coulomb self-energy parameters to GPU
+    // Claude Generated (March 2026): GPU-side Coulomb TERM 2+3 + qtmp
+    const int N = m_natoms;
+    if (chi_base.size() == N && gam.size() == N && alp.size() == N && cnf.size() == N) {
+        auto& impl = *m_impl;
+        impl.d_coul_chi_base.alloc(N);
+        impl.d_coul_cnf.alloc(N);
+        impl.d_coul_gam.alloc(N);
+        impl.d_coul_alp.alloc(N);
+        impl.d_coul_chi_base.upload(chi_base.data(), N);
+        impl.d_coul_cnf.upload(cnf.data(), N);
+        impl.d_coul_gam.upload(gam.data(), N);
+        impl.d_coul_alp.upload(alp.data(), N);
+        impl.coul_self_on_gpu = true;
+    }
 }
 
 void FFWorkspaceGPU::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
@@ -832,6 +868,48 @@ void FFWorkspaceGPU::setDispersionEnabled(bool v)  { m_dispersion_enabled = v; }
 void FFWorkspaceGPU::setHBondEnabled(bool v)        { m_hbond_enabled = v; }
 void FFWorkspaceGPU::setRepulsionEnabled(bool v)    { m_repulsion_enabled = v; }
 void FFWorkspaceGPU::setCoulombEnabled(bool v)      { m_coulomb_enabled = v; }
+
+// ============================================================================
+// GPU-only CN chain-rule setters (Claude Generated March 2026)
+// ============================================================================
+
+void FFWorkspaceGPU::setCNPairList(const std::vector<int>& idx_i,
+                                    const std::vector<int>& idx_j,
+                                    const std::vector<double>& rcov_sum)
+{
+    const int np = static_cast<int>(idx_i.size());
+    if (np == 0 || idx_j.size() != idx_i.size() || rcov_sum.size() != idx_i.size()) return;
+
+    m_cn_pair_i    = idx_i;
+    m_cn_pair_j    = idx_j;
+    m_cn_pair_rcov = rcov_sum;
+    m_cn_n_pairs   = np;
+
+    // Upload to GPU
+    auto& impl = *m_impl;
+    impl.d_cn_idx_i.alloc(np);
+    impl.d_cn_idx_j.alloc(np);
+    impl.d_cn_rcov_sum.alloc(np);
+    impl.d_cn_idx_i.upload(idx_i.data(), np);
+    impl.d_cn_idx_j.upload(idx_j.data(), np);
+    impl.d_cn_rcov_sum.upload(rcov_sum.data(), np);
+    impl.n_cn_pairs = np;
+    m_cn_pairs_on_gpu = true;
+
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::info(fmt::format("  GPU CN chain-rule: {} pairs uploaded", np));
+}
+
+void FFWorkspaceGPU::setDlogDCN(const Vector& dlogdcn)
+{
+    m_dlogdcn = dlogdcn;
+    // Upload to GPU
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    if (dlogdcn.size() != N) return;
+    if (!impl.d_dlogdcn.ptr) impl.d_dlogdcn.alloc(N);
+    impl.d_dlogdcn.upload(dlogdcn.data(), N);
+}
 
 void FFWorkspaceGPU::setCPUResidualWorkspace(FFWorkspace* cpu_ws)
 {
@@ -1086,74 +1164,39 @@ double FFWorkspaceGPU::calculate(bool gradient)
     }
 
     // =========================================================================
-    // 4. Synchronise and download results
+    // 4. GPU postprocess: Coulomb self-energy, dispersion dEdcn, qtmp, CN chain-rule
+    // Claude Generated (March 2026): Replaces postProcessCPU for full GPU consistency
     // =========================================================================
-    // Synchronize device-wide: ensures all async kernel operations complete
-    // and any kernel errors (illegal memory access, etc.) propagate as exceptions.
-    checkCuda(cudaGetLastError(), "kernel launch check");
-    checkCuda(cudaDeviceSynchronize(), "calculate device sync");
 
-    // Download per-term GPU energies
-    double e_disp = 0, e_brep = 0, e_nbrep = 0, e_coul1 = 0;
-    double e_bond = 0, e_angle = 0, e_dihedral = 0, e_inversion = 0;
-    double e_stors = 0, e_batm = 0, e_atm = 0, e_xbond = 0, e_hbond = 0;
-    checkCuda(cudaMemcpy(&e_disp,      impl.d_e_disp.ptr,       sizeof(double), cudaMemcpyDeviceToHost), "disp energy download");
-    checkCuda(cudaMemcpy(&e_brep,      impl.d_e_bonded_rep.ptr, sizeof(double), cudaMemcpyDeviceToHost), "brep energy download");
-    checkCuda(cudaMemcpy(&e_nbrep,     impl.d_e_nb_rep.ptr,     sizeof(double), cudaMemcpyDeviceToHost), "nbrep energy download");
-    checkCuda(cudaMemcpy(&e_coul1,     impl.d_e_coulomb.ptr,    sizeof(double), cudaMemcpyDeviceToHost), "coul1 energy download");
-    checkCuda(cudaMemcpy(&e_bond,      impl.d_e_bond.ptr,       sizeof(double), cudaMemcpyDeviceToHost), "bond energy download");
-    checkCuda(cudaMemcpy(&e_angle,     impl.d_e_angle.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "angle energy download");
-    checkCuda(cudaMemcpy(&e_dihedral,  impl.d_e_dihedral.ptr,   sizeof(double), cudaMemcpyDeviceToHost), "dihedral energy download");
-    checkCuda(cudaMemcpy(&e_inversion, impl.d_e_inversion.ptr,  sizeof(double), cudaMemcpyDeviceToHost), "inversion energy download");
-    checkCuda(cudaMemcpy(&e_stors,     impl.d_e_stors.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "stors energy download");
-    checkCuda(cudaMemcpy(&e_batm,      impl.d_e_batm.ptr,       sizeof(double), cudaMemcpyDeviceToHost), "batm energy download");
-    checkCuda(cudaMemcpy(&e_atm,       impl.d_e_atm.ptr,        sizeof(double), cudaMemcpyDeviceToHost), "atm energy download");
-    checkCuda(cudaMemcpy(&e_xbond,     impl.d_e_xbond.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "xbond energy download");
-    checkCuda(cudaMemcpy(&e_hbond,     impl.d_e_hbond.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "hbond energy download");
-
-    // Download gradient (using pre-allocated staging buffer — no heap allocs)
-    if (gradient) {
-        checkCuda(cudaMemcpy(m_h_grad.data(), impl.d_grad.ptr,
-                             3*N*sizeof(double), cudaMemcpyDeviceToHost),
-                  "gradient download");
-
-        for (int i = 0; i < N; ++i) {
-            m_result_gradient(i, 0) = m_h_grad[3*i+0];
-            m_result_gradient(i, 1) = m_h_grad[3*i+1];
-            m_result_gradient(i, 2) = m_h_grad[3*i+2];
+    // Coulomb TERM 2+3 self-energy on GPU (energy only, no gradient)
+    if (m_coulomb_enabled && impl.coul_self_on_gpu) {
+        if (!impl.d_e_coul_self.ptr) {
+            impl.d_e_coul_self.alloc(1);
         }
-
-        // Download dEdcn (for CN chain-rule in postProcessCPU)
-        checkCuda(cudaMemcpy(m_dEdcn_total.data(), impl.d_dEdcn.ptr,
-                             N*sizeof(double), cudaMemcpyDeviceToHost),
-                  "dEdcn download");
+        cudaMemsetAsync(impl.d_e_coul_self.ptr, 0, sizeof(double), impl.stream);
+        k_coulomb_self<<<(N+255)/256, 256, 0, impl.stream>>>(
+            N,
+            impl.d_charges.ptr,        // eeq_charges
+            impl.d_coul_chi_base.ptr,
+            impl.d_coul_cnf.ptr,
+            impl.d_cn.ptr,
+            impl.d_coul_gam.ptr,
+            impl.d_coul_alp.ptr,
+            impl.d_e_coul_self.ptr);
     }
 
-    // =========================================================================
-    // 5. Populate energy components (per-term from GPU)
-    // =========================================================================
-    m_result_energy.reset();
-    m_result_energy.dispersion    = e_disp;
-    m_result_energy.bonded_rep    = e_brep;
-    m_result_energy.nonbonded_rep = e_nbrep;
-    m_result_energy.coulomb       = e_coul1;  // TERM 1 only; TERM 2+3 added in postProcessCPU
-    m_result_energy.bond          = e_bond;
-    m_result_energy.angle         = e_angle;
-    m_result_energy.dihedral      = e_dihedral;
-    m_result_energy.inversion     = e_inversion;
-    m_result_energy.stors         = e_stors;
-    m_result_energy.batm          = e_batm;
-    m_result_energy.atm           = e_atm;
-    m_result_energy.xbond         = e_xbond;
-    m_result_energy.hbond         = e_hbond;
-
-    // =========================================================================
-    // 5b. Dispersion dEdcn (CPU-side): GPU kernel doesn't compute dc6/dcn
-    //     chain-rule.  CPU postProcess needs this for CN chain-rule gradient.
-    //     Reference: ff_workspace_gfnff.cpp:696-702 (calcDispersion dEdcn)
-    // =========================================================================
+    // Dispersion dEdcn (CPU-side for now — accumulates into dEdcn on CPU, then re-uploads)
+    // TODO: Move to GPU kernel that accumulates directly into d_dEdcn
     if (gradient && m_dc6dcn_ptr && m_dc6dcn_ptr->size() > 0
         && !m_dispersions_cpu.empty() && m_geometry_cpu.rows() == N) {
+
+        // Download current dEdcn from GPU (bonds already accumulated)
+        checkCuda(cudaDeviceSynchronize(), "sync before dEdcn download");
+        checkCuda(cudaMemcpy(m_dEdcn_total.data(), impl.d_dEdcn.ptr,
+                             N*sizeof(double), cudaMemcpyDeviceToHost),
+                  "dEdcn download for disp");
+
+        // Add dispersion dEdcn on CPU
         for (const auto& disp : m_dispersions_cpu) {
             Eigen::Vector3d ri = m_geometry_cpu.row(disp.i);
             Eigen::Vector3d rj = m_geometry_cpu.row(disp.j);
@@ -1174,12 +1217,92 @@ double FFWorkspaceGPU::calculate(bool gradient)
                 m_dEdcn_total(disp.j) -= (*m_dc6dcn_ptr)(disp.j, disp.i) * disp_value;
             }
         }
+
+        // Re-upload combined dEdcn (bond + dispersion) to GPU
+        impl.d_dEdcn.upload(m_dEdcn_total.data(), N, impl.stream);
+    }
+
+    // Subtract qtmp from dEdcn on GPU (Coulomb TERM 1b correction)
+    if (gradient && m_coulomb_enabled && m_cnf.size() == N && m_eeq_charges.size() == N) {
+        k_subtract_qtmp<<<(N+255)/256, 256, 0, impl.stream>>>(
+            N,
+            impl.d_charges.ptr,     // eeq_charges
+            impl.d_coul_cnf.ptr,    // cnf
+            impl.d_cn.ptr,          // cn
+            impl.d_dEdcn.ptr);      // modified in-place
+    }
+
+    // CN chain-rule gradient on GPU (replaces dcn * dEdcn_combined)
+    if (gradient && m_cn_pairs_on_gpu && impl.n_cn_pairs > 0 && impl.d_dlogdcn.ptr) {
+        k_cn_chainrule<<<(impl.n_cn_pairs + 255)/256, 256, 0, impl.stream>>>(
+            impl.n_cn_pairs,
+            impl.d_cn_idx_i.ptr,
+            impl.d_cn_idx_j.ptr,
+            impl.d_cn_rcov_sum.ptr,
+            impl.d_coords.ptr,
+            impl.d_dEdcn.ptr,       // combined dEdcn (bond + disp - qtmp)
+            impl.d_dlogdcn.ptr,
+            impl.d_grad.ptr,
+            m_kn);
     }
 
     // =========================================================================
-    // 6. postProcessCPU: CN chain-rule gradient + Coulomb TERM 2+3
+    // 5. Synchronise and download final results
     // =========================================================================
-    postProcessCPU(gradient);
+    checkCuda(cudaGetLastError(), "postprocess kernel launch check");
+    checkCuda(cudaDeviceSynchronize(), "postprocess device sync");
+
+    // Download per-term GPU energies
+    double e_disp = 0, e_brep = 0, e_nbrep = 0, e_coul1 = 0;
+    double e_bond = 0, e_angle = 0, e_dihedral = 0, e_inversion = 0;
+    double e_stors = 0, e_batm = 0, e_atm = 0, e_xbond = 0, e_hbond = 0;
+    double e_coul_self = 0;
+    checkCuda(cudaMemcpy(&e_disp,      impl.d_e_disp.ptr,       sizeof(double), cudaMemcpyDeviceToHost), "disp energy download");
+    checkCuda(cudaMemcpy(&e_brep,      impl.d_e_bonded_rep.ptr, sizeof(double), cudaMemcpyDeviceToHost), "brep energy download");
+    checkCuda(cudaMemcpy(&e_nbrep,     impl.d_e_nb_rep.ptr,     sizeof(double), cudaMemcpyDeviceToHost), "nbrep energy download");
+    checkCuda(cudaMemcpy(&e_coul1,     impl.d_e_coulomb.ptr,    sizeof(double), cudaMemcpyDeviceToHost), "coul1 energy download");
+    checkCuda(cudaMemcpy(&e_bond,      impl.d_e_bond.ptr,       sizeof(double), cudaMemcpyDeviceToHost), "bond energy download");
+    checkCuda(cudaMemcpy(&e_angle,     impl.d_e_angle.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "angle energy download");
+    checkCuda(cudaMemcpy(&e_dihedral,  impl.d_e_dihedral.ptr,   sizeof(double), cudaMemcpyDeviceToHost), "dihedral energy download");
+    checkCuda(cudaMemcpy(&e_inversion, impl.d_e_inversion.ptr,  sizeof(double), cudaMemcpyDeviceToHost), "inversion energy download");
+    checkCuda(cudaMemcpy(&e_stors,     impl.d_e_stors.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "stors energy download");
+    checkCuda(cudaMemcpy(&e_batm,      impl.d_e_batm.ptr,       sizeof(double), cudaMemcpyDeviceToHost), "batm energy download");
+    checkCuda(cudaMemcpy(&e_atm,       impl.d_e_atm.ptr,        sizeof(double), cudaMemcpyDeviceToHost), "atm energy download");
+    checkCuda(cudaMemcpy(&e_xbond,     impl.d_e_xbond.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "xbond energy download");
+    checkCuda(cudaMemcpy(&e_hbond,     impl.d_e_hbond.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "hbond energy download");
+    if (impl.d_e_coul_self.ptr)
+        checkCuda(cudaMemcpy(&e_coul_self, impl.d_e_coul_self.ptr, sizeof(double), cudaMemcpyDeviceToHost), "coul_self download");
+
+    // Download gradient (using pre-allocated staging buffer — no heap allocs)
+    if (gradient) {
+        checkCuda(cudaMemcpy(m_h_grad.data(), impl.d_grad.ptr,
+                             3*N*sizeof(double), cudaMemcpyDeviceToHost),
+                  "gradient download");
+
+        for (int i = 0; i < N; ++i) {
+            m_result_gradient(i, 0) = m_h_grad[3*i+0];
+            m_result_gradient(i, 1) = m_h_grad[3*i+1];
+            m_result_gradient(i, 2) = m_h_grad[3*i+2];
+        }
+    }
+
+    // =========================================================================
+    // 6. Populate energy components
+    // =========================================================================
+    m_result_energy.reset();
+    m_result_energy.dispersion    = e_disp;
+    m_result_energy.bonded_rep    = e_brep;
+    m_result_energy.nonbonded_rep = e_nbrep;
+    m_result_energy.coulomb       = e_coul1 + e_coul_self;  // TERM 1 + TERM 2+3
+    m_result_energy.bond          = e_bond;
+    m_result_energy.angle         = e_angle;
+    m_result_energy.dihedral      = e_dihedral;
+    m_result_energy.inversion     = e_inversion;
+    m_result_energy.stors         = e_stors;
+    m_result_energy.batm          = e_batm;
+    m_result_energy.atm           = e_atm;
+    m_result_energy.xbond         = e_xbond;
+    m_result_energy.hbond         = e_hbond;
 
     // =========================================================================
     // 7. Add E0 (baseline energy from parameter set) and return

@@ -111,6 +111,19 @@ private:
     // Avoids heap allocations on CUDA-corrupted heap during MD/Opt iterations.
     std::vector<double> m_hb_cn_values;                ///< [n_bonds] HB CN per bond
     std::unordered_map<int, double> m_hb_cn_map;       ///< H-atom → CN (cleared+reused each step)
+
+    // CN chain-rule pair list (generated once at init, used every gradient step)
+    // Claude Generated (March 2026): Full GPU gradient consistency
+    std::vector<int>    m_cn_pair_i;        ///< atom i indices
+    std::vector<int>    m_cn_pair_j;        ///< atom j indices
+    std::vector<double> m_cn_pair_rcov;     ///< scaled cov. radius sum (Bohr)
+    bool                m_cn_pairs_generated = false;
+
+    /**
+     * @brief Generate CN pair list from geometry and covalent radii.
+     * Called once after initGPUWorkspace(). Pairs with rcov_sum < 2*max contribution.
+     */
+    void generateCNPairList(const Matrix& geom_bohr);
 };
 
 #endif // USE_CUDA

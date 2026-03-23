@@ -78,9 +78,9 @@ __global__ void k_dispersion(
     if (tid >= n) return;
 
     int i = idx_i[tid], j = idx_j[tid];
-    double dx = coords[3*j]   - coords[3*i];
-    double dy = coords[3*j+1] - coords[3*i+1];
-    double dz = coords[3*j+2] - coords[3*i+2];
+    double dx = coords[3*i]   - coords[3*j];
+    double dy = coords[3*i+1] - coords[3*j+1];
+    double dz = coords[3*i+2] - coords[3*j+2];
     double r2 = dx*dx + dy*dy + dz*dz;
     double rij = sqrt(r2);
 
@@ -99,8 +99,7 @@ __global__ void k_dispersion(
     double E = -C6[tid] * disp_sum * zetac6[tid];
     atomicAdd(energy, E);
 
-    // Gradient: dE/dr2 = -C6*zetac6 * (d6 + 2*r4r2*d8)
-    // d6 = d(t6)/d(r2) = -6*r4*t6^2, multiply by rij to get dE/dr
+    // Gradient: dE/dr via chain rule, displacement = ri - rj (matches CPU convention)
     double d6   = -6.0 * r4 * t6 * t6;
     double d8   = -8.0 * r4 * r2 * t8 * t8;
     double dEdr = -C6[tid] * zetac6[tid] * (d6 + 2.0 * r4r2ij[tid] * d8) * rij;
@@ -131,9 +130,9 @@ __global__ void k_repulsion(
     if (tid >= n) return;
 
     int i = idx_i[tid], j = idx_j[tid];
-    double dx = coords[3*j]   - coords[3*i];
-    double dy = coords[3*j+1] - coords[3*i+1];
-    double dz = coords[3*j+2] - coords[3*i+2];
+    double dx = coords[3*i]   - coords[3*j];
+    double dy = coords[3*i+1] - coords[3*j+1];
+    double dz = coords[3*i+2] - coords[3*j+2];
     double r2  = dx*dx + dy*dy + dz*dz;
     double rij = sqrt(r2);
 
@@ -173,9 +172,9 @@ __global__ void k_coulomb(
     if (tid >= n) return;
 
     int i = idx_i[tid], j = idx_j[tid];
-    double dx  = coords[3*j]   - coords[3*i];
-    double dy  = coords[3*j+1] - coords[3*i+1];
-    double dz  = coords[3*j+2] - coords[3*i+2];
+    double dx  = coords[3*i]   - coords[3*j];
+    double dy  = coords[3*i+1] - coords[3*j+1];
+    double dz  = coords[3*i+2] - coords[3*j+2];
     double r2  = dx*dx + dy*dy + dz*dz;
     double rij = sqrt(r2);
 
@@ -234,9 +233,9 @@ __global__ void k_bonds(
     if (tid >= n) return;
 
     int i = idx_i[tid], j = idx_j[tid];
-    double dx  = coords[3*j]   - coords[3*i];
-    double dy  = coords[3*j+1] - coords[3*i+1];
-    double dz  = coords[3*j+2] - coords[3*i+2];
+    double dx  = coords[3*i]   - coords[3*j];
+    double dy  = coords[3*i+1] - coords[3*j+1];
+    double dz  = coords[3*i+2] - coords[3*j+2];
     double r2  = dx*dx + dy*dy + dz*dz;
     double rij = sqrt(r2);
     if (rij < 1e-10) return;
@@ -435,8 +434,9 @@ __global__ void k_angles(
         double cos0   = cos(t0);
         double dcos   = cos_a - cos0;
         energy_raw    = k_fc * dcos * dcos;
-        double sinth  = sin(acos(cos_a));
-        dedcos        = (sinth > 1e-8) ? 2.0 * k_fc * sinth * (cos0 - cos_a) : 0.0;
+        // dE/d(cos_theta) for E = fc*(cos-cos0)^2
+        // cos_angle_grad returns d(cos)/dr, so we need dE/d(cos), NOT dE/d(theta)
+        dedcos        = 2.0 * k_fc * dcos;
     }
 
     atomicAdd(energy, energy_raw * damp);
@@ -686,66 +686,121 @@ __global__ void k_dihedrals(
 // Atom i is the central atom, j/k/l are substituents
 // Returns omega in [-pi, pi] and fills derivate[4][3]
 // ============================================================================
+// Claude Generated (March 2026): Full analytical inversion gradient (domegadr)
+// Port of Fortran gfnff_helpers.f90:450-510 (Spicher/Grimme)
+// Replaces simplified version that only computed l-atom derivative.
+// Reference: gfnff_geometry.h:calculateOutOfPlaneAngle (CPU version)
+// ============================================================================
 __device__ double inversion_angle_grad(
     const double* __restrict__ c,
     int i, int j, int k, int l,
     double derivate[4][3],
     bool do_grad)
 {
-    // Vectors from i to j, k, l
-    double rij[3] = {c[3*j]-c[3*i], c[3*j+1]-c[3*i+1], c[3*j+2]-c[3*i+2]};
-    double rik[3] = {c[3*k]-c[3*i], c[3*k+1]-c[3*i+1], c[3*k+2]-c[3*i+2]};
-    double ril[3] = {c[3*l]-c[3*i], c[3*l+1]-c[3*i+1], c[3*l+2]-c[3*i+2]};
+    // Fortran convention vectors (gfnff_helpers.f90:436-440, 465-471):
+    //   re = r_i - r_j  (center - nb1)
+    //   rd = r_k - r_j  (nb2 - nb1)
+    //   rv = r_l - r_i  (nb3 - center)
+    double re[3], rd[3], rv[3];
+    for (int d = 0; d < 3; ++d) {
+        re[d] = c[3*i+d] - c[3*j+d];
+        rd[d] = c[3*k+d] - c[3*j+d];
+        rv[d] = c[3*l+d] - c[3*i+d];
+    }
 
-    // Normal of plane j-i-k: n = rij × rik
-    double nx = rij[1]*rik[2] - rij[2]*rik[1];
-    double ny = rij[2]*rik[0] - rij[0]*rik[2];
-    double nz = rij[0]*rik[1] - rij[1]*rik[0];
-    double nn = sqrt(nx*nx + ny*ny + nz*nz);
-    double rl = sqrt(ril[0]*ril[0] + ril[1]*ril[1] + ril[2]*ril[2]);
+    // Normal vector: rn = re × rd
+    double rn[3];
+    rn[0] = re[1]*rd[2] - re[2]*rd[1];
+    rn[1] = re[2]*rd[0] - re[0]*rd[2];
+    rn[2] = re[0]*rd[1] - re[1]*rd[0];
 
-    if (nn < 1e-10 || rl < 1e-10) {
+    double rnn = sqrt(rn[0]*rn[0] + rn[1]*rn[1] + rn[2]*rn[2]);
+    double rvn = sqrt(rv[0]*rv[0] + rv[1]*rv[1] + rv[2]*rv[2]);
+
+    if (rnn < 1e-10 || rvn < 1e-10) {
         if (do_grad)
-            for (int a=0; a<4; ++a) derivate[a][0]=derivate[a][1]=derivate[a][2]=0.0;
+            for (int a = 0; a < 4; ++a) derivate[a][0] = derivate[a][1] = derivate[a][2] = 0.0;
         return 0.0;
     }
 
-    // sin(omega) = n·ril / (|n|*|ril|)
-    double sin_om = (nx*ril[0]+ny*ril[1]+nz*ril[2]) / (nn*rl);
+    // omega = asin(rn_hat · rv_hat)
+    double inv_rnn = 1.0 / rnn;
+    double inv_rvn = 1.0 / rvn;
+    double sin_om = (rn[0]*rv[0] + rn[1]*rv[1] + rn[2]*rv[2]) * inv_rnn * inv_rvn;
     sin_om = fmax(-1.0, fmin(1.0, sin_om));
     double omega = asin(sin_om);
 
     if (!do_grad) return omega;
 
-    // Simplified gradient (from standard inversion gradient formula)
-    // ∂omega/∂r_l: simplest term
     double cos_om = cos(omega);
-    if (fabs(cos_om) < 1e-8) cos_om = 1e-8;
-
-    double inv_nn  = 1.0/nn;
-    double inv_rl  = 1.0/rl;
-    double inv_cos = 1.0/cos_om;
-
-    // n unit vector
-    double un[3] = {nx*inv_nn, ny*inv_nn, nz*inv_nn};
-    // unit ril
-    double ul[3] = {ril[0]*inv_rl, ril[1]*inv_rl, ril[2]*inv_rl};
-
-    // ∂sin_om/∂r_l = (n/nn - sin_om*ril/rl) / rl
-    // ∂omega/∂r_l = (∂sin_om/∂r_l) / cos_om
-    for (int d=0; d<3; ++d) {
-        double dsin_drl = (un[d] - sin_om*ul[d]) * inv_rl;
-        derivate[3][d] = dsin_drl * inv_cos;
+    double nenner = rnn * rvn * cos_om;
+    if (fabs(nenner) < 1e-14) {
+        for (int a = 0; a < 4; ++a) derivate[a][0] = derivate[a][1] = derivate[a][2] = 0.0;
+        return omega;
     }
 
-    // ∂omega/∂r_i = -sum(derivate[j]+derivate[k]+derivate[l]) / 1 (simplified)
-    // For a rigorous implementation the j/k partials are complex (cross-product derivatives)
-    // Use numerical approximation via sum-zero for central atom
-    for (int d=0; d<3; ++d) {
-        derivate[1][d] = 0.0;   // j: simplified (second-order correction)
-        derivate[2][d] = 0.0;   // k: simplified
-        derivate[0][d] = -derivate[3][d]; // i: translational invariance (approx)
-    }
+    double onenner = 1.0 / nenner;
+
+    // rdme = rd - re = r_k - r_i
+    double rdme[3];
+    for (int d = 0; d < 3; ++d) rdme[d] = rd[d] - re[d];
+
+    // Cross products (gfnff_helpers.f90:477-482)
+    // rve = rv × re
+    double rve[3];
+    rve[0] = rv[1]*re[2] - rv[2]*re[1];
+    rve[1] = rv[2]*re[0] - rv[0]*re[2];
+    rve[2] = rv[0]*re[1] - rv[1]*re[0];
+
+    // rne = rn × re
+    double rne[3];
+    rne[0] = rn[1]*re[2] - rn[2]*re[1];
+    rne[1] = rn[2]*re[0] - rn[0]*re[2];
+    rne[2] = rn[0]*re[1] - rn[1]*re[0];
+
+    // rdv = rd × rv
+    double rdv[3];
+    rdv[0] = rd[1]*rv[2] - rd[2]*rv[1];
+    rdv[1] = rd[2]*rv[0] - rd[0]*rv[2];
+    rdv[2] = rd[0]*rv[1] - rd[1]*rv[0];
+
+    // rdn = rd × rn
+    double rdn[3];
+    rdn[0] = rd[1]*rn[2] - rd[2]*rn[1];
+    rdn[1] = rd[2]*rn[0] - rd[0]*rn[2];
+    rdn[2] = rd[0]*rn[1] - rd[1]*rn[0];
+
+    // rvdme = rv × rdme
+    double rvdme[3];
+    rvdme[0] = rv[1]*rdme[2] - rv[2]*rdme[1];
+    rvdme[1] = rv[2]*rdme[0] - rv[0]*rdme[2];
+    rvdme[2] = rv[0]*rdme[1] - rv[1]*rdme[0];
+
+    // rndme = rn × rdme
+    double rndme[3];
+    rndme[0] = rn[1]*rdme[2] - rn[2]*rdme[1];
+    rndme[1] = rn[2]*rdme[0] - rn[0]*rdme[2];
+    rndme[2] = rn[0]*rdme[1] - rn[1]*rdme[0];
+
+    // Gradient formulas (gfnff_helpers.f90:489-499)
+    double rvn_over_rnn = rvn * inv_rnn;
+    double rnn_over_rvn = rnn * inv_rvn;
+
+    // row(0) = dω/dr_i (center)
+    for (int d = 0; d < 3; ++d)
+        derivate[0][d] = onenner * (rdv[d] - rn[d] - sin_om * (rvn_over_rnn * rdn[d] - rnn_over_rvn * rv[d]));
+
+    // row(1) = dω/dr_j (nb1)
+    for (int d = 0; d < 3; ++d)
+        derivate[1][d] = onenner * (rvdme[d] - sin_om * rvn_over_rnn * rndme[d]);
+
+    // row(2) = dω/dr_k (nb2)
+    for (int d = 0; d < 3; ++d)
+        derivate[2][d] = onenner * (rve[d] - sin_om * rvn_over_rnn * rne[d]);
+
+    // row(3) = dω/dr_l (nb3)
+    for (int d = 0; d < 3; ++d)
+        derivate[3][d] = onenner * (rn[d] - sin_om * rnn_over_rvn * rv[d]);
 
     return omega;
 }
@@ -1775,4 +1830,112 @@ __global__ void k_hbonds(
     add_grad(grad, A, ga_x, ga_y, ga_z);
     add_grad(grad, B, gb_x, gb_y, gb_z);
     add_grad(grad, H, gh_x, gh_y, gh_z);
+}
+
+// ============================================================================
+// GPU-only postprocess kernels (replace postProcessCPU)
+// Claude Generated (March 2026): Full GPU gradient consistency
+// ============================================================================
+
+// ============================================================================
+// Kernel: Coulomb TERM 2+3 self-energy (O(N), energy only)
+// E_en = -Σ qi * chi_eff_i
+// E_self = 0.5 * Σ qi^2 * (gam_i + sqrt(2/pi) / sqrt(alp_i))
+// Reference: ff_workspace.cpp::postProcess() lines 354-383
+// ============================================================================
+__global__ void k_coulomb_self(
+    int N,
+    const double* __restrict__ eeq_charges,
+    const double* __restrict__ chi_base,
+    const double* __restrict__ cnf,
+    const double* __restrict__ cn,
+    const double* __restrict__ gam,
+    const double* __restrict__ alp,
+    double*                    energy)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    double q = eeq_charges[i];
+    if (isnan(q)) return;
+    if (alp[i] <= 0.0) return;
+
+    // chi_eff = chi_base + cnf * sqrt(max(cn, 0))
+    double chi;
+    if (cnf[i] != 0.0) {
+        chi = chi_base[i] + cnf[i] * sqrt(fmax(cn[i], 0.0));
+    } else {
+        chi = chi_base[i];
+    }
+
+    static const double sqrt_2_over_pi = 0.797884560802865;
+    double E_en   = -q * chi;
+    double E_self = 0.5 * q * q * (gam[i] + sqrt_2_over_pi / sqrt(alp[i]));
+
+    atomicAdd(energy, E_en + E_self);
+}
+
+// ============================================================================
+// Kernel: Subtract qtmp from dEdcn (Coulomb TERM 1b chain-rule correction)
+// dEdcn[i] -= q[i] * cnf[i] / (2*sqrt(cn[i]) + 1e-16)
+// Reference: ff_workspace.cpp::postProcess() lines 391-399
+// ============================================================================
+__global__ void k_subtract_qtmp(
+    int N,
+    const double* __restrict__ eeq_charges,
+    const double* __restrict__ cnf,
+    const double* __restrict__ cn,
+    double*                    dEdcn)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    double cn_i = fmax(cn[i], 0.0);
+    double qtmp = eeq_charges[i] * cnf[i] / (2.0 * sqrt(cn_i) + 1e-16);
+    dEdcn[i] -= qtmp;
+}
+
+// ============================================================================
+// Kernel: CN chain-rule gradient (pairwise)
+// For each pair (i,j):
+//   dr = (rij - rcov_sum) / rcov_sum
+//   dS/dr = (kn / sqrt(pi)) * exp(-kn^2 * dr^2) / rcov_sum
+//   fac = dS/dr / rij * (dEdcn[i]*dlogdcn[i] + dEdcn[j]*dlogdcn[j])
+//   grad_i += fac * (ri - rj),  grad_j -= fac * (ri - rj)
+// Reference: gfnff_method.cpp:calculateCoordinationNumberDerivatives
+// ============================================================================
+__global__ void k_cn_chainrule(
+    int n_pairs,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const double* __restrict__ rcov_sum,
+    const double* __restrict__ coords,
+    const double* __restrict__ dEdcn,
+    const double* __restrict__ dlogdcn,
+    double*                    grad,
+    double        kn)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_pairs) return;
+
+    int i = idx_i[tid], j = idx_j[tid];
+    double dx = coords[3*i]   - coords[3*j];
+    double dy = coords[3*i+1] - coords[3*j+1];
+    double dz = coords[3*i+2] - coords[3*j+2];
+    double r2 = dx*dx + dy*dy + dz*dz;
+    double rij = sqrt(r2);
+    if (rij < 1e-10) return;
+
+    double rcov = rcov_sum[tid];
+    double dr = (rij - rcov) / rcov;
+
+    // dS/dr = (kn / sqrt(pi)) * exp(-kn^2 * dr^2) / rcov
+    static const double inv_sqrtpi = 0.5641895835477563;  // 1/sqrt(pi)
+    double dSdr = kn * inv_sqrtpi * exp(-kn * kn * dr * dr) / rcov;
+
+    // Combined chain-rule factor
+    double fac = dSdr / rij * (dEdcn[i] * dlogdcn[i] + dEdcn[j] * dlogdcn[j]);
+
+    add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
+    add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
 }

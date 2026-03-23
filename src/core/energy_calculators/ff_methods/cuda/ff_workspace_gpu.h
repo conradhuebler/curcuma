@@ -5,8 +5,10 @@
  * Claude Generated (March 2026): GPU counterpart to FFWorkspace.
  * Accepts a GFNFFParameterSet, uploads interaction lists as SoA to GPU
  * once at construction, then for each step: uploads geometry/charges/CN,
- * launches all 7 CUDA kernels, downloads results.  Coulomb TERM 2+3 and
- * the CN chain-rule gradient are handled on CPU (O(N) loops).
+ * launches all CUDA kernels, downloads results.
+ *
+ * All gradient contributions (including CN chain-rule) are computed on GPU
+ * for full consistency.  No CPU postprocessing needed for gradients.
  *
  * Interface is deliberately CUDA-agnostic so it can be forward-declared
  * from non-CUDA translation units.  All CUDA types are hidden in the Pimpl
@@ -95,12 +97,41 @@ public:
      * @param cn   D3 CN (size N)
      * @param cnf  CNF factors for Coulomb TERM 1b (size N)
      * @param dcn  3 sparse N×N matrices: ∂CN_i/∂x_j, ∂CN_i/∂y_j, ∂CN_i/∂z_j
+     * @deprecated Use setCNPairList() + setDlogDCN() instead for GPU-only gradient
      */
     void setCNDerivatives(const Vector& cn, const Vector& cnf,
                           const std::vector<SpMatrix>& dcn);
 
     /// Set dc6/dcn pointer for D4 dispersion CN gradient (CPU chain-rule only)
+    /// @deprecated Dispersion dEdcn will be computed on GPU
     void setDC6DCNPtr(const Matrix* ptr);
+
+    // =========================================================================
+    // GPU-only CN chain-rule data (replaces sparse dcn matrices)
+    // Claude Generated (March 2026): Full GPU gradient consistency
+    // =========================================================================
+
+    /**
+     * @brief Set CN pair list for GPU CN chain-rule gradient kernel.
+     *
+     * All atom pairs (i,j) within CN cutoff, with pre-computed scaled
+     * covalent radius sums. Uploaded to GPU once; geometry checked at runtime.
+     *
+     * @param idx_i      Atom i indices (size n_pairs)
+     * @param idx_j      Atom j indices (size n_pairs)
+     * @param rcov_sum   Scaled covalent radius sum per pair: 4/3*(rcov_i+rcov_j) in Bohr
+     */
+    void setCNPairList(const std::vector<int>& idx_i,
+                       const std::vector<int>& idx_j,
+                       const std::vector<double>& rcov_sum);
+
+    /**
+     * @brief Set per-atom dlogdcn (logistic squashing factor for CN chain-rule).
+     * dlogdcn[i] = exp(cnmax) / (exp(cnmax) + exp(cn_raw[i]))
+     * Must be called every step after CN computation.
+     * @param dlogdcn  Per-atom squashing factor (size N)
+     */
+    void setDlogDCN(const Vector& dlogdcn);
 
     /// Set baseline energy (e0 from parameter set, added to total)
     void setE0(double e0);
@@ -203,18 +234,27 @@ private:
     // Coulomb self-energy parameters (O(N), extracted at init)
     Vector  m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf, m_coul_chi_static;
 
-    // CN chain-rule state
+    // CN chain-rule state (legacy sparse matrix path, deprecated)
     Vector              m_cn, m_cnf;
     std::vector<SpMatrix> m_dcn;
 
-    // Dynamic per-step state (also stored for postProcessCPU)
+    // GPU CN chain-rule state (replaces sparse dcn matrices)
+    Vector m_dlogdcn;                       ///< [N] logistic squashing factor
+    std::vector<int>    m_cn_pair_i;        ///< CN pair atom i indices
+    std::vector<int>    m_cn_pair_j;        ///< CN pair atom j indices
+    std::vector<double> m_cn_pair_rcov;     ///< CN pair scaled cov. radius sum
+    int                 m_cn_n_pairs = 0;   ///< Number of CN pairs
+    bool                m_cn_pairs_on_gpu = false; ///< Whether CN pairs uploaded to GPU
+    double              m_kn = -7.5;        ///< CN exponential decay constant
+
+    // Dynamic per-step state
     Vector  m_eeq_charges;
     Vector  m_topology_charges;
 
-    // DC6/DCN pointer for D4 CN gradient
+    // DC6/DCN pointer for D4 CN gradient (legacy, will be moved to GPU)
     const Matrix* m_dc6dcn_ptr = nullptr;
 
-    // CPU-side dispersion pairs (for dEdcn chain-rule, not computed on GPU)
+    // CPU-side dispersion pairs (for dEdcn chain-rule — temporary until GPU migration)
     std::vector<GFNFFDispersion> m_dispersions_cpu;
     Matrix m_geometry_cpu;  ///< Last geometry (Bohr) for CPU-side dispersion dEdcn
 

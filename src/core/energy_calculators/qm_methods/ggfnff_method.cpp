@@ -216,9 +216,33 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
 
     if (gradient) {
         const Vector& cnf = m_gfnff->getLastCNF();
-        const auto& dcn = m_gfnff->getLastCNDerivatives();
-        m_gpu_workspace->setCNDerivatives(cn, cnf, dcn);
 
+        // GPU CN chain-rule: pair list + dlogdcn (replaces sparse dcn matrices)
+        // Generate CN pair list once (first call with gradient).
+        // The cutoff (2.5× rcov) is generous enough for short MD runs.
+        if (!m_cn_pairs_generated) {
+            generateCNPairList(geom_bohr);
+            m_gpu_workspace->setCNPairList(m_cn_pair_i, m_cn_pair_j, m_cn_pair_rcov);
+        }
+
+        // Compute dlogdcn = dCN_squashed/dCN_raw (logistic squashing derivative)
+        // CPU uses cn_raw in calculateCoordinationNumberDerivatives (line 4488).
+        // getLastCN() returns cn_squashed = log(1+e^cnmax) - log(1+e^(cnmax-cn_raw)).
+        // Inversion: e^(cnmax-cn_raw) = e^(lncnmax - cn_squashed) - 1
+        // dlogdcn = e^(cnmax-cn_raw) / (1 + e^(cnmax-cn_raw)) = (x-1)/x
+        // where x = e^(lncnmax - cn_squashed)
+        constexpr double cnmax = 4.4;
+        const double lncnmax = std::log(1.0 + std::exp(cnmax));
+        const int N = static_cast<int>(cn.size());
+        Vector dlogdcn(N);
+        for (int i = 0; i < N; ++i) {
+            double expval = std::exp(lncnmax - cn[i]);
+            dlogdcn[i] = (expval - 1.0) / expval;  // = 1 - exp(cn[i] - lncnmax)
+        }
+        m_gpu_workspace->setDlogDCN(dlogdcn);
+        m_gpu_workspace->setCNDerivatives(cn, cnf, {}); // cn/cnf still needed, dcn empty
+
+        // DC6/DCN for dispersion dEdcn (still CPU-side for now)
         const Matrix* dc6dcn = m_gfnff->getDC6DCNPtr();
         if (dc6dcn) {
             m_gpu_workspace->setDC6DCNPtr(dc6dcn);
@@ -416,6 +440,56 @@ json GGFNFFComputationalMethod::getEnergyDecomposition() const
     json energy_json;
     energy_json["GPU_Total"]  = m_last_energy;
     return energy_json;
+}
+
+// ---------------------------------------------------------------------------
+// Generate CN pair list for GPU CN chain-rule kernel
+// Claude Generated (March 2026): Replaces sparse dcn matrices
+// ---------------------------------------------------------------------------
+
+void GGFNFFComputationalMethod::generateCNPairList(const Matrix& geom_bohr)
+{
+    const int N = static_cast<int>(geom_bohr.rows());
+    const auto& rcov_d3 = GFNFFParameters::covalent_rad_d3;
+    constexpr double rcov_scale = 4.0 / 3.0;
+    constexpr double kn = -7.5;
+
+    // Cutoff: where exp(-kn^2 * dr^2) < 1e-12 → |dr| > 1.2 → r > 2.2 * rcov_sum
+    constexpr double cutoff_factor = 2.5;
+
+    m_cn_pair_i.clear();
+    m_cn_pair_j.clear();
+    m_cn_pair_rcov.clear();
+
+    for (int i = 0; i < N; ++i) {
+        int zi = m_atom_types[i];
+        if (zi < 1 || zi > static_cast<int>(rcov_d3.size())) continue;
+        double rcov_i = rcov_d3[zi - 1] * rcov_scale;
+
+        for (int j = i + 1; j < N; ++j) {
+            int zj = m_atom_types[j];
+            if (zj < 1 || zj > static_cast<int>(rcov_d3.size())) continue;
+            double rcov_j = rcov_d3[zj - 1] * rcov_scale;
+            double rcov_sum = rcov_i + rcov_j;
+
+            double dx = geom_bohr(i, 0) - geom_bohr(j, 0);
+            double dy = geom_bohr(i, 1) - geom_bohr(j, 1);
+            double dz = geom_bohr(i, 2) - geom_bohr(j, 2);
+            double r2 = dx*dx + dy*dy + dz*dz;
+            double rij = std::sqrt(r2);
+
+            if (rij < cutoff_factor * rcov_sum && rij > 1e-10) {
+                m_cn_pair_i.push_back(i);
+                m_cn_pair_j.push_back(j);
+                m_cn_pair_rcov.push_back(rcov_sum);
+            }
+        }
+    }
+
+    m_cn_pairs_generated = true;
+
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::info(fmt::format("  CN pair list: {} pairs (N={})", m_cn_pair_i.size(), N));
 }
 
 #endif // USE_CUDA

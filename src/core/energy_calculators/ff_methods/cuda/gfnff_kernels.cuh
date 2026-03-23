@@ -271,6 +271,53 @@ __global__ void k_hbonds(
 );
 
 // ============================================================================
+// GPU-only postprocess kernels (replace postProcessCPU)
+// Claude Generated (March 2026): Full GPU gradient consistency
+// ============================================================================
+
+/// Coulomb TERM 2+3 self-energy (O(N), energy only — no gradient contribution)
+/// E_en = -Σ qi * chi_eff_i,  E_self = 0.5 * Σ qi² * (gam_i + sqrt(2/pi)/sqrt(alp_i))
+/// Reference: ff_workspace.cpp::postProcess() lines 354-383
+__global__ void k_coulomb_self(
+    int N,
+    const double* __restrict__ eeq_charges,   ///< [N] dynamic EEQ charges
+    const double* __restrict__ chi_base,       ///< [N] base electronegativity
+    const double* __restrict__ cnf,            ///< [N] CN-dependent chi correction
+    const double* __restrict__ cn,             ///< [N] coordination numbers
+    const double* __restrict__ gam,            ///< [N] chemical hardness
+    const double* __restrict__ alp,            ///< [N] Coulomb exponent
+    double*                    energy           ///< [1] atomicAdd
+);
+
+/// Subtract qtmp from dEdcn in-place: dEdcn[i] -= q[i]*cnf[i]/(2*sqrt(cn[i])+eps)
+/// This implements Coulomb TERM 1b chain-rule correction.
+/// Reference: ff_workspace.cpp::postProcess() lines 391-399
+__global__ void k_subtract_qtmp(
+    int N,
+    const double* __restrict__ eeq_charges,
+    const double* __restrict__ cnf,
+    const double* __restrict__ cn,
+    double*                    dEdcn            ///< [N] modified in-place
+);
+
+/// CN chain-rule gradient: pairwise kernel over CN-relevant atom pairs.
+/// For each pair (i,j): grad_i += fac*(ri-rj), grad_j -= fac*(ri-rj)
+/// where fac = dS/dr / rij * (dEdcn[i]*dlogdcn[i] + dEdcn[j]*dlogdcn[j])
+/// Replaces: dcn[dim] * dEdcn_combined sparse matrix-vector multiply
+/// Reference: gfnff_method.cpp:calculateCoordinationNumberDerivatives (CN formula)
+__global__ void k_cn_chainrule(
+    int n_pairs,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const double* __restrict__ rcov_sum,       ///< [n_pairs] scaled cov. radius sum
+    const double* __restrict__ coords,
+    const double* __restrict__ dEdcn,          ///< [N] combined dE/dCN (bond+disp-qtmp)
+    const double* __restrict__ dlogdcn,        ///< [N] logistic squashing factor
+    double*                    grad,
+    double        kn                            ///< CN decay constant (-7.5)
+);
+
+// ============================================================================
 // Utility: zero device array
 // ============================================================================
 __global__ void k_zero_double(double* arr, int n);
