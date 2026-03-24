@@ -239,6 +239,7 @@ class Molecule
       inline void writeXYZFile() const { writeXYZFile(Name() + ".xyz"); }
 
       void appendXYZFile(const std::string& filename) const;
+      void appendXYZFile(const std::string& filename, const std::string& comment) const;
       inline void appendXYZFile() const { appendXYZFile(Name() + ".xyz"); }
 
       // Claude Generated (Nov 2025): VTF trajectory output for CG systems

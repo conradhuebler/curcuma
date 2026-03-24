@@ -29,6 +29,12 @@
 #include <vector>
 #include <map>
 
+/// Claude Generated: Sequence entry with explicit Xx connection point selection via prime notation
+struct SequenceEntry {
+    std::string fragment_name;  ///< Fragment key (without primes) — key into m_fragments
+    int xx_selection;           ///< 0=first Xx, 1=second Xx, 2=third, ... (from prime count)
+};
+
 /**
  * @brief Result of connecting a fragment to a polymer.
  *
@@ -82,19 +88,24 @@ public:
     void ReadControlFile() override {}
     void LoadControlJson() override {}
 
+    friend class TestablePolymerBuild;  // Claude Generated: test access to parsing methods
+
 private:
     /**
      * @brief Parse the polymer sequence string
      * @param sequence The sequence string (e.g., (A)10-B-(C)5)
-     * @return List of fragment names in order
+     * @return List of sequence entries with fragment names and Xx selection
      */
-    std::vector<std::string> parseSequence(const std::string& sequence);
+    std::vector<SequenceEntry> parseSequence(const std::string& sequence);
+
+    /// Claude Generated: Parse inner token string into SequenceEntry list (e.g., "AA'" → [{A,0},{A,1}])
+    std::vector<SequenceEntry> parseTokens(const std::string& content);
 
     /**
      * @brief Assemble the polymer from the sequence of fragments
      * @param sequence List of fragment names
      */
-    void assemblePolymer(const std::vector<std::string>& sequence);
+    void assemblePolymer(const std::vector<SequenceEntry>& sequence);
 
     /**
      * @brief Connect a new fragment to the current polymer using LM optimization.
@@ -117,7 +128,8 @@ private:
         const std::string& fragment_file,
         const std::vector<std::pair<int, int>>& prev_tracked_xx,
         const std::vector<std::pair<int, int>>& prev_interface_bonds,
-        int step_number = 0);
+        int step_number = 0,
+        int xx_selection = 0);
 
     /// Claude Generated: Core connection logic accepting a Molecule directly (used by connectFragment and D&C merge)
     ConnectionResult connectMolecule(
@@ -126,11 +138,12 @@ private:
         const std::vector<std::pair<int, int>>& prev_tracked_xx,
         const std::vector<std::pair<int, int>>& prev_interface_bonds,
         int step_number = 0,
-        const std::vector<std::pair<int, int>>& fragment_internal_bonds = {});
+        const std::vector<std::pair<int, int>>& fragment_internal_bonds = {},
+        int xx_selection = 0);
 
-    /// Claude Generated: Build a sub-chain from a list of fragment names (for divide-and-conquer)
+    /// Claude Generated: Build a sub-chain from a list of sequence entries (for divide-and-conquer)
     SubchainResult buildSubchain(
-        const std::vector<std::string>& fragment_names,
+        const std::vector<SequenceEntry>& fragment_entries,
         int monomer_id_offset,
         int subchain_index);
 

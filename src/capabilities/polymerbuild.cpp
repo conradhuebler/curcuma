@@ -207,7 +207,7 @@ PolymerBuild::PolymerBuild(const json& controller, bool silent)
     if (controller.contains("verbosity"))
         verbosity = std::max(0, std::min(3, controller["verbosity"].get<int>()));
     else if (m_config.get<bool>("verbose", true))
-        verbosity = 3;
+        verbosity = 2;
     CurcumaLogger::set_verbosity(verbosity);
 
     // Parse fragments map
@@ -242,11 +242,17 @@ void PolymerBuild::start()
     CurcumaLogger::info("Starting PolymerBuild");
     CurcumaLogger::param("sequence", sequence_str);
 
-    std::vector<std::string> sequence = parseSequence(sequence_str);
+    std::vector<SequenceEntry> sequence = parseSequence(sequence_str);
     if (sequence.empty()) {
         CurcumaLogger::error("Parsed sequence is empty or invalid");
         return;
     }
+
+    // Log parsed sequence with Xx selection info — Claude Generated
+    std::string seq_str;
+    for (const auto& e : sequence)
+        seq_str += e.fragment_name + std::string(e.xx_selection, '\'') + " ";
+    CurcumaLogger::info(fmt::format("Parsed sequence ({} monomers): {}", sequence.size(), seq_str));
 
     assemblePolymer(sequence);
 }
@@ -256,24 +262,75 @@ void PolymerBuild::printHelp() const
     // Handled by ParameterRegistry
 }
 
-std::vector<std::string> PolymerBuild::parseSequence(const std::string& sequence)
+/// Claude Generated: Parse inner token string into SequenceEntry list
+/// e.g., "AA'" → [{A,0},{A,1}], "B''" → [{B,2}], "pdmaema" → [{pdmaema,0}]
+/// Convention: Each uppercase letter starts a new token. Lowercase/digits/underscores
+/// continue the current token. Use '-' to force a new token boundary for names
+/// starting with lowercase (rare). This allows (AA')3 to mean alternating Xx selection.
+std::vector<SequenceEntry> PolymerBuild::parseTokens(const std::string& content)
 {
-    std::vector<std::string> result;
-    // Simple parser for (A)n and A-B-C
-    std::regex re("(\\(([A-Za-z0-9_]+)\\)([0-9]+))|([A-Za-z0-9_]+)");
+    std::vector<SequenceEntry> tokens;
+    size_t pos = 0;
+    while (pos < content.size()) {
+        // Skip optional separator
+        if (content[pos] == '-') { ++pos; continue; }
+
+        // Skip unexpected characters
+        if (!std::isalnum(content[pos]) && content[pos] != '_' && content[pos] != '\'') {
+            ++pos; continue;
+        }
+
+        // Start a new token: first char must be alphanumeric or underscore
+        if (content[pos] == '\'') { ++pos; continue; }  // stray prime, skip
+
+        size_t name_start = pos;
+        ++pos;  // consume first character
+
+        // Continue token with lowercase, digits, underscores (NOT uppercase — that starts a new token)
+        while (pos < content.size() && (std::islower(content[pos]) || std::isdigit(content[pos]) || content[pos] == '_'))
+            ++pos;
+
+        std::string name = content.substr(name_start, pos - name_start);
+
+        // Count trailing prime characters for xx_selection
+        int primes = 0;
+        while (pos < content.size() && content[pos] == '\'') {
+            ++primes;
+            ++pos;
+        }
+
+        tokens.push_back({name, primes});
+    }
+    return tokens;
+}
+
+/// Claude Generated: Two-level parser supporting prime notation for Xx selection
+/// e.g., "(AA')3-B''" → [{A,0},{A,1},{A,0},{A,1},{A,0},{A,1},{B,2}]
+std::vector<SequenceEntry> PolymerBuild::parseSequence(const std::string& sequence)
+{
+    std::vector<SequenceEntry> result;
+
+    // Outer regex: matches either "(content)N" repetition groups or bare tokens with primes
+    std::regex re(R"((\(([^)]+)\)(\d+))|([A-Za-z0-9_]+'*))");
     auto it = std::sregex_iterator(sequence.begin(), sequence.end(), re);
     auto end = std::sregex_iterator();
 
     for (; it != end; ++it) {
         std::smatch match = *it;
-        if (match[1].matched) { // (NAME)NUMBER
-            std::string name = match[2].str();
+        if (match[1].matched) {
+            // Repetition group: (content)N
+            std::string inner = match[2].str();
             int count = std::stoi(match[3].str());
+            std::vector<SequenceEntry> inner_tokens = parseTokens(inner);
             for (int i = 0; i < count; ++i) {
-                result.push_back(name);
+                for (const auto& tok : inner_tokens)
+                    result.push_back(tok);
             }
-        } else if (match[4].matched) { // NAME
-            result.push_back(match[4].str());
+        } else if (match[4].matched) {
+            // Bare token (possibly with primes): e.g., "A", "B'", "C''"
+            std::vector<SequenceEntry> tokens = parseTokens(match[4].str());
+            for (const auto& tok : tokens)
+                result.push_back(tok);
         }
     }
 
@@ -384,7 +441,7 @@ std::pair<Position, Position> PolymerBuild::optimizeFragmentPlacement(
 
     // Always write trajectory — one file per LM call, one frame per iteration.
     // Claude Generated: helper lambda to render a single XYZ frame
-    std::string traj_filename = fmt::format("lm_trajectory_step{:02d}.xyz", step_number);
+    std::string traj_filename = fmt::format("{}_lm_{:03d}.xyz", polymer.Name(), step_number);
     std::ofstream traj_file(traj_filename);
 
     Geometry frag_geom_orig = fragment.getGeometry();
@@ -447,11 +504,12 @@ ConnectionResult PolymerBuild::connectFragment(
     const std::string& fragment_file,
     const std::vector<std::pair<int, int>>& prev_tracked_xx,
     const std::vector<std::pair<int, int>>& prev_interface_bonds,
-    int step_number)
+    int step_number,
+    int xx_selection)
 {
     Molecule next;
     next.LoadMolecule(fragment_file);
-    return connectMolecule(current_polymer, next, prev_tracked_xx, prev_interface_bonds, step_number);
+    return connectMolecule(current_polymer, next, prev_tracked_xx, prev_interface_bonds, step_number, {}, xx_selection);
 }
 
 /// Claude Generated: Core connection logic accepting a Molecule directly
@@ -461,7 +519,8 @@ ConnectionResult PolymerBuild::connectMolecule(
     const std::vector<std::pair<int, int>>& prev_tracked_xx,
     const std::vector<std::pair<int, int>>& prev_interface_bonds,
     int step_number,
-    const std::vector<std::pair<int, int>>& fragment_internal_bonds)
+    const std::vector<std::pair<int, int>>& fragment_internal_bonds,
+    int xx_selection)
 {
     ConnectionResult result;
 
@@ -516,27 +575,25 @@ ConnectionResult PolymerBuild::connectMolecule(
         polymer_xx_idx, polymer_active_idx,
         Elements::ElementAbbr[current_polymer.Atom(polymer_active_idx).first]));
 
-    // Find best-matching Xx in next fragment
-    // Use direction-based matching: pick Xx whose bond direction best aligns
-    // with -v_out (opposite to polymer's Xx→active direction)
+    // Compute polymer chain direction for initial fragment placement
     Position polymer_xx_pos = current_polymer.Atom(polymer_xx_idx).second;
     Position polymer_active_pos = current_polymer.Atom(polymer_active_idx).second;
     Position v_out = (polymer_xx_pos - polymer_active_pos).normalized();
 
-    int best_next_xx = next_xx.front();
-    double best_dot = -2.0;
-    for (int xx : next_xx) {
-        int active = findBondedAtom(next, xx);
-        if (active < 0) continue;
-        Position v_in = (next.Atom(xx).second - next.Atom(active).second).normalized();
-        double dot = v_in.dot(-v_out);
-        if (dot > best_dot) {
-            best_dot = dot;
-            best_next_xx = xx;
-        }
+    // Claude Generated: Select Xx in next fragment by index (xx_selection from prime notation)
+    // next_xx is built by scanning atoms in index order, so next_xx[0]=first Xx, next_xx[1]=second, etc.
+    int next_xx_idx;
+    if (xx_selection >= 0 && xx_selection < (int)next_xx.size()) {
+        next_xx_idx = next_xx[xx_selection];
+        CurcumaLogger::info(fmt::format(
+            "connectMolecule: Using Xx#{} (atom idx {}) from prime notation",
+            xx_selection, next_xx_idx));
+    } else {
+        CurcumaLogger::error(fmt::format(
+            "Requested Xx#{} but fragment has only {} Xx — using Xx#0",
+            xx_selection, next_xx.size()));
+        next_xx_idx = next_xx[0];
     }
-
-    int next_xx_idx = best_next_xx;
     int next_active_idx = findBondedAtom(next, next_xx_idx);
     if (next_active_idx < 0) {
         CurcumaLogger::error("connectFragment: Could not find bonded atom for Xx in next fragment");
@@ -1105,15 +1162,15 @@ void PolymerBuild::resolveOverlaps(Molecule& mol, int max_steps, double max_disp
 
 /// Claude Generated: Build a sub-chain from a list of fragment names
 SubchainResult PolymerBuild::buildSubchain(
-    const std::vector<std::string>& fragment_names,
+    const std::vector<SequenceEntry>& fragment_entries,
     int monomer_id_offset,
     int subchain_index)
 {
     SubchainResult sc_result;
-    if (fragment_names.empty()) return sc_result;
+    if (fragment_entries.empty()) return sc_result;
 
     // Load first fragment
-    std::string first_name = fragment_names[0];
+    std::string first_name = fragment_entries[0].fragment_name;
     if (m_fragments.find(first_name) == m_fragments.end()) {
         CurcumaLogger::error("Fragment not found in map: " + first_name);
         return sc_result;
@@ -1124,13 +1181,14 @@ SubchainResult PolymerBuild::buildSubchain(
     polymer.setName(fmt::format("subchain_{:02d}", subchain_index));
     polymer.setCharge(0);
 
-    // Debug: Show raw first fragment with Xx
+    // Debug: Show raw first fragment with Xx — appended to consolidated _debug.xyz
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("DEBUG STEP 1: Raw first fragment '{}' ({} atoms, with Xx)",
                                         first_name, polymer.AtomCount()));
-        std::string debug_file = fmt::format("{}_step1_00_raw_Xx.xyz", polymer.Name());
-        polymer.writeXYZFile(debug_file);
-        CurcumaLogger::info(fmt::format("DEBUG: Wrote {}", debug_file));
+        // Claude Generated: one debug file per step, all frames within a step have the same atom count
+        std::string debug_file = fmt::format("{}_debug_01.xyz", polymer.Name());
+        polymer.appendXYZFile(debug_file, fmt::format("step 01: raw_Xx ({} atoms)", polymer.AtomCount()));
+        CurcumaLogger::info(fmt::format("DEBUG: Appended step1 raw_Xx frame to {}", debug_file));
 
         Molecule capped = polymer;
         Mol capped_info = capped.getMolInfo();
@@ -1141,9 +1199,8 @@ SubchainResult PolymerBuild::buildSubchain(
             capped_info.m_charge = 0;
         }
         capped.LoadMolecule(capped_info);
-        std::string capped_file = fmt::format("{}_step1_01_capped_H.xyz", polymer.Name());
-        capped.writeXYZFile(capped_file);
-        CurcumaLogger::info(fmt::format("DEBUG: Wrote (Xx→H capped) {}", capped_file));
+        capped.appendXYZFile(debug_file, fmt::format("step 01: capped_H ({} atoms)", capped.AtomCount()));
+        CurcumaLogger::info(fmt::format("DEBUG: Appended step1 capped_H frame to {}", debug_file));
     }
 
     // Initialize Xx tracking: find all Xx atoms and their bonded atoms
@@ -1169,19 +1226,22 @@ SubchainResult PolymerBuild::buildSubchain(
     bool optimize = m_config.get<bool>("optimize", true);
 
     // Connect remaining fragments
-    for (size_t i = 1; i < fragment_names.size(); ++i) {
-        std::string next_name = fragment_names[i];
+    for (size_t i = 1; i < fragment_entries.size(); ++i) {
+        const auto& entry = fragment_entries[i];
+        std::string next_name = entry.fragment_name;
         if (m_fragments.find(next_name) == m_fragments.end()) {
             CurcumaLogger::error("Fragment not found in map: " + next_name);
             continue;
         }
 
-        CurcumaLogger::info(fmt::format("[sc{:02d}] Adding fragment {}/{}: {}",
-            subchain_index, i, fragment_names.size() - 1, next_name));
+        CurcumaLogger::info(fmt::format("[sc{:02d}] Adding fragment {}/{}: {}{}",
+            subchain_index, i, fragment_entries.size() - 1, next_name,
+            std::string(entry.xx_selection, '\'')));
 
-        // Use LM-based connectFragment (pass step_number for debug output)
+        // Use LM-based connectFragment with explicit Xx selection — Claude Generated
         ConnectionResult conn_result = connectFragment(
-            polymer, m_fragments[next_name], tracked_xx, interface_bonds, static_cast<int>(i));
+            polymer, m_fragments[next_name], tracked_xx, interface_bonds,
+            static_cast<int>(i), entry.xx_selection);
 
         polymer = conn_result.polymer;
         tracked_xx = conn_result.tracked_xx;
@@ -1199,16 +1259,17 @@ SubchainResult PolymerBuild::buildSubchain(
                        fmt::format("step {:02d} post-connect", i),
                        interface_bonds);
 
-        // Debug output
+        // Debug output — appended to consolidated _debug.xyz
         if (CurcumaLogger::get_verbosity() >= 3) {
             int xx_count = 0;
             for (int k = 0; k < polymer.AtomCount(); ++k)
                 if (polymer.Atom(k).first == 0) xx_count++;
             CurcumaLogger::info(fmt::format("DEBUG: After connectFragment - {} atoms, {} Xx remaining",
                                             polymer.AtomCount(), xx_count));
-            std::string debug_file = fmt::format("{}_debug_{:02d}_connected.xyz", polymer.Name(), i);
-            polymer.writeXYZFile(debug_file);
-            CurcumaLogger::info(fmt::format("DEBUG: Wrote {}", debug_file));
+            // Claude Generated: one debug file per step — all frames have the same atom count
+            std::string debug_file = fmt::format("{}_debug_{:02d}.xyz", polymer.Name(), i);
+            polymer.appendXYZFile(debug_file, fmt::format("step {:02d}: connected ({} atoms)", i, polymer.AtomCount()));
+            CurcumaLogger::info(fmt::format("DEBUG: Appended step {:02d} connected frame to {}", i, debug_file));
         }
 
         // Rebuild topology: intra-monomer geometric + explicit interface bonds only — Claude Generated
@@ -1236,10 +1297,18 @@ SubchainResult PolymerBuild::buildSubchain(
             polymer.setTopologyMatrix(topo);
         }
 
-        validateTopology(polymer, atom_monomer_id, interface_bonds,
+        int topo_issues = validateTopology(polymer, atom_monomer_id, interface_bonds,
                          fmt::format("step {:02d} post-connect", i));
-        repairUnboundAtoms(polymer, atom_monomer_id, interface_bonds,
+        int repaired = repairUnboundAtoms(polymer, atom_monomer_id, interface_bonds,
                            fmt::format("step {:02d} post-connect", i));
+
+        // Claude Generated: per-step connectivity status visible at verbose ≥1 for easy scanning
+        if (topo_issues == 0 && repaired == 0)
+            CurcumaLogger::success(fmt::format("step {:02d}: connectivity OK", i));
+        else if (topo_issues > 0)
+            CurcumaLogger::error(fmt::format("step {:02d}: {} connectivity issue(s) — check above", i, topo_issues));
+        else
+            CurcumaLogger::warn(fmt::format("step {:02d}: {} atom(s) repaired", i, repaired));
 
         // Manual bond count verification — Claude Generated
         {
@@ -1319,10 +1388,11 @@ SubchainResult PolymerBuild::buildSubchain(
 
             int spurious_cross = cross_geo - (int)interface_bonds.size();
             if (spurious_cross > 0) {
-                // Pre-optimization overlap: warn only (optimization will attempt to resolve)
-                CurcumaLogger::warn(fmt::format(
-                    "step {:02d} pre-opt: {} cross-monomer overlaps (will optimize), topo={}, geo_all={}",
-                    i, spurious_cross, topo_bonds, geo_bonds_all));
+                // Pre-optimization overlap: optimizer handles this, only show at verbose ≥2
+                if (CurcumaLogger::get_verbosity() >= 2)
+                    CurcumaLogger::warn(fmt::format(
+                        "step {:02d} pre-opt: {} cross-monomer overlaps (will optimize), topo={}, geo_all={}",
+                        i, spurious_cross, topo_bonds, geo_bonds_all));
             } else {
                 CurcumaLogger::info(fmt::format(
                     "step {:02d} BOND-CHECK: OK — topo={}, geo_all={}, atoms={}, monomers={}",
@@ -1361,9 +1431,10 @@ SubchainResult PolymerBuild::buildSubchain(
                                interface_bonds);
 
                 if (CurcumaLogger::get_verbosity() >= 3) {
-                    std::string debug_file = fmt::format("{}_debug_{:02d}_postLJ_preH.xyz", polymer.Name(), i);
-                    polymer.writeXYZFile(debug_file);
-                    CurcumaLogger::info(fmt::format("DEBUG: Wrote {}", debug_file));
+                    // Claude Generated: same per-step debug file — postLJ has same atom count as connected
+                    std::string debug_file = fmt::format("{}_debug_{:02d}.xyz", polymer.Name(), i);
+                    polymer.appendXYZFile(debug_file, fmt::format("step {:02d}: postLJ ({} atoms)", i, polymer.AtomCount()));
+                    CurcumaLogger::info(fmt::format("DEBUG: Appended step {:02d} postLJ frame to {}", i, debug_file));
                 }
 
                 int opt_max_iter = m_config.get<int>("opt_max_iter", 0);
@@ -1404,9 +1475,10 @@ SubchainResult PolymerBuild::buildSubchain(
                 polymer_opt.setCharge(0);
 
                 if (CurcumaLogger::get_verbosity() >= 3) {
-                    std::string debug_file = fmt::format("{}_debug_{:02d}_forFF.xyz", polymer.Name(), i);
-                    polymer_opt.writeXYZFile(debug_file);
-                    CurcumaLogger::info(fmt::format("DEBUG: Wrote {}", debug_file));
+                    // Claude Generated: same per-step debug file — forFF (Xx→H) has same atom count
+                    std::string debug_file = fmt::format("{}_debug_{:02d}.xyz", polymer.Name(), i);
+                    polymer_opt.appendXYZFile(debug_file, fmt::format("step {:02d}: forFF ({} atoms)", i, polymer_opt.AtomCount()));
+                    CurcumaLogger::info(fmt::format("DEBUG: Appended step {:02d} forFF frame to {}", i, debug_file));
                 }
 
                 // Save current good structure before optimization
@@ -1428,9 +1500,10 @@ SubchainResult PolymerBuild::buildSubchain(
                         polymer.setGeometry(result_geom);
 
                         if (CurcumaLogger::get_verbosity() >= 3) {
-                            std::string debug_file = fmt::format("{}_debug_{:02d}_postFF.xyz", polymer.Name(), i);
-                            polymer.writeXYZFile(debug_file);
-                            CurcumaLogger::info(fmt::format("DEBUG: Wrote {}", debug_file));
+                            // Claude Generated: same per-step debug file — postFF has same atom count
+                            std::string debug_file = fmt::format("{}_debug_{:02d}.xyz", polymer.Name(), i);
+                            polymer.appendXYZFile(debug_file, fmt::format("step {:02d}: postFF ({} atoms)", i, polymer.AtomCount()));
+                            CurcumaLogger::info(fmt::format("DEBUG: Appended step {:02d} postFF frame to {}", i, debug_file));
                         }
                     } else {
                         // Optimization produced invalid structure - restore and abort fragment
@@ -1740,7 +1813,7 @@ SubchainResult PolymerBuild::buildSubchain(
 }
 
 /// Claude Generated: Assemble polymer — dispatches between sequential and divide-and-conquer
-void PolymerBuild::assemblePolymer(const std::vector<std::string>& sequence)
+void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
 {
     int scs = m_config.get<int>("subchain_size", 0);
 
@@ -1751,11 +1824,11 @@ void PolymerBuild::assemblePolymer(const std::vector<std::string>& sequence)
             sequence.size(), scs));
 
         // Split sequence into sub-sequences
-        std::vector<std::vector<std::string>> sub_sequences;
+        std::vector<std::vector<SequenceEntry>> sub_sequences;
         for (size_t i = 0; i < sequence.size(); i += scs) {
             size_t end = std::min(i + (size_t)scs, sequence.size());
             sub_sequences.push_back(
-                std::vector<std::string>(sequence.begin() + i, sequence.begin() + end));
+                std::vector<SequenceEntry>(sequence.begin() + i, sequence.begin() + end));
         }
         CurcumaLogger::info(fmt::format("Split into {} sub-chains", sub_sequences.size()));
 
@@ -1769,10 +1842,10 @@ void PolymerBuild::assemblePolymer(const std::vector<std::string>& sequence)
         for (size_t sc = 0; sc < sub_sequences.size(); ++sc) {
             int monomer_offset = static_cast<int>(sc * scs);
 
-            // Build a cache key from the fragment name list
+            // Build a cache key from the fragment name list including Xx selection — Claude Generated
             std::string cache_key;
-            for (const auto& name : sub_sequences[sc])
-                cache_key += name + ",";
+            for (const auto& entry : sub_sequences[sc])
+                cache_key += entry.fragment_name + std::string(entry.xx_selection, '\'') + ",";
 
             auto it = subchain_cache.find(cache_key);
             if (it != subchain_cache.end()) {

@@ -1516,6 +1516,15 @@ void Molecule::appendXYZFile(const std::string& filename) const
     input.close();
 }
 
+/// Claude Generated: append XYZ frame with custom comment line (for multi-frame trajectory files)
+void Molecule::appendXYZFile(const std::string& filename, const std::string& comment) const
+{
+    std::ofstream out(filename, std::ios_base::app);
+    out << fmt::format("{}\n{}\n", AtomCount(), comment);
+    for (int i = 0; i < AtomCount(); ++i)
+        out << Atom2String(i);
+}
+
 void Molecule::appendDipoleFile(const std::string& filename) const
 {
     std::string output;
