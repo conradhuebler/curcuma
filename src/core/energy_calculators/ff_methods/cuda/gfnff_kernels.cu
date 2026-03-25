@@ -70,7 +70,10 @@ __global__ void k_dispersion(
     const double* __restrict__ r0_sq,
     const double* __restrict__ zetac6,
     const double* __restrict__ r_cut,
+    const double* __restrict__ dc6dcn_ij,
+    const double* __restrict__ dc6dcn_ji,
     const double* __restrict__ coords,
+    double*                    dEdcn,
     double*                    grad,
     double*                    energy)
 {
@@ -106,6 +109,14 @@ __global__ void k_dispersion(
     double fac  = dEdr / rij;
     add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
     add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+
+    // dEdcn chain-rule: dc6/dcn contribution for CN gradient
+    // Reference: ff_workspace_gfnff.cpp:696-701 (CPU path)
+    if (dc6dcn_ij && dEdcn) {
+        double disp_value = disp_sum * zetac6[tid];
+        atomicAdd(&dEdcn[i], -dc6dcn_ij[tid] * disp_value);
+        atomicAdd(&dEdcn[j], -dc6dcn_ji[tid] * disp_value);
+    }
 }
 
 // ============================================================================
@@ -139,7 +150,10 @@ __global__ void k_repulsion(
     if (rij > r_cut[tid] || rij < 1e-8) return;
 
     double r1_5      = rij * sqrt(rij);        // r^1.5
-    double exp_term  = exp(-alpha[tid] * r1_5);
+    double alp_r     = alpha[tid] * r1_5;
+    // Guard against NaN: skip if alpha or repab is NaN, or if exp argument overflows
+    if (isnan(alp_r) || isnan(repab[tid]) || alp_r > 700.0) return;
+    double exp_term  = exp(-alp_r);
     double base_E    = repab[tid] * exp_term / rij;
     atomicAdd(energy, base_E);
 
@@ -223,10 +237,12 @@ __global__ void k_bonds(
     const double* __restrict__ alpha,
     const int*    __restrict__ nr_hb,
     const double* __restrict__ hb_cn_H,
+    const int*    __restrict__ hb_H_atom,
     const double* __restrict__ coords,
     const double* __restrict__ cn,
     double*                    grad,
     double*                    dEdcn,
+    double*                    zz_hb,
     double*                    energy)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -277,6 +293,18 @@ __global__ void k_bonds(
         double yy = -dEdr;   // ∂E/∂r0 = -∂E/∂r
         atomicAdd(&dEdcn[i], yy * ff[tid] * cnfak_i[tid]);
         atomicAdd(&dEdcn[j], yy * ff[tid] * cnfak_j[tid]);
+    }
+
+    // HB alpha-modulation chain-rule: zz = t1 * alpha_orig * dr^2 * E
+    // Claude Generated (March 2026): Accumulate per-H zz for k_hb_alpha_chainrule
+    // Reference: Fortran gfnff_engrad.F90:1054-1063
+    if (zz_hb && nr_hb[tid] >= 1 && hb_H_atom) {
+        constexpr double t1 = 0.1;  // = 1 - VBOND_SCALE
+        double zz = t1 * alpha_orig * dr * dr * E;
+        int H = hb_H_atom[tid];
+        if (H >= 0) {
+            atomicAdd(&zz_hb[H], zz);
+        }
     }
 }
 
@@ -512,52 +540,79 @@ __device__ double dihedral_angle_grad(
 
     double inv_n1 = 1.0/n1n;
     double inv_n2 = 1.0/n2n;
-    double inv_b2 = 1.0/b2n;
 
-    // Unit vectors
+    // Unit normal vectors
     double u1x=n1x*inv_n1, u1y=n1y*inv_n1, u1z=n1z*inv_n1;
     double u2x=n2x*inv_n2, u2y=n2y*inv_n2, u2z=n2z*inv_n2;
-    double ub2x=b2x*inv_b2, ub2y=b2y*inv_b2, ub2z=b2z*inv_b2;
 
+    // cos(phi) = n1_hat · n2_hat
     double cos_phi = u1x*u2x + u1y*u2y + u1z*u2z;
-    cos_phi = fmax(-1.0, fmin(1.0, cos_phi));
 
-    // Sign from (n1 × n2) · b2
-    double cross_x = u1y*u2z - u1z*u2y;
-    double cross_y = u1z*u2x - u1x*u2z;
-    double cross_z = u1x*u2y - u1y*u2x;
-    double sign_dot = cross_x*ub2x + cross_y*ub2y + cross_z*ub2z;
-    double phi = acos(cos_phi);
-    if (sign_dot < 0.0) phi = -phi;
+    // sin(phi) = |v2| * (n1_hat · v3) / |n2|  (matches CPU gfnff_geometry.h:109)
+    double sin_phi_raw = b2n * (u1x*b3x + u1y*b3y + u1z*b3z) * inv_n2;
+    sin_phi_raw = fmax(-1.0, fmin(1.0, sin_phi_raw));
+
+    // phi via atan2 (identical to CPU computation path)
+    double phi = atan2(sin_phi_raw, cos_phi);
 
     if (!do_grad) return phi;
 
-    // Gradient via Ryckaert-Bellemans / IUPAC formula
-    // ∂phi/∂r_i = -b2n/n1n^2 * n1
-    // ∂phi/∂r_l =  b2n/n2n^2 * n2
-    // ∂phi/∂r_j = [(r_ij · b2)/b2n^2 - 1] * ∂phi/∂r_i - (r_kl · b2)/b2n^2 * ∂phi/∂r_l
-    // (simplified common implementation)
-    double f1 = -b2n / (n1n * n1n);
-    double f4 =  b2n / (n2n * n2n);
+    // Gradient via Fortran dphidr formula (gfnff_helpers.f90:514-583)
+    // Matches CPU gfnff_geometry.h:calculateDihedralAngle exactly.
+    // Uses onenner = 1/(nan*nbn*sinphi) with cross-product expressions.
+    double sin_phi_val = sin(phi);
+    double nenner = n1n * n2n * sin_phi_val;
+    if (fabs(nenner) < 1e-14) {
+        for (int a = 0; a < 4; ++a)
+            derivate[a][0] = derivate[a][1] = derivate[a][2] = 0.0;
+        return phi;
+    }
+    double onenner = 1.0 / nenner;
 
-    derivate[0][0] = f1 * n1x;
-    derivate[0][1] = f1 * n1y;
-    derivate[0][2] = f1 * n1z;
-    derivate[3][0] = f4 * n2x;
-    derivate[3][1] = f4 * n2y;
-    derivate[3][2] = f4 * n2z;
+    // Cross products needed for dphidr (Fortran naming convention)
+    // rab = n1 × b2,  rbb = n2 × b2
+    double rabx = n1y*b2z - n1z*b2y, raby = n1z*b2x - n1x*b2z, rabz = n1x*b2y - n1y*b2x;
+    double rbbx = n2y*b2z - n2z*b2y, rbby = n2z*b2x - n2x*b2z, rbbz = n2x*b2y - n2y*b2x;
+    // rac = n1 × b3,  rbc = n2 × b3
+    double racx = n1y*b3z - n1z*b3y, racy = n1z*b3x - n1x*b3z, racz = n1x*b3y - n1y*b3x;
+    double rbcx = n2y*b3z - n2z*b3y, rbcy = n2z*b3x - n2x*b3z, rbcz = n2x*b3y - n2y*b3x;
+    // rba = n2 × b1,  raa = n1 × b1
+    double rbax = n2y*b1z - n2z*b1y, rbay = n2z*b1x - n2x*b1z, rbaz = n2x*b1y - n2y*b1x;
+    double raax = n1y*b1z - n1z*b1y, raay = n1z*b1x - n1x*b1z, raaz = n1x*b1y - n1y*b1x;
 
-    // Middle atoms via sum-zero (translational invariance)
-    double b1_dot_b2 = (b1x*b2x + b1y*b2y + b1z*b2z) / (b2n*b2n);
-    double b3_dot_b2 = (b3x*b2x + b3y*b2y + b3z*b2z) / (b2n*b2n);
+    // rapb = b1 + b2,  rbpc = b2 + b3
+    double rapbx = b1x+b2x, rapby = b1y+b2y, rapbz = b1z+b2z;
+    double rbpcx = b2x+b3x, rbpcy = b2y+b3y, rbpcz = b2z+b3z;
 
-    derivate[1][0] = (b1_dot_b2 - 1.0)*derivate[0][0] - b3_dot_b2*derivate[3][0];
-    derivate[1][1] = (b1_dot_b2 - 1.0)*derivate[0][1] - b3_dot_b2*derivate[3][1];
-    derivate[1][2] = (b1_dot_b2 - 1.0)*derivate[0][2] - b3_dot_b2*derivate[3][2];
+    // rapba = rapb × n1,  rapbb = rapb × n2
+    double rapbax = rapby*n1z - rapbz*n1y, rapbay = rapbz*n1x - rapbx*n1z, rapbaz = rapbx*n1y - rapby*n1x;
+    double rapbbx = rapby*n2z - rapbz*n2y, rapbby = rapbz*n2x - rapbx*n2z, rapbbz = rapbx*n2y - rapby*n2x;
+    // rbpca = rbpc × n1,  rbpcb = rbpc × n2
+    double rbpcax = rbpcy*n1z - rbpcz*n1y, rbpcay = rbpcz*n1x - rbpcx*n1z, rbpcaz = rbpcx*n1y - rbpcy*n1x;
+    double rbpcbx = rbpcy*n2z - rbpcz*n2y, rbpcby = rbpcz*n2x - rbpcx*n2z, rbpcbz = rbpcx*n2y - rbpcy*n2x;
 
-    derivate[2][0] = -derivate[0][0] - derivate[1][0] - derivate[3][0];
-    derivate[2][1] = -derivate[0][1] - derivate[1][1] - derivate[3][1];
-    derivate[2][2] = -derivate[0][2] - derivate[1][2] - derivate[3][2];
+    double r_n2_over_n1 = n2n / n1n;
+    double r_n1_over_n2 = n1n / n2n;
+
+    // dphidri (atom i)
+    derivate[0][0] = onenner * (cos_phi * r_n2_over_n1 * rabx - rbbx);
+    derivate[0][1] = onenner * (cos_phi * r_n2_over_n1 * raby - rbby);
+    derivate[0][2] = onenner * (cos_phi * r_n2_over_n1 * rabz - rbbz);
+
+    // dphidrj (atom j)
+    derivate[1][0] = onenner * (cos_phi * (r_n2_over_n1 * rapbax + r_n1_over_n2 * rbcx) - (racx + rapbbx));
+    derivate[1][1] = onenner * (cos_phi * (r_n2_over_n1 * rapbay + r_n1_over_n2 * rbcy) - (racy + rapbby));
+    derivate[1][2] = onenner * (cos_phi * (r_n2_over_n1 * rapbaz + r_n1_over_n2 * rbcz) - (racz + rapbbz));
+
+    // dphidrk (atom k)
+    derivate[2][0] = onenner * (cos_phi * (r_n2_over_n1 * raax + r_n1_over_n2 * rbpcbx) - (rbax + rbpcax));
+    derivate[2][1] = onenner * (cos_phi * (r_n2_over_n1 * raay + r_n1_over_n2 * rbpcby) - (rbay + rbpcay));
+    derivate[2][2] = onenner * (cos_phi * (r_n2_over_n1 * raaz + r_n1_over_n2 * rbpcbz) - (rbaz + rbpcaz));
+
+    // dphidrl (atom l)
+    derivate[3][0] = onenner * (cos_phi * r_n1_over_n2 * rbbx - rabx);
+    derivate[3][1] = onenner * (cos_phi * r_n1_over_n2 * rbby - raby);
+    derivate[3][2] = onenner * (cos_phi * r_n1_over_n2 * rbbz - rabz);
 
     return phi;
 }
@@ -658,23 +713,25 @@ __global__ void k_dihedrals(
 
     // Gradient from damping: E_raw * d(damp)/d(rXY²) * rXY_vec
     // Reference: ff_workspace_gfnff.cpp:360-376 (pairs: i-j, j-k, k-l)
+    // Damping gradient: d(r²_AB)/dx_A = 2*(x_A - x_B), so vector is (ri - rj)
+    // Reference: ff_workspace_gfnff.cpp:364-376 — vij = ri - rj, vjk = rj - rk, etc.
     // (i,j) pair
     {
-        double dx=coords[3*aj]-coords[3*ai], dy=coords[3*aj+1]-coords[3*ai+1], dz=coords[3*aj+2]-coords[3*ai+2];
+        double dx=coords[3*ai]-coords[3*aj], dy=coords[3*ai+1]-coords[3*aj+1], dz=coords[3*ai+2]-coords[3*aj+2];
         double fac = E_raw * d2_ij * d_jk * d_kl;
         add_grad(grad, ai,  fac*dx,  fac*dy,  fac*dz);
         add_grad(grad, aj, -fac*dx, -fac*dy, -fac*dz);
     }
     // (j,k) pair
     {
-        double dx=coords[3*ak]-coords[3*aj], dy=coords[3*ak+1]-coords[3*aj+1], dz=coords[3*ak+2]-coords[3*aj+2];
+        double dx=coords[3*aj]-coords[3*ak], dy=coords[3*aj+1]-coords[3*ak+1], dz=coords[3*aj+2]-coords[3*ak+2];
         double fac = E_raw * d_ij * d2_jk * d_kl;
         add_grad(grad, aj,  fac*dx,  fac*dy,  fac*dz);
         add_grad(grad, ak, -fac*dx, -fac*dy, -fac*dz);
     }
     // (k,l) pair
     {
-        double dx=coords[3*al]-coords[3*ak], dy=coords[3*al+1]-coords[3*ak+1], dz=coords[3*al+2]-coords[3*ak+2];
+        double dx=coords[3*ak]-coords[3*al], dy=coords[3*ak+1]-coords[3*al+1], dz=coords[3*ak+2]-coords[3*al+2];
         double fac = E_raw * d_ij * d_jk * d2_kl;
         add_grad(grad, ak,  fac*dx,  fac*dy,  fac*dz);
         add_grad(grad, al, -fac*dx, -fac*dy, -fac*dz);
@@ -1023,6 +1080,13 @@ __global__ void k_storsions(
 
     double dEdphi = 2.0 * eref * sin(2.0 * phi);
     int atoms[4] = {ai, aj, ak, al};
+
+    // DIAGNOSTIC: print s-torsion data involving atom 3
+    if (ai == 3 || aj == 3 || ak == 3 || al == 3) {
+        printf("STORS tid=%d atoms=%d-%d-%d-%d eref=%.6e phi=%.6e dEdphi=%.6e deriv0x=%.6e\n",
+               tid, ai, aj, ak, al, eref, phi, dEdphi, derivate[0][0]);
+    }
+
     for (int a = 0; a < 4; ++a) {
         add_grad(grad, atoms[a],
                  dEdphi * derivate[a][0],
@@ -1116,9 +1180,14 @@ __global__ void k_batm(
     double fik = -dang_ik * c9 / rik;
 
     // j += (-dgij + dgjk),  k += (-dgik - dgjk),  i += (dgij + dgik)
-    add_grad(grad, j, -fij*rij_x + fjk*rjk_x, -fij*rij_y + fjk*rjk_y, -fij*rij_z + fjk*rjk_z);
-    add_grad(grad, k, -fik*rik_x - fjk*rjk_x, -fik*rik_y - fjk*rjk_y, -fik*rik_z - fjk*rjk_z);
-    add_grad(grad, i,  fij*rij_x + fik*rik_x,  fij*rij_y + fik*rik_y,  fij*rij_z + fik*rik_z);
+    double gj_x = -fij*rij_x + fjk*rjk_x, gj_y = -fij*rij_y + fjk*rjk_y, gj_z = -fij*rij_z + fjk*rjk_z;
+    double gk_x = -fik*rik_x - fjk*rjk_x, gk_y = -fik*rik_y - fjk*rjk_y, gk_z = -fik*rik_z - fjk*rjk_z;
+    double gi_x =  fij*rij_x + fik*rik_x, gi_y =  fij*rij_y + fik*rik_y, gi_z =  fij*rij_z + fik*rik_z;
+
+
+    add_grad(grad, j, gj_x, gj_y, gj_z);
+    add_grad(grad, k, gk_x, gk_y, gk_z);
+    add_grad(grad, i, gi_x, gi_y, gi_z);
 }
 
 // ============================================================================
@@ -1473,29 +1542,35 @@ __global__ void k_hbonds(
         }
     }
 
-    // Case 4: Virtual LP
+    // Case 4: Virtual LP — save state for gradient
     double outl_lp = 1.0;
+    double lp_dist_c4 = 0, lp_vx_c4 = 0, lp_vy_c4 = 0, lp_vz_c4 = 0;
+    double vnorm_c4 = 0, ralp_c4 = 0, expo_lp_c4 = 0;
+    double lpx_c4 = 0, lpy_c4 = 0, lpz_c4 = 0;
+    int nbb_lp_c4 = 0;
     if (ct == 4) {
-        double lp_dist = 0.50 - 0.018 * repz_B[tid];
+        lp_dist_c4 = 0.50 - 0.018 * repz_B[tid];
         int nb_off = nb_B_offset[tid];
         int nb_cnt = nb_B_count[tid];
+        nbb_lp_c4 = nb_cnt;
         if (nb_cnt > 0) {
-            double lp_vx = 0, lp_vy = 0, lp_vz = 0;
             for (int ni = 0; ni < nb_cnt; ++ni) {
                 int nb = nb_B_flat[nb_off + ni];
-                lp_vx += coords[3*nb]   - bx;
-                lp_vy += coords[3*nb+1] - by;
-                lp_vz += coords[3*nb+2] - bz;
+                lp_vx_c4 += coords[3*nb]   - bx;
+                lp_vy_c4 += coords[3*nb+1] - by;
+                lp_vz_c4 += coords[3*nb+2] - bz;
             }
-            double vnorm = sqrt(lp_vx*lp_vx + lp_vy*lp_vy + lp_vz*lp_vz);
-            if (vnorm > 1e-10) {
-                double lpx = bx + (-lp_dist) * lp_vx / vnorm;
-                double lpy = by + (-lp_dist) * lp_vy / vnorm;
-                double lpz = bz + (-lp_dist) * lp_vz / vnorm;
-                double dAlp_x = ax - lpx, dAlp_y = ay - lpy, dAlp_z = az - lpz;
-                double ralp = sqrt(dAlp_x*dAlp_x + dAlp_y*dAlp_y + dAlp_z*dAlp_z);
-                double expo_lp = (HBLPCUT_D / r_vdw_AB) * ((ralp + lp_dist + 1e-12) / r_AB - 1.0);
-                outl_lp = 2.0 / (1.0 + exp(expo_lp));
+            vnorm_c4 = sqrt(lp_vx_c4*lp_vx_c4 + lp_vy_c4*lp_vy_c4 + lp_vz_c4*lp_vz_c4);
+            if (vnorm_c4 > 1e-10) {
+                lpx_c4 = bx + (-lp_dist_c4) * lp_vx_c4 / vnorm_c4;
+                lpy_c4 = by + (-lp_dist_c4) * lp_vy_c4 / vnorm_c4;
+                lpz_c4 = bz + (-lp_dist_c4) * lp_vz_c4 / vnorm_c4;
+                double dAlp_x = ax - lpx_c4, dAlp_y = ay - lpy_c4, dAlp_z = az - lpz_c4;
+                ralp_c4 = sqrt(dAlp_x*dAlp_x + dAlp_y*dAlp_y + dAlp_z*dAlp_z);
+                expo_lp_c4 = (HBLPCUT_D / r_vdw_AB) * ((ralp_c4 + lp_dist_c4 + 1e-12) / r_AB - 1.0);
+                outl_lp = 2.0 / (1.0 + exp(expo_lp_c4));
+            } else {
+                nbb_lp_c4 = 0;
             }
         }
     }
@@ -1768,8 +1843,64 @@ __global__ void k_hbonds(
             }
         }
 
-        // Case 4: LP gradient (simplified — omits LP neighbor chain rule for now)
-        // The LP chain rule contribution is typically small
+        // Case 4: LP out-of-line gradient (matching CPU calcHydrogenBonds)
+        if (ct == 4 && nbb_lp_c4 > 0) {
+            double lpterm = -rdamp * Q_H * damp_outl * outl_nb_tot * eangl * etors * const_val;
+            double rblp = lp_dist_c4;
+            double ralpprblp = ralp_c4 + rblp + 1e-12;
+            double ratio2_lp = exp(expo_lp_c4);
+
+            // LP out-of-line: rab
+            double tmp3 = -2.0 * lpterm * ratio2_lp * expo_lp_c4
+                        / ((1.0 + ratio2_lp) * (1.0 + ratio2_lp))
+                        / (ralpprblp - r_AB);
+            double gi_lp = -tmp3 * ralpprblp / rab2;
+            ga_x += gi_lp * drab_x; ga_y += gi_lp * drab_y; ga_z += gi_lp * drab_z;
+            gb_x -= gi_lp * drab_x; gb_y -= gi_lp * drab_y; gb_z -= gi_lp * drab_z;
+
+            // LP out-of-line: ralp  (dralp = pos_A - lp_pos)
+            double dralp_x = ax - lpx_c4, dralp_y = ay - lpy_c4, dralp_z = az - lpz_c4;
+            gi_lp = tmp3 / (ralp_c4 + 1e-12);
+            double dga_lp_x = gi_lp * dralp_x, dga_lp_y = gi_lp * dralp_y, dga_lp_z = gi_lp * dralp_z;
+            ga_x += dga_lp_x; ga_y += dga_lp_y; ga_z += dga_lp_z;
+            // Fortran: gb -= dga (uses dga, not dgb)
+            gb_x -= dga_lp_x; gb_y -= dga_lp_y; gb_z -= dga_lp_z;
+
+            double glp_x = -dga_lp_x, glp_y = -dga_lp_y, glp_z = -dga_lp_z;
+
+            // LP neighbor chain rule
+            if (vnorm_c4 > 1e-10) {
+                // gii matrix × glp vector (3×3 matmul)
+                // gii.col(c) = -lp_dist * nbb * (unit_c/vnorm + lp_v * lp_v(c) / vnorm^3)
+                // gnb = gii * glp
+                double inv_v = 1.0 / vnorm_c4;
+                double inv_v3 = inv_v * inv_v * inv_v;
+                double fac = -lp_dist_c4 * (double)nbb_lp_c4;
+
+                // gii[r][c] = fac * (-delta(r,c)/vnorm + lp_v[r]*lp_v[c]/vnorm^3)
+                // gnb[r] = sum_c gii[r][c] * glp[c]
+                double gnb_x = 0, gnb_y = 0, gnb_z = 0;
+                for (int c = 0; c < 3; ++c) {
+                    double glp_c = (c==0) ? glp_x : (c==1) ? glp_y : glp_z;
+                    double unit_c = (c==0) ? -1.0 : 0.0;
+                    double lp_vc = (c==0) ? lp_vx_c4 : (c==1) ? lp_vy_c4 : lp_vz_c4;
+                    // gii column c, row x
+                    gnb_x += fac * (((c==0)?-1.0:0.0) * inv_v + lp_vx_c4 * lp_vc * inv_v3) * glp_c;
+                    gnb_y += fac * (((c==1)?-1.0:0.0) * inv_v + lp_vy_c4 * lp_vc * inv_v3) * glp_c;
+                    gnb_z += fac * (((c==2)?-1.0:0.0) * inv_v + lp_vz_c4 * lp_vc * inv_v3) * glp_c;
+                }
+                gb_x += gnb_x; gb_y += gnb_y; gb_z += gnb_z;
+                // Distribute to neighbors
+                double gnb_share_x = gnb_x / (double)nbb_lp_c4;
+                double gnb_share_y = gnb_y / (double)nbb_lp_c4;
+                double gnb_share_z = gnb_z / (double)nbb_lp_c4;
+                int nb_off = nb_B_offset[tid];
+                for (int ni = 0; ni < nbb_lp_c4; ++ni) {
+                    int nb = nb_B_flat[nb_off + ni];
+                    add_grad(grad, nb, -gnb_share_x, -gnb_share_y, -gnb_share_z);
+                }
+            }
+        }
 
     } else {
         // Case 1 gradient
@@ -1938,4 +2069,51 @@ __global__ void k_cn_chainrule(
 
     add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
     add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+}
+
+// ============================================================================
+// Kernel: HB alpha-modulation chain-rule gradient (pairwise over HB neighbor pairs)
+// Claude Generated (March 2026): Missing gradient term for egbond_hb
+//
+// For bonds with HB modification: alpha_mod = (1 - t1*hb_cn_H)*alpha_orig
+// The chain-rule gives: dE/d(hb_cn_H) = t1 * alpha_orig * dr^2 * E = zz
+// This kernel applies: grad_H += zz_H * d(hb_cn_H)/dx_H
+//                      grad_B += zz_H * d(hb_cn_H)/dx_B
+// where d(hb_cn_H)/dx uses error function CN with kn=27.5, rcov_scal=1.78
+//
+// Reference: Fortran gfnff_engrad.F90:1054-1063 (egbond_hb, hb_dcn term)
+// ============================================================================
+__global__ void k_hb_alpha_chainrule(
+    int n_pairs,
+    const int*    __restrict__ idx_H,
+    const int*    __restrict__ idx_B,
+    const double* __restrict__ rcov_sum,
+    const double* __restrict__ coords,
+    const double* __restrict__ zz_hb,
+    double*                    grad,
+    double        kn)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_pairs) return;
+
+    int H = idx_H[tid], B = idx_B[tid];
+    double dx = coords[3*H]   - coords[3*B];
+    double dy = coords[3*H+1] - coords[3*B+1];
+    double dz = coords[3*H+2] - coords[3*B+2];
+    double r2 = dx*dx + dy*dy + dz*dz;
+    double rij = sqrt(r2);
+    if (rij < 1e-10) return;
+
+    double rcov = rcov_sum[tid];
+    double dr = (rij - rcov) / rcov;
+
+    // dS/dr = (-kn / (rcov * sqrt(pi))) * exp(-(kn*dr)^2)
+    // Note: kn=27.5 for HB CN, sign chosen so gradient pushes correctly
+    static const double inv_sqrtpi = 0.5641895835477563;  // 1/sqrt(pi)
+    double dSdr = -kn * inv_sqrtpi * exp(-kn * kn * dr * dr) / rcov;
+
+    // grad_H += zz_H * dS/dr * (H-B)/r,  grad_B -= same
+    double fac = zz_hb[H] * dSdr / rij;
+    add_grad(grad, H,  fac*dx,  fac*dy,  fac*dz);
+    add_grad(grad, B, -fac*dx, -fac*dy, -fac*dz);
 }

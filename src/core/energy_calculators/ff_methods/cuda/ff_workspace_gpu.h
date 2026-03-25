@@ -7,8 +7,8 @@
  * once at construction, then for each step: uploads geometry/charges/CN,
  * launches all CUDA kernels, downloads results.
  *
- * All gradient contributions (including CN chain-rule) are computed on GPU
- * for full consistency.  No CPU postprocessing needed for gradients.
+ * All gradient contributions (including CN chain-rule and dispersion dEdcn)
+ * are computed entirely on GPU.  No CPU postprocessing needed.
  *
  * Interface is deliberately CUDA-agnostic so it can be forward-declared
  * from non-CUDA translation units.  All CUDA types are hidden in the Pimpl
@@ -27,7 +27,6 @@
 #include "../ff_workspace.h"           // FFEnergyComponents, Matrix, Vector, SpMatrix
 #include "../gfnff_parameters.h"       // GFNFFParameterSet
 
-#include <Eigen/Sparse>
 #include <memory>
 #include <vector>
 
@@ -43,9 +42,7 @@ struct FFWorkspaceGPUImpl;
  * @brief GPU-accelerated drop-in replacement for FFWorkspace (GFN-FF only).
  *
  * Claude Generated (March 2026): GPU version of FFWorkspace for the `ggfnff`
- * method.  The CPU FFWorkspace remains unchanged; this class provides the
- * same setter/calculate/getter API so GGFNFFComputationalMethod can swap
- * between GPU and CPU at construction time.
+ * method.  All energy terms and gradient contributions run on GPU.
  *
  * Usage:
  *   FFWorkspaceGPU gpu_ws(params, natoms, atom_types);
@@ -53,7 +50,7 @@ struct FFWorkspaceGPUImpl;
  *   gpu_ws.setGeometry(geom);           // Bohr row-major N×3
  *   gpu_ws.setEEQCharges(q);            // N EEQ charges
  *   gpu_ws.setD3CN(cn);                 // N D3 coordination numbers
- *   gpu_ws.setCNDerivatives(cn, cnf, dcn);
+ *   gpu_ws.updateDispersionDC6DCN(dc6dcn); // N×N dc6/dcn matrix
  *   double E = gpu_ws.calculate(true);
  *   Matrix G = gpu_ws.gradient();       // N×3 Hartree/Bohr
  */
@@ -77,7 +74,7 @@ public:
     FFWorkspaceGPU& operator=(const FFWorkspaceGPU&)  = delete;
 
     // =========================================================================
-    // Per-step state updates (mirror of FFWorkspace interface)
+    // Per-step state updates
     // =========================================================================
 
     /// Set current geometry (Bohr, N×3 row-major Eigen matrix)
@@ -86,25 +83,19 @@ public:
     /// Set dynamic EEQ charges (geometry-dependent, size N)
     void setEEQCharges(const Vector& q);
 
-    /// Set topology charges (size N — used for BATM; forwarded to CPU path only)
+    /// Set topology charges (size N — used for BATM kernel)
     void setTopologyCharges(const Vector& q);
 
     /// Set D3 coordination numbers (size N, for CN-dependent bond r0)
     void setD3CN(const Vector& cn);
 
     /**
-     * @brief Set coordination numbers + sparse dcn derivatives for gradient.
-     * @param cn   D3 CN (size N)
+     * @brief Set CN factors needed for Coulomb TERM 1b gradient.
+     * @param cn   D3 CN (size N) — stored for k_subtract_qtmp
      * @param cnf  CNF factors for Coulomb TERM 1b (size N)
-     * @param dcn  3 sparse N×N matrices: ∂CN_i/∂x_j, ∂CN_i/∂y_j, ∂CN_i/∂z_j
-     * @deprecated Use setCNPairList() + setDlogDCN() instead for GPU-only gradient
      */
     void setCNDerivatives(const Vector& cn, const Vector& cnf,
                           const std::vector<SpMatrix>& dcn);
-
-    /// Set dc6/dcn pointer for D4 dispersion CN gradient (CPU chain-rule only)
-    /// @deprecated Dispersion dEdcn will be computed on GPU
-    void setDC6DCNPtr(const Matrix* ptr);
 
     // =========================================================================
     // GPU-only CN chain-rule data (replaces sparse dcn matrices)
@@ -157,6 +148,17 @@ public:
                                      const Vector& alp,     const Vector& cnf,
                                      const Vector& chi_static);
 
+    /**
+     * @brief Upload per-pair dc6/dcn values for dispersion dEdcn on GPU.
+     *
+     * Extracts dc6dcn(i,j) and dc6dcn(j,i) for each dispersion pair from
+     * the full N×N matrix and uploads to GPU SoA arrays.
+     * Must be called every gradient step (dc6dcn is CN-dependent).
+     *
+     * @param dc6dcn  N×N matrix: dc6dcn(i,j) = dC6(i,j)/dCN(i)
+     */
+    void updateDispersionDC6DCN(const Matrix& dc6dcn);
+
     // =========================================================================
     // Term enable flags (match FFWorkspace API)
     // =========================================================================
@@ -175,16 +177,14 @@ public:
      *
      * Execution order:
      *   1. Zero d_energy / d_grad / d_dEdcn on GPU
-     *   2. Async upload: geometry, charges, CN
-     *   3. k_dispersion, k_repulsion (×2), k_coulomb
-     *   4. k_bonds (accumulates dEdcn), k_angles, k_dihedrals, k_inversions
-     *   5. cudaStreamSynchronize
-     *   6. Download energy scalar + gradient matrix + dEdcn vector
-     *   7. postProcessCPU(): Coulomb TERM 2+3 self-energy + CN chain-rule gradient
-     *   8. Return E_total + e0
-     *
-     * H-bonds, X-bonds, ATM, BATM are forwarded to the CPU residual workspace
-     * (if set via setCPUResidualWorkspace) — Phase 1 leaves them on CPU.
+     *   2. Upload: charges, CN, topology charges
+     *   3. k_dispersion (energy + gradient + dEdcn), k_repulsion (×2), k_coulomb
+     *   4. k_bonds (energy + gradient + dEdcn), k_angles, k_dihedrals, k_inversions
+     *   5. k_storsions, k_batm, k_atm, k_xbonds, k_hbonds
+     *   6. k_coulomb_self (energy only)
+     *   7. k_subtract_qtmp + k_cn_chainrule (gradient postprocess)
+     *   8. Download energy scalars + gradient matrix
+     *   9. Return E_total + e0
      *
      * @param gradient  If true compute gradient (N×3 Hartree/Bohr)
      * @return Total GFN-FF energy in Hartree
@@ -201,18 +201,8 @@ public:
     // dEdcn totals (for external CN chain-rule, if needed)
     const Vector& dEdcnTotal() const;
 
-    // =========================================================================
-    // Optional: CPU residual workspace for H/X-bonds and three-body terms
-    // =========================================================================
-
-    /**
-     * @brief Attach a CPU FFWorkspace for terms not yet on GPU (Phase 1).
-     *
-     * When set, calculate() calls cpu_ws->calculate(gradient) after the GPU
-     * kernels and adds the CPU energy/gradient to the GPU results.  The CPU
-     * workspace must already have its per-step state set by the caller.
-     */
-    void setCPUResidualWorkspace(FFWorkspace* cpu_ws);
+    /// Gradient before CN chain-rule (for diagnostic comparison)
+    const Matrix& gradientBeforeCN() const { return m_grad_before_cn; }
 
     // =========================================================================
     // Diagnostics
@@ -227,16 +217,15 @@ public:
 private:
     std::unique_ptr<FFWorkspaceGPUImpl> m_impl;
 
-    // CPU-side per-step state (needed for postProcessCPU)
+    // CPU-side per-step state
     int     m_natoms = 0;
     double  m_e0     = 0.0;
 
     // Coulomb self-energy parameters (O(N), extracted at init)
     Vector  m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf, m_coul_chi_static;
 
-    // CN chain-rule state (legacy sparse matrix path, deprecated)
-    Vector              m_cn, m_cnf;
-    std::vector<SpMatrix> m_dcn;
+    // CN state for GPU upload and k_subtract_qtmp (Coulomb TERM 1b)
+    Vector  m_cn, m_cnf;
 
     // GPU CN chain-rule state (replaces sparse dcn matrices)
     Vector m_dlogdcn;                       ///< [N] logistic squashing factor
@@ -251,21 +240,19 @@ private:
     Vector  m_eeq_charges;
     Vector  m_topology_charges;
 
-    // DC6/DCN pointer for D4 CN gradient (legacy, will be moved to GPU)
-    const Matrix* m_dc6dcn_ptr = nullptr;
+    // Host-side dispersion pair indices (for per-step dc6dcn extraction)
+    std::vector<int> m_disp_idx_i_host;
+    std::vector<int> m_disp_idx_j_host;
 
-    // CPU-side dispersion pairs (for dEdcn chain-rule — temporary until GPU migration)
-    std::vector<GFNFFDispersion> m_dispersions_cpu;
-    Matrix m_geometry_cpu;  ///< Last geometry (Bohr) for CPU-side dispersion dEdcn
+    // Per-step dc6dcn staging buffer (pre-allocated, reused)
+    std::vector<double> m_h_dc6dcn_ij;
+    std::vector<double> m_h_dc6dcn_ji;
 
     // Term enable flags
     bool m_dispersion_enabled = true;
     bool m_hbond_enabled      = true;
     bool m_repulsion_enabled  = true;
     bool m_coulomb_enabled    = true;
-
-    // Optional CPU residual for H/X-bonds and three-body terms
-    FFWorkspace* m_cpu_residual = nullptr;
 
     // Pre-allocated staging buffers (avoid heap allocs on corrupted heap)
     // Claude Generated (March 2026): CUDA operations corrupt C++ heap metadata.
@@ -276,19 +263,9 @@ private:
 
     // Results
     Matrix             m_result_gradient;
+    Matrix             m_grad_before_cn;  ///< Gradient before CN chain-rule (diagnostic)
     FFEnergyComponents m_result_energy;
     Vector             m_dEdcn_total;
-
-    /**
-     * @brief CPU counterpart of FFWorkspace::postProcess().
-     *
-     * Computes:
-     *   - Coulomb TERM 2+3: self-energy + electronegativity contribution
-     *   - dEdcn chain-rule gradient: gradient += dcn * (dEdcn - qtmp)
-     *
-     * @param gradient  If true, apply CN chain-rule gradient
-     */
-    void postProcessCPU(bool gradient);
 };
 
 #endif // USE_CUDA

@@ -34,7 +34,10 @@ __global__ void k_dispersion(
     const double* __restrict__ r0_sq,
     const double* __restrict__ zetac6,
     const double* __restrict__ r_cut,
+    const double* __restrict__ dc6dcn_ij, ///< [n] dC6/dCN(i) per pair (nullptr if no dEdcn)
+    const double* __restrict__ dc6dcn_ji, ///< [n] dC6/dCN(j) per pair (nullptr if no dEdcn)
     const double* __restrict__ coords,   ///< [N*3] row-major (x,y,z per atom)
+    double*                    dEdcn,    ///< [N] CN chain-rule accumulator (atomicAdd, nullptr ok)
     double*                    grad,     ///< [N*3] atomicAdd
     double*                    energy    ///< [1]   atomicAdd
 );
@@ -91,10 +94,12 @@ __global__ void k_bonds(
     const double* __restrict__ alpha,
     const int*    __restrict__ nr_hb,      ///< HB count per bond
     const double* __restrict__ hb_cn_H,    ///< HB coordination number of H
+    const int*    __restrict__ hb_H_atom,  ///< Index of H atom per bond (-1 if no HB)
     const double* __restrict__ coords,
     const double* __restrict__ cn,     ///< [N] D3 coordination numbers
     double*                    grad,
     double*                    dEdcn,  ///< [N] CN chain-rule accumulator (atomicAdd)
+    double*                    zz_hb,  ///< [N] HB alpha chain-rule zz accumulator (atomicAdd, nullable)
     double*                    energy
 );
 
@@ -315,6 +320,21 @@ __global__ void k_cn_chainrule(
     const double* __restrict__ dlogdcn,        ///< [N] logistic squashing factor
     double*                    grad,
     double        kn                            ///< CN decay constant (-7.5)
+);
+
+/// HB alpha-modulation chain-rule gradient: pairwise kernel over (H, B) pairs.
+/// For each pair: grad_H += zz_H * dS/dr * (rH-rB)/r, grad_B -= same
+/// where dS/dr = (-kn / (rcov*sqrt(pi))) * exp(-(kn*dr)^2), dr=(r-rcov)/rcov
+/// Reference: Fortran gfnff_engrad.F90:1054-1063
+__global__ void k_hb_alpha_chainrule(
+    int n_pairs,
+    const int*    __restrict__ idx_H,
+    const int*    __restrict__ idx_B,
+    const double* __restrict__ rcov_sum,       ///< [n_pairs] scaled cov. radius sum
+    const double* __restrict__ coords,
+    const double* __restrict__ zz_hb,          ///< [N] per-H zz accumulator from k_bonds
+    double*                    grad,
+    double        kn                            ///< HB CN decay constant (27.5)
 );
 
 // ============================================================================

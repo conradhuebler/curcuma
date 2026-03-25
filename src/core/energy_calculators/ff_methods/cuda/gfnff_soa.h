@@ -113,6 +113,8 @@ struct CudaBuffer {
 struct DispersionSoA {
     CudaBuffer<int>    idx_i, idx_j;
     CudaBuffer<double> C6, r4r2ij, r0_sq, zetac6, r_cut;
+    CudaBuffer<double> dc6dcn_ij;  ///< [n] dC6(i,j)/dCN(i) per pair (updated per step)
+    CudaBuffer<double> dc6dcn_ji;  ///< [n] dC6(i,j)/dCN(j) per pair (updated per step)
     int n = 0;
 
     void upload(const std::vector<GFNFFDispersion>& v, cudaStream_t stream = nullptr);
@@ -156,9 +158,24 @@ struct BondSoA {
     CudaBuffer<double> r0_base_j;  ///< Base r0 for atom j
     CudaBuffer<int>    nr_hb;      ///< HB count for bond (>= 1 triggers alpha modification)
     CudaBuffer<double> hb_cn_H;    ///< HB coordination number of H atom
+    CudaBuffer<int>    hb_H_atom;  ///< Index of H atom in bond (-1 if no HB)
     int n = 0;
 
-    void upload(const std::vector<Bond>& v, cudaStream_t stream = nullptr);
+    void upload(const std::vector<Bond>& v, const std::vector<int>& atom_types,
+                cudaStream_t stream = nullptr);
+};
+
+// ============================================================================
+// HBAlphaSoA: HB neighbor pairs (H, B) for alpha-modulation CN chain-rule gradient
+// Claude Generated (March 2026): Flattened from BondHBEntry B_atoms
+// ============================================================================
+struct HBAlphaSoA {
+    CudaBuffer<int>    idx_H, idx_B;    ///< H and B atom indices per pair
+    CudaBuffer<double> rcov_sum;        ///< Scaled covalent radius sum per pair
+    int n = 0;
+
+    void upload(const std::vector<int>& h_idx, const std::vector<int>& b_idx,
+                const std::vector<double>& rcov, cudaStream_t stream = nullptr);
 };
 
 // ============================================================================

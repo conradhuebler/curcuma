@@ -26,7 +26,6 @@
 #include "src/core/curcuma_logger.h"
 
 #include <Eigen/Dense>
-#include <Eigen/Sparse>
 
 #include <cmath>
 #include <cstring>
@@ -168,12 +167,13 @@ void CoulombSoA::upload(const std::vector<GFNFFCoulomb>& v, cudaStream_t stream)
 }
 
 // ---------------------------------------------------------------------------
-void BondSoA::upload(const std::vector<Bond>& v, cudaStream_t stream)
+void BondSoA::upload(const std::vector<Bond>& v, const std::vector<int>& atom_types,
+                     cudaStream_t stream)
 {
     n = static_cast<int>(v.size());
     if (n == 0) return;
 
-    std::vector<int>    h_i(n), h_j(n), h_nr_hb(n);
+    std::vector<int>    h_i(n), h_j(n), h_nr_hb(n), h_hb_H(n);
     std::vector<double> h_r0(n), h_fc(n), h_alpha(n), h_rabshift(n), h_ff(n);
     std::vector<double> h_cnfak_i(n), h_cnfak_j(n), h_rb_i(n), h_rb_j(n);
     std::vector<double> h_hb_cn_H(n);
@@ -192,6 +192,17 @@ void BondSoA::upload(const std::vector<Bond>& v, cudaStream_t stream)
         h_rb_j[k]    = v[k].r0_base_j;
         h_nr_hb[k]   = v[k].nr_hb;
         h_hb_cn_H[k] = v[k].hb_cn_H;
+        // Determine which atom is H for HB alpha gradient
+        if (v[k].nr_hb >= 1) {
+            if (v[k].i < static_cast<int>(atom_types.size()) && atom_types[v[k].i] == 1)
+                h_hb_H[k] = v[k].i;
+            else if (v[k].j < static_cast<int>(atom_types.size()) && atom_types[v[k].j] == 1)
+                h_hb_H[k] = v[k].j;
+            else
+                h_hb_H[k] = -1;
+        } else {
+            h_hb_H[k] = -1;
+        }
     }
 
     idx_i.upload(h_i, stream);
@@ -207,6 +218,18 @@ void BondSoA::upload(const std::vector<Bond>& v, cudaStream_t stream)
     r0_base_j.upload(h_rb_j, stream);
     nr_hb.upload(h_nr_hb, stream);
     hb_cn_H.upload(h_hb_cn_H, stream);
+    hb_H_atom.upload(h_hb_H, stream);
+}
+
+// ---------------------------------------------------------------------------
+void HBAlphaSoA::upload(const std::vector<int>& h_idx, const std::vector<int>& b_idx,
+                        const std::vector<double>& rcov, cudaStream_t stream)
+{
+    n = static_cast<int>(h_idx.size());
+    if (n == 0) return;
+    idx_H.upload(h_idx, stream);
+    idx_B.upload(b_idx, stream);
+    rcov_sum.upload(rcov, stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +590,10 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_cn_rcov_sum;  ///< [n_cn_pairs]
     int                n_cn_pairs = 0;
 
+    // HB alpha chain-rule: per-atom zz accumulator + HB neighbor pair list
+    CudaBuffer<double> d_zz_hb;        ///< [N] per-atom zz accumulator (zeroed each step)
+    HBAlphaSoA         hb_alpha;       ///< (H, B) pairs for alpha gradient
+
     // Coulomb self-energy parameters (uploaded once)
     CudaBuffer<double> d_coul_chi_base; ///< [N]
     CudaBuffer<double> d_coul_cnf;      ///< [N]
@@ -632,7 +659,6 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     // These buffers are reused every step without new allocations.
     m_h_coords.resize(3 * natoms);
     m_h_grad.resize(3 * natoms);
-    m_geometry_cpu = Matrix::Zero(natoms, 3);
 
     m_impl = std::make_unique<FFWorkspaceGPUImpl>();
     m_impl->N = natoms;
@@ -648,8 +674,18 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     upload_covalent_radii(GFNFFParameters::covalent_radii.data(),
                           static_cast<int>(GFNFFParameters::covalent_radii.size()));
 
-    // Store dispersion pairs on CPU for dEdcn chain-rule (not computed in GPU kernel)
-    m_dispersions_cpu = params.dispersions;
+    // Store dispersion pair indices on host for per-step dc6dcn extraction
+    {
+        const int nd = static_cast<int>(params.dispersions.size());
+        m_disp_idx_i_host.resize(nd);
+        m_disp_idx_j_host.resize(nd);
+        m_h_dc6dcn_ij.resize(nd, 0.0);
+        m_h_dc6dcn_ji.resize(nd, 0.0);
+        for (int k = 0; k < nd; ++k) {
+            m_disp_idx_i_host[k] = params.dispersions[k].i;
+            m_disp_idx_j_host[k] = params.dispersions[k].j;
+        }
+    }
 
     // Store topology charges for BATM kernel (uploaded to GPU each calculate() call)
     m_topology_charges = params.topology_charges;
@@ -659,7 +695,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_impl->bonded_rep.upload(params.bonded_repulsions, stream);
     m_impl->nonbonded_rep.upload(params.nonbonded_repulsions, stream);
     m_impl->coulomb.upload(params.coulombs, stream);
-    m_impl->bonds.upload(params.bonds, stream);
+    m_impl->bonds.upload(params.bonds, atom_types, stream);
     m_impl->angles.upload(params.angles, atom_types, stream);
     m_impl->dihedrals.upload(params.dihedrals, params.extra_dihedrals, atom_types, stream);
     m_impl->inversions.upload(params.inversions, atom_types, stream);
@@ -695,6 +731,30 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_impl->d_e_atm.alloc(1);
     m_impl->d_e_xbond.alloc(1);
     m_impl->d_e_hbond.alloc(1);
+
+    // --- HB alpha chain-rule: allocate zz buffer + build (H,B) pair list ---
+    m_impl->d_zz_hb.alloc(natoms);
+    if (!params.bond_hb_data.empty()) {
+        const auto& rcov_d3 = GFNFFParameters::covalent_rad_d3;  // already in Bohr
+        constexpr double rcov_43 = 4.0 / 3.0;
+        constexpr double rcov_scal = 1.78;
+
+        std::vector<int> hb_h_idx, hb_b_idx;
+        std::vector<double> hb_rcov;
+        for (const auto& entry : params.bond_hb_data) {
+            int H = entry.H;
+            int ati = (H < natoms) ? atom_types[H] : 0;
+            for (int B : entry.B_atoms) {
+                int atj = (B < natoms) ? atom_types[B] : 0;
+                if (ati < 1 || atj < 1) continue;
+                double rcovij = rcov_scal * rcov_43 * (rcov_d3[ati - 1] + rcov_d3[atj - 1]);  // already in Bohr
+                hb_h_idx.push_back(H);
+                hb_b_idx.push_back(B);
+                hb_rcov.push_back(rcovij);
+            }
+        }
+        m_impl->hb_alpha.upload(hb_h_idx, hb_b_idx, hb_rcov, stream);
+    }
 
     // --- Pre-allocate CPU result buffers ---
     m_result_gradient.resize(natoms, 3);
@@ -777,37 +837,23 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
 void FFWorkspaceGPU::setEEQCharges(const Vector& q)
 {
     m_eeq_charges = q;
-    if (m_cpu_residual) m_cpu_residual->setEEQCharges(q);
 }
 
 void FFWorkspaceGPU::setTopologyCharges(const Vector& q)
 {
     m_topology_charges = q;
-    if (m_cpu_residual) m_cpu_residual->setTopologyCharges(q);
 }
 
 void FFWorkspaceGPU::setD3CN(const Vector& cn)
 {
-    // Store D3 CN for bond r0 calculation on GPU
     m_cn = cn;
-    if (m_cpu_residual) m_cpu_residual->setD3CN(cn);
 }
 
 void FFWorkspaceGPU::setCNDerivatives(const Vector& cn, const Vector& cnf,
-                                       const std::vector<SpMatrix>& dcn)
+                                       const std::vector<SpMatrix>& /* dcn */)
 {
-    m_cn  = cn;
+    // Only cnf is needed (for k_subtract_qtmp). CN pair list replaces sparse dcn.
     m_cnf = cnf;
-    m_dcn = dcn;
-    // NOT forwarded to CPU residual — postProcessCPU() handles CN chain-rule
-    // centrally for ALL terms (GPU + residual).  Forwarding would double-count
-    // the Coulomb TERM 1b qtmp correction.
-}
-
-void FFWorkspaceGPU::setDC6DCNPtr(const Matrix* ptr)
-{
-    m_dc6dcn_ptr = ptr;
-    // NOT forwarded to CPU residual — same reason as setCNDerivatives.
 }
 
 void FFWorkspaceGPU::setE0(double e0)
@@ -911,9 +957,27 @@ void FFWorkspaceGPU::setDlogDCN(const Vector& dlogdcn)
     impl.d_dlogdcn.upload(dlogdcn.data(), N);
 }
 
-void FFWorkspaceGPU::setCPUResidualWorkspace(FFWorkspace* cpu_ws)
+void FFWorkspaceGPU::updateDispersionDC6DCN(const Matrix& dc6dcn)
 {
-    m_cpu_residual = cpu_ws;
+    // Claude Generated (March 2026): Extract per-pair dc6dcn values and upload to GPU.
+    // Eliminates the CPU round-trip (download dEdcn, add dispersion, re-upload).
+    const int nd = static_cast<int>(m_disp_idx_i_host.size());
+    if (nd == 0 || dc6dcn.size() == 0) return;
+
+    for (int k = 0; k < nd; ++k) {
+        int i = m_disp_idx_i_host[k];
+        int j = m_disp_idx_j_host[k];
+        if (i < dc6dcn.rows() && j < dc6dcn.cols()) {
+            m_h_dc6dcn_ij[k] = dc6dcn(i, j);
+            m_h_dc6dcn_ji[k] = dc6dcn(j, i);
+        } else {
+            m_h_dc6dcn_ij[k] = 0.0;
+            m_h_dc6dcn_ji[k] = 0.0;
+        }
+    }
+
+    m_impl->disp.dc6dcn_ij.upload(m_h_dc6dcn_ij.data(), nd);
+    m_impl->disp.dc6dcn_ji.upload(m_h_dc6dcn_ji.data(), nd);
 }
 
 // ============================================================================
@@ -972,7 +1036,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
     // 3. Launch CUDA kernels (only for non-empty lists and enabled terms)
     // =========================================================================
 
-    // --- Dispersion (D4 modified BJ formula) ---
+    // --- Dispersion (D4 modified BJ formula + dEdcn chain-rule) ---
     if (m_dispersion_enabled && impl.disp.n > 0) {
         k_dispersion<<<gridFor(impl.disp.n, BLOCK), BLOCK, 0, stream>>>(
             impl.disp.n,
@@ -980,7 +1044,10 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
             impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
             impl.disp.r_cut.ptr,
+            gradient ? impl.disp.dc6dcn_ij.ptr : nullptr,
+            gradient ? impl.disp.dc6dcn_ji.ptr : nullptr,
             impl.d_coords.ptr,
+            impl.d_dEdcn.ptr,
             impl.d_grad.ptr,
             impl.d_e_disp.ptr);
     }
@@ -1022,8 +1089,12 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.d_e_coulomb.ptr);
     }
 
-    // --- Bond stretching (with CN-dependent r0 and dEdcn accumulation) ---
+    // --- Bond stretching (with CN-dependent r0, dEdcn, and HB alpha zz) ---
     if (impl.bonds.n > 0) {
+        // Zero HB alpha zz buffer if HB pairs exist
+        if (gradient && impl.hb_alpha.n > 0) {
+            impl.d_zz_hb.zero(N, stream);
+        }
         k_bonds<<<gridFor(impl.bonds.n, BLOCK), BLOCK, 0, stream>>>(
             impl.bonds.n,
             impl.bonds.idx_i.ptr,     impl.bonds.idx_j.ptr,
@@ -1036,10 +1107,12 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.bonds.alpha.ptr,
             impl.bonds.nr_hb.ptr,
             impl.bonds.hb_cn_H.ptr,
+            impl.bonds.hb_H_atom.ptr,
             impl.d_coords.ptr,
             impl.d_cn.ptr,
             impl.d_grad.ptr,
             impl.d_dEdcn.ptr,
+            (gradient && impl.hb_alpha.n > 0) ? impl.d_zz_hb.ptr : nullptr,
             impl.d_e_bond.ptr);
     }
 
@@ -1163,6 +1236,22 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.d_e_hbond.ptr);
     }
 
+    // --- HB alpha-modulation chain-rule gradient ---
+    // Claude Generated (March 2026): Missing gradient for d(alpha)/d(hb_cn_H) chain rule
+    // zz_hb accumulated by k_bonds, now apply d(hb_cn_H)/dx via error-function CN derivative
+    if (gradient && impl.hb_alpha.n > 0 && impl.d_zz_hb.ptr) {
+        constexpr double hb_kn = 27.5;  // HB CN decay constant (different from D3 kn=-7.5)
+        k_hb_alpha_chainrule<<<gridFor(impl.hb_alpha.n, BLOCK), BLOCK, 0, stream>>>(
+            impl.hb_alpha.n,
+            impl.hb_alpha.idx_H.ptr,
+            impl.hb_alpha.idx_B.ptr,
+            impl.hb_alpha.rcov_sum.ptr,
+            impl.d_coords.ptr,
+            impl.d_zz_hb.ptr,
+            impl.d_grad.ptr,
+            hb_kn);
+    }
+
     // =========================================================================
     // 4. GPU postprocess: Coulomb self-energy, dispersion dEdcn, qtmp, CN chain-rule
     // Claude Generated (March 2026): Replaces postProcessCPU for full GPU consistency
@@ -1185,41 +1274,19 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.d_e_coul_self.ptr);
     }
 
-    // Dispersion dEdcn (CPU-side for now — accumulates into dEdcn on CPU, then re-uploads)
-    // TODO: Move to GPU kernel that accumulates directly into d_dEdcn
-    if (gradient && m_dc6dcn_ptr && m_dc6dcn_ptr->size() > 0
-        && !m_dispersions_cpu.empty() && m_geometry_cpu.rows() == N) {
+    // Dispersion dEdcn is now computed directly in k_dispersion kernel on GPU
+    // (via dc6dcn_ij/dc6dcn_ji SoA uploaded by updateDispersionDC6DCN).
+    // No CPU round-trip needed.
 
-        // Download current dEdcn from GPU (bonds already accumulated)
-        checkCuda(cudaDeviceSynchronize(), "sync before dEdcn download");
-        checkCuda(cudaMemcpy(m_dEdcn_total.data(), impl.d_dEdcn.ptr,
-                             N*sizeof(double), cudaMemcpyDeviceToHost),
-                  "dEdcn download for disp");
-
-        // Add dispersion dEdcn on CPU
-        for (const auto& disp : m_dispersions_cpu) {
-            Eigen::Vector3d ri = m_geometry_cpu.row(disp.i);
-            Eigen::Vector3d rj = m_geometry_cpu.row(disp.j);
-            double rij = (ri - rj).norm();
-            if (rij > disp.r_cut || rij < 1e-8) continue;
-
-            double r2 = rij * rij;
-            double r6 = r2 * r2 * r2;
-            double r0_6 = disp.r0_squared * disp.r0_squared * disp.r0_squared;
-            double t6 = 1.0 / (r6 + r0_6);
-            double r8 = r6 * r2;
-            double r0_8 = r0_6 * disp.r0_squared;
-            double t8 = 1.0 / (r8 + r0_8);
-
-            double disp_value = (t6 + 2.0 * disp.r4r2ij * t8) * disp.zetac6;
-            if (disp.i < m_dc6dcn_ptr->rows() && disp.j < m_dc6dcn_ptr->cols()) {
-                m_dEdcn_total(disp.i) -= (*m_dc6dcn_ptr)(disp.i, disp.j) * disp_value;
-                m_dEdcn_total(disp.j) -= (*m_dc6dcn_ptr)(disp.j, disp.i) * disp_value;
-            }
-        }
-
-        // Re-upload combined dEdcn (bond + dispersion) to GPU
-        impl.d_dEdcn.upload(m_dEdcn_total.data(), N, impl.stream);
+    // Download raw dEdcn (bond + disp, before qtmp) for diagnostics
+    if (gradient) {
+        checkCuda(cudaDeviceSynchronize(), "pre-qtmp sync");
+        m_dEdcn_total.resize(N);
+        std::vector<double> h_dEdcn(N);
+        checkCuda(cudaMemcpy(h_dEdcn.data(), impl.d_dEdcn.ptr,
+                             N * sizeof(double), cudaMemcpyDeviceToHost), "dEdcn download");
+        for (int i = 0; i < N; ++i)
+            m_dEdcn_total[i] = h_dEdcn[i];
     }
 
     // Subtract qtmp from dEdcn on GPU (Coulomb TERM 1b correction)
@@ -1234,6 +1301,19 @@ double FFWorkspaceGPU::calculate(bool gradient)
 
     // CN chain-rule gradient on GPU (replaces dcn * dEdcn_combined)
     if (gradient && m_cn_pairs_on_gpu && impl.n_cn_pairs > 0 && impl.d_dlogdcn.ptr) {
+        // Download gradient BEFORE CN chain-rule for diagnostics
+        if (m_h_grad.size() >= static_cast<size_t>(3*N)) {
+            checkCuda(cudaDeviceSynchronize(), "pre-cn-grad sync");
+            checkCuda(cudaMemcpy(m_h_grad.data(), impl.d_grad.ptr,
+                                 3*N*sizeof(double), cudaMemcpyDeviceToHost), "pre-cn grad download");
+            m_grad_before_cn.resize(N, 3);
+            for (int i = 0; i < N; ++i) {
+                m_grad_before_cn(i, 0) = m_h_grad[3*i+0];
+                m_grad_before_cn(i, 1) = m_h_grad[3*i+1];
+                m_grad_before_cn(i, 2) = m_h_grad[3*i+2];
+            }
+        }
+
         k_cn_chainrule<<<(impl.n_cn_pairs + 255)/256, 256, 0, impl.stream>>>(
             impl.n_cn_pairs,
             impl.d_cn_idx_i.ptr,
@@ -1320,9 +1400,6 @@ void FFWorkspaceGPU::setGeometry(const Matrix& geom)
     const int N = m_natoms;
     if (geom.rows() != N) return;
 
-    // Store CPU copy (needed for dispersion dEdcn chain-rule computation)
-    m_geometry_cpu = geom;  // no realloc (pre-allocated in constructor, same size)
-
     // Fill pre-allocated staging buffer in-place (replaces toRowMajor heap alloc)
     for (int i = 0; i < N; ++i) {
         m_h_coords[3*i+0] = geom(i, 0);
@@ -1330,81 +1407,6 @@ void FFWorkspaceGPU::setGeometry(const Matrix& geom)
         m_h_coords[3*i+2] = geom(i, 2);
     }
     impl.d_coords.upload(m_h_coords.data(), 3*N, impl.stream);
-
-    // Forward geometry to CPU residual workspace (HB/XB/ATM/BATM)
-    if (m_cpu_residual) m_cpu_residual->setGeometry(geom);
-}
-
-// ============================================================================
-// postProcessCPU — mirrors FFWorkspace::postProcess()
-// ============================================================================
-
-void FFWorkspaceGPU::postProcessCPU(bool gradient)
-{
-    const int N = m_natoms;
-
-    // =========================================================================
-    // Coulomb TERM 2+3: Self-energy (O(N), sequential)
-    // Reference: Fortran gfnff_engrad.F90:1678-1679
-    // Mirrors: ff_workspace.cpp::postProcess() lines 354-383
-    // =========================================================================
-    if (m_coul_gam.size() == N && m_eeq_charges.size() == N && m_coulomb_enabled) {
-        const double sqrt_2_over_pi = 0.797884560802865;
-        const bool has_cn = (m_cn.size() == N);
-        double E_en = 0.0, E_self = 0.0;
-
-        for (int i = 0; i < N; ++i) {
-            if (m_coul_alp(i) <= 0.0) continue;
-            const double q = m_eeq_charges(i);
-            if (std::isnan(q)) continue;
-
-            double chi;
-            if (m_coul_cnf(i) != 0.0 && has_cn) {
-                chi = m_coul_chi_base(i) + m_coul_cnf(i) * std::sqrt(std::max(m_cn(i), 0.0));
-            } else {
-                chi = m_coul_chi_static(i);
-            }
-            E_en   -= q * chi;
-            E_self += 0.5 * q * q * (m_coul_gam(i) + sqrt_2_over_pi / std::sqrt(m_coul_alp(i)));
-        }
-        m_result_energy.coulomb += E_en + E_self;
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format(
-                "  Coulomb self-energy (GPU workspace): EN={:+.12f}, Self={:+.12f} Eh",
-                E_en, E_self));
-        }
-    }
-
-    // =========================================================================
-    // dEdcn chain-rule gradient + Coulomb TERM 1b
-    // Reference: Fortran gfnff_engrad.F90:418-422 (bond/disp), 449-454 (coulomb)
-    // Mirrors: ff_workspace.cpp::postProcess() lines 385-422
-    // =========================================================================
-    if (gradient && !m_dcn.empty() && m_dcn.size() == 3) {
-        // Compute TERM 1b qtmp: Coulomb gradient via CN chain-rule
-        Vector qtmp = Vector::Zero(N);
-        const bool has_term1b = (m_eeq_charges.size() == N &&
-                                 m_cnf.size() == N &&
-                                 m_cn.size() == N);
-        if (has_term1b && m_coulomb_enabled) {
-            for (int i = 0; i < N; ++i) {
-                const double cn_i = std::max(m_cn(i), 0.0);
-                qtmp(i) = m_eeq_charges(i) * m_cnf(i) / (2.0 * std::sqrt(cn_i) + 1e-16);
-            }
-        }
-
-        // Combined: gradient += dcn * (dEdcn_total - qtmp)
-        Vector dEdcn_combined = has_term1b
-            ? (m_dEdcn_total - qtmp).eval()
-            : m_dEdcn_total;
-
-        for (int dim = 0; dim < 3; ++dim) {
-            if (m_dcn[dim].rows() == N && m_dcn[dim].cols() == N) {
-                m_result_gradient.col(dim) += m_dcn[dim] * dEdcn_combined;
-            }
-        }
-    }
 }
 
 // ============================================================================
