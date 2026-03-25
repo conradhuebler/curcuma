@@ -387,6 +387,9 @@ void FFWorkspace::postProcess(bool gradient)
     // Reference: Fortran gfnff_engrad.F90:418-422 (bond/disp), 449-454 (coulomb)
     // =========================================================================
     if (gradient && !m_dcn.empty() && m_dcn.size() == 3) {
+        // Snapshot gradient before CN chain-rule (diagnostic)
+        m_grad_before_cn = m_result_gradient;
+
         // Compute TERM 1b qtmp
         Vector qtmp = Vector::Zero(m_natoms);
         bool has_term1b = (m_eeq_charges.size() == m_natoms &&

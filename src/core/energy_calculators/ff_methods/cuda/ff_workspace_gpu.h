@@ -168,6 +168,9 @@ public:
     void setRepulsionEnabled(bool v);
     void setCoulombEnabled(bool v);
 
+    /// Set verbosity for diagnostic snapshot downloads (only >= 3 triggers snapshot D2H)
+    void setVerbosity(int v) { m_verbosity = v; }
+
     // =========================================================================
     // Main calculation
     // =========================================================================
@@ -253,13 +256,17 @@ private:
     bool m_hbond_enabled      = true;
     bool m_repulsion_enabled  = true;
     bool m_coulomb_enabled    = true;
+    int  m_verbosity          = 0;
 
-    // Pre-allocated staging buffers (avoid heap allocs on corrupted heap)
-    // Claude Generated (March 2026): CUDA operations corrupt C++ heap metadata.
-    // Repeated std::vector allocations in setGeometry/calculate cause segfaults
-    // during iterative MD/Opt. Pre-allocating these buffers once avoids the issue.
-    std::vector<double> m_h_coords;  ///< [3*N] staging buffer for geometry upload
-    std::vector<double> m_h_grad;    ///< [3*N] staging buffer for gradient download
+    // Pre-allocated pinned staging buffers for async DMA transfers.
+    // Claude Generated (March 2026): Pinned memory enables true async H2D/D2H via
+    // cudaMemcpyAsync without CPU page-fault overhead. This is the primary per-step
+    // performance optimization for iterative MD/Opt workloads.
+    // Allocated via cudaMallocHost in constructor, freed via cudaFreeHost in destructor.
+    double* m_h_coords = nullptr;   ///< [3*N] pinned staging for geometry upload
+    double* m_h_grad   = nullptr;   ///< [3*N] pinned staging for gradient download
+    double* m_h_dEdcn_snap = nullptr; ///< [N] pinned staging for dEdcn snapshot download
+    double* m_h_grad_snap  = nullptr; ///< [3*N] pinned staging for pre-CN grad snapshot
 
     // Results
     Matrix             m_result_gradient;

@@ -551,17 +551,19 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
 // Claude Generated (March 2026): Exposed for GPU orchestration
 // ---------------------------------------------------------------------------
 
-void GFNFF::prepareCNAndEEQ(bool gradient)
+void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only)
 {
     auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
     Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
     m_last_cn = cn;
 
-    // Distribute D3 CN to ForceField and workspace
-    if (m_forcefield) m_forcefield->distributeD3CN(cn);
-    if (m_workspace) {
-        m_workspace->setGeometry(m_geometry_bohr);
-        m_workspace->setD3CN(cn);
+    // Distribute D3 CN to CPU ForceField and workspace (skip for GPU-only path)
+    if (!gpu_only) {
+        if (m_forcefield) m_forcefield->distributeD3CN(cn);
+        if (m_workspace) {
+            m_workspace->setGeometry(m_geometry_bohr);
+            m_workspace->setD3CN(cn);
+        }
     }
 
     // Prepare EEQ topology input
@@ -598,9 +600,13 @@ void GFNFF::prepareCNAndEEQ(bool gradient)
         auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
         if (pool) pool->setActiveThreadCount(total_threads);
 
-        std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(cn, 1600.0, pool, total_threads);
-        m_last_dcn = dcn;
+        // Sparse dcn matrices only needed for CPU path (GPU has k_cn_chainrule kernel)
+        if (!gpu_only) {
+            std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(cn, 1600.0, pool, total_threads);
+            m_last_dcn = dcn;
+        }
 
+        // D4 dc6dcn update always needed (GPU uploads per-pair values from this matrix)
         if (m_d4_generator) {
             m_d4_generator->updateCNValuesForGradient(cn_vec, pool, total_threads);
         }
@@ -614,25 +620,27 @@ void GFNFF::prepareCNAndEEQ(bool gradient)
                 true, topo_ptr->alpeeq, pool, total_threads);
         }
 
-        // Distribute to ForceField
-        if (m_forcefield) {
-            m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
-            if (m_d4_generator) {
-                m_forcefield->setDispersionDC6DCNPtr(&m_d4_generator->getDC6DCN());
+        // Distribute to CPU ForceField/workspace (skip for GPU-only path)
+        if (!gpu_only) {
+            if (m_forcefield) {
+                m_forcefield->distributeCNandDerivatives(cn, cnf, m_last_dcn);
+                if (m_d4_generator) {
+                    m_forcefield->setDispersionDC6DCNPtr(&m_d4_generator->getDC6DCN());
+                }
             }
-        }
-
-        // Distribute to workspace
-        if (m_workspace) {
-            m_workspace->setCNDerivatives(cn, cnf, dcn);
-            if (m_d4_generator) {
-                m_workspace->setDC6DCNPtr(&m_d4_generator->getDC6DCN());
+            if (m_workspace) {
+                m_workspace->setCNDerivatives(cn, cnf, m_last_dcn);
+                if (m_d4_generator) {
+                    m_workspace->setDC6DCNPtr(&m_d4_generator->getDC6DCN());
+                }
             }
         }
 
         if (do_eeq && new_charges.size() == m_atomcount) {
-            if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
-            if (m_workspace) m_workspace->setEEQCharges(new_charges);
+            if (!gpu_only) {
+                if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
+                if (m_workspace) m_workspace->setEEQCharges(new_charges);
+            }
             m_charges = new_charges;
         }
     } else {
@@ -640,7 +648,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient)
         m_last_cnf = Vector();
         m_last_dcn.clear();
 
-        if (m_forcefield) m_forcefield->distributeCNOnly(cn);
+        if (!gpu_only && m_forcefield) m_forcefield->distributeCNOnly(cn);
 
         if (do_eeq) {
             Vector new_charges = m_eeq_solver->calculateFinalCharges(
@@ -649,8 +657,10 @@ void GFNFF::prepareCNAndEEQ(bool gradient)
                 topo_ptr->hybridization, eeq_topo,
                 true, topo_ptr->alpeeq);
             if (new_charges.size() == m_atomcount) {
-                if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
-                if (m_workspace) m_workspace->setEEQCharges(new_charges);
+                if (!gpu_only) {
+                    if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
+                    if (m_workspace) m_workspace->setEEQCharges(new_charges);
+                }
                 m_charges = new_charges;
             }
         }

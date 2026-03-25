@@ -173,6 +173,13 @@ if(USE_CUDA)
         set_tests_properties(${GPU_TEST_NAME}
             PROPERTIES TIMEOUT 120 LABELS "ggfnff;gpu;validation")
     endforeach()
+
+    # Claude Generated (March 2026): GPU analytical vs numerical gradient test
+    add_executable(test_gpu_numgrad test_gpu_numgrad.cpp)
+    target_link_libraries(test_gpu_numgrad curcuma_core CUDA::cudart)
+    if(USE_PCH)
+        target_precompile_headers(test_gpu_numgrad REUSE_FROM curcuma_core)
+    endif()
 endif()
 
 # Claude Generated: CLI argument validation test suite (October 2025)

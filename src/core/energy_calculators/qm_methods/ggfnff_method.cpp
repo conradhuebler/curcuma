@@ -35,20 +35,8 @@ GGFNFFComputationalMethod::GGFNFFComputationalMethod(const std::string& method_n
 
 GGFNFFComputationalMethod::~GGFNFFComputationalMethod()
 {
-    // CUDA allocations corrupt adjacent heap metadata. To prevent the
-    // FFWorkspace destructor from crashing on corrupted free-list entries,
-    // disconnect the CPU residual BEFORE destroying the GPU workspace,
-    // then leak the CPU residual (same pattern as m_gpu_params_leaked).
-    if (m_gpu_workspace) {
-        m_gpu_workspace->setCPUResidualWorkspace(nullptr);
-    }
+    // Destroy GPU workspace first (holds CUDA resources)
     m_gpu_workspace.reset();
-
-    // Leak the CPU residual — its heap metadata may be corrupted by CUDA.
-    // Cost: proportional to HB/XB/ATM/BATM list sizes (typically <50 KB).
-    if (m_cpu_residual) {
-        m_cpu_residual.release();
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -121,41 +109,16 @@ bool GGFNFFComputationalMethod::initGPUWorkspace()
         }
 
         // === 1. Create GPU workspace from full parameter set ===
+        // All energy terms (including HB, XB, ATM, BATM, sTors) run on GPU.
         m_gpu_workspace = std::make_unique<FFWorkspaceGPU>(*pending, natoms, atom_types);
-
-        // === 2. Create CPU residual workspace for HB/XB/ATM/BATM/sTors ===
-        // These terms remain on CPU because they are complex/sparse.
-        // GPU workspace's calculate() automatically calls m_cpu_residual->calculate().
-        {
-            GFNFFParameterSet residual_params;
-            // Copy only CPU-residual terms
-            residual_params.hbonds = pending->hbonds;
-            residual_params.xbonds = pending->xbonds;
-            residual_params.atm_triples = pending->atm_triples;
-            residual_params.batm_triples = pending->batm_triples;
-            residual_params.storsions = pending->storsions;
-            residual_params.bond_hb_data = pending->bond_hb_data;
-            // Charges needed for BATM and HB/XB energy calculations
-            residual_params.eeq_charges = pending->eeq_charges;
-            residual_params.topology_charges = pending->topology_charges;
-            residual_params.method_type = pending->method_type;
-
-            m_cpu_residual = std::make_unique<FFWorkspace>(1);  // single-threaded
-            m_cpu_residual->setAtomTypes(atom_types);
-            m_cpu_residual->setInteractionLists(std::move(residual_params));
-            m_cpu_residual->setTopologyCharges(pending->topology_charges);
-            m_cpu_residual->partition();
-        }
-
-        // === 3. Connect CPU residual to GPU workspace ===
-        // FFWorkspaceGPU::calculate() will automatically add CPU residual energy/gradient.
-        // State setters (setGeometry, setD3CN, setEEQCharges, etc.) forward to m_cpu_residual.
-        m_gpu_workspace->setCPUResidualWorkspace(m_cpu_residual.get());
 
         // WORKAROUND: Leak the parameter set — FFWorkspaceGPU's CUDA allocations corrupt
         // adjacent heap metadata, making the GFNFFParameterSet unfreeable.
         // Cost: ~100 KB one-time.  TODO: investigate CUDA root cause.
         m_gpu_params_leaked = pending.release();
+
+        // Pass verbosity to GPU workspace for conditional diagnostics
+        m_gpu_workspace->setVerbosity(CurcumaLogger::get_verbosity());
 
         // Pre-allocate cached gradient BEFORE any CUDA operations that may corrupt heap
         m_cached_gradient = Matrix::Zero(natoms, 3);
@@ -167,10 +130,8 @@ bool GGFNFFComputationalMethod::initGPUWorkspace()
 
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::success(fmt::format(
-                "ggfnff: GPU workspace ready ({} atoms, {} bonds, {} disp pairs, "
-                "{} HB, {} XB on CPU residual)",
-                natoms, m_gpu_workspace->bondCount(), m_gpu_workspace->dispersionCount(),
-                m_cpu_residual->getHBondCount(), m_cpu_residual->getXBondCount()));
+                "ggfnff: GPU workspace ready ({} atoms, {} bonds, {} disp pairs)",
+                natoms, m_gpu_workspace->bondCount(), m_gpu_workspace->dispersionCount()));
         }
 
         return true;
@@ -200,12 +161,12 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    // === Step 1: CN + EEQ on CPU (via GFNFF helper) ===
-    m_gfnff->prepareCNAndEEQ(gradient);
+    // === Step 1: CN + EEQ on CPU (via GFNFF helper, gpu_only=true) ===
+    // gpu_only: skip sparse dcn matrices and CPU forcefield/workspace distribution
+    m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true);
     auto t1 = std::chrono::high_resolution_clock::now();
 
     // === Step 2: Distribute state to GPU workspace ===
-    // FFWorkspaceGPU setters automatically forward to m_cpu_residual.
     const Matrix& geom_bohr = m_gfnff->getGeometryBohr();
     const Vector& cn = m_gfnff->getLastCN();
     const Vector& charges = m_gfnff->getLastCharges();
@@ -226,26 +187,21 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
         }
 
         // Compute dlogdcn = dCN_squashed/dCN_raw (logistic squashing derivative)
-        // CPU uses cn_raw in calculateCoordinationNumberDerivatives (line 4488).
-        // getLastCN() returns cn_squashed = log(1+e^cnmax) - log(1+e^(cnmax-cn_raw)).
-        // Inversion: e^(cnmax-cn_raw) = e^(lncnmax - cn_squashed) - 1
-        // dlogdcn = e^(cnmax-cn_raw) / (1 + e^(cnmax-cn_raw)) = (x-1)/x
-        // where x = e^(lncnmax - cn_squashed)
         constexpr double cnmax = 4.4;
         const double lncnmax = std::log(1.0 + std::exp(cnmax));
         const int N = static_cast<int>(cn.size());
         Vector dlogdcn(N);
         for (int i = 0; i < N; ++i) {
             double expval = std::exp(lncnmax - cn[i]);
-            dlogdcn[i] = (expval - 1.0) / expval;  // = 1 - exp(cn[i] - lncnmax)
+            dlogdcn[i] = (expval - 1.0) / expval;
         }
         m_gpu_workspace->setDlogDCN(dlogdcn);
-        m_gpu_workspace->setCNDerivatives(cn, cnf, {}); // cn/cnf still needed, dcn empty
+        m_gpu_workspace->setCNDerivatives(cn, cnf, {});
 
-        // DC6/DCN for dispersion dEdcn (still CPU-side for now)
+        // Upload per-pair dc6/dcn values to GPU for dispersion dEdcn kernel
         const Matrix* dc6dcn = m_gfnff->getDC6DCNPtr();
         if (dc6dcn) {
-            m_gpu_workspace->setDC6DCNPtr(dc6dcn);
+            m_gpu_workspace->updateDispersionDC6DCN(*dc6dcn);
         }
     }
 
@@ -297,8 +253,7 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
     auto t2 = std::chrono::high_resolution_clock::now();
 
     // === Step 3: Dynamic HB/XB re-detection ===
-    // Updates m_cpu_residual (and internal GFNFF m_workspace/m_forcefield)
-    m_gfnff->updateHBXBIfNeeded(m_cpu_residual.get());
+    m_gfnff->updateHBXBIfNeeded(nullptr);
 
     // If HB/XB lists changed, re-upload SoA to GPU workspace
     if (m_gfnff->consumeHBXBUpdate()) {
@@ -307,7 +262,7 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
     }
     auto t3 = std::chrono::high_resolution_clock::now();
 
-    // === Step 4: Calculate — GPU terms + CPU residual (HB/XB/ATM/BATM) ===
+    // === Step 4: Calculate — all terms on GPU ===
     m_last_energy = m_gpu_workspace->calculate(gradient);
     auto t4 = std::chrono::high_resolution_clock::now();
 
@@ -319,7 +274,7 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
         double ms_hbxb   = std::chrono::duration<double, std::milli>(t3 - t2).count();
         double ms_gpu    = std::chrono::duration<double, std::milli>(t4 - t3).count();
         double ms_total  = std::chrono::duration<double, std::milli>(t4 - t0).count();
-        CurcumaLogger::result_fmt("GFN-FF (GPU) Timing: CN+EEQ={:.1f}ms Upload+HBCN={:.1f}ms HB/XB={:.1f}ms GPU+Residual={:.1f}ms Total={:.1f}ms",
+        CurcumaLogger::result_fmt("GFN-FF (GPU) Timing: CN+EEQ={:.1f}ms Upload+HBCN={:.1f}ms HB/XB={:.1f}ms GPU={:.1f}ms Total={:.1f}ms",
                                    ms_cneeq, ms_upload, ms_hbxb, ms_gpu, ms_total);
     }
 
@@ -440,6 +395,11 @@ json GGFNFFComputationalMethod::getEnergyDecomposition() const
     json energy_json;
     energy_json["GPU_Total"]  = m_last_energy;
     return energy_json;
+}
+
+const Vector& GGFNFFComputationalMethod::getGPUdEdcn() const
+{
+    return m_gpu_workspace->dEdcnTotal();
 }
 
 // ---------------------------------------------------------------------------

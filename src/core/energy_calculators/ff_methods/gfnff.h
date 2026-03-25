@@ -508,8 +508,11 @@ public:
      * @brief Compute CN, EEQ charges, and (if gradient) CN derivatives for current geometry.
      * Results are stored internally and distributed to m_forcefield/m_workspace.
      * Call getters below to retrieve results for external workspaces.
+     * @param gradient  If true, also compute gradient-related data (cnf, dc6dcn)
+     * @param gpu_only  If true, skip sparse dcn matrix build and CPU forcefield/workspace
+     *                  distribution (GPU has its own k_cn_chainrule kernel)
      */
-    void prepareCNAndEEQ(bool gradient);
+    void prepareCNAndEEQ(bool gradient, bool gpu_only = false);
 
     /**
      * @brief Re-detect HB/XB pairs if geometry has changed enough (RMSD > 0.3 Bohr).

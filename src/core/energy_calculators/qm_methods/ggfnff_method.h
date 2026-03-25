@@ -15,7 +15,6 @@
 
 #include "../computational_method.h"
 #include "../ff_methods/gfnff.h"
-#include "../ff_methods/ff_workspace.h"
 #include "../ff_methods/cuda/ff_workspace_gpu.h"
 
 #include <memory>
@@ -81,9 +80,15 @@ public:
 
     json getEnergyDecomposition() const override;
 
+    /// Expose GPU dEdcn for diagnostics (valid after calculateEnergy with gradient)
+    const Vector& getGPUdEdcn() const;
+
+    /// Expose GPU workspace for gradient diagnostics (e.g. gradientBeforeCN)
+    FFWorkspaceGPU* getGPUWorkspace() const { return m_gpu_workspace.get(); }
+
 private:
     /**
-     * @brief Initialize GPU + CPU-residual workspaces from GFNFF parameter set.
+     * @brief Initialize GPU workspace from GFNFF parameter set.
      * Called after m_gfnff->InitialiseMolecule() succeeds.
      * @return true on success; sets m_has_error on CUDA failure.
      */
@@ -95,8 +100,7 @@ private:
     // the GFNFFParameterSet unfreeable.  Cost: ~100 KB one-time leak.
     // TODO: Investigate CUDA driver heap corruption root cause.
     GFNFFParameterSet*              m_gpu_params_leaked = nullptr;
-    std::unique_ptr<FFWorkspace>    m_cpu_residual;  ///< CPU workspace for HB/XB/ATM/BATM/sTors
-    std::unique_ptr<FFWorkspaceGPU> m_gpu_workspace; ///< GPU workspace (holds raw ptr to m_cpu_residual)
+    std::unique_ptr<FFWorkspaceGPU> m_gpu_workspace;
 
     json             m_parameters;
     std::string      m_method_name;
