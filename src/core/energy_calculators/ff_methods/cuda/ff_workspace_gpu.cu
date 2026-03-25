@@ -601,23 +601,20 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_coul_alp;      ///< [N]
     bool               coul_self_on_gpu = false;
 
-    // Per-term energy: Coulomb self (TERM 2+3)
-    CudaBuffer<double> d_e_coul_self;   ///< [1]
+    // Per-term energy accumulators — consolidated into single contiguous buffer
+    // Claude Generated (March 2026): Reduces 14 individual cudaMemcpy to 1
+    enum EnergySlot {
+        E_DISP = 0, E_BREP = 1, E_NBREP = 2, E_COUL = 3, E_BOND = 4,
+        E_ANGLE = 5, E_DIHED = 6, E_INV = 7, E_STORS = 8, E_BATM = 9,
+        E_ATM = 10, E_XBOND = 11, E_HBOND = 12, E_COUL_SELF = 13,
+        N_ENERGY_SLOTS = 14
+    };
+    CudaBuffer<double> d_energies;      ///< [N_ENERGY_SLOTS] all per-term energies
 
-    // Per-term energy accumulators
-    CudaBuffer<double> d_e_disp;        ///< [1] dispersion energy
-    CudaBuffer<double> d_e_bonded_rep;  ///< [1] bonded repulsion energy
-    CudaBuffer<double> d_e_nb_rep;      ///< [1] non-bonded repulsion energy
-    CudaBuffer<double> d_e_coulomb;     ///< [1] Coulomb TERM 1 energy
-    CudaBuffer<double> d_e_bond;        ///< [1] bond stretching energy
-    CudaBuffer<double> d_e_angle;       ///< [1] angle bending energy
-    CudaBuffer<double> d_e_dihedral;    ///< [1] dihedral torsion energy
-    CudaBuffer<double> d_e_inversion;   ///< [1] inversion energy
-    CudaBuffer<double> d_e_stors;       ///< [1] triple bond torsion energy
-    CudaBuffer<double> d_e_batm;        ///< [1] bonded ATM energy
-    CudaBuffer<double> d_e_atm;         ///< [1] ATM dispersion energy
-    CudaBuffer<double> d_e_xbond;       ///< [1] halogen bond energy
-    CudaBuffer<double> d_e_hbond;       ///< [1] hydrogen bond energy
+    // Diagnostic snapshot buffers (GPU-side, no pipeline stall)
+    // Claude Generated (March 2026): Device-to-device copy instead of sync+download
+    CudaBuffer<double> d_dEdcn_snapshot;   ///< [N] copy of dEdcn before qtmp
+    CudaBuffer<double> d_grad_snapshot;    ///< [3*N] copy of gradient before CN chain-rule
 
     int N = 0;
     cudaStream_t stream = nullptr;
@@ -717,20 +714,12 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_impl->d_dEdcn.alloc(natoms);
     m_impl->d_energy.alloc(1);
 
-    // Per-term energy accumulators
-    m_impl->d_e_disp.alloc(1);
-    m_impl->d_e_bonded_rep.alloc(1);
-    m_impl->d_e_nb_rep.alloc(1);
-    m_impl->d_e_coulomb.alloc(1);
-    m_impl->d_e_bond.alloc(1);
-    m_impl->d_e_angle.alloc(1);
-    m_impl->d_e_dihedral.alloc(1);
-    m_impl->d_e_inversion.alloc(1);
-    m_impl->d_e_stors.alloc(1);
-    m_impl->d_e_batm.alloc(1);
-    m_impl->d_e_atm.alloc(1);
-    m_impl->d_e_xbond.alloc(1);
-    m_impl->d_e_hbond.alloc(1);
+    // Per-term energy accumulators — single contiguous buffer
+    m_impl->d_energies.alloc(FFWorkspaceGPUImpl::N_ENERGY_SLOTS);
+
+    // Diagnostic snapshot buffers (device-to-device copy, no sync stall)
+    m_impl->d_dEdcn_snapshot.alloc(natoms);
+    m_impl->d_grad_snapshot.alloc(N3);
 
     // --- HB alpha chain-rule: allocate zz buffer + build (H,B) pair list ---
     m_impl->d_zz_hb.alloc(natoms);
@@ -997,19 +986,9 @@ double FFWorkspaceGPU::calculate(bool gradient)
     cudaMemsetAsync(impl.d_energy.ptr, 0, sizeof(double),         stream);
     cudaMemsetAsync(impl.d_grad.ptr,   0, 3*N*sizeof(double),     stream);
     cudaMemsetAsync(impl.d_dEdcn.ptr,  0, N*sizeof(double),       stream);
-    cudaMemsetAsync(impl.d_e_disp.ptr,       0, sizeof(double), stream);
-    cudaMemsetAsync(impl.d_e_bonded_rep.ptr, 0, sizeof(double), stream);
-    cudaMemsetAsync(impl.d_e_nb_rep.ptr,     0, sizeof(double), stream);
-    cudaMemsetAsync(impl.d_e_coulomb.ptr,    0, sizeof(double), stream);
-    cudaMemsetAsync(impl.d_e_bond.ptr,       0, sizeof(double), stream);
-    cudaMemsetAsync(impl.d_e_angle.ptr,      0, sizeof(double), stream);
-    cudaMemsetAsync(impl.d_e_dihedral.ptr,   0, sizeof(double), stream);
-    cudaMemsetAsync(impl.d_e_inversion.ptr,  0, sizeof(double), stream);
-    cudaMemsetAsync(impl.d_e_stors.ptr,      0, sizeof(double), stream);
-    cudaMemsetAsync(impl.d_e_batm.ptr,       0, sizeof(double), stream);
-    cudaMemsetAsync(impl.d_e_atm.ptr,        0, sizeof(double), stream);
-    cudaMemsetAsync(impl.d_e_xbond.ptr,      0, sizeof(double), stream);
-    cudaMemsetAsync(impl.d_e_hbond.ptr,      0, sizeof(double), stream);
+    // Zero all per-term energy accumulators in single call
+    cudaMemsetAsync(impl.d_energies.ptr, 0,
+                    FFWorkspaceGPUImpl::N_ENERGY_SLOTS * sizeof(double), stream);
 
     // =========================================================================
     // 2. Upload per-step charges and CN
@@ -1049,7 +1028,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.d_coords.ptr,
             impl.d_dEdcn.ptr,
             impl.d_grad.ptr,
-            impl.d_e_disp.ptr);
+            &impl.d_energies.ptr[impl.E_DISP]);
     }
 
     // --- Bonded repulsion ---
@@ -1061,7 +1040,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.bonded_rep.r_cut.ptr,
             impl.d_coords.ptr,
             impl.d_grad.ptr,
-            impl.d_e_bonded_rep.ptr);
+            &impl.d_energies.ptr[impl.E_BREP]);
     }
 
     // --- Non-bonded repulsion ---
@@ -1073,7 +1052,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.nonbonded_rep.r_cut.ptr,
             impl.d_coords.ptr,
             impl.d_grad.ptr,
-            impl.d_e_nb_rep.ptr);
+            &impl.d_energies.ptr[impl.E_NBREP]);
     }
 
     // --- Coulomb TERM 1 (pairwise erf-damped) ---
@@ -1086,7 +1065,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.d_coords.ptr,
             impl.d_charges.ptr,
             impl.d_grad.ptr,
-            impl.d_e_coulomb.ptr);
+            &impl.d_energies.ptr[impl.E_COUL]);
     }
 
     // --- Bond stretching (with CN-dependent r0, dEdcn, and HB alpha zz) ---
@@ -1113,7 +1092,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.d_grad.ptr,
             impl.d_dEdcn.ptr,
             (gradient && impl.hb_alpha.n > 0) ? impl.d_zz_hb.ptr : nullptr,
-            impl.d_e_bond.ptr);
+            &impl.d_energies.ptr[impl.E_BOND]);
     }
 
     // --- Angle bending (cosine + distance damping) ---
@@ -1126,7 +1105,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.d_coords.ptr,
             (double*)nullptr,       // rcov_d3 unused (constant memory)
             impl.d_grad.ptr,
-            impl.d_e_angle.ptr);
+            &impl.d_energies.ptr[impl.E_ANGLE]);
     }
 
     // --- Dihedrals (standard + extra, Fourier + distance damping) ---
@@ -1144,7 +1123,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.d_coords.ptr,
             (double*)nullptr,         // rcov_d3 unused (constant memory)
             impl.d_grad.ptr,
-            impl.d_e_dihedral.ptr);
+            &impl.d_energies.ptr[impl.E_DIHED]);
     }
 
     // --- Out-of-plane inversions ---
@@ -1160,7 +1139,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.inversions.potential_type.ptr,
             impl.d_coords.ptr,
             impl.d_grad.ptr,
-            impl.d_e_inversion.ptr);
+            &impl.d_energies.ptr[impl.E_INV]);
     }
 
     // --- Triple bond torsions ---
@@ -1172,7 +1151,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.storsions.erefhalf.ptr,
             impl.d_coords.ptr,
             impl.d_grad.ptr,
-            impl.d_e_stors.ptr);
+            &impl.d_energies.ptr[impl.E_STORS]);
     }
 
     // --- Bonded ATM (3-body charge-scaled) ---
@@ -1184,7 +1163,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.d_coords.ptr,
             impl.d_topo_charges.ptr,
             impl.d_grad.ptr,
-            impl.d_e_batm.ptr);
+            &impl.d_energies.ptr[impl.E_BATM]);
     }
 
     // --- ATM 3-body dispersion ---
@@ -1198,7 +1177,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.atm.triple_scale.ptr,
             impl.d_coords.ptr,
             impl.d_grad.ptr,
-            impl.d_e_atm.ptr);
+            &impl.d_energies.ptr[impl.E_ATM]);
     }
 
     // --- Halogen bonds (3-body A-X...B) ---
@@ -1211,7 +1190,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.xbonds.r_cut.ptr,
             impl.d_coords.ptr,
             impl.d_grad.ptr,
-            impl.d_e_xbond.ptr);
+            &impl.d_energies.ptr[impl.E_XBOND]);
     }
 
     // --- Hydrogen bonds (3-body A-H...B, all 4 cases) ---
@@ -1233,7 +1212,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.hbonds.repz_B.ptr,
             impl.d_coords.ptr,
             impl.d_grad.ptr,
-            impl.d_e_hbond.ptr);
+            &impl.d_energies.ptr[impl.E_HBOND]);
     }
 
     // --- HB alpha-modulation chain-rule gradient ---
@@ -1259,10 +1238,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
 
     // Coulomb TERM 2+3 self-energy on GPU (energy only, no gradient)
     if (m_coulomb_enabled && impl.coul_self_on_gpu) {
-        if (!impl.d_e_coul_self.ptr) {
-            impl.d_e_coul_self.alloc(1);
-        }
-        cudaMemsetAsync(impl.d_e_coul_self.ptr, 0, sizeof(double), impl.stream);
+        // E_COUL_SELF slot already zeroed with d_energies above
         k_coulomb_self<<<(N+255)/256, 256, 0, impl.stream>>>(
             N,
             impl.d_charges.ptr,        // eeq_charges
@@ -1271,22 +1247,18 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.d_cn.ptr,
             impl.d_coul_gam.ptr,
             impl.d_coul_alp.ptr,
-            impl.d_e_coul_self.ptr);
+            &impl.d_energies.ptr[impl.E_COUL_SELF]);
     }
 
     // Dispersion dEdcn is now computed directly in k_dispersion kernel on GPU
     // (via dc6dcn_ij/dc6dcn_ji SoA uploaded by updateDispersionDC6DCN).
     // No CPU round-trip needed.
 
-    // Download raw dEdcn (bond + disp, before qtmp) for diagnostics
+    // Snapshot dEdcn BEFORE qtmp modification (async device-to-device, no pipeline stall)
+    // Claude Generated (March 2026): Replaced sync+download with D2D copy
     if (gradient) {
-        checkCuda(cudaDeviceSynchronize(), "pre-qtmp sync");
-        m_dEdcn_total.resize(N);
-        std::vector<double> h_dEdcn(N);
-        checkCuda(cudaMemcpy(h_dEdcn.data(), impl.d_dEdcn.ptr,
-                             N * sizeof(double), cudaMemcpyDeviceToHost), "dEdcn download");
-        for (int i = 0; i < N; ++i)
-            m_dEdcn_total[i] = h_dEdcn[i];
+        cudaMemcpyAsync(impl.d_dEdcn_snapshot.ptr, impl.d_dEdcn.ptr,
+                        N * sizeof(double), cudaMemcpyDeviceToDevice, stream);
     }
 
     // Subtract qtmp from dEdcn on GPU (Coulomb TERM 1b correction)
@@ -1301,18 +1273,10 @@ double FFWorkspaceGPU::calculate(bool gradient)
 
     // CN chain-rule gradient on GPU (replaces dcn * dEdcn_combined)
     if (gradient && m_cn_pairs_on_gpu && impl.n_cn_pairs > 0 && impl.d_dlogdcn.ptr) {
-        // Download gradient BEFORE CN chain-rule for diagnostics
-        if (m_h_grad.size() >= static_cast<size_t>(3*N)) {
-            checkCuda(cudaDeviceSynchronize(), "pre-cn-grad sync");
-            checkCuda(cudaMemcpy(m_h_grad.data(), impl.d_grad.ptr,
-                                 3*N*sizeof(double), cudaMemcpyDeviceToHost), "pre-cn grad download");
-            m_grad_before_cn.resize(N, 3);
-            for (int i = 0; i < N; ++i) {
-                m_grad_before_cn(i, 0) = m_h_grad[3*i+0];
-                m_grad_before_cn(i, 1) = m_h_grad[3*i+1];
-                m_grad_before_cn(i, 2) = m_h_grad[3*i+2];
-            }
-        }
+        // Snapshot gradient BEFORE CN chain-rule (async device-to-device, no pipeline stall)
+        // Claude Generated (March 2026): Replaced sync+download with D2D copy
+        cudaMemcpyAsync(impl.d_grad_snapshot.ptr, impl.d_grad.ptr,
+                        3*N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
 
         k_cn_chainrule<<<(impl.n_cn_pairs + 255)/256, 256, 0, impl.stream>>>(
             impl.n_cn_pairs,
@@ -1332,26 +1296,26 @@ double FFWorkspaceGPU::calculate(bool gradient)
     checkCuda(cudaGetLastError(), "postprocess kernel launch check");
     checkCuda(cudaDeviceSynchronize(), "postprocess device sync");
 
-    // Download per-term GPU energies
-    double e_disp = 0, e_brep = 0, e_nbrep = 0, e_coul1 = 0;
-    double e_bond = 0, e_angle = 0, e_dihedral = 0, e_inversion = 0;
-    double e_stors = 0, e_batm = 0, e_atm = 0, e_xbond = 0, e_hbond = 0;
-    double e_coul_self = 0;
-    checkCuda(cudaMemcpy(&e_disp,      impl.d_e_disp.ptr,       sizeof(double), cudaMemcpyDeviceToHost), "disp energy download");
-    checkCuda(cudaMemcpy(&e_brep,      impl.d_e_bonded_rep.ptr, sizeof(double), cudaMemcpyDeviceToHost), "brep energy download");
-    checkCuda(cudaMemcpy(&e_nbrep,     impl.d_e_nb_rep.ptr,     sizeof(double), cudaMemcpyDeviceToHost), "nbrep energy download");
-    checkCuda(cudaMemcpy(&e_coul1,     impl.d_e_coulomb.ptr,    sizeof(double), cudaMemcpyDeviceToHost), "coul1 energy download");
-    checkCuda(cudaMemcpy(&e_bond,      impl.d_e_bond.ptr,       sizeof(double), cudaMemcpyDeviceToHost), "bond energy download");
-    checkCuda(cudaMemcpy(&e_angle,     impl.d_e_angle.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "angle energy download");
-    checkCuda(cudaMemcpy(&e_dihedral,  impl.d_e_dihedral.ptr,   sizeof(double), cudaMemcpyDeviceToHost), "dihedral energy download");
-    checkCuda(cudaMemcpy(&e_inversion, impl.d_e_inversion.ptr,  sizeof(double), cudaMemcpyDeviceToHost), "inversion energy download");
-    checkCuda(cudaMemcpy(&e_stors,     impl.d_e_stors.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "stors energy download");
-    checkCuda(cudaMemcpy(&e_batm,      impl.d_e_batm.ptr,       sizeof(double), cudaMemcpyDeviceToHost), "batm energy download");
-    checkCuda(cudaMemcpy(&e_atm,       impl.d_e_atm.ptr,        sizeof(double), cudaMemcpyDeviceToHost), "atm energy download");
-    checkCuda(cudaMemcpy(&e_xbond,     impl.d_e_xbond.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "xbond energy download");
-    checkCuda(cudaMemcpy(&e_hbond,     impl.d_e_hbond.ptr,      sizeof(double), cudaMemcpyDeviceToHost), "hbond energy download");
-    if (impl.d_e_coul_self.ptr)
-        checkCuda(cudaMemcpy(&e_coul_self, impl.d_e_coul_self.ptr, sizeof(double), cudaMemcpyDeviceToHost), "coul_self download");
+    // Download all per-term GPU energies in single transfer
+    // Claude Generated (March 2026): Replaces 14 individual cudaMemcpy with 1
+    double h_energies[FFWorkspaceGPUImpl::N_ENERGY_SLOTS] = {};
+    checkCuda(cudaMemcpy(h_energies, impl.d_energies.ptr,
+                         FFWorkspaceGPUImpl::N_ENERGY_SLOTS * sizeof(double),
+                         cudaMemcpyDeviceToHost), "per-term energy download");
+    const double e_disp      = h_energies[impl.E_DISP];
+    const double e_brep      = h_energies[impl.E_BREP];
+    const double e_nbrep     = h_energies[impl.E_NBREP];
+    const double e_coul1     = h_energies[impl.E_COUL];
+    const double e_bond      = h_energies[impl.E_BOND];
+    const double e_angle     = h_energies[impl.E_ANGLE];
+    const double e_dihedral  = h_energies[impl.E_DIHED];
+    const double e_inversion = h_energies[impl.E_INV];
+    const double e_stors     = h_energies[impl.E_STORS];
+    const double e_batm      = h_energies[impl.E_BATM];
+    const double e_atm       = h_energies[impl.E_ATM];
+    const double e_xbond     = h_energies[impl.E_XBOND];
+    const double e_hbond     = h_energies[impl.E_HBOND];
+    const double e_coul_self = h_energies[impl.E_COUL_SELF];
 
     // Download gradient (using pre-allocated staging buffer — no heap allocs)
     if (gradient) {
@@ -1363,6 +1327,26 @@ double FFWorkspaceGPU::calculate(bool gradient)
             m_result_gradient(i, 0) = m_h_grad[3*i+0];
             m_result_gradient(i, 1) = m_h_grad[3*i+1];
             m_result_gradient(i, 2) = m_h_grad[3*i+2];
+        }
+
+        // Download diagnostic snapshots from GPU (no extra sync needed — already synced)
+        // Claude Generated (March 2026): Snapshots taken via D2D copy, downloaded here
+        m_dEdcn_total.resize(N);
+        std::vector<double> h_dEdcn(N);
+        checkCuda(cudaMemcpy(h_dEdcn.data(), impl.d_dEdcn_snapshot.ptr,
+                             N * sizeof(double), cudaMemcpyDeviceToHost), "dEdcn snapshot download");
+        for (int i = 0; i < N; ++i)
+            m_dEdcn_total[i] = h_dEdcn[i];
+
+        // Download pre-CN gradient snapshot
+        std::vector<double> h_grad_snap(3*N);
+        checkCuda(cudaMemcpy(h_grad_snap.data(), impl.d_grad_snapshot.ptr,
+                             3*N*sizeof(double), cudaMemcpyDeviceToHost), "pre-cn grad snapshot download");
+        m_grad_before_cn.resize(N, 3);
+        for (int i = 0; i < N; ++i) {
+            m_grad_before_cn(i, 0) = h_grad_snap[3*i+0];
+            m_grad_before_cn(i, 1) = h_grad_snap[3*i+1];
+            m_grad_before_cn(i, 2) = h_grad_snap[3*i+2];
         }
     }
 
