@@ -98,6 +98,7 @@ public:
     const std::vector<std::vector<double>>& getGaussianWeightDerivatives() const { return m_gaussian_weight_derivatives; }
     const std::vector<double>& getC6FlatCache() const { return m_c6_flat_cache; }
     const std::vector<int>& getRefN() const { return m_refn; }
+    const std::vector<std::vector<double>>& getRefCN() const { return m_refcn; }
 
     // Claude Generated (March 2026): Public access for ATM triple generation without JSON
     double getChargeWeightedC6(int Zi, int Zj, size_t atom_i, size_t atom_j) const;

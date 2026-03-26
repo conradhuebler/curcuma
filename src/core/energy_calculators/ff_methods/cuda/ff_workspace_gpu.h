@@ -214,6 +214,19 @@ public:
     void computeDC6DCNOnGPU(const std::vector<std::vector<double>>& gw,
                              const std::vector<std::vector<double>>& dgw);
 
+    /**
+     * @brief Upload reference CN values (one-time at init).
+     * @param refcn  Nested [MAX_ELEM][nref] reference CN values
+     */
+    void uploadRefCN(const std::vector<std::vector<double>>& refcn);
+
+    /**
+     * @brief Compute Gaussian weights + dc6dcn entirely on GPU (Phase 6).
+     * Replaces: CPU precomputeGaussianWeights() + computeGaussianWeightDerivatives()
+     * + computeDC6DCNOnGPU(). CN values must be on GPU (from computeCN() or setD3CN()).
+     */
+    void computeGaussianWeightsOnGPU();
+
     // =========================================================================
     // Term enable flags (match FFWorkspace API)
     // =========================================================================
@@ -373,6 +386,7 @@ private:
     double* m_h_grad   = nullptr;   ///< [3*N] pinned staging for gradient download
     double* m_h_dEdcn_snap = nullptr; ///< [N] pinned staging for dEdcn snapshot download
     double* m_h_grad_snap  = nullptr; ///< [3*N] pinned staging for pre-CN grad snapshot
+    double* m_h_energies   = nullptr; ///< [14] pinned staging for per-term energy download
 
     // Results
     Matrix             m_result_gradient;

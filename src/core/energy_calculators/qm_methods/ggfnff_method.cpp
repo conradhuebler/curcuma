@@ -139,6 +139,8 @@ bool GGFNFFComputationalMethod::initGPUWorkspace()
         D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
         if (d4 && !d4->getC6FlatCache().empty()) {
             m_gpu_workspace->uploadC6ReferenceTable(d4->getC6FlatCache(), d4->getRefN());
+            // Phase 6: Upload reference CN values for GPU Gaussian weight kernel
+            m_gpu_workspace->uploadRefCN(d4->getRefCN());
         }
 
         if (CurcumaLogger::get_verbosity() >= 1) {
@@ -279,16 +281,14 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
     const Vector& cn = m_gfnff->getLastCN();
     const Vector& charges = m_gfnff->getLastCharges();
 
-    // Upload dc6dcn for dispersion gradient (computed from Gaussian weights in prepareCNAndEEQ)
+    // Upload CN derivatives and compute dc6dcn for dispersion gradient
     if (gradient) {
         const Vector& cnf = m_gfnff->getLastCNF();
         m_gpu_workspace->setCNDerivatives(cn, cnf, {});
 
-        D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
-        if (d4) {
-            m_gpu_workspace->computeDC6DCNOnGPU(d4->getGaussianWeights(),
-                                                  d4->getGaussianWeightDerivatives());
-        }
+        // Phase 6: Gaussian weights + dc6dcn computed entirely on GPU
+        // (k_gaussian_weights + k_dc6dcn_per_pair, no CPU gw/dgw needed)
+        m_gpu_workspace->computeGaussianWeightsOnGPU();
     }
 
     auto t2 = std::chrono::high_resolution_clock::now();

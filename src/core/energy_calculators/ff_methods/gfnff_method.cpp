@@ -746,12 +746,13 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             m_last_dcn = dcn;
         }
 
-        // D4 Gaussian weights + derivatives always needed for dc6dcn.
-        // gpu_only: skip O(N²) computeDC6DCN() — GPU computes dc6dcn per pair directly.
-        if (m_d4_generator) {
+        // D4 Gaussian weights + derivatives needed for dc6dcn.
+        // gpu_only: GPU computes gw + dgw + dc6dcn entirely on device (Phase 6).
+        // CPU path: compute gw + dgw + dc6dcn matrix on CPU.
+        if (m_d4_generator && !gpu_only) {
             std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_last_cn.size());
             m_d4_generator->updateCNValuesForGradient(cn_std, pool, total_threads,
-                                                       /*skip_dc6dcn=*/gpu_only);
+                                                       /*skip_dc6dcn=*/false);
         }
 
         Vector new_charges;

@@ -72,9 +72,42 @@ static const double s_rcov_d3_bohr[87] = {
 };
 
 // ============================================================================
-// GPU thread launch helper
+// GPU thread launch helpers (Phase 6: Dynamic block size optimization)
+// Claude Generated (March 2026)
+//
+// Adaptive block sizing based on problem size for better GPU occupancy:
+//   - Small problems (<256): 32 threads (1 warp)
+//   - Medium problems (<1024): 128 threads (4 warps)
+//   - Normal problems (<16384): 256 threads (8 warps)
+//   - Large problems: 512 threads (16 warps)
+//
+// Warp-aligned block sizes ensure efficient reduction in blockReduceAddEnergy.
 // ============================================================================
 
+struct LaunchConfig {
+    int blockSize;
+    int gridSize;
+};
+
+static inline LaunchConfig getLaunchConfig(int n_elements, int maxBlockSize = 512) {
+    LaunchConfig cfg;
+    // Adaptive block size based on problem size
+    // IMPORTANT: maxBlockSize must match GFNFF_KERNEL_BOUNDS in gfnff_kernels.cuh
+    // Current: __launch_bounds__(512, 2) - max 512 threads, min 2 blocks/SM
+    if (n_elements < 256) {
+        cfg.blockSize = 32;    // Single warp - minimal overhead for tiny problems
+    } else if (n_elements < 1024) {
+        cfg.blockSize = 128;   // 4 warps - good for small problems
+    } else if (n_elements < 16384) {
+        cfg.blockSize = 256;   // Standard - good balance for medium problems
+    } else {
+        cfg.blockSize = maxBlockSize;  // 512 threads - maximize occupancy for large problems
+    }
+    cfg.gridSize = (n_elements + cfg.blockSize - 1) / cfg.blockSize;
+    return cfg;
+}
+
+// Legacy helper for backward compatibility (still uses 256 as default)
 static inline int gridFor(int n, int block = 256) {
     return (n + block - 1) / block;
 }
@@ -624,6 +657,7 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_dgw;          ///< [N * MAX_REF] weight derivatives
     CudaBuffer<double> d_c6_flat;      ///< [MAX_ELEM² * MAX_REF²] C6 reference table
     CudaBuffer<int>    d_refn;         ///< [MAX_ELEM] nref per element
+    CudaBuffer<double> d_refcn;        ///< [MAX_ELEM * MAX_REF] reference CN values
     bool               dc6dcn_gpu_ready = false; ///< true after C6 table + refn uploaded
 
     // Diagnostic snapshot buffers (GPU-side, no pipeline stall)
@@ -676,6 +710,9 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     // The caller (ggfnff_method.cpp) pre-allocates m_gpu_cn_final before CUDA init.
     checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_cn_final), natoms * sizeof(double)),
               "pinned alloc m_h_cn_final");
+    checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_energies),
+                             FFWorkspaceGPUImpl::N_ENERGY_SLOTS * sizeof(double)),
+              "pinned alloc m_h_energies");
 
     m_impl = std::make_unique<FFWorkspaceGPUImpl>();
     m_impl->N = natoms;
@@ -872,6 +909,7 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
     if (m_h_dEdcn_snap) cudaFreeHost(m_h_dEdcn_snap);
     if (m_h_grad_snap)  cudaFreeHost(m_h_grad_snap);
     if (m_h_cn_final)   cudaFreeHost(m_h_cn_final);
+    if (m_h_energies)   cudaFreeHost(m_h_energies);
 }
 
 // ============================================================================
@@ -1083,10 +1121,9 @@ void FFWorkspaceGPU::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& 
     impl.d_gw.upload(m_h_gw_flat.data(), gw_size);
     impl.d_dgw.upload(m_h_dgw_flat.data(), gw_size);
 
-    // Launch dc6dcn per-pair kernel
-    int block = 256;
-    int grid = (nd + block - 1) / block;
-    k_dc6dcn_per_pair<<<grid, block, 0, impl.stream>>>(
+    // Launch dc6dcn per-pair kernel (Phase 6: dynamic block size)
+    LaunchConfig cfg = getLaunchConfig(nd);
+    k_dc6dcn_per_pair<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
         nd,
         impl.disp.idx_i.ptr,
         impl.disp.idx_j.ptr,
@@ -1103,6 +1140,75 @@ void FFWorkspaceGPU::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& 
     // launchChargeDependentAndFinish() does cudaStreamWaitEvent(stream_pairwise, stream)
     // before launching k_dispersion, which guarantees dc6dcn is ready.
     // Phase 4a: Removed unnecessary cudaStreamSynchronize (Claude Generated March 2026)
+}
+
+// ============================================================================
+// Phase 6: Upload reference CN values (one-time at init)
+// Claude Generated (March 2026)
+// ============================================================================
+
+void FFWorkspaceGPU::uploadRefCN(const std::vector<std::vector<double>>& refcn)
+{
+    auto& impl = *m_impl;
+
+    // Flatten nested refcn[MAX_ELEM][var_len] → flat [MAX_ELEM × D4_MAX_REF]
+    const int flat_size = D4_MAX_ELEM * D4_MAX_REF;
+    std::vector<double> refcn_flat(flat_size, 0.0);
+
+    for (int elem = 0; elem < D4_MAX_ELEM && elem < static_cast<int>(refcn.size()); ++elem) {
+        int base = elem * D4_MAX_REF;
+        int nref = static_cast<int>(refcn[elem].size());
+        for (int r = 0; r < D4_MAX_REF && r < nref; ++r) {
+            refcn_flat[base + r] = refcn[elem][r];
+        }
+    }
+
+    impl.d_refcn.upload(refcn_flat.data(), flat_size);
+}
+
+// ============================================================================
+// Phase 6: Compute Gaussian weights + dc6dcn entirely on GPU
+// Claude Generated (March 2026): Eliminates CPU precomputeGaussianWeights()
+// + computeGaussianWeightDerivatives() + flatten + sync H2D upload.
+// ============================================================================
+
+void FFWorkspaceGPU::computeGaussianWeightsOnGPU()
+{
+    auto& impl = *m_impl;
+    if (!impl.dc6dcn_gpu_ready) return;
+
+    const int N = m_natoms;
+    const int nd = impl.disp.n;
+    if (nd == 0) return;
+
+    // Launch k_gaussian_weights: compute gw and dgw from CN values already on GPU
+    // CN source: d_cn (uploaded in prepareAndLaunchChargeIndependent via setD3CN)
+    LaunchConfig cfg_gw = getLaunchConfig(N);
+    k_gaussian_weights<<<cfg_gw.gridSize, cfg_gw.blockSize, 0, impl.stream>>>(
+        N,
+        impl.d_cn.ptr,
+        impl.d_atom_types.ptr,
+        impl.d_refcn.ptr,
+        impl.d_refn.ptr,
+        impl.d_gw.ptr,
+        impl.d_dgw.ptr);
+
+    // Launch k_dc6dcn_per_pair immediately on same stream (gw/dgw ready by ordering)
+    LaunchConfig cfg_dc6 = getLaunchConfig(nd);
+    k_dc6dcn_per_pair<<<cfg_dc6.gridSize, cfg_dc6.blockSize, 0, impl.stream>>>(
+        nd,
+        impl.disp.idx_i.ptr,
+        impl.disp.idx_j.ptr,
+        impl.d_atom_types.ptr,
+        impl.d_gw.ptr,
+        impl.d_dgw.ptr,
+        impl.d_c6_flat.ptr,
+        impl.d_refn.ptr,
+        impl.disp.dc6dcn_ij.ptr,
+        impl.disp.dc6dcn_ji.ptr);
+
+    // No sync needed: same stream ordering guarantees dc6dcn is ready
+    // before k_dispersion in launchChargeDependentAndFinish()
 }
 
 // ============================================================================
@@ -1125,7 +1231,6 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     auto& impl = *m_impl;
     const int N = m_natoms;
     cudaStream_t stream = impl.stream;
-    constexpr int BLOCK = 256;
 
     // =========================================================================
     // 1. Zero GPU accumulators (total + per-term)
@@ -1167,7 +1272,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // because the dEdcn accumulation needs dc6dcn values which come from computeDC6DCNOnGPU()
     // (called after EEQ completes). Energy-only dispersion runs here for full overlap.
     if (m_dispersion_enabled && impl.disp.n > 0 && !gradient) {
-        k_dispersion<<<gridFor(impl.disp.n, BLOCK), BLOCK, 0, sA>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.disp.n);
+        k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
             impl.disp.n,
             impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
             impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
@@ -1181,7 +1287,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             &impl.d_energies.ptr[impl.E_DISP]);
     }
     if (m_repulsion_enabled && impl.bonded_rep.n > 0) {
-        k_repulsion<<<gridFor(impl.bonded_rep.n, BLOCK), BLOCK, 0, sA>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.bonded_rep.n);
+        k_repulsion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
             impl.bonded_rep.n,
             impl.bonded_rep.idx_i.ptr,  impl.bonded_rep.idx_j.ptr,
             impl.bonded_rep.alpha.ptr,  impl.bonded_rep.repab.ptr,
@@ -1191,7 +1298,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             &impl.d_energies.ptr[impl.E_BREP]);
     }
     if (m_repulsion_enabled && impl.nonbonded_rep.n > 0) {
-        k_repulsion<<<gridFor(impl.nonbonded_rep.n, BLOCK), BLOCK, 0, sA>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.nonbonded_rep.n);
+        k_repulsion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
             impl.nonbonded_rep.n,
             impl.nonbonded_rep.idx_i.ptr,  impl.nonbonded_rep.idx_j.ptr,
             impl.nonbonded_rep.alpha.ptr,  impl.nonbonded_rep.repab.ptr,
@@ -1208,7 +1316,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         if (gradient && impl.hb_alpha.n > 0) {
             impl.d_zz_hb.zero(N, sB);
         }
-        k_bonds<<<gridFor(impl.bonds.n, BLOCK), BLOCK, 0, sB>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.bonds.n);
+        k_bonds<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.bonds.n,
             impl.bonds.idx_i.ptr,     impl.bonds.idx_j.ptr,
             impl.bonds.r0.ptr,
@@ -1229,7 +1338,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             &impl.d_energies.ptr[impl.E_BOND]);
     }
     if (impl.angles.n > 0) {
-        k_angles<<<gridFor(impl.angles.n, BLOCK), BLOCK, 0, sB>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.angles.n);
+        k_angles<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.angles.n,
             impl.angles.idx_i.ptr,  impl.angles.idx_j.ptr,  impl.angles.idx_k.ptr,
             impl.angles.ati.ptr,    impl.angles.atj.ptr,    impl.angles.atk.ptr,
@@ -1240,7 +1350,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             &impl.d_energies.ptr[impl.E_ANGLE]);
     }
     if (impl.dihedrals.n > 0) {
-        k_dihedrals<<<gridFor(impl.dihedrals.n, BLOCK), BLOCK, 0, sB>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.dihedrals.n);
+        k_dihedrals<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.dihedrals.n,
             impl.dihedrals.idx_i.ptr, impl.dihedrals.idx_j.ptr,
             impl.dihedrals.idx_k.ptr, impl.dihedrals.idx_l.ptr,
@@ -1256,7 +1367,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             &impl.d_energies.ptr[impl.E_DIHED]);
     }
     if (impl.inversions.n > 0) {
-        k_inversions<<<gridFor(impl.inversions.n, BLOCK), BLOCK, 0, sB>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.inversions.n);
+        k_inversions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.inversions.n,
             impl.inversions.idx_i.ptr, impl.inversions.idx_j.ptr,
             impl.inversions.idx_k.ptr, impl.inversions.idx_l.ptr,
@@ -1270,7 +1382,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             &impl.d_energies.ptr[impl.E_INV]);
     }
     if (impl.storsions.n > 0) {
-        k_storsions<<<gridFor(impl.storsions.n, BLOCK), BLOCK, 0, sB>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.storsions.n);
+        k_storsions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.storsions.n,
             impl.storsions.idx_i.ptr, impl.storsions.idx_j.ptr,
             impl.storsions.idx_k.ptr, impl.storsions.idx_l.ptr,
@@ -1281,7 +1394,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     if (gradient && impl.hb_alpha.n > 0 && impl.d_zz_hb.ptr) {
         constexpr double hb_kn = 27.5;
-        k_hb_alpha_chainrule<<<gridFor(impl.hb_alpha.n, BLOCK), BLOCK, 0, sB>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.hb_alpha.n);
+        k_hb_alpha_chainrule<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.hb_alpha.n,
             impl.hb_alpha.idx_H.ptr,
             impl.hb_alpha.idx_B.ptr,
@@ -1297,7 +1411,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // All charge-independent: batm uses topology charges (static),
     // hbonds uses q_H/q_A/q_B baked into SoA at construction time.
     if (impl.batm.n > 0) {
-        k_batm<<<gridFor(impl.batm.n, BLOCK), BLOCK, 0, sC>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.batm.n);
+        k_batm<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
             impl.batm.n,
             impl.batm.idx_i.ptr, impl.batm.idx_j.ptr, impl.batm.idx_k.ptr,
             impl.batm.zb3atm_i.ptr, impl.batm.zb3atm_j.ptr, impl.batm.zb3atm_k.ptr,
@@ -1307,7 +1422,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             &impl.d_energies.ptr[impl.E_BATM]);
     }
     if (impl.atm.n > 0) {
-        k_atm<<<gridFor(impl.atm.n, BLOCK), BLOCK, 0, sC>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.atm.n);
+        k_atm<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
             impl.atm.n,
             impl.atm.idx_i.ptr, impl.atm.idx_j.ptr, impl.atm.idx_k.ptr,
             impl.atm.ati.ptr,   impl.atm.atj.ptr,   impl.atm.atk.ptr,
@@ -1319,7 +1435,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             &impl.d_energies.ptr[impl.E_ATM]);
     }
     if (impl.xbonds.n > 0) {
-        k_xbonds<<<gridFor(impl.xbonds.n, BLOCK), BLOCK, 0, sC>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.xbonds.n);
+        k_xbonds<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
             impl.xbonds.n,
             impl.xbonds.idx_i.ptr, impl.xbonds.idx_j.ptr, impl.xbonds.idx_k.ptr,
             impl.xbonds.elem_A.ptr, impl.xbonds.elem_B.ptr,
@@ -1330,7 +1447,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             &impl.d_energies.ptr[impl.E_XBOND]);
     }
     if (m_hbond_enabled && impl.hbonds.n > 0) {
-        k_hbonds<<<gridFor(impl.hbonds.n, BLOCK), BLOCK, 0, sC>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.hbonds.n);
+        k_hbonds<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
             impl.hbonds.n,
             impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr,
             impl.hbonds.elem_A.ptr, impl.hbonds.elem_B.ptr,
@@ -1358,7 +1476,6 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     auto& impl = *m_impl;
     const int N = m_natoms;
     cudaStream_t stream = impl.stream;
-    constexpr int BLOCK = 256;
 
     // =========================================================================
     // 1. Upload EEQ charges (the CPU EEQ solver has completed by now)
@@ -1379,7 +1496,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // k_dispersion deferred from charge-independent phase when gradient=true
     // (needs dc6dcn from computeDC6DCNOnGPU which ran after EEQ)
     if (m_dispersion_enabled && impl.disp.n > 0 && gradient) {
-        k_dispersion<<<gridFor(impl.disp.n, BLOCK), BLOCK, 0, impl.stream_pairwise>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.disp.n);
+        k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
             impl.disp.n,
             impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
             impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
@@ -1395,7 +1513,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
 
     // k_coulomb (needs EEQ charges)
     if (m_coulomb_enabled && impl.coulomb.n > 0) {
-        k_coulomb<<<gridFor(impl.coulomb.n, BLOCK), BLOCK, 0, impl.stream_pairwise>>>(
+        LaunchConfig cfg = getLaunchConfig(impl.coulomb.n);
+        k_coulomb<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
             impl.coulomb.n,
             impl.coulomb.idx_i.ptr,  impl.coulomb.idx_j.ptr,
             impl.coulomb.gamma_ij.ptr,
@@ -1419,7 +1538,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // k_coulomb_self: only reads d_charges and d_cn which are on main stream already.
     // Can run immediately after charge upload, no need to wait for kernel streams.
     if (m_coulomb_enabled && impl.coul_self_on_gpu) {
-        k_coulomb_self<<<(N+255)/256, 256, 0, stream>>>(
+        LaunchConfig cfg = getLaunchConfig(N);
+        k_coulomb_self<<<cfg.gridSize, cfg.blockSize, 0, stream>>>(
             N,
             impl.d_charges.ptr,
             impl.d_coul_chi_base.ptr,
@@ -1442,7 +1562,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
                             N * sizeof(double), cudaMemcpyDeviceToDevice, stream);
         }
 
-        k_subtract_qtmp<<<(N+255)/256, 256, 0, stream>>>(
+        LaunchConfig cfg_qtmp = getLaunchConfig(N);
+        k_subtract_qtmp<<<cfg_qtmp.gridSize, cfg_qtmp.blockSize, 0, stream>>>(
             N,
             impl.d_charges.ptr,
             impl.d_coul_cnf.ptr,
@@ -1462,7 +1583,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
                             3*N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
         }
 
-        k_cn_chainrule<<<(impl.n_cn_pairs + 255)/256, 256, 0, stream>>>(
+        LaunchConfig cfg_cn = getLaunchConfig(impl.n_cn_pairs);
+        k_cn_chainrule<<<cfg_cn.gridSize, cfg_cn.blockSize, 0, stream>>>(
             impl.n_cn_pairs,
             impl.d_cn_idx_i.ptr,
             impl.d_cn_idx_j.ptr,
@@ -1475,59 +1597,73 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     }
 
     // =========================================================================
-    // 4. Synchronise and download final results
-    // Ensure ALL kernel streams have completed before downloading energies/gradient.
-    // The stream waits above may not cover all streams (e.g. threebody for energy-only).
+    // 4. Async download of final results (Phase 6: Async DMA)
+    // Claude Generated (March 2026): All D2H transfers enqueued on main stream,
+    // single cudaStreamSynchronize at end. Pinned buffers enable true async DMA.
     // =========================================================================
     cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
     cudaStreamWaitEvent(stream, impl.event_bonded, 0);
     cudaStreamWaitEvent(stream, impl.event_threebody, 0);
 
     checkCuda(cudaGetLastError(), "postprocess kernel launch check");
-    checkCuda(cudaStreamSynchronize(stream), "postprocess stream sync");
 
-    // Download all per-term GPU energies in single transfer
-    double h_energies[FFWorkspaceGPUImpl::N_ENERGY_SLOTS] = {};
-    checkCuda(cudaMemcpy(h_energies, impl.d_energies.ptr,
-                         FFWorkspaceGPUImpl::N_ENERGY_SLOTS * sizeof(double),
-                         cudaMemcpyDeviceToHost), "per-term energy download");
-    const double e_disp      = h_energies[impl.E_DISP];
-    const double e_brep      = h_energies[impl.E_BREP];
-    const double e_nbrep     = h_energies[impl.E_NBREP];
-    const double e_coul1     = h_energies[impl.E_COUL];
-    const double e_bond      = h_energies[impl.E_BOND];
-    const double e_angle     = h_energies[impl.E_ANGLE];
-    const double e_dihedral  = h_energies[impl.E_DIHED];
-    const double e_inversion = h_energies[impl.E_INV];
-    const double e_stors     = h_energies[impl.E_STORS];
-    const double e_batm      = h_energies[impl.E_BATM];
-    const double e_atm       = h_energies[impl.E_ATM];
-    const double e_xbond     = h_energies[impl.E_XBOND];
-    const double e_hbond     = h_energies[impl.E_HBOND];
-    const double e_coul_self = h_energies[impl.E_COUL_SELF];
+    // Async energy download (pinned m_h_energies buffer)
+    checkCuda(cudaMemcpyAsync(m_h_energies, impl.d_energies.ptr,
+                              FFWorkspaceGPUImpl::N_ENERGY_SLOTS * sizeof(double),
+                              cudaMemcpyDeviceToHost, stream),
+              "async energy download");
 
-    // Download gradient
+    // Async gradient + diagnostic snapshot downloads
     if (gradient) {
-        checkCuda(cudaMemcpy(m_h_grad, impl.d_grad.ptr,
-                             3*N*sizeof(double), cudaMemcpyDeviceToHost),
-                  "gradient download");
+        checkCuda(cudaMemcpyAsync(m_h_grad, impl.d_grad.ptr,
+                                  3 * N * sizeof(double),
+                                  cudaMemcpyDeviceToHost, stream),
+                  "async gradient download");
 
+        if (need_snapshots) {
+            checkCuda(cudaMemcpyAsync(m_h_dEdcn_snap, impl.d_dEdcn_snapshot.ptr,
+                                      N * sizeof(double),
+                                      cudaMemcpyDeviceToHost, stream),
+                      "async dEdcn snapshot download");
+            checkCuda(cudaMemcpyAsync(m_h_grad_snap, impl.d_grad_snapshot.ptr,
+                                      3 * N * sizeof(double),
+                                      cudaMemcpyDeviceToHost, stream),
+                      "async grad snapshot download");
+        }
+    }
+
+    // Single synchronization point — all async transfers complete here
+    checkCuda(cudaStreamSynchronize(stream), "final stream sync");
+
+    // Extract per-term energies from pinned buffer
+    const double e_disp      = m_h_energies[impl.E_DISP];
+    const double e_brep      = m_h_energies[impl.E_BREP];
+    const double e_nbrep     = m_h_energies[impl.E_NBREP];
+    const double e_coul1     = m_h_energies[impl.E_COUL];
+    const double e_bond      = m_h_energies[impl.E_BOND];
+    const double e_angle     = m_h_energies[impl.E_ANGLE];
+    const double e_dihedral  = m_h_energies[impl.E_DIHED];
+    const double e_inversion = m_h_energies[impl.E_INV];
+    const double e_stors     = m_h_energies[impl.E_STORS];
+    const double e_batm      = m_h_energies[impl.E_BATM];
+    const double e_atm       = m_h_energies[impl.E_ATM];
+    const double e_xbond     = m_h_energies[impl.E_XBOND];
+    const double e_hbond     = m_h_energies[impl.E_HBOND];
+    const double e_coul_self = m_h_energies[impl.E_COUL_SELF];
+
+    // Copy gradient from pinned buffer to Eigen matrix
+    if (gradient) {
         for (int i = 0; i < N; ++i) {
             m_result_gradient(i, 0) = m_h_grad[3*i+0];
             m_result_gradient(i, 1) = m_h_grad[3*i+1];
             m_result_gradient(i, 2) = m_h_grad[3*i+2];
         }
 
-        // Download diagnostic snapshots only when verbosity >= 3
         if (need_snapshots) {
             m_dEdcn_total.resize(N);
-            checkCuda(cudaMemcpy(m_h_dEdcn_snap, impl.d_dEdcn_snapshot.ptr,
-                                 N * sizeof(double), cudaMemcpyDeviceToHost), "dEdcn snapshot download");
             for (int i = 0; i < N; ++i)
                 m_dEdcn_total[i] = m_h_dEdcn_snap[i];
 
-            checkCuda(cudaMemcpy(m_h_grad_snap, impl.d_grad_snapshot.ptr,
-                                 3*N*sizeof(double), cudaMemcpyDeviceToHost), "pre-cn grad snapshot download");
             m_grad_before_cn.resize(N, 3);
             for (int i = 0; i < N; ++i) {
                 m_grad_before_cn(i, 0) = m_h_grad_snap[3*i+0];
@@ -1636,9 +1772,8 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
 
     // Launch CN compute kernel
     // Uses constant memory d_rcov_d3 for covalent radii (uploaded at construction)
-    int block = 256;
-    int grid = (N + block - 1) / block;
-    k_cn_compute<<<grid, block, 0, impl.stream>>>(
+    LaunchConfig cfg_cn = getLaunchConfig(N);
+    k_cn_compute<<<cfg_cn.gridSize, cfg_cn.blockSize, 0, impl.stream>>>(
         N,
         impl.d_coords.ptr,
         impl.d_atom_types.ptr,

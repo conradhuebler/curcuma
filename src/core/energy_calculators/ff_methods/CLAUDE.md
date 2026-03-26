@@ -578,9 +578,15 @@ std::string method = "d4";  // Matches Fortran reference
 - Gradient atomicAdds unchanged (write to different addresses, no single-address contention)
 - Verified: GPU vs CPU energy diff < 1 nEh, 24/24 CPU regression tests pass
 
-### ⏳ Phase 6: GPU Gaussian Weights + Async DMA (planned, lowest priority)
-- Move Gaussian weight computation to GPU kernel (eliminates CPU O(N*MAX_REF) + H2D upload)
-- Async energy/gradient download
+### ✅ Phase 6: GPU Gaussian Weights + Async DMA (March 2026)
+- **k_gaussian_weights kernel**: Computes gw and dgw/dCN directly on GPU (1 thread/atom, MAX_REF=7 in registers)
+- **Full GPU dc6dcn pipeline**: k_gaussian_weights → k_dc6dcn_per_pair on same stream, no CPU→GPU sync
+- **Eliminates**: CPU `precomputeGaussianWeights()` + `computeGaussianWeightDerivatives()` + flatten + 2 sync H2D uploads
+- **`uploadRefCN()`**: One-time upload of reference CN values (826 doubles)
+- **Async DMA downloads**: All D2H transfers via `cudaMemcpyAsync` on main stream, single `cudaStreamSynchronize` at end
+- **Pinned energy buffer**: `m_h_energies` replaces stack array for true async transfer
+- **Adaptive block sizing**: `getLaunchConfig()` with `__launch_bounds__(512, 2)` on all 22 kernels
+- **Warp shuffle reduction**: `warpReduceSum()` via `__shfl_down_sync()` in `blockReduceAddEnergy()`
 
 ### ✅ Topology Caching (March 2026)
 - **Two-tier caching**: Static topology (bonds, rings, hybridization) cached until large geometry change (>0.5 Bohr)

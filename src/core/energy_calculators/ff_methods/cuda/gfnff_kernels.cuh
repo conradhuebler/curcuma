@@ -8,7 +8,8 @@
  * Each kernel computes one energy term, accumulates energy via atomicAdd
  * on a single double, and accumulates gradients via atomicAdd on grad[N*3].
  *
- * Thread layout: blockDim.x = 256, gridDim.x = ceil(n/256)
+ * Thread layout: dynamic block size (32-512), grid = ceil(n/blockSize)
+ * Phase 6 (March 2026): Warp-level reduction + adaptive block sizing.
  */
 
 #pragma once
@@ -19,13 +20,28 @@
 #include "gfnff_soa.h"
 
 // ============================================================================
+// Launch bounds for optimal GPU occupancy (Phase 6: March 2026)
+//
+// GFNFF_KERNEL_BOUNDS: 512 threads, min 2 blocks/SM for good occupancy
+// - Targets compute capability 6.0+ (Pascal and newer)
+// - Balance between register pressure and occupancy
+// - Allows dynamic block sizing via getLaunchConfig() for better throughput
+// - 512 threads gives better occupancy on modern GPUs (RTX 3080, A100, etc.)
+// ============================================================================
+#define GFNFF_KERNEL_BOUNDS __launch_bounds__(512, 2)
+
+// D4 constants (matching d4param_generator.h)
+#define D4_MAX_ELEM 118
+#define D4_MAX_REF  7
+
+// ============================================================================
 // Pairwise kernels: 1 thread = 1 pair
 // ============================================================================
 
 /// GFN-FF D4 dispersion (BJ-damped, GFN-FF modified formula)
 /// E = -C6 * zetac6 * (t6 + 2*r4r2ij*t8)  where t6=1/(r6+R06), t8=1/(r8+R08)
 /// Reference: Fortran gfnff_gdisp0.f90:365-377
-__global__ void k_dispersion(
+__global__ GFNFF_KERNEL_BOUNDS void k_dispersion(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -45,7 +61,7 @@ __global__ void k_dispersion(
 /// GFN-FF bonded or non-bonded repulsion (same formula, different params)
 /// E = repab * exp(-alpha * r^1.5) / r
 /// Reference: Fortran gfnff_engrad.F90:467-495 (bonded), 255-276 (nonbonded)
-__global__ void k_repulsion(
+__global__ GFNFF_KERNEL_BOUNDS void k_repulsion(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -60,7 +76,7 @@ __global__ void k_repulsion(
 /// GFN-FF Coulomb TERM 1 (pairwise, dynamic EEQ charges)
 /// E = qi * qj * erf(gamma_ij * r) / r
 /// Reference: Fortran gfnff_engrad.F90:1378-1389
-__global__ void k_coulomb(
+__global__ GFNFF_KERNEL_BOUNDS void k_coulomb(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -79,7 +95,7 @@ __global__ void k_coulomb(
 /// GFN-FF bond stretching (exponential potential, CN-dependent r0)
 /// E = fc * exp(-alpha * (r - r0)^2)
 /// Reference: Fortran gfnff_engrad.F90:675-721
-__global__ void k_bonds(
+__global__ GFNFF_KERNEL_BOUNDS void k_bonds(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -106,7 +122,7 @@ __global__ void k_bonds(
 /// GFN-FF angle bending (cosine + distance damping)
 /// E = fc * (cos(theta) - cos(theta0))^2 * damp_ij * damp_jk
 /// Reference: Fortran gfnff_engrad.F90:857-916
-__global__ void k_angles(
+__global__ GFNFF_KERNEL_BOUNDS void k_angles(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -125,7 +141,7 @@ __global__ void k_angles(
 /// GFN-FF dihedral torsions (Fourier + distance damping, standard + extra)
 /// E = V * (1 + cos(n*(phi - phi0) + pi)) * damp
 /// Reference: Fortran gfnff_engrad.F90:1041-1122
-__global__ void k_dihedrals(
+__global__ GFNFF_KERNEL_BOUNDS void k_dihedrals(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -148,7 +164,7 @@ __global__ void k_dihedrals(
 /// GFN-FF out-of-plane inversions
 /// E = fc * (1 - cos(omega)) * damp  or  fc * (cos(omega) - cos(omega0))^2 * damp
 /// Reference: Fortran gfnff_ini.f90 inversion potential
-__global__ void k_inversions(
+__global__ GFNFF_KERNEL_BOUNDS void k_inversions(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -175,7 +191,7 @@ __global__ void k_inversions(
 
 /// Triple bond torsions: E = -erefhalf * cos(2φ) + erefhalf
 /// Reference: ff_workspace_gfnff.cpp:calcSTorsions, Fortran gfnff_engrad.F90:3454
-__global__ void k_storsions(
+__global__ GFNFF_KERNEL_BOUNDS void k_storsions(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -189,7 +205,7 @@ __global__ void k_storsions(
 
 /// Bonded ATM (BATM): 3-body charge-scaled angular term for 1,4-pairs
 /// Reference: ff_workspace_gfnff.cpp:calcBATM, Fortran gfnff_engrad.F90:3267-3334
-__global__ void k_batm(
+__global__ GFNFF_KERNEL_BOUNDS void k_batm(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -205,7 +221,7 @@ __global__ void k_batm(
 
 /// ATM (Axilrod-Teller-Muto): 3-body dispersion with BJ damping (energy + gradient)
 /// Reference: ff_workspace_gfnff.cpp:calcATM+calcATMGradient
-__global__ void k_atm(
+__global__ GFNFF_KERNEL_BOUNDS void k_atm(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -228,7 +244,7 @@ __global__ void k_atm(
 
 /// Halogen bonds (3-body A-X...B): distance damped electrostatic
 /// Reference: ff_workspace_gfnff.cpp:calcHalogenBonds, Fortran rbxgfnff_eg
-__global__ void k_xbonds(
+__global__ GFNFF_KERNEL_BOUNDS void k_xbonds(
     int n,
     const int*    __restrict__ idx_i,     ///< donor A
     const int*    __restrict__ idx_j,     ///< halogen X
@@ -246,7 +262,7 @@ __global__ void k_xbonds(
 
 /// Hydrogen bonds (3-body A-H...B): multi-case with neighbor damping
 /// Reference: ff_workspace_gfnff.cpp:calcHydrogenBonds, Fortran abhgfnff_eg*
-__global__ void k_hbonds(
+__global__ GFNFF_KERNEL_BOUNDS void k_hbonds(
     int n,
     const int*    __restrict__ idx_i,     ///< donor A
     const int*    __restrict__ idx_j,     ///< hydrogen H
@@ -283,7 +299,7 @@ __global__ void k_hbonds(
 /// Coulomb TERM 2+3 self-energy (O(N), energy only — no gradient contribution)
 /// E_en = -Σ qi * chi_eff_i,  E_self = 0.5 * Σ qi² * (gam_i + sqrt(2/pi)/sqrt(alp_i))
 /// Reference: ff_workspace.cpp::postProcess() lines 354-383
-__global__ void k_coulomb_self(
+__global__ GFNFF_KERNEL_BOUNDS void k_coulomb_self(
     int N,
     const double* __restrict__ eeq_charges,   ///< [N] dynamic EEQ charges
     const double* __restrict__ chi_base,       ///< [N] base electronegativity
@@ -297,7 +313,7 @@ __global__ void k_coulomb_self(
 /// Subtract qtmp from dEdcn in-place: dEdcn[i] -= q[i]*cnf[i]/(2*sqrt(cn[i])+eps)
 /// This implements Coulomb TERM 1b chain-rule correction.
 /// Reference: ff_workspace.cpp::postProcess() lines 391-399
-__global__ void k_subtract_qtmp(
+__global__ GFNFF_KERNEL_BOUNDS void k_subtract_qtmp(
     int N,
     const double* __restrict__ eeq_charges,
     const double* __restrict__ cnf,
@@ -310,7 +326,7 @@ __global__ void k_subtract_qtmp(
 /// where fac = dS/dr / rij * (dEdcn[i]*dlogdcn[i] + dEdcn[j]*dlogdcn[j])
 /// Replaces: dcn[dim] * dEdcn_combined sparse matrix-vector multiply
 /// Reference: gfnff_method.cpp:calculateCoordinationNumberDerivatives (CN formula)
-__global__ void k_cn_chainrule(
+__global__ GFNFF_KERNEL_BOUNDS void k_cn_chainrule(
     int n_pairs,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -326,7 +342,7 @@ __global__ void k_cn_chainrule(
 /// For each pair: grad_H += zz_H * dS/dr * (rH-rB)/r, grad_B -= same
 /// where dS/dr = (-kn / (rcov*sqrt(pi))) * exp(-(kn*dr)^2), dr=(r-rcov)/rcov
 /// Reference: Fortran gfnff_engrad.F90:1054-1063
-__global__ void k_hb_alpha_chainrule(
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_alpha_chainrule(
     int n_pairs,
     const int*    __restrict__ idx_H,
     const int*    __restrict__ idx_B,
@@ -348,7 +364,7 @@ __global__ void k_hb_alpha_chainrule(
 /// Thread layout: 1 thread per atom, each loops over all other atoms.
 /// Uses constant memory d_rcov_d3 for covalent radii (uploaded via upload_rcov_d3)
 /// Reference: gfnff_cn.f90:66-126, Spicher & Grimme J. Chem. Theory Comput. 2020
-__global__ void k_cn_compute(
+__global__ GFNFF_KERNEL_BOUNDS void k_cn_compute(
     int natoms,
     const double* __restrict__ coords,      ///< [3*N] in Bohr
     const int*    __restrict__ atom_types,   ///< [N] 1-based atomic numbers
@@ -368,7 +384,7 @@ __global__ void k_cn_compute(
 /// Formula: dc6dcn(i,j) = Σ_{ri,rj} dgw(i,ri) * gw(j,rj) * C6_ref(Zi,Zj,ri,rj)
 /// Thread layout: 1 thread per dispersion pair.
 /// Reference: d4param_generator.cpp:computeDC6DCN(), Fortran gfnff_gdisp0.f90:262-305
-__global__ void k_dc6dcn_per_pair(
+__global__ GFNFF_KERNEL_BOUNDS void k_dc6dcn_per_pair(
     int n_pairs,
     const int*    __restrict__ idx_i,          ///< [n] pair atom i indices
     const int*    __restrict__ idx_j,          ///< [n] pair atom j indices
@@ -379,6 +395,26 @@ __global__ void k_dc6dcn_per_pair(
     const int*    __restrict__ refn,           ///< [MAX_ELEM] nref per element
     double*       __restrict__ dc6dcn_ij,      ///< [n] output: dC6(i,j)/dCN(i)
     double*       __restrict__ dc6dcn_ji       ///< [n] output: dC6(i,j)/dCN(j)
+);
+
+// ============================================================================
+// GPU Gaussian weight computation (Phase 6: March 2026)
+// Claude Generated: Compute gw and dgw/dCN on GPU, eliminating CPU computation
+// + flatten + H2D upload.
+// ============================================================================
+
+/// Compute normalized Gaussian weights and their CN-derivatives per atom.
+/// gw(ref) = exp(-wf*(CN-CN_ref)^2) / norm,  dgw/dCN via quotient rule.
+/// Thread layout: 1 thread per atom, each loops over MAX_REF references.
+/// Reference: d4param_generator.cpp:precomputeGaussianWeights() + computeGaussianWeightDerivatives()
+__global__ GFNFF_KERNEL_BOUNDS void k_gaussian_weights(
+    int natoms,
+    const double* __restrict__ cn,           ///< [N] coordination numbers
+    const int*    __restrict__ atom_types,    ///< [N] atomic numbers (1-based)
+    const double* __restrict__ refcn,        ///< [MAX_ELEM * MAX_REF] reference CN values
+    const int*    __restrict__ refn,         ///< [MAX_ELEM] nref per element
+    double*       __restrict__ gw,           ///< [N * MAX_REF] output: normalized weights
+    double*       __restrict__ dgw           ///< [N * MAX_REF] output: weight derivatives
 );
 
 // ============================================================================
