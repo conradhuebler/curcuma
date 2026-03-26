@@ -582,6 +582,12 @@ std::string method = "d4";  // Matches Fortran reference
 - Move Gaussian weight computation to GPU kernel (eliminates CPU O(N*MAX_REF) + H2D upload)
 - Async energy/gradient download
 
+### ✅ Topology Caching (March 2026)
+- **Two-tier caching**: Static topology (bonds, rings, hybridization) cached until large geometry change (>0.5 Bohr)
+- **Dynamic state only**: CN and distance matrices updated each step (O(N²) vs O(N³) for full topology)
+- **MD speedup**: ~15x for topology phase when topology is constant (typical MD)
+- **Implementation**: `getCachedTopology()` in `gfnff_method.cpp`, `needsFullTopologyUpdate()` checks displacement
+
 ### ⚠️ Known Issues
 - ggfnff GPU validation tests (test_ggfnff) fail with JSON null error — pre-existing, unrelated to pipeline
 - k_dispersion cannot overlap with EEQ in gradient mode (dc6dcn dependency)

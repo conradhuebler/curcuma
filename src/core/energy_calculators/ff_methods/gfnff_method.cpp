@@ -378,6 +378,7 @@ bool GFNFF::InitialiseMolecule()
     // Invalidate cached topology and bond list because geometry changed
     m_cached_topology.reset();
     m_cached_bond_list.reset();
+    m_static_topology_valid = false;  // Reset static topology cache for new molecule
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Validating molecule structure...");
@@ -469,15 +470,39 @@ bool GFNFF::UpdateMolecule()
 // ---------------------------------------------------------------------------
 
 const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
-    // Only recalculate if geometry has meaningfully changed
-    if (!m_cached_topology || m_geometry_tracker.geometryChanged(m_geometry_bohr)) {
-        if (m_cached_topology && CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info("GFNFF: Recalculating topology due to significant geometry change");
+    // Two-tier caching (March 2026):
+    // Tier 1: Static topology (bonds, rings, hybridization) - recalc on large geometry change
+    // Tier 2: Dynamic state (CN, distances) - recalc on any geometry change
+
+    bool geometry_changed = m_geometry_tracker.geometryChanged(m_geometry_bohr);
+
+    if (!geometry_changed) {
+        // No change at all - return cached topology
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("GFNFF: Using cached topology (geometry unchanged)");
+        }
+        return *m_cached_topology;
+    }
+
+    // Geometry has changed - check if we need full topology or just dynamic update
+    bool needs_full = needsFullTopologyUpdate(m_geometry_bohr);
+
+    if (needs_full || !m_cached_topology) {
+        // Full topology recalculation (expensive, rare during MD)
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("GFNFF: Full topology recalculation (large geometry change or first call)");
         }
         m_cached_topology = calculateTopologyInfo();
+        m_last_topology_geometry = m_geometry_bohr;
+        m_static_topology_valid = true;
         m_geometry_tracker.updateGeometry(m_geometry_bohr);
-    } else if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("GFNFF: Using cached topology (geometry unchanged)");
+    } else {
+        // Only update dynamic state (cheap, every MD step)
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("GFNFF: Updating dynamic topology (small geometry change)");
+        }
+        updateDynamicState(*m_cached_topology);
+        m_geometry_tracker.updateGeometry(m_geometry_bohr);
     }
     return *m_cached_topology;
 }
@@ -545,6 +570,86 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
         CurcumaLogger::info(fmt::format("GFNFF: Using cached bond list ({} bonds)", m_cached_bond_list->size()));
     }
     return *m_cached_bond_list;
+}
+
+// ---------------------------------------------------------------------------
+// Topology update threshold check - O(1) max displacement check
+// Claude Generated - March 2026
+// ---------------------------------------------------------------------------
+
+bool GFNFF::needsFullTopologyUpdate(const Eigen::MatrixXd& geometry_bohr) const {
+    // First call - always need full topology
+    if (!m_static_topology_valid || m_last_topology_geometry.rows() == 0) {
+        return true;
+    }
+
+    // Check maximum atom displacement since last full topology calculation
+    // Threshold: 0.5 Bohr (~0.26 Å) - large enough to potentially change bond connectivity
+    // This is O(N) but much cheaper than O(N²) bond connectivity check
+    constexpr double DISPLACEMENT_THRESHOLD = 0.5;  // Bohr
+
+    if (geometry_bohr.rows() != m_last_topology_geometry.rows()) {
+        return true;  // Atom count changed
+    }
+
+    double max_displacement = (geometry_bohr - m_last_topology_geometry).array().abs().maxCoeff();
+    return max_displacement > DISPLACEMENT_THRESHOLD;
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic state update for Tier 2 caching
+// Claude Generated - March 2026
+// ---------------------------------------------------------------------------
+
+void GFNFF::updateDynamicState(TopologyInfo& topo) const {
+    // Only recalculate geometry-dependent data (CN, distance matrices)
+    // This is O(N²) but much cheaper than full topology recalculation
+
+    const int natoms = m_atomcount;
+
+    // 1. Calculate distance matrix (O(N²))
+    topo.distance_matrix.resize(natoms, natoms);
+    topo.squared_dist_matrix.resize(natoms, natoms);
+
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < natoms; ++i) {
+        for (int j = i; j < natoms; ++j) {
+            double dx = m_geometry_bohr(i, 0) - m_geometry_bohr(j, 0);
+            double dy = m_geometry_bohr(i, 1) - m_geometry_bohr(j, 1);
+            double dz = m_geometry_bohr(i, 2) - m_geometry_bohr(j, 2);
+            double dist_sq = dx*dx + dy*dy + dz*dz;
+            double dist = std::sqrt(dist_sq);
+            topo.distance_matrix(i, j) = dist;
+            topo.distance_matrix(j, i) = dist;
+            topo.squared_dist_matrix(i, j) = dist_sq;
+            topo.squared_dist_matrix(j, i) = dist_sq;
+        }
+    }
+
+    // 2. Calculate coordination numbers from distances (O(N²))
+    topo.coordination_numbers.resize(natoms);
+    topo.coordination_numbers.setZero();
+
+    // Use CNCalculator for geometry-dependent CN
+    // Reference: gfnff_ini.f90 uses D3-style CN with k1=16, k2=4/3
+    constexpr double k1 = 16.0;
+    constexpr double k2 = 4.0/3.0;
+
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < natoms; ++i) {
+        double cn_i = 0.0;
+        double rcov_i = getCovalentRadius(m_atoms[i]);
+        for (int j = 0; j < natoms; ++j) {
+            if (i == j) continue;
+            double rcov_j = getCovalentRadius(m_atoms[j]);
+            double r_cov = rcov_i + rcov_j;
+            double r_ij = topo.distance_matrix(i, j);
+            // CN counting formula: 1/(1+exp(-k1*(k2*r_cov/r_ij - 1)))
+            double x = k2 * r_cov / r_ij - 1.0;
+            cn_i += 1.0 / (1.0 + std::exp(-k1 * x));
+        }
+        topo.coordination_numbers(i) = cn_i;
+    }
 }
 
 // ---------------------------------------------------------------------------

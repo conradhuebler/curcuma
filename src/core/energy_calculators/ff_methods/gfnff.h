@@ -2001,9 +2001,19 @@ private:
     // Geometry change detector for intelligent caching
     mutable GeometryChangeDetector m_geometry_tracker;
 
-    // Cached topology and bond detection to avoid redundant calculations
+    // Two-tier topology caching (March 2026)
+    // Tier 1: Static topology (bonds, rings, hybridization) - only invalidates on large geometry change
+    // Tier 2: Dynamic state (CN, distances) - invalidates on small geometry change
     mutable std::optional<TopologyInfo> m_cached_topology;
+    mutable Eigen::MatrixXd m_last_topology_geometry;  // Geometry when topology was last calculated
+    mutable bool m_static_topology_valid = false;       // True if static topology is current
     mutable std::optional<std::vector<std::pair<int,int>>> m_cached_bond_list;
+
+    // Check if geometry change warrants full topology recalculation (vs just dynamic state)
+    bool needsFullTopologyUpdate(const Eigen::MatrixXd& geometry_bohr) const;
+
+    // Dynamic state update for Tier 2 caching
+    void updateDynamicState(TopologyInfo& topo) const;
 
     // Claude Generated (March 2026): Heap-stored parameter copy for external consumers.
     // Set in initializeForceField(), consumed once via consumeCachedParameterSet().
