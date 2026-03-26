@@ -571,10 +571,12 @@ std::string method = "d4";  // Matches Fortran reference
 - Removed unnecessary `cudaStreamSynchronize` in `computeDC6DCNOnGPU`
 - Relaxed postprocess stream dependencies: k_coulomb_self has no stream wait, k_subtract_qtmp waits pairwise+bonded only
 
-### ⏳ Phase 5: Shared Memory Energy Reduction (planned)
-- Block-level reduction with shared memory instead of per-thread atomicAdd
-- Target: k_dispersion, k_repulsion, k_coulomb, k_angles, k_dihedrals, k_bonds
-- Expected 5-10% kernel time reduction (66 atoms), 20-40% (500+ atoms)
+### ✅ Phase 5: Shared Memory Energy Reduction (March 2026)
+- `blockReduceAddEnergy()` device function: block-level tree reduction in shared memory, one `atomicAdd` per block
+- All 12 energy kernels converted: k_dispersion, k_repulsion, k_coulomb, k_bonds, k_angles, k_dihedrals, k_inversions, k_storsions, k_batm, k_atm, k_xbonds, k_hbonds
+- Threads with tid >= n contribute `local_E = 0.0` (must stay for `__syncthreads()`)
+- Gradient atomicAdds unchanged (write to different addresses, no single-address contention)
+- Verified: GPU vs CPU energy diff < 1 nEh, 24/24 CPU regression tests pass
 
 ### ⏳ Phase 6: GPU Gaussian Weights + Async DMA (planned, lowest priority)
 - Move Gaussian weight computation to GPU kernel (eliminates CPU O(N*MAX_REF) + H2D upload)

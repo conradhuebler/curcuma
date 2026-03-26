@@ -45,6 +45,33 @@ __device__ __forceinline__ void add_grad(double* __restrict__ grad, int atom,
 }
 
 // ============================================================================
+// Block-level energy reduction (Phase 5: shared memory optimization)
+// Claude Generated (March 2026)
+//
+// Replaces per-thread atomicAdd(energy, E) with block-level reduction.
+// Each thread contributes local_E to shared memory, tree-reduced to one value,
+// then a single atomicAdd per block. Reduces atomic contention by ~256x.
+//
+// IMPORTANT: All threads in the block MUST call this function (no early return
+// before this point). Threads with no work contribute local_E = 0.0.
+// ============================================================================
+
+__device__ __forceinline__ void blockReduceAddEnergy(double local_E, double* energy)
+{
+    __shared__ double sdata[256];
+    const int tid = threadIdx.x;
+    sdata[tid] = local_E;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+
+    if (tid == 0) atomicAdd(energy, sdata[0]);
+}
+
+// ============================================================================
 // Utility kernel
 // ============================================================================
 
@@ -78,45 +105,47 @@ __global__ void k_dispersion(
     double*                    energy)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    double local_E = 0.0;
 
-    int i = idx_i[tid], j = idx_j[tid];
-    double dx = coords[3*i]   - coords[3*j];
-    double dy = coords[3*i+1] - coords[3*j+1];
-    double dz = coords[3*i+2] - coords[3*j+2];
-    double r2 = dx*dx + dy*dy + dz*dz;
-    double rij = sqrt(r2);
+    if (tid < n) {
+        int i = idx_i[tid], j = idx_j[tid];
+        double dx = coords[3*i]   - coords[3*j];
+        double dy = coords[3*i+1] - coords[3*j+1];
+        double dz = coords[3*i+2] - coords[3*j+2];
+        double r2 = dx*dx + dy*dy + dz*dz;
+        double rij = sqrt(r2);
 
-    if (rij > r_cut[tid] || rij < 1e-10) return;
+        if (rij <= r_cut[tid] && rij >= 1e-10) {
+            double r4   = r2  * r2;
+            double r6   = r4  * r2;
+            double r0s  = r0_sq[tid];
+            double r0_6 = r0s * r0s * r0s;
+            double t6   = 1.0 / (r6 + r0_6);
+            double r8   = r6  * r2;
+            double r0_8 = r0_6 * r0s;
+            double t8   = 1.0 / (r8 + r0_8);
 
-    double r4   = r2  * r2;
-    double r6   = r4  * r2;
-    double r0s  = r0_sq[tid];
-    double r0_6 = r0s * r0s * r0s;
-    double t6   = 1.0 / (r6 + r0_6);
-    double r8   = r6  * r2;
-    double r0_8 = r0_6 * r0s;
-    double t8   = 1.0 / (r8 + r0_8);
+            double disp_sum = t6 + 2.0 * r4r2ij[tid] * t8;
+            local_E = -C6[tid] * disp_sum * zetac6[tid];
 
-    double disp_sum = t6 + 2.0 * r4r2ij[tid] * t8;
-    double E = -C6[tid] * disp_sum * zetac6[tid];
-    atomicAdd(energy, E);
+            // Gradient: dE/dr via chain rule
+            double d6   = -6.0 * r4 * t6 * t6;
+            double d8   = -8.0 * r4 * r2 * t8 * t8;
+            double dEdr = -C6[tid] * zetac6[tid] * (d6 + 2.0 * r4r2ij[tid] * d8) * rij;
+            double fac  = dEdr / rij;
+            add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
+            add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
 
-    // Gradient: dE/dr via chain rule, displacement = ri - rj (matches CPU convention)
-    double d6   = -6.0 * r4 * t6 * t6;
-    double d8   = -8.0 * r4 * r2 * t8 * t8;
-    double dEdr = -C6[tid] * zetac6[tid] * (d6 + 2.0 * r4r2ij[tid] * d8) * rij;
-    double fac  = dEdr / rij;
-    add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
-    add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
-
-    // dEdcn chain-rule: dc6/dcn contribution for CN gradient
-    // Reference: ff_workspace_gfnff.cpp:696-701 (CPU path)
-    if (dc6dcn_ij && dEdcn) {
-        double disp_value = disp_sum * zetac6[tid];
-        atomicAdd(&dEdcn[i], -dc6dcn_ij[tid] * disp_value);
-        atomicAdd(&dEdcn[j], -dc6dcn_ji[tid] * disp_value);
+            // dEdcn chain-rule: dc6/dcn contribution for CN gradient
+            if (dc6dcn_ij && dEdcn) {
+                double disp_value = disp_sum * zetac6[tid];
+                atomicAdd(&dEdcn[i], -dc6dcn_ij[tid] * disp_value);
+                atomicAdd(&dEdcn[j], -dc6dcn_ji[tid] * disp_value);
+            }
+        }
     }
+
+    blockReduceAddEnergy(local_E, energy);
 }
 
 // ============================================================================
@@ -138,30 +167,33 @@ __global__ void k_repulsion(
     double*                    energy)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    double local_E = 0.0;
 
-    int i = idx_i[tid], j = idx_j[tid];
-    double dx = coords[3*i]   - coords[3*j];
-    double dy = coords[3*i+1] - coords[3*j+1];
-    double dz = coords[3*i+2] - coords[3*j+2];
-    double r2  = dx*dx + dy*dy + dz*dz;
-    double rij = sqrt(r2);
+    if (tid < n) {
+        int i = idx_i[tid], j = idx_j[tid];
+        double dx = coords[3*i]   - coords[3*j];
+        double dy = coords[3*i+1] - coords[3*j+1];
+        double dz = coords[3*i+2] - coords[3*j+2];
+        double r2  = dx*dx + dy*dy + dz*dz;
+        double rij = sqrt(r2);
 
-    if (rij > r_cut[tid] || rij < 1e-8) return;
+        if (rij <= r_cut[tid] && rij >= 1e-8) {
+            double r1_5      = rij * sqrt(rij);
+            double alp_r     = alpha[tid] * r1_5;
+            if (!isnan(alp_r) && !isnan(repab[tid]) && alp_r <= 700.0) {
+                double exp_term  = exp(-alp_r);
+                double base_E    = repab[tid] * exp_term / rij;
+                local_E = base_E;
 
-    double r1_5      = rij * sqrt(rij);        // r^1.5
-    double alp_r     = alpha[tid] * r1_5;
-    // Guard against NaN: skip if alpha or repab is NaN, or if exp argument overflows
-    if (isnan(alp_r) || isnan(repab[tid]) || alp_r > 700.0) return;
-    double exp_term  = exp(-alp_r);
-    double base_E    = repab[tid] * exp_term / rij;
-    atomicAdd(energy, base_E);
+                double dEdr = -base_E / rij - 1.5 * alpha[tid] * sqrt(rij) * base_E;
+                double fac  = dEdr / rij;
+                add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
+                add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+            }
+        }
+    }
 
-    // dE/dr = -E/r - 1.5*alpha*sqrt(r)*E
-    double dEdr = -base_E / rij - 1.5 * alpha[tid] * sqrt(rij) * base_E;
-    double fac  = dEdr / rij;
-    add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
-    add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+    blockReduceAddEnergy(local_E, energy);
 }
 
 // ============================================================================
@@ -183,34 +215,37 @@ __global__ void k_coulomb(
     double*                    energy)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    double local_E = 0.0;
 
-    int i = idx_i[tid], j = idx_j[tid];
-    double dx  = coords[3*i]   - coords[3*j];
-    double dy  = coords[3*i+1] - coords[3*j+1];
-    double dz  = coords[3*i+2] - coords[3*j+2];
-    double r2  = dx*dx + dy*dy + dz*dz;
-    double rij = sqrt(r2);
+    if (tid < n) {
+        int i = idx_i[tid], j = idx_j[tid];
+        double dx  = coords[3*i]   - coords[3*j];
+        double dy  = coords[3*i+1] - coords[3*j+1];
+        double dz  = coords[3*i+2] - coords[3*j+2];
+        double r2  = dx*dx + dy*dy + dz*dz;
+        double rij = sqrt(r2);
 
-    if (rij > r_cut[tid] || rij < 1e-10) return;
+        if (rij <= r_cut[tid] && rij >= 1e-10) {
+            double qi = charges[i];
+            double qj = charges[j];
+            if (!isnan(qi) && !isnan(qj)) {
+                double gamma_r = gamma_ij[tid] * rij;
+                double erf_v   = erf(gamma_r);
+                local_E = qi * qj * erf_v / rij;
 
-    double qi = charges[i];
-    double qj = charges[j];
-    if (isnan(qi) || isnan(qj)) return;
+                // Gradient
+                static const double inv_sqrt_pi = 0.5641895835477563;
+                double exp_v  = exp(-gamma_r * gamma_r);
+                double derf   = gamma_ij[tid] * exp_v * (2.0 * inv_sqrt_pi);
+                double dEdr   = qi * qj * (derf / rij - erf_v / (rij * rij));
+                double fac    = dEdr / rij;
+                add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
+                add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+            }
+        }
+    }
 
-    double gamma_r = gamma_ij[tid] * rij;
-    double erf_v   = erf(gamma_r);
-    double E       = qi * qj * erf_v / rij;
-    atomicAdd(energy, E);
-
-    // Gradient
-    static const double inv_sqrt_pi = 0.5641895835477563;
-    double exp_v  = exp(-gamma_r * gamma_r);
-    double derf   = gamma_ij[tid] * exp_v * (2.0 * inv_sqrt_pi);
-    double dEdr   = qi * qj * (derf / rij - erf_v / (rij * rij));
-    double fac    = dEdr / rij;
-    add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
-    add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+    blockReduceAddEnergy(local_E, energy);
 }
 
 // ============================================================================
@@ -246,66 +281,64 @@ __global__ void k_bonds(
     double*                    energy)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    double local_E = 0.0;
 
-    int i = idx_i[tid], j = idx_j[tid];
-    double dx  = coords[3*i]   - coords[3*j];
-    double dy  = coords[3*i+1] - coords[3*j+1];
-    double dz  = coords[3*i+2] - coords[3*j+2];
-    double r2  = dx*dx + dy*dy + dz*dz;
-    double rij = sqrt(r2);
-    if (rij < 1e-10) return;
+    if (tid < n) {
+        int i = idx_i[tid], j = idx_j[tid];
+        double dx  = coords[3*i]   - coords[3*j];
+        double dy  = coords[3*i+1] - coords[3*j+1];
+        double dz  = coords[3*i+2] - coords[3*j+2];
+        double r2  = dx*dx + dy*dy + dz*dz;
+        double rij = sqrt(r2);
 
-    // Dynamic r0 (CN-dependent)
-    double r0_ij;
-    if (cn && r0_base_i[tid] > 0.0) {
-        double ra = r0_base_i[tid] + cnfak_i[tid] * cn[i];
-        double rb = r0_base_j[tid] + cnfak_j[tid] * cn[j];
-        r0_ij = (ra + rb + rabshift[tid]) * ff[tid];
-    } else {
-        r0_ij = r0[tid];
-    }
+        if (rij >= 1e-10) {
+            // Dynamic r0 (CN-dependent)
+            double r0_ij;
+            if (cn && r0_base_i[tid] > 0.0) {
+                double ra = r0_base_i[tid] + cnfak_i[tid] * cn[i];
+                double rb = r0_base_j[tid] + cnfak_j[tid] * cn[j];
+                r0_ij = (ra + rb + rabshift[tid]) * ff[tid];
+            } else {
+                r0_ij = r0[tid];
+            }
 
-    double dr      = rij - r0_ij;
-    double alpha_orig = alpha[tid];
-    double alp     = alpha_orig;
+            double dr      = rij - r0_ij;
+            double alpha_orig = alpha[tid];
+            double alp     = alpha_orig;
 
-    // HB X-H bond alpha modification
-    // Reference: Fortran gfnff_engrad.F90:957-958
-    if (nr_hb[tid] >= 1) {
-        constexpr double VBOND_SCALE = 0.9;
-        double t1 = 1.0 - VBOND_SCALE;
-        alp = (-t1 * hb_cn_H[tid] + 1.0) * alpha_orig;
-    }
+            if (nr_hb[tid] >= 1) {
+                constexpr double VBOND_SCALE = 0.9;
+                double t1 = 1.0 - VBOND_SCALE;
+                alp = (-t1 * hb_cn_H[tid] + 1.0) * alpha_orig;
+            }
 
-    double exp_v   = exp(-alp * dr * dr);
-    double E       = fc[tid] * exp_v;
-    atomicAdd(energy, E);
+            double exp_v   = exp(-alp * dr * dr);
+            double E       = fc[tid] * exp_v;
+            local_E = E;
 
-    // Gradient ∂E/∂r
-    double dEdr = -2.0 * alp * dr * E;
-    double fac  = dEdr / rij;
-    add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
-    add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+            double dEdr = -2.0 * alp * dr * E;
+            double fac  = dEdr / rij;
+            add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
+            add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
 
-    // CN chain-rule: d(r0)/d(cn_i) = cnfak_i * ff
-    if (dEdcn && cn && r0_base_i[tid] > 0.0) {
-        double yy = -dEdr;   // ∂E/∂r0 = -∂E/∂r
-        atomicAdd(&dEdcn[i], yy * ff[tid] * cnfak_i[tid]);
-        atomicAdd(&dEdcn[j], yy * ff[tid] * cnfak_j[tid]);
-    }
+            if (dEdcn && cn && r0_base_i[tid] > 0.0) {
+                double yy = -dEdr;
+                atomicAdd(&dEdcn[i], yy * ff[tid] * cnfak_i[tid]);
+                atomicAdd(&dEdcn[j], yy * ff[tid] * cnfak_j[tid]);
+            }
 
-    // HB alpha-modulation chain-rule: zz = t1 * alpha_orig * dr^2 * E
-    // Claude Generated (March 2026): Accumulate per-H zz for k_hb_alpha_chainrule
-    // Reference: Fortran gfnff_engrad.F90:1054-1063
-    if (zz_hb && nr_hb[tid] >= 1 && hb_H_atom) {
-        constexpr double t1 = 0.1;  // = 1 - VBOND_SCALE
-        double zz = t1 * alpha_orig * dr * dr * E;
-        int H = hb_H_atom[tid];
-        if (H >= 0) {
-            atomicAdd(&zz_hb[H], zz);
+            if (zz_hb && nr_hb[tid] >= 1 && hb_H_atom) {
+                constexpr double t1 = 0.1;
+                double zz = t1 * alpha_orig * dr * dr * E;
+                int H = hb_H_atom[tid];
+                if (H >= 0) {
+                    atomicAdd(&zz_hb[H], zz);
+                }
+            }
         }
     }
+
+    blockReduceAddEnergy(local_E, energy);
 }
 
 // ============================================================================
@@ -399,103 +432,92 @@ __global__ void k_angles(
     double*                    energy)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    double local_E = 0.0;
 
-    int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid];
-    int zi = ati[tid] - 1, zj = atj[tid] - 1, zk = atk[tid] - 1;
-    if (zi < 0 || zi >= 86 || zj < 0 || zj >= 86 || zk < 0 || zk >= 86) return;
+    if (tid < n) {
+        int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid];
+        int zi = ati[tid] - 1, zj = atj[tid] - 1, zk = atk[tid] - 1;
 
-    // rcov scaled by 4/3 (as in calcAngles)
-    const double scale = 4.0 / 3.0;
-    double rcov_i = d_rcov_d3[zi] * scale;
-    double rcov_j = d_rcov_d3[zj] * scale;
-    double rcov_k = d_rcov_d3[zk] * scale;
+        if (zi >= 0 && zi < 86 && zj >= 0 && zj < 86 && zk >= 0 && zk < 86) {
+            const double scale = 4.0 / 3.0;
+            double rcov_i = d_rcov_d3[zi] * scale;
+            double rcov_j = d_rcov_d3[zj] * scale;
+            double rcov_k = d_rcov_d3[zk] * scale;
 
-    // Distance vectors for damping
-    double dij_x = coords[3*i]   - coords[3*j];
-    double dij_y = coords[3*i+1] - coords[3*j+1];
-    double dij_z = coords[3*i+2] - coords[3*j+2];
-    double dkj_x = coords[3*k]   - coords[3*j];
-    double dkj_y = coords[3*k+1] - coords[3*j+1];
-    double dkj_z = coords[3*k+2] - coords[3*j+2];
+            double dij_x = coords[3*i]   - coords[3*j];
+            double dij_y = coords[3*i+1] - coords[3*j+1];
+            double dij_z = coords[3*i+2] - coords[3*j+2];
+            double dkj_x = coords[3*k]   - coords[3*j];
+            double dkj_y = coords[3*k+1] - coords[3*j+1];
+            double dkj_z = coords[3*k+2] - coords[3*j+2];
 
-    double r_ij_sq = dij_x*dij_x + dij_y*dij_y + dij_z*dij_z;
-    double r_jk_sq = dkj_x*dkj_x + dkj_y*dkj_y + dkj_z*dkj_z;
+            double r_ij_sq = dij_x*dij_x + dij_y*dij_y + dij_z*dij_z;
+            double r_jk_sq = dkj_x*dkj_x + dkj_y*dkj_y + dkj_z*dkj_z;
 
-    const double atcuta = 0.595;
-    double sum_ij = rcov_i + rcov_j;
-    double sum_jk = rcov_j + rcov_k;
-    double rcut_ij_sq = atcuta * sum_ij * sum_ij;
-    double rcut_jk_sq = atcuta * sum_jk * sum_jk;
+            const double atcuta = 0.595;
+            double sum_ij = rcov_i + rcov_j;
+            double sum_jk = rcov_j + rcov_k;
+            double rcut_ij_sq = atcuta * sum_ij * sum_ij;
+            double rcut_jk_sq = atcuta * sum_jk * sum_jk;
 
-    double rr_ij  = (r_ij_sq > 1e-10) ? (r_ij_sq / rcut_ij_sq) : 0.0;
-    rr_ij  = rr_ij  * rr_ij;
-    double rr_jk  = (r_jk_sq > 1e-10) ? (r_jk_sq / rcut_jk_sq) : 0.0;
-    rr_jk  = rr_jk  * rr_jk;
+            double rr_ij  = (r_ij_sq > 1e-10) ? (r_ij_sq / rcut_ij_sq) : 0.0;
+            rr_ij  = rr_ij  * rr_ij;
+            double rr_jk  = (r_jk_sq > 1e-10) ? (r_jk_sq / rcut_jk_sq) : 0.0;
+            rr_jk  = rr_jk  * rr_jk;
 
-    double damp_ij = 1.0 / (1.0 + rr_ij);
-    double damp_jk = 1.0 / (1.0 + rr_jk);
-    double damp    = damp_ij * damp_jk;
+            double damp_ij = 1.0 / (1.0 + rr_ij);
+            double damp_jk = 1.0 / (1.0 + rr_jk);
+            double damp    = damp_ij * damp_jk;
 
-    // Angle + gradient
-    double d_ri_x, d_ri_y, d_ri_z;
-    double d_rk_x, d_rk_y, d_rk_z;
-    double d_rj_x, d_rj_y, d_rj_z;
-    double cos_a = cos_angle_grad(coords, i, j, k,
-                                   d_ri_x, d_ri_y, d_ri_z,
-                                   d_rk_x, d_rk_y, d_rk_z,
-                                   d_rj_x, d_rj_y, d_rj_z, true);
+            double d_ri_x, d_ri_y, d_ri_z;
+            double d_rk_x, d_rk_y, d_rk_z;
+            double d_rj_x, d_rj_y, d_rj_z;
+            double cos_a = cos_angle_grad(coords, i, j, k,
+                                           d_ri_x, d_ri_y, d_ri_z,
+                                           d_rk_x, d_rk_y, d_rk_z,
+                                           d_rj_x, d_rj_y, d_rj_z, true);
 
-    const double pi = 3.14159265358979323846;
-    double t0   = theta0[tid];
-    double k_fc = fc[tid];
-    double energy_raw, dedcos;
+            const double pi = 3.14159265358979323846;
+            double t0   = theta0[tid];
+            double k_fc = fc[tid];
+            double energy_raw, dedcos;
 
-    if (fabs(pi - t0) < 1e-6) {
-        // Linear angle: use (theta - theta0)^2
-        double theta = acos(cos_a);
-        double dtheta = theta - t0;
-        energy_raw = k_fc * dtheta * dtheta;
-        double sinth = sin(theta);
-        dedcos = (sinth > 1e-8) ? (2.0 * k_fc * dtheta / (-sinth)) : 0.0;
-    } else {
-        double cos0   = cos(t0);
-        double dcos   = cos_a - cos0;
-        energy_raw    = k_fc * dcos * dcos;
-        // dE/d(cos_theta) for E = fc*(cos-cos0)^2
-        // cos_angle_grad returns d(cos)/dr, so we need dE/d(cos), NOT dE/d(theta)
-        dedcos        = 2.0 * k_fc * dcos;
+            if (fabs(pi - t0) < 1e-6) {
+                double theta = acos(cos_a);
+                double dtheta = theta - t0;
+                energy_raw = k_fc * dtheta * dtheta;
+                double sinth = sin(theta);
+                dedcos = (sinth > 1e-8) ? (2.0 * k_fc * dtheta / (-sinth)) : 0.0;
+            } else {
+                double cos0   = cos(t0);
+                double dcos   = cos_a - cos0;
+                energy_raw    = k_fc * dcos * dcos;
+                dedcos        = 2.0 * k_fc * dcos;
+            }
+
+            local_E = energy_raw * damp;
+
+            double damp2ij = (r_ij_sq > 1e-8) ? -2.0 * 2.0 * rr_ij / (r_ij_sq * (1.0+rr_ij)*(1.0+rr_ij)) : 0.0;
+            double damp2jk = (r_jk_sq > 1e-8) ? -2.0 * 2.0 * rr_jk / (r_jk_sq * (1.0+rr_jk)*(1.0+rr_jk)) : 0.0;
+
+            double gi_x = dedcos * damp * d_ri_x, gi_y = dedcos * damp * d_ri_y, gi_z = dedcos * damp * d_ri_z;
+            double gk_x = dedcos * damp * d_rk_x, gk_y = dedcos * damp * d_rk_y, gk_z = dedcos * damp * d_rk_z;
+            double gj_x = dedcos * damp * d_rj_x, gj_y = dedcos * damp * d_rj_y, gj_z = dedcos * damp * d_rj_z;
+
+            double t1_x = energy_raw * damp2ij * damp_jk * dij_x;
+            double t1_y = energy_raw * damp2ij * damp_jk * dij_y;
+            double t1_z = energy_raw * damp2ij * damp_jk * dij_z;
+            double t2_x = energy_raw * damp2jk * damp_ij * dkj_x;
+            double t2_y = energy_raw * damp2jk * damp_ij * dkj_y;
+            double t2_z = energy_raw * damp2jk * damp_ij * dkj_z;
+
+            add_grad(grad, i, gi_x + t1_x, gi_y + t1_y, gi_z + t1_z);
+            add_grad(grad, j, gj_x - t1_x - t2_x, gj_y - t1_y - t2_y, gj_z - t1_z - t2_z);
+            add_grad(grad, k, gk_x + t2_x, gk_y + t2_y, gk_z + t2_z);
+        }
     }
 
-    atomicAdd(energy, energy_raw * damp);
-
-    // Gradient: chain rule through damping
-    // damp2_ij = d(damp_ij)/d(r_ij^2) = -4*rr_ij / (r_ij_sq * (1+rr_ij)^2)
-    double damp2ij = (r_ij_sq > 1e-8) ? -2.0 * 2.0 * rr_ij / (r_ij_sq * (1.0+rr_ij)*(1.0+rr_ij)) : 0.0;
-    double damp2jk = (r_jk_sq > 1e-8) ? -2.0 * 2.0 * rr_jk / (r_jk_sq * (1.0+rr_jk)*(1.0+rr_jk)) : 0.0;
-
-    // Gradient of angle potential (without damping)
-    double gi_x = dedcos * damp * d_ri_x;
-    double gi_y = dedcos * damp * d_ri_y;
-    double gi_z = dedcos * damp * d_ri_z;
-    double gk_x = dedcos * damp * d_rk_x;
-    double gk_y = dedcos * damp * d_rk_y;
-    double gk_z = dedcos * damp * d_rk_z;
-    double gj_x = dedcos * damp * d_rj_x;
-    double gj_y = dedcos * damp * d_rj_y;
-    double gj_z = dedcos * damp * d_rj_z;
-
-    // Gradient from damping term: energy_raw * d(damp)/d(r_ij^2) * 2*r_ij_vec
-    double t1_x = energy_raw * damp2ij * damp_jk * dij_x;
-    double t1_y = energy_raw * damp2ij * damp_jk * dij_y;
-    double t1_z = energy_raw * damp2ij * damp_jk * dij_z;
-    double t2_x = energy_raw * damp2jk * damp_ij * dkj_x;
-    double t2_y = energy_raw * damp2jk * damp_ij * dkj_y;
-    double t2_z = energy_raw * damp2jk * damp_ij * dkj_z;
-
-    add_grad(grad, i, gi_x + t1_x, gi_y + t1_y, gi_z + t1_z);
-    add_grad(grad, j, gj_x - t1_x - t2_x, gj_y - t1_y - t2_y, gj_z - t1_z - t2_z);
-    add_grad(grad, k, gk_x + t2_x, gk_y + t2_y, gk_z + t2_z);
+    blockReduceAddEnergy(local_E, energy);
 }
 
 // ============================================================================
@@ -643,99 +665,95 @@ __global__ void k_dihedrals(
     double*                    energy)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    double local_E = 0.0;
 
-    int ai = idx_i[tid], aj = idx_j[tid], ak = idx_k[tid], al = idx_l[tid];
-    int zi = ati[tid]-1, zj = atj[tid]-1, zk = atk[tid]-1, zl = atl[tid]-1;
-    if (zi<0||zi>=86||zj<0||zj>=86||zk<0||zk>=86||zl<0||zl>=86) return;
+    if (tid < n) {
+        int ai = idx_i[tid], aj = idx_j[tid], ak = idx_k[tid], al = idx_l[tid];
+        int zi = ati[tid]-1, zj = atj[tid]-1, zk = atk[tid]-1, zl = atl[tid]-1;
 
-    const double scale = 4.0/3.0;
-    double ri = d_rcov_d3[zi]*scale, rj = d_rcov_d3[zj]*scale;
-    double rk = d_rcov_d3[zk]*scale, rl = d_rcov_d3[zl]*scale;
+        if (zi>=0&&zi<86&&zj>=0&&zj<86&&zk>=0&&zk<86&&zl>=0&&zl<86) {
+            const double scale = 4.0/3.0;
+            double ri = d_rcov_d3[zi]*scale, rj = d_rcov_d3[zj]*scale;
+            double rk = d_rcov_d3[zk]*scale, rl = d_rcov_d3[zl]*scale;
 
-    double atcutt = is_nci[tid] ? 0.305 : 0.505;
+            double atcutt = is_nci[tid] ? 0.305 : 0.505;
 
-    // Damping pairs: (i,j), (j,k), (k,l) — bonded chain distances
-    // Reference: ff_workspace_gfnff.cpp:335-337
-    auto sq_dist = [&](int a, int b) {
-        double dx=coords[3*b]-coords[3*a];
-        double dy=coords[3*b+1]-coords[3*a+1];
-        double dz=coords[3*b+2]-coords[3*a+2];
-        return dx*dx+dy*dy+dz*dz;
-    };
+            auto sq_dist = [&](int a, int b) {
+                double dx=coords[3*b]-coords[3*a];
+                double dy=coords[3*b+1]-coords[3*a+1];
+                double dz=coords[3*b+2]-coords[3*a+2];
+                return dx*dx+dy*dy+dz*dz;
+            };
 
-    auto make_damp = [&](double r2_sq, double ra, double rb) {
-        double sum = ra + rb;
-        double rcut_sq = atcutt * sum * sum;
-        double rr = r2_sq / rcut_sq;
-        rr = rr*rr;
-        return 1.0/(1.0+rr);
-    };
-    auto make_damp2 = [&](double r2_sq, double ra, double rb) {
-        double sum = ra + rb;
-        double rcut_sq = atcutt * sum * sum;
-        double rr = r2_sq / rcut_sq;
-        rr = rr*rr;
-        return (r2_sq > 1e-8) ? -4.0*rr/(r2_sq*(1.0+rr)*(1.0+rr)) : 0.0;
-    };
+            auto make_damp = [&](double r2_sq, double ra, double rb) {
+                double sum = ra + rb;
+                double rcut_sq = atcutt * sum * sum;
+                double rr = r2_sq / rcut_sq;
+                rr = rr*rr;
+                return 1.0/(1.0+rr);
+            };
+            auto make_damp2 = [&](double r2_sq, double ra, double rb) {
+                double sum = ra + rb;
+                double rcut_sq = atcutt * sum * sum;
+                double rr = r2_sq / rcut_sq;
+                rr = rr*rr;
+                return (r2_sq > 1e-8) ? -4.0*rr/(r2_sq*(1.0+rr)*(1.0+rr)) : 0.0;
+            };
 
-    double rij2 = sq_dist(ai, aj);
-    double rjk2 = sq_dist(aj, ak);
-    double rkl2 = sq_dist(ak, al);
+            double rij2 = sq_dist(ai, aj);
+            double rjk2 = sq_dist(aj, ak);
+            double rkl2 = sq_dist(ak, al);
 
-    double d_ij = make_damp(rij2, ri, rj);
-    double d_jk = make_damp(rjk2, rj, rk);
-    double d_kl = make_damp(rkl2, rk, rl);
-    double damp  = d_ij * d_jk * d_kl;
+            double d_ij = make_damp(rij2, ri, rj);
+            double d_jk = make_damp(rjk2, rj, rk);
+            double d_kl = make_damp(rkl2, rk, rl);
+            double damp  = d_ij * d_jk * d_kl;
 
-    double d2_ij = make_damp2(rij2, ri, rj);
-    double d2_jk = make_damp2(rjk2, rj, rk);
-    double d2_kl = make_damp2(rkl2, rk, rl);
+            double d2_ij = make_damp2(rij2, ri, rj);
+            double d2_jk = make_damp2(rjk2, rj, rk);
+            double d2_kl = make_damp2(rkl2, rk, rl);
 
-    // Dihedral angle + gradient
-    double derivate[4][3];
-    double phi = dihedral_angle_grad(coords, ai, aj, ak, al, derivate, true);
+            double derivate[4][3];
+            double phi = dihedral_angle_grad(coords, ai, aj, ak, al, derivate, true);
 
-    double c1    = n_period[tid] * (phi - phi0[tid]) + M_PI;
-    double cos_c1 = cos(c1);
-    double E_raw = V[tid] * (1.0 + cos_c1);
-    atomicAdd(energy, E_raw * damp);
+            double c1    = n_period[tid] * (phi - phi0[tid]) + M_PI;
+            double cos_c1 = cos(c1);
+            double E_raw = V[tid] * (1.0 + cos_c1);
+            local_E = E_raw * damp;
 
-    // Gradient of torsion potential (angle part)
-    double dEdphi = -V[tid] * n_period[tid] * sin(c1);
-    int atoms[4] = {ai, aj, ak, al};
-    for (int a = 0; a < 4; ++a) {
-        add_grad(grad, atoms[a],
-                 dEdphi * damp * derivate[a][0],
-                 dEdphi * damp * derivate[a][1],
-                 dEdphi * damp * derivate[a][2]);
+            // Gradient of torsion potential (angle part)
+            double dEdphi = -V[tid] * n_period[tid] * sin(c1);
+            int atoms[4] = {ai, aj, ak, al};
+            for (int a = 0; a < 4; ++a) {
+                add_grad(grad, atoms[a],
+                         dEdphi * damp * derivate[a][0],
+                         dEdphi * damp * derivate[a][1],
+                         dEdphi * damp * derivate[a][2]);
+            }
+
+            // Gradient from damping: E_raw * d(damp)/d(rXY²) * rXY_vec
+            {
+                double dx=coords[3*ai]-coords[3*aj], dy=coords[3*ai+1]-coords[3*aj+1], dz=coords[3*ai+2]-coords[3*aj+2];
+                double fac = E_raw * d2_ij * d_jk * d_kl;
+                add_grad(grad, ai,  fac*dx,  fac*dy,  fac*dz);
+                add_grad(grad, aj, -fac*dx, -fac*dy, -fac*dz);
+            }
+            {
+                double dx=coords[3*aj]-coords[3*ak], dy=coords[3*aj+1]-coords[3*ak+1], dz=coords[3*aj+2]-coords[3*ak+2];
+                double fac = E_raw * d_ij * d2_jk * d_kl;
+                add_grad(grad, aj,  fac*dx,  fac*dy,  fac*dz);
+                add_grad(grad, ak, -fac*dx, -fac*dy, -fac*dz);
+            }
+            {
+                double dx=coords[3*ak]-coords[3*al], dy=coords[3*ak+1]-coords[3*al+1], dz=coords[3*ak+2]-coords[3*al+2];
+                double fac = E_raw * d_ij * d_jk * d2_kl;
+                add_grad(grad, ak,  fac*dx,  fac*dy,  fac*dz);
+                add_grad(grad, al, -fac*dx, -fac*dy, -fac*dz);
+            }
+        }
     }
 
-    // Gradient from damping: E_raw * d(damp)/d(rXY²) * rXY_vec
-    // Reference: ff_workspace_gfnff.cpp:360-376 (pairs: i-j, j-k, k-l)
-    // Damping gradient: d(r²_AB)/dx_A = 2*(x_A - x_B), so vector is (ri - rj)
-    // Reference: ff_workspace_gfnff.cpp:364-376 — vij = ri - rj, vjk = rj - rk, etc.
-    // (i,j) pair
-    {
-        double dx=coords[3*ai]-coords[3*aj], dy=coords[3*ai+1]-coords[3*aj+1], dz=coords[3*ai+2]-coords[3*aj+2];
-        double fac = E_raw * d2_ij * d_jk * d_kl;
-        add_grad(grad, ai,  fac*dx,  fac*dy,  fac*dz);
-        add_grad(grad, aj, -fac*dx, -fac*dy, -fac*dz);
-    }
-    // (j,k) pair
-    {
-        double dx=coords[3*aj]-coords[3*ak], dy=coords[3*aj+1]-coords[3*ak+1], dz=coords[3*aj+2]-coords[3*ak+2];
-        double fac = E_raw * d_ij * d2_jk * d_kl;
-        add_grad(grad, aj,  fac*dx,  fac*dy,  fac*dz);
-        add_grad(grad, ak, -fac*dx, -fac*dy, -fac*dz);
-    }
-    // (k,l) pair
-    {
-        double dx=coords[3*ak]-coords[3*al], dy=coords[3*ak+1]-coords[3*al+1], dz=coords[3*ak+2]-coords[3*al+2];
-        double fac = E_raw * d_ij * d_jk * d2_kl;
-        add_grad(grad, ak,  fac*dx,  fac*dy,  fac*dz);
-        add_grad(grad, al, -fac*dx, -fac*dy, -fac*dz);
-    }
+    blockReduceAddEnergy(local_E, energy);
 }
 
 // ============================================================================
@@ -890,113 +908,106 @@ __global__ void k_inversions(
     double*                    energy)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    double local_E = 0.0;
 
-    // Atom layout: i=center, j=nb1, k=nb2, l=nb3
-    int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid], l = idx_l[tid];
+    if (tid < n) {
+        int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid], l = idx_l[tid];
 
-    // Distance damping (matches CPU ff_workspace_gfnff.cpp:509-513, 537-549)
-    // Reference: gfnff_engrad.F90:1356-1365
-    const double rcov_scale = 4.0 / 3.0;
-    const double atcutt = 0.505;
+        const double rcov_scale = 4.0 / 3.0;
+        const double atcutt = 0.505;
 
-    int zi = ati[tid]-1, zj = atj[tid]-1, zk = atk[tid]-1, zl = atl[tid]-1;
-    double rcov_c = (zi >= 0 && zi < 87) ? d_rcov_d3[zi] * rcov_scale : 1.0 * rcov_scale;
-    double rcov_1 = (zj >= 0 && zj < 87) ? d_rcov_d3[zj] * rcov_scale : 1.0 * rcov_scale;
-    double rcov_2 = (zk >= 0 && zk < 87) ? d_rcov_d3[zk] * rcov_scale : 1.0 * rcov_scale;
-    double rcov_3 = (zl >= 0 && zl < 87) ? d_rcov_d3[zl] * rcov_scale : 1.0 * rcov_scale;
+        int zi = ati[tid]-1, zj = atj[tid]-1, zk = atk[tid]-1, zl = atl[tid]-1;
+        double rcov_c = (zi >= 0 && zi < 87) ? d_rcov_d3[zi] * rcov_scale : 1.0 * rcov_scale;
+        double rcov_1 = (zj >= 0 && zj < 87) ? d_rcov_d3[zj] * rcov_scale : 1.0 * rcov_scale;
+        double rcov_2 = (zk >= 0 && zk < 87) ? d_rcov_d3[zk] * rcov_scale : 1.0 * rcov_scale;
+        double rcov_3 = (zl >= 0 && zl < 87) ? d_rcov_d3[zl] * rcov_scale : 1.0 * rcov_scale;
 
-    // Damping pairs: nb1-center, nb1-nb2, nb1-nb3 (hub = nb1 = j)
-    auto sq_dist3 = [&](int a, int b) {
-        double dx=coords[3*b]-coords[3*a];
-        double dy=coords[3*b+1]-coords[3*a+1];
-        double dz=coords[3*b+2]-coords[3*a+2];
-        return dx*dx+dy*dy+dz*dz;
-    };
+        auto sq_dist3 = [&](int a, int b) {
+            double dx=coords[3*b]-coords[3*a];
+            double dy=coords[3*b+1]-coords[3*a+1];
+            double dz=coords[3*b+2]-coords[3*a+2];
+            return dx*dx+dy*dy+dz*dz;
+        };
 
-    double rij_sq = sq_dist3(j, i);   // nb1-center
-    double rjk_sq = sq_dist3(j, k);   // nb1-nb2
-    double rjl_sq = sq_dist3(j, l);   // nb1-nb3
+        double rij_sq = sq_dist3(j, i);
+        double rjk_sq = sq_dist3(j, k);
+        double rjl_sq = sq_dist3(j, l);
 
-    auto calc_damp = [&](double rsq, double ra, double rb) -> double {
-        double sum = ra + rb;
-        double rcut_sq = atcutt * sum * sum;
-        double rr = (rsq / rcut_sq);
-        rr = rr * rr;
-        return 1.0 / (1.0 + rr);
-    };
+        auto calc_damp = [&](double rsq, double ra, double rb) -> double {
+            double sum = ra + rb;
+            double rcut_sq = atcutt * sum * sum;
+            double rr = (rsq / rcut_sq);
+            rr = rr * rr;
+            return 1.0 / (1.0 + rr);
+        };
 
-    double damp_ij = calc_damp(rij_sq, rcov_c, rcov_1);
-    double damp_jk = calc_damp(rjk_sq, rcov_2, rcov_1);
-    double damp_jl = calc_damp(rjl_sq, rcov_3, rcov_1);
-    double damp    = damp_ij * damp_jk * damp_jl;
+        double damp_ij = calc_damp(rij_sq, rcov_c, rcov_1);
+        double damp_jk = calc_damp(rjk_sq, rcov_2, rcov_1);
+        double damp_jl = calc_damp(rjl_sq, rcov_3, rcov_1);
+        double damp    = damp_ij * damp_jk * damp_jl;
 
-    double derivate[4][3];
-    double omega = inversion_angle_grad(coords, i, j, k, l, derivate, true);
-    double cos_om  = cos(omega);
-    double cos_om0 = cos(omega0[tid]);
+        double derivate[4][3];
+        double omega = inversion_angle_grad(coords, i, j, k, l, derivate, true);
+        double cos_om  = cos(omega);
+        double cos_om0 = cos(omega0[tid]);
 
-    double E_raw, dEdcos;
-    if (potential_type[tid] == 0) {
-        // E = fc * (1 - cos(omega))
-        E_raw  = fc[tid] * (1.0 - cos_om);
-        dEdcos = -fc[tid];
-    } else {
-        // E = fc * (cos(omega) - cos(omega0))^2
-        double dcos = cos_om - cos_om0;
-        E_raw  = fc[tid] * dcos * dcos;
-        dEdcos = 2.0 * fc[tid] * dcos;
+        double E_raw, dEdcos;
+        if (potential_type[tid] == 0) {
+            E_raw  = fc[tid] * (1.0 - cos_om);
+            dEdcos = -fc[tid];
+        } else {
+            double dcos = cos_om - cos_om0;
+            E_raw  = fc[tid] * dcos * dcos;
+            dEdcos = 2.0 * fc[tid] * dcos;
+        }
+
+        local_E = E_raw * damp;
+
+        double dEdOmega = dEdcos * (-sin(omega)) * damp;
+
+        int atoms[4] = {i, j, k, l};
+        for (int a = 0; a < 4; ++a) {
+            add_grad(grad, atoms[a],
+                     dEdOmega * derivate[a][0],
+                     dEdOmega * derivate[a][1],
+                     dEdOmega * derivate[a][2]);
+        }
+
+        auto calc_ddamp = [&](double rsq, double ra, double rb) -> double {
+            if (rsq < 1e-8) return 0.0;
+            double sum = ra + rb;
+            double rcut_sq = atcutt * sum * sum;
+            double rr = (rsq / rcut_sq);
+            rr = rr * rr;
+            double opr = 1.0 + rr;
+            return -4.0 * rr / (rsq * opr * opr);
+        };
+
+        double dd_ij = calc_ddamp(rij_sq, rcov_c, rcov_1);
+        double dd_jk = calc_ddamp(rjk_sq, rcov_2, rcov_1);
+        double dd_jl = calc_ddamp(rjl_sq, rcov_3, rcov_1);
+
+        {
+            double dx=coords[3*i]-coords[3*j], dy=coords[3*i+1]-coords[3*j+1], dz=coords[3*i+2]-coords[3*j+2];
+            double fac = E_raw * dd_ij * damp_jk * damp_jl;
+            add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
+            add_grad(grad, i, -fac*dx, -fac*dy, -fac*dz);
+        }
+        {
+            double dx=coords[3*k]-coords[3*j], dy=coords[3*k+1]-coords[3*j+1], dz=coords[3*k+2]-coords[3*j+2];
+            double fac = E_raw * damp_ij * dd_jk * damp_jl;
+            add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
+            add_grad(grad, k, -fac*dx, -fac*dy, -fac*dz);
+        }
+        {
+            double dx=coords[3*l]-coords[3*j], dy=coords[3*l+1]-coords[3*j+1], dz=coords[3*l+2]-coords[3*j+2];
+            double fac = E_raw * damp_ij * damp_jk * dd_jl;
+            add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
+            add_grad(grad, l, -fac*dx, -fac*dy, -fac*dz);
+        }
     }
 
-    atomicAdd(energy, E_raw * damp);
-
-    // Gradient: angle part with damping
-    double dEdOmega = dEdcos * (-sin(omega)) * damp;
-
-    int atoms[4] = {i, j, k, l};
-    for (int a = 0; a < 4; ++a) {
-        add_grad(grad, atoms[a],
-                 dEdOmega * derivate[a][0],
-                 dEdOmega * derivate[a][1],
-                 dEdOmega * derivate[a][2]);
-    }
-
-    // Gradient from damping: E_raw * d(damp)/d(r²) * r_vec
-    auto calc_ddamp = [&](double rsq, double ra, double rb) -> double {
-        if (rsq < 1e-8) return 0.0;
-        double sum = ra + rb;
-        double rcut_sq = atcutt * sum * sum;
-        double rr = (rsq / rcut_sq);
-        rr = rr * rr;
-        double opr = 1.0 + rr;
-        return -4.0 * rr / (rsq * opr * opr);
-    };
-
-    double dd_ij = calc_ddamp(rij_sq, rcov_c, rcov_1);
-    double dd_jk = calc_ddamp(rjk_sq, rcov_2, rcov_1);
-    double dd_jl = calc_ddamp(rjl_sq, rcov_3, rcov_1);
-
-    // (j,i) pair — nb1 to center
-    {
-        double dx=coords[3*i]-coords[3*j], dy=coords[3*i+1]-coords[3*j+1], dz=coords[3*i+2]-coords[3*j+2];
-        double fac = E_raw * dd_ij * damp_jk * damp_jl;
-        add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
-        add_grad(grad, i, -fac*dx, -fac*dy, -fac*dz);
-    }
-    // (j,k) pair — nb1 to nb2
-    {
-        double dx=coords[3*k]-coords[3*j], dy=coords[3*k+1]-coords[3*j+1], dz=coords[3*k+2]-coords[3*j+2];
-        double fac = E_raw * damp_ij * dd_jk * damp_jl;
-        add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
-        add_grad(grad, k, -fac*dx, -fac*dy, -fac*dz);
-    }
-    // (j,l) pair — nb1 to nb3
-    {
-        double dx=coords[3*l]-coords[3*j], dy=coords[3*l+1]-coords[3*j+1], dz=coords[3*l+2]-coords[3*j+2];
-        double fac = E_raw * damp_ij * damp_jk * dd_jl;
-        add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
-        add_grad(grad, l, -fac*dx, -fac*dy, -fac*dz);
-    }
+    blockReduceAddEnergy(local_E, energy);
 }
 
 // ============================================================================
@@ -1067,32 +1078,28 @@ __global__ void k_storsions(
     double*                    energy)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    double local_E = 0.0;
 
-    int ai = idx_i[tid], aj = idx_j[tid], ak = idx_k[tid], al = idx_l[tid];
+    if (tid < n) {
+        int ai = idx_i[tid], aj = idx_j[tid], ak = idx_k[tid], al = idx_l[tid];
 
-    double derivate[4][3];
-    double phi = dihedral_angle_grad(coords, ai, aj, ak, al, derivate, true);
+        double derivate[4][3];
+        double phi = dihedral_angle_grad(coords, ai, aj, ak, al, derivate, true);
 
-    double eref = erefhalf[tid];
-    double E = -eref * cos(2.0 * phi) + eref;
-    atomicAdd(energy, E);
+        double eref = erefhalf[tid];
+        local_E = -eref * cos(2.0 * phi) + eref;
 
-    double dEdphi = 2.0 * eref * sin(2.0 * phi);
-    int atoms[4] = {ai, aj, ak, al};
-
-    // DIAGNOSTIC: print s-torsion data involving atom 3
-    if (ai == 3 || aj == 3 || ak == 3 || al == 3) {
-        printf("STORS tid=%d atoms=%d-%d-%d-%d eref=%.6e phi=%.6e dEdphi=%.6e deriv0x=%.6e\n",
-               tid, ai, aj, ak, al, eref, phi, dEdphi, derivate[0][0]);
+        double dEdphi = 2.0 * eref * sin(2.0 * phi);
+        int atoms[4] = {ai, aj, ak, al};
+        for (int a = 0; a < 4; ++a) {
+            add_grad(grad, atoms[a],
+                     dEdphi * derivate[a][0],
+                     dEdphi * derivate[a][1],
+                     dEdphi * derivate[a][2]);
+        }
     }
 
-    for (int a = 0; a < 4; ++a) {
-        add_grad(grad, atoms[a],
-                 dEdphi * derivate[a][0],
-                 dEdphi * derivate[a][1],
-                 dEdphi * derivate[a][2]);
-    }
+    blockReduceAddEnergy(local_E, energy);
 }
 
 // ============================================================================
@@ -1116,78 +1123,69 @@ __global__ void k_batm(
     double*                    energy)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    double local_E = 0.0;
 
-    int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid];
+    if (tid < n) {
+        int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid];
 
-    double ix = coords[3*i], iy = coords[3*i+1], iz = coords[3*i+2];
-    double jx = coords[3*j], jy = coords[3*j+1], jz = coords[3*j+2];
-    double kx = coords[3*k], ky = coords[3*k+1], kz = coords[3*k+2];
+        double ix = coords[3*i], iy = coords[3*i+1], iz = coords[3*i+2];
+        double jx = coords[3*j], jy = coords[3*j+1], jz = coords[3*j+2];
+        double kx = coords[3*k], ky = coords[3*k+1], kz = coords[3*k+2];
 
-    double rij_x = jx-ix, rij_y = jy-iy, rij_z = jz-iz;
-    double rik_x = kx-ix, rik_y = ky-iy, rik_z = kz-iz;
-    double rjk_x = kx-jx, rjk_y = ky-jy, rjk_z = kz-jz;
+        double rij_x = jx-ix, rij_y = jy-iy, rij_z = jz-iz;
+        double rik_x = kx-ix, rik_y = ky-iy, rik_z = kz-iz;
+        double rjk_x = kx-jx, rjk_y = ky-jy, rjk_z = kz-jz;
 
-    double r2ij = rij_x*rij_x + rij_y*rij_y + rij_z*rij_z;
-    double r2ik = rik_x*rik_x + rik_y*rik_y + rik_z*rik_z;
-    double r2jk = rjk_x*rjk_x + rjk_y*rjk_y + rjk_z*rjk_z;
+        double r2ij = rij_x*rij_x + rij_y*rij_y + rij_z*rij_z;
+        double r2ik = rik_x*rik_x + rik_y*rik_y + rik_z*rik_z;
+        double r2jk = rjk_x*rjk_x + rjk_y*rjk_y + rjk_z*rjk_z;
 
-    double rij = sqrt(r2ij), rik = sqrt(r2ik), rjk = sqrt(r2jk);
-    if (rij < 1e-10 || rik < 1e-10 || rjk < 1e-10) return;
+        double rij = sqrt(r2ij), rik = sqrt(r2ik), rjk = sqrt(r2jk);
+        if (rij >= 1e-10 && rik >= 1e-10 && rjk >= 1e-10) {
+            double rijk3 = r2ij * r2jk * r2ik;
+            double mijk  = -r2ij + r2jk + r2ik;
+            double imjk  = r2ij - r2jk + r2ik;
+            double ijmk  = r2ij + r2jk - r2ik;
 
-    double rijk3 = r2ij * r2jk * r2ik;
-    double mijk  = -r2ij + r2jk + r2ik;
-    double imjk  = r2ij - r2jk + r2ik;
-    double ijmk  = r2ij + r2jk - r2ik;
+            double ang = 0.375 * ijmk * imjk * mijk / rijk3;
+            double rav3 = r2ij * rij * r2ik * rik * r2jk * rjk;
 
-    double ang = 0.375 * ijmk * imjk * mijk / rijk3;
-    // rav3 = pow(rijk3, 1.5) = (rij*rik*rjk)^3
-    double rav3 = r2ij * rij * r2ik * rik * r2jk * rjk;
+            double angr9 = (ang + 1.0) / rav3;
 
-    double angr9 = (ang + 1.0) / rav3;
+            const double fqq = 3.0;
+            double fi = fmin(fmax(1.0 - fqq * topo_charges[i], -4.0), 4.0);
+            double fj = fmin(fmax(1.0 - fqq * topo_charges[j], -4.0), 4.0);
+            double fk = fmin(fmax(1.0 - fqq * topo_charges[k], -4.0), 4.0);
 
-    // Topology charges: fi = clamp(1 - 3*q_i, -4, 4)
-    const double fqq = 3.0;
-    double fi = fmin(fmax(1.0 - fqq * topo_charges[i], -4.0), 4.0);
-    double fj = fmin(fmax(1.0 - fqq * topo_charges[j], -4.0), 4.0);
-    double fk = fmin(fmax(1.0 - fqq * topo_charges[k], -4.0), 4.0);
+            double c9 = fi * fj * fk * zb3atm_i[tid] * zb3atm_j[tid] * zb3atm_k[tid];
+            local_E = c9 * angr9;
 
-    double c9 = fi * fj * fk * zb3atm_i[tid] * zb3atm_j[tid] * zb3atm_k[tid];
-    double E = c9 * angr9;
-    atomicAdd(energy, E);
+            double dang_ij = -0.375 * (r2ij*r2ij*r2ij + r2ij*r2ij*(r2jk + r2ik)
+                              + r2ij*(3.0*r2jk*r2jk + 2.0*r2jk*r2ik + 3.0*r2ik*r2ik)
+                              - 5.0*(r2jk - r2ik)*(r2jk - r2ik)*(r2jk + r2ik))
+                              / (rij * rijk3 * rav3);
 
-    // Gradient: analytical ATM derivative (matches CPU calcBATM)
-    double r5ijk = rijk3 * rav3;  // (r2ij*r2jk*r2ik) * (rij^3*rik^3*rjk^3) = rij^5*rik^5*rjk^5
+            double dang_jk = -0.375 * (r2jk*r2jk*r2jk + r2jk*r2jk*(r2ik + r2ij)
+                              + r2jk*(3.0*r2ik*r2ik + 2.0*r2ik*r2ij + 3.0*r2ij*r2ij)
+                              - 5.0*(r2ik - r2ij)*(r2ik - r2ij)*(r2ik + r2ij))
+                              / (rjk * rijk3 * rav3);
 
-    double dang_ij = -0.375 * (r2ij*r2ij*r2ij + r2ij*r2ij*(r2jk + r2ik)
-                      + r2ij*(3.0*r2jk*r2jk + 2.0*r2jk*r2ik + 3.0*r2ik*r2ik)
-                      - 5.0*(r2jk - r2ik)*(r2jk - r2ik)*(r2jk + r2ik))
-                      / (rij * rijk3 * rav3);
+            double dang_ik = -0.375 * (r2ik*r2ik*r2ik + r2ik*r2ik*(r2jk + r2ij)
+                              + r2ik*(3.0*r2jk*r2jk + 2.0*r2jk*r2ij + 3.0*r2ij*r2ij)
+                              - 5.0*(r2jk - r2ij)*(r2jk - r2ij)*(r2jk + r2ij))
+                              / (rik * rijk3 * rav3);
 
-    double dang_jk = -0.375 * (r2jk*r2jk*r2jk + r2jk*r2jk*(r2ik + r2ij)
-                      + r2jk*(3.0*r2ik*r2ik + 2.0*r2ik*r2ij + 3.0*r2ij*r2ij)
-                      - 5.0*(r2ik - r2ij)*(r2ik - r2ij)*(r2ik + r2ij))
-                      / (rjk * rijk3 * rav3);
+            double fij = -dang_ij * c9 / rij;
+            double fjk = -dang_jk * c9 / rjk;
+            double fik = -dang_ik * c9 / rik;
 
-    double dang_ik = -0.375 * (r2ik*r2ik*r2ik + r2ik*r2ik*(r2jk + r2ij)
-                      + r2ik*(3.0*r2jk*r2jk + 2.0*r2jk*r2ij + 3.0*r2ij*r2ij)
-                      - 5.0*(r2jk - r2ij)*(r2jk - r2ij)*(r2jk + r2ij))
-                      / (rik * rijk3 * rav3);
+            add_grad(grad, j, -fij*rij_x + fjk*rjk_x, -fij*rij_y + fjk*rjk_y, -fij*rij_z + fjk*rjk_z);
+            add_grad(grad, k, -fik*rik_x - fjk*rjk_x, -fik*rik_y - fjk*rjk_y, -fik*rik_z - fjk*rjk_z);
+            add_grad(grad, i,  fij*rij_x + fik*rik_x,  fij*rij_y + fik*rik_y,  fij*rij_z + fik*rik_z);
+        }
+    }
 
-    // dgij = -dang_ij * c9 * (rij_vec / rij)
-    double fij = -dang_ij * c9 / rij;
-    double fjk = -dang_jk * c9 / rjk;
-    double fik = -dang_ik * c9 / rik;
-
-    // j += (-dgij + dgjk),  k += (-dgik - dgjk),  i += (dgij + dgik)
-    double gj_x = -fij*rij_x + fjk*rjk_x, gj_y = -fij*rij_y + fjk*rjk_y, gj_z = -fij*rij_z + fjk*rjk_z;
-    double gk_x = -fik*rik_x - fjk*rjk_x, gk_y = -fik*rik_y - fjk*rjk_y, gk_z = -fik*rik_z - fjk*rjk_z;
-    double gi_x =  fij*rij_x + fik*rik_x, gi_y =  fij*rij_y + fik*rik_y, gi_z =  fij*rij_z + fik*rik_z;
-
-
-    add_grad(grad, j, gj_x, gj_y, gj_z);
-    add_grad(grad, k, gk_x, gk_y, gk_z);
-    add_grad(grad, i, gi_x, gi_y, gi_z);
+    blockReduceAddEnergy(local_E, energy);
 }
 
 // ============================================================================
@@ -1217,82 +1215,81 @@ __global__ void k_atm(
     double*                    energy)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    double local_E = 0.0;
 
-    int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid];
+    if (tid < n) {
+        int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid];
 
-    double ix = coords[3*i], iy = coords[3*i+1], iz = coords[3*i+2];
-    double jx = coords[3*j], jy = coords[3*j+1], jz = coords[3*j+2];
-    double kx = coords[3*k], ky = coords[3*k+1], kz = coords[3*k+2];
+        double ix = coords[3*i], iy = coords[3*i+1], iz = coords[3*i+2];
+        double jx = coords[3*j], jy = coords[3*j+1], jz = coords[3*j+2];
+        double kx = coords[3*k], ky = coords[3*k+1], kz = coords[3*k+2];
 
-    double rij_x = jx-ix, rij_y = jy-iy, rij_z = jz-iz;
-    double rik_x = kx-ix, rik_y = ky-iy, rik_z = kz-iz;
-    double rjk_x = kx-jx, rjk_y = ky-jy, rjk_z = kz-jz;
+        double rij_x = jx-ix, rij_y = jy-iy, rij_z = jz-iz;
+        double rik_x = kx-ix, rik_y = ky-iy, rik_z = kz-iz;
+        double rjk_x = kx-jx, rjk_y = ky-jy, rjk_z = kz-jz;
 
-    double r2ij = rij_x*rij_x + rij_y*rij_y + rij_z*rij_z;
-    double r2ik = rik_x*rik_x + rik_y*rik_y + rik_z*rik_z;
-    double r2jk = rjk_x*rjk_x + rjk_y*rjk_y + rjk_z*rjk_z;
+        double r2ij = rij_x*rij_x + rij_y*rij_y + rij_z*rij_z;
+        double r2ik = rik_x*rik_x + rik_y*rik_y + rik_z*rik_z;
+        double r2jk = rjk_x*rjk_x + rjk_y*rjk_y + rjk_z*rjk_z;
 
-    double rij = sqrt(r2ij), rik = sqrt(r2ik), rjk = sqrt(r2jk);
-    if (rij < 1e-10 || rik < 1e-10 || rjk < 1e-10) return;
+        double rij = sqrt(r2ij), rik = sqrt(r2ik), rjk = sqrt(r2jk);
+        if (rij >= 1e-10 && rik >= 1e-10 && rjk >= 1e-10) {
+            double c9_val = s9[tid] * sqrt(fabs(C6_ij[tid] * C6_ik[tid] * C6_jk[tid]));
 
-    double c9_val = s9[tid] * sqrt(fabs(C6_ij[tid] * C6_ik[tid] * C6_jk[tid]));
+            int zi = ati[tid] - 1, zj = atj[tid] - 1, zk = atk[tid] - 1;
+            double r_cov_i = (zi >= 0 && zi < 87) ? d_rcov_d3[zi] : 1.0;
+            double r_cov_j = (zj >= 0 && zj < 87) ? d_rcov_d3[zj] : 1.0;
+            double r_cov_k = (zk >= 0 && zk < 87) ? d_rcov_d3[zk] : 1.0;
 
-    // Covalent radii for BJ damping r0
-    int zi = ati[tid] - 1, zj = atj[tid] - 1, zk = atk[tid] - 1;
-    double r_cov_i = (zi >= 0 && zi < 87) ? d_rcov_d3[zi] : 1.0;  // rcov_bohr
-    double r_cov_j = (zj >= 0 && zj < 87) ? d_rcov_d3[zj] : 1.0;
-    double r_cov_k = (zk >= 0 && zk < 87) ? d_rcov_d3[zk] : 1.0;
+            double a1_v = a1[tid], a2_v = a2[tid], alp_v = alp[tid];
+            double r0ij = a1_v * sqrt(3.0 * r_cov_i * r_cov_j) + a2_v;
+            double r0ik = a1_v * sqrt(3.0 * r_cov_i * r_cov_k) + a2_v;
+            double r0jk = a1_v * sqrt(3.0 * r_cov_j * r_cov_k) + a2_v;
+            double r0ijk = r0ij * r0ik * r0jk;
 
-    double a1_v = a1[tid], a2_v = a2[tid], alp_v = alp[tid];
-    double r0ij = a1_v * sqrt(3.0 * r_cov_i * r_cov_j) + a2_v;
-    double r0ik = a1_v * sqrt(3.0 * r_cov_i * r_cov_k) + a2_v;
-    double r0jk = a1_v * sqrt(3.0 * r_cov_j * r_cov_k) + a2_v;
-    double r0ijk = r0ij * r0ik * r0jk;
+            double rijk = rij * rik * rjk;
+            double r2ijk = r2ij * r2ik * r2jk;
+            double r3ijk = rijk * r2ijk;
+            double r5ijk = r2ijk * r3ijk;
 
-    double rijk = rij * rik * rjk;
-    double r2ijk = r2ij * r2ik * r2jk;
-    double r3ijk = rijk * r2ijk;
-    double r5ijk = r2ijk * r3ijk;
+            double tmp = pow(r0ijk / rijk, alp_v / 3.0);
+            double fdmp = 1.0 / (1.0 + 6.0 * tmp);
 
-    double tmp = pow(r0ijk / rijk, alp_v / 3.0);
-    double fdmp = 1.0 / (1.0 + 6.0 * tmp);
+            double A = r2ij + r2jk - r2ik;
+            double B = r2ij + r2ik - r2jk;
+            double C = r2ik + r2jk - r2ij;
+            double ang = (0.375 * A * B * C / r2ijk + 1.0) / r3ijk;
 
-    double A = r2ij + r2jk - r2ik;
-    double B = r2ij + r2ik - r2jk;
-    double C = r2ik + r2jk - r2ij;
-    double ang = (0.375 * A * B * C / r2ijk + 1.0) / r3ijk;
+            double tscale = triple_scale[tid];
+            local_E = ang * fdmp * c9_val / 3.0 * tscale;
 
-    double tscale = triple_scale[tid];
-    atomicAdd(energy, ang * fdmp * c9_val / 3.0 * tscale);
+            double c9_grad = -s9[tid] * sqrt(fabs(C6_ij[tid] * C6_ik[tid] * C6_jk[tid]));
+            double dfdmp = -2.0 * alp_v * tmp * fdmp * fdmp;
 
-    // Gradient (matches calcATMGradient exactly)
-    // Note: negative c9 for gradient (dispersion is attractive)
-    double c9_grad = -s9[tid] * sqrt(fabs(C6_ij[tid] * C6_ik[tid] * C6_jk[tid]));
-    double dfdmp = -2.0 * alp_v * tmp * fdmp * fdmp;
+            double dang_ij = -0.375 * (r2ij*r2ij*r2ij + r2ij*r2ij*(r2jk + r2ik)
+                              + r2ij*(3.0*r2jk*r2jk + 2.0*r2jk*r2ik + 3.0*r2ik*r2ik)
+                              - 5.0*(r2jk - r2ik)*(r2jk - r2ik)*(r2jk + r2ik)) / r5ijk;
 
-    double dang_ij = -0.375 * (r2ij*r2ij*r2ij + r2ij*r2ij*(r2jk + r2ik)
-                      + r2ij*(3.0*r2jk*r2jk + 2.0*r2jk*r2ik + 3.0*r2ik*r2ik)
-                      - 5.0*(r2jk - r2ik)*(r2jk - r2ik)*(r2jk + r2ik)) / r5ijk;
+            double dang_ik = -0.375 * (r2ik*r2ik*r2ik + r2ik*r2ik*(r2jk + r2ij)
+                              + r2ik*(3.0*r2jk*r2jk + 2.0*r2jk*r2ij + 3.0*r2ij*r2ij)
+                              - 5.0*(r2jk - r2ij)*(r2jk - r2ij)*(r2jk + r2ij)) / r5ijk;
 
-    double dang_ik = -0.375 * (r2ik*r2ik*r2ik + r2ik*r2ik*(r2jk + r2ij)
-                      + r2ik*(3.0*r2jk*r2jk + 2.0*r2jk*r2ij + 3.0*r2ij*r2ij)
-                      - 5.0*(r2jk - r2ij)*(r2jk - r2ij)*(r2jk + r2ij)) / r5ijk;
+            double dang_jk = -0.375 * (r2jk*r2jk*r2jk + r2jk*r2jk*(r2ik + r2ij)
+                              + r2jk*(3.0*r2ik*r2ik + 2.0*r2ik*r2ij + 3.0*r2ij*r2ij)
+                              - 5.0*(r2ik - r2ij)*(r2ik - r2ij)*(r2ik + r2ij)) / r5ijk;
 
-    double dang_jk = -0.375 * (r2jk*r2jk*r2jk + r2jk*r2jk*(r2ik + r2ij)
-                      + r2jk*(3.0*r2ik*r2ik + 2.0*r2ik*r2ij + 3.0*r2ij*r2ij)
-                      - 5.0*(r2ik - r2ij)*(r2ik - r2ij)*(r2ik + r2ij)) / r5ijk;
+            double pf = c9_grad * tscale / 3.0;
+            double fij = pf * (-dang_ij * fdmp + ang * dfdmp) / r2ij;
+            double fik = pf * (-dang_ik * fdmp + ang * dfdmp) / r2ik;
+            double fjk = pf * (-dang_jk * fdmp + ang * dfdmp) / r2jk;
 
-    double pf = c9_grad * tscale / 3.0;
-    // dgXY = pf * (-dang_XY * fdmp + ang * dfdmp) / r2XY * rXY_vec
-    double fij = pf * (-dang_ij * fdmp + ang * dfdmp) / r2ij;
-    double fik = pf * (-dang_ik * fdmp + ang * dfdmp) / r2ik;
-    double fjk = pf * (-dang_jk * fdmp + ang * dfdmp) / r2jk;
+            add_grad(grad, i, -(fij*rij_x + fik*rik_x), -(fij*rij_y + fik*rik_y), -(fij*rij_z + fik*rik_z));
+            add_grad(grad, j, fij*rij_x - fjk*rjk_x, fij*rij_y - fjk*rjk_y, fij*rij_z - fjk*rjk_z);
+            add_grad(grad, k, fik*rik_x + fjk*rjk_x, fik*rik_y + fjk*rjk_y, fik*rik_z + fjk*rjk_z);
+        }
+    }
 
-    // i += -(dgij + dgik),  j += (dgij - dgjk),  k += (dgik + dgjk)
-    add_grad(grad, i, -(fij*rij_x + fik*rik_x), -(fij*rij_y + fik*rik_y), -(fij*rij_z + fik*rik_z));
-    add_grad(grad, j, fij*rij_x - fjk*rjk_x, fij*rij_y - fjk*rjk_y, fij*rij_z - fjk*rjk_z);
-    add_grad(grad, k, fik*rik_x + fjk*rjk_x, fik*rik_y + fjk*rjk_y, fik*rik_z + fjk*rjk_z);
+    blockReduceAddEnergy(local_E, energy);
 }
 
 // ============================================================================
@@ -1318,109 +1315,103 @@ __global__ void k_xbonds(
     double*                    energy)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    double local_E = 0.0;
 
-    // Constants from gfnff_par.h
-    const double XB_SCUT_D = 5.0;
-    const double XB_BACUT_D = 70.0;
-    const double HB_ALP_D = 6.0;
-    const double HB_LONGCUT_XB_D = 70.0;
-    const double XB_ST_D = 15.0;
-    const double XB_SF_D = 0.03;
+    if (tid < n) {
+        const double XB_SCUT_D = 5.0;
+        const double XB_BACUT_D = 70.0;
+        const double HB_ALP_D = 6.0;
+        const double HB_LONGCUT_XB_D = 70.0;
+        const double XB_ST_D = 15.0;
+        const double XB_SF_D = 0.03;
 
-    int A = idx_i[tid], X = idx_j[tid], B = idx_k[tid];
+        int A = idx_i[tid], X = idx_j[tid], B = idx_k[tid];
 
-    double ax = coords[3*A], ay = coords[3*A+1], az = coords[3*A+2];
-    double xx = coords[3*X], xy = coords[3*X+1], xz = coords[3*X+2];
-    double bx = coords[3*B], by = coords[3*B+1], bz = coords[3*B+2];
+        double ax = coords[3*A], ay = coords[3*A+1], az = coords[3*A+2];
+        double xx = coords[3*X], xy = coords[3*X+1], xz = coords[3*X+2];
+        double bx = coords[3*B], by = coords[3*B+1], bz = coords[3*B+2];
 
-    double rAX_x = xx-ax, rAX_y = xy-ay, rAX_z = xz-az;
-    double rXB_x = bx-xx, rXB_y = by-xy, rXB_z = bz-xz;
-    double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az;
+        double rAX_x = xx-ax, rAX_y = xy-ay, rAX_z = xz-az;
+        double rXB_x = bx-xx, rXB_y = by-xy, rXB_z = bz-xz;
+        double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az;
 
-    double r2AX = rAX_x*rAX_x + rAX_y*rAX_y + rAX_z*rAX_z;
-    double r2XB = rXB_x*rXB_x + rXB_y*rXB_y + rXB_z*rXB_z;
-    double r2AB = rAB_x*rAB_x + rAB_y*rAB_y + rAB_z*rAB_z;
+        double r2AX = rAX_x*rAX_x + rAX_y*rAX_y + rAX_z*rAX_z;
+        double r2XB = rXB_x*rXB_x + rXB_y*rXB_y + rXB_z*rXB_z;
+        double r2AB = rAB_x*rAB_x + rAB_y*rAB_y + rAB_z*rAB_z;
 
-    double r_AX = sqrt(r2AX), r_XB = sqrt(r2XB), r_AB = sqrt(r2AB);
-    if (r_XB > r_cut[tid] || r_XB < 1e-10 || r_AB < 1e-10) return;
+        double r_AX = sqrt(r2AX), r_XB = sqrt(r2XB), r_AB = sqrt(r2AB);
 
-    int eA = elem_A[tid] - 1, eB = elem_B[tid] - 1;
-    double r_vdw_AB = ((eA >= 0 && eA < 100) ? d_cov_radii[eA] : 1.0)
-                    + ((eB >= 0 && eB < 100) ? d_cov_radii[eB] : 1.0);
+        if (r_XB <= r_cut[tid] && r_XB >= 1e-10 && r_AB >= 1e-10) {
+            int eA = elem_A[tid] - 1, eB = elem_B[tid] - 1;
+            double r_vdw_AB = ((eA >= 0 && eA < 100) ? d_cov_radii[eA] : 1.0)
+                            + ((eB >= 0 && eB < 100) ? d_cov_radii[eB] : 1.0);
 
-    double damp_short = d_damping_short_range(r_XB, r_vdw_AB, XB_SCUT_D, HB_ALP_D);
-    double damp_long = d_damping_long_range(r_XB, HB_LONGCUT_XB_D, HB_ALP_D);
+            double damp_short = d_damping_short_range(r_XB, r_vdw_AB, XB_SCUT_D, HB_ALP_D);
+            double damp_long = d_damping_long_range(r_XB, HB_LONGCUT_XB_D, HB_ALP_D);
 
-    double ratio_outl = (r_AX + r_XB) / r_AB;
-    double expo_outl = XB_BACUT_D * (ratio_outl - 1.0);
-    if (expo_outl > 15.0) return;
-    double damp_outl = 2.0 / (1.0 + exp(expo_outl));
+            double ratio_outl = (r_AX + r_XB) / r_AB;
+            double expo_outl = XB_BACUT_D * (ratio_outl - 1.0);
 
-    double Q_X = d_charge_scaling(q_X[tid], XB_ST_D, XB_SF_D);
-    double Q_B = d_charge_scaling(-q_B[tid], XB_ST_D, XB_SF_D);
+            if (expo_outl <= 15.0) {
+                double damp_outl = 2.0 / (1.0 + exp(expo_outl));
 
-    double r3XB = r_XB * r_XB * r_XB;
-    double R_damp = damp_short * damp_long * damp_outl / r3XB;
-    double E_XB = -R_damp * Q_B * acidity_X[tid] * Q_X;
-    atomicAdd(energy, E_XB);
+                double Q_X = d_charge_scaling(q_X[tid], XB_ST_D, XB_SF_D);
+                double Q_B = d_charge_scaling(-q_B[tid], XB_ST_D, XB_SF_D);
 
-    // ========== Gradient ==========
-    // Short-range damping derivative w.r.t. r_XB
-    double ratio_short = XB_SCUT_D * r_vdw_AB / (r_XB * r_XB);
-    double damp_short_term = 1.0;
-    for (int p = 0; p < (int)HB_ALP_D; ++p) damp_short_term *= ratio_short;
-    double ddamp_short_dr = -2.0 * HB_ALP_D * damp_short * damp_short_term
-                          / (r_XB * (1.0 + damp_short_term));
+                double r3XB = r_XB * r_XB * r_XB;
+                double R_damp = damp_short * damp_long * damp_outl / r3XB;
+                local_E = -R_damp * Q_B * acidity_X[tid] * Q_X;
 
-    // Long-range damping derivative w.r.t. r_XB
-    double ratio_long = (r_XB * r_XB) / HB_LONGCUT_XB_D;
-    double damp_long_term = 1.0;
-    for (int p = 0; p < (int)HB_ALP_D; ++p) damp_long_term *= ratio_long;
-    double ddamp_long_dr = -2.0 * HB_ALP_D * r_XB * damp_long * damp_long_term
-                         / (HB_LONGCUT_XB_D * (1.0 + damp_long_term));
+                // Gradient
+                double ratio_short = XB_SCUT_D * r_vdw_AB / (r_XB * r_XB);
+                double damp_short_term = 1.0;
+                for (int p = 0; p < (int)HB_ALP_D; ++p) damp_short_term *= ratio_short;
+                double ddamp_short_dr = -2.0 * HB_ALP_D * damp_short * damp_short_term
+                                      / (r_XB * (1.0 + damp_short_term));
 
-    // Out-of-line damping derivatives
-    double exp_term = exp(expo_outl);
-    double denom_outl = 1.0 + exp_term;
-    double ddamp_outl_drAX = -2.0 * exp_term * XB_BACUT_D / (r_AB * denom_outl * denom_outl);
-    double ddamp_outl_drXB = ddamp_outl_drAX;
-    double ddamp_outl_drAB = 2.0 * exp_term * XB_BACUT_D * (r_AX + r_XB)
-                           / (r_AB * r_AB * denom_outl * denom_outl);
+                double ratio_long = (r_XB * r_XB) / HB_LONGCUT_XB_D;
+                double damp_long_term = 1.0;
+                for (int p = 0; p < (int)HB_ALP_D; ++p) damp_long_term *= ratio_long;
+                double ddamp_long_dr = -2.0 * HB_ALP_D * r_XB * damp_long * damp_long_term
+                                     / (HB_LONGCUT_XB_D * (1.0 + damp_long_term));
 
-    // R_damp chain rule
-    double dRdamp_drXB = (ddamp_short_dr * damp_long * damp_outl
-                        + damp_short * ddamp_long_dr * damp_outl
-                        + damp_short * damp_long * ddamp_outl_drXB) / r3XB
-                       - 3.0 * R_damp / r_XB;
-    double dRdamp_drAX = damp_short * damp_long * ddamp_outl_drAX / r3XB;
-    double dRdamp_drAB = damp_short * damp_long * ddamp_outl_drAB / r3XB;
+                double exp_term = exp(expo_outl);
+                double denom_outl = 1.0 + exp_term;
+                double ddamp_outl_drAX = -2.0 * exp_term * XB_BACUT_D / (r_AB * denom_outl * denom_outl);
+                double ddamp_outl_drXB = ddamp_outl_drAX;
+                double ddamp_outl_drAB = 2.0 * exp_term * XB_BACUT_D * (r_AX + r_XB)
+                                       / (r_AB * r_AB * denom_outl * denom_outl);
 
-    double E_pf = -Q_B * acidity_X[tid] * Q_X;
-    double dE_drXB = E_pf * dRdamp_drXB;
-    double dE_drAX = E_pf * dRdamp_drAX;
-    double dE_drAB = E_pf * dRdamp_drAB;
+                double dRdamp_drXB = (ddamp_short_dr * damp_long * damp_outl
+                                    + damp_short * ddamp_long_dr * damp_outl
+                                    + damp_short * damp_long * ddamp_outl_drXB) / r3XB
+                                   - 3.0 * R_damp / r_XB;
+                double dRdamp_drAX = damp_short * damp_long * ddamp_outl_drAX / r3XB;
+                double dRdamp_drAB = damp_short * damp_long * ddamp_outl_drAB / r3XB;
 
-    double inv_rAX = 1.0 / (r_AX + 1e-14);
-    double inv_rXB = 1.0 / (r_XB + 1e-14);
-    double inv_rAB = 1.0 / (r_AB + 1e-14);
+                double E_pf = -Q_B * acidity_X[tid] * Q_X;
+                double dE_drXB = E_pf * dRdamp_drXB;
+                double dE_drAX = E_pf * dRdamp_drAX;
+                double dE_drAB = E_pf * dRdamp_drAB;
 
-    // A: dr_AX/dA = -rAX_unit, dr_AB/dA = -rAB_unit
-    double ga_x = -dE_drAX * rAX_x * inv_rAX - dE_drAB * rAB_x * inv_rAB;
-    double ga_y = -dE_drAX * rAX_y * inv_rAX - dE_drAB * rAB_y * inv_rAB;
-    double ga_z = -dE_drAX * rAX_z * inv_rAX - dE_drAB * rAB_z * inv_rAB;
-    // X: dr_AX/dX = +rAX_unit, dr_XB/dX = -rXB_unit
-    double gx_x = dE_drAX * rAX_x * inv_rAX - dE_drXB * rXB_x * inv_rXB;
-    double gx_y = dE_drAX * rAX_y * inv_rAX - dE_drXB * rXB_y * inv_rXB;
-    double gx_z = dE_drAX * rAX_z * inv_rAX - dE_drXB * rXB_z * inv_rXB;
-    // B: dr_XB/dB = +rXB_unit, dr_AB/dB = +rAB_unit
-    double gb_x = dE_drXB * rXB_x * inv_rXB + dE_drAB * rAB_x * inv_rAB;
-    double gb_y = dE_drXB * rXB_y * inv_rXB + dE_drAB * rAB_y * inv_rAB;
-    double gb_z = dE_drXB * rXB_z * inv_rXB + dE_drAB * rAB_z * inv_rAB;
+                double inv_rAX = 1.0 / (r_AX + 1e-14);
+                double inv_rXB = 1.0 / (r_XB + 1e-14);
+                double inv_rAB = 1.0 / (r_AB + 1e-14);
 
-    add_grad(grad, A, ga_x, ga_y, ga_z);
-    add_grad(grad, X, gx_x, gx_y, gx_z);
-    add_grad(grad, B, gb_x, gb_y, gb_z);
+                add_grad(grad, A, -dE_drAX * rAX_x * inv_rAX - dE_drAB * rAB_x * inv_rAB,
+                                  -dE_drAX * rAX_y * inv_rAX - dE_drAB * rAB_y * inv_rAB,
+                                  -dE_drAX * rAX_z * inv_rAX - dE_drAB * rAB_z * inv_rAB);
+                add_grad(grad, X, dE_drAX * rAX_x * inv_rAX - dE_drXB * rXB_x * inv_rXB,
+                                  dE_drAX * rAX_y * inv_rAX - dE_drXB * rXB_y * inv_rXB,
+                                  dE_drAX * rAX_z * inv_rAX - dE_drXB * rXB_z * inv_rXB);
+                add_grad(grad, B, dE_drXB * rXB_x * inv_rXB + dE_drAB * rAB_x * inv_rAB,
+                                  dE_drXB * rXB_y * inv_rXB + dE_drAB * rAB_y * inv_rAB,
+                                  dE_drXB * rXB_z * inv_rXB + dE_drAB * rAB_z * inv_rAB);
+            }
+        }
+    }
+
+    blockReduceAddEnergy(local_E, energy);
 }
 
 // ============================================================================
@@ -1465,7 +1456,9 @@ __global__ void k_hbonds(
     double*                    energy)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
+    double local_E = 0.0;
+
+    if (tid < n) {
 
     // Constants
     const double HB_SCUT_D = 22.0;
@@ -1497,7 +1490,8 @@ __global__ void k_hbonds(
     double r2AB = rAB_x*rAB_x + rAB_y*rAB_y + rAB_z*rAB_z;
 
     double r_AH = sqrt(r2AH), r_HB = sqrt(r2HB), r_AB = sqrt(r2AB);
-    if (r_AB > r_cut[tid] || r_AB < 1e-10) return;
+
+    if (r_AB <= r_cut[tid] && r_AB >= 1e-10) {
 
     double r_AH_4 = r2AH * r2AH;
     double r_HB_4 = r2HB * r2HB;
@@ -1521,7 +1515,8 @@ __global__ void k_hbonds(
     // Out-of-line damping
     double rahprbh = r_AH + r_HB + 1e-12;
     double expo = (HB_BACUT_D / r_vdw_AB) * (rahprbh / r_AB - 1.0);
-    if (expo > 15.0) return;
+
+    if (expo <= 15.0) {
     double damp_outl = 2.0 / (1.0 + exp(expo));
 
     // Neighbor out-of-line (Case >= 2)
@@ -1649,7 +1644,7 @@ __global__ void k_hbonds(
     } else {
         E_HB = -bas * aci * rdamp * qhoutl;
     }
-    atomicAdd(energy, E_HB);
+    local_E = E_HB;
 
     // ========== Gradient ==========
     // Full analytical gradient matching CPU calcHydrogenBonds
@@ -1961,6 +1956,12 @@ __global__ void k_hbonds(
     add_grad(grad, A, ga_x, ga_y, ga_z);
     add_grad(grad, B, gb_x, gb_y, gb_z);
     add_grad(grad, H, gh_x, gh_y, gh_z);
+
+    } // expo <= 15.0
+    } // r_AB in range
+    } // tid < n
+
+    blockReduceAddEnergy(local_E, energy);
 }
 
 // ============================================================================
