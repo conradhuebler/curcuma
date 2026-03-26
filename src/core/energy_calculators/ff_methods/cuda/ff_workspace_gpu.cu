@@ -1827,3 +1827,16 @@ int FFWorkspaceGPU::bondCount() const
 {
     return m_impl ? m_impl->bonds.n : 0;
 }
+
+// Claude Generated (March 2026): Expose device coords for EEQSolverGPU
+const double* FFWorkspaceGPU::getDeviceCoordsPtr() const
+{
+    return m_impl ? m_impl->d_coords.ptr : nullptr;
+}
+
+// Claude Generated (March 2026): Explicit sync for cross-stream safety
+void FFWorkspaceGPU::synchronizeMainStream()
+{
+    if (m_impl && m_impl->stream)
+        checkCuda(cudaStreamSynchronize(m_impl->stream), "synchronizeMainStream");
+}

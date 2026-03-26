@@ -325,6 +325,14 @@ public:
     /// Number of bond pairs uploaded to GPU
     int bondCount() const;
 
+    /// Device pointer to [3*N] coordinate array (Bohr, row-major x,y,z per atom)
+    /// Claude Generated (March 2026): Exposes GPU coords for EEQSolverGPU
+    const double* getDeviceCoordsPtr() const;
+
+    /// Synchronize main stream to ensure all prior uploads (coords, CN) are visible.
+    /// Claude Generated (March 2026): Required before cross-stream reads (e.g. EEQSolverGPU).
+    void synchronizeMainStream();
+
 private:
     std::unique_ptr<FFWorkspaceGPUImpl> m_impl;
 

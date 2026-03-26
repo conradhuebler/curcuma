@@ -670,7 +670,7 @@ void GFNFF::updateDynamicState(TopologyInfo& topo) const {
 // Claude Generated (March 2026): Exposed for GPU orchestration
 // ---------------------------------------------------------------------------
 
-void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external_cn)
+void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external_cn, bool skip_eeq)
 {
     // Claude Generated (March 2026): GPU path uses memcpy into pre-allocated vectors
     // to avoid Eigen heap allocations (CUDA corrupts heap metadata after init).
@@ -756,7 +756,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         }
 
         Vector new_charges;
-        if (do_eeq) {
+        if (do_eeq && !skip_eeq) {
             new_charges = m_eeq_solver->calculateFinalCharges(
                 m_atoms, m_geometry_bohr, m_charge,
                 topo_ptr->topology_charges, m_last_cn,
@@ -780,7 +780,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             }
         }
 
-        if (do_eeq && new_charges.size() == m_atomcount) {
+        if (do_eeq && !skip_eeq && new_charges.size() == m_atomcount) {
             if (!gpu_only) {
                 if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
                 if (m_workspace) m_workspace->setEEQCharges(new_charges);
@@ -801,7 +801,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 
         if (!gpu_only && m_forcefield) m_forcefield->distributeCNOnly(m_last_cn);
 
-        if (do_eeq) {
+        if (do_eeq && !skip_eeq) {
             Vector new_charges = m_eeq_solver->calculateFinalCharges(
                 m_atoms, m_geometry_bohr, m_charge,
                 topo_ptr->topology_charges, m_last_cn,
@@ -824,6 +824,83 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     if (m_skip_eeq_recalc && CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Phase-2 EEQ recalculation SKIPPED (charge injection mode)");
     }
+}
+
+// ---------------------------------------------------------------------------
+// prepareEEQParametersForGPU — O(N) parameter extraction for GPU EEQ solver
+// Claude Generated (March 2026): GPU EEQ Phase 7
+// ---------------------------------------------------------------------------
+
+GFNFF::EEQGPUParams GFNFF::prepareEEQParametersForGPU(const Vector& cn) const
+{
+    const int N = m_atomcount;
+    const TopologyInfo& topo = getCachedTopology();
+
+    EEQGPUParams params;
+    params.alpha_corrected.resize(N);
+    params.gam_corrected.resize(N);
+    params.rhs_atoms.resize(N);
+    params.nfrag = topo.nfrag;
+    params.fraglist = topo.fraglist;
+
+    // Fragment target charges
+    params.rhs_constraints.resize(topo.nfrag);
+    for (int f = 0; f < topo.nfrag; ++f) {
+        params.rhs_constraints[f] = (f < static_cast<int>(topo.qfrag.size()))
+                                      ? topo.qfrag[f]
+                                      : (f == 0 ? static_cast<double>(m_charge) : 0.0);
+    }
+
+    // Per-atom parameter extraction (O(N))
+    // Reference: EEQSolver::calculateFinalCharges() lines 2275-2405
+    for (int i = 0; i < N; ++i) {
+        int z = m_atoms[i];
+
+        // alpha_corrected: use pre-computed charge-dependent alpha² from topology
+        // (computed once at initialization: alpeeq(i) = (alpha_base + ff*qa(i))²)
+        // Reference: Fortran gfnff_ini.f90:718-725
+        if (i < topo.alpeeq.size()) {
+            params.alpha_corrected[i] = topo.alpeeq(i);
+        } else {
+            double alpha_base = (z >= 1 && z <= static_cast<int>(GFNFFParameters::alpha_eeq.size()))
+                                  ? GFNFFParameters::alpha_eeq[z - 1] : 0.903430;
+            params.alpha_corrected[i] = alpha_base * alpha_base;
+        }
+
+        // gam_corrected: gam_base + dgam
+        double gam_base = (i < static_cast<int>(topo.eeq_gam.size()))
+                            ? topo.eeq_gam[i]
+                            : ((z >= 1 && z <= static_cast<int>(GFNFFParameters::gam_eeq.size()))
+                                 ? GFNFFParameters::gam_eeq[z - 1] : 0.5);
+        double dgam_i = (i < topo.dgam.size()) ? topo.dgam(i) : 0.0;
+        params.gam_corrected[i] = gam_base + dgam_i;
+
+        // rhs_atoms: -chi + dxi + cnf*sqrt(cn)
+        // Reference: Fortran gfnff_engrad.F90:1504
+        //   x(i) = topo%chieeq(i) + param%cnf(at(i))*sqrt(cn(i))
+        //   where chieeq = -chi + dxi (gfnff_ini.f90:696 for Phase 2)
+        double chi_base = (i < static_cast<int>(topo.eeq_chi.size()))
+                            ? topo.eeq_chi[i]
+                            : ((z >= 1 && z <= static_cast<int>(GFNFFParameters::chi_eeq.size()))
+                                 ? GFNFFParameters::chi_eeq[z - 1] : 0.0);
+        double dxi_i = (i < topo.dxi.size()) ? topo.dxi(i) : 0.0;
+        double cnf_i = (i < static_cast<int>(topo.eeq_cnf.size()))
+                          ? topo.eeq_cnf[i]
+                          : ((z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
+                               ? GFNFFParameters::cnf_eeq[z - 1] : 0.0);
+
+        double chi_corrected = -chi_base + dxi_i;
+
+        // Amide hydrogen correction (gfnff_ini.f90:717)
+        if (z == 1 && i < static_cast<int>(topo.is_amide_h.size()) && topo.is_amide_h[i]) {
+            chi_corrected -= 0.02;
+        }
+
+        double cn_i = (i < cn.size()) ? cn(i) : 0.0;
+        params.rhs_atoms[i] = chi_corrected + cnf_i * std::sqrt(std::max(cn_i, 0.0));
+    }
+
+    return params;
 }
 
 // ---------------------------------------------------------------------------

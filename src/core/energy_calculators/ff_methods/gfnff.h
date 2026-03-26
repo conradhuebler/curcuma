@@ -514,7 +514,30 @@ public:
      * @param external_cn  If non-null, use these CN values instead of computing on CPU.
      *                     Claude Generated (March 2026): Enables GPU CN bypass.
      */
-    void prepareCNAndEEQ(bool gradient, bool gpu_only = false, const Vector* external_cn = nullptr);
+    void prepareCNAndEEQ(bool gradient, bool gpu_only = false, const Vector* external_cn = nullptr, bool skip_eeq = false);
+
+    /**
+     * @brief Extract EEQ parameters for GPU solver (O(N) CPU work only)
+     *
+     * Claude Generated (March 2026): GPU EEQ Phase 7 — parameter extraction.
+     * Computes dxi, dgam, alpha_corrected, gam_corrected, rhs_atoms from
+     * cached topology and current CN. No matrix build or solve — that's done
+     * on GPU by EEQSolverGPU.
+     *
+     * Must be called AFTER prepareCNAndEEQ(gradient, gpu_only=true, cn, skip_eeq=true).
+     *
+     * @param cn Current coordination numbers (from GPU or CPU)
+     * @return EEQGPUParams struct with all arrays for GPU solver
+     */
+    struct EEQGPUParams {
+        std::vector<double> alpha_corrected;  ///< [N] charge-corrected alpha² values
+        std::vector<double> gam_corrected;    ///< [N] corrected hardness
+        std::vector<double> rhs_atoms;        ///< [N] electronegativity RHS: -chi + dxi + cnf*sqrt(cn)
+        std::vector<double> rhs_constraints;  ///< [nfrag] target charges per fragment
+        std::vector<int>    fraglist;         ///< [N] fragment ID per atom (1-indexed)
+        int nfrag = 1;                        ///< Number of molecular fragments
+    };
+    EEQGPUParams prepareEEQParametersForGPU(const Vector& cn) const;
 
     /**
      * @brief Re-detect HB/XB pairs if geometry has changed enough (RMSD > 0.3 Bohr).
@@ -532,6 +555,19 @@ public:
     const Vector& getLastCN() const { return m_last_cn; }
     const Vector& getLastCharges() const { return m_charges; }
     const Matrix& getGeometryBohr() const { return m_geometry_bohr; }
+
+    /**
+     * @brief Store GPU-computed charges via memcpy (no Eigen heap alloc, no ForceField distribution).
+     * Claude Generated (March 2026): Safe for GPU path where CUDA corrupts heap metadata.
+     * Requires preAllocateForGPUPath() called first (m_charges pre-sized).
+     * @param data  Pointer to N doubles
+     * @param n     Number of atoms (must match m_charges.size())
+     */
+    void storeChargesFromGPU(const double* data, int n)
+    {
+        if (n == m_charges.size())
+            std::memcpy(m_charges.data(), data, n * sizeof(double));
+    }
     const std::vector<SpMatrix>& getLastCNDerivatives() const { return m_last_dcn; }
     const Vector& getLastCNF() const { return m_last_cnf; }
     const Matrix* getDC6DCNPtr() const { return m_d4_generator ? &m_d4_generator->getDC6DCN() : nullptr; }

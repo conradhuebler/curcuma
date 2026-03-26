@@ -677,12 +677,13 @@ if(USE_CUDA)
     find_package(CUDAToolkit REQUIRED)
     set(CMAKE_CUDA_STANDARD 17)
     # Target: Pascal(6.0), Volta(7.0), Turing(7.5), Ampere(8.0/8.6), Ada(8.9)
-    set(CMAKE_CUDA_ARCHITECTURES "60;70;75;80;86" CACHE STRING "CUDA architectures")
+    set(CMAKE_CUDA_ARCHITECTURES "60;70;75;80;86;89;120" CACHE STRING "CUDA architectures")
 
     # CUDA source files - compiled as part of curcuma_core
     set(CUDA_SOURCES
         src/core/energy_calculators/ff_methods/cuda/gfnff_kernels.cu
         src/core/energy_calculators/ff_methods/cuda/ff_workspace_gpu.cu
+        src/core/energy_calculators/ff_methods/cuda/eeq_solver_gpu.cu
         src/core/energy_calculators/qm_methods/ggfnff_method.cpp
     )
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY LANGUAGE CUDA)
@@ -691,7 +692,7 @@ if(USE_CUDA)
     # Add CUDA sources to curcuma_core
     target_sources(curcuma_core PRIVATE ${CUDA_SOURCES})
     target_include_directories(curcuma_core PRIVATE ${PROJECT_SOURCE_DIR})
-    target_link_libraries(curcuma_core CUDA::cudart)
+    target_link_libraries(curcuma_core CUDA::cudart CUDA::cusolver)
     target_compile_definitions(curcuma_core PUBLIC USE_CUDA)
 
     message(STATUS "CUDA support enabled: ggfnff method available")

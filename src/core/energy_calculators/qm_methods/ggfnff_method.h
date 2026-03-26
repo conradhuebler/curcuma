@@ -16,6 +16,7 @@
 #include "../computational_method.h"
 #include "../ff_methods/gfnff.h"
 #include "../ff_methods/cuda/ff_workspace_gpu.h"
+#include "../ff_methods/cuda/eeq_solver_gpu.h"
 
 #include <memory>
 
@@ -104,6 +105,14 @@ private:
     // TODO: Investigate CUDA driver heap corruption root cause.
     GFNFFParameterSet*              m_gpu_params_leaked = nullptr;
     std::unique_ptr<FFWorkspaceGPU> m_gpu_workspace;
+
+    // Claude Generated (March 2026): GPU EEQ solver (cuSOLVER Cholesky)
+    std::unique_ptr<EEQSolverGPU>   m_eeq_gpu;
+
+    // Pre-allocated buffers for GPU EEQ Schur complement (avoid per-step heap allocs)
+    std::vector<double> m_eeq_z1;           ///< [N] A⁻¹ · b_atoms
+    std::vector<double> m_eeq_Z2;           ///< [N*nfrag] A⁻¹ · C^T (column-major)
+    std::vector<double> m_eeq_charges_gpu;  ///< [N] final charges from GPU path
 
     json             m_parameters;
     std::string      m_method_name;
