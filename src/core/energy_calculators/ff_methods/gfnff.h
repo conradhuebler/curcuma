@@ -2009,6 +2009,9 @@ private:
     mutable bool m_static_topology_valid = false;       // True if static topology is current
     mutable std::optional<std::vector<std::pair<int,int>>> m_cached_bond_list;
 
+    // Topology caching mode: "auto" (two-tier caching) or "constant" (never recalculate)
+    std::string m_topology_mode = "auto";
+
     // Check if geometry change warrants full topology recalculation (vs just dynamic state)
     bool needsFullTopologyUpdate(const Eigen::MatrixXd& geometry_bohr) const;
 

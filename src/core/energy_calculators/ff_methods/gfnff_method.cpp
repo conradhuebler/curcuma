@@ -308,10 +308,14 @@ GFNFF::GFNFF(const json& parameters)
         { "dispersion", true },  // Claude Generated: GFN-FF uses D4 dispersion (Spicher & Grimme 2020)
         { "hbond", true },
         { "repulsion_scaling", 1.0 },
-        { "solvent", "none" }  // Claude Generated (Mar 2026): ALPB solvation
+        { "solvent", "none" },  // Claude Generated (Mar 2026): ALPB solvation
+        { "topology_mode", "auto" }  // "auto" (two-tier caching) or "constant" (never recalculate)
     };
 
     m_parameters = MergeJson(default_parameters, parameters);
+
+    // Extract topology mode
+    m_topology_mode = m_parameters.value("topology_mode", "auto");
 
     // Initialize EEQ solver (Dec 2025 - Phase 3)
     // CRITICAL FIX (Dec 25, 2025): Pass global CurcumaLogger verbosity to EEQSolver
@@ -470,7 +474,16 @@ bool GFNFF::UpdateMolecule()
 // ---------------------------------------------------------------------------
 
 const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
-    // Two-tier caching (March 2026):
+    // Constant topology mode: always return cached topology after first calculation
+    // Useful for MD/optimization where bond connectivity never changes
+    if (m_topology_mode == "constant" && m_cached_topology) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("GFNFF: Using constant topology (mode=constant)");
+        }
+        return *m_cached_topology;
+    }
+
+    // Auto mode: two-tier caching (March 2026)
     // Tier 1: Static topology (bonds, rings, hybridization) - recalc on large geometry change
     // Tier 2: Dynamic state (CN, distances) - recalc on any geometry change
 
