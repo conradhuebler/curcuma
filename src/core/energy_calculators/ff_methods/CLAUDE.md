@@ -558,6 +558,32 @@ std::string method = "d4";  // Matches Fortran reference
 - Consistency: Same D3 accuracy for both UFF-D3 and GFN-FF
 - Maintainability: Single D3 implementation to validate and update
 
+## GPU Pipeline (cuda/)
+
+### ✅ Phase 1+2: GPU CN + GPU dc6dcn (March 2026)
+- GPU CN computation replaces CPU O(N²) erf() loop
+- GPU dc6dcn per-pair kernel replaces CPU O(N²) matrix + extraction
+
+### ✅ Phase 3+4: CPU/GPU Overlap + Sync Removal (March 2026)
+- `prepareAndLaunchChargeIndependent()` launches ~12 charge-independent kernels while CPU EEQ runs
+- `launchChargeDependentAndFinish()` uploads EEQ charges, launches Coulomb + postprocess, downloads
+- k_dispersion deferred to charge-dependent phase when `gradient=true` (needs dc6dcn from post-EEQ)
+- Removed unnecessary `cudaStreamSynchronize` in `computeDC6DCNOnGPU`
+- Relaxed postprocess stream dependencies: k_coulomb_self has no stream wait, k_subtract_qtmp waits pairwise+bonded only
+
+### ⏳ Phase 5: Shared Memory Energy Reduction (planned)
+- Block-level reduction with shared memory instead of per-thread atomicAdd
+- Target: k_dispersion, k_repulsion, k_coulomb, k_angles, k_dihedrals, k_bonds
+- Expected 5-10% kernel time reduction (66 atoms), 20-40% (500+ atoms)
+
+### ⏳ Phase 6: GPU Gaussian Weights + Async DMA (planned, lowest priority)
+- Move Gaussian weight computation to GPU kernel (eliminates CPU O(N*MAX_REF) + H2D upload)
+- Async energy/gradient download
+
+### ⚠️ Known Issues
+- ggfnff GPU validation tests (test_ggfnff) fail with JSON null error — pre-existing, unrelated to pipeline
+- k_dispersion cannot overlap with EEQ in gradient mode (dc6dcn dependency)
+
 ## Open Bugs
 
 ### ⚠️ Dead Code: `assignAtomsForSelfEnergy()`

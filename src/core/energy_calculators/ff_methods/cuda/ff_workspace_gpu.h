@@ -250,6 +250,46 @@ public:
     double calculate(bool gradient);
 
     // =========================================================================
+    // Phase 3: Split calculation for CPU/GPU overlap (Claude Generated March 2026)
+    //
+    // Architecture: Allows the O(N³) EEQ solver on CPU to run in parallel with
+    // charge-independent GPU kernels. Only k_coulomb, k_coulomb_self, and
+    // k_subtract_qtmp require EEQ charges — everything else can fire immediately.
+    //
+    // Usage (in ggfnff_method.cpp):
+    //   gpu->setGeometry(geom);
+    //   gpu->computeCN(atom_types);
+    //   gpu->setD3CN(cn);
+    //   gpu->prepareAndLaunchChargeIndependent(gradient);  // fire-and-forget
+    //   // ... CPU EEQ runs here in parallel ...
+    //   gpu->setEEQCharges(charges);
+    //   energy = gpu->launchChargeDependentAndFinish(gradient);
+    // =========================================================================
+
+    /**
+     * @brief Zero accumulators, upload CN/geometry, launch all charge-independent kernels.
+     *
+     * Launches on 3 streams: dispersion+repulsion (sA), bonds+angles+dihedrals+
+     * inversions+storsions+hb_alpha (sB), batm+atm+xbonds+hbonds (sC).
+     * Does NOT upload or use EEQ charges. Returns immediately (non-blocking).
+     *
+     * @param gradient  If true, kernels compute gradient contributions
+     */
+    void prepareAndLaunchChargeIndependent(bool gradient);
+
+    /**
+     * @brief Upload EEQ charges, launch charge-dependent kernels, download results.
+     *
+     * Waits for charge-independent kernels to complete (via stream events),
+     * then launches k_coulomb, k_coulomb_self, k_subtract_qtmp, k_cn_chainrule.
+     * Downloads energy and gradient. Blocking call.
+     *
+     * @param gradient  If true, compute and download gradient
+     * @return Total GFN-FF energy in Hartree
+     */
+    double launchChargeDependentAndFinish(bool gradient);
+
+    // =========================================================================
     // Results
     // =========================================================================
 

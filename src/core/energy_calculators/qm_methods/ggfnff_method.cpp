@@ -174,64 +174,53 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    // === Step 1: GPU CN + CPU EEQ ===
-    // Claude Generated (March 2026): Compute CN on GPU, pass to EEQ on CPU.
-    // Eliminates O(N²) CPU erf() loop — biggest per-step bottleneck.
-    // All CN data flows through pinned buffer → pre-allocated Vector (no heap allocs).
-    m_gpu_workspace->setGeometry(m_gfnff->getGeometryBohr());
+    // === Phase 3: CPU/GPU Overlap Architecture (Claude Generated March 2026) ===
+    //
+    // Pipeline:
+    //   1. GPU: computeCN → sync (need CN for EEQ)
+    //   2. CPU: prepareCNAndEEQ (O(N³) EEQ solver)
+    //      GPU: charge-independent kernels run in parallel (dispersion, repulsion,
+    //           bonds, angles, dihedrals, inversions, storsions, hbonds, batm, atm, xbonds)
+    //   3. CPU done → upload EEQ charges → launch Coulomb + postprocess → download
+    //
+    // This overlaps the expensive EEQ solver with ~12 GPU kernels that don't need charges.
+
+    const int N = static_cast<int>(m_atom_types.size());
+    const Matrix& geom_bohr = m_gfnff->getGeometryBohr();
+
+    // --- Step 1: GPU CN computation ---
+    m_gpu_workspace->setGeometry(geom_bohr);
     m_gpu_workspace->computeCN(m_atom_types);
 
-    // Copy CN from pinned buffer into pre-allocated Vector (allocated before CUDA init)
-    const int N = static_cast<int>(m_atom_types.size());
+    // Copy CN from pinned buffer into pre-allocated Vector (no heap allocs)
     std::memcpy(m_gpu_cn_final.data(), m_gpu_workspace->getCNPinnedBuffer(), N * sizeof(double));
 
-    // Pass GPU CN to prepareCNAndEEQ — skips CNCalculator::calculateGFNFFCN() entirely
-    m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final);
-    const Vector& cn = m_gfnff->getLastCN();
-    auto t1 = std::chrono::high_resolution_clock::now();
+    // Pass GPU CN to prepareCNAndEEQ — but DON'T call EEQ yet, first launch GPU kernels
+    // prepareCNAndEEQ does: Gaussian weights, EEQ solve, weight derivatives, dc6dcn
+    // We need CN uploaded to GPU before launching charge-independent kernels.
+    m_gpu_workspace->setD3CN(m_gpu_cn_final);
 
-    // === Step 2: Distribute state to GPU workspace ===
-    const Matrix& geom_bohr = m_gfnff->getGeometryBohr();
-    const Vector& charges = m_gfnff->getLastCharges();
-
-    m_gpu_workspace->setGeometry(geom_bohr);
-    m_gpu_workspace->setD3CN(cn);
-    m_gpu_workspace->setEEQCharges(charges);
-
+    // --- Step 2a: Set up gradient state (CN pairs, dlogdcn, dc6dcn) ---
+    // These must happen before launching charge-independent kernels because
+    // k_dispersion needs dc6dcn and k_bonds needs d_cn.
     if (gradient) {
-        const Vector& cnf = m_gfnff->getLastCNF();
-
-        // GPU CN chain-rule: pair list + dlogdcn (replaces sparse dcn matrices)
-        // Generate CN pair list once (first call with gradient).
-        // The cutoff (2.5× rcov) is generous enough for short MD runs.
         if (!m_cn_pairs_generated) {
             generateCNPairList(geom_bohr);
             m_gpu_workspace->setCNPairList(m_cn_pair_i, m_cn_pair_j, m_cn_pair_rcov);
         }
 
-        // Compute dlogdcn = dCN_squashed/dCN_raw (logistic squashing derivative)
+        // Compute dlogdcn (logistic squashing derivative) — needed for CN chain-rule
         constexpr double cnmax = 4.4;
         const double lncnmax = std::log(1.0 + std::exp(cnmax));
-        const int N = static_cast<int>(cn.size());
         Vector dlogdcn(N);
         for (int i = 0; i < N; ++i) {
-            double expval = std::exp(lncnmax - cn[i]);
+            double expval = std::exp(lncnmax - m_gpu_cn_final[i]);
             dlogdcn[i] = (expval - 1.0) / expval;
         }
         m_gpu_workspace->setDlogDCN(dlogdcn);
-        m_gpu_workspace->setCNDerivatives(cn, cnf, {});
-
-        // Phase 2: Compute dc6/dcn per pair directly on GPU (replaces CPU O(N²) matrix)
-        D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
-        if (d4) {
-            m_gpu_workspace->computeDC6DCNOnGPU(d4->getGaussianWeights(),
-                                                  d4->getGaussianWeightDerivatives());
-        }
     }
 
-    // === Step 2b: Compute per-bond HB coordination numbers ===
-    // Reference: ff_workspace_gfnff.cpp:46-97 (computeHBCoordinationNumbers)
-    // egbond_hb: Modified exponent for X-H bonds in hydrogen bonding
+    // --- Step 2b: Compute per-bond HB coordination numbers ---
     if (m_gpu_params_leaked && !m_gpu_params_leaked->bond_hb_data.empty()) {
         static const std::vector<double>& rcov_base = GFNFFParameters::covalent_rad_d3;
         constexpr double rcov_43 = 4.0 / 3.0;
@@ -239,7 +228,6 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
         constexpr double rcov_scal = 1.78;
         constexpr double thr = 900.0;
 
-        // Reuse pre-allocated vector (no heap allocs on corrupted heap)
         std::fill(m_hb_cn_per_atom.begin(), m_hb_cn_per_atom.end(), 0.0);
         for (const auto& entry : m_gpu_params_leaked->bond_hb_data) {
             int H = entry.H;
@@ -273,32 +261,52 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
         m_gpu_workspace->updateBondHBCN(m_hb_cn_values);
     }
 
-    auto t2 = std::chrono::high_resolution_clock::now();
-
-    // === Step 3: Dynamic HB/XB re-detection ===
+    // --- Step 2c: Dynamic HB/XB re-detection (must happen before kernel launch) ---
     m_gfnff->updateHBXBIfNeeded(nullptr);
-
-    // If HB/XB lists changed, re-upload SoA to GPU workspace
     if (m_gfnff->consumeHBXBUpdate()) {
         m_gpu_workspace->updateHBonds(m_gfnff->getLastHBonds(), m_atom_types);
         m_gpu_workspace->updateXBonds(m_gfnff->getLastXBonds(), m_atom_types);
     }
-    auto t3 = std::chrono::high_resolution_clock::now();
 
-    // === Step 4: Calculate — all terms on GPU ===
-    m_last_energy = m_gpu_workspace->calculate(gradient);
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    // === OVERLAP: Launch charge-independent GPU kernels ===
+    // These run asynchronously while CPU computes EEQ charges below.
+    m_gpu_workspace->prepareAndLaunchChargeIndependent(gradient);
+
+    // === CPU: EEQ solver + Gaussian weights (runs in parallel with GPU kernels) ===
+    m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final);
+    const Vector& cn = m_gfnff->getLastCN();
+    const Vector& charges = m_gfnff->getLastCharges();
+
+    // Upload dc6dcn for dispersion gradient (computed from Gaussian weights in prepareCNAndEEQ)
+    if (gradient) {
+        const Vector& cnf = m_gfnff->getLastCNF();
+        m_gpu_workspace->setCNDerivatives(cn, cnf, {});
+
+        D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
+        if (d4) {
+            m_gpu_workspace->computeDC6DCNOnGPU(d4->getGaussianWeights(),
+                                                  d4->getGaussianWeightDerivatives());
+        }
+    }
+
+    auto t2 = std::chrono::high_resolution_clock::now();
+
+    // === Upload EEQ charges and finish: Coulomb + postprocess + download ===
+    m_gpu_workspace->setEEQCharges(charges);
+    m_last_energy = m_gpu_workspace->launchChargeDependentAndFinish(gradient);
     auto t4 = std::chrono::high_resolution_clock::now();
 
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::energy_abs(m_last_energy, "GFN-FF (GPU) Energy");
 
-        double ms_cneeq  = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        double ms_upload  = std::chrono::duration<double, std::milli>(t2 - t1).count();
-        double ms_hbxb   = std::chrono::duration<double, std::milli>(t3 - t2).count();
-        double ms_gpu    = std::chrono::duration<double, std::milli>(t4 - t3).count();
-        double ms_total  = std::chrono::duration<double, std::milli>(t4 - t0).count();
-        CurcumaLogger::result_fmt("GFN-FF (GPU) Timing: CN+EEQ={:.1f}ms Upload+HBCN={:.1f}ms HB/XB={:.1f}ms GPU={:.1f}ms Total={:.1f}ms",
-                                   ms_cneeq, ms_upload, ms_hbxb, ms_gpu, ms_total);
+        double ms_prep    = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        double ms_overlap = std::chrono::duration<double, std::milli>(t2 - t1).count();
+        double ms_finish  = std::chrono::duration<double, std::milli>(t4 - t2).count();
+        double ms_total   = std::chrono::duration<double, std::milli>(t4 - t0).count();
+        CurcumaLogger::result_fmt("GFN-FF (GPU) Timing: CN+Prep={:.1f}ms EEQ||GPU={:.1f}ms Coul+Fin={:.1f}ms Total={:.1f}ms",
+                                   ms_prep, ms_overlap, ms_finish, ms_total);
     }
 
     // Energy decomposition at verbosity 2+
@@ -435,9 +443,8 @@ void GGFNFFComputationalMethod::generateCNPairList(const Matrix& geom_bohr)
     const int N = static_cast<int>(geom_bohr.rows());
     const auto& rcov_d3 = GFNFFParameters::covalent_rad_d3;
     constexpr double rcov_scale = 4.0 / 3.0;
-    constexpr double kn = -7.5;
 
-    // Cutoff: where exp(-kn^2 * dr^2) < 1e-12 → |dr| > 1.2 → r > 2.2 * rcov_sum
+    // Cutoff: where exp(-kn^2 * dr^2) < 1e-12 (kn=-7.5) → |dr| > 1.2 → r > 2.2 * rcov_sum
     constexpr double cutoff_factor = 2.5;
 
     m_cn_pair_i.clear();

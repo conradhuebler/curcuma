@@ -1099,15 +1099,28 @@ void FFWorkspaceGPU::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& 
         impl.disp.dc6dcn_ji.ptr
     );
 
-    // Ensure dc6dcn is ready before k_dispersion uses it
-    cudaStreamSynchronize(impl.stream);
+    // No sync needed here: k_dc6dcn_per_pair runs on impl.stream (main stream).
+    // launchChargeDependentAndFinish() does cudaStreamWaitEvent(stream_pairwise, stream)
+    // before launching k_dispersion, which guarantees dc6dcn is ready.
+    // Phase 4a: Removed unnecessary cudaStreamSynchronize (Claude Generated March 2026)
 }
 
 // ============================================================================
-// calculate() — main entry point
+// Phase 3: Split calculation for CPU/GPU overlap
+// Claude Generated (March 2026)
+//
+// prepareAndLaunchChargeIndependent() — zeros accumulators, uploads CN+geometry+
+//   topology charges, launches ALL charge-independent kernels (everything except
+//   k_coulomb, k_coulomb_self, k_subtract_qtmp). Non-blocking.
+//
+// launchChargeDependentAndFinish() — uploads EEQ charges, launches Coulomb +
+//   postprocess kernels, downloads results. Blocking.
+//
+// The original calculate() is preserved for backward compatibility and calls
+// both methods in sequence.
 // ============================================================================
 
-double FFWorkspaceGPU::calculate(bool gradient)
+void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
 {
     auto& impl = *m_impl;
     const int N = m_natoms;
@@ -1120,60 +1133,48 @@ double FFWorkspaceGPU::calculate(bool gradient)
     cudaMemsetAsync(impl.d_energy.ptr, 0, sizeof(double),         stream);
     cudaMemsetAsync(impl.d_grad.ptr,   0, 3*N*sizeof(double),     stream);
     cudaMemsetAsync(impl.d_dEdcn.ptr,  0, N*sizeof(double),       stream);
-    // Zero all per-term energy accumulators in single call
     cudaMemsetAsync(impl.d_energies.ptr, 0,
                     FFWorkspaceGPUImpl::N_ENERGY_SLOTS * sizeof(double), stream);
 
     // =========================================================================
-    // 2. Upload per-step charges and CN
+    // 2. Upload CN and topology charges (NOT EEQ charges — those come later)
     //    Geometry was already uploaded by setGeometry() before this call.
-    //    d_coords is valid on the GPU at this point.
     // =========================================================================
-
-    // Upload EEQ charges
-    if (m_eeq_charges.size() == N) {
-        impl.d_charges.upload(m_eeq_charges.data(), N, stream);
-    }
-
-    // Upload D3 CN
     if (m_cn.size() == N) {
         impl.d_cn.upload(m_cn.data(), N, stream);
     }
-
-    // Upload topology charges (used by BATM kernel)
     if (m_topology_charges.size() == N) {
         impl.d_topo_charges.upload(m_topology_charges.data(), N, stream);
     }
 
     // =========================================================================
-    // 3. Launch CUDA kernels on parallel streams
-    // Claude Generated (March 2026): Multi-stream concurrency for better GPU utilization
-    //   Stream A (pairwise):  dispersion, repulsion×2, coulomb
-    //   Stream B (bonded):    bonds, angles, dihedrals, inversions, storsions, hb_alpha
-    //   Stream C (3-body):    batm, atm, xbonds, hbonds
-    // All kernels use atomicAdd on shared grad/dEdcn — safe for concurrent execution.
+    // 3. Launch charge-independent kernels on parallel streams
+    //    These kernels do NOT read d_charges (EEQ). They use only coords, CN,
+    //    topology charges, and static SoA parameters.
     // =========================================================================
     cudaStream_t sA = impl.stream_pairwise;
     cudaStream_t sB = impl.stream_bonded;
     cudaStream_t sC = impl.stream_threebody;
 
     // Ensure all uploads on main stream are visible to worker streams
-    // Claude Generated (March 2026): Reuse pre-allocated event (no per-call create/destroy)
     cudaEventRecord(impl.event_upload, stream);
     cudaStreamWaitEvent(sA, impl.event_upload, 0);
     cudaStreamWaitEvent(sB, impl.event_upload, 0);
     cudaStreamWaitEvent(sC, impl.event_upload, 0);
 
-    // --- Stream A: Pairwise terms (dispersion, repulsion, coulomb) ---
-    if (m_dispersion_enabled && impl.disp.n > 0) {
+    // --- Stream A: Charge-independent pairwise terms (dispersion, repulsion) ---
+    // NOTE: When gradient=true, k_dispersion is DEFERRED to launchChargeDependentAndFinish()
+    // because the dEdcn accumulation needs dc6dcn values which come from computeDC6DCNOnGPU()
+    // (called after EEQ completes). Energy-only dispersion runs here for full overlap.
+    if (m_dispersion_enabled && impl.disp.n > 0 && !gradient) {
         k_dispersion<<<gridFor(impl.disp.n, BLOCK), BLOCK, 0, sA>>>(
             impl.disp.n,
             impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
             impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
             impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
             impl.disp.r_cut.ptr,
-            gradient ? impl.disp.dc6dcn_ij.ptr : nullptr,
-            gradient ? impl.disp.dc6dcn_ji.ptr : nullptr,
+            nullptr,   // no dc6dcn for energy-only
+            nullptr,
             impl.d_coords.ptr,
             impl.d_dEdcn.ptr,
             impl.d_grad.ptr,
@@ -1199,17 +1200,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_NBREP]);
     }
-    if (m_coulomb_enabled && impl.coulomb.n > 0) {
-        k_coulomb<<<gridFor(impl.coulomb.n, BLOCK), BLOCK, 0, sA>>>(
-            impl.coulomb.n,
-            impl.coulomb.idx_i.ptr,  impl.coulomb.idx_j.ptr,
-            impl.coulomb.gamma_ij.ptr,
-            impl.coulomb.r_cut.ptr,
-            impl.d_coords.ptr,
-            impl.d_charges.ptr,
-            impl.d_grad.ptr,
-            &impl.d_energies.ptr[impl.E_COUL]);
-    }
+    // NOTE: k_coulomb is NOT launched here — it needs EEQ charges
     cudaEventRecord(impl.event_pairwise, sA);
 
     // --- Stream B: Bonded terms (bonds, angles, dihedrals, inversions, storsions, hb_alpha) ---
@@ -1288,7 +1279,6 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_STORS]);
     }
-    // HB alpha chain-rule runs on stream B (depends on d_zz_hb from k_bonds)
     if (gradient && impl.hb_alpha.n > 0 && impl.d_zz_hb.ptr) {
         constexpr double hb_kn = 27.5;
         k_hb_alpha_chainrule<<<gridFor(impl.hb_alpha.n, BLOCK), BLOCK, 0, sB>>>(
@@ -1304,6 +1294,8 @@ double FFWorkspaceGPU::calculate(bool gradient)
     cudaEventRecord(impl.event_bonded, sB);
 
     // --- Stream C: 3-body terms (batm, atm, xbonds, hbonds) ---
+    // All charge-independent: batm uses topology charges (static),
+    // hbonds uses q_H/q_A/q_B baked into SoA at construction time.
     if (impl.batm.n > 0) {
         k_batm<<<gridFor(impl.batm.n, BLOCK), BLOCK, 0, sC>>>(
             impl.batm.n,
@@ -1358,15 +1350,74 @@ double FFWorkspaceGPU::calculate(bool gradient)
             &impl.d_energies.ptr[impl.E_HBOND]);
     }
     cudaEventRecord(impl.event_threebody, sC);
+    // Returns immediately — charge-independent kernels run asynchronously on GPU
+}
+
+double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    cudaStream_t stream = impl.stream;
+    constexpr int BLOCK = 256;
 
     // =========================================================================
-    // 4. GPU postprocess on main stream (wait for all kernel groups to complete)
+    // 1. Upload EEQ charges (the CPU EEQ solver has completed by now)
     // =========================================================================
-    cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
-    cudaStreamWaitEvent(stream, impl.event_bonded, 0);
-    cudaStreamWaitEvent(stream, impl.event_threebody, 0);
+    if (m_eeq_charges.size() == N) {
+        impl.d_charges.upload(m_eeq_charges.data(), N, stream);
+    }
 
-    // Coulomb TERM 2+3 self-energy on GPU (energy only, no gradient)
+    // =========================================================================
+    // 2. Launch deferred kernels on stream A
+    //    Wait for charge-independent pairwise kernels to finish first,
+    //    since these kernels write to the same d_grad/d_energies buffers.
+    // =========================================================================
+    // Record event on main stream (after charge upload) so pairwise stream can wait
+    cudaEventRecord(impl.event_upload, stream);
+    cudaStreamWaitEvent(impl.stream_pairwise, impl.event_upload, 0);
+
+    // k_dispersion deferred from charge-independent phase when gradient=true
+    // (needs dc6dcn from computeDC6DCNOnGPU which ran after EEQ)
+    if (m_dispersion_enabled && impl.disp.n > 0 && gradient) {
+        k_dispersion<<<gridFor(impl.disp.n, BLOCK), BLOCK, 0, impl.stream_pairwise>>>(
+            impl.disp.n,
+            impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
+            impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
+            impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
+            impl.disp.r_cut.ptr,
+            impl.disp.dc6dcn_ij.ptr,
+            impl.disp.dc6dcn_ji.ptr,
+            impl.d_coords.ptr,
+            impl.d_dEdcn.ptr,
+            impl.d_grad.ptr,
+            &impl.d_energies.ptr[impl.E_DISP]);
+    }
+
+    // k_coulomb (needs EEQ charges)
+    if (m_coulomb_enabled && impl.coulomb.n > 0) {
+        k_coulomb<<<gridFor(impl.coulomb.n, BLOCK), BLOCK, 0, impl.stream_pairwise>>>(
+            impl.coulomb.n,
+            impl.coulomb.idx_i.ptr,  impl.coulomb.idx_j.ptr,
+            impl.coulomb.gamma_ij.ptr,
+            impl.coulomb.r_cut.ptr,
+            impl.d_coords.ptr,
+            impl.d_charges.ptr,
+            impl.d_grad.ptr,
+            &impl.d_energies.ptr[impl.E_COUL]);
+    }
+    // Re-record pairwise event to include k_coulomb completion
+    cudaEventRecord(impl.event_pairwise, impl.stream_pairwise);
+
+    // =========================================================================
+    // 3. Postprocess on main stream
+    // Phase 4b: Relaxed stream dependencies (Claude Generated March 2026)
+    //   k_coulomb_self   — needs d_charges + d_cn (uploaded on main stream, no kernel deps)
+    //   k_subtract_qtmp  — needs d_dEdcn (from pairwise + bonded), NOT threebody
+    //   k_cn_chainrule   — needs d_dEdcn complete from ALL streams → wait for all 3
+    // =========================================================================
+
+    // k_coulomb_self: only reads d_charges and d_cn which are on main stream already.
+    // Can run immediately after charge upload, no need to wait for kernel streams.
     if (m_coulomb_enabled && impl.coul_self_on_gpu) {
         k_coulomb_self<<<(N+255)/256, 256, 0, stream>>>(
             N,
@@ -1379,16 +1430,18 @@ double FFWorkspaceGPU::calculate(bool gradient)
             &impl.d_energies.ptr[impl.E_COUL_SELF]);
     }
 
-    // Snapshot dEdcn BEFORE qtmp modification (async D2D, diagnostic only)
-    // Claude Generated (March 2026): Only snapshot when verbosity >= 3 (debug mode)
+    // k_subtract_qtmp: reads d_dEdcn which is accumulated by dispersion (pairwise)
+    // and bonds (bonded). Does NOT need threebody event.
     const bool need_snapshots = (m_verbosity >= 3);
-    if (gradient && need_snapshots) {
-        cudaMemcpyAsync(impl.d_dEdcn_snapshot.ptr, impl.d_dEdcn.ptr,
-                        N * sizeof(double), cudaMemcpyDeviceToDevice, stream);
-    }
-
-    // Subtract qtmp from dEdcn on GPU (Coulomb TERM 1b correction)
     if (gradient && m_coulomb_enabled && m_cnf.size() == N && m_eeq_charges.size() == N) {
+        cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
+        cudaStreamWaitEvent(stream, impl.event_bonded, 0);
+
+        if (need_snapshots) {
+            cudaMemcpyAsync(impl.d_dEdcn_snapshot.ptr, impl.d_dEdcn.ptr,
+                            N * sizeof(double), cudaMemcpyDeviceToDevice, stream);
+        }
+
         k_subtract_qtmp<<<(N+255)/256, 256, 0, stream>>>(
             N,
             impl.d_charges.ptr,
@@ -1397,9 +1450,13 @@ double FFWorkspaceGPU::calculate(bool gradient)
             impl.d_dEdcn.ptr);
     }
 
-    // CN chain-rule gradient on GPU
+    // k_cn_chainrule: reads d_dEdcn (must be final) and d_grad (accumulated by ALL
+    // kernels), so wait for all 3 stream events.
     if (gradient && m_cn_pairs_on_gpu && impl.n_cn_pairs > 0 && impl.d_dlogdcn.ptr) {
-        // Snapshot gradient BEFORE CN chain-rule (diagnostic only)
+        cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
+        cudaStreamWaitEvent(stream, impl.event_bonded, 0);
+        cudaStreamWaitEvent(stream, impl.event_threebody, 0);
+
         if (need_snapshots) {
             cudaMemcpyAsync(impl.d_grad_snapshot.ptr, impl.d_grad.ptr,
                             3*N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
@@ -1418,13 +1475,18 @@ double FFWorkspaceGPU::calculate(bool gradient)
     }
 
     // =========================================================================
-    // 5. Synchronise and download final results
+    // 4. Synchronise and download final results
+    // Ensure ALL kernel streams have completed before downloading energies/gradient.
+    // The stream waits above may not cover all streams (e.g. threebody for energy-only).
     // =========================================================================
+    cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
+    cudaStreamWaitEvent(stream, impl.event_bonded, 0);
+    cudaStreamWaitEvent(stream, impl.event_threebody, 0);
+
     checkCuda(cudaGetLastError(), "postprocess kernel launch check");
     checkCuda(cudaStreamSynchronize(stream), "postprocess stream sync");
 
     // Download all per-term GPU energies in single transfer
-    // Claude Generated (March 2026): Replaces 14 individual cudaMemcpy with 1
     double h_energies[FFWorkspaceGPUImpl::N_ENERGY_SLOTS] = {};
     checkCuda(cudaMemcpy(h_energies, impl.d_energies.ptr,
                          FFWorkspaceGPUImpl::N_ENERGY_SLOTS * sizeof(double),
@@ -1444,7 +1506,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
     const double e_hbond     = h_energies[impl.E_HBOND];
     const double e_coul_self = h_energies[impl.E_COUL_SELF];
 
-    // Download gradient (using pre-allocated staging buffer — no heap allocs)
+    // Download gradient
     if (gradient) {
         checkCuda(cudaMemcpy(m_h_grad, impl.d_grad.ptr,
                              3*N*sizeof(double), cudaMemcpyDeviceToHost),
@@ -1456,8 +1518,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
             m_result_gradient(i, 2) = m_h_grad[3*i+2];
         }
 
-        // Download diagnostic snapshots only when verbosity >= 3 (debug mode)
-        // Claude Generated (March 2026): Skipping saves 2 cudaMemcpy D2H per step
+        // Download diagnostic snapshots only when verbosity >= 3
         if (need_snapshots) {
             m_dEdcn_total.resize(N);
             checkCuda(cudaMemcpy(m_h_dEdcn_snap, impl.d_dEdcn_snapshot.ptr,
@@ -1477,13 +1538,13 @@ double FFWorkspaceGPU::calculate(bool gradient)
     }
 
     // =========================================================================
-    // 6. Populate energy components
+    // 5. Populate energy components
     // =========================================================================
     m_result_energy.reset();
     m_result_energy.dispersion    = e_disp;
     m_result_energy.bonded_rep    = e_brep;
     m_result_energy.nonbonded_rep = e_nbrep;
-    m_result_energy.coulomb       = e_coul1 + e_coul_self;  // TERM 1 + TERM 2+3
+    m_result_energy.coulomb       = e_coul1 + e_coul_self;
     m_result_energy.bond          = e_bond;
     m_result_energy.angle         = e_angle;
     m_result_energy.dihedral      = e_dihedral;
@@ -1494,10 +1555,26 @@ double FFWorkspaceGPU::calculate(bool gradient)
     m_result_energy.xbond         = e_xbond;
     m_result_energy.hbond         = e_hbond;
 
-    // =========================================================================
-    // 7. Add E0 (baseline energy from parameter set) and return
-    // =========================================================================
     return m_result_energy.total() + m_e0;
+}
+
+// ============================================================================
+// calculate() — original entry point (backward compatible, calls both stages)
+// ============================================================================
+
+double FFWorkspaceGPU::calculate(bool gradient)
+{
+    // Backward-compatible: upload charges, then run both stages sequentially.
+    // For CPU/GPU overlap, call prepareAndLaunchChargeIndependent() and
+    // launchChargeDependentAndFinish() separately from the orchestrator.
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+
+    // Upload EEQ charges to member (launchChargeDependentAndFinish reads them)
+    // setEEQCharges() was already called before calculate() in the old path.
+
+    prepareAndLaunchChargeIndependent(gradient);
+    return launchChargeDependentAndFinish(gradient);
 }
 
 // ============================================================================
