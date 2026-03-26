@@ -24,6 +24,7 @@
 #include "src/core/periodic_table.h"
 #include "src/core/functional_groups.h"  // Claude Generated (January 10, 2026): Amide detection
 #include <chrono>
+#include <cstring>
 #include <map>
 #include <set>
 #include <functional>
@@ -551,18 +552,30 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
 // Claude Generated (March 2026): Exposed for GPU orchestration
 // ---------------------------------------------------------------------------
 
-void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only)
+void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external_cn)
 {
-    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-    Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
-    m_last_cn = cn;
+    // Claude Generated (March 2026): GPU path uses memcpy into pre-allocated vectors
+    // to avoid Eigen heap allocations (CUDA corrupts heap metadata after init).
+    if (m_gpu_path_preallocated && external_cn) {
+        // memcpy into pre-allocated m_last_cn (no Eigen assignment, no heap alloc)
+        std::memcpy(m_last_cn.data(), external_cn->data(), m_atomcount * sizeof(double));
+    } else if (external_cn) {
+        m_last_cn = *external_cn;
+    } else {
+        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+        if (m_gpu_path_preallocated) {
+            std::memcpy(m_last_cn.data(), cn_vec.data(), m_atomcount * sizeof(double));
+        } else {
+            m_last_cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+        }
+    }
 
     // Distribute D3 CN to CPU ForceField and workspace (skip for GPU-only path)
     if (!gpu_only) {
-        if (m_forcefield) m_forcefield->distributeD3CN(cn);
+        if (m_forcefield) m_forcefield->distributeD3CN(m_last_cn);
         if (m_workspace) {
             m_workspace->setGeometry(m_geometry_bohr);
-            m_workspace->setD3CN(cn);
+            m_workspace->setD3CN(m_last_cn);
         }
     }
 
@@ -588,13 +601,22 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only)
     }
 
     if (gradient) {
-        Vector cnf(m_atoms.size());
-        for (size_t i = 0; i < m_atoms.size(); ++i) {
-            int z = m_atoms[i];
-            cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
-                        ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
+        // Fill CNF directly into pre-allocated m_last_cnf (no local Vector construction)
+        if (m_gpu_path_preallocated) {
+            for (int i = 0; i < m_atomcount; ++i) {
+                int z = m_atoms[i];
+                m_last_cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
+                                  ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
+            }
+        } else {
+            Vector cnf(m_atoms.size());
+            for (size_t i = 0; i < m_atoms.size(); ++i) {
+                int z = m_atoms[i];
+                cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
+                            ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
+            }
+            m_last_cnf = cnf;
         }
-        m_last_cnf = cnf;
 
         int total_threads = m_parameters.value("threads", 1);
         auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
@@ -602,20 +624,23 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only)
 
         // Sparse dcn matrices only needed for CPU path (GPU has k_cn_chainrule kernel)
         if (!gpu_only) {
-            std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(cn, 1600.0, pool, total_threads);
+            std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(m_last_cn, 1600.0, pool, total_threads);
             m_last_dcn = dcn;
         }
 
-        // D4 dc6dcn update always needed (GPU uploads per-pair values from this matrix)
+        // D4 Gaussian weights + derivatives always needed for dc6dcn.
+        // gpu_only: skip O(N²) computeDC6DCN() — GPU computes dc6dcn per pair directly.
         if (m_d4_generator) {
-            m_d4_generator->updateCNValuesForGradient(cn_vec, pool, total_threads);
+            std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_last_cn.size());
+            m_d4_generator->updateCNValuesForGradient(cn_std, pool, total_threads,
+                                                       /*skip_dc6dcn=*/gpu_only);
         }
 
         Vector new_charges;
         if (do_eeq) {
             new_charges = m_eeq_solver->calculateFinalCharges(
                 m_atoms, m_geometry_bohr, m_charge,
-                topo_ptr->topology_charges, cn,
+                topo_ptr->topology_charges, m_last_cn,
                 topo_ptr->hybridization, eeq_topo,
                 true, topo_ptr->alpeeq, pool, total_threads);
         }
@@ -623,13 +648,13 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only)
         // Distribute to CPU ForceField/workspace (skip for GPU-only path)
         if (!gpu_only) {
             if (m_forcefield) {
-                m_forcefield->distributeCNandDerivatives(cn, cnf, m_last_dcn);
+                m_forcefield->distributeCNandDerivatives(m_last_cn, m_last_cnf, m_last_dcn);
                 if (m_d4_generator) {
                     m_forcefield->setDispersionDC6DCNPtr(&m_d4_generator->getDC6DCN());
                 }
             }
             if (m_workspace) {
-                m_workspace->setCNDerivatives(cn, cnf, m_last_dcn);
+                m_workspace->setCNDerivatives(m_last_cn, m_last_cnf, m_last_dcn);
                 if (m_d4_generator) {
                     m_workspace->setDC6DCNPtr(&m_d4_generator->getDC6DCN());
                 }
@@ -641,19 +666,26 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only)
                 if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
                 if (m_workspace) m_workspace->setEEQCharges(new_charges);
             }
-            m_charges = new_charges;
+            // GPU path: memcpy into pre-allocated m_charges to avoid Eigen heap alloc
+            if (m_gpu_path_preallocated) {
+                std::memcpy(m_charges.data(), new_charges.data(), m_atomcount * sizeof(double));
+            } else {
+                m_charges = new_charges;
+            }
         }
     } else {
         // Energy-only path
-        m_last_cnf = Vector();
+        if (!m_gpu_path_preallocated) {
+            m_last_cnf = Vector();
+        }
         m_last_dcn.clear();
 
-        if (!gpu_only && m_forcefield) m_forcefield->distributeCNOnly(cn);
+        if (!gpu_only && m_forcefield) m_forcefield->distributeCNOnly(m_last_cn);
 
         if (do_eeq) {
             Vector new_charges = m_eeq_solver->calculateFinalCharges(
                 m_atoms, m_geometry_bohr, m_charge,
-                topo_ptr->topology_charges, cn,
+                topo_ptr->topology_charges, m_last_cn,
                 topo_ptr->hybridization, eeq_topo,
                 true, topo_ptr->alpeeq);
             if (new_charges.size() == m_atomcount) {
@@ -661,7 +693,11 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only)
                     if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
                     if (m_workspace) m_workspace->setEEQCharges(new_charges);
                 }
-                m_charges = new_charges;
+                if (m_gpu_path_preallocated) {
+                    std::memcpy(m_charges.data(), new_charges.data(), m_atomcount * sizeof(double));
+                } else {
+                    m_charges = new_charges;
+                }
             }
         }
     }

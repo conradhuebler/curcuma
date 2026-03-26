@@ -98,6 +98,40 @@ public:
                           const std::vector<SpMatrix>& dcn);
 
     // =========================================================================
+    // GPU CN Computation (Phase 1: GPU migration)
+    // Claude Generated (March 2026): Compute CN on GPU
+    // =========================================================================
+
+    /**
+     * @brief Compute GFN-FF coordination numbers on GPU.
+     *
+     * Computes CN_raw and CN_final from current geometry and atom types.
+     * Replaces CPU CNCalculator::calculateGFNFFCN().
+     * Results are downloaded to pinned buffer — use getCNPinnedBuffer()
+     * to access the data.  No Eigen allocations (heap-corruption safe).
+     *
+     * @param atom_types  Atomic numbers (1-based, size N)
+     */
+    void computeCN(const std::vector<int>& atom_types);
+
+    /**
+     * @brief Get pointer to pinned CN_final buffer (valid after computeCN()).
+     * Caller copies into their pre-allocated Vector via memcpy.
+     * @return Pointer to N doubles (log-transformed CN values)
+     */
+    const double* getCNPinnedBuffer() const { return m_h_cn_final; }
+
+    /**
+     * @brief Check if GPU CN has been computed this step.
+     */
+    bool hasComputedCN() const { return m_cn_computed; }
+
+    /**
+     * @brief Reset CN computed flag (call before new geometry step).
+     */
+    void resetCNComputed() { m_cn_computed = false; }
+
+    // =========================================================================
     // GPU-only CN chain-rule data (replaces sparse dcn matrices)
     // Claude Generated (March 2026): Full GPU gradient consistency
     // =========================================================================
@@ -158,6 +192,27 @@ public:
      * @param dc6dcn  N×N matrix: dc6dcn(i,j) = dC6(i,j)/dCN(i)
      */
     void updateDispersionDC6DCN(const Matrix& dc6dcn);
+
+    // =========================================================================
+    // Phase 2: GPU dc6dcn per-pair computation (Claude Generated March 2026)
+    // =========================================================================
+
+    /**
+     * @brief Upload C6 reference table and element refn counts (one-time at init).
+     * @param c6_flat  Flat C6 reference array [MAX_ELEM² × MAX_REF²]
+     * @param refn     Number of reference states per element [MAX_ELEM]
+     */
+    void uploadC6ReferenceTable(const std::vector<double>& c6_flat,
+                                 const std::vector<int>& refn);
+
+    /**
+     * @brief Upload Gaussian weights + derivatives and compute dc6dcn per pair on GPU.
+     * Replaces: CPU computeDC6DCN() O(N²) + updateDispersionDC6DCN() extraction.
+     * @param gw   Nested [N][nref] Gaussian weights (will be flattened to [N×MAX_REF])
+     * @param dgw  Nested [N][nref] weight derivatives
+     */
+    void computeDC6DCNOnGPU(const std::vector<std::vector<double>>& gw,
+                             const std::vector<std::vector<double>>& dgw);
 
     // =========================================================================
     // Term enable flags (match FFWorkspace API)
@@ -230,6 +285,12 @@ private:
     // CN state for GPU upload and k_subtract_qtmp (Coulomb TERM 1b)
     Vector  m_cn, m_cnf;
 
+    // GPU CN computation state
+    // NOTE: No Eigen Vectors here — heap-corruption-safe.  CN data lives in pinned buffer only.
+    double* m_h_cn_final = nullptr; ///< [N] pinned staging buffer for CN download
+    bool    m_cn_computed = false; ///< GPU CN computed this step?
+    std::vector<int> m_atom_types_cached; ///< Cached atom types for GPU CN
+
     // GPU CN chain-rule state (replaces sparse dcn matrices)
     Vector m_dlogdcn;                       ///< [N] logistic squashing factor
     std::vector<int>    m_cn_pair_i;        ///< CN pair atom i indices
@@ -250,6 +311,11 @@ private:
     // Per-step dc6dcn staging buffer (pre-allocated, reused)
     std::vector<double> m_h_dc6dcn_ij;
     std::vector<double> m_h_dc6dcn_ji;
+
+    // Phase 2: GPU dc6dcn staging buffers (pre-allocated, reused per step)
+    std::vector<double> m_h_gw_flat;   ///< [N * MAX_REF] flattened Gaussian weights
+    std::vector<double> m_h_dgw_flat;  ///< [N * MAX_REF] flattened weight derivatives
+    static constexpr int D4_MAX_REF = 7;
 
     // Term enable flags
     bool m_dispersion_enabled = true;

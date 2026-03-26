@@ -18,7 +18,6 @@
 #include "../ff_methods/cuda/ff_workspace_gpu.h"
 
 #include <memory>
-#include <unordered_map>
 
 /**
  * @brief GPU-accelerated GFN-FF via CUDA (method name: "ggfnff")
@@ -40,10 +39,11 @@
  *   4. m_gpu_workspace->setCPUResidualWorkspace(m_cpu_residual)
  *
  * Per-step calculation (orchestrated here, NOT delegated to GFNFF::Calculation):
- *   1. m_gfnff->prepareCNAndEEQ(gradient)  — CN + EEQ on CPU
- *   2. Distribute state to GPU + CPU-residual workspaces
- *   3. m_gfnff->updateHBXBIfNeeded(m_cpu_residual)  — dynamic HB/XB
- *   4. m_gpu_workspace->calculate()  — GPU terms + CPU residual automatically
+ *   1. GPU: computeCN() — CN on GPU (k_cn_compute kernel)
+ *   2. CPU: prepareCNAndEEQ(gradient, gpu_only, &gpu_cn) — EEQ only (CN from GPU)
+ *   3. Distribute state (charges, CN, geometry) to GPU workspace
+ *   4. m_gfnff->updateHBXBIfNeeded() — dynamic HB/XB re-detection
+ *   5. m_gpu_workspace->calculate() — all energy terms on GPU
  */
 class GGFNFFComputationalMethod : public ComputationalMethod {
 public:
@@ -86,6 +86,9 @@ public:
     /// Expose GPU workspace for gradient diagnostics (e.g. gradientBeforeCN)
     FFWorkspaceGPU* getGPUWorkspace() const { return m_gpu_workspace.get(); }
 
+    /// Get GPU CN result (valid after calculateEnergy)
+    const Vector& getGPUCN() const { return m_gpu_cn_final; }
+
 private:
     /**
      * @brief Initialize GPU workspace from GFNFF parameter set.
@@ -114,7 +117,7 @@ private:
     // Pre-allocated buffers for per-step HB coordination number computation.
     // Avoids heap allocations on CUDA-corrupted heap during MD/Opt iterations.
     std::vector<double> m_hb_cn_values;                ///< [n_bonds] HB CN per bond
-    std::unordered_map<int, double> m_hb_cn_map;       ///< H-atom → CN (cleared+reused each step)
+    std::vector<double> m_hb_cn_per_atom;              ///< [natoms] H-atom CN (pre-allocated, replaces unordered_map)
 
     // CN chain-rule pair list (generated once at init, used every gradient step)
     // Claude Generated (March 2026): Full GPU gradient consistency
@@ -122,6 +125,9 @@ private:
     std::vector<int>    m_cn_pair_j;        ///< atom j indices
     std::vector<double> m_cn_pair_rcov;     ///< scaled cov. radius sum (Bohr)
     bool                m_cn_pairs_generated = false;
+
+    // GPU CN result (always used — GPU CN is the default path)
+    Vector              m_gpu_cn_final;        ///< Cached GPU CN result
 
     /**
      * @brief Generate CN pair list from geometry and covalent radii.

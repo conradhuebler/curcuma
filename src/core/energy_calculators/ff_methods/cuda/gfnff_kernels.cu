@@ -2117,3 +2117,148 @@ __global__ void k_hb_alpha_chainrule(
     add_grad(grad, H,  fac*dx,  fac*dy,  fac*dz);
     add_grad(grad, B, -fac*dx, -fac*dy, -fac*dz);
 }
+
+// ============================================================================
+// Kernel: CN Compute - GFN-FF coordination number calculation
+// Claude Generated (March 2026): GPU implementation of CNCalculator::calculateGFNFFCN
+//
+// Computes: CN_raw[i] = sum_{j≠i} 0.5 * (1 + erf(kn * (r_ij - rcov_ij) / rcov_ij))
+//           CN_final[i] = log(1 + e^cnmax) - log(1 + e^(cnmax - CN_raw[i]))
+//
+// Thread layout: 1 thread per atom, each reduces over all other atoms
+// Uses constant memory d_rcov_d3 for covalent radii (uploaded via upload_rcov_d3)
+//
+// Reference: gfnff_cn.f90:66-126, Spicher & Grimme J. Chem. Theory Comput. 2020
+// ============================================================================
+__global__ void k_cn_compute(
+    int natoms,
+    const double* __restrict__ coords,    // [3*N] in Bohr
+    const int*    __restrict__ atom_types, // [N] 1-based atomic numbers
+    double*       __restrict__ cn_raw,      // [N] output: raw CN (erf sum)
+    double*       __restrict__ cn_final,    // [N] output: log-transformed CN
+    double        kn,                       // decay constant (-7.5)
+    double        cnmax,                    // squashing limit (4.4)
+    double        threshold_sq)             // distance cutoff squared (Bohr²)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= natoms) return;
+
+    int zi = atom_types[i];
+    if (zi < 1 || zi > 86) {
+        cn_raw[i] = 0.0;
+        cn_final[i] = 0.0;
+        return;
+    }
+
+    // Claude Generated (March 2026): CN uses 4/3-scaled covalent radii.
+    // d_rcov_d3 is in Bohr WITHOUT 4/3 factor (shared with angle/dihedral damping).
+    // Reference: gfnff_param.f90:381-404 — "covalentRadD3 * aatoau * 4/3"
+    constexpr double CN_RCOV_SCALE = 4.0 / 3.0;
+    double rcov_i = d_rcov_d3[zi - 1] * CN_RCOV_SCALE;
+    double xi = coords[3*i];
+    double yi = coords[3*i + 1];
+    double zi_coord = coords[3*i + 2];
+
+    double cn_sum = 0.0;
+
+    // Loop over all other atoms
+    for (int j = 0; j < natoms; ++j) {
+        if (i == j) continue;
+
+        int zj = atom_types[j];
+        if (zj < 1 || zj > 86) continue;
+
+        double dx = xi - coords[3*j];
+        double dy = yi - coords[3*j + 1];
+        double dz = zi_coord - coords[3*j + 2];
+        double r2 = dx*dx + dy*dy + dz*dz;
+
+        // Distance cutoff (skip far atoms)
+        if (r2 > threshold_sq) continue;
+
+        double rcov_j = d_rcov_d3[zj - 1] * CN_RCOV_SCALE;
+        double rcov_ij = rcov_i + rcov_j;
+
+        double rij = sqrt(r2);
+        double dr = (rij - rcov_ij) / rcov_ij;
+
+        // Error function CN contribution
+        cn_sum += 0.5 * (1.0 + erf(kn * dr));
+    }
+
+    cn_raw[i] = cn_sum;
+
+    // Log transformation for numerical stability
+    cn_final[i] = log(1.0 + exp(cnmax)) - log(1.0 + exp(cnmax - cn_sum));
+}
+
+// ============================================================================
+// DC6DCN per-pair kernel (Phase 2 GPU optimization)
+// Claude Generated (March 2026): Compute dc6/dcn directly per dispersion pair.
+// Eliminates O(N²) CPU matrix construction — only O(nd) pairs computed on GPU.
+// Reference: d4param_generator.cpp:computeDC6DCN()
+// ============================================================================
+
+// D4 constants (matching d4param_generator.h)
+#define D4_MAX_ELEM 118
+#define D4_MAX_REF  7
+
+__global__ void k_dc6dcn_per_pair(
+    int n_pairs,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ atom_types,
+    const double* __restrict__ gw,
+    const double* __restrict__ dgw,
+    const double* __restrict__ c6_flat,
+    const int*    __restrict__ refn,
+    double*       __restrict__ dc6dcn_ij,
+    double*       __restrict__ dc6dcn_ji)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_pairs) return;
+
+    int ai = idx_i[tid];
+    int aj = idx_j[tid];
+
+    // Element indices (0-based)
+    int ei = atom_types[ai] - 1;
+    int ej = atom_types[aj] - 1;
+
+    int nri = refn[ei];
+    int nrj = refn[ej];
+
+    // C6 flat index base: elem_i * MAX_ELEM * MAX_REF² + elem_j * MAX_REF²
+    size_t c6_base = (size_t)ei * D4_MAX_ELEM * D4_MAX_REF * D4_MAX_REF
+                   + (size_t)ej * D4_MAX_REF * D4_MAX_REF;
+
+    // Weight array offsets: atom * MAX_REF
+    int gw_i_base = ai * D4_MAX_REF;
+    int gw_j_base = aj * D4_MAX_REF;
+
+    double dc6_ij = 0.0;
+    double dc6_ji = 0.0;
+
+    for (int ri = 0; ri < nri; ++ri) {
+        double dgw_i_ri = dgw[gw_i_base + ri];
+        double gw_i_ri  = gw[gw_i_base + ri];
+
+        for (int rj = 0; rj < nrj; ++rj) {
+            double c6ref = c6_flat[c6_base + ri * D4_MAX_REF + rj];
+            if (fabs(c6ref) < 1e-20) continue;
+
+            // dc6dcn(i,j) = dC6(i,j)/dCN(i) = Σ dgw(i,ri) * gw(j,rj) * C6ref
+            dc6_ij += dgw_i_ri * gw[gw_j_base + rj] * c6ref;
+
+            // dc6dcn(j,i) = dC6(i,j)/dCN(j) = Σ gw(i,ri) * dgw(j,rj) * C6ref
+            dc6_ji += gw_i_ri * dgw[gw_j_base + rj] * c6ref;
+        }
+    }
+
+    dc6dcn_ij[tid] = dc6_ij;
+    dc6dcn_ji[tid] = dc6_ji;
+}
+
+// ============================================================================
+// Utility: zero device array
+// ============================================================================

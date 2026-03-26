@@ -511,8 +511,10 @@ public:
      * @param gradient  If true, also compute gradient-related data (cnf, dc6dcn)
      * @param gpu_only  If true, skip sparse dcn matrix build and CPU forcefield/workspace
      *                  distribution (GPU has its own k_cn_chainrule kernel)
+     * @param external_cn  If non-null, use these CN values instead of computing on CPU.
+     *                     Claude Generated (March 2026): Enables GPU CN bypass.
      */
-    void prepareCNAndEEQ(bool gradient, bool gpu_only = false);
+    void prepareCNAndEEQ(bool gradient, bool gpu_only = false, const Vector* external_cn = nullptr);
 
     /**
      * @brief Re-detect HB/XB pairs if geometry has changed enough (RMSD > 0.3 Bohr).
@@ -534,6 +536,37 @@ public:
     const Vector& getLastCNF() const { return m_last_cnf; }
     const Matrix* getDC6DCNPtr() const { return m_d4_generator ? &m_d4_generator->getDC6DCN() : nullptr; }
     FFWorkspace* getWorkspace() const { return m_workspace.get(); }
+
+    // Claude Generated (March 2026): Phase 2 GPU dc6dcn — expose D4 internals
+    D4ParameterGenerator* getD4Generator() { return m_d4_generator.get(); }
+
+    /**
+     * @brief Set external CN values (from GPU computation).
+     * Claude Generated (March 2026): Phase 1 GPU CN migration.
+     * Allows GPU-computed CN to replace CPU CN before EEQ calculation.
+     * @param cn External CN values (size N)
+     */
+    void setLastCN(const Vector& cn) { m_last_cn = cn; }
+
+    /**
+     * @brief Pre-allocate per-step Eigen Vectors to correct size.
+     * Claude Generated (March 2026): Must be called BEFORE CUDA init to avoid
+     * heap corruption — CUDA allocations corrupt adjacent heap metadata,
+     * making subsequent Eigen Vector resizes crash.
+     * After this call, prepareCNAndEEQ() uses memcpy instead of Eigen assignment.
+     * @param natoms Number of atoms
+     */
+    void preAllocateForGPUPath(int natoms)
+    {
+        m_last_cn  = Vector::Zero(natoms);
+        m_last_cnf = Vector::Zero(natoms);
+        if (m_charges.size() != natoms)
+            m_charges = Vector::Zero(natoms);
+        m_gpu_path_preallocated = true;
+    }
+
+    /// True if preAllocateForGPUPath() was called (enables memcpy path in prepareCNAndEEQ)
+    bool isGPUPathPreallocated() const { return m_gpu_path_preallocated; }
 
 private:
     /**
@@ -1984,6 +2017,7 @@ private:
     // Claude Generated (March 2026): State from last prepareCNAndEEQ() call
     Vector m_last_cn;    ///< Coordination numbers
     Vector m_last_cnf;   ///< CN-dependent EEQ factors per atom
+    bool m_gpu_path_preallocated = false; ///< True after preAllocateForGPUPath()
     std::vector<SpMatrix> m_last_dcn; ///< CN derivatives (gradient only)
 
     // Conversion factors

@@ -338,6 +338,50 @@ __global__ void k_hb_alpha_chainrule(
 );
 
 // ============================================================================
+// CN Compute kernel - GFN-FF coordination number calculation
+// Claude Generated (March 2026): GPU implementation for Phase 1 GPU migration
+// ============================================================================
+
+/// Compute GFN-FF coordination numbers on GPU.
+/// CN_raw[i] = sum_{j≠i} 0.5 * (1 + erf(kn * (r_ij - rcov_ij) / rcov_ij))
+/// CN_final[i] = log(1 + e^cnmax) - log(1 + e^(cnmax - CN_raw[i]))
+/// Thread layout: 1 thread per atom, each loops over all other atoms.
+/// Uses constant memory d_rcov_d3 for covalent radii (uploaded via upload_rcov_d3)
+/// Reference: gfnff_cn.f90:66-126, Spicher & Grimme J. Chem. Theory Comput. 2020
+__global__ void k_cn_compute(
+    int natoms,
+    const double* __restrict__ coords,      ///< [3*N] in Bohr
+    const int*    __restrict__ atom_types,   ///< [N] 1-based atomic numbers
+    double*       __restrict__ cn_raw,      ///< [N] output: raw CN (erf sum)
+    double*       __restrict__ cn_final,    ///< [N] output: log-transformed CN
+    double        kn,                        ///< decay constant (-7.5)
+    double        cnmax,                     ///< squashing limit (4.4)
+    double        threshold_sq);             ///< distance cutoff squared (Bohr²)
+
+// ============================================================================
+// DC6DCN per-pair kernel (Phase 2 GPU optimization)
+// Claude Generated (March 2026): Compute dc6/dcn directly per dispersion pair,
+// eliminating O(N²) CPU matrix construction.
+// ============================================================================
+
+/// Compute dC6(i,j)/dCN(i) and dC6(i,j)/dCN(j) for each dispersion pair.
+/// Formula: dc6dcn(i,j) = Σ_{ri,rj} dgw(i,ri) * gw(j,rj) * C6_ref(Zi,Zj,ri,rj)
+/// Thread layout: 1 thread per dispersion pair.
+/// Reference: d4param_generator.cpp:computeDC6DCN(), Fortran gfnff_gdisp0.f90:262-305
+__global__ void k_dc6dcn_per_pair(
+    int n_pairs,
+    const int*    __restrict__ idx_i,          ///< [n] pair atom i indices
+    const int*    __restrict__ idx_j,          ///< [n] pair atom j indices
+    const int*    __restrict__ atom_types,     ///< [N] atomic numbers (1-based)
+    const double* __restrict__ gw,             ///< [N * MAX_REF] Gaussian weights (padded)
+    const double* __restrict__ dgw,            ///< [N * MAX_REF] weight derivatives
+    const double* __restrict__ c6_flat,        ///< [MAX_ELEM² * MAX_REF²] C6 reference table
+    const int*    __restrict__ refn,           ///< [MAX_ELEM] nref per element
+    double*       __restrict__ dc6dcn_ij,      ///< [n] output: dC6(i,j)/dCN(i)
+    double*       __restrict__ dc6dcn_ji       ///< [n] output: dC6(i,j)/dCN(j)
+);
+
+// ============================================================================
 // Utility: zero device array
 // ============================================================================
 __global__ void k_zero_double(double* arr, int n);

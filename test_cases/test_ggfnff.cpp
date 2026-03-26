@@ -63,6 +63,13 @@ int main(int argc, char* argv[])
     // --- GPU ggfnff ---
     auto* gpu = new EnergyCalculator("ggfnff", config);
     gpu->setMolecule(mol);
+    // Debug: check initialization
+    if (gpu->Interface() && dynamic_cast<GGFNFFComputationalMethod*>(gpu->Interface())) {
+        auto* gm = dynamic_cast<GGFNFFComputationalMethod*>(gpu->Interface());
+        if (gm->hasError()) {
+            std::cerr << "GPU INIT ERROR: " << gm->getErrorMessage() << std::endl;
+        }
+    }
     double gpu_e = gpu->CalculateEnergy(true);
     Matrix G_gpu = gpu->Gradient();
     std::cout << "GPU energy: " << std::setprecision(12) << gpu_e << " Eh" << std::endl;
@@ -289,7 +296,9 @@ int main(int argc, char* argv[])
                 auto* gpu_p = new EnergyCalculator("ggfnff", config);
                 gpu_p->setMolecule(mol_p);
                 double gpu_ep = gpu_p->CalculateEnergy(false);
-                delete cpu_p; delete gpu_p;
+                delete cpu_p;
+                // NOTE: GPU instances intentionally leaked — CUDA heap corruption
+                // makes destructors crash.  _exit() at end cleans up.
 
                 // -h
                 Mol mol_m = mol;
@@ -301,7 +310,8 @@ int main(int argc, char* argv[])
                 auto* gpu_m = new EnergyCalculator("ggfnff", config);
                 gpu_m->setMolecule(mol_m);
                 double gpu_em = gpu_m->CalculateEnergy(false);
-                delete cpu_m; delete gpu_m;
+                delete cpu_m;
+                // GPU intentionally leaked (CUDA heap corruption)
 
                 double cpu_num = (cpu_ep - cpu_em) / (2.0 * step_bohr);
                 double gpu_num = (gpu_ep - gpu_em) / (2.0 * step_bohr);

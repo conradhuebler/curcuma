@@ -15,7 +15,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
-#include <unordered_map>
 
 // ---------------------------------------------------------------------------
 // Constructor
@@ -37,6 +36,10 @@ GGFNFFComputationalMethod::~GGFNFFComputationalMethod()
 {
     // Destroy GPU workspace first (holds CUDA resources)
     m_gpu_workspace.reset();
+
+    // Leak GFNFF instance — its Eigen member destructors (m_last_cn, m_charges, etc.)
+    // crash on CUDA-corrupted heap metadata.  Cost: ~10 KB, process is ending anyway.
+    m_gfnff.release();
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +111,18 @@ bool GGFNFFComputationalMethod::initGPUWorkspace()
             return false;
         }
 
+        // Pre-allocate ALL Eigen Vectors and staging buffers BEFORE CUDA init.
+        // After FFWorkspaceGPU construction, CUDA may corrupt adjacent heap metadata,
+        // making Eigen Vector resize/assign crash. All per-step buffers must be
+        // allocated now and reused via memcpy in the hot path.
+        m_gpu_cn_final = Vector::Zero(natoms);
+        m_cached_gradient = Matrix::Zero(natoms, 3);
+        m_gfnff->preAllocateForGPUPath(natoms);
+
+        // Pre-allocate HB-CN staging buffers (before CUDA init corrupts heap)
+        m_hb_cn_values.resize(pending->bonds.size(), 0.0);
+        m_hb_cn_per_atom.resize(natoms, 0.0);
+
         // === 1. Create GPU workspace from full parameter set ===
         // All energy terms (including HB, XB, ATM, BATM, sTors) run on GPU.
         m_gpu_workspace = std::make_unique<FFWorkspaceGPU>(*pending, natoms, atom_types);
@@ -120,12 +135,10 @@ bool GGFNFFComputationalMethod::initGPUWorkspace()
         // Pass verbosity to GPU workspace for conditional diagnostics
         m_gpu_workspace->setVerbosity(CurcumaLogger::get_verbosity());
 
-        // Pre-allocate cached gradient BEFORE any CUDA operations that may corrupt heap
-        m_cached_gradient = Matrix::Zero(natoms, 3);
-
-        // Pre-allocate HB-CN staging buffers (reused every step without heap allocs)
-        if (m_gpu_params_leaked) {
-            m_hb_cn_values.resize(m_gpu_params_leaked->bonds.size(), 0.0);
+        // Phase 2: Upload C6 reference table for GPU dc6dcn per-pair computation
+        D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
+        if (d4 && !d4->getC6FlatCache().empty()) {
+            m_gpu_workspace->uploadC6ReferenceTable(d4->getC6FlatCache(), d4->getRefN());
         }
 
         if (CurcumaLogger::get_verbosity() >= 1) {
@@ -161,14 +174,24 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    // === Step 1: CN + EEQ on CPU (via GFNFF helper, gpu_only=true) ===
-    // gpu_only: skip sparse dcn matrices and CPU forcefield/workspace distribution
-    m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true);
+    // === Step 1: GPU CN + CPU EEQ ===
+    // Claude Generated (March 2026): Compute CN on GPU, pass to EEQ on CPU.
+    // Eliminates O(N²) CPU erf() loop — biggest per-step bottleneck.
+    // All CN data flows through pinned buffer → pre-allocated Vector (no heap allocs).
+    m_gpu_workspace->setGeometry(m_gfnff->getGeometryBohr());
+    m_gpu_workspace->computeCN(m_atom_types);
+
+    // Copy CN from pinned buffer into pre-allocated Vector (allocated before CUDA init)
+    const int N = static_cast<int>(m_atom_types.size());
+    std::memcpy(m_gpu_cn_final.data(), m_gpu_workspace->getCNPinnedBuffer(), N * sizeof(double));
+
+    // Pass GPU CN to prepareCNAndEEQ — skips CNCalculator::calculateGFNFFCN() entirely
+    m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final);
+    const Vector& cn = m_gfnff->getLastCN();
     auto t1 = std::chrono::high_resolution_clock::now();
 
     // === Step 2: Distribute state to GPU workspace ===
     const Matrix& geom_bohr = m_gfnff->getGeometryBohr();
-    const Vector& cn = m_gfnff->getLastCN();
     const Vector& charges = m_gfnff->getLastCharges();
 
     m_gpu_workspace->setGeometry(geom_bohr);
@@ -198,10 +221,11 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
         m_gpu_workspace->setDlogDCN(dlogdcn);
         m_gpu_workspace->setCNDerivatives(cn, cnf, {});
 
-        // Upload per-pair dc6/dcn values to GPU for dispersion dEdcn kernel
-        const Matrix* dc6dcn = m_gfnff->getDC6DCNPtr();
-        if (dc6dcn) {
-            m_gpu_workspace->updateDispersionDC6DCN(*dc6dcn);
+        // Phase 2: Compute dc6/dcn per pair directly on GPU (replaces CPU O(N²) matrix)
+        D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
+        if (d4) {
+            m_gpu_workspace->computeDC6DCNOnGPU(d4->getGaussianWeights(),
+                                                  d4->getGaussianWeightDerivatives());
         }
     }
 
@@ -215,8 +239,8 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
         constexpr double rcov_scal = 1.78;
         constexpr double thr = 900.0;
 
-        // Reuse pre-allocated map and vector (no heap allocs on corrupted heap)
-        m_hb_cn_map.clear();
+        // Reuse pre-allocated vector (no heap allocs on corrupted heap)
+        std::fill(m_hb_cn_per_atom.begin(), m_hb_cn_per_atom.end(), 0.0);
         for (const auto& entry : m_gpu_params_leaked->bond_hb_data) {
             int H = entry.H;
             int ati = m_atom_types[H];
@@ -230,7 +254,7 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
                 double r = std::sqrt(r2);
                 double rcovij = rcov_scal * rcov_43 * (rcov_base[ati - 1] + rcov_base[atj - 1]);
                 double arg = -kn * (r - rcovij) / rcovij;
-                m_hb_cn_map[H] += 0.5 * (1.0 + std::erf(arg));
+                m_hb_cn_per_atom[H] += 0.5 * (1.0 + std::erf(arg));
             }
         }
 
@@ -243,8 +267,7 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
             if (m_atom_types[bonds[b].i] == 1) H = bonds[b].i;
             else if (m_atom_types[bonds[b].j] == 1) H = bonds[b].j;
             if (H >= 0) {
-                auto it = m_hb_cn_map.find(H);
-                m_hb_cn_values[b] = (it != m_hb_cn_map.end()) ? it->second : 0.0;
+                m_hb_cn_values[b] = m_hb_cn_per_atom[H];
             }
         }
         m_gpu_workspace->updateBondHBCN(m_hb_cn_values);

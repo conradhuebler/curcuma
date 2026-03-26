@@ -601,6 +601,12 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_coul_alp;      ///< [N]
     bool               coul_self_on_gpu = false;
 
+    // GPU CN computation buffers (Phase 1: GPU migration)
+    // Claude Generated (March 2026): CN computed entirely on GPU
+    CudaBuffer<double> d_cn_raw;        ///< [N] raw CN values (erf sum)
+    CudaBuffer<double> d_cn_final;       ///< [N] log-transformed CN values
+    CudaBuffer<int>    d_atom_types;    ///< [N] atomic numbers for CN lookup
+
     // Per-term energy accumulators — consolidated into single contiguous buffer
     // Claude Generated (March 2026): Reduces 14 individual cudaMemcpy to 1
     enum EnergySlot {
@@ -610,6 +616,15 @@ struct FFWorkspaceGPUImpl {
         N_ENERGY_SLOTS = 14
     };
     CudaBuffer<double> d_energies;      ///< [N_ENERGY_SLOTS] all per-term energies
+
+    // Phase 2: GPU dc6dcn per-pair computation (Claude Generated March 2026)
+    // Gaussian weights and C6 reference table for on-GPU dc6dcn computation.
+    // Eliminates O(N²) CPU computeDC6DCN() — only O(nd) pairs computed.
+    CudaBuffer<double> d_gw;           ///< [N * MAX_REF] Gaussian weights (padded)
+    CudaBuffer<double> d_dgw;          ///< [N * MAX_REF] weight derivatives
+    CudaBuffer<double> d_c6_flat;      ///< [MAX_ELEM² * MAX_REF²] C6 reference table
+    CudaBuffer<int>    d_refn;         ///< [MAX_ELEM] nref per element
+    bool               dc6dcn_gpu_ready = false; ///< true after C6 table + refn uploaded
 
     // Diagnostic snapshot buffers (GPU-side, no pipeline stall)
     // Claude Generated (March 2026): Device-to-device copy instead of sync+download
@@ -656,6 +671,11 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
               "pinned alloc m_h_dEdcn_snap");
     checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_grad_snap), 3 * natoms * sizeof(double)),
               "pinned alloc m_h_grad_snap");
+    // Claude Generated (March 2026): Pre-allocate pinned CN download buffer
+    // NOTE: Do NOT allocate Eigen Vectors here — heap may be corrupted after CUDA allocs.
+    // The caller (ggfnff_method.cpp) pre-allocates m_gpu_cn_final before CUDA init.
+    checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_cn_final), natoms * sizeof(double)),
+              "pinned alloc m_h_cn_final");
 
     m_impl = std::make_unique<FFWorkspaceGPUImpl>();
     m_impl->N = natoms;
@@ -728,6 +748,15 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     // Diagnostic snapshot buffers (device-to-device copy, no sync stall)
     m_impl->d_dEdcn_snapshot.alloc(natoms);
     m_impl->d_grad_snapshot.alloc(N3);
+
+    // --- GPU CN computation buffers (Phase 1: GPU migration) ---
+    // Claude Generated (March 2026): CN computed entirely on GPU
+    m_impl->d_cn_raw.alloc(natoms);
+    m_impl->d_cn_final.alloc(natoms);
+    m_impl->d_atom_types.alloc(natoms);
+    // Upload atom types once (static during simulation)
+    std::vector<int> h_atom_types = atom_types;  // copy
+    m_impl->d_atom_types.upload(h_atom_types, stream);
 
     // --- HB alpha chain-rule: allocate zz buffer + build (H,B) pair list ---
     m_impl->d_zz_hb.alloc(natoms);
@@ -842,6 +871,7 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
     if (m_h_grad)       cudaFreeHost(m_h_grad);
     if (m_h_dEdcn_snap) cudaFreeHost(m_h_dEdcn_snap);
     if (m_h_grad_snap)  cudaFreeHost(m_h_grad_snap);
+    if (m_h_cn_final)   cudaFreeHost(m_h_cn_final);
 }
 
 // ============================================================================
@@ -992,6 +1022,85 @@ void FFWorkspaceGPU::updateDispersionDC6DCN(const Matrix& dc6dcn)
 
     m_impl->disp.dc6dcn_ij.upload(m_h_dc6dcn_ij.data(), nd);
     m_impl->disp.dc6dcn_ji.upload(m_h_dc6dcn_ji.data(), nd);
+}
+
+// ============================================================================
+// Phase 2: GPU dc6dcn per-pair computation (Claude Generated March 2026)
+// ============================================================================
+
+void FFWorkspaceGPU::uploadC6ReferenceTable(const std::vector<double>& c6_flat,
+                                              const std::vector<int>& refn)
+{
+    auto& impl = *m_impl;
+
+    // Upload C6 reference table (one-time, ~3.1 MB)
+    impl.d_c6_flat.upload(c6_flat.data(), static_cast<int>(c6_flat.size()));
+
+    // Upload refn array (118 ints)
+    impl.d_refn.upload(refn.data(), static_cast<int>(refn.size()));
+
+    // Pre-allocate gw/dgw GPU buffers
+    const int gw_size = m_natoms * D4_MAX_REF;
+    impl.d_gw.alloc(gw_size);
+    impl.d_dgw.alloc(gw_size);
+
+    // Pre-allocate dc6dcn output buffers (written by k_dc6dcn_per_pair kernel)
+    const int nd = impl.disp.n;
+    if (nd > 0) {
+        impl.disp.dc6dcn_ij.alloc(nd);
+        impl.disp.dc6dcn_ji.alloc(nd);
+    }
+
+    // Pre-allocate host staging buffers
+    m_h_gw_flat.resize(gw_size, 0.0);
+    m_h_dgw_flat.resize(gw_size, 0.0);
+
+    impl.dc6dcn_gpu_ready = true;
+}
+
+void FFWorkspaceGPU::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& gw,
+                                          const std::vector<std::vector<double>>& dgw)
+{
+    auto& impl = *m_impl;
+    if (!impl.dc6dcn_gpu_ready) return;
+
+    const int N = m_natoms;
+    const int nd = impl.disp.n;
+    if (nd == 0) return;
+
+    // Flatten nested weight arrays to [N × MAX_REF] with zero-padding
+    for (int i = 0; i < N; ++i) {
+        int base = i * D4_MAX_REF;
+        int nref = static_cast<int>(gw[i].size());
+        for (int r = 0; r < D4_MAX_REF; ++r) {
+            m_h_gw_flat[base + r]  = (r < nref) ? gw[i][r] : 0.0;
+            m_h_dgw_flat[base + r] = (r < nref) ? dgw[i][r] : 0.0;
+        }
+    }
+
+    // Upload to GPU
+    const int gw_size = N * D4_MAX_REF;
+    impl.d_gw.upload(m_h_gw_flat.data(), gw_size);
+    impl.d_dgw.upload(m_h_dgw_flat.data(), gw_size);
+
+    // Launch dc6dcn per-pair kernel
+    int block = 256;
+    int grid = (nd + block - 1) / block;
+    k_dc6dcn_per_pair<<<grid, block, 0, impl.stream>>>(
+        nd,
+        impl.disp.idx_i.ptr,
+        impl.disp.idx_j.ptr,
+        impl.d_atom_types.ptr,
+        impl.d_gw.ptr,
+        impl.d_dgw.ptr,
+        impl.d_c6_flat.ptr,
+        impl.d_refn.ptr,
+        impl.disp.dc6dcn_ij.ptr,
+        impl.disp.dc6dcn_ji.ptr
+    );
+
+    // Ensure dc6dcn is ready before k_dispersion uses it
+    cudaStreamSynchronize(impl.stream);
 }
 
 // ============================================================================
@@ -1411,6 +1520,65 @@ void FFWorkspaceGPU::setGeometry(const Matrix& geom)
     if (impl.d_coords.n < 3*N) impl.d_coords.alloc(3*N);
     cudaMemcpyAsync(impl.d_coords.ptr, m_h_coords, 3*N*sizeof(double),
                     cudaMemcpyHostToDevice, impl.stream);
+}
+
+// ============================================================================
+// GPU CN Computation (Phase 1: GPU migration)
+// Claude Generated (March 2026): Compute coordination numbers on GPU
+// ============================================================================
+
+void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+
+    // Constants for GFN-FF CN calculation
+    // Reference: gfnff_cn.f90:66-126, cn_calculator.cpp:99-155
+    constexpr double kn = -7.5;          // CN decay constant
+    constexpr double cnmax = 4.4;       // Squashing limit
+    constexpr double threshold_factor = 2.5;  // Cutoff factor for rcov
+    constexpr double ANG2BOHR = 1.8897259886;
+
+    // Pre-compute threshold squared (largest possible distance)
+    // Use max covalent radius * threshold_factor as conservative cutoff
+    const auto& rcov_d3 = GFNFFParameters::covalent_rad_d3;  // in Bohr
+    double max_rcov = 0.0;
+    for (int i = 0; i < N; ++i) {
+        int z = atom_types[i];
+        if (z >= 1 && z <= static_cast<int>(rcov_d3.size())) {
+            max_rcov = std::max(max_rcov, rcov_d3[z - 1]);
+        }
+    }
+    // rcov_d3 is already scaled by 4/3, use conservative threshold
+    double threshold_sq = (threshold_factor * 2.0 * max_rcov * ANG2BOHR) * (threshold_factor * 2.0 * max_rcov * ANG2BOHR);
+    threshold_sq = 900.0;  // Use 30 Bohr cutoff (same as CNCalculator)
+
+    // Ensure CN buffers are allocated
+    if (impl.d_cn_raw.n < N) impl.d_cn_raw.alloc(N);
+    if (impl.d_cn_final.n < N) impl.d_cn_final.alloc(N);
+
+    // Launch CN compute kernel
+    // Uses constant memory d_rcov_d3 for covalent radii (uploaded at construction)
+    int block = 256;
+    int grid = (N + block - 1) / block;
+    k_cn_compute<<<grid, block, 0, impl.stream>>>(
+        N,
+        impl.d_coords.ptr,
+        impl.d_atom_types.ptr,
+        impl.d_cn_raw.ptr,   // output: raw CN
+        impl.d_cn_final.ptr, // output: log-transformed CN
+        kn,
+        cnmax,
+        threshold_sq
+    );
+
+    // Download CN_final to pre-allocated pinned buffer (no heap alloc after CUDA init)
+    // Claude Generated (March 2026): Avoids heap corruption from CUDA allocator
+    cudaMemcpyAsync(m_h_cn_final, impl.d_cn_final.ptr, N * sizeof(double),
+                    cudaMemcpyDeviceToHost, impl.stream);
+    cudaStreamSynchronize(impl.stream);
+    m_cn_computed = true;
+    // Data now in m_h_cn_final — caller uses getCNPinnedBuffer() + memcpy
 }
 
 // ============================================================================
