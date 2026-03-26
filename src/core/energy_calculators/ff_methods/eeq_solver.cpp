@@ -705,7 +705,8 @@ static void testElementSpecificHybridizationLogic() {
 EEQSolveMethod EEQSolver::parseSolveMethod(const std::string& method_str) {
     if (method_str == "lu") return EEQSolveMethod::LU;
     if (method_str == "pcg") return EEQSolveMethod::PCG;
-    return EEQSolveMethod::SchurCholesky;  // default
+    if (method_str == "schur_cholesky") return EEQSolveMethod::SchurCholesky;
+    return EEQSolveMethod::Auto;  // default including "auto"
 }
 
 EEQSolver::EEQSolver(const ConfigManager& config)
@@ -1413,15 +1414,23 @@ Vector EEQSolver::solveEEQ(
     }
 
     // Claude Generated (March 2026): Dispatch solve by method
-    if (m_verbosity >= 2) {
-        const char* method_name = (m_solve_method == EEQSolveMethod::PCG) ? "PCG"
-            : (m_solve_method == EEQSolveMethod::SchurCholesky) ? "SchurCholesky" : "LU";
-        fmt::print(stderr, "[EEQ] solveEEQ: Using {} solver (N={})\n", method_name, natoms);
+    // Resolve Auto to actual method (either from benchmark or cached decision)
+    EEQSolveMethod method_to_use = m_solve_method;
+    if (m_solve_method == EEQSolveMethod::Auto) {
+        method_to_use = m_selected_method;  // Use cached or default (SchurCholesky)
     }
+
+    if (m_verbosity >= 2) {
+        const char* method_name = (method_to_use == EEQSolveMethod::PCG) ? "PCG"
+            : (method_to_use == EEQSolveMethod::SchurCholesky) ? "SchurCholesky" : "LU";
+        const char* mode_str = (m_solve_method == EEQSolveMethod::Auto) ? " (auto)" : "";
+        fmt::print(stderr, "[EEQ] solveEEQ: Using {} solver{} (N={})\n", method_name, mode_str, natoms);
+    }
+
     // Extract NxN sub-matrix, constraint matrix, and RHS components for structured solvers
     Vector charges;
 
-    if (m_solve_method == EEQSolveMethod::SchurCholesky || m_solve_method == EEQSolveMethod::PCG) {
+    if (method_to_use == EEQSolveMethod::SchurCholesky || method_to_use == EEQSolveMethod::PCG || m_solve_method == EEQSolveMethod::Auto) {
         // Extract components from augmented system
         Matrix A_nn = A.topLeftCorner(natoms, natoms);
         Vector rhs_atoms = x.head(natoms);
@@ -1435,7 +1444,57 @@ Vector EEQSolver::solveEEQ(
         }
         Vector rhs_constraints = x.tail(nfrag);
 
-        if (m_solve_method == EEQSolveMethod::PCG) {
+        // ===== Auto-benchmark: First call decides which solver to use =====
+        // Claude Generated - March 2026
+        if (m_solve_method == EEQSolveMethod::Auto && !m_auto_benchmark_done) {
+            auto t1 = std::chrono::high_resolution_clock::now();
+            Vector charges_schur = solveWithSchurCholesky(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
+            auto t2 = std::chrono::high_resolution_clock::now();
+
+            // PCG warm start: use zeros for first benchmark
+            int pcg_max = m_config.get<int>("max_pcg_iterations", 200);
+            double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
+            Vector x0_zero = Vector::Zero(natoms);
+
+            Vector z1 = solveWithPCG(A_nn, rhs_atoms, x0_zero, pcg_max, pcg_tol);
+            Matrix Z2(natoms, nfrag);
+            for (int f = 0; f < nfrag; ++f) {
+                Vector c_col = C.row(f).transpose();
+                Z2.col(f) = solveWithPCG(A_nn, c_col, x0_zero, pcg_max, pcg_tol);
+            }
+            Matrix S = C * Z2;
+            Vector schur_rhs = C * z1 - rhs_constraints;
+            Vector lambda;
+            if (nfrag == 1) {
+                lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
+            } else {
+                lambda = S.partialPivLu().solve(schur_rhs);
+            }
+            Vector charges_pcg = z1 - Z2 * lambda;
+            auto t3 = std::chrono::high_resolution_clock::now();
+
+            double schur_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+            double pcg_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
+
+            m_selected_method = (pcg_ms < schur_ms) ? EEQSolveMethod::PCG : EEQSolveMethod::SchurCholesky;
+            m_auto_benchmark_done = true;
+
+            if (m_verbosity >= 2) {
+                fmt::print(stderr, "[EEQ] Auto-benchmark: SchurCholesky={:.1f}ms, PCG={:.1f}ms → {}\n",
+                           schur_ms, pcg_ms,
+                           m_selected_method == EEQSolveMethod::PCG ? "PCG" : "SchurCholesky");
+            }
+
+            // Cache PCG warm-start vectors for future calls
+            m_pcg_last_z1 = z1;
+            m_pcg_last_z2 = Z2.col(0);
+            m_pcg_cache_valid = true;
+
+            return charges_pcg;
+        }
+
+        // Use the resolved method (either explicit choice or cached auto-benchmark result)
+        if (method_to_use == EEQSolveMethod::PCG) {
             // PCG with Schur complement constraint handling
             int pcg_max = m_config.get<int>("max_pcg_iterations", 200);
             double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
@@ -2419,25 +2478,80 @@ Vector EEQSolver::calculateFinalCharges(
         }
 
         // 6. Solve system — dispatch by method
-        // Claude Generated (March 2026): Schur-Cholesky / PCG / LU selection
+        // Claude Generated (March 2026): Schur-Cholesky / PCG / LU selection with auto-benchmark
+        // Resolve Auto to actual method (either from benchmark or cached decision)
+        EEQSolveMethod method_to_use = m_solve_method;
+        if (m_solve_method == EEQSolveMethod::Auto) {
+            method_to_use = m_selected_method;  // Use cached or default (SchurCholesky)
+        }
+
         if (m_verbosity >= 2 && iteration == 0) {
-            const char* method_name = (m_solve_method == EEQSolveMethod::PCG) ? "PCG"
-                : (m_solve_method == EEQSolveMethod::SchurCholesky) ? "SchurCholesky" : "LU";
-            fmt::print(stderr, "[EEQ] Phase 2: Using {} solver (N={})\n", method_name, natoms);
+            const char* method_name = (method_to_use == EEQSolveMethod::PCG) ? "PCG"
+                : (method_to_use == EEQSolveMethod::SchurCholesky) ? "SchurCholesky" : "LU";
+            const char* mode_str = (m_solve_method == EEQSolveMethod::Auto) ? " (auto)" : "";
+            fmt::print(stderr, "[EEQ] Phase 2: Using {} solver{} (N={})\n", method_name, mode_str, natoms);
         }
         Vector new_charges;
 
-        if (m_solve_method == EEQSolveMethod::SchurCholesky || m_solve_method == EEQSolveMethod::PCG) {
-            // Extract NxN sub-matrix and constraint components
-            Matrix A_nn = A.topLeftCorner(natoms, natoms);
-            Vector rhs_atoms = x.head(natoms);
-            Matrix C_mat = Matrix::Zero(nfrag, natoms);
-            for (int f = 0; f < nfrag; ++f)
-                for (int j = 0; j < natoms; ++j)
-                    C_mat(f, j) = A(natoms + f, j);
-            Vector rhs_constraints = x.tail(nfrag);
+        // Extract NxN sub-matrix and constraint components (needed for SchurCholesky, PCG, and Auto-benchmark)
+        Matrix A_nn = A.topLeftCorner(natoms, natoms);
+        Vector rhs_atoms = x.head(natoms);
+        Matrix C_mat = Matrix::Zero(nfrag, natoms);
+        for (int f = 0; f < nfrag; ++f)
+            for (int j = 0; j < natoms; ++j)
+                C_mat(f, j) = A(natoms + f, j);
+        Vector rhs_constraints = x.tail(nfrag);
 
-            if (m_solve_method == EEQSolveMethod::PCG) {
+        // ===== Auto-benchmark: First call decides which solver to use =====
+        // Claude Generated - March 2026
+        if (m_solve_method == EEQSolveMethod::Auto && !m_auto_benchmark_done && iteration == 0) {
+            auto t1 = std::chrono::high_resolution_clock::now();
+            Vector charges_schur = solveWithSchurCholesky(A_nn, rhs_atoms, C_mat, rhs_constraints, natoms, nfrag);
+            auto t2 = std::chrono::high_resolution_clock::now();
+
+            int pcg_max = m_config.get<int>("max_pcg_iterations", 200);
+            double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
+            Vector x0_zero = Vector::Zero(natoms);
+
+            Vector z1 = solveWithPCG(A_nn, rhs_atoms, x0_zero, pcg_max, pcg_tol);
+            Matrix Z2(natoms, nfrag);
+            for (int f = 0; f < nfrag; ++f) {
+                Vector c_col = C_mat.row(f).transpose();
+                Z2.col(f) = solveWithPCG(A_nn, c_col, x0_zero, pcg_max, pcg_tol);
+            }
+            Matrix S = C_mat * Z2;
+            Vector schur_rhs = C_mat * z1 - rhs_constraints;
+            Vector lambda;
+            if (nfrag == 1) {
+                lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
+            } else {
+                lambda = S.partialPivLu().solve(schur_rhs);
+            }
+            Vector charges_pcg = z1 - Z2 * lambda;
+            auto t3 = std::chrono::high_resolution_clock::now();
+
+            double schur_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+            double pcg_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
+
+            m_selected_method = (pcg_ms < schur_ms) ? EEQSolveMethod::PCG : EEQSolveMethod::SchurCholesky;
+            m_auto_benchmark_done = true;
+
+            if (m_verbosity >= 2) {
+                fmt::print(stderr, "[EEQ] Auto-benchmark: SchurCholesky={:.1f}ms, PCG={:.1f}ms → {}\n",
+                           schur_ms, pcg_ms,
+                           m_selected_method == EEQSolveMethod::PCG ? "PCG" : "SchurCholesky");
+            }
+
+            // Cache PCG warm-start vectors for future calls
+            m_pcg_last_z1 = z1;
+            m_pcg_last_z2 = Z2.col(0);
+            m_pcg_cache_valid = true;
+
+            return charges_pcg;
+        }
+
+        if (method_to_use == EEQSolveMethod::SchurCholesky || method_to_use == EEQSolveMethod::PCG) {
+            if (method_to_use == EEQSolveMethod::PCG) {
                 int pcg_max = m_config.get<int>("max_pcg_iterations", 200);
                 double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
                 Vector x0 = m_pcg_cache_valid ? m_pcg_last_z1 : Vector::Zero(natoms);
