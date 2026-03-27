@@ -633,6 +633,11 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_coul_gam;      ///< [N]
     CudaBuffer<double> d_coul_alp;      ///< [N]
     bool               coul_self_on_gpu = false;
+    bool               use_mixed_precision = true;  ///< FP32 intermediates for repulsion/batm/xbonds
+
+    // GPU topology displacement check buffers (Claude Generated March 2026)
+    CudaBuffer<double> d_ref_coords;      ///< [3*N] reference geometry for displacement check
+    CudaBuffer<int>    d_disp_flag;       ///< [1] exceeded flag for displacement check
 
     // GPU CN computation buffers (Phase 1: GPU migration)
     // Claude Generated (March 2026): CN computed entirely on GPU
@@ -785,6 +790,9 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     // Diagnostic snapshot buffers (device-to-device copy, no sync stall)
     m_impl->d_dEdcn_snapshot.alloc(natoms);
     m_impl->d_grad_snapshot.alloc(N3);
+
+    // --- GPU topology displacement check (Claude Generated March 2026) ---
+    m_impl->d_disp_flag.alloc(1);
 
     // --- GPU CN computation buffers (Phase 1: GPU migration) ---
     // Claude Generated (March 2026): CN computed entirely on GPU
@@ -1288,25 +1296,47 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     if (m_repulsion_enabled && impl.bonded_rep.n > 0) {
         LaunchConfig cfg = getLaunchConfig(impl.bonded_rep.n);
-        k_repulsion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
-            impl.bonded_rep.n,
-            impl.bonded_rep.idx_i.ptr,  impl.bonded_rep.idx_j.ptr,
-            impl.bonded_rep.alpha.ptr,  impl.bonded_rep.repab.ptr,
-            impl.bonded_rep.r_cut.ptr,
-            impl.d_coords.ptr,
-            impl.d_grad.ptr,
-            &impl.d_energies.ptr[impl.E_BREP]);
+        if (impl.use_mixed_precision) {
+            k_repulsion_mixed<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
+                impl.bonded_rep.n,
+                impl.bonded_rep.idx_i.ptr,  impl.bonded_rep.idx_j.ptr,
+                impl.bonded_rep.alpha.ptr,  impl.bonded_rep.repab.ptr,
+                impl.bonded_rep.r_cut.ptr,
+                impl.d_coords.ptr,
+                impl.d_grad.ptr,
+                &impl.d_energies.ptr[impl.E_BREP]);
+        } else {
+            k_repulsion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
+                impl.bonded_rep.n,
+                impl.bonded_rep.idx_i.ptr,  impl.bonded_rep.idx_j.ptr,
+                impl.bonded_rep.alpha.ptr,  impl.bonded_rep.repab.ptr,
+                impl.bonded_rep.r_cut.ptr,
+                impl.d_coords.ptr,
+                impl.d_grad.ptr,
+                &impl.d_energies.ptr[impl.E_BREP]);
+        }
     }
     if (m_repulsion_enabled && impl.nonbonded_rep.n > 0) {
         LaunchConfig cfg = getLaunchConfig(impl.nonbonded_rep.n);
-        k_repulsion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
-            impl.nonbonded_rep.n,
-            impl.nonbonded_rep.idx_i.ptr,  impl.nonbonded_rep.idx_j.ptr,
-            impl.nonbonded_rep.alpha.ptr,  impl.nonbonded_rep.repab.ptr,
-            impl.nonbonded_rep.r_cut.ptr,
-            impl.d_coords.ptr,
-            impl.d_grad.ptr,
-            &impl.d_energies.ptr[impl.E_NBREP]);
+        if (impl.use_mixed_precision) {
+            k_repulsion_mixed<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
+                impl.nonbonded_rep.n,
+                impl.nonbonded_rep.idx_i.ptr,  impl.nonbonded_rep.idx_j.ptr,
+                impl.nonbonded_rep.alpha.ptr,  impl.nonbonded_rep.repab.ptr,
+                impl.nonbonded_rep.r_cut.ptr,
+                impl.d_coords.ptr,
+                impl.d_grad.ptr,
+                &impl.d_energies.ptr[impl.E_NBREP]);
+        } else {
+            k_repulsion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
+                impl.nonbonded_rep.n,
+                impl.nonbonded_rep.idx_i.ptr,  impl.nonbonded_rep.idx_j.ptr,
+                impl.nonbonded_rep.alpha.ptr,  impl.nonbonded_rep.repab.ptr,
+                impl.nonbonded_rep.r_cut.ptr,
+                impl.d_coords.ptr,
+                impl.d_grad.ptr,
+                &impl.d_energies.ptr[impl.E_NBREP]);
+        }
     }
     // NOTE: k_coulomb is NOT launched here — it needs EEQ charges
     cudaEventRecord(impl.event_pairwise, sA);
@@ -1412,14 +1442,25 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // hbonds uses q_H/q_A/q_B baked into SoA at construction time.
     if (impl.batm.n > 0) {
         LaunchConfig cfg = getLaunchConfig(impl.batm.n);
-        k_batm<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
-            impl.batm.n,
-            impl.batm.idx_i.ptr, impl.batm.idx_j.ptr, impl.batm.idx_k.ptr,
-            impl.batm.zb3atm_i.ptr, impl.batm.zb3atm_j.ptr, impl.batm.zb3atm_k.ptr,
-            impl.d_coords.ptr,
-            impl.d_topo_charges.ptr,
-            impl.d_grad.ptr,
-            &impl.d_energies.ptr[impl.E_BATM]);
+        if (impl.use_mixed_precision) {
+            k_batm_mixed<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
+                impl.batm.n,
+                impl.batm.idx_i.ptr, impl.batm.idx_j.ptr, impl.batm.idx_k.ptr,
+                impl.batm.zb3atm_i.ptr, impl.batm.zb3atm_j.ptr, impl.batm.zb3atm_k.ptr,
+                impl.d_coords.ptr,
+                impl.d_topo_charges.ptr,
+                impl.d_grad.ptr,
+                &impl.d_energies.ptr[impl.E_BATM]);
+        } else {
+            k_batm<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
+                impl.batm.n,
+                impl.batm.idx_i.ptr, impl.batm.idx_j.ptr, impl.batm.idx_k.ptr,
+                impl.batm.zb3atm_i.ptr, impl.batm.zb3atm_j.ptr, impl.batm.zb3atm_k.ptr,
+                impl.d_coords.ptr,
+                impl.d_topo_charges.ptr,
+                impl.d_grad.ptr,
+                &impl.d_energies.ptr[impl.E_BATM]);
+        }
     }
     if (impl.atm.n > 0) {
         LaunchConfig cfg = getLaunchConfig(impl.atm.n);
@@ -1436,15 +1477,27 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     if (impl.xbonds.n > 0) {
         LaunchConfig cfg = getLaunchConfig(impl.xbonds.n);
-        k_xbonds<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
-            impl.xbonds.n,
-            impl.xbonds.idx_i.ptr, impl.xbonds.idx_j.ptr, impl.xbonds.idx_k.ptr,
-            impl.xbonds.elem_A.ptr, impl.xbonds.elem_B.ptr,
-            impl.xbonds.q_X.ptr, impl.xbonds.q_B.ptr, impl.xbonds.acidity_X.ptr,
-            impl.xbonds.r_cut.ptr,
-            impl.d_coords.ptr,
-            impl.d_grad.ptr,
-            &impl.d_energies.ptr[impl.E_XBOND]);
+        if (impl.use_mixed_precision) {
+            k_xbonds_mixed<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
+                impl.xbonds.n,
+                impl.xbonds.idx_i.ptr, impl.xbonds.idx_j.ptr, impl.xbonds.idx_k.ptr,
+                impl.xbonds.elem_A.ptr, impl.xbonds.elem_B.ptr,
+                impl.xbonds.q_X.ptr, impl.xbonds.q_B.ptr, impl.xbonds.acidity_X.ptr,
+                impl.xbonds.r_cut.ptr,
+                impl.d_coords.ptr,
+                impl.d_grad.ptr,
+                &impl.d_energies.ptr[impl.E_XBOND]);
+        } else {
+            k_xbonds<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
+                impl.xbonds.n,
+                impl.xbonds.idx_i.ptr, impl.xbonds.idx_j.ptr, impl.xbonds.idx_k.ptr,
+                impl.xbonds.elem_A.ptr, impl.xbonds.elem_B.ptr,
+                impl.xbonds.q_X.ptr, impl.xbonds.q_B.ptr, impl.xbonds.acidity_X.ptr,
+                impl.xbonds.r_cut.ptr,
+                impl.d_coords.ptr,
+                impl.d_grad.ptr,
+                &impl.d_energies.ptr[impl.E_XBOND]);
+        }
     }
     if (m_hbond_enabled && impl.hbonds.n > 0) {
         LaunchConfig cfg = getLaunchConfig(impl.hbonds.n);
@@ -1529,31 +1582,15 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
 
     // =========================================================================
     // 3. Postprocess on main stream
-    // Phase 4b: Relaxed stream dependencies (Claude Generated March 2026)
-    //   k_coulomb_self   — needs d_charges + d_cn (uploaded on main stream, no kernel deps)
-    //   k_subtract_qtmp  — needs d_dEdcn (from pairwise + bonded), NOT threebody
+    // Phase 4b+Fusion: Fused Coulomb postprocess (Claude Generated March 2026)
+    //   k_coulomb_postprocess — fused self-energy + qtmp subtraction in single O(N) pass
+    //     Needs d_dEdcn (from pairwise + bonded) for qtmp, NOT threebody
     //   k_cn_chainrule   — needs d_dEdcn complete from ALL streams → wait for all 3
     // =========================================================================
 
-    // k_coulomb_self: only reads d_charges and d_cn which are on main stream already.
-    // Can run immediately after charge upload, no need to wait for kernel streams.
-    if (m_coulomb_enabled && impl.coul_self_on_gpu) {
-        LaunchConfig cfg = getLaunchConfig(N);
-        k_coulomb_self<<<cfg.gridSize, cfg.blockSize, 0, stream>>>(
-            N,
-            impl.d_charges.ptr,
-            impl.d_coul_chi_base.ptr,
-            impl.d_coul_cnf.ptr,
-            impl.d_cn.ptr,
-            impl.d_coul_gam.ptr,
-            impl.d_coul_alp.ptr,
-            &impl.d_energies.ptr[impl.E_COUL_SELF]);
-    }
-
-    // k_subtract_qtmp: reads d_dEdcn which is accumulated by dispersion (pairwise)
-    // and bonds (bonded). Does NOT need threebody event.
     const bool need_snapshots = (m_verbosity >= 3);
-    if (gradient && m_coulomb_enabled && m_cnf.size() == N && m_eeq_charges.size() == N) {
+    if (m_coulomb_enabled && impl.coul_self_on_gpu) {
+        // Wait for pairwise+bonded streams (dEdcn dependency for qtmp subtraction)
         cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
         cudaStreamWaitEvent(stream, impl.event_bonded, 0);
 
@@ -1562,13 +1599,19 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
                             N * sizeof(double), cudaMemcpyDeviceToDevice, stream);
         }
 
-        LaunchConfig cfg_qtmp = getLaunchConfig(N);
-        k_subtract_qtmp<<<cfg_qtmp.gridSize, cfg_qtmp.blockSize, 0, stream>>>(
+        bool do_subtract = gradient && m_cnf.size() == N && m_eeq_charges.size() == N;
+        LaunchConfig cfg = getLaunchConfig(N);
+        k_coulomb_postprocess<<<cfg.gridSize, cfg.blockSize, 0, stream>>>(
             N,
             impl.d_charges.ptr,
+            impl.d_coul_chi_base.ptr,
             impl.d_coul_cnf.ptr,
             impl.d_cn.ptr,
-            impl.d_dEdcn.ptr);
+            impl.d_coul_gam.ptr,
+            impl.d_coul_alp.ptr,
+            impl.d_dEdcn.ptr,
+            &impl.d_energies.ptr[impl.E_COUL_SELF],
+            do_subtract);
     }
 
     // k_cn_chainrule: reads d_dEdcn (must be final) and d_grad (accumulated by ALL
@@ -1839,4 +1882,67 @@ void FFWorkspaceGPU::synchronizeMainStream()
 {
     if (m_impl && m_impl->stream)
         checkCuda(cudaStreamSynchronize(m_impl->stream), "synchronizeMainStream");
+}
+
+// ---------------------------------------------------------------------------
+// setMixedPrecision — enable/disable FP32 intermediates for repulsion/batm/xbonds
+// Claude Generated (March 2026)
+// ---------------------------------------------------------------------------
+void FFWorkspaceGPU::setMixedPrecision(bool enable)
+{
+    if (m_impl) m_impl->use_mixed_precision = enable;
+}
+
+// ---------------------------------------------------------------------------
+// checkDisplacement — GPU flag-based topology displacement check
+// Claude Generated (March 2026)
+// ---------------------------------------------------------------------------
+bool FFWorkspaceGPU::checkDisplacement(double threshold)
+{
+    if (!m_impl || !m_impl->d_ref_coords.ptr || !m_impl->d_coords.ptr) return true;
+    auto& impl = *m_impl;
+
+    // Zero the flag
+    int zero = 0;
+    checkCuda(cudaMemcpyAsync(impl.d_disp_flag.ptr, &zero, sizeof(int),
+                               cudaMemcpyHostToDevice, impl.stream),
+              "checkDisplacement: zero flag");
+
+    // Launch displacement check kernel
+    LaunchConfig cfg = getLaunchConfig(m_natoms);
+    k_check_displacement<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        m_natoms,
+        impl.d_coords.ptr,
+        impl.d_ref_coords.ptr,
+        threshold * threshold,
+        impl.d_disp_flag.ptr);
+
+    // Download single int result
+    int result = 0;
+    checkCuda(cudaMemcpyAsync(&result, impl.d_disp_flag.ptr, sizeof(int),
+                               cudaMemcpyDeviceToHost, impl.stream),
+              "checkDisplacement: download flag");
+    checkCuda(cudaStreamSynchronize(impl.stream), "checkDisplacement: sync");
+
+    return result != 0;
+}
+
+// ---------------------------------------------------------------------------
+// updateReferenceGeometry — copy d_coords → d_ref_coords (device-to-device)
+// Claude Generated (March 2026)
+// ---------------------------------------------------------------------------
+void FFWorkspaceGPU::updateReferenceGeometry()
+{
+    if (!m_impl || !m_impl->d_coords.ptr) return;
+    auto& impl = *m_impl;
+
+    // Allocate d_ref_coords on first call
+    if (!impl.d_ref_coords.ptr) {
+        impl.d_ref_coords.alloc(3 * m_natoms);
+    }
+
+    checkCuda(cudaMemcpyAsync(impl.d_ref_coords.ptr, impl.d_coords.ptr,
+                               3 * m_natoms * sizeof(double),
+                               cudaMemcpyDeviceToDevice, impl.stream),
+              "updateReferenceGeometry: D2D copy");
 }

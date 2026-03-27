@@ -239,6 +239,28 @@ public:
     /// Set verbosity for diagnostic snapshot downloads (only >= 3 triggers snapshot D2H)
     void setVerbosity(int v) { m_verbosity = v; }
 
+    /// Enable/disable FP32 mixed precision for repulsion, BATM, and XBonds kernels.
+    /// Default: enabled. FP64 fallback available for validation.
+    void setMixedPrecision(bool enable);
+
+    // =========================================================================
+    // GPU Topology Displacement Check (Claude Generated March 2026)
+    // =========================================================================
+
+    /**
+     * @brief Check if any atom moved more than threshold (Bohr) from reference geometry.
+     *
+     * Uses flag-based GPU kernel: each thread checks one atom, atomicOr sets flag
+     * if any atom exceeds squared threshold. Single int D2H transfer.
+     *
+     * @param threshold  Maximum allowed displacement in Bohr (0.5 for topology)
+     * @return true if any atom exceeded the threshold
+     */
+    bool checkDisplacement(double threshold);
+
+    /// Copy current d_coords to d_ref_coords (device-to-device, call after topology update)
+    void updateReferenceGeometry();
+
     // =========================================================================
     // Main calculation
     // =========================================================================

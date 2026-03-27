@@ -197,8 +197,20 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
     const int N = static_cast<int>(m_atom_types.size());
     const Matrix& geom_bohr = m_gfnff->getGeometryBohr();
 
-    // --- Step 1: GPU CN computation ---
+    // --- Step 0: GPU topology displacement check (Claude Generated March 2026) ---
+    // Runs on GPU where coords already live. Result fed to GFNFF::needsFullTopologyUpdate()
+    // to skip CPU O(N) Eigen matrix subtraction.
     m_gpu_workspace->setGeometry(geom_bohr);
+    {
+        bool needs_topo_update = m_gpu_workspace->checkDisplacement(0.5);
+        m_gfnff->setExternalTopologyDecision(needs_topo_update);
+        if (needs_topo_update) {
+            // Reference geometry updated after topology recalculation (triggered inside prepareCNAndEEQ)
+            // — updateReferenceGeometry() called below after prepareCNAndEEQ.
+        }
+    }
+
+    // --- Step 1: GPU CN computation ---
     m_gpu_workspace->computeCN(m_atom_types);
 
     // Copy CN from pinned buffer into pre-allocated Vector (no heap allocs)
@@ -285,7 +297,16 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
 
     // === CPU: CN distribution + EEQ parameter extraction (skip CPU EEQ solve) ===
     // prepareCNAndEEQ with skip_eeq=true: does CN, CNF, dcn setup but NO matrix build/solve.
+    // Inside, getCachedTopology() may trigger full topology recalculation if displacement check flagged it.
     m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/true);
+
+    // Update GPU reference geometry ONLY when a full topology recalculation happened.
+    // Must NOT update every step — that would make the displacement check always return 0
+    // and prevent topology updates during MD (instability bug).
+    if (m_gfnff->consumeFullTopologyUpdate()) {
+        m_gpu_workspace->updateReferenceGeometry();
+    }
+
     const Vector& cn = m_gfnff->getLastCN();
 
     // Upload CN derivatives and compute dc6dcn for dispersion gradient

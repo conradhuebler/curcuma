@@ -508,6 +508,7 @@ const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
         m_cached_topology = calculateTopologyInfo();
         m_last_topology_geometry = m_geometry_bohr;
         m_static_topology_valid = true;
+        m_full_topology_recalculated = true;  // Signal GPU path to update reference geometry
         m_geometry_tracker.updateGeometry(m_geometry_bohr);
     } else {
         // Only update dynamic state (cheap, every MD step)
@@ -593,10 +594,18 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
 bool GFNFF::needsFullTopologyUpdate(const Eigen::MatrixXd& geometry_bohr) const {
     // First call - always need full topology
     if (!m_static_topology_valid || m_last_topology_geometry.rows() == 0) {
+        m_external_topology_decision.reset();
         return true;
     }
 
-    // Check maximum atom displacement since last full topology calculation
+    // Use GPU displacement check result if available (Claude Generated March 2026)
+    if (m_external_topology_decision.has_value()) {
+        bool result = m_external_topology_decision.value();
+        m_external_topology_decision.reset();
+        return result;
+    }
+
+    // CPU fallback: Check maximum atom displacement since last full topology calculation
     // Threshold: 0.5 Bohr (~0.26 Å) - large enough to potentially change bond connectivity
     // This is O(N) but much cheaper than O(N²) bond connectivity check
     constexpr double DISPLACEMENT_THRESHOLD = 0.5;  // Bohr

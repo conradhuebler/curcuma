@@ -108,6 +108,28 @@ __global__ void k_zero_double(double* arr, int n)
 }
 
 // ============================================================================
+// Kernel: GPU topology displacement check (flag-based)
+// Claude Generated (March 2026): Checks if any atom moved > threshold from
+// reference geometry. Uses atomicOr on a flag — no reduction needed.
+// Replaces CPU O(N) Eigen matrix subtraction in needsFullTopologyUpdate().
+// ============================================================================
+__global__ void k_check_displacement(
+    int N,
+    const double* __restrict__ current_coords,
+    const double* __restrict__ ref_coords,
+    double        threshold_sq,
+    int*          exceeded_flag)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double dx = current_coords[3*i]   - ref_coords[3*i];
+    double dy = current_coords[3*i+1] - ref_coords[3*i+1];
+    double dz = current_coords[3*i+2] - ref_coords[3*i+2];
+    if (dx*dx + dy*dy + dz*dz > threshold_sq)
+        atomicOr(exceeded_flag, 1);
+}
+
+// ============================================================================
 // Kernel 1: D4 Dispersion
 // E = -C6 * zetac6 * (1/(r^6+R0^6) + 2*r4r2ij/(r^8+R0^8))
 // dE/dr = -C6 * zetac6 * (-6*r^4*t6^2 + 2*r4r2ij*(-8*r^6*t8^2)) * r
@@ -215,6 +237,55 @@ __global__ void k_repulsion(
                 double fac  = dEdr / rij;
                 add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+            }
+        }
+    }
+
+    blockReduceAddEnergy(local_E, energy);
+}
+
+// ============================================================================
+// Kernel 2b: Repulsion with FP32 intermediates (mixed precision)
+// Claude Generated (March 2026): Halves register pressure for intermediates.
+// Same formula as k_repulsion, but distances/exp computed in float.
+// FP64 accumulation boundaries at add_grad() and blockReduceAddEnergy().
+// ============================================================================
+__global__ GFNFF_KERNEL_BOUNDS void k_repulsion_mixed(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const double* __restrict__ alpha,
+    const double* __restrict__ repab,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ coords,
+    double*                    grad,
+    double*                    energy)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+
+    if (tid < n) {
+        int i = idx_i[tid], j = idx_j[tid];
+        float dx = (float)(coords[3*i]   - coords[3*j]);
+        float dy = (float)(coords[3*i+1] - coords[3*j+1]);
+        float dz = (float)(coords[3*i+2] - coords[3*j+2]);
+        float r2  = dx*dx + dy*dy + dz*dz;
+        float rij = sqrtf(r2);
+
+        if (rij <= (float)r_cut[tid] && rij >= 1e-8f) {
+            float r1_5  = rij * sqrtf(rij);
+            float alp_f = (float)alpha[tid];
+            float rep_f = (float)repab[tid];
+            float alp_r = alp_f * r1_5;
+            if (!isnan(alp_r) && !isnan(rep_f) && alp_r <= 700.0f) {
+                float exp_term = expf(-alp_r);
+                float base_E   = rep_f * exp_term / rij;
+                local_E = (double)base_E;
+
+                float dEdr = -base_E / rij - 1.5f * alp_f * sqrtf(rij) * base_E;
+                float fac  = dEdr / rij;
+                add_grad(grad, i,  (double)( fac*dx), (double)( fac*dy), (double)( fac*dz));
+                add_grad(grad, j,  (double)(-fac*dx), (double)(-fac*dy), (double)(-fac*dz));
             }
         }
     }
@@ -1215,6 +1286,90 @@ __global__ void k_batm(
 }
 
 // ============================================================================
+// Kernel 9b: Bonded ATM with FP32 intermediates (mixed precision)
+// Claude Generated (March 2026): Saves ~35 registers on distance/angle intermediates.
+// Same formula as k_batm, FP64 accumulation at add_grad()/blockReduceAddEnergy().
+// ============================================================================
+__global__ GFNFF_KERNEL_BOUNDS void k_batm_mixed(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const double* __restrict__ zb3atm_i,
+    const double* __restrict__ zb3atm_j,
+    const double* __restrict__ zb3atm_k,
+    const double* __restrict__ coords,
+    const double* __restrict__ topo_charges,
+    double*                    grad,
+    double*                    energy)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+
+    if (tid < n) {
+        int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid];
+
+        float ix = (float)coords[3*i], iy = (float)coords[3*i+1], iz = (float)coords[3*i+2];
+        float jx = (float)coords[3*j], jy = (float)coords[3*j+1], jz = (float)coords[3*j+2];
+        float kx = (float)coords[3*k], ky = (float)coords[3*k+1], kz = (float)coords[3*k+2];
+
+        float rij_x = jx-ix, rij_y = jy-iy, rij_z = jz-iz;
+        float rik_x = kx-ix, rik_y = ky-iy, rik_z = kz-iz;
+        float rjk_x = kx-jx, rjk_y = ky-jy, rjk_z = kz-jz;
+
+        float r2ij = rij_x*rij_x + rij_y*rij_y + rij_z*rij_z;
+        float r2ik = rik_x*rik_x + rik_y*rik_y + rik_z*rik_z;
+        float r2jk = rjk_x*rjk_x + rjk_y*rjk_y + rjk_z*rjk_z;
+
+        float rij = sqrtf(r2ij), rik = sqrtf(r2ik), rjk = sqrtf(r2jk);
+        if (rij >= 1e-10f && rik >= 1e-10f && rjk >= 1e-10f) {
+            float rijk3 = r2ij * r2jk * r2ik;
+            float mijk  = -r2ij + r2jk + r2ik;
+            float imjk  = r2ij - r2jk + r2ik;
+            float ijmk  = r2ij + r2jk - r2ik;
+
+            float ang = 0.375f * ijmk * imjk * mijk / rijk3;
+            float rav3 = r2ij * rij * r2ik * rik * r2jk * rjk;
+
+            float angr9 = (ang + 1.0f) / rav3;
+
+            const float fqq = 3.0f;
+            float fi = fminf(fmaxf(1.0f - fqq * (float)topo_charges[i], -4.0f), 4.0f);
+            float fj = fminf(fmaxf(1.0f - fqq * (float)topo_charges[j], -4.0f), 4.0f);
+            float fk = fminf(fmaxf(1.0f - fqq * (float)topo_charges[k], -4.0f), 4.0f);
+
+            float c9 = fi * fj * fk * (float)zb3atm_i[tid] * (float)zb3atm_j[tid] * (float)zb3atm_k[tid];
+            local_E = (double)(c9 * angr9);
+
+            float dang_ij = -0.375f * (r2ij*r2ij*r2ij + r2ij*r2ij*(r2jk + r2ik)
+                              + r2ij*(3.0f*r2jk*r2jk + 2.0f*r2jk*r2ik + 3.0f*r2ik*r2ik)
+                              - 5.0f*(r2jk - r2ik)*(r2jk - r2ik)*(r2jk + r2ik))
+                              / (rij * rijk3 * rav3);
+
+            float dang_jk = -0.375f * (r2jk*r2jk*r2jk + r2jk*r2jk*(r2ik + r2ij)
+                              + r2jk*(3.0f*r2ik*r2ik + 2.0f*r2ik*r2ij + 3.0f*r2ij*r2ij)
+                              - 5.0f*(r2ik - r2ij)*(r2ik - r2ij)*(r2ik + r2ij))
+                              / (rjk * rijk3 * rav3);
+
+            float dang_ik = -0.375f * (r2ik*r2ik*r2ik + r2ik*r2ik*(r2jk + r2ij)
+                              + r2ik*(3.0f*r2jk*r2jk + 2.0f*r2jk*r2ij + 3.0f*r2ij*r2ij)
+                              - 5.0f*(r2jk - r2ij)*(r2jk - r2ij)*(r2jk + r2ij))
+                              / (rik * rijk3 * rav3);
+
+            float fij = -dang_ij * c9 / rij;
+            float fjk = -dang_jk * c9 / rjk;
+            float fik = -dang_ik * c9 / rik;
+
+            add_grad(grad, j, (double)(-fij*rij_x + fjk*rjk_x), (double)(-fij*rij_y + fjk*rjk_y), (double)(-fij*rij_z + fjk*rjk_z));
+            add_grad(grad, k, (double)(-fik*rik_x - fjk*rjk_x), (double)(-fik*rik_y - fjk*rjk_y), (double)(-fik*rik_z - fjk*rjk_z));
+            add_grad(grad, i, (double)( fij*rij_x + fik*rik_x), (double)( fij*rij_y + fik*rik_y), (double)( fij*rij_z + fik*rik_z));
+        }
+    }
+
+    blockReduceAddEnergy(local_E, energy);
+}
+
+// ============================================================================
 // Kernel 10: ATM Three-Body Dispersion (Axilrod-Teller-Muto)
 // E = c9 * ang * fdmp / 3.0 * triple_scale
 // Reference: ff_workspace_gfnff.cpp:calcATM (1517-1564) + calcATMGradient (1575-1645)
@@ -1433,6 +1588,136 @@ __global__ void k_xbonds(
                 add_grad(grad, B, dE_drXB * rXB_x * inv_rXB + dE_drAB * rAB_x * inv_rAB,
                                   dE_drXB * rXB_y * inv_rXB + dE_drAB * rAB_y * inv_rAB,
                                   dE_drXB * rXB_z * inv_rXB + dE_drAB * rAB_z * inv_rAB);
+            }
+        }
+    }
+
+    blockReduceAddEnergy(local_E, energy);
+}
+
+// ============================================================================
+// Kernel 11b: Halogen Bonds with FP32 intermediates (mixed precision)
+// Claude Generated (March 2026): FP32 for distance/damping intermediates.
+// Same formula as k_xbonds, FP64 at add_grad()/blockReduceAddEnergy().
+// ============================================================================
+__global__ GFNFF_KERNEL_BOUNDS void k_xbonds_mixed(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ elem_A,
+    const int*    __restrict__ elem_B,
+    const double* __restrict__ q_X,
+    const double* __restrict__ q_B,
+    const double* __restrict__ acidity_X,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ coords,
+    double*                    grad,
+    double*                    energy)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+
+    if (tid < n) {
+        const float XB_SCUT_D = 5.0f;
+        const float XB_BACUT_D = 70.0f;
+        const float HB_ALP_D = 6.0f;
+        const float HB_LONGCUT_XB_D = 70.0f;
+        const float XB_ST_D = 15.0f;
+        const float XB_SF_D = 0.03f;
+
+        int A = idx_i[tid], X = idx_j[tid], B = idx_k[tid];
+
+        float ax = (float)coords[3*A], ay = (float)coords[3*A+1], az = (float)coords[3*A+2];
+        float xx = (float)coords[3*X], xy = (float)coords[3*X+1], xz = (float)coords[3*X+2];
+        float bx = (float)coords[3*B], by = (float)coords[3*B+1], bz = (float)coords[3*B+2];
+
+        float rAX_x = xx-ax, rAX_y = xy-ay, rAX_z = xz-az;
+        float rXB_x = bx-xx, rXB_y = by-xy, rXB_z = bz-xz;
+        float rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az;
+
+        float r2AX = rAX_x*rAX_x + rAX_y*rAX_y + rAX_z*rAX_z;
+        float r2XB = rXB_x*rXB_x + rXB_y*rXB_y + rXB_z*rXB_z;
+        float r2AB = rAB_x*rAB_x + rAB_y*rAB_y + rAB_z*rAB_z;
+
+        float r_AX = sqrtf(r2AX), r_XB = sqrtf(r2XB), r_AB = sqrtf(r2AB);
+
+        if (r_XB <= (float)r_cut[tid] && r_XB >= 1e-10f && r_AB >= 1e-10f) {
+            int eA = elem_A[tid] - 1, eB = elem_B[tid] - 1;
+            float r_vdw_AB = ((eA >= 0 && eA < 100) ? (float)d_cov_radii[eA] : 1.0f)
+                           + ((eB >= 0 && eB < 100) ? (float)d_cov_radii[eB] : 1.0f);
+
+            // Short-range damping (integer-exponent loop, exact in FP32)
+            float ratio_s = XB_SCUT_D * r_vdw_AB / (r_XB * r_XB);
+            float p_s = 1.0f;
+            for (int p = 0; p < 6; ++p) p_s *= ratio_s;
+            float damp_short = 1.0f / (1.0f + p_s);
+
+            // Long-range damping
+            float ratio_l = (r_XB * r_XB) / HB_LONGCUT_XB_D;
+            float p_l = 1.0f;
+            for (int p = 0; p < 6; ++p) p_l *= ratio_l;
+            float damp_long = 1.0f / (1.0f + p_l);
+
+            float ratio_outl = (r_AX + r_XB) / r_AB;
+            float expo_outl = XB_BACUT_D * (ratio_outl - 1.0f);
+
+            if (expo_outl <= 15.0f) {
+                float damp_outl = 2.0f / (1.0f + expf(expo_outl));
+
+                // Charge scaling (using double for exp precision, cast result)
+                float Q_X_f = (float)d_charge_scaling(q_X[tid], (double)XB_ST_D, (double)XB_SF_D);
+                float Q_B_f = (float)d_charge_scaling(-q_B[tid], (double)XB_ST_D, (double)XB_SF_D);
+
+                float r3XB = r_XB * r_XB * r_XB;
+                float R_damp = damp_short * damp_long * damp_outl / r3XB;
+                local_E = (double)(-R_damp * Q_B_f * (float)acidity_X[tid] * Q_X_f);
+
+                // Gradient
+                float damp_short_term = 1.0f;
+                float ratio_short_g = XB_SCUT_D * r_vdw_AB / (r_XB * r_XB);
+                for (int p = 0; p < 6; ++p) damp_short_term *= ratio_short_g;
+                float ddamp_short_dr = -2.0f * HB_ALP_D * damp_short * damp_short_term
+                                      / (r_XB * (1.0f + damp_short_term));
+
+                float damp_long_term = 1.0f;
+                float ratio_long_g = (r_XB * r_XB) / HB_LONGCUT_XB_D;
+                for (int p = 0; p < 6; ++p) damp_long_term *= ratio_long_g;
+                float ddamp_long_dr = -2.0f * HB_ALP_D * r_XB * damp_long * damp_long_term
+                                     / (HB_LONGCUT_XB_D * (1.0f + damp_long_term));
+
+                float exp_t = expf(expo_outl);
+                float denom_outl = 1.0f + exp_t;
+                float ddamp_outl_drAX = -2.0f * exp_t * XB_BACUT_D / (r_AB * denom_outl * denom_outl);
+                float ddamp_outl_drXB = ddamp_outl_drAX;
+                float ddamp_outl_drAB = 2.0f * exp_t * XB_BACUT_D * (r_AX + r_XB)
+                                       / (r_AB * r_AB * denom_outl * denom_outl);
+
+                float dRdamp_drXB = (ddamp_short_dr * damp_long * damp_outl
+                                    + damp_short * ddamp_long_dr * damp_outl
+                                    + damp_short * damp_long * ddamp_outl_drXB) / r3XB
+                                   - 3.0f * R_damp / r_XB;
+                float dRdamp_drAX = damp_short * damp_long * ddamp_outl_drAX / r3XB;
+                float dRdamp_drAB = damp_short * damp_long * ddamp_outl_drAB / r3XB;
+
+                float E_pf = -Q_B_f * (float)acidity_X[tid] * Q_X_f;
+                float dE_drXB = E_pf * dRdamp_drXB;
+                float dE_drAX = E_pf * dRdamp_drAX;
+                float dE_drAB = E_pf * dRdamp_drAB;
+
+                float inv_rAX = 1.0f / (r_AX + 1e-14f);
+                float inv_rXB = 1.0f / (r_XB + 1e-14f);
+                float inv_rAB = 1.0f / (r_AB + 1e-14f);
+
+                add_grad(grad, A, (double)(-dE_drAX * rAX_x * inv_rAX - dE_drAB * rAB_x * inv_rAB),
+                                  (double)(-dE_drAX * rAX_y * inv_rAX - dE_drAB * rAB_y * inv_rAB),
+                                  (double)(-dE_drAX * rAX_z * inv_rAX - dE_drAB * rAB_z * inv_rAB));
+                add_grad(grad, X, (double)( dE_drAX * rAX_x * inv_rAX - dE_drXB * rXB_x * inv_rXB),
+                                  (double)( dE_drAX * rAX_y * inv_rAX - dE_drXB * rXB_y * inv_rXB),
+                                  (double)( dE_drAX * rAX_z * inv_rAX - dE_drXB * rXB_z * inv_rXB));
+                add_grad(grad, B, (double)( dE_drXB * rXB_x * inv_rXB + dE_drAB * rAB_x * inv_rAB),
+                                  (double)( dE_drXB * rXB_y * inv_rXB + dE_drAB * rAB_y * inv_rAB),
+                                  (double)( dE_drXB * rXB_z * inv_rXB + dE_drAB * rAB_z * inv_rAB));
             }
         }
     }
@@ -2051,6 +2336,61 @@ __global__ void k_subtract_qtmp(
     double cn_i = fmax(cn[i], 0.0);
     double qtmp = eeq_charges[i] * cnf[i] / (2.0 * sqrt(cn_i) + 1e-16);
     dEdcn[i] -= qtmp;
+}
+
+// ============================================================================
+// Fused Kernel: Coulomb self-energy + qtmp subtraction in single O(N) pass
+// Claude Generated (March 2026): Kernel fusion optimization
+//
+// Combines k_coulomb_self (TERM 2+3 self-energy, energy accumulation) with
+// k_subtract_qtmp (TERM 1b chain-rule correction, dEdcn modification).
+// Saves one kernel launch + fixes pattern inconsistency (now uses
+// blockReduceAddEnergy instead of per-thread atomicAdd).
+//
+// Reference: ff_workspace.cpp::postProcess() lines 354-399
+// ============================================================================
+__global__ GFNFF_KERNEL_BOUNDS void k_coulomb_postprocess(
+    int N,
+    const double* __restrict__ eeq_charges,
+    const double* __restrict__ chi_base,
+    const double* __restrict__ cnf,
+    const double* __restrict__ cn,
+    const double* __restrict__ gam,
+    const double* __restrict__ alp,
+    double*                    dEdcn,
+    double*                    energy,
+    bool                       do_subtract)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+
+    if (i < N) {
+        double q = eeq_charges[i];
+        bool valid = !isnan(q) && alp[i] > 0.0;
+
+        if (valid) {
+            // Coulomb TERM 2+3 self-energy
+            double chi;
+            if (cnf[i] != 0.0) {
+                chi = chi_base[i] + cnf[i] * sqrt(fmax(cn[i], 0.0));
+            } else {
+                chi = chi_base[i];
+            }
+            static const double sqrt_2_over_pi = 0.797884560802865;
+            double E_en   = -q * chi;
+            double E_self = 0.5 * q * q * (gam[i] + sqrt_2_over_pi / sqrt(alp[i]));
+            local_E = E_en + E_self;
+        }
+
+        // Coulomb TERM 1b chain-rule: dEdcn[i] -= qtmp
+        if (do_subtract) {
+            double cn_i = fmax(cn[i], 0.0);
+            double qtmp = q * cnf[i] / (2.0 * sqrt(cn_i) + 1e-16);
+            dEdcn[i] -= qtmp;
+        }
+    }
+
+    blockReduceAddEnergy(local_E, energy);
 }
 
 // ============================================================================

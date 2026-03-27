@@ -548,6 +548,21 @@ public:
 
     /// True if updateHBXBIfNeeded() ran and changed lists since last call
     bool consumeHBXBUpdate() { bool r = m_hbxb_updated; m_hbxb_updated = false; return r; }
+
+    /// Set external topology decision from GPU displacement check (Claude Generated March 2026).
+    /// If set, needsFullTopologyUpdate() uses this value instead of CPU computation.
+    void setExternalTopologyDecision(bool needs_full_update) const {
+        m_external_topology_decision = needs_full_update;
+    }
+
+    /// Returns true if the last getCachedTopology() triggered a full topology recalculation.
+    /// One-shot: resets to false after read. Used by GPU path to know when to update ref geometry.
+    bool consumeFullTopologyUpdate() const {
+        bool r = m_full_topology_recalculated;
+        m_full_topology_recalculated = false;
+        return r;
+    }
+
     const std::vector<GFNFFHydrogenBond>& getLastHBonds() const { return m_last_hbonds; }
     const std::vector<GFNFFHalogenBond>& getLastXBonds() const { return m_last_xbonds; }
 
@@ -2043,6 +2058,8 @@ private:
     mutable std::optional<TopologyInfo> m_cached_topology;
     mutable Eigen::MatrixXd m_last_topology_geometry;  // Geometry when topology was last calculated
     mutable bool m_static_topology_valid = false;       // True if static topology is current
+    mutable bool m_full_topology_recalculated = false;  // Set by getCachedTopology() on full update
+    mutable std::optional<bool> m_external_topology_decision; ///< GPU displacement check result
     mutable std::optional<std::vector<std::pair<int,int>>> m_cached_bond_list;
 
     // Topology caching mode: "auto" (two-tier caching) or "constant" (never recalculate)

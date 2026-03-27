@@ -73,6 +73,19 @@ __global__ GFNFF_KERNEL_BOUNDS void k_repulsion(
     double*                    energy
 );
 
+/// Mixed-precision variant: FP32 intermediates, FP64 accumulation
+__global__ GFNFF_KERNEL_BOUNDS void k_repulsion_mixed(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const double* __restrict__ alpha,
+    const double* __restrict__ repab,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ coords,
+    double*                    grad,
+    double*                    energy
+);
+
 /// GFN-FF Coulomb TERM 1 (pairwise, dynamic EEQ charges)
 /// E = qi * qj * erf(gamma_ij * r) / r
 /// Reference: Fortran gfnff_engrad.F90:1378-1389
@@ -219,6 +232,38 @@ __global__ GFNFF_KERNEL_BOUNDS void k_batm(
     double*                    energy
 );
 
+/// Mixed-precision variant of k_batm: FP32 intermediates, FP64 accumulation
+__global__ GFNFF_KERNEL_BOUNDS void k_batm_mixed(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const double* __restrict__ zb3atm_i,
+    const double* __restrict__ zb3atm_j,
+    const double* __restrict__ zb3atm_k,
+    const double* __restrict__ coords,
+    const double* __restrict__ topo_charges,
+    double*                    grad,
+    double*                    energy
+);
+
+/// Mixed-precision variant of k_xbonds: FP32 intermediates, FP64 accumulation
+__global__ GFNFF_KERNEL_BOUNDS void k_xbonds_mixed(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ elem_A,
+    const int*    __restrict__ elem_B,
+    const double* __restrict__ q_X,
+    const double* __restrict__ q_B,
+    const double* __restrict__ acidity_X,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ coords,
+    double*                    grad,
+    double*                    energy
+);
+
 /// ATM (Axilrod-Teller-Muto): 3-body dispersion with BJ damping (energy + gradient)
 /// Reference: ff_workspace_gfnff.cpp:calcATM+calcATMGradient
 __global__ GFNFF_KERNEL_BOUNDS void k_atm(
@@ -321,6 +366,22 @@ __global__ GFNFF_KERNEL_BOUNDS void k_subtract_qtmp(
     double*                    dEdcn            ///< [N] modified in-place
 );
 
+/// Fused Coulomb self-energy + qtmp subtraction (single O(N) pass)
+/// Replaces separate k_coulomb_self + k_subtract_qtmp launches.
+/// Uses blockReduceAddEnergy for energy (fixes pattern inconsistency).
+__global__ GFNFF_KERNEL_BOUNDS void k_coulomb_postprocess(
+    int N,
+    const double* __restrict__ eeq_charges,
+    const double* __restrict__ chi_base,
+    const double* __restrict__ cnf,
+    const double* __restrict__ cn,
+    const double* __restrict__ gam,
+    const double* __restrict__ alp,
+    double*                    dEdcn,
+    double*                    energy,
+    bool                       do_subtract
+);
+
 /// CN chain-rule gradient: pairwise kernel over CN-relevant atom pairs.
 /// For each pair (i,j): grad_i += fac*(ri-rj), grad_j -= fac*(ri-rj)
 /// where fac = dS/dr / rij * (dEdcn[i]*dlogdcn[i] + dEdcn[j]*dlogdcn[j])
@@ -421,6 +482,16 @@ __global__ GFNFF_KERNEL_BOUNDS void k_gaussian_weights(
 // Utility: zero device array
 // ============================================================================
 __global__ void k_zero_double(double* arr, int n);
+
+// ============================================================================
+// GPU topology displacement check (flag-based, March 2026)
+// ============================================================================
+__global__ void k_check_displacement(
+    int N,
+    const double* __restrict__ current_coords,
+    const double* __restrict__ ref_coords,
+    double        threshold_sq,
+    int*          exceeded_flag);
 
 // ============================================================================
 // Upload covalent radii table to GPU constant memory
