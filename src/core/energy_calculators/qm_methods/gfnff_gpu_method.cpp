@@ -1,18 +1,18 @@
 /*
- * <GGFNFFComputationalMethod — GPU-accelerated GFN-FF wrapper>
+ * <GFNFFGPUComputationalMethod — GPU-accelerated GFN-FF wrapper>
  * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
- * Claude Generated (March 2026): ComputationalMethod adapter for ggfnff.
+ * Claude Generated (March 2026): ComputationalMethod adapter for gfnff GPU path.
  * Clean GPU/CPU separation: GFNFF has no GPU knowledge, this class orchestrates.
  *
- * Usage (Phase 1 unified method name):
+ * Usage:
  *   ./curcuma -sp mol.xyz -method gfnff -gpu cuda
  *   ./curcuma -sp mol.xyz -method gfnff -gpu auto   # GPU if available
  */
 
 #ifdef USE_CUDA
 
-#include "ggfnff_method.h"
+#include "gfnff_gpu_method.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "src/core/energy_calculators/ff_methods/cuda/gpu_utils.h"
@@ -25,7 +25,7 @@
 // Constructor
 // ---------------------------------------------------------------------------
 
-GGFNFFComputationalMethod::GGFNFFComputationalMethod(const std::string& method_name,
+GFNFFGPUComputationalMethod::GFNFFGPUComputationalMethod(const std::string& method_name,
                                                       const json& config)
     : m_parameters(config)
     , m_method_name(method_name)
@@ -37,7 +37,7 @@ GGFNFFComputationalMethod::GGFNFFComputationalMethod(const std::string& method_n
 // Destructor — controlled teardown to survive CUDA heap corruption
 // ---------------------------------------------------------------------------
 
-GGFNFFComputationalMethod::~GGFNFFComputationalMethod()
+GFNFFGPUComputationalMethod::~GFNFFGPUComputationalMethod()
 {
     // Destroy GPU workspace first (holds CUDA resources)
     m_gpu_workspace.reset();
@@ -51,11 +51,11 @@ GGFNFFComputationalMethod::~GGFNFFComputationalMethod()
 // setMolecule — init topology (CPU), then upload parameters to GPU
 // ---------------------------------------------------------------------------
 
-bool GGFNFFComputationalMethod::setMolecule(const Mol& mol)
+bool GFNFFGPUComputationalMethod::setMolecule(const Mol& mol)
 {
     if (!m_gfnff) {
         m_has_error = true;
-        m_error_message = "GGFNFFComputationalMethod: m_gfnff is nullptr";
+        m_error_message = "GFNFFGPUMethod: m_gfnff is nullptr";
         CurcumaLogger::error(m_error_message);
         return false;
     }
@@ -68,7 +68,7 @@ bool GGFNFFComputationalMethod::setMolecule(const Mol& mol)
     // CPU topology + parameter generation (same as CPU gfnff)
     if (!m_gfnff->InitialiseMolecule(mol)) {
         m_has_error = true;
-        m_error_message = "GGFNFFComputationalMethod: InitialiseMolecule failed";
+        m_error_message = "GFNFFGPUMethod: InitialiseMolecule failed";
         CurcumaLogger::error(m_error_message);
         return false;
     }
@@ -83,7 +83,7 @@ bool GGFNFFComputationalMethod::setMolecule(const Mol& mol)
     if (CurcumaLogger::get_verbosity() >= 1) {
         double ms_topo = std::chrono::duration<double, std::milli>(t_after_topo - t_init_start).count();
         double ms_gpu  = std::chrono::duration<double, std::milli>(t_init_end - t_after_topo).count();
-        CurcumaLogger::result_fmt("ggfnff init: topology={:.1f}ms GPU upload={:.1f}ms", ms_topo, ms_gpu);
+        CurcumaLogger::result_fmt("gfnff-gpu init: topology={:.1f}ms GPU upload={:.1f}ms", ms_topo, ms_gpu);
     }
 
     m_initialized = true;
@@ -94,14 +94,14 @@ bool GGFNFFComputationalMethod::setMolecule(const Mol& mol)
 // initGPUWorkspace — split params → GPU workspace + CPU residual workspace
 // ---------------------------------------------------------------------------
 
-bool GGFNFFComputationalMethod::initGPUWorkspace()
+bool GFNFFGPUComputationalMethod::initGPUWorkspace()
 {
     try {
         const std::vector<int>& atom_types = m_atom_types;
         const int natoms = static_cast<int>(atom_types.size());
         if (natoms == 0) {
             m_has_error = true;
-            m_error_message = "GGFNFFComputationalMethod: zero atoms after InitialiseMolecule";
+            m_error_message = "GFNFFGPUMethod: zero atoms after InitialiseMolecule";
             CurcumaLogger::error(m_error_message);
             return false;
         }
@@ -125,7 +125,7 @@ bool GGFNFFComputationalMethod::initGPUWorkspace()
         std::unique_ptr<GFNFFParameterSet> pending = m_gfnff->consumeCachedParameterSet();
         if (!pending) {
             m_has_error = true;
-            m_error_message = "GGFNFFComputationalMethod: no cached params (was InitialiseMolecule called?)";
+            m_error_message = "GFNFFGPUMethod: no cached params (was InitialiseMolecule called?)";
             CurcumaLogger::error(m_error_message);
             return false;
         }
@@ -171,7 +171,7 @@ bool GGFNFFComputationalMethod::initGPUWorkspace()
 
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::success(fmt::format(
-                "ggfnff: GPU workspace ready ({} atoms, {} bonds, {} disp pairs, GPU EEQ enabled)",
+                "gfnff-gpu: GPU workspace ready ({} atoms, {} bonds, {} disp pairs, GPU EEQ enabled)",
                 natoms, m_gpu_workspace->bondCount(), m_gpu_workspace->dispersionCount()));
         }
 
@@ -189,15 +189,15 @@ bool GGFNFFComputationalMethod::initGPUWorkspace()
 // calculateEnergy — orchestrate CN/EEQ/state/calculate (no delegation to GFNFF::Calculation)
 // ---------------------------------------------------------------------------
 
-double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
+double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
 {
     if (!m_initialized || !m_gfnff || !m_gpu_workspace) {
-        CurcumaLogger::error("GGFNFFComputationalMethod: not initialized");
+        CurcumaLogger::error("GFNFFGPUMethod: not initialized");
         return 0.0;
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("=== GGFNFFComputationalMethod::calculateEnergy() START (GPU path) ===");
+        CurcumaLogger::info("=== GFNFFGPUMethod::calculateEnergy() START (GPU path) ===");
     }
 
     auto t0 = std::chrono::high_resolution_clock::now();
@@ -250,12 +250,14 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
         }
 
         // Compute dlogdcn (logistic squashing derivative) — needed for CN chain-rule
+        // Reference: Fortran gfnff_cn.f90 create_dlogCN
+        // dlogdcn[i] = exp(cnmax) / (exp(cnmax) + exp(cn[i]))
+        // This is the derivative of the logistic-squashed CN.
         constexpr double cnmax = 4.4;
-        const double lncnmax = std::log(1.0 + std::exp(cnmax));
+        const double exp_cnmax = std::exp(cnmax);
         Vector dlogdcn(N);
         for (int i = 0; i < N; ++i) {
-            double expval = std::exp(lncnmax - m_gpu_cn_final[i]);
-            dlogdcn[i] = (expval - 1.0) / expval;
+            dlogdcn[i] = exp_cnmax / (exp_cnmax + std::exp(m_gpu_cn_final[i]));
         }
         m_gpu_workspace->setDlogDCN(dlogdcn);
     }
@@ -481,20 +483,20 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
 // Remaining ComputationalMethod interface — all delegate to m_gfnff
 // ---------------------------------------------------------------------------
 
-bool GGFNFFComputationalMethod::updateGeometry(const Matrix& geometry)
+bool GFNFFGPUComputationalMethod::updateGeometry(const Matrix& geometry)
 {
     if (!m_gfnff) return false;
     return m_gfnff->UpdateMolecule(geometry);
 }
 
-Matrix GGFNFFComputationalMethod::getGradient() const
+Matrix GFNFFGPUComputationalMethod::getGradient() const
 {
     // Return cached gradient (copied immediately after calculate() to avoid
     // heap corruption issues when copying from GPU workspace later)
     return m_cached_gradient;
 }
 
-void GGFNFFComputationalMethod::copyGradientTo(Matrix& target) const
+void GFNFFGPUComputationalMethod::copyGradientTo(Matrix& target) const
 {
     // Claude Generated (March 2026): Direct memcpy into pre-allocated target.
     // Avoids temporary Matrix creation (heap alloc) that crashes on CUDA-corrupted heap.
@@ -507,62 +509,62 @@ void GGFNFFComputationalMethod::copyGradientTo(Matrix& target) const
     }
 }
 
-Vector GGFNFFComputationalMethod::getCharges() const
+Vector GFNFFGPUComputationalMethod::getCharges() const
 {
     return m_gfnff->Charges();
 }
 
-Vector GGFNFFComputationalMethod::getBondOrders() const
+Vector GFNFFGPUComputationalMethod::getBondOrders() const
 {
     return m_gfnff->BondOrders();
 }
 
-Position GGFNFFComputationalMethod::getDipole() const
+Position GFNFFGPUComputationalMethod::getDipole() const
 {
     return Position{0.0, 0.0, 0.0};
 }
 
-void GGFNFFComputationalMethod::setThreadCount(int threads)
+void GFNFFGPUComputationalMethod::setThreadCount(int threads)
 {
     (void)threads;  // GPU path does not use CPU threads for bonded terms
 }
 
-void GGFNFFComputationalMethod::setParameters(const json& params)
+void GFNFFGPUComputationalMethod::setParameters(const json& params)
 {
     m_parameters = params;
     if (m_gfnff)
         m_gfnff->setParameters(params);
 }
 
-json GGFNFFComputationalMethod::getParameters() const
+json GFNFFGPUComputationalMethod::getParameters() const
 {
     return m_parameters;
 }
 
-bool GGFNFFComputationalMethod::hasError() const
+bool GFNFFGPUComputationalMethod::hasError() const
 {
     return m_has_error;
 }
 
-void GGFNFFComputationalMethod::clearError()
+void GFNFFGPUComputationalMethod::clearError()
 {
     m_has_error = false;
     m_error_message.clear();
 }
 
-std::string GGFNFFComputationalMethod::getErrorMessage() const
+std::string GFNFFGPUComputationalMethod::getErrorMessage() const
 {
     return m_error_message;
 }
 
-json GGFNFFComputationalMethod::getEnergyDecomposition() const
+json GFNFFGPUComputationalMethod::getEnergyDecomposition() const
 {
     json energy_json;
     energy_json["GPU_Total"]  = m_last_energy;
     return energy_json;
 }
 
-const Vector& GGFNFFComputationalMethod::getGPUdEdcn() const
+const Vector& GFNFFGPUComputationalMethod::getGPUdEdcn() const
 {
     return m_gpu_workspace->dEdcnTotal();
 }
@@ -572,7 +574,7 @@ const Vector& GGFNFFComputationalMethod::getGPUdEdcn() const
 // Claude Generated (March 2026): Replaces sparse dcn matrices
 // ---------------------------------------------------------------------------
 
-void GGFNFFComputationalMethod::generateCNPairList(const Matrix& geom_bohr)
+void GFNFFGPUComputationalMethod::generateCNPairList(const Matrix& geom_bohr)
 {
     const int N = static_cast<int>(geom_bohr.rows());
     const auto& rcov_d3 = GFNFFParameters::covalent_rad_d3;

@@ -1,7 +1,7 @@
 #!/bin/bash
-# Test: GPU GFN-FF (ggfnff) Single Point — energy matches CPU gfnff
+# Test: GPU GFN-FF Single Point — energy matches CPU gfnff
 # Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
-# Claude Generated (March 2026): Validates ggfnff CLI method against CPU gfnff reference
+# Claude Generated (March 2026): Validates gfnff -gpu cuda CLI against CPU gfnff reference
 
 set -e
 export LC_NUMERIC=C
@@ -9,25 +9,25 @@ export LC_NUMERIC=C
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../test_utils.sh"
 
-TEST_NAME="ggfnff - 01: GPU GFN-FF Single Point (caffeine)"
+TEST_NAME="gfnff_gpu - 01: GPU GFN-FF Single Point (caffeine)"
 TEST_DIR="$SCRIPT_DIR"
 
 # Reference energy from CPU gfnff (test 02_caffeine_gfnff_energy_components)
-# ggfnff must match within 1e-5 Eh
+# gfnff GPU must match CPU within 1e-5 Eh
 REFERENCE_TOTAL_ENERGY="-4.672736999448"
 ENERGY_TOLERANCE="0.00002"   # 20 µEh — generous for GPU floating-point
 
 run_test() {
     cd "$TEST_DIR"
 
-    # Attempt to run ggfnff; exit code 1 with "requires a CUDA build" → skip
-    echo "Executing: $CURCUMA -sp caffeine.xyz -method ggfnff -verbosity 1"
-    $CURCUMA -sp caffeine.xyz -method ggfnff -verbosity 1 > stdout.log 2> stderr.log
+    # Attempt to run gfnff GPU; exit code 1 with "requires a CUDA build" → skip
+    echo "Executing: $CURCUMA -sp caffeine.xyz -method gfnff -gpu cuda -verbosity 1"
+    $CURCUMA -sp caffeine.xyz -method gfnff -gpu cuda -verbosity 1 > stdout.log 2> stderr.log
     local exit_code=$?
 
-    # Graceful skip if ggfnff is not compiled in
+    # Graceful skip if CUDA is not compiled in
     if grep -q "requires a CUDA build\|USE_CUDA" stderr.log stdout.log 2>/dev/null; then
-        echo -e "${YELLOW}SKIP${NC}: ggfnff not available in this build (USE_CUDA=OFF)"
+        echo -e "${YELLOW}SKIP${NC}: gfnff GPU not available in this build (USE_CUDA=OFF)"
         exit 0
     fi
 
@@ -37,7 +37,7 @@ run_test() {
         exit 0
     fi
 
-    assert_exit_code $exit_code 0 "ggfnff single point should succeed"
+    assert_exit_code $exit_code 0 "gfnff GPU single point should succeed"
     return 0
 }
 
@@ -55,14 +55,14 @@ validate_results() {
     fi
 
     if [ -z "$total_energy" ]; then
-        echo -e "${RED}✗ FAIL${NC}: Could not extract energy from ggfnff output"
+        echo -e "${RED}✗ FAIL${NC}: Could not extract energy from gfnff GPU output"
         TESTS_FAILED=$((TESTS_FAILED + 1))
         return 1
     fi
 
-    echo "GPU ggfnff energy: $total_energy Eh"
-    echo "CPU gfnff  ref:    $REFERENCE_TOTAL_ENERGY Eh"
-    assert_scientific_value "$REFERENCE_TOTAL_ENERGY" "$total_energy" "$ENERGY_TOLERANCE" "ggfnff energy matches gfnff CPU reference"
+    echo "GPU gfnff energy: $total_energy Eh"
+    echo "CPU gfnff ref:    $REFERENCE_TOTAL_ENERGY Eh"
+    assert_scientific_value "$REFERENCE_TOTAL_ENERGY" "$total_energy" "$ENERGY_TOLERANCE" "gfnff GPU energy matches CPU reference"
 }
 
 cleanup_before() {

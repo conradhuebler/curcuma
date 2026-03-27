@@ -595,7 +595,7 @@ std::string method = "d4";  // Matches Fortran reference
 - **Implementation**: `getCachedTopology()` in `gfnff_method.cpp`, `needsFullTopologyUpdate()` checks displacement
 
 ### ⚠️ Known Issues
-- ggfnff GPU validation tests (test_ggfnff) fail with JSON null error — pre-existing, unrelated to pipeline
+- gfnff GPU validation tests (test_gfnff_gpu) fail with JSON null error — pre-existing, unrelated to pipeline
 - k_dispersion cannot overlap with EEQ in gradient mode (dc6dcn dependency)
 
 ## Open Bugs

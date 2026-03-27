@@ -30,7 +30,7 @@
 #include "qm_methods/external_gfnff_method.h"
 #include "qm_methods/gfnff_method.h"
 #ifdef USE_CUDA
-#include "qm_methods/ggfnff_method.h"
+#include "qm_methods/gfnff_gpu_method.h"
 #endif
 #ifdef USE_TBLITE
 #include "qm_methods/tblite_method.h"
@@ -49,7 +49,7 @@ using namespace std;
 // =================================================================================
 
 const std::vector<std::string> MethodFactory::m_ff_methods = {
-    "uff", "uff-d3", "d3", "qmdff", "gfnff", "gfnff-d3", "ggfnff"  // ggfnff deprecated, use gfnff -gpu cuda
+    "uff", "uff-d3", "d3", "qmdff", "gfnff", "gfnff-d3"
 };
 
 const std::vector<std::string> MethodFactory::m_tblite_methods = {
@@ -366,7 +366,7 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         if (gpu_mode == "cuda") {
 #ifdef USE_CUDA
             CurcumaLogger::info("GFN-FF: using GPU acceleration (CUDA)");
-            return std::make_unique<GGFNFFComputationalMethod>("gfnff", config);
+            return std::make_unique<GFNFFGPUComputationalMethod>("gfnff", config);
 #else
             throw MethodCreationException(
                 "GPU acceleration requested (--gpu cuda) but Curcuma was compiled "
@@ -377,19 +377,6 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         CurcumaLogger::info("GFN-FF: using CPU implementation");
         return std::make_unique<GFNFFComputationalMethod>("gfnff", config);
     }
-
-    // GPU-accelerated GFN-FF (legacy alias, deprecated)
-#ifdef USE_CUDA
-    if (method == "ggfnff") {
-        CurcumaLogger::warn("'ggfnff' is deprecated. Use '-method gfnff -gpu cuda'");
-        return std::make_unique<GGFNFFComputationalMethod>("gfnff", config);
-    }
-#else
-    if (method == "ggfnff") {
-        throw MethodCreationException(
-            "Method 'ggfnff' requires a CUDA build. Recompile with: cmake -DUSE_CUDA=ON");
-    }
-#endif
 
     // Force field methods (always available)
     if (method == "uff" || method == "uff-d3" || method == "qmdff") {

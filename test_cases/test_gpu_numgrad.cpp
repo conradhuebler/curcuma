@@ -1,5 +1,5 @@
 /**
- * GPU analytical vs numerical gradient check for ggfnff.
+ * GPU analytical vs numerical gradient check for gfnff -gpu cuda.
  * Claude Generated (March 2026)
  */
 #ifdef USE_CUDA
@@ -26,7 +26,7 @@ int main(int argc, char* argv[])
     constexpr double bohr2ang = 0.529177249;
     double step_ang = step_bohr * bohr2ang;
 
-    std::cout << "GPU ggfnff: Analytical vs Numerical Gradient\n"
+    std::cout << "GPU gfnff: Analytical vs Numerical Gradient\n"
               << "Molecule: " << mol_file << ", step=" << step_bohr << " Bohr\n"
               << std::string(60, '=') << std::endl;
 
@@ -35,10 +35,10 @@ int main(int argc, char* argv[])
     int N = mol.m_number_atoms;
     std::cout << "Atoms: " << N << std::endl;
 
-    json config = {{"verbosity", 0}, {"threads", 1}, {"ggfnff", json::object()}};
+    json config = {{"verbosity", 0}, {"threads", 1}, {"gfnff", json::object()}, {"gpu", "cuda"}};
 
     // Analytical gradient
-    auto* calc = new EnergyCalculator("ggfnff", config);
+    auto* calc = new EnergyCalculator("gfnff", config);
     calc->setMolecule(mol);
     double E0 = calc->CalculateEnergy(true);
     Matrix G_anal = calc->Gradient();
@@ -54,7 +54,7 @@ int main(int argc, char* argv[])
             // +h
             Mol mol_p = mol;
             mol_p.m_geometry(i, d) = orig_geom(i, d) + step_ang;
-            auto* c_p = new EnergyCalculator("ggfnff", config);
+            auto* c_p = new EnergyCalculator("gfnff", config);
             c_p->setMolecule(mol_p);
             double ep = c_p->CalculateEnergy(false);
             delete c_p;
@@ -62,7 +62,7 @@ int main(int argc, char* argv[])
             // -h
             Mol mol_m = mol;
             mol_m.m_geometry(i, d) = orig_geom(i, d) - step_ang;
-            auto* c_m = new EnergyCalculator("ggfnff", config);
+            auto* c_m = new EnergyCalculator("gfnff", config);
             c_m->setMolecule(mol_m);
             double em = c_m->CalculateEnergy(false);
             delete c_m;

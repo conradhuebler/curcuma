@@ -1,8 +1,8 @@
 /**
- * GPU GFN-FF Validation: ggfnff vs gfnff (CPU)
+ * GPU GFN-FF Validation: gfnff -gpu cuda vs gfnff (CPU)
  *
  * Claude Generated (March 2026): Validates that the GPU-accelerated GFN-FF
- * (ggfnff) produces energies and gradients numerically identical to the CPU
+ * produces energies and gradients numerically identical to the CPU
  * reference implementation (gfnff).
  *
  * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
@@ -14,8 +14,8 @@
 #include "src/core/molecule.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/global.h"
-#include "src/core/energy_calculators/qm_methods/gfnff_method.h"   // CPU wrapper
-#include "src/core/energy_calculators/qm_methods/ggfnff_method.h"  // GPU wrapper
+#include "src/core/energy_calculators/qm_methods/gfnff_method.h"       // CPU wrapper
+#include "src/core/energy_calculators/qm_methods/gfnff_gpu_method.h"  // GPU wrapper
 #include "src/core/energy_calculators/ff_methods/gfnff.h"          // GFNFF class
 #include "src/core/energy_calculators/ff_methods/ff_workspace.h"   // FFWorkspace
 #include "json.hpp"
@@ -77,7 +77,7 @@ int main(int argc, char* argv[])
     }
 
     std::cout << "==================================================\n"
-              << "  GFN-FF GPU Validation: ggfnff vs gfnff (CPU)\n"
+              << "  GFN-FF GPU Validation: gfnff -gpu cuda vs gfnff (CPU)\n"
               << "  Molecule: " << xyz_file << "\n"
               << "==================================================" << std::endl;
 
@@ -85,11 +85,12 @@ int main(int argc, char* argv[])
     Mol mol = molecule.getMolInfo();
     std::cout << "Atoms: " << mol.m_number_atoms << std::endl;
 
-    json config = {{"verbosity", 0}, {"threads", 1}, {"gfnff", json::object()}, {"ggfnff", json::object()}};
+    json config_cpu = {{"verbosity", 0}, {"threads", 1}, {"gfnff", json::object()}};
+    json config_gpu = {{"verbosity", 0}, {"threads", 1}, {"gfnff", json::object()}, {"gpu", "cuda"}};
     int passed = 0, failed = 0;
 
     // --- CPU gfnff ---
-    auto* cpu = new EnergyCalculator("gfnff", config);
+    auto* cpu = new EnergyCalculator("gfnff", config_cpu);
     cpu->setMolecule(mol);
     double cpu_e = cpu->CalculateEnergy(true);
     Matrix G_cpu = cpu->Gradient();
@@ -98,12 +99,12 @@ int main(int argc, char* argv[])
 
     std::cout.flush();
 
-    // --- GPU ggfnff ---
-    auto* gpu = new EnergyCalculator("ggfnff", config);
+    // --- GPU gfnff ---
+    auto* gpu = new EnergyCalculator("gfnff", config_gpu);
     gpu->setMolecule(mol);
     // Debug: check initialization
-    if (gpu->Interface() && dynamic_cast<GGFNFFComputationalMethod*>(gpu->Interface())) {
-        auto* gm = dynamic_cast<GGFNFFComputationalMethod*>(gpu->Interface());
+    if (gpu->Interface() && dynamic_cast<GFNFFGPUComputationalMethod*>(gpu->Interface())) {
+        auto* gm = dynamic_cast<GFNFFGPUComputationalMethod*>(gpu->Interface());
         if (gm->hasError()) {
             std::cerr << "GPU INIT ERROR: " << gm->getErrorMessage() << std::endl;
         }
@@ -127,7 +128,7 @@ int main(int argc, char* argv[])
     {
         // Access CPU dEdcn via GFNFFComputationalMethod → GFNFF → FFWorkspace
         auto* cpu_method = dynamic_cast<GFNFFComputationalMethod*>(cpu->Interface());
-        auto* gpu_method = dynamic_cast<GGFNFFComputationalMethod*>(gpu->Interface());
+        auto* gpu_method = dynamic_cast<GFNFFGPUComputationalMethod*>(gpu->Interface());
 
         if (cpu_method && cpu_method->getGFNFF() && cpu_method->getGFNFF()->getWorkspace()
             && gpu_method) {
@@ -234,7 +235,7 @@ int main(int argc, char* argv[])
 
     // --- Compare gradient BEFORE CN chain-rule (isolate CN contribution) ---
     {
-        auto* gpu_method = dynamic_cast<GGFNFFComputationalMethod*>(gpu->Interface());
+        auto* gpu_method = dynamic_cast<GFNFFGPUComputationalMethod*>(gpu->Interface());
         auto* cpu_method2 = dynamic_cast<GFNFFComputationalMethod*>(cpu->Interface());
         if (gpu_method && cpu_method2 && cpu_method2->getGFNFF() && cpu_method2->getGFNFF()->getWorkspace()
             && gpu_method->getGPUWorkspace()) {
@@ -328,10 +329,10 @@ int main(int argc, char* argv[])
                 Mol mol_p = mol;
                 mol_p.m_geometry = orig_geom;
                 mol_p.m_geometry(atom, d) += step_ang;
-                auto* cpu_p = new EnergyCalculator("gfnff", config);
+                auto* cpu_p = new EnergyCalculator("gfnff", config_cpu);
                 cpu_p->setMolecule(mol_p);
                 double cpu_ep = cpu_p->CalculateEnergy(false);
-                auto* gpu_p = new EnergyCalculator("ggfnff", config);
+                auto* gpu_p = new EnergyCalculator("gfnff", config_gpu);
                 gpu_p->setMolecule(mol_p);
                 double gpu_ep = gpu_p->CalculateEnergy(false);
                 delete cpu_p;
@@ -342,10 +343,10 @@ int main(int argc, char* argv[])
                 Mol mol_m = mol;
                 mol_m.m_geometry = orig_geom;
                 mol_m.m_geometry(atom, d) -= step_ang;
-                auto* cpu_m = new EnergyCalculator("gfnff", config);
+                auto* cpu_m = new EnergyCalculator("gfnff", config_cpu);
                 cpu_m->setMolecule(mol_m);
                 double cpu_em = cpu_m->CalculateEnergy(false);
-                auto* gpu_m = new EnergyCalculator("ggfnff", config);
+                auto* gpu_m = new EnergyCalculator("gfnff", config_gpu);
                 gpu_m->setMolecule(mol_m);
                 double gpu_em = gpu_m->CalculateEnergy(false);
                 delete cpu_m;
@@ -419,7 +420,7 @@ int main(int argc, char* argv[])
 
 #include <iostream>
 int main() {
-    std::cout << "test_ggfnff: built without USE_CUDA — skipping GPU tests\n";
+    std::cout << "test_gfnff_gpu: built without USE_CUDA — skipping GPU tests\n";
     return 0;
 }
 

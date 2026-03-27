@@ -53,7 +53,7 @@ option(USE_PCH
     "Enable Precompiled Headers for faster compilation" ON)
 
 option(USE_CUDA
-    "Enable CUDA-accelerated GFN-FF (ggfnff method, requires CUDA toolkit)" OFF)
+    "Enable CUDA-accelerated GFN-FF (gfnff -gpu cuda, requires CUDA toolkit)" OFF)
 
 if(USE_MKL)
     if(NOT DEFINED MKL_ROOT)
@@ -669,7 +669,7 @@ if(USE_Plumed)
     endif()
 endif()
 
-# Claude Generated (March 2026): CUDA-accelerated GFN-FF (ggfnff method)
+# Claude Generated (March 2026): CUDA-accelerated GFN-FF (gfnff -gpu cuda)
 # Requires: CUDA toolkit, compute capability >= 6.0 (Pascal / GTX 10xx)
 # Build: cmake -DUSE_CUDA=ON && make -j4
 if(USE_CUDA)
@@ -685,7 +685,7 @@ if(USE_CUDA)
         src/core/energy_calculators/ff_methods/cuda/ff_workspace_gpu.cu
         src/core/energy_calculators/ff_methods/cuda/eeq_solver_gpu.cu
         src/core/energy_calculators/ff_methods/cuda/gpu_utils.cpp
-        src/core/energy_calculators/qm_methods/ggfnff_method.cpp
+        src/core/energy_calculators/qm_methods/gfnff_gpu_method.cpp
     )
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY LANGUAGE CUDA)
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
@@ -696,7 +696,7 @@ if(USE_CUDA)
     target_link_libraries(curcuma_core CUDA::cudart CUDA::cusolver)
     target_compile_definitions(curcuma_core PUBLIC USE_CUDA)
 
-    message(STATUS "CUDA support enabled: ggfnff method available")
+    message(STATUS "CUDA support enabled: gfnff -gpu cuda available")
     message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 endif()
 

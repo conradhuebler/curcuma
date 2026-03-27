@@ -727,7 +727,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
               "pinned alloc m_h_grad_snap");
     // Claude Generated (March 2026): Pre-allocate pinned CN download buffer
     // NOTE: Do NOT allocate Eigen Vectors here — heap may be corrupted after CUDA allocs.
-    // The caller (ggfnff_method.cpp) pre-allocates m_gpu_cn_final before CUDA init.
+    // The caller (gfnff_gpu_method.cpp) pre-allocates m_gpu_cn_final before CUDA init.
     checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_cn_final), natoms * sizeof(double)),
               "pinned alloc m_h_cn_final");
     checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_energies),
@@ -1726,9 +1726,17 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
         cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
         cudaStreamWaitEvent(stream, impl.event_bonded, 0);
 
-        if (need_snapshots) {
+        // d_dEdcn_snapshot must always be populated — dEdcnTotal() is public API
+        // used by external code (tests, chain-rule validation) regardless of verbosity.
+        if (m_coulomb_enabled && impl.coul_self_on_gpu && impl.d_dEdcn_snapshot.ptr) {
             cudaMemcpyAsync(impl.d_dEdcn_snapshot.ptr, impl.d_dEdcn.ptr,
                             N * sizeof(double), cudaMemcpyDeviceToDevice, stream);
+        }
+
+        if (need_snapshots) {
+            // Grad snapshot is only for diagnostics at verbosity >= 3
+            cudaMemcpyAsync(impl.d_grad_snapshot.ptr, impl.d_grad.ptr,
+                            3*N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
         }
 
         bool do_subtract = gradient && m_cnf.size() == N && m_eeq_charges.size() == N;
@@ -1797,11 +1805,13 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
                                   cudaMemcpyDeviceToHost, stream),
                   "async gradient download");
 
+        // Always download dEdcn snapshot — dEdcnTotal() is public API
+        checkCuda(cudaMemcpyAsync(m_h_dEdcn_snap, impl.d_dEdcn_snapshot.ptr,
+                                  N * sizeof(double),
+                                  cudaMemcpyDeviceToHost, stream),
+                  "async dEdcn snapshot download");
+
         if (need_snapshots) {
-            checkCuda(cudaMemcpyAsync(m_h_dEdcn_snap, impl.d_dEdcn_snapshot.ptr,
-                                      N * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream),
-                      "async dEdcn snapshot download");
             checkCuda(cudaMemcpyAsync(m_h_grad_snap, impl.d_grad_snapshot.ptr,
                                       3 * N * sizeof(double),
                                       cudaMemcpyDeviceToHost, stream),
@@ -1836,11 +1846,12 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             m_result_gradient(i, 2) = m_h_grad[3*i+2];
         }
 
-        if (need_snapshots) {
-            m_dEdcn_total.resize(N);
-            for (int i = 0; i < N; ++i)
-                m_dEdcn_total[i] = m_h_dEdcn_snap[i];
+        // Always populate m_dEdcn_total — dEdcnTotal() is public API
+        m_dEdcn_total.resize(N);
+        for (int i = 0; i < N; ++i)
+            m_dEdcn_total[i] = m_h_dEdcn_snap[i];
 
+        if (need_snapshots) {
             m_grad_before_cn.resize(N, 3);
             for (int i = 0; i < N; ++i) {
                 m_grad_before_cn(i, 0) = m_h_grad_snap[3*i+0];

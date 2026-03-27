@@ -41,8 +41,8 @@ struct FFWorkspaceGPUImpl;
 /**
  * @brief GPU-accelerated drop-in replacement for FFWorkspace (GFN-FF only).
  *
- * Claude Generated (March 2026): GPU version of FFWorkspace for the `ggfnff`
- * method.  All energy terms and gradient contributions run on GPU.
+ * Claude Generated (March 2026): GPU version of FFWorkspace for GFN-FF GPU path.
+ * All energy terms and gradient contributions run on GPU.
  *
  * Usage:
  *   FFWorkspaceGPU gpu_ws(params, natoms, atom_types);
@@ -291,7 +291,7 @@ public:
     // charge-independent GPU kernels. Only k_coulomb, k_coulomb_self, and
     // k_subtract_qtmp require EEQ charges — everything else can fire immediately.
     //
-    // Usage (in ggfnff_method.cpp):
+    // Usage (in gfnff_gpu_method.cpp):
     //   gpu->setGeometry(geom);
     //   gpu->computeCN(atom_types);
     //   gpu->setD3CN(cn);

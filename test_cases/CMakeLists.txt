@@ -144,34 +144,34 @@ endif()
 add_test(NAME test_eeq_two_phase
          COMMAND test_eeq_two_phase)
 
-# Claude Generated (March 2026): GPU GFN-FF Validation Test (ggfnff vs gfnff CPU)
+# Claude Generated (March 2026): GPU GFN-FF Validation Test (gfnff GPU vs CPU)
 # Only built and registered when USE_CUDA=ON
 if(USE_CUDA)
-    add_executable(test_ggfnff test_ggfnff.cpp)
-    target_link_libraries(test_ggfnff curcuma_core CUDA::cudart)
+    add_executable(test_gfnff_gpu test_gfnff_gpu.cpp)
+    target_link_libraries(test_gfnff_gpu curcuma_core CUDA::cudart)
 
     if(USE_PCH)
-        target_precompile_headers(test_ggfnff REUSE_FROM curcuma_core)
+        target_precompile_headers(test_gfnff_gpu REUSE_FROM curcuma_core)
     endif()
 
     # Built-in molecule test (water, methane, ethanol) — no arguments
-    add_test(NAME ggfnff_builtin_molecules
-             COMMAND test_ggfnff
+    add_test(NAME gfnff_gpu_builtin_molecules
+             COMMAND test_gfnff_gpu
              WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-    set_tests_properties(ggfnff_builtin_molecules
-        PROPERTIES TIMEOUT 120 LABELS "ggfnff;gpu;validation")
+    set_tests_properties(gfnff_gpu_builtin_molecules
+        PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;validation")
 
     # Per-molecule tests using the same reference data as CPU GFN-FF validation
     foreach(REF_FILE ${GFNFF_REF_FILES})
         get_filename_component(MOL_NAME ${REF_FILE} NAME_WE)
         set(BUILD_REF_FILE "${CMAKE_CURRENT_BINARY_DIR}/reference_data/${MOL_NAME}.ref.json")
-        set(GPU_TEST_NAME "ggfnff_vs_cpu_${MOL_NAME}")
+        set(GPU_TEST_NAME "gfnff_gpu_vs_cpu_${MOL_NAME}")
 
         add_test(NAME ${GPU_TEST_NAME}
-                 COMMAND test_ggfnff ${BUILD_REF_FILE}
+                 COMMAND test_gfnff_gpu ${BUILD_REF_FILE}
                  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
         set_tests_properties(${GPU_TEST_NAME}
-            PROPERTIES TIMEOUT 120 LABELS "ggfnff;gpu;validation")
+            PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;validation")
     endforeach()
 
     # Claude Generated (March 2026): GPU analytical vs numerical gradient test

@@ -1,15 +1,14 @@
 /*
- * <GGFNFFComputationalMethod — GPU-accelerated GFN-FF wrapper>
+ * <GFNFFGPUComputationalMethod — GPU-accelerated GFN-FF wrapper>
  * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
- * Claude Generated (March 2026): ComputationalMethod adapter for ggfnff.
+ * Claude Generated (March 2026): ComputationalMethod adapter for gfnff GPU path.
  * Available only when compiled with USE_CUDA=ON.
  *
- * Usage (Phase 1 unified method name):
+ * Usage:
  *   ./curcuma -sp mol.xyz -method gfnff -gpu cuda    # Explicit GPU
  *   ./curcuma -sp mol.xyz -method gfnff -gpu auto   # GPU if available
  *   ./curcuma -sp mol.xyz -method gfnff             # CPU (default)
- *   ./curcuma -sp mol.xyz -method ggfnff            # Deprecated (GPU)
  */
 
 #pragma once
@@ -24,7 +23,7 @@
 #include <memory>
 
 /**
- * @brief GPU-accelerated GFN-FF via CUDA (method name: "ggfnff")
+ * @brief GPU-accelerated GFN-FF via CUDA (method name: "gfnff" with -gpu cuda)
  *
  * Claude Generated (March 2026): Clean GPU/CPU separation architecture.
  * GFNFF is a pure CPU class (no GPU knowledge). This wrapper orchestrates:
@@ -49,10 +48,10 @@
  *   4. m_gfnff->updateHBXBIfNeeded() — dynamic HB/XB re-detection
  *   5. m_gpu_workspace->calculate() — all energy terms on GPU
  */
-class GGFNFFComputationalMethod : public ComputationalMethod {
+class GFNFFGPUComputationalMethod : public ComputationalMethod {
 public:
-    explicit GGFNFFComputationalMethod(const std::string& method_name, const json& config);
-    ~GGFNFFComputationalMethod();
+    explicit GFNFFGPUComputationalMethod(const std::string& method_name, const json& config);
+    ~GFNFFGPUComputationalMethod();
 
     // === ComputationalMethod interface ===
 
