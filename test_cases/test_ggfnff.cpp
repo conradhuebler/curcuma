@@ -22,6 +22,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -38,12 +39,49 @@ int main(int argc, char* argv[])
     }
     CurcumaLogger::set_verbosity(verbose);
 
+    // Claude Generated (March 2026): Handle .ref.json files by extracting geometry_file
+    // and resolving the path relative to the source root
+    std::string xyz_file = mol_file;
+
+    if (mol_file.size() > 5 && mol_file.substr(mol_file.size() - 5) == ".json") {
+        std::ifstream ref_file(mol_file);
+        if (ref_file.is_open()) {
+            try {
+                json ref_data;
+                ref_file >> ref_data;
+                if (ref_data.contains("molecule") && ref_data["molecule"].contains("geometry_file")) {
+                    std::string geo_path = ref_data["molecule"]["geometry_file"].get<std::string>();
+
+                    // The geometry_file path is relative to different roots depending on the source.
+                    // We're running from build/test_cases/ (where the .ref.json was copied).
+                    //
+                    // Path formats in .ref.json files:
+                    // 1. "test_cases/molecules/..." - relative to curcuma root -> prepend "../../"
+                    // 2. "../test_cases/molecules/..." - relative to some dir -> prepend "../"
+                    // 3. "external/gfnff/test/..." - relative to curcuma root -> prepend "../../"
+                    // 4. "../external/gfnff/test/..." - relative to some dir -> prepend "../"
+
+                    if (geo_path.size() >= 3 && geo_path.substr(0, 3) == "../") {
+                        // Path starts with "../" - already relative, use as-is with one more "../"
+                        xyz_file = "../" + geo_path;
+                    } else {
+                        // Path starts without "../" - relative to curcuma root, go up two dirs
+                        xyz_file = "../../" + geo_path;
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error parsing JSON file " << mol_file << ": " << e.what() << std::endl;
+                return 1;
+            }
+        }
+    }
+
     std::cout << "==================================================\n"
               << "  GFN-FF GPU Validation: ggfnff vs gfnff (CPU)\n"
-              << "  Molecule: " << mol_file << "\n"
+              << "  Molecule: " << xyz_file << "\n"
               << "==================================================" << std::endl;
 
-    curcuma::Molecule molecule(mol_file);
+    curcuma::Molecule molecule(xyz_file);
     Mol mol = molecule.getMolInfo();
     std::cout << "Atoms: " << mol.m_number_atoms << std::endl;
 

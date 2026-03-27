@@ -5,8 +5,11 @@
  * Claude Generated (March 2026): ComputationalMethod adapter for ggfnff.
  * Available only when compiled with USE_CUDA=ON.
  *
- * Usage:
- *   ./curcuma -sp mol.xyz -method ggfnff
+ * Usage (Phase 1 unified method name):
+ *   ./curcuma -sp mol.xyz -method gfnff -gpu cuda    # Explicit GPU
+ *   ./curcuma -sp mol.xyz -method gfnff -gpu auto   # GPU if available
+ *   ./curcuma -sp mol.xyz -method gfnff             # CPU (default)
+ *   ./curcuma -sp mol.xyz -method ggfnff            # Deprecated (GPU)
  */
 
 #pragma once

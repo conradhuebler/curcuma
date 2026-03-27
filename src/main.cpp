@@ -658,8 +658,9 @@ json CLI2Json(int argc, char** argv)
     // Claude Generated (October 2025): Global parameters that should be accessible
     // both at top level (controller[param]) and module level (controller[module][param])
     // ENHANCED: Added "method" to support global energy method specification
+    // Claude Generated (March 2026): Added "gpu" for GPU acceleration control
     std::set<std::string> global_params = {
-        "verbosity", "threads", "method",  // energy_method applies to all capabilities
+        "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
         "export_run", "export-run", // Export current run configuration
         "import_config", "import-config" // Import custom configuration
     };

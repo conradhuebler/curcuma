@@ -4,6 +4,10 @@
  *
  * Claude Generated (March 2026): ComputationalMethod adapter for ggfnff.
  * Clean GPU/CPU separation: GFNFF has no GPU knowledge, this class orchestrates.
+ *
+ * Usage (Phase 1 unified method name):
+ *   ./curcuma -sp mol.xyz -method gfnff -gpu cuda
+ *   ./curcuma -sp mol.xyz -method gfnff -gpu auto   # GPU if available
  */
 
 #ifdef USE_CUDA
@@ -11,6 +15,7 @@
 #include "ggfnff_method.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
+#include "src/core/energy_calculators/ff_methods/cuda/gpu_utils.h"
 
 #include <chrono>
 #include <cmath>
@@ -100,6 +105,20 @@ bool GGFNFFComputationalMethod::initGPUWorkspace()
             CurcumaLogger::error(m_error_message);
             return false;
         }
+
+        // Claude Generated (March 2026): GPU memory check before allocation
+        // Check available GPU memory before proceeding
+        if (!GPUUtils::checkGPUMemoryAvailable(natoms, 0.8)) {
+            m_has_error = true;
+            m_error_message = fmt::format(
+                "Insufficient GPU memory for {} atoms. Use CPU fallback: -method gfnff -gpu none",
+                natoms);
+            CurcumaLogger::error(m_error_message);
+            return false;
+        }
+
+        // Log GPU memory status at verbosity >= 2
+        GPUUtils::logGPUMemoryStatus(2);
 
         // Consume pre-generated params from initializeForceField().
         // CRITICAL: Do NOT call generateGFNFFParameterSet() again — causes heap corruption.
