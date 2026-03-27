@@ -2484,11 +2484,21 @@ __global__ void k_cn_chainrule(
     static const double inv_sqrtpi = 0.5641895835477563;  // 1/sqrt(pi)
     double dSdr = kn * inv_sqrtpi * exp(-kn * kn * dr * dr) / rcov;
 
-    // Combined chain-rule factor
+    // Chain-rule gradient for CN-dependent energy terms
+    // Reference: Fortran gfnff_cn.f90 gfnff_dlogcoord lines 112-115
+    // For pair (i,j): dlogCN(i,i) -= dlogdcn_i*rij, dlogCN(j,j) += dlogdcn_j*rij
+    //                 dlogCN(i,j) = -dlogdcn_j*rij, dlogCN(j,i) = +dlogdcn_i*rij
+    // where rij = dSdr * (rj - ri) / |rij|
+    // Gradient: g(i) = -(dlogdcn_i*dEdcn(i) + dlogdcn_j*dEdcn(j)) * rij
+    //           g(j) = +(dlogdcn_i*dEdcn(i) + dlogdcn_j*dEdcn(j)) * rij
+    //
+    // On GPU: dx = xi - xj = -(xj - xi), so:
+    // g(i) = +(dlogdcn_i*dEdcn(i) + dlogdcn_j*dEdcn(j)) * dSdr * dx / rij
+    // g(j) = -(dlogdcn_i*dEdcn(i) + dlogdcn_j*dEdcn(j)) * dSdr * dx / rij
     double fac = dSdr / rij * (dEdcn[i] * dlogdcn[i] + dEdcn[j] * dlogdcn[j]);
 
-    add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
-    add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+    add_grad(grad, i,  fac * dx,  fac * dy,  fac * dz);
+    add_grad(grad, j, -fac * dx, -fac * dy, -fac * dz);
 }
 
 // ============================================================================
