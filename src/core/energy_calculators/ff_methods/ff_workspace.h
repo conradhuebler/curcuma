@@ -222,6 +222,9 @@ public:
     const Vector& dEdcnTotal() const { return m_dEdcn_total; }
     const Vector& dEdcnBondTotal() const { return m_dEdcn_bond_total; }
 
+    /// Gradient before CN chain-rule (diagnostic, valid after calculate with gradient)
+    const Matrix& gradientBeforeCN() const { return m_grad_before_cn; }
+
     // Per-component gradient getters (only valid if store_components=true)
     const Matrix& gradientBond() const { return m_result_grad_bond; }
     const Matrix& gradientAngle() const { return m_result_grad_angle; }
@@ -319,6 +322,7 @@ private:
     Matrix m_result_gradient;
     FFEnergyComponents m_result_energy;
     Vector m_dEdcn_total, m_dEdcn_bond_total;
+    Matrix m_grad_before_cn;  ///< Gradient snapshot before CN chain-rule (diagnostic)
     bool m_store_components = false;
     bool m_do_gradient = false;
 

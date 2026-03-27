@@ -52,6 +52,9 @@ set(CURCUMA_DEBUG_LEVEL 2 CACHE STRING "Debug verbosity level 0-3")
 option(USE_PCH
     "Enable Precompiled Headers for faster compilation" ON)
 
+option(USE_CUDA
+    "Enable CUDA-accelerated GFN-FF (gfnff -gpu cuda, requires CUDA toolkit)" OFF)
+
 if(USE_MKL)
     if(NOT DEFINED MKL_ROOT)
         set(MKL_ROOT $ENV{MKL_ROOT})
@@ -126,6 +129,8 @@ endif(UNIX)
 
 add_definitions("-DGIT_COMMIT_HASH=${GIT_COMMIT_HASH}")
 add_definitions("-DGIT_BRANCH=${GIT_BRANCH}")
+# Claude Generated (March 2026): Remove comma from RFC 2822 date — nvcc splits -D values at commas
+string(REPLACE "," " " GIT_COMMIT_DATE "${GIT_COMMIT_DATE}")
 add_definitions("-DGIT_COMMIT_DATE=${GIT_COMMIT_DATE}")
 add_definitions("-DGIT_COMMIT_TAG=${GIT_COMMIT_TAG}")
 
@@ -662,6 +667,37 @@ if(USE_Plumed)
     else()
         message(FATAL_ERROR "Plumed2 library not found. Set PLUMED_ROOT environment variable or install plumed: apt-get install libplumed-dev")
     endif()
+endif()
+
+# Claude Generated (March 2026): CUDA-accelerated GFN-FF (gfnff -gpu cuda)
+# Requires: CUDA toolkit, compute capability >= 6.0 (Pascal / GTX 10xx)
+# Build: cmake -DUSE_CUDA=ON && make -j4
+if(USE_CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    set(CMAKE_CUDA_STANDARD 17)
+    # Target: Pascal(6.0), Volta(7.0), Turing(7.5), Ampere(8.0/8.6), Ada(8.9)
+    set(CMAKE_CUDA_ARCHITECTURES "60;70;75;80;86;89;120" CACHE STRING "CUDA architectures")
+
+    # CUDA source files - compiled as part of curcuma_core
+    set(CUDA_SOURCES
+        src/core/energy_calculators/ff_methods/cuda/gfnff_kernels.cu
+        src/core/energy_calculators/ff_methods/cuda/ff_workspace_gpu.cu
+        src/core/energy_calculators/ff_methods/cuda/eeq_solver_gpu.cu
+        src/core/energy_calculators/ff_methods/cuda/gpu_utils.cpp
+        src/core/energy_calculators/qm_methods/gfnff_gpu_method.cpp
+    )
+    set_property(SOURCE ${CUDA_SOURCES} PROPERTY LANGUAGE CUDA)
+    set_property(SOURCE ${CUDA_SOURCES} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+
+    # Add CUDA sources to curcuma_core
+    target_sources(curcuma_core PRIVATE ${CUDA_SOURCES})
+    target_include_directories(curcuma_core PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(curcuma_core CUDA::cudart CUDA::cusolver)
+    target_compile_definitions(curcuma_core PUBLIC USE_CUDA)
+
+    message(STATUS "CUDA support enabled: gfnff -gpu cuda available")
+    message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 endif()
 
 target_link_libraries(curcuma_core pthread fmt::fmt-header-only )

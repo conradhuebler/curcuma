@@ -71,6 +71,16 @@ add_cli_test(gfnff 01_complex_gfnff_singlepoint)
 add_cli_test(gfnff 02_caffeine_gfnff_energy_components)
 
 # =============================================================================
+# GPU GFN-FF Tests — only registered when USE_CUDA=ON
+# =============================================================================
+
+if(USE_CUDA)
+    add_cli_test(gfnff_gpu 01_gfnff_gpu_singlepoint)
+    set_tests_properties(cli_gfnff_gpu_01_gfnff_gpu_singlepoint
+        PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;cli")
+endif()
+
+# =============================================================================
 # RMSD Tests (6 scenarios)
 # =============================================================================
 

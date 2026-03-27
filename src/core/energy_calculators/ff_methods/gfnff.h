@@ -25,6 +25,7 @@
 #include "json.hpp"
 #include "src/core/config_manager.h"
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
+
 #include "src/core/energy_calculators/ff_methods/ff_workspace.h"  // Claude Generated (Mar 2026): Unified workspace
 #include "src/core/energy_calculators/ff_methods/eeq_solver.h"  // EEQ charge calculation (Dec 2025 - Phase 3)
 #include "src/core/energy_calculators/ff_methods/huckel_solver.h"  // Full Hückel calculation (Jan 2026 - Phase 1)
@@ -473,6 +474,151 @@ public:
      */
     TopologyInfo calculateTopologyInfo() const;
 
+    /**
+     * @brief Generate GFN-FF parameters as native C++ structs (no JSON)
+     * @return GFNFFParameterSet with all interaction parameters
+     *
+     * Claude Generated (March 2026): Primary parameter generation path.
+     * Called after InitialiseMolecule() when topology is available.
+     */
+    GFNFFParameterSet generateGFNFFParameterSet();
+
+
+    /**
+     * @brief Consume cached parameter set for external use.
+     *
+     * Claude Generated (March 2026): initializeForceField() stores a heap copy of the
+     * parameter set. External consumers (GPU wrapper, etc.) call consumeCachedParameterSet()
+     * once to take ownership; subsequent calls return nullptr.
+     */
+    /**
+     * @brief Consume cached parameter set (avoids extra generateGFNFFParameterSet call).
+     *
+     * Claude Generated (March 2026): initializeForceField() stores a heap copy of the
+     * parameter set. External callers (e.g. GPU wrapper) call this once to take ownership;
+     * subsequent calls return nullptr.
+     */
+    std::unique_ptr<GFNFFParameterSet> consumeCachedParameterSet() { return std::move(m_cached_parameter_set); }
+
+    // === GPU orchestration helpers (Claude Generated March 2026) ===
+    // These expose internal CN/EEQ computation so that GGFNFFComputationalMethod
+    // can orchestrate GPU + CPU-residual without duplicating logic.
+
+    /**
+     * @brief Compute CN, EEQ charges, and (if gradient) CN derivatives for current geometry.
+     * Results are stored internally and distributed to m_forcefield/m_workspace.
+     * Call getters below to retrieve results for external workspaces.
+     * @param gradient  If true, also compute gradient-related data (cnf, dc6dcn)
+     * @param gpu_only  If true, skip sparse dcn matrix build and CPU forcefield/workspace
+     *                  distribution (GPU has its own k_cn_chainrule kernel)
+     * @param external_cn  If non-null, use these CN values instead of computing on CPU.
+     *                     Claude Generated (March 2026): Enables GPU CN bypass.
+     */
+    void prepareCNAndEEQ(bool gradient, bool gpu_only = false, const Vector* external_cn = nullptr, bool skip_eeq = false);
+
+    /**
+     * @brief Extract EEQ parameters for GPU solver (O(N) CPU work only)
+     *
+     * Claude Generated (March 2026): GPU EEQ Phase 7 — parameter extraction.
+     * Computes dxi, dgam, alpha_corrected, gam_corrected, rhs_atoms from
+     * cached topology and current CN. No matrix build or solve — that's done
+     * on GPU by EEQSolverGPU.
+     *
+     * Must be called AFTER prepareCNAndEEQ(gradient, gpu_only=true, cn, skip_eeq=true).
+     *
+     * @param cn Current coordination numbers (from GPU or CPU)
+     * @return EEQGPUParams struct with all arrays for GPU solver
+     */
+    struct EEQGPUParams {
+        std::vector<double> alpha_corrected;  ///< [N] charge-corrected alpha² values
+        std::vector<double> gam_corrected;    ///< [N] corrected hardness
+        std::vector<double> rhs_atoms;        ///< [N] electronegativity RHS: -chi + dxi + cnf*sqrt(cn)
+        std::vector<double> rhs_constraints;  ///< [nfrag] target charges per fragment
+        std::vector<int>    fraglist;         ///< [N] fragment ID per atom (1-indexed)
+        int nfrag = 1;                        ///< Number of molecular fragments
+    };
+    EEQGPUParams prepareEEQParametersForGPU(const Vector& cn) const;
+
+    /**
+     * @brief Re-detect HB/XB pairs if geometry has changed enough (RMSD > 0.3 Bohr).
+     * Updates the given workspace with new HB/XB interaction lists.
+     * @param ws External workspace to update (e.g. CPU residual workspace for GPU path)
+     */
+    void updateHBXBIfNeeded(FFWorkspace* ws);
+
+    /// True if updateHBXBIfNeeded() ran and changed lists since last call
+    bool consumeHBXBUpdate() { bool r = m_hbxb_updated; m_hbxb_updated = false; return r; }
+
+    /// Set external topology decision from GPU displacement check (Claude Generated March 2026).
+    /// If set, needsFullTopologyUpdate() uses this value instead of CPU computation.
+    void setExternalTopologyDecision(bool needs_full_update) const {
+        m_external_topology_decision = needs_full_update;
+    }
+
+    /// Returns true if the last getCachedTopology() triggered a full topology recalculation.
+    /// One-shot: resets to false after read. Used by GPU path to know when to update ref geometry.
+    bool consumeFullTopologyUpdate() const {
+        bool r = m_full_topology_recalculated;
+        m_full_topology_recalculated = false;
+        return r;
+    }
+
+    const std::vector<GFNFFHydrogenBond>& getLastHBonds() const { return m_last_hbonds; }
+    const std::vector<GFNFFHalogenBond>& getLastXBonds() const { return m_last_xbonds; }
+
+    // Getters for CN/EEQ results (valid after prepareCNAndEEQ)
+    const Vector& getLastCN() const { return m_last_cn; }
+    const Vector& getLastCharges() const { return m_charges; }
+    const Matrix& getGeometryBohr() const { return m_geometry_bohr; }
+
+    /**
+     * @brief Store GPU-computed charges via memcpy (no Eigen heap alloc, no ForceField distribution).
+     * Claude Generated (March 2026): Safe for GPU path where CUDA corrupts heap metadata.
+     * Requires preAllocateForGPUPath() called first (m_charges pre-sized).
+     * @param data  Pointer to N doubles
+     * @param n     Number of atoms (must match m_charges.size())
+     */
+    void storeChargesFromGPU(const double* data, int n)
+    {
+        if (n == m_charges.size())
+            std::memcpy(m_charges.data(), data, n * sizeof(double));
+    }
+    const std::vector<SpMatrix>& getLastCNDerivatives() const { return m_last_dcn; }
+    const Vector& getLastCNF() const { return m_last_cnf; }
+    const Matrix* getDC6DCNPtr() const { return m_d4_generator ? &m_d4_generator->getDC6DCN() : nullptr; }
+    FFWorkspace* getWorkspace() const { return m_workspace.get(); }
+
+    // Claude Generated (March 2026): Phase 2 GPU dc6dcn — expose D4 internals
+    D4ParameterGenerator* getD4Generator() { return m_d4_generator.get(); }
+
+    /**
+     * @brief Set external CN values (from GPU computation).
+     * Claude Generated (March 2026): Phase 1 GPU CN migration.
+     * Allows GPU-computed CN to replace CPU CN before EEQ calculation.
+     * @param cn External CN values (size N)
+     */
+    void setLastCN(const Vector& cn) { m_last_cn = cn; }
+
+    /**
+     * @brief Pre-allocate per-step Eigen Vectors to correct size.
+     * Claude Generated (March 2026): Must be called BEFORE CUDA init to avoid
+     * heap corruption — CUDA allocations corrupt adjacent heap metadata,
+     * making subsequent Eigen Vector resizes crash.
+     * After this call, prepareCNAndEEQ() uses memcpy instead of Eigen assignment.
+     * @param natoms Number of atoms
+     */
+    void preAllocateForGPUPath(int natoms)
+    {
+        m_last_cn  = Vector::Zero(natoms);
+        m_last_cnf = Vector::Zero(natoms);
+        if (m_charges.size() != natoms)
+            m_charges = Vector::Zero(natoms);
+        m_gpu_path_preallocated = true;
+    }
+
+    /// True if preAllocateForGPUPath() was called (enables memcpy path in prepareCNAndEEQ)
+    bool isGPUPathPreallocated() const { return m_gpu_path_preallocated; }
+
 private:
     /**
      * @brief Initialize GFN-FF force field and generate parameters
@@ -488,15 +634,6 @@ private:
      * Kept for backward compatibility with file-based parameter caching.
      */
     json generateGFNFFParameters();
-
-    /**
-     * @brief Generate GFN-FF parameters as native C++ structs (no JSON)
-     * @return GFNFFParameterSet with all interaction parameters
-     *
-     * Claude Generated (March 2026): Primary parameter generation path.
-     * Returns native structs for direct in-memory transfer to ForceField.
-     */
-    GFNFFParameterSet generateGFNFFParameterSet();
 
     /**
      * @brief Calculate topology and connectivity for GFN-FF
@@ -1821,6 +1958,7 @@ private:
     ForceField* m_forcefield; ///< Force field engine using modern structure
     std::unique_ptr<FFWorkspace> m_workspace; ///< Claude Generated (Mar 2026): Unified workspace (replaces ForceField path)
     bool m_use_workspace = false; ///< Use FFWorkspace path instead of ForceField
+
     Matrix m_geometry_bohr; ///< Geometry in Bohr (GFN-FF parameters are in Bohr)
 
     // EEQ charge calculation (Dec 2025 - Phase 3: Extraction and delegation)
@@ -1914,9 +2052,39 @@ private:
     // Geometry change detector for intelligent caching
     mutable GeometryChangeDetector m_geometry_tracker;
 
-    // Cached topology and bond detection to avoid redundant calculations
+    // Two-tier topology caching (March 2026)
+    // Tier 1: Static topology (bonds, rings, hybridization) - only invalidates on large geometry change
+    // Tier 2: Dynamic state (CN, distances) - invalidates on small geometry change
     mutable std::optional<TopologyInfo> m_cached_topology;
+    mutable Eigen::MatrixXd m_last_topology_geometry;  // Geometry when topology was last calculated
+    mutable bool m_static_topology_valid = false;       // True if static topology is current
+    mutable bool m_full_topology_recalculated = false;  // Set by getCachedTopology() on full update
+    mutable std::optional<bool> m_external_topology_decision; ///< GPU displacement check result
     mutable std::optional<std::vector<std::pair<int,int>>> m_cached_bond_list;
+
+    // Topology caching mode: "auto" (two-tier caching) or "constant" (never recalculate)
+    std::string m_topology_mode = "auto";
+
+    // Check if geometry change warrants full topology recalculation (vs just dynamic state)
+    bool needsFullTopologyUpdate(const Eigen::MatrixXd& geometry_bohr) const;
+
+    // Dynamic state update for Tier 2 caching
+    void updateDynamicState(TopologyInfo& topo) const;
+
+    // Claude Generated (March 2026): Heap-stored parameter copy for external consumers.
+    // Set in initializeForceField(), consumed once via consumeCachedParameterSet().
+    std::unique_ptr<GFNFFParameterSet> m_cached_parameter_set;
+
+    // Claude Generated (March 2026): Last re-detected HB/XB lists from updateHBXBIfNeeded()
+    std::vector<GFNFFHydrogenBond> m_last_hbonds;
+    std::vector<GFNFFHalogenBond> m_last_xbonds;
+    bool m_hbxb_updated = false;  ///< True if updateHBXBIfNeeded() ran since last check
+
+    // Claude Generated (March 2026): State from last prepareCNAndEEQ() call
+    Vector m_last_cn;    ///< Coordination numbers
+    Vector m_last_cnf;   ///< CN-dependent EEQ factors per atom
+    bool m_gpu_path_preallocated = false; ///< True after preAllocateForGPUPath()
+    std::vector<SpMatrix> m_last_dcn; ///< CN derivatives (gradient only)
 
     // Conversion factors
     static constexpr double HARTREE_TO_KCAL = 627.5094740631;

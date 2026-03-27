@@ -29,6 +29,9 @@
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
 #include "qm_methods/gfnff_method.h"
+#ifdef USE_CUDA
+#include "qm_methods/gfnff_gpu_method.h"
+#endif
 #ifdef USE_TBLITE
 #include "qm_methods/tblite_method.h"
 #endif
@@ -226,7 +229,9 @@ std::unique_ptr<ComputationalMethod> MethodFactory::createIPEA1(const json& conf
 }
 
 std::unique_ptr<ComputationalMethod> MethodFactory::createGFNFF(const json& config) {
-    // Priority: External GFN-FF > XTB > Native cgfnff
+    // Priority for "xtb-gfnff" method: External GFN-FF > XTB
+    // Note: This is for the "xtb-gfnff" method name only.
+    // The "gfnff" method is handled in create() with GPU dispatch support.
 #ifdef USE_GFNFF
     CurcumaLogger::info("GFN-FF: trying External GFN-FF (priority 1)");
     try {
@@ -344,8 +349,32 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
     }
 
     // Native GFN-FF (always available, Curcuma's own implementation)
+    // GPU acceleration via -gpu cuda flag (Phase 1: unified method name)
     if (method == "gfnff") {
-        CurcumaLogger::success("Method 'gfnff' resolved to native GFN-FF");
+        std::string gpu_mode = config.value("gpu", "none");
+        std::transform(gpu_mode.begin(), gpu_mode.end(), gpu_mode.begin(), ::tolower);
+
+        // Auto-detect: use GPU if compiled with CUDA
+        if (gpu_mode == "auto") {
+#ifdef USE_CUDA
+            gpu_mode = "cuda";
+#else
+            gpu_mode = "none";
+#endif
+        }
+
+        if (gpu_mode == "cuda") {
+#ifdef USE_CUDA
+            CurcumaLogger::info("GFN-FF: using GPU acceleration (CUDA)");
+            return std::make_unique<GFNFFGPUComputationalMethod>("gfnff", config);
+#else
+            throw MethodCreationException(
+                "GPU acceleration requested (--gpu cuda) but Curcuma was compiled "
+                "without CUDA support. Recompile with: cmake -DUSE_CUDA=ON");
+#endif
+        }
+
+        CurcumaLogger::info("GFN-FF: using CPU implementation");
         return std::make_unique<GFNFFComputationalMethod>("gfnff", config);
     }
 
@@ -468,6 +497,12 @@ json MethodFactory::getMethodInfo(const std::string& method_name) {
         if (hasGFNFF()) info["providers"].push_back({{"name", "External GFN-FF"}, {"available", true}});
         if (hasXTB()) info["providers"].push_back({{"name", "XTB"}, {"available", true}});
         info["providers"].push_back({{"name", "Native"}, {"available", true}});
+#ifdef USE_CUDA
+        info["providers"].push_back({{"name", "Native+GPU"}, {"available", true}});
+        info["gpu_support"] = true;
+#else
+        info["gpu_support"] = false;
+#endif
         return info;
     }
 
@@ -512,6 +547,9 @@ void MethodFactory::printAvailableMethods() {
     fmt::print("Core Methods (always available):\n");
     fmt::print("  - EHT: Extended Hückel Theory\n");
     fmt::print("  - gfnff: Native C++ GFN-FF implementation\n");
+#ifdef USE_CUDA
+    fmt::print("    (GPU acceleration: use '-gpu cuda' or '-gpu auto')\n");
+#endif
     fmt::print("  - ForceField: UFF, QMDFF methods\n");
 
     fmt::print("\nOptional QM Methods:\n");
@@ -521,6 +559,11 @@ void MethodFactory::printAvailableMethods() {
     fmt::print("  - External GFN-FF: {}\n", hasGFNFF() ? "YES" : "NO");
     fmt::print("  - DFT-D3: {}\n", hasD3() ? "YES" : "NO");
     fmt::print("  - DFT-D4: {}\n", hasD4() ? "YES" : "NO");
+#ifdef USE_CUDA
+    fmt::print("  - CUDA GPU: YES (gfnff -gpu cuda)\n");
+#else
+    fmt::print("  - CUDA GPU: NO\n");
+#endif
 
     fmt::print("\nShared Methods (priority-based resolution):\n");
 
@@ -548,6 +591,9 @@ void MethodFactory::printAvailableMethods() {
     if (hasGFNFF()) gfnff_providers.push_back("External GFN-FF");
     if (hasXTB()) gfnff_providers.push_back("XTB");
     gfnff_providers.push_back("Native");
+#ifdef USE_CUDA
+    gfnff_providers.push_back("Native+GPU");
+#endif
     fmt::print("{}\n", fmt::format("{}", fmt::join(gfnff_providers, " > ")));
 
     fmt::print("===================================\n");
