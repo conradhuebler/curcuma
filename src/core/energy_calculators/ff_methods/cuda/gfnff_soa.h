@@ -318,4 +318,36 @@ struct HBondSoA {
                 cudaStream_t stream = nullptr);
 };
 
+// ============================================================================
+// CoordSoA: Per-step atomic coordinates in Structure-of-Arrays layout
+// Claude Generated (March 2026): Replaces d_coords[3*N] AoS buffer.
+// SoA layout gives fully coalesced warp reads: x[0..31] fits in one cache line,
+// giving ~3× better bandwidth vs stride-3 AoS for N > 100 atoms.
+// Gradients remain AoS (add_grad uses atomicAdd scatter — no SoA benefit).
+// ============================================================================
+struct CoordSoA {
+    CudaBuffer<double> d_x;  ///< [N] x-coordinates (Bohr)
+    CudaBuffer<double> d_y;  ///< [N] y-coordinates (Bohr)
+    CudaBuffer<double> d_z;  ///< [N] z-coordinates (Bohr)
+    int N = 0;
+
+    void alloc(int n) { d_x.alloc(n); d_y.alloc(n); d_z.alloc(n); N = n; }
+    bool empty() const { return N == 0 || d_x.empty(); }
+};
+
+// ============================================================================
+// RefCoordSoA: Reference geometry for topology displacement check
+// Claude Generated (March 2026): Parallel SoA layout to CoordSoA.
+// Updated only on topology rebuild; compared against CoordSoA each step.
+// ============================================================================
+struct RefCoordSoA {
+    CudaBuffer<double> d_rx;  ///< [N] reference x-coordinates (Bohr)
+    CudaBuffer<double> d_ry;  ///< [N] reference y-coordinates (Bohr)
+    CudaBuffer<double> d_rz;  ///< [N] reference z-coordinates (Bohr)
+    int N = 0;
+
+    void alloc(int n) { d_rx.alloc(n); d_ry.alloc(n); d_rz.alloc(n); N = n; }
+    bool empty() const { return N == 0 || d_rx.empty(); }
+};
+
 #endif // USE_CUDA

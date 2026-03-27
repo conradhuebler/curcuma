@@ -28,8 +28,8 @@ struct EEQSolverGPUImpl;
  *
  * Usage:
  *   EEQSolverGPU eeq_gpu(max_natoms);
- *   bool ok = eeq_gpu.solve(N, nfrag, d_coords, alpha, gam, fraglist,
- *                            rhs_atoms, rhs_constr, z1, Z2);
+ *   bool ok = eeq_gpu.solve(N, nfrag, cx, cy, cz, alpha, gam, fraglist,
+ *                            rhs_atoms, rhs_constr, z1, Z2);  // cx/cy/cz: SoA device ptrs
  *   if (!ok) { ... CPU fallback ... }
  *   // CPU Schur complement: q = z1 - Z2 * S^{-1} * (C*z1 - d)
  */
@@ -46,7 +46,9 @@ public:
      *
      * @param natoms           Number of atoms N
      * @param nfrag            Number of fragments (typically 1)
-     * @param d_coords         GPU pointer to [3*N] coordinates (Bohr, row-major xyz)
+     * @param cx               GPU pointer to [N] x-coordinates (Bohr, SoA)
+     * @param cy               GPU pointer to [N] y-coordinates (Bohr, SoA)
+     * @param cz               GPU pointer to [N] z-coordinates (Bohr, SoA)
      * @param alpha_corrected  Host [N] charge-corrected alpha² values (already squared!)
      * @param gam_corrected    Host [N] corrected hardness values
      * @param fraglist         Host [N] fragment ID per atom (1-indexed), empty for single-fragment
@@ -58,7 +60,7 @@ public:
      */
     bool solve(
         int natoms, int nfrag,
-        const double* d_coords,
+        const double* cx, const double* cy, const double* cz,
         const double* alpha_corrected,
         const double* gam_corrected,
         const std::vector<int>& fraglist,

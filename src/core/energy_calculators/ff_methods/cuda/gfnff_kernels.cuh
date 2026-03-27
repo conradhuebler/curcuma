@@ -52,7 +52,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_dispersion(
     const double* __restrict__ r_cut,
     const double* __restrict__ dc6dcn_ij, ///< [n] dC6/dCN(i) per pair (nullptr if no dEdcn)
     const double* __restrict__ dc6dcn_ji, ///< [n] dC6/dCN(j) per pair (nullptr if no dEdcn)
-    const double* __restrict__ coords,   ///< [N*3] row-major (x,y,z per atom)
+    const double* __restrict__ cx,       ///< [N] x-coordinates (Bohr, SoA)
+    const double* __restrict__ cy,       ///< [N] y-coordinates (Bohr, SoA)
+    const double* __restrict__ cz,       ///< [N] z-coordinates (Bohr, SoA)
     double*                    dEdcn,    ///< [N] CN chain-rule accumulator (atomicAdd, nullptr ok)
     double*                    grad,     ///< [N*3] atomicAdd
     double*                    energy    ///< [1]   atomicAdd
@@ -68,7 +70,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_repulsion(
     const double* __restrict__ alpha,
     const double* __restrict__ repab,
     const double* __restrict__ r_cut,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy
 );
@@ -81,7 +85,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_repulsion_mixed(
     const double* __restrict__ alpha,
     const double* __restrict__ repab,
     const double* __restrict__ r_cut,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy
 );
@@ -95,7 +101,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_coulomb(
     const int*    __restrict__ idx_j,
     const double* __restrict__ gamma_ij,
     const double* __restrict__ r_cut,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ charges,  ///< [N] EEQ charges per atom
     double*                    grad,
     double*                    energy
@@ -124,7 +132,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_bonds(
     const int*    __restrict__ nr_hb,      ///< HB count per bond
     const double* __restrict__ hb_cn_H,    ///< HB coordination number of H
     const int*    __restrict__ hb_H_atom,  ///< Index of H atom per bond (-1 if no HB)
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ cn,     ///< [N] D3 coordination numbers
     double*                    grad,
     double*                    dEdcn,  ///< [N] CN chain-rule accumulator (atomicAdd)
@@ -145,7 +155,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_angles(
     const int*    __restrict__ atk,
     const double* __restrict__ fc,
     const double* __restrict__ theta0,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ rcov_d3, ///< [MAX_ELEM] covalent radii table (Bohr)
     double*                    grad,
     double*                    energy
@@ -168,7 +180,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_dihedrals(
     const double* __restrict__ phi0,
     const double* __restrict__ n_period,
     const int*    __restrict__ is_nci,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ rcov_d3,
     double*                    grad,
     double*                    energy
@@ -193,7 +207,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_inversions(
     const double* __restrict__ C1,
     const double* __restrict__ C2,
     const int*    __restrict__ potential_type,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy
 );
@@ -211,7 +227,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_storsions(
     const int*    __restrict__ idx_k,
     const int*    __restrict__ idx_l,
     const double* __restrict__ erefhalf,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy
 );
@@ -226,7 +244,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_batm(
     const double* __restrict__ zb3atm_i,
     const double* __restrict__ zb3atm_j,
     const double* __restrict__ zb3atm_k,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ topo_charges, ///< [N] Phase-1 topology charges
     double*                    grad,
     double*                    energy
@@ -241,7 +261,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_batm_mixed(
     const double* __restrict__ zb3atm_i,
     const double* __restrict__ zb3atm_j,
     const double* __restrict__ zb3atm_k,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ topo_charges,
     double*                    grad,
     double*                    energy
@@ -259,7 +281,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_xbonds_mixed(
     const double* __restrict__ q_B,
     const double* __restrict__ acidity_X,
     const double* __restrict__ r_cut,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy
 );
@@ -282,7 +306,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_atm(
     const double* __restrict__ a2,
     const double* __restrict__ alp,
     const double* __restrict__ triple_scale,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy
 );
@@ -300,7 +326,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_xbonds(
     const double* __restrict__ q_B,
     const double* __restrict__ acidity_X,
     const double* __restrict__ r_cut,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy
 );
@@ -331,7 +359,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hbonds(
     const int*    __restrict__ nb_C_count,
     const int*    __restrict__ nb_C_flat,
     const double* __restrict__ repz_B,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy
 );
@@ -392,7 +422,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_cn_chainrule(
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
     const double* __restrict__ rcov_sum,       ///< [n_pairs] scaled cov. radius sum
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ dEdcn,          ///< [N] combined dE/dCN (bond+disp-qtmp)
     const double* __restrict__ dlogdcn,        ///< [N] logistic squashing factor
     double*                    grad,
@@ -408,7 +440,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hb_alpha_chainrule(
     const int*    __restrict__ idx_H,
     const int*    __restrict__ idx_B,
     const double* __restrict__ rcov_sum,       ///< [n_pairs] scaled cov. radius sum
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ zz_hb,          ///< [N] per-H zz accumulator from k_bonds
     double*                    grad,
     double        kn                            ///< HB CN decay constant (27.5)
@@ -427,7 +461,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hb_alpha_chainrule(
 /// Reference: gfnff_cn.f90:66-126, Spicher & Grimme J. Chem. Theory Comput. 2020
 __global__ GFNFF_KERNEL_BOUNDS void k_cn_compute(
     int natoms,
-    const double* __restrict__ coords,      ///< [3*N] in Bohr
+    const double* __restrict__ cx,           ///< [N] x-coordinates (Bohr, SoA)
+    const double* __restrict__ cy,           ///< [N] y-coordinates (Bohr, SoA)
+    const double* __restrict__ cz,           ///< [N] z-coordinates (Bohr, SoA)
     const int*    __restrict__ atom_types,   ///< [N] 1-based atomic numbers
     double*       __restrict__ cn_raw,      ///< [N] output: raw CN (erf sum)
     double*       __restrict__ cn_final,    ///< [N] output: log-transformed CN
@@ -487,8 +523,12 @@ __global__ void k_zero_double(double* arr, int n);
 // ============================================================================
 __global__ void k_check_displacement(
     int N,
-    const double* __restrict__ current_coords,
-    const double* __restrict__ ref_coords,
+    const double* __restrict__ cx,           ///< [N] current x-coordinates (SoA)
+    const double* __restrict__ cy,           ///< [N] current y-coordinates (SoA)
+    const double* __restrict__ cz,           ///< [N] current z-coordinates (SoA)
+    const double* __restrict__ rx,           ///< [N] reference x-coordinates (SoA)
+    const double* __restrict__ ry,           ///< [N] reference y-coordinates (SoA)
+    const double* __restrict__ rz,           ///< [N] reference z-coordinates (SoA)
     double        threshold_sq,
     int*          exceeded_flag);
 

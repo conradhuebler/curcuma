@@ -6,6 +6,7 @@ Format: One line per change, newest first.
 
 ## March 2026
 
+- **GPU Pipeline Phase 10: SoA Coordinate Layout (Mar 27)**: Replaced `d_coords[3*N]` AoS buffer with `CoordSoA{d_x,d_y,d_z}[N]` across all 20 GPU kernels + EEQ solver; enables fully coalesced warp reads (~3× bandwidth gain for pairwise kernels at N>100); `d_ref_coords[3*N]` → `RefCoordSoA`; pinned host staging split into 3×N buffers; CUDA Graph re-capture unaffected (pointers stable); 28/28 CLI tests pass
 - **GPU Pipeline Phase 3+4: CPU/GPU Overlap + Sync Removal (Mar 26)**: Split `FFWorkspaceGPU::calculate()` into `prepareAndLaunchChargeIndependent()` (non-blocking, ~12 kernels) and `launchChargeDependentAndFinish()` (Coulomb + download), enabling CPU EEQ O(N³) solver to overlap with charge-independent GPU kernels; removed unnecessary `cudaStreamSynchronize` in `computeDC6DCNOnGPU`; relaxed postprocess stream dependencies (k_coulomb_self no wait, k_subtract_qtmp pairwise+bonded only); energy agreement CPU vs GPU < 1 nEh
 
 ## February 2026

@@ -610,7 +610,7 @@ struct FFWorkspaceGPUImpl {
     HBondSoA       hbonds;          ///< Hydrogen bonds
 
     // Dynamic buffers (reset + upload each calculation step)
-    CudaBuffer<double> d_coords;    ///< [N*3] row-major (x,y,z per atom)
+    CoordSoA    coords;      ///< Current geometry SoA (x[N], y[N], z[N]) — Phase 10, March 2026
     CudaBuffer<double> d_charges;   ///< [N] EEQ charges
     CudaBuffer<double> d_cn;        ///< [N] D3 coordination numbers
     CudaBuffer<double> d_topo_charges; ///< [N] topology charges (for BATM)
@@ -638,7 +638,7 @@ struct FFWorkspaceGPUImpl {
     bool               use_mixed_precision = true;  ///< FP32 intermediates for repulsion/batm/xbonds
 
     // GPU topology displacement check buffers (Claude Generated March 2026)
-    CudaBuffer<double> d_ref_coords;      ///< [3*N] reference geometry for displacement check
+    RefCoordSoA ref_coords;  ///< Reference geometry SoA (rx[N], ry[N], rz[N]) — Phase 10, March 2026
     CudaBuffer<int>    d_disp_flag;       ///< [1] exceeded flag for displacement check
 
     // GPU CN computation buffers (Phase 1: GPU migration)
@@ -713,8 +713,12 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     // Pre-allocate pinned CPU staging buffers BEFORE any CUDA operations.
     // Claude Generated (March 2026): cudaMallocHost for async DMA and avoids
     // CUDA heap corruption issues with std::vector.
-    checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_coords), 3 * natoms * sizeof(double)),
-              "pinned alloc m_h_coords");
+    checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_x), natoms * sizeof(double)),
+              "pinned alloc m_h_x");
+    checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_y), natoms * sizeof(double)),
+              "pinned alloc m_h_y");
+    checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_z), natoms * sizeof(double)),
+              "pinned alloc m_h_z");
     checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_grad), 3 * natoms * sizeof(double)),
               "pinned alloc m_h_grad");
     checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_dEdcn_snap), natoms * sizeof(double)),
@@ -787,7 +791,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
 
     // --- Allocate dynamic per-step buffers ---
     const int N3 = 3 * natoms;
-    m_impl->d_coords.alloc(N3);
+    m_impl->coords.alloc(natoms);
     m_impl->d_charges.alloc(natoms);
     m_impl->d_cn.alloc(natoms);
     m_impl->d_topo_charges.alloc(natoms);
@@ -927,7 +931,9 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
     }
 
     // Free pinned memory staging buffers
-    if (m_h_coords)     cudaFreeHost(m_h_coords);
+    if (m_h_x)          cudaFreeHost(m_h_x);
+    if (m_h_y)          cudaFreeHost(m_h_y);
+    if (m_h_z)          cudaFreeHost(m_h_z);
     if (m_h_grad)       cudaFreeHost(m_h_grad);
     if (m_h_dEdcn_snap) cudaFreeHost(m_h_dEdcn_snap);
     if (m_h_grad_snap)  cudaFreeHost(m_h_grad_snap);
@@ -1342,7 +1348,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.disp.r_cut.ptr,
             nullptr,   // no dc6dcn for energy-only
             nullptr,
-            impl.d_coords.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
             impl.d_dEdcn.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_DISP]);
@@ -1356,7 +1364,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.bonded_rep.idx_i.ptr,  impl.bonded_rep.idx_j.ptr,
                 impl.bonded_rep.alpha.ptr,  impl.bonded_rep.repab.ptr,
                 impl.bonded_rep.r_cut.ptr,
-                impl.d_coords.ptr,
+                impl.coords.d_x.ptr,
+                impl.coords.d_y.ptr,
+                impl.coords.d_z.ptr,
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_BREP]);
         } else {
@@ -1365,7 +1375,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.bonded_rep.idx_i.ptr,  impl.bonded_rep.idx_j.ptr,
                 impl.bonded_rep.alpha.ptr,  impl.bonded_rep.repab.ptr,
                 impl.bonded_rep.r_cut.ptr,
-                impl.d_coords.ptr,
+                impl.coords.d_x.ptr,
+                impl.coords.d_y.ptr,
+                impl.coords.d_z.ptr,
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_BREP]);
         }
@@ -1379,7 +1391,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.nonbonded_rep.idx_i.ptr,  impl.nonbonded_rep.idx_j.ptr,
                 impl.nonbonded_rep.alpha.ptr,  impl.nonbonded_rep.repab.ptr,
                 impl.nonbonded_rep.r_cut.ptr,
-                impl.d_coords.ptr,
+                impl.coords.d_x.ptr,
+                impl.coords.d_y.ptr,
+                impl.coords.d_z.ptr,
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_NBREP]);
         } else {
@@ -1388,7 +1402,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.nonbonded_rep.idx_i.ptr,  impl.nonbonded_rep.idx_j.ptr,
                 impl.nonbonded_rep.alpha.ptr,  impl.nonbonded_rep.repab.ptr,
                 impl.nonbonded_rep.r_cut.ptr,
-                impl.d_coords.ptr,
+                impl.coords.d_x.ptr,
+                impl.coords.d_y.ptr,
+                impl.coords.d_z.ptr,
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_NBREP]);
         }
@@ -1417,7 +1433,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.bonds.nr_hb.ptr,
             impl.bonds.hb_cn_H.ptr,
             impl.bonds.hb_H_atom.ptr,
-            impl.d_coords.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
             impl.d_cn.ptr,
             impl.d_grad.ptr,
             impl.d_dEdcn.ptr,
@@ -1432,7 +1450,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.angles.idx_i.ptr,  impl.angles.idx_j.ptr,  impl.angles.idx_k.ptr,
             impl.angles.ati.ptr,    impl.angles.atj.ptr,    impl.angles.atk.ptr,
             impl.angles.fc.ptr,     impl.angles.theta0.ptr,
-            impl.d_coords.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
             (double*)nullptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_ANGLE]);
@@ -1450,7 +1470,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.dihedrals.phi0.ptr,
             impl.dihedrals.n_period.ptr,
             impl.dihedrals.is_nci.ptr,
-            impl.d_coords.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
             (double*)nullptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_DIHED]);
@@ -1467,7 +1489,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.inversions.fc.ptr,    impl.inversions.omega0.ptr,
             impl.inversions.C0.ptr,    impl.inversions.C1.ptr,    impl.inversions.C2.ptr,
             impl.inversions.potential_type.ptr,
-            impl.d_coords.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_INV]);
     }
@@ -1479,7 +1503,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.storsions.idx_i.ptr, impl.storsions.idx_j.ptr,
             impl.storsions.idx_k.ptr, impl.storsions.idx_l.ptr,
             impl.storsions.erefhalf.ptr,
-            impl.d_coords.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_STORS]);
     }
@@ -1491,7 +1517,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.hb_alpha.idx_H.ptr,
             impl.hb_alpha.idx_B.ptr,
             impl.hb_alpha.rcov_sum.ptr,
-            impl.d_coords.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
             impl.d_zz_hb.ptr,
             impl.d_grad.ptr,
             hb_kn);
@@ -1509,7 +1537,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.batm.n,
                 impl.batm.idx_i.ptr, impl.batm.idx_j.ptr, impl.batm.idx_k.ptr,
                 impl.batm.zb3atm_i.ptr, impl.batm.zb3atm_j.ptr, impl.batm.zb3atm_k.ptr,
-                impl.d_coords.ptr,
+                impl.coords.d_x.ptr,
+                impl.coords.d_y.ptr,
+                impl.coords.d_z.ptr,
                 impl.d_topo_charges.ptr,
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_BATM]);
@@ -1518,7 +1548,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.batm.n,
                 impl.batm.idx_i.ptr, impl.batm.idx_j.ptr, impl.batm.idx_k.ptr,
                 impl.batm.zb3atm_i.ptr, impl.batm.zb3atm_j.ptr, impl.batm.zb3atm_k.ptr,
-                impl.d_coords.ptr,
+                impl.coords.d_x.ptr,
+                impl.coords.d_y.ptr,
+                impl.coords.d_z.ptr,
                 impl.d_topo_charges.ptr,
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_BATM]);
@@ -1534,7 +1566,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.atm.C6_ij.ptr, impl.atm.C6_ik.ptr, impl.atm.C6_jk.ptr,
             impl.atm.s9.ptr, impl.atm.a1.ptr, impl.atm.a2.ptr, impl.atm.alp.ptr,
             impl.atm.triple_scale.ptr,
-            impl.d_coords.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_ATM]);
     }
@@ -1548,7 +1582,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.xbonds.elem_A.ptr, impl.xbonds.elem_B.ptr,
                 impl.xbonds.q_X.ptr, impl.xbonds.q_B.ptr, impl.xbonds.acidity_X.ptr,
                 impl.xbonds.r_cut.ptr,
-                impl.d_coords.ptr,
+                impl.coords.d_x.ptr,
+                impl.coords.d_y.ptr,
+                impl.coords.d_z.ptr,
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_XBOND]);
         } else {
@@ -1558,7 +1594,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.xbonds.elem_A.ptr, impl.xbonds.elem_B.ptr,
                 impl.xbonds.q_X.ptr, impl.xbonds.q_B.ptr, impl.xbonds.acidity_X.ptr,
                 impl.xbonds.r_cut.ptr,
-                impl.d_coords.ptr,
+                impl.coords.d_x.ptr,
+                impl.coords.d_y.ptr,
+                impl.coords.d_z.ptr,
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_XBOND]);
         }
@@ -1581,7 +1619,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.hbonds.nb_C_offset.ptr, impl.hbonds.nb_C_count.ptr,
             impl.hbonds.nb_C_flat.ptr,
             impl.hbonds.repz_B.ptr,
-            impl.d_coords.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_HBOND]);
     }
@@ -1646,7 +1686,9 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             impl.disp.r_cut.ptr,
             impl.disp.dc6dcn_ij.ptr,
             impl.disp.dc6dcn_ji.ptr,
-            impl.d_coords.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
             impl.d_dEdcn.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_DISP]);
@@ -1660,7 +1702,9 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             impl.coulomb.idx_i.ptr,  impl.coulomb.idx_j.ptr,
             impl.coulomb.gamma_ij.ptr,
             impl.coulomb.r_cut.ptr,
-            impl.d_coords.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
             impl.d_charges.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_COUL]);
@@ -1720,7 +1764,9 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             impl.d_cn_idx_i.ptr,
             impl.d_cn_idx_j.ptr,
             impl.d_cn_rcov_sum.ptr,
-            impl.d_coords.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
             impl.d_dEdcn.ptr,
             impl.d_dlogdcn.ptr,
             impl.d_grad.ptr,
@@ -1854,15 +1900,19 @@ void FFWorkspaceGPU::setGeometry(const Matrix& geom)
     const int N = m_natoms;
     if (geom.rows() != N) return;
 
-    // Fill pinned staging buffer in-place, then async DMA to GPU.
-    // Claude Generated (March 2026): Pinned memory enables true async DMA.
+    // Fill pinned staging buffers in-place, then async DMA to GPU (SoA layout).
+    // Claude Generated (Phase 10, March 2026): SoA pinned buffers for coalesced warp reads.
     for (int i = 0; i < N; ++i) {
-        m_h_coords[3*i+0] = geom(i, 0);
-        m_h_coords[3*i+1] = geom(i, 1);
-        m_h_coords[3*i+2] = geom(i, 2);
+        m_h_x[i] = geom(i, 0);
+        m_h_y[i] = geom(i, 1);
+        m_h_z[i] = geom(i, 2);
     }
-    if (impl.d_coords.n < 3*N) impl.d_coords.alloc(3*N);
-    cudaMemcpyAsync(impl.d_coords.ptr, m_h_coords, 3*N*sizeof(double),
+    if (impl.coords.empty()) impl.coords.alloc(N);
+    cudaMemcpyAsync(impl.coords.d_x.ptr, m_h_x, N*sizeof(double),
+                    cudaMemcpyHostToDevice, impl.stream);
+    cudaMemcpyAsync(impl.coords.d_y.ptr, m_h_y, N*sizeof(double),
+                    cudaMemcpyHostToDevice, impl.stream);
+    cudaMemcpyAsync(impl.coords.d_z.ptr, m_h_z, N*sizeof(double),
                     cudaMemcpyHostToDevice, impl.stream);
 }
 
@@ -1906,7 +1956,9 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
     LaunchConfig cfg_cn = getLaunchConfig(N);
     k_cn_compute<<<cfg_cn.gridSize, cfg_cn.blockSize, 0, impl.stream>>>(
         N,
-        impl.d_coords.ptr,
+        impl.coords.d_x.ptr,
+        impl.coords.d_y.ptr,
+        impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
         impl.d_cn_raw.ptr,   // output: raw CN
         impl.d_cn_final.ptr, // output: log-transformed CN
@@ -1959,10 +2011,23 @@ int FFWorkspaceGPU::bondCount() const
     return m_impl ? m_impl->bonds.n : 0;
 }
 
-// Claude Generated (March 2026): Expose device coords for EEQSolverGPU
+// DEPRECATED (Phase 10, March 2026): coords now in SoA layout. Use getDeviceXPtr/YPtr/ZPtr().
 const double* FFWorkspaceGPU::getDeviceCoordsPtr() const
 {
-    return m_impl ? m_impl->d_coords.ptr : nullptr;
+    return nullptr;  // Deprecated: coords now in SoA layout. Use getDeviceXPtr/YPtr/ZPtr().
+}
+
+const double* FFWorkspaceGPU::getDeviceXPtr() const
+{
+    return m_impl ? m_impl->coords.d_x.ptr : nullptr;
+}
+const double* FFWorkspaceGPU::getDeviceYPtr() const
+{
+    return m_impl ? m_impl->coords.d_y.ptr : nullptr;
+}
+const double* FFWorkspaceGPU::getDeviceZPtr() const
+{
+    return m_impl ? m_impl->coords.d_z.ptr : nullptr;
 }
 
 // Claude Generated (March 2026): Explicit sync for cross-stream safety
@@ -1987,8 +2052,9 @@ void FFWorkspaceGPU::setMixedPrecision(bool enable)
 // ---------------------------------------------------------------------------
 bool FFWorkspaceGPU::checkDisplacement(double threshold)
 {
-    if (!m_impl || !m_impl->d_ref_coords.ptr || !m_impl->d_coords.ptr) return true;
+    if (!m_impl) return true;
     auto& impl = *m_impl;
+    if (impl.ref_coords.empty() || impl.coords.empty()) return true;
 
     // Zero the flag
     int zero = 0;
@@ -2000,8 +2066,12 @@ bool FFWorkspaceGPU::checkDisplacement(double threshold)
     LaunchConfig cfg = getLaunchConfig(m_natoms);
     k_check_displacement<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
         m_natoms,
-        impl.d_coords.ptr,
-        impl.d_ref_coords.ptr,
+        impl.coords.d_x.ptr,
+        impl.coords.d_y.ptr,
+        impl.coords.d_z.ptr,
+        impl.ref_coords.d_rx.ptr,
+        impl.ref_coords.d_ry.ptr,
+        impl.ref_coords.d_rz.ptr,
         threshold * threshold,
         impl.d_disp_flag.ptr);
 
@@ -2016,21 +2086,29 @@ bool FFWorkspaceGPU::checkDisplacement(double threshold)
 }
 
 // ---------------------------------------------------------------------------
-// updateReferenceGeometry — copy d_coords → d_ref_coords (device-to-device)
+// updateReferenceGeometry — copy coords SoA → ref_coords SoA (device-to-device)
 // Claude Generated (March 2026)
 // ---------------------------------------------------------------------------
 void FFWorkspaceGPU::updateReferenceGeometry()
 {
-    if (!m_impl || !m_impl->d_coords.ptr) return;
+    if (!m_impl || m_impl->coords.empty()) return;
     auto& impl = *m_impl;
 
-    // Allocate d_ref_coords on first call
-    if (!impl.d_ref_coords.ptr) {
-        impl.d_ref_coords.alloc(3 * m_natoms);
+    // Allocate ref_coords on first call
+    if (impl.ref_coords.empty()) {
+        impl.ref_coords.alloc(m_natoms);
     }
 
-    checkCuda(cudaMemcpyAsync(impl.d_ref_coords.ptr, impl.d_coords.ptr,
-                               3 * m_natoms * sizeof(double),
+    checkCuda(cudaMemcpyAsync(impl.ref_coords.d_rx.ptr, impl.coords.d_x.ptr,
+                               m_natoms * sizeof(double),
                                cudaMemcpyDeviceToDevice, impl.stream),
-              "updateReferenceGeometry: D2D copy");
+              "updateReferenceGeometry: D2D copy x");
+    checkCuda(cudaMemcpyAsync(impl.ref_coords.d_ry.ptr, impl.coords.d_y.ptr,
+                               m_natoms * sizeof(double),
+                               cudaMemcpyDeviceToDevice, impl.stream),
+              "updateReferenceGeometry: D2D copy y");
+    checkCuda(cudaMemcpyAsync(impl.ref_coords.d_rz.ptr, impl.coords.d_z.ptr,
+                               m_natoms * sizeof(double),
+                               cudaMemcpyDeviceToDevice, impl.stream),
+              "updateReferenceGeometry: D2D copy z");
 }

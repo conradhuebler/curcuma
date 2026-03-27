@@ -327,13 +327,14 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
     // O(N) CPU parameter extraction + O(N²) GPU matrix build + O(N³/6) GPU Cholesky
     GFNFF::EEQGPUParams eeq_params = m_gfnff->prepareEEQParametersForGPU(cn);
 
-    // Ensure coord upload on main stream is complete before EEQ stream reads d_coords.
+    // Ensure coord upload on main stream is complete before EEQ stream reads SoA buffers.
     // Currently implicit (computeCN syncs main stream), but explicit for safety.
     m_gpu_workspace->synchronizeMainStream();
-    const double* d_coords = m_gpu_workspace->getDeviceCoordsPtr();
     bool eeq_ok = m_eeq_gpu->solve(
         N, eeq_params.nfrag,
-        d_coords,
+        m_gpu_workspace->getDeviceXPtr(),
+        m_gpu_workspace->getDeviceYPtr(),
+        m_gpu_workspace->getDeviceZPtr(),
         eeq_params.alpha_corrected.data(),
         eeq_params.gam_corrected.data(),
         eeq_params.fraglist,

@@ -258,7 +258,7 @@ public:
      */
     bool checkDisplacement(double threshold);
 
-    /// Copy current d_coords to d_ref_coords (device-to-device, call after topology update)
+    /// Copy current coords SoA to ref_coords SoA (device-to-device, call after topology update)
     void updateReferenceGeometry();
 
     // =========================================================================
@@ -347,9 +347,15 @@ public:
     /// Number of bond pairs uploaded to GPU
     int bondCount() const;
 
-    /// Device pointer to [3*N] coordinate array (Bohr, row-major x,y,z per atom)
-    /// Claude Generated (March 2026): Exposes GPU coords for EEQSolverGPU
+    /// DEPRECATED: use getDeviceXPtr/YPtr/ZPtr() instead.
+    /// Returns nullptr — coords are now in SoA layout (Phase 10, March 2026).
     const double* getDeviceCoordsPtr() const;
+
+    /// Device pointer to x-coordinate array [N] (Bohr, SoA).
+    /// Claude Generated (Phase 10, March 2026): SoA for coalesced warp reads.
+    const double* getDeviceXPtr() const;
+    const double* getDeviceYPtr() const;
+    const double* getDeviceZPtr() const;
 
     /// Synchronize main stream to ensure all prior uploads (coords, CN) are visible.
     /// Claude Generated (March 2026): Required before cross-stream reads (e.g. EEQSolverGPU).
@@ -418,7 +424,9 @@ private:
     // cudaMemcpyAsync without CPU page-fault overhead. This is the primary per-step
     // performance optimization for iterative MD/Opt workloads.
     // Allocated via cudaMallocHost in constructor, freed via cudaFreeHost in destructor.
-    double* m_h_coords = nullptr;   ///< [3*N] pinned staging for geometry upload
+    double* m_h_x = nullptr;   ///< [N] pinned staging x-coords for geometry upload
+    double* m_h_y = nullptr;   ///< [N] pinned staging y-coords for geometry upload
+    double* m_h_z = nullptr;   ///< [N] pinned staging z-coords for geometry upload
     double* m_h_grad   = nullptr;   ///< [3*N] pinned staging for gradient download
     double* m_h_dEdcn_snap = nullptr; ///< [N] pinned staging for dEdcn snapshot download
     double* m_h_grad_snap  = nullptr; ///< [3*N] pinned staging for pre-CN grad snapshot

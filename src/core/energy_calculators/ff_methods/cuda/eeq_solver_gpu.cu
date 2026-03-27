@@ -88,7 +88,9 @@ __device__ constexpr double TSQRT2PI_GPU = 0.797884560802866;
 __global__ __launch_bounds__(256, 4)
 void k_eeq_build_matrix(
     int N,
-    const double* __restrict__ coords,   // [N*3] row-major AoS: x₀y₀z₀x₁y₁z₁... (Bohr)
+    const double* __restrict__ cx,       // [N] x-coordinates (Bohr, SoA)
+    const double* __restrict__ cy,       // [N] y-coordinates (Bohr, SoA)
+    const double* __restrict__ cz,       // [N] z-coordinates (Bohr, SoA)
     const double* __restrict__ alpha,     // [N] alpha² = (alpha_base + ff*qa)², already squared
     const double* __restrict__ gam,       // [N] gam_corrected
     double* __restrict__ A)               // [N*N] output column-major
@@ -109,10 +111,10 @@ void k_eeq_build_matrix(
         // Diagonal: gam + sqrt(2/pi) / sqrt(alpha)
         A[i * N + i] = gam[i] + TSQRT2PI_GPU / sqrt(alpha[i]);
     } else {
-        // Off-diagonal: compute interatomic distance
-        double dx = coords[i * 3 + 0] - coords[j * 3 + 0];
-        double dy = coords[i * 3 + 1] - coords[j * 3 + 1];
-        double dz = coords[i * 3 + 2] - coords[j * 3 + 2];
+        // Off-diagonal: compute interatomic distance (SoA layout)
+        double dx = cx[i] - cx[j];
+        double dy = cy[i] - cy[j];
+        double dz = cz[i] - cz[j];
         double r = sqrt(dx * dx + dy * dy + dz * dz);
 
         double gamma_ij = 1.0 / sqrt(alpha[i] + alpha[j]);
@@ -169,7 +171,7 @@ EEQSolverGPU::~EEQSolverGPU()
 
 bool EEQSolverGPU::solve(
     int natoms, int nfrag,
-    const double* d_coords,
+    const double* cx, const double* cy, const double* cz,
     const double* alpha_corrected,
     const double* gam_corrected,
     const std::vector<int>& fraglist,
@@ -192,7 +194,7 @@ bool EEQSolverGPU::solve(
         int grid = (n_lower + block - 1) / block;
 
         k_eeq_build_matrix<<<grid, block, 0, m_impl->stream>>>(
-            N, d_coords, m_impl->d_alpha.ptr, m_impl->d_gam.ptr, m_impl->d_A.ptr);
+            N, cx, cy, cz, m_impl->d_alpha.ptr, m_impl->d_gam.ptr, m_impl->d_A.ptr);
     }
 
     // --- 3. Build RHS matrix on CPU and upload ---

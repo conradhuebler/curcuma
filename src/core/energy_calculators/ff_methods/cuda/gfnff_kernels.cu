@@ -14,7 +14,7 @@
  * Gradient: atomicAdd into grad[3*atom + dim]
  * Energy:   atomicAdd into energy[0]
  *
- * Coordinate layout: coords[3*i + 0] = x_i, [3*i+1] = y_i, [3*i+2] = z_i
+ * Coordinate layout: SoA — separate cx[N], cy[N], cz[N] arrays (Phase 10, March 2026)
  */
 
 #include "gfnff_kernels.cuh"
@@ -25,15 +25,6 @@
 // ============================================================================
 // Device geometry helpers
 // ============================================================================
-
-/// Squared distance between atoms i and j
-__device__ __forceinline__ double dist_sq(const double* __restrict__ c, int i, int j)
-{
-    double dx = c[3*j]   - c[3*i];
-    double dy = c[3*j+1] - c[3*i+1];
-    double dz = c[3*j+2] - c[3*i+2];
-    return dx*dx + dy*dy + dz*dz;
-}
 
 /// Add vector contribution to gradient (atomicAdd on x,y,z)
 __device__ __forceinline__ void add_grad(double* __restrict__ grad, int atom,
@@ -115,16 +106,20 @@ __global__ void k_zero_double(double* arr, int n)
 // ============================================================================
 __global__ void k_check_displacement(
     int N,
-    const double* __restrict__ current_coords,
-    const double* __restrict__ ref_coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ rx,
+    const double* __restrict__ ry,
+    const double* __restrict__ rz,
     double        threshold_sq,
     int*          exceeded_flag)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
-    double dx = current_coords[3*i]   - ref_coords[3*i];
-    double dy = current_coords[3*i+1] - ref_coords[3*i+1];
-    double dz = current_coords[3*i+2] - ref_coords[3*i+2];
+    double dx = cx[i] - rx[i];
+    double dy = cy[i] - ry[i];
+    double dz = cz[i] - rz[i];
     if (dx*dx + dy*dy + dz*dz > threshold_sq)
         atomicOr(exceeded_flag, 1);
 }
@@ -147,7 +142,9 @@ __global__ void k_dispersion(
     const double* __restrict__ r_cut,
     const double* __restrict__ dc6dcn_ij,
     const double* __restrict__ dc6dcn_ji,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    dEdcn,
     double*                    grad,
     double*                    energy)
@@ -157,9 +154,9 @@ __global__ void k_dispersion(
 
     if (tid < n) {
         int i = idx_i[tid], j = idx_j[tid];
-        double dx = coords[3*i]   - coords[3*j];
-        double dy = coords[3*i+1] - coords[3*j+1];
-        double dz = coords[3*i+2] - coords[3*j+2];
+        double dx = cx[i] - cx[j];
+        double dy = cy[i] - cy[j];
+        double dz = cz[i] - cz[j];
         double r2 = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
@@ -210,7 +207,9 @@ __global__ void k_repulsion(
     const double* __restrict__ alpha,
     const double* __restrict__ repab,
     const double* __restrict__ r_cut,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy)
 {
@@ -219,9 +218,9 @@ __global__ void k_repulsion(
 
     if (tid < n) {
         int i = idx_i[tid], j = idx_j[tid];
-        double dx = coords[3*i]   - coords[3*j];
-        double dy = coords[3*i+1] - coords[3*j+1];
-        double dz = coords[3*i+2] - coords[3*j+2];
+        double dx = cx[i] - cx[j];
+        double dy = cy[i] - cy[j];
+        double dz = cz[i] - cz[j];
         double r2  = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
@@ -257,7 +256,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_repulsion_mixed(
     const double* __restrict__ alpha,
     const double* __restrict__ repab,
     const double* __restrict__ r_cut,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy)
 {
@@ -266,9 +267,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_repulsion_mixed(
 
     if (tid < n) {
         int i = idx_i[tid], j = idx_j[tid];
-        float dx = (float)(coords[3*i]   - coords[3*j]);
-        float dy = (float)(coords[3*i+1] - coords[3*j+1]);
-        float dz = (float)(coords[3*i+2] - coords[3*j+2]);
+        float dx = (float)(cx[i] - cx[j]);
+        float dy = (float)(cy[i] - cy[j]);
+        float dz = (float)(cz[i] - cz[j]);
         float r2  = dx*dx + dy*dy + dz*dz;
         float rij = sqrtf(r2);
 
@@ -306,7 +307,9 @@ __global__ void k_coulomb(
     const int*    __restrict__ idx_j,
     const double* __restrict__ gamma_ij,
     const double* __restrict__ r_cut,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ charges,
     double*                    grad,
     double*                    energy)
@@ -316,9 +319,9 @@ __global__ void k_coulomb(
 
     if (tid < n) {
         int i = idx_i[tid], j = idx_j[tid];
-        double dx  = coords[3*i]   - coords[3*j];
-        double dy  = coords[3*i+1] - coords[3*j+1];
-        double dz  = coords[3*i+2] - coords[3*j+2];
+        double dx  = cx[i] - cx[j];
+        double dy  = cy[i] - cy[j];
+        double dz  = cz[i] - cz[j];
         double r2  = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
@@ -370,7 +373,9 @@ __global__ void k_bonds(
     const int*    __restrict__ nr_hb,
     const double* __restrict__ hb_cn_H,
     const int*    __restrict__ hb_H_atom,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ cn,
     double*                    grad,
     double*                    dEdcn,
@@ -382,9 +387,9 @@ __global__ void k_bonds(
 
     if (tid < n) {
         int i = idx_i[tid], j = idx_j[tid];
-        double dx  = coords[3*i]   - coords[3*j];
-        double dy  = coords[3*i+1] - coords[3*j+1];
-        double dz  = coords[3*i+2] - coords[3*j+2];
+        double dx  = cx[i] - cx[j];
+        double dy  = cy[i] - cy[j];
+        double dz  = cz[i] - cz[j];
         double r2  = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
@@ -461,18 +466,19 @@ __constant__ int    d_refn_const[D4_MAX_ELEM];
 // Also fills d_cos[3]: ∂cos/∂x_i, ∂cos/∂x_k (x-component only as template)
 // ============================================================================
 __device__ double cos_angle_grad(
-    const double* __restrict__ c, int i, int j, int k,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    int i, int j, int k,
     double& d_ri_x, double& d_ri_y, double& d_ri_z,
     double& d_rk_x, double& d_rk_y, double& d_rk_z,
     double& d_rj_x, double& d_rj_y, double& d_rj_z,
     bool grad)
 {
-    double eij_x = c[3*i]   - c[3*j];
-    double eij_y = c[3*i+1] - c[3*j+1];
-    double eij_z = c[3*i+2] - c[3*j+2];
-    double ekj_x = c[3*k]   - c[3*j];
-    double ekj_y = c[3*k+1] - c[3*j+1];
-    double ekj_z = c[3*k+2] - c[3*j+2];
+    double eij_x = cx[i] - cx[j];
+    double eij_y = cy[i] - cy[j];
+    double eij_z = cz[i] - cz[j];
+    double ekj_x = cx[k] - cx[j];
+    double ekj_y = cy[k] - cy[j];
+    double ekj_z = cz[k] - cz[j];
 
     double rij2 = eij_x*eij_x + eij_y*eij_y + eij_z*eij_z;
     double rkj2 = ekj_x*ekj_x + ekj_y*ekj_y + ekj_z*ekj_z;
@@ -534,7 +540,9 @@ __global__ void k_angles(
     const int*    __restrict__ atk,
     const double* __restrict__ fc,
     const double* __restrict__ theta0,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ rcov_d3,  // unused arg; uses constant d_rcov_d3 directly
     double*                    grad,
     double*                    energy)
@@ -552,12 +560,12 @@ __global__ void k_angles(
             double rcov_j = d_rcov_d3[zj] * scale;
             double rcov_k = d_rcov_d3[zk] * scale;
 
-            double dij_x = coords[3*i]   - coords[3*j];
-            double dij_y = coords[3*i+1] - coords[3*j+1];
-            double dij_z = coords[3*i+2] - coords[3*j+2];
-            double dkj_x = coords[3*k]   - coords[3*j];
-            double dkj_y = coords[3*k+1] - coords[3*j+1];
-            double dkj_z = coords[3*k+2] - coords[3*j+2];
+            double dij_x = cx[i] - cx[j];
+            double dij_y = cy[i] - cy[j];
+            double dij_z = cz[i] - cz[j];
+            double dkj_x = cx[k] - cx[j];
+            double dkj_y = cy[k] - cy[j];
+            double dkj_z = cz[k] - cz[j];
 
             double r_ij_sq = dij_x*dij_x + dij_y*dij_y + dij_z*dij_z;
             double r_jk_sq = dkj_x*dkj_x + dkj_y*dkj_y + dkj_z*dkj_z;
@@ -580,7 +588,7 @@ __global__ void k_angles(
             double d_ri_x, d_ri_y, d_ri_z;
             double d_rk_x, d_rk_y, d_rk_z;
             double d_rj_x, d_rj_y, d_rj_z;
-            double cos_a = cos_angle_grad(coords, i, j, k,
+            double cos_a = cos_angle_grad(cx, cy, cz, i, j, k,
                                            d_ri_x, d_ri_y, d_ri_z,
                                            d_rk_x, d_rk_y, d_rk_z,
                                            d_rj_x, d_rj_y, d_rj_z, true);
@@ -634,21 +642,21 @@ __global__ void k_angles(
 // Reference: gfnff_geometry.h GFNFF_Geometry::calculateDihedralAngle
 // ============================================================================
 __device__ double dihedral_angle_grad(
-    const double* __restrict__ c,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
     int i, int j, int k, int l,
     double derivate[4][3],   // [atom][xyz]
     bool do_grad)
 {
     // b1 = rj - ri, b2 = rk - rj, b3 = rl - rk
-    double b1x = c[3*j]   - c[3*i];
-    double b1y = c[3*j+1] - c[3*i+1];
-    double b1z = c[3*j+2] - c[3*i+2];
-    double b2x = c[3*k]   - c[3*j];
-    double b2y = c[3*k+1] - c[3*j+1];
-    double b2z = c[3*k+2] - c[3*j+2];
-    double b3x = c[3*l]   - c[3*k];
-    double b3y = c[3*l+1] - c[3*k+1];
-    double b3z = c[3*l+2] - c[3*k+2];
+    double b1x = cx[j] - cx[i];
+    double b1y = cy[j] - cy[i];
+    double b1z = cz[j] - cz[i];
+    double b2x = cx[k] - cx[j];
+    double b2y = cy[k] - cy[j];
+    double b2z = cz[k] - cz[j];
+    double b3x = cx[l] - cx[k];
+    double b3y = cy[l] - cy[k];
+    double b3z = cz[l] - cz[k];
 
     // n1 = b1 × b2,  n2 = b2 × b3
     double n1x = b1y*b2z - b1z*b2y;
@@ -767,7 +775,9 @@ __global__ void k_dihedrals(
     const double* __restrict__ phi0,
     const double* __restrict__ n_period,
     const int*    __restrict__ is_nci,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ rcov_d3_unused,
     double*                    grad,
     double*                    energy)
@@ -787,9 +797,9 @@ __global__ void k_dihedrals(
             double atcutt = is_nci[tid] ? 0.305 : 0.505;
 
             auto sq_dist = [&](int a, int b) {
-                double dx=coords[3*b]-coords[3*a];
-                double dy=coords[3*b+1]-coords[3*a+1];
-                double dz=coords[3*b+2]-coords[3*a+2];
+                double dx = cx[b] - cx[a];
+                double dy = cy[b] - cy[a];
+                double dz = cz[b] - cz[a];
                 return dx*dx+dy*dy+dz*dz;
             };
 
@@ -822,7 +832,7 @@ __global__ void k_dihedrals(
             double d2_kl = make_damp2(rkl2, rk, rl);
 
             double derivate[4][3];
-            double phi = dihedral_angle_grad(coords, ai, aj, ak, al, derivate, true);
+            double phi = dihedral_angle_grad(cx, cy, cz, ai, aj, ak, al, derivate, true);
 
             double c1    = n_period[tid] * (phi - phi0[tid]) + M_PI;
             double cos_c1 = cos(c1);
@@ -841,19 +851,19 @@ __global__ void k_dihedrals(
 
             // Gradient from damping: E_raw * d(damp)/d(rXY²) * rXY_vec
             {
-                double dx=coords[3*ai]-coords[3*aj], dy=coords[3*ai+1]-coords[3*aj+1], dz=coords[3*ai+2]-coords[3*aj+2];
+                double dx=cx[ai]-cx[aj], dy=cy[ai]-cy[aj], dz=cz[ai]-cz[aj];
                 double fac = E_raw * d2_ij * d_jk * d_kl;
                 add_grad(grad, ai,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, aj, -fac*dx, -fac*dy, -fac*dz);
             }
             {
-                double dx=coords[3*aj]-coords[3*ak], dy=coords[3*aj+1]-coords[3*ak+1], dz=coords[3*aj+2]-coords[3*ak+2];
+                double dx=cx[aj]-cx[ak], dy=cy[aj]-cy[ak], dz=cz[aj]-cz[ak];
                 double fac = E_raw * d_ij * d2_jk * d_kl;
                 add_grad(grad, aj,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, ak, -fac*dx, -fac*dy, -fac*dz);
             }
             {
-                double dx=coords[3*ak]-coords[3*al], dy=coords[3*ak+1]-coords[3*al+1], dz=coords[3*ak+2]-coords[3*al+2];
+                double dx=cx[ak]-cx[al], dy=cy[ak]-cy[al], dz=cz[ak]-cz[al];
                 double fac = E_raw * d_ij * d_jk * d2_kl;
                 add_grad(grad, ak,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, al, -fac*dx, -fac*dy, -fac*dz);
@@ -875,7 +885,7 @@ __global__ void k_dihedrals(
 // Reference: gfnff_geometry.h:calculateOutOfPlaneAngle (CPU version)
 // ============================================================================
 __device__ double inversion_angle_grad(
-    const double* __restrict__ c,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
     int i, int j, int k, int l,
     double derivate[4][3],
     bool do_grad)
@@ -885,11 +895,9 @@ __device__ double inversion_angle_grad(
     //   rd = r_k - r_j  (nb2 - nb1)
     //   rv = r_l - r_i  (nb3 - center)
     double re[3], rd[3], rv[3];
-    for (int d = 0; d < 3; ++d) {
-        re[d] = c[3*i+d] - c[3*j+d];
-        rd[d] = c[3*k+d] - c[3*j+d];
-        rv[d] = c[3*l+d] - c[3*i+d];
-    }
+    re[0] = cx[i] - cx[j]; re[1] = cy[i] - cy[j]; re[2] = cz[i] - cz[j];
+    rd[0] = cx[k] - cx[j]; rd[1] = cy[k] - cy[j]; rd[2] = cz[k] - cz[j];
+    rv[0] = cx[l] - cx[i]; rv[1] = cy[l] - cy[i]; rv[2] = cz[l] - cz[i];
 
     // Normal vector: rn = re × rd
     double rn[3];
@@ -1011,7 +1019,9 @@ __global__ void k_inversions(
     const double* __restrict__ C1,
     const double* __restrict__ C2,
     const int*    __restrict__ potential_type,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy)
 {
@@ -1031,9 +1041,9 @@ __global__ void k_inversions(
         double rcov_3 = (zl >= 0 && zl < 87) ? d_rcov_d3[zl] * rcov_scale : 1.0 * rcov_scale;
 
         auto sq_dist3 = [&](int a, int b) {
-            double dx=coords[3*b]-coords[3*a];
-            double dy=coords[3*b+1]-coords[3*a+1];
-            double dz=coords[3*b+2]-coords[3*a+2];
+            double dx = cx[b] - cx[a];
+            double dy = cy[b] - cy[a];
+            double dz = cz[b] - cz[a];
             return dx*dx+dy*dy+dz*dz;
         };
 
@@ -1055,7 +1065,7 @@ __global__ void k_inversions(
         double damp    = damp_ij * damp_jk * damp_jl;
 
         double derivate[4][3];
-        double omega = inversion_angle_grad(coords, i, j, k, l, derivate, true);
+        double omega = inversion_angle_grad(cx, cy, cz, i, j, k, l, derivate, true);
         double cos_om  = cos(omega);
         double cos_om0 = cos(omega0[tid]);
 
@@ -1096,19 +1106,19 @@ __global__ void k_inversions(
         double dd_jl = calc_ddamp(rjl_sq, rcov_3, rcov_1);
 
         {
-            double dx=coords[3*i]-coords[3*j], dy=coords[3*i+1]-coords[3*j+1], dz=coords[3*i+2]-coords[3*j+2];
+            double dx=cx[i]-cx[j], dy=cy[i]-cy[j], dz=cz[i]-cz[j];
             double fac = E_raw * dd_ij * damp_jk * damp_jl;
             add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, i, -fac*dx, -fac*dy, -fac*dz);
         }
         {
-            double dx=coords[3*k]-coords[3*j], dy=coords[3*k+1]-coords[3*j+1], dz=coords[3*k+2]-coords[3*j+2];
+            double dx=cx[k]-cx[j], dy=cy[k]-cy[j], dz=cz[k]-cz[j];
             double fac = E_raw * damp_ij * dd_jk * damp_jl;
             add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, k, -fac*dx, -fac*dy, -fac*dz);
         }
         {
-            double dx=coords[3*l]-coords[3*j], dy=coords[3*l+1]-coords[3*j+1], dz=coords[3*l+2]-coords[3*j+2];
+            double dx=cx[l]-cx[j], dy=cy[l]-cy[j], dz=cz[l]-cz[j];
             double fac = E_raw * damp_ij * damp_jk * dd_jl;
             add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, l, -fac*dx, -fac*dy, -fac*dz);
@@ -1197,7 +1207,9 @@ __global__ void k_storsions(
     const int*    __restrict__ idx_k,
     const int*    __restrict__ idx_l,
     const double* __restrict__ erefhalf,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy)
 {
@@ -1208,7 +1220,7 @@ __global__ void k_storsions(
         int ai = idx_i[tid], aj = idx_j[tid], ak = idx_k[tid], al = idx_l[tid];
 
         double derivate[4][3];
-        double phi = dihedral_angle_grad(coords, ai, aj, ak, al, derivate, true);
+        double phi = dihedral_angle_grad(cx, cy, cz, ai, aj, ak, al, derivate, true);
 
         double eref = erefhalf[tid];
         local_E = -eref * cos(2.0 * phi) + eref;
@@ -1241,7 +1253,9 @@ __global__ void k_batm(
     const double* __restrict__ zb3atm_i,
     const double* __restrict__ zb3atm_j,
     const double* __restrict__ zb3atm_k,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ topo_charges,
     double*                    grad,
     double*                    energy)
@@ -1252,9 +1266,9 @@ __global__ void k_batm(
     if (tid < n) {
         int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid];
 
-        double ix = coords[3*i], iy = coords[3*i+1], iz = coords[3*i+2];
-        double jx = coords[3*j], jy = coords[3*j+1], jz = coords[3*j+2];
-        double kx = coords[3*k], ky = coords[3*k+1], kz = coords[3*k+2];
+        double ix = cx[i], iy = cy[i], iz = cz[i];
+        double jx = cx[j], jy = cy[j], jz = cz[j];
+        double kx = cx[k], ky = cy[k], kz = cz[k];
 
         double rij_x = jx-ix, rij_y = jy-iy, rij_z = jz-iz;
         double rik_x = kx-ix, rik_y = ky-iy, rik_z = kz-iz;
@@ -1325,7 +1339,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_batm_mixed(
     const double* __restrict__ zb3atm_i,
     const double* __restrict__ zb3atm_j,
     const double* __restrict__ zb3atm_k,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ topo_charges,
     double*                    grad,
     double*                    energy)
@@ -1336,9 +1352,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_batm_mixed(
     if (tid < n) {
         int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid];
 
-        float ix = (float)coords[3*i], iy = (float)coords[3*i+1], iz = (float)coords[3*i+2];
-        float jx = (float)coords[3*j], jy = (float)coords[3*j+1], jz = (float)coords[3*j+2];
-        float kx = (float)coords[3*k], ky = (float)coords[3*k+1], kz = (float)coords[3*k+2];
+        float ix = (float)cx[i], iy = (float)cy[i], iz = (float)cz[i];
+        float jx = (float)cx[j], jy = (float)cy[j], jz = (float)cz[j];
+        float kx = (float)cx[k], ky = (float)cy[k], kz = (float)cz[k];
 
         float rij_x = jx-ix, rij_y = jy-iy, rij_z = jz-iz;
         float rik_x = kx-ix, rik_y = ky-iy, rik_z = kz-iz;
@@ -1418,7 +1434,9 @@ __global__ void k_atm(
     const double* __restrict__ a2,
     const double* __restrict__ alp,
     const double* __restrict__ triple_scale,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy)
 {
@@ -1428,9 +1446,9 @@ __global__ void k_atm(
     if (tid < n) {
         int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid];
 
-        double ix = coords[3*i], iy = coords[3*i+1], iz = coords[3*i+2];
-        double jx = coords[3*j], jy = coords[3*j+1], jz = coords[3*j+2];
-        double kx = coords[3*k], ky = coords[3*k+1], kz = coords[3*k+2];
+        double ix = cx[i], iy = cy[i], iz = cz[i];
+        double jx = cx[j], jy = cy[j], jz = cz[j];
+        double kx = cx[k], ky = cy[k], kz = cz[k];
 
         double rij_x = jx-ix, rij_y = jy-iy, rij_z = jz-iz;
         double rik_x = kx-ix, rik_y = ky-iy, rik_z = kz-iz;
@@ -1518,7 +1536,9 @@ __global__ void k_xbonds(
     const double* __restrict__ q_B,
     const double* __restrict__ acidity_X,
     const double* __restrict__ r_cut,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy)
 {
@@ -1535,9 +1555,9 @@ __global__ void k_xbonds(
 
         int A = idx_i[tid], X = idx_j[tid], B = idx_k[tid];
 
-        double ax = coords[3*A], ay = coords[3*A+1], az = coords[3*A+2];
-        double xx = coords[3*X], xy = coords[3*X+1], xz = coords[3*X+2];
-        double bx = coords[3*B], by = coords[3*B+1], bz = coords[3*B+2];
+        double ax = cx[A], ay = cy[A], az = cz[A];
+        double xx = cx[X], xy = cy[X], xz = cz[X];
+        double bx = cx[B], by = cy[B], bz = cz[B];
 
         double rAX_x = xx-ax, rAX_y = xy-ay, rAX_z = xz-az;
         double rXB_x = bx-xx, rXB_y = by-xy, rXB_z = bz-xz;
@@ -1638,7 +1658,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_xbonds_mixed(
     const double* __restrict__ q_B,
     const double* __restrict__ acidity_X,
     const double* __restrict__ r_cut,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy)
 {
@@ -1655,9 +1677,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_xbonds_mixed(
 
         int A = idx_i[tid], X = idx_j[tid], B = idx_k[tid];
 
-        float ax = (float)coords[3*A], ay = (float)coords[3*A+1], az = (float)coords[3*A+2];
-        float xx = (float)coords[3*X], xy = (float)coords[3*X+1], xz = (float)coords[3*X+2];
-        float bx = (float)coords[3*B], by = (float)coords[3*B+1], bz = (float)coords[3*B+2];
+        float ax = (float)cx[A], ay = (float)cy[A], az = (float)cz[A];
+        float xx = (float)cx[X], xy = (float)cy[X], xz = (float)cz[X];
+        float bx = (float)cx[B], by = (float)cy[B], bz = (float)cz[B];
 
         float rAX_x = xx-ax, rAX_y = xy-ay, rAX_z = xz-az;
         float rXB_x = bx-xx, rXB_y = by-xy, rXB_z = bz-xz;
@@ -1789,7 +1811,9 @@ __global__ void k_hbonds(
     const int*    __restrict__ nb_C_count,
     const int*    __restrict__ nb_C_flat,
     const double* __restrict__ repz_B,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     double*                    grad,
     double*                    energy)
 {
@@ -1815,9 +1839,9 @@ __global__ void k_hbonds(
     int A = idx_i[tid], H = idx_j[tid], B = idx_k[tid];
     int ct = case_type[tid];
 
-    double ax = coords[3*A], ay = coords[3*A+1], az = coords[3*A+2];
-    double hx = coords[3*H], hy = coords[3*H+1], hz = coords[3*H+2];
-    double bx = coords[3*B], by = coords[3*B+1], bz = coords[3*B+2];
+    double ax = cx[A], ay = cy[A], az = cz[A];
+    double hx = cx[H], hy = cy[H], hz = cz[H];
+    double bx = cx[B], by = cy[B], bz = cz[B];
 
     double rAH_x = hx-ax, rAH_y = hy-ay, rAH_z = hz-az;
     double rHB_x = bx-hx, rHB_y = by-hy, rHB_z = bz-hz;
@@ -1865,7 +1889,7 @@ __global__ void k_hbonds(
         double hbnbcut_save = (eB + 1 == 7 && nb_cnt == 1) ? 2.0 : HB_NBCUT_D;
         for (int ni = 0; ni < nb_cnt; ++ni) {
             int nb = nb_B_flat[nb_off + ni];
-            double nbx = coords[3*nb], nby = coords[3*nb+1], nbz = coords[3*nb+2];
+            double nbx = cx[nb], nby = cy[nb], nbz = cz[nb];
             double dAnb_x = nbx-ax, dAnb_y = nby-ay, dAnb_z = nbz-az;
             double dBnb_x = nbx-bx, dBnb_y = nby-by, dBnb_z = nbz-bz;
             double r_Anb = sqrt(dAnb_x*dAnb_x + dAnb_y*dAnb_y + dAnb_z*dAnb_z);
@@ -1889,9 +1913,9 @@ __global__ void k_hbonds(
         if (nb_cnt > 0) {
             for (int ni = 0; ni < nb_cnt; ++ni) {
                 int nb = nb_B_flat[nb_off + ni];
-                lp_vx_c4 += coords[3*nb]   - bx;
-                lp_vy_c4 += coords[3*nb+1] - by;
-                lp_vz_c4 += coords[3*nb+2] - bz;
+                lp_vx_c4 += cx[nb] - bx;
+                lp_vy_c4 += cy[nb] - by;
+                lp_vz_c4 += cz[nb] - bz;
             }
             vnorm_c4 = sqrt(lp_vx_c4*lp_vx_c4 + lp_vy_c4*lp_vy_c4 + lp_vz_c4*lp_vz_c4);
             if (vnorm_c4 > 1e-10) {
@@ -1926,8 +1950,8 @@ __global__ void k_hbonds(
 
         // eangl: angle bending H...B=C
         {
-            double cx = coords[3*C_idx], cy = coords[3*C_idx+1], cz = coords[3*C_idx+2];
-            double vab_x = cx-bx, vab_y = cy-by, vab_z = cz-bz;
+            double C_x = cx[C_idx], C_y = cy[C_idx], C_z = cz[C_idx];
+            double vab_x = C_x-bx, vab_y = C_y-by, vab_z = C_z-bz;
             double vcb_x = hx-bx, vcb_y = hy-by, vcb_z = hz-bz;
             double rab2a = vab_x*vab_x + vab_y*vab_y + vab_z*vab_z;
             double rcb2a = vcb_x*vcb_x + vcb_y*vcb_y + vcb_z*vcb_z;
@@ -1958,7 +1982,7 @@ __global__ void k_hbonds(
             if (D_idx == B_idx) continue;
 
             double derivate[4][3];
-            double phi = dihedral_angle_grad(coords, D_idx, B_idx, C_idx, H_idx, derivate, false);
+            double phi = dihedral_angle_grad(cx, cy, cz, D_idx, B_idx, C_idx, H_idx, derivate, false);
 
             double tshift = TORS_HB_D;
             double fc_tors = (1.0 - tshift) / 2.0;
@@ -2056,7 +2080,7 @@ __global__ void k_hbonds(
             double hbnbcut_g = (eB + 1 == 7 && nb_cnt == 1) ? 2.0 : HB_NBCUT_D;
             for (int ni = 0; ni < nb_cnt; ++ni) {
                 int nb = nb_B_flat[nb_off + ni];
-                double nbx = coords[3*nb], nby = coords[3*nb+1], nbz = coords[3*nb+2];
+                double nbx = cx[nb], nby = cy[nb], nbz = cz[nb];
                 double dranb_x = ax-nbx, dranb_y = ay-nby, dranb_z = az-nbz;
                 double drbnb_x = bx-nbx, drbnb_y = by-nby, drbnb_z = bz-nbz;
                 double ranb = sqrt(dranb_x*dranb_x + dranb_y*dranb_y + dranb_z*dranb_z);
@@ -2094,8 +2118,8 @@ __global__ void k_hbonds(
             int C_idx = acceptor_parent[tid];
             double bterm_c3 = -rdamp * qhoutl * etors * acidity_A[tid] * basicity_B[tid] * Q_A * Q_B * global_scale;
             // Angle gradient: H...B=C angle
-            double cx = coords[3*C_idx], cy = coords[3*C_idx+1], cz = coords[3*C_idx+2];
-            double vab_x = cx-bx, vab_y = cy-by, vab_z = cz-bz;
+            double C_x = cx[C_idx], C_y = cy[C_idx], C_z = cz[C_idx];
+            double vab_x = C_x-bx, vab_y = C_y-by, vab_z = C_z-bz;
             double vcb_x = hx-bx, vcb_y = hy-by, vcb_z = hz-bz;
             double rab2a = vab_x*vab_x + vab_y*vab_y + vab_z*vab_z;
             double rcb2a = vcb_x*vcb_x + vcb_y*vcb_y + vcb_z*vcb_z;
@@ -2156,7 +2180,7 @@ __global__ void k_hbonds(
                 if (D_idx == B) continue;
 
                 double derivate[4][3];
-                double phi = dihedral_angle_grad(coords, D_idx, B, C_idx, H, derivate, true);
+                double phi = dihedral_angle_grad(cx, cy, cz, D_idx, B, C_idx, H, derivate, true);
 
                 double tshift = TORS_HB_D;
                 double fc_tors = (1.0 - tshift) / 2.0;
@@ -2434,7 +2458,9 @@ __global__ void k_cn_chainrule(
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
     const double* __restrict__ rcov_sum,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ dEdcn,
     const double* __restrict__ dlogdcn,
     double*                    grad,
@@ -2444,9 +2470,9 @@ __global__ void k_cn_chainrule(
     if (tid >= n_pairs) return;
 
     int i = idx_i[tid], j = idx_j[tid];
-    double dx = coords[3*i]   - coords[3*j];
-    double dy = coords[3*i+1] - coords[3*j+1];
-    double dz = coords[3*i+2] - coords[3*j+2];
+    double dx = cx[i] - cx[j];
+    double dy = cy[i] - cy[j];
+    double dz = cz[i] - cz[j];
     double r2 = dx*dx + dy*dy + dz*dz;
     double rij = sqrt(r2);
     if (rij < 1e-10) return;
@@ -2482,7 +2508,9 @@ __global__ void k_hb_alpha_chainrule(
     const int*    __restrict__ idx_H,
     const int*    __restrict__ idx_B,
     const double* __restrict__ rcov_sum,
-    const double* __restrict__ coords,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
     const double* __restrict__ zz_hb,
     double*                    grad,
     double        kn)
@@ -2491,9 +2519,9 @@ __global__ void k_hb_alpha_chainrule(
     if (tid >= n_pairs) return;
 
     int H = idx_H[tid], B = idx_B[tid];
-    double dx = coords[3*H]   - coords[3*B];
-    double dy = coords[3*H+1] - coords[3*B+1];
-    double dz = coords[3*H+2] - coords[3*B+2];
+    double dx = cx[H] - cx[B];
+    double dy = cy[H] - cy[B];
+    double dz = cz[H] - cz[B];
     double r2 = dx*dx + dy*dy + dz*dz;
     double rij = sqrt(r2);
     if (rij < 1e-10) return;
@@ -2526,7 +2554,9 @@ __global__ void k_hb_alpha_chainrule(
 // ============================================================================
 __global__ void k_cn_compute(
     int natoms,
-    const double* __restrict__ coords,    // [3*N] in Bohr
+    const double* __restrict__ cx,         // [N] x-coordinates in Bohr (SoA)
+    const double* __restrict__ cy,         // [N] y-coordinates in Bohr (SoA)
+    const double* __restrict__ cz,         // [N] z-coordinates in Bohr (SoA)
     const int*    __restrict__ atom_types, // [N] 1-based atomic numbers
     double*       __restrict__ cn_raw,      // [N] output: raw CN (erf sum)
     double*       __restrict__ cn_final,    // [N] output: log-transformed CN
@@ -2549,9 +2579,9 @@ __global__ void k_cn_compute(
     // Reference: gfnff_param.f90:381-404 — "covalentRadD3 * aatoau * 4/3"
     constexpr double CN_RCOV_SCALE = 4.0 / 3.0;
     double rcov_i = d_rcov_d3[zi - 1] * CN_RCOV_SCALE;
-    double xi = coords[3*i];
-    double yi = coords[3*i + 1];
-    double zi_coord = coords[3*i + 2];
+    double xi = cx[i];
+    double yi = cy[i];
+    double zi_coord = cz[i];
 
     double cn_sum = 0.0;
 
@@ -2562,9 +2592,9 @@ __global__ void k_cn_compute(
         int zj = atom_types[j];
         if (zj < 1 || zj > 86) continue;
 
-        double dx = xi - coords[3*j];
-        double dy = yi - coords[3*j + 1];
-        double dz = zi_coord - coords[3*j + 2];
+        double dx = xi - cx[j];
+        double dy = yi - cy[j];
+        double dz = zi_coord - cz[j];
         double r2 = dx*dx + dy*dy + dz*dz;
 
         // Distance cutoff (skip far atoms)
