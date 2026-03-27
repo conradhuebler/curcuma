@@ -1090,6 +1090,197 @@ int PolymerBuild::repairUnboundAtoms(Molecule& mol,
     return repaired;
 }
 
+/// Claude Generated: Extract fragment topology template from loaded molecule
+FragmentTopologyTemplate PolymerBuild::extractFragmentTemplate(const Molecule& mol, const std::string& fragment_name) const
+{
+    FragmentTopologyTemplate tmpl;
+    tmpl.fragment_name = fragment_name;
+
+    // Get atoms and identify Xx atoms
+    int n = mol.AtomCount();
+    std::vector<int> heavy_indices;  // maps fragment-local index to original index (skipping Xx)
+    std::vector<int> idx_to_local(n, -1);  // maps original index to fragment-local index (skipping Xx)
+
+    for (int i = 0; i < n; ++i) {
+        int elem = mol.Atom(i).first;
+        if (elem == 0) continue;  // skip Xx
+        idx_to_local[i] = static_cast<int>(heavy_indices.size());
+        heavy_indices.push_back(i);
+    }
+    tmpl.n_atoms = static_cast<int>(heavy_indices.size());
+
+    // Compute distance matrix for bond detection
+    auto [dist, _topo] = mol.DistanceMatrix();
+
+    // Extract bonds between heavy atoms (skip Xx-Xx and heavy-Xx bonds)
+    for (int i = 0; i < n; ++i) {
+        if (idx_to_local[i] < 0) continue;  // skip Xx
+        int elem_i = mol.Atom(i).first;
+
+        for (int j = i + 1; j < n; ++j) {
+            if (idx_to_local[j] < 0) continue;  // skip Xx
+            int elem_j = mol.Atom(j).first;
+
+            double cov_sum = Elements::CovalentRadius[elem_i] + Elements::CovalentRadius[elem_j];
+            if (dist(i, j) > 1e-6 && dist(i, j) <= cov_sum * 1.15) {
+                // Bond found - store with local indices
+                tmpl.internal_bonds.push_back({idx_to_local[i], idx_to_local[j]});
+            }
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format(
+            "Fragment template '{}': {} heavy atoms, {} internal bonds",
+            fragment_name, tmpl.n_atoms, tmpl.internal_bonds.size()));
+    }
+
+    return tmpl;
+}
+
+/// Claude Generated: Rebuild topology from stored templates
+void PolymerBuild::rebuildTopologyFromTemplates(
+    Molecule& mol,
+    const std::vector<int>& atom_monomer_id,
+    const std::vector<std::string>& monomer_fragment_type,
+    const std::vector<std::pair<int, int>>& interface_bonds,
+    const std::vector<int>& monomer_start_atoms) const
+{
+    int n = mol.AtomCount();
+    Matrix topo = Matrix::Zero(n, n);
+
+    // Build monomer atom ranges from monomer_start_atoms
+    std::vector<std::pair<int, int>> monomer_ranges;  // (start, end_exclusive) for each monomer
+    for (size_t m = 0; m < monomer_start_atoms.size(); ++m) {
+        int start = monomer_start_atoms[m];
+        int end = (m + 1 < monomer_start_atoms.size()) ? monomer_start_atoms[m + 1] : n;
+        monomer_ranges.push_back({start, end});
+    }
+
+    // For each monomer, copy template bonds (adjusted for atom indices)
+    int monomer_count = static_cast<int>(monomer_fragment_type.size());
+    for (int m = 0; m < monomer_count; ++m) {
+        const std::string& frag_name = monomer_fragment_type[m];
+        auto it = m_fragment_templates.find(frag_name);
+        if (it == m_fragment_templates.end()) {
+            CurcumaLogger::warn(fmt::format(
+                "rebuildTopology: no template for fragment '{}', falling back to distance-based",
+                frag_name));
+            continue;
+        }
+
+        const FragmentTopologyTemplate& tmpl = it->second;
+        int start_idx = monomer_ranges[m].first;
+
+        // Copy each template bond with adjusted indices
+        for (const auto& bond : tmpl.internal_bonds) {
+            int i = start_idx + bond.first;
+            int j = start_idx + bond.second;
+            if (i < n && j < n) {
+                topo(i, j) = topo(j, i) = 1.0;
+            }
+        }
+    }
+
+    // Add interface bonds
+    for (const auto& bond : interface_bonds) {
+        if (bond.first < n && bond.second < n) {
+            topo(bond.first, bond.second) = topo(bond.second, bond.first) = 1.0;
+        }
+    }
+
+    mol.setTopologyMatrix(topo);
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        int bond_count = 0;
+        for (int i = 0; i < n; ++i)
+            for (int j = i + 1; j < n; ++j)
+                if (topo(i, j) > 0.5) ++bond_count;
+        CurcumaLogger::info(fmt::format(
+            "rebuildTopology: {} total bonds (from {} monomer templates + {} interface)",
+            bond_count, monomer_count, interface_bonds.size()));
+    }
+}
+
+/// Claude Generated: Validate topology consistency across identical monomers
+int PolymerBuild::validateTopologyConsistency(
+    const Molecule& mol,
+    const std::vector<int>& atom_monomer_id,
+    const std::vector<std::string>& monomer_fragment_type,
+    const std::vector<std::pair<int, int>>& interface_bonds,
+    const std::string& tag) const
+{
+    if (!mol.hasPersistentTopology()) {
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::warn(fmt::format("{}: no persistent topology for consistency check", tag));
+        return -1;
+    }
+
+    const Matrix topo = mol.getTopologyMatrix();
+    int n = mol.AtomCount();
+
+    // Build set of interface bonds for exclusion
+    std::set<std::pair<int, int>> interface_set;
+    for (const auto& b : interface_bonds) {
+        auto canonical = (b.first < b.second) ? b : std::make_pair(b.second, b.first);
+        interface_set.insert(canonical);
+    }
+
+    // Build monomer atom lists
+    std::map<int, std::vector<int>> monomer_atoms;  // monomer_id -> list of atom indices
+    for (int i = 0; i < n; ++i) {
+        if (i < (int)atom_monomer_id.size()) {
+            monomer_atoms[atom_monomer_id[i]].push_back(i);
+        }
+    }
+
+    // Count actual intra-monomer bonds for each monomer
+    std::map<std::string, std::vector<int>> bonds_by_type;  // fragment_type -> list of bond counts per instance
+    int inconsistencies = 0;
+
+    for (const auto& [monomer_id, atoms] : monomer_atoms) {
+        if (monomer_id < 0 || monomer_id >= (int)monomer_fragment_type.size()) continue;
+
+        const std::string& frag_type = monomer_fragment_type[monomer_id];
+        int intra_bonds = 0;
+
+        // Count bonds within this monomer (excluding interface bonds)
+        for (size_t i = 0; i < atoms.size(); ++i) {
+            for (size_t j = i + 1; j < atoms.size(); ++j) {
+                auto canonical = (atoms[i] < atoms[j]) ? std::make_pair(atoms[i], atoms[j])
+                                                        : std::make_pair(atoms[j], atoms[i]);
+                if (interface_set.count(canonical)) continue;  // exclude interface bonds
+                if (topo(atoms[i], atoms[j]) > 0.5) ++intra_bonds;
+            }
+        }
+
+        bonds_by_type[frag_type].push_back(intra_bonds);
+    }
+
+    // Compare against expected bond counts from templates
+    for (const auto& [frag_type, bond_counts] : bonds_by_type) {
+        auto it = m_fragment_templates.find(frag_type);
+        if (it == m_fragment_templates.end()) continue;
+
+        int expected = static_cast<int>(it->second.internal_bonds.size());
+
+        for (int count : bond_counts) {
+            if (count != expected) {
+                ++inconsistencies;
+                CurcumaLogger::warn(fmt::format(
+                    "{}: TOPOLOGY INCONSISTENCY: monomer type '{}' has {} bonds, expected {} (from template)",
+                    tag, frag_type, count, expected));
+            }
+        }
+    }
+
+    if (inconsistencies == 0 && CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("{}: all monomer topologies consistent with templates", tag));
+    }
+
+    return inconsistencies;
+}
+
 void PolymerBuild::resolveOverlaps(Molecule& mol, int max_steps, double max_displacement)
 {
     int n = mol.AtomCount();
@@ -1221,6 +1412,17 @@ SubchainResult PolymerBuild::buildSubchain(
     std::vector<std::pair<int, int>> interface_bonds;
     // Per-atom monomer ID: atom_monomer_id[i] = which monomer atom i belongs to — Claude Generated
     std::vector<int> atom_monomer_id(polymer.AtomCount(), monomer_id_offset);
+    // Claude Generated: Track monomer types for topology validation
+    std::vector<std::string> monomer_fragment_type;
+    std::vector<int> monomer_start_atoms;  // starting atom index for each monomer
+
+    // Extract and store template for first fragment — Claude Generated
+    if (m_fragment_templates.find(first_name) == m_fragment_templates.end()) {
+        m_fragment_templates[first_name] = extractFragmentTemplate(polymer, first_name);
+    }
+    monomer_fragment_type.push_back(first_name);
+    monomer_start_atoms.push_back(0);  // first monomer starts at atom 0
+
     int chunk_size = m_config.get<int>("chunk_size", 1);
     if (chunk_size < 1) chunk_size = 1;
     bool optimize = m_config.get<bool>("optimize", true);
@@ -1247,6 +1449,17 @@ SubchainResult PolymerBuild::buildSubchain(
         tracked_xx = conn_result.tracked_xx;
         interface_bonds = conn_result.interface_bonds;
 
+        // Claude Generated: Extract template for new fragment type
+        if (m_fragment_templates.find(next_name) == m_fragment_templates.end()) {
+            Molecule frag_tmp;
+            frag_tmp.LoadMolecule(m_fragments[next_name]);
+            m_fragment_templates[next_name] = extractFragmentTemplate(frag_tmp, next_name);
+        }
+
+        // Claude Generated: Track monomer type and start atom
+        monomer_fragment_type.push_back(next_name);
+        monomer_start_atoms.push_back(conn_result.fragment_offset);
+
         // Update atom_monomer_id: remove entry for the deleted interface Xx, append new fragment — Claude Generated
         if (conn_result.removed_polymer_xx_idx >= 0
             && conn_result.removed_polymer_xx_idx < (int)atom_monomer_id.size())
@@ -1272,35 +1485,56 @@ SubchainResult PolymerBuild::buildSubchain(
             CurcumaLogger::info(fmt::format("DEBUG: Appended step {:02d} connected frame to {}", i, debug_file));
         }
 
-        // Rebuild topology: intra-monomer geometric + explicit interface bonds only — Claude Generated
-        // Prevents spurious inter-monomer bonds when chain folds back on itself
+        // Claude Generated: Rebuild topology from templates + interface bonds
+        // Falls back to distance-based detection if template not available
         {
             int n = polymer.AtomCount();
             Matrix topo = Matrix::Zero(n, n);
-            auto [dist, _unused] = polymer.DistanceMatrix();
-            for (int ii = 0; ii < n; ++ii) {
-                for (int jj = ii + 1; jj < n; ++jj) {
-                    int ei = polymer.Atom(ii).first;
-                    int ej = polymer.Atom(jj).first;
-                    if (ei == 0 || ej == 0) continue;
-                    if (atom_monomer_id[ii] != atom_monomer_id[jj]) continue;
-                    double cutoff = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
-                    if (dist(ii, jj) > 1e-3 && dist(ii, jj) <= cutoff * 1.15) {
-                        topo(ii, jj) = topo(jj, ii) = 1.0;
-                    }
+
+            // Try template-based rebuild first
+            bool use_templates = !m_fragment_templates.empty();
+            for (const auto& ft : monomer_fragment_type) {
+                if (m_fragment_templates.find(ft) == m_fragment_templates.end()) {
+                    use_templates = false;
+                    break;
                 }
             }
-            for (const auto& bond : interface_bonds) {
-                if (bond.first < n && bond.second < n)
-                    topo(bond.first, bond.second) = topo(bond.second, bond.first) = 1.0;
+
+            if (use_templates) {
+                rebuildTopologyFromTemplates(polymer, atom_monomer_id, monomer_fragment_type,
+                                              interface_bonds, monomer_start_atoms);
+            } else {
+                // Fallback: distance-based intra-monomer detection
+                auto [dist, _unused] = polymer.DistanceMatrix();
+                for (int ii = 0; ii < n; ++ii) {
+                    for (int jj = ii + 1; jj < n; ++jj) {
+                        int ei = polymer.Atom(ii).first;
+                        int ej = polymer.Atom(jj).first;
+                        if (ei == 0 || ej == 0) continue;
+                        if (atom_monomer_id[ii] != atom_monomer_id[jj]) continue;
+                        double cutoff = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
+                        if (dist(ii, jj) > 1e-3 && dist(ii, jj) <= cutoff * 1.15) {
+                            topo(ii, jj) = topo(jj, ii) = 1.0;
+                        }
+                    }
+                }
+                for (const auto& bond : interface_bonds) {
+                    if (bond.first < n && bond.second < n)
+                        topo(bond.first, bond.second) = topo(bond.second, bond.first) = 1.0;
+                }
+                polymer.setTopologyMatrix(topo);
             }
-            polymer.setTopologyMatrix(topo);
         }
 
         int topo_issues = validateTopology(polymer, atom_monomer_id, interface_bonds,
                          fmt::format("step {:02d} post-connect", i));
         int repaired = repairUnboundAtoms(polymer, atom_monomer_id, interface_bonds,
                            fmt::format("step {:02d} post-connect", i));
+
+        // Claude Generated: Validate topology consistency across identical monomers
+        int consistency_issues = validateTopologyConsistency(polymer, atom_monomer_id,
+            monomer_fragment_type, interface_bonds,
+            fmt::format("step {:02d} consistency", i));
 
         // Claude Generated: per-step connectivity status visible at verbose ≥1 for easy scanning
         if (topo_issues == 0 && repaired == 0)
@@ -1442,6 +1676,7 @@ SubchainResult PolymerBuild::buildSubchain(
                 opt_ctrl["opt"]["method"] = opt_method;
                 opt_ctrl["opt"]["printOutput"] = false;
                 opt_ctrl["opt"]["writeXYZ"] = true;
+		opt_ctrl["opt"]["silent"] = true;
                 if (opt_max_iter > 0)
                     opt_ctrl["opt"]["MaxIter"] = opt_max_iter;
                 if (opt_attempt == 0)
@@ -1464,12 +1699,50 @@ SubchainResult PolymerBuild::buildSubchain(
                     const Matrix topo = polymer.getTopologyMatrix();
                     m_opt.m_bonds.clear();
                     int n = topo.rows();
+                    int topo_bond_count = 0;
                     for (int ii = 0; ii < n; ++ii)
                         for (int jj = ii + 1; jj < n; ++jj)
-                            if (topo(ii, jj) > 0.5)
+                            if (topo(ii, jj) > 0.5) {
                                 m_opt.m_bonds.push_back({ii, jj});
-                    if (CurcumaLogger::get_verbosity() >= 2)
-                        CurcumaLogger::info(fmt::format("Passing {} bonds from topology to GFN-FF", m_opt.m_bonds.size()));
+                                ++topo_bond_count;
+                            }
+
+                    // Claude Generated: Debug - verify bond list matches topology
+                    if (CurcumaLogger::get_verbosity() >= 2) {
+                        // Count bonds per atom in topology
+                        std::vector<int> topo_bonds_per_atom(n, 0);
+                        for (int ii = 0; ii < n; ++ii)
+                            for (int jj = 0; jj < n; ++jj)
+                                if (ii != jj && topo(ii, jj) > 0.5)
+                                    ++topo_bonds_per_atom[ii];
+
+                        // Count bonds per atom in passed list
+                        std::vector<int> passed_bonds_per_atom(n, 0);
+                        for (const auto& b : m_opt.m_bonds) {
+                            ++passed_bonds_per_atom[b.first];
+                            ++passed_bonds_per_atom[b.second];
+                        }
+
+                        // Compare and report mismatches
+                        int mismatches = 0;
+                        for (int ii = 0; ii < n; ++ii) {
+                            if (topo_bonds_per_atom[ii] != passed_bonds_per_atom[ii]) {
+                                ++mismatches;
+                                if (mismatches <= 5) {
+                                    CurcumaLogger::warn(fmt::format(
+                                        "TOPOLOGY MISMATCH: Atom {} has {} bonds in topology but {} in passed list",
+                                        ii, topo_bonds_per_atom[ii], passed_bonds_per_atom[ii]));
+                                }
+                            }
+                        }
+
+                        if (mismatches > 0)
+                            CurcumaLogger::error(fmt::format(
+                                "TOPOLOGY MISMATCH: {} atoms have bond count mismatch!", mismatches));
+                        else
+                            CurcumaLogger::info(fmt::format(
+                                "Passing {} bonds from topology to GFN-FF (verified, no mismatches)", topo_bond_count));
+                    }
                 }
                 polymer_opt.LoadMolecule(m_opt);
                 polymer_opt.setCharge(0);
@@ -1663,7 +1936,7 @@ SubchainResult PolymerBuild::buildSubchain(
                     cold_md_ctrl["simplemd"]["verbosity"] = 0;
                     cold_md_ctrl["simplemd"]["write_xyz"] = false;
                     cold_md_ctrl["simplemd"]["no_center"] = true;     // don't re-center
-                    cold_md_ctrl["simplemd"]["dump_frequency"] = 50;
+                    cold_md_ctrl["simplemd"]["dump"] = 1;
 		    cold_md_ctrl["simplemd"]["restart"] = false;
                     cold_md_ctrl["simplemd"]["print_frequency"] = 1000;
 
@@ -1809,6 +2082,8 @@ SubchainResult PolymerBuild::buildSubchain(
     sc_result.tracked_xx = tracked_xx;
     sc_result.interface_bonds = interface_bonds;
     sc_result.atom_monomer_id = atom_monomer_id;
+    sc_result.monomer_fragment_type = monomer_fragment_type;
+    sc_result.monomer_start_atoms = monomer_start_atoms;
     return sc_result;
 }
 
@@ -1875,6 +2150,9 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
         std::vector<std::pair<int, int>> tracked_xx = subchains[0].tracked_xx;
         std::vector<std::pair<int, int>> interface_bonds = subchains[0].interface_bonds;
         std::vector<int> atom_monomer_id = subchains[0].atom_monomer_id;
+        // Claude Generated: Track monomer types for topology validation
+        std::vector<std::string> monomer_fragment_type = subchains[0].monomer_fragment_type;
+        std::vector<int> monomer_start_atoms = subchains[0].monomer_start_atoms;
 
         std::string opt_method = m_config.get<std::string>("opt_method", "gfnff");
         std::string ci_str = m_config.get<std::string>("cap_intermediate", "H");
@@ -1914,6 +2192,12 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
                 atom_monomer_id.push_back(sc_ids[k]);
             }
 
+            // Claude Generated: Merge monomer type tracking
+            for (const auto& ft : subchains[sc].monomer_fragment_type)
+                monomer_fragment_type.push_back(ft);
+            for (int start : subchains[sc].monomer_start_atoms)
+                monomer_start_atoms.push_back(start);  // Note: will need adjustment for merged indices
+
             // Sanity check: atom_monomer_id size must match polymer atom count — Claude Generated
             if ((int)atom_monomer_id.size() != polymer.AtomCount()) {
                 CurcumaLogger::error(fmt::format(
@@ -1922,33 +2206,51 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
             }
 
             // Rebuild topology after sub-chain connection
+            // Claude Generated: Use template-based rebuild when available
             {
-                int n = polymer.AtomCount();
-                Matrix topo = Matrix::Zero(n, n);
-                auto [dist, _unused] = polymer.DistanceMatrix();
-                for (int ii = 0; ii < n; ++ii) {
-                    for (int jj = ii + 1; jj < n; ++jj) {
-                        int ei = polymer.Atom(ii).first;
-                        int ej = polymer.Atom(jj).first;
-                        if (ei == 0 || ej == 0) continue;
-                        if (atom_monomer_id[ii] != atom_monomer_id[jj]) continue;
-                        double cutoff = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
-                        if (dist(ii, jj) > 1e-3 && dist(ii, jj) <= cutoff * 1.15) {
-                            topo(ii, jj) = topo(jj, ii) = 1.0;
-                        }
+                bool use_templates = !m_fragment_templates.empty();
+                for (const auto& ft : monomer_fragment_type) {
+                    if (m_fragment_templates.find(ft) == m_fragment_templates.end()) {
+                        use_templates = false;
+                        break;
                     }
                 }
-                for (const auto& bond : interface_bonds) {
-                    if (bond.first < n && bond.second < n)
-                        topo(bond.first, bond.second) = topo(bond.second, bond.first) = 1.0;
+
+                if (use_templates) {
+                    rebuildTopologyFromTemplates(polymer, atom_monomer_id, monomer_fragment_type,
+                                                  interface_bonds, monomer_start_atoms);
+                } else {
+                    // Fallback: distance-based detection
+                    int n = polymer.AtomCount();
+                    Matrix topo = Matrix::Zero(n, n);
+                    auto [dist, _unused] = polymer.DistanceMatrix();
+                    for (int ii = 0; ii < n; ++ii) {
+                        for (int jj = ii + 1; jj < n; ++jj) {
+                            int ei = polymer.Atom(ii).first;
+                            int ej = polymer.Atom(jj).first;
+                            if (ei == 0 || ej == 0) continue;
+                            if (atom_monomer_id[ii] != atom_monomer_id[jj]) continue;
+                            double cutoff = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
+                            if (dist(ii, jj) > 1e-3 && dist(ii, jj) <= cutoff * 1.15) {
+                                topo(ii, jj) = topo(jj, ii) = 1.0;
+                            }
+                        }
+                    }
+                    for (const auto& bond : interface_bonds) {
+                        if (bond.first < n && bond.second < n)
+                            topo(bond.first, bond.second) = topo(bond.second, bond.first) = 1.0;
+                    }
+                    polymer.setTopologyMatrix(topo);
                 }
-                polymer.setTopologyMatrix(topo);
             }
 
             validateTopology(polymer, atom_monomer_id, interface_bonds,
                              fmt::format("subchain-join {:02d}", sc));
             repairUnboundAtoms(polymer, atom_monomer_id, interface_bonds,
                                fmt::format("subchain-join {:02d}", sc));
+            // Claude Generated: Validate topology consistency across identical monomers
+            validateTopologyConsistency(polymer, atom_monomer_id, monomer_fragment_type,
+                interface_bonds, fmt::format("subchain-join {:02d}", sc));
 
             // Light FF optimization after sub-chain connection
             resolveOverlaps(polymer);

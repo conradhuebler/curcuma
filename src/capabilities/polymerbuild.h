@@ -55,6 +55,20 @@ struct SubchainResult {
     std::vector<std::pair<int, int>> tracked_xx;
     std::vector<std::pair<int, int>> interface_bonds;
     std::vector<int> atom_monomer_id;
+    std::vector<std::string> monomer_fragment_type;  ///< Claude Generated: fragment name for each monomer index
+    std::vector<int> monomer_start_atoms;             ///< Claude Generated: starting atom index for each monomer
+};
+
+/**
+ * @brief Template for fragment topology (bonds within fragment, excluding Xx).
+ *
+ * Claude Generated: Stores expected intra-monomer bonds for topology consistency validation.
+ * Used to verify that identical monomers have identical internal topology.
+ */
+struct FragmentTopologyTemplate {
+    std::string fragment_name;                          ///< Fragment identifier
+    int n_atoms;                                         ///< Number of heavy atoms (excluding Xx)
+    std::vector<std::pair<int, int>> internal_bonds;    ///< Bonds between heavy atoms (indices relative to fragment, Xx removed)
 };
 
 /**
@@ -267,9 +281,67 @@ private:
      */
     int findBondedAtom(const Molecule& mol, int xx_idx) const;
 
+    /**
+     * @brief Extract fragment topology template from a loaded molecule.
+     *
+     * Extracts internal bonds (excluding Xx) for use as template during topology rebuild.
+     * Indices are relative to the fragment (Xx atoms removed).
+     *
+     * @param mol Fragment molecule with Xx atoms still present
+     * @param fragment_name Name of the fragment for storage
+     * @return FragmentTopologyTemplate with bonds and metadata
+     *
+     * Claude Generated
+     */
+    FragmentTopologyTemplate extractFragmentTemplate(const Molecule& mol, const std::string& fragment_name) const;
+
+    /**
+     * @brief Rebuild topology from stored templates instead of distance-based detection.
+     *
+     * For each monomer, copies bonds from the stored template (adjusted for atom indices).
+     * Interface bonds are added explicitly from the interface_bonds list.
+     *
+     * @param mol Polymer molecule
+     * @param atom_monomer_id Per-atom monomer ID assignment
+     * @param monomer_fragment_type Fragment name for each monomer index
+     * @param interface_bonds Known interface bonds
+     * @param monomer_start_atoms Starting atom index for each monomer
+     *
+     * Claude Generated
+     */
+    void rebuildTopologyFromTemplates(
+        Molecule& mol,
+        const std::vector<int>& atom_monomer_id,
+        const std::vector<std::string>& monomer_fragment_type,
+        const std::vector<std::pair<int, int>>& interface_bonds,
+        const std::vector<int>& monomer_start_atoms) const;
+
+    /**
+     * @brief Validate topology consistency across identical monomers.
+     *
+     * Compares the actual intra-monomer bond counts against the expected counts
+     * from stored templates. Reports discrepancies.
+     *
+     * @param mol Polymer molecule
+     * @param atom_monomer_id Per-atom monomer ID assignment
+     * @param monomer_fragment_type Fragment name for each monomer index
+     * @param interface_bonds Known interface bonds (to exclude from count)
+     * @param tag Label for log messages
+     * @return Number of inconsistencies found (0 = all consistent)
+     *
+     * Claude Generated
+     */
+    int validateTopologyConsistency(
+        const Molecule& mol,
+        const std::vector<int>& atom_monomer_id,
+        const std::vector<std::string>& monomer_fragment_type,
+        const std::vector<std::pair<int, int>>& interface_bonds,
+        const std::string& tag) const;
+
     ConfigManager m_config;
     bool m_silent;
     std::map<std::string, std::string> m_fragments;
+    std::map<std::string, FragmentTopologyTemplate> m_fragment_templates;  ///< Claude Generated: Cached topology templates by fragment name
 
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
     BEGIN_PARAMETER_DEFINITION(polymerbuild)
