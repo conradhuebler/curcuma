@@ -390,7 +390,7 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
         
         // Get gradient if requested
         if (gradient) {
-            m_gradient = m_method->getGradient();
+            m_method->copyGradientTo(m_gradient);
         }
         
         // Check for NaN values
@@ -412,17 +412,11 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
     }
 }
 
-Matrix EnergyCalculator::Gradient() const {
-    if (!m_method) {
-        return Matrix::Zero(m_atoms > 0 ? m_atoms : 1, 3);
-    }
-    
-    try {
-        return m_method->getGradient();
-    } catch (const std::exception& e) {
-        // Return cached gradient if direct access fails
-        return m_gradient;
-    }
+const Matrix& EnergyCalculator::Gradient() const {
+    // Return cached gradient by reference (populated in CalculateEnergy).
+    // Claude Generated (March 2026): Returns const ref instead of copy to
+    // avoid heap allocation — CUDA corrupts C++ heap metadata.
+    return m_gradient;
 }
 
 Eigen::MatrixXd EnergyCalculator::NumGrad() {

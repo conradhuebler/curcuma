@@ -23,28 +23,35 @@ Additionally, [nlohmann/json](https://github.com/nlohmann/json) is obtained via 
 
 A C++/Eigen implementation of the Munkres Algorithmus (Hungarian Method) based on [the workshop here](https://brc2.com/the-algorithm-workshop/) is included.
 
-### UFF, xTB and Dispersion Correction
-Curcuma has an interface to tblite, xtb as well simple-d3 and cpp-d4, enabling semiempirical calculations or combinations of UFF with D3, D4 and H4 (no parameters are adjusted yet). To use on of the methods, please add **-method methodname** to your arguments:
+### UFF, xTB, GFN-FF and Dispersion Correction
+Curcuma has an interface to tblite, xtb as well simple-d3 and cpp-d4, enabling semiempirical calculations or combinations of UFF with D3, D4 and H4 (no parameters are adjusted yet). To use one of the methods, please add **-method methodname** to your arguments:
 
 UFF (default)
-- uff : Gradients are evaluated numerically.
+- uff : Universal Force Field
+
+Native force field (no external dependency required):
+- gfnff : Native C++ GFN-FF implementation — full energy and gradient, good agreement with the Fortran reference implementation
 
 tblite methods:
 - gfn1
 - gfn2
 
 xtb methods:
-- gfnff
+- xtb-gfnff : GFN-FF via the xtb library
 - xtb-gfn1
 - xtb-gfn2
 
-Using only **d3** or **d4** should be possible. 
- 
-Please cite xtb, tblite etc if external methods are used within curcuma! The most recent information can be found at the respective gitub pages, some are listed below.
+Using only **d3** or **d4** should be possible.
 
-UFF 
+Please cite xtb, tblite etc if external methods are used within curcuma! The most recent information can be found at the respective github pages, some are listed below.
+
+UFF
 - J. Am. Chem. Soc. (1992) 114(25) p. 10024-10035,
-- with the  H4 hydrogen bond correction (J. Chem. Theory Comput. 8, 141-151 (2012)) included (same parameters as applied in case of PM6-D3 for now). 
+- with the H4 hydrogen bond correction (J. Chem. Theory Comput. 8, 141-151 (2012)) included (same parameters as applied in case of PM6-D3 for now).
+
+GFN-FF:
+- S. Spicher and S. Grimme, Angew. Chem. Int. Ed. 2020, 59, 15665. DOI: 10.1002/anie.202004239
+
 D3:
 - J. Chem. Phys. 132, 154104 (2010); https://doi.org/10.1063/1.3382344
 

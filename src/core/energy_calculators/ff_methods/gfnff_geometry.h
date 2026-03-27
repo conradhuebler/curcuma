@@ -132,20 +132,18 @@ inline double calculateDihedralAngle(
     gradient = Matrix::Zero(4, 3);
 
     double sin_phi_val = sin(phi);
-    // CRITICAL FIX (Feb 2026): Stricter threshold for aromatic systems
-    // Planar rings (benzene) have φ ≈ 180° → sin_phi ≈ 0
-    // Previous 1e-6 too close to numerical noise, raised to 1e-4
-    if (std::abs(sin_phi_val) < 1e-4) {
-        // At extrema (φ ≈ 0 or π), gradient is zero by symmetry
-        // Explicitly set gradient to zero to prevent stale values
-        if (calculate_gradient) {
-            gradient.setZero();
-        }
+    // Guard matching Fortran dphidr (gfnff_helpers.f90:546): eps=1.d-14
+    // nenner = nan*nbn*sinphi — only guard against true numerical zero.
+    // Previous threshold of 1e-4 was too aggressive: zeroed gradients for
+    // many near-planar dihedrals (aromatic rings), losing physical contributions.
+    double nenner = n1_norm * n2_norm * sin_phi_val;
+    if (std::abs(nenner) < 1e-14) {
+        gradient.setZero();
         return phi;
     }
 
     // Normalization factor
-    double onenner = 1.0 / (n1_norm * n2_norm * sin_phi_val);
+    double onenner = 1.0 / nenner;
 
     // Calculate various cross products needed for gradients
     Eigen::Vector3d rab = n1.cross(v2);  // n1 × v2

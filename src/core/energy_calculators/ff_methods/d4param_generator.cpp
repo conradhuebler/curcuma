@@ -1410,16 +1410,21 @@ void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
 // Claude Generated (Feb 15, 2026): Update CN values and recompute weight derivatives + dc6dcn
 // Called from GFNFF::Calculation() when gradient is requested
 // Reference: Fortran gfnff_gdisp0.f90:382-395 - dc6dcn used for dispersion gradient
-void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool, int num_threads)
+void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool, int num_threads, bool skip_dc6dcn)
 {
     m_cn_values = cn;
 
     // Recompute gaussian weights with new CN values
     precomputeGaussianWeights(pool, num_threads);
 
-    // Compute weight derivatives and dc6dcn matrix
+    // Compute weight derivatives (needed for dc6dcn — CPU or GPU)
     computeGaussianWeightDerivatives(pool, num_threads);
-    computeDC6DCN(pool, num_threads);
+
+    // Claude Generated (March 2026): Phase 2 GPU dc6dcn — skip O(N²) matrix when
+    // GPU will compute dc6dcn per dispersion pair directly.
+    if (!skip_dc6dcn) {
+        computeDC6DCN(pool, num_threads);
+    }
 }
 
 // Claude Generated (March 2026): Native dispersion pair generation — bypasses JSON entirely

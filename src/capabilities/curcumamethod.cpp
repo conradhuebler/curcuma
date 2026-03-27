@@ -219,7 +219,7 @@ void CurcumaMethod::UpdateController(const json& controller)
         }
         m_defaults = MergeJson(m_defaults, method);
     }
-    if (!m_silent)
+    if (!m_silent && CurcumaLogger::get_verbosity() >= 2)
         PrintController(m_defaults);
     LoadControlJson();
 }

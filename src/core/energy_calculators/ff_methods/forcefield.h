@@ -22,6 +22,7 @@
 #include "src/core/global.h"
 
 #include "forcefieldthread.h"
+#include "ff_workspace.h"
 
 #include "src/core/hbonds.h"
 
@@ -343,4 +344,8 @@ private:
     std::string m_auto_param_file; // Auto-detected parameter file path
     bool m_enable_caching = true; // Can be disabled for multi-threading
     bool m_in_setParameter = false; // Claude Generated: Recursive guard for setParameter()
+
+    // Claude Generated (March 2026): FFWorkspace for UFF/QMDFF (replaces ForceFieldThread path)
+    std::unique_ptr<FFWorkspace> m_workspace;
+    bool m_use_workspace = false; ///< True when UFF/QMDFF use FFWorkspace path
 };

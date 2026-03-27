@@ -75,13 +75,13 @@ private:
     static std::unique_ptr<ComputationalMethod> createGFN2(const json& config);
     static std::unique_ptr<ComputationalMethod> createGFN1(const json& config);
     static std::unique_ptr<ComputationalMethod> createIPEA1(const json& config);
+    static std::unique_ptr<ComputationalMethod> createGFNFF(const json& config);
 
     // =================================================================================
     // Explicit Method Creation (single provider)
     // =================================================================================
 
     static std::unique_ptr<ComputationalMethod> createEHT(const json& config);
-    static std::unique_ptr<ComputationalMethod> createGFNFF(const json& config);
     static std::unique_ptr<ComputationalMethod> createForceField(const json& config);
     static std::unique_ptr<ComputationalMethod> createUlyssesExplicit(const std::string& method, const json& config);
 

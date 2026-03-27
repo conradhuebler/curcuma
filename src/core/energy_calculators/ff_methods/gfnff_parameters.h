@@ -40,6 +40,15 @@ struct Bond;
 struct Angle;
 struct Dihedral;
 struct Inversion;
+struct vdW;
+
+/**
+ * @brief Force field method type for unified parameter set
+ *
+ * Claude Generated (March 2026): Distinguishes UFF, QMDFF, and GFN-FF within
+ * the shared ForceFieldParameterSet / FFWorkspace architecture.
+ */
+enum class FFMethodType { UFF = 1, QMDFF = 2, GFN_FF = 3 };
 
 /**
  * @brief Bond-HB mapping entry for dncoord_erf calculation
@@ -239,6 +248,9 @@ struct GFNFFParameterSet {
     // Bond-HB mapping data
     std::vector<BondHBEntry> bond_hb_data;
 
+    // UFF/QMDFF specific non-bonded pairs (empty for GFN-FF)
+    std::vector<vdW> vdws;
+
     // Charges
     Eigen::VectorXd eeq_charges;
     Eigen::VectorXd topology_charges;
@@ -246,6 +258,9 @@ struct GFNFFParameterSet {
     // Metadata
     std::string dispersion_method = "d4";
     double e0 = 0.0;
+
+    // Method type (distinguishes UFF, QMDFF, GFN-FF in FFWorkspace)
+    FFMethodType method_type = FFMethodType::GFN_FF;
 
     // Term enable flags
     bool dispersion_enabled = true;
@@ -266,3 +281,6 @@ struct GFNFFParameterSet {
      */
     static GFNFFParameterSet fromJSON(const json& j);
 };
+
+/// Alias for backward compatibility — GFNFFParameterSet IS ForceFieldParameterSet
+using ForceFieldParameterSet = GFNFFParameterSet;

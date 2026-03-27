@@ -83,7 +83,14 @@ def parse_analyzer_output(output, xyz_file):
             else:
                 if energy_charges:
                     in_goed_charges = False
-    # Fallback: parse "charge q_i" from EEQ Charge Analysis section if goed_gfnff section missing
+    # Fallback 1: parse "energy_q(i) = " from new nlist%q output
+    if not energy_charges:
+        for line in lines:
+            match = re.match(r"\s*energy_q\(\d+\)\s*=\s*([-]?[\d.]+)", line)
+            if match:
+                energy_charges.append(float(match.group(1)))
+
+    # Fallback 2: parse "charge q_i" from EEQ Charge Analysis section if goed_gfnff section missing
     # Reference: analyzer outputs these in verbose mode (-v 2)
     if not energy_charges:
         eeq_charges = []

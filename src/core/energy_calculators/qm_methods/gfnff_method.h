@@ -64,6 +64,9 @@ public:
     // Energy decomposition (JSON output)
     json getEnergyDecomposition() const override;
 
+    /// Access underlying GFNFF for diagnostics (e.g. workspace dEdcn)
+    GFNFF* getGFNFF() const { return m_gfnff.get(); }
+
 private:
     std::unique_ptr<GFNFF> m_gfnff;
     json m_parameters;

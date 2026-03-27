@@ -70,11 +70,6 @@ bool XYZCommentParser::parseComment(const std::string& comment, Molecule& mol)
     FormatType format = detectFormat(comment);
     std::vector<std::string> tokens = tokenize(comment);
 
-    // Debug: Show that new parser is being used (remove after testing)
-    if (comment.find("water") != std::string::npos || comment.find("Energy") != std::string::npos) {
-        std::cout << "[DEBUG] XYZCommentParser: Processing \"" << comment << "\" as format " << static_cast<int>(format) << std::endl;
-    }
-
     switch (format) {
     case FormatType::CURCUMA_NATIVE:
         return parseCurcumaNative(tokens, mol);

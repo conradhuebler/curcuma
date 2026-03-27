@@ -88,8 +88,17 @@ public:
 
     // Claude Generated (Feb 15, 2026): dc6dcn computation for dispersion CN gradient
     // Reference: Fortran gfnff_gdisp0.f90:174-210, 262-305
-    void updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool = nullptr, int num_threads = 1);
+    // @param skip_dc6dcn  If true, skip O(N²) dc6dcn matrix (GPU computes per-pair)
+    void updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool = nullptr,
+                                    int num_threads = 1, bool skip_dc6dcn = false);
     const Matrix& getDC6DCN() const { return m_dc6dcn; }
+
+    // Claude Generated (March 2026): GPU dc6dcn Phase 2 — expose weight arrays
+    const std::vector<std::vector<double>>& getGaussianWeights() const { return m_gaussian_weights; }
+    const std::vector<std::vector<double>>& getGaussianWeightDerivatives() const { return m_gaussian_weight_derivatives; }
+    const std::vector<double>& getC6FlatCache() const { return m_c6_flat_cache; }
+    const std::vector<int>& getRefN() const { return m_refn; }
+    const std::vector<std::vector<double>>& getRefCN() const { return m_refcn; }
 
     // Claude Generated (March 2026): Public access for ATM triple generation without JSON
     double getChargeWeightedC6(int Zi, int Zj, size_t atom_i, size_t atom_j) const;
