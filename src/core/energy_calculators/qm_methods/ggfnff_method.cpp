@@ -287,6 +287,8 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
     if (m_gfnff->consumeHBXBUpdate()) {
         m_gpu_workspace->updateHBonds(m_gfnff->getLastHBonds(), m_atom_types);
         m_gpu_workspace->updateXBonds(m_gfnff->getLastXBonds(), m_atom_types);
+        // Phase 8: HB/XB SoA n-values changed → captured graph is stale
+        m_gpu_workspace->invalidateGraph();
     }
 
     auto t1 = std::chrono::high_resolution_clock::now();
@@ -305,6 +307,8 @@ double GGFNFFComputationalMethod::calculateEnergy(bool gradient)
     // and prevent topology updates during MD (instability bug).
     if (m_gfnff->consumeFullTopologyUpdate()) {
         m_gpu_workspace->updateReferenceGeometry();
+        // Phase 8: all SoAs rebuilt after topology change → captured graph is stale
+        m_gpu_workspace->invalidateGraph();
     }
 
     const Vector& cn = m_gfnff->getLastCN();

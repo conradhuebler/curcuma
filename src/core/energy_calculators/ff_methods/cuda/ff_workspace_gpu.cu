@@ -103,7 +103,9 @@ static inline LaunchConfig getLaunchConfig(int n_elements, int maxBlockSize = 51
     } else {
         cfg.blockSize = maxBlockSize;  // 512 threads - maximize occupancy for large problems
     }
-    cfg.gridSize = (n_elements + cfg.blockSize - 1) / cfg.blockSize;
+    // Phase 8 (Claude Generated March 2026): min 1 block so n=0 launches a no-op block
+    // instead of gridSize=0 (undefined in CUDA). All kernels early-return for i >= n.
+    cfg.gridSize = std::max(1, (n_elements + cfg.blockSize - 1) / cfg.blockSize);
     return cfg;
 }
 
@@ -682,6 +684,15 @@ struct FFWorkspaceGPUImpl {
     cudaEvent_t  event_bonded    = nullptr;  ///< Sync event for stream B completion
     cudaEvent_t  event_threebody = nullptr;  ///< Sync event for stream C completion
     cudaEvent_t  event_upload    = nullptr;  ///< Reusable event for upload→stream sync
+
+    // === CUDA Graph Capture — Phase 8 (Claude Generated March 2026) ===
+    // For topology-stable MD steps, the entire charge-independent kernel sequence is
+    // captured once into m_graph_phase1 and replayed via cudaGraphLaunch() — near-zero
+    // CPU overhead instead of ~14 individual kernel-launch API calls (~70 µs/step).
+    // Invalidated via invalidateGraph() whenever any SoA n-value changes (bonds, HB/XB).
+    bool            m_graph_phase1_valid    = false;  ///< True when exec graph is ready to use
+    cudaGraph_t     m_graph_phase1          = nullptr; ///< Captured graph (template)
+    cudaGraphExec_t m_graph_exec_phase1     = nullptr; ///< Instantiated executable graph
 };
 
 // ============================================================================
@@ -909,6 +920,10 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
         if (m_impl->stream_pairwise) cudaStreamDestroy(m_impl->stream_pairwise);
         if (m_impl->stream_bonded)   cudaStreamDestroy(m_impl->stream_bonded);
         if (m_impl->stream_threebody)cudaStreamDestroy(m_impl->stream_threebody);
+
+        // Phase 8: destroy graph objects
+        if (m_impl->m_graph_exec_phase1) cudaGraphExecDestroy(m_impl->m_graph_exec_phase1);
+        if (m_impl->m_graph_phase1)      cudaGraphDestroy(m_impl->m_graph_phase1);
     }
 
     // Free pinned memory staging buffers
@@ -918,6 +933,24 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
     if (m_h_grad_snap)  cudaFreeHost(m_h_grad_snap);
     if (m_h_cn_final)   cudaFreeHost(m_h_cn_final);
     if (m_h_energies)   cudaFreeHost(m_h_energies);
+}
+
+// ============================================================================
+// Phase 8: CUDA Graph invalidation (Claude Generated March 2026)
+// ============================================================================
+
+void FFWorkspaceGPU::invalidateGraph()
+{
+    auto& impl = *m_impl;
+    if (impl.m_graph_exec_phase1) {
+        cudaGraphExecDestroy(impl.m_graph_exec_phase1);
+        impl.m_graph_exec_phase1 = nullptr;
+    }
+    if (impl.m_graph_phase1) {
+        cudaGraphDestroy(impl.m_graph_phase1);
+        impl.m_graph_phase1 = nullptr;
+    }
+    impl.m_graph_phase1_valid = false;
 }
 
 // ============================================================================
@@ -1241,6 +1274,25 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     cudaStream_t stream = impl.stream;
 
     // =========================================================================
+    // Phase 8: CUDA Graph fast path (Claude Generated March 2026)
+    // For topology-stable MD steps, the entire charge-independent kernel sequence
+    // was captured on the first call and is replayed here via cudaGraphLaunch().
+    // CPU-GPU overlap with EEQ is preserved: cudaGraphLaunch() is asynchronous.
+    // =========================================================================
+    const bool need_snapshots = impl.d_dEdcn_snapshot.ptr && impl.d_grad_snapshot.ptr;
+    if (impl.m_graph_phase1_valid && !need_snapshots) {
+        cudaGraphLaunch(impl.m_graph_exec_phase1, stream);
+        return;  // GPU executes the graph asynchronously; CPU proceeds to EEQ
+    }
+
+    // === CAPTURE START: on the first topology-stable step, record this execution ===
+    bool capturing = false;
+    if (!impl.m_graph_phase1_valid && !need_snapshots) {
+        cudaError_t cap_err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+        capturing = (cap_err == cudaSuccess);
+    }
+
+    // =========================================================================
     // 1. Zero GPU accumulators (total + per-term)
     // =========================================================================
     cudaMemsetAsync(impl.d_energy.ptr, 0, sizeof(double),         stream);
@@ -1279,7 +1331,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // NOTE: When gradient=true, k_dispersion is DEFERRED to launchChargeDependentAndFinish()
     // because the dEdcn accumulation needs dc6dcn values which come from computeDC6DCNOnGPU()
     // (called after EEQ completes). Energy-only dispersion runs here for full overlap.
-    if (m_dispersion_enabled && impl.disp.n > 0 && !gradient) {
+    if (m_dispersion_enabled && !gradient) {
+        // Phase 8: n > 0 guard removed — n=0 produces a 1-block no-op (graph-capture safe)
         LaunchConfig cfg = getLaunchConfig(impl.disp.n);
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
             impl.disp.n,
@@ -1294,7 +1347,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_DISP]);
     }
-    if (m_repulsion_enabled && impl.bonded_rep.n > 0) {
+    if (m_repulsion_enabled) {
+        // Phase 8: n > 0 guard removed — n=0 produces a 1-block no-op (graph-capture safe)
         LaunchConfig cfg = getLaunchConfig(impl.bonded_rep.n);
         if (impl.use_mixed_precision) {
             k_repulsion_mixed<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
@@ -1316,7 +1370,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 &impl.d_energies.ptr[impl.E_BREP]);
         }
     }
-    if (m_repulsion_enabled && impl.nonbonded_rep.n > 0) {
+    if (m_repulsion_enabled) {
+        // Phase 8: n > 0 guard removed — n=0 produces a 1-block no-op (graph-capture safe)
         LaunchConfig cfg = getLaunchConfig(impl.nonbonded_rep.n);
         if (impl.use_mixed_precision) {
             k_repulsion_mixed<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
@@ -1342,10 +1397,12 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     cudaEventRecord(impl.event_pairwise, sA);
 
     // --- Stream B: Bonded terms (bonds, angles, dihedrals, inversions, storsions, hb_alpha) ---
-    if (impl.bonds.n > 0) {
-        if (gradient && impl.hb_alpha.n > 0) {
-            impl.d_zz_hb.zero(N, sB);
-        }
+    // Phase 8: outer bonds.n > 0 guard removed — n=0 produces a 1-block no-op.
+    // Inner hb_alpha guard kept: d_zz_hb.ptr may be null when hb_alpha.n == 0.
+    if (gradient && impl.hb_alpha.n > 0) {
+        impl.d_zz_hb.zero(N, sB);
+    }
+    {
         LaunchConfig cfg = getLaunchConfig(impl.bonds.n);
         k_bonds<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.bonds.n,
@@ -1367,7 +1424,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             (gradient && impl.hb_alpha.n > 0) ? impl.d_zz_hb.ptr : nullptr,
             &impl.d_energies.ptr[impl.E_BOND]);
     }
-    if (impl.angles.n > 0) {
+    {
+        // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.angles.n);
         k_angles<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.angles.n,
@@ -1379,7 +1437,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_ANGLE]);
     }
-    if (impl.dihedrals.n > 0) {
+    {
+        // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.dihedrals.n);
         k_dihedrals<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.dihedrals.n,
@@ -1396,7 +1455,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_DIHED]);
     }
-    if (impl.inversions.n > 0) {
+    {
+        // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.inversions.n);
         k_inversions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.inversions.n,
@@ -1411,7 +1471,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_INV]);
     }
-    if (impl.storsions.n > 0) {
+    {
+        // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.storsions.n);
         k_storsions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.storsions.n,
@@ -1440,7 +1501,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // --- Stream C: 3-body terms (batm, atm, xbonds, hbonds) ---
     // All charge-independent: batm uses topology charges (static),
     // hbonds uses q_H/q_A/q_B baked into SoA at construction time.
-    if (impl.batm.n > 0) {
+    {
+        // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.batm.n);
         if (impl.use_mixed_precision) {
             k_batm_mixed<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
@@ -1462,7 +1524,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 &impl.d_energies.ptr[impl.E_BATM]);
         }
     }
-    if (impl.atm.n > 0) {
+    {
+        // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.atm.n);
         k_atm<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
             impl.atm.n,
@@ -1475,7 +1538,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_ATM]);
     }
-    if (impl.xbonds.n > 0) {
+    {
+        // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.xbonds.n);
         if (impl.use_mixed_precision) {
             k_xbonds_mixed<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
@@ -1499,7 +1563,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 &impl.d_energies.ptr[impl.E_XBOND]);
         }
     }
-    if (m_hbond_enabled && impl.hbonds.n > 0) {
+    if (m_hbond_enabled) {
+        // Phase 8: hbonds.n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.hbonds.n);
         k_hbonds<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
             impl.hbonds.n,
@@ -1521,6 +1586,29 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             &impl.d_energies.ptr[impl.E_HBOND]);
     }
     cudaEventRecord(impl.event_threebody, sC);
+
+    // === CAPTURE END: finalise graph and execute immediately ===
+    if (capturing) {
+        // Join all forked streams back to main before EndCapture.
+        // These are GPU-side edges only; cudaGraphLaunch() below is still async from CPU.
+        cudaStreamWaitEvent(stream, impl.event_pairwise,  0);
+        cudaStreamWaitEvent(stream, impl.event_bonded,    0);
+        cudaStreamWaitEvent(stream, impl.event_threebody, 0);
+
+        cudaError_t end_err = cudaStreamEndCapture(stream, &impl.m_graph_phase1);
+        if (end_err == cudaSuccess && impl.m_graph_phase1) {
+            cudaError_t inst_err = cudaGraphInstantiate(
+                &impl.m_graph_exec_phase1, impl.m_graph_phase1, NULL, NULL, 0);
+            if (inst_err == cudaSuccess) {
+                impl.m_graph_phase1_valid = true;
+                // cudaStreamBeginCapture suppressed actual kernel execution; replay now.
+                cudaGraphLaunch(impl.m_graph_exec_phase1, stream);
+                return;
+            }
+        }
+        // Capture or instantiation failed — fall back silently (normal execution already done)
+        if (impl.m_graph_phase1) { cudaGraphDestroy(impl.m_graph_phase1); impl.m_graph_phase1 = nullptr; }
+    }
     // Returns immediately — charge-independent kernels run asynchronously on GPU
 }
 

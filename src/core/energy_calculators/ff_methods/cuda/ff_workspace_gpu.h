@@ -355,6 +355,12 @@ public:
     /// Claude Generated (March 2026): Required before cross-stream reads (e.g. EEQSolverGPU).
     void synchronizeMainStream();
 
+    /// Invalidate the CUDA Graph — call whenever any SoA topology changes
+    /// (full topology recalculation, HB/XB re-detection, or any n-value change).
+    /// The next prepareAndLaunchChargeIndependent() call will re-capture the graph.
+    /// Claude Generated (Phase 8, March 2026).
+    void invalidateGraph();
+
 private:
     std::unique_ptr<FFWorkspaceGPUImpl> m_impl;
 
