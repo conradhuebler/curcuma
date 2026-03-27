@@ -661,8 +661,8 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_gw;           ///< [N * MAX_REF] Gaussian weights (padded)
     CudaBuffer<double> d_dgw;          ///< [N * MAX_REF] weight derivatives
     CudaBuffer<double> d_c6_flat;      ///< [MAX_ELEM² * MAX_REF²] C6 reference table
-    CudaBuffer<int>    d_refn;         ///< [MAX_ELEM] nref per element
-    CudaBuffer<double> d_refcn;        ///< [MAX_ELEM * MAX_REF] reference CN values
+    // d_refn and d_refcn moved to __constant__ memory (Phase 8: March 2026)
+    // Uploaded via upload_refn_const() / upload_refcn_const() at init
     bool               dc6dcn_gpu_ready = false; ///< true after C6 table + refn uploaded
 
     // Diagnostic snapshot buffers (GPU-side, no pipeline stall)
@@ -1082,8 +1082,8 @@ void FFWorkspaceGPU::uploadC6ReferenceTable(const std::vector<double>& c6_flat,
     // Upload C6 reference table (one-time, ~3.1 MB)
     impl.d_c6_flat.upload(c6_flat.data(), static_cast<int>(c6_flat.size()));
 
-    // Upload refn array (118 ints)
-    impl.d_refn.upload(refn.data(), static_cast<int>(refn.size()));
+    // Upload refn array (118 ints) to constant memory (Phase 8: broadcast via L1)
+    upload_refn_const(refn.data(), static_cast<int>(refn.size()));
 
     // Pre-allocate gw/dgw GPU buffers
     const int gw_size = m_natoms * D4_MAX_REF;
@@ -1131,6 +1131,7 @@ void FFWorkspaceGPU::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& 
 
     // Launch dc6dcn per-pair kernel (Phase 6: dynamic block size)
     LaunchConfig cfg = getLaunchConfig(nd);
+    // refn read from constant memory d_refn_const (Phase 8)
     k_dc6dcn_per_pair<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
         nd,
         impl.disp.idx_i.ptr,
@@ -1139,7 +1140,6 @@ void FFWorkspaceGPU::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& 
         impl.d_gw.ptr,
         impl.d_dgw.ptr,
         impl.d_c6_flat.ptr,
-        impl.d_refn.ptr,
         impl.disp.dc6dcn_ij.ptr,
         impl.disp.dc6dcn_ji.ptr
     );
@@ -1171,7 +1171,8 @@ void FFWorkspaceGPU::uploadRefCN(const std::vector<std::vector<double>>& refcn)
         }
     }
 
-    impl.d_refcn.upload(refcn_flat.data(), flat_size);
+    // Upload to constant memory (Phase 8: L1-broadcast instead of global memory load)
+    upload_refcn_const(refcn_flat.data(), flat_size);
 }
 
 // ============================================================================
@@ -1192,17 +1193,17 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU()
     // Launch k_gaussian_weights: compute gw and dgw from CN values already on GPU
     // CN source: d_cn (uploaded in prepareAndLaunchChargeIndependent via setD3CN)
     LaunchConfig cfg_gw = getLaunchConfig(N);
+    // refcn and refn read from constant memory d_refcn_const/d_refn_const (Phase 8)
     k_gaussian_weights<<<cfg_gw.gridSize, cfg_gw.blockSize, 0, impl.stream>>>(
         N,
         impl.d_cn.ptr,
         impl.d_atom_types.ptr,
-        impl.d_refcn.ptr,
-        impl.d_refn.ptr,
         impl.d_gw.ptr,
         impl.d_dgw.ptr);
 
     // Launch k_dc6dcn_per_pair immediately on same stream (gw/dgw ready by ordering)
     LaunchConfig cfg_dc6 = getLaunchConfig(nd);
+    // refn read from constant memory d_refn_const (Phase 8)
     k_dc6dcn_per_pair<<<cfg_dc6.gridSize, cfg_dc6.blockSize, 0, impl.stream>>>(
         nd,
         impl.disp.idx_i.ptr,
@@ -1211,7 +1212,6 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU()
         impl.d_gw.ptr,
         impl.d_dgw.ptr,
         impl.d_c6_flat.ptr,
-        impl.d_refn.ptr,
         impl.disp.dc6dcn_ij.ptr,
         impl.disp.dc6dcn_ji.ptr);
 

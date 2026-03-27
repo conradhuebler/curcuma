@@ -453,9 +453,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_dc6dcn_per_pair(
     const double* __restrict__ gw,             ///< [N * MAX_REF] Gaussian weights (padded)
     const double* __restrict__ dgw,            ///< [N * MAX_REF] weight derivatives
     const double* __restrict__ c6_flat,        ///< [MAX_ELEM² * MAX_REF²] C6 reference table
-    const int*    __restrict__ refn,           ///< [MAX_ELEM] nref per element
     double*       __restrict__ dc6dcn_ij,      ///< [n] output: dC6(i,j)/dCN(i)
     double*       __restrict__ dc6dcn_ji       ///< [n] output: dC6(i,j)/dCN(j)
+    // refn read from d_refn_const (constant memory, uploaded via upload_refn_const)
 );
 
 // ============================================================================
@@ -471,11 +471,10 @@ __global__ GFNFF_KERNEL_BOUNDS void k_dc6dcn_per_pair(
 __global__ GFNFF_KERNEL_BOUNDS void k_gaussian_weights(
     int natoms,
     const double* __restrict__ cn,           ///< [N] coordination numbers
-    const int*    __restrict__ atom_types,    ///< [N] atomic numbers (1-based)
-    const double* __restrict__ refcn,        ///< [MAX_ELEM * MAX_REF] reference CN values
-    const int*    __restrict__ refn,         ///< [MAX_ELEM] nref per element
+    const int*    __restrict__ atom_types,   ///< [N] atomic numbers (1-based)
     double*       __restrict__ gw,           ///< [N * MAX_REF] output: normalized weights
     double*       __restrict__ dgw           ///< [N * MAX_REF] output: weight derivatives
+    // refcn and refn read from d_refcn_const/d_refn_const (constant memory)
 );
 
 // ============================================================================
@@ -502,5 +501,12 @@ void upload_rcov_d3(const double* rcov, int n);
 // Upload covalent radii table for HB/XB vdW radii to GPU constant memory
 // ============================================================================
 void upload_covalent_radii(const double* radii, int n);
+
+// ============================================================================
+// Upload D4 reference CN and nref tables to GPU constant memory (once at init)
+// Claude Generated (March 2026): Phase 8 — constant memory broadcast for refcn/refn
+// ============================================================================
+void upload_refcn_const(const double* data, int n);
+void upload_refn_const(const int* data, int n);
 
 #endif // USE_CUDA

@@ -446,6 +446,17 @@ __global__ void k_bonds(
 __constant__ double d_rcov_d3[87];   // uploaded once at init
 
 // ============================================================================
+// D4 reference CN and nref-per-element tables in constant memory
+// Claude Generated (March 2026): Phase 8 optimization — constant memory broadcast
+// d_refcn_const: 118 × 7 doubles = 6.6 KB  (fits well within 64 KB limit)
+// d_refn_const:  118 ints        = 0.5 KB
+// Access pattern: all threads with the same element read identical addresses
+// → GPU broadcasts from constant cache instead of global memory load
+// ============================================================================
+__constant__ double d_refcn_const[D4_MAX_ELEM * D4_MAX_REF];
+__constant__ int    d_refn_const[D4_MAX_ELEM];
+
+// ============================================================================
 // Device helper: angle between vectors (i-j) and (k-j), returns cos(theta)
 // Also fills d_cos[3]: ∂cos/∂x_i, ∂cos/∂x_k (x-component only as template)
 // ============================================================================
@@ -1115,6 +1126,22 @@ void upload_rcov_d3(const double* rcov, int n)
 {
     int count = (n < 87) ? n : 87;
     cudaMemcpyToSymbol(d_rcov_d3, rcov, count * sizeof(double));
+}
+
+// ============================================================================
+// Upload D4 reference CN and nref tables to constant memory (once at init)
+// Claude Generated (March 2026): Phase 8 — constant memory for refcn/refn
+// ============================================================================
+void upload_refcn_const(const double* data, int n)
+{
+    int count = (n < D4_MAX_ELEM * D4_MAX_REF) ? n : D4_MAX_ELEM * D4_MAX_REF;
+    cudaMemcpyToSymbol(d_refcn_const, data, count * sizeof(double));
+}
+
+void upload_refn_const(const int* data, int n)
+{
+    int count = (n < D4_MAX_ELEM) ? n : D4_MAX_ELEM;
+    cudaMemcpyToSymbol(d_refn_const, data, count * sizeof(int));
 }
 
 // ============================================================================
@@ -2585,8 +2612,6 @@ __global__ GFNFF_KERNEL_BOUNDS void k_gaussian_weights(
     int natoms,
     const double* __restrict__ cn,
     const int*    __restrict__ atom_types,
-    const double* __restrict__ refcn,
-    const int*    __restrict__ refn,
     double*       __restrict__ gw,
     double*       __restrict__ dgw)
 {
@@ -2607,7 +2632,8 @@ __global__ GFNFF_KERNEL_BOUNDS void k_gaussian_weights(
         return;
     }
 
-    int nref = refn[elem];
+    // Read from constant memory (L1-broadcast for same-element threads)
+    int nref = d_refn_const[elem];
     if (nref > D4_MAX_REF) nref = D4_MAX_REF;
 
     double cn_i = cn[i];
@@ -2620,9 +2646,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_gaussian_weights(
     double dnorm = 0.0;
 
     for (int r = 0; r < nref; ++r) {
-        double diff = cn_i - refcn[refcn_base + r];
+        double diff = cn_i - d_refcn_const[refcn_base + r];
         double ew = exp(-wf * diff * diff);
-        double dew = 2.0 * wf * (refcn[refcn_base + r] - cn_i) * ew;
+        double dew = 2.0 * wf * (d_refcn_const[refcn_base + r] - cn_i) * ew;
         expw[r] = ew;
         dexpw[r] = dew;
         norm += ew;
@@ -2662,7 +2688,6 @@ __global__ void k_dc6dcn_per_pair(
     const double* __restrict__ gw,
     const double* __restrict__ dgw,
     const double* __restrict__ c6_flat,
-    const int*    __restrict__ refn,
     double*       __restrict__ dc6dcn_ij,
     double*       __restrict__ dc6dcn_ji)
 {
@@ -2676,8 +2701,8 @@ __global__ void k_dc6dcn_per_pair(
     int ei = atom_types[ai] - 1;
     int ej = atom_types[aj] - 1;
 
-    int nri = refn[ei];
-    int nrj = refn[ej];
+    int nri = d_refn_const[ei];
+    int nrj = d_refn_const[ej];
 
     // C6 flat index base: elem_i * MAX_ELEM * MAX_REF² + elem_j * MAX_REF²
     size_t c6_base = (size_t)ei * D4_MAX_ELEM * D4_MAX_REF * D4_MAX_REF
