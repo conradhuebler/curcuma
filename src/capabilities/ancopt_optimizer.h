@@ -154,6 +154,16 @@ private:
     // Micro-iteration control
     bool m_needs_anc_regeneration = true;
 
+    // Trust radius (Claude Generated Mar 2026): adaptive step size control.
+    // Limits the RF step norm to prevent overshooting when the model Hessian
+    // is too soft. Updated each iteration based on actual vs. predicted ΔE.
+    // Initial value: 0.05 Bohr = 0.026 Å (conservative start for all methods).
+    double m_trust_radius = 0.05 * 0.529177; // in Å (= 0.05 Bohr)
+
+    // Energy tracking for convergence (Bug 3 fix)
+    double m_energy_change = 0.0;   // ΔE from last step (Hartree)
+    double m_previous_energy = 0.0; // Energy before current step
+
 protected:
     // OptimizerDriver interface implementation
     bool InitializeOptimizerInternal() override;

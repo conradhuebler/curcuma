@@ -60,8 +60,25 @@ bool ANCCoordinates::generateANC(const Matrix& cartesian_hessian, const Vector& 
         return false;
     }
 
-    const Vector& eigenvalues = solver.eigenvalues();
+    // Bug 4 Fix: Apply XTB eigenvalue damping before selecting eigenvectors
+    // Shifts all eigenvalues so the minimum is at least hlow
+    // Reference: XTB type/anc.f90 generate_anc_blowup() Z. 94-108
+    Vector evals = solver.eigenvalues();
     const Matrix& eigenvectors = solver.eigenvectors();
+
+    double elow = std::numeric_limits<double>::max();
+    for (int i = 0; i < evals.size(); ++i)
+        if (std::abs(evals(i)) > 1e-10)
+            elow = std::min(elow, evals(i));
+
+    if (elow < std::numeric_limits<double>::max()) {
+        double damp = std::max(hlow - elow, 0.0);
+        if (damp > 0.0) {
+            for (int i = 0; i < evals.size(); ++i)
+                if (std::abs(evals(i)) > 1e-11)
+                    evals(i) += damp;
+        }
+    }
 
     // Select nvar eigenvectors as basis (skip rotations/translations)
     int skip = is_linear ? 5 : 6; // 3 translations + 2/3 rotations
@@ -73,20 +90,20 @@ bool ANCCoordinates::generateANC(const Matrix& cartesian_hessian, const Vector& 
         start_idx = std::max(0, n3 - nvar);
     }
 
-    // Copy selected eigenvectors to B matrix (transformation matrix)
+    // Copy selected eigenvectors to B matrix (raw eigenvectors, no scaling)
+    // XTB uses eigenvectors directly as ANC basis without frequency-based scaling
     for (int i = 0; i < nvar && (start_idx + i) < n3; ++i) {
         B.col(i) = eigenvectors.col(start_idx + i);
+    }
 
-        // Scale by frequency (optional, following XTB approach)
-        double freq = eigenvalues(start_idx + i);
-        if (freq > hlow && freq < hmax) {
-            // Keep as is - within desired frequency range
-        } else if (freq < hlow && freq > 0.0) {
-            // Scale down low frequencies
-            B.col(i) *= std::sqrt(freq / hlow);
-        } else if (freq > hmax) {
-            // Scale down high frequencies
-            B.col(i) *= std::sqrt(hmax / freq);
+    // Set internal Hessian as diagonal of (damped) eigenvalues - XTB approach
+    // This gives a physically meaningful starting Hessian for the RF step
+    hess = Matrix::Zero(nvar, nvar);
+    for (int i = 0; i < nvar; ++i) {
+        int idx = start_idx + i;
+        if (idx < evals.size()) {
+            double ev = std::max(evals(idx), hlow); // Clamp to hlow minimum
+            hess(i, i) = ev;
         }
     }
 
@@ -261,9 +278,20 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
 
         m_micro_current = 0;
         m_needs_anc_regeneration = false;
+
+        // Critical: re-project gradient onto NEW ANC basis after regeneration.
+        // m_gint was computed above with the OLD B matrix; m_anc->hess now uses the
+        // NEW eigenvectors, so mixing them in the RF step would give a garbage direction.
+        // Re-projecting here ensures m_gint and m_anc->hess are in the same basis.
+        m_gint = m_anc->transformGradientToInternal(gradient);
+        m_gnorm = m_gint.norm();
+        m_gint_old = m_gint;                               // no valid old basis to compare
+        m_displ = Vector::Zero(m_anc->nvar);               // old displacement is in old basis → invalid
     }
 
     // Update Hessian with BFGS/Powell if we have previous step
+    // Guard m_displ.norm() > 1e-10 naturally skips the first step after ANC regeneration
+    // (m_displ was zeroed above) and the very first iteration.
     if (m_current_iteration > 0 && m_displ.norm() > 1e-10) {
         Vector dg = m_gint - m_gint_old;
 
@@ -277,48 +305,108 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
     // Calculate Rational Function step
     m_displ = calculateRationalFunctionStep(m_gint, m_anc->hess);
 
-    // Limit step size
+    // Claude Generated (Mar 2026): Trust radius step limiting.
+    // Limits the total RF step norm to m_trust_radius (Å).
+    // This prevents overshooting when the model Hessian is too soft.
+    // Each component is also clamped to m_maxdispl (per-component limit from XTB).
+    double displ_norm = m_displ.norm();
+    if (displ_norm > m_trust_radius) {
+        m_displ *= m_trust_radius / displ_norm;  // Scale to trust radius
+    }
+    // Per-component limit (XTB-style maxdispl, in Å)
+    double maxdispl_ang = m_maxdispl * 0.529177; // convert Bohr → Å
     for (int i = 0; i < m_displ.size(); ++i) {
-        if (std::abs(m_displ(i)) > m_maxdispl) {
-            m_displ(i) = std::copysign(m_maxdispl, m_displ(i));
+        if (std::abs(m_displ(i)) > maxdispl_ang) {
+            m_displ(i) = std::copysign(maxdispl_ang, m_displ(i));
         }
     }
 
     // Predict energy change
     m_depred = predictEnergyChange(m_gint, m_displ, m_anc->hess);
 
-    // Update internal coordinates
-    m_anc->coord += m_displ;
+    // Bug 2 Fix: Adaptive step size scaling (XTB optimizer.f90 Z. 720-728)
+    // XTB scales the step when gradient norm is small (near convergence)
+    double alp = 1.0;
+    if (m_gnorm < 0.0003) alp = 3.0;
+    else if (m_gnorm < 0.0006) alp = 2.0;
+    else if (m_gnorm < 0.002) alp = 1.5;
 
-    // Transform back to Cartesian
+    // Update internal coordinates with scaled displacement
+    m_anc->coord += m_displ * alp;
+
+    // Transform back to Cartesian (returns absolute new coordinates)
     Vector new_xyz;
     m_anc->getCartesian(new_xyz);
 
     m_micro_current++;
 
-    CurcumaLogger::param("Displacement norm (ANC)", std::to_string(m_displ.norm()));
-    CurcumaLogger::param("Predicted energy change", std::to_string(m_depred) + " Eh");
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("Displacement norm (ANC)", std::to_string(m_displ.norm()));
+        CurcumaLogger::param("Predicted energy change", std::to_string(m_depred) + " Eh");
+        CurcumaLogger::param("Step scaling (alp)", std::to_string(alp));
+    }
 
-    return new_xyz;
+    // Bug 1 Fix: Return displacement (new_xyz - current_xyz) NOT absolute coordinates
+    // OptimizerDriver::Optimize() adds step to current coords: new = current + step
+    return new_xyz - current_coordinates;
 }
 
 bool ANCOptimizer::CheckMethodSpecificConvergence() const {
-    // AncOpt convergence: gradient norm below threshold
+    // XTB-style convergence: gradient AND energy conditions.
+    // Reference: XTB optimizer.f90: converged = gconverged AND econverged
     bool grad_converged = m_gnorm < m_gthr;
 
-    CurcumaLogger::info("Gradient norm: " + std::to_string(m_gnorm) + " Eh/Bohr (threshold: " + std::to_string(m_gthr) + ")");
+    bool energy_ok;
+    if (m_current_iteration <= 1) {
+        energy_ok = true;  // First iteration: no previous energy to compare
+    } else if (std::abs(m_energy_change) < m_ethr) {
+        energy_ok = true;  // Within energy threshold (allows tiny fluctuations near minimum)
+    } else {
+        energy_ok = (m_energy_change < 0.0);  // Must be decreasing if not within threshold
+    }
 
-    return grad_converged;
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info_fmt("Convergence: gnorm={:.3e} (thr={:.3e}), dE={:.3e} (thr={:.3e})",
+            m_gnorm, m_gthr, m_energy_change, m_ethr);
+    }
+
+    return grad_converged && energy_ok;
 }
 
 void ANCOptimizer::UpdateOptimizerState(const Vector& new_coordinates,
                                         const Vector& new_gradient,
                                         double new_energy) {
-    // Check if step was too large (displacement norm > 2.0 in ANC space)
-    if (m_displ.norm() > 2.0) {
-        CurcumaLogger::warn("Large displacement detected - will regenerate ANC");
+    // Bug 3 Fix: Track energy change before updating m_current_energy
+    // CheckMethodSpecificConvergence() needs this to test echng < 0 condition
+    m_energy_change = new_energy - m_current_energy;
+    m_previous_energy = m_current_energy;
+
+    // Claude Generated (Mar 2026): Trust radius adaptation.
+    // Standard Fletcher-Reeves-style update based on actual/predicted ratio.
+    // Reference: Nocedal & Wright "Numerical Optimization", trust region methods.
+    if (m_energy_change > 0.0) {
+        // Energy rose: model Hessian too soft, step too large.
+        // Reduce trust radius aggressively and regenerate ANC from current geometry.
+        m_trust_radius *= 0.25;
+        m_trust_radius = std::max(m_trust_radius, 0.005 * 0.529177); // min ~0.003 Å
         m_needs_anc_regeneration = true;
+        CurcumaLogger::warn_fmt("Energy rose, trust radius reduced to {:.4f} Å", m_trust_radius);
+    } else if (m_depred < 0.0) {
+        // Energy decreased. Update trust radius based on quality of prediction.
+        double ratio = m_energy_change / m_depred; // ratio > 0 (both negative)
+        double maxtr = m_maxdispl * 0.529177;       // max trust radius in Å
+        if (ratio > 0.75) {
+            // Excellent prediction: increase trust radius
+            m_trust_radius = std::min(m_trust_radius * 2.0, maxtr);
+        } else if (ratio < 0.25) {
+            // Poor prediction (large overshoot): decrease trust radius
+            m_trust_radius *= 0.5;
+            m_trust_radius = std::max(m_trust_radius, 0.005 * 0.529177);
+        }
+        // else (0.25 ≤ ratio ≤ 0.75): keep trust radius unchanged
     }
+
+    CurcumaLogger::param("Trust radius (Å)", fmt::format("{:.4f}", m_trust_radius));
 
     // Store current state
     m_current_energy = new_energy;
@@ -339,55 +427,206 @@ void ANCOptimizer::FinalizeOptimizationInternal() {
 // ============================================================================
 
 Matrix ANCOptimizer::generateModelHessian(const Molecule& mol) {
-    CurcumaLogger::info("Generating model Hessian (Lindh 2007)");
+    // Claude Generated (Mar 2026): Lindh 1995 model Hessian.
+    // Reference: R. Lindh, A. Bernhardsson, G. Karlström, P.-A. Malmqvist,
+    //            Chem. Phys. Lett. 241 (1995) 423-428
+    //
+    // The model Hessian is built from exponentially-damped bond-direction and
+    // angle-bending contributions. It approximates the true Hessian well enough
+    // to produce a good ANC basis, without needing an actual computation.
+    //
+    // STRETCHING: For each atom pair (i,j):
+    //   e_ij = unit vector from i to j
+    //   rho_ij = exp(-alpha_ij * (r_ij - r0_ij)^2)   [r in Bohr]
+    //   H += k_str * rho_ij * (e_ij ⊗ e_ij)  (converted to Eh/Å²)
+    //
+    // BENDING: For each triplet (i,j,k) with j as central atom:
+    //   Wilson B-matrix vectors di, dj, dk give d(angle)/d(Cartesian)
+    //   rho = rho_ij * rho_jk
+    //   H += k_bend * rho * (di ⊗ di + dj ⊗ dj + dk ⊗ dk + cross terms)
 
-    int n3 = 3 * mol.AtomCount();
-    Matrix hessian = Matrix::Zero(n3, n3);
+    CurcumaLogger::info("Generating model Hessian (Lindh 1995)");
 
-    // Simplified Lindh model Hessian
-    // For now, use simple diagonal approximation based on atomic masses
-    // TODO: Implement full Lindh (2007) model with bond/angle/dihedral terms
+    const int N = mol.AtomCount();
+    const int n3 = 3 * N;
+    Matrix H = Matrix::Zero(n3, n3);
 
-    const auto& geometry = mol.getGeometry();
+    // Conversion: 1 Bohr = 0.529177 Å
+    // Geometry stored in Å, parameters in Bohr.
+    // Hessian units: Eh/Å² (consistent with gradient in Eh/Å).
+    const double A2B = 1.0 / 0.529177; // Å → Bohr
+    const double A2B2 = A2B * A2B;     // for converting Eh/Bohr² → Eh/Å²
 
-    // Diagonal elements: simple harmonic approximation
-    for (int i = 0; i < mol.AtomCount(); ++i) {
-        double mass = Elements::AtomicMass[mol.Atom(i).first];
-        double k_diagonal = m_model_hess_params.s6 / std::sqrt(mass);
+    // Lindh 1995 reference distances r0 [Bohr] (Table 1), indexed by period:
+    //   row 0 = H, row 1 = period 2 (Li-Ne), row 2 = period 3+ (Na+)
+    // r0[ri][rj] = reference distance for pair in periods ri, rj
+    const double r0[3][3] = {
+        {1.35, 2.10, 2.53}, // H-H,     H-Li..Ne,  H-Na+
+        {2.10, 2.87, 3.40}, // Li..Ne-H, Li..Ne pair, Li..Ne - Na+
+        {2.53, 3.40, 3.40}  // Na+-H,   Na+-Li..Ne, Na+-Na+
+    };
 
-        for (int xyz = 0; xyz < 3; ++xyz) {
-            hessian(3 * i + xyz, 3 * i + xyz) = k_diagonal;
+    // Lindh 1995 exponential decay parameters alpha [Bohr^-2] (Table 1)
+    // alpha_HH=1.00, all others ~0.316 = sqrt(0.1)
+    const double alpha_str[3][3] = {
+        {1.000, 0.316, 0.316},
+        {0.316, 0.316, 0.316},
+        {0.316, 0.316, 0.316}
+    };
+
+    // For angle bending, Lindh uses softer alpha values (~0.12)
+    const double alpha_bend[3][3] = {
+        {0.120, 0.120, 0.120},
+        {0.120, 0.120, 0.120},
+        {0.120, 0.120, 0.120}
+    };
+
+    // Reference force constants [Eh/Bohr²]
+    // Stretching and bending values from Lindh 1995
+    const double k_str  = 0.45; // Eh/Bohr² (bond stretching)
+    const double k_bend = 0.15; // Eh/rad² (angle bending, rad because B-matrix is dangle/dcoord)
+
+    // Cutoff: only include pairs within 8 Bohr (~4.2 Å)
+    const double r_cutoff_bohr = 8.0;
+
+    // Assign each atom to a period row (for parameter table lookup)
+    auto getPeriod = [](int Z) -> int {
+        if (Z == 1) return 0;   // H
+        if (Z <= 10) return 1;  // Li-Ne
+        return 2;               // Na and beyond (simplified to period 3 parameters)
+    };
+
+    // Convert geometry to Bohr for all distance/vector calculations
+    const auto& geom_ang = mol.getGeometry(); // Rows: atoms, Cols: x,y,z in Å
+
+    // === BOND STRETCHING CONTRIBUTIONS ===
+    // For each pair (i,j), add k_str*rho * (e_ij ⊗ e_ij) to the appropriate blocks.
+    // This correctly represents the second derivative of a harmonic bond potential.
+    for (int i = 0; i < N; ++i) {
+        int pi = getPeriod(mol.Atom(i).first);
+        for (int j = i + 1; j < N; ++j) {
+            int pj = getPeriod(mol.Atom(j).first);
+
+            // Distance in Bohr
+            Eigen::Vector3d dr_ang = geom_ang.row(j) - geom_ang.row(i);
+            double r_ang = dr_ang.norm();
+            double r_bohr = r_ang * A2B;
+
+            if (r_bohr > r_cutoff_bohr)
+                continue;
+
+            // Exponential damping: rho = exp(-alpha * (r - r0)^2)
+            double dr = r_bohr - r0[pi][pj];
+            double rho = std::exp(-alpha_str[pi][pj] * dr * dr);
+
+            // Effective force constant in Eh/Bohr² → convert to Eh/Å²
+            double k_eff_ang = k_str * rho * A2B2;
+
+            // Bond unit vector (same direction in Å or Bohr space)
+            Eigen::Vector3d e_ij = dr_ang / r_ang;
+
+            // Outer product: e_ij ⊗ e_ij (dimensionless)
+            // Second derivative of harmonic potential E=k/2*(r-r0)^2:
+            //   d²E/dx_i dx_j(bond) = k * e_ij * e_ij^T  (i,j same atom → positive)
+            //   d²E/dx_i dx_k(bond) = -k * e_ij * e_ij^T (i,k different atoms → negative)
+            for (int a = 0; a < 3; ++a) {
+                for (int b = 0; b < 3; ++b) {
+                    double outer_ab = e_ij(a) * e_ij(b) * k_eff_ang;
+                    H(3*i+a, 3*i+b) += outer_ab;  // atom i diagonal block: +
+                    H(3*j+a, 3*j+b) += outer_ab;  // atom j diagonal block: +
+                    H(3*i+a, 3*j+b) -= outer_ab;  // i-j off-diagonal block: -
+                    H(3*j+a, 3*i+b) -= outer_ab;  // j-i off-diagonal block: -
+                }
+            }
         }
     }
 
-    // Off-diagonal elements: bond connectivity
-    auto bonds = mol.Bonds();
-    for (const auto& bond : bonds) {
-        int i = bond.first;
-        int j = bond.second;
+    // === ANGLE BENDING CONTRIBUTIONS ===
+    // For each triplet (i,j,k) with j as central atom, add Wilson B-matrix contributions.
+    // Wilson B-vector: di = d(angle)/d(coord_i), units = 1/Å
+    //   di = (cos(θ)*e_ji - e_jk) / (r_ji * sin(θ))  [in 1/Å if r in Å]
+    //   dk = (cos(θ)*e_jk - e_ji) / (r_jk * sin(θ))
+    //   dj = -(di + dk)
+    // H contribution: k_bend * rho_ij * rho_jk * (da ⊗ db) for each atom pair (a,b)
+    for (int j = 0; j < N; ++j) {
+        int pj = getPeriod(mol.Atom(j).first);
+        for (int i = 0; i < N; ++i) {
+            if (i == j) continue;
+            int pi = getPeriod(mol.Atom(i).first);
 
-        if (i >= mol.AtomCount() || j >= mol.AtomCount())
-            continue;
+            Eigen::Vector3d dr_ji_ang = geom_ang.row(i) - geom_ang.row(j);
+            double r_ji_ang = dr_ji_ang.norm();
+            double r_ji_bohr = r_ji_ang * A2B;
+            if (r_ji_bohr > r_cutoff_bohr) continue;
 
-        double rij = (geometry.row(i) - geometry.row(j)).norm();
-        double mass_i = Elements::AtomicMass[mol.Atom(i).first];
-        double mass_j = Elements::AtomicMass[mol.Atom(j).first];
+            double dri = r_ji_bohr - r0[pj][pi];
+            double rho_ij = std::exp(-alpha_bend[pj][pi] * dri * dri);
 
-        double k_bond = m_model_hess_params.s6 / (rij * std::sqrt(mass_i * mass_j));
+            for (int k = i + 1; k < N; ++k) {
+                if (k == j) continue;
+                int pk = getPeriod(mol.Atom(k).first);
 
-        // Simplified: only diagonal blocks
-        for (int xyz = 0; xyz < 3; ++xyz) {
-            int idx_i = 3 * i + xyz;
-            int idx_j = 3 * j + xyz;
+                Eigen::Vector3d dr_jk_ang = geom_ang.row(k) - geom_ang.row(j);
+                double r_jk_ang = dr_jk_ang.norm();
+                double r_jk_bohr = r_jk_ang * A2B;
+                if (r_jk_bohr > r_cutoff_bohr) continue;
 
-            hessian(idx_i, idx_j) -= k_bond * 0.5;
-            hessian(idx_j, idx_i) -= k_bond * 0.5;
+                double drk = r_jk_bohr - r0[pj][pk];
+                double rho_jk = std::exp(-alpha_bend[pj][pk] * drk * drk);
+
+                // Combined damping for angle i-j-k
+                double rho = rho_ij * rho_jk;
+
+                // Compute angle i-j-k (in radians)
+                Eigen::Vector3d e_ji = dr_ji_ang / r_ji_ang;
+                Eigen::Vector3d e_jk = dr_jk_ang / r_jk_ang;
+                double cos_theta = e_ji.dot(e_jk);
+                cos_theta = std::max(-1.0 + 1e-8, std::min(1.0 - 1e-8, cos_theta));
+                double sin_theta = std::sqrt(1.0 - cos_theta * cos_theta);
+                if (sin_theta < 1e-6) continue; // Skip (nearly) linear angles
+
+                // Wilson B-matrix vectors in 1/Å
+                // These are the derivatives of the angle (in rad) with respect to Å
+                Eigen::Vector3d di = (cos_theta * e_ji - e_jk) / (r_ji_ang * sin_theta);
+                Eigen::Vector3d dk = (cos_theta * e_jk - e_ji) / (r_jk_ang * sin_theta);
+                Eigen::Vector3d dj = -(di + dk);
+
+                // Effective force constant for bending in Eh/Å²
+                // k_bend [Eh/rad²] * di [rad/Å] * dj [rad/Å] → [Eh/Å²] ✓
+                double k_eff = k_bend * rho;
+
+                // Atoms involved: i (index i), j (index j), k (index k)
+                const Eigen::Vector3d* dvec[3] = {&di, &dj, &dk};
+                const int idx[3] = {i, j, k};
+
+                // Add all 9 block contributions (symmetric)
+                for (int a = 0; a < 3; ++a) {
+                    for (int b = a; b < 3; ++b) {
+                        for (int p = 0; p < 3; ++p) {
+                            for (int q = 0; q < 3; ++q) {
+                                double contrib = k_eff * (*dvec[a])(p) * (*dvec[b])(q);
+                                H(3*idx[a]+p, 3*idx[b]+q) += contrib;
+                                if (a != b) {
+                                    H(3*idx[b]+q, 3*idx[a]+p) += contrib; // symmetry
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
-    CurcumaLogger::success("Model Hessian generated");
+    // Symmetrize (should already be symmetric, but ensure numerical symmetry)
+    for (int i = 0; i < n3; ++i)
+        for (int j = i + 1; j < n3; ++j) {
+            double avg = 0.5 * (H(i, j) + H(j, i));
+            H(i, j) = avg;
+            H(j, i) = avg;
+        }
 
-    return hessian;
+    CurcumaLogger::success("Lindh 1995 model Hessian generated (" + std::to_string(N) + " atoms)");
+    return H;
 }
 
 bool ANCOptimizer::generateANCFromHessian(const Matrix& cart_hess, const Molecule& mol) {
@@ -437,31 +676,29 @@ Vector ANCOptimizer::calculateRationalFunctionStep(const Vector& gradient_intern
     }
 
     // Get lowest eigenvalue and corresponding eigenvector
+    // XTB takes the first (lowest/most negative) eigenvector for the downhill step
+    // Reference: XTB optimizer.f90 - lambda = eigv(1)
     const Vector& eigenvalues = solver.eigenvalues();
     const Matrix& eigenvectors = solver.eigenvectors();
 
-    // Find eigenvalue closest to zero (but not exactly zero)
-    int min_idx = 0;
-    double min_abs = std::abs(eigenvalues(0));
-    for (int i = 1; i < nvar1; ++i) {
-        if (std::abs(eigenvalues(i)) < min_abs && std::abs(eigenvalues(i)) > 1e-10) {
-            min_abs = std::abs(eigenvalues(i));
-            min_idx = i;
-        }
-    }
+    // Use eigenvector with lowest eigenvalue (index 0 from SelfAdjointEigenSolver)
+    Vector eigenvec = eigenvectors.col(0);
 
-    Vector eigenvec = eigenvectors.col(min_idx);
-
-    // Extract displacement (divide by last element to normalize)
+    // Extract displacement: eigenvec = [p; s], displacement = p/s
+    // Ensure s > 0 (positive normalization) to get correct direction
     double last_elem = eigenvec(nvar);
     if (std::abs(last_elem) < 1e-10) {
         CurcumaLogger::warn("RF normalization failed - using steepest descent");
         return -gradient_internal * 0.1;
     }
+    // Flip sign if s < 0 to ensure consistent direction
+    if (last_elem < 0.0)
+        eigenvec = -eigenvec;
+    last_elem = eigenvec(nvar);
 
     Vector displacement = eigenvec.head(nvar) / last_elem;
 
-    CurcumaLogger::param("RF eigenvalue", std::to_string(eigenvalues(min_idx)));
+    CurcumaLogger::param("RF eigenvalue", std::to_string(eigenvalues(0)));
 
     return displacement;
 }
@@ -479,15 +716,18 @@ void ANCOptimizer::updateHessianBFGS(Matrix& hessian, const Vector& dx, const Ve
      */
 
     double dg_dot_dx = dg.dot(dx);
-    if (std::abs(dg_dot_dx) < 1e-10) {
-        return; // Skip update if curvature condition fails
+    // Claude Generated (Mar 2026): BFGS requires positive curvature (dg^T*dx > 0).
+    // Using abs() was wrong — a negative value means the curvature condition is violated
+    // and the update would make the Hessian indefinite. Skip in that case.
+    if (dg_dot_dx < 1e-10) {
+        return; // Skip update if curvature condition fails (must be strictly positive)
     }
 
     Vector H_dx = hessian * dx;
     double dx_H_dx = dx.dot(H_dx);
 
-    if (std::abs(dx_H_dx) < 1e-10) {
-        return; // Avoid division by zero
+    if (dx_H_dx < 1e-10) {
+        return; // Avoid division by zero or indefinite update
     }
 
     // BFGS update
@@ -542,15 +782,76 @@ double ANCOptimizer::predictEnergyChange(const Vector& gradient, const Vector& d
 
 void ANCOptimizer::projectTranslationsRotations(Matrix& hessian, const Molecule& mol) {
     /*
-     * Project out translations and rotations from Hessian
-     * This is a simplified version - full implementation needs proper projection matrix
+     * Bug 5 Fix: Eckart T/R projection from Hessian
+     * Builds 6 (5 for linear) translation/rotation vectors, orthonormalizes them
+     * via Gram-Schmidt, and projects them out: H_proj = P * H * P^T
+     * where P = I - V * V^T (V columns = orthonormal T/R vectors)
      *
-     * Ported from XTB trproj()
+     * Reference: XTB trproj() and detrotra8 subroutines
      */
 
-    // TODO: Implement full Eckart projection
-    // For now, this is a placeholder that does nothing
-    // The ANC generation will handle projection through eigenvector selection
+    int n3 = 3 * mol.AtomCount();
+    const auto& geom = mol.getGeometry();
+
+    // Compute center of mass
+    Eigen::Vector3d com = Eigen::Vector3d::Zero();
+    double total_mass = 0.0;
+    for (int i = 0; i < mol.AtomCount(); ++i) {
+        double m = Elements::AtomicMass[mol.Atom(i).first];
+        com += m * geom.row(i).transpose();
+        total_mass += m;
+    }
+    com /= total_mass;
+
+    // Build 6 T/R vectors in 3N space
+    std::vector<Vector> tr_vecs;
+    tr_vecs.reserve(6);
+
+    // 3 Translations: T_d has component 1 at each atom's d-th coordinate
+    for (int d = 0; d < 3; ++d) {
+        Vector v = Vector::Zero(n3);
+        for (int i = 0; i < mol.AtomCount(); ++i)
+            v(3 * i + d) = 1.0;
+        v.normalize();
+        tr_vecs.push_back(v);
+    }
+
+    // 3 Rotations about x, y, z axes (cross product of axis with position)
+    for (int d = 0; d < 3; ++d) {
+        Vector v = Vector::Zero(n3);
+        for (int i = 0; i < mol.AtomCount(); ++i) {
+            Eigen::Vector3d r = geom.row(i).transpose() - com;
+            // Rotation d: each atom contributes e_d x r (cross product)
+            if (d == 0) { v(3 * i + 1) = -r(2); v(3 * i + 2) = r(1); }  // Rx: [0,-z,y]
+            if (d == 1) { v(3 * i + 0) = r(2);  v(3 * i + 2) = -r(0); } // Ry: [z,0,-x]
+            if (d == 2) { v(3 * i + 0) = -r(1); v(3 * i + 1) = r(0); }  // Rz: [-y,x,0]
+        }
+        if (v.norm() > 1e-10) {
+            v.normalize();
+            tr_vecs.push_back(v);
+        }
+    }
+
+    // Gram-Schmidt orthonormalization
+    std::vector<Vector> ortho_vecs;
+    ortho_vecs.reserve(6);
+    for (auto& v : tr_vecs) {
+        Vector u = v;
+        for (const auto& w : ortho_vecs)
+            u -= w.dot(u) * w;
+        double norm = u.norm();
+        if (norm > 1e-10) {
+            u /= norm;
+            ortho_vecs.push_back(u);
+        }
+    }
+
+    // Build projection: P = I - V*V^T, apply H_proj = P * H * P^T
+    Matrix P = Matrix::Identity(n3, n3);
+    for (const auto& v : ortho_vecs)
+        P -= v * v.transpose();
+
+    hessian = P * hessian * P.transpose();
 }
 
 void ANCOptimizer::setOptimizationLevel(int level) {
