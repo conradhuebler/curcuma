@@ -54,9 +54,12 @@ namespace GFN1Params {
 struct ShellParams {
     double selfenergy;   ///< Base self-energy E_ii (Hartree)
     double kcn;          ///< CN shift coefficient (Hartree/CN)
-    double gexp;         ///< Gaussian exponent for STO
+    double gexp;         ///< Gaussian exponent for STO (Slater zeta)
     double refocc;       ///< Reference occupation
     double shpoly;       ///< Shell polynomial for distance-dependent H scaling (from TBLite p_shpoly * 0.01)
+    int angular_momentum = 0;  ///< Angular momentum l (0=s, 1=p, 2=d)
+    int principal_qn = 1;      ///< Principal quantum number n
+    int num_primitives = 6;    ///< Number of Gaussian primitives for STO-NG expansion (Stewart)
 };
 
 /**
@@ -72,8 +75,14 @@ struct ElementParams {
     int atomic_number;
     std::string symbol;
 
-    // Shell parameters (key: 0=s, 1=p, 2=d)
+    // Shell parameters by angular momentum (key: 0=s, 1=p, 2=d)
+    // For angular-momentum lookups; stores first (valence) shell per l
     std::map<int, ShellParams> shells;
+
+    // Shell parameters by shell index (ordered as in TBLite)
+    // Claude Generated (March 2026): Needed for basis set construction
+    // H has nshell=2 with ang_shell={0,0} — two s-shells with different zeta
+    std::vector<ShellParams> shell_list;
 
     // Repulsion parameters
     double rep_alpha;    ///< Repulsion exponent
@@ -123,9 +132,9 @@ public:
     bool hasElement(int Z) const { return m_elements.count(Z) > 0; }
     const ElementParams& getElement(int Z) const { return m_elements.at(Z); }
 
-    // Pair access
-    bool hasPair(int Z1, int Z2) const { return m_pairs.count({Z1, Z2}) > 0; }
-    const PairParams& getPair(int Z1, int Z2) const { return m_pairs.at({Z1, Z2}); }
+    // Pair access (always returns valid params — default kpair=1.0 for unstored pairs)
+    bool hasPair(int Z1, int Z2) const;
+    PairParams getPair(int Z1, int Z2) const;
 
     // Statistics
     int getNumElements() const { return m_elements.size(); }

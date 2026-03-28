@@ -94,6 +94,8 @@ private:
     // Hamiltonian construction (similar to GFN2 but simpler)
     double getSelfEnergy(int element, int shell, double CN) const;
     double getHamiltonianScale(const STO::Orbital& fi, const STO::Orbital& fj, double distance) const;
+    double getHamiltonianScaleIdx(const STO::Orbital& fi, const STO::Orbital& fj,
+                                   double distance, int basis_idx_i, int basis_idx_j) const;
 
     // Coordination numbers (same as GFN2)
     Vector calculateCoordinationNumbers();
@@ -118,6 +120,7 @@ private:
     ArrayParameters m_params;                  ///< Legacy GFN1 parameters (for compatibility)
     GFN1Params::ParameterDatabase m_param_db;  ///< Shell-resolved parameter database (November 2025)
     std::vector<STO::Orbital> m_basis;
+    std::vector<int> m_basis_shell_idx;  ///< Maps basis function → shell_list index (Claude Generated March 2026)
     int m_nbasis;
 
     Vector m_coordination_numbers;

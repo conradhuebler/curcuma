@@ -18,6 +18,7 @@
 
 #include "gfn1.h"
 #include "diis_accelerator.h"
+#include "STO_CGTO.hpp"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
 #include "ParallelEigenSolver.hpp"
@@ -25,6 +26,7 @@
 #include <fmt/format.h>
 #include <cmath>
 #include <algorithm>
+#include <set>
 
 using namespace CurcumaUnit;
 
@@ -32,9 +34,139 @@ using namespace CurcumaUnit;
 extern double getCovalentRadius(int Z);
 
 namespace {
-    // GFN1 specific parameters (from original paper)
-    const double GFN1_K1 = 16.0;      // CN steepness
-    const double GFN1_K2 = 4.0 / 3.0; // CN range decay
+    // GFN1 CN parameters: double-exponential from TBLite ncoord/gfn.f90 lines 82-101
+    // Product of two sigmoid functions: count = gfn_count(ka, r, rc) * gfn_count(kb, r, rc+r_shift)
+    const double GFN1_CN_KA = 10.0;        // First exponential steepness
+    const double GFN1_CN_KB = 20.0;        // Second exponential steepness
+    const double GFN1_CN_RSHIFT = 2.0;     // Range shift in Bohr
+
+    // GFN1 TBLite constants (gfn1.f90 lines 54-58)
+    constexpr double GFN1_REP_KEXP = 1.5;
+    constexpr double GFN1_REP_REXP = 1.0;
+    constexpr double GFN1_ENSCALE = -7.0e-3;
+    constexpr double GFN1_KDIAG[] = {1.85, 2.25, 2.0, 2.0, 2.0};
+    constexpr double GFN1_KDIFF = 2.85;
+
+    // Pauling electronegativities (TBLite data/paulingen.f90)
+    // Used for enscale correction in Hamiltonian scaling
+    constexpr double PAULING_EN[] = {
+        0.0,  // dummy for Z=0
+        2.20, 3.00,  // H, He
+        0.98, 1.57, 2.04, 2.55, 3.04, 3.44, 3.98, 4.50,  // Li-Ne
+        0.93, 1.31, 1.61, 1.90, 2.19, 2.58, 3.16, 3.50,  // Na-Ar
+        0.82, 1.00,  // K, Ca
+        1.36, 1.54, 1.63, 1.66, 1.55, 1.83, 1.88, 1.91, 1.90, 1.65,  // Sc-Zn
+        1.81, 2.01, 2.18, 2.55, 2.96, 3.00,  // Ga-Kr
+        0.82, 0.95,  // Rb, Sr
+        1.22, 1.33, 1.60, 2.16, 1.90, 2.20, 2.28, 2.20, 1.93, 1.69,  // Y-Cd
+        1.78, 1.96, 2.05, 2.10, 2.66, 2.60,  // In-Xe
+        0.79, 0.89,  // Cs, Ba
+        1.10, 1.12, 1.13, 1.14, 1.13, 1.17, 1.20,  // La-Eu
+        1.20, 1.20, 1.22, 1.23, 1.24, 1.25, 1.10,  // Gd-Yb
+        1.27, 1.30, 1.50, 2.36, 1.90, 2.20, 2.20, 2.28, 2.54, 2.00,  // Lu-Hg
+        1.62, 2.33, 2.02, 2.00, 2.20, 2.20  // Tl-Rn
+    };  // 87 entries: index 0..86
+
+    // TBLite atomic radii for shpoly distance scaling (Bohr)
+    // Source: tblite/data/atomicrad.f90 (Mantina et al., CRC Handbook 2010), converted aatoau
+    const double aatoau = 1.0 / 0.529177249;
+    const double GFN1_ATOMIC_RAD[87] = {
+        0.0,  // dummy
+        0.32*aatoau, 0.37*aatoau, 1.30*aatoau, 0.99*aatoau, 0.84*aatoau, 0.75*aatoau,  // H-C
+        0.71*aatoau, 0.64*aatoau, 0.60*aatoau, 0.62*aatoau,  // N-Ne
+        1.60*aatoau, 1.40*aatoau, 1.24*aatoau, 1.14*aatoau, 1.09*aatoau, 1.04*aatoau,  // Na-S
+        1.00*aatoau, 1.01*aatoau,  // Cl, Ar
+        2.00*aatoau, 1.74*aatoau, 1.59*aatoau, 1.48*aatoau, 1.44*aatoau, 1.30*aatoau,  // K-Cr
+        1.29*aatoau, 1.24*aatoau, 1.18*aatoau, 1.17*aatoau, 1.22*aatoau, 1.20*aatoau,  // Mn-Zn
+        1.23*aatoau, 1.20*aatoau, 1.20*aatoau, 1.18*aatoau, 1.17*aatoau, 1.16*aatoau,  // Ga-Kr
+        2.15*aatoau, 1.90*aatoau, 1.76*aatoau, 1.64*aatoau, 1.56*aatoau, 1.46*aatoau,  // Rb-Mo
+        1.38*aatoau, 1.36*aatoau, 1.34*aatoau, 1.30*aatoau, 1.36*aatoau, 1.40*aatoau,  // Tc-Cd
+        1.42*aatoau, 1.40*aatoau, 1.40*aatoau, 1.37*aatoau, 1.36*aatoau, 1.36*aatoau,  // In-Xe
+        2.38*aatoau, 2.06*aatoau, 1.94*aatoau, 1.84*aatoau, 1.90*aatoau, 1.88*aatoau,  // Cs-Nd
+        1.86*aatoau, 1.85*aatoau, 1.83*aatoau, 1.82*aatoau, 1.81*aatoau, 1.80*aatoau,  // Pm-Dy
+        1.79*aatoau, 1.77*aatoau, 1.77*aatoau, 1.78*aatoau, 1.74*aatoau, 1.64*aatoau,  // Ho-Hf
+        1.58*aatoau, 1.50*aatoau, 1.41*aatoau, 1.36*aatoau, 1.32*aatoau, 1.30*aatoau,  // Ta-Ir
+        1.30*aatoau, 1.32*aatoau, 1.44*aatoau, 1.45*aatoau, 1.50*aatoau, 1.42*aatoau,  // Pt-Po
+        1.48*aatoau, 1.46*aatoau  // At, Rn
+    };
+
+    // GFN1 shell polynomials (p_shpoly * 0.01) from TBLite gfn1.f90 lines 248-292
+    // Indexed as [Z][shell], Z=1..86, shell=0(s),1(p),2(d)
+    const double GFN1_SHPOLY[87][3] = {
+        {0.0, 0.0, 0.0},  // dummy Z=0
+        { 0.000000*0.01,  0.000000*0.01,  0.000000*0.01},  // H
+        { 8.084149*0.01,  0.000000*0.01,  0.000000*0.01},  // He
+        {-4.102845*0.01,  9.259276*0.01,  0.000000*0.01},  // Li
+        {-12.991482*0.01, -1.308797*0.01,  0.000000*0.01},  // Be
+        {-7.088823*0.01,  0.655877*0.01,  0.000000*0.01},  // B
+        {-7.082170*0.01,  0.812216*0.01,  0.000000*0.01},  // C
+        {-12.745585*0.01, -1.428367*0.01,  0.000000*0.01},  // N
+        {-13.729047*0.01, -4.453341*0.01,  0.000000*0.01},  // O
+        {-3.921613*0.01, -11.422491*0.01,  0.000000*0.01},  // F
+        {-2.115896*0.01, -15.124326*0.01,  0.000000*0.01},  // Ne
+        {13.188489*0.01,  10.969376*0.01,  0.000000*0.01},  // Na
+        {-19.219408*0.01, 18.272922*0.01,  0.000000*0.01},  // Mg
+        {-21.085827*0.01, 24.805127*0.01, 26.405814*0.01},  // Al
+        {-14.201582*0.01, -3.893343*0.01, 25.499221*0.01},  // Si
+        {-16.118985*0.01, -2.241189*0.01, 30.984577*0.01},  // P
+        {-16.989922*0.01, -6.067779*0.01, 16.248395*0.01},  // S
+        {-9.341919*0.01,  -8.499805*0.01, 13.088867*0.01},  // Cl
+        {-0.082808*0.01,  -9.217948*0.01, 12.204172*0.01},  // Ar
+        {12.482844*0.01,  22.323655*0.01,  0.000000*0.01},  // K
+        {-11.421376*0.01, 14.628284*0.01, 10.129602*0.01},  // Ca
+        { 9.522966*0.01,  44.183320*0.01,-36.027863*0.01},  // Sc
+        {24.879987*0.01,  18.910954*0.01,-24.908650*0.01},  // Ti
+        {-5.301066*0.01,  22.945047*0.01,-29.197847*0.01},  // V
+        {-2.432193*0.01,  11.274054*0.01,-22.608167*0.01},  // Cr
+        { 1.025345*0.01,   1.834626*0.01,-25.016650*0.01},  // Mn
+        {-2.182723*0.01,  11.769535*0.01,-22.920815*0.01},  // Fe
+        { 0.815250*0.01,  15.765732*0.01,-21.678930*0.01},  // Co
+        {15.160508*0.01,  15.782685*0.01,-26.348820*0.01},  // Ni
+        {-3.590501*0.01,   7.413473*0.01,-21.142399*0.01},  // Cu
+        {-15.535695*0.01,  4.061664*0.01,  0.000000*0.01},  // Zn
+        {-14.584657*0.01,  9.375082*0.01, 19.671655*0.01},  // Ga
+        {-12.195371*0.01,-11.374296*0.01,  9.364108*0.01},  // Ge
+        {-17.489686*0.01, -6.747956*0.01, 17.858510*0.01},  // As
+        {-14.852299*0.01, -9.863477*0.01,  9.556181*0.01},  // Se
+        {-17.815502*0.01,-14.058044*0.01,  5.468245*0.01},  // Br
+        {-25.437273*0.01,-12.813227*0.01, 10.440712*0.01},  // Kr
+        {-7.450752*0.01,  16.670533*0.01,  0.000000*0.01},  // Rb
+        {-6.087125*0.01,   2.115262*0.01, 17.076466*0.01},  // Sr
+        {10.950764*0.01,  45.679760*0.01,-28.061976*0.01},  // Y
+        {44.110231*0.01,  25.863572*0.01,-22.240873*0.01},  // Zr
+        {15.379439*0.01,  30.159730*0.01,-25.998052*0.01},  // Nb
+        { 5.815301*0.01,  14.527159*0.01,-22.556077*0.01},  // Mo
+        {24.977603*0.01,   1.953838*0.01,-23.231470*0.01},  // Tc
+        {15.281981*0.01,   1.340798*0.01,-23.099524*0.01},  // Ru
+        {24.928002*0.01,  -4.330556*0.01,-19.564083*0.01},  // Rh
+        {25.774929*0.01,  -0.704597*0.01,-21.172493*0.01},  // Pd
+        {38.415536*0.01,  -0.665483*0.01,-22.169385*0.01},  // Ag
+        {-11.443658*0.01, -5.119735*0.01,-11.067532*0.01},  // Cd
+        {-6.581368*0.01,   3.995243*0.01,  0.000000*0.01},  // In
+        {-2.193199*0.01,   0.060451*0.01,  0.000000*0.01},  // Sn
+        {-10.874138*0.01, -6.034796*0.01,  0.000000*0.01},  // Sb
+        {-20.410234*0.01, -9.424568*0.01,  0.000000*0.01},  // Te
+        {-18.477865*0.01,-14.037423*0.01, 13.809093*0.01},  // I
+        {-21.965390*0.01,-12.804436*0.01, 16.836546*0.01},  // Xe
+        {-22.139701*0.01,-20.539955*0.01, 17.249637*0.01},  // Cs
+        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Ba-Pm (56-61)
+        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Sm-Tb (62-65)
+        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Dy-Tm (66-69)
+        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Yb-Hf (70-73)
+        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Ta-Os (74-77)
+        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Ir-Pb (78-82)
+        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Bi-Rn (83-86)
+    };
+
+    inline double getGFN1AtomicRad(int Z) {
+        if (Z >= 1 && Z <= 86) return GFN1_ATOMIC_RAD[Z];
+        return 2.0;  // fallback
+    }
+
+    inline double getGFN1ShPoly(int Z, int shell) {
+        if (Z >= 1 && Z <= 86 && shell >= 0 && shell <= 2) return GFN1_SHPOLY[Z][shell];
+        return 0.0;
+    }
 
     // Halogen bond elements
     inline bool isHalogen(int Z) {
@@ -54,7 +186,7 @@ GFN1::GFN1()
     , m_energy_coulomb(0.0)
     , m_energy_dispersion(0.0)
     , m_energy_halogen_bond(0.0)
-    , m_scf_max_iterations(250)
+    , m_scf_max_iterations(500)
     , m_scf_threshold(1.0e-6)
     , m_scf_damping(0.4)
     , m_scf_converged(false)
@@ -82,7 +214,7 @@ GFN1::GFN1(const ArrayParameters& params)
     , m_energy_coulomb(0.0)
     , m_energy_dispersion(0.0)
     , m_energy_halogen_bond(0.0)
-    , m_scf_max_iterations(250)
+    , m_scf_max_iterations(500)
     , m_scf_threshold(1.0e-6)
     , m_scf_damping(0.4)
     , m_scf_converged(false)
@@ -162,6 +294,24 @@ double GFN1::Calculation(bool gradient)
             CurcumaLogger::info("Starting GFN1 energy calculation");
         }
 
+        // DEBUG: Print H0 and S matrices before SCF
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            fmt::print("  DEBUG H0 matrix (Eh):\n");
+            for (int i = 0; i < m_nbasis; ++i) {
+                fmt::print("    ");
+                for (int j = 0; j < m_nbasis; ++j)
+                    fmt::print("{:10.6f} ", m_hamiltonian(i, j));
+                fmt::print("\n");
+            }
+            fmt::print("  DEBUG S matrix:\n");
+            for (int i = 0; i < m_nbasis; ++i) {
+                fmt::print("    ");
+                for (int j = 0; j < m_nbasis; ++j)
+                    fmt::print("{:10.6f} ", m_overlap(i, j));
+                fmt::print("\n");
+            }
+        }
+
         // Run SCF convergence
         bool scf_success = runSCF();
 
@@ -225,34 +375,31 @@ double GFN1::Calculation(bool gradient)
 
 int GFN1::buildBasisSet()
 {
+    // Claude Generated (March 2026): Use TBLite shell_list for basis set construction.
+    // Key change: H has nshell=2 (two s-shells with different zeta), giving 8 basis functions
+    // for water instead of 6. The polarization s-shell is critical for accuracy (~38 mEh).
+
     m_basis.clear();
+    m_basis_shell_idx.clear();
     m_num_electrons = 0;
 
     for (size_t i = 0; i < m_atoms.size(); ++i) {
         int Z = m_atoms[i];
 
-        // GFN1 uses minimal valence basis (similar to GFN2)
-        int n_shells = 1;
-        if (Z > 2) n_shells = 2;
-        if (Z > 18) n_shells = 3;
+        if (!m_param_db.hasElement(Z)) {
+            CurcumaLogger::error(fmt::format("GFN1 param_db missing element Z={}", Z));
+            continue;
+        }
 
-        for (int shell = 0; shell < n_shells; ++shell) {
-            // Get parameters for this shell from parameter database
-            // Use m_param_db (TBLite parameters) if available, else fallback to m_params
-            double zeta = 0.0;
-            int principal_qn = shell + 1;  // Default: n = l + 1
+        const auto& elem = m_param_db.getElement(Z);
+        int n_shells = static_cast<int>(elem.shell_list.size());
 
-            if (m_param_db.hasElement(Z) && m_param_db.getElement(Z).shells.count(shell)) {
-                const auto& shell_params = m_param_db.getElement(Z).shells.at(shell);
-                zeta = shell_params.gexp;  // Use gexp (Gaussian exponent / Yeff)
-            } else {
-                zeta = m_params.getYeff(Z, shell);  // Legacy fallback
-                principal_qn = static_cast<int>(m_params.getPrincipalQN(Z, shell));
-            }
+        for (int shell_idx = 0; shell_idx < n_shells; ++shell_idx) {
+            const auto& sp = elem.shell_list[shell_idx];
+            double zeta = sp.gexp;
+            int l = sp.angular_momentum;
 
             if (zeta < 1.0e-6) continue;  // Skip unparameterized shells
-
-            int l = shell;
 
             for (int m = -l; m <= l; ++m) {
                 STO::Orbital orbital;
@@ -261,13 +408,11 @@ int GFN1::buildBasisSet()
                 if (l == 0) {
                     orbital.type = STO::S;
                 } else if (l == 1) {
-                    // p-orbitals: m = -1 (py), 0 (pz), +1 (px)
                     if (m == -1) orbital.type = STO::PY;
                     else if (m == 0) orbital.type = STO::PZ;
                     else orbital.type = STO::PX;
                 } else if (l == 2) {
-                    // d-orbitals: would need proper m → type mapping
-                    orbital.type = STO::S;  // Placeholder
+                    orbital.type = STO::S;  // Placeholder for d-orbitals
                 } else {
                     orbital.type = STO::S;  // Fallback
                 }
@@ -278,39 +423,104 @@ int GFN1::buildBasisSet()
                 orbital.zeta = zeta;
                 orbital.VSIP = 0.0;
                 orbital.atom = i;
-                orbital.shell = shell;
+                orbital.shell = l;  // Angular momentum (for Coulomb, kshell lookup)
+                orbital.principal_n = sp.principal_qn;  // Claude Generated (March 2026)
 
                 m_basis.push_back(orbital);
+                m_basis_shell_idx.push_back(shell_idx);  // Maps to shell_list entry
             }
 
-            // Fix 2 (March 2026): Valence-only electron count, mirrors GFN2 buildBasisSet
-            // Bug was: min(2,Z) and min(6,Z-2) counted core electrons → C got 6, O got 8
-            // Correct: only valence electrons fill the minimal basis
-            if (Z <= 2) { if (shell == 0) m_num_electrons += Z; }
-            else if (Z <= 10) {
-                if (shell == 0) m_num_electrons += std::min(2, Z - 2);
-                else if (shell == 1) m_num_electrons += std::max(0, Z - 4);
-            } else if (Z <= 18) {
-                if (shell == 0) m_num_electrons += std::min(2, Z - 10);
-                else if (shell == 1) m_num_electrons += std::max(0, Z - 12);
-            } else {
-                if (shell == 0) m_num_electrons += 2;
-                else if (shell == 1) m_num_electrons += 6;
-            }
+            // Electron count from reference occupation
+            m_num_electrons += static_cast<int>(sp.refocc);
         }
     }
+
+    // Apply charge
+    m_num_electrons -= m_charge;
 
     return static_cast<int>(m_basis.size());
 }
 
 Matrix GFN1::MakeOverlap(std::vector<STO::Orbital>& basisset)
 {
-    Matrix S = Matrix::Zero(basisset.size(), basisset.size());
+    // Claude Generated (March 2026): Use Stewart STO-NG expansion for overlap integrals
+    // instead of analytical STO overlaps. This matches TBLite's approach (basis/slater.f90)
+    // and avoids near-linear dependency for same-center shells (e.g., H 1s/2s overlap
+    // drops from 0.983 (STO) to ~0.43 (CGTO) due to radial node structure in CGTOs).
 
-    for (size_t i = 0; i < basisset.size(); ++i) {
-        for (size_t j = 0; j <= i; ++j) {
-            double overlap = STO::calculateOverlap(basisset[i], basisset[j]);
-            S(i, j) = S(j, i) = overlap;
+    const int n = static_cast<int>(basisset.size());
+    Matrix S = Matrix::Zero(n, n);
+
+    // Step 1: Build CGTO shells per element (with orthogonalization)
+    // TBLite basis/ortho.f90: When two shells on the same atom have the same angular
+    // momentum (e.g., H 1s + 2s), the second is Gram-Schmidt orthogonalized to the first.
+    // This eliminates near-linear dependency (S(1s,2s) drops from 0.98 to 0.0).
+
+    // Cache orthogonalized shells per element (keyed by Z)
+    // Each element gets a vector of CGTO::Shell, one per shell in shell_list
+    std::map<int, std::vector<CGTO::Shell>> element_cgto_shells;
+
+    // Build set of unique elements in molecule
+    std::set<int> unique_elements(m_atoms.begin(), m_atoms.end());
+    for (int Z : unique_elements) {
+        const auto& elem = m_param_db.getElement(Z);
+        int nsh = static_cast<int>(elem.shell_list.size());
+        std::vector<CGTO::Shell> shells(nsh);
+
+        // Convert STO → CGTO for each shell
+        for (int s = 0; s < nsh; ++s) {
+            const auto& sp = elem.shell_list[s];
+            shells[s] = CGTO::slater_to_gauss(sp.principal_qn, sp.angular_momentum,
+                                               sp.gexp, sp.num_primitives);
+        }
+
+        // Orthogonalize: for each shell, if a previous shell has the same l, orthogonalize
+        // Mirrors TBLite gfn1.f90 add_basis(): ang_idx tracks first shell per l
+        std::map<int, int> ang_idx;  // l → first shell index with that l
+        for (int s = 0; s < nsh; ++s) {
+            int l = elem.shell_list[s].angular_momentum;
+            if (ang_idx.count(l) > 0) {
+                CGTO::orthogonalize(shells[ang_idx[l]], shells[s]);
+            } else {
+                ang_idx[l] = s;
+            }
+        }
+
+        element_cgto_shells[Z] = std::move(shells);
+    }
+
+    // Step 2: Assign CGTO shells and types to each basis function
+    std::vector<CGTO::Shell> cgto_shells(n);
+    std::vector<int> cgto_type(n);  // 0=s, 1=px, 2=py, 3=pz
+
+    for (int i = 0; i < n; ++i) {
+        const auto& orb = basisset[i];
+        int Z = m_atoms[orb.atom];
+        int sidx = m_basis_shell_idx[i];
+
+        cgto_shells[i] = element_cgto_shells[Z][sidx];
+
+        switch (orb.type) {
+        case STO::S:  cgto_type[i] = 0; break;
+        case STO::PX: cgto_type[i] = 1; break;
+        case STO::PY: cgto_type[i] = 2; break;
+        case STO::PZ: cgto_type[i] = 3; break;
+        default:      cgto_type[i] = 0; break;
+        }
+    }
+
+    // Compute overlap matrix using CGTO integrals
+    for (int i = 0; i < n; ++i) {
+        S(i, i) = CGTO::cgto_overlap(cgto_shells[i], cgto_shells[i],
+                                      basisset[i].x, basisset[i].y, basisset[i].z,
+                                      basisset[i].x, basisset[i].y, basisset[i].z,
+                                      cgto_type[i], cgto_type[i]);
+        for (int j = 0; j < i; ++j) {
+            double sij = CGTO::cgto_overlap(cgto_shells[i], cgto_shells[j],
+                                             basisset[i].x, basisset[i].y, basisset[i].z,
+                                             basisset[j].x, basisset[j].y, basisset[j].z,
+                                             cgto_type[i], cgto_type[j]);
+            S(i, j) = S(j, i) = sij;
         }
     }
 
@@ -332,25 +542,35 @@ Matrix GFN1::MakeH(const Matrix& S, const std::vector<STO::Orbital>& basisset)
     Matrix H = Matrix::Zero(basisset.size(), basisset.size());
 
     // Pass 1: set all diagonal (self-energy) elements first
+    // Claude Generated (March 2026): Use m_basis_shell_idx for per-shell self-energy.
+    // Critical for H which has two s-shells: valence 1s (-0.4014 Eh) and polarization 2s (-0.0798 Eh).
+    // Without this, both get -0.4014 Eh from shells.at(0), causing SCF oscillation.
     for (size_t i = 0; i < basisset.size(); ++i) {
         int atom_i = basisset[i].atom;
         int Z_i = m_atoms[atom_i];
         double CN_i = m_coordination_numbers(atom_i);
-        int shell_i = 0;
-        if (basisset[i].type == STO::PX || basisset[i].type == STO::PY || basisset[i].type == STO::PZ)
-            shell_i = 1;
-        H(i, i) = getSelfEnergy(Z_i, shell_i, CN_i);
+
+        int sidx = m_basis_shell_idx[i];
+        const auto& sp = m_param_db.getElement(Z_i).shell_list[sidx];
+        // TBLite h0.f90:132: selfenergy(ii+ish) = selfenergy(ii+ish) - kcn(ish,izp) * cn(iat)
+        H(i, i) = sp.selfenergy - sp.kcn * CN_i;
     }
 
     // Pass 2: off-diagonal elements using already-set diagonals
+    // Claude Generated (March 2026): Skip same-atom pairs (two-center approximation).
+    // In tight-binding (GFN-xTB), H0 has on-site diagonal + inter-site off-diagonal only.
+    // Same-atom, different-shell off-diagonals are zero in TBLite's H0.
     for (size_t i = 0; i < basisset.size(); ++i) {
         for (size_t j = 0; j < i; ++j) {
+            if (basisset[i].atom == basisset[j].atom)
+                continue;  // Same-atom off-diag = 0 in tight-binding H0
+
             double dx = basisset[i].x - basisset[j].x;
             double dy = basisset[i].y - basisset[j].y;
             double dz = basisset[i].z - basisset[j].z;
             double distance = std::sqrt(dx*dx + dy*dy + dz*dz) * au;
 
-            double scale = getHamiltonianScale(basisset[i], basisset[j], distance);
+            double scale = getHamiltonianScaleIdx(basisset[i], basisset[j], distance, i, j);
             double h_ij = scale * S(i, j) * (H(i, i) + H(j, j)) / 2.0;
             H(i, j) = H(j, i) = h_ij;
         }
@@ -378,10 +598,8 @@ double GFN1::getSelfEnergy(int element, int shell, double CN) const
         if (shell_it != elem_params.shells.end()) {
             const auto& shell_params = shell_it->second;
 
-            // GFN1 self-energy with real parameters
-            // Fix 4 (March 2026): sign was inverted — kcn is negative, so + gives more
-            // negative self-energy for higher CN (physically correct, mirrors GFN2)
-            E = shell_params.selfenergy + shell_params.kcn * CN;
+            // GFN1 self-energy: TBLite h0.f90:132 uses selfenergy - kcn * CN
+            E = shell_params.selfenergy - shell_params.kcn * CN;
             use_real_params = true;
 
             if (CurcumaLogger::get_verbosity() >= 3) {
@@ -396,8 +614,7 @@ double GFN1::getSelfEnergy(int element, int shell, double CN) const
         double E_base = -m_params.getHardness(element);
         double k_CN = m_params.getShellHardness(element) * 0.01;
 
-        // Fix 4 (March 2026): same sign correction for legacy fallback
-        E = E_base + k_CN * CN;
+        E = E_base - k_CN * CN;
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::param(fmt::format("SelfEnergy[Z={},shell={}]", element, shell),
@@ -410,74 +627,88 @@ double GFN1::getSelfEnergy(int element, int shell, double CN) const
 
 double GFN1::getHamiltonianScale(const STO::Orbital& fi, const STO::Orbital& fj, double distance) const
 {
-    // Claude Generated: GFN1 Hamiltonian scaling with pair-specific parameters
-    // GFN1 uses simpler pair interactions than GFN2
-    // Reference: S. Grimme et al., JCTC 2017, 13, 1989
-    // Updated November 2025: Uses real TBLite pair parameters for 25 element pairs
+    return getHamiltonianScaleIdx(fi, fj, distance, -1, -1);
+}
 
-    int atom_i = fi.atom;
-    int atom_j = fj.atom;
-    int Z_i = m_atoms[atom_i];
-    int Z_j = m_atoms[atom_j];
+double GFN1::getHamiltonianScaleIdx(const STO::Orbital& fi, const STO::Orbital& fj,
+                                     double distance, int basis_idx_i, int basis_idx_j) const
+{
+    // Claude Generated (March 2026): GFN1 Hamiltonian scaling — matches TBLite gfn1.f90:773-812
+    // The scaling factor km depends on whether shells are valence or polarization:
+    //   Both valence:       km = kpair * kshell(jl,il) * (1 + enscale * (EN_i - EN_j)^2)
+    //   Valence/non-valence: km = 0.5 * (kshell(il,il) + kdiff)
+    //   Both non-valence:   km = kdiff
+    // Then: H0_ij = S_ij * 0.5 * (se_i + se_j) * km * shpoly
+    // This function returns km * shpoly.
 
-    double EN_i = m_params.getElectronegativity(Z_i);
-    double EN_j = m_params.getElectronegativity(Z_j);
-    double delta_EN = EN_i - EN_j;
+    int Z_i = m_atoms[fi.atom];
+    int Z_j = m_atoms[fj.atom];
+    int shell_i = fi.shell;  // Angular momentum
+    int shell_j = fj.shell;
 
-    double zeta_i = fi.zeta;
-    double zeta_j = fj.zeta;
-    double z_ij = std::sqrt(2.0 * std::sqrt(zeta_i * zeta_j) / (zeta_i + zeta_j));
+    // Determine shell_list index from basis function index
+    int sidx_i = -1, sidx_j = -1;
+    if (basis_idx_i >= 0 && basis_idx_i < static_cast<int>(m_basis_shell_idx.size()))
+        sidx_i = m_basis_shell_idx[basis_idx_i];
+    if (basis_idx_j >= 0 && basis_idx_j < static_cast<int>(m_basis_shell_idx.size()))
+        sidx_j = m_basis_shell_idx[basis_idx_j];
 
-    // Try to use real pair-specific parameters
-    double k_pair = 1.0;
-    double k_shell = 1.0;
-    bool use_real_params = false;
+    const auto& elem_i = m_param_db.getElement(Z_i);
+    const auto& elem_j = m_param_db.getElement(Z_j);
 
-    if (m_param_db.hasPair(Z_i, Z_j)) {
-        const auto& pair_params = m_param_db.getPair(Z_i, Z_j);
+    // Determine valence status: first shell with given angular momentum is valence
+    // (refocc > 0 indicates occupied = valence shell)
+    bool val_i = true, val_j = true;
+    if (sidx_i >= 0 && elem_i.shell_list[sidx_i].refocc == 0.0)
+        val_i = false;
+    if (sidx_j >= 0 && elem_j.shell_list[sidx_j].refocc == 0.0)
+        val_j = false;
 
-        // Use element-pair specific coupling
-        k_pair = pair_params.kpair;
+    // Compute km based on valence/polarization status (TBLite gfn1.f90:797-806)
+    double km;
+    if (val_i && val_j) {
+        // Both valence: full formula with kpair, kshell, enscale
+        double k_pair = m_param_db.getPair(Z_i, Z_j).kpair;
 
-        // Determine shell types for k_shell coupling
-        int shell_i = 0;  // s-orbital
-        int shell_j = 0;
-        if (fi.type == STO::PX || fi.type == STO::PY || fi.type == STO::PZ) shell_i = 1;
-        if (fj.type == STO::PX || fj.type == STO::PY || fj.type == STO::PZ) shell_j = 1;
-
-        // Select shell-specific coupling
-        if (shell_i == 0 && shell_j == 0) {
-            k_shell = pair_params.kshell_ss;  // s-s coupling
-        } else if (shell_i == 1 && shell_j == 1) {
-            k_shell = pair_params.kshell_pp;  // p-p coupling
+        // kshell: 2.08 for s-p pairs, (kdiag[i]+kdiag[j])/2 otherwise
+        double k_shell;
+        if ((shell_i == 0 && shell_j == 1) || (shell_i == 1 && shell_j == 0)) {
+            k_shell = 2.08;
         } else {
-            k_shell = pair_params.kshell_sp;  // s-p coupling
+            k_shell = (GFN1_KDIAG[shell_i] + GFN1_KDIAG[shell_j]) / 2.0;
         }
 
-        use_real_params = true;
+        // EN factor: Pauling electronegativity (TBLite gfn1.f90:792)
+        double en_i = (Z_i >= 0 && Z_i <= 86) ? PAULING_EN[Z_i] : 2.0;
+        double en_j = (Z_j >= 0 && Z_j <= 86) ? PAULING_EN[Z_j] : 2.0;
+        double den = (en_i - en_j) * (en_i - en_j);
+        double enp = 1.0 + GFN1_ENSCALE * den;
 
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param(fmt::format("HScale[{}-{}]", Z_i, Z_j),
-                               fmt::format("k_pair={:.3f}, k_shell={:.3f} [TBLite]",
-                                         k_pair, k_shell));
-        }
+        km = k_pair * k_shell * enp;
+    } else if (val_i && !val_j) {
+        // Valence i, polarization j: use il diagonal + kdiff
+        km = 0.5 * (GFN1_KDIAG[shell_i] + GFN1_KDIFF);
+    } else if (!val_i && val_j) {
+        // Polarization i, valence j: use jl diagonal + kdiff
+        km = 0.5 * (GFN1_KDIAG[shell_j] + GFN1_KDIFF);
     } else {
-        // Fallback: use Alpha parameter as approximation
-        k_pair = std::sqrt(m_params.getAlpha(Z_i) * m_params.getAlpha(Z_j)) * 0.1;
-        k_shell = 1.0;
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param(fmt::format("HScale[{}-{}]", Z_i, Z_j),
-                               "using legacy approximation");
-        }
+        // Both polarization
+        km = GFN1_KDIFF;
     }
 
-    double en_factor = 1.0 + 0.02 * delta_EN * delta_EN;
-
+    // Distance-dependent polynomial (TBLite h0.f90 line 222, 230-231)
+    // rr = sqrt(sqrt(r2) / (rad_i + rad_j))  [note: sqrt of distance, not distance]
     double r_bohr = distance / au;
-    double poly_r = std::exp(-0.5 * (r_bohr - 3.0));
+    double rad_i = elem_i.rad;
+    double rad_j = elem_j.rad;
+    double sh_i = (sidx_i >= 0) ? elem_i.shell_list[sidx_i].shpoly
+                : (elem_i.shells.count(shell_i) ? elem_i.shells.at(shell_i).shpoly : 0.0);
+    double sh_j = (sidx_j >= 0) ? elem_j.shell_list[sidx_j].shpoly
+                : (elem_j.shells.count(shell_j) ? elem_j.shells.at(shell_j).shpoly : 0.0);
+    double rr = std::sqrt(r_bohr / (rad_i + rad_j));
+    double shpoly = (1.0 + sh_i * rr) * (1.0 + sh_j * rr);
 
-    return z_ij * k_pair * k_shell * en_factor * poly_r;
+    return km * shpoly;
 }
 
 // =================================================================================
@@ -486,30 +717,26 @@ double GFN1::getHamiltonianScale(const STO::Orbital& fi, const STO::Orbital& fj,
 
 Vector GFN1::calculateCoordinationNumbers()
 {
-    // Claude Generated: GFN1 CN calculation (identical to GFN2)
+    // Claude Generated: GFN1 CN with double-exponential (same as GFN2)
+    // TBLite ncoord/gfn.f90: count = gfn_count(ka, r, rc) * gfn_count(kb, r, rc+r_shift)
+    // ka=10, kb=20, r_shift=2.0 Bohr
 
     Vector CN = Vector::Zero(m_atomcount);
+    double r_shift_ang = GFN1_CN_RSHIFT * au;  // Convert Bohr to Angstrom
 
     for (int A = 0; A < m_atomcount; ++A) {
-        int Z_A = m_atoms[A];
-        double R_cov_A = getCovalentRadius(Z_A);
-
         for (int B = 0; B < m_atomcount; ++B) {
             if (A == B) continue;
 
-            int Z_B = m_atoms[B];
-            double R_cov_B = getCovalentRadius(Z_B);
-            double R_cov = R_cov_A + R_cov_B;
-
-            double dx = m_geometry(A, 0) - m_geometry(B, 0);
-            double dy = m_geometry(A, 1) - m_geometry(B, 1);
-            double dz = m_geometry(A, 2) - m_geometry(B, 2);
-            double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz);
-
+            double R_AB = (m_geometry.row(A) - m_geometry.row(B)).norm();  // Angstrom
             if (R_AB < 1.0e-6) continue;
 
-            double count = 1.0 / (1.0 + std::exp(-GFN1_K1 * (R_cov / R_AB - 1.0)));
-            CN(A) += std::pow(count, GFN1_K2);
+            double R_cov = getCovalentRadius(m_atoms[A]) + getCovalentRadius(m_atoms[B]);  // Angstrom
+
+            // Double-exponential: product of two sigmoid functions
+            double count1 = 1.0 / (1.0 + std::exp(-GFN1_CN_KA * (R_cov / R_AB - 1.0)));
+            double count2 = 1.0 / (1.0 + std::exp(-GFN1_CN_KB * ((R_cov + r_shift_ang) / R_AB - 1.0)));
+            CN(A) += count1 * count2;
         }
     }
 
@@ -539,22 +766,23 @@ bool GFN1::runSCF()
     }
 
     DIISAccelerator diis(8);  // Keep last 8 Fock matrices
-    const int diis_start = 2;  // Start DIIS after this many iterations
+    const int diis_start = 3;  // Start DIIS after a few damped iterations
+
+    // Claude Generated (March 2026): Use Fermi-Dirac smearing for SCF stability.
+    // TBLite default: 300K. Helps convergence when HOMO-LUMO gap is small.
+    if (m_electronic_temperature <= 0.0)
+        m_electronic_temperature = 300.0;  // Default to TBLite's 300K
 
     for (int iter = 0; iter < m_scf_max_iterations; ++iter) {
         m_fock = buildFockMatrix(m_density);
 
-        // DIIS: store Fock matrix and extrapolate when enough vectors available
+        // Pure density damping (no DIIS — DIIS conflicts with density damping for GFN1)
         Matrix F_scf = m_fock;
-        if (iter >= diis_start) {
-            diis.push(m_fock, m_density, m_overlap);
-            if (diis.size() >= 2)
-                F_scf = diis.extrapolate();
-        }
 
         // Claude Generated (March 2026): Fixed transformMOs=true (was false)
         // Without back-transform, MOs are in orthonormal basis → P = 2*C*C^T gives Tr(PS) ≠ N_elec
         bool success = solver.solveWithPrecalculatedS_1_2(m_S_inv_sqrt, F_scf, m_energies, m_mo, m_threads, true);
+
 
         if (!success) {
             CurcumaLogger::error("Eigenvalue solution failed in GFN1 SCF");
@@ -581,13 +809,26 @@ bool GFN1::runSCF()
             m_scf_converged = true;
             if (CurcumaLogger::get_verbosity() >= 1)
                 CurcumaLogger::success(fmt::format("GFN1 SCF converged in {} iterations (ΔE = {:.2e})", iter + 1, energy_diff));
+
+            // DEBUG: Print all orbital energies and diagnostics
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                fmt::print("  DEBUG orbital energies (Eh):\n");
+                for (int k = 0; k < m_nbasis; ++k)
+                    fmt::print("    orb {:2d}: {:12.6f} Eh\n", k+1, m_energies(k));
+                fmt::print("  DEBUG H0 diagonal (Eh):\n");
+                for (int k = 0; k < m_nbasis; ++k)
+                    fmt::print("    H0({:2d},{:2d}): {:12.6f}  basis_shell_idx={}\n", k+1, k+1, m_hamiltonian(k,k), m_basis_shell_idx[k]);
+                double trPS = (m_density * m_overlap).trace();
+                fmt::print("  DEBUG Tr(P*S) = {:.6f} (should be {})\n", trPS, m_num_electrons);
+                fmt::print("  DEBUG Tr(P*H0) = {:.6f}\n", (m_density.cwiseProduct(m_hamiltonian)).sum());
+            }
+
             return true;
         }
 
-        // Iteration 0: use full new density (zero → damping creates artificial charges)
-        // All other iterations: damping for stability (DIIS handles Fock extrapolation)
+        // Density damping: mix new and old density for stability
         if (iter == 0) {
-            m_density = density_new;
+            m_density = density_new;  // First iter: no damping (from zero density)
         } else {
             m_density = m_scf_damping * density_new + (1.0 - m_scf_damping) * m_density;
         }
@@ -612,25 +853,26 @@ Matrix GFN1::buildFockMatrix(const Matrix& density)
     Matrix F = m_hamiltonian;
     Matrix PS = density * m_overlap;
 
-    // Compute shell populations per atom
+    // Compute shell populations per atom, indexed by shell_list index
+    // Claude Generated (March 2026): Use shell_list index (not angular momentum) to
+    // correctly track H's two s-shells separately (refocc=1.0 vs 0.0).
     std::vector<std::map<int, double>> shell_pop(m_atomcount);
     for (int mu = 0; mu < m_nbasis; ++mu) {
         int A = m_basis[mu].atom;
-        int l = (m_basis[mu].type == STO::PX || m_basis[mu].type == STO::PY || m_basis[mu].type == STO::PZ) ? 1 : 0;
-        shell_pop[A][l] += PS(mu, mu);
+        int sidx = m_basis_shell_idx[mu];
+        shell_pop[A][sidx] += PS(mu, mu);
     }
 
-    // Delta-charges per shell and per atom using refocc
+    // Delta-charges per shell and per atom using refocc from shell_list
     std::vector<std::map<int, double>> dq(m_atomcount);
     Vector atomic_charges = Vector::Zero(m_atomcount);
     for (int A = 0; A < m_atomcount; ++A) {
         int Z_A = m_atoms[A];
-        for (auto& [s, pop] : shell_pop[A]) {
-            double ref = 0.0;
-            if (m_param_db.hasElement(Z_A) && m_param_db.getElement(Z_A).shells.count(s))
-                ref = m_param_db.getElement(Z_A).shells.at(s).refocc;
-            dq[A][s] = ref - pop;
-            atomic_charges(A) += dq[A][s];
+        const auto& elem = m_param_db.getElement(Z_A);
+        for (auto& [sidx, pop] : shell_pop[A]) {
+            double ref = elem.shell_list[sidx].refocc;
+            dq[A][sidx] = ref - pop;
+            atomic_charges(A) += dq[A][sidx];
         }
     }
     m_charges = atomic_charges;
@@ -639,21 +881,20 @@ Matrix GFN1::buildFockMatrix(const Matrix& density)
     if (density.norm() < 1e-10) return F;
 
     // Compute Coulomb potential V[μ] for each basis function
-    // GFN1: atom-resolved gamma_ss for all shells (simpler than GFN2's shell-resolved)
+    // GFN1: atom-resolved gamma_ss, HARMONIC mean (TBLite effective.f90:142-152)
+    // GFN1 harmonic: gam = 2*gi*gj/(gi+gj), kernel: 1/sqrt(R² + 1/gam²)
+    // TODO: Upgrade to fully shell-resolved Coulomb (shell-pair γ matrix) for <1 mEh accuracy
     std::vector<double> V(m_nbasis, 0.0);
     for (int mu = 0; mu < m_nbasis; ++mu) {
         int A = m_basis[mu].atom;
-        double gamma_AA = m_param_db.hasElement(m_atoms[A])
-                          ? m_param_db.getElement(m_atoms[A]).gamma_ss
-                          : m_params.getHardness(m_atoms[A]);
+        double gamma_AA = m_param_db.getElement(m_atoms[A]).gamma_ss;
 
         for (int B = 0; B < m_atomcount; ++B) {
             double R_AB = (A == B) ? 0.0 : (m_geometry.row(A) - m_geometry.row(B)).norm() / au;
-            double gamma_BB = m_param_db.hasElement(m_atoms[B])
-                              ? m_param_db.getElement(m_atoms[B]).gamma_ss
-                              : m_params.getHardness(m_atoms[B]);
-            // Klopman-Ohno Coulomb kernel (same formula as corrected calculateCoulombEnergy)
-            double gamma_AB = 1.0 / std::sqrt(R_AB * R_AB + std::pow(2.0 / (gamma_AA + gamma_BB), 2.0));
+            double gamma_BB = m_param_db.getElement(m_atoms[B]).gamma_ss;
+            // GFN1 Klopman-Ohno: harmonic mean gamma, then 1/sqrt(R² + 1/gam²)
+            double gam = 2.0 * gamma_AA * gamma_BB / (gamma_AA + gamma_BB);
+            double gamma_AB = 1.0 / std::sqrt(R_AB * R_AB + 1.0 / (gam * gam));
             V[mu] += atomic_charges(B) * gamma_AB;
         }
     }
@@ -796,33 +1037,33 @@ double GFN1::calculateCoulombEnergy() const
 
     Matrix PS = m_density * m_overlap;
 
-    // Accumulate shell populations per atom
+    // Accumulate shell populations per atom, indexed by shell_list index
+    // Claude Generated (March 2026): shell_list index for correct H two-s-shell tracking
     std::vector<std::map<int, double>> shell_pop(m_atomcount);
     for (int mu = 0; mu < m_nbasis; ++mu) {
         int A   = m_basis[mu].atom;
-        int l   = (m_basis[mu].type == STO::PX || m_basis[mu].type == STO::PY || m_basis[mu].type == STO::PZ) ? 1 : 0;
-        shell_pop[A][l] += PS(mu, mu);
+        int sidx = m_basis_shell_idx[mu];
+        shell_pop[A][sidx] += PS(mu, mu);
     }
 
-    // Delta-charges per shell and per atom using refocc
+    // Delta-charges per shell and per atom using refocc from shell_list
     std::vector<std::map<int, double>> dq(m_atomcount);
     Vector charges = Vector::Zero(m_atomcount);
 
     for (int A = 0; A < m_atomcount; ++A) {
         int Z_A = m_atoms[A];
-        for (auto& [s, pop] : shell_pop[A]) {
-            double ref = 0.0;
-            if (m_param_db.hasElement(Z_A) && m_param_db.getElement(Z_A).shells.count(s))
-                ref = m_param_db.getElement(Z_A).shells.at(s).refocc;
-            dq[A][s] = ref - pop;
-            charges(A) += dq[A][s];
+        const auto& elem = m_param_db.getElement(Z_A);
+        for (auto& [sidx, pop] : shell_pop[A]) {
+            double ref = elem.shell_list[sidx].refocc;
+            dq[A][sidx] = ref - pop;
+            charges(A) += dq[A][sidx];
         }
     }
 
     const_cast<GFN1*>(this)->m_charges = charges;
 
-    // ES2: Effective Coulomb using shell-resolved delta-charges
-    // GFN1 uses atom-resolved (not shell-resolved) Hubbard kernel
+    // ES2: Effective Coulomb with HARMONIC mean (GFN1-specific, TBLite effective.f90:142-152)
+    // GFN1 harmonic: gam = 2*gi*gj/(gi+gj), kernel: 1/sqrt(R² + 1/gam²)
     double E_ES2 = 0.0;
 
     for (int A = 0; A < m_atomcount; ++A) {
@@ -831,6 +1072,7 @@ double GFN1::calculateCoulombEnergy() const
                           ? m_param_db.getElement(Z_A).gamma_ss
                           : m_params.getHardness(Z_A);
 
+        // On-site: gam_AA = gamma_AA (harmonic mean of same value = itself)
         E_ES2 += 0.5 * charges(A) * charges(A) * gamma_AA;
 
         for (int B = A + 1; B < m_atomcount; ++B) {
@@ -844,10 +1086,9 @@ double GFN1::calculateCoulombEnergy() const
             double dz = m_geometry(A, 2) - m_geometry(B, 2);
             double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz) / au;
 
-            // Claude Generated (March 2026): Fixed Coulomb kernel — must match GFN2::calculateCoulombKernel
-            // Old formula: 1/sqrt(R² + 0.5*(γA+γB)) — wrong: on-site gives 1/sqrt(γ), not γ
-            // Correct Klopman-Ohno: 1/sqrt(R² + (2/(γA+γB))²) — on-site gives (γA+γB)/2 = γ ✓
-            double gamma_AB = 1.0 / std::sqrt(R_AB*R_AB + std::pow(2.0 / (gamma_AA + gamma_BB), 2.0));
+            // GFN1 Klopman-Ohno: harmonic mean, then 1/sqrt(R² + 1/gam²)
+            double gam = 2.0 * gamma_AA * gamma_BB / (gamma_AA + gamma_BB);
+            double gamma_AB = 1.0 / std::sqrt(R_AB * R_AB + 1.0 / (gam * gam));
 
             E_ES2 += charges(A) * charges(B) * gamma_AB;
         }
@@ -960,119 +1201,8 @@ double GFN1::calculateHalogenBondCorrection() const
 }
 
 // =================================================================================
-// Gradient Calculation (numerical, same as GFN2)
+// Gradient Calculation
 // =================================================================================
-
-// Claude Generated (March 2026): TBLite atomic radii for shpoly distance scaling (Bohr)
-// Source: tblite/data/atomicrad.f90 (Mantina et al., CRC Handbook 2010), converted aatoau
-namespace {
-    const double aatoau = 1.0 / 0.529177249;
-    const double GFN1_ATOMIC_RAD[87] = {
-        0.0,  // dummy
-        0.32*aatoau, 0.37*aatoau, 1.30*aatoau, 0.99*aatoau, 0.84*aatoau, 0.75*aatoau,  // H-C
-        0.71*aatoau, 0.64*aatoau, 0.60*aatoau, 0.62*aatoau,  // N-Ne
-        1.60*aatoau, 1.40*aatoau, 1.24*aatoau, 1.14*aatoau, 1.09*aatoau, 1.04*aatoau,  // Na-S
-        1.00*aatoau, 1.01*aatoau,  // Cl, Ar
-        2.00*aatoau, 1.74*aatoau, 1.59*aatoau, 1.48*aatoau, 1.44*aatoau, 1.30*aatoau,  // K-Cr
-        1.29*aatoau, 1.24*aatoau, 1.18*aatoau, 1.17*aatoau, 1.22*aatoau, 1.20*aatoau,  // Mn-Zn
-        1.23*aatoau, 1.20*aatoau, 1.20*aatoau, 1.18*aatoau, 1.17*aatoau, 1.16*aatoau,  // Ga-Kr
-        2.15*aatoau, 1.90*aatoau, 1.76*aatoau, 1.64*aatoau, 1.56*aatoau, 1.46*aatoau,  // Rb-Mo
-        1.38*aatoau, 1.36*aatoau, 1.34*aatoau, 1.30*aatoau, 1.36*aatoau, 1.40*aatoau,  // Tc-Cd
-        1.42*aatoau, 1.40*aatoau, 1.40*aatoau, 1.37*aatoau, 1.36*aatoau, 1.36*aatoau,  // In-Xe
-        2.38*aatoau, 2.06*aatoau, 1.94*aatoau, 1.84*aatoau, 1.90*aatoau, 1.88*aatoau,  // Cs-Nd
-        1.86*aatoau, 1.85*aatoau, 1.83*aatoau, 1.82*aatoau, 1.81*aatoau, 1.80*aatoau,  // Pm-Dy
-        1.79*aatoau, 1.77*aatoau, 1.77*aatoau, 1.78*aatoau, 1.74*aatoau, 1.64*aatoau,  // Ho-Hf
-        1.58*aatoau, 1.50*aatoau, 1.41*aatoau, 1.36*aatoau, 1.32*aatoau, 1.30*aatoau,  // Ta-Ir
-        1.30*aatoau, 1.32*aatoau, 1.44*aatoau, 1.45*aatoau, 1.50*aatoau, 1.42*aatoau,  // Pt-Po
-        1.48*aatoau, 1.46*aatoau  // At, Rn
-    };
-
-    // GFN1 shell polynomials (p_shpoly * 0.01) from TBLite gfn1.f90 lines 248-292
-    // Indexed as [Z][shell], Z=1..86, shell=0(s),1(p),2(d)
-    // Only first 18 elements shown explicitly; rest can be added as needed
-    const double GFN1_SHPOLY[87][3] = {
-        {0.0, 0.0, 0.0},  // dummy Z=0
-        { 0.000000*0.01,  0.000000*0.01,  0.000000*0.01},  // H
-        { 8.084149*0.01,  0.000000*0.01,  0.000000*0.01},  // He
-        {-4.102845*0.01,  9.259276*0.01,  0.000000*0.01},  // Li
-        {-12.991482*0.01, -1.308797*0.01,  0.000000*0.01},  // Be
-        {-7.088823*0.01,  0.655877*0.01,  0.000000*0.01},  // B
-        {-7.082170*0.01,  0.812216*0.01,  0.000000*0.01},  // C
-        {-12.745585*0.01, -1.428367*0.01,  0.000000*0.01},  // N
-        {-13.729047*0.01, -4.453341*0.01,  0.000000*0.01},  // O
-        {-3.921613*0.01, -11.422491*0.01,  0.000000*0.01},  // F
-        {-2.115896*0.01, -15.124326*0.01,  0.000000*0.01},  // Ne
-        {13.188489*0.01,  10.969376*0.01,  0.000000*0.01},  // Na
-        {-19.219408*0.01, 18.272922*0.01,  0.000000*0.01},  // Mg
-        {-21.085827*0.01, 24.805127*0.01, 26.405814*0.01},  // Al
-        {-14.201582*0.01, -3.893343*0.01, 25.499221*0.01},  // Si
-        {-16.118985*0.01, -2.241189*0.01, 30.984577*0.01},  // P
-        {-16.989922*0.01, -6.067779*0.01, 16.248395*0.01},  // S
-        {-9.341919*0.01,  -8.499805*0.01, 13.088867*0.01},  // Cl
-        {-0.082808*0.01,  -9.217948*0.01, 12.204172*0.01},  // Ar
-        {12.482844*0.01,  22.323655*0.01,  0.000000*0.01},  // K
-        {-11.421376*0.01, 14.628284*0.01, 10.129602*0.01},  // Ca
-        { 9.522966*0.01,  44.183320*0.01,-36.027863*0.01},  // Sc
-        {24.879987*0.01,  18.910954*0.01,-24.908650*0.01},  // Ti
-        {-5.301066*0.01,  22.945047*0.01,-29.197847*0.01},  // V
-        {-2.432193*0.01,  11.274054*0.01,-22.608167*0.01},  // Cr
-        { 1.025345*0.01,   1.834626*0.01,-25.016650*0.01},  // Mn
-        {-2.182723*0.01,  11.769535*0.01,-22.920815*0.01},  // Fe
-        { 0.815250*0.01,  15.765732*0.01,-21.678930*0.01},  // Co
-        {15.160508*0.01,  15.782685*0.01,-26.348820*0.01},  // Ni
-        {-3.590501*0.01,   7.413473*0.01,-21.142399*0.01},  // Cu
-        {-15.535695*0.01,  4.061664*0.01,  0.000000*0.01},  // Zn
-        {-14.584657*0.01,  9.375082*0.01, 19.671655*0.01},  // Ga
-        {-12.195371*0.01,-11.374296*0.01,  9.364108*0.01},  // Ge
-        {-17.489686*0.01, -6.747956*0.01, 17.858510*0.01},  // As
-        {-14.852299*0.01, -9.863477*0.01,  9.556181*0.01},  // Se
-        {-17.815502*0.01,-14.058044*0.01,  5.468245*0.01},  // Br
-        {-25.437273*0.01,-12.813227*0.01, 10.440712*0.01},  // Kr
-        {-7.450752*0.01,  16.670533*0.01,  0.000000*0.01},  // Rb
-        {-6.087125*0.01,   2.115262*0.01, 17.076466*0.01},  // Sr
-        {10.950764*0.01,  45.679760*0.01,-28.061976*0.01},  // Y
-        {44.110231*0.01,  25.863572*0.01,-22.240873*0.01},  // Zr
-        {15.379439*0.01,  30.159730*0.01,-25.998052*0.01},  // Nb
-        { 5.815301*0.01,  14.527159*0.01,-22.556077*0.01},  // Mo
-        {24.977603*0.01,   1.953838*0.01,-23.231470*0.01},  // Tc
-        {15.281981*0.01,   1.340798*0.01,-23.099524*0.01},  // Ru
-        {24.928002*0.01,  -4.330556*0.01,-19.564083*0.01},  // Rh-correction: moved
-        {25.774929*0.01,  -0.704597*0.01,-21.172493*0.01},  // Pd
-        {38.415536*0.01,  -0.665483*0.01,-22.169385*0.01},  // Ag
-        {-11.443658*0.01, -5.119735*0.01,-11.067532*0.01},  // Cd
-        {-6.581368*0.01,   3.995243*0.01,  0.000000*0.01},  // In
-        {-2.193199*0.01,   0.060451*0.01,  0.000000*0.01},  // Sn
-        {-10.874138*0.01, -6.034796*0.01,  0.000000*0.01},  // Sb
-        {-20.410234*0.01, -9.424568*0.01,  0.000000*0.01},  // Te
-        {-18.477865*0.01,-14.037423*0.01, 13.809093*0.01},  // I
-        {-21.965390*0.01,-12.804436*0.01, 16.836546*0.01},  // Xe
-        {-22.139701*0.01,-20.539955*0.01, 17.249637*0.01},  // Cs
-        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Ba-Pm (56-61)
-        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Sm-Tb (62-65)
-        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Dy-Tm (66-69)
-        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Yb-Hf (70-73)
-        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Ta-Os (74-77)
-        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Ir-Pb (78-82)
-        {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},  // Bi-Rn (83-86)
-    };
-
-    // GFN1 TBLite constants (gfn1.f90 lines 54-58)
-    constexpr double GFN1_REP_KEXP = 1.5;
-    constexpr double GFN1_REP_REXP = 1.0;
-    constexpr double GFN1_ENSCALE = -7.0e-3;
-    constexpr double GFN1_KDIAG[] = {1.85, 2.25, 2.0, 2.0, 2.0};
-    constexpr double GFN1_KDIFF = 2.85;
-
-    inline double getGFN1AtomicRad(int Z) {
-        if (Z >= 1 && Z <= 86) return GFN1_ATOMIC_RAD[Z];
-        return 2.0;  // fallback
-    }
-
-    inline double getGFN1ShPoly(int Z, int shell) {
-        if (Z >= 1 && Z <= 86 && shell >= 0 && shell <= 2) return GFN1_SHPOLY[Z][shell];
-        return 0.0;
-    }
-}
 
 Matrix GFN1::calculateGradient() const
 {
@@ -1155,28 +1285,27 @@ Matrix GFN1::calculateGradient() const
                     double drr = 1.0 / (2.0 * std::sqrt(R_AB_bohr * (rad_A + rad_B)));
                     double dpoly = sh_A * drr * (1.0 + sh_B * rr) + (1.0 + sh_A * rr) * sh_B * drr;
 
-                    // Orbital overlap scaling
-                    double z_ij = std::sqrt(2.0 * std::sqrt(m_basis[mu].zeta * m_basis[nu].zeta) / (m_basis[mu].zeta + m_basis[nu].zeta));
-
                     // EN scaling (GFN1: enscale = -7.0e-3)
                     double EN_A = m_params.getElectronegativity(ZA);
                     double EN_B = m_params.getElectronegativity(ZB);
                     double dEN = EN_A - EN_B;
 
-                    // Shell coupling from kdiag
-                    double k_s = (GFN1_KDIAG[shell_mu] + GFN1_KDIAG[shell_nu]) / 2.0;
+                    // Shell coupling: GFN1 uses 2.08 for s-p pairs
+                    double k_s;
+                    if ((shell_mu == 0 && shell_nu == 1) || (shell_mu == 1 && shell_nu == 0)) {
+                        k_s = 2.08;
+                    } else {
+                        k_s = (GFN1_KDIAG[shell_mu] + GFN1_KDIAG[shell_nu]) / 2.0;
+                    }
 
                     // Pair coupling
                     double k_p = 1.0;
                     if (m_param_db.hasPair(ZA, ZB)) {
-                        const auto& pair = m_param_db.getPair(ZA, ZB);
-                        k_p = pair.kpair;
-                        if (shell_mu == 0 && shell_nu == 0) k_s = pair.kshell_ss;
-                        else if (shell_mu == 1 && shell_nu == 1) k_s = pair.kshell_pp;
-                        else k_s = pair.kshell_sp;
+                        k_p = m_param_db.getPair(ZA, ZB).kpair;
                     }
 
-                    double C = z_ij * k_p * k_s * (1.0 + GFN1_ENSCALE * dEN * dEN);
+                    // GFN1: wexp=0, NO z_ij factor
+                    double C = k_p * k_s * (1.0 + GFN1_ENSCALE * dEN * dEN);
                     double dH0 = (C * dpoly * m_overlap(mu, nu) + C * poly * dS_dR) * h_avg;
                     double contrib = 2.0 * (m_density(mu, nu) * dH0 - W(mu, nu) * dS_dR);
 
@@ -1186,25 +1315,32 @@ Matrix GFN1::calculateGradient() const
             }
 
             // ===== 3. Coulomb (ES2) gradient =====
-            // gamma_AB = 1/sqrt(R^2 + 0.5*(gamma_AA + gamma_BB))
-            // dgamma/dR = -R / (R^2 + eta)^(3/2) where eta = 0.5*(gAA+gBB)
+            // GFN1: harmonic mean gamma, kernel = 1/sqrt(R² + 1/gam²)
+            // dgamma/dR = -R / (R² + 1/gam²)^(3/2)
             double gamma_AA = m_param_db.hasElement(ZA) ? m_param_db.getElement(ZA).gamma_ss : m_params.getHardness(ZA);
             double gamma_BB = m_param_db.hasElement(ZB) ? m_param_db.getElement(ZB).gamma_ss : m_params.getHardness(ZB);
-            double eta = 0.5 * (gamma_AA + gamma_BB);
-            double dgamma = -R_AB_bohr / std::pow(R_AB_bohr * R_AB_bohr + eta, 1.5);
+            double gam_AB = 2.0 * gamma_AA * gamma_BB / (gamma_AA + gamma_BB);
+            double inv_gam2 = 1.0 / (gam_AB * gam_AB);
+            double dgamma = -R_AB_bohr / std::pow(R_AB_bohr * R_AB_bohr + inv_gam2, 1.5);
             double dES2 = (m_charges(A) * m_charges(B) * dgamma) / au;
             gradient(A, 0) += dES2 * nx; gradient(A, 1) += dES2 * ny; gradient(A, 2) += dES2 * nz;
             gradient(B, 0) -= dES2 * nx; gradient(B, 1) -= dES2 * ny; gradient(B, 2) -= dES2 * nz;
 
             // ===== 4. CN gradient =====
-            // CN_A depends on R_AB, self-energy depends on CN: dE/dR = dE/dCN * dCN/dR
+            // Double-exponential CN: count = count1 * count2
+            // d(count)/dR = dcount1/dR * count2 + count1 * dcount2/dR
             double R_cov = getCovalentRadius(ZA) + getCovalentRadius(ZB);
-            double exp_val = std::exp(-GFN1_K1 * (R_cov / R_AB_ang - 1.0));
-            double count = 1.0 / (1.0 + exp_val);
-            // d(count)/dR = K1 * R_cov * exp / (R^2 * (1+exp)^2)
-            // d(count^K2)/dR = K2 * count^(K2-1) * d(count)/dR
-            double dcount_dR = (-GFN1_K1 * R_cov * exp_val) / (R_AB_ang * R_AB_ang * (1.0 + exp_val) * (1.0 + exp_val));
-            double dCN_dR = GFN1_K2 * std::pow(count, GFN1_K2 - 1.0) * dcount_dR;
+            double r_shift_ang = GFN1_CN_RSHIFT * au;
+
+            double exp1 = std::exp(-GFN1_CN_KA * (R_cov / R_AB_ang - 1.0));
+            double count1 = 1.0 / (1.0 + exp1);
+            double dcount1_dR = (-GFN1_CN_KA * R_cov * exp1) / (R_AB_ang * R_AB_ang * (1.0 + exp1) * (1.0 + exp1));
+
+            double exp2 = std::exp(-GFN1_CN_KB * ((R_cov + r_shift_ang) / R_AB_ang - 1.0));
+            double count2 = 1.0 / (1.0 + exp2);
+            double dcount2_dR = (-GFN1_CN_KB * (R_cov + r_shift_ang) * exp2) / (R_AB_ang * R_AB_ang * (1.0 + exp2) * (1.0 + exp2));
+
+            double dCN_dR = dcount1_dR * count2 + count1 * dcount2_dR;
 
             // dE/dCN_A = sum_{mu on A} kcn_A_shell * P(mu,mu)
             // dE/dCN_B = sum_{mu on B} kcn_B_shell * P(mu,mu)

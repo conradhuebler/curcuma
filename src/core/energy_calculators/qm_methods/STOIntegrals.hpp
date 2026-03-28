@@ -137,6 +137,7 @@ struct Orbital {
     OrbitalType type; // Orbital type
     int atom; // Atom index
     int shell = 0; // Shell index (0=s, 1=p, 2=d) for shell-resolved calculations
+    int principal_n = 1; // Principal quantum number (Claude Generated March 2026)
 
     std::string toString() const
     {
@@ -145,7 +146,7 @@ struct Orbital {
            << std::fixed << std::setprecision(6)
            << x << ", " << y << ", " << z
            << ") with zeta=" << zeta << ", VSIP=" << VSIP
-           << ", shell=" << shell;
+           << ", shell=" << shell << ", n=" << principal_n;
         return ss.str();
     }
 };
@@ -186,9 +187,11 @@ static inline DirectionCosines getDirectionCosines(const Orbital& orb1, const Or
  */
 static inline double calculateSSOverlap(double zeta1, double zeta2, double R, bool debug = false)
 {
-    // Für identische Zentren (R=0)
-    if (R < 1e-10)
-        return 1.0;
+    // Claude Generated (March 2026): Removed incorrect R=0 → 1.0 shortcut.
+    // For two 1s STOs with DIFFERENT zeta on the same center:
+    //   S = (4*z1*z2/(z1+z2)^2)^(3/2) < 1.0 (by AM-GM inequality)
+    // The general formula handles R=0 correctly (exp(0)=1, poly(0)=1).
+    // Self-overlap (same zeta, same center) is caught by calculateOverlap() earlier.
 
     // Reduzierter Zeta-Wert berechnen
     double zeta_reduced = (zeta1 * zeta2) / (zeta1 + zeta2);
@@ -215,6 +218,45 @@ static inline double calculateSSOverlap(double zeta1, double zeta2, double R, bo
     }
 
     return result;
+}
+
+/**
+ * @brief Calculate SS overlap with principal quantum number correction
+ * Claude Generated (March 2026): Corrects for different n values (e.g. 1s-2s).
+ *
+ * The base formula computes the 1s-1s overlap (n1=n2=1). For different n,
+ * we scale by the ratio of exact same-center overlaps:
+ *   S(n1, n2, R) ≈ S_1s1s(R) * S_exact(n1, n2, R=0) / S_1s1s(R=0)
+ *
+ * Same-center exact formula:
+ *   S(n1, n2, ζ1, ζ2, R=0) = sqrt((2ζ1)^(2n1+1)/(2n1)!) * sqrt((2ζ2)^(2n2+1)/(2n2)!)
+ *                              * (n1+n2)! / (ζ1+ζ2)^(n1+n2+1)
+ */
+static inline double calculateSSOverlapN(double zeta1, double zeta2, double R,
+                                          int n1, int n2, bool debug = false)
+{
+    // 1s-1s overlap (base)
+    double S_1s1s = calculateSSOverlap(zeta1, zeta2, R, debug);
+
+    if (n1 == 1 && n2 == 1)
+        return S_1s1s;
+
+    // Exact same-center overlap for (n1, n2):
+    // N_n = sqrt((2ζ)^(2n+1) / (2n)!)
+    // S(R=0) = N1 * N2 * (n1+n2)! / (ζ1+ζ2)^(n1+n2+1)
+    double N1 = std::sqrt(std::pow(2.0 * zeta1, 2*n1 + 1) / factorial(2*n1));
+    double N2 = std::sqrt(std::pow(2.0 * zeta2, 2*n2 + 1) / factorial(2*n2));
+    double S_exact_R0 = N1 * N2 * factorial(n1 + n2) / std::pow(zeta1 + zeta2, n1 + n2 + 1);
+
+    // Same-center overlap for (1, 1):
+    double N1_1s = std::sqrt(std::pow(2.0 * zeta1, 3) / 2.0);
+    double N2_1s = std::sqrt(std::pow(2.0 * zeta2, 3) / 2.0);
+    double S_1s1s_R0 = N1_1s * N2_1s * 2.0 / std::pow(zeta1 + zeta2, 3);
+
+    // Correction factor
+    double correction = (S_1s1s_R0 > 1e-15) ? S_exact_R0 / S_1s1s_R0 : 1.0;
+
+    return S_1s1s * correction;
 }
 
 /**
@@ -641,11 +683,14 @@ static inline double calculateOverlap(const Orbital& orb1, const Orbital& orb2, 
     OrbitalType type2 = orb2.type;
     double zeta1 = orb1.zeta;
     double zeta2 = orb2.zeta;
+    int n1 = orb1.principal_n;
+    int n2 = orb2.principal_n;
 
     // Always use the lower type first for symmetry
     if (type1 > type2) {
         std::swap(type1, type2);
         std::swap(zeta1, zeta2);
+        std::swap(n1, n2);
 
         if (debug) {
             std::cout << "Swapped orbital order for calculation" << std::endl;
@@ -657,7 +702,8 @@ static inline double calculateOverlap(const Orbital& orb1, const Orbital& orb2, 
     // Calculate appropriate overlap based on orbital types
     if (type1 == S) {
         if (type2 == S) {
-            result = calculateSSOverlap(zeta1, zeta2, R, debug);
+            // Claude Generated (March 2026): Use principal quantum number for SS overlap
+            result = calculateSSOverlapN(zeta1, zeta2, R, n1, n2, debug);
         } else if (type2 <= PZ) {
             double direction = 0.0;
             if (type2 == PX)
