@@ -335,6 +335,17 @@ private:
      */
     EEQParameters getParameters(int Z, double cn = 0.0) const;
 
+    /**
+     * @brief Generate uniform fallback charges when EEQ solver fails
+     * Claude Generated (March 2026): Graceful degradation instead of hard crash
+     *
+     * @param natoms Number of atoms
+     * @param total_charge Total molecular charge
+     * @param context Description of failure context (for warning message)
+     * @return Vector with q_i = total_charge / natoms
+     */
+    Vector generateFallbackCharges(int natoms, int total_charge, const std::string& context) const;
+
     // ===== Correction Terms =====
 
     /**
@@ -613,6 +624,28 @@ private:
     ) const;
 
     // ===== Solve Methods =====
+
+    /**
+     * @brief Dispatch solve of augmented EEQ system using configured solver method
+     * Claude Generated (March 2026): Unified solver dispatch for Phase 1 and Phase 2
+     *
+     * Routes to SchurCholesky, PCG, LU, or Auto based on m_solve_method.
+     * Returns atomic charges (natoms elements), or fallback charges on failure.
+     *
+     * @param A Full augmented matrix (natoms+nfrag) × (natoms+nfrag)
+     * @param x Full RHS vector (natoms+nfrag)
+     * @param natoms Number of atoms
+     * @param nfrag Number of fragments
+     * @param total_charge Total molecular charge (for fallback)
+     * @return Vector of atomic charges (natoms elements)
+     */
+    Vector dispatchSolve(
+        const Matrix& A,
+        const Vector& x,
+        int natoms,
+        int nfrag,
+        int total_charge
+    );
 
     /**
      * @brief Solve augmented EEQ system via Schur complement + Cholesky

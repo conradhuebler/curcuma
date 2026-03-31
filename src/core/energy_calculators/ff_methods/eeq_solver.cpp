@@ -732,6 +732,14 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     }
 }
 
+// Claude Generated (March 2026): Fallback charges for graceful degradation
+Vector EEQSolver::generateFallbackCharges(int natoms, int total_charge, const std::string& context) const
+{
+    CurcumaLogger::warn(fmt::format("EEQ solver failed ({}): using uniform fallback charges q_i = {:.4f}",
+                                    context, static_cast<double>(total_charge) / natoms));
+    return Vector::Constant(natoms, static_cast<double>(total_charge) / natoms);
+}
+
 // ===== Main API =====
 
 /**
@@ -1196,6 +1204,165 @@ Matrix EEQSolver::buildSmartEEQMatrix(
     return A;
 }
 
+// ===== Unified Solver Dispatch =====
+// Claude Generated (March 2026): Routes augmented EEQ system to configured solver
+// Used by both Phase 1 (calculateTopologyCharges) and Phase 2 (calculateFinalCharges)
+
+Vector EEQSolver::dispatchSolve(
+    const Matrix& A,
+    const Vector& x,
+    int natoms,
+    int nfrag,
+    int total_charge)
+{
+    EEQSolveMethod method_to_use = m_solve_method;
+    if (m_solve_method == EEQSolveMethod::Auto) {
+        method_to_use = m_selected_method;  // Use cached or default (SchurCholesky)
+    }
+
+    if (m_verbosity >= 2) {
+        const char* method_name = (method_to_use == EEQSolveMethod::PCG) ? "PCG"
+            : (method_to_use == EEQSolveMethod::SchurCholesky) ? "SchurCholesky" : "LU";
+        const char* mode_str = (m_solve_method == EEQSolveMethod::Auto) ? " (auto)" : "";
+        fmt::print(stderr, "[EEQ] dispatchSolve: Using {} solver{} (N={})\n", method_name, mode_str, natoms);
+    }
+
+    Vector charges;
+
+    if (method_to_use == EEQSolveMethod::SchurCholesky || method_to_use == EEQSolveMethod::PCG || m_solve_method == EEQSolveMethod::Auto) {
+        Matrix A_nn = A.topLeftCorner(natoms, natoms);
+        Vector rhs_atoms = x.head(natoms);
+
+        Matrix C = Matrix::Zero(nfrag, natoms);
+        for (int f = 0; f < nfrag; ++f) {
+            for (int j = 0; j < natoms; ++j) {
+                C(f, j) = A(natoms + f, j);
+            }
+        }
+        Vector rhs_constraints = x.tail(nfrag);
+
+        // Auto-benchmark on first call
+        // Claude Generated (March 2026): Skip benchmark for large N — PCG always wins above ~500 atoms.
+        // SchurCholesky for N>500 allocates O(N²) memory and O(N³) compute — prohibitively slow.
+        // For multi-fragment systems (nfrag>1), PCG needs nfrag+1 solves; benchmarking doubles that cost.
+        const int PCG_DIRECT_THRESHOLD = 500;
+        if (m_solve_method == EEQSolveMethod::Auto && !m_auto_benchmark_done && natoms > PCG_DIRECT_THRESHOLD) {
+            m_selected_method = EEQSolveMethod::PCG;
+            m_auto_benchmark_done = true;
+            if (m_verbosity >= 1) {
+                CurcumaLogger::info(fmt::format("EEQ: Large system (N={}, nfrag={}), using PCG directly (threshold={})",
+                                                natoms, nfrag, PCG_DIRECT_THRESHOLD));
+            }
+            // Fall through to PCG path below
+        }
+
+        if (m_solve_method == EEQSolveMethod::Auto && !m_auto_benchmark_done) {
+            auto t1 = std::chrono::high_resolution_clock::now();
+            Vector charges_schur = solveWithSchurCholesky(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
+            auto t2 = std::chrono::high_resolution_clock::now();
+
+            int pcg_max = m_config.get<int>("max_pcg_iterations", 200);
+            double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
+            Vector x0_zero = Vector::Zero(natoms);
+
+            Vector z1 = solveWithPCG(A_nn, rhs_atoms, x0_zero, pcg_max, pcg_tol);
+            Matrix Z2(natoms, nfrag);
+            for (int f = 0; f < nfrag; ++f) {
+                Vector c_col = C.row(f).transpose();
+                Z2.col(f) = solveWithPCG(A_nn, c_col, x0_zero, pcg_max, pcg_tol);
+            }
+            Matrix S = C * Z2;
+            Vector schur_rhs = C * z1 - rhs_constraints;
+            Vector lambda;
+            if (nfrag == 1) {
+                lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
+            } else {
+                lambda = S.partialPivLu().solve(schur_rhs);
+            }
+            Vector charges_pcg = z1 - Z2 * lambda;
+            auto t3 = std::chrono::high_resolution_clock::now();
+
+            double schur_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+            double pcg_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
+
+            m_selected_method = (pcg_ms < schur_ms) ? EEQSolveMethod::PCG : EEQSolveMethod::SchurCholesky;
+            m_auto_benchmark_done = true;
+
+            if (m_verbosity >= 2) {
+                fmt::print(stderr, "[EEQ] Auto-benchmark: SchurCholesky={:.1f}ms, PCG={:.1f}ms → {}\n",
+                           schur_ms, pcg_ms,
+                           m_selected_method == EEQSolveMethod::PCG ? "PCG" : "SchurCholesky");
+            }
+
+            m_pcg_last_z1 = z1;
+            m_pcg_last_z2 = Z2.col(0);
+            m_pcg_cache_valid = true;
+
+            return charges_pcg;
+        }
+
+        if (method_to_use == EEQSolveMethod::PCG) {
+            int pcg_max = m_config.get<int>("max_pcg_iterations", 200);
+            double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
+
+            Vector x0_z1 = m_pcg_cache_valid ? m_pcg_last_z1 : Vector::Zero(natoms);
+
+            Vector z1 = solveWithPCG(A_nn, rhs_atoms, x0_z1, pcg_max, pcg_tol);
+
+            Matrix Z2(natoms, nfrag);
+            for (int f = 0; f < nfrag; ++f) {
+                Vector c_col = C.row(f).transpose();
+                Vector x0_col = (m_pcg_cache_valid && m_pcg_last_z2.size() == natoms)
+                    ? m_pcg_last_z2 : Vector::Zero(natoms);
+                Z2.col(f) = solveWithPCG(A_nn, c_col, x0_col, pcg_max, pcg_tol);
+            }
+
+            Matrix S = C * Z2;
+            Vector schur_rhs = C * z1 - rhs_constraints;
+            Vector lambda;
+            if (nfrag == 1) {
+                lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
+            } else {
+                lambda = S.partialPivLu().solve(schur_rhs);
+            }
+            charges = z1 - Z2 * lambda;
+
+            m_pcg_last_z1 = z1;
+            m_pcg_last_z2 = Z2.col(0);
+            m_pcg_cache_valid = true;
+        } else {
+            charges = solveWithSchurCholesky(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
+            if (charges.size() == 0) {
+                if (m_verbosity >= 1) {
+                    CurcumaLogger::warn("EEQ: Schur-Cholesky failed, falling back to LU");
+                }
+                Eigen::PartialPivLU<Matrix> lu(A);
+                Vector solution = lu.solve(x);
+                Vector residual = A * solution - x;
+                solution -= lu.solve(residual);
+                charges = solution.segment(0, natoms);
+            }
+        }
+    } else {
+        // LU baseline
+        Eigen::PartialPivLU<Matrix> lu(A);
+        Vector solution = lu.solve(x);
+        Vector residual = A * solution - x;
+        solution -= lu.solve(residual);
+        charges = solution.segment(0, natoms);
+    }
+
+    // NaN/Inf validation with fallback
+    for (int i = 0; i < natoms; ++i) {
+        if (std::isnan(charges[i]) || std::isinf(charges[i])) {
+            CurcumaLogger::error(fmt::format("EEQ dispatchSolve: Invalid charge[{}] = {}", i, charges[i]));
+            return generateFallbackCharges(natoms, total_charge, "NaN/Inf in linear solve");
+        }
+    }
+
+    return charges;
+}
+
 // ===== Schur Complement Cholesky Solver =====
 // Claude Generated - March 2026 (Performance optimization)
 //
@@ -1413,148 +1580,8 @@ Vector EEQSolver::solveEEQ(
         x(row) = q_target;
     }
 
-    // Claude Generated (March 2026): Dispatch solve by method
-    // Resolve Auto to actual method (either from benchmark or cached decision)
-    EEQSolveMethod method_to_use = m_solve_method;
-    if (m_solve_method == EEQSolveMethod::Auto) {
-        method_to_use = m_selected_method;  // Use cached or default (SchurCholesky)
-    }
-
-    if (m_verbosity >= 2) {
-        const char* method_name = (method_to_use == EEQSolveMethod::PCG) ? "PCG"
-            : (method_to_use == EEQSolveMethod::SchurCholesky) ? "SchurCholesky" : "LU";
-        const char* mode_str = (m_solve_method == EEQSolveMethod::Auto) ? " (auto)" : "";
-        fmt::print(stderr, "[EEQ] solveEEQ: Using {} solver{} (N={})\n", method_name, mode_str, natoms);
-    }
-
-    // Extract NxN sub-matrix, constraint matrix, and RHS components for structured solvers
-    Vector charges;
-
-    if (method_to_use == EEQSolveMethod::SchurCholesky || method_to_use == EEQSolveMethod::PCG || m_solve_method == EEQSolveMethod::Auto) {
-        // Extract components from augmented system
-        Matrix A_nn = A.topLeftCorner(natoms, natoms);
-        Vector rhs_atoms = x.head(natoms);
-
-        // Build constraint matrix C (nfrag × natoms)
-        Matrix C = Matrix::Zero(nfrag, natoms);
-        for (int f = 0; f < nfrag; ++f) {
-            for (int j = 0; j < natoms; ++j) {
-                C(f, j) = A(natoms + f, j);
-            }
-        }
-        Vector rhs_constraints = x.tail(nfrag);
-
-        // ===== Auto-benchmark: First call decides which solver to use =====
-        // Claude Generated - March 2026
-        if (m_solve_method == EEQSolveMethod::Auto && !m_auto_benchmark_done) {
-            auto t1 = std::chrono::high_resolution_clock::now();
-            Vector charges_schur = solveWithSchurCholesky(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
-            auto t2 = std::chrono::high_resolution_clock::now();
-
-            // PCG warm start: use zeros for first benchmark
-            int pcg_max = m_config.get<int>("max_pcg_iterations", 200);
-            double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
-            Vector x0_zero = Vector::Zero(natoms);
-
-            Vector z1 = solveWithPCG(A_nn, rhs_atoms, x0_zero, pcg_max, pcg_tol);
-            Matrix Z2(natoms, nfrag);
-            for (int f = 0; f < nfrag; ++f) {
-                Vector c_col = C.row(f).transpose();
-                Z2.col(f) = solveWithPCG(A_nn, c_col, x0_zero, pcg_max, pcg_tol);
-            }
-            Matrix S = C * Z2;
-            Vector schur_rhs = C * z1 - rhs_constraints;
-            Vector lambda;
-            if (nfrag == 1) {
-                lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
-            } else {
-                lambda = S.partialPivLu().solve(schur_rhs);
-            }
-            Vector charges_pcg = z1 - Z2 * lambda;
-            auto t3 = std::chrono::high_resolution_clock::now();
-
-            double schur_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
-            double pcg_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
-
-            m_selected_method = (pcg_ms < schur_ms) ? EEQSolveMethod::PCG : EEQSolveMethod::SchurCholesky;
-            m_auto_benchmark_done = true;
-
-            if (m_verbosity >= 2) {
-                fmt::print(stderr, "[EEQ] Auto-benchmark: SchurCholesky={:.1f}ms, PCG={:.1f}ms → {}\n",
-                           schur_ms, pcg_ms,
-                           m_selected_method == EEQSolveMethod::PCG ? "PCG" : "SchurCholesky");
-            }
-
-            // Cache PCG warm-start vectors for future calls
-            m_pcg_last_z1 = z1;
-            m_pcg_last_z2 = Z2.col(0);
-            m_pcg_cache_valid = true;
-
-            return charges_pcg;
-        }
-
-        // Use the resolved method (either explicit choice or cached auto-benchmark result)
-        if (method_to_use == EEQSolveMethod::PCG) {
-            // PCG with Schur complement constraint handling
-            int pcg_max = m_config.get<int>("max_pcg_iterations", 200);
-            double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
-
-            // Warm start: use previous solution if available
-            Vector x0_z1 = m_pcg_cache_valid ? m_pcg_last_z1 : Vector::Zero(natoms);
-            Vector x0_z2;
-
-            // Solve A·z₁ = b_atoms via PCG
-            Vector z1 = solveWithPCG(A_nn, rhs_atoms, x0_z1, pcg_max, pcg_tol);
-
-            // Solve A·z₂ columns via PCG (one per fragment)
-            // For single fragment, z₂ is A⁻¹·1 — very stable between steps
-            Matrix Z2(natoms, nfrag);
-            for (int f = 0; f < nfrag; ++f) {
-                Vector c_col = C.row(f).transpose();
-                Vector x0_col = (m_pcg_cache_valid && m_pcg_last_z2.size() == natoms)
-                    ? m_pcg_last_z2 : Vector::Zero(natoms);
-                Z2.col(f) = solveWithPCG(A_nn, c_col, x0_col, pcg_max, pcg_tol);
-            }
-
-            // Schur complement constraint correction
-            Matrix S = C * Z2;
-            Vector schur_rhs = C * z1 - rhs_constraints;
-            Vector lambda;
-            if (nfrag == 1) {
-                lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
-            } else {
-                lambda = S.partialPivLu().solve(schur_rhs);
-            }
-            charges = z1 - Z2 * lambda;
-
-            // Cache for warm start
-            m_pcg_last_z1 = z1;
-            m_pcg_last_z2 = Z2.col(0);  // Cache first fragment's constraint vector
-            m_pcg_cache_valid = true;
-        } else {
-            // Schur Cholesky
-            charges = solveWithSchurCholesky(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
-            if (charges.size() == 0) {
-                // Cholesky failed — fall back to LU
-                if (m_verbosity >= 1) {
-                    CurcumaLogger::warn("EEQ: Schur-Cholesky failed, falling back to LU");
-                }
-                Eigen::PartialPivLU<Matrix> lu(A);
-                Vector solution = lu.solve(x);
-                Vector residual = A * solution - x;
-                solution -= lu.solve(residual);
-                charges = solution.segment(0, natoms);
-            }
-        }
-    } else {
-        // LU baseline
-        Eigen::PartialPivLU<Matrix> lu(A);
-        Vector solution = lu.solve(x);
-        // Single iterative refinement step for large-system accuracy
-        Vector residual = A * solution - x;
-        solution -= lu.solve(residual);
-        charges = solution.segment(0, natoms);
-    }
+    // Claude Generated (March 2026): Use unified dispatchSolve instead of duplicated solver logic
+    Vector charges = dispatchSolve(A, x, natoms, nfrag, total_charge);
 
     // DEBUG: Verify linear solve accuracy
     if (m_verbosity >= 3) {
@@ -1739,7 +1766,7 @@ Vector EEQSolver::calculateTopologyCharges(
 
                 if (r < 1e-10) {
                     CurcumaLogger::error("EEQSolver::calculateTopologyCharges: Zero distance between atoms");
-                    return Vector::Zero(0);
+                    return generateFallbackCharges(natoms, total_charge, "zero distance in Phase 1");
                 }
 
                 // Store distance for both Coulomb matrix and cache
@@ -1838,31 +1865,25 @@ Vector EEQSolver::calculateTopologyCharges(
         std::cerr << "==================================================" << std::endl;
     }
 
-    // Phase 1 EEQ linear solve using LU (~2× faster than QR, no iterative refinement needed)
-    // Claude Generated (March 2026): PartialPivLU replaces QR for performance
-    Vector solution = A.partialPivLu().solve(x);
+    // Claude Generated (March 2026): Use configurable solver dispatch instead of hardcoded LU
+    // This allows the user to select solve_method (lu, schur_cholesky, pcg, auto) for Phase 1 too
+    Vector topology_charges = dispatchSolve(A, x, natoms, nfrag, total_charge);
 
-    // Extract atomic charges
-    Vector topology_charges = solution.segment(0, natoms);
-
-    // Claude Generated (March 2026): Print full solution vector including Lagrange multipliers
+    // Claude Generated (March 2026): Print Phase 1 charge summary
     if (m_verbosity >= 3 && natoms <= 10) {
-        std::cerr << "\nPhase 1 full solution vector:" << std::endl;
-        for (int i = 0; i < m; ++i) {
-            if (i < natoms)
-                std::cerr << fmt::format("  q({:2d}) = {:12.6f}  (Z={:2d})", i, solution(i), atoms[i]) << std::endl;
-            else
-                std::cerr << fmt::format("  λ({:2d}) = {:12.6f}  (Lagrange multiplier)", i - natoms, solution(i)) << std::endl;
+        std::cerr << "\nPhase 1 charges:" << std::endl;
+        for (int i = 0; i < natoms; ++i) {
+            std::cerr << fmt::format("  q({:2d}) = {:12.6f}  (Z={:2d})", i, topology_charges(i), atoms[i]) << std::endl;
         }
         std::cerr << fmt::format("  charge sum = {:12.6f}", topology_charges.sum()) << std::endl;
     }
 
-    // Check for NaN/Inf
+    // Check for NaN/Inf - fallback to uniform charges instead of hard fail
     for (int i = 0; i < natoms; ++i) {
         if (std::isnan(topology_charges[i]) || std::isinf(topology_charges[i])) {
             CurcumaLogger::error(fmt::format("Phase 1 EEQ: Invalid charge[{}] = {} (Z={})",
                                              i, topology_charges[i], atoms[i]));
-            return Vector::Zero(0);
+            return generateFallbackCharges(natoms, total_charge, "NaN/Inf in Phase 1 solution");
         }
     }
 
@@ -2217,7 +2238,7 @@ Vector EEQSolver::calculateFinalCharges(
     }
     if (atoms_too_close) {
         CurcumaLogger::error("EEQSolver::calculateFinalCharges: atoms too close");
-        return Vector::Zero(0);
+        return generateFallbackCharges(natoms, total_charge, "zero distance in Phase 2");
     }
     // Const reference alias for readability — no copy
     const Matrix& distances = m_phase2_distances;
@@ -2477,118 +2498,8 @@ Vector EEQSolver::calculateFinalCharges(
             }
         }
 
-        // 6. Solve system — dispatch by method
-        // Claude Generated (March 2026): Schur-Cholesky / PCG / LU selection with auto-benchmark
-        // Resolve Auto to actual method (either from benchmark or cached decision)
-        EEQSolveMethod method_to_use = m_solve_method;
-        if (m_solve_method == EEQSolveMethod::Auto) {
-            method_to_use = m_selected_method;  // Use cached or default (SchurCholesky)
-        }
-
-        if (m_verbosity >= 2 && iteration == 0) {
-            const char* method_name = (method_to_use == EEQSolveMethod::PCG) ? "PCG"
-                : (method_to_use == EEQSolveMethod::SchurCholesky) ? "SchurCholesky" : "LU";
-            const char* mode_str = (m_solve_method == EEQSolveMethod::Auto) ? " (auto)" : "";
-            fmt::print(stderr, "[EEQ] Phase 2: Using {} solver{} (N={})\n", method_name, mode_str, natoms);
-        }
-        Vector new_charges;
-
-        // Extract NxN sub-matrix and constraint components (needed for SchurCholesky, PCG, and Auto-benchmark)
-        Matrix A_nn = A.topLeftCorner(natoms, natoms);
-        Vector rhs_atoms = x.head(natoms);
-        Matrix C_mat = Matrix::Zero(nfrag, natoms);
-        for (int f = 0; f < nfrag; ++f)
-            for (int j = 0; j < natoms; ++j)
-                C_mat(f, j) = A(natoms + f, j);
-        Vector rhs_constraints = x.tail(nfrag);
-
-        // ===== Auto-benchmark: First call decides which solver to use =====
-        // Claude Generated - March 2026
-        if (m_solve_method == EEQSolveMethod::Auto && !m_auto_benchmark_done && iteration == 0) {
-            auto t1 = std::chrono::high_resolution_clock::now();
-            Vector charges_schur = solveWithSchurCholesky(A_nn, rhs_atoms, C_mat, rhs_constraints, natoms, nfrag);
-            auto t2 = std::chrono::high_resolution_clock::now();
-
-            int pcg_max = m_config.get<int>("max_pcg_iterations", 200);
-            double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
-            Vector x0_zero = Vector::Zero(natoms);
-
-            Vector z1 = solveWithPCG(A_nn, rhs_atoms, x0_zero, pcg_max, pcg_tol);
-            Matrix Z2(natoms, nfrag);
-            for (int f = 0; f < nfrag; ++f) {
-                Vector c_col = C_mat.row(f).transpose();
-                Z2.col(f) = solveWithPCG(A_nn, c_col, x0_zero, pcg_max, pcg_tol);
-            }
-            Matrix S = C_mat * Z2;
-            Vector schur_rhs = C_mat * z1 - rhs_constraints;
-            Vector lambda;
-            if (nfrag == 1) {
-                lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
-            } else {
-                lambda = S.partialPivLu().solve(schur_rhs);
-            }
-            Vector charges_pcg = z1 - Z2 * lambda;
-            auto t3 = std::chrono::high_resolution_clock::now();
-
-            double schur_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
-            double pcg_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
-
-            m_selected_method = (pcg_ms < schur_ms) ? EEQSolveMethod::PCG : EEQSolveMethod::SchurCholesky;
-            m_auto_benchmark_done = true;
-
-            if (m_verbosity >= 2) {
-                fmt::print(stderr, "[EEQ] Auto-benchmark: SchurCholesky={:.1f}ms, PCG={:.1f}ms → {}\n",
-                           schur_ms, pcg_ms,
-                           m_selected_method == EEQSolveMethod::PCG ? "PCG" : "SchurCholesky");
-            }
-
-            // Cache PCG warm-start vectors for future calls
-            m_pcg_last_z1 = z1;
-            m_pcg_last_z2 = Z2.col(0);
-            m_pcg_cache_valid = true;
-
-            return charges_pcg;
-        }
-
-        if (method_to_use == EEQSolveMethod::SchurCholesky || method_to_use == EEQSolveMethod::PCG) {
-            if (method_to_use == EEQSolveMethod::PCG) {
-                int pcg_max = m_config.get<int>("max_pcg_iterations", 200);
-                double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
-                Vector x0 = m_pcg_cache_valid ? m_pcg_last_z1 : Vector::Zero(natoms);
-                Vector z1 = solveWithPCG(A_nn, rhs_atoms, x0, pcg_max, pcg_tol);
-
-                Matrix Z2(natoms, nfrag);
-                for (int f = 0; f < nfrag; ++f) {
-                    Vector c_col = C_mat.row(f).transpose();
-                    Vector x0_col = (m_pcg_cache_valid && m_pcg_last_z2.size() == natoms)
-                        ? m_pcg_last_z2 : Vector::Zero(natoms);
-                    Z2.col(f) = solveWithPCG(A_nn, c_col, x0_col, pcg_max, pcg_tol);
-                }
-                Matrix S = C_mat * Z2;
-                Vector schur_rhs = C_mat * z1 - rhs_constraints;
-                Vector lambda;
-                if (nfrag == 1) {
-                    lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
-                } else {
-                    lambda = S.partialPivLu().solve(schur_rhs);
-                }
-                new_charges = z1 - Z2 * lambda;
-                m_pcg_last_z1 = z1;
-                m_pcg_last_z2 = Z2.col(0);
-                m_pcg_cache_valid = true;
-            } else {
-                new_charges = solveWithSchurCholesky(A_nn, rhs_atoms, C_mat, rhs_constraints, natoms, nfrag);
-                if (new_charges.size() == 0) {
-                    // Cholesky failed — fall back to LU
-                    Vector solution = A.partialPivLu().solve(x);
-                    new_charges = solution.segment(0, natoms);
-                }
-            }
-        } else {
-            // LU baseline
-            Vector solution = A.partialPivLu().solve(x);
-            new_charges = solution.segment(0, natoms);
-        }
+        // 6. Solve system — unified dispatch (March 2026)
+        Vector new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge);
 
         // Claude Generated (March 2026): Print Phase 2 solution charges
         if (m_verbosity >= 3 && iteration == 0 && natoms <= 10) {
@@ -2611,7 +2522,7 @@ Vector EEQSolver::calculateFinalCharges(
         }
 
         if (!solution_valid) {
-            return Vector::Zero(0);
+            return generateFallbackCharges(natoms, total_charge, "NaN/Inf in Phase 2 solution");
         }
 
         // Check convergence for iterative case

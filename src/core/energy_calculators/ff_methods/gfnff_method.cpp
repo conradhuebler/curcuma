@@ -7143,8 +7143,8 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         );
 
         if (topo_info.topology_charges.size() != m_atomcount) {
-            CurcumaLogger::error("calculateTopologyInfo: Phase 1 topology charge calculation failed");
-            throw std::runtime_error("GFN-FF initialization failed: Phase 1 topology charge calculation failed.");
+            CurcumaLogger::warn("calculateTopologyInfo: Phase 1 topology charges failed - using uniform fallback");
+            topo_info.topology_charges = Vector::Constant(m_atomcount, static_cast<double>(m_charge) / m_atomcount);
         }
 
         if (CurcumaLogger::get_verbosity() >= 1) {
@@ -7162,8 +7162,8 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             CurcumaLogger::info("Computing Phase 1A: Electronegativity corrections (dxi)");
         }
         if (!calculateDxi(topo_info)) {
-            CurcumaLogger::error("calculateTopologyInfo: Phase 1A dxi calculation failed");
-            throw std::runtime_error("GFN-FF initialization failed: Phase 1A dxi calculation failed.");
+            CurcumaLogger::warn("calculateTopologyInfo: Phase 1A dxi failed - using zero corrections");
+            topo_info.dxi = Vector::Zero(m_atomcount);
         }
 
         // ===== PHASE 1B: Charge-Dependent Alpha (alpeeq) =====
@@ -7177,8 +7177,13 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         }
 
         if (!calculateAlpeeq(topo_info)) {
-            CurcumaLogger::error("calculateTopologyInfo: Phase 1B alpeeq calculation failed");
-            throw std::runtime_error("GFN-FF initialization failed: Phase 1B alpeeq calculation failed.");
+            CurcumaLogger::warn("calculateTopologyInfo: Phase 1B alpeeq failed - using base alpha values");
+            topo_info.alpeeq = Vector::Zero(m_atomcount);
+            for (int i = 0; i < m_atomcount; ++i) {
+                int z_i = m_atoms[i];
+                double alpha_base = (z_i >= 1 && z_i <= 86) ? GFNFFParameters::alpha_eeq[z_i - 1] : 0.903430;
+                topo_info.alpeeq(i) = alpha_base * alpha_base;  // Squared, no charge correction
+            }
         }
 
         // ===== PHASE 1C: Calculate dgam corrections =====
@@ -7241,8 +7246,8 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         );
 
         if (topo_info.eeq_charges.size() != m_atomcount) {
-            CurcumaLogger::error("calculateTopologyInfo: Phase 2 energy charge calculation failed");
-            throw std::runtime_error("GFN-FF initialization failed: Phase 2 energy charge calculation failed.");
+            CurcumaLogger::warn("calculateTopologyInfo: Phase 2 energy charges failed - using Phase 1 charges as fallback");
+            topo_info.eeq_charges = topo_info.topology_charges;
         }
 
         // Validate charge conservation for both charge systems
