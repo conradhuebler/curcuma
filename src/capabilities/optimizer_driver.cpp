@@ -200,6 +200,10 @@ bool OptimizerDriver::InitializeOptimization(const Molecule* molecule)
         return false;
     }
 
+    // Initialize energy calculator with molecule (Claude Apr 2026: Required for first call)
+    // updateGeometry() only updates coordinates, but the calculator needs full initialization
+    m_context.energy_calculator->setMolecule(m_molecule.getMolInfo());
+
     // Setup RMSD driver for convergence checking
     json rmsd_config = {
         { "reorder", false },

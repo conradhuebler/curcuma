@@ -218,8 +218,8 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeStructure(
             }
             */
         }
-        
-       
+
+
         // Log optimization start
         logOptimizationHeader(method_name, *molecule);
 
@@ -449,8 +449,10 @@ void ModernOptimizerDispatcher::logOptimizationHeader(const std::string& method,
     CurcumaLogger::param("Atoms", static_cast<int>(molecule.AtomCount()));
     CurcumaLogger::param("Method", method);
 
-    // Show initial energy if available
-    if (molecule.Energy() != 0.0) {
+    // Show initial energy if available (use epsilon comparison for floating-point safety)
+    // Claude Apr 2026: Use epsilon comparison instead of != 0.0 to handle denormalized values
+    constexpr double energy_epsilon = 1e-10;  // Small threshold for "near zero"
+    if (std::abs(molecule.Energy()) > energy_epsilon) {
         CurcumaLogger::energy_abs(molecule.Energy(), "Initial energy");
     }
 }
