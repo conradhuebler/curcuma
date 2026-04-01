@@ -730,6 +730,8 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     // The caller (gfnff_gpu_method.cpp) pre-allocates m_gpu_cn_final before CUDA init.
     checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_cn_final), natoms * sizeof(double)),
               "pinned alloc m_h_cn_final");
+    checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_cn_raw), natoms * sizeof(double)),
+              "pinned alloc m_h_cn_raw");
     checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_energies),
                              FFWorkspaceGPUImpl::N_ENERGY_SLOTS * sizeof(double)),
               "pinned alloc m_h_energies");
@@ -938,6 +940,7 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
     if (m_h_dEdcn_snap) cudaFreeHost(m_h_dEdcn_snap);
     if (m_h_grad_snap)  cudaFreeHost(m_h_grad_snap);
     if (m_h_cn_final)   cudaFreeHost(m_h_cn_final);
+    if (m_h_cn_raw)     cudaFreeHost(m_h_cn_raw);
     if (m_h_energies)   cudaFreeHost(m_h_energies);
 }
 
@@ -1978,13 +1981,15 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
         threshold_sq
     );
 
-    // Download CN_final to pre-allocated pinned buffer (no heap alloc after CUDA init)
+    // Download CN_final and CN_raw to pre-allocated pinned buffers
     // Claude Generated (March 2026): Avoids heap corruption from CUDA allocator
+    // CN_raw needed for correct dlogdcn computation (chain-rule gradient)
     cudaMemcpyAsync(m_h_cn_final, impl.d_cn_final.ptr, N * sizeof(double),
+                    cudaMemcpyDeviceToHost, impl.stream);
+    cudaMemcpyAsync(m_h_cn_raw, impl.d_cn_raw.ptr, N * sizeof(double),
                     cudaMemcpyDeviceToHost, impl.stream);
     cudaStreamSynchronize(impl.stream);
     m_cn_computed = true;
-    // Data now in m_h_cn_final — caller uses getCNPinnedBuffer() + memcpy
 }
 
 // ============================================================================

@@ -122,6 +122,13 @@ public:
     const double* getCNPinnedBuffer() const { return m_h_cn_final; }
 
     /**
+     * @brief Get pointer to pinned CN_raw buffer (valid after computeCN()).
+     * Raw (un-squashed) CN values needed for dlogdcn computation.
+     * @return Pointer to N doubles (raw erf-sum CN values)
+     */
+    const double* getCNRawPinnedBuffer() const { return m_h_cn_raw; }
+
+    /**
      * @brief Check if GPU CN has been computed this step.
      */
     bool hasComputedCN() const { return m_cn_computed; }
@@ -382,7 +389,8 @@ private:
 
     // GPU CN computation state
     // NOTE: No Eigen Vectors here — heap-corruption-safe.  CN data lives in pinned buffer only.
-    double* m_h_cn_final = nullptr; ///< [N] pinned staging buffer for CN download
+    double* m_h_cn_final = nullptr; ///< [N] pinned staging buffer for CN_final download
+    double* m_h_cn_raw   = nullptr; ///< [N] pinned staging buffer for CN_raw download
     bool    m_cn_computed = false; ///< GPU CN computed this step?
     std::vector<int> m_atom_types_cached; ///< Cached atom types for GPU CN
 

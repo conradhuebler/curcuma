@@ -232,7 +232,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // --- Step 1: GPU CN computation ---
     m_gpu_workspace->computeCN(m_atom_types);
 
-    // Copy CN from pinned buffer into pre-allocated Vector (no heap allocs)
+    // Copy CN from pinned buffers into pre-allocated Vectors (no heap allocs)
     std::memcpy(m_gpu_cn_final.data(), m_gpu_workspace->getCNPinnedBuffer(), N * sizeof(double));
 
     // Pass GPU CN to prepareCNAndEEQ — but DON'T call EEQ yet, first launch GPU kernels
@@ -251,13 +251,16 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
 
         // Compute dlogdcn (logistic squashing derivative) — needed for CN chain-rule
         // Reference: Fortran gfnff_cn.f90 create_dlogCN
-        // dlogdcn[i] = exp(cnmax) / (exp(cnmax) + exp(cn[i]))
-        // This is the derivative of the logistic-squashed CN.
+        // dlogdcn[i] = exp(cnmax) / (exp(cnmax) + exp(cn_raw[i]))
+        // CRITICAL: Must use cn_raw (erf sum), NOT cn_final (log-transformed).
+        // The dlogdcn formula is the derivative of log-squashing w.r.t. raw CN.
         constexpr double cnmax = 4.4;
         const double exp_cnmax = std::exp(cnmax);
+        Vector cn_raw(N);
+        std::memcpy(cn_raw.data(), m_gpu_workspace->getCNRawPinnedBuffer(), N * sizeof(double));
         Vector dlogdcn(N);
         for (int i = 0; i < N; ++i) {
-            dlogdcn[i] = exp_cnmax / (exp_cnmax + std::exp(m_gpu_cn_final[i]));
+            dlogdcn[i] = exp_cnmax / (exp_cnmax + std::exp(cn_raw[i]));
         }
         m_gpu_workspace->setDlogDCN(dlogdcn);
     }
