@@ -42,13 +42,13 @@ LBFGSppObjectiveFunction::LBFGSppObjectiveFunction(EnergyCalculator* calc, Molec
     }
 }
 
-double LBFGSppObjectiveFunction::operator()(const VectorXd& x, VectorXd& grad)
+double LBFGSppObjectiveFunction::operator()(const Vector& x, Vector& grad)
 {
     m_error = false;
 
     try {
         // Update molecule geometry
-        Tools::Coord2Mol(x, *m_molecule);
+        CoordinatesToMolecule(x, *m_molecule);
 
         // Check for NaN coordinates
         for (int i = 0; i < x.size(); ++i) {
@@ -59,7 +59,7 @@ double LBFGSppObjectiveFunction::operator()(const VectorXd& x, VectorXd& grad)
         }
 
         // Calculate energy
-        m_energy_calculator->setMolecule(*m_molecule);
+        m_energy_calculator->setMolecule(m_molecule->getMolInfo());
 
         double energy;
         if (m_use_numerical_gradient) {
@@ -70,7 +70,7 @@ double LBFGSppObjectiveFunction::operator()(const VectorXd& x, VectorXd& grad)
                 return 0.0;
             }
             Geometry gradient_geom = m_energy_calculator->NumGrad();
-            grad = VectorXd::Map(gradient_geom.data(), gradient_geom.size());
+            grad = Vector::Map(gradient_geom.data(), gradient_geom.size());
         } else {
             // Use analytical gradient
             energy = m_energy_calculator->CalculateEnergy(true);
@@ -79,7 +79,7 @@ double LBFGSppObjectiveFunction::operator()(const VectorXd& x, VectorXd& grad)
                 return 0.0;
             }
             Geometry gradient_geom = m_energy_calculator->Gradient();
-            grad = VectorXd::Map(gradient_geom.data(), gradient_geom.size());
+            grad = Vector::Map(gradient_geom.data(), gradient_geom.size());
         }
 
         // Apply constraints to gradient
@@ -121,8 +121,8 @@ bool LBFGSppOptimizer::InitializeOptimizerInternal()
         m_param = std::make_unique<LBFGSParam<double>>();
         configureLBFGSParam();
 
-        // Create solver
-        m_solver = std::make_unique<LBFGSSolver<double>>(*m_param);
+        // Create solver with LineSearchBacktracking (matching legacy CurcumaOpt)
+        m_solver = std::make_unique<LBFGSSolver<double, LineSearchBacktracking>>(*m_param);
 
         // Create objective function
         // Claude Generated (Feb 21, 2026): Pass numerical gradient flags from context
@@ -131,7 +131,7 @@ bool LBFGSppOptimizer::InitializeOptimizerInternal()
             m_context.use_numerical_gradient, m_context.numerical_gradient_step);
 
         // Initialize coordinate vector
-        m_current_coordinates = Tools::Mol2Coord(m_molecule);
+        m_current_coordinates = MoleculeToCoordinates(m_molecule);
 
         CurcumaLogger::success("LBFGSpp optimizer initialized");
         CurcumaLogger::param("Memory parameter (m)", m_lbfgs_m);
@@ -155,11 +155,11 @@ Vector LBFGSppOptimizer::CalculateOptimizationStep(const Vector& current_coordin
         m_current_coordinates = current_coordinates;
 
         // Perform single LBFGS step
-        VectorXd x = current_coordinates;
+        Vector x = current_coordinates;
 
         // Use SingleStep for step-by-step control
         double energy;
-        int niter = m_solver->SingleStep(*m_objective, x, energy);
+        m_solver->SingleStep(*m_objective, x, energy);
 
         if (m_objective->hasError()) {
             CurcumaLogger::warn("LBFGSpp objective function reported error");
@@ -168,7 +168,7 @@ Vector LBFGSppOptimizer::CalculateOptimizationStep(const Vector& current_coordin
         }
 
         // Check solver convergence
-        m_solver_converged = (niter == 0); // SingleStep returns 0 when converged
+        m_solver_converged = false; // Updated by CheckMethodSpecificConvergence()
 
         // Calculate step
         Vector step = x - current_coordinates;
@@ -214,15 +214,15 @@ json LBFGSppOptimizer::GetDefaultConfiguration() const
 {
     json config = OptimizerInterfaceJson;
 
-    // LBFGSpp-specific parameters
+    // LBFGSpp-specific parameters - matching legacy CurcumaOpt defaults
     config["lbfgs_m"] = 2000;
     config["lbfgs_past"] = 0;
     config["lbfgs_eps_abs"] = 1e-5;
     config["lbfgs_eps_rel"] = 1e-5;
     config["lbfgs_delta"] = 0.0;
     config["lbfgs_line_search"] = 3; // LBFGS_LINESEARCH_DEFAULT
-    config["lbfgs_max_line_search"] = 20;
-    config["lbfgs_min_step"] = 1e-20;
+    config["lbfgs_max_line_search"] = 2;  // Legacy: LBFGS_ls_iter = 2
+    config["lbfgs_min_step"] = 1e-4;      // Legacy: LBFGS_min_step = 1e-4 (not 1e-20!)
     config["lbfgs_max_step"] = 1e20;
     config["lbfgs_ftol"] = 1e-4;
     config["lbfgs_wolfe"] = 0.9;
@@ -275,7 +275,7 @@ void LBFGSppOptimizer::configureLBFGSParam()
     m_param->delta = m_lbfgs_delta;
 
     // Line search parameters
-    m_param->linesearch = static_cast<lbfgs_linesearch_t>(m_lbfgs_line_search);
+    m_param->linesearch = static_cast<LINE_SEARCH_TERMINATION_CONDITION>(m_lbfgs_line_search);
     m_param->max_linesearch = m_lbfgs_max_line_search;
     m_param->min_step = m_lbfgs_min_step;
     m_param->max_step = m_lbfgs_max_step;

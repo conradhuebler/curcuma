@@ -78,8 +78,8 @@ private:
     double m_lbfgs_ftol = 1e-4; // Function tolerance for line search
     double m_lbfgs_wolfe = 0.9; // Wolfe condition parameter
 
-    // LBFGSpp objects
-    std::unique_ptr<LBFGSSolver<double>> m_solver;
+    // LBFGSpp objects - use LineSearchBacktracking like legacy CurcumaOpt
+    std::unique_ptr<LBFGSSolver<double, LineSearchBacktracking>> m_solver;
     std::unique_ptr<LBFGSParam<double>> m_param;
     std::unique_ptr<LBFGSppObjectiveFunction> m_objective;
 
