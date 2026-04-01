@@ -1474,11 +1474,13 @@ int executeOptimization(const json& controller, int argc, char** argv) {
                 return 0;
             } else {
                 // Modern optimizer failed, fall through to legacy
-                CurcumaLogger::warn(fmt::format("Modern optimization failed: {}, using legacy optimizer", result.error_message));
+                CurcumaLogger::warn(fmt::format("{} optimizer failed: {}", optimizer_method, result.error_message));
+                CurcumaLogger::info("Falling back to legacy CurcumaOpt optimizer");
             }
         } catch (const std::exception& e) {
             // Fall through to legacy code below
-            CurcumaLogger::warn(fmt::format("Modern optimization failed: {}, using legacy optimizer", e.what()));
+            CurcumaLogger::warn(fmt::format("{} optimizer threw exception: {}", optimizer_method, e.what()));
+            CurcumaLogger::info("Falling back to legacy CurcumaOpt optimizer");
         }
     }
 
