@@ -26,6 +26,11 @@
 
 namespace Optimization {
 
+// Coordinate conversion helpers used by multiple optimizer implementations
+Vector MoleculeToCoordinates(const Molecule& mol);
+void CoordinatesToMolecule(const Vector& coords, Molecule& mol);
+
+
 /**
  * @brief Optimization context for shared state management - Claude Generated
  * Analog to QM system's parameter management, contains all shared data
@@ -121,7 +126,7 @@ protected:
     bool checkConvergence(double energy_change, double rmsd_change, double gradient_norm) const;
     void updateTrajectory(const Molecule& new_structure, double energy);
     void logOptimizationStep(int iteration, double energy, double energy_change,
-        double rmsd_change, double gradient_norm) const;
+        double rmsd_change, double gradient_norm, double elapsed_time) const;
     double calculateRMSD(const Molecule& mol1, const Molecule& mol2) const;
 
 public:

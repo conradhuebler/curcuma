@@ -26,7 +26,7 @@
 namespace Optimization {
 
 // Claude Generated - Helper function to convert Molecule geometry to flat Vector
-static Vector MoleculeToCoordinates(const Molecule& mol) {
+Vector MoleculeToCoordinates(const Molecule& mol) {
     const auto& geom = mol.getGeometry();
     Vector coords(3 * mol.AtomCount());
     for (int i = 0; i < mol.AtomCount(); ++i) {
@@ -36,7 +36,7 @@ static Vector MoleculeToCoordinates(const Molecule& mol) {
 }
 
 // Claude Generated - Helper function to set Molecule geometry from flat Vector
-static void CoordinatesToMolecule(const Vector& coords, Molecule& mol) {
+void CoordinatesToMolecule(const Vector& coords, Molecule& mol) {
     int natoms = mol.AtomCount();
     if (coords.size() != 3 * natoms) {
         CurcumaLogger::error_fmt("CoordinatesToMolecule: coords size mismatch! coords.size()={}, expected={}",
@@ -217,7 +217,7 @@ bool OptimizerDriver::InitializeOptimization(const Molecule* molecule)
     m_converged = false;
 
     // Calculate initial energy and gradient
-    Vector coordinates = Tools::Mol2Coord(m_molecule);
+    Vector coordinates = MoleculeToCoordinates(m_molecule);
     if (!evaluateEnergyAndGradient(coordinates, m_current_energy, m_current_gradient)) {
         CurcumaLogger::error("Failed to calculate initial energy and gradient");
         return false;
@@ -245,7 +245,7 @@ bool OptimizerDriver::InitializeOptimization(const double* coordinates, int atom
     Molecule mol(atom_count, 0);
     for (int i = 0; i < atom_count; ++i) {
         int element = 6; // Default to carbon - should be provided in real implementation
-        Vector3 position(coordinates[3 * i], coordinates[3 * i + 1], coordinates[3 * i + 2]);
+        Position position(coordinates[3 * i], coordinates[3 * i + 1], coordinates[3 * i + 2]);
         mol.addPair({ element, position });
     }
 
@@ -255,17 +255,15 @@ bool OptimizerDriver::InitializeOptimization(const double* coordinates, int atom
 bool OptimizerDriver::UpdateGeometry(const Molecule& molecule)
 {
     m_molecule = molecule;
-    Vector coordinates = Tools::Mol2Coord(m_molecule);
+    Vector coordinates = MoleculeToCoordinates(m_molecule);
     return evaluateEnergyAndGradient(coordinates, m_current_energy, m_current_gradient);
 }
 
 bool OptimizerDriver::UpdateGeometry(const double* coordinates)
 {
-    // Update molecule coordinates
-    for (int i = 0; i < m_molecule.AtomCount(); ++i) {
-        Vector3 pos(coordinates[3 * i], coordinates[3 * i + 1], coordinates[3 * i + 2]);
-        m_molecule.setAtom(i, m_molecule.Atom(i).first, pos);
-    }
+    // Update molecule coordinates via CoordinatesToMolecule helper
+    Vector coords_vec = Vector::Map(coordinates, 3 * m_molecule.AtomCount());
+    CoordinatesToMolecule(coords_vec, m_molecule);
 
     return evaluateEnergyAndGradient(Vector::Map(coordinates, 3 * m_molecule.AtomCount()),
         m_current_energy, m_current_gradient);
@@ -298,12 +296,18 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
         fmt::format("ΔE < {:.1e} kJ/mol, ΔRMSD < {:.3f} Å, |∇| < {:.1e} Eh/Bohr",
             m_context.energy_threshold, m_context.rmsd_threshold, m_context.gradient_threshold));
 
+    // Print optimization progress table header (matches CurcumaOpt format)
+    if (verbosity >= 1) {
+        CurcumaLogger::result_raw(fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}} {7: ^{1}}", "", 15, "Step", "Current Energy", "Energy Change", "RMSD Change", "Gradient Norm", "time"));
+        CurcumaLogger::result_raw(fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}} {7: ^{1}}", "", 15, " ", "[Eh]", "[kJ/mol]", "[A]", "[Eh/Bohr]", "[s]"));
+    }
+
     try {
         // Main optimization loop (Template Method Pattern)
         for (m_current_iteration = 1; m_current_iteration <= m_context.max_iterations; ++m_current_iteration) {
 
             // Calculate optimization step (method-specific)
-            Vector current_coords = Tools::Mol2Coord(m_molecule);
+            Vector current_coords = MoleculeToCoordinates(m_molecule);
             Vector step = CalculateOptimizationStep(current_coords, m_current_gradient);
 
             if (step.norm() == 0) {
@@ -330,7 +334,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             }
 
             // Update molecule geometry
-            Tools::Coord2Mol(new_coords, m_molecule);
+            CoordinatesToMolecule(new_coords, m_molecule);
 
             // Calculate RMSD change
             double rmsd_change = 0.0;
@@ -346,10 +350,12 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             m_current_gradient = new_gradient;
             updateTrajectory(m_molecule, new_energy);
 
-            // Log progress (analog to recent RMSDTraj improvements)
-            if (CurcumaLogger::get_verbosity() >= 3 || m_current_iteration % 10 == 0) {
+            // Log progress - table row every iteration
+            if (CurcumaLogger::get_verbosity() >= 1) {
+                auto now = std::chrono::high_resolution_clock::now();
+                double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_start_time).count() / 1000.0;
                 logOptimizationStep(m_current_iteration, new_energy, energy_change_kjmol,
-                    rmsd_change, new_gradient.norm());
+                    rmsd_change, new_gradient.norm(), elapsed);
             }
 
             // Check convergence
@@ -390,7 +396,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             // Write trajectory file
             std::ofstream trj_file(m_context.trajectory_filename);
             for (const auto& mol : m_trajectory) {
-                trj_file << mol.getXYZString();
+                trj_file << mol.XYZString();
             }
             CurcumaLogger::success_fmt("Trajectory written to: {}", m_context.trajectory_filename);
         }
@@ -421,8 +427,12 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
 bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, double& energy, Vector& gradient)
 {
     try {
-        Tools::Coord2Mol(coordinates, m_molecule);
-        m_context.energy_calculator->setMolecule(m_molecule);
+        CoordinatesToMolecule(coordinates, m_molecule);
+        // Claude Generated (Mar 2026): Use updateGeometry instead of setMolecule to avoid
+        // full GFN-FF re-initialization (topology/charges/parameters) on every step.
+        // setMolecule() triggers expensive InitialiseMolecule() which can return 0.0 energy.
+        // updateGeometry() only updates Bohr coordinates — correct for optimization iterations.
+        m_context.energy_calculator->updateGeometry(m_molecule.getGeometry());
 
         // Claude Generated (Feb 21, 2026): Support for numerical gradient mode
         // When use_numerical_gradient is true, use finite difference gradient instead of analytical
@@ -500,15 +510,12 @@ void OptimizerDriver::updateTrajectory(const Molecule& new_structure, double ene
     m_energy_trajectory.push_back(energy);
 }
 
+// Claude Generated (Mar 2026): Table-formatted progress output matching CurcumaOpt style
 void OptimizerDriver::logOptimizationStep(int iteration, double energy, double energy_change,
-    double rmsd_change, double gradient_norm) const
+    double rmsd_change, double gradient_norm, double elapsed_time) const
 {
-    CurcumaLogger::info_fmt("Step {:4d}: E = {:.8f} Eh", iteration, energy);
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::energy_rel(energy_change / CURCUMA_EH_TO_KJMOL, "  ΔE");
-        CurcumaLogger::length(rmsd_change / CURCUMA_BOHR_TO_ANGSTROM, "  ΔRMSD");
-        CurcumaLogger::param("  |∇|", fmt::format("{:.6e} Eh/Bohr", gradient_norm));
-    }
+    CurcumaLogger::result_raw(fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}",
+        15, iteration, energy, energy_change, rmsd_change, gradient_norm, elapsed_time));
 }
 
 double OptimizerDriver::calculateRMSD(const Molecule& mol1, const Molecule& mol2) const
