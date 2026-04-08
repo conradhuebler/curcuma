@@ -88,3 +88,15 @@ test_cases/**/*.dat
 # global_config.h is auto-generated from global_config.h.in during cmake configuration
 src/global_config.h
 
+# FetchContent-populated external dependencies (populated by cmake, not tracked by git)
+external/CxxThreadPool/
+external/LBFGSpp/
+external/cpp-d4/
+external/fmt/
+external/gfnff/
+external/ripser/
+external/simple-dftd3/
+external/tblite/
+external/xtb/
+external/plumed2/
+

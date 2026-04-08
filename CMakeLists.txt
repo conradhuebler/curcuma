@@ -69,7 +69,79 @@ endif()
 
 
 
-add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
+# External dependencies via FetchContent (replaces git submodules)
+# SOURCE_DIR set to external/<name> to preserve existing include paths without any source changes
+include(FetchContent)
+
+FetchContent_Declare(fmt
+    GIT_REPOSITORY https://github.com/fmtlib/fmt
+    GIT_TAG        676c2a107e9575663f79095d9b2c9d15168e1285
+    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/fmt
+)
+FetchContent_Declare(LBFGSpp
+    GIT_REPOSITORY https://github.com/conradhuebler/LBFGSpp
+    GIT_TAG        d16c89da2a490307791764aeb2778fa0c1458960
+    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/LBFGSpp
+)
+FetchContent_Declare(CxxThreadPool
+    GIT_REPOSITORY https://github.com/conradhuebler/CxxThreadPool.git
+    GIT_TAG        6c41b0a0222cc13c49fb7fa1a6cd2002d4de7aa9
+    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/CxxThreadPool
+)
+# ripser: header-only, no CMakeLists.txt at root — use Populate to avoid add_subdirectory
+FetchContent_Declare(ripser
+    GIT_REPOSITORY https://github.com/conradhuebler/ripser
+    GIT_TAG        c2abee3a44ce6d9942824c09b83671b600db8d49
+    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/ripser
+)
+# cpp-d4: headers always needed, library only when USE_D4=ON
+FetchContent_Declare(cpp-d4
+    GIT_REPOSITORY https://github.com/conradhuebler/cpp-d4
+    GIT_TAG        95882c7203e3b847528d0746a92b184f4cef4dc3
+    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/cpp-d4
+)
+# Conditional deps — declared here, FetchContent_MakeAvailable called in if(USE_*) blocks only
+FetchContent_Declare(xtb
+    GIT_REPOSITORY https://github.com/grimme-lab/xtb
+    GIT_TAG        26b28010e805f7d1aeeef39813feb473e69cc4be
+    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/xtb
+)
+FetchContent_Declare(tblite
+    GIT_REPOSITORY https://github.com/tblite/tblite
+    GIT_TAG        9ca469a77cb9433dc6b0469ba5f6effc48a1bda8
+    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/tblite
+)
+FetchContent_Declare(gfnff
+    GIT_REPOSITORY https://github.com/pprcht/gfnff.git
+    GIT_TAG        0491df2ff1fe3cd80fc6a8630fea16f9b6840996
+    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/gfnff
+)
+FetchContent_Declare(simple-dftd3
+    GIT_REPOSITORY https://github.com/dftd3/simple-dftd3
+    GIT_TAG        3a50cbdf8566b3caa8760499ae21746ec9a5e535
+    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/simple-dftd3
+)
+FetchContent_Declare(plumed2
+    GIT_REPOSITORY https://github.com/plumed/plumed2
+    GIT_TAG        d4f7b550416d5aba2ca44ce6c2bca981282acea7
+    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/plumed2
+)
+
+# fmt: full MakeAvailable to get the fmt::fmt-header-only CMake target
+FetchContent_MakeAvailable(fmt)
+
+# Header-only libs: Populate only — no add_subdirectory needed (avoids old cmake_minimum_required issues)
+# CMP0169 was introduced in CMake 3.30 — only set if available
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30")
+    cmake_policy(SET CMP0169 OLD)
+endif()
+foreach(_fc_dep LBFGSpp CxxThreadPool ripser cpp-d4)
+    string(TOLOWER "${_fc_dep}" _fc_dep_lower)
+    FetchContent_GetProperties(${_fc_dep} POPULATED ${_fc_dep_lower}_populated)
+    if(NOT ${_fc_dep_lower}_populated)
+        FetchContent_Populate(${_fc_dep})
+    endif()
+endforeach()
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
@@ -432,12 +504,11 @@ set_property(TARGET curcuma PROPERTY LINK_FLAGS_RELEASE -s)
 set_property(TARGET curcuma PROPERTY LINK_FLAGS_RELWITHDEBINFO -s)
 
 if(USE_XTB)
-    add_subdirectory(external/xtb)
+    FetchContent_MakeAvailable(xtb)
 
     if(NOT TARGET mctc-lib)
       set("mctc-lib-url" "https://github.com/grimme-lab/mctc-lib")
       message(STATUS "Retrieving mctc-lib from ${mctc-lib-url}")
-      include(FetchContent)
       FetchContent_Declare(
         "mctc-lib"
         GIT_REPOSITORY "${mctc-lib-url}"
@@ -478,7 +549,6 @@ if(USE_TBLITE)
     if(NOT TARGET mctc-lib)
       set("mctc-lib-url" "https://github.com/grimme-lab/mctc-lib")
       message(STATUS "Retrieving mctc-lib from ${mctc-lib-url}")
-      include(FetchContent)
       FetchContent_Declare(
         "mctc-lib"
         GIT_REPOSITORY "${mctc-lib-url}"
@@ -487,7 +557,7 @@ if(USE_TBLITE)
       FetchContent_MakeAvailable("mctc-lib")
     endif()
     if(NOT TARGET tblite-lib)
-    add_subdirectory(external/tblite)
+    FetchContent_MakeAvailable(tblite)
     include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/tblite/include)
     elseif()
  #       include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/tblite/include)
@@ -520,7 +590,7 @@ endif()
 if(USE_GFNFF)
     # External GFN-FF library integration
     if(NOT TARGET gfnff-lib)
-        add_subdirectory(external/gfnff)
+        FetchContent_MakeAvailable(gfnff)
         include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/gfnff/include)
     endif()
     
@@ -553,7 +623,7 @@ endif()
 
 if(USE_D3)
     if(NOT TARGET s-dftd3)
-        add_subdirectory(external/simple-dftd3)
+        FetchContent_MakeAvailable(simple-dftd3)
     endif()
     if(HELPERS)
         add_executable(dftd3_helper
@@ -599,7 +669,7 @@ if(USE_D4)
         set(D4_AUTODISCOVERED FALSE)
     endif()
 
-    add_subdirectory(external/cpp-d4)
+    FetchContent_MakeAvailable(cpp-d4)
     if(HELPERS)
     add_executable(dftd4_helper
         src/helpers/dftd4_helper.cpp
@@ -634,18 +704,15 @@ if(USE_D4)
 endif()
 
 if(USE_Plumed)
-    # Claude Generated (November 2025): Platform-independent Plumed2 discovery
-    # Try to find Plumed library with fallback to local build directory
-    find_library(PLUMED_LIBRARY plumed
-                 HINTS ${PLUMED_ROOT}/src/lib
-                       ${PROJECT_SOURCE_DIR}/external/plumed2/src/lib
-                       /usr/lib /usr/lib64 /usr/local/lib)
-
-    if(PLUMED_LIBRARY)
-        target_link_libraries(curcuma_core ${PLUMED_LIBRARY})
-        message(STATUS "Plumed2 found: ${PLUMED_LIBRARY}")
+    # Build plumed2 from source via FetchContent (plumed2 >= 2.8 has CMake support)
+    FetchContent_MakeAvailable(plumed2)
+    # plumed2 CMake target is 'plumed' — link to curcuma_core
+    if(TARGET plumed)
+        target_link_libraries(curcuma_core plumed)
+        message(STATUS "Plumed2 built from source via FetchContent")
     else()
-        message(FATAL_ERROR "Plumed2 library not found. Set PLUMED_ROOT environment variable or install plumed: apt-get install libplumed-dev")
+        message(FATAL_ERROR "Plumed2 CMake target 'plumed' not found after FetchContent_MakeAvailable. "
+                            "Check external/plumed2/CMakeLists.txt for the correct target name.")
     endif()
 endif()
 
