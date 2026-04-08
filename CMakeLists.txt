@@ -264,14 +264,21 @@ if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip)
 endif()
 file(ARCHIVE_EXTRACT INPUT ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip DESTINATION ${PROJECT_SOURCE_DIR}/external)
 
-if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/ulysses.zip)
-  file(DOWNLOAD https://gitlab.com/siriius/ulysses/-/archive/main/ulysses-main.zip  ${PROJECT_SOURCE_DIR}/external/ulysses.zip
-         TIMEOUT 60  # seconds
-         EXPECTED_HASH SHA256=5f6f39e6fb12538ab30f9aef94a76d8e283151b30f1b6eef80f80b5bed46477a
-         )
+# Ulysses: fetched via FetchContent (replaces fragile file(DOWNLOAD) with hardcoded hash)
+FetchContent_Declare(ulysses
+    GIT_REPOSITORY https://gitlab.com/siriius/ulysses.git
+    GIT_TAG        main
+    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/ulysses-main
+)
+if(USE_ULYSSES)
+    FetchContent_MakeAvailable(ulysses)
+else()
+    # Headers always needed (include path at line 160), just populate source tree
+    FetchContent_GetProperties(ulysses POPULATED ulysses_populated)
+    if(NOT ulysses_populated)
+        FetchContent_Populate(ulysses)
+    endif()
 endif()
-
-file(ARCHIVE_EXTRACT INPUT ${PROJECT_SOURCE_DIR}/external/ulysses.zip DESTINATION ${PROJECT_SOURCE_DIR}/external)
 
 configure_file (
   "${PROJECT_SOURCE_DIR}/src/global_config.h.in"
