@@ -209,7 +209,9 @@ private:
      * @param max_steps         Maximum steepest-descent iterations (default 300)
      * @param max_displacement  Max atom displacement per step in Å (default 0.05)
      */
-    void resolveOverlaps(Molecule& mol, int max_steps = 300, double max_displacement = 0.05);
+    void resolveOverlaps(Molecule& mol,
+                         const std::vector<std::pair<int,int>>& bonded_pairs = {},
+                         int max_steps = 300, double max_displacement = 0.05);
 
     /**
      * @brief Check all pairwise distances and report close contacts.

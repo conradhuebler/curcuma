@@ -749,6 +749,75 @@ ConnectionResult PolymerBuild::connectMolecule(
         frag_geom.row(i) = p.transpose();
     }
 
+    // RC4 fix: Dihedral scan around interface bond axis — Claude Generated
+    // The LM optimizer has no torsional DOF around the new bond. Scan 12×30° rotations
+    // of the fragment around the polymer_active → fragment_active axis, pick lowest clash.
+    {
+        Position anchor_poly = polymer_lm.Atom(polymer_active_idx_lm).second;
+        Position anchor_frag = frag_geom.row(next_active_idx_lm).transpose();
+        Position bond_axis = (anchor_frag - anchor_poly);
+        if (bond_axis.norm() > 1e-6) {
+            bond_axis.normalize();
+            const int n_steps = 12;
+            const double angle_step = 2.0 * M_PI / n_steps;
+            double best_clash_energy = std::numeric_limits<double>::max();
+            int best_step = 0;
+            Geometry best_geom = frag_geom;
+
+            for (int s = 0; s < n_steps; ++s) {
+                double angle = s * angle_step;
+                // Rodrigues rotation around bond_axis through anchor_frag
+                Geometry rotated = frag_geom;
+                double cos_a = std::cos(angle);
+                double sin_a = std::sin(angle);
+                for (int i = 0; i < rotated.rows(); ++i) {
+                    if (i == next_active_idx_lm) continue;  // Pivot atom stays
+                    Position p = rotated.row(i).transpose() - anchor_frag;
+                    Position p_rot = p * cos_a + bond_axis.cross(p) * sin_a
+                                   + bond_axis * (bond_axis.dot(p)) * (1.0 - cos_a);
+                    rotated.row(i) = (p_rot + anchor_frag).transpose();
+                }
+
+                // Compute total LJ clash energy between polymer and rotated fragment
+                double clash_energy = 0.0;
+                for (int i = 0; i < polymer_lm.AtomCount(); ++i) {
+                    int ei = polymer_lm.Atom(i).first;
+                    if (ei <= 0) continue;
+                    Position pi = polymer_lm.Atom(i).second;
+                    double rvdw_i = Elements::VanDerWaalsRadius[ei];
+                    for (int j = 0; j < fragment_lm.AtomCount(); ++j) {
+                        if (i == polymer_active_idx_lm && j == next_active_idx_lm) continue;
+                        int ej = fragment_lm.Atom(j).first;
+                        if (ej <= 0) continue;
+                        Position pj = rotated.row(j).transpose();
+                        double dist = (pi - pj).norm();
+                        if (dist < 1e-6) dist = 1e-6;
+                        double rvdw = rvdw_i + Elements::VanDerWaalsRadius[ej];
+                        if (dist < rvdw) {
+                            double ratio = rvdw / dist;
+                            clash_energy += ratio * ratio * ratio * ratio;  // (r_vdw/r)^4 repulsion
+                        }
+                    }
+                }
+
+                if (clash_energy < best_clash_energy) {
+                    best_clash_energy = clash_energy;
+                    best_step = s;
+                    best_geom = rotated;
+                }
+            }
+
+            if (best_step != 0) {
+                frag_geom = best_geom;
+                if (CurcumaLogger::get_verbosity() >= 2) {
+                    CurcumaLogger::info(fmt::format(
+                        "Dihedral scan: best orientation at {}° (clash energy {:.2f} → {:.2f})",
+                        best_step * 30, best_clash_energy, best_clash_energy));
+                }
+            }
+        }
+    }
+
     // Build combined: polymer_lm (interface Xx already removed, other Xx as cap_intermediate)
     // + fragment_lm (interface Xx already removed, other Xx as cap_intermediate)
     Molecule combined = polymer_lm;
@@ -1281,10 +1350,27 @@ int PolymerBuild::validateTopologyConsistency(
     return inconsistencies;
 }
 
-void PolymerBuild::resolveOverlaps(Molecule& mol, int max_steps, double max_displacement)
+/// RC5 fix: Raised threshold from 0.85×cov to 1.15×cov, exclude bonded pairs — Claude Generated
+void PolymerBuild::resolveOverlaps(Molecule& mol,
+                                    const std::vector<std::pair<int,int>>& bonded_pairs,
+                                    int max_steps, double max_displacement)
 {
     int n = mol.AtomCount();
     int clashes_initial = 0;
+
+    // Build bonded pair lookup for O(1) exclusion
+    std::set<std::pair<int,int>> bonded_set;
+    for (const auto& [a, b] : bonded_pairs) {
+        bonded_set.insert({std::min(a, b), std::max(a, b)});
+    }
+    // Also include topology bonds if available
+    if (mol.hasPersistentTopology()) {
+        const Matrix& topo = mol.getTopologyMatrix();
+        for (int i = 0; i < n; ++i)
+            for (int j = i + 1; j < n; ++j)
+                if (topo(i, j) > 0.5)
+                    bonded_set.insert({i, j});
+    }
 
     for (int step = 0; step < max_steps; ++step) {
         Geometry coords = mol.Coords();
@@ -1298,12 +1384,15 @@ void PolymerBuild::resolveOverlaps(Molecule& mol, int max_steps, double max_disp
                 int ej = mol.Atom(j).first;
                 if (ej == 0) continue;
 
+                // Skip bonded pairs — they are supposed to be close
+                if (bonded_set.count({i, j})) continue;
+
                 Position diff = coords.row(i).transpose() - coords.row(j).transpose();
                 double dist = diff.norm();
                 if (dist < 1e-6) dist = 1e-6;
 
                 double r_cov = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
-                double r_cut = r_cov * 0.85;
+                double r_cut = r_cov * 1.15;  // RC5: raised from 0.85 to match bond detection cutoff
                 if (dist >= r_cut) continue;
 
                 clashes++;
@@ -1659,7 +1748,7 @@ SubchainResult PolymerBuild::buildSubchain(
                                                     i, opt_attempt, polymer.AtomCount()));
                 }
 
-                resolveOverlaps(polymer);
+                resolveOverlaps(polymer, interface_bonds);
                 checkDistances(polymer,
                                fmt::format("step {:02d} post-resolveOverlaps", i),
                                interface_bonds);
@@ -1787,23 +1876,37 @@ SubchainResult PolymerBuild::buildSubchain(
                     }
                 }
 
-                // Restore topology: intra-monomer geometric + interface bonds only — Claude Generated
-                int n = polymer.AtomCount();
-                Matrix topo = Matrix::Zero(n, n);
-                auto [dist2, _u2] = polymer.DistanceMatrix();
-                for (int ii = 0; ii < n; ++ii)
-                    for (int jj = ii+1; jj < n; ++jj) {
-                        int ei = polymer.Atom(ii).first, ej = polymer.Atom(jj).first;
-                        if (ei == 0 || ej == 0) continue;
-                        if (atom_monomer_id[ii] != atom_monomer_id[jj]) continue;
-                        double co = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
-                        if (dist2(ii,jj) > 1e-3 && dist2(ii,jj) <= co * 1.15)
-                            topo(ii,jj) = topo(jj,ii) = 1.0;
+                // RC2 fix: Restore topology using templates when available, fall back to distance — Claude Generated
+                {
+                    bool use_templates = !m_fragment_templates.empty();
+                    for (const auto& ft : monomer_fragment_type) {
+                        if (m_fragment_templates.find(ft) == m_fragment_templates.end()) {
+                            use_templates = false;
+                            break;
+                        }
                     }
-                for (const auto& b : interface_bonds)
-                    if (b.first < n && b.second < n)
-                        topo(b.first, b.second) = topo(b.second, b.first) = 1.0;
-                polymer.setTopologyMatrix(topo);
+                    if (use_templates) {
+                        rebuildTopologyFromTemplates(polymer, atom_monomer_id, monomer_fragment_type,
+                                                      interface_bonds, monomer_start_atoms);
+                    } else {
+                        int n = polymer.AtomCount();
+                        Matrix topo = Matrix::Zero(n, n);
+                        auto [dist2, _u2] = polymer.DistanceMatrix();
+                        for (int ii = 0; ii < n; ++ii)
+                            for (int jj = ii+1; jj < n; ++jj) {
+                                int ei = polymer.Atom(ii).first, ej = polymer.Atom(jj).first;
+                                if (ei == 0 || ej == 0) continue;
+                                if (atom_monomer_id[ii] != atom_monomer_id[jj]) continue;
+                                double co = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
+                                if (dist2(ii,jj) > 1e-3 && dist2(ii,jj) <= co * 1.15)
+                                    topo(ii,jj) = topo(jj,ii) = 1.0;
+                            }
+                        for (const auto& b : interface_bonds)
+                            if (b.first < n && b.second < n)
+                                topo(b.first, b.second) = topo(b.second, b.first) = 1.0;
+                        polymer.setTopologyMatrix(topo);
+                    }
+                }
 
                 validateTopology(polymer, atom_monomer_id, interface_bonds,
                                  fmt::format("step {:02d} post-FF (attempt {})", i, opt_attempt + 1));
@@ -1814,88 +1917,93 @@ SubchainResult PolymerBuild::buildSubchain(
                                fmt::format("step {:02d} post-FF", i),
                                interface_bonds);
 
-                // Check for cross-monomer overlaps and displace if needed — Claude Generated
-                // Strategy: for each overlapping atom, pull it toward its own bonded neighbor
-                // (shortening the covalent bond) and push it perpendicular to the overlap plane
-                // by ~0.25 Å. This preserves monomer geometry better than pushing atoms apart.
-                int overlaps_found = 0;
-                Geometry geom = polymer.getGeometry();
+                // RC6+RC7 fix: Cross-monomer overlap detection with convergence loop — Claude Generated
+                // RC7: Recompute distances fresh after repair (previous dist2 is stale)
+                // RC6: Wrap displacement in inner convergence loop to catch secondary overlaps
                 const double perp_shift = 0.25;  // Å perpendicular displacement
+                const int max_disp_rounds = 5;   // Max displacement iterations per opt attempt
+                int overlaps_found = 0;
 
-                // Build adjacency from topology for quick bonded-atom lookup
-                const Matrix& topo_post = polymer.getTopologyMatrix();
+                for (int disp_round = 0; disp_round < max_disp_rounds; ++disp_round) {
+                    int n_ov = polymer.AtomCount();
+                    // RC7: Fresh distance computation each round
+                    auto [dist_fresh, _uf] = polymer.DistanceMatrix();
+                    Geometry geom = polymer.getGeometry();
+                    const Matrix& topo_post = polymer.getTopologyMatrix();
 
-                // Collect overlapping atoms with their overlap partner
-                // Each entry: (atom_idx, overlap_partner_idx, sign for up/down)
-                std::vector<std::tuple<int, int, double>> atoms_to_displace;
+                    std::vector<std::tuple<int, int, double>> atoms_to_displace;
+                    overlaps_found = 0;
 
-                for (int ii = 0; ii < n; ++ii) {
-                    int ei = polymer.Atom(ii).first;
-                    if (ei == 0) continue;
-                    for (int jj = ii + 1; jj < n; ++jj) {
-                        int ej = polymer.Atom(jj).first;
-                        if (ej == 0) continue;
-                        if (atom_monomer_id[ii] == atom_monomer_id[jj]) continue;
-                        bool is_iface = false;
-                        for (const auto& b : interface_bonds)
-                            if ((b.first == ii && b.second == jj) || (b.first == jj && b.second == ii))
-                                { is_iface = true; break; }
-                        if (is_iface) continue;
+                    for (int ii = 0; ii < n_ov; ++ii) {
+                        int ei = polymer.Atom(ii).first;
+                        if (ei == 0) continue;
+                        for (int jj = ii + 1; jj < n_ov; ++jj) {
+                            int ej = polymer.Atom(jj).first;
+                            if (ej == 0) continue;
+                            if (atom_monomer_id[ii] == atom_monomer_id[jj]) continue;
+                            bool is_iface = false;
+                            for (const auto& b : interface_bonds)
+                                if ((b.first == ii && b.second == jj) || (b.first == jj && b.second == ii))
+                                    { is_iface = true; break; }
+                            if (is_iface) continue;
 
-                        double d = dist2(ii, jj);
-                        double co = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
-                        if (d > 1e-3 && d < co * 1.3) {
-                            ++overlaps_found;
-                            atoms_to_displace.push_back({ii, jj, 1.0});
-                            atoms_to_displace.push_back({jj, ii, -1.0});
+                            double d = dist_fresh(ii, jj);
+                            double co = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
+                            if (d > 1e-3 && d < co * 1.3) {
+                                ++overlaps_found;
+                                atoms_to_displace.push_back({ii, jj, 1.0});
+                                atoms_to_displace.push_back({jj, ii, -1.0});
+                            }
                         }
                     }
-                }
 
-                // Displace each overlapping atom
-                for (const auto& [atom_idx, partner_idx, sign] : atoms_to_displace) {
-                    Position r_atom = geom.row(atom_idx).transpose();
-                    Position r_partner = geom.row(partner_idx).transpose();
-
-                    // Find bonded neighbor of atom_idx from topology
-                    int bonded = -1;
-                    double best_d = 1e9;
-                    for (int kk = 0; kk < n; ++kk) {
-                        if (kk == atom_idx) continue;
-                        if (topo_post(atom_idx, kk) < 0.5) continue;
-                        double dd = (geom.row(kk).transpose() - r_atom).norm();
-                        if (dd < best_d) { best_d = dd; bonded = kk; }
+                    if (overlaps_found == 0) {
+                        if (opt_attempt > 0 || disp_round > 0)
+                            CurcumaLogger::success(fmt::format("step {:02d}: overlaps resolved (attempt {}, round {})",
+                                                                i, opt_attempt + 1, disp_round + 1));
+                        break;
                     }
 
-                    if (bonded < 0) continue;  // no bonded atom found
+                    // Displace each overlapping atom
+                    for (const auto& [atom_idx, partner_idx, sign] : atoms_to_displace) {
+                        Position r_atom = geom.row(atom_idx).transpose();
+                        Position r_partner = geom.row(partner_idx).transpose();
 
-                    Position r_bonded = geom.row(bonded).transpose();
-                    Position bond_vec = (r_bonded - r_atom).normalized();
-                    Position overlap_vec = (r_partner - r_atom).normalized();
+                        int bonded = -1;
+                        double best_d = 1e9;
+                        for (int kk = 0; kk < n_ov; ++kk) {
+                            if (kk == atom_idx) continue;
+                            if (topo_post(atom_idx, kk) < 0.5) continue;
+                            double dd = (geom.row(kk).transpose() - r_atom).norm();
+                            if (dd < best_d) { best_d = dd; bonded = kk; }
+                        }
+                        if (bonded < 0) continue;
 
-                    // Perpendicular to the plane defined by bond and overlap vectors
-                    Position perp = bond_vec.cross(overlap_vec);
-                    if (perp.norm() < 1e-6)
-                        perp = bond_vec.cross(Position(0, 0, 1));  // fallback
-                    if (perp.norm() < 1e-6)
-                        perp = bond_vec.cross(Position(0, 1, 0));
-                    perp.normalize();
+                        Position r_bonded = geom.row(bonded).transpose();
+                        Position bond_vec = (r_bonded - r_atom).normalized();
+                        Position overlap_vec = (r_partner - r_atom).normalized();
 
-                    // Pull atom toward its bonded neighbor (shorten covalent bond by 0.1 Å)
-                    // + push perpendicular by ±0.25 Å
-                    geom.row(atom_idx) += (bond_vec * 0.1 + perp * sign * perp_shift).transpose();
+                        Position perp = bond_vec.cross(overlap_vec);
+                        if (perp.norm() < 1e-6)
+                            perp = bond_vec.cross(Position(0, 0, 1));
+                        if (perp.norm() < 1e-6)
+                            perp = bond_vec.cross(Position(0, 1, 0));
+                        perp.normalize();
+
+                        geom.row(atom_idx) += (bond_vec * 0.1 + perp * sign * perp_shift).transpose();
+                    }
+
+                    polymer.setGeometry(geom);
+                    if (disp_round < max_disp_rounds - 1)
+                        CurcumaLogger::info(fmt::format(
+                            "step {:02d}: {} overlaps, displacement round {}/{}",
+                            i, overlaps_found, disp_round + 1, max_disp_rounds));
                 }
 
-                if (overlaps_found == 0) {
-                    if (opt_attempt > 0)
-                        CurcumaLogger::success(fmt::format("step {:02d}: overlaps resolved after {} attempts", i, opt_attempt + 1));
-                    break;  // No overlaps, done
-                }
+                if (overlaps_found == 0) break;  // No overlaps remain, exit opt retry loop
 
-                // Apply displaced geometry and retry
-                polymer.setGeometry(geom);
                 CurcumaLogger::warn(fmt::format(
-                    "step {:02d}: {} cross-monomer overlaps after optimization, displacing atoms (attempt {}/{})",
+                    "step {:02d}: {} cross-monomer overlaps after optimization, retrying (attempt {}/{})",
                     i, overlaps_found, opt_attempt + 1, max_opt_retries));
 
                 if (opt_attempt == max_opt_retries - 1 && overlaps_found > 0) {
@@ -1913,8 +2021,9 @@ SubchainResult PolymerBuild::buildSubchain(
                     if (polymer.hasPersistentTopology()) {
                         const Matrix& t = polymer.getTopologyMatrix();
                         md_info.m_bonds.clear();
-                        for (int ii2 = 0; ii2 < n; ++ii2)
-                            for (int jj2 = ii2 + 1; jj2 < n; ++jj2)
+                        int n_md = polymer.AtomCount();
+                        for (int ii2 = 0; ii2 < n_md; ++ii2)
+                            for (int jj2 = ii2 + 1; jj2 < n_md; ++jj2)
                                 if (t(ii2, jj2) > 0.5)
                                     md_info.m_bonds.push_back({ii2, jj2});
                     }
@@ -1974,10 +2083,11 @@ SubchainResult PolymerBuild::buildSubchain(
                     // Re-check overlaps after cold MD
                     auto [dist_md, _umd] = polymer.DistanceMatrix();
                     int remaining = 0;
-                    for (int ii2 = 0; ii2 < n; ++ii2) {
+                    int n_post_md = polymer.AtomCount();
+                    for (int ii2 = 0; ii2 < n_post_md; ++ii2) {
                         int ei2 = polymer.Atom(ii2).first;
                         if (ei2 == 0) continue;
-                        for (int jj2 = ii2 + 1; jj2 < n; ++jj2) {
+                        for (int jj2 = ii2 + 1; jj2 < n_post_md; ++jj2) {
                             int ej2 = polymer.Atom(jj2).first;
                             if (ej2 == 0) continue;
                             if (atom_monomer_id[ii2] == atom_monomer_id[jj2]) continue;
@@ -2195,8 +2305,15 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
             // Claude Generated: Merge monomer type tracking
             for (const auto& ft : subchains[sc].monomer_fragment_type)
                 monomer_fragment_type.push_back(ft);
-            for (int start : subchains[sc].monomer_start_atoms)
-                monomer_start_atoms.push_back(start);  // Note: will need adjustment for merged indices
+            // RC1 fix: Adjust sub-chain B's monomer_start_atoms by fragment_offset
+            // and account for the removed interface Xx atom — Claude Generated
+            for (int start : subchains[sc].monomer_start_atoms) {
+                int adjusted = conn.fragment_offset + start;
+                // If the removed fragment Xx was before this monomer's start, shift down by 1
+                if (conn.removed_fragment_xx_idx >= 0 && start > conn.removed_fragment_xx_idx)
+                    adjusted--;
+                monomer_start_atoms.push_back(adjusted);
+            }
 
             // Sanity check: atom_monomer_id size must match polymer atom count — Claude Generated
             if ((int)atom_monomer_id.size() != polymer.AtomCount()) {
@@ -2253,7 +2370,7 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
                 interface_bonds, fmt::format("subchain-join {:02d}", sc));
 
             // Light FF optimization after sub-chain connection
-            resolveOverlaps(polymer);
+            resolveOverlaps(polymer, interface_bonds);
 
             Molecule polymer_opt = polymer;
             polymer_opt.setCharge(0);
