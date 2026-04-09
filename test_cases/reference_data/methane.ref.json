@@ -1,7 +1,7 @@
 {
   "molecule": {
     "name": "methane",
-    "geometry_file": "../external/gfnff/test/methane.xyz",
+    "geometry_file": "test_cases/molecules/larger/CH4.xyz",
     "atoms": [
       {
         "element": "C",

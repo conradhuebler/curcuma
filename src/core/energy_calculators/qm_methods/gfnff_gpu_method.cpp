@@ -154,6 +154,21 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
         // Pass verbosity to GPU workspace for conditional diagnostics
         m_gpu_workspace->setVerbosity(CurcumaLogger::get_verbosity());
 
+        // Claude Generated (April 2026): Forward term enable/disable flags to GPU workspace
+        // Without this, GPU always computes all terms regardless of config flags.
+        // Flags live under m_parameters["gfnff"] (same layout as CPU ForceField path).
+        json gfnff_cfg;
+        if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+            gfnff_cfg = m_parameters["gfnff"];
+        if (gfnff_cfg.contains("dispersion"))
+            m_gpu_workspace->setDispersionEnabled(gfnff_cfg.value("dispersion", true));
+        if (gfnff_cfg.contains("hbond"))
+            m_gpu_workspace->setHBondEnabled(gfnff_cfg.value("hbond", true));
+        if (gfnff_cfg.contains("repulsion"))
+            m_gpu_workspace->setRepulsionEnabled(gfnff_cfg.value("repulsion", true));
+        if (gfnff_cfg.contains("coulomb"))
+            m_gpu_workspace->setCoulombEnabled(gfnff_cfg.value("coulomb", true));
+
         // Phase 2: Upload C6 reference table for GPU dc6dcn per-pair computation
         D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
         if (d4 && !d4->getC6FlatCache().empty()) {

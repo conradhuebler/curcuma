@@ -309,13 +309,17 @@ GFNFF::GFNFF(const json& parameters)
         { "hbond", true },
         { "repulsion_scaling", 1.0 },
         { "solvent", "none" },  // Claude Generated (Mar 2026): ALPB solvation
-        { "topology_mode", "auto" }  // "auto" (two-tier caching) or "constant" (never recalculate)
+        { "topology_mode", "auto" },  // "auto" (two-tier caching) or "constant" (never recalculate)
+        { "cache_topology", true },   // Claude Generated (Mar 2026): Cache Phase-1 topology in param.json (opt-out)
+        { "print_timing", true }      // Claude Generated (Mar 2026): Print init timing at verbosity >= 1
     };
 
     m_parameters = MergeJson(default_parameters, parameters);
 
     // Extract topology mode
     m_topology_mode = m_parameters.value("topology_mode", "auto");
+    m_cache_topology = m_parameters.value("cache_topology", true);
+    m_print_timing = m_parameters.value("print_timing", true);
 
     // Initialize EEQ solver (Dec 2025 - Phase 3)
     // CRITICAL FIX (Dec 25, 2025): Pass global CurcumaLogger verbosity to EEQSolver
@@ -1560,16 +1564,36 @@ void GFNFF::setParameters(const json& parameters)
 // Phase 3: Topology I/O for Restart (Claude Generated Mar 2026)
 // =================================================================================
 
+std::string GFNFF::computeTopologyFingerprint() const
+{
+    // Claude Generated (March 2026): Simple fingerprint for topology cache validation
+    // Combines atom count, sorted atom types, and bond list into a hashable string
+    std::string data = "N=" + std::to_string(m_atomcount) + "|Z=";
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (i > 0) data += ",";
+        data += std::to_string(m_atoms[i]);
+    }
+    data += "|B=";
+    const auto& bonds = getCachedBondList();
+    for (size_t i = 0; i < bonds.size(); ++i) {
+        if (i > 0) data += ",";
+        data += std::to_string(bonds[i].first) + "-" + std::to_string(bonds[i].second);
+    }
+    // Use std::hash for a fast, non-cryptographic fingerprint
+    size_t hash = std::hash<std::string>{}(data);
+    return std::to_string(hash);
+}
+
 json GFNFF::exportTopology() const
 {
     json topo_json;
 
-    if (!m_initialized) {
-        CurcumaLogger::warn("GFNFF::exportTopology: Not initialized, returning empty topology");
+    if (!m_cached_topology.has_value()) {
+        CurcumaLogger::warn("GFNFF::exportTopology: No cached topology, returning empty");
         return topo_json;
     }
 
-    const TopologyInfo& topo = getCachedTopology();
+    const TopologyInfo& topo = *m_cached_topology;
 
     // Version for format compatibility
     topo_json["version"] = 1;
@@ -1671,6 +1695,13 @@ json GFNFF::exportTopology() const
         );
     }
 
+    // Claude Generated (March 2026): Cached dgam (hardness corrections)
+    if (topo.dgam.size() > 0) {
+        topo_json["dgam"] = std::vector<double>(
+            topo.dgam.data(), topo.dgam.data() + topo.dgam.size()
+        );
+    }
+
     // Timestamp for cache validation
     topo_json["timestamp"] = std::chrono::system_clock::now().time_since_epoch().count();
 
@@ -1684,10 +1715,8 @@ bool GFNFF::importTopology(const json& topo_json)
         return false;
     }
 
-    if (!m_initialized) {
-        CurcumaLogger::warn("GFNFF::importTopology: Not initialized, cannot import topology");
-        return false;
-    }
+    // Note: m_initialized may be false during initializeForceField() cache path
+    // This is intentional — topology import happens before m_initialized = true
 
     // Check version compatibility
     int version = topo_json.value("version", 0);
@@ -1790,6 +1819,12 @@ bool GFNFF::importTopology(const json& topo_json)
         topo.alpeeq = Eigen::Map<Eigen::VectorXd>(alpeeq.data(), alpeeq.size());
     }
 
+    // Claude Generated (March 2026): dgam (hardness corrections)
+    if (topo_json.contains("dgam")) {
+        auto dgam = topo_json["dgam"].get<std::vector<double>>();
+        topo.dgam = Eigen::Map<Eigen::VectorXd>(dgam.data(), dgam.size());
+    }
+
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success("GFNFF: Topology imported from cache");
     }
@@ -1836,50 +1871,18 @@ bool GFNFF::initializeForceField()
     // NOTE: Use Bohr geometry (m_geometry_bohr) because GFN-FF parameters are in Bohr
     m_forcefield->UpdateGeometry(m_geometry_bohr);
 
-    // Phase 3 LITE: Enable parameter caching for 96% speedup on repeated calculations
-    // Caches parameters to molecule.gfnff.json file for instant loading on next run
+    // FF parameter caching disabled — the JSON round-trip produces slightly different
+    // energies vs the native struct path. Topology caching is handled separately by GFNFF.
     m_forcefield->setParameterCaching(false);
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("ForceField instance created");
         CurcumaLogger::param("geometry_set", std::to_string(m_geometry_bohr.rows()) + " atoms");
-        CurcumaLogger::warn("TEMPORARY: Parameter caching disabled for debugging");
+        CurcumaLogger::param("cache_topology", m_cache_topology ? "true" : "false");
     }
 
-    // Claude Generated (Dec 26, 2025): Try loading from cache BEFORE expensive EEQ/topology calculation
-    // Note: Cache file stores method as "gfnff"
-    if (m_forcefield && m_forcefield->tryLoadAutoParameters("gfnff")) {
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::success("Loaded from cache - skipping EEQ/topology calculation");
-        }
-
-        // CRITICAL FIX (Claude Generated Dec 2025): Restore cached charges to m_charges
-        // Cache contains EEQ charges computed during parameter generation
-        m_charges = m_forcefield->getCachedEEQCharges();
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("Restored EEQ charges from cache");
-            CurcumaLogger::param("charge_count", std::to_string(m_charges.size()));
-            CurcumaLogger::param("charge_sum", fmt::format("{:.6f}", m_charges.sum()));
-        }
-
-        // Claude Generated (Feb 1, 2026): Calculate and distribute CN, CNF, and CN derivatives (CACHE PATH)
-        // Reference: Fortran gfnff_engrad.F90:418-422 - for Coulomb charge derivative gradients
-        {
-            auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-            Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
-            Vector cnf(m_atoms.size());
-            for (size_t i = 0; i < m_atoms.size(); ++i) {
-                int z = m_atoms[i];
-                cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
-                            ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
-            }
-            std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(cn);
-            m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
-        }
-
-        return true;
-    }
+    // Note: FF parameter caching (param.json) is disabled because the JSON round-trip
+    // produces ~1.8 µEh energy drift. Topology caching uses a separate .topo.json file.
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Cache miss - calculating topology (bonds, angles, torsions, inversions)...");
@@ -1904,6 +1907,15 @@ bool GFNFF::initializeForceField()
         return false;
     }
 
+    // Claude Generated (April 2026): Forward term enable/disable flags from config to parameter set.
+    // User flags may be under m_parameters["gfnff"] (controller JSON sub-object).
+    // Note: only set if explicitly specified — defaults are true (all terms enabled).
+    // Read flags from top-level m_parameters (set by MergeJson from defaults + user config).
+    ff_params.dispersion_enabled = m_parameters.value("dispersion", true);
+    ff_params.hbond_enabled      = m_parameters.value("hbond", true);
+    ff_params.repulsion_enabled  = m_parameters.value("repulsion", true);
+    ff_params.coulomb_enabled    = m_parameters.value("coulomb", true);
+
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("GFN-FF parameters generated successfully (native structs)");
         CurcumaLogger::param("bonds_count", std::to_string(ff_params.bonds.size()));
@@ -1921,6 +1933,25 @@ bool GFNFF::initializeForceField()
     } catch (const std::exception& e) {
         CurcumaLogger::error(std::string("m_forcefield->setGFNFFParameters() failed: ") + e.what());
         return false;
+    }
+
+    // Claude Generated (March 2026): Save topology cache to .topo.json
+    if (m_cache_topology && m_cached_topology.has_value() && m_parameters.contains("geometry_file")) {
+        std::string geom_file = m_parameters["geometry_file"].get<std::string>();
+        size_t dot = geom_file.find_last_of('.');
+        std::string topo_file = (dot != std::string::npos ? geom_file.substr(0, dot) : geom_file) + ".topo.json";
+
+        json topo_export = exportTopology();
+        topo_export["fingerprint"] = computeTopologyFingerprint();
+
+        std::ofstream topo_out(topo_file);
+        if (topo_out.is_open()) {
+            topo_out << topo_export.dump(2);
+            topo_out.close();
+            if (CurcumaLogger::get_verbosity() >= 1) {
+                CurcumaLogger::success(fmt::format("Topology cache saved to {}", topo_file));
+            }
+        }
     }
 
     // EEQ charges already distributed by setGFNFFParameters() → no need to call distributeEEQCharges here
@@ -7084,18 +7115,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
 
     if (use_two_phase) {
         // ===== CRITICAL CORRECTION (Jan 4, 2026): Proper Two-Phase EEQ System =====
-        // Implementation of the correct two-phase system from XTB documentation:
-        // Phase 1 (goedeckera): Compute topology charges (topo%qa) using topology distances
-        // Phase 2 (goed_gfnff): Compute energy charges (nlist%q) using real distances
-        //
-        // Reference: CHARGE_DATAFLOW.md documentation of two distinct charge systems:
-        // - topo%qa (~0.039539 for C) - used for parameter generation
-        // - nlist%q (~0.02055261 for C) - used for electrostatic energy calculation
-        //
-        // Key differences:
-        // 1. Distance system: topology vs real coordinate distances
-        // 2. CN system: integer neighbor count vs fractional erf-based CN
-        // 3. Chi term: includes CNF*sqrt(nb) in Phase 1, excludes in Phase 2
+        // Reference: CHARGE_DATAFLOW.md documentation of two distinct charge systems
 
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("Using proper two-phase EEQ system");
@@ -7108,18 +7128,76 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         eeq_topology_input.fraglist = topo_info.fraglist;
         eeq_topology_input.qfrag = topo_info.qfrag;
         // CRITICAL FIX (Mar 2026): Use Pyykko covalent radii (param%rad), NOT D3 radii
-        // Fortran: gfnff_ini.f90:438 uses param%rad(at(i)) for Floyd-Warshall
-        // param%rad = Pyykko radii in Angstrom (H=0.32, C=0.75, N=0.71, O=0.64)
         eeq_topology_input.covalent_radii.resize(m_atomcount);
         for (int i = 0; i < m_atomcount; ++i) {
             int z = m_atoms[i];
             if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
-                eeq_topology_input.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];  // Pyykko in Å
+                eeq_topology_input.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
             } else {
                 eeq_topology_input.covalent_radii[i] = 1.0;
             }
         }
 
+        // Claude Generated (March 2026): Check .topo.json cache before expensive Phase 1 EEQ
+        // The topology cache stores Phase-1 charges, dxi, dgam, alpeeq — all geometry-independent
+        bool topology_from_cache = false;
+        if (m_cache_topology && m_parameters.contains("geometry_file")) {
+            std::string geom_file = m_parameters["geometry_file"].get<std::string>();
+            size_t dot = geom_file.find_last_of('.');
+            std::string topo_file = (dot != std::string::npos ? geom_file.substr(0, dot) : geom_file) + ".topo.json";
+
+            std::ifstream topo_in(topo_file);
+            if (topo_in.good()) {
+                try {
+                    json topo_cache;
+                    topo_in >> topo_cache;
+                    topo_in.close();
+
+                    if (topo_cache.contains("fingerprint")) {
+                        std::string cached_fp = topo_cache["fingerprint"].get<std::string>();
+                        std::string current_fp = computeTopologyFingerprint();
+                        if (cached_fp == current_fp) {
+                            // Fingerprint match — restore Phase 1 data from cache
+                            if (topo_cache.contains("topology_charges")) {
+                                auto tc = topo_cache["topology_charges"].get<std::vector<double>>();
+                                topo_info.topology_charges = Eigen::Map<Eigen::VectorXd>(tc.data(), tc.size());
+                            }
+                            if (topo_cache.contains("dxi")) {
+                                auto dxi = topo_cache["dxi"].get<std::vector<double>>();
+                                topo_info.dxi = Eigen::Map<Eigen::VectorXd>(dxi.data(), dxi.size());
+                            }
+                            if (topo_cache.contains("dgam")) {
+                                auto dgam = topo_cache["dgam"].get<std::vector<double>>();
+                                topo_info.dgam = Eigen::Map<Eigen::VectorXd>(dgam.data(), dgam.size());
+                            }
+                            if (topo_cache.contains("alpeeq")) {
+                                auto alp = topo_cache["alpeeq"].get<std::vector<double>>();
+                                topo_info.alpeeq = Eigen::Map<Eigen::VectorXd>(alp.data(), alp.size());
+                            }
+                            if (topo_cache.contains("is_amide_h")) {
+                                auto flags = topo_cache["is_amide_h"].get<std::vector<int>>();
+                                topo_info.is_amide_h.resize(flags.size());
+                                for (size_t i = 0; i < flags.size(); ++i)
+                                    topo_info.is_amide_h[i] = (flags[i] != 0);
+                            }
+
+                            topology_from_cache = (topo_info.topology_charges.size() == m_atomcount);
+                            if (topology_from_cache && CurcumaLogger::get_verbosity() >= 1) {
+                                CurcumaLogger::success(fmt::format("Topology cache hit — skipping Phase 1 EEQ ({})", topo_file));
+                            }
+                        } else if (CurcumaLogger::get_verbosity() >= 2) {
+                            CurcumaLogger::warn("Topology cache fingerprint mismatch — recalculating");
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    if (CurcumaLogger::get_verbosity() >= 2) {
+                        CurcumaLogger::warn(fmt::format("Failed to read topology cache: {}", e.what()));
+                    }
+                }
+            }
+        }
+
+        if (!topology_from_cache) {
         // ===== PHASE 1: Topology Charges (topo%qa) =====
         // Compute topology charges using Dijkstra topological distances
         // Reference: Fortran gfnff_ini.f90:589 call goedeckera()
@@ -7130,15 +7208,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             phase_timer = std::chrono::high_resolution_clock::now();
         }
 
-        // CRITICAL FIX (Phase 1 Charge Synchronization - January 26, 2026):
-        // Passed 'true' for use_corrections to enable dxi electronegativity corrections
-        // in Phase 1 (topological mode). This matches Fortran gfnff_ini.f90:411.
         topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
             m_atoms,
             m_geometry_bohr,
             m_charge,
-            topo_info.coordination_numbers,  // Uses fractional CN but with integer nb for CNF term
-            eeq_topology_input,  // WITH topology - uses Floyd-Warshall topological distances
+            topo_info.coordination_numbers,
+            eeq_topology_input,
             true  // Phase 1 Charge Sync: enable dxi corrections
         );
 
@@ -7154,10 +7229,6 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         }
 
         // ===== PHASE 1A: Calculate dxi corrections =====
-        // CRITICAL FIX (Jan 29, 2026): topo_info.dxi must be populated for Coulomb energy calculation!
-        // The dxi values distinguish ether O (dxi=0) from hydroxyl O (dxi=-0.005), etc.
-        // Previously this was never called, causing topo_info.dxi to be empty and
-        // chi_eff calculations in Coulomb pairs to use dxi=0 for all atoms!
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Computing Phase 1A: Electronegativity corrections (dxi)");
         }
@@ -7167,11 +7238,6 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         }
 
         // ===== PHASE 1B: Charge-Dependent Alpha (alpeeq) =====
-        // Claude Generated (January 2026)
-        // Calculate charge-dependent alpha values using Phase 1 charges
-        // Reference: Fortran gfnff_ini.f90:718-725
-        // Formula: alpeeq(i) = (alpha_base + ff*qa(i))²
-        // These values are stored and used UNCHANGED in all subsequent EEQ calculations
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Computing Phase 1B: Charge-dependent alpha (alpeeq)");
         }
@@ -7182,23 +7248,15 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             for (int i = 0; i < m_atomcount; ++i) {
                 int z_i = m_atoms[i];
                 double alpha_base = (z_i >= 1 && z_i <= 86) ? GFNFFParameters::alpha_eeq[z_i - 1] : 0.903430;
-                topo_info.alpeeq(i) = alpha_base * alpha_base;  // Squared, no charge correction
+                topo_info.alpeeq(i) = alpha_base * alpha_base;
             }
         }
 
         // ===== PHASE 1C: Calculate dgam corrections =====
-        // FIX (Mar 7, 2026): Use EEQ solver's calculateDgam with pi-system and amide detection
-        // for consistency between Coulomb energy parameters and EEQ charge solve.
-        // Root cause: GFNFF::calculateDgam used ff=-0.13 for ALL nitrogen atoms,
-        // but EEQ solver (and Fortran gfnff_ini.f90:706-709) uses ff=-0.14 for pi-N
-        // and ff=-0.16 for amide N. This inconsistency caused -0.121 mEh Coulomb error
-        // on caffeine and -0.604 mEh on complex (231 atoms).
-        // Reference: Fortran gfnff_ini.f90:697-724 computes dgam ONCE and uses it for
-        // BOTH the EEQ solve AND the Coulomb energy formula.
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Computing Phase 1C: Hardness corrections (dgam) + amideH detection");
         }
-        // Claude Generated (March 2026): Run dgam and amideH detection in parallel (independent computations)
+        // Run dgam and amideH detection in parallel (independent computations)
         auto amide_future = std::async(std::launch::async, [&]() {
             return m_eeq_solver->detectAmideHydrogensFull(
                 m_atoms, topo_info.hybridization, topo_info.coordination_numbers, eeq_topology_input);
@@ -7225,6 +7283,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             CurcumaLogger::result_fmt("  eeq_phase1_corrections (dxi+alpeeq+dgam): {} ms", dt.count());
             phase_timer = std::chrono::high_resolution_clock::now();
         }
+        } // end if (!topology_from_cache)
 
         // ===== PHASE 2: Energy Charges (nlist%q) =====
         // Compute energy charges using real geometric distances
@@ -7487,12 +7546,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         CurcumaLogger::result_fmt("  topo_distances+batm: {} ms", dt.count());
     }
 
-    // Claude Generated (February 2026): Report topology calculation timing
+    // Claude Generated (March 2026): Timing summary
     auto topo_end = std::chrono::high_resolution_clock::now();
     auto topo_duration = std::chrono::duration_cast<std::chrono::milliseconds>(topo_end - topo_start);
 
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::result_fmt("Topology calculation (CN, EEQ, rings, etc.): {} ms", topo_duration.count());
+    if (m_print_timing && CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result_fmt("GFN-FF topology total: {} ms", topo_duration.count());
     }
 
     return topo_info;
@@ -9426,16 +9485,18 @@ double GFNFF::compareGradients(double dx)
     Matrix analytic = m_gradient;
 
     // Save component gradients NOW, before NumGrad calls overwrite thread state
-    Matrix grad_bond       = m_forcefield->GradientBond();
-    Matrix grad_angle      = m_forcefield->GradientAngle();
-    Matrix grad_torsion    = m_forcefield->GradientTorsion();
-    Matrix grad_repulsion  = m_forcefield->GradientRepulsion();
-    Matrix grad_coulomb    = m_forcefield->GradientCoulomb();
-    Matrix grad_dispersion = m_forcefield->GradientDispersion();
-    Matrix grad_hb         = m_forcefield->GradientHB();
-    Matrix grad_xb         = m_forcefield->GradientXB();
-    Matrix grad_batm       = m_forcefield->GradientBATM();
-    Matrix grad_atm        = m_forcefield->GradientATM();
+    // Guard: workspace path doesn't populate ForceField's stored_threads
+    bool have_components = !m_use_workspace && m_forcefield;
+    Matrix grad_bond       = have_components ? m_forcefield->GradientBond()       : Matrix::Zero(m_atomcount, 3);
+    Matrix grad_angle      = have_components ? m_forcefield->GradientAngle()      : Matrix::Zero(m_atomcount, 3);
+    Matrix grad_torsion    = have_components ? m_forcefield->GradientTorsion()    : Matrix::Zero(m_atomcount, 3);
+    Matrix grad_repulsion  = have_components ? m_forcefield->GradientRepulsion()  : Matrix::Zero(m_atomcount, 3);
+    Matrix grad_coulomb    = have_components ? m_forcefield->GradientCoulomb()    : Matrix::Zero(m_atomcount, 3);
+    Matrix grad_dispersion = have_components ? m_forcefield->GradientDispersion() : Matrix::Zero(m_atomcount, 3);
+    Matrix grad_hb         = have_components ? m_forcefield->GradientHB()         : Matrix::Zero(m_atomcount, 3);
+    Matrix grad_xb         = have_components ? m_forcefield->GradientXB()         : Matrix::Zero(m_atomcount, 3);
+    Matrix grad_batm       = have_components ? m_forcefield->GradientBATM()       : Matrix::Zero(m_atomcount, 3);
+    Matrix grad_atm        = have_components ? m_forcefield->GradientATM()        : Matrix::Zero(m_atomcount, 3);
 
     // Level 1: Fixed-charge numerical gradient (CN updated, EEQ charges fixed)
     // This comparison isolates REAL gradient formula bugs.

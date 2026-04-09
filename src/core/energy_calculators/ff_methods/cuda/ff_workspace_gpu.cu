@@ -635,7 +635,7 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_coul_gam;      ///< [N]
     CudaBuffer<double> d_coul_alp;      ///< [N]
     bool               coul_self_on_gpu = false;
-    bool               use_mixed_precision = true;  ///< FP32 intermediates for repulsion/batm/xbonds
+    bool               use_mixed_precision = false;  ///< TODO: Restore to true after GPU gradient debugging complete
 
     // GPU topology displacement check buffers (Claude Generated March 2026)
     RefCoordSoA ref_coords;  ///< Reference geometry SoA (rx[N], ry[N], rz[N]) — Phase 10, March 2026
@@ -1723,7 +1723,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     //   k_cn_chainrule   — needs d_dEdcn complete from ALL streams → wait for all 3
     // =========================================================================
 
-    const bool need_snapshots = (m_verbosity >= 3);
+    const bool need_snapshots = true; // TODO: Restore to (m_verbosity >= 3) after GPU gradient debugging complete
     if (m_coulomb_enabled && impl.coul_self_on_gpu) {
         // Wait for pairwise+bonded streams (dEdcn dependency for qtmp subtraction)
         cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
@@ -1849,10 +1849,27 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             m_result_gradient(i, 2) = m_h_grad[3*i+2];
         }
 
+        // TODO: Remove debug fprintf blocks after GPU gradient debugging complete
+        fprintf(stderr, "=== GPU POST-CN GRADIENT (natoms=%d) ===\n", N);
+        for (int i = 0; i < N; ++i) {
+            fprintf(stderr, "  atom %2d: %22.15e %22.15e %22.15e\n",
+                    i, m_result_gradient(i,0), m_result_gradient(i,1), m_result_gradient(i,2));
+        }
+        fprintf(stderr, "=== GPU POST-CN GRADIENT END ===\n");
+
         // Always populate m_dEdcn_total — dEdcnTotal() is public API
         m_dEdcn_total.resize(N);
         for (int i = 0; i < N; ++i)
             m_dEdcn_total[i] = m_h_dEdcn_snap[i];
+
+        // TODO: Remove — debug dEdcn/qtmp fprintf
+        {
+            fprintf(stderr, "=== GPU dEdcn BEFORE qtmp (natoms=%d) ===\n", N);
+            for (int i = 0; i < N; ++i) {
+                fprintf(stderr, "  atom %2d: dEdcn=%22.15e\n", i, m_dEdcn_total[i]);
+            }
+            fprintf(stderr, "=== GPU dEdcn END ===\n");
+        }
 
         if (need_snapshots) {
             m_grad_before_cn.resize(N, 3);
@@ -1861,6 +1878,13 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
                 m_grad_before_cn(i, 1) = m_h_grad_snap[3*i+1];
                 m_grad_before_cn(i, 2) = m_h_grad_snap[3*i+2];
             }
+            // TODO: Remove — debug pre-CN gradient fprintf
+            fprintf(stderr, "=== GPU PRE-CN GRADIENT (natoms=%d) ===\n", N);
+            for (int i = 0; i < N; ++i) {
+                fprintf(stderr, "  atom %2d: %22.15e %22.15e %22.15e\n",
+                        i, m_grad_before_cn(i,0), m_grad_before_cn(i,1), m_grad_before_cn(i,2));
+            }
+            fprintf(stderr, "=== GPU PRE-CN GRADIENT END ===\n");
         }
     }
 
@@ -1881,6 +1905,24 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     m_result_energy.atm           = e_atm;
     m_result_energy.xbond         = e_xbond;
     m_result_energy.hbond         = e_hbond;
+
+    // TODO: Remove — debug per-term energy fprintf
+    fprintf(stderr, "=== GPU ENERGY TERMS ===\n");
+    fprintf(stderr, "  bond      = %22.15e\n", e_bond);
+    fprintf(stderr, "  angle     = %22.15e\n", e_angle);
+    fprintf(stderr, "  dihedral  = %22.15e\n", e_dihedral);
+    fprintf(stderr, "  inversion = %22.15e\n", e_inversion);
+    fprintf(stderr, "  stors     = %22.15e\n", e_stors);
+    fprintf(stderr, "  batm      = %22.15e\n", e_batm);
+    fprintf(stderr, "  atm       = %22.15e\n", e_atm);
+    fprintf(stderr, "  disp      = %22.15e\n", e_disp);
+    fprintf(stderr, "  brep      = %22.15e\n", e_brep);
+    fprintf(stderr, "  nbrep     = %22.15e\n", e_nbrep);
+    fprintf(stderr, "  coul1     = %22.15e\n", e_coul1);
+    fprintf(stderr, "  coul_self = %22.15e\n", e_coul_self);
+    fprintf(stderr, "  hbond     = %22.15e\n", e_hbond);
+    fprintf(stderr, "  xbond     = %22.15e\n", e_xbond);
+    fprintf(stderr, "=== GPU ENERGY END ===\n");
 
     return m_result_energy.total() + m_e0;
 }

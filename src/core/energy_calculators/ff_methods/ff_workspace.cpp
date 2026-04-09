@@ -255,6 +255,24 @@ double FFWorkspace::calculate(bool gradient)
     }
 
     postProcess(gradient);
+
+    // TODO: Remove — debug per-term energy fprintf
+    fprintf(stderr, "=== CPU ENERGY TERMS ===\n");
+    fprintf(stderr, "  bond      = %22.15e\n", m_result_energy.bond);
+    fprintf(stderr, "  angle     = %22.15e\n", m_result_energy.angle);
+    fprintf(stderr, "  dihedral  = %22.15e\n", m_result_energy.dihedral);
+    fprintf(stderr, "  inversion = %22.15e\n", m_result_energy.inversion);
+    fprintf(stderr, "  stors     = %22.15e\n", m_result_energy.stors);
+    fprintf(stderr, "  batm      = %22.15e\n", m_result_energy.batm);
+    fprintf(stderr, "  atm       = %22.15e\n", m_result_energy.atm);
+    fprintf(stderr, "  disp      = %22.15e\n", m_result_energy.dispersion);
+    fprintf(stderr, "  brep      = %22.15e\n", m_result_energy.bonded_rep);
+    fprintf(stderr, "  nbrep     = %22.15e\n", m_result_energy.nonbonded_rep);
+    fprintf(stderr, "  coulomb   = %22.15e\n", m_result_energy.coulomb);
+    fprintf(stderr, "  hbond     = %22.15e\n", m_result_energy.hbond);
+    fprintf(stderr, "  xbond     = %22.15e\n", m_result_energy.xbond);
+    fprintf(stderr, "=== CPU ENERGY END ===\n");
+
     return m_e0 + m_result_energy.total();
 }
 
@@ -390,6 +408,14 @@ void FFWorkspace::postProcess(bool gradient)
         // Snapshot gradient before CN chain-rule (diagnostic)
         m_grad_before_cn = m_result_gradient;
 
+        // TODO: Remove — debug pre-CN gradient fprintf
+        fprintf(stderr, "=== CPU PRE-CN GRADIENT (natoms=%d) ===\n", m_natoms);
+        for (int i = 0; i < m_natoms; ++i) {
+            fprintf(stderr, "  atom %2d: %22.15e %22.15e %22.15e\n",
+                    i, m_grad_before_cn(i,0), m_grad_before_cn(i,1), m_grad_before_cn(i,2));
+        }
+        fprintf(stderr, "=== CPU PRE-CN GRADIENT END ===\n");
+
         // Compute TERM 1b qtmp
         Vector qtmp = Vector::Zero(m_natoms);
         bool has_term1b = (m_eeq_charges.size() == m_natoms &&
@@ -404,6 +430,14 @@ void FFWorkspace::postProcess(bool gradient)
 
         // Combined matvec: gradient += dcn * (dEdcn_total - qtmp)
         Vector dEdcn_combined = has_term1b ? (m_dEdcn_total - qtmp).eval() : m_dEdcn_total;
+        // TODO: Remove — debug dEdcn_combined fprintf
+        fprintf(stderr, "=== CPU dEdcn_combined (natoms=%d) ===\n", m_natoms);
+        for (int i = 0; i < m_natoms; ++i) {
+            fprintf(stderr, "  atom %2d: dEdcn=%22.15e qtmp=%22.15e comb=%22.15e cn=%22.15e cnf=%22.15e\n",
+                    i, m_dEdcn_total(i), (has_term1b ? qtmp(i) : 0.0), dEdcn_combined(i),
+                    (m_cn.size() > i ? m_cn(i) : 0.0), (m_cnf.size() > i ? m_cnf(i) : 0.0));
+        }
+        fprintf(stderr, "=== CPU dEdcn_combined END ===\n");
         for (int dim = 0; dim < 3; ++dim) {
             if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
                 m_result_gradient.col(dim) += m_dcn[dim] * dEdcn_combined;
@@ -421,5 +455,14 @@ void FFWorkspace::postProcess(bool gradient)
                 }
             }
         }
+    }
+    // TODO: Remove — debug post-CN gradient fprintf
+    if (gradient) {
+        fprintf(stderr, "=== CPU POST-CN GRADIENT (natoms=%d) ===\n", m_natoms);
+        for (int i = 0; i < m_natoms; ++i) {
+            fprintf(stderr, "  atom %2d: %22.15e %22.15e %22.15e\n",
+                    i, m_result_gradient(i,0), m_result_gradient(i,1), m_result_gradient(i,2));
+        }
+        fprintf(stderr, "=== CPU POST-CN GRADIENT END ===\n");
     }
 }

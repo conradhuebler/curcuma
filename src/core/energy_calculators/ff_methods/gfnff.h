@@ -469,6 +469,15 @@ public:
     bool importTopology(const json& topo_json);
 
     /**
+     * @brief Compute fingerprint for topology cache validation
+     * @return Hash string based on atom count, types, and bond list
+     *
+     * Claude Generated (March 2026): Fingerprint ensures topology cache is
+     * invalidated when molecular connectivity changes.
+     */
+    std::string computeTopologyFingerprint() const;
+
+    /**
      * @brief Calculate full topology information for advanced parametrization
      * @return Complete topology information
      */
@@ -2064,6 +2073,10 @@ private:
 
     // Topology caching mode: "auto" (two-tier caching) or "constant" (never recalculate)
     std::string m_topology_mode = "auto";
+
+    // Claude Generated (March 2026): Topology persistence in param.json
+    bool m_cache_topology = true;   ///< Cache Phase-1 EEQ topology in param.json (opt-out)
+    bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1
 
     // Check if geometry change warrants full topology recalculation (vs just dynamic state)
     bool needsFullTopologyUpdate(const Eigen::MatrixXd& geometry_bohr) const;
