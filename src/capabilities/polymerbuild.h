@@ -214,6 +214,28 @@ private:
                          int max_steps = 300, double max_displacement = 0.05);
 
     /**
+     * @brief Local LJ-LM refinement step after GFN-FF GeoOpt.
+     *
+     * Extracts the last-added monomer from the combined polymer, re-optimizes
+     * its 6 DOF (3 translation + 3 rotation) using LJ repulsion as cost function
+     * with interface bond-length constraints. Supports multiple interface bonds.
+     *
+     * @param polymer         Combined polymer molecule (modified in-place)
+     * @param atom_monomer_id Per-atom monomer ID assignment
+     * @param interface_bonds Known cross-monomer bonds
+     * @param current_monomer The monomer ID of the just-added fragment
+     * @param step_number     Step number for debug output
+     * @return Number of problematic contacts remaining
+     *
+     * Claude Generated 2026
+     */
+    int localLJRefinement(Molecule& polymer,
+                           const std::vector<int>& atom_monomer_id,
+                           const std::vector<std::pair<int,int>>& interface_bonds,
+                           int current_monomer,
+                           int step_number);
+
+    /**
      * @brief Check all pairwise distances and report close contacts.
      *
      * Categories:
@@ -311,12 +333,13 @@ private:
      *
      * Claude Generated
      */
-    void rebuildTopologyFromTemplates(
+    int verifyAndFixTopology(
         Molecule& mol,
         const std::vector<int>& atom_monomer_id,
         const std::vector<std::string>& monomer_fragment_type,
         const std::vector<std::pair<int, int>>& interface_bonds,
-        const std::vector<int>& monomer_start_atoms) const;
+        const std::vector<int>& monomer_start_atoms,
+        const std::string& context_label = "") const;
 
     /**
      * @brief Validate topology consistency across identical monomers.
@@ -363,6 +386,14 @@ private:
     PARAM(lm_max_iter, Int, 500, "Maximum LM iterations for fragment placement", "Refinement", {})
     PARAM(lm_tolerance, Double, 1e-6, "Convergence tolerance for LM optimization", "Refinement", {})
     PARAM(overlap_retries, Int, 3, "Max optimization retries to resolve cross-monomer overlaps", "Refinement", { "retries" })
+
+    // LJ-LM refinement options — Claude Generated 2026
+    PARAM(ljlm_refine, Bool, true, "Enable LJ-LM refinement after each GeoOpt step", "Refinement", {})
+    PARAM(ljlm_max_iter, Int, 3, "Max LJ-LM / GeoOpt iterations for refinement", "Refinement", {})
+    PARAM(ljlm_lm_max_iter, Int, 500, "Max LM iterations per LJ-LM refinement call", "Refinement", {})
+    PARAM(ljlm_lm_tolerance, Double, 1e-6, "Convergence tolerance for LJ-LM refinement", "Refinement", {})
+    PARAM(ljlm_k_bond, Double, 100000.0, "Bond-length constraint weight for LJ-LM refinement", "Refinement", {})
+    PARAM(ljlm_disable_md, Bool, true, "Disable cold and warm MD when LJ-LM refinement is active", "Refinement", {})
 
     // Dynamics options
     PARAM(dynamics, Bool, false, "Enable intermediate molecular dynamics after each fragment", "Refinement", { "md" })

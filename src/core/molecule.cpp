@@ -78,6 +78,15 @@ Molecule::Molecule(const Molecule& other)
     m_mass = other.m_mass; // Claude Generated 2025: Copy molecular mass (fixes VTF trajectory m_mass=0 bug)
     m_unit_cell = other.m_unit_cell; // Claude Generated 2025: Copy PBC data
     m_has_pbc = other.m_has_pbc;
+    // Claude Generated 2026: Copy persistent topology (fixes polymer topology loss on copy)
+    m_persistent_topology = other.m_persistent_topology;
+    m_has_persistent_topology = other.m_has_persistent_topology;
+    m_topology_matrix = other.m_topology_matrix;
+    m_distance_matrix = other.m_distance_matrix;
+    m_distance_cache_valid = other.m_distance_cache_valid;
+    m_scaling = other.m_scaling;
+    m_hbond_cutoff = other.m_hbond_cutoff;
+    m_dirty = other.m_dirty;
 }
 /*
 Molecule& Molecule::operator=(const Molecule& other)
@@ -107,6 +116,15 @@ Molecule::Molecule(const Molecule* other)
     m_borders = other->m_borders;
     m_unit_cell = other->m_unit_cell; // Claude Generated 2025: Copy PBC data
     m_has_pbc = other->m_has_pbc;
+    // Claude Generated 2026: Copy persistent topology (fixes polymer topology loss on copy)
+    m_persistent_topology = other->m_persistent_topology;
+    m_has_persistent_topology = other->m_has_persistent_topology;
+    m_topology_matrix = other->m_topology_matrix;
+    m_distance_matrix = other->m_distance_matrix;
+    m_distance_cache_valid = other->m_distance_cache_valid;
+    m_scaling = other->m_scaling;
+    m_hbond_cutoff = other->m_hbond_cutoff;
+    m_dirty = other->m_dirty;
 }
 /*
 Molecule& Molecule::operator=(const Molecule* other)
@@ -2033,6 +2051,12 @@ void Molecule::setTopologyMatrix(const Matrix& topology)
     m_has_persistent_topology = true;
     m_topology_matrix = topology;
     invalidateCaches();
+    // Claude Generated 2026: Sync bond list from topology matrix
+    m_bonds.clear();
+    for (int i = 0; i < topology.rows(); ++i)
+        for (int j = i + 1; j < topology.cols(); ++j)
+            if (topology(i, j) > 0.5)
+                m_bonds.push_back({i, j});
 }
 
 std::pair<Matrix, Matrix> Molecule::DistanceMatrix(const std::vector<int>& indices) const
