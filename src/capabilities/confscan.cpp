@@ -388,7 +388,7 @@ void ConfScan::LoadControlJson()
     // Molalign citation
     if (m_RMSDmethod == "molalign") {
         if (m_verbosity >= 1) {
-            CurcumaLogger::citation("J. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187");
+            CurcumaLogger::addCitation("molalign");
         }
         m_domolalign = -1;
     }

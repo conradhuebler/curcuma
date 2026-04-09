@@ -49,6 +49,7 @@ TBLiteMethod::TBLiteMethod(const std::string& method_name, const json& config)
 bool TBLiteMethod::setMolecule(const Mol& mol) {
     m_molecule = mol;
     m_initialized = true;
+    CurcumaLogger::addCitation("tblite");
 #ifdef USE_TBLITE
     return m_tblite->InitialiseMolecule(mol);
 #else

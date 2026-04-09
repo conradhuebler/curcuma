@@ -23,8 +23,11 @@
 #include <chrono>
 #include <fmt/color.h>
 #include <fmt/core.h>
+#include <set>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
+#include <vector>
 
 using json = nlohmann::json;
 
@@ -164,6 +167,26 @@ public:
             param(key, value_str);
         }
     }
+
+private:
+    // Claude Generated (April 2026): Citation registry — short keys → full references
+    // Methods register a key at init, full citation is printed at program end.
+    static std::unordered_map<std::string, std::string> m_citation_registry;
+    static std::set<std::string> m_used_citations;
+
+public:
+    // Register a citation key. Multiple calls with the same key are deduplicated.
+    // If the key is not in the registry, the full text is stored directly.
+    // If the key matches a known registry entry, the registry text is used.
+    static void addCitation(const std::string& key, const std::string& full_text = "");
+
+    // Print all collected citations (call at program end). Always prints regardless of verbosity.
+    static void printCitations();
+
+    // Claude Generated (April 2026): Citation key registry
+    // Maps short keys (e.g. "gfnff") to full citation strings.
+    // Methods call addCitation("gfnff") at init, printCitations() at program end.
+    static void initCitationRegistry();
 
 private:
     // Helper functions for internal formatting

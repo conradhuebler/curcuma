@@ -88,7 +88,7 @@ FetchContent_Declare(LBFGSpp
 )
 FetchContent_Declare(CxxThreadPool
     GIT_REPOSITORY https://github.com/conradhuebler/CxxThreadPool.git
-    GIT_TAG        6c41b0a0222cc13c49fb7fa1a6cd2002d4de7aa9
+    GIT_TAG        140625c509f245185ec486b5f5424b318c8ccef6
     SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/CxxThreadPool
 )
 # ripser: header-only, no CMakeLists.txt at root — use Populate to avoid add_subdirectory

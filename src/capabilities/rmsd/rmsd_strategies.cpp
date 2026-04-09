@@ -731,7 +731,7 @@ AlignmentResult MolAlignStrategy::align(RMSDDriver* driver, const AlignmentConfi
         // Check if alignment was successful
         if (std::filesystem::exists("aligned.xyz") && !rndm) {
             if (driver->m_verbosity >= 1) {
-                CURCUMA_CITATION("J. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187");
+                CurcumaLogger::addCitation("molalign");
             }
 
             FileIterator file("aligned.xyz", true);

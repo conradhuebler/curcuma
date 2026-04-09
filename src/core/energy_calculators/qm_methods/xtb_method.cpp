@@ -20,6 +20,7 @@ XTBMethod::XTBMethod(const std::string& method_name, const json& config)
 bool XTBMethod::setMolecule(const Mol& mol) {
     m_molecule = mol;
     m_initialized = true;
+    CurcumaLogger::addCitation("gfn2xtb");
 #ifdef USE_XTB
     return m_xtb->InitialiseMolecule(mol);
 #else
