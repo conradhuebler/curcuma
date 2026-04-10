@@ -363,6 +363,23 @@ private:
         const std::vector<std::pair<int, int>>& interface_bonds,
         const std::string& tag) const;
 
+    /**
+     * @brief Save an intermediate polymer as a building block XYZ file with Xx atoms preserved.
+     *
+     * If save_blocks > 0 and the step number is a multiple of save_blocks,
+     * writes the polymer to {prefix}_block_{step:03d}.xyz with Xx atoms intact.
+     * These files can be reused as fragments in subsequent PolymerBuild runs.
+     *
+     * @param mol Polymer molecule to save
+     * @param tracked_xx Currently tracked Xx connection points
+     * @param step_number Step number (used for file naming and interval filtering)
+     *
+     * Claude Generated 2026
+     */
+    void saveBuildingBlock(const Molecule& mol,
+                           const std::vector<std::pair<int,int>>& tracked_xx,
+                           int step_number) const;
+
     ConfigManager m_config;
     bool m_silent;
     std::map<std::string, std::string> m_fragments;
@@ -412,6 +429,8 @@ private:
     PARAM(chunk_size, Int, 1, "Number of fragments to place before running optimization (1=after each)", "Refinement", {})
     PARAM(subchain_size, Int, 0, "Sub-chain size for divide-and-conquer assembly (0=sequential)", "Assembly", { "scs" })
     PARAM(write_intermediates, Bool, false, "Write XYZ file after each fragment addition for debugging", "Output", { "intermediates" })
+    PARAM(save_blocks, Int, 0, "Save intermediate polymers with Xx atoms as reusable building blocks (0=off, 1=every step, N=every Nth step)", "Output", { "saveblocks" })
+    PARAM(block_prefix, String, "", "Prefix for building block files (default: polymer basename)", "Output", {})
     PARAM(verbose, Bool, true, "Detailed output", "Output", {})
 
     END_PARAMETER_DEFINITION

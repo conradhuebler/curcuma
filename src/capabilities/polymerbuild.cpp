@@ -2387,6 +2387,9 @@ SubchainResult PolymerBuild::buildSubchain(
             debug_mol.writeXYZFile(step_file);
             CurcumaLogger::info(fmt::format("Wrote intermediate (Xx→H): {}", step_file));
         }
+
+        // Claude Generated 2026: Save building block with Xx atoms preserved
+        saveBuildingBlock(polymer, tracked_xx, static_cast<int>(i));
     }
 
     // Return sub-chain result for use by assemblePolymer — Claude Generated
@@ -2454,6 +2457,9 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
                 subchain_cache[cache_key] = {result, monomer_offset};
                 subchains.push_back(std::move(result));
             }
+
+            // Claude Generated 2026: Save completed sub-chain as building block
+            saveBuildingBlock(subchains.back().molecule, subchains.back().tracked_xx, static_cast<int>(1000 + sc));
         }
 
         // Phase 2: Connect sub-chains sequentially
@@ -2585,6 +2591,9 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
             checkDistances(polymer,
                            fmt::format("subchain-join {:02d} post-opt", sc),
                            interface_bonds);
+
+            // Claude Generated 2026: Save building block after sub-chain join
+            saveBuildingBlock(polymer, tracked_xx, static_cast<int>(2000 + sc));
         }
 
         // Phase 3: Capping + final output
@@ -2639,4 +2648,40 @@ void PolymerBuild::applyCapping(Molecule& mol)
         m.m_atoms[xx_indices[i]] = element;
     }
     mol.LoadMolecule(m);
+}
+
+/// Claude Generated 2026 — Save intermediate polymer as building block with Xx atoms preserved
+void PolymerBuild::saveBuildingBlock(const Molecule& mol,
+                                       const std::vector<std::pair<int,int>>& tracked_xx,
+                                       int step_number) const
+{
+    int save_interval = m_config.get<int>("save_blocks", 0);
+    if (save_interval <= 0) return;
+    if (step_number % save_interval != 0) return;
+
+    std::string prefix = m_config.get<std::string>("block_prefix", "");
+    if (prefix.empty()) prefix = mol.Name();
+
+    std::string filename = fmt::format("{}_block_{:03d}.xyz", prefix, step_number);
+    mol.writeXYZFile(filename);
+
+    // Count Xx atoms for reporting
+    int xx_count = 0;
+    for (int i = 0; i < mol.AtomCount(); ++i)
+        if (mol.Atom(i).first == 0) xx_count++;
+
+    CurcumaLogger::success(fmt::format(
+        "Saved building block step {:03d}: {} ({} atoms, {} open Xx connection point{})",
+        step_number, filename, mol.AtomCount(), xx_count, xx_count == 1 ? "" : "s"));
+
+    // List each Xx connection point with its bonded heavy atom
+    for (const auto& [xx_idx, active_idx] : tracked_xx) {
+        if (xx_idx >= 0 && xx_idx < mol.AtomCount()) {
+            std::string active_elem = (active_idx >= 0 && active_idx < mol.AtomCount())
+                ? Elements::ElementAbbr[mol.Atom(active_idx).first]
+                : "?";
+            CurcumaLogger::info(fmt::format("  Xx at atom {} → bonded to {} ({})",
+                xx_idx, active_idx, active_elem));
+        }
+    }
 }
