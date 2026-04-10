@@ -73,7 +73,7 @@ public:
     static void success(const std::string& msg);
     static void result(const std::string& msg);  // Claude Generated: Neutral result reporting at level 1+
     static void info(const std::string& msg);
-    static void citation(const std::string& ref);
+    static void citation(const std::string& key);
 
     // Parameter logging with different types
     static void param(const std::string& key, const std::string& value);
@@ -142,6 +142,7 @@ public:
     template <typename... Args>
     static void citation_fmt(fmt::format_string<Args...> format_str, Args&&... args)
     {
+        // Deprecated: use CitationRegistry::cite(key) directly
         std::string msg = fmt::format(format_str, std::forward<Args>(args)...);
         citation(msg);
     }

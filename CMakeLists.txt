@@ -350,6 +350,8 @@ set(curcuma_core_SRC
         src/core/energy_calculators/ff_methods/forcefieldgenerator.cpp
         src/core/energy_calculators/ff_methods/cg_potentials.cpp
         src/core/curcuma_logger.cpp
+        src/core/citation_database.cpp
+        src/core/citation_registry.cpp
         src/tools/formats.h
         src/tools/geometry.h
         src/tools/general.h
