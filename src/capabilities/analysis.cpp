@@ -21,6 +21,7 @@
 #include "analysis_output.h"  // Claude Generated 2026: Output dispatcher
 #include "persistentdiagram.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/citation_registry.h"
 #include "src/core/elements.h"
 #include "src/core/units.h"
 #include "src/core/parameter_registry.h"
@@ -1160,10 +1161,7 @@ json UnifiedAnalysis::calculateTopologicalProperties(const Molecule& mol)
             }
 
             // Add citation info for enhanced analysis
-            topology["citation"] = "Townsend, J., Micucci, C.P., Hymel, J.H. et al. "
-                                 "Representation of molecular structures with persistent homology "
-                                 "for machine learning applications in chemistry. "
-                                 "Nat Commun 11, 3230 (2020). https://doi.org/10.1038/s41467-020-17035-5";
+            CitationRegistry::cite("ripser");
 
             if (!m_silent) {
                 CurcumaLogger::success("Enhanced topological analysis completed with dMatrix functionality");
@@ -1505,11 +1503,7 @@ void UnifiedAnalysis::printEnhancedTDAHelp() const
     std::cout << "• Machine learning feature generation" << std::endl;
     std::cout << std::endl;
     std::cout << "CITATION:" << std::endl;
-    std::cout << "When using enhanced TDA features, please cite:" << std::endl;
-    std::cout << "Townsend, J., Micucci, C.P., Hymel, J.H. et al." << std::endl;
-    std::cout << "Representation of molecular structures with persistent homology" << std::endl;
-    std::cout << "for machine learning applications in chemistry." << std::endl;
-    std::cout << "Nat Commun 11, 3230 (2020). https://doi.org/10.1038/s41467-020-17035-5" << std::endl;
+    CitationRegistry::cite("ripser");
     std::cout << std::endl;
     std::cout << "EXAMPLES:" << std::endl;
     std::cout << std::endl;

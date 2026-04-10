@@ -2385,7 +2385,7 @@ int main(int argc, char **argv) {
             std::cout << "Printing energy: " << print_energy << std::endl;
             FileIterator file(argv[2]);
             json dMatrix = controller["dMatrix"];
-            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nTownsend, J., Micucci, C.P., Hymel, J.H. et al. Representation of molecular structures with persistent homology for machine learning applications in chemistry. Nat Commun 11, 3230 (2020). https://doi.org/10.1038/s41467-020-17035-5\n\n");
+            CitationRegistry::cite("ripser");
 
             std::string outfile = argv[2];
             for (int i = 0; i < 4; ++i)

@@ -6,6 +6,7 @@
 #include "src/core/energy_calculators/qm_methods/interface/abstract_interface.h"
 
 #include "dispersion_method.h"
+#include "src/core/citation_registry.h"
 #include "src/core/config_manager.h"
 
 DispersionMethod::DispersionMethod(const std::string& method_name, const json& config)
@@ -45,6 +46,7 @@ bool DispersionMethod::updateGeometry(const Matrix& geometry) {
 double DispersionMethod::calculateEnergy(bool gradient)
 {
     if (m_dispersion) {
+        CitationRegistry::cite(m_method_name); // "d3" or "d4"
         m_last_energy = m_dispersion->Calculation(gradient);
         m_calculation_done = true;
         return m_last_energy;

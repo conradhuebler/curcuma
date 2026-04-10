@@ -18,6 +18,7 @@
  */
 
 #include "gfnff_method.h"
+#include "src/core/citation_registry.h"
 #include "src/tools/general.h"
 
 // Minimal stub implementation for GFN-FF method
@@ -42,6 +43,9 @@ bool GFNFFMethod::updateGeometry(const Matrix& geometry) {
 
 double GFNFFMethod::calculateEnergy(bool gradient)
 {
+    CitationRegistry::cite("gfnff");
+    CitationRegistry::cite("d4", "gfnff");
+    CitationRegistry::cite("h4", "gfnff");
     m_last_energy = m_gfnff->Calculation(gradient);
     m_calculation_done = true;
     return m_last_energy;

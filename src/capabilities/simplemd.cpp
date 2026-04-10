@@ -51,6 +51,7 @@
 #include "plumed2/src/wrapper/Plumed.h"
 #endif
 #include "simplemd.h"
+#include "src/core/citation_registry.h"
 
 // Claude Generated: Unit conversion constants for wall statistics
 const double au2eV = 1.0 / eV2Eh; // Convert Hartree to eV
@@ -1486,11 +1487,11 @@ void SimpleMD::start()
 
     switch (thermo) {
         case ThermostatType::CSVR:
-            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Canonical sampling through velocity rescaling (CSVR) Thermostat\nJ. Chem. Phys. 126, 014101 (2007) - DOI: 10.1063/1.2408420\n\n");
+            CitationRegistry::cite("csvr");
             ThermostatFunction = [this] { CSVR(); };
             break;
         case ThermostatType::Berendsen:
-            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Berendsen Thermostat\nJ. Chem. Phys. 81, 3684 (1984) - DOI: 10.1063/1.448118\n\n");
+            CitationRegistry::cite("berendsen");
             ThermostatFunction = [this] { Berendson(); };
             break;
         case ThermostatType::Anderson:

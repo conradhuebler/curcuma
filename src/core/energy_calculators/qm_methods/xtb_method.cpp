@@ -6,6 +6,7 @@
 #include "xtb_method.h"
 #include "src/tools/general.h"
 #include "src/core/config_manager.h"
+#include "src/core/citation_registry.h"
 
 XTBMethod::XTBMethod(const std::string& method_name, const json& config)
     : m_method_name(method_name), m_calculation_done(false), m_last_energy(0.0) {
@@ -39,6 +40,7 @@ bool XTBMethod::updateGeometry(const Matrix& geometry) {
 double XTBMethod::calculateEnergy(bool gradient)
 {
 #ifdef USE_XTB
+    CitationRegistry::cite("xtb");
     m_last_energy = m_xtb->Calculation(gradient);
     m_calculation_done = true;
     return m_last_energy;

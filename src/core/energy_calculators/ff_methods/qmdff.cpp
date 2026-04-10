@@ -18,6 +18,7 @@
  */
 
 #include "src/core/global.h"
+#include "src/core/citation_registry.h"
 #include "src/tools/general.h"
 
 /* H4 Correction taken from
@@ -1175,6 +1176,7 @@ Eigen::MatrixXd QMDFF::NumGrad()
 
 double QMDFF::Calculate(bool grd)
 {
+    CitationRegistry::cite("qmdff");
     m_CalculateGradient = grd;
     hbonds4::atom_t geometry[m_atom_types.size()];
     for (int i = 0; i < m_atom_types.size(); ++i) {
