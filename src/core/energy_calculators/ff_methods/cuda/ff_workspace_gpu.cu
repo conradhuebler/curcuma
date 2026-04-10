@@ -672,6 +672,13 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_dEdcn_snapshot;   ///< [N] copy of dEdcn before qtmp
     CudaBuffer<double> d_grad_snapshot;    ///< [3*N] copy of gradient before CN chain-rule
 
+    // Per-kernel gradient snapshots (Claude Generated April 2026)
+    CudaBuffer<double> d_grad_after_sA;       ///< [3*N] snapshot after stream A (repulsion)
+    CudaBuffer<double> d_grad_after_bonds;   ///< [3*N] snapshot after k_bonds
+    CudaBuffer<double> d_grad_after_angles;  ///< [3*N] snapshot after k_angles
+    CudaBuffer<double> d_grad_after_sB;      ///< [3*N] snapshot after all stream B kernels
+    CudaBuffer<double> d_grad_after_sC;      ///< [3*N] snapshot after stream C (3-body)
+
     int N = 0;
     cudaStream_t stream = nullptr;
 
@@ -725,6 +732,17 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
               "pinned alloc m_h_dEdcn_snap");
     checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_grad_snap), 3 * natoms * sizeof(double)),
               "pinned alloc m_h_grad_snap");
+    // Per-kernel diagnostic pinned buffers (Claude Generated April 2026)
+    checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_grad_after_sA), 3 * natoms * sizeof(double)),
+              "pinned alloc m_h_grad_after_sA");
+    checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_grad_after_bonds), 3 * natoms * sizeof(double)),
+              "pinned alloc m_h_grad_after_bonds");
+    checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_grad_after_angles), 3 * natoms * sizeof(double)),
+              "pinned alloc m_h_grad_after_angles");
+    checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_grad_after_sB), 3 * natoms * sizeof(double)),
+              "pinned alloc m_h_grad_after_sB");
+    checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_grad_after_sC), 3 * natoms * sizeof(double)),
+              "pinned alloc m_h_grad_after_sC");
     // Claude Generated (March 2026): Pre-allocate pinned CN download buffer
     // NOTE: Do NOT allocate Eigen Vectors here — heap may be corrupted after CUDA allocs.
     // The caller (gfnff_gpu_method.cpp) pre-allocates m_gpu_cn_final before CUDA init.
@@ -807,6 +825,13 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     // Diagnostic snapshot buffers (device-to-device copy, no sync stall)
     m_impl->d_dEdcn_snapshot.alloc(natoms);
     m_impl->d_grad_snapshot.alloc(N3);
+
+    // Per-kernel gradient snapshots (Claude Generated April 2026)
+    m_impl->d_grad_after_sA.alloc(N3);
+    m_impl->d_grad_after_bonds.alloc(N3);
+    m_impl->d_grad_after_angles.alloc(N3);
+    m_impl->d_grad_after_sB.alloc(N3);
+    m_impl->d_grad_after_sC.alloc(N3);
 
     // --- GPU topology displacement check (Claude Generated March 2026) ---
     m_impl->d_disp_flag.alloc(1);
@@ -939,6 +964,11 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
     if (m_h_grad)       cudaFreeHost(m_h_grad);
     if (m_h_dEdcn_snap) cudaFreeHost(m_h_dEdcn_snap);
     if (m_h_grad_snap)  cudaFreeHost(m_h_grad_snap);
+    if (m_h_grad_after_sA)     cudaFreeHost(m_h_grad_after_sA);
+    if (m_h_grad_after_bonds)  cudaFreeHost(m_h_grad_after_bonds);
+    if (m_h_grad_after_angles) cudaFreeHost(m_h_grad_after_angles);
+    if (m_h_grad_after_sB)     cudaFreeHost(m_h_grad_after_sB);
+    if (m_h_grad_after_sC)     cudaFreeHost(m_h_grad_after_sC);
     if (m_h_cn_final)   cudaFreeHost(m_h_cn_final);
     if (m_h_cn_raw)     cudaFreeHost(m_h_cn_raw);
     if (m_h_energies)   cudaFreeHost(m_h_energies);
@@ -1034,12 +1064,16 @@ void FFWorkspaceGPU::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
     // Claude Generated (March 2026): Needed because updateHBXBIfNeeded() may find
     // additional HBonds on re-detection that weren't in the initial parameter set.
     m_impl->hbonds.upload(hbonds, atom_types, m_impl->stream);
+    // Store for CPU vs GPU comparison debugging
+    m_last_hbonds = hbonds;
 }
 
 void FFWorkspaceGPU::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
                                     const std::vector<int>& atom_types)
 {
     m_impl->xbonds.upload(xbonds, atom_types, m_impl->stream);
+    // Store for CPU vs GPU comparison debugging
+    m_last_xbonds = xbonds;
 }
 
 void FFWorkspaceGPU::setDispersionEnabled(bool v)  { m_dispersion_enabled = v; }
@@ -1289,14 +1323,15 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // CPU-GPU overlap with EEQ is preserved: cudaGraphLaunch() is asynchronous.
     // =========================================================================
     const bool need_snapshots = impl.d_dEdcn_snapshot.ptr && impl.d_grad_snapshot.ptr;
-    if (impl.m_graph_phase1_valid && !need_snapshots) {
+    const bool force_single_stream = (gradient && impl.d_grad_after_bonds.ptr);
+    if (impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream) {
         cudaGraphLaunch(impl.m_graph_exec_phase1, stream);
         return;  // GPU executes the graph asynchronously; CPU proceeds to EEQ
     }
 
     // === CAPTURE START: on the first topology-stable step, record this execution ===
     bool capturing = false;
-    if (!impl.m_graph_phase1_valid && !need_snapshots) {
+    if (!impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream) {
         cudaError_t cap_err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
         capturing = (cap_err == cudaSuccess);
     }
@@ -1326,15 +1361,20 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     //    These kernels do NOT read d_charges (EEQ). They use only coords, CN,
     //    topology charges, and static SoA parameters.
     // =========================================================================
-    cudaStream_t sA = impl.stream_pairwise;
-    cudaStream_t sB = impl.stream_bonded;
-    cudaStream_t sC = impl.stream_threebody;
+    // Per-kernel diagnostic mode: force all kernels onto main stream so
+    // snapshots reflect exactly one kernel's contribution at a time.
+    // Normal mode: 3 parallel streams for maximum GPU occupancy.
+    cudaStream_t sA = force_single_stream ? stream : impl.stream_pairwise;
+    cudaStream_t sB = force_single_stream ? stream : impl.stream_bonded;
+    cudaStream_t sC = force_single_stream ? stream : impl.stream_threebody;
 
     // Ensure all uploads on main stream are visible to worker streams
-    cudaEventRecord(impl.event_upload, stream);
-    cudaStreamWaitEvent(sA, impl.event_upload, 0);
-    cudaStreamWaitEvent(sB, impl.event_upload, 0);
-    cudaStreamWaitEvent(sC, impl.event_upload, 0);
+    if (!force_single_stream) {
+        cudaEventRecord(impl.event_upload, stream);
+        cudaStreamWaitEvent(sA, impl.event_upload, 0);
+        cudaStreamWaitEvent(sB, impl.event_upload, 0);
+        cudaStreamWaitEvent(sC, impl.event_upload, 0);
+    }
 
     // --- Stream A: Charge-independent pairwise terms (dispersion, repulsion) ---
     // NOTE: When gradient=true, k_dispersion is DEFERRED to launchChargeDependentAndFinish()
@@ -1413,6 +1453,11 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         }
     }
     // NOTE: k_coulomb is NOT launched here — it needs EEQ charges
+    // Per-kernel snapshot: after stream A repulsion (Claude Generated April 2026)
+    if (gradient && impl.d_grad_after_sA.ptr) {
+        cudaMemcpyAsync(impl.d_grad_after_sA.ptr, impl.d_grad.ptr,
+                        3*N*sizeof(double), cudaMemcpyDeviceToDevice, sA);
+    }
     cudaEventRecord(impl.event_pairwise, sA);
 
     // --- Stream B: Bonded terms (bonds, angles, dihedrals, inversions, storsions, hb_alpha) ---
@@ -1445,6 +1490,11 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             (gradient && impl.hb_alpha.n > 0) ? impl.d_zz_hb.ptr : nullptr,
             &impl.d_energies.ptr[impl.E_BOND]);
     }
+    // Per-kernel snapshot: after k_bonds (Claude Generated April 2026)
+    if (gradient && impl.d_grad_after_bonds.ptr) {
+        cudaMemcpyAsync(impl.d_grad_after_bonds.ptr, impl.d_grad.ptr,
+                        3*N*sizeof(double), cudaMemcpyDeviceToDevice, sB);
+    }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.angles.n);
@@ -1459,6 +1509,11 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             (double*)nullptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_ANGLE]);
+    }
+    // Per-kernel snapshot: after k_angles (Claude Generated April 2026)
+    if (gradient && impl.d_grad_after_angles.ptr) {
+        cudaMemcpyAsync(impl.d_grad_after_angles.ptr, impl.d_grad.ptr,
+                        3*N*sizeof(double), cudaMemcpyDeviceToDevice, sB);
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
@@ -1526,6 +1581,11 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.d_zz_hb.ptr,
             impl.d_grad.ptr,
             hb_kn);
+    }
+    // Per-kernel snapshot: after all stream B kernels (Claude Generated April 2026)
+    if (gradient && impl.d_grad_after_sB.ptr) {
+        cudaMemcpyAsync(impl.d_grad_after_sB.ptr, impl.d_grad.ptr,
+                        3*N*sizeof(double), cudaMemcpyDeviceToDevice, sB);
     }
     cudaEventRecord(impl.event_bonded, sB);
 
@@ -1627,6 +1687,11 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.coords.d_z.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_HBOND]);
+    }
+    // Per-kernel snapshot: after all stream C kernels (Claude Generated April 2026)
+    if (gradient && impl.d_grad_after_sC.ptr) {
+        cudaMemcpyAsync(impl.d_grad_after_sC.ptr, impl.d_grad.ptr,
+                        3*N*sizeof(double), cudaMemcpyDeviceToDevice, sC);
     }
     cudaEventRecord(impl.event_threebody, sC);
 
@@ -1820,6 +1885,37 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
                                       cudaMemcpyDeviceToHost, stream),
                       "async grad snapshot download");
         }
+        // Per-kernel snapshot downloads (Claude Generated April 2026)
+        if (impl.d_grad_after_sA.ptr) {
+            checkCuda(cudaMemcpyAsync(m_h_grad_after_sA, impl.d_grad_after_sA.ptr,
+                                      3 * N * sizeof(double),
+                                      cudaMemcpyDeviceToHost, stream),
+                      "async grad after_sA download");
+        }
+        if (impl.d_grad_after_bonds.ptr) {
+            checkCuda(cudaMemcpyAsync(m_h_grad_after_bonds, impl.d_grad_after_bonds.ptr,
+                                      3 * N * sizeof(double),
+                                      cudaMemcpyDeviceToHost, stream),
+                      "async grad after_bonds download");
+        }
+        if (impl.d_grad_after_angles.ptr) {
+            checkCuda(cudaMemcpyAsync(m_h_grad_after_angles, impl.d_grad_after_angles.ptr,
+                                      3 * N * sizeof(double),
+                                      cudaMemcpyDeviceToHost, stream),
+                      "async grad after_angles download");
+        }
+        if (impl.d_grad_after_sB.ptr) {
+            checkCuda(cudaMemcpyAsync(m_h_grad_after_sB, impl.d_grad_after_sB.ptr,
+                                      3 * N * sizeof(double),
+                                      cudaMemcpyDeviceToHost, stream),
+                      "async grad after_sB download");
+        }
+        if (impl.d_grad_after_sC.ptr) {
+            checkCuda(cudaMemcpyAsync(m_h_grad_after_sC, impl.d_grad_after_sC.ptr,
+                                      3 * N * sizeof(double),
+                                      cudaMemcpyDeviceToHost, stream),
+                      "async grad after_sC download");
+        }
     }
 
     // Single synchronization point — all async transfers complete here
@@ -1849,26 +1945,78 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             m_result_gradient(i, 2) = m_h_grad[3*i+2];
         }
 
-        // TODO: Remove debug fprintf blocks after GPU gradient debugging complete
-        fprintf(stderr, "=== GPU POST-CN GRADIENT (natoms=%d) ===\n", N);
-        for (int i = 0; i < N; ++i) {
-            fprintf(stderr, "  atom %2d: %22.15e %22.15e %22.15e\n",
-                    i, m_result_gradient(i,0), m_result_gradient(i,1), m_result_gradient(i,2));
+        // GPU POST-CN GRADIENT (verbosity >= 3)
+        if (m_verbosity >= 3) {
+            CurcumaLogger::info(fmt::format("=== GPU POST-CN GRADIENT (natoms={}) ===", N));
+            for (int i = 0; i < N; ++i) {
+                fmt::print("  atom {:3d}: {:+.15e} {:+.15e} {:+.15e}\n",
+                           i, m_result_gradient(i,0), m_result_gradient(i,1), m_result_gradient(i,2));
+            }
         }
-        fprintf(stderr, "=== GPU POST-CN GRADIENT END ===\n");
+
+        // Per-kernel gradient decomposition (Claude Generated April 2026)
+        // With single-stream mode, snapshots are clean: sA → bonds → angles → rest_sB → sC
+        if (m_h_grad_after_sA && m_h_grad_after_bonds && m_h_grad_after_angles
+            && m_h_grad_after_sB && m_h_grad_after_sC) {
+            if (m_verbosity >= 3) {
+                CurcumaLogger::info("=== GPU PER-KERNEL GRADIENT DECOMPOSITION (single-stream) ===");
+                fmt::print("  Atom   |rep(sA)|    |bonds|       |angles|      |sB_rest|    |3body(sC)|  |coul_ph2|   |CN_chain|\n");
+            }
+            for (int i = 0; i < N; ++i) {
+                auto norm3 = [](const double* buf, int idx) {
+                    double x = buf[3*idx+0], y = buf[3*idx+1], z = buf[3*idx+2];
+                    return std::sqrt(x*x + y*y + z*z);
+                };
+                auto delta_norm = [](const double* a, const double* b, int idx) {
+                    double dx = a[3*idx+0]-b[3*idx+0], dy = a[3*idx+1]-b[3*idx+1], dz = a[3*idx+2]-b[3*idx+2];
+                    return std::sqrt(dx*dx + dy*dy + dz*dz);
+                };
+
+                double rep     = norm3(m_h_grad_after_sA, i);
+                double bonds   = delta_norm(m_h_grad_after_bonds, m_h_grad_after_sA, i);
+                double angles  = delta_norm(m_h_grad_after_angles, m_h_grad_after_bonds, i);
+                double rest_sB = delta_norm(m_h_grad_after_sB, m_h_grad_after_angles, i);
+                double threebody = delta_norm(m_h_grad_after_sC, m_h_grad_after_sB, i);
+                // Coulomb phase 2 = pre_CN - after_sC (disp_grad + coulomb + coulomb_postprocess)
+                double coul_ph2 = delta_norm(m_h_grad_snap, m_h_grad_after_sC, i);
+                // CN chain-rule = post_CN - pre_CN
+                double cn_chain = delta_norm(m_h_grad, m_h_grad_snap, i);
+
+                if (m_verbosity >= 3) {
+                    fmt::print("  {:2d}  {:11.4e} {:11.4e} {:11.4e} {:11.4e} {:11.4e} {:11.4e} {:11.4e}\n",
+                               i, rep, bonds, angles, rest_sB, threebody, coul_ph2, cn_chain);
+                }
+            }
+            // Print full gradient vectors for each decomposed component (verbosity >= 3)
+            if (m_verbosity >= 3) {
+                const char* labels[] = {"REPULSION(sA)", "BONDS", "ANGLES", "sB_REST(dihed+inv+stors+hb_alpha)", "3BODY(sC:batm+atm+xb+hb)", "COULOMB_PH2(disp_gr+coul+postproc)", "CN_CHAINRULE"};
+                const double* bases[] = {nullptr, m_h_grad_after_sA, m_h_grad_after_bonds, m_h_grad_after_angles, m_h_grad_after_sB, m_h_grad_after_sC, m_h_grad_snap};
+                const double* snaps[] = {m_h_grad_after_sA, m_h_grad_after_bonds, m_h_grad_after_angles, m_h_grad_after_sB, m_h_grad_after_sC, m_h_grad_snap, m_h_grad};
+                for (int c = 0; c < 7; ++c) {
+                    CurcumaLogger::info(fmt::format("=== GPU {} GRADIENT ===", labels[c]));
+                    for (int i = 0; i < N; ++i) {
+                        double gx = snaps[c][3*i+0] - (bases[c] ? bases[c][3*i+0] : 0.0);
+                        double gy = snaps[c][3*i+1] - (bases[c] ? bases[c][3*i+1] : 0.0);
+                        double gz = snaps[c][3*i+2] - (bases[c] ? bases[c][3*i+2] : 0.0);
+                        fmt::print("  atom {:3d}: {:+.15e} {:+.15e} {:+.15e}\n", i, gx, gy, gz);
+                    }
+                }
+                CurcumaLogger::info("=== GPU PER-KERNEL END ===");
+            }
+        }
 
         // Always populate m_dEdcn_total — dEdcnTotal() is public API
         m_dEdcn_total.resize(N);
         for (int i = 0; i < N; ++i)
             m_dEdcn_total[i] = m_h_dEdcn_snap[i];
 
-        // TODO: Remove — debug dEdcn/qtmp fprintf
-        {
-            fprintf(stderr, "=== GPU dEdcn BEFORE qtmp (natoms=%d) ===\n", N);
+        // GPU dEdcn BEFORE qtmp (verbosity >= 3)
+        if (m_verbosity >= 3) {
+            CurcumaLogger::info(fmt::format("=== GPU dEdcn BEFORE qtmp (natoms={}) ===", N));
             for (int i = 0; i < N; ++i) {
-                fprintf(stderr, "  atom %2d: dEdcn=%22.15e\n", i, m_dEdcn_total[i]);
+                fmt::print("  atom {:3d}: dEdcn={:+.15e}\n", i, m_dEdcn_total[i]);
             }
-            fprintf(stderr, "=== GPU dEdcn END ===\n");
+            CurcumaLogger::info("=== GPU dEdcn END ===");
         }
 
         if (need_snapshots) {
@@ -1878,13 +2026,15 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
                 m_grad_before_cn(i, 1) = m_h_grad_snap[3*i+1];
                 m_grad_before_cn(i, 2) = m_h_grad_snap[3*i+2];
             }
-            // TODO: Remove — debug pre-CN gradient fprintf
-            fprintf(stderr, "=== GPU PRE-CN GRADIENT (natoms=%d) ===\n", N);
-            for (int i = 0; i < N; ++i) {
-                fprintf(stderr, "  atom %2d: %22.15e %22.15e %22.15e\n",
-                        i, m_grad_before_cn(i,0), m_grad_before_cn(i,1), m_grad_before_cn(i,2));
+            // GPU PRE-CN GRADIENT (verbosity >= 3)
+            if (m_verbosity >= 3) {
+                CurcumaLogger::info(fmt::format("=== GPU PRE-CN GRADIENT (natoms={}) ===", N));
+                for (int i = 0; i < N; ++i) {
+                    fmt::print("  atom {:3d}: {:+.15e} {:+.15e} {:+.15e}\n",
+                               i, m_grad_before_cn(i,0), m_grad_before_cn(i,1), m_grad_before_cn(i,2));
+                }
+                CurcumaLogger::info("=== GPU PRE-CN GRADIENT END ===");
             }
-            fprintf(stderr, "=== GPU PRE-CN GRADIENT END ===\n");
         }
     }
 
@@ -1906,23 +2056,25 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     m_result_energy.xbond         = e_xbond;
     m_result_energy.hbond         = e_hbond;
 
-    // TODO: Remove — debug per-term energy fprintf
-    fprintf(stderr, "=== GPU ENERGY TERMS ===\n");
-    fprintf(stderr, "  bond      = %22.15e\n", e_bond);
-    fprintf(stderr, "  angle     = %22.15e\n", e_angle);
-    fprintf(stderr, "  dihedral  = %22.15e\n", e_dihedral);
-    fprintf(stderr, "  inversion = %22.15e\n", e_inversion);
-    fprintf(stderr, "  stors     = %22.15e\n", e_stors);
-    fprintf(stderr, "  batm      = %22.15e\n", e_batm);
-    fprintf(stderr, "  atm       = %22.15e\n", e_atm);
-    fprintf(stderr, "  disp      = %22.15e\n", e_disp);
-    fprintf(stderr, "  brep      = %22.15e\n", e_brep);
-    fprintf(stderr, "  nbrep     = %22.15e\n", e_nbrep);
-    fprintf(stderr, "  coul1     = %22.15e\n", e_coul1);
-    fprintf(stderr, "  coul_self = %22.15e\n", e_coul_self);
-    fprintf(stderr, "  hbond     = %22.15e\n", e_hbond);
-    fprintf(stderr, "  xbond     = %22.15e\n", e_xbond);
-    fprintf(stderr, "=== GPU ENERGY END ===\n");
+    // GPU ENERGY TERMS (verbosity >= 3)
+    if (m_verbosity >= 3) {
+        CurcumaLogger::info("=== GPU ENERGY TERMS ===");
+        fmt::print("  bond      = {:+.15e}\n", e_bond);
+        fmt::print("  angle     = {:+.15e}\n", e_angle);
+        fmt::print("  dihedral  = {:+.15e}\n", e_dihedral);
+        fmt::print("  inversion = {:+.15e}\n", e_inversion);
+        fmt::print("  stors     = {:+.15e}\n", e_stors);
+        fmt::print("  batm      = {:+.15e}\n", e_batm);
+        fmt::print("  atm       = {:+.15e}\n", e_atm);
+        fmt::print("  disp      = {:+.15e}\n", e_disp);
+        fmt::print("  brep      = {:+.15e}\n", e_brep);
+        fmt::print("  nbrep     = {:+.15e}\n", e_nbrep);
+        fmt::print("  coul1     = {:+.15e}\n", e_coul1);
+        fmt::print("  coul_self = {:+.15e}\n", e_coul_self);
+        fmt::print("  hbond     = {:+.15e}\n", e_hbond);
+        fmt::print("  xbond     = {:+.15e}\n", e_xbond);
+        CurcumaLogger::info("=== GPU ENERGY END ===");
+    }
 
     return m_result_energy.total() + m_e0;
 }

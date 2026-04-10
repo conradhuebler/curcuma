@@ -16,6 +16,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "src/core/energy_calculators/ff_methods/cuda/gpu_utils.h"
+#include "src/core/energy_calculators/ff_methods/cn_calculator.h"
 
 #include <chrono>
 #include <cmath>
@@ -255,6 +256,32 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // We need CN uploaded to GPU before launching charge-independent kernels.
     m_gpu_workspace->setD3CN(m_gpu_cn_final);
 
+    // === DEBUG: CN comparison GPU vs CPU (verbosity >= 3) ===
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        std::vector<double> cn_cpu_vec = CNCalculator::calculateGFNFFCN(m_atom_types, geom_bohr);
+        Vector cn_cpu = Eigen::Map<Vector>(cn_cpu_vec.data(), N);
+        double max_diff = 0.0;
+        int worst_atom = -1;
+        for (int i = 0; i < N; ++i) {
+            double diff = std::abs(m_gpu_cn_final[i] - cn_cpu[i]);
+            if (diff > max_diff) {
+                max_diff = diff;
+                worst_atom = i;
+            }
+        }
+        CurcumaLogger::info(fmt::format(
+            "  [DEBUG] CN comparison: max_diff={:.2e} at atom {}, GPU_CN={:.6f} CPU_CN={:.6f}",
+            max_diff, worst_atom, m_gpu_cn_final[worst_atom], cn_cpu[worst_atom]));
+        if (max_diff > 1e-10) {
+            CurcumaLogger::info("  [DEBUG] CN values per atom:");
+            for (int i = 0; i < N; ++i) {
+                fmt::print("    CN[{:3d}] Z={:2d}: GPU={:.8f} CPU={:.8f} diff={:.2e}\n",
+                           i, m_atom_types[i], m_gpu_cn_final[i], cn_cpu[i],
+                           m_gpu_cn_final[i] - cn_cpu[i]);
+            }
+        }
+    }
+
     // --- Step 2a: Set up gradient state (CN pairs, dlogdcn, dc6dcn) ---
     // These must happen before launching charge-independent kernels because
     // k_dispersion needs dc6dcn and k_bonds needs d_cn.
@@ -328,6 +355,45 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         m_gpu_workspace->updateXBonds(m_gfnff->getLastXBonds(), m_atom_types);
         // Phase 8: HB/XB SoA n-values changed → captured graph is stale
         m_gpu_workspace->invalidateGraph();
+    }
+
+    // === DEBUG: HB/XB pair list comparison CPU vs GPU (verbosity >= 3) ===
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        const auto& hb_cpu = m_gfnff->getLastHBonds();
+        const auto& hb_gpu = m_gpu_workspace->getLastHBonds();
+        if (hb_cpu.size() != hb_gpu.size()) {
+            CurcumaLogger::warn(fmt::format(
+                "  [DEBUG] HB pair count mismatch: CPU={} GPU={}",
+                hb_cpu.size(), hb_gpu.size()));
+        } else {
+            CurcumaLogger::info(fmt::format(
+                "  [DEBUG] HB pair count: {} (matches)", hb_cpu.size()));
+        }
+        // Compare first few pairs in detail (HB: A-H...B with i=A, j=H, k=B)
+        size_t n_compare = std::min(hb_cpu.size(), hb_gpu.size());
+        for (size_t p = 0; p < n_compare && p < 20; ++p) {
+            bool same = (hb_cpu[p].i == hb_gpu[p].i &&
+                         hb_cpu[p].j == hb_gpu[p].j &&
+                         hb_cpu[p].k == hb_gpu[p].k &&
+                         hb_cpu[p].case_type == hb_gpu[p].case_type);
+            if (!same) {
+                CurcumaLogger::info(fmt::format(
+                    "  [DEBUG] HB pair[{}] diff: CPU(A={} H={} B={} case={}) GPU(A={} H={} B={} case={})",
+                    p, hb_cpu[p].i, hb_cpu[p].j, hb_cpu[p].k, hb_cpu[p].case_type,
+                    hb_gpu[p].i, hb_gpu[p].j, hb_gpu[p].k, hb_gpu[p].case_type));
+            }
+        }
+
+        const auto& xb_cpu = m_gfnff->getLastXBonds();
+        const auto& xb_gpu = m_gpu_workspace->getLastXBonds();
+        if (xb_cpu.size() != xb_gpu.size()) {
+            CurcumaLogger::warn(fmt::format(
+                "  [DEBUG] XB pair count mismatch: CPU={} GPU={}",
+                xb_cpu.size(), xb_gpu.size()));
+        } else {
+            CurcumaLogger::info(fmt::format(
+                "  [DEBUG] XB pair count: {} (matches)", xb_cpu.size()));
+        }
     }
 
     auto t1 = std::chrono::high_resolution_clock::now();
