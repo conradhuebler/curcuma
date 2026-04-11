@@ -18,6 +18,7 @@
  */
 #include "rmsd/rmsd_functions.h"
 #include "src/core/global.h" // For CurcumaLogger - Claude Generated
+#include "src/core/citation_registry.h"
 #include "src/global_config.h"
 #include "src/core/parameter_registry.h"  // Claude Generated - For ParameterRegistry::getInstance()
 
@@ -1627,9 +1628,7 @@ bool RMSDDriver::MolAlignLib()
     pclose(FileOpen);
 
     if (std::filesystem::exists("aligned.xyz") and !rndm) {
-        if (m_verbosity >= 1) {
-            CurcumaLogger::citation("J. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187");
-        }
+        CurcumaLogger::citation("molalign");
         FileIterator file("aligned.xyz", true);
         m_reference_centered = file.Next();
         m_target_reordered = file.Next();

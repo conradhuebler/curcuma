@@ -1,7 +1,7 @@
 {
   "molecule": {
     "name": "acetic_acid_dimer",
-    "geometry_file": "external/gfnff/test/acetic_acid_dimer.xyz",
+    "geometry_file": "test_cases/molecules/larger/acetic_acid_dimer.xyz",
     "atoms": [
       {
         "element": "C",

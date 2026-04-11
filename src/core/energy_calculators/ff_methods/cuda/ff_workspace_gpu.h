@@ -122,6 +122,13 @@ public:
     const double* getCNPinnedBuffer() const { return m_h_cn_final; }
 
     /**
+     * @brief Get pointer to pinned CN_raw buffer (valid after computeCN()).
+     * Raw (un-squashed) CN values needed for dlogdcn computation.
+     * @return Pointer to N doubles (raw erf-sum CN values)
+     */
+    const double* getCNRawPinnedBuffer() const { return m_h_cn_raw; }
+
+    /**
      * @brief Check if GPU CN has been computed this step.
      */
     bool hasComputedCN() const { return m_cn_computed; }
@@ -171,6 +178,12 @@ public:
     /// Re-upload XBond SoA after dynamic re-detection
     void updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
                       const std::vector<int>& atom_types);
+
+    /// Get last uploaded HBond list (for CPU vs GPU comparison debugging)
+    const std::vector<GFNFFHydrogenBond>& getLastHBonds() const { return m_last_hbonds; }
+
+    /// Get last uploaded XBond list (for CPU vs GPU comparison debugging)
+    const std::vector<GFNFFHalogenBond>& getLastXBonds() const { return m_last_xbonds; }
 
     /**
      * @brief Provide Coulomb self-energy parameters (size N each).
@@ -382,7 +395,8 @@ private:
 
     // GPU CN computation state
     // NOTE: No Eigen Vectors here — heap-corruption-safe.  CN data lives in pinned buffer only.
-    double* m_h_cn_final = nullptr; ///< [N] pinned staging buffer for CN download
+    double* m_h_cn_final = nullptr; ///< [N] pinned staging buffer for CN_final download
+    double* m_h_cn_raw   = nullptr; ///< [N] pinned staging buffer for CN_raw download
     bool    m_cn_computed = false; ///< GPU CN computed this step?
     std::vector<int> m_atom_types_cached; ///< Cached atom types for GPU CN
 
@@ -398,6 +412,10 @@ private:
     // Dynamic per-step state
     Vector  m_eeq_charges;
     Vector  m_topology_charges;
+
+    // Last uploaded HB/XB bond lists (for CPU vs GPU comparison debugging)
+    std::vector<GFNFFHydrogenBond> m_last_hbonds;
+    std::vector<GFNFFHalogenBond> m_last_xbonds;
 
     // Host-side dispersion pair indices (for per-step dc6dcn extraction)
     std::vector<int> m_disp_idx_i_host;
@@ -430,6 +448,12 @@ private:
     double* m_h_grad   = nullptr;   ///< [3*N] pinned staging for gradient download
     double* m_h_dEdcn_snap = nullptr; ///< [N] pinned staging for dEdcn snapshot download
     double* m_h_grad_snap  = nullptr; ///< [3*N] pinned staging for pre-CN grad snapshot
+    // Per-kernel diagnostic pinned buffers (Claude Generated April 2026)
+    double* m_h_grad_after_sA     = nullptr; ///< [3*N] grad after stream A (repulsion)
+    double* m_h_grad_after_bonds  = nullptr; ///< [3*N] grad after k_bonds
+    double* m_h_grad_after_angles = nullptr; ///< [3*N] grad after k_angles
+    double* m_h_grad_after_sB     = nullptr; ///< [3*N] grad after all stream B
+    double* m_h_grad_after_sC     = nullptr; ///< [3*N] grad after stream C (3-body)
     double* m_h_energies   = nullptr; ///< [14] pinned staging for per-term energy download
 
     // Results

@@ -30,7 +30,9 @@ UFF (default)
 - uff : Universal Force Field
 
 Native force field (no external dependency required):
-- gfnff : Native C++ GFN-FF implementation — full energy and gradient, good agreement with the Fortran reference implementation
+- **gfnff** : Native C++ GFN-FF — full energy and gradient, validated against Fortran reference (see status below)
+- **gfnff** + `-gpu cuda` : CUDA-accelerated variant; topology cached, charges on CPU, all kernels on GPU
+- **xtb-gfnff** : GFN-FF via the xtb Fortran library (USE_GFNFF build flag)
 
 tblite methods:
 - gfn1
@@ -49,8 +51,33 @@ UFF
 - J. Am. Chem. Soc. (1992) 114(25) p. 10024-10035,
 - with the H4 hydrogen bond correction (J. Chem. Theory Comput. 8, 141-151 (2012)) included (same parameters as applied in case of PM6-D3 for now).
 
-GFN-FF:
+GFN-FF (native C++ implementation):
 - S. Spicher and S. Grimme, Angew. Chem. Int. Ed. 2020, 59, 15665. DOI: 10.1002/anie.202004239
+
+### Native GFN-FF Status (April 2026)
+
+The native `gfnff` implementation is **AI-implemented and machine-tested** — human production testing is pending.
+
+**What works (validated by automated tests):**
+- All energy terms: bonds, angles, torsions, inversions, repulsion, dispersion (D4), Coulomb (EEQ), hydrogen bonds, halogen bonds, triple-bond torsions, BATM, ATM
+- Analytical gradients for all terms; GPU (CUDA) analytical gradients correct
+- 20 validation molecules (H₂ to a 1280-atom polymer) — energy vs. Fortran reference within tolerances
+- CUDA acceleration: topology caching, async CPU/GPU overlap, shared-memory reduction
+- Geometry optimization and MD using gradients
+
+**Not validated / not implemented:**
+- **Solvation (ALPB/GBSA)**: Code exists but never validated against reference — result unknown
+- **Periodic boundary conditions**: Not implemented
+- **Organometallics / transition metals**: No test molecule with metal center; parameter quality unknown
+- **Gradient accuracy for large systems**: Dispersion gradients show √N accumulation error (expected for O(N²) terms, scientifically acceptable for MD/opt)
+- **GPU energy for polymer (1280 atoms)**: 8.9 µEh vs. 1 µEh tolerance — pre-existing, under investigation
+
+**Known differences from Fortran reference** (see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)):
+- Sub-mEh agreement for most small/medium molecules
+- EEQ charge environment corrections (dxi) partially implemented
+- Metal-specific EEQ corrections (fqq) not implemented
+
+Do not use for production on untested system classes without cross-checking against `xtb-gfnff`.
 
 D3:
 - J. Chem. Phys. 132, 154104 (2010); https://doi.org/10.1063/1.3382344

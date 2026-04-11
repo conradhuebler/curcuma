@@ -209,9 +209,16 @@ ctest -R test_gfnff_gradients --verbose
 1. **Validate Repulsion gradients** against Fortran (bonded + non-bonded)
 2. **Run full regression test** with gradients enabled
 
-## Current Implementation Status (Mar 2026)
+## Current Implementation Status (Apr 2026)
 
-### ✅ Fully Implemented and Validated Terms
+### ⚠️ Overall Readiness: AI-implemented, machine-tested — human production testing pending
+- Solvation (ALPB): code exists, **not validated**
+- Periodic boundary conditions: **not implemented**
+- Organometallics/metals: code path exists, **not tested**
+- Optimization/MD: gradient-driven workflows run, **long-run stability untested by humans**
+- Reference: [docs/GFNFF_STATUS.md](../../../../docs/GFNFF_STATUS.md)
+
+### ✅ Fully Implemented and Validated Terms (automated tests)
 - Bond stretching (exponential potential) — < 0.1% error
 - Angle bending (cosine + damping + pi_bond_orders) — < 0.12 mEh (all molecules)
 - Dihedral torsion + extra torsions — active, < 2.5 mEh (triose)

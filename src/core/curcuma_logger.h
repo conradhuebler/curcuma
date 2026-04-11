@@ -23,8 +23,11 @@
 #include <chrono>
 #include <fmt/color.h>
 #include <fmt/core.h>
+#include <set>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
+#include <vector>
 
 using json = nlohmann::json;
 
@@ -73,7 +76,7 @@ public:
     static void success(const std::string& msg);
     static void result(const std::string& msg);  // Claude Generated: Neutral result reporting at level 1+
     static void info(const std::string& msg);
-    static void citation(const std::string& ref);
+    static void citation(const std::string& key);
 
     // Parameter logging with different types
     static void param(const std::string& key, const std::string& value);
@@ -142,6 +145,7 @@ public:
     template <typename... Args>
     static void citation_fmt(fmt::format_string<Args...> format_str, Args&&... args)
     {
+        // Deprecated: use CitationRegistry::cite(key) directly
         std::string msg = fmt::format(format_str, std::forward<Args>(args)...);
         citation(msg);
     }
@@ -164,6 +168,26 @@ public:
             param(key, value_str);
         }
     }
+
+private:
+    // Claude Generated (April 2026): Citation registry — short keys → full references
+    // Methods register a key at init, full citation is printed at program end.
+    static std::unordered_map<std::string, std::string> m_citation_registry;
+    static std::set<std::string> m_used_citations;
+
+public:
+    // Register a citation key. Multiple calls with the same key are deduplicated.
+    // If the key is not in the registry, the full text is stored directly.
+    // If the key matches a known registry entry, the registry text is used.
+    static void addCitation(const std::string& key, const std::string& full_text = "");
+
+    // Print all collected citations (call at program end). Always prints regardless of verbosity.
+    static void printCitations();
+
+    // Claude Generated (April 2026): Citation key registry
+    // Maps short keys (e.g. "gfnff") to full citation strings.
+    // Methods call addCitation("gfnff") at init, printCitations() at program end.
+    static void initCitationRegistry();
 
 private:
     // Helper functions for internal formatting

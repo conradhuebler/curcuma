@@ -1,8 +1,26 @@
 # GFN-FF Implementation Status
 
-**Last Updated**: 2026-03-08
-**Status**: ✅ **Dispersion FIXED — All molecules < 1 µEh error**
+**Last Updated**: 2026-04-11
+**Implementation**: AI-generated, machine-tested — **human production testing pending**
 **Location**: `src/core/energy_calculators/ff_methods/`
+
+---
+
+## Readiness Summary
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Energy (all terms) | ✅ Validated | 20 molecules, sub-mEh vs. Fortran |
+| Analytical gradients (CPU) | ✅ Validated | Numerical gradient check, all terms |
+| Analytical gradients (GPU) | ✅ Validated | 18/19 GPU tests pass; polymer energy tolerance 8.9 µEh |
+| Geometry optimization | ⚠️ Untested by humans | CI only; convergence on real systems unknown |
+| Molecular dynamics | ⚠️ Untested by humans | Gradients enabled; long-run stability unknown |
+| Solvation (ALPB/GBSA) | ❌ Not validated | Code exists, never tested vs. reference |
+| Periodic boundary conditions | ❌ Not implemented | — |
+| Organometallics / metals | ❌ Not tested | Parameter code present; quality unknown |
+| Large system stability (>500 atoms) | ⚠️ Partial | Polymer energy, gradient precision acceptable |
+
+**Recommendation**: Cross-check against `xtb-gfnff` for any system class not in the table above.
 
 ---
 

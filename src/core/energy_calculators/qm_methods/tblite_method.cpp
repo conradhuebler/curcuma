@@ -7,6 +7,7 @@
 
 #ifdef USE_TBLITE
 
+#include "src/core/citation_registry.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/config_manager.h"
 #include "src/tools/general.h"
@@ -49,6 +50,7 @@ TBLiteMethod::TBLiteMethod(const std::string& method_name, const json& config)
 bool TBLiteMethod::setMolecule(const Mol& mol) {
     m_molecule = mol;
     m_initialized = true;
+    CurcumaLogger::addCitation("tblite");
 #ifdef USE_TBLITE
     return m_tblite->InitialiseMolecule(mol);
 #else
@@ -67,6 +69,7 @@ bool TBLiteMethod::updateGeometry(const Matrix& geometry) {
 double TBLiteMethod::calculateEnergy(bool gradient)
 {
 #ifdef USE_TBLITE
+    CitationRegistry::cite("tblite");
     m_last_energy = m_tblite->Calculation(gradient);
     m_calculation_done = true;
     return m_last_energy;

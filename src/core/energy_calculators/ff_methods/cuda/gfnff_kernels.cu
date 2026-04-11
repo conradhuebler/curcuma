@@ -1105,23 +1105,25 @@ __global__ void k_inversions(
         double dd_jk = calc_ddamp(rjk_sq, rcov_2, rcov_1);
         double dd_jl = calc_ddamp(rjl_sq, rcov_3, rcov_1);
 
+        // Damping gradient: peripheral atom gets +fac*d, hub (j) gets -fac*d
+        // Matches Fortran gfnff_engrad.F90:1382-1385 and CPU CalculateGFNFFInversionContribution
         {
             double dx=cx[i]-cx[j], dy=cy[i]-cy[j], dz=cz[i]-cz[j];
             double fac = E_raw * dd_ij * damp_jk * damp_jl;
-            add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
-            add_grad(grad, i, -fac*dx, -fac*dy, -fac*dz);
+            add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
+            add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
         }
         {
             double dx=cx[k]-cx[j], dy=cy[k]-cy[j], dz=cz[k]-cz[j];
             double fac = E_raw * damp_ij * dd_jk * damp_jl;
-            add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
-            add_grad(grad, k, -fac*dx, -fac*dy, -fac*dz);
+            add_grad(grad, k,  fac*dx,  fac*dy,  fac*dz);
+            add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
         }
         {
             double dx=cx[l]-cx[j], dy=cy[l]-cy[j], dz=cz[l]-cz[j];
             double fac = E_raw * damp_ij * damp_jk * dd_jl;
-            add_grad(grad, j,  fac*dx,  fac*dy,  fac*dz);
-            add_grad(grad, l, -fac*dx, -fac*dy, -fac*dz);
+            add_grad(grad, l,  fac*dx,  fac*dy,  fac*dz);
+            add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
         }
     }
 

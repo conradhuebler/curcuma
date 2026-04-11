@@ -18,7 +18,8 @@
  */
 
 #include "gfnff_method.h"
-#include "src/core/curcuma_logger.h"
+#include "src/core/citation_registry.h"
+#include "src/tools/general.h"
 
 GFNFFComputationalMethod::GFNFFComputationalMethod(const std::string& method_name, const json& config)
     : m_parameters(config)
@@ -54,6 +55,9 @@ bool GFNFFComputationalMethod::updateGeometry(const Matrix& geometry) {
 }
 
 double GFNFFComputationalMethod::calculateEnergy(bool gradient) {
+    CitationRegistry::cite("gfnff");
+    CitationRegistry::cite("d4", "gfnff");
+    CitationRegistry::cite("h4", "gfnff");
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== GFNFFComputationalMethod::calculateEnergy() START ===");
     }

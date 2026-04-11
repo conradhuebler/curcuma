@@ -82,6 +82,7 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool 
 
     // Initialize CurcumaLogger with this method's verbosity - Claude Generated
     CurcumaLogger::set_verbosity(m_verbosity);
+    CurcumaLogger::initCitationRegistry();
 
     // m_curcuma_progress.open("curcuma_progress", std::ios::out);
 }
@@ -125,12 +126,14 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, int v
 
     // Initialize CurcumaLogger with this method's verbosity - Claude Generated
     CurcumaLogger::set_verbosity(m_verbosity);
+    CurcumaLogger::initCitationRegistry();
 
     //m_curcuma_progress.open("curcuma_progress", std::ios::out);
 }
 
 CurcumaMethod::~CurcumaMethod()
 {
+    CurcumaLogger::printCitations();
 }
 
 // Claude Generated 2025: Enhanced restart writing with automatic checksum and version
