@@ -600,6 +600,10 @@ public:
     // Claude Generated (March 2026): Phase 2 GPU dc6dcn — expose D4 internals
     D4ParameterGenerator* getD4Generator() { return m_d4_generator.get(); }
 
+    // Claude Generated (Apr 2026): P1a — Delegate CN-change threshold check to D4ParameterGenerator
+    bool canSkipD4GaussianWeightsUpdate(const std::vector<double>& cn) const;
+    void recordD4CNValues(const std::vector<double>& cn);
+
     /**
      * @brief Set external CN values (from GPU computation).
      * Claude Generated (March 2026): Phase 1 GPU CN migration.

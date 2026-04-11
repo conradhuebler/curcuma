@@ -4,3 +4,9 @@
 2026-04-11 17:50:30 | 1c27621 | gfnff | threads=4 | 157.70s | 157.7ms/step | ok | pre_optimization_baseline
 2026-04-11 17:53:08 | 1c27621 | xtb-gfnff | threads=4 | 422.07s | 422.1ms/step | ok | pre_optimization_baseline
 2026-04-11 18:01:44 | 1c27621 | gfnff-gpu | threads=4 | 30.02s | 30.0ms/step | ok | pre_optimization_baseline
+2026-04-11 19:40:43 | a41f31b | gfnff | threads=4 | 155.79s | 155.8ms/step | ok | after_P1a_d4_threshold  [vs 1c27621 speedup=1.01x]
+2026-04-11 19:43:45 | a41f31b | gfnff-gpu | threads=4 | 29.27s | 29.3ms/step | ok | after_P1a_d4_threshold_gpu  [vs 1c27621 speedup=1.03x]
+2026-04-11 20:05:00 | a41f31b | gfnff | threads=4 | 156.28s | 156.3ms/step | ok | P1a_threshold_0.0
+2026-04-11 20:07:57 | a41f31b | gfnff | threads=4 | 157.58s | 157.6ms/step | ok | P1a_threshold_0.01
+2026-04-11 20:10:34 | a41f31b | gfnff | threads=4 | 156.79s | 156.8ms/step | ok | P1a_threshold_0.05
+2026-04-11 20:13:10 | a41f31b | gfnff | threads=4 | 155.17s | 155.2ms/step | ok | P1a_threshold_0.1

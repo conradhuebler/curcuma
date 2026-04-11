@@ -1410,9 +1410,15 @@ void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
 // Claude Generated (Feb 15, 2026): Update CN values and recompute weight derivatives + dc6dcn
 // Called from GFNFF::Calculation() when gradient is requested
 // Reference: Fortran gfnff_gdisp0.f90:382-395 - dc6dcn used for dispersion gradient
+// Claude Generated (Apr 2026): P1a — Skip recomputation when CN change < threshold (MD optimization)
 void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool, int num_threads, bool skip_dc6dcn)
 {
     m_cn_values = cn;
+
+    // P1a: Skip recomputation if CN change is below threshold
+    if (canSkipGaussianWeightsUpdate(cn)) {
+        return;  // gw, dgw, dc6dcn all unchanged — valid for this step
+    }
 
     // Recompute gaussian weights with new CN values
     precomputeGaussianWeights(pool, num_threads);
@@ -1425,6 +1431,32 @@ void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& 
     if (!skip_dc6dcn) {
         computeDC6DCN(pool, num_threads);
     }
+
+    // Store CN for next step's threshold check
+    m_prev_cn_values = cn;
+    m_cn_cached = true;
+}
+
+// Claude Generated (Apr 2026): P1a — CN-change threshold check for Gaussian weight caching
+bool D4ParameterGenerator::canSkipGaussianWeightsUpdate(const std::vector<double>& new_cn) const
+{
+    double threshold = m_config.get<double>("d4_cn_cache_threshold", 0.01);
+    if (threshold <= 0.0) return false;  // Caching disabled
+    if (!m_cn_cached || m_prev_cn_values.size() != new_cn.size())
+        return false;
+    double max_change = 0.0;
+    for (size_t i = 0; i < new_cn.size(); ++i) {
+        double delta = std::abs(new_cn[i] - m_prev_cn_values[i]);
+        if (delta > max_change) max_change = delta;
+    }
+    return max_change < threshold;
+}
+
+// Claude Generated (Apr 2026): P1a — Record CN values for next step's threshold check
+void D4ParameterGenerator::recordCNValues(const std::vector<double>& cn)
+{
+    m_prev_cn_values = cn;
+    m_cn_cached = true;
 }
 
 // Claude Generated (March 2026): Native dispersion pair generation — bypasses JSON entirely

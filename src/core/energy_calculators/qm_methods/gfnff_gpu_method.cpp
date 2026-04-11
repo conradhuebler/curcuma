@@ -429,9 +429,17 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         const Vector& cnf = m_gfnff->getLastCNF();
         m_gpu_workspace->setCNDerivatives(cn, cnf, {});
 
-        // Phase 6: Gaussian weights + dc6dcn computed entirely on GPU
-        // (k_gaussian_weights + k_dc6dcn_per_pair, no CPU gw/dgw needed)
-        m_gpu_workspace->computeGaussianWeightsOnGPU();
+        // P1a: Skip GPU Gaussian weights + dc6dcn if CN change < threshold
+        // CN is available from prepareCNAndEEQ() which just ran on CPU
+        std::vector<double> cn_std(cn.data(), cn.data() + cn.size());
+        if (!m_gfnff->canSkipD4GaussianWeightsUpdate(cn_std)) {
+            // Phase 6: Gaussian weights + dc6dcn computed entirely on GPU
+            // (k_gaussian_weights + k_dc6dcn_per_pair, no CPU gw/dgw needed)
+            m_gpu_workspace->computeGaussianWeightsOnGPU();
+        }
+
+        // Update D4 CN tracking (even if we skipped GPU computation)
+        m_gfnff->recordD4CNValues(cn_std);
     }
 
     // === GPU EEQ: Build Coulomb matrix + Cholesky solve on GPU ===

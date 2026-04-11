@@ -9831,3 +9831,15 @@ double GFNFF::compareGradients(double dx)
     // Return the fixed-charge deviation (the actionable metric for gradient bugs)
     return max_diff_fixed;
 }
+
+// Claude Generated (Apr 2026): P1a — Delegate CN-change threshold check to D4ParameterGenerator
+bool GFNFF::canSkipD4GaussianWeightsUpdate(const std::vector<double>& cn) const
+{
+    if (!m_d4_generator) return false;
+    return m_d4_generator->canSkipGaussianWeightsUpdate(cn);
+}
+
+void GFNFF::recordD4CNValues(const std::vector<double>& cn)
+{
+    if (m_d4_generator) m_d4_generator->recordCNValues(cn);
+}

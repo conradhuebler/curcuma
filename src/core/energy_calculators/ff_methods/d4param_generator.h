@@ -49,6 +49,9 @@ BEGIN_PARAMETER_DEFINITION(d4param)
 
     // D4 atomic polarizability data
     PARAM(d4_r4r2_model, Int, 1, "D4 r4/r2 model (0=static, 1=dynamic).", "Model", {})
+
+    // Claude Generated (Apr 2026): P1a — CN-change threshold for Gaussian weight caching
+    PARAM(d4_cn_cache_threshold, Double, 0.01, "CN change threshold for skipping Gaussian weight recomputation (MD optimization). Set to 0.0 to disable caching.", "Advanced", {})
 END_PARAMETER_DEFINITION
 
 class D4ParameterGenerator {
@@ -103,6 +106,11 @@ public:
     // Claude Generated (March 2026): Public access for ATM triple generation without JSON
     double getChargeWeightedC6(int Zi, int Zj, size_t atom_i, size_t atom_j) const;
     double calculateTripleScale(int i, int j, int k) const;
+
+    // Claude Generated (Apr 2026): P1a — CN-change threshold cache for Gaussian weights
+    // Skip recomputation of gw/dgw/dc6dcn when CN changes < d4_cn_cache_threshold (MD optimization)
+    bool canSkipGaussianWeightsUpdate(const std::vector<double>& new_cn) const;
+    void recordCNValues(const std::vector<double>& cn);
 
 private:
     void initializeReferenceData();
@@ -191,6 +199,11 @@ private:
     // dc6dcn(i,j) = dC6(i,j)/dCN(i) - asymmetric matrix
     Matrix m_dc6dcn;
     bool m_dc6dcn_computed = false;
+
+    // Claude Generated (Apr 2026): P1a — CN-change threshold cache for Gaussian weights
+    // Skip recomputation of gw/dgw/dc6dcn when CN changes < threshold (MD optimization)
+    std::vector<double> m_prev_cn_values;  // Previous step's CN values
+    bool m_cn_cached = false;              // Whether m_prev_cn_values is valid
 
     // Mathematical constants
     static constexpr double PI = 3.14159265358979323846;
