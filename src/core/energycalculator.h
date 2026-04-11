@@ -138,10 +138,10 @@ public:
     double CalculateEnergy(bool gradient = false);
 
     /**
-     * @brief Get calculated gradients
+     * @brief Get calculated gradients (const reference, no copy)
      * @return Gradient matrix (natoms x 3)
      */
-    Matrix Gradient() const;
+    const Matrix& Gradient() const;
     
     /**
      * @brief Calculate numerical gradients (for testing/validation)

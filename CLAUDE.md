@@ -15,6 +15,37 @@
 - No completion claims until you can demonstrate zero remaining instances
 - Dont use git -A to blindly add files
 
+## AI-Generated Content and Validation Policy
+
+### Status Labels — Definitions
+These labels are used throughout CLAUDE.md files and documentation. Only the human operator may assign ✅ TESTED or ✅ APPROVED.
+
+| Label | Meaning | Who sets it |
+|-------|---------|-------------|
+| 🤖 AI-generated | Code written by AI, not reviewed by human | AI |
+| ⚙️ Machine-tested | Passes automated tests (CI, ctest) | AI |
+| 👁️ Human-reviewed | Human has read and understood the code | Human only |
+| ✅ TESTED | Human has run it on real problems and it behaves correctly | **Human only** |
+| ✅ APPROVED | Human confirms correctness, ready for production | **Human only** |
+
+**The AI must never write ✅ TESTED or ✅ APPROVED on its own work.**
+
+### Conservative Self-Assessment Rules for AI
+When documenting implemented features, the AI must apply these rules:
+
+1. **Automated tests pass ≠ correct** — tests only cover what was anticipated. Unknown failure modes exist.
+2. **Agreement with reference on test molecules ≠ general correctness** — the reference comparison is only as broad as the test set.
+3. **No gaps visible ≠ no gaps exist** — absence of a known bug is not the same as correctness. Especially for AI-generated scientific code: the most dangerous bugs are those that produce plausible but wrong results.
+4. **"Implemented" means the code compiles and runs** — it does not imply physical correctness, numerical stability across all inputs, or completeness relative to the reference method.
+5. **When in doubt, add a caveat** — a caveat that turns out to be unnecessary is harmless. A missing caveat on wrong code causes user errors.
+
+### Required Documentation for New AI-Generated Features
+Every new method or capability added by AI must include in its CLAUDE.md:
+- What was tested (which molecules, which conditions)
+- What was **not** tested (system classes, edge cases, conditions)
+- What is **not implemented** relative to the reference method
+- A note that human production testing is pending until the human removes it
+
 ## General Instructions
 
 - Each source code dir has a CLAUDE.md with basic information of the code and logic

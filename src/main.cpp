@@ -23,6 +23,7 @@
 #include "src/core/imagewriter.hpp"
 #include "src/core/molecule.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/citation_registry.h"
 
 #include "src/capabilities/analysenciplot.h"
 #include "src/capabilities/analysis.h"
@@ -658,8 +659,9 @@ json CLI2Json(int argc, char** argv)
     // Claude Generated (October 2025): Global parameters that should be accessible
     // both at top level (controller[param]) and module level (controller[module][param])
     // ENHANCED: Added "method" to support global energy method specification
+    // Claude Generated (March 2026): Added "gpu" for GPU acceleration control
     std::set<std::string> global_params = {
-        "verbosity", "threads", "method",  // energy_method applies to all capabilities
+        "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
         "export_run", "export-run", // Export current run configuration
         "import_config", "import-config" // Import custom configuration
     };
@@ -845,11 +847,6 @@ json CLI2Json(int argc, char** argv)
             global_values[param] = key[param];
         }
     }
-
-    // Claude Generated: DEBUG - Show what's in key before storing to controller
-    std::cerr << "[CLI2Json DEBUG] keyword=" << keyword << ", module_name=" << module_name << std::endl;
-    std::cerr << "[CLI2Json DEBUG] key object content:" << std::endl;
-    std::cerr << key.dump(2) << std::endl;
 
     // Build controller with proper structure using actual module name
     // This enables ConfigManager to find parameters under the correct module name
@@ -1153,6 +1150,8 @@ int executeDMatrix(const json& controller, int argc, char** argv) {
         return 0;
     }
 
+    CitationRegistry::cite("ripser");
+
     // Redirect to UnifiedAnalysis with topology properties enabled
     json dmatrix_config = controller.value("dMatrix", json::object());
     json analysis_config = controller;
@@ -1434,7 +1433,9 @@ int executeOptimization(const json& controller, int argc, char** argv) {
     }
 
     // Parse optional optimizer parameter from controller
-    json opt_config_base = controller.contains("opt") ? controller["opt"] : json::object();
+    // Guard against null JSON (can occur when -opt is used without additional parameters)
+    json opt_config_base = (controller.contains("opt") && controller["opt"].is_object())
+                           ? controller["opt"] : json::object();
     std::string optimizer_method = opt_config_base.value("optimizer", "auto");
 
     if (optimizer_method != "auto" && optimizer_method != "") {
@@ -1914,6 +1915,9 @@ int main(int argc, char **argv) {
 
     General::StartUp(argc, argv);
 
+    // Register curcuma self-citation
+    CitationRegistry::cite("curcuma");
+
     // Claude Generated: Initialize parameter registry early
     initialize_generated_registry();
     if (!ParameterRegistry::getInstance().validateRegistry()) {
@@ -2113,6 +2117,10 @@ int main(int argc, char **argv) {
 #else
     remove("stop");
 #endif
+
+    // Print citation summary and write BibTeX file
+    CitationRegistry::printSummary();
+    CitationRegistry::writeBibTeX();
 
     return 0;
 }

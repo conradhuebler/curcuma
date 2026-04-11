@@ -19,7 +19,10 @@
 #include <chrono>
 #include <fstream>  // Claude Generated (Mar 5, 2026): For diagnostic JSON output
 #include <limits>
+#include <thread>
+#include <future>
 #include <omp.h>  // Claude Generated (February 2026): Phase 3 - OpenMP parallelization
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 // External declarations from d4_reference_cn_fortran.cpp (Fortran dftd3param.f90 - January 2026)
 // CRITICAL FIX: Use Fortran reference CN data (matches dftd3param.f90) instead of cpp-d4 data
@@ -980,26 +983,20 @@ double D4ParameterGenerator::computeC6Reference(int elem_i, int elem_j, int ref_
     return c6_ref;
 }
 
-void D4ParameterGenerator::precomputeGaussianWeights()
+void D4ParameterGenerator::precomputeGaussianWeights(CxxThreadPool* pool, int num_threads)
 {
     // Claude Generated (Dec 27, 2025): Pre-compute CN-only Gaussian weights once per atom
+    // Claude Generated (Mar 2026): Internal std::thread parallelisation
     // Reference: external/gfnff/src/gfnff_gdisp0.f90:405 weight_cn() function
-    //
-    // ARCHITECTURAL NOTE:
-    // GFN-FF uses D4 Casimir-Polder integration with D3-style CN-only weighting.
-    // This is NOT full D4 (which uses CN+charge weighting), but a hybrid model.
-    // See Spicher & Grimme, Angew. Chem. Int. Ed. 2020, DOI: 10.1002/anie.202004239
-    //
-    // Performance optimization: Eliminates redundant exp() calls in getChargeWeightedC6()
-    // - Old approach: O(N²×M) exp() calls (compute weights for every atom pair)
-    // - New approach: O(N×M) exp() calls (compute weights once per atom)
-    // Expected speedup: 5-10x for molecules with 100+ atoms
 
     constexpr double wf = 4.0;  // Gaussian width parameter (from D4 cpp-d4)
 
-    m_gaussian_weights.resize(m_atoms.size());
+    int natoms_gw = static_cast<int>(m_atoms.size());
+    m_gaussian_weights.resize(natoms_gw);
 
-    for (size_t i = 0; i < m_atoms.size(); ++i) {
+    // Worker lambda: each thread processes interleaved atom indices
+    auto gw_worker = [&](int t_id, int T) {
+    for (int i = t_id; i < natoms_gw; i += T) {
         int Zi = m_atoms[i];
         int elem_i = Zi - 1;  // Convert to 0-based
 
@@ -1020,7 +1017,6 @@ void D4ParameterGenerator::precomputeGaussianWeights()
         // Get atom properties
         // EEQ charges calculated but NOT used in GFN-FF weighting (CN-only model)
         // Charges remain available for potential future full D4 implementation
-        double qi = m_eeq_charges(i);
         double cni = m_cn_values[i];
 
         // Compute Gaussian weights for all reference states of this atom
@@ -1028,7 +1024,6 @@ void D4ParameterGenerator::precomputeGaussianWeights()
         double sum_weights = 0.0;
 
         for (int ref = 0; ref < nref && ref < MAX_REF; ++ref) {
-            double qi_ref = m_refq[elem_i][ref];
             double cni_ref = (elem_i < static_cast<int>(m_refcn.size()) &&
                              ref < static_cast<int>(m_refcn[elem_i].size()))
                             ? m_refcn[elem_i][ref] : 0.0;
@@ -1036,9 +1031,6 @@ void D4ParameterGenerator::precomputeGaussianWeights()
             // KEY: CN-only Gaussian weighting (matches GFN-FF hybrid model)
             // Reference: external/gfnff/src/gfnff_gdisp0.f90:405 - cngw = exp(-wf * (cn - cnref)**2)
             double diff_cn = cni - cni_ref;
-            if (i == 0 && CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("DEBUG: i=0 ref={} cni={:.4f} cni_ref={:.4f} diff={:.4f}", ref, cni, cni_ref, diff_cn));
-            }
             weights[ref] = std::exp(-wf * diff_cn * diff_cn);
             sum_weights += weights[ref];
         }
@@ -1056,9 +1048,30 @@ void D4ParameterGenerator::precomputeGaussianWeights()
 
         m_gaussian_weights[i] = std::move(weights);
     }
+    };  // end gw_worker lambda
+
+    // Dispatch: parallel if beneficial, otherwise single-threaded
+    if (num_threads > 1 && natoms_gw > 64) {
+        int T = std::min(num_threads, natoms_gw);
+        if (pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(pool->enqueue(gw_worker, t, T));
+            gw_worker(0, T);
+            for (auto& f : futures) f.get();
+        } else {
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t)
+                threads[t - 1] = std::thread(gw_worker, t, T);
+            gw_worker(0, T);
+            for (auto& th : threads) th.join();
+        }
+    } else {
+        gw_worker(0, 1);
+    }
 
     // Claude Generated (Feb 8, 2026): Diagnostic for Gaussian weights (verbosity >= 3 only)
-    // Claude Generated (Mar 5, 2026): Removed atom count limit for large-system diagnostics
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("D4_GW_DIAG: Gaussian weights per atom:");
         for (size_t i = 0; i < m_atoms.size(); ++i) {
@@ -1229,13 +1242,16 @@ double D4ParameterGenerator::calculateTripleScale(int i, int j, int k) const
 //   d(expw)/dCN = -2*wf*(CN - CN_ref) * expw  = 2*wf*(CN_ref - CN) * expw
 //   norm = sum_ref expw(ref)
 //   d(norm)/dCN = sum_ref d(expw(ref))/dCN
-void D4ParameterGenerator::computeGaussianWeightDerivatives()
+void D4ParameterGenerator::computeGaussianWeightDerivatives(CxxThreadPool* pool, int num_threads)
 {
+    // Claude Generated (Mar 2026): Internal std::thread parallelisation
     constexpr double wf = 4.0;  // Gaussian width (matches precomputeGaussianWeights)
 
-    m_gaussian_weight_derivatives.resize(m_atoms.size());
+    int natoms_gwd = static_cast<int>(m_atoms.size());
+    m_gaussian_weight_derivatives.resize(natoms_gwd);
 
-    for (size_t i = 0; i < m_atoms.size(); ++i) {
+    auto gwd_worker = [&](int t_id, int T) {
+    for (int i = t_id; i < natoms_gwd; i += T) {
         int Zi = m_atoms[i];
         int elem_i = Zi - 1;
 
@@ -1252,7 +1268,6 @@ void D4ParameterGenerator::computeGaussianWeightDerivatives()
 
         double cni = m_cn_values[i];
 
-        // Compute raw weights and their derivatives
         std::vector<double> expw(nref, 0.0);
         std::vector<double> dexpw(nref, 0.0);
         double norm = 0.0;
@@ -1265,13 +1280,11 @@ void D4ParameterGenerator::computeGaussianWeightDerivatives()
 
             double diff_cn = cni - cni_ref;
             expw[ref] = std::exp(-wf * diff_cn * diff_cn);
-            // d(expw)/dCN = 2*wf*(CN_ref - CN) * expw (note sign: CN_ref - CN, not CN - CN_ref)
             dexpw[ref] = 2.0 * wf * (cni_ref - cni) * expw[ref];
             norm += expw[ref];
             dnorm += dexpw[ref];
         }
 
-        // Quotient rule: dgw/dCN = (dexpw * norm - expw * dnorm) / norm^2
         std::vector<double> dgwdcn(nref, 0.0);
         if (norm > 1e-10) {
             double norm2 = norm * norm;
@@ -1282,6 +1295,27 @@ void D4ParameterGenerator::computeGaussianWeightDerivatives()
 
         m_gaussian_weight_derivatives[i] = std::move(dgwdcn);
     }
+    };  // end gwd_worker lambda
+
+    if (num_threads > 1 && natoms_gwd > 64) {
+        int T = std::min(num_threads, natoms_gwd);
+        if (pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(pool->enqueue(gwd_worker, t, T));
+            gwd_worker(0, T);
+            for (auto& f : futures) f.get();
+        } else {
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t)
+                threads[t - 1] = std::thread(gwd_worker, t, T);
+            gwd_worker(0, T);
+            for (auto& th : threads) th.join();
+        }
+    } else {
+        gwd_worker(0, 1);
+    }
 }
 
 // Claude Generated (Feb 15, 2026): Compute dc6dcn matrix from weight derivatives and C6 references
@@ -1289,12 +1323,19 @@ void D4ParameterGenerator::computeGaussianWeightDerivatives()
 //
 // dc6dcn(i,j) = dC6(i,j)/dCN(i) = sum_{ri,rj} dgwdcn(ri,i) * gw(rj,j) * c6ref(ri,rj,Zi,Zj)
 // dc6dcn(j,i) = dC6(i,j)/dCN(j) = sum_{ri,rj} gw(ri,i) * dgwdcn(rj,j) * c6ref(ri,rj,Zi,Zj)
-void D4ParameterGenerator::computeDC6DCN()
+void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
 {
+    // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²×M²)
     int natoms = static_cast<int>(m_atoms.size());
     m_dc6dcn = Matrix::Zero(natoms, natoms);
 
-    for (int i = 0; i < natoms; ++i) {
+    // Thread safety proof: Each (i,j) pair with j >= i is processed by exactly the thread
+    // owning row i. Writes: m_dc6dcn(i,j) = dc6_di (row i, thread's own row) and
+    // m_dc6dcn(j,i) = dc6_dj (row j, column i). No other thread writes to (j,i) because
+    // the pair (i,j) is only processed once by the thread owning row i.
+    // Therefore direct writes to m_dc6dcn are safe without buffering.
+    auto dc6_worker = [&](int t_id, int T) {
+    for (int i = t_id; i < natoms; i += T) {
         int Zi = m_atoms[i];
         int elem_i = Zi - 1;
         if (elem_i < 0 || elem_i >= MAX_ELEM) continue;
@@ -1316,12 +1357,11 @@ void D4ParameterGenerator::computeDC6DCN()
 
             int nref_j = static_cast<int>(gw_j.size());
 
-            // Base offset in flat C6 cache
             const size_t base_ij = static_cast<size_t>(elem_i) * MAX_ELEM * MAX_REF * MAX_REF
                                  + static_cast<size_t>(elem_j) * MAX_REF * MAX_REF;
 
-            double dc6_di = 0.0;  // dC6(i,j)/dCN(i)
-            double dc6_dj = 0.0;  // dC6(i,j)/dCN(j)
+            double dc6_di = 0.0;
+            double dc6_dj = 0.0;
 
             for (int ri = 0; ri < nref_i && ri < MAX_REF; ++ri) {
                 size_t base_ri = base_ij + static_cast<size_t>(ri) * MAX_REF;
@@ -1334,14 +1374,34 @@ void D4ParameterGenerator::computeDC6DCN()
                 }
             }
 
-            m_dc6dcn(i, j) = dc6_di;
-            m_dc6dcn(j, i) = dc6_dj;
-
-            // For diagonal: dC6(i,i)/dCN(i) needs both derivatives
             if (i == j) {
                 m_dc6dcn(i, i) = dc6_di + dc6_dj;
+            } else {
+                m_dc6dcn(i, j) = dc6_di;  // dC6(i,j)/dCN(i)
+                m_dc6dcn(j, i) = dc6_dj;  // dC6(i,j)/dCN(j) — safe, unique writer
             }
         }
+    }
+    };  // end dc6_worker lambda
+
+    if (num_threads > 1 && natoms > 64) {
+        int T = std::min(num_threads, natoms);
+        if (pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(pool->enqueue(dc6_worker, t, T));
+            dc6_worker(0, T);
+            for (auto& f : futures) f.get();
+        } else {
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t)
+                threads[t - 1] = std::thread(dc6_worker, t, T);
+            dc6_worker(0, T);
+            for (auto& th : threads) th.join();
+        }
+    } else {
+        dc6_worker(0, 1);
     }
 
     m_dc6dcn_computed = true;
@@ -1350,14 +1410,115 @@ void D4ParameterGenerator::computeDC6DCN()
 // Claude Generated (Feb 15, 2026): Update CN values and recompute weight derivatives + dc6dcn
 // Called from GFNFF::Calculation() when gradient is requested
 // Reference: Fortran gfnff_gdisp0.f90:382-395 - dc6dcn used for dispersion gradient
-void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& cn)
+void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool, int num_threads, bool skip_dc6dcn)
 {
     m_cn_values = cn;
 
     // Recompute gaussian weights with new CN values
+    precomputeGaussianWeights(pool, num_threads);
+
+    // Compute weight derivatives (needed for dc6dcn — CPU or GPU)
+    computeGaussianWeightDerivatives(pool, num_threads);
+
+    // Claude Generated (March 2026): Phase 2 GPU dc6dcn — skip O(N²) matrix when
+    // GPU will compute dc6dcn per dispersion pair directly.
+    if (!skip_dc6dcn) {
+        computeDC6DCN(pool, num_threads);
+    }
+}
+
+// Claude Generated (March 2026): Native dispersion pair generation — bypasses JSON entirely
+// For 1410 atoms (993345 pairs), JSON overhead was ~10 seconds. Native: ~1 second.
+std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative(
+    const std::vector<int>& atoms, const Matrix& geometry_bohr)
+{
+    m_atoms = atoms;
+
+    // Step 1: CN calculation
+    m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
+
+    // Step 2: Reuse topology charges or compute fresh
+    if (m_topology_charges.size() != static_cast<Eigen::Index>(m_atoms.size())) {
+        Vector cn_eigen = Eigen::Map<const Vector>(m_cn_values.data(), m_cn_values.size());
+        m_eeq_charges = m_eeq_solver->calculateCharges(m_atoms, geometry_bohr, 0, &cn_eigen);
+    } else {
+        m_eeq_charges = m_topology_charges;
+    }
+
+    // Step 3: Pre-compute Gaussian weights and C6 reference matrix
+    if (!m_data_initialized) initializeReferenceData();
+    if (!m_c6_reference_cached) precomputeC6ReferenceMatrix();
     precomputeGaussianWeights();
 
-    // Compute weight derivatives and dc6dcn matrix
+    // Step 4: Generate pairs as native structs (no JSON!)
+    double a1 = m_config.get<double>("d4_a1", 0.58);
+    double a2 = m_config.get<double>("d4_a2", 4.80);
+    double s6 = m_config.get<double>("d4_s6", 1.0);
+    double s8 = m_config.get<double>("d4_s8", 2.0);
+
+    std::vector<GFNFFDispersion> all_pairs;
+
+    #pragma omp parallel
+    {
+        std::vector<GFNFFDispersion> local_pairs;
+
+        #pragma omp for schedule(dynamic, 10)
+        for (size_t i = 0; i < m_atoms.size(); ++i) {
+            for (size_t j = i + 1; j < m_atoms.size(); ++j) {
+                int atom_i = m_atoms[i];
+                int atom_j = m_atoms[j];
+
+                if (atom_i < 1 || atom_i > MAX_ELEM || atom_j < 1 || atom_j > MAX_ELEM)
+                    continue;
+
+                double c6 = getChargeWeightedC6(atom_i, atom_j, i, j);
+                double sqrt_zr4r2_i = getSqrtZr4r2(atom_i);
+                double sqrt_zr4r2_j = getSqrtZr4r2(atom_j);
+                double r4r2ij = 3.0 * sqrt_zr4r2_i * sqrt_zr4r2_j;
+                double r0_sq = std::pow(a1 * std::sqrt(r4r2ij) + a2, 2);
+
+                double q_i, q_j;
+                if (m_topology_charges.size() > 0) {
+                    q_i = (i < static_cast<size_t>(m_topology_charges.size())) ? m_topology_charges(i) : 0.0;
+                    q_j = (j < static_cast<size_t>(m_topology_charges.size())) ? m_topology_charges(j) : 0.0;
+                } else {
+                    q_i = (i < static_cast<size_t>(m_eeq_charges.size())) ? m_eeq_charges(i) : 0.0;
+                    q_j = (j < static_cast<size_t>(m_eeq_charges.size())) ? m_eeq_charges(j) : 0.0;
+                }
+                double zetac6 = GFNFFParameters::zetaChargeScale(atom_i, q_i)
+                              * GFNFFParameters::zetaChargeScale(atom_j, q_j);
+
+                GFNFFDispersion d;
+                d.i = static_cast<int>(i);
+                d.j = static_cast<int>(j);
+                d.C6 = c6;
+                d.r4r2ij = r4r2ij;
+                d.r0_squared = r0_sq;
+                d.r_cut = 50.0;
+                d.zetac6 = zetac6;
+                d.C8 = 3.0 * c6 * sqrt_zr4r2_i * sqrt_zr4r2_j;
+                d.s6 = s6;
+                d.s8 = s8;
+                d.a1 = a1;
+                d.a2 = a2;
+
+                local_pairs.push_back(d);
+            }
+        }
+
+        #pragma omp critical
+        {
+            all_pairs.insert(all_pairs.end(), local_pairs.begin(), local_pairs.end());
+        }
+    }
+
+    // Also compute dc6dcn for gradient computation
     computeGaussianWeightDerivatives();
     computeDC6DCN();
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result_fmt("D4 native dispersion: {} pairs generated", all_pairs.size());
+    }
+
+    return all_pairs;
 }

@@ -24,6 +24,7 @@
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
 #include "eeq_solver.h"  // EEQ charge calculation for D4
+#include "gfnff_parameters.h"  // GFNFFDispersion struct for native generation
 #include "cn_calculator.h"  // CN calculation for D4 (Claude Generated - December 2025)
 
 #include <Eigen/Dense>
@@ -31,6 +32,8 @@
 
 #include "json.hpp"
 using json = nlohmann::json;
+
+class CxxThreadPool;  // Forward declaration for pool-based parallelisation
 
 BEGIN_PARAMETER_DEFINITION(d4param)
     // D4 reference selection and scaling
@@ -57,6 +60,20 @@ public:
     void GenerateParameters(const std::vector<int>& atoms, const Matrix& geometry_bohr);
     json getParameters() const { return m_parameters; }
 
+    /**
+     * @brief Generate dispersion pairs as native structs (bypasses JSON entirely)
+     *
+     * Claude Generated (March 2026): Performance optimization for large systems.
+     * For 1410 atoms (993345 pairs), JSON overhead was ~10 seconds.
+     * Native struct generation reduces this to ~1 second.
+     *
+     * @param atoms Atomic numbers
+     * @param geometry_bohr Coordinates in Bohr
+     * @return Vector of GFNFFDispersion structs
+     */
+    std::vector<GFNFFDispersion> GenerateDispersionPairsNative(
+        const std::vector<int>& atoms, const Matrix& geometry_bohr);
+
     // Individual parameter accessors
     double getC6(int atom_i, int atom_j, int ref_i = 0, int ref_j = 0) const;
     double getR4OverR2(int atom) const;
@@ -71,12 +88,21 @@ public:
 
     // Claude Generated (Feb 15, 2026): dc6dcn computation for dispersion CN gradient
     // Reference: Fortran gfnff_gdisp0.f90:174-210, 262-305
-    void updateCNValuesForGradient(const std::vector<double>& cn);
+    // @param skip_dc6dcn  If true, skip O(N²) dc6dcn matrix (GPU computes per-pair)
+    void updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool = nullptr,
+                                    int num_threads = 1, bool skip_dc6dcn = false);
     const Matrix& getDC6DCN() const { return m_dc6dcn; }
 
-    // Charge-weighted C6 using EEQ charges and Gaussian weighting (Dec 2025)
-    // Claude Generated: Made public for native D4 fallback in GFN2
+    // Claude Generated (March 2026): GPU dc6dcn Phase 2 — expose weight arrays
+    const std::vector<std::vector<double>>& getGaussianWeights() const { return m_gaussian_weights; }
+    const std::vector<std::vector<double>>& getGaussianWeightDerivatives() const { return m_gaussian_weight_derivatives; }
+    const std::vector<double>& getC6FlatCache() const { return m_c6_flat_cache; }
+    const std::vector<int>& getRefN() const { return m_refn; }
+    const std::vector<std::vector<double>>& getRefCN() const { return m_refcn; }
+
+    // Claude Generated: Made public for native D4 fallback in GFN2 (Dec 2025) and ATM triples (Mar 2026)
     double getChargeWeightedC6(int Zi, int Zj, size_t atom_i, size_t atom_j) const;
+    double calculateTripleScale(int i, int j, int k) const;
 
 private:
     void initializeReferenceData();
@@ -86,14 +112,13 @@ private:
     double getEffectiveC6(int atom_i, int atom_j) const;
 
     // Claude Generated (Dec 27, 2025): Weight caching optimization
-    void precomputeGaussianWeights();
+    void precomputeGaussianWeights(CxxThreadPool* pool = nullptr, int num_threads = 1);
 
     // Claude Generated (Dec 27, 2025): C6 reference matrix pre-computation
     void precomputeC6ReferenceMatrix();
     double computeC6Reference(int elem_i, int elem_j, int ref_i, int ref_j) const;
 
-    // ATM three-body helper (Claude Generated 2025)
-    double calculateTripleScale(int i, int j, int k) const;
+    // getChargeWeightedC6 and calculateTripleScale moved to public section (March 2026)
 
     // Reference data from GFN-FF Fortran implementation
     // constexpr ensures inline definition (ODR-safe for C++14 and C++17)
@@ -157,8 +182,8 @@ private:
     std::vector<std::vector<int>> m_dominant_refs;  // [atom_idx] → list of significant ref indices
 
     // Claude Generated (Feb 15, 2026): dc6dcn computation helpers
-    void computeGaussianWeightDerivatives();
-    void computeDC6DCN();
+    void computeGaussianWeightDerivatives(CxxThreadPool* pool = nullptr, int num_threads = 1);
+    void computeDC6DCN(CxxThreadPool* pool = nullptr, int num_threads = 1);
 
     // Claude Generated (Feb 15, 2026): Gaussian weight derivatives and dc6dcn matrix
     // dgwdcn[atom_idx][ref_idx] = d(normalized_weight(ref))/d(CN(atom))

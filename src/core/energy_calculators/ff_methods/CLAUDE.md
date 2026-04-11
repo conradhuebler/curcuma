@@ -209,9 +209,16 @@ ctest -R test_gfnff_gradients --verbose
 1. **Validate Repulsion gradients** against Fortran (bonded + non-bonded)
 2. **Run full regression test** with gradients enabled
 
-## Current Implementation Status (Mar 2026)
+## Current Implementation Status (Apr 2026)
 
-### ✅ Fully Implemented and Validated Terms
+### ⚠️ Overall Readiness: AI-implemented, machine-tested — human production testing pending
+- Solvation (ALPB): code exists, **not validated**
+- Periodic boundary conditions: **not implemented**
+- Organometallics/metals: code path exists, **not tested**
+- Optimization/MD: gradient-driven workflows run, **long-run stability untested by humans**
+- Reference: [docs/GFNFF_STATUS.md](../../../../docs/GFNFF_STATUS.md)
+
+### ✅ Fully Implemented and Validated Terms (automated tests)
 - Bond stretching (exponential potential) — < 0.1% error
 - Angle bending (cosine + damping + pi_bond_orders) — < 0.12 mEh (all molecules)
 - Dihedral torsion + extra torsions — active, < 2.5 mEh (triose)
@@ -557,6 +564,46 @@ std::string method = "d4";  // Matches Fortran reference
 - Code consolidation: Eliminates duplicate D3 implementations
 - Consistency: Same D3 accuracy for both UFF-D3 and GFN-FF
 - Maintainability: Single D3 implementation to validate and update
+
+## GPU Pipeline (cuda/)
+
+### ✅ Phase 1+2: GPU CN + GPU dc6dcn (March 2026)
+- GPU CN computation replaces CPU O(N²) erf() loop
+- GPU dc6dcn per-pair kernel replaces CPU O(N²) matrix + extraction
+
+### ✅ Phase 3+4: CPU/GPU Overlap + Sync Removal (March 2026)
+- `prepareAndLaunchChargeIndependent()` launches ~12 charge-independent kernels while CPU EEQ runs
+- `launchChargeDependentAndFinish()` uploads EEQ charges, launches Coulomb + postprocess, downloads
+- k_dispersion deferred to charge-dependent phase when `gradient=true` (needs dc6dcn from post-EEQ)
+- Removed unnecessary `cudaStreamSynchronize` in `computeDC6DCNOnGPU`
+- Relaxed postprocess stream dependencies: k_coulomb_self has no stream wait, k_subtract_qtmp waits pairwise+bonded only
+
+### ✅ Phase 5: Shared Memory Energy Reduction (March 2026)
+- `blockReduceAddEnergy()` device function: block-level tree reduction in shared memory, one `atomicAdd` per block
+- All 12 energy kernels converted: k_dispersion, k_repulsion, k_coulomb, k_bonds, k_angles, k_dihedrals, k_inversions, k_storsions, k_batm, k_atm, k_xbonds, k_hbonds
+- Threads with tid >= n contribute `local_E = 0.0` (must stay for `__syncthreads()`)
+- Gradient atomicAdds unchanged (write to different addresses, no single-address contention)
+- Verified: GPU vs CPU energy diff < 1 nEh, 24/24 CPU regression tests pass
+
+### ✅ Phase 6: GPU Gaussian Weights + Async DMA (March 2026)
+- **k_gaussian_weights kernel**: Computes gw and dgw/dCN directly on GPU (1 thread/atom, MAX_REF=7 in registers)
+- **Full GPU dc6dcn pipeline**: k_gaussian_weights → k_dc6dcn_per_pair on same stream, no CPU→GPU sync
+- **Eliminates**: CPU `precomputeGaussianWeights()` + `computeGaussianWeightDerivatives()` + flatten + 2 sync H2D uploads
+- **`uploadRefCN()`**: One-time upload of reference CN values (826 doubles)
+- **Async DMA downloads**: All D2H transfers via `cudaMemcpyAsync` on main stream, single `cudaStreamSynchronize` at end
+- **Pinned energy buffer**: `m_h_energies` replaces stack array for true async transfer
+- **Adaptive block sizing**: `getLaunchConfig()` with `__launch_bounds__(512, 2)` on all 22 kernels
+- **Warp shuffle reduction**: `warpReduceSum()` via `__shfl_down_sync()` in `blockReduceAddEnergy()`
+
+### ✅ Topology Caching (March 2026)
+- **Two-tier caching**: Static topology (bonds, rings, hybridization) cached until large geometry change (>0.5 Bohr)
+- **Dynamic state only**: CN and distance matrices updated each step (O(N²) vs O(N³) for full topology)
+- **MD speedup**: ~15x for topology phase when topology is constant (typical MD)
+- **Implementation**: `getCachedTopology()` in `gfnff_method.cpp`, `needsFullTopologyUpdate()` checks displacement
+
+### ⚠️ Known Issues
+- gfnff GPU validation tests (test_gfnff_gpu) fail with JSON null error — pre-existing, unrelated to pipeline
+- k_dispersion cannot overlap with EEQ in gradient mode (dc6dcn dependency)
 
 ## Open Bugs
 

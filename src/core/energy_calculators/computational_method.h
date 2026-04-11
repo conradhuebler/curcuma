@@ -98,6 +98,20 @@ public:
     virtual Position getDipole() const = 0;
     
     /**
+     * @brief Copy gradient into pre-allocated target (avoids heap allocation).
+     *
+     * Claude Generated (March 2026): CUDA operations corrupt C++ heap metadata.
+     * getGradient() returns by value → temporary Matrix → heap alloc → crash.
+     * This method copies directly into caller's pre-allocated buffer.
+     * Override in GPU methods to use memcpy; default calls getGradient().
+     *
+     * @param target Pre-allocated N×3 matrix (must already be correct size)
+     */
+    virtual void copyGradientTo(Matrix& target) const {
+        target = getGradient();
+    }
+
+    /**
      * @brief Check if analytical gradients are available
      * @return true if method can provide analytical gradients
      */

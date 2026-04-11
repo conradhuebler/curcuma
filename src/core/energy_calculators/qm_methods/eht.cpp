@@ -22,6 +22,7 @@
 #include "eht.h"
 
 #include "interface/abstract_interface.h"
+#include "src/core/citation_registry.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
@@ -157,6 +158,7 @@ bool EHT::InitialiseMolecule()
 
 double EHT::Calculation(bool gradient)
 {
+    CitationRegistry::cite("eht");
     m_threads = 1; // EHT typically uses single thread for matrix operations
     // std::cout << m_geometry << std::endl << std::endl;
     //  Check for gradient request (not supported in EHT)

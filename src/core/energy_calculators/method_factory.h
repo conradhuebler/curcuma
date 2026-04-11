@@ -97,24 +97,16 @@ private:
      * @brief Create IPEA1 method (TBLite only)
      */
     static std::unique_ptr<ComputationalMethod> createIPEA1(const json& config);
-    
+    static std::unique_ptr<ComputationalMethod> createGFNFF(const json& config);
+
     // =================================================================================
     // Explicit Method Creation (single provider)
     // =================================================================================
-    
+
     /**
      * @brief Create Extended Hückel Theory method
      */
     static std::unique_ptr<ComputationalMethod> createEHT(const json& config);
-    
-    /**
-     * @brief Create native GFN-FF method
-     */
-    static std::unique_ptr<ComputationalMethod> createGFNFF(const json& config);
-    
-    /**
-     * @brief Create UFF/QMDFF force field methods
-     */
     static std::unique_ptr<ComputationalMethod> createForceField(const json& config);
     
     /**

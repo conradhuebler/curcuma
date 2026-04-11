@@ -123,9 +123,6 @@ bool GFNFFInterface::InitialiseMolecule(const int* attyp, const double* coord, c
         CurcumaLogger::param("coordinates", "converted to Bohr");
     }
 
-    // Sync Fortran gff_print flag with current verbosity before init
-    c_gfnff_set_printlevel(m_printlevel);
-
     // Initialize external GFN-FF calculator (using stored Bohr coordinates)
     // Note: API returns calculator object, not status code
     double (*coord_ptr)[3] = reinterpret_cast<double (*)[3]>(m_coordinates_bohr.data());
@@ -231,9 +228,6 @@ double GFNFFInterface::Calculation(bool gradient)
         CurcumaLogger::param("grad_ptr", fmt::format("{}", (void*)grad_ptr));
     }
 
-    // Sync Fortran gff_print flag with current verbosity before singlepoint
-    c_gfnff_set_printlevel(m_printlevel);
-
     int iostat = 0;
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Calling external GFN-FF singlepoint calculation...");
@@ -330,8 +324,5 @@ void GFNFFInterface::updateVerbosity()
     } else {
         m_printlevel = 0;
     }
-#ifdef USE_GFNFF
-    // Sync Fortran gff_print module variable with current verbosity
-    c_gfnff_set_printlevel(m_printlevel);
-#endif
+    // Note: External GFN-FF receives printlevel via c_gfnff_calculator_init, not via separate function
 }

@@ -22,6 +22,7 @@
 #include "src/core/global.h"
 
 #include "forcefieldthread.h"
+#include "ff_workspace.h"
 
 #include "src/core/hbonds.h"
 
@@ -100,6 +101,21 @@ public:
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
 
+    /**
+     * @brief Set GFN-FF parameters from native structs (no JSON round-trip)
+     *
+     * Claude Generated (March 2026): Primary parameter intake for GFN-FF.
+     * Replaces the JSON serialization/deserialization path for in-memory transfer.
+     * JSON-based setParameter() is kept only for loading cached parameters from disk.
+     *
+     * @param params Complete GFN-FF parameter set as native C++ structs
+     */
+    void setGFNFFParameters(const GFNFFParameterSet& params);
+
+    /// Claude Generated (March 2026): Clear parameter data in existing threads for reuse.
+    /// Avoids thread destruction/recreation when only parameters change.
+    void clearThreadData();
+
     // Claude Generated (Feb 15, 2026): HB/XB update methods for MD simulations
     // Reference: Fortran gfnff_engrad.F90:246-260 - dynamic list rebuilding
     void updateGFNFFHBonds(const json& hbonds);
@@ -116,6 +132,11 @@ public:
     bool autoSaveParameters() const;
     static std::string generateParameterFileName(const std::string& geometry_file);
     void setParameterCaching(bool enable) { m_enable_caching = enable; }
+
+    // Claude Generated (March 2026): Topology cache — opaque JSON block stored in param.json
+    // GFNFF sets topology data after calculation; ForceField persists it with other parameters.
+    void setTopologyCache(const json& topology) { m_topology_cache = topology; }
+    const json& getTopologyCache() const { return m_topology_cache; }
 
     // Phase 5A: Distribute EEQ charges to all threads for fqq calculation (Claude Generated Nov 2025)
     void distributeEEQCharges(const Vector& charges);
@@ -142,10 +163,17 @@ public:
     // Reference: Fortran gfnff_gdisp0.f90:262-305 - dc6dcn(i,j) = dC6(i,j)/dCN(i)
     void setDispersionDC6DCN(const Matrix& dc6dcn);
 
+    /// Claude Generated (Mar 2026): Zero-copy dc6dcn — threads point directly to D4Generator's matrix
+    void setDispersionDC6DCNPtr(const Matrix* dc6dcn_ptr) {
+        for (auto* thread : m_stored_threads) {
+            thread->setDispersionDC6DCN(dc6dcn_ptr);
+        }
+    }
+
     // Claude Generated (Feb 1, 2026): Distribute CN, CNF, and CN derivatives for Coulomb gradients
     // Reference: Fortran gfnff_engrad.F90:418-422 - charge derivative via CN
     void distributeCNandDerivatives(const Vector& cn, const Vector& cnf,
-                                     const std::vector<Matrix>& dcn);
+                                     const std::vector<SpMatrix>& dcn);
 
     // Claude Generated (Feb 22, 2026): Distribute only CN to threads for energy-only evaluations
     // Needed so dynamic r0 in bonds uses current CN, not stale values from last gradient call
@@ -174,6 +202,9 @@ public:
 
     // Claude Generated: Parameter analysis functionality
     void printParameterSummary() const;
+
+    /// Claude Generated (Mar 2026): Expose thread pool for Phase-A sub-task parallelisation
+    CxxThreadPool* threadPool() const { return m_threadpool; }
 
 private:
     void AutoRanges();
@@ -288,9 +319,13 @@ private:
 
     // Claude Generated (Feb 1, 2026): CN, CNF, and CN derivatives for Coulomb charge derivative gradients
     // Reference: Fortran gfnff_engrad.F90:418-422 - qtmp(i) = q(i)*cnf(i)/(2*sqrt(cn(i)))
+    // Phase 1a (Mar 2026): Stored ONLY in ForceField, not copied to threads.
     Vector m_cn;                    // Coordination numbers per atom
     Vector m_cnf;                   // CNF parameters per atom (for qtmp calculation)
-    std::vector<Matrix> m_dcn;      // CN derivatives: dcn[dim](i,j) = dCN(j)/dr(i,dim)
+    std::vector<SpMatrix> m_dcn;    // CN derivatives (sparse): dcn[dim](i,j) = dCN(j)/dr(i,dim)
+
+    // Claude Generated (Mar 2026, Phase 1b): dc6dcn stored here, shared to threads via const pointer.
+    Matrix m_dc6dcn;                // dc6dcn(i,j) = dC6(i,j)/dCN(i)
 
     // Claude Generated (Feb 23, 2026): Per-atom Coulomb self-energy parameters
     // Extracted once from pairs at load time. Used for sequential TERM 2+3
@@ -311,7 +346,12 @@ private:
     bool m_store_gradient_components = false; // mirror of thread flag for getters
 
     json m_parameters;
+    json m_topology_cache;  // Claude Generated (March 2026): Opaque topology block for param.json persistence
     std::string m_auto_param_file; // Auto-detected parameter file path
     bool m_enable_caching = true; // Can be disabled for multi-threading
     bool m_in_setParameter = false; // Claude Generated: Recursive guard for setParameter()
+
+    // Claude Generated (March 2026): FFWorkspace for UFF/QMDFF (replaces ForceFieldThread path)
+    std::unique_ptr<FFWorkspace> m_workspace;
+    bool m_use_workspace = false; ///< True when UFF/QMDFF use FFWorkspace path
 };

@@ -67,6 +67,7 @@ bool EHTMethod::setMolecule(const Mol& mol) {
         m_molecule = mol;
         m_calculation_done = false;
         m_initialized = true;
+        CurcumaLogger::addCitation("eht");
         clearError();
         
         // Initialize EHT with molecule (use QMInterface base class method)
