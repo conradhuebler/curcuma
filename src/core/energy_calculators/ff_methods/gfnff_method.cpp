@@ -642,20 +642,19 @@ bool GFNFF::needsFullTopologyUpdate(const Eigen::MatrixXd& geometry_bohr) const 
 // ---------------------------------------------------------------------------
 
 void GFNFF::updateDynamicState(TopologyInfo& topo) const {
-    // Only recalculate geometry-dependent data (CN, distance matrices)
-    // This is O(N²) but much cheaper than full topology recalculation
+    // Only recalculate geometry-dependent data (CN)
+    // This is O(N*k) with neighbor list (P2b) or O(N²) with threshold
 
     const int natoms = m_atomcount;
 
     // P2a (Apr 2026): Distance matrix removed from per-step path.
-    // CN is now computed on-the-fly by CNCalculator with threshold cutoff.
     // Only the initial topology build creates the distance matrix.
     topo.distance_matrix.resize(0, 0);  // No per-step distance matrix
 
-    // P2a (Apr 2026): Use CNCalculator with erf-based formula and threshold cutoff
-    // instead of D3-style exponential formula that required the full distance matrix.
-    // CNCalculator computes distances on-the-fly with 40 Bohr threshold, eliminating O(N²) memory.
-    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+    // P2b (Apr 2026): Configurable CN cutoff — neighbor list, accuracy-based, or full O(N²)
+    double cn_cutoff_bohr = m_parameters.value("cn_cutoff_bohr", 6.0);
+    double cn_accuracy = m_parameters.value("cn_accuracy", 1.0);
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_cutoff_bohr, cn_accuracy, -7.5, 4.4);
     topo.coordination_numbers = Eigen::Map<const Eigen::VectorXd>(cn_vec.data(), cn_vec.size());
 }
 

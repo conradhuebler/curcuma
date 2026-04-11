@@ -24,6 +24,7 @@
 
 #include "json.hpp"
 #include "src/core/config_manager.h"
+#include "src/core/parameter_macros.h"
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
 
 #include "src/core/energy_calculators/ff_methods/ff_workspace.h"  // Claude Generated (Mar 2026): Unified workspace
@@ -96,6 +97,16 @@ inline bool isMetalAtom(int atomic_number) {
            (atomic_number >= 57 && atomic_number <= 80) ||   // La-Hg
            (atomic_number >= 89 && atomic_number <= 103);    // Ac-Lr
 }
+
+// P2b (Apr 2026): CN cutoff parameters — configurable via CLI
+// Three modes:
+//   cn_cutoff_bohr > 0: Neighbor-list mode (default 6.0 Bohr, fast O(N*k))
+//   cn_cutoff_bohr = 0, cn_accuracy > 0: Fortran accuracy-based threshold (cnthr = 100 - log10(acc)*50)
+//   cn_cutoff_bohr = 0, cn_accuracy = 0: Full O(N²) reference mode (no cutoff)
+BEGIN_PARAMETER_DEFINITION(gfnff)
+PARAM(cn_cutoff_bohr, Double, 6.0, "CN neighbor list cutoff radius in Bohr. 0 = use accuracy-based threshold instead.", "Advanced", {})
+PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
+END_PARAMETER_DEFINITION
 
 class GFNFF {
 public:

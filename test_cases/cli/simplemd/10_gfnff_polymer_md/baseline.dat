@@ -15,3 +15,4 @@
 2026-04-11 22:29:24 | cd581be | gfnff | threads=4 | 31.70s | 31.7ms/step | bad | after_P1b_round_robin_INVALID_TIMING
 2026-04-12 | cd581be | gfnff | threads=4 | 151.1s | 151.1ms/step | ok | after_P1b_round_robin  [vs 1c27621 speedup=1.04x]
 2026-04-12 | 31d0e7e | gfnff | threads=4 | 150.5s | 150.5ms/step | ok | after_P2a_distance_matrix_elimination  [vs 1c27621 speedup=1.05x]
+2026-04-12 | c2c6b03 | gfnff | threads=4 | 146.6s | 146.6ms/step | ok | after_P2b_neighbor_list_6bohr  [vs 1c27621 speedup=1.08x]
