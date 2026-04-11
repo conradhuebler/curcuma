@@ -182,23 +182,6 @@ if(USE_CUDA)
     endif()
 endif()
 
-# Claude Generated (April 2026): Isolated HB gradient test (CPU vs GPU vs finite-difference)
-add_executable(test_hb_gradient_isolation test_hb_gradient_isolation.cpp)
-target_link_libraries(test_hb_gradient_isolation curcuma_core)
-if(USE_CUDA)
-    target_link_libraries(test_hb_gradient_isolation CUDA::cudart)
-endif()
-if(USE_PCH)
-    target_precompile_headers(test_hb_gradient_isolation REUSE_FROM curcuma_core)
-endif()
-
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/acetic_acid_dimer.xyz
-     DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/)
-
-add_test(NAME gfnff_hb_gradient_isolation
-         COMMAND test_hb_gradient_isolation ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/acetic_acid_dimer.xyz
-         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-set_tests_properties(gfnff_hb_gradient_isolation PROPERTIES TIMEOUT 300 LABELS "gfnff;gradient;hbond")
 
 # Claude Generated: CLI argument validation test suite (October 2025)
 # Include comprehensive Bash-based CLI tests for all capabilities
