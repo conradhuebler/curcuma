@@ -17,6 +17,8 @@
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "src/core/energy_calculators/ff_methods/cuda/gpu_utils.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"
+#include "src/core/energy_calculators/ff_methods/forcefield.h"
+#include "src/core/energy_calculators/ff_methods/forcefieldthread.h"
 
 #include <chrono>
 #include <cmath>
@@ -256,7 +258,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // We need CN uploaded to GPU before launching charge-independent kernels.
     m_gpu_workspace->setD3CN(m_gpu_cn_final);
 
-    // === DEBUG: CN comparison GPU vs CPU (verbosity >= 3) ===
+    // CN consistency check: GPU vs CPU recompute (verbosity >= 3)
     if (CurcumaLogger::get_verbosity() >= 3) {
         std::vector<double> cn_cpu_vec = CNCalculator::calculateGFNFFCN(m_atom_types, geom_bohr);
         Vector cn_cpu = Eigen::Map<Vector>(cn_cpu_vec.data(), N);
@@ -270,10 +272,9 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
             }
         }
         CurcumaLogger::info(fmt::format(
-            "  [DEBUG] CN comparison: max_diff={:.2e} at atom {}, GPU_CN={:.6f} CPU_CN={:.6f}",
+            "  CN check: max_diff={:.2e} at atom {}, GPU_CN={:.6f} CPU_CN={:.6f}",
             max_diff, worst_atom, m_gpu_cn_final[worst_atom], cn_cpu[worst_atom]));
-        if (max_diff > 1e-10) {
-            CurcumaLogger::info("  [DEBUG] CN values per atom:");
+        if (max_diff > 1e-6) {
             for (int i = 0; i < N; ++i) {
                 fmt::print("    CN[{:3d}] Z={:2d}: GPU={:.8f} CPU={:.8f} diff={:.2e}\n",
                            i, m_atom_types[i], m_gpu_cn_final[i], cn_cpu[i],
@@ -353,23 +354,49 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     if (m_gfnff->consumeHBXBUpdate()) {
         m_gpu_workspace->updateHBonds(m_gfnff->getLastHBonds(), m_atom_types);
         m_gpu_workspace->updateXBonds(m_gfnff->getLastXBonds(), m_atom_types);
+
+        // Claude Generated (Apr 2026): Propagate HB re-detection to bond metadata and alpha pairs.
+        // Without this, the bond SoA's nr_hb/hb_H_atom and the HB alpha pair list become stale,
+        // causing gradient errors at H-bond atoms during optimization/MD.
+        // Reference: Fortran gfnff_ini2.f90:1008-1060 (bond_hb_AHB_set0/set1)
+        if (m_gpu_params_leaked) {
+            auto hb_update = m_gfnff->rebuildBondHBData(
+                m_gfnff->getLastHBonds(), m_gpu_params_leaked->bonds);
+
+            // Update HB alpha (H,B) pair list on GPU
+            m_gpu_workspace->updateHBAlphaPairs(hb_update.bond_hb_data, m_atom_types);
+
+            // Update per-bond nr_hb and hb_H_atom metadata on GPU
+            m_gpu_workspace->updateBondHBMetadata(hb_update.bond_nr_hb, hb_update.bond_hb_H_atom);
+
+            // Update leaked params' bond_hb_data for HB CN computation (Step 2b)
+            m_gpu_params_leaked->bond_hb_data = std::move(hb_update.bond_hb_data);
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format(
+                    "  [DEBUG] HB re-detection: updated bond_hb_data ({} entries), "
+                    "hb_alpha ({} pairs), bond nr_hb for {} bonds",
+                    m_gpu_params_leaked->bond_hb_data.size(),
+                    [&]() { int n = 0; for (const auto& e : m_gpu_params_leaked->bond_hb_data) n += e.B_atoms.size(); return n; }(),
+                    hb_update.bond_nr_hb.size()));
+            }
+        }
+
         // Phase 8: HB/XB SoA n-values changed → captured graph is stale
         m_gpu_workspace->invalidateGraph();
     }
 
-    // === DEBUG: HB/XB pair list comparison CPU vs GPU (verbosity >= 3) ===
+    // HB/XB pair list consistency: CPU vs GPU (verbosity >= 3)
     if (CurcumaLogger::get_verbosity() >= 3) {
         const auto& hb_cpu = m_gfnff->getLastHBonds();
         const auto& hb_gpu = m_gpu_workspace->getLastHBonds();
         if (hb_cpu.size() != hb_gpu.size()) {
             CurcumaLogger::warn(fmt::format(
-                "  [DEBUG] HB pair count mismatch: CPU={} GPU={}",
+                "  HB pair count mismatch: CPU={} GPU={}",
                 hb_cpu.size(), hb_gpu.size()));
         } else {
-            CurcumaLogger::info(fmt::format(
-                "  [DEBUG] HB pair count: {} (matches)", hb_cpu.size()));
+            CurcumaLogger::info(fmt::format("  HB pairs: {} (CPU==GPU)", hb_cpu.size()));
         }
-        // Compare first few pairs in detail (HB: A-H...B with i=A, j=H, k=B)
         size_t n_compare = std::min(hb_cpu.size(), hb_gpu.size());
         for (size_t p = 0; p < n_compare && p < 20; ++p) {
             bool same = (hb_cpu[p].i == hb_gpu[p].i &&
@@ -377,8 +404,8 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                          hb_cpu[p].k == hb_gpu[p].k &&
                          hb_cpu[p].case_type == hb_gpu[p].case_type);
             if (!same) {
-                CurcumaLogger::info(fmt::format(
-                    "  [DEBUG] HB pair[{}] diff: CPU(A={} H={} B={} case={}) GPU(A={} H={} B={} case={})",
+                CurcumaLogger::warn(fmt::format(
+                    "  HB pair[{}] diff: CPU(A={} H={} B={} case={}) GPU(A={} H={} B={} case={})",
                     p, hb_cpu[p].i, hb_cpu[p].j, hb_cpu[p].k, hb_cpu[p].case_type,
                     hb_gpu[p].i, hb_gpu[p].j, hb_gpu[p].k, hb_gpu[p].case_type));
             }
@@ -388,11 +415,10 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         const auto& xb_gpu = m_gpu_workspace->getLastXBonds();
         if (xb_cpu.size() != xb_gpu.size()) {
             CurcumaLogger::warn(fmt::format(
-                "  [DEBUG] XB pair count mismatch: CPU={} GPU={}",
+                "  XB pair count mismatch: CPU={} GPU={}",
                 xb_cpu.size(), xb_gpu.size()));
         } else {
-            CurcumaLogger::info(fmt::format(
-                "  [DEBUG] XB pair count: {} (matches)", xb_cpu.size()));
+            CurcumaLogger::info(fmt::format("  XB pairs: {} (CPU==GPU)", xb_cpu.size()));
         }
     }
 
