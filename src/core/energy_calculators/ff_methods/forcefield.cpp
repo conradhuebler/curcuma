@@ -1599,24 +1599,27 @@ void ForceField::AutoRanges()
         // Phase 4.2: Distribute GFN-FF pairwise non-bonded interactions (Claude Generated 2025)
         // Phase 2.2 (December 19, 2025): Extended for UFF-D3 native dispersion
         if (m_method == "gfnff" || m_method == "d3") {
+            // P1b (Apr 2026): Round-robin distribution for O(N²) pair types
+            // Improves load balancing when pairs have varying compute cost (cutoff-dependent)
             if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("Distributing {} GFN-FF dispersion pairs to thread {}", m_gfnff_dispersions.size(), i));
+                CurcumaLogger::info(fmt::format("Distributing {} GFN-FF dispersion pairs to thread {} (round-robin)", m_gfnff_dispersions.size(), i));
             }
-            for (int j = int(i * m_gfnff_dispersions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)); ++j) {
+            for (size_t j = i; j < m_gfnff_dispersions.size(); j += thread_count) {
                 thread->addGFNFFDispersion(m_gfnff_dispersions[j]);
             }
 
-            // Distribute bonded repulsion pairs
+            // Bonded repulsion: small set, linear strip is fine
             for (int j = int(i * m_gfnff_bonded_repulsions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_bonded_repulsions.size() / double(free_threads)); ++j) {
                 thread->addGFNFFBondedRepulsion(m_gfnff_bonded_repulsions[j]);
             }
 
-            // Distribute non-bonded repulsion pairs
-            for (int j = int(i * m_gfnff_nonbonded_repulsions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_nonbonded_repulsions.size() / double(free_threads)); ++j) {
+            // P1b (Apr 2026): Round-robin for non-bonded repulsion (O(N²), cutoff-dependent)
+            for (size_t j = i; j < m_gfnff_nonbonded_repulsions.size(); j += thread_count) {
                 thread->addGFNFFNonbondedRepulsion(m_gfnff_nonbonded_repulsions[j]);
             }
 
-            for (int j = int(i * m_gfnff_coulombs.size() / double(free_threads)); j < int((i + 1) * m_gfnff_coulombs.size() / double(free_threads)); ++j) {
+            // P1b (Apr 2026): Round-robin for Coulomb (O(N²), charge-dependent)
+            for (size_t j = i; j < m_gfnff_coulombs.size(); j += thread_count) {
                 thread->addGFNFFCoulomb(m_gfnff_coulombs[j]);
             }
 
@@ -1626,28 +1629,27 @@ void ForceField::AutoRanges()
 
         // Claude Generated (December 19, 2025): UFF-D3 native D3 dispersion distribution
         // Distribute D3 dispersion pairs to threads for parallel calculation
-        // P1c (Apr 2026): Use m_d3_pairs (D3DispersionPair) instead of m_gfnff_dispersions
+        // P1b (Apr 2026): Round-robin for D3 dispersion pairs (O(N²), cutoff-dependent)
         if (m_method == "uff-d3" && !m_d3_pairs.empty()) {
-            for (int j = int(i * m_d3_pairs.size() / double(free_threads)); j < int((i + 1) * m_d3_pairs.size() / double(free_threads)); ++j) {
+            for (size_t j = i; j < m_d3_pairs.size(); j += thread_count) {
                 thread->addD3Dispersion(m_d3_pairs[j]);
             }
 
             if (CurcumaLogger::get_verbosity() >= 3) {
-                int d3_count = int((i + 1) * m_d3_pairs.size() / double(free_threads)) - int(i * m_d3_pairs.size() / double(free_threads));
-                CurcumaLogger::param(fmt::format("thread_{}_d3_pairs", i), d3_count);
+                size_t d3_count = (m_d3_pairs.size() + thread_count - 1 - i) / thread_count;
+                CurcumaLogger::param(fmt::format("thread_{}_d3_pairs", i), static_cast<int>(d3_count));
             }
         }
 
-        // Claude Generated (December 25, 2025): GFN-FF Native D4 dispersion distribution
-        // Distribute D4 dispersion pairs to threads for parallel calculation
+        // P1b (Apr 2026): Round-robin for D4 dispersion (O(N²), cutoff-dependent)
         if (!m_d4_dispersions.empty()) {
-            for (int j = int(i * m_d4_dispersions.size() / double(free_threads)); j < int((i + 1) * m_d4_dispersions.size() / double(free_threads)); ++j) {
+            for (size_t j = i; j < m_d4_dispersions.size(); j += thread_count) {
                 thread->addD4Dispersion(m_d4_dispersions[j]);
             }
 
             if (CurcumaLogger::get_verbosity() >= 3) {
-                int d4_count = int((i + 1) * m_d4_dispersions.size() / double(free_threads)) - int(i * m_d4_dispersions.size() / double(free_threads));
-                CurcumaLogger::param(fmt::format("thread_{}_d4_pairs", i), d4_count);
+                size_t d4_count = (m_d4_dispersions.size() + thread_count - 1 - i) / thread_count;
+                CurcumaLogger::param(fmt::format("thread_{}_d4_pairs", i), static_cast<int>(d4_count));
             }
         }
 

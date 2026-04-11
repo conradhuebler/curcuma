@@ -12,3 +12,5 @@
 2026-04-11 20:13:10 | a41f31b | gfnff | threads=4 | 155.17s | 155.2ms/step | ok | P1a_threshold_0.1
 2026-04-11 20:52:47 | d75048e | gfnff | threads=4 | 157.85s | 157.9ms/step | ok | after_P1c_disp_struct_shrink  [vs 1c27621 speedup=1.00x]
 2026-04-11 21:10:00 | d75048e | gfnff | threads=4 | 157.85s | 157.9ms/step | ok | after_P1c_disp_struct_shrink
+2026-04-11 22:29:24 | cd581be | gfnff | threads=4 | 31.70s | 31.7ms/step | bad | after_P1b_round_robin_INVALID_TIMING
+2026-04-12 | cd581be | gfnff | threads=4 | 151.1s | 151.1ms/step | ok | after_P1b_round_robin  [vs 1c27621 speedup=1.04x]
