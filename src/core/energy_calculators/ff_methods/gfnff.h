@@ -170,8 +170,7 @@ public:
      */
     struct GFNFFDynamicState {
         Vector coordination_numbers;                             // D3 CN (geometry-dependent)
-        Eigen::MatrixXd distance_matrix;                         // N×N distances in Bohr
-        Eigen::MatrixXd squared_dist_matrix;                     // N×N squared distances
+        Eigen::MatrixXd distance_matrix;                         // N×N distances in Bohr (only for initial topology, not per-step)
     };
 
     /**
@@ -1365,12 +1364,13 @@ private:
      *
      * Returns the number of atoms within 20 Bohr (≈10.58 Å) of the given atom.
      * This is used for bond fcn correction factors in GFN-FF.
+     * P2a (April 2026): Now uses on-the-fly distance computation instead of N×N matrix.
      *
      * @param atom_index Index of atom to count neighbors for
-     * @param distance_matrix N×N distance matrix in Bohr
+     * @param geometry_bohr N×3 geometry matrix in Bohr
      * @return Number of neighbors within 20 Bohr cutoff
      */
-    int countNeighborsWithin20Bohr(int atom_index, const Eigen::MatrixXd& distance_matrix) const;
+    int countNeighborsWithin20Bohr(int atom_index, const Eigen::MatrixXd& geometry_bohr) const;
 
     /**
      * @brief Calculate simplified π-bond orders for all atom pairs
@@ -1398,7 +1398,7 @@ private:
      * @param hybridization Hybridization state per atom
      * @param pi_fragments Pi-system fragment IDs
      * @param charges EEQ atomic charges (needed for full Hückel)
-     * @param distances N×N distance matrix in Bohr (needed for full Hückel)
+     * @param geometry_bohr N×3 geometry matrix in Bohr (P2a: replaces distance matrix)
      * @return Vector of π-bond orders in triangular format (access via lin(i,j))
      */
     std::vector<double> calculatePiBondOrders(
@@ -1406,7 +1406,7 @@ private:
         const std::vector<int>& hybridization,
         const std::vector<int>& pi_fragments,
         const std::vector<double>& charges = {},
-        const Eigen::MatrixXd& distances = Eigen::MatrixXd()) const;
+        const Eigen::MatrixXd& geometry_bohr = Eigen::MatrixXd()) const;
 
     /**
      * @brief Calculate EEQ electrostatic energy
