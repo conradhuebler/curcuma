@@ -1,70 +1,78 @@
 #include <cassert>
 #include <iostream>
+#include <vector>
+#include <string>
 
-#include "src/tools/general.h"
+#include "src/tools/cli_parser.h"
 
-#include "json.hpp" // Include the JSON library
-/*
 using json = nlohmann::json;
 
 void testCLI2Json()
 {
-
     // Test case 1: No arguments
     {
-        char* argv[] = { (char*)"program" };
-        json result = CLI2Json(1, argv);
+        char* argv[] = { (char*)"curcuma" };
+        json result = CLIUtils::CLI2Json(1, argv);
         assert(result.empty());
     }
 
-    // Test case 2: Single flag
+    // Test case 2: Single flag (modern dash handling)
     {
-        char* argv[] = { (char*)"program", (char*)"-keyword", (char*)"-flag" };
-        json result = CLI2Json(3, argv);
-        assert(result["keyword"]["flag"] == true);
+        char* argv[] = { (char*)"curcuma", (char*)"--md", (char*)"--flag" };
+        json result = CLIUtils::CLI2Json(3, argv);
+        // "md" is mapped to "simplemd"
+        assert(result["simplemd"]["flag"] == true);
+        assert(result["md"]["flag"] == true);
     }
 
-    // Test case 3: Flag with value
+    // Test case 3: Hyphen to underscore (canonicalization)
     {
-        char* argv[] = { (char*)"program", (char*)"-keyword", (char*)"-flag", (char*)"value" };
-        json result = CLI2Json(4, argv);
-        assert(result["keyword"]["flag"] == "value");
+        char* argv[] = { (char*)"curcuma", (char*)"-opt", (char*)"--max-iter", (char*)"100" };
+        json result = CLIUtils::CLI2Json(4, argv);
+        assert(result["opt"]["max_iter"] == 100);
     }
 
-    // Test case 4: Flag with true
+    // Test case 4: Triple dashes and mixed formats
     {
-        char* argv[] = { (char*)"program", (char*)"-keyword", (char*)"-flag", (char*)"true" };
-        json result = CLI2Json(4, argv);
-        assert(result["keyword"]["flag"] == true);
+        char* argv[] = { (char*)"curcuma", (char*)"---sp", (char*)"-method", (char*)"uff", (char*)"--threads", (char*)"4" };
+        json result = CLIUtils::CLI2Json(6, argv);
+        assert(result["opt"]["method"] == "uff");
+        assert(result["global"]["method"] == "uff");
+        assert(result["global"]["threads"] == 4);
     }
 
-    // Test case 5: Flag with false
+    // Test case 5: Dotted parameters with prefix stripping
     {
-        char* argv[] = { (char*)"program", (char*)"-keyword", (char*)"-flag", (char*)"false" };
-        json result = CLI2Json(4, argv);
-        assert(result["keyword"]["flag"] == false);
+        char* argv[] = { (char*)"curcuma", (char*)"-md", (char*)"-md.max_time", (char*)"10.5" };
+        json result = CLIUtils::CLI2Json(4, argv);
+        // Should be at top level of simplemd, not nested
+        assert(result["simplemd"]["max_time"] == 10.5);
     }
 
-    // Test case 6: Flag with number
+    // Test case 6: Dotted parameters routing to other modules
     {
-        char* argv[] = { (char*)"program", (char*)"-keyword", (char*)"-flag", (char*)"123.45" };
-        json result = CLI2Json(4, argv);
-        assert(result["keyword"]["flag"] == 123.45);
+        char* argv[] = { (char*)"curcuma", (char*)"-opt", (char*)"-rmsd.method", (char*)"subspace" };
+        json result = CLIUtils::CLI2Json(4, argv);
+        assert(result["rmsd"]["method"] == "subspace");
     }
 
-    // Test case 7: Flag with vector
+    // Test case 7: Positional arguments handling
     {
-        char* argv[] = { (char*)"program", (char*)"-keyword", (char*)"-flag", (char*)"1,2,3" };
-        json result = CLI2Json(4, argv);
-        std::cout << result.dump(4) << std::endl; // Print the JSON for debugging
-        assert(result["keyword"]["flag"] == "1,2,3");
+        char* argv[] = { (char*)"curcuma", (char*)"-sp", (char*)"molecule.xyz", (char*)"extra_arg" };
+        json result = CLIUtils::CLI2Json(4, argv);
+        // "sp" is mapped to "opt"
+        assert(result["opt"]["input_file"] == "molecule.xyz");
+        assert(result["positional"].is_array());
+        assert(result["positional"].size() == 2);
+        assert(result["positional"][0] == "molecule.xyz");
+        assert(result["positional"][1] == "extra_arg");
     }
 
-    std::cout << "All tests passed!" << std::endl;
+    std::cout << "All CLI parsing tests passed!" << std::endl;
 }
-*/
+
 int main()
 {
-    // testCLI2Json();
+    testCLI2Json();
     return 0;
 }

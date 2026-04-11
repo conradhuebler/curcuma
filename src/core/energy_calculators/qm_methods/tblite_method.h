@@ -66,7 +66,10 @@ public:
     bool hasError() const override;
     void clearError() override;
     std::string getErrorMessage() const override;
-    
+
+    // Energy decomposition (JSON output - placeholder for native implementation)
+    json getEnergyDecomposition() const override;
+
     Vector getOrbitalEnergies() const override;
     Vector getOrbitalOccupations() const override;
 

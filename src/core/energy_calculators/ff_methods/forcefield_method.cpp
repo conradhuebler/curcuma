@@ -18,6 +18,7 @@
  */
 
 #include "forcefield_method.h"
+#include "src/core/citation_registry.h"
 #include "src/tools/general.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/config_manager.h"
@@ -63,6 +64,7 @@ ForceFieldMethod::ForceFieldMethod(const std::string& method_name, const json& c
     }
     
     CurcumaLogger::success("ForceFieldMethod created successfully");
+    CurcumaLogger::addCitation("uff");
 }
 
 bool ForceFieldMethod::initializeForceField() {
@@ -127,7 +129,7 @@ json ForceFieldMethod::generateForceFieldController() const {
     // Method-specific parameters
     if (m_method_name == "uff-d3") {
         controller["d3_correction"] = true;
-    } else if (m_method_name == "cgfnff") {
+    } else if (m_method_name == "gfnff") {
         controller["gfnff_mode"] = "native";
     }
     
@@ -207,7 +209,8 @@ double ForceFieldMethod::calculateEnergy(bool gradient)
     
     try {
         clearError();
-        
+
+        CitationRegistry::cite("uff");
         // Perform ForceField calculation
         m_last_energy = m_forcefield->Calculate(gradient);
 
@@ -272,8 +275,8 @@ void ForceFieldMethod::setThreadCount(int threads) {
     // For now, store for future calculations
     
     if (threads > 1 && m_parameters.value("parameter_caching", true)) {
-        // Warn about parameter caching with threading
-        fmt::print("Warning: Consider disabling parameter caching for multi-threaded calculations\n");
+        // Warn about parameter caching with threading (always visible to user)
+        CurcumaLogger::warn("Consider disabling parameter caching for multi-threaded calculations");
     }
 }
 
@@ -419,7 +422,7 @@ void ForceFieldMethod::setParameterFile(const std::string& filename) {
 // =================================================================================
 
 std::vector<std::string> ForceFieldMethod::getSupportedMethods() {
-    return {"uff", "uff-d3", "qmdff", "cgfnff"};
+    return {"uff", "uff-d3", "d3", "qmdff", "gfnff"};
 }
 
 bool ForceFieldMethod::isMethodSupported(const std::string& method_name) {
@@ -471,13 +474,15 @@ json ForceFieldMethod::getDefaultConfigForMethod(const std::string& method_name)
     // Method-specific defaults
     if (method_name == "uff-d3") {
         config["d3_correction"] = true;
-    } else if (method_name == "cgfnff") {
+    } else if (method_name == "gfnff") {
         config["gfnff_mode"] = "native";
-        config["parameter_caching"] = false;  // cgfnff has parameter issues
+        config["parameter_caching"] = true;
     } else if (method_name == "qmdff") {
         config["qmdff_version"] = "latest";
+    } else if (method_name == "d3") {
+        config["d3_preset"] = "pbe0";  // Default preset for D3-only method
     }
-    
+
     return config;
 }
 
@@ -488,14 +493,39 @@ std::string ForceFieldMethod::normalizeMethodName(const std::string& method_name
 }
 
 bool ForceFieldMethod::generateParametersIfNeeded(const Mol& mol) {
-    CurcumaLogger::info("Checking if ForceField parameters need to be generated");
-    
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Checking if ForceField parameters need to be generated");
+    }
+
     // Check if parameters are already set
     if (m_forcefield->hasParameters()) {
-        CurcumaLogger::info("ForceField parameters already available - skipping generation");
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("ForceField parameters already available - skipping generation");
+        }
         return true;
     }
-    
+
+    // Claude Generated (Dec 2025): Try to load from cache BEFORE expensive generation
+    // This avoids costly EEQ calculations and topology analysis for cached molecules
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Attempting to load parameters from cache before generation...");
+    }
+
+    if (m_forcefield->tryLoadAutoParameters(m_method_name)) {
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::success("✅ Loaded parameters from cache - skipping generation");
+        }
+        return true;
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::warn("Cache load failed or not available - will generate parameters");
+    }
+
+    // Cache not found or load failed - proceed with generation
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("No cached parameters found - generating new parameters");
+    }
     CurcumaLogger::info("Generating ForceField parameters using ForceFieldGenerator");
     CurcumaLogger::param("method", m_method_name);
     
@@ -606,16 +636,116 @@ namespace ForceFieldMethodUtils {
     double estimateMemoryUsage(const Mol& mol, int threads) {
         // Rough estimate of memory usage in MB
         int natoms = mol.m_number_atoms;
-        
+
         // Base memory for molecule data
         double base_memory = natoms * 0.001;  // ~1 KB per atom
-        
+
         // Threading overhead
         double thread_memory = threads * 0.1;  // ~100 KB per thread
-        
+
         // Force field matrices and parameters
         double ff_memory = natoms * natoms * 0.00001;  // Distance matrices etc.
-        
+
         return base_memory + thread_memory + ff_memory;
     }
+}
+
+// =================================================================================
+// Energy Decomposition (JSON output)
+// =================================================================================
+
+json ForceFieldMethod::getEnergyDecomposition() const {
+    json energy_json;
+
+    if (!m_forcefield) {
+        // Return zero JSON if ForceField not initialized
+        energy_json = {
+            {"Bond", 0.0},
+            {"Angle", 0.0},
+            {"Torsion", 0.0},
+            {"Inversion", 0.0},
+            {"Dispersion", 0.0},
+            {"Coulomb", 0.0},
+            {"HBond", 0.0},
+            {"XBond", 0.0},
+            {"ATM", 0.0},
+            {"BATM", 0.0}
+        };
+        return energy_json;
+    }
+
+    // Get all energy components from ForceField
+    energy_json["Bond"] = m_forcefield->BondEnergy();
+    energy_json["Angle"] = m_forcefield->AngleEnergy();
+    energy_json["Torsion"] = m_forcefield->DihedralEnergy();
+    energy_json["Inversion"] = m_forcefield->InversionEnergy();
+    energy_json["Dispersion"] = m_forcefield->DispersionEnergy();
+    energy_json["Coulomb"] = m_forcefield->CoulombEnergy();
+    energy_json["HBond"] = m_forcefield->HydrogenBondEnergy();
+    energy_json["XBond"] = m_forcefield->HalogenBondEnergy();
+    energy_json["ATM"] = m_forcefield->ATMEnergy();
+    energy_json["BATM"] = m_forcefield->BatmEnergy();
+
+    return energy_json;
+}
+
+// Claude Generated: Energy component getter methods (Nov 2025)
+double ForceFieldMethod::getBondEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->BondEnergy();
+}
+
+double ForceFieldMethod::getAngleEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->AngleEnergy();
+}
+
+double ForceFieldMethod::getDihedralEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->DihedralEnergy();
+}
+
+double ForceFieldMethod::getInversionEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->InversionEnergy();
+}
+
+double ForceFieldMethod::getVdWEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->VdWEnergy();
+}
+
+double ForceFieldMethod::getRepulsionEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->RepulsionEnergy();
+}
+
+double ForceFieldMethod::getDispersionEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->DispersionEnergy();
+}
+
+double ForceFieldMethod::getCoulombEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->CoulombEnergy();
+}
+
+double ForceFieldMethod::getHBondEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->HydrogenBondEnergy();
+}
+
+double ForceFieldMethod::getXBondEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->HalogenBondEnergy();
+}
+
+double ForceFieldMethod::getATMEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->ATMEnergy();
+}
+
+double ForceFieldMethod::getBatmEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->BatmEnergy();
 }

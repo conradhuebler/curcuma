@@ -7,6 +7,7 @@
 
 #ifdef USE_TBLITE
 
+#include "src/core/citation_registry.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/config_manager.h"
 #include "src/tools/general.h"
@@ -49,6 +50,7 @@ TBLiteMethod::TBLiteMethod(const std::string& method_name, const json& config)
 bool TBLiteMethod::setMolecule(const Mol& mol) {
     m_molecule = mol;
     m_initialized = true;
+    CurcumaLogger::addCitation("tblite");
 #ifdef USE_TBLITE
     return m_tblite->InitialiseMolecule(mol);
 #else
@@ -67,6 +69,7 @@ bool TBLiteMethod::updateGeometry(const Matrix& geometry) {
 double TBLiteMethod::calculateEnergy(bool gradient)
 {
 #ifdef USE_TBLITE
+    CitationRegistry::cite("tblite");
     m_last_energy = m_tblite->Calculation(gradient);
     m_calculation_done = true;
     return m_last_energy;
@@ -115,6 +118,25 @@ json TBLiteMethod::getParameters() const { return m_parameters; }
 bool TBLiteMethod::hasError() const { return m_has_error; }
 void TBLiteMethod::clearError() { m_has_error = false; m_error_message.clear(); }
 std::string TBLiteMethod::getErrorMessage() const { return m_error_message; }
+
+// Energy decomposition (JSON output) - placeholder for native implementation
+json TBLiteMethod::getEnergyDecomposition() const {
+    // QM methods don't have energy decomposition - return zero JSON
+    // Native implementations are work-in-progress
+    json energy_json = {
+        {"Bond", 0.0},
+        {"Angle", 0.0},
+        {"Torsion", 0.0},
+        {"Inversion", 0.0},
+        {"Dispersion", 0.0},
+        {"Coulomb", 0.0},
+        {"HBond", 0.0},
+        {"XBond", 0.0},
+        {"ATM", 0.0},
+        {"BATM", 0.0}
+    };
+    return energy_json;
+}
 
 Vector TBLiteMethod::getOrbitalEnergies() const {
 #ifdef USE_TBLITE

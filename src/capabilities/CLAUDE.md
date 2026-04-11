@@ -36,11 +36,11 @@ capabilities/
 
 ### Molecular Dynamics
 - **SimpleMD**: Basic molecular dynamics with various thermostats
-  - ✅ **NEW (Oct 2025)**: Coarse-graining support with automatic system detection
-  - ✅ **NEW (Oct 2025)**: PBC wrapping for periodic boundary conditions
-  - ✅ **NEW (Oct 2025)**: 10x timestep scaling for pure CG systems
-  - ✅ **NEW (Nov 2025)**: VTF trajectory output for CG systems
-  - ✅ **NEW (Nov 2025)**: Orientational dynamics infrastructure (prepared for Phase 6 ellipsoids)
+  - ✅ Coarse-graining support with automatic system detection
+  - ✅ PBC wrapping for periodic boundary conditions
+  - ✅ 10x timestep scaling for pure CG systems
+  - ✅ VTF trajectory output for CG systems
+  - ✅ Orientational dynamics infrastructure (prepared for Phase 6 ellipsoids)
 - **NEB Docking**: Nudged elastic band for transition state searches
 - **Trajectory Analysis**: Analysis tools for MD trajectories
 

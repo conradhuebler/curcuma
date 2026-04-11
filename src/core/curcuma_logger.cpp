@@ -18,6 +18,7 @@
  */
 
 #include "curcuma_logger.h"
+#include "citation_registry.h"
 #include <algorithm>
 #include <cstdlib> // for getenv
 #include <set>
@@ -28,6 +29,8 @@ int CurcumaLogger::m_verbosity = 1;
 bool CurcumaLogger::m_use_colors = true;
 CurcumaLogger::OutputFormat CurcumaLogger::m_format = CurcumaLogger::OutputFormat::TERMINAL;
 std::chrono::high_resolution_clock::time_point CurcumaLogger::m_start_time;
+std::unordered_map<std::string, std::string> CurcumaLogger::m_citation_registry;
+std::set<std::string> CurcumaLogger::m_used_citations;
 
 // Unit conversion functions (from global_config.h constants)
 inline double hartree_to_kjmol(double eh) { return eh * 2625.4996394798; }
@@ -105,11 +108,65 @@ void CurcumaLogger::info(const std::string& msg)
     }
 }
 
-void CurcumaLogger::citation(const std::string& ref)
+void CurcumaLogger::citation(const std::string& key)
 {
-    if (m_verbosity >= 2) {
-        log_colored(fmt::color::green, "[CITE]  ", ref);
+    CitationRegistry::cite(key);
+}
+
+// Claude Generated (April 2026): Citation key registry
+void CurcumaLogger::initCitationRegistry()
+{
+    m_citation_registry = {
+        {"gfnff",   "GFN-FF: Spicher & Grimme, Angew. Chem. Int. Ed. 59, 15665 (2020) — doi:10.1002/anie.202004239"},
+        {"d4",      "D4: Caldeweyher et al., J. Chem. Phys. 150, 154122 (2019) — doi:10.1063/1.5090222"},
+        {"gfn2xtb", "GFN2-xTB: Bannwarth et al., Angew. Chem. Int. Ed. 58, 3628 (2019) — doi:10.1002/anie.201901016"},
+        {"tblite",  "TBLite: Caldeweyher et al., J. Chem. Theory Comput. 19, 4466 (2023) — doi:10.1021/acs.jctc.3c00556"},
+        {"uff",     "UFF: Rappe et al., J. Am. Chem. Soc. 114, 10024 (1992) — doi:10.1021/ja00079a032"},
+        {"eht",     "EHT: Hoffmann, J. Chem. Phys. 39, 1397 (1963) — doi:10.1063/1.1734456"},
+        {"lbfgs",   "L-BFGS: Nocedal & Wright, Numerical Optimization (2006), Chapter 7"},
+        {"diis",    "DIIS: Pulay, Chem. Phys. Lett. 73, 393 (1980)"},
+        {"rfo",     "RFO: Banerjee et al., J. Phys. Chem. 89, 52 (1985)"},
+        {"molalign","Molalign: J. Chem. Inf. Model. 2023, 63, 1157 — doi:10.1021/acs.jcim.2c01187"},
+        {"d3",      "D3: Grimme et al., J. Chem. Phys. 132, 154104 (2010) — doi:10.1063/1.3382344"},
+        {"curcuma", "Curcuma: doi:10.5281/zenodo.4302722"},
+    };
+    m_used_citations.clear();
+}
+
+void CurcumaLogger::addCitation(const std::string& key, const std::string& full_text)
+{
+    // Deduplicate: only register each key once
+    if (m_used_citations.count(key)) return;
+    m_used_citations.insert(key);
+
+    // If full_text is provided and key is not in registry, store it directly
+    if (!full_text.empty() && m_citation_registry.find(key) == m_citation_registry.end()) {
+        m_citation_registry[key] = full_text;
     }
+
+    // Immediate feedback at verbosity >= 2
+    if (m_verbosity >= 2) {
+        auto it = m_citation_registry.find(key);
+        std::string display = (it != m_citation_registry.end()) ? it->second : full_text;
+        if (display.empty()) display = key;
+        log_colored(fmt::color::green, "[CITE]  ", display);
+    }
+}
+
+void CurcumaLogger::printCitations()
+{
+    if (m_used_citations.empty()) return;
+
+    fmt::print("\n");
+    log_colored(fmt::color::green, "", "═══════════════════════════════════════════════════════════════");
+    log_colored(fmt::color::green, "", "  Please cite the following references for methods used in this run:");
+    log_colored(fmt::color::green, "", "═══════════════════════════════════════════════════════════════");
+    for (const auto& key : m_used_citations) {
+        auto it = m_citation_registry.find(key);
+        std::string display = (it != m_citation_registry.end()) ? it->second : key;
+        log_colored(fmt::color::green, "  [CITE]  ", display);
+    }
+    log_colored(fmt::color::green, "", "═══════════════════════════════════════════════════════════════\n");
 }
 
 void CurcumaLogger::param(const std::string& key, const std::string& value)
@@ -142,7 +199,7 @@ void CurcumaLogger::param(const std::string& key, bool value)
 
 void CurcumaLogger::param_table(const json& parameters, const std::string& title)
 {
-    if (m_verbosity >= 1) {
+    if (m_verbosity >= 2) {
         if (!parameters.empty()) {
             log_colored(fmt::color::cyan, "[TABLE] ", title);
             std::string separator(title.length() + 8, '-');

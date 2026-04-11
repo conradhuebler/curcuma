@@ -6,6 +6,7 @@
 #include "src/core/energy_calculators/qm_methods/interface/abstract_interface.h"
 
 #include "dispersion_method.h"
+#include "src/core/citation_registry.h"
 #include "src/core/config_manager.h"
 
 DispersionMethod::DispersionMethod(const std::string& method_name, const json& config)
@@ -45,6 +46,7 @@ bool DispersionMethod::updateGeometry(const Matrix& geometry) {
 double DispersionMethod::calculateEnergy(bool gradient)
 {
     if (m_dispersion) {
+        CitationRegistry::cite(m_method_name); // "d3" or "d4"
         m_last_energy = m_dispersion->Calculation(gradient);
         m_calculation_done = true;
         return m_last_energy;
@@ -86,6 +88,25 @@ json DispersionMethod::getParameters() const { return m_parameters; }
 bool DispersionMethod::hasError() const { return m_has_error; }
 void DispersionMethod::clearError() { m_has_error = false; m_error_message.clear(); }
 std::string DispersionMethod::getErrorMessage() const { return m_error_message; }
+
+// Energy decomposition (JSON output) - placeholder for native implementation
+json DispersionMethod::getEnergyDecomposition() const {
+    // QM methods don't have energy decomposition - return zero JSON
+    // Native implementations are work-in-progress
+    json energy_json = {
+        {"Bond", 0.0},
+        {"Angle", 0.0},
+        {"Torsion", 0.0},
+        {"Inversion", 0.0},
+        {"Dispersion", 0.0},
+        {"Coulomb", 0.0},
+        {"HBond", 0.0},
+        {"XBond", 0.0},
+        {"ATM", 0.0},
+        {"BATM", 0.0}
+    };
+    return energy_json;
+}
 
 bool DispersionMethod::isD3Available() {
 #ifdef USE_D3

@@ -17,7 +17,7 @@ jobs:
     steps:
       - name: Create Release
         id: create_release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -31,53 +31,60 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v4
+
+    - name: Cache FetchContent dependencies
+      uses: actions/cache@v4
       with:
-        submodules: true
+        path: |
+          release_xtb/_deps
+          external/fmt
+          external/LBFGSpp
+          external/CxxThreadPool
+          external/ripser
+          external/cpp-d4
+        key: fetchcontent-${{ hashFiles('CMakeLists.txt') }}
+
     - uses: awalsh128/cache-apt-pkgs-action@latest
       with:
-        packages: liblapacke-dev libatlas-base-dev libopenblas-dev libblas-dev liblapack-dev
+        packages: liblapacke-dev libatlas-base-dev libopenblas-dev libblas-dev liblapack-dev gfortran-12
         version: 1.0
-    - name: Update Modules and Build
+
+    - name: Build
       run: sh scripts/build_unix_github.sh
 
     - name: Deploy
       run: sh scripts/deploy_unix_github_20_04.sh
 
     - name: Upload Release Asset
-      id: upload-release-asset-20-04
       uses: svenstaro/upload-release-action@v2
       with:
-        upload_url: ${{ needs.makerelease.outputs.url }}
         file: ./package/curcuma-nightly-x86_64.AppImage
         asset_name: curcuma-nightly-${{ needs.makerelease.outputs.version }}-20_04-x86_64-Linux.AppImage
         asset_content_type: application/zip
         repo_token: ${{ secrets.GITHUB_TOKEN }}
-        
-    - name: Upload Release Asset
-      uses: softprops/action-gh-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: 0.0.${{ needs.makerelease.outputs.version }}
-        files: |
-          ./package/curcuma-nightly-x86_64.AppImage
-          
+        tag: 0.0.${{ github.run_number }}
+
   windows:
     needs: [makerelease]
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v1
-        with:
-          submodules: true
+      - uses: actions/checkout@v4
 
       - name: Set up MinGW
         uses: e-t-l/setup-mingw@patch-1
         with:
             platform: x64
 
-      - name: Update Modules and Build
+      - name: Build
         run: scripts/build_windows.bat
 
-
+      - name: Upload Release Asset
+        uses: svenstaro/upload-release-action@v2
+        with:
+          file: ./curcuma-windows.zip
+          asset_name: curcuma-nightly-${{ needs.makerelease.outputs.version }}-windows-x86_64.zip
+          asset_content_type: application/zip
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          tag: 0.0.${{ github.run_number }}

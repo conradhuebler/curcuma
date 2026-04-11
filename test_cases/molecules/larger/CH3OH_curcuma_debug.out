@@ -1,0 +1,406 @@
+**************************************************************
+*         Curcuma - Simple Molecular Modelling tool!         *
+*                                                            *
+*          Curcuma - Version:  0.0.189-24-gc4b0357           *
+*                                                            *
+*            Written by Conrad Hübler TU Freiberg            *
+*                                                            *
+*            Visit the website for initial usage             *
+*          https://github.com/conradhuebler/curcuma          *
+*                                                            *
+*          This program comes without any warranty           *
+*               It might even be total useless               *
+*                                                            *
+*          If you obtain some usefull results with           *
+*                    curcuma, please cite                    *
+*           http://doi.org/10.5281/zenodo.4302722            *
+*                                                            *
+*                  Git Commit Hash: c4b0357                  *
+*                                                            *
+**************************************************************
+
+Curcuma was started as:
+[1m[38;2;144;238;144m/home/conrad/src/claude_curcuma/curcuma/release/curcuma [0m[1m[38;2;144;238;144m-sp [0m[1m[38;2;144;238;144mCH3OH.xyz [0m[1m[38;2;144;238;144m-method [0m[1m[38;2;144;238;144mcgfnff [0m[1m[38;2;144;238;144m-v [0m[1m[38;2;144;238;144m3 [0m
+
+Warning: Parameter 'damping' has different types in modules 'dftd3' and 'orca'
+Warning: Parameter 'damping' has different types in modules 'dftd3' and 'rmsd'
+Warning: Parameter 'damping' has different types in modules 'dftd3' and 'tblite'
+Warning: Parameter 'spin' has different types in modules 'opt' and 'tblite'
+Warning: Parameter 'spin' has different types in modules 'opt' and 'xtb'
+Started computation at Sat Dec  6 16:49:18 2025
+
+[CLI2Json DEBUG] keyword=sp, module_name=opt
+[CLI2Json DEBUG] key object content:
+{
+  "method": "cgfnff",
+  "verbosity": 3
+}
+**| charge: 0 |**      **| conv_count: 11 |**      **| d_e: 0.1 |**      **| d_rmsd: 0.01 |**      **| diis_hist: 5 |**      **| diis_start: 5 |**      **| fusion: false |**      **| grad_norm: 0.0005 |**      **| hessian: 0 |**      **| init_hess: false |**      **| lambda: 0.1 |**      **| lbfgs_delta: 0.0 |**      **| lbfgs_eps_abs: 1e-05 |**      **| lbfgs_eps_rel: 1e-05 |**      **| lbfgs_ftol: 0.0001 |**      **| lbfgs_ls_iter: 2 |**      **| lbfgs_lst: 3 |**      **| lbfgs_m: 2000 |**      **| lbfgs_min_step: 0.0001 |**      **| lbfgs_past: 0 |**      **| lbfgs_wolfe: 0.9 |**      **| max_iter: 5000 |**      **| max_rise: 100 |**      **| method: "cgfnff" |**      **| mo_homo: -1 |**      **| mo_lumo: -1 |**      **| mo_scale: 1.0 |**      **| mo_scheme: false |**      **| opt_h: false |**      **| opti_method: 0 |**      **| print_output: true |**      **| serial: false |**      **| single_point: true |**      **| single_step: 1 |**      **| spin: 0 |**      **| threads: 1 |**      **| verbosity: 3 |**      **| write_xyz: true |**      
+
+Using external lBFGS module
+Opening file CH3OH.xyz
+        Initializing EnergyCalculator (ConfigManager)
+[38;2;100;149;237m[PARAM] method: cgfnff
+[0m        === EnergyCalculator Initialization Debug (ConfigManager) ===
+[38;2;100;149;237m[PARAM] method_name: cgfnff
+[0m[38;2;100;149;237m[PARAM] basename: CH3OH
+[0m[38;2;100;149;237m[PARAM] verbosity_override: -1
+[0m[38;2;000;255;255m[TABLE] EnergyCalculator Configuration
+[0m        --------------------------------------
+[38;2;100;149;237m        method    : cgfnff
+[0m[38;2;100;149;237m        verbosity : 0
+[0m
+[38;2;100;149;237m[PARAM] auto_geometry_file: CH3OH.xyz
+[0m[38;2;100;149;237m[PARAM] multiplicity: 1
+[0m        Creating computational method using MethodFactory...
+        Creating computational method
+[38;2;100;149;237m[PARAM] requested_method: cgfnff
+[0m        Method configuration prepared:
+[38;2;000;255;255m[TABLE] Method Configuration
+[0m        ----------------------------
+[38;2;100;149;237m        basename      : CH3OH
+[0m[38;2;100;149;237m        geometry_file : CH3OH.xyz
+[0m[38;2;100;149;237m        method        : cgfnff
+[0m[38;2;100;149;237m        multiplicity  : 1
+[0m[38;2;100;149;237m        verbosity     : 0
+[0m
+        Calling MethodFactory::create...
+        MethodFactory::create called
+[38;2;100;149;237m[PARAM] requested_method: cgfnff
+[0m[38;2;100;149;237m[PARAM] normalized_method: cgfnff
+[0m        === MethodFactory Resolution Process ===
+[38;2;100;149;237m[PARAM] input_method: cgfnff
+[0m[38;2;100;149;237m[PARAM] normalized_method: cgfnff
+[0m        Step 1: Checking priority methods (shared methods with fallback hierarchy)
+        Step 2: Checking explicit methods (single provider)
+        Found explicit method: cgfnff
+[38;2;100;149;237m[PARAM] provider: Native
+[0m[38;2;100;149;237m[PARAM] requires_compilation: false
+[0m        Creating method using explicit mapping...
+[38;2;050;205;050m[OK]    Method 'cgfnff' resolved to: Native (explicit mapping)
+[0m[38;2;050;205;050m[OK]    EnergyCalculator initialized successfully
+[0m[38;2;100;149;237m[PARAM] actual_method: cgfnff
+[0m        Setting molecule in EnergyCalculator
+[38;2;100;149;237m[PARAM] atoms: 6
+[0m[38;2;100;149;237m[PARAM] charge: 0
+[0m[38;2;100;149;237m[PARAM] spin: 0
+[0m        Calling computational method setMolecule...
+        === GFNFFMethod::setMolecule() START ===
+[38;2;100;149;237m[PARAM] atoms: 6
+[0m[38;2;100;149;237m[PARAM] charge: 0
+[0m        === GFNFF::InitialiseMolecule() START ===
+[38;2;100;149;237m[PARAM] atom_count: 6
+[0m[38;2;100;149;237m[PARAM] geometry_rows: 0
+[0m[38;2;100;149;237m[PARAM] geometry_cols: 3
+[0m        Validating molecule structure...
+[38;2;050;205;050m[OK]    Molecule validation passed
+[0m        Initializing force field...
+        === GFNFF::initializeForceField() START ===
+[38;2;100;149;237m[PARAM] forcefield_exists: true
+[0m        Creating ForceField instance...
+[38;2;100;149;237m[PARAM] threads: 1
+[0m[38;2;100;149;237m[PARAM] gradient: 1
+[0m[38;2;050;205;050m[OK]    ForceField instance created
+[0m[38;2;100;149;237m[PARAM] geometry_set: 6 atoms
+[0m[38;2;255;165;000m[WARN]  TEMPORARY: Parameter caching disabled for debugging
+[0m        Calculating topology (bonds, angles, torsions, inversions)...
+[38;2;050;205;050m[OK]    Topology calculation complete
+[0m        Generating GFN-FF parameters...
+Using basic GFN-FF parametrization
+DEBUG CN(C): raw CN = 1.650, logCN = 1.600
+  Using D3 rcov: C=0.75 Å, H=0.32 Å, O=0.63 Å
+  FACTOR-2 FIX: CN values now ~2x larger (bug fixed)
+        === DXI Implementation Debug ===
+[38;2;100;149;237m[PARAM] atom_count: 6
+[0m[38;2;100;149;237m[PARAM] bond_count: 5
+[0m        Building minimal topology info to avoid circular dependency
+        === calculateDXI() START ===
+[38;2;100;149;237m[PARAM] input_atoms: 6
+[0m[38;2;100;149;237m[PARAM] neighbor_list_size: 6
+[0m[38;2;100;149;237m[PARAM] processing_atom_0: true
+[0m[38;2;100;149;237m[PARAM] atom_0_Z6: true
+[0m[38;2;100;149;237m[PARAM] processing_atom_1: true
+[0m[38;2;100;149;237m[PARAM] atom_1_Z1: true
+[0m[38;2;100;149;237m[PARAM] processing_atom_2: true
+[0m[38;2;100;149;237m[PARAM] atom_2_Z1: true
+[0m[38;2;100;149;237m[PARAM] processing_atom_3: true
+[0m[38;2;100;149;237m[PARAM] atom_3_Z1: true
+[0m[38;2;100;149;237m[PARAM] processing_atom_4: true
+[0m[38;2;100;149;237m[PARAM] atom_4_Z8: true
+[0m[38;2;100;149;237m[PARAM] processing_atom_5: true
+[0m[38;2;100;149;237m[PARAM] atom_5_Z1: true
+[0m        === calculateDXI() FINAL RESULTS ===
+[38;2;100;149;237m[PARAM] final_dxi_0_Z6: +0.000000
+[0m[38;2;100;149;237m[PARAM] final_dxi_1_Z1: +0.000000
+[0m[38;2;100;149;237m[PARAM] final_dxi_2_Z1: +0.000000
+[0m[38;2;100;149;237m[PARAM] final_dxi_3_Z1: +0.000000
+[0m[38;2;100;149;237m[PARAM] final_dxi_4_Z8: -0.005000
+[0m[38;2;100;149;237m[PARAM] final_dxi_5_Z1: +0.000000
+[0m        === DXI Topology Corrections ===
+[38;2;100;149;237m[PARAM] atom_0_Z6: dxi=+0.000000, nn=4, nh=3, nm=0
+[0m[38;2;100;149;237m[PARAM] atom_1_Z1: dxi=+0.000000, nn=1, nh=0, nm=0
+[0m[38;2;100;149;237m[PARAM] atom_2_Z1: dxi=+0.000000, nn=1, nh=0, nm=0
+[0m[38;2;100;149;237m[PARAM] atom_3_Z1: dxi=+0.000000, nn=1, nh=0, nm=0
+[0m[38;2;100;149;237m[PARAM] atom_4_Z8: dxi=-0.005000, nn=2, nh=1, nm=0
+[0m[38;2;100;149;237m[PARAM] atom_5_Z1: dxi=+0.000000, nn=1, nh=0, nm=0
+[0m[38;2;050;205;050m[OK]    calculateDXI() completed
+[0m[38;2;050;205;050m[OK]    DXI calculation completed successfully
+[0m        === EEQ Charges Calculated ===
+[38;2;100;149;237m[PARAM] atom_0_Z6: q=0.034701, χ=1.311555, γ=0.392544, α=0.816186, CN=1.600
+[0m[38;2;100;149;237m[PARAM] atom_1_Z1: q=0.048442, χ=1.227054, γ=0.473762, α=0.342306, CN=0.395
+[0m[38;2;100;149;237m[PARAM] atom_2_Z1: q=0.048442, χ=1.227054, γ=0.473762, α=0.342306, CN=0.395
+[0m[38;2;100;149;237m[PARAM] atom_3_Z1: q=0.052923, χ=1.227054, γ=0.473762, α=0.342306, CN=0.422
+[0m[38;2;100;149;237m[PARAM] atom_4_Z8: q=-0.295730, χ=1.691201, γ=0.323150, α=0.819653, CN=0.846
+[0m[38;2;100;149;237m[PARAM] atom_5_Z1: q=0.111222, χ=1.227054, γ=0.473762, α=0.342306, CN=0.436
+[0m[38;2;100;149;237m[PARAM] total_charge: 0.000000
+[0m        GFN-FF bond detection: 6 atoms, threshold 1.30
+        === GFN-FF Bond Parameters: Atom 0 (Z=6) - Atom 1 (Z=1) ===
+          Topology: CN1=1.60, CN2=0.40, hyb1=3, hyb2=1, ring1=0, ring2=0
+RAB_TRANSFORM: r0[Z1=6]=0.98310699, cnfak[Z1]=0.10514203, CN1=1.5997766735 -> ra=1.15131076 Bohr
+RAB_TRANSFORM: r0[Z2=1]=0.55682207, cnfak[Z2]=0.17957827, CN2=0.3950929306 -> rb=0.62777217 Bohr
+RAB_TRANSFORM: EN1=2.49640820, EN2=2.30085633, |ΔEN|=0.19555187
+RAB_TRANSFORM: k1=0.14069865, k2=-0.03384827, ff=0.97378049
+RAB_TRANSFORM: gen_rabshift=-0.11000000, shift=-0.07200000, rabshift=-0.18200000
+RAB_TRANSFORM: r_eq = (1.15131076 + 0.62777217 + -0.18200000) * 0.97378049 = 1.55520820 Bohr
+          Equilibrium Distance: r_A=1.151, r_B=0.628, EN_corr=0.974 -> r_eq=1.555 Bohr
+          Hybridization: hyb1=3, hyb2=1 -> bstrength=1.000
+          Correction Factors: fqq=1.007, ringf=1.000, fxh=1.000, fcn=1.000, fheavy=1.000, fpi=1.000
+DEBUG FC (H-bond Z1=6 Z2=1): bond_i=0.3852480000, bond_j=0.4179970000, bstrength=1.0000000000
+DEBUG FC: fqq=1.0068695186, ringf=1.0000000000, fheavy=1.0000000000, fpi=1.0000000000, fxh=1.0000000000, fcn=1.0000000000
+DEBUG FC: product=0.1621387241, neg_product=-0.1621387241, fc_calculated=-0.1621387241
+[38;2;050;205;050m[OK]      FINAL: fc=-0.1621, r_eq=1.5552 Bohr, alpha=0.4723 (fsrb2=0.3171)
+[0m          Force Constant Factors: bond_i=0.3852, bond_j=0.4180, bstrength=1.0000
+          Corrections: fqq=1.0069, ringf=1.0000, fheavy=1.0000, fpi=1.0000, fxh=1.0000, fcn=1.0000
+        === GFN-FF Bond Parameters: Atom 0 (Z=6) - Atom 2 (Z=1) ===
+          Topology: CN1=1.60, CN2=0.40, hyb1=3, hyb2=1, ring1=0, ring2=0
+RAB_TRANSFORM: r0[Z1=6]=0.98310699, cnfak[Z1]=0.10514203, CN1=1.5997766735 -> ra=1.15131076 Bohr
+RAB_TRANSFORM: r0[Z2=1]=0.55682207, cnfak[Z2]=0.17957827, CN2=0.3950930352 -> rb=0.62777219 Bohr
+RAB_TRANSFORM: EN1=2.49640820, EN2=2.30085633, |ΔEN|=0.19555187
+RAB_TRANSFORM: k1=0.14069865, k2=-0.03384827, ff=0.97378049
+RAB_TRANSFORM: gen_rabshift=-0.11000000, shift=-0.07200000, rabshift=-0.18200000
+RAB_TRANSFORM: r_eq = (1.15131076 + 0.62777219 + -0.18200000) * 0.97378049 = 1.55520822 Bohr
+          Equilibrium Distance: r_A=1.151, r_B=0.628, EN_corr=0.974 -> r_eq=1.555 Bohr
+          Hybridization: hyb1=3, hyb2=1 -> bstrength=1.000
+          Correction Factors: fqq=1.007, ringf=1.000, fxh=1.000, fcn=1.000, fheavy=1.000, fpi=1.000
+DEBUG FC (H-bond Z1=6 Z2=1): bond_i=0.3852480000, bond_j=0.4179970000, bstrength=1.0000000000
+DEBUG FC: fqq=1.0068695199, ringf=1.0000000000, fheavy=1.0000000000, fpi=1.0000000000, fxh=1.0000000000, fcn=1.0000000000
+DEBUG FC: product=0.1621387243, neg_product=-0.1621387243, fc_calculated=-0.1621387243
+[38;2;050;205;050m[OK]      FINAL: fc=-0.1621, r_eq=1.5552 Bohr, alpha=0.4723 (fsrb2=0.3171)
+[0m          Force Constant Factors: bond_i=0.3852, bond_j=0.4180, bstrength=1.0000
+          Corrections: fqq=1.0069, ringf=1.0000, fheavy=1.0000, fpi=1.0000, fxh=1.0000, fcn=1.0000
+        === GFN-FF Bond Parameters: Atom 0 (Z=6) - Atom 3 (Z=1) ===
+          Topology: CN1=1.60, CN2=0.42, hyb1=3, hyb2=1, ring1=0, ring2=0
+RAB_TRANSFORM: r0[Z1=6]=0.98310699, cnfak[Z1]=0.10514203, CN1=1.5997766735 -> ra=1.15131076 Bohr
+RAB_TRANSFORM: r0[Z2=1]=0.55682207, cnfak[Z2]=0.17957827, CN2=0.4219807862 -> rb=0.63260065 Bohr
+RAB_TRANSFORM: EN1=2.49640820, EN2=2.30085633, |ΔEN|=0.19555187
+RAB_TRANSFORM: k1=0.14069865, k2=-0.03384827, ff=0.97378049
+RAB_TRANSFORM: gen_rabshift=-0.11000000, shift=-0.07200000, rabshift=-0.18200000
+RAB_TRANSFORM: r_eq = (1.15131076 + 0.63260065 + -0.18200000) * 0.97378049 = 1.55991008 Bohr
+          Equilibrium Distance: r_A=1.151, r_B=0.633, EN_corr=0.974 -> r_eq=1.560 Bohr
+          Hybridization: hyb1=3, hyb2=1 -> bstrength=1.000
+          Correction Factors: fqq=1.006, ringf=1.000, fxh=1.000, fcn=1.000, fheavy=1.000, fpi=1.000
+DEBUG FC (H-bond Z1=6 Z2=1): bond_i=0.3852480000, bond_j=0.4179970000, bstrength=1.0000000000
+DEBUG FC: fqq=1.0059660190, ringf=1.0000000000, fheavy=1.0000000000, fpi=1.0000000000, fxh=1.0000000000, fcn=1.0000000000
+DEBUG FC: product=0.1619932313, neg_product=-0.1619932313, fc_calculated=-0.1619932313
+[38;2;050;205;050m[OK]      FINAL: fc=-0.1620, r_eq=1.5599 Bohr, alpha=0.4723 (fsrb2=0.3171)
+[0m          Force Constant Factors: bond_i=0.3852, bond_j=0.4180, bstrength=1.0000
+          Corrections: fqq=1.0060, ringf=1.0000, fheavy=1.0000, fpi=1.0000, fxh=1.0000, fcn=1.0000
+        === GFN-FF Bond Parameters: Atom 0 (Z=6) - Atom 4 (Z=8) ===
+          Topology: CN1=1.60, CN2=0.85, hyb1=3, hyb2=2, ring1=0, ring2=0
+RAB_TRANSFORM: r0[Z1=6]=0.98310699, cnfak[Z1]=0.10514203, CN1=1.5997766735 -> ra=1.15131076 Bohr
+RAB_TRANSFORM: r0[Z2=8]=0.76716063, cnfak[Z2]=0.30470380, CN2=0.8455475392 -> rb=1.02480218 Bohr
+RAB_TRANSFORM: EN1=2.49640820, EN2=4.51078438, |ΔEN|=2.01437618
+RAB_TRANSFORM: k1=-0.01705498, k2=0.02108784, ff=0.94878679
+RAB_TRANSFORM: gen_rabshift=-0.11000000, shift=0.00000000, rabshift=-0.11000000
+RAB_TRANSFORM: r_eq = (1.15131076 + 1.02480218 + -0.11000000) * 0.94878679 = 1.96030066 Bohr
+          Equilibrium Distance: r_A=1.151, r_B=1.025, EN_corr=0.949 -> r_eq=1.960 Bohr
+          Hybridization: hyb1=3, hyb2=2 -> bstrength=1.079
+          Correction Factors: fqq=1.047, ringf=1.000, fxh=1.000, fcn=1.000, fheavy=1.000, fpi=1.000
+[38;2;050;205;050m[OK]      FINAL: fc=-0.1476, r_eq=1.9603 Bohr, alpha=0.9553 (fsrb2=0.3171)
+[0m          Force Constant Factors: bond_i=0.3852, bond_j=0.3392, bstrength=1.0790
+          Corrections: fqq=1.0470, ringf=1.0000, fheavy=1.0000, fpi=1.0000, fxh=1.0000, fcn=1.0000
+        === GFN-FF Bond Parameters: Atom 4 (Z=8) - Atom 5 (Z=1) ===
+          Topology: CN1=0.85, CN2=0.44, hyb1=2, hyb2=1, ring1=0, ring2=0
+RAB_TRANSFORM: r0[Z1=8]=0.76716063, cnfak[Z1]=0.30470380, CN1=0.8455475392 -> ra=1.02480218 Bohr
+RAB_TRANSFORM: r0[Z2=1]=0.55682207, cnfak[Z2]=0.17957827, CN2=0.4363169079 -> rb=0.63517511 Bohr
+RAB_TRANSFORM: EN1=4.51078438, EN2=2.30085633, |ΔEN|=2.20992805
+RAB_TRANSFORM: k1=0.14069865, k2=-0.03384827, ff=0.85437367
+RAB_TRANSFORM: gen_rabshift=-0.11000000, shift=-0.05000000, rabshift=-0.16000000
+RAB_TRANSFORM: r_eq = (1.02480218 + 0.63517511 + -0.16000000) * 0.85437367 = 1.28154109 Bohr
+          Equilibrium Distance: r_A=1.025, r_B=0.635, EN_corr=0.854 -> r_eq=1.282 Bohr
+          Hybridization: hyb1=2, hyb2=1 -> bstrength=1.000
+          Correction Factors: fqq=1.047, ringf=1.000, fxh=0.930, fcn=1.000, fheavy=1.000, fpi=1.000
+DEBUG FC (H-bond Z1=8 Z2=1): bond_i=0.3392490000, bond_j=0.4179970000, bstrength=1.0000000000
+DEBUG FC: fqq=1.0470000000, ringf=1.0000000000, fheavy=1.0000000000, fpi=1.0000000000, fxh=0.9300000000, fcn=1.0000000000
+DEBUG FC: product=0.1380770091, neg_product=-0.1380770091, fc_calculated=-0.1380770091
+[38;2;050;205;050m[OK]      FINAL: fc=-0.1381, r_eq=1.2815 Bohr, alpha=1.0456 (fsrb2=0.3171)
+[0m          Force Constant Factors: bond_i=0.3392, bond_j=0.4180, bstrength=1.0000
+          Corrections: fqq=1.0470, ringf=1.0000, fheavy=1.0000, fpi=1.0000, fxh=0.9300, fcn=1.0000
+[38;2;050;205;050m[OK]    GFN-FF detected 5 bonds
+[0mDEBUG CN(C): raw CN = 1.650, logCN = 1.600
+  Using D3 rcov: C=0.75 Å, H=0.32 Å, O=0.63 Å
+  FACTOR-2 FIX: CN values now ~2x larger (bug fixed)
+DEBUG CN(C): raw CN = 1.650, logCN = 1.600
+  Using D3 rcov: C=0.75 Å, H=0.32 Å, O=0.63 Å
+  FACTOR-2 FIX: CN values now ~2x larger (bug fixed)
+DEBUG CN(C): raw CN = 1.650, logCN = 1.600
+  Using D3 rcov: C=0.75 Å, H=0.32 Å, O=0.63 Å
+  FACTOR-2 FIX: CN values now ~2x larger (bug fixed)
+DEBUG CN(C): raw CN = 1.650, logCN = 1.600
+  Using D3 rcov: C=0.75 Å, H=0.32 Å, O=0.63 Å
+  FACTOR-2 FIX: CN values now ~2x larger (bug fixed)
+DEBUG CN(C): raw CN = 1.650, logCN = 1.600
+  Using D3 rcov: C=0.75 Å, H=0.32 Å, O=0.63 Å
+  FACTOR-2 FIX: CN values now ~2x larger (bug fixed)
+DEBUG CN(C): raw CN = 1.650, logCN = 1.600
+  Using D3 rcov: C=0.75 Å, H=0.32 Å, O=0.63 Å
+  FACTOR-2 FIX: CN values now ~2x larger (bug fixed)
+DEBUG CN(C): raw CN = 1.650, logCN = 1.600
+  Using D3 rcov: C=0.75 Å, H=0.32 Å, O=0.63 Å
+  FACTOR-2 FIX: CN values now ~2x larger (bug fixed)
+GFN-FF detected 7 angles
+TORSION DEBUG: i=1, j=6, k=8, l=1 (Z=1,6,8,1)
+  tors[6]=0.260028, tors[8]=0.250620, fij=0.065168
+  tors2[1]=1.618678, tors2[1]=1.618678, fkl_raw=2.620118
+  CN_correction (CN_i=2.00, CN_l=2.00)=0.823591, fkl=2.157906
+  f1=1.000000, f2=0.000000, fqq=1.000000
+  fctot = (1.0000 + 10*1.18*0.0000) * 1.0000 * 0.065168 * 2.157906 = 0.140627 Eh
+  XTB REFERENCE: 0.246679 Eh (for C-O torsion)
+
+TORSION DEBUG: i=1, j=6, k=8, l=1 (Z=1,6,8,1)
+  tors[6]=0.260028, tors[8]=0.250620, fij=0.065168
+  tors2[1]=1.618678, tors2[1]=1.618678, fkl_raw=2.620118
+  CN_correction (CN_i=2.00, CN_l=2.00)=0.823591, fkl=2.157906
+  f1=1.000000, f2=0.000000, fqq=1.000000
+  fctot = (1.0000 + 10*1.18*0.0000) * 1.0000 * 0.065168 * 2.157906 = 0.140627 Eh
+  XTB REFERENCE: 0.246679 Eh (for C-O torsion)
+
+TORSION DEBUG: i=1, j=6, k=8, l=1 (Z=1,6,8,1)
+  tors[6]=0.260028, tors[8]=0.250620, fij=0.065168
+  tors2[1]=1.618678, tors2[1]=1.618678, fkl_raw=2.620118
+  CN_correction (CN_i=2.00, CN_l=2.00)=0.823591, fkl=2.157906
+  f1=1.000000, f2=0.000000, fqq=1.000000
+  fctot = (1.0000 + 10*1.18*0.0000) * 1.0000 * 0.065168 * 2.157906 = 0.140627 Eh
+  XTB REFERENCE: 0.246679 Eh (for C-O torsion)
+
+TORSION DEBUG: i=1, j=6, k=8, l=1 (Z=1,6,8,1)
+  tors[6]=0.260028, tors[8]=0.250620, fij=0.065168
+  tors2[1]=1.618678, tors2[1]=1.618678, fkl_raw=2.620118
+  CN_correction (CN_i=2.00, CN_l=2.00)=0.823591, fkl=2.157906
+  f1=1.000000, f2=0.000000, fqq=1.000000
+  fctot = (1.0000 + 10*1.18*0.0000) * 1.0000 * 0.065168 * 2.157906 = 0.140627 Eh
+  XTB REFERENCE: 0.246679 Eh (for C-O torsion)
+
+TORSION DEBUG: i=1, j=6, k=8, l=1 (Z=1,6,8,1)
+  tors[6]=0.260028, tors[8]=0.250620, fij=0.065168
+  tors2[1]=1.618678, tors2[1]=1.618678, fkl_raw=2.620118
+  CN_correction (CN_i=2.00, CN_l=2.00)=0.823591, fkl=2.157906
+  f1=1.000000, f2=0.000000, fqq=1.000000
+  fctot = (1.0000 + 10*1.18*0.0000) * 1.0000 * 0.065168 * 2.157906 = 0.140627 Eh
+  XTB REFERENCE: 0.246679 Eh (for C-O torsion)
+
+TORSION DEBUG: i=1, j=6, k=8, l=1 (Z=1,6,8,1)
+  tors[6]=0.260028, tors[8]=0.250620, fij=0.065168
+  tors2[1]=1.618678, tors2[1]=1.618678, fkl_raw=2.620118
+  CN_correction (CN_i=2.00, CN_l=2.00)=0.823591, fkl=2.157906
+  f1=1.000000, f2=0.000000, fqq=1.000000
+  fctot = (1.0000 + 10*1.18*0.0000) * 1.0000 * 0.065168 * 2.157906 = 0.140627 Eh
+  XTB REFERENCE: 0.246679 Eh (for C-O torsion)
+
+TORSION DEBUG: i=1, j=6, k=8, l=1 (Z=1,6,8,1)
+  tors[6]=0.260028, tors[8]=0.250620, fij=0.065168
+  tors2[1]=1.618678, tors2[1]=1.618678, fkl_raw=2.620118
+  CN_correction (CN_i=2.00, CN_l=2.00)=0.823591, fkl=2.157906
+  f1=1.000000, f2=0.000000, fqq=1.000000
+  fctot = (1.0000 + 10*1.18*0.0000) * 1.0000 * 0.065168 * 2.157906 = 0.140627 Eh
+  XTB REFERENCE: 0.246679 Eh (for C-O torsion)
+
+TORSION DEBUG: i=1, j=6, k=8, l=1 (Z=1,6,8,1)
+  tors[6]=0.260028, tors[8]=0.250620, fij=0.065168
+  tors2[1]=1.618678, tors2[1]=1.618678, fkl_raw=2.620118
+  CN_correction (CN_i=2.00, CN_l=2.00)=0.823591, fkl=2.157906
+  f1=1.000000, f2=0.000000, fqq=1.000000
+  fctot = (1.0000 + 10*1.18*0.0000) * 1.0000 * 0.065168 * 2.157906 = 0.140627 Eh
+  XTB REFERENCE: 0.246679 Eh (for C-O torsion)
+
+TORSION DEBUG: i=1, j=6, k=8, l=1 (Z=1,6,8,1)
+  tors[6]=0.260028, tors[8]=0.250620, fij=0.065168
+  tors2[1]=1.618678, tors2[1]=1.618678, fkl_raw=2.620118
+  CN_correction (CN_i=2.00, CN_l=2.00)=0.823591, fkl=2.157906
+  f1=1.000000, f2=0.000000, fqq=1.000000
+  fctot = (1.0000 + 10*1.18*0.0000) * 1.0000 * 0.065168 * 2.157906 = 0.140627 Eh
+  XTB REFERENCE: 0.246679 Eh (for C-O torsion)
+
+TORSION DEBUG: i=1, j=6, k=8, l=1 (Z=1,6,8,1)
+  tors[6]=0.260028, tors[8]=0.250620, fij=0.065168
+  tors2[1]=1.618678, tors2[1]=1.618678, fkl_raw=2.620118
+  CN_correction (CN_i=2.00, CN_l=2.00)=0.823591, fkl=2.157906
+  f1=1.000000, f2=0.000000, fqq=1.000000
+  fctot = (1.0000 + 10*1.18*0.0000) * 1.0000 * 0.065168 * 2.157906 = 0.140627 Eh
+  XTB REFERENCE: 0.246679 Eh (for C-O torsion)
+
+        GFN-FF detected 10 torsions
+          Periodicity distribution: n=1 (0), n=2 (0), n=3 (10)
+        GFN-FF: No inversions detected (no sp² centers found)
+        === generateGFNFFCoulombPairs() START ===
+[38;2;100;149;237m[PARAM] m_atomcount: 6
+[0m[38;2;100;149;237m[PARAM] coulomb_0-1: q_i=0.034701, q_j=0.048442, γ=0.929081, χ_i=1.311555, χ_j=1.227054
+[0m[38;2;100;149;237m[PARAM] coulomb_0-2: q_i=0.034701, q_j=0.048442, γ=0.929081, χ_i=1.311555, χ_j=1.227054
+[0m[38;2;100;149;237m[PARAM] coulomb_0-3: q_i=0.034701, q_j=0.052923, γ=0.929081, χ_i=1.311555, χ_j=1.227054
+[0m[38;2;100;149;237m[PARAM] coulomb_0-4: q_i=0.034701, q_j=-0.295730, γ=0.781861, χ_i=1.311555, χ_j=1.691201
+[0m[38;2;100;149;237m[PARAM] coulomb_0-5: q_i=0.034701, q_j=0.111222, γ=0.929081, χ_i=1.311555, χ_j=1.227054
+[0m[38;2;100;149;237m[PARAM] coulomb_1-2: q_i=0.048442, q_j=0.048442, γ=1.208587, χ_i=1.227054, χ_j=1.227054
+[0m[38;2;100;149;237m[PARAM] coulomb_1-3: q_i=0.048442, q_j=0.052923, γ=1.208587, χ_i=1.227054, χ_j=1.227054
+[0m[38;2;100;149;237m[PARAM] coulomb_1-4: q_i=0.048442, q_j=-0.295730, γ=0.927694, χ_i=1.227054, χ_j=1.691201
+[0m[38;2;100;149;237m[PARAM] coulomb_1-5: q_i=0.048442, q_j=0.111222, γ=1.208587, χ_i=1.227054, χ_j=1.227054
+[0m[38;2;100;149;237m[PARAM] coulomb_2-3: q_i=0.048442, q_j=0.052923, γ=1.208587, χ_i=1.227054, χ_j=1.227054
+[0m[38;2;100;149;237m[PARAM] coulomb_2-4: q_i=0.048442, q_j=-0.295730, γ=0.927694, χ_i=1.227054, χ_j=1.691201
+[0m[38;2;100;149;237m[PARAM] coulomb_2-5: q_i=0.048442, q_j=0.111222, γ=1.208587, χ_i=1.227054, χ_j=1.227054
+[0m[38;2;100;149;237m[PARAM] coulomb_3-4: q_i=0.052923, q_j=-0.295730, γ=0.927694, χ_i=1.227054, χ_j=1.691201
+[0m[38;2;100;149;237m[PARAM] coulomb_3-5: q_i=0.052923, q_j=0.111222, γ=1.208587, χ_i=1.227054, χ_j=1.227054
+[0m[38;2;100;149;237m[PARAM] coulomb_4-5: q_i=-0.295730, q_j=0.111222, γ=0.927694, χ_i=1.691201, χ_j=1.227054
+[0m[38;2;050;205;050m[OK]    Generated 15 Coulomb pairs
+[0m        === generateGFNFFRepulsionPairs() START ===
+[38;2;100;149;237m[PARAM] m_atomcount: 6
+[0m[38;2;100;149;237m[PARAM] repulsion_0-1: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;100;149;237m[PARAM] repulsion_0-2: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;100;149;237m[PARAM] repulsion_0-3: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;100;149;237m[PARAM] repulsion_0-4: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;100;149;237m[PARAM] repulsion_0-5: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;100;149;237m[PARAM] repulsion_1-2: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;100;149;237m[PARAM] repulsion_1-3: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;100;149;237m[PARAM] repulsion_1-4: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;100;149;237m[PARAM] repulsion_1-5: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;100;149;237m[PARAM] repulsion_2-3: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;100;149;237m[PARAM] repulsion_2-4: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;100;149;237m[PARAM] repulsion_2-5: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;100;149;237m[PARAM] repulsion_3-4: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;100;149;237m[PARAM] repulsion_3-5: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;100;149;237m[PARAM] repulsion_4-5: bonded=%s, repab=%.6f, alpha=%.6f
+[0m[38;2;050;205;050m[OK]    Generated 15 repulsion pairs
+[0m        === generateGFNFFDispersionPairs() START ===
+[38;2;100;149;237m[PARAM] m_atomcount: 6
+[0m[38;2;050;205;050m[OK]    Generated 15 dispersion pairs
+[0m        === detectHydrogenBonds() START ===
+        Found 0 HB hydrogens
+        Found 0 potential A-B pairs
+        Detected 0 hydrogen bonds
+        === detectHalogenBonds() START ===
+        Found 0 A-X halogen pairs
+        Detected 0 halogen bonds
+[38;2;050;205;050m[OK]    GFN-FF parameters generated
+[0m[38;2;100;149;237m[PARAM] bonds_count: 5
+[0m[38;2;100;149;237m[PARAM] angles_count: 7
+[0m[38;2;100;149;237m[PARAM] torsions_count: 10
+[0m[38;2;100;149;237m[PARAM] inversions_count: 0
+[0m        Setting parameters in ForceField...
+DEBUG ForceField::setParameter - verbosity = 3
+        Initializing force field parameters
+[38;2;100;149;237m[PARAM] method: gfnff
+[0mDEBUG: After initializing logging
+DEBUG: Trying to load from cache...
+[38;2;100;149;237m[PARAM] loaded_from_cache: true
+[0mDEBUG: loaded_from_cache = false
+DEBUG: Setting parameters...
+DEBUG: bonds done
+DEBUG setAngles: Processing 7 angles

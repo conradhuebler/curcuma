@@ -20,7 +20,7 @@
  * descriptive names for better code readability and maintainability.
  */
 enum class MethodType : int {
-    FORCEFIELD = 0, ///< Force field methods (UFF, QMDFF, cgfnff)
+    FORCEFIELD = 0, ///< Force field methods (UFF, QMDFF, gfnff)
     TBLITE = 1, ///< TBLite tight-binding DFT methods
     XTB = 2, ///< Extended tight-binding methods
     ULYSSES = 3, ///< Semi-empirical methods via Ulysses
@@ -29,8 +29,7 @@ enum class MethodType : int {
     EHT = 6, ///< Extended Hückel Theory
     QMDFF_LEGACY = 7, ///< Legacy QMDFF (deprecated)
     UFF_LEGACY = 8, ///< Legacy UFF (deprecated)
-    // NOTE: Case 9 (cgfnff) should be moved to FORCEFIELD (case 0)
-    CGFNFF_LEGACY = 9, ///< TODO: Move cgfnff to ForceField system
+    GFNFF_NATIVE = 9, ///< Native GFN-FF (same as FORCEFIELD, kept for legacy routing)
     UNKNOWN = -1 ///< Unknown/unsupported method
 };
 
@@ -70,12 +69,11 @@ public:
     static const std::vector<MethodConfig>& getAllMethods()
     {
         static std::vector<MethodConfig> methods = {
-            // TODO: Move cgfnff from case 9 to FORCEFIELD (case 0)
-            { MethodType::CGFNFF_LEGACY, { "cgfnff" }, "Native Curcuma GFN-FF (should be in ForceField)" },
+            { MethodType::GFNFF_NATIVE, { "gfnff", "gfnff-d3" }, "Native C++ GFN-FF" },
 
             { MethodType::TBLITE, { "ipea1", "gfn1", "gfn2" }, "TBLite tight-binding DFT", true, "USE_TBLITE" },
 
-            { MethodType::XTB, { "gfnff", "xtb-gfn1", "xtb-gfn2" }, "Extended tight-binding methods", true, "USE_XTB" },
+            { MethodType::XTB, { "xtb-gfnff", "xtb-gfn1", "xtb-gfn2" }, "Extended tight-binding methods", true, "USE_XTB" },
 
             // TODO: Verify these Ulysses method names - taken from current code but need validation
             { MethodType::ULYSSES, { "ugfn2", "GFN2L", "pm3", "PM3PDDG", "MNDOPDDG", "PM3BP", "RM1", "AM1", "MNDO", "MNDOd", "pm6" },
@@ -86,8 +84,7 @@ public:
             { MethodType::EHT, { "eht" }, "Extended Hückel Theory" },
             { MethodType::QMDFF_LEGACY, { "fqmdff" }, "Legacy QMDFF (deprecated)" },
 
-            // TODO: Add cgfnff here when moved from case 9
-            { MethodType::FORCEFIELD, { "uff", "uff-d3", "qmdff" /* TODO: add "cgfnff" */ }, "Force field methods" },
+            { MethodType::FORCEFIELD, { "uff", "uff-d3", "qmdff" }, "Force field methods" },
 
             { MethodType::UFF_LEGACY, { "fuff" }, "Legacy UFF (deprecated)" }
         };
@@ -130,5 +127,4 @@ public:
     // 1. Check Ulysses documentation for correct method identifiers
     // 2. Validate TBLite method names against actual implementation
     // 3. Confirm XTB method naming convention
-    // 4. Move cgfnff from case 9 to ForceField system (case 0)
 };

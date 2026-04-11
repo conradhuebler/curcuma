@@ -40,7 +40,7 @@ class MethodFactory {
 public:
     /**
      * @brief Create computational method based on method name and configuration
-     * @param method_name Method identifier (e.g., "gfn2", "eht", "uff", "cgfnff")
+     * @param method_name Method identifier (e.g., "gfn2", "eht", "uff", "gfnff")
      * @param config JSON configuration for the method
      * @return Unique pointer to computational method
      * @throws MethodCreationException if method cannot be created
@@ -77,9 +77,16 @@ private:
     static std::unique_ptr<ComputationalMethod> createIPEA1(const json& config);
     static std::unique_ptr<ComputationalMethod> createGFNFF(const json& config);
 
-    // Explicit method creation (single provider, requires compilation flag check)
-    static std::unique_ptr<ComputationalMethod> createXTBExplicit(const std::string& method, const json& config);
+    // =================================================================================
+    // Explicit Method Creation (single provider)
+    // =================================================================================
+
+    static std::unique_ptr<ComputationalMethod> createEHT(const json& config);
+    static std::unique_ptr<ComputationalMethod> createForceField(const json& config);
     static std::unique_ptr<ComputationalMethod> createUlyssesExplicit(const std::string& method, const json& config);
+
+    // Explicit XTB method creation (xtb-gfn1, xtb-gfn2, gfnff)
+    static std::unique_ptr<ComputationalMethod> createXTBExplicit(const std::string& method, const json& config);
     static std::unique_ptr<ComputationalMethod> createDFTD3(const json& config);
     static std::unique_ptr<ComputationalMethod> createDFTD4(const json& config);
 
@@ -95,7 +102,10 @@ private:
     // Method classification helpers
     static bool isUlyssesMethod(const std::string& method);
 
-    // Ulysses method list (9 base methods x 3 correction modes = 27)
+    // Method lists
+    static const std::vector<std::string> m_ff_methods;
+    static const std::vector<std::string> m_tblite_methods;
+    static const std::vector<std::string> m_xtb_methods;
     static const std::vector<std::string> m_ulysses_methods;
 };
 

@@ -22,15 +22,19 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/global.h"
 #include "uff_par.h"
+#include "cn_calculator.h"  // Claude Generated (Jan 18, 2026): D3 CN calculation for dynamic r0
 
 #include "cg_potentials.h"
 #include "forcefieldfunctions.h"
 
+#include <chrono>  // Claude Generated (February 2026): For energy calculation timing
+#include <unordered_map>  // Claude Generated (February 2026): For term timing aggregation
 #include <fmt/core.h>
 #include <fmt/format.h>
 
 #include "forcefield.h"
 #include "forcefieldthread.h"
+#include "ff_workspace.h"
 
 ForceField::ForceField(const json& controller)
 {
@@ -45,6 +49,13 @@ ForceField::ForceField(const json& controller)
     if (parameter.contains("geometry_file")) {
         std::string geom_file = parameter["geometry_file"];
         m_auto_param_file = generateParameterFileName(geom_file);
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::param("auto_param_file", m_auto_param_file);
+        }
+    } else {
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::warn("No geometry_file in ForceField parameter - automatic caching disabled");
+        }
     }
 }
 
@@ -95,40 +106,138 @@ void ForceField::UpdateGeometry(const std::vector<std::array<double, 3>>& geomet
     }
 }
 
+void ForceField::distributeEEQCharges(const Vector& charges)
+{
+    // Store charges — threads read via pointer (no per-thread copy needed for GFN-FF)
+    m_eeq_charges = charges;
+
+    // Legacy path: threads without pointer still need explicit copy (UFF/QMDFF)
+    if (m_method != "gfnff") {
+        for (int i = 0; i < m_stored_threads.size(); ++i) {
+            m_stored_threads[i]->setEEQCharges(charges);
+        }
+    }
+}
+
+// Claude Generated (Feb 21, 2026): Distribute Phase-1 topology charges for BATM
+// Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
+// CRITICAL: BATM must use Phase-1 charges (fixed at init), not Phase-2 EEQ charges (geometry-dependent)
+void ForceField::distributeTopologyCharges(const Vector& charges)
+{
+    // Store topology charges — threads read via pointer
+    m_topology_charges = charges;
+
+    // Legacy path: threads without pointer still need explicit copy
+    if (m_method != "gfnff") {
+        for (int i = 0; i < m_stored_threads.size(); ++i) {
+            m_stored_threads[i]->setTopologyCharges(charges);
+        }
+    }
+}
+
+// Claude Generated (Jan 18, 2026): Distribute D3 coordination numbers to all threads
+// Reference: Fortran gfnff_engrad.F90:432 - CN recalculated at each energy evaluation
+void ForceField::distributeD3CN(const Vector& d3_cn)
+{
+    // Store CN — threads read via pointer
+    m_d3_cn = d3_cn;
+
+    // Legacy path: threads without pointer still need explicit copy
+    if (m_method != "gfnff") {
+        for (int i = 0; i < m_stored_threads.size(); ++i) {
+            m_stored_threads[i]->setD3CN(d3_cn);
+        }
+    }
+}
+
+// Claude Generated (Mar 2026, Phase 1a): Store CN, CNF, dcn in ForceField only.
+// These are NOT distributed to threads (threads never read them).
+// Used after thread completion for chain-rule gradients (TERM 1b, bond/disp dEdcn).
+void ForceField::distributeCNandDerivatives(const Vector& cn, const Vector& cnf,
+                                             const std::vector<SpMatrix>& dcn)
+{
+    m_cn = cn;
+    m_cnf = cnf;
+    m_dcn = dcn;
+}
+
+// Claude Generated (Mar 2026, Phase 1a): Store CN in ForceField for TERM 2+3 self-energy.
+// Threads use m_d3_cn (from distributeD3CN) for bond dynamic r0, not m_cn.
+void ForceField::distributeCNOnly(const Vector& cn)
+{
+    m_cn = cn;
+}
+
+// Claude Generated (Mar 2026, Phase 1b): Store dc6dcn in ForceField, share via const pointer.
+// Threads read dc6dcn for dispersion CN gradient but never write it.
+// Eliminates N×N matrix copy per thread.
+void ForceField::setDispersionDC6DCN(const Matrix& dc6dcn)
+{
+    m_dc6dcn = dc6dcn;
+    for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
+        m_stored_threads[i]->setDispersionDC6DCN(&m_dc6dcn);
+    }
+}
+
 void ForceField::setParameter(const json& parameters)
 {
-    static bool in_setParameter = false;
-    if (in_setParameter) {
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::warn("Recursive setParameter call detected - preventing infinite loop");
-        }
-        return;
-    }
-    in_setParameter = true;
-
     std::string method_name = "unknown";
     if (parameters.contains("method") && !parameters["method"].is_null()) {
         method_name = parameters["method"].get<std::string>();
     }
 
-    // Level 2+: Force field initialization
+    bool loaded_from_cache = false;
+
+    // Claude Generated (December 2025): Prevent infinite recursion during cache loading
+    // Skip cache loading if we're already being called from within loadParametersFromFile
+    static thread_local bool loading_from_cache = false;
+
+    if (!loading_from_cache && !m_in_setParameter && m_enable_caching && parameters.contains("method")) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Attempting to load cached parameters");
+        }
+        std::string method = parameters["method"];
+        loading_from_cache = true;
+        loaded_from_cache = tryLoadAutoParameters(method);
+        loading_from_cache = false;
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::param("loaded_from_cache", loaded_from_cache ? "true" : "false");
+        }
+
+        // If we loaded from cache successfully, we're done (tryLoadAutoParameters already called setParameter recursively)
+        if (loaded_from_cache) {
+            return;
+        }
+    } else {
+        // Claude Generated (Dec 2025): Diagnostic warnings for caching issues
+        if (!m_enable_caching && CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::warn("Parameter caching is disabled - parameters will be regenerated");
+        }
+        if (m_auto_param_file.empty() && m_enable_caching && CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::warn("No geometry_file provided - automatic caching disabled");
+        }
+    }
+
+    // Claude Generated: Recursion guard - prevents infinite loops from nested setParameter calls
+    if (m_in_setParameter) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::warn("Recursive setParameter call detected - preventing infinite loop");
+        }
+        return;
+    }
+    m_in_setParameter = true;
+
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Initializing force field parameters");
         CurcumaLogger::param("method", method_name);
     }
 
-    bool loaded_from_cache = false;
-
-    // Try loading cached parameters if caching enabled and same method
-    if (m_enable_caching && parameters.contains("method")) {
-        std::string method = parameters["method"];
-        loaded_from_cache = tryLoadAutoParameters(method);
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param("loaded_from_cache", loaded_from_cache ? "true" : "false");
-        }
-    }
-
     if (!loaded_from_cache) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Cache miss - generating new force field parameters");
+        }
+
         // Set new parameters (generation or explicit)
         if (parameters.contains("bonds"))
             setBonds(parameters["bonds"]);
@@ -140,12 +249,84 @@ void ForceField::setParameter(const json& parameters)
             setInversions(parameters["inversions"]);
         if (parameters.contains("vdws"))
             setvdWs(parameters["vdws"]);
+
+        // Phase 4.2: GFN-FF pairwise non-bonded parameters (Claude Generated 2025)
+        // Support "d4_dispersion_pairs"优先 (Native D4 - Dec 25, 2025)
+        // Support both "gfnff_dispersions" (from GFNFF) and "d3_dispersion_pairs" (from D3ParameterGenerator)
+        if (parameters.contains("d4_dispersion_pairs"))
+            setD4Dispersions(parameters["d4_dispersion_pairs"]);  // Claude Generated - Dec 25, 2025: Native D4 dispersion
+        else if (parameters.contains("gfnff_dispersions"))
+            setGFNFFDispersions(parameters["gfnff_dispersions"]);
+        else if (parameters.contains("d3_dispersion_pairs"))
+            setGFNFFDispersions(parameters["d3_dispersion_pairs"]);
+
+        if (parameters.contains("gfnff_bonded_repulsions"))
+            setGFNFFBondedRepulsions(parameters["gfnff_bonded_repulsions"]);
+        if (parameters.contains("gfnff_nonbonded_repulsions"))
+            setGFNFFNonbondedRepulsions(parameters["gfnff_nonbonded_repulsions"]);
+
+        // Backward compatibility warning
+        if (parameters.contains("gfnff_repulsions")) {
+            CurcumaLogger::warn("Deprecated 'gfnff_repulsions' key - update to separate bonded/nonbonded keys");
+        }
+        if (parameters.contains("gfnff_coulombs"))
+            setGFNFFCoulombs(parameters["gfnff_coulombs"]);
+
+        // Phase 3: GFN-FF hydrogen bond and halogen bond setters (Claude Generated 2025)
+        if (parameters.contains("gfnff_hbonds"))
+            setGFNFFHydrogenBonds(parameters["gfnff_hbonds"]);
+        if (parameters.contains("gfnff_xbonds"))
+            setGFNFFHalogenBonds(parameters["gfnff_xbonds"]);
+
+        if (parameters.contains("gfnff_storsions"))
+            setGFNFFSTorsions(parameters["gfnff_storsions"]);
+
+        // ATM three-body dispersion (D3/D4)
+        if (parameters.contains("atm_triples"))
+            setATMTriples(parameters["atm_triples"]);
+
+        // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+        // GFN-FF bonded ATM (batm) parameters for 1,4-pairs
+        if (parameters.contains("gfnff_batms"))
+            setGFNFFBatms(parameters["gfnff_batms"]);
+
+        // Claude Generated (Feb 21, 2026): Bond-HB mapping for dncoord_erf
+        if (parameters.contains("bond_hb_data"))
+            loadBondHBData(parameters["bond_hb_data"]);
+
         m_parameters = parameters;
         m_method = m_parameters["method"];
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("method_selected", m_method);
+        }
         if (m_parameters.contains("e0"))
             m_e0 = m_parameters["e0"];
 
-        AutoRanges();
+        // Claude Generated (Jan 17, 2026): Extract EEQ charges from input parameters (fresh generation path)
+        // This ensures charges are available for batm calculation and for caching
+        // Note: loadParametersFromFile() has equivalent code at line 1273 for cache loading path
+        if (parameters.contains("eeq_charges") && !parameters["eeq_charges"].is_null()) {
+            std::vector<double> charge_vec = parameters["eeq_charges"].get<std::vector<double>>();
+            m_eeq_charges = Eigen::Map<Vector>(charge_vec.data(), charge_vec.size());
+
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::param("eeq_charges_loaded", static_cast<int>(m_eeq_charges.size()));
+            }
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Calculating parameter ranges");
+        }
+        // Claude Generated (March 2026): UFF/QMDFF use FFWorkspace — no legacy threads needed.
+        // Skip AutoRanges() for these methods to avoid creating unused ForceFieldThreads.
+        if (m_method != "uff" && m_method != "uff-d3" &&
+            m_method != "qmdff" && m_method != "quff") {
+            AutoRanges();
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Parameter generation complete");
+        }
 
         // Auto-save new parameters (only if caching enabled)
         if (m_enable_caching) {
@@ -162,21 +343,209 @@ void ForceField::setParameter(const json& parameters)
     } else if (m_method == "cg" || m_method == "cg-lj") {
         method_type = 4; // CG methods
         // Generate CG parameters if not loaded from cache
-        if (!loaded_from_cache) {
+        if (m_enable_caching && !loaded_from_cache) {
             generateCGParameters(parameters);
         }
+    } else if (m_method == "d3") {
+        method_type = 1; // D3 uses UFF method type
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        std::string method_name = "UFF"; // default
+        if (method_type == 2) method_name = "QMDFF";
+        else if (method_type == 3) method_name = "GFN-FF";
+        else if (method_type == 4) method_name = "CG";
+        CurcumaLogger::param("method_type", fmt::format("{} ({})", method_type, method_name));
     }
 
     // Claude Generated: Print parameter summary after setting parameters
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Generating parameter summary");
+    }
+
     printParameterSummary();
 
-    in_setParameter = false; // Reset the recursive guard
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Parameter summary completed");
+    }
+
+    // Claude Generated (March 2026): Create FFWorkspace for UFF/QMDFF after parameters are populated.
+    // This replaces the ForceFieldThread path for bonded + vdW terms.
+    m_use_workspace = false;
+    if (m_method == "uff" || m_method == "uff-d3" ||
+        m_method == "qmdff" || m_method == "quff") {
+        ForceFieldParameterSet ws_params;
+        ws_params.method_type = (m_method == "qmdff" || m_method == "quff")
+                                ? FFMethodType::QMDFF : FFMethodType::UFF;
+        ws_params.bonds      = m_bonds;
+        ws_params.angles     = m_angles;
+        ws_params.dihedrals  = m_dihedrals;
+        ws_params.inversions = m_inversions;
+        ws_params.vdws       = m_vdWs;
+        // uff-d3: pass D3 dispersion pairs (stored in m_gfnff_dispersions via addD3Dispersion path)
+        if (m_method == "uff-d3" && !m_gfnff_dispersions.empty()) {
+            ws_params.dispersions = m_gfnff_dispersions;
+            ws_params.dispersion_method = "d3";
+            ws_params.dispersion_enabled = true;
+        } else {
+            ws_params.dispersion_enabled = false;
+        }
+        ws_params.hbond_enabled = false;
+        ws_params.repulsion_enabled = false;
+        ws_params.coulomb_enabled = false;
+
+        m_workspace = std::make_unique<FFWorkspace>(m_threads);
+        m_workspace->setPool(m_threadpool);  // Claude Generated (March 2026): Required for multi-thread execution
+        m_workspace->setAtomTypes(m_atom_types);
+        m_workspace->setInteractionLists(std::move(ws_params));
+        m_workspace->partition();
+        m_use_workspace = true;
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::success(fmt::format("FFWorkspace (UFF/QMDFF): {} bonds, {} angles, {} vdWs, T={}",
+                m_bonds.size(), m_angles.size(), m_vdWs.size(), m_threads));
+        }
+    }
+
+    m_in_setParameter = false; // Reset the recursive guard - FIX: use member variable
+
+    // Claude Generated (January 2026): CRITICAL - Distribute EEQ charges to threads at END of setParameter()
+    // This ensures batm calculation has access to charges regardless of how parameters were loaded
+    // (from cache or fresh generation). Must be AFTER AutoRanges() creates threads.
+    if (m_eeq_charges.size() > 0) {
+        distributeEEQCharges(m_eeq_charges);
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("EEQ charges ({} atoms) distributed to {} threads for batm calculation",
+                                          m_eeq_charges.size(), m_stored_threads.size()));
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success("ForceField::setParameter() complete");
+    }
 }
 
 void ForceField::setParameterFile(const std::string& file)
 {
     if (!loadParametersFromFile(file)) {
         CurcumaLogger::warn(fmt::format("Failed to load parameter file: {}", file));
+    }
+}
+
+// Claude Generated (March 2026): Native struct intake — bypasses JSON round-trip entirely
+void ForceField::setGFNFFParameters(const GFNFFParameterSet& params)
+{
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Setting GFN-FF parameters from native structs (no JSON)");
+    }
+
+    // Direct vector assignment — no JSON parsing overhead
+    m_bonds = params.bonds;
+    m_angles = params.angles;
+    m_dihedrals = params.dihedrals;
+    m_extra_dihedrals = params.extra_dihedrals;
+    m_inversions = params.inversions;
+    m_gfnff_storsions = params.storsions;
+
+    m_gfnff_dispersions.clear();
+    m_d4_dispersions.clear();
+    if (params.dispersion_method == "d4") {
+        m_d4_dispersions = params.dispersions;
+    } else {
+        m_gfnff_dispersions = params.dispersions;
+    }
+
+    m_gfnff_bonded_repulsions = params.bonded_repulsions;
+    m_gfnff_nonbonded_repulsions = params.nonbonded_repulsions;
+    m_gfnff_coulombs = params.coulombs;
+
+    // Extract per-atom Coulomb parameters from pairs (for TERM 2+3 self-energy)
+    // Same logic as setGFNFFCoulombs() — needed for parent-level computation
+    m_coulomb_chi_base = Vector::Zero(m_natoms);
+    m_coulomb_gam = Vector::Zero(m_natoms);
+    m_coulomb_alp = Vector::Zero(m_natoms);
+    m_coulomb_cnf = Vector::Zero(m_natoms);
+    m_coulomb_chi_static = Vector::Zero(m_natoms);
+    {
+        std::vector<bool> atom_seen(m_natoms, false);
+        for (const auto& coul : m_gfnff_coulombs) {
+            if (!atom_seen[coul.i]) {
+                m_coulomb_chi_base(coul.i) = coul.chi_base_i;
+                m_coulomb_gam(coul.i) = coul.gam_i;
+                m_coulomb_alp(coul.i) = coul.alp_i;
+                m_coulomb_cnf(coul.i) = coul.cnf_i;
+                m_coulomb_chi_static(coul.i) = coul.chi_i;
+                atom_seen[coul.i] = true;
+            }
+            if (!atom_seen[coul.j]) {
+                m_coulomb_chi_base(coul.j) = coul.chi_base_j;
+                m_coulomb_gam(coul.j) = coul.gam_j;
+                m_coulomb_alp(coul.j) = coul.alp_j;
+                m_coulomb_cnf(coul.j) = coul.cnf_j;
+                m_coulomb_chi_static(coul.j) = coul.chi_j;
+                atom_seen[coul.j] = true;
+            }
+        }
+    }
+
+    m_gfnff_hbonds = params.hbonds;
+    m_gfnff_xbonds = params.xbonds;
+    m_atm_triples = params.atm_triples;
+    m_gfnff_batms = params.batm_triples;
+    m_bond_hb_data = params.bond_hb_data;
+
+    // Store EEQ charges
+    if (params.eeq_charges.size() > 0) {
+        m_eeq_charges = params.eeq_charges;
+    }
+
+    // Set method and e0
+    m_method = "gfnff";
+    m_e0 = params.e0;
+
+    // Store JSON representation for caching (only if enabled)
+    if (m_enable_caching) {
+        m_parameters = params.toJSON();
+        autoSaveParameters();
+    }
+
+    // Populate m_parameters with minimum fields needed by AutoRanges()
+    // AutoRanges reads flags like "dispersion", "hbond", "repulsion", "coulomb"
+    if (m_parameters.is_null() || m_parameters.empty()) {
+        m_parameters = json::object();
+    }
+    m_parameters["dispersion"] = params.dispersion_enabled;
+    m_parameters["hbond"] = params.hbond_enabled;
+    m_parameters["repulsion"] = params.repulsion_enabled;
+    m_parameters["coulomb"] = params.coulomb_enabled;
+    m_parameters["method"] = "gfnff";
+
+    // Create threads and distribute parameters
+    AutoRanges();
+
+    // Set method type for ForceFieldThread (GFN-FF = 3)
+    // (Already handled by AutoRanges which reads m_method)
+
+    printParameterSummary();
+
+    // Distribute EEQ charges to threads (after AutoRanges creates them)
+    if (m_eeq_charges.size() > 0) {
+        distributeEEQCharges(m_eeq_charges);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success("ForceField::setGFNFFParameters() complete (native path)");
+    }
+}
+
+// Claude Generated (March 2026): Clear parameter data in existing threads for reuse
+// Avoids thread pool destruction/recreation when only parameters change (e.g. geometry opt)
+void ForceField::clearThreadData()
+{
+    for (auto* thread : m_stored_threads) {
+        if (auto* ff_thread = dynamic_cast<ForceFieldThread*>(thread)) {
+            ff_thread->clearParameterData();
+        }
     }
 }
 
@@ -348,12 +717,33 @@ void ForceField::setBonds(const json& bonds)
         b.r0_ik = bond["r0_ik"];
 
         b.fc = bond["fc"];
+        b.rabshift = bond.value("rabshift", 0.0);  // Claude Generated (Dec 2025): Load vbond(1) with default 0.0
+        b.fqq = bond.value("fqq", 1.0);  // Claude Generated (Jan 7, 2026): Load charge-dependent factor with default 1.0
+
+        // Claude Generated (Jan 18, 2026): Dynamic r0 calculation parameters
+        // These are used for GFN-FF to recalculate r0 from current CN at each Calculate()
+        b.z_i = bond.value("z_i", 0);
+        b.z_j = bond.value("z_j", 0);
+        b.r0_base_i = bond.value("r0_base_i", 0.0);
+        b.r0_base_j = bond.value("r0_base_j", 0.0);
+        b.cnfak_i = bond.value("cnfak_i", 0.0);
+        b.cnfak_j = bond.value("cnfak_j", 0.0);
+        b.ff = bond.value("ff", 1.0);
+
+        // Claude Generated (Jan 24, 2026): Hydrogen bridge bond modulation (egbond_hb)
+        // Reference: Fortran gfnff_engrad.F90:449-453, 919-994
+        b.nr_hb = bond.value("nr_hb", 0);
+        b.hb_cn_H = bond.value("hb_cn_H", 0.0);
+
         m_bonds.push_back(b);
     }
 }
 
 void ForceField::setAngles(const json& angles)
 {
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("angles_processing", fmt::format("Processing {} angle parameters", angles.size()));
+    }
     m_angles.clear();
     for (int i = 0; i < angles.size(); ++i) {
         json angle = angles[i].get<json>();
@@ -364,21 +754,35 @@ void ForceField::setAngles(const json& angles)
         a.i = angle["i"];
         a.j = angle["j"];
         a.k = angle["k"];
-        a.C0 = angle["C0"];
-        a.C1 = angle["C1"];
-        a.C2 = angle["C2"];
+
+        // Claude Generated: Optional Fourier coefficients (not used by GFN-FF)
+        // GFN-FF uses simple angle bending, UFF/QMDFF may use Fourier expansion
+        a.C0 = angle.value("C0", 0.0);
+        a.C1 = angle.value("C1", 0.0);
+        a.C2 = angle.value("C2", 0.0);
+
         a.fc = angle["fc"];
         a.r0_ij = angle["r0_ij"];
         a.r0_ik = angle["r0_ik"];
         a.theta0_ijk = angle["theta0_ijk"];
         m_angles.push_back(a);
     }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("angles_processed", fmt::format("{}", m_angles.size()));
+    }
 }
 
 void ForceField::setDihedrals(const json& dihedrals)
 {
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("dihedrals_processing", fmt::format("Processing {} dihedral parameters", dihedrals.size()));
+    }
     m_dihedrals.clear();
+    m_extra_dihedrals.clear();  // Claude Generated (Jan 2, 2026): Clear extra torsions
+
     for (int i = 0; i < dihedrals.size(); ++i) {
+        //CRITICAL: Does it work for GFNFF dihedrals and its different parameter types
         json dihedral = dihedrals[i].get<json>();
         Dihedral d;
         d.type = dihedral["type"];
@@ -390,12 +794,26 @@ void ForceField::setDihedrals(const json& dihedrals)
         d.V = dihedral["V"];
         d.n = dihedral["n"];
         d.phi0 = dihedral["phi0"];
-        m_dihedrals.push_back(d);
+        d.is_extra = dihedral.value("is_extra", false);  // Claude Generated (Jan 1, 2026): Read extra torsion flag
+
+        // Claude Generated (Jan 2, 2026): Separate primary and extra torsions
+        if (d.is_extra) {
+            m_extra_dihedrals.push_back(d);
+        } else {
+            m_dihedrals.push_back(d);
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("dihedrals_processed", fmt::format("{} primary, {} extra", m_dihedrals.size(), m_extra_dihedrals.size()));
     }
 }
 
 void ForceField::setInversions(const json& inversions)
 {
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("inversions_processing", fmt::format("Processing {} inversion parameters", inversions.size()));
+    }
     m_inversions.clear();
     for (int i = 0; i < inversions.size(); ++i) {
         json inversion = inversions[i].get<json>();
@@ -406,12 +824,37 @@ void ForceField::setInversions(const json& inversions)
         inv.j = inversion["j"];
         inv.k = inversion["k"];
         inv.l = inversion["l"];
-        inv.fc = inversion["fc"];
-        inv.C0 = inversion["C0"];
-        inv.C1 = inversion["C1"];
-        inv.C2 = inversion["C2"];
+
+        // GFN-FF uses different inversion parameters (barrier, omega0) vs UFF (fc, C0, C1, C2)
+        if (inversion.contains("barrier")) {
+            // GFN-FF style: V and omega0 with Fortran-compatible formula
+            inv.type = 3; // GFN-FF type
+            inv.fc = inversion["barrier"]; // V (force constant in Hartree)
+            inv.potential_type = inversion.value("potential_type", 0);
+            inv.omega0 = inversion.value("omega0", 0.0);
+            inv.C0 = 0.0;
+            inv.C1 = 0.0;
+            inv.C2 = 0.0;
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::param("inversion_format", fmt::format("GFN-FF (V={:.6f}, pot_type={}, omega0={:.4f})",
+                    inv.fc, inv.potential_type, inv.omega0));
+            }
+        } else {
+            // UFF/QMDFF style: use Fourier coefficients
+            inv.fc = inversion["fc"];
+            inv.C0 = inversion["C0"];
+            inv.C1 = inversion["C1"];
+            inv.C2 = inversion["C2"];
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::param("inversion_format", "UFF (Fourier)");
+            }
+        }
 
         m_inversions.push_back(inv);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("inversions_processed", fmt::format("{}", m_inversions.size()));
     }
 }
 
@@ -429,6 +872,553 @@ void ForceField::setvdWs(const json& vdws)
         v.r0_ij = vdw["r0_ij"];
 
         m_vdWs.push_back(v);
+    }
+}
+
+// Phase 4.2: GFN-FF pairwise non-bonded parameter setters (Claude Generated 2025)
+
+void ForceField::setGFNFFDispersions(const json& dispersions)
+{
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFDispersions: Loading {} dispersions", dispersions.size()));
+    }
+
+    m_gfnff_dispersions.clear();
+    for (int i = 0; i < dispersions.size(); ++i) {
+        json disp_json = dispersions[i].get<json>();
+        GFNFFDispersion disp;
+
+        disp.i = disp_json["i"];
+        disp.j = disp_json["j"];
+        disp.C6 = disp_json["C6"];
+        disp.r_cut = disp_json["r_cut"];
+
+        // CLAUDE GENERATED (January 25, 2026): GFN-FF specific dispersion parameters
+        // Reference: gfnff_gdisp0.f90:365-377
+        // r4r2ij = 3 * sqrtZr4r2_i * sqrtZr4r2_j (implicit C8/C6 factor)
+        // r0_squared = (a1*sqrt(r4r2ij) + a2)^2 with a1=0.58, a2=4.80
+        if (disp_json.contains("r4r2ij") && disp_json.contains("r0_squared")) {
+            disp.r4r2ij = disp_json["r4r2ij"];
+            disp.r0_squared = disp_json["r0_squared"];
+        } else {
+            // Fallback for legacy parameter sets: compute from sqrtZr4r2 approximation
+            // This maintains backward compatibility with older cached parameters
+            double a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
+            double a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
+
+            // If C8 is available, estimate r4r2ij from C8/C6 relationship
+            // r4r2ij ≈ 3*sqrt(C8/(3*C6)) for legacy data
+            if (disp_json.contains("C8") && disp.C6 > 1e-10) {
+                double c8 = disp_json["C8"].get<double>();
+                disp.r4r2ij = c8 / disp.C6;  // Approximate: C8 ≈ r4r2ij * C6
+            } else {
+                disp.r4r2ij = 1.0;  // Fallback default
+            }
+            disp.r0_squared = std::pow(a1 * std::sqrt(disp.r4r2ij) + a2, 2);
+        }
+
+        // Legacy fields (for backward compatibility, not used in GFN-FF energy formula)
+        disp.C8 = disp_json.contains("C8") ? disp_json["C8"].get<double>() : 0.0;
+        disp.s6 = disp_json.contains("s6") ? disp_json["s6"].get<double>() : 1.0;
+        disp.s8 = disp_json.contains("s8") ? disp_json["s8"].get<double>() : 2.0;
+        disp.a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
+        disp.a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
+
+        m_gfnff_dispersions.push_back(disp);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF dispersion pairs", m_gfnff_dispersions.size()));
+    }
+}
+
+// Claude Generated 2025: Native D4 dispersion (separate storage from GFNFF native dispersion)
+// Updated (January 25, 2026): Support GFN-FF modified dispersion formula
+void ForceField::setD4Dispersions(const json& dispersions)
+{
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setD4Dispersions: Loading {} D4 dispersions", dispersions.size()));
+    }
+
+    m_d4_dispersions.clear();
+    for (int i = 0; i < dispersions.size(); ++i) {
+        json disp_json = dispersions[i].get<json>();
+        GFNFFDispersion disp;
+
+        disp.i = disp_json["i"];
+        disp.j = disp_json["j"];
+        disp.C6 = disp_json["C6"];
+        disp.r_cut = disp_json["r_cut"];
+
+        // CLAUDE GENERATED (January 25, 2026): GFN-FF specific dispersion parameters
+        if (disp_json.contains("r4r2ij") && disp_json.contains("r0_squared")) {
+            disp.r4r2ij = disp_json["r4r2ij"];
+            disp.r0_squared = disp_json["r0_squared"];
+        } else {
+            // Fallback for legacy parameter sets
+            double a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
+            double a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
+            if (disp_json.contains("C8") && disp.C6 > 1e-10) {
+                double c8 = disp_json["C8"].get<double>();
+                disp.r4r2ij = c8 / disp.C6;
+            } else {
+                disp.r4r2ij = 1.0;
+            }
+            disp.r0_squared = std::pow(a1 * std::sqrt(disp.r4r2ij) + a2, 2);
+        }
+
+        // Claude Generated (Jan 31, 2026): Zeta charge scaling for GFN-FF dispersion
+        // Reference: gfnff_ini.f90:789-806, gfnff_gdisp0.f90:374
+        disp.zetac6 = disp_json.contains("zetac6") ? disp_json["zetac6"].get<double>() : 1.0;
+
+        // Legacy fields
+        disp.C8 = disp_json.contains("C8") ? disp_json["C8"].get<double>() : 0.0;
+        disp.s6 = disp_json.contains("s6") ? disp_json["s6"].get<double>() : 1.0;
+        disp.s8 = disp_json.contains("s8") ? disp_json["s8"].get<double>() : 2.0;
+        disp.a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
+        disp.a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
+
+        m_d4_dispersions.push_back(disp);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("Loaded {} D4 dispersion pairs", m_d4_dispersions.size()));
+    }
+}
+
+void ForceField::setGFNFFBondedRepulsions(const json& repulsions)
+{
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFBondedRepulsions: Loading {} bonded repulsions", repulsions.size()));
+    }
+
+    m_gfnff_bonded_repulsions.clear();
+    for (int i = 0; i < repulsions.size(); ++i) {
+        json rep_json = repulsions[i].get<json>();
+        GFNFFRepulsion rep;
+
+        rep.i = rep_json["i"];
+        rep.j = rep_json["j"];
+        rep.alpha = rep_json["alpha"];
+        rep.repab = rep_json["repab"];
+        rep.r_cut = rep_json["r_cut"];
+
+        m_gfnff_bonded_repulsions.push_back(rep);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF bonded repulsion pairs", m_gfnff_bonded_repulsions.size()));
+    }
+}
+
+void ForceField::setGFNFFNonbondedRepulsions(const json& repulsions)
+{
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFNonbondedRepulsions: Loading {} non-bonded repulsions", repulsions.size()));
+    }
+
+    m_gfnff_nonbonded_repulsions.clear();
+    for (int i = 0; i < repulsions.size(); ++i) {
+        json rep_json = repulsions[i].get<json>();
+        GFNFFRepulsion rep;
+
+        rep.i = rep_json["i"];
+        rep.j = rep_json["j"];
+        rep.alpha = rep_json["alpha"];
+        rep.repab = rep_json["repab"];
+        rep.r_cut = rep_json["r_cut"];
+
+        m_gfnff_nonbonded_repulsions.push_back(rep);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF non-bonded repulsion pairs", m_gfnff_nonbonded_repulsions.size()));
+    }
+}
+
+void ForceField::setGFNFFCoulombs(const json& coulombs)
+{
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFCoulombs: Loading {} Coulomb pairs", coulombs.size()));
+    }
+
+    m_gfnff_coulombs.clear();
+    for (int i = 0; i < coulombs.size(); ++i) {
+        json coul_json = coulombs[i].get<json>();
+        GFNFFCoulomb coul;
+
+        coul.i = coul_json["i"];
+        coul.j = coul_json["j"];
+        coul.q_i = coul_json["q_i"];
+        coul.q_j = coul_json["q_j"];
+        coul.gamma_ij = coul_json["gamma_ij"];
+        coul.chi_i = coul_json.value("chi_i", 0.0);      // Default to 0 if missing (backward compat)
+        coul.chi_j = coul_json.value("chi_j", 0.0);
+        // Claude Generated (Feb 22, 2026): Dynamic Coulomb chi reconstruction fields
+        // chi_base = -chi+dxi (WITHOUT cnf*sqrt(cn)), cnf = per-atom CN correction factor
+        // Falls back to static chi_i/chi_j and cnf=0 for legacy parameter files
+        coul.chi_base_i = coul_json.value("chi_base_i", coul.chi_i);
+        coul.chi_base_j = coul_json.value("chi_base_j", coul.chi_j);
+        coul.cnf_i = coul_json.value("cnf_i", 0.0);
+        coul.cnf_j = coul_json.value("cnf_j", 0.0);
+        coul.gam_i = coul_json.value("gam_i", 0.0);      // Chemical hardness
+        coul.gam_j = coul_json.value("gam_j", 0.0);
+        coul.alp_i = coul_json.value("alp_i", 0.0);
+        coul.alp_j = coul_json.value("alp_j", 0.0);
+        coul.r_cut = coul_json.value("r_cut", 50.0);
+
+        m_gfnff_coulombs.push_back(coul);
+    }
+
+    // Claude Generated (Feb 23, 2026): Extract per-atom Coulomb parameters from pairs
+    // for parent-level TERM 2+3 (thread-count-independent self-energy computation)
+    m_coulomb_chi_base = Vector::Zero(m_natoms);
+    m_coulomb_gam = Vector::Zero(m_natoms);
+    m_coulomb_alp = Vector::Zero(m_natoms);
+    m_coulomb_cnf = Vector::Zero(m_natoms);
+    m_coulomb_chi_static = Vector::Zero(m_natoms);
+    std::vector<bool> atom_seen(m_natoms, false);
+    for (const auto& coul : m_gfnff_coulombs) {
+        if (!atom_seen[coul.i]) {
+            m_coulomb_chi_base(coul.i) = coul.chi_base_i;
+            m_coulomb_gam(coul.i) = coul.gam_i;
+            m_coulomb_alp(coul.i) = coul.alp_i;
+            m_coulomb_cnf(coul.i) = coul.cnf_i;
+            m_coulomb_chi_static(coul.i) = coul.chi_i;
+            atom_seen[coul.i] = true;
+        }
+        if (!atom_seen[coul.j]) {
+            m_coulomb_chi_base(coul.j) = coul.chi_base_j;
+            m_coulomb_gam(coul.j) = coul.gam_j;
+            m_coulomb_alp(coul.j) = coul.alp_j;
+            m_coulomb_cnf(coul.j) = coul.cnf_j;
+            m_coulomb_chi_static(coul.j) = coul.chi_j;
+            atom_seen[coul.j] = true;
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF Coulomb pairs, extracted per-atom params for {} atoms",
+            m_gfnff_coulombs.size(), m_natoms));
+    }
+}
+
+void ForceField::setGFNFFSTorsions(const json& storsions)
+{
+    /**
+     * @brief Load GFN-FF triple bond torsions (sTors_eg) from JSON
+     *
+     * Claude Generated (March 2026)
+     */
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFSTorsions: Loading {} triple bond torsions", storsions.size()));
+    }
+
+    m_gfnff_storsions.clear();
+    for (int i = 0; i < storsions.size(); ++i) {
+        json stor_json = storsions[i].get<json>();
+        GFNFFSTorsion stor;
+
+        stor.i = stor_json["i"];
+        stor.j = stor_json["j"];
+        stor.k = stor_json["k"];
+        stor.l = stor_json["l"];
+        stor.erefhalf = stor_json.value("erefhalf", 3.75e-4);
+
+        m_gfnff_storsions.push_back(stor);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF triple bond torsions", m_gfnff_storsions.size()));
+    }
+}
+
+void ForceField::setGFNFFHydrogenBonds(const json& hbonds)
+{
+    // Claude Generated (2025): Phase 3 - HB Parameter Setter
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFHydrogenBonds: Loading {} hydrogen bonds", hbonds.size()));
+    }
+
+    m_gfnff_hbonds.clear();
+    int nhb1 = 0, nhb2 = 0;
+    for (const auto& hb : hbonds) {
+        GFNFFHydrogenBond bond;
+
+        bond.i = hb["i"];  // Donor atom A (or acceptor for case 1)
+        bond.j = hb["j"];  // Hydrogen
+        bond.k = hb["k"];  // Acceptor atom B
+
+        bond.basicity_A = hb["basicity_A"];
+        bond.basicity_B = hb["basicity_B"];
+        bond.acidity_A = hb["acidity_A"];
+        bond.acidity_B = hb["acidity_B"];
+
+        bond.q_H = hb["q_H"];
+        bond.q_A = hb["q_A"];
+        bond.q_B = hb["q_B"];
+
+        bond.case_type = hb.value("case_type", hb.value("case", 1));
+        bond.r_cut = hb.value("r_cut", 50.0);
+
+        if (hb.contains("neighbors_A")) {
+            bond.neighbors_A = hb["neighbors_A"].get<std::vector<int>>();
+        }
+        if (hb.contains("neighbors_B")) {
+            bond.neighbors_B = hb["neighbors_B"].get<std::vector<int>>();
+        }
+        if (hb.contains("acceptor_parent_index")) {
+            bond.acceptor_parent_index = hb["acceptor_parent_index"];
+        }
+        if (hb.contains("neighbors_C")) {
+            bond.neighbors_C = hb["neighbors_C"].get<std::vector<int>>();
+        }
+
+        if (bond.case_type == 1) nhb1++; else nhb2++;
+        m_gfnff_hbonds.push_back(bond);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result(fmt::format("Loaded {} GFN-FF hydrogen bonds (nhb1={}, nhb2={})",
+                              hbonds.size(), nhb1, nhb2));
+    }
+}
+
+void ForceField::setGFNFFHalogenBonds(const json& xbonds)
+{
+    // Claude Generated (2025): Phase 3 - XB Parameter Setter
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFHalogenBonds: Loading {} halogen bonds", xbonds.size()));
+    }
+
+    m_gfnff_xbonds.clear();
+    for (const auto& xb : xbonds) {
+        GFNFFHalogenBond bond;
+
+        bond.i = xb["i"];  // Donor atom A
+        bond.j = xb["j"];  // Halogen X
+        bond.k = xb["k"];  // Acceptor atom B
+
+        bond.basicity_B = xb["basicity_B"];
+        bond.acidity_X = xb["acidity_X"];
+
+        bond.q_X = xb["q_X"];
+        bond.q_B = xb["q_B"];
+
+        m_gfnff_xbonds.push_back(bond);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF halogen bonds", xbonds.size()));
+    }
+}
+
+/**
+ * @brief Update hydrogen bond list for MD simulations
+ *
+ * Claude Generated (Feb 15, 2026): Dynamic HB update for MD
+ * Reference: Fortran gfnff_engrad.F90:246-260, gfnff_ini2.f90:700-768
+ *
+ * During MD simulations, HB pairs can form or break. This method
+ * allows updating the HB list without full parameter regeneration.
+ *
+ * @param hbonds New hydrogen bond parameters
+ */
+void ForceField::updateGFNFFHBonds(const json& hbonds)
+{
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("Updating HB list: {} -> {} bonds",
+                                        m_gfnff_hbonds.size(), hbonds.size()));
+    }
+
+    // Clear and repopulate (same logic as setGFNFFHydrogenBonds)
+    m_gfnff_hbonds.clear();
+    for (const auto& hb : hbonds) {
+        GFNFFHydrogenBond bond;
+
+        bond.i = hb["i"];
+        bond.j = hb["j"];
+        bond.k = hb["k"];
+
+        bond.basicity_A = hb["basicity_A"];
+        bond.basicity_B = hb["basicity_B"];
+        bond.acidity_A = hb["acidity_A"];
+        bond.acidity_B = hb["acidity_B"];
+
+        bond.q_H = hb["q_H"];
+        bond.q_A = hb["q_A"];
+        bond.q_B = hb["q_B"];
+
+        bond.case_type = hb.value("case_type", hb.value("case", 1));
+        bond.r_cut = hb.value("r_cut", 50.0);
+
+        if (hb.contains("neighbors_A")) {
+            bond.neighbors_A = hb["neighbors_A"].get<std::vector<int>>();
+        }
+        if (hb.contains("neighbors_B")) {
+            bond.neighbors_B = hb["neighbors_B"].get<std::vector<int>>();
+        }
+        if (hb.contains("acceptor_parent_index")) {
+            bond.acceptor_parent_index = hb["acceptor_parent_index"];
+        }
+        if (hb.contains("neighbors_C")) {
+            bond.neighbors_C = hb["neighbors_C"].get<std::vector<int>>();
+        }
+
+        m_gfnff_hbonds.push_back(bond);
+    }
+
+    // Distribute to threads using modulo-based partitioning (must match initial distribution)
+    // Claude Generated (Feb 23, 2026): Fix thread-scaling bug — was broadcasting all HBs to all threads
+    int thread_count = static_cast<int>(m_stored_threads.size());
+    for (int t = 0; t < thread_count; ++t) {
+        std::vector<GFNFFHydrogenBond> thread_hbs;
+        for (const auto& hb : m_gfnff_hbonds) {
+            if ((hb.i + hb.j + hb.k) % thread_count == t) {
+                thread_hbs.push_back(hb);
+            }
+        }
+        m_stored_threads[t]->setGFNFFHBonds(thread_hbs);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("Updated HB list: {} bonds distributed to {} threads",
+                                           m_gfnff_hbonds.size(), thread_count));
+    }
+}
+
+/**
+ * @brief Update halogen bond list for MD simulations
+ *
+ * Claude Generated (Feb 15, 2026): Dynamic XB update for MD
+ * Reference: Fortran gfnff_engrad.F90:246-260, gfnff_ini2.f90:700-768
+ *
+ * @param xbonds New halogen bond parameters
+ */
+void ForceField::updateGFNFFXBonds(const json& xbonds)
+{
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("Updating XB list: {} -> {} bonds",
+                                        m_gfnff_xbonds.size(), xbonds.size()));
+    }
+
+    // Clear and repopulate (same logic as setGFNFFHalogenBonds)
+    m_gfnff_xbonds.clear();
+    for (const auto& xb : xbonds) {
+        GFNFFHalogenBond bond;
+
+        bond.i = xb["i"];
+        bond.j = xb["j"];
+        bond.k = xb["k"];
+
+        bond.basicity_B = xb["basicity_B"];
+        bond.acidity_X = xb["acidity_X"];
+
+        bond.q_X = xb["q_X"];
+        bond.q_B = xb["q_B"];
+
+        m_gfnff_xbonds.push_back(bond);
+    }
+
+    // Distribute to threads using modulo-based partitioning (must match initial distribution)
+    // Claude Generated (Feb 23, 2026): Fix thread-scaling bug — was broadcasting all XBs to all threads
+    int thread_count = static_cast<int>(m_stored_threads.size());
+    for (int t = 0; t < thread_count; ++t) {
+        std::vector<GFNFFHalogenBond> thread_xbs;
+        for (const auto& xb : m_gfnff_xbonds) {
+            if ((xb.i + xb.j + xb.k) % thread_count == t) {
+                thread_xbs.push_back(xb);
+            }
+        }
+        m_stored_threads[t]->setGFNFFHalogenBonds(thread_xbs);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("Updated XB list: {} bonds distributed to {} threads",
+                                           m_gfnff_xbonds.size(), thread_count));
+    }
+}
+
+void ForceField::setATMTriples(const json& triples)
+{
+    // Claude Generated (2025): ATM three-body dispersion parameter loader
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setATMTriples: Loading {} ATM triples", triples.size()));
+    }
+
+    m_atm_triples.clear();
+    for (const auto& t : triples) {
+        ATMTriple triple;
+
+        triple.i = t["i"];
+        triple.j = t["j"];
+        triple.k = t["k"];
+
+        triple.C6_ij = t["C6_ij"];
+        triple.C6_ik = t["C6_ik"];
+        triple.C6_jk = t["C6_jk"];
+
+        triple.s9 = t["s9"];
+        triple.a1 = t["a1"];
+        triple.a2 = t["a2"];
+        triple.alp = t["alp"];
+
+        triple.atm_method = t["atm_method"];
+        triple.triple_scale = t["triple_scale"];
+
+        m_atm_triples.push_back(triple);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("Loaded {} ATM three-body triples", triples.size()));
+    }
+}
+
+// BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+void ForceField::setGFNFFBatms(const json& batms)
+{
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFBatms: Loading {} batm triples", batms.size()));
+    }
+
+    m_gfnff_batms.clear();
+    for (const auto& batm_json : batms) {
+        GFNFFBatmTriple batm;
+
+        batm.i = batm_json["i"];
+        batm.j = batm_json["j"];
+        batm.k = batm_json["k"];
+
+        batm.zb3atm_i = batm_json["zb3atm_i"];
+        batm.zb3atm_j = batm_json["zb3atm_j"];
+        batm.zb3atm_k = batm_json["zb3atm_k"];
+
+        m_gfnff_batms.push_back(batm);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF batm triples", batms.size()));
+    }
+}
+
+// Claude Generated (Feb 21, 2026): Load bond-HB mapping for dncoord_erf
+// Reference: Fortran gfnff_data_types.f90:88,118-120 (bond_hb_AH, bond_hb_B, bond_hb_Bn)
+void ForceField::loadBondHBData(const json& bond_hb_data_json)
+{
+    m_bond_hb_data.clear();
+    for (const auto& entry : bond_hb_data_json) {
+        BondHBEntry bhe;
+        bhe.A = entry["A"].get<int>();
+        bhe.H = entry["H"].get<int>();
+        bhe.B_atoms = entry["B_atoms"].get<std::vector<int>>();
+        m_bond_hb_data.push_back(bhe);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2 && !m_bond_hb_data.empty()) {
+        int total_b = 0;
+        for (const auto& e : m_bond_hb_data) total_b += static_cast<int>(e.B_atoms.size());
+        CurcumaLogger::info(fmt::format("Loaded {} bond-HB entries ({} total B atoms) for dncoord_erf",
+                                         m_bond_hb_data.size(), total_b));
     }
 }
 
@@ -452,52 +1442,88 @@ void ForceField::setESPs(const json& esps)
 
 void ForceField::AutoRanges()
 {
-    // Level 3+: AutoRanges debug info
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("Setting up force field calculation ranges");
-        CurcumaLogger::param("method", m_method);
-        CurcumaLogger::param("bonds", static_cast<int>(m_bonds.size()));
-        CurcumaLogger::param("angles", static_cast<int>(m_angles.size()));
-        CurcumaLogger::param("threads", m_threads);
-    }
+        // Level 3+: AutoRanges debug info
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Setting up force field calculation ranges");
+            CurcumaLogger::param("method", m_method);
+            CurcumaLogger::param("bonds", static_cast<int>(m_bonds.size()));
+            CurcumaLogger::param("angles", static_cast<int>(m_angles.size()));
+            CurcumaLogger::param("threads", m_threads);
+        }
 
     int free_threads = m_threads;
-#pragma message("revert")
-    int d3 = false; // m_parameters["d3"];
-    #ifdef USE_D3
-    if (d3) {
-        if (free_threads > 1)
-            free_threads--;
-        D3Thread* thread = new D3Thread(m_threads - 1, free_threads);
-        thread->setParamater(m_parameters);
-        thread->Initialise(m_atom_types);
-        m_threadpool->addThread(thread);
-        m_stored_threads.push_back(thread);
-    }
-    #endif
-    int h4 = false; // m_parameters["h4"];
-    if (h4) {
-        if (free_threads > 1)
-            free_threads--;
-        H4Thread* thread = new H4Thread(m_threads - 1, free_threads);
-        thread->setParamater(m_parameters);
-        thread->Initialise(m_atom_types);
+    int thread_count = (free_threads > 0) ? free_threads : 1;
 
-        m_threadpool->addThread(thread);
-        m_stored_threads.push_back(thread);
+    // Claude Generated (March 2026): Thread reuse — if thread count matches, clear and reuse
+    // Avoids thread pool destruction/recreation during repeated setParameter() calls
+    bool reuse_threads = (!m_stored_threads.empty()
+                          && static_cast<int>(m_stored_threads.size()) == thread_count);
+
+    if (reuse_threads) {
+        clearThreadData();
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("AutoRanges: reusing {} existing threads", m_stored_threads.size()));
+        }
+    } else {
+        // Destroy old threads and create new ones
+        if (!m_stored_threads.empty()) {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("AutoRanges: clearing {} old threads (count changed)", m_stored_threads.size()));
+            }
+            m_threadpool->clear();
+            m_stored_threads.clear();
+        }
+
+        for (int i = 0; i < thread_count; ++i) {
+            ForceFieldThread* thread = new ForceFieldThread(i, thread_count);
+            thread->setGeometry(m_geometry, false);
+            thread->Initialise(m_atom_types);
+            m_threadpool->addThread(thread);
+            m_stored_threads.push_back(thread);
+        }
     }
-    for (int i = 0; i < free_threads; ++i) {
-        ForceFieldThread* thread = new ForceFieldThread(i, free_threads);
-        thread->setGeometry(m_geometry, false);
-        m_threadpool->addThread(thread);
-        m_stored_threads.push_back(thread);
+
+    for (int i = 0; i < thread_count; ++i) {
+        ForceFieldThread* thread = dynamic_cast<ForceFieldThread*>(m_stored_threads[i]);
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("created_thread", i);
+        }
         if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) {
             thread->setMethod(1);
         } else if (std::find(m_qmdff_methods.begin(), m_qmdff_methods.end(), m_method) != m_qmdff_methods.end()) {
             thread->setMethod(2);
         } else if (m_method == "gfnff") {
             thread->setMethod(3); // GFN-FF
+
+            // Claude Generated (Mar 2026): Pointer-based data sharing — threads read from ForceField memory
+            // Eliminates per-step O(N) copies for geometry, charges, CN
+            thread->setGeometryPtr(&m_geometry);
+            thread->setEEQChargesPtr(&m_eeq_charges);
+            thread->setTopologyChargesPtr(&m_topology_charges);
+            thread->setD3CNPtr(&m_d3_cn);
+
+            // Phase 2: Configure GFN-FF parameter flags (Claude Generated Dec 2025)
+            // These control which energy terms are calculated to save CPU time
+            bool dispersion = m_parameters.value("dispersion", true);
+            bool hbond = m_parameters.value("hbond", true);
+            bool repulsion = m_parameters.value("repulsion", true);
+            bool coulomb = m_parameters.value("coulomb", true);
+
+            thread->setDispersionEnabled(dispersion);
+            thread->setHydrogenBondEnabled(hbond);
+            thread->setRepulsionEnabled(repulsion);
+            thread->setCoulombEnabled(coulomb);
+        } else if (m_method == "d3") {  // Claude Generated (December 21, 2025)
+            thread->setMethod(5); // D3-only method
         }
+
+        // Claude Generated (Feb 21, 2026): Distribute bond-HB data to all threads for dncoord_erf
+        // Every thread needs the full set because any thread's bond may have nr_hb >= 1
+        if (!m_bond_hb_data.empty()) {
+            thread->setBondHBData(m_bond_hb_data);
+        }
+
         for (int j = int(i * m_bonds.size() / double(free_threads)); j < int((i + 1) * m_bonds.size() / double(free_threads)); ++j) {
             if (m_method == "gfnff") {
                 thread->addGFNFFBond(m_bonds[j]);
@@ -522,6 +1548,13 @@ void ForceField::AutoRanges()
             }
         }
 
+        // Claude Generated (Jan 2, 2026): Distribute extra sp3-sp3 gauche torsions
+        for (int j = int(i * m_extra_dihedrals.size() / double(free_threads)); j < int((i + 1) * m_extra_dihedrals.size() / double(free_threads)); ++j) {
+            if (m_method == "gfnff") {
+                thread->addGFNFFExtraTorsion(m_extra_dihedrals[j]);
+            }
+        }
+
         for (int j = int(i * m_inversions.size() / double(free_threads)); j < int((i + 1) * m_inversions.size() / double(free_threads)); ++j) {
             if (m_method == "gfnff") {
                 thread->addGFNFFInversion(m_inversions[j]);
@@ -538,14 +1571,165 @@ void ForceField::AutoRanges()
             }
         }
 
+        // Phase 4.2: Distribute GFN-FF pairwise non-bonded interactions (Claude Generated 2025)
+        // Phase 2.2 (December 19, 2025): Extended for UFF-D3 native dispersion
+        if (m_method == "gfnff" || m_method == "d3") {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("Distributing {} GFN-FF dispersion pairs to thread {}", m_gfnff_dispersions.size(), i));
+            }
+            for (int j = int(i * m_gfnff_dispersions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)); ++j) {
+                thread->addGFNFFDispersion(m_gfnff_dispersions[j]);
+            }
+
+            // Distribute bonded repulsion pairs
+            for (int j = int(i * m_gfnff_bonded_repulsions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_bonded_repulsions.size() / double(free_threads)); ++j) {
+                thread->addGFNFFBondedRepulsion(m_gfnff_bonded_repulsions[j]);
+            }
+
+            // Distribute non-bonded repulsion pairs
+            for (int j = int(i * m_gfnff_nonbonded_repulsions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_nonbonded_repulsions.size() / double(free_threads)); ++j) {
+                thread->addGFNFFNonbondedRepulsion(m_gfnff_nonbonded_repulsions[j]);
+            }
+
+            for (int j = int(i * m_gfnff_coulombs.size() / double(free_threads)); j < int((i + 1) * m_gfnff_coulombs.size() / double(free_threads)); ++j) {
+                thread->addGFNFFCoulomb(m_gfnff_coulombs[j]);
+            }
+
+            // NOTE (Feb 23, 2026): Self-energy atom assignment removed — TERM 2+3 and Term 1b
+            // are now computed sequentially in the parent reduction step (thread-count-independent).
+        }
+
+        // Claude Generated (December 19, 2025): UFF-D3 native D3 dispersion distribution
+        // Distribute D3 dispersion pairs to threads for parallel calculation
+        if (m_method == "uff-d3" && !m_gfnff_dispersions.empty()) {
+            for (int j = int(i * m_gfnff_dispersions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)); ++j) {
+                thread->addD3Dispersion(m_gfnff_dispersions[j]);
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                int d3_count = int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)) - int(i * m_gfnff_dispersions.size() / double(free_threads));
+                CurcumaLogger::param(fmt::format("thread_{}_d3_pairs", i), d3_count);
+            }
+        }
+
+        // Claude Generated (December 25, 2025): GFN-FF Native D4 dispersion distribution
+        // Distribute D4 dispersion pairs to threads for parallel calculation
+        if (!m_d4_dispersions.empty()) {
+            for (int j = int(i * m_d4_dispersions.size() / double(free_threads)); j < int((i + 1) * m_d4_dispersions.size() / double(free_threads)); ++j) {
+                thread->addD4Dispersion(m_d4_dispersions[j]);
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                int d4_count = int((i + 1) * m_d4_dispersions.size() / double(free_threads)) - int(i * m_d4_dispersions.size() / double(free_threads));
+                CurcumaLogger::param(fmt::format("thread_{}_d4_pairs", i), d4_count);
+            }
+        }
+
+        // ATM three-body dispersion (D3/D4)
+        // Distribute ATM triples to threads for parallel calculation
+        if (!m_atm_triples.empty()) {
+            // Use sum-based distribution for triples (similar to HB/XB pattern)
+            for (const auto& triple : m_atm_triples) {
+                int thread_id = (triple.i + triple.j + triple.k) % thread_count;
+                if (thread_id == i) {
+                    thread->addATMTriple(triple);
+                }
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                int atm_count = 0;
+                for (const auto& triple : m_atm_triples) {
+                    if ((triple.i + triple.j + triple.k) % thread_count == i) {
+                        atm_count++;
+                    }
+                }
+                CurcumaLogger::param(fmt::format("thread_{}_atm_triples", i), atm_count);
+            }
+        }
+
+        // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+        // Distribute batm triples to threads for parallel calculation
+        if (!m_gfnff_batms.empty()) {
+            // Use sum-based distribution for triples (similar to ATM/HB/XB pattern)
+            for (const auto& batm : m_gfnff_batms) {
+                int thread_id = (batm.i + batm.j + batm.k) % thread_count;
+                if (thread_id == i) {
+                    thread->addGFNFFBatmTriple(batm);
+                }
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                int batm_count = 0;
+                for (const auto& batm : m_gfnff_batms) {
+                    if ((batm.i + batm.j + batm.k) % thread_count == i) {
+                        batm_count++;
+                    }
+                }
+                CurcumaLogger::param(fmt::format("thread_{}_batm_triples", i), batm_count);
+            }
+        }
+
+        // GFN-FF Hydrogen Bond (HB) Distribution - Claude Generated (January 17, 2026)
+        // Distribute HB three-body terms (A-H...B) to threads for parallel calculation
+        if (!m_gfnff_hbonds.empty()) {
+            // Use sum-based distribution for triples (similar to ATM/BATM/XB pattern)
+            for (const auto& hb : m_gfnff_hbonds) {
+                int thread_id = (hb.i + hb.j + hb.k) % thread_count;
+                if (thread_id == i) {
+                    thread->addGFNFFHydrogenBond(hb);
+                }
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                int hb_count = 0;
+                for (const auto& hb : m_gfnff_hbonds) {
+                    if ((hb.i + hb.j + hb.k) % thread_count == i) {
+                        hb_count++;
+                    }
+                }
+            CurcumaLogger::param(fmt::format("thread_{}_hbonds", i), hb_count);
+        }
+    }
+
+        // GFN-FF Halogen Bond (XB) Distribution - Claude Generated (January 17, 2026)
+        // Distribute XB three-body terms (A-X...B) to threads for parallel calculation
+        if (!m_gfnff_xbonds.empty()) {
+            // Use sum-based distribution for triples (similar to ATM/BATM/HB pattern)
+            for (const auto& xb : m_gfnff_xbonds) {
+                int thread_id = (xb.i + xb.j + xb.k) % thread_count;
+                if (thread_id == i) {
+                    thread->addGFNFFHalogenBond(xb);
+                }
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                int xb_count = 0;
+                for (const auto& xb : m_gfnff_xbonds) {
+                    if ((xb.i + xb.j + xb.k) % thread_count == i) {
+                        xb_count++;
+                    }
+                }
+                CurcumaLogger::param(fmt::format("thread_{}_xbonds", i), xb_count);
+            }
+        }
+
+        // Claude Generated (March 2026): GFN-FF triple bond torsion distribution
+        if (!m_gfnff_storsions.empty()) {
+            for (int j = int(i * m_gfnff_storsions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_storsions.size() / double(free_threads)); ++j) {
+                thread->addGFNFFSTorsion(m_gfnff_storsions[j]);
+            }
+        }
+
         for (int j = int(i * m_EQs.size() / double(free_threads)); j < int((i + 1) * m_EQs.size() / double(free_threads)); ++j)
             thread->addEQ(m_EQs[j]);
     }
 
     // Level 3+: AutoRanges completion info
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::param("created_threads", free_threads);
+        CurcumaLogger::param("created_threads", thread_count);
         CurcumaLogger::param("total_stored_threads", static_cast<int>(m_stored_threads.size()));
+        CurcumaLogger::info(fmt::format("DEBUG AutoRanges: Created {} new threads for method {}",
+            m_stored_threads.size(), m_method));
         CurcumaLogger::info("Force field calculation ranges setup completed");
     }
 }
@@ -624,6 +1808,55 @@ bool ForceField::loadParametersFromFile(const std::string& filename)
             CurcumaLogger::param("method", loaded_params["method"].get<std::string>());
             CurcumaLogger::param("bonds", static_cast<int>(loaded_params["bonds"].size()));
             CurcumaLogger::param("angles", static_cast<int>(loaded_params["angles"].size()));
+
+            // Claude Generated (December 2025): Additional validation for GFN-FF/D4 parameters
+            std::string method = loaded_params["method"].get<std::string>();
+            if (method == "gfnff") {
+                if (loaded_params.contains("gfnff_dispersions")) {
+                    CurcumaLogger::param("gfnff_dispersions", static_cast<int>(loaded_params["gfnff_dispersions"].size()));
+                }
+                if (loaded_params.contains("gfnff_coulombs")) {
+                    CurcumaLogger::param("gfnff_coulombs", static_cast<int>(loaded_params["gfnff_coulombs"].size()));
+                }
+                if (loaded_params.contains("gfnff_bonded_repulsions")) {
+                    CurcumaLogger::param("gfnff_bonded_repulsions", static_cast<int>(loaded_params["gfnff_bonded_repulsions"].size()));
+                }
+                if (loaded_params.contains("gfnff_nonbonded_repulsions")) {
+                    CurcumaLogger::param("gfnff_nonbonded_repulsions", static_cast<int>(loaded_params["gfnff_nonbonded_repulsions"].size()));
+                }
+                if (loaded_params.contains("gfnff_hbonds")) {
+                    CurcumaLogger::param("gfnff_hbonds", static_cast<int>(loaded_params["gfnff_hbonds"].size()));
+                }
+                if (loaded_params.contains("gfnff_xbonds")) {
+                    CurcumaLogger::param("gfnff_xbonds", static_cast<int>(loaded_params["gfnff_xbonds"].size()));
+                }
+            }
+
+            // D4 dispersion parameter info
+            if (loaded_params.contains("d4_dispersion_pairs")) {
+                CurcumaLogger::param("d4_dispersion_pairs", static_cast<int>(loaded_params["d4_dispersion_pairs"].size()));
+            }
+
+            // ATM triple info (universal)
+            if (loaded_params.contains("atm_triples")) {
+                CurcumaLogger::param("atm_triples", static_cast<int>(loaded_params["atm_triples"].size()));
+            }
+
+            // EEQ charges info (GFN-FF)
+            if (loaded_params.contains("eeq_charges")) {
+                CurcumaLogger::param("eeq_charges", static_cast<int>(loaded_params["eeq_charges"].size()));
+            }
+        }
+
+        // Claude Generated (December 2025): Restore EEQ charges from cache
+        // Distribution to threads happens at end of setParameter() - no need to do it here
+        if (loaded_params.contains("eeq_charges") && !loaded_params["eeq_charges"].is_null()) {
+            std::vector<double> charge_vec = loaded_params["eeq_charges"].get<std::vector<double>>();
+            m_eeq_charges = Eigen::Map<Vector>(charge_vec.data(), charge_vec.size());
+
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::param("eeq_charges_restored", static_cast<int>(m_eeq_charges.size()));
+            }
         }
 
         return true;
@@ -656,6 +1889,22 @@ json ForceField::exportCurrentParameters() const
         b["exponent"] = bond.exponent;
         b["r0_ij"] = bond.r0_ij;
         b["r0_ik"] = bond.r0_ik;
+        b["rabshift"] = bond.rabshift;  // Claude Generated (Dec 2025): Store vbond(1) for validation
+        b["fqq"] = bond.fqq;  // Claude Generated (Jan 7, 2026): Store charge-dependent factor for validation
+
+        // Claude Generated (Jan 18, 2026): Dynamic r0 calculation parameters for GFN-FF
+        b["z_i"] = bond.z_i;
+        b["z_j"] = bond.z_j;
+        b["r0_base_i"] = bond.r0_base_i;
+        b["r0_base_j"] = bond.r0_base_j;
+        b["cnfak_i"] = bond.cnfak_i;
+        b["cnfak_j"] = bond.cnfak_j;
+        b["ff"] = bond.ff;
+
+        // Claude Generated (Jan 24, 2026): Hydrogen bridge bond modulation (egbond_hb)
+        b["nr_hb"] = bond.nr_hb;
+        b["hb_cn_H"] = bond.hb_cn_H;
+
         bonds.push_back(b);
     }
     output["bonds"] = bonds;
@@ -695,6 +1944,22 @@ json ForceField::exportCurrentParameters() const
     }
     output["dihedrals"] = dihedrals;
 
+    // Claude Generated (March 2026): Export extra sp3-sp3 torsions for per-torsion diagnostics
+    json extra_dihedrals = json::array();
+    for (const auto& d : m_extra_dihedrals) {
+        json ed;
+        ed["type"] = d.type;
+        ed["i"] = d.i;
+        ed["j"] = d.j;
+        ed["k"] = d.k;
+        ed["l"] = d.l;
+        ed["V"] = d.V;
+        ed["n"] = d.n;
+        ed["phi0"] = d.phi0;
+        extra_dihedrals.push_back(ed);
+    }
+    output["extra_dihedrals"] = extra_dihedrals;
+
     // Export inversions
     json inversions = json::array();
     for (const auto& inversion : m_inversions) {
@@ -708,6 +1973,8 @@ json ForceField::exportCurrentParameters() const
         inv["C0"] = inversion.C0;
         inv["C1"] = inversion.C1;
         inv["C2"] = inversion.C2;
+        inv["potential_type"] = inversion.potential_type;
+        inv["omega0"] = inversion.omega0;
         inversions.push_back(inv);
     }
     output["inversions"] = inversions;
@@ -738,6 +2005,218 @@ json ForceField::exportCurrentParameters() const
         eqs.push_back(e);
     }
     output["electrostatics"] = eqs;
+
+    // Claude Generated: Export D3 dispersion parameters if they exist
+    if (m_parameters.contains("d3_dispersion_pairs")) {
+        output["d3_dispersion_pairs"] = m_parameters["d3_dispersion_pairs"];
+    }
+    if (m_parameters.contains("d3_damping")) {
+        output["d3_damping"] = m_parameters["d3_damping"];
+    }
+    if (m_parameters.contains("d3_enabled")) {
+        output["d3_enabled"] = m_parameters["d3_enabled"];
+    }
+
+    // Claude Generated (December 2025, Updated January 25, 2026): Export GFN-FF specific parameters
+    // Now includes r4r2ij and r0_squared for GFN-FF modified dispersion formula
+    if (!m_gfnff_dispersions.empty()) {
+        json gfnff_disp = json::array();
+        for (const auto& disp : m_gfnff_dispersions) {
+            json d;
+            d["i"] = disp.i;
+            d["j"] = disp.j;
+            d["C6"] = disp.C6;
+            d["r4r2ij"] = disp.r4r2ij;      // GFN-FF specific: 3*sqrtZr4r2_i*sqrtZr4r2_j
+            d["r0_squared"] = disp.r0_squared;  // GFN-FF specific: (a1*sqrt(r4r2ij)+a2)^2
+            d["r_cut"] = disp.r_cut;
+            // Legacy fields (for backward compatibility)
+            d["C8"] = disp.C8;
+            d["s6"] = disp.s6;
+            d["s8"] = disp.s8;
+            d["a1"] = disp.a1;
+            d["a2"] = disp.a2;
+            gfnff_disp.push_back(d);
+        }
+        output["gfnff_dispersions"] = gfnff_disp;
+    }
+
+    // Claude Generated (December 2025): Export GFN-FF repulsions
+    if (!m_gfnff_bonded_repulsions.empty()) {
+        json bonded_rep = json::array();
+        for (const auto& rep : m_gfnff_bonded_repulsions) {
+            json r;
+            r["i"] = rep.i;
+            r["j"] = rep.j;
+            r["alpha"] = rep.alpha;
+            r["repab"] = rep.repab;
+            r["r_cut"] = rep.r_cut;
+            bonded_rep.push_back(r);
+        }
+        output["gfnff_bonded_repulsions"] = bonded_rep;
+    }
+
+    if (!m_gfnff_nonbonded_repulsions.empty()) {
+        json nonbonded_rep = json::array();
+        for (const auto& rep : m_gfnff_nonbonded_repulsions) {
+            json r;
+            r["i"] = rep.i;
+            r["j"] = rep.j;
+            r["alpha"] = rep.alpha;
+            r["repab"] = rep.repab;
+            r["r_cut"] = rep.r_cut;
+            nonbonded_rep.push_back(r);
+        }
+        output["gfnff_nonbonded_repulsions"] = nonbonded_rep;
+    }
+
+    // Claude Generated (December 2025): Export GFN-FF Coulomb parameters
+    if (!m_gfnff_coulombs.empty()) {
+        json coulombs = json::array();
+        for (const auto& coul : m_gfnff_coulombs) {
+            json c;
+            c["i"] = coul.i;
+            c["j"] = coul.j;
+            c["q_i"] = coul.q_i;
+            c["q_j"] = coul.q_j;
+            c["gamma_ij"] = coul.gamma_ij;
+            c["chi_i"] = coul.chi_i;
+            c["chi_j"] = coul.chi_j;
+            c["chi_base_i"] = coul.chi_base_i;
+            c["chi_base_j"] = coul.chi_base_j;
+            c["cnf_i"] = coul.cnf_i;
+            c["cnf_j"] = coul.cnf_j;
+            c["gam_i"] = coul.gam_i;
+            c["gam_j"] = coul.gam_j;
+            c["alp_i"] = coul.alp_i;
+            c["alp_j"] = coul.alp_j;
+            c["r_cut"] = coul.r_cut;
+            coulombs.push_back(c);
+        }
+        output["gfnff_coulombs"] = coulombs;
+    }
+
+    // Claude Generated (December 2025): Export GFN-FF hydrogen bonds
+    if (!m_gfnff_hbonds.empty()) {
+        json hbonds = json::array();
+        for (const auto& hb : m_gfnff_hbonds) {
+            json h;
+            h["i"] = hb.i;
+            h["j"] = hb.j;
+            h["k"] = hb.k;
+            h["basicity_A"] = hb.basicity_A;
+            h["basicity_B"] = hb.basicity_B;
+            h["acidity_A"] = hb.acidity_A;
+            h["q_H"] = hb.q_H;
+            h["q_A"] = hb.q_A;
+            h["q_B"] = hb.q_B;
+            h["r_cut"] = hb.r_cut;
+            h["case_type"] = hb.case_type;
+            h["neighbors_B"] = hb.neighbors_B;
+            hbonds.push_back(h);
+        }
+        output["gfnff_hbonds"] = hbonds;
+    }
+
+    // Claude Generated (December 2025): Export GFN-FF halogen bonds
+    if (!m_gfnff_xbonds.empty()) {
+        json xbonds = json::array();
+        for (const auto& xb : m_gfnff_xbonds) {
+            json x;
+            x["i"] = xb.i;
+            x["j"] = xb.j;
+            x["k"] = xb.k;
+            x["basicity_B"] = xb.basicity_B;
+            x["acidity_X"] = xb.acidity_X;
+            x["q_X"] = xb.q_X;
+            x["q_B"] = xb.q_B;
+            x["r_cut"] = xb.r_cut;
+            xbonds.push_back(x);
+        }
+        output["gfnff_xbonds"] = xbonds;
+    }
+
+    // Claude Generated (December 2025, Updated January 25, 2026): Export D4 dispersion parameters
+    // Now includes r4r2ij and r0_squared for GFN-FF modified dispersion formula
+    if (!m_d4_dispersions.empty()) {
+        json d4_disp = json::array();
+        for (const auto& disp : m_d4_dispersions) {
+            json d;
+            d["i"] = disp.i;
+            d["j"] = disp.j;
+            d["C6"] = disp.C6;
+            d["r4r2ij"] = disp.r4r2ij;      // GFN-FF specific: 3*sqrtZr4r2_i*sqrtZr4r2_j
+            d["r0_squared"] = disp.r0_squared;  // GFN-FF specific: (a1*sqrt(r4r2ij)+a2)^2
+            d["r_cut"] = disp.r_cut;
+            // Legacy fields (for backward compatibility)
+            d["C8"] = disp.C8;
+            d["s6"] = disp.s6;
+            d["s8"] = disp.s8;
+            d["a1"] = disp.a1;
+            d["a2"] = disp.a2;
+            d4_disp.push_back(d);
+        }
+        output["d4_dispersion_pairs"] = d4_disp;
+    }
+
+    // Claude Generated (December 2025): Export ATM triples (universal for D3 and D4)
+    if (!m_atm_triples.empty()) {
+        json atm = json::array();
+        for (const auto& triple : m_atm_triples) {
+            json t;
+            t["i"] = triple.i;
+            t["j"] = triple.j;
+            t["k"] = triple.k;
+            t["C6_ij"] = triple.C6_ij;
+            t["C6_ik"] = triple.C6_ik;
+            t["C6_jk"] = triple.C6_jk;
+            t["s9"] = triple.s9;
+            t["a1"] = triple.a1;
+            t["a2"] = triple.a2;
+            t["alp"] = triple.alp;
+            t["atm_method"] = triple.atm_method;
+            t["triple_scale"] = triple.triple_scale;
+            atm.push_back(t);
+        }
+        output["atm_triples"] = atm;
+    }
+
+    // Claude Generated (January 2026): Export GFN-FF batm (bonded ATM) triples for 1,4-pairs
+    if (!m_gfnff_batms.empty()) {
+        json batms = json::array();
+        for (const auto& batm : m_gfnff_batms) {
+            json b;
+            b["i"] = batm.i;
+            b["j"] = batm.j;
+            b["k"] = batm.k;
+            b["zb3atm_i"] = batm.zb3atm_i;
+            b["zb3atm_j"] = batm.zb3atm_j;
+            b["zb3atm_k"] = batm.zb3atm_k;
+            batms.push_back(b);
+        }
+        output["gfnff_batms"] = batms;
+    }
+
+    // Claude Generated (December 2025): Export EEQ charges if available
+    if (m_eeq_charges.size() > 0) {
+        json charges = json::array();
+        for (int i = 0; i < m_eeq_charges.size(); ++i) {
+            charges.push_back(m_eeq_charges[i]);
+        }
+        output["eeq_charges"] = charges;
+    }
+
+    // Claude Generated (Feb 21, 2026): Export bond-HB data for dncoord_erf
+    if (!m_bond_hb_data.empty()) {
+        json bond_hb_json = json::array();
+        for (const auto& entry : m_bond_hb_data) {
+            json e;
+            e["A"] = entry.A;
+            e["H"] = entry.H;
+            e["B_atoms"] = entry.B_atoms;
+            bond_hb_json.push_back(e);
+        }
+        output["bond_hb_data"] = bond_hb_json;
+    }
 
     // Add metadata
     output["generated_by"] = "curcuma_forcefield";
@@ -788,7 +2267,8 @@ bool ForceField::tryLoadAutoParameters(const std::string& method)
     if (m_parameters.contains("method") && !m_parameters["method"].is_null()) {
         std::string cached_method = m_parameters["method"].get<std::string>();
         if (cached_method == method) {
-            if (CurcumaLogger::get_verbosity() >= 2) {
+            // Claude Generated (Dec 2025): Show cache success at verbosity ≥1 (important user info)
+            if (CurcumaLogger::get_verbosity() >= 1) {
                 CurcumaLogger::success(fmt::format("Loaded cached {} parameters from: {}", method, m_auto_param_file));
             }
             return true;
@@ -826,6 +2306,87 @@ bool ForceField::autoSaveParameters() const
 
 double ForceField::Calculate(bool gradient)
 {
+    // Claude Generated (March 2026): FFWorkspace path for UFF/QMDFF
+    if (m_use_workspace && m_workspace) {
+        m_workspace->setGeometry(m_geometry);
+        double energy = m_workspace->calculate(gradient);
+        if (gradient)
+            m_gradient = m_workspace->gradient();
+        const auto& e = m_workspace->energyComponents();
+        m_bond_energy        = e.bond;
+        m_angle_energy       = e.angle;
+        m_dihedral_energy    = e.dihedral;
+        m_inversion_energy   = e.inversion;
+        m_vdw_energy         = e.vdw;
+        m_rep_energy         = e.rep;
+        m_dispersion_energy  = e.dispersion;
+        m_d3_energy          = e.dispersion;  // D3 dispersion stored here for uff-d3
+        return energy;
+    }
+
+    // Claude Generated (March 2026): Safety fallback — UFF/QMDFF workspace missing, rebuild on-the-fly.
+    // This should not happen in normal usage (setParameter() creates workspace), but guards against
+    // cases where the workspace was not initialized (e.g., direct loadParametersFromFile calls).
+    if (!m_workspace &&
+        (m_method == "uff" || m_method == "uff-d3" ||
+         m_method == "qmdff" || m_method == "quff") &&
+        !m_bonds.empty()) {
+        CurcumaLogger::warn(fmt::format(
+            "UFF/QMDFF workspace not initialized for method '{}' — rebuilding", m_method));
+        ForceFieldParameterSet ws_params;
+        ws_params.method_type = (m_method == "qmdff" || m_method == "quff")
+                                ? FFMethodType::QMDFF : FFMethodType::UFF;
+        ws_params.bonds      = m_bonds;
+        ws_params.angles     = m_angles;
+        ws_params.dihedrals  = m_dihedrals;
+        ws_params.inversions = m_inversions;
+        ws_params.vdws       = m_vdWs;
+        ws_params.dispersion_enabled = (m_method == "uff-d3");
+        if (m_method == "uff-d3" && !m_gfnff_dispersions.empty()) {
+            ws_params.dispersions = m_gfnff_dispersions;
+            ws_params.dispersion_method = "d3";
+        }
+        ws_params.hbond_enabled = false;
+        ws_params.repulsion_enabled = false;
+        ws_params.coulomb_enabled = false;
+
+        m_workspace = std::make_unique<FFWorkspace>(m_threads);
+        m_workspace->setPool(m_threadpool);  // Claude Generated (March 2026): Required for multi-thread execution
+        m_workspace->setAtomTypes(m_atom_types);
+        m_workspace->setInteractionLists(std::move(ws_params));
+        m_workspace->partition();
+        m_use_workspace = true;
+    }
+    // Re-check workspace path (may have just been created by fallback above):
+    if (m_use_workspace && m_workspace) {
+        m_workspace->setGeometry(m_geometry);
+        double energy = m_workspace->calculate(gradient);
+        if (gradient) m_gradient = m_workspace->gradient();
+        const auto& e = m_workspace->energyComponents();
+        m_bond_energy        = e.bond;
+        m_angle_energy       = e.angle;
+        m_dihedral_energy    = e.dihedral;
+        m_inversion_energy   = e.inversion;
+        m_vdw_energy         = e.vdw;
+        m_rep_energy         = e.rep;
+        m_dispersion_energy  = e.dispersion;
+        m_d3_energy          = e.dispersion;
+        return energy;
+    }
+
+    // Claude Generated (2025-12-13): Check for uninitialized ForceField
+    if (m_stored_threads.empty()) {
+        CurcumaLogger::error("ForceField::Calculate() - ForceField not initialized! No threads available.");
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("This usually means setParameter() was not called or AutoRanges() failed.");
+            CurcumaLogger::info("Check if parameter generation succeeded and produced valid JSON arrays.");
+        }
+        return 0.0;
+    }
+
+    // Claude Generated (February 2026): Start energy calculation timer for verbosity 1+
+    auto energy_calc_start = std::chrono::high_resolution_clock::now();
+
     // Level 3+: Calculation debug info
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Starting force field calculation");
@@ -833,47 +2394,324 @@ double ForceField::Calculate(bool gradient)
         CurcumaLogger::param("stored_threads", static_cast<int>(m_stored_threads.size()));
     }
 
-    m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
+    // Claude Generated (Mar 2026): Reuse existing allocation, avoid per-step malloc
+    if (m_gradient.rows() != m_geometry.rows() || m_gradient.cols() != 3)
+        m_gradient.resize(m_geometry.rows(), 3);
+    m_gradient.setZero();
     double energy = 0.0;
-    double d4_energy = 0;
-    double d3_energy = 0;
-    double bond_energy = 0.0;
-    double angle_energy = 0.0;
-    double dihedral_energy = 0.0;
-    double inversion_energy = 0.0;
-    double vdw_energy = 0.0;
-    double rep_energy = 0.0;
-    double eq_energy = 0.0;
+    // Claude Generated (Jan 2, 2026): Use member variables instead of local variables for D3/D4
+    // Claude Generated: Reset all energy components for regression testing (Nov 2025)
+    m_bond_energy = 0.0;
+    m_angle_energy = 0.0;
+    m_dihedral_energy = 0.0;
+    m_inversion_energy = 0.0;
+    m_vdw_energy = 0.0;
+    m_rep_energy = 0.0;
+    m_eq_energy = 0.0;
+    m_dispersion_energy = 0.0;
+    m_coulomb_energy = 0.0;
+    m_energy_hbond = 0.0;    // Claude Generated (2025): Phase 5 - Reset HB energy
+    m_energy_xbond = 0.0;    // Claude Generated (2025): Phase 5 - Reset XB energy
+    m_gfnff_repulsion = 0.0;  // Claude Generated (Dec 2025): Reset GFN-FF repulsion energy
+    m_gfnff_bonded_repulsion = 0.0;
+    m_gfnff_nonbonded_repulsion = 0.0;
+    m_atm_energy = 0.0;      // Claude Generated (December 2025): Reset ATM three-body dispersion
+    m_d3_energy = 0.0;       // Claude Generated (Jan 2, 2026): Reset D3 dispersion energy
+    m_d4_energy = 0.0;       // Claude Generated (Jan 2, 2026): Reset D4 dispersion energy
+    m_batm_energy = 0.0;     // Claude Generated (Jan 17, 2026): Reset batm three-body energy - CRITICAL FIX
+
     double h4_energy = 0.0;
-    double hh_energy = 0.0;
     double cg_energy = 0.0; // Claude Generated: CG pair interaction energy
 
-    for (int i = 0; i < m_stored_threads.size(); ++i) {
-        m_stored_threads[i]->UpdateGeometry(m_geometry, gradient);
+    // Claude Generated: GFN-FF specific non-bonded energies (Phase 4.4 fix)
+    // NOTE: These are now accumulated into member variables m_dispersion_energy and m_coulomb_energy
+    // (local variables removed - using m_dispersion_energy and m_coulomb_energy member variables)
+
+    // Claude Generated (December 2025): Thread safety verification
+    // Verify all threads are valid pointers before using them
+    for (size_t i = 0; i < m_stored_threads.size(); ++i) {
+        if (m_stored_threads[i] == nullptr) {
+            // Claude Generated (March 2026): UFF/QMDFF should use workspace path — safe return
+            if (m_method == "uff" || m_method == "uff-d3" ||
+                m_method == "qmdff" || m_method == "quff") {
+                CurcumaLogger::error(fmt::format(
+                    "Thread {} nullptr for {} — workspace not initialized! "
+                    "m_use_workspace={}, m_workspace={}",
+                    i, m_method, m_use_workspace, (m_workspace != nullptr)));
+                return 0.0;
+            }
+            throw std::runtime_error(fmt::format("Thread {} is nullptr!", i));
+        }
+    }
+
+    // Claude Generated (Mar 2026): GFN-FF threads use pointer-based sharing — only reset accumulators.
+    // UFF/QMDFF threads still copy geometry (no pointer set).
+    if (m_method == "gfnff") {
+        for (int i = 0; i < m_stored_threads.size(); ++i) {
+            m_stored_threads[i]->resetForStep(gradient);
+        }
+    } else {
+        for (int i = 0; i < m_stored_threads.size(); ++i) {
+            m_stored_threads[i]->UpdateGeometry(m_geometry, gradient);
+        }
+    }
+
+    // Claude Generated (Mar 2026): Duplicate CN calculation removed — Phase 0 optimization.
+    // CN is now calculated once in GFNFF::Calculation() and distributed via distributeD3CN().
+    // Previous code here recalculated CN identically (same geometry, same function) — pure waste.
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("DEBUG: All thread pointers are valid");
+        CurcumaLogger::info(fmt::format("DEBUG Calculate: Using {} threads", m_stored_threads.size()));
     }
 
     m_threadpool->Reset();
     m_threadpool->setActiveThreadCount(m_threads);
 
     m_threadpool->StartAndWait();
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success("DEBUG Calculate: All threads completed successfully");
+    }
     // m_threadpool->setWakeUp(m_threadpool->WakeUp() / 2);
 
+    // Claude Generated (February 2026): Accumulate individual term timings from all threads
+    std::unordered_map<std::string, long long> total_term_timings;
+
     for (int i = 0; i < m_stored_threads.size(); ++i) {
-        bond_energy += m_stored_threads[i]->BondEnergy();
-        angle_energy += m_stored_threads[i]->AngleEnergy();
-        dihedral_energy += m_stored_threads[i]->DihedralEnergy();
-        inversion_energy += m_stored_threads[i]->InversionEnergy();
-        if (m_stored_threads[i]->Type() != 3)
-            vdw_energy += m_stored_threads[i]->VdWEnergy();
-        else
-            h4_energy += m_stored_threads[i]->VdWEnergy();
-        if (m_stored_threads[i]->Type() != 3)
-            rep_energy += m_stored_threads[i]->RepEnergy();
-        else
-            hh_energy += m_stored_threads[i]->RepEnergy();
-        // eq_energy += m_stored_threads[i]->RepEnergy();
+        // Accumulate timing data
+        const auto& thread_timings = m_stored_threads[i]->getTermTimings();
+        for (const auto& [term, time] : thread_timings) {
+            total_term_timings[term] += time;
+        }
+
+        // Original energy accumulation continues below
+        m_bond_energy += m_stored_threads[i]->BondEnergy();
+        m_angle_energy += m_stored_threads[i]->AngleEnergy();
+        m_dihedral_energy += m_stored_threads[i]->DihedralEnergy();
+        m_inversion_energy += m_stored_threads[i]->InversionEnergy();
+
+        // Claude Generated (2025): Debug thread type
+        int thread_type = m_stored_threads[i]->Type();
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param(fmt::format("thread_{}_type", i), std::to_string(thread_type));
+        }
+
+        // Collect D3 and D4 energies from all threads for reporting
+        m_d3_energy += m_stored_threads[i]->D3Energy();
+        m_d4_energy += m_stored_threads[i]->D4Energy();
+
+        // ALWAYS collect dispersion energy from all threads for the final sum
+        // (Ensures hybrid methods like uff-d3 are correctly summed via m_dispersion_energy)
+        double thread_disp = m_stored_threads[i]->DispersionEnergy();
+        m_dispersion_energy += thread_disp;
+
+        if (thread_type != 3 && thread_type != 5) {
+            m_vdw_energy += m_stored_threads[i]->VdWEnergy();
+            m_rep_energy += m_stored_threads[i]->RepEnergy();
+        } else if (thread_type == 3 || thread_type == 5) {
+            // GFN-FF (Type == 3) and D3-only (Type == 5) use dispersion energies
+            // Claude Generated: Store GFN-FF energies in both old and new variables for API compatibility
+            // Claude Generated (December 21, 2025): Extend to also handle D3-only (Type == 5)
+            if (thread_type == 3) {
+                // GFN-FF specific components
+                h4_energy += m_stored_threads[i]->VdWEnergy();
+                m_gfnff_repulsion += m_stored_threads[i]->RepEnergy();  // Claude Generated (Dec 2025): GFN-FF repulsion
+                m_gfnff_bonded_repulsion += m_stored_threads[i]->BondedRepEnergy();
+                m_gfnff_nonbonded_repulsion += m_stored_threads[i]->NonbondedRepEnergy();
+                // CRITICAL FIX (Nov 2025): Do NOT also add to m_rep_energy for GFN-FF!
+                // For GFN-FF (method==3), repulsion goes ONLY into m_gfnff_repulsion, not m_rep_energy
+                // This was causing double-counting: H2 showed 0.266 Eh instead of 0.050 Eh
+                // m_rep_energy is for UFF/QMDFF only (method != 3)
+            }
+            // Collect Coulomb energies for both GFN-FF and D3-only
+            // (Dispersion already collected for all threads above)
+            double thread_coul = m_stored_threads[i]->CoulombEnergy();
+            m_coulomb_energy += thread_coul;
+
+            // Claude Generated (2025): Phase 5 - Collect HB/XB energies
+            double thread_hb = m_stored_threads[i]->HydrogenBondEnergy();
+            double thread_xb = m_stored_threads[i]->HalogenBondEnergy();
+            m_energy_hbond += thread_hb;
+            m_energy_xbond += thread_xb;
+
+            // Claude Generated (December 2025): Collect ATM three-body dispersion energy
+            double thread_atm = m_stored_threads[i]->ATMEnergy();
+            m_atm_energy += thread_atm;
+
+            // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+            // Collect GFN-FF batm energy for 1,4-pairs
+            double thread_batm = m_stored_threads[i]->BatmEnergy();
+            m_batm_energy += thread_batm;
+
+            // Claude Generated (March 2026): Triple bond torsions
+            double thread_stors = m_stored_threads[i]->STorsEnergy();
+            m_stors_energy += thread_stors;
+
+            // Claude Generated (2025): Debug individual energy components
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::param(fmt::format("thread_{}_dispersion", i),
+                    fmt::format("{:.6f} Eh", thread_disp));
+                CurcumaLogger::param(fmt::format("thread_{}_coulomb", i),
+                    fmt::format("{:.6f} Eh", thread_coul));
+                if (thread_hb != 0.0) {
+                    CurcumaLogger::param(fmt::format("thread_{}_hbond", i),
+                        fmt::format("{:.6f} Eh", thread_hb));
+                }
+                if (thread_xb != 0.0) {
+                    CurcumaLogger::param(fmt::format("thread_{}_xbond", i),
+                        fmt::format("{:.6f} Eh", thread_xb));
+                }
+            }
+        }
 
         m_gradient += m_stored_threads[i]->Gradient();
+    }
+
+    // =========================================================================
+    // Claude Generated (Feb 23, 2026): TERM 2+3 Coulomb self-energy (sequential, thread-count-independent)
+    // Reference: Fortran gfnff_engrad.F90:1678-1679
+    // Moved out of threads to eliminate atom_to_params coupling with pair distribution.
+    // O(N) — negligible cost compared to O(N²) pairwise TERM 1 in threads.
+    // =========================================================================
+    if ((m_method == "gfnff") &&
+        m_coulomb_gam.size() == m_natoms && m_eeq_charges.size() == m_natoms) {
+        const double sqrt_2_over_pi = 0.797884560802865;
+        // Per-step O(N): OpenMP removed (Mar 2026) — fork/join overhead exceeds benefit
+        double E_en = 0.0, E_self = 0.0;
+        const bool has_cn = (m_cn.size() == m_natoms);
+        for (int i = 0; i < m_natoms; ++i) {
+            // Skip atoms not present in any Coulomb pair (alp==0 → division by zero)
+            if (m_coulomb_alp(i) <= 0.0) continue;
+            double q = m_eeq_charges(i);
+            if (std::isnan(q)) continue;
+            // Dynamic chi_eff = chi_base + cnf * sqrt(cn_current)
+            double chi;
+            if (m_coulomb_cnf(i) != 0.0 && has_cn) {
+                chi = m_coulomb_chi_base(i) + m_coulomb_cnf(i) * std::sqrt(std::max(m_cn(i), 0.0));
+            } else {
+                chi = m_coulomb_chi_static(i);
+            }
+            E_en -= q * chi;
+            E_self += 0.5 * q * q * (m_coulomb_gam(i) + sqrt_2_over_pi / std::sqrt(m_coulomb_alp(i)));
+        }
+        m_coulomb_energy += E_en + E_self;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("  Coulomb self-energy (parent): EN={:+.12f}, Self={:+.12f} Eh", E_en, E_self));
+            // Claude Generated (Mar 5, 2026): Energy decomposition diagnostics to JSON file
+            double term1 = m_coulomb_energy - E_en - E_self;  // Pairwise from threads
+            {
+                json diag;
+                diag["type"] = "energy_decomposition";
+                diag["coulomb"] = {
+                    {"term1_pairwise", term1},
+                    {"term2_EN", E_en},
+                    {"term3_self", E_self},
+                    {"total", m_coulomb_energy}
+                };
+                diag["bond"] = m_bond_energy;
+                diag["angle"] = m_angle_energy;
+                diag["torsion"] = m_dihedral_energy;
+                diag["inversion"] = m_inversion_energy;
+                diag["repulsion"] = m_gfnff_repulsion;
+                diag["dispersion"] = m_dispersion_energy;
+                diag["atm"] = m_atm_energy;
+                diag["batm"] = m_batm_energy;
+                diag["hbond"] = m_energy_hbond;
+                diag["xbond"] = m_energy_xbond;
+
+                diag["n_threads"] = static_cast<int>(m_stored_threads.size());
+
+                std::ofstream diag_file("gfnff_diag_energy.json");
+                if (diag_file.is_open()) {
+                    diag_file << diag.dump(2) << std::endl;
+                    diag_file.close();
+                    CurcumaLogger::info("Wrote energy decomposition diagnostics to gfnff_diag_energy.json");
+                }
+            }
+        }
+    }
+
+    // Claude Generated (Feb 15, 2026): Apply dE/dCN chain-rule gradient for bond dr0/dCN and dispersion dC6/dCN
+    // Reference: Fortran gfnff_engrad.F90:973-974 (bond), gfnff_gdisp0.f90:393-395 (dispersion)
+    //
+    // Pattern: gradient(i,dim) += Σ_j dcn[dim](i,j) * dEdcn_total(j)
+    // where dcn[dim](i,j) = dCN(j)/dr(i,dim) and dEdcn_total(j) is accumulated from all energy terms
+    //
+    // Claude Generated (March 2026): TERM 1b (Coulomb charge derivative) merged into single pass
+    // Combined: gradient += dcn * (dEdcn_total - qtmp) instead of two separate matvec passes
+    // Saves 3 sparse matvecs per gradient evaluation for gfnff
+    if (gradient && !m_dcn.empty() && m_dcn.size() == 3) {
+        Vector dEdcn_total = Vector::Zero(m_natoms);
+        for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
+            const Vector& thread_dEdcn = m_stored_threads[i]->getDEdcn();
+            if (thread_dEdcn.size() == m_natoms) {
+                dEdcn_total += thread_dEdcn;
+            }
+        }
+
+        // Claude Generated (March 2026): Compute TERM 1b qtmp and combine with dEdcn
+        // Reference: Fortran gfnff_engrad.F90:449-454: g -= dcn * qtmp
+        // Combined vector: dEdcn_combined = dEdcn_total - qtmp (single matvec instead of two)
+        Vector qtmp = Vector::Zero(m_natoms);
+        bool has_term1b = (m_method == "gfnff") &&
+            m_eeq_charges.size() == m_natoms && m_cnf.size() == m_natoms && m_cn.size() == m_natoms;
+        if (has_term1b) {
+            for (int i = 0; i < m_natoms; ++i) {
+                double cn_i = std::max(m_cn(i), 0.0);
+                qtmp(i) = m_eeq_charges(i) * m_cnf(i) / (2.0 * std::sqrt(cn_i) + 1e-16);
+            }
+        }
+
+        // Combined matvec: gradient += dcn * (dEdcn_total - qtmp)
+        Vector dEdcn_combined = has_term1b ? (dEdcn_total - qtmp).eval() : dEdcn_total;
+        for (int dim = 0; dim < 3; ++dim) {
+            if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
+                m_gradient.col(dim) += m_dcn[dim] * dEdcn_combined;
+            }
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            double dEdcn_norm = dEdcn_total.norm();
+            if (dEdcn_norm > 1e-12) {
+                CurcumaLogger::info(fmt::format("dEdcn chain-rule: |dEdcn| = {:.6e}, max = {:.6e}",
+                    dEdcn_norm, dEdcn_total.cwiseAbs().maxCoeff()));
+            }
+        }
+        if (has_term1b && CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Coulomb charge derivative gradient (Term 1b) applied in combined pass");
+        }
+
+        // Claude Generated (Mar 2026): Per-component CN corrections for GradComp validation
+        // Bond dEdcn goes to GradientBond(), remainder (dispersion) to GradientDispersion()
+        // Reference: Fortran applies CN chain-rule to g_bond and g_disp separately
+        if (m_store_gradient_components) {
+            Vector dEdcn_bond_total = Vector::Zero(m_natoms);
+            for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
+                const Vector& v = m_stored_threads[i]->getDEdcnBond();
+                if (v.size() == m_natoms) dEdcn_bond_total += v;
+            }
+            Vector dEdcn_disp_total = dEdcn_total - dEdcn_bond_total;
+
+            m_bond_cn_correction = Matrix::Zero(m_natoms, 3);
+            m_disp_cn_correction = Matrix::Zero(m_natoms, 3);
+            for (int dim = 0; dim < 3; ++dim) {
+                if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
+                    m_bond_cn_correction.col(dim) = m_dcn[dim] * dEdcn_bond_total;
+                    m_disp_cn_correction.col(dim) = m_dcn[dim] * dEdcn_disp_total;
+                }
+            }
+            // Coulomb component CN correction for GradComp
+            // Reference: Fortran gfnff_engrad.F90:453-454 applies TERM 1b to g_es
+            if (has_term1b) {
+                m_coulomb_cn_correction = Matrix::Zero(m_natoms, 3);
+                for (int dim = 0; dim < 3; ++dim) {
+                    if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
+                        m_coulomb_cn_correction.col(dim) = -(m_dcn[dim] * qtmp);
+                    }
+                }
+            }
+        }
     }
 
     // Claude Generated: CG pair interaction calculations (spherical implementation)
@@ -909,42 +2747,177 @@ double ForceField::Calculate(bool gradient)
         }
     }
 
-    energy = m_e0 + bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy + h4_energy + hh_energy + cg_energy;
+    // Claude Generated (Jan 25, 2026): Total energy calculation
+    // CRITICAL FIX: Removed m_d3_energy and m_d4_energy from total sum because they are already accumulated in m_dispersion_energy
+    // in ForceFieldThread to avoid double counting for GFN-FF method.
+    energy = m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy +
+             m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + m_gfnff_repulsion +
+             cg_energy + m_dispersion_energy + m_coulomb_energy + m_energy_hbond +
+             m_energy_xbond + m_atm_energy + m_batm_energy;
+
+    // Claude Generated (Feb 23, 2026): Per-term energy decomposition for thread-count independence check
+    if (CurcumaLogger::get_verbosity() >= 2 && (m_method == "gfnff")) {
+        CurcumaLogger::info(fmt::format(
+            "\n=== THREAD DIAGNOSTIC ({} threads) ===\n"
+            "  bond:       {:+.10f}\n  angle:      {:+.10f}\n  torsion:    {:+.10f}\n"
+            "  inversion:  {:+.10f}\n  repulsion:  {:+.10f}\n  dispersion: {:+.10f}\n"
+            "  coulomb:    {:+.10f}\n  hbond:      {:+.10f}\n  xbond:      {:+.10f}\n"
+            "  atm:        {:+.10f}\n  batm:       {:+.10f}\n  h4:         {:+.10f}\n"
+            "  e0:         {:+.10f}",
+            m_stored_threads.size(),
+            m_bond_energy, m_angle_energy, m_dihedral_energy,
+            m_inversion_energy, m_gfnff_repulsion, m_dispersion_energy,
+            m_coulomb_energy, m_energy_hbond, m_energy_xbond,
+            m_atm_energy, m_batm_energy, h4_energy, m_e0));
+    }
+
+    // Claude Generated (2025): Debug total GFN-FF energies
+    if (CurcumaLogger::get_verbosity() >= 3 && (m_dispersion_energy != 0.0 || m_coulomb_energy != 0.0)) {
+        CurcumaLogger::param("total_gfnff_dispersion", fmt::format("{:.6f} Eh", m_dispersion_energy));
+        CurcumaLogger::param("total_gfnff_coulomb", fmt::format("{:.6f} Eh", m_coulomb_energy));
+        CurcumaLogger::param("total_before_gfnff", fmt::format("{:.6f} Eh",
+            m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + m_gfnff_repulsion + cg_energy));  // Claude Generated (Dec 2025): GFN-FF repulsion
+    }
+
+    // Claude Generated (February 2026): Energy calculation timing at verbosity 1+
+    auto energy_calc_end = std::chrono::high_resolution_clock::now();
+    auto energy_calc_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        energy_calc_end - energy_calc_start);
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result_fmt("Force Field energy calculation: {} ms",
+                                  energy_calc_duration.count());
+    }
+
     // Level 1+: Final energy result
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::energy_abs(energy, "Force Field Energy");
     }
 
-    // Level 2+: Energy decomposition
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("Force field energy decomposition:");
+    // Level 1+: Energy decomposition (Claude Generated February 2026: Improved organization)
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::info("\nForce Field Energy Decomposition:");
+
+        // Baseline energy (if present)
         if (m_e0 != 0.0) {
-            CurcumaLogger::param("E0_baseline", fmt::format("{:.6f} Eh", m_e0));
-        }
-        CurcumaLogger::param("bond_energy", fmt::format("{:.6f} Eh", bond_energy));
-        CurcumaLogger::param("angle_energy", fmt::format("{:.6f} Eh", angle_energy));
-        CurcumaLogger::param("dihedral_energy", fmt::format("{:.6f} Eh", dihedral_energy));
-        CurcumaLogger::param("inversion_energy", fmt::format("{:.6f} Eh", inversion_energy));
-        CurcumaLogger::param("nonbonded_energy", fmt::format("{:.6f} Eh", vdw_energy + rep_energy));
-        if (d3_energy != 0.0) {
-            CurcumaLogger::param("D3_energy", fmt::format("{:.6f} Eh", d3_energy));
-        }
-        if (d4_energy != 0.0) {
-            CurcumaLogger::param("D4_energy", fmt::format("{:.6f} Eh", d4_energy));
-        }
-        if (h4_energy != 0.0) {
-            CurcumaLogger::param("HBond_correction", fmt::format("{:.6f} Eh", h4_energy));
-        }
-        if (hh_energy != 0.0) {
-            CurcumaLogger::param("HH_repulsion", fmt::format("{:.6f} Eh", hh_energy));
-        }
-        if (cg_energy != 0.0) {
-            CurcumaLogger::param("CG_interactions", fmt::format("{:.6f} Eh", cg_energy));
+            CurcumaLogger::result(fmt::format("  E0_baseline:     {:>10.6f} Eh", m_e0));
         }
 
+        // Bonded terms (always present)
+        CurcumaLogger::result("  Bonded Terms:");
+        CurcumaLogger::result(fmt::format("    bonds:      {:>10.6f} Eh", m_bond_energy));
+        CurcumaLogger::result(fmt::format("    angles:     {:>10.6f} Eh", m_angle_energy));
+        CurcumaLogger::result(fmt::format("    dihedrals:  {:>10.6f} Eh", m_dihedral_energy));
+        if (m_inversion_energy != 0.0) {
+            CurcumaLogger::result(fmt::format("    inversions: {:>10.6f} Eh", m_inversion_energy));
+        }
+
+        // Non-bonded repulsion/vdW
+        double total_nonbonded = m_vdw_energy + m_rep_energy;
+        if (total_nonbonded != 0.0) {
+            CurcumaLogger::result("  Non-bonded Terms:");
+            if (m_gfnff_repulsion != 0.0) {
+                CurcumaLogger::result(fmt::format("    repulsion:  {:>10.6f} Eh", m_gfnff_repulsion));
+            } else if (m_rep_energy != 0.0 || m_vdw_energy != 0.0) {
+                CurcumaLogger::result(fmt::format("    vdW + repulsion: {:>10.6f} Eh", total_nonbonded));
+            }
+        }
+
+        // Dispersion corrections
+        bool has_dispersion = (m_d3_energy != 0.0 || m_d4_energy != 0.0 || m_dispersion_energy != 0.0 || m_atm_energy != 0.0 || m_batm_energy != 0.0);
+        if (has_dispersion) {
+            CurcumaLogger::result("  Dispersion:");
+            if (m_dispersion_energy != 0.0) {
+                CurcumaLogger::result(fmt::format("    GFN-FF disp:   {:>10.6f} Eh", m_dispersion_energy));
+            }
+            if (m_d3_energy != 0.0) {
+                CurcumaLogger::result(fmt::format("    D3:            {:>10.6f} Eh", m_d3_energy));
+            }
+            if (m_d4_energy != 0.0) {
+                CurcumaLogger::result(fmt::format("    D4:            {:>10.6f} Eh", m_d4_energy));
+            }
+            if (m_atm_energy != 0.0) {
+                CurcumaLogger::result(fmt::format("    ATM (3-body):  {:>10.6e} Eh", m_atm_energy));
+            }
+            if (m_batm_energy != 0.0) {
+                CurcumaLogger::result(fmt::format("    BATM (bonded): {:>10.6e} Eh", m_batm_energy));
+            }
+        }
+
+        // Electrostatics
+        if (m_coulomb_energy != 0.0) {
+            CurcumaLogger::result("  Electrostatics:");
+            CurcumaLogger::result(fmt::format("    Coulomb:    {:>10.6f} Eh", m_coulomb_energy));
+        }
+
+        // Non-covalent interactions
+        bool has_nci = (m_energy_hbond != 0.0 || m_energy_xbond != 0.0 || h4_energy != 0.0);
+        if (has_nci) {
+            CurcumaLogger::result("  Non-covalent Interactions:");
+            if (m_energy_hbond != 0.0) {
+                CurcumaLogger::result(fmt::format("    H-bonds:    {:>10.6f} Eh", m_energy_hbond));
+            }
+            if (m_energy_xbond != 0.0) {
+                CurcumaLogger::result(fmt::format("    X-bonds:    {:>10.6f} Eh", m_energy_xbond));
+            }
+            if (h4_energy != 0.0) {
+                CurcumaLogger::result(fmt::format("    H4 corr:    {:>10.6f} Eh", h4_energy));
+            }
+        }
+
+        // Coarse-grained (if present)
+        if (cg_energy != 0.0) {
+            CurcumaLogger::result("  Coarse-Grained:");
+            CurcumaLogger::result(fmt::format("    CG interact: {:>10.6f} Eh", cg_energy));
+        }
+
+        // Claude Generated (February 2026): Individual energy term timing breakdown at verbosity 1
+        if (!total_term_timings.empty()) {
+            CurcumaLogger::info("\nEnergy Calculation Timing Breakdown:");
+
+            // Bonded terms
+            if (total_term_timings.count("bonds"))
+                CurcumaLogger::result_fmt("  bonds:              {} ms", total_term_timings["bonds"]);
+            if (total_term_timings.count("angles"))
+                CurcumaLogger::result_fmt("  angles:             {} ms", total_term_timings["angles"]);
+            if (total_term_timings.count("torsions"))
+                CurcumaLogger::result_fmt("  torsions:           {} ms", total_term_timings["torsions"]);
+            if (total_term_timings.count("extra_torsions"))
+                CurcumaLogger::result_fmt("  extra_torsions:     {} ms", total_term_timings["extra_torsions"]);
+            if (total_term_timings.count("inversions"))
+                CurcumaLogger::result_fmt("  inversions:         {} ms", total_term_timings["inversions"]);
+
+            // Non-bonded terms
+            if (total_term_timings.count("dispersion"))
+                CurcumaLogger::result_fmt("  dispersion:         {} ms", total_term_timings["dispersion"]);
+            if (total_term_timings.count("bonded_repulsion"))
+                CurcumaLogger::result_fmt("  bonded_repulsion:   {} ms", total_term_timings["bonded_repulsion"]);
+            if (total_term_timings.count("nonbonded_repulsion"))
+                CurcumaLogger::result_fmt("  nonbonded_repulsion: {} ms", total_term_timings["nonbonded_repulsion"]);
+            if (total_term_timings.count("coulomb"))
+                CurcumaLogger::result_fmt("  coulomb:            {} ms", total_term_timings["coulomb"]);
+
+            // Non-covalent interactions
+            if (total_term_timings.count("hydrogen_bonds"))
+                CurcumaLogger::result_fmt("  hydrogen_bonds:     {} ms", total_term_timings["hydrogen_bonds"]);
+            if (total_term_timings.count("halogen_bonds"))
+                CurcumaLogger::result_fmt("  halogen_bonds:      {} ms", total_term_timings["halogen_bonds"]);
+
+            // Dispersion corrections
+            if (total_term_timings.count("d3_dispersion"))
+                CurcumaLogger::result_fmt("  d3_dispersion:      {} ms", total_term_timings["d3_dispersion"]);
+            if (total_term_timings.count("d4_dispersion"))
+                CurcumaLogger::result_fmt("  d4_dispersion:      {} ms", total_term_timings["d4_dispersion"]);
+            if (total_term_timings.count("atm_dispersion"))
+                CurcumaLogger::result_fmt("  atm_dispersion:     {} ms", total_term_timings["atm_dispersion"]);
+            if (total_term_timings.count("batm"))
+                CurcumaLogger::result_fmt("  batm:               {} ms", total_term_timings["batm"]);
+        }
+
+        // Gradient information
         if (gradient) {
             double grad_norm = m_gradient.norm();
-            CurcumaLogger::param("gradient_norm", fmt::format("{:.6f} Eh/Bohr", grad_norm));
+            CurcumaLogger::param("\ngradient_norm", fmt::format("{:.6e} Eh/Bohr", grad_norm));
         }
     }
 
@@ -956,6 +2929,54 @@ double ForceField::Calculate(bool gradient)
     return energy;
 }
 
+// Claude Generated (February 2026): Per-component gradient decomposition for validation
+void ForceField::setStoreGradientComponents(bool store)
+{
+    m_store_gradient_components = store;
+    for (auto* thread : m_stored_threads) {
+        thread->setStoreGradientComponents(store);
+    }
+}
+
+// Helper to sum a component gradient across all threads
+static Matrix sumComponentGradient(const std::vector<ForceFieldThread*>& threads,
+                                    const Matrix& (ForceFieldThread::*getter)() const,
+                                    int natoms)
+{
+    Matrix result = Eigen::MatrixXd::Zero(natoms, 3);
+    for (const auto* thread : threads) {
+        if (thread->storeGradientComponents()) {
+            result += (thread->*getter)();
+        }
+    }
+    return result;
+}
+
+// Claude Generated (Mar 2026): Bond/Coulomb/Dispersion getters include CN chain-rule corrections
+// Reference: Fortran applies CN chain-rule to g_bond (engrad:973), g_es (engrad:453), g_disp (gdisp0:393) separately
+Matrix ForceField::GradientBond() const {
+    auto result = sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientBond, m_natoms);
+    if (m_bond_cn_correction.rows() == m_natoms) result += m_bond_cn_correction;
+    return result;
+}
+Matrix ForceField::GradientAngle() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientAngle, m_natoms); }
+Matrix ForceField::GradientTorsion() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientTorsion, m_natoms); }
+Matrix ForceField::GradientRepulsion() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientRepulsion, m_natoms); }
+Matrix ForceField::GradientCoulomb() const {
+    auto result = sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientCoulomb, m_natoms);
+    if (m_coulomb_cn_correction.rows() == m_natoms) result += m_coulomb_cn_correction;
+    return result;
+}
+Matrix ForceField::GradientDispersion() const {
+    auto result = sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientDispersion, m_natoms);
+    if (m_disp_cn_correction.rows() == m_natoms) result += m_disp_cn_correction;
+    return result;
+}
+Matrix ForceField::GradientHB() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientHB, m_natoms); }
+Matrix ForceField::GradientXB() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientXB, m_natoms); }
+Matrix ForceField::GradientBATM() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientBATM, m_natoms); }
+Matrix ForceField::GradientATM() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientATM, m_natoms); }
+
 // Claude Generated: Print comprehensive parameter summary
 void ForceField::printParameterSummary() const
 {
@@ -966,6 +2987,7 @@ void ForceField::printParameterSummary() const
     try {
         // Count different parameter types - parameters are stored as arrays
         int bonds = 0, angles = 0, dihedrals = 0, inversions = 0, vdws = 0, esps = 0;
+        int gfnff_dispersions = 0, gfnff_bonded_repulsions = 0, gfnff_nonbonded_repulsions = 0, gfnff_coulombs = 0, gfnff_hbonds = 0, gfnff_xbonds = 0;
 
         if (m_parameters.contains("bonds") && m_parameters["bonds"].is_array()) {
             bonds = m_parameters["bonds"].size();
@@ -986,59 +3008,96 @@ void ForceField::printParameterSummary() const
             esps = m_parameters["esps"].size();
         }
 
-        // Print summary in consistent format
-        fmt::print("  • {} bond terms\n", bonds);
-        fmt::print("  • {} angle terms\n", angles);
-        fmt::print("  • {} dihedral terms\n", dihedrals);
-        fmt::print("  • {} inversion terms\n", inversions);
-        fmt::print("  • {} van der Waals pairs\n", vdws);
-        fmt::print("  • {} electrostatic pairs\n", esps);
-
-        // Print scaling factors
-        fmt::print("  Scaling factors:\n");
-        if (m_parameters.contains("vdw_scaling")) {
-            fmt::print("    vdW: {:.3f}\n", m_parameters["vdw_scaling"].get<double>());
+        // Claude Generated (2025): Check for GFN-FF specific pairwise parameters
+        if (m_parameters.contains("gfnff_dispersions") && m_parameters["gfnff_dispersions"].is_array()) {
+            gfnff_dispersions = m_parameters["gfnff_dispersions"].size();
         }
-        if (m_parameters.contains("bond_scaling")) {
-            fmt::print("    bond: {:.3f}\n", m_parameters["bond_scaling"].get<double>());
+        if (m_parameters.contains("gfnff_bonded_repulsions") && m_parameters["gfnff_bonded_repulsions"].is_array()) {
+            gfnff_bonded_repulsions = m_parameters["gfnff_bonded_repulsions"].size();
         }
-        if (m_parameters.contains("angle_scaling")) {
-            fmt::print("    angle: {:.3f}\n", m_parameters["angle_scaling"].get<double>());
+        if (m_parameters.contains("gfnff_nonbonded_repulsions") && m_parameters["gfnff_nonbonded_repulsions"].is_array()) {
+            gfnff_nonbonded_repulsions = m_parameters["gfnff_nonbonded_repulsions"].size();
         }
-        if (m_parameters.contains("dihedral_scaling")) {
-            fmt::print("    dihedral: {:.3f}\n", m_parameters["dihedral_scaling"].get<double>());
+        if (m_parameters.contains("gfnff_coulombs") && m_parameters["gfnff_coulombs"].is_array()) {
+            gfnff_coulombs = m_parameters["gfnff_coulombs"].size();
         }
-        if (m_parameters.contains("inversion_scaling")) {
-            fmt::print("    inversion: {:.3f}\n", m_parameters["inversion_scaling"].get<double>());
+        if (m_parameters.contains("gfnff_hbonds") && m_parameters["gfnff_hbonds"].is_array()) {
+            gfnff_hbonds = m_parameters["gfnff_hbonds"].size();
         }
-        if (m_parameters.contains("coulomb_scaling")) {
-            fmt::print("    coulomb: {:.3f}\n", m_parameters["coulomb_scaling"].get<double>());
-        }
-        if (m_parameters.contains("rep_scaling")) {
-            fmt::print("    repulsion: {:.3f}\n", m_parameters["rep_scaling"].get<double>());
+        if (m_parameters.contains("gfnff_xbonds") && m_parameters["gfnff_xbonds"].is_array()) {
+            gfnff_xbonds = m_parameters["gfnff_xbonds"].size();
         }
 
-        // Print dispersion and hydrogen bonding flags
-        fmt::print("  Force field flags:\n");
-        if (m_parameters.contains("d3") && m_parameters["d3"].get<double>() != 0) {
-            fmt::print("    D3 dispersion: enabled (s6={:.3f}, s8={:.3f})\n",
-                m_parameters.value("d3_s6", 0.0), m_parameters.value("d3_s8", 0.0));
-        }
-        if (m_parameters.contains("d4") && m_parameters["d4"].get<double>() != 0) {
-            fmt::print("    D4 dispersion: enabled\n");
-        }
-        if (m_parameters.contains("h4") && m_parameters["h4"].get<double>() != 0) {
-            fmt::print("    H4 hydrogen bonding: enabled (scaling={:.3f})\n",
-                m_parameters.value("h4_scaling", 1.0));
-            if (m_parameters.contains("h4_nh_o")) {
-                fmt::print("      NH···O: {:.3f}\n", m_parameters["h4_nh_o"].get<double>());
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            // Basic force field topology
+            CurcumaLogger::info("Force field topology summary:");
+            if (bonds > 0) CurcumaLogger::param(fmt::format("bonds_count", bonds), fmt::format("{} bond terms", bonds));
+            if (angles > 0) CurcumaLogger::param(fmt::format("angles_count", angles), fmt::format("{} angle terms", angles));
+            if (dihedrals > 0) CurcumaLogger::param(fmt::format("dihedrals_count", dihedrals), fmt::format("{} dihedral terms", dihedrals));
+            if (inversions > 0) CurcumaLogger::param(fmt::format("inversions_count", inversions), fmt::format("{} inversion terms", inversions));
+            if (vdws > 0) CurcumaLogger::param(fmt::format("vdw_count", vdws), fmt::format("{} van der Waals pairs", vdws));
+            if (esps > 0) CurcumaLogger::param(fmt::format("electrostatic_count", esps), fmt::format("{} electrostatic pairs", esps));
+
+            // Print GFN-FF specific parameters if present
+            if (gfnff_dispersions > 0 || gfnff_bonded_repulsions > 0 || gfnff_nonbonded_repulsions > 0 || gfnff_coulombs > 0 || gfnff_hbonds > 0 || gfnff_xbonds > 0) {
+                CurcumaLogger::info("GFN-FF pairwise interactions:");
+                if (gfnff_dispersions > 0) CurcumaLogger::param("dispersion_pairs", fmt::format("{}", gfnff_dispersions));
+                if (gfnff_bonded_repulsions > 0) CurcumaLogger::param("bonded_repulsion_pairs", fmt::format("{}", gfnff_bonded_repulsions));
+                if (gfnff_nonbonded_repulsions > 0) CurcumaLogger::param("nonbonded_repulsion_pairs", fmt::format("{}", gfnff_nonbonded_repulsions));
+                if (gfnff_coulombs > 0) CurcumaLogger::param("coulomb_pairs", fmt::format("{}", gfnff_coulombs));
+                if (gfnff_hbonds > 0) CurcumaLogger::param("hydrogen_bonds", fmt::format("{}", gfnff_hbonds));
+                if (gfnff_xbonds > 0) CurcumaLogger::param("halogen_bonds", fmt::format("{}", gfnff_xbonds));
             }
-            if (m_parameters.contains("h4_oh_n")) {
-                fmt::print("      OH···N: {:.3f}\n", m_parameters["h4_oh_n"].get<double>());
+
+            // Print scaling factors
+            CurcumaLogger::info("Scaling factors:");
+            if (m_parameters.contains("vdw_scaling")) {
+                CurcumaLogger::param("vdw_scaling", fmt::format("{:.3f}", m_parameters["vdw_scaling"].get<double>()));
+            }
+            if (m_parameters.contains("bond_scaling")) {
+                CurcumaLogger::param("bond_scaling", fmt::format("{:.3f}", m_parameters["bond_scaling"].get<double>()));
+            }
+            if (m_parameters.contains("angle_scaling")) {
+                CurcumaLogger::param("angle_scaling", fmt::format("{:.3f}", m_parameters["angle_scaling"].get<double>()));
+            }
+            if (m_parameters.contains("dihedral_scaling")) {
+                CurcumaLogger::param("dihedral_scaling", fmt::format("{:.3f}", m_parameters["dihedral_scaling"].get<double>()));
+            }
+            if (m_parameters.contains("inversion_scaling")) {
+                CurcumaLogger::param("inversion_scaling", fmt::format("{:.3f}", m_parameters["inversion_scaling"].get<double>()));
+            }
+            if (m_parameters.contains("coulomb_scaling")) {
+                CurcumaLogger::param("coulomb_scaling", fmt::format("{:.3f}", m_parameters["coulomb_scaling"].get<double>()));
+            }
+            if (m_parameters.contains("rep_scaling")) {
+                CurcumaLogger::param("repulsion_scaling", fmt::format("{:.3f}", m_parameters["rep_scaling"].get<double>()));
+            }
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            // Print dispersion and hydrogen bonding flags
+            CurcumaLogger::info("Force field flags:");
+            if (m_parameters.contains("d3") && m_parameters["d3"].get<double>() != 0) {
+                CurcumaLogger::info("D3 dispersion enabled");
+                CurcumaLogger::param("d3_s6", fmt::format("{:.3f}", m_parameters.value("d3_s6", 0.0)));
+                CurcumaLogger::param("d3_s8", fmt::format("{:.3f}", m_parameters.value("d3_s8", 0.0)));
+            }
+            if (m_parameters.contains("d4") && m_parameters["d4"].get<double>() != 0) {
+                CurcumaLogger::info("D4 dispersion enabled");
+            }
+            if (m_parameters.contains("h4") && m_parameters["h4"].get<double>() != 0) {
+                CurcumaLogger::info("H4 hydrogen bonding enabled");
+                CurcumaLogger::param("h4_scaling", fmt::format("{:.3f}", m_parameters.value("h4_scaling", 1.0)));
+                if (m_parameters.contains("h4_nh_o")) {
+                    CurcumaLogger::param("h4_nh_o_scaling", fmt::format("{:.3f}", m_parameters["h4_nh_o"].get<double>()));
+                }
+                if (m_parameters.contains("h4_oh_n")) {
+                    CurcumaLogger::param("h4_oh_n_scaling", fmt::format("{:.3f}", m_parameters["h4_oh_n"].get<double>()));
+                }
             }
         }
 
     } catch (const std::exception& e) {
-        fmt::print("Warning: Could not display parameter summary: {}\n", e.what());
+        CurcumaLogger::warn(fmt::format("Could not display parameter summary: {}", e.what()));
     }
 }

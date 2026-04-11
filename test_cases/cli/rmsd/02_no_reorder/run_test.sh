@@ -1,4 +1,6 @@
 #!/bin/bash
+export PROJECT_ROOT='/home/conrad/src/claude_curcuma/curcuma/test_cases/cli/../..'
+
 # Test: RMSD with No Reordering
 # Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
 # Claude Generated - Based on testing_plan_rmsd.md Szenario 2

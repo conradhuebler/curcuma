@@ -67,6 +67,7 @@ bool EHTMethod::setMolecule(const Mol& mol) {
         m_molecule = mol;
         m_calculation_done = false;
         m_initialized = true;
+        CurcumaLogger::addCitation("eht");
         clearError();
         
         // Initialize EHT with molecule (use QMInterface base class method)
@@ -205,6 +206,28 @@ void EHTMethod::clearError() {
 
 std::string EHTMethod::getErrorMessage() const {
     return m_error_message;
+}
+
+// =================================================================================
+// Energy Decomposition (JSON output)
+// =================================================================================
+
+json EHTMethod::getEnergyDecomposition() const {
+    // QM methods don't have energy decomposition - return zero JSON
+    // Native implementations are work-in-progress
+    json energy_json = {
+        {"Bond", 0.0},
+        {"Angle", 0.0},
+        {"Torsion", 0.0},
+        {"Inversion", 0.0},
+        {"Dispersion", 0.0},
+        {"Coulomb", 0.0},
+        {"HBond", 0.0},
+        {"XBond", 0.0},
+        {"ATM", 0.0},
+        {"BATM", 0.0}
+    };
+    return energy_json;
 }
 
 // =================================================================================
