@@ -37,6 +37,12 @@
 // global.h: Vector = Eigen::VectorXd
 // global.h: SpMatrix = Eigen::SparseMatrix<double>
 
+// Claude Generated (April 2026): Extern declarations for PBC constant memory symbols
+// defined in gfnff_kernels.cu (same device link unit)
+extern __constant__ double d_lattice[9];
+extern __constant__ double d_lattice_inv[9];
+extern __constant__ int    d_has_pbc;
+
 // ============================================================================
 // D3 Covalent radii for angle/dihedral distance damping (Bohr, WITHOUT 4/3 factor)
 // Copied from gfnff_par.h since nvcc has trouble linking static const std::vector
@@ -1080,6 +1086,17 @@ void FFWorkspaceGPU::setDispersionEnabled(bool v)  { m_dispersion_enabled = v; }
 void FFWorkspaceGPU::setHBondEnabled(bool v)        { m_hbond_enabled = v; }
 void FFWorkspaceGPU::setRepulsionEnabled(bool v)    { m_repulsion_enabled = v; }
 void FFWorkspaceGPU::setCoulombEnabled(bool v)      { m_coulomb_enabled = v; }
+
+/// Claude Generated (April 2026): Upload unit cell to GPU constant memory for PBC.
+/// cell_bohr_9 and cell_bohr_inv_9 are column-major 3×3 matrices (9 doubles each).
+/// Zero overhead when has_pbc==false because applyMIC() returns immediately.
+void FFWorkspaceGPU::setUnitCell(const double* cell_bohr_9, const double* cell_bohr_inv_9, bool has_pbc)
+{
+    cudaMemcpyToSymbol(d_lattice,     cell_bohr_9,     9 * sizeof(double));
+    cudaMemcpyToSymbol(d_lattice_inv, cell_bohr_inv_9, 9 * sizeof(double));
+    int flag = has_pbc ? 1 : 0;
+    cudaMemcpyToSymbol(d_has_pbc, &flag, sizeof(int));
+}
 
 // ============================================================================
 // GPU-only CN chain-rule setters (Claude Generated March 2026)

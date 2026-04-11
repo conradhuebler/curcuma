@@ -179,6 +179,19 @@ void ForceField::setDispersionDC6DCN(const Matrix& dc6dcn)
     }
 }
 
+/// Claude Generated (April 2026): Set unit cell for PBC minimum image convention.
+/// Converts from Angstrom to Bohr (ForceField internal units) and propagates to all threads.
+void ForceField::setUnitCell(const Eigen::Matrix3d& cell_angstrom, bool has_pbc)
+{
+    constexpr double ANG2BOHR = 1.0 / 0.529177210903;
+    m_has_pbc = has_pbc;
+    m_unit_cell_bohr = cell_angstrom * ANG2BOHR;
+    m_unit_cell_bohr_inv = m_unit_cell_bohr.inverse();
+    for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
+        m_stored_threads[i]->setUnitCell(m_unit_cell_bohr, m_unit_cell_bohr_inv, has_pbc);
+    }
+}
+
 void ForceField::setParameter(const json& parameters)
 {
     std::string method_name = "unknown";
@@ -1516,6 +1529,11 @@ void ForceField::AutoRanges()
             thread->setCoulombEnabled(coulomb);
         } else if (m_method == "d3") {  // Claude Generated (December 21, 2025)
             thread->setMethod(5); // D3-only method
+        }
+
+        // Claude Generated (April 2026): Propagate PBC unit cell to threads
+        if (m_has_pbc) {
+            thread->setUnitCell(m_unit_cell_bohr, m_unit_cell_bohr_inv, true);
         }
 
         // Claude Generated (Feb 21, 2026): Distribute bond-HB data to all threads for dncoord_erf

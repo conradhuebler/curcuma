@@ -249,6 +249,10 @@ public:
     void setRepulsionEnabled(bool v);
     void setCoulombEnabled(bool v);
 
+    /// Claude Generated (April 2026): Set unit cell for PBC minimum image convention.
+    /// cell_bohr: 3×3 matrix (column-major, in Bohr). Uploads to GPU constant memory.
+    void setUnitCell(const double* cell_bohr_9, const double* cell_bohr_inv_9, bool has_pbc);
+
     /// Set verbosity for diagnostic snapshot downloads (only >= 3 triggers snapshot D2H)
     void setVerbosity(int v) { m_verbosity = v; }
 

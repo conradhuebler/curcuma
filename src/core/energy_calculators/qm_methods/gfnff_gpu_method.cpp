@@ -234,6 +234,13 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     const int N = static_cast<int>(m_atom_types.size());
     const Matrix& geom_bohr = m_gfnff->getGeometryBohr();
 
+    // Claude Generated (April 2026): Upload PBC unit cell to GPU constant memory
+    if (m_gfnff->hasPBC()) {
+        Eigen::Matrix3d cell_bohr = m_gfnff->getUnitCellBohr();
+        Eigen::Matrix3d cell_bohr_inv = cell_bohr.inverse();
+        m_gpu_workspace->setUnitCell(cell_bohr.data(), cell_bohr_inv.data(), true);
+    }
+
     // --- Step 0: GPU topology displacement check (Claude Generated March 2026) ---
     // Runs on GPU where coords already live. Result fed to GFNFF::needsFullTopologyUpdate()
     // to skip CPU O(N) Eigen matrix subtraction.
@@ -354,33 +361,6 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     if (m_gfnff->consumeHBXBUpdate()) {
         m_gpu_workspace->updateHBonds(m_gfnff->getLastHBonds(), m_atom_types);
         m_gpu_workspace->updateXBonds(m_gfnff->getLastXBonds(), m_atom_types);
-
-        // Claude Generated (Apr 2026): Propagate HB re-detection to bond metadata and alpha pairs.
-        // Without this, the bond SoA's nr_hb/hb_H_atom and the HB alpha pair list become stale,
-        // causing gradient errors at H-bond atoms during optimization/MD.
-        // Reference: Fortran gfnff_ini2.f90:1008-1060 (bond_hb_AHB_set0/set1)
-        if (m_gpu_params_leaked) {
-            auto hb_update = m_gfnff->rebuildBondHBData(
-                m_gfnff->getLastHBonds(), m_gpu_params_leaked->bonds);
-
-            // Update HB alpha (H,B) pair list on GPU
-            m_gpu_workspace->updateHBAlphaPairs(hb_update.bond_hb_data, m_atom_types);
-
-            // Update per-bond nr_hb and hb_H_atom metadata on GPU
-            m_gpu_workspace->updateBondHBMetadata(hb_update.bond_nr_hb, hb_update.bond_hb_H_atom);
-
-            // Update leaked params' bond_hb_data for HB CN computation (Step 2b)
-            m_gpu_params_leaked->bond_hb_data = std::move(hb_update.bond_hb_data);
-
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format(
-                    "  [DEBUG] HB re-detection: updated bond_hb_data ({} entries), "
-                    "hb_alpha ({} pairs), bond nr_hb for {} bonds",
-                    m_gpu_params_leaked->bond_hb_data.size(),
-                    [&]() { int n = 0; for (const auto& e : m_gpu_params_leaked->bond_hb_data) n += e.B_atoms.size(); return n; }(),
-                    hb_update.bond_nr_hb.size()));
-            }
-        }
 
         // Phase 8: HB/XB SoA n-values changed → captured graph is stale
         m_gpu_workspace->invalidateGraph();

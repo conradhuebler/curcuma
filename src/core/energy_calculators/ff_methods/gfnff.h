@@ -1640,6 +1640,13 @@ public:
      */
     double BatmEnergy() const;
 
+    // Claude Generated (April 2026): PBC accessors for GPU path
+    bool hasPBC() const { return m_has_pbc; }
+    Eigen::Matrix3d getUnitCellBohr() const {
+        constexpr double ANG2BOHR = 1.0 / 0.529177210903;
+        return m_unit_cell * ANG2BOHR;
+    }
+
     /**
      * @brief Get hydrogen bond energy component
      * @return Hydrogen bond energy or 0 if not calculated
@@ -2053,6 +2060,10 @@ private:
     bool m_comparing_gradients = false; ///< Guard to prevent recursion in compareGradients
     bool m_skip_eeq_recalc = false; ///< Skip Phase-2 EEQ recalculation (for charge injection diagnostic)
     bool m_rep_diag = false; ///< Dump repulsion alphanb diagnostic
+
+    // Claude Generated (April 2026): Periodic Boundary Conditions
+    bool m_has_pbc = false;                                              ///< PBC active flag
+    Eigen::Matrix3d m_unit_cell = Eigen::Matrix3d::Identity();          ///< Unit cell (Angstrom, from Mol)
 
     double m_energy_total; ///< Total energy in Hartree
     Vector m_charges; ///< Atomic partial charges

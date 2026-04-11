@@ -359,6 +359,11 @@ bool GFNFF::InitialiseMolecule(const Mol& molecule)
     m_atoms = molecule.m_atoms;
     m_gradient = Matrix::Zero(m_atomcount, 3);
 
+    // Claude Generated (April 2026): Extract PBC from Mol
+    m_has_pbc = molecule.m_has_pbc;
+    if (m_has_pbc)
+        m_unit_cell = molecule.m_unit_cell;
+
     // Call existing initialization logic
     return InitialiseMolecule();
 }
@@ -416,6 +421,11 @@ bool GFNFF::InitialiseMolecule()
     if (!initializeForceField()) {
         CurcumaLogger::error("GFN-FF initialization failed: Force field initialization failed");
         return false;
+    }
+
+    // Claude Generated (April 2026): Propagate PBC unit cell to ForceField (threads already created)
+    if (m_has_pbc && m_forcefield) {
+        m_forcefield->setUnitCell(m_unit_cell, true);
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {

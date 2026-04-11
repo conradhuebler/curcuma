@@ -89,6 +89,33 @@ __device__ __forceinline__ void blockReduceAddEnergy(double local_E, double* ene
 }
 
 // ============================================================================
+// PBC: Minimum Image Convention (Claude Generated April 2026)
+// d_lattice[9]    — unit cell vectors in Bohr (column-major: col0=a, col1=b, col2=c)
+// d_lattice_inv[9]— inverse of d_lattice
+// d_has_pbc       — non-zero when PBC is active
+//
+// Column-major layout (Eigen Matrix3d default):
+//   d_lattice[3*col + row]
+// Must be declared before first kernel that calls applyMIC().
+// ============================================================================
+__constant__ double d_lattice[9];
+__constant__ double d_lattice_inv[9];
+__constant__ int    d_has_pbc;
+
+/// Apply Minimum Image Convention to displacement vector (dx,dy,dz) in-place.
+/// Operates in Bohr (same units as GPU geometry). Zero overhead when d_has_pbc==0.
+__device__ __forceinline__ void applyMIC(double& dx, double& dy, double& dz) {
+    if (!d_has_pbc) return;
+    double fx = d_lattice_inv[0]*dx + d_lattice_inv[3]*dy + d_lattice_inv[6]*dz;
+    double fy = d_lattice_inv[1]*dx + d_lattice_inv[4]*dy + d_lattice_inv[7]*dz;
+    double fz = d_lattice_inv[2]*dx + d_lattice_inv[5]*dy + d_lattice_inv[8]*dz;
+    fx -= rint(fx); fy -= rint(fy); fz -= rint(fz);
+    dx = d_lattice[0]*fx + d_lattice[3]*fy + d_lattice[6]*fz;
+    dy = d_lattice[1]*fx + d_lattice[4]*fy + d_lattice[7]*fz;
+    dz = d_lattice[2]*fx + d_lattice[5]*fy + d_lattice[8]*fz;
+}
+
+// ============================================================================
 // Utility kernel
 // ============================================================================
 
@@ -157,6 +184,7 @@ __global__ void k_dispersion(
         double dx = cx[i] - cx[j];
         double dy = cy[i] - cy[j];
         double dz = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
         double r2 = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
@@ -221,6 +249,7 @@ __global__ void k_repulsion(
         double dx = cx[i] - cx[j];
         double dy = cy[i] - cy[j];
         double dz = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
         double r2  = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
@@ -267,9 +296,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_repulsion_mixed(
 
     if (tid < n) {
         int i = idx_i[tid], j = idx_j[tid];
-        float dx = (float)(cx[i] - cx[j]);
-        float dy = (float)(cy[i] - cy[j]);
-        float dz = (float)(cz[i] - cz[j]);
+        double ddx = cx[i] - cx[j], ddy = cy[i] - cy[j], ddz = cz[i] - cz[j];
+        applyMIC(ddx, ddy, ddz);
+        float dx = (float)ddx, dy = (float)ddy, dz = (float)ddz;
         float r2  = dx*dx + dy*dy + dz*dz;
         float rij = sqrtf(r2);
 
@@ -322,6 +351,7 @@ __global__ void k_coulomb(
         double dx  = cx[i] - cx[j];
         double dy  = cy[i] - cy[j];
         double dz  = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
         double r2  = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
@@ -390,6 +420,7 @@ __global__ void k_bonds(
         double dx  = cx[i] - cx[j];
         double dy  = cy[i] - cy[j];
         double dz  = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
         double r2  = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
@@ -563,9 +594,11 @@ __global__ void k_angles(
             double dij_x = cx[i] - cx[j];
             double dij_y = cy[i] - cy[j];
             double dij_z = cz[i] - cz[j];
+            applyMIC(dij_x, dij_y, dij_z);
             double dkj_x = cx[k] - cx[j];
             double dkj_y = cy[k] - cy[j];
             double dkj_z = cz[k] - cz[j];
+            applyMIC(dkj_x, dkj_y, dkj_z);
 
             double r_ij_sq = dij_x*dij_x + dij_y*dij_y + dij_z*dij_z;
             double r_jk_sq = dkj_x*dkj_x + dkj_y*dkj_y + dkj_z*dkj_z;
@@ -1561,9 +1594,9 @@ __global__ void k_xbonds(
         double xx = cx[X], xy = cy[X], xz = cz[X];
         double bx = cx[B], by = cy[B], bz = cz[B];
 
-        double rAX_x = xx-ax, rAX_y = xy-ay, rAX_z = xz-az;
-        double rXB_x = bx-xx, rXB_y = by-xy, rXB_z = bz-xz;
-        double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az;
+        double rAX_x = xx-ax, rAX_y = xy-ay, rAX_z = xz-az; applyMIC(rAX_x, rAX_y, rAX_z);
+        double rXB_x = bx-xx, rXB_y = by-xy, rXB_z = bz-xz; applyMIC(rXB_x, rXB_y, rXB_z);
+        double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
 
         double r2AX = rAX_x*rAX_x + rAX_y*rAX_y + rAX_z*rAX_z;
         double r2XB = rXB_x*rXB_x + rXB_y*rXB_y + rXB_z*rXB_z;
@@ -1845,9 +1878,9 @@ __global__ void k_hbonds(
     double hx = cx[H], hy = cy[H], hz = cz[H];
     double bx = cx[B], by = cy[B], bz = cz[B];
 
-    double rAH_x = hx-ax, rAH_y = hy-ay, rAH_z = hz-az;
-    double rHB_x = bx-hx, rHB_y = by-hy, rHB_z = bz-hz;
-    double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az;
+    double rAH_x = hx-ax, rAH_y = hy-ay, rAH_z = hz-az; applyMIC(rAH_x, rAH_y, rAH_z);
+    double rHB_x = bx-hx, rHB_y = by-hy, rHB_z = bz-hz; applyMIC(rHB_x, rHB_y, rHB_z);
+    double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
 
     double r2AH = rAH_x*rAH_x + rAH_y*rAH_y + rAH_z*rAH_z;
     double r2HB = rHB_x*rHB_x + rHB_y*rHB_y + rHB_z*rHB_z;
@@ -2475,6 +2508,7 @@ __global__ void k_cn_chainrule(
     double dx = cx[i] - cx[j];
     double dy = cy[i] - cy[j];
     double dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);
     double r2 = dx*dx + dy*dy + dz*dz;
     double rij = sqrt(r2);
     if (rij < 1e-10) return;
@@ -2534,6 +2568,7 @@ __global__ void k_hb_alpha_chainrule(
     double dx = cx[H] - cx[B];
     double dy = cy[H] - cy[B];
     double dz = cz[H] - cz[B];
+    applyMIC(dx, dy, dz);
     double r2 = dx*dx + dy*dy + dz*dz;
     double rij = sqrt(r2);
     if (rij < 1e-10) return;
@@ -2607,6 +2642,7 @@ __global__ void k_cn_compute(
         double dx = xi - cx[j];
         double dy = yi - cy[j];
         double dz = zi_coord - cz[j];
+        applyMIC(dx, dy, dz);
         double r2 = dx*dx + dy*dy + dz*dz;
 
         // Distance cutoff (skip far atoms)
