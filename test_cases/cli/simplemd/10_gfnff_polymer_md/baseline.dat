@@ -1,0 +1,6 @@
+# GFN-FF Polymer MD Baseline — 1000 steps, 1410 atoms
+# Fields: timestamp | git_hash | method | threads | wall_s | ms_per_step | quality | note
+# ---
+2026-04-11 17:50:30 | 1c27621 | gfnff | threads=4 | 157.70s | 157.7ms/step | ok | pre_optimization_baseline
+2026-04-11 17:53:08 | 1c27621 | xtb-gfnff | threads=4 | 422.07s | 422.1ms/step | ok | pre_optimization_baseline
+2026-04-11 18:01:44 | 1c27621 | gfnff-gpu | threads=4 | 30.02s | 30.0ms/step | ok | pre_optimization_baseline

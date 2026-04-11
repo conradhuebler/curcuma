@@ -22,7 +22,8 @@ namespace TestMolecules {
         {"C6H6", "molecules/larger/C6H6.xyz"},
         {"benzene", "molecules/larger/C6H6.xyz"},
         {"monosaccharide", "molecules/larger/monosaccharide.xyz"},
-        {"triose", "molecules/larger/triose.xyz"}
+        {"triose", "molecules/larger/triose.xyz"},
+        {"polymer", "molecules/larger/polymer.xyz"}
     };
 
     // Initialize the molecule registry with critical test molecules
@@ -371,7 +372,7 @@ namespace TestMolecules {
     const MoleculeData& TestMoleculeRegistry::getMolecule(const std::string& name) {
         auto it = s_molecule_registry.find(name);
         if (it == s_molecule_registry.end()) {
-            throw std::invalid_argument("Molecule '" + name + "' not found in registry. Available molecules: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, H2O_dimer, O3, monosaccharide, triose");
+            throw std::invalid_argument("Molecule '" + name + "' not found in registry. Available molecules: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, H2O_dimer, O3, monosaccharide, triose. Note: 'polymer' is xyz-path-only (1410 atoms — too large to inline).");
         }
         return it->second;
     }
@@ -383,7 +384,7 @@ namespace TestMolecules {
             for (const auto& pair : s_xyz_paths) {
                 if (name == pair.second) return pair.second;
             }
-            throw std::invalid_argument("XYZ path for molecule '" + name + "' not found. Available: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, O3, monosaccharide, triose");
+            throw std::invalid_argument("XYZ path for molecule '" + name + "' not found. Available: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, O3, monosaccharide, triose, polymer");
         }
         return it->second;
     }
