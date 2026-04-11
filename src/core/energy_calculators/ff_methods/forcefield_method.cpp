@@ -18,6 +18,7 @@
  */
 
 #include "forcefield_method.h"
+#include "src/core/citation_registry.h"
 #include "src/tools/general.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/config_manager.h"
@@ -63,6 +64,7 @@ ForceFieldMethod::ForceFieldMethod(const std::string& method_name, const json& c
     }
     
     CurcumaLogger::success("ForceFieldMethod created successfully");
+    CurcumaLogger::addCitation("uff");
 }
 
 bool ForceFieldMethod::initializeForceField() {
@@ -207,7 +209,8 @@ double ForceFieldMethod::calculateEnergy(bool gradient)
     
     try {
         clearError();
-        
+
+        CitationRegistry::cite("uff");
         // Perform ForceField calculation
         m_last_energy = m_forcefield->Calculate(gradient);
 

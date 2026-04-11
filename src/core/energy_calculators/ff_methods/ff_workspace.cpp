@@ -63,10 +63,17 @@ void FFWorkspace::setInteractionLists(GFNFFParameterSet&& params)
 
     m_bond_hb_data = std::move(params.bond_hb_data);
 
+    // UFF/QMDFF non-bonded pairs
+    m_vdws = std::move(params.vdws);
+
     m_eeq_charges = std::move(params.eeq_charges);
     m_topology_charges = std::move(params.topology_charges);
 
     m_e0 = params.e0;
+
+    // Method type and distance unit factor
+    m_method_type = params.method_type;
+    m_au = (m_method_type != FFMethodType::GFN_FF) ? 1.889726125 : 1.0;
 
     m_dispersion_enabled = params.dispersion_enabled;
     m_hbond_enabled = params.hbond_enabled;
@@ -140,6 +147,7 @@ void FFWorkspace::partition()
         pr.xbonds = linearRange(m_xbonds.size(), t, T);
         pr.atm_triples = linearRange(m_atm_triples.size(), t, T);
         pr.batm_triples = linearRange(m_batm_triples.size(), t, T);
+        pr.vdws = linearRange(m_vdws.size(), t, T);
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -196,10 +204,20 @@ double FFWorkspace::calculate(bool gradient)
 {
     m_do_gradient = gradient;
 
+    // Select execute function based on method type
+    auto executeMethod = [this](int t) {
+        if (m_method_type == FFMethodType::UFF)
+            executeUFF(t);
+        else if (m_method_type == FFMethodType::QMDFF)
+            executeQMDFF(t);
+        else
+            executeGFNFF(t);
+    };
+
     if (m_num_threads == 1) {
         // T=1: Direct call, zero pool overhead
         m_accumulators[0].reset(m_natoms, gradient, m_store_components);
-        executeGFNFF(0);
+        executeMethod(0);
 
         // acc[0] IS the result — zero-copy swap
         m_result_energy = m_accumulators[0].energy;
@@ -228,8 +246,8 @@ double FFWorkspace::calculate(bool gradient)
         std::vector<std::future<void>> futures;
         futures.reserve(m_num_threads - 1);
         for (int t = 1; t < m_num_threads; ++t)
-            futures.push_back(m_pool->enqueue([this, t]() { executeGFNFF(t); }));
-        executeGFNFF(0);  // Main thread works on partition 0
+            futures.push_back(m_pool->enqueue([this, t, &executeMethod]() { executeMethod(t); }));
+        executeMethod(0);  // Main thread works on partition 0
         for (auto& f : futures)
             f.get();
 
@@ -237,6 +255,26 @@ double FFWorkspace::calculate(bool gradient)
     }
 
     postProcess(gradient);
+
+    // CPU ENERGY TERMS (verbosity >= 3)
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== CPU ENERGY TERMS ===");
+        fmt::print("  bond      = {:+.15e}\n", m_result_energy.bond);
+        fmt::print("  angle     = {:+.15e}\n", m_result_energy.angle);
+        fmt::print("  dihedral  = {:+.15e}\n", m_result_energy.dihedral);
+        fmt::print("  inversion = {:+.15e}\n", m_result_energy.inversion);
+        fmt::print("  stors     = {:+.15e}\n", m_result_energy.stors);
+        fmt::print("  batm      = {:+.15e}\n", m_result_energy.batm);
+        fmt::print("  atm       = {:+.15e}\n", m_result_energy.atm);
+        fmt::print("  disp      = {:+.15e}\n", m_result_energy.dispersion);
+        fmt::print("  brep      = {:+.15e}\n", m_result_energy.bonded_rep);
+        fmt::print("  nbrep     = {:+.15e}\n", m_result_energy.nonbonded_rep);
+        fmt::print("  coulomb   = {:+.15e}\n", m_result_energy.coulomb);
+        fmt::print("  hbond     = {:+.15e}\n", m_result_energy.hbond);
+        fmt::print("  xbond     = {:+.15e}\n", m_result_energy.xbond);
+        CurcumaLogger::info("=== CPU ENERGY END ===");
+    }
+
     return m_e0 + m_result_energy.total();
 }
 
@@ -369,6 +407,19 @@ void FFWorkspace::postProcess(bool gradient)
     // Reference: Fortran gfnff_engrad.F90:418-422 (bond/disp), 449-454 (coulomb)
     // =========================================================================
     if (gradient && !m_dcn.empty() && m_dcn.size() == 3) {
+        // Snapshot gradient before CN chain-rule (diagnostic)
+        m_grad_before_cn = m_result_gradient;
+
+        // CPU PRE-CN GRADIENT (verbosity >= 3)
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("=== CPU PRE-CN GRADIENT (natoms={}) ===", m_natoms));
+            for (int i = 0; i < m_natoms; ++i) {
+                fmt::print("  atom {:3d}: {:+.15e} {:+.15e} {:+.15e}\n",
+                           i, m_grad_before_cn(i,0), m_grad_before_cn(i,1), m_grad_before_cn(i,2));
+            }
+            CurcumaLogger::info("=== CPU PRE-CN GRADIENT END ===");
+        }
+
         // Compute TERM 1b qtmp
         Vector qtmp = Vector::Zero(m_natoms);
         bool has_term1b = (m_eeq_charges.size() == m_natoms &&
@@ -383,12 +434,21 @@ void FFWorkspace::postProcess(bool gradient)
 
         // Combined matvec: gradient += dcn * (dEdcn_total - qtmp)
         Vector dEdcn_combined = has_term1b ? (m_dEdcn_total - qtmp).eval() : m_dEdcn_total;
+        // CPU dEdcn_combined (verbosity >= 3)
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("=== CPU dEdcn_combined (natoms={}) ===", m_natoms));
+            for (int i = 0; i < m_natoms; ++i) {
+                fmt::print("  atom {:3d}: dEdcn={:+.15e} qtmp={:+.15e} comb={:+.15e} cn={:+.15e} cnf={:+.15e}\n",
+                           i, m_dEdcn_total(i), (has_term1b ? qtmp(i) : 0.0), dEdcn_combined(i),
+                           (m_cn.size() > i ? m_cn(i) : 0.0), (m_cnf.size() > i ? m_cnf(i) : 0.0));
+            }
+            CurcumaLogger::info("=== CPU dEdcn_combined END ===");
+        }
         for (int dim = 0; dim < 3; ++dim) {
             if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
                 m_result_gradient.col(dim) += m_dcn[dim] * dEdcn_combined;
             }
         }
-
         // Per-component CN corrections
         if (m_store_components) {
             Vector dEdcn_disp = m_dEdcn_total - m_dEdcn_bond_total;
@@ -399,6 +459,33 @@ void FFWorkspace::postProcess(bool gradient)
                     if (has_term1b)
                         m_result_grad_coulomb.col(dim) -= m_dcn[dim] * qtmp;
                 }
+            }
+        }
+    }
+    // CPU POST-CN GRADIENT (verbosity >= 3)
+    if (gradient) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("=== CPU POST-CN GRADIENT (natoms={}) ===", m_natoms));
+            for (int i = 0; i < m_natoms; ++i) {
+                fmt::print("  atom {:3d}: {:+.15e} {:+.15e} {:+.15e}\n",
+                           i, m_result_gradient(i,0), m_result_gradient(i,1), m_result_gradient(i,2));
+            }
+            CurcumaLogger::info("=== CPU POST-CN GRADIENT END ===");
+
+            // Per-component CPU gradient decomposition (verbosity >= 3)
+            if (m_store_components) {
+                const char* names[] = {"REPULSION", "BONDS", "ANGLES", "DISPERSION", "COULOMB", "HB"};
+                const Matrix* comps[] = {&m_result_grad_repulsion, &m_result_grad_bond, &m_result_grad_angle,
+                                         &m_result_grad_dispersion, &m_result_grad_coulomb, &m_result_grad_hb};
+                for (int c = 0; c < 6; ++c) {
+                    if (comps[c]->rows() != m_natoms) continue;
+                    CurcumaLogger::info(fmt::format("=== CPU {} GRADIENT ===", names[c]));
+                    for (int i = 0; i < m_natoms; ++i) {
+                        fmt::print("  atom {:3d}: {:+.15e} {:+.15e} {:+.15e}\n",
+                                   i, (*comps[c])(i,0), (*comps[c])(i,1), (*comps[c])(i,2));
+                    }
+                }
+                CurcumaLogger::info("=== CPU PER-COMPONENT END ===");
             }
         }
     }

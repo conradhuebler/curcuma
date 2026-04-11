@@ -66,13 +66,16 @@ enum class EEQDistanceMode {
  *   then Schur complement for constraint rows (~2x faster than LU)
  * - PCG: Preconditioned Conjugate Gradient with Schur complement constraint
  *   handling. O(N²·k) where k << N for warm-started MD/optimization (~10-30x for N>500)
+ * - Auto: First-call benchmark chooses fastest method (SchurCholesky or PCG),
+ *   then caches decision for subsequent calls. Default for optimal performance.
  *
  * Claude Generated - March 2026 (Performance optimization)
  */
 enum class EEQSolveMethod {
     LU,             ///< PartialPivLU on full augmented system (baseline)
     SchurCholesky,  ///< Cholesky on NxN SPD block + Schur complement for constraints
-    PCG             ///< Preconditioned Conjugate Gradient with warm start
+    PCG,            ///< Preconditioned Conjugate Gradient with warm start
+    Auto            ///< Auto-select via first-call benchmark (SchurCholesky vs PCG)
 };
 
 /**
@@ -331,6 +334,17 @@ private:
      * CRITICAL: alpha value is SQUARED (alpha_eeq[Z-1]²) before storage!
      */
     EEQParameters getParameters(int Z, double cn = 0.0) const;
+
+    /**
+     * @brief Generate uniform fallback charges when EEQ solver fails
+     * Claude Generated (March 2026): Graceful degradation instead of hard crash
+     *
+     * @param natoms Number of atoms
+     * @param total_charge Total molecular charge
+     * @param context Description of failure context (for warning message)
+     * @return Vector with q_i = total_charge / natoms
+     */
+    Vector generateFallbackCharges(int natoms, int total_charge, const std::string& context) const;
 
     // ===== Correction Terms =====
 
@@ -612,6 +626,28 @@ private:
     // ===== Solve Methods =====
 
     /**
+     * @brief Dispatch solve of augmented EEQ system using configured solver method
+     * Claude Generated (March 2026): Unified solver dispatch for Phase 1 and Phase 2
+     *
+     * Routes to SchurCholesky, PCG, LU, or Auto based on m_solve_method.
+     * Returns atomic charges (natoms elements), or fallback charges on failure.
+     *
+     * @param A Full augmented matrix (natoms+nfrag) × (natoms+nfrag)
+     * @param x Full RHS vector (natoms+nfrag)
+     * @param natoms Number of atoms
+     * @param nfrag Number of fragments
+     * @param total_charge Total molecular charge (for fallback)
+     * @return Vector of atomic charges (natoms elements)
+     */
+    Vector dispatchSolve(
+        const Matrix& A,
+        const Vector& x,
+        int natoms,
+        int nfrag,
+        int total_charge
+    );
+
+    /**
      * @brief Solve augmented EEQ system via Schur complement + Cholesky
      *
      * Exploits the SPD structure of the NxN Coulomb sub-matrix A:
@@ -732,6 +768,11 @@ private:
     mutable Vector m_pcg_last_z2;  ///< Previous A⁻¹·1 constraint solution (very stable between steps)
     mutable bool m_pcg_cache_valid = false;  ///< Whether PCG warm-start cache is usable
 
+    // Auto-solver benchmark state
+    // Claude Generated - March 2026 (Auto-solver selection)
+    mutable EEQSolveMethod m_selected_method = EEQSolveMethod::SchurCholesky;  ///< Method chosen by auto-benchmark
+    mutable bool m_auto_benchmark_done = false;  ///< Whether auto-benchmark has run
+
     // ===== Pre-allocated Buffers for calculateFinalCharges (Claude Generated Mar 2026) =====
     // Avoid ~26 MB alloc+free per gradient step for large molecules (N=1280).
     // Buffers are allocated once and reused when atom count stays the same.
@@ -767,8 +808,8 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Auto-calculate coordination numbers if not provided", "Algorithm", {})
     PARAM(use_iterative_refinement, Bool, false,
           "Use iterative refinement for EEQ Phase 2", "Algorithm", {})
-    PARAM(solve_method, String, "schur_cholesky",
-          "EEQ linear solve method: lu, schur_cholesky, pcg", "Algorithm", {})
+    PARAM(solve_method, String, "auto",
+          "EEQ linear solve method: lu, schur_cholesky, pcg, auto", "Algorithm", {})
     PARAM(max_pcg_iterations, Int, 200,
           "Maximum PCG iterations for EEQ solve", "Algorithm", {})
     PARAM(pcg_tolerance, Double, 1e-10,

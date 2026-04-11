@@ -1,7 +1,7 @@
 {
   "molecule": {
     "name": "HCN",
-    "geometry_file": "../external/gfnff/test/HCN.xyz",
+    "geometry_file": "test_cases/molecules/trimers/HCN.xyz",
     "atoms": [
       {
         "element": "H",

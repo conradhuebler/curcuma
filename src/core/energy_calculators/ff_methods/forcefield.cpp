@@ -34,6 +34,7 @@
 
 #include "forcefield.h"
 #include "forcefieldthread.h"
+#include "ff_workspace.h"
 
 ForceField::ForceField(const json& controller)
 {
@@ -316,7 +317,12 @@ void ForceField::setParameter(const json& parameters)
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Calculating parameter ranges");
         }
-        AutoRanges();
+        // Claude Generated (March 2026): UFF/QMDFF use FFWorkspace — no legacy threads needed.
+        // Skip AutoRanges() for these methods to avoid creating unused ForceFieldThreads.
+        if (m_method != "uff" && m_method != "uff-d3" &&
+            m_method != "qmdff" && m_method != "quff") {
+            AutoRanges();
+        }
 
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("Parameter generation complete");
@@ -361,6 +367,44 @@ void ForceField::setParameter(const json& parameters)
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Parameter summary completed");
+    }
+
+    // Claude Generated (March 2026): Create FFWorkspace for UFF/QMDFF after parameters are populated.
+    // This replaces the ForceFieldThread path for bonded + vdW terms.
+    m_use_workspace = false;
+    if (m_method == "uff" || m_method == "uff-d3" ||
+        m_method == "qmdff" || m_method == "quff") {
+        ForceFieldParameterSet ws_params;
+        ws_params.method_type = (m_method == "qmdff" || m_method == "quff")
+                                ? FFMethodType::QMDFF : FFMethodType::UFF;
+        ws_params.bonds      = m_bonds;
+        ws_params.angles     = m_angles;
+        ws_params.dihedrals  = m_dihedrals;
+        ws_params.inversions = m_inversions;
+        ws_params.vdws       = m_vdWs;
+        // uff-d3: pass D3 dispersion pairs (stored in m_gfnff_dispersions via addD3Dispersion path)
+        if (m_method == "uff-d3" && !m_gfnff_dispersions.empty()) {
+            ws_params.dispersions = m_gfnff_dispersions;
+            ws_params.dispersion_method = "d3";
+            ws_params.dispersion_enabled = true;
+        } else {
+            ws_params.dispersion_enabled = false;
+        }
+        ws_params.hbond_enabled = false;
+        ws_params.repulsion_enabled = false;
+        ws_params.coulomb_enabled = false;
+
+        m_workspace = std::make_unique<FFWorkspace>(m_threads);
+        m_workspace->setPool(m_threadpool);  // Claude Generated (March 2026): Required for multi-thread execution
+        m_workspace->setAtomTypes(m_atom_types);
+        m_workspace->setInteractionLists(std::move(ws_params));
+        m_workspace->partition();
+        m_use_workspace = true;
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::success(fmt::format("FFWorkspace (UFF/QMDFF): {} bonds, {} angles, {} vdWs, T={}",
+                m_bonds.size(), m_angles.size(), m_vdWs.size(), m_threads));
+        }
     }
 
     m_in_setParameter = false; // Reset the recursive guard - FIX: use member variable
@@ -2262,6 +2306,74 @@ bool ForceField::autoSaveParameters() const
 
 double ForceField::Calculate(bool gradient)
 {
+    // Claude Generated (March 2026): FFWorkspace path for UFF/QMDFF
+    if (m_use_workspace && m_workspace) {
+        m_workspace->setGeometry(m_geometry);
+        double energy = m_workspace->calculate(gradient);
+        if (gradient)
+            m_gradient = m_workspace->gradient();
+        const auto& e = m_workspace->energyComponents();
+        m_bond_energy        = e.bond;
+        m_angle_energy       = e.angle;
+        m_dihedral_energy    = e.dihedral;
+        m_inversion_energy   = e.inversion;
+        m_vdw_energy         = e.vdw;
+        m_rep_energy         = e.rep;
+        m_dispersion_energy  = e.dispersion;
+        m_d3_energy          = e.dispersion;  // D3 dispersion stored here for uff-d3
+        return energy;
+    }
+
+    // Claude Generated (March 2026): Safety fallback — UFF/QMDFF workspace missing, rebuild on-the-fly.
+    // This should not happen in normal usage (setParameter() creates workspace), but guards against
+    // cases where the workspace was not initialized (e.g., direct loadParametersFromFile calls).
+    if (!m_workspace &&
+        (m_method == "uff" || m_method == "uff-d3" ||
+         m_method == "qmdff" || m_method == "quff") &&
+        !m_bonds.empty()) {
+        CurcumaLogger::warn(fmt::format(
+            "UFF/QMDFF workspace not initialized for method '{}' — rebuilding", m_method));
+        ForceFieldParameterSet ws_params;
+        ws_params.method_type = (m_method == "qmdff" || m_method == "quff")
+                                ? FFMethodType::QMDFF : FFMethodType::UFF;
+        ws_params.bonds      = m_bonds;
+        ws_params.angles     = m_angles;
+        ws_params.dihedrals  = m_dihedrals;
+        ws_params.inversions = m_inversions;
+        ws_params.vdws       = m_vdWs;
+        ws_params.dispersion_enabled = (m_method == "uff-d3");
+        if (m_method == "uff-d3" && !m_gfnff_dispersions.empty()) {
+            ws_params.dispersions = m_gfnff_dispersions;
+            ws_params.dispersion_method = "d3";
+        }
+        ws_params.hbond_enabled = false;
+        ws_params.repulsion_enabled = false;
+        ws_params.coulomb_enabled = false;
+
+        m_workspace = std::make_unique<FFWorkspace>(m_threads);
+        m_workspace->setPool(m_threadpool);  // Claude Generated (March 2026): Required for multi-thread execution
+        m_workspace->setAtomTypes(m_atom_types);
+        m_workspace->setInteractionLists(std::move(ws_params));
+        m_workspace->partition();
+        m_use_workspace = true;
+    }
+    // Re-check workspace path (may have just been created by fallback above):
+    if (m_use_workspace && m_workspace) {
+        m_workspace->setGeometry(m_geometry);
+        double energy = m_workspace->calculate(gradient);
+        if (gradient) m_gradient = m_workspace->gradient();
+        const auto& e = m_workspace->energyComponents();
+        m_bond_energy        = e.bond;
+        m_angle_energy       = e.angle;
+        m_dihedral_energy    = e.dihedral;
+        m_inversion_energy   = e.inversion;
+        m_vdw_energy         = e.vdw;
+        m_rep_energy         = e.rep;
+        m_dispersion_energy  = e.dispersion;
+        m_d3_energy          = e.dispersion;
+        return energy;
+    }
+
     // Claude Generated (2025-12-13): Check for uninitialized ForceField
     if (m_stored_threads.empty()) {
         CurcumaLogger::error("ForceField::Calculate() - ForceField not initialized! No threads available.");
@@ -2319,6 +2431,15 @@ double ForceField::Calculate(bool gradient)
     // Verify all threads are valid pointers before using them
     for (size_t i = 0; i < m_stored_threads.size(); ++i) {
         if (m_stored_threads[i] == nullptr) {
+            // Claude Generated (March 2026): UFF/QMDFF should use workspace path — safe return
+            if (m_method == "uff" || m_method == "uff-d3" ||
+                m_method == "qmdff" || m_method == "quff") {
+                CurcumaLogger::error(fmt::format(
+                    "Thread {} nullptr for {} — workspace not initialized! "
+                    "m_use_workspace={}, m_workspace={}",
+                    i, m_method, m_use_workspace, (m_workspace != nullptr)));
+                return 0.0;
+            }
             throw std::runtime_error(fmt::format("Thread {} is nullptr!", i));
         }
     }

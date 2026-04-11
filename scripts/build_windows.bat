@@ -1,29 +1,55 @@
-echo on
+@echo off
+setlocal enabledelayedexpansion
 
-SET project_dir="%cd%"
-echo Building curcuma using MinGW ...
-git submodule update --init --recursive
-git pull --recurse-submodules
-mkdir build_windows
+echo ==============================================================================
+echo Building curcuma for Windows using MinGW
+echo ==============================================================================
+
+set project_dir=%cd%
+
+REM 1. FetchContent handles dependencies (no submodules needed)
+echo Configuring dependencies via CMake FetchContent...
+
+REM 2. Create and enter build directory
+if not exist build_windows mkdir build_windows
 cd build_windows
 
+REM 3. Configure CMake
+echo Configuring project...
 cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release .. -DUSE_TBLITE=OFF -DUSE_XTB=OFF -DUSE_Plumed=OFF
+if %errorlevel% neq 0 (
+    echo [ERROR] CMake configuration failed!
+    exit /b %errorlevel%
+)
+
+REM 4. Build project
+echo Building project...
 cmake --build . --config Release
+if %errorlevel% neq 0 (
+    echo [ERROR] Build failed!
+    exit /b %errorlevel%
+)
 
-mkdir -p ../bin
-copy curcuma.exe ../bin
-REM Kopiere die benötigten DLL-Dateien in den bin-Ordner
-copy %MINGW_DIR%\bin\libgcc_s_seh-1.dll ../bin
-copy %MINGW_DIR%\bin\libgfortran-5.dll ../bin
-copy %MINGW_DIR%\bin\libgomp-1.dll ../bin
-copy %MINGW_DIR%\bin\libquadmath-0.dll ../bin
-copy %MINGW_DIR%\bin\libstdc++-6.dll ../bin
-copy %MINGW_DIR%\bin\libwinpthread-1.dll ../bin
+REM 5. Prepare bin directory
 cd ..
+if not exist bin mkdir bin
 
-cd bin
+REM 6. Copy executable
+echo Copying executable...
+copy /Y build_windows\curcuma.exe bin\curcuma.exe
 
-REM Packe den Inhalt des bin-Verzeichnisses in eine ZIP-Datei
-REM powershell Compress-Archive -Path * -DestinationPath ../curcuma-windows.zip
+REM 7. Dynamic DLL Collection
+echo Collecting required MinGW DLLs...
+powershell -File scripts\collect_dlls.ps1
 
-echo Done! The executable and required DLLs are in the bin folder, and the ZIP file is created.
+REM 8. Create ZIP archive
+echo Creating distribution ZIP...
+powershell -Command "Compress-Archive -Path bin\* -DestinationPath curcuma-windows.zip -Force"
+
+echo.
+echo ==============================================================================
+echo Done!
+echo Executable and DLLs are in: %project_dir%\bin
+echo ZIP archive created: %project_dir%\curcuma-windows.zip
+echo ==============================================================================
+endlocal

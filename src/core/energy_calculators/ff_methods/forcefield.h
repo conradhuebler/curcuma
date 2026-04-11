@@ -22,6 +22,7 @@
 #include "src/core/global.h"
 
 #include "forcefieldthread.h"
+#include "ff_workspace.h"
 
 #include "src/core/hbonds.h"
 
@@ -131,6 +132,11 @@ public:
     bool autoSaveParameters() const;
     static std::string generateParameterFileName(const std::string& geometry_file);
     void setParameterCaching(bool enable) { m_enable_caching = enable; }
+
+    // Claude Generated (March 2026): Topology cache — opaque JSON block stored in param.json
+    // GFNFF sets topology data after calculation; ForceField persists it with other parameters.
+    void setTopologyCache(const json& topology) { m_topology_cache = topology; }
+    const json& getTopologyCache() const { return m_topology_cache; }
 
     // Phase 5A: Distribute EEQ charges to all threads for fqq calculation (Claude Generated Nov 2025)
     void distributeEEQCharges(const Vector& charges);
@@ -340,7 +346,12 @@ private:
     bool m_store_gradient_components = false; // mirror of thread flag for getters
 
     json m_parameters;
+    json m_topology_cache;  // Claude Generated (March 2026): Opaque topology block for param.json persistence
     std::string m_auto_param_file; // Auto-detected parameter file path
     bool m_enable_caching = true; // Can be disabled for multi-threading
     bool m_in_setParameter = false; // Claude Generated: Recursive guard for setParameter()
+
+    // Claude Generated (March 2026): FFWorkspace for UFF/QMDFF (replaces ForceFieldThread path)
+    std::unique_ptr<FFWorkspace> m_workspace;
+    bool m_use_workspace = false; ///< True when UFF/QMDFF use FFWorkspace path
 };

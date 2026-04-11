@@ -18,6 +18,7 @@
  */
 
 #include "modern_optimizer_simple.h"
+#include "src/core/citation_registry.h"
 #include "../curcumaopt.h" // For legacy LBFGS functionality
 #include "../optimizer_factory.h" // Claude Nov 2025 - New OptimizerFactory
 #include "lbfgs.h" // Native LBFGS implementation - Claude Generated
@@ -51,9 +52,9 @@ void ModernOptimizerDispatcher::printHelp() const
     CurcumaLogger::info("");
     CurcumaLogger::success("🧪 Scientific Algorithm Documentation:");
 
-    CurcumaLogger::citation("L-BFGS: Nocedal & Wright 'Numerical Optimization' (2006), Chapter 7");
-    CurcumaLogger::citation("DIIS: Pulay, P. Chem. Phys. Lett. 73, 393 (1980)");
-    CurcumaLogger::citation("RFO: Banerjee et al. J. Phys. Chem. 89, 52 (1985)");
+    CitationRegistry::cite("lbfgs");
+    CitationRegistry::cite("diis");
+    CitationRegistry::cite("rfo");
 
     CurcumaLogger::info("");
     CurcumaLogger::success("Available optimization algorithms:");
@@ -511,7 +512,7 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeWithNativeLBFGS(Mole
             CurcumaLogger::header("Native L-BFGS Optimization");
         }
         if (verbosity >= 2) {
-            CurcumaLogger::citation("Algorithm: Nocedal & Wright 'Numerical Optimization' (2006), Chapter 7");
+            CitationRegistry::cite("lbfgs");
             CurcumaLogger::param("Atoms", static_cast<int>(molecule->AtomCount()));
             CurcumaLogger::param("Memory size", safe_config.value("memory_size", 10));
             CurcumaLogger::param("Max iterations", max_iterations);
@@ -640,7 +641,7 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeWithNativeDIIS(Molec
             CurcumaLogger::header("Native DIIS Optimization");
         }
         if (verbosity >= 2) {
-            CurcumaLogger::citation("Algorithm: Pulay, P. Chem. Phys. Lett. 73, 393 (1980)");
+            CitationRegistry::cite("diis");
             CurcumaLogger::param("Atoms", static_cast<int>(molecule->AtomCount()));
             CurcumaLogger::param("DIIS history", safe_config.value("diis_hist", 10));
             CurcumaLogger::param("DIIS start", safe_config.value("diis_start", 5));
@@ -805,7 +806,7 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeWithNativeRFO(Molecu
             CurcumaLogger::header("Native RFO Optimization");
         }
         if (verbosity >= 2) {
-            CurcumaLogger::citation("Algorithm: Banerjee et al. J. Phys. Chem. 89, 52 (1985)");
+            CitationRegistry::cite("rfo");
             CurcumaLogger::param("Atoms", static_cast<int>(molecule->AtomCount()));
             CurcumaLogger::param("Trust radius", fmt::format("{:.3f} Bohr", trust_radius));
             CurcumaLogger::param("Energy threshold", fmt::format("{:.2e} Eh", energy_threshold));
