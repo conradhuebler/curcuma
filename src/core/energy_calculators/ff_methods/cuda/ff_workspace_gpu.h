@@ -192,8 +192,7 @@ public:
      * Coulomb data.  Can be overridden by GFNFF::Calculation().
      */
     void setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
-                                     const Vector& alp,     const Vector& cnf,
-                                     const Vector& chi_static);
+                                     const Vector& alp,     const Vector& cnf);
 
     /**
      * @brief Upload per-pair dc6/dcn values for dispersion dEdcn on GPU.
@@ -392,7 +391,7 @@ private:
     double  m_e0     = 0.0;
 
     // Coulomb self-energy parameters (O(N), extracted at init)
-    Vector  m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf, m_coul_chi_static;
+    Vector  m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf;
 
     // CN state for GPU upload and k_subtract_qtmp (Coulomb TERM 1b)
     Vector  m_cn, m_cnf;

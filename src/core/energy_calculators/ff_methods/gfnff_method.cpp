@@ -25,6 +25,7 @@
 #include "src/core/functional_groups.h"  // Claude Generated (January 10, 2026): Amide detection
 #include <chrono>
 #include <cstring>
+#include <algorithm>
 #include <map>
 #include <set>
 #include <functional>
@@ -166,17 +167,14 @@ json GFNFFParameterSet::toJSON() const
     }
     j["gfnff_nonbonded_repulsions"] = nonbonded_rep_json;
 
-    // Coulombs
+    // Coulombs (P3a: redundant per-atom fields removed from struct, written from parameter set data)
     json coul_json = json::array();
     for (const auto& c : coulombs) {
         json cj;
-        cj["i"] = c.i; cj["j"] = c.j; cj["q_i"] = c.q_i; cj["q_j"] = c.q_j;
+        cj["i"] = c.i; cj["j"] = c.j;
         cj["gamma_ij"] = c.gamma_ij;
-        cj["chi_i"] = c.chi_i; cj["chi_j"] = c.chi_j;
         cj["chi_base_i"] = c.chi_base_i; cj["chi_base_j"] = c.chi_base_j;
         cj["cnf_i"] = c.cnf_i; cj["cnf_j"] = c.cnf_j;
-        cj["gam_i"] = c.gam_i; cj["gam_j"] = c.gam_j;
-        cj["alp_i"] = c.alp_i; cj["alp_j"] = c.alp_j;
         cj["r_cut"] = c.r_cut;
         coul_json.push_back(cj);
     }
@@ -244,6 +242,13 @@ json GFNFFParameterSet::toJSON() const
     if (eeq_charges.size() > 0) {
         j["eeq_charges"] = std::vector<double>(eeq_charges.data(),
             eeq_charges.data() + eeq_charges.size());
+    }
+    // P3a (Apr 2026): Per-atom Coulomb self-energy parameters
+    if (eeq_gam.size() > 0) {
+        j["eeq_gam"] = std::vector<double>(eeq_gam.data(), eeq_gam.data() + eeq_gam.size());
+    }
+    if (eeq_alp.size() > 0) {
+        j["eeq_alp"] = std::vector<double>(eeq_alp.data(), eeq_alp.data() + eeq_alp.size());
     }
 
     j["vdws"] = json::array(); // Legacy
@@ -2524,6 +2529,25 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     m_charges = topo_info.eeq_charges;
     params.eeq_charges = topo_info.eeq_charges;
     params.topology_charges = topo_info.topology_charges;
+
+    // P3a (Apr 2026): Per-atom Coulomb self-energy parameters (extracted from topology)
+    // gam = eeq_gam + dgam (charge-corrected chemical hardness)
+    // alp = alpeeq (charge-corrected alpha)
+    params.eeq_gam = Eigen::VectorXd::Zero(m_atomcount);
+    params.eeq_alp = Eigen::VectorXd::Zero(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        double gam_i = topo_info.eeq_gam[i];
+        if (topo_info.dgam.size() == m_atomcount) {
+            gam_i += topo_info.dgam(i);
+        }
+        params.eeq_gam(i) = gam_i;
+
+        double alp_i = topo_info.eeq_alp[i];
+        if (topo_info.alpeeq.size() == m_atomcount) {
+            alp_i = topo_info.alpeeq(i);
+        }
+        params.eeq_alp(i) = alp_i;
+    }
 
     // Phase 1: Bonds (native — no JSON)
     params.bonds = generateBondsNative(topo_info);
@@ -7593,8 +7617,6 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
             GFNFFCoulomb c;
             c.i = i;
             c.j = j;
-            c.q_i = charges[i];
-            c.q_j = charges[j];
 
             // gamma_ij from charge-corrected alpeeq
             double alp_i_for_gamma = topo_info.eeq_alp[i];
@@ -7617,35 +7639,18 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
 
             double cnf_i = topo_info.eeq_cnf[i];
             double cnf_j = topo_info.eeq_cnf[j];
-            double cn_i = topo_info.coordination_numbers(i);
-            double cn_j = topo_info.coordination_numbers(j);
 
-            c.chi_i = chi_base_i + cnf_i * std::sqrt(cn_i);  // Legacy: static chi_eff
-            c.chi_j = chi_base_j + cnf_j * std::sqrt(cn_j);
             c.chi_base_i = chi_base_i;
             c.chi_base_j = chi_base_j;
             c.cnf_i = cnf_i;
             c.cnf_j = cnf_j;
-
-            // Gam: charge-corrected gameeq
-            double gam_i = topo_info.eeq_gam[i];
-            double gam_j = topo_info.eeq_gam[j];
-            if (topo_info.dgam.size() == m_atomcount) {
-                gam_i += topo_info.dgam(i);
-                gam_j += topo_info.dgam(j);
-            }
-            c.gam_i = gam_i;
-            c.gam_j = gam_j;
-            c.alp_i = alp_i_for_gamma;
-            c.alp_j = alp_j_for_gamma;
             c.r_cut = 100.0;
 
             coulombs.push_back(c);
 
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::param(fmt::format("coulomb_{}-{}", i, j),
-                    fmt::format("q_i={:.6f}, q_j={:.6f}, gamma={:.6f}",
-                        charges[i], charges[j], c.gamma_ij));
+                    fmt::format("gamma={:.6f}", c.gamma_ij));
             }
         }
     }
@@ -7665,18 +7670,35 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
 json GFNFF::generateGFNFFCoulombPairs() const
 {
     auto coulombs = generateCoulombPairsNative();
+    const TopologyInfo& topo_info = getCachedTopology();
+    const Vector& charges = topo_info.eeq_charges;
+
     json result = json::array();
     for (const auto& c : coulombs) {
         json j;
         j["i"] = c.i; j["j"] = c.j;
-        j["q_i"] = c.q_i; j["q_j"] = c.q_j;
         j["gamma_ij"] = c.gamma_ij;
-        j["chi_i"] = c.chi_i; j["chi_j"] = c.chi_j;
         j["chi_base_i"] = c.chi_base_i; j["chi_base_j"] = c.chi_base_j;
         j["cnf_i"] = c.cnf_i; j["cnf_j"] = c.cnf_j;
-        j["gam_i"] = c.gam_i; j["gam_j"] = c.gam_j;
-        j["alp_i"] = c.alp_i; j["alp_j"] = c.alp_j;
         j["r_cut"] = c.r_cut;
+        // Per-atom fields (written for backward compatibility with cached parameter files)
+        if (c.i < static_cast<int>(charges.size())) j["q_i"] = charges[c.i];
+        if (c.j < static_cast<int>(charges.size())) j["q_j"] = charges[c.j];
+        double chi_i = c.chi_base_i + c.cnf_i * std::sqrt(std::max(topo_info.coordination_numbers(c.i), 0.0));
+        double chi_j = c.chi_base_j + c.cnf_j * std::sqrt(std::max(topo_info.coordination_numbers(c.j), 0.0));
+        j["chi_i"] = chi_i; j["chi_j"] = chi_j;
+        double gam_i = topo_info.eeq_gam[c.i], gam_j = topo_info.eeq_gam[c.j];
+        if (topo_info.dgam.size() == m_atomcount) {
+            gam_i += topo_info.dgam(c.i);
+            gam_j += topo_info.dgam(c.j);
+        }
+        j["gam_i"] = gam_i; j["gam_j"] = gam_j;
+        double alp_i = topo_info.eeq_alp[c.i], alp_j = topo_info.eeq_alp[c.j];
+        if (topo_info.alpeeq.size() == m_atomcount) {
+            alp_i = topo_info.alpeeq(c.i);
+            alp_j = topo_info.alpeeq(c.j);
+        }
+        j["alp_i"] = alp_i; j["alp_j"] = alp_j;
         result.push_back(j);
     }
     return result;
@@ -7698,7 +7720,14 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
     std::vector<GFNFFRepulsion> nonbonded_reps;
 
     const std::vector<std::pair<int,int>>& cached_bonds = getCachedBondList();
-    std::set<std::pair<int, int>> bonded_set(cached_bonds.begin(), cached_bonds.end());
+    // P3b (Apr 2026): Upper-triangle bitset for O(1) bonded-pair lookup
+    // Replaces O(log B) std::set lookup with O(1) bitset access
+    std::vector<bool> bonded_bitset(static_cast<size_t>(m_atomcount) * m_atomcount, false);
+    for (const auto& bond : cached_bonds) {
+        int lo = std::min(bond.first, bond.second);
+        int hi = std::max(bond.first, bond.second);
+        bonded_bitset[static_cast<size_t>(lo) * m_atomcount + hi] = true;
+    }
 
     // ===== BONDED REPULSION =====
     for (const auto& bond : cached_bonds) {
@@ -7729,7 +7758,7 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
 
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = i + 1; j < m_atomcount; ++j) {
-            if (bonded_set.count({i, j}) > 0) continue;
+            if (bonded_bitset[static_cast<size_t>(i) * m_atomcount + j]) continue;
 
             int zi = m_atoms[i] - 1;
             int zj = m_atoms[j] - 1;

@@ -103,8 +103,8 @@ G2b (Profiling)     → G2a (Kernel-Split): Profiling zuerst, um richtige Kernel
 | P1c | ⚙️ Machine-tested | CPU: 1.00× (157.9 vs 157.7 ms/step) — Struct 88→48 Bytes, kein messbarer Effekt bei 1410 Atomen. Cache-Limitierung tritt erst bei größeren Systemen auf. |
 | P2a | ⚙️ Machine-tested | CPU: 1.05× (157.7→150.5 ms/step) — distance_matrix aus Per-Step-Pfad entfernt, squared_dist_matrix eliminiert (dead weight), CNCalculator statt D3-Style CN in updateDynamicState(), countNeighborsWithin20Bohr on-the-fly, HuckelSolver erhält geometry_bohr statt N×N-Matrix. Speicherersparnis: ~32MB bei 1410 Atomen. Performance-Effekt minimal bei 1410 Atomen (Cache-Limitierung nicht erreicht). |
 | P2b | ⚙️ Machine-tested | CPU: 1.08× (157.7→146.6 ms/step, 6 Bohr cutoff) — Neighbor-List mit konfigurierbarem Cutoff. Referenzmodus (voll O(N²)): 159.6 ms/step. Parameter: `-gfnff.cn_cutoff_bohr 6` (default), `-gfnff.cn_cutoff_bohr 0 -gfnff.cn_accuracy 0` (Referenz). CPU-GPU-Inkonsistenz (30 vs 40 Bohr) dokumentiert. |
-| P3a | ⏳ offen | — |
-| P3b | ⏳ offen | — |
+| P3a | ⚙️ Machine-tested | CPU: 0.99× (159.8 vs 157.7 ms/step) — GFNFFCoulomb 120→56 Bytes, redundante Felder entfernt (q_i/j, chi_i/j, gam_i/j, alp_i/j). Per-Atom-Vektoren statt Per-Pair-Daten. Kein messbarer Effekt bei 1410 Atomen. |
+| P3b | ⚙️ Machine-tested | CPU: 0.99× (159.8 vs 157.7 ms/step) — m_bonded_pairs Dead Code entfernt, std::set→vector<bool> Bitset in generateRepulsionPairsNative(). Cache-Effekt minimal bei 1410 Atomen. |
 | G1a | ⏳ offen | — |
 | G1b | ⏳ offen | — |
 | G2a | ⏳ offen | — |

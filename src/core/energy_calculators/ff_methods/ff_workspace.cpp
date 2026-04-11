@@ -80,40 +80,35 @@ void FFWorkspace::setInteractionLists(GFNFFParameterSet&& params)
     m_repulsion_enabled = params.repulsion_enabled;
     m_coulomb_enabled = params.coulomb_enabled;
 
-    // Build bonded pairs cache for fast repulsion lookup
-    m_bonded_pairs.clear();
-    for (const auto& bond : m_bonds) {
-        m_bonded_pairs.insert({bond.i, bond.j});
-        m_bonded_pairs.insert({bond.j, bond.i});
-    }
-
     // Extract per-atom Coulomb self-energy parameters from pairs (for TERM 2+3 in postProcess)
-    // Same logic as ForceField::setGFNFFParameters lines 418-444
+    // P3a (Apr 2026): chi_base/cnf from pairs; gam/alp from per-atom vectors
     if (!m_coulombs.empty() && m_natoms > 0) {
         m_coul_chi_base = Vector::Zero(m_natoms);
-        m_coul_gam = Vector::Zero(m_natoms);
-        m_coul_alp = Vector::Zero(m_natoms);
         m_coul_cnf = Vector::Zero(m_natoms);
-        m_coul_chi_static = Vector::Zero(m_natoms);
 
         std::vector<bool> atom_seen(m_natoms, false);
         for (const auto& coul : m_coulombs) {
             if (!atom_seen[coul.i]) {
                 m_coul_chi_base(coul.i) = coul.chi_base_i;
-                m_coul_gam(coul.i) = coul.gam_i;
-                m_coul_alp(coul.i) = coul.alp_i;
                 m_coul_cnf(coul.i) = coul.cnf_i;
-                m_coul_chi_static(coul.i) = coul.chi_i;
                 atom_seen[coul.i] = true;
             }
             if (!atom_seen[coul.j]) {
                 m_coul_chi_base(coul.j) = coul.chi_base_j;
-                m_coul_gam(coul.j) = coul.gam_j;
-                m_coul_alp(coul.j) = coul.alp_j;
                 m_coul_cnf(coul.j) = coul.cnf_j;
-                m_coul_chi_static(coul.j) = coul.chi_j;
                 atom_seen[coul.j] = true;
             }
+        }
+        // Per-atom gam/alp from parameter set vectors (P3a: no longer in pair struct)
+        if (params.eeq_gam.size() == m_natoms) {
+            m_coul_gam = params.eeq_gam;
+        } else {
+            m_coul_gam = Vector::Zero(m_natoms);
+        }
+        if (params.eeq_alp.size() == m_natoms) {
+            m_coul_alp = params.eeq_alp;
+        } else {
+            m_coul_alp = Vector::Zero(m_natoms);
         }
     }
 }
@@ -190,14 +185,12 @@ void FFWorkspace::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds)
 }
 
 void FFWorkspace::setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
-                                               const Vector& alp, const Vector& cnf,
-                                               const Vector& chi_static)
+                                               const Vector& alp, const Vector& cnf)
 {
     m_coul_chi_base = chi_base;
     m_coul_gam = gam;
     m_coul_alp = alp;
     m_coul_cnf = cnf;
-    m_coul_chi_static = chi_static;
 }
 
 double FFWorkspace::calculate(bool gradient)
@@ -390,7 +383,7 @@ void FFWorkspace::postProcess(bool gradient)
             if (m_coul_cnf(i) != 0.0 && has_cn) {
                 chi = m_coul_chi_base(i) + m_coul_cnf(i) * std::sqrt(std::max(m_cn(i), 0.0));
             } else {
-                chi = m_coul_chi_static(i);
+                chi = m_coul_chi_base(i);  // P3a: equivalent to chi_static when cnf=0
             }
             E_en -= q * chi;
             E_self += 0.5 * q * q * (m_coul_gam(i) + sqrt_2_over_pi / std::sqrt(m_coul_alp(i)));

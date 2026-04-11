@@ -251,8 +251,7 @@ public:
 
     // Coulomb self-energy parameters (extracted from pairs at init)
     void setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
-                                     const Vector& alp, const Vector& cnf,
-                                     const Vector& chi_static);
+                                     const Vector& alp, const Vector& cnf);
 
     // Bond-HB data for coordination number calculation
     void setBondHBData(const std::vector<BondHBEntry>& data) { m_bond_hb_data = data; }
@@ -282,7 +281,7 @@ private:
     double m_e0 = 0.0;
 
     // Coulomb self-energy parameters (O(N), extracted at init)
-    Vector m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf, m_coul_chi_static;
+    Vector m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf;
 
     // Term-enable flags
     bool m_dispersion_enabled = true;
@@ -310,9 +309,6 @@ private:
     std::vector<BondHBEntry> m_bond_hb_data;
     std::vector<HBGradEntry> m_hb_grad_entries;
     std::vector<vdW> m_vdws;                    ///< UFF/QMDFF LJ non-bonded pairs
-
-    // Cached bonded pairs for fast repulsion lookup
-    std::set<std::pair<int,int>> m_bonded_pairs;
 
     // === Partitions + Accumulators ===
     std::vector<PartitionRanges> m_partitions;

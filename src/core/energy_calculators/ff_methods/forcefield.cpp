@@ -472,32 +472,33 @@ void ForceField::setGFNFFParameters(const GFNFFParameterSet& params)
     m_gfnff_nonbonded_repulsions = params.nonbonded_repulsions;
     m_gfnff_coulombs = params.coulombs;
 
-    // Extract per-atom Coulomb parameters from pairs (for TERM 2+3 self-energy)
-    // Same logic as setGFNFFCoulombs() — needed for parent-level computation
+    // Extract per-atom Coulomb parameters from pairs and parameter set (for TERM 2+3 self-energy)
+    // P3a (Apr 2026): chi_base/cnf from pairs; gam/alp from per-atom vectors
     m_coulomb_chi_base = Vector::Zero(m_natoms);
     m_coulomb_gam = Vector::Zero(m_natoms);
     m_coulomb_alp = Vector::Zero(m_natoms);
     m_coulomb_cnf = Vector::Zero(m_natoms);
-    m_coulomb_chi_static = Vector::Zero(m_natoms);
     {
+        // Per-atom chi_base and cnf extracted from Coulomb pairs
         std::vector<bool> atom_seen(m_natoms, false);
         for (const auto& coul : m_gfnff_coulombs) {
             if (!atom_seen[coul.i]) {
                 m_coulomb_chi_base(coul.i) = coul.chi_base_i;
-                m_coulomb_gam(coul.i) = coul.gam_i;
-                m_coulomb_alp(coul.i) = coul.alp_i;
                 m_coulomb_cnf(coul.i) = coul.cnf_i;
-                m_coulomb_chi_static(coul.i) = coul.chi_i;
                 atom_seen[coul.i] = true;
             }
             if (!atom_seen[coul.j]) {
                 m_coulomb_chi_base(coul.j) = coul.chi_base_j;
-                m_coulomb_gam(coul.j) = coul.gam_j;
-                m_coulomb_alp(coul.j) = coul.alp_j;
                 m_coulomb_cnf(coul.j) = coul.cnf_j;
-                m_coulomb_chi_static(coul.j) = coul.chi_j;
                 atom_seen[coul.j] = true;
             }
+        }
+        // Per-atom gam and alp from parameter set vectors (P3a: no longer in pair struct)
+        if (params.eeq_gam.size() == m_natoms) {
+            m_coulomb_gam = params.eeq_gam;
+        }
+        if (params.eeq_alp.size() == m_natoms) {
+            m_coulomb_alp = params.eeq_alp;
         }
     }
 
@@ -1063,56 +1064,45 @@ void ForceField::setGFNFFCoulombs(const json& coulombs)
     }
 
     m_gfnff_coulombs.clear();
+    // Per-atom vectors: extract from JSON directly (P3a: no longer stored in struct)
+    m_coulomb_chi_base = Vector::Zero(m_natoms);
+    m_coulomb_gam = Vector::Zero(m_natoms);
+    m_coulomb_alp = Vector::Zero(m_natoms);
+    m_coulomb_cnf = Vector::Zero(m_natoms);
+    std::vector<bool> atom_seen(m_natoms, false);
+
     for (int i = 0; i < coulombs.size(); ++i) {
         json coul_json = coulombs[i].get<json>();
         GFNFFCoulomb coul;
 
         coul.i = coul_json["i"];
         coul.j = coul_json["j"];
-        coul.q_i = coul_json["q_i"];
-        coul.q_j = coul_json["q_j"];
         coul.gamma_ij = coul_json["gamma_ij"];
-        coul.chi_i = coul_json.value("chi_i", 0.0);      // Default to 0 if missing (backward compat)
-        coul.chi_j = coul_json.value("chi_j", 0.0);
-        // Claude Generated (Feb 22, 2026): Dynamic Coulomb chi reconstruction fields
-        // chi_base = -chi+dxi (WITHOUT cnf*sqrt(cn)), cnf = per-atom CN correction factor
-        // Falls back to static chi_i/chi_j and cnf=0 for legacy parameter files
-        coul.chi_base_i = coul_json.value("chi_base_i", coul.chi_i);
-        coul.chi_base_j = coul_json.value("chi_base_j", coul.chi_j);
+        // P3a (Apr 2026): chi_base/cnf remain in struct; gam/alp/chi_static extracted to per-atom vectors
+        // Backward compat: legacy files may have chi_i which equals chi_base + cnf*sqrt(cn)
+        double chi_i_legacy = coul_json.value("chi_i", 0.0);
+        double chi_j_legacy = coul_json.value("chi_j", 0.0);
+        coul.chi_base_i = coul_json.value("chi_base_i", chi_i_legacy);  // Fall back to static chi for legacy files
+        coul.chi_base_j = coul_json.value("chi_base_j", chi_j_legacy);
         coul.cnf_i = coul_json.value("cnf_i", 0.0);
         coul.cnf_j = coul_json.value("cnf_j", 0.0);
-        coul.gam_i = coul_json.value("gam_i", 0.0);      // Chemical hardness
-        coul.gam_j = coul_json.value("gam_j", 0.0);
-        coul.alp_i = coul_json.value("alp_i", 0.0);
-        coul.alp_j = coul_json.value("alp_j", 0.0);
         coul.r_cut = coul_json.value("r_cut", 50.0);
 
         m_gfnff_coulombs.push_back(coul);
-    }
 
-    // Claude Generated (Feb 23, 2026): Extract per-atom Coulomb parameters from pairs
-    // for parent-level TERM 2+3 (thread-count-independent self-energy computation)
-    m_coulomb_chi_base = Vector::Zero(m_natoms);
-    m_coulomb_gam = Vector::Zero(m_natoms);
-    m_coulomb_alp = Vector::Zero(m_natoms);
-    m_coulomb_cnf = Vector::Zero(m_natoms);
-    m_coulomb_chi_static = Vector::Zero(m_natoms);
-    std::vector<bool> atom_seen(m_natoms, false);
-    for (const auto& coul : m_gfnff_coulombs) {
+        // Extract per-atom parameters from JSON (not from struct)
         if (!atom_seen[coul.i]) {
             m_coulomb_chi_base(coul.i) = coul.chi_base_i;
-            m_coulomb_gam(coul.i) = coul.gam_i;
-            m_coulomb_alp(coul.i) = coul.alp_i;
+            m_coulomb_gam(coul.i) = coul_json.value("gam_i", 0.0);
+            m_coulomb_alp(coul.i) = coul_json.value("alp_i", 0.0);
             m_coulomb_cnf(coul.i) = coul.cnf_i;
-            m_coulomb_chi_static(coul.i) = coul.chi_i;
             atom_seen[coul.i] = true;
         }
         if (!atom_seen[coul.j]) {
             m_coulomb_chi_base(coul.j) = coul.chi_base_j;
-            m_coulomb_gam(coul.j) = coul.gam_j;
-            m_coulomb_alp(coul.j) = coul.alp_j;
+            m_coulomb_gam(coul.j) = coul_json.value("gam_j", 0.0);
+            m_coulomb_alp(coul.j) = coul_json.value("alp_j", 0.0);
             m_coulomb_cnf(coul.j) = coul.cnf_j;
-            m_coulomb_chi_static(coul.j) = coul.chi_j;
             atom_seen[coul.j] = true;
         }
     }
@@ -2094,26 +2084,28 @@ json ForceField::exportCurrentParameters() const
     }
 
     // Claude Generated (December 2025): Export GFN-FF Coulomb parameters
+    // P3a (Apr 2026): Redundant per-atom fields removed from struct; per-atom data in vectors
     if (!m_gfnff_coulombs.empty()) {
         json coulombs = json::array();
         for (const auto& coul : m_gfnff_coulombs) {
             json c;
             c["i"] = coul.i;
             c["j"] = coul.j;
-            c["q_i"] = coul.q_i;
-            c["q_j"] = coul.q_j;
             c["gamma_ij"] = coul.gamma_ij;
-            c["chi_i"] = coul.chi_i;
-            c["chi_j"] = coul.chi_j;
             c["chi_base_i"] = coul.chi_base_i;
             c["chi_base_j"] = coul.chi_base_j;
             c["cnf_i"] = coul.cnf_i;
             c["cnf_j"] = coul.cnf_j;
-            c["gam_i"] = coul.gam_i;
-            c["gam_j"] = coul.gam_j;
-            c["alp_i"] = coul.alp_i;
-            c["alp_j"] = coul.alp_j;
             c["r_cut"] = coul.r_cut;
+            // Per-atom data from vectors (for backward-compatible JSON export)
+            if (coul.i < m_eeq_charges.size()) c["q_i"] = m_eeq_charges(coul.i);
+            if (coul.j < m_eeq_charges.size()) c["q_j"] = m_eeq_charges(coul.j);
+            if (coul.i < m_coulomb_gam.size()) c["gam_i"] = m_coulomb_gam(coul.i);
+            if (coul.j < m_coulomb_gam.size()) c["gam_j"] = m_coulomb_gam(coul.j);
+            if (coul.i < m_coulomb_alp.size()) c["alp_i"] = m_coulomb_alp(coul.i);
+            if (coul.j < m_coulomb_alp.size()) c["alp_j"] = m_coulomb_alp(coul.j);
+            if (coul.i < m_coulomb_chi_base.size()) c["chi_i"] = m_coulomb_chi_base(coul.i) + coul.cnf_i * std::sqrt(std::max(m_cn.size() > 0 ? m_cn(coul.i) : 0.0, 0.0));
+            if (coul.j < m_coulomb_chi_base.size()) c["chi_j"] = m_coulomb_chi_base(coul.j) + coul.cnf_j * std::sqrt(std::max(m_cn.size() > 0 ? m_cn(coul.j) : 0.0, 0.0));
             coulombs.push_back(c);
         }
         output["gfnff_coulombs"] = coulombs;
@@ -2606,11 +2598,12 @@ double ForceField::Calculate(bool gradient)
             double q = m_eeq_charges(i);
             if (std::isnan(q)) continue;
             // Dynamic chi_eff = chi_base + cnf * sqrt(cn_current)
+            // P3a (Apr 2026): Fallback uses chi_base directly (equivalent to chi_static when cnf=0)
             double chi;
             if (m_coulomb_cnf(i) != 0.0 && has_cn) {
                 chi = m_coulomb_chi_base(i) + m_coulomb_cnf(i) * std::sqrt(std::max(m_cn(i), 0.0));
             } else {
-                chi = m_coulomb_chi_static(i);
+                chi = m_coulomb_chi_base(i);
             }
             E_en -= q * chi;
             E_self += 0.5 * q * q * (m_coulomb_gam(i) + sqrt_2_over_pi / std::sqrt(m_coulomb_alp(i)));

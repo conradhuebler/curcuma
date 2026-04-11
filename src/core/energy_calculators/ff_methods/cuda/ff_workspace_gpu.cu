@@ -882,36 +882,37 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_dEdcn_total.setZero();
 
     // --- Extract per-atom Coulomb self-energy params (for CPU postProcess TERM 2+3) ---
-    // Mirrors FFWorkspace::setInteractionLists() lines 90-118
+    // P3a (Apr 2026): chi_base/cnf from pairs; gam/alp from per-atom vectors
     if (!params.coulombs.empty()) {
         m_coul_chi_base  = Vector::Zero(natoms);
-        m_coul_gam       = Vector::Zero(natoms);
-        m_coul_alp       = Vector::Zero(natoms);
         m_coul_cnf       = Vector::Zero(natoms);
-        m_coul_chi_static= Vector::Zero(natoms);
 
         std::vector<bool> seen(natoms, false);
         for (const auto& c : params.coulombs) {
             if (c.i < natoms && !seen[c.i]) {
                 m_coul_chi_base(c.i)   = c.chi_base_i;
-                m_coul_gam(c.i)        = c.gam_i;
-                m_coul_alp(c.i)        = c.alp_i;
                 m_coul_cnf(c.i)        = c.cnf_i;
-                m_coul_chi_static(c.i) = c.chi_i;
                 seen[c.i] = true;
             }
             if (c.j < natoms && !seen[c.j]) {
                 m_coul_chi_base(c.j)   = c.chi_base_j;
-                m_coul_gam(c.j)        = c.gam_j;
-                m_coul_alp(c.j)        = c.alp_j;
                 m_coul_cnf(c.j)        = c.cnf_j;
-                m_coul_chi_static(c.j) = c.chi_j;
                 seen[c.j] = true;
             }
         }
+        // Per-atom gam/alp from parameter set vectors
+        if (params.eeq_gam.size() == natoms) {
+            m_coul_gam = params.eeq_gam;
+        } else {
+            m_coul_gam = Vector::Zero(natoms);
+        }
+        if (params.eeq_alp.size() == natoms) {
+            m_coul_alp = params.eeq_alp;
+        } else {
+            m_coul_alp = Vector::Zero(natoms);
+        }
         // Upload Coulomb self-energy parameters to GPU for k_coulomb_self kernel
-        setCoulombSelfEnergyParams(m_coul_chi_base, m_coul_gam, m_coul_alp,
-                                   m_coul_cnf, m_coul_chi_static);
+        setCoulombSelfEnergyParams(m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf);
     }
 
     // Store initial charges and E0 from parameter set
@@ -1037,14 +1038,12 @@ void FFWorkspaceGPU::updateBondHBCN(const std::vector<double>& hb_cn_values)
 }
 
 void FFWorkspaceGPU::setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
-                                                  const Vector& alp,     const Vector& cnf,
-                                                  const Vector& chi_static)
+                                                  const Vector& alp,     const Vector& cnf)
 {
     m_coul_chi_base   = chi_base;
     m_coul_gam        = gam;
     m_coul_alp        = alp;
     m_coul_cnf        = cnf;
-    m_coul_chi_static = chi_static;
 
     // Upload Coulomb self-energy parameters to GPU
     // Claude Generated (March 2026): GPU-side Coulomb TERM 2+3 + qtmp
