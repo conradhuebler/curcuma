@@ -137,11 +137,15 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 ### 1. Quantum Mechanical Methods
 
 #### Native Implementations (Educational, No External Dependencies)
-- ✅ **Extended Hückel Theory (EHT)** - Semi-empirical quantum chemistry
-- ✅ **GFN2-xTB (Native)** - Tight-binding with D4 (stub), MethodFactory fallback
-- ✅ **GFN1-xTB (Native)** - Tight-binding with D3 (stub) + halogen bond correction
-- ✅ **PM3 (Native)** - NDDO semi-empirical (H, C, N, O), thermochemistry-focused
-- ⚠️ **Native GFN-FF** - Work in progress (`cgfnff`)
+
+> ⚠️ **All native QM methods are AI-implemented and machine-tested only — not human production tested.**
+> Results should be validated against external references (TBLite, Ulysses, XTB) before use in research.
+
+- ⚠️ **Extended Hückel Theory (EHT)** - AI-implemented, machine-tested
+- ⚠️ **GFN2-xTB (Native)** - AI-implemented, machine-tested; 0/7 tests passing vs TBLite reference
+- ⚠️ **GFN1-xTB (Native)** - AI-implemented, machine-tested; 2/7 tests passing vs TBLite reference
+- ⚠️ **PM3/AM1/MNDO (Native NDDO)** - AI-implemented, machine-tested; 21/21 tests vs Ulysses reference (< 4 µEh)
+- ⚠️ **Native GFN-FF** - AI-implemented, machine-tested; see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
 
 #### External Interfaces (Production Quality, Requires Compilation)
 - **TBLite Interface** - Tight-binding DFT methods (GFN1, GFN2, iPEA1) + **Solvation** (CPCM, GB, ALPB)

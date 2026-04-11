@@ -132,14 +132,22 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 
 ## Variable Section
 
-### Current Development Status ✅
-- **✅ Universal Verbosity**: **COMPLETED** - All QM methods fully integrated with CurcumaLogger
-- **✅ ConfigManager Integration**: **COMPLETED (Oktober 2025)** - All QM interfaces accept ConfigManager (Phases 3A-3C)
-  - 240 parameters with PARAM macro definitions across 12 modules
-  - All 8 QM/FF interfaces migrated to ConfigManager constructors
-  - Type-safe parameter access replacing JSON-based configuration
-  - End-to-end parameter flow from CLI to external libraries
-- **✅ EHT Implementation**: Fully functional with orbital analysis and verbosity control
+### AI Implementation Status
+
+> ⚠️ **All native QM methods: AI-implemented, machine-tested only — not human production tested.**
+
+| Method | Test Status | Notes |
+|--------|-------------|-------|
+| EHT | not systematically tested | qualitative only |
+| Native GFN1-xTB | 2/7 vs TBLite | known accuracy gaps |
+| Native GFN2-xTB | 0/7 vs TBLite | major errors remain |
+| PM3/AM1/MNDO | 21/21 vs Ulysses (< 4 µEh) | most complete |
+| PM6 | not tested | parameters present, untested |
+
+### Current Development Status
+- **✅ Universal Verbosity**: All QM methods integrated with CurcumaLogger
+- **✅ ConfigManager Integration**: All QM interfaces accept ConfigManager (Phases 3A-3C)
+- **✅ EHT Implementation**: Functional with orbital analysis and verbosity control
 - **✅ XTB/TBLite Interfaces**: Native library verbosity synchronized with CurcumaLogger
 - **✅ Ulysses Interface**: Complete CurcumaLogger integration with SCF progress
 - **🔧 Native GFN-FF (gfnff)**: Architecture complete, parameter debugging in progress
