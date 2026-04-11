@@ -19,6 +19,9 @@
 #include <string>
 #include <vector>
 
+/// NDDO method types supported by the unified NDDO solver
+enum class NDDOMethodType { MNDO, AM1, PM3, PM6 };
+
 namespace NDDOParams {
 
 /**
@@ -48,9 +51,11 @@ struct ElementParams {
     double D1 = 0.0;
     double D2 = 0.0;
 
-    // ERI exponents [Angstrom]
-    double rho_s = 0.0;
-    double rho_p = 0.0;
+    // Klopman-Ohno damping parameters [Angstrom]
+    // Three levels: l=0 (monopole), l=1 (dipole), l=2 (quadrupole)
+    double rho_s = 0.0;   // l=0 monopole (ss, pp diagonal)
+    double rho_p = 0.0;   // l=1 dipole (sp)
+    double rho_q = 0.0;   // l=2 quadrupole (pp cross)
 
     // One-center two-electron integrals [eV]
     // These are the CRITICAL parameters that were previously missing
@@ -84,6 +89,28 @@ const std::map<int, ElementParams>& getAM1Params();
 
 /// Get complete PM3 parameter set (30 elements: H through Bi)
 const std::map<int, ElementParams>& getPM3Params();
+
+/// Get PM6 parameter set (H, C, N, O - expandable)
+const std::map<int, ElementParams>& getPM6Params();
+
+/// Get parameter set by method type
+const std::map<int, ElementParams>& getParams(NDDOMethodType type);
+
+/// Check if method uses Gaussian core-core corrections
+inline bool hasGaussianCorrections(NDDOMethodType type) {
+    return type != NDDOMethodType::MNDO;
+}
+
+/// Get human-readable method name
+inline const char* methodName(NDDOMethodType type) {
+    switch (type) {
+        case NDDOMethodType::MNDO: return "MNDO";
+        case NDDOMethodType::AM1:  return "AM1";
+        case NDDOMethodType::PM3:  return "PM3";
+        case NDDOMethodType::PM6:  return "PM6";
+    }
+    return "NDDO";
+}
 
 /// Check if element Z is supported for a given method
 bool isElementSupported(const std::string& method, int Z);

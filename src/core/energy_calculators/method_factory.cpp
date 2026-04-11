@@ -31,10 +31,7 @@
 #include "qm_methods/gfn1_method.h"
 #include "qm_methods/gfn2_method.h"
 #include "qm_methods/gfnff_method.h"
-#include "qm_methods/pm3_method.h"
-#include "qm_methods/mndo_method.h"
-#include "qm_methods/am1_method.h"
-#include "qm_methods/pm6_method.h"
+#include "qm_methods/nddo_method.h"
 #ifdef USE_TBLITE
 #include "qm_methods/tblite_method.h"
 #endif
@@ -365,22 +362,22 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
 
     if (method == "pm3") {
         CurcumaLogger::success("Method 'pm3' resolved to native PM3");
-        return std::make_unique<PM3Method>(config);
+        return std::make_unique<NDDOMethod>(NDDOMethodType::PM3, config);
     }
 
     if (method == "mndo") {
         CurcumaLogger::success("Method 'mndo' resolved to native MNDO");
-        return std::make_unique<MNDOMethod>();
+        return std::make_unique<NDDOMethod>(NDDOMethodType::MNDO, config);
     }
 
     if (method == "am1") {
         CurcumaLogger::success("Method 'am1' resolved to native AM1");
-        return std::make_unique<AM1Method>();
+        return std::make_unique<NDDOMethod>(NDDOMethodType::AM1, config);
     }
 
     if (method == "pm6") {
         CurcumaLogger::success("Method 'pm6' resolved to native PM6");
-        return std::make_unique<PM6Method>();
+        return std::make_unique<NDDOMethod>(NDDOMethodType::PM6, config);
     }
 
     // Direct native GFN2 access (bypasses priority chain, always uses native implementation)

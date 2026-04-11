@@ -1,5 +1,7 @@
 #pragma once
 
+#include "LofthusOverlap.hpp"
+
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -185,34 +187,31 @@ static inline DirectionCosines getDirectionCosines(const Orbital& orb1, const Or
  * Formula: S_{ss} = (2√(ζ₁ζ₂))/(ζ₁+ζ₂)^(3/2) · e^(-ρ) · (1 + ρ + ρ²/3)
  * where ρ = R(ζ₁+ζ₂)/2
  */
-static inline double calculateSSOverlap(double zeta1, double zeta2, double R, bool debug = false)
+static inline double calculateSSOverlap(double zeta1, double zeta2, double R_angstrom, bool debug = false)
 {
-    // Claude Generated (March 2026): Removed incorrect R=0 → 1.0 shortcut.
-    // For two 1s STOs with DIFFERENT zeta on the same center:
-    //   S = (4*z1*z2/(z1+z2)^2)^(3/2) < 1.0 (by AM-GM inequality)
-    // The general formula handles R=0 correctly (exp(0)=1, poly(0)=1).
-    // Self-overlap (same zeta, same center) is caught by calculateOverlap() earlier.
+    // Claude Generated: 1s-1s STO overlap integral
+    // S = N * exp(-p*R) * (1 + p*R + (p*R)²/3)
+    // where p = (ζ₁+ζ₂)/2, R in Bohr, N = [4ζ₁ζ₂/(ζ₁+ζ₂)²]^(3/2)
+    // Reference: Mulliken et al., J. Chem. Phys. 17, 1248 (1949)
 
-    // Reduzierter Zeta-Wert berechnen
-    double zeta_reduced = (zeta1 * zeta2) / (zeta1 + zeta2);
+    constexpr double bohr = 0.52917721092;  // Angstrom per Bohr
+    double R = R_angstrom / bohr;  // Convert to Bohr
 
-    // Normalisierungsfaktor
+    // Average exponent p = (ζ₁+ζ₂)/2 — NOT reduced mass ζ₁ζ₂/(ζ₁+ζ₂)
+    double p = (zeta1 + zeta2) / 2.0;
+    double pR = p * R;
+
+    // Normalization factor
     double N = pow(4.0 * zeta1 * zeta2 / pow(zeta1 + zeta2, 2.0), 1.5);
 
-    // Exponentialterm berechnen
-    double exp_term = exp(-zeta_reduced * R);
-
-    // Polynomterm berechnen
-    double poly_term = 1.0 + zeta_reduced * R + (1.0 / 3.0) * pow(zeta_reduced * R, 2.0);
-
-    // Endergebnis
+    double exp_term = exp(-pR);
+    double poly_term = 1.0 + pR + pR * pR / 3.0;
     double result = N * exp_term * poly_term;
 
-    // Debug-Ausgabe wenn angefordert
     if (debug) {
         std::cout << "S-S overlap: zeta1=" << zeta1 << ", zeta2=" << zeta2
-                  << ", R=" << R << ", zeta_reduced=" << zeta_reduced
-                  << ", N=" << N << ", exp=" << exp_term
+                  << ", R_ang=" << R_angstrom << ", R_bohr=" << R
+                  << ", p=" << p << ", N=" << N << ", exp=" << exp_term
                   << ", poly=" << poly_term
                   << ", result=" << result << std::endl;
     }
@@ -271,33 +270,35 @@ static inline double calculateSSOverlapN(double zeta1, double zeta2, double R,
  * Formula: S_{sp} = (2√(ζₛζₚ))/(ζₛ+ζₚ)^(3/2) · λ · e^(-ρ) · ρ(1 + ρ/3)
  * where ρ = R(ζₛ+ζₚ)/2 and λ is the direction cosine
  */
-static inline double calculateSPOverlap(double zeta1, double zeta2, double R,
+static inline double calculateSPOverlap(double zeta1, double zeta2, double R_angstrom,
     double direction, bool debug = false)
 {
-    // Für identische Zentren (R=0)
-    if (R < 1e-10)
-        return 0.0; // P-Orbitale haben Amplitude 0 im Zentrum
+    // Claude Generated: 1s-2p_σ STO overlap integral
+    // S_sp = direction * N * pR * exp(-pR) * (1 + pR/3)
+    // where p = (ζ_s+ζ_p)/2, R in Bohr
+    // Reference: Mulliken et al., J. Chem. Phys. 17, 1248 (1949)
 
-    // Reduzierter Zeta-Wert berechnen
-    double zeta_reduced = (zeta1 * zeta2) / (zeta1 + zeta2);
+    if (R_angstrom < 1e-10)
+        return 0.0;
 
-    // Parameter berechnen
-    double rho = 2.0 * sqrt(zeta1 * zeta2) / (zeta1 + zeta2);
+    constexpr double bohr = 0.52917721092;
+    double R = R_angstrom / bohr;
 
-    // Formeln nach Mulliken/Franzblau (normalisierte Slater-Orbitale)
-    double exp_term = exp(-zeta_reduced * R);
+    double p = (zeta1 + zeta2) / 2.0;
+    double pR = p * R;
+
+    // Normalization: N = √(ζ_s ζ_p) * [2/(ζ_s+ζ_p)]^(3/2)
     double N = sqrt(zeta1 * zeta2) * pow(2.0 / (zeta1 + zeta2), 1.5);
-    double S_sp = N * R * exp_term * (1.0 + (1.0 / 3.0) * zeta_reduced * R);
 
-    // Anpassung für Richtung (Projektion des P-Orbitals auf die Bindungsachse)
+    double exp_term = exp(-pR);
+    double S_sp = N * pR * exp_term * (1.0 + pR / 3.0);
     double result = direction * S_sp;
 
-    // Debug-Ausgabe wenn angefordert
     if (debug) {
         std::cout << "S-P overlap: zeta1=" << zeta1 << ", zeta2=" << zeta2
-                  << ", R=" << R << ", direction=" << direction
-                  << ", zeta_reduced=" << zeta_reduced
-                  << ", rho=" << rho << ", N=" << N
+                  << ", R_ang=" << R_angstrom << ", R_bohr=" << R
+                  << ", direction=" << direction
+                  << ", p=" << p << ", N=" << N
                   << ", exp=" << exp_term
                   << ", S_sp=" << S_sp
                   << ", result=" << result << std::endl;
@@ -316,40 +317,40 @@ static inline double calculateSPOverlap(double zeta1, double zeta2, double R,
  * @param debug Whether to print debug information
  * @return Overlap integral value
  */
-static inline double calculatePPOverlap(double zeta1, double zeta2, double R,
+static inline double calculatePPOverlap(double zeta1, double zeta2, double R_angstrom,
     double cos_angle, bool same_axis,
     bool debug = false)
 {
-    // Für identische Zentren (R=0)
-    if (R < 1e-10)
+    // Claude Generated: 2p-2p STO overlap integrals (σ and π components)
+    // S_pp_σ = N * exp(-pR) * (1 - pR + (pR)²/3)
+    // S_pp_π = N * exp(-pR) * (1 + pR + (pR)²/3)
+    // where p = (ζ₁+ζ₂)/2, R in Bohr
+    // Reference: Mulliken et al., J. Chem. Phys. 17, 1248 (1949)
+
+    if (R_angstrom < 1e-10)
         return same_axis ? 1.0 : 0.0;
 
-    // Reduzierter Zeta-Wert berechnen
-    double zeta_reduced = (zeta1 * zeta2) / (zeta1 + zeta2);
+    constexpr double bohr = 0.52917721092;
+    double R = R_angstrom / bohr;
 
-    // Gemeinsamer Normalisierungsfaktor
+    double p = (zeta1 + zeta2) / 2.0;
+    double pR = p * R;
+
+    // Normalization: N = ζ₁ζ₂ * [2/(ζ₁+ζ₂)]³
     double N = zeta1 * zeta2 * pow(2.0 / (zeta1 + zeta2), 3.0);
 
-    // Exponentialterm
-    double exp_term = exp(-zeta_reduced * R);
-
-    // P-P Überlappungsintegrale
+    double exp_term = exp(-pR);
     double result;
 
     if (same_axis) {
-        // Parallele P-Orbitale entlang der Bindungsachse (PPσ)
-        double poly = 1.0 - zeta_reduced * R + (1.0 / 3.0) * pow(zeta_reduced * R, 2.0);
+        double poly = 1.0 - pR + pR * pR / 3.0;
         result = N * exp_term * poly;
     } else if (fabs(cos_angle) < 1e-10) {
-        // Perfekt senkrechte P-Orbitale (PPπ)
-        double poly = 1.0 + zeta_reduced * R + (1.0 / 3.0) * pow(zeta_reduced * R, 2.0);
+        double poly = 1.0 + pR + pR * pR / 3.0;
         result = N * exp_term * poly;
     } else {
-        // Allgemeiner Fall mit beliebigem Winkel
-        double poly_sigma = 1.0 - zeta_reduced * R + (1.0 / 3.0) * pow(zeta_reduced * R, 2.0);
-        double poly_pi = 1.0 + zeta_reduced * R + (1.0 / 3.0) * pow(zeta_reduced * R, 2.0);
-
-        // cos²(θ) * PPσ-Überlappung + sin²(θ) * PPπ-Überlappung
+        double poly_sigma = 1.0 - pR + pR * pR / 3.0;
+        double poly_pi = 1.0 + pR + pR * pR / 3.0;
         double cos2 = cos_angle * cos_angle;
         result = N * exp_term * (cos2 * poly_sigma + (1.0 - cos2) * poly_pi);
     }
@@ -359,7 +360,7 @@ static inline double calculatePPOverlap(double zeta1, double zeta2, double R,
         std::cout << "P-P overlap: zeta1=" << zeta1 << ", zeta2=" << zeta2
                   << ", R=" << R << ", cos_angle=" << cos_angle
                   << ", same_axis=" << (same_axis ? "true" : "false")
-                  << ", zeta_reduced=" << zeta_reduced
+                  << ", p=" << p
                   << ", N=" << N << ", exp=" << exp_term
                   << ", result=" << result << std::endl;
     }
@@ -678,7 +679,6 @@ static inline double calculateOverlap(const Orbital& orb1, const Orbital& orb2, 
         return 1.0;
     }
 
-    // Sort orbital types for consistent calculation
     OrbitalType type1 = orb1.type;
     OrbitalType type2 = orb2.type;
     double zeta1 = orb1.zeta;
@@ -686,61 +686,95 @@ static inline double calculateOverlap(const Orbital& orb1, const Orbital& orb2, 
     int n1 = orb1.principal_n;
     int n2 = orb2.principal_n;
 
-    // Always use the lower type first for symmetry
-    if (type1 > type2) {
-        std::swap(type1, type2);
-        std::swap(zeta1, zeta2);
-        std::swap(n1, n2);
-
-        if (debug) {
-            std::cout << "Swapped orbital order for calculation" << std::endl;
-        }
-    }
-
     double result = 0.0;
 
-    // Calculate appropriate overlap based on orbital types
-    if (type1 == S) {
-        if (type2 == S) {
-            // Claude Generated (March 2026): Use principal quantum number for SS overlap
-            result = calculateSSOverlapN(zeta1, zeta2, R, n1, n2, debug);
-        } else if (type2 <= PZ) {
-            double direction = 0.0;
-            if (type2 == PX)
-                direction = dc.l;
-            else if (type2 == PY)
-                direction = dc.m;
-            else
-                direction = dc.n;
+    // Claude Generated (April 2026): Exact Lofthus/Pople STO overlaps for s/p orbitals
+    // Uses confocal elliptical coordinates with Ak/Bk auxiliary integrals.
+    // IMPORTANT: argB = 0.5*R*(ζ_bra - ζ_ket) is asymmetric, so orbital ordering
+    // must match Lofthus convention: bra=orb1 (left), ket=orb2 (right).
+    // Ref: E. Lofthus, Mol. Phys. 5, 105 (1962); Pople & Beveridge, "Approx. MO Theory" (1970)
+    constexpr double bohr = 0.52917721092;
+    double R_bohr = R / bohr;
 
-            result = calculateSPOverlap(zeta1, zeta2, R, direction, debug);
-        } else {
-            result = calculateSDOverlap(zeta1, zeta2, R, dc, type2, debug);
+    // Determine orbital category pair (without swapping — order matters for Lofthus)
+    bool is_s1 = (type1 == S), is_s2 = (type2 == S);
+    bool is_p1 = (type1 >= PX && type1 <= PZ), is_p2 = (type2 >= PX && type2 <= PZ);
+
+    if (is_s1 && is_s2) {
+        // SS overlap: symmetric in orbital order
+        result = Lofthus::exactSSOverlap(n1, zeta1, n2, zeta2, R_bohr);
+    }
+    else if (is_s1 && is_p2) {
+        // SP case: S on orb1 (bra), P on orb2 (ket)
+        // Following Ulysses: result = -SProt(k,1) * sigma_SP
+        // SProt(k,1) = direction cosine for component k
+        double direction = 0.0;
+        if (type2 == PX) direction = dc.l;
+        else if (type2 == PY) direction = dc.m;
+        else direction = dc.n;
+
+        // exactSPSigmaOverlap(n_s, zeta_s, n_p, zeta_p, R)
+        double sp_sigma = Lofthus::exactSPSigmaOverlap(n1, zeta1, n2, zeta2, R_bohr);
+        result = -sp_sigma * direction;  // negative sign per Ulysses convention
+    }
+    else if (is_p1 && is_s2) {
+        // PS case: P on orb1 (bra), S on orb2 (ket)
+        // Following Ulysses: result = +SProt(k,1) * sigma_PS
+        // Uses separate PSOvIntIndex polynomial with [1,+1] factor
+        double direction = 0.0;
+        if (type1 == PX) direction = dc.l;
+        else if (type1 == PY) direction = dc.m;
+        else direction = dc.n;
+
+        // exactPSSigmaOverlap(n_p, zeta_p, n_s, zeta_s, R)
+        double ps_sigma = Lofthus::exactPSSigmaOverlap(n1, zeta1, n2, zeta2, R_bohr);
+        result = ps_sigma * direction;  // positive sign per Ulysses convention
+    }
+    else if (is_p1 && is_p2) {
+        // PP overlap: combine sigma and pi components with rotation
+        double pp_sigma = Lofthus::exactPPSigmaOverlap(n1, zeta1, n2, zeta2, R_bohr);
+        double pp_pi = Lofthus::exactPPPiOverlap(n1, zeta1, n2, zeta2, R_bohr);
+
+        // Rotation from diatomic to lab frame using SProt matrix
+        // S(i,j) = -sigma*SProt(i,0)*SProt(j,0) + pi*(SProt(i,1)*SProt(j,1) + SProt(i,2)*SProt(j,2))
+        double cost = dc.n;
+        double sint = std::sqrt(dc.l * dc.l + dc.m * dc.m);
+        double cosp = 1.0, sinp = 0.0;
+        if (sint > 1e-8) {
+            cosp = dc.l / sint;
+            sinp = dc.m / sint;
         }
-    } else if (type1 <= PZ) {
-        if (type2 <= PZ) {
-            bool same_axis = (type1 == type2);
 
-            double l1 = 0.0, l2 = 0.0;
-            if (type1 == PX)
-                l1 = dc.l;
-            else if (type1 == PY)
-                l1 = dc.m;
-            else
-                l1 = dc.n;
+        double SP[3][3] = {
+            {sint * cosp, cost * cosp, -sinp},
+            {sint * sinp, cost * sinp,  cosp},
+            {cost,        -sint,         0.0 }
+        };
 
-            if (type2 == PX)
-                l2 = dc.l;
-            else if (type2 == PY)
-                l2 = dc.m;
-            else
-                l2 = dc.n;
+        int i1 = type1 - PX;
+        int i2 = type2 - PX;
 
-            result = calculatePPOverlap(zeta1, zeta2, R, l1 * l2, same_axis, debug);
+        result = -pp_sigma * SP[i1][0] * SP[i2][0]
+                + pp_pi * (SP[i1][1] * SP[i2][1] + SP[i1][2] * SP[i2][2]);
+    }
+    else if ((is_s1 || is_p1) && !(is_s2 || is_p2)) {
+        // SD or PD overlap: use old approximate formulas
+        if (is_s1) {
+            result = calculateSDOverlap(zeta1, zeta2, R, dc, type2, debug);
         } else {
             result = calculatePDOverlap(zeta1, zeta2, R, dc, type1, type2, debug);
         }
-    } else {
+    }
+    else if (!(is_s1 || is_p1) && (is_s2 || is_p2)) {
+        // DS or DP overlap: swap and use old formulas
+        if (is_s2) {
+            result = calculateSDOverlap(zeta2, zeta1, R, dc, type1, debug);
+        } else {
+            result = calculatePDOverlap(zeta2, zeta1, R, dc, type2, type1, debug);
+        }
+    }
+    else {
+        // DD overlap
         result = calculateDDOverlap(zeta1, zeta2, R, dc, type1, type2, debug);
     }
 
@@ -763,41 +797,50 @@ static inline double calculateOverlap(const Orbital& orb1, const Orbital& orb2, 
  */
 static inline double calculateOverlapDerivative(const Orbital& orb1, const Orbital& orb2, double R)
 {
+    // Claude Generated: Overlap derivatives with correct p = (ζ₁+ζ₂)/2 and R in Bohr
+    // dS/dR_angstrom = dS/dR_bohr * dR_bohr/dR_ang = dS/dR_bohr / bohr
     if (R < 1e-10) return 0.0;
+
+    constexpr double bohr = 0.52917721092;
+    double R_bohr = R / bohr;
 
     double zeta1 = orb1.zeta;
     double zeta2 = orb2.zeta;
     OrbitalType type1 = orb1.type;
     OrbitalType type2 = orb2.type;
 
-    // Symmetry sort
     if (type1 > type2) {
         std::swap(type1, type2);
         std::swap(zeta1, zeta2);
     }
 
-    double zeta_reduced = (zeta1 * zeta2) / (zeta1 + zeta2);
-    double rho = zeta_reduced * R;
-    double exp_term = std::exp(-rho);
+    double p = (zeta1 + zeta2) / 2.0;
+    double pR = p * R_bohr;
+    double exp_term = std::exp(-pR);
 
+    // All derivatives are dS/dR_angstrom, so divide by bohr at the end
     if (type1 == S && type2 == S) {
         double N = std::pow(4.0 * zeta1 * zeta2 / std::pow(zeta1 + zeta2, 2.0), 1.5);
-        return N * zeta_reduced * exp_term * (-1.0 / 3.0 * rho - 1.0 / 3.0 * rho * rho);
+        // d/dR[exp(-pR)(1+pR+p²R²/3)] = exp(-pR)*(-p²R²/3 * p - p + p + p²R - p³R²/3)
+        // = exp(-pR) * p * (-pR/3 - p²R²/3) = -p*exp(-pR)*pR*(1/3 + pR/3)
+        return N * p * exp_term * (-pR / 3.0 - pR * pR / 3.0) / bohr;
     }
     else if (type1 == S && type2 <= PZ) {
         double N = std::sqrt(zeta1 * zeta2) * std::pow(2.0 / (zeta1 + zeta2), 1.5);
-        return N * exp_term * (1.0 - 1.0 / 3.0 * rho - 1.0 / 3.0 * rho * rho);
+        // d/dR[pR*exp(-pR)*(1+pR/3)] = p*exp(-pR)*(1+pR/3) + pR*exp(-pR)*(-p*(1+pR/3) + p/3)
+        // = p*exp(-pR)*(1 - pR/3 - p²R²/3)
+        return N * p * exp_term * (1.0 - pR / 3.0 - pR * pR / 3.0) / bohr;
     }
     else if (type1 <= PZ && type2 <= PZ) {
         double N = zeta1 * zeta2 * std::pow(2.0 / (zeta1 + zeta2), 3.0);
-        if (type1 == type2) { // Sigma (approx)
-            return N * exp_term * (-2.0 * zeta_reduced + 5.0 / 3.0 * zeta_reduced * rho - 1.0 / 3.0 * zeta_reduced * rho * rho);
-        } else { // Pi (approx)
-            return N * zeta_reduced * exp_term * (-1.0 / 3.0 * rho - 1.0 / 3.0 * rho * rho);
+        if (type1 == type2) { // Sigma: d/dR[exp(-pR)(1-pR+p²R²/3)]
+            return N * exp_term * (-2.0*p + 5.0/3.0*p*pR - p*pR*pR/3.0) / bohr;
+        } else { // Pi: d/dR[exp(-pR)(1+pR+p²R²/3)]
+            return N * p * exp_term * (-pR/3.0 - pR*pR/3.0) / bohr;
         }
     }
 
-    return 0.0; // Placeholder for D orbitals
+    return 0.0;
 }
 
 /**
