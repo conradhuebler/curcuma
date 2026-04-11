@@ -144,6 +144,28 @@ endif()
 add_test(NAME test_eeq_two_phase
          COMMAND test_eeq_two_phase)
 
+# Claude Generated (April 2026): CPU GFN-FF analytical vs numerical gradient test
+# Tests gradient correctness for all built-in molecules (H2O, CH4, CH3OH, CH3OCH3)
+# Use --fixed-charges flag to isolate formula bugs from missing dq/dx terms
+add_executable(test_gfnff_numgrad test_gfnff_numgrad.cpp)
+target_link_libraries(test_gfnff_numgrad curcuma_core)
+
+if(USE_PCH)
+    target_precompile_headers(test_gfnff_numgrad REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME gfnff_numgrad_builtin
+         COMMAND test_gfnff_numgrad
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_numgrad_builtin
+    PROPERTIES TIMEOUT 120 LABELS "gfnff;gradient;cpu")
+
+add_test(NAME gfnff_numgrad_fixed_charges
+         COMMAND test_gfnff_numgrad --fixed-charges
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_numgrad_fixed_charges
+    PROPERTIES TIMEOUT 120 LABELS "gfnff;gradient;cpu")
+
 # Claude Generated (March 2026): GPU GFN-FF Validation Test (gfnff GPU vs CPU)
 # Only built and registered when USE_CUDA=ON
 if(USE_CUDA)
