@@ -20,6 +20,7 @@
 
 #include "rmsd_strategies.h"
 #include "../rmsd.h" // For RMSDDriver access
+#include "src/core/citation_registry.h"
 #include "src/core/fileiterator.h"
 #include "src/core/global.h"
 #include <filesystem>
@@ -731,7 +732,7 @@ AlignmentResult MolAlignStrategy::align(RMSDDriver* driver, const AlignmentConfi
         // Check if alignment was successful
         if (std::filesystem::exists("aligned.xyz") && !rndm) {
             if (driver->m_verbosity >= 1) {
-                CurcumaLogger::addCitation("molalign");
+                CURCUMA_CITE("molalign");
             }
 
             FileIterator file("aligned.xyz", true);

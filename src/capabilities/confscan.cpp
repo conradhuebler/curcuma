@@ -31,6 +31,7 @@
 
 #include "src/core/global.h" // For CurcumaLogger - Claude Generated
 #include "src/global_config.h" // For new logging system - Claude Generated
+#include "src/core/citation_registry.h"
 #include "src/core/parameter_registry.h" // For ParameterRegistry - Claude Generated 2025
 
 #include "src/capabilities/confstat.h"
@@ -387,9 +388,7 @@ void ConfScan::LoadControlJson()
 
     // Molalign citation
     if (m_RMSDmethod == "molalign") {
-        if (m_verbosity >= 1) {
-            CurcumaLogger::addCitation("molalign");
-        }
+        CitationRegistry::cite("molalign");
         m_domolalign = -1;
     }
 

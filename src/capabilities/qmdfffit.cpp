@@ -33,6 +33,7 @@
 #include <filesystem>
 
 #include "qmdfffit.h"
+#include "src/core/citation_registry.h"
 
 QMDFFFit::QMDFFFit(const json& controller, bool silent)
     : QMDFFFit(ConfigManager("qmdfffit", controller), silent)
@@ -55,7 +56,7 @@ void QMDFFFit::LoadControlJson()
 
 void QMDFFFit::start()
 {
-    std::cout << "Parametrising QMDFF (see S. Grimmme, J. Chem. Theory Comput. 2014, 10, 10, 4497–4514 [10.1021/ct500573f]) for the original publication!" << std::endl;
+    CitationRegistry::cite("qmdff");
     std::cout << "Starting with the hessian ..." << std::endl;
     std::cout << m_defaults << m_controller << std::endl;
 

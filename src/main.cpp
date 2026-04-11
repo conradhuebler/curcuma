@@ -23,6 +23,7 @@
 #include "src/core/imagewriter.hpp"
 #include "src/core/molecule.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/citation_registry.h"
 
 #include "src/capabilities/analysenciplot.h"
 #include "src/capabilities/analysis.h"
@@ -1149,6 +1150,8 @@ int executeDMatrix(const json& controller, int argc, char** argv) {
         return 0;
     }
 
+    CitationRegistry::cite("ripser");
+
     // Redirect to UnifiedAnalysis with topology properties enabled
     json dmatrix_config = controller.value("dMatrix", json::object());
     json analysis_config = controller;
@@ -1912,6 +1915,9 @@ int main(int argc, char **argv) {
 
     General::StartUp(argc, argv);
 
+    // Register curcuma self-citation
+    CitationRegistry::cite("curcuma");
+
     // Claude Generated: Initialize parameter registry early
     initialize_generated_registry();
     if (!ParameterRegistry::getInstance().validateRegistry()) {
@@ -2111,6 +2117,10 @@ int main(int argc, char **argv) {
 #else
     remove("stop");
 #endif
+
+    // Print citation summary and write BibTeX file
+    CitationRegistry::printSummary();
+    CitationRegistry::writeBibTeX();
 
     return 0;
 }

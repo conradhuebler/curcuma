@@ -18,6 +18,7 @@
  */
 
 #include "curcuma_logger.h"
+#include "citation_registry.h"
 #include <algorithm>
 #include <cstdlib> // for getenv
 #include <set>
@@ -107,11 +108,9 @@ void CurcumaLogger::info(const std::string& msg)
     }
 }
 
-void CurcumaLogger::citation(const std::string& ref)
+void CurcumaLogger::citation(const std::string& key)
 {
-    if (m_verbosity >= 2) {
-        log_colored(fmt::color::green, "[CITE]  ", ref);
-    }
+    CitationRegistry::cite(key);
 }
 
 // Claude Generated (April 2026): Citation key registry

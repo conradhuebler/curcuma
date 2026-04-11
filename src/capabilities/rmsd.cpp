@@ -18,6 +18,7 @@
  */
 #include "rmsd/rmsd_functions.h"
 #include "src/core/global.h" // For CurcumaLogger - Claude Generated
+#include "src/core/citation_registry.h"
 #include "src/global_config.h"
 #include "src/core/parameter_registry.h"  // Claude Generated - For ParameterRegistry::getInstance()
 
@@ -1627,9 +1628,7 @@ bool RMSDDriver::MolAlignLib()
     pclose(FileOpen);
 
     if (std::filesystem::exists("aligned.xyz") and !rndm) {
-        if (m_verbosity >= 1) {
-            CurcumaLogger::addCitation("molalign");
-        }
+        CurcumaLogger::citation("molalign");
         FileIterator file("aligned.xyz", true);
         m_reference_centered = file.Next();
         m_target_reordered = file.Next();

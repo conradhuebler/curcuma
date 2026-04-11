@@ -18,6 +18,7 @@
  */
 
 #include "modern_optimizer_simple.h"
+#include "src/core/citation_registry.h"
 #include "../curcumaopt.h" // For legacy LBFGS functionality
 #include "lbfgs.h" // Native LBFGS implementation - Claude Generated
 #include "src/core/parameter_registry.h"
@@ -50,9 +51,9 @@ void ModernOptimizerDispatcher::printHelp() const
     CurcumaLogger::info("");
     CurcumaLogger::success("🧪 Scientific Algorithm Documentation:");
 
-    CurcumaLogger::addCitation("lbfgs");
-    CurcumaLogger::addCitation("diis");
-    CurcumaLogger::addCitation("rfo");
+    CitationRegistry::cite("lbfgs");
+    CitationRegistry::cite("diis");
+    CitationRegistry::cite("rfo");
 
     CurcumaLogger::info("");
     CurcumaLogger::success("Available optimization algorithms:");
@@ -474,7 +475,7 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeWithNativeLBFGS(Mole
             CurcumaLogger::header("Native L-BFGS Optimization");
         }
         if (verbosity >= 2) {
-            CurcumaLogger::addCitation("lbfgs");
+            CitationRegistry::cite("lbfgs");
             CurcumaLogger::param("Atoms", static_cast<int>(molecule->AtomCount()));
             CurcumaLogger::param("Memory size", safe_config.value("memory_size", 10));
             CurcumaLogger::param("Max iterations", max_iterations);
@@ -603,7 +604,7 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeWithNativeDIIS(Molec
             CurcumaLogger::header("Native DIIS Optimization");
         }
         if (verbosity >= 2) {
-            CurcumaLogger::addCitation("diis");
+            CitationRegistry::cite("diis");
             CurcumaLogger::param("Atoms", static_cast<int>(molecule->AtomCount()));
             CurcumaLogger::param("DIIS history", safe_config.value("diis_hist", 10));
             CurcumaLogger::param("DIIS start", safe_config.value("diis_start", 5));
@@ -768,7 +769,7 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeWithNativeRFO(Molecu
             CurcumaLogger::header("Native RFO Optimization");
         }
         if (verbosity >= 2) {
-            CurcumaLogger::addCitation("rfo");
+            CitationRegistry::cite("rfo");
             CurcumaLogger::param("Atoms", static_cast<int>(molecule->AtomCount()));
             CurcumaLogger::param("Trust radius", fmt::format("{:.3f} Bohr", trust_radius));
             CurcumaLogger::param("Energy threshold", fmt::format("{:.2e} Eh", energy_threshold));

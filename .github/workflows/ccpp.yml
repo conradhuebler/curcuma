@@ -79,3 +79,12 @@ jobs:
 
       - name: Build
         run: scripts/build_windows.bat
+
+      - name: Upload Release Asset
+        uses: svenstaro/upload-release-action@v2
+        with:
+          file: ./curcuma-windows.zip
+          asset_name: curcuma-nightly-${{ needs.makerelease.outputs.version }}-windows-x86_64.zip
+          asset_content_type: application/zip
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          tag: 0.0.${{ github.run_number }}
