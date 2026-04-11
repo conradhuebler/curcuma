@@ -897,6 +897,8 @@ void ForceField::setGFNFFDispersions(const json& dispersions)
     }
 
     m_gfnff_dispersions.clear();
+    m_d3_pairs.clear();  // P1c: Also populate D3 pairs if legacy fields present
+
     for (int i = 0; i < dispersions.size(); ++i) {
         json disp_json = dispersions[i].get<json>();
         GFNFFDispersion disp;
@@ -915,29 +917,38 @@ void ForceField::setGFNFFDispersions(const json& dispersions)
             disp.r0_squared = disp_json["r0_squared"];
         } else {
             // Fallback for legacy parameter sets: compute from sqrtZr4r2 approximation
-            // This maintains backward compatibility with older cached parameters
+            // P1c (Apr 2026): Read a1/a2/C8 from JSON directly (no longer stored on struct)
             double a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
             double a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
 
-            // If C8 is available, estimate r4r2ij from C8/C6 relationship
-            // r4r2ij ≈ 3*sqrt(C8/(3*C6)) for legacy data
             if (disp_json.contains("C8") && disp.C6 > 1e-10) {
                 double c8 = disp_json["C8"].get<double>();
-                disp.r4r2ij = c8 / disp.C6;  // Approximate: C8 ≈ r4r2ij * C6
+                disp.r4r2ij = c8 / disp.C6;
             } else {
-                disp.r4r2ij = 1.0;  // Fallback default
+                disp.r4r2ij = 1.0;
             }
             disp.r0_squared = std::pow(a1 * std::sqrt(disp.r4r2ij) + a2, 2);
         }
 
-        // Legacy fields (for backward compatibility, not used in GFN-FF energy formula)
-        disp.C8 = disp_json.contains("C8") ? disp_json["C8"].get<double>() : 0.0;
-        disp.s6 = disp_json.contains("s6") ? disp_json["s6"].get<double>() : 1.0;
-        disp.s8 = disp_json.contains("s8") ? disp_json["s8"].get<double>() : 2.0;
-        disp.a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
-        disp.a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
+        // Zeta charge scaling
+        disp.zetac6 = disp_json.contains("zetac6") ? disp_json["zetac6"].get<double>() : 1.0;
 
         m_gfnff_dispersions.push_back(disp);
+
+        // P1c: Also create D3 pair if legacy fields present (UFF-D3 compatibility)
+        if (disp_json.contains("C8") || disp_json.contains("s6")) {
+            D3DispersionPair d3;
+            d3.i = disp.i;
+            d3.j = disp.j;
+            d3.C6 = disp.C6;
+            d3.C8 = disp_json.contains("C8") ? disp_json["C8"].get<double>() : 0.0;
+            d3.s6 = disp_json.contains("s6") ? disp_json["s6"].get<double>() : 1.0;
+            d3.s8 = disp_json.contains("s8") ? disp_json["s8"].get<double>() : 2.0;
+            d3.a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
+            d3.a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
+            d3.r_cut = disp.r_cut;
+            m_d3_pairs.push_back(d3);
+        }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -968,7 +979,7 @@ void ForceField::setD4Dispersions(const json& dispersions)
             disp.r4r2ij = disp_json["r4r2ij"];
             disp.r0_squared = disp_json["r0_squared"];
         } else {
-            // Fallback for legacy parameter sets
+            // P1c (Apr 2026): Read a1/a2/C8 from JSON directly (no longer stored on struct)
             double a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
             double a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
             if (disp_json.contains("C8") && disp.C6 > 1e-10) {
@@ -984,12 +995,8 @@ void ForceField::setD4Dispersions(const json& dispersions)
         // Reference: gfnff_ini.f90:789-806, gfnff_gdisp0.f90:374
         disp.zetac6 = disp_json.contains("zetac6") ? disp_json["zetac6"].get<double>() : 1.0;
 
-        // Legacy fields
-        disp.C8 = disp_json.contains("C8") ? disp_json["C8"].get<double>() : 0.0;
-        disp.s6 = disp_json.contains("s6") ? disp_json["s6"].get<double>() : 1.0;
-        disp.s8 = disp_json.contains("s8") ? disp_json["s8"].get<double>() : 2.0;
-        disp.a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
-        disp.a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
+        // P1c (Apr 2026): Legacy fields (C8, s6, s8, a1, a2) removed from GFNFFDispersion.
+        // JSON may still contain them for backward compatibility, but they are not stored.
 
         m_d4_dispersions.push_back(disp);
     }
@@ -1619,13 +1626,14 @@ void ForceField::AutoRanges()
 
         // Claude Generated (December 19, 2025): UFF-D3 native D3 dispersion distribution
         // Distribute D3 dispersion pairs to threads for parallel calculation
-        if (m_method == "uff-d3" && !m_gfnff_dispersions.empty()) {
-            for (int j = int(i * m_gfnff_dispersions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)); ++j) {
-                thread->addD3Dispersion(m_gfnff_dispersions[j]);
+        // P1c (Apr 2026): Use m_d3_pairs (D3DispersionPair) instead of m_gfnff_dispersions
+        if (m_method == "uff-d3" && !m_d3_pairs.empty()) {
+            for (int j = int(i * m_d3_pairs.size() / double(free_threads)); j < int((i + 1) * m_d3_pairs.size() / double(free_threads)); ++j) {
+                thread->addD3Dispersion(m_d3_pairs[j]);
             }
 
             if (CurcumaLogger::get_verbosity() >= 3) {
-                int d3_count = int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)) - int(i * m_gfnff_dispersions.size() / double(free_threads));
+                int d3_count = int((i + 1) * m_d3_pairs.size() / double(free_threads)) - int(i * m_d3_pairs.size() / double(free_threads));
                 CurcumaLogger::param(fmt::format("thread_{}_d3_pairs", i), d3_count);
             }
         }
@@ -2047,12 +2055,8 @@ json ForceField::exportCurrentParameters() const
             d["r4r2ij"] = disp.r4r2ij;      // GFN-FF specific: 3*sqrtZr4r2_i*sqrtZr4r2_j
             d["r0_squared"] = disp.r0_squared;  // GFN-FF specific: (a1*sqrt(r4r2ij)+a2)^2
             d["r_cut"] = disp.r_cut;
-            // Legacy fields (for backward compatibility)
-            d["C8"] = disp.C8;
-            d["s6"] = disp.s6;
-            d["s8"] = disp.s8;
-            d["a1"] = disp.a1;
-            d["a2"] = disp.a2;
+            d["zetac6"] = disp.zetac6;
+            // P1c (Apr 2026): Legacy D3 fields (C8, s6, s8, a1, a2) removed from struct
             gfnff_disp.push_back(d);
         }
         output["gfnff_dispersions"] = gfnff_disp;
@@ -2162,15 +2166,11 @@ json ForceField::exportCurrentParameters() const
             d["i"] = disp.i;
             d["j"] = disp.j;
             d["C6"] = disp.C6;
-            d["r4r2ij"] = disp.r4r2ij;      // GFN-FF specific: 3*sqrtZr4r2_i*sqrtZr4r2_j
-            d["r0_squared"] = disp.r0_squared;  // GFN-FF specific: (a1*sqrt(r4r2ij)+a2)^2
+            d["r4r2ij"] = disp.r4r2ij;
+            d["r0_squared"] = disp.r0_squared;
             d["r_cut"] = disp.r_cut;
-            // Legacy fields (for backward compatibility)
-            d["C8"] = disp.C8;
-            d["s6"] = disp.s6;
-            d["s8"] = disp.s8;
-            d["a1"] = disp.a1;
-            d["a2"] = disp.a2;
+            d["zetac6"] = disp.zetac6;
+            // P1c (Apr 2026): Legacy D3 fields removed from struct
             d4_disp.push_back(d);
         }
         output["d4_dispersion_pairs"] = d4_disp;

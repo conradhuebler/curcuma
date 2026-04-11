@@ -1528,11 +1528,7 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
                 d.r0_squared = r0_sq;
                 d.r_cut = 50.0;
                 d.zetac6 = zetac6;
-                d.C8 = 3.0 * c6 * sqrt_zr4r2_i * sqrt_zr4r2_j;
-                d.s6 = s6;
-                d.s8 = s8;
-                d.a1 = a1;
-                d.a2 = a2;
+                // P1c (Apr 2026): Legacy D3 fields removed from GFNFFDispersion
 
                 local_pairs.push_back(d);
             }

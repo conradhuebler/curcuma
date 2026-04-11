@@ -159,7 +159,7 @@ public:
     void addGFNFFCoulomb(const GFNFFCoulomb& coulomb);
 
     // D3/D4 parameter integration methods
-    void addD3Dispersion(const GFNFFDispersion& d3_dispersion);
+    void addD3Dispersion(const D3DispersionPair& d3_dispersion);
     void addD4Dispersion(const GFNFFDispersion& d4_dispersion);
     void CalculateD3DispersionContribution();
     void CalculateD4DispersionContribution();  // Claude Generated - Dec 25, 2025
@@ -463,7 +463,7 @@ private:
     std::vector<int> m_assigned_atoms_for_self_energy;
 
     // D3/D4 native dispersion pairs
-    std::vector<GFNFFDispersion> m_d3_dispersions;  // Native D3 parameters
+    std::vector<D3DispersionPair> m_d3_dispersions;  // Native D3 parameters (P1c: separate struct)
     std::vector<GFNFFDispersion> m_d4_dispersions;  // Native D4 parameters
 
     // Phase 1.2: GFN-FF hydrogen bond and halogen bond terms (Claude Generated 2025)

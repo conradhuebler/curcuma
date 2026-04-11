@@ -3354,7 +3354,7 @@ void ForceFieldThread::CalculateD4DispersionContribution()
 }
 
 // Claude Generated 2025: D3/D4 dispersion addition methods
-void ForceFieldThread::addD3Dispersion(const GFNFFDispersion& d3_dispersion)
+void ForceFieldThread::addD3Dispersion(const D3DispersionPair& d3_dispersion)
 {
     m_d3_dispersions.push_back(d3_dispersion);
 }

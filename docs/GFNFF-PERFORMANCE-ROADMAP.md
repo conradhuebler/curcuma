@@ -100,6 +100,7 @@ G2b (Profiling)     → G2a (Kernel-Split): Profiling zuerst, um richtige Kernel
 |----|--------|---------|
 | P1a | ⚙️ Machine-tested | CPU: 1.01× (156.3→157.6 ms/step je nach Threshold), GPU: 1.03× — Cache bei 1410 Atomen selten aktiv. Threshold-Benchmark: 0.0=156.3ms, 0.01=157.6ms, 0.05=156.8ms, 0.1=155.2ms — alles innerhalb Messungenauigkeit. D4-Term ist kleiner Anteil der Gesamtzeit. |
 | P1b | ⏳ offen | — |
+| P1c | ⚙️ Machine-tested | CPU: 1.00× (157.9 vs 157.7 ms/step) — Struct 88→48 Bytes, kein messbarer Effekt bei 1410 Atomen. Cache-Limitierung tritt erst bei größeren Systemen auf. |
 | P1c | ⏳ offen | — |
 | P2a | ⏳ offen | — |
 | P2b | ⏳ offen | — |
