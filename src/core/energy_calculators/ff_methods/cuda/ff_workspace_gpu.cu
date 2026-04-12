@@ -99,8 +99,9 @@ struct LaunchConfig {
 static inline LaunchConfig getLaunchConfig(int n_elements, int maxBlockSize = 512) {
     LaunchConfig cfg;
     // Adaptive block size based on problem size
-    // IMPORTANT: maxBlockSize must match GFNFF_KERNEL_BOUNDS in gfnff_kernels.cuh
-    // Current: __launch_bounds__(512, 2) - max 512 threads, min 2 blocks/SM
+    // IMPORTANT: maxBlockSize must match __launch_bounds__ in gfnff_kernels.cuh
+    // GFNFF_KERNEL_BOUNDS (512,2): max 512 threads - for lightweight pairwise kernels
+    // GFNFF_KERNEL_BOUNDS_HEAVY (256,2): max 256 threads - for register-heavy bonded kernels
     if (n_elements < 256) {
         cfg.blockSize = 32;    // Single warp - minimal overhead for tiny problems
     } else if (n_elements < 1024) {
@@ -108,7 +109,7 @@ static inline LaunchConfig getLaunchConfig(int n_elements, int maxBlockSize = 51
     } else if (n_elements < 16384) {
         cfg.blockSize = 256;   // Standard - good balance for medium problems
     } else {
-        cfg.blockSize = maxBlockSize;  // 512 threads - maximize occupancy for large problems
+        cfg.blockSize = maxBlockSize;  // Max threads - maximize throughput for large problems
     }
     // Phase 8 (Claude Generated March 2026): min 1 block so n=0 launches a no-op block
     // instead of gridSize=0 (undefined in CUDA). All kernels early-return for i >= n.
@@ -1524,7 +1525,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.angles.n);
+        LaunchConfig cfg = getLaunchConfig(impl.angles.n, 256);  // HEAVY: __launch_bounds__(256,2)
         k_angles<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.angles.n,
             impl.angles.idx_i.ptr,  impl.angles.idx_j.ptr,  impl.angles.idx_k.ptr,
@@ -1544,7 +1545,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.dihedrals.n);
+        LaunchConfig cfg = getLaunchConfig(impl.dihedrals.n, 256);  // HEAVY: __launch_bounds__(256,2)
         k_dihedrals<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.dihedrals.n,
             impl.dihedrals.idx_i.ptr, impl.dihedrals.idx_j.ptr,
@@ -1564,7 +1565,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.inversions.n);
+        LaunchConfig cfg = getLaunchConfig(impl.inversions.n, 256);  // HEAVY: __launch_bounds__(256,2)
         k_inversions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.inversions.n,
             impl.inversions.idx_i.ptr, impl.inversions.idx_j.ptr,
@@ -1582,7 +1583,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.storsions.n);
+        LaunchConfig cfg = getLaunchConfig(impl.storsions.n, 256);  // HEAVY: __launch_bounds__(256,2)
         k_storsions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.storsions.n,
             impl.storsions.idx_i.ptr, impl.storsions.idx_j.ptr,
@@ -1693,7 +1694,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     if (m_hbond_enabled) {
         // Phase 8: hbonds.n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.hbonds.n);
+        LaunchConfig cfg = getLaunchConfig(impl.hbonds.n, 256);  // HEAVY: __launch_bounds__(256,2)
         k_hbonds<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
             impl.hbonds.n,
             impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr,
