@@ -107,8 +107,9 @@ G2b (Profiling)     → G2a (Kernel-Split): Profiling zuerst, um richtige Kernel
 | P3b | ⚙️ Machine-tested | CPU: 0.99× (159.8 vs 157.7 ms/step) — m_bonded_pairs Dead Code entfernt, std::set→vector<bool> Bitset in generateRepulsionPairsNative(). Cache-Effekt minimal bei 1410 Atomen. |
 | G1a | ⚙️ Machine-tested | CPU: 0.99× (159.8 vs 157.7 ms/step) — Dispersion-Paare nach idx_i sortiert vor GPU-Upload. Kein CPU-Effekt. GPU: 1.50× (20.0 vs 30.0 ms/step) — deutlich bessere L2-Lokalität durch Sortierung. |
 | G1b | ⚙️ Machine-tested | CPU: N/A — __ldg() nur für GPU relevant. GPU: kombiniert mit G1a-Messung (1.50×). __ldg() für alle Paar-SoA-Parameter in k_dispersion, k_repulsion, k_coulomb, k_coulomb_self, k_coulomb_postprocess. |
+| G1c | ⚙️ Machine-tested | CPU: N/A. GPU: 1.58× (19.0 vs 30.0 ms/step) — Coulomb + Repulsion-Paare ebenfalls nach idx_i sortiert. Kein zusätzlicher Effekt bei 1410 Atomen (Sortierung bringt nur bei Dispersion Gewinn wegen engerem Cutoff). |
 | G2a | ⚙️ Machine-tested | CPU: 1.06× (148.8 vs 157.7 ms/step) — kein CPU-Effekt. GPU: 1.58× (19.0 vs 30.0 ms/step) — Register-Spilling reduziert durch `__launch_bounds__(256, 2)` für k_angles, k_dihedrals, k_inversions, k_storsions, k_hbonds. k_angles/storsions/inversions: 0 Spills (von 88-264 Bytes Stack). k_dihedrals: 88 Bytes Stack (von 432). k_hbonds: 312 Bytes Stack (von 632), noch 548/780 Bytes Spill — benötigt weitere Optimierung. |
-| G2b | ⏳ offen | — |
+| G2b | ⏭️ Übersprungen | Nsight Compute nicht installiert. Register-Spilling stattdessen via ptxas -v analysiert (siehe G2a-Ergebnisse). |
 
 *Nur der Operator darf Status auf ✅ TESTED setzen.*
 

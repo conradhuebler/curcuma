@@ -812,9 +812,27 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
 
     // --- Upload static SoA interaction lists ---
     m_impl->disp.upload(disp_sorted, stream);
-    m_impl->bonded_rep.upload(params.bonded_repulsions, stream);
-    m_impl->nonbonded_rep.upload(params.nonbonded_repulsions, stream);
-    m_impl->coulomb.upload(params.coulombs, stream);
+    // G1c: Sort repulsion pairs by idx_i for L2 locality (same as G1a for dispersion)
+    auto bonded_rep_sorted = params.bonded_repulsions;
+    std::sort(bonded_rep_sorted.begin(), bonded_rep_sorted.end(),
+        [](const GFNFFRepulsion& a, const GFNFFRepulsion& b) {
+            return (a.i != b.i) ? (a.i < b.i) : (a.j < b.j);
+        });
+    auto nonbonded_rep_sorted = params.nonbonded_repulsions;
+    std::sort(nonbonded_rep_sorted.begin(), nonbonded_rep_sorted.end(),
+        [](const GFNFFRepulsion& a, const GFNFFRepulsion& b) {
+            return (a.i != b.i) ? (a.i < b.i) : (a.j < b.j);
+        });
+    m_impl->bonded_rep.upload(bonded_rep_sorted, stream);
+    m_impl->nonbonded_rep.upload(nonbonded_rep_sorted, stream);
+    // G1c (Apr 2026): Sort Coulomb pairs by idx_i (primary), idx_j (secondary)
+    // Same L2 locality optimization as G1a for dispersion pairs.
+    auto coul_sorted = params.coulombs;
+    std::sort(coul_sorted.begin(), coul_sorted.end(),
+        [](const GFNFFCoulomb& a, const GFNFFCoulomb& b) {
+            return (a.i != b.i) ? (a.i < b.i) : (a.j < b.j);
+        });
+    m_impl->coulomb.upload(coul_sorted, stream);
     m_impl->bonds.upload(params.bonds, atom_types, stream);
     m_impl->angles.upload(params.angles, atom_types, stream);
     m_impl->dihedrals.upload(params.dihedrals, params.extra_dihedrals, atom_types, stream);
