@@ -17,3 +17,4 @@
 2026-04-12 | 31d0e7e | gfnff | threads=4 | 150.5s | 150.5ms/step | ok | after_P2a_distance_matrix_elimination  [vs 1c27621 speedup=1.05x]
 2026-04-12 | c2c6b03 | gfnff | threads=4 | 146.6s | 146.6ms/step | ok | after_P2b_neighbor_list_6bohr  [vs 1c27621 speedup=1.08x]
 2026-04-12 01:38:07 | 47851af | gfnff | threads=4 | 159.78s | 159.8ms/step | ok | after_P3a_P3b  [vs 1c27621 speedup=0.99x]
+2026-04-12 02:01:55 | b0356ee | gfnff-gpu | threads=4 | 19.99s | 20.0ms/step | ok | after_G1a_pair_sorting_ldg  [vs 1c27621 speedup=1.50x]

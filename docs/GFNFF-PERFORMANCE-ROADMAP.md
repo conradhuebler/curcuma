@@ -105,8 +105,8 @@ G2b (Profiling)     → G2a (Kernel-Split): Profiling zuerst, um richtige Kernel
 | P2b | ⚙️ Machine-tested | CPU: 1.08× (157.7→146.6 ms/step, 6 Bohr cutoff) — Neighbor-List mit konfigurierbarem Cutoff. Referenzmodus (voll O(N²)): 159.6 ms/step. Parameter: `-gfnff.cn_cutoff_bohr 6` (default), `-gfnff.cn_cutoff_bohr 0 -gfnff.cn_accuracy 0` (Referenz). CPU-GPU-Inkonsistenz (30 vs 40 Bohr) dokumentiert. |
 | P3a | ⚙️ Machine-tested | CPU: 0.99× (159.8 vs 157.7 ms/step) — GFNFFCoulomb 120→56 Bytes, redundante Felder entfernt (q_i/j, chi_i/j, gam_i/j, alp_i/j). Per-Atom-Vektoren statt Per-Pair-Daten. Kein messbarer Effekt bei 1410 Atomen. |
 | P3b | ⚙️ Machine-tested | CPU: 0.99× (159.8 vs 157.7 ms/step) — m_bonded_pairs Dead Code entfernt, std::set→vector<bool> Bitset in generateRepulsionPairsNative(). Cache-Effekt minimal bei 1410 Atomen. |
-| G1a | ⏳ offen | — |
-| G1b | ⏳ offen | — |
+| G1a | ⚙️ Machine-tested | CPU: 0.99× (159.8 vs 157.7 ms/step) — Dispersion-Paare nach idx_i sortiert vor GPU-Upload. Kein CPU-Effekt. GPU: 1.50× (20.0 vs 30.0 ms/step) — deutlich bessere L2-Lokalität durch Sortierung. |
+| G1b | ⚙️ Machine-tested | CPU: N/A — __ldg() nur für GPU relevant. GPU: kombiniert mit G1a-Messung (1.50×). __ldg() für alle Paar-SoA-Parameter in k_dispersion, k_repulsion, k_coulomb, k_coulomb_self, k_coulomb_postprocess. |
 | G2a | ⏳ offen | — |
 | G2b | ⏳ offen | — |
 

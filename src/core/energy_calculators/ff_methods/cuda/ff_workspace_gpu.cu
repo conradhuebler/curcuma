@@ -27,6 +27,7 @@
 
 #include <Eigen/Dense>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -782,16 +783,26 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     upload_covalent_radii(GFNFFParameters::covalent_radii.data(),
                           static_cast<int>(GFNFFParameters::covalent_radii.size()));
 
+    // G1a (Apr 2026): Sort dispersion pairs by idx_i (primary), idx_j (secondary)
+    // to improve L2 cache locality when threads access cx/cy/cz atom coordinates.
+    // Nearby threads → nearby atoms → better cache behavior.
+    auto disp_sorted = params.dispersions;
+    std::sort(disp_sorted.begin(), disp_sorted.end(),
+        [](const GFNFFDispersion& a, const GFNFFDispersion& b) {
+            return (a.i != b.i) ? (a.i < b.i) : (a.j < b.j);
+        });
+
     // Store dispersion pair indices on host for per-step dc6dcn extraction
+    // (must use sorted order to match SoA layout)
     {
-        const int nd = static_cast<int>(params.dispersions.size());
+        const int nd = static_cast<int>(disp_sorted.size());
         m_disp_idx_i_host.resize(nd);
         m_disp_idx_j_host.resize(nd);
         m_h_dc6dcn_ij.resize(nd, 0.0);
         m_h_dc6dcn_ji.resize(nd, 0.0);
         for (int k = 0; k < nd; ++k) {
-            m_disp_idx_i_host[k] = params.dispersions[k].i;
-            m_disp_idx_j_host[k] = params.dispersions[k].j;
+            m_disp_idx_i_host[k] = disp_sorted[k].i;
+            m_disp_idx_j_host[k] = disp_sorted[k].j;
         }
     }
 
@@ -799,7 +810,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_topology_charges = params.topology_charges;
 
     // --- Upload static SoA interaction lists ---
-    m_impl->disp.upload(params.dispersions, stream);
+    m_impl->disp.upload(disp_sorted, stream);
     m_impl->bonded_rep.upload(params.bonded_repulsions, stream);
     m_impl->nonbonded_rep.upload(params.nonbonded_repulsions, stream);
     m_impl->coulomb.upload(params.coulombs, stream);

@@ -188,32 +188,40 @@ __global__ void k_dispersion(
         double r2 = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
-        if (rij <= r_cut[tid] && rij >= 1e-10) {
+        // G1b (Apr 2026): __ldg() routes read-only SoA params through texture cache
+        // freeing L1/L2 bandwidth for coordinate arrays accessed via atom indices
+        double rcut = __ldg(&r_cut[tid]);
+
+        if (rij <= rcut && rij >= 1e-10) {
             double r4   = r2  * r2;
             double r6   = r4  * r2;
-            double r0s  = r0_sq[tid];
+            double r0s  = __ldg(&r0_sq[tid]);
             double r0_6 = r0s * r0s * r0s;
             double t6   = 1.0 / (r6 + r0_6);
             double r8   = r6  * r2;
             double r0_8 = r0_6 * r0s;
             double t8   = 1.0 / (r8 + r0_8);
 
-            double disp_sum = t6 + 2.0 * r4r2ij[tid] * t8;
-            local_E = -C6[tid] * disp_sum * zetac6[tid];
+            double c6   = __ldg(&C6[tid]);
+            double r4r2 = __ldg(&r4r2ij[tid]);
+            double zeta = __ldg(&zetac6[tid]);
+
+            double disp_sum = t6 + 2.0 * r4r2 * t8;
+            local_E = -c6 * disp_sum * zeta;
 
             // Gradient: dE/dr via chain rule
             double d6   = -6.0 * r4 * t6 * t6;
             double d8   = -8.0 * r4 * r2 * t8 * t8;
-            double dEdr = -C6[tid] * zetac6[tid] * (d6 + 2.0 * r4r2ij[tid] * d8) * rij;
+            double dEdr = -c6 * zeta * (d6 + 2.0 * r4r2 * d8) * rij;
             double fac  = dEdr / rij;
             add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
 
             // dEdcn chain-rule: dc6/dcn contribution for CN gradient
             if (dc6dcn_ij && dEdcn) {
-                double disp_value = disp_sum * zetac6[tid];
-                atomicAdd(&dEdcn[i], -dc6dcn_ij[tid] * disp_value);
-                atomicAdd(&dEdcn[j], -dc6dcn_ji[tid] * disp_value);
+                double disp_value = disp_sum * zeta;
+                atomicAdd(&dEdcn[i], -__ldg(&dc6dcn_ij[tid]) * disp_value);
+                atomicAdd(&dEdcn[j], -__ldg(&dc6dcn_ji[tid]) * disp_value);
             }
         }
     }
@@ -253,15 +261,20 @@ __global__ void k_repulsion(
         double r2  = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
-        if (rij <= r_cut[tid] && rij >= 1e-8) {
-            double r1_5      = rij * sqrt(rij);
-            double alp_r     = alpha[tid] * r1_5;
-            if (!isnan(alp_r) && !isnan(repab[tid]) && alp_r <= 700.0) {
-                double exp_term  = exp(-alp_r);
-                double base_E    = repab[tid] * exp_term / rij;
+        // G1b (Apr 2026): __ldg() for read-only SoA params
+        double rcut = __ldg(&r_cut[tid]);
+
+        if (rij <= rcut && rij >= 1e-8) {
+            double alp = __ldg(&alpha[tid]);
+            double rep = __ldg(&repab[tid]);
+            double r1_5 = rij * sqrt(rij);
+            double alp_r = alp * r1_5;
+            if (!isnan(alp_r) && !isnan(rep) && alp_r <= 700.0) {
+                double exp_term = exp(-alp_r);
+                double base_E  = rep * exp_term / rij;
                 local_E = base_E;
 
-                double dEdr = -base_E / rij - 1.5 * alpha[tid] * sqrt(rij) * base_E;
+                double dEdr = -base_E / rij - 1.5 * alp * sqrt(rij) * base_E;
                 double fac  = dEdr / rij;
                 add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
@@ -302,10 +315,10 @@ __global__ GFNFF_KERNEL_BOUNDS void k_repulsion_mixed(
         float r2  = dx*dx + dy*dy + dz*dz;
         float rij = sqrtf(r2);
 
-        if (rij <= (float)r_cut[tid] && rij >= 1e-8f) {
+        if (rij <= (float)__ldg(&r_cut[tid]) && rij >= 1e-8f) {
             float r1_5  = rij * sqrtf(rij);
-            float alp_f = (float)alpha[tid];
-            float rep_f = (float)repab[tid];
+            float alp_f = (float)__ldg(&alpha[tid]);
+            float rep_f = (float)__ldg(&repab[tid]);
             float alp_r = alp_f * r1_5;
             if (!isnan(alp_r) && !isnan(rep_f) && alp_r <= 700.0f) {
                 float exp_term = expf(-alp_r);
@@ -355,18 +368,22 @@ __global__ void k_coulomb(
         double r2  = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
-        if (rij <= r_cut[tid] && rij >= 1e-10) {
+        // G1b (Apr 2026): __ldg() for read-only SoA params
+        double rcut = __ldg(&r_cut[tid]);
+
+        if (rij <= rcut && rij >= 1e-10) {
             double qi = charges[i];
             double qj = charges[j];
             if (!isnan(qi) && !isnan(qj)) {
-                double gamma_r = gamma_ij[tid] * rij;
+                double gam = __ldg(&gamma_ij[tid]);
+                double gamma_r = gam * rij;
                 double erf_v   = erf(gamma_r);
                 local_E = qi * qj * erf_v / rij;
 
                 // Gradient
                 static const double inv_sqrt_pi = 0.5641895835477563;
                 double exp_v  = exp(-gamma_r * gamma_r);
-                double derf   = gamma_ij[tid] * exp_v * (2.0 * inv_sqrt_pi);
+                double derf   = gam * exp_v * (2.0 * inv_sqrt_pi);
                 double dEdr   = qi * qj * (derf / rij - erf_v / (rij * rij));
                 double fac    = dEdr / rij;
                 add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
@@ -2387,19 +2404,24 @@ __global__ void k_coulomb_self(
 
     double q = eeq_charges[i];
     if (isnan(q)) return;
-    if (alp[i] <= 0.0) return;
+    // G1b (Apr 2026): __ldg() for read-only per-atom params
+    double alp_i = __ldg(&alp[i]);
+    if (alp_i <= 0.0) return;
 
     // chi_eff = chi_base + cnf * sqrt(max(cn, 0))
+    // P3a fallback: chi_base directly when cnf=0
+    double chi_base_i = __ldg(&chi_base[i]);
+    double cnf_i = __ldg(&cnf[i]);
     double chi;
-    if (cnf[i] != 0.0) {
-        chi = chi_base[i] + cnf[i] * sqrt(fmax(cn[i], 0.0));
+    if (cnf_i != 0.0) {
+        chi = chi_base_i + cnf_i * sqrt(fmax(__ldg(&cn[i]), 0.0));
     } else {
-        chi = chi_base[i];
+        chi = chi_base_i;
     }
 
     static const double sqrt_2_over_pi = 0.797884560802865;
     double E_en   = -q * chi;
-    double E_self = 0.5 * q * q * (gam[i] + sqrt_2_over_pi / sqrt(alp[i]));
+    double E_self = 0.5 * q * q * (__ldg(&gam[i]) + sqrt_2_over_pi / sqrt(alp_i));
 
     atomicAdd(energy, E_en + E_self);
 }
@@ -2419,8 +2441,8 @@ __global__ void k_subtract_qtmp(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
 
-    double cn_i = fmax(cn[i], 0.0);
-    double qtmp = eeq_charges[i] * cnf[i] / (2.0 * sqrt(cn_i) + 1e-16);
+    double cn_i = fmax(__ldg(&cn[i]), 0.0);
+    double qtmp = eeq_charges[i] * __ldg(&cnf[i]) / (2.0 * sqrt(cn_i) + 1e-16);
     dEdcn[i] -= qtmp;
 }
 
@@ -2452,19 +2474,23 @@ __global__ GFNFF_KERNEL_BOUNDS void k_coulomb_postprocess(
 
     if (i < N) {
         double q = eeq_charges[i];
-        bool valid = !isnan(q) && alp[i] > 0.0;
+        double alp_i = __ldg(&alp[i]);
+        bool valid = !isnan(q) && alp_i > 0.0;
 
         if (valid) {
             // Coulomb TERM 2+3 self-energy
+            // G1b (Apr 2026): __ldg() for read-only per-atom params
+            double chi_base_i = __ldg(&chi_base[i]);
+            double cnf_i = __ldg(&cnf[i]);
             double chi;
-            if (cnf[i] != 0.0) {
-                chi = chi_base[i] + cnf[i] * sqrt(fmax(cn[i], 0.0));
+            if (cnf_i != 0.0) {
+                chi = chi_base_i + cnf_i * sqrt(fmax(__ldg(&cn[i]), 0.0));
             } else {
-                chi = chi_base[i];
+                chi = chi_base_i;  // P3a fallback
             }
             static const double sqrt_2_over_pi = 0.797884560802865;
             double E_en   = -q * chi;
-            double E_self = 0.5 * q * q * (gam[i] + sqrt_2_over_pi / sqrt(alp[i]));
+            double E_self = 0.5 * q * q * (__ldg(&gam[i]) + sqrt_2_over_pi / sqrt(alp_i));
             local_E = E_en + E_self;
         }
 
