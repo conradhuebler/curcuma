@@ -89,6 +89,33 @@ __device__ __forceinline__ void blockReduceAddEnergy(double local_E, double* ene
 }
 
 // ============================================================================
+// PBC: Minimum Image Convention (Claude Generated April 2026)
+// d_lattice[9]    — unit cell vectors in Bohr (column-major: col0=a, col1=b, col2=c)
+// d_lattice_inv[9]— inverse of d_lattice
+// d_has_pbc       — non-zero when PBC is active
+//
+// Column-major layout (Eigen Matrix3d default):
+//   d_lattice[3*col + row]
+// Must be declared before first kernel that calls applyMIC().
+// ============================================================================
+__constant__ double d_lattice[9];
+__constant__ double d_lattice_inv[9];
+__constant__ int    d_has_pbc;
+
+/// Apply Minimum Image Convention to displacement vector (dx,dy,dz) in-place.
+/// Operates in Bohr (same units as GPU geometry). Zero overhead when d_has_pbc==0.
+__device__ __forceinline__ void applyMIC(double& dx, double& dy, double& dz) {
+    if (!d_has_pbc) return;
+    double fx = d_lattice_inv[0]*dx + d_lattice_inv[3]*dy + d_lattice_inv[6]*dz;
+    double fy = d_lattice_inv[1]*dx + d_lattice_inv[4]*dy + d_lattice_inv[7]*dz;
+    double fz = d_lattice_inv[2]*dx + d_lattice_inv[5]*dy + d_lattice_inv[8]*dz;
+    fx -= rint(fx); fy -= rint(fy); fz -= rint(fz);
+    dx = d_lattice[0]*fx + d_lattice[3]*fy + d_lattice[6]*fz;
+    dy = d_lattice[1]*fx + d_lattice[4]*fy + d_lattice[7]*fz;
+    dz = d_lattice[2]*fx + d_lattice[5]*fy + d_lattice[8]*fz;
+}
+
+// ============================================================================
 // Utility kernel
 // ============================================================================
 
@@ -157,35 +184,44 @@ __global__ void k_dispersion(
         double dx = cx[i] - cx[j];
         double dy = cy[i] - cy[j];
         double dz = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
         double r2 = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
-        if (rij <= r_cut[tid] && rij >= 1e-10) {
+        // G1b (Apr 2026): __ldg() routes read-only SoA params through texture cache
+        // freeing L1/L2 bandwidth for coordinate arrays accessed via atom indices
+        double rcut = __ldg(&r_cut[tid]);
+
+        if (rij <= rcut && rij >= 1e-10) {
             double r4   = r2  * r2;
             double r6   = r4  * r2;
-            double r0s  = r0_sq[tid];
+            double r0s  = __ldg(&r0_sq[tid]);
             double r0_6 = r0s * r0s * r0s;
             double t6   = 1.0 / (r6 + r0_6);
             double r8   = r6  * r2;
             double r0_8 = r0_6 * r0s;
             double t8   = 1.0 / (r8 + r0_8);
 
-            double disp_sum = t6 + 2.0 * r4r2ij[tid] * t8;
-            local_E = -C6[tid] * disp_sum * zetac6[tid];
+            double c6   = __ldg(&C6[tid]);
+            double r4r2 = __ldg(&r4r2ij[tid]);
+            double zeta = __ldg(&zetac6[tid]);
+
+            double disp_sum = t6 + 2.0 * r4r2 * t8;
+            local_E = -c6 * disp_sum * zeta;
 
             // Gradient: dE/dr via chain rule
             double d6   = -6.0 * r4 * t6 * t6;
             double d8   = -8.0 * r4 * r2 * t8 * t8;
-            double dEdr = -C6[tid] * zetac6[tid] * (d6 + 2.0 * r4r2ij[tid] * d8) * rij;
+            double dEdr = -c6 * zeta * (d6 + 2.0 * r4r2 * d8) * rij;
             double fac  = dEdr / rij;
             add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
 
             // dEdcn chain-rule: dc6/dcn contribution for CN gradient
             if (dc6dcn_ij && dEdcn) {
-                double disp_value = disp_sum * zetac6[tid];
-                atomicAdd(&dEdcn[i], -dc6dcn_ij[tid] * disp_value);
-                atomicAdd(&dEdcn[j], -dc6dcn_ji[tid] * disp_value);
+                double disp_value = disp_sum * zeta;
+                atomicAdd(&dEdcn[i], -__ldg(&dc6dcn_ij[tid]) * disp_value);
+                atomicAdd(&dEdcn[j], -__ldg(&dc6dcn_ji[tid]) * disp_value);
             }
         }
     }
@@ -221,18 +257,24 @@ __global__ void k_repulsion(
         double dx = cx[i] - cx[j];
         double dy = cy[i] - cy[j];
         double dz = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
         double r2  = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
-        if (rij <= r_cut[tid] && rij >= 1e-8) {
-            double r1_5      = rij * sqrt(rij);
-            double alp_r     = alpha[tid] * r1_5;
-            if (!isnan(alp_r) && !isnan(repab[tid]) && alp_r <= 700.0) {
-                double exp_term  = exp(-alp_r);
-                double base_E    = repab[tid] * exp_term / rij;
+        // G1b (Apr 2026): __ldg() for read-only SoA params
+        double rcut = __ldg(&r_cut[tid]);
+
+        if (rij <= rcut && rij >= 1e-8) {
+            double alp = __ldg(&alpha[tid]);
+            double rep = __ldg(&repab[tid]);
+            double r1_5 = rij * sqrt(rij);
+            double alp_r = alp * r1_5;
+            if (!isnan(alp_r) && !isnan(rep) && alp_r <= 700.0) {
+                double exp_term = exp(-alp_r);
+                double base_E  = rep * exp_term / rij;
                 local_E = base_E;
 
-                double dEdr = -base_E / rij - 1.5 * alpha[tid] * sqrt(rij) * base_E;
+                double dEdr = -base_E / rij - 1.5 * alp * sqrt(rij) * base_E;
                 double fac  = dEdr / rij;
                 add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
@@ -267,16 +309,16 @@ __global__ GFNFF_KERNEL_BOUNDS void k_repulsion_mixed(
 
     if (tid < n) {
         int i = idx_i[tid], j = idx_j[tid];
-        float dx = (float)(cx[i] - cx[j]);
-        float dy = (float)(cy[i] - cy[j]);
-        float dz = (float)(cz[i] - cz[j]);
+        double ddx = cx[i] - cx[j], ddy = cy[i] - cy[j], ddz = cz[i] - cz[j];
+        applyMIC(ddx, ddy, ddz);
+        float dx = (float)ddx, dy = (float)ddy, dz = (float)ddz;
         float r2  = dx*dx + dy*dy + dz*dz;
         float rij = sqrtf(r2);
 
-        if (rij <= (float)r_cut[tid] && rij >= 1e-8f) {
+        if (rij <= (float)__ldg(&r_cut[tid]) && rij >= 1e-8f) {
             float r1_5  = rij * sqrtf(rij);
-            float alp_f = (float)alpha[tid];
-            float rep_f = (float)repab[tid];
+            float alp_f = (float)__ldg(&alpha[tid]);
+            float rep_f = (float)__ldg(&repab[tid]);
             float alp_r = alp_f * r1_5;
             if (!isnan(alp_r) && !isnan(rep_f) && alp_r <= 700.0f) {
                 float exp_term = expf(-alp_r);
@@ -322,21 +364,26 @@ __global__ void k_coulomb(
         double dx  = cx[i] - cx[j];
         double dy  = cy[i] - cy[j];
         double dz  = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
         double r2  = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
-        if (rij <= r_cut[tid] && rij >= 1e-10) {
+        // G1b (Apr 2026): __ldg() for read-only SoA params
+        double rcut = __ldg(&r_cut[tid]);
+
+        if (rij <= rcut && rij >= 1e-10) {
             double qi = charges[i];
             double qj = charges[j];
             if (!isnan(qi) && !isnan(qj)) {
-                double gamma_r = gamma_ij[tid] * rij;
+                double gam = __ldg(&gamma_ij[tid]);
+                double gamma_r = gam * rij;
                 double erf_v   = erf(gamma_r);
                 local_E = qi * qj * erf_v / rij;
 
                 // Gradient
                 static const double inv_sqrt_pi = 0.5641895835477563;
                 double exp_v  = exp(-gamma_r * gamma_r);
-                double derf   = gamma_ij[tid] * exp_v * (2.0 * inv_sqrt_pi);
+                double derf   = gam * exp_v * (2.0 * inv_sqrt_pi);
                 double dEdr   = qi * qj * (derf / rij - erf_v / (rij * rij));
                 double fac    = dEdr / rij;
                 add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
@@ -390,6 +437,7 @@ __global__ void k_bonds(
         double dx  = cx[i] - cx[j];
         double dy  = cy[i] - cy[j];
         double dz  = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
         double r2  = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
@@ -563,9 +611,11 @@ __global__ void k_angles(
             double dij_x = cx[i] - cx[j];
             double dij_y = cy[i] - cy[j];
             double dij_z = cz[i] - cz[j];
+            applyMIC(dij_x, dij_y, dij_z);
             double dkj_x = cx[k] - cx[j];
             double dkj_y = cy[k] - cy[j];
             double dkj_z = cz[k] - cz[j];
+            applyMIC(dkj_x, dkj_y, dkj_z);
 
             double r_ij_sq = dij_x*dij_x + dij_y*dij_y + dij_z*dij_z;
             double r_jk_sq = dkj_x*dkj_x + dkj_y*dkj_y + dkj_z*dkj_z;
@@ -1561,9 +1611,9 @@ __global__ void k_xbonds(
         double xx = cx[X], xy = cy[X], xz = cz[X];
         double bx = cx[B], by = cy[B], bz = cz[B];
 
-        double rAX_x = xx-ax, rAX_y = xy-ay, rAX_z = xz-az;
-        double rXB_x = bx-xx, rXB_y = by-xy, rXB_z = bz-xz;
-        double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az;
+        double rAX_x = xx-ax, rAX_y = xy-ay, rAX_z = xz-az; applyMIC(rAX_x, rAX_y, rAX_z);
+        double rXB_x = bx-xx, rXB_y = by-xy, rXB_z = bz-xz; applyMIC(rXB_x, rXB_y, rXB_z);
+        double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
 
         double r2AX = rAX_x*rAX_x + rAX_y*rAX_y + rAX_z*rAX_z;
         double r2XB = rXB_x*rXB_x + rXB_y*rXB_y + rXB_z*rXB_z;
@@ -1845,9 +1895,9 @@ __global__ void k_hbonds(
     double hx = cx[H], hy = cy[H], hz = cz[H];
     double bx = cx[B], by = cy[B], bz = cz[B];
 
-    double rAH_x = hx-ax, rAH_y = hy-ay, rAH_z = hz-az;
-    double rHB_x = bx-hx, rHB_y = by-hy, rHB_z = bz-hz;
-    double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az;
+    double rAH_x = hx-ax, rAH_y = hy-ay, rAH_z = hz-az; applyMIC(rAH_x, rAH_y, rAH_z);
+    double rHB_x = bx-hx, rHB_y = by-hy, rHB_z = bz-hz; applyMIC(rHB_x, rHB_y, rHB_z);
+    double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
 
     double r2AH = rAH_x*rAH_x + rAH_y*rAH_y + rAH_z*rAH_z;
     double r2HB = rHB_x*rHB_x + rHB_y*rHB_y + rHB_z*rHB_z;
@@ -2354,19 +2404,24 @@ __global__ void k_coulomb_self(
 
     double q = eeq_charges[i];
     if (isnan(q)) return;
-    if (alp[i] <= 0.0) return;
+    // G1b (Apr 2026): __ldg() for read-only per-atom params
+    double alp_i = __ldg(&alp[i]);
+    if (alp_i <= 0.0) return;
 
     // chi_eff = chi_base + cnf * sqrt(max(cn, 0))
+    // P3a fallback: chi_base directly when cnf=0
+    double chi_base_i = __ldg(&chi_base[i]);
+    double cnf_i = __ldg(&cnf[i]);
     double chi;
-    if (cnf[i] != 0.0) {
-        chi = chi_base[i] + cnf[i] * sqrt(fmax(cn[i], 0.0));
+    if (cnf_i != 0.0) {
+        chi = chi_base_i + cnf_i * sqrt(fmax(__ldg(&cn[i]), 0.0));
     } else {
-        chi = chi_base[i];
+        chi = chi_base_i;
     }
 
     static const double sqrt_2_over_pi = 0.797884560802865;
     double E_en   = -q * chi;
-    double E_self = 0.5 * q * q * (gam[i] + sqrt_2_over_pi / sqrt(alp[i]));
+    double E_self = 0.5 * q * q * (__ldg(&gam[i]) + sqrt_2_over_pi / sqrt(alp_i));
 
     atomicAdd(energy, E_en + E_self);
 }
@@ -2386,8 +2441,8 @@ __global__ void k_subtract_qtmp(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
 
-    double cn_i = fmax(cn[i], 0.0);
-    double qtmp = eeq_charges[i] * cnf[i] / (2.0 * sqrt(cn_i) + 1e-16);
+    double cn_i = fmax(__ldg(&cn[i]), 0.0);
+    double qtmp = eeq_charges[i] * __ldg(&cnf[i]) / (2.0 * sqrt(cn_i) + 1e-16);
     dEdcn[i] -= qtmp;
 }
 
@@ -2419,19 +2474,23 @@ __global__ GFNFF_KERNEL_BOUNDS void k_coulomb_postprocess(
 
     if (i < N) {
         double q = eeq_charges[i];
-        bool valid = !isnan(q) && alp[i] > 0.0;
+        double alp_i = __ldg(&alp[i]);
+        bool valid = !isnan(q) && alp_i > 0.0;
 
         if (valid) {
             // Coulomb TERM 2+3 self-energy
+            // G1b (Apr 2026): __ldg() for read-only per-atom params
+            double chi_base_i = __ldg(&chi_base[i]);
+            double cnf_i = __ldg(&cnf[i]);
             double chi;
-            if (cnf[i] != 0.0) {
-                chi = chi_base[i] + cnf[i] * sqrt(fmax(cn[i], 0.0));
+            if (cnf_i != 0.0) {
+                chi = chi_base_i + cnf_i * sqrt(fmax(__ldg(&cn[i]), 0.0));
             } else {
-                chi = chi_base[i];
+                chi = chi_base_i;  // P3a fallback
             }
             static const double sqrt_2_over_pi = 0.797884560802865;
             double E_en   = -q * chi;
-            double E_self = 0.5 * q * q * (gam[i] + sqrt_2_over_pi / sqrt(alp[i]));
+            double E_self = 0.5 * q * q * (__ldg(&gam[i]) + sqrt_2_over_pi / sqrt(alp_i));
             local_E = E_en + E_self;
         }
 
@@ -2475,6 +2534,7 @@ __global__ void k_cn_chainrule(
     double dx = cx[i] - cx[j];
     double dy = cy[i] - cy[j];
     double dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);
     double r2 = dx*dx + dy*dy + dz*dz;
     double rij = sqrt(r2);
     if (rij < 1e-10) return;
@@ -2534,6 +2594,7 @@ __global__ void k_hb_alpha_chainrule(
     double dx = cx[H] - cx[B];
     double dy = cy[H] - cy[B];
     double dz = cz[H] - cz[B];
+    applyMIC(dx, dy, dz);
     double r2 = dx*dx + dy*dy + dz*dz;
     double rij = sqrt(r2);
     if (rij < 1e-10) return;
@@ -2607,6 +2668,7 @@ __global__ void k_cn_compute(
         double dx = xi - cx[j];
         double dy = yi - cy[j];
         double dz = zi_coord - cz[j];
+        applyMIC(dx, dy, dz);
         double r2 = dx*dx + dy*dy + dz*dz;
 
         // Distance cutoff (skip far atoms)

@@ -25,6 +25,7 @@
 #include "src/core/functional_groups.h"  // Claude Generated (January 10, 2026): Amide detection
 #include <chrono>
 #include <cstring>
+#include <algorithm>
 #include <map>
 #include <set>
 #include <functional>
@@ -166,17 +167,14 @@ json GFNFFParameterSet::toJSON() const
     }
     j["gfnff_nonbonded_repulsions"] = nonbonded_rep_json;
 
-    // Coulombs
+    // Coulombs (P3a: redundant per-atom fields removed from struct, written from parameter set data)
     json coul_json = json::array();
     for (const auto& c : coulombs) {
         json cj;
-        cj["i"] = c.i; cj["j"] = c.j; cj["q_i"] = c.q_i; cj["q_j"] = c.q_j;
+        cj["i"] = c.i; cj["j"] = c.j;
         cj["gamma_ij"] = c.gamma_ij;
-        cj["chi_i"] = c.chi_i; cj["chi_j"] = c.chi_j;
         cj["chi_base_i"] = c.chi_base_i; cj["chi_base_j"] = c.chi_base_j;
         cj["cnf_i"] = c.cnf_i; cj["cnf_j"] = c.cnf_j;
-        cj["gam_i"] = c.gam_i; cj["gam_j"] = c.gam_j;
-        cj["alp_i"] = c.alp_i; cj["alp_j"] = c.alp_j;
         cj["r_cut"] = c.r_cut;
         coul_json.push_back(cj);
     }
@@ -244,6 +242,13 @@ json GFNFFParameterSet::toJSON() const
     if (eeq_charges.size() > 0) {
         j["eeq_charges"] = std::vector<double>(eeq_charges.data(),
             eeq_charges.data() + eeq_charges.size());
+    }
+    // P3a (Apr 2026): Per-atom Coulomb self-energy parameters
+    if (eeq_gam.size() > 0) {
+        j["eeq_gam"] = std::vector<double>(eeq_gam.data(), eeq_gam.data() + eeq_gam.size());
+    }
+    if (eeq_alp.size() > 0) {
+        j["eeq_alp"] = std::vector<double>(eeq_alp.data(), eeq_alp.data() + eeq_alp.size());
     }
 
     j["vdws"] = json::array(); // Legacy
@@ -364,6 +369,10 @@ bool GFNFF::InitialiseMolecule(const Mol& molecule)
     if (!m_forced_bonds.empty() && CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("GFNFF: {} forced bonds from molecule", m_forced_bonds.size()));
     }
+    // Claude Generated (April 2026): Extract PBC from Mol
+    m_has_pbc = molecule.m_has_pbc;
+    if (m_has_pbc)
+        m_unit_cell = molecule.m_unit_cell;
 
     // Call existing initialization logic
     return InitialiseMolecule();
@@ -422,6 +431,11 @@ bool GFNFF::InitialiseMolecule()
     if (!initializeForceField()) {
         CurcumaLogger::error("GFN-FF initialization failed: Force field initialization failed");
         return false;
+    }
+
+    // Claude Generated (April 2026): Propagate PBC unit cell to ForceField (threads already created)
+    if (m_has_pbc && m_forcefield) {
+        m_forcefield->setUnitCell(m_unit_cell, true);
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -643,54 +657,20 @@ bool GFNFF::needsFullTopologyUpdate(const Eigen::MatrixXd& geometry_bohr) const 
 // ---------------------------------------------------------------------------
 
 void GFNFF::updateDynamicState(TopologyInfo& topo) const {
-    // Only recalculate geometry-dependent data (CN, distance matrices)
-    // This is O(N²) but much cheaper than full topology recalculation
+    // Only recalculate geometry-dependent data (CN)
+    // This is O(N*k) with neighbor list (P2b) or O(N²) with threshold
 
     const int natoms = m_atomcount;
 
-    // 1. Calculate distance matrix (O(N²))
-    topo.distance_matrix.resize(natoms, natoms);
-    topo.squared_dist_matrix.resize(natoms, natoms);
+    // P2a (Apr 2026): Distance matrix removed from per-step path.
+    // Only the initial topology build creates the distance matrix.
+    topo.distance_matrix.resize(0, 0);  // No per-step distance matrix
 
-    #pragma omp parallel for schedule(static)
-    for (int i = 0; i < natoms; ++i) {
-        for (int j = i; j < natoms; ++j) {
-            double dx = m_geometry_bohr(i, 0) - m_geometry_bohr(j, 0);
-            double dy = m_geometry_bohr(i, 1) - m_geometry_bohr(j, 1);
-            double dz = m_geometry_bohr(i, 2) - m_geometry_bohr(j, 2);
-            double dist_sq = dx*dx + dy*dy + dz*dz;
-            double dist = std::sqrt(dist_sq);
-            topo.distance_matrix(i, j) = dist;
-            topo.distance_matrix(j, i) = dist;
-            topo.squared_dist_matrix(i, j) = dist_sq;
-            topo.squared_dist_matrix(j, i) = dist_sq;
-        }
-    }
-
-    // 2. Calculate coordination numbers from distances (O(N²))
-    topo.coordination_numbers.resize(natoms);
-    topo.coordination_numbers.setZero();
-
-    // Use CNCalculator for geometry-dependent CN
-    // Reference: gfnff_ini.f90 uses D3-style CN with k1=16, k2=4/3
-    constexpr double k1 = 16.0;
-    constexpr double k2 = 4.0/3.0;
-
-    #pragma omp parallel for schedule(static)
-    for (int i = 0; i < natoms; ++i) {
-        double cn_i = 0.0;
-        double rcov_i = getCovalentRadius(m_atoms[i]);
-        for (int j = 0; j < natoms; ++j) {
-            if (i == j) continue;
-            double rcov_j = getCovalentRadius(m_atoms[j]);
-            double r_cov = rcov_i + rcov_j;
-            double r_ij = topo.distance_matrix(i, j);
-            // CN counting formula: 1/(1+exp(-k1*(k2*r_cov/r_ij - 1)))
-            double x = k2 * r_cov / r_ij - 1.0;
-            cn_i += 1.0 / (1.0 + std::exp(-k1 * x));
-        }
-        topo.coordination_numbers(i) = cn_i;
-    }
+    // P2b (Apr 2026): Configurable CN cutoff — neighbor list, accuracy-based, or full O(N²)
+    double cn_cutoff_bohr = m_parameters.value("cn_cutoff_bohr", 6.0);
+    double cn_accuracy = m_parameters.value("cn_accuracy", 1.0);
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_cutoff_bohr, cn_accuracy, -7.5, 4.4);
+    topo.coordination_numbers = Eigen::Map<const Eigen::VectorXd>(cn_vec.data(), cn_vec.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -2560,6 +2540,25 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     params.eeq_charges = topo_info.eeq_charges;
     params.topology_charges = topo_info.topology_charges;
 
+    // P3a (Apr 2026): Per-atom Coulomb self-energy parameters (extracted from topology)
+    // gam = eeq_gam + dgam (charge-corrected chemical hardness)
+    // alp = alpeeq (charge-corrected alpha)
+    params.eeq_gam = Eigen::VectorXd::Zero(m_atomcount);
+    params.eeq_alp = Eigen::VectorXd::Zero(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        double gam_i = topo_info.eeq_gam[i];
+        if (topo_info.dgam.size() == m_atomcount) {
+            gam_i += topo_info.dgam(i);
+        }
+        params.eeq_gam(i) = gam_i;
+
+        double alp_i = topo_info.eeq_alp[i];
+        if (topo_info.alpeeq.size() == m_atomcount) {
+            alp_i = topo_info.alpeeq(i);
+        }
+        params.eeq_alp(i) = alp_i;
+    }
+
     // Phase 1: Bonds (native — no JSON)
     params.bonds = generateBondsNative(topo_info);
 
@@ -3564,17 +3563,9 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     double fcn = 1.0;  // Default: no CN correction
 
     // Phase 2 (January 14, 2026): Use exact nb20 (neighbors within 20 Bohr cutoff)
-    // Port from gfnff_ini2.f90 - replaces CN approximation with exact count
-    int nb20_1, nb20_2;
-    if (topo.distance_matrix.size() > 0) {
-        // Use exact 20 Bohr cutoff count
-        nb20_1 = countNeighborsWithin20Bohr(atom1, topo.distance_matrix);
-        nb20_2 = countNeighborsWithin20Bohr(atom2, topo.distance_matrix);
-    } else {
-        // Fallback to CN approximation if no distance matrix available
-        nb20_1 = static_cast<int>(std::round(cn1));
-        nb20_2 = static_cast<int>(std::round(cn2));
-    }
+    // P2a (April 2026): Use on-the-fly distance computation instead of N×N matrix
+    int nb20_1 = countNeighborsWithin20Bohr(atom1, m_geometry_bohr);
+    int nb20_2 = countNeighborsWithin20Bohr(atom2, m_geometry_bohr);
 
     // Only apply to heavy atoms (Z > 10, i.e., beyond neon)
     // Fortran gfnff_ini.f90:1181-1184
@@ -5798,10 +5789,11 @@ std::vector<std::vector<int>> GFNFF::buildNeighborLists() const
     return neighbors;
 }
 
-int GFNFF::countNeighborsWithin20Bohr(int atom_index, const Eigen::MatrixXd& distance_matrix) const
+int GFNFF::countNeighborsWithin20Bohr(int atom_index, const Eigen::MatrixXd& geometry_bohr) const
 {
     /**
      * Claude Generated (January 14, 2026) - Phase 2: Exact nb20 implementation
+     * P2a (April 2026): Replaced distance_matrix lookup with on-the-fly computation.
      *
      * Port from gfnff_ini2.f90 neighbor list generation.
      * Counts atoms within 20 Bohr cutoff for bond fcn correction.
@@ -5809,14 +5801,17 @@ int GFNFF::countNeighborsWithin20Bohr(int atom_index, const Eigen::MatrixXd& dis
      * Reference: external/gfnff/src/gfnff_ini2.f90 - getnb() subroutine
      */
 
-    static constexpr double NB20_CUTOFF = 20.0;  // Bohr
+    static constexpr double NB20_CUTOFF_SQ = 400.0;  // 20^2 Bohr^2
 
     int count = 0;
-    int natoms = static_cast<int>(distance_matrix.rows());
+    int natoms = static_cast<int>(geometry_bohr.rows());
 
     for (int j = 0; j < natoms; j++) {
         if (j != atom_index) {
-            if (distance_matrix(atom_index, j) < NB20_CUTOFF) {
+            double dx = geometry_bohr(atom_index, 0) - geometry_bohr(j, 0);
+            double dy = geometry_bohr(atom_index, 1) - geometry_bohr(j, 1);
+            double dz = geometry_bohr(atom_index, 2) - geometry_bohr(j, 2);
+            if (dx*dx + dy*dy + dz*dz < NB20_CUTOFF_SQ) {
                 count++;
             }
         }
@@ -5830,7 +5825,7 @@ std::vector<double> GFNFF::calculatePiBondOrders(
     const std::vector<int>& hybridization,
     const std::vector<int>& pi_fragments,
     const std::vector<double>& charges,
-    const Eigen::MatrixXd& distances) const
+    const Eigen::MatrixXd& geometry_bohr) const
 {
     /**
      * Claude Generated (January 14, 2026) - Updated for Phase 1: Full Hückel implementation
@@ -5858,14 +5853,14 @@ std::vector<double> GFNFF::calculatePiBondOrders(
         CurcumaLogger::param("m_use_full_huckel", m_use_full_huckel ? "true" : "false");
         CurcumaLogger::param("m_huckel_solver", m_huckel_solver ? "exists" : "null");
         CurcumaLogger::param("charges.empty()", charges.empty() ? "true" : "false");
-        CurcumaLogger::param("distances.size()", std::to_string(distances.size()));
+        CurcumaLogger::param("geometry_bohr.size()", std::to_string(geometry_bohr.size()));
         CurcumaLogger::param("max_index", std::to_string(max_index));
     }
 
     // ========================================================================
     // Full Hückel calculation (default mode)
     // ========================================================================
-    if (m_use_full_huckel && m_huckel_solver && !charges.empty() && distances.size() > 0) {
+    if (m_use_full_huckel && m_huckel_solver && !charges.empty() && geometry_bohr.size() > 0) {
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("Using full iterative Hückel calculation for π-bond orders");
         }
@@ -5880,7 +5875,7 @@ std::vector<double> GFNFF::calculatePiBondOrders(
             pi_fragments,
             charges,
             bond_list,
-            distances,
+            geometry_bohr,
             itag
         );
 
@@ -7012,19 +7007,17 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     }
     auto phase_timer = std::chrono::high_resolution_clock::now();
     topo_info.distance_matrix = Eigen::MatrixXd::Zero(m_atomcount, m_atomcount);
-    topo_info.squared_dist_matrix = Eigen::MatrixXd::Zero(m_atomcount, m_atomcount);
+    // P2a (Apr 2026): squared_dist_matrix removed — was dead weight (written but never read)
 
     // Claude Generated (March 2026): OpenMP parallelization for O(N²) distance matrix
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = i + 1; j < m_atomcount; ++j) {
             Eigen::Vector3d rij = m_geometry_bohr.row(i) - m_geometry_bohr.row(j);
-            double dist_sq = rij.squaredNorm();
-            double dist = std::sqrt(dist_sq);
+            double dist = rij.norm();
 
-            // Symmetric matrices — each (i,j) pair written by exactly one thread
+            // Symmetric matrix — each (i,j) pair written by exactly one thread
             topo_info.distance_matrix(i, j) = topo_info.distance_matrix(j, i) = dist;
-            topo_info.squared_dist_matrix(i, j) = topo_info.squared_dist_matrix(j, i) = dist_sq;
         }
     }
 
@@ -7414,7 +7407,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         topo_info.hybridization,
         topo_info.pi_fragments,
         charges_vec,
-        topo_info.distance_matrix
+        m_geometry_bohr  // P2a: Pass geometry instead of distance_matrix
     );
 
     // Initialize metal and aromatic flags
@@ -7634,8 +7627,6 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
             GFNFFCoulomb c;
             c.i = i;
             c.j = j;
-            c.q_i = charges[i];
-            c.q_j = charges[j];
 
             // gamma_ij from charge-corrected alpeeq
             double alp_i_for_gamma = topo_info.eeq_alp[i];
@@ -7658,35 +7649,18 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
 
             double cnf_i = topo_info.eeq_cnf[i];
             double cnf_j = topo_info.eeq_cnf[j];
-            double cn_i = topo_info.coordination_numbers(i);
-            double cn_j = topo_info.coordination_numbers(j);
 
-            c.chi_i = chi_base_i + cnf_i * std::sqrt(cn_i);  // Legacy: static chi_eff
-            c.chi_j = chi_base_j + cnf_j * std::sqrt(cn_j);
             c.chi_base_i = chi_base_i;
             c.chi_base_j = chi_base_j;
             c.cnf_i = cnf_i;
             c.cnf_j = cnf_j;
-
-            // Gam: charge-corrected gameeq
-            double gam_i = topo_info.eeq_gam[i];
-            double gam_j = topo_info.eeq_gam[j];
-            if (topo_info.dgam.size() == m_atomcount) {
-                gam_i += topo_info.dgam(i);
-                gam_j += topo_info.dgam(j);
-            }
-            c.gam_i = gam_i;
-            c.gam_j = gam_j;
-            c.alp_i = alp_i_for_gamma;
-            c.alp_j = alp_j_for_gamma;
             c.r_cut = 100.0;
 
             coulombs.push_back(c);
 
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::param(fmt::format("coulomb_{}-{}", i, j),
-                    fmt::format("q_i={:.6f}, q_j={:.6f}, gamma={:.6f}",
-                        charges[i], charges[j], c.gamma_ij));
+                    fmt::format("gamma={:.6f}", c.gamma_ij));
             }
         }
     }
@@ -7706,18 +7680,35 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
 json GFNFF::generateGFNFFCoulombPairs() const
 {
     auto coulombs = generateCoulombPairsNative();
+    const TopologyInfo& topo_info = getCachedTopology();
+    const Vector& charges = topo_info.eeq_charges;
+
     json result = json::array();
     for (const auto& c : coulombs) {
         json j;
         j["i"] = c.i; j["j"] = c.j;
-        j["q_i"] = c.q_i; j["q_j"] = c.q_j;
         j["gamma_ij"] = c.gamma_ij;
-        j["chi_i"] = c.chi_i; j["chi_j"] = c.chi_j;
         j["chi_base_i"] = c.chi_base_i; j["chi_base_j"] = c.chi_base_j;
         j["cnf_i"] = c.cnf_i; j["cnf_j"] = c.cnf_j;
-        j["gam_i"] = c.gam_i; j["gam_j"] = c.gam_j;
-        j["alp_i"] = c.alp_i; j["alp_j"] = c.alp_j;
         j["r_cut"] = c.r_cut;
+        // Per-atom fields (written for backward compatibility with cached parameter files)
+        if (c.i < static_cast<int>(charges.size())) j["q_i"] = charges[c.i];
+        if (c.j < static_cast<int>(charges.size())) j["q_j"] = charges[c.j];
+        double chi_i = c.chi_base_i + c.cnf_i * std::sqrt(std::max(topo_info.coordination_numbers(c.i), 0.0));
+        double chi_j = c.chi_base_j + c.cnf_j * std::sqrt(std::max(topo_info.coordination_numbers(c.j), 0.0));
+        j["chi_i"] = chi_i; j["chi_j"] = chi_j;
+        double gam_i = topo_info.eeq_gam[c.i], gam_j = topo_info.eeq_gam[c.j];
+        if (topo_info.dgam.size() == m_atomcount) {
+            gam_i += topo_info.dgam(c.i);
+            gam_j += topo_info.dgam(c.j);
+        }
+        j["gam_i"] = gam_i; j["gam_j"] = gam_j;
+        double alp_i = topo_info.eeq_alp[c.i], alp_j = topo_info.eeq_alp[c.j];
+        if (topo_info.alpeeq.size() == m_atomcount) {
+            alp_i = topo_info.alpeeq(c.i);
+            alp_j = topo_info.alpeeq(c.j);
+        }
+        j["alp_i"] = alp_i; j["alp_j"] = alp_j;
         result.push_back(j);
     }
     return result;
@@ -7739,7 +7730,14 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
     std::vector<GFNFFRepulsion> nonbonded_reps;
 
     const std::vector<std::pair<int,int>>& cached_bonds = getCachedBondList();
-    std::set<std::pair<int, int>> bonded_set(cached_bonds.begin(), cached_bonds.end());
+    // P3b (Apr 2026): Upper-triangle bitset for O(1) bonded-pair lookup
+    // Replaces O(log B) std::set lookup with O(1) bitset access
+    std::vector<bool> bonded_bitset(static_cast<size_t>(m_atomcount) * m_atomcount, false);
+    for (const auto& bond : cached_bonds) {
+        int lo = std::min(bond.first, bond.second);
+        int hi = std::max(bond.first, bond.second);
+        bonded_bitset[static_cast<size_t>(lo) * m_atomcount + hi] = true;
+    }
 
     // ===== BONDED REPULSION =====
     for (const auto& bond : cached_bonds) {
@@ -7770,7 +7768,7 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
 
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = i + 1; j < m_atomcount; ++j) {
-            if (bonded_set.count({i, j}) > 0) continue;
+            if (bonded_bitset[static_cast<size_t>(i) * m_atomcount + j]) continue;
 
             int zi = m_atoms[i] - 1;
             int zj = m_atoms[j] - 1;
@@ -8599,7 +8597,7 @@ bool GFNFF::regenerateParametersWithCurrentCharges() {
         topo.neighbor_lists = m_cached_topology->neighbor_lists;
         topo.adjacency_list = m_cached_topology->adjacency_list;
         topo.distance_matrix = m_cached_topology->distance_matrix;
-        topo.squared_dist_matrix = m_cached_topology->squared_dist_matrix;
+        // P2a (Apr 2026): squared_dist_matrix removed — was dead weight
         topo.topo_distances = m_cached_topology->topo_distances;  // Phase 9B: Floyd-Warshall bond counts
     } else {
         CurcumaLogger::warn("GFNFF::regenerateParametersWithCurrentCharges - No cached topology available");
@@ -9831,4 +9829,16 @@ double GFNFF::compareGradients(double dx)
 
     // Return the fixed-charge deviation (the actionable metric for gradient bugs)
     return max_diff_fixed;
+}
+
+// Claude Generated (Apr 2026): P1a — Delegate CN-change threshold check to D4ParameterGenerator
+bool GFNFF::canSkipD4GaussianWeightsUpdate(const std::vector<double>& cn) const
+{
+    if (!m_d4_generator) return false;
+    return m_d4_generator->canSkipGaussianWeightsUpdate(cn);
+}
+
+void GFNFF::recordD4CNValues(const std::vector<double>& cn)
+{
+    if (m_d4_generator) m_d4_generator->recordCNValues(cn);
 }

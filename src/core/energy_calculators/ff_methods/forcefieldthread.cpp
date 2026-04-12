@@ -102,19 +102,6 @@ int ForceFieldThread::execute()
             CurcumaLogger::info(fmt::format("GFN-FF energy calculation started in thread {}", m_thread));
         }
 
-        // Phase 1.2: Build bonded pairs cache ONCE for fast lookup (Claude Generated - Dec 2025)
-        if (!m_bonded_pairs_cached && m_gfnff_bonds.size() > 0) {
-            m_bonded_pairs.clear();
-            for (const auto& bond : m_gfnff_bonds) {
-                m_bonded_pairs.insert({bond.i, bond.j});
-                m_bonded_pairs.insert({bond.j, bond.i});  // symmetric
-            }
-            m_bonded_pairs_cached = true;
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("Cached {} bonded pairs", m_bonded_pairs.size()));
-            }
-        }
-
         // Claude Generated (February 2026): Wrap all energy term calculations with timing
         // When m_store_gradient_components is active, capture gradient delta per term
 
@@ -1896,6 +1883,7 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
         Eigen::Vector3d ri = geom().row(disp.i);
         Eigen::Vector3d rj = geom().row(disp.j);
         Eigen::Vector3d rij_vec = ri - rj;
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
         double rij = rij_vec.norm() * m_au;  // Convert to atomic units if needed
 
         // HIGH PRIORITY FIX (Feb 2026): Reduce epsilon threshold for gradient robustness
@@ -2008,6 +1996,7 @@ void ForceFieldThread::CalculateGFNFFBondedRepulsionContribution()
         Eigen::Vector3d ri = geom().row(rep.i);
         Eigen::Vector3d rj = geom().row(rep.j);
         Eigen::Vector3d rij_vec = ri - rj;
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
         double rij = rij_vec.norm() * m_au;
 
         // HIGH PRIORITY FIX (Feb 2026): Strengthen distance check to prevent gradient Inf/NaN
@@ -2078,6 +2067,7 @@ void ForceFieldThread::CalculateGFNFFNonbondedRepulsionContribution()
         Eigen::Vector3d ri = geom().row(rep.i);
         Eigen::Vector3d rj = geom().row(rep.j);
         Eigen::Vector3d rij_vec = ri - rj;
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
         double rij = rij_vec.norm() * m_au;
 
         // HIGH PRIORITY FIX (Feb 2026): Strengthen distance check to prevent gradient Inf/NaN
@@ -2143,13 +2133,14 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
     // Reference: gfnff_par.h chi_gam_alp_cnf_angewChem2020 arrays are in Hartree
 
     // Verify EEQ charges before Coulomb energy calculation (Nov 2025)
+    // P3a (Apr 2026): Charges are now accessed via eeq_q(), not from struct
     if (CurcumaLogger::get_verbosity() >= 1 && m_gfnff_coulombs.size() > 0) {
         CurcumaLogger::info("=== Coulomb Energy Calculation: EEQ Charge Verification ===");
         for (int idx = 0; idx < std::min((int)m_gfnff_coulombs.size(), 10); ++idx) {
             const auto& coul = m_gfnff_coulombs[idx];
-            CurcumaLogger::param(fmt::format("Coulomb[{}] q_i(atom{}), q_j(atom{})",
+            CurcumaLogger::param(fmt::format("Coulomb[{}] i={}, j={}",
                                              idx, coul.i, coul.j),
-                                 fmt::format("{:.8f}, {:.8f}", coul.q_i, coul.q_j));
+                                 fmt::format("q_i={:.8f}, q_j={:.8f}", eeq_q(coul.i), eeq_q(coul.j)));
         }
         if (m_gfnff_coulombs.size() > 10) {
             CurcumaLogger::param("...", fmt::format("{} more coulomb pairs", m_gfnff_coulombs.size() - 10));
@@ -2157,7 +2148,7 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
 
         double max_charge = 0.0;
         for (const auto& coul : m_gfnff_coulombs) {
-            max_charge = std::max({max_charge, std::abs(coul.q_i), std::abs(coul.q_j)});
+            max_charge = std::max({max_charge, std::abs(eeq_q(coul.i)), std::abs(eeq_q(coul.j))});
         }
         CurcumaLogger::param("max_absolute_charge", fmt::format("{:.8e}", max_charge));
 
@@ -2186,22 +2177,15 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
         Eigen::Vector3d ri = geom().row(coul.i);
         Eigen::Vector3d rj = geom().row(coul.j);
         Eigen::Vector3d rij_vec = ri - rj;
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
         double rij = rij_vec.norm() * m_au;
 
         if (rij > coul.r_cut || rij < 1e-10) continue;
 
         // Use dynamic EEQ charges via pointer or local copy, fall back to static if unavailable or NaN
-        double qi = coul.q_i;
-        double qj = coul.q_j;
-        const bool have_eeq = m_eeq_charges_ptr ? (m_eeq_charges_ptr->size() > 0) : (m_eeq_charges.size() > 0);
-        if (have_eeq) {
-            qi = eeq_q(coul.i);
-            qj = eeq_q(coul.j);
-            if (std::isnan(qi) || std::isnan(qj)) {
-                qi = coul.q_i;
-                qj = coul.q_j;
-            }
-        }
+        // P3a (Apr 2026): Use dynamic EEQ charges directly (no static fallback in struct)
+        double qi = eeq_q(coul.i);
+        double qj = eeq_q(coul.j);
 
         // Pairwise: E_pair = q_i * q_j * erf(γ_ij*r) / r
         double gamma_r = coul.gamma_ij * rij;
@@ -2365,10 +2349,15 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
         Eigen::Vector3d pos_H = geom().row(hb.j).transpose();
         Eigen::Vector3d pos_B = geom().row(hb.k).transpose();
 
-        // Calculate distance vectors
+        // Calculate distance vectors (apply MIC for periodic systems)
         Eigen::Vector3d r_AH_vec = pos_H - pos_A;
         Eigen::Vector3d r_HB_vec = pos_B - pos_H;
         Eigen::Vector3d r_AB_vec = pos_B - pos_A;
+        if (m_has_pbc) {
+            r_AH_vec = PBCUtils::applyMinimumImage(r_AH_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+            r_HB_vec = PBCUtils::applyMinimumImage(r_HB_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+            r_AB_vec = PBCUtils::applyMinimumImage(r_AB_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+        }
 
         // Calculate distances (convert to Bohr via m_au)
         double r_AH = r_AH_vec.norm() * m_au;
@@ -2986,10 +2975,15 @@ void ForceFieldThread::CalculateGFNFFHalogenBondContribution()
         Eigen::Vector3d pos_X = geom().row(xb.j).transpose();
         Eigen::Vector3d pos_B = geom().row(xb.k).transpose();
 
-        // Calculate distance vectors
+        // Calculate distance vectors (apply MIC for periodic systems)
         Eigen::Vector3d r_AX_vec = pos_X - pos_A;
         Eigen::Vector3d r_XB_vec = pos_B - pos_X;
         Eigen::Vector3d r_AB_vec = pos_B - pos_A;
+        if (m_has_pbc) {
+            r_AX_vec = PBCUtils::applyMinimumImage(r_AX_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+            r_XB_vec = PBCUtils::applyMinimumImage(r_XB_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+            r_AB_vec = PBCUtils::applyMinimumImage(r_AB_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+        }
 
         // Calculate distances (convert to Bohr via m_au)
         double r_AX = r_AX_vec.norm() * m_au;
@@ -3340,7 +3334,7 @@ void ForceFieldThread::CalculateD4DispersionContribution()
 }
 
 // Claude Generated 2025: D3/D4 dispersion addition methods
-void ForceFieldThread::addD3Dispersion(const GFNFFDispersion& d3_dispersion)
+void ForceFieldThread::addD3Dispersion(const D3DispersionPair& d3_dispersion)
 {
     m_d3_dispersions.push_back(d3_dispersion);
 }

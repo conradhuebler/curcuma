@@ -179,6 +179,19 @@ void ForceField::setDispersionDC6DCN(const Matrix& dc6dcn)
     }
 }
 
+/// Claude Generated (April 2026): Set unit cell for PBC minimum image convention.
+/// Converts from Angstrom to Bohr (ForceField internal units) and propagates to all threads.
+void ForceField::setUnitCell(const Eigen::Matrix3d& cell_angstrom, bool has_pbc)
+{
+    constexpr double ANG2BOHR = 1.0 / 0.529177210903;
+    m_has_pbc = has_pbc;
+    m_unit_cell_bohr = cell_angstrom * ANG2BOHR;
+    m_unit_cell_bohr_inv = m_unit_cell_bohr.inverse();
+    for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
+        m_stored_threads[i]->setUnitCell(m_unit_cell_bohr, m_unit_cell_bohr_inv, has_pbc);
+    }
+}
+
 void ForceField::setParameter(const json& parameters)
 {
     std::string method_name = "unknown";
@@ -459,32 +472,33 @@ void ForceField::setGFNFFParameters(const GFNFFParameterSet& params)
     m_gfnff_nonbonded_repulsions = params.nonbonded_repulsions;
     m_gfnff_coulombs = params.coulombs;
 
-    // Extract per-atom Coulomb parameters from pairs (for TERM 2+3 self-energy)
-    // Same logic as setGFNFFCoulombs() — needed for parent-level computation
+    // Extract per-atom Coulomb parameters from pairs and parameter set (for TERM 2+3 self-energy)
+    // P3a (Apr 2026): chi_base/cnf from pairs; gam/alp from per-atom vectors
     m_coulomb_chi_base = Vector::Zero(m_natoms);
     m_coulomb_gam = Vector::Zero(m_natoms);
     m_coulomb_alp = Vector::Zero(m_natoms);
     m_coulomb_cnf = Vector::Zero(m_natoms);
-    m_coulomb_chi_static = Vector::Zero(m_natoms);
     {
+        // Per-atom chi_base and cnf extracted from Coulomb pairs
         std::vector<bool> atom_seen(m_natoms, false);
         for (const auto& coul : m_gfnff_coulombs) {
             if (!atom_seen[coul.i]) {
                 m_coulomb_chi_base(coul.i) = coul.chi_base_i;
-                m_coulomb_gam(coul.i) = coul.gam_i;
-                m_coulomb_alp(coul.i) = coul.alp_i;
                 m_coulomb_cnf(coul.i) = coul.cnf_i;
-                m_coulomb_chi_static(coul.i) = coul.chi_i;
                 atom_seen[coul.i] = true;
             }
             if (!atom_seen[coul.j]) {
                 m_coulomb_chi_base(coul.j) = coul.chi_base_j;
-                m_coulomb_gam(coul.j) = coul.gam_j;
-                m_coulomb_alp(coul.j) = coul.alp_j;
                 m_coulomb_cnf(coul.j) = coul.cnf_j;
-                m_coulomb_chi_static(coul.j) = coul.chi_j;
                 atom_seen[coul.j] = true;
             }
+        }
+        // Per-atom gam and alp from parameter set vectors (P3a: no longer in pair struct)
+        if (params.eeq_gam.size() == m_natoms) {
+            m_coulomb_gam = params.eeq_gam;
+        }
+        if (params.eeq_alp.size() == m_natoms) {
+            m_coulomb_alp = params.eeq_alp;
         }
     }
 
@@ -884,6 +898,8 @@ void ForceField::setGFNFFDispersions(const json& dispersions)
     }
 
     m_gfnff_dispersions.clear();
+    m_d3_pairs.clear();  // P1c: Also populate D3 pairs if legacy fields present
+
     for (int i = 0; i < dispersions.size(); ++i) {
         json disp_json = dispersions[i].get<json>();
         GFNFFDispersion disp;
@@ -902,29 +918,38 @@ void ForceField::setGFNFFDispersions(const json& dispersions)
             disp.r0_squared = disp_json["r0_squared"];
         } else {
             // Fallback for legacy parameter sets: compute from sqrtZr4r2 approximation
-            // This maintains backward compatibility with older cached parameters
+            // P1c (Apr 2026): Read a1/a2/C8 from JSON directly (no longer stored on struct)
             double a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
             double a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
 
-            // If C8 is available, estimate r4r2ij from C8/C6 relationship
-            // r4r2ij ≈ 3*sqrt(C8/(3*C6)) for legacy data
             if (disp_json.contains("C8") && disp.C6 > 1e-10) {
                 double c8 = disp_json["C8"].get<double>();
-                disp.r4r2ij = c8 / disp.C6;  // Approximate: C8 ≈ r4r2ij * C6
+                disp.r4r2ij = c8 / disp.C6;
             } else {
-                disp.r4r2ij = 1.0;  // Fallback default
+                disp.r4r2ij = 1.0;
             }
             disp.r0_squared = std::pow(a1 * std::sqrt(disp.r4r2ij) + a2, 2);
         }
 
-        // Legacy fields (for backward compatibility, not used in GFN-FF energy formula)
-        disp.C8 = disp_json.contains("C8") ? disp_json["C8"].get<double>() : 0.0;
-        disp.s6 = disp_json.contains("s6") ? disp_json["s6"].get<double>() : 1.0;
-        disp.s8 = disp_json.contains("s8") ? disp_json["s8"].get<double>() : 2.0;
-        disp.a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
-        disp.a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
+        // Zeta charge scaling
+        disp.zetac6 = disp_json.contains("zetac6") ? disp_json["zetac6"].get<double>() : 1.0;
 
         m_gfnff_dispersions.push_back(disp);
+
+        // P1c: Also create D3 pair if legacy fields present (UFF-D3 compatibility)
+        if (disp_json.contains("C8") || disp_json.contains("s6")) {
+            D3DispersionPair d3;
+            d3.i = disp.i;
+            d3.j = disp.j;
+            d3.C6 = disp.C6;
+            d3.C8 = disp_json.contains("C8") ? disp_json["C8"].get<double>() : 0.0;
+            d3.s6 = disp_json.contains("s6") ? disp_json["s6"].get<double>() : 1.0;
+            d3.s8 = disp_json.contains("s8") ? disp_json["s8"].get<double>() : 2.0;
+            d3.a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
+            d3.a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
+            d3.r_cut = disp.r_cut;
+            m_d3_pairs.push_back(d3);
+        }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -955,7 +980,7 @@ void ForceField::setD4Dispersions(const json& dispersions)
             disp.r4r2ij = disp_json["r4r2ij"];
             disp.r0_squared = disp_json["r0_squared"];
         } else {
-            // Fallback for legacy parameter sets
+            // P1c (Apr 2026): Read a1/a2/C8 from JSON directly (no longer stored on struct)
             double a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
             double a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
             if (disp_json.contains("C8") && disp.C6 > 1e-10) {
@@ -971,12 +996,8 @@ void ForceField::setD4Dispersions(const json& dispersions)
         // Reference: gfnff_ini.f90:789-806, gfnff_gdisp0.f90:374
         disp.zetac6 = disp_json.contains("zetac6") ? disp_json["zetac6"].get<double>() : 1.0;
 
-        // Legacy fields
-        disp.C8 = disp_json.contains("C8") ? disp_json["C8"].get<double>() : 0.0;
-        disp.s6 = disp_json.contains("s6") ? disp_json["s6"].get<double>() : 1.0;
-        disp.s8 = disp_json.contains("s8") ? disp_json["s8"].get<double>() : 2.0;
-        disp.a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
-        disp.a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
+        // P1c (Apr 2026): Legacy fields (C8, s6, s8, a1, a2) removed from GFNFFDispersion.
+        // JSON may still contain them for backward compatibility, but they are not stored.
 
         m_d4_dispersions.push_back(disp);
     }
@@ -1043,56 +1064,45 @@ void ForceField::setGFNFFCoulombs(const json& coulombs)
     }
 
     m_gfnff_coulombs.clear();
+    // Per-atom vectors: extract from JSON directly (P3a: no longer stored in struct)
+    m_coulomb_chi_base = Vector::Zero(m_natoms);
+    m_coulomb_gam = Vector::Zero(m_natoms);
+    m_coulomb_alp = Vector::Zero(m_natoms);
+    m_coulomb_cnf = Vector::Zero(m_natoms);
+    std::vector<bool> atom_seen(m_natoms, false);
+
     for (int i = 0; i < coulombs.size(); ++i) {
         json coul_json = coulombs[i].get<json>();
         GFNFFCoulomb coul;
 
         coul.i = coul_json["i"];
         coul.j = coul_json["j"];
-        coul.q_i = coul_json["q_i"];
-        coul.q_j = coul_json["q_j"];
         coul.gamma_ij = coul_json["gamma_ij"];
-        coul.chi_i = coul_json.value("chi_i", 0.0);      // Default to 0 if missing (backward compat)
-        coul.chi_j = coul_json.value("chi_j", 0.0);
-        // Claude Generated (Feb 22, 2026): Dynamic Coulomb chi reconstruction fields
-        // chi_base = -chi+dxi (WITHOUT cnf*sqrt(cn)), cnf = per-atom CN correction factor
-        // Falls back to static chi_i/chi_j and cnf=0 for legacy parameter files
-        coul.chi_base_i = coul_json.value("chi_base_i", coul.chi_i);
-        coul.chi_base_j = coul_json.value("chi_base_j", coul.chi_j);
+        // P3a (Apr 2026): chi_base/cnf remain in struct; gam/alp/chi_static extracted to per-atom vectors
+        // Backward compat: legacy files may have chi_i which equals chi_base + cnf*sqrt(cn)
+        double chi_i_legacy = coul_json.value("chi_i", 0.0);
+        double chi_j_legacy = coul_json.value("chi_j", 0.0);
+        coul.chi_base_i = coul_json.value("chi_base_i", chi_i_legacy);  // Fall back to static chi for legacy files
+        coul.chi_base_j = coul_json.value("chi_base_j", chi_j_legacy);
         coul.cnf_i = coul_json.value("cnf_i", 0.0);
         coul.cnf_j = coul_json.value("cnf_j", 0.0);
-        coul.gam_i = coul_json.value("gam_i", 0.0);      // Chemical hardness
-        coul.gam_j = coul_json.value("gam_j", 0.0);
-        coul.alp_i = coul_json.value("alp_i", 0.0);
-        coul.alp_j = coul_json.value("alp_j", 0.0);
         coul.r_cut = coul_json.value("r_cut", 50.0);
 
         m_gfnff_coulombs.push_back(coul);
-    }
 
-    // Claude Generated (Feb 23, 2026): Extract per-atom Coulomb parameters from pairs
-    // for parent-level TERM 2+3 (thread-count-independent self-energy computation)
-    m_coulomb_chi_base = Vector::Zero(m_natoms);
-    m_coulomb_gam = Vector::Zero(m_natoms);
-    m_coulomb_alp = Vector::Zero(m_natoms);
-    m_coulomb_cnf = Vector::Zero(m_natoms);
-    m_coulomb_chi_static = Vector::Zero(m_natoms);
-    std::vector<bool> atom_seen(m_natoms, false);
-    for (const auto& coul : m_gfnff_coulombs) {
+        // Extract per-atom parameters from JSON (not from struct)
         if (!atom_seen[coul.i]) {
             m_coulomb_chi_base(coul.i) = coul.chi_base_i;
-            m_coulomb_gam(coul.i) = coul.gam_i;
-            m_coulomb_alp(coul.i) = coul.alp_i;
+            m_coulomb_gam(coul.i) = coul_json.value("gam_i", 0.0);
+            m_coulomb_alp(coul.i) = coul_json.value("alp_i", 0.0);
             m_coulomb_cnf(coul.i) = coul.cnf_i;
-            m_coulomb_chi_static(coul.i) = coul.chi_i;
             atom_seen[coul.i] = true;
         }
         if (!atom_seen[coul.j]) {
             m_coulomb_chi_base(coul.j) = coul.chi_base_j;
-            m_coulomb_gam(coul.j) = coul.gam_j;
-            m_coulomb_alp(coul.j) = coul.alp_j;
+            m_coulomb_gam(coul.j) = coul_json.value("gam_j", 0.0);
+            m_coulomb_alp(coul.j) = coul_json.value("alp_j", 0.0);
             m_coulomb_cnf(coul.j) = coul.cnf_j;
-            m_coulomb_chi_static(coul.j) = coul.chi_j;
             atom_seen[coul.j] = true;
         }
     }
@@ -1518,6 +1528,11 @@ void ForceField::AutoRanges()
             thread->setMethod(5); // D3-only method
         }
 
+        // Claude Generated (April 2026): Propagate PBC unit cell to threads
+        if (m_has_pbc) {
+            thread->setUnitCell(m_unit_cell_bohr, m_unit_cell_bohr_inv, true);
+        }
+
         // Claude Generated (Feb 21, 2026): Distribute bond-HB data to all threads for dncoord_erf
         // Every thread needs the full set because any thread's bond may have nr_hb >= 1
         if (!m_bond_hb_data.empty()) {
@@ -1574,24 +1589,27 @@ void ForceField::AutoRanges()
         // Phase 4.2: Distribute GFN-FF pairwise non-bonded interactions (Claude Generated 2025)
         // Phase 2.2 (December 19, 2025): Extended for UFF-D3 native dispersion
         if (m_method == "gfnff" || m_method == "d3") {
+            // P1b (Apr 2026): Round-robin distribution for O(N²) pair types
+            // Improves load balancing when pairs have varying compute cost (cutoff-dependent)
             if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("Distributing {} GFN-FF dispersion pairs to thread {}", m_gfnff_dispersions.size(), i));
+                CurcumaLogger::info(fmt::format("Distributing {} GFN-FF dispersion pairs to thread {} (round-robin)", m_gfnff_dispersions.size(), i));
             }
-            for (int j = int(i * m_gfnff_dispersions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)); ++j) {
+            for (size_t j = i; j < m_gfnff_dispersions.size(); j += thread_count) {
                 thread->addGFNFFDispersion(m_gfnff_dispersions[j]);
             }
 
-            // Distribute bonded repulsion pairs
+            // Bonded repulsion: small set, linear strip is fine
             for (int j = int(i * m_gfnff_bonded_repulsions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_bonded_repulsions.size() / double(free_threads)); ++j) {
                 thread->addGFNFFBondedRepulsion(m_gfnff_bonded_repulsions[j]);
             }
 
-            // Distribute non-bonded repulsion pairs
-            for (int j = int(i * m_gfnff_nonbonded_repulsions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_nonbonded_repulsions.size() / double(free_threads)); ++j) {
+            // P1b (Apr 2026): Round-robin for non-bonded repulsion (O(N²), cutoff-dependent)
+            for (size_t j = i; j < m_gfnff_nonbonded_repulsions.size(); j += thread_count) {
                 thread->addGFNFFNonbondedRepulsion(m_gfnff_nonbonded_repulsions[j]);
             }
 
-            for (int j = int(i * m_gfnff_coulombs.size() / double(free_threads)); j < int((i + 1) * m_gfnff_coulombs.size() / double(free_threads)); ++j) {
+            // P1b (Apr 2026): Round-robin for Coulomb (O(N²), charge-dependent)
+            for (size_t j = i; j < m_gfnff_coulombs.size(); j += thread_count) {
                 thread->addGFNFFCoulomb(m_gfnff_coulombs[j]);
             }
 
@@ -1601,27 +1619,27 @@ void ForceField::AutoRanges()
 
         // Claude Generated (December 19, 2025): UFF-D3 native D3 dispersion distribution
         // Distribute D3 dispersion pairs to threads for parallel calculation
-        if (m_method == "uff-d3" && !m_gfnff_dispersions.empty()) {
-            for (int j = int(i * m_gfnff_dispersions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)); ++j) {
-                thread->addD3Dispersion(m_gfnff_dispersions[j]);
+        // P1b (Apr 2026): Round-robin for D3 dispersion pairs (O(N²), cutoff-dependent)
+        if (m_method == "uff-d3" && !m_d3_pairs.empty()) {
+            for (size_t j = i; j < m_d3_pairs.size(); j += thread_count) {
+                thread->addD3Dispersion(m_d3_pairs[j]);
             }
 
             if (CurcumaLogger::get_verbosity() >= 3) {
-                int d3_count = int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)) - int(i * m_gfnff_dispersions.size() / double(free_threads));
-                CurcumaLogger::param(fmt::format("thread_{}_d3_pairs", i), d3_count);
+                size_t d3_count = (m_d3_pairs.size() + thread_count - 1 - i) / thread_count;
+                CurcumaLogger::param(fmt::format("thread_{}_d3_pairs", i), static_cast<int>(d3_count));
             }
         }
 
-        // Claude Generated (December 25, 2025): GFN-FF Native D4 dispersion distribution
-        // Distribute D4 dispersion pairs to threads for parallel calculation
+        // P1b (Apr 2026): Round-robin for D4 dispersion (O(N²), cutoff-dependent)
         if (!m_d4_dispersions.empty()) {
-            for (int j = int(i * m_d4_dispersions.size() / double(free_threads)); j < int((i + 1) * m_d4_dispersions.size() / double(free_threads)); ++j) {
+            for (size_t j = i; j < m_d4_dispersions.size(); j += thread_count) {
                 thread->addD4Dispersion(m_d4_dispersions[j]);
             }
 
             if (CurcumaLogger::get_verbosity() >= 3) {
-                int d4_count = int((i + 1) * m_d4_dispersions.size() / double(free_threads)) - int(i * m_d4_dispersions.size() / double(free_threads));
-                CurcumaLogger::param(fmt::format("thread_{}_d4_pairs", i), d4_count);
+                size_t d4_count = (m_d4_dispersions.size() + thread_count - 1 - i) / thread_count;
+                CurcumaLogger::param(fmt::format("thread_{}_d4_pairs", i), static_cast<int>(d4_count));
             }
         }
 
@@ -2029,12 +2047,8 @@ json ForceField::exportCurrentParameters() const
             d["r4r2ij"] = disp.r4r2ij;      // GFN-FF specific: 3*sqrtZr4r2_i*sqrtZr4r2_j
             d["r0_squared"] = disp.r0_squared;  // GFN-FF specific: (a1*sqrt(r4r2ij)+a2)^2
             d["r_cut"] = disp.r_cut;
-            // Legacy fields (for backward compatibility)
-            d["C8"] = disp.C8;
-            d["s6"] = disp.s6;
-            d["s8"] = disp.s8;
-            d["a1"] = disp.a1;
-            d["a2"] = disp.a2;
+            d["zetac6"] = disp.zetac6;
+            // P1c (Apr 2026): Legacy D3 fields (C8, s6, s8, a1, a2) removed from struct
             gfnff_disp.push_back(d);
         }
         output["gfnff_dispersions"] = gfnff_disp;
@@ -2070,26 +2084,28 @@ json ForceField::exportCurrentParameters() const
     }
 
     // Claude Generated (December 2025): Export GFN-FF Coulomb parameters
+    // P3a (Apr 2026): Redundant per-atom fields removed from struct; per-atom data in vectors
     if (!m_gfnff_coulombs.empty()) {
         json coulombs = json::array();
         for (const auto& coul : m_gfnff_coulombs) {
             json c;
             c["i"] = coul.i;
             c["j"] = coul.j;
-            c["q_i"] = coul.q_i;
-            c["q_j"] = coul.q_j;
             c["gamma_ij"] = coul.gamma_ij;
-            c["chi_i"] = coul.chi_i;
-            c["chi_j"] = coul.chi_j;
             c["chi_base_i"] = coul.chi_base_i;
             c["chi_base_j"] = coul.chi_base_j;
             c["cnf_i"] = coul.cnf_i;
             c["cnf_j"] = coul.cnf_j;
-            c["gam_i"] = coul.gam_i;
-            c["gam_j"] = coul.gam_j;
-            c["alp_i"] = coul.alp_i;
-            c["alp_j"] = coul.alp_j;
             c["r_cut"] = coul.r_cut;
+            // Per-atom data from vectors (for backward-compatible JSON export)
+            if (coul.i < m_eeq_charges.size()) c["q_i"] = m_eeq_charges(coul.i);
+            if (coul.j < m_eeq_charges.size()) c["q_j"] = m_eeq_charges(coul.j);
+            if (coul.i < m_coulomb_gam.size()) c["gam_i"] = m_coulomb_gam(coul.i);
+            if (coul.j < m_coulomb_gam.size()) c["gam_j"] = m_coulomb_gam(coul.j);
+            if (coul.i < m_coulomb_alp.size()) c["alp_i"] = m_coulomb_alp(coul.i);
+            if (coul.j < m_coulomb_alp.size()) c["alp_j"] = m_coulomb_alp(coul.j);
+            if (coul.i < m_coulomb_chi_base.size()) c["chi_i"] = m_coulomb_chi_base(coul.i) + coul.cnf_i * std::sqrt(std::max(m_cn.size() > 0 ? m_cn(coul.i) : 0.0, 0.0));
+            if (coul.j < m_coulomb_chi_base.size()) c["chi_j"] = m_coulomb_chi_base(coul.j) + coul.cnf_j * std::sqrt(std::max(m_cn.size() > 0 ? m_cn(coul.j) : 0.0, 0.0));
             coulombs.push_back(c);
         }
         output["gfnff_coulombs"] = coulombs;
@@ -2144,15 +2160,11 @@ json ForceField::exportCurrentParameters() const
             d["i"] = disp.i;
             d["j"] = disp.j;
             d["C6"] = disp.C6;
-            d["r4r2ij"] = disp.r4r2ij;      // GFN-FF specific: 3*sqrtZr4r2_i*sqrtZr4r2_j
-            d["r0_squared"] = disp.r0_squared;  // GFN-FF specific: (a1*sqrt(r4r2ij)+a2)^2
+            d["r4r2ij"] = disp.r4r2ij;
+            d["r0_squared"] = disp.r0_squared;
             d["r_cut"] = disp.r_cut;
-            // Legacy fields (for backward compatibility)
-            d["C8"] = disp.C8;
-            d["s6"] = disp.s6;
-            d["s8"] = disp.s8;
-            d["a1"] = disp.a1;
-            d["a2"] = disp.a2;
+            d["zetac6"] = disp.zetac6;
+            // P1c (Apr 2026): Legacy D3 fields removed from struct
             d4_disp.push_back(d);
         }
         output["d4_dispersion_pairs"] = d4_disp;
@@ -2586,11 +2598,12 @@ double ForceField::Calculate(bool gradient)
             double q = m_eeq_charges(i);
             if (std::isnan(q)) continue;
             // Dynamic chi_eff = chi_base + cnf * sqrt(cn_current)
+            // P3a (Apr 2026): Fallback uses chi_base directly (equivalent to chi_static when cnf=0)
             double chi;
             if (m_coulomb_cnf(i) != 0.0 && has_cn) {
                 chi = m_coulomb_chi_base(i) + m_coulomb_cnf(i) * std::sqrt(std::max(m_cn(i), 0.0));
             } else {
-                chi = m_coulomb_chi_static(i);
+                chi = m_coulomb_chi_base(i);
             }
             E_en -= q * chi;
             E_self += 0.5 * q * q * (m_coulomb_gam(i) + sqrt_2_over_pi / std::sqrt(m_coulomb_alp(i)));
