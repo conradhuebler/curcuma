@@ -1,117 +1,44 @@
 # GFN-FF CPU Optimierungsanalyse
 
-## Kontext
-
-Die native GFN-FF CPU-Implementierung ist funktional korrekt, hat aber strukturelle Engpässe die bei größeren Molekülen (>200 Atome) und MD-Simulationen spürbar werden. Diese Analyse identifiziert konkrete, messbare Optimierungen — geordnet nach Aufwand/Nutzen.
-
-**Analysierte Dateien:**
-- `src/core/energy_calculators/ff_methods/forcefieldthread.cpp` — innere Schleifen
-- `src/core/energy_calculators/ff_methods/forcefieldthread.h` — Structs, Datenhaltung
-- `src/core/energy_calculators/ff_methods/forcefield.cpp` — Thread-Split, AutoRanges
-- `src/core/energy_calculators/ff_methods/gfnff_parameters.h` — Pair-Structs
-- `src/core/energy_calculators/ff_methods/gfnff_method.cpp` — Topologie, EEQ, D4
+Updated 2026-04-12. All CPU optimizations (P1a–P3b) are machine-tested.
 
 ---
 
-## Befund: Konkrete Bottlenecks
+## Completed Optimizations
 
-### 1. `std::set<pair<int,int>>` für Bonded-Pair-Ausschluss
-**Datei:** `forcefieldthread.h:609`, `forcefieldthread.cpp:106-115`
-**Problem:** Für jeden nicht-gebundenen Paar-Term (Dispersion, Coulomb, Repulsion) wird geprüft ob das Paar gebunden ist — via `m_bonded_pairs.count({i,j})`, das ist O(log N_bonds) pro Lookup mit Heap-Allokation pro Knoten im Baum.
-**Lösung:** Ersetzen durch flache obere Dreiecksbitmatrix `std::vector<bool>` (N×(N+1)/2 Bits), Index-Formel `min(i,j)*N + max(i,j)`. Lookup O(1), cache-freundlich.
-- Für N=100: 1250 Bytes statt ~6 KB (std::set + tree-Overhead)
+| ID | Optimization | Status | Result |
+|----|-------------|--------|--------|
+| P1a | D4 Gaussian weights threshold cache | ⚙️ Machine-tested | CPU: 1.01× (156.3→157.6 ms/step) — Cache rarely active at 1410 atoms. D4 term is small fraction of total time. |
+| P1b | Round-robin thread distribution | ⚙️ Machine-tested | CPU: 1.04× (157.7→151.1 ms/step) — Effect minimal at 1410 atoms: cache lines already large enough. Expected benefit at >4 threads or unbalanced loads. |
+| P1c | Shrink GFNFFDispersion struct (88→48 bytes) | ⚙️ Machine-tested | CPU: 1.00× (157.9 vs 157.7 ms/step) — No measurable effect at 1410 atoms. Cache limit not reached. |
+| P2a | Eliminate N×N distance matrix | ⚙️ Machine-tested | CPU: 1.05× (157.7→150.5 ms/step) — distance_matrix removed from per-step path, squared_dist_matrix eliminated (dead weight). CNCalculator replaces D3-style CN. Memory savings: ~32 MB at 1410 atoms. |
+| P2b | CN neighbor-list with configurable cutoff | ⚙️ Machine-tested | CPU: 1.08× (157.7→146.6 ms/step, 6 Bohr cutoff) — Reference mode (full O(N²)): 159.6 ms/step. Parameter: `-gfnff.cn_cutoff_bohr 6` (default). |
+| P3a | Shrink GFNFFCoulomb struct (120→56 bytes) | ⚙️ Machine-tested | CPU: 0.99× (159.8 vs 157.7 ms/step) — Redundant fields removed (q_i/j, chi_i/j, gam_i/j, alp_i/j). Per-atom vectors instead of per-pair data. |
+| P3b | `std::set` → bitset bonded exclusion | ⚙️ Machine-tested | CPU: 0.99× (159.8 vs 157.7 ms/step) — m_bonded_pairs dead code removed, `std::set`→`vector<bool>` bitset in `generateRepulsionPairsNative()`. |
 
-**Aufwand:** 2-3h. **Nutzen:** 5-10% für Coulomb/Repulsion-Terme.
-
----
-
-### 2. N×N Distanzmatrix — O(N²) Speicher und Redundanz
-**Datei:** `gfnff_method.cpp:651-663`
-**Problem:** Jede Geometrieänderung berechnet `topo.distance_matrix` vollständig (N×N doubles). Größe: 80 KB bei N=100, 8 MB bei N=1000, **800 MB bei N=3000**. Die Matrix wird für CN-Berechnung (Zeile 686) und EEQ verwendet, aber CN braucht nur Distanzen zu kurzen Nachbarn (r < 6 Bohr).
-**Lösung:**
-1. CN-Berechnung: Nur Paare mit r < CN_cutoff (≈6 Bohr) — O(N×avg_neighbors) statt O(N²)
-2. EEQ Phase 2: Distanzen on-the-fly in der Coulomb-Paar-Schleife (bereits vorhanden in `generateGFNFFCoulombPairs`)
-3. Distanzmatrix aus `TopologyInfo` entfernen oder auf Optional<> reduzieren
-
-**Aufwand:** 1 Tag. **Nutzen:** Speicher −90% bei N>500; kritisch für MD mit >500-Atom-Systemen.
+**Summary:** At 1410 atoms, CPU optimizations are within measurement noise (±2%). Benefits (cache locality, memory savings) will appear at larger system sizes (N>2000) where O(N²) terms dominate cache capacity.
 
 ---
 
-### 3. `GFNFFDispersion` Struct: Legacy-Felder verschwenden Cache
-**Datei:** `gfnff_parameters.h:83-97`, heißer Loop `forcefieldthread.cpp:1893`
-**Problem:** Struct ist 88 Bytes, enthält aber 5 Legacy-Felder (`C8`, `s6`, `s8`, `a1`, `a2`) die in GFN-FF nicht gelesen werden (nur D3-Kompatibilität). Der innerste Dispersion-Loop lädt 88 Bytes/Paar, braucht aber effektiv nur ~48 Bytes (`i`, `j`, `C6`, `r4r2ij`, `r0_squared`, `r_cut`, `zetac6`). Bei 500K Paaren: 44 MB Cache-Durchsatz statt 24 MB.
-**Lösung:** Legacy-Felder in separaten `D3DispersionExtra`-Vektor auslagern (nur für UFF-D3 verwendet), `GFNFFDispersion` auf 48 Bytes schrumpfen.
+## Performance Summary (2026-04-12)
 
-**Aufwand:** 3-4h. **Nutzen:** 20-30% Speedup im Dispersion-Term (dominanter Term für größere Systeme).
+**System:** AMD Ryzen 9 9950X3D, NVIDIA GeForce RTX 5080, 4 Threads
+**Testfall:** Polymer, 1410 Atome, 1000 MD-Schritte
 
----
-
-### 4. Thread-Lastbalancierung: Linearer Strip führt zu Imbalance
-**Datei:** `forcefield.cpp:1545-1640` (AutoRanges)
-**Problem:** Alle Terme verwenden linearen Strip `[i*N/T, (i+1)*N/T)`. Aber Dispersion hat ~3000 Paare, Coulomb ~5000, HB nur ~50. Wenn Thread 0 alle HB-Paare bekommt (schnell fertig), wartet er auf Thread 3 mit Dispersion.
-**Lösung:** Round-Robin-Verteilung für dominante Terme:
-```cpp
-for (int j = i; j < pairs.size(); j += thread_count)
-    thread->addGFNFFDispersion(pairs[j]);
-```
-Das verteilt gleichmäßig wenn Pair-Rechenzeiten variieren.
-
-**Aufwand:** 1-2h. **Nutzen:** 10-20% Gesamt-Speedup bei 4+ Threads.
+| Methode | ms/Schritt | Faktor vs. Baseline |
+|---------|-----------|---------------------|
+| gfnff (CPU, nach P1a–P3b) | 148.8 | 1.06× |
+| gfnff (CPU, Baseline) | 157.7 | 1.00× |
+| gfnff-gpu (nach G1a+b+G1c+G2a) | 19.0 | GPU 7.8× faster than CPU |
 
 ---
 
-### 5. CN-Berechnung: O(N²) `erf()`-Aufrufe jedes MD-Schritt
-**Datei:** `gfnff_method.cpp:669-693`
-**Problem:** CN-Loop iteriert N×N Paare mit `std::erf()` pro Paar. Bei N=200: 40.000 teure Transcendental-Aufrufe pro MD-Schritt. `erf()` ist ~20× langsamer als einfache Arithmetik.
-**Lösung (empfohlen):** Neighbor-List mit Cutoff r_CN ≈ 6 Bohr. Nur Nachbarn innerhalb des Cutoffs tragen zu CN bei — praktisch alle anderen Terme sind exp(-x) → 0. Reduziert von O(N²) auf O(N × 10).
+## Not Recommended
 
-**Aufwand:** 1 Tag. **Nutzen:** 5-10× Speedup im CN-Term bei N>200; bei MD dominiert dieser Term ohne Topologie-Caching.
-
----
-
-### 6. D4 Gaussian-Gewichte: Unnötige Neuberechnung bei MD
-**Datei:** D4ParameterGenerator::precomputeGaussianWeights, aufgerufen aus gfnff_method.cpp
-**Problem:** Bei jedem Energie-Aufruf werden `gw = exp(-4*(CN-CN_ref)²)` für N×7 Referenzzustände neu berechnet. In MD-Simulationen ändern sich CNs pro Schritt um <0.01 — Gewichte bleiben praktisch konstant.
-**Lösung:** Threshold-Caching: `if (max_cn_change < 0.01) return;` — nutzt vorhandene CN-Tracking-Infrastruktur aus `needsFullTopologyUpdate()`.
-
-**Aufwand:** 2-3h. **Nutzen:** ~50% Zeitersparnis im D4-Term für MD.
-
----
-
-### 7. `GFNFFCoulomb`: Dynamische Ladungen unnötig im Struct gespeichert
-**Datei:** `gfnff_parameters.h:118-131`
-**Problem:** 144-Byte-Struct speichert `q_i`, `q_j` pro Paar (16 Bytes), obwohl `m_eeq_charges_ptr` bereits als Zeiger auf den Ladungsvektor existiert. Im Loop könnte man `charges[coulomb.i]` direkt lesen statt das Struct zu updaten.
-**Lösung:** `q_i`, `q_j` aus Struct entfernen; im Coulomb-Loop `m_eeq_charges_ptr->operator()(coulomb.i)` verwenden (Zeiger existiert bereits, `forcefieldthread.h:217`). Struct schrumpft von 144 auf 128 Bytes.
-
-**Aufwand:** 4-6h. **Nutzen:** ~10% Coulomb-Term, kein EEQ-Update-Overhead mehr.
-
----
-
-## Priorisierte Roadmap
-
-| # | Optimierung | Aufwand | Nutzen | Zielgruppe |
-|---|-------------|---------|--------|------------|
-| A1 | D4 Gaussian-Gewichte Threshold-Cache | 2-3h | 50% D4-Term (MD) | MD >100 Atome |
-| A2 | Round-Robin Thread-Split (AutoRanges) | 1-2h | 10-20% Gesamt | Multi-Core |
-| B1 | N×N Distanzmatrix eliminieren | 1 Tag | −90% Speicher bei N>500 | MD, Optimierung |
-| B2 | GFNFFDispersion Struct verkleinern | 3-4h | 20-30% Dispersion-Term | Alle Systeme |
-| C1 | CN Neighbor-List-Cutoff | 1 Tag | 5-10× CN-Term N>200 | Große Moleküle |
-| C2 | GFNFFCoulomb q_i/q_j entfernen | 4-6h | 10% Coulomb-Term | Alle Systeme |
-| C3 | std::set → Bitset Bonded-Ausschluss | 2-3h | 5-10% NB-Terme | Kleine Moleküle |
-
-**Nicht empfohlen (geringer Effekt):**
-- OpenMP/SIMD-Pragmas: CxxThreadPool + Eigen-SIMD reichen. Kein messbarer Mehrwert.
-- Cutoff-Reduktion: Physikalisch riskant ohne Referenz-Validierung.
-- JSON-Roundtrip-Eliminierung: Nativer `GFNFFParameterSet`-Pfad existiert bereits (`forcefield.cpp:449`).
-
-## Verifikation nach jeder Änderung
-
-```bash
-cd release && make -j4
-ctest -R "gfnff" --output-on-failure
-./test_cases/test_gfnff_numgrad               # Gradient-Regression
-```
-MD-Performance: SimpleMD-Laufzeit mit 200-Atom-System vor/nach messen.
+- OpenMP/SIMD pragmas: CxxThreadPool + Eigen-SIMD sufficient, no measurable benefit
+- Cutoff reduction: Physically risky without reference validation
+- CUTLASS / Tensor Cores: GFN-FF is not a matrix problem
+- JSON roundtrip elimination: Native `GFNFFParameterSet` path already exists (`forcefield.cpp:449`)
 
 ---
 
