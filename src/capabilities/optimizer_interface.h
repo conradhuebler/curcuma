@@ -21,17 +21,14 @@
 
 #include "json.hpp"
 #include "src/core/curcuma_logger.h"
+#include "src/core/energycalculator.h"
+#include "src/core/molecule.h"
 #include <memory>
 #include <string>
 #include <vector>
 
 using json = nlohmann::json;
-
-// Forward declarations
-class Molecule;
-class EnergyCalculator;
-typedef Eigen::VectorXd Vector;
-typedef Eigen::Matrix<double, -1, -1> Matrix;
+using curcuma::Molecule;
 
 namespace Optimization {
 
@@ -40,11 +37,12 @@ namespace Optimization {
  * Type-safe method selection replacing magic numbers
  */
 enum class OptimizerType {
-    LBFGSPP, // "lbfgspp" - External LBFGSpp library
-    INTERNAL_LBFGS, // "lbfgs"   - Internal LBFGS implementation
-    DIIS, // "diis"    - Direct Inversion of Iterative Subspace
-    RFO, // "rfo"     - Rational Function Optimization
-    AUTO // "auto"    - Automatic selection based on system
+    LBFGSPP,      // External LBFGSpp library
+    NATIVE_LBFGS, // Curcuma's own L-BFGS (Nocedal & Wright)
+    NATIVE_DIIS,  // Curcuma's own DIIS (Pulay 1980)
+    NATIVE_RFO,   // Curcuma's own RFO (Banerjee et al. 1985)
+    ANCOPT,       // Approximate Normal Coordinate Optimizer (Grimme)
+    AUTO          // Automatic selection based on system size
 };
 
 /**
@@ -90,50 +88,7 @@ struct OptimizationResult {
 };
 
 /**
- * @brief Abstract optimizer interface - Claude Generated
- * Analog to QMInterface - unified polymorphic interface for all optimization methods
- */
-class OptimizerInterface {
-public:
-    virtual ~OptimizerInterface() = default;
-
-    // Multiple initialization methods (analog to QMInterface)
-    virtual bool InitializeOptimization(const Molecule& molecule) = 0;
-    virtual bool InitializeOptimization(const Molecule* molecule) = 0;
-    virtual bool InitializeOptimization(const double* coordinates, int atom_count) = 0;
-
-    // Geometry updates (analog to QMInterface::UpdateMolecule)
-    virtual bool UpdateGeometry(const Molecule& molecule) = 0;
-    virtual bool UpdateGeometry(const double* coordinates) = 0;
-
-    // Core optimization method (analog to QMInterface::Calculation)
-    virtual OptimizationResult Optimize(bool write_trajectory = false, int verbosity = 1) = 0;
-
-    // Property accessors (analog to QMInterface::Charges, etc.)
-    virtual Vector GetCurrentGradient() const = 0;
-    virtual double GetCurrentEnergy() const = 0;
-    virtual Matrix GetCurrentHessian() const = 0;
-    virtual std::vector<Molecule> GetTrajectory() const = 0;
-
-    // Configuration management (analog to QMInterface)
-    virtual void LoadConfiguration(const json& config) = 0;
-    virtual json GetDefaultConfiguration() const = 0;
-    virtual json GetCurrentConfiguration() const = 0;
-
-    // Energy calculator management - Claude Generated
-    virtual void setEnergyCalculator(EnergyCalculator* calc) = 0;
-
-    // Method identification
-    virtual std::string getName() const = 0;
-    virtual OptimizerType getType() const = 0;
-    virtual bool supportsConstraints() const = 0;
-    virtual bool requiresHessian() const = 0;
-    virtual std::vector<std::string> getRequiredParameters() const = 0;
-};
-
-/**
  * @brief Default configuration for all optimizers - Claude Generated
- * Analog to QMInterfaceJson - consistent defaults across methods
  */
 extern const json OptimizerInterfaceJson;
 

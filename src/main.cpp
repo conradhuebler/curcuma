@@ -30,12 +30,11 @@
 #include "src/capabilities/confscan.h"
 #include "src/capabilities/confsearch.h"
 #include "src/capabilities/confstat.h"
-#include "src/capabilities/curcumaopt.h"
 // Modern optimizer system - Claude Generated (simplified)
 #include "src/capabilities/docking.h"
 #include "src/capabilities/hessian.h"
 #include "src/capabilities/casino.h"
-#include "src/capabilities/optimisation/modern_optimizer_simple.h"
+#include "src/capabilities/optimizer_factory.h"
 #include "src/capabilities/nebdocking.h"
 #include "src/capabilities/pairmapper.h"
 #include "src/capabilities/persistentdiagram.h"
@@ -56,7 +55,6 @@
 #include "src/core/parameter_registry.h"
 
 #include "src/capabilities/optimiser/OptimiseDipoleScaling.h"
-#include "src/capabilities/optimisation/modern_optimizer_simple.h"
 
 #include <cmath>
 #include <cstring>
@@ -1406,29 +1404,30 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         return 1;
     }
 
-    json sp_controller = controller;
-    json opt_params = sp_controller.contains("opt") ? sp_controller["opt"] : json{};
-    opt_params["single_point"] = true;
+    // Claude Generated (Apr 2026): Direct EnergyCalculator for single point — no CurcumaOpt needed
+    std::string method = controller.value("method", "gfnff");
+    json energy_controller = controller;
+    energy_controller["geometry_file"] = std::string(argv[2]);
 
-    // Claude Generated (December 2025): Set geometry_file for automatic parameter caching
-    std::string geometry_file(argv[2]);
-    opt_params["geometry_file"] = geometry_file;
-    sp_controller["geometry_file"] = geometry_file;  // Also set at top level for EnergyCalculator
+    Molecule molecule(argv[2]);
+    EnergyCalculator energy_calc(method, energy_controller);
+    energy_calc.setMolecule(molecule.getMolInfo());
+    double energy = energy_calc.CalculateEnergy(true);
 
-    sp_controller["opt"] = opt_params;
+    fmt::print("\nCharge {} Spin {}\n", molecule.Charge(), molecule.Spin());
+    CurcumaLogger::energy_abs(energy, "Single Point Energy");
 
-    CurcumaOpt opt(sp_controller, false);
-    opt.setFileName(argv[2]);
-    opt.start();
+    Geometry gradient = energy_calc.Gradient();
+    double grad_norm = Eigen::Map<Eigen::VectorXd>(gradient.data(), gradient.size()).norm();
+    CurcumaLogger::param("Gradient norm", fmt::format("{:.6e} Eh/Bohr", grad_norm));
+
     return 0;
 }
 
 // Additional capability handlers - Claude Generated
 int executeOptimization(const json& controller, int argc, char** argv) {
     if (argc < 3) {
-        json safe_opt_config = controller.contains("opt") ? controller["opt"] : json{};
-        ModernOptimization::ModernOptimizerDispatcher helper(safe_opt_config, false);
-        helper.printHelp();
+        ParameterRegistry::getInstance().printHelp("opt");
         return 0;
     }
 
@@ -1442,71 +1441,42 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         std::cout << "Using native Curcuma optimizer: " << optimizer_method << std::endl;
     }
 
-    // Check if we should use modern native optimizers (Claude Nov 2025: Added ancopt, new_lbfgspp)
-    bool use_modern = (optimizer_method == "native_lbfgs" || optimizer_method == "lbfgs" ||
-        optimizer_method == "diis" || optimizer_method == "rfo" || optimizer_method == "auto" ||
-        optimizer_method == "ancopt" || optimizer_method == "anc" || optimizer_method == "new_lbfgspp");
+    // Unified optimizer path: ALL optimizer types go through OptimizerFactory
+    json opt_defaults = ParameterRegistry::getInstance().getDefaultJson("opt");
+    json opt_config = MergeJson(opt_defaults, controller.contains("opt") ? controller["opt"] : json{});
 
-    if (use_modern) {
+    try {
+        auto molecule = std::make_unique<Molecule>(argv[2]);
+        std::string method = controller.value("method", "gfnff");
+        json energy_controller = controller;
+        energy_controller["geometry_file"] = std::string(argv[2]);
+        EnergyCalculator energy_calc(method, energy_controller);
+        // Note: setMolecule() is called inside OptimizerDriver::InitializeOptimization()
+        // Do NOT call it here — double-init crashes GFN-FF (generateDispersionPairsNative)
 
-        try {
-            auto molecule = std::make_unique<Molecule>(argv[2]);
-            std::string method = controller.value("method", "uff");
+        Optimization::OptimizerType opt_type = Optimization::parseOptimizerType(optimizer_method);
+        auto result = Optimization::OptimizationDispatcher::optimizeStructure(
+            molecule.get(), opt_type, &energy_calc, opt_config);
 
-            // Claude Generated (December 2025): Set geometry_file for automatic parameter caching
-            json energy_controller = controller;
-            energy_controller["geometry_file"] = std::string(argv[2]);
-
-            EnergyCalculator energy_calc(method, energy_controller);
-            energy_calc.setMolecule(molecule->getMolInfo());
-
-            // Claude Generated (October 2025): Merge with default opt parameters from ParameterRegistry
-            json opt_defaults = ParameterRegistry::getInstance().getDefaultJson("opt");
-            json opt_config = MergeJson(opt_defaults, controller.contains("opt") ? controller["opt"] : json{});
-
-            auto result = ModernOptimization::ModernOptimizerDispatcher::optimizeStructure(
-                molecule.get(), optimizer_method, &energy_calc, opt_config);
-
-            if (result.success) {
-                // Claude Generated: Derive output filename from input basename like Legacy CurcumaOpt
-                // Extract basename from argv[2] (e.g., "input.xyz" → "input")
-                std::string filename(argv[2]);
-                std::string basename = filename.size() >= 4 ?
-                    filename.substr(0, filename.size() - 4) : filename;  // Remove last 4 chars (.xyz)
-                std::string output_file = opt_config.value("output", basename + ".opt.xyz");
-
-                molecule->writeXYZFile(output_file);
-                CurcumaLogger::success_fmt("Optimized structure written to: {}", output_file);
-                return 0;
-            } else {
-                // Modern optimizer failed, fall through to legacy
-                CurcumaLogger::warn(fmt::format("{} optimizer failed: {}", optimizer_method, result.error_message));
-                CurcumaLogger::info("Falling back to legacy CurcumaOpt optimizer");
-            }
-        } catch (const std::exception& e) {
-            // Fall through to legacy code below
-            CurcumaLogger::warn(fmt::format("{} optimizer threw exception: {}", optimizer_method, e.what()));
+        if (result.success) {
+            std::string filename(argv[2]);
+            std::string basename = filename.size() >= 4 ?
+                filename.substr(0, filename.size() - 4) : filename;
+            std::string output_file = opt_config.value("output", basename + ".opt.xyz");
+            molecule->writeXYZFile(output_file);
+            CurcumaLogger::success_fmt("Optimized structure written to: {}", output_file);
+            return 0;
+        } else {
+            CurcumaLogger::warn_fmt("{} optimizer failed: {}", optimizer_method, result.error_message);
             CurcumaLogger::info("Falling back to legacy CurcumaOpt optimizer");
         }
+    } catch (const std::exception& e) {
+        CurcumaLogger::warn_fmt("{} optimizer threw exception: {}", optimizer_method, e.what());
+        CurcumaLogger::info("Falling back to legacy CurcumaOpt optimizer");
     }
 
-    // Legacy optimization (fallback for exceptions or non-modern methods)
-    // Claude Generated 2025: Apply same parameter merging as modern optimizer to fix JSON null bug
-    json legacy_controller = controller;
-    json opt_defaults = ParameterRegistry::getInstance().getDefaultJson("opt");
-    json opt_params = MergeJson(opt_defaults, controller.contains("opt") ? controller["opt"] : json{});
-
-    // Claude Generated (December 2025): Set geometry_file for automatic parameter caching
-    std::string geometry_file(argv[2]);
-    opt_params["geometry_file"] = geometry_file;
-    legacy_controller["geometry_file"] = geometry_file;  // Also set at top level for EnergyCalculator
-
-    legacy_controller["opt"] = opt_params;
-
-    CurcumaOpt opt(legacy_controller, false);
-    opt.setFileName(argv[2]);
-    opt.start();
-    return 0;
+    // No legacy fallback — all optimization goes through OptimizerFactory
+    return 1;
 }
 
 int executeConfScan(const json& controller, int argc, char** argv) {

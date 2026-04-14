@@ -19,7 +19,7 @@
 
 #pragma once
 
-#include "src/capabilities/curcumaopt.h"
+#include "src/capabilities/optimizer_factory.h"
 #include "src/capabilities/optimiser/LevMarDocking.h"
 
 #include "src/core/elements.h"
@@ -172,6 +172,6 @@ private:
     int m_RMSDElement = 7;
     StringList m_files;
     std::string m_host, m_guest, m_complex, m_RMSDmethod;
-    CurcumaOpt *m_optimise, *m_singlepoint;
+    std::vector<Molecule> m_optimise_molecules, m_singlepoint_molecules;
     std::map<double, Molecule*> m_docking_result, m_optimisation_result, m_result_list, m_final_results, m_temp_results;
 };

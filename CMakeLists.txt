@@ -298,12 +298,16 @@ configure_file(
 set(curcuma_core_SRC
         # Optimization algorithms - Claude Generated (Educational-First Design)
         src/capabilities/optimisation/lbfgs.cpp
-        src/capabilities/optimisation/modern_optimizer_simple.cpp
+        src/capabilities/optimizer_interface.cpp
+        src/capabilities/optimizer_driver.cpp
+        src/capabilities/optimizer_factory.cpp
+        src/capabilities/ancopt_optimizer.cpp
+        src/capabilities/lbfgspp_optimizer.cpp
+        src/capabilities/native_optimizer_adapters.cpp
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/curcumamethod.cpp
-        src/capabilities/curcumaopt.cpp
-        # Native LBFGS optimizer - Claude Generated (disabled for now due to compilation issues)
+        # Native LBFGS optimizer - Claude Generated (disabled, superseded by native_optimizer_adapters)
         # src/capabilities/native_lbfgs_optimizer.cpp
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
@@ -388,7 +392,6 @@ set(curcuma_cap_SRC
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/curcumamethod.cpp
-        src/capabilities/curcumaopt.cpp
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
         src/capabilities/confstat.cpp

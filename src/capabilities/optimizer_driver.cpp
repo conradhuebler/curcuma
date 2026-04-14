@@ -275,38 +275,33 @@ bool OptimizerDriver::UpdateGeometry(const double* coordinates)
 
 OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosity)
 {
-    // Synchronize verbosity settings using the new integer parameter
-    // Validate verbosity range
+    // Optimizer controls its own verbosity level independently.
+    // Save+restore global CurcumaLogger level so EnergyCalculator output
+    // is also suppressed during silent optimization (verbosity 0).
     if (verbosity < 0 || verbosity > 3) {
-        verbosity = 1; // Default to minimal if out of range
+        verbosity = 1;
     }
 
-    CurcumaLogger::set_verbosity(verbosity);
+    int saved_global_verbosity = CurcumaLogger::get_verbosity();
+    // Suppress all EnergyCalculator output during optimization — the optimizer
+    // prints its own progress table. Restore after optimization.
+    CurcumaLogger::set_verbosity(0);
     m_context.write_trajectory = write_trajectory;
     m_context.verbosity = verbosity;
 
     m_start_time = std::chrono::high_resolution_clock::now();
 
-    CurcumaLogger::header(fmt::format("{} Geometry Optimization", getName()));
-
-    // Display optimization parameters (analog to QM system parameter display)
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::param_table(m_configuration, "Optimization Parameters");
-    }
-
-    CurcumaLogger::energy_abs(m_initial_energy, "Initial energy");
-    CurcumaLogger::param("Max iterations", m_context.max_iterations);
-    CurcumaLogger::param("Convergence criteria",
-        fmt::format("ΔE < {:.1e} kJ/mol, ΔRMSD < {:.3f} Å, |∇| < {:.1e} Eh/Bohr",
-            m_context.energy_threshold, m_context.rmsd_threshold, m_context.gradient_threshold));
-
-    // Print optimization progress table header (matches CurcumaOpt format)
+    // Optimizer uses fmt::print directly for its own output, controlled by local verbosity.
+    // Global CurcumaLogger is at 0 to suppress EnergyCalculator line-search spam.
     if (verbosity >= 1) {
-        CurcumaLogger::result_raw(fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}} {7: ^{1}}", "", 15, "Step", "Current Energy", "Energy Change", "RMSD Change", "Gradient Norm", "time"));
-        CurcumaLogger::result_raw(fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}} {7: ^{1}}", "", 15, " ", "[Eh]", "[kJ/mol]", "[A]", "[Eh/Bohr]", "[s]"));
+        fmt::print("\n{0: ^{1}} {2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", "Step", 15, "Current Energy", "Energy Change", "RMSD Change", "Gradient Norm", "time");
+        fmt::print("{0: ^{1}} {2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", " ", 15, "[Eh]", "[kJ/mol]", "[A]", "[Eh/Bohr]", "[s]");
     }
 
     try {
+        Molecule previous_molecule = m_molecule; // For RMSD between consecutive steps
+        auto step_start_time = std::chrono::high_resolution_clock::now(); // For per-step timing
+
         // Main optimization loop (Template Method Pattern)
         for (m_current_iteration = 1; m_current_iteration <= m_context.max_iterations; ++m_current_iteration) {
 
@@ -315,7 +310,14 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             Vector step = CalculateOptimizationStep(current_coords, m_current_gradient);
 
             if (step.norm() == 0) {
-                CurcumaLogger::warn("Zero optimization step calculated - possible convergence or error");
+                // Zero step may indicate convergence (solver decided no more progress)
+                // or an error. Check method-specific convergence before giving up.
+                if (CheckMethodSpecificConvergence()) {
+                    m_converged = true;
+                    m_convergence_reason = "Optimizer reports convergence (zero step)";
+                } else {
+                    CurcumaLogger::warn("Zero optimization step - possible convergence or error");
+                }
                 break;
             }
 
@@ -324,7 +326,16 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             double new_energy;
             Vector new_gradient;
 
-            if (!evaluateEnergyAndGradient(new_coords, new_energy, new_gradient)) {
+            // If subclass already evaluated energy during step (e.g. LBFGSpp SingleStep),
+            // use the pre-computed values instead of redundant re-evaluation
+            if (m_context.step_evaluated_energy) {
+                new_energy = m_context.step_energy;
+                new_gradient = m_context.step_gradient;
+                m_context.step_evaluated_energy = false; // reset for next iteration
+                // Still need to update molecule geometry
+                CoordinatesToMolecule(new_coords, m_molecule);
+            } else if (!evaluateEnergyAndGradient(new_coords, new_energy, new_gradient)) {
+                CurcumaLogger::set_verbosity(saved_global_verbosity);
                 CurcumaLogger::error_fmt("Energy evaluation failed at iteration {}", m_current_iteration);
                 return OptimizationResult::failed_result("Energy evaluation failed during optimization");
             }
@@ -332,6 +343,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             // Check for energy rise limit
             double energy_change_kjmol = (new_energy - m_current_energy) * CURCUMA_EH_TO_KJMOL;
             if (energy_change_kjmol > m_context.max_energy_rise) {
+                CurcumaLogger::set_verbosity(saved_global_verbosity);
                 CurcumaLogger::warn_fmt("Energy rise ({:.2f} kJ/mol) exceeds limit ({:.1f} kJ/mol)",
                     energy_change_kjmol, m_context.max_energy_rise);
                 return OptimizationResult::failed_result("Energy rise exceeded maximum allowed");
@@ -340,11 +352,9 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             // Update molecule geometry
             CoordinatesToMolecule(new_coords, m_molecule);
 
-            // Calculate RMSD change
-            double rmsd_change = 0.0;
-            if (m_trajectory.size() > 0) {
-                rmsd_change = calculateRMSD(m_molecule, m_trajectory.back());
-            }
+            // Calculate RMSD change between consecutive steps
+            double rmsd_change = calculateRMSD(m_molecule, previous_molecule);
+            previous_molecule = m_molecule;
 
             // Update state (method-specific)
             UpdateOptimizerState(new_coords, new_gradient, new_energy);
@@ -352,14 +362,16 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             // Update common state
             m_current_energy = new_energy;
             m_current_gradient = new_gradient;
-            updateTrajectory(m_molecule, new_energy);
+            if (m_context.write_trajectory)
+                updateTrajectory(m_molecule, new_energy);
 
             // Log progress - table row every iteration
-            if (CurcumaLogger::get_verbosity() >= 1) {
+            if (verbosity >= 1) {
                 auto now = std::chrono::high_resolution_clock::now();
-                double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_start_time).count() / 1000.0;
+                double step_time = std::chrono::duration_cast<std::chrono::milliseconds>(now - step_start_time).count() / 1000.0;
+                step_start_time = now;
                 logOptimizationStep(m_current_iteration, new_energy, energy_change_kjmol,
-                    rmsd_change, new_gradient.norm(), elapsed);
+                    rmsd_change, new_gradient.norm(), step_time);
             }
 
             // Check convergence
@@ -383,18 +395,19 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(m_end_time - m_start_time);
         double optimization_time = duration.count() / 1000.0;
 
-        // Final reporting
-        if (m_converged) {
-            CurcumaLogger::success_fmt("Optimization converged after {} iterations", m_current_iteration);
-            CurcumaLogger::success_fmt("Convergence reason: {}", m_convergence_reason);
-        } else {
-            CurcumaLogger::warn_fmt("Optimization did not converge within {} iterations", m_context.max_iterations);
-        }
+        // Restore global verbosity before final reporting
+        CurcumaLogger::set_verbosity(saved_global_verbosity);
 
-        CurcumaLogger::energy_abs(m_current_energy, "Final energy");
-        CurcumaLogger::energy_rel(m_current_energy - m_initial_energy, "Energy change");
-        CurcumaLogger::param("Final gradient norm", fmt::format("{:.6e} Eh/Bohr", m_current_gradient.norm()));
-        CurcumaLogger::param("Optimization time", fmt::format("{:.3f} seconds", optimization_time));
+        // Final reporting — uses local verbosity parameter
+        if (verbosity >= 1) {
+            if (m_converged) {
+                CurcumaLogger::success_fmt("Optimization converged after {} iterations", m_current_iteration);
+            } else {
+                CurcumaLogger::warn_fmt("Optimization did not converge within {} iterations", m_context.max_iterations);
+            }
+            CurcumaLogger::energy_abs(m_current_energy, "Final energy");
+            CurcumaLogger::energy_rel(m_current_energy - m_initial_energy, "Energy change");
+        }
 
         if (m_context.write_trajectory && !m_context.trajectory_filename.empty()) {
             // Write trajectory file
@@ -412,8 +425,10 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
         result.final_gradient = m_current_gradient;
         result.final_energy_change = (m_current_energy - m_initial_energy) * CURCUMA_EH_TO_KJMOL;
         result.final_gradient_norm = m_current_gradient.norm();
-        result.trajectory = m_trajectory;
-        result.energy_trajectory = m_energy_trajectory;
+        result.trajectory = std::move(m_trajectory);
+        result.energy_trajectory = std::move(m_energy_trajectory);
+        m_trajectory.clear();
+        m_energy_trajectory.clear();
 
         if (!m_converged) {
             result.error_message = fmt::format("Did not converge within {} iterations", m_context.max_iterations);
@@ -422,6 +437,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
         return result;
 
     } catch (const std::exception& e) {
+        CurcumaLogger::set_verbosity(saved_global_verbosity);
         CurcumaLogger::error_fmt("Optimization failed with exception: {}", e.what());
         return OptimizationResult::failed_result(e.what());
     }
@@ -514,12 +530,12 @@ void OptimizerDriver::updateTrajectory(const Molecule& new_structure, double ene
     m_energy_trajectory.push_back(energy);
 }
 
-// Claude Generated (Mar 2026): Table-formatted progress output matching CurcumaOpt style
+// Claude Generated (Apr 2026): Table-formatted progress output matching legacy CurcumaOpt style
 void OptimizerDriver::logOptimizationStep(int iteration, double energy, double energy_change,
     double rmsd_change, double gradient_norm, double elapsed_time) const
 {
-    CurcumaLogger::result_raw(fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}",
-        15, iteration, energy, energy_change, rmsd_change, gradient_norm, elapsed_time));
+    fmt::print("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n",
+        15, iteration, energy, energy_change, rmsd_change, gradient_norm, elapsed_time);
 }
 
 double OptimizerDriver::calculateRMSD(const Molecule& mol1, const Molecule& mol2) const

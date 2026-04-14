@@ -18,34 +18,33 @@
  */
 
 #include "optimizer_factory.h"
+#include "ancopt_optimizer.h"
 #include "lbfgspp_optimizer.h"
-// Future includes:
-// #include "internal_lbfgs_optimizer.h"
-// #include "diis_optimizer.h"
-// #include "rfo_optimizer.h"
+#include "native_optimizer_adapters.h"
 
 namespace Optimization {
 
-// Claude Generated - Factory registry initialization
-const std::map<OptimizerType, OptimizerFactory::OptimizerFactoryFunction>
+// Claude Generated (Apr 2026) - Factory registry with all optimizer types
+const std::map<OptimizerType, OptimizerFactory::OptimizerCreator>
     OptimizerFactory::s_factory_registry = {
         { OptimizerType::LBFGSPP, &OptimizerFactory::createLBFGSpp },
-        // Future implementations:
-        // { OptimizerType::INTERNAL_LBFGS, &OptimizerFactory::createInternalLBFGS },
-        // { OptimizerType::DIIS, &OptimizerFactory::createDIIS },
-        // { OptimizerType::RFO, &OptimizerFactory::createRFO }
+        { OptimizerType::ANCOPT, &OptimizerFactory::createANCOpt },
+        { OptimizerType::NATIVE_LBFGS, &OptimizerFactory::createNativeLBFGS },
+        { OptimizerType::NATIVE_DIIS, &OptimizerFactory::createNativeDIIS },
+        { OptimizerType::NATIVE_RFO, &OptimizerFactory::createNativeRFO },
     };
 
 const std::map<OptimizerType, std::string> OptimizerFactory::s_optimizer_descriptions = {
-    { OptimizerType::LBFGSPP, "External LBFGSpp library - robust L-BFGS implementation" },
-    { OptimizerType::INTERNAL_LBFGS, "Internal LBFGS implementation with custom features" },
-    { OptimizerType::DIIS, "Direct Inversion of Iterative Subspace method" },
-    { OptimizerType::RFO, "Rational Function Optimization with Hessian updates" },
-    { OptimizerType::AUTO, "Automatic selection based on system characteristics" }
+    { OptimizerType::LBFGSPP, "External LBFGSpp library - robust L-BFGS" },
+    { OptimizerType::NATIVE_LBFGS, "Native L-BFGS (Nocedal & Wright)" },
+    { OptimizerType::NATIVE_DIIS, "Native DIIS (Pulay 1980)" },
+    { OptimizerType::NATIVE_RFO, "Native RFO (Banerjee et al. 1985)" },
+    { OptimizerType::ANCOPT, "ANCOpt (Grimme, approximate normal coordinates)" },
+    { OptimizerType::AUTO, "Automatic selection based on system size" }
 };
 
 // Claude Generated - Factory methods
-std::unique_ptr<OptimizerInterface> OptimizerFactory::createOptimizer(
+std::unique_ptr<OptimizerDriver> OptimizerFactory::createOptimizer(
     OptimizerType type, EnergyCalculator* energy_calculator)
 {
 
@@ -56,10 +55,11 @@ std::unique_ptr<OptimizerInterface> OptimizerFactory::createOptimizer(
         CurcumaLogger::info("Auto-selected optimizer: LBFGSpp");
     }
 
-    // Find factory function
+    // Find factory function — fall back to LBFGSpp for types not yet in factory (native_* etc.)
     auto it = s_factory_registry.find(type);
     if (it == s_factory_registry.end()) {
-        throw std::invalid_argument("Optimizer type not implemented: " + optimizerTypeToString(type));
+        CurcumaLogger::warn_fmt("Optimizer '{}' not in factory, using LBFGSpp", optimizerTypeToString(type));
+        it = s_factory_registry.find(OptimizerType::LBFGSPP);
     }
 
     // Create optimizer
@@ -74,7 +74,7 @@ std::unique_ptr<OptimizerInterface> OptimizerFactory::createOptimizer(
     return optimizer;
 }
 
-std::unique_ptr<OptimizerInterface> OptimizerFactory::createOptimizer(
+std::unique_ptr<OptimizerDriver> OptimizerFactory::createOptimizer(
     const std::string& method_name, EnergyCalculator* energy_calculator)
 {
 
@@ -82,7 +82,7 @@ std::unique_ptr<OptimizerInterface> OptimizerFactory::createOptimizer(
     return createOptimizer(type, energy_calculator);
 }
 
-std::unique_ptr<OptimizerInterface> OptimizerFactory::createOptimizer(
+std::unique_ptr<OptimizerDriver> OptimizerFactory::createOptimizer(
     const json& config, EnergyCalculator* energy_calculator)
 {
 
@@ -96,7 +96,7 @@ std::unique_ptr<OptimizerInterface> OptimizerFactory::createOptimizer(
     } else if (config.contains("optimethod")) {
         // Legacy compatibility
         int legacy_method = config["optimethod"];
-        type = (legacy_method == 0) ? OptimizerType::LBFGSPP : OptimizerType::INTERNAL_LBFGS;
+        type = (legacy_method == 0) ? OptimizerType::LBFGSPP : OptimizerType::NATIVE_LBFGS;
     }
 
     auto optimizer = createOptimizer(type, energy_calculator);
@@ -148,7 +148,7 @@ OptimizerType OptimizerFactory::selectOptimalOptimizer(const Molecule& molecule,
     if (preferences.contains("prefer_speed")) {
         bool prefer_speed = preferences["prefer_speed"];
         if (prefer_speed && atom_count < 100) {
-            return OptimizerType::INTERNAL_LBFGS; // Faster for small systems
+            return OptimizerType::NATIVE_LBFGS; // Faster for small systems
         }
     }
 
@@ -163,27 +163,29 @@ OptimizerType OptimizerFactory::selectOptimalOptimizer(const Molecule& molecule,
 }
 
 // Claude Generated - Individual factory methods
-std::unique_ptr<OptimizerInterface> OptimizerFactory::createLBFGSpp()
+std::unique_ptr<OptimizerDriver> OptimizerFactory::createLBFGSpp()
 {
     return std::make_unique<LBFGSppOptimizer>();
 }
 
-std::unique_ptr<OptimizerInterface> OptimizerFactory::createInternalLBFGS()
+std::unique_ptr<OptimizerDriver> OptimizerFactory::createANCOpt()
 {
-    throw std::runtime_error("Internal LBFGS optimizer not yet implemented");
-    // return std::make_unique<InternalLBFGSOptimizer>();
+    return std::make_unique<ANCOptimizer>();
 }
 
-std::unique_ptr<OptimizerInterface> OptimizerFactory::createDIIS()
+std::unique_ptr<OptimizerDriver> OptimizerFactory::createNativeLBFGS()
 {
-    throw std::runtime_error("DIIS optimizer not yet implemented");
-    // return std::make_unique<DIISOptimizer>();
+    return std::make_unique<NativeLBFGSAdapter>();
 }
 
-std::unique_ptr<OptimizerInterface> OptimizerFactory::createRFO()
+std::unique_ptr<OptimizerDriver> OptimizerFactory::createNativeDIIS()
 {
-    throw std::runtime_error("RFO optimizer not yet implemented");
-    // return std::make_unique<RFOOptimizer>();
+    return std::make_unique<NativeDIISAdapter>();
+}
+
+std::unique_ptr<OptimizerDriver> OptimizerFactory::createNativeRFO()
+{
+    return std::make_unique<NativeRFOAdapter>();
 }
 
 // Claude Generated - OptimizationDispatcher implementation
@@ -221,10 +223,10 @@ OptimizationResult OptimizationDispatcher::optimizeStructure(
 
         // Extract settings from config
         bool write_trajectory = merged_config.value("write_trajectory", true);
-        bool verbose = merged_config.value("verbose", false);
+        int verbosity = merged_config.contains("verbosity") ? merged_config["verbosity"].get<int>() : 1;
 
         // Perform optimization
-        OptimizationResult result = optimizer->Optimize(write_trajectory, verbose);
+        OptimizationResult result = optimizer->Optimize(write_trajectory, verbosity);
 
         // Update molecule with final structure
         if (result.success) {

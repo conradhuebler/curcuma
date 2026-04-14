@@ -58,8 +58,8 @@ double LBFGSppObjectiveFunction::operator()(const Vector& x, Vector& grad)
             }
         }
 
-        // Calculate energy
-        m_energy_calculator->setMolecule(m_molecule->getMolInfo());
+        // Update geometry only (avoid full GFN-FF reinit via setMolecule)
+        m_energy_calculator->updateGeometry(m_molecule->getGeometry());
 
         double energy;
         if (m_use_numerical_gradient) {
@@ -130,8 +130,13 @@ bool LBFGSppOptimizer::InitializeOptimizerInternal()
             m_context.energy_calculator, &m_molecule, m_context.atom_constraints,
             m_context.use_numerical_gradient, m_context.numerical_gradient_step);
 
-        // Initialize coordinate vector
+        // Initialize coordinate vector and LBFGSpp single-step workspace
         m_current_coordinates = MoleculeToCoordinates(m_molecule);
+        double fx = m_current_energy;
+        int already_converged = m_solver->InitializeSingleSteps(*m_objective, m_current_coordinates, fx);
+        if (already_converged) {
+            m_solver_converged = true;
+        }
 
         CurcumaLogger::success("LBFGSpp optimizer initialized");
         CurcumaLogger::param("Memory parameter (m)", m_lbfgs_m);
@@ -150,40 +155,63 @@ bool LBFGSppOptimizer::InitializeOptimizerInternal()
 Vector LBFGSppOptimizer::CalculateOptimizationStep(const Vector& current_coordinates,
     const Vector& gradient)
 {
+    // Update current coordinates
+    m_current_coordinates = current_coordinates;
+    Vector x = current_coordinates;
+    double energy = m_current_energy;
+
     try {
-        // Update current coordinates
-        m_current_coordinates = current_coordinates;
-
-        // Perform single LBFGS step
-        Vector x = current_coordinates;
-
-        // Use SingleStep for step-by-step control
-        double energy;
+        // Perform single LBFGS step — calls objective function internally (line search)
         m_solver->SingleStep(*m_objective, x, energy);
 
         if (m_objective->hasError()) {
             CurcumaLogger::warn("LBFGSpp objective function reported error");
             m_objective->clearError();
-            return Vector::Zero(current_coordinates.size()); // Zero step on error
+            return Vector::Zero(current_coordinates.size());
         }
 
-        // Check solver convergence
-        m_solver_converged = false; // Updated by CheckMethodSpecificConvergence()
+        // Check if LBFGSpp considers itself converged
+        m_solver_converged = m_solver->isConverged();
 
-        // Calculate step
-        Vector step = x - current_coordinates;
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info_fmt("LBFGSpp step norm: {:.6e}", step.norm());
-            CurcumaLogger::info_fmt("LBFGSpp convergence: {}", m_solver_converged ? "Yes" : "No");
+    } catch (const std::logic_error& e) {
+        // LBFGSpp throws logic_error when line search step < min_step
+        if (m_solver->Step() < 1e-8) {
+            m_solver_converged = true;
+        } else {
+            CurcumaLogger::warn_fmt("LBFGSpp logic error: {}", e.what());
         }
-
-        return step;
-
-    } catch (const std::exception& e) {
-        CurcumaLogger::error_fmt("LBFGSpp step calculation failed: {}", e.what());
+        return Vector::Zero(current_coordinates.size());
+    } catch (const std::runtime_error& e) {
+        // Runtime error from line search (step too small) typically means convergence
+        CurcumaLogger::warn_fmt("LBFGSpp runtime error: {}", e.what());
+        m_solver_converged = true;
         return Vector::Zero(current_coordinates.size());
     }
+
+    // SingleStep already evaluated energy+gradient at new coordinates —
+    // signal to OptimizerDriver to skip redundant re-evaluation
+    m_context.step_evaluated_energy = true;
+    m_context.step_energy = energy;
+    m_context.step_gradient = m_solver->final_grad();
+
+    // Apply constraints to the pre-computed gradient
+    if (m_context.use_constraints && !m_context.atom_constraints.empty()) {
+        for (size_t i = 0; i < m_context.atom_constraints.size() && i < static_cast<size_t>(m_molecule.AtomCount()); ++i) {
+            if (m_context.atom_constraints[i] == 0) {
+                m_context.step_gradient[3 * i] = 0.0;
+                m_context.step_gradient[3 * i + 1] = 0.0;
+                m_context.step_gradient[3 * i + 2] = 0.0;
+            }
+        }
+    }
+
+    Vector step = x - current_coordinates;
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info_fmt("LBFGSpp step norm: {:.6e}", step.norm());
+    }
+
+    return step;
 }
 
 bool LBFGSppOptimizer::CheckMethodSpecificConvergence() const

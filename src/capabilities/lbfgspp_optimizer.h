@@ -106,14 +106,14 @@ public:
     LBFGSppOptimizer();
     virtual ~LBFGSppOptimizer() = default;
 
-    // OptimizerInterface implementation
+    // Method identification
     std::string getName() const override { return "LBFGSpp External Library"; }
     OptimizerType getType() const override { return OptimizerType::LBFGSPP; }
     bool supportsConstraints() const override { return true; }
     bool requiresHessian() const override { return false; }
     std::vector<std::string> getRequiredParameters() const override;
 
-    json GetDefaultConfiguration() const override;
+    json GetDefaultConfiguration() const;
 
     // Configuration accessors
     void setMemoryParameter(int m) { m_lbfgs_m = m; }
