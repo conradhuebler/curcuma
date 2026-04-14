@@ -240,7 +240,7 @@ public:
     ANCOptimizer();
     virtual ~ANCOptimizer() = default;
 
-    // OptimizerInterface implementation
+    // Method identification
     std::string getName() const override {
         return "AncOpt (Approximate Normal Coordinate Optimizer)";
     }
@@ -256,7 +256,7 @@ public:
         return {"maxdispl", "hlow", "hmax", "maxmicro", "model_hessian"};
     }
 
-    json GetDefaultConfiguration() const override;
+    json GetDefaultConfiguration() const;
 
     // Configuration setters
     void setMaxDisplacement(double maxd) { m_maxdispl = maxd; }

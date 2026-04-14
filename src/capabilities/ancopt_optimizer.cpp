@@ -414,10 +414,13 @@ void ANCOptimizer::UpdateOptimizerState(const Vector& new_coordinates,
 }
 
 void ANCOptimizer::FinalizeOptimizationInternal() {
-    // Cleanup
-    if (m_anc) {
-        m_anc->deallocate();
-    }
+    // Explicitly release ANC matrices before the optimizer object is destroyed.
+    // This avoids heap-corruption crashes (signal 11 in __libc_free) that occur
+    // when large Eigen allocations are freed in the wrong order during destruction.
+    m_anc.reset();
+    m_displ.resize(0);
+    m_gint.resize(0);
+    m_gint_old.resize(0);
 
     CurcumaLogger::success("AncOpt optimization finalized");
 }

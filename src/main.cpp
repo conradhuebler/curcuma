@@ -1427,7 +1427,45 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
 // Additional capability handlers - Claude Generated
 int executeOptimization(const json& controller, int argc, char** argv) {
     if (argc < 3) {
-        ParameterRegistry::getInstance().printHelp("opt");
+        fmt::print("\nUsage: curcuma -opt input.xyz [parameters]\n\n");
+        fmt::print("Basic:\n");
+        fmt::print("  -method <name>       Energy method: uff, gfnff, gfn2, eht, ... (default: gfnff)\n");
+        fmt::print("  -optimizer <name>    Optimization algorithm (default: auto)\n");
+        fmt::print("                         auto      - automatic selection based on system size\n");
+        fmt::print("                         lbfgspp   - external LBFGSpp library (robust, recommended)\n");
+        fmt::print("                         lbfgs     - native Curcuma L-BFGS (two-loop recursion)\n");
+        fmt::print("                         diis      - native DIIS acceleration (Pulay 1980)\n");
+        fmt::print("                         rfo       - native RFO eigenvector following (Banerjee 1985)\n");
+        fmt::print("                         ancopt    - approximate normal coordinate optimizer (Grimme)\n");
+        fmt::print("  -charge <n>          Molecular charge (default: 0)\n");
+        fmt::print("  -spin <n>            Spin multiplicity (default: 0)\n");
+        fmt::print("  -threads <n>         Parallel threads (default: 1)\n");
+        fmt::print("  -verbosity <n>       Output level: 0=silent, 1=table, 2=detailed, 3=debug (default: 1)\n\n");
+        fmt::print("Convergence:\n");
+        fmt::print("  -energy_threshold <f>    Energy change [kJ/mol] (default: 0.1)\n");
+        fmt::print("  -rmsd_threshold <f>      RMSD change [Angstrom] (default: 0.01)\n");
+        fmt::print("  -gradient_threshold <f>  Gradient norm [Eh/Bohr] (default: 5e-4)\n");
+        fmt::print("  -max_iterations <n>      Max steps (default: 5000)\n");
+        fmt::print("  -convergence_count <n>   Criteria bit field: 1=energy, 2=RMSD, 4=gradient (default: 7=all)\n");
+        fmt::print("  -max_energy_rise <f>     Abort if energy rises by more than this [kJ/mol] (default: 100)\n\n");
+        fmt::print("Output:\n");
+        fmt::print("  -write_trajectory <0|1>  Write .trj.xyz file (default: 1)\n\n");
+        fmt::print("L-BFGS tuning (lbfgspp optimizer):\n");
+        fmt::print("  -lbfgs_m <n>             Memory: number of stored steps (default: 2000)\n");
+        fmt::print("  -lbfgs_line_search <n>   Line search: 1=Armijo, 2=Wolfe, 3=StrongWolfe, 4=Backtrack (default: 3)\n");
+        fmt::print("  -lbfgs_max_line_search <n>  Max line search iterations (default: 20)\n");
+        fmt::print("  -lbfgs_min_step <f>      Minimum step size (default: 1e-4)\n");
+        fmt::print("  -lbfgs_ftol <f>          Armijo sufficient-decrease parameter (default: 1e-4)\n");
+        fmt::print("  -lbfgs_wolfe <f>         Wolfe curvature parameter (default: 0.9)\n\n");
+        fmt::print("Native optimizer tuning (lbfgs/diis/rfo):\n");
+        fmt::print("  -diis_history <n>        DIIS stored error vectors (default: 5)\n");
+        fmt::print("  -diis_start <n>          First iteration with DIIS extrapolation (default: 5)\n");
+        fmt::print("  -rfo_lambda <f>          RFO initial trust radius (default: 0.1)\n\n");
+        fmt::print("Examples:\n");
+        fmt::print("  curcuma -opt molecule.xyz\n");
+        fmt::print("  curcuma -opt molecule.xyz -method gfnff -optimizer lbfgspp\n");
+        fmt::print("  curcuma -opt molecule.xyz -method gfn2 -gradient_threshold 1e-4 -max_iterations 1000\n");
+        fmt::print("  curcuma -opt molecule.xyz -method uff -verbosity 0   (silent)\n");
         return 0;
     }
 
