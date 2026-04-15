@@ -9330,10 +9330,12 @@ Matrix GFNFF::NumGradFixedCharges(double dx)
             m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
 
             // Update geometry AND recalculate CN (but NOT EEQ charges)
+            // distributeD3CN must also be called so bond r0 = (r0_base + cnfak*CN)*ff updates correctly
             m_forcefield->UpdateGeometry(m_geometry_bohr);
             auto cn_vec_plus = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
             Vector cn_plus = Vector::Map(cn_vec_plus.data(), cn_vec_plus.size()).eval();
             m_forcefield->distributeCNOnly(cn_plus);
+            m_forcefield->distributeD3CN(cn_plus);
             double E_plus = m_forcefield->Calculate(false);
 
             // Backward perturbation
@@ -9343,6 +9345,7 @@ Matrix GFNFF::NumGradFixedCharges(double dx)
             auto cn_vec_minus = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
             Vector cn_minus = Vector::Map(cn_vec_minus.data(), cn_vec_minus.size()).eval();
             m_forcefield->distributeCNOnly(cn_minus);
+            m_forcefield->distributeD3CN(cn_minus);
             double E_minus = m_forcefield->Calculate(false);
 
             // Central difference
@@ -9359,6 +9362,7 @@ Matrix GFNFF::NumGradFixedCharges(double dx)
     auto cn_vec_orig = CNCalculator::calculateGFNFFCN(m_atoms, original_geometry_bohr);
     Vector cn_orig = Vector::Map(cn_vec_orig.data(), cn_vec_orig.size()).eval();
     m_forcefield->distributeCNOnly(cn_orig);
+    m_forcefield->distributeD3CN(cn_orig);
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::result_fmt("Fixed-charge numerical gradient computed: norm = {:.6e} Eh/Bohr",
