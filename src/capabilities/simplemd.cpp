@@ -3086,6 +3086,11 @@ bool SimpleMD::WriteGeometry()
     TriggerWriteRestart();
     m_molecule.setGeometry(geometry);
 
+    // Claude Generated - Fire live update callback for GUI visualization (Qurcuma integration)
+    if (m_stepCallback) {
+        m_stepCallback(m_molecule, static_cast<int>(m_step), m_Epot, m_Ekin);
+    }
+
     // Claude Generated (Nov 2025): Write VTF trajectory for CG systems
     if (m_is_cg_system && m_cg_write_vtf) {
         m_molecule.setEnergy(m_Epot);

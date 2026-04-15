@@ -273,7 +273,23 @@ public:
         ParameterRegistry::getInstance().printHelp("opt");
     }
 
+    /**
+     * @brief Register a callback for real-time geometry updates during optimization.
+     *
+     * Claude Generated - Interactive Simulation Integration (Qurcuma)
+     *
+     * Called after each accepted optimization step (inside LBFGSOptimise / GPTLBFGS).
+     * Enables live visualization of the optimization trajectory in GUI applications.
+     *
+     * @param callback Invoked as: callback(molecule, iteration, energy [Eh])
+     */
+    inline void setStepCallback(std::function<void(const Molecule&, int, double)> callback)
+    {
+        m_optCallback = callback;
+    }
+
 private:
+    std::function<void(const Molecule&, int, double)> m_optCallback;  // Claude Generated - Live update callback for GUI
     /* Lets have this for all modules */
     inline nlohmann::json WriteRestartInformation() override { return json(); }
 

@@ -174,8 +174,24 @@ public:
     std::vector<Molecule*> UniqueMolecules() const { return m_unique_structures; }
     void printHelp() const;
 
+    /**
+     * @brief Register a callback for real-time geometry updates during MD simulation.
+     *
+     * Claude Generated - Interactive Simulation Integration (Qurcuma)
+     *
+     * Called inside WriteGeometry() every dump_frequency steps.
+     * Enables live visualization in GUI applications without file I/O polling.
+     *
+     * @param callback Invoked as: callback(molecule, step, Epot [Eh], Ekin [Eh])
+     */
+    inline void setStepCallback(std::function<void(const Molecule&, int, double, double)> callback)
+    {
+        m_stepCallback = callback;
+    }
+
 private:
     std::function<void(void)> ThermostatFunction;
+    std::function<void(const Molecule&, int, double, double)> m_stepCallback;  // Claude Generated - Live update callback for GUI
     void PrintStatus() const;
 
     /* Lets have this for all modules */

@@ -689,6 +689,10 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
             previous = next;
             next.setEnergy(final_energy);
             intermediate->push_back(next);
+            // Claude Generated - Fire live update callback for GUI visualization (Qurcuma integration)
+            if (m_optCallback) {
+                m_optCallback(next, static_cast<int>(intermediate->size()) - 1, final_energy);
+            }
             next.appendXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
 
         } else {
@@ -940,6 +944,10 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
             previous = next;
             next.setEnergy(final_energy);
             intermediate->push_back(next);
+            // Claude Generated - Fire live update callback for GUI visualization (Qurcuma integration)
+            if (m_optCallback) {
+                m_optCallback(next, static_cast<int>(intermediate->size()) - 1, final_energy);
+            }
             next.appendXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
 
         } else {
