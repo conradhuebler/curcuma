@@ -120,10 +120,11 @@ struct ModelHessianParameters {
 class ANCOptimizer : public OptimizerDriver {
 private:
     // ANC-specific parameters
-    double m_maxdispl = 0.3; // Maximum displacement in ANC (Bohr)
+    double m_maxdispl = 1.0; // Maximum displacement per ANC component (Bohr) — XTB setparam.f90:213
     double m_hlow = 0.01; // Lower frequency cutoff
     double m_hmax = 5.0; // Upper frequency cutoff
-    int m_maxmicro = 25; // Max micro-iterations before ANC regeneration
+    int m_maxmicro = 20; // Max micro-iterations before ANC regeneration (XTB setparam.f90:209)
+    int m_maxmicro_initial = 20; // Initial maxmicro, used as base for ramp-up cap (XTB optimizer.f90:407)
     int m_micro_current = 0; // Current micro-iteration
 
     ModelHessianParameters m_model_hess_params;
@@ -146,6 +147,11 @@ private:
     double m_gnorm_old = 0.0; // Previous gradient norm
     double m_depred = 0.0; // Predicted energy change
 
+    // Warm-start vector for Lanczos RF solver (invalidated on ANC regeneration).
+    // Cf. XTB optimizer.f90:691 — steepest-descent start in cycle 1, previous
+    // Ritz vector thereafter. Dramatically reduces Lanczos iteration count.
+    Vector m_last_rf_eigenvector;
+
     // Convergence parameters (from XTB)
     double m_ethr = 5e-6; // Energy threshold (Eh)
     double m_gthr = 1e-3; // Gradient threshold (Eh/Bohr)
@@ -154,15 +160,21 @@ private:
     // Micro-iteration control
     bool m_needs_anc_regeneration = true;
 
-    // Trust radius (Claude Generated Mar 2026): adaptive step size control.
-    // Limits the RF step norm to prevent overshooting when the model Hessian
-    // is too soft. Updated each iteration based on actual vs. predicted ΔE.
-    // Initial value: 0.05 Bohr = 0.026 Å (conservative start for all methods).
-    double m_trust_radius = 0.05 * 0.529177; // in Å (= 0.05 Bohr)
-
     // Energy tracking for convergence (Bug 3 fix)
     double m_energy_change = 0.0;   // ΔE from last step (Hartree)
     double m_previous_energy = 0.0; // Energy before current step
+
+    // Phase timing accumulators (printed at verbosity >= 2 in Finalize).
+    // Helps identify per-iter hotspots during optimization.
+    double m_time_anc_regen = 0.0;  // ANC regeneration (model Hessian + project + eigendecomp)
+    double m_time_bfgs = 0.0;        // BFGS/Powell Hessian update
+    double m_time_rf_step = 0.0;     // Rational function step (total, for cross-check)
+    double m_time_rf_lanczos = 0.0;  // Lanczos-only time
+    double m_time_rf_fallback = 0.0; // Full-eigendecomp fallback time
+    double m_time_transform = 0.0;   // Gradient transform + cartesian backtransform
+    int m_rf_lanczos_calls = 0;      // Count of Lanczos successful calls
+    int m_rf_fallback_calls = 0;     // Count of full-eigendecomp fallback calls
+    int m_rf_lanczos_iters_total = 0; // Sum of Lanczos iterations used (for avg)
 
 protected:
     // OptimizerDriver interface implementation
@@ -197,9 +209,44 @@ protected:
      * @brief Rational Function step calculation
      * Solves augmented eigenvalue problem for displacement
      * Ported from XTB optimizer.f90:676-729
+     *
+     * For N = nvar+1 >= 50 uses iterative Lanczos (O(N^2) per iter, a few iters total);
+     * for smaller systems or on Lanczos failure, falls back to full SelfAdjointEigenSolver.
      */
     Vector calculateRationalFunctionStep(const Vector& gradient_internal,
                                          const Matrix& hessian_internal);
+
+    /**
+     * @brief Lanczos iteration for the lowest eigenpair of the augmented RF matrix.
+     *
+     * Computes the lowest eigenvalue/eigenvector of the implicit augmented matrix
+     *   A_aug = [[H, g], [g^T, 0]]   (size (nvar+1) x (nvar+1))
+     * using symmetric Lanczos with full reorthogonalization and warm-start.
+     *
+     * The matvec is evaluated implicitly — A_aug is never materialized — which
+     * eliminates an O(nvar^2) matrix allocation + copy per RF call at large nvar.
+     *
+     * Parameters:
+     *   hessian         : nvar x nvar symmetric matrix H
+     *   gradient        : nvar vector g
+     *   start_vector    : normalized initial vector, length nvar+1
+     *   out_eigenvector : Ritz vector on success (length nvar+1)
+     *   out_eigenvalue  : Ritz value on success
+     *   m_max           : max Lanczos iterations (default 100)
+     *   tol             : relative residual threshold (default 1e-6)
+     *
+     * Returns true on convergence. If false, the outputs are undefined.
+     *
+     * Reference: XTB optimizer.f90 solver_sdavidson. Lanczos gives equivalent
+     * convergence on extremal eigenvalues of dense matrices and is simpler.
+     */
+    bool lanczosLowestEigenpair(const Matrix& hessian,
+                                const Vector& gradient,
+                                const Vector& start_vector,
+                                Vector& out_eigenvector,
+                                double& out_eigenvalue,
+                                int m_max = 100,
+                                double tol = 1e-6);
 
     /**
      * @brief BFGS Hessian update

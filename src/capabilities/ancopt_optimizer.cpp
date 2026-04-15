@@ -11,14 +11,26 @@
  * (at your option) any later version.
  */
 
+// Route Eigen dense matrix ops (GEMV/GEMM) to BLAS if available. This is the
+// same pattern used in eeq_solver.cpp. Must be defined before any Eigen header.
+// For nvar~700 the H*v matvec in the Lanczos inner loop dominates the RF step;
+// BLAS GEMV is roughly 5x faster than Eigen's generic path on typical hardware.
+#ifndef EIGEN_USE_BLAS
+#define EIGEN_USE_BLAS
+#endif
+
 #include "ancopt_optimizer.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/molecule.h"
 #include "src/tools/geometry.h"
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iostream>
+#include <limits>
+#include <vector>
 
 namespace Optimization {
 
@@ -80,30 +92,84 @@ bool ANCCoordinates::generateANC(const Matrix& cartesian_hessian, const Vector& 
         }
     }
 
-    // Select nvar eigenvectors as basis (skip rotations/translations)
-    int skip = is_linear ? 5 : 6; // 3 translations + 2/3 rotations
-    int start_idx = skip;
+    // Bug 4 Fix (Apr 2026): Apply detrotra8 — physics-based T/R mode identification.
+    // XTB calls detrotra8() AFTER diagonalization (type/anc.f90 Zeile 167).
+    // It distorts the geometry along each low-frequency mode and measures how much
+    // interatomic distances change. True T/R modes don't change distances → eigenvalue
+    // is zeroed. This is robust against imperfect T/R projection before diagonalization.
+    // Reference: external/xtb/src/detrotra.f90 detrotra8()
+    {
+        struct ModeMetric { double metric; int index; };
+        std::vector<ModeMetric> tr_metrics;
+        tr_metrics.reserve(12);
 
-    // Check if we have enough eigenvectors
-    if (n3 - skip < nvar) {
-        CurcumaLogger::warn("Not enough eigenvectors after projection, using all available");
-        start_idx = std::max(0, n3 - nvar);
+        for (int ii = 0; ii < n3; ++ii) {
+            if (evals(ii) > 0.05) continue; // only low-frequency modes (detrotra.f90 line 103)
+
+            double c0 = 0.0;
+            for (int i = 0; i < n_atoms; ++i) {
+                for (int j = 0; j < i; ++j) {
+                    // original distance
+                    double dx = xyz(3*i+0) - xyz(3*j+0);
+                    double dy = xyz(3*i+1) - xyz(3*j+1);
+                    double dz = xyz(3*i+2) - xyz(3*j+2);
+                    double a0 = std::sqrt(dx*dx + dy*dy + dz*dz);
+                    // distorted position
+                    double di0 = xyz(3*i+0) + eigenvectors(3*i+0, ii);
+                    double di1 = xyz(3*i+1) + eigenvectors(3*i+1, ii);
+                    double di2 = xyz(3*i+2) + eigenvectors(3*i+2, ii);
+                    double dj0 = xyz(3*j+0) + eigenvectors(3*j+0, ii);
+                    double dj1 = xyz(3*j+1) + eigenvectors(3*j+1, ii);
+                    double dj2 = xyz(3*j+2) + eigenvectors(3*j+2, ii);
+                    double ex = di0-dj0, ey = di1-dj1, ez = di2-dj2;
+                    double b0 = std::sqrt(ex*ex + ey*ey + ez*ez);
+                    c0 += (a0-b0)*(a0-b0);
+                }
+            }
+            // Weight by |eigenvalue| (detrotra.f90 line 122)
+            tr_metrics.push_back({std::sqrt(c0 / n_atoms) * std::abs(evals(ii)), ii});
+        }
+
+        std::sort(tr_metrics.begin(), tr_metrics.end(),
+                  [](const ModeMetric& a, const ModeMetric& b){ return a.metric < b.metric; });
+
+        int nend = is_linear ? 5 : 6;
+        for (int i = 0; i < std::min(nend, (int)tr_metrics.size()); ++i)
+            evals(tr_metrics[i].index) = 0.0; // mark as T/R
     }
 
-    // Copy selected eigenvectors to B matrix (raw eigenvectors, no scaling)
-    // XTB uses eigenvectors directly as ANC basis without frequency-based scaling
-    for (int i = 0; i < nvar && (start_idx + i) < n3; ++i) {
-        B.col(i) = eigenvectors.col(start_idx + i);
-    }
-
-    // Set internal Hessian as diagonal of (damped) eigenvalues - XTB approach
-    // This gives a physically meaningful starting Hessian for the RF step
+    // Bug 5 Fix (Apr 2026): Select nvar modes by threshold (XTB-style) instead of fixed skip.
+    // XTB: iterate from largest eigenvalue downward, include only |eigv| > thr.
+    // 4-stage retry with falling threshold (generate_anc_blowup() Zeile 191-213).
+    // After detrotra8, T/R modes have eigv=0 and are excluded by the threshold.
+    // Sort selected modes ascending afterward (XTB calls sort() Zeile 220).
+    B = Matrix::Zero(n3, nvar);
     hess = Matrix::Zero(nvar, nvar);
-    for (int i = 0; i < nvar; ++i) {
-        int idx = start_idx + i;
-        if (idx < evals.size()) {
-            double ev = std::max(evals(idx), hlow); // Clamp to hlow minimum
-            hess(i, i) = ev;
+    {
+        double thr = 1e-11;
+        int nfound = 0;
+        for (int itry = 0; itry < 4 && nfound < nvar; ++itry) {
+            nfound = 0;
+            B.setZero();
+            hess.setZero();
+            for (int i = n3 - 1; i >= 0 && nfound < nvar; --i) {
+                if (std::abs(evals(i)) > thr) {
+                    B.col(nfound) = eigenvectors.col(i);
+                    hess(nfound, nfound) = std::min(std::max(evals(i), hlow), hmax);
+                    ++nfound;
+                }
+            }
+            if (nfound < nvar) thr *= 0.1;
+        }
+        if (nfound < nvar) {
+            CurcumaLogger::warn_fmt("ANC: only {} of {} modes found — using available", nfound, nvar);
+        }
+        // Modes are in descending eigenvalue order; reverse to ascending (XTB sort())
+        // Reverse columns of B and diagonal of hess
+        for (int i = 0; i < nfound / 2; ++i) {
+            int j = nfound - 1 - i;
+            B.col(i).swap(B.col(j));
+            std::swap(hess(i, i), hess(j, j));
         }
     }
 
@@ -255,14 +321,21 @@ bool ANCOptimizer::InitializeOptimizerInternal() {
 
 Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates,
                                                 const Vector& gradient) {
+    using clk = std::chrono::high_resolution_clock;
+    auto t0 = clk::now();
+
     // Transform Cartesian gradient to internal coordinates
     m_gint_old = m_gint;
     m_gint = m_anc->transformGradientToInternal(gradient);
     m_gnorm_old = m_gnorm;
     m_gnorm = m_gint.norm();
 
+    auto t1 = clk::now();
+    m_time_transform += std::chrono::duration<double>(t1 - t0).count();
+
     // Check if we need to regenerate ANC
     if (m_needs_anc_regeneration || m_micro_current >= m_maxmicro) {
+        auto tr0 = clk::now();
         CurcumaLogger::info("Regenerating ANC (micro-iteration limit reached)");
 
         // Generate new model Hessian
@@ -279,6 +352,14 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
         m_micro_current = 0;
         m_needs_anc_regeneration = false;
 
+        // XTB optimizer.f90:407 — grow maxmicro by 10% each macro cycle, capped at 2x initial.
+        // Rationale: as optimization progresses the Hessian model becomes less critical,
+        // so ANC regeneration can happen less frequently, saving 3x O(N^3) work per skipped regen.
+        if (m_current_iteration > 0) {
+            m_maxmicro = std::min(static_cast<int>(m_maxmicro * 1.1),
+                                  2 * m_maxmicro_initial);
+        }
+
         // Critical: re-project gradient onto NEW ANC basis after regeneration.
         // m_gint was computed above with the OLD B matrix; m_anc->hess now uses the
         // NEW eigenvectors, so mixing them in the RF step would give a garbage direction.
@@ -287,8 +368,11 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
         m_gnorm = m_gint.norm();
         m_gint_old = m_gint;                               // no valid old basis to compare
         m_displ = Vector::Zero(m_anc->nvar);               // old displacement is in old basis → invalid
+        m_last_rf_eigenvector.resize(0);                   // basis change invalidates Lanczos warm-start
+        m_time_anc_regen += std::chrono::duration<double>(clk::now() - tr0).count();
     }
 
+    auto tbfgs0 = clk::now();
     // Update Hessian with BFGS/Powell if we have previous step
     // Guard m_displ.norm() > 1e-10 naturally skips the first step after ANC regeneration
     // (m_displ was zeroed above) and the very first iteration.
@@ -301,24 +385,32 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
             updateHessianPowell(m_anc->hess, m_displ, dg);
         }
     }
+    m_time_bfgs += std::chrono::duration<double>(clk::now() - tbfgs0).count();
 
     // Calculate Rational Function step
+    auto trf0 = clk::now();
     m_displ = calculateRationalFunctionStep(m_gint, m_anc->hess);
+    m_time_rf_step += std::chrono::duration<double>(clk::now() - trf0).count();
 
-    // Claude Generated (Mar 2026): Trust radius step limiting.
-    // Limits the total RF step norm to m_trust_radius (Å).
-    // This prevents overshooting when the model Hessian is too soft.
-    // Each component is also clamped to m_maxdispl (per-component limit from XTB).
-    double displ_norm = m_displ.norm();
-    if (displ_norm > m_trust_radius) {
-        m_displ *= m_trust_radius / displ_norm;  // Scale to trust radius
-    }
-    // Per-component limit (XTB-style maxdispl, in Å)
-    double maxdispl_ang = m_maxdispl * 0.529177; // convert Bohr → Å
+    // XTB optimizer.f90:707-712 — only per-component clipping, no global norm limit.
+    // Earlier Curcuma versions imposed an additional global trust-radius on ||dx||,
+    // which is NOT in the reference. For systems with many internal coordinates the
+    // sqrt(nvar) scaling of the true step norm was shrunk to a tiny per-step radius,
+    // producing "slurring" optimization with many small steps.
+    double maxdispl_ang = m_maxdispl * 0.529177; // Bohr → Å
     for (int i = 0; i < m_displ.size(); ++i) {
         if (std::abs(m_displ(i)) > maxdispl_ang) {
             m_displ(i) = std::copysign(maxdispl_ang, m_displ(i));
         }
+    }
+
+    // XTB: exit micro-loop (= regenerate ANC) if step norm > 2.0 Bohr after iter 2.
+    // This prevents the Hessian from being updated with a garbage step.
+    // Reference: XTB optimizer.f90 relax() Zeile 733-736
+    if (m_micro_current > 2 && m_displ.norm() > 2.0 * 0.529177) {
+        CurcumaLogger::warn_fmt("Large step detected ({:.3f} A), forcing ANC regeneration",
+                                m_displ.norm());
+        m_needs_anc_regeneration = true;
     }
 
     // Predict energy change
@@ -352,22 +444,22 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
 }
 
 bool ANCOptimizer::CheckMethodSpecificConvergence() const {
-    // XTB-style convergence: gradient AND energy conditions.
-    // Reference: XTB optimizer.f90: converged = gconverged AND econverged
+    // XTB convergence: ALL THREE conditions simultaneously.
+    // Reference: XTB optimizer.f90 relax() Zeile 742-747:
+    //   if(abs(echng).lt.ethr .and. gnorm.lt.gthr .and. echng.lt.0) converged=.true.
+    //
+    // Old Curcuma code accepted (|dE| < ethr OR dE < 0) — too loose, caused premature
+    // convergence when energy was still decreasing by large amounts.
     bool grad_converged = m_gnorm < m_gthr;
+    bool energy_small   = std::abs(m_energy_change) < m_ethr;
+    bool energy_lowered = m_energy_change < 0.0;
 
-    bool energy_ok;
-    if (m_current_iteration <= 1) {
-        energy_ok = true;  // First iteration: no previous energy to compare
-    } else if (std::abs(m_energy_change) < m_ethr) {
-        energy_ok = true;  // Within energy threshold (allows tiny fluctuations near minimum)
-    } else {
-        energy_ok = (m_energy_change < 0.0);  // Must be decreasing if not within threshold
-    }
+    // First iteration: no previous energy → skip energy condition
+    bool energy_ok = (m_current_iteration <= 1) || (energy_small && energy_lowered);
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info_fmt("Convergence: gnorm={:.3e} (thr={:.3e}), dE={:.3e} (thr={:.3e})",
-            m_gnorm, m_gthr, m_energy_change, m_ethr);
+        CurcumaLogger::info_fmt("Convergence: gnorm={:.3e} (thr={:.3e}), dE={:.3e} (thr={:.3e}), lowered={}",
+            m_gnorm, m_gthr, m_energy_change, m_ethr, energy_lowered);
     }
 
     return grad_converged && energy_ok;
@@ -381,32 +473,18 @@ void ANCOptimizer::UpdateOptimizerState(const Vector& new_coordinates,
     m_energy_change = new_energy - m_current_energy;
     m_previous_energy = m_current_energy;
 
-    // Claude Generated (Mar 2026): Trust radius adaptation.
-    // Standard Fletcher-Reeves-style update based on actual/predicted ratio.
-    // Reference: Nocedal & Wright "Numerical Optimization", trust region methods.
-    if (m_energy_change > 0.0) {
-        // Energy rose: model Hessian too soft, step too large.
-        // Reduce trust radius aggressively and regenerate ANC from current geometry.
-        m_trust_radius *= 0.25;
-        m_trust_radius = std::max(m_trust_radius, 0.005 * 0.529177); // min ~0.003 Å
-        m_needs_anc_regeneration = true;
-        CurcumaLogger::warn_fmt("Energy rose, trust radius reduced to {:.4f} Å", m_trust_radius);
-    } else if (m_depred < 0.0) {
-        // Energy decreased. Update trust radius based on quality of prediction.
-        double ratio = m_energy_change / m_depred; // ratio > 0 (both negative)
-        double maxtr = m_maxdispl * 0.529177;       // max trust radius in Å
-        if (ratio > 0.75) {
-            // Excellent prediction: increase trust radius
-            m_trust_radius = std::min(m_trust_radius * 2.0, maxtr);
-        } else if (ratio < 0.25) {
-            // Poor prediction (large overshoot): decrease trust radius
-            m_trust_radius *= 0.5;
-            m_trust_radius = std::max(m_trust_radius, 0.005 * 0.529177);
-        }
-        // else (0.25 ≤ ratio ≤ 0.75): keep trust radius unchanged
-    }
-
-    CurcumaLogger::param("Trust radius (Å)", fmt::format("{:.4f}", m_trust_radius));
+    // XTB reference (optimizer.f90 relax()): energy rises are NOT treated specially.
+    // XTB simply continues the micro-loop; BFGS corrects the Hessian and the next
+    // RF step will be better. ANC regeneration happens only after maxmicro steps or
+    // large displacement (dsnrm > 2.0 Bohr) — NOT on every energy rise.
+    //
+    // Old Curcuma code set m_needs_anc_regeneration = true on any energy rise and
+    // reduced trust radius by 0.25x. This caused expensive ANC regeneration (3x O(N³))
+    // on every early-optimization step where energy briefly rises, which is why
+    // the optimizer was slow: ANC was rebuilt every 1-2 steps instead of every 25.
+    //
+    // Fix: only track for convergence check. Large-step exit in CalculateOptimizationStep
+    // handles the case where the step is genuinely too large.
 
     // Store current state
     m_current_energy = new_energy;
@@ -414,6 +492,30 @@ void ANCOptimizer::UpdateOptimizerState(const Vector& new_coordinates,
 }
 
 void ANCOptimizer::FinalizeOptimizationInternal() {
+    // Phase timing summary — shown at verbosity >= 2 for profiling/diagnostics.
+    // Uses fmt::print because CurcumaLogger global verbosity is set to 0
+    // during optimization to suppress EnergyCalculator line-search spam.
+    if (m_context.verbosity >= 2) {
+        const int n_rf = m_rf_lanczos_calls + m_rf_fallback_calls;
+        fmt::print("\nAncOpt phase timings (cumulative seconds):\n");
+        fmt::print("  ANC regeneration    : {:.3f}\n", m_time_anc_regen);
+        fmt::print("  BFGS/Powell update  : {:.3f}\n", m_time_bfgs);
+        fmt::print("  RF step total       : {:.3f}\n", m_time_rf_step);
+        fmt::print("    Lanczos-only      : {:.3f}\n", m_time_rf_lanczos);
+        fmt::print("    Fallback-only     : {:.3f}\n", m_time_rf_fallback);
+        fmt::print("  Gradient transform  : {:.3f}\n", m_time_transform);
+        fmt::print("  RF calls Lanczos    : {}\n", m_rf_lanczos_calls);
+        fmt::print("  RF calls fallback   : {}\n", m_rf_fallback_calls);
+        if (n_rf > 0) {
+            fmt::print("  RF avg time/call    : {:.2f} ms\n",
+                       1000.0 * m_time_rf_step / n_rf);
+        }
+        if (m_rf_lanczos_calls > 0) {
+            fmt::print("  Lanczos avg iters   : {:.1f}\n",
+                       double(m_rf_lanczos_iters_total) / m_rf_lanczos_calls);
+        }
+    }
+
     // Explicitly release ANC matrices before the optimizer object is destroyed.
     // This avoids heap-corruption crashes (signal 11 in __libc_free) that occur
     // when large Eigen allocations are freed in the wrong order during destruction.
@@ -632,6 +734,8 @@ Matrix ANCOptimizer::generateModelHessian(const Molecule& mol) {
     return H;
 }
 
+
+
 bool ANCOptimizer::generateANCFromHessian(const Matrix& cart_hess, const Molecule& mol) {
     // Convert Cartesian coordinates to flat vector
     Vector xyz_flat(3 * mol.AtomCount());
@@ -649,6 +753,149 @@ bool ANCOptimizer::generateANCFromHessian(const Matrix& cart_hess, const Molecul
 // Rational Function Step Calculation
 // ============================================================================
 
+bool ANCOptimizer::lanczosLowestEigenpair(const Matrix& hessian,
+                                          const Vector& gradient,
+                                          const Vector& start_vector,
+                                          Vector& out_eigenvector,
+                                          double& out_eigenvalue,
+                                          int m_max,
+                                          double tol)
+{
+    // Symmetric Lanczos iteration with full reorthogonalization on the implicit
+    // augmented matrix A_aug = [[H, g], [g^T, 0]] (never materialized).
+    // Equivalent role as XTB's solver_sdavidson (optimizer.f90:696) but simpler
+    // for our dense, moderately-sized matrices.
+    //
+    // Numerical notes:
+    //  - Full reorth at each step (V: N x j, cost O(j*N)) keeps Ritz values accurate.
+    //  - Tolerance is on the Ritz residual |beta_j * y_j[last]|, the standard
+    //    exit criterion for Lanczos extremal eigenvalues.
+    //  - Breakdown (beta_j ~ 0) means invariant subspace reached; return current Ritz.
+    const int nvar = static_cast<int>(gradient.size());
+    const int N = nvar + 1;
+    if (hessian.rows() != nvar || hessian.cols() != nvar) return false;
+    if (start_vector.size() != N || N == 0) return false;
+
+    double v0_norm = start_vector.norm();
+    if (v0_norm < 1e-14) return false;
+
+    // Implicit matvec for A_aug:
+    //   w.head(nvar) = H * v.head(nvar) + g * v(nvar)
+    //   w(nvar)      = g . v.head(nvar)
+    // Cost: one H*v (O(nvar^2)) + two AXPYs + one dot (O(nvar)) per iter.
+    auto apply_A = [&](const Eigen::Ref<const Vector>& v, Vector& w) {
+        w.resize(N);
+        w.head(nvar).noalias() = hessian * v.head(nvar);
+        w.head(nvar).noalias() += gradient * v(nvar);
+        w(nvar) = gradient.dot(v.head(nvar));
+    };
+
+    // Cap at problem size (Lanczos cannot exceed dim).
+    m_max = std::min(m_max, N);
+
+    // Matrix scale for residual threshold: |A_aug|_F ≈ sqrt(|H|_F^2 + 2|g|^2).
+    // We compute |H|_F via squaredNorm (O(nvar^2), same cost as one matvec) so
+    // the residual tolerance tracks the matrix magnitude rather than comparing
+    // an absolute residual against a tiny eigenvalue.
+    const double h_norm_sq = hessian.squaredNorm();
+    const double g_norm_sq = gradient.squaredNorm();
+    const double matrix_scale = std::sqrt(h_norm_sq + 2.0 * g_norm_sq) + 1e-12;
+
+    // Lanczos basis V (N x j), tridiagonal coefficients alpha, beta.
+    Matrix V(N, m_max);
+    std::vector<double> alpha; alpha.reserve(m_max);
+    std::vector<double> beta;  beta.reserve(m_max);
+
+    V.col(0) = start_vector / v0_norm;
+
+    Vector w;                     // matvec scratch
+    Vector v_prev = Vector::Zero(N);
+    double beta_prev = 0.0;
+
+    double prev_ritz = std::numeric_limits<double>::max();
+
+    for (int j = 0; j < m_max; ++j) {
+        // w = A * v_j - beta_{j-1} * v_{j-1}
+        apply_A(V.col(j), w);
+        if (j > 0) w.noalias() -= beta_prev * v_prev;
+
+        double a_j = V.col(j).dot(w);
+        alpha.push_back(a_j);
+        w.noalias() -= a_j * V.col(j);
+
+        // Full reorthogonalization against V[:, 0..j] — one Gram-Schmidt pass is
+        // enough at these sizes; skip the "twice is enough" refinement for speed.
+        if (j > 0) {
+            Vector coeffs = V.leftCols(j + 1).transpose() * w;
+            w.noalias() -= V.leftCols(j + 1) * coeffs;
+        }
+
+        double b_j = w.norm();
+        beta.push_back(b_j);
+
+        // Invariant subspace: the current Krylov space is complete, solve on it.
+        const bool breakdown = (b_j < 1e-12);
+
+        // Check convergence via the tridiagonal Ritz value every few steps
+        // (costly to do every step, but O(j^3) is tiny for small j).
+        if (j + 1 >= 3 && (j % 3 == 2 || breakdown || j == m_max - 1)) {
+            const int m = j + 1;
+            Matrix T = Matrix::Zero(m, m);
+            for (int k = 0; k < m; ++k) {
+                T(k, k) = alpha[k];
+                if (k + 1 < m) {
+                    T(k, k + 1) = beta[k];
+                    T(k + 1, k) = beta[k];
+                }
+            }
+            Eigen::SelfAdjointEigenSolver<Matrix> tri_solver(T);
+            if (tri_solver.info() != Eigen::Success) return false;
+
+            double ritz = tri_solver.eigenvalues()(0);
+            Vector y = tri_solver.eigenvectors().col(0);
+
+            // Residual estimate for the Ritz pair. For a true eigenpair of A,
+            // |A*x - ritz*x| ≈ |b_j * y(m-1)|. This is scale-dependent: on the
+            // RF augmented matrix the residual grows with the gradient scale,
+            // so compare against a scale-aware threshold.
+            double residual = std::abs(b_j * y(m - 1));
+
+            // Scale-aware residual threshold. |A_aug|_F is dominated by |H|_F
+            // (gradient contributes 2||g||^2); use the Hessian Frobenius norm
+            // (captured at entry, cheap — O(nvar^2) — amortized over all iters).
+            // Accept convergence when residual is small on the matrix scale.
+            const double scaled_residual_thr = std::max(tol * matrix_scale, tol);
+
+            // Absolute eigenvalue-stability check (XTB david2.f90:154). Only
+            // trust this after a minimum number of Lanczos iterations — early
+            // Ritz values can accidentally repeat on a sparse Krylov basis,
+            // which previously caused false convergence on a wrong eigenvalue
+            // (geometry exploded to NaN on caffeine-sized problems).
+            const bool ritz_stable = (j + 1 >= 5) &&
+                                     std::abs(ritz - prev_ritz) < tol;
+            prev_ritz = ritz;
+
+            if (residual < scaled_residual_thr || breakdown || ritz_stable) {
+                // Convergence (or breakdown): Ritz vector = V[:,0..m-1] * y.
+                out_eigenvector = V.leftCols(m) * y;
+                out_eigenvector.normalize();
+                out_eigenvalue = ritz;
+                m_rf_lanczos_iters_total += m;
+                return true;
+            }
+        }
+
+        if (breakdown) return false; // shouldn't reach here but be explicit
+
+        // Advance.
+        v_prev = V.col(j);
+        beta_prev = b_j;
+        if (j + 1 < m_max) V.col(j + 1) = w / b_j;
+    }
+
+    return false; // m_max exceeded without convergence
+}
+
 Vector ANCOptimizer::calculateRationalFunctionStep(const Vector& gradient_internal,
                                                     const Matrix& hessian_internal) {
     /*
@@ -658,52 +905,98 @@ Vector ANCOptimizer::calculateRationalFunctionStep(const Vector& gradient_intern
      * | H  g | * | dx |     = λ * | dx |
      * | g  0 |   | 1  |           | 1  |
      *
-     * Ported from XTB optimizer.f90:676-729
+     * For small systems (N < 50): full SelfAdjointEigenSolver (O(N^3)).
+     * For large systems: Lanczos with warm-start from previous eigenvector.
+     * Matches XTB's method selection in optimizer.f90:687-699.
+     *
+     * The Lanczos path uses an IMPLICIT matvec — the augmented matrix A_aug
+     * is never materialized, which saves an O(nvar^2) allocation + copy per
+     * call. A_aug is only built for the fallback full eigendecomposition.
      */
 
     int nvar = gradient_internal.size();
     int nvar1 = nvar + 1;
 
-    // Construct augmented Hessian
-    Matrix A_aug = Matrix::Zero(nvar1, nvar1);
-    A_aug.topLeftCorner(nvar, nvar) = hessian_internal;
-    A_aug.block(nvar, 0, 1, nvar) = gradient_internal.transpose();
-    A_aug.block(0, nvar, nvar, 1) = gradient_internal;
-    A_aug(nvar, nvar) = 0.0;
+    Vector eigenvec;
+    double eigenvalue = 0.0;
+    bool lanczos_ok = false;
 
-    // Solve eigenvalue problem
-    Eigen::SelfAdjointEigenSolver<Matrix> solver(A_aug);
-    if (solver.info() != Eigen::Success) {
-        CurcumaLogger::error("RF solver failed - using steepest descent");
-        return -gradient_internal * 0.1; // Fallback
+    using rf_clk = std::chrono::high_resolution_clock;
+
+    // XTB optimizer.f90:687 — iterative solver for nvar1 >= 50.
+    if (nvar1 >= 50) {
+        auto tl0 = rf_clk::now();
+        Vector start(nvar1);
+        const bool have_warm = (m_last_rf_eigenvector.size() == nvar1);
+
+        if (have_warm) {
+            start = m_last_rf_eigenvector;
+        } else {
+            // Steepest-descent initial guess, matches XTB:691-694.
+            start.head(nvar) = -gradient_internal;
+            start(nvar) = 1.0;
+            start.normalize();
+        }
+
+        lanczos_ok = lanczosLowestEigenpair(hessian_internal, gradient_internal,
+                                            start, eigenvec, eigenvalue);
+
+        // Retry from steepest-descent if warm-start failed to converge.
+        if (!lanczos_ok && have_warm) {
+            Vector sd(nvar1);
+            sd.head(nvar) = -gradient_internal;
+            sd(nvar) = 1.0;
+            sd.normalize();
+            lanczos_ok = lanczosLowestEigenpair(hessian_internal, gradient_internal,
+                                                sd, eigenvec, eigenvalue);
+        }
+        m_time_rf_lanczos += std::chrono::duration<double>(rf_clk::now() - tl0).count();
     }
 
-    // Get lowest eigenvalue and corresponding eigenvector
-    // XTB takes the first (lowest/most negative) eigenvector for the downhill step
-    // Reference: XTB optimizer.f90 - lambda = eigv(1)
-    const Vector& eigenvalues = solver.eigenvalues();
-    const Matrix& eigenvectors = solver.eigenvectors();
+    // Fallback for small systems or when Lanczos fails: full eigendecomposition.
+    // Only materialize A_aug on this (hopefully rare) path.
+    if (!lanczos_ok) {
+        auto tf0 = rf_clk::now();
+        ++m_rf_fallback_calls;
+        Matrix A_aug = Matrix::Zero(nvar1, nvar1);
+        A_aug.topLeftCorner(nvar, nvar) = hessian_internal;
+        A_aug.block(nvar, 0, 1, nvar) = gradient_internal.transpose();
+        A_aug.block(0, nvar, nvar, 1) = gradient_internal;
+        // A_aug(nvar, nvar) already 0.
 
-    // Use eigenvector with lowest eigenvalue (index 0 from SelfAdjointEigenSolver)
-    Vector eigenvec = eigenvectors.col(0);
+        Eigen::SelfAdjointEigenSolver<Matrix> solver(A_aug);
+        if (solver.info() != Eigen::Success) {
+            CurcumaLogger::error("RF solver failed - using steepest descent");
+            m_last_rf_eigenvector.resize(0);
+            m_time_rf_fallback += std::chrono::duration<double>(rf_clk::now() - tf0).count();
+            return -gradient_internal * 0.1;
+        }
+        eigenvec = solver.eigenvectors().col(0);
+        eigenvalue = solver.eigenvalues()(0);
+        m_time_rf_fallback += std::chrono::duration<double>(rf_clk::now() - tf0).count();
+    } else {
+        ++m_rf_lanczos_calls;
+    }
 
-    // Extract displacement: eigenvec = [p; s], displacement = p/s
-    // Ensure s > 0 (positive normalization) to get correct direction
+    // Extract displacement: eigenvec = [p; s], displacement = p/s.
     double last_elem = eigenvec(nvar);
     if (std::abs(last_elem) < 1e-10) {
         CurcumaLogger::warn("RF normalization failed - using steepest descent");
+        m_last_rf_eigenvector.resize(0);
         return -gradient_internal * 0.1;
     }
-    // Flip sign if s < 0 to ensure consistent direction
-    if (last_elem < 0.0)
-        eigenvec = -eigenvec;
-    last_elem = eigenvec(nvar);
 
-    Vector displacement = eigenvec.head(nvar) / last_elem;
+    // Consistent sign: ensure the last component is positive so that dividing
+    // by it gives a minimizing direction. Both signs are valid eigenvectors of
+    // the augmented system; this fixes the convention.
+    if (last_elem < 0.0) eigenvec = -eigenvec;
 
-    CurcumaLogger::param("RF eigenvalue", std::to_string(eigenvalues(0)));
+    // Cache Ritz vector as warm-start for next RF call (invalidated on ANC regen).
+    m_last_rf_eigenvector = eigenvec;
 
-    return displacement;
+    CurcumaLogger::param("RF eigenvalue", std::to_string(eigenvalue));
+
+    return eigenvec.head(nvar) / eigenvec(nvar);
 }
 
 // ============================================================================
@@ -736,6 +1029,14 @@ void ANCOptimizer::updateHessianBFGS(Matrix& hessian, const Vector& dx, const Ve
     // BFGS update
     hessian += (dg * dg.transpose()) / dg_dot_dx;
     hessian -= (H_dx * H_dx.transpose()) / dx_H_dx;
+
+    // XTB: clamp diagonal elements to minimum hlow after update.
+    // Prevents the Hessian from becoming too soft, which would cause huge RF steps.
+    // Reference: XTB bfgs.f90 Zeile 96-101: if(abs(hess(ij)).lt.thr) hess(ij)=thr  (thr=0.01)
+    for (int i = 0; i < hessian.rows(); ++i) {
+        if (hessian(i, i) < m_anc->hlow)
+            hessian(i, i) = m_anc->hlow;
+    }
 }
 
 void ANCOptimizer::updateHessianPowell(Matrix& hessian, const Vector& dx, const Vector& dg) {
@@ -922,6 +1223,7 @@ void ANCOptimizer::loadANCParameters(const json& config) {
     }
     if (config.contains("maxmicro")) {
         m_maxmicro = config["maxmicro"].get<int>();
+        m_maxmicro_initial = m_maxmicro; // base for ramp-up cap (XTB optimizer.f90:407)
     }
     if (config.contains("hessian_update")) {
         std::string update_str = config["hessian_update"].get<std::string>();
@@ -990,11 +1292,11 @@ bool ANCOptimizer::checkLinearMolecule(const Molecule& mol) const {
 json ANCOptimizer::GetDefaultConfiguration() const {
     json config = OptimizerDriver::GetDefaultConfiguration();
 
-    config["maxdispl"] = 0.3;
+    config["maxdispl"] = 1.0;               // XTB setparam.f90:213 (was 0.3, ~3x smaller than reference)
     config["hlow"] = 0.01;
     config["hmax"] = 5.0;
-    config["maxmicro"] = 25;
-    config["model_hessian"] = "lindh2007";
+    config["maxmicro"] = 20;                 // XTB setparam.f90:209 (ramps to 2x via optimizer.f90:407)
+    config["model_hessian"] = "lindh1995";   // actual implementation (XTB default = p_modh_old = ddvopt)
     config["s6"] = 30.0;
     config["hessian_update"] = "bfgs";
     config["optimization_level"] = 0; // normal
