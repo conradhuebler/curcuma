@@ -27,7 +27,6 @@
 
 #include <Eigen/Dense>
 
-#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -99,9 +98,8 @@ struct LaunchConfig {
 static inline LaunchConfig getLaunchConfig(int n_elements, int maxBlockSize = 512) {
     LaunchConfig cfg;
     // Adaptive block size based on problem size
-    // IMPORTANT: maxBlockSize must match __launch_bounds__ in gfnff_kernels.cuh
-    // GFNFF_KERNEL_BOUNDS (512,2): max 512 threads - for lightweight pairwise kernels
-    // GFNFF_KERNEL_BOUNDS_HEAVY (256,2): max 256 threads - for register-heavy bonded kernels
+    // IMPORTANT: maxBlockSize must match GFNFF_KERNEL_BOUNDS in gfnff_kernels.cuh
+    // Current: __launch_bounds__(512, 2) - max 512 threads, min 2 blocks/SM
     if (n_elements < 256) {
         cfg.blockSize = 32;    // Single warp - minimal overhead for tiny problems
     } else if (n_elements < 1024) {
@@ -109,7 +107,7 @@ static inline LaunchConfig getLaunchConfig(int n_elements, int maxBlockSize = 51
     } else if (n_elements < 16384) {
         cfg.blockSize = 256;   // Standard - good balance for medium problems
     } else {
-        cfg.blockSize = maxBlockSize;  // Max threads - maximize throughput for large problems
+        cfg.blockSize = maxBlockSize;  // 512 threads - maximize occupancy for large problems
     }
     // Phase 8 (Claude Generated March 2026): min 1 block so n=0 launches a no-op block
     // instead of gridSize=0 (undefined in CUDA). All kernels early-return for i >= n.
@@ -784,26 +782,16 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     upload_covalent_radii(GFNFFParameters::covalent_radii.data(),
                           static_cast<int>(GFNFFParameters::covalent_radii.size()));
 
-    // G1a (Apr 2026): Sort dispersion pairs by idx_i (primary), idx_j (secondary)
-    // to improve L2 cache locality when threads access cx/cy/cz atom coordinates.
-    // Nearby threads → nearby atoms → better cache behavior.
-    auto disp_sorted = params.dispersions;
-    std::sort(disp_sorted.begin(), disp_sorted.end(),
-        [](const GFNFFDispersion& a, const GFNFFDispersion& b) {
-            return (a.i != b.i) ? (a.i < b.i) : (a.j < b.j);
-        });
-
     // Store dispersion pair indices on host for per-step dc6dcn extraction
-    // (must use sorted order to match SoA layout)
     {
-        const int nd = static_cast<int>(disp_sorted.size());
+        const int nd = static_cast<int>(params.dispersions.size());
         m_disp_idx_i_host.resize(nd);
         m_disp_idx_j_host.resize(nd);
         m_h_dc6dcn_ij.resize(nd, 0.0);
         m_h_dc6dcn_ji.resize(nd, 0.0);
         for (int k = 0; k < nd; ++k) {
-            m_disp_idx_i_host[k] = disp_sorted[k].i;
-            m_disp_idx_j_host[k] = disp_sorted[k].j;
+            m_disp_idx_i_host[k] = params.dispersions[k].i;
+            m_disp_idx_j_host[k] = params.dispersions[k].j;
         }
     }
 
@@ -811,28 +799,10 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_topology_charges = params.topology_charges;
 
     // --- Upload static SoA interaction lists ---
-    m_impl->disp.upload(disp_sorted, stream);
-    // G1c: Sort repulsion pairs by idx_i for L2 locality (same as G1a for dispersion)
-    auto bonded_rep_sorted = params.bonded_repulsions;
-    std::sort(bonded_rep_sorted.begin(), bonded_rep_sorted.end(),
-        [](const GFNFFRepulsion& a, const GFNFFRepulsion& b) {
-            return (a.i != b.i) ? (a.i < b.i) : (a.j < b.j);
-        });
-    auto nonbonded_rep_sorted = params.nonbonded_repulsions;
-    std::sort(nonbonded_rep_sorted.begin(), nonbonded_rep_sorted.end(),
-        [](const GFNFFRepulsion& a, const GFNFFRepulsion& b) {
-            return (a.i != b.i) ? (a.i < b.i) : (a.j < b.j);
-        });
-    m_impl->bonded_rep.upload(bonded_rep_sorted, stream);
-    m_impl->nonbonded_rep.upload(nonbonded_rep_sorted, stream);
-    // G1c (Apr 2026): Sort Coulomb pairs by idx_i (primary), idx_j (secondary)
-    // Same L2 locality optimization as G1a for dispersion pairs.
-    auto coul_sorted = params.coulombs;
-    std::sort(coul_sorted.begin(), coul_sorted.end(),
-        [](const GFNFFCoulomb& a, const GFNFFCoulomb& b) {
-            return (a.i != b.i) ? (a.i < b.i) : (a.j < b.j);
-        });
-    m_impl->coulomb.upload(coul_sorted, stream);
+    m_impl->disp.upload(params.dispersions, stream);
+    m_impl->bonded_rep.upload(params.bonded_repulsions, stream);
+    m_impl->nonbonded_rep.upload(params.nonbonded_repulsions, stream);
+    m_impl->coulomb.upload(params.coulombs, stream);
     m_impl->bonds.upload(params.bonds, atom_types, stream);
     m_impl->angles.upload(params.angles, atom_types, stream);
     m_impl->dihedrals.upload(params.dihedrals, params.extra_dihedrals, atom_types, stream);
@@ -912,37 +882,36 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_dEdcn_total.setZero();
 
     // --- Extract per-atom Coulomb self-energy params (for CPU postProcess TERM 2+3) ---
-    // P3a (Apr 2026): chi_base/cnf from pairs; gam/alp from per-atom vectors
+    // Mirrors FFWorkspace::setInteractionLists() lines 90-118
     if (!params.coulombs.empty()) {
         m_coul_chi_base  = Vector::Zero(natoms);
+        m_coul_gam       = Vector::Zero(natoms);
+        m_coul_alp       = Vector::Zero(natoms);
         m_coul_cnf       = Vector::Zero(natoms);
+        m_coul_chi_static= Vector::Zero(natoms);
 
         std::vector<bool> seen(natoms, false);
         for (const auto& c : params.coulombs) {
             if (c.i < natoms && !seen[c.i]) {
                 m_coul_chi_base(c.i)   = c.chi_base_i;
+                m_coul_gam(c.i)        = c.gam_i;
+                m_coul_alp(c.i)        = c.alp_i;
                 m_coul_cnf(c.i)        = c.cnf_i;
+                m_coul_chi_static(c.i) = c.chi_i;
                 seen[c.i] = true;
             }
             if (c.j < natoms && !seen[c.j]) {
                 m_coul_chi_base(c.j)   = c.chi_base_j;
+                m_coul_gam(c.j)        = c.gam_j;
+                m_coul_alp(c.j)        = c.alp_j;
                 m_coul_cnf(c.j)        = c.cnf_j;
+                m_coul_chi_static(c.j) = c.chi_j;
                 seen[c.j] = true;
             }
         }
-        // Per-atom gam/alp from parameter set vectors
-        if (params.eeq_gam.size() == natoms) {
-            m_coul_gam = params.eeq_gam;
-        } else {
-            m_coul_gam = Vector::Zero(natoms);
-        }
-        if (params.eeq_alp.size() == natoms) {
-            m_coul_alp = params.eeq_alp;
-        } else {
-            m_coul_alp = Vector::Zero(natoms);
-        }
         // Upload Coulomb self-energy parameters to GPU for k_coulomb_self kernel
-        setCoulombSelfEnergyParams(m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf);
+        setCoulombSelfEnergyParams(m_coul_chi_base, m_coul_gam, m_coul_alp,
+                                   m_coul_cnf, m_coul_chi_static);
     }
 
     // Store initial charges and E0 from parameter set
@@ -1068,12 +1037,14 @@ void FFWorkspaceGPU::updateBondHBCN(const std::vector<double>& hb_cn_values)
 }
 
 void FFWorkspaceGPU::setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
-                                                  const Vector& alp,     const Vector& cnf)
+                                                  const Vector& alp,     const Vector& cnf,
+                                                  const Vector& chi_static)
 {
     m_coul_chi_base   = chi_base;
     m_coul_gam        = gam;
     m_coul_alp        = alp;
     m_coul_cnf        = cnf;
+    m_coul_chi_static = chi_static;
 
     // Upload Coulomb self-energy parameters to GPU
     // Claude Generated (March 2026): GPU-side Coulomb TERM 2+3 + qtmp
@@ -1543,7 +1514,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.angles.n, 256);  // HEAVY: __launch_bounds__(256,2)
+        LaunchConfig cfg = getLaunchConfig(impl.angles.n);
         k_angles<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.angles.n,
             impl.angles.idx_i.ptr,  impl.angles.idx_j.ptr,  impl.angles.idx_k.ptr,
@@ -1563,7 +1534,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.dihedrals.n, 256);  // HEAVY: __launch_bounds__(256,2)
+        LaunchConfig cfg = getLaunchConfig(impl.dihedrals.n);
         k_dihedrals<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.dihedrals.n,
             impl.dihedrals.idx_i.ptr, impl.dihedrals.idx_j.ptr,
@@ -1583,7 +1554,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.inversions.n, 256);  // HEAVY: __launch_bounds__(256,2)
+        LaunchConfig cfg = getLaunchConfig(impl.inversions.n);
         k_inversions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.inversions.n,
             impl.inversions.idx_i.ptr, impl.inversions.idx_j.ptr,
@@ -1601,7 +1572,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.storsions.n, 256);  // HEAVY: __launch_bounds__(256,2)
+        LaunchConfig cfg = getLaunchConfig(impl.storsions.n);
         k_storsions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.storsions.n,
             impl.storsions.idx_i.ptr, impl.storsions.idx_j.ptr,
@@ -1712,7 +1683,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     if (m_hbond_enabled) {
         // Phase 8: hbonds.n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.hbonds.n, 256);  // HEAVY: __launch_bounds__(256,2)
+        LaunchConfig cfg = getLaunchConfig(impl.hbonds.n);
         k_hbonds<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
             impl.hbonds.n,
             impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr,

@@ -40,6 +40,7 @@
 #include "gfnff_geometry.h"  // Claude Generated (2025): GFN-FF geometry functions
 
 #include <functional>
+#include <set>
 #include <vector>
 #include <unordered_map>  // Claude Generated (February 2026): For term timing storage
 #include <chrono>         // Claude Generated (February 2026): For timing measurements
@@ -602,6 +603,11 @@ protected:
         resetMat(m_gradient_batm);
         resetMat(m_gradient_atm);
     }
+
+    // Phase 1.2: Cached bonded pairs for fast lookup in repulsion calculation (Claude Generated - Dec 2025)
+    // Built once in execute() to avoid O(N_bonds × log(N_bonds)) overhead per energy call
+    std::set<std::pair<int, int>> m_bonded_pairs;
+    bool m_bonded_pairs_cached = false;
 
     // Phase 2: Parameter flags for GFN-FF term control (Claude Generated Dec 2025)
     // These control which energy terms are calculated - saves CPU time for disabled terms

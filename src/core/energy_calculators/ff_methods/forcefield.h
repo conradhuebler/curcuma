@@ -340,6 +340,7 @@ private:
     Vector m_coulomb_gam;        // Chemical hardness (gameeq)
     Vector m_coulomb_alp;        // Chemical softness (alpeeq, squared)
     Vector m_coulomb_cnf;        // CN correction factor (cnf_eeq)
+    Vector m_coulomb_chi_static; // Static chi_eff (legacy fallback)
 
     // Claude Generated (Mar 2026): Per-component CN chain-rule corrections for GradComp
     // These are computed in Calculate() and added in the component getters

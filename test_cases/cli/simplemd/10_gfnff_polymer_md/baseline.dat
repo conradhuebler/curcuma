@@ -20,3 +20,4 @@
 2026-04-12 02:01:55 | b0356ee | gfnff-gpu | threads=4 | 19.99s | 20.0ms/step | ok | after_G1a_pair_sorting_ldg  [vs 1c27621 speedup=1.50x]
 2026-04-12 11:16:51 | 8fdaf90 | gfnff-gpu | threads=4 | 18.96s | 19.0ms/step | ok | after_G2a_launch_bounds_heavy  [vs 1c27621 speedup=1.58x]
 2026-04-12 11:17:27 | 8fdaf90 | gfnff | threads=4 | 148.82s | 148.8ms/step | ok | after_G2a_launch_bounds_heavy  [vs 1c27621 speedup=1.06x]
+2026-04-12 11:35:26 | ccefa22 | gfnff-gpu | threads=4 | 19.04s | 19.0ms/step | ok | after_G1c_pair_sorting  [vs 1c27621 speedup=1.58x]

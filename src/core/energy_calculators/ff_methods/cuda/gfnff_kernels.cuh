@@ -20,20 +20,15 @@
 #include "gfnff_soa.h"
 
 // ============================================================================
-// Launch bounds for optimal GPU occupancy
+// Launch bounds for optimal GPU occupancy (Phase 6: March 2026)
 //
-// GFNFF_KERNEL_BOUNDS: 512 threads, min 2 blocks/SM (1024 threads/SM)
-// - Register budget: 64 regs/thread on sm_75+ (65536 / (2*512))
-// - Good for lightweight pairwise kernels (dispersion, repulsion, coulomb)
-//
-// GFNFF_KERNEL_BOUNDS_HEAVY: 256 threads, min 2 blocks/SM (512 threads/SM)
-// - Register budget: 128 regs/thread on sm_75+ (65536 / (2*256))
-// - Eliminates register spilling in complex bonded kernels
-// - 50% occupancy is sufficient — these kernels are compute-heavy, not memory-bound
-// - k_hbonds was spilling 632 bytes, k_dihedrals 432 bytes with 64 regs
+// GFNFF_KERNEL_BOUNDS: 512 threads, min 2 blocks/SM for good occupancy
+// - Targets compute capability 6.0+ (Pascal and newer)
+// - Balance between register pressure and occupancy
+// - Allows dynamic block sizing via getLaunchConfig() for better throughput
+// - 512 threads gives better occupancy on modern GPUs (RTX 3080, A100, etc.)
 // ============================================================================
 #define GFNFF_KERNEL_BOUNDS __launch_bounds__(512, 2)
-#define GFNFF_KERNEL_BOUNDS_HEAVY __launch_bounds__(256, 2)
 
 // D4 constants (matching d4param_generator.h)
 #define D4_MAX_ELEM 118
@@ -150,7 +145,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_bonds(
 /// GFN-FF angle bending (cosine + distance damping)
 /// E = fc * (cos(theta) - cos(theta0))^2 * damp_ij * damp_jk
 /// Reference: Fortran gfnff_engrad.F90:857-916
-__global__ GFNFF_KERNEL_BOUNDS_HEAVY void k_angles(
+__global__ GFNFF_KERNEL_BOUNDS void k_angles(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -171,7 +166,7 @@ __global__ GFNFF_KERNEL_BOUNDS_HEAVY void k_angles(
 /// GFN-FF dihedral torsions (Fourier + distance damping, standard + extra)
 /// E = V * (1 + cos(n*(phi - phi0) + pi)) * damp
 /// Reference: Fortran gfnff_engrad.F90:1041-1122
-__global__ GFNFF_KERNEL_BOUNDS_HEAVY void k_dihedrals(
+__global__ GFNFF_KERNEL_BOUNDS void k_dihedrals(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -196,7 +191,7 @@ __global__ GFNFF_KERNEL_BOUNDS_HEAVY void k_dihedrals(
 /// GFN-FF out-of-plane inversions
 /// E = fc * (1 - cos(omega)) * damp  or  fc * (cos(omega) - cos(omega0))^2 * damp
 /// Reference: Fortran gfnff_ini.f90 inversion potential
-__global__ GFNFF_KERNEL_BOUNDS_HEAVY void k_inversions(
+__global__ GFNFF_KERNEL_BOUNDS void k_inversions(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -225,7 +220,7 @@ __global__ GFNFF_KERNEL_BOUNDS_HEAVY void k_inversions(
 
 /// Triple bond torsions: E = -erefhalf * cos(2φ) + erefhalf
 /// Reference: ff_workspace_gfnff.cpp:calcSTorsions, Fortran gfnff_engrad.F90:3454
-__global__ GFNFF_KERNEL_BOUNDS_HEAVY void k_storsions(
+__global__ GFNFF_KERNEL_BOUNDS void k_storsions(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -340,7 +335,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_xbonds(
 
 /// Hydrogen bonds (3-body A-H...B): multi-case with neighbor damping
 /// Reference: ff_workspace_gfnff.cpp:calcHydrogenBonds, Fortran abhgfnff_eg*
-__global__ GFNFF_KERNEL_BOUNDS_HEAVY void k_hbonds(
+__global__ GFNFF_KERNEL_BOUNDS void k_hbonds(
     int n,
     const int*    __restrict__ idx_i,     ///< donor A
     const int*    __restrict__ idx_j,     ///< hydrogen H
