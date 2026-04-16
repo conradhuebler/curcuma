@@ -189,9 +189,26 @@ public:
         m_stepCallback = callback;
     }
 
+    /**
+     * @brief Set an external atomic stop flag for GUI-driven unlimited-time MD.
+     *
+     * Claude Generated - Interactive Simulation Integration (Qurcuma)
+     *
+     * When max_time = 0 (unlimited MD), the loop runs until this flag is set true
+     * by an external thread (GUI stop button). Checked each step alongside CheckStop().
+     * The flag pointer must remain valid for the entire duration of start().
+     *
+     * @param flag Pointer to std::atomic<bool> owned by the caller
+     */
+    inline void setExternalStopFlag(std::atomic<bool>* flag)
+    {
+        m_externalStop = flag;
+    }
+
 private:
     std::function<void(void)> ThermostatFunction;
     std::function<void(const Molecule&, int, double, double)> m_stepCallback;  // Claude Generated - Live update callback for GUI
+    std::atomic<bool>* m_externalStop = nullptr;  // Claude Generated - External stop flag for unlimited MD
     void PrintStatus() const;
 
     /* Lets have this for all modules */

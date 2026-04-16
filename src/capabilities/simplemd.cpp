@@ -1591,8 +1591,13 @@ void SimpleMD::start()
     }
     PrintStatus();
 
-    /* Start MD Lopp here */
-    while (m_currentStep < m_maxtime) {
+    /* Start MD loop here.
+     * Claude Generated - Interactive Simulation Integration:
+     * If m_maxtime == 0, run indefinitely until stopped via external stop flag
+     * (m_externalStop) or the standard CheckStop() mechanism. Useful for interactive
+     * GUI-driven MD where the user controls the simulation duration. */
+    while ((m_maxtime <= 0 || m_currentStep < m_maxtime)
+        && !(m_externalStop && m_externalStop->load(std::memory_order_relaxed))) {
         auto step0 = std::chrono::system_clock::now();
 
         if (CheckStop() == true) {
