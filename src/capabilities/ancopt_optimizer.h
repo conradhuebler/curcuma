@@ -152,10 +152,13 @@ private:
     // Ritz vector thereafter. Dramatically reduces Lanczos iteration count.
     Vector m_last_rf_eigenvector;
 
-    // Convergence parameters (from XTB)
-    double m_ethr = 5e-6; // Energy threshold (Eh)
-    double m_gthr = 1e-3; // Gradient threshold (Eh/Bohr)
-    double m_acc = 1.0; // SCC accuracy scaling
+    // Convergence parameters (from XTB, gradient threshold in Eh/Ang).
+    // Note: gradient is converted Eh/Bohr → Eh/Ang in CalculateOptimizationStep
+    // to match the ANC model Hessian units (Eh/Ang²). All gnorm comparisons
+    // (m_gthr, alp thresholds) therefore use Eh/Ang throughout.
+    double m_ethr = 5e-6;    // Energy threshold (Eh)
+    double m_gthr = 1.890e-3; // Gradient threshold (Eh/Ang) — level 0 normal, = 1e-3 Eh/Bohr × A2B
+    double m_acc = 1.0;      // SCC accuracy scaling
 
     // Micro-iteration control
     bool m_needs_anc_regeneration = true;

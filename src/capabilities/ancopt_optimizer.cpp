@@ -324,9 +324,22 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
     using clk = std::chrono::high_resolution_clock;
     auto t0 = clk::now();
 
-    // Transform Cartesian gradient to internal coordinates
+    // Transform Cartesian gradient to internal coordinates.
+    // GFN-FF (and all XTB-interface methods) return the gradient in atomic units
+    // (Eh/Bohr), but Curcuma geometry is stored in Angstrom.  The ANC model
+    // Hessian is therefore built in Eh/Ang².  To keep the RF step and BFGS update
+    // dimensionally consistent (Newton step [Ang], dg·dx [Eh]) we convert here:
+    //
+    //   dE/d(r_Ang) = dE/d(r_Bohr) × d(r_Bohr)/d(r_Ang)
+    //               = gradient_Bohr  × ANGSTROM_TO_BOHR    [Eh/Ang]
+    //
+    // Note: ANGSTROM_TO_BOHR ≈ 1.88973, NOT BOHR_TO_ANGSTROM ≈ 0.52918.
+    // The B matrix is dimensionless (eigenvectors), so g_int = B^T · g_cart_ang
+    // inherits the Eh/Ang unit.  With H [Eh/Ang²] and g [Eh/Ang], the Newton
+    // step p/s has units Ang — consistent with ANC coordinates stored in Ang.
+    const Vector gradient_ang = gradient * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
     m_gint_old = m_gint;
-    m_gint = m_anc->transformGradientToInternal(gradient);
+    m_gint = m_anc->transformGradientToInternal(gradient_ang);
     m_gnorm_old = m_gnorm;
     m_gnorm = m_gint.norm();
 
@@ -364,7 +377,8 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
         // m_gint was computed above with the OLD B matrix; m_anc->hess now uses the
         // NEW eigenvectors, so mixing them in the RF step would give a garbage direction.
         // Re-projecting here ensures m_gint and m_anc->hess are in the same basis.
-        m_gint = m_anc->transformGradientToInternal(gradient);
+        // Use gradient_ang (Eh/Ang) to stay consistent with the model Hessian (Eh/Ang²).
+        m_gint = m_anc->transformGradientToInternal(gradient_ang);
         m_gnorm = m_gint.norm();
         m_gint_old = m_gint;                               // no valid old basis to compare
         m_displ = Vector::Zero(m_anc->nvar);               // old displacement is in old basis → invalid
@@ -416,12 +430,17 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
     // Predict energy change
     m_depred = predictEnergyChange(m_gint, m_displ, m_anc->hess);
 
-    // Bug 2 Fix: Adaptive step size scaling (XTB optimizer.f90 Z. 720-728)
-    // XTB scales the step when gradient norm is small (near convergence)
+    // Adaptive step size scaling (XTB optimizer.f90:648).
+    // XTB thresholds are in Eh/Bohr; m_gnorm is now in Eh/Ang after the unit fix.
+    // Convert XTB values: X Eh/Bohr × ANGSTROM_TO_BOHR (Bohr/Ang) = X Eh/Ang equivalent.
+    // dE/d(r_Ang) = dE/d(r_Bohr) × ANGSTROM_TO_BOHR  → multiply thresholds by A2B.
+    // Note: XTB's elseif chain has dead branches (0.0006 and 0.0003 unreachable
+    // after 0.002 triggers first) — Curcuma's correct descending order is intentional.
     double alp = 1.0;
-    if (m_gnorm < 0.0003) alp = 3.0;
-    else if (m_gnorm < 0.0006) alp = 2.0;
-    else if (m_gnorm < 0.002) alp = 1.5;
+    constexpr double A2B = CurcumaUnit::Length::ANGSTROM_TO_BOHR;
+    if      (m_gnorm < 0.0003 * A2B) alp = 3.0;
+    else if (m_gnorm < 0.0006 * A2B) alp = 2.0;
+    else if (m_gnorm < 0.002  * A2B) alp = 1.5;
 
     // Update internal coordinates with scaled displacement
     m_anc->coord += m_displ * alp;
@@ -1164,51 +1183,56 @@ void ANCOptimizer::setOptimizationLevel(int level) {
      * Ported from XTB get_optthr()
      */
 
+    // Gradient thresholds are stored in Eh/Ang (Curcuma's internal unit after the
+    // Bohr→Ang gradient scaling in CalculateOptimizationStep).
+    // Conversion: X Eh/Bohr = X × ANGSTROM_TO_BOHR Eh/Ang  (A2B ≈ 1.88973).
+    // Reference values from XTB get_optthr() in Eh/Bohr; multiply by A2B for Eh/Ang.
+    const double A2B = CurcumaUnit::Length::ANGSTROM_TO_BOHR;
     switch (level) {
     case -3: // crude
         m_ethr = 5e-4;
-        m_gthr = 1e-2;
+        m_gthr = 1e-2  * A2B;  // 1.890e-2 Eh/Ang
         m_acc = 3.0;
         break;
     case -2: // sloppy
         m_ethr = 1e-4;
-        m_gthr = 6e-3;
+        m_gthr = 6e-3  * A2B;  // 1.134e-2 Eh/Ang
         m_acc = 3.0;
         break;
     case -1: // loose
         m_ethr = 5e-5;
-        m_gthr = 4e-3;
+        m_gthr = 4e-3  * A2B;  // 7.559e-3 Eh/Ang
         m_acc = 2.0;
         break;
     case 0: // normal (default)
         m_ethr = 5e-6;
-        m_gthr = 1e-3;
+        m_gthr = 1e-3  * A2B;  // 1.890e-3 Eh/Ang
         m_acc = 1.0;
         break;
     case 1: // tight
         m_ethr = 1e-6;
-        m_gthr = 8e-4;
+        m_gthr = 8e-4  * A2B;  // 1.512e-3 Eh/Ang
         m_acc = 0.2;
         break;
     case 2: // vtight
         m_ethr = 1e-7;
-        m_gthr = 2e-4;
+        m_gthr = 2e-4  * A2B;  // 3.779e-4 Eh/Ang
         m_acc = 0.05;
         break;
     case 3: // extreme
         m_ethr = 5e-8;
-        m_gthr = 5e-5;
+        m_gthr = 5e-5  * A2B;  // 9.449e-5 Eh/Ang
         m_acc = 0.01;
         break;
     default:
         m_ethr = 5e-6;
-        m_gthr = 1e-3;
+        m_gthr = 1e-3  * A2B;  // 1.890e-3 Eh/Ang
         m_acc = 1.0;
     }
 
     CurcumaLogger::param("Optimization level", level);
     CurcumaLogger::param("Energy threshold", std::to_string(m_ethr) + " Eh");
-    CurcumaLogger::param("Gradient threshold", std::to_string(m_gthr) + " Eh/Bohr");
+    CurcumaLogger::param("Gradient threshold", std::to_string(m_gthr) + " Eh/Ang");
 }
 
 void ANCOptimizer::loadANCParameters(const json& config) {
