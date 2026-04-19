@@ -1921,6 +1921,14 @@ void showStructuredHelp(const std::string& category = "") {
 }
 
 int main(int argc, char **argv) {
+    // RAII guard: prints citation summary and writes BibTeX on any exit path
+    struct CitationGuard {
+        ~CitationGuard() {
+            CitationRegistry::printSummary();
+            CitationRegistry::writeBibTeX();
+        }
+    } citation_guard;
+
 #ifndef _WIN32
 #if __GNUC__
     signal(SIGINT, ctrl_c_handler);
@@ -2119,24 +2127,13 @@ int main(int argc, char **argv) {
     // Try structured dispatch first - Claude Generated
     auto it = CAPABILITY_REGISTRY.find(command);
     if (it != CAPABILITY_REGISTRY.end()) {
-        return it->second.handler(controller, argc, argv);
+        int result = it->second.handler(controller, argc, argv);
+        return result;
     }
 
     // Handle unknown commands
     std::cerr << "Error: Unknown command '-" << command << "'" << std::endl;
     std::cerr << "Use 'curcuma -help' to see available capabilities." << std::endl;
 
-#ifdef C17
-#ifndef _WIN32
-    std::filesystem::remove("stop");
-#endif
-#else
-    remove("stop");
-#endif
-
-    // Print citation summary and write BibTeX file
-    CitationRegistry::printSummary();
-    CitationRegistry::writeBibTeX();
-
-    return 0;
+    return 1;
 }
