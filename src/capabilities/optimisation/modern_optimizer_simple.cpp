@@ -483,12 +483,14 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeWithNativeLBFGS(Mole
         json safe_config = config.is_null() ? json{} : config;
         
         LBFGS optimizer(safe_config.value("memory_size", 10)); // Memory size from config or default
-        
+
         // Setup the optimizer with computational chemistry parameters
         optimizer.setEnergyCalculator(calc);
         optimizer.setOptimizationMethod(LBFGS::Method::LBFGS);
         int verbosity = safe_config.value("verbosity", 1); // Default: minimal output
         optimizer.setVerbosity(verbosity);
+        // Apply config (lbfgs_line_search, rfo_solver, etc.)
+        optimizer.setConfig(safe_config);
         
         // Extract geometry to optimization coordinates
         Vector initial_coords = Vector::Zero(3 * molecule->AtomCount());
@@ -611,13 +613,14 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeWithNativeDIIS(Molec
         json safe_config = config.is_null() ? json{} : config;
         
         LBFGS optimizer(safe_config.value("diis_hist", 10)); // DIIS history size
-        
+
         // Setup the optimizer with DIIS parameters
         optimizer.setEnergyCalculator(calc);
         optimizer.setOptimizationMethod(LBFGS::Method::DIIS);
         optimizer.setDIISParameters(safe_config.value("diis_hist", 10), safe_config.value("diis_start", 5));
         int verbosity = safe_config.value("verbosity", 1); // Default: minimal output
         optimizer.setVerbosity(verbosity);
+        optimizer.setConfig(safe_config);
         
         // Extract geometry to optimization coordinates
         Vector initial_coords = Vector::Zero(3 * molecule->AtomCount());
@@ -739,14 +742,15 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeWithNativeRFO(Molecu
         json safe_config = config.is_null() ? json{} : config;
         
         LBFGS optimizer(10);
-        
+
         // Setup the optimizer with RFO parameters
         optimizer.setEnergyCalculator(calc);
         optimizer.setOptimizationMethod(LBFGS::Method::RFO);
         optimizer.setLambda(safe_config.value("lambda", 0.1)); // RFO lambda parameter (legacy)
         int verbosity = safe_config.value("verbosity", 1); // Default: minimal output
         optimizer.setVerbosity(verbosity);
-        
+        optimizer.setConfig(safe_config); // applies rfo_solver, lbfgs_line_search, etc.
+
         // Configure RFO-specific parameters from config
         double trust_radius = safe_config.value("trust_radius", 0.05);  // Conservative default
         double energy_threshold = safe_config.value("energy_threshold", 1e-6);  // Stricter threshold

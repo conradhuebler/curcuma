@@ -144,6 +144,16 @@ bool LBFGSppOptimizer::InitializeOptimizerInternal()
         CurcumaLogger::param("Relative tolerance", fmt::format("{:.2e}", m_lbfgs_eps_rel));
         CurcumaLogger::param("Line search algorithm", m_lbfgs_line_search);
 
+        // Size advisory for large systems (informational, verbosity >= 2)
+        int dof = m_current_coordinates.size();
+        if (dof > 3000) {
+            double mb_history = static_cast<double>(dof) * m_lbfgs_m * 8.0 / (1024.0 * 1024.0);
+            CurcumaLogger::info_fmt(
+                "LBFGSpp: {} DOF ({} atoms) - m={} history vectors, ~{:.0f} MB memory per step. "
+                "L-BFGS scales O(N*m) per step and handles large systems well.",
+                dof, m_molecule.AtomCount(), m_lbfgs_m, mb_history);
+        }
+
         return true;
 
     } catch (const std::exception& e) {
@@ -182,8 +192,15 @@ Vector LBFGSppOptimizer::CalculateOptimizationStep(const Vector& current_coordin
         }
         return Vector::Zero(current_coordinates.size());
     } catch (const std::runtime_error& e) {
-        // Runtime error from line search (step too small) typically means convergence
-        CurcumaLogger::warn_fmt("LBFGSpp runtime error: {}", e.what());
+        // LBFGSpp throws runtime_error when the line search step shrinks below min_step.
+        // Treat as convergence: we cannot make further progress, output the current structure.
+        const double gnorm = gradient.norm();
+        if (gnorm < m_lbfgs_eps_abs * 100.0) {
+            CurcumaLogger::info_fmt("LBFGSpp: line search step < min_step with ||g||={:.2e} — converged",
+                                    gnorm);
+        } else {
+            CurcumaLogger::warn_fmt("LBFGSpp: line search failed (||g||={:.2e}), stopping: {}", gnorm, e.what());
+        }
         m_solver_converged = true;
         return Vector::Zero(current_coordinates.size());
     }
@@ -207,6 +224,11 @@ Vector LBFGSppOptimizer::CalculateOptimizationStep(const Vector& current_coordin
 
     Vector step = x - current_coordinates;
 
+    if (m_context.verbosity >= 2) {
+        fmt::print("  LBFGSpp: alpha={:.3e} ||step||={:.3e} ||grad||={:.3e}{}\n",
+                   m_solver->Step(), step.norm(), m_context.step_gradient.norm(),
+                   m_solver_converged ? " [converged]" : "");
+    }
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info_fmt("LBFGSpp step norm: {:.6e}", step.norm());
     }
