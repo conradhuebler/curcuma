@@ -316,7 +316,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
                     m_converged = true;
                     m_convergence_reason = "Optimizer reports convergence (zero step)";
                 } else {
-                    CurcumaLogger::warn("Zero optimization step - possible convergence or error");
+                    CurcumaLogger::error("Optimization step is zero - line search or gradient failure");
                 }
                 break;
             }
@@ -475,11 +475,26 @@ bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, doubl
             // Normal mode: calculate energy with analytical gradient
             energy = m_context.energy_calculator->CalculateEnergy(true);
             if (std::isnan(energy) || std::isinf(energy)) {
+                CurcumaLogger::error_fmt(
+                    "evaluateEnergyAndGradient: energy is NaN/Inf ({:.6e})", energy);
                 return false;
             }
 
             Geometry grad_geom = m_context.energy_calculator->Gradient();
             gradient = Vector::Map(grad_geom.data(), grad_geom.size());
+
+            // Apr 2026 NaN trap: report first NaN component (atom/axis) so the
+            // upstream diagnostic in GFN-FF can correlate with a specific atom.
+            if (!gradient.allFinite()) {
+                int first_bad = -1;
+                for (int i = 0; i < gradient.size(); ++i) {
+                    if (!std::isfinite(gradient(i))) { first_bad = i; break; }
+                }
+                CurcumaLogger::error_fmt(
+                    "evaluateEnergyAndGradient: gradient has NaN/Inf (component={}, atom={}, axis={}; energy={:.6e})",
+                    first_bad, first_bad / 3, first_bad % 3, energy);
+                return false;
+            }
         }
 
         // Apply constraints if specified
