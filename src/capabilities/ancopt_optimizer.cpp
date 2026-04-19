@@ -21,6 +21,7 @@
 
 #include "ancopt_optimizer.h"
 #include "optimisation/rf_solver.h"
+#include "src/core/citation_registry.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/molecule.h"
 #include "src/core/parameter_registry.h"
@@ -418,6 +419,10 @@ ANCOptimizer::ANCOptimizer()
 
 bool ANCOptimizer::InitializeOptimizerInternal() {
     CurcumaLogger::info("Initializing AncOpt optimizer");
+
+    CitationRegistry::cite("ancopt");
+    CitationRegistry::cite("lindh", "ancopt");
+    CitationRegistry::cite("lanczos", "ancopt");
 
     // Claude Nov 2025: BUG FIX - Check molecule is valid before proceeding
     int atom_count = m_molecule.AtomCount();

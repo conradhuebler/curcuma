@@ -18,6 +18,7 @@
  */
 
 #include "lbfgspp_optimizer.h"
+#include "src/core/citation_registry.h"
 #include "src/tools/general.h"
 #include <stdexcept>
 
@@ -139,6 +140,9 @@ bool LBFGSppOptimizer::InitializeOptimizerInternal()
         }
 
         CurcumaLogger::success("LBFGSpp optimizer initialized");
+
+        CitationRegistry::cite("lbfgspp");
+        CitationRegistry::cite("lbfgs", "lbfgspp");
         CurcumaLogger::param("Memory parameter (m)", m_lbfgs_m);
         CurcumaLogger::param("Absolute tolerance", fmt::format("{:.2e}", m_lbfgs_eps_abs));
         CurcumaLogger::param("Relative tolerance", fmt::format("{:.2e}", m_lbfgs_eps_rel));

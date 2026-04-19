@@ -55,6 +55,7 @@ void ModernOptimizerDispatcher::printHelp() const
     CitationRegistry::cite("lbfgs");
     CitationRegistry::cite("diis");
     CitationRegistry::cite("rfo");
+    CitationRegistry::cite("lanczos", "rfo");
 
     CurcumaLogger::info("");
     CurcumaLogger::success("Available optimization algorithms:");
