@@ -131,7 +131,7 @@ Optimized structure saved to: input.opt.xyz
 
 ## Variable Section
 
-### AI Implementation Status
+### AI Implementation Status (Apr 2026)
 
 > **All native optimizers (L-BFGS, DIIS, RFO, SR1) are 🤖 AI-generated.**
 > None have been ✅ TESTED or ✅ APPROVED by the human operator.
@@ -150,6 +150,21 @@ Optimized structure saved to: input.opt.xyz
 - RFO: mode following untested
 
 **Human production testing pending — do not use for production calculations.**
+
+### Large-System Optimizations (Apr 2026, all 🤖 AI-generated, ⚙️ compiles, not ✅ TESTED)
+
+**`rf_solver.h/.cpp`** (Phase 6 — shared Rational Function solver):
+- `RFSolver::lanczosLowestEigenpair()` — Lanczos for lowest eigenpair of augmented RF matrix
+- `RFSolver::calculateRFStep()` — dispatches Lanczos (nvar≥49) or dense fallback
+- Used by ANCOpt and native RFO (replaces per-optimizer duplicate code)
+- Enables iterative RF step scaling for large systems without O(N³) eigendecomp
+
+**`lbfgs.cpp` enhancements**:
+- Phase 5: Strong-Wolfe line search (`lineSearchStrongWolfe`, N&W Alg 3.5/3.6) — optional via `m_line_search_method = "strong_wolfe"`
+- Phase 6: `RFOStep()` replaced O(N³) `SelfAdjointEigenSolver` with `RFSolver::calculateRFStep()`
+- Verbosity 2: per-step alpha, step norm, gradient norm, history size
+
+**EIGEN_USE_LAPACKE**: Enabled per-file in `rf_solver.cpp` and `lbfgs.cpp` (safe — no local variable `I`). Enables LAPACK D&C backend for `SelfAdjointEigenSolver` in fallback path.
 
 ### 🎯 **EINHEITLICHES DESIGN FESTGEHALTEN:**
 1. **`-optimizer` Parameter**: Bestimmt Optimierungsalgorithmus (nicht `-method`)

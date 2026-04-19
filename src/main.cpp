@@ -1485,6 +1485,11 @@ int executeOptimization(const json& controller, int argc, char** argv) {
 
     try {
         auto molecule = std::make_unique<Molecule>(argv[2]);
+        // Apply charge/spin from CLI controller to the molecule before optimization
+        if (controller.contains("charge"))
+            molecule->setCharge(controller["charge"].get<int>());
+        if (controller.contains("spin"))
+            molecule->setSpin(controller["spin"].get<int>());
         std::string method = controller.value("method", "gfnff");
         json energy_controller = controller;
         energy_controller["geometry_file"] = std::string(argv[2]);

@@ -297,6 +297,7 @@ configure_file(
 
 set(curcuma_core_SRC
         # Optimization algorithms - Claude Generated (Educational-First Design)
+        src/capabilities/optimisation/rf_solver.cpp
         src/capabilities/optimisation/lbfgs.cpp
         src/capabilities/optimizer_interface.cpp
         src/capabilities/optimizer_driver.cpp
@@ -388,6 +389,7 @@ set(curcuma_core_SRC
 )
 
 set(curcuma_cap_SRC
+        src/capabilities/optimisation/rf_solver.cpp
         src/capabilities/optimisation/lbfgs.cpp
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
@@ -782,17 +784,37 @@ endif()
 target_link_libraries(curcuma_core pthread fmt::fmt-header-only )
 target_link_libraries(curcuma_cap pthread fmt::fmt-header-only )
 
-# Claude Generated (March 2026): Link BLAS/LAPACK for curcuma_core
-# Per-file EIGEN_USE_BLAS defined in eeq_solver.cpp to avoid Eigen 3.4 complex-type conflicts
+# Link BLAS/LAPACK for curcuma_core.
+# EIGEN_USE_BLAS: per-file in eeq_solver.cpp (avoids Eigen 3.4 complex-type conflict).
+# EIGEN_USE_LAPACKE: per-target on curcuma_core — safe because no TU uses complex Eigen types
+#   alongside LAPACKE. Enables LAPACK dsyevd (divide-and-conquer) inside SelfAdjointEigenSolver
+#   for ~3-5x speedup on matrices with N > 300 (Tier M/L ANC regeneration fallback).
 find_package(BLAS QUIET)
 find_package(LAPACK QUIET)
 if(BLAS_FOUND)
     target_link_libraries(curcuma_core ${BLAS_LIBRARIES})
-    message(STATUS "BLAS linked for curcuma_core (Eigen BLAS in eeq_solver only)")
+    message(STATUS "BLAS linked for curcuma_core")
 endif()
 if(LAPACK_FOUND)
     target_link_libraries(curcuma_core ${LAPACK_LIBRARIES})
-    message(STATUS "LAPACK linked for curcuma_core (Eigen LAPACK in eeq_solver only)")
+    message(STATUS "LAPACK linked for curcuma_core")
+endif()
+
+# LAPACKE C interface — needed for EIGEN_USE_LAPACKE. Re-use the LAPACKE_LIBRARY already
+# discovered by the DFT-D4 search above, or do a fresh search if that block was skipped.
+if(NOT LAPACKE_LIBRARY)
+    find_library(LAPACKE_LIBRARY lapacke
+                 HINTS /usr/lib /usr/lib64 /usr/local/lib)
+endif()
+if(LAPACKE_LIBRARY)
+    target_link_libraries(curcuma_core ${LAPACKE_LIBRARY})
+    # EIGEN_USE_LAPACKE is NOT set globally here — it breaks TUs that use local variables
+    # named 'I' (C99 complex macro conflict with LAPACKE headers). Define it per-file instead:
+    #   rf_solver.cpp, lbfgs.cpp — both safe (no variable named 'I').
+    # See ancopt_optimizer.cpp: renamed Matrix3d I -> inertia to fix the same issue.
+    message(STATUS "LAPACKE found: ${LAPACKE_LIBRARY} — linking, EIGEN_USE_LAPACKE applied per-file")
+else()
+    message(STATUS "LAPACKE not found — SelfAdjointEigenSolver uses Eigen built-in path")
 endif()
 
 if(USE_BLAS)

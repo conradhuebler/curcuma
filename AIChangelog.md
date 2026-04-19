@@ -4,6 +4,10 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+## April 2026
+
+- **ANCOpt large-system optimizer (Apr 18)**: 8-phase implementation for scalable geometry optimization: (1) Truncated Lanczos ANC generation (`generateANCLanczos`, O(n3²·m) vs O(n3³), Tier L >=600 atoms); (2) Implicit T/R projection O(N²) via rank-6 update (vs O(N³) dense); (3) `detrotra8` gated behind n3<=1800; (4) L-BFGS in ANC subspace for Tier XL (>2000 atoms, replaces dense nvar×nvar Hessian with m=12 pair history); (5) Strong-Wolfe line search in native LBFGS; (6) Shared RF solver (`rf_solver.h/.cpp`, RFSolver namespace) used by both ANCOpt and native RFO; (7) EIGEN_USE_LAPACKE per-file in rf_solver.cpp + lbfgs.cpp; (8) Structured tier advisory at verbosity 2 with per-phase timing; plus LBFGSpp gradient-norm convergence detection fix
+
 ## March 2026
 
 - **GPU Pipeline Phase 10: SoA Coordinate Layout (Mar 27)**: Replaced `d_coords[3*N]` AoS buffer with `CoordSoA{d_x,d_y,d_z}[N]` across all 20 GPU kernels + EEQ solver; enables fully coalesced warp reads (~3× bandwidth gain for pairwise kernels at N>100); `d_ref_coords[3*N]` → `RefCoordSoA`; pinned host staging split into 3×N buffers; CUDA Graph re-capture unaffected (pointers stable); 28/28 CLI tests pass
