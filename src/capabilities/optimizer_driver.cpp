@@ -25,6 +25,32 @@
 
 namespace Optimization {
 
+// Claude Generated - Helper function to convert Molecule geometry to flat Vector
+Vector MoleculeToCoordinates(const Molecule& mol) {
+    const auto& geom = mol.getGeometry();
+    Vector coords(3 * mol.AtomCount());
+    for (int i = 0; i < mol.AtomCount(); ++i) {
+        coords.segment<3>(3 * i) = geom.row(i);
+    }
+    return coords;
+}
+
+// Claude Generated - Helper function to set Molecule geometry from flat Vector
+void CoordinatesToMolecule(const Vector& coords, Molecule& mol) {
+    int natoms = mol.AtomCount();
+    if (coords.size() != 3 * natoms) {
+        CurcumaLogger::error_fmt("CoordinatesToMolecule: coords size mismatch! coords.size()={}, expected={}",
+            coords.size(), 3 * natoms);
+        return;
+    }
+
+    Geometry geom(natoms, 3);
+    for (int i = 0; i < natoms; ++i) {
+        geom.row(i) = coords.segment<3>(3 * i);
+    }
+    mol.setGeometry(geom);
+}
+
 // Claude Generated - OptimizationContext implementation
 bool OptimizationContext::isValid() const
 {
@@ -74,25 +100,30 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
     OptimizationContext context;
     context.energy_calculator = calc;
 
-    // Load convergence criteria
+    // Load convergence criteria (Claude Nov 2025: Type-safe conversions)
     if (config.contains("energy_threshold"))
-        context.energy_threshold = config["energy_threshold"];
+        context.energy_threshold = config["energy_threshold"].get<double>();
     if (config.contains("rmsd_threshold"))
-        context.rmsd_threshold = config["rmsd_threshold"];
+        context.rmsd_threshold = config["rmsd_threshold"].get<double>();
     if (config.contains("gradient_threshold"))
-        context.gradient_threshold = config["gradient_threshold"];
+        context.gradient_threshold = config["gradient_threshold"].get<double>();
     if (config.contains("max_iterations"))
-        context.max_iterations = config["max_iterations"];
+        context.max_iterations = config["max_iterations"].get<int>();
     if (config.contains("convergence_count"))
-        context.convergence_count = config["convergence_count"];
+        context.convergence_count = config["convergence_count"].get<int>();
 
-    // Load performance settings
+    // Load performance settings (Claude Nov 2025: Type-safe conversions)
     if (config.contains("threads"))
-        context.threads = config["threads"];
-    if (config.contains("single_step_mode"))
-        context.single_step_mode = config["single_step_mode"];
+        context.threads = config["threads"].get<int>();
+    if (config.contains("single_step_mode")) {
+        // Handle both boolean and number (0/1) types
+        if (config["single_step_mode"].is_boolean())
+            context.single_step_mode = config["single_step_mode"].get<bool>();
+        else if (config["single_step_mode"].is_number())
+            context.single_step_mode = (config["single_step_mode"].get<int>() != 0);
+    }
     if (config.contains("max_energy_rise"))
-        context.max_energy_rise = config["max_energy_rise"];
+        context.max_energy_rise = config["max_energy_rise"].get<double>();
 
     // Claude Generated (Feb 21, 2026): Numerical gradient option for debugging
     if (config.contains("numgrad"))
@@ -100,30 +131,38 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
     if (config.contains("numerical_gradient_step"))
         context.numerical_gradient_step = config["numerical_gradient_step"];
 
-    // Load output settings
-    if (config.contains("write_trajectory"))
-        context.write_trajectory = config["write_trajectory"];
+    // Load output settings (Type-safe conversions)
+    if (config.contains("write_trajectory")) {
+        if (config["write_trajectory"].is_boolean())
+            context.write_trajectory = config["write_trajectory"].get<bool>();
+        else if (config["write_trajectory"].is_number())
+            context.write_trajectory = (config["write_trajectory"].get<int>() != 0);
+    }
 
     // Handle both legacy verbose and new verbosity parameters for backward compatibility
     if (config.contains("verbosity")) {
-        context.verbosity = config["verbosity"];
-        // Validate verbosity range
-        if (context.verbosity < 0 || context.verbosity > 3) {
-            context.verbosity = 1; // Default to minimal if out of range
-        }
+        context.verbosity = config["verbosity"].get<int>();
+        if (context.verbosity < 0 || context.verbosity > 3)
+            context.verbosity = 1;
     } else if (config.contains("verbose")) {
-        // Legacy boolean verbose parameter - convert to verbosity level
-        context.verbosity = config["verbose"] ? 3 : 1;
+        if (config["verbose"].is_boolean())
+            context.verbosity = config["verbose"].get<bool>() ? 3 : 1;
+        else if (config["verbose"].is_number())
+            context.verbosity = (config["verbose"].get<int>() != 0) ? 3 : 1;
     }
 
-    if (config.contains("print_output"))
-        context.print_output = config["print_output"];
+    if (config.contains("print_output")) {
+        if (config["print_output"].is_boolean())
+            context.print_output = config["print_output"].get<bool>();
+        else if (config["print_output"].is_number())
+            context.print_output = (config["print_output"].get<int>() != 0);
+    }
 
-    // Load molecular properties
+    // Load molecular properties (Claude Nov 2025: Type-safe conversions)
     if (config.contains("charge"))
-        context.charge = config["charge"];
+        context.charge = config["charge"].get<int>();
     if (config.contains("spin"))
-        context.spin = config["spin"];
+        context.spin = config["spin"].get<int>();
 
     return context;
 }
@@ -161,6 +200,10 @@ bool OptimizerDriver::InitializeOptimization(const Molecule* molecule)
         return false;
     }
 
+    // Initialize energy calculator with molecule (Claude Apr 2026: Required for first call)
+    // updateGeometry() only updates coordinates, but the calculator needs full initialization
+    m_context.energy_calculator->setMolecule(m_molecule.getMolInfo());
+
     // Setup RMSD driver for convergence checking
     json rmsd_config = {
         { "reorder", false },
@@ -178,7 +221,7 @@ bool OptimizerDriver::InitializeOptimization(const Molecule* molecule)
     m_converged = false;
 
     // Calculate initial energy and gradient
-    Vector coordinates = Tools::Mol2Coord(m_molecule);
+    Vector coordinates = MoleculeToCoordinates(m_molecule);
     if (!evaluateEnergyAndGradient(coordinates, m_current_energy, m_current_gradient)) {
         CurcumaLogger::error("Failed to calculate initial energy and gradient");
         return false;
@@ -206,7 +249,7 @@ bool OptimizerDriver::InitializeOptimization(const double* coordinates, int atom
     Molecule mol(atom_count, 0);
     for (int i = 0; i < atom_count; ++i) {
         int element = 6; // Default to carbon - should be provided in real implementation
-        Vector3 position(coordinates[3 * i], coordinates[3 * i + 1], coordinates[3 * i + 2]);
+        Position position(coordinates[3 * i], coordinates[3 * i + 1], coordinates[3 * i + 2]);
         mol.addPair({ element, position });
     }
 
@@ -216,17 +259,15 @@ bool OptimizerDriver::InitializeOptimization(const double* coordinates, int atom
 bool OptimizerDriver::UpdateGeometry(const Molecule& molecule)
 {
     m_molecule = molecule;
-    Vector coordinates = Tools::Mol2Coord(m_molecule);
+    Vector coordinates = MoleculeToCoordinates(m_molecule);
     return evaluateEnergyAndGradient(coordinates, m_current_energy, m_current_gradient);
 }
 
 bool OptimizerDriver::UpdateGeometry(const double* coordinates)
 {
-    // Update molecule coordinates
-    for (int i = 0; i < m_molecule.AtomCount(); ++i) {
-        Vector3 pos(coordinates[3 * i], coordinates[3 * i + 1], coordinates[3 * i + 2]);
-        m_molecule.setAtom(i, m_molecule.Atom(i).first, pos);
-    }
+    // Update molecule coordinates via CoordinatesToMolecule helper
+    Vector coords_vec = Vector::Map(coordinates, 3 * m_molecule.AtomCount());
+    CoordinatesToMolecule(coords_vec, m_molecule);
 
     return evaluateEnergyAndGradient(Vector::Map(coordinates, 3 * m_molecule.AtomCount()),
         m_current_energy, m_current_gradient);
@@ -234,41 +275,49 @@ bool OptimizerDriver::UpdateGeometry(const double* coordinates)
 
 OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosity)
 {
-    // Synchronize verbosity settings using the new integer parameter
-    // Validate verbosity range
+    // Optimizer controls its own verbosity level independently.
+    // Save+restore global CurcumaLogger level so EnergyCalculator output
+    // is also suppressed during silent optimization (verbosity 0).
     if (verbosity < 0 || verbosity > 3) {
-        verbosity = 1; // Default to minimal if out of range
+        verbosity = 1;
     }
 
-    CurcumaLogger::set_verbosity(verbosity);
+    int saved_global_verbosity = CurcumaLogger::get_verbosity();
+    // Suppress all EnergyCalculator output during optimization — the optimizer
+    // prints its own progress table. Restore after optimization.
+    CurcumaLogger::set_verbosity(0);
     m_context.write_trajectory = write_trajectory;
     m_context.verbosity = verbosity;
 
     m_start_time = std::chrono::high_resolution_clock::now();
 
-    CurcumaLogger::header(fmt::format("{} Geometry Optimization", getName()));
-
-    // Display optimization parameters (analog to QM system parameter display)
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::param_table(m_configuration, "Optimization Parameters");
+    // Optimizer uses fmt::print directly for its own output, controlled by local verbosity.
+    // Global CurcumaLogger is at 0 to suppress EnergyCalculator line-search spam.
+    if (verbosity >= 1) {
+        fmt::print("\n{0: ^{1}} {2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", "Step", 15, "Current Energy", "Energy Change", "RMSD Change", "Gradient Norm", "time");
+        fmt::print("{0: ^{1}} {2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", " ", 15, "[Eh]", "[kJ/mol]", "[A]", "[Eh/Bohr]", "[s]");
     }
 
-    CurcumaLogger::energy_abs(m_initial_energy, "Initial energy");
-    CurcumaLogger::param("Max iterations", m_context.max_iterations);
-    CurcumaLogger::param("Convergence criteria",
-        fmt::format("ΔE < {:.1e} kJ/mol, ΔRMSD < {:.3f} Å, |∇| < {:.1e} Eh/Bohr",
-            m_context.energy_threshold, m_context.rmsd_threshold, m_context.gradient_threshold));
-
     try {
+        Molecule previous_molecule = m_molecule; // For RMSD between consecutive steps
+        auto step_start_time = std::chrono::high_resolution_clock::now(); // For per-step timing
+
         // Main optimization loop (Template Method Pattern)
         for (m_current_iteration = 1; m_current_iteration <= m_context.max_iterations; ++m_current_iteration) {
 
             // Calculate optimization step (method-specific)
-            Vector current_coords = Tools::Mol2Coord(m_molecule);
+            Vector current_coords = MoleculeToCoordinates(m_molecule);
             Vector step = CalculateOptimizationStep(current_coords, m_current_gradient);
 
             if (step.norm() == 0) {
-                CurcumaLogger::warn("Zero optimization step calculated - possible convergence or error");
+                // Zero step may indicate convergence (solver decided no more progress)
+                // or an error. Check method-specific convergence before giving up.
+                if (CheckMethodSpecificConvergence()) {
+                    m_converged = true;
+                    m_convergence_reason = "Optimizer reports convergence (zero step)";
+                } else {
+                    CurcumaLogger::error("Optimization step is zero - line search or gradient failure");
+                }
                 break;
             }
 
@@ -277,7 +326,16 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             double new_energy;
             Vector new_gradient;
 
-            if (!evaluateEnergyAndGradient(new_coords, new_energy, new_gradient)) {
+            // If subclass already evaluated energy during step (e.g. LBFGSpp SingleStep),
+            // use the pre-computed values instead of redundant re-evaluation
+            if (m_context.step_evaluated_energy) {
+                new_energy = m_context.step_energy;
+                new_gradient = m_context.step_gradient;
+                m_context.step_evaluated_energy = false; // reset for next iteration
+                // Still need to update molecule geometry
+                CoordinatesToMolecule(new_coords, m_molecule);
+            } else if (!evaluateEnergyAndGradient(new_coords, new_energy, new_gradient)) {
+                CurcumaLogger::set_verbosity(saved_global_verbosity);
                 CurcumaLogger::error_fmt("Energy evaluation failed at iteration {}", m_current_iteration);
                 return OptimizationResult::failed_result("Energy evaluation failed during optimization");
             }
@@ -285,19 +343,18 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             // Check for energy rise limit
             double energy_change_kjmol = (new_energy - m_current_energy) * CURCUMA_EH_TO_KJMOL;
             if (energy_change_kjmol > m_context.max_energy_rise) {
+                CurcumaLogger::set_verbosity(saved_global_verbosity);
                 CurcumaLogger::warn_fmt("Energy rise ({:.2f} kJ/mol) exceeds limit ({:.1f} kJ/mol)",
                     energy_change_kjmol, m_context.max_energy_rise);
                 return OptimizationResult::failed_result("Energy rise exceeded maximum allowed");
             }
 
             // Update molecule geometry
-            Tools::Coord2Mol(new_coords, m_molecule);
+            CoordinatesToMolecule(new_coords, m_molecule);
 
-            // Calculate RMSD change
-            double rmsd_change = 0.0;
-            if (m_trajectory.size() > 0) {
-                rmsd_change = calculateRMSD(m_molecule, m_trajectory.back());
-            }
+            // Calculate RMSD change between consecutive steps
+            double rmsd_change = calculateRMSD(m_molecule, previous_molecule);
+            previous_molecule = m_molecule;
 
             // Update state (method-specific)
             UpdateOptimizerState(new_coords, new_gradient, new_energy);
@@ -305,12 +362,16 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             // Update common state
             m_current_energy = new_energy;
             m_current_gradient = new_gradient;
-            updateTrajectory(m_molecule, new_energy);
+            if (m_context.write_trajectory)
+                updateTrajectory(m_molecule, new_energy);
 
-            // Log progress (analog to recent RMSDTraj improvements)
-            if (CurcumaLogger::get_verbosity() >= 3 || m_current_iteration % 10 == 0) {
+            // Log progress - table row every iteration
+            if (verbosity >= 1) {
+                auto now = std::chrono::high_resolution_clock::now();
+                double step_time = std::chrono::duration_cast<std::chrono::milliseconds>(now - step_start_time).count() / 1000.0;
+                step_start_time = now;
                 logOptimizationStep(m_current_iteration, new_energy, energy_change_kjmol,
-                    rmsd_change, new_gradient.norm());
+                    rmsd_change, new_gradient.norm(), step_time);
             }
 
             // Check convergence
@@ -334,24 +395,25 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(m_end_time - m_start_time);
         double optimization_time = duration.count() / 1000.0;
 
-        // Final reporting
-        if (m_converged) {
-            CurcumaLogger::success_fmt("Optimization converged after {} iterations", m_current_iteration);
-            CurcumaLogger::success_fmt("Convergence reason: {}", m_convergence_reason);
-        } else {
-            CurcumaLogger::warn_fmt("Optimization did not converge within {} iterations", m_context.max_iterations);
-        }
+        // Restore global verbosity before final reporting
+        CurcumaLogger::set_verbosity(saved_global_verbosity);
 
-        CurcumaLogger::energy_abs(m_current_energy, "Final energy");
-        CurcumaLogger::energy_rel(m_current_energy - m_initial_energy, "Energy change");
-        CurcumaLogger::param("Final gradient norm", fmt::format("{:.6e} Eh/Bohr", m_current_gradient.norm()));
-        CurcumaLogger::param("Optimization time", fmt::format("{:.3f} seconds", optimization_time));
+        // Final reporting — uses local verbosity parameter
+        if (verbosity >= 1) {
+            if (m_converged) {
+                CurcumaLogger::success_fmt("Optimization converged after {} iterations", m_current_iteration);
+            } else {
+                CurcumaLogger::warn_fmt("Optimization did not converge within {} iterations", m_context.max_iterations);
+            }
+            CurcumaLogger::energy_abs(m_current_energy, "Final energy");
+            CurcumaLogger::energy_rel(m_current_energy - m_initial_energy, "Energy change");
+        }
 
         if (m_context.write_trajectory && !m_context.trajectory_filename.empty()) {
             // Write trajectory file
             std::ofstream trj_file(m_context.trajectory_filename);
             for (const auto& mol : m_trajectory) {
-                trj_file << mol.getXYZString();
+                trj_file << mol.XYZString();
             }
             CurcumaLogger::success_fmt("Trajectory written to: {}", m_context.trajectory_filename);
         }
@@ -363,8 +425,10 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
         result.final_gradient = m_current_gradient;
         result.final_energy_change = (m_current_energy - m_initial_energy) * CURCUMA_EH_TO_KJMOL;
         result.final_gradient_norm = m_current_gradient.norm();
-        result.trajectory = m_trajectory;
-        result.energy_trajectory = m_energy_trajectory;
+        result.trajectory = std::move(m_trajectory);
+        result.energy_trajectory = std::move(m_energy_trajectory);
+        m_trajectory.clear();
+        m_energy_trajectory.clear();
 
         if (!m_converged) {
             result.error_message = fmt::format("Did not converge within {} iterations", m_context.max_iterations);
@@ -373,6 +437,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
         return result;
 
     } catch (const std::exception& e) {
+        CurcumaLogger::set_verbosity(saved_global_verbosity);
         CurcumaLogger::error_fmt("Optimization failed with exception: {}", e.what());
         return OptimizationResult::failed_result(e.what());
     }
@@ -382,8 +447,12 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
 bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, double& energy, Vector& gradient)
 {
     try {
-        Tools::Coord2Mol(coordinates, m_molecule);
-        m_context.energy_calculator->setMolecule(m_molecule);
+        CoordinatesToMolecule(coordinates, m_molecule);
+        // Claude Generated (Mar 2026): Use updateGeometry instead of setMolecule to avoid
+        // full GFN-FF re-initialization (topology/charges/parameters) on every step.
+        // setMolecule() triggers expensive InitialiseMolecule() which can return 0.0 energy.
+        // updateGeometry() only updates Bohr coordinates — correct for optimization iterations.
+        m_context.energy_calculator->updateGeometry(m_molecule.getGeometry());
 
         // Claude Generated (Feb 21, 2026): Support for numerical gradient mode
         // When use_numerical_gradient is true, use finite difference gradient instead of analytical
@@ -406,11 +475,26 @@ bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, doubl
             // Normal mode: calculate energy with analytical gradient
             energy = m_context.energy_calculator->CalculateEnergy(true);
             if (std::isnan(energy) || std::isinf(energy)) {
+                CurcumaLogger::error_fmt(
+                    "evaluateEnergyAndGradient: energy is NaN/Inf ({:.6e})", energy);
                 return false;
             }
 
             Geometry grad_geom = m_context.energy_calculator->Gradient();
             gradient = Vector::Map(grad_geom.data(), grad_geom.size());
+
+            // Apr 2026 NaN trap: report first NaN component (atom/axis) so the
+            // upstream diagnostic in GFN-FF can correlate with a specific atom.
+            if (!gradient.allFinite()) {
+                int first_bad = -1;
+                for (int i = 0; i < gradient.size(); ++i) {
+                    if (!std::isfinite(gradient(i))) { first_bad = i; break; }
+                }
+                CurcumaLogger::error_fmt(
+                    "evaluateEnergyAndGradient: gradient has NaN/Inf (component={}, atom={}, axis={}; energy={:.6e})",
+                    first_bad, first_bad / 3, first_bad % 3, energy);
+                return false;
+            }
         }
 
         // Apply constraints if specified
@@ -461,15 +545,12 @@ void OptimizerDriver::updateTrajectory(const Molecule& new_structure, double ene
     m_energy_trajectory.push_back(energy);
 }
 
+// Claude Generated (Apr 2026): Table-formatted progress output matching legacy CurcumaOpt style
 void OptimizerDriver::logOptimizationStep(int iteration, double energy, double energy_change,
-    double rmsd_change, double gradient_norm) const
+    double rmsd_change, double gradient_norm, double elapsed_time) const
 {
-    CurcumaLogger::info_fmt("Step {:4d}: E = {:.8f} Eh", iteration, energy);
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::energy_rel(energy_change / CURCUMA_EH_TO_KJMOL, "  ΔE");
-        CurcumaLogger::length(rmsd_change / CURCUMA_BOHR_TO_ANGSTROM, "  ΔRMSD");
-        CurcumaLogger::param("  |∇|", fmt::format("{:.6e} Eh/Bohr", gradient_norm));
-    }
+    fmt::print("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n",
+        15, iteration, energy, energy_change, rmsd_change, gradient_norm, elapsed_time);
 }
 
 double OptimizerDriver::calculateRMSD(const Molecule& mol1, const Molecule& mol2) const

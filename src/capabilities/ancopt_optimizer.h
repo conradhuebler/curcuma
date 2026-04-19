@@ -1,0 +1,379 @@
+/*
+ * <AncOpt Optimizer - Approximate Normal Coordinate Optimizer>
+ * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * This file contains a port of the AncOpt (Approximate Normal Coordinate Optimizer)
+ * algorithm from XTB by Stefan Grimme and contributors.
+ *
+ * ORIGINAL IMPLEMENTATION:
+ * File: external/xtb/src/optimizer.f90
+ * Author: Stefan Grimme
+ * Copyright (C) 2017-2020 Stefan Grimme
+ * License: LGPL-3.0-or-later
+ *
+ * LITERATURE REFERENCE:
+ * - Birkholz, A. B., & Schlegel, H. B. (2015)
+ *   "Exploring the efficacy of the Bofill update in geometry optimization"
+ *   Theoretical Chemistry Accounts, 135, 84
+ * - AncOpt is unpublished work by Stefan Grimme
+ *   Ported with respect to the original author
+ *
+ * This C++ port was created by Claude AI under instruction from Conrad Hübler.
+ * All copyright remains with Conrad Hübler as project owner.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ */
+
+#pragma once
+
+#include "optimizer_driver.h"
+#include "src/core/molecule.h"
+#include "src/core/parameter_macros.h"
+#include <Eigen/Dense>
+#include <memory>
+#include <vector>
+
+using curcuma::Molecule;
+
+namespace Optimization {
+
+/**
+ * @brief ANC (Approximate Normal Coordinate) data structure
+ *
+ * Contains the transformation between Cartesian and internal coordinates
+ * based on approximate normal modes.
+ */
+struct ANCCoordinates {
+    int n_atoms = 0; // Number of atoms
+    int n3 = 0; // 3 * n_atoms (Cartesian dimension)
+    int nvar = 0; // Number of internal coordinates (3N - 6 or 3N - 5)
+
+    Matrix B; // Transformation matrix B (n3 x nvar)
+    Vector coord; // Current internal coordinates
+    Vector coord_reference; // Reference internal coordinates (Claude Nov 2025: Fix for ANC transform bug)
+    Vector xyz_flat; // Current Cartesian coordinates (flattened)
+    Vector xyz_reference; // Reference Cartesian coordinates (Claude Nov 2025: Fix for ANC transform bug)
+
+    Matrix hess; // Hessian in internal coordinates (packed format)
+
+    double hlow = 0.01; // Lower frequency cutoff
+    double hmax = 5.0; // Upper frequency cutoff
+
+    bool initialized = false;
+
+    // Methods
+    void allocate(int natoms, int num_vars, double h_low, double h_max);
+    void deallocate();
+
+    // Generate ANC from model Hessian
+    bool generateANC(const Matrix& cartesian_hessian, const Vector& xyz, bool is_linear);
+
+    // Truncated-Lanczos ANC generation for large systems: finds the k_target
+    // largest eigenpairs of the Cartesian Hessian without materializing the
+    // full dense eigendecomposition. Called by generateANC() when n3 is large.
+    bool generateANCLanczos(const Matrix& cartesian_hessian, const Vector& xyz,
+                            bool is_linear, int k_target);
+
+    // Transform between coordinate systems
+    void getCartesian(Vector& xyz_out) const;
+    void setCartesian(const Vector& xyz_in);
+    Vector transformGradientToInternal(const Vector& cartesian_gradient) const;
+};
+
+/**
+ * @brief Model Hessian parameters
+ * Ported from XTB's model hessian settings
+ */
+struct ModelHessianParameters {
+    enum Type {
+        LINDH_1995, // Original Lindh (1995) model
+        LINDH_2007, // Updated Lindh (2007) model
+        LINDH_D2,   // Lindh with D2 dispersion corrections
+        SWART,      // Swart model hessian
+        READ_FILE   // Read from external file
+    };
+
+    Type model = LINDH_2007;
+    double s6 = 30.0; // Scaling factor for model hessian
+
+    static ModelHessianParameters fromJson(const json& config);
+};
+
+/**
+ * @brief AncOpt Optimizer Implementation - Claude Generated
+ *
+ * Port of Stefan Grimme's AncOpt (Approximate Normal Coordinate Optimizer)
+ * from XTB. Uses rational function optimization in approximate normal
+ * coordinate space with BFGS Hessian updates.
+ *
+ * ALGORITHM OVERVIEW:
+ * 1. Generate model Hessian (Lindh or similar)
+ * 2. Transform to approximate normal coordinates (ANC)
+ * 3. Optimize in ANC space using Rational Function (RF) method
+ * 4. Update Hessian with BFGS or Powell
+ * 5. Periodically regenerate ANC from updated Hessian
+ *
+ * SCIENTIFIC BACKGROUND:
+ * - Uses eigenvectors of model Hessian as approximate normal modes
+ * - Optimization in normal mode space reduces coupling between coordinates
+ * - Rational Function method: Solves augmented eigenvalue problem
+ *   | H  g |   | dx |       | dx |
+ *   | g  0 | * | 1  | = λ * | 1  |
+ * - BFGS updates maintain Hessian approximation between ANC regenerations
+ */
+class ANCOptimizer : public OptimizerDriver {
+private:
+    // ANC-specific parameters
+    double m_maxdispl = 1.0; // Maximum displacement per ANC component (Bohr) — XTB setparam.f90:213
+    double m_hlow = 0.01; // Lower frequency cutoff
+    double m_hmax = 5.0; // Upper frequency cutoff
+    int m_maxmicro = 20; // Max micro-iterations before ANC regeneration (XTB setparam.f90:209)
+    int m_maxmicro_initial = 20; // Initial maxmicro, used as base for ramp-up cap (XTB optimizer.f90:407)
+    int m_micro_current = 0; // Current micro-iteration
+
+    ModelHessianParameters m_model_hess_params;
+
+    // Hessian update method
+    enum HessianUpdate {
+        BFGS = 0,
+        POWELL = 1
+    };
+    HessianUpdate m_hessian_update = BFGS;
+
+    // ANC data structure
+    std::unique_ptr<ANCCoordinates> m_anc;
+
+    // Optimization state
+    Vector m_displ; // Current displacement in internal coordinates
+    Vector m_gint; // Gradient in internal coordinates
+    Vector m_gint_old; // Previous gradient
+    double m_gnorm = 0.0; // Gradient norm
+    double m_gnorm_old = 0.0; // Previous gradient norm
+    double m_depred = 0.0; // Predicted energy change
+
+    // Warm-start vector for Lanczos RF solver (invalidated on ANC regeneration).
+    // Cf. XTB optimizer.f90:691 — steepest-descent start in cycle 1, previous
+    // Ritz vector thereafter. Dramatically reduces Lanczos iteration count.
+    Vector m_last_rf_eigenvector;
+
+    // Tier XL: L-BFGS in ANC subspace (replaces dense hess + RF when nvar > threshold).
+    // nvar > m_anc_lbfgs_threshold: dense hess (nvar x nvar, ~32 MB at nvar=2000) is replaced
+    // by storing the last m_anc_lbfgs_history (s_k, y_k) pairs; H^-1*g via two-loop recursion.
+    // RF mode-following is not available in this tier (only minima, no TS searches).
+    int m_anc_lbfgs_threshold = 2000; // nvar above which to switch to L-BFGS-in-ANC
+    int m_anc_lbfgs_history = 12;     // number of (s,y) pairs stored
+    std::vector<Vector> m_lbfgs_s_int; // step differences in ANC space
+    std::vector<Vector> m_lbfgs_y_int; // gradient differences in ANC space
+    std::vector<double> m_lbfgs_rho_int; // 1/(y·s) values
+    double m_time_lbfgs_step = 0.0;   // timing for L-BFGS step in XL tier
+    int m_lbfgs_step_calls = 0;       // steps taken via L-BFGS
+
+    // Convergence parameters (from XTB, gradient threshold in Eh/Ang).
+    // Note: gradient is converted Eh/Bohr → Eh/Ang in CalculateOptimizationStep
+    // to match the ANC model Hessian units (Eh/Ang²). All gnorm comparisons
+    // (m_gthr, alp thresholds) therefore use Eh/Ang throughout.
+    double m_ethr = 5e-6;    // Energy threshold (Eh)
+    double m_gthr = 1.890e-3; // Gradient threshold (Eh/Ang) — level 0 normal, = 1e-3 Eh/Bohr × A2B
+    double m_acc = 1.0;      // SCC accuracy scaling
+
+    // Micro-iteration control
+    bool m_needs_anc_regeneration = true;
+
+    // Energy tracking for convergence (Bug 3 fix)
+    double m_energy_change = 0.0;   // ΔE from last step (Hartree)
+    double m_previous_energy = 0.0; // Energy before current step
+
+    // Phase timing accumulators (printed at verbosity >= 2 in Finalize).
+    // Helps identify per-iter hotspots during optimization.
+    double m_time_anc_regen = 0.0;  // ANC regeneration (model Hessian + project + eigendecomp)
+    double m_time_bfgs = 0.0;        // BFGS/Powell Hessian update
+    double m_time_rf_step = 0.0;     // Rational function step (total, for cross-check)
+    double m_time_rf_lanczos = 0.0;  // Lanczos-only time
+    double m_time_rf_fallback = 0.0; // Full-eigendecomp fallback time
+    double m_time_transform = 0.0;   // Gradient transform + cartesian backtransform
+    int m_rf_lanczos_calls = 0;      // Count of Lanczos successful calls
+    int m_rf_fallback_calls = 0;     // Count of full-eigendecomp fallback calls
+    int m_rf_lanczos_iters_total = 0; // Sum of Lanczos iterations used (for avg)
+
+protected:
+    // OptimizerDriver interface implementation
+    bool InitializeOptimizerInternal() override;
+
+    Vector CalculateOptimizationStep(const Vector& current_coordinates,
+                                      const Vector& gradient) override;
+
+    bool CheckMethodSpecificConvergence() const override;
+
+    void UpdateOptimizerState(const Vector& new_coordinates,
+                              const Vector& new_gradient,
+                              double new_energy) override;
+
+    void FinalizeOptimizationInternal() override;
+
+    // AncOpt-specific methods
+
+    /**
+     * @brief Generate model Hessian in Cartesian coordinates
+     * Ported from XTB's modhes() routine
+     */
+    Matrix generateModelHessian(const Molecule& mol);
+
+    /**
+     * @brief Generate ANC from Cartesian Hessian
+     * Ported from XTB's tb_anc type
+     */
+    bool generateANCFromHessian(const Matrix& cart_hess, const Molecule& mol);
+
+    /**
+     * @brief Rational Function step calculation
+     * Solves augmented eigenvalue problem for displacement
+     * Ported from XTB optimizer.f90:676-729
+     *
+     * For N = nvar+1 >= 50 uses iterative Lanczos (O(N^2) per iter, a few iters total);
+     * for smaller systems or on Lanczos failure, falls back to full SelfAdjointEigenSolver.
+     */
+    Vector calculateRationalFunctionStep(const Vector& gradient_internal,
+                                         const Matrix& hessian_internal);
+
+    /**
+     * @brief Lanczos iteration for the lowest eigenpair of the augmented RF matrix.
+     *
+     * Computes the lowest eigenvalue/eigenvector of the implicit augmented matrix
+     *   A_aug = [[H, g], [g^T, 0]]   (size (nvar+1) x (nvar+1))
+     * using symmetric Lanczos with full reorthogonalization and warm-start.
+     *
+     * The matvec is evaluated implicitly — A_aug is never materialized — which
+     * eliminates an O(nvar^2) matrix allocation + copy per RF call at large nvar.
+     *
+     * Parameters:
+     *   hessian         : nvar x nvar symmetric matrix H
+     *   gradient        : nvar vector g
+     *   start_vector    : normalized initial vector, length nvar+1
+     *   out_eigenvector : Ritz vector on success (length nvar+1)
+     *   out_eigenvalue  : Ritz value on success
+     *   m_max           : max Lanczos iterations (default 100)
+     *   tol             : relative residual threshold (default 1e-6)
+     *
+     * Returns true on convergence. If false, the outputs are undefined.
+     *
+     * Reference: XTB optimizer.f90 solver_sdavidson. Lanczos gives equivalent
+     * convergence on extremal eigenvalues of dense matrices and is simpler.
+     */
+    bool lanczosLowestEigenpair(const Matrix& hessian,
+                                const Vector& gradient,
+                                const Vector& start_vector,
+                                Vector& out_eigenvector,
+                                double& out_eigenvalue,
+                                int m_max = 100,
+                                double tol = 1e-6);
+
+    /**
+     * @brief L-BFGS two-loop recursion in ANC internal space (Tier XL path).
+     *
+     * Replaces the dense hess + RF step when nvar > m_anc_lbfgs_threshold.
+     * Uses the stored (m_lbfgs_s_int, m_lbfgs_y_int, m_lbfgs_rho_int) history.
+     * Returns the L-BFGS search direction (= H^-1 * g, minimizing direction = -result).
+     * On empty history, returns g (caller negates to get steepest-descent).
+     * Reference: Nocedal & Wright Algorithm 7.4 (two-loop recursion).
+     */
+    Vector calculateLBFGSStepInternal(const Vector& gradient);
+
+    /**
+     * @brief BFGS Hessian update
+     * Ported from XTB bfgs.f90
+     */
+    void updateHessianBFGS(Matrix& hessian, const Vector& dx, const Vector& dg);
+
+    /**
+     * @brief Powell Hessian update
+     * Ported from XTB broyden.f90
+     */
+    void updateHessianPowell(Matrix& hessian, const Vector& dx, const Vector& dg);
+
+    /**
+     * @brief Predict energy change from 2nd order model
+     * ΔE = g·dx + 0.5·dx·H·dx
+     */
+    double predictEnergyChange(const Vector& gradient, const Vector& displacement,
+                               const Matrix& hessian);
+
+    /**
+     * @brief Project out translations and rotations from Hessian
+     * Ported from XTB trproj()
+     */
+    void projectTranslationsRotations(Matrix& hessian, const Molecule& mol);
+
+    /**
+     * @brief Get optimization thresholds based on level
+     * Ported from XTB get_optthr()
+     */
+    void setOptimizationLevel(int level);
+
+    // Helper methods
+    void loadANCParameters(const json& config);
+    bool checkLinearMolecule(const Molecule& mol) const;
+
+public:
+    ANCOptimizer();
+    virtual ~ANCOptimizer() = default;
+
+    // Method identification
+    std::string getName() const override {
+        return "AncOpt (Approximate Normal Coordinate Optimizer)";
+    }
+
+    OptimizerType getType() const override {
+        return OptimizerType::ANCOPT;
+    }
+
+    bool supportsConstraints() const override { return true; }
+    bool requiresHessian() const override { return false; } // Generates model Hessian
+
+    std::vector<std::string> getRequiredParameters() const override {
+        return {"maxdispl", "hlow", "hmax", "maxmicro", "model_hessian"};
+    }
+
+    json GetDefaultConfiguration() const;
+
+    // Configuration setters
+    void setMaxDisplacement(double maxd) { m_maxdispl = maxd; }
+    void setFrequencyCutoffs(double hlow, double hmax) {
+        m_hlow = hlow;
+        m_hmax = hmax;
+    }
+    void setMicroIterations(int micro) { m_maxmicro = micro; }
+    void setHessianUpdate(HessianUpdate method) { m_hessian_update = method; }
+    void setModelHessianType(ModelHessianParameters::Type type) {
+        m_model_hess_params.model = type;
+    }
+
+    // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
+    BEGIN_PARAMETER_DEFINITION(ancopt)
+
+    // Basic optimization parameters
+    PARAM(maxdispl, Double, 1.0, "Maximum displacement per ANC component (Bohr)", "Basic", {"max_displ"})
+    PARAM(hlow, Double, 0.01, "Lower eigenvalue cutoff for ANC basis", "Basic", {})
+    PARAM(hmax, Double, 5.0, "Upper eigenvalue cutoff for ANC basis", "Basic", {})
+    PARAM(maxmicro, Int, 20, "Maximum micro-iterations before ANC regeneration", "Basic", {"max_micro"})
+    PARAM(model_hessian, Int, 1, "Model Hessian type: 0=Lindh_1995 1=Lindh_2007 2=Lindh_D2 3=Swart", "Algorithm", {"hessian_model"})
+    PARAM(hessian_update, Int, 0, "Hessian update method: 0=BFGS 1=Powell", "Algorithm", {})
+
+    // Convergence thresholds (matched to XTB level 0 = 'normal')
+    PARAM(energy_threshold, Double, 5e-6, "Energy convergence threshold (Eh)", "Convergence", {"ethr"})
+    PARAM(gradient_threshold, Double, 1.890e-3, "Gradient convergence threshold (Eh/Ang)", "Convergence", {"gthr"})
+    PARAM(opt_level, Int, 0, "Optimization level 0=normal 1=tight 2=vtight (sets ethr/gthr)", "Convergence", {})
+
+    // Large-system size tiers — thresholds and ANC basis controls (Apr 2026)
+    PARAM(anc_lanczos_threshold, Int, 1800, "n3 = 3*N above which to use truncated Lanczos ANC generation (Tier L). Below: full eigendecomp.", "Advanced", {})
+    PARAM(anc_lanczos_k, Int, 500, "Maximum ANC basis size (nvar cap) for Tier L+ Lanczos path. Bounds dense BFGS cost O(k^2).", "Advanced", {})
+    PARAM(anc_lbfgs_threshold, Int, 2000, "nvar above which to replace dense BFGS+RF with L-BFGS in ANC subspace (Tier XL). RF mode-following disabled.", "Advanced", {})
+    PARAM(anc_lbfgs_history, Int, 12, "Number of (s,y) pairs stored for L-BFGS in ANC subspace (Tier XL)", "Advanced", {})
+
+    END_PARAMETER_DEFINITION
+    // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
+};
+
+} // namespace Optimization

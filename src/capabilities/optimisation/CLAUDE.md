@@ -131,18 +131,40 @@ Optimized structure saved to: input.opt.xyz
 
 ## Variable Section
 
-### ✅ **COMPLETED MILESTONES:**
-- **Native optimizer cleanup**: All variable naming inconsistencies fixed
-- **Einheitliches -optimizer System**: Implementiert und funktionsfähig
-- **Educational-First Integration**: Wissenschaftliche Algorithmen direkt aufrufbar
-- **Curcuma-eigene Optimierer**: L-BFGS, DIIS, RFO nativ verfügbar
-- **Build erfolgreich**: Kompiliert ohne Fehler
-- **🧪 ALGORITHMUS KORREKTUREN** (August 2025):
-  - **L-BFGS Two-Loop Recursion**: Indexierung korrigiert (Nocedal & Wright konform)
-  - **Curvature Condition**: Implementiert - verhindert numerische Instabilität
-  - **DIIS B-Matrix**: Korrigiert nach Pulay (1980) - einfache Skalarprodukte
-  - **RFO Algorithmus**: Komplett neu nach Banerjee et al. (1985) implementiert
-  - **SR1 Hessian Update**: Korrigiert - m_lambda Faktor entfernt
+### AI Implementation Status (Apr 2026)
+
+> **All native optimizers (L-BFGS, DIIS, RFO, SR1) are 🤖 AI-generated.**
+> None have been ✅ TESTED or ✅ APPROVED by the human operator.
+
+| Method | Status | Tested on | Not tested |
+|--------|--------|-----------|------------|
+| Native L-BFGS | 🤖 AI-generated, ⚙️ compiles | water, ethane (UFF) | large systems, QM methods, constrained opt |
+| Native DIIS | 🤖 AI-generated, ⚙️ compiles | small UFF molecules | convergence stability, near-degenerate cases |
+| Native RFO | 🤖 AI-generated, ⚙️ compiles | small UFF molecules | saddle point searches, transition states |
+| SR1 update | 🤖 AI-generated, ⚙️ compiles | indirectly via DIIS | standalone correctness vs. reference |
+
+**Known gaps vs. reference implementations:**
+- No independent numerical gradient check for any native method
+- Step size control not validated against reference optimizer (XTB, Gaussian)
+- DIIS extrapolation: no guarantee of convergence on difficult PES
+- RFO: mode following untested
+
+**Human production testing pending — do not use for production calculations.**
+
+### Large-System Optimizations (Apr 2026, all 🤖 AI-generated, ⚙️ compiles, not ✅ TESTED)
+
+**`rf_solver.h/.cpp`** (Phase 6 — shared Rational Function solver):
+- `RFSolver::lanczosLowestEigenpair()` — Lanczos for lowest eigenpair of augmented RF matrix
+- `RFSolver::calculateRFStep()` — dispatches Lanczos (nvar≥49) or dense fallback
+- Used by ANCOpt and native RFO (replaces per-optimizer duplicate code)
+- Enables iterative RF step scaling for large systems without O(N³) eigendecomp
+
+**`lbfgs.cpp` enhancements**:
+- Phase 5: Strong-Wolfe line search (`lineSearchStrongWolfe`, N&W Alg 3.5/3.6) — optional via `m_line_search_method = "strong_wolfe"`
+- Phase 6: `RFOStep()` replaced O(N³) `SelfAdjointEigenSolver` with `RFSolver::calculateRFStep()`
+- Verbosity 2: per-step alpha, step norm, gradient norm, history size
+
+**EIGEN_USE_LAPACKE**: Enabled per-file in `rf_solver.cpp` and `lbfgs.cpp` (safe — no local variable `I`). Enables LAPACK D&C backend for `SelfAdjointEigenSolver` in fallback path.
 
 ### 🎯 **EINHEITLICHES DESIGN FESTGEHALTEN:**
 1. **`-optimizer` Parameter**: Bestimmt Optimierungsalgorithmus (nicht `-method`)

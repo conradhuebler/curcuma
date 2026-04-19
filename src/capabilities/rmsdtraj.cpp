@@ -21,7 +21,7 @@
 #include "src/global_config.h"
 
 #include "src/capabilities/confscan.h"
-#include "src/capabilities/curcumaopt.h"
+#include "src/capabilities/optimizer_factory.h"
 #include "src/capabilities/rmsd.h"
 
 #include "src/core/elements.h"
@@ -590,10 +590,27 @@ void RMSDTraj::LoadControlJson()
 
 void RMSDTraj::Optimise()
 {
-    CurcumaOpt optimise(m_controller["rmsdtraj"], true);
-    optimise.setFileName(m_outfile + ".unique.xyz");
-    // optimise.setBaseName(m_outfile);
-    optimise.start();
+    // Claude Generated (Apr 2026): Use unified optimizer instead of legacy CurcumaOpt
+    json rmsdtraj_config = m_controller.contains("rmsdtraj") ? m_controller["rmsdtraj"] : json{};
+    std::string method = rmsdtraj_config.value("method", std::string("gfnff"));
+    std::string input_file = m_outfile + ".unique.xyz";
+    std::string output_file = m_outfile + ".opt.xyz";
+
+    // Read molecules from file
+    FileIterator file(input_file);
+    while (!file.AtEnd()) {
+        Molecule mol = file.Next();
+        if (mol.AtomCount() == 0)
+            continue;
+
+        EnergyCalculator energy_calc(method, rmsdtraj_config);
+        auto result = Optimization::OptimizationDispatcher::optimizeStructure(
+            &mol, Optimization::OptimizerType::LBFGSPP, &energy_calc, rmsdtraj_config);
+
+        if (result.success) {
+            result.final_molecule.appendXYZFile(output_file);
+        }
+    }
 }
 
 void RMSDTraj::Filter()

@@ -78,8 +78,8 @@ private:
     double m_lbfgs_ftol = 1e-4; // Function tolerance for line search
     double m_lbfgs_wolfe = 0.9; // Wolfe condition parameter
 
-    // LBFGSpp objects
-    std::unique_ptr<LBFGSSolver<double>> m_solver;
+    // LBFGSpp objects - use LineSearchBacktracking like legacy CurcumaOpt
+    std::unique_ptr<LBFGSSolver<double, LineSearchBacktracking>> m_solver;
     std::unique_ptr<LBFGSParam<double>> m_param;
     std::unique_ptr<LBFGSppObjectiveFunction> m_objective;
 
@@ -106,14 +106,14 @@ public:
     LBFGSppOptimizer();
     virtual ~LBFGSppOptimizer() = default;
 
-    // OptimizerInterface implementation
+    // Method identification
     std::string getName() const override { return "LBFGSpp External Library"; }
     OptimizerType getType() const override { return OptimizerType::LBFGSPP; }
     bool supportsConstraints() const override { return true; }
     bool requiresHessian() const override { return false; }
     std::vector<std::string> getRequiredParameters() const override;
 
-    json GetDefaultConfiguration() const override;
+    json GetDefaultConfiguration() const;
 
     // Configuration accessors
     void setMemoryParameter(int m) { m_lbfgs_m = m; }
