@@ -782,6 +782,11 @@ private:
     mutable int m_phase2_buf_natoms = 0; ///< Atom count for current buffer size
     mutable int m_phase2_buf_nfrag = 0;  ///< Fragment count for current buffer size
 
+    /// Last successfully computed Phase 2 charges — used as fallback when solver fails on
+    /// subsequent steps. Much better than Phase 1 topology charges because these are
+    /// geometrically accurate (from a real linear solve, not topological distances).
+    mutable Vector m_last_successful_charges;
+
     /// Ensure buffers are large enough. Only reallocates if size changed.
     void ensurePhase2Buffers(int natoms, int nfrag) const {
         if (natoms != m_phase2_buf_natoms || nfrag != m_phase2_buf_nfrag) {
