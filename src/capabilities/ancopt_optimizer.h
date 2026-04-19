@@ -31,6 +31,7 @@
 
 #include "optimizer_driver.h"
 #include "src/core/molecule.h"
+#include "src/core/parameter_macros.h"
 #include <Eigen/Dense>
 #include <memory>
 #include <vector>
@@ -69,6 +70,12 @@ struct ANCCoordinates {
 
     // Generate ANC from model Hessian
     bool generateANC(const Matrix& cartesian_hessian, const Vector& xyz, bool is_linear);
+
+    // Truncated-Lanczos ANC generation for large systems: finds the k_target
+    // largest eigenpairs of the Cartesian Hessian without materializing the
+    // full dense eigendecomposition. Called by generateANC() when n3 is large.
+    bool generateANCLanczos(const Matrix& cartesian_hessian, const Vector& xyz,
+                            bool is_linear, int k_target);
 
     // Transform between coordinate systems
     void getCartesian(Vector& xyz_out) const;
@@ -151,6 +158,18 @@ private:
     // Cf. XTB optimizer.f90:691 — steepest-descent start in cycle 1, previous
     // Ritz vector thereafter. Dramatically reduces Lanczos iteration count.
     Vector m_last_rf_eigenvector;
+
+    // Tier XL: L-BFGS in ANC subspace (replaces dense hess + RF when nvar > threshold).
+    // nvar > m_anc_lbfgs_threshold: dense hess (nvar x nvar, ~32 MB at nvar=2000) is replaced
+    // by storing the last m_anc_lbfgs_history (s_k, y_k) pairs; H^-1*g via two-loop recursion.
+    // RF mode-following is not available in this tier (only minima, no TS searches).
+    int m_anc_lbfgs_threshold = 2000; // nvar above which to switch to L-BFGS-in-ANC
+    int m_anc_lbfgs_history = 12;     // number of (s,y) pairs stored
+    std::vector<Vector> m_lbfgs_s_int; // step differences in ANC space
+    std::vector<Vector> m_lbfgs_y_int; // gradient differences in ANC space
+    std::vector<double> m_lbfgs_rho_int; // 1/(y·s) values
+    double m_time_lbfgs_step = 0.0;   // timing for L-BFGS step in XL tier
+    int m_lbfgs_step_calls = 0;       // steps taken via L-BFGS
 
     // Convergence parameters (from XTB, gradient threshold in Eh/Ang).
     // Note: gradient is converted Eh/Bohr → Eh/Ang in CalculateOptimizationStep
@@ -252,6 +271,17 @@ protected:
                                 double tol = 1e-6);
 
     /**
+     * @brief L-BFGS two-loop recursion in ANC internal space (Tier XL path).
+     *
+     * Replaces the dense hess + RF step when nvar > m_anc_lbfgs_threshold.
+     * Uses the stored (m_lbfgs_s_int, m_lbfgs_y_int, m_lbfgs_rho_int) history.
+     * Returns the L-BFGS search direction (= H^-1 * g, minimizing direction = -result).
+     * On empty history, returns g (caller negates to get steepest-descent).
+     * Reference: Nocedal & Wright Algorithm 7.4 (two-loop recursion).
+     */
+    Vector calculateLBFGSStepInternal(const Vector& gradient);
+
+    /**
      * @brief BFGS Hessian update
      * Ported from XTB bfgs.f90
      */
@@ -319,6 +349,31 @@ public:
     void setModelHessianType(ModelHessianParameters::Type type) {
         m_model_hess_params.model = type;
     }
+
+    // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
+    BEGIN_PARAMETER_DEFINITION(ancopt)
+
+    // Basic optimization parameters
+    PARAM(maxdispl, Double, 1.0, "Maximum displacement per ANC component (Bohr)", "Basic", {"max_displ"})
+    PARAM(hlow, Double, 0.01, "Lower eigenvalue cutoff for ANC basis", "Basic", {})
+    PARAM(hmax, Double, 5.0, "Upper eigenvalue cutoff for ANC basis", "Basic", {})
+    PARAM(maxmicro, Int, 20, "Maximum micro-iterations before ANC regeneration", "Basic", {"max_micro"})
+    PARAM(model_hessian, Int, 1, "Model Hessian type: 0=Lindh_1995 1=Lindh_2007 2=Lindh_D2 3=Swart", "Algorithm", {"hessian_model"})
+    PARAM(hessian_update, Int, 0, "Hessian update method: 0=BFGS 1=Powell", "Algorithm", {})
+
+    // Convergence thresholds (matched to XTB level 0 = 'normal')
+    PARAM(energy_threshold, Double, 5e-6, "Energy convergence threshold (Eh)", "Convergence", {"ethr"})
+    PARAM(gradient_threshold, Double, 1.890e-3, "Gradient convergence threshold (Eh/Ang)", "Convergence", {"gthr"})
+    PARAM(opt_level, Int, 0, "Optimization level 0=normal 1=tight 2=vtight (sets ethr/gthr)", "Convergence", {})
+
+    // Large-system size tiers — thresholds and ANC basis controls (Apr 2026)
+    PARAM(anc_lanczos_threshold, Int, 1800, "n3 = 3*N above which to use truncated Lanczos ANC generation (Tier L). Below: full eigendecomp.", "Advanced", {})
+    PARAM(anc_lanczos_k, Int, 500, "Maximum ANC basis size (nvar cap) for Tier L+ Lanczos path. Bounds dense BFGS cost O(k^2).", "Advanced", {})
+    PARAM(anc_lbfgs_threshold, Int, 2000, "nvar above which to replace dense BFGS+RF with L-BFGS in ANC subspace (Tier XL). RF mode-following disabled.", "Advanced", {})
+    PARAM(anc_lbfgs_history, Int, 12, "Number of (s,y) pairs stored for L-BFGS in ANC subspace (Tier XL)", "Advanced", {})
+
+    END_PARAMETER_DEFINITION
+    // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
 };
 
 } // namespace Optimization
