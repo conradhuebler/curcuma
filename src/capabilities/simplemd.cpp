@@ -447,7 +447,7 @@ bool SimpleMD::Initialise()
         }
         LoadRestartInformation(md);
 
-    } else if (!m_restart)
+    } else if (!m_restart && !m_norestart)
         LoadRestartInformation();
 
     if (m_molecule.AtomCount() == 0)

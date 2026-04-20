@@ -376,9 +376,9 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                 CurcumaLogger::info(fmt::format(
                     "  [DEBUG] HB re-detection: updated bond_hb_data ({} entries), "
                     "hb_alpha ({} pairs), bond nr_hb for {} bonds",
-                    m_gpu_params_leaked->bond_hb_data.size(),
-                    [&]() { int n = 0; for (const auto& e : m_gpu_params_leaked->bond_hb_data) n += e.B_atoms.size(); return n; }(),
-                    hb_update.bond_nr_hb.size()));
+                    static_cast<int>(m_gpu_params_leaked->bond_hb_data.size()),
+                    [&]() { int n = 0; for (const auto& e : m_gpu_params_leaked->bond_hb_data) n += static_cast<int>(e.B_atoms.size()); return n; }(),
+                    static_cast<int>(hb_update.bond_nr_hb.size())));
             }
         }
 

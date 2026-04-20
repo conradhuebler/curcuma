@@ -575,6 +575,32 @@ public:
     const std::vector<GFNFFHydrogenBond>& getLastHBonds() const { return m_last_hbonds; }
     const std::vector<GFNFFHalogenBond>& getLastXBonds() const { return m_last_xbonds; }
 
+    /**
+     * @brief Result of rebuildBondHBData() — per-bond HB metadata for GPU upload.
+     *
+     * Claude Generated (Apr 2026): GPU path needs bond nr_hb / hb_H_atom arrays and
+     * the flat BondHBEntry list to be rebuilt after each dynamic HB re-detection.
+     */
+    struct BondHBRebuildResult {
+        std::vector<BondHBEntry> bond_hb_data;   ///< Flat (A,H,B) entries for GPU HB-alpha pairs
+        std::vector<int> bond_nr_hb;             ///< Per-bond HB count (size = nb)
+        std::vector<int> bond_hb_H_atom;         ///< Per-bond H atom index, -1 if not an HB bond (size = nb)
+    };
+
+    /**
+     * @brief Rebuild bond-HB cross-reference data from freshly re-detected HB list.
+     *
+     * Claude Generated (Apr 2026): Called by GFNFFGPUMethod after consumeHBXBUpdate()
+     * to propagate new HB topology into the GPU bond SoA (nr_hb, hb_H_atom) and the
+     * HB-alpha pair list.  Mirrors the cross-referencing logic in generateGFNFFParameterSet().
+     *
+     * @param hbonds  New HB list from getLastHBonds()
+     * @param bonds   Static bond list from GFNFFParameterSet (m_gpu_params_leaked->bonds)
+     * @return BondHBRebuildResult with updated bond_hb_data, per-bond nr_hb, per-bond hb_H_atom
+     */
+    BondHBRebuildResult rebuildBondHBData(const std::vector<GFNFFHydrogenBond>& hbonds,
+                                           const std::vector<Bond>& bonds) const;
+
     // Getters for CN/EEQ results (valid after prepareCNAndEEQ)
     const Vector& getLastCN() const { return m_last_cn; }
     const Vector& getLastCharges() const { return m_charges; }

@@ -1030,6 +1030,47 @@ void FFWorkspaceGPU::updateBondHBCN(const std::vector<double>& hb_cn_values)
     m_impl->bonds.hb_cn_H.upload(hb_cn_values.data(), nb);
 }
 
+// Claude Generated (Apr 2026): Re-upload HB alpha (H,B) pair list after dynamic HB re-detection.
+// Mirrors the construction-time logic at ff_workspace_gpu.cu:848-870.
+void FFWorkspaceGPU::updateHBAlphaPairs(const std::vector<BondHBEntry>& bond_hb_data,
+                                          const std::vector<int>& atom_types)
+{
+    if (!m_impl) return;
+    const auto& rcov_d3 = GFNFFParameters::covalent_rad_d3;
+    constexpr double rcov_43 = 4.0 / 3.0;
+    constexpr double rcov_scal = 1.78;
+
+    std::vector<int> hb_h_idx, hb_b_idx;
+    std::vector<double> hb_rcov;
+    for (const auto& entry : bond_hb_data) {
+        int H = entry.H;
+        int ati = (H < m_natoms) ? atom_types[H] : 0;
+        for (int B : entry.B_atoms) {
+            int atj = (B < m_natoms) ? atom_types[B] : 0;
+            if (ati < 1 || atj < 1) continue;
+            double rcovij = rcov_scal * rcov_43 * (rcov_d3[ati - 1] + rcov_d3[atj - 1]);
+            hb_h_idx.push_back(H);
+            hb_b_idx.push_back(B);
+            hb_rcov.push_back(rcovij);
+        }
+    }
+    m_impl->hb_alpha.upload(hb_h_idx, hb_b_idx, hb_rcov, m_impl->stream);
+}
+
+// Claude Generated (Apr 2026): Re-upload per-bond nr_hb and hb_H_atom to GPU BondSoA.
+// Called after updateHBAlphaPairs() to keep k_bonds kernel HB modulation current.
+void FFWorkspaceGPU::updateBondHBMetadata(const std::vector<int>& nr_hb,
+                                            const std::vector<int>& hb_H_atom)
+{
+    if (!m_impl) return;
+    const int nb = m_impl->bonds.n;
+    if (nb == 0) return;
+    if (static_cast<int>(nr_hb.size()) != nb || static_cast<int>(hb_H_atom.size()) != nb)
+        return;
+    m_impl->bonds.nr_hb.upload(nr_hb.data(), nb, m_impl->stream);
+    m_impl->bonds.hb_H_atom.upload(hb_H_atom.data(), nb, m_impl->stream);
+}
+
 void FFWorkspaceGPU::setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
                                                   const Vector& alp,     const Vector& cnf,
                                                   const Vector& chi_static)

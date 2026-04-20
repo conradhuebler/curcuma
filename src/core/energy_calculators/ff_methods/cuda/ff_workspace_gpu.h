@@ -171,6 +171,32 @@ public:
     /// Update per-bond HB coordination numbers (for egbond_hb alpha modulation)
     void updateBondHBCN(const std::vector<double>& hb_cn_values);
 
+    /**
+     * @brief Re-upload HB alpha (H,B) pair list after dynamic HB re-detection.
+     *
+     * Claude Generated (Apr 2026): Replaces the HBAlphaSoA built at construction time
+     * with updated (H,B) pairs from the new HB list.  Must be called after
+     * updateHBonds() when consumeHBXBUpdate() returns true.
+     *
+     * @param bond_hb_data  New flat BondHBEntry list (from GFNFF::rebuildBondHBData)
+     * @param atom_types    Atomic numbers (1-based, size N) for covalent radius lookup
+     */
+    void updateHBAlphaPairs(const std::vector<BondHBEntry>& bond_hb_data,
+                             const std::vector<int>& atom_types);
+
+    /**
+     * @brief Re-upload per-bond nr_hb and hb_H_atom arrays after dynamic HB re-detection.
+     *
+     * Claude Generated (Apr 2026): Overwrites the BondSoA nr_hb and hb_H_atom buffers
+     * on the GPU so the k_bonds kernel uses updated HB participation counts.
+     * Must be called after updateHBAlphaPairs() when consumeHBXBUpdate() returns true.
+     *
+     * @param nr_hb       Per-bond HB count (size = bond count)
+     * @param hb_H_atom   Per-bond H atom index, -1 if not an HB bond (size = bond count)
+     */
+    void updateBondHBMetadata(const std::vector<int>& nr_hb,
+                               const std::vector<int>& hb_H_atom);
+
     /// Re-upload HBond SoA after dynamic re-detection (called after updateHBXBIfNeeded)
     void updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
                       const std::vector<int>& atom_types);

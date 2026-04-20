@@ -2643,6 +2643,46 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     return params;
 }
 
+// Claude Generated (Apr 2026): Rebuild bond-HB cross-reference after dynamic HB re-detection.
+// Mirrors the cross-referencing block in generateGFNFFParameterSet() (lines 2609-2631).
+// Called by GFNFFGPUMethod after consumeHBXBUpdate() to keep GPU bond SoA in sync.
+GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBData(
+    const std::vector<GFNFFHydrogenBond>& hbonds,
+    const std::vector<Bond>& bonds) const
+{
+    BondHBRebuildResult result;
+    const int nb = static_cast<int>(bonds.size());
+    result.bond_nr_hb.assign(nb, 0);
+    result.bond_hb_H_atom.assign(nb, -1);
+
+    // Build A-H → B_atoms map from the new HB list (only N/O acceptors)
+    std::map<std::pair<int,int>, std::vector<int>> ah_to_b_atoms;
+    for (const auto& hb : hbonds) {
+        int z_b = (hb.k < m_atomcount) ? m_atoms[hb.k] : 0;
+        if (z_b == 7 || z_b == 8)
+            ah_to_b_atoms[{hb.i, hb.j}].push_back(hb.k);
+    }
+
+    for (int b = 0; b < nb; ++b) {
+        const Bond& bond = bonds[b];
+        int hbH = -1, hbA = -1;
+        if (bond.i < m_atomcount && m_atoms[bond.i] == 1) { hbH = bond.i; hbA = bond.j; }
+        else if (bond.j < m_atomcount && m_atoms[bond.j] == 1) { hbH = bond.j; hbA = bond.i; }
+        else continue;
+        if (hbA >= m_atomcount || (m_atoms[hbA] != 7 && m_atoms[hbA] != 8)) continue;
+
+        auto it = ah_to_b_atoms.find({hbA, hbH});
+        if (it != ah_to_b_atoms.end() && !it->second.empty()) {
+            result.bond_nr_hb[b] = static_cast<int>(it->second.size());
+            result.bond_hb_H_atom[b] = hbH;
+            BondHBEntry entry;
+            entry.A = hbA; entry.H = hbH; entry.B_atoms = it->second;
+            result.bond_hb_data.push_back(entry);
+        }
+    }
+    return result;
+}
+
 json GFNFF::generateGFNFFBonds() const
 {
     auto start_time = std::chrono::high_resolution_clock::now();
