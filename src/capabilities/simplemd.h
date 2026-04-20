@@ -294,7 +294,7 @@ private:
     int m_rattle_dynamic_tol_iter = 100;
     double m_pos_conv = 0, m_scale_velo = 1.0, m_coupling = 10;
     double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
-    double m_rattle_tol_12 = 0.1, m_rattle_tol_13 = 0.5;
+    double m_rattle_tol_12 = 1e-4, m_rattle_tol_13 = 1e-3;
     double m_wall_spheric_radius = 6, m_wall_temp = 298.15, m_wall_beta = 6;
     double m_wall_x_min = 0, m_wall_x_max = 0, m_wall_y_min = 0, m_wall_y_max = 0, m_wall_z_min = 0, m_wall_z_max = 0;
     double m_wall_potential = 0, m_average_wall_potential = 0;
@@ -317,6 +317,13 @@ private:
     int m_rmsd_fragment_count = 0;
     int m_wall_type = 0;
     int m_rattle_counter = 0;
+    // RATTLE diagnostics: accumulated stats per print interval
+    int m_rattle_iters_step1 = 0;    // iterations used in 1st step (position constraints)
+    int m_rattle_iters_step2 = 0;    // iterations used in 2nd step (velocity constraints)
+    int m_rattle_max_err_count = 0;  // how many steps hit max iterations
+    double m_rattle_max_err_12 = 0;  // worst 1-2 constraint error this interval
+    double m_rattle_max_err_13 = 0;  // worst 1-3 constraint error this interval
+    int m_rattle_constrained_atoms = 0; // atoms involved in constraints
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
@@ -413,9 +420,9 @@ private:
     PARAM(rattle, Int, 0, "RATTLE constraint algorithm (0:off, 1:on, 2:H-only).", "RATTLE", {})
     PARAM(rattle_12, Bool, true, "Constrain 1-2 bond distances.", "RATTLE", {})
     PARAM(rattle_13, Bool, false, "Constrain 1-3 distances (angles).", "RATTLE", {})
-    PARAM(rattle_tol_12, Double, 1e-1, "Tolerance for 1-2 constraints.", "RATTLE", {})
-    PARAM(rattle_tol_13, Double, 2.0, "Tolerance for 1-3 constraints.", "RATTLE", {})
-    PARAM(rattle_max_iterations, Int, 50, "Maximum RATTLE iterations.", "RATTLE", {"rattle_maxiter"})
+    PARAM(rattle_tol_12, Double, 1e-4, "Tolerance for 1-2 constraints (squared Bohr).", "RATTLE", {})
+    PARAM(rattle_tol_13, Double, 1e-3, "Tolerance for 1-3 constraints (squared Bohr).", "RATTLE", {})
+    PARAM(rattle_max_iterations, Int, 100, "Maximum RATTLE iterations.", "RATTLE", {"rattle_maxiter"})
 
     // --- Wall Potentials ---
     PARAM(wall_type, String, "none", "Wall type: none|spheric|rect.", "Walls", {"wall"})

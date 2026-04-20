@@ -26,6 +26,7 @@
 #include <limits>
 #include <map>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -810,19 +811,23 @@ void SimpleMD::InitConstrainedBonds()
             }
     }
 
-    std::cout << std::endl
-              << m_dof << " initial degrees of freedom " << std::endl;
-    std::cout << m_bond_constrained.size() << " constrains active" << std::endl;
-    // m_dof -= (m_bond_constrained.size() + m_bond_13_constrained.size());
+    // Subtract constrained DOF: each bond/angle constraint removes 1 degree of freedom
+    int n_constraints = static_cast<int>(m_bond_constrained.size() + m_bond_13_constrained.size());
+    m_dof -= n_constraints;
+    if (m_dof < 1)
+        m_dof = 1;
 
-    std::cout << m_dof << " degrees of freedom remaining ..." << std::endl;
+    std::cout << std::endl
+              << m_dof + n_constraints << " initial degrees of freedom (3N)" << std::endl;
+    std::cout << n_constraints << " constraints active (" << m_bond_constrained.size() << " 1-2, " << m_bond_13_constrained.size() << " 1-3)" << std::endl;
+    std::cout << m_dof << " effective degrees of freedom" << std::endl;
 }
 
 void SimpleMD::InitVelocities(double scaling)
 {
     static std::default_random_engine generator;
     for (size_t i = 0; i < m_natoms; ++i) {
-        std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_eigen_inv_masses.data()[i]));
+        std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_eigen_inv_masses.data()[3 * i]));
         m_eigen_velocities.data()[3 * i + 0] = distribution(generator);
         m_eigen_velocities.data()[3 * i + 1] = distribution(generator);
         m_eigen_velocities.data()[3 * i + 2] = distribution(generator);
@@ -836,6 +841,72 @@ void SimpleMD::InitVelocities(double scaling)
     Berendson();
     EKin();
     m_coupling = coupling;
+
+    // If RATTLE is active, project velocities onto constraint manifold
+    // and rescale to target temperature using reduced DOF.
+    // This prevents the initial temperature drop caused by SHAKE
+    // removing kinetic energy from constrained DOF.
+    if (m_rattle) {
+        // Apply RATTLE velocity constraint: project out r_ij · v_ij for each constraint
+        double max_mu = 10;
+        int iter = 0;
+        while (iter < m_rattle_maxiter) {
+            iter++;
+            int active = 0;
+            for (auto bond : m_bond_constrained) {
+                int i = bond.first.first, j = bond.first.second;
+                double dx = m_eigen_geometry.data()[3 * i + 0] - m_eigen_geometry.data()[3 * j + 0];
+                double dy = m_eigen_geometry.data()[3 * i + 1] - m_eigen_geometry.data()[3 * j + 1];
+                double dz = m_eigen_geometry.data()[3 * i + 2] - m_eigen_geometry.data()[3 * j + 2];
+                double dvx = m_eigen_velocities.data()[3 * i + 0] - m_eigen_velocities.data()[3 * j + 0];
+                double dvy = m_eigen_velocities.data()[3 * i + 1] - m_eigen_velocities.data()[3 * j + 1];
+                double dvz = m_eigen_velocities.data()[3 * i + 2] - m_eigen_velocities.data()[3 * j + 2];
+                double distance_sq = dx * dx + dy * dy + dz * dz;
+                double r = dx * dvx + dy * dvy + dz * dvz;
+                double mu = -r / ((m_eigen_inv_masses.data()[3 * i] + m_eigen_inv_masses.data()[3 * j]) * distance_sq);
+                while (std::abs(mu) > max_mu) mu /= 2;
+                if (std::abs(mu) > m_rattle_tol_12) {
+                    active = 1;
+                    m_eigen_velocities.data()[3 * i + 0] += dx * mu * m_eigen_inv_masses.data()[3 * i];
+                    m_eigen_velocities.data()[3 * i + 1] += dy * mu * m_eigen_inv_masses.data()[3 * i];
+                    m_eigen_velocities.data()[3 * i + 2] += dz * mu * m_eigen_inv_masses.data()[3 * i];
+                    m_eigen_velocities.data()[3 * j + 0] -= dx * mu * m_eigen_inv_masses.data()[3 * j];
+                    m_eigen_velocities.data()[3 * j + 1] -= dy * mu * m_eigen_inv_masses.data()[3 * j];
+                    m_eigen_velocities.data()[3 * j + 2] -= dz * mu * m_eigen_inv_masses.data()[3 * j];
+                }
+            }
+            for (auto bond : m_bond_13_constrained) {
+                int i = bond.first.first, j = bond.first.second;
+                double dx = m_eigen_geometry.data()[3 * i + 0] - m_eigen_geometry.data()[3 * j + 0];
+                double dy = m_eigen_geometry.data()[3 * i + 1] - m_eigen_geometry.data()[3 * j + 1];
+                double dz = m_eigen_geometry.data()[3 * i + 2] - m_eigen_geometry.data()[3 * j + 2];
+                double dvx = m_eigen_velocities.data()[3 * i + 0] - m_eigen_velocities.data()[3 * j + 0];
+                double dvy = m_eigen_velocities.data()[3 * i + 1] - m_eigen_velocities.data()[3 * j + 1];
+                double dvz = m_eigen_velocities.data()[3 * i + 2] - m_eigen_velocities.data()[3 * j + 2];
+                double distance_sq = dx * dx + dy * dy + dz * dz;
+                double r = dx * dvx + dy * dvy + dz * dvz;
+                double mu = -r / ((m_eigen_inv_masses.data()[3 * i] + m_eigen_inv_masses.data()[3 * j]) * distance_sq);
+                while (std::abs(mu) > max_mu) mu /= 2;
+                if (std::abs(mu) > m_rattle_tol_13) {
+                    active = 1;
+                    m_eigen_velocities.data()[3 * i + 0] += dx * mu * m_eigen_inv_masses.data()[3 * i];
+                    m_eigen_velocities.data()[3 * i + 1] += dy * mu * m_eigen_inv_masses.data()[3 * i];
+                    m_eigen_velocities.data()[3 * i + 2] += dz * mu * m_eigen_inv_masses.data()[3 * i];
+                    m_eigen_velocities.data()[3 * j + 0] -= dx * mu * m_eigen_inv_masses.data()[3 * j];
+                    m_eigen_velocities.data()[3 * j + 1] -= dy * mu * m_eigen_inv_masses.data()[3 * j];
+                    m_eigen_velocities.data()[3 * j + 2] -= dz * mu * m_eigen_inv_masses.data()[3 * j];
+                }
+            }
+            if (active == 0) break;
+        }
+        // Rescale velocities to target temperature using reduced DOF
+        EKin();
+        double scale = std::sqrt(m_T0 / m_T);
+        for (int i = 0; i < 3 * m_natoms; ++i) {
+            m_eigen_velocities.data()[i] *= scale;
+        }
+        EKin();
+    }
 }
 
 void SimpleMD::InitialiseWalls()
@@ -1713,6 +1784,10 @@ void SimpleMD::start()
         if ((m_step && static_cast<int>(m_step * m_dT) % m_print == 0)) {
             m_Etot = m_Epot + m_Ekin;
             PrintStatus();
+            // Reset RATTLE diagnostics after printing
+            m_rattle_max_err_12 = 0;
+            m_rattle_max_err_13 = 0;
+            m_rattle_max_err_count = 0;
             m_time_step = 0;
         }
         if (m_rattle && m_rattle_dynamic_tol) {
@@ -1856,7 +1931,7 @@ void SimpleMD::Verlet()
         m_eigen_velocities.data()[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
         m_eigen_velocities.data()[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
         m_eigen_velocities.data()[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
-        ekin += m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        ekin += m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
     }
 
     // CRITICAL FIX (Feb 2026): Check velocities AFTER integration
@@ -1872,7 +1947,8 @@ void SimpleMD::Verlet()
     ekin *= 0.5;
     m_T = 2.0 * ekin / (kb_Eh * m_dof);
     m_Ekin = ekin;
-    ThermostatFunction();
+    // Thermostat NOT applied here — half-step velocities not representative.
+    // Apply thermostat only after full velocity update (second half-step).
     m_Epot = Energy();
     if (m_rmsd_mtd) {
         if (m_step % m_mtd_steps == 0) {
@@ -1909,7 +1985,7 @@ void SimpleMD::Verlet()
         m_eigen_velocities.data()[3 * i + 1] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
         m_eigen_velocities.data()[3 * i + 2] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
 
-        ekin += m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        ekin += m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
         //m_gradient[3 * i + 0] = m_eigen_gradient.data()[3 * i + 0];
         //m_gradient[3 * i + 1] = m_eigen_gradient.data()[3 * i + 1];
         //m_gradient[3 * i + 2] = m_eigen_gradient.data()[3 * i + 2];
@@ -1945,258 +2021,141 @@ void SimpleMD::Rattle()
 
     auto* coord = new double[3 * m_natoms];
     double m_dT_inverse = 1 / m_dT;
-    std::vector<int> moved_12(m_natoms, 0), moved_13(m_natoms, 0);
+    std::set<int> constrained_atoms;
     bool move = false;
-    int dof = m_dof;
+    double max_mu = 10;
+    double max_err_12 = 0, max_err_13 = 0;
     for (int i = 0; i < m_natoms; ++i) {
         coord[3 * i + 0] = m_eigen_geometry.data()[3 * i + 0] + m_dT * m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0] * m_dt2;
         coord[3 * i + 1] = m_eigen_geometry.data()[3 * i + 1] + m_dT * m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1] * m_dt2;
         coord[3 * i + 2] = m_eigen_geometry.data()[3 * i + 2] + m_dT * m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2] * m_dt2;
 
-        m_rt_geom_1[3 * i + 0] = coord[3 * i + 0];
-        m_rt_geom_1[3 * i + 1] = coord[3 * i + 1];
-        m_rt_geom_1[3 * i + 2] = coord[3 * i + 2];
-
         m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
         m_eigen_velocities.data()[3 * i + 1] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
         m_eigen_velocities.data()[3 * i + 2] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
-
-        m_rt_velo[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0];
-        m_rt_velo[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1];
-        m_rt_velo[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2];
     }
 
     double iter = 0;
-    double difference = 0;
-    double difference_prev = 1e22, difference_curr = 1e22;
-    double max = m_rattle_max;
-    double scale = 0.1;
-    int local_dof = 0;
+    double max_violation_12 = 0, max_violation_13 = 0;
     while (iter < m_rattle_maxiter) {
-        difference_prev = difference_curr;
-        difference_curr = 0;
-        difference = 0;
         iter++;
         int active = 0;
+        max_violation_12 = 0;
+        max_violation_13 = 0;
 
         for (auto bond : m_bond_constrained) {
             int i = bond.first.first, j = bond.first.second;
             double distance = bond.second;
-            double distance_current = ((m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0]) * (m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0])
-                + (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1]) * (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1])
-                + (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]) * (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]));
-            if (std::abs(distance - distance_current) > m_rattle_tol_12) {
+            double distance_current = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
+                + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
+                + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
+            double violation_12 = std::abs(distance - distance_current);
+            if (violation_12 > max_violation_12) max_violation_12 = violation_12;
+            if (violation_12 > m_rattle_tol_12) {
+                if (violation_12 > max_err_12) max_err_12 = violation_12;
                 move = true;
                 double r = distance - distance_current;
                 double dx = m_eigen_geometry.data()[3 * i + 0] - m_eigen_geometry.data()[3 * j + 0];
                 double dy = m_eigen_geometry.data()[3 * i + 1] - m_eigen_geometry.data()[3 * j + 1];
                 double dz = m_eigen_geometry.data()[3 * i + 2] - m_eigen_geometry.data()[3 * j + 2];
 
-                double scalarproduct = (dx) * (m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0])
-                    + (dy) * (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1])
-                    + (dz) * (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]);
-                // if (scalarproduct >= m_rattle_tolerance * distance) {
-                moved_12[i] += 1;
-                moved_12[j] += 1;
-                if (moved_12[i] == 1)
-                    local_dof++;
+                double scalarproduct = (dx) * (coord[3 * i + 0] - coord[3 * j + 0])
+                    + (dy) * (coord[3 * i + 1] - coord[3 * j + 1])
+                    + (dz) * (coord[3 * i + 2] - coord[3 * j + 2]);
+
+                constrained_atoms.insert(i);
+                constrained_atoms.insert(j);
                 active++;
-                // std::cout << i << " " << j << " " << distance_current << " " << scalarproduct <<std::endl;
 
                 if (std::abs(scalarproduct) < m_rattle_min) {
-                    std::cout << "small" << scalarproduct << " " << distance - distance_current << "" << std::endl;
                     if (scalarproduct < 0)
                         scalarproduct = -1 * m_rattle_min;
                     else
                         scalarproduct = m_rattle_min;
-
-                    std::cout << scalarproduct << std::endl;
                 }
 
-                    double lambda = r / (1 * (m_eigen_inv_masses.data()[i] + m_eigen_inv_masses.data()[j]) * scalarproduct);
-                    if (std::isinf(lambda)) {
-                        std::cout << i << " " << j << std::endl;
-                        std::cout << r << " " << scalarproduct << " " << distance_current;
-                        std::cout << " " << (coord[3 * i + 0] - coord[3 * j + 0]) << " " << coord[3 * i + 1] - coord[3 * j + 1] << " " << (coord[3 * i + 2] - coord[3 * j + 2]);
-                        std::cout << " " << (m_eigen_geometry.data()[3 * i + 0] - m_eigen_geometry.data()[3 * j + 0]) << " " << m_eigen_geometry.data()[3 * i + 1] - m_eigen_geometry.data()[3 * j + 1] << " " << (m_eigen_geometry.data()[3 * i + 2] - m_eigen_geometry.data()[3 * j + 2]);
+                double lambda = r / ((m_eigen_inv_masses.data()[3 * i] + m_eigen_inv_masses.data()[3 * j]) * scalarproduct);
+                if (std::isinf(lambda) || std::isnan(lambda)) {
+                    std::cout << "RATTLE 1-2: " << i << " " << j << " lambda=" << lambda
+                              << " r=" << r << " sp=" << scalarproduct << " dc=" << distance_current << std::endl;
+                }
 
-                        std::cout << "inf" << std::endl;
-                        exit(0);
-                    }
-                    if (std::isnan(lambda)) {
-                        std::cout << "nan" << std::endl;
-                        exit(0);
-                    }
+                while (std::abs(lambda) > max_mu)
+                    lambda /= 2;
 
-                    while (std::abs(lambda) > max) {
-                        // std::cout << " " << lambda << " " << max_mu;
-                        lambda *= scale;
-                    }
+                coord[3 * i + 0] += dx * lambda * 0.5 * m_eigen_inv_masses.data()[3 * i];
+                coord[3 * i + 1] += dy * lambda * 0.5 * m_eigen_inv_masses.data()[3 * i];
+                coord[3 * i + 2] += dz * lambda * 0.5 * m_eigen_inv_masses.data()[3 * i];
 
-                    m_rt_geom_1[3 * i + 0] = coord[3 * i + 0] + dx * lambda * 0.5 * m_eigen_inv_masses.data()[i];
-                    m_rt_geom_1[3 * i + 1] = coord[3 * i + 1] + dy * lambda * 0.5 * m_eigen_inv_masses.data()[i];
-                    m_rt_geom_1[3 * i + 2] = coord[3 * i + 2] + dz * lambda * 0.5 * m_eigen_inv_masses.data()[i];
+                coord[3 * j + 0] -= dx * lambda * 0.5 * m_eigen_inv_masses.data()[3 * j];
+                coord[3 * j + 1] -= dy * lambda * 0.5 * m_eigen_inv_masses.data()[3 * j];
+                coord[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[3 * j];
 
-                    m_rt_geom_1[3 * j + 0] = coord[3 * j + 0] - dx * lambda * 0.5 * m_eigen_inv_masses.data()[j];
-                    m_rt_geom_1[3 * j + 1] = coord[3 * j + 1] - dy * lambda * 0.5 * m_eigen_inv_masses.data()[j];
-                    m_rt_geom_1[3 * j + 2] = coord[3 * j + 2] - dz * lambda * 0.5 * m_eigen_inv_masses.data()[j];
-                    /*
-                                        coord[3 * i + 0] += dx * lambda * 0.5 * m_eigen_inv_masses.data()[i];
-                                        coord[3 * i + 1] += dy * lambda * 0.5 * m_eigen_inv_masses.data()[i];
-                                        coord[3 * i + 2] += dz * lambda * 0.5 * m_eigen_inv_masses.data()[i];
+                m_eigen_velocities.data()[3 * i + 0] += dx * lambda * 0.5 * m_eigen_inv_masses.data()[3 * i] * m_dT_inverse;
+                m_eigen_velocities.data()[3 * i + 1] += dy * lambda * 0.5 * m_eigen_inv_masses.data()[3 * i] * m_dT_inverse;
+                m_eigen_velocities.data()[3 * i + 2] += dz * lambda * 0.5 * m_eigen_inv_masses.data()[3 * i] * m_dT_inverse;
 
-                                        coord[3 * j + 0] -= dx * lambda * 0.5 * m_eigen_inv_masses.data()[j];
-                                        coord[3 * j + 1] -= dy * lambda * 0.5 * m_eigen_inv_masses.data()[j];
-                                        coord[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[j];
-                    */
-
-                    /*
-                    std::cout <<m_rt_geom_1[3 * i + 0] << " " << m_rt_geom_1[3 * i + 1] << " " << m_rt_geom_1[3 * i + 2] << std::endl;
-                    std::cout <<coord[3 * i + 0] << " " << coord[3 * i + 1] << " " << coord[3 * i + 2] << std::endl;
-
-                    std::cout <<m_rt_geom_1[3 * j + 0] << " " << m_rt_geom_1[3 * j + 1] << " " << m_rt_geom_1[3 * j + 2] << std::endl;
-                    std::cout <<coord[3 * j + 0] << " " << coord[3 * j + 1] << " " << coord[3 * j + 2] << std::endl << std::endl;
-
-*/
-                    double distance_current_New = ((m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0]) * (m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0])
-                        + (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1]) * (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1])
-                        + (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]) * (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]));
-                    /*
-                                        double distance_current_New = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
-                                            + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
-                                            + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
-                    */
-                    difference_curr += std::abs(distance_current_New - distance_current);
-                    // std::cout << i<< " "<< j<< " " << distance << " "<< distance_current << " " << distance_current_New << " " << lambda << std::endl << std::endl;
-
-                    /*
-                                        m_eigen_velocities.data()[3 * i + 0] += dx * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-                                        m_eigen_velocities.data()[3 * i + 1] += dy * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-                                        m_eigen_velocities.data()[3 * i + 2] += dz * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-
-                                        m_eigen_velocities.data()[3 * j + 0] -= dx * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-                                        m_eigen_velocities.data()[3 * j + 1] -= dy * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-                                        m_eigen_velocities.data()[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-                    */
-
-                    m_rt_velo[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0] + dx * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-                    m_rt_velo[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] + dy * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-                    m_rt_velo[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] + dz * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-
-                    m_rt_velo[3 * j + 0] = m_eigen_velocities.data()[3 * j + 0] - dx * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-                    m_rt_velo[3 * j + 1] = m_eigen_velocities.data()[3 * j + 1] - dy * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-                    m_rt_velo[3 * j + 2] = m_eigen_velocities.data()[3 * j + 2] - dz * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-
-                    //}
+                m_eigen_velocities.data()[3 * j + 0] -= dx * lambda * 0.5 * m_eigen_inv_masses.data()[3 * j] * m_dT_inverse;
+                m_eigen_velocities.data()[3 * j + 1] -= dy * lambda * 0.5 * m_eigen_inv_masses.data()[3 * j] * m_dT_inverse;
+                m_eigen_velocities.data()[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[3 * j] * m_dT_inverse;
             }
         }
 
         for (auto bond : m_bond_13_constrained) {
             int i = bond.first.first, j = bond.first.second;
             double distance = bond.second;
-            double distance_current = ((m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0]) * (m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0])
-                + (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1]) * (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1])
-                + (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]) * (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]));
-            if (std::abs(distance - distance_current) > m_rattle_tol_13) {
+            double distance_current = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
+                + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
+                + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
+            double violation_13 = std::abs(distance - distance_current);
+            if (violation_13 > max_violation_13) max_violation_13 = violation_13;
+            if (violation_13 > m_rattle_tol_13) {
+                if (violation_13 > max_err_13) max_err_13 = violation_13;
                 move = true;
                 double r = distance - distance_current;
                 double dx = m_eigen_geometry.data()[3 * i + 0] - m_eigen_geometry.data()[3 * j + 0];
                 double dy = m_eigen_geometry.data()[3 * i + 1] - m_eigen_geometry.data()[3 * j + 1];
                 double dz = m_eigen_geometry.data()[3 * i + 2] - m_eigen_geometry.data()[3 * j + 2];
 
-                double scalarproduct = (dx) * (m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0])
-                    + (dy) * (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1])
-                    + (dz) * (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]);
-                // if (scalarproduct >= m_rattle_tolerance * distance) {
-                moved_13[i] += 1;
-                moved_13[j] += 1;
-                if (moved_13[i] == 1)
-                    local_dof++;
+                double scalarproduct = (dx) * (coord[3 * i + 0] - coord[3 * j + 0])
+                    + (dy) * (coord[3 * i + 1] - coord[3 * j + 1])
+                    + (dz) * (coord[3 * i + 2] - coord[3 * j + 2]);
+
+                constrained_atoms.insert(i);
+                constrained_atoms.insert(j);
                 active++;
-                // std::cout << i << " " << j << " " << distance_current << " " << scalarproduct <<std::endl;
 
                 if (std::abs(scalarproduct) < m_rattle_min) {
-                    std::cout << "small" << scalarproduct << " " << distance - distance_current << "" << std::endl;
                     if (scalarproduct < 0)
                         scalarproduct = -1 * m_rattle_min;
                     else
                         scalarproduct = m_rattle_min;
-
-                    std::cout << scalarproduct << std::endl;
                 }
 
-                double lambda = r / (1 * (m_eigen_inv_masses.data()[i] + m_eigen_inv_masses.data()[j]) * scalarproduct);
-                if (std::isinf(lambda)) {
-                    std::cout << i << " " << j << std::endl;
-                    std::cout << r << " " << scalarproduct << " " << distance_current;
-                    std::cout << " " << (coord[3 * i + 0] - coord[3 * j + 0]) << " " << coord[3 * i + 1] - coord[3 * j + 1] << " " << (coord[3 * i + 2] - coord[3 * j + 2]);
-                    std::cout << " " << (m_eigen_geometry.data()[3 * i + 0] - m_eigen_geometry.data()[3 * j + 0]) << " " << m_eigen_geometry.data()[3 * i + 1] - m_eigen_geometry.data()[3 * j + 1] << " " << (m_eigen_geometry.data()[3 * i + 2] - m_eigen_geometry.data()[3 * j + 2]);
-
-                    std::cout << "inf" << std::endl;
-                    std::cout << "nan" << std::endl;
-                    exit(0);
+                double lambda = r / ((m_eigen_inv_masses.data()[3 * i] + m_eigen_inv_masses.data()[3 * j]) * scalarproduct);
+                if (std::isinf(lambda) || std::isnan(lambda)) {
+                    std::cout << "RATTLE 1-3: " << i << " " << j << " lambda=" << lambda
+                              << " r=" << r << " sp=" << scalarproduct << " dc=" << distance_current << std::endl;
                 }
 
-                while (std::abs(lambda) > max) {
-                    // std::cout << " " << lambda << " " << max_mu;
-                    lambda *= scale;
-                }
+                while (std::abs(lambda) > max_mu)
+                    lambda /= 2;
 
-                m_rt_geom_1[3 * i + 0] = coord[3 * i + 0] + dx * lambda * 0.5 * m_eigen_inv_masses.data()[i];
-                m_rt_geom_1[3 * i + 1] = coord[3 * i + 1] + dy * lambda * 0.5 * m_eigen_inv_masses.data()[i];
-                m_rt_geom_1[3 * i + 2] = coord[3 * i + 2] + dz * lambda * 0.5 * m_eigen_inv_masses.data()[i];
+                coord[3 * i + 0] += dx * lambda * 0.5 * m_eigen_inv_masses.data()[3 * i];
+                coord[3 * i + 1] += dy * lambda * 0.5 * m_eigen_inv_masses.data()[3 * i];
+                coord[3 * i + 2] += dz * lambda * 0.5 * m_eigen_inv_masses.data()[3 * i];
 
-                m_rt_geom_1[3 * j + 0] = coord[3 * j + 0] - dx * lambda * 0.5 * m_eigen_inv_masses.data()[j];
-                m_rt_geom_1[3 * j + 1] = coord[3 * j + 1] - dy * lambda * 0.5 * m_eigen_inv_masses.data()[j];
-                m_rt_geom_1[3 * j + 2] = coord[3 * j + 2] - dz * lambda * 0.5 * m_eigen_inv_masses.data()[j];
-                /*
-                                    coord[3 * i + 0] += dx * lambda * 0.5 * m_eigen_inv_masses.data()[i];
-                                    coord[3 * i + 1] += dy * lambda * 0.5 * m_eigen_inv_masses.data()[i];
-                                    coord[3 * i + 2] += dz * lambda * 0.5 * m_eigen_inv_masses.data()[i];
+                coord[3 * j + 0] -= dx * lambda * 0.5 * m_eigen_inv_masses.data()[3 * j];
+                coord[3 * j + 1] -= dy * lambda * 0.5 * m_eigen_inv_masses.data()[3 * j];
+                coord[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[3 * j];
 
-                                 coord[3 * j + 0] -= dx * lambda * 0.5 * m_eigen_inv_masses.data()[j];
-                                 coord[3 * j + 1] -= dy * lambda * 0.5 * m_eigen_inv_masses.data()[j];
-                                 coord[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[j];
-             */
+                m_eigen_velocities.data()[3 * i + 0] += dx * lambda * 0.5 * m_eigen_inv_masses.data()[3 * i] * m_dT_inverse;
+                m_eigen_velocities.data()[3 * i + 1] += dy * lambda * 0.5 * m_eigen_inv_masses.data()[3 * i] * m_dT_inverse;
+                m_eigen_velocities.data()[3 * i + 2] += dz * lambda * 0.5 * m_eigen_inv_masses.data()[3 * i] * m_dT_inverse;
 
-                /*
-                std::cout <<m_rt_geom_1[3 * i + 0] << " " << m_rt_geom_1[3 * i + 1] << " " << m_rt_geom_1[3 * i + 2] << std::endl;
-                std::cout <<coord[3 * i + 0] << " " << coord[3 * i + 1] << " " << coord[3 * i + 2] << std::endl;
-
-                     std::cout <<m_rt_geom_1[3 * j + 0] << " " << m_rt_geom_1[3 * j + 1] << " " << m_rt_geom_1[3 * j + 2] << std::endl;
-                     std::cout <<coord[3 * j + 0] << " " << coord[3 * j + 1] << " " << coord[3 * j + 2] << std::endl << std::endl;
-
-      */
-                double distance_current_New = ((m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0]) * (m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0])
-                    + (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1]) * (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1])
-                    + (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]) * (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]));
-                /*
-                                    double distance_current_New = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
-                                        + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
-                                        + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
-                */
-                difference_curr += std::abs(distance_current_New - distance_current);
-                // std::cout << i<< " "<< j<< " " << distance << " "<< distance_current << " " << distance_current_New << " " << lambda << std::endl << std::endl;
-
-                /*
-                                    m_eigen_velocities.data()[3 * i + 0] += dx * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-                                    m_eigen_velocities.data()[3 * i + 1] += dy * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-                                    m_eigen_velocities.data()[3 * i + 2] += dz * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-
-                                 m_eigen_velocities.data()[3 * j + 0] -= dx * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-                                 m_eigen_velocities.data()[3 * j + 1] -= dy * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-                                 m_eigen_velocities.data()[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-             */
-
-                m_rt_velo[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0] + dx * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-                m_rt_velo[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] + dy * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-                m_rt_velo[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] + dz * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-
-                m_rt_velo[3 * j + 0] = m_eigen_velocities.data()[3 * j + 0] - dx * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-                m_rt_velo[3 * j + 1] = m_eigen_velocities.data()[3 * j + 1] - dy * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-                m_rt_velo[3 * j + 2] = m_eigen_velocities.data()[3 * j + 2] - dz * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-
-                //}
+                m_eigen_velocities.data()[3 * j + 0] -= dx * lambda * 0.5 * m_eigen_inv_masses.data()[3 * j] * m_dT_inverse;
+                m_eigen_velocities.data()[3 * j + 1] -= dy * lambda * 0.5 * m_eigen_inv_masses.data()[3 * j] * m_dT_inverse;
+                m_eigen_velocities.data()[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[3 * j] * m_dT_inverse;
             }
         }
         /*
@@ -2210,82 +2169,30 @@ void SimpleMD::Rattle()
 
                 m_molecule.appendXYZFile(Basename() + ".rattle.trj.xyz");
         */
-        //   std::cout << "Current Difference: " <<  difference_curr << " Old Difference: " << difference_prev << " increasing " << difference_curr-difference_prev << " " << iter <<  std::endl;
-        difference /= double(active);
-        if ((iter > 1 && difference_curr < difference_prev)) {
-            //    std::cout << "rise " << difference_curr << " " << difference_prev << " " << iter << " ";
-        }
-        if (active == 0 || (iter > 1 && difference_curr > difference_prev)) {
-            // std::cout <<difference_prev << " " << difference_curr << " " << iter;
-            // if(iter > 40)
-            //     break;
-            // else{
-            //     max /= 2;
-            //     scale /= 2;
-            // }
-        }
-
-        for (int i = 0; i < m_natoms; ++i) {
-            m_eigen_velocities.data()[3 * i + 0] = m_rt_velo[3 * i + 0];
-            m_eigen_velocities.data()[3 * i + 1] = m_rt_velo[3 * i + 1];
-            m_eigen_velocities.data()[3 * i + 2] = m_rt_velo[3 * i + 2];
-
-            coord[3 * i + 0] = m_rt_geom_1[3 * i + 0];
-            coord[3 * i + 1] = m_rt_geom_1[3 * i + 1];
-            coord[3 * i + 2] = m_rt_geom_1[3 * i + 2];
-        }
+        if (active == 0)
+            break;
     }
-    m_dof -= local_dof;
-    /*
-        for (auto bond : m_bond_constrained) {
-            int i = bond.first.first, j = bond.first.second;
-            double distance = bond.second;
-            double distance_current = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
-                + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
-                + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
-
-                double r = distance - distance_current;
-                double dx = m_eigen_geometry.data()[3 * i + 0] - m_eigen_geometry.data()[3 * j + 0];
-                double dy = m_eigen_geometry.data()[3 * i + 1] - m_eigen_geometry.data()[3 * j + 1];
-                double dz = m_eigen_geometry.data()[3 * i + 2] - m_eigen_geometry.data()[3 * j + 2];
-
-                double scalarproduct = (dx) * (coord[3 * i + 0] - coord[3 * j + 0])
-                    + (dy) * (coord[3 * i + 1] - coord[3 * j + 1])
-                    + (dz) * (coord[3 * i + 2] - coord[3 * j + 2]);
-
-                double lambda = r / (1 * (m_eigen_inv_masses.data()[i] + m_eigen_inv_masses.data()[j]) * scalarproduct);
-
-                m_eigen_velocities.data()[3 * i + 0] += dx * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-                m_eigen_velocities.data()[3 * i + 1] += dy * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-                m_eigen_velocities.data()[3 * i + 2] += dz * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
-
-                m_eigen_velocities.data()[3 * j + 0] -= dx * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-                m_eigen_velocities.data()[3 * j + 1] -= dy * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-                m_eigen_velocities.data()[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
-        }
-
-    */
 
     if (iter >= m_rattle_maxiter) {
-        //  std::cout << "numeric difficulties - 1st step in rattle velocity verlet " << difference << std::endl;
-        // std::ofstream restart_file("unstable_curcuma_" + std::to_string(m_currentStep) + ".json");
-        // nlohmann::json restart;
-        // restart[MethodName()[0]] = WriteRestartInformation();
-        // restart_file << restart << std::endl;
-        //  PrintStatus();
+        CurcumaLogger::info("RATTLE 1st step: max iterations reached");
+        m_rattle_max_err_count++;
     }
+    m_rattle_iters_step1 = static_cast<int>(iter);
+    m_rattle_constrained_atoms = static_cast<int>(constrained_atoms.size());
+
     double ekin = 0;
 
     for (int i = 0; i < m_natoms; ++i) {
         m_eigen_geometry.data()[3 * i + 0] = coord[3 * i + 0];
         m_eigen_geometry.data()[3 * i + 1] = coord[3 * i + 1];
         m_eigen_geometry.data()[3 * i + 2] = coord[3 * i + 2];
-        ekin += m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        ekin += m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
     }
     ekin *= 0.5;
     m_T = 2.0 * ekin / (kb_Eh * m_dof);
     m_Ekin = ekin;
-    ThermostatFunction();
+    // Thermostat NOT applied here — half-step velocities include SHAKE corrections.
+    // Apply thermostat only after full RATTLE step (velocity constraints + 2nd half-step).
     m_Epot = Energy();
 
     if (m_rmsd_mtd) {
@@ -2329,17 +2236,13 @@ void SimpleMD::Rattle()
     m_virial_correction = 0;
     iter = 0;
     ekin = 0.0;
-    double sum_active = 0;
 
     while (iter < m_rattle_maxiter) {
         iter++;
         int active = 0;
-        double sum_mu = 0;
         for (auto bond : m_bond_constrained) {
             int i = bond.first.first, j = bond.first.second;
-            if (moved_12[i] != 0 && moved_12[j] != 0) {
-                moved_12[i] -= 1;
-                moved_12[j] -= 1;
+            if (constrained_atoms.count(i) && constrained_atoms.count(j)) {
                 double distance_current = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
                     + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
                     + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
@@ -2355,39 +2258,26 @@ void SimpleMD::Rattle()
 
                 double r = (dx) * (dvx) + (dy) * (dvy) + (dz) * (dvz);
 
-                double mu = -1 * r / ((m_eigen_inv_masses.data()[i] + m_eigen_inv_masses.data()[j]) * distance_current);
-                sum_mu += mu;
-                if (iter == m_rattle_maxiter) {
-                    //      std::cout << i << " " << j << " " << r << " " << (dx) * (dx) + (dy) * (dy) + (dz) * (dz) << " " << distance << " " << mu << " .. ";
-                }
-                // if (std::abs(mu) > m_rattle_tolerance) {
-                while (std::abs(mu) > m_rattle_max)
-                    mu *= 0.1;
-                active = 1;
-                sum_active++;
-                m_virial_correction += mu * distance_current;
-                m_eigen_velocities.data()[3 * i + 0] += dx * mu * m_eigen_inv_masses.data()[i];
-                m_eigen_velocities.data()[3 * i + 1] += dy * mu * m_eigen_inv_masses.data()[i];
-                m_eigen_velocities.data()[3 * i + 2] += dz * mu * m_eigen_inv_masses.data()[i];
+                double mu = -1 * r / ((m_eigen_inv_masses.data()[3 * i] + m_eigen_inv_masses.data()[3 * j]) * distance_current);
+                while (std::abs(mu) > max_mu)
+                    mu /= 2;
+                if (std::abs(mu) > m_rattle_tol_12) {
+                    active = 1;
+                    m_virial_correction += mu * distance_current;
+                    m_eigen_velocities.data()[3 * i + 0] += dx * mu * m_eigen_inv_masses.data()[3 * i];
+                    m_eigen_velocities.data()[3 * i + 1] += dy * mu * m_eigen_inv_masses.data()[3 * i];
+                    m_eigen_velocities.data()[3 * i + 2] += dz * mu * m_eigen_inv_masses.data()[3 * i];
 
-                m_eigen_velocities.data()[3 * j + 0] -= dx * mu * m_eigen_inv_masses.data()[j];
-                m_eigen_velocities.data()[3 * j + 1] -= dy * mu * m_eigen_inv_masses.data()[j];
-                m_eigen_velocities.data()[3 * j + 2] -= dz * mu * m_eigen_inv_masses.data()[j];
-                // if(iter == m_rattle_maxiter)
-                //      std::cout << " " << mu << std::endl;
-                //}//lse
-                //{
-                // std::cout << mu <<std::endl;
-                //}
+                    m_eigen_velocities.data()[3 * j + 0] -= dx * mu * m_eigen_inv_masses.data()[3 * j];
+                    m_eigen_velocities.data()[3 * j + 1] -= dy * mu * m_eigen_inv_masses.data()[3 * j];
+                    m_eigen_velocities.data()[3 * j + 2] -= dz * mu * m_eigen_inv_masses.data()[3 * j];
+                }
             }
-            //   std::cout << sum_mu << " (" << iter << "/" << sum_active << ") ";
         }
 
         for (auto bond : m_bond_13_constrained) {
             int i = bond.first.first, j = bond.first.second;
-            if (moved_13[i] != 0 && moved_13[j] != 0) {
-                moved_13[i] -= 1;
-                moved_13[j] -= 1;
+            if (constrained_atoms.count(i) && constrained_atoms.count(j)) {
                 double distance_current = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
                     + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
                     + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
@@ -2403,61 +2293,50 @@ void SimpleMD::Rattle()
 
                 double r = (dx) * (dvx) + (dy) * (dvy) + (dz) * (dvz);
 
-                double mu = -1 * r / ((m_eigen_inv_masses.data()[i] + m_eigen_inv_masses.data()[j]) * distance_current);
-                sum_mu += mu;
-                if (iter == m_rattle_maxiter) {
-                    //      std::cout << i << " " << j << " " << r << " " << (dx) * (dx) + (dy) * (dy) + (dz) * (dz) << " " << distance << " " << mu << " .. ";
-                }
-                // if (std::abs(mu) > m_rattle_tolerance) {
-                while (std::abs(mu) > m_rattle_max)
-                    mu *= 0.1;
-                active = 1;
-                sum_active++;
-                m_virial_correction += mu * distance_current;
-                m_eigen_velocities.data()[3 * i + 0] += dx * mu * m_eigen_inv_masses.data()[i];
-                m_eigen_velocities.data()[3 * i + 1] += dy * mu * m_eigen_inv_masses.data()[i];
-                m_eigen_velocities.data()[3 * i + 2] += dz * mu * m_eigen_inv_masses.data()[i];
+                double mu = -1 * r / ((m_eigen_inv_masses.data()[3 * i] + m_eigen_inv_masses.data()[3 * j]) * distance_current);
+                while (std::abs(mu) > max_mu)
+                    mu /= 2;
+                if (std::abs(mu) > m_rattle_tol_13) {
+                    active = 1;
+                    m_virial_correction += mu * distance_current;
+                    m_eigen_velocities.data()[3 * i + 0] += dx * mu * m_eigen_inv_masses.data()[3 * i];
+                    m_eigen_velocities.data()[3 * i + 1] += dy * mu * m_eigen_inv_masses.data()[3 * i];
+                    m_eigen_velocities.data()[3 * i + 2] += dz * mu * m_eigen_inv_masses.data()[3 * i];
 
-                m_eigen_velocities.data()[3 * j + 0] -= dx * mu * m_eigen_inv_masses.data()[j];
-                m_eigen_velocities.data()[3 * j + 1] -= dy * mu * m_eigen_inv_masses.data()[j];
-                m_eigen_velocities.data()[3 * j + 2] -= dz * mu * m_eigen_inv_masses.data()[j];
-                // if(iter == m_rattle_maxiter)
-                //      std::cout << " " << mu << std::endl;
-                //}//lse
-                //{
-                // std::cout << mu <<std::endl;
-                //}
+                    m_eigen_velocities.data()[3 * j + 0] -= dx * mu * m_eigen_inv_masses.data()[3 * j];
+                    m_eigen_velocities.data()[3 * j + 1] -= dy * mu * m_eigen_inv_masses.data()[3 * j];
+                    m_eigen_velocities.data()[3 * j + 2] -= dz * mu * m_eigen_inv_masses.data()[3 * j];
+                }
             }
-            //   std::cout << sum_mu << " (" << iter << "/" << sum_active << ") ";
         }
-        //   std::cout << std::endl;
         if (active == 0)
             break;
     }
 
     if (iter >= m_rattle_maxiter) {
-        std::cout << "numeric difficulties - 2nd in rattle velocity verlet " << iter << std::endl;
-        /*    std::ofstream restart_file("unstable_curcuma_" + std::to_string(m_currentStep) + ".json");
-            nlohmann::json restart;
-            restart[MethodName()[0]] = WriteRestartInformation();
-            restart_file << restart << std::endl; */
-        PrintStatus();
+        CurcumaLogger::info("RATTLE 2nd step: max iterations reached (" + std::to_string(static_cast<int>(iter)) + ")");
+        m_rattle_max_err_count++;
     }
+    m_rattle_iters_step2 = static_cast<int>(iter);
+
+    // Accumulate worst errors for periodic summary
+    if (max_err_12 > m_rattle_max_err_12) m_rattle_max_err_12 = max_err_12;
+    if (max_err_13 > m_rattle_max_err_13) m_rattle_max_err_13 = max_err_13;
 
     if (move)
         RemoveRotations();
 
     delete[] coord;
     for (int i = 0; i < m_natoms; ++i) {
-        ekin += m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        ekin += m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
     }
     ekin *= 0.5;
     double T = 2.0 * ekin / (kb_Eh * m_dof);
     m_unstable = T > 10000 * m_T || std::isnan(T);
     m_T = T;
+    m_Ekin = ekin;
     ThermostatFunction();
     EKin();
-    m_dof = dof;
 
     // Claude Generated (Oct 2025): Apply PBC wrapping after integration step
     applyPeriodicBoundaryConditions();
@@ -2828,7 +2707,7 @@ void SimpleMD::RemoveRotations()
     // std::cout << fragments.size() << std::endl;
     for (auto & fragment : fragments) {
         for (const int i : fragment) {
-            const double m = m_eigen_masses.data()[i];
+            const double m = m_eigen_masses.data()[3 * i];
             mass += m;
             pos(0) += m * m_eigen_geometry.data()[3 * i + 0];
             pos(1) += m * m_eigen_geometry.data()[3 * i + 1];
@@ -2844,7 +2723,7 @@ void SimpleMD::RemoveRotations()
 
         Geometry matrix = Geometry::Zero(3, 3);
         for (const int i : fragment) {
-            const double m = m_eigen_masses.data()[i];
+            const double m = m_eigen_masses.data()[3 * i];
             geom(i, 0) -= pos(0);
             geom(i, 1) -= pos(1);
             geom(i, 2) -= pos(2);
@@ -2852,9 +2731,9 @@ void SimpleMD::RemoveRotations()
             const double x = geom(i, 0);
             const double y = geom(i, 1);
             const double z = geom(i, 2);
-            angom(0) += m_eigen_masses.data()[i] * (geom(i, 1) *  m_eigen_velocities.data()[3 * i + 2] - geom(i, 2) *  m_eigen_velocities.data()[3 * i + 1]);
-            angom(1) += m_eigen_masses.data()[i] * (geom(i, 2) *  m_eigen_velocities.data()[3 * i + 0] - geom(i, 0) *  m_eigen_velocities.data()[3 * i + 2]);
-            angom(2) += m_eigen_masses.data()[i] * (geom(i, 0) *  m_eigen_velocities.data()[3 * i + 1] - geom(i, 1) *  m_eigen_velocities.data()[3 * i + 0]);
+            angom(0) += m_eigen_masses.data()[3 * i] * (geom(i, 1) *  m_eigen_velocities.data()[3 * i + 2] - geom(i, 2) *  m_eigen_velocities.data()[3 * i + 1]);
+            angom(1) += m_eigen_masses.data()[3 * i] * (geom(i, 2) *  m_eigen_velocities.data()[3 * i + 0] - geom(i, 0) *  m_eigen_velocities.data()[3 * i + 2]);
+            angom(2) += m_eigen_masses.data()[3 * i] * (geom(i, 0) *  m_eigen_velocities.data()[3 * i + 1] - geom(i, 1) *  m_eigen_velocities.data()[3 * i + 0]);
             const double x2 = x * x;
             const double y2 = y * y;
             const double z2 = z * z;
@@ -2873,9 +2752,9 @@ void SimpleMD::RemoveRotations()
 
         Position rlm = { 0, 0, 0 }, ram = { 0, 0, 0 };
         for (const int i : fragment) {
-            rlm(0) = rlm(0) + m_eigen_masses.data()[i] *  m_eigen_velocities.data()[3 * i + 0];
-            rlm(1) = rlm(1) + m_eigen_masses.data()[i] *  m_eigen_velocities.data()[3 * i + 1];
-            rlm(2) = rlm(2) + m_eigen_masses.data()[i] *  m_eigen_velocities.data()[3 * i + 2];
+            rlm(0) = rlm(0) + m_eigen_masses.data()[3 * i] *  m_eigen_velocities.data()[3 * i + 0];
+            rlm(1) = rlm(1) + m_eigen_masses.data()[3 * i] *  m_eigen_velocities.data()[3 * i + 1];
+            rlm(2) = rlm(2) + m_eigen_masses.data()[3 * i] *  m_eigen_velocities.data()[3 * i + 2];
         }
 
         for (const int i : fragment) {
@@ -2902,7 +2781,7 @@ void SimpleMD::RemoveRotation()
     Geometry geom(m_natoms, 3);
 
     for (int i = 0; i < m_natoms; ++i) {
-        double m = m_eigen_masses.data()[i];
+        double m = m_eigen_masses.data()[3 * i];
         mass += m;
         pos(0) += m * m_eigen_geometry.data()[3 * i + 0];
         pos(1) += m * m_eigen_geometry.data()[3 * i + 1];
@@ -2918,7 +2797,7 @@ void SimpleMD::RemoveRotation()
 
     Geometry matrix = Geometry::Zero(3, 3);
     for (int i = 0; i < m_natoms; ++i) {
-        double m = m_eigen_masses.data()[i];
+        double m = m_eigen_masses.data()[3 * i];
         geom(i, 0) -= pos(0);
         geom(i, 1) -= pos(1);
         geom(i, 2) -= pos(2);
@@ -2926,9 +2805,9 @@ void SimpleMD::RemoveRotation()
         double x = geom(i, 0);
         double y = geom(i, 1);
         double z = geom(i, 2);
-        angom(0) += m_eigen_masses.data()[i] * (geom(i, 1) * m_eigen_velocities.data()[3 * i + 2] - geom(i, 2) *  m_eigen_velocities.data()[3 * i + 1]);
-        angom(1) += m_eigen_masses.data()[i] * (geom(i, 2) * m_eigen_velocities.data()[3 * i + 0] - geom(i, 0) *  m_eigen_velocities.data()[3 * i + 2]);
-        angom(2) += m_eigen_masses.data()[i] * (geom(i, 0) * m_eigen_velocities.data()[3 * i + 1] - geom(i, 1) *  m_eigen_velocities.data()[3 * i + 0]);
+        angom(0) += m_eigen_masses.data()[3 * i] * (geom(i, 1) * m_eigen_velocities.data()[3 * i + 2] - geom(i, 2) *  m_eigen_velocities.data()[3 * i + 1]);
+        angom(1) += m_eigen_masses.data()[3 * i] * (geom(i, 2) * m_eigen_velocities.data()[3 * i + 0] - geom(i, 0) *  m_eigen_velocities.data()[3 * i + 2]);
+        angom(2) += m_eigen_masses.data()[3 * i] * (geom(i, 0) * m_eigen_velocities.data()[3 * i + 1] - geom(i, 1) *  m_eigen_velocities.data()[3 * i + 0]);
         double x2 = x * x;
         double y2 = y * y;
         double z2 = z * z;
@@ -2947,9 +2826,9 @@ void SimpleMD::RemoveRotation()
 
     Position rlm = { 0, 0, 0 }, ram = { 0, 0, 0 };
     for (int i = 0; i < m_natoms; ++i) {
-        rlm(0) = rlm(0) + m_eigen_masses.data()[i] *  m_eigen_velocities.data()[3 * i + 0];
-        rlm(1) = rlm(1) + m_eigen_masses.data()[i] *  m_eigen_velocities.data()[3 * i + 1];
-        rlm(2) = rlm(2) + m_eigen_masses.data()[i] *  m_eigen_velocities.data()[3 * i + 2];
+        rlm(0) = rlm(0) + m_eigen_masses.data()[3 * i] *  m_eigen_velocities.data()[3 * i + 0];
+        rlm(1) = rlm(1) + m_eigen_masses.data()[3 * i] *  m_eigen_velocities.data()[3 * i + 1];
+        rlm(2) = rlm(2) + m_eigen_masses.data()[3 * i] *  m_eigen_velocities.data()[3 * i + 2];
     }
 
     for (int i = 0; i < m_natoms; ++i) {
@@ -2995,6 +2874,13 @@ void SimpleMD::PrintStatus() const
         std::cout << m_currentStep * m_dT / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
 
 #endif
+    }
+
+    // RATTLE constraint summary (only when RATTLE is active)
+    if (m_rattle) {
+        CurcumaLogger::info(fmt::format("RATTLE: iters={}/{} max_err_12={:.2e} max_err_13={:.2e} failures={}",
+            m_rattle_iters_step1, m_rattle_iters_step2,
+            m_rattle_max_err_12, m_rattle_max_err_13, m_rattle_max_err_count));
     }
 
     //std::cout << m_mtd_time << " " << m_loop_time << std::endl;
@@ -3054,7 +2940,7 @@ void SimpleMD::EKin()
 {
     double ekin = 0;
     for (int i = 0; i < m_natoms; ++i) {
-        ekin += m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        ekin += m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
     }
     ekin *= 0.5;
     m_Ekin = ekin;
@@ -3141,7 +3027,7 @@ void SimpleMD::CSVR()
         m_eigen_velocities.data()[3 * i + 1] *= alpha;
         m_eigen_velocities.data()[3 * i + 2] *= alpha;
 
-        m_atom_temp[i].push_back(m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i + 0] * m_eigen_velocities.data()[3 * i + 0] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]) / (kb_Eh * m_dof));
+        m_atom_temp[i].push_back(m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i + 0] * m_eigen_velocities.data()[3 * i + 0] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]) / (kb_Eh * m_dof));
     }
     m_seed++;
 }
@@ -3153,7 +3039,7 @@ void SimpleMD::Anderson()
     std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
     for (size_t i = 0; i < m_natoms; ++i) {
         if (uniform_dist(generator) < probability) {
-            std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_eigen_inv_masses.data()[i]));
+            std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_eigen_inv_masses.data()[3 * i]));
             m_eigen_velocities.data()[3 * i + 0] = (m_eigen_velocities.data()[3 * i + 0] + distribution(generator)) / 2.0;
             m_eigen_velocities.data()[3 * i + 1] = (m_eigen_velocities.data()[3 * i + 1] + distribution(generator)) / 2.0;
             m_eigen_velocities.data()[3 * i + 2] = (m_eigen_velocities.data()[3 * i + 2] + distribution(generator)) / 2.0;
@@ -3166,7 +3052,7 @@ void SimpleMD::NoseHover()
     // Berechnung der kinetischen Energie
     double kinetic_energy = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
-        kinetic_energy += 0.5 * m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        kinetic_energy += 0.5 * m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
     }
     // Update der Thermostatkette
     m_xi[0] += 0.5 * m_dT * (2.0 * kinetic_energy - m_dof * m_T0 * kb_Eh) / m_Q[0];
