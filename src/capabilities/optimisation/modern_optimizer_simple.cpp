@@ -20,6 +20,7 @@
 #include "modern_optimizer_simple.h"
 #include "src/core/citation_registry.h"
 #include "../curcumaopt.h" // For legacy LBFGS functionality
+#include "../optimizer_factory.h" // Claude Nov 2025 - New OptimizerFactory
 #include "lbfgs.h" // Native LBFGS implementation - Claude Generated
 #include "src/core/parameter_registry.h"
 #include <algorithm>
@@ -54,6 +55,7 @@ void ModernOptimizerDispatcher::printHelp() const
     CitationRegistry::cite("lbfgs");
     CitationRegistry::cite("diis");
     CitationRegistry::cite("rfo");
+    CitationRegistry::cite("lanczos", "rfo");
 
     CurcumaLogger::info("");
     CurcumaLogger::success("Available optimization algorithms:");
@@ -112,7 +114,11 @@ ModernOptimizerDispatcher::OptimizerType ModernOptimizerDispatcher::parseOptimiz
     std::string lower_name = method_name;
     std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
 
-    if (lower_name == "lbfgspp" || lower_name == "lbfgs++" || lower_name == "external") {
+    if (lower_name == "ancopt" || lower_name == "anc" || lower_name == "approximate_normal") {
+        return OptimizerType::ANCOPT; // Claude Nov 2025 - AncOpt from XTB
+    } else if (lower_name == "new_lbfgspp" || lower_name == "new-lbfgspp") {
+        return OptimizerType::NEW_LBFGSPP; // Claude Nov 2025 - New OptimizerFactory-based LBFGSPP
+    } else if (lower_name == "lbfgspp" || lower_name == "lbfgs++" || lower_name == "external") {
         return OptimizerType::LBFGSPP;
     } else if (lower_name == "internal" || lower_name == "gpt") {
         return OptimizerType::INTERNAL;
@@ -134,6 +140,8 @@ ModernOptimizerDispatcher::OptimizerType ModernOptimizerDispatcher::parseOptimiz
 std::map<std::string, std::string> ModernOptimizerDispatcher::getAvailableOptimizers()
 {
     return {
+        { "ancopt", "Approximate Normal Coordinate Optimizer from XTB (Stefan Grimme) - Claude Nov 2025" },
+        { "new_lbfgspp", "New OptimizerFactory-based LBFGSpp implementation - Claude Nov 2025" },
         { "lbfgspp", "External LBFGSpp library - robust L-BFGS implementation" },
         { "internal", "Internal LBFGS implementation - custom features (placeholder)" },
         { "lbfgs", "Native L-BFGS implementation (Claude 3.5 generated)" },
@@ -212,34 +220,62 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeStructure(
             }
             */
         }
-        
-       
-        // Log optimization start
-        // TODO -> Calculate initial energy 
 
+
+        // Log optimization start
         logOptimizationHeader(method_name, *molecule);
 
-        // Route to specific optimizer
+        // Claude Generated (November 2025): Use new OptimizerFactory for ANCOPT support
+        // Try new OptimizerFactory first for ANCOPT and modern optimizer types
         SimpleOptimizationResult result;
-        switch (type) {
-        case OptimizerType::LBFGSPP:
-            result = optimizeWithLBFGSpp(molecule, energy_calculator, config);
-            break;
-        case OptimizerType::INTERNAL:
-            result = optimizeWithInternal(molecule, energy_calculator, config);
-            break;
-        case OptimizerType::NATIVE_LBFGS:
-            result = optimizeWithNativeLBFGS(molecule, energy_calculator, config);
-            break;
-        case OptimizerType::NATIVE_DIIS:
-            result = optimizeWithNativeDIIS(molecule, energy_calculator, config);
-            break;
-        case OptimizerType::NATIVE_RFO:
-            result = optimizeWithNativeRFO(molecule, energy_calculator, config);
-            break;
-        default:
-            result = SimpleOptimizationResult::failed_result("Unknown optimizer type", method_name);
-            break;
+
+        if (type == OptimizerType::ANCOPT || type == OptimizerType::NEW_LBFGSPP) {
+            // Use new Optimization::OptimizerFactory infrastructure
+            try {
+                Optimization::OptimizerType new_opt_type;
+                if (type == OptimizerType::ANCOPT) {
+                    new_opt_type = Optimization::OptimizerType::ANCOPT;
+                } else {
+                    new_opt_type = Optimization::OptimizerType::LBFGSPP;
+                }
+
+                auto opt_result = Optimization::OptimizationDispatcher::optimizeStructure(
+                    molecule, new_opt_type, energy_calculator, config);
+
+                // Convert to SimpleOptimizationResult
+                result.success = opt_result.success;
+                result.final_molecule = opt_result.final_molecule;
+                result.final_energy = opt_result.final_energy;
+                result.method_used = Optimization::optimizerTypeToString(new_opt_type);
+                result.iterations_performed = opt_result.iterations_performed;
+                result.optimization_time_seconds = opt_result.optimization_time_seconds;
+                result.error_message = opt_result.error_message;
+            } catch (const std::exception& e) {
+                result = SimpleOptimizationResult::failed_result(
+                    fmt::format("New optimizer failed: {}", e.what()), method_name);
+            }
+        } else {
+            // Use legacy implementations
+            switch (type) {
+            case OptimizerType::LBFGSPP:
+                result = optimizeWithLBFGSpp(molecule, energy_calculator, config);
+                break;
+            case OptimizerType::INTERNAL:
+                result = optimizeWithInternal(molecule, energy_calculator, config);
+                break;
+            case OptimizerType::NATIVE_LBFGS:
+                result = optimizeWithNativeLBFGS(molecule, energy_calculator, config);
+                break;
+            case OptimizerType::NATIVE_DIIS:
+                result = optimizeWithNativeDIIS(molecule, energy_calculator, config);
+                break;
+            case OptimizerType::NATIVE_RFO:
+                result = optimizeWithNativeRFO(molecule, energy_calculator, config);
+                break;
+            default:
+                result = SimpleOptimizationResult::failed_result("Unknown optimizer type", method_name);
+                break;
+            }
         }
 
         // Log results
@@ -415,8 +451,10 @@ void ModernOptimizerDispatcher::logOptimizationHeader(const std::string& method,
     CurcumaLogger::param("Atoms", static_cast<int>(molecule.AtomCount()));
     CurcumaLogger::param("Method", method);
 
-    // Show initial energy if available
-    if (molecule.Energy() != 0.0) {
+    // Show initial energy if available (use epsilon comparison for floating-point safety)
+    // Claude Apr 2026: Use epsilon comparison instead of != 0.0 to handle denormalized values
+    constexpr double energy_epsilon = 1e-10;  // Small threshold for "near zero"
+    if (std::abs(molecule.Energy()) > energy_epsilon) {
         CurcumaLogger::energy_abs(molecule.Energy(), "Initial energy");
     }
 }
@@ -446,12 +484,14 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeWithNativeLBFGS(Mole
         json safe_config = config.is_null() ? json{} : config;
         
         LBFGS optimizer(safe_config.value("memory_size", 10)); // Memory size from config or default
-        
+
         // Setup the optimizer with computational chemistry parameters
         optimizer.setEnergyCalculator(calc);
         optimizer.setOptimizationMethod(LBFGS::Method::LBFGS);
         int verbosity = safe_config.value("verbosity", 1); // Default: minimal output
         optimizer.setVerbosity(verbosity);
+        // Apply config (lbfgs_line_search, rfo_solver, etc.)
+        optimizer.setConfig(safe_config);
         
         // Extract geometry to optimization coordinates
         Vector initial_coords = Vector::Zero(3 * molecule->AtomCount());
@@ -574,13 +614,14 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeWithNativeDIIS(Molec
         json safe_config = config.is_null() ? json{} : config;
         
         LBFGS optimizer(safe_config.value("diis_hist", 10)); // DIIS history size
-        
+
         // Setup the optimizer with DIIS parameters
         optimizer.setEnergyCalculator(calc);
         optimizer.setOptimizationMethod(LBFGS::Method::DIIS);
         optimizer.setDIISParameters(safe_config.value("diis_hist", 10), safe_config.value("diis_start", 5));
         int verbosity = safe_config.value("verbosity", 1); // Default: minimal output
         optimizer.setVerbosity(verbosity);
+        optimizer.setConfig(safe_config);
         
         // Extract geometry to optimization coordinates
         Vector initial_coords = Vector::Zero(3 * molecule->AtomCount());
@@ -702,14 +743,15 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeWithNativeRFO(Molecu
         json safe_config = config.is_null() ? json{} : config;
         
         LBFGS optimizer(10);
-        
+
         // Setup the optimizer with RFO parameters
         optimizer.setEnergyCalculator(calc);
         optimizer.setOptimizationMethod(LBFGS::Method::RFO);
         optimizer.setLambda(safe_config.value("lambda", 0.1)); // RFO lambda parameter (legacy)
         int verbosity = safe_config.value("verbosity", 1); // Default: minimal output
         optimizer.setVerbosity(verbosity);
-        
+        optimizer.setConfig(safe_config); // applies rfo_solver, lbfgs_line_search, etc.
+
         // Configure RFO-specific parameters from config
         double trust_radius = safe_config.value("trust_radius", 0.05);  // Conservative default
         double energy_threshold = safe_config.value("energy_threshold", 1e-6);  // Stricter threshold

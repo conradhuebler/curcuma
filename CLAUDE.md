@@ -103,6 +103,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - Implement timing analysis for complex functions
 - Keep track of significant improvements in AIChangelog.md, one line per fact
 - **Complex Architecture Documentation**: Factory patterns, dispatchers, and multi-step workflows require comprehensive inline documentation following ARCHITECTURE_DOCUMENTATION.md standards
+- **No UTF symbols in terminal output**: Do not use Unicode box-drawing characters, emoji, arrows (->), checkmarks, or any non-ASCII symbols in fmt::print/std::cout output. Use plain ASCII only. Reason: breaks output in many terminal emulators, log files, and remote shells. CurcumaLogger colored output is exempt (uses ANSI codes, not Unicode).
 
 #### Parameter Definition Standards (MANDATORY for new capabilities)
 - **ALL new capabilities MUST use Parameter Registry System** - no static JSON configurations

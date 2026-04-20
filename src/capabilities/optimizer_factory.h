@@ -19,8 +19,7 @@
 
 #pragma once
 
-#include "optimizer_interface.h"
-#include "src/core/energycalculator.h"
+#include "optimizer_driver.h"
 #include <functional>
 #include <map>
 #include <memory>
@@ -36,21 +35,21 @@ public:
     /**
      * @brief Create optimizer by type enum
      */
-    static std::unique_ptr<OptimizerInterface> createOptimizer(
+    static std::unique_ptr<OptimizerDriver> createOptimizer(
         OptimizerType type,
         EnergyCalculator* energy_calculator = nullptr);
 
     /**
      * @brief Create optimizer by string name
      */
-    static std::unique_ptr<OptimizerInterface> createOptimizer(
+    static std::unique_ptr<OptimizerDriver> createOptimizer(
         const std::string& method_name,
         EnergyCalculator* energy_calculator = nullptr);
 
     /**
      * @brief Create optimizer from JSON configuration
      */
-    static std::unique_ptr<OptimizerInterface> createOptimizer(
+    static std::unique_ptr<OptimizerDriver> createOptimizer(
         const json& config,
         EnergyCalculator* energy_calculator = nullptr);
 
@@ -77,17 +76,18 @@ public:
 
 private:
     // Factory function type
-    using OptimizerFactoryFunction = std::function<std::unique_ptr<OptimizerInterface>()>;
+    using OptimizerCreator = std::function<std::unique_ptr<OptimizerDriver>()>;
 
     // Factory registry
-    static const std::map<OptimizerType, OptimizerFactoryFunction> s_factory_registry;
+    static const std::map<OptimizerType, OptimizerCreator> s_factory_registry;
     static const std::map<OptimizerType, std::string> s_optimizer_descriptions;
 
     // Individual factory methods
-    static std::unique_ptr<OptimizerInterface> createLBFGSpp();
-    static std::unique_ptr<OptimizerInterface> createInternalLBFGS();
-    static std::unique_ptr<OptimizerInterface> createDIIS();
-    static std::unique_ptr<OptimizerInterface> createRFO();
+    static std::unique_ptr<OptimizerDriver> createLBFGSpp();
+    static std::unique_ptr<OptimizerDriver> createANCOpt();
+    static std::unique_ptr<OptimizerDriver> createNativeLBFGS();
+    static std::unique_ptr<OptimizerDriver> createNativeDIIS();
+    static std::unique_ptr<OptimizerDriver> createNativeRFO();
 };
 
 /**

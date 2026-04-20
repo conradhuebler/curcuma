@@ -416,6 +416,8 @@ private:
     bool m_containsNaN = false;                      ///< NaN detection flag
     bool m_error = false;                            ///< Error state flag
     std::string m_error_message;                     ///< Error description
+    bool m_gpu_fallback = false;                    ///< GPU requested but CUDA unavailable
+    bool m_gpu_fallback_warned = false;              ///< Final GPU warning already printed
     
     int m_atoms = 0;                                 ///< Number of atoms
     int m_mult = 1;                                  ///< Multiplicity

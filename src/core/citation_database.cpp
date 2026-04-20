@@ -1,6 +1,6 @@
 /*
  * <Citation Database — compiled-in reference data for all computational methods>
- * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * Each entry: key → { description, reference, bibtex_key, bibtex }
  * To add a new citation: add one entry to the map below.
@@ -209,14 +209,86 @@ const std::unordered_map<std::string, CitationData>& database()
         // === Optimization algorithms ===
         { "lbfgs", {
             "L-BFGS Optimization",
-            "Nocedal, J.; Wright, S. Numerical Optimization, Springer, 2006",
-            "nocedal2006lbfgs",
-            "@book{nocedal2006lbfgs,\n"
-            "  author = {Nocedal, Jorge and Wright, Stephen},\n"
-            "  title = {Numerical Optimization},\n"
-            "  publisher = {Springer},\n"
-            "  year = {2006},\n"
-            "  edition = {2nd}\n"
+            "Liu, D. C.; Nocedal, J. Math. Program. 1989, 45, 503–528 (DOI: 10.1007/BF01589116); "
+            "Nocedal, J. Math. Comput. 1980, 35, 773–782 (DOI: 10.1090/S0025-5718-1980-0572855-7)",
+            "liu1989lbfgs",
+            "@article{liu1989lbfgs,\n"
+            "  author = {Liu, Dong C. and Nocedal, Jorge},\n"
+            "  title = {On the limited memory {BFGS} method for large scale optimization},\n"
+            "  journal = {Math. Program.},\n"
+            "  year = {1989},\n"
+            "  volume = {45},\n"
+            "  pages = {503--528},\n"
+            "  doi = {10.1007/BF01589116}\n"
+            "}\n"
+            "@article{nocedal1980lbfgs,\n"
+            "  author = {Nocedal, Jorge},\n"
+            "  title = {Updating quasi-{Newton} matrices with limited storage},\n"
+            "  journal = {Math. Comput.},\n"
+            "  year = {1980},\n"
+            "  volume = {35},\n"
+            "  pages = {773--782},\n"
+            "  doi = {10.1090/S0025-5718-1980-0572855-7}\n"
+            "}"
+        }},
+
+        { "lbfgspp", {
+            "LBFGS++ — L-BFGS-B C++ library",
+            "Qiu, Y. LBFGS++ library, https://github.com/yixuan/LBFGSpp",
+            "qiu_lbfgspp",
+            "@software{qiu_lbfgspp,\n"
+            "  author = {Qiu, Yixuan},\n"
+            "  title = {{LBFGS++}: A header-only {C++} library for {L-BFGS} and {L-BFGS-B} algorithms},\n"
+            "  year = {2024},\n"
+            "  url = {https://github.com/yixuan/LBFGSpp}\n"
+            "}"
+        }},
+
+        { "ancopt", {
+            "ANCopt — Approximate Normal Coordinate Optimizer (via XTB)",
+            "Bannwarth, C. et al., WIREs Comput. Mol. Sci. 2021, 11, e01493 (DOI: 10.1002/wcms.1493)",
+            "bannwarth2021xtb",
+            "@article{bannwarth2021xtb,\n"
+            "  author = {Bannwarth, Christoph and Caldeweyher, Eike and Ehlert, Sebastian\n"
+            "            and Hansen, Andreas and Pracht, Philipp and Seibert, Jan\n"
+            "            and Spicher, Sebastian and Grimme, Stefan},\n"
+            "  title = {Extended Tight-Binding Quantum Chemistry Methods},\n"
+            "  journal = {WIREs Comput. Mol. Sci.},\n"
+            "  year = {2021},\n"
+            "  volume = {11},\n"
+            "  pages = {e01493},\n"
+            "  doi = {10.1002/wcms.1493}\n"
+            "}"
+        }},
+
+        { "lindh", {
+            "Lindh Model Hessian for ANC generation",
+            "Lindh, R. et al., Chem. Phys. Lett. 1995, 241, 423–428 (DOI: 10.1016/0009-2614(95)00646-L)",
+            "lindh1995hmf",
+            "@article{lindh1995hmf,\n"
+            "  author = {Lindh, Roland and Bernhardsson, Anders and Karlstrom, Gunnar\n"
+            "            and Malmqvist, Per-Ake},\n"
+            "  title = {On the use of a {H}essian model function in molecular geometry optimizations},\n"
+            "  journal = {Chem. Phys. Lett.},\n"
+            "  year = {1995},\n"
+            "  volume = {241},\n"
+            "  pages = {423--428},\n"
+            "  doi = {10.1016/0009-2614(95)00646-L}\n"
+            "}"
+        }},
+
+        { "lanczos", {
+            "Lanczos Algorithm for Eigenvalue Problems",
+            "Lanczos, C. J. Res. Natl. Bur. Stand. 1950, 45, 255–282 (DOI: 10.6028/jres.045.026)",
+            "lanczos1950",
+            "@article{lanczos1950,\n"
+            "  author = {Lanczos, Cornelius},\n"
+            "  title = {An iteration method for the solution of the eigenvalue problem of linear differential and integral operators},\n"
+            "  journal = {J. Res. Natl. Bur. Stand.},\n"
+            "  year = {1950},\n"
+            "  volume = {45},\n"
+            "  pages = {255--282},\n"
+            "  doi = {10.6028/jres.045.026}\n"
             "}"
         }},
 
@@ -235,12 +307,37 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        { "gdiis", {
+            "GDIIS — Geometry Direct Inversion in the Iterative Subspace",
+            "Csaszar, P.; Pulay, P. J. Comput. Chem. 1984, 5, 241–249 (DOI: 10.1002/jcc.540050306)",
+            "csaszar1984gdiis",
+            "@article{csaszar1984gdiis,\n"
+            "  author = {Csaszar, Peter and Pulay, Peter},\n"
+            "  title = {Geometry optimization by direct inversion in the iterative subspace},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {1984},\n"
+            "  volume = {5},\n"
+            "  pages = {241--249},\n"
+            "  doi = {10.1002/jcc.540050306}\n"
+            "}"
+        }},
+
         { "rfo", {
             "RFO — Rational Function Optimization",
+            "Simons, J. et al., J. Phys. Chem. 1983, 87, 2745–2753 (DOI: 10.1021/j100238a013); "
             "Banerjee, A. et al., J. Phys. Chem. 1985, 89, 52–57 (DOI: 10.1021/j100247a013)",
-            "banerjee1985rfo",
+            "simons1983rfo",
+            "@article{simons1983rfo,\n"
+            "  author = {Simons, Jack and Jorgensen, Poul and Taylor, Hugh and Ozment, Judy},\n"
+            "  title = {Walking on potential energy surfaces},\n"
+            "  journal = {J. Phys. Chem.},\n"
+            "  year = {1983},\n"
+            "  volume = {87},\n"
+            "  pages = {2745--2753},\n"
+            "  doi = {10.1021/j100238a013}\n"
+            "}\n"
             "@article{banerjee1985rfo,\n"
-            "  author = {Banerjee, A. and Adams, N. and Simons, J\n"
+            "  author = {Banerjee, A. and Adams, N. and Simons, J.\n"
             "            and Shepard, R.},\n"
             "  title = {Search for stationary points on surfaces},\n"
             "  journal = {J. Phys. Chem.},\n"

@@ -368,9 +368,9 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
             CurcumaLogger::info("GFN-FF: using GPU acceleration (CUDA)");
             return std::make_unique<GFNFFGPUComputationalMethod>("gfnff", config);
 #else
-            throw MethodCreationException(
-                "GPU acceleration requested (--gpu cuda) but Curcuma was compiled "
-                "without CUDA support. Recompile with: cmake -DUSE_CUDA=ON");
+            CurcumaLogger::warn("GPU acceleration requested (--gpu cuda) but Curcuma was compiled "
+                "without CUDA support. Falling back to CPU.");
+            CurcumaLogger::warn("To enable CUDA, recompile with: cmake -DUSE_CUDA=ON");
 #endif
         }
 

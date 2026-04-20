@@ -63,23 +63,26 @@ typedef std::pair<int, int> IntPair;
 typedef std::vector<std::string> StringList;
 
 struct Mol {
-    double m_energy;
-    double m_spin;
+    // Apr 2026: default-initialize scalar members. Previously `Mol molecule;` in
+    // XYZ2Mol() left these uninitialized, so m_charge picked up whatever was on
+    // the stack (observed: 32512 = 0x7F00), silently corrupting EEQ constraints.
+    double m_energy = 0.0;
+    double m_spin = 0.0;
 
-    int m_number_atoms;
-    int m_charge;
+    int m_number_atoms = 0;
+    int m_charge = 0;
 
     std::string m_commentline;
     std::string m_formula; // Claude Generated: Molecular formula
 
     Geometry m_geometry;
     Vector m_partial_charges;
-    
+
     std::vector<std::pair<int, int>> m_bonds;
     std::vector<int> m_atoms;
 
     // Claude Generated: Periodic Boundary Conditions data
-    Eigen::Matrix3d m_unit_cell; // 3x3 lattice vectors matrix (Angstroms)
+    Eigen::Matrix3d m_unit_cell = Eigen::Matrix3d::Zero(); // 3x3 lattice vectors matrix (Angstroms)
     bool m_has_pbc = false; // PBC active flag
 
     int AtomCount()

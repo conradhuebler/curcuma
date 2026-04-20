@@ -33,7 +33,7 @@
 #include <stdlib.h>
 #include <time.h>
 
-#include "src/capabilities/curcumaopt.h"
+#include "src/capabilities/optimizer_factory.h"
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 
@@ -575,24 +575,18 @@ bool SimpleMD::Initialise()
     m_atom_temp = std::vector<std::vector<double>>(m_natoms);
     if(m_opt)
     {
-        json js = SimpleMDJson;  // Claude Generated: Fixed - use SimpleMDJson instead of CurcumaOptJson
-        js = MergeJson(js, m_defaults);
-        js["writeXYZ"] = false;
-        js["method"] = m_method;
-        /*
-        try {
-            js["threads"] = m_defaults["threads"].get<int>();
+        // Claude Generated (Apr 2026): Use unified optimizer instead of legacy CurcumaOpt
+        json opt_config;
+        opt_config["method"] = m_method;
+        opt_config["write_trajectory"] = false;
+
+        EnergyCalculator energy_calc(m_method, m_defaults);
+        auto result = Optimization::OptimizationDispatcher::optimizeStructure(
+            &m_molecule, Optimization::OptimizerType::LBFGSPP, &energy_calc, opt_config);
+
+        if (result.success) {
+            m_molecule.setGeometry(result.final_molecule.getGeometry());
         }
-        catch (const nlohmann::detail::type_error& error) {
-
-           }*/
-        CurcumaOpt optimise(js, true);
-        optimise.addMolecule(&m_molecule);
-        optimise.start();
-        auto mol = optimise.Molecules();
-
-        auto molecule = ((*mol)[0]);
-        m_molecule.setGeometry(molecule.getGeometry());
         m_molecule.appendXYZFile(Basename() + ".opt.xyz");
     }
     double mass = 0;

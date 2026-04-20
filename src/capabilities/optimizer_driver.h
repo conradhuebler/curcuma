@@ -26,6 +26,11 @@
 
 namespace Optimization {
 
+// Coordinate conversion helpers used by multiple optimizer implementations
+Vector MoleculeToCoordinates(const Molecule& mol);
+void CoordinatesToMolecule(const Vector& coords, Molecule& mol);
+
+
 /**
  * @brief Optimization context for shared state management - Claude Generated
  * Analog to QM system's parameter management, contains all shared data
@@ -40,7 +45,7 @@ public:
     double rmsd_threshold = 0.01; // Å - geometric changes
     double gradient_threshold = 5e-4; // Eh/Bohr - gradient norm
     int max_iterations = 5000;
-    int convergence_count = 11; // Bit field for convergence requirements
+    int convergence_count = 7; // Bit field: bits 0(energy)+1(RMSD)+2(gradient) all required
 
     // Performance settings
     int threads = 1;
@@ -53,6 +58,12 @@ public:
     bool print_output = true;
     std::string trajectory_filename;
     std::string output_basename;
+
+    // Step-includes-evaluation: when subclass step already evaluated energy/gradient
+    // (e.g. LBFGSpp SingleStep calls objective internally), driver skips re-evaluation
+    bool step_evaluated_energy = false;
+    double step_energy = 0.0;
+    Vector step_gradient;
 
     // Constraints and advanced features
     std::vector<int> atom_constraints; // 0 = fixed, 1 = mobile
@@ -78,10 +89,12 @@ public:
 };
 
 /**
- * @brief Base class for optimizers using Template Method Pattern - Claude Generated
- * Analog to QMDriver - provides common functionality with customizable steps
+ * @brief Abstract base class for all optimizers — Template Method Pattern
+ * Provides the optimization loop, convergence checking, and output table.
+ * Subclasses implement only their step logic via CalculateOptimizationStep().
+ * Claude Generated
  */
-class OptimizerDriver : public OptimizerInterface {
+class OptimizerDriver {
 protected:
     // Common data members (analog to QMDriver)
     Molecule m_molecule; // Current molecule
@@ -121,34 +134,35 @@ protected:
     bool checkConvergence(double energy_change, double rmsd_change, double gradient_norm) const;
     void updateTrajectory(const Molecule& new_structure, double energy);
     void logOptimizationStep(int iteration, double energy, double energy_change,
-        double rmsd_change, double gradient_norm) const;
+        double rmsd_change, double gradient_norm, double elapsed_time) const;
     double calculateRMSD(const Molecule& mol1, const Molecule& mol2) const;
 
 public:
     OptimizerDriver();
     virtual ~OptimizerDriver() = default;
 
-    // OptimizerInterface implementation (Template Method)
-    bool InitializeOptimization(const Molecule& molecule) override;
-    bool InitializeOptimization(const Molecule* molecule) override;
-    bool InitializeOptimization(const double* coordinates, int atom_count) override;
+    // Initialization
+    bool InitializeOptimization(const Molecule& molecule);
+    bool InitializeOptimization(const Molecule* molecule);
+    bool InitializeOptimization(const double* coordinates, int atom_count);
 
-    bool UpdateGeometry(const Molecule& molecule) override;
-    bool UpdateGeometry(const double* coordinates) override;
+    // Geometry update
+    bool UpdateGeometry(const Molecule& molecule);
+    bool UpdateGeometry(const double* coordinates);
 
-    // Main optimization method (Template Method implementation)
-    OptimizationResult Optimize(bool write_trajectory = false, int verbosity = 1) final override;
+    // Main optimization loop — all subclasses use this, no overrides allowed
+    OptimizationResult Optimize(bool write_trajectory = false, int verbosity = 1);
 
     // Property accessors
-    Vector GetCurrentGradient() const override { return m_current_gradient; }
-    double GetCurrentEnergy() const override { return m_current_energy; }
-    Matrix GetCurrentHessian() const override { return Matrix::Zero(0, 0); } // Default: no Hessian
-    std::vector<Molecule> GetTrajectory() const override { return m_trajectory; }
+    Vector GetCurrentGradient() const { return m_current_gradient; }
+    double GetCurrentEnergy() const { return m_current_energy; }
+    Matrix GetCurrentHessian() const { return Matrix::Zero(0, 0); }
+    std::vector<Molecule> GetTrajectory() const { return m_trajectory; }
 
     // Configuration management
-    void LoadConfiguration(const json& config) override;
-    json GetDefaultConfiguration() const override { return OptimizerInterfaceJson; }
-    json GetCurrentConfiguration() const override { return m_configuration; }
+    void LoadConfiguration(const json& config);
+    json GetDefaultConfiguration() const { return OptimizerInterfaceJson; }
+    json GetCurrentConfiguration() const { return m_configuration; }
 
     // Setters for context
     void setEnergyCalculator(EnergyCalculator* calculator);
@@ -156,6 +170,13 @@ public:
     void setConvergenceCriteria(double energy_thresh, double rmsd_thresh, double grad_thresh);
     void setTrajectoryFile(const std::string& filename);
     void setBasename(const std::string& basename);
+
+    // Method identification — implemented by each concrete optimizer
+    virtual std::string getName() const = 0;
+    virtual OptimizerType getType() const = 0;
+    virtual bool supportsConstraints() const = 0;
+    virtual bool requiresHessian() const = 0;
+    virtual std::vector<std::string> getRequiredParameters() const = 0;
 };
 
 } // namespace Optimization

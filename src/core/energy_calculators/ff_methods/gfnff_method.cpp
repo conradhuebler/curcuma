@@ -1071,7 +1071,9 @@ double GFNFF::Calculation(bool gradient)
     updateHBXBIfNeeded(nullptr);
 
     // Claude Generated (Feb 21, 2026): Enable per-component gradient storage for invariance diagnosis
-    if (gradient && CurcumaLogger::get_verbosity() >= 2) {
+    // Apr 2026: enabled unconditionally when gradient is requested so the NaN trap below
+    // can attribute NaNs to specific energy terms at any verbosity (memory cost ~= 10 * Natoms*3 doubles).
+    if (gradient) {
         if (m_forcefield) m_forcefield->setStoreGradientComponents(true);
         if (m_workspace) m_workspace->setStoreGradientComponents(true);
     }
@@ -1140,6 +1142,52 @@ double GFNFF::Calculation(bool gradient)
         // Claude Generated (Mar 2026): Add ALPB solvation gradient
         if (m_solvation) {
             m_solvation->addGradient(m_atoms, m_geometry_bohr, m_charges, m_gradient);
+        }
+
+        // Apr 2026 NaN trap: when the combined gradient contains NaN/Inf, scan each
+        // per-term component (requires storage enabled above) to attribute the NaN
+        // to a specific energy term. This is the diagnostic path for opt failures
+        // on large systems (e.g. 1410-atom polymer) where SP/MD succeed.
+        if (!m_gradient.allFinite()) {
+            CurcumaLogger::error("GFN-FF: combined gradient contains NaN/Inf — scanning per-term contributions");
+            if (!m_charges.allFinite()) {
+                CurcumaLogger::error("GFN-FF: m_charges (EEQ Phase-2) contains NaN/Inf");
+            }
+            auto scanComp = [](const Matrix& comp, const std::string& name) {
+                if (comp.rows() == 0) return;
+                if (!comp.allFinite()) {
+                    int atom = -1, axis = -1;
+                    for (int i = 0; i < comp.rows() && atom < 0; ++i) {
+                        for (int j = 0; j < comp.cols(); ++j) {
+                            if (!std::isfinite(comp(i, j))) { atom = i; axis = j; break; }
+                        }
+                    }
+                    CurcumaLogger::error_fmt("  [NaN] term={} first_atom={} axis={}", name, atom, axis);
+                }
+            };
+            if (m_use_workspace && m_workspace) {
+                scanComp(m_workspace->gradientBond(),       "bond");
+                scanComp(m_workspace->gradientAngle(),      "angle");
+                scanComp(m_workspace->gradientTorsion(),    "torsion");
+                scanComp(m_workspace->gradientRepulsion(),  "repulsion");
+                scanComp(m_workspace->gradientCoulomb(),    "coulomb");
+                scanComp(m_workspace->gradientDispersion(), "dispersion");
+                scanComp(m_workspace->gradientHB(),         "hb");
+                scanComp(m_workspace->gradientXB(),         "xb");
+                scanComp(m_workspace->gradientBATM(),       "batm");
+                scanComp(m_workspace->gradientATM(),        "atm");
+            } else if (m_forcefield) {
+                scanComp(m_forcefield->GradientBond(),       "bond");
+                scanComp(m_forcefield->GradientAngle(),      "angle");
+                scanComp(m_forcefield->GradientTorsion(),    "torsion");
+                scanComp(m_forcefield->GradientRepulsion(),  "repulsion");
+                scanComp(m_forcefield->GradientCoulomb(),    "coulomb");
+                scanComp(m_forcefield->GradientDispersion(), "dispersion");
+                scanComp(m_forcefield->GradientHB(),         "hb");
+                scanComp(m_forcefield->GradientXB(),         "xb");
+                scanComp(m_forcefield->GradientBATM(),       "batm");
+                scanComp(m_forcefield->GradientATM(),        "atm");
+            }
         }
 
         // Claude Generated (Mar 2026): Report gradient norm like XTB
@@ -1739,12 +1787,31 @@ bool GFNFF::importTopology(const json& topo_json)
     }
     if (topo_json.contains("qfrag")) {
         topo.qfrag = topo_json["qfrag"].get<std::vector<double>>();
+        // Guard against corrupt cache: qfrag[0] must match the actual molecular charge.
+        // Corrupt values (e.g. 32512, 21974) arise when Phase 1 EEQ fails to converge
+        // and the result is saved as the constraint target. Reset to m_charge if mismatched.
+        if (!topo.qfrag.empty() && std::abs(topo.qfrag[0] - static_cast<double>(m_charge)) > 0.5) {
+            CurcumaLogger::warn(fmt::format(
+                "Topology cache: qfrag[0]={:.1f} mismatches molecule charge={}, resetting",
+                topo.qfrag[0], m_charge));
+            topo.qfrag.assign(topo.nfrag, 0.0);
+            if (topo.nfrag >= 1)
+                topo.qfrag[0] = static_cast<double>(m_charge);
+        }
     }
 
     // Topology charges
     if (topo_json.contains("topology_charges")) {
         auto charges = topo_json["topology_charges"].get<std::vector<double>>();
         topo.topology_charges = Eigen::Map<Eigen::VectorXd>(charges.data(), charges.size());
+        // Validate topology charges: sum must be close to m_charge. If corrupt, clear so they get recomputed.
+        double charge_sum = topo.topology_charges.sum();
+        if (std::abs(charge_sum - static_cast<double>(m_charge)) > 1.0) {
+            CurcumaLogger::warn(fmt::format(
+                "Topology cache: topology_charges sum={:.1f} mismatches molecule charge={}, clearing cache",
+                charge_sum, m_charge));
+            topo.topology_charges = Eigen::VectorXd();  // Force Phase 1 EEQ recomputation
+        }
     }
 
     // Coordination numbers
@@ -1940,20 +2007,38 @@ bool GFNFF::initializeForceField()
     }
 
     // Claude Generated (March 2026): Save topology cache to .topo.json
+    // Apr 2026 write guard: refuse to persist a topology whose Phase-1 charges are
+    // unphysical. Mirrors the load-side guard at lines 1742-1766 — prevents a failed
+    // Phase-1 EEQ from baking corrupt qfrag/topology_charges into the cache file.
     if (m_cache_topology && m_cached_topology.has_value() && m_parameters.contains("geometry_file")) {
-        std::string geom_file = m_parameters["geometry_file"].get<std::string>();
-        size_t dot = geom_file.find_last_of('.');
-        std::string topo_file = (dot != std::string::npos ? geom_file.substr(0, dot) : geom_file) + ".topo.json";
+        const auto& tc  = m_cached_topology->topology_charges;
+        const auto& qf  = m_cached_topology->qfrag;
+        bool charges_valid =
+            tc.size() == m_atomcount && tc.allFinite() &&
+            std::abs(tc.sum() - static_cast<double>(m_charge)) < 1.0 &&
+            (qf.empty() || std::abs(qf[0] - static_cast<double>(m_charge)) < 0.5);
 
-        json topo_export = exportTopology();
-        topo_export["fingerprint"] = computeTopologyFingerprint();
+        if (!charges_valid) {
+            CurcumaLogger::warn(fmt::format(
+                "Topology cache write skipped: invalid Phase-1 charges (sum={:.3f}, expected {}, qfrag[0]={:.3f})",
+                tc.allFinite() ? tc.sum() : std::numeric_limits<double>::quiet_NaN(),
+                m_charge,
+                qf.empty() ? std::numeric_limits<double>::quiet_NaN() : qf[0]));
+        } else {
+            std::string geom_file = m_parameters["geometry_file"].get<std::string>();
+            size_t dot = geom_file.find_last_of('.');
+            std::string topo_file = (dot != std::string::npos ? geom_file.substr(0, dot) : geom_file) + ".topo.json";
 
-        std::ofstream topo_out(topo_file);
-        if (topo_out.is_open()) {
-            topo_out << topo_export.dump(2);
-            topo_out.close();
-            if (CurcumaLogger::get_verbosity() >= 1) {
-                CurcumaLogger::success(fmt::format("Topology cache saved to {}", topo_file));
+            json topo_export = exportTopology();
+            topo_export["fingerprint"] = computeTopologyFingerprint();
+
+            std::ofstream topo_out(topo_file);
+            if (topo_out.is_open()) {
+                topo_out << topo_export.dump(2);
+                topo_out.close();
+                if (CurcumaLogger::get_verbosity() >= 1) {
+                    CurcumaLogger::success(fmt::format("Topology cache saved to {}", topo_file));
+                }
             }
         }
     }

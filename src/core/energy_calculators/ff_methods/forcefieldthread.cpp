@@ -444,10 +444,15 @@ void ForceFieldThread::CalculateUFFAngleContribution()
         m_angle_energy += angle.fc * (angle.C0 + angle.C1 * costheta + angle.C2 * cos2theta) * m_final_factor * m_angle_scaling;
 
         if (m_calculate_gradient) {
-            double diff = angle.fc * (angle.C1 + 4 * angle.C2 * costheta) * m_final_factor * m_angle_scaling;
-            m_gradient.row(angle.i) += diff * derivate.row(0);
-            m_gradient.row(angle.j) += diff * derivate.row(1);
-            m_gradient.row(angle.k) += diff * derivate.row(2);
+            // UFF gradient fix (Claude Generated Mar 2026):
+            // AngleBending returns derivate = dθ/dr_i (gradient of angle θ, NOT cosθ).
+            // diff must be dE/dθ, not dE/d(cosθ):
+            //   dE/dθ = dE/d(cosθ) * d(cosθ)/dθ = fc*(C1+4*C2*cosθ) * (-sinθ)
+            double sintheta = std::sin(std::acos(costheta));
+            double dEdTheta = -sintheta * angle.fc * (angle.C1 + 4 * angle.C2 * costheta) * m_final_factor * m_angle_scaling;
+            m_gradient.row(angle.i) += dEdTheta * derivate.row(0);
+            m_gradient.row(angle.j) += dEdTheta * derivate.row(1);
+            m_gradient.row(angle.k) += dEdTheta * derivate.row(2);
         }
     }
 }
