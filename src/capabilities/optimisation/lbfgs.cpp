@@ -148,9 +148,12 @@ Eigen::MatrixXd LBFGS::update_inverse_hessian_approximation(Eigen::MatrixXd& B, 
     double rho = 1.0 / deltaG.dot(deltaX);
     Eigen::VectorXd B_deltaX = B * deltaX;
 
-    Eigen::MatrixXd I = Eigen::MatrixXd::Identity(B.rows(), B.cols());
+    // NOTE: variable renamed from `I` to `Ident` because EIGEN_USE_LAPACKE (set
+    // at top of this TU) pulls in <complex.h> via LAPACKE, which defines `I` as
+    // a preprocessor macro and breaks the declaration below.
+    Eigen::MatrixXd Ident = Eigen::MatrixXd::Identity(B.rows(), B.cols());
 
-    B = (I - rho * deltaX * deltaG.transpose()) * B * (I - rho * deltaG * deltaX.transpose()) + rho * (deltaX * deltaX.transpose());
+    B = (Ident - rho * deltaX * deltaG.transpose()) * B * (Ident - rho * deltaG * deltaX.transpose()) + rho * (deltaX * deltaX.transpose());
 
     return B;
 }

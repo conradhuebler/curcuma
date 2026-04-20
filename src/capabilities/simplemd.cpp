@@ -1466,15 +1466,33 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     return true;
 }
 
+// Claude Generated 2026 - Stepwise MD refactor (Qurcuma interactive simulation)
+// start() previously contained setup + loop + cleanup in one monolithic block.
+// It is now split into prepareRun() / step() / finalizeRun() so external
+// callers (e.g. the qurcuma GUI worker) can drive the MD integration one step
+// at a time and inject per-step perturbations between steps.
 void SimpleMD::start()
 {
-    if (m_initialised == false)
+    prepareRun();
+    if (!m_run_prepared)
         return;
-    bool aborted = false;
+    while (step()) {
+        // step() returns false when the simulation should terminate
+    }
+    finalizeRun();
+}
+
+void SimpleMD::prepareRun()
+{
+    if (m_initialised == false) {
+        m_run_prepared = false;
+        return;
+    }
+    m_run_aborted = false;
+    m_run_states.clear();
+
     auto unix_timestamp = std::chrono::seconds(std::time(nullptr));
     m_unix_started = std::chrono::milliseconds(unix_timestamp).count();
-
-    std::vector<json> states;
 
     // Claude Generated 2025: Thermostat selection - Enum-based switch
     auto thermo_it = thermostat_map.find(m_thermostat);
@@ -1512,7 +1530,7 @@ void SimpleMD::start()
     EKin();
     m_Etot = m_Epot + m_Ekin;
     AverageQuantities();
-    int m_step = 0;
+    m_step = 0;
     WriteGeometry();
 #ifdef USE_Plumed
     if (m_mtd) {
@@ -1584,157 +1602,184 @@ void SimpleMD::start()
             std::cout << "Well Tempered\tOff" << std::endl;
     }
     PrintStatus();
+    m_run_prepared = true;
+}
 
-    /* Start MD loop here.
-     * Claude Generated - Interactive Simulation Integration:
-     * If m_maxtime == 0, run indefinitely until stopped via external stop flag
-     * (m_externalStop) or the standard CheckStop() mechanism. Useful for interactive
-     * GUI-driven MD where the user controls the simulation duration. */
-    while ((m_maxtime <= 0 || m_currentStep < m_maxtime)
-        && !(m_externalStop && m_externalStop->load(std::memory_order_relaxed))) {
-        auto step0 = std::chrono::system_clock::now();
+/* Claude Generated 2026 - One iteration of the MD loop.
+ * Returns true while the simulation should continue, false when it should end.
+ * Termination reasons: max_time reached, CheckStop() (stop file), unstable
+ * dynamics, or exhausted rescue budget. The step() body mirrors the original
+ * while-loop body in start() verbatim. External-force injection happens at the
+ * very top so the contribution is folded into the upcoming integrator step. */
+bool SimpleMD::step()
+{
+    if (!m_run_prepared)
+        return false;
 
-        if (CheckStop() == true) {
-            TriggerWriteRestart();
-            aborted = true;
+    if (!(m_maxtime <= 0 || m_currentStep < m_maxtime))
+        return false;
+
+    auto step0 = std::chrono::system_clock::now();
+
+    if (CheckStop() == true) {
+        TriggerWriteRestart();
+        m_run_aborted = true;
 #ifdef USE_Plumed
-            if (m_mtd) {
-                plumed_finalize(m_plumedmain); // Call the plumed destructor
-            }
-#endif
-
-            break;
-        }
-
-        if (m_rm_COM_step > 0 && m_step % m_rm_COM_step == 0) {
-            // std::cout << "Removing COM motion." << std::endl;
-            if (m_rmrottrans == 1)
-                RemoveRotation();
-            else if (m_rmrottrans == 2)
-                RemoveRotations();
-            else if (m_rmrottrans == 3) {
-                RemoveRotations();
-                RemoveRotation();
-            }
-        }
-
-        Integrator();
-        AverageQuantities();
-
         if (m_mtd) {
-            if (!m_eval_mtd) {
-                if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
-                    m_eval_mtd = true;
-                    std::cout << "Starting with MetaDynamics ..." << std::endl;
-                }
+            plumed_finalize(m_plumedmain);
+        }
+#endif
+        return false;
+    }
+
+    // Claude Generated 2026 - Inject queued external forces before integration.
+    // The contribution is consumed (cleared) in a single step; callers must
+    // re-apply each step while the user is actively dragging an atom.
+    if (m_external_forces_pending) {
+        m_eigen_gradient += m_external_forces;
+        m_external_forces.setZero();
+        m_external_forces_pending = false;
+    }
+
+    if (m_rm_COM_step > 0 && m_step % m_rm_COM_step == 0) {
+        if (m_rmrottrans == 1)
+            RemoveRotation();
+        else if (m_rmrottrans == 2)
+            RemoveRotations();
+        else if (m_rmrottrans == 3) {
+            RemoveRotations();
+            RemoveRotation();
+        }
+    }
+
+    Integrator();
+    AverageQuantities();
+
+    if (m_mtd) {
+        if (!m_eval_mtd) {
+            if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
+                m_eval_mtd = true;
+                std::cout << "Starting with MetaDynamics ..." << std::endl;
             }
         }
+    }
 
-        /////////// Dipole
-        if (m_dipole && m_method == "gfn2") {
-            //linear Dipoles
-            auto curr_dipoles_lin = m_molecule.CalculateDipoleMoments(m_scaling_vector_linear, m_start_fragments);
-            std::ofstream file;
-            file.open(Basename() + "_dipole_linear.out", std::ios_base::app);
-            Position d = {0,0,0};
-            for (const auto& dipole_lin : curr_dipoles_lin) {
-                d += dipole_lin;
-                file << dipole_lin[0] << " " << dipole_lin[1] << " " << dipole_lin[2] << " " << dipole_lin.norm() << ", ";
-            }
-            file << d[0] << " " << d[1] << " " << d[2] << ", " << m_molecule.getDipole()[0] << " " << m_molecule.getDipole()[1] << " " << m_molecule.getDipole()[2] << std::endl;
-            file.close();
-            //nonlinear Dipoles
-            auto curr_dipoles_nlin = m_molecule.CalculateDipoleMoments(m_scaling_vector_nonlinear, m_start_fragments);
-            std::ofstream file2;
-            file2.open(Basename() + "_dipole_nonlinear.out", std::ios_base::app);
-            Position sum = {0,0,0};
-            for (const auto& dipole_nlin : curr_dipoles_nlin) {
-                sum += dipole_nlin;
-                file2 << dipole_nlin[0] << " " << dipole_nlin[1] << " " << dipole_nlin[2] << " " << dipole_nlin.norm() <<", ";
-            }
-            file2 << sum[0] << " " << sum[1] << " " << sum[2] << ", " << m_molecule.getDipole()[0] << " " << m_molecule.getDipole()[1] << " " << m_molecule.getDipole()[2] << std::endl;
-            file2.close();
+    /////////// Dipole
+    if (m_dipole && m_method == "gfn2") {
+        //linear Dipoles
+        auto curr_dipoles_lin = m_molecule.CalculateDipoleMoments(m_scaling_vector_linear, m_start_fragments);
+        std::ofstream file;
+        file.open(Basename() + "_dipole_linear.out", std::ios_base::app);
+        Position d = {0,0,0};
+        for (const auto& dipole_lin : curr_dipoles_lin) {
+            d += dipole_lin;
+            file << dipole_lin[0] << " " << dipole_lin[1] << " " << dipole_lin[2] << " " << dipole_lin.norm() << ", ";
         }
-        //////////// Dipole
-
-
-        if (m_step % m_dump == 0) {
-            if (bool write = WriteGeometry()) {
-                states.push_back(WriteRestartInformation());
-                m_current_rescue = 0;
-            } else if (!write && m_rescue && states.size() > (1 - m_current_rescue)) {
-                std::cout << "Molecule exploded, resetting to previous state ..." << std::endl;
-                LoadRestartInformation(states[states.size() - 1 - m_current_rescue]);
-                Geometry geometry = m_molecule.getGeometry();
-                for (int i = 0; i < m_natoms; ++i) {
-                    geometry(i, 0) = m_eigen_geometry.data()[3 * i + 0];
-                    geometry(i, 1) = m_eigen_geometry.data()[3 * i + 1];
-                    geometry(i, 2) = m_eigen_geometry.data()[3 * i + 2];
-                }
-                m_molecule.setGeometry(geometry);
-                m_molecule.GetFragments();
-                InitVelocities(-1);
-                Energy();
-                EKin();
-                m_Etot = m_Epot + m_Ekin;
-                m_current_rescue++;
-                PrintStatus();
-                m_time_step = 0;
-            }
+        file << d[0] << " " << d[1] << " " << d[2] << ", " << m_molecule.getDipole()[0] << " " << m_molecule.getDipole()[1] << " " << m_molecule.getDipole()[2] << std::endl;
+        file.close();
+        //nonlinear Dipoles
+        auto curr_dipoles_nlin = m_molecule.CalculateDipoleMoments(m_scaling_vector_nonlinear, m_start_fragments);
+        std::ofstream file2;
+        file2.open(Basename() + "_dipole_nonlinear.out", std::ios_base::app);
+        Position sum = {0,0,0};
+        for (const auto& dipole_nlin : curr_dipoles_nlin) {
+            sum += dipole_nlin;
+            file2 << dipole_nlin[0] << " " << dipole_nlin[1] << " " << dipole_nlin[2] << " " << dipole_nlin.norm() <<", ";
         }
+        file2 << sum[0] << " " << sum[1] << " " << sum[2] << ", " << m_molecule.getDipole()[0] << " " << m_molecule.getDipole()[1] << " " << m_molecule.getDipole()[2] << std::endl;
+        file2.close();
+    }
+    //////////// Dipole
 
-        if (m_unstable || m_interface->Error() || m_interface->HasNan()) {
+    if (m_step % m_dump == 0) {
+        if (bool write = WriteGeometry()) {
+            m_run_states.push_back(WriteRestartInformation());
+            m_current_rescue = 0;
+        } else if (!write && m_rescue && m_run_states.size() > (1 - m_current_rescue)) {
+            std::cout << "Molecule exploded, resetting to previous state ..." << std::endl;
+            LoadRestartInformation(m_run_states[m_run_states.size() - 1 - m_current_rescue]);
+            Geometry geometry = m_molecule.getGeometry();
+            for (int i = 0; i < m_natoms; ++i) {
+                geometry(i, 0) = m_eigen_geometry.data()[3 * i + 0];
+                geometry(i, 1) = m_eigen_geometry.data()[3 * i + 1];
+                geometry(i, 2) = m_eigen_geometry.data()[3 * i + 2];
+            }
+            m_molecule.setGeometry(geometry);
+            m_molecule.GetFragments();
+            InitVelocities(-1);
+            Energy();
+            EKin();
+            m_Etot = m_Epot + m_Ekin;
+            m_current_rescue++;
             PrintStatus();
-            fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Simulation got unstable, exiting!\n");
-
-            std::ofstream restart_file("unstable_curcuma.json");
-            nlohmann::json restart;
-            restart[MethodName()[0]] = WriteRestartInformation();
-            restart_file << restart << std::endl;
-
             m_time_step = 0;
-            aborted = true;
+        }
+    }
+
+    if (m_unstable || m_interface->Error() || m_interface->HasNan()) {
+        PrintStatus();
+        fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Simulation got unstable, exiting!\n");
+
+        std::ofstream restart_file("unstable_curcuma.json");
+        nlohmann::json restart;
+        restart[MethodName()[0]] = WriteRestartInformation();
+        restart_file << restart << std::endl;
+
+        m_time_step = 0;
+        m_run_aborted = true;
 
 #ifdef USE_Plumed
-            if (m_mtd) {
-                plumed_finalize(m_plumedmain); // Call the plumed destructor
-            }
+        if (m_mtd) {
+            plumed_finalize(m_plumedmain);
+        }
 #endif
-            return;
-        }
+        m_run_prepared = false;  // signal to start(): skip finalizeRun() cleanup
+        return false;
+    }
 
-        if (m_writerestart > -1 && m_step % m_writerestart == 0) {
-            std::ofstream restart_file("curcuma_step_" + std::to_string(static_cast<int>(m_step * m_dT)) + ".json");
-            json restart;
-            restart[MethodName()[0]] = WriteRestartInformation();
-            restart_file << restart << std::endl;
-        }
-        if ((m_step && static_cast<int>(m_step * m_dT) % m_print == 0)) {
-            m_Etot = m_Epot + m_Ekin;
-            PrintStatus();
-            m_time_step = 0;
-        }
-        if (m_rattle && m_rattle_dynamic_tol) {
-            m_aver_rattle_Temp += m_T;
-            m_rattle_counter++;
-            if (m_rattle_counter == m_rattle_dynamic_tol_iter)
-                AdjustRattleTolerance();
-        }
-        if (m_impuls > m_T) {
-            InitVelocities(m_scale_velo * m_impuls_scaling);
-            EKin();
-            // PrintStatus();
-            m_time_step = 0;
-        }
+    if (m_writerestart > -1 && m_step % m_writerestart == 0) {
+        std::ofstream restart_file("curcuma_step_" + std::to_string(static_cast<int>(m_step * m_dT)) + ".json");
+        json restart;
+        restart[MethodName()[0]] = WriteRestartInformation();
+        restart_file << restart << std::endl;
+    }
+    if ((m_step && static_cast<int>(m_step * m_dT) % m_print == 0)) {
+        m_Etot = m_Epot + m_Ekin;
+        PrintStatus();
+        m_time_step = 0;
+    }
+    if (m_rattle && m_rattle_dynamic_tol) {
+        m_aver_rattle_Temp += m_T;
+        m_rattle_counter++;
+        if (m_rattle_counter == m_rattle_dynamic_tol_iter)
+            AdjustRattleTolerance();
+    }
+    if (m_impuls > m_T) {
+        InitVelocities(m_scale_velo * m_impuls_scaling);
+        EKin();
+        m_time_step = 0;
+    }
 
-        if (m_current_rescue >= m_max_rescue) {
-            fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Nothing really helps");
-            break;
-        }
-        m_step++;
-        m_currentStep += m_dT;
-        m_time_step += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - step0).count();
-    } //MD Loop end here
+    if (m_current_rescue >= m_max_rescue) {
+        fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Nothing really helps");
+        return false;
+    }
+    m_step++;
+    m_currentStep += m_dT;
+    m_time_step += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - step0).count();
+    return true;
+}
+
+/* Claude Generated 2026 - Post-loop cleanup. Writes final trajectory frame,
+ * prints summary, finalises plumed/RMSD-metadynamics, writes curcuma_final.json.
+ * Skipped by start() when step() triggered an early abort (unstable dynamics).
+ * Always resets m_run_prepared so the object can be re-run. */
+void SimpleMD::finalizeRun()
+{
+    if (!m_run_prepared) {
+        // early-exit path (unstable) already did its own cleanup inside step()
+        return;
+    }
 
     // Claude Generated (October 2025): Write final frame to ensure at least 2 frames (t=0, t=max_time)
     // Fixes trajectory file generation for short simulations where dump_frequency > total_steps
@@ -1744,25 +1789,18 @@ void SimpleMD::start()
     if (m_thermostat == "csvr")
         std::cout << "Exchange with heat bath " << m_Ekin_exchange << "Eh" << std::endl;
     if (m_dipole) {
-
-        double dipole = 0.0;
-        //std::cout << dipole*2.5418 << " average dipole in Debye and " << dipole*2.5418*3.3356e-30 << " Cm" << std::endl;
-
         std::cout << "Calculated averaged dipole moment " << m_aver_dipol_linear * 2.5418 << " Debye and " << m_aver_dipol_linear * 2.5418 * 3.3356 << " Cm [e-30]" << std::endl;
     }
 
 #ifdef USE_Plumed
     if (m_mtd) {
-        plumed_finalize(m_plumedmain); // Call the plumed destructor
+        plumed_finalize(m_plumedmain);
     }
 #endif
     if (m_rmsd_mtd) {
         std::cout << "Sum of Energy of COLVARs:" << std::endl;
-        // std::vector<BiasStructure> biased_structures;
-
         for (int i = 0; i < m_bias_threads.size(); ++i) {
             auto structures = m_bias_threads[i]->getBiasStructure();
-            // biased_structures.push_back(structures);
             for (int j = 0; j < structures.size(); ++j) {
                 std::cout << structures[j].rmsd_reference << "\t" << structures[j].energy << "\t" << structures[j].counter / static_cast<double>(m_colvar_incr) * 100 << std::endl;
 
@@ -1780,8 +1818,26 @@ void SimpleMD::start()
     nlohmann::json restart;
     restart[MethodName()[0]] = WriteRestartInformation();
     restart_file << restart << std::endl;
-    if (aborted == false)
+    if (m_run_aborted == false)
         std::remove("curcuma_restart.json");
+
+    m_run_prepared = false;
+}
+
+/* Claude Generated 2026 - Queue external per-atom force contribution for the
+ * next step() call. Forces are in Hartree/Bohr (same units as m_eigen_gradient).
+ * The contribution is added additively and then cleared, so callers must re-queue
+ * each step while a user drag is active. Shape check: forces must match (natoms, 3). */
+void SimpleMD::applyExternalForces(const Geometry& forces)
+{
+    if (forces.rows() != m_natoms || forces.cols() != 3)
+        return;
+
+    if (m_external_forces.rows() != m_natoms || m_external_forces.cols() != 3)
+        m_external_forces = Geometry::Zero(m_natoms, 3);
+
+    m_external_forces = forces;
+    m_external_forces_pending = true;
 }
 
 void SimpleMD::AdjustRattleTolerance()
@@ -3084,11 +3140,6 @@ bool SimpleMD::WriteGeometry()
     }
     TriggerWriteRestart();
     m_molecule.setGeometry(geometry);
-
-    // Claude Generated - Fire live update callback for GUI visualization (Qurcuma integration)
-    if (m_stepCallback) {
-        m_stepCallback(m_molecule, static_cast<int>(m_step), m_Epot, m_Ekin);
-    }
 
     // Claude Generated (Nov 2025): Write VTF trajectory for CG systems
     if (m_is_cg_system && m_cg_write_vtf) {

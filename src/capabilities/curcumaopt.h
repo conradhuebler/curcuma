@@ -122,6 +122,14 @@ public:
     void setMethod(int method) { m_method = method; }
     bool isError() const { return m_error; }
 
+    /* Claude Generated 2026 - Interactive opt force injection.
+     * Additive external gradient contribution (in Eh/Bohr) applied once inside
+     * operator() and cleared. Vector must match 3*atoms. */
+    void applyExternalForces(const Vector& grad) {
+        m_external_grad = grad;
+        m_external_grad_pending = true;
+    }
+
 private:
     //  int m_iter = 0;
     int m_atoms = 0;
@@ -130,6 +138,8 @@ private:
     std::vector<int> m_constrains;
     EnergyCalculator* m_interface;
     Vector m_parameter;
+    Vector m_external_grad;
+    bool m_external_grad_pending = false;
     const Molecule* m_molecule;
     bool m_error = false;
 };
@@ -259,23 +269,7 @@ public:
         ParameterRegistry::getInstance().printHelp("opt");
     }
 
-    /**
-     * @brief Register a callback for real-time geometry updates during optimization.
-     *
-     * Claude Generated - Interactive Simulation Integration (Qurcuma)
-     *
-     * Called after each accepted optimization step (inside LBFGSOptimise / GPTLBFGS).
-     * Enables live visualization of the optimization trajectory in GUI applications.
-     *
-     * @param callback Invoked as: callback(molecule, iteration, energy [Eh])
-     */
-    inline void setStepCallback(std::function<void(const Molecule&, int, double)> callback)
-    {
-        m_optCallback = callback;
-    }
-
 private:
-    std::function<void(const Molecule&, int, double)> m_optCallback;  // Claude Generated - Live update callback for GUI
     /* Lets have this for all modules */
     inline nlohmann::json WriteRestartInformation() override { return json(); }
 

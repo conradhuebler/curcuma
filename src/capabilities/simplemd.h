@@ -174,41 +174,48 @@ public:
     std::vector<Molecule*> UniqueMolecules() const { return m_unique_structures; }
     void printHelp() const;
 
-    /**
-     * @brief Register a callback for real-time geometry updates during MD simulation.
+    /* ============================================================================
+     * Stepwise MD API (Claude Generated 2026 - Qurcuma interactive simulation)
      *
-     * Claude Generated - Interactive Simulation Integration (Qurcuma)
-     *
-     * Called inside WriteGeometry() every dump_frequency steps.
-     * Enables live visualization in GUI applications without file I/O polling.
-     *
-     * @param callback Invoked as: callback(molecule, step, Epot [Eh], Ekin [Eh])
-     */
-    inline void setStepCallback(std::function<void(const Molecule&, int, double, double)> callback)
-    {
-        m_stepCallback = callback;
-    }
+     * Replaces the former callback-based integration. Callers drive the MD loop
+     * themselves by invoking prepareRun() → step() repeatedly → finalizeRun().
+     * Between two step() calls, applyExternalForces() can inject an additive
+     * gradient contribution (e.g. from a user grabbing an atom in a GUI).
+     * ============================================================================ */
 
-    /**
-     * @brief Set an external atomic stop flag for GUI-driven unlimited-time MD.
-     *
-     * Claude Generated - Interactive Simulation Integration (Qurcuma)
-     *
-     * When max_time = 0 (unlimited MD), the loop runs until this flag is set true
-     * by an external thread (GUI stop button). Checked each step alongside CheckStop().
-     * The flag pointer must remain valid for the entire duration of start().
-     *
-     * @param flag Pointer to std::atomic<bool> owned by the caller
-     */
-    inline void setExternalStopFlag(std::atomic<bool>* flag)
-    {
-        m_externalStop = flag;
-    }
+    /** Setup phase before the MD loop (thermostat selection, initial energy,
+     *  first trajectory frame, plumed init, console headers). Must be called
+     *  after Initialise(). Safe to call from start(); automatically invoked there. */
+    void prepareRun();
+
+    /** Execute one MD step (position+velocity update, thermostat, rattle, output
+     *  for the current step counter). Returns false when the simulation should
+     *  terminate (m_unstable, maxtime reached, CheckStop()). */
+    bool step();
+
+    /** Final printout, final trajectory frame, plumed/metadynamics finalize,
+     *  curcuma_final.json. Automatically invoked at end of start(). */
+    void finalizeRun();
+
+    /** Add an external per-atom force contribution that will be applied in the
+     *  next step() call (added to m_eigen_gradient before the integrator). The
+     *  contribution is cleared after application. Matrix shape: (natoms, 3) in
+     *  Hartree/Bohr (same units as m_eigen_gradient). */
+    void applyExternalForces(const Geometry& forces);
+
+    // Getters for stepwise GUI feedback
+    const Geometry& positions() const { return m_eigen_geometry; }
+    const Geometry& velocities() const { return m_eigen_velocities; }
+    const Geometry& gradient() const { return m_eigen_gradient; }
+    double potentialEnergy() const { return m_Epot; }
+    double kineticEnergy() const { return m_Ekin; }
+    double currentTemperature() const { return m_T; }
+    int stepCount() const { return m_step; }
+    double currentTime() const { return m_currentStep; }
+    const Molecule& currentMolecule() const { return m_molecule; }
 
 private:
     std::function<void(void)> ThermostatFunction;
-    std::function<void(const Molecule&, int, double, double)> m_stepCallback;  // Claude Generated - Live update callback for GUI
-    std::atomic<bool>* m_externalStop = nullptr;  // Claude Generated - External stop flag for unlimited MD
     void PrintStatus() const;
 
     /* Lets have this for all modules */
@@ -315,6 +322,13 @@ private:
 
     Geometry m_eigen_geometry, m_eigen_geometry_old, m_eigen_gradient, m_eigen_gradient_old, m_eigen_velocities;
     Vector m_eigen_masses, m_eigen_inv_masses;
+
+    // Stepwise-API state (Claude Generated 2026)
+    Geometry m_external_forces;          // additive per-atom force contribution, cleared after use
+    bool m_external_forces_pending = false;
+    bool m_run_prepared = false;         // true after prepareRun(), false after finalizeRun()
+    bool m_run_aborted = false;          // mirrors former local `aborted` flag in start()
+    std::vector<json> m_run_states;      // rescue states carried across step() calls
 
     std::vector<Geometry> m_bias_structures;
     std::vector<BiasStructure> m_biased_structures;
