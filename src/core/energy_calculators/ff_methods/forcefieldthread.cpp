@@ -1901,6 +1901,7 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
         Eigen::Vector3d ri = geom().row(disp.i);
         Eigen::Vector3d rj = geom().row(disp.j);
         Eigen::Vector3d rij_vec = ri - rj;
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
         double rij = rij_vec.norm() * m_au;  // Convert to atomic units if needed
 
         // HIGH PRIORITY FIX (Feb 2026): Reduce epsilon threshold for gradient robustness
@@ -2013,6 +2014,7 @@ void ForceFieldThread::CalculateGFNFFBondedRepulsionContribution()
         Eigen::Vector3d ri = geom().row(rep.i);
         Eigen::Vector3d rj = geom().row(rep.j);
         Eigen::Vector3d rij_vec = ri - rj;
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
         double rij = rij_vec.norm() * m_au;
 
         // HIGH PRIORITY FIX (Feb 2026): Strengthen distance check to prevent gradient Inf/NaN
@@ -2083,6 +2085,7 @@ void ForceFieldThread::CalculateGFNFFNonbondedRepulsionContribution()
         Eigen::Vector3d ri = geom().row(rep.i);
         Eigen::Vector3d rj = geom().row(rep.j);
         Eigen::Vector3d rij_vec = ri - rj;
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
         double rij = rij_vec.norm() * m_au;
 
         // HIGH PRIORITY FIX (Feb 2026): Strengthen distance check to prevent gradient Inf/NaN
@@ -2191,6 +2194,7 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
         Eigen::Vector3d ri = geom().row(coul.i);
         Eigen::Vector3d rj = geom().row(coul.j);
         Eigen::Vector3d rij_vec = ri - rj;
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
         double rij = rij_vec.norm() * m_au;
 
         if (rij > coul.r_cut || rij < 1e-10) continue;
@@ -2370,10 +2374,15 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
         Eigen::Vector3d pos_H = geom().row(hb.j).transpose();
         Eigen::Vector3d pos_B = geom().row(hb.k).transpose();
 
-        // Calculate distance vectors
+        // Calculate distance vectors (apply MIC for periodic systems)
         Eigen::Vector3d r_AH_vec = pos_H - pos_A;
         Eigen::Vector3d r_HB_vec = pos_B - pos_H;
         Eigen::Vector3d r_AB_vec = pos_B - pos_A;
+        if (m_has_pbc) {
+            r_AH_vec = PBCUtils::applyMinimumImage(r_AH_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+            r_HB_vec = PBCUtils::applyMinimumImage(r_HB_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+            r_AB_vec = PBCUtils::applyMinimumImage(r_AB_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+        }
 
         // Calculate distances (convert to Bohr via m_au)
         double r_AH = r_AH_vec.norm() * m_au;
@@ -2991,10 +3000,15 @@ void ForceFieldThread::CalculateGFNFFHalogenBondContribution()
         Eigen::Vector3d pos_X = geom().row(xb.j).transpose();
         Eigen::Vector3d pos_B = geom().row(xb.k).transpose();
 
-        // Calculate distance vectors
+        // Calculate distance vectors (apply MIC for periodic systems)
         Eigen::Vector3d r_AX_vec = pos_X - pos_A;
         Eigen::Vector3d r_XB_vec = pos_B - pos_X;
         Eigen::Vector3d r_AB_vec = pos_B - pos_A;
+        if (m_has_pbc) {
+            r_AX_vec = PBCUtils::applyMinimumImage(r_AX_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+            r_XB_vec = PBCUtils::applyMinimumImage(r_XB_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+            r_AB_vec = PBCUtils::applyMinimumImage(r_AB_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+        }
 
         // Calculate distances (convert to Bohr via m_au)
         double r_AX = r_AX_vec.norm() * m_au;
@@ -3345,7 +3359,7 @@ void ForceFieldThread::CalculateD4DispersionContribution()
 }
 
 // Claude Generated 2025: D3/D4 dispersion addition methods
-void ForceFieldThread::addD3Dispersion(const GFNFFDispersion& d3_dispersion)
+void ForceFieldThread::addD3Dispersion(const D3DispersionPair& d3_dispersion)
 {
     m_d3_dispersions.push_back(d3_dispersion);
 }

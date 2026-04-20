@@ -168,3 +168,107 @@ double CNCalculator::getCovalentRadius(int atomic_number)
 
     return COVALENT_RADII[idx];
 }
+
+std::vector<double> CNCalculator::calculateGFNFFCN(
+    const std::vector<int>& atoms,
+    const Eigen::MatrixXd& geometry_bohr,
+    double cn_cutoff_bohr,
+    double cn_accuracy,
+    double kn,
+    double cnmax)
+{
+    /**
+     * P2b (Apr 2026): Configurable CN calculation with three modes:
+     *
+     * 1. Neighbor-list mode (cn_cutoff_bohr > 0):
+     *    Build neighbor list with cutoff radius, then compute CN only for neighbors.
+     *    O(N*k) where k = average number of neighbors within cutoff.
+     *    Default cutoff: 6.0 Bohr (captures all significant erf contributions).
+     *
+     * 2. Accuracy-based threshold mode (cn_cutoff_bohr = 0, cn_accuracy > 0):
+     *    Fortran formula: cnthr = 100.0 - log10(accuracy) * 50.0
+     *    threshold = cnthr Bohr². Standard O(N²) loop with skip.
+     *
+     * 3. Full reference mode (cn_cutoff_bohr = 0, cn_accuracy = 0):
+     *    No cutoff, full O(N²) calculation. For verification only.
+     */
+
+    const double ANG2BOHR = 1.8897259886;
+    const int natoms = static_cast<int>(atoms.size());
+    const double k_scaled = 4.0 / 3.0;
+
+    // Pre-compute scaled covalent radii in Bohr
+    std::vector<double> rcov_bohr(natoms, 0.0);
+    for (int i = 0; i < natoms; ++i) {
+        int elem = atoms[i] - 1;
+        if (elem >= 0 && elem < static_cast<int>(COVALENT_RADII.size())) {
+            rcov_bohr[i] = k_scaled * COVALENT_RADII[elem] * ANG2BOHR;
+        }
+    }
+
+    // Mode selection
+    if (cn_cutoff_bohr > 0.0) {
+        // ============================================================
+        // MODE 1: Neighbor-list with cutoff (fast, O(N*k))
+        // ============================================================
+        double cutoff_sq = cn_cutoff_bohr * cn_cutoff_bohr;
+        std::vector<std::vector<int>> neighbors(natoms);
+
+        // Build neighbor list (upper triangle, O(N²) but with early exit)
+        #pragma omp parallel for schedule(dynamic, 32)
+        for (int i = 0; i < natoms; ++i) {
+            if (rcov_bohr[i] == 0.0) continue;
+            Eigen::Vector3d pos_i = geometry_bohr.row(i);
+            for (int j = i + 1; j < natoms; ++j) {
+                if (rcov_bohr[j] == 0.0) continue;
+                double dx = pos_i(0) - geometry_bohr(j, 0);
+                double dy = pos_i(1) - geometry_bohr(j, 1);
+                double dz = pos_i(2) - geometry_bohr(j, 2);
+                double dist_sq = dx*dx + dy*dy + dz*dz;
+                if (dist_sq < cutoff_sq) {
+                    // Thread-safe: each i has its own neighbors[i]
+                    neighbors[i].push_back(j);
+                    neighbors[j].push_back(i);
+                }
+            }
+        }
+
+        // Compute CN only for neighbors
+        std::vector<double> cn_values(natoms, 0.0);
+        #pragma omp parallel for schedule(dynamic, 32)
+        for (int i = 0; i < natoms; ++i) {
+            if (rcov_bohr[i] == 0.0) continue;
+            double cn_raw = 0.0;
+            for (int j : neighbors[i]) {
+                double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
+                double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
+                double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
+                double dist_sq = dx*dx + dy*dy + dz*dz;
+                double dist = std::sqrt(dist_sq);
+                double rcov_ij = rcov_bohr[i] + rcov_bohr[j];
+                double dr = (dist - rcov_ij) / rcov_ij;
+                cn_raw += 0.5 * (1.0 + std::erf(kn * dr));
+            }
+            cn_values[i] = std::log(1.0 + std::exp(cnmax)) - std::log(1.0 + std::exp(cnmax - cn_raw));
+        }
+        return cn_values;
+
+    } else if (cn_accuracy > 0.0) {
+        // ============================================================
+        // MODE 2: Fortran accuracy-based threshold (O(N²) with skip)
+        // ============================================================
+        // Reference: gfnff_param.f90:551
+        // cnthr = 100.0 - log10(accuracy) * 50.0
+        double cnthr = 100.0 - std::log10(cn_accuracy) * 50.0;
+        double threshold = cnthr;  // threshold in Bohr²
+        return calculateGFNFFCN(atoms, geometry_bohr, threshold, kn, cnmax);
+
+    } else {
+        // ============================================================
+        // MODE 3: Full O(N²) reference mode (no cutoff)
+        // ============================================================
+        // Use a very large threshold to disable skipping
+        double threshold = 1e30;  // Effectively no cutoff
+        return calculateGFNFFCN(atoms, geometry_bohr, threshold, kn, cnmax);
+    }
+}

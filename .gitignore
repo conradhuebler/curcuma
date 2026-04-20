@@ -92,6 +92,7 @@ test_cases/**/*.param.json
 test_cases/**/curcuma_*.json
 test_cases/**/*.log
 test_cases/**/*.dat
+!test_cases/**/baseline.dat
 
 # Root-level output files (optimization and trajectory outputs)
 *.opt.xyz
@@ -152,6 +153,7 @@ gfnff_subtile_parameter_generierung.md
 2026-01-21-implement-the-following-plan.txt
 compare_*.py
 compare_*.sh
+!test_cases/**/compare_baseline.sh
 *_test.py
 test_*.py
 test_benzene_md.xyz

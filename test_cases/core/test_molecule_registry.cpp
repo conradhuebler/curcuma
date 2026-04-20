@@ -22,7 +22,8 @@ namespace TestMolecules {
         {"C6H6", "molecules/larger/C6H6.xyz"},
         {"benzene", "molecules/larger/C6H6.xyz"},
         {"monosaccharide", "molecules/larger/monosaccharide.xyz"},
-        {"triose", "molecules/larger/triose.xyz"}
+        {"triose", "molecules/larger/triose.xyz"},
+        {"polymer", "molecules/larger/polymer.xyz"}
     };
 
     // Initialize the molecule registry with critical test molecules
@@ -346,13 +347,32 @@ namespace TestMolecules {
                 .tolerances = {},          // Empty - use defaults
                 .atom_count = 66
             }
+        },
+        // Claude Generated (April 2026): Water dimer for HB gradient tests
+        {
+            "H2O_dimer", {
+                .name = "H2O_dimer",
+                .description = "Water dimer — tests hydrogen bond gradient",
+                .category = "dimers",
+                .atoms = {
+                    {8, Eigen::Vector3d( 0.000,  0.000,  0.119)},  // O donor
+                    {1, Eigen::Vector3d( 0.000,  0.757, -0.477)},  // H
+                    {1, Eigen::Vector3d( 0.000, -0.757, -0.477)},  // H
+                    {8, Eigen::Vector3d( 0.000,  0.000,  2.919)},  // O acceptor
+                    {1, Eigen::Vector3d( 0.000,  0.757,  3.515)},  // H
+                    {1, Eigen::Vector3d( 0.000, -0.757,  3.515)}   // H
+                },
+                .reference_energies = {},
+                .tolerances = {},
+                .atom_count = 6
+            }
         }
     };
 
     const MoleculeData& TestMoleculeRegistry::getMolecule(const std::string& name) {
         auto it = s_molecule_registry.find(name);
         if (it == s_molecule_registry.end()) {
-            throw std::invalid_argument("Molecule '" + name + "' not found in registry. Available molecules: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, O3, monosaccharide, triose");
+            throw std::invalid_argument("Molecule '" + name + "' not found in registry. Available molecules: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, H2O_dimer, O3, monosaccharide, triose. Note: 'polymer' is xyz-path-only (1410 atoms — too large to inline).");
         }
         return it->second;
     }
@@ -364,7 +384,7 @@ namespace TestMolecules {
             for (const auto& pair : s_xyz_paths) {
                 if (name == pair.second) return pair.second;
             }
-            throw std::invalid_argument("XYZ path for molecule '" + name + "' not found. Available: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, O3, monosaccharide, triose");
+            throw std::invalid_argument("XYZ path for molecule '" + name + "' not found. Available: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, O3, monosaccharide, triose, polymer");
         }
         return it->second;
     }

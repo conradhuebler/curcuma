@@ -206,6 +206,10 @@ public:
     /// Claude Generated (Mar 2026): Expose thread pool for Phase-A sub-task parallelisation
     CxxThreadPool* threadPool() const { return m_threadpool; }
 
+    /// Claude Generated (April 2026): Set unit cell for PBC minimum image convention
+    /// cell_angstrom: 3×3 matrix (Angstrom); converted to Bohr internally for thread distribution
+    void setUnitCell(const Eigen::Matrix3d& cell_angstrom, bool has_pbc);
+
 private:
     void AutoRanges();
     void setBonds(const json& bonds);
@@ -286,6 +290,7 @@ private:
     // Phase 4.2: GFN-FF pairwise non-bonded storage (Claude Generated 2025)
     std::vector<GFNFFDispersion> m_gfnff_dispersions;
     std::vector<GFNFFDispersion> m_d4_dispersions;  // Claude Generated - Dec 25, 2025: Native D4 dispersion pairs
+    std::vector<D3DispersionPair> m_d3_pairs;        // Claude Generated - Apr 2026: P1c — Separate D3 storage
     std::vector<GFNFFRepulsion> m_gfnff_bonded_repulsions;
     std::vector<GFNFFRepulsion> m_gfnff_nonbonded_repulsions;
     std::vector<GFNFFCoulomb> m_gfnff_coulombs;
@@ -350,6 +355,12 @@ private:
     std::string m_auto_param_file; // Auto-detected parameter file path
     bool m_enable_caching = true; // Can be disabled for multi-threading
     bool m_in_setParameter = false; // Claude Generated: Recursive guard for setParameter()
+
+    // Claude Generated (April 2026): Periodic Boundary Conditions
+    // Unit cell in Bohr (ForceField internal units); propagated to threads in AutoRanges()
+    Eigen::Matrix3d m_unit_cell_bohr = Eigen::Matrix3d::Identity();
+    Eigen::Matrix3d m_unit_cell_bohr_inv = Eigen::Matrix3d::Identity();
+    bool m_has_pbc = false;
 
     // Claude Generated (March 2026): FFWorkspace for UFF/QMDFF (replaces ForceFieldThread path)
     std::unique_ptr<FFWorkspace> m_workspace;

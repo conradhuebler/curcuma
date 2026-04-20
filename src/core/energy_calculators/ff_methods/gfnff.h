@@ -24,6 +24,7 @@
 
 #include "json.hpp"
 #include "src/core/config_manager.h"
+#include "src/core/parameter_macros.h"
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
 
 #include "src/core/energy_calculators/ff_methods/ff_workspace.h"  // Claude Generated (Mar 2026): Unified workspace
@@ -96,6 +97,16 @@ inline bool isMetalAtom(int atomic_number) {
            (atomic_number >= 57 && atomic_number <= 80) ||   // La-Hg
            (atomic_number >= 89 && atomic_number <= 103);    // Ac-Lr
 }
+
+// P2b (Apr 2026): CN cutoff parameters — configurable via CLI
+// Three modes:
+//   cn_cutoff_bohr > 0: Neighbor-list mode (default 6.0 Bohr, fast O(N*k))
+//   cn_cutoff_bohr = 0, cn_accuracy > 0: Fortran accuracy-based threshold (cnthr = 100 - log10(acc)*50)
+//   cn_cutoff_bohr = 0, cn_accuracy = 0: Full O(N²) reference mode (no cutoff)
+BEGIN_PARAMETER_DEFINITION(gfnff)
+PARAM(cn_cutoff_bohr, Double, 6.0, "CN neighbor list cutoff radius in Bohr. 0 = use accuracy-based threshold instead.", "Advanced", {})
+PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
+END_PARAMETER_DEFINITION
 
 class GFNFF {
 public:
@@ -170,8 +181,7 @@ public:
      */
     struct GFNFFDynamicState {
         Vector coordination_numbers;                             // D3 CN (geometry-dependent)
-        Eigen::MatrixXd distance_matrix;                         // N×N distances in Bohr
-        Eigen::MatrixXd squared_dist_matrix;                     // N×N squared distances
+        Eigen::MatrixXd distance_matrix;                         // N×N distances in Bohr (only for initial topology, not per-step)
     };
 
     /**
@@ -625,6 +635,10 @@ public:
 
     // Claude Generated (March 2026): Phase 2 GPU dc6dcn — expose D4 internals
     D4ParameterGenerator* getD4Generator() { return m_d4_generator.get(); }
+
+    // Claude Generated (Apr 2026): P1a — Delegate CN-change threshold check to D4ParameterGenerator
+    bool canSkipD4GaussianWeightsUpdate(const std::vector<double>& cn) const;
+    void recordD4CNValues(const std::vector<double>& cn);
 
     /**
      * @brief Set external CN values (from GPU computation).
@@ -1387,12 +1401,13 @@ private:
      *
      * Returns the number of atoms within 20 Bohr (≈10.58 Å) of the given atom.
      * This is used for bond fcn correction factors in GFN-FF.
+     * P2a (April 2026): Now uses on-the-fly distance computation instead of N×N matrix.
      *
      * @param atom_index Index of atom to count neighbors for
-     * @param distance_matrix N×N distance matrix in Bohr
+     * @param geometry_bohr N×3 geometry matrix in Bohr
      * @return Number of neighbors within 20 Bohr cutoff
      */
-    int countNeighborsWithin20Bohr(int atom_index, const Eigen::MatrixXd& distance_matrix) const;
+    int countNeighborsWithin20Bohr(int atom_index, const Eigen::MatrixXd& geometry_bohr) const;
 
     /**
      * @brief Calculate simplified π-bond orders for all atom pairs
@@ -1420,7 +1435,7 @@ private:
      * @param hybridization Hybridization state per atom
      * @param pi_fragments Pi-system fragment IDs
      * @param charges EEQ atomic charges (needed for full Hückel)
-     * @param distances N×N distance matrix in Bohr (needed for full Hückel)
+     * @param geometry_bohr N×3 geometry matrix in Bohr (P2a: replaces distance matrix)
      * @return Vector of π-bond orders in triangular format (access via lin(i,j))
      */
     std::vector<double> calculatePiBondOrders(
@@ -1428,7 +1443,7 @@ private:
         const std::vector<int>& hybridization,
         const std::vector<int>& pi_fragments,
         const std::vector<double>& charges = {},
-        const Eigen::MatrixXd& distances = Eigen::MatrixXd()) const;
+        const Eigen::MatrixXd& geometry_bohr = Eigen::MatrixXd()) const;
 
     /**
      * @brief Calculate EEQ electrostatic energy
@@ -1665,6 +1680,13 @@ public:
      * Claude Generated (Jan 17, 2026): Batm energy accessor for 1,4-pairs
      */
     double BatmEnergy() const;
+
+    // Claude Generated (April 2026): PBC accessors for GPU path
+    bool hasPBC() const { return m_has_pbc; }
+    Eigen::Matrix3d getUnitCellBohr() const {
+        constexpr double ANG2BOHR = 1.0 / 0.529177210903;
+        return m_unit_cell * ANG2BOHR;
+    }
 
     /**
      * @brief Get hydrogen bond energy component
@@ -2079,6 +2101,10 @@ private:
     bool m_comparing_gradients = false; ///< Guard to prevent recursion in compareGradients
     bool m_skip_eeq_recalc = false; ///< Skip Phase-2 EEQ recalculation (for charge injection diagnostic)
     bool m_rep_diag = false; ///< Dump repulsion alphanb diagnostic
+
+    // Claude Generated (April 2026): Periodic Boundary Conditions
+    bool m_has_pbc = false;                                              ///< PBC active flag
+    Eigen::Matrix3d m_unit_cell = Eigen::Matrix3d::Identity();          ///< Unit cell (Angstrom, from Mol)
 
     double m_energy_total; ///< Total energy in Hartree
     Vector m_charges; ///< Atomic partial charges

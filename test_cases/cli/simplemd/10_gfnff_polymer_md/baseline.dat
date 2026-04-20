@@ -1,0 +1,23 @@
+# GFN-FF Polymer MD Baseline — 1000 steps, 1410 atoms
+# Fields: timestamp | git_hash | method | threads | wall_s | ms_per_step | quality | note
+# ---
+2026-04-11 17:50:30 | 1c27621 | gfnff | threads=4 | 157.70s | 157.7ms/step | ok | pre_optimization_baseline
+2026-04-11 17:53:08 | 1c27621 | xtb-gfnff | threads=4 | 422.07s | 422.1ms/step | ok | pre_optimization_baseline
+2026-04-11 18:01:44 | 1c27621 | gfnff-gpu | threads=4 | 30.02s | 30.0ms/step | ok | pre_optimization_baseline
+2026-04-11 19:40:43 | a41f31b | gfnff | threads=4 | 155.79s | 155.8ms/step | ok | after_P1a_d4_threshold  [vs 1c27621 speedup=1.01x]
+2026-04-11 19:43:45 | a41f31b | gfnff-gpu | threads=4 | 29.27s | 29.3ms/step | ok | after_P1a_d4_threshold_gpu  [vs 1c27621 speedup=1.03x]
+2026-04-11 20:05:00 | a41f31b | gfnff | threads=4 | 156.28s | 156.3ms/step | ok | P1a_threshold_0.0
+2026-04-11 20:07:57 | a41f31b | gfnff | threads=4 | 157.58s | 157.6ms/step | ok | P1a_threshold_0.01
+2026-04-11 20:10:34 | a41f31b | gfnff | threads=4 | 156.79s | 156.8ms/step | ok | P1a_threshold_0.05
+2026-04-11 20:13:10 | a41f31b | gfnff | threads=4 | 155.17s | 155.2ms/step | ok | P1a_threshold_0.1
+2026-04-11 20:52:47 | d75048e | gfnff | threads=4 | 157.85s | 157.9ms/step | ok | after_P1c_disp_struct_shrink  [vs 1c27621 speedup=1.00x]
+2026-04-11 21:10:00 | d75048e | gfnff | threads=4 | 157.85s | 157.9ms/step | ok | after_P1c_disp_struct_shrink
+2026-04-11 22:29:24 | cd581be | gfnff | threads=4 | 31.70s | 31.7ms/step | bad | after_P1b_round_robin_INVALID_TIMING
+2026-04-12 | cd581be | gfnff | threads=4 | 151.1s | 151.1ms/step | ok | after_P1b_round_robin  [vs 1c27621 speedup=1.04x]
+2026-04-12 | 31d0e7e | gfnff | threads=4 | 150.5s | 150.5ms/step | ok | after_P2a_distance_matrix_elimination  [vs 1c27621 speedup=1.05x]
+2026-04-12 | c2c6b03 | gfnff | threads=4 | 146.6s | 146.6ms/step | ok | after_P2b_neighbor_list_6bohr  [vs 1c27621 speedup=1.08x]
+2026-04-12 01:38:07 | 47851af | gfnff | threads=4 | 159.78s | 159.8ms/step | ok | after_P3a_P3b  [vs 1c27621 speedup=0.99x]
+2026-04-12 02:01:55 | b0356ee | gfnff-gpu | threads=4 | 19.99s | 20.0ms/step | ok | after_G1a_pair_sorting_ldg  [vs 1c27621 speedup=1.50x]
+2026-04-12 11:16:51 | 8fdaf90 | gfnff-gpu | threads=4 | 18.96s | 19.0ms/step | ok | after_G2a_launch_bounds_heavy  [vs 1c27621 speedup=1.58x]
+2026-04-12 11:17:27 | 8fdaf90 | gfnff | threads=4 | 148.82s | 148.8ms/step | ok | after_G2a_launch_bounds_heavy  [vs 1c27621 speedup=1.06x]
+2026-04-12 11:35:26 | ccefa22 | gfnff-gpu | threads=4 | 19.04s | 19.0ms/step | ok | after_G1c_pair_sorting  [vs 1c27621 speedup=1.58x]
