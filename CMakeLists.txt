@@ -154,17 +154,17 @@ set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
 
 
-include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
-                            ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include
-                            ${PROJECT_SOURCE_DIR}/external/ripser
+include_directories(SYSTEM  ${CMAKE_SOURCE_DIR}/external/fmt/include
+                            ${CMAKE_SOURCE_DIR}/external/LBFGSpp/include
+                            ${CMAKE_SOURCE_DIR}/external/ripser
                             ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
-                            ${PROJECT_SOURCE_DIR}/external/cpp-d4/include
+                            ${CMAKE_SOURCE_DIR}/external/cpp-d4/include
                             ${PROJECT_SOURCE_DIR}/external/
-                            ${PROJECT_SOURCE_DIR}/external/ulysses-main/src/
+                            ${CMAKE_SOURCE_DIR}/external/ulysses-main/src/
                             )
 
 
-include_directories(${PROJECT_SOURCE_DIR} ${PROJECT_BINARY_DIR} )
+include_directories(${CMAKE_SOURCE_DIR} ${PROJECT_SOURCE_DIR} ${PROJECT_BINARY_DIR} )
 
 # Get the current working branch
 execute_process(
