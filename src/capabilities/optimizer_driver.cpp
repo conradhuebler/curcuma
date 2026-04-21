@@ -374,6 +374,12 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
                     rmsd_change, new_gradient.norm(), step_time);
             }
 
+            // Per-step notification: interactive visualization, early stopping
+            if (m_step_callback && !m_step_callback(m_current_iteration, m_molecule, m_current_energy)) {
+                m_convergence_reason = "Stopped by step observer";
+                break;
+            }
+
             // Check convergence
             if (checkConvergence(energy_change_kjmol, rmsd_change, new_gradient.norm()) && CheckMethodSpecificConvergence()) {
                 m_converged = true;
