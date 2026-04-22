@@ -57,7 +57,6 @@ bool GFNFFComputationalMethod::updateGeometry(const Matrix& geometry) {
 double GFNFFComputationalMethod::calculateEnergy(bool gradient) {
     CitationRegistry::cite("gfnff");
     CitationRegistry::cite("d4", "gfnff");
-    CitationRegistry::cite("h4", "gfnff");
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== GFNFFComputationalMethod::calculateEnergy() START ===");
     }

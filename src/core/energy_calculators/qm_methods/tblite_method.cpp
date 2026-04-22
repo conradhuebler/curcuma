@@ -50,7 +50,6 @@ TBLiteMethod::TBLiteMethod(const std::string& method_name, const json& config)
 bool TBLiteMethod::setMolecule(const Mol& mol) {
     m_molecule = mol;
     m_initialized = true;
-    CurcumaLogger::addCitation("tblite");
 #ifdef USE_TBLITE
     return m_tblite->InitialiseMolecule(mol);
 #else
@@ -70,6 +69,9 @@ double TBLiteMethod::calculateEnergy(bool gradient)
 {
 #ifdef USE_TBLITE
     CitationRegistry::cite("tblite");
+    if (m_method_name.find("gfn2") != std::string::npos) CitationRegistry::cite("gfn2", "tblite");
+    else if (m_method_name.find("gfn1") != std::string::npos) CitationRegistry::cite("gfn1", "tblite");
+    else if (m_method_name.find("ipea1") != std::string::npos) CitationRegistry::cite("ipea1", "tblite");
     m_last_energy = m_tblite->Calculation(gradient);
     m_calculation_done = true;
     return m_last_energy;

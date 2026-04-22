@@ -47,6 +47,11 @@ double DispersionMethod::calculateEnergy(bool gradient)
 {
     if (m_dispersion) {
         CitationRegistry::cite(m_method_name); // "d3" or "d4"
+        if (m_method_name == "d3") {
+            CitationRegistry::cite("sdftd3", "d3");
+        } else if (m_method_name == "d4") {
+            CitationRegistry::cite("dftd4", "d4");
+        }
         m_last_energy = m_dispersion->Calculation(gradient);
         m_calculation_done = true;
         return m_last_energy;

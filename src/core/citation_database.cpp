@@ -40,7 +40,8 @@ const std::unordered_map<std::string, CitationData>& database()
             "  year = {2020},\n"
             "  volume = {10},\n"
             "  pages = {e01493},\n"
-            "  doi = {10.1002/wcms.1493}\n"
+            "  doi = {10.1002/wcms.1493},\n"
+            "  url = {https://github.com/grimme-lab/xtb}\n"
             "}"
         }},
 
@@ -76,9 +77,24 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        { "ipea1", {
+            "IPEA1-xTB — Ionization Potential Extended Tight-Binding",
+            "Asgeirsson, V. et al., Chem. Sci. 2017, 8, 4879–4895 (DOI: 10.1039/C7SC00601B)",
+            "asgeirsson2017ipea1",
+            "@article{asgeirsson2017ipea1,\n"
+            "  author = {Ásgeirsson, Vilhjálmur and Bauer, Christoph A. and Grimme, Stefan},\n"
+            "  title = {Quantum chemical calculation of electron ionization mass spectra for general organic and inorganic molecules},\n"
+            "  journal = {Chem. Sci.},\n"
+            "  year = {2017},\n"
+            "  volume = {8},\n"
+            "  pages = {4879--4895},\n"
+            "  doi = {10.1039/C7SC00601B}\n"
+            "}"
+        }},
+
         { "tblite", {
             "TBLite — Tight-Binding Lite",
-            "Sebastian Ehlert, TBLite library (DOI: 10.5281/zenodo.7511769)",
+            "Ehlert, S. TBLite library (DOI: 10.5281/zenodo.7511769, https://github.com/tblite/tblite)",
             "ehlert2022tblite",
             "@software{ehlert2022tblite,\n"
             "  author = {Ehlert, Sebastian},\n"
@@ -105,12 +121,149 @@ const std::unordered_map<std::string, CitationData>& database()
         }},
 
         { "ulysses", {
-            "Ulysses — Semi-empirical QM methods",
-            "Ulysses semi-empirical quantum chemistry package",
+            "Ulysses — Semi-empirical QM methods (PM3, AM1, MNDO, PM6, ...)",
+            "Ulysses semi-empirical quantum chemistry library by siriius (https://gitlab.com/siriius/ulysses)",
             "ulysses",
             "@software{ulysses,\n"
-            "  title = {Ulysses — Semi-empirical quantum chemistry},\n"
-            "  url = {https://gitlab.com/siriius/ulysses}\n"
+            "  author = {siriius},\n"
+            "  title = {Ulysses — Semi-empirical quantum chemistry library},\n"
+            "  year = {2024},\n"
+            "  url = {https://gitlab.com/siriius/ulysses},\n"
+            "  note = {Provides PM3, AM1, MNDO, MNDO/d, PM6, RM1, PDDG/PM3, PDDG/MNDO, and GFN2-xTB}\n"
+            "}"
+        }},
+
+        // === Semi-empirical methods (cited as sub-references of "ulysses") ===
+        { "pm6", {
+            "PM6 — Parametric Method 6",
+            "Stewart, J. J. P. J. Mol. Model. 2007, 13, 1173–1213 (DOI: 10.1007/s00894-007-0233-4)",
+            "stewart2007pm6",
+            "@article{stewart2007pm6,\n"
+            "  author = {Stewart, James J. P.},\n"
+            "  title = {Optimization of parameters for semiempirical methods {V}: Modification of {NDDO} approximations and application to 70 elements},\n"
+            "  journal = {J. Mol. Model.},\n"
+            "  year = {2007},\n"
+            "  volume = {13},\n"
+            "  pages = {1173--1213},\n"
+            "  doi = {10.1007/s00894-007-0233-4}\n"
+            "}"
+        }},
+
+        { "pm3", {
+            "PM3 — Parametric Method 3",
+            "Stewart, J. J. P. J. Comput. Chem. 1989, 10, 209–264 (DOI: 10.1002/jcc.540100208, 10.1002/jcc.540100209)",
+            "stewart1989pm3",
+            "@article{stewart1989pm3a,\n"
+            "  author = {Stewart, James J. P.},\n"
+            "  title = {Optimization of parameters for semiempirical methods {I}. Method},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {1989},\n"
+            "  volume = {10},\n"
+            "  pages = {209--220},\n"
+            "  doi = {10.1002/jcc.540100208}\n"
+            "}\n"
+            "@article{stewart1989pm3b,\n"
+            "  author = {Stewart, James J. P.},\n"
+            "  title = {Optimization of parameters for semiempirical methods {II}. Applications},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {1989},\n"
+            "  volume = {10},\n"
+            "  pages = {221--264},\n"
+            "  doi = {10.1002/jcc.540100209}\n"
+            "}"
+        }},
+
+        { "am1", {
+            "AM1 — Austin Model 1",
+            "Dewar, M. J. S. et al., J. Am. Chem. Soc. 1985, 107, 3902–3909 (DOI: 10.1021/ja00299a024)",
+            "dewar1985am1",
+            "@article{dewar1985am1,\n"
+            "  author = {Dewar, Michael J. S. and Zoebisch, Eve G. and Healy, Eamonn F.\n"
+            "            and Stewart, James J. P.},\n"
+            "  title = {Development and use of quantum mechanical molecular models. 76. {AM1}: a new general purpose quantum mechanical molecular model},\n"
+            "  journal = {J. Am. Chem. Soc.},\n"
+            "  year = {1985},\n"
+            "  volume = {107},\n"
+            "  pages = {3902--3909},\n"
+            "  doi = {10.1021/ja00299a024}\n"
+            "}"
+        }},
+
+        { "mndo", {
+            "MNDO — Modified Neglect of Diatomic Overlap",
+            "Dewar, M. J. S.; Thiel, W. J. Am. Chem. Soc. 1977, 99, 4899–4907 (DOI: 10.1021/ja00457a004)",
+            "dewar1977mndo",
+            "@article{dewar1977mndo,\n"
+            "  author = {Dewar, Michael J. S. and Thiel, Walter},\n"
+            "  title = {Ground States of Molecules. 38. The {MNDO} Method. Approximations and Parameters},\n"
+            "  journal = {J. Am. Chem. Soc.},\n"
+            "  year = {1977},\n"
+            "  volume = {99},\n"
+            "  pages = {4899--4907},\n"
+            "  doi = {10.1021/ja00457a004}\n"
+            "}"
+        }},
+
+        { "mndod", {
+            "MNDO/d — MNDO with d Orbitals",
+            "Thiel, W.; Voityuk, A. A. J. Phys. Chem. 1996, 100, 616–626 (DOI: 10.1021/jp952148o)",
+            "thiel1996mndod",
+            "@article{thiel1996mndod,\n"
+            "  author = {Thiel, Walter and Voityuk, Alexander A.},\n"
+            "  title = {Extension of {MNDO} to d Orbitals: Parameters and Results for the Second-Row Elements and for the Zinc Group},\n"
+            "  journal = {J. Phys. Chem.},\n"
+            "  year = {1996},\n"
+            "  volume = {100},\n"
+            "  pages = {616--626},\n"
+            "  doi = {10.1021/jp952148o}\n"
+            "}"
+        }},
+
+        { "rm1", {
+            "RM1 — Recife Model 1 (reparameterized AM1)",
+            "Rocha, G. B. et al., J. Comput. Chem. 2006, 27, 1101–1111 (DOI: 10.1002/jcc.20425)",
+            "rocha2006rm1",
+            "@article{rocha2006rm1,\n"
+            "  author = {Rocha, Gerd B. and Freire, Ricardo O. and Simas, Alfredo M.\n"
+            "            and Stewart, James J. P.},\n"
+            "  title = {{RM1}: A Reparameterization of {AM1} for {H}, {C}, {N}, {O}, {P}, {S}, {F}, {Cl}, {Br}, and {I}},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {2006},\n"
+            "  volume = {27},\n"
+            "  pages = {1101--1111},\n"
+            "  doi = {10.1002/jcc.20425}\n"
+            "}"
+        }},
+
+        { "pm3pddg", {
+            "PDDG/PM3 — Pairwise Distance Directed Gaussian / PM3",
+            "Repasky, M. P. et al., J. Comput. Chem. 2002, 23, 1601–1622 (DOI: 10.1002/jcc.10162)",
+            "repasky2002pddg",
+            "@article{repasky2002pddg,\n"
+            "  author = {Repasky, Matthew P. and Chandrasekhar, Jayaraman\n"
+            "            and Jorgensen, William L.},\n"
+            "  title = {{PDDG/PM3} and {PDDG/MNDO}: Improved semiempirical methods},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {2002},\n"
+            "  volume = {23},\n"
+            "  pages = {1601--1622},\n"
+            "  doi = {10.1002/jcc.10162}\n"
+            "}"
+        }},
+
+        { "mndopddg", {
+            "PDDG/MNDO — Pairwise Distance Directed Gaussian / MNDO",
+            "Repasky, M. P. et al., J. Comput. Chem. 2002, 23, 1601–1622 (DOI: 10.1002/jcc.10162)",
+            "repasky2002pddg",
+            "@article{repasky2002pddg,\n"
+            "  author = {Repasky, Matthew P. and Chandrasekhar, Jayaraman\n"
+            "            and Jorgensen, William L.},\n"
+            "  title = {{PDDG/PM3} and {PDDG/MNDO}: Improved semiempirical methods},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {2002},\n"
+            "  volume = {23},\n"
+            "  pages = {1601--1622},\n"
+            "  doi = {10.1002/jcc.10162}\n"
             "}"
         }},
 
@@ -130,6 +283,18 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        { "sdftd3", {
+            "s-dftd3 — Simple DFT-D3 Library",
+            "Ehlert, S.; Grimme, S. s-dftd3 library (https://github.com/dftd3/simple-dftd3)",
+            "ehlert2022sdftd3",
+            "@software{ehlert2022sdftd3,\n"
+            "  author = {Ehlert, Sebastian and Grimme, Stefan},\n"
+            "  title = {s-dftd3 — Simple reimplementation of the {DFT-D3} method},\n"
+            "  year = {2022},\n"
+            "  url = {https://github.com/dftd3/simple-dftd3}\n"
+            "}"
+        }},
+
         { "d4", {
             "DFT-D4 Dispersion Correction",
             "Caldeweyher, E. et al., J. Chem. Phys. 2019, 150, 154122 (DOI: 10.1063/1.5090222)",
@@ -146,16 +311,31 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        { "dftd4", {
+            "dftd4 — D4 Dispersion Library",
+            "Ehlert, S.; Grimme, S. dftd4 library (DOI: 10.5281/zenodo.11614401, https://github.com/dftd4/dftd4)",
+            "ehlert2024dftd4",
+            "@software{ehlert2024dftd4,\n"
+            "  author = {Ehlert, Sebastian and Grimme, Stefan},\n"
+            "  title = {dftd4 — Generally applicable atomic-charge dependent London dispersion correction},\n"
+            "  year = {2024},\n"
+            "  doi = {10.5281/zenodo.11614401},\n"
+            "  url = {https://github.com/dftd4/dftd4}\n"
+            "}"
+        }},
+
         { "h4", {
             "H4 Hydrogen/Halogen Bond Correction",
-            "Grimme, S. et al., J. Chem. Theory Comput. 2018 (DOI: 10.26434/chemrxiv.8326202)",
-            "grimme2018h4",
-            "@article{grimme2018h4,\n"
-            "  author = {Grimme, Stefan and Hansen, Andreas and Spicher, Sebastian\n"
-            "            and Ehlert, Sebastian and Pracht, Philipp},\n"
-            "  title = {Comprehensive theoretical chemistry: A robust and efficient scheme for quantum chemical treatment of huge molecules},\n"
-            "  year = {2018},\n"
-            "  doi = {10.26434/chemrxiv.8326202}\n"
+            "Rezac, J.; Hobza, P. J. Chem. Theory Comput. 2012, 8, 141-151 (DOI: 10.1021/ct200751e)",
+            "rezac2012h4",
+            "@article{rezac2012h4,\n"
+            "  author = {Řezáč, Jan and Hobza, Pavel},\n"
+            "  title = {Advanced Corrections of Hydrogen Bonding and Dispersion for Semiempirical Quantum Chemical Methods},\n"
+            "  journal = {J. Chem. Theory Comput.},\n"
+            "  year = {2012},\n"
+            "  volume = {8},\n"
+            "  pages = {141--151},\n"
+            "  doi = {10.1021/ct200751e}\n"
             "}"
         }},
 
@@ -166,12 +346,24 @@ const std::unordered_map<std::string, CitationData>& database()
             "spicher2020gfnff",
             "@article{spicher2020gfnff,\n"
             "  author = {Spicher, Sebastian and Grimme, Stefan},\n"
-            "  title = {Single-Point Hessian Method for Fast and Accurate Uncertainty Quantification in Computational Chemistry},\n"
+            "  title = {{GFN-FF}: A General Force Field for Accurate Quantum-Chemical Calculations},\n"
             "  journal = {Angew. Chem. Int. Ed.},\n"
             "  year = {2020},\n"
             "  volume = {59},\n"
             "  pages = {15665--15673},\n"
             "  doi = {10.1002/anie.202004239}\n"
+            "}"
+        }},
+
+        { "gfnff_ext", {
+            "GFN-FF Fortran Library (external)",
+            "Pracht, P. et al. GFN-FF Fortran implementation (https://github.com/pprcht/gfnff)",
+            "pracht2024gfnff",
+            "@software{pracht2024gfnff,\n"
+            "  author = {Pracht, Philipp and Grimme, Stefan and Spicher, Sebastian},\n"
+            "  title = {{GFN-FF} — General Force Field Fortran implementation},\n"
+            "  year = {2024},\n"
+            "  url = {https://github.com/pprcht/gfnff}\n"
             "}"
         }},
 
@@ -416,16 +608,28 @@ const std::unordered_map<std::string, CitationData>& database()
         // === ORCA interface ===
         { "orca", {
             "ORCA — Quantum Chemistry Package",
-            "Neese, F. WIREs Comput. Mol. Sci. 2012, 2, 73–78 (DOI: 10.1002/wcms.79)",
-            "neese2012orca",
-            "@article{neese2012orca,\n"
+            "Neese, F. WIREs Comput. Mol. Sci. 2024, 14, e1692 (DOI: 10.1002/wcms.1692); "
+            "Neese, F. et al., J. Chem. Phys. 2020, 152, 224108 (DOI: 10.1063/5.0005356)",
+            "neese2024orca",
+            "@article{neese2024orca,\n"
             "  author = {Neese, Frank},\n"
-            "  title = {The ORCA program system},\n"
+            "  title = {Software update: the {ORCA} program system, version 5.0},\n"
             "  journal = {WIREs Comput. Mol. Sci.},\n"
-            "  year = {2012},\n"
-            "  volume = {2},\n"
-            "  pages = {73--78},\n"
-            "  doi = {10.1002/wcms.79}\n"
+            "  year = {2024},\n"
+            "  volume = {14},\n"
+            "  pages = {e1692},\n"
+            "  doi = {10.1002/wcms.1692},\n"
+            "  url = {https://github.com/orca/orca}\n"
+            "}\n"
+            "@article{neese2020orca,\n"
+            "  author = {Neese, Frank and Wennmohs, Frank and Becker, Ute\n"
+            "            and Riplinger, Christoph},\n"
+            "  title = {The {ORCA} quantum chemistry program package},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2020},\n"
+            "  volume = {152},\n"
+            "  pages = {224108},\n"
+            "  doi = {10.1063/5.0005356}\n"
             "}"
         }},
     };
