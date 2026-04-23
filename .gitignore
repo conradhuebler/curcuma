@@ -194,3 +194,4 @@ external/xtb/
 external/plumed2/
 external/ulysses-main/
 external/ulysses.zip
+src/version.h
