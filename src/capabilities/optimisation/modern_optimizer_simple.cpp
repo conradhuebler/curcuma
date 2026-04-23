@@ -143,7 +143,7 @@ std::map<std::string, std::string> ModernOptimizerDispatcher::getAvailableOptimi
         { "ancopt", "Approximate Normal Coordinate Optimizer from XTB (Stefan Grimme) - Claude Nov 2025" },
         { "new_lbfgspp", "New OptimizerFactory-based LBFGSpp implementation - Claude Nov 2025" },
         { "lbfgspp", "External LBFGSpp library - robust L-BFGS implementation" },
-        { "internal", "Internal LBFGS implementation - custom features (placeholder)" },
+        { "internal", "Internal LBFGS implementation - custom features (experimental, not tested)" },
         { "lbfgs", "Native L-BFGS implementation (Claude 3.5 generated)" },
         { "diis", "Native DIIS with L-BFGS fallback (Claude 3.5 generated)" },
         { "rfo", "Native Rational Function Optimization (Claude 3.5 generated)" },
