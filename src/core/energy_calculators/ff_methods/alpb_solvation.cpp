@@ -11,6 +11,7 @@
 
 #include "alpb_solvation.h"
 #include "alpb_parameters.h"
+#include "src/core/citation_registry.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
 
@@ -921,6 +922,11 @@ void ALPBSolvation::addADetDeriv(const Matrix& xyz_bohr, double kEps_alpbet,
 
 double ALPBSolvation::getEnergy(const Vector& charges) const
 {
+    CitationRegistry::cite("alpb");
+    CitationRegistry::cite("lebedev", "alpb");
+    CitationRegistry::cite("still_gb", "alpb");
+    CitationRegistry::cite("p16", "alpb");
+    CitationRegistry::cite("obc2", "alpb");
     ALPBEnergyParts parts = getEnergyParts(charges);
     return parts.total();
 }

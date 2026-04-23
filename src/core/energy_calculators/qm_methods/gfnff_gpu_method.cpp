@@ -212,6 +212,13 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
 {
     CitationRegistry::cite("gfnff");
     CitationRegistry::cite("d4", "gfnff");
+    CitationRegistry::cite("eeq", "gfnff");
+    CitationRegistry::cite("pyykko", "gfnff");
+    CitationRegistry::cite("sanderson", "gfnff");
+    CitationRegistry::cite("ghosh_islam", "gfnff");
+    CitationRegistry::cite("atm", "d3");
+    CitationRegistry::cite("bj", "d3");
+    CitationRegistry::cite("casimir_polder", "d4");
     if (!m_initialized || !m_gfnff || !m_gpu_workspace) {
         CurcumaLogger::error("GFNFFGPUMethod: not initialized");
         return 0.0;

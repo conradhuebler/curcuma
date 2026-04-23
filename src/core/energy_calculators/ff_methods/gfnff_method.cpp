@@ -434,10 +434,6 @@ bool GFNFF::InitialiseMolecule()
 
     m_initialized = true;
 
-    // Claude Generated (April 2026): Method citations
-    CurcumaLogger::addCitation("gfnff");
-    CurcumaLogger::addCitation("d4");
-
     // Claude Generated (Mar 2026): Initialize ALPB solvation if solvent specified
     // Reference: Fortran gbsa.f90 — newBornModel() called during init
     if (m_parameters.contains("solvent")) {

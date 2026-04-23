@@ -84,6 +84,13 @@ double ExternalGFNFFMethod::calculateEnergy(bool gradient)
     CitationRegistry::cite("gfnff");
     CitationRegistry::cite("gfnff_ext", "gfnff");
     CitationRegistry::cite("d4", "gfnff");
+    CitationRegistry::cite("eeq", "gfnff");
+    CitationRegistry::cite("pyykko", "gfnff");
+    CitationRegistry::cite("sanderson", "gfnff");
+    CitationRegistry::cite("ghosh_islam", "gfnff");
+    CitationRegistry::cite("atm", "d3");
+    CitationRegistry::cite("bj", "d3");
+    CitationRegistry::cite("casimir_polder", "d4");
     if (!m_initialized) {
         CurcumaLogger::error("External GFN-FF method not initialized - call setMolecule() first");
         return 0.0;
