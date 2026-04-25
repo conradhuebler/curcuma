@@ -202,6 +202,10 @@ void FFWorkspace::setCoulombSelfEnergyParams(const Vector& chi_base, const Vecto
 
 double FFWorkspace::calculate(bool gradient)
 {
+    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
+    auto t_calc_start = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
+    double t_execute = 0.0, t_reduce = 0.0, t_post = 0.0;
+
     m_do_gradient = gradient;
 
     // Select execute function based on method type
@@ -214,6 +218,7 @@ double FFWorkspace::calculate(bool gradient)
             executeGFNFF(t);
     };
 
+    auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (m_num_threads == 1) {
         // T=1: Direct call, zero pool overhead
         m_accumulators[0].reset(m_natoms, gradient, m_store_components);
@@ -252,9 +257,19 @@ double FFWorkspace::calculate(bool gradient)
             f.get();
 
         reduce();
+        if (do_timing) {
+            t_reduce = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count() - t_execute;
+        }
+    }
+    if (do_timing) {
+        t_execute = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
     }
 
+    t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     postProcess(gradient);
+    if (do_timing) {
+        t_post = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    }
 
     // CPU ENERGY TERMS (verbosity >= 3)
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -273,6 +288,13 @@ double FFWorkspace::calculate(bool gradient)
         fmt::print("  hbond     = {:+.15e}\n", m_result_energy.hbond);
         fmt::print("  xbond     = {:+.15e}\n", m_result_energy.xbond);
         CurcumaLogger::info("=== CPU ENERGY END ===");
+    }
+
+    if (do_timing) {
+        double t_total = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_calc_start).count();
+        CurcumaLogger::info(fmt::format(
+            "FFWorkspace calculate: total={:.1f}ms execute={:.1f}ms reduce={:.1f}ms postProcess={:.1f}ms",
+            t_total, t_execute, t_reduce, t_post));
     }
 
     return m_e0 + m_result_energy.total();
@@ -373,10 +395,15 @@ void FFWorkspace::reduce()
 
 void FFWorkspace::postProcess(bool gradient)
 {
+    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
+    auto t_post_start = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
+    double t_self_energy = 0.0, t_chainrule = 0.0;
+
     // =========================================================================
     // Coulomb TERM 2+3: Self-energy (sequential, thread-count-independent)
     // Reference: Fortran gfnff_engrad.F90:1678-1679
     // =========================================================================
+    auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (m_coul_gam.size() == m_natoms && m_eeq_charges.size() == m_natoms) {
         const double sqrt_2_over_pi = 0.797884560802865;
         const bool has_cn = (m_cn.size() == m_natoms);
@@ -401,11 +428,15 @@ void FFWorkspace::postProcess(bool gradient)
             CurcumaLogger::info(fmt::format("  Coulomb self-energy (workspace): EN={:+.12f}, Self={:+.12f} Eh", E_en, E_self));
         }
     }
+    if (do_timing) {
+        t_self_energy = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    }
 
     // =========================================================================
     // dEdcn chain-rule gradient + Coulomb TERM 1b
     // Reference: Fortran gfnff_engrad.F90:418-422 (bond/disp), 449-454 (coulomb)
     // =========================================================================
+    t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (gradient && !m_dcn.empty() && m_dcn.size() == 3) {
         // Snapshot gradient before CN chain-rule (diagnostic)
         m_grad_before_cn = m_result_gradient;
@@ -488,5 +519,12 @@ void FFWorkspace::postProcess(bool gradient)
                 CurcumaLogger::info("=== CPU PER-COMPONENT END ===");
             }
         }
+    }
+
+    if (do_timing) {
+        double t_total = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_post_start).count();
+        CurcumaLogger::info(fmt::format(
+            "FFWorkspace postProcess: total={:.1f}ms self_energy={:.1f}ms chain_rule={:.1f}ms",
+            t_total, t_self_energy, t_chainrule));
     }
 }

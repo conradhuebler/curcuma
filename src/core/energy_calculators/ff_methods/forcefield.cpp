@@ -2444,8 +2444,13 @@ double ForceField::Calculate(bool gradient)
         }
     }
 
+    auto t_ff_start = std::chrono::high_resolution_clock::now();
+    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
+    double t_thread_reset = 0.0, t_pool = 0.0, t_accumulate = 0.0, t_self_energy = 0.0, t_chainrule = 0.0;
+
     // Claude Generated (Mar 2026): GFN-FF threads use pointer-based sharing — only reset accumulators.
     // UFF/QMDFF threads still copy geometry (no pointer set).
+    auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (m_method == "gfnff") {
         for (int i = 0; i < m_stored_threads.size(); ++i) {
             m_stored_threads[i]->resetForStep(gradient);
@@ -2454,6 +2459,9 @@ double ForceField::Calculate(bool gradient)
         for (int i = 0; i < m_stored_threads.size(); ++i) {
             m_stored_threads[i]->UpdateGeometry(m_geometry, gradient);
         }
+    }
+    if (do_timing) {
+        t_thread_reset = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
     }
 
     // Claude Generated (Mar 2026): Duplicate CN calculation removed — Phase 0 optimization.
@@ -2468,7 +2476,11 @@ double ForceField::Calculate(bool gradient)
     m_threadpool->Reset();
     m_threadpool->setActiveThreadCount(m_threads);
 
+    t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     m_threadpool->StartAndWait();
+    if (do_timing) {
+        t_pool = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("DEBUG Calculate: All threads completed successfully");
@@ -2478,6 +2490,7 @@ double ForceField::Calculate(bool gradient)
     // Claude Generated (February 2026): Accumulate individual term timings from all threads
     std::unordered_map<std::string, long long> total_term_timings;
 
+    t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     for (int i = 0; i < m_stored_threads.size(); ++i) {
         // Accumulate timing data
         const auto& thread_timings = m_stored_threads[i]->getTermTimings();
@@ -2567,6 +2580,9 @@ double ForceField::Calculate(bool gradient)
 
         m_gradient += m_stored_threads[i]->Gradient();
     }
+    if (do_timing) {
+        t_accumulate = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    }
 
     // =========================================================================
     // Claude Generated (Feb 23, 2026): TERM 2+3 Coulomb self-energy (sequential, thread-count-independent)
@@ -2574,6 +2590,7 @@ double ForceField::Calculate(bool gradient)
     // Moved out of threads to eliminate atom_to_params coupling with pair distribution.
     // O(N) — negligible cost compared to O(N²) pairwise TERM 1 in threads.
     // =========================================================================
+    t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if ((m_method == "gfnff") &&
         m_coulomb_gam.size() == m_natoms && m_eeq_charges.size() == m_natoms) {
         const double sqrt_2_over_pi = 0.797884560802865;
@@ -2631,6 +2648,9 @@ double ForceField::Calculate(bool gradient)
             }
         }
     }
+    if (do_timing) {
+        t_self_energy = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    }
 
     // Claude Generated (Feb 15, 2026): Apply dE/dCN chain-rule gradient for bond dr0/dCN and dispersion dC6/dCN
     // Reference: Fortran gfnff_engrad.F90:973-974 (bond), gfnff_gdisp0.f90:393-395 (dispersion)
@@ -2641,6 +2661,7 @@ double ForceField::Calculate(bool gradient)
     // Claude Generated (March 2026): TERM 1b (Coulomb charge derivative) merged into single pass
     // Combined: gradient += dcn * (dEdcn_total - qtmp) instead of two separate matvec passes
     // Saves 3 sparse matvecs per gradient evaluation for gfnff
+    t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (gradient && !m_dcn.empty() && m_dcn.size() == 3) {
         Vector dEdcn_total = Vector::Zero(m_natoms);
         for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
@@ -2713,6 +2734,9 @@ double ForceField::Calculate(bool gradient)
             }
         }
     }
+    if (do_timing) {
+        t_chainrule = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    }
 
     // Claude Generated: CG pair interaction calculations (spherical implementation)
     // Only calculated for CG methods (method type 4)
@@ -2783,6 +2807,13 @@ double ForceField::Calculate(bool gradient)
     auto energy_calc_end = std::chrono::high_resolution_clock::now();
     auto energy_calc_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
         energy_calc_end - energy_calc_start);
+
+    if (do_timing) {
+        double t_total = std::chrono::duration<double, std::milli>(energy_calc_end - t_ff_start).count();
+        CurcumaLogger::info(fmt::format(
+            "ForceField Calculate: total={:.1f}ms thread_reset={:.1f}ms pool={:.1f}ms accumulate={:.1f}ms self_energy={:.1f}ms chain_rule={:.1f}ms",
+            t_total, t_thread_reset, t_pool, t_accumulate, t_self_energy, t_chainrule));
+    }
 
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::result_fmt("Force Field energy calculation: {} ms",

@@ -514,6 +514,21 @@ public:
     // can orchestrate GPU + CPU-residual without duplicating logic.
 
     /**
+     * @brief Timing breakdown for prepareCNAndEEQ sub-steps.
+     * Claude Generated (April 2026): Collected for consolidated summary in Calculation().
+     */
+    struct PrepTiming {
+        double total = 0.0;
+        double cn = 0.0;
+        double eeq_topo = 0.0;
+        double cnf = 0.0;
+        double dcn = 0.0;
+        double d4_gw = 0.0;
+        double eeq_solve = 0.0;
+        double charge_dist = 0.0;
+    };
+
+    /**
      * @brief Compute CN, EEQ charges, and (if gradient) CN derivatives for current geometry.
      * Results are stored internally and distributed to m_forcefield/m_workspace.
      * Call getters below to retrieve results for external workspaces.
@@ -522,8 +537,9 @@ public:
      *                  distribution (GPU has its own k_cn_chainrule kernel)
      * @param external_cn  If non-null, use these CN values instead of computing on CPU.
      *                     Claude Generated (March 2026): Enables GPU CN bypass.
+     * @param out_timing  If non-null, filled with per-sub-step durations (ms).
      */
-    void prepareCNAndEEQ(bool gradient, bool gpu_only = false, const Vector* external_cn = nullptr, bool skip_eeq = false);
+    void prepareCNAndEEQ(bool gradient, bool gpu_only = false, const Vector* external_cn = nullptr, bool skip_eeq = false, PrepTiming* out_timing = nullptr);
 
     /**
      * @brief Extract EEQ parameters for GPU solver (O(N) CPU work only)
@@ -557,6 +573,10 @@ public:
 
     /// True if updateHBXBIfNeeded() ran and changed lists since last call
     bool consumeHBXBUpdate() { bool r = m_hbxb_updated; m_hbxb_updated = false; return r; }
+
+    // Claude Generated (Apr 2026): Timing accessors for GPU orchestrator
+    double getParamGenTimeMs() const { return m_param_gen_time_ms; }
+    double getTopologyTimeMs() const { return m_topology_time_ms; }
 
     /// Set external topology decision from GPU displacement check (Claude Generated March 2026).
     /// If set, needsFullTopologyUpdate() uses this value instead of CPU computation.
@@ -2105,6 +2125,10 @@ private:
     bool m_cache_topology = true;   ///< Cache Phase-1 EEQ topology in param.json (opt-out)
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1
 
+    // Claude Generated (April 2026): Timing for consolidated summary
+    double m_param_gen_time_ms = 0.0;       ///< Parameter generation time (generateGFNFFParameterSet) for summary
+    mutable double m_topology_time_ms = 0.0; ///< Topology generation time (calculateTopologyInfo) for summary (mutable: set in const method)
+
     // Check if geometry change warrants full topology recalculation (vs just dynamic state)
     bool needsFullTopologyUpdate(const Eigen::MatrixXd& geometry_bohr) const;
 
@@ -2119,6 +2143,7 @@ private:
     std::vector<GFNFFHydrogenBond> m_last_hbonds;
     std::vector<GFNFFHalogenBond> m_last_xbonds;
     bool m_hbxb_updated = false;  ///< True if updateHBXBIfNeeded() ran since last check
+    bool m_hbxb_fresh = false;    ///< True if HB/XB lists were freshly built during init and geometry is unchanged
 
     // Claude Generated (March 2026): State from last prepareCNAndEEQ() call
     Vector m_last_cn;    ///< Coordination numbers

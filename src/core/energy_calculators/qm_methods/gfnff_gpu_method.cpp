@@ -307,8 +307,10 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         }
         m_gpu_workspace->setDlogDCN(dlogdcn);
     }
+    auto t_dlogdcn_end = std::chrono::high_resolution_clock::now();
 
     // --- Step 2b: Compute per-bond HB coordination numbers ---
+    auto t_hb_cn_start = std::chrono::high_resolution_clock::now();
     if (m_gpu_params_leaked && !m_gpu_params_leaked->bond_hb_data.empty()) {
         static const std::vector<double>& rcov_base = GFNFFParameters::covalent_rad_d3;
         constexpr double rcov_43 = 4.0 / 3.0;
@@ -348,8 +350,10 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         }
         m_gpu_workspace->updateBondHBCN(m_hb_cn_values);
     }
+    auto t_hb_cn_end = std::chrono::high_resolution_clock::now();
 
     // --- Step 2c: Dynamic HB/XB re-detection (must happen before kernel launch) ---
+    auto t_hbxb_start = std::chrono::high_resolution_clock::now();
     m_gfnff->updateHBXBIfNeeded(nullptr);
     if (m_gfnff->consumeHBXBUpdate()) {
         m_gpu_workspace->updateHBonds(m_gfnff->getLastHBonds(), m_atom_types);
@@ -547,12 +551,56 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::energy_abs(m_last_energy, "GFN-FF (GPU) Energy");
 
-        double ms_prep    = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        double ms_overlap = std::chrono::duration<double, std::milli>(t2 - t1).count();
-        double ms_finish  = std::chrono::duration<double, std::milli>(t4 - t2).count();
-        double ms_total   = std::chrono::duration<double, std::milli>(t4 - t0).count();
-        CurcumaLogger::result_fmt("GFN-FF (GPU) Timing: CN+Prep={:.1f}ms EEQ||GPU={:.1f}ms Coul+Fin={:.1f}ms Total={:.1f}ms",
-                                   ms_prep, ms_overlap, ms_finish, ms_total);
+        // Claude Generated (Apr 2026): Granular GPU timing + wallclock-normalized breakdown
+        double t_gpu_cn    = std::chrono::duration<double, std::milli>(t_cn_end - t_cn_start).count();
+        double t_dlogdcn   = std::chrono::duration<double, std::milli>(t_dlogdcn_end - t_cn_end).count();
+        double t_hb_cn     = std::chrono::duration<double, std::milli>(t_hb_cn_end - t_dlogdcn_end).count();
+        double t_hbxb      = std::chrono::duration<double, std::milli>(t_hbxb_start - t_hb_cn_end).count();
+        double t_prep      = std::chrono::duration<double, std::milli>(t_prep_end - t_cn_end).count();
+        double t_launch    = std::chrono::duration<double, std::milli>(t_launch_end - t_prep_end).count();
+        double t_cpu_eeq   = std::chrono::duration<double, std::milli>(t_eeq_end - t_launch_end).count();
+        double t_coulomb   = std::chrono::duration<double, std::milli>(t4 - t_eeq_end).count();
+        double t_calc      = std::chrono::duration<double, std::milli>(t4 - t0).count();
+        double t_init      = m_gfnff->getTopologyTimeMs() + m_gfnff->getParamGenTimeMs();
+        double t_wall      = t_calc + t_init;
+
+        auto pct = [&](double t) { return t_wall > 0 ? 100.0 * t / t_wall : 0.0; };
+
+        CurcumaLogger::result("\n[RESULT] GFN-FF (GPU) Timing Breakdown:");
+        CurcumaLogger::result("  Phase                          Time (ms)   %Wall");
+        CurcumaLogger::result("  --------------------------------------------------");
+        CurcumaLogger::result(fmt::format("  GPU CN compute                 {:>10.1f}  {:>5.1f}%", t_gpu_cn, pct(t_gpu_cn)));
+        if (gradient) {
+            CurcumaLogger::result(fmt::format("  dlogdcn compute                {:>10.1f}  {:>5.1f}%", t_dlogdcn, pct(t_dlogdcn)));
+        }
+        CurcumaLogger::result(fmt::format("  HB CN per-bond loop            {:>10.1f}  {:>5.1f}%", t_hb_cn, pct(t_hb_cn)));
+        CurcumaLogger::result(fmt::format("  HB/XB detection                {:>10.1f}  {:>5.1f}%", t_hbxb, pct(t_hbxb)));
+        CurcumaLogger::result(fmt::format("  GPU kernel launch overhead     {:>10.1f}  {:>5.1f}%", t_launch, pct(t_launch)));
+        CurcumaLogger::result(fmt::format("  CPU EEQ (parallel to GPU)      {:>10.1f}  {:>5.1f}%", t_cpu_eeq, pct(t_cpu_eeq)));
+        CurcumaLogger::result(fmt::format("  Coulomb + postprocess + DMA    {:>10.1f}  {:>5.1f}%", t_coulomb, pct(t_coulomb)));
+        CurcumaLogger::result("  --------------------------------------------------");
+        CurcumaLogger::result(fmt::format("  Calculation Total              {:>10.1f}  {:>5.1f}%", t_calc, pct(t_calc)));
+        CurcumaLogger::result(fmt::format("  Initialization (not above)   {:>10.1f}  {:>5.1f}%", t_init, pct(t_init)));
+        CurcumaLogger::result(fmt::format("  Wallclock Total                {:>10.1f}  100.0%", t_wall));
+
+        // Pipeline analysis — sum all sequential work for realistic parallelization estimate
+        double seq_time = t_prep + t_cpu_eeq + t_coulomb;
+        double overlap_time = std::max(0.0, t_cpu_eeq - t_prep);
+        CurcumaLogger::result("\n[RESULT] GPU Pipeline Analysis:");
+        CurcumaLogger::result(fmt::format(
+            "  Sequential work (prep + EEQ + finish):            {:.1f} ms ({:.1f}% of calc)",
+            seq_time, t_calc > 0 ? 100.0 * seq_time / t_calc : 0.0));
+        CurcumaLogger::result(fmt::format(
+            "  CPU/GPU overlap (EEQ || charge-indep kernels):  {:.1f} ms ({:.1f}% of calc)",
+            overlap_time, t_calc > 0 ? 100.0 * overlap_time / t_calc : 0.0));
+        CurcumaLogger::result(fmt::format(
+            "  Sequential fraction of wallclock:                 {:.1f}%",
+            t_wall > 0 ? 100.0 * (seq_time + t_init) / t_wall : 0.0));
+        if (t_cpu_eeq > 0) {
+            CurcumaLogger::result(
+                "    CPU EEQ ran parallel to GPU charge-independent kernels."
+                " Actual wallclock depends on which side finished first.");
+        }
     }
 
     // Energy decomposition at verbosity 2+

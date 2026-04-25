@@ -773,6 +773,19 @@ private:
     mutable EEQSolveMethod m_selected_method = EEQSolveMethod::PCG;  ///< Method chosen by auto-benchmark
     mutable bool m_auto_benchmark_done = false;  ///< Whether auto-benchmark has run
 
+    // Convergence statistics — accumulate across calls, print summary instead of per-call spam
+    // Claude Generated (April 2026)
+    mutable int m_pcg_total_calls = 0;       ///< Total PCG solve calls
+    mutable int m_pcg_nonconv_calls = 0;    ///< PCG calls that did not converge
+    mutable int m_pcg_total_iters = 0;      ///< Total PCG iterations across all calls
+    mutable double m_pcg_worst_residual = 0.0; ///< Worst |r| among non-converged calls
+
+    // Claude Generated (Apr 2026): Cache for historically implausible Phase 2 results.
+    // Once Phase 2 has produced garbage charges for a given system size, skip it forever
+    // (until the atom count changes, which indicates a new molecule).
+    mutable bool m_phase2_historically_implausible = false;
+    mutable int m_phase2_implausible_natoms = 0;
+
     // ===== Pre-allocated Buffers for calculateFinalCharges (Claude Generated Mar 2026) =====
     // Avoid ~26 MB alloc+free per gradient step for large molecules (N=1280).
     // Buffers are allocated once and reused when atom count stays the same.

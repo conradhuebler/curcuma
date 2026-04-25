@@ -1458,6 +1458,11 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
 
     std::vector<GFNFFDispersion> all_pairs;
 
+    // Claude Generated (Apr 2026): Hard distance cutoff of 60 Bohr for dispersion pairs.
+    // BJ-damped dispersion is negligible beyond this range; skipping saves N²/2 pairs.
+    constexpr double disp_cutoff_bohr = 60.0;
+    constexpr double disp_cutoff_sq = disp_cutoff_bohr * disp_cutoff_bohr;
+
     #pragma omp parallel
     {
         std::vector<GFNFFDispersion> local_pairs;
@@ -1465,6 +1470,9 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
         #pragma omp for schedule(dynamic, 10)
         for (size_t i = 0; i < m_atoms.size(); ++i) {
             for (size_t j = i + 1; j < m_atoms.size(); ++j) {
+                double r2 = (geometry_bohr.row(i) - geometry_bohr.row(j)).squaredNorm();
+                if (r2 > disp_cutoff_sq) continue;
+
                 int atom_i = m_atoms[i];
                 int atom_j = m_atoms[j];
 

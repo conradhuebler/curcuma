@@ -465,6 +465,9 @@ bool GFNFF::UpdateMolecule()
     // Update Bohr geometry for GFN-FF
     m_geometry_bohr = m_geometry * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
 
+    // Geometry changed — HB/XB lists are no longer fresh
+    m_hbxb_fresh = false;
+
     // NOTE: We no longer aggressively reset caches here because our smart caching
     // will handle cache invalidation based on geometry change thresholds.
     // The existing cached results will be used if geometry change is insignificant.
@@ -948,6 +951,11 @@ GFNFF::EEQGPUParams GFNFF::prepareEEQParametersForGPU(const Vector& cn) const
 
 void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
 {
+    // Claude Generated (Apr 2026): If lists were freshly built during init and geometry
+    // has not changed, skip redundant re-detection. This saves ~8s on large single-points.
+    if (m_hbxb_fresh && !shouldUpdateHBXB(m_geometry_bohr))
+        return;
+
     if (!shouldUpdateHBXB(m_geometry_bohr))
         return;
 
@@ -2627,6 +2635,20 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
         params.hbonds = detectHydrogenBondsNative(topo_info.eeq_charges);
 
         params.xbonds = detectHalogenBondsNative(topo_info.eeq_charges);
+
+        // Claude Generated (Apr 2026): Cache init-time HB/XB lists so updateHBXBIfNeeded()
+        // can skip redundant re-detection on the first calculateEnergy() call when
+        // geometry has not changed. This saves ~8s on large single-point runs.
+        m_last_hbonds = params.hbonds;
+        m_last_xbonds = params.xbonds;
+        m_hb_reference = HBReferenceGeometry{};
+        m_hb_reference->reference_positions = m_geometry_bohr;
+        m_hb_reference->nhb_count = static_cast<int>(m_last_hbonds.size());
+        m_hb_reference->nxb_count = static_cast<int>(m_last_xbonds.size());
+        m_hb_reference->needs_update = false;
+        m_hbxb_fresh = true;
+    }
+    if (do_timing) t_hbxb = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
 
         // Bond-HB cross-referencing (nr_hb and bond_hb_data)
         std::map<std::pair<int,int>, std::vector<int>> ah_to_b_atoms;

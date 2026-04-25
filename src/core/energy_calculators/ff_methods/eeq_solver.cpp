@@ -879,6 +879,32 @@ Vector EEQSolver::calculateCharges(
         }
     }
 
+    // Claude Generated (April 2026): skip_phase2 option — bypass Phase 2 entirely
+    if (m_skip_phase2) {
+        if (m_verbosity >= 1) {
+            CurcumaLogger::warn("EEQSolver: skip_phase2=true — bypassing Phase 2 refinement, using Phase 1 topology charges");
+        }
+        return topology_charges;
+    }
+
+    // Claude Generated (Apr 2026): If Phase 2 was historically implausible for this system
+    // size, skip it forever (until atom count changes, indicating a new molecule).
+    if (m_phase2_historically_implausible && m_phase2_implausible_natoms == natoms) {
+        if (m_verbosity >= 2) {
+            CurcumaLogger::info("EEQSolver: Phase 2 was historically implausible for this system — skipping, using Phase 1 topology charges");
+        }
+        return topology_charges;
+    }
+
+    // Initialize cache with Phase 1 charges if not yet set.
+    // Without this, m_last_successful_charges starts empty (size 0), so Tier 1/2
+    // fallbacks below would skip it and go straight to topology_charges. With this
+    // initialization, the cache holds Phase 1 charges on the first call, then is
+    // overwritten with Phase 2 charges after a successful solve.
+    if (m_last_successful_charges.size() != natoms) {
+        m_last_successful_charges = topology_charges;
+    }
+
     // PHASE 2: Final energy charges with ALL corrections (matching Fortran reference)
     // Reference: XTB gfnff_ini.f90:693-707 - ONE solve with dxi, dgam, and alpha corrections
     // Restored (Jan 17, 2026): Activate corrections to match GFN-FF Fortran reference
@@ -2292,6 +2318,18 @@ Vector EEQSolver::calculateFinalCharges(
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
 
 
+    // Claude Generated (Apr 2026): If Phase 2 was historically implausible for this system
+    // size, skip it forever (until atom count changes, indicating a new molecule).
+    if (m_phase2_historically_implausible && m_phase2_implausible_natoms == natoms) {
+        if (m_verbosity >= 2) {
+            CurcumaLogger::info("EEQSolver: Phase 2 was historically implausible for this system — skipping, using Phase 1 topology charges");
+        }
+        return topology_charges;
+    }
+
+    if (m_verbosity >= 2) {
+        fmt::print(stderr, "[EEQ] Phase 2: preparing corrections (dxi, dgam, pi/amide detection)...\n");
+    }
 
     // CRITICAL FIX (Jan 4, 2026): Only use corrections if explicitly requested
     // gfnff_final.cpp achieves 0.0000025 e accuracy using ONLY base parameters (NO dxi, NO dgam)
@@ -2671,6 +2709,30 @@ Vector EEQSolver::calculateFinalCharges(
         // 6. Solve system — unified dispatch (March 2026)
         Vector new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge);
 
+<<<<<<< HEAD
+=======
+        // Empty return from dispatchSolve signals all solvers failed.
+        // Prefer the last successful Phase 2 charges (from a prior step) over Phase 1
+        // topology_charges — Phase 2 charges are geometrically accurate and the energy
+        // computed with them is physically reasonable. For small optimizer steps the
+        // charges from the previous step are an excellent approximation.
+        if (new_charges.size() != natoms) {
+            if (isValidChargeCache(m_last_successful_charges, natoms, total_charge)) {
+                CurcumaLogger::warn(fmt::format(
+                    "EEQ Phase 2: all solvers failed for N={}, using last successful charges as fallback",
+                    natoms));
+                return m_last_successful_charges;
+            }
+            CurcumaLogger::warn(fmt::format(
+                "EEQ Phase 2: all solvers failed for N={}, no valid prior charges — using Phase 1 topology charges",
+                natoms));
+            // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this system.
+            m_phase2_historically_implausible = true;
+            m_phase2_implausible_natoms = natoms;
+            return topology_charges;
+        }
+
+>>>>>>> e37db8b (Speed up GFN-FF single-point with HB/XB skip, Phase-2 cache, D4 cutoff, and wallclock timing)
         // Claude Generated (March 2026): Print Phase 2 solution charges
         if (m_verbosity >= 3 && iteration == 0 && natoms <= 10) {
             std::cerr << "\nPhase 2 solution charges:" << std::endl;
@@ -2692,7 +2754,106 @@ Vector EEQSolver::calculateFinalCharges(
         }
 
         if (!solution_valid) {
+<<<<<<< HEAD
             return generateFallbackCharges(natoms, total_charge, "NaN/Inf in Phase 2 solution");
+=======
+            if (isValidChargeCache(m_last_successful_charges, natoms, total_charge)) {
+                CurcumaLogger::warn("EEQ Phase 2: invalid solution, using last successful charges as fallback");
+                return m_last_successful_charges;
+            }
+            CurcumaLogger::warn("EEQ Phase 2: invalid solution, no valid prior charges — using Phase 1 topology charges");
+            // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this system.
+            m_phase2_historically_implausible = true;
+            m_phase2_implausible_natoms = natoms;
+            return topology_charges;
+        }
+
+        // Claude Generated (April 2026): Phase 2 charge plausibility check + dump
+        // dispatchSolve may return non-NaN charges that are still numerically garbage
+        // (e.g., from a near-singular matrix). Fall back to Phase 1 topology charges
+        // when the solution is clearly non-physical.
+        //
+        // Uses the cached A matrix directly — no O(N²) distance/erf recomputation.
+        // E = 0.5 * q^T * A_nn * q - Σ q_i * chi_i   (chi_i = chi_corrected + cnf*sqrt(CN))
+        {
+            const Matrix& A_nn = A.topLeftCorner(natoms, natoms);
+            auto eeq_energy = [&](const Vector& q) -> double {
+                double chi_sum = 0.0;
+                for (int i = 0; i < natoms; ++i) {
+                    EEQParameters params = getParameters(atoms[i], cn(i));
+                    chi_sum += q(i) * (chi_corrected(i) + params.cnf * std::sqrt(std::abs(cn(i))));
+                }
+                return 0.5 * q.transpose() * A_nn * q - chi_sum;
+            };
+
+            double e_coul_p1 = eeq_energy(topology_charges);
+            double e_coul_p2 = eeq_energy(new_charges);
+            double max_q_p2 = new_charges.cwiseAbs().maxCoeff();
+            double max_q_p1 = topology_charges.cwiseAbs().maxCoeff();
+
+            // Dump to JSON if requested (for offline analysis of bad Phase 2 solves)
+            if (m_config.get<bool>("dump_charges", false)) {
+                json dump;
+                dump["natoms"] = natoms;
+                dump["nfrag"] = nfrag;
+                dump["total_charge"] = total_charge;
+                dump["e_coulomb_phase1"] = e_coul_p1;
+                dump["e_coulomb_phase2"] = e_coul_p2;
+                dump["max_q_phase1"] = max_q_p1;
+                dump["max_q_phase2"] = max_q_p2;
+                dump["solver_method"] = (m_solve_method == EEQSolveMethod::PCG) ? "PCG"
+                    : (m_solve_method == EEQSolveMethod::SchurCholesky) ? "SchurCholesky"
+                    : (m_solve_method == EEQSolveMethod::Auto) ? "Auto"
+                    : (m_selected_method == EEQSolveMethod::LU) ? "LU (auto)"
+                    : "LU";
+                for (int i = 0; i < natoms; ++i) {
+                    json atom;
+                    atom["Z"] = atoms[i];
+                    atom["cn"] = cn(i);
+                    atom["q_phase1"] = topology_charges(i);
+                    atom["q_phase2"] = new_charges(i);
+                    dump["atoms"].push_back(atom);
+                }
+                std::string fname = fmt::format("charges_dump_N{}.json", natoms);
+                std::ofstream ofs(fname);
+                ofs << dump.dump(2) << std::endl;
+                CurcumaLogger::info(fmt::format("EEQ: Charge dump saved to {}", fname));
+            }
+
+            // Plausibility: max |q| should not be >> max |q| from Phase 1
+            // For organic systems, charges are typically -1..+1. |q| > 10 is clearly garbage.
+            double q_threshold = std::max(10.0, 5.0 * max_q_p1);
+            if (max_q_p2 > q_threshold) {
+                CurcumaLogger::warn(fmt::format(
+                    "EEQ Phase 2: implausible charges (max |q| = {:.2f}, Phase 1 max = {:.2f}), using Phase 1",
+                    max_q_p2, max_q_p1));
+                current_charges = topology_charges;
+                // Do NOT overwrite m_last_successful_charges — the Phase 2 result was
+                // garbage, but the cache still holds a good result from a previous step.
+                // Phase 1 topology_charges are used for THIS step but must not poison
+                // the cache for future steps.
+                // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this
+                // system size so we can skip the expensive solve on all future calls.
+                m_phase2_historically_implausible = true;
+                m_phase2_implausible_natoms = natoms;
+                break;
+            }
+
+            // Plausibility: Coulomb energy should not be wildly different
+            double e_diff_ratio = std::abs(e_coul_p2 - e_coul_p1) / (std::abs(e_coul_p1) + 1.0);
+            if (e_diff_ratio > 5.0) {
+                CurcumaLogger::warn(fmt::format(
+                    "EEQ Phase 2: Coulomb energy ratio {:.1f} (P2={:.2e}, P1={:.2e}), using Phase 1",
+                    e_diff_ratio, e_coul_p2, e_coul_p1));
+                current_charges = topology_charges;
+                // Same as above — keep the cache intact.
+                // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this
+                // system size so we can skip the expensive solve on all future calls.
+                m_phase2_historically_implausible = true;
+                m_phase2_implausible_natoms = natoms;
+                break;
+            }
+>>>>>>> e37db8b (Speed up GFN-FF single-point with HB/XB skip, Phase-2 cache, D4 cutoff, and wallclock timing)
         }
 
         // Check convergence for iterative case
