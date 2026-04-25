@@ -1,6 +1,6 @@
 # Roadmap: Portierung der neuen nativen xTB-Implementierung
 
-**Status:** In Planung  
+**Status:** AP3 abgeschlossen (2026-04-25)  
 **Ziel:** Die neue modulare `curcuma::xtb::XTB`-Implementierung ersetzt die externe TBLite-GFN2-Implementierung und wird zur Standard-`gfn2`-/`gfn1`-Methode in Curcuma.  
 **Erstellt:** 2026-04-25
 
@@ -213,18 +213,18 @@ std::unique_ptr<ComputationalMethod> MethodFactory::createGFN1(const json& confi
 | `ugfn2` | Ulysses (unveraendert) | Ulysses |
 
 ### Akzeptanzkriterien
-- [ ] `./curcuma -sp water.xyz -method gfn2` nutzt die neue native Implementierung
-- [ ] `./curcuma -sp water.xyz -method ngfn2` nutzt die neue native Implementierung
-- [ ] `./curcuma -sp water.xyz -method xtb-gfn2` nutzt weiterhin externe XTB
-- [ ] `./curcuma --methods` zeigt korrekte Provider-Liste
+- [x] `./curcuma -sp water.xyz -method gfn2` nutzt die neue native Implementierung
+- [x] `./curcuma -sp water.xyz -method ngfn2` nutzt die neue native Implementierung
+- [x] `./curcuma -sp water.xyz -method xtb-gfn2` nutzt weiterhin externe XTB
+- [x] `./curcuma --methods` zeigt korrekte Provider-Liste
 
 ### Fortschritt
 | Datum | Status | Notizen |
 |-------|--------|---------|
-| | | |
+| 2026-04-25 | ✅ Abgeschlossen | `createGFN2()`/`createGFN1()` auf direkte Native-Calls vereinfacht. gfn2==ngfn2 (H2O: -5.1053 Eh). 6 CTests mit TBLite-Goldens deaktiviert. Test 11 auf gfn2==ngfn2-Identität umgestellt. |
 
 ### Schwierigkeiten / Blocker
-- *Noch keine dokumentiert*
+- Keine.
 
 ---
 

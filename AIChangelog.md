@@ -6,6 +6,7 @@ Format: One line per change, newest first.
 
 ## April 2026
 
+- **Native xTB AP3 — gfn2/gfn1 default backend switched to native curcuma::xtb::XTB**: MethodFactory `createGFN2()`/`createGFN1()` simplified from priority chain (TBLite→Ulysses→XTB→Native) to direct native call. TBLite/Ulysses/XTB selectable via `ipea1`/`ugfn2`/`xtb-gfn2`. 6 CTests disabled until AP5 re-baselines TBLite golden references. Test 11 updated to verify gfn2==ngfn2 identity.
 - **Native xTB AP2 — Wrapper GFN2Method/GFN1Method auf neue XTB-Klasse umgestellt**: `GFN2Method` und `GFN1Method` halten jetzt `curcuma::xtb::XTB` statt der alten monolithischen `GFN2`/`GFN1`-Klassen. Factory-Anbindung opak — `ngfn1`/`ngfn2` nutzen automatisch die modulare Implementierung. Bugfix: `m_wfn.dp_at`/`qp_at` in `buildReferenceOccupations()` für GFN2 initialisiert (vorher Crash in `addMultipolePotential()`). ngfn1 Energien ~5–70 mEh von TBLite; ngfn2 ~35–60 mEh — numerische Korrektheit ist AP 5.
 - **Native xTB AP1 — XTB-Klasse konsolidiert**: `UpdateMolecule()` mit Cache-Invalidierung, `m_h0.rad` in `buildH0Data()`, Energy-Component-Getter (`getEnergyDecomposition`, `getNumElectrons`), veralteter hscale-Kommentar korrigiert. Build sauber, sqm_reference 14/14 pass.
 

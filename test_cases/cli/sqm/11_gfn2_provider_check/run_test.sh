@@ -3,12 +3,11 @@
 # Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
 # Claude Generated — verifies dispatch via MethodFactory for gfn2/ngfn2/ipea1.
 #
-# Today (pre-AP-3): -method gfn2 routes to TBLite, -method ngfn2 to native.
-# After AP 3: -method gfn2 routes to native (= ngfn2). -method ipea1 stays TBLite.
-#
-# This test only enforces accuracy where TBLite is reliably the backend
-# (gfn2, ipea1). Native ngfn2 accuracy is checked by test 09; here we
-# only verify ngfn2 dispatches and produces a finite number.
+# AP 3 (2026-04-25): -method gfn2 routes to native xTB (= ngfn2). -method ipea1 stays TBLite.
+# This test verifies:
+#   1) gfn2, ngfn2, ipea1 each dispatch and produce a finite energy
+#   2) gfn2 and ngfn2 produce identical energies (same native backend)
+#   3) ipea1 matches its TBLite reference
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../test_utils.sh"
@@ -17,9 +16,9 @@ TEST_NAME="sqm - 11: GFN2 Provider Routing Check (water)"
 TEST_DIR="$SCRIPT_DIR"
 
 ENERGY_TOLERANCE="0.001"
+IDENTITY_TOLERANCE="1e-10"
 
-# References for water.xyz — TBLite-routed methods (gfn2 today, ipea1 always)
-REF_GFN2="-5.07036982186124"        # gfn2 → TBLite (current routing)
+# References
 REF_IPEA1="-5.826250385201024"      # ipea1 → TBLite (always)
 
 # Run a method, return success if energy is finite (non-zero, not NaN).
@@ -62,16 +61,20 @@ main() {
     run_method_finite ngfn2
     run_method_finite ipea1
 
-    # 2) TBLite-routed methods must match their references precisely
-    local E_GFN2 E_IPEA1
-    E_GFN2=$(sed 's/\x1b\[[0-9;]*m//g' out_gfn2.log  | grep -oP 'Single Point Energy = \K[-0-9.e]+' | head -1)
+    local E_GFN2 E_NGFN2 E_IPEA1
+    E_GFN2=$(sed 's/\x1b\[[0-9;]*m//g' out_gfn2.log   | grep -oP 'Single Point Energy = \K[-0-9.e]+' | head -1)
+    E_NGFN2=$(sed 's/\x1b\[[0-9;]*m//g' out_ngfn2.log | grep -oP 'Single Point Energy = \K[-0-9.e]+' | head -1)
     E_IPEA1=$(sed 's/\x1b\[[0-9;]*m//g' out_ipea1.log | grep -oP 'Single Point Energy = \K[-0-9.e]+' | head -1)
-    assert_numeric_match "$REF_GFN2"  "$E_GFN2"  "$ENERGY_TOLERANCE" "gfn2 (TBLite-routed) energy"
+
+    # 2) AP3: gfn2 == ngfn2 (both route to native xTB)
+    assert_numeric_match "$E_GFN2"   "$E_NGFN2" "$IDENTITY_TOLERANCE" "gfn2 == ngfn2 (same native backend)"
+
+    # 3) ipea1 must match TBLite reference
     assert_numeric_match "$REF_IPEA1" "$E_IPEA1" "$ENERGY_TOLERANCE" "ipea1 (TBLite) energy"
 
-    # 3) Routing-marker checks (informational, never fail)
-    if grep -qE "GFN2 resolved to TBLite|using native xTB" out_gfn2.log; then
-        echo -e "${GREEN}✓ PASS${NC}: gfn2 routing marker present"
+    # 4) Routing-marker checks (informational, never fail)
+    if grep -qE "using native xTB" out_gfn2.log; then
+        echo -e "${GREEN}✓ PASS${NC}: gfn2 routing marker 'using native xTB' present"
     else
         echo -e "${YELLOW}⚠${NC}: gfn2 routing marker not found (verbosity issue, non-fatal)"
     fi

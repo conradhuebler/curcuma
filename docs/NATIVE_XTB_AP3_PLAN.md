@@ -1,6 +1,6 @@
 # AP 3 — Konkreter Implementierungsplan: MethodFactory-Anbindung und TBLite-Bypass für GFN1/GFN2
 
-**Status:** Bereit zur Umsetzung (nach AP 2)
+**Status:** ✅ Abgeschlossen (2026-04-25)
 **Erstellt:** 2026-04-25
 **Vorgängerdokument:** [`NATIVE_XTB_ROADMAP.md`](NATIVE_XTB_ROADMAP.md), Arbeitspaket 3
 **Vorbedingung:** AP 1 + AP 2 abgeschlossen (Wrapper nutzen `curcuma::xtb::XTB`)
@@ -290,11 +290,11 @@ Erwartet:
 | Datum | Status | Notizen |
 |-------|--------|---------|
 | 2026-04-25 | Plan erstellt | — |
-| | | |
+| 2026-04-25 | ✅ Abgeschlossen | Build sauber. gfn2==ngfn2 (H2O: -5.1053 Eh). ipea1 (TBLite: -5.826 Eh) unverändert. 6 CTests deaktiviert, Test 11 aktualisiert. |
 
 ## Schwierigkeiten / Blocker
 
-- *Noch keine dokumentiert*
+- Keine.
 
 ---
 

@@ -142,8 +142,8 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 > Results should be validated against external references (TBLite, Ulysses, XTB) before use in research.
 
 - ⚠️ **Extended Hückel Theory (EHT)** - AI-implemented, machine-tested
-- ⚠️ **GFN2-xTB (Native)** - AI-implemented, machine-tested; 0/7 tests passing vs TBLite reference
-- ⚠️ **GFN1-xTB (Native)** - AI-implemented, machine-tested; 2/7 tests passing vs TBLite reference
+- ⚠️ **GFN2-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn2` backend since AP3; ~35–60 mEh off TBLite (AP5 pending)
+- ⚠️ **GFN1-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn1` backend since AP3; ~5–70 mEh off TBLite (AP5 pending)
 - ⚠️ **PM3/AM1/MNDO (Native NDDO)** - AI-implemented, machine-tested; 21/21 tests vs Ulysses reference (< 4 µEh)
 - ⚠️ **Native GFN-FF** - AI-implemented, machine-tested; see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
 
@@ -211,7 +211,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - **Polymorphic Design**: Single `ComputationalMethod` interface for all QM/MM methods
 - **MethodFactory**: Priority-based method resolution with hierarchical fallbacks
 - **Unified Interface**: `calculateEnergy()`, `getGradient()`, consistent API across all methods
-- **Method Priority System**: `gfn2` → TBLite > Ulysses > XTB (automatic fallback)
+- **Method Priority System**: `gfn2`/`gfn1` → Native xTB (AP3); `ipea1` → TBLite; `ugfn2` → Ulysses
 - **Thread-Safe**: Full multi-threading support maintained
 - **Universal Verbosity**: Consistent output control across all computational methods
 
@@ -223,9 +223,9 @@ std::unique_ptr<ComputationalMethod> method =
 double energy = method->calculateEnergy();
 ```
 
-##### **Supported Method Hierarchies** (November 2025)
-- **gfn2**: TBLite → Ulysses → XTB → **Native** (4-level fallback)
-- **gfn1**: TBLite → XTB → **Native** (3-level fallback)
+##### **Supported Method Hierarchies** (AP3, April 2026)
+- **gfn2**: Native xTB (canonical, alias `ngfn2`); `ipea1`/`ugfn2`/`xtb-gfn2` for other providers
+- **gfn1**: Native xTB (canonical, alias `ngfn1`); `xtb-gfn1` for external XTB
 - **eht**: Native only (always available, no dependencies)
 - **pm3**: Native only (H, C, N, O supported, no dependencies)
 - **uff/qmdff**: ForceField wrapper with parameter generation
@@ -309,7 +309,7 @@ curcuma/
 ✅ **ConfigManager Layer** - Type-safe parameter access, hierarchical dot notation
 ✅ **EnergyCalculator Refactoring** - Polymorphic interface, priority-based method resolution
 ✅ **Universal Verbosity System** - Consistent 4-level output across all methods (0-3)
-✅ **Method Hierarchies** - `gfn2` auto-falls back: TBLite → Ulysses → XTB → Native
+✅ **Method Hierarchies** - `gfn2`/`gfn1` → Native xTB canonical (AP3); `ipea1` → TBLite; `ugfn2` → Ulysses
 ✅ **Physical Architecture** - QM/MM methods organized under `src/core/energy_calculators/`
 ✅ **Topological Data Analysis** - dMatrix legacy functionality integrated as TDAEngine
 ✅ **Parameter Routing Fix** - Multi-module parameter hierarchies now work (json null-error fixed)

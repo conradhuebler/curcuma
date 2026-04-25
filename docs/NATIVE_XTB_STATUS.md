@@ -84,12 +84,17 @@ qm_methods/
 
 ### End-to-end integration tests
 
-| Method | Old implementation | New implementation |
-|--------|-------------------|-------------------|
-| Native GFN2 (`ngfn2`) | 0/7 vs. TBLite | **Wired via GFN2Method wrapper** (AP2 done). Energies returned, but ~35–60 mEh off TBLite. Crash in `addMultipolePotential` fixed (uninit `dp_at`). |
-| Native GFN1 (`ngfn1`) | 2/7 vs. TBLite | **Wired via GFN1Method wrapper** (AP2 done). Energies returned, ~5–70 mEh off TBLite. |
+| Method | Routing before AP3 | Routing after AP3 (2026-04-25) |
+|--------|-------------------|-------------------------------|
+| `gfn2` | TBLite > Ulysses > XTB > Native | **Native xTB** (canonical) |
+| `gfn1` | TBLite > XTB > Native | **Native xTB** (canonical) |
+| `ngfn2` | Native (direct) | Native xTB — alias for `gfn2` |
+| `ngfn1` | Native (direct) | Native xTB — alias for `gfn1` |
+| `xtb-gfn1`/`xtb-gfn2` | External XTB | External XTB (unchanged) |
+| `ipea1` | TBLite | TBLite (unchanged) |
+| `ugfn2` | Ulysses | Ulysses (unchanged) |
 
-**Note**: The new `XTB` class is now accessible via `MethodFactory` through `GFN2Method`/`GFN1Method` wrappers (AP2 complete). Default `gfn2`/`gfn1` still routes through TBLite priority chain (AP3 pending).
+**Status**: Energies returned but ~35–60 mEh off TBLite for GFN2, ~5–70 mEh for GFN1. Numerical correctness in AP5. TBLite-based CTests disabled until AP5 re-baselines golden references.
 
 ---
 

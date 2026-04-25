@@ -56,7 +56,7 @@ const std::vector<std::string> MethodFactory::m_ff_methods = {
 };
 
 const std::vector<std::string> MethodFactory::m_tblite_methods = {
-    "ipea1", "gfn1", "gfn2"
+    "ipea1"
 };
 
 const std::vector<std::string> MethodFactory::m_xtb_methods = {
@@ -158,72 +158,17 @@ bool MethodFactory::isUlyssesMethod(const std::string& method) {
 // Priority-Based Method Creation (multiple providers with fallback chains)
 // =================================================================================
 
-// Claude Generated: Direct implementation - no registry lambdas (GCC 15 compatible)
+// AP3 (2026-04-25): Native xTB is now the canonical gfn2 provider.
+// For other providers use explicit names: "ipea1" (TBLite), "ugfn2" (Ulysses), "xtb-gfn2" (XTB).
 std::unique_ptr<ComputationalMethod> MethodFactory::createGFN2(const json& config) {
-    // Priority: TBLite > Ulysses > XTB > Native
-#ifdef USE_TBLITE
-    CurcumaLogger::info("GFN2: trying TBLite (priority 1)");
-    try {
-        auto method = std::make_unique<TBLiteMethod>("gfn2", config);
-        CurcumaLogger::success("GFN2 resolved to TBLite");
-        return method;
-    } catch (const std::exception& e) {
-        CurcumaLogger::warn("TBLite failed: " + std::string(e.what()));
-    }
-#endif
-    if (hasUlysses()) {
-        CurcumaLogger::info("GFN2: trying Ulysses (fallback)");
-        try {
-            auto method = std::make_unique<UlyssesMethod>("ugfn2", config);
-            if (method) {
-                CurcumaLogger::success("GFN2 resolved to Ulysses");
-                return method;
-            }
-        } catch (const std::exception& e) {
-            CurcumaLogger::warn("Ulysses failed: " + std::string(e.what()));
-        }
-    }
-    if (hasXTB()) {
-        CurcumaLogger::info("GFN2: trying XTB (fallback)");
-        try {
-            auto method = std::make_unique<XTBMethod>("gfn2", config);
-            if (method) {
-                CurcumaLogger::success("GFN2 resolved to XTB");
-                return method;
-            }
-        } catch (const std::exception& e) {
-            CurcumaLogger::warn("XTB failed: " + std::string(e.what()));
-        }
-    }
-    CurcumaLogger::info("GFN2: trying native implementation (fallback)");
+    CurcumaLogger::info("GFN2: using native xTB implementation");
     return std::make_unique<GFN2Method>(config);
 }
 
+// AP3 (2026-04-25): Native xTB is now the canonical gfn1 provider.
+// For other providers use explicit names: "xtb-gfn1" (XTB), "ipea1" (TBLite).
 std::unique_ptr<ComputationalMethod> MethodFactory::createGFN1(const json& config) {
-    // Priority: TBLite > XTB > Native
-#ifdef USE_TBLITE
-    CurcumaLogger::info("GFN1: trying TBLite (priority 1)");
-    try {
-        auto method = std::make_unique<TBLiteMethod>("gfn1", config);
-        CurcumaLogger::success("GFN1 resolved to TBLite");
-        return method;
-    } catch (const std::exception& e) {
-        CurcumaLogger::warn("TBLite failed: " + std::string(e.what()));
-    }
-#endif
-    if (hasXTB()) {
-        CurcumaLogger::info("GFN1: trying XTB (fallback)");
-        try {
-            auto method = std::make_unique<XTBMethod>("xtb-gfn1", config);
-            if (method) {
-                CurcumaLogger::success("GFN1 resolved to XTB");
-                return method;
-            }
-        } catch (const std::exception& e) {
-            CurcumaLogger::warn("XTB failed: " + std::string(e.what()));
-        }
-    }
-    CurcumaLogger::info("GFN1: trying native implementation (fallback)");
+    CurcumaLogger::info("GFN1: using native xTB implementation");
     return std::make_unique<GFN1Method>(config);
 }
 
@@ -476,12 +421,10 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
 std::vector<std::string> MethodFactory::getAvailableMethods() {
     std::vector<std::string> available;
 
-    // Always available: native methods and force fields (no external dependencies)
-    available.insert(available.end(), {"eht", "pm3", "mndo", "am1", "pm6", "ngfn2", "ngfn1", "gfnff", "uff", "uff-d3", "qmdff"});
-
-    // Priority methods: always have native fallback
-    available.push_back("gfn2");
-    available.push_back("gfn1");
+    // Always available: native methods, force fields, and native xTB (gfn1/gfn2/ngfn1/ngfn2)
+    available.insert(available.end(), {"eht", "pm3", "mndo", "am1", "pm6",
+                                       "gfn1", "gfn2", "ngfn1", "ngfn2",
+                                       "gfnff", "uff", "uff-d3", "qmdff"});
 
     if (hasTBLite())
         available.push_back("ipea1");
@@ -520,20 +463,15 @@ json MethodFactory::getMethodInfo(const std::string& method_name) {
     info["type"] = "unknown";
     info["providers"] = json::array();
 
-    // Priority methods with fallback chains
-    if (method_name == "gfn2") {
-        info["type"] = "priority_based";
-        if (hasTBLite()) info["providers"].push_back({{"name", "TBLite"}, {"available", true}});
-        if (hasUlysses()) info["providers"].push_back({{"name", "Ulysses"}, {"available", true}});
-        if (hasXTB()) info["providers"].push_back({{"name", "XTB"}, {"available", true}});
-        info["providers"].push_back({{"name", "Native"}, {"available", true}});
+    // Native xTB methods (AP3: canonical providers since 2026-04-25)
+    if (method_name == "gfn2" || method_name == "ngfn2") {
+        info["type"] = "explicit";
+        info["providers"].push_back({{"name", "Native xTB"}, {"available", true}});
         return info;
     }
-    if (method_name == "gfn1") {
-        info["type"] = "priority_based";
-        if (hasTBLite()) info["providers"].push_back({{"name", "TBLite"}, {"available", true}});
-        if (hasXTB()) info["providers"].push_back({{"name", "XTB"}, {"available", true}});
-        info["providers"].push_back({{"name", "Native"}, {"available", true}});
+    if (method_name == "gfn1" || method_name == "ngfn1") {
+        info["type"] = "explicit";
+        info["providers"].push_back({{"name", "Native xTB"}, {"available", true}});
         return info;
     }
     if (method_name == "ipea1") {
@@ -558,8 +496,7 @@ json MethodFactory::getMethodInfo(const std::string& method_name) {
     // Native methods (always available)
     if (method_name == "eht" || method_name == "cgfnff" ||
         method_name == "pm3" || method_name == "mndo" ||
-        method_name == "am1" || method_name == "pm6" ||
-        method_name == "ngfn2" || method_name == "ngfn1") {
+        method_name == "am1" || method_name == "pm6") {
         info["type"] = "explicit";
         info["providers"].push_back({{"name", "Native"}, {"available", true}});
         return info;
@@ -602,8 +539,10 @@ void MethodFactory::printAvailableMethods() {
     fmt::print("  - mndo:  Native MNDO semi-empirical\n");
     fmt::print("  - am1:   Native AM1 semi-empirical\n");
     fmt::print("  - pm6:   Native PM6 semi-empirical\n");
-    fmt::print("  - ngfn2: Native GFN2-xTB (direct, bypasses priority chain)\n");
-    fmt::print("  - ngfn1: Native GFN1-xTB (direct, bypasses priority chain)\n");
+    fmt::print("  - gfn2:  Native GFN2-xTB (canonical, via curcuma::xtb::XTB) — alias ngfn2\n");
+    fmt::print("  - gfn1:  Native GFN1-xTB (canonical, via curcuma::xtb::XTB) — alias ngfn1\n");
+    fmt::print("  - ngfn2: Alias for gfn2 (backward compatibility)\n");
+    fmt::print("  - ngfn1: Alias for gfn1 (backward compatibility)\n");
     fmt::print("  - gfnff: Native C++ GFN-FF implementation\n");
 #ifdef USE_CUDA
     fmt::print("    (GPU acceleration: use '-gpu cuda' or '-gpu auto')\n");
@@ -623,24 +562,7 @@ void MethodFactory::printAvailableMethods() {
     fmt::print("  - CUDA GPU: NO\n");
 #endif
 
-    fmt::print("\nShared Methods (priority-based resolution with native fallback):\n");
-
-    // GFN2
-    fmt::print("  - gfn2: ");
-    std::vector<std::string> gfn2_providers;
-    if (hasTBLite()) gfn2_providers.push_back("TBLite");
-    if (hasUlysses()) gfn2_providers.push_back("Ulysses");
-    if (hasXTB()) gfn2_providers.push_back("XTB");
-    gfn2_providers.push_back("Native");
-    fmt::print("{}\n", fmt::format("{}", fmt::join(gfn2_providers, " > ")));
-
-    // GFN1
-    fmt::print("  - gfn1: ");
-    std::vector<std::string> gfn1_providers;
-    if (hasTBLite()) gfn1_providers.push_back("TBLite");
-    if (hasXTB()) gfn1_providers.push_back("XTB");
-    gfn1_providers.push_back("Native");
-    fmt::print("{}\n", fmt::format("{}", fmt::join(gfn1_providers, " > ")));
+    fmt::print("\nExternal Provider Methods:\n");
 
     // IPEA1
     fmt::print("  - ipea1: {}\n", hasTBLite() ? "TBLite" : "UNAVAILABLE");
