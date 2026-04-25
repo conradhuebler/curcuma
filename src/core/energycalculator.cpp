@@ -180,13 +180,14 @@ bool EnergyCalculator::createMethod(const std::string& method_name, const json& 
         
         ClearError();
 
-        // Track GPU fallback: user requested -gpu cuda but CUDA unavailable
+        // Track GPU fallback: warn only if -gpu cuda requested but CUDA not compiled in
         std::string gpu_req = config.value("gpu", "none");
         std::transform(gpu_req.begin(), gpu_req.end(), gpu_req.begin(), ::tolower);
+#ifndef USE_CUDA
         if (gpu_req == "cuda") {
             m_gpu_fallback = true;
         }
-
+#endif
         return true;
         
     } catch (const MethodCreationException& e) {
@@ -413,7 +414,7 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
             CurcumaLogger::energy_abs(m_energy, fmt::format("{} Final Energy", m_method_name));
         }
 
-        // Final warning if GPU was requested but fell back to CPU
+        // Final warning if GPU was requested but CUDA was not compiled in
         if (m_gpu_fallback && !m_gpu_fallback_warned) {
             CurcumaLogger::warn("Calculation completed on CPU. The requested -gpu cuda was not used.");
             m_gpu_fallback_warned = true;

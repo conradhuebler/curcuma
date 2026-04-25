@@ -248,6 +248,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     }
 
     // --- Step 1: GPU CN computation ---
+    auto t_cn_start = std::chrono::high_resolution_clock::now();
     m_gpu_workspace->computeCN(m_atom_types);
 
     // Copy CN from pinned buffers into pre-allocated Vectors (no heap allocs)
@@ -257,6 +258,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // prepareCNAndEEQ does: Gaussian weights, EEQ solve, weight derivatives, dc6dcn
     // We need CN uploaded to GPU before launching charge-independent kernels.
     m_gpu_workspace->setD3CN(m_gpu_cn_final);
+    auto t_cn_end = std::chrono::high_resolution_clock::now();
 
     // CN consistency check: GPU vs CPU recompute (verbosity >= 3)
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -426,11 +428,12 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         }
     }
 
-    auto t1 = std::chrono::high_resolution_clock::now();
+    auto t_prep_end = std::chrono::high_resolution_clock::now();
 
     // === OVERLAP: Launch charge-independent GPU kernels ===
     // These run asynchronously while CPU computes EEQ parameters below.
     m_gpu_workspace->prepareAndLaunchChargeIndependent(gradient);
+    auto t_launch_end = std::chrono::high_resolution_clock::now();
 
     // === CPU: CN distribution + EEQ parameter extraction (skip CPU EEQ solve) ===
     // prepareCNAndEEQ with skip_eeq=true: does CN, CNF, dcn setup but NO matrix build/solve.
@@ -541,7 +544,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         charges = m_gfnff->getLastCharges();
     }
 
-    auto t2 = std::chrono::high_resolution_clock::now();
+    auto t_eeq_end = std::chrono::high_resolution_clock::now();
 
     // === Upload EEQ charges and finish: Coulomb + postprocess + download ===
     m_gpu_workspace->setEEQCharges(charges);
@@ -551,51 +554,41 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::energy_abs(m_last_energy, "GFN-FF (GPU) Energy");
 
-        // Claude Generated (Apr 2026): Granular GPU timing + wallclock-normalized breakdown
+        // Claude Generated (April 2026): Granular GPU timing + pipeline analysis
         double t_gpu_cn    = std::chrono::duration<double, std::milli>(t_cn_end - t_cn_start).count();
-        double t_dlogdcn   = std::chrono::duration<double, std::milli>(t_dlogdcn_end - t_cn_end).count();
-        double t_hb_cn     = std::chrono::duration<double, std::milli>(t_hb_cn_end - t_dlogdcn_end).count();
-        double t_hbxb      = std::chrono::duration<double, std::milli>(t_hbxb_start - t_hb_cn_end).count();
         double t_prep      = std::chrono::duration<double, std::milli>(t_prep_end - t_cn_end).count();
         double t_launch    = std::chrono::duration<double, std::milli>(t_launch_end - t_prep_end).count();
         double t_cpu_eeq   = std::chrono::duration<double, std::milli>(t_eeq_end - t_launch_end).count();
         double t_coulomb   = std::chrono::duration<double, std::milli>(t4 - t_eeq_end).count();
-        double t_calc      = std::chrono::duration<double, std::milli>(t4 - t0).count();
-        double t_init      = m_gfnff->getTopologyTimeMs() + m_gfnff->getParamGenTimeMs();
-        double t_wall      = t_calc + t_init;
+        double t_total     = std::chrono::duration<double, std::milli>(t4 - t0).count();
 
-        auto pct = [&](double t) { return t_wall > 0 ? 100.0 * t / t_wall : 0.0; };
+        auto pct = [&](double t) { return t_total > 0 ? 100.0 * t / t_total : 0.0; };
 
         CurcumaLogger::result("\n[RESULT] GFN-FF (GPU) Timing Breakdown:");
-        CurcumaLogger::result("  Phase                          Time (ms)   %Wall");
+        CurcumaLogger::result("  Phase                          Time (ms)   %Total");
         CurcumaLogger::result("  --------------------------------------------------");
         CurcumaLogger::result(fmt::format("  GPU CN compute                 {:>10.1f}  {:>5.1f}%", t_gpu_cn, pct(t_gpu_cn)));
-        if (gradient) {
-            CurcumaLogger::result(fmt::format("  dlogdcn compute                {:>10.1f}  {:>5.1f}%", t_dlogdcn, pct(t_dlogdcn)));
-        }
-        CurcumaLogger::result(fmt::format("  HB CN per-bond loop            {:>10.1f}  {:>5.1f}%", t_hb_cn, pct(t_hb_cn)));
-        CurcumaLogger::result(fmt::format("  HB/XB detection                {:>10.1f}  {:>5.1f}%", t_hbxb, pct(t_hbxb)));
+        CurcumaLogger::result(fmt::format("  CPU Prep (HB/XB, dlogdcn)      {:>10.1f}  {:>5.1f}%", t_prep, pct(t_prep)));
         CurcumaLogger::result(fmt::format("  GPU kernel launch overhead     {:>10.1f}  {:>5.1f}%", t_launch, pct(t_launch)));
         CurcumaLogger::result(fmt::format("  CPU EEQ (parallel to GPU)      {:>10.1f}  {:>5.1f}%", t_cpu_eeq, pct(t_cpu_eeq)));
         CurcumaLogger::result(fmt::format("  Coulomb + postprocess + DMA    {:>10.1f}  {:>5.1f}%", t_coulomb, pct(t_coulomb)));
         CurcumaLogger::result("  --------------------------------------------------");
-        CurcumaLogger::result(fmt::format("  Calculation Total              {:>10.1f}  {:>5.1f}%", t_calc, pct(t_calc)));
-        CurcumaLogger::result(fmt::format("  Initialization (not above)   {:>10.1f}  {:>5.1f}%", t_init, pct(t_init)));
-        CurcumaLogger::result(fmt::format("  Wallclock Total                {:>10.1f}  100.0%", t_wall));
+        CurcumaLogger::result(fmt::format("  Total                          {:>10.1f}  100.0%", t_total));
 
-        // Pipeline analysis — sum all sequential work for realistic parallelization estimate
-        double seq_time = t_prep + t_cpu_eeq + t_coulomb;
-        double overlap_time = std::max(0.0, t_cpu_eeq - t_prep);
+        // Pipeline analysis
+        double seq_time = t_gpu_cn + t_prep + t_launch + t_coulomb;
+        double overlap_time = t_cpu_eeq;
         CurcumaLogger::result("\n[RESULT] GPU Pipeline Analysis:");
         CurcumaLogger::result(fmt::format(
-            "  Sequential work (prep + EEQ + finish):            {:.1f} ms ({:.1f}% of calc)",
-            seq_time, t_calc > 0 ? 100.0 * seq_time / t_calc : 0.0));
+            "  Sequential work (CN + prep + launch + finish): {:.1f} ms ({:.1f}%)",
+            seq_time, pct(seq_time)));
         CurcumaLogger::result(fmt::format(
-            "  CPU/GPU overlap (EEQ || charge-indep kernels):  {:.1f} ms ({:.1f}% of calc)",
-            overlap_time, t_calc > 0 ? 100.0 * overlap_time / t_calc : 0.0));
+            "  CPU/GPU overlap (EEQ || charge-indep kernels):  {:.1f} ms ({:.1f}%)",
+            overlap_time, pct(overlap_time)));
+        double critical_path = seq_time;
         CurcumaLogger::result(fmt::format(
-            "  Sequential fraction of wallclock:                 {:.1f}%",
-            t_wall > 0 ? 100.0 * (seq_time + t_init) / t_wall : 0.0));
+            "  Critical path (lower bound):                    {:.1f} ms",
+            critical_path));
         if (t_cpu_eeq > 0) {
             CurcumaLogger::result(
                 "    CPU EEQ ran parallel to GPU charge-independent kernels."
