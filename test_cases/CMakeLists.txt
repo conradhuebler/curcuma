@@ -186,3 +186,7 @@ endif()
 # Claude Generated: CLI argument validation test suite (October 2025)
 # Include comprehensive Bash-based CLI tests for all capabilities
 add_subdirectory(cli)
+
+# Claude Generated (Phase 0, Apr 2026): reference SCC dumps from tblite
+# for native GFN1/GFN2 validation (see scripts/extract_xtb_params.py + xtb_native.*)
+add_subdirectory(sqm_reference)

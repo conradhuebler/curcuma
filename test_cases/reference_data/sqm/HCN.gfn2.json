@@ -1,0 +1,112 @@
+{
+  "molecule": "HCN",
+  "geometry_file": "test_cases/molecules/trimers/HCN.xyz",
+  "charge": 0,
+  "spin_unpaired": 0,
+  "method": "gfn2",
+  "xtb_version": "6.6.1",
+  "energies": {
+    "total_energy": -5.504066162387,
+    "scc_energy": -5.632580784062,
+    "repulsion": 0.128514622591,
+    "isotropic_es": 0.004723945165,
+    "anisotropic_es": 0.000296203534,
+    "anisotropic_xc": 0.021112446124,
+    "dispersion": -0.000496463245,
+    "homo_lumo_gap_eV": 5.950926428904
+  },
+  "orbitals": [
+    {
+      "index": 1,
+      "occupation": 2.0,
+      "energy_Eh": -0.6644534,
+      "energy_eV": -18.0807,
+      "tag": ""
+    },
+    {
+      "index": 2,
+      "occupation": 2.0,
+      "energy_Eh": -0.5757773,
+      "energy_eV": -15.6677,
+      "tag": ""
+    },
+    {
+      "index": 3,
+      "occupation": 2.0,
+      "energy_Eh": -0.5064864,
+      "energy_eV": -13.7822,
+      "tag": ""
+    },
+    {
+      "index": 4,
+      "occupation": 2.0,
+      "energy_Eh": -0.5064864,
+      "energy_eV": -13.7822,
+      "tag": ""
+    },
+    {
+      "index": 5,
+      "occupation": 2.0,
+      "energy_Eh": -0.4498742,
+      "energy_eV": -12.2417,
+      "tag": "HOMO"
+    },
+    {
+      "index": 6,
+      "occupation": 0.0,
+      "energy_Eh": -0.2311817,
+      "energy_eV": -6.2908,
+      "tag": "LUMO"
+    },
+    {
+      "index": 7,
+      "occupation": 0.0,
+      "energy_Eh": -0.2311817,
+      "energy_eV": -6.2908,
+      "tag": ""
+    },
+    {
+      "index": 8,
+      "occupation": 0.0,
+      "energy_Eh": 0.1199624,
+      "energy_eV": 3.2643,
+      "tag": ""
+    },
+    {
+      "index": 9,
+      "occupation": 0.0,
+      "energy_Eh": 1.1401945,
+      "energy_eV": 31.0263,
+      "tag": ""
+    }
+  ],
+  "mulliken": [
+    {
+      "index": 1,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 1.838,
+      "q_mulliken": 0.075
+    },
+    {
+      "index": 2,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.927,
+      "q_mulliken": 0.083
+    },
+    {
+      "index": 3,
+      "Z": 7,
+      "symbol": "N",
+      "cov_cn": 0.91,
+      "q_mulliken": -0.158
+    }
+  ],
+  "dipole": {
+    "x": 0.081,
+    "y": 0.873,
+    "z": 0.544,
+    "total_Debye": 2.621
+  }
+}

@@ -1,8 +1,11 @@
 # GFN-FF Implementation Status
 
-**Last Updated**: 2026-04-11
+**Last Updated**: 2026-04-25
 **Implementation**: AI-generated, machine-tested — **human production testing pending**
 **Location**: `src/core/energy_calculators/ff_methods/`
+
+> **Note**: Gradient documentation previously in `GFNFF_GRADIENTS.md` has been consolidated here. See archive for historical details.
+> **Note**: Physics audit details previously in `GFNFF_PHYSICS_AUDIT.md` and dispersion fix details from `GFNFF_DISPERSION_FIX.md` have been consolidated here.
 
 ---
 

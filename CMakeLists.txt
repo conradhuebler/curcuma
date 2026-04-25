@@ -352,6 +352,12 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/gfn1_params_loader.cpp
         src/core/energy_calculators/qm_methods/gfn2.cpp
         src/core/energy_calculators/qm_methods/gfn2_params_loader.cpp
+        src/core/energy_calculators/qm_methods/xtb_native.cpp
+        src/core/energy_calculators/qm_methods/xtb_h0.cpp
+        src/core/energy_calculators/qm_methods/xtb_coulomb.cpp
+        src/core/energy_calculators/qm_methods/xtb_thirdorder.cpp
+        src/core/energy_calculators/qm_methods/xtb_scf.cpp
+        src/core/energy_calculators/qm_methods/xtb_multipole.cpp
         src/core/energy_calculators/qm_methods/nddo_params.cpp
         src/core/energy_calculators/ff_methods/gfnff_method.cpp
         src/core/energy_calculators/ff_methods/gfnff_advanced.cpp
@@ -506,41 +512,26 @@ endif()
     src/capabilities/c_code/interface.c
 )
 add_library(km ${km_SRC})
-if(USE_ULYSSES)
 
-set(ulysess_SRC
-    src/core/energy_calculators/qm_methods/interface/ulysses.cpp
-)
-add_executable(ulysses_helper
-src/helpers/ulysses_helper.cpp
-)
-else()
-set(ulysess_SRC
-    src/core/energy_calculators/qm_methods/eht.cpp
-)
-endif(USE_ULYSSES)
-add_library(ulysses_lib ${ulysess_SRC})
-
-# Claude Generated (October 2025): Add USE_ULYSSES compile definition
 if(USE_ULYSSES)
+    add_library(ulysses_lib
+        src/core/energy_calculators/qm_methods/interface/ulysses.cpp
+    )
     target_compile_definitions(ulysses_lib PRIVATE USE_ULYSSES)
+    if(USE_BLAS)
+        target_link_libraries(ulysses_lib ${BLAS_LIBRARIES})
+    endif()
+    if(USE_MKL)
+        target_link_libraries(ulysses_lib -m64 -I${MKLROOT}/include  -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)
+    endif()
+
+    add_executable(ulysses_helper
+        src/helpers/ulysses_helper.cpp
+    )
+    target_link_libraries(ulysses_helper PUBLIC ulysses_lib curcuma_core)
+
+    target_link_libraries(curcuma_core km ulysses_lib)
 endif()
-
-if(USE_BLAS)
-    target_link_libraries(ulysses_lib ${BLAS_LIBRARIES})
-endif()
-if(USE_MKL)
-    target_link_libraries(ulysses_lib -m64 -I${MKLROOT}/include  -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)
-
-endif()
-if(USE_ULYSSES)
-
-target_link_libraries(ulysses_helper PUBLIC ulysses_lib curcuma_core)
-endif()
-
-
-
-target_link_libraries(curcuma_core km ulysses_lib)
 
 add_executable(curcuma
         src/main.cpp

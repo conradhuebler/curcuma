@@ -1,0 +1,98 @@
+{
+  "molecule": "HCl",
+  "geometry_file": "test_cases/molecules/dimers/HCl.xyz",
+  "charge": 0,
+  "spin_unpaired": 0,
+  "method": "gfn1",
+  "xtb_version": "6.6.1",
+  "energies": {
+    "total_energy": -4.68387170259,
+    "scc_energy": -4.815996621278,
+    "repulsion": 0.132243749948,
+    "electrostatic": 0.006127715023,
+    "dispersion": -0.00011883126,
+    "halogen_bond": 0.0,
+    "homo_lumo_gap_eV": 8.746359497631
+  },
+  "orbitals": [
+    {
+      "index": 1,
+      "occupation": 2.0,
+      "energy_Eh": -0.9571403,
+      "energy_eV": -26.0451,
+      "tag": ""
+    },
+    {
+      "index": 2,
+      "occupation": 2.0,
+      "energy_Eh": -0.580048,
+      "energy_eV": -15.7839,
+      "tag": ""
+    },
+    {
+      "index": 3,
+      "occupation": 2.0,
+      "energy_Eh": -0.4976827,
+      "energy_eV": -13.5426,
+      "tag": ""
+    },
+    {
+      "index": 4,
+      "occupation": 2.0,
+      "energy_Eh": -0.4976827,
+      "energy_eV": -13.5426,
+      "tag": "HOMO"
+    },
+    {
+      "index": 5,
+      "occupation": 0.0,
+      "energy_Eh": -0.1762599,
+      "energy_eV": -4.7963,
+      "tag": "LUMO"
+    },
+    {
+      "index": 6,
+      "occupation": 0.0,
+      "energy_Eh": -0.0935244,
+      "energy_eV": -2.5449,
+      "tag": ""
+    },
+    {
+      "index": 7,
+      "occupation": 0.0,
+      "energy_Eh": -0.0760815,
+      "energy_eV": -2.0703,
+      "tag": ""
+    },
+    {
+      "index": 8,
+      "occupation": 0.0,
+      "energy_Eh": -0.0760815,
+      "energy_eV": -2.0703,
+      "tag": ""
+    },
+    {
+      "index": 9,
+      "occupation": 0.0,
+      "energy_Eh": -0.0760815,
+      "energy_eV": -2.0703,
+      "tag": ""
+    },
+    {
+      "index": 10,
+      "occupation": 0.0,
+      "energy_Eh": -0.0760815,
+      "energy_eV": -2.0703,
+      "tag": ""
+    },
+    {
+      "index": 11,
+      "occupation": 0.0,
+      "energy_Eh": 1.8292084,
+      "energy_eV": 49.7753,
+      "tag": ""
+    }
+  ],
+  "mulliken": [],
+  "dipole": {}
+}

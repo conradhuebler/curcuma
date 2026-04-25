@@ -1,0 +1,56 @@
+{
+  "molecule": "H2",
+  "geometry_file": "test_cases/molecules/dimers/HH.xyz",
+  "charge": 0,
+  "spin_unpaired": 0,
+  "method": "gfn2",
+  "xtb_version": "6.6.1",
+  "energies": {
+    "total_energy": -0.876597667514,
+    "scc_energy": -1.068098360013,
+    "repulsion": 0.191500692499,
+    "isotropic_es": 0.0,
+    "anisotropic_es": 0.002840801853,
+    "anisotropic_xc": 0.004569270704,
+    "dispersion": -5.2182727e-05,
+    "homo_lumo_gap_eV": 45.65593567371
+  },
+  "orbitals": [
+    {
+      "index": 1,
+      "occupation": 2.0,
+      "energy_Eh": -0.516846,
+      "energy_eV": -14.0641,
+      "tag": "HOMO"
+    },
+    {
+      "index": 2,
+      "occupation": 0.0,
+      "energy_Eh": 1.1609787,
+      "energy_eV": 31.5918,
+      "tag": "LUMO"
+    }
+  ],
+  "mulliken": [
+    {
+      "index": 1,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.981,
+      "q_mulliken": -0.0
+    },
+    {
+      "index": 2,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.981,
+      "q_mulliken": 0.0
+    }
+  ],
+  "dipole": {
+    "x": 0.0,
+    "y": -0.0,
+    "z": 0.0,
+    "total_Debye": 0.0
+  }
+}

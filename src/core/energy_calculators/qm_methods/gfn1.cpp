@@ -17,6 +17,7 @@
  */
 
 #include "gfn1.h"
+#include "gfn1_params.hpp"
 #include "diis_accelerator.h"
 #include "STO_CGTO.hpp"
 #include "src/core/curcuma_logger.h"
@@ -554,6 +555,10 @@ Matrix GFN1::MakeH(const Matrix& S, const std::vector<STO::Orbital>& basisset)
         const auto& sp = m_param_db.getElement(Z_i).shell_list[sidx];
         // TBLite h0.f90:132: selfenergy(ii+ish) = selfenergy(ii+ish) - kcn(ish,izp) * cn(iat)
         H(i, i) = sp.selfenergy - sp.kcn * CN_i;
+        if (CurcumaLogger::get_verbosity() >= 3 && i == 0) {
+            fmt::print("  DEBUG H0 diagonal: Z={}, sidx={}, se={:.6f}, kcn={:.6f}, CN={:.6f}, H0={:.6f}\n",
+                       Z_i, sidx, sp.selfenergy, sp.kcn, CN_i, H(i,i));
+        }
     }
 
     // Pass 2: off-diagonal elements using already-set diagonals
@@ -717,12 +722,15 @@ double GFN1::getHamiltonianScaleIdx(const STO::Orbital& fi, const STO::Orbital& 
 
 Vector GFN1::calculateCoordinationNumbers()
 {
-    // Claude Generated: GFN1 CN with double-exponential (same as GFN2)
-    // TBLite ncoord/gfn.f90: count = gfn_count(ka, r, rc) * gfn_count(kb, r, rc+r_shift)
-    // ka=10, kb=20, r_shift=2.0 Bohr
+    // Claude Generated: GFN1 CN with single-exponential (TBLite ncoord/exp.f90)
+    // TBLite gfn1.f90:613: call new_ncoord(calc%ncoord, mol, cn_type="exp")
+    // exp.f90: count = 1/(1 + exp(-kcn * (rc/r - 1))), kcn=16.0
+    // TBLite uses D3 covalent radii (4/3 * Pyykko2009) for CN calculation
+
+    const double kcn = 16.0;  // TBLite exp_ncoord default
+    const double d3_scale = 4.0 / 3.0;  // D3 scaling of covalent radii
 
     Vector CN = Vector::Zero(m_atomcount);
-    double r_shift_ang = GFN1_CN_RSHIFT * au;  // Convert Bohr to Angstrom
 
     for (int A = 0; A < m_atomcount; ++A) {
         for (int B = 0; B < m_atomcount; ++B) {
@@ -731,12 +739,11 @@ Vector GFN1::calculateCoordinationNumbers()
             double R_AB = (m_geometry.row(A) - m_geometry.row(B)).norm();  // Angstrom
             if (R_AB < 1.0e-6) continue;
 
-            double R_cov = getCovalentRadius(m_atoms[A]) + getCovalentRadius(m_atoms[B]);  // Angstrom
+            double R_cov = d3_scale * (getCovalentRadius(m_atoms[A]) + getCovalentRadius(m_atoms[B]));  // D3 radii
 
-            // Double-exponential: product of two sigmoid functions
-            double count1 = 1.0 / (1.0 + std::exp(-GFN1_CN_KA * (R_cov / R_AB - 1.0)));
-            double count2 = 1.0 / (1.0 + std::exp(-GFN1_CN_KB * ((R_cov + r_shift_ang) / R_AB - 1.0)));
-            CN(A) += count1 * count2;
+            // Single-exponential: count = 1/(1 + exp(-kcn * (rc/r - 1)))
+            double count = 1.0 / (1.0 + std::exp(-kcn * (R_cov / R_AB - 1.0)));
+            CN(A) += count;
         }
     }
 
@@ -880,23 +887,52 @@ Matrix GFN1::buildFockMatrix(const Matrix& density)
     // Skip Coulomb contribution for zero density (first SCF iteration)
     if (density.norm() < 1e-10) return F;
 
-    // Compute Coulomb potential V[μ] for each basis function
-    // GFN1: atom-resolved gamma_ss, HARMONIC mean (TBLite effective.f90:142-152)
-    // GFN1 harmonic: gam = 2*gi*gj/(gi+gj), kernel: 1/sqrt(R² + 1/gam²)
-    // TODO: Upgrade to fully shell-resolved Coulomb (shell-pair γ matrix) for <1 mEh accuracy
+    // Shell-resolved Coulomb potential V[μ] (Claude Generated April 2026)
+    // V[μ] = Σ_B Σ_t Δq_{B,t} * γ_{s(μ),A; t,B}
+    // γ_{sA,tB} = 1/sqrt(R_AB² + 1/gam²), gam = 2*η_{A,s}*η_{B,t}/(η_{A,s}+η_{B,t})
+    // η_{A,s} = HUBBARD[A] * SHELL_HUBBARD[A][l_s]  (TBLite effective.f90:142-152)
+    // Shell hardness from parameter database: gamma_ss(l=0), gamma_sp(l=1), gamma_pp(l=2)
+
+    // Helper: get shell hardness for atom Z, angular momentum l
+    auto shellHardness = [&](int Z, int l) -> double {
+        const auto& e = m_param_db.getElement(Z);
+        if (l == 1) return e.gamma_sp;   // p-shell: HUBBARD * SHELL_HUBBARD[1]
+        if (l == 2) return e.gamma_pp;   // d-shell: HUBBARD * SHELL_HUBBARD[2]
+        return e.gamma_ss;               // s-shell (l=0): HUBBARD * 1.0
+    };
+
     std::vector<double> V(m_nbasis, 0.0);
     for (int mu = 0; mu < m_nbasis; ++mu) {
         int A = m_basis[mu].atom;
-        double gamma_AA = m_param_db.getElement(m_atoms[A]).gamma_ss;
+        int l_mu = m_basis[mu].shell;
+        int Z_A = m_atoms[A];
+        double eta_mu = shellHardness(Z_A, l_mu);
 
         for (int B = 0; B < m_atomcount; ++B) {
+            int Z_B = m_atoms[B];
             double R_AB = (A == B) ? 0.0 : (m_geometry.row(A) - m_geometry.row(B)).norm() / au;
-            double gamma_BB = m_param_db.getElement(m_atoms[B]).gamma_ss;
-            // GFN1 Klopman-Ohno: harmonic mean gamma, then 1/sqrt(R² + 1/gam²)
-            double gam = 2.0 * gamma_AA * gamma_BB / (gamma_AA + gamma_BB);
-            double gamma_AB = 1.0 / std::sqrt(R_AB * R_AB + 1.0 / (gam * gam));
-            V[mu] += atomic_charges(B) * gamma_AB;
+            const auto& elem_B = m_param_db.getElement(Z_B);
+
+            // Sum over shells t of atom B
+            for (const auto& [t_sidx, dq_Bt] : dq[B]) {
+                int l_t = elem_B.shell_list[t_sidx].angular_momentum;
+                double eta_Bt = shellHardness(Z_B, l_t);
+                double gam = 2.0 * eta_mu * eta_Bt / (eta_mu + eta_Bt);
+                double gamma_st = 1.0 / std::sqrt(R_AB * R_AB + 1.0 / (gam * gam));
+                V[mu] += dq_Bt * gamma_st;
+            }
         }
+    }
+
+    // Third-order Hubbard correction (atom-resolved, TBLite thirdorder.f90)
+    // V3[A] = q_A² * hubbard_derivs(Z_A) — adds nonlinear charge-dependent potential
+    // GFN1 uses atom-resolved (not shell-resolved): spread(p_hubbard_derivs, 1, 1)
+    // RAW values must be multiplied by 0.1 (TBLite gfn1.f90 line 189)
+    for (int mu = 0; mu < m_nbasis; ++mu) {
+        int A = m_basis[mu].atom;
+        int Z_A = m_atoms[A];
+        double hubb_deriv = GFN1Params::GFN1_HUBBARD_DERIVS_RAW[Z_A - 1] * 0.1;
+        V[mu] += atomic_charges(A) * atomic_charges(A) * hubb_deriv;
     }
 
     // Modify Fock matrix: F(μ,ν) -= 0.5 * S(μ,ν) * (V[μ] + V[ν])
@@ -1008,12 +1044,13 @@ double GFN1::calculateRepulsionEnergy() const
             double dz = m_geometry(A, 2) - m_geometry(B, 2);
             double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz) / au;
 
-            // Fix 5 (March 2026): correct GFN1/GFN2 repulsion formula — mirrors GFN2
-            // Bugs: arithmetic mean of alpha (should be geometric), sum of Zeff (should be product),
-            // missing kexp polynomial (R^1.5 for heavy, R^1.0 for H-H)
-            double alpha_AB = std::sqrt(alpha_A * alpha_B);   // geometric mean
-            double zeff_AB  = Z_eff_A * Z_eff_B;              // product
-            double kexp     = (m_atoms[A] > 2 || m_atoms[B] > 2) ? 1.5 : 1.0;
+            // GFN1 repulsion: TBLite gfn1.f90 lines 54,627
+            // new_repulsion(calc%repulsion, mol, alpha, zeff, rep_kexp, rep_kexp, rep_rexp)
+            // GFN1 uses kexp=1.5 for ALL pairs (both heavy and H-H).
+            // GFN2 differs: kexp_light=1.0 for light-light (H-H) pairs.
+            double alpha_AB = std::sqrt(alpha_A * alpha_B);   // geometric mean (TBLite line 78)
+            double zeff_AB  = Z_eff_A * Z_eff_B;              // product (TBLite line 85)
+            const double kexp = 1.5;                           // GFN1: always 1.5, no H-H exception
             double V_rep    = zeff_AB * std::exp(-alpha_AB * std::pow(R_AB, kexp)) / R_AB;
 
             E_rep += V_rep;
@@ -1025,76 +1062,92 @@ double GFN1::calculateRepulsionEnergy() const
 
 double GFN1::calculateCoulombEnergy() const
 {
-    // Claude Generated: GFN1 Coulomb energy with TBLite parameters
-    // GFN1 uses simpler ES2 model (no ES3 third-order correction)
-    // Reference: S. Grimme et al., JCTC 2017, 13, 1989
-    //
-    // Fix 3 (March 2026): replace Z_A-based charge with refocc-based delta-charge.
-    // Bug: charges(A) = Z_A - mulliken_pop used nuclear charge Z_A as reference.
-    // For C (Z=6) with ~4 valence electrons this gave q=+2, for O (Z=8) q=+2,
-    // causing E_ES2 ~ 0.5*4*gamma per atom — many Hartree of false positive energy.
-    // Correct: delta_q[A][s] = refocc[s] - shell_pop[s]  (mirrors GFN2 line 592)
+    // Claude Generated: GFN1 shell-resolved Coulomb energy (April 2026)
+    // E_ES2 = (1/2) Σ_{A,s} Σ_{B,t} Δq_{A,s} * γ_{sA,tB} * Δq_{B,t}
+    // γ_{sA,tB} = 1/sqrt(R_AB² + 1/gam²), gam = 2*η_{A,s}*η_{B,t}/(η_{A,s}+η_{B,t})
+    // Matches TBLite effective.f90:142-152 with shell-resolved Hubbard parameters.
 
     Matrix PS = m_density * m_overlap;
 
-    // Accumulate shell populations per atom, indexed by shell_list index
-    // Claude Generated (March 2026): shell_list index for correct H two-s-shell tracking
+    // Shell populations per atom
     std::vector<std::map<int, double>> shell_pop(m_atomcount);
     for (int mu = 0; mu < m_nbasis; ++mu) {
-        int A   = m_basis[mu].atom;
+        int A    = m_basis[mu].atom;
         int sidx = m_basis_shell_idx[mu];
         shell_pop[A][sidx] += PS(mu, mu);
     }
 
-    // Delta-charges per shell and per atom using refocc from shell_list
+    // Shell-resolved delta-charges Δq_{A,s} = refocc_{A,s} - pop_{A,s}
     std::vector<std::map<int, double>> dq(m_atomcount);
     Vector charges = Vector::Zero(m_atomcount);
-
     for (int A = 0; A < m_atomcount; ++A) {
-        int Z_A = m_atoms[A];
-        const auto& elem = m_param_db.getElement(Z_A);
+        const auto& elem = m_param_db.getElement(m_atoms[A]);
         for (auto& [sidx, pop] : shell_pop[A]) {
             double ref = elem.shell_list[sidx].refocc;
             dq[A][sidx] = ref - pop;
             charges(A) += dq[A][sidx];
         }
     }
-
     const_cast<GFN1*>(this)->m_charges = charges;
 
-    // ES2: Effective Coulomb with HARMONIC mean (GFN1-specific, TBLite effective.f90:142-152)
-    // GFN1 harmonic: gam = 2*gi*gj/(gi+gj), kernel: 1/sqrt(R² + 1/gam²)
-    double E_ES2 = 0.0;
+    // Shell hardness helper: η_{A,s} = HUBBARD[A] * SHELL_HUBBARD[A][l_s]
+    auto shellHardness = [&](int Z, int l) -> double {
+        const auto& e = m_param_db.getElement(Z);
+        if (l == 1) return e.gamma_sp;
+        if (l == 2) return e.gamma_pp;
+        return e.gamma_ss;
+    };
 
+    // Shell-resolved ES2 energy
+    double E_ES2 = 0.0;
     for (int A = 0; A < m_atomcount; ++A) {
         int Z_A = m_atoms[A];
-        double gamma_AA = m_param_db.hasElement(Z_A)
-                          ? m_param_db.getElement(Z_A).gamma_ss
-                          : m_params.getHardness(Z_A);
+        for (const auto& [s_sidx, dq_As] : dq[A]) {
+            int l_s = m_param_db.getElement(Z_A).shell_list[s_sidx].angular_momentum;
+            double eta_As = shellHardness(Z_A, l_s);
 
-        // On-site: gam_AA = gamma_AA (harmonic mean of same value = itself)
-        E_ES2 += 0.5 * charges(A) * charges(A) * gamma_AA;
+            // On-site (A=B, s=t): γ = η_{A,s} (Klopman-Ohno at R=0)
+            E_ES2 += 0.5 * dq_As * dq_As * eta_As;
 
-        for (int B = A + 1; B < m_atomcount; ++B) {
-            int Z_B = m_atoms[B];
-            double gamma_BB = m_param_db.hasElement(Z_B)
-                              ? m_param_db.getElement(Z_B).gamma_ss
-                              : m_params.getHardness(Z_B);
+            // Off-site: all (B>A) with all shells t of B
+            for (int B = A + 1; B < m_atomcount; ++B) {
+                int Z_B = m_atoms[B];
+                double dx = m_geometry(A,0) - m_geometry(B,0);
+                double dy = m_geometry(A,1) - m_geometry(B,1);
+                double dz = m_geometry(A,2) - m_geometry(B,2);
+                double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz) / au;
 
-            double dx = m_geometry(A, 0) - m_geometry(B, 0);
-            double dy = m_geometry(A, 1) - m_geometry(B, 1);
-            double dz = m_geometry(A, 2) - m_geometry(B, 2);
-            double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz) / au;
+                for (const auto& [t_sidx, dq_Bt] : dq[B]) {
+                    int l_t = m_param_db.getElement(Z_B).shell_list[t_sidx].angular_momentum;
+                    double eta_Bt = shellHardness(Z_B, l_t);
+                    double gam = 2.0 * eta_As * eta_Bt / (eta_As + eta_Bt);
+                    double gamma_st = 1.0 / std::sqrt(R_AB*R_AB + 1.0/(gam*gam));
+                    E_ES2 += dq_As * dq_Bt * gamma_st;
+                }
+            }
 
-            // GFN1 Klopman-Ohno: harmonic mean, then 1/sqrt(R² + 1/gam²)
-            double gam = 2.0 * gamma_AA * gamma_BB / (gamma_AA + gamma_BB);
-            double gamma_AB = 1.0 / std::sqrt(R_AB * R_AB + 1.0 / (gam * gam));
-
-            E_ES2 += charges(A) * charges(B) * gamma_AB;
+            // Same-atom, different shells (s≠t, A=B): on-site cross-shell
+            for (const auto& [t_sidx, dq_At] : dq[A]) {
+                if (t_sidx <= s_sidx) continue;  // count each pair once
+                int l_t = m_param_db.getElement(Z_A).shell_list[t_sidx].angular_momentum;
+                double eta_At = shellHardness(Z_A, l_t);
+                double gam = 2.0 * eta_As * eta_At / (eta_As + eta_At);
+                // On-site cross: Klopman-Ohno at R=0 → γ = gam
+                E_ES2 += dq_As * dq_At * gam;
+            }
         }
     }
 
-    return E_ES2;
+    // Third-order Hubbard correction (atom-resolved, TBLite thirdorder.f90)
+    // E3 = Σ_A q_A³ * hubbard_derivs(Z_A) / 3
+    double E_3rd = 0.0;
+    for (int A = 0; A < m_atomcount; ++A) {
+        int Z_A = m_atoms[A];
+        double hubb_deriv = GFN1Params::GFN1_HUBBARD_DERIVS_RAW[Z_A - 1] * 0.1;
+        E_3rd += charges(A) * charges(A) * charges(A) * hubb_deriv / 3.0;
+    }
+
+    return E_ES2 + E_3rd;
 }
 
 double GFN1::calculateDispersionEnergy() const

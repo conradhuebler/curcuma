@@ -1,0 +1,294 @@
+{
+  "molecule": "C6H6",
+  "geometry_file": "test_cases/molecules/larger/C6H6.xyz",
+  "charge": 0,
+  "spin_unpaired": 0,
+  "method": "gfn2",
+  "xtb_version": "6.6.1",
+  "energies": {
+    "total_energy": -15.879607324421,
+    "scc_energy": -16.199973451235,
+    "repulsion": 0.320359390473,
+    "isotropic_es": 0.000790614419,
+    "anisotropic_es": 0.002487501709,
+    "anisotropic_xc": 0.012283559986,
+    "dispersion": -0.008026191202,
+    "homo_lumo_gap_eV": 4.958145822003
+  },
+  "orbitals": [
+    {
+      "index": 1,
+      "occupation": 2.0,
+      "energy_Eh": -0.6423153,
+      "energy_eV": -17.4783,
+      "tag": ""
+    },
+    {
+      "index": 3,
+      "occupation": 2.0,
+      "energy_Eh": -0.611969,
+      "energy_eV": -16.6525,
+      "tag": ""
+    },
+    {
+      "index": 4,
+      "occupation": 2.0,
+      "energy_Eh": -0.5693479,
+      "energy_eV": -15.4927,
+      "tag": ""
+    },
+    {
+      "index": 5,
+      "occupation": 2.0,
+      "energy_Eh": -0.5693473,
+      "energy_eV": -15.4927,
+      "tag": ""
+    },
+    {
+      "index": 6,
+      "occupation": 2.0,
+      "energy_Eh": -0.5315424,
+      "energy_eV": -14.464,
+      "tag": ""
+    },
+    {
+      "index": 7,
+      "occupation": 2.0,
+      "energy_Eh": -0.4949641,
+      "energy_eV": -13.4687,
+      "tag": ""
+    },
+    {
+      "index": 8,
+      "occupation": 2.0,
+      "energy_Eh": -0.4896583,
+      "energy_eV": -13.3243,
+      "tag": ""
+    },
+    {
+      "index": 9,
+      "occupation": 2.0,
+      "energy_Eh": -0.4765141,
+      "energy_eV": -12.9666,
+      "tag": ""
+    },
+    {
+      "index": 10,
+      "occupation": 2.0,
+      "energy_Eh": -0.4764963,
+      "energy_eV": -12.9661,
+      "tag": ""
+    },
+    {
+      "index": 11,
+      "occupation": 2.0,
+      "energy_Eh": -0.4754304,
+      "energy_eV": -12.9371,
+      "tag": ""
+    },
+    {
+      "index": 12,
+      "occupation": 2.0,
+      "energy_Eh": -0.4212875,
+      "energy_eV": -11.4638,
+      "tag": ""
+    },
+    {
+      "index": 13,
+      "occupation": 2.0,
+      "energy_Eh": -0.4212854,
+      "energy_eV": -11.4638,
+      "tag": ""
+    },
+    {
+      "index": 14,
+      "occupation": 2.0,
+      "energy_Eh": -0.402912,
+      "energy_eV": -10.9638,
+      "tag": ""
+    },
+    {
+      "index": 15,
+      "occupation": 2.0,
+      "energy_Eh": -0.4029032,
+      "energy_eV": -10.9636,
+      "tag": "HOMO"
+    },
+    {
+      "index": 16,
+      "occupation": 0.0,
+      "energy_Eh": -0.2206947,
+      "energy_eV": -6.0054,
+      "tag": "LUMO"
+    },
+    {
+      "index": 17,
+      "occupation": 0.0,
+      "energy_Eh": -0.2206787,
+      "energy_eV": -6.005,
+      "tag": ""
+    },
+    {
+      "index": 18,
+      "occupation": 0.0,
+      "energy_Eh": -0.0885548,
+      "energy_eV": -2.4097,
+      "tag": ""
+    },
+    {
+      "index": 19,
+      "occupation": 0.0,
+      "energy_Eh": 0.1182969,
+      "energy_eV": 3.219,
+      "tag": ""
+    },
+    {
+      "index": 20,
+      "occupation": 0.0,
+      "energy_Eh": 0.1400774,
+      "energy_eV": 3.8117,
+      "tag": ""
+    },
+    {
+      "index": 21,
+      "occupation": 0.0,
+      "energy_Eh": 0.1741003,
+      "energy_eV": 4.7375,
+      "tag": ""
+    },
+    {
+      "index": 22,
+      "occupation": 0.0,
+      "energy_Eh": 0.1741343,
+      "energy_eV": 4.7384,
+      "tag": ""
+    },
+    {
+      "index": 23,
+      "occupation": 0.0,
+      "energy_Eh": 0.2056092,
+      "energy_eV": 5.5949,
+      "tag": ""
+    },
+    {
+      "index": 24,
+      "occupation": 0.0,
+      "energy_Eh": 0.2056724,
+      "energy_eV": 5.5966,
+      "tag": ""
+    },
+    {
+      "index": 25,
+      "occupation": 0.0,
+      "energy_Eh": 0.4165411,
+      "energy_eV": 11.3347,
+      "tag": ""
+    },
+    {
+      "index": 26,
+      "occupation": 0.0,
+      "energy_Eh": 0.4166591,
+      "energy_eV": 11.3379,
+      "tag": ""
+    },
+    {
+      "index": 30,
+      "occupation": 0.0,
+      "energy_Eh": 0.6802539,
+      "energy_eV": 18.5107,
+      "tag": ""
+    }
+  ],
+  "mulliken": [
+    {
+      "index": 1,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 2.922,
+      "q_mulliken": -0.029
+    },
+    {
+      "index": 2,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 2.922,
+      "q_mulliken": -0.029
+    },
+    {
+      "index": 3,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 2.922,
+      "q_mulliken": -0.029
+    },
+    {
+      "index": 4,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 2.922,
+      "q_mulliken": -0.029
+    },
+    {
+      "index": 5,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 2.922,
+      "q_mulliken": -0.029
+    },
+    {
+      "index": 6,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 2.922,
+      "q_mulliken": -0.029
+    },
+    {
+      "index": 7,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.926,
+      "q_mulliken": 0.029
+    },
+    {
+      "index": 8,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.926,
+      "q_mulliken": 0.029
+    },
+    {
+      "index": 9,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.926,
+      "q_mulliken": 0.029
+    },
+    {
+      "index": 10,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.926,
+      "q_mulliken": 0.029
+    },
+    {
+      "index": 11,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.926,
+      "q_mulliken": 0.029
+    },
+    {
+      "index": 12,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.926,
+      "q_mulliken": 0.029
+    }
+  ],
+  "dipole": {
+    "x": -0.0,
+    "y": 0.0,
+    "z": 0.0,
+    "total_Debye": 0.001
+  }
+}

@@ -25,6 +25,7 @@
 #include <fmt/format.h>
 #include <cmath>
 #include <algorithm>
+#include <fstream>
 #include <vector>
 #include <map>
 
@@ -247,6 +248,40 @@ double GFN2::Calculation(bool gradient)
         }
 
         m_total_energy = m_energy_electronic + m_energy_repulsion + m_energy_coulomb + m_energy_dispersion + m_energy_solvation;
+
+        // Debug: dump density + orbital info at verbosity 3 for tblite comparison
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            json st;
+            st["method"] = "gfn2";
+            st["natoms"] = m_atomcount;
+            st["nbasis"] = m_nbasis;
+            st["atoms"] = json::array();
+            for (int i = 0; i < m_atomcount; ++i)
+                st["atoms"].push_back({{"z", m_atoms[i]},
+                                       {"xyz_bohr", {m_geometry(i,0), m_geometry(i,1), m_geometry(i,2)}}});
+            st["energy_total"] = m_total_energy;
+            st["atomic_charges"] = json::array();
+            for (int i = 0; i < m_atomcount; ++i) st["atomic_charges"].push_back(m_charges(i));
+            st["orbital_energies"] = json::array();
+            for (int i = 0; i < m_nbasis; ++i) st["orbital_energies"].push_back(m_energies(i));
+            st["density"] = json::array();
+            for (int i = 0; i < m_nbasis; ++i) {
+                json row = json::array();
+                for (int j = 0; j < m_nbasis; ++j) row.push_back(m_density(i, j));
+                st["density"].push_back(std::move(row));
+            }
+            auto dip = calculateAtomicDipoles();
+            auto qua = calculateAtomicQuadrupoles();
+            st["dpat_simple"] = json::array();
+            st["qpat_simple"] = json::array();
+            for (int i = 0; i < m_atomcount; ++i) {
+                st["dpat_simple"].push_back({dip[i][0], dip[i][1], dip[i][2]});
+                st["qpat_simple"].push_back({qua[i][0], qua[i][1], qua[i][2], qua[i][3], qua[i][4], qua[i][5]});
+            }
+            std::ofstream ofs("gfn2_state.json");
+            if (ofs) ofs << st.dump(2);
+            CurcumaLogger::info("GFN2 state dumped to gfn2_state.json");
+        }
 
         if (CurcumaLogger::get_verbosity() >= 1) CurcumaLogger::energy_abs(m_total_energy, "GFN2 Total Energy");
 

@@ -1,0 +1,133 @@
+{
+  "molecule": "CH3OH",
+  "geometry_file": "test_cases/molecules/larger/CH3OH.xyz",
+  "charge": 0,
+  "spin_unpaired": 0,
+  "method": "gfn1",
+  "xtb_version": "6.6.1",
+  "energies": {
+    "total_energy": -8.961076717661,
+    "scc_energy": -9.035378309246,
+    "repulsion": 0.075043788762,
+    "electrostatic": 0.044049486137,
+    "dispersion": -0.000742197177,
+    "halogen_bond": 0.0,
+    "homo_lumo_gap_eV": 8.761425554762
+  },
+  "orbitals": [
+    {
+      "index": 1,
+      "occupation": 2.0,
+      "energy_Eh": -0.7717858,
+      "energy_eV": -21.0014,
+      "tag": ""
+    },
+    {
+      "index": 2,
+      "occupation": 2.0,
+      "energy_Eh": -0.6576076,
+      "energy_eV": -17.8944,
+      "tag": ""
+    },
+    {
+      "index": 3,
+      "occupation": 2.0,
+      "energy_Eh": -0.6054438,
+      "energy_eV": -16.475,
+      "tag": ""
+    },
+    {
+      "index": 4,
+      "occupation": 2.0,
+      "energy_Eh": -0.5700863,
+      "energy_eV": -15.5128,
+      "tag": ""
+    },
+    {
+      "index": 5,
+      "occupation": 2.0,
+      "energy_Eh": -0.5597266,
+      "energy_eV": -15.2309,
+      "tag": ""
+    },
+    {
+      "index": 6,
+      "occupation": 2.0,
+      "energy_Eh": -0.4911001,
+      "energy_eV": -13.3635,
+      "tag": ""
+    },
+    {
+      "index": 7,
+      "occupation": 2.0,
+      "energy_Eh": -0.4595487,
+      "energy_eV": -12.505,
+      "tag": "HOMO"
+    },
+    {
+      "index": 8,
+      "occupation": 0.0,
+      "energy_Eh": -0.1375722,
+      "energy_eV": -3.7435,
+      "tag": "LUMO"
+    },
+    {
+      "index": 9,
+      "occupation": 0.0,
+      "energy_Eh": -0.1100879,
+      "energy_eV": -2.9956,
+      "tag": ""
+    },
+    {
+      "index": 10,
+      "occupation": 0.0,
+      "energy_Eh": -0.0746548,
+      "energy_eV": -2.0315,
+      "tag": ""
+    },
+    {
+      "index": 11,
+      "occupation": 0.0,
+      "energy_Eh": -0.06428,
+      "energy_eV": -1.7491,
+      "tag": ""
+    },
+    {
+      "index": 12,
+      "occupation": 0.0,
+      "energy_Eh": 0.125358,
+      "energy_eV": 3.4112,
+      "tag": ""
+    },
+    {
+      "index": 13,
+      "occupation": 0.0,
+      "energy_Eh": 0.261241,
+      "energy_eV": 7.1087,
+      "tag": ""
+    },
+    {
+      "index": 14,
+      "occupation": 0.0,
+      "energy_Eh": 0.261392,
+      "energy_eV": 7.1128,
+      "tag": ""
+    },
+    {
+      "index": 15,
+      "occupation": 0.0,
+      "energy_Eh": 0.3860991,
+      "energy_eV": 10.5063,
+      "tag": ""
+    },
+    {
+      "index": 16,
+      "occupation": 0.0,
+      "energy_Eh": 0.4273713,
+      "energy_eV": 11.6294,
+      "tag": ""
+    }
+  ],
+  "mulliken": [],
+  "dipole": {}
+}
