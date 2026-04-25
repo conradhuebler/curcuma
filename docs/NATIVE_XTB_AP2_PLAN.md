@@ -345,13 +345,13 @@ Erwartung: nur `gfn2_method.cpp` (von AP 2 selbst geändert) und `gfn1_method.cp
 
 ## Akzeptanzkriterien
 
-- [ ] `release/` build kompiliert ohne neue Errors. Warnings nur „unused include"-Klasse.
-- [ ] `gfn2_method.h/.cpp` enthält keinen `GFN2`-Typ mehr, ausschließlich `curcuma::xtb::XTB`.
-- [ ] `gfn1_method.h/.cpp` analog.
-- [ ] `./curcuma -sp H2O.xyz -method ngfn2` terminiert mit endlicher Energie (kein NaN/Inf, kein Crash).
-- [ ] `./curcuma -sp H2O.xyz -method ngfn1` analog.
-- [ ] Bestehende `cli_curcumaopt_*` und `cli_sqm_*` CTests passieren weiter (kein Regression auf `gfn2`-Pfad, weil AP 3 noch nicht aktiv).
-- [ ] `getEnergyDecomposition()`-Konsumenten greifen nur via `value(key, default)` zu — kein direktes `[]`-Indexing für Keys, die im neuen Schema fehlen.
+- [x] `release/` build kompiliert ohne neue Errors. Warnings nur „unused include"-Klasse.
+- [x] `gfn2_method.h/.cpp` enthält keinen `GFN2`-Typ mehr, ausschließlich `curcuma::xtb::XTB`.
+- [x] `gfn1_method.h/.cpp` analog.
+- [x] `./curcuma -sp H2O.xyz -method ngfn2` terminiert mit endlicher Energie (kein NaN/Inf, kein Crash). Fix: `m_wfn.dp_at`/`qp_at` in `buildReferenceOccupations()` initialisieren.
+- [x] `./curcuma -sp H2O.xyz -method ngfn1` terminiert mit endlicher Energie.
+- [x] Bestehende `cli_curcumaopt_*` und `cli_sqm_*` CTests passieren weiter (kein Regression auf `gfn2`-Pfad, weil AP 3 noch nicht aktiv).
+- [x] `getEnergyDecomposition()`-Konsumenten greifen nur via `value(key, default)` zu — kein direktes `[]`-Indexing für Keys, die im neuen Schema fehlen.
 
 **Nicht-Ziele:**
 - ❌ Numerische Übereinstimmung mit TBLite (AP 5)
@@ -404,11 +404,12 @@ Erwartet: 26/26 wie vor AP 2.
 | Datum | Status | Notizen |
 |-------|--------|---------|
 | 2026-04-25 | Plan erstellt | — |
+| 2026-04-25 | ✅ Abgeschlossen | Wrapper umgestellt, build sauber. ngfn1 liefert Energien; ngfn2 crashte wegen uninitialisiertem `m_wfn.dp_at` — Bug gefixt, liefert jetzt Energien (numerisch noch ~35 mEh–60 mEh von TBLite entfernt) |
 | | | |
 
 ## Schwierigkeiten / Blocker
 
-- *Noch keine dokumentiert*
+- **(Gefixt)** `ngfn2` crashte in erster SCF-Iteration in `addMultipolePotential()`: `m_wfn.dp_at`/`qp_at` waren in `buildReferenceOccupations()` nicht initialisiert. Fix in `xtb_native.cpp:364` — setze `dp_at`/`qp_at` auf `Zero(3/6, nat)` für `MethodType::GFN2`.
 
 ---
 

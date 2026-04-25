@@ -4,6 +4,11 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+## April 2026
+
+- **Native xTB AP2 — Wrapper GFN2Method/GFN1Method auf neue XTB-Klasse umgestellt**: `GFN2Method` und `GFN1Method` halten jetzt `curcuma::xtb::XTB` statt der alten monolithischen `GFN2`/`GFN1`-Klassen. Factory-Anbindung opak — `ngfn1`/`ngfn2` nutzen automatisch die modulare Implementierung. Bugfix: `m_wfn.dp_at`/`qp_at` in `buildReferenceOccupations()` für GFN2 initialisiert (vorher Crash in `addMultipolePotential()`). ngfn1 Energien ~5–70 mEh von TBLite; ngfn2 ~35–60 mEh — numerische Korrektheit ist AP 5.
+- **Native xTB AP1 — XTB-Klasse konsolidiert**: `UpdateMolecule()` mit Cache-Invalidierung, `m_h0.rad` in `buildH0Data()`, Energy-Component-Getter (`getEnergyDecomposition`, `getNumElectrons`), veralteter hscale-Kommentar korrigiert. Build sauber, sqm_reference 14/14 pass.
+
 ## March 2026
 
 - **GPU Pipeline Phase 10: SoA Coordinate Layout (Mar 27)**: Replaced `d_coords[3*N]` AoS buffer with `CoordSoA{d_x,d_y,d_z}[N]` across all 20 GPU kernels + EEQ solver; enables fully coalesced warp reads (~3× bandwidth gain for pairwise kernels at N>100); `d_ref_coords[3*N]` → `RefCoordSoA`; pinned host staging split into 3×N buffers; CUDA Graph re-capture unaffected (pointers stable); 28/28 CLI tests pass

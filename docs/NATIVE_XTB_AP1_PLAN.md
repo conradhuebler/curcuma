@@ -263,14 +263,14 @@ Erwartung: Status wie vor AP 1 (siehe `NATIVE_XTB_STATUS.md` Zeilen 76-82). AP 1
 
 Markiere abgehakt, wenn lokal verifiziert:
 
-- [ ] `release/` build kompiliert ohne neue Warnings (`build_ap1.log` sauber).
-- [ ] `XTB::UpdateMolecule()` (no-arg) ist überschrieben; setzt `m_S`, `m_H0`, `m_gamma`, `m_cn` auf Größe 0 und `m_mp_initialized = false`.
-- [ ] `m_h0.rad[i] == atomic_rad_au(m_basis.z[i])` nach `InitialiseMolecule()` für ein Test­molekül.
-- [ ] Kommentar zu `m_h0.hscale` reflektiert tatsächliche On-the-fly-Berechnung in `xtb_h0.cpp`.
-- [ ] `getCoordinationNumbers()` liefert nicht-leeren Vektor nach `Calculation()`.
-- [ ] `getNumElectrons()` liefert für H₂O = 8.
-- [ ] `getEnergyDecomposition()` liefert JSON mit den 8 spezifizierten Keys; `total ≈ electronic + repulsion + halogen_bond + dispersion` (Toleranz 1e-12).
-- [ ] Bestehende Kernel-CTests (`test_xtb_overlap`, `test_xtb_h0`, `test_xtb_coulomb`) passieren weiter.
+- [x] `release/` build kompiliert ohne neue Warnings (`build_ap1.log` sauber).
+- [x] `XTB::UpdateMolecule()` (no-arg) ist überschrieben; setzt `m_S`, `m_H0`, `m_gamma`, `m_cn` auf Größe 0 und `m_mp_initialized = false`.
+- [x] `m_h0.rad[i] == atomic_rad_au(m_basis.z[i])` nach `InitialiseMolecule()` für ein Test­molekül.
+- [x] Kommentar zu `m_h0.hscale` reflektiert tatsächliche On-the-fly-Berechnung in `xtb_h0.cpp`.
+- [x] `getCoordinationNumbers()` liefert nicht-leeren Vektor nach `Calculation()`.
+- [x] `getNumElectrons()` liefert für H₂O = 8.
+- [x] `getEnergyDecomposition()` liefert JSON mit den 8 spezifizierten Keys; `total ≈ electronic + repulsion + halogen_bond + dispersion` (Toleranz 1e-12).
+- [x] Bestehende Kernel-CTests (`test_xtb_overlap`, `test_xtb_h0`, `test_xtb_coulomb`) passieren weiter.
 
 **Nicht-Ziele für AP 1 (gehören zu späteren Paketen):**
 - ❌ MethodFactory-Wiring (AP 3)
@@ -331,6 +331,7 @@ ctest -R "cli_" --output-on-failure
 | Datum | Status | Notizen |
 |-------|--------|---------|
 | 2026-04-25 | Plan erstellt | — |
+| 2026-04-25 | ✅ Abgeschlossen | Alle Aufgaben 1.1–1.6 implementiert und committed (b0dbfc2). Build sauber, sqm_reference 14/14 pass |
 | | | |
 
 ## Schwierigkeiten / Blocker

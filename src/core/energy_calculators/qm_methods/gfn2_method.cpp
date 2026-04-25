@@ -22,7 +22,7 @@
 // =================================================================================
 
 GFN2Method::GFN2Method(const json& config)
-    : m_gfn2(nullptr)
+    : m_xtb(nullptr)
     , m_calculation_done(false)
     , m_last_energy(0.0)
 {
@@ -30,7 +30,7 @@ GFN2Method::GFN2Method(const json& config)
     updateGFN2Parameters();
 
     // Initialize GFN2 core implementation
-    m_gfn2 = std::make_unique<GFN2>();
+    m_xtb = std::make_unique<curcuma::xtb::XTB>(curcuma::xtb::MethodType::GFN2);
 }
 
 json GFN2Method::getDefaultConfig()
@@ -66,7 +66,7 @@ bool GFN2Method::setMolecule(const Mol& mol)
         clearError();
 
         // Initialize GFN2 with molecule
-        if (!m_gfn2->QMInterface::InitialiseMolecule(mol)) {
+        if (!m_xtb->QMInterface::InitialiseMolecule(mol)) {
             handleGFN2Error("molecule initialization");
             return false;
         }
@@ -94,7 +94,7 @@ bool GFN2Method::updateGeometry(const Matrix& geometry)
         clearError();
 
         // Update geometry in GFN2 method
-        if (!m_gfn2->UpdateMolecule(geometry)) {
+        if (!m_xtb->UpdateMolecule(geometry)) {
             handleGFN2Error("geometry update");
             return false;
         }
@@ -129,13 +129,13 @@ double GFN2Method::calculateEnergy(bool gradient)
         */
 
         // Perform GFN2 calculation
-        m_last_energy = m_gfn2->Calculation(gradient);
+        m_last_energy = m_xtb->Calculation(gradient);
         m_calculation_done = true;
 
         // Print orbital analysis if requested
         if (m_parameters.value("print_orbitals", false)) {
             if (CurcumaLogger::get_verbosity() >= 2) {
-                json decomp = m_gfn2->getEnergyDecomposition();
+                json decomp = m_xtb->getEnergyDecomposition();
                 CurcumaLogger::info("GFN2 Energy Decomposition:");
                 CurcumaLogger::param("electronic", fmt::format("{:.6f} Eh", decomp["electronic"].get<double>()));
                 CurcumaLogger::param("repulsion", fmt::format("{:.6f} Eh", decomp["repulsion"].get<double>()));
@@ -158,11 +158,11 @@ double GFN2Method::calculateEnergy(bool gradient)
 
 Matrix GFN2Method::getGradient() const
 {
-    if (!m_calculation_done || !m_gfn2) {
+    if (!m_calculation_done || !m_xtb) {
         return Matrix::Zero(m_molecule.m_number_atoms, 3);
     }
 
-    Matrix grad = m_gfn2->Gradient();
+    Matrix grad = m_xtb->Gradient();
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::param("GFN2Method_gradient_norm", fmt::format("{:.6e} Eh/Å", grad.norm()));
     }
@@ -171,11 +171,11 @@ Matrix GFN2Method::getGradient() const
 
 Vector GFN2Method::getCharges() const
 {
-    if (!m_calculation_done || !m_gfn2) {
+    if (!m_calculation_done || !m_xtb) {
         return Vector::Zero(m_molecule.m_number_atoms);
     }
 
-    return m_gfn2->getPartialCharges();
+    return m_xtb->getPartialCharges();
 }
 
 Vector GFN2Method::getBondOrders() const
@@ -234,12 +234,12 @@ std::string GFN2Method::getErrorMessage() const
 
 Vector GFN2Method::getOrbitalEnergies() const
 {
-    if (!m_calculation_done || !m_gfn2) {
+    if (!m_calculation_done || !m_xtb) {
         return Vector{};
     }
 
     try {
-        return m_gfn2->Energies();
+        return m_xtb->Energies();
     } catch (const std::exception& e) {
         return Vector{};
     }
@@ -247,12 +247,12 @@ Vector GFN2Method::getOrbitalEnergies() const
 
 Matrix GFN2Method::getMolecularOrbitals() const
 {
-    if (!m_calculation_done || !m_gfn2) {
+    if (!m_calculation_done || !m_xtb) {
         return Matrix{};
     }
 
     try {
-        return m_gfn2->MolecularOrbitals();
+        return m_xtb->MolecularOrbitals();
     } catch (const std::exception& e) {
         return Matrix{};
     }
@@ -260,12 +260,12 @@ Matrix GFN2Method::getMolecularOrbitals() const
 
 int GFN2Method::getNumElectrons() const
 {
-    if (!m_calculation_done || !m_gfn2) {
+    if (!m_calculation_done || !m_xtb) {
         return 0;
     }
 
     try {
-        return m_gfn2->NumElectrons();
+        return m_xtb->NumElectrons();
     } catch (const std::exception& e) {
         return 0;
     }
@@ -273,12 +273,12 @@ int GFN2Method::getNumElectrons() const
 
 double GFN2Method::getHOMOLUMOGap() const
 {
-    if (!m_calculation_done || !m_gfn2) {
+    if (!m_calculation_done || !m_xtb) {
         return 0.0;
     }
 
     try {
-        return m_gfn2->getHOMOLUMOGap();
+        return m_xtb->getHOMOLUMOGap();
     } catch (const std::exception& e) {
         return 0.0;
     }
@@ -286,12 +286,12 @@ double GFN2Method::getHOMOLUMOGap() const
 
 double GFN2Method::getHOMOEnergy() const
 {
-    if (!m_calculation_done || !m_gfn2) {
+    if (!m_calculation_done || !m_xtb) {
         return 0.0;
     }
 
     try {
-        return m_gfn2->getHOMOEnergy();
+        return m_xtb->getHOMOEnergy();
     } catch (const std::exception& e) {
         return 0.0;
     }
@@ -299,12 +299,12 @@ double GFN2Method::getHOMOEnergy() const
 
 double GFN2Method::getLUMOEnergy() const
 {
-    if (!m_calculation_done || !m_gfn2) {
+    if (!m_calculation_done || !m_xtb) {
         return 0.0;
     }
 
     try {
-        return m_gfn2->getLUMOEnergy();
+        return m_xtb->getLUMOEnergy();
     } catch (const std::exception& e) {
         return 0.0;
     }
@@ -312,12 +312,12 @@ double GFN2Method::getLUMOEnergy() const
 
 Vector GFN2Method::getCoordinationNumbers() const
 {
-    if (!m_calculation_done || !m_gfn2) {
+    if (!m_calculation_done || !m_xtb) {
         return Vector{};
     }
 
     try {
-        return m_gfn2->getCoordinationNumbers();
+        return m_xtb->getCoordinationNumbers();
     } catch (const std::exception& e) {
         return Vector{};
     }
@@ -325,12 +325,12 @@ Vector GFN2Method::getCoordinationNumbers() const
 
 json GFN2Method::getEnergyDecomposition() const
 {
-    if (!m_calculation_done || !m_gfn2) {
+    if (!m_calculation_done || !m_xtb) {
         return json{};
     }
 
     try {
-        return m_gfn2->getEnergyDecomposition();
+        return m_xtb->getEnergyDecomposition();
     } catch (const std::exception& e) {
         return json{};
     }
@@ -376,15 +376,15 @@ bool GFN2Method::saveToFile(const std::string& filename) const
 
 bool GFN2Method::initializeGFN2()
 {
-    if (!m_gfn2) {
-        m_gfn2 = std::make_unique<GFN2>();
+    if (!m_xtb) {
+        m_xtb = std::make_unique<curcuma::xtb::XTB>(curcuma::xtb::MethodType::GFN2);
     }
-    return m_gfn2 != nullptr;
+    return m_xtb != nullptr;
 }
 
 void GFN2Method::updateGFN2Parameters()
 {
-    if (!m_gfn2) return;
+    if (!m_xtb) return;
 
     // Update SCF parameters if available
     // TODO: Pass parameters to GFN2 core implementation

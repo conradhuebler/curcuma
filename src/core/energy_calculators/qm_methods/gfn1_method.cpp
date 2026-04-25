@@ -9,7 +9,7 @@
 #include "src/core/curcuma_logger.h"
 
 GFN1Method::GFN1Method(const json& config)
-    : m_gfn1(nullptr)
+    : m_xtb(nullptr)
     , m_calculation_done(false)
     , m_last_energy(0.0)
 {
@@ -19,7 +19,7 @@ GFN1Method::GFN1Method(const json& config)
         full_config.merge_patch(config);
     }
 
-    m_gfn1 = std::make_unique<GFN1>();
+    m_xtb = std::make_unique<curcuma::xtb::XTB>(curcuma::xtb::MethodType::GFN1);
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("GFN1Method initialized with native implementation");
@@ -32,7 +32,7 @@ bool GFN1Method::setMolecule(const Mol& mol)
     m_calculation_done = false;
 
     // Initialize with molecule data (explicit base class call to avoid name hiding)
-    return m_gfn1->QMInterface::InitialiseMolecule(mol);
+    return m_xtb->QMInterface::InitialiseMolecule(mol);
 }
 
 bool GFN1Method::updateGeometry(const Matrix& geometry)
@@ -40,12 +40,12 @@ bool GFN1Method::updateGeometry(const Matrix& geometry)
     m_calculation_done = false;
 
     // Update geometry only
-    return m_gfn1->UpdateMolecule(geometry);
+    return m_xtb->UpdateMolecule(geometry);
 }
 
 double GFN1Method::calculateEnergy(bool gradient)
 {
-    m_last_energy = m_gfn1->Calculation(gradient);
+    m_last_energy = m_xtb->Calculation(gradient);
     m_calculation_done = true;
 
     return m_last_energy;
@@ -58,7 +58,7 @@ Matrix GFN1Method::getGradient() const
         return Matrix::Zero(m_molecule.AtomCount(), 3);
     }
 
-    return m_gfn1->Gradient();
+    return m_xtb->Gradient();
 }
 
 Vector GFN1Method::getCharges() const
@@ -67,17 +67,17 @@ Vector GFN1Method::getCharges() const
         return Vector::Zero(m_molecule.AtomCount());
     }
 
-    return m_gfn1->getPartialCharges();
+    return m_xtb->getPartialCharges();
 }
 
 Vector GFN1Method::getCoordinationNumbers() const
 {
-    return m_gfn1->getCoordinationNumbers();
+    return m_xtb->getCoordinationNumbers();
 }
 
 json GFN1Method::getEnergyDecomposition() const
 {
-    return m_gfn1->getEnergyDecomposition();
+    return m_xtb->getEnergyDecomposition();
 }
 
 bool GFN1Method::saveToFile(const std::string& filename) const

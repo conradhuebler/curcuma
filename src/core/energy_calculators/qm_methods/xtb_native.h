@@ -165,7 +165,7 @@ struct Wavefunction {
 class XTB : public QMDriver {
 public:
     explicit XTB(MethodType method);
-    ~XTB() override = default;
+    ~XTB() override;
 
     // QMDriver API
     bool   InitialiseMolecule() override;
@@ -199,6 +199,10 @@ public:
 
     nlohmann::json getEnergyDecomposition() const;
     int getNumElectrons() const { return static_cast<int>(m_wfn.nocc); }
+
+    // API compatibility for GFN1Method/GFN2Method wrappers
+    Vector getPartialCharges() const { return getCharges(); }
+    Vector getCoordinationNumbers() const { return m_coordination_numbers; }
 
     // Convergence
     bool isConverged() const { return m_scf_converged; }
@@ -291,6 +295,8 @@ private:
     double m_electronic_temp = 300.0;  // K; 0 → integer occupation
     bool   m_scf_converged   = false;
     int    m_scf_iterations  = 0;
+
+    Vector m_coordination_numbers;   ///< CN, filled in Calculation()
 };
 
 } // namespace curcuma::xtb

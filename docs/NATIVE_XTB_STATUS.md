@@ -86,10 +86,10 @@ qm_methods/
 
 | Method | Old implementation | New implementation |
 |--------|-------------------|-------------------|
-| Native GFN2 (`ngfn2`) | 0/7 vs. TBLite | **Not yet wired to MethodFactory** |
-| Native GFN1 (`ngfn1`) | 2/7 vs. TBLite | **Not yet wired to MethodFactory** |
+| Native GFN2 (`ngfn2`) | 0/7 vs. TBLite | **Wired via GFN2Method wrapper** (AP2 done). Energies returned, but ~35–60 mEh off TBLite. Crash in `addMultipolePotential` fixed (uninit `dp_at`). |
+| Native GFN1 (`ngfn1`) | 2/7 vs. TBLite | **Wired via GFN1Method wrapper** (AP2 done). Energies returned, ~5–70 mEh off TBLite. |
 
-**Note**: The new `XTB` class is **not yet accessible** via `MethodFactory`. It is only compiled and tested through the standalone `sqm_reference` test suite.
+**Note**: The new `XTB` class is now accessible via `MethodFactory` through `GFN2Method`/`GFN1Method` wrappers (AP2 complete). Default `gfn2`/`gfn1` still routes through TBLite priority chain (AP3 pending).
 
 ---
 
@@ -109,13 +109,11 @@ qm_methods/
 
 ## Known Issues
 
-1. **`hscale` comment stale**: `xtb_native.cpp:320` says `// hscale is Phase 3...` but `hscale` is already computed on-the-fly in `xtb_h0.cpp:184-191`. The `m_h0.hscale` member is unused. (Harmless, but comment should be fixed.)
-
-2. **`m_h0.rad` not filled**: `buildH0Data()` leaves `m_h0.rad` as zeros. `getHamiltonianH0()` calls `atomic_rad_au()` directly instead. (Harmless, but inconsistent with TBLite's `tb_hamiltonian%rad`.)
-
-3. **`UpdateMolecule()` not overridden**: `XTB` inherits `QMInterface::UpdateMolecule(const Matrix&)`, which only copies `m_geometry`. Cached matrices (`m_S`, `m_H0`, `m_gamma`, `m_mp_initialized`) are not invalidated. (Will cause stale data on geometry update.)
-
-4. **`Calculation(bool gradient)` ignores `gradient`**: The `gradient` parameter is accepted but gradients are not computed. Returns energy only. (Will break optimization/MD if wired to MethodFactory without gradient implementation.)
+1. ~~**`hscale` comment stale**~~ — **FIXED in AP1** (b0dbfc2)
+2. ~~**`m_h0.rad` not filled**~~ — **FIXED in AP1** (b0dbfc2)
+3. ~~**`UpdateMolecule()` not overridden**~~ — **FIXED in AP1** (b0dbfc2): `UpdateMolecule()` overridden with cache invalidation.
+4. **`Calculation(bool gradient)` ignores `gradient`**: The `gradient` parameter is accepted but gradients are not computed. Returns energy only. **Gradient stub added in AP2** — returns zero matrix with warning. (Will break optimization/MD until AP 4.)
+5. **`ngfn2` crash in `addMultipolePotential()`** — **FIXED in AP2**: `m_wfn.dp_at`/`qp_at` were uninitialized in `buildReferenceOccupations()`. Crash occurred on first SCF iteration for any GFN2 molecule.
 
 ---
 

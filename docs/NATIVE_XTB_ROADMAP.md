@@ -78,18 +78,18 @@ int getNumElectrons() const { return static_cast<int>(m_wfn.nocc); }
 ```
 
 ### Akzeptanzkriterien
-- [ ] `UpdateMolecule()` invalidiert alle cached Matrizen korrekt
-- [ ] `m_h0.rad` ist gefuellt
-- [ ] `getEnergyDecomposition()` gibt korrekte JSON-Struktur zurueck
-- [ ] Kompiliert ohne Warnungen
+- [x] `UpdateMolecule()` invalidiert alle cached Matrizen korrekt
+- [x] `m_h0.rad` ist gefuellt
+- [x] `getEnergyDecomposition()` gibt korrekte JSON-Struktur zurueck
+- [x] Kompiliert ohne Warnungen
 
 ### Fortschritt
 | Datum | Status | Notizen |
 |-------|--------|---------|
-| | | |
+| 2026-04-25 | ✅ Abgeschlossen | Committed als b0dbfc2. sqm_reference 14/14 pass. |
 
 ### Schwierigkeiten / Blocker
-- *Noch keine dokumentiert*
+- *Keine*
 
 ---
 
@@ -154,18 +154,18 @@ Analog fuer `getOrbitalEnergies()`, `getHOMOEnergy()`, `getLUMOEnergy()`, `getHO
 Analog zu 2.1, aber mit `MethodType::GFN1`.
 
 ### Akzeptanzkriterien
-- [ ] `ngfn2` und `ngfn1` funktionieren als direkte Methodenaufrufe
-- [ ] Energieberechnung gibt einen Wert zurueck (nicht 0.0 oder NaN)
-- [ ] Ladungen sind zugaenglich
-- [ ] Kompiliert und linkt erfolgreich
+- [x] `ngfn2` und `ngfn1` funktionieren als direkte Methodenaufrufe
+- [x] Energieberechnung gibt einen Wert zurueck (nicht 0.0 oder NaN)
+- [x] Ladungen sind zugaenglich
+- [x] Kompiliert und linkt erfolgreich
 
 ### Fortschritt
 | Datum | Status | Notizen |
 |-------|--------|---------|
-| | | |
+| 2026-04-25 | ✅ Abgeschlossen | Wrapper umgestellt, build sauber. ngfn1 Energien ~5–70 mEh von TBLite. ngfn2 crashte wegen uninit `dp_at` — gefixt, jetzt ~35–60 mEh von TBLite. |
 
 ### Schwierigkeiten / Blocker
-- *Noch keine dokumentiert*
+- `ngfn2` crashte in erster SCF-Iteration in `addMultipolePotential()` wegen uninitialisiertem `m_wfn.dp_at`/`qp_at`. Fix in `xtb_native.cpp` — `buildReferenceOccupations()` setzt jetzt `dp_at`/`qp_at` für GFN2.
 
 ---
 

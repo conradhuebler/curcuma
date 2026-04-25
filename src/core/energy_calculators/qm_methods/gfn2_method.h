@@ -15,7 +15,7 @@
 #pragma once
 
 #include "../computational_method.h"
-#include "gfn2.h"
+#include "xtb_native.h"
 
 #include <memory>
 
@@ -146,7 +146,7 @@ public:
     bool saveToFile(const std::string& filename) const override;
 
 private:
-    std::unique_ptr<GFN2> m_gfn2;              ///< Wrapped GFN2 implementation
+    std::unique_ptr<curcuma::xtb::XTB> m_xtb;  ///< Wrapped native XTB implementation
     Mol m_molecule;                             ///< Current molecule
     bool m_calculation_done;                    ///< Flag if calculation was performed
     double m_last_energy;                       ///< Last calculated energy

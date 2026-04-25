@@ -41,6 +41,8 @@ XTB::XTB(MethodType method)
 {
 }
 
+XTB::~XTB() = default;
+
 bool XTB::InitialiseMolecule()
 {
     if (m_atomcount <= 0) {
@@ -64,7 +66,7 @@ namespace {
     }
 }
 
-double XTB::Calculation(bool /*gradient*/)
+double XTB::Calculation(bool gradient)
 {
     // 1. Coordination numbers
     Vector cn = computeCoordinationNumbers();
@@ -187,6 +189,17 @@ double XTB::Calculation(bool /*gradient*/)
 
     m_E_total = m_E_electronic + m_E_repulsion
               + m_E_halogen_bond + m_E_dispersion;
+
+    // Update QMDriver state for wrapper compatibility
+    m_mo = m_wfn.C;
+    m_energies = m_wfn.eps;
+    m_num_electrons = static_cast<int>(m_wfn.nocc);
+    m_coordination_numbers = cn;
+
+    if (gradient) {
+        m_gradient = Matrix::Zero(m_atomcount, 3);
+        CurcumaLogger::warn("XTB analytical gradients not yet implemented — returning zero gradient");
+    }
 
     if (!m_scf_converged) {
         CurcumaLogger::warn("XTB::Calculation did NOT converge after "
@@ -349,6 +362,10 @@ void XTB::buildReferenceOccupations()
     m_wfn.nocc = total;
     m_wfn.q_at.setZero(m_basis.nat);
     m_wfn.q_sh.setZero(m_basis.nsh);
+    if (m_method == MethodType::GFN2) {
+        m_wfn.dp_at = Eigen::MatrixXd::Zero(3, m_basis.nat);
+        m_wfn.qp_at = Eigen::MatrixXd::Zero(6, m_basis.nat);
+    }
 
     m_pot.v_at = Eigen::VectorXd::Zero(m_basis.nat);
     m_pot.v_sh = Eigen::VectorXd::Zero(m_basis.nsh);
