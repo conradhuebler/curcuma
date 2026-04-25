@@ -150,7 +150,7 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - **✅ EHT Implementation**: Functional with orbital analysis and verbosity control
 - **✅ XTB/TBLite Interfaces**: Native library verbosity synchronized with CurcumaLogger
 - **✅ Ulysses Interface**: Complete CurcumaLogger integration with SCF progress
-- **✅ Native GFN1/GFN2 Gradients (AP4)**: `xtb_gradient.cpp` — repulsion + H0/Pulay + Coulomb + CN; `-opt` converges on H₂O, CH₄, NH₃; GFN2 multipole gradient pending (Phase 4b)
+- **✅ Native GFN1/GFN2 Gradients (AP4)**: `xtb_gradient.cpp` — repulsion + H0/Pulay + Coulomb + CN; `-opt` converges on H₂O, CH₄, NH₃; GFN2 multipole gradient deferred to AP5
 - **🔧 Native GFN-FF (gfnff)**: Architecture complete, parameter debugging in progress
 
 ### Verbosity Integration Status ✅

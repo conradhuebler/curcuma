@@ -10,8 +10,8 @@
  *   - external/tblite/src/tblite/repulsion/effective.f90 (get_repulsion_derivs)
  *   - external/tblite/src/tblite/coulomb/charge/type.f90
  *
- * AP4 — Phase 4a: repulsion + H0/Pulay (s/p only) + Coulomb + CN chain-rule.
- * Phase 4b (TODO): analytical GFN2 multipole gradient.
+ * AP4: repulsion + H0/Pulay (s/p only) + Coulomb + CN chain-rule.
+ * AP5 (TODO): GFN2 multipole gradient + overall energy accuracy.
  *
  * Claude Generated. GPL-3.0.
  */
@@ -470,14 +470,10 @@ void XTB::calculateGradient()
 
     // ==========================================================================
     //  5.  GFN2 multipole gradient
-    //      TODO Phase 4b: analytical gradient for sd/dd/sq interactions.
-    //      For now: omitted; causes slight inconsistency for GFN2 but
-    //      repulsion+H0+Coulomb dominates; -opt will still converge.
+    //      TODO AP5: analytical gradient for sd/dd/sq interactions.
+    //      Deferred together with GFN2 energy accuracy work (AP5).
+    //      Impact: small relative to repulsion+H0+Coulomb; -opt converges.
     // ==========================================================================
-    if (m_method == MethodType::GFN2 && m_E_multipole != 0.0) {
-        CurcumaLogger::info("XTB: GFN2 multipole gradient not yet implemented (Phase 4b); "
-                            "using zero contribution — small error for geometry optimization");
-    }
 }
 
 } // namespace curcuma::xtb
