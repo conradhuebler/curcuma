@@ -186,6 +186,20 @@ public:
     double  getElectronicEnergy() const { return m_E_electronic; }
     double  getRepulsionEnergy() const  { return m_E_repulsion;  }
 
+    // Geometry update with cache invalidation
+    bool UpdateMolecule(const Matrix& geometry) override;
+
+    // Energy component accessors (for wrapper decomposition)
+    double getCoulombShellEnergy() const { return m_E_coulomb_shell; }
+    double getThirdOrderEnergy() const   { return m_E_third_order; }
+    double getMultipoleEnergy() const    { return m_E_multipole; }
+    double getHalogenBondEnergy() const  { return m_E_halogen_bond; }
+    double getDispersionEnergy() const   { return m_E_dispersion; }
+    double getTotalEnergy() const        { return m_E_total; }
+
+    nlohmann::json getEnergyDecomposition() const;
+    int getNumElectrons() const { return static_cast<int>(m_wfn.nocc); }
+
     // Convergence
     bool isConverged() const { return m_scf_converged; }
     int  scfIterations() const { return m_scf_iterations; }

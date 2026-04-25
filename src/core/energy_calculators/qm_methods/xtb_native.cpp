@@ -23,6 +23,7 @@
 
 #include "parameters/gfn1_params.hpp"
 #include "parameters/gfn2_params.hpp"
+#include "parameters/xtb_params_extra.hpp"
 
 #include "STO_CGTO.hpp"
 #include "src/core/curcuma_logger.h"
@@ -301,6 +302,9 @@ void XTB::buildH0Data()
     m_h0.kcn       .assign(m_basis.nsh, 0.0);
     m_h0.shpoly    .assign(m_basis.nsh, 0.0);
     m_h0.rad       .assign(m_basis.nat, 0.0);
+    for (int iat = 0; iat < m_basis.nat; ++iat) {
+        m_h0.rad[iat] = atomic_rad_au(m_basis.z[iat]);
+    }
 
     for (int iat = 0; iat < m_basis.nat; ++iat) {
         const int z = m_basis.z[iat];
@@ -317,8 +321,9 @@ void XTB::buildH0Data()
             }
         }
     }
-    // hscale is Phase 3: its per-method construction rule is in
-    // tblite/xtb/{gfn1,gfn2}.f90 (get_hscale).
+    // hscale is computed on-the-fly in getHamiltonianH0() (xtb_h0.cpp).
+    // m_h0.hscale is kept as zero and not used; the per-shell-pair logic
+    // (Slater-ratio prefactor, kpair, kshell, EN scaling) lives in the H0 builder.
     m_h0.hscale = Matrix::Zero(m_basis.nsh, m_basis.nsh);
 }
 
@@ -368,6 +373,68 @@ double XTB::getLUMOEnergy() const
     return m_wfn.eps(lumo_idx);
 }
 double XTB::getHOMOLUMOGap() const { return getLUMOEnergy() - getHOMOEnergy(); }
+
+/* ------------------------------------------------------------------------- *
+ *  Geometry update with full cache invalidation
+ * ------------------------------------------------------------------------- */
+bool XTB::UpdateMolecule(const Matrix& geometry)
+{
+    // 1. Update base class geometry
+    m_geometry = geometry;
+
+    // 2. Invalidate all geometry-dependent cached state
+    //    Overlap and H0 depend on atom positions via STO-CGTO overlap integrals
+    m_S.resize(0, 0);
+    m_H0.resize(0, 0);
+
+    // 3. Gamma matrix depends on interatomic distances (Klopman-Ohno R_AB)
+    m_gamma.resize(0, 0);
+
+    // 4. Multipole interaction matrices depend on distances and damping radii
+    m_mp_initialized = false;
+    for (auto& m : m_mp_amat_sd) m.resize(0, 0);
+    for (auto& row : m_mp_amat_dd)
+        for (auto& m : row) m.resize(0, 0);
+    for (auto& m : m_mp_amat_sq) m.resize(0, 0);
+    m_mp_mrad.clear();
+    m_mp_dkernel.clear();
+    m_mp_qkernel.clear();
+
+    // 5. Reset wavefunction populations (Mulliken charges depend on geometry)
+    //    Keep m_wfn.n0_at / n0_sh (reference occupations, geometry-independent)
+    m_wfn.q_at.setZero(m_basis.nat);
+    m_wfn.q_sh.setZero(m_basis.nsh);
+    m_wfn.dp_at.setZero(3, m_basis.nat);
+    m_wfn.qp_at.setZero(6, m_basis.nat);
+
+    // 6. Energy components are now stale
+    m_E_electronic = m_E_repulsion = m_E_coulomb_shell = 0.0;
+    m_E_third_order = m_E_multipole = m_E_halogen_bond = m_E_dispersion = 0.0;
+    m_E_total = 0.0;
+    m_scf_converged = false;
+    m_scf_iterations = 0;
+
+    return true;
+}
+
+/* ------------------------------------------------------------------------- *
+ *  Energy decomposition accessor
+ * ------------------------------------------------------------------------- */
+nlohmann::json XTB::getEnergyDecomposition() const
+{
+    nlohmann::json j;
+    j["electronic"]     = m_E_electronic;
+    j["coulomb_shell"]  = m_E_coulomb_shell;
+    j["third_order"]    = m_E_third_order;
+    j["multipole"]      = m_E_multipole;
+    j["repulsion"]      = m_E_repulsion;
+    j["halogen_bond"]   = m_E_halogen_bond;
+    j["dispersion"]     = m_E_dispersion;
+    j["total"]          = m_E_total;
+    j["scf_converged"]  = m_scf_converged;
+    j["scf_iterations"] = m_scf_iterations;
+    return j;
+}
 
 /* ------------------------------------------------------------------------- *
  *  Legacy QMDriver hooks — not used yet; we go through buildH0Data() instead.
