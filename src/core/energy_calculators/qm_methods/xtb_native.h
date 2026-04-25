@@ -249,6 +249,8 @@ private:
     double calcRepulsionEnergy() const;                                  // xtb_native.cpp
     double calcHalogenBondEnergy() const;                                // xtb_native.cpp
 
+    void calculateGradient();   // xtb_gradient.cpp — fills m_gradient in Eh/Bohr
+
     /* ----- legacy QMDriver hooks (still routed through MakeOverlap/H) */
     Matrix MakeOverlap(std::vector<STO::Orbital>& basisset) override;
     Matrix MakeH(const Matrix& S,

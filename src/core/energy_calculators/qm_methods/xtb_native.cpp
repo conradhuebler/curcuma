@@ -197,8 +197,15 @@ double XTB::Calculation(bool gradient)
     m_coordination_numbers = cn;
 
     if (gradient) {
-        m_gradient = Matrix::Zero(m_atomcount, 3);
-        CurcumaLogger::warn("XTB analytical gradients not yet implemented — returning zero gradient");
+        // Rebuild potential with converged shell charges before computing gradient.
+        // (m_pot was overwritten during SCF; final values must be regenerated.)
+        m_pot.reset();
+        addCoulombShellPotential(m_pot);
+        addThirdOrderPotential(m_pot);
+        if (m_method == MethodType::GFN2) addMultipolePotential(m_pot);
+
+        calculateGradient();       // fills m_gradient in Eh/Bohr
+        m_gradient *= au;          // Eh/Bohr → Eh/Å (matching tbliteinterface.cpp:553)
     }
 
     if (!m_scf_converged) {

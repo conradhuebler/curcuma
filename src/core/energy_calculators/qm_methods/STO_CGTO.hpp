@@ -352,4 +352,192 @@ inline void orthogonalize(const Shell& shell_a, Shell& shell_b)
     }
 }
 
+/**
+ * @brief Gradient of CGTO overlap dS_μν/dA_k wrt center A (where φ_μ lives).
+ *
+ * Obara-Saika recursion:  dS/dA_k = 2α * S(a+e_k, b) - n_k * S(a-e_k, b)
+ * where n_k is the angular quantum number of φ_μ in direction k.
+ *
+ * Covers type_a, type_b in {0=s, 1=px, 2=py, 3=pz} (s/p basis, sufficient for
+ * all organic molecules in GFN1/GFN2).  Returns zeros for d-type or higher.
+ *
+ * By translational invariance:  dS/dB_k = -dS/dA_k.
+ *
+ * @param shell_a  Shell of φ_μ at center A
+ * @param shell_b  Shell of φ_ν at center B
+ * @param xa..za   Position of A in Bohr
+ * @param xb..zb   Position of B in Bohr
+ * @param type_a   AO type of φ_μ: 0=s,1=px,2=py,3=pz
+ * @param type_b   AO type of φ_ν: 0=s,1=px,2=py,3=pz
+ * @param grad[3]  Output: dS_μν/dA_k for k=0,1,2
+ *
+ * Claude Generated (April 2026).
+ */
+inline void cgto_overlap_grad(const Shell& shell_a, const Shell& shell_b,
+                               double xa, double ya, double za,
+                               double xb, double yb, double zb,
+                               int type_a, int type_b,
+                               double grad[3])
+{
+    grad[0] = grad[1] = grad[2] = 0.0;
+    if (type_a > 3 || type_b > 3) return;   // d-type or higher: gradient = 0
+
+    const double dx = xb - xa, dy = yb - ya, dz = zb - za;
+    const double R2 = dx*dx + dy*dy + dz*dz;
+
+    // Angular quantum numbers n_k for φ_μ (non-zero only for the corresponding p-orbital)
+    const int nk[3] = { (type_a == 1) ? 1 : 0,
+                        (type_a == 2) ? 1 : 0,
+                        (type_a == 3) ? 1 : 0 };
+
+    for (int ip = 0; ip < shell_a.nprim; ++ip) {
+        const double ai = shell_a.alpha[ip];
+        const double ci = shell_a.coeff[ip];
+
+        for (int jp = 0; jp < shell_b.nprim; ++jp) {
+            const double aj = shell_b.alpha[jp];
+            const double cj = shell_b.coeff[jp];
+            const double fac = ci * cj;
+            const double g   = ai + aj;
+            const double invg = 1.0 / g;
+
+            // Gaussian product center
+            const double Px = (ai*xa + aj*xb) * invg;
+            const double Py = (ai*ya + aj*yb) * invg;
+            const double Pz = (ai*za + aj*zb) * invg;
+            const double PAx = Px - xa, PAy = Py - ya, PAz = Pz - za;
+            const double PBx = Px - xb, PBy = Py - yb, PBz = Pz - zb;
+            const double S00 = std::pow(M_PI * invg, 1.5) * std::exp(-ai*aj * invg * R2);
+            const double h   = 0.5 * invg;   // = 1/(2γ)
+
+            // Raised primitive overlaps: (type_a_raised_k | type_b) for k=x,y,z
+            double Sr[3];
+
+            // -------- type_a = 0 (s on A) ---------
+            if (type_a == 0) {
+                // raise s→p_k;  (p_k | type_b)
+                if (type_b == 0) {
+                    Sr[0] = PAx * S00;
+                    Sr[1] = PAy * S00;
+                    Sr[2] = PAz * S00;
+                } else if (type_b == 1) {   // px
+                    Sr[0] = (PAx*PBx + h) * S00;
+                    Sr[1] = PAy * PBx * S00;
+                    Sr[2] = PAz * PBx * S00;
+                } else if (type_b == 2) {   // py
+                    Sr[0] = PAx * PBy * S00;
+                    Sr[1] = (PAy*PBy + h) * S00;
+                    Sr[2] = PAz * PBy * S00;
+                } else {                    // pz
+                    Sr[0] = PAx * PBz * S00;
+                    Sr[1] = PAy * PBz * S00;
+                    Sr[2] = (PAz*PBz + h) * S00;
+                }
+            }
+            // -------- type_a = 1 (px on A) ---------
+            else if (type_a == 1) {
+                if (type_b == 0) {
+                    // raise x: (d_xx|s);  raise y: (d_xy|s);  raise z: (d_xz|s)
+                    Sr[0] = (PAx*PAx + h) * S00;
+                    Sr[1] = PAx * PAy * S00;
+                    Sr[2] = PAx * PAz * S00;
+                } else if (type_b == 1) {   // px
+                    // raise x: (d_xx|px) — N_x^a=1,N_x^b=1
+                    // = PAx*(PAx*PBx+h)*S00 + h*(PBx+PAx)*S00
+                    Sr[0] = (PAx*PAx*PBx + PAx*invg + PBx*h) * S00;
+                    // raise y: (d_xy|px) — N_y^a=0,N_y^b=0
+                    Sr[1] = PAy * (PAx*PBx + h) * S00;
+                    // raise z: (d_xz|px) — N_z^a=0,N_z^b=0
+                    Sr[2] = PAz * (PAx*PBx + h) * S00;
+                } else if (type_b == 2) {   // py
+                    // raise x: (d_xx|py) — N_x^a=1,N_x^b=0
+                    Sr[0] = (PAx*PAx + h) * PBy * S00;
+                    // raise y: (d_xy|py) — N_y^a=0,N_y^b=1
+                    Sr[1] = PAx * (PAy*PBy + h) * S00;
+                    // raise z: (d_xz|py) — N_z^a=0,N_z^b=0
+                    Sr[2] = PAz * PAx * PBy * S00;
+                } else {                    // pz
+                    // raise x: (d_xx|pz) — N_x^a=1,N_x^b=0
+                    Sr[0] = (PAx*PAx + h) * PBz * S00;
+                    // raise y: (d_xy|pz) — N_y^a=0,N_y^b=0
+                    Sr[1] = PAy * PAx * PBz * S00;
+                    // raise z: (d_xz|pz) — N_z^a=0,N_z^b=1
+                    Sr[2] = PAx * (PAz*PBz + h) * S00;
+                }
+            }
+            // -------- type_a = 2 (py on A) ---------
+            else if (type_a == 2) {
+                if (type_b == 0) {
+                    Sr[0] = PAy * PAx * S00;
+                    Sr[1] = (PAy*PAy + h) * S00;
+                    Sr[2] = PAy * PAz * S00;
+                } else if (type_b == 1) {   // px
+                    // raise x: (d_xy|px) — N_x^a=0,N_x^b=1
+                    Sr[0] = PAy * (PAx*PBx + h) * S00;
+                    // raise y: (d_yy|px) — N_y^a=1,N_y^b=0
+                    Sr[1] = (PAy*PAy + h) * PBx * S00;
+                    // raise z: (d_yz|px) — N_z^a=0,N_z^b=0
+                    Sr[2] = PAz * PAy * PBx * S00;
+                } else if (type_b == 2) {   // py
+                    // raise x: (d_xy|py) — N_x^a=0,N_x^b=0
+                    Sr[0] = PAx * (PAy*PBy + h) * S00;
+                    // raise y: (d_yy|py) — N_y^a=1,N_y^b=1
+                    Sr[1] = (PAy*PAy*PBy + PAy*invg + PBy*h) * S00;
+                    // raise z: (d_yz|py) — N_z^a=0,N_z^b=0
+                    Sr[2] = PAz * (PAy*PBy + h) * S00;
+                } else {                    // pz
+                    // raise x: (d_xy|pz) — N_x^a=0,N_x^b=0
+                    Sr[0] = PAx * PAy * PBz * S00;
+                    // raise y: (d_yy|pz) — N_y^a=1,N_y^b=0
+                    Sr[1] = (PAy*PAy + h) * PBz * S00;
+                    // raise z: (d_yz|pz) — N_z^a=0,N_z^b=1
+                    Sr[2] = PAy * (PAz*PBz + h) * S00;
+                }
+            }
+            // -------- type_a = 3 (pz on A) ---------
+            else {   // type_a == 3
+                if (type_b == 0) {
+                    Sr[0] = PAz * PAx * S00;
+                    Sr[1] = PAz * PAy * S00;
+                    Sr[2] = (PAz*PAz + h) * S00;
+                } else if (type_b == 1) {   // px
+                    // raise x: (d_xz|px) — N_x^a=0,N_x^b=1
+                    Sr[0] = PAz * (PAx*PBx + h) * S00;
+                    // raise y: (d_yz|px) — N_y^a=0,N_y^b=0
+                    Sr[1] = PAy * PAz * PBx * S00;
+                    // raise z: (d_zz|px) — N_z^a=1,N_z^b=0
+                    Sr[2] = (PAz*PAz + h) * PBx * S00;
+                } else if (type_b == 2) {   // py
+                    // raise x: (d_xz|py) — N_x^a=0,N_x^b=0
+                    Sr[0] = PAx * PAz * PBy * S00;
+                    // raise y: (d_yz|py) — N_y^a=0,N_y^b=1
+                    Sr[1] = PAz * (PAy*PBy + h) * S00;
+                    // raise z: (d_zz|py) — N_z^a=1,N_z^b=0
+                    Sr[2] = (PAz*PAz + h) * PBy * S00;
+                } else {                    // pz
+                    // raise x: (d_xz|pz) — N_x^a=0,N_x^b=0
+                    Sr[0] = PAx * (PAz*PBz + h) * S00;
+                    // raise y: (d_yz|pz) — N_y^a=0,N_y^b=0
+                    Sr[1] = PAy * (PAz*PBz + h) * S00;
+                    // raise z: (d_zz|pz) — N_z^a=1,N_z^b=1
+                    Sr[2] = (PAz*PAz*PBz + PAz*invg + PBz*h) * S00;
+                }
+            }
+
+            // Lowered primitive overlap: (s | type_b) — non-zero only when n_k > 0
+            double S_s_b = 0.0;
+            if (type_a >= 1) {   // p-type: lower gives s
+                if      (type_b == 0) S_s_b = S00;
+                else if (type_b == 1) S_s_b = PBx * S00;
+                else if (type_b == 2) S_s_b = PBy * S00;
+                else                  S_s_b = PBz * S00;
+            }
+
+            // Obara-Saika:  dS/dA_k = 2α * S_raised_k - n_k * S_lower_k
+            for (int k = 0; k < 3; ++k)
+                grad[k] += fac * (2.0 * ai * Sr[k] - nk[k] * S_s_b);
+        }
+    }
+}
+
 } // namespace CGTO
