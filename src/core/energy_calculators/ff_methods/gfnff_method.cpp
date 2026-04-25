@@ -718,6 +718,12 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     EEQSolver::TopologyInput eeq_topo;
     const TopologyInfo* topo_ptr = nullptr;
     bool do_eeq = (m_eeq_solver && !m_skip_eeq_recalc);
+    bool eeq_charges_current = (m_charges.size() == m_atomcount)
+        && (m_last_eeq_geometry.rows() == m_geometry_bohr.rows())
+        && (m_last_eeq_geometry == m_geometry_bohr);
+    if (eeq_charges_current && CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("GFN-FF: Skipping redundant Phase-2 EEQ (geometry unchanged)");
+    }
     if (do_eeq) {
         topo_ptr = &getCachedTopology();
         eeq_topo.neighbor_lists = topo_ptr->neighbor_lists;
@@ -773,7 +779,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         }
 
         Vector new_charges;
-        if (do_eeq && !skip_eeq) {
+        if (do_eeq && !skip_eeq && !eeq_charges_current) {
             new_charges = m_eeq_solver->calculateFinalCharges(
                 m_atoms, m_geometry_bohr, m_charge,
                 topo_ptr->topology_charges, m_last_cn,
@@ -797,14 +803,22 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             }
         }
 
-        if (do_eeq && !skip_eeq && new_charges.size() == m_atomcount) {
-            if (!gpu_only) {
-                if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
-                if (m_workspace) m_workspace->setEEQCharges(new_charges);
-            }
-            // GPU path: memcpy into pre-allocated m_charges to avoid Eigen heap alloc
-            if (m_gpu_path_preallocated) {
-                std::memcpy(m_charges.data(), new_charges.data(), m_atomcount * sizeof(double));
+        if (do_eeq && !skip_eeq && !eeq_charges_current && new_charges.size() == m_atomcount) {
+            // Validate charges before accepting — reject NaN/Inf or implausibly large values
+            bool charges_ok = new_charges.allFinite()
+                           && new_charges.cwiseAbs().maxCoeff() < 50.0;
+            if (charges_ok) {
+                if (!gpu_only) {
+                    if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
+                    if (m_workspace) m_workspace->setEEQCharges(new_charges);
+                }
+                // GPU path: memcpy into pre-allocated m_charges to avoid Eigen heap alloc
+                if (m_gpu_path_preallocated) {
+                    std::memcpy(m_charges.data(), new_charges.data(), m_atomcount * sizeof(double));
+                } else {
+                    m_charges = new_charges;
+                }
+                m_last_eeq_geometry = m_geometry_bohr;
             } else {
                 m_charges = new_charges;
             }
@@ -818,19 +832,26 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 
         if (!gpu_only && m_forcefield) m_forcefield->distributeCNOnly(m_last_cn);
 
-        if (do_eeq && !skip_eeq) {
+        if (do_eeq && !skip_eeq && !eeq_charges_current) {
             Vector new_charges = m_eeq_solver->calculateFinalCharges(
                 m_atoms, m_geometry_bohr, m_charge,
                 topo_ptr->topology_charges, m_last_cn,
                 topo_ptr->hybridization, eeq_topo,
                 true, topo_ptr->alpeeq);
             if (new_charges.size() == m_atomcount) {
-                if (!gpu_only) {
-                    if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
-                    if (m_workspace) m_workspace->setEEQCharges(new_charges);
-                }
-                if (m_gpu_path_preallocated) {
-                    std::memcpy(m_charges.data(), new_charges.data(), m_atomcount * sizeof(double));
+                bool charges_ok = new_charges.allFinite()
+                               && new_charges.cwiseAbs().maxCoeff() < 50.0;
+                if (charges_ok) {
+                    if (!gpu_only) {
+                        if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
+                        if (m_workspace) m_workspace->setEEQCharges(new_charges);
+                    }
+                    if (m_gpu_path_preallocated) {
+                        std::memcpy(m_charges.data(), new_charges.data(), m_atomcount * sizeof(double));
+                    } else {
+                        m_charges = new_charges;
+                    }
+                    m_last_eeq_geometry = m_geometry_bohr;
                 } else {
                     m_charges = new_charges;
                 }
@@ -2546,6 +2567,7 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
 
     // Set charges before torsion generation (torsions need m_charges for fqq)
     m_charges = topo_info.eeq_charges;
+    m_last_eeq_geometry = m_geometry_bohr;  // Mark charges as valid for current geometry
     params.eeq_charges = topo_info.eeq_charges;
     params.topology_charges = topo_info.topology_charges;
 

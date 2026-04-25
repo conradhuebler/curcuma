@@ -770,7 +770,7 @@ private:
 
     // Auto-solver benchmark state
     // Claude Generated - March 2026 (Auto-solver selection)
-    mutable EEQSolveMethod m_selected_method = EEQSolveMethod::SchurCholesky;  ///< Method chosen by auto-benchmark
+    mutable EEQSolveMethod m_selected_method = EEQSolveMethod::PCG;  ///< Method chosen by auto-benchmark
     mutable bool m_auto_benchmark_done = false;  ///< Whether auto-benchmark has run
 
     // ===== Pre-allocated Buffers for calculateFinalCharges (Claude Generated Mar 2026) =====
@@ -808,10 +808,22 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Auto-calculate coordination numbers if not provided", "Algorithm", {})
     PARAM(use_iterative_refinement, Bool, false,
           "Use iterative refinement for EEQ Phase 2", "Algorithm", {})
-    PARAM(solve_method, String, "auto",
+    PARAM(solve_method, String, "pcg",
           "EEQ linear solve method: lu, schur_cholesky, pcg, auto", "Algorithm", {})
-    PARAM(max_pcg_iterations, Int, 200,
+    PARAM(max_pcg_iterations, Int, 100,
           "Maximum PCG iterations for EEQ solve", "Algorithm", {})
     PARAM(pcg_tolerance, Double, 1e-10,
           "PCG convergence tolerance", "Algorithm", {})
+    PARAM(pcg_large_system_iterations, Int, 100,
+          "Max PCG iterations for large systems (N>pcg_large_threshold). Overrides max_pcg_iterations.", "Algorithm", {})
+    PARAM(pcg_large_system_scaling, Int, 10,
+          "PCG iteration scaling factor for large systems: max_iter = min(scaling*N, pcg_large_system_iterations)", "Algorithm", {})
+    PARAM(pcg_large_system_tol_factor, Double, 1e-6,
+          "Relative tolerance factor for large systems: tol = max(pcg_tolerance, factor*||rhs||)", "Algorithm", {})
+    PARAM(pcg_large_threshold, Int, 500,
+          "Atom count threshold above which PCG auto-selection and adaptive scaling activate", "Algorithm", {})
+    PARAM(eeq_distance_cutoff, Double, 30.0,
+          "Distance cutoff in Bohr for Coulomb matrix sparsification. 0 = no cutoff. Improves condition number for large systems.", "Advanced", {})
+    PARAM(dump_charges, Bool, false,
+          "Save Phase 1 and Phase 2 charges to charges_dump_N<size>.json for analysis", "Advanced", {})
 END_PARAMETER_DEFINITION

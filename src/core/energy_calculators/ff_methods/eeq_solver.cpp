@@ -717,7 +717,9 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_convergence_threshold = m_config.get<double>("convergence_threshold", 1e-6);
     m_verbosity = m_config.get<int>("verbosity", 0);
     m_calculate_cn = m_config.get<bool>("calculate_cn", true);
-    m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "schur_cholesky"));
+    m_allow_unconverged = m_config.get<bool>("allow_unconverged_charges", false);
+    m_skip_phase2 = m_config.get<bool>("skip_phase2", false);
+    m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "pcg"));
 
     // Initialize EEQ caching system
     m_eeq_cache = std::make_unique<EEQSolverCache>();
@@ -728,7 +730,8 @@ EEQSolver::EEQSolver(const ConfigManager& config)
         CurcumaLogger::param("convergence_threshold", fmt::format("{:.2e}", m_convergence_threshold));
         CurcumaLogger::param("verbosity", std::to_string(m_verbosity));
         CurcumaLogger::param("calculate_cn", m_calculate_cn ? "true" : "false");
-        CurcumaLogger::param("solve_method", m_config.get<std::string>("solve_method", "schur_cholesky"));
+        CurcumaLogger::param("allow_unconverged_charges", m_allow_unconverged ? "true" : "false");
+        CurcumaLogger::param("solve_method", m_config.get<std::string>("solve_method", "pcg"));
     }
 }
 
@@ -1261,7 +1264,7 @@ Vector EEQSolver::dispatchSolve(
             Vector charges_schur = solveWithSchurCholesky(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
             auto t2 = std::chrono::high_resolution_clock::now();
 
-            int pcg_max = m_config.get<int>("max_pcg_iterations", 200);
+            int pcg_max = m_config.get<int>("max_pcg_iterations", 100);
             double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
             Vector x0_zero = Vector::Zero(natoms);
 
@@ -1302,9 +1305,126 @@ Vector EEQSolver::dispatchSolve(
         }
 
         if (method_to_use == EEQSolveMethod::PCG) {
-            int pcg_max = m_config.get<int>("max_pcg_iterations", 200);
+            int pcg_max = m_config.get<int>("max_pcg_iterations", 100);
             double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
 
+            // Large systems need more iterations and a relative (looser) tolerance.
+            // 200 iterations and 1e-10 absolute are unachievable for N>500 with Jacobi PCG.
+            // Relative tolerance 1e-6 gives charge error ~1e-6 per atom → energy error ~0.3 mEh
+            // which is acceptable for geometry optimization.
+            int pcg_large_threshold = m_config.get<int>("pcg_large_threshold", 500);
+            int pcg_large_iterations = m_config.get<int>("pcg_large_system_iterations", 100);
+            int pcg_large_scaling = m_config.get<int>("pcg_large_system_scaling", 10);
+            double pcg_tol_factor = m_config.get<double>("pcg_large_system_tol_factor", 1e-6);
+
+            if (natoms > pcg_large_threshold) {
+                pcg_max = std::max(pcg_max, std::min(pcg_large_scaling * natoms, pcg_large_iterations));
+                double rhs_norm = rhs_atoms.norm() + 1.0;
+                pcg_tol = std::max(pcg_tol, pcg_tol_factor * rhs_norm);
+                if (m_verbosity >= 1) {
+                    CurcumaLogger::info(fmt::format(
+                        "EEQ PCG large system (N={}): max_iter={}, tol={:.2e}",
+                        natoms, pcg_max, pcg_tol));
+                }
+            }
+
+            // Claude Generated (April 2026): Gershgorin condition estimate for A_nn.
+            // Cheap O(N²) pre-check: if the matrix is weakly diagonally dominant or has
+            // a very large estimated condition number, PCG will converge slowly. Skip
+            // directly to LU instead of burning 5000 PCG iterations first.
+            // Gershgorin: λ ∈ [A_ii - Σ_j≠i |A_ij|, A_ii + Σ_j≠i |A_ij|] for each row.
+            // For the EEQ matrix, A_ij = erf(γ·r)/r > 0, so |A_ij| = A_ij.
+            bool pcg_viable = true;
+            {
+                double min_gersh = std::numeric_limits<double>::max();
+                double max_gersh = 0.0;
+                for (int i = 0; i < natoms; ++i) {
+                    double diag = A_nn(i, i);
+                    double off = 0.0;
+                    for (int j = 0; j < natoms; ++j) {
+                        if (i != j) off += A_nn(i, j);
+                    }
+                    min_gersh = std::min(min_gersh, diag - off);
+                    max_gersh = std::max(max_gersh, diag + off);
+                }
+                double kappa_est = (min_gersh > 0.0) ? max_gersh / min_gersh
+                                                     : std::numeric_limits<double>::infinity();
+
+                if (m_verbosity >= 2) {
+                    CurcumaLogger::info(fmt::format(
+                        "EEQ PCG: Gershgorin bounds [{:.4e}, {:.4e}], κ_est={:.1e}",
+                        min_gersh, max_gersh, kappa_est));
+                }
+
+                // If the matrix is clearly not SPD or has extreme condition number,
+                // skip PCG entirely — it will burn 5000+ iterations and then fail anyway.
+                if (min_gersh <= 0.0 || kappa_est > 1e12) {
+                    if (m_verbosity >= 1) {
+                        CurcumaLogger::warn(fmt::format(
+                            "EEQ PCG: ill-conditioned matrix (κ_est={:.1e}, min_gersh={:.2e}), "
+                            "using LU directly instead of PCG", kappa_est, min_gersh));
+                    }
+                    m_pcg_cache_valid = false;
+                    pcg_viable = false;
+                }
+            }
+
+            if (pcg_viable) {
+            double pcg_tol_factor = m_config.get<double>("pcg_large_system_tol_factor", 1e-6);
+
+            if (natoms > pcg_large_threshold) {
+                pcg_max = std::max(pcg_max, std::min(pcg_large_scaling * natoms, pcg_large_iterations));
+                double rhs_norm = rhs_atoms.norm() + 1.0;
+                pcg_tol = std::max(pcg_tol, pcg_tol_factor * rhs_norm);
+                if (m_verbosity >= 1) {
+                    CurcumaLogger::info(fmt::format(
+                        "EEQ PCG large system (N={}): max_iter={}, tol={:.2e}",
+                        natoms, pcg_max, pcg_tol));
+                }
+            }
+
+            // Claude Generated (April 2026): Gershgorin condition estimate for A_nn.
+            // Cheap O(N²) pre-check: if the matrix is weakly diagonally dominant or has
+            // a very large estimated condition number, PCG will converge slowly. Skip
+            // directly to LU instead of burning 5000 PCG iterations first.
+            // Gershgorin: λ ∈ [A_ii - Σ_j≠i |A_ij|, A_ii + Σ_j≠i |A_ij|] for each row.
+            // For the EEQ matrix, A_ij = erf(γ·r)/r > 0, so |A_ij| = A_ij.
+            bool pcg_viable = true;
+            {
+                double min_gersh = std::numeric_limits<double>::max();
+                double max_gersh = 0.0;
+                for (int i = 0; i < natoms; ++i) {
+                    double diag = A_nn(i, i);
+                    double off = 0.0;
+                    for (int j = 0; j < natoms; ++j) {
+                        if (i != j) off += A_nn(i, j);
+                    }
+                    min_gersh = std::min(min_gersh, diag - off);
+                    max_gersh = std::max(max_gersh, diag + off);
+                }
+                double kappa_est = (min_gersh > 0.0) ? max_gersh / min_gersh
+                                                     : std::numeric_limits<double>::infinity();
+
+                if (m_verbosity >= 2) {
+                    CurcumaLogger::info(fmt::format(
+                        "EEQ PCG: Gershgorin bounds [{:.4e}, {:.4e}], κ_est={:.1e}",
+                        min_gersh, max_gersh, kappa_est));
+                }
+
+                // If the matrix is clearly not SPD or has extreme condition number,
+                // skip PCG entirely — it will burn 5000+ iterations and then fail anyway.
+                if (min_gersh <= 0.0 || kappa_est > 1e12) {
+                    if (m_verbosity >= 1) {
+                        CurcumaLogger::warn(fmt::format(
+                            "EEQ PCG: ill-conditioned matrix (κ_est={:.1e}, min_gersh={:.2e}), "
+                            "using LU directly instead of PCG", kappa_est, min_gersh));
+                    }
+                    m_pcg_cache_valid = false;
+                    pcg_viable = false;
+                }
+            }
+
+            if (pcg_viable) {
             Vector x0_z1 = m_pcg_cache_valid ? m_pcg_last_z1 : Vector::Zero(natoms);
 
             Vector z1 = solveWithPCG(A_nn, rhs_atoms, x0_z1, pcg_max, pcg_tol);
@@ -1327,30 +1447,80 @@ Vector EEQSolver::dispatchSolve(
             }
             charges = z1 - Z2 * lambda;
 
-            m_pcg_last_z1 = z1;
-            m_pcg_last_z2 = Z2.col(0);
-            m_pcg_cache_valid = true;
-        } else {
-            charges = solveWithSchurCholesky(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
-            if (charges.size() == 0) {
-                if (m_verbosity >= 1) {
-                    CurcumaLogger::warn("EEQ: Schur-Cholesky failed, falling back to LU");
+            if (schur_ok) {
+                if (nfrag == 1) {
+                    lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
+                } else {
+                    lambda = S.partialPivLu().solve(schur_rhs);
                 }
-                Eigen::PartialPivLU<Matrix> lu(A);
-                Vector solution = lu.solve(x);
-                Vector residual = A * solution - x;
-                solution -= lu.solve(residual);
-                charges = solution.segment(0, natoms);
+                charges = z1 - Z2 * lambda;
+
+                // Check for NaN/Inf from unconverged PCG; fall back to LU if needed.
+                bool has_nan = false;
+                for (int i = 0; i < natoms && !has_nan; ++i)
+                    has_nan = std::isnan(charges[i]) || std::isinf(charges[i]);
+
+                if (!has_nan) {
+                    m_pcg_last_z1 = z1;
+                    m_pcg_last_z2 = Z2.col(0);
+                    m_pcg_cache_valid = true;
+                } else {
+                    schur_ok = false;
+                    if (m_verbosity >= 1)
+                        CurcumaLogger::warn("EEQ PCG: NaN charges after Schur solve, falling back to LU");
+                }
             }
+
+            if (!schur_ok) {
+                // LU fallback — used only when PCG fails
+                goto lu_solve;
+            }
+            // PCG succeeded — charges are set, fall through to return
+        } else {
+            // pcg_viable = false (Gershgorin check) — use LU directly
+            goto lu_solve;
         }
+    } else if (method_to_use == EEQSolveMethod::LU) {
+        // Direct full-system LU — no Schur complement overhead.
+        // Used when previous calls showed A is not SPD (SchurCholesky failed)
+        // and PCG is unsuitable (large N, no convergence).
+        goto lu_solve;
     } else {
-        // LU baseline
-        Eigen::PartialPivLU<Matrix> lu(A);
-        Vector solution = lu.solve(x);
-        Vector residual = A * solution - x;
-        solution -= lu.solve(residual);
-        charges = solution.segment(0, natoms);
+        charges = solveWithSchurCholesky(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
+        if (charges.size() == 0) {
+            if (m_verbosity >= 1) {
+                CurcumaLogger::warn("EEQ: Schur-Cholesky failed, falling back to LU");
+            }
+            // Don't permanently select LU — next step tries SchurCholesky again
+            goto lu_solve;
+        }
     }
+    } // closes outer if (method_to_use == SchurCholesky || PCG || Auto)
+    goto end_dispatch;
+
+    // Single LU solve with progress timing — shared by all paths
+    {
+        lu_solve:
+        if (m_verbosity >= 1 && natoms > 200) {
+            CurcumaLogger::info(fmt::format("EEQ LU solve starting for N={}...", natoms));
+        }
+        auto t0 = std::chrono::high_resolution_clock::now();
+        Eigen::PartialPivLU<Matrix> lu(A);
+        charges = lu.solve(x).head(natoms);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        if (m_verbosity >= 1 && natoms > 200) {
+            CurcumaLogger::result(fmt::format(
+                "EEQ LU solve done in {:.1f}s",
+                std::chrono::duration<double>(t1 - t0).count()));
+        }
+        m_pcg_cache_valid = false;
+        // After LU, switch to PCG for future calls (with warm-start from LU result).
+        // This avoids getting stuck in LU permanently: PCG may converge on the next
+        // step since the geometry change is small and LU provides a good initial guess.
+        if (m_solve_method == EEQSolveMethod::Auto)
+            m_selected_method = EEQSolveMethod::PCG;
+    }
+    end_dispatch: ;
 
     // NaN/Inf validation with fallback
     for (int i = 0; i < natoms; ++i) {

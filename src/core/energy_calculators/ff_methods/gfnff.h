@@ -2092,6 +2092,7 @@ private:
     // Tier 2: Dynamic state (CN, distances) - invalidates on small geometry change
     mutable std::optional<TopologyInfo> m_cached_topology;
     mutable Eigen::MatrixXd m_last_topology_geometry;  // Geometry when topology was last calculated
+    mutable Eigen::MatrixXd m_last_eeq_geometry;       // Geometry for which m_charges are currently valid
     mutable bool m_static_topology_valid = false;       // True if static topology is current
     mutable bool m_full_topology_recalculated = false;  // Set by getCachedTopology() on full update
     mutable std::optional<bool> m_external_topology_decision; ///< GPU displacement check result
