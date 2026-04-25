@@ -139,8 +139,8 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 | Method | Test Status | Notes |
 |--------|-------------|-------|
 | EHT | not systematically tested | qualitative only |
-| Native GFN1-xTB | 2/7 vs TBLite | known accuracy gaps |
-| Native GFN2-xTB | 0/7 vs TBLite | major errors remain |
+| Native GFN1-xTB | 2/7 vs TBLite | known accuracy gaps; **-opt works (AP4)** |
+| Native GFN2-xTB | 0/7 vs TBLite | major errors remain; **-opt works (AP4)** |
 | PM3/AM1/MNDO | 21/21 vs Ulysses (< 4 µEh) | most complete |
 | PM6 | not tested | parameters present, untested |
 
@@ -150,6 +150,7 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - **✅ EHT Implementation**: Functional with orbital analysis and verbosity control
 - **✅ XTB/TBLite Interfaces**: Native library verbosity synchronized with CurcumaLogger
 - **✅ Ulysses Interface**: Complete CurcumaLogger integration with SCF progress
+- **✅ Native GFN1/GFN2 Gradients (AP4)**: `xtb_gradient.cpp` — repulsion + H0/Pulay + Coulomb + CN; `-opt` converges on H₂O, CH₄, NH₃; GFN2 multipole gradient pending (Phase 4b)
 - **🔧 Native GFN-FF (gfnff)**: Architecture complete, parameter debugging in progress
 
 ### Verbosity Integration Status ✅
