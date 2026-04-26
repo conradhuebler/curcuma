@@ -21,6 +21,7 @@
 #include "xtb_native.h"
 #include "STO_CGTO.hpp"
 #include "xtb_coulomb.hpp"
+#include "xtb_multipole_ints.hpp"
 
 #include "parameters/gfn1_params.hpp"
 #include "parameters/gfn2_params.hpp"
@@ -311,6 +312,80 @@ void XTB::calculateGradient()
                             G_sval[0] += sval * dS[0];
                             G_sval[1] += sval * dS[1];
                             G_sval[2] += sval * dS[2];
+
+                            // AP5b: GFN2 multipole integral Pulay term
+                            // Fock: F_μν -= 0.5*(dp_jat·v_dp(jat) + dp_iat·v_dp(iat) + quad terms)
+                            //   dp_jat = D with origin at jat (column atom)
+                            //   dp_iat = dp_jat + ΔR·S  (ΔR = Rjat - Riat)
+                            // Gradient (Pulay, iat-derivative, triangular loop):
+                            //   term = d(dp_jat)/dRiat · v_dp(jat) + d(dp_iat)/dRiat · v_dp(iat)
+                            //        + d(qp_jat)/dRiat · v_qp(jat) + d(qp_iat)/dRiat · v_qp(iat)
+                            // Reference: tblite h0.f90:get_hamiltonian_gradient
+                            if (m_method == MethodType::GFN2 && m_mp_initialized) {
+                                double S_mp, D_mp[3], Q_mp[6];
+                                double dD_dA[3][3], dD_dB[3][3];
+                                double dQ_dA[3][6], dQ_dB[3][6];
+                                using namespace curcuma::xtb::multipole_ints;
+                                cgto_multipole_grad_transformed(
+                                    sh_a, sh_b,
+                                    xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                                    xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2],
+                                    t_a, t_b,
+                                    S_mp, D_mp, Q_mp,
+                                    dD_dA, dD_dB, dQ_dA, dQ_dB);
+
+                                // ΔR = Rjat - Riat (origin-shift vector)
+                                const double dR[3] = {
+                                    xyz[3*jat+0]-xyz[3*iat+0],
+                                    xyz[3*jat+1]-xyz[3*iat+1],
+                                    xyz[3*jat+2]-xyz[3*iat+2]
+                                };
+                                // Packed quadrupole index mapping (upper triangle)
+                                static const int qa6[6] = {0,0,1,0,1,2};
+                                static const int qb6[6] = {0,1,1,2,2,2};
+
+                                for (int l = 0; l < 3; ++l) {
+                                    double term = 0.0;
+
+                                    // -- Dipole contributions --
+                                    for (int k = 0; k < 3; ++k) {
+                                        // d(dp_jat[k])/dRiat_l · v_dp(jat)
+                                        term += dD_dA[l][k] * m_pot.v_dp(k, jat);
+                                        // d(dp_iat[k])/dRiat_l · v_dp(iat)
+                                        // = (dD_dA[l][k] + ΔR[k]·dS[l] - δ_{kl}·Smn) · v_dp(iat)
+                                        const double dDiat = dD_dA[l][k] + dR[k]*dS[l] - (k==l ? Smn : 0.0);
+                                        term += dDiat * m_pot.v_dp(k, iat);
+                                    }
+
+                                    // -- Quadrupole contributions --
+                                    // d(qp_iat) = d(qp_jat) + traceless(Δqraw)
+                                    // Δqraw[q] = origin-shift correction for iat-origin quad
+                                    double Δqraw[6];
+                                    for (int q = 0; q < 6; ++q) {
+                                        const int a = qa6[q], b = qb6[q];
+                                        // derivative of (ΔR[b]*D_mp[a] + ΔR[a]*D_mp[b] + ΔR[a]*ΔR[b]*S)
+                                        // w.r.t. Riat_l  (dΔR[k]/dRiat_l = -δ_{kl})
+                                        Δqraw[q] = -(b==l ? D_mp[a] : 0.0) + dR[b]*dD_dA[l][a]
+                                                 - (a==l ? D_mp[b] : 0.0) + dR[a]*dD_dA[l][b]
+                                                 + (-(a==l ? dR[b] : 0.0) - (b==l ? dR[a] : 0.0))*Smn
+                                                 + dR[a]*dR[b]*dS[l];
+                                    }
+                                    const double dtr_c = 0.5*(Δqraw[0] + Δqraw[2] + Δqraw[5]);
+
+                                    for (int q = 0; q < 6; ++q) {
+                                        const bool is_diag = (qa6[q] == qb6[q]);
+                                        // d(qp_jat[q])/dRiat_l · v_qp(jat)
+                                        term += dQ_dA[l][q] * m_pot.v_qp(q, jat);
+                                        // d(qp_iat[q])/dRiat_l · v_qp(iat)
+                                        const double dQiat = dQ_dA[l][q]
+                                                           + 1.5*Δqraw[q]
+                                                           - (is_diag ? dtr_c : 0.0);
+                                        term += dQiat * m_pot.v_qp(q, iat);
+                                    }
+
+                                    G_sval[l] -= Pmn * term;
+                                }
+                            }
 
                             // shpoly contribution: 2·P·H0 · dlog(pi)/dR = 2·P·H0 · dlog_pi_dr_r · rij
                             G_shpoly_scalar += 2.0 * Pmn * H0mn * dlog_pi_dr_r;

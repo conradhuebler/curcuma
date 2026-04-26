@@ -140,7 +140,7 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 |--------|-------------|-------|
 | EHT | not systematically tested | qualitative only |
 | Native GFN1-xTB | 2/7 vs TBLite | known accuracy gaps; `-opt` works (AP4); ~5–70 mEh off |
-| Native GFN2-xTB | 0/7 vs TBLite | energy accuracy issue (vat_extra, separate); `-opt` works (AP4); multipole direct gradient done (AP5-S1); integral Pulay pending (AP5-S2) |
+| Native GFN2-xTB | 0/7 vs TBLite | energy accuracy issue (vat_extra, separate); `-opt` works (AP4+AP5b); FD gradient tests pass H₂O/CH₄/NH₃ (7e-8 max error) after AP5b + unit fix |
 | PM3/AM1/MNDO | 21/21 vs Ulysses (< 4 µEh) | most complete |
 | PM6 | not tested | parameters present, untested |
 
@@ -151,8 +151,9 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - **✅ XTB/TBLite Interfaces**: Native library verbosity synchronized with CurcumaLogger
 - **✅ Ulysses Interface**: Complete CurcumaLogger integration with SCF progress
 - **✅ Native GFN1/GFN2 Gradients (AP4)**: `xtb_gradient.cpp` — repulsion + H0/Pulay + Coulomb + CN; `-opt` converges on H₂O, CH₄, NH₃
-- **🔧 GFN2 Multipole Gradient Schritt 1 (AP5)**: Section 5 in `xtb_gradient.cpp` — SD/DD/SQ direct interaction gradient + mrad/CN chain-rule (port of `get_multipole_gradient_0d`); runs BEFORE section 4
-- **⏳ GFN2 Multipole Gradient Schritt 2 (AP5)**: `cgto_multipole_grad()` in `xtb_multipole_ints.hpp` — integral Pulay term still pending
+- **✅ GFN2 Multipole Gradient Schritt 1 (AP5)**: Section 5 in `xtb_gradient.cpp` — SD/DD/SQ direct interaction gradient + mrad/CN chain-rule (port of `get_multipole_gradient_0d`)
+- **✅ GFN2 Multipole Integral Pulay (AP5b)**: `xtb_gradient.cpp` lines ~316–390 — d(dp_iat)/dR and d(qp_iat)/dR terms via origin-shift correction from `dD_dA`; `cgto_multipole_grad_transformed()` in `xtb_multipole_ints.hpp`
+- **✅ Gradient unit fix**: `m_gradient /= au` (was `*= au`) in `xtb_native.cpp` — caused au² error (~72% wrong) at non-equilibrium geometries
 - **🔧 Native GFN-FF (gfnff)**: Architecture complete, parameter debugging in progress
 
 ### Verbosity Integration Status ✅

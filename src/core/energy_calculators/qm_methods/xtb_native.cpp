@@ -205,7 +205,7 @@ double XTB::Calculation(bool gradient)
         if (m_method == MethodType::GFN2) addMultipolePotential(m_pot);
 
         calculateGradient();       // fills m_gradient in Eh/Bohr
-        m_gradient *= au;          // Eh/Bohr → Eh/Å (matching tbliteinterface.cpp:553)
+        m_gradient /= au;          // Eh/Bohr → Eh/Å: 1 Eh/Bohr = (1/au) Eh/Å
     }
 
     if (!m_scf_converged) {
