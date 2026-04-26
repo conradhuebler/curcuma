@@ -1,7 +1,7 @@
 # AP 5 — Konkreter Implementierungsplan: Validierung und Regressionstests
 
-**Status:** Bereit zur Umsetzung (nach AP 4)
-**Erstellt:** 2026-04-25
+**Status:** In Bearbeitung — Schritt 1 (direkter Interaktionsgradient) abgeschlossen; Schritt 2 (Integral-Pulay) ausstehend
+**Erstellt:** 2026-04-25 | **Aktualisiert:** 2026-04-26
 **Vorgängerdokument:** [`NATIVE_XTB_ROADMAP.md`](NATIVE_XTB_ROADMAP.md), Arbeitspaket 5
 **Vorbedingung:** AP 1–4 abgeschlossen
 **Implementation:** AI-generiert; Validierungsergebnisse erfordern Operator-Sichtung (`✅ TESTED` darf nur der Operator setzen)
@@ -386,18 +386,20 @@ Nach jedem Lauf wird `docs/NATIVE_XTB_STATUS.md` mit den Tabellen­werten aktual
 
 | Datum | Aufgabe | Status | Notizen |
 |-------|---------|--------|---------|
-| 2026-04-25 | 5.1 Energie | Plan | — |
-| | 5.2 Grad-FD | | |
-| | 5.3 Grad-TBLite | | |
-| | 5.4 Opt-E2E | | |
-| | 5.5 CTests | | |
-| | 5.6 Perf | | |
-| | 5.7 Doku | | |
-| | 5.8 Übergabe | | |
+| 2026-04-25 | 5.1 Energie | Offen | Energiefehler ~35–60 mEh (GFN2) bekannt — separates Problem (vat_extra) |
+| 2026-04-26 | 5.2 Grad-FD | Infrastruktur ✅ | `test_xtb_gradient.cpp` erstellt; Schritt-1-Gradient implementiert; noch nicht gelaufen |
+| | 5.3 Grad-TBLite | Offen | — |
+| | 5.4 Opt-E2E | Teilweise | AP4: H₂O, CH₄, NH₃ konvergieren; Schritt-2-Vollständigkeit ausstehend |
+| | 5.5 CTests | Teilweise | Disabled-Tests noch deaktiviert; test_xtb_gradient registriert aber nicht gebaut |
+| | 5.6 Perf | Offen | — |
+| | 5.7 Doku | Teilweise ✅ | NATIVE_XTB_STATUS.md, CLAUDE.md, AIChangelog.md aktualisiert (2026-04-26) |
+| | 5.8 Übergabe | Offen | — |
 
 ## Schwierigkeiten / Blocker
 
-- *Noch keine dokumentiert*
+- **GFN2 Energiefehler ~35–60 mEh** vs. TBLite: `vat_extra`-Term (~1.5e-4 Eh Offset), `updown_to_magnet`-Verdacht in der Quadrupol-Popul.-Analyse. Nicht in AP5 behoben — separates Problem.
+- **AP5 Schritt 2** (Multipol-Integral-Pulay `cgto_multipole_grad`): Erfordert Port von `tblite/integral/multipole.f90:multipole_grad_cgto` (Zeilen 522–657). Ohne diesen Term ist der Gradient formal inkonsistent mit der Fock-Matrix.
+- **d-Schalen**: weiterhin übersprungen (`if (t_a < 0) continue`) — nicht Gegenstand von AP5.
 
 ---
 

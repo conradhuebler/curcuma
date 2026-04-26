@@ -1,6 +1,6 @@
 # Native xTB Implementation Status (neue modulare Architektur)
 
-**Last Updated**: 2026-04-25
+**Last Updated**: 2026-04-26 (AP5 Schritt 1)
 **Implementation**: AI-generated, machine-tested — **human production testing pending**
 **Location**: `src/core/energy_calculators/qm_methods/`
 
@@ -60,7 +60,9 @@ qm_methods/
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| **Analytical gradients** | ❌ Not implemented | Required for optimization/MD. See Roadmap AP 4. |
+| **Analytical gradients (GFN1/GFN2)** | ✅ AP4 | Repulsion, H0/Pulay, Coulomb ES2, CN chain-rule in `xtb_gradient.cpp` |
+| **GFN2 multipole direct gradient** | ✅ AP5 Schritt 1 | SD/DD/SQ pairwise gradients + mrad/CN chain-rule; port of `tblite/coulomb/multipole.f90:get_multipole_gradient_0d` |
+| **GFN2 multipole integral Pulay** | ❌ AP5 Schritt 2 | `cgto_multipole_grad()` not yet implemented; gradient formally incomplete without this |
 | **D4 dispersion** | ❌ Stub | `m_E_dispersion = 0.0`. DFT-D4 interface exists but not wired. |
 | **DIIS / advanced mixer** | ❌ Not implemented | Only linear damping (0.4). `diis_accelerator.h` exists but unused. |
 | **Thermal smearing** | ❌ Declared but unused | `m_electronic_temp = 300 K` never used. Integer occupation only. |
@@ -78,7 +80,8 @@ qm_methods/
 | `test_xtb_overlap` (3.1) | CGTO overlap vs. TBLite | ✅ max |ΔS| < 1e-8 |
 | `test_xtb_h0` (3.2) | Bare Hamiltonian H0 vs. TBLite | ✅ max |ΔH| < 1e-7 |
 | `test_xtb_coulomb` (3.3) | Gamma matrix structural checks | ✅ Symmetry, diagonal, limits |
-| `test_xtb_scf_snapshot` (3.6) | Full SCF from dumped S/H0 | 🔄 In progress (Δε_max < 1e-4 Eh gate) |
+| `test_xtb_scf_snapshot` (3.6) | Full SCF from dumped S/H0 | ⚠️ GFN2 Δε_max slightly above 1e-4 Eh (pre-existing energy accuracy issue) |
+| `test_xtb_gradient` (AP5) | Analytical vs FD gradient | 🔄 Added (H₂O, CH₄, NH₃; tolerance 5e-4 Eh/Å); needs build+run |
 
 **Test molecules**: H2, He2, LiH, H2O, CH4, NH3, C6H6
 
@@ -94,7 +97,7 @@ qm_methods/
 | `ipea1` | TBLite | TBLite (unchanged) |
 | `ugfn2` | Ulysses | Ulysses (unchanged) |
 
-**Status**: Energies returned but ~35–60 mEh off TBLite for GFN2, ~5–70 mEh for GFN1. Numerical correctness in AP5. TBLite-based CTests disabled until AP5 re-baselines golden references.
+**Status**: Energies ~35–60 mEh off TBLite (GFN2), ~5–70 mEh (GFN1) — energy accuracy is a separate issue (vat_extra/updown_to_magnet, not addressed in AP5). Gradient: AP4+AP5-Schritt-1 implemented; AP5-Schritt-2 (integral Pulay) pending. `-opt` converges for H₂O, CH₄, NH₃. TBLite-based CTests remain disabled.
 
 ---
 
@@ -107,7 +110,7 @@ qm_methods/
 | **hscale** | Pre-built matrix (buggy) | On-the-fly in H0 builder (correct) |
 | **Multipole** | Simplified dipole-dipole only | Full dipole + quadrupole with damping |
 | **SCF mixer** | DIIS (8 vectors) | Linear damping only |
-| **Gradients** | Implemented (in old GFN2) | **Not yet implemented** |
+| **Gradients** | Implemented (old) | AP4+AP5-S1 implemented; AP5-S2 pending |
 | **MethodFactory** | Wired as `ngfn2` / `ngfn1` | **Not wired** |
 
 ---
@@ -132,5 +135,5 @@ qm_methods/
 
 ---
 
-*Status updated: 2026-04-25*
-*Next update: After MethodFactory wiring + gradient implementation*
+*Status updated: 2026-04-26*
+*Next: AP5 Schritt 2 (multipole integral Pulay gradient) → then energy accuracy investigation (vat_extra)*

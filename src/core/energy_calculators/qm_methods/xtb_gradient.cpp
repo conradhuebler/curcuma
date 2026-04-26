@@ -9,9 +9,11 @@
  *   - external/tblite/src/tblite/xtb/h0.f90        (get_hamiltonian_gradient)
  *   - external/tblite/src/tblite/repulsion/effective.f90 (get_repulsion_derivs)
  *   - external/tblite/src/tblite/coulomb/charge/type.f90
+ *   - external/tblite/src/tblite/coulomb/multipole.f90  (get_multipole_gradient_0d)
  *
  * AP4: repulsion + H0/Pulay (s/p only) + Coulomb + CN chain-rule.
- * AP5 (TODO): GFN2 multipole gradient + overall energy accuracy.
+ * AP5: GFN2 direct multipole gradient (SD/DD/SQ) + mrad/CN chain-rule.
+ * AP5 (TODO): integral Pulay term (multipole integral derivatives × v_dp/v_qp).
  *
  * Claude Generated. GPL-3.0.
  */
@@ -63,8 +65,8 @@ static inline int ao_to_type_g(int ang, int local_ao)
  *   1.  Repulsion gradient                                                    *
  *   2.  Hamiltonian/Pulay gradient (H0 + W + potential terms)                *
  *   3.  Coulomb (ES2) gradient                                                *
+ *   5.  GFN2 multipole gradient (AP5) — must run before 4 to fill dEdcn      *
  *   4.  CN chain-rule gradient                                                *
- *  (GFN2 multipole gradient: deferred to Phase 4b)                           *
  * ========================================================================== */
 void XTB::calculateGradient()
 {
@@ -406,6 +408,167 @@ void XTB::calculateGradient()
     }
 
     // ==========================================================================
+    //  5.  GFN2 multipole gradient (AP5)
+    //      Port of tblite/coulomb/multipole.f90:get_multipole_gradient_0d
+    //      Reference: Bannwarth et al., JCTC 2019; Grimme et al., JCTC 2017
+    //
+    //  Three pairwise terms (unique pairs iat > jat, vec = R_jat - R_iat):
+    //
+    //    SD (charge-dipole, g3):
+    //      dpiqj = (vec·dp_iat) * q_jat
+    //      qidpj = (vec·dp_jat) * q_iat
+    //      ddmp3 = g5*fdmp3*(-3 + mp_dmp3*(1-fdmp3))          [includes g5]
+    //      dg    = -ddmp3*vec*(dpiqj-qidpj) + fdmp3*g3*(q_iat*dp_jat - q_jat*dp_iat)
+    //
+    //    DD (dipole-dipole, g5):
+    //      edd   = (dp_iat·dp_jat)*r² - 3*(dp_jat·vec)*(dp_iat·vec)
+    //      ddmp5 = fdmp5*(-5 + mp_dmp5*(1-fdmp5))             [without g7]
+    //      dg   += -2*fdmp5*g5*(dp_iat·dp_jat)*vec
+    //              +3*fdmp5*g5*((dp_iat·vec)*dp_jat + (dp_jat·vec)*dp_iat)
+    //              -edd*ddmp5*g7*vec
+    //
+    //    SQ (charge-quadrupole, g5):
+    //      eq    = (q_jat*qp_iat + qp_jat*q_iat) : vec⊗vec   [packed sym tensor]
+    //      θ·v   = symmetric matrix-vector product (packed xx,xy,yy,xz,yz,zz)
+    //      dg   += -eq*ddmp5*g7*vec
+    //              -2*fdmp5*g5*(q_iat*(θ_jat·vec) + q_jat*(θ_iat·vec))
+    //
+    //  mrad/CN chain rule:
+    //    dEdr_mp[i] += fddr_{SD,DD,SQ}  (derivative w.r.t. mrad[i])
+    //    dmrdcn[i]   = -t2*mp_kexp*t1/(1+t1)  (same formula as in setupMultipole)
+    //    dEdcn[i]   += dEdr_mp[i] * dmrdcn[i]  → fed into existing CN pair loop (sect. 4)
+    //
+    //  Must run BEFORE section 4 so that dEdcn is complete when CN loop executes.
+    // ==========================================================================
+    if (m_method == MethodType::GFN2 && m_mp_initialized) {
+        using namespace gfn2_params;
+
+        Vector dEdr_mp = Vector::Zero(nat);
+
+        for (int iat = 0; iat < nat; ++iat) {
+            for (int jat = 0; jat < iat; ++jat) {
+                // vec = R_jat - R_iat  (TBLite convention)
+                const double vx = xyz[3*jat+0] - xyz[3*iat+0];
+                const double vy = xyz[3*jat+1] - xyz[3*iat+1];
+                const double vz = xyz[3*jat+2] - xyz[3*iat+2];
+                const double r2 = vx*vx + vy*vy + vz*vz;
+                if (r2 < 1.0e-12) continue;
+                const double r1 = std::sqrt(r2);
+                const double g1 = 1.0 / r1;
+                const double g3 = g1 * g1 * g1;
+                const double g5 = g3 * g1 * g1;
+                const double g7 = g5 * g1 * g1;
+
+                const double rr_dmp = 0.5 * (m_mp_mrad[iat] + m_mp_mrad[jat]);
+
+                const double fdmp3 = 1.0 / (1.0 + 6.0 * std::pow(rr_dmp * g1, mp_dmp3));
+                const double fdmp5 = 1.0 / (1.0 + 6.0 * std::pow(rr_dmp * g1, mp_dmp5));
+
+                // ddmp3: d(g3*fdmp3)/dr divided by (vec/r), includes g5 factor
+                const double ddmp3 = g5 * fdmp3 * (-3.0 + mp_dmp3 * (1.0 - fdmp3));
+                // ddmp5: same for g5*fdmp5, WITHOUT g7 (g7 applied separately)
+                const double ddmp5 = fdmp5 * (-5.0 - mp_dmp5 * (fdmp5 - 1.0));
+
+                // ── SD (charge-dipole) ────────────────────────────────────────────
+                const double dpiqj = (vx*m_wfn.dp_at(0,iat) + vy*m_wfn.dp_at(1,iat)
+                                    + vz*m_wfn.dp_at(2,iat)) * m_wfn.q_at(jat);
+                const double qidpj = (vx*m_wfn.dp_at(0,jat) + vy*m_wfn.dp_at(1,jat)
+                                    + vz*m_wfn.dp_at(2,jat)) * m_wfn.q_at(iat);
+                const double diff_sd = dpiqj - qidpj;
+
+                double gx = -ddmp3 * vx * diff_sd
+                          + fdmp3 * g3 * (m_wfn.q_at(iat)*m_wfn.dp_at(0,jat) - m_wfn.q_at(jat)*m_wfn.dp_at(0,iat));
+                double gy = -ddmp3 * vy * diff_sd
+                          + fdmp3 * g3 * (m_wfn.q_at(iat)*m_wfn.dp_at(1,jat) - m_wfn.q_at(jat)*m_wfn.dp_at(1,iat));
+                double gz = -ddmp3 * vz * diff_sd
+                          + fdmp3 * g3 * (m_wfn.q_at(iat)*m_wfn.dp_at(2,jat) - m_wfn.q_at(jat)*m_wfn.dp_at(2,iat));
+
+                // fddr_SD: ∂E_SD/∂mrad (same value added to both iat and jat)
+                const double fddr_sd = 3.0 * diff_sd * mp_dmp3 * fdmp3 * g3
+                                     * (fdmp3 / rr_dmp) * std::pow(rr_dmp * g1, mp_dmp3);
+                dEdr_mp(iat) += fddr_sd;
+                dEdr_mp(jat) += fddr_sd;
+
+                // ── DD (dipole-dipole) ────────────────────────────────────────────
+                const double dpidpj = m_wfn.dp_at(0,iat)*m_wfn.dp_at(0,jat)
+                                    + m_wfn.dp_at(1,iat)*m_wfn.dp_at(1,jat)
+                                    + m_wfn.dp_at(2,iat)*m_wfn.dp_at(2,jat);
+                const double dpiv   = vx*m_wfn.dp_at(0,iat) + vy*m_wfn.dp_at(1,iat) + vz*m_wfn.dp_at(2,iat);
+                const double dpjv   = vx*m_wfn.dp_at(0,jat) + vy*m_wfn.dp_at(1,jat) + vz*m_wfn.dp_at(2,jat);
+                const double edd    = dpidpj * r2 - 3.0 * dpjv * dpiv;
+
+                gx += -2.0*fdmp5*g5*dpidpj*vx
+                    + 3.0*fdmp5*g5*(dpiv*m_wfn.dp_at(0,jat) + dpjv*m_wfn.dp_at(0,iat))
+                    - edd * ddmp5 * g7 * vx;
+                gy += -2.0*fdmp5*g5*dpidpj*vy
+                    + 3.0*fdmp5*g5*(dpiv*m_wfn.dp_at(1,jat) + dpjv*m_wfn.dp_at(1,iat))
+                    - edd * ddmp5 * g7 * vy;
+                gz += -2.0*fdmp5*g5*dpidpj*vz
+                    + 3.0*fdmp5*g5*(dpiv*m_wfn.dp_at(2,jat) + dpjv*m_wfn.dp_at(2,iat))
+                    - edd * ddmp5 * g7 * vz;
+
+                const double fddr_dd = 3.0 * edd * mp_dmp5 * fdmp5 * g5
+                                     * (fdmp5 / rr_dmp) * std::pow(rr_dmp * g1, mp_dmp5);
+                dEdr_mp(iat) += fddr_dd;
+                dEdr_mp(jat) += fddr_dd;
+
+                // ── SQ (charge-quadrupole) ────────────────────────────────────────
+                // qp_at packing: (xx=0, xy=1, yy=2, xz=3, yz=4, zz=5)
+                // eq = Σ_{ab} (q_j*θ_i + θ_j*q_i)_{ab} * vec_a * vec_b  [packed sym]
+                const double qi = m_wfn.q_at(iat);
+                const double qj = m_wfn.q_at(jat);
+                const double eq =
+                      (qj*m_wfn.qp_at(0,iat) + m_wfn.qp_at(0,jat)*qi) * vx*vx
+                    + 2.0*(qj*m_wfn.qp_at(1,iat) + m_wfn.qp_at(1,jat)*qi) * vx*vy
+                    + (qj*m_wfn.qp_at(2,iat) + m_wfn.qp_at(2,jat)*qi) * vy*vy
+                    + 2.0*(qj*m_wfn.qp_at(3,iat) + m_wfn.qp_at(3,jat)*qi) * vx*vz
+                    + 2.0*(qj*m_wfn.qp_at(4,iat) + m_wfn.qp_at(4,jat)*qi) * vy*vz
+                    + (qj*m_wfn.qp_at(5,iat) + m_wfn.qp_at(5,jat)*qi) * vz*vz;
+
+                // θ_iat · vec  and  θ_jat · vec  (symmetric matrix-vector, packed)
+                const double tivx = m_wfn.qp_at(0,iat)*vx + m_wfn.qp_at(1,iat)*vy + m_wfn.qp_at(3,iat)*vz;
+                const double tivy = m_wfn.qp_at(1,iat)*vx + m_wfn.qp_at(2,iat)*vy + m_wfn.qp_at(4,iat)*vz;
+                const double tivz = m_wfn.qp_at(3,iat)*vx + m_wfn.qp_at(4,iat)*vy + m_wfn.qp_at(5,iat)*vz;
+                const double tjvx = m_wfn.qp_at(0,jat)*vx + m_wfn.qp_at(1,jat)*vy + m_wfn.qp_at(3,jat)*vz;
+                const double tjvy = m_wfn.qp_at(1,jat)*vx + m_wfn.qp_at(2,jat)*vy + m_wfn.qp_at(4,jat)*vz;
+                const double tjvz = m_wfn.qp_at(3,jat)*vx + m_wfn.qp_at(4,jat)*vy + m_wfn.qp_at(5,jat)*vz;
+
+                gx += -eq * ddmp5 * g7 * vx
+                    - 2.0*fdmp5*g5 * (qi*tjvx + qj*tivx);
+                gy += -eq * ddmp5 * g7 * vy
+                    - 2.0*fdmp5*g5 * (qi*tjvy + qj*tivy);
+                gz += -eq * ddmp5 * g7 * vz
+                    - 2.0*fdmp5*g5 * (qi*tjvz + qj*tivz);
+
+                const double fddr_sq = eq * 3.0 * mp_dmp5 * fdmp5 * g5
+                                     * (fdmp5 / rr_dmp) * std::pow(rr_dmp * g1, mp_dmp5);
+                dEdr_mp(iat) += fddr_sq;
+                dEdr_mp(jat) += fddr_sq;
+
+                // ── Apply forces (Newton's 3rd law) ───────────────────────────────
+                m_gradient(iat, 0) += gx;  m_gradient(jat, 0) -= gx;
+                m_gradient(iat, 1) += gy;  m_gradient(jat, 1) -= gy;
+                m_gradient(iat, 2) += gz;  m_gradient(jat, 2) -= gz;
+            }
+        }
+
+        // mrad/CN chain rule:
+        //   mrad[i] = p_rad[z-1] + (mp_rmax - p_rad[z-1]) / (1 + t1)
+        //   dmrdcn[i] = -t2 * mp_kexp * t1 / (1 + t1)   (tblite get_mrad convention)
+        //   dEdcn[i] += dEdr_mp[i] * dmrdcn[i]
+        for (int i = 0; i < nat; ++i) {
+            const int zi     = m_atoms[i];
+            const double rad = p_rad[zi - 1];
+            const double vcn = p_vcn[zi - 1];
+            const double arg = m_coordination_numbers(i) - vcn - mp_shift;
+            const double t1  = std::exp(-mp_kexp * arg);
+            const double t2  = (mp_rmax - rad) / (1.0 + t1);
+            const double dmrdcn = -t2 * mp_kexp * t1 / (1.0 + t1);
+            dEdcn(i) += dEdr_mp(i) * dmrdcn;
+        }
+    }
+
+    // ==========================================================================
     //  4.  CN chain-rule gradient
     //      G_iat += Σ_j (dEdcn[i] + dEdcn[j]) · dcount_ij/dr · (R_i−R_j)/r
     //
@@ -416,6 +579,7 @@ void XTB::calculateGradient()
     //    dc/dr = dc1/dr·c2 + c1·dc2/dr
     //
     //  Covalent radii: D3 parametrisation via covalent_rad_d3_au().
+    //  Note: dEdcn now includes H0/Pulay + GFN2 multipole mrad contributions.
     // ==========================================================================
     {
         std::vector<double> rcov(nat);
@@ -467,13 +631,6 @@ void XTB::calculateGradient()
             }
         }
     }
-
-    // ==========================================================================
-    //  5.  GFN2 multipole gradient
-    //      TODO AP5: analytical gradient for sd/dd/sq interactions.
-    //      Deferred together with GFN2 energy accuracy work (AP5).
-    //      Impact: small relative to repulsion+H0+Coulomb; -opt converges.
-    // ==========================================================================
 }
 
 } // namespace curcuma::xtb

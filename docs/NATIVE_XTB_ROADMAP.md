@@ -1,6 +1,6 @@
 # Roadmap: Portierung der neuen nativen xTB-Implementierung
 
-**Status:** AP3 abgeschlossen (2026-04-25)  
+**Status:** AP5 Schritt 1 abgeschlossen (2026-04-26) — AP5b, AP6–AP9 geplant  
 **Ziel:** Die neue modulare `curcuma::xtb::XTB`-Implementierung ersetzt die externe TBLite-GFN2-Implementierung und wird zur Standard-`gfn2`-/`gfn1`-Methode in Curcuma.  
 **Erstellt:** 2026-04-25
 
@@ -308,6 +308,19 @@ Referenz: Alte `gfn2.cpp:855-873`
 
 ---
 
+## Arbeitspaket 4: Analytische Gradienten — Fortschritt
+
+| Sub-AP | Beitrag | Status |
+|--------|---------|--------|
+| 4a | Repulsion | ✅ AP4 |
+| 4b | Isotrope Coulomb | ✅ AP4 |
+| 4c | Third-order | ✅ AP4 |
+| 4d | H0 (HF + CN-Shift + shpoly) | ✅ AP4 |
+| 4e-direkt | Multipol-Direktgradient (SD/DD/SQ) | ✅ AP5 Schritt 1 |
+| 4e-pulay | Multipol-Integral-Pulay | ⏳ AP5b |
+
+---
+
 ## Arbeitspaket 5: Validierung und Regressionstests
 
 **Ziel:** Die neue Implementierung gegen TBLite-Referenz validieren und sicherstellen, dass keine Regressionen in anderen Methoden auftreten.
@@ -360,6 +373,74 @@ Numerischer Gradient vs. analytischer Gradient:
 
 ### Schwierigkeiten / Blocker
 - *Noch keine dokumentiert*
+
+---
+
+---
+
+## Arbeitspaket 5b: Multipol-Integral-Pulay-Gradient
+
+**Ziel:** `cgto_multipole_grad()` implementieren und in Sektion 2b von `calculateGradient()` einbinden. Ohne diesen Term ist der GFN2-Gradient formal inkonsistent mit der Fock-Matrix.
+
+**Plan:** [`NATIVE_XTB_AP5b_PLAN.md`](NATIVE_XTB_AP5b_PLAN.md)
+
+| Aufgabe | Status |
+|---------|--------|
+| `cgto_multipole_grad()` in `xtb_multipole_ints.hpp` | Offen |
+| Integration in `xtb_gradient.cpp` Sektion 2b | Offen |
+| FD-Validierung: max\|ΔG\| < 5e-4 Eh/Å | Offen |
+
+---
+
+## Arbeitspaket 6: GFN2 Energiegenauigkeit (vat_extra-Debugging)
+
+**Ziel:** GFN2-Energie-Abweichung von ~35–60 mEh gegenüber TBLite beheben. Hauptverdacht: `updown_to_magnet`-Konvertierung in `xtb_scf.cpp`, `vat_extra` in `xtb_multipole.cpp`.
+
+**Plan:** [`NATIVE_XTB_AP6_PLAN.md`](NATIVE_XTB_AP6_PLAN.md)
+
+**Akzeptanz:** H₂O, CH₄, NH₃, C₆H₆ — alle |ΔE_native − E_TBLite| < 1e-3 Eh
+
+---
+
+## Arbeitspaket 7: d-Schalen-Unterstützung
+
+**Ziel:** Elemente der 2./3. Periode mit d-Orbitalen (S, P, Cl, Br, Übergangsmetalle). Aktuell übersprungen mit `if (typeA < 0) continue`.
+
+**Plan:** [`NATIVE_XTB_AP7_PLAN.md`](NATIVE_XTB_AP7_PLAN.md)
+
+**Kernaufgabe:** Obara-Saika-Integrale für l=2 in `STO_CGTO.hpp`.
+
+---
+
+## Arbeitspaket 8: DIIS-Mischer und SCF-Robustheit
+
+**Ziel:** `diis_accelerator.h` in `xtb_scf.cpp` einbinden. Verbessert Konvergenz für konjugierte/polarisierte Systeme von 50+ auf <20 Iterationen.
+
+**Plan:** [`NATIVE_XTB_AP8_PLAN.md`](NATIVE_XTB_AP8_PLAN.md)
+
+---
+
+## Arbeitspaket 9: DFT-D4/D3 Dispersion
+
+**Ziel:** `m_E_dispersion = 0.0` Stub durch echte D4-Berechnung ersetzen. GFN2 → D4, GFN1 → D3(BJ). `dftd4interface.cpp` ist bereits vorhanden.
+
+**Plan:** [`NATIVE_XTB_AP9_PLAN.md`](NATIVE_XTB_AP9_PLAN.md)
+
+---
+
+## Empfohlene Reihenfolge
+
+```
+AP5b → AP6 → AP7 → AP8 (parallel zu AP7) → AP9
+```
+
+| AP | Inhalt | Priorität | Vorbedingung |
+|----|--------|-----------|--------------|
+| **AP5b** | Multipol-Integral-Pulay | **höchste** | AP5-S1 ✅ |
+| **AP6** | Energiegenauigkeit | **hoch** | AP5b empfohlen |
+| **AP7** | d-Schalen | mittel | AP6 (stabile s/p-Basis) |
+| **AP8** | DIIS | niedrig-mittel | AP4 (kann parallel zu AP6/7) |
+| **AP9** | D4 Dispersion | mittel | AP6 |
 
 ---
 

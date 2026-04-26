@@ -183,6 +183,22 @@ if(USE_CUDA)
 endif()
 
 
+# Claude Generated (AP5, Apr 2026): GFN1/GFN2 analytical vs numerical gradient test
+add_executable(test_xtb_gradient test_xtb_gradient.cpp)
+target_link_libraries(test_xtb_gradient curcuma_core)
+if(USE_PCH)
+    target_precompile_headers(test_xtb_gradient REUSE_FROM curcuma_core)
+endif()
+
+set(_GRAD_MOL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/sqm_reference/molecules)
+foreach(_mol H2O CH4 NH3)
+    add_test(NAME xtb_gradient_${_mol}
+             COMMAND test_xtb_gradient ${_GRAD_MOL_DIR}/${_mol}.xyz
+             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(xtb_gradient_${_mol}
+        PROPERTIES TIMEOUT 120 LABELS "gradient;native_xtb")
+endforeach()
+
 # Claude Generated: CLI argument validation test suite (October 2025)
 # Include comprehensive Bash-based CLI tests for all capabilities
 add_subdirectory(cli)

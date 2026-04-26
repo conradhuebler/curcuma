@@ -142,8 +142,8 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 > Results should be validated against external references (TBLite, Ulysses, XTB) before use in research.
 
 - ⚠️ **Extended Hückel Theory (EHT)** - AI-implemented, machine-tested
-- ⚠️ **GFN2-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn2` backend since AP3; `-opt` works (AP4); ~35–60 mEh off TBLite (AP5 pending)
-- ⚠️ **GFN1-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn1` backend since AP3; `-opt` works (AP4); ~5–70 mEh off TBLite (AP5 pending)
+- ⚠️ **GFN2-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn2` backend since AP3; `-opt` works (AP4); multipole direct gradient (AP5 Schritt 1 ✓); integral Pulay gradient pending (AP5 Schritt 2); ~35–60 mEh off TBLite (energy accuracy: separate issue)
+- ⚠️ **GFN1-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn1` backend since AP3; `-opt` works (AP4); ~5–70 mEh off TBLite
 - ⚠️ **PM3/AM1/MNDO (Native NDDO)** - AI-implemented, machine-tested; 21/21 tests vs Ulysses reference (< 4 µEh)
 - ⚠️ **Native GFN-FF** - AI-implemented, machine-tested; see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
 

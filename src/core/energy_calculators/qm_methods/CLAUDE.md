@@ -139,8 +139,8 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 | Method | Test Status | Notes |
 |--------|-------------|-------|
 | EHT | not systematically tested | qualitative only |
-| Native GFN1-xTB | 2/7 vs TBLite | known accuracy gaps; **-opt works (AP4)** |
-| Native GFN2-xTB | 0/7 vs TBLite | major errors remain; **-opt works (AP4)** |
+| Native GFN1-xTB | 2/7 vs TBLite | known accuracy gaps; `-opt` works (AP4); ~5–70 mEh off |
+| Native GFN2-xTB | 0/7 vs TBLite | energy accuracy issue (vat_extra, separate); `-opt` works (AP4); multipole direct gradient done (AP5-S1); integral Pulay pending (AP5-S2) |
 | PM3/AM1/MNDO | 21/21 vs Ulysses (< 4 µEh) | most complete |
 | PM6 | not tested | parameters present, untested |
 
@@ -150,7 +150,9 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - **✅ EHT Implementation**: Functional with orbital analysis and verbosity control
 - **✅ XTB/TBLite Interfaces**: Native library verbosity synchronized with CurcumaLogger
 - **✅ Ulysses Interface**: Complete CurcumaLogger integration with SCF progress
-- **✅ Native GFN1/GFN2 Gradients (AP4)**: `xtb_gradient.cpp` — repulsion + H0/Pulay + Coulomb + CN; `-opt` converges on H₂O, CH₄, NH₃; GFN2 multipole gradient deferred to AP5
+- **✅ Native GFN1/GFN2 Gradients (AP4)**: `xtb_gradient.cpp` — repulsion + H0/Pulay + Coulomb + CN; `-opt` converges on H₂O, CH₄, NH₃
+- **🔧 GFN2 Multipole Gradient Schritt 1 (AP5)**: Section 5 in `xtb_gradient.cpp` — SD/DD/SQ direct interaction gradient + mrad/CN chain-rule (port of `get_multipole_gradient_0d`); runs BEFORE section 4
+- **⏳ GFN2 Multipole Gradient Schritt 2 (AP5)**: `cgto_multipole_grad()` in `xtb_multipole_ints.hpp` — integral Pulay term still pending
 - **🔧 Native GFN-FF (gfnff)**: Architecture complete, parameter debugging in progress
 
 ### Verbosity Integration Status ✅
