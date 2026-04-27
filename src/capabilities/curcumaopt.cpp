@@ -59,10 +59,23 @@ double LBFGSInterface::operator()(const VectorXd& x, VectorXd& grad)
     Geometry gradient = m_interface->Gradient();
     m_error = std::isnan(fx);
 
+    const bool have_external = m_external_grad_pending && m_external_grad.size() == 3 * m_atoms;
     for (int i = 0; i < m_atoms; ++i) {
-        grad[3 * i + 0] = gradient.data()[3 * i + 0] * (m_constrains[i]);
-        grad[3 * i + 1] = gradient.data()[3 * i + 1] * (m_constrains[i]);
-        grad[3 * i + 2] = gradient.data()[3 * i + 2] * (m_constrains[i]);
+        double gx = gradient.data()[3 * i + 0];
+        double gy = gradient.data()[3 * i + 1];
+        double gz = gradient.data()[3 * i + 2];
+        if (have_external) {
+            gx += m_external_grad[3 * i + 0];
+            gy += m_external_grad[3 * i + 1];
+            gz += m_external_grad[3 * i + 2];
+        }
+        grad[3 * i + 0] = gx * (m_constrains[i]);
+        grad[3 * i + 1] = gy * (m_constrains[i]);
+        grad[3 * i + 2] = gz * (m_constrains[i]);
+    }
+    if (have_external) {
+        m_external_grad.setZero();
+        m_external_grad_pending = false;
     }
     m_energy = fx;
     m_parameter = x;
@@ -689,10 +702,6 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
             previous = next;
             next.setEnergy(final_energy);
             intermediate->push_back(next);
-            // Claude Generated - Fire live update callback for GUI visualization (Qurcuma integration)
-            if (m_optCallback) {
-                m_optCallback(next, static_cast<int>(intermediate->size()) - 1, final_energy);
-            }
             next.appendXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
 
         } else {
@@ -944,10 +953,6 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
             previous = next;
             next.setEnergy(final_energy);
             intermediate->push_back(next);
-            // Claude Generated - Fire live update callback for GUI visualization (Qurcuma integration)
-            if (m_optCallback) {
-                m_optCallback(next, static_cast<int>(intermediate->size()) - 1, final_energy);
-            }
             next.appendXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
 
         } else {
