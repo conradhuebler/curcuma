@@ -2709,8 +2709,6 @@ Vector EEQSolver::calculateFinalCharges(
         // 6. Solve system — unified dispatch (March 2026)
         Vector new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge);
 
-<<<<<<< HEAD
-=======
         // Empty return from dispatchSolve signals all solvers failed.
         // Prefer the last successful Phase 2 charges (from a prior step) over Phase 1
         // topology_charges — Phase 2 charges are geometrically accurate and the energy
@@ -2732,7 +2730,6 @@ Vector EEQSolver::calculateFinalCharges(
             return topology_charges;
         }
 
->>>>>>> e37db8b (Speed up GFN-FF single-point with HB/XB skip, Phase-2 cache, D4 cutoff, and wallclock timing)
         // Claude Generated (March 2026): Print Phase 2 solution charges
         if (m_verbosity >= 3 && iteration == 0 && natoms <= 10) {
             std::cerr << "\nPhase 2 solution charges:" << std::endl;
@@ -2754,9 +2751,6 @@ Vector EEQSolver::calculateFinalCharges(
         }
 
         if (!solution_valid) {
-<<<<<<< HEAD
-            return generateFallbackCharges(natoms, total_charge, "NaN/Inf in Phase 2 solution");
-=======
             if (isValidChargeCache(m_last_successful_charges, natoms, total_charge)) {
                 CurcumaLogger::warn("EEQ Phase 2: invalid solution, using last successful charges as fallback");
                 return m_last_successful_charges;
@@ -2853,7 +2847,6 @@ Vector EEQSolver::calculateFinalCharges(
                 m_phase2_implausible_natoms = natoms;
                 break;
             }
->>>>>>> e37db8b (Speed up GFN-FF single-point with HB/XB skip, Phase-2 cache, D4 cutoff, and wallclock timing)
         }
 
         // Check convergence for iterative case

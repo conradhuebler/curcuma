@@ -22,6 +22,7 @@
 #include "src/core/global.h"
 
 #include "src/core/hbonds.h"
+#include "src/tools/pbc_utils.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
@@ -158,7 +159,7 @@ public:
     void addGFNFFCoulomb(const GFNFFCoulomb& coulomb);
 
     // D3/D4 parameter integration methods
-    void addD3Dispersion(const GFNFFDispersion& d3_dispersion);
+    void addD3Dispersion(const D3DispersionPair& d3_dispersion);
     void addD4Dispersion(const GFNFFDispersion& d4_dispersion);
     void CalculateD3DispersionContribution();
     void CalculateD4DispersionContribution();  // Claude Generated - Dec 25, 2025
@@ -359,6 +360,15 @@ public:
     void setRepulsionEnabled(bool enabled) { m_repulsion_enabled = enabled; }
     void setCoulombEnabled(bool enabled) { m_coulomb_enabled = enabled; }
 
+    // Claude Generated (April 2026): PBC minimum image convention
+    // cell_bohr: 3×3 unit cell matrix in Bohr (ForceField internal units)
+    // cell_bohr_inv: pre-computed inverse of cell_bohr
+    void setUnitCell(const Eigen::Matrix3d& cell_bohr, const Eigen::Matrix3d& cell_bohr_inv, bool has_pbc) {
+        m_unit_cell_bohr = cell_bohr;
+        m_unit_cell_bohr_inv = cell_bohr_inv;
+        m_has_pbc = has_pbc;
+    }
+
     Matrix Gradient() const { return m_gradient; }
 
     // Claude Generated (February 2026): Per-component gradient storage for validation
@@ -453,7 +463,7 @@ private:
     std::vector<int> m_assigned_atoms_for_self_energy;
 
     // D3/D4 native dispersion pairs
-    std::vector<GFNFFDispersion> m_d3_dispersions;  // Native D3 parameters
+    std::vector<D3DispersionPair> m_d3_dispersions;  // Native D3 parameters (P1c: separate struct)
     std::vector<GFNFFDispersion> m_d4_dispersions;  // Native D4 parameters
 
     // Phase 1.2: GFN-FF hydrogen bond and halogen bond terms (Claude Generated 2025)
@@ -605,6 +615,12 @@ protected:
     bool m_hbond_enabled = true;
     bool m_repulsion_enabled = true;
     bool m_coulomb_enabled = true;
+
+    // Claude Generated (April 2026): Periodic Boundary Conditions (PBC)
+    // Cell stored in Bohr (ForceField internal units); inverse pre-computed in setUnitCell()
+    Eigen::Matrix3d m_unit_cell_bohr = Eigen::Matrix3d::Identity();
+    Eigen::Matrix3d m_unit_cell_bohr_inv = Eigen::Matrix3d::Identity();
+    bool m_has_pbc = false;
 };
 
 class H4Thread : public ForceFieldThread {

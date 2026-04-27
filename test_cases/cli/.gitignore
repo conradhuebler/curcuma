@@ -28,6 +28,7 @@ stderr.log
 
 # Data analysis files
 *.dat
+!**/baseline.dat
 *.pairs
 *.dot
 

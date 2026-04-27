@@ -84,7 +84,7 @@ public:
      * @param pi_fragments π-system fragment IDs (0 = not in π-system)
      * @param charges EEQ atomic charges
      * @param bonds List of bonded atom pairs (0-based indices)
-     * @param distances N×N distance matrix in Bohr
+     * @param geometry_bohr N×3 geometry matrix in Bohr (P2a: replaces distance matrix)
      * @param itag Special atom tags (1=carbene for C, 1=NO₂ for N)
      * @return π-bond orders in triangular format [huckel_lin(i,j)]
      */
@@ -94,7 +94,7 @@ public:
         const std::vector<int>& pi_fragments,
         const std::vector<double>& charges,
         const std::vector<std::pair<int,int>>& bonds,
-        const Eigen::MatrixXd& distances,
+        const Eigen::MatrixXd& geometry_bohr,
         const std::vector<int>& itag = {}
     );
 
@@ -199,7 +199,7 @@ private:
      * @param hybridization Hybridization states
      * @param charges Atomic charges
      * @param bonds Bond list
-     * @param distances Distance matrix
+     * @param geometry_bohr N×3 geometry matrix in Bohr (P2a: replaces distance matrix)
      * @param P_old Previous density matrix (for P-dependent coupling)
      * @return Hamiltonian matrix
      */
@@ -211,7 +211,7 @@ private:
         const std::vector<int>& hybridization,
         const std::vector<double>& charges,
         const std::vector<std::pair<int,int>>& bonds,
-        const Eigen::MatrixXd& distances,
+        const Eigen::MatrixXd& geometry_bohr,
         const Eigen::MatrixXd& P_old
     ) const;
 
