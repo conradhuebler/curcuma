@@ -47,7 +47,9 @@ void CitationRegistry::printSummary()
     if (m_cited_keys.empty()) return;
 
     fmt::print("\n");
-    CurcumaLogger::header("Please cite the following methods used in this calculation");
+    fmt::print(fg(fmt::color::green), "===============================================================\n");
+    fmt::print(fg(fmt::color::green), "  Please cite the following references for methods used in this run:\n");
+    fmt::print(fg(fmt::color::green), "===============================================================\n");
 
     // Collect sub-ref children per parent
     std::set<std::string> children;
@@ -62,20 +64,18 @@ void CitationRegistry::printSummary()
         const Citations::CitationData* data = Citations::lookup(key);
         if (!data) continue;
 
-        int padding = 10;
-        if (static_cast<int>(key.length()) >= padding) padding = static_cast<int>(key.length()) + 2;
-        fmt::print("  {:{}}  —  {}\n", key, padding, data->reference);
+        fmt::print(fg(fmt::color::green), "  [CITE]  {:10s}  {}\n", key, data->reference);
 
         // Print sub-references of this parent
         for (const auto& [child, parent] : m_subrefs) {
             if (parent != key) continue;
             const Citations::CitationData* child_data = Citations::lookup(child);
             if (!child_data) continue;
-            fmt::print("    → {:{}}  —  {}\n", child, padding - 4, child_data->reference);
+            fmt::print(fg(fmt::color::green), "  [CITE]      -> {:6s}  {}\n", child, child_data->reference);
         }
     }
 
-    fmt::print("\n");
+    fmt::print(fg(fmt::color::green), "===============================================================\n");
 }
 
 void CitationRegistry::writeBibTeX(const std::string& output_dir, const std::string& basename)

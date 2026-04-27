@@ -23,6 +23,7 @@
 #include "src/tools/general.h"
 #include "src/core/curcuma_logger.h"
 #include "config_manager.h"
+#include <algorithm>
 
 #include <iostream>
 #include <cmath>
@@ -178,6 +179,14 @@ bool EnergyCalculator::createMethod(const std::string& method_name, const json& 
         }
         
         ClearError();
+
+        // Track GPU fallback: user requested -gpu cuda but CUDA unavailable
+        std::string gpu_req = config.value("gpu", "none");
+        std::transform(gpu_req.begin(), gpu_req.end(), gpu_req.begin(), ::tolower);
+        if (gpu_req == "cuda") {
+            m_gpu_fallback = true;
+        }
+
         return true;
         
     } catch (const MethodCreationException& e) {
@@ -402,6 +411,12 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
 
         if (getEffectiveVerbosity() >= 1) {
             CurcumaLogger::energy_abs(m_energy, fmt::format("{} Final Energy", m_method_name));
+        }
+
+        // Final warning if GPU was requested but fell back to CPU
+        if (m_gpu_fallback && !m_gpu_fallback_warned) {
+            CurcumaLogger::warn("Calculation completed on CPU. The requested -gpu cuda was not used.");
+            m_gpu_fallback_warned = true;
         }
 
         return m_energy;

@@ -611,6 +611,14 @@ a metadynamics simulation can be performed using plumed. It is a ***plumed.dat**
 curcuma -md input.xyz -mtd -plumed input.plumed
 ``` 
 
+# Funding
+The development of curcuma is funded by:
+
+-   2026 Stiftung Innovation in der Hochschullehre
+
+![STIL Logo](https://github.com/conradhuebler/curcuma/raw/master/STIL_Funding.jpg)
+
+
 # Citation
 Please cite the software package if you obtain results:
 [conradhuebler/curcuma: Curcuma Zenodo Citation](https://doi.org/10.5281/zenodo.4302722)
