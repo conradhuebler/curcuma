@@ -1321,15 +1321,11 @@ double GFNFF::Calculation(bool gradient)
         }
     }
 
-    // Claude Generated (Feb 22, 2026): Auto-trigger compareGradients at verbosity >= 3
-    // Reference: Plan Phase 1.1 - diagnose gradient errors via analytical vs numerical comparison
-    // m_comparing_gradients guard prevents recursion (NumGrad calls Calculation internally)
-    if (CurcumaLogger::get_verbosity() >= 3 && !m_comparing_gradients) {
-        CurcumaLogger::info("--- Gradient Numerical Verification ---");
-        m_comparing_gradients = true;
-        compareGradients(1e-5);
-        m_comparing_gradients = false;
-    }
+    // Auto-numerical-gradient comparison disabled Apr 2026: triggered N×6 extra
+    // energy evaluations per Calculation() call at verbosity 3, making the
+    // verbose mode unusable for routine diagnostics on systems > ~50 atoms.
+    // For numerical gradient verification, call compareGradients(1e-5) directly
+    // from a test harness (see test_gfnff_numgrad / test_gpu_numgrad).
 
     // No unit conversion needed - already in Hartree
     m_energy_total = energy_hartree;
@@ -5503,13 +5499,30 @@ std::vector<int> GFNFF::findSmallestRings(const std::vector<std::vector<int>>& a
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("Ring enumeration: found {} unique rings (size 3-{})",
+        // Histogram by ring size (replaces per-ring spam unsuitable for large molecules)
+        std::map<int, int> ring_size_count;
+        for (const auto& r : topo_info.rings) {
+            ring_size_count[static_cast<int>(r.size())]++;
+        }
+        CurcumaLogger::info(fmt::format("Ring enumeration: {} unique rings (size 3-{})",
                                          topo_info.rings.size(), MAX_RING_SIZE));
-        for (size_t i = 0; i < topo_info.rings.size(); ++i) {
+        std::string hist;
+        for (const auto& [sz, cnt] : ring_size_count) {
+            if (!hist.empty()) hist += ", ";
+            hist += fmt::format("{}-ring: {}", sz, cnt);
+        }
+        if (!hist.empty()) CurcumaLogger::info(fmt::format("  By size: {}", hist));
+        // First 5 rings as concrete examples
+        const size_t n_show = std::min(size_t(5), topo_info.rings.size());
+        for (size_t i = 0; i < n_show; ++i) {
             std::string atoms_str;
             for (int a : topo_info.rings[i]) atoms_str += std::to_string(a) + " ";
             CurcumaLogger::info(fmt::format("  Ring {}: size={}, atoms=[{}]",
                                              i, topo_info.rings[i].size(), atoms_str));
+        }
+        if (topo_info.rings.size() > n_show) {
+            CurcumaLogger::info(fmt::format("  ... ({} more rings)",
+                                             topo_info.rings.size() - n_show));
         }
     }
 
@@ -7750,21 +7763,19 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         CurcumaLogger::info("Generating bonded ATM (batm) triples for 1,4-pairs");
     }
 
-    // First, let's debug-check for 1,4-pairs in the molecule
+    // Count 1,4-pairs (topological distance == 3) — used for batm generation below.
+    // Per-pair listing was removed (N²/2 lines unusable for large molecules).
     int pairs_14_count = 0;
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = 0; j < i; ++j) {
-            if (topo_info.topo_distances[i][j] == 3) {  // bpair == 3
+            if (topo_info.topo_distances[i][j] == 3) {
                 pairs_14_count++;
-                if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::info(fmt::format("DEBUG: Found 1,4-pair: {}-{} (bpair=3)", i, j));
-                }
             }
         }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("DEBUG: Found {} 1,4-pairs in molecule", pairs_14_count));
+        CurcumaLogger::info(fmt::format("1,4-pairs (bpair=3): {} found", pairs_14_count));
     }
 
     // bpair is same as topo_distances (topological distance matrix)
@@ -7926,7 +7937,8 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
 
             coulombs.push_back(c);
 
-            if (CurcumaLogger::get_verbosity() >= 3) {
+            // Per-pair dump (capped Apr 2026: first 5 of N²/2 — was unusable beyond ~50 atoms)
+            if (CurcumaLogger::get_verbosity() >= 3 && coulombs.size() <= 5) {
                 CurcumaLogger::param(fmt::format("coulomb_{}-{}", i, j),
                     fmt::format("q_i={:.6f}, q_j={:.6f}, gamma={:.6f}",
                         charges[i], charges[j], c.gamma_ij));
@@ -7935,7 +7947,7 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::success(fmt::format("Generated {} Coulomb pairs", coulombs.size()));
+        CurcumaLogger::success(fmt::format("Generated {} Coulomb pairs (showed first 5)", coulombs.size()));
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();

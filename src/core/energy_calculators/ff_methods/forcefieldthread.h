@@ -488,6 +488,8 @@ private:
 protected:
     Matrix m_geometry, m_gradient;
     double m_energy = 0, m_bond_energy = 0.0, m_angle_energy = 0.0, m_dihedral_energy = 0.0, m_inversion_energy = 0.0, m_vdw_energy = 0.0, m_rep_energy = 0.0, m_eq_energy = 0.0;
+    // Verbose-3 cap: count significant torsions per call, log only first 5 (Apr 2026)
+    int m_significant_torsion_count = 0;
 
     // Phase 4: Separate energy components for GFN-FF non-bonded terms
     double m_dispersion_energy = 0.0;  // D3/D4 dispersion
