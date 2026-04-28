@@ -558,13 +558,6 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
         std::vector<std::pair<int,int>> bonds;
         double bond_threshold = 1.3;
 
-        // Detailed debug output only at verbosity 3
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("=== Bond Detection Debug ===");
-            CurcumaLogger::info(fmt::format("Atom count: {}", m_atomcount));
-            CurcumaLogger::info(fmt::format("Geometry rows: {}, cols: {}", m_geometry_bohr.rows(), m_geometry_bohr.cols()));
-        }
-
         // Claude Generated (March 2026): Pre-cache per-atom covalent radii and fat factors
         std::vector<double> rcov(m_atomcount);
         std::vector<double> fat_val(m_atomcount);
@@ -573,6 +566,16 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
             fat_val[i] = fat[m_atoms[i]];
         }
 
+        // Bond-detection statistics (verbosity >= 3): replaces N²/2 per-pair logs with
+        // distance-ratio histogram and closest-unbonded / furthest-bonded extremes.
+        // Claude Generated (April 2026): per-pair spam unusable for N > ~50.
+        const bool collect_stats = CurcumaLogger::get_verbosity() >= 3;
+        size_t n_pairs = 0, n_bonded = 0, n_near = 0, n_mid = 0, n_far = 0;
+        double max_ratio_bonded = 0.0;
+        double min_ratio_unbonded = std::numeric_limits<double>::infinity();
+        int max_b_i = -1, max_b_j = -1, min_u_i = -1, min_u_j = -1;
+        double min_d_unbonded = std::numeric_limits<double>::infinity();
+
         for (int i = 0; i < m_atomcount; ++i) {
             for (int j = i + 1; j < m_atomcount; ++j) {
                 double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
@@ -580,18 +583,42 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
                 // Phase 3: Apply element-specific fat scaling factors (Claude Generated Jan 2026)
                 double threshold = bond_threshold * (rcov[i] + rcov[j]) * fat_val[i] * fat_val[j];
 
-                // Debug output for each pair - only at verbosity 3
-                if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::info(fmt::format("Pair {}-{}: dist={:.3f}, rcov_i={:.3f}, rcov_j={:.3f}, fat_i={:.3f}, fat_j={:.3f}, threshold={:.3f}",
-                                          i, j, distance, rcov[i], rcov[j], fat_val[i], fat_val[j], threshold));
-                }
-
                 if (distance < threshold) {
                     bonds.emplace_back(i, j);
-                    if (CurcumaLogger::get_verbosity() >= 3) {
-                        CurcumaLogger::info(fmt::format("  -> BONDED"));
+                    if (collect_stats) {
+                        ++n_bonded;
+                        double ratio = distance / threshold;
+                        if (ratio > max_ratio_bonded) { max_ratio_bonded = ratio; max_b_i = i; max_b_j = j; }
+                    }
+                } else if (collect_stats) {
+                    double ratio = distance / threshold;
+                    if (ratio < 1.5) ++n_near;
+                    else if (ratio < 3.0) ++n_mid;
+                    else ++n_far;
+                    if (ratio < min_ratio_unbonded) {
+                        min_ratio_unbonded = ratio; min_d_unbonded = distance;
+                        min_u_i = i; min_u_j = j;
                     }
                 }
+                if (collect_stats) ++n_pairs;
+            }
+        }
+
+        if (collect_stats) {
+            CurcumaLogger::info("=== Bond Detection ===");
+            CurcumaLogger::info(fmt::format("  Atoms: {}, pairs evaluated: {}", m_atomcount, n_pairs));
+            auto pct = [&](size_t n) { return n_pairs > 0 ? 100.0 * static_cast<double>(n) / static_cast<double>(n_pairs) : 0.0; };
+            CurcumaLogger::info(fmt::format("  Bonded   (ratio < 1.0): {:>10}  ({:5.2f}%)", n_bonded, pct(n_bonded)));
+            CurcumaLogger::info(fmt::format("  Near     (1.0-1.5):     {:>10}  ({:5.2f}%)", n_near,   pct(n_near)));
+            CurcumaLogger::info(fmt::format("  Mid      (1.5-3.0):     {:>10}  ({:5.2f}%)", n_mid,    pct(n_mid)));
+            CurcumaLogger::info(fmt::format("  Far      (>= 3.0):      {:>10}  ({:5.2f}%)", n_far,    pct(n_far)));
+            if (max_b_i >= 0) {
+                CurcumaLogger::info(fmt::format("  Furthest bonded:  pair {}-{} ratio={:.3f} (Z={},{})",
+                    max_b_i, max_b_j, max_ratio_bonded, m_atoms[max_b_i], m_atoms[max_b_j]));
+            }
+            if (min_u_i >= 0) {
+                CurcumaLogger::info(fmt::format("  Closest unbonded: pair {}-{} ratio={:.3f} d={:.3f} Bohr (Z={},{})",
+                    min_u_i, min_u_j, min_ratio_unbonded, min_d_unbonded, m_atoms[min_u_i], m_atoms[min_u_j]));
             }
         }
 
