@@ -1396,61 +1396,6 @@ Vector EEQSolver::dispatchSolve(
             }
 
             if (pcg_viable) {
-            double pcg_tol_factor = m_config.get<double>("pcg_large_system_tol_factor", 1e-6);
-
-            if (natoms > pcg_large_threshold) {
-                pcg_max = std::max(pcg_max, std::min(pcg_large_scaling * natoms, pcg_large_iterations));
-                double rhs_norm = rhs_atoms.norm() + 1.0;
-                pcg_tol = std::max(pcg_tol, pcg_tol_factor * rhs_norm);
-                if (m_verbosity >= 1) {
-                    CurcumaLogger::info(fmt::format(
-                        "EEQ PCG large system (N={}): max_iter={}, tol={:.2e}",
-                        natoms, pcg_max, pcg_tol));
-                }
-            }
-
-            // Claude Generated (April 2026): Gershgorin condition estimate for A_nn.
-            // Cheap O(N²) pre-check: if the matrix is weakly diagonally dominant or has
-            // a very large estimated condition number, PCG will converge slowly. Skip
-            // directly to LU instead of burning 5000 PCG iterations first.
-            // Gershgorin: λ ∈ [A_ii - Σ_j≠i |A_ij|, A_ii + Σ_j≠i |A_ij|] for each row.
-            // For the EEQ matrix, A_ij = erf(γ·r)/r > 0, so |A_ij| = A_ij.
-            bool pcg_viable = true;
-            {
-                double min_gersh = std::numeric_limits<double>::max();
-                double max_gersh = 0.0;
-                for (int i = 0; i < natoms; ++i) {
-                    double diag = A_nn(i, i);
-                    double off = 0.0;
-                    for (int j = 0; j < natoms; ++j) {
-                        if (i != j) off += A_nn(i, j);
-                    }
-                    min_gersh = std::min(min_gersh, diag - off);
-                    max_gersh = std::max(max_gersh, diag + off);
-                }
-                double kappa_est = (min_gersh > 0.0) ? max_gersh / min_gersh
-                                                     : std::numeric_limits<double>::infinity();
-
-                if (m_verbosity >= 2) {
-                    CurcumaLogger::info(fmt::format(
-                        "EEQ PCG: Gershgorin bounds [{:.4e}, {:.4e}], κ_est={:.1e}",
-                        min_gersh, max_gersh, kappa_est));
-                }
-
-                // If the matrix is clearly not SPD or has extreme condition number,
-                // skip PCG entirely — it will burn 5000+ iterations and then fail anyway.
-                if (min_gersh <= 0.0 || kappa_est > 1e12) {
-                    if (m_verbosity >= 1) {
-                        CurcumaLogger::warn(fmt::format(
-                            "EEQ PCG: ill-conditioned matrix (κ_est={:.1e}, min_gersh={:.2e}), "
-                            "using LU directly instead of PCG", kappa_est, min_gersh));
-                    }
-                    m_pcg_cache_valid = false;
-                    pcg_viable = false;
-                }
-            }
-
-            if (pcg_viable) {
             Vector x0_z1 = m_pcg_cache_valid ? m_pcg_last_z1 : Vector::Zero(natoms);
 
             Vector z1 = solveWithPCG(A_nn, rhs_atoms, x0_z1, pcg_max, pcg_tol);
@@ -1466,12 +1411,17 @@ Vector EEQSolver::dispatchSolve(
             Matrix S = C * Z2;
             Vector schur_rhs = C * z1 - rhs_constraints;
             Vector lambda;
-            if (nfrag == 1) {
-                lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
-            } else {
-                lambda = S.partialPivLu().solve(schur_rhs);
+
+            // Claude Generated (Apr 2026): Guard against degenerate Schur complement.
+            // S(0,0) near-zero means the constraint solve is degenerate — happens when
+            // PCG hasn't converged and Z2 is garbage. Fall back to LU.
+            bool schur_ok = true;
+            if (nfrag == 1 && std::abs(S(0, 0)) < 1e-12) {
+                schur_ok = false;
+                if (m_verbosity >= 1)
+                    CurcumaLogger::warn(fmt::format(
+                        "EEQ PCG: Schur complement S(0,0)={:.2e} near zero, falling back to LU", S(0, 0)));
             }
-            charges = z1 - Z2 * lambda;
 
             if (schur_ok) {
                 if (nfrag == 1) {

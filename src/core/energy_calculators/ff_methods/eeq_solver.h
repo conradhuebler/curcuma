@@ -126,6 +126,22 @@ public:
      */
     ~EEQSolver() = default;
 
+    // ===== Convergence Statistics =====
+
+    /**
+     * @brief Print summary of PCG convergence statistics since last reset.
+     *
+     * Prints one line: "EEQ PCG: X/Y converged (worst |r|=Z.ZeZZ)" if any
+     * calls did not converge, or nothing if all converged.
+     * Resets statistics after printing.
+     */
+    void printConvergenceSummary();
+
+    /**
+     * @brief Reset convergence statistics counters.
+     */
+    void resetConvergenceStats();
+
     // ===== Main API =====
 
     /**
@@ -714,6 +730,8 @@ private:
     double m_convergence_threshold;   ///< Convergence threshold for charge changes (e)
     int m_verbosity;                  ///< Verbosity level (0-3)
     bool m_calculate_cn;              ///< Auto-calculate CN if not provided
+    bool m_allow_unconverged;         ///< Allow continuing with unconverged charges (Claude Generated Apr 2026)
+    bool m_skip_phase2;               ///< Skip Phase 2 and use Phase 1 topology charges directly (Claude Generated Apr 2026)
     EEQSolveMethod m_solve_method;    ///< Linear solve algorithm selection
 
     // ===== Cached Data for Energy Calculation =====
@@ -770,7 +788,7 @@ private:
 
     // Auto-solver benchmark state
     // Claude Generated - March 2026 (Auto-solver selection)
-    mutable EEQSolveMethod m_selected_method = EEQSolveMethod::PCG;  ///< Method chosen by auto-benchmark
+    mutable EEQSolveMethod m_selected_method = EEQSolveMethod::SchurCholesky;  ///< Method chosen by auto-benchmark
     mutable bool m_auto_benchmark_done = false;  ///< Whether auto-benchmark has run
 
     // Convergence statistics — accumulate across calls, print summary instead of per-call spam
@@ -795,6 +813,22 @@ private:
     mutable int m_phase2_buf_natoms = 0; ///< Atom count for current buffer size
     mutable int m_phase2_buf_nfrag = 0;  ///< Fragment count for current buffer size
 
+    /// Last truly successful charges (Phase 2 if available, otherwise Phase 1).
+    /// Initialized from topology_charges on first call, then overwritten with the Phase 2
+    /// result after a successful solve (line 2919). NOT overwritten on plausibility-check
+    /// failure — the cache preserves the last good result. Used as fallback when the solver
+    /// fails on subsequent steps. Validated on read: allFinite(), |q|_max < 50, charge sum
+    /// within tolerance, to avoid using a corrupted cache.
+    mutable Vector m_last_successful_charges;
+
+    /// Validate cached charges are plausible for use as fallback
+    bool isValidChargeCache(const Vector& charges, int natoms, int total_charge) const {
+        return charges.size() == natoms
+            && charges.allFinite()
+            && std::abs(charges.sum() - total_charge) < 1.0
+            && charges.cwiseAbs().maxCoeff() < 50.0;
+    }
+
     /// Ensure buffers are large enough. Only reallocates if size changed.
     void ensurePhase2Buffers(int natoms, int nfrag) const {
         if (natoms != m_phase2_buf_natoms || nfrag != m_phase2_buf_nfrag) {
@@ -811,6 +845,9 @@ private:
 // ===== Parameter Definitions =====
 
 BEGIN_PARAMETER_DEFINITION(eeq_solver)
+    PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. Maps to solver tolerances and iteration limits.", "Basic", {})
+    PARAM(allow_unconverged_charges, Bool, false, "Allow calculation to continue with unconverged charges (warn instead of abort).", "Advanced", {})
+    PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 topology charges directly. Faster but less accurate.", "Advanced", {})
     PARAM(max_iterations, Int, 50,
           "Maximum iterations for EEQ charge refinement (Phase 2)", "Algorithm", {})
     PARAM(convergence_threshold, Double, 1e-6,
@@ -821,13 +858,13 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Auto-calculate coordination numbers if not provided", "Algorithm", {})
     PARAM(use_iterative_refinement, Bool, false,
           "Use iterative refinement for EEQ Phase 2", "Algorithm", {})
-    PARAM(solve_method, String, "pcg",
+    PARAM(solve_method, String, "schur_cholesky",
           "EEQ linear solve method: lu, schur_cholesky, pcg, auto", "Algorithm", {})
-    PARAM(max_pcg_iterations, Int, 100,
+    PARAM(max_pcg_iterations, Int, 200,
           "Maximum PCG iterations for EEQ solve", "Algorithm", {})
     PARAM(pcg_tolerance, Double, 1e-10,
           "PCG convergence tolerance", "Algorithm", {})
-    PARAM(pcg_large_system_iterations, Int, 100,
+    PARAM(pcg_large_system_iterations, Int, 5000,
           "Max PCG iterations for large systems (N>pcg_large_threshold). Overrides max_pcg_iterations.", "Algorithm", {})
     PARAM(pcg_large_system_scaling, Int, 10,
           "PCG iteration scaling factor for large systems: max_iter = min(scaling*N, pcg_large_system_iterations)", "Algorithm", {})

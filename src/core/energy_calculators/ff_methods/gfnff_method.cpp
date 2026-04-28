@@ -2773,8 +2773,6 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
         params.hbonds = detectHydrogenBondsNative(topo_info.eeq_charges);
 
         params.xbonds = detectHalogenBondsNative(topo_info.eeq_charges);
-    }
-    if (do_timing) t_hbxb = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
 
         // Claude Generated (Apr 2026): Cache init-time HB/XB lists so updateHBXBIfNeeded()
         // can skip redundant re-detection on the first calculateEnergy() call when
