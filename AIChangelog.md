@@ -4,6 +4,10 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+## April 2026
+
+- **Native-GFN-FF Branch-Konsolidierung (Apr 28)**: Merge `origin/native-gfnff` (P-/G-Optimierungs-Reihe + numerischer Gradient-Test + PBC + D4 P1a) in lokal `native-gfnff` (HB-Re-Detection-Fix + Stepwise-MD/Opt-API + EEQ-Cherry-Picks aus GPU-Branch); manuelle Konfliktauflösung in `gfnff_gpu_method.cpp`/`simplemd.cpp` mit Erhalt aller wertvollen Blöcke beider Seiten; Reparatur zweier latenter Defekte aus den Apr-25-Cherry-Picks (`ada6925`/`7389e2e`): `eeq_solver.h` hatte alle 87c1a8e/e37db8b-Member-Deklarationen verloren (Build-Fehler), `eeq_solver.cpp` hatte duplizierten `pcg_viable`-Block + undeklariertes `schur_ok`, `gfnff_method.cpp` hatte HB/XB-Cache-Block außerhalb der `if (hbond)`-Klammer; aggressive `e37db8b`-Defaults (PCG, 100, 100) auf konservative Werte (SchurCholesky, 200, 5000) zurückgesetzt; Build clean, 21/22 CLI-Tests grün; eine 3.5 mEh-Regression in `cli_gfnff_01_complex` mit HBond als Hauptverdächtigem dokumentiert (siehe `docs/NATIVE_GFNFF_CONSOLIDATION_2026-04-28.md`)
+
 ## March 2026
 
 - **GPU Pipeline Phase 10: SoA Coordinate Layout (Mar 27)**: Replaced `d_coords[3*N]` AoS buffer with `CoordSoA{d_x,d_y,d_z}[N]` across all 20 GPU kernels + EEQ solver; enables fully coalesced warp reads (~3× bandwidth gain for pairwise kernels at N>100); `d_ref_coords[3*N]` → `RefCoordSoA`; pinned host staging split into 3×N buffers; CUDA Graph re-capture unaffected (pointers stable); 28/28 CLI tests pass
