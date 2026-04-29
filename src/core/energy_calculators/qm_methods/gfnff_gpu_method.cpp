@@ -14,6 +14,7 @@
 
 #include "gfnff_gpu_method.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/citation_registry.h"
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "src/core/energy_calculators/ff_methods/cuda/gpu_utils.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"
@@ -95,6 +96,10 @@ bool GFNFFGPUComputationalMethod::setMolecule(const Mol& mol)
     }
 
     m_initialized = true;
+
+    CitationRegistry::cite("gfnff");
+    CitationRegistry::cite("d4", "gfnff");
+
     return true;
 }
 
@@ -224,6 +229,9 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         CurcumaLogger::error("GFNFFGPUMethod: not initialized");
         return 0.0;
     }
+
+    CitationRegistry::cite("gfnff");
+    CitationRegistry::cite("d4", "gfnff");
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== GFNFFGPUMethod::calculateEnergy() START (GPU path) ===");
