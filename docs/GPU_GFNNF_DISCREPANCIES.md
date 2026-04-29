@@ -192,11 +192,11 @@ MD simulations (polymer system) and heat-exchange analysis comparing all three i
 
 | Method | Heat exchange (MD) | Agreement with XTB |
 |--------|--------------------|--------------------|
-| Native GFN-FF CPU | diverges / unstable | worse |
-| Native GFN-FF GPU (`-gpu cuda`) | stable, closer to XTB | better |
+| Native GFN-FF CPU | small deviations from XTB | worse |
+| Native GFN-FF GPU (`-gpu cuda`) | closer to XTB | better |
 | XTB GFN-FF (Fortran reference) | reference | — |
 
-The GPU implementation produces MD trajectories that are **more consistent with XTB GFN-FF** than the CPU implementation, as measured by heat-bath exchange values over extended runs.
+The GPU implementation produces MD trajectories that agree better with XTB GFN-FF than the CPU implementation, as measured by heat-bath exchange values. The CPU path runs without instability but shows systematic deviations that are still open for production use.
 
 ### Revised Interpretation
 

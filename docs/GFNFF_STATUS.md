@@ -258,9 +258,9 @@ The foundation that enabled rapid angle error debugging:
 
 **New evidence (Apr 29, 2026)**: MD simulations (polymer) and heat-bath exchange values show the GPU path (`-gpu cuda`) produces trajectories **closer to XTB GFN-FF** than the CPU path. The CPU MD diverges; the GPU MD stays stable and matches XTB heat exchange.
 
-**Revised interpretation**: The CPU gradient likely contains errors not present in the GPU path, possibly in HB gradient distribution or CN chain-rule accumulation. The GPU `atomicAdd` accumulation order may reproduce Fortran summation more faithfully than CPU sequential loops. The isolated HB FD comparison needs re-evaluation — the FD "reference" on CPU may contain the same CPU error.
+**Revised interpretation**: The CPU path runs without instability but shows systematic deviations from XTB that are not present (or smaller) in the GPU path. Likely causes: HB gradient distribution, CN chain-rule accumulation order. The GPU `atomicAdd` order may reproduce Fortran summation more faithfully than CPU sequential loops. The isolated HB FD comparison needs re-evaluation — the FD "reference" on CPU may contain the same CPU deviation.
 
-**Status**: UNDER INVESTIGATION — GPU is currently the more reliable production path for MD.  
+**Status**: UNDER INVESTIGATION — GPU path shows better XTB agreement; CPU deviations still open for production.  
 **Details**: See [docs/GPU_GFNNF_DISCREPANCIES.md](GPU_GFNNF_DISCREPANCIES.md) — "April 2026 Update" section.
 
 ### Dispersion Zeta Scaling (Feb 11, 2026) - SUPERSEDED
