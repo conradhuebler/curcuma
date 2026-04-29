@@ -146,6 +146,16 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
         m_cached_gradient = Matrix::Zero(natoms, 3);
         m_gfnff->preAllocateForGPUPath(natoms);
 
+        // Pre-allocate EEQ staging buffers before CUDA init (heap safety).
+        // m_eeq_Z2 is A^{-1} * C^T — size N × nfrag. Use actual nfrag from topology;
+        // the "max 8 fragments" hardcode was too small for multi-fragment systems.
+        {
+            int nfrag_actual = m_gfnff->getTopologyInfo().nfrag;
+            m_eeq_z1.resize(natoms, 0.0);
+            m_eeq_Z2.resize(natoms * std::max(nfrag_actual, 1), 0.0);
+            m_eeq_charges_gpu.resize(natoms, 0.0);
+        }
+
         // === 1. Create GPU workspace from full parameter set ===
         // All energy terms (including HB, XB, ATM, BATM, sTors) run on GPU.
         m_gpu_workspace = std::make_unique<FFWorkspaceGPU>(*pending, natoms, atom_types);
@@ -185,10 +195,7 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
         }
 
         // Claude Generated (March 2026): GPU EEQ solver (cuSOLVER Cholesky)
-        // Pre-allocate EEQ buffers before creating the solver (heap safety)
-        m_eeq_z1.resize(natoms, 0.0);
-        m_eeq_Z2.resize(natoms * 8, 0.0);  // max 8 fragments
-        m_eeq_charges_gpu.resize(natoms, 0.0);
+        // EEQ staging buffers pre-allocated above (before CUDA init). Create solver here.
         m_eeq_gpu = std::make_unique<EEQSolverGPU>(natoms);
 
         if (CurcumaLogger::get_verbosity() >= 1) {
@@ -436,7 +443,13 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         m_gfnff->recordD4CNValues(cn_std);
     }
 
-    // Claude Generated (April 2026): skip_phase2 — bypass GPU EEQ entirely, use CPU Phase 1 charges
+    // Claude Generated (April 2026): EEQ charge selection
+    // Three paths, in priority order:
+    //   1. skip_phase2: bypass entirely, use CPU Phase 1 topology charges
+    //   2. GPU EEQ Cholesky (nfrag==1 only): O(N²) matrix build + O(N³/6) GPU Cholesky
+    //      For nfrag>1 the system is block-diagonal; dense Cholesky is O(N³) on the
+    //      full matrix — inefficient. TODO: batched-Cholesky per fragment block.
+    //   3. CPU Phase 2 EEQ: always valid fallback (already cached from InitialiseMolecule)
     Vector charges(N);
     if (m_skip_phase2) {
         if (CurcumaLogger::get_verbosity() >= 1) {
@@ -445,101 +458,71 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/false);
         charges = m_gfnff->getLastCharges();
     } else {
-    // === GPU EEQ: Build Coulomb matrix + Cholesky solve on GPU ===
-    // O(N) CPU parameter extraction + O(N²) GPU matrix build + O(N³/6) GPU Cholesky
-    GFNFF::EEQGPUParams eeq_params = m_gfnff->prepareEEQParametersForGPU(cn);
+        // === GPU EEQ: Build Coulomb matrix + Cholesky solve on GPU ===
+        GFNFF::EEQGPUParams eeq_params = m_gfnff->prepareEEQParametersForGPU(cn);
 
-    // Distance cutoff for GPU matrix conditioning — matches CPU EEQ behavior
-    double eeq_dist_cutoff = m_gfnff->getEEQDistanceCutoff();
-    double cutoff_sq = (N > 200 && eeq_dist_cutoff > 0.0)
-        ? eeq_dist_cutoff * eeq_dist_cutoff : 0.0;
+        // Guard: m_eeq_Z2 must hold N × nfrag elements. Pre-allocated at init with actual
+        // nfrag; after topology update nfrag can change — resize if needed.
+        if (static_cast<int>(m_eeq_Z2.size()) < N * eeq_params.nfrag) {
+            m_eeq_Z2.resize(N * eeq_params.nfrag, 0.0);
+        }
 
-    // Ensure coord upload on main stream is complete before EEQ stream reads SoA buffers.
-    // Currently implicit (computeCN syncs main stream), but explicit for safety.
-    m_gpu_workspace->synchronizeMainStream();
-    bool eeq_ok = m_eeq_gpu->solve(
-        N, eeq_params.nfrag,
-        m_gpu_workspace->getDeviceXPtr(),
-        m_gpu_workspace->getDeviceYPtr(),
-        m_gpu_workspace->getDeviceZPtr(),
-        eeq_params.alpha_corrected.data(),
-        eeq_params.gam_corrected.data(),
-        eeq_params.fraglist,
-        eeq_params.rhs_atoms.data(),
-        eeq_params.rhs_constraints.data(),
-        m_eeq_z1.data(),
-        m_eeq_Z2.data(),
-        cutoff_sq);
+        // GPU EEQ is only applicable for nfrag==1 (single connected system).
+        // For nfrag>1 (multi-fragment box): use CPU Phase 2 charges directly.
+        // TODO: replace with batched per-fragment Cholesky for multi-fragment GPU path.
+        const bool gpu_eeq_applicable = (eeq_params.nfrag == 1);
 
-    // CPU Schur complement: q = z1 - Z2 * S^{-1} * (C*z1 - d)
-    // For nfrag=1 (common case): scalar division
-    if (eeq_ok) {
-        const int nfrag = eeq_params.nfrag;
-        if (nfrag == 1) {
-            // Fast path: single fragment → scalar Schur complement
-            // S = C · Z2 (1×1), where C is all-ones row
-            double S = 0.0, Cz1 = 0.0;
-            for (int i = 0; i < N; ++i) {
-                S += m_eeq_Z2[i];
-                Cz1 += m_eeq_z1[i];
-            }
-            double lambda = (Cz1 - eeq_params.rhs_constraints[0]) / S;
-            for (int i = 0; i < N; ++i) {
-                m_eeq_charges_gpu[i] = m_eeq_z1[i] - m_eeq_Z2[i] * lambda;
-            }
-        } else {
-            // Multi-fragment: dense Schur complement (nfrag typically small)
-            // S = C * Z2 (nfrag × nfrag)
-            Eigen::MatrixXd S_mat(nfrag, nfrag);
-            Eigen::VectorXd Cz1_vec(nfrag);
-            for (int f = 0; f < nfrag; ++f) {
-                Cz1_vec(f) = 0.0;
+        bool used_gpu_eeq = false;
+        if (gpu_eeq_applicable) {
+            // Distance cutoff for GPU matrix conditioning
+            double cutoff_sq = 0.0;
+
+            m_gpu_workspace->synchronizeMainStream();
+            bool eeq_ok = m_eeq_gpu->solve(
+                N, eeq_params.nfrag,
+                m_gpu_workspace->getDeviceXPtr(),
+                m_gpu_workspace->getDeviceYPtr(),
+                m_gpu_workspace->getDeviceZPtr(),
+                eeq_params.alpha_corrected.data(),
+                eeq_params.gam_corrected.data(),
+                eeq_params.fraglist,
+                eeq_params.rhs_atoms.data(),
+                eeq_params.rhs_constraints.data(),
+                m_eeq_z1.data(),
+                m_eeq_Z2.data(),
+                cutoff_sq);
+
+            if (eeq_ok) {
+                // CPU Schur complement: q = z1 - Z2 * λ  (nfrag=1 → scalar)
+                double S = 0.0, Cz1 = 0.0;
                 for (int i = 0; i < N; ++i) {
-                    bool in_frag = eeq_params.fraglist.empty()
-                                     ? (f == 0)
-                                     : (eeq_params.fraglist[i] == f + 1);
-                    if (in_frag) Cz1_vec(f) += m_eeq_z1[i];
+                    S   += m_eeq_Z2[i];
+                    Cz1 += m_eeq_z1[i];
                 }
-                for (int g = 0; g < nfrag; ++g) {
-                    S_mat(f, g) = 0.0;
-                    const double* Z2_col = m_eeq_Z2.data() + g * N;
-                    for (int i = 0; i < N; ++i) {
-                        bool in_frag = eeq_params.fraglist.empty()
-                                         ? (f == 0)
-                                         : (eeq_params.fraglist[i] == f + 1);
-                        if (in_frag) S_mat(f, g) += Z2_col[i];
-                    }
-                }
-            }
-            Eigen::VectorXd d_vec = Eigen::Map<const Eigen::VectorXd>(
-                eeq_params.rhs_constraints.data(), nfrag);
-            Eigen::VectorXd lambda_vec = S_mat.partialPivLu().solve(Cz1_vec - d_vec);
-            for (int i = 0; i < N; ++i) {
-                double correction = 0.0;
-                for (int f = 0; f < nfrag; ++f) {
-                    correction += m_eeq_Z2[f * N + i] * lambda_vec(f);
-                }
-                m_eeq_charges_gpu[i] = m_eeq_z1[i] - correction;
-            }
-        }
-        charges = Eigen::Map<const Vector>(m_eeq_charges_gpu.data(), N);
+                double lambda = (Cz1 - eeq_params.rhs_constraints[0]) / S;
+                for (int i = 0; i < N; ++i)
+                    m_eeq_charges_gpu[i] = m_eeq_z1[i] - m_eeq_Z2[i] * lambda;
 
-        // Store charges in GFNFF for consistency (raw memcpy, no Eigen heap alloc)
-        m_gfnff->storeChargesFromGPU(m_eeq_charges_gpu.data(), N);
-    } else {
-        // GPU Cholesky failed (not SPD) — fall back to CPU EEQ
-        // Claude Generated (April 2026): Respect allow_unconverged_charges flag
-        if (m_allow_unconverged_charges) {
-            CurcumaLogger::warn("GPU EEQ Cholesky failed (allow_unconverged_charges=true), falling back to CPU solver");
+                charges = Eigen::Map<const Vector>(m_eeq_charges_gpu.data(), N);
+                m_gfnff->storeChargesFromGPU(m_eeq_charges_gpu.data(), N);
+                used_gpu_eeq = true;
+            } else {
+                CurcumaLogger::warn("GPU EEQ Cholesky failed (not SPD), falling back to CPU solver");
+            }
         } else {
-            CurcumaLogger::warn("GPU EEQ Cholesky failed, falling back to CPU solver");
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::info(fmt::format(
+                    "GPU EEQ: nfrag={} — using CPU Phase 2 charges (TODO: batched-Cholesky per fragment)",
+                    eeq_params.nfrag));
+            }
         }
-        m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/false);
-        charges = m_gfnff->getLastCharges();
-        // CPU EEQ solver already has fallback logic (Phase 1 topology charges or best estimate)
-        // when allow_unconverged_charges=true. No need for additional zero-charge fallback.
+
+        if (!used_gpu_eeq) {
+            // CPU Phase 2 EEQ fallback (cached from InitialiseMolecule on first step)
+            m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/false);
+            charges = m_gfnff->getLastCharges();
+        }
     }
-    } // end if (!m_skip_phase2)
 
     auto t_eeq_end = std::chrono::high_resolution_clock::now();
 
