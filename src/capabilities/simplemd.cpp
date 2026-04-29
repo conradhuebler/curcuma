@@ -165,6 +165,7 @@ SimpleMD::SimpleMD(const json& controller, const bool silent)
 
 SimpleMD::~SimpleMD()
 {
+    delete m_interface;
     for (const auto & m_unique_structure : m_unique_structures)
         delete m_unique_structure;
     // delete m_bias_pool;
@@ -648,7 +649,21 @@ bool SimpleMD::Initialise()
     m_molecule.setSpin(m_spin);
     // Claude Generated (October 2025 - FIXED): Use controller["simplemd"] like CurcumaOpt uses controller["opt"]
     // Also merge in global parameters and defaults from ParameterRegistry
-    json ec_config = m_controller.contains("simplemd") ? m_controller["simplemd"] : json::object();
+    json ec_config = m_controller.contains("simplemd") && m_controller["simplemd"].is_object()
+        ? m_controller["simplemd"]
+        : json::object();
+
+    // Forward flat user parameters from controller to energy calculator config.
+    // ConfSearch and other callers may pass parameters at the top level rather
+    // than nested inside controller["simplemd"]. Without this forwarding, keys
+    // like "gpu" or "charge" are silently dropped.
+    for (auto& [key, value] : m_controller.items()) {
+        if (key == "simplemd" || key == "global" || value.is_object())
+            continue;
+        if (!ec_config.contains(key) || ec_config[key].is_null()) {
+            ec_config[key] = value;
+        }
+    }
 
     // Merge global parameters as fallback
     if (m_controller.contains("global") && m_controller["global"].is_object()) {

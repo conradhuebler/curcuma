@@ -182,8 +182,6 @@ void CurcumaOpt::LoadControlJson()
         std::cout << "Using gpt coded optimisation module" << std::endl;
     }
 
-    if (m_method.compare("GFNFF") == 0)
-        m_threads = 1;
 }
 
 void CurcumaOpt::start()

@@ -532,9 +532,7 @@ public:
 
     virtual int execute() override
     {
-        json controller;
-        controller["md"] = m_controller;
-        m_mddriver = new SimpleMD(controller, false);
+        m_mddriver = new SimpleMD(m_controller, false);
         m_mddriver->setMolecule(m_molecule);
         m_mddriver->overrideBasename(m_basename + ".t" + std::to_string(getThreadId()));
         m_mddriver->Initialise();

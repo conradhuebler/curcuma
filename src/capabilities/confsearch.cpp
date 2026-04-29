@@ -27,6 +27,7 @@
 #include "src/core/molecule.h"
 
 #include "src/tools/general.h"
+#include "src/core/parameter_registry.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
@@ -66,8 +67,39 @@ bool ConfSearch::Initialise()
 
 void ConfSearch::start()
 {
-    nlohmann::json md = m_defaults;
+    nlohmann::json md = ParameterRegistry::getInstance().getDefaultJson("simplemd");
+
+    // Forward flat user parameters from the ConfSearch controller to the MD config.
+    // This ensures flags like -gpu cuda or -charge are propagated to SimpleMD and
+    // ultimately to the EnergyCalculator inside each MD thread.
+    // NOTE: Use m_defaults (merged in UpdateController) because m_controller only
+    // contains nested objects after CLI2Json parsing. Also check m_controller["global"]
+    // for parameters like gpu that are not part of the ConfSearch module defaults.
+    auto forwardParam = [&](const std::string& key, const nlohmann::json& value) {
+        if (value.is_object() || key == "confsearch" || key == "confscan" || key == "global")
+            return;
+        if (!md.contains(key) || md[key].is_null()) {
+            md[key] = value;
+        }
+    };
+    for (auto& [key, value] : m_defaults.items())
+        forwardParam(key, value);
+    if (m_controller.contains("global") && m_controller["global"].is_object()) {
+        for (auto& [key, value] : m_controller["global"].items())
+            forwardParam(key, value);
+    }
+
     md["unique"] = true;
+    md["method"] = m_method;
+    md["rmsd"] = m_rmsd;
+    md["threads"] = m_threads;
+    md["time_step"] = m_dT;
+    md["max_time"] = m_time;
+
+    // RMSD metadynamics is the default driver for conformational exploration.
+    // Only disable if the user explicitly passed -rmsd_mtd false.
+    if (!md.contains("rmsd_mtd") || md["rmsd_mtd"].is_null())
+        md["rmsd_mtd"] = true;
     for (m_currentT = m_startT; m_currentT >= m_endT; m_currentT -= m_deltaT) {
         CurcumaLogger::header(fmt::format("MD Simulation at {} K", m_currentT));
         CurcumaLogger::info_fmt("Repetitions: {}, Structures: {}, Total runs: {}",
@@ -87,6 +119,8 @@ void ConfSearch::start()
         nlohmann::json opt;
         opt["method"] = m_method;
         opt["threads"] = m_threads;
+        if (md.contains("gpu") && !md["gpu"].is_null())
+            opt["gpu"] = md["gpu"];
         PerformOptimisation("ff", opt);
 
         nlohmann::json scan = ConfSearchJson;
@@ -94,6 +128,8 @@ void ConfSearch::start()
         scan["fewerFile"] = true;
         scan["threads"] = m_threads;
         scan["method"] = m_method;
+        if (md.contains("gpu") && !md["gpu"].is_null())
+            scan["gpu"] = md["gpu"];
 
         PerformFilter("ff", scan);
 
@@ -131,15 +167,12 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
             MDThread* thread = new MDThread(parameter);
             thread->setThreadId(index);
             thread->setBasename("confsearch");
-            thread->setMolecule(molecules[i * repeat]);
+            thread->setMolecule(molecules[i]);
             index++;
             pool->addThread(thread);
         }
     }
-    if (m_method.compare("gfnff") == 0)
-        pool->setActiveThreadCount(1);
-    else
-        pool->setActiveThreadCount(m_threads);
+    pool->setActiveThreadCount(m_threads);
     pool->StartAndWait();
 
     std::string file = "confsearch.unique.xyz";

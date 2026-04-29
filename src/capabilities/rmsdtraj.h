@@ -44,7 +44,7 @@ using json = nlohmann::json;
 BEGIN_PARAMETER_DEFINITION(rmsdtraj)
     PARAM(heavy_only, Bool, false, "Use only heavy atoms.", "RMSD", {"heavy"})
     PARAM(rmsd_threshold, Double, 1.5, "RMSD threshold for clustering (Å).", "RMSD", {"rmsd"})
-    PARAM(reference, String, "", "Reference structure file.", "Input", {})
+    PARAM(reference, String, "none", "Reference structure file.", "Input", {})
     PARAM(second_trajectory, String, "none", "Second trajectory file for comparison.", "Input", {"second"})
     PARAM(write_unique, Bool, false, "Write unique conformers to file.", "Output", {"writeUnique"})
     PARAM(write_aligned, Bool, false, "Write aligned trajectory.", "Output", {"writeAligned"})
