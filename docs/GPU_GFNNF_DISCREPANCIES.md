@@ -181,9 +181,46 @@ New test comparing CPU analytical, GPU analytical, and finite-difference gradien
 - Added to `test_cases/CMakeLists.txt` with CTest registration
 - Supports `--all-terms` flag and custom molecule path
 
+## April 2026 Update: GPU Gradient May Be More Correct Than CPU
+
+**Date**: 2026-04-29  
+**Status**: Revised interpretation — investigation ongoing
+
+### New Evidence
+
+MD simulations (polymer system) and heat-exchange analysis comparing all three implementations:
+
+| Method | Heat exchange (MD) | Agreement with XTB |
+|--------|--------------------|--------------------|
+| Native GFN-FF CPU | diverges / unstable | worse |
+| Native GFN-FF GPU (`-gpu cuda`) | stable, closer to XTB | better |
+| XTB GFN-FF (Fortran reference) | reference | — |
+
+The GPU implementation produces MD trajectories that are **more consistent with XTB GFN-FF** than the CPU implementation, as measured by heat-bath exchange values over extended runs.
+
+### Revised Interpretation
+
+The CPU vs GPU gradient discrepancies documented above (e.g. 3.7e-3 Eh/Bohr on acetic acid dimer) were previously assumed to indicate GPU errors. The new MD evidence suggests the opposite may be true:
+
+- **The CPU gradient may contain errors** not present in the GPU path — possibly in HB gradient distribution, CN chain-rule accumulation order, or atomicAdd vs sequential summation.
+- The GPU's `atomicAdd`-based accumulation may accidentally reproduce the Fortran summation order more faithfully than the CPU sequential loops.
+- The isolated HB test result (CPU anal vs FD: 5.7e-9 ✅, GPU anal vs FD: 4.2e-3 ❌) is not overturned, but needs to be re-evaluated: the FD reference on the CPU may itself contain the same CPU error.
+
+### What This Means for the Roadmap
+
+1. **Do not treat GPU gradient as the bug source** until a careful per-term comparison against the Fortran reference is done (not against the CPU).
+2. **Priority**: Compare GPU and CPU gradients separately against XTB numerical gradients (not against each other).
+3. **The GPU path is currently the more reliable production path** for MD simulations.
+
+### Still Unknown
+
+- Which specific term(s) cause the CPU gradient to diverge from XTB
+- Whether the GPU advantage holds for all molecule classes (only polymer/complex tested)
+- Whether the GPU `atomicAdd` ordering is deterministic across runs
+
 ## Next Steps
 
-1. **Per-term GPU gradient isolation** — Add diagnostic output to `k_hbonds` kernel separating damping/out-of-line/neighbor gradient contributions per atom
-2. **Compare GPU vs CPU per-atom HB gradient accumulation** — Identify which specific gradient sub-term diverges on donor/acceptor atoms
-3. **atomicAdd accumulation order** — Test if Kahan summation or deterministic reduction eliminates the error (4.2e-3 is too large for simple FP rounding)
-4. **HB SoA data verification** — Confirm GPU H-bond pair/parameter arrays match CPU data
+1. **Direct comparison against XTB numerical gradient** — Run `xtb --grad` on test molecules, compare both native CPU and GPU against this reference, not against each other.
+2. **Per-term CPU gradient audit** — Isolate which gradient term diverges in the CPU path relative to XTB (HB most likely candidate based on April isolation tests).
+3. **Confirm GPU stability on more systems** — Repeat MD heat-exchange test on acetic acid dimer and caffeine.
+4. **HB SoA data verification** — Confirm GPU H-bond pair/parameter arrays match CPU data (still relevant to understand the source of divergence).
