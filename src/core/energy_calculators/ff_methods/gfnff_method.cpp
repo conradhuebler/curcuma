@@ -6904,9 +6904,10 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
 
     // Claude Generated (Apr 2026): Use spatial cell list for O(N) AB-pair generation.
     // The double loop is O(N²); with a cell list only atom pairs within the HB cutoff
-    // (~15.8 Bohr) are considered.  For N < 800 the build overhead does not pay off.
+    // (~15.8 Bohr) are considered.  Threshold configurable via hb_cell_list_min_atoms.
     const double ab_cutoff = std::sqrt(hbthr1);  // ~15.81 Bohr
-    if (m_atomcount >= 800) {
+    const int hb_cell_threshold = m_parameters.value("hb_cell_list_min_atoms", 800);
+    if (hb_cell_threshold == 0 || m_atomcount >= hb_cell_threshold) {
         SpatialCellList cell_list;
         cell_list.build(m_geometry_bohr, ab_cutoff);
         cell_list.forEachPair([&](int i, int j, double /*r2*/) {
@@ -7008,7 +7009,9 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     // The AB-pair outer loop is embarrassingly parallel; each thread collects into
     // its own local vector, merged after the barrier.  No locking in the hot path.
     CxxThreadPool* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
-    const bool use_parallel = (pool != nullptr && static_cast<int>(ab_pairs.size()) > 500);
+    const int hb_par_threshold = m_parameters.value("hb_parallel_min_pairs", 500);
+    const bool use_parallel = (pool != nullptr && hb_par_threshold >= 0
+                               && static_cast<int>(ab_pairs.size()) > hb_par_threshold);
 
     if (use_parallel) {
         int n_threads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
@@ -7301,9 +7304,9 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     const double xb_cutoff_sq = xb_cutoff * xb_cutoff;
 
     // Claude Generated (Apr 2026): Spatial cell list for O(N) B-atom lookup.
-    // For N < 800 the build overhead does not pay off — fall back to the
-    // sequential loop over all atoms.
-    bool use_cell_list = (m_atomcount >= 800);
+    // Threshold configurable via hb_cell_list_min_atoms (shared with HB detection).
+    const int xb_cell_threshold = m_parameters.value("hb_cell_list_min_atoms", 800);
+    bool use_cell_list = (xb_cell_threshold == 0 || m_atomcount >= xb_cell_threshold);
     SpatialCellList cell_list;
     if (use_cell_list) {
         cell_list.build(m_geometry_bohr, xb_cutoff);

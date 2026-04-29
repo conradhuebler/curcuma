@@ -121,6 +121,10 @@ PARAM(eeq_distance_cutoff, Double, 30.0,
       "Distance cutoff in Bohr for EEQ matrix conditioning. 0 = no cutoff. Affects both CPU and GPU.", "Advanced", {})
 PARAM(gpu_block_size, Int, 0,
       "GPU kernel block size (0 = adaptive, 32/64/128/256/512). 512 = max occupancy. Passed to ff_workspace_gpu.", "Advanced", {})
+PARAM(hb_cell_list_min_atoms, Int, 800,
+      "Min atom count to use SpatialCellList for HB/XB neighbor detection. Below this falls back to O(N²) loop. 0 = always use cell list.", "Advanced", {})
+PARAM(hb_parallel_min_pairs, Int, 500,
+      "Min AB-pair count to parallelise HB detection via CxxThreadPool. 0 = always parallel (if pool available). -1 = never parallel.", "Advanced", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
