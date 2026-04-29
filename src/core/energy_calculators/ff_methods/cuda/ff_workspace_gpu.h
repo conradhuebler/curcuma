@@ -129,6 +129,13 @@ public:
     const double* getCNRawPinnedBuffer() const { return m_h_cn_raw; }
 
     /**
+     * @brief Get pointer to pinned dlogdcn buffer (valid after computeCN() with gradient=true).
+     * dlogdcn is computed on GPU by k_dlogdcn kernel (Apr 2026).
+     * @return Pointer to N doubles (logistic derivative)
+     */
+    const double* getDlogdcnPinnedBuffer() const { return m_h_dlogdcn; }
+
+    /**
      * @brief Check if GPU CN has been computed this step.
      */
     bool hasComputedCN() const { return m_cn_computed; }
@@ -165,6 +172,15 @@ public:
      */
     void setDlogDCN(const Vector& dlogdcn);
 
+    /**
+     * @brief Generate CN pair list entirely on GPU (Apr 2026).
+     *
+     * Two-pass kernel: count valid pairs, allocate buffers, write (i,j,rcov_sum).
+     * Replaces CPU generateCNPairList() O(N^2) loop.
+     * Coordinates and atom types must already be on GPU.
+     */
+    void generateCNPairListOnGPU();
+
     /// Set baseline energy (e0 from parameter set, added to total)
     void setE0(double e0);
 
@@ -196,6 +212,10 @@ public:
      */
     void updateBondHBMetadata(const std::vector<int>& nr_hb,
                                const std::vector<int>& hb_H_atom);
+
+    /// Compute HB CN per-bond entirely on GPU (Apr 2026).
+    /// Uses HBAlphaSoA + BondSoA; no CPU loop or H2D upload.
+    void computeBondHBCN();
 
     /// Re-upload HBond SoA after dynamic re-detection (called after updateHBXBIfNeeded)
     void updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
@@ -285,6 +305,12 @@ public:
     /// Enable/disable FP32 mixed precision for repulsion, BATM, and XBonds kernels.
     /// Default: enabled. FP64 fallback available for validation.
     void setMixedPrecision(bool enable);
+
+    /// G3a (Apr 2026): Set fixed GPU kernel block size (0 = adaptive default).
+    /// Valid: 0, 32, 64, 128, 256, 512. 0 uses adaptive logic (32/128/256/512).
+    /// 512 maximizes occupancy but may be slower for small systems.
+    void setBlockSize(int block_size) { m_block_size = block_size; }
+    int getBlockSize() const { return m_block_size; }
 
     // =========================================================================
     // GPU Topology Displacement Check (Claude Generated March 2026)
@@ -427,6 +453,7 @@ private:
     // NOTE: No Eigen Vectors here — heap-corruption-safe.  CN data lives in pinned buffer only.
     double* m_h_cn_final = nullptr; ///< [N] pinned staging buffer for CN_final download
     double* m_h_cn_raw   = nullptr; ///< [N] pinned staging buffer for CN_raw download
+    double* m_h_dlogdcn  = nullptr; ///< [N] pinned staging buffer for dlogdcn download (Apr 2026)
     bool    m_cn_computed = false; ///< GPU CN computed this step?
     std::vector<int> m_atom_types_cached; ///< Cached atom types for GPU CN
 
@@ -466,6 +493,9 @@ private:
     bool m_repulsion_enabled  = true;
     bool m_coulomb_enabled    = true;
     int  m_verbosity          = 0;
+
+    // G3a (Apr 2026): GPU kernel block size override (0 = adaptive default)
+    int  m_block_size         = 0;
 
     // Pre-allocated pinned staging buffers for async DMA transfers.
     // Claude Generated (March 2026): Pinned memory enables true async H2D/D2H via

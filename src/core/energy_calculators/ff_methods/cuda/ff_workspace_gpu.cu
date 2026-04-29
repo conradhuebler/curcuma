@@ -95,19 +95,26 @@ struct LaunchConfig {
     int gridSize;
 };
 
-static inline LaunchConfig getLaunchConfig(int n_elements, int maxBlockSize = 512) {
+static inline LaunchConfig getLaunchConfig(int n_elements, int block_size_override = 0) {
     LaunchConfig cfg;
-    // Adaptive block size based on problem size
-    // IMPORTANT: maxBlockSize must match GFNFF_KERNEL_BOUNDS in gfnff_kernels.cuh
-    // Current: __launch_bounds__(512, 2) - max 512 threads, min 2 blocks/SM
-    if (n_elements < 256) {
-        cfg.blockSize = 32;    // Single warp - minimal overhead for tiny problems
-    } else if (n_elements < 1024) {
-        cfg.blockSize = 128;   // 4 warps - good for small problems
-    } else if (n_elements < 16384) {
-        cfg.blockSize = 256;   // Standard - good balance for medium problems
+    // G3a (Apr 2026): Optional fixed block size override.
+    // If block_size_override > 0, use it directly (clamped 32..512).
+    // If 0, fall back to adaptive logic based on problem size.
+    if (block_size_override > 0) {
+        cfg.blockSize = std::min(512, std::max(32, block_size_override));
     } else {
-        cfg.blockSize = maxBlockSize;  // 512 threads - maximize occupancy for large problems
+        // Adaptive block size based on problem size
+        // IMPORTANT: maxBlockSize must match GFNFF_KERNEL_BOUNDS in gfnff_kernels.cuh
+        // Current: __launch_bounds__(512, 2) - max 512 threads, min 2 blocks/SM
+        if (n_elements < 256) {
+            cfg.blockSize = 32;    // Single warp - minimal overhead for tiny problems
+        } else if (n_elements < 1024) {
+            cfg.blockSize = 128;   // 4 warps - good for small problems
+        } else if (n_elements < 16384) {
+            cfg.blockSize = 256;   // Standard - good balance for medium problems
+        } else {
+            cfg.blockSize = 512;   // 512 threads - maximize occupancy for large problems
+        }
     }
     // Phase 8 (Claude Generated March 2026): min 1 block so n=0 launches a no-op block
     // instead of gridSize=0 (undefined in CUDA). All kernels early-return for i >= n.
@@ -630,10 +637,12 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<int>    d_cn_idx_j;     ///< [n_cn_pairs]
     CudaBuffer<double> d_cn_rcov_sum;  ///< [n_cn_pairs]
     int                n_cn_pairs = 0;
+    CudaBuffer<int>    d_cn_pair_counter; ///< [1] atomic counter for on-GPU pair generation (Apr 2026)
 
     // HB alpha chain-rule: per-atom zz accumulator + HB neighbor pair list
     CudaBuffer<double> d_zz_hb;        ///< [N] per-atom zz accumulator (zeroed each step)
     HBAlphaSoA         hb_alpha;       ///< (H, B) pairs for alpha gradient
+    CudaBuffer<double> d_hb_cn_per_atom; ///< [N] per-H accumulator for HB CN (Apr 2026)
 
     // Coulomb self-energy parameters (uploaded once)
     CudaBuffer<double> d_coul_chi_base; ///< [N]
@@ -756,6 +765,8 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
               "pinned alloc m_h_cn_final");
     checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_cn_raw), natoms * sizeof(double)),
               "pinned alloc m_h_cn_raw");
+    checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_dlogdcn), natoms * sizeof(double)),
+              "pinned alloc m_h_dlogdcn");
     checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_energies),
                              FFWorkspaceGPUImpl::N_ENERGY_SLOTS * sizeof(double)),
               "pinned alloc m_h_energies");
@@ -977,6 +988,7 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
     if (m_h_grad_after_sC)     cudaFreeHost(m_h_grad_after_sC);
     if (m_h_cn_final)   cudaFreeHost(m_h_cn_final);
     if (m_h_cn_raw)     cudaFreeHost(m_h_cn_raw);
+    if (m_h_dlogdcn)    cudaFreeHost(m_h_dlogdcn);
     if (m_h_energies)   cudaFreeHost(m_h_energies);
 }
 
@@ -1075,6 +1087,46 @@ void FFWorkspaceGPU::updateBondHBMetadata(const std::vector<int>& nr_hb,
         return;
     m_impl->bonds.nr_hb.upload(nr_hb.data(), nb, m_impl->stream);
     m_impl->bonds.hb_H_atom.upload(hb_H_atom.data(), nb, m_impl->stream);
+}
+
+// ============================================================================
+// GPU HB CN per-bond computation (Apr 2026)
+// Replaces CPU HB CN loop in gfnff_gpu_method.cpp.
+// ============================================================================
+void FFWorkspaceGPU::computeBondHBCN()
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    if (N <= 0 || impl.hb_alpha.n == 0) return;
+
+    // Allocate/zero per-H accumulator
+    if (!impl.d_hb_cn_per_atom.ptr || impl.d_hb_cn_per_atom.n < N)
+        impl.d_hb_cn_per_atom.alloc(N);
+    cudaMemsetAsync(impl.d_hb_cn_per_atom.ptr, 0, N * sizeof(double), impl.stream);
+
+    // Pass 1: accumulate HB CN per H-atom
+    auto cfg1 = getLaunchConfig(impl.hb_alpha.n, m_block_size);
+    k_hb_cn_per_atom<<<cfg1.gridSize, cfg1.blockSize, 0, impl.stream>>>(
+        impl.hb_alpha.n,
+        impl.hb_alpha.idx_H.ptr,
+        impl.hb_alpha.idx_B.ptr,
+        impl.hb_alpha.rcov_sum.ptr,
+        impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.d_hb_cn_per_atom.ptr,
+        27.5,   // kn
+        900.0); // thr_sq
+
+    // Pass 2: map per-H CN to per-bond CN
+    auto cfg2 = getLaunchConfig(impl.bonds.n, m_block_size);
+    k_hb_cn_map_to_bonds<<<cfg2.gridSize, cfg2.blockSize, 0, impl.stream>>>(
+        impl.bonds.n,
+        impl.bonds.nr_hb.ptr,
+        impl.bonds.hb_H_atom.ptr,
+        impl.d_hb_cn_per_atom.ptr,
+        impl.bonds.hb_cn_H.ptr);
+
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::info("  GPU HB CN per-bond computed on GPU");
 }
 
 void FFWorkspaceGPU::setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
@@ -1181,6 +1233,72 @@ void FFWorkspaceGPU::setDlogDCN(const Vector& dlogdcn)
     impl.d_dlogdcn.upload(dlogdcn.data(), N);
 }
 
+// ============================================================================
+// GPU CN pair list generation (Apr 2026)
+// Replaces CPU generateCNPairList() O(N^2) loop with two-pass GPU kernels.
+// ============================================================================
+void FFWorkspaceGPU::generateCNPairListOnGPU()
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    if (N <= 0) return;
+
+    // Ensure counter buffer is allocated
+    if (!impl.d_cn_pair_counter.ptr) impl.d_cn_pair_counter.alloc(1);
+
+    // Pass 1: count valid pairs
+    int h_count = 0;
+    impl.d_cn_pair_counter.upload(&h_count, 1);  // zero the counter
+
+    int n_total = N * (N - 1) / 2;
+    auto cfg = getLaunchConfig(n_total, m_block_size);
+    k_generate_cn_pairs_count<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        N,
+        impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.d_atom_types.ptr,
+        2.5,  // cutoff_factor
+        impl.d_cn_pair_counter.ptr);
+    checkCuda(cudaStreamSynchronize(impl.stream), "k_generate_cn_pairs_count sync");
+
+    // Download count
+    impl.d_cn_pair_counter.download(&h_count, 1);
+    checkCuda(cudaStreamSynchronize(impl.stream), "download pair count");
+
+    if (h_count == 0) {
+        impl.n_cn_pairs = 0;
+        m_cn_pairs_on_gpu = false;
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::info("  GPU CN pair list: 0 pairs");
+        return;
+    }
+
+    // Allocate pair buffers based on count
+    impl.d_cn_idx_i.alloc(h_count);
+    impl.d_cn_idx_j.alloc(h_count);
+    impl.d_cn_rcov_sum.alloc(h_count);
+    impl.n_cn_pairs = h_count;
+
+    // Pass 2: write valid pairs
+    int h_zero = 0;
+    impl.d_cn_pair_counter.upload(&h_zero, 1);  // reset counter for write indices
+
+    k_generate_cn_pairs_write<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        N,
+        impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.d_atom_types.ptr,
+        2.5,  // cutoff_factor
+        impl.d_cn_pair_counter.ptr,
+        impl.d_cn_idx_i.ptr,
+        impl.d_cn_idx_j.ptr,
+        impl.d_cn_rcov_sum.ptr);
+    checkCuda(cudaStreamSynchronize(impl.stream), "k_generate_cn_pairs_write sync");
+
+    m_cn_pairs_on_gpu = true;
+
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::info(fmt::format("  GPU CN pair list: {} pairs generated on GPU", h_count));
+}
+
 void FFWorkspaceGPU::updateDispersionDC6DCN(const Matrix& dc6dcn)
 {
     // Claude Generated (March 2026): Extract per-pair dc6dcn values and upload to GPU.
@@ -1264,7 +1382,7 @@ void FFWorkspaceGPU::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& 
     impl.d_dgw.upload(m_h_dgw_flat.data(), gw_size);
 
     // Launch dc6dcn per-pair kernel (Phase 6: dynamic block size)
-    LaunchConfig cfg = getLaunchConfig(nd);
+    LaunchConfig cfg = getLaunchConfig(nd, m_block_size);
     // refn read from constant memory d_refn_const (Phase 8)
     k_dc6dcn_per_pair<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
         nd,
@@ -1326,7 +1444,7 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU()
 
     // Launch k_gaussian_weights: compute gw and dgw from CN values already on GPU
     // CN source: d_cn (uploaded in prepareAndLaunchChargeIndependent via setD3CN)
-    LaunchConfig cfg_gw = getLaunchConfig(N);
+    LaunchConfig cfg_gw = getLaunchConfig(N, m_block_size);
     // refcn and refn read from constant memory d_refcn_const/d_refn_const (Phase 8)
     k_gaussian_weights<<<cfg_gw.gridSize, cfg_gw.blockSize, 0, impl.stream>>>(
         N,
@@ -1336,7 +1454,7 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU()
         impl.d_dgw.ptr);
 
     // Launch k_dc6dcn_per_pair immediately on same stream (gw/dgw ready by ordering)
-    LaunchConfig cfg_dc6 = getLaunchConfig(nd);
+    LaunchConfig cfg_dc6 = getLaunchConfig(nd, m_block_size);
     // refn read from constant memory d_refn_const (Phase 8)
     k_dc6dcn_per_pair<<<cfg_dc6.gridSize, cfg_dc6.blockSize, 0, impl.stream>>>(
         nd,
@@ -1440,7 +1558,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // (called after EEQ completes). Energy-only dispersion runs here for full overlap.
     if (m_dispersion_enabled && !gradient) {
         // Phase 8: n > 0 guard removed — n=0 produces a 1-block no-op (graph-capture safe)
-        LaunchConfig cfg = getLaunchConfig(impl.disp.n);
+        LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
             impl.disp.n,
             impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
@@ -1458,7 +1576,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     if (m_repulsion_enabled) {
         // Phase 8: n > 0 guard removed — n=0 produces a 1-block no-op (graph-capture safe)
-        LaunchConfig cfg = getLaunchConfig(impl.bonded_rep.n);
+        LaunchConfig cfg = getLaunchConfig(impl.bonded_rep.n, m_block_size);
         if (impl.use_mixed_precision) {
             k_repulsion_mixed<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
                 impl.bonded_rep.n,
@@ -1485,7 +1603,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     if (m_repulsion_enabled) {
         // Phase 8: n > 0 guard removed — n=0 produces a 1-block no-op (graph-capture safe)
-        LaunchConfig cfg = getLaunchConfig(impl.nonbonded_rep.n);
+        LaunchConfig cfg = getLaunchConfig(impl.nonbonded_rep.n, m_block_size);
         if (impl.use_mixed_precision) {
             k_repulsion_mixed<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
                 impl.nonbonded_rep.n,
@@ -1525,7 +1643,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         impl.d_zz_hb.zero(N, sB);
     }
     {
-        LaunchConfig cfg = getLaunchConfig(impl.bonds.n);
+        LaunchConfig cfg = getLaunchConfig(impl.bonds.n, m_block_size);
         k_bonds<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.bonds.n,
             impl.bonds.idx_i.ptr,     impl.bonds.idx_j.ptr,
@@ -1555,7 +1673,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.angles.n);
+        LaunchConfig cfg = getLaunchConfig(impl.angles.n, m_block_size);
         k_angles<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.angles.n,
             impl.angles.idx_i.ptr,  impl.angles.idx_j.ptr,  impl.angles.idx_k.ptr,
@@ -1575,7 +1693,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.dihedrals.n);
+        LaunchConfig cfg = getLaunchConfig(impl.dihedrals.n, m_block_size);
         k_dihedrals<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.dihedrals.n,
             impl.dihedrals.idx_i.ptr, impl.dihedrals.idx_j.ptr,
@@ -1595,7 +1713,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.inversions.n);
+        LaunchConfig cfg = getLaunchConfig(impl.inversions.n, m_block_size);
         k_inversions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.inversions.n,
             impl.inversions.idx_i.ptr, impl.inversions.idx_j.ptr,
@@ -1613,7 +1731,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.storsions.n);
+        LaunchConfig cfg = getLaunchConfig(impl.storsions.n, m_block_size);
         k_storsions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.storsions.n,
             impl.storsions.idx_i.ptr, impl.storsions.idx_j.ptr,
@@ -1627,7 +1745,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     if (gradient && impl.hb_alpha.n > 0 && impl.d_zz_hb.ptr) {
         constexpr double hb_kn = 27.5;
-        LaunchConfig cfg = getLaunchConfig(impl.hb_alpha.n);
+        LaunchConfig cfg = getLaunchConfig(impl.hb_alpha.n, m_block_size);
         k_hb_alpha_chainrule<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.hb_alpha.n,
             impl.hb_alpha.idx_H.ptr,
@@ -1652,7 +1770,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // hbonds uses q_H/q_A/q_B baked into SoA at construction time.
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.batm.n);
+        LaunchConfig cfg = getLaunchConfig(impl.batm.n, m_block_size);
         if (impl.use_mixed_precision) {
             k_batm_mixed<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
                 impl.batm.n,
@@ -1679,7 +1797,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.atm.n);
+        LaunchConfig cfg = getLaunchConfig(impl.atm.n, m_block_size);
         k_atm<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
             impl.atm.n,
             impl.atm.idx_i.ptr, impl.atm.idx_j.ptr, impl.atm.idx_k.ptr,
@@ -1695,7 +1813,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.xbonds.n);
+        LaunchConfig cfg = getLaunchConfig(impl.xbonds.n, m_block_size);
         if (impl.use_mixed_precision) {
             k_xbonds_mixed<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
                 impl.xbonds.n,
@@ -1724,7 +1842,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     if (m_hbond_enabled) {
         // Phase 8: hbonds.n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.hbonds.n);
+        LaunchConfig cfg = getLaunchConfig(impl.hbonds.n, m_block_size);
         k_hbonds<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
             impl.hbonds.n,
             impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr,
@@ -1803,7 +1921,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // k_dispersion deferred from charge-independent phase when gradient=true
     // (needs dc6dcn from computeDC6DCNOnGPU which ran after EEQ)
     if (m_dispersion_enabled && impl.disp.n > 0 && gradient) {
-        LaunchConfig cfg = getLaunchConfig(impl.disp.n);
+        LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
             impl.disp.n,
             impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
@@ -1822,7 +1940,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
 
     // k_coulomb (needs EEQ charges)
     if (m_coulomb_enabled && impl.coulomb.n > 0) {
-        LaunchConfig cfg = getLaunchConfig(impl.coulomb.n);
+        LaunchConfig cfg = getLaunchConfig(impl.coulomb.n, m_block_size);
         k_coulomb<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
             impl.coulomb.n,
             impl.coulomb.idx_i.ptr,  impl.coulomb.idx_j.ptr,
@@ -1866,7 +1984,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
         }
 
         bool do_subtract = gradient && m_cnf.size() == N && m_eeq_charges.size() == N;
-        LaunchConfig cfg = getLaunchConfig(N);
+        LaunchConfig cfg = getLaunchConfig(N, m_block_size);
         k_coulomb_postprocess<<<cfg.gridSize, cfg.blockSize, 0, stream>>>(
             N,
             impl.d_charges.ptr,
@@ -1892,7 +2010,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
                             3*N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
         }
 
-        LaunchConfig cfg_cn = getLaunchConfig(impl.n_cn_pairs);
+        LaunchConfig cfg_cn = getLaunchConfig(impl.n_cn_pairs, m_block_size);
         k_cn_chainrule<<<cfg_cn.gridSize, cfg_cn.blockSize, 0, stream>>>(
             impl.n_cn_pairs,
             impl.d_cn_idx_i.ptr,
@@ -2216,10 +2334,11 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
     // Ensure CN buffers are allocated
     if (impl.d_cn_raw.n < N) impl.d_cn_raw.alloc(N);
     if (impl.d_cn_final.n < N) impl.d_cn_final.alloc(N);
+    if (impl.d_dlogdcn.n < N) impl.d_dlogdcn.alloc(N);
 
     // Launch CN compute kernel
     // Uses constant memory d_rcov_d3 for covalent radii (uploaded at construction)
-    LaunchConfig cfg_cn = getLaunchConfig(N);
+    LaunchConfig cfg_cn = getLaunchConfig(N, m_block_size);
     k_cn_compute<<<cfg_cn.gridSize, cfg_cn.blockSize, 0, impl.stream>>>(
         N,
         impl.coords.d_x.ptr,
@@ -2233,12 +2352,21 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
         threshold_sq
     );
 
-    // Download CN_final and CN_raw to pre-allocated pinned buffers
+    // Claude Generated (Apr 2026): Compute dlogdcn on GPU, eliminating CPU loop + H2D upload.
+    // dlogdcn[i] = exp(cnmax) / (exp(cnmax) + exp(cn_raw[i]))
+    LaunchConfig cfg_dlog = getLaunchConfig(N, m_block_size);
+    k_dlogdcn<<<cfg_dlog.gridSize, cfg_dlog.blockSize, 0, impl.stream>>>(
+        N, impl.d_cn_raw.ptr, impl.d_dlogdcn.ptr, std::exp(cnmax)
+    );
+
+    // Download CN_final, CN_raw, and dlogdcn to pre-allocated pinned buffers
     // Claude Generated (March 2026): Avoids heap corruption from CUDA allocator
     // CN_raw needed for correct dlogdcn computation (chain-rule gradient)
     cudaMemcpyAsync(m_h_cn_final, impl.d_cn_final.ptr, N * sizeof(double),
                     cudaMemcpyDeviceToHost, impl.stream);
     cudaMemcpyAsync(m_h_cn_raw, impl.d_cn_raw.ptr, N * sizeof(double),
+                    cudaMemcpyDeviceToHost, impl.stream);
+    cudaMemcpyAsync(m_h_dlogdcn, impl.d_dlogdcn.ptr, N * sizeof(double),
                     cudaMemcpyDeviceToHost, impl.stream);
     cudaStreamSynchronize(impl.stream);
     m_cn_computed = true;
@@ -2331,7 +2459,7 @@ bool FFWorkspaceGPU::checkDisplacement(double threshold)
               "checkDisplacement: zero flag");
 
     // Launch displacement check kernel
-    LaunchConfig cfg = getLaunchConfig(m_natoms);
+    LaunchConfig cfg = getLaunchConfig(m_natoms, m_block_size);
     k_check_displacement<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
         m_natoms,
         impl.coords.d_x.ptr,

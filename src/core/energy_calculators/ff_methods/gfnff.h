@@ -104,8 +104,23 @@ inline bool isMetalAtom(int atomic_number) {
 //   cn_cutoff_bohr = 0, cn_accuracy > 0: Fortran accuracy-based threshold (cnthr = 100 - log10(acc)*50)
 //   cn_cutoff_bohr = 0, cn_accuracy = 0: Full O(N²) reference mode (no cutoff)
 BEGIN_PARAMETER_DEFINITION(gfnff)
+PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. Maps to EEQ and CN parameters.", "Basic", {})
+PARAM(allow_unconverged_charges, Bool, false, "Allow calculation to continue with unconverged EEQ charges (warn instead of abort).", "Advanced", {})
+PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 topology charges directly. Faster but less accurate.", "Advanced", {})
 PARAM(cn_cutoff_bohr, Double, 6.0, "CN neighbor list cutoff radius in Bohr. 0 = use accuracy-based threshold instead.", "Advanced", {})
 PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
+PARAM(solve, String, "auto",
+      "EEQ solver method: lu, schur_cholesky, pcg, auto. Passed to eeq_solver.", "Algorithm", {})
+PARAM(eeq_max_iterations, Int, -1,
+      "Max EEQ PCG iterations. -1 = use adaptive default (200 small, 5000 large). Passed to eeq_solver.", "Algorithm", {})
+PARAM(eeq_tolerance, Double, -1.0,
+      "EEQ PCG tolerance. -1 = use adaptive default (1e-10 small, 1e-6*||rhs|| large). Passed to eeq_solver.", "Algorithm", {})
+PARAM(eeq_accuracy, Double, 1e-6,
+      "Target EEQ charge accuracy (e). Sets pcg_large_system_tol_factor. Higher = faster but less accurate.", "Algorithm", {})
+PARAM(eeq_distance_cutoff, Double, 30.0,
+      "Distance cutoff in Bohr for EEQ matrix conditioning. 0 = no cutoff. Affects both CPU and GPU.", "Advanced", {})
+PARAM(gpu_block_size, Int, 0,
+      "GPU kernel block size (0 = adaptive, 32/64/128/256/512). 512 = max occupancy. Passed to ff_workspace_gpu.", "Advanced", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -573,6 +588,18 @@ public:
         int nfrag = 1;                        ///< Number of molecular fragments
     };
     EEQGPUParams prepareEEQParametersForGPU(const Vector& cn) const;
+
+    /**
+     * @brief Get EEQ distance cutoff from parameters (Bohr).
+     * Used by GPU path to match CPU matrix conditioning behavior.
+     */
+    double getEEQDistanceCutoff() const;
+
+    /**
+     * @brief Forward gfnff-level solver parameters to eeq_solver sub-config.
+     * Handles: solve, eeq_max_iterations, eeq_tolerance, eeq_accuracy, eeq_distance_cutoff.
+     */
+    void forwardEEQSolverParams(json& eeq_params);
 
     /**
      * @brief Re-detect HB/XB pairs if geometry has changed enough (RMSD > 0.3 Bohr).

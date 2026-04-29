@@ -119,16 +119,13 @@ private:
     json             m_parameters;
     std::string      m_method_name;
     std::vector<int> m_atom_types;   ///< Element numbers (Z) — stored from setMolecule()
+    bool             m_allow_unconverged_charges = false; ///< Respect allow_unconverged_charges for GPU→CPU fallback (Claude Generated Apr 2026)
+    bool             m_skip_phase2 = false;               ///< Skip Phase 2 EEQ refinement, use Phase 1 topology charges (Claude Generated Apr 2026)
     bool             m_initialized   = false;
     bool             m_has_error     = false;
     std::string      m_error_message;
     double           m_last_energy   = 0.0;
     Matrix           m_cached_gradient; ///< Cached gradient (copied from GPU workspace after calculate)
-
-    // Pre-allocated buffers for per-step HB coordination number computation.
-    // Avoids heap allocations on CUDA-corrupted heap during MD/Opt iterations.
-    std::vector<double> m_hb_cn_values;                ///< [n_bonds] HB CN per bond
-    std::vector<double> m_hb_cn_per_atom;              ///< [natoms] H-atom CN (pre-allocated, replaces unordered_map)
 
     // CN chain-rule pair list (generated once at init, used every gradient step)
     // Claude Generated (March 2026): Full GPU gradient consistency

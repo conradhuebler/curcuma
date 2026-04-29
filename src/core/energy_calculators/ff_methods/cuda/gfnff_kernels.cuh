@@ -495,6 +495,20 @@ __global__ GFNFF_KERNEL_BOUNDS void k_dc6dcn_per_pair(
 );
 
 // ============================================================================
+// GPU dlogdcn computation (Apr 2026)
+// Compute logistic squashing derivative directly on GPU after k_cn_compute.
+// dlogdcn[i] = exp(cnmax) / (exp(cnmax) + exp(cn_raw[i]))
+// Eliminates CPU loop + H2D upload in gfnff_gpu_method.cpp.
+// ============================================================================
+
+__global__ GFNFF_KERNEL_BOUNDS void k_dlogdcn(
+    int natoms,
+    const double* __restrict__ cn_raw,  ///< [N] raw CN values (erf sum)
+    double*       __restrict__ dlogdcn, ///< [N] output: logistic derivative
+    double        exp_cnmax             ///< pre-computed exp(cnmax)
+);
+
+// ============================================================================
 // GPU Gaussian weight computation (Phase 6: March 2026)
 // Claude Generated: Compute gw and dgw/dCN on GPU, eliminating CPU computation
 // + flatten + H2D upload.
@@ -548,5 +562,80 @@ void upload_covalent_radii(const double* radii, int n);
 // ============================================================================
 void upload_refcn_const(const double* data, int n);
 void upload_refn_const(const int* data, int n);
+
+// ============================================================================
+// GPU CN pair list generation (Apr 2026)
+// Two-pass kernels: count valid pairs, then write (i, j, rcov_sum).
+// Replaces CPU generateCNPairList() O(N^2) loop.
+// ============================================================================
+
+__global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_factor,
+    int*          d_count);
+
+__global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_factor,
+    int*          d_counter,
+    int*          idx_i,
+    int*          idx_j,
+    double*       rcov_sum);
+
+// ============================================================================
+// GPU HB CN per-bond computation (Apr 2026)
+// Replaces CPU HB CN loop in gfnff_gpu_method.cpp.
+// ============================================================================
+
+/// 1 thread = 1 (H,B) pair. Atomically accumulates into per-H buffer.
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_per_atom(
+    int n_pairs,
+    const int*    __restrict__ idx_H,
+    const int*    __restrict__ idx_B,
+    const double* __restrict__ rcov_sum,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*       __restrict__ hb_cn_per_atom, // [N] zeroed before launch
+    double        kn,                          // 27.5
+    double        thr_sq);                     // 900.0
+
+/// 1 thread = 1 bond. Reads hb_H_atom from BondSoA and scatters per-H CN into hb_cn_H.
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_map_to_bonds(
+    int nb,
+    const int*    __restrict__ nr_hb,
+    const int*    __restrict__ hb_H_atom,
+    const double* __restrict__ hb_cn_per_atom,
+    double*       __restrict__ hb_cn_H);       // [nb] output, BondSoA buffer
+
+// ============================================================================
+// GPU EEQ Schur complement (Apr 2026)
+// Replaces CPU Schur loop after Cholesky solve in gfnff_gpu_method.cpp.
+// For nfrag == 1 only (common case). nfrag > 1 falls back to CPU path.
+// ============================================================================
+
+/// Block-reduce S = sum(Z2_col0) and Cz1 = sum(z1) on GPU.
+/// Launch with 1 block. Shared mem: 2 * blockSize * sizeof(double).
+/// Writes 2 scalars to d_sums[0] = Cz1, d_sums[1] = S.
+__global__ void k_eeq_reduce_sums(
+    int N,
+    const double* __restrict__ d_rhs,  ///< [N * nrhs] column-major, nrhs >= 2
+    double*       __restrict__ d_sums); ///< [2] output: [Cz1, S]
+
+/// Element-wise Schur complement for nfrag == 1.
+/// charges[i] = z1[i] - Z2[i] * lambda
+__global__ void k_eeq_schur_nfrag1(
+    int N,
+    const double* __restrict__ d_rhs,   ///< [N * 2] column-major: col0=z1, col1=Z2
+    double        lambda,
+    double*       __restrict__ charges); ///< [N] output
 
 #endif // USE_CUDA

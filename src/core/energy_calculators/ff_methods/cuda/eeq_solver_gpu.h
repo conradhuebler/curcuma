@@ -67,7 +67,44 @@ public:
         const double* rhs_atoms,
         const double* rhs_constraints,
         double* out_z1,
-        double* out_Z2
+        double* out_Z2,
+        double cutoff_sq = 0.0
+    );
+
+    /**
+     * @brief Build + solve + compute charges on GPU, avoiding large D2H transfers.
+     *
+     * ⚠️ NOT USED in production — measured ~4 s slowdown vs solve() + CPU Schur.
+     * The extra kernel launches (reduce + schur) + additional sync points outweigh
+     * the benefit of downloading 2N fewer doubles. Kept for reference.
+     *
+     * For nfrag == 1 (common case): after potrs, runs GPU reduction kernels to
+     * compute the Schur complement directly on-device.
+     *
+     * For nfrag > 1: falls back to solve() + CPU Schur complement.
+     *
+     * @param natoms           Number of atoms N
+     * @param nfrag            Number of fragments
+     * @param cx, cy, cz       GPU SoA coordinate pointers
+     * @param alpha_corrected  Host [N] alpha² values
+     * @param gam_corrected    Host [N] hardness values
+     * @param fraglist         Host [N] fragment IDs (1-indexed)
+     * @param rhs_atoms        Host [N] atom electronegativity RHS
+     * @param rhs_constraints  Host [nfrag] target fragment charges
+     * @param out_charges      Host [N] output: EEQ charges
+     * @param cutoff_sq        Distance cutoff for matrix sparsity (0 = none)
+     * @return true on success, false if Cholesky fails
+     */
+    bool solveAndComputeCharges(
+        int natoms, int nfrag,
+        const double* cx, const double* cy, const double* cz,
+        const double* alpha_corrected,
+        const double* gam_corrected,
+        const std::vector<int>& fraglist,
+        const double* rhs_atoms,
+        const double* rhs_constraints,
+        double* out_charges,
+        double cutoff_sq = 0.0
     );
 
 private:

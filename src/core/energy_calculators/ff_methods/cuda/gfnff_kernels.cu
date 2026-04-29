@@ -2665,6 +2665,24 @@ __global__ void k_cn_compute(
 }
 
 // ============================================================================
+// GPU dlogdcn computation (Apr 2026)
+// Compute logistic squashing derivative directly on GPU after k_cn_compute.
+// dlogdcn[i] = exp(cnmax) / (exp(cnmax) + exp(cn_raw[i]))
+// Reference: Fortran gfnff_cn.f90 create_dlogCN
+// ============================================================================
+
+__global__ GFNFF_KERNEL_BOUNDS void k_dlogdcn(
+    int natoms,
+    const double* __restrict__ cn_raw,
+    double*       __restrict__ dlogdcn,
+    double        exp_cnmax)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= natoms) return;
+    dlogdcn[i] = exp_cnmax / (exp_cnmax + exp(cn_raw[i]));
+}
+
+// ============================================================================
 // DC6DCN per-pair kernel (Phase 2 GPU optimization)
 // Claude Generated (March 2026): Compute dc6/dcn directly per dispersion pair.
 // Eliminates O(N²) CPU matrix construction — only O(nd) pairs computed on GPU.
@@ -2816,3 +2834,221 @@ __global__ void k_dc6dcn_per_pair(
 // ============================================================================
 // Utility: zero device array
 // ============================================================================
+
+// ============================================================================
+// GPU CN pair list generation (Apr 2026)
+// Two-pass kernels replacing CPU generateCNPairList() O(N^2) loop.
+// ============================================================================
+
+/// Pass 1: count valid pairs. 1 thread = 1 upper-triangle pair (i<j).
+__global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_factor,
+    int*          d_count)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int n_total = N * (N - 1) / 2;
+    if (tid >= n_total) return;
+
+    // Map linear tid to upper-triangle (i,j) with i<j
+    // n_pairs_before_i = i * (2*N - i - 1) / 2
+    // Solve i*(2*N - i - 1)/2 <= tid for i
+    int i = static_cast<int>((2.0 * N - 1.0 - sqrt((2.0 * N - 1.0) * (2.0 * N - 1.0) - 8.0 * tid)) * 0.5);
+    // Correct rounding drift
+    while (i > 0 && i * (2 * N - i - 1) / 2 > tid) --i;
+    while (i + 1 < N && (i + 1) * (2 * N - (i + 1) - 1) / 2 <= tid) ++i;
+    int offset_i = i * (2 * N - i - 1) / 2;
+    int j = tid - offset_i + i + 1;
+
+    if (j >= N) return;
+
+    int zi = atom_types[i];
+    int zj = atom_types[j];
+    if (zi < 1 || zi > 86 || zj < 1 || zj > 86) return;
+
+    double dx = cx[i] - cx[j];
+    double dy = cy[i] - cy[j];
+    double dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);
+    double r2 = dx * dx + dy * dy + dz * dz;
+    double rij = sqrt(r2);
+
+    constexpr double CN_RCOV_SCALE = 4.0 / 3.0;
+    double rcov_i = d_rcov_d3[zi - 1] * CN_RCOV_SCALE;
+    double rcov_j = d_rcov_d3[zj - 1] * CN_RCOV_SCALE;
+    double rcov_sum = rcov_i + rcov_j;
+
+    if (rij < cutoff_factor * rcov_sum && rij > 1e-10) {
+        atomicAdd(d_count, 1);
+    }
+}
+
+/// Pass 2: write valid pairs into pre-allocated buffers.
+__global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_factor,
+    int*          d_counter,
+    int*          idx_i,
+    int*          idx_j,
+    double*       rcov_sum)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int n_total = N * (N - 1) / 2;
+    if (tid >= n_total) return;
+
+    // Same mapping as Pass 1
+    int i = static_cast<int>((2.0 * N - 1.0 - sqrt((2.0 * N - 1.0) * (2.0 * N - 1.0) - 8.0 * tid)) * 0.5);
+    while (i > 0 && i * (2 * N - i - 1) / 2 > tid) --i;
+    while (i + 1 < N && (i + 1) * (2 * N - (i + 1) - 1) / 2 <= tid) ++i;
+    int offset_i = i * (2 * N - i - 1) / 2;
+    int j = tid - offset_i + i + 1;
+
+    if (j >= N) return;
+
+    int zi = atom_types[i];
+    int zj = atom_types[j];
+    if (zi < 1 || zi > 86 || zj < 1 || zj > 86) return;
+
+    double dx = cx[i] - cx[j];
+    double dy = cy[i] - cy[j];
+    double dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);
+    double r2 = dx * dx + dy * dy + dz * dz;
+    double rij = sqrt(r2);
+
+    constexpr double CN_RCOV_SCALE = 4.0 / 3.0;
+    double rcov_i = d_rcov_d3[zi - 1] * CN_RCOV_SCALE;
+    double rcov_j = d_rcov_d3[zj - 1] * CN_RCOV_SCALE;
+    double rcov_sum_val = rcov_i + rcov_j;
+
+    if (rij < cutoff_factor * rcov_sum_val && rij > 1e-10) {
+        int idx = atomicAdd(d_counter, 1);
+        idx_i[idx] = i;
+        idx_j[idx] = j;
+        rcov_sum[idx] = rcov_sum_val;
+    }
+}
+
+// ============================================================================
+// GPU HB CN per-bond computation (Apr 2026)
+// Replaces CPU HB CN loop in gfnff_gpu_method.cpp.
+// ============================================================================
+
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_per_atom(
+    int n_pairs,
+    const int*    __restrict__ idx_H,
+    const int*    __restrict__ idx_B,
+    const double* __restrict__ rcov_sum,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*       __restrict__ hb_cn_per_atom,
+    double        kn,
+    double        thr_sq)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_pairs) return;
+
+    int H = idx_H[tid];
+    int B = idx_B[tid];
+
+    double dx = cx[H] - cx[B];
+    double dy = cy[H] - cy[B];
+    double dz = cz[H] - cz[B];
+    applyMIC(dx, dy, dz);
+    double r2 = dx * dx + dy * dy + dz * dz;
+    if (r2 > thr_sq) return;
+
+    double r = sqrt(r2);
+    double rcovij = rcov_sum[tid];
+    double arg = -kn * (r - rcovij) / rcovij;
+    double contrib = 0.5 * (1.0 + erf(arg));
+
+    atomicAdd(&hb_cn_per_atom[H], contrib);
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_map_to_bonds(
+    int nb,
+    const int*    __restrict__ nr_hb,
+    const int*    __restrict__ hb_H_atom,
+    const double* __restrict__ hb_cn_per_atom,
+    double*       __restrict__ hb_cn_H)
+{
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= nb) return;
+
+    if (nr_hb[b] >= 1) {
+        int H = hb_H_atom[b];
+        if (H >= 0) {
+            hb_cn_H[b] = hb_cn_per_atom[H];
+        } else {
+            hb_cn_H[b] = 0.0;
+        }
+    } else {
+        hb_cn_H[b] = 0.0;
+    }
+}
+
+// ============================================================================
+// GPU EEQ Schur complement (Apr 2026)
+// Replaces CPU Schur loop after Cholesky solve in gfnff_gpu_method.cpp.
+// For nfrag == 1 only (common case). nfrag > 1 falls back to CPU path.
+// ============================================================================
+
+__global__ void k_eeq_reduce_sums(
+    int N,
+    const double* __restrict__ d_rhs,
+    double*       __restrict__ d_sums)
+{
+    extern __shared__ double sdata[];
+    double* s_z1  = sdata;            // [blockDim.x]
+    double* s_Z2  = sdata + blockDim.x; // [blockDim.x]
+
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + tid;
+
+    double val_z1 = 0.0;
+    double val_Z2 = 0.0;
+    if (i < N) {
+        val_z1 = d_rhs[i];          // column 0: z1
+        val_Z2 = d_rhs[N + i];      // column 1: Z2_col0
+    }
+    s_z1[tid] = val_z1;
+    s_Z2[tid] = val_Z2;
+    __syncthreads();
+
+    // Block-level tree reduction
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_z1[tid] += s_z1[tid + s];
+            s_Z2[tid] += s_Z2[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        atomicAdd(&d_sums[0], s_z1[0]);   // Cz1
+        atomicAdd(&d_sums[1], s_Z2[0]);   // S
+    }
+}
+
+__global__ void k_eeq_schur_nfrag1(
+    int N,
+    const double* __restrict__ d_rhs,
+    double        lambda,
+    double*       __restrict__ charges)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double z1 = d_rhs[i];
+    double Z2 = d_rhs[N + i];
+    charges[i] = z1 - Z2 * lambda;
+}

@@ -15,6 +15,7 @@
 
 #include "eeq_solver_gpu.h"
 #include "gfnff_soa.h"
+#include "gfnff_kernels.cuh"
 
 #include <cusolverDn.h>
 #include <cuda_runtime.h>
@@ -55,6 +56,7 @@ struct EEQSolverGPUImpl {
     CudaBuffer<double> d_rhs;        ///< [N*(nfrag+1)] RHS matrix (column-major)
     CudaBuffer<double> d_workspace;  ///< cuSOLVER workspace
     CudaBuffer<int>    d_info;       ///< [1] cuSOLVER info
+    CudaBuffer<double> d_sums;       ///< [2] GPU reduction: [Cz1, S] for Schur complement
 
     // Pinned host buffers for async D2H transfer
     double* h_result = nullptr;      ///< [N*(nfrag+1)] downloaded solution
@@ -93,7 +95,8 @@ void k_eeq_build_matrix(
     const double* __restrict__ cz,       // [N] z-coordinates (Bohr, SoA)
     const double* __restrict__ alpha,     // [N] alpha² = (alpha_base + ff*qa)², already squared
     const double* __restrict__ gam,       // [N] gam_corrected
-    double* __restrict__ A)               // [N*N] output column-major
+    double* __restrict__ A,               // [N*N] output column-major
+    double cutoff_sq)                     // distance cutoff squared (0.0 = no cutoff)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int n_lower = N * (N + 1) / 2;
@@ -115,15 +118,23 @@ void k_eeq_build_matrix(
         double dx = cx[i] - cx[j];
         double dy = cy[i] - cy[j];
         double dz = cz[i] - cz[j];
-        double r = sqrt(dx * dx + dy * dy + dz * dz);
+        double r_sq = dx * dx + dy * dy + dz * dz;
 
-        double gamma_ij = 1.0 / sqrt(alpha[i] + alpha[j]);
-        double val = erf(gamma_ij * r) / r;
+        // Distance cutoff: zero out near-zero long-range elements
+        // Matches CPU EEQ behavior for matrix conditioning (same cutoff_sq logic)
+        if (cutoff_sq > 0.0 && r_sq > cutoff_sq) {
+            A[j * N + i] = 0.0;
+            A[i * N + j] = 0.0;
+        } else {
+            double r = sqrt(r_sq);
+            double gamma_ij = 1.0 / sqrt(alpha[i] + alpha[j]);
+            double val = erf(gamma_ij * r) / r;
 
-        // Column-major: element (row, col) at col*N + row
-        // Write both triangles (cuSOLVER potrs reads full matrix)
-        A[j * N + i] = val;   // lower triangle
-        A[i * N + j] = val;   // upper triangle (symmetric)
+            // Column-major: element (row, col) at col*N + row
+            // Write both triangles (cuSOLVER potrs reads full matrix)
+            A[j * N + i] = val;   // lower triangle
+            A[i * N + j] = val;   // upper triangle (symmetric)
+        }
     }
 }
 
@@ -178,7 +189,8 @@ bool EEQSolverGPU::solve(
     const double* rhs_atoms,
     const double* rhs_constraints,
     double* out_z1,
-    double* out_Z2)
+    double* out_Z2,
+    double cutoff_sq)
 {
     const int N = natoms;
     const int nrhs = nfrag + 1;  // b_atoms + nfrag constraint columns
@@ -194,7 +206,7 @@ bool EEQSolverGPU::solve(
         int grid = (n_lower + block - 1) / block;
 
         k_eeq_build_matrix<<<grid, block, 0, m_impl->stream>>>(
-            N, cx, cy, cz, m_impl->d_alpha.ptr, m_impl->d_gam.ptr, m_impl->d_A.ptr);
+            N, cx, cy, cz, m_impl->d_alpha.ptr, m_impl->d_gam.ptr, m_impl->d_A.ptr, cutoff_sq);
     }
 
     // --- 3. Build RHS matrix on CPU and upload ---
@@ -290,6 +302,150 @@ bool EEQSolverGPU::solve(
     // Columns 1..nfrag → Z2 (A⁻¹ · C^T, column-major)
     if (nfrag > 0) {
         std::memcpy(out_Z2, m_impl->h_result + N, N * nfrag * sizeof(double));
+    }
+
+    return true;
+}
+
+// ============================================================================
+// solveAndComputeCharges — GPU Schur complement for nfrag == 1
+// ============================================================================
+
+bool EEQSolverGPU::solveAndComputeCharges(
+    int natoms, int nfrag,
+    const double* cx, const double* cy, const double* cz,
+    const double* alpha_corrected,
+    const double* gam_corrected,
+    const std::vector<int>& fraglist,
+    const double* rhs_atoms,
+    const double* rhs_constraints,
+    double* out_charges,
+    double cutoff_sq)
+{
+    const int N = natoms;
+    const int nrhs = nfrag + 1;
+
+    // --- 1. Upload alpha, gam to device ---
+    m_impl->d_alpha.upload(alpha_corrected, N);
+    m_impl->d_gam.upload(gam_corrected, N);
+
+    // --- 2. Build N×N Coulomb matrix on GPU ---
+    {
+        int n_lower = N * (N + 1) / 2;
+        int block = 256;
+        int grid = (n_lower + block - 1) / block;
+
+        k_eeq_build_matrix<<<grid, block, 0, m_impl->stream>>>(
+            N, cx, cy, cz, m_impl->d_alpha.ptr, m_impl->d_gam.ptr, m_impl->d_A.ptr, cutoff_sq);
+    }
+
+    // --- 3. Build RHS matrix on CPU and upload ---
+    {
+        const int rhs_size = N * nrhs;
+        if (m_impl->d_rhs.n < rhs_size)
+            m_impl->d_rhs.alloc(rhs_size);
+
+        std::vector<double> h_rhs(rhs_size, 0.0);
+        std::memcpy(h_rhs.data(), rhs_atoms, N * sizeof(double));
+        for (int f = 0; f < nfrag; ++f) {
+            double* col = h_rhs.data() + (f + 1) * N;
+            if (fraglist.empty()) {
+                if (f == 0) {
+                    for (int j = 0; j < N; ++j)
+                        col[j] = 1.0;
+                }
+            } else {
+                for (int j = 0; j < N; ++j) {
+                    if (fraglist[j] == f + 1)
+                        col[j] = 1.0;
+                }
+            }
+        }
+        m_impl->d_rhs.upload(h_rhs.data(), rhs_size);
+    }
+
+    // --- 4. cuSOLVER workspace query ---
+    if (N != m_last_N) {
+        int lwork = 0;
+        checkCusolverEEQ(
+            cusolverDnDpotrf_bufferSize(m_impl->cusolver_handle,
+                                         CUBLAS_FILL_MODE_LOWER,
+                                         N, m_impl->d_A.ptr, N, &lwork),
+            "potrf_bufferSize");
+        m_impl->workspace_size = lwork;
+        if (m_impl->d_workspace.n < lwork)
+            m_impl->d_workspace.alloc(lwork);
+        m_last_N = N;
+    }
+
+    // --- 5. Cholesky factorization ---
+    checkCusolverEEQ(
+        cusolverDnDpotrf(m_impl->cusolver_handle,
+                          CUBLAS_FILL_MODE_LOWER,
+                          N, m_impl->d_A.ptr, N,
+                          m_impl->d_workspace.ptr, m_impl->workspace_size,
+                          m_impl->d_info.ptr),
+        "cusolverDnDpotrf");
+
+    checkCudaEEQ(cudaMemcpyAsync(m_impl->h_info, m_impl->d_info.ptr, sizeof(int),
+                                  cudaMemcpyDeviceToHost, m_impl->stream),
+                 "download d_info");
+    checkCudaEEQ(cudaStreamSynchronize(m_impl->stream), "sync after potrf");
+
+    if (*m_impl->h_info != 0) {
+        return false;  // not SPD → caller falls back to CPU
+    }
+
+    // --- 6. Triangular solve (in-place in d_rhs) ---
+    checkCusolverEEQ(
+        cusolverDnDpotrs(m_impl->cusolver_handle,
+                          CUBLAS_FILL_MODE_LOWER,
+                          N, nrhs,
+                          m_impl->d_A.ptr, N,
+                          m_impl->d_rhs.ptr, N,
+                          m_impl->d_info.ptr),
+        "cusolverDnDpotrs");
+
+    // --- 7. Schur complement on GPU (nfrag == 1 fast path) ---
+    if (nfrag == 1) {
+        // Allocate/zero d_sums [2]
+        if (m_impl->d_sums.n < 2)
+            m_impl->d_sums.alloc(2);
+        cudaMemsetAsync(m_impl->d_sums.ptr, 0, 2 * sizeof(double), m_impl->stream);
+
+        // Reduce Cz1 = sum(z1) and S = sum(Z2_col0)
+        int reduce_block = 256;
+        int reduce_grid = (N + reduce_block - 1) / reduce_block;
+        k_eeq_reduce_sums<<<reduce_grid, reduce_block,
+                             2 * reduce_block * sizeof(double), m_impl->stream>>>(
+            N, m_impl->d_rhs.ptr, m_impl->d_sums.ptr);
+
+        // Download 2 scalars
+        double h_sums[2] = {0.0, 0.0};
+        checkCudaEEQ(cudaMemcpyAsync(h_sums, m_impl->d_sums.ptr, 2 * sizeof(double),
+                                      cudaMemcpyDeviceToHost, m_impl->stream),
+                     "download sums");
+        checkCudaEEQ(cudaStreamSynchronize(m_impl->stream), "sync after reduce");
+
+        double Cz1 = h_sums[0];
+        double S   = h_sums[1];
+        double lambda = (Cz1 - rhs_constraints[0]) / S;
+
+        // Compute charges on GPU
+        int block = 256;
+        int grid = (N + block - 1) / block;
+        k_eeq_schur_nfrag1<<<grid, block, 0, m_impl->stream>>>(
+            N, m_impl->d_rhs.ptr, lambda, m_impl->d_rhs.ptr);  // reuse d_rhs as output
+
+        // Download charges only (N doubles)
+        checkCudaEEQ(cudaMemcpyAsync(out_charges, m_impl->d_rhs.ptr,
+                                      N * sizeof(double),
+                                      cudaMemcpyDeviceToHost, m_impl->stream),
+                     "download charges");
+        checkCudaEEQ(cudaStreamSynchronize(m_impl->stream), "sync after schur");
+    } else {
+        // nfrag > 1: not handled by this fast path — caller should use solve() + CPU Schur
+        return false;
     }
 
     return true;
