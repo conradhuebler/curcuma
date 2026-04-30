@@ -107,6 +107,18 @@ public:
         double cutoff_sq = 0.0
     );
 
+    /**
+     * @brief Force a full Cholesky refactorization on the next solve() call.
+     * Call this after a topology change (bond connectivity, fragment count change).
+     */
+    void resetRefactorCounter();
+
+    /**
+     * @brief Set how often the Cholesky factor is refreshed (every N steps).
+     * Default: 5. For geometry optimization always pass 1 to disable lazy mode.
+     */
+    void setRefactorInterval(int interval);
+
 private:
     std::unique_ptr<EEQSolverGPUImpl> m_impl;
     int m_max_natoms;

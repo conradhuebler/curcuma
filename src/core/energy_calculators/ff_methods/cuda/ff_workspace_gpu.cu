@@ -806,7 +806,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
         }
     }
 
-    // Store topology charges for BATM kernel (uploaded to GPU each calculate() call)
+    // Store topology charges for BATM kernel; uploaded once below (static per topology)
     m_topology_charges = params.topology_charges;
 
     // --- Upload static SoA interaction lists ---
@@ -832,6 +832,12 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_impl->d_charges.alloc(natoms);
     m_impl->d_cn.alloc(natoms);
     m_impl->d_topo_charges.alloc(natoms);
+    // G-P1 (Apr 2026): Upload topology charges once at init — they are static per topology.
+    // Removes the per-step blocking cudaMemcpy from prepareAndLaunchChargeIndependent().
+    if (m_topology_charges.size() > 0) {
+        m_impl->d_topo_charges.upload(m_topology_charges.data(),
+                                      static_cast<int>(m_topology_charges.size()), stream);
+    }
     m_impl->d_grad.alloc(N3);
     m_impl->d_dEdcn.alloc(natoms);
     m_impl->d_energy.alloc(1);
@@ -839,16 +845,13 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     // Per-term energy accumulators — single contiguous buffer
     m_impl->d_energies.alloc(FFWorkspaceGPUImpl::N_ENERGY_SLOTS);
 
-    // Diagnostic snapshot buffers (device-to-device copy, no sync stall)
+    // dEdcn snapshot — always needed: dEdcnTotal() is public API (Coulomb chain-rule)
     m_impl->d_dEdcn_snapshot.alloc(natoms);
+    // grad snapshot — kept for CUDA graph gating (need_snapshots check in prepareAndLaunch)
     m_impl->d_grad_snapshot.alloc(N3);
-
-    // Per-kernel gradient snapshots (Claude Generated April 2026)
-    m_impl->d_grad_after_sA.alloc(N3);
-    m_impl->d_grad_after_bonds.alloc(N3);
-    m_impl->d_grad_after_angles.alloc(N3);
-    m_impl->d_grad_after_sB.alloc(N3);
-    m_impl->d_grad_after_sC.alloc(N3);
+    // d_grad_after_* are debug-only snapshots. NOT allocated in normal mode:
+    // keeping them null sets force_single_stream=false → enables 3-stream parallelism.
+    // Allocate here only when gradient debugging is needed (guarded by m_verbosity if re-added).
 
     // --- GPU topology displacement check (Claude Generated March 2026) ---
     m_impl->d_disp_flag.alloc(1);
@@ -1433,7 +1436,7 @@ void FFWorkspaceGPU::uploadRefCN(const std::vector<std::vector<double>>& refcn)
 // + computeGaussianWeightDerivatives() + flatten + sync H2D upload.
 // ============================================================================
 
-void FFWorkspaceGPU::computeGaussianWeightsOnGPU()
+void FFWorkspaceGPU::computeGaussianWeightsOnGPU(bool use_cn_final)
 {
     auto& impl = *m_impl;
     if (!impl.dc6dcn_gpu_ready) return;
@@ -1442,20 +1445,24 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU()
     const int nd = impl.disp.n;
     if (nd == 0) return;
 
-    // Launch k_gaussian_weights: compute gw and dgw from CN values already on GPU
-    // CN source: d_cn (uploaded in prepareAndLaunchChargeIndependent via setD3CN)
+    // Select CN source buffer:
+    //   use_cn_final=true  → d_cn_final (written by computeCN(), current step).
+    //                         Call BEFORE prepareAndLaunchChargeIndependent() so
+    //                         dc6dcn is ready on the main stream before the event_upload
+    //                         fence that sA (dispersion stream) waits on.
+    //   use_cn_final=false → d_cn (updated by D2D copy inside prepareAndLaunchChargeIndependent).
+    //                         Call AFTER prepareAndLaunchChargeIndependent() — legacy path.
+    double* cn_buf = (use_cn_final && impl.d_cn_final.ptr) ? impl.d_cn_final.ptr : impl.d_cn.ptr;
+
     LaunchConfig cfg_gw = getLaunchConfig(N, m_block_size);
-    // refcn and refn read from constant memory d_refcn_const/d_refn_const (Phase 8)
     k_gaussian_weights<<<cfg_gw.gridSize, cfg_gw.blockSize, 0, impl.stream>>>(
         N,
-        impl.d_cn.ptr,
+        cn_buf,
         impl.d_atom_types.ptr,
         impl.d_gw.ptr,
         impl.d_dgw.ptr);
 
-    // Launch k_dc6dcn_per_pair immediately on same stream (gw/dgw ready by ordering)
     LaunchConfig cfg_dc6 = getLaunchConfig(nd, m_block_size);
-    // refn read from constant memory d_refn_const (Phase 8)
     k_dc6dcn_per_pair<<<cfg_dc6.gridSize, cfg_dc6.blockSize, 0, impl.stream>>>(
         nd,
         impl.disp.idx_i.ptr,
@@ -1466,9 +1473,8 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU()
         impl.d_c6_flat.ptr,
         impl.disp.dc6dcn_ij.ptr,
         impl.disp.dc6dcn_ji.ptr);
-
-    // No sync needed: same stream ordering guarantees dc6dcn is ready
-    // before k_dispersion in launchChargeDependentAndFinish()
+    // No explicit sync: stream ordering + event_upload fence in prepareAndLaunchChargeIndependent
+    // guarantees dc6dcn is ready before k_dispersion on sA.
 }
 
 // ============================================================================
@@ -1522,14 +1528,18 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                     FFWorkspaceGPUImpl::N_ENERGY_SLOTS * sizeof(double), stream);
 
     // =========================================================================
-    // 2. Upload CN and topology charges (NOT EEQ charges — those come later)
+    // 2. Upload CN (NOT EEQ charges — those come later)
     //    Geometry was already uploaded by setGeometry() before this call.
+    //    Topology charges (d_topo_charges) uploaded once at setParameter() — static per topology.
     // =========================================================================
-    if (m_cn.size() == N) {
-        impl.d_cn.upload(m_cn.data(), N, stream);
-    }
-    if (m_topology_charges.size() == N) {
-        impl.d_topo_charges.upload(m_topology_charges.data(), N, stream);
+    // G-P1 (Apr 2026): Use GPU-side D2D copy d_cn_final → d_cn instead of CPU round-trip.
+    // d_cn_final was written by k_cn_compute on the same (main) stream, so it is ready here.
+    // D2D copy is async on main stream; event_upload recorded below makes worker streams wait.
+    if (impl.d_cn_final.ptr && impl.d_cn.ptr && impl.d_cn_final.n >= N) {
+        cudaMemcpyAsync(impl.d_cn.ptr, impl.d_cn_final.ptr,
+                        N * sizeof(double), cudaMemcpyDeviceToDevice, stream);
+    } else if (static_cast<int>(m_cn.size()) == N) {
+        impl.d_cn.upload(m_cn.data(), N, stream);  // fallback (before first CN compute)
     }
 
     // =========================================================================
@@ -1553,11 +1563,10 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
 
     // --- Stream A: Charge-independent pairwise terms (dispersion, repulsion) ---
-    // NOTE: When gradient=true, k_dispersion is DEFERRED to launchChargeDependentAndFinish()
-    // because the dEdcn accumulation needs dc6dcn values which come from computeDC6DCNOnGPU()
-    // (called after EEQ completes). Energy-only dispersion runs here for full overlap.
+    // k_dispersion: energy mode only. Gradient mode is deferred to Phase 2
+    // (computeGaussianWeightsOnGPU runs after Phase 1 on d_cn; dc6dcn is only
+    // ready on stream_pairwise after the Phase-2 event_upload fence).
     if (m_dispersion_enabled && !gradient) {
-        // Phase 8: n > 0 guard removed — n=0 produces a 1-block no-op (graph-capture safe)
         LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
             impl.disp.n,
@@ -1565,7 +1574,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
             impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
             impl.disp.r_cut.ptr,
-            nullptr,   // no dc6dcn for energy-only
+            nullptr,  // dc6dcn: energy-only, no gradient contribution
             nullptr,
             impl.coords.d_x.ptr,
             impl.coords.d_y.ptr,
@@ -1918,9 +1927,11 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     cudaEventRecord(impl.event_upload, stream);
     cudaStreamWaitEvent(impl.stream_pairwise, impl.event_upload, 0);
 
-    // k_dispersion deferred from charge-independent phase when gradient=true
-    // (needs dc6dcn from computeDC6DCNOnGPU which ran after EEQ)
-    if (m_dispersion_enabled && impl.disp.n > 0 && gradient) {
+    // k_dispersion (gradient mode): deferred from Phase 1.
+    // computeGaussianWeightsOnGPU() was called after Phase 1 (using d_cn, current step)
+    // and runs on the main stream. The event_upload fence above ensures stream_pairwise
+    // sees the completed dc6dcn values before k_dispersion launches.
+    if (m_dispersion_enabled && gradient) {
         LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
             impl.disp.n,
@@ -1964,7 +1975,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     //   k_cn_chainrule   — needs d_dEdcn complete from ALL streams → wait for all 3
     // =========================================================================
 
-    const bool need_snapshots = true; // TODO: Restore to (m_verbosity >= 3) after GPU gradient debugging complete
+    const bool need_snapshots = (m_verbosity >= 3);
     if (m_coulomb_enabled && impl.coul_self_on_gpu) {
         // Wait for pairwise+bonded streams (dEdcn dependency for qtmp subtraction)
         cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
@@ -2368,7 +2379,20 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
                     cudaMemcpyDeviceToHost, impl.stream);
     cudaMemcpyAsync(m_h_dlogdcn, impl.d_dlogdcn.ptr, N * sizeof(double),
                     cudaMemcpyDeviceToHost, impl.stream);
-    cudaStreamSynchronize(impl.stream);
+    // G-P1 (Apr 2026): Sync deferred — caller calls finalizeCNForCPU() after Phase 4 launch.
+    // GPU finishes CN kernel in ~0.15ms; by the time finalizeCNForCPU() is reached (~0.3ms
+    // later after Phase 4 launch overhead), the stream is already complete → no sleep penalty.
+    m_cn_computed = false;
+}
+
+// G-P1 (Apr 2026): Finalize deferred CN download — sync main stream, copy to caller's buffer.
+// Must be called after Phase 4 launch so the GPU CN kernel completes during launch overhead.
+void FFWorkspaceGPU::finalizeCNForCPU(Vector& out_cn)
+{
+    const int N = m_natoms;
+    cudaStreamSynchronize(m_impl->stream);   // returns near-instantly if GPU already done
+    if (out_cn.size() != N) out_cn.resize(N);
+    std::memcpy(out_cn.data(), m_h_cn_final, N * sizeof(double));
     m_cn_computed = true;
 }
 

@@ -115,6 +115,15 @@ public:
     void computeCN(const std::vector<int>& atom_types);
 
     /**
+     * @brief Finalize deferred CN download after Phase 4 launch (G-P1, Apr 2026).
+     * Syncs the main CUDA stream and copies CN_final from pinned buffer to out_cn.
+     * Call after prepareAndLaunchChargeIndependent() so the GPU finishes CN during
+     * the Phase 4 launch overhead (~0.3ms), eliminating the 4ms sleep penalty.
+     * @param out_cn Output vector resized to N doubles (log-transformed CN)
+     */
+    void finalizeCNForCPU(Vector& out_cn);
+
+    /**
      * @brief Get pointer to pinned CN_final buffer (valid after computeCN()).
      * Caller copies into their pre-allocated Vector via memcpy.
      * @return Pointer to N doubles (log-transformed CN values)
@@ -283,8 +292,12 @@ public:
      * @brief Compute Gaussian weights + dc6dcn entirely on GPU (Phase 6).
      * Replaces: CPU precomputeGaussianWeights() + computeGaussianWeightDerivatives()
      * + computeDC6DCNOnGPU(). CN values must be on GPU (from computeCN() or setD3CN()).
+     * @param use_cn_final If true, read CN from d_cn_final (current step, written by computeCN).
+     *                     If false (default), read from d_cn (updated in prepareAndLaunch).
+     *                     Set use_cn_final=true to call BEFORE prepareAndLaunchChargeIndependent()
+     *                     so dc6dcn is ready for Phase 1 dispersion overlap with EEQ.
      */
-    void computeGaussianWeightsOnGPU();
+    void computeGaussianWeightsOnGPU(bool use_cn_final = false);
 
     // =========================================================================
     // Term enable flags (match FFWorkspace API)

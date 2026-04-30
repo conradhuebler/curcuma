@@ -35,6 +35,7 @@ __device__ __forceinline__ void add_grad(double* __restrict__ grad, int atom,
     atomicAdd(&grad[3*atom+2], fz);
 }
 
+
 // ============================================================================
 // Warp-level reduction helper (Phase 6: Warp shuffle optimization)
 // Claude Generated (March 2026)
@@ -206,10 +207,10 @@ __global__ void k_dispersion(
             double d8   = -8.0 * r4 * r2 * t8 * t8;
             double dEdr = -C6[tid] * zetac6[tid] * (d6 + 2.0 * r4r2ij[tid] * d8) * rij;
             double fac  = dEdr / rij;
+
             add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
 
-            // dEdcn chain-rule: dc6/dcn contribution for CN gradient
             if (dc6dcn_ij && dEdcn) {
                 double disp_value = disp_sum * zetac6[tid];
                 atomicAdd(&dEdcn[i], -dc6dcn_ij[tid] * disp_value);
@@ -254,11 +255,11 @@ __global__ void k_repulsion(
         double rij = sqrt(r2);
 
         if (rij <= r_cut[tid] && rij >= 1e-8) {
-            double r1_5      = rij * sqrt(rij);
-            double alp_r     = alpha[tid] * r1_5;
+            double r1_5  = rij * sqrt(rij);
+            double alp_r = alpha[tid] * r1_5;
             if (!isnan(alp_r) && !isnan(repab[tid]) && alp_r <= 700.0) {
-                double exp_term  = exp(-alp_r);
-                double base_E    = repab[tid] * exp_term / rij;
+                double exp_term = exp(-alp_r);
+                double base_E   = repab[tid] * exp_term / rij;
                 local_E = base_E;
 
                 double dEdr = -base_E / rij - 1.5 * alpha[tid] * sqrt(rij) * base_E;
@@ -314,8 +315,8 @@ __global__ GFNFF_KERNEL_BOUNDS void k_repulsion_mixed(
 
                 float dEdr = -base_E / rij - 1.5f * alp_f * sqrtf(rij) * base_E;
                 float fac  = dEdr / rij;
-                add_grad(grad, i,  (double)( fac*dx), (double)( fac*dy), (double)( fac*dz));
-                add_grad(grad, j,  (double)(-fac*dx), (double)(-fac*dy), (double)(-fac*dz));
+                add_grad(grad, i,  (double)( fac*dx),  (double)( fac*dy),  (double)( fac*dz));
+                add_grad(grad, j, (double)(-fac*dx), (double)(-fac*dy), (double)(-fac*dz));
             }
         }
     }
@@ -363,7 +364,6 @@ __global__ void k_coulomb(
                 double erf_v   = erf(gamma_r);
                 local_E = qi * qj * erf_v / rij;
 
-                // Gradient
                 static const double inv_sqrt_pi = 0.5641895835477563;
                 double exp_v  = exp(-gamma_r * gamma_r);
                 double derf   = gamma_ij[tid] * exp_v * (2.0 * inv_sqrt_pi);

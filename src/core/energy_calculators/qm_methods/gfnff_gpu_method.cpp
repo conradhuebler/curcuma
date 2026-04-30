@@ -202,6 +202,11 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
         // Claude Generated (March 2026): GPU EEQ solver (cuSOLVER Cholesky)
         // EEQ staging buffers pre-allocated above (before CUDA init). Create solver here.
         m_eeq_gpu = std::make_unique<EEQSolverGPU>(natoms);
+        // eeq_refactor_interval: 0=always refactorize (default, matches reference);
+        // >0=lazy — reuse Cholesky factor every N steps (MD speedup, ~12ms/step saved).
+        // Use only if reference accuracy not required (introduces O(δ) charge error).
+        if (gfnff_cfg.contains("eeq_refactor_interval"))
+            m_eeq_gpu->setRefactorInterval(gfnff_cfg.value("eeq_refactor_interval", 0));
 
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::success(fmt::format(
@@ -273,57 +278,26 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         }
     }
 
-    // --- Step 1: GPU CN computation ---
+    // --- Step 1: GPU CN computation (G-P1: truly async, no sync here) ---
+    // k_cn_compute + k_dlogdcn + 3 async D2H launches on main stream.
+    // d_cn_final / d_dlogdcn are already on GPU and correct after this call.
+    // finalizeCNForCPU() is called after Phase 4 launch to sync without sleeping.
     auto t_cn_start = std::chrono::high_resolution_clock::now();
     m_gpu_workspace->computeCN(m_atom_types);
-
-    // Copy CN from pinned buffers into pre-allocated Vectors (no heap allocs)
-    std::memcpy(m_gpu_cn_final.data(), m_gpu_workspace->getCNPinnedBuffer(), N * sizeof(double));
-
-    // Pass GPU CN to prepareCNAndEEQ — but DON'T call EEQ yet, first launch GPU kernels
-    // prepareCNAndEEQ does: Gaussian weights, EEQ solve, weight derivatives, dc6dcn
-    // We need CN uploaded to GPU before launching charge-independent kernels.
-    m_gpu_workspace->setD3CN(m_gpu_cn_final);
+    // G-P1: removed immediate sync + memcpy + setD3CN here.
+    // d_cn_final → d_cn D2D copy happens inside prepareAndLaunchChargeIndependent().
+    // setD3CN() no longer needed: d_cn is populated GPU-side from d_cn_final.
     auto t_cn_end = std::chrono::high_resolution_clock::now();
 
-    // CN consistency check: GPU vs CPU recompute (verbosity >= 3)
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        std::vector<double> cn_cpu_vec = CNCalculator::calculateGFNFFCN(m_atom_types, geom_bohr);
-        Vector cn_cpu = Eigen::Map<Vector>(cn_cpu_vec.data(), N);
-        double max_diff = 0.0;
-        int worst_atom = -1;
-        for (int i = 0; i < N; ++i) {
-            double diff = std::abs(m_gpu_cn_final[i] - cn_cpu[i]);
-            if (diff > max_diff) {
-                max_diff = diff;
-                worst_atom = i;
-            }
-        }
-        CurcumaLogger::info(fmt::format(
-            "  CN check: max_diff={:.2e} at atom {}, GPU_CN={:.6f} CPU_CN={:.6f}",
-            max_diff, worst_atom, m_gpu_cn_final[worst_atom], cn_cpu[worst_atom]));
-        if (max_diff > 1e-6) {
-            for (int i = 0; i < N; ++i) {
-                fmt::print("    CN[{:3d}] Z={:2d}: GPU={:.8f} CPU={:.8f} diff={:.2e}\n",
-                           i, m_atom_types[i], m_gpu_cn_final[i], cn_cpu[i],
-                           m_gpu_cn_final[i] - cn_cpu[i]);
-            }
-        }
-    }
-
-    // --- Step 2a: Set up gradient state (CN pairs, dlogdcn, dc6dcn) ---
-    // These must happen before launching charge-independent kernels because
-    // k_dispersion needs dc6dcn and k_bonds needs d_cn.
+    // --- Step 2a: Set up gradient state (CN pairs) ---
+    // G-P1: dlogdcn is already on GPU from k_dlogdcn; setDlogDCN() removed (redundant).
+    // d_dlogdcn is used directly by k_cn_chainrule via the main stream ordering.
     if (gradient) {
         if (!m_cn_pairs_generated) {
             m_gpu_workspace->generateCNPairListOnGPU();
         }
-
-        // Claude Generated (Apr 2026): dlogdcn is computed on GPU by k_dlogdcn kernel
-        // inside computeCN(). Download from pinned buffer instead of CPU loop.
-        Vector dlogdcn(N);
-        std::memcpy(dlogdcn.data(), m_gpu_workspace->getDlogdcnPinnedBuffer(), N * sizeof(double));
-        m_gpu_workspace->setDlogDCN(dlogdcn);
+        // G-P1: removed: memcpy dlogdcn from pinned + setDlogDCN()
+        // k_dlogdcn already wrote d_dlogdcn on main stream before prepareAndLaunch.
     }
     auto t_dlogdcn_end = std::chrono::high_resolution_clock::now();
 
@@ -414,8 +388,23 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
 
     // === OVERLAP: Launch charge-independent GPU kernels ===
     // These run asynchronously while CPU computes EEQ parameters below.
+    // k_dispersion in gradient mode is deferred to Phase 2 (needs dc6dcn from
+    // computeGaussianWeightsOnGPU, which runs AFTER Phase 1 on d_cn — current step).
+    // G-P1: d_cn_final → d_cn D2D copy is enqueued inside prepareAndLaunchChargeIndependent().
     m_gpu_workspace->prepareAndLaunchChargeIndependent(gradient);
+
+    // Gaussian weights + dc6dcn: must run AFTER Phase 1 so d_cn holds the current step's
+    // values (Phase 1 D2D-copies d_cn_final → d_cn on main stream before sA fences).
+    // Using d_cn guarantees consistency with the dispersion kernel launched in Phase 2.
+    if (gradient) {
+        m_gpu_workspace->computeGaussianWeightsOnGPU(/*use_cn_final=*/false);
+    }
     auto t_launch_end = std::chrono::high_resolution_clock::now();
+
+    // G-P1 (Apr 2026): Finalize CN download — sync main stream here, not inside computeCN().
+    // GPU finished CN kernel at ~0.15ms; we are now ~0.3ms past the launch → stream already
+    // complete → cudaStreamSynchronize returns without sleeping (< 0.1ms overhead).
+    m_gpu_workspace->finalizeCNForCPU(m_gpu_cn_final);
 
     // === CPU: CN distribution + EEQ parameter extraction (skip CPU EEQ solve) ===
     // prepareCNAndEEQ with skip_eeq=true: does CN, CNF, dcn setup but NO matrix build/solve.
@@ -429,25 +418,21 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         m_gpu_workspace->updateReferenceGeometry();
         // Phase 8: all SoAs rebuilt after topology change → captured graph is stale
         m_gpu_workspace->invalidateGraph();
+        // EEQ matrix depends on atom positions; after topology rebuild (bond distances
+        // changed significantly) the old Cholesky factor may be stale — force refactor.
+        if (m_eeq_gpu)
+            m_eeq_gpu->resetRefactorCounter();
     }
 
     const Vector& cn = m_gfnff->getLastCN();
 
-    // Upload CN derivatives and compute dc6dcn for dispersion gradient
+    // Upload CN derivatives (CNF for Coulomb chain-rule)
     if (gradient) {
         const Vector& cnf = m_gfnff->getLastCNF();
         m_gpu_workspace->setCNDerivatives(cn, cnf, {});
 
-        // P1a: Skip GPU Gaussian weights + dc6dcn if CN change < threshold
-        // CN is available from prepareCNAndEEQ() which just ran on CPU
+        // DC6DCN computed on GPU after Phase 1 (using d_cn, current step). Record CN for skip-check.
         std::vector<double> cn_std(cn.data(), cn.data() + cn.size());
-        if (!m_gfnff->canSkipD4GaussianWeightsUpdate(cn_std)) {
-            // Phase 6: Gaussian weights + dc6dcn computed entirely on GPU
-            // (k_gaussian_weights + k_dc6dcn_per_pair, no CPU gw/dgw needed)
-            m_gpu_workspace->computeGaussianWeightsOnGPU();
-        }
-
-        // Update D4 CN tracking (even if we skipped GPU computation)
         m_gfnff->recordD4CNValues(cn_std);
     }
 
@@ -485,7 +470,10 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
             // Distance cutoff for GPU matrix conditioning
             double cutoff_sq = 0.0;
 
-            m_gpu_workspace->synchronizeMainStream();
+            // G-P1 (Apr 2026): removed synchronizeMainStream() here.
+            // Coordinates are already on the GPU (synchronous upload in setGeometry()).
+            // k_eeq_build_matrix runs on the dedicated EEQ stream — in parallel with
+            // Phase 4 charge-independent kernels on the main stream.
             bool eeq_ok = m_eeq_gpu->solve(
                 N, eeq_params.nfrag,
                 m_gpu_workspace->getDeviceXPtr(),
