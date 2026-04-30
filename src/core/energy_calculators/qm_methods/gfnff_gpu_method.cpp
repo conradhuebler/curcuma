@@ -35,9 +35,14 @@ GFNFFGPUComputationalMethod::GFNFFGPUComputationalMethod(const std::string& meth
     , m_method_name(method_name)
 {
     // Claude Generated (April 2026): Read accuracy-related flags for GPU fallback behavior
+    // config.value("gfnff", config) falls back to config itself so top-level CLI params work.
     json gfnff_cfg = config.value("gfnff", config);
     m_allow_unconverged_charges = gfnff_cfg.value("allow_unconverged_charges", false);
     m_skip_phase2 = gfnff_cfg.value("skip_phase2", false);
+    // eeq_rmsd_threshold: per-atom RMSD (Bohr) below which the Cholesky factor is reused.
+    // 0.0 (default) = always refactorize, matches reference CPU behavior exactly.
+    // Suggested MD value: 0.05–0.10 Bohr (saves ~12 ms/step when geometry barely changes).
+    m_eeq_rmsd_threshold = gfnff_cfg.value("eeq_rmsd_threshold", 0.0);
 
     m_gfnff = std::make_unique<GFNFF>(config);
 }
@@ -201,12 +206,8 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
 
         // Claude Generated (March 2026): GPU EEQ solver (cuSOLVER Cholesky)
         // EEQ staging buffers pre-allocated above (before CUDA init). Create solver here.
+        // Lazy refactorization is RMSD-based: force_refactor flag passed per solve() call.
         m_eeq_gpu = std::make_unique<EEQSolverGPU>(natoms);
-        // eeq_refactor_interval: 0=always refactorize (default, matches reference);
-        // >0=lazy — reuse Cholesky factor every N steps (MD speedup, ~12ms/step saved).
-        // Use only if reference accuracy not required (introduces O(δ) charge error).
-        if (gfnff_cfg.contains("eeq_refactor_interval"))
-            m_eeq_gpu->setRefactorInterval(gfnff_cfg.value("eeq_refactor_interval", 0));
 
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::success(fmt::format(
@@ -418,10 +419,9 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         m_gpu_workspace->updateReferenceGeometry();
         // Phase 8: all SoAs rebuilt after topology change → captured graph is stale
         m_gpu_workspace->invalidateGraph();
-        // EEQ matrix depends on atom positions; after topology rebuild (bond distances
-        // changed significantly) the old Cholesky factor may be stale — force refactor.
-        if (m_eeq_gpu)
-            m_eeq_gpu->resetRefactorCounter();
+        // Topology rebuild means large geometry change → reset EEQ reference geometry
+        // so the next step always gets a fresh Cholesky factorization.
+        m_eeq_has_ref_geom = false;
     }
 
     const Vector& cn = m_gfnff->getLastCN();
@@ -467,13 +467,27 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
 
         bool used_gpu_eeq = false;
         if (gpu_eeq_applicable) {
+            // RMSD-based EEQ lazy refactorization:
+            // Compute per-atom RMSD (Bohr) from geometry at last full Cholesky build.
+            // If RMSD < threshold: reuse cached L (dpotrs only, saves ~12 ms/step).
+            // If RMSD >= threshold or threshold==0: full refactorization.
+            const Matrix& cur_geom = m_gfnff->getGeometryBohr();
+            bool force_refactor = true;
+            if (m_eeq_rmsd_threshold > 0.0 && m_eeq_has_ref_geom
+                    && m_eeq_ref_geom.rows() == cur_geom.rows()) {
+                double rmsd_sq = 0.0;
+                for (int i = 0; i < N; ++i) {
+                    double dx = cur_geom(i,0) - m_eeq_ref_geom(i,0);
+                    double dy = cur_geom(i,1) - m_eeq_ref_geom(i,1);
+                    double dz = cur_geom(i,2) - m_eeq_ref_geom(i,2);
+                    rmsd_sq += dx*dx + dy*dy + dz*dz;
+                }
+                force_refactor = (std::sqrt(rmsd_sq / N) >= m_eeq_rmsd_threshold);
+            }
+
             // Distance cutoff for GPU matrix conditioning
             double cutoff_sq = 0.0;
 
-            // G-P1 (Apr 2026): removed synchronizeMainStream() here.
-            // Coordinates are already on the GPU (synchronous upload in setGeometry()).
-            // k_eeq_build_matrix runs on the dedicated EEQ stream — in parallel with
-            // Phase 4 charge-independent kernels on the main stream.
             bool eeq_ok = m_eeq_gpu->solve(
                 N, eeq_params.nfrag,
                 m_gpu_workspace->getDeviceXPtr(),
@@ -486,7 +500,13 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                 eeq_params.rhs_constraints.data(),
                 m_eeq_z1.data(),
                 m_eeq_Z2.data(),
-                cutoff_sq);
+                cutoff_sq,
+                force_refactor);
+            // On successful refactorization: cache reference geometry for next RMSD check.
+            if (eeq_ok && force_refactor) {
+                m_eeq_ref_geom = cur_geom;
+                m_eeq_has_ref_geom = true;
+            }
 
             if (eeq_ok) {
                 // CPU Schur complement: q = z1 - Z2 * λ  (nfrag=1 → scalar)

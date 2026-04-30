@@ -58,6 +58,12 @@ public:
      * @param out_Z2           Host [N*nfrag] output: A⁻¹ · C^T columns (column-major)
      * @return true on success, false if Cholesky fails (not SPD → caller falls back to CPU)
      */
+    /**
+     * @param force_refactor   If true: always rebuild matrix + dpotrf (full solve).
+     *                         If false: reuse cached Cholesky factor L (lazy solve).
+     *                         Caller decides based on geometry RMSD from last refactorization.
+     *                         Default: true (always refactorize = matches reference).
+     */
     bool solve(
         int natoms, int nfrag,
         const double* cx, const double* cy, const double* cz,
@@ -68,33 +74,11 @@ public:
         const double* rhs_constraints,
         double* out_z1,
         double* out_Z2,
-        double cutoff_sq = 0.0
+        double cutoff_sq = 0.0,
+        bool force_refactor = true
     );
 
-    /**
-     * @brief Build + solve + compute charges on GPU, avoiding large D2H transfers.
-     *
-     * ⚠️ NOT USED in production — measured ~4 s slowdown vs solve() + CPU Schur.
-     * The extra kernel launches (reduce + schur) + additional sync points outweigh
-     * the benefit of downloading 2N fewer doubles. Kept for reference.
-     *
-     * For nfrag == 1 (common case): after potrs, runs GPU reduction kernels to
-     * compute the Schur complement directly on-device.
-     *
-     * For nfrag > 1: falls back to solve() + CPU Schur complement.
-     *
-     * @param natoms           Number of atoms N
-     * @param nfrag            Number of fragments
-     * @param cx, cy, cz       GPU SoA coordinate pointers
-     * @param alpha_corrected  Host [N] alpha² values
-     * @param gam_corrected    Host [N] hardness values
-     * @param fraglist         Host [N] fragment IDs (1-indexed)
-     * @param rhs_atoms        Host [N] atom electronegativity RHS
-     * @param rhs_constraints  Host [nfrag] target fragment charges
-     * @param out_charges      Host [N] output: EEQ charges
-     * @param cutoff_sq        Distance cutoff for matrix sparsity (0 = none)
-     * @return true on success, false if Cholesky fails
-     */
+    /// ⚠️ NOT USED in production (kept for reference). ~4 s slower than solve() + CPU Schur.
     bool solveAndComputeCharges(
         int natoms, int nfrag,
         const double* cx, const double* cy, const double* cz,
@@ -106,18 +90,6 @@ public:
         double* out_charges,
         double cutoff_sq = 0.0
     );
-
-    /**
-     * @brief Force a full Cholesky refactorization on the next solve() call.
-     * Call this after a topology change (bond connectivity, fragment count change).
-     */
-    void resetRefactorCounter();
-
-    /**
-     * @brief Set how often the Cholesky factor is refreshed (every N steps).
-     * Default: 5. For geometry optimization always pass 1 to disable lazy mode.
-     */
-    void setRefactorInterval(int interval);
 
 private:
     std::unique_ptr<EEQSolverGPUImpl> m_impl;

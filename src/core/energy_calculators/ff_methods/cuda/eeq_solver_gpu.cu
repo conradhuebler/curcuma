@@ -64,16 +64,10 @@ struct EEQSolverGPUImpl {
 
     int workspace_size = 0;
 
-    // Lazy Cholesky refactorization state (Apr 2026)
-    // d_A holds the cached Cholesky factor L between refactorization steps.
-    // On non-refactor steps we skip matrix build + dpotrf and reuse L,
-    // updating only the RHS (CN-dependent χ values). This saves ~12 ms/step.
-    //
-    // m_refactor_interval == 0  → always refactorize (default, matches reference)
-    // m_refactor_interval >  0  → lazy: refactorize every N steps (MD speedup)
+    // Lazy Cholesky state: d_A holds the cached factor L after refactorization.
+    // force_refactor flag (passed per solve() call) decides whether to rebuild.
+    // Caller (GFNFFGPUComputationalMethod) decides based on geometry RMSD.
     bool m_has_cached_factor = false;
-    int  m_steps_since_refactor = 0;
-    int  m_refactor_interval = 0;     ///< 0=always refactorize; >0=lazy interval
 
     // Cached host RHS buffer to avoid per-step heap allocation
     std::vector<double> m_h_rhs_cache;
@@ -204,23 +198,17 @@ bool EEQSolverGPU::solve(
     const double* rhs_constraints,
     double* out_z1,
     double* out_Z2,
-    double cutoff_sq)
+    double cutoff_sq,
+    bool force_refactor)
 {
     const int N = natoms;
     const int nrhs = nfrag + 1;  // b_atoms + nfrag constraint columns
 
-    // --- Lazy Cholesky refactorization (Apr 2026) ---
-    // For MD, atomic positions change by ~0.01 Bohr/step. The EEQ matrix
-    // changes by O(δ/r²) ≈ 0.1% per step. Reusing the cached Cholesky factor
-    // L for several steps introduces only O(δ) charge error and O(δ²) energy
-    // error — negligible for MD. This saves ~12 ms/step vs full refactorization.
-    //
-    // On refactor steps: rebuild matrix + dpotrf → cache L in d_A
-    // On non-refactor steps: skip matrix build + dpotrf, just update RHS + dpotrs
-    const bool do_refactor = !m_impl->m_has_cached_factor
-                          || (N != m_last_N)
-                          || (m_impl->m_refactor_interval == 0)   // 0 = always (default, matches reference)
-                          || (m_impl->m_steps_since_refactor >= m_impl->m_refactor_interval);
+    // Refactorize if: first call, N changed, or caller says geometry moved enough.
+    // Caller (GFNFFGPUComputationalMethod) tracks RMSD from last refactorization.
+    const bool do_refactor = force_refactor
+                          || !m_impl->m_has_cached_factor
+                          || (N != m_last_N);
 
     if (do_refactor) {
         // --- 1. Upload alpha, gam to device ---
@@ -272,11 +260,8 @@ bool EEQSolverGPU::solve(
         }
 
         m_impl->m_has_cached_factor = true;
-        m_impl->m_steps_since_refactor = 0;
     } else {
         // Non-refactor step: reuse cached L from d_A, skip matrix build + dpotrf
-        m_impl->m_steps_since_refactor++;
-        // d_A still holds the Cholesky factor L from the last refactorization
     }
 
     // --- 6. Build RHS matrix on CPU and upload (always fresh — captures CN-dependent χ) ---
@@ -339,17 +324,6 @@ bool EEQSolverGPU::solve(
     return true;
 }
 
-void EEQSolverGPU::resetRefactorCounter()
-{
-    m_impl->m_has_cached_factor = false;
-    m_impl->m_steps_since_refactor = 0;
-}
-
-void EEQSolverGPU::setRefactorInterval(int interval)
-{
-    // 0 = always refactorize (matches reference); >0 = lazy interval (MD speedup)
-    m_impl->m_refactor_interval = (interval < 0) ? 0 : interval;
-}
 
 // ============================================================================
 // solveAndComputeCharges — GPU Schur complement for nfrag == 1

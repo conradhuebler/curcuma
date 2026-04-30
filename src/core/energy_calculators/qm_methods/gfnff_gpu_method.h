@@ -137,6 +137,14 @@ private:
     // GPU CN result (always used — GPU CN is the default path)
     Vector              m_gpu_cn_final;        ///< Cached GPU CN result
 
+    // RMSD-based EEQ lazy refactorization (Apr 2026)
+    // Caller tracks geometry RMSD from last full Cholesky refactorization.
+    // m_eeq_rmsd_threshold == 0.0 → always refactorize (default, matches reference).
+    // m_eeq_rmsd_threshold >  0.0 → lazy: reuse L when per-atom RMSD < threshold (Bohr).
+    double m_eeq_rmsd_threshold = 0.0;  ///< Bohr; from eeq_rmsd_threshold param
+    Matrix m_eeq_ref_geom;              ///< geometry (Bohr) at last EEQ refactorization
+    bool   m_eeq_has_ref_geom = false;
+
     /**
      * @brief Generate CN pair list from geometry and covalent radii.
      * Called once after initGPUWorkspace(). Pairs with rcov_sum < 2*max contribution.
