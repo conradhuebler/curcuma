@@ -694,6 +694,21 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_grad_after_sB;      ///< [3*N] snapshot after all stream B kernels
     CudaBuffer<double> d_grad_after_sC;      ///< [3*N] snapshot after stream C (3-body)
 
+    // WP2: topology-constant EEQ parameters on GPU (Claude Generated May 2026)
+    // Uploaded once per topology build; per-step k_build_eeq_rhs reads d_chi_corrected
+    // and d_cnf to construct d_rhs_atoms from d_cn_final without CPU involvement.
+    struct EEQTopologyBuffers {
+        CudaBuffer<double> d_alpha_corrected; ///< [N] charge-corrected alpha²
+        CudaBuffer<double> d_gam_corrected;   ///< [N] gam + dgam
+        CudaBuffer<double> d_chi_corrected;   ///< [N] -chi + dxi + amide_corr (no CN term)
+        CudaBuffer<double> d_cnf;             ///< [N] cnf_eeq per atom
+        CudaBuffer<double> d_rhs_atoms;       ///< [N] output of k_build_eeq_rhs (per-step)
+        CudaBuffer<double> d_rhs_constraints; ///< [nfrag] fragment target charges
+        int  nfrag = 1;
+        bool valid = false;
+    };
+    EEQTopologyBuffers eeq_topo;
+
     int N = 0;
     cudaStream_t stream = nullptr;
 
@@ -1545,6 +1560,20 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                         N * sizeof(double), cudaMemcpyDeviceToDevice, stream);
     } else if (static_cast<int>(m_cn.size()) == N) {
         impl.d_cn.upload(m_cn.data(), N, stream);  // fallback (before first CN compute)
+    }
+
+    // WP2: Build EEQ RHS on GPU — rhs[i] = chi_corr[i] + cnf[i]*sqrt(max(cn[i],0))
+    // Runs on main stream directly after d_cn_final is available; no CPU sync needed.
+    // finalizeCNForCPU() (called later) syncs main stream, so d_rhs_atoms is ready
+    // before solveWithDeviceRHS() starts its D2D copy.
+    if (impl.eeq_topo.valid && impl.d_cn_final.ptr) {
+        LaunchConfig cfg = getLaunchConfig(N, m_block_size);
+        k_build_eeq_rhs<<<cfg.gridSize, cfg.blockSize, 0, stream>>>(
+            N,
+            impl.d_cn_final.ptr,
+            impl.eeq_topo.d_chi_corrected.ptr,
+            impl.eeq_topo.d_cnf.ptr,
+            impl.eeq_topo.d_rhs_atoms.ptr);
     }
 
     // =========================================================================
@@ -2460,6 +2489,60 @@ void FFWorkspaceGPU::synchronizeMainStream()
 {
     if (m_impl && m_impl->stream)
         checkCuda(cudaStreamSynchronize(m_impl->stream), "synchronizeMainStream");
+}
+
+// ---------------------------------------------------------------------------
+// WP2: uploadEEQTopologyParams + device pointer getters
+// Claude Generated (May 2026): Upload topology-constant EEQ parameters once
+// per topology build so k_build_eeq_rhs can construct rhs_atoms on GPU.
+// ---------------------------------------------------------------------------
+
+void FFWorkspaceGPU::uploadEEQTopologyParams(const GFNFF::EEQGPUParams& params)
+{
+    if (!m_impl) return;
+    auto& et = m_impl->eeq_topo;
+    const int N = m_natoms;
+
+    et.d_alpha_corrected.upload(params.alpha_corrected.data(), N);
+    et.d_gam_corrected.upload(params.gam_corrected.data(), N);
+    et.d_chi_corrected.upload(params.chi_corrected_static.data(), N);
+    et.d_cnf.upload(params.cnf.data(), N);
+
+    const int nfrag = params.nfrag;
+    if (nfrag > 0)
+        et.d_rhs_constraints.upload(params.rhs_constraints.data(), nfrag);
+    et.nfrag = nfrag;
+
+    // Allocate output buffer for k_build_eeq_rhs (written per-step, not uploaded here)
+    if (et.d_rhs_atoms.n < N)
+        et.d_rhs_atoms.alloc(N);
+
+    et.valid = true;
+}
+
+bool FFWorkspaceGPU::isEEQTopoValid() const
+{
+    return m_impl && m_impl->eeq_topo.valid;
+}
+
+const double* FFWorkspaceGPU::getDeviceRHSPtr() const
+{
+    return (m_impl && m_impl->eeq_topo.valid) ? m_impl->eeq_topo.d_rhs_atoms.ptr : nullptr;
+}
+
+const double* FFWorkspaceGPU::getDeviceRHSConstraintsPtr() const
+{
+    return (m_impl && m_impl->eeq_topo.valid) ? m_impl->eeq_topo.d_rhs_constraints.ptr : nullptr;
+}
+
+const double* FFWorkspaceGPU::getDeviceAlphaPtr() const
+{
+    return (m_impl && m_impl->eeq_topo.valid) ? m_impl->eeq_topo.d_alpha_corrected.ptr : nullptr;
+}
+
+const double* FFWorkspaceGPU::getDeviceGamPtr() const
+{
+    return (m_impl && m_impl->eeq_topo.valid) ? m_impl->eeq_topo.d_gam_corrected.ptr : nullptr;
 }
 
 // ---------------------------------------------------------------------------

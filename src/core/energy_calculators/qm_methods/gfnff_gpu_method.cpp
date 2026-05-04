@@ -209,6 +209,17 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
         // Lazy refactorization is RMSD-based: force_refactor flag passed per solve() call.
         m_eeq_gpu = std::make_unique<EEQSolverGPU>(natoms);
 
+        // WP2: Upload topology-constant EEQ parameters to GPU.
+        // cn=Zero because chi_corrected_static and cnf are CN-independent.
+        {
+            Vector dummy_cn = Vector::Zero(natoms);
+            GFNFF::EEQGPUParams topo_params = m_gfnff->prepareEEQParametersForGPU(dummy_cn);
+            m_gpu_workspace->uploadEEQTopologyParams(topo_params);
+            m_eeq_fraglist         = topo_params.fraglist;
+            m_eeq_rhs_constraints  = topo_params.rhs_constraints;
+            m_eeq_nfrag            = topo_params.nfrag;
+        }
+
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::success(fmt::format(
                 "gfnff-gpu: GPU workspace ready ({} atoms, {} bonds, {} disp pairs, GPU EEQ enabled)",
@@ -425,6 +436,14 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         // Topology rebuild means large geometry change → reset EEQ reference geometry
         // so the next step always gets a fresh Cholesky factorization.
         m_eeq_has_ref_geom = false;
+
+        // WP2: Topology-constant EEQ parameters changed — re-upload to GPU
+        Vector dummy_cn = Vector::Zero(N);
+        GFNFF::EEQGPUParams topo_params = m_gfnff->prepareEEQParametersForGPU(dummy_cn);
+        m_gpu_workspace->uploadEEQTopologyParams(topo_params);
+        m_eeq_fraglist        = topo_params.fraglist;
+        m_eeq_rhs_constraints = topo_params.rhs_constraints;
+        m_eeq_nfrag           = topo_params.nfrag;
     }
 
     const Vector& cn = m_gfnff->getLastCN();
@@ -455,18 +474,20 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         charges = m_gfnff->getLastCharges();
     } else {
         // === GPU EEQ: Build Coulomb matrix + Cholesky solve on GPU ===
-        GFNFF::EEQGPUParams eeq_params = m_gfnff->prepareEEQParametersForGPU(cn);
+        // WP2: use topology-constant alpha/gam/chi/cnf already on GPU;
+        // rhs_atoms built by k_build_eeq_rhs (launched in prepareAndLaunchChargeIndependent).
+        // fraglist and nfrag are cached from last topology build (m_eeq_fraglist/m_eeq_nfrag).
+        const bool use_device_rhs = m_gpu_workspace->isEEQTopoValid();
 
-        // Guard: m_eeq_Z2 must hold N × nfrag elements. Pre-allocated at init with actual
-        // nfrag; after topology update nfrag can change — resize if needed.
-        if (static_cast<int>(m_eeq_Z2.size()) < N * eeq_params.nfrag) {
-            m_eeq_Z2.resize(N * eeq_params.nfrag, 0.0);
+        // Guard: Z2 buffer must hold N × nfrag elements
+        if (static_cast<int>(m_eeq_Z2.size()) < N * m_eeq_nfrag) {
+            m_eeq_Z2.resize(N * m_eeq_nfrag, 0.0);
         }
 
         // GPU EEQ is only applicable for nfrag==1 (single connected system).
         // For nfrag>1 (multi-fragment box): use CPU Phase 2 charges directly.
         // TODO: replace with batched per-fragment Cholesky for multi-fragment GPU path.
-        const bool gpu_eeq_applicable = (eeq_params.nfrag == 1);
+        const bool gpu_eeq_applicable = (m_eeq_nfrag == 1);
 
         bool used_gpu_eeq = false;
         if (gpu_eeq_applicable) {
@@ -488,37 +509,62 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                 force_refactor = (std::sqrt(rmsd_sq / N) >= m_eeq_rmsd_threshold);
             }
 
-            // Distance cutoff for GPU matrix conditioning
-            double cutoff_sq = 0.0;
+            bool eeq_ok = false;
+            if (use_device_rhs) {
+                // WP2: all params on GPU — no H2D uploads of alpha/gam/rhs
+                eeq_ok = m_eeq_gpu->solveWithDeviceRHS(
+                    N, m_eeq_nfrag,
+                    m_gpu_workspace->getDeviceXPtr(),
+                    m_gpu_workspace->getDeviceYPtr(),
+                    m_gpu_workspace->getDeviceZPtr(),
+                    m_gpu_workspace->getDeviceAlphaPtr(),
+                    m_gpu_workspace->getDeviceGamPtr(),
+                    m_gpu_workspace->getDeviceRHSPtr(),
+                    m_gpu_workspace->getDeviceRHSConstraintsPtr(),
+                    m_eeq_fraglist,
+                    m_eeq_z1.data(),
+                    m_eeq_Z2.data(),
+                    force_refactor);
+            } else {
+                // Fallback: EEQ topo not yet uploaded to GPU (should not happen after init)
+                CurcumaLogger::warn("WP2: EEQ topo not valid — falling back to CPU param upload");
+                GFNFF::EEQGPUParams eeq_params = m_gfnff->prepareEEQParametersForGPU(cn);
+                eeq_ok = m_eeq_gpu->solve(
+                    N, eeq_params.nfrag,
+                    m_gpu_workspace->getDeviceXPtr(),
+                    m_gpu_workspace->getDeviceYPtr(),
+                    m_gpu_workspace->getDeviceZPtr(),
+                    eeq_params.alpha_corrected.data(),
+                    eeq_params.gam_corrected.data(),
+                    eeq_params.fraglist,
+                    eeq_params.rhs_atoms.data(),
+                    eeq_params.rhs_constraints.data(),
+                    m_eeq_z1.data(),
+                    m_eeq_Z2.data(),
+                    0.0,
+                    force_refactor);
+                // update cached topology data in case it changed
+                m_eeq_fraglist        = eeq_params.fraglist;
+                m_eeq_rhs_constraints = eeq_params.rhs_constraints;
+                m_eeq_nfrag           = eeq_params.nfrag;
+            }
 
-            bool eeq_ok = m_eeq_gpu->solve(
-                N, eeq_params.nfrag,
-                m_gpu_workspace->getDeviceXPtr(),
-                m_gpu_workspace->getDeviceYPtr(),
-                m_gpu_workspace->getDeviceZPtr(),
-                eeq_params.alpha_corrected.data(),
-                eeq_params.gam_corrected.data(),
-                eeq_params.fraglist,
-                eeq_params.rhs_atoms.data(),
-                eeq_params.rhs_constraints.data(),
-                m_eeq_z1.data(),
-                m_eeq_Z2.data(),
-                cutoff_sq,
-                force_refactor);
             // On successful refactorization: cache reference geometry for next RMSD check.
             if (eeq_ok && force_refactor) {
                 m_eeq_ref_geom = cur_geom;
                 m_eeq_has_ref_geom = true;
             }
 
+            // Schur complement: q = z1 - Z2 * λ  (nfrag=1 → scalar)
+            // rhs_constraints[0] = fragment target charge (topology-constant, cached)
+            const double rhs_c0 = m_eeq_rhs_constraints.empty() ? 0.0 : m_eeq_rhs_constraints[0];
             if (eeq_ok) {
-                // CPU Schur complement: q = z1 - Z2 * λ  (nfrag=1 → scalar)
                 double S = 0.0, Cz1 = 0.0;
                 for (int i = 0; i < N; ++i) {
                     S   += m_eeq_Z2[i];
                     Cz1 += m_eeq_z1[i];
                 }
-                double lambda = (Cz1 - eeq_params.rhs_constraints[0]) / S;
+                double lambda = (Cz1 - rhs_c0) / S;
                 for (int i = 0; i < N; ++i)
                     m_eeq_charges_gpu[i] = m_eeq_z1[i] - m_eeq_Z2[i] * lambda;
 
@@ -532,7 +578,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
             if (CurcumaLogger::get_verbosity() >= 2) {
                 CurcumaLogger::info(fmt::format(
                     "GPU EEQ: nfrag={} — using CPU Phase 2 charges (TODO: batched-Cholesky per fragment)",
-                    eeq_params.nfrag));
+                    m_eeq_nfrag));
             }
         }
 

@@ -29,6 +29,8 @@
 // - 512 threads gives better occupancy on modern GPUs (RTX 3080, A100, etc.)
 // ============================================================================
 #define GFNFF_KERNEL_BOUNDS __launch_bounds__(512, 2)
+// Light kernel bound for simple element-wise kernels (k_build_eeq_rhs, k_zero, etc.)
+#define GFNFF_KERNEL_BOUNDS_LIGHT __launch_bounds__(256, 4)
 
 // D4 constants (matching d4param_generator.h)
 #define D4_MAX_ELEM 118
@@ -637,5 +639,21 @@ __global__ void k_eeq_schur_nfrag1(
     const double* __restrict__ d_rhs,   ///< [N * 2] column-major: col0=z1, col1=Z2
     double        lambda,
     double*       __restrict__ charges); ///< [N] output
+
+// ============================================================================
+// WP2: GPU-side EEQ RHS construction
+// ============================================================================
+
+/// Build EEQ RHS vector on GPU: rhs[i] = chi_corr[i] + cnf[i]*sqrt(max(cn[i],0))
+/// Launch after k_cn_compute on same stream — eliminates finalizeCNForCPU() sync
+/// for the EEQ RHS. chi_corr and cnf are topology-constant (upload once per topo).
+/// Reference: gfnff_method.cpp prepareEEQParametersForGPU lines 1029-1037
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_build_eeq_rhs(
+    int N,
+    const double* __restrict__ d_cn,       ///< [N] log-transformed CN (d_cn_final)
+    const double* __restrict__ d_chi_corr, ///< [N] -chi+dxi+amide_corr (topology-const)
+    const double* __restrict__ d_cnf,      ///< [N] cnf_eeq per atom (topology-const)
+    double*       __restrict__ d_rhs       ///< [N] output RHS
+);
 
 #endif // USE_CUDA

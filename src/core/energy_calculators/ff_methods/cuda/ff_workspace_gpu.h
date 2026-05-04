@@ -26,6 +26,7 @@
 #include "src/core/global.h"
 #include "../ff_workspace.h"           // FFEnergyComponents, Matrix, Vector, SpMatrix
 #include "../gfnff_parameters.h"       // GFNFFParameterSet
+#include "../gfnff.h"                  // GFNFF::EEQGPUParams (WP2)
 
 #include <memory>
 #include <vector>
@@ -442,6 +443,27 @@ public:
     /// Synchronize main stream to ensure all prior uploads (coords, CN) are visible.
     /// Claude Generated (March 2026): Required before cross-stream reads (e.g. EEQSolverGPU).
     void synchronizeMainStream();
+
+    // =========================================================================
+    // WP2: GPU-side EEQ topology parameters (Claude Generated May 2026)
+    // =========================================================================
+
+    /// Upload topology-constant EEQ parameters to GPU (once per topology build).
+    /// Enables k_build_eeq_rhs to construct rhs_atoms[i] entirely on GPU each step.
+    /// Call after InitialiseMolecule() and after each full topology recalculation.
+    void uploadEEQTopologyParams(const GFNFF::EEQGPUParams& params);
+
+    /// Returns true if uploadEEQTopologyParams() has been called at least once.
+    bool isEEQTopoValid() const;
+
+    /// Device pointer to EEQ RHS vector [N] (valid after k_build_eeq_rhs ran).
+    const double* getDeviceRHSPtr() const;
+    /// Device pointer to EEQ fragment target charges [nfrag] (topology-constant).
+    const double* getDeviceRHSConstraintsPtr() const;
+    /// Device pointer to alpha_corrected [N] (topology-constant).
+    const double* getDeviceAlphaPtr() const;
+    /// Device pointer to gam_corrected [N] (topology-constant).
+    const double* getDeviceGamPtr() const;
 
     /// Invalidate the CUDA Graph — call whenever any SoA topology changes
     /// (full topology recalculation, HB/XB re-detection, or any n-value change).

@@ -3052,3 +3052,24 @@ __global__ void k_eeq_schur_nfrag1(
     double Z2 = d_rhs[N + i];
     charges[i] = z1 - Z2 * lambda;
 }
+
+// ============================================================================
+// WP2: k_build_eeq_rhs — GPU-side EEQ RHS construction
+// Claude Generated (May 2026): Eliminates CPU sync for EEQ RHS per MD step.
+// chi_corr and cnf are topology-constant (uploaded once by uploadEEQTopologyParams).
+// Only sqrt(cn[i]) changes each step — computed directly from d_cn_final on device.
+// Reference: prepareEEQParametersForGPU() in gfnff_method.cpp
+// ============================================================================
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_build_eeq_rhs(
+    int N,
+    const double* __restrict__ d_cn,
+    const double* __restrict__ d_chi_corr,
+    const double* __restrict__ d_cnf,
+    double*       __restrict__ d_rhs)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double cn_i = d_cn[i];
+    double sqrt_cn = (cn_i > 0.0) ? __dsqrt_rn(cn_i) : 0.0;
+    d_rhs[i] = d_chi_corr[i] + d_cnf[i] * sqrt_cn;
+}

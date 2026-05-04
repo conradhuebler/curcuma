@@ -78,6 +78,33 @@ public:
         bool force_refactor = true
     );
 
+    /**
+     * @brief WP2 variant: alpha, gam, rhs_atoms already on GPU.
+     *
+     * Eliminates per-step H2D upload of alpha_corrected, gam_corrected, and rhs_atoms.
+     * alpha and gam come from uploadEEQTopologyParams (topology-constant);
+     * rhs_atoms comes from k_build_eeq_rhs (written on main stream each step).
+     * Caller must synchronize the main workspace stream before calling
+     * (finalizeCNForCPU() satisfies this requirement).
+     *
+     * @param d_alpha_corrected  Device [N] alpha² (from FFWorkspaceGPU::getDeviceAlphaPtr())
+     * @param d_gam_corrected    Device [N] gam+dgam (from FFWorkspaceGPU::getDeviceGamPtr())
+     * @param d_rhs_atoms        Device [N] RHS from k_build_eeq_rhs
+     * @param d_rhs_constraints  Device [nfrag] target charges (unused in GPU solve, for WP4)
+     */
+    bool solveWithDeviceRHS(
+        int natoms, int nfrag,
+        const double* cx, const double* cy, const double* cz,
+        const double* d_alpha_corrected,
+        const double* d_gam_corrected,
+        const double* d_rhs_atoms,
+        const double* d_rhs_constraints,
+        const std::vector<int>& fraglist,
+        double* out_z1,
+        double* out_Z2,
+        bool force_refactor = true
+    );
+
     /// ⚠️ NOT USED in production (kept for reference). ~4 s slower than solve() + CPU Schur.
     bool solveAndComputeCharges(
         int natoms, int nfrag,

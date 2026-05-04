@@ -595,6 +595,14 @@ std::string method = "d4";  // Matches Fortran reference
 - **Adaptive block sizing**: `getLaunchConfig()` with `__launch_bounds__(512, 2)` on all 22 kernels
 - **Warp shuffle reduction**: `warpReduceSum()` via `__shfl_down_sync()` in `blockReduceAddEnergy()`
 
+### ✅ WP2: GPU-seitiger EEQ-RHS (Mai 2026)
+- **k_build_eeq_rhs**: `rhs[i] = chi_corr[i] + cnf[i]*sqrt(cn[i])` direkt auf GPU nach `k_cn_compute`
+- **EEQTopologyBuffers** in `FFWorkspaceGPUImpl`: alpha, gam, chi_corr, cnf einmalig bei Topo-Build hochgeladen
+- **`solveWithDeviceRHS()`**: D2D-Copy für col0 statt H2D; Cholesky-Pfad nutzt device-seitige alpha/gam
+- **Kein messbarer Timing-Gewinn**: Bottleneck ist O(N³/6) Cholesky (~10–15 ms), nicht der O(N) CPU-Loop (~0.2 ms)
+- **Infrastruktur für WP4/WP5**: `d_rhs_atoms` als stabiler Device-Pointer für CUDA-Graph-Integration
+- Nächster sinnvoller Schritt: **WP3** (Pair-List CN, O(N²)→O(N·k), ~3–5 ms Gewinn)
+
 ### ✅ Topology Caching (March 2026)
 - **Two-tier caching**: Static topology (bonds, rings, hybridization) cached until large geometry change (>0.5 Bohr)
 - **Dynamic state only**: CN and distance matrices updated each step (O(N²) vs O(N³) for full topology)

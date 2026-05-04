@@ -43,10 +43,10 @@ GROMACS-Vergleich: keine CPU-Sync-Punkte, kein O(N³) im Hot-Path, >80% GPU-Ausl
 | WP | Titel | Aufwand | Wirkung | Abhängig von |
 |----|-------|---------|---------|--------------|
 | [WP1](GPU_WP1_L2_PERSISTENCE_LAUNCH_BOUNDS.md) | L2-Persistenz + Blackwell Launch-Bounds | ~4h | Mittel–Hoch | — |
-| [WP2](GPU_WP2_EEQ_RHS_KERNEL.md) | k_build_eeq_rhs — GPU-seitiger RHS | ~8h | **Hoch** | — |
-| [WP3](GPU_WP3_PAIRLIST_CN_KERNEL.md) | Pair-List CN — O(N²)→O(N·k) | ~8h | **Hoch** | — |
-| [WP4](GPU_WP4_PHASE2_CUDA_GRAPH.md) | Phase-2-CUDA-Graph | ~6h | Mittel | WP2 empfohlen |
-| [WP5](GPU_WP5_FULL_GPU_EEQ_PIPELINE.md) | Vollständig GPU-residenter EEQ | ~10 Tage | **Transformativ** | WP2+WP3+WP4 |
+| [WP2](GPU_WP2_EEQ_RHS_KERNEL.md) | k_build_eeq_rhs — GPU-seitiger RHS | ✅ **Implementiert** | Infrastruktur (kein Timing-Gewinn) | — |
+| [WP3](GPU_WP3_PAIRLIST_CN_KERNEL.md) | Pair-List CN — O(N²)→O(N·k) | ~8h | **Hoch — nächster Schritt** | — |
+| [WP4](GPU_WP4_PHASE2_CUDA_GRAPH.md) | Phase-2-CUDA-Graph | ~6h | Mittel | WP2 ✅ |
+| [WP5](GPU_WP5_FULL_GPU_EEQ_PIPELINE.md) | Vollständig GPU-residenter EEQ | ~10 Tage | **Transformativ** | WP2 ✅ + WP3 + WP4 |
 | [WP6](GPU_WP6_TILED_CN_SHARED_MEMORY.md) | Tiled k_cn_compute (Shared Memory) | ~7 Tage | Hoch (N≥3000) | WP3 optional |
 
 ---
@@ -54,17 +54,17 @@ GROMACS-Vergleich: keine CPU-Sync-Punkte, kein O(N³) im Hot-Path, >80% GPU-Ausl
 ## Empfohlene Reihenfolge
 
 ```
-WP1 (Quick Win, unabhängig)
+WP2 ✅ (EEQ RHS Kernel — Infrastruktur für WP4/WP5)
    ↓
-WP3 (CN Pair-List, unabhängig)
+WP3 ← NÄCHSTER SCHRITT (CN Pair-List, O(N²)→O(N·k), ~3–5 ms Gewinn)
    ↓
-WP2 (EEQ RHS Kernel, unabhängig)
+WP1 (L2-Persistenz + Launch-Bounds, unabhängig, Quick Win)
    ↓
-WP4 (Phase-2-Graph, baut auf WP2 auf)
+WP4 (Phase-2-Graph, baut auf WP2 ✅ auf)
    ↓
-WP5 (vollständig GPU, baut auf WP2+WP3+WP4 auf)
+WP5 (vollständig GPU, baut auf WP2 ✅ + WP3 + WP4 auf)
    ↓
-WP6 (Shared Memory CN, für große N)
+WP6 (Shared Memory CN, für N≥3000)
 ```
 
 ---
@@ -73,18 +73,29 @@ WP6 (Shared Memory CN, für große N)
 
 ### Aktuelle Pipeline (per Schritt, N=1410, RTX 5080)
 
-| Schritt | Zeit (geschätzt) | Bottleneck |
-|---------|-----------------|------------|
-| GPU Phase 1 (CUDA Graph) | ~3–5 ms | Kernel-Compute |
-| `finalizeCNForCPU` Sync | ~0.1 ms | Stream-Sync |
-| `prepareEEQParametersForGPU` | ~0.2 ms | CPU O(N) |
-| `eeq_gpu.solve()` (fresh) | ~10–15 ms | O(N³/6) Cholesky |
-| `eeq_gpu.solve()` (lazy, RMSD>0) | ~1–2 ms | O(N²) potrs |
-| `setEEQCharges` H2D | ~0.05 ms | 11 KB Upload |
-| GPU Phase 2 (7 Kernel-Launches) | ~3–5 ms | Kernel-Compute |
-| D2H energy+gradient | ~0.1 ms | 11 KB Download |
+| Schritt | Zeit (geschätzt) | Bottleneck | WP |
+|---------|-----------------|------------|----|
+| GPU Phase 1 (CUDA Graph) | ~3–5 ms | Kernel-Compute (O(N²) erf) | WP3, WP6 |
+| `finalizeCNForCPU` Sync | ~0.1 ms | Stream-Sync | WP5 |
+| `prepareEEQParametersForGPU` | ~0 ms | **Entfällt** (WP2 ✅) | — |
+| `eeq_gpu.solveWithDeviceRHS()` fresh | ~10–15 ms | **O(N³/6) Cholesky ← Haupt-Bottleneck** | WP5 |
+| `eeq_gpu.solveWithDeviceRHS()` lazy | ~1–2 ms | O(N²) potrs | WP4 |
+| `setEEQCharges` H2D | ~0.05 ms | 11 KB Upload | WP5 |
+| GPU Phase 2 (7 Kernel-Launches) | ~3–5 ms | Kernel-Compute | WP4 |
+| D2H energy+gradient | ~0.1 ms | 11 KB Download | WP5 |
 
-**Dominierender Faktor**: EEQ Cholesky (~10–15 ms für fresh solve). WP2+WP5 adressieren dies durch GPU-seitige RHS-Konstruktion und vollständig asynchrone EEQ-Pipeline.
+**Dominierender Faktor**: EEQ Cholesky O(N³/6) (~10–15 ms fresh solve, ~50% des Schritts).  
+WP2 hat die O(N) CPU-Vorbereitung (~0.2 ms) eliminiert — im Rauschen.  
+Realer Gewinn kommt von **WP3** (O(N²) CN-Kernel → O(N·k)) und **WP5** (Cholesky aus hot path).
+
+### Nach WP3 (nächster Schritt)
+
+| Schritt | Zeit vorher | Zeit nachher |
+|---------|------------|-------------|
+| `k_cn_compute` (N=1410) | ~3–5 ms | ~0.3–0.6 ms (5–10×) |
+| **Gesamtschritt** | ~29 ms | ~25–27 ms |
+
+CN ist derzeit O(N²) mit erf(): 2 Mio. Aufrufe pro Schritt für N=1410, davon ~80% außerhalb Cutoff. Pair-List reduziert auf ~400K effektive Paare.
 
 ### Nach allen WPs
 

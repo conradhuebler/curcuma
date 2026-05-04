@@ -590,6 +590,9 @@ public:
         std::vector<double> rhs_constraints;  ///< [nfrag] target charges per fragment
         std::vector<int>    fraglist;         ///< [N] fragment ID per atom (1-indexed)
         int nfrag = 1;                        ///< Number of molecular fragments
+        // WP2: topology-constant RHS components for GPU kernel k_build_eeq_rhs
+        std::vector<double> chi_corrected_static; ///< [N] -chi + dxi + amide_corr (no CN term)
+        std::vector<double> cnf;                  ///< [N] cnf_eeq per atom
     };
     EEQGPUParams prepareEEQParametersForGPU(const Vector& cn) const;
 

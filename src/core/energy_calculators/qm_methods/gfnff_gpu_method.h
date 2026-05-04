@@ -116,6 +116,11 @@ private:
     std::vector<double> m_eeq_Z2;           ///< [N*nfrag] A⁻¹ · C^T (column-major)
     std::vector<double> m_eeq_charges_gpu;  ///< [N] final charges from GPU path
 
+    // WP2: cached topology-constant EEQ data (avoid prepareEEQParametersForGPU per step)
+    std::vector<int>    m_eeq_fraglist;          ///< [N] fragment IDs (topology-constant)
+    std::vector<double> m_eeq_rhs_constraints;   ///< [nfrag] target charges (topology-constant)
+    int                 m_eeq_nfrag = 1;         ///< number of fragments (topology-constant)
+
     json             m_parameters;
     std::string      m_method_name;
     std::vector<int> m_atom_types;   ///< Element numbers (Z) — stored from setMolecule()

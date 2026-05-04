@@ -977,6 +977,8 @@ GFNFF::EEQGPUParams GFNFF::prepareEEQParametersForGPU(const Vector& cn) const
     params.alpha_corrected.resize(N);
     params.gam_corrected.resize(N);
     params.rhs_atoms.resize(N);
+    params.chi_corrected_static.resize(N);
+    params.cnf.resize(N);
     params.nfrag = topo.nfrag;
     params.fraglist = topo.fraglist;
 
@@ -1032,6 +1034,10 @@ GFNFF::EEQGPUParams GFNFF::prepareEEQParametersForGPU(const Vector& cn) const
         if (z == 1 && i < static_cast<int>(topo.is_amide_h.size()) && topo.is_amide_h[i]) {
             chi_corrected -= 0.02;
         }
+
+        // WP2: store topology-constant components for GPU kernel k_build_eeq_rhs
+        params.chi_corrected_static[i] = chi_corrected;
+        params.cnf[i] = cnf_i;
 
         double cn_i = (i < cn.size()) ? cn(i) : 0.0;
         params.rhs_atoms[i] = chi_corrected + cnf_i * std::sqrt(std::max(cn_i, 0.0));
