@@ -4,7 +4,7 @@
 **Aufwand**: ~6–8 Stunden  
 **Wirkung**: Hoch — k_cn_compute wird jeden Schritt aufgerufen; 5–10× weniger Arbeit für N=1410  
 **Abhängigkeiten**: Keine (unabhängig von WP1/WP2)  
-**Status**: 🤖 Geplant
+**Status**: ✅ Implementiert (Mai 2026) — 4 ms/Schritt Gewinn gemessen (28s→24s, 1000 Schritte N=1410)
 
 ---
 
@@ -286,4 +286,20 @@ ctest -R "cli_gfnff\|cli_simplemd" --output-on-failure
 
 - **n_pairs = 0** (z.B. Einzelatom): Fallback auf `k_cn_compute` (Guard `if (n > 0)`)
 - **Topologie-Rebuild**: Pair-List wird neu generiert; `cn_pairs.valid = false` während Rebuild
-- **PBC**: `k_generate_cn_pairs_write_indexed` muss Minimum-Image-Convention berücksichtigen — analog zu bestehenden `applyMIC()`-Aufrufen in anderen Kerneln
+- **PBC**: `k_cn_compute_pairs` ruft `applyMIC()` auf — konsistent mit bestehenden Kerneln
+
+---
+
+## Implementierte Änderungen (Mai 2026)
+
+| Datei | Änderung |
+|-------|---------|
+| `gfnff_kernels.cuh` | `k_cn_compute_pairs` + `k_logcn` deklariert |
+| `gfnff_kernels.cu` | `k_cn_compute_pairs` + `k_logcn` implementiert |
+| `ff_workspace_gpu.cu` | `computeCN()`: Pair-List-Pfad (WP3) vor O(N²)-Fallback |
+
+**Abweichung vom Designdokument**: Statt CUB-Prefix-Sum für die Pair-List-Generierung wird die vorhandene `generateCNPairListOnGPU()` (atomicAdd-basiert) weiterverwendet — sie läuft nur einmalig pro Topologie-Build und ist dort akzeptabel. Der Fokus lag auf dem Per-Schritt-Hot-Path (`k_cn_compute_pairs` statt `k_cn_compute`).
+
+## Diagnose: Numerische Abweichungen beim CSVR-Thermostat
+
+`atomicAdd` in `k_cn_compute_pairs` ist nicht-deterministisch in der Summationsreihenfolge → marginal andere CN-Werte gegenüber `k_cn_compute` → andere EEQ-Ladungen → anderer CSVR-Skalierungsfaktor. Energiedifferenz GPU vs. CPU bleibt <1 nEh. Kein physikalischer Fehler.

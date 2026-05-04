@@ -601,7 +601,14 @@ std::string method = "d4";  // Matches Fortran reference
 - **`solveWithDeviceRHS()`**: D2D-Copy für col0 statt H2D; Cholesky-Pfad nutzt device-seitige alpha/gam
 - **Kein messbarer Timing-Gewinn**: Bottleneck ist O(N³/6) Cholesky (~10–15 ms), nicht der O(N) CPU-Loop (~0.2 ms)
 - **Infrastruktur für WP4/WP5**: `d_rhs_atoms` als stabiler Device-Pointer für CUDA-Graph-Integration
-- Nächster sinnvoller Schritt: **WP3** (Pair-List CN, O(N²)→O(N·k), ~3–5 ms Gewinn)
+
+### ✅ WP3: Pair-List CN-Kernel (Mai 2026)
+- **k_cn_compute_pairs**: 1 Thread/Paar, atomicAdd auf `d_cn_raw[i/j]` — O(n_pairs) statt O(N²)
+- **k_logcn**: separater Log-Squashing-Kernel für `cn_final` (war in k_cn_compute eingebettet)
+- **`computeCN()` in `ff_workspace_gpu.cu`**: Pair-List-Pfad aktiv wenn `m_cn_pairs_on_gpu && n_pairs>0`, sonst Fallback auf `k_cn_compute`
+- **Pair-List**: von `generateCNPairListOnGPU()` einmalig pro Topo-Build generiert; ab Schritt 2 aktiv
+- **Gemessener Gewinn**: ~4 ms/Schritt (27ms→23ms, N=1410 Polymer, 1000 MD-Schritte)
+- **CSVR-Numerik**: marginale Abweichungen erwartet (atomicAdd nicht-deterministisch), <1 nEh Energiefehler
 
 ### ✅ Topology Caching (March 2026)
 - **Two-tier caching**: Static topology (bonds, rings, hybridization) cached until large geometry change (>0.5 Bohr)

@@ -2938,6 +2938,57 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
 }
 
 // ============================================================================
+// WP3: Pair-list-based CN computation (Mai 2026)
+// Replaces O(N²) k_cn_compute with O(n_pairs) pair-list kernel every step.
+// Pair list is built once per topology build by generateCNPairListOnGPU().
+// ============================================================================
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_cn_compute_pairs(
+    int           n_pairs,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const double* __restrict__ rcov_sum,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*       __restrict__ cn_raw,
+    double        kn)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_pairs) return;
+
+    int i = idx_i[tid];
+    int j = idx_j[tid];
+
+    double dx = cx[i] - cx[j];
+    double dy = cy[i] - cy[j];
+    double dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);
+    double r = __dsqrt_rn(dx*dx + dy*dy + dz*dz);
+    if (r < 1e-10) return;
+
+    // erf-based CN contribution (same formula as k_cn_compute)
+    double arg = kn * (r / rcov_sum[tid] - 1.0);
+    double contrib = 0.5 * (1.0 + erf(arg));
+
+    // Symmetric: both atoms i and j receive the contribution
+    atomicAdd(&cn_raw[i], contrib);
+    atomicAdd(&cn_raw[j], contrib);
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_logcn(
+    int natoms,
+    const double* __restrict__ cn_raw,
+    double*       __restrict__ cn_final,
+    double        cnmax)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= natoms) return;
+    // Log squashing: CN_final = log(1+exp(cnmax)) - log(1+exp(cnmax-CN_raw))
+    cn_final[i] = log(1.0 + exp(cnmax)) - log(1.0 + exp(cnmax - cn_raw[i]));
+}
+
+// ============================================================================
 // GPU HB CN per-bond computation (Apr 2026)
 // Replaces CPU HB CN loop in gfnff_gpu_method.cpp.
 // ============================================================================

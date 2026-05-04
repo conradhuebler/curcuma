@@ -2381,24 +2381,51 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
     if (impl.d_cn_final.n < N) impl.d_cn_final.alloc(N);
     if (impl.d_dlogdcn.n < N) impl.d_dlogdcn.alloc(N);
 
-    // Launch CN compute kernel
-    // Uses constant memory d_rcov_d3 for covalent radii (uploaded at construction)
-    LaunchConfig cfg_cn = getLaunchConfig(N, m_block_size);
-    k_cn_compute<<<cfg_cn.gridSize, cfg_cn.blockSize, 0, impl.stream>>>(
-        N,
-        impl.coords.d_x.ptr,
-        impl.coords.d_y.ptr,
-        impl.coords.d_z.ptr,
-        impl.d_atom_types.ptr,
-        impl.d_cn_raw.ptr,   // output: raw CN
-        impl.d_cn_final.ptr, // output: log-transformed CN
-        kn,
-        cnmax,
-        threshold_sq
-    );
+    // WP3: Pair-list-based CN path — O(n_pairs) instead of O(N²) per step.
+    // Pair list built once per topology by generateCNPairListOnGPU().
+    // ~5-10x fewer erf() calls for N=1410 (21K pairs vs 2M atoms×atoms).
+    if (m_cn_pairs_on_gpu && impl.n_cn_pairs > 0) {
+        // Zero cn_raw (atomicAdd kernel requires zeroed input)
+        LaunchConfig cfg_zero = getLaunchConfig(N, m_block_size);
+        k_zero_double<<<cfg_zero.gridSize, cfg_zero.blockSize, 0, impl.stream>>>(
+            impl.d_cn_raw.ptr, N);
 
-    // Claude Generated (Apr 2026): Compute dlogdcn on GPU, eliminating CPU loop + H2D upload.
-    // dlogdcn[i] = exp(cnmax) / (exp(cnmax) + exp(cn_raw[i]))
+        // 1 thread per pair: atomicAdd into cn_raw[i] and cn_raw[j]
+        LaunchConfig cfg_pairs = getLaunchConfig(impl.n_cn_pairs, m_block_size);
+        k_cn_compute_pairs<<<cfg_pairs.gridSize, cfg_pairs.blockSize, 0, impl.stream>>>(
+            impl.n_cn_pairs,
+            impl.d_cn_idx_i.ptr,
+            impl.d_cn_idx_j.ptr,
+            impl.d_cn_rcov_sum.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
+            impl.d_cn_raw.ptr,
+            kn);
+
+        // Log squashing: cn_final[i] = log(1+exp(cnmax)) - log(1+exp(cnmax-cn_raw[i]))
+        LaunchConfig cfg_log = getLaunchConfig(N, m_block_size);
+        k_logcn<<<cfg_log.gridSize, cfg_log.blockSize, 0, impl.stream>>>(
+            N, impl.d_cn_raw.ptr, impl.d_cn_final.ptr, cnmax);
+
+    } else {
+        // Fallback: O(N²) kernel (initial step before pair list is built, or n_pairs==0)
+        LaunchConfig cfg_cn = getLaunchConfig(N, m_block_size);
+        k_cn_compute<<<cfg_cn.gridSize, cfg_cn.blockSize, 0, impl.stream>>>(
+            N,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
+            impl.d_atom_types.ptr,
+            impl.d_cn_raw.ptr,
+            impl.d_cn_final.ptr,
+            kn,
+            cnmax,
+            threshold_sq);
+    }
+
+    // Compute dlogdcn on GPU: dlogdcn[i] = exp(cnmax)/(exp(cnmax)+exp(cn_raw[i]))
+    // Runs on same stream after either CN path — cn_raw is always valid at this point.
     LaunchConfig cfg_dlog = getLaunchConfig(N, m_block_size);
     k_dlogdcn<<<cfg_dlog.gridSize, cfg_dlog.blockSize, 0, impl.stream>>>(
         N, impl.d_cn_raw.ptr, impl.d_dlogdcn.ptr, std::exp(cnmax)

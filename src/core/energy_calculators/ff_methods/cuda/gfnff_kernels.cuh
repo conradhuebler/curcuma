@@ -656,4 +656,36 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_build_eeq_rhs(
     double*       __restrict__ d_rhs       ///< [N] output RHS
 );
 
+// ============================================================================
+// WP3: Pair-list-based CN computation — O(N²) → O(n_pairs)
+// ============================================================================
+
+/// Compute raw GFN-FF CN from pre-built pair list: 1 thread per (i,j) pair.
+/// atomicAdd into d_cn_raw[i] and d_cn_raw[j] — caller must zero d_cn_raw first.
+/// Uses same erf formula as k_cn_compute: contrib = 0.5*(1+erf(kn*(r/rcov-1))).
+/// Reuses CN pair list from generateCNPairListOnGPU() (built once per topology).
+/// Reference: gfnff_cn.f90:66-126
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_cn_compute_pairs(
+    int           n_pairs,
+    const int*    __restrict__ idx_i,    ///< [n_pairs] atom i index
+    const int*    __restrict__ idx_j,    ///< [n_pairs] atom j index
+    const double* __restrict__ rcov_sum, ///< [n_pairs] sum of 4/3-scaled covalent radii
+    const double* __restrict__ cx,       ///< [N] x-coordinates (Bohr, SoA)
+    const double* __restrict__ cy,       ///< [N] y-coordinates (Bohr, SoA)
+    const double* __restrict__ cz,       ///< [N] z-coordinates (Bohr, SoA)
+    double*       __restrict__ cn_raw,   ///< [N] output: erf sum (atomicAdd, zero before)
+    double        kn                     ///< CN decay constant (-7.5)
+);
+
+/// Apply log squashing transform from cn_raw to cn_final: 1 thread per atom.
+/// cn_final[i] = log(1+exp(cnmax)) - log(1+exp(cnmax-cn_raw[i]))
+/// Called after k_cn_compute_pairs; replaces the embedded transform in k_cn_compute.
+/// Reference: gfnff_cn.f90:93-96
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_logcn(
+    int natoms,
+    const double* __restrict__ cn_raw,   ///< [N] raw erf-sum CN
+    double*       __restrict__ cn_final, ///< [N] output: log-squashed CN
+    double        cnmax                  ///< squashing limit (4.4)
+);
+
 #endif // USE_CUDA

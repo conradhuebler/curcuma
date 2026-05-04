@@ -5,15 +5,13 @@
 
 | Methode | ms/Schritt | Bemerkung |
 |---------|-----------|-----------|
-| gfnff-gpu (aktuell, 85ca3cf clean) | **~29 ms** | nach `m_cn_pairs_generated`-Bugfix |
+| gfnff-gpu (WP3, Mai 2026) | **~23 ms** | k_cn_compute_pairs aktiv |
+| gfnff-gpu (WP2, Mai 2026) | ~27 ms | nach `m_cn_pairs_generated`-Bugfix + WP2 |
 | gfnff-gpu (mit G2a-Experiment) | ~28.7 ms | Gaussian-Weights vor Phase 1, deaktiviert |
-| gfnff-gpu (historisch ccefa22) | ~19 ms | Referenz-Baseline (Ziel wiederherstellen) |
 | gfnff CPU (4 Threads) | 148.8 ms | — |
 | xtb-gfnff | 422.1 ms | — |
 
-Siehe [WP1](GPU_WP1_L2_PERSISTENCE_LAUNCH_BOUNDS.md) für Analyse der Ursachen und Experimente.
-
-GPU aktuell **7.8× schneller als CPU**. Details: [GFNFF-GPU.md](GFNFF-GPU.md)
+GPU nach WP2+WP3 **~6.5× schneller als CPU** (23ms vs 148ms). Details: [GFNFF-GPU.md](GFNFF-GPU.md)
 
 **Hinweis**: Die ptxas-Register-Daten in GFNFF-GPU.md wurden auf **sm_75 (Turing)** gemessen — für SM_120 (Blackwell) gelten andere Register-Budgets. WP1 kalibriert gezielt für SM_120.
 
@@ -44,7 +42,7 @@ GROMACS-Vergleich: keine CPU-Sync-Punkte, kein O(N³) im Hot-Path, >80% GPU-Ausl
 |----|-------|---------|---------|--------------|
 | [WP1](GPU_WP1_L2_PERSISTENCE_LAUNCH_BOUNDS.md) | L2-Persistenz + Blackwell Launch-Bounds | ~4h | Mittel–Hoch | — |
 | [WP2](GPU_WP2_EEQ_RHS_KERNEL.md) | k_build_eeq_rhs — GPU-seitiger RHS | ✅ **Implementiert** | Infrastruktur (kein Timing-Gewinn) | — |
-| [WP3](GPU_WP3_PAIRLIST_CN_KERNEL.md) | Pair-List CN — O(N²)→O(N·k) | ~8h | **Hoch — nächster Schritt** | — |
+| [WP3](GPU_WP3_PAIRLIST_CN_KERNEL.md) | Pair-List CN — O(N²)→O(N·k) | ✅ **Implementiert** | ~4 ms/Schritt Gewinn | — |
 | [WP4](GPU_WP4_PHASE2_CUDA_GRAPH.md) | Phase-2-CUDA-Graph | ~6h | Mittel | WP2 ✅ |
 | [WP5](GPU_WP5_FULL_GPU_EEQ_PIPELINE.md) | Vollständig GPU-residenter EEQ | ~10 Tage | **Transformativ** | WP2 ✅ + WP3 + WP4 |
 | [WP6](GPU_WP6_TILED_CN_SHARED_MEMORY.md) | Tiled k_cn_compute (Shared Memory) | ~7 Tage | Hoch (N≥3000) | WP3 optional |
@@ -56,13 +54,13 @@ GROMACS-Vergleich: keine CPU-Sync-Punkte, kein O(N³) im Hot-Path, >80% GPU-Ausl
 ```
 WP2 ✅ (EEQ RHS Kernel — Infrastruktur für WP4/WP5)
    ↓
-WP3 ← NÄCHSTER SCHRITT (CN Pair-List, O(N²)→O(N·k), ~3–5 ms Gewinn)
+WP3 ✅ (CN Pair-List, O(N²)→O(N·k), 4 ms Gewinn gemessen)
    ↓
-WP1 (L2-Persistenz + Launch-Bounds, unabhängig, Quick Win)
+WP1 ← NÄCHSTER SCHRITT (L2-Persistenz + Launch-Bounds, unabhängig, Quick Win)
    ↓
 WP4 (Phase-2-Graph, baut auf WP2 ✅ auf)
    ↓
-WP5 (vollständig GPU, baut auf WP2 ✅ + WP3 + WP4 auf)
+WP5 (vollständig GPU, baut auf WP2 ✅ + WP3 ✅ + WP4 auf)
    ↓
 WP6 (Shared Memory CN, für N≥3000)
 ```
@@ -88,14 +86,16 @@ WP6 (Shared Memory CN, für N≥3000)
 WP2 hat die O(N) CPU-Vorbereitung (~0.2 ms) eliminiert — im Rauschen.  
 Realer Gewinn kommt von **WP3** (O(N²) CN-Kernel → O(N·k)) und **WP5** (Cholesky aus hot path).
 
-### Nach WP3 (nächster Schritt)
+### Nach WP3 ✅ (gemessen Mai 2026)
 
 | Schritt | Zeit vorher | Zeit nachher |
 |---------|------------|-------------|
-| `k_cn_compute` (N=1410) | ~3–5 ms | ~0.3–0.6 ms (5–10×) |
-| **Gesamtschritt** | ~29 ms | ~25–27 ms |
+| `k_cn_compute` (N=1410) | ~3–5 ms | <1 ms (`k_cn_compute_pairs`) |
+| **Gesamtschritt** | ~27 ms | **~23 ms** |
 
-CN ist derzeit O(N²) mit erf(): 2 Mio. Aufrufe pro Schritt für N=1410, davon ~80% außerhalb Cutoff. Pair-List reduziert auf ~400K effektive Paare.
+Gemessene Verbesserung: 4 ms/Schritt (28s→24s, 1000 Schritte, N=1410).
+CN war O(N²) mit erf(): 2 Mio. Aufrufe → Pair-List: O(n_pairs) atomicAdds.
+CSVR-Thermostat zeigt marginale numerische Abweichungen (erwartet: atomicAdd nicht-deterministisch).
 
 ### Nach allen WPs
 
