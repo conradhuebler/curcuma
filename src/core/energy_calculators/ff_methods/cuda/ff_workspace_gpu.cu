@@ -706,6 +706,7 @@ struct FFWorkspaceGPUImpl {
     cudaEvent_t  event_bonded    = nullptr;  ///< Sync event for stream B completion
     cudaEvent_t  event_threebody = nullptr;  ///< Sync event for stream C completion
     cudaEvent_t  event_upload    = nullptr;  ///< Reusable event for upload→stream sync
+    // cudaEvent_t  event_cn_ready  = nullptr;  // (disabled) was for overlap experiment: CN D2H before gaussian weights
 
     // === CUDA Graph Capture — Phase 8 (Claude Generated March 2026) ===
     // For topology-stable MD steps, the entire charge-independent kernel sequence is
@@ -1504,6 +1505,10 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // was captured on the first call and is replayed here via cudaGraphLaunch().
     // CPU-GPU overlap with EEQ is preserved: cudaGraphLaunch() is asynchronous.
     // =========================================================================
+    // need_snapshots=true when d_dEdcn_snapshot and d_grad_snapshot are allocated.
+    // d_grad_snapshot is deliberately kept allocated to disable CUDA graph capture:
+    // event_pairwise/bonded/threebody are shared between Phase 1 graph and Phase 2 code;
+    // capturing them creates undefined event state after replay. (graph left for future refactor)
     const bool need_snapshots = impl.d_dEdcn_snapshot.ptr && impl.d_grad_snapshot.ptr;
     const bool force_single_stream = (gradient && impl.d_grad_after_bonds.ptr);
     if (impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream) {

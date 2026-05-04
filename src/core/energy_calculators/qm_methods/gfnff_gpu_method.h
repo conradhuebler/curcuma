@@ -145,6 +145,8 @@ private:
     Matrix m_eeq_ref_geom;              ///< geometry (Bohr) at last EEQ refactorization
     bool   m_eeq_has_ref_geom = false;
 
+    int  m_calc_count = 0;  ///< counts calculateEnergy() calls; first 5 always print timing
+
     /**
      * @brief Generate CN pair list from geometry and covalent radii.
      * Called once after initGPUWorkspace(). Pairs with rcov_sum < 2*max contribution.
