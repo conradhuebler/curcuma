@@ -40,7 +40,7 @@ GROMACS-Vergleich: keine CPU-Sync-Punkte, kein O(N³) im Hot-Path, >80% GPU-Ausl
 
 | WP | Titel | Aufwand | Wirkung | Abhängig von |
 |----|-------|---------|---------|--------------|
-| [WP1](GPU_WP1_L2_PERSISTENCE_LAUNCH_BOUNDS.md) | L2-Persistenz + Blackwell Launch-Bounds | ~4h | Mittel–Hoch | — |
+| [WP1](GPU_WP1_L2_PERSISTENCE_LAUNCH_BOUNDS.md) | L2-Persistenz + Blackwell Launch-Bounds | ~4h | Mittel–Hoch | — | ❌ Blockiert (Energie=0, Details in WP1-Dok) |
 | [WP2](GPU_WP2_EEQ_RHS_KERNEL.md) | k_build_eeq_rhs — GPU-seitiger RHS | ✅ **Implementiert** | Infrastruktur (kein Timing-Gewinn) | — |
 | [WP3](GPU_WP3_PAIRLIST_CN_KERNEL.md) | Pair-List CN — O(N²)→O(N·k) | ✅ **Implementiert** | ~4 ms/Schritt Gewinn | — |
 | [WP4](GPU_WP4_PHASE2_CUDA_GRAPH.md) | Phase-2-CUDA-Graph | ~6h | Mittel | WP2 ✅ |
@@ -56,7 +56,7 @@ WP2 ✅ (EEQ RHS Kernel — Infrastruktur für WP4/WP5)
    ↓
 WP3 ✅ (CN Pair-List, O(N²)→O(N·k), 4 ms Gewinn gemessen)
    ↓
-WP1 ← NÄCHSTER SCHRITT (L2-Persistenz + Launch-Bounds, unabhängig, Quick Win)
+WP1 ← BLOCKIERT (Energie=0 bei beiden Teilaufgaben — Details in GPU_WP1_L2_PERSISTENCE_LAUNCH_BOUNDS.md)
    ↓
 WP4 (Phase-2-Graph, baut auf WP2 ✅ auf)
    ↓

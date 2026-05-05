@@ -4,7 +4,45 @@
 **Aufwand**: ~4 Stunden  
 **Wirkung**: Mittel–Hoch (15–30% Reduktion L2-Miss-Rate, Occupancy-Steigerung auf SM_120)  
 **Abhängigkeiten**: keine  
-**Status**: 🤖 Geplant (Teilaufgaben A+B noch ausstehend)
+**Status**: ❌ BLOCKIERT — beide Implementierungsversuche führten zu Energie=0 (Mai 2026)
+
+---
+
+## ❌ Implementierungsversuche (Mai 2026) — beide gescheitert
+
+### Teilaufgabe A: L2-Persistenzfenster (`cudaStreamSetAttribute`)
+
+**Implementiert**: `setGeometry()` in `ff_workspace_gpu.cu` nach den drei `cudaMemcpyAsync`-Aufrufen.
+
+**Ergebnis**: Energie=0, Gradient=0 nach dem ersten Schritt.
+
+**Ursache**: Die drei SoA-Arrays `d_x`, `d_y`, `d_z` werden einzeln via `cudaMalloc` allokiert. Ihr kombinerter Adress-Span übersteigt potenziell das gerätespezifische Persisting-L2-Limit. `cudaStreamSetAttribute` gibt dann `cudaErrorInvalidValue` zurück, was den Stream in einen Fehlerzustand versetzt und alle nachfolgenden Kernel-Starts lautlos unterdrückt.
+
+Versuchte Gegenmaßnahmen (alle gescheitert):
+- `num_bytes` auf `l2_bytes` geclampt → Energie weiterhin 0
+- `cudaGetLastError()` nach fehlgeschlagenem `cudaStreamSetAttribute` → Energie weiterhin 0
+
+**Voraussetzung für korrekten Fix**: `d_x`, `d_y`, `d_z` in einer einzigen `cudaMalloc(3*N*sizeof(double))`-Allokation mit Offset-Pointern zusammenlegen. Dann ist `num_bytes = 3*N*8 ≈ 34 KB` garantiert kleiner als das L2-Limit.
+
+---
+
+### Teilaufgabe B: Launch-Bounds `GFNFF_KERNEL_BOUNDS_LIGHT` (`__launch_bounds__(256, 4)`)
+
+**Implementiert**: Kernel-Deklarationen in `gfnff_kernels.cuh` von `GFNFF_KERNEL_BOUNDS` auf `GFNFF_KERNEL_BOUNDS_LIGHT` umgestellt für alle als „leicht" klassifizierten Kernel.
+
+**Ergebnis**: Energie=0, Gradient=0.
+
+**Mechanismus**: nvcc propagiert `__launch_bounds__` aus Forward-Deklarationen (`.cuh`) auf Kernel-Definitionen (`.cu`), auch wenn die Definition selbst keine Bounds-Annotation hat. Eine Änderung in der Deklaration ist damit funktional äquivalent zur Änderung der Definition.
+
+**Ursache unklar**: `__launch_bounds__(256, 4)` reduziert das maximale Register-Budget von 128 auf 64 Register/Thread. Mindestens ein Kernel überschreitet dieses Budget auf SM_120, was zu stillem Fehlverhalten führt (kein Launch-Error, nur falsche Ergebnisse: 0). Welcher Kernel betroffen ist, wurde noch nicht isoliert — das erfordert schrittweises Umstellen einzelner Kernels mit Test nach jedem Schritt.
+
+**Gesichert funktionierend** (bereits vor WP1 auf LIGHT):
+- `k_build_eeq_rhs`, `k_cn_compute_pairs`, `k_logcn` — diese drei WP2/WP3-Kernels laufen mit `GFNFF_KERNEL_BOUNDS_LIGHT` korrekt.
+
+**Voraussetzung für erneuten Versuch**:
+1. `ptxas -v` im Build aktivieren, um echte Register-Zahlen auf SM_120 zu messen
+2. Kernels einzeln auf LIGHT umstellen und nach jedem Schritt testen
+3. Nur Kernels mit bestätigten ≤64 Registern auf SM_120 auf LIGHT setzen
 
 ---
 
