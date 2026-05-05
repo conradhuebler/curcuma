@@ -490,6 +490,8 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         const bool gpu_eeq_applicable = (m_eeq_nfrag == 1);
 
         bool used_gpu_eeq = false;
+        const double rhs_c0 = m_eeq_rhs_constraints.empty() ? 0.0 : m_eeq_rhs_constraints[0];
+
         if (gpu_eeq_applicable) {
             // RMSD-based EEQ lazy refactorization:
             // Compute per-atom RMSD (Bohr) from geometry at last full Cholesky build.
@@ -510,9 +512,13 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
             }
 
             bool eeq_ok = false;
+            bool used_gpu_schur = false;
+
             if (use_device_rhs) {
-                // WP2: all params on GPU — no H2D uploads of alpha/gam/rhs
-                eeq_ok = m_eeq_gpu->solveWithDeviceRHS(
+                // WP5-A: try GPU Schur path first (nfrag==1 only).
+                // Eliminates 22 KB D2H (z1+Z2) + CPU O(N) Schur loop + 11 KB H2D.
+                // Falls back to WP2 CPU-Schur for nfrag>1 or Cholesky failure.
+                eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUSchur(
                     N, m_eeq_nfrag,
                     m_gpu_workspace->getDeviceXPtr(),
                     m_gpu_workspace->getDeviceYPtr(),
@@ -520,11 +526,27 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                     m_gpu_workspace->getDeviceAlphaPtr(),
                     m_gpu_workspace->getDeviceGamPtr(),
                     m_gpu_workspace->getDeviceRHSPtr(),
-                    m_gpu_workspace->getDeviceRHSConstraintsPtr(),
                     m_eeq_fraglist,
-                    m_eeq_z1.data(),
-                    m_eeq_Z2.data(),
+                    rhs_c0,
                     force_refactor);
+                if (eeq_ok) {
+                    used_gpu_schur = true;
+                } else {
+                    // nfrag>1 or Cholesky failed: fall back to WP2 solve + CPU Schur
+                    eeq_ok = m_eeq_gpu->solveWithDeviceRHS(
+                        N, m_eeq_nfrag,
+                        m_gpu_workspace->getDeviceXPtr(),
+                        m_gpu_workspace->getDeviceYPtr(),
+                        m_gpu_workspace->getDeviceZPtr(),
+                        m_gpu_workspace->getDeviceAlphaPtr(),
+                        m_gpu_workspace->getDeviceGamPtr(),
+                        m_gpu_workspace->getDeviceRHSPtr(),
+                        m_gpu_workspace->getDeviceRHSConstraintsPtr(),
+                        m_eeq_fraglist,
+                        m_eeq_z1.data(),
+                        m_eeq_Z2.data(),
+                        force_refactor);
+                }
             } else {
                 // Fallback: EEQ topo not yet uploaded to GPU (should not happen after init)
                 CurcumaLogger::warn("WP2: EEQ topo not valid — falling back to CPU param upload");
@@ -555,21 +577,29 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                 m_eeq_has_ref_geom = true;
             }
 
-            // Schur complement: q = z1 - Z2 * λ  (nfrag=1 → scalar)
-            // rhs_constraints[0] = fragment target charge (topology-constant, cached)
-            const double rhs_c0 = m_eeq_rhs_constraints.empty() ? 0.0 : m_eeq_rhs_constraints[0];
             if (eeq_ok) {
-                double S = 0.0, Cz1 = 0.0;
-                for (int i = 0; i < N; ++i) {
-                    S   += m_eeq_Z2[i];
-                    Cz1 += m_eeq_z1[i];
+                if (used_gpu_schur) {
+                    // WP5-A: charges already on GPU (d_rhs[0..N-1] in EEQ solver).
+                    // D2D copy into impl.d_charges — skips H2D upload in Phase-2.
+                    m_gpu_workspace->setEEQDeviceCharges(m_eeq_gpu->getDeviceChargesPtr());
+                    // Download for storeChargesFromGPU() — EEQ stream already synced.
+                    cudaMemcpy(m_eeq_charges_gpu.data(), m_eeq_gpu->getDeviceChargesPtr(),
+                               N * sizeof(double), cudaMemcpyDeviceToHost);
+                    m_gfnff->storeChargesFromGPU(m_eeq_charges_gpu.data(), N);
+                } else {
+                    // CPU Schur complement: q = z1 - Z2 * λ  (nfrag>1 or WP2 fallback)
+                    double S = 0.0, Cz1 = 0.0;
+                    for (int i = 0; i < N; ++i) {
+                        S   += m_eeq_Z2[i];
+                        Cz1 += m_eeq_z1[i];
+                    }
+                    double lambda = (Cz1 - rhs_c0) / S;
+                    for (int i = 0; i < N; ++i)
+                        m_eeq_charges_gpu[i] = m_eeq_z1[i] - m_eeq_Z2[i] * lambda;
+                    charges = Eigen::Map<const Vector>(m_eeq_charges_gpu.data(), N);
+                    m_gfnff->storeChargesFromGPU(m_eeq_charges_gpu.data(), N);
+                    m_gpu_workspace->setEEQCharges(charges);
                 }
-                double lambda = (Cz1 - rhs_c0) / S;
-                for (int i = 0; i < N; ++i)
-                    m_eeq_charges_gpu[i] = m_eeq_z1[i] - m_eeq_Z2[i] * lambda;
-
-                charges = Eigen::Map<const Vector>(m_eeq_charges_gpu.data(), N);
-                m_gfnff->storeChargesFromGPU(m_eeq_charges_gpu.data(), N);
                 used_gpu_eeq = true;
             } else {
                 CurcumaLogger::warn("GPU EEQ Cholesky failed (not SPD), falling back to CPU solver");
@@ -586,13 +616,14 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
             // CPU Phase 2 EEQ fallback (cached from InitialiseMolecule on first step)
             m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/false);
             charges = m_gfnff->getLastCharges();
+            m_gpu_workspace->setEEQCharges(charges);
         }
     }
 
     auto t_eeq_end = std::chrono::high_resolution_clock::now();
 
-    // === Upload EEQ charges and finish: Coulomb + postprocess + download ===
-    m_gpu_workspace->setEEQCharges(charges);
+    // === Finish: Coulomb + postprocess + download ===
+    // Note: setEEQCharges / setEEQDeviceCharges already called above per path.
     m_last_energy = m_gpu_workspace->launchChargeDependentAndFinish(gradient);
     auto t4 = std::chrono::high_resolution_clock::now();
 

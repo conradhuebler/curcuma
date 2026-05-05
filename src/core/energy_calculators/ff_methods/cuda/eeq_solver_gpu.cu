@@ -590,3 +590,146 @@ bool EEQSolverGPU::solveAndComputeCharges(
 
     return true;
 }
+
+// ============================================================================
+// solveWithDeviceRHSAndGPUSchur (WP5-A) — WP2 solve + GPU Schur complement
+// Claude Generated (May 2026): Eliminates 22 KB D2H (z1+Z2) + O(N) CPU loop
+// + 11 KB H2D (charges). Only the Schur scalar lambda crosses CPU boundary.
+// ============================================================================
+
+bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchur(
+    int natoms, int nfrag,
+    const double* cx, const double* cy, const double* cz,
+    const double* d_alpha_corrected,
+    const double* d_gam_corrected,
+    const double* d_rhs_atoms,
+    const std::vector<int>& fraglist,
+    double rhs_c0,
+    bool force_refactor)
+{
+    // Only nfrag == 1 supported; multi-fragment needs batched Cholesky (future work)
+    if (nfrag != 1) return false;
+
+    const int N = natoms;
+    const int nrhs = nfrag + 1;  // col0: b_atoms, col1: fragment indicator
+
+    const bool do_refactor = force_refactor
+                          || !m_impl->m_has_cached_factor
+                          || (N != m_last_N);
+
+    if (do_refactor) {
+        // Build N×N Coulomb matrix on GPU (alpha/gam already on device via WP2)
+        {
+            int n_lower = N * (N + 1) / 2;
+            int block = 256;
+            int grid = (n_lower + block - 1) / block;
+            k_eeq_build_matrix<<<grid, block, 0, m_impl->stream>>>(
+                N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, m_impl->d_A.ptr, 0.0);
+        }
+
+        if (N != m_last_N) {
+            int lwork = 0;
+            checkCusolverEEQ(
+                cusolverDnDpotrf_bufferSize(m_impl->cusolver_handle,
+                                             CUBLAS_FILL_MODE_LOWER,
+                                             N, m_impl->d_A.ptr, N, &lwork),
+                "potrf_bufferSize");
+            m_impl->workspace_size = lwork;
+            if (m_impl->d_workspace.n < lwork)
+                m_impl->d_workspace.alloc(lwork);
+            m_last_N = N;
+        }
+
+        checkCusolverEEQ(
+            cusolverDnDpotrf(m_impl->cusolver_handle,
+                              CUBLAS_FILL_MODE_LOWER,
+                              N, m_impl->d_A.ptr, N,
+                              m_impl->d_workspace.ptr, m_impl->workspace_size,
+                              m_impl->d_info.ptr),
+            "cusolverDnDpotrf");
+
+        checkCudaEEQ(cudaMemcpyAsync(m_impl->h_info, m_impl->d_info.ptr, sizeof(int),
+                                      cudaMemcpyDeviceToHost, m_impl->stream),
+                     "download d_info");
+        checkCudaEEQ(cudaStreamSynchronize(m_impl->stream), "sync after potrf");
+
+        if (*m_impl->h_info != 0) {
+            m_impl->m_has_cached_factor = false;
+            return false;
+        }
+        m_impl->m_has_cached_factor = true;
+    }
+
+    // Build RHS: col0 = d_rhs_atoms (D2D), col1 = fragment indicator (H2D, topology-constant)
+    {
+        const int rhs_size = N * nrhs;
+        if (m_impl->d_rhs.n < rhs_size)
+            m_impl->d_rhs.alloc(rhs_size);
+
+        checkCudaEEQ(cudaMemcpy(m_impl->d_rhs.ptr, d_rhs_atoms, N * sizeof(double),
+                                 cudaMemcpyDeviceToDevice),
+                     "D2D rhs_atoms col0");
+
+        // Column 1: binary fragment indicator (topology-constant for nfrag=1)
+        if (m_impl->m_h_rhs_cache.size() < (size_t)N)
+            m_impl->m_h_rhs_cache.assign(N, 0.0);
+        else
+            std::fill(m_impl->m_h_rhs_cache.begin(), m_impl->m_h_rhs_cache.begin() + N, 0.0);
+
+        if (fraglist.empty()) {
+            std::fill(m_impl->m_h_rhs_cache.begin(), m_impl->m_h_rhs_cache.begin() + N, 1.0);
+        } else {
+            for (int j = 0; j < N; ++j)
+                if (fraglist[j] == 1) m_impl->m_h_rhs_cache[j] = 1.0;
+        }
+        checkCudaEEQ(cudaMemcpy(m_impl->d_rhs.ptr + N, m_impl->m_h_rhs_cache.data(),
+                                 N * sizeof(double), cudaMemcpyHostToDevice),
+                     "H2D constraint col1");
+    }
+
+    // Triangular solve: L·L^T · X = B (in-place, d_rhs[0..N-1]=z1, d_rhs[N..2N-1]=Z2)
+    checkCusolverEEQ(
+        cusolverDnDpotrs(m_impl->cusolver_handle,
+                          CUBLAS_FILL_MODE_LOWER,
+                          N, nrhs,
+                          m_impl->d_A.ptr, N,
+                          m_impl->d_rhs.ptr, N,
+                          m_impl->d_info.ptr),
+        "cusolverDnDpotrs");
+
+    // GPU Schur: q[i] = z1[i] - Z2[i] * lambda
+    //   lambda = (sum(z1) - rhs_c0) / sum(Z2)
+    if (m_impl->d_sums.n < 2)
+        m_impl->d_sums.alloc(2);
+    cudaMemsetAsync(m_impl->d_sums.ptr, 0, 2 * sizeof(double), m_impl->stream);
+
+    int rb = 256, rg = (N + rb - 1) / rb;
+    k_eeq_reduce_sums<<<rg, rb, 2 * rb * sizeof(double), m_impl->stream>>>(
+        N, m_impl->d_rhs.ptr, m_impl->d_sums.ptr);
+
+    // Download only 2 scalars (16 bytes) for lambda — not the full N-vector
+    double h_sums[2] = {0.0, 0.0};
+    checkCudaEEQ(cudaMemcpyAsync(h_sums, m_impl->d_sums.ptr, 2 * sizeof(double),
+                                  cudaMemcpyDeviceToHost, m_impl->stream),
+                 "download Schur sums");
+    checkCudaEEQ(cudaStreamSynchronize(m_impl->stream), "sync after reduce");
+
+    double Cz1    = h_sums[0];
+    double S      = h_sums[1];
+    double lambda = (Cz1 - rhs_c0) / S;
+
+    // Write charges into d_rhs[0..N-1] (overwrites z1 in-place)
+    int b = 256, g = (N + b - 1) / b;
+    k_eeq_schur_nfrag1<<<g, b, 0, m_impl->stream>>>(
+        N, m_impl->d_rhs.ptr, lambda, m_impl->d_rhs.ptr);
+
+    // Sync so caller can safely D2D-copy from getDeviceChargesPtr()
+    checkCudaEEQ(cudaStreamSynchronize(m_impl->stream), "sync after schur_nfrag1");
+
+    return true;
+}
+
+double* EEQSolverGPU::getDeviceChargesPtr()
+{
+    return m_impl->d_rhs.ptr;
+}

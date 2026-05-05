@@ -84,6 +84,12 @@ public:
     /// Set dynamic EEQ charges (geometry-dependent, size N)
     void setEEQCharges(const Vector& q);
 
+    /// WP5-A: D2D path — charges already on GPU after GPU Schur complement.
+    /// Enqueues a D2D copy on the main workspace stream; no H2D upload happens
+    /// in launchChargeDependentAndFinish() for this step.
+    /// Caller must ensure d_src is valid (EEQ stream fully synced) before calling.
+    void setEEQDeviceCharges(const double* d_src);
+
     /// Set topology charges (size N — used for BATM kernel)
     void setTopologyCharges(const Vector& q);
 
@@ -504,6 +510,7 @@ private:
     // Dynamic per-step state
     Vector  m_eeq_charges;
     Vector  m_topology_charges;
+    bool    m_device_charges_ready = false;  ///< WP5-A: set by setEEQDeviceCharges(), skips H2D upload
 
     // Last uploaded HB/XB bond lists (for CPU vs GPU comparison debugging)
     std::vector<GFNFFHydrogenBond> m_last_hbonds;

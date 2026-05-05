@@ -118,6 +118,39 @@ public:
         double cutoff_sq = 0.0
     );
 
+    /**
+     * @brief WP5-A: WP2 solve + GPU-side Schur complement (no D2H for z1/Z2).
+     *
+     * Replaces the 22 KB D2H + CPU O(N) Schur loop + 11 KB H2D with:
+     *   - k_eeq_reduce_sums (sum z1, Z2 on GPU)
+     *   - 2-scalar D2H (16 bytes) for lambda
+     *   - k_eeq_schur_nfrag1 (charges stored in d_rhs[0..N-1])
+     *
+     * On success: charges available via getDeviceChargesPtr().
+     * Caller must NOT call setEEQCharges() afterwards — use setEEQDeviceCharges() instead.
+     *
+     * Only supported for nfrag == 1 (fast path). Returns false for nfrag > 1
+     * or if Cholesky fails; caller must fall back to CPU solve + setEEQCharges().
+     *
+     * @param rhs_c0         m_eeq_rhs_constraints[0] — target fragment charge (scalar)
+     * @param force_refactor See solveWithDeviceRHS()
+     */
+    bool solveWithDeviceRHSAndGPUSchur(
+        int natoms, int nfrag,
+        const double* cx, const double* cy, const double* cz,
+        const double* d_alpha_corrected,
+        const double* d_gam_corrected,
+        const double* d_rhs_atoms,
+        const std::vector<int>& fraglist,
+        double rhs_c0,
+        bool force_refactor = true
+    );
+
+    /// WP5-A: Device pointer to EEQ charges after successful solveWithDeviceRHSAndGPUSchur().
+    /// Points to d_rhs[0..N-1] (valid until next solve call).
+    /// EEQ stream is fully synced before return — safe to use immediately on any stream.
+    double* getDeviceChargesPtr();
+
 private:
     std::unique_ptr<EEQSolverGPUImpl> m_impl;
     int m_max_natoms;

@@ -885,7 +885,12 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
 
     // dEdcn snapshot — always needed: dEdcnTotal() is public API (Coulomb chain-rule)
     m_impl->d_dEdcn_snapshot.alloc(natoms);
-    // grad snapshot — kept for CUDA graph gating (need_snapshots check in prepareAndLaunch)
+    // grad snapshot — always allocated to keep need_snapshots=true, which disables
+    // Phase-1 CUDA graph capture. Graph capture fails on RTX 5080 (Blackwell): the
+    // cudaStreamBeginCapture path captures kernels without executing them; if
+    // cudaStreamEndCapture then fails, Phase-1 work is silently dropped → energy=0.
+    // Keeping this allocated gates both Phase-1 and Phase-2 graph capture off.
+    // Cost: ~32 KB (N3 doubles) GPU memory; acceptable until graph isolation is solved.
     m_impl->d_grad_snapshot.alloc(N3);
     // d_grad_after_* are debug-only snapshots. NOT allocated in normal mode:
     // keeping them null sets force_single_stream=false → enables 3-stream parallelism.
@@ -1087,6 +1092,15 @@ void FFWorkspaceGPU::invalidateGraph()
 void FFWorkspaceGPU::setEEQCharges(const Vector& q)
 {
     m_eeq_charges = q;
+}
+
+void FFWorkspaceGPU::setEEQDeviceCharges(const double* d_src)
+{
+    // WP5-A: d_src is d_rhs[0..N-1] from EEQ solver (EEQ stream fully synced by caller).
+    // Enqueue D2D copy on main workspace stream — no CPU involvement.
+    cudaMemcpyAsync(m_impl->d_charges.ptr, d_src, m_natoms * sizeof(double),
+                    cudaMemcpyDeviceToDevice, m_impl->stream);
+    m_device_charges_ready = true;
 }
 
 void FFWorkspaceGPU::setTopologyCharges(const Vector& q)
@@ -1571,10 +1585,11 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // was captured on the first call and is replayed here via cudaGraphLaunch().
     // CPU-GPU overlap with EEQ is preserved: cudaGraphLaunch() is asynchronous.
     // =========================================================================
-    // need_snapshots=true when d_dEdcn_snapshot and d_grad_snapshot are allocated.
-    // d_grad_snapshot is deliberately kept allocated to disable CUDA graph capture:
-    // event_pairwise/bonded/threebody are shared between Phase 1 graph and Phase 2 code;
-    // capturing them creates undefined event state after replay. (graph left for future refactor)
+    // need_snapshots=true when both snapshot buffers are allocated (always true in practice).
+    // d_grad_snapshot is always allocated to keep need_snapshots=true, disabling graph capture.
+    // Phase-1 graph capture fails on RTX 5080: captured kernels are silently dropped when
+    // cudaStreamEndCapture fails (stream isolation due to pending non-captured work on worker
+    // streams). Keep graph capture disabled until root cause is resolved on Blackwell.
     const bool need_snapshots = impl.d_dEdcn_snapshot.ptr && impl.d_grad_snapshot.ptr;
     const bool force_single_stream = (gradient && impl.d_grad_after_bonds.ptr);
     if (impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream) {
@@ -2005,12 +2020,23 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     //   d_grad_snapshot is deliberately kept allocated (see Phase 1 comment at
     //   prepareAndLaunchChargeIndependent()) so this guard always disables capture
     //   until stream isolation is solved.
-    // =========================================================================
-    // Matches Phase 1: disabled when snapshot buffers are present (always true in practice)
+    // Phase-1 graph flag: if Phase-1 ran as a graph, all its sub-streams (sA, sB, sC)
+    // are fully synchronized to the main stream before Phase-2 entries execute.
+    // Phase-1-internal events (event_bonded, event_threebody) are NOT externally signaled
+    // after graph replay → Phase-2 must NOT wait on them in that case.
+    const bool p1_was_graph = impl.m_graph_phase1_valid;
+
+    // WP5-A fix: d_grad_snapshot is only allocated at verbosity >= 3 now.
+    // p2_snapshot_guard is false in normal mode → capture guard is pure verbosity check.
     const bool p2_snapshot_guard      = impl.d_dEdcn_snapshot.ptr && impl.d_grad_snapshot.ptr;
     const bool p2_need_snapshots      = (m_verbosity >= 3) || p2_snapshot_guard;
     const bool p2_force_single_stream = (gradient && impl.d_grad_after_bonds.ptr);
-    const bool p2_capture_disabled    = p2_need_snapshots || p2_force_single_stream;
+    // Phase-1 graph fix: when Phase-1 ran as a graph, stream_pairwise may still have
+    // pending graph work when Phase-2 tries to begin capture. CUDA rejects the
+    // cudaStreamWaitEvent join with cudaErrorStreamCaptureIsolation, invalidating
+    // the Phase-2 capture and causing all charge-dependent kernels to be silently
+    // skipped → energy = 0. Disable Phase-2 capture whenever Phase-1 is graph-active.
+    const bool p2_capture_disabled    = p2_need_snapshots || p2_force_single_stream || p1_was_graph;
     bool&            p2_valid = gradient ? impl.m_graph_phase2_grad_valid
                                          : impl.m_graph_phase2_energy_valid;
     cudaGraph_t&     p2_graph = gradient ? impl.m_graph_phase2_grad
@@ -2029,9 +2055,13 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
         }
 
     // =========================================================================
-    // 1. Upload EEQ charges (the CPU EEQ solver has completed by now)
+    // 1. Upload EEQ charges
+    //    WP5-A: if setEEQDeviceCharges() was called, charges are already in
+    //    impl.d_charges via D2D — skip H2D upload and reset the flag.
     // =========================================================================
-    if (m_eeq_charges.size() == N) {
+    if (m_device_charges_ready) {
+        m_device_charges_ready = false;  // consumed; next step will upload normally
+    } else if (m_eeq_charges.size() == N) {
         impl.d_charges.upload(m_eeq_charges.data(), N, stream);
     }
 
@@ -2098,9 +2128,11 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     const bool need_snapshots = (m_verbosity >= 3);
     if (m_coulomb_enabled && impl.coul_self_on_gpu) {
         // Wait for pairwise+bonded streams (dEdcn dependency for qtmp subtraction).
-        // WP4: event_p2_pairwise for phase-2 pairwise sync (event_bonded recorded by Phase 1).
+        // event_p2_pairwise: Phase-2-dedicated — always wait (records k_coulomb completion).
+        // event_bonded: Phase-1-internal — skip if Phase-1 ran as graph (already sequenced).
         cudaStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
-        cudaStreamWaitEvent(stream, impl.event_bonded, 0);
+        if (!p1_was_graph)
+            cudaStreamWaitEvent(stream, impl.event_bonded, 0);
 
         // d_dEdcn_snapshot must always be populated — dEdcnTotal() is public API
         // used by external code (tests, chain-rule validation) regardless of verbosity.
@@ -2133,10 +2165,13 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // k_cn_chainrule: reads d_dEdcn (must be final) and d_grad (accumulated by ALL
     // kernels), so wait for all 3 stream events.
     if (gradient && m_cn_pairs_on_gpu && impl.n_cn_pairs > 0 && impl.d_dlogdcn.ptr) {
-        // WP4: event_p2_pairwise for phase-2 pairwise sync; event_bonded/threebody from Phase 1.
+        // event_p2_pairwise: Phase-2-dedicated — always wait.
+        // event_bonded/threebody: Phase-1-internal — skip if Phase-1 ran as graph.
         cudaStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
-        cudaStreamWaitEvent(stream, impl.event_bonded, 0);
-        cudaStreamWaitEvent(stream, impl.event_threebody, 0);
+        if (!p1_was_graph) {
+            cudaStreamWaitEvent(stream, impl.event_bonded, 0);
+            cudaStreamWaitEvent(stream, impl.event_threebody, 0);
+        }
 
         if (need_snapshots) {
             cudaMemcpyAsync(impl.d_grad_snapshot.ptr, impl.d_grad.ptr,
@@ -2163,10 +2198,14 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // Claude Generated (March 2026): All D2H transfers enqueued on main stream,
     // single cudaStreamSynchronize at end. Pinned buffers enable true async DMA.
     // =========================================================================
-    // WP4: event_p2_pairwise for phase-2 pairwise sync (final D2H pre-fence).
+    // Final fence before D2H: wait for all Phase-2 stream work.
+    // event_p2_pairwise: Phase-2-dedicated (dispersion + Coulomb on stream_pairwise).
+    // event_bonded/threebody: Phase-1-internal — skip if Phase-1 ran as graph.
     cudaStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
-    cudaStreamWaitEvent(stream, impl.event_bonded, 0);
-    cudaStreamWaitEvent(stream, impl.event_threebody, 0);
+    if (!p1_was_graph) {
+        cudaStreamWaitEvent(stream, impl.event_bonded, 0);
+        cudaStreamWaitEvent(stream, impl.event_threebody, 0);
+    }
 
     checkCuda(cudaGetLastError(), "postprocess kernel launch check");
 
