@@ -731,6 +731,26 @@ struct FFWorkspaceGPUImpl {
     bool            m_graph_phase1_valid    = false;  ///< True when exec graph is ready to use
     cudaGraph_t     m_graph_phase1          = nullptr; ///< Captured graph (template)
     cudaGraphExec_t m_graph_exec_phase1     = nullptr; ///< Instantiated executable graph
+
+    // === WP4 (May 2026): Phase-2 CUDA Graph Capture ===
+    // launchChargeDependentAndFinish() is captured into one of two graph slots based on
+    // gradient mode (energy-only vs gradient). Replay eliminates ~35 µs/step of kernel-
+    // launch API overhead + ~10 µs of stream-event coordination on the charge-dependent
+    // phase. Disabled when verbosity >= 3 (extra grad_snapshot writes) or per-kernel
+    // diagnostics are active. Invalidated together with phase-1 graph on topology rebuild.
+    bool            m_graph_phase2_grad_valid     = false;
+    cudaGraph_t     m_graph_phase2_grad           = nullptr;
+    cudaGraphExec_t m_graph_exec_phase2_grad      = nullptr;
+    bool            m_graph_phase2_energy_valid   = false;
+    cudaGraph_t     m_graph_phase2_energy         = nullptr;
+    cudaGraphExec_t m_graph_exec_phase2_energy    = nullptr;
+    /// WP4: Dedicated phase-2 events. Decouple phase-2 capture from phase-1's events.
+    /// event_p2_pairwise: stream_pairwise → main stream sync (replaces event_pairwise inside Phase 2)
+    /// event_p2_upload:   main stream → stream_pairwise upload fence (replaces event_upload inside Phase 2)
+    /// Phase 2 still WAITS on event_bonded/event_threebody (recorded by Phase 1 graph), but never
+    /// records them — that one-way dependency is safe under cudaStreamCaptureModeThreadLocal.
+    cudaEvent_t     event_p2_pairwise             = nullptr;
+    cudaEvent_t     event_p2_upload               = nullptr;
 };
 
 // ============================================================================
@@ -800,6 +820,8 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_bonded, cudaEventDisableTiming), "cudaEventCreate bonded");
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_threebody, cudaEventDisableTiming), "cudaEventCreate threebody");
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_upload, cudaEventDisableTiming), "cudaEventCreate upload");
+    checkCuda(cudaEventCreateWithFlags(&m_impl->event_p2_pairwise, cudaEventDisableTiming), "cudaEventCreate p2_pairwise");
+    checkCuda(cudaEventCreateWithFlags(&m_impl->event_p2_upload, cudaEventDisableTiming), "cudaEventCreate p2_upload");
     cudaStream_t stream = m_impl->stream;
 
     // Upload covalent radii to constant memory (used by angle/dihedral distance damping)
@@ -978,19 +1000,26 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
         if (m_impl->stream_bonded)   cudaStreamSynchronize(m_impl->stream_bonded);
         if (m_impl->stream_threebody)cudaStreamSynchronize(m_impl->stream_threebody);
 
-        if (m_impl->event_pairwise)  cudaEventDestroy(m_impl->event_pairwise);
-        if (m_impl->event_bonded)    cudaEventDestroy(m_impl->event_bonded);
-        if (m_impl->event_threebody) cudaEventDestroy(m_impl->event_threebody);
-        if (m_impl->event_upload)    cudaEventDestroy(m_impl->event_upload);
+        if (m_impl->event_pairwise)    cudaEventDestroy(m_impl->event_pairwise);
+        if (m_impl->event_bonded)      cudaEventDestroy(m_impl->event_bonded);
+        if (m_impl->event_threebody)   cudaEventDestroy(m_impl->event_threebody);
+        if (m_impl->event_upload)      cudaEventDestroy(m_impl->event_upload);
+        if (m_impl->event_p2_pairwise) cudaEventDestroy(m_impl->event_p2_pairwise);
+        if (m_impl->event_p2_upload)   cudaEventDestroy(m_impl->event_p2_upload);
 
         if (m_impl->stream)          cudaStreamDestroy(m_impl->stream);
         if (m_impl->stream_pairwise) cudaStreamDestroy(m_impl->stream_pairwise);
         if (m_impl->stream_bonded)   cudaStreamDestroy(m_impl->stream_bonded);
         if (m_impl->stream_threebody)cudaStreamDestroy(m_impl->stream_threebody);
 
-        // Phase 8: destroy graph objects
+        // Phase 8: destroy phase-1 graph objects
         if (m_impl->m_graph_exec_phase1) cudaGraphExecDestroy(m_impl->m_graph_exec_phase1);
         if (m_impl->m_graph_phase1)      cudaGraphDestroy(m_impl->m_graph_phase1);
+        // WP4: destroy phase-2 graph objects (gradient + energy slots)
+        if (m_impl->m_graph_exec_phase2_grad)   cudaGraphExecDestroy(m_impl->m_graph_exec_phase2_grad);
+        if (m_impl->m_graph_phase2_grad)        cudaGraphDestroy(m_impl->m_graph_phase2_grad);
+        if (m_impl->m_graph_exec_phase2_energy) cudaGraphExecDestroy(m_impl->m_graph_exec_phase2_energy);
+        if (m_impl->m_graph_phase2_energy)      cudaGraphDestroy(m_impl->m_graph_phase2_energy);
     }
 
     // Free pinned memory staging buffers
@@ -1027,6 +1056,28 @@ void FFWorkspaceGPU::invalidateGraph()
         impl.m_graph_phase1 = nullptr;
     }
     impl.m_graph_phase1_valid = false;
+
+    // WP4: invalidate phase-2 gradient slot
+    if (impl.m_graph_exec_phase2_grad) {
+        cudaGraphExecDestroy(impl.m_graph_exec_phase2_grad);
+        impl.m_graph_exec_phase2_grad = nullptr;
+    }
+    if (impl.m_graph_phase2_grad) {
+        cudaGraphDestroy(impl.m_graph_phase2_grad);
+        impl.m_graph_phase2_grad = nullptr;
+    }
+    impl.m_graph_phase2_grad_valid = false;
+
+    // WP4: invalidate phase-2 energy slot
+    if (impl.m_graph_exec_phase2_energy) {
+        cudaGraphExecDestroy(impl.m_graph_exec_phase2_energy);
+        impl.m_graph_exec_phase2_energy = nullptr;
+    }
+    if (impl.m_graph_phase2_energy) {
+        cudaGraphDestroy(impl.m_graph_phase2_energy);
+        impl.m_graph_phase2_energy = nullptr;
+    }
+    impl.m_graph_phase2_energy_valid = false;
 }
 
 // ============================================================================
@@ -1946,6 +1997,38 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     cudaStream_t stream = impl.stream;
 
     // =========================================================================
+    // WP4 (May 2026): Phase-2 CUDA-Graph capture / replay
+    //   Two graph slots — one for gradient=true, one for energy-only — kept in step
+    //   with the topology cache (invalidateGraph() destroys both alongside Phase 1).
+    //   Capture guard matches Phase 1: stream_pairwise must be idle (no pending Phase 1
+    //   non-captured work) before it can be joined to a capture via cudaStreamWaitEvent.
+    //   d_grad_snapshot is deliberately kept allocated (see Phase 1 comment at
+    //   prepareAndLaunchChargeIndependent()) so this guard always disables capture
+    //   until stream isolation is solved.
+    // =========================================================================
+    // Matches Phase 1: disabled when snapshot buffers are present (always true in practice)
+    const bool p2_snapshot_guard      = impl.d_dEdcn_snapshot.ptr && impl.d_grad_snapshot.ptr;
+    const bool p2_need_snapshots      = (m_verbosity >= 3) || p2_snapshot_guard;
+    const bool p2_force_single_stream = (gradient && impl.d_grad_after_bonds.ptr);
+    const bool p2_capture_disabled    = p2_need_snapshots || p2_force_single_stream;
+    bool&            p2_valid = gradient ? impl.m_graph_phase2_grad_valid
+                                         : impl.m_graph_phase2_energy_valid;
+    cudaGraph_t&     p2_graph = gradient ? impl.m_graph_phase2_grad
+                                         : impl.m_graph_phase2_energy;
+    cudaGraphExec_t& p2_exec  = gradient ? impl.m_graph_exec_phase2_grad
+                                         : impl.m_graph_exec_phase2_energy;
+    bool p2_capturing = false;
+
+    if (p2_valid && !p2_capture_disabled) {
+        // Replay: cudaGraphLaunch is async; sync + extraction happen below.
+        cudaGraphLaunch(p2_exec, stream);
+    } else {
+        if (!p2_valid && !p2_capture_disabled) {
+            cudaError_t cap_err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+            p2_capturing = (cap_err == cudaSuccess);
+        }
+
+    // =========================================================================
     // 1. Upload EEQ charges (the CPU EEQ solver has completed by now)
     // =========================================================================
     if (m_eeq_charges.size() == N) {
@@ -1957,9 +2040,11 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     //    Wait for charge-independent pairwise kernels to finish first,
     //    since these kernels write to the same d_grad/d_energies buffers.
     // =========================================================================
-    // Record event on main stream (after charge upload) so pairwise stream can wait
-    cudaEventRecord(impl.event_upload, stream);
-    cudaStreamWaitEvent(impl.stream_pairwise, impl.event_upload, 0);
+    // Record event on main stream (after charge upload) so pairwise stream can wait.
+    // WP4: dedicated phase-2 event (event_p2_upload) to keep capture isolated from
+    // phase-1's event_upload, which is recorded inside the phase-1 graph.
+    cudaEventRecord(impl.event_p2_upload, stream);
+    cudaStreamWaitEvent(impl.stream_pairwise, impl.event_p2_upload, 0);
 
     // k_dispersion (gradient mode): deferred from Phase 1.
     // computeGaussianWeightsOnGPU() was called after Phase 1 (using d_cn, current step)
@@ -1998,8 +2083,9 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_COUL]);
     }
-    // Re-record pairwise event to include k_coulomb completion
-    cudaEventRecord(impl.event_pairwise, impl.stream_pairwise);
+    // Re-record pairwise event to include k_coulomb completion.
+    // WP4: event_p2_pairwise — phase-2-dedicated, never aliased with phase-1 graph.
+    cudaEventRecord(impl.event_p2_pairwise, impl.stream_pairwise);
 
     // =========================================================================
     // 3. Postprocess on main stream
@@ -2011,8 +2097,9 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
 
     const bool need_snapshots = (m_verbosity >= 3);
     if (m_coulomb_enabled && impl.coul_self_on_gpu) {
-        // Wait for pairwise+bonded streams (dEdcn dependency for qtmp subtraction)
-        cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
+        // Wait for pairwise+bonded streams (dEdcn dependency for qtmp subtraction).
+        // WP4: event_p2_pairwise for phase-2 pairwise sync (event_bonded recorded by Phase 1).
+        cudaStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
         cudaStreamWaitEvent(stream, impl.event_bonded, 0);
 
         // d_dEdcn_snapshot must always be populated — dEdcnTotal() is public API
@@ -2046,7 +2133,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // k_cn_chainrule: reads d_dEdcn (must be final) and d_grad (accumulated by ALL
     // kernels), so wait for all 3 stream events.
     if (gradient && m_cn_pairs_on_gpu && impl.n_cn_pairs > 0 && impl.d_dlogdcn.ptr) {
-        cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
+        // WP4: event_p2_pairwise for phase-2 pairwise sync; event_bonded/threebody from Phase 1.
+        cudaStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
         cudaStreamWaitEvent(stream, impl.event_bonded, 0);
         cudaStreamWaitEvent(stream, impl.event_threebody, 0);
 
@@ -2075,7 +2163,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // Claude Generated (March 2026): All D2H transfers enqueued on main stream,
     // single cudaStreamSynchronize at end. Pinned buffers enable true async DMA.
     // =========================================================================
-    cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
+    // WP4: event_p2_pairwise for phase-2 pairwise sync (final D2H pre-fence).
+    cudaStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
     cudaStreamWaitEvent(stream, impl.event_bonded, 0);
     cudaStreamWaitEvent(stream, impl.event_threebody, 0);
 
@@ -2138,6 +2227,28 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
                       "async grad after_sC download");
         }
     }
+
+        // === WP4: Phase-2 capture end + immediate replay ===
+        // BeginCapture suppressed real kernel execution; the captured graph must be
+        // launched once now to actually run this step's work (matches Phase 1 pattern).
+        if (p2_capturing) {
+            cudaError_t end_err = cudaStreamEndCapture(stream, &p2_graph);
+            if (end_err == cudaSuccess && p2_graph) {
+                cudaError_t inst_err = cudaGraphInstantiate(
+                    &p2_exec, p2_graph, NULL, NULL, 0);
+                if (inst_err == cudaSuccess) {
+                    p2_valid = true;
+                    cudaGraphLaunch(p2_exec, stream);
+                } else {
+                    cudaGraphDestroy(p2_graph);
+                    p2_graph = nullptr;
+                }
+            } else if (p2_graph) {
+                cudaGraphDestroy(p2_graph);
+                p2_graph = nullptr;
+            }
+        }
+    } // end else (WP4 replay-or-capture)
 
     // Single synchronization point — all async transfers complete here
     checkCuda(cudaStreamSynchronize(stream), "final stream sync");
@@ -2240,6 +2351,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             CurcumaLogger::info("=== GPU dEdcn END ===");
         }
 
+        const bool need_snapshots = (m_verbosity >= 3);
         if (need_snapshots) {
             m_grad_before_cn.resize(N, 3);
             for (int i = 0; i < N; ++i) {

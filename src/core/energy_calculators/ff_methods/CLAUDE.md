@@ -610,6 +610,16 @@ std::string method = "d4";  // Matches Fortran reference
 - **Gemessener Gewinn**: ~4 ms/Schritt (27ms→23ms, N=1410 Polymer, 1000 MD-Schritte)
 - **CSVR-Numerik**: marginale Abweichungen erwartet (atomicAdd nicht-deterministisch), <1 nEh Energiefehler
 
+### ⚠️ WP4: Phase-2 CUDA-Graph-Infrastruktur (Mai 2026) — Graph-Capture deaktiviert
+- **Ziel**: `launchChargeDependentAndFinish()` als CUDA-Graph capturieren (~35 µs/Schritt Kernel-Launch-Overhead)
+- **Neue Events**: `event_p2_pairwise`, `event_p2_upload` — dediziert für Phase 2, lösen Event-Sharing-Problem mit Phase-1-Graph
+- **Zwei Graph-Slots**: gradient=true und gradient=false getrennt, synchron mit Topo-Cache invalidiert
+- **Graph-Capture deaktiviert** (`p2_snapshot_guard`): `stream_pairwise` hat beim Capture-Start noch ausstehende Phase-1-Arbeit (non-captured) → CUDA lehnt `cudaStreamWaitEvent`-Join ab (`cudaErrorStreamCaptureIsolation`) → `cudaStreamEndCapture` schlägt fehl → kein Graph-Launch → Energie=0
+- **Ursache**: Phase 1 kehrt asynchron zurück; `stream_pairwise` läuft noch mit Phase-1-Kerneln wenn Phase 2 den Capture startet. CUDA verbietet explizit das Joinen eines Streams mit pending non-captured work.
+- **Guard**: `p2_snapshot_guard = d_dEdcn_snapshot.ptr && d_grad_snapshot.ptr` — spiegelt Phase-1-Verhalten (d_grad_snapshot absichtlich alloziert gehalten)
+- **Offenes Problem**: Stream-Isolation erfordert Sync-Punkt nach Phase-1-Pairwise vor Capture-Start — zerstört CPU/GPU-Overlap-Struktur
+- **Infrastruktur bleibt**: Events, Graph-Slots, invalidateGraph() für spätere Lösung nutzbar
+
 ### ✅ Topology Caching (March 2026)
 - **Two-tier caching**: Static topology (bonds, rings, hybridization) cached until large geometry change (>0.5 Bohr)
 - **Dynamic state only**: CN and distance matrices updated each step (O(N²) vs O(N³) for full topology)
