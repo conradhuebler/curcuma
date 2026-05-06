@@ -162,13 +162,17 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
         m_gfnff->preAllocateForGPUPath(natoms);
 
         // Pre-allocate EEQ staging buffers before CUDA init (heap safety).
-        // m_eeq_Z2 is A^{-1} * C^T — size N × nfrag. Use actual nfrag from topology;
-        // the "max 8 fragments" hardcode was too small for multi-fragment systems.
+        // After FFWorkspaceGPU construction, CUDA may corrupt adjacent heap metadata,
+        // making any malloc/new crash. All per-step buffers must be allocated NOW.
         {
             int nfrag_actual = m_gfnff->getTopologyInfo().nfrag;
+            int nf = std::max(nfrag_actual, 1);
             m_eeq_z1.resize(natoms, 0.0);
-            m_eeq_Z2.resize(natoms * std::max(nfrag_actual, 1), 0.0);
+            m_eeq_Z2.resize(natoms * nf, 0.0);
             m_eeq_charges_gpu.resize(natoms, 0.0);
+            // CPU Schur workspace: [S: nf×nf | rhs: nf | lambda: nf]
+            // Avoids Eigen MatrixXd/VectorXd heap allocs in the nfrag>1 hot path.
+            m_schur_workspace.assign(nf * (nf + 2), 0.0);
         }
 
         // === 1. Create GPU workspace from full parameter set ===
@@ -223,6 +227,10 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
             m_eeq_fraglist         = topo_params.fraglist;
             m_eeq_rhs_constraints  = topo_params.rhs_constraints;
             m_eeq_nfrag            = topo_params.nfrag;
+
+            // WP6: upload fragment topology for batched Cholesky (nfrag > 1)
+            if (m_eeq_nfrag > 1)
+                m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, natoms);
         }
 
         if (CurcumaLogger::get_verbosity() >= 1) {
@@ -424,7 +432,8 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // WP5-D (May 2026): In the normal GPU path (nfrag==1, not skip_phase2) no CPU
     // consumer of CN remains after WP5-B+C. finalizeCNForCPU + prepareCNAndEEQ are
     // kept only for fallback branches that still need CPU-side CN/EEQ.
-    if (m_skip_phase2 || m_eeq_nfrag != 1) {
+    // WP6 (May 2026): nfrag > 1 with valid fragment topology also skips CPU path.
+    if (m_skip_phase2 || (m_eeq_nfrag != 1 && !m_eeq_gpu->isFragmentTopoValid())) {
         m_gpu_workspace->finalizeCNForCPU(m_gpu_cn_final);
         m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/true);
     }
@@ -447,6 +456,10 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         m_eeq_fraglist        = topo_params.fraglist;
         m_eeq_rhs_constraints = topo_params.rhs_constraints;
         m_eeq_nfrag           = topo_params.nfrag;
+
+        // WP6: upload fragment topology for batched Cholesky (nfrag > 1)
+        if (m_eeq_nfrag > 1)
+            m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, N);
     }
 
     // WP5-B (May 2026): setCNDerivatives no-op — CNF lives on GPU as eeq_topo.d_cnf.
@@ -475,15 +488,19 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         // fraglist and nfrag are cached from last topology build (m_eeq_fraglist/m_eeq_nfrag).
         const bool use_device_rhs = m_gpu_workspace->isEEQTopoValid();
 
-        // Guard: Z2 buffer must hold N × nfrag elements
-        if (static_cast<int>(m_eeq_Z2.size()) < N * m_eeq_nfrag) {
+        // Guard: z1, Z2 and charges buffers must be large enough
+        if (static_cast<int>(m_eeq_z1.size()) < N)
+            m_eeq_z1.resize(N, 0.0);
+        if (static_cast<int>(m_eeq_Z2.size()) < N * m_eeq_nfrag)
             m_eeq_Z2.resize(N * m_eeq_nfrag, 0.0);
-        }
+        if (static_cast<int>(m_eeq_charges_gpu.size()) < N)
+            m_eeq_charges_gpu.resize(N, 0.0);
 
-        // GPU EEQ is only applicable for nfrag==1 (single connected system).
-        // For nfrag>1 (multi-fragment box): use CPU Phase 2 charges directly.
-        // TODO: replace with batched per-fragment Cholesky for multi-fragment GPU path.
-        const bool gpu_eeq_applicable = (m_eeq_nfrag == 1);
+        // GPU EEQ paths:
+        //   nfrag == 1: WP5-A single-fragment Cholesky (always applicable)
+        //   nfrag >  1: WP6 batched per-fragment Cholesky (applicable once topo uploaded)
+        const bool gpu_eeq_applicable = (m_eeq_nfrag == 1)
+            || (m_eeq_nfrag > 1 && m_eeq_gpu->isFragmentTopoValid());
 
         bool used_gpu_eeq = false;
         const double rhs_c0 = m_eeq_rhs_constraints.empty() ? 0.0 : m_eeq_rhs_constraints[0];
@@ -495,6 +512,12 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         const double eeq_cutoff_sq = (N > 200 && m_eeq_distance_cutoff > 0.0)
                                        ? m_eeq_distance_cutoff * m_eeq_distance_cutoff
                                        : 0.0;
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info(fmt::format("EEQ GPU Phase 2: N={}, nfrag={}, path={}",
+                N, m_eeq_nfrag,
+                gpu_eeq_applicable ? (m_eeq_nfrag == 1 ? "WP5-A GPU-Schur" : "WP2 Cholesky+CPU-Schur") : "CPU-fallback"));
+        }
 
         if (gpu_eeq_applicable) {
             // RMSD-based EEQ lazy refactorization:
@@ -519,25 +542,43 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
             bool used_gpu_schur = false;
 
             if (use_device_rhs) {
-                // WP5-A: try GPU Schur path first (nfrag==1 only).
-                // Eliminates 22 KB D2H (z1+Z2) + CPU O(N) Schur loop + 11 KB H2D.
-                // Falls back to WP2 CPU-Schur for nfrag>1 or Cholesky failure.
-                eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUSchur(
-                    N, m_eeq_nfrag,
-                    m_gpu_workspace->getDeviceXPtr(),
-                    m_gpu_workspace->getDeviceYPtr(),
-                    m_gpu_workspace->getDeviceZPtr(),
-                    m_gpu_workspace->getDeviceAlphaPtr(),
-                    m_gpu_workspace->getDeviceGamPtr(),
-                    m_gpu_workspace->getDeviceRHSPtr(),
-                    m_eeq_fraglist,
-                    rhs_c0,
-                    eeq_cutoff_sq,
-                    force_refactor);
-                if (eeq_ok) {
-                    used_gpu_schur = true;  // restore original
+                if (m_eeq_nfrag == 1) {
+                    // WP5-A: single-fragment GPU Schur (fast path).
+                    eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUSchur(
+                        N, 1,
+                        m_gpu_workspace->getDeviceXPtr(),
+                        m_gpu_workspace->getDeviceYPtr(),
+                        m_gpu_workspace->getDeviceZPtr(),
+                        m_gpu_workspace->getDeviceAlphaPtr(),
+                        m_gpu_workspace->getDeviceGamPtr(),
+                        m_gpu_workspace->getDeviceRHSPtr(),
+                        m_eeq_fraglist,
+                        rhs_c0,
+                        eeq_cutoff_sq,
+                        force_refactor);
+                    if (eeq_ok) {
+                        used_gpu_schur = true;
+                    } else {
+                        // Cholesky failed (not SPD): fall back to WP2 + CPU Schur
+                        eeq_ok = m_eeq_gpu->solveWithDeviceRHS(
+                            N, 1,
+                            m_gpu_workspace->getDeviceXPtr(),
+                            m_gpu_workspace->getDeviceYPtr(),
+                            m_gpu_workspace->getDeviceZPtr(),
+                            m_gpu_workspace->getDeviceAlphaPtr(),
+                            m_gpu_workspace->getDeviceGamPtr(),
+                            m_gpu_workspace->getDeviceRHSPtr(),
+                            m_gpu_workspace->getDeviceRHSConstraintsPtr(),
+                            m_eeq_fraglist,
+                            m_eeq_z1.data(),
+                            m_eeq_Z2.data(),
+                            eeq_cutoff_sq,
+                            force_refactor);
+                    }
                 } else {
-                    // nfrag>1 or Cholesky failed: fall back to WP2 solve + CPU Schur
+                    // WP6: exact GPU solve for nfrag > 1, CPU Schur complement.
+                    // Batched per-fragment solver disabled: cross-fragment Coulomb is
+                    // non-negligible for close-contact fragments (pi-systems, complexes).
                     eeq_ok = m_eeq_gpu->solveWithDeviceRHS(
                         N, m_eeq_nfrag,
                         m_gpu_workspace->getDeviceXPtr(),
@@ -546,12 +587,13 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                         m_gpu_workspace->getDeviceAlphaPtr(),
                         m_gpu_workspace->getDeviceGamPtr(),
                         m_gpu_workspace->getDeviceRHSPtr(),
-                        m_gpu_workspace->getDeviceRHSConstraintsPtr(),
+                        nullptr,  // d_rhs_constraints not used by WP2
                         m_eeq_fraglist,
                         m_eeq_z1.data(),
                         m_eeq_Z2.data(),
                         eeq_cutoff_sq,
                         force_refactor);
+                    // On failure: fall through to CPU EEQ at line 622
                 }
             } else {
                 // Fallback: EEQ topo not yet uploaded to GPU (should not happen after init)
@@ -594,29 +636,108 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                                N * sizeof(double), cudaMemcpyDeviceToHost);
                     m_gfnff->storeChargesFromGPU(m_eeq_charges_gpu.data(), N);
                 } else {
-                    // CPU Schur complement: q = z1 - Z2 * λ  (nfrag>1 or WP2 fallback)
-                    double S = 0.0, Cz1 = 0.0;
-                    for (int i = 0; i < N; ++i) {
-                        S   += m_eeq_Z2[i];
-                        Cz1 += m_eeq_z1[i];
+                    // CPU Schur complement: q = z1 - Z2 * λ
+                    if (m_eeq_nfrag == 1) {
+                        double S = 0.0, Cz1 = 0.0;
+                        for (int i = 0; i < N; ++i) {
+                            S   += m_eeq_Z2[i];
+                            Cz1 += m_eeq_z1[i];
+                        }
+                        double lambda = (Cz1 - rhs_c0) / S;
+                        for (int i = 0; i < N; ++i)
+                            m_eeq_charges_gpu[i] = m_eeq_z1[i] - m_eeq_Z2[i] * lambda;
+                    } else {
+                        // Multi-fragment Schur: S·λ = C·z1 - qfrag, q = z1 - Z2·λ
+                        // Uses pre-allocated m_schur_workspace to avoid any heap allocation
+                        // after CUDA init (FFWorkspaceGPU corrupts adjacent heap metadata).
+                        const int nf = m_eeq_nfrag;
+                        // Grow workspace only if nfrag increased (rare topology change)
+                        if (nf * (nf + 2) > static_cast<int>(m_schur_workspace.size()))
+                            m_schur_workspace.assign(nf * (nf + 2), 0.0);
+                        double* Sw   = m_schur_workspace.data();           // [nf×nf] row-major
+                        double* rhsw = m_schur_workspace.data() + nf * nf; // [nf]
+                        double* lamw = rhsw + nf;                           // [nf]
+
+                        // Build S(f,g) = Σ_{i∈frag_f} Z2[i + g*N]
+                        for (int f = 0; f < nf; ++f) {
+                            for (int g = 0; g < nf; ++g) {
+                                double sum = 0.0;
+                                for (int i = 0; i < N; ++i)
+                                    if (m_eeq_fraglist[i] == f + 1)
+                                        sum += m_eeq_Z2[i + g * N];
+                                Sw[f * nf + g] = sum;
+                            }
+                        }
+                        // Build rhs(f) = Σ_{i∈frag_f} z1[i] - qfrag[f]
+                        for (int f = 0; f < nf; ++f) {
+                            double sum = 0.0;
+                            for (int i = 0; i < N; ++i)
+                                if (m_eeq_fraglist[i] == f + 1)
+                                    sum += m_eeq_z1[i];
+                            double qfrag_f = (f < static_cast<int>(m_eeq_rhs_constraints.size()))
+                                                 ? m_eeq_rhs_constraints[f] : 0.0;
+                            rhsw[f] = sum - qfrag_f;
+                        }
+                        // Gaussian elimination with partial pivoting (in-place on Sw/rhsw)
+                        for (int col = 0; col < nf; ++col) {
+                            int pivot = col;
+                            double maxv = std::abs(Sw[col * nf + col]);
+                            for (int row = col + 1; row < nf; ++row) {
+                                double v = std::abs(Sw[row * nf + col]);
+                                if (v > maxv) { maxv = v; pivot = row; }
+                            }
+                            if (pivot != col) {
+                                for (int k = 0; k < nf; ++k)
+                                    std::swap(Sw[col * nf + k], Sw[pivot * nf + k]);
+                                std::swap(rhsw[col], rhsw[pivot]);
+                            }
+                            double inv_d = (std::abs(Sw[col * nf + col]) > 1e-15)
+                                               ? 1.0 / Sw[col * nf + col] : 0.0;
+                            for (int row = col + 1; row < nf; ++row) {
+                                double fac = Sw[row * nf + col] * inv_d;
+                                for (int k = col + 1; k < nf; ++k)
+                                    Sw[row * nf + k] -= fac * Sw[col * nf + k];
+                                rhsw[row] -= fac * rhsw[col];
+                                Sw[row * nf + col] = 0.0;
+                            }
+                        }
+                        // Back substitution → lamw
+                        for (int i = nf - 1; i >= 0; --i) {
+                            lamw[i] = rhsw[i];
+                            for (int j = i + 1; j < nf; ++j)
+                                lamw[i] -= Sw[i * nf + j] * lamw[j];
+                            double diag = Sw[i * nf + i];
+                            lamw[i] = (std::abs(diag) > 1e-15) ? lamw[i] / diag : 0.0;
+                        }
+                        // Apply q[i] = z1[i] - Σ_f Z2[i+f*N] * λ[f]
+                        for (int i = 0; i < N; ++i) {
+                            double q = m_eeq_z1[i];
+                            for (int f = 0; f < nf; ++f)
+                                q -= m_eeq_Z2[i + f * N] * lamw[f];
+                            m_eeq_charges_gpu[i] = q;
+                        }
                     }
-                    double lambda = (Cz1 - rhs_c0) / S;
-                    for (int i = 0; i < N; ++i)
-                        m_eeq_charges_gpu[i] = m_eeq_z1[i] - m_eeq_Z2[i] * lambda;
                     charges = Eigen::Map<const Vector>(m_eeq_charges_gpu.data(), N);
                     m_gfnff->storeChargesFromGPU(m_eeq_charges_gpu.data(), N);
                     m_gpu_workspace->setEEQCharges(charges);
+                }
+                if (CurcumaLogger::get_verbosity() >= 2) {
+                    std::string frag_info;
+                    for (int f = 0; f < m_eeq_nfrag; ++f) {
+                        double qsum = 0.0;
+                        for (int i = 0; i < N; ++i)
+                            if (m_eeq_fraglist[i] == f + 1) qsum += m_eeq_charges_gpu[i];
+                        frag_info += fmt::format(" frag{}={:+.4f}", f + 1, qsum);
+                    }
+                    CurcumaLogger::success(fmt::format("EEQ GPU done:{}", frag_info));
                 }
                 used_gpu_eeq = true;
             } else {
                 CurcumaLogger::warn("GPU EEQ Cholesky failed (not SPD), falling back to CPU solver");
             }
         } else {
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::info(fmt::format(
-                    "GPU EEQ: nfrag={} — using CPU Phase 2 charges (TODO: batched-Cholesky per fragment)",
-                    m_eeq_nfrag));
-            }
+            // Fragment topo not yet uploaded (first MD step before topology build).
+            // CPU fallback below will populate m_eeq_fraglist for next step.
         }
 
         if (!used_gpu_eeq) {

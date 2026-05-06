@@ -577,10 +577,6 @@ const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
     bool geometry_changed = m_geometry_tracker.geometryChanged(m_geometry_bohr);
 
     if (!geometry_changed) {
-        // No change at all - return cached topology
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("GFNFF: Using cached topology (geometry unchanged)");
-        }
         return *m_cached_topology;
     }
 
@@ -646,17 +642,8 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
                 // Phase 3: Apply element-specific fat scaling factors (Claude Generated Jan 2026)
                 double threshold = bond_threshold * (rcov[i] + rcov[j]) * fat_val[i] * fat_val[j];
 
-                // Debug output for each pair - only at verbosity 3
-                if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::info(fmt::format("Pair {}-{}: dist={:.3f}, rcov_i={:.3f}, rcov_j={:.3f}, fat_i={:.3f}, fat_j={:.3f}, threshold={:.3f}",
-                                          i, j, distance, rcov[i], rcov[j], fat_val[i], fat_val[j], threshold));
-                }
-
                 if (distance < threshold) {
                     bonds.emplace_back(i, j);
-                    if (CurcumaLogger::get_verbosity() >= 3) {
-                        CurcumaLogger::info(fmt::format("  -> BONDED"));
-                    }
                 }
             }
         }
@@ -667,7 +654,7 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
 
         m_cached_bond_list = std::move(bonds);
         m_geometry_tracker.updateGeometry(m_geometry_bohr);
-    } else if (CurcumaLogger::get_verbosity() >= 3) {
+    } else if (CurcumaLogger::get_verbosity() >= 4) {
         CurcumaLogger::info(fmt::format("GFNFF: Using cached bond list ({} bonds)", m_cached_bond_list->size()));
     }
     return *m_cached_bond_list;
@@ -960,6 +947,29 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 
     if (m_skip_eeq_recalc && CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Phase-2 EEQ recalculation SKIPPED (charge injection mode)");
+    }
+
+    // Verbosity 3: per-atom parameter table (CN, EEQ charge, hybridization, fragment)
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        const TopologyInfo& topo = getCachedTopology();
+        static const char* hyb_labels[] = {"sp3", "sp", "sp2", "sp3d", "sp3d2", "hv5"};
+        CurcumaLogger::info(fmt::format("Atom table ({} atoms, {} frag(s)):", m_atomcount, topo.nfrag));
+        CurcumaLogger::info(fmt::format("{:>4}  {:>2}  {:>7}  {:>9}  {:>5}  {:>4}",
+                                        "Idx", "El", "CN", "q_EEQ", "Hyb", "Frag"));
+        for (int i = 0; i < m_atomcount; ++i) {
+            int z = m_atoms[i];
+            const std::string& sym = (z >= 1 && z < static_cast<int>(Elements::ElementAbbr.size()))
+                                       ? Elements::ElementAbbr[z] : "?";
+            double cn  = (i < static_cast<int>(m_last_cn.size()))  ? m_last_cn(i)  : 0.0;
+            double q   = (i < static_cast<int>(m_charges.size()))  ? m_charges(i)  : 0.0;
+            int hyb = (!topo.hybridization.empty() && i < static_cast<int>(topo.hybridization.size()))
+                          ? topo.hybridization[i] : -1;
+            const char* hyb_s = (hyb >= 0 && hyb < 6) ? hyb_labels[hyb] : "?";
+            int frag = (!topo.fraglist.empty() && i < static_cast<int>(topo.fraglist.size()))
+                           ? topo.fraglist[i] : 0;
+            CurcumaLogger::info(fmt::format("{:>4}  {:>2}  {:>7.3f}  {:>+9.4f}  {:>5}  {:>4}",
+                                            i, sym, cn, q, hyb_s, frag));
+        }
     }
 }
 
@@ -8221,11 +8231,6 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
 
             coulombs.push_back(c);
 
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::param(fmt::format("coulomb_{}-{}", i, j),
-                    fmt::format("q_i={:.6f}, q_j={:.6f}, gamma={:.6f}",
-                        charges[i], charges[j], c.gamma_ij));
-            }
         }
     }
 

@@ -84,8 +84,7 @@ int ForceFieldThread::execute()
     m_atm_energy = 0.0;  // Claude Generated (Dec 2025): Reset ATM three-body dispersion
     m_batm_energy = 0.0;  // Claude Generated (Jan 17, 2026): Reset batm three-body energy - CRITICAL FIX
 
-    // Phase 1.1: Guard debug output with verbosity check (Claude Generated - Dec 2025)
-    if (CurcumaLogger::get_verbosity() >= 3) {
+    if (CurcumaLogger::get_verbosity() >= 4) {
         CurcumaLogger::info(fmt::format("ForceFieldThread {} executing (method={})", m_thread, m_method));
     }
 
@@ -98,8 +97,7 @@ int ForceFieldThread::execute()
         // CalculateUFFBondContribution();
         CalculateQMDFFAngleContribution();
     } else if (m_method == 3) {
-        // Phase 1.1: Guard debug output with verbosity check (Claude Generated - Dec 2025)
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        if (CurcumaLogger::get_verbosity() >= 4) {
             CurcumaLogger::info(fmt::format("GFN-FF energy calculation started in thread {}", m_thread));
         }
 
@@ -164,14 +162,14 @@ int ForceFieldThread::execute()
 
         // Claude Generated (December 19, 2025): Native D3/D4 dispersion calculation for GFN-FF
         if (m_d3_dispersions.size() > 0) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
+            if (CurcumaLogger::get_verbosity() >= 4) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} D3 dispersion pairs", m_thread, m_d3_dispersions.size()));
             }
             runWithGradCapture("d3_dispersion", [this]() { CalculateD3DispersionContribution(); }, m_gradient_dispersion);
         }
 
         if (m_d4_dispersions.size() > 0) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
+            if (CurcumaLogger::get_verbosity() >= 4) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} D4 dispersion pairs", m_thread, m_d4_dispersions.size()));
             }
             runWithGradCapture("d4_dispersion", [this]() { CalculateD4DispersionContribution(); }, m_gradient_dispersion);
@@ -179,7 +177,7 @@ int ForceFieldThread::execute()
 
         // ATM three-body dispersion (D3/D4)
         if (!m_atm_triples.empty()) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
+            if (CurcumaLogger::get_verbosity() >= 4) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} ATM triples", m_thread, m_atm_triples.size()));
             }
             // Claude Generated (Mar 2026): ATM captured in own component for structural
@@ -194,7 +192,7 @@ int ForceFieldThread::execute()
 
         // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
         if (!m_gfnff_batms.empty()) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
+            if (CurcumaLogger::get_verbosity() >= 4) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} batm triples", m_thread, m_gfnff_batms.size()));
             }
             runWithGradCapture("batm", [this]() { CalculateGFNFFBatmContribution(); }, m_gradient_batm);
@@ -204,7 +202,7 @@ int ForceFieldThread::execute()
             runWithGradCapture("storsions", [this]() { CalculateGFNFFSTorsionContribution(); }, m_gradient_torsion);
         }
 
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        if (CurcumaLogger::get_verbosity() >= 4) {
             CurcumaLogger::info(fmt::format("Thread {}: Bond={:.6f}, Angle={:.6f}, Torsion={:.6f}, Rep={:.6f}, Coul={:.6f}, Disp={:.6f}, Batm={:.6f}",
                 m_thread, m_bond_energy, m_angle_energy, m_dihedral_energy,
                 m_rep_energy, m_coulomb_energy, m_dispersion_energy, m_batm_energy));
@@ -2145,8 +2143,8 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
     // The kJ/mol conversion factor was incorrect - all quantities should be in Hartree
     // Reference: gfnff_par.h chi_gam_alp_cnf_angewChem2020 arrays are in Hartree
 
-    // Verify EEQ charges before Coulomb energy calculation (Nov 2025)
-    if (CurcumaLogger::get_verbosity() >= 1 && m_gfnff_coulombs.size() > 0) {
+    // EEQ charge verification (per-pair diagnostic)
+    if (CurcumaLogger::get_verbosity() >= 4 && m_gfnff_coulombs.size() > 0) {
         CurcumaLogger::info("=== Coulomb Energy Calculation: EEQ Charge Verification ===");
         for (int idx = 0; idx < std::min((int)m_gfnff_coulombs.size(), 10); ++idx) {
             const auto& coul = m_gfnff_coulombs[idx];
@@ -2163,12 +2161,6 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
             max_charge = std::max({max_charge, std::abs(coul.q_i), std::abs(coul.q_j)});
         }
         CurcumaLogger::param("max_absolute_charge", fmt::format("{:.8e}", max_charge));
-
-        if (max_charge < 1e-10) {
-            CurcumaLogger::info("ℹ️  All EEQ partial charges near zero (typical for homonuclear molecules like H₂, Cl₂)");
-        } else {
-            CurcumaLogger::success(fmt::format("✅ Charges up to {:.2e} found - Coulomb energy should be non-zero", max_charge));
-        }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_coulombs.size() > 0) {

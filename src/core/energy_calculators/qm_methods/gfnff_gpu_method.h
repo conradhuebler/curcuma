@@ -115,6 +115,7 @@ private:
     std::vector<double> m_eeq_z1;           ///< [N] A⁻¹ · b_atoms
     std::vector<double> m_eeq_Z2;           ///< [N*nfrag] A⁻¹ · C^T (column-major)
     std::vector<double> m_eeq_charges_gpu;  ///< [N] final charges from GPU path
+    std::vector<double> m_schur_workspace;  ///< [nfrag*(nfrag+2)] CPU Schur: S matrix + rhs + lambda (no heap after CUDA init)
 
     // WP2: cached topology-constant EEQ data (avoid prepareEEQParametersForGPU per step)
     std::vector<int>    m_eeq_fraglist;          ///< [N] fragment IDs (topology-constant)
