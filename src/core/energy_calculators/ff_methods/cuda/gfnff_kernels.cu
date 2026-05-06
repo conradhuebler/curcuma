@@ -3150,6 +3150,63 @@ __global__ void k_eeq_schur_general(
 }
 
 // ============================================================================
+// WP7-C: GPU PCG kernels (May 2026)
+// All four are 1-thread-per-atom, no shared memory, no atomics.
+// Used by EEQSolverGPU::solveSinglePCG.
+// Reference: docs/GPU_WP7_EEQ_LARGE_SYSTEMS.md (Strategie C)
+// ============================================================================
+
+// Extract A's diagonal and invert it: M_inv[i] = 1/A[i,i].
+// A is column-major N×N; element (i,i) is at A[i*N + i].
+__global__ void k_pcg_extract_diag_inv(
+    int N,
+    const double* __restrict__ d_A,
+    double*       __restrict__ d_M_inv)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double diag = d_A[i * N + i];
+    d_M_inv[i] = (diag != 0.0) ? 1.0 / diag : 0.0;
+}
+
+// PCG init: r = b − A·x. d_Ax holds A·x (computed via cublasDsymv before this call).
+__global__ void k_pcg_init_residual(
+    int N,
+    const double* __restrict__ d_b,
+    const double* __restrict__ d_Ax,
+    double*       __restrict__ d_r)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    d_r[i] = d_b[i] - d_Ax[i];
+}
+
+// Apply Jacobi preconditioner: z = M_inv ⊙ r.
+__global__ void k_pcg_apply_precond(
+    int N,
+    const double* __restrict__ d_M_inv,
+    const double* __restrict__ d_r,
+    double*       __restrict__ d_z)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    d_z[i] = d_M_inv[i] * d_r[i];
+}
+
+// Direction update: p_out = z + β·p_in. Single-pass — avoids cublasDcopy + cublasDaxpy.
+__global__ void k_pcg_dir_update(
+    int N,
+    const double* __restrict__ d_z,
+    double        beta,
+    const double* __restrict__ d_p_in,
+    double*       __restrict__ d_p_out)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    d_p_out[i] = d_z[i] + beta * d_p_in[i];
+}
+
+// ============================================================================
 // WP2: k_build_eeq_rhs — GPU-side EEQ RHS construction
 // Claude Generated (May 2026): Eliminates CPU sync for EEQ RHS per MD step.
 // chi_corr and cnf are topology-constant (uploaded once by uploadEEQTopologyParams).

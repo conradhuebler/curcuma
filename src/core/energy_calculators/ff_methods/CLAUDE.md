@@ -680,11 +680,16 @@ Ziel: GFN-FF für N > 10k Atome.
   - Validierung: complex.xyz (eng gepackt, 1.4 Bohr min-distanz) → Warnung + 2.5 mEh Δ vs cholesky
   - Speedup für gut getrennte N=10k, nfrag=100: O(Σ N_f³) statt O(N³) — ~10000× im Cholesky-Schritt
 
-- **WP7-C: PCG auf GPU** — exakt, O(k·N²), ~7 Tage
-  - `cublasDgemv` für Matrix-Vektor-Produkt + `k_pcg_project_fragments` für Fragment-Constraints
-  - Warm-Start: Ladungsvektor vom Vorschritt bleibt auf Device (D2D, kein Transfer)
-  - CPU-Pendant: OpenMP MATVEC + Fragment-Projektion nach jedem CG-Schritt
-  - Ermöglicht MD für N > 5k (k=20 Iterationen × O(N²) statt O(N³))
+- **WP7-C: PCG auf GPU** — ✅ implementiert (Mai 2026), exakt, O(k·N²)
+  - Auswählbar via `solve_method=pcg` oder `auto` (für N≥`pcg_large_threshold`)
+  - `cublasDsymv(FILL_MODE_LOWER)` für SPMV (halbiert FLOPs vs dgemv); cublasDdot mit `POINTER_MODE_DEVICE`
+  - 4 neue Kernels: `k_pcg_extract_diag_inv` (Jacobi M_inv), `k_pcg_init_residual`, `k_pcg_apply_precond`, `k_pcg_dir_update`
+  - Persistente Warm-Start-Buffer `d_z1_persistent` + `d_Z2_persistent` (überleben über Calls; invalidiert bei Topo-Wechsel)
+  - **Architektur-Schlüssel**: PCG arbeitet auf N×N SPD-Block, Constraints kommen über WP7-A's Schur-Reuse — `k_eeq_reduce_fragment_sums` + CPU Schur + `k_eeq_schur_general` werden 1:1 wiederverwendet
+  - Bei Stall (`|r|≥tol` nach max_iter) → automatischer Fallback auf WP7-A Cholesky (sauberer Cusolver-Workspace-State, kein `m_last_N`-Konflikt)
+  - Validierung: complex.xyz (nfrag=2) — pcg/auto/cholesky bit-identisch (-37.24419652 Eh); Stall-Test mit `max_pcg_iterations=1` → korrekter Fallback (-37.24419651777443 Eh)
+  - nfrag=1: bleibt auf WP5-A (schneller); PCG-Pfad für nfrag=1 ist ein Followup
+  - Followup: matrix-free Matvec für N>10k (vermeidet O(N²) `d_A`); CPU-OpenMP-Pendant aus Doc
 
 **Parameter-Interface** (CPU + GPU vereinheitlicht, Mai 2026):
 ```

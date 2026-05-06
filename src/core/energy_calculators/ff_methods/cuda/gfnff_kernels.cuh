@@ -670,6 +670,42 @@ __global__ void k_eeq_schur_general(
     double*       __restrict__ charges);     ///< [N] output (in-place on d_rhs[0..N-1] OK)
 
 // ============================================================================
+// WP7-C: GPU PCG kernels (May 2026)
+// 1-thread-per-atom helpers used by EEQSolverGPU::solveSinglePCG.
+// Matvec / dot / axpy go via cuBLAS (cublasDsymv / Ddot / Daxpy).
+// ============================================================================
+
+/// Extract A's diagonal and invert it: M_inv[i] = 1/A[i,i].
+/// A is column-major N×N (k_eeq_build_matrix output, both triangles filled).
+__global__ void k_pcg_extract_diag_inv(
+    int N,
+    const double* __restrict__ d_A,
+    double*       __restrict__ d_M_inv);
+
+/// Compute initial residual r = b − A·x.
+/// d_Ax must hold A·x (precomputed via cublasDsymv).
+__global__ void k_pcg_init_residual(
+    int N,
+    const double* __restrict__ d_b,
+    const double* __restrict__ d_Ax,
+    double*       __restrict__ d_r);
+
+/// Apply Jacobi preconditioner: z = M_inv ⊙ r (elementwise multiply).
+__global__ void k_pcg_apply_precond(
+    int N,
+    const double* __restrict__ d_M_inv,
+    const double* __restrict__ d_r,
+    double*       __restrict__ d_z);
+
+/// PCG direction update: p_out = z + β·p_in. Single fused kernel.
+__global__ void k_pcg_dir_update(
+    int N,
+    const double* __restrict__ d_z,
+    double        beta,
+    const double* __restrict__ d_p_in,
+    double*       __restrict__ d_p_out);
+
+// ============================================================================
 // WP2: GPU-side EEQ RHS construction
 // ============================================================================
 

@@ -224,6 +224,36 @@ public:
     double getMinFragmentDistanceSq() const;
 
     /**
+     * @brief WP7-C: GPU PCG solver for nfrag>=1 (May 2026).
+     *
+     * Iterative O(k·N²) replacement for the WP7-A Cholesky path. Reuses WP7-A's
+     * Schur-complement infrastructure: the (1+nfrag) PCG runs solve A·z1 = b and
+     * A·Z2[:,f] = e_f independently, then k_eeq_reduce_fragment_sums + CPU Gauss-elim
+     * + k_eeq_schur_general apply the constraint exactly. Warm-start uses
+     * d_z1_persistent / d_Z2_persistent (kept across calls until topology changes).
+     *
+     * Returns false on PCG stall (max_iter reached without |r|<tol) — caller must
+     * fall back to solveWithDeviceRHSAndGPUSchurGeneral (WP7-A).
+     *
+     * @param max_iter        Per-PCG-call iteration cap (e.g. 200).
+     * @param tol             Convergence tolerance on |r| (e.g. 1e-10).
+     * @param force_refactor  If true: rebuild A and re-extract Jacobi precond.
+     */
+    bool solveWithDeviceRHSAndGPUPCG(
+        int natoms, int nfrag,
+        const double* cx, const double* cy, const double* cz,
+        const double* d_alpha_corrected,
+        const double* d_gam_corrected,
+        const double* d_rhs_atoms,
+        const std::vector<int>& fraglist,
+        const std::vector<double>& rhs_constraints,
+        int    max_iter,
+        double tol,
+        double cutoff_sq    = 0.0,
+        bool   force_refactor = true
+    );
+
+    /**
      * @brief Batched per-fragment EEQ: independent N_f×N_f Cholesky + host Schur per fragment.
      *
      * Claude Generated (May 2026): Replaces single N×N Cholesky for nfrag > 1 systems.

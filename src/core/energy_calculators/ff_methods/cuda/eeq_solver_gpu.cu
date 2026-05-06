@@ -18,6 +18,7 @@
 #include "gfnff_kernels.cuh"
 
 #include <cusolverDn.h>
+#include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cstring>
 #include <limits>
@@ -42,12 +43,19 @@ static void checkCusolverEEQ(cusolverStatus_t status, const char* msg)
         throw std::runtime_error(std::string(msg) + ": cusolver error " + std::to_string(static_cast<int>(status)));
 }
 
+static void checkCublasEEQ(cublasStatus_t status, const char* msg)
+{
+    if (status != CUBLAS_STATUS_SUCCESS)
+        throw std::runtime_error(std::string(msg) + ": cublas error " + std::to_string(static_cast<int>(status)));
+}
+
 // ============================================================================
 // Pimpl implementation struct
 // ============================================================================
 
 struct EEQSolverGPUImpl {
     cusolverDnHandle_t cusolver_handle = nullptr;
+    cublasHandle_t     cublas_handle   = nullptr;  ///< WP7-C: PCG matvec/dot/axpy
     cudaStream_t stream = nullptr;
 
     // Device buffers
@@ -108,6 +116,25 @@ struct EEQSolverGPUImpl {
     bool   m_frag_topo_valid    = false;
     bool   m_frag_refactored    = false;  ///< cached Cholesky factors valid (lazy solve)
     double m_min_frag_distance_sq = -1.0; ///< WP7-B: cached squared min inter-fragment distance (Bohr²); -1 = not computed
+
+    // ── WP7-C: GPU PCG (May 2026) ────────────────────────────────────────────
+    // Persistent warm-start buffers (survive across solve calls; invalidated on
+    // topology change or large geometry jump):
+    CudaBuffer<double>  d_z1_persistent;       ///< [N] last z1 solution
+    CudaBuffer<double>  d_Z2_persistent;       ///< [N·nfrag] last Z2 columns
+    bool                m_pcg_warm_valid = false;
+    bool                m_pcg_M_inv_valid = false;  ///< Jacobi precond cache (re-extract on refactor)
+    // Per-call scratch (size N — re-allocated when N grows):
+    CudaBuffer<double>  d_pcg_M_inv;           ///< [N] 1/A[i,i]
+    CudaBuffer<double>  d_pcg_r;               ///< [N] residual
+    CudaBuffer<double>  d_pcg_z;               ///< [N] M_inv·r
+    CudaBuffer<double>  d_pcg_p;               ///< [N] search direction
+    CudaBuffer<double>  d_pcg_Ap;              ///< [N] A·p
+    CudaBuffer<double>  d_pcg_dot_scratch;     ///< [2] device-pointer scalars (rz, pAp)
+    CudaBuffer<double>  d_pcg_rnorm_scratch;   ///< [1] |r|² for convergence check
+    int                 m_pcg_total_iters     = 0;
+    int                 m_pcg_total_calls     = 0;
+    int                 m_pcg_nonconv_calls   = 0;
 
     // ── WP7-A: General Schur for nfrag > 1 (May 2026) ────────────────────────
     // Topology-constant device buffers populated by uploadFragmentTopology():
@@ -235,6 +262,10 @@ EEQSolverGPU::EEQSolverGPU(int max_natoms)
     checkCusolverEEQ(cusolverDnSetStream(m_impl->cusolver_handle, m_impl->stream),
                      "cusolverDnSetStream");
 
+    // WP7-C: cuBLAS handle (PCG matvec/dot/axpy). Same stream as cusolver — no sync needed.
+    checkCublasEEQ(cublasCreate(&m_impl->cublas_handle), "cublasCreate");
+    checkCublasEEQ(cublasSetStream(m_impl->cublas_handle, m_impl->stream), "cublasSetStream");
+
     // Pre-allocate device buffers for max atom count
     m_impl->d_alpha.alloc(max_natoms);
     m_impl->d_gam.alloc(max_natoms);
@@ -261,6 +292,7 @@ EEQSolverGPU::~EEQSolverGPU()
     if (m_impl) {
         if (m_impl->h_result) cudaFreeHost(m_impl->h_result);
         if (m_impl->h_info) cudaFreeHost(m_impl->h_info);
+        if (m_impl->cublas_handle) cublasDestroy(m_impl->cublas_handle);
         if (m_impl->cusolver_handle) cusolverDnDestroy(m_impl->cusolver_handle);
         if (m_impl->stream) cudaStreamDestroy(m_impl->stream);
     }
@@ -1015,6 +1047,296 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurGeneral(
 }
 
 // ============================================================================
+// WP7-C: GPU PCG (May 2026) — iterative O(k·N²) replacement for Cholesky.
+// Reuses WP7-A reduce + Schur kernels for constraint handling.
+// ============================================================================
+
+// Run a single preconditioned CG solve A·x = b with warm-start in d_x.
+// d_b and d_x must be N device doubles. Returns true on convergence (|r|<tol),
+// false on stall. A and M_inv are read from impl.d_A / impl.d_pcg_M_inv.
+//
+// Uses cuBLAS with POINTER_MODE_DEVICE for inner products; one D2H per iter for
+// |r|² convergence check. All work is on impl.stream — no extra sync until exit.
+static bool runSinglePCG(EEQSolverGPUImpl& impl, int N,
+                          const double* d_b, double* d_x,
+                          int max_iter, double tol)
+{
+    // Resize per-call scratch if N grew.
+    if (impl.d_pcg_r.n  < N) impl.d_pcg_r.alloc(N);
+    if (impl.d_pcg_z.n  < N) impl.d_pcg_z.alloc(N);
+    if (impl.d_pcg_p.n  < N) impl.d_pcg_p.alloc(N);
+    if (impl.d_pcg_Ap.n < N) impl.d_pcg_Ap.alloc(N);
+    if (impl.d_pcg_dot_scratch.n   < 2) impl.d_pcg_dot_scratch.alloc(2);
+    if (impl.d_pcg_rnorm_scratch.n < 1) impl.d_pcg_rnorm_scratch.alloc(1);
+
+    cublasHandle_t blas = impl.cublas_handle;
+    cudaStream_t   s    = impl.stream;
+    const double  one   = 1.0;
+    const double  zero  = 0.0;
+
+    // --- Init: r = b − A·x, z = M_inv·r, p = z, rz = r·z ---
+    // Compute A·x → d_pcg_Ap (reuse Ap scratch as Ax holder for init).
+    checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_HOST), "set ptr mode host");
+    checkCublasEEQ(
+        cublasDsymv(blas, CUBLAS_FILL_MODE_LOWER, N,
+                    &one, impl.d_A.ptr, N, d_x, 1, &zero, impl.d_pcg_Ap.ptr, 1),
+        "cublasDsymv init Ax");
+
+    {
+        int blk = 256, grd = (N + blk - 1) / blk;
+        k_pcg_init_residual<<<grd, blk, 0, s>>>(N, d_b, impl.d_pcg_Ap.ptr, impl.d_pcg_r.ptr);
+        k_pcg_apply_precond<<<grd, blk, 0, s>>>(N, impl.d_pcg_M_inv.ptr,
+                                                 impl.d_pcg_r.ptr, impl.d_pcg_z.ptr);
+        // Initial p ← z (use cublasDcopy for simplicity).
+        checkCublasEEQ(cublasDcopy(blas, N, impl.d_pcg_z.ptr, 1, impl.d_pcg_p.ptr, 1),
+                       "cublasDcopy p=z");
+    }
+
+    // rz = r·z (device pointer) ; |r|² (device pointer)
+    checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_DEVICE), "set ptr mode device");
+    checkCublasEEQ(cublasDdot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_z.ptr, 1,
+                              impl.d_pcg_dot_scratch.ptr /*[0]=rz*/),
+                   "cublasDdot rz init");
+
+    // Pull rz to host once for the loop (cheap; 8 bytes).
+    double h_rz = 0.0;
+    checkCudaEEQ(cudaMemcpyAsync(&h_rz, impl.d_pcg_dot_scratch.ptr, sizeof(double),
+                                  cudaMemcpyDeviceToHost, s),
+                 "D2H rz init");
+    checkCudaEEQ(cudaStreamSynchronize(s), "sync rz init");
+
+    bool converged = false;
+    int  iters     = 0;
+    for (int k = 0; k < max_iter; ++k) {
+        iters = k + 1;
+
+        // Ap = A·p
+        checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_HOST), "ptr host");
+        checkCublasEEQ(
+            cublasDsymv(blas, CUBLAS_FILL_MODE_LOWER, N,
+                        &one, impl.d_A.ptr, N, impl.d_pcg_p.ptr, 1,
+                        &zero, impl.d_pcg_Ap.ptr, 1),
+            "cublasDsymv Ap");
+
+        // pAp = p·Ap (device pointer)
+        checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_DEVICE), "ptr dev");
+        checkCublasEEQ(cublasDdot(blas, N, impl.d_pcg_p.ptr, 1, impl.d_pcg_Ap.ptr, 1,
+                                  impl.d_pcg_dot_scratch.ptr + 1 /*[1]=pAp*/),
+                       "cublasDdot pAp");
+
+        // D2H pAp (8 bytes).
+        double h_pAp = 0.0;
+        checkCudaEEQ(cudaMemcpyAsync(&h_pAp, impl.d_pcg_dot_scratch.ptr + 1, sizeof(double),
+                                      cudaMemcpyDeviceToHost, s),
+                     "D2H pAp");
+        checkCudaEEQ(cudaStreamSynchronize(s), "sync pAp");
+
+        if (std::abs(h_pAp) < 1e-30) break;  // degenerate direction
+        double alpha = h_rz / h_pAp;
+        double neg_alpha = -alpha;
+
+        // x += α·p ; r -= α·Ap
+        checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_HOST), "ptr host");
+        checkCublasEEQ(cublasDaxpy(blas, N, &alpha, impl.d_pcg_p.ptr,  1, d_x, 1),
+                       "Daxpy x+=ap");
+        checkCublasEEQ(cublasDaxpy(blas, N, &neg_alpha, impl.d_pcg_Ap.ptr, 1,
+                                    impl.d_pcg_r.ptr, 1),
+                       "Daxpy r-=aAp");
+
+        // |r|² = r·r (device pointer)
+        checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_DEVICE), "ptr dev");
+        checkCublasEEQ(cublasDdot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_r.ptr, 1,
+                                  impl.d_pcg_rnorm_scratch.ptr),
+                       "Ddot rnorm");
+        double h_rnorm_sq = 0.0;
+        checkCudaEEQ(cudaMemcpyAsync(&h_rnorm_sq, impl.d_pcg_rnorm_scratch.ptr,
+                                      sizeof(double), cudaMemcpyDeviceToHost, s),
+                     "D2H rnorm");
+        checkCudaEEQ(cudaStreamSynchronize(s), "sync rnorm");
+
+        if (h_rnorm_sq < tol * tol) { converged = true; break; }
+
+        // z_new = M_inv · r ; rz_new = r · z_new
+        {
+            int blk = 256, grd = (N + blk - 1) / blk;
+            k_pcg_apply_precond<<<grd, blk, 0, s>>>(N, impl.d_pcg_M_inv.ptr,
+                                                      impl.d_pcg_r.ptr, impl.d_pcg_z.ptr);
+        }
+        checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_DEVICE), "ptr dev");
+        checkCublasEEQ(cublasDdot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_z.ptr, 1,
+                                  impl.d_pcg_dot_scratch.ptr /*[0]=rz_new*/),
+                       "Ddot rz_new");
+        double h_rz_new = 0.0;
+        checkCudaEEQ(cudaMemcpyAsync(&h_rz_new, impl.d_pcg_dot_scratch.ptr, sizeof(double),
+                                      cudaMemcpyDeviceToHost, s),
+                     "D2H rz_new");
+        checkCudaEEQ(cudaStreamSynchronize(s), "sync rz_new");
+
+        if (std::abs(h_rz) < 1e-30) break;  // degenerate
+        double beta = h_rz_new / h_rz;
+        h_rz = h_rz_new;
+
+        // p = z + β·p (in-place via dedicated kernel — avoids cublasDcopy + axpy).
+        {
+            int blk = 256, grd = (N + blk - 1) / blk;
+            k_pcg_dir_update<<<grd, blk, 0, s>>>(N, impl.d_pcg_z.ptr, beta,
+                                                  impl.d_pcg_p.ptr, impl.d_pcg_p.ptr);
+        }
+    }
+
+    impl.m_pcg_total_calls += 1;
+    impl.m_pcg_total_iters += iters;
+    if (!converged) impl.m_pcg_nonconv_calls += 1;
+    return converged;
+}
+
+bool EEQSolverGPU::solveWithDeviceRHSAndGPUPCG(
+    int natoms, int nfrag,
+    const double* cx, const double* cy, const double* cz,
+    const double* d_alpha_corrected,
+    const double* d_gam_corrected,
+    const double* d_rhs_atoms,
+    const std::vector<int>& /*fraglist*/,
+    const std::vector<double>& rhs_constraints,
+    int    max_iter,
+    double tol,
+    double cutoff_sq,
+    bool   force_refactor)
+{
+    auto& impl = *m_impl;
+    if (nfrag < 1) return false;
+    if (!impl.m_frag_topo_valid) return false;
+    if (impl.m_nfrag_batched != nfrag) return false;
+    if (impl.d_atom_frag.n < natoms) return false;
+    if (impl.d_rhs_constraint_cols.n < natoms * nfrag) return false;
+
+    const int N    = natoms;
+    const int nrhs = nfrag + 1;
+
+    const bool do_refactor = force_refactor
+                          || !impl.m_pcg_M_inv_valid
+                          || (N != m_last_N);
+
+    if (do_refactor) {
+        // (Re)build A on GPU — same kernel WP7-A uses for the Cholesky path.
+        {
+            int n_lower = N * (N + 1) / 2;
+            int block   = 256;
+            int grid    = (n_lower + block - 1) / block;
+            k_eeq_build_matrix<<<grid, block, 0, impl.stream>>>(
+                N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, impl.d_A.ptr, cutoff_sq);
+        }
+        if (impl.d_pcg_M_inv.n < N) impl.d_pcg_M_inv.alloc(N);
+        {
+            int blk = 256, grd = (N + blk - 1) / blk;
+            k_pcg_extract_diag_inv<<<grd, blk, 0, impl.stream>>>(
+                N, impl.d_A.ptr, impl.d_pcg_M_inv.ptr);
+        }
+        impl.m_pcg_M_inv_valid = true;
+        // Note: do NOT touch m_last_N here — it is owned by the cuSOLVER paths
+        // (WP5-A / WP7-A) and tracks their workspace allocation. PCG bypasses
+        // cuSOLVER entirely, so writing m_last_N here would falsely tell the
+        // Cholesky paths their workspace is still valid for the current N.
+        // Geometry change ⇒ warm-start may be far from new optimum, but PCG still
+        // converges from any x0. Keep the cached z1/Z2 anyway — Z2 in particular
+        // is very stable across MD steps (matches CPU m_pcg_last_z2 strategy).
+    }
+
+    // Allocate d_rhs (column-major [N × (nfrag+1)]) — first column receives z1
+    // after PCG, columns 1..nfrag receive Z2. Same layout as WP7-A.
+    {
+        const int rhs_size = N * nrhs;
+        if (impl.d_rhs.n < rhs_size) impl.d_rhs.alloc(rhs_size);
+    }
+
+    // --- PCG #1: A · z1 = b_atoms.   x0 ← d_z1_persistent on warm; else zero. ---
+    if (impl.m_pcg_warm_valid) {
+        // d_rhs[0..N-1] ← d_z1_persistent  (D2D copy, on stream)
+        checkCudaEEQ(cudaMemcpyAsync(impl.d_rhs.ptr, impl.d_z1_persistent.ptr,
+                                      N * sizeof(double),
+                                      cudaMemcpyDeviceToDevice, impl.stream),
+                     "D2D z1 warm-start");
+    } else {
+        cudaMemsetAsync(impl.d_rhs.ptr, 0, N * sizeof(double), impl.stream);
+    }
+    bool ok = runSinglePCG(impl, N, d_rhs_atoms, impl.d_rhs.ptr, max_iter, tol);
+    if (!ok) return false;
+
+    // --- PCG #2..nfrag+1: A · Z2[:,f] = e_f for each fragment. ---
+    for (int f = 0; f < nfrag; ++f) {
+        double* d_x_col = impl.d_rhs.ptr + (f + 1) * N;
+        const double* d_b_col = impl.d_rhs_constraint_cols.ptr + f * N;
+        if (impl.m_pcg_warm_valid && impl.d_Z2_persistent.n >= (f + 1) * N) {
+            checkCudaEEQ(cudaMemcpyAsync(d_x_col, impl.d_Z2_persistent.ptr + f * N,
+                                          N * sizeof(double),
+                                          cudaMemcpyDeviceToDevice, impl.stream),
+                         "D2D Z2 warm-start");
+        } else {
+            cudaMemsetAsync(d_x_col, 0, N * sizeof(double), impl.stream);
+        }
+        ok = runSinglePCG(impl, N, d_b_col, d_x_col, max_iter, tol);
+        if (!ok) return false;
+    }
+
+    // --- Persist warm-start BEFORE the Schur apply overwrites d_rhs[0..N-1]. ---
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_z1_persistent.ptr, impl.d_rhs.ptr,
+                                  N * sizeof(double),
+                                  cudaMemcpyDeviceToDevice, impl.stream),
+                 "D2D persist z1");
+    if (impl.d_Z2_persistent.n < N * nfrag) impl.d_Z2_persistent.alloc(N * nfrag);
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_Z2_persistent.ptr, impl.d_rhs.ptr + N,
+                                  N * nfrag * sizeof(double),
+                                  cudaMemcpyDeviceToDevice, impl.stream),
+                 "D2D persist Z2");
+    impl.m_pcg_warm_valid = true;
+
+    // --- Schur reduction (reuse WP7-A kernels): Cz1[nfrag] + S[nfrag×nfrag] ---
+    cudaMemsetAsync(impl.d_Cz1_general.ptr, 0, nfrag * sizeof(double), impl.stream);
+    cudaMemsetAsync(impl.d_S_general.ptr,   0, (size_t)nfrag * nfrag * sizeof(double), impl.stream);
+    {
+        int rb = 256, rg = (N + rb - 1) / rb;
+        k_eeq_reduce_fragment_sums<<<rg, rb, 0, impl.stream>>>(
+            N, nfrag, impl.d_rhs.ptr, impl.d_atom_frag.ptr,
+            impl.d_Cz1_general.ptr, impl.d_S_general.ptr);
+    }
+
+    checkCudaEEQ(cudaMemcpyAsync(impl.h_Cz1_general.data(), impl.d_Cz1_general.ptr,
+                                  nfrag * sizeof(double),
+                                  cudaMemcpyDeviceToHost, impl.stream),
+                 "D2H Cz1 (pcg)");
+    checkCudaEEQ(cudaMemcpyAsync(impl.h_S_general.data(), impl.d_S_general.ptr,
+                                  (size_t)nfrag * nfrag * sizeof(double),
+                                  cudaMemcpyDeviceToHost, impl.stream),
+                 "D2H S (pcg)");
+    checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after reduce (pcg)");
+
+    // CPU Schur: S·λ = Cz1 − Q_frag.
+    std::vector<double> schur_rhs(nfrag, 0.0);
+    for (int f = 0; f < nfrag; ++f) {
+        double q_target = (f < (int)rhs_constraints.size()) ? rhs_constraints[f] : 0.0;
+        schur_rhs[f] = impl.h_Cz1_general[f] - q_target;
+    }
+    solveSchurSystemInPlace(impl.h_S_general.data(), schur_rhs.data(),
+                             impl.h_lambda_general.data(), nfrag);
+
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_lambda_general.ptr,
+                                  impl.h_lambda_general.data(),
+                                  nfrag * sizeof(double),
+                                  cudaMemcpyHostToDevice, impl.stream),
+                 "H2D lambda (pcg)");
+
+    // Apply: q[i] = z1[i] − Σ_g Z2[i,g]·λ[g]; in-place into d_rhs[0..N-1].
+    {
+        int b = 256, g = (N + b - 1) / b;
+        k_eeq_schur_general<<<g, b, 0, impl.stream>>>(
+            N, nfrag, impl.d_rhs.ptr, impl.d_lambda_general.ptr, impl.d_rhs.ptr);
+    }
+
+    checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after schur_general (pcg)");
+    return true;
+}
+
+// ============================================================================
 // WP6: uploadFragmentTopology — one-time setup for batched Cholesky (nfrag > 1)
 // Claude Generated (May 2026)
 // ============================================================================
@@ -1029,6 +1351,8 @@ void EEQSolverGPU::uploadFragmentTopology(int nfrag,
     impl.m_frag_topo_valid       = false;
     impl.m_frag_refactored       = false;
     impl.m_min_frag_distance_sq  = -1.0;  // WP7-B: invalidate on topology change
+    impl.m_pcg_warm_valid        = false; // WP7-C: warm-start invalid after topology change
+    impl.m_pcg_M_inv_valid       = false; // WP7-C: re-extract M_inv on next solve
     impl.m_nfrag_batched         = nfrag;
 
     // --- 1. Count atoms per fragment ---
@@ -1160,6 +1484,11 @@ void EEQSolverGPU::uploadFragmentTopology(int nfrag,
     impl.h_Cz1_general.assign(nfrag, 0.0);
     impl.h_S_general.assign((size_t)nfrag * (size_t)nfrag, 0.0);
     impl.h_lambda_general.assign(nfrag, 0.0);
+
+    // WP7-C: persistent warm-start buffers (sized to current topology).
+    // Per-call PCG scratch is grown lazily inside solveSinglePCG.
+    impl.d_z1_persistent.alloc(N);
+    impl.d_Z2_persistent.alloc(N * nfrag);
 
     impl.m_frag_topo_valid = true;
 }

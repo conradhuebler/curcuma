@@ -160,9 +160,15 @@ private:
     // WP7-B (May 2026): GPU EEQ solver strategy for nfrag>1 systems.
     // SchurCholesky → WP5-A (nfrag=1) / WP7-A (nfrag>1) — exact, full N×N Cholesky.
     // Batched      → WP7-B (nfrag>1)                   — per-fragment Cholesky, drops cross-fragment Coulomb.
-    // PCG / LU / Auto are CPU concepts; on GPU they collapse to SchurCholesky for now.
+    // PCG          → WP7-C (nfrag>1)                   — iterative O(k·N²), warm-started.
+    // LU / Auto    → CPU concepts; Auto resolves to PCG above pcg_large_threshold else SchurCholesky.
     EEQSolveMethod m_eeq_strategy = EEQSolveMethod::SchurCholesky;
     double m_eeq_batched_min_distance_bohr = 15.0;  ///< warn if min inter-frag distance < this
+
+    // WP7-C (May 2026): GPU PCG parameters (mirror CPU EEQSolver defaults).
+    int    m_eeq_pcg_max_iter   = 200;     ///< per-PCG-call iteration cap
+    double m_eeq_pcg_tolerance  = 1e-10;   ///< convergence tolerance on |r|
+    int    m_eeq_pcg_threshold  = 500;     ///< Auto strategy: PCG for N>=this (else cholesky)
 
     int  m_calc_count = 0;  ///< counts calculateEnergy() calls; first 5 always print timing
 

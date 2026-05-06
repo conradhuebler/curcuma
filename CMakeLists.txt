@@ -769,7 +769,7 @@ if(USE_CUDA)
     # Add CUDA sources to curcuma_core
     target_sources(curcuma_core PRIVATE ${CUDA_SOURCES})
     target_include_directories(curcuma_core PRIVATE ${PROJECT_SOURCE_DIR})
-    target_link_libraries(curcuma_core CUDA::cudart CUDA::cusolver)
+    target_link_libraries(curcuma_core CUDA::cudart CUDA::cusolver CUDA::cublas)
     target_compile_definitions(curcuma_core PUBLIC USE_CUDA)
 
     message(STATUS "CUDA support enabled: gfnff -gpu cuda available")
