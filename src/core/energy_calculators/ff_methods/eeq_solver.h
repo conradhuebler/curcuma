@@ -872,8 +872,8 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Relative tolerance factor for large systems: tol = max(pcg_tolerance, factor*||rhs||)", "Algorithm", {})
     PARAM(pcg_large_threshold, Int, 500,
           "Atom count threshold above which PCG auto-selection and adaptive scaling activate", "Algorithm", {})
-    PARAM(eeq_distance_cutoff, Double, 30.0,
-          "Distance cutoff in Bohr for Coulomb matrix sparsification. 0 = no cutoff. Improves condition number for large systems.", "Advanced", {})
+    PARAM(eeq_distance_cutoff, Double, 0.0,
+          "Distance cutoff in Bohr for Coulomb matrix sparsification (0 = no cutoff, matches Fortran goed_gfnff). Non-zero values violate Hellmann-Feynman vs. the full Coulomb energy and degrade MD energy conservation.", "Advanced", {})
     PARAM(dump_charges, Bool, false,
           "Save Phase 1 and Phase 2 charges to charges_dump_N<size>.json for analysis", "Advanced", {})
 END_PARAMETER_DEFINITION

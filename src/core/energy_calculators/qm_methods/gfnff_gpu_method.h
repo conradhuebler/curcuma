@@ -150,6 +150,11 @@ private:
     Matrix m_eeq_ref_geom;              ///< geometry (Bohr) at last EEQ refactorization
     bool   m_eeq_has_ref_geom = false;
 
+    // EEQ Coulomb-matrix distance cutoff (Bohr). Default 0 = no cutoff, matches Fortran
+    // goed_gfnff. Set non-zero only for performance experiments — produces HF-inconsistent
+    // gradients vs. the un-truncated Coulomb energy and degrades MD energy conservation.
+    double m_eeq_distance_cutoff = 0.0;  ///< Bohr; from eeq_distance_cutoff param
+
     int  m_calc_count = 0;  ///< counts calculateEnergy() calls; first 5 always print timing
 
     /**

@@ -44,6 +44,11 @@ GFNFFGPUComputationalMethod::GFNFFGPUComputationalMethod(const std::string& meth
     // Suggested MD value: 0.05–0.10 Bohr (saves ~12 ms/step when geometry barely changes).
     m_eeq_rmsd_threshold = gfnff_cfg.value("eeq_rmsd_threshold", 0.0);
 
+    // EEQ Coulomb-matrix distance cutoff (Bohr). Default 0 = no cutoff, matches Fortran
+    // goed_gfnff (gfnff_engrad.F90:1274-1391) and the CPU EEQSolver default. Non-zero
+    // values violate Hellmann-Feynman vs. the full Coulomb energy → MD energy drift.
+    m_eeq_distance_cutoff = gfnff_cfg.value("eeq_distance_cutoff", 0.0);
+
     m_gfnff = std::make_unique<GFNFF>(config);
 }
 
@@ -492,6 +497,14 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         bool used_gpu_eeq = false;
         const double rhs_c0 = m_eeq_rhs_constraints.empty() ? 0.0 : m_eeq_rhs_constraints[0];
 
+        // EEQ distance cutoff (matches CPU EEQSolver behaviour at eeq_solver.cpp:2641-2643).
+        // CPU truncates Coulomb-matrix off-diagonals at 30 Bohr only when natoms > 200.
+        // Below that threshold both paths must use 0.0 to keep small-molecule results
+        // bit-identical to the previous behaviour.
+        const double eeq_cutoff_sq = (N > 200 && m_eeq_distance_cutoff > 0.0)
+                                       ? m_eeq_distance_cutoff * m_eeq_distance_cutoff
+                                       : 0.0;
+
         if (gpu_eeq_applicable) {
             // RMSD-based EEQ lazy refactorization:
             // Compute per-atom RMSD (Bohr) from geometry at last full Cholesky build.
@@ -528,9 +541,10 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                     m_gpu_workspace->getDeviceRHSPtr(),
                     m_eeq_fraglist,
                     rhs_c0,
+                    eeq_cutoff_sq,
                     force_refactor);
                 if (eeq_ok) {
-                    used_gpu_schur = true;
+                    used_gpu_schur = true;  // restore original
                 } else {
                     // nfrag>1 or Cholesky failed: fall back to WP2 solve + CPU Schur
                     eeq_ok = m_eeq_gpu->solveWithDeviceRHS(
@@ -545,6 +559,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                         m_eeq_fraglist,
                         m_eeq_z1.data(),
                         m_eeq_Z2.data(),
+                        eeq_cutoff_sq,
                         force_refactor);
                 }
             } else {
@@ -563,7 +578,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                     eeq_params.rhs_constraints.data(),
                     m_eeq_z1.data(),
                     m_eeq_Z2.data(),
-                    0.0,
+                    eeq_cutoff_sq,
                     force_refactor);
                 // update cached topology data in case it changed
                 m_eeq_fraglist        = eeq_params.fraglist;

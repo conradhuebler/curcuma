@@ -102,6 +102,7 @@ public:
         const std::vector<int>& fraglist,
         double* out_z1,
         double* out_Z2,
+        double cutoff_sq = 0.0,
         bool force_refactor = true
     );
 
@@ -143,6 +144,7 @@ public:
         const double* d_rhs_atoms,
         const std::vector<int>& fraglist,
         double rhs_c0,
+        double cutoff_sq = 0.0,
         bool force_refactor = true
     );
 

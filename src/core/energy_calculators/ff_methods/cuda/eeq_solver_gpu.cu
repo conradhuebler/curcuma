@@ -340,6 +340,7 @@ bool EEQSolverGPU::solveWithDeviceRHS(
     const std::vector<int>& fraglist,
     double* out_z1,
     double* out_Z2,
+    double cutoff_sq,
     bool force_refactor)
 {
     const int N = natoms;
@@ -356,7 +357,7 @@ bool EEQSolverGPU::solveWithDeviceRHS(
             int block = 256;
             int grid = (n_lower + block - 1) / block;
             k_eeq_build_matrix<<<grid, block, 0, m_impl->stream>>>(
-                N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, m_impl->d_A.ptr, 0.0);
+                N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, m_impl->d_A.ptr, cutoff_sq);
         }
 
         if (N != m_last_N) {
@@ -605,6 +606,7 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchur(
     const double* d_rhs_atoms,
     const std::vector<int>& fraglist,
     double rhs_c0,
+    double cutoff_sq,
     bool force_refactor)
 {
     // Only nfrag == 1 supported; multi-fragment needs batched Cholesky (future work)
@@ -624,7 +626,7 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchur(
             int block = 256;
             int grid = (n_lower + block - 1) / block;
             k_eeq_build_matrix<<<grid, block, 0, m_impl->stream>>>(
-                N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, m_impl->d_A.ptr, 0.0);
+                N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, m_impl->d_A.ptr, cutoff_sq);
         }
 
         if (N != m_last_N) {

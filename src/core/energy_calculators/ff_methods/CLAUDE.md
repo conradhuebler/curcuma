@@ -237,6 +237,17 @@ ctest -R test_gfnff_gradients --verbose
 - **Element hybridization**: Complete XTB element-specific rules (gfnff_ini2.f90:217-332)
 - See `docs/DGAM_VALIDATION_REPORT.md` for dgam analysis
 
+### ⚙️ EEQ Distance Cutoff (`eeq_distance_cutoff`, default `0.0` since May 2026)
+- **Default = 0 → no cutoff, matches Fortran reference** `goed_gfnff` (gfnff_engrad.F90:1274-1391, full A-matrix, full energy sum)
+- **Why default = 0**: Non-zero cutoff truncates the EEQ A-matrix but the Coulomb energy/gradient kernels evaluate the full pair list → charges are not stationary w.r.t. the computed energy → Hellmann-Feynman violated → MD energy drift. Verified May 2026 on polymer (N=1410): with default 30 Bohr the GPU-MD thermostat exchange grew noticeably; with default 0 it returns to clean energy conservation.
+- **Performance experiments** (large N): A non-zero cutoff is allowed via CLI/config but **MUST** be applied consistently across **all four** sites or the gradient breaks:
+  1. EEQ A-matrix build (CPU `eeq_solver.cpp:2641-2706`, GPU `k_eeq_build_matrix` via `cutoff_sq` argument)
+  2. Coulomb pair-list filter (`gfnff_method.cpp:8220` — `coul.r_cut` must be ≤ cutoff)
+  3. CPU Coulomb energy/gradient (`forcefieldthread.cpp:CalculateGFNFFCoulombContribution` — already respects per-pair `r_cut`)
+  4. GPU Coulomb kernel (`k_coulomb` — already respects per-pair `r_cut`)
+- **Fortran-equivalence validation**: Always benchmark against XTB with `eeq_distance_cutoff = 0`; non-zero cutoff produces a different (truncated) energy surface and is not directly comparable to the reference.
+- **Reference for the polymer fix** (May 2026): `docs/GFNFF_GPU_EEQ_CUTOFF_FIX.md` — explains the original GPU/CPU mismatch (Δ≈0.978 Eh) and why aligning both paths to the cutoff-free Fortran behaviour was the correct resolution.
+
 ### ✅ Parameter Management (Phase 2 - December 2025)
 - **ConfigManager Integration**: Type-safe parameter access with validation
 - **Parameter Flags**: Selective term calculation (dispersion, hbond, repulsion, coulomb enabled/disable)

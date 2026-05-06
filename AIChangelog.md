@@ -4,6 +4,10 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+## May 2026
+
+- **GFN-FF EEQ Coulomb-Cutoff Fix (May 6)**: Polymer (N=1410) Coulomb-Energie GPU vs CPU diff Δ≈0.978 Eh behoben. Ursache war ein 30-Bohr-EEQ-Cutoff in `eeq_solver.cpp` (für N>200), der GPU-`k_eeq_build_matrix` nicht spiegelte; im Fortran-`goed_gfnff` (gfnff_engrad.F90:1274-1391) gibt es keinen Cutoff. Fix: GPU-Solver nimmt jetzt `cutoff_sq`-Argument, EEQ-Default `eeq_distance_cutoff: 30.0 → 0.0` (matcht Fortran und stellt Hellmann-Feynman-Konsistenz mit der un-truncated Coulomb-Energie wieder her — vorher beobachtete MD-Thermostat-Drift verschwunden). Cutoff bleibt als CLI-Option für künftige Performance-Experimente, **muss** dann aber konsistent über EEQ-Matrix + Coulomb-Pair-List + CPU-Coulomb + GPU-Coulomb-Kernel gezogen werden. Doku: `docs/GFNFF_GPU_EEQ_CUTOFF_FIX.md`, Roadmap-Eintrag G2c.
+
 ## April 2026
 
 - **Native-GFN-FF Branch-Konsolidierung (Apr 28)**: Merge `origin/native-gfnff` (P-/G-Optimierungs-Reihe + numerischer Gradient-Test + PBC + D4 P1a) in lokal `native-gfnff` (HB-Re-Detection-Fix + Stepwise-MD/Opt-API + EEQ-Cherry-Picks aus GPU-Branch); manuelle Konfliktauflösung in `gfnff_gpu_method.cpp`/`simplemd.cpp` mit Erhalt aller wertvollen Blöcke beider Seiten; Reparatur zweier latenter Defekte aus den Apr-25-Cherry-Picks (`ada6925`/`7389e2e`): `eeq_solver.h` hatte alle 87c1a8e/e37db8b-Member-Deklarationen verloren (Build-Fehler), `eeq_solver.cpp` hatte duplizierten `pcg_viable`-Block + undeklariertes `schur_ok`, `gfnff_method.cpp` hatte HB/XB-Cache-Block außerhalb der `if (hbond)`-Klammer; aggressive `e37db8b`-Defaults (PCG, 100, 100) auf konservative Werte (SchurCholesky, 200, 5000) zurückgesetzt; Build clean, 21/22 CLI-Tests grün; eine 3.5 mEh-Regression in `cli_gfnff_01_complex` mit HBond als Hauptverdächtigem dokumentiert (siehe `docs/NATIVE_GFNFF_CONSOLIDATION_2026-04-28.md`)
