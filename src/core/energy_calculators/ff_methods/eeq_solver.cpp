@@ -706,7 +706,10 @@ static void testElementSpecificHybridizationLogic() {
 EEQSolveMethod EEQSolver::parseSolveMethod(const std::string& method_str) {
     if (method_str == "lu") return EEQSolveMethod::LU;
     if (method_str == "pcg") return EEQSolveMethod::PCG;
-    if (method_str == "schur_cholesky") return EEQSolveMethod::SchurCholesky;
+    if (method_str == "batched") return EEQSolveMethod::Batched;
+    // "cholesky" (canonical) and "schur_cholesky" (legacy) both map to SchurCholesky
+    if (method_str == "cholesky" || method_str == "schur_cholesky")
+        return EEQSolveMethod::SchurCholesky;
     return EEQSolveMethod::Auto;  // default including "auto"
 }
 
@@ -1252,6 +1255,18 @@ Vector EEQSolver::dispatchSolve(
     EEQSolveMethod method_to_use = m_solve_method;
     if (m_solve_method == EEQSolveMethod::Auto) {
         method_to_use = m_selected_method;  // Use cached or default (SchurCholesky)
+    }
+    // WP7-B: CPU has no batched implementation — warn once and fall back to cholesky.
+    // GPU dispatch (gfnff_gpu_method.cpp) handles Batched on its own path; this CPU
+    // dispatcher still runs for Phase 1 topology charges even when -gpu cuda is set.
+    if (method_to_use == EEQSolveMethod::Batched) {
+        if (!m_batched_cpu_warned) {
+            CurcumaLogger::warn("solve_method=batched: CPU dispatcher has no batched "
+                                "path; falling back to cholesky here. The batched GPU "
+                                "solver (WP7-B) runs separately when -gpu cuda is active.");
+            m_batched_cpu_warned = true;
+        }
+        method_to_use = EEQSolveMethod::SchurCholesky;
     }
 
     if (m_verbosity >= 2) {

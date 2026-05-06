@@ -74,6 +74,7 @@ enum class EEQDistanceMode {
 enum class EEQSolveMethod {
     LU,             ///< PartialPivLU on full augmented system (baseline)
     SchurCholesky,  ///< Cholesky on NxN SPD block + Schur complement for constraints
+    Batched,        ///< Per-fragment Cholesky (GPU only); CPU falls back to SchurCholesky
     PCG,            ///< Preconditioned Conjugate Gradient with warm start
     Auto            ///< Auto-select via first-call benchmark (SchurCholesky vs PCG)
 };
@@ -326,6 +327,12 @@ public:
         const Vector& cn,
         const std::optional<TopologyInput>& topology = std::nullopt
     ) const;
+
+    /**
+     * @brief Parse solve method string to enum (public so GPU dispatch can reuse).
+     * Claude Generated - March 2026; moved to public for WP7-B (May 2026).
+     */
+    static EEQSolveMethod parseSolveMethod(const std::string& method_str);
 
 private:
     /**
@@ -717,12 +724,6 @@ private:
         double tol
     );
 
-    /**
-     * @brief Parse solve method string to enum
-     * Claude Generated - March 2026
-     */
-    static EEQSolveMethod parseSolveMethod(const std::string& method_str);
-
     // ===== Configuration =====
 
     ConfigManager m_config;           ///< Configuration manager
@@ -791,6 +792,9 @@ private:
     mutable EEQSolveMethod m_selected_method = EEQSolveMethod::SchurCholesky;  ///< Method chosen by auto-benchmark
     mutable bool m_auto_benchmark_done = false;  ///< Whether auto-benchmark has run
 
+    // WP7-B (May 2026): warn-once flag for CPU "batched" → cholesky fallback
+    mutable bool m_batched_cpu_warned = false;
+
     // Convergence statistics — accumulate across calls, print summary instead of per-call spam
     // Claude Generated (April 2026)
     mutable int m_pcg_total_calls = 0;       ///< Total PCG solve calls
@@ -858,8 +862,14 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Auto-calculate coordination numbers if not provided", "Algorithm", {})
     PARAM(use_iterative_refinement, Bool, false,
           "Use iterative refinement for EEQ Phase 2", "Algorithm", {})
-    PARAM(solve_method, String, "schur_cholesky",
-          "EEQ linear solve method: lu, schur_cholesky, pcg, auto", "Algorithm", {})
+    PARAM(solve_method, String, "cholesky",
+          "EEQ linear solve algorithm: cholesky | batched | pcg | auto | lu (legacy). "
+          "GPU paths: cholesky → WP5-A/WP7-A (exact, full N×N Cholesky); "
+          "batched → WP7-B (per-fragment Cholesky, ignores cross-fragment Coulomb — "
+          "use only for well-separated fragments, see eeq_batched_min_distance). "
+          "CPU 'batched' logs a warning and falls back to cholesky. "
+          "Legacy alias 'schur_cholesky' maps to 'cholesky'.",
+          "Algorithm", {})
     PARAM(max_pcg_iterations, Int, 200,
           "Maximum PCG iterations for EEQ solve", "Algorithm", {})
     PARAM(pcg_tolerance, Double, 1e-10,
@@ -874,6 +884,12 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Atom count threshold above which PCG auto-selection and adaptive scaling activate", "Algorithm", {})
     PARAM(eeq_distance_cutoff, Double, 0.0,
           "Distance cutoff in Bohr for Coulomb matrix sparsification (0 = no cutoff, matches Fortran goed_gfnff). Non-zero values violate Hellmann-Feynman vs. the full Coulomb energy and degrade MD energy conservation.", "Advanced", {})
+    PARAM(eeq_batched_min_distance, Double, 15.0,
+          "Minimum atom-atom distance between different fragments (Bohr) below which "
+          "the batched EEQ solver logs a warning. Batched still runs — the warning "
+          "alerts the user that cross-fragment Coulomb (which batched ignores) may be "
+          "non-negligible. 0 = no warning. Default 15 Bohr ≈ 8 Å.",
+          "Advanced", {})
     PARAM(dump_charges, Bool, false,
           "Save Phase 1 and Phase 2 charges to charges_dump_N<size>.json for analysis", "Advanced", {})
 END_PARAMETER_DEFINITION

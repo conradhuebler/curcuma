@@ -17,6 +17,7 @@
 
 #include "../computational_method.h"
 #include "../ff_methods/gfnff.h"
+#include "../ff_methods/eeq_solver.h"  // EEQSolveMethod enum
 #include "../ff_methods/cuda/ff_workspace_gpu.h"
 #include "../ff_methods/cuda/eeq_solver_gpu.h"
 
@@ -155,6 +156,13 @@ private:
     // goed_gfnff. Set non-zero only for performance experiments — produces HF-inconsistent
     // gradients vs. the un-truncated Coulomb energy and degrades MD energy conservation.
     double m_eeq_distance_cutoff = 0.0;  ///< Bohr; from eeq_distance_cutoff param
+
+    // WP7-B (May 2026): GPU EEQ solver strategy for nfrag>1 systems.
+    // SchurCholesky → WP5-A (nfrag=1) / WP7-A (nfrag>1) — exact, full N×N Cholesky.
+    // Batched      → WP7-B (nfrag>1)                   — per-fragment Cholesky, drops cross-fragment Coulomb.
+    // PCG / LU / Auto are CPU concepts; on GPU they collapse to SchurCholesky for now.
+    EEQSolveMethod m_eeq_strategy = EEQSolveMethod::SchurCholesky;
+    double m_eeq_batched_min_distance_bohr = 15.0;  ///< warn if min inter-frag distance < this
 
     int  m_calc_count = 0;  ///< counts calculateEnergy() calls; first 5 always print timing
 

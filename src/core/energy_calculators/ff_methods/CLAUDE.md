@@ -670,11 +670,15 @@ Ziel: GFN-FF für N > 10k Atome.
   - Validierung: complex.xyz (nfrag=2): WP7-A == WP2+CPU-Schur (bit-identisch)
   - CPU-Pendant (OpenMP-Rückwärtssubstitution in `solveWithSchurCholesky()`) noch offen
 
-- **WP7-B: Gebatchtes per-Fragment Cholesky** — approximativ (kein cross-frag Coulomb), ~3 Tage
-  - `solveWithDeviceRHSAndGPUSchurBatched()` bereits implementiert, nur deaktiviert
-  - CPU-Pendant: OpenMP über nfrag unabhängige Cholesky-Faktorisierungen
-  - Sinnvoll wenn Fragmentabstand > ~8 Å; Warnung bei engem Kontakt (`eeq_batched_warn_threshold`)
-  - Speedup für N=10k, nfrag=100: O(N_f³×nfrag) statt O(N³) — ~10000× schneller für Cholesky
+- **WP7-B: Gebatchtes per-Fragment Cholesky** — ✅ GPU-Pfad aktiviert (Mai 2026)
+  - Auswählbar via `solve_method=batched` (Default bleibt `cholesky` = WP7-A)
+  - `EEQSolverGPU::solveWithDeviceRHSAndGPUSchurBatched()` jetzt im Dispatch verdrahtet
+  - Min-Fragment-Distanz wird einmalig pro Topo-Build gecacht (`updateMinFragmentDistance`)
+  - Warnung wenn min-distanz < `eeq_batched_min_distance` (Default 15 Bohr ≈ 8 Å)
+  - Bei Cholesky-Failure → automatischer Fallback auf WP7-A
+  - CPU-Dispatch: `batched` warnt einmal und fällt auf `cholesky` zurück (kein OpenMP-Pfad)
+  - Validierung: complex.xyz (eng gepackt, 1.4 Bohr min-distanz) → Warnung + 2.5 mEh Δ vs cholesky
+  - Speedup für gut getrennte N=10k, nfrag=100: O(Σ N_f³) statt O(N³) — ~10000× im Cholesky-Schritt
 
 - **WP7-C: PCG auf GPU** — exakt, O(k·N²), ~7 Tage
   - `cublasDgemv` für Matrix-Vektor-Produkt + `k_pcg_project_fragments` für Fragment-Constraints
@@ -682,10 +686,13 @@ Ziel: GFN-FF für N > 10k Atome.
   - CPU-Pendant: OpenMP MATVEC + Fragment-Projektion nach jedem CG-Schritt
   - Ermöglicht MD für N > 5k (k=20 Iterationen × O(N²) statt O(N³))
 
-**Parameter-Interface** (alle Strategien über einen Parameter):
+**Parameter-Interface** (CPU + GPU vereinheitlicht, Mai 2026):
 ```
-eeq_solver_strategy: auto | cholesky | batched | pcg | cholesky_gpu | batched_gpu | pcg_gpu
-eeq_batched_warn_threshold: Bohr-Grenze für Warnung bei engem Fragment-Kontakt (default 15.0)
+solve_method: cholesky (default) | batched | pcg | auto | lu (legacy)
+              Alias: schur_cholesky → cholesky
+              GPU-Pfade: cholesky → WP5-A/WP7-A; batched → WP7-B
+              CPU "batched" warnt einmal und fällt auf cholesky zurück.
+eeq_batched_min_distance: Bohr-Schwelle für Warnung bei engem Fragment-Kontakt (default 15.0).
 ```
 
 ### ⚠️ Known Issues

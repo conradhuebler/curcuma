@@ -49,6 +49,16 @@ GFNFFGPUComputationalMethod::GFNFFGPUComputationalMethod(const std::string& meth
     // values violate Hellmann-Feynman vs. the full Coulomb energy → MD energy drift.
     m_eeq_distance_cutoff = gfnff_cfg.value("eeq_distance_cutoff", 0.0);
 
+    // WP7-B (May 2026): EEQ solver strategy for nfrag>1.
+    //   "cholesky" / "schur_cholesky" → WP5-A/WP7-A (exact, default).
+    //   "batched"                     → WP7-B per-fragment Cholesky (drops cross-fragment Coulomb).
+    //   "pcg" / "lu" / "auto"         → collapse to cholesky on GPU (CPU concepts).
+    {
+        std::string strategy_str = gfnff_cfg.value("solve_method", std::string("cholesky"));
+        m_eeq_strategy = EEQSolver::parseSolveMethod(strategy_str);
+    }
+    m_eeq_batched_min_distance_bohr = gfnff_cfg.value("eeq_batched_min_distance", 15.0);
+
     m_gfnff = std::make_unique<GFNFF>(config);
 }
 
@@ -229,8 +239,15 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
             m_eeq_nfrag            = topo_params.nfrag;
 
             // WP6: upload fragment topology for batched Cholesky (nfrag > 1)
-            if (m_eeq_nfrag > 1)
+            if (m_eeq_nfrag > 1) {
                 m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, natoms);
+                // WP7-B: cache min inter-fragment distance for batched-solver warning.
+                const Matrix& geom = m_gfnff->getGeometryBohr();
+                if (geom.rows() == natoms && geom.cols() >= 3) {
+                    m_eeq_gpu->updateMinFragmentDistance(
+                        geom.col(0).data(), geom.col(1).data(), geom.col(2).data(), natoms);
+                }
+            }
         }
 
         if (CurcumaLogger::get_verbosity() >= 1) {
@@ -458,8 +475,15 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         m_eeq_nfrag           = topo_params.nfrag;
 
         // WP6: upload fragment topology for batched Cholesky (nfrag > 1)
-        if (m_eeq_nfrag > 1)
+        if (m_eeq_nfrag > 1) {
             m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, N);
+            // WP7-B: refresh min inter-fragment distance after topology rebuild.
+            const Matrix& geom = m_gfnff->getGeometryBohr();
+            if (geom.rows() == N && geom.cols() >= 3) {
+                m_eeq_gpu->updateMinFragmentDistance(
+                    geom.col(0).data(), geom.col(1).data(), geom.col(2).data(), N);
+            }
+        }
     }
 
     // WP5-B (May 2026): setCNDerivatives no-op — CNF lives on GPU as eeq_topo.d_cnf.
@@ -517,9 +541,11 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
             const char* path = "CPU-fallback";
             if (gpu_eeq_applicable) {
                 if (m_eeq_nfrag == 1)
-                    path = "WP5-A GPU-Schur";
+                    path = "WP5-A GPU-Schur (cholesky)";
+                else if (m_eeq_strategy == EEQSolveMethod::Batched)
+                    path = "WP7-B GPU-Schur (batched)";
                 else
-                    path = "WP7-A GPU-Schur";  // falls back to WP2+CPU-Schur on failure
+                    path = "WP7-A GPU-Schur (cholesky)";
             }
             CurcumaLogger::info(fmt::format("EEQ GPU Phase 2: N={}, nfrag={}, path={}",
                 N, m_eeq_nfrag, path));
@@ -582,11 +608,40 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                             force_refactor);
                     }
                 } else {
+                    // nfrag > 1: pick strategy. Default (cholesky) → WP7-A. "batched" → WP7-B.
+                    // Both fall back to WP2 + CPU-Schur on failure.
+                    if (m_eeq_strategy == EEQSolveMethod::Batched
+                            && m_eeq_gpu->isFragmentTopoValid()) {
+                        // WP7-B: per-fragment Cholesky (drops cross-fragment Coulomb).
+                        // Approximate — only safe for well-separated fragments.
+                        double min_d_sq = m_eeq_gpu->getMinFragmentDistanceSq();
+                        double thr      = m_eeq_batched_min_distance_bohr;
+                        if (thr > 0.0 && min_d_sq >= 0.0 && min_d_sq < thr * thr) {
+                            CurcumaLogger::warn(fmt::format(
+                                "WP7-B batched EEQ: min inter-fragment distance {:.2f} Bohr "
+                                "below threshold {:.2f} — cross-fragment Coulomb is "
+                                "non-negligible, energies will differ from cholesky.",
+                                std::sqrt(min_d_sq), thr));
+                        }
+                        eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUSchurBatched(
+                            N, m_eeq_nfrag,
+                            m_gpu_workspace->getDeviceXPtr(),
+                            m_gpu_workspace->getDeviceYPtr(),
+                            m_gpu_workspace->getDeviceZPtr(),
+                            m_gpu_workspace->getDeviceAlphaPtr(),
+                            m_gpu_workspace->getDeviceGamPtr(),
+                            m_gpu_workspace->getDeviceRHSPtr(),
+                            m_eeq_rhs_constraints,
+                            eeq_cutoff_sq,
+                            force_refactor);
+                        if (eeq_ok)
+                            used_gpu_schur = true;
+                    }
                     // WP7-A: full N×N Cholesky + GPU Schur complement for nfrag > 1.
                     // Replaces D2H of z1+Z2 (~N·(1+nfrag) doubles) with D2H of
                     // Cz1+S (nfrag + nfrag² doubles) and a tiny CPU Gauss-elim.
                     // Cross-fragment Coulomb correctly retained (single N×N Cholesky).
-                    if (m_eeq_gpu->isFragmentTopoValid()) {
+                    if (!eeq_ok && m_eeq_gpu->isFragmentTopoValid()) {
                         eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUSchurGeneral(
                             N, m_eeq_nfrag,
                             m_gpu_workspace->getDeviceXPtr(),
