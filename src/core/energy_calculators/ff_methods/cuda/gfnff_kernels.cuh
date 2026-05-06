@@ -641,6 +641,35 @@ __global__ void k_eeq_schur_nfrag1(
     double*       __restrict__ charges); ///< [N] output
 
 // ============================================================================
+// WP7-A: General Schur complement for nfrag > 1 (May 2026)
+// Replaces CPU Schur loop in gfnff_gpu_method.cpp for multi-fragment systems.
+// k_eeq_reduce_fragment_sums: Cz1[f] = Σ_{i∈frag_f} z1[i],
+//                             S[f,g] = Σ_{i∈frag_f} Z2[i,g]
+// k_eeq_schur_general:        q[i] = z1[i] - Σ_g Z2[i,g] * λ[g]
+// ============================================================================
+
+/// Block-reduce per-fragment sums of z1 (column 0) and Z2[:,g] (columns 1..nfrag).
+/// Each block reduces a tile of atoms in shared memory, then atomicAdd's
+/// (nfrag + 1) values into d_Cz1[atom_frag[i]] and d_S[atom_frag[i]*nfrag + g].
+/// Caller must zero d_Cz1 and d_S before launch (cudaMemsetAsync).
+__global__ void k_eeq_reduce_fragment_sums(
+    int N,
+    int nfrag,
+    const double* __restrict__ d_rhs,        ///< [N*(nfrag+1)] column-major
+    const int*    __restrict__ d_atom_frag,  ///< [N] 0-indexed fragment id per atom
+    double*       __restrict__ d_Cz1,        ///< [nfrag] output: per-fragment Σ z1
+    double*       __restrict__ d_S);         ///< [nfrag*nfrag] row-major: S[f*nfrag+g]
+
+/// Element-wise Schur apply for nfrag > 1.
+/// charges[i] = z1[i] - Σ_{g=0..nfrag-1} Z2[i,g] * lambda[g]
+__global__ void k_eeq_schur_general(
+    int N,
+    int nfrag,
+    const double* __restrict__ d_rhs,        ///< [N*(nfrag+1)] column-major
+    const double* __restrict__ d_lambda,     ///< [nfrag] Lagrange multipliers
+    double*       __restrict__ charges);     ///< [N] output (in-place on d_rhs[0..N-1] OK)
+
+// ============================================================================
 // WP2: GPU-side EEQ RHS construction
 // ============================================================================
 
@@ -704,6 +733,57 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_logcn(
     const double* __restrict__ cn_raw,   ///< [N] raw erf-sum CN
     double*       __restrict__ cn_final, ///< [N] output: log-squashed CN
     double        cnmax                  ///< squashing limit (4.4)
+);
+
+// ============================================================================
+// WP6: Batched per-fragment EEQ kernels (nfrag > 1)
+// Claude Generated (May 2026): Independent N_f×N_f Coulomb blocks per fragment.
+// Cross-fragment Coulomb set to zero (valid for well-separated fragments in MD).
+// ============================================================================
+
+/**
+ * @brief Build independent per-fragment N_f×N_f Coulomb blocks for batched EEQ.
+ *
+ * 1 thread per lower-triangle element across ALL fragments (packed).
+ * total_pairs = sum_f N_f*(N_f+1)/2 total threads.
+ * Thread maps to (fragment_f, local_i, local_j) via binary search on frag_offsets_pair.
+ * Writes column-major block into d_A_blocks[frag_offsets_A[f] + local_j*N_f + local_i].
+ *
+ * Reference: same erf(gamma*r)/r formula as k_eeq_build_matrix, intra-fragment only.
+ */
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_build_fragment_matrices(
+    int           total_pairs,               ///< sum_f N_f*(N_f+1)/2
+    const double* __restrict__ cx,           ///< [N] x-coordinates (Bohr, SoA, global order)
+    const double* __restrict__ cy,           ///< [N] y-coordinates
+    const double* __restrict__ cz,           ///< [N] z-coordinates
+    const double* __restrict__ alpha,        ///< [N] alpha² per atom (global order)
+    const double* __restrict__ gam,          ///< [N] gam_corrected per atom (global order)
+    const int*    __restrict__ frag_sizes,       ///< [nfrag] N_f per fragment
+    const int*    __restrict__ frag_offsets_A,   ///< [nfrag] start in d_A_blocks
+    const int*    __restrict__ frag_offsets_pair,///< [nfrag+1] prefix sum N_f*(N_f+1)/2
+    const int*    __restrict__ frag_atom_offsets,///< [nfrag+1] prefix sum N_f (atom start)
+    const int*    __restrict__ frag_atom_map,    ///< [N] sorted-position → global atom index
+    double*       __restrict__ d_A_blocks,       ///< [sum N_f²] output, column-major per block
+    int           nfrag,
+    double        cutoff_sq                      ///< distance cutoff² (0 = no cutoff)
+);
+
+/**
+ * @brief Gather per-atom RHS (b_atoms) from global order into per-fragment RHS blocks.
+ *
+ * 1 thread per sorted atom position k (0..N-1).
+ * Reads d_rhs_global[frag_atom_map[k]] and writes to d_rhs_blocks col0.
+ * Col1 (constraint = all-ones per fragment) is pre-filled at uploadFragmentTopology.
+ */
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_gather_rhs_fragments(
+    int           N,
+    const double* __restrict__ d_rhs_global,      ///< [N] from k_build_eeq_rhs (global order)
+    const int*    __restrict__ frag_atom_map,      ///< [N] sorted-position → global index
+    const int*    __restrict__ frag_atom_offsets,  ///< [nfrag+1] prefix sum N_f
+    const int*    __restrict__ frag_offsets_rhs,   ///< [nfrag] start in d_rhs_blocks
+    const int*    __restrict__ frag_sizes,         ///< [nfrag] N_f per fragment
+    double*       __restrict__ d_rhs_blocks,       ///< [sum N_f*2] col0 written here
+    int           nfrag
 );
 
 #endif // USE_CUDA

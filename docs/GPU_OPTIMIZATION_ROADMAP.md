@@ -38,14 +38,15 @@ GROMACS-Vergleich: keine CPU-Sync-Punkte, kein O(N³) im Hot-Path, >80% GPU-Ausl
 
 ## Arbeitspakete
 
-| WP | Titel | Aufwand | Wirkung | Abhängig von |
-|----|-------|---------|---------|--------------|
-| [WP1](GPU_WP1_L2_PERSISTENCE_LAUNCH_BOUNDS.md) | L2-Persistenz + Blackwell Launch-Bounds | ~4h | Mittel–Hoch | — | ❌ Blockiert (Energie=0, Details in WP1-Dok) |
-| [WP2](GPU_WP2_EEQ_RHS_KERNEL.md) | k_build_eeq_rhs — GPU-seitiger RHS | ✅ **Implementiert** | Infrastruktur (kein Timing-Gewinn) | — |
-| [WP3](GPU_WP3_PAIRLIST_CN_KERNEL.md) | Pair-List CN — O(N²)→O(N·k) | ✅ **Implementiert** | ~4 ms/Schritt Gewinn | — |
-| [WP4](GPU_WP4_PHASE2_CUDA_GRAPH.md) | Phase-2-CUDA-Graph | ~6h | Mittel | WP2 ✅ |
-| [WP5](GPU_WP5_FULL_GPU_EEQ_PIPELINE.md) | Vollständig GPU-residenter EEQ | ~10 Tage | **Transformativ** | WP2 ✅ + WP3 + WP4 |
-| [WP6](GPU_WP6_TILED_CN_SHARED_MEMORY.md) | Tiled k_cn_compute (Shared Memory) | ~7 Tage | Hoch (N≥3000) | WP3 optional |
+| WP | Titel | Aufwand | Wirkung | Status | Abhängig von |
+|----|-------|---------|---------|--------|--------------|
+| [WP1](GPU_WP1_L2_PERSISTENCE_LAUNCH_BOUNDS.md) | L2-Persistenz + Blackwell Launch-Bounds | ~4h | Mittel–Hoch | ❌ Blockiert | — |
+| [WP2](GPU_WP2_EEQ_RHS_KERNEL.md) | k_build_eeq_rhs — GPU-seitiger RHS | — | Infrastruktur | ✅ Fertig | — |
+| [WP3](GPU_WP3_PAIRLIST_CN_KERNEL.md) | Pair-List CN — O(N²)→O(N·k) | — | ~4 ms/Schritt | ✅ Fertig | — |
+| [WP4](GPU_WP4_PHASE2_CUDA_GRAPH.md) | Phase-2-CUDA-Graph | ~6h | Mittel | 🤖 Geplant | WP2 ✅ |
+| [WP5](GPU_WP5_FULL_GPU_EEQ_PIPELINE.md) | Vollständig GPU-residenter EEQ (nfrag=1) | ~10 Tage | **Transformativ** | ⚙️ WP5-A–D fertig | WP2 ✅ + WP3 ✅ |
+| [WP6](GPU_WP6_TILED_CN_SHARED_MEMORY.md) | Tiled k_cn_compute (Shared Memory) | ~7 Tage | Hoch (N≥3000) | 🤖 Geplant | WP3 optional |
+| [WP7](GPU_WP7_EEQ_LARGE_SYSTEMS.md) | EEQ-Löser für große Systeme (nfrag>1, N>10k) | ~15–25 Tage | **Kritisch für >10k Atome** | 🤖 Geplant | WP5 ✅ |
 
 ---
 
@@ -63,6 +64,12 @@ WP4 (Phase-2-Graph, baut auf WP2 ✅ auf)
 WP5 (vollständig GPU, baut auf WP2 ✅ + WP3 ✅ + WP4 auf)
    ↓
 WP6 (Shared Memory CN, für N≥3000)
+   ↓
+WP7-A (allgemeines Schur nfrag>1, schließt complex.xyz GPU-Lücke)
+   ↓
+WP7-B (Batched aktivieren + Validierung, für weit getrennte Fragmente)
+   ↓
+WP7-C (PCG auf GPU — ermöglicht N>5k MD)
 ```
 
 ---

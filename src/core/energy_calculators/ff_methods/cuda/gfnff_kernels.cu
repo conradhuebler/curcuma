@@ -3105,6 +3105,51 @@ __global__ void k_eeq_schur_nfrag1(
 }
 
 // ============================================================================
+// WP7-A: General Schur for nfrag > 1 (May 2026)
+// k_eeq_reduce_fragment_sums: Cz1[f] = Σ_{i∈frag_f} z1[i],
+//                             S[f,g] = Σ_{i∈frag_f} Z2[i,g]
+// k_eeq_schur_general:        q[i] = z1[i] - Σ_g Z2[i,g] · λ[g]
+// Reference: docs/GPU_WP7_EEQ_LARGE_SYSTEMS.md (Strategie A)
+// ============================================================================
+__global__ void k_eeq_reduce_fragment_sums(
+    int N,
+    int nfrag,
+    const double* __restrict__ d_rhs,
+    const int*    __restrict__ d_atom_frag,
+    double*       __restrict__ d_Cz1,
+    double*       __restrict__ d_S)
+{
+    // 1 thread / atom; per-thread loop over (nfrag+1) RHS columns.
+    // Each atom contributes to its own fragment row in (Cz1, S) → atomicAdd.
+    // Non-deterministic ordering ⇒ <1 µEh energy noise (same class as WP3 CN-pair).
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    int f = d_atom_frag[i];
+    // Column 0 contributes to Cz1[f]
+    atomicAdd(&d_Cz1[f], d_rhs[i]);
+    // Columns 1..nfrag contribute to S[f, g] (row-major layout: f*nfrag + g)
+    for (int g = 0; g < nfrag; ++g) {
+        atomicAdd(&d_S[f * nfrag + g], d_rhs[(g + 1) * N + i]);
+    }
+}
+
+__global__ void k_eeq_schur_general(
+    int N,
+    int nfrag,
+    const double* __restrict__ d_rhs,
+    const double* __restrict__ d_lambda,
+    double*       __restrict__ charges)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double q = d_rhs[i];  // z1[i]
+    for (int g = 0; g < nfrag; ++g) {
+        q -= d_rhs[(g + 1) * N + i] * d_lambda[g];
+    }
+    charges[i] = q;
+}
+
+// ============================================================================
 // WP2: k_build_eeq_rhs — GPU-side EEQ RHS construction
 // Claude Generated (May 2026): Eliminates CPU sync for EEQ RHS per MD step.
 // chi_corr and cnf are topology-constant (uploaded once by uploadEEQTopologyParams).
@@ -3189,4 +3234,117 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_check_dc6dcn_skip_final(
     if (tid == 0) {
         *skip_flag = (sdata[0] < abs_threshold) ? 1 : 0;
     }
+}
+
+// ============================================================================
+// WP6: Batched per-fragment EEQ kernels (nfrag > 1)
+// Claude Generated (May 2026)
+// ============================================================================
+
+/// sqrt(2/pi) — matches value in eeq_solver_gpu.cu
+__device__ constexpr double TSQRT2PI_FRAG = 0.797884560802866;
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_build_fragment_matrices(
+    int           total_pairs,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ alpha,
+    const double* __restrict__ gam,
+    const int*    __restrict__ frag_sizes,
+    const int*    __restrict__ frag_offsets_A,
+    const int*    __restrict__ frag_offsets_pair,
+    const int*    __restrict__ frag_atom_offsets,
+    const int*    __restrict__ frag_atom_map,
+    double*       __restrict__ d_A_blocks,
+    int           nfrag,
+    double        cutoff_sq)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= total_pairs) return;
+
+    // Binary search: find which fragment this tid belongs to
+    int f = 0;
+    {
+        int lo = 0, hi = nfrag - 1;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (frag_offsets_pair[mid + 1] <= tid)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        f = lo;
+    }
+
+    int local_tid  = tid - frag_offsets_pair[f];
+    int Nf         = frag_sizes[f];
+    int atom_start = frag_atom_offsets[f];
+
+    // Map local_tid → (li, lj) in lower triangle of the N_f×N_f block: li >= lj
+    int li = static_cast<int>((-1.0 + sqrt(1.0 + 8.0 * static_cast<double>(local_tid))) * 0.5);
+    while (li * (li + 1) / 2 > local_tid) --li;
+    while ((li + 1) * (li + 2) / 2 <= local_tid) ++li;
+    int lj = local_tid - li * (li + 1) / 2;
+
+    // Global atom indices
+    int gi = frag_atom_map[atom_start + li];
+    int gj = frag_atom_map[atom_start + lj];
+
+    // Base pointer for this fragment's N_f×N_f column-major block
+    double* Af = d_A_blocks + frag_offsets_A[f];
+
+    if (li == lj) {
+        Af[lj * Nf + li] = gam[gi] + TSQRT2PI_FRAG / sqrt(alpha[gi]);
+    } else {
+        double dx   = cx[gi] - cx[gj];
+        double dy   = cy[gi] - cy[gj];
+        double dz   = cz[gi] - cz[gj];
+        double r_sq = dx*dx + dy*dy + dz*dz;
+
+        if (cutoff_sq > 0.0 && r_sq > cutoff_sq) {
+            Af[lj * Nf + li] = 0.0;
+            Af[li * Nf + lj] = 0.0;
+        } else {
+            double r          = sqrt(r_sq);
+            double gamma_ij   = 1.0 / sqrt(alpha[gi] + alpha[gj]);
+            double val        = erf(gamma_ij * r) / r;
+            Af[lj * Nf + li] = val;  // lower triangle (col=lj, row=li)
+            Af[li * Nf + lj] = val;  // upper triangle (col=li, row=lj)
+        }
+    }
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_gather_rhs_fragments(
+    int           N,
+    const double* __restrict__ d_rhs_global,
+    const int*    __restrict__ frag_atom_map,
+    const int*    __restrict__ frag_atom_offsets,
+    const int*    __restrict__ frag_offsets_rhs,
+    const int*    __restrict__ frag_sizes,
+    double*       __restrict__ d_rhs_blocks,
+    int           nfrag)
+{
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= N) return;
+
+    // Binary search: find which fragment sorted position k belongs to
+    int f = 0;
+    {
+        int lo = 0, hi = nfrag - 1;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (frag_atom_offsets[mid + 1] <= k)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        f = lo;
+    }
+
+    int local_k = k - frag_atom_offsets[f];
+    int gi      = frag_atom_map[k];
+
+    // Write to col0 of this fragment's RHS block (col1 = ones, pre-filled at topo upload)
+    d_rhs_blocks[frag_offsets_rhs[f] + local_k] = d_rhs_global[gi];
 }

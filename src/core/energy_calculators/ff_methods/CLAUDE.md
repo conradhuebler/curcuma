@@ -658,9 +658,40 @@ std::string method = "d4";  // Matches Fortran reference
 - **MD speedup**: ~15x for topology phase when topology is constant (typical MD)
 - **Implementation**: `getCachedTopology()` in `gfnff_method.cpp`, `needsFullTopologyUpdate()` checks displacement
 
+### 🤖 WP7: EEQ-Löser für große Systeme (geplant — siehe [docs/GPU_WP7_EEQ_LARGE_SYSTEMS.md](../../../../docs/GPU_WP7_EEQ_LARGE_SYSTEMS.md))
+
+Drei Strategien, jeweils auf GPU und CPU (parallelisiert), über Parameter `eeq_solver_strategy` auswählbar.
+Ziel: GFN-FF für N > 10k Atome.
+
+- **WP7-A: Allgemeines Schur für nfrag>1** — ✅ implementiert (Mai 2026)
+  - Kernel `k_eeq_reduce_fragment_sums` + `k_eeq_schur_general` in `gfnff_kernels.cu`
+  - `EEQSolverGPU::solveWithDeviceRHSAndGPUSchurGeneral()` schließt die nfrag>1 GPU-Lücke
+  - D2H pro Schritt: `(nfrag + nfrag²)·8` Byte statt `N·(1+nfrag)·8` Byte
+  - Validierung: complex.xyz (nfrag=2): WP7-A == WP2+CPU-Schur (bit-identisch)
+  - CPU-Pendant (OpenMP-Rückwärtssubstitution in `solveWithSchurCholesky()`) noch offen
+
+- **WP7-B: Gebatchtes per-Fragment Cholesky** — approximativ (kein cross-frag Coulomb), ~3 Tage
+  - `solveWithDeviceRHSAndGPUSchurBatched()` bereits implementiert, nur deaktiviert
+  - CPU-Pendant: OpenMP über nfrag unabhängige Cholesky-Faktorisierungen
+  - Sinnvoll wenn Fragmentabstand > ~8 Å; Warnung bei engem Kontakt (`eeq_batched_warn_threshold`)
+  - Speedup für N=10k, nfrag=100: O(N_f³×nfrag) statt O(N³) — ~10000× schneller für Cholesky
+
+- **WP7-C: PCG auf GPU** — exakt, O(k·N²), ~7 Tage
+  - `cublasDgemv` für Matrix-Vektor-Produkt + `k_pcg_project_fragments` für Fragment-Constraints
+  - Warm-Start: Ladungsvektor vom Vorschritt bleibt auf Device (D2D, kein Transfer)
+  - CPU-Pendant: OpenMP MATVEC + Fragment-Projektion nach jedem CG-Schritt
+  - Ermöglicht MD für N > 5k (k=20 Iterationen × O(N²) statt O(N³))
+
+**Parameter-Interface** (alle Strategien über einen Parameter):
+```
+eeq_solver_strategy: auto | cholesky | batched | pcg | cholesky_gpu | batched_gpu | pcg_gpu
+eeq_batched_warn_threshold: Bohr-Grenze für Warnung bei engem Fragment-Kontakt (default 15.0)
+```
+
 ### ⚠️ Known Issues
 - gfnff GPU validation tests (test_gfnff_gpu) fail with JSON null error — pre-existing, unrelated to pipeline
 - k_dispersion cannot overlap with EEQ in gradient mode (dc6dcn dependency)
+- nfrag>1: `solveWithDeviceRHS()` lädt z1+Z₂ auf CPU (N×nfrag×8 Byte) — WP7-A schließt diese Lücke
 
 ## Open Bugs
 

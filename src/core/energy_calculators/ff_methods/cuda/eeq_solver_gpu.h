@@ -153,6 +153,87 @@ public:
     /// EEQ stream is fully synced before return — safe to use immediately on any stream.
     double* getDeviceChargesPtr();
 
+    /**
+     * @brief WP7-A: General Schur for nfrag > 1 (May 2026), full GPU-resident path.
+     *
+     * Generalizes solveWithDeviceRHSAndGPUSchur() to multi-fragment systems:
+     *   - Single N×N Cholesky (cross-fragment Coulomb correctly retained).
+     *   - dpotrs solves [b_atoms | C^T] in one call (nfrag+1 RHS columns).
+     *   - GPU reduction yields Cz1[nfrag] + S[nfrag×nfrag] (8·nfrag·(nfrag+1) bytes D2H).
+     *   - Tiny CPU Gauss-elim for λ; H2D upload (8·nfrag bytes).
+     *   - One apply kernel produces charges in d_rhs[0..N-1].
+     *
+     * uploadFragmentTopology() must have been called first (provides d_atom_frag and
+     * d_rhs_constraint_cols). Returns false on Cholesky failure or invalid topo —
+     * caller must fall back to solveWithDeviceRHS() + CPU Schur.
+     *
+     * On success: charges available via getDeviceChargesPtr() (same contract as WP5-A).
+     */
+    bool solveWithDeviceRHSAndGPUSchurGeneral(
+        int natoms, int nfrag,
+        const double* cx, const double* cy, const double* cz,
+        const double* d_alpha_corrected,
+        const double* d_gam_corrected,
+        const double* d_rhs_atoms,
+        const std::vector<int>& fraglist,
+        const std::vector<double>& rhs_constraints,  ///< [nfrag] target charge per fragment
+        double cutoff_sq = 0.0,
+        bool force_refactor = true
+    );
+
+    // ── WP6: Batched per-fragment Cholesky (nfrag > 1) ──────────────────────
+
+    /**
+     * @brief Upload fragment topology for the batched Cholesky path (nfrag > 1).
+     *
+     * Claude Generated (May 2026): Topology-constant; call once per topology build
+     * before any solveWithDeviceRHSAndGPUSchurBatched() call.
+     * Computes fragment sizes, A-block offsets, sorted-atom permutation on CPU,
+     * uploads all index arrays to GPU, pre-fills constraint cols (all-ones) in
+     * d_rhs_blocks, and queries the cuSOLVER workspace for the largest fragment.
+     *
+     * @param nfrag    Number of fragments
+     * @param fraglist [N] fragment ID per atom (1-indexed)
+     * @param natoms   Total atom count N
+     */
+    void uploadFragmentTopology(int nfrag,
+                                const std::vector<int>& fraglist,
+                                int natoms);
+
+    /// Returns true after a successful uploadFragmentTopology() call.
+    bool isFragmentTopoValid() const;
+
+    /**
+     * @brief Batched per-fragment EEQ: independent N_f×N_f Cholesky + host Schur per fragment.
+     *
+     * Claude Generated (May 2026): Replaces single N×N Cholesky for nfrag > 1 systems.
+     * Each fragment is solved independently (cross-fragment Coulomb = 0).
+     * On success: charges for all N atoms available via getDeviceChargesPtr()
+     *   (in global atom order, in d_rhs[0..N-1]).
+     * Returns false if any fragment's Cholesky fails → caller falls back to CPU.
+     *
+     * uploadFragmentTopology() must have been called first.
+     *
+     * @param natoms            Total atom count N
+     * @param nfrag             Number of fragments
+     * @param cx/cy/cz          Device SoA coordinate pointers (global atom order)
+     * @param d_alpha           Device [N] alpha² (from uploadEEQTopologyParams)
+     * @param d_gam             Device [N] gam_corrected (from uploadEEQTopologyParams)
+     * @param d_rhs_atoms       Device [N] RHS from k_build_eeq_rhs
+     * @param rhs_constraints   Host [nfrag] target charge per fragment
+     * @param cutoff_sq         Distance cutoff² (0 = no cutoff)
+     * @param force_refactor    If false: reuse cached Cholesky factors (lazy solve)
+     */
+    bool solveWithDeviceRHSAndGPUSchurBatched(
+        int natoms, int nfrag,
+        const double* cx, const double* cy, const double* cz,
+        const double* d_alpha,
+        const double* d_gam,
+        const double* d_rhs_atoms,
+        const std::vector<double>& rhs_constraints,
+        double cutoff_sq = 0.0,
+        bool force_refactor = true);
+
 private:
     std::unique_ptr<EEQSolverGPUImpl> m_impl;
     int m_max_natoms;

@@ -514,9 +514,15 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                                        : 0.0;
 
         if (CurcumaLogger::get_verbosity() >= 2) {
+            const char* path = "CPU-fallback";
+            if (gpu_eeq_applicable) {
+                if (m_eeq_nfrag == 1)
+                    path = "WP5-A GPU-Schur";
+                else
+                    path = "WP7-A GPU-Schur";  // falls back to WP2+CPU-Schur on failure
+            }
             CurcumaLogger::info(fmt::format("EEQ GPU Phase 2: N={}, nfrag={}, path={}",
-                N, m_eeq_nfrag,
-                gpu_eeq_applicable ? (m_eeq_nfrag == 1 ? "WP5-A GPU-Schur" : "WP2 Cholesky+CPU-Schur") : "CPU-fallback"));
+                N, m_eeq_nfrag, path));
         }
 
         if (gpu_eeq_applicable) {
@@ -576,24 +582,45 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                             force_refactor);
                     }
                 } else {
-                    // WP6: exact GPU solve for nfrag > 1, CPU Schur complement.
-                    // Batched per-fragment solver disabled: cross-fragment Coulomb is
-                    // non-negligible for close-contact fragments (pi-systems, complexes).
-                    eeq_ok = m_eeq_gpu->solveWithDeviceRHS(
-                        N, m_eeq_nfrag,
-                        m_gpu_workspace->getDeviceXPtr(),
-                        m_gpu_workspace->getDeviceYPtr(),
-                        m_gpu_workspace->getDeviceZPtr(),
-                        m_gpu_workspace->getDeviceAlphaPtr(),
-                        m_gpu_workspace->getDeviceGamPtr(),
-                        m_gpu_workspace->getDeviceRHSPtr(),
-                        nullptr,  // d_rhs_constraints not used by WP2
-                        m_eeq_fraglist,
-                        m_eeq_z1.data(),
-                        m_eeq_Z2.data(),
-                        eeq_cutoff_sq,
-                        force_refactor);
-                    // On failure: fall through to CPU EEQ at line 622
+                    // WP7-A: full N×N Cholesky + GPU Schur complement for nfrag > 1.
+                    // Replaces D2H of z1+Z2 (~N·(1+nfrag) doubles) with D2H of
+                    // Cz1+S (nfrag + nfrag² doubles) and a tiny CPU Gauss-elim.
+                    // Cross-fragment Coulomb correctly retained (single N×N Cholesky).
+                    if (m_eeq_gpu->isFragmentTopoValid()) {
+                        eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUSchurGeneral(
+                            N, m_eeq_nfrag,
+                            m_gpu_workspace->getDeviceXPtr(),
+                            m_gpu_workspace->getDeviceYPtr(),
+                            m_gpu_workspace->getDeviceZPtr(),
+                            m_gpu_workspace->getDeviceAlphaPtr(),
+                            m_gpu_workspace->getDeviceGamPtr(),
+                            m_gpu_workspace->getDeviceRHSPtr(),
+                            m_eeq_fraglist,
+                            m_eeq_rhs_constraints,
+                            eeq_cutoff_sq,
+                            force_refactor);
+                        if (eeq_ok)
+                            used_gpu_schur = true;
+                    }
+                    if (!eeq_ok) {
+                        // Fallback: WP2 exact GPU solve + CPU Schur complement.
+                        // Triggers when fragment topo invalid OR Cholesky failed in WP7-A.
+                        eeq_ok = m_eeq_gpu->solveWithDeviceRHS(
+                            N, m_eeq_nfrag,
+                            m_gpu_workspace->getDeviceXPtr(),
+                            m_gpu_workspace->getDeviceYPtr(),
+                            m_gpu_workspace->getDeviceZPtr(),
+                            m_gpu_workspace->getDeviceAlphaPtr(),
+                            m_gpu_workspace->getDeviceGamPtr(),
+                            m_gpu_workspace->getDeviceRHSPtr(),
+                            nullptr,  // d_rhs_constraints not used by WP2
+                            m_eeq_fraglist,
+                            m_eeq_z1.data(),
+                            m_eeq_Z2.data(),
+                            eeq_cutoff_sq,
+                            force_refactor);
+                        // On further failure: fall through to CPU EEQ at line 622
+                    }
                 }
             } else {
                 // Fallback: EEQ topo not yet uploaded to GPU (should not happen after init)
