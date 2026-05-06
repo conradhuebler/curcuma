@@ -20,7 +20,7 @@
 #include "src/tools/general.h"
 
 #include "src/capabilities/confscan.h"
-#include "src/capabilities/curcumaopt.h"
+#include "src/capabilities/optimizer_factory.h"
 #include "src/core/parameter_registry.h"  // Claude Generated 2025
 #include "src/capabilities/optimiser/LevMarDocking.h"
 
@@ -330,76 +330,56 @@ void Docking::PostOptimise()
 
 void Docking::OptimiseBatch()
 {
+    // Claude Generated (Apr 2026): Use unified optimizer instead of legacy CurcumaOpt
     double frag_scaling = 1.5;
-    /*
-        json GFNFF = CurcumaOptJson;
-        GFNFF["printOutput"] = false;
-        GFNFF["threads"] = 1; // m_threads;
-        GFNFF["gfn"] = 66;
-        GFNFF["dE"] = 1;
-        GFNFF["dRMSD"] = 0.1;
-        GFNFF["GradNorm"] = 0.01;
-        GFNFF["ConvCount"] = 3;
-    */
-    json GFN2_crude = CurcumaOptJson;
-    GFN2_crude["SinglePoint"] = false;
-    GFN2_crude["gfn"] = 2;
-    GFN2_crude["threads"] = m_threads;
-    GFN2_crude["dE"] = 10;
-    GFN2_crude["dRMSD"] = 0.1;
-    GFN2_crude["GradNorm"] = 0.01;
-    GFN2_crude["ConvCount"] = 3;
 
-    m_optimise = new CurcumaOpt(GFN2_crude, false);
-    m_singlepoint = new CurcumaOpt(GFN2_crude, false);
+    json crude_config;
+    crude_config["method"] = std::string("gfn2");
+    crude_config["threads"] = m_threads;
+    crude_config["energy_threshold"] = 10.0;
+    crude_config["gradient_threshold"] = 0.01;
 
-    /* Divide list of structures in those which already have 2 fragments (supramolecular complex) and those which have atoms to close to each other*/
-    auto iter = m_docking_result.begin();
-    while (iter != m_docking_result.end()) {
-        auto pair = *iter;
+    m_optimise_molecules.clear();
+    m_singlepoint_molecules.clear();
+
+    // Divide structures: 2 fragments (complex) vs. 1 fragment (too close)
+    for (auto& pair : m_docking_result) {
         if (pair.second->GetFragments(frag_scaling).size() == 2)
-            m_optimise->addMolecule(pair.second);
+            m_optimise_molecules.push_back(*pair.second);
         else if (pair.second->GetFragments(frag_scaling).size() == 1)
-            m_singlepoint->addMolecule(pair.second);
-        ++iter;
+            m_singlepoint_molecules.push_back(*pair.second);
     }
-    /* Optimisation */
-    std::cout << "** Crude preoptimisation of " << m_optimise->Molecules()->size() << " complexes **" << std::endl;
 
-    m_optimise->overrideBasename("Optimise_Crude_F2");
-    m_optimise->start();
+    // Crude preoptimisation of correct complexes
+    std::cout << "** Crude preoptimisation of " << m_optimise_molecules.size() << " complexes **" << std::endl;
+    for (auto& mol : m_optimise_molecules) {
+        EnergyCalculator energy_calc("gfn2", crude_config);
+        Optimization::OptimizationDispatcher::optimizeStructure(
+            &mol, Optimization::OptimizerType::LBFGSPP, &energy_calc, crude_config);
+    }
 
-    /* Optimisation of the structures with incorrect fragments */
-    std::cout << "** Crude preoptimisation of " << m_singlepoint->Molecules()->size() << " structures with wrong connectivity **" << std::endl;
+    // Crude preoptimisation of structures with wrong connectivity
+    std::cout << "** Crude preoptimisation of " << m_singlepoint_molecules.size() << " structures with wrong connectivity **" << std::endl;
+    for (auto& mol : m_singlepoint_molecules) {
+        EnergyCalculator energy_calc("gfn2", crude_config);
+        Optimization::OptimizationDispatcher::optimizeStructure(
+            &mol, Optimization::OptimizerType::LBFGSPP, &energy_calc, crude_config);
+    }
 
-    m_singlepoint->overrideBasename("Optimise_Crude_FX");
-    m_singlepoint->start();
-
-    /* Update Optimiser to perform single point calculation (GFN2) of the at GFN-FF level optimised structures */
-
-    /*
-        m_optimise->UpdateController(GFN2_crude);
-        m_optimise->start();
-    */
-    /* Estimate the approximate energy of the correct complexes */
+    // Estimate energy threshold from correct complexes
     double e0 = -1e7;
-    for (const auto& m : *(m_optimise->Molecules())) {
+    for (const auto& m : m_optimise_molecules) {
         e0 = std::max(m.Energy(), e0);
     }
     std::cout << " *** energy threshold " << e0 << " Eh ***" << std::endl;
 
-    // m_optimise->clear();
-
+    // Filter singlepoint structures by energy
     const std::string exclude_energy = "AboveThreshold.xyz";
     int added = 0, excluded = 0;
-    for (const auto& m : *(m_singlepoint->Molecules())) {
+    for (const auto& m : m_singlepoint_molecules) {
         if (abs(m.Energy() - e0) * 2625.5 < m_energy_threshold) {
-            m_optimise->addMolecule(m);
+            m_optimise_molecules.push_back(m);
             added++;
-            /*
-            Molecule* mol1 = new Molecule(m);
-            m_temp_results.insert(std::pair<double, Molecule*>(m.Energy(), mol1));
-            */
         } else {
             excluded++;
             m.appendXYZFile(exclude_energy);
@@ -408,15 +388,17 @@ void Docking::OptimiseBatch()
     std::cout << " ***" << added << " complexes to optimisation batch ***" << std::endl;
     std::cout << " ***" << excluded << " structures dropped ***" << std::endl;
 
-    json GFN2 = CurcumaOptJson;
-    GFN2["gfn"] = 2;
-    GFN2["threads"] = m_threads;
-    GFN2["printOutput"] = false;
+    // Standard optimisation
+    json std_config;
+    std_config["method"] = std::string("gfn2");
+    std_config["threads"] = m_threads;
 
-    std::cout << "** Standard optimsation of " << m_optimise->Molecules()->size() << " complexes **" << std::endl;
-
-    m_optimise->UpdateController(GFN2);
-    m_optimise->start();
+    std::cout << "** Standard optimsation of " << m_optimise_molecules.size() << " complexes **" << std::endl;
+    for (auto& mol : m_optimise_molecules) {
+        EnergyCalculator energy_calc("gfn2", std_config);
+        Optimization::OptimizationDispatcher::optimizeStructure(
+            &mol, Optimization::OptimizerType::LBFGSPP, &energy_calc, std_config);
+    }
 }
 
 void Docking::CollectStructures()
@@ -426,7 +408,7 @@ void Docking::CollectStructures()
     const std::string excluded = "Excluded_Result.xyz";
     int added = 0, dropped = 0;
 
-    for (const auto& m : *(m_optimise->Molecules())) {
+    for (const auto& m : m_optimise_molecules) {
         m.GetFragments(frag_scaling).size();
         if (m.GetFragments(frag_scaling).size() == 2) {
             double sum = 0;
@@ -436,8 +418,6 @@ void Docking::CollectStructures()
             if (sum < 1e-3) {
                 added++;
                 m_optimisation_result.insert(std::pair<double, Molecule*>(m.Energy(), new Molecule(m)));
-                // std::cout << " adding new Molecule! E = " << m.Energy() << " Eh\n\n"
-                //           << std::endl;
                 m.appendXYZFile(name);
             } else
                 m.appendXYZFile(excluded);

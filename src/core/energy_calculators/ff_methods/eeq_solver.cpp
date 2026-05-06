@@ -1532,6 +1532,7 @@ Vector EEQSolver::dispatchSolve(
     }
     end_dispatch: ;
 
+
     // NaN/Inf validation — return empty vector to signal failure.
     // Caller (calculateFinalCharges) is responsible for choosing an appropriate fallback
     // (topology_charges are far better than uniform 0 charges for neutral molecules).
@@ -2125,7 +2126,8 @@ Vector EEQSolver::calculateTopologyCharges(
     }
 
     // Empty return signals solver failure — fall back to uniform charges for Phase 1
-    if (topology_charges.size() != static_cast<size_t>(natoms)) {
+    // (uniform is the only available fallback here since no topology_charges exist yet)
+    if (topology_charges.size() != natoms) {
         if (m_allow_unconverged) {
             CurcumaLogger::warn(fmt::format("Phase 1 EEQ: solver did not converge for N={} (allow_unconverged_charges=true)", natoms));
         } else {
@@ -2663,6 +2665,7 @@ Vector EEQSolver::calculateFinalCharges(
             fmt::print(stderr, "[EEQ] Phase 2: Coulomb matrix ({} atoms):", natoms);
             fflush(stderr);
         }
+
         // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²) A-matrix
         if (num_threads > 1 && natoms > 64) {
             int T = std::min(num_threads, natoms);
@@ -2864,7 +2867,8 @@ Vector EEQSolver::calculateFinalCharges(
             std::cerr << fmt::format("  sum = {:12.6f}", new_charges.sum()) << std::endl;
         }
 
-        // 7. Validate solution
+        // 7. Validate solution — NaN/Inf should already be caught by dispatchSolve,
+        // but double-check here and fall back to topology_charges rather than uniform 0.
         bool solution_valid = true;
         for (int i = 0; i < natoms; ++i) {
             if (std::isnan(new_charges[i]) || std::isinf(new_charges[i])) {
@@ -3027,6 +3031,8 @@ Vector EEQSolver::calculateFinalCharges(
     m_dxi_stored = dxi;
 
     // Cache successful Phase 2 result for fallback on future solver failures.
+    // On subsequent steps where the solver fails, these provide a physically accurate
+    // starting point instead of the cruder Phase 1 topology charges.
     m_last_successful_charges = final_charges;
 
     // Print PCG convergence summary (one line, resets stats)

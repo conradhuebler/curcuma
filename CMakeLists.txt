@@ -31,8 +31,14 @@ option (WriteMoreInfo
 option (USE_Plumed
     "Enable interface to plumed for metadynamics")
 
+option(USE_MARCH_NATIVE
+    "Enable -march=native (best performance, NOT portable)" OFF)
+
 option(USE_AVX2
-    "Enable AVX2 instructions" OFF)
+    "Enable AVX2 + FMA instructions (Haswell+, not portable)" OFF)
+
+option(USE_AVX512
+    "Enable AVX-512 instructions (Skylake-X+, not portable)" OFF)
 
 option(USE_BLAS
     "Enable BLAS" OFF)
@@ -56,18 +62,26 @@ option(USE_CUDA
     "Enable CUDA-accelerated GFN-FF (gfnff -gpu cuda, requires CUDA toolkit)" OFF)
 
 if(USE_MKL)
-    if(NOT DEFINED MKL_ROOT)
-        set(MKL_ROOT $ENV{MKL_ROOT})
+    # Support both MKL_ROOT and MKLROOT (environment and CMake variables)
+    if(NOT MKL_ROOT)
+        if(DEFINED ENV{MKL_ROOT})
+            set(MKL_ROOT $ENV{MKL_ROOT})
+        elseif(DEFINED ENV{MKLROOT})
+            set(MKL_ROOT $ENV{MKLROOT})
+        endif()
     endif()
+    if(NOT MKL_ROOT AND DEFINED MKLROOT)
+        set(MKL_ROOT ${MKLROOT})
+    endif()
+
     message(STATUS "MKL_ROOT set to ${MKL_ROOT}")
-    if( MKL_ROOT STREQUAL "")
-        message(FATAL_ERROR "MKL_ROOT not set")
-        message(FATAL_ERROR "Please set MKL_ROOT to the root directory of your MKL installation")
-        message(FATAL_ERROR "For example: export MKL_ROOT=/opt/intel/oneapi/mkl/latest")
-        message(FATAL_ERROR "Or use -DMKL_ROOT=/opt/intel/oneapi/mkl/latest")
+    if(NOT MKL_ROOT OR MKL_ROOT STREQUAL "")
+        message(FATAL_ERROR "MKL_ROOT not set. Please set MKL_ROOT or MKLROOT to the root directory of your MKL installation.\n"
+                            "Examples:\n"
+                            "  export MKL_ROOT=/opt/intel/oneapi/mkl/latest\n"
+                            "  cmake -DMKL_ROOT=/opt/intel/oneapi/mkl/latest ..")
     endif()
     set(MKLROOT ${MKL_ROOT})
-
 endif()
 
 
@@ -242,9 +256,32 @@ else()
 endif(WIN32)
 ENDIF(CMAKE_COMPILER_IS_GNUCXX)
 
-if(USE_AVX2)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2")
-
+# CPU feature flags — safe default: none (portable). Enable for target machine only.
+include(CheckCXXCompilerFlag)
+if(USE_MARCH_NATIVE)
+    check_cxx_compiler_flag("-march=native" COMPILER_SUPPORTS_MARCH_NATIVE)
+    if(COMPILER_SUPPORTS_MARCH_NATIVE)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+        message(STATUS "CPU: -march=native enabled")
+    else()
+        message(WARNING "-march=native not supported by compiler")
+    endif()
+elseif(USE_AVX512)
+    check_cxx_compiler_flag("-mavx512f" COMPILER_SUPPORTS_AVX512)
+    if(COMPILER_SUPPORTS_AVX512)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx512f -mavx512vl -mavx512dq -mfma")
+        message(STATUS "CPU: AVX-512 enabled")
+    else()
+        message(WARNING "AVX-512 not supported by compiler")
+    endif()
+elseif(USE_AVX2)
+    check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
+    if(COMPILER_SUPPORTS_AVX2)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2 -mfma")
+        message(STATUS "CPU: AVX2 + FMA enabled")
+    else()
+        message(WARNING "AVX2 not supported by compiler")
+    endif()
 endif()
 
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/json.hpp)
@@ -297,13 +334,18 @@ configure_file(
 
 set(curcuma_core_SRC
         # Optimization algorithms - Claude Generated (Educational-First Design)
+        src/capabilities/optimisation/rf_solver.cpp
         src/capabilities/optimisation/lbfgs.cpp
-        src/capabilities/optimisation/modern_optimizer_simple.cpp
+        src/capabilities/optimizer_interface.cpp
+        src/capabilities/optimizer_driver.cpp
+        src/capabilities/optimizer_factory.cpp
+        src/capabilities/ancopt_optimizer.cpp
+        src/capabilities/lbfgspp_optimizer.cpp
+        src/capabilities/native_optimizer_adapters.cpp
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/curcumamethod.cpp
-        src/capabilities/curcumaopt.cpp
-        # Native LBFGS optimizer - Claude Generated (disabled for now due to compilation issues)
+        # Native LBFGS optimizer - Claude Generated (disabled, superseded by native_optimizer_adapters)
         # src/capabilities/native_lbfgs_optimizer.cpp
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
@@ -384,11 +426,11 @@ set(curcuma_core_SRC
 )
 
 set(curcuma_cap_SRC
+        src/capabilities/optimisation/rf_solver.cpp
         src/capabilities/optimisation/lbfgs.cpp
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/curcumamethod.cpp
-        src/capabilities/curcumaopt.cpp
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
         src/capabilities/confstat.cpp
@@ -733,16 +775,42 @@ if(USE_D4)
 endif()
 
 if(USE_Plumed)
-    # Build plumed2 from source via FetchContent (plumed2 >= 2.8 has CMake support)
-    FetchContent_MakeAvailable(plumed2)
-    # plumed2 CMake target is 'plumed' — link to curcuma_core
-    if(TARGET plumed)
-        target_link_libraries(curcuma_core plumed)
-        message(STATUS "Plumed2 built from source via FetchContent")
-    else()
-        message(FATAL_ERROR "Plumed2 CMake target 'plumed' not found after FetchContent_MakeAvailable. "
-                            "Check external/plumed2/CMakeLists.txt for the correct target name.")
+    # Build plumed2 from source via autotools (FetchContent only fetches, does not add_subdirectory)
+    FetchContent_GetProperties(plumed2)
+    if(NOT plumed2_POPULATED)
+        FetchContent_Populate(plumed2)
     endif()
+
+    set(PLUMED2_SOURCE_DIR ${CMAKE_SOURCE_DIR}/external/plumed2)
+    set(PLUMED2_LIB        ${PLUMED2_SOURCE_DIR}/src/lib/libplumed.so)
+
+    include(ExternalProject)
+    ExternalProject_Add(plumed2_build
+        SOURCE_DIR        ${PLUMED2_SOURCE_DIR}
+        BINARY_DIR        ${PLUMED2_SOURCE_DIR}
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env "CXXFLAGS=-fpermissive -O3" ${PLUMED2_SOURCE_DIR}/configure --disable-python
+        BUILD_COMMAND     make -C src/lib -j
+        INSTALL_COMMAND   ""
+        BUILD_BYPRODUCTS  ${PLUMED2_LIB}
+    )
+
+    add_custom_target(plumed2_patch_rpath
+        COMMAND patchelf --set-rpath '$$ORIGIN' ${PLUMED2_LIB}
+        DEPENDS plumed2_build
+        COMMENT "Patching RPATH of libplumed.so"
+    )
+
+    add_library(plumed UNKNOWN IMPORTED GLOBAL)
+    set_target_properties(plumed PROPERTIES
+        IMPORTED_LOCATION             ${PLUMED2_LIB}
+        INTERFACE_INCLUDE_DIRECTORIES ${PLUMED2_SOURCE_DIR}/src/wrapper
+    )
+    add_dependencies(plumed plumed2_build plumed2_patch_rpath)
+
+    target_link_libraries(curcuma_core plumed)
+    target_compile_definitions(curcuma_core PRIVATE USE_Plumed)
+
+    message(STATUS "PLUMED2: external project configured, library expected at ${PLUMED2_LIB}")
 endif()
 
 # Claude Generated (March 2026): CUDA-accelerated GFN-FF (gfnff -gpu cuda)
@@ -779,17 +847,37 @@ endif()
 target_link_libraries(curcuma_core pthread fmt::fmt-header-only )
 target_link_libraries(curcuma_cap pthread fmt::fmt-header-only )
 
-# Claude Generated (March 2026): Link BLAS/LAPACK for curcuma_core
-# Per-file EIGEN_USE_BLAS defined in eeq_solver.cpp to avoid Eigen 3.4 complex-type conflicts
+# Link BLAS/LAPACK for curcuma_core.
+# EIGEN_USE_BLAS: per-file in eeq_solver.cpp (avoids Eigen 3.4 complex-type conflict).
+# EIGEN_USE_LAPACKE: per-target on curcuma_core — safe because no TU uses complex Eigen types
+#   alongside LAPACKE. Enables LAPACK dsyevd (divide-and-conquer) inside SelfAdjointEigenSolver
+#   for ~3-5x speedup on matrices with N > 300 (Tier M/L ANC regeneration fallback).
 find_package(BLAS QUIET)
 find_package(LAPACK QUIET)
 if(BLAS_FOUND)
     target_link_libraries(curcuma_core ${BLAS_LIBRARIES})
-    message(STATUS "BLAS linked for curcuma_core (Eigen BLAS in eeq_solver only)")
+    message(STATUS "BLAS linked for curcuma_core")
 endif()
 if(LAPACK_FOUND)
     target_link_libraries(curcuma_core ${LAPACK_LIBRARIES})
-    message(STATUS "LAPACK linked for curcuma_core (Eigen LAPACK in eeq_solver only)")
+    message(STATUS "LAPACK linked for curcuma_core")
+endif()
+
+# LAPACKE C interface — needed for EIGEN_USE_LAPACKE. Re-use the LAPACKE_LIBRARY already
+# discovered by the DFT-D4 search above, or do a fresh search if that block was skipped.
+if(NOT LAPACKE_LIBRARY)
+    find_library(LAPACKE_LIBRARY lapacke
+                 HINTS /usr/lib /usr/lib64 /usr/local/lib)
+endif()
+if(LAPACKE_LIBRARY)
+    target_link_libraries(curcuma_core ${LAPACKE_LIBRARY})
+    # EIGEN_USE_LAPACKE is NOT set globally here — it breaks TUs that use local variables
+    # named 'I' (C99 complex macro conflict with LAPACKE headers). Define it per-file instead:
+    #   rf_solver.cpp, lbfgs.cpp — both safe (no variable named 'I').
+    # See ancopt_optimizer.cpp: renamed Matrix3d I -> inertia to fix the same issue.
+    message(STATUS "LAPACKE found: ${LAPACKE_LIBRARY} — linking, EIGEN_USE_LAPACKE applied per-file")
+else()
+    message(STATUS "LAPACKE not found — SelfAdjointEigenSolver uses Eigen built-in path")
 endif()
 
 if(USE_BLAS)

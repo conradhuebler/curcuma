@@ -20,7 +20,7 @@
 #include "src/global_config.h"
 
 #include "src/capabilities/confscan.h"
-#include "src/capabilities/curcumaopt.h"
+#include "src/capabilities/optimizer_factory.h"
 #include "src/capabilities/simplemd.h"
 
 #include "src/core/fileiterator.h"
@@ -84,7 +84,7 @@ void ConfSearch::start()
         // std::vector<Molecule*> uniques;
         PerformMolecularDynamics(m_in_stack, md);
 
-        nlohmann::json opt = CurcumaOptJson;
+        nlohmann::json opt;
         opt["method"] = m_method;
         opt["threads"] = m_threads;
         PerformOptimisation("ff", opt);
@@ -162,17 +162,32 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
 
 std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann::json& parameter)
 {
-    std::string file = "confsearch.unique";
-    std::ofstream result_file;
-    result_file.open(file);
-    result_file.close();
+    // Claude Generated (Apr 2026): Use unified optimizer instead of legacy CurcumaOpt
+    std::string basename = "confsearch.unique";
+    std::string input_file = basename + ".xyz";
+    std::string output_file = basename + ".opt.xyz";
 
-    CurcumaOpt optimise(parameter, false);
-    optimise.setFileName("confsearch.unique.xyz");
-    optimise.overrideBasename(file);
-    optimise.start();
+    // Clear output file
+    std::ofstream(output_file).close();
 
-    return file;
+    std::string method = parameter.value("method", std::string("gfnff"));
+
+    FileIterator file(input_file);
+    while (!file.AtEnd()) {
+        Molecule mol = file.Next();
+        if (mol.AtomCount() == 0)
+            continue;
+
+        EnergyCalculator energy_calc(method, parameter);
+        auto result = Optimization::OptimizationDispatcher::optimizeStructure(
+            &mol, Optimization::OptimizerType::LBFGSPP, &energy_calc, parameter);
+
+        if (result.success) {
+            result.final_molecule.appendXYZFile(output_file);
+        }
+    }
+
+    return basename;
 }
 
 std::string ConfSearch::PerformFilter(const std::string& f, const nlohmann::json& parameter)

@@ -732,7 +732,7 @@ AlignmentResult MolAlignStrategy::align(RMSDDriver* driver, const AlignmentConfi
         // Check if alignment was successful
         if (std::filesystem::exists("aligned.xyz") && !rndm) {
             if (driver->m_verbosity >= 1) {
-                CURCUMA_CITE("molalign");
+                CitationRegistry::cite("molalign");
             }
 
             FileIterator file("aligned.xyz", true);

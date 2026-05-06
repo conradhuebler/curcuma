@@ -46,7 +46,7 @@ BEGIN_PARAMETER_DEFINITION(casino)
     PARAM(energy_frequency, Int, 10, "Energy output frequency", "Output", {})
 
     // Move configuration
-    PARAM(move_type, String, "mixed", "Move type: translation|rotation|orientational|pivot|mixed", "Algorithm", {})
+    PARAM(move_type, String, "mixed", "Move type: translation|rotation|orientational|mixed (pivot: not yet implemented)", "Algorithm", {})
     PARAM(move_strategy, String, "single_atom", "Move strategy: all_atoms|single_atom|cg_aware|chain_segment|mixed_strategy", "Algorithm", {})
 
     // Adaptive sampling

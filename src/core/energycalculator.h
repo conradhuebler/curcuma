@@ -419,6 +419,7 @@ private:
     bool m_gpu_fallback = false;                    ///< GPU requested but CUDA not compiled in
     bool m_gpu_fallback_warned = false;              ///< Final GPU warning already printed
 
+
     int m_atoms = 0;                                 ///< Number of atoms
     int m_mult = 1;                                  ///< Multiplicity
 

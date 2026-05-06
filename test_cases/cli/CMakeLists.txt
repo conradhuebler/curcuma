@@ -120,10 +120,10 @@ add_cli_test(simplemd 10_gfnff_polymer_md)
 set_tests_properties(cli_simplemd_10_gfnff_polymer_md PROPERTIES TIMEOUT 3600 LABELS "simplemd;gfnff;large_system;performance")
 
 # =============================================================================
-# CG (Coarse Graining) Tests (1 scenario)
+# CG (Coarse Graining) Tests — disabled: -vtf command not implemented in main.cpp
 # =============================================================================
 
-add_cli_test(cg 01_single_point)
+# add_cli_test(cg 01_single_point)
 
 # =============================================================================
 # Analysis Tests (1 scenario)

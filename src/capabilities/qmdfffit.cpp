@@ -19,7 +19,6 @@
 
 #include "src/capabilities/optimiser/LevMarQMDFFFit.h"
 
-#include "src/capabilities/curcumaopt.h"
 #include "src/capabilities/hessian.h"
 
 #include "src/core/energy_calculators/ff_methods/forcefieldgenerator.h"

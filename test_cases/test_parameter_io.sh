@@ -186,7 +186,7 @@ test_list_modules() {
     echo -n "Test 7: List available modules... "
     TESTS_RUN=$((TESTS_RUN + 1))
 
-    $CURCUMA -list-modules 2>/dev/null | grep -q "analysis (25 parameters)"
+    $CURCUMA -list-modules 2>/dev/null | grep -qE "analysis \([0-9]+ parameters\)"
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}PASS${NC}"

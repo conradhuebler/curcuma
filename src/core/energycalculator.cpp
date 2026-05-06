@@ -188,6 +188,7 @@ bool EnergyCalculator::createMethod(const std::string& method_name, const json& 
             m_gpu_fallback = true;
         }
 #endif
+
         return true;
         
     } catch (const MethodCreationException& e) {

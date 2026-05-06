@@ -49,7 +49,7 @@ using namespace std;
 // =================================================================================
 
 const std::vector<std::string> MethodFactory::m_ff_methods = {
-    "uff", "uff-d3", "d3", "qmdff", "gfnff", "gfnff-d3"
+    "uff", "uff-d3", "d3", "qmdff", "gfnff"
 };
 
 const std::vector<std::string> MethodFactory::m_tblite_methods = {

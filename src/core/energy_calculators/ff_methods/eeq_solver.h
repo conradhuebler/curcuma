@@ -833,6 +833,7 @@ private:
             && charges.cwiseAbs().maxCoeff() < 50.0;
     }
 
+
     /// Ensure buffers are large enough. Only reallocates if size changed.
     void ensurePhase2Buffers(int natoms, int nfrag) const {
         if (natoms != m_phase2_buf_natoms || nfrag != m_phase2_buf_nfrag) {

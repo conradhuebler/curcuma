@@ -18,7 +18,6 @@
 
 #pragma once
 
-#include "optimisation/modern_optimizer_simple.h"
 #include "optimisation/lbfgs.h"
 #include "src/core/curcuma_logger.h"
 #include <chrono>

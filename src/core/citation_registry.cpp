@@ -39,7 +39,7 @@ void CitationRegistry::cite(const std::string& key, const std::string& parent)
     }
 
     // Log — always visible, regardless of verbosity
-    CurcumaLogger::info("[CITE]  " + key + ": " + data->reference);
+    CurcumaLogger::info("[CITE]  " + key + ": " + data->description);
 }
 
 void CitationRegistry::printSummary()
@@ -57,21 +57,27 @@ void CitationRegistry::printSummary()
         children.insert(child);
     }
 
+    // Helper: print one entry (description + reference, two lines)
+    auto printEntry = [](const std::string& prefix, const Citations::CitationData* data) {
+        fmt::print(fg(fmt::color::green), "  [CITE]  {}\n", prefix + data->description);
+        fmt::print(fg(fmt::color::green), "          {}\n", data->reference);
+    };
+
     // Print top-level entries (those that are not children of another)
     for (const auto& key : m_cited_keys) {
-        if (children.count(key)) continue; // printed as sub-ref later
+        if (children.count(key)) continue;
 
         const Citations::CitationData* data = Citations::lookup(key);
         if (!data) continue;
 
-        fmt::print(fg(fmt::color::green), "  [CITE]  {:10s}  {}\n", key, data->reference);
+        printEntry("", data);
 
-        // Print sub-references of this parent
+        // Print sub-references of this parent (indented, without raw key)
         for (const auto& [child, parent] : m_subrefs) {
             if (parent != key) continue;
             const Citations::CitationData* child_data = Citations::lookup(child);
             if (!child_data) continue;
-            fmt::print(fg(fmt::color::green), "  [CITE]      -> {:6s}  {}\n", child, child_data->reference);
+            printEntry("  -> ", child_data);
         }
     }
 
