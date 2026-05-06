@@ -645,8 +645,9 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_hb_cn_per_atom; ///< [N] per-H accumulator for HB CN (Apr 2026)
 
     // Coulomb self-energy parameters (uploaded once)
+    // WP5-B (May 2026): d_coul_cnf removed — topology-constant eeq_topo.d_cnf is used
+    // directly by k_coulomb_postprocess, eliminating per-step H2D copy.
     CudaBuffer<double> d_coul_chi_base; ///< [N]
-    CudaBuffer<double> d_coul_cnf;      ///< [N]
     CudaBuffer<double> d_coul_gam;      ///< [N]
     CudaBuffer<double> d_coul_alp;      ///< [N]
     bool               coul_self_on_gpu = false;
@@ -661,6 +662,12 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_cn_raw;        ///< [N] raw CN values (erf sum)
     CudaBuffer<double> d_cn_final;       ///< [N] log-transformed CN values
     CudaBuffer<int>    d_atom_types;    ///< [N] atomic numbers for CN lookup
+
+    // WP5-C (May 2026): GPU-side D4 dc6dcn skip-check buffers
+    CudaBuffer<double> d_cn_d4_ref;        ///< [N] CN snapshot from previous step
+    CudaBuffer<double> d_dc6dcn_block_max; ///< [max_blocks] per-block max for reduction
+    CudaBuffer<int>    d_dc6dcn_skip;      ///< [1] skip flag (0 = recompute, 1 = skip)
+    int*               h_dc6dcn_skip = nullptr; ///< Pinned host buffer for async D2H
 
     // Per-term energy accumulators — consolidated into single contiguous buffer
     // Claude Generated (March 2026): Reduces 14 individual cudaMemcpy to 1
@@ -904,6 +911,13 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_impl->d_cn_raw.alloc(natoms);
     m_impl->d_cn_final.alloc(natoms);
     m_impl->d_atom_types.alloc(natoms);
+
+    // WP5-C (May 2026): GPU-side D4 dc6dcn skip-check buffers
+    m_impl->d_cn_d4_ref.alloc(natoms);
+    // d_dc6dcn_block_max sized for max possible blocks (~8 for N=2000, blockSize=256)
+    m_impl->d_dc6dcn_block_max.alloc(32);
+    m_impl->d_dc6dcn_skip.alloc(1);
+    cudaHostAlloc(&m_impl->h_dc6dcn_skip, sizeof(int), cudaHostAllocDefault);
     // Upload atom types once (static during simulation)
     std::vector<int> h_atom_types = atom_types;  // copy
     m_impl->d_atom_types.upload(h_atom_types, stream);
@@ -944,7 +958,6 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
         m_coul_chi_base  = Vector::Zero(natoms);
         m_coul_gam       = Vector::Zero(natoms);
         m_coul_alp       = Vector::Zero(natoms);
-        m_coul_cnf       = Vector::Zero(natoms);
         m_coul_chi_static= Vector::Zero(natoms);
 
         std::vector<bool> seen(natoms, false);
@@ -953,7 +966,6 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
                 m_coul_chi_base(c.i)   = c.chi_base_i;
                 m_coul_gam(c.i)        = c.gam_i;
                 m_coul_alp(c.i)        = c.alp_i;
-                m_coul_cnf(c.i)        = c.cnf_i;
                 m_coul_chi_static(c.i) = c.chi_i;
                 seen[c.i] = true;
             }
@@ -961,14 +973,14 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
                 m_coul_chi_base(c.j)   = c.chi_base_j;
                 m_coul_gam(c.j)        = c.gam_j;
                 m_coul_alp(c.j)        = c.alp_j;
-                m_coul_cnf(c.j)        = c.cnf_j;
                 m_coul_chi_static(c.j) = c.chi_j;
                 seen[c.j] = true;
             }
         }
         // Upload Coulomb self-energy parameters to GPU for k_coulomb_self kernel
+        // WP5-B (May 2026): CNF omitted — eeq_topo.d_cnf (topology-constant) used instead.
         setCoulombSelfEnergyParams(m_coul_chi_base, m_coul_gam, m_coul_alp,
-                                   m_coul_cnf, m_coul_chi_static);
+                                   m_coul_chi_static);
     }
 
     // Store initial charges and E0 from parameter set
@@ -1043,6 +1055,7 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
     if (m_h_cn_raw)     cudaFreeHost(m_h_cn_raw);
     if (m_h_dlogdcn)    cudaFreeHost(m_h_dlogdcn);
     if (m_h_energies)   cudaFreeHost(m_h_energies);
+    if (m_impl && m_impl->h_dc6dcn_skip) cudaFreeHost(m_impl->h_dc6dcn_skip);
 }
 
 // ============================================================================
@@ -1113,11 +1126,13 @@ void FFWorkspaceGPU::setD3CN(const Vector& cn)
     m_cn = cn;
 }
 
-void FFWorkspaceGPU::setCNDerivatives(const Vector& cn, const Vector& cnf,
+void FFWorkspaceGPU::setCNDerivatives(const Vector& /* cn */, const Vector& /* cnf */,
                                        const std::vector<SpMatrix>& /* dcn */)
 {
-    // Only cnf is needed (for k_subtract_qtmp). CN pair list replaces sparse dcn.
-    m_cnf = cnf;
+    // WP5-B (May 2026): No-op. CNF for the Coulomb postprocess (TERM 1b / k_subtract_qtmp)
+    // already lives on GPU as the topology-constant `impl.eeq_topo.d_cnf` buffer from
+    // uploadEEQTopologyParams(). The previous per-step copy into m_cnf was only used as a
+    // size probe for the do_subtract guard, which now checks impl.coul_self_on_gpu directly.
 }
 
 void FFWorkspaceGPU::setE0(double e0)
@@ -1214,26 +1229,25 @@ void FFWorkspaceGPU::computeBondHBCN()
 }
 
 void FFWorkspaceGPU::setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
-                                                  const Vector& alp,     const Vector& cnf,
+                                                  const Vector& alp,
                                                   const Vector& chi_static)
 {
     m_coul_chi_base   = chi_base;
     m_coul_gam        = gam;
     m_coul_alp        = alp;
-    m_coul_cnf        = cnf;
     m_coul_chi_static = chi_static;
 
     // Upload Coulomb self-energy parameters to GPU
     // Claude Generated (March 2026): GPU-side Coulomb TERM 2+3 + qtmp
+    // WP5-B (May 2026): CNF no longer uploaded here — topology-constant eeq_topo.d_cnf
+    // (from uploadEEQTopologyParams) is used directly by k_coulomb_postprocess.
     const int N = m_natoms;
-    if (chi_base.size() == N && gam.size() == N && alp.size() == N && cnf.size() == N) {
+    if (chi_base.size() == N && gam.size() == N && alp.size() == N) {
         auto& impl = *m_impl;
         impl.d_coul_chi_base.alloc(N);
-        impl.d_coul_cnf.alloc(N);
         impl.d_coul_gam.alloc(N);
         impl.d_coul_alp.alloc(N);
         impl.d_coul_chi_base.upload(chi_base.data(), N);
-        impl.d_coul_cnf.upload(cnf.data(), N);
         impl.d_coul_gam.upload(gam.data(), N);
         impl.d_coul_alp.upload(alp.data(), N);
         impl.coul_self_on_gpu = true;
@@ -2147,13 +2161,14 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
                             3*N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
         }
 
-        bool do_subtract = gradient && m_cnf.size() == N && m_eeq_charges.size() == N;
+        // WP5-B: do_subtract only needs the GPU CNF buffer + EEQ charges — no CPU vector.
+        bool do_subtract = gradient && impl.coul_self_on_gpu && m_eeq_charges.size() == N;
         LaunchConfig cfg = getLaunchConfig(N, m_block_size);
         k_coulomb_postprocess<<<cfg.gridSize, cfg.blockSize, 0, stream>>>(
             N,
             impl.d_charges.ptr,
             impl.d_coul_chi_base.ptr,
-            impl.d_coul_cnf.ptr,
+            impl.eeq_topo.d_cnf.ptr,
             impl.d_cn.ptr,
             impl.d_coul_gam.ptr,
             impl.d_coul_alp.ptr,
@@ -2291,6 +2306,11 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
 
     // Single synchronization point — all async transfers complete here
     checkCuda(cudaStreamSynchronize(stream), "final stream sync");
+
+    // WP5-C (May 2026): Update skip-pending flag from async D2H copy.
+    // h_dc6dcn_skip was written by k_check_dc6dcn_skip_final → cudaMemcpyAsync on the
+    // same stream; now that the stream is synchronized, the host buffer is valid.
+    m_dc6dcn_skip_pending = (impl.h_dc6dcn_skip != nullptr && *impl.h_dc6dcn_skip != 0);
 
     // Extract per-term energies from pinned buffer
     const double e_disp      = m_h_energies[impl.E_DISP];
@@ -2573,6 +2593,30 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
             kn,
             cnmax,
             threshold_sq);
+    }
+
+    // WP5-C (May 2026): GPU-side D4 dc6dcn skip check.
+    // Compare current CN against previous-step snapshot. If max|ΔCN| < 0.01,
+    // the next step can skip Gaussian weight + dc6dcn recomputation.
+    // Stage 1: per-block max reduction → d_block_max[].
+    // Stage 2: single block reduces d_block_max[] → d_dc6dcn_skip[0].
+    // Asynchronous D2H copy of skip flag (read by caller in next step).
+    {
+        LaunchConfig cfg_skip = getLaunchConfig(N, m_block_size);
+        // Zero d_dc6dcn_skip before Stage 2 writes the final flag.
+        cudaMemsetAsync(impl.d_dc6dcn_skip.ptr, 0, sizeof(int), impl.stream);
+        k_check_dc6dcn_skip<<<cfg_skip.gridSize, cfg_skip.blockSize, 0, impl.stream>>>(
+            N, impl.d_cn_final.ptr, impl.d_cn_d4_ref.ptr,
+            impl.d_dc6dcn_block_max.ptr);
+        k_check_dc6dcn_skip_final<<<1, cfg_skip.blockSize, 0, impl.stream>>>(
+            cfg_skip.gridSize, impl.d_dc6dcn_block_max.ptr, 0.01,
+            impl.d_dc6dcn_skip.ptr);
+        cudaMemcpyAsync(impl.h_dc6dcn_skip, impl.d_dc6dcn_skip.ptr, sizeof(int),
+                        cudaMemcpyDeviceToHost, impl.stream);
+
+        // Snapshot current CN for next step's comparison (D2D copy, async)
+        cudaMemcpyAsync(impl.d_cn_d4_ref.ptr, impl.d_cn_final.ptr,
+                        N * sizeof(double), cudaMemcpyDeviceToDevice, impl.stream);
     }
 
     // Compute dlogdcn on GPU: dlogdcn[i] = exp(cnmax)/(exp(cnmax)+exp(cn_raw[i]))

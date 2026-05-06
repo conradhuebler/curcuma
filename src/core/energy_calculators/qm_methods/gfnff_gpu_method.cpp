@@ -421,15 +421,13 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     }
     auto t_launch_end = std::chrono::high_resolution_clock::now();
 
-    // G-P1 (Apr 2026): Finalize CN download — sync main stream here, not inside computeCN().
-    // GPU finished CN kernel at ~0.15ms; we are now ~0.3ms past the launch → stream already
-    // complete → cudaStreamSynchronize returns without sleeping (< 0.1ms overhead).
-    m_gpu_workspace->finalizeCNForCPU(m_gpu_cn_final);
-
-    // === CPU: CN distribution + EEQ parameter extraction (skip CPU EEQ solve) ===
-    // prepareCNAndEEQ with skip_eeq=true: does CN, CNF, dcn setup but NO matrix build/solve.
-    // Inside, getCachedTopology() may trigger full topology recalculation if displacement check flagged it.
-    m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/true);
+    // WP5-D (May 2026): In the normal GPU path (nfrag==1, not skip_phase2) no CPU
+    // consumer of CN remains after WP5-B+C. finalizeCNForCPU + prepareCNAndEEQ are
+    // kept only for fallback branches that still need CPU-side CN/EEQ.
+    if (m_skip_phase2 || m_eeq_nfrag != 1) {
+        m_gpu_workspace->finalizeCNForCPU(m_gpu_cn_final);
+        m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/true);
+    }
 
     // Update GPU reference geometry ONLY when a full topology recalculation happened.
     // Must NOT update every step — that would make the displacement check always return 0
@@ -451,17 +449,10 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         m_eeq_nfrag           = topo_params.nfrag;
     }
 
-    const Vector& cn = m_gfnff->getLastCN();
-
-    // Upload CN derivatives (CNF for Coulomb chain-rule)
-    if (gradient) {
-        const Vector& cnf = m_gfnff->getLastCNF();
-        m_gpu_workspace->setCNDerivatives(cn, cnf, {});
-
-        // DC6DCN computed on GPU after Phase 1 (using d_cn, current step). Record CN for skip-check.
-        std::vector<double> cn_std(cn.data(), cn.data() + cn.size());
-        m_gfnff->recordD4CNValues(cn_std);
-    }
+    // WP5-B (May 2026): setCNDerivatives no-op — CNF lives on GPU as eeq_topo.d_cnf.
+    // WP5-C (May 2026): D4 skip-check moved to GPU (k_check_dc6dcn_skip in computeCN).
+    // WP5-D (May 2026): finalizeCNForCPU + prepareCNAndEEQ removed from normal path.
+    // All CN consumers are now GPU-side; no CPU round-trip needed.
 
     // Claude Generated (April 2026): EEQ charge selection
     // Three paths, in priority order:
@@ -565,6 +556,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
             } else {
                 // Fallback: EEQ topo not yet uploaded to GPU (should not happen after init)
                 CurcumaLogger::warn("WP2: EEQ topo not valid — falling back to CPU param upload");
+                const Vector& cn = m_gfnff->getLastCN();
                 GFNFF::EEQGPUParams eeq_params = m_gfnff->prepareEEQParametersForGPU(cn);
                 eeq_ok = m_eeq_gpu->solve(
                     N, eeq_params.nfrag,

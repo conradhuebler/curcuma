@@ -657,6 +657,24 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_build_eeq_rhs(
 );
 
 // ============================================================================
+// WP5-C: GPU-side D4 dc6dcn skip check
+// ============================================================================
+
+/// Stage 1: per-block max reduction of |cn_cur - cn_ref| → d_block_max[]
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_check_dc6dcn_skip(
+    int N,
+    const double* __restrict__ cn_cur,
+    const double* __restrict__ cn_ref,
+    double* __restrict__ d_block_max);
+
+/// Stage 2: single-block reduction of d_block_max[] → skip_flag (0 or 1)
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_check_dc6dcn_skip_final(
+    int n_blocks,
+    const double* __restrict__ d_block_max,
+    double abs_threshold,
+    int* __restrict__ skip_flag);
+
+// ============================================================================
 // WP3: Pair-list-based CN computation — O(N²) → O(n_pairs)
 // ============================================================================
 

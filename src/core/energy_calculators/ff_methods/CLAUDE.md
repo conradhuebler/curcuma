@@ -631,6 +631,27 @@ std::string method = "d4";  // Matches Fortran reference
 - **Offenes Problem**: Stream-Isolation erfordert Sync-Punkt nach Phase-1-Pairwise vor Capture-Start — zerstört CPU/GPU-Overlap-Struktur
 - **Infrastruktur bleibt**: Events, Graph-Slots, invalidateGraph() für spätere Lösung nutzbar
 
+### ✅ WP5-B: CNF-Derivate vollständig auf GPU (Mai 2026)
+- **`setCNDerivatives()` No-op**: `m_cnf` (Eigen-Vector) und `impl.d_coul_cnf` (GPU-Buffer) entfernt
+- **`k_coulomb_postprocess` lijet `cnf` aus `eeq_topo.d_cnf`**: topology-konstant, kein per-Schritt-H2D
+- **`setCoulombSelfEnergyParams()`**: uploadet kein `d_coul_cnf` mehr — `eeq_topo.d_cnf` aus `uploadEEQTopologyParams()` wird direkt verwendet
+- **Validierung**: Energie GPU↔CPU < 1 µEh für H2O/Caffeine/Triose/Complex/Polymer
+
+### ✅ WP5-C: D4 dc6dcn Skip-Check auf GPU (Mai 2026)
+- **Neue Kernel**: `k_check_dc6dcn_skip` (per-block max-Reduktion) + `k_check_dc6dcn_skip_final` (single-block → skip_flag)
+- **Neue Buffer**: `d_cn_d4_ref` (N doubles, Referenz-CN), `d_dc6dcn_block_max` (32 doubles), `d_dc6dcn_skip` (1 int), `h_dc6dcn_skip` (pinned host)
+- **Ablauf**: nach `k_logcn` → Stage 1 + Stage 2 → async D2H von `skip_flag` → `m_dc6dcn_skip_pending` nach `launchChargeDependentAndFinish()`
+- **D2D-Copy**: `d_cn_final → d_cn_d4_ref` als letzter Kernel der CN-Phase (für nächsten Schritt)
+- **CPU-Code `recordD4CNValues` entfällt** im GPU-Pfad; `canSkipGaussianWeightsUpdate` nur noch CPU-seitig
+- **Validierung**: Gleiche Energie-Regression wie WP5-B
+
+### ✅ WP5-D: finalizeCNForCPU + prepareCNAndEEQ aus Hot-Path entfernt (Mai 2026)
+- **Im normalen Pfad** (nfrag==1, nicht skip_phase2): `finalizeCNForCPU()` und `prepareCNAndEEQ(..., skip_eeq=true)` laufen nicht mehr
+- **Fallback-Zweige** (`m_skip_phase2 || m_eeq_nfrag != 1`): beide Calls bleiben aktiv
+- **`consumeFullTopologyUpdate()`**: liest weiterhin die GPU-Displacement-Check-Entscheidung (unabhängig von `prepareCNAndEEQ`)
+- **Hot-Path zwischen** `prepareAndLaunchChargeIndependent()` und `launchChargeDependentAndFinish()` hat keinen CPU-Code mehr
+- **Validierung**: Gleiche Energie-Regression wie WP5-B/C; ctest 3/4 pass (1 pre-existing)
+
 ### ✅ Topology Caching (March 2026)
 - **Two-tier caching**: Static topology (bonds, rings, hybridization) cached until large geometry change (>0.5 Bohr)
 - **Dynamic state only**: CN and distance matrices updated each step (O(N²) vs O(N³) for full topology)

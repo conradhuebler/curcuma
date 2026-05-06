@@ -4,7 +4,7 @@
 **Aufwand**: ~7–12 Tage  
 **Wirkung**: Transformativ — eliminiert alle CPU-Sync-Punkte aus dem heißen Pfad  
 **Abhängigkeiten**: WP2 (k_build_eeq_rhs), WP3 (Pair-List CN), WP4 (Phase-2-Graph)  
-**Status**: 🤖 Geplant — nur nach WP2+WP3 validiert beginnen
+**Status**: ⚙️ MACHINE-TESTED — WP5-B/C/D abgeschlossen (Mai 2026); WP5-A bereits in WP2 enthalten; WP5-E wartet auf WP4-Lösung
 
 ---
 
@@ -107,46 +107,26 @@ Bestehende Kernel `k_eeq_reduce_sums` und `k_eeq_schur_nfrag1` (bereits in `eeq_
 
 **Neuer Getter**: `getDeviceChargesPtr()` in `EEQSolverGPU` gibt `impl.d_charges.ptr` zurück.
 
-### Phase WP5-B: CNF-Derivate vollständig auf GPU (3–4h)
+### Phase WP5-B: CNF-Derivate vollständig auf GPU ✅ MACHINE-TESTED (Mai 2026)
 
-`setCNDerivatives(cn, cnf, dcn)` in `gfnff_gpu_method.cpp` ruft `m_gpu_workspace->setCNDerivatives()` auf, was einen H2D-Upload des CNF-Vektors auslöst. Nach WP2 liegt `d_cnf` bereits auf GPU. Anpassung:
+`setCNDerivatives(cn, cnf, dcn)` in `gfnff_gpu_method.cpp` wurde zu No-op. Der CNF-Vector `m_cnf` wurde aus `FFWorkspaceGPU` entfernt. `k_coulomb_postprocess` liest `cnf` jetzt direkt aus `impl.eeq_topo.d_cnf` (topology-konstant, einmalig bei Topo-Build hochgeladen). `setCoulombSelfEnergyParams()` uploadet `d_coul_cnf` nicht mehr — stattdessen wird `eeq_topo.d_cnf` verwendet.
 
-```cpp
-// setCNDerivatives() ersetzen durch:
-m_gpu_workspace->useCNFFromTopologyBuffer();  // d_cnf bereits da, kein Upload nötig
-```
+**Dateien geändert**: `ff_workspace_gpu.cu`, `ff_workspace_gpu.h`, `gfnff_gpu_method.cpp`
+**Validierung**: Energie GPU↔CPU < 1 µEh für H2O/Caffeine/Triose/Complex/Polymer; ctest 3/4 pass (1 pre-existing Failure).
 
-Das spart den CNF-H2D-Upload (~11 KB für N=1410) pro Schritt.
+### Phase WP5-C: recordD4CNValues auf GPU ✅ MACHINE-TESTED (Mai 2026)
 
-### Phase WP5-C: recordD4CNValues auf GPU (3–4h)
+Neuer Kernel `k_check_dc6dcn_skip` (zwei Stufen: per-block max-Reduktion → `d_block_max[]`, dann `k_check_dc6dcn_skip_final` reduziert zu `skip_flag`). `d_cn_d4_ref` speichert die Referenz-CN per D2D-Copy nach jedem Schritt. Async D2H des `int`-Flags; `m_dc6dcn_skip_pending` wird nach `launchChargeDependentAndFinish()` aktualisiert. CPU-Code `recordD4CNValues` + `canSkipGaussianWeightsUpdate` entfällt im GPU-Pfad.
 
-```cpp
-// Neuer Device-Buffer: d_cn_ref_for_d4 (N doubles, einmalig alloziert)
-// Nach jedem Schritt: D2D copy: d_cn_final → d_cn_ref_for_d4
-// Neuer Kernel k_check_dc6dcn_skip vergleicht beide:
-__global__ void k_check_dc6dcn_skip(
-    int N,
-    const double* d_cn_cur, const double* d_cn_ref,
-    double threshold_sq, int* d_skip_flag);
-// D2H download des 1-int-Flags asynchron → beeinflusst nächsten Schritt, nicht aktuellen
-```
+**Dateien geändert**: `gfnff_kernels.cu`, `gfnff_kernels.cuh`, `ff_workspace_gpu.cu`, `ff_workspace_gpu.h`, `gfnff_gpu_method.cpp`
+**Validierung**: Gleiche Energie-Regression wie WP5-B.
 
-### Phase WP5-D: finalizeCNForCPU() entfernen (1h)
+### Phase WP5-D: finalizeCNForCPU() + prepareCNAndEEQ(skip_eeq=true) entfernt ✅ MACHINE-TESTED (Mai 2026)
 
-Nach WP5-A+B+C: Der einzige Verbraucher von CPU-seitigem CN ist `prepareCNAndEEQ(skip_eeq=false)` als Fallback. Im normalen Pfad (nfrag=1, GPU-EEQ) kann `finalizeCNForCPU()` entfernt werden.
+Im normalen Pfad (nfrag==1, nicht skip_phase2) laufen `finalizeCNForCPU()` und `prepareCNAndEEQ(..., skip_eeq=true)` nicht mehr. Beide Aufrufe sind nur noch in den Fallback-Zweigen `m_skip_phase2 || m_eeq_nfrag != 1` aktiv. `consumeFullTopologyUpdate()` liest weiterhin die externe Displacement-Check-Entscheidung (von `checkDisplacement()`), unabhängig davon ob `prepareCNAndEEQ` gelaufen ist.
 
-```cpp
-// gfnff_gpu_method.cpp — WP5-D:
-// VORHER:
-m_gpu_workspace->finalizeCNForCPU(m_gpu_cn_final);
-m_gfnff->prepareCNAndEEQ(gradient, true, &m_gpu_cn_final, true);
-
-// NACHHER (kein CPU-Sync):
-// (CNF via Topology-Buffer, CN-Derivate via GPU-Kernel)
-if (gradient) {
-    m_gpu_workspace->launchCNDerivativeKernels(stream);  // GPU-seitig
-}
-```
+**Dateien geändert**: `gfnff_gpu_method.cpp`
+**Validierung**: Gleiche Energie-Regression wie WP5-B/C.
 
 ### Phase WP5-E: Vollständiger Schritt-Graph (3–5h)
 

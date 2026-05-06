@@ -254,7 +254,7 @@ public:
      * Coulomb data.  Can be overridden by GFNFF::Calculation().
      */
     void setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
-                                     const Vector& alp,     const Vector& cnf,
+                                     const Vector& alp,
                                      const Vector& chi_static);
 
     /**
@@ -477,6 +477,11 @@ public:
     /// Claude Generated (Phase 8, March 2026).
     void invalidateGraph();
 
+    /// WP5-C (May 2026): Return the GPU-side dc6dcn skip flag from the previous step.
+    /// True if max|ΔCN| < 0.01 between the last two steps, meaning dc6dcn recomputation
+    /// can be skipped. Always false on the first step or after topology invalidation.
+    bool shouldSkipDc6dcn() const { return m_dc6dcn_skip_pending; }
+
 private:
     std::unique_ptr<FFWorkspaceGPUImpl> m_impl;
 
@@ -485,10 +490,12 @@ private:
     double  m_e0     = 0.0;
 
     // Coulomb self-energy parameters (O(N), extracted at init)
-    Vector  m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf, m_coul_chi_static;
+    Vector  m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_chi_static;
 
     // CN state for GPU upload and k_subtract_qtmp (Coulomb TERM 1b)
-    Vector  m_cn, m_cnf;
+    // WP5-B (May 2026): m_cnf removed — CNF lives on GPU as impl.d_coul_cnf
+    // (topology-constant). m_cn kept for legacy setD3CN() compatibility.
+    Vector  m_cn;
 
     // GPU CN computation state
     // NOTE: No Eigen Vectors here — heap-corruption-safe.  CN data lives in pinned buffer only.
@@ -511,6 +518,9 @@ private:
     Vector  m_eeq_charges;
     Vector  m_topology_charges;
     bool    m_device_charges_ready = false;  ///< WP5-A: set by setEEQDeviceCharges(), skips H2D upload
+
+    // WP5-C (May 2026): GPU-side D4 dc6dcn skip-check state
+    bool    m_dc6dcn_skip_pending = false;   ///< skip flag from previous step (read in current step)
 
     // Last uploaded HB/XB bond lists (for CPU vs GPU comparison debugging)
     std::vector<GFNFFHydrogenBond> m_last_hbonds;

@@ -6,6 +6,12 @@ Format: One line per change, newest first.
 
 ## May 2026
 
+- **WP5-B/C/D: Vollständig GPU-residenter EEQ-Pfad (Mai 2026)**: Drei aufeinanderbauende Phasen eliminieren alle CPU-Sync-Punkte im normalen GPU-Hot-Path (nfrag==1, nicht skip_phase2).
+  - **WP5-B**: `setCNDerivatives()` wird No-op — `m_cnf`/`d_coul_cnf` entfernt; `k_coulomb_postprocess` liest `cnf` direkt aus `eeq_topo.d_cnf` (topology-konstant); `~11 KB/Schritt` H2D-Upload gespart.
+  - **WP5-C**: D4 dc6dcn Skip-Check auf GPU verlagert — `k_check_dc6dcn_skip` (zwei-Stufen-Max-Reduktion) + `d_cn_d4_ref` (Device-Referenz-CN) ersetzt CPU-`recordD4CNValues` + `canSkipGaussianWeightsUpdate`; `~N doubles` D2H-Download pro Schritt entfällt.
+  - **WP5-D**: `finalizeCNForCPU()` + `prepareCNAndEEQ(..., skip_eeq=true)` aus dem normalen Pfad entfernt — beide Calls nur noch in Fallback-Zweigen (`skip_phase2 || nfrag!=1`); Hot-Path hat keinen CPU-Code mehr zwischen Phase 1 und Phase 2.
+  - **Validierung**: Energie GPU↔CPU < 1 µEh für H2O/Caffeine/Triose/Complex/Polymer; ctest 3/4 pass (1 pre-existing Failure `cli_gfnff_01`); Polymer-MD (N=1410, 5000 Schritte) stabil.
+
 - **GFN-FF EEQ Coulomb-Cutoff Fix (May 6)**: Polymer (N=1410) Coulomb-Energie GPU vs CPU diff Δ≈0.978 Eh behoben. Ursache war ein 30-Bohr-EEQ-Cutoff in `eeq_solver.cpp` (für N>200), der GPU-`k_eeq_build_matrix` nicht spiegelte; im Fortran-`goed_gfnff` (gfnff_engrad.F90:1274-1391) gibt es keinen Cutoff. Fix: GPU-Solver nimmt jetzt `cutoff_sq`-Argument, EEQ-Default `eeq_distance_cutoff: 30.0 → 0.0` (matcht Fortran und stellt Hellmann-Feynman-Konsistenz mit der un-truncated Coulomb-Energie wieder her — vorher beobachtete MD-Thermostat-Drift verschwunden). Cutoff bleibt als CLI-Option für künftige Performance-Experimente, **muss** dann aber konsistent über EEQ-Matrix + Coulomb-Pair-List + CPU-Coulomb + GPU-Coulomb-Kernel gezogen werden. Doku: `docs/GFNFF_GPU_EEQ_CUTOFF_FIX.md`, Roadmap-Eintrag G2c.
 
 ## April 2026

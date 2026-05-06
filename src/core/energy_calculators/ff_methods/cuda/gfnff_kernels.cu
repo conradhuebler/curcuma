@@ -3124,3 +3124,69 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_build_eeq_rhs(
     double sqrt_cn = (cn_i > 0.0) ? __dsqrt_rn(cn_i) : 0.0;
     d_rhs[i] = d_chi_corr[i] + d_cnf[i] * sqrt_cn;
 }
+
+// ============================================================================
+// WP5-C: k_check_dc6dcn_skip — GPU-side D4 dc6dcn skip check
+// Claude Generated (May 2026): Two-stage max-reduction on max|ΔCN| to decide
+// whether Gaussian weights + dc6dcn can be skipped. Replaces CPU-side
+// recordCNValues + shouldSkipDc6Reconstruction, eliminating per-step CN D2H memcpy.
+//
+// Stage 1 (k_check_dc6dcn_skip): per-block max reduction → d_block_max[]
+// Stage 2 (k_check_dc6dcn_skip_final): single block reduces d_block_max[] → skip_flag.
+// ============================================================================
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_check_dc6dcn_skip(
+    int N,
+    const double* __restrict__ cn_cur,
+    const double* __restrict__ cn_ref,
+    double* __restrict__ d_block_max)
+{
+    __shared__ double sdata[512];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + tid;
+
+    double local_max = 0.0;
+    if (i < N) {
+        double delta = fabs(cn_cur[i] - cn_ref[i]);
+        local_max = delta;
+    }
+    sdata[tid] = local_max;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (sdata[tid + s] > sdata[tid])
+                sdata[tid] = sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        d_block_max[blockIdx.x] = sdata[0];
+    }
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_check_dc6dcn_skip_final(
+    int n_blocks,
+    const double* __restrict__ d_block_max,
+    double abs_threshold,
+    int* __restrict__ skip_flag)
+{
+    __shared__ double sdata[512];
+    int tid = threadIdx.x;
+
+    double local_max = (tid < n_blocks) ? d_block_max[tid] : 0.0;
+    sdata[tid] = local_max;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (sdata[tid + s] > sdata[tid])
+                sdata[tid] = sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        *skip_flag = (sdata[0] < abs_threshold) ? 1 : 0;
+    }
+}
