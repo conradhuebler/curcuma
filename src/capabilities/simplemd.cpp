@@ -37,6 +37,7 @@
 #include "src/capabilities/optimizer_factory.h"
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
+#include "src/capabilities/shared_bias_pool.h"  // Claude Generated (Apr 2026)
 
 #include "src/core/elements.h"
 #include "src/core/energycalculator.h"
@@ -131,7 +132,7 @@ int BiasThread::execute()
         }
         */
 
-        double dEdR = -2 * m_alpha * m_k / m_atoms * exp(-rmsd * rmsd * m_alpha) * factor * m_dT;
+        double dEdR = -2 * m_alpha * m_k / m_atoms * exp(-rmsd * rmsd * m_alpha) * factor;
 
         m_gradient += m_driver.Gradient() * dEdR;
         m_counter += m_biased_structures[i].counter;
@@ -738,6 +739,12 @@ bool SimpleMD::Initialise()
         json config = ParameterRegistry::getInstance().getDefaultJson("rmsd");  // Claude Generated 2025: Use ParameterRegistry instead of RMSDJson
         config["silent"] = true;
         config["reorder"] = false;
+
+        // Claude Generated (Apr 2026): Initialize shared pool RMSDDriver for parallel ConfSearch
+        m_shared_pool_driver = RMSDDriver(config, true);
+        m_shared_pool_driver.setReference(m_rmsd_mtd_molecule);
+        m_shared_pool_target = m_rmsd_mtd_molecule;
+
         for (int i = 0; i < m_threads; ++i) {
             auto* thread = new BiasThread(m_rmsd_mtd_molecule, config, m_nocolvarfile, m_nohillsfile);
             thread->setDT(m_rmsd_DT);
@@ -1653,39 +1660,18 @@ void SimpleMD::prepareRun()
     }
 #endif
     std::vector<double> charge(0, m_natoms);
-
-#ifdef GCC
-    //         std::cout << fmt::format("{0: ^{0}} {1: ^{1}} {2: ^{2}} {3: ^{3}} {4: ^{4}}\n", "Step", "Epot", "Ekin", "Etot", "T");
-    // std::cout << fmt::format("{1: ^{0}} {1: ^{1}} {1: ^{2}} {1: ^{3}} {1: ^{4}}\n", "", "Eh", "Eh", "Eh", "K");
-#else
-    std::cout << "Step"
-              << "\t"
-              << "Epot"
-              << "\t"
-              << "Ekin"
-              << "\t"
-              << "Etot"
-              << "\t"
-              << "T" << std::endl;
-    std::cout << "  "
-              << "\t"
-              << "Eh"
-              << "\t"
-              << "Eh"
-              << "\t"
-              << "Eh"
-              << "\t"
-              << "T" << std::endl;
-#endif
     if (m_rmsd_mtd) {
-        std::cout << "k\t" << m_k_rmsd << std::endl;
-        std::cout << "alpha\t" << m_alpha_rmsd << std::endl;
-        std::cout << "steps\t" << m_mtd_steps << std::endl;
-        std::cout << "Ethresh\t" << m_rmsd_econv << std::endl;
+        CurcumaLogger::result_fmt("RMSD-MTD: k={} Eh, alpha={} Bohr^-2, pace={} steps",
+            m_k_rmsd, m_alpha_rmsd, m_mtd_steps);
+        CurcumaLogger::result_fmt("RMSD-MTD: Econv={}, max_gaussians={}",
+            m_rmsd_econv, m_max_rmsd_N);
         if (m_wtmtd)
-            std::cout << "Well Tempered\tOn (" << m_rmsd_DT << ")" << std::endl;
+            CurcumaLogger::result_fmt("RMSD-MTD: Well-tempered (dT={})", m_rmsd_DT);
         else
-            std::cout << "Well Tempered\tOff" << std::endl;
+            CurcumaLogger::result("RMSD-MTD: Well-tempered Off");
+        if (m_shared_pool)
+            CurcumaLogger::result_fmt("RMSD-MTD: Shared bias pool active ({} structures)",
+                m_shared_pool->biasStructureCount());
     }
     PrintStatus();
     m_run_prepared = true;
@@ -1844,11 +1830,15 @@ bool SimpleMD::step()
         if (m_rattle_counter == m_rattle_dynamic_tol_iter)
             AdjustRattleTolerance();
     }
+    // Temporarily disabled: impuls re-initialization overrides thermostat-controlled
+    // temperature ramps in ConfSearch. Re-enable after testing temperature stability.
+    /*
     if (m_impuls > m_T) {
         InitVelocities(m_scale_velo * m_impuls_scaling);
         EKin();
         m_time_step = 0;
     }
+    */
 
     if (m_current_rescue >= m_max_rescue) {
         fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Nothing really helps");
@@ -2418,6 +2408,7 @@ void SimpleMD::ApplyRMSDMTD()
     m_start = std::chrono::system_clock::now();
     m_colvar_incr = 0;
 
+    // RMSD-subset geometry for bias evaluation
     Geometry current_geometry = m_rmsd_mtd_molecule.getGeometry();
     for (int i = 0; i < m_rmsd_indicies.size(); ++i) {
         current_geometry(i, 0) = m_eigen_geometry.data()[3 * m_rmsd_indicies[i] + 0];
@@ -2425,9 +2416,135 @@ void SimpleMD::ApplyRMSDMTD()
         current_geometry(i, 2) = m_eigen_geometry.data()[3 * m_rmsd_indicies[i] + 2];
     }
 
+    // Full molecule geometry for storage and XYZ output (all atoms)
+    Geometry full_geometry(m_natoms, 3);
+    for (int i = 0; i < m_natoms; ++i) {
+        full_geometry(i, 0) = m_eigen_geometry.data()[3 * i + 0];
+        full_geometry(i, 1) = m_eigen_geometry.data()[3 * i + 1];
+        full_geometry(i, 2) = m_eigen_geometry.data()[3 * i + 2];
+    }
+
     double current_bias = 0;
     double rmsd_reference = 0;
 
+    // Claude Generated (Apr 2026): Shared bias pool path for parallel ConfSearch
+    // When a shared pool is set, read bias structures from the pool and evaluate locally.
+    // Deposit new structures back to the shared pool when the deposition criterion is met.
+    if (m_shared_pool) {
+        int global_count = m_shared_pool->biasStructureCount();
+
+        if (global_count == 0) {
+            // First structure: deposit initial reference with full geometry
+            BiasStructure initial;
+            initial.geometry = full_geometry;
+            initial.time = m_currentStep;
+            initial.rmsd_reference = 0;
+            initial.counter = 1;
+            initial.index = 0;
+            initial.temperature = m_T0;
+            m_shared_pool->depositBiasStructure(initial);
+            // Write full molecule to per-thread .mtd.xyz for reference
+            Molecule out_mol(m_molecule);
+            out_mol.setGeometry(full_geometry);
+            out_mol.setName(std::to_string(m_currentStep));
+            out_mol.writeXYZFile(Basename() + ".mtd.xyz");
+            if (m_nocolvarfile == false) {
+                std::ofstream colvarfile;
+                colvarfile.open("COLVAR");
+                colvarfile.close();
+            }
+            m_end = std::chrono::system_clock::now();
+            m_mtd_time += std::chrono::duration_cast<std::chrono::milliseconds>(m_end - m_start).count();
+            return;
+        }
+
+        // Snapshot all current bias structures from the shared pool
+        auto bias_snapshot = m_shared_pool->snapshot();
+
+        // Evaluate bias locally using the snapshot
+        for (const auto& bs : bias_snapshot) {
+            m_rmsd_mtd_molecule.setGeometry(current_geometry);
+            // bs.geometry is full-atom; need RMSD-subset for evaluation
+            Geometry bs_rmsd_subset = m_rmsd_mtd_molecule.getGeometry();
+            for (int i = 0; i < m_rmsd_indicies.size(); ++i) {
+                bs_rmsd_subset(i, 0) = bs.geometry(m_rmsd_indicies[i], 0);
+                bs_rmsd_subset(i, 1) = bs.geometry(m_rmsd_indicies[i], 1);
+                bs_rmsd_subset(i, 2) = bs.geometry(m_rmsd_indicies[i], 2);
+            }
+            m_shared_pool_target.setGeometry(bs_rmsd_subset);
+            m_shared_pool_driver.setTarget(m_shared_pool_target);
+            double rmsd = m_shared_pool_driver.BestFitRMSD();
+            double expr = exp(-rmsd * rmsd * m_alpha_rmsd);
+            double bias_energy = expr * m_rmsd_DT;
+            double factor = 1.0;
+
+            if (m_wtmtd) {
+                factor += exp(-bs.energy / (8.3145e-3 * m_T0 / 2625.5) / m_rmsd_DT);
+            } else {
+                factor = bs.counter;
+            }
+
+            bias_energy *= factor * m_k_rmsd;
+            current_bias += bias_energy;
+
+            // Gradient contribution
+            double dEdR = -2.0 * m_alpha_rmsd * m_k_rmsd / m_rmsd_indicies.size()
+                          * expr * factor;
+            Geometry grad = m_shared_pool_driver.Gradient();
+            for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
+                m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += dEdR * grad(j, 0);
+                m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 1] += dEdR * grad(j, 1);
+                m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 2] += dEdR * grad(j, 2);
+            }
+
+            if (bs.index == 0) {
+                rmsd_reference = rmsd;
+            }
+        }
+
+        m_rmsd_mtd_molecule.setGeometry(current_geometry);
+
+        // COLVAR output
+        if (m_nocolvarfile == false) {
+            std::ofstream colvarfile;
+            colvarfile.open("COLVAR", std::iostream::app);
+            colvarfile << m_currentStep << " ";
+            if (m_rmsd_fragment_count < 2)
+                colvarfile << rmsd_reference << " ";
+            for (int i = 0; i < m_rmsd_fragment_count; ++i)
+                for (int j = 0; j < i; ++j) {
+                    colvarfile << (m_rmsd_mtd_molecule.Centroid(true, i) - m_rmsd_mtd_molecule.Centroid(true, j)).norm() << " ";
+                }
+            colvarfile << current_bias << " " << std::endl;
+            colvarfile.close();
+        }
+        m_bias_energy += current_bias;
+
+        // Deposition criterion: deposit a new bias structure unless the structure is fixed.
+        // This matches the normal RMSD-MTD behavior (deposits at each mtd_steps interval).
+        if (!m_rmsd_fix_structure) {
+            BiasStructure new_bs;
+            new_bs.geometry = full_geometry;
+            new_bs.rmsd_reference = rmsd_reference;
+            new_bs.time = m_currentStep;
+            new_bs.counter = 1;
+            new_bs.temperature = m_T0;
+            int new_count = m_shared_pool->depositBiasStructure(new_bs);
+            // Write full molecule to per-thread .mtd.xyz
+            Molecule out_mol(m_molecule);
+            out_mol.setGeometry(full_geometry);
+            out_mol.setName(std::to_string(m_currentStep));
+            out_mol.appendXYZFile(Basename() + ".mtd.xyz");
+            CurcumaLogger::result_fmt("RMSD-MTD: Deposited bias structure {} (pool total: {})",
+                new_count, m_shared_pool->biasStructureCount());
+        }
+
+        m_end = std::chrono::system_clock::now();
+        m_mtd_time += std::chrono::duration_cast<std::chrono::milliseconds>(m_end - m_start).count();
+        return;
+    }
+
+    // Original local-only bias path (unchanged)
     if (m_bias_structure_count == 0) {
         m_bias_threads[0]->addGeometry(current_geometry, 0, m_currentStep, 0);
         m_bias_structure_count++;
@@ -2914,6 +3031,35 @@ void SimpleMD::RemoveRotation()
 
 void SimpleMD::PrintStatus() const
 {
+    // Print table header once, directly before the first data row
+    if (m_step == 0) {
+#ifdef GCC
+        std::cout << fmt::format("{0: >{1}} {2: >{1}} {3: >{1}} {4: >{1}} {5: >{1}} {6: >{1}} {7: >{1}} {8: >{1}} {9: >{1}} {10: >{1}} {11: >{1}} {12: >{1}} {13: >{1}} {14: >{1}} {15: >{1}} {16: >{1}}\n",
+                                  "Step", 15, "Epot", "avEpot", "Ekin", "avEkin", "Etot", "avEtot", "T", "avT", "Wall", "avWall", "Vir", "avVir", "Rem", "t_step", "Uniq");
+        std::cout << fmt::format("{0: >{1}} {2: >{1}} {3: >{1}} {4: >{1}} {5: >{1}} {6: >{1}} {7: >{1}} {8: >{1}} {9: >{1}} {10: >{1}} {11: >{1}} {12: >{1}} {13: >{1}} {14: >{1}} {15: >{1}} {16: >{1}}\n",
+                                  "ps", 15, "Eh", "Eh", "Eh", "Eh", "Eh", "Eh", "K", "K", "Eh", "Eh", "Eh", "Eh", "min", "ms", "#");
+#else
+        std::cout << "Step"
+                  << "\t"
+                  << "Epot"
+                  << "\t"
+                  << "Ekin"
+                  << "\t"
+                  << "Etot"
+                  << "\t"
+                  << "T" << std::endl;
+        std::cout << "  "
+                  << "\t"
+                  << "Eh"
+                  << "\t"
+                  << "Eh"
+                  << "\t"
+                  << "Eh"
+                  << "\t"
+                  << "T" << std::endl;
+#endif
+    }
+
     const auto unix_timestamp = std::chrono::seconds(std::time(NULL));
 
     const int current = std::chrono::milliseconds(unix_timestamp).count();

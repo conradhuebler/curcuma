@@ -51,7 +51,10 @@ struct BiasStructure {
     double factor = 1;
     int index = 0;
     int counter = 0;
+    double temperature = 0;  // Claude Generated (Apr 2026): deposition temperature for cross-T propagation
 };
+
+class SharedBiasPool;  // Claude Generated (Apr 2026): forward declaration
 
 class BiasThread : public CxxThread {
 public:
@@ -214,6 +217,9 @@ public:
     double currentTime() const { return m_currentStep; }
     const Molecule& currentMolecule() const { return m_molecule; }
 
+    // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
+    void setSharedBiasPool(SharedBiasPool* pool) { m_shared_pool = pool; }
+
 private:
     std::function<void(void)> ThermostatFunction;
     void PrintStatus() const;
@@ -335,6 +341,9 @@ private:
     std::vector<BiasThread*> m_bias_threads;
     json m_bias_json;
     CxxThreadPool* m_bias_pool;
+    SharedBiasPool* m_shared_pool = nullptr;  // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
+    RMSDDriver m_shared_pool_driver;  // Claude Generated (Apr 2026): local RMSDDriver for shared pool path
+    Molecule m_shared_pool_target;  // Claude Generated (Apr 2026): target molecule for shared pool RMSD
     int m_unix_started = 0, m_prev_index = 0, m_max_rescue = 10, m_current_rescue = 0, m_currentTime = 0, m_max_top_diff = 15, m_step = 0;
     int m_writerestart = -1;
     int m_respa = 1;
@@ -530,11 +539,15 @@ public:
     inline void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
     SimpleMD* MDDriver() const { return m_mddriver; }
 
+    // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
+    void setSharedBiasPool(SharedBiasPool* pool) { m_shared_pool = pool; }
+
     virtual int execute() override
     {
         m_mddriver = new SimpleMD(m_controller, false);
         m_mddriver->setMolecule(m_molecule);
         m_mddriver->overrideBasename(m_basename + ".t" + std::to_string(getThreadId()));
+        m_mddriver->setSharedBiasPool(m_shared_pool);
         m_mddriver->Initialise();
         m_mddriver->start();
         return 0;
@@ -546,4 +559,5 @@ protected:
     std::string m_result;
     json m_controller;
     SimpleMD* m_mddriver;
+    SharedBiasPool* m_shared_pool = nullptr;  // Claude Generated (Apr 2026)
 };

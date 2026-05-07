@@ -31,6 +31,9 @@
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include "src/capabilities/curcumamethod.h"
+#include "src/capabilities/shared_bias_pool.h"
+#include "src/capabilities/optimizer_factory.h"
+#include "src/core/energycalculator.h"
 using namespace curcuma;
 static const nlohmann::json ConfSearchJson{
     { "method", "uff" },
@@ -62,7 +65,6 @@ static const nlohmann::json ConfSearchJson{
     { "rescue", false },
     { "coupling", 10 },
     { "MaxTopoDiff", 15 },
-    { "impuls", 0 },
     { "impuls_scaling", 0.75 },
     { "writeinit", false },
     { "initfile", "none" },
@@ -92,7 +94,31 @@ static const nlohmann::json ConfSearchJson{
     { "wall_beta", 6 }
 };
 
-class curcuma::Molecule;
+// Claude Generated (Apr 2026): Thread class for parallel geometry optimization
+class OptThread : public CxxThread {
+public:
+    OptThread(const Molecule& molecule, const json& parameter)
+        : m_molecule(molecule), m_parameter(parameter)
+    {
+        setAutoDelete(false);
+    }
+
+    virtual int execute() override
+    {
+        std::string method = m_parameter.value("method", std::string("gfnff"));
+        EnergyCalculator energy_calc(method, m_parameter);
+        m_result = Optimization::OptimizationDispatcher::optimizeStructure(
+            &m_molecule, Optimization::OptimizerType::LBFGSPP, &energy_calc, m_parameter);
+        return m_result.success ? 0 : 1;
+    }
+
+    const Optimization::OptimizationResult& result() const { return m_result; }
+
+private:
+    Molecule m_molecule;
+    json m_parameter;
+    Optimization::OptimizationResult m_result;
+};
 
 class ConfSearch : public CurcumaMethod {
 public:
@@ -136,4 +162,5 @@ private:
     int m_spin = 0, m_charge = 0, m_repeat = 5, m_threads = 1;
     double m_time = 1e4, m_startT = 500, m_endT = 300, m_deltaT = 50, m_currentT = 0, m_rmsd = 1.25, m_energy_window = 100;
     Matrix m_topo_matrix;
+    SharedBiasPool* m_bias_pool = nullptr;  // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
 };

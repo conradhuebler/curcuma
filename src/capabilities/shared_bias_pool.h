@@ -1,0 +1,81 @@
+/*
+ * <Shared Bias Pool for Parallel RMSD-MTD Conformational Search>
+ * Copyright (C) 2026 Conrad Huebler <Conrad.Huebler@gmx.net>
+ *
+ * Thread-safe container for sharing bias structures across parallel
+ * MD workers during ConfSearch. Uses std::shared_mutex for read-heavy
+ * access: every MD step reads all structures (shared lock), but new
+ * structures are deposited infrequently (unique lock).
+ *
+ * Claude Generated (Apr 2026)
+ */
+
+#pragma once
+
+#include <shared_mutex>
+#include <atomic>
+#include <vector>
+
+#include "src/capabilities/simplemd.h"  // BiasStructure
+#include "json.hpp"
+
+class SharedBiasPool {
+public:
+    explicit SharedBiasPool() = default;
+    ~SharedBiasPool() = default;
+
+    // Non-copyable, non-movable (contains mutex)
+    SharedBiasPool(const SharedBiasPool&) = delete;
+    SharedBiasPool& operator=(const SharedBiasPool&) = delete;
+    SharedBiasPool(SharedBiasPool&&) = delete;
+    SharedBiasPool& operator=(SharedBiasPool&&) = delete;
+
+    /** Snapshot all current bias structures (shared_lock, O(N) copy).
+     *  Callers use this for bias evaluation; releases the lock immediately.
+     *  The returned vector is a deep copy -- safe to use without locking. */
+    std::vector<BiasStructure> snapshot() const;
+
+    /** Atomic read of the current global structure count.
+     *  Uses memory_order_relaxed -- sufficient for count checks
+     *  in the deposition criterion. */
+    int biasStructureCount() const;
+
+    /** Deposit a new bias structure (unique_lock, exclusive access).
+     *  Called when a SimpleMD instance decides to add a new Gaussian.
+     *  Returns the assigned global index. */
+    int depositBiasStructure(const BiasStructure& structure);
+
+    /** Batch deposit multiple structures at once (unique_lock).
+     *  Used for initial seeding and cross-temperature propagation.
+     *  Returns the index of the first deposited structure. */
+    int depositBatch(const std::vector<BiasStructure>& structures);
+
+    /** Prune structures whose counter is below threshold.
+     *  Called between temperature cycles (no concurrent access).
+     *  Removes rarely-visited regions to keep pool size manageable. */
+    void pruneByCounter(int min_counter);
+
+    /** Remove all structures. Used when starting fresh
+     *  or when resetting between temperature cycles. */
+    void clear();
+
+    /** Serialize metadata (counter, energy, factor, index, temperature)
+     *  to JSON. Matches existing restart format for backward compatibility. */
+    nlohmann::json serializeMetadata() const;
+
+    /** Serialize geometries as XYZ string (multi-frame). */
+    std::string serializeGeometry() const;
+
+    /** Restore from JSON metadata. Geometries must be loaded separately
+     *  via deserializeGeometry(). */
+    void deserializeMetadata(const nlohmann::json& metadata);
+
+    /** Restore geometries from XYZ string. Must match the order
+     *  from serializeGeometry(). */
+    void deserializeGeometry(const std::string& xyz_data);
+
+private:
+    mutable std::shared_mutex m_mutex;
+    std::vector<BiasStructure> m_structures;
+    std::atomic<int> m_global_count{0};
+};
