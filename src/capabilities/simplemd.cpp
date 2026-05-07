@@ -2445,9 +2445,6 @@ void SimpleMD::ApplyRMSDMTD()
             int deposited = m_shared_pool->depositBiasStructure(initial);
             CurcumaLogger::result_fmt("RMSD-MTD: Initial bias structure {} deposited (pool total: {})",
                 deposited, m_shared_pool->biasStructureCount());
-            std::cout << "[MTD] Thread " << Basename() << " deposited initial bias structure " << deposited
-                      << " at step " << m_currentStep << " (pool total: "
-                      << m_shared_pool->biasStructureCount() << ")" << std::endl;
             // Write full molecule to per-thread .mtd.xyz for reference
             Molecule out_mol(m_molecule);
             out_mol.setGeometry(full_geometry);
@@ -2542,10 +2539,6 @@ void SimpleMD::ApplyRMSDMTD()
             out_mol.appendXYZFile(Basename() + ".mtd.xyz");
             CurcumaLogger::result_fmt("RMSD-MTD: Deposited bias structure {} (pool total: {})",
                 new_count, m_shared_pool->biasStructureCount());
-            // Also print to cout directly for thread visibility with flush
-            std::cout << "[MTD] Thread " << Basename() << " deposited bias structure " << new_count
-                      << " at step " << m_currentStep << " (pool total: "
-                      << m_shared_pool->biasStructureCount() << ")" << std::endl;
         }
 
         m_end = std::chrono::system_clock::now();

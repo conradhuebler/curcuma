@@ -257,12 +257,13 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
 {
     CxxThreadPool* pool = new CxxThreadPool;
     int index = 0;
-    CurcumaLogger::info("Initializing MD thread pool");
+    CurcumaLogger::result_fmt("ConfSearch MD: Starting {} independent runs ({} repeats x {} structures), {} threads in parallel",
+        m_repeat * static_cast<int>(molecules.size()), m_repeat, static_cast<int>(molecules.size()), m_threads);
     for (int repeat = 0; repeat < m_repeat; ++repeat) {
         for (int i = 0; i < molecules.size(); ++i) {
             MDThread* thread = new MDThread(parameter);
             thread->setThreadId(index);
-            thread->setBasename("confsearch");
+            thread->setBasename("confsearch.r" + std::to_string(repeat));
             thread->setMolecule(molecules[i]);
             thread->setSharedBiasPool(m_bias_pool);  // Claude Generated (Apr 2026): shared bias pool
             index++;
