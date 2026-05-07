@@ -153,6 +153,17 @@ public:
     /// EEQ stream is fully synced before return — safe to use immediately on any stream.
     double* getDeviceChargesPtr();
 
+    /// Step B (May 2026): true if the last successful refactorization used the
+    /// LU fallback (cusolverDnDgetrf) because Cholesky failed on an indefinite
+    /// matrix. Persists across lazy solves until the next refactorization.
+    /// Used by gfnff_gpu_method.cpp to log a one-line warning matching the
+    /// CPU dispatcher's "ill-conditioned matrix → using LU" message.
+    bool isUsingLUFallback() const;
+
+    /// Step B (May 2026): leading minor index returned by cusolverDnDpotrf when
+    /// the most recent Cholesky attempt failed. 0 if Cholesky succeeded.
+    int getLastCholInfo() const;
+
     /**
      * @brief WP7-A: General Schur for nfrag > 1 (May 2026), full GPU-resident path.
      *

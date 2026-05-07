@@ -293,6 +293,13 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
 
     CitationRegistry::cite("gfnff");
     CitationRegistry::cite("d4", "gfnff");
+    CitationRegistry::cite("eeq", "gfnff");
+    CitationRegistry::cite("pyykko", "gfnff");
+    CitationRegistry::cite("sanderson", "gfnff");
+    CitationRegistry::cite("ghosh_islam", "gfnff");
+    CitationRegistry::cite("atm", "d3");
+    CitationRegistry::cite("bj", "d3");
+    CitationRegistry::cite("casimir_polder", "d4");
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== GFNFFGPUMethod::calculateEnergy() START (GPU path) ===");
@@ -519,6 +526,19 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         }
         m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/false);
         charges = m_gfnff->getLastCharges();
+    } else if (m_gfnff->areEEQChargesCurrent(m_gfnff->getGeometryBohr())) {
+        // Step A (Claude Generated, May 2026): Geometry unchanged since last EEQ solve.
+        // Reuse the CPU charges (which the topology-stage CPU EEQ already computed,
+        // including LU fallback for indefinite matrices) instead of running a fresh
+        // GPU Cholesky. Mirrors the CPU "Skipping redundant Phase-2 EEQ" branch in
+        // prepareCNAndEEQ (gfnff_method.cpp:761-765) and avoids the indefinite-matrix
+        // divergence on systems like polymer.xyz where dpotrf cannot factor A.
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info(
+                "EEQ GPU Phase 2: reusing cached CPU charges (geometry unchanged)");
+        }
+        charges = m_gfnff->getLastCharges();
+        m_gpu_workspace->setEEQCharges(charges);
     } else {
         // === GPU EEQ: Build Coulomb matrix + Cholesky solve on GPU ===
         // WP2: use topology-constant alpha/gam/chi/cnf already on GPU;
@@ -859,6 +879,15 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                         frag_info += fmt::format(" frag{}={:+.4f}", f + 1, qsum);
                     }
                     CurcumaLogger::success(fmt::format("EEQ GPU done:{}", frag_info));
+                }
+                // Step B (May 2026): warn once when the indefinite-matrix LU
+                // fallback kicks in. Mirrors the CPU dispatcher line
+                // "EEQ PCG: ill-conditioned matrix ... using LU directly".
+                if (m_eeq_gpu->isUsingLUFallback() && force_refactor
+                        && CurcumaLogger::get_verbosity() >= 1) {
+                    CurcumaLogger::warn(fmt::format(
+                        "EEQ GPU: matrix indefinite (Cholesky info={}), using LU fallback",
+                        m_eeq_gpu->getLastCholInfo()));
                 }
                 used_gpu_eeq = true;
             } else {

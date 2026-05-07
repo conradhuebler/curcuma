@@ -82,6 +82,21 @@ struct EEQSolverGPUImpl {
     // Cached host RHS buffer to avoid per-step heap allocation
     std::vector<double> m_h_rhs_cache;
 
+    // ── Step B (May 2026): LU fallback for indefinite EEQ matrices ──────────
+    // cusolverDnDpotrf requires SPD; the EEQ Coulomb matrix can be indefinite
+    // (the polymer test case has min_gersh ≈ -60.7, κ_est = inf). When dpotrf
+    // returns info != 0, rebuild d_A and refactor with cusolverDnDgetrf (LU
+    // with partial pivoting), then use dgetrs in place of dpotrs. m_using_lu
+    // persists with m_has_cached_factor: lazy solves on subsequent calls reuse
+    // the cached LU factor and pick dgetrs accordingly. Mirrors the CPU
+    // dispatcher rule (eeq_solver.cpp:1391-1430) that switches PCG → LU when
+    // the Gershgorin bound is non-positive.
+    CudaBuffer<int>    d_lu_pivots;       ///< [N] partial-pivot indices from dgetrf
+    CudaBuffer<double> d_lu_workspace;    ///< cuSOLVER dgetrf workspace
+    int  lu_workspace_size = 0;
+    bool m_using_lu        = false;       ///< true: cached factor is LU, use dgetrs
+    int  m_last_chol_info  = 0;           ///< first failed leading minor (for diagnostics)
+
     // ── WP6: Batched per-fragment Cholesky (nfrag > 1) ──────────────────────
     // Fragment layout (topology-constant, uploaded once per topology build):
     //   d_frag_sizes[f]        = N_f
@@ -768,10 +783,60 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchur(
         checkCudaEEQ(cudaStreamSynchronize(m_impl->stream), "sync after potrf");
 
         if (*m_impl->h_info != 0) {
-            m_impl->m_has_cached_factor = false;
-            return false;
+            // Step B (Claude Generated, May 2026): Cholesky failed, matrix is
+            // not SPD. Mirror the CPU dispatcher (eeq_solver.cpp:1391-1430)
+            // and fall back to LU with partial pivoting (cusolverDnDgetrf),
+            // which handles indefinite matrices. Without this fallback, an
+            // indefinite EEQ matrix (e.g. the polymer test case with
+            // min_gersh ≈ -60.7) would silently produce wrong charges and
+            // a ~0.98 Eh Coulomb energy error.
+            m_impl->m_last_chol_info = *m_impl->h_info;
+
+            // dpotrf clobbered d_A during the partial factorization — rebuild.
+            {
+                int n_lower = N * (N + 1) / 2;
+                int block = 256;
+                int grid = (n_lower + block - 1) / block;
+                k_eeq_build_matrix<<<grid, block, 0, m_impl->stream>>>(
+                    N, cx, cy, cz, d_alpha_corrected, d_gam_corrected,
+                    m_impl->d_A.ptr, cutoff_sq);
+            }
+
+            if (m_impl->d_lu_pivots.n < N)
+                m_impl->d_lu_pivots.alloc(N);
+            int lwork_lu = 0;
+            checkCusolverEEQ(
+                cusolverDnDgetrf_bufferSize(m_impl->cusolver_handle, N, N,
+                                             m_impl->d_A.ptr, N, &lwork_lu),
+                "getrf_bufferSize");
+            if (m_impl->d_lu_workspace.n < lwork_lu) {
+                m_impl->d_lu_workspace.alloc(lwork_lu);
+                m_impl->lu_workspace_size = lwork_lu;
+            }
+
+            checkCusolverEEQ(
+                cusolverDnDgetrf(m_impl->cusolver_handle, N, N,
+                                  m_impl->d_A.ptr, N,
+                                  m_impl->d_lu_workspace.ptr,
+                                  m_impl->d_lu_pivots.ptr,
+                                  m_impl->d_info.ptr),
+                "cusolverDnDgetrf");
+            checkCudaEEQ(cudaMemcpyAsync(m_impl->h_info, m_impl->d_info.ptr, sizeof(int),
+                                          cudaMemcpyDeviceToHost, m_impl->stream),
+                         "download d_info (LU)");
+            checkCudaEEQ(cudaStreamSynchronize(m_impl->stream), "sync after getrf");
+
+            if (*m_impl->h_info != 0) {
+                m_impl->m_has_cached_factor = false;
+                m_impl->m_using_lu = false;
+                return false;
+            }
+            m_impl->m_has_cached_factor = true;
+            m_impl->m_using_lu = true;
+        } else {
+            m_impl->m_has_cached_factor = true;
+            m_impl->m_using_lu = false;
         }
-        m_impl->m_has_cached_factor = true;
     }
 
     // Build RHS: col0 = d_rhs_atoms (D2D), col1 = fragment indicator (H2D, topology-constant)
@@ -801,15 +866,28 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchur(
                      "H2D constraint col1");
     }
 
-    // Triangular solve: L·L^T · X = B (in-place, d_rhs[0..N-1]=z1, d_rhs[N..2N-1]=Z2)
-    checkCusolverEEQ(
-        cusolverDnDpotrs(m_impl->cusolver_handle,
-                          CUBLAS_FILL_MODE_LOWER,
-                          N, nrhs,
-                          m_impl->d_A.ptr, N,
-                          m_impl->d_rhs.ptr, N,
-                          m_impl->d_info.ptr),
-        "cusolverDnDpotrs");
+    // Triangular solve: L·L^T · X = B (Cholesky) or P·L·U · X = B (LU fallback).
+    // Cached factor type drives dispatch; m_using_lu persists with m_has_cached_factor
+    // so lazy-solve calls (do_refactor==false) consistently pick the right routine.
+    if (m_impl->m_using_lu) {
+        checkCusolverEEQ(
+            cusolverDnDgetrs(m_impl->cusolver_handle,
+                              CUBLAS_OP_N, N, nrhs,
+                              m_impl->d_A.ptr, N,
+                              m_impl->d_lu_pivots.ptr,
+                              m_impl->d_rhs.ptr, N,
+                              m_impl->d_info.ptr),
+            "cusolverDnDgetrs");
+    } else {
+        checkCusolverEEQ(
+            cusolverDnDpotrs(m_impl->cusolver_handle,
+                              CUBLAS_FILL_MODE_LOWER,
+                              N, nrhs,
+                              m_impl->d_A.ptr, N,
+                              m_impl->d_rhs.ptr, N,
+                              m_impl->d_info.ptr),
+            "cusolverDnDpotrs");
+    }
 
     // GPU Schur: q[i] = z1[i] - Z2[i] * lambda
     //   lambda = (sum(z1) - rhs_c0) / sum(Z2)
@@ -846,6 +924,16 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchur(
 double* EEQSolverGPU::getDeviceChargesPtr()
 {
     return m_impl->d_rhs.ptr;
+}
+
+bool EEQSolverGPU::isUsingLUFallback() const
+{
+    return m_impl->m_using_lu;
+}
+
+int EEQSolverGPU::getLastCholInfo() const
+{
+    return m_impl->m_last_chol_info;
 }
 
 // ============================================================================
@@ -951,10 +1039,53 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurGeneral(
         checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after potrf (general)");
 
         if (*impl.h_info != 0) {
-            impl.m_has_cached_factor = false;
-            return false;
+            // Step B (Claude Generated, May 2026): Cholesky failed → LU fallback.
+            // Same rationale as in solveWithDeviceRHSAndGPUSchur (WP5-A).
+            impl.m_last_chol_info = *impl.h_info;
+            {
+                int n_lower = N * (N + 1) / 2;
+                int block   = 256;
+                int grid    = (n_lower + block - 1) / block;
+                k_eeq_build_matrix<<<grid, block, 0, impl.stream>>>(
+                    N, cx, cy, cz, d_alpha_corrected, d_gam_corrected,
+                    impl.d_A.ptr, cutoff_sq);
+            }
+
+            if (impl.d_lu_pivots.n < N)
+                impl.d_lu_pivots.alloc(N);
+            int lwork_lu = 0;
+            checkCusolverEEQ(
+                cusolverDnDgetrf_bufferSize(impl.cusolver_handle, N, N,
+                                             impl.d_A.ptr, N, &lwork_lu),
+                "getrf_bufferSize (general)");
+            if (impl.d_lu_workspace.n < lwork_lu) {
+                impl.d_lu_workspace.alloc(lwork_lu);
+                impl.lu_workspace_size = lwork_lu;
+            }
+
+            checkCusolverEEQ(
+                cusolverDnDgetrf(impl.cusolver_handle, N, N,
+                                  impl.d_A.ptr, N,
+                                  impl.d_lu_workspace.ptr,
+                                  impl.d_lu_pivots.ptr,
+                                  impl.d_info.ptr),
+                "cusolverDnDgetrf (general)");
+            checkCudaEEQ(cudaMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int),
+                                          cudaMemcpyDeviceToHost, impl.stream),
+                         "download d_info (general LU)");
+            checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after getrf (general)");
+
+            if (*impl.h_info != 0) {
+                impl.m_has_cached_factor = false;
+                impl.m_using_lu = false;
+                return false;
+            }
+            impl.m_has_cached_factor = true;
+            impl.m_using_lu = true;
+        } else {
+            impl.m_has_cached_factor = true;
+            impl.m_using_lu = false;
         }
-        impl.m_has_cached_factor = true;
     }
 
     // Assemble (nfrag+1)-column RHS on device:
@@ -975,17 +1106,29 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurGeneral(
                      "D2D rhs_constraint_cols (general)");
     }
 
-    // dpotrs: in-place solve A·X = [b_atoms | C^T]. After this:
-    //   d_rhs[0..N-1]                   = z1
-    //   d_rhs[(g+1)·N .. (g+2)·N-1]    = Z2[:,g]   for g = 0..nfrag-1
-    checkCusolverEEQ(
-        cusolverDnDpotrs(impl.cusolver_handle,
-                          CUBLAS_FILL_MODE_LOWER,
-                          N, nrhs,
-                          impl.d_A.ptr, N,
-                          impl.d_rhs.ptr, N,
-                          impl.d_info.ptr),
-        "cusolverDnDpotrs (general)");
+    // In-place solve A·X = [b_atoms | C^T]. After this:
+    //   d_rhs[0..N-1]                = z1
+    //   d_rhs[(g+1)·N .. (g+2)·N-1]  = Z2[:,g]   for g = 0..nfrag-1
+    // Cholesky (dpotrs) or LU (dgetrs) depending on cached factor type.
+    if (impl.m_using_lu) {
+        checkCusolverEEQ(
+            cusolverDnDgetrs(impl.cusolver_handle,
+                              CUBLAS_OP_N, N, nrhs,
+                              impl.d_A.ptr, N,
+                              impl.d_lu_pivots.ptr,
+                              impl.d_rhs.ptr, N,
+                              impl.d_info.ptr),
+            "cusolverDnDgetrs (general)");
+    } else {
+        checkCusolverEEQ(
+            cusolverDnDpotrs(impl.cusolver_handle,
+                              CUBLAS_FILL_MODE_LOWER,
+                              N, nrhs,
+                              impl.d_A.ptr, N,
+                              impl.d_rhs.ptr, N,
+                              impl.d_info.ptr),
+            "cusolverDnDpotrs (general)");
+    }
 
     // GPU reduction: Cz1[f] = Σ_{i∈frag_f} z1[i], S[f,g] = Σ_{i∈frag_f} Z2[i,g].
     cudaMemsetAsync(impl.d_Cz1_general.ptr, 0, nfrag * sizeof(double), impl.stream);

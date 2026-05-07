@@ -392,8 +392,7 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, Vec
     EnergyCalculator interface(method, sp_config, Basename());
     interface.setMolecule(initial->getMolInfo());
     json param = interface.Parameter();
-    bool with_gradient = sp_config.value("gradient", false);
-    double energy = interface.CalculateEnergy(with_gradient);
+    double energy = interface.CalculateEnergy(false);
 
     // Claude Generated (February 2026): Energy Decomposition JSON output
     if (CurcumaLogger::get_verbosity() >= 1) {

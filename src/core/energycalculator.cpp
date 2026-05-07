@@ -180,6 +180,7 @@ bool EnergyCalculator::createMethod(const std::string& method_name, const json& 
         
         ClearError();
 
+#ifndef USE_CUDA
         // Track GPU fallback: user requested -gpu cuda but CUDA unavailable
         std::string gpu_req = config.value("gpu", "none");
         std::transform(gpu_req.begin(), gpu_req.end(), gpu_req.begin(), ::tolower);

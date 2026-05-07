@@ -671,6 +671,22 @@ public:
     const Matrix& getGeometryBohr() const { return m_geometry_bohr; }
 
     /**
+     * @brief True if m_charges are valid for the supplied geometry.
+     * Mirrors the eeq_charges_current check in prepareCNAndEEQ
+     * (gfnff_method.cpp:761-765). Used by the GPU path to short-circuit
+     * a redundant Phase-2 EEQ when the geometry has not moved since the
+     * last solve (typical for SP at the topology-time geometry).
+     * Claude Generated (May 2026).
+     */
+    bool areEEQChargesCurrent(const Matrix& geom_bohr) const
+    {
+        return (m_charges.size() == m_atomcount)
+            && (m_last_eeq_geometry.rows() == geom_bohr.rows())
+            && (m_last_eeq_geometry.cols() == geom_bohr.cols())
+            && (m_last_eeq_geometry == geom_bohr);
+    }
+
+    /**
      * @brief Store GPU-computed charges via memcpy (no Eigen heap alloc, no ForceField distribution).
      * Claude Generated (March 2026): Safe for GPU path where CUDA corrupts heap metadata.
      * Requires preAllocateForGPUPath() called first (m_charges pre-sized).

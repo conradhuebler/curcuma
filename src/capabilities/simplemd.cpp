@@ -3066,10 +3066,6 @@ void SimpleMD::Berendson()
 
 void SimpleMD::CSVR()
 {
-    // Guard: alpha2 formula has m_Ekin in denominator — bail out if kinetic energy is zero
-    if (m_Ekin <= 0.0)
-        return;
-
     double Ekin_target = 0.5 * kb_Eh * (m_T0)*m_dof;
     double c = exp(-(m_dT / 2.0 * m_respa) / m_coupling);
     static std::default_random_engine rd{};
@@ -3088,7 +3084,7 @@ void SimpleMD::CSVR()
 
         m_atom_temp[i].push_back(m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i + 0] * m_eigen_velocities.data()[3 * i + 0] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]) / (kb_Eh * m_dof));
     }
-    // Note: m_seed++ has no effect — the static generators above do not use m_seed.
+    m_seed++;
 }
 
 void SimpleMD::Anderson()
