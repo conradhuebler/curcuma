@@ -147,7 +147,12 @@ void ConfSearch::start()
         CurcumaLogger::success("Shared bias pool: Active (cross-worker bias sharing enabled)");
     }
 
+    int temperature_cycle = 0;
     for (m_currentT = m_startT; m_currentT >= m_endT; m_currentT -= m_deltaT) {
+        temperature_cycle++;
+        CurcumaLogger::header("=== ConfSearch Temperature Cycle " + std::to_string(temperature_cycle)
+            + " / " + std::to_string(static_cast<int>((m_startT - m_endT) / m_deltaT) + 1)
+            + " : T = " + std::to_string(static_cast<int>(m_currentT)) + " K ===");
         CurcumaLogger::result_fmt("ConfSearch: T={}K -- {} independent MD runs per structure, {} input structures, {} total runs",
             m_currentT, m_repeat, m_in_stack.size(), m_repeat * m_in_stack.size());
         CurcumaLogger::info("Each repetition starts from the same input geometry with fresh velocities (exploration via shared bias pool).");
@@ -190,15 +195,16 @@ void ConfSearch::start()
             }
         }
 
-        CurcumaLogger::result("ConfSearch: Optimizing unique conformers...");
+        CurcumaLogger::result("ConfSearch: === Phase 2: Geometry Optimisation ===");
         nlohmann::json opt;
         opt["method"] = m_method;
         opt["threads"] = m_threads;
         if (md.contains("gpu") && !md["gpu"].is_null())
             opt["gpu"] = md["gpu"];
         PerformOptimisation("ff", opt);
+        CurcumaLogger::result("ConfSearch: Optimisation complete.");
 
-        CurcumaLogger::result("ConfSearch: Filtering conformers by RMSD...");
+        CurcumaLogger::result("ConfSearch: === Phase 3: RMSD-Based Conformer Filtering ===");
         nlohmann::json scan = ConfSearchJson;
         scan["rmsdmethod"] = "hybrid";
         scan["fewerFile"] = true;
@@ -206,10 +212,10 @@ void ConfSearch::start()
         scan["method"] = m_method;
         if (md.contains("gpu") && !md["gpu"].is_null())
             scan["gpu"] = md["gpu"];
-
         PerformFilter("ff", scan);
+        CurcumaLogger::result("ConfSearch: RMSD filtering complete.");
 
-        CurcumaLogger::result("ConfSearch: Applying energy window and topology filter...");
+        CurcumaLogger::result("ConfSearch: === Phase 4: Energy Window and Topology Filter ===");
         for (int i = 0; i < m_in_stack.size(); ++i)
             delete m_in_stack[i];
         m_in_stack.clear();
@@ -237,8 +243,9 @@ void ConfSearch::start()
                 energy = mol->Energy();
             }
         }
-        CurcumaLogger::result_fmt("ConfSearch: T={}K cycle done -- {} accepted, {} rejected (topo), {} rejected (energy)",
-            m_currentT, accepted, rejected_topo, rejected_energy);
+        CurcumaLogger::result_fmt("ConfSearch: T={}K cycle complete -- {} accepted, {} rejected (topo), {} rejected (energy), {} structures in next cycle",
+            m_currentT, accepted, rejected_topo, rejected_energy, static_cast<int>(m_in_stack.size()));
+        CurcumaLogger::header("=== End Temperature Cycle T = " + std::to_string(static_cast<int>(m_currentT)) + " K ===");
     }  // end temperature loop
 
     // Claude Generated (Apr 2026): Clean up shared bias pool
@@ -271,19 +278,33 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
     result_file.close();
 
     int total_structures = 0;
+    int thread_idx = 0;
     for (const auto& thread : pool->getFinishedThreads()) {
         auto structures = static_cast<MDThread*>(thread)->MDDriver()->UniqueMolecules();
         int thread_id = static_cast<MDThread*>(thread)->getThreadId();
         int count = static_cast<int>(structures.size());
         total_structures += count;
-        if (count > 0) {
-            CurcumaLogger::result_fmt("ConfSearch MD thread {}: {} unique structures found", thread_id, count);
+
+        int bias_count = 0;
+        if (m_bias_pool) {
+            bias_count = m_bias_pool->biasStructureCount();
         }
-        int index = 0;
+
+        CurcumaLogger::result_fmt("ConfSearch MD thread {} done: {} unique structures found, bias pool has {} structures",
+            thread_id, count, bias_count);
+
+        int idx = 0;
         for (const auto* molecule : structures) {
-            if (index != 0 || molecules.size() == 0)
+            if (idx != 0 || molecules.size() == 0)
                 molecule->appendXYZFile(file);
-            index++;
+            idx++;
+        }
+
+        thread_idx++;
+        // Progress report every thread
+        if (thread_idx % 5 == 0 || thread_idx == static_cast<int>(pool->getFinishedThreads().size())) {
+            CurcumaLogger::info_fmt("ConfSearch MD progress: {} / {} threads completed, {} unique structures so far",
+                thread_idx, static_cast<int>(pool->getFinishedThreads().size()), total_structures);
         }
     }
     CurcumaLogger::result_fmt("ConfSearch: Total {} unique structures written to {}", total_structures, file);
