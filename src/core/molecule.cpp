@@ -1951,6 +1951,14 @@ Molecule Molecule::ElementsRemoved(const std::vector<int>& elements)
 
 Molecule Molecule::AtomsRemoved(const std::vector<int>& atoms)
 {
+    // Guard against internal inconsistency that leads to SIGSEGV in Atom(i)
+    if (m_geometry.rows() != AtomCount()) {
+        std::cerr << "ERROR: Molecule::AtomsRemoved called with inconsistent state: "
+                  << "geometry.rows()=" << m_geometry.rows()
+                  << " != AtomCount()=" << AtomCount() << "\n";
+        return Molecule();
+    }
+
     // Build kept atom list
     std::vector<std::pair<int, Position>> kept_atoms;
     for (int i = 0; i < AtomCount(); ++i) {

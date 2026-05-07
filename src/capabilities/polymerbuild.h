@@ -214,6 +214,39 @@ private:
                          int max_steps = 300, double max_displacement = 0.05);
 
     /**
+     * @brief Balanced displacement: repair clashes AND stretched bonds in one pass.
+     *
+     * Like resolveOverlaps() but additionally applies an attractive force on every
+     * bond (from persistent topology + bonded_pairs) whose current distance exceeds
+     * `stretch_factor * (r_cov_i + r_cov_j)`. Both repulsive (clash) and attractive
+     * (stretched bond) gradients are accumulated and the same max_displacement
+     * scaling is applied, so the two effects balance within one step.
+     *
+     * Motivation: GFN-FF bond stretch E = k_b·exp(-α·(r-r₀)²) has an asymptotic
+     * cutoff — a bond pulled too far apart produces no restoring gradient and
+     * cannot recover. This routine drags such "lost" bonds back into the range
+     * where the FF can heal them, keeping the persistent topology meaningful
+     * even after disruptive intermediate steps.
+     *
+     * @param mol               Molecule to relax in-place
+     * @param bonded_pairs      Additional bonded pairs (unioned with topology matrix)
+     * @param max_steps         Maximum iterations
+     * @param max_displacement  Max atom displacement per step (Å)
+     * @param stretch_factor    Threshold for "stretched bond" detection
+     * @param k_attr            Weight of attractive term (vs. k_rep ≈ 4.0)
+     * @return pair (clashes_resolved, stretches_resolved) from initial counts
+     *
+     * Claude Generated 2026
+     */
+    std::pair<int,int> balanceBondsAndClashes(
+        Molecule& mol,
+        const std::vector<std::pair<int,int>>& bonded_pairs = {},
+        int max_steps = 300,
+        double max_displacement = 0.05,
+        double stretch_factor = 1.3,
+        double k_attr = 4.0);
+
+    /**
      * @brief Local LJ-LM refinement step after GFN-FF GeoOpt.
      *
      * Extracts the last-added monomer from the combined polymer, re-optimizes
@@ -364,6 +397,33 @@ private:
         const std::string& tag) const;
 
     /**
+     * @brief Diagnostic invariant check for polymer state vectors.
+     *
+     * Verifies that atom_monomer_id, interface_bonds, and monomer_start_atoms
+     * are consistent with polymer.AtomCount(). Read-only — logs detailed errors
+     * on violation but does not modify state. Used to bracket the polymer
+     * assembly loop for crash diagnosis on long chains, where stale indices
+     * would lead to out-of-bounds vector access in downstream loops.
+     *
+     * Invariants checked:
+     *   - atom_monomer_id.size() == polymer.AtomCount()
+     *   - monomer_fragment_type.size() == monomer_start_atoms.size()
+     *   - monomer_start_atoms strictly increasing, all in [0, polymer.AtomCount())
+     *   - all interface_bonds indices in [0, polymer.AtomCount())
+     *
+     * @return Number of invariant violations (0 = all OK)
+     *
+     * Claude Generated 2026 — long-chain crash diagnostics
+     */
+    int validatePolymerInvariants(
+        const Molecule& polymer,
+        const std::vector<int>& atom_monomer_id,
+        const std::vector<std::pair<int, int>>& interface_bonds,
+        const std::vector<int>& monomer_start_atoms,
+        const std::vector<std::string>& monomer_fragment_type,
+        const std::string& tag) const;
+
+    /**
      * @brief Save an intermediate polymer as a building block XYZ file with Xx atoms preserved.
      *
      * If save_blocks > 0 and the step number is a multiple of save_blocks,
@@ -380,10 +440,43 @@ private:
                            const std::vector<std::pair<int,int>>& tracked_xx,
                            int step_number) const;
 
+    /**
+     * @brief Compare GFN-FF coordination numbers of the last added monomer in the polymer
+     *        against the isolated template monomer (Xx→H substitution on both sides).
+     *
+     * Template CN is cached per fragment type. Polymer CN is computed via GFN-FF single-point
+     * (if opt_method == "gfnff") or CNCalculator (same erf formula, cheaper fallback).
+     * Bonds to Xx atoms in the template are counted because they represent future polymer bonds.
+     *
+     * @param mol               Current polymer molecule
+     * @param atom_monomer_id   Per-atom monomer assignment
+     * @param monomer_fragment_type Fragment name per monomer index
+     * @param monomer_start_atoms   Starting atom index per monomer
+     * @param interface_bonds   Known cross-monomer bonds
+     * @param step              Assembly step number (for log labels)
+     * @param current_monomer_idx Monomer index of the last added fragment
+     * @param opt_method        Optimization method name (controls CN computation path)
+     *
+     * Claude Generated 2026
+     */
+    /**
+     * @return Number of heavy atoms with |ΔCN| > cn_diag_threshold (0 = geometry OK)
+     */
+    int reportCNDiagnostics(
+        const Molecule& mol,
+        const std::vector<int>& atom_monomer_id,
+        const std::vector<std::string>& monomer_fragment_type,
+        const std::vector<int>& monomer_start_atoms,
+        const std::vector<std::pair<int,int>>& interface_bonds,
+        int step,
+        int current_monomer_idx,
+        const std::string& opt_method) const;
+
     ConfigManager m_config;
     bool m_silent;
     std::map<std::string, std::string> m_fragments;
     std::map<std::string, FragmentTopologyTemplate> m_fragment_templates;  ///< Claude Generated: Cached topology templates by fragment name
+    mutable std::map<std::string, Vector> m_fragment_cn_templates;         ///< Claude Generated 2026: Cached GFN-FF CN per fragment (Xx→H)
 
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
     BEGIN_PARAMETER_DEFINITION(polymerbuild)
@@ -412,6 +505,13 @@ private:
     PARAM(ljlm_k_bond, Double, 100000.0, "Bond-length constraint weight for LJ-LM refinement", "Refinement", {})
     PARAM(ljlm_disable_md, Bool, true, "Disable cold and warm MD when LJ-LM refinement is active", "Refinement", {})
 
+    // Balanced displacement (persistent bond restoration) — Claude Generated 2026
+    PARAM(balance_enabled, Bool, true, "Enable balanced displacement: pull stretched bonds and push clashes in one pass", "Refinement", {})
+    PARAM(balance_max_steps, Int, 300, "Max iterations for balanced displacement", "Refinement", {})
+    PARAM(balance_max_displacement, Double, 0.05, "Max atom displacement per balanced step [Å]", "Refinement", {})
+    PARAM(balance_stretch_factor, Double, 1.3, "Threshold factor for stretched-bond detection: r > f*(r_cov_i+r_cov_j)", "Refinement", {})
+    PARAM(balance_k_attr, Double, 4.0, "Attractive weight for stretched bonds (vs. k_rep=4.0 for clashes)", "Refinement", {})
+
     // Dynamics options
     PARAM(dynamics, Bool, false, "Enable intermediate molecular dynamics after each fragment", "Refinement", { "md" })
     PARAM(md_steps, Int, 1000, "Max simulation time for intermediate MD [fs]", "Refinement", {})
@@ -432,6 +532,8 @@ private:
     PARAM(save_blocks, Int, 0, "Save intermediate polymers with Xx atoms as reusable building blocks (0=off, 1=every step, N=every Nth step)", "Output", { "saveblocks" })
     PARAM(block_prefix, String, "", "Prefix for building block files (default: polymer basename)", "Output", {})
     PARAM(verbose, Bool, true, "Detailed output", "Output", {})
+    PARAM(cn_diag, Bool, true, "Enable per-atom GFN-FF CN diagnostics after each assembly step", "Output", {})
+    PARAM(cn_diag_threshold, Double, 0.3, "CN deviation threshold for CN diagnostic warnings", "Output", {})
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
