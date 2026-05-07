@@ -497,6 +497,12 @@ private:
     PARAM(lm_tolerance, Double, 1e-6, "Convergence tolerance for LM optimization", "Refinement", {})
     PARAM(overlap_retries, Int, 3, "Max optimization retries to resolve cross-monomer overlaps", "Refinement", { "retries" })
 
+    // LM placement hardening — Claude Generated 2026
+    PARAM(lm_k_bond, Double, 100000.0, "Bond-length constraint weight for fragment placement LM", "Refinement", {})
+    PARAM(lm_bond_tolerance, Double, 0.1, "Warn if LM bond length exceeds target by more than this (Å)", "Refinement", {})
+    PARAM(lm_retry_on_stretch, Bool, true, "Retry LM with alternative initial guess when bond is overstretched", "Refinement", {})
+    PARAM(lm_contract_bond, Bool, false, "Contract overstretched LM bond by sliding fragment along anchor axis before assembly", "Refinement", {})
+
     // LJ-LM refinement options — Claude Generated 2026
     PARAM(ljlm_refine, Bool, true, "Enable LJ-LM refinement after each GeoOpt step", "Refinement", {})
     PARAM(ljlm_max_iter, Int, 3, "Max LJ-LM / GeoOpt iterations for refinement", "Refinement", {})

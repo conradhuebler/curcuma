@@ -424,6 +424,7 @@ std::pair<Position, Position> PolymerBuild::optimizeFragmentPlacement(
     functor.m_polymer_xx_idx = polymer_xx_idx;
     functor.m_frag_xx_idx = frag_xx_idx;
     functor.m_bond_length = bond_length;
+    functor.m_k_bond = m_config.get<double>("lm_k_bond", 100000.0);
 
     // Compute fragment centroid for rotation pivot
     functor.m_fragment_centroid = fragment.Centroid();
@@ -839,19 +840,83 @@ ConnectionResult PolymerBuild::connectMolecule(
     // No need to remove interface Xx — already removed before LM
     // No need to convert I back to Xx — fragment Xx are already cap_intermediate
 
-    // Check bond length after LM optimization
-    Position anchor_polymer_final = combined.Atom(polymer_active_idx_lm).second;
-    Position anchor_fragment_final = combined.Atom(offset + next_active_idx_lm).second;
-    double actual_bond_length = (anchor_fragment_final - anchor_polymer_final).norm();
-    double bond_tolerance = 0.1;  // Å - warn if bond exceeds target by more than this
+    // --- Optional LM retry + bond contraction — Claude Generated 2026 ---
+    double bond_tolerance = m_config.get<double>("lm_bond_tolerance", 0.1);
+    Position anchor_poly = polymer_lm.Atom(polymer_active_idx_lm).second;
+    Position anchor_frag = frag_geom.row(next_active_idx_lm).transpose();
+    double actual_bond_length = (anchor_frag - anchor_poly).norm();
+
+    // Retry with stronger constraint + corrected initial guess if bond is overstretched
+    bool did_retry = false;
+    if (actual_bond_length > bond_length + bond_tolerance
+        && m_config.get<bool>("lm_retry_on_stretch", true)) {
+        CurcumaLogger::warn(fmt::format(
+            "LM bond length {:.3f} Å exceeds target {:.3f} Å by {:.3f} Å — retrying with stronger constraint",
+            actual_bond_length, bond_length, actual_bond_length - bond_length));
+
+        // Correct initial guess: slide fragment along bond axis so anchor distance = target
+        Position bond_dir = (anchor_frag - anchor_poly).normalized();
+        Position corrected_translation = opt_translation - bond_dir * (actual_bond_length - bond_length);
+
+        auto [retry_trans, retry_rot] = optimizeFragmentPlacement(
+            polymer_lm, fragment_lm,
+            anchor_poly, polymer_active_idx_lm, next_active_idx_lm,
+            bond_length, corrected_translation, opt_rotation,
+            step_number + 1000, -1, -1);  // step_number offset to avoid filename collision
+
+        Position retry_anchor_frag = fragment_lm.Centroid();
+        Geometry retry_geom = fragment_lm.getGeometry();
+        for (int i = 0; i < retry_geom.rows(); ++i) {
+            Position p = retry_geom.row(i).transpose();
+            p -= fragment_centroid;
+            p = PolymerPlacementFunctor(6,1).rotatePoint(p, retry_rot);
+            p += retry_trans;
+            retry_geom.row(i) = p.transpose();
+        }
+        Position retry_anchor = retry_geom.row(next_active_idx_lm).transpose();
+        double retry_bond = (retry_anchor - anchor_poly).norm();
+
+        if (retry_bond < actual_bond_length) {
+            opt_translation = retry_trans;
+            opt_rotation = retry_rot;
+            frag_geom = retry_geom;
+            actual_bond_length = retry_bond;
+            did_retry = true;
+            CurcumaLogger::info(fmt::format(
+                "LM retry improved bond length: {:.3f} Å (was {:.3f} Å)",
+                actual_bond_length, actual_bond_length + (retry_bond < actual_bond_length ? 0 : 1)));
+        } else {
+            CurcumaLogger::warn("LM retry did not improve bond length — keeping original");
+        }
+    }
+
+    // Optional post-LM bond contraction: slide fragment along anchor axis to exact target
+    if (actual_bond_length > bond_length + bond_tolerance
+        && m_config.get<bool>("lm_contract_bond", false)) {
+        Position bond_dir = (anchor_frag - anchor_poly).normalized();
+        double contraction = actual_bond_length - bond_length;
+        for (int i = 0; i < frag_geom.rows(); ++i) {
+            Position p = frag_geom.row(i).transpose();
+            p -= bond_dir * contraction;
+            frag_geom.row(i) = p.transpose();
+        }
+        double new_length = (frag_geom.row(next_active_idx_lm).transpose() - anchor_poly).norm();
+        CurcumaLogger::info(fmt::format(
+            "Bond contraction: {:.3f} Å → {:.3f} Å (target {:.3f} Å)",
+            actual_bond_length, new_length, bond_length));
+        actual_bond_length = new_length;
+    }
+
     if (actual_bond_length > bond_length + bond_tolerance) {
         CurcumaLogger::warn(fmt::format(
-            "LM bond length {:.3f} Å exceeds target {:.3f} Å by {:.3f} Å (tolerance: {:.3f} Å)",
-            actual_bond_length, bond_length, actual_bond_length - bond_length, bond_tolerance));
+            "LM bond length {:.3f} Å exceeds target {:.3f} Å by {:.3f} Å (tolerance: {:.3f} Å){}",
+            actual_bond_length, bond_length, actual_bond_length - bond_length, bond_tolerance,
+            did_retry ? " [retry attempted]" : ""));
     } else if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format(
-            "LM bond length: {:.3f} Å (target: {:.3f} Å)",
-            actual_bond_length, bond_length));
+            "LM bond length: {:.3f} Å (target: {:.3f} Å){}",
+            actual_bond_length, bond_length,
+            did_retry ? " [retry succeeded]" : ""));
     }
 
     // Set up interface bond between polymer_active and fragment_active
