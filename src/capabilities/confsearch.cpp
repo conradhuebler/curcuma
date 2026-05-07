@@ -148,6 +148,7 @@ void ConfSearch::start()
     }
 
     int temperature_cycle = 0;
+    double previous_lowest_energy = 0;  // Track energy improvement between cycles
     for (m_currentT = m_startT; m_currentT >= m_endT; m_currentT -= m_deltaT) {
         temperature_cycle++;
         CurcumaLogger::header("=== ConfSearch Temperature Cycle " + std::to_string(temperature_cycle)
@@ -202,7 +203,13 @@ void ConfSearch::start()
         if (md.contains("gpu") && !md["gpu"].is_null())
             opt["gpu"] = md["gpu"];
         PerformOptimisation("ff", opt);
-        CurcumaLogger::result("ConfSearch: Optimisation complete.");
+        // Count optimised structures
+        int opt_count = 0;
+        {
+            FileIterator opt_file("confsearch.unique.opt.xyz");
+            while (!opt_file.AtEnd()) { opt_file.Next(); opt_count++; }
+        }
+        CurcumaLogger::result_fmt("ConfSearch: Optimisation complete. {} structures optimised.", opt_count);
 
         CurcumaLogger::result("ConfSearch: === Phase 3: RMSD-Based Conformer Filtering ===");
         nlohmann::json scan = ConfSearchJson;
@@ -213,13 +220,19 @@ void ConfSearch::start()
         if (md.contains("gpu") && !md["gpu"].is_null())
             scan["gpu"] = md["gpu"];
         PerformFilter("ff", scan);
-        CurcumaLogger::result("ConfSearch: RMSD filtering complete.");
+        // Count after RMSD filter
+        int rmsd_count = 0;
+        {
+            FileIterator rmsd_file("confsearch.unique.opt.accepted.xyz");
+            while (!rmsd_file.AtEnd()) { rmsd_file.Next(); rmsd_count++; }
+        }
+        CurcumaLogger::result_fmt("ConfSearch: RMSD filtering complete. {} structures accepted after RMSD filter.", rmsd_count);
 
         CurcumaLogger::result("ConfSearch: === Phase 4: Energy Window and Topology Filter ===");
         for (int i = 0; i < m_in_stack.size(); ++i)
             delete m_in_stack[i];
         m_in_stack.clear();
-        double energy = 0;
+        double lowest_energy = 0;
         int accepted = 0, rejected_topo = 0, rejected_energy = 0;
         FileIterator file("confsearch.unique.opt.accepted.xyz");
         while (!file.AtEnd()) {
@@ -229,8 +242,8 @@ void ConfSearch::start()
                 delete mol;
                 continue;
             }
-            if (energy < 0) {
-                if ((mol->Energy() - energy) * 2625.5 < m_energy_window) {
+            if (lowest_energy < 0) {
+                if ((mol->Energy() - lowest_energy) * 2625.5 < m_energy_window) {
                     m_in_stack.push_back(mol);
                     accepted++;
                 } else {
@@ -240,9 +253,30 @@ void ConfSearch::start()
             } else {
                 m_in_stack.push_back(mol);
                 accepted++;
-                energy = mol->Energy();
+                lowest_energy = mol->Energy();
             }
         }
+
+        // Log energy improvement vs previous cycle
+        double energy_gain_kj = 0;
+        bool improved = false;
+        if (previous_lowest_energy < 0 && lowest_energy < previous_lowest_energy) {
+            energy_gain_kj = (previous_lowest_energy - lowest_energy) * 2625.5;
+            improved = true;
+        }
+        if (previous_lowest_energy < 0) {
+            if (improved) {
+                CurcumaLogger::success_fmt("ConfSearch: Energy improved by {:.2f} kJ/mol (prev: {:.6f} Eh, new: {:.6f} Eh)",
+                    energy_gain_kj, previous_lowest_energy, lowest_energy);
+            } else {
+                CurcumaLogger::warn_fmt("ConfSearch: No energy improvement (prev: {:.6f} Eh, new: {:.6f} Eh, delta: {:.2f} kJ/mol)",
+                    previous_lowest_energy, lowest_energy, (lowest_energy - previous_lowest_energy) * 2625.5);
+            }
+        } else {
+            CurcumaLogger::result_fmt("ConfSearch: Lowest energy this cycle: {:.6f} Eh", lowest_energy);
+        }
+        previous_lowest_energy = lowest_energy;
+
         CurcumaLogger::result_fmt("ConfSearch: T={}K cycle complete -- {} accepted, {} rejected (topo), {} rejected (energy), {} structures in next cycle",
             m_currentT, accepted, rejected_topo, rejected_energy, static_cast<int>(m_in_stack.size()));
         CurcumaLogger::header("=== End Temperature Cycle T = " + std::to_string(static_cast<int>(m_currentT)) + " K ===");
@@ -308,7 +342,7 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
                 thread_idx, static_cast<int>(pool->getFinishedThreads().size()), total_structures);
         }
     }
-    CurcumaLogger::result_fmt("ConfSearch: Total {} unique structures written to {}", total_structures, file);
+    CurcumaLogger::result_fmt("ConfSearch: MD phase complete. Total {} unique structures written to {}", total_structures, file);
 
     // A) Write central confsearch.mtd.xyz and C) append bias structures to confsearch.unique.xyz
     if (m_bias_pool && m_bias_pool->biasStructureCount() > 0) {
