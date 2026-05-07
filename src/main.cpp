@@ -1233,22 +1233,8 @@ int executeBlock(const json& controller, int argc, char** argv) {
 
 int executeConfSearch(const json& controller, int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Please use curcuma for conformational search as follows:\ncurcuma -confsearch input.xyz [parameters]" << std::endl;
-        std::cerr << "\nBasic Parameters:" << std::endl;
-        std::cerr << "  -method <name>       Energy method: uff, gfnff, gfn2, ... (default: uff)" << std::endl;
-        std::cerr << "  -startT <K>          Starting temperature (default: 600)" << std::endl;
-        std::cerr << "  -endT <K>            Ending temperature (default: 300)" << std::endl;
-        std::cerr << "  -deltaT <K>           Temperature step (default: 50)" << std::endl;
-        std::cerr << "  -repeat <n>           Number of independent MD runs per structure (default: 10)" << std::endl;
-        std::cerr << "  -time <fs>            MD simulation time per run in fs (default: 50000 = 50 ps)" << std::endl;
-        std::cerr << "  -rmsd <A>            RMSD threshold for duplicate filtering (default: 1.25)" << std::endl;
-        std::cerr << "  -energy_window <kJ>   Energy window for conformer acceptance (default: 100)" << std::endl;
-        std::cerr << "  -threads <n>          Number of parallel threads (default: 1)" << std::endl;
-        std::cerr << "\nRMSD Metadynamics (enabled by default):" << std::endl;
-        std::cerr << "  -rmsd_mtd false        Disable RMSD metadynamics" << std::endl;
-        std::cerr << "  -rmsd_mtd_k <Eh>      Bias force constant (default: 0.1)" << std::endl;
-        std::cerr << "  -rmsd_mtd_pace <n>     Deposit bias every N steps (default: 1)" << std::endl;
-        std::cerr << "\nExample:\n  curcuma -confsearch input.xyz -method gfnff -startT 500 -endT 300 -repeat 5 -time 10000" << std::endl;
+        ConfSearch search(controller, false);
+        search.printHelp();
         return 0;
     }
     ConfSearch search(controller, false);

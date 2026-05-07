@@ -130,6 +130,16 @@ public:
 
     virtual void start() override;
 
+    virtual void printHelp() const override
+    {
+        std::cout << "Usage: curcuma -confsearch input.xyz [parameters]\n\n";
+        std::cout << "Conformational Search Parameters (from ConfSearchJson):\n";
+        for (auto& el : ConfSearchJson.items()) {
+            std::cout << "  -" << el.key() << "  (default: " << el.value() << ")\n";
+        }
+        std::cout << "\nRMSD-MTD is enabled by default. Use -rmsd_mtd false to disable.\n";
+    }
+
 private:
     std::string PerformMolecularDynamics(const std::vector<Molecule*>& molecules, const nlohmann::json& parameter);
 
