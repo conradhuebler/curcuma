@@ -2478,7 +2478,7 @@ Vector EEQSolver::calculateFinalCharges(
     // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²) distance matrix
     std::atomic<bool> atoms_too_close{false};
     int dist_progress_10pct = std::max(1, natoms / 10);
-    bool show_dist_progress = (m_verbosity >= 2 && natoms >= 200);
+    bool show_dist_progress = (m_verbosity >= 3 && natoms >= 200);
     if (show_dist_progress) {
         fmt::print(stderr, "[EEQ] Phase 2: distance matrix ({} atoms):", natoms);
         fflush(stderr);
@@ -2579,7 +2579,7 @@ Vector EEQSolver::calculateFinalCharges(
     int max_iterations = m_config.get<int>("max_iterations", 50);
     double convergence_threshold = m_config.get<double>("convergence_threshold", 1e-6);
 
-    if (m_verbosity >= 2) {
+    if (m_verbosity >= 3) {
         const char* solver_name = (m_solve_method == EEQSolveMethod::PCG) ? "PCG"
             : (m_solve_method == EEQSolveMethod::SchurCholesky) ? "Cholesky"
             : (m_solve_method == EEQSolveMethod::Auto) ? "auto (benchmark)" : "LU";
@@ -2660,7 +2660,7 @@ Vector EEQSolver::calculateFinalCharges(
             ? eeq_dist_cutoff * eeq_dist_cutoff : 0.0;
 
         int coulomb_progress_10pct = std::max(1, natoms / 10);
-        bool show_coulomb_progress = (m_verbosity >= 2 && natoms >= 200 && iteration == 0);
+        bool show_coulomb_progress = (m_verbosity >= 3 && natoms >= 200 && iteration == 0);
         if (show_coulomb_progress) {
             fmt::print(stderr, "[EEQ] Phase 2: Coulomb matrix ({} atoms):", natoms);
             fflush(stderr);
@@ -2821,8 +2821,9 @@ Vector EEQSolver::calculateFinalCharges(
             std::cerr << "==================================================" << std::endl;
         }
 
-        // 5. Matrix diagnostics (only for first iteration to avoid spam)
-        if (m_verbosity >= 3 && iteration == 0) {
+        // 5. Matrix diagnostics (only for first iteration, small systems only)
+        // O(N³) eigendecomposition — skip for natoms > 100 to avoid hour-long hangs on large systems
+        if (m_verbosity >= 3 && iteration == 0 && natoms <= 100) {
             Eigen::SelfAdjointEigenSolver<Matrix> eigensolver(A);
             Vector eigenvalues = eigensolver.eigenvalues();
             double max_eigenvalue = eigenvalues.maxCoeff();

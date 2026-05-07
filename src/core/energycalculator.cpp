@@ -180,10 +180,9 @@ bool EnergyCalculator::createMethod(const std::string& method_name, const json& 
         
         ClearError();
 
-        // Track GPU fallback: warn only if -gpu cuda requested but CUDA not compiled in
+        // Track GPU fallback: user requested -gpu cuda but CUDA unavailable
         std::string gpu_req = config.value("gpu", "none");
         std::transform(gpu_req.begin(), gpu_req.end(), gpu_req.begin(), ::tolower);
-#ifndef USE_CUDA
         if (gpu_req == "cuda") {
             m_gpu_fallback = true;
         }
@@ -404,9 +403,13 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
             m_method->copyGradientTo(m_gradient);
         }
         
-        // Check for NaN values
+        // Check for NaN values — always emit error regardless of verbosity, since
+        // silent NaN causes optimizer to see energy=0.0 and fail with no diagnostic.
         if (checkForNaN(m_energy, gradient ? m_gradient : Matrix{})) {
             m_containsNaN = true;
+            CurcumaLogger::error(fmt::format(
+                "NaN/Inf in {} energy or gradient — returning 0.0 (optimizer will fail silently without this message)",
+                m_method_name));
             handleMethodError("NaN values detected in calculation results");
             return 0.0;
         }
@@ -415,7 +418,7 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
             CurcumaLogger::energy_abs(m_energy, fmt::format("{} Final Energy", m_method_name));
         }
 
-        // Final warning if GPU was requested but CUDA was not compiled in
+        // Final warning if GPU was requested but fell back to CPU
         if (m_gpu_fallback && !m_gpu_fallback_warned) {
             CurcumaLogger::warn("Calculation completed on CPU. The requested -gpu cuda was not used.");
             m_gpu_fallback_warned = true;
