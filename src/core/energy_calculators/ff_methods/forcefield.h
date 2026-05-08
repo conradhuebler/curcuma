@@ -56,6 +56,7 @@ static const json FFJson = {
     { "gradient", 1 }
 };
 
+// CNDerivStore is defined in forcefieldthread.h (transitively included via ff_workspace.h)
 class ForceField {
 
 public:
@@ -184,8 +185,9 @@ public:
 
     // Claude Generated (Feb 1, 2026): Distribute CN, CNF, and CN derivatives for Coulomb gradients
     // Reference: Fortran gfnff_engrad.F90:418-422 - charge derivative via CN
+    // Claude Generated (WP4, May 2026): dcn now passed as CNDerivStore (pair-list) instead of std::vector<SpMatrix>
     void distributeCNandDerivatives(const Vector& cn, const Vector& cnf,
-                                     const std::vector<SpMatrix>& dcn);
+                                     const CNDerivStore& dcn);
 
     // Claude Generated (Feb 22, 2026): Distribute only CN to threads for energy-only evaluations
     // Needed so dynamic r0 in bonds uses current CN, not stale values from last gradient call
@@ -345,7 +347,9 @@ private:
     // Phase 1a (Mar 2026): Stored ONLY in ForceField, not copied to threads.
     Vector m_cn;                    // Coordination numbers per atom
     Vector m_cnf;                   // CNF parameters per atom (for qtmp calculation)
-    std::vector<SpMatrix> m_dcn;    // CN derivatives (sparse): dcn[dim](i,j) = dCN(j)/dr(i,dim)
+    // Claude Generated (WP4, May 2026): CNDerivStore (pair-list + diag) replaces std::vector<SpMatrix>.
+    // Same mathematical semantics: applyAdd(v, out) computes out += M * v with M = full sparse N×N×3.
+    CNDerivStore m_dcn;
 
     // Claude Generated (Mar 2026, Phase 1b): dc6dcn stored here, shared to threads via const pointer.
     Matrix m_dc6dcn;                // dc6dcn(i,j) = dC6(i,j)/dCN(i)

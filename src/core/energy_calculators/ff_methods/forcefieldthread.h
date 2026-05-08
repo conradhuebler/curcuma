@@ -54,6 +54,48 @@ using json = nlohmann::json;
 // GFNFFHydrogenBond, GFNFFHalogenBond, GFNFFSTorsion, ATMTriple, GFNFFBatmTriple
 // are defined in gfnff_parameters.h (included above)
 
+// Claude Generated (WP4, May 2026): pair-list representation of CN derivatives.
+// Replaces std::vector<SpMatrix> dcn[3] (~250k entries × 3 sparse matrices) — eliminates
+// triplet allocation + setFromTriplets cost (~1000 ms on mixture.xyz, 74 % of CN+EEQ phase).
+// Same mathematical semantics: applyAdd(v, out) computes out += M*v where M is the
+// implied N×N sparse derivative matrix. Diagonal stored separately as dense (N,3) matrix.
+struct CNDerivPair {
+    int i;              // row atom (gradient target)
+    int j;              // column atom (vector lookup index)
+    double cx, cy, cz;  // dCN(j)/dr(i,d) already multiplied by dlogdcn(j)
+};
+
+struct CNDerivStore {
+    std::vector<CNDerivPair> pairs;  // off-diagonal contributions
+    Matrix diag;                      // (N, 3): diag(i,d) is multiplied by v(i) on apply
+    int natoms = 0;
+
+    void clear() {
+        pairs.clear();
+        diag.resize(0, 0);
+        natoms = 0;
+    }
+    bool empty() const { return natoms == 0; }
+
+    // out += sign * M * v, where M is the implied SpMatrix.
+    // out is (N, 3); v is (N).
+    void applyAdd(const Vector& v, Eigen::Ref<Matrix> out, double sign = 1.0) const {
+        if (natoms == 0 || diag.rows() != natoms || out.rows() != natoms || out.cols() != 3) return;
+        for (int i = 0; i < natoms; ++i) {
+            double vi = v(i);
+            out(i, 0) += sign * diag(i, 0) * vi;
+            out(i, 1) += sign * diag(i, 1) * vi;
+            out(i, 2) += sign * diag(i, 2) * vi;
+        }
+        for (const auto& p : pairs) {
+            double vj = v(p.j);
+            out(p.i, 0) += sign * p.cx * vj;
+            out(p.i, 1) += sign * p.cy * vj;
+            out(p.i, 2) += sign * p.cz * vj;
+        }
+    }
+};
+
 struct Bond {
     int type = 1; // 1 = UFF, 2 = QMDFF
     int i = 0, j = 0, k = 0;

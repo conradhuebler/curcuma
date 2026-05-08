@@ -996,11 +996,11 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
         if (pool) pool->setActiveThreadCount(total_threads);
 
-        // Sparse dcn matrices only needed for CPU path (GPU has k_cn_chainrule kernel)
+        // CN-derivative pair list only needed for CPU path (GPU has k_cn_chainrule kernel).
+        // Claude Generated (WP4, May 2026): CNDerivStore replaces std::vector<SpMatrix>.
         if (!gpu_only) {
             t0 = std::chrono::high_resolution_clock::now();
-            std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(m_last_cn, 1600.0, pool, total_threads);
-            m_last_dcn = dcn;
+            m_last_dcn = calculateCoordinationNumberDerivatives(m_last_cn, 1600.0, pool, total_threads);
             if (do_timing) {
                 t_dcn = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
             }
@@ -2564,7 +2564,8 @@ bool GFNFF::initializeForceField()
                         : 0.0;
         }
 
-        std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(cn);
+        // Claude Generated (WP4, May 2026): CNDerivStore replaces std::vector<SpMatrix>
+        CNDerivStore dcn = calculateCoordinationNumberDerivatives(cn);
         m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
 
         if (CurcumaLogger::get_verbosity() >= 3) {
@@ -5372,10 +5373,12 @@ bool GFNFF::loadGFNFFCharges()
 // Advanced GFN-FF Parameter Generation (Placeholder implementations)
 // =================================================================================
 
-std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, double threshold, CxxThreadPool* pool, int num_threads) const
+CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, double threshold, CxxThreadPool* pool, int num_threads) const
 {
-    // Claude Generated (Mar 2026, Phase 3): Sparse dcn matrices
-    // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²) loops
+    // Claude Generated (Mar 2026, Phase 3): Sparse dcn matrices — replaced WP4 May 2026
+    // Claude Generated (WP4, May 2026): Pair-list output (CNDerivStore) instead of 3× SpMatrix.
+    // Inner-loop math is identical to the SpMatrix version. The two storage variants both
+    // compute (M*v)(i,d) = diag(i,d)*v(i) + Σ_{j: pair (i,j)} comp_d(i,j) * v(j).
     // Reference: external/gfnff/src/gfnff_cn.f90:94-117
 
     const double kn = -7.5;
@@ -5448,18 +5451,21 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
         dlogdcn[i] = std::exp(cnmax) / (std::exp(cnmax) + std::exp(cn_raw[i]));
     }
 
-    // Step 3: Build sparse dcn via triplet lists
-    // Parallelise with thread-local triplets + diag arrays, merge after join
+    // Step 3: Build CN-derivative pair list and diagonal contributions.
+    // Two pairs per (i,j) pair: (i,j, -dlogdcn_j*comp) and (j,i, +dlogdcn_i*comp).
+    CNDerivStore store;
+    store.natoms = m_atomcount;
+    store.diag = Matrix::Zero(m_atomcount, 3);
+
     if (num_threads > 1 && m_atomcount > 64) {
         int T = std::min(num_threads, m_atomcount);
 
-        // Thread-local storage
+        // Per-thread output buffer — eliminates contention; merged in main thread after join.
         struct ThreadLocalData {
-            std::vector<std::vector<Eigen::Triplet<double>>> triplets{3};
-            std::vector<double> diag_x, diag_y, diag_z;
-            ThreadLocalData(int N) : diag_x(N, 0.0), diag_y(N, 0.0), diag_z(N, 0.0) {
-                int est = N * 40 / 4 + 100;
-                for (int d = 0; d < 3; ++d) triplets[d].reserve(est);
+            std::vector<CNDerivPair> pairs;
+            Matrix diag;
+            ThreadLocalData(int N) : diag(Matrix::Zero(N, 3)) {
+                pairs.reserve(static_cast<size_t>(N) * 40 / 4 * 2 + 100);
             }
         };
         std::vector<ThreadLocalData> tld;
@@ -5490,25 +5496,21 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
                     double comp_y = derfCN_dr * grad_dir[1];
                     double comp_z = derfCN_dr * grad_dir[2];
 
-                    local.diag_x[i] -= dlogdcn_i * comp_x;
-                    local.diag_y[i] -= dlogdcn_i * comp_y;
-                    local.diag_z[i] -= dlogdcn_i * comp_z;
+                    local.diag(i, 0) -= dlogdcn_i * comp_x;
+                    local.diag(i, 1) -= dlogdcn_i * comp_y;
+                    local.diag(i, 2) -= dlogdcn_i * comp_z;
 
-                    local.diag_x[j] += dlogdcn_j * comp_x;
-                    local.diag_y[j] += dlogdcn_j * comp_y;
-                    local.diag_z[j] += dlogdcn_j * comp_z;
+                    local.diag(j, 0) += dlogdcn_j * comp_x;
+                    local.diag(j, 1) += dlogdcn_j * comp_y;
+                    local.diag(j, 2) += dlogdcn_j * comp_z;
 
-                    local.triplets[0].emplace_back(i, j, -dlogdcn_j * comp_x);
-                    local.triplets[0].emplace_back(j, i,  dlogdcn_i * comp_x);
-                    local.triplets[1].emplace_back(i, j, -dlogdcn_j * comp_y);
-                    local.triplets[1].emplace_back(j, i,  dlogdcn_i * comp_y);
-                    local.triplets[2].emplace_back(i, j, -dlogdcn_j * comp_z);
-                    local.triplets[2].emplace_back(j, i,  dlogdcn_i * comp_z);
+                    // Two off-diagonal entries per (i,j) pair: M(i,j) and M(j,i).
+                    local.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
+                    local.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
                 }
             }
         };
 
-        // Claude Generated (Mar 2026): pool->enqueue() reuses persistent workers
         if (pool) {
             std::vector<std::future<void>> futures;
             futures.reserve(T - 1);
@@ -5524,49 +5526,19 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
             for (auto& th : threads) th.join();
         }
 
-        // Merge: concatenate triplets, reduce diag arrays
-        std::vector<std::vector<Eigen::Triplet<double>>> merged_triplets(3);
-        std::vector<double> diag_x(m_atomcount, 0.0), diag_y(m_atomcount, 0.0), diag_z(m_atomcount, 0.0);
-
+        // Merge: append per-thread pair vectors, sum per-thread diag matrices.
+        size_t total_pairs = 0;
+        for (int t = 0; t < T; ++t) total_pairs += tld[t].pairs.size();
+        store.pairs.reserve(total_pairs);
         for (int t = 0; t < T; ++t) {
-            for (int d = 0; d < 3; ++d) {
-                merged_triplets[d].insert(merged_triplets[d].end(),
-                    tld[t].triplets[d].begin(), tld[t].triplets[d].end());
-            }
-            for (int i = 0; i < m_atomcount; ++i) {
-                diag_x[i] += tld[t].diag_x[i];
-                diag_y[i] += tld[t].diag_y[i];
-                diag_z[i] += tld[t].diag_z[i];
-            }
+            store.pairs.insert(store.pairs.end(), tld[t].pairs.begin(), tld[t].pairs.end());
+            store.diag += tld[t].diag;
         }
-
-        // Add diagonal entries
-        for (int i = 0; i < m_atomcount; ++i) {
-            if (diag_x[i] != 0.0) merged_triplets[0].emplace_back(i, i, diag_x[i]);
-            if (diag_y[i] != 0.0) merged_triplets[1].emplace_back(i, i, diag_y[i]);
-            if (diag_z[i] != 0.0) merged_triplets[2].emplace_back(i, i, diag_z[i]);
-        }
-
-        // Build sparse matrices
-        std::vector<SpMatrix> dcn(3);
-        for (int dim = 0; dim < 3; ++dim) {
-            dcn[dim].resize(m_atomcount, m_atomcount);
-            dcn[dim].setFromTriplets(merged_triplets[dim].begin(), merged_triplets[dim].end());
-            dcn[dim].makeCompressed();
-        }
-        return dcn;
+        return store;
     }
 
     // Sequential path (num_threads <= 1 or small molecule)
-    std::vector<double> diag_x(m_atomcount, 0.0);
-    std::vector<double> diag_y(m_atomcount, 0.0);
-    std::vector<double> diag_z(m_atomcount, 0.0);
-
-    std::vector<std::vector<Eigen::Triplet<double>>> triplets(3);
-    const int est_triplets = m_atomcount * 40 + 100;
-    for (int dim = 0; dim < 3; ++dim) {
-        triplets[dim].reserve(est_triplets);
-    }
+    store.pairs.reserve(static_cast<size_t>(m_atomcount) * 40 + 100);
 
     for (int i = 0; i < m_atomcount; ++i) {
         Eigen::Vector3d ri = m_geometry_bohr.row(i);
@@ -5589,39 +5561,20 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
             double comp_y = derfCN_dr * grad_dir[1];
             double comp_z = derfCN_dr * grad_dir[2];
 
-            diag_x[i] -= dlogdcn_i * comp_x;
-            diag_y[i] -= dlogdcn_i * comp_y;
-            diag_z[i] -= dlogdcn_i * comp_z;
+            store.diag(i, 0) -= dlogdcn_i * comp_x;
+            store.diag(i, 1) -= dlogdcn_i * comp_y;
+            store.diag(i, 2) -= dlogdcn_i * comp_z;
 
-            diag_x[j] += dlogdcn_j * comp_x;
-            diag_y[j] += dlogdcn_j * comp_y;
-            diag_z[j] += dlogdcn_j * comp_z;
+            store.diag(j, 0) += dlogdcn_j * comp_x;
+            store.diag(j, 1) += dlogdcn_j * comp_y;
+            store.diag(j, 2) += dlogdcn_j * comp_z;
 
-            triplets[0].emplace_back(i, j, -dlogdcn_j * comp_x);
-            triplets[0].emplace_back(j, i,  dlogdcn_i * comp_x);
-            triplets[1].emplace_back(i, j, -dlogdcn_j * comp_y);
-            triplets[1].emplace_back(j, i,  dlogdcn_i * comp_y);
-            triplets[2].emplace_back(i, j, -dlogdcn_j * comp_z);
-            triplets[2].emplace_back(j, i,  dlogdcn_i * comp_z);
+            store.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
+            store.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
         }
     }
 
-    // Add diagonal entries
-    for (int i = 0; i < m_atomcount; ++i) {
-        if (diag_x[i] != 0.0) triplets[0].emplace_back(i, i, diag_x[i]);
-        if (diag_y[i] != 0.0) triplets[1].emplace_back(i, i, diag_y[i]);
-        if (diag_z[i] != 0.0) triplets[2].emplace_back(i, i, diag_z[i]);
-    }
-
-    // Build sparse matrices
-    std::vector<SpMatrix> dcn(3);
-    for (int dim = 0; dim < 3; ++dim) {
-        dcn[dim].resize(m_atomcount, m_atomcount);
-        dcn[dim].setFromTriplets(triplets[dim].begin(), triplets[dim].end());
-        dcn[dim].makeCompressed();
-    }
-
-    return dcn;
+    return store;
 }
 
 std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int>>& adjacency_list) const

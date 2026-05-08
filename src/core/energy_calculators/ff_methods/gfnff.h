@@ -822,7 +822,8 @@ public:
         if (n == m_charges.size())
             std::memcpy(m_charges.data(), data, n * sizeof(double));
     }
-    const std::vector<SpMatrix>& getLastCNDerivatives() const { return m_last_dcn; }
+    // Claude Generated (WP4, May 2026): CNDerivStore replaces std::vector<SpMatrix>
+    const CNDerivStore& getLastCNDerivatives() const { return m_last_dcn; }
     const Vector& getLastCNF() const { return m_last_cnf; }
     const Matrix* getDC6DCNPtr() const { return m_d4_generator ? &m_d4_generator->getDC6DCN() : nullptr; }
     FFWorkspace* getWorkspace() const { return m_workspace.get(); }
@@ -1438,7 +1439,9 @@ private:
      * @param threshold Coordination number threshold (squared distance in Bohr²)
      * @return 3D tensor of CN derivatives (3 x natoms x natoms)
      */
-    std::vector<SpMatrix> calculateCoordinationNumberDerivatives(const Vector& cn, double threshold = 1600.0, CxxThreadPool* pool = nullptr, int num_threads = 1) const;  // 40.0² = 1600 (squared)
+    // Claude Generated (WP4, May 2026): returns CNDerivStore (pair-list + diag) instead of std::vector<SpMatrix>
+    // Eliminates ~1000 ms triplet+setFromTriplets cost on mixture.xyz N=6200 (74 % of CN+EEQ phase per WP1).
+    CNDerivStore calculateCoordinationNumberDerivatives(const Vector& cn, double threshold = 1600.0, CxxThreadPool* pool = nullptr, int num_threads = 1) const;  // 40.0² = 1600 (squared)
 
     /**
      * @brief Determine hybridization states for all atoms
@@ -2354,7 +2357,7 @@ private:
     Vector m_last_cn;    ///< Coordination numbers
     Vector m_last_cnf;   ///< CN-dependent EEQ factors per atom
     bool m_gpu_path_preallocated = false; ///< True after preAllocateForGPUPath()
-    std::vector<SpMatrix> m_last_dcn; ///< CN derivatives (gradient only)
+    CNDerivStore m_last_dcn; ///< CN derivatives (gradient only). Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
 
     // Conversion factors
     static constexpr double HARTREE_TO_KCAL = 627.5094740631;

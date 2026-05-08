@@ -162,7 +162,7 @@ void FFWorkspace::partition()
 }
 
 void FFWorkspace::setCNDerivatives(const Vector& cn, const Vector& cnf,
-                                    const std::vector<SpMatrix>& dcn)
+                                    const CNDerivStore& dcn)
 {
     m_cn = cn;
     m_cnf = cnf;
@@ -445,7 +445,7 @@ void FFWorkspace::postProcess(bool gradient)
     // Reference: Fortran gfnff_engrad.F90:418-422 (bond/disp), 449-454 (coulomb)
     // =========================================================================
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
-    if (gradient && !m_dcn.empty() && m_dcn.size() == 3) {
+    if (gradient && !m_dcn.empty() && m_dcn.natoms == m_natoms) {
         // Snapshot gradient before CN chain-rule (diagnostic)
         m_grad_before_cn = m_result_gradient;
 
@@ -483,22 +483,15 @@ void FFWorkspace::postProcess(bool gradient)
             }
             CurcumaLogger::info("=== CPU dEdcn_combined END ===");
         }
-        for (int dim = 0; dim < 3; ++dim) {
-            if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
-                m_result_gradient.col(dim) += m_dcn[dim] * dEdcn_combined;
-            }
-        }
+        // Claude Generated (WP4, May 2026): CNDerivStore::applyAdd replaces 3× SpMatrix*v
+        m_dcn.applyAdd(dEdcn_combined, m_result_gradient);
         // Per-component CN corrections
         if (m_store_components) {
             Vector dEdcn_disp = m_dEdcn_total - m_dEdcn_bond_total;
-            for (int dim = 0; dim < 3; ++dim) {
-                if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
-                    m_result_grad_bond.col(dim) += m_dcn[dim] * m_dEdcn_bond_total;
-                    m_result_grad_dispersion.col(dim) += m_dcn[dim] * dEdcn_disp;
-                    if (has_term1b)
-                        m_result_grad_coulomb.col(dim) -= m_dcn[dim] * qtmp;
-                }
-            }
+            m_dcn.applyAdd(m_dEdcn_bond_total, m_result_grad_bond);
+            m_dcn.applyAdd(dEdcn_disp, m_result_grad_dispersion);
+            if (has_term1b)
+                m_dcn.applyAdd(qtmp, m_result_grad_coulomb, -1.0);
         }
     }
     // CPU POST-CN GRADIENT (verbosity >= 3)

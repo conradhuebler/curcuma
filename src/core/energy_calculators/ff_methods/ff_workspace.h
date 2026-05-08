@@ -236,9 +236,10 @@ public:
     /// Set D3 coordination numbers (for dynamic r0)
     void setD3CN(const Vector& cn) { m_d3_cn = cn; }
 
-    /// Set CN, CNF, and sparse dcn derivatives (gradient only)
+    /// Set CN, CNF, and CN derivatives (gradient only)
+    /// Claude Generated (WP4, May 2026): dcn now CNDerivStore (pair-list) instead of std::vector<SpMatrix>
     void setCNDerivatives(const Vector& cn, const Vector& cnf,
-                          const std::vector<SpMatrix>& dcn);
+                          const CNDerivStore& dcn);
 
     /// Set dc6dcn pointer for D4 dispersion CN gradient
     void setDC6DCNPtr(const Matrix* ptr) { m_dc6dcn_ptr = ptr; }
@@ -315,7 +316,7 @@ private:
     std::vector<int> m_atom_types;
     Vector m_eeq_charges, m_topology_charges, m_d3_cn;
     Vector m_cn, m_cnf;
-    std::vector<SpMatrix> m_dcn;
+    CNDerivStore m_dcn;  // Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
     const Matrix* m_dc6dcn_ptr = nullptr;
     double m_e0 = 0.0;
 

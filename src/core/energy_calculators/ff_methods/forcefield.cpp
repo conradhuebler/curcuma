@@ -154,7 +154,7 @@ void ForceField::distributeD3CN(const Vector& d3_cn)
 // These are NOT distributed to threads (threads never read them).
 // Used after thread completion for chain-rule gradients (TERM 1b, bond/disp dEdcn).
 void ForceField::distributeCNandDerivatives(const Vector& cn, const Vector& cnf,
-                                             const std::vector<SpMatrix>& dcn)
+                                             const CNDerivStore& dcn)
 {
     m_cn = cn;
     m_cnf = cnf;
@@ -2685,7 +2685,7 @@ double ForceField::Calculate(bool gradient)
     // Combined: gradient += dcn * (dEdcn_total - qtmp) instead of two separate matvec passes
     // Saves 3 sparse matvecs per gradient evaluation for gfnff
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
-    if (gradient && !m_dcn.empty() && m_dcn.size() == 3) {
+    if (gradient && !m_dcn.empty() && m_dcn.natoms == m_natoms) {
         Vector dEdcn_total = Vector::Zero(m_natoms);
         for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
             const Vector& thread_dEdcn = m_stored_threads[i]->getDEdcn();
@@ -2707,13 +2707,10 @@ double ForceField::Calculate(bool gradient)
             }
         }
 
-        // Combined matvec: gradient += dcn * (dEdcn_total - qtmp)
+        // Claude Generated (WP4, May 2026): CNDerivStore::applyAdd replaces 3× SpMatrix*v.
+        // Combined vector: gradient += M * (dEdcn_total - qtmp)
         Vector dEdcn_combined = has_term1b ? (dEdcn_total - qtmp).eval() : dEdcn_total;
-        for (int dim = 0; dim < 3; ++dim) {
-            if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
-                m_gradient.col(dim) += m_dcn[dim] * dEdcn_combined;
-            }
-        }
+        m_dcn.applyAdd(dEdcn_combined, m_gradient);
 
         if (CurcumaLogger::get_verbosity() >= 2) {
             double dEdcn_norm = dEdcn_total.norm();
@@ -2739,21 +2736,13 @@ double ForceField::Calculate(bool gradient)
 
             m_bond_cn_correction = Matrix::Zero(m_natoms, 3);
             m_disp_cn_correction = Matrix::Zero(m_natoms, 3);
-            for (int dim = 0; dim < 3; ++dim) {
-                if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
-                    m_bond_cn_correction.col(dim) = m_dcn[dim] * dEdcn_bond_total;
-                    m_disp_cn_correction.col(dim) = m_dcn[dim] * dEdcn_disp_total;
-                }
-            }
+            m_dcn.applyAdd(dEdcn_bond_total, m_bond_cn_correction);
+            m_dcn.applyAdd(dEdcn_disp_total, m_disp_cn_correction);
             // Coulomb component CN correction for GradComp
             // Reference: Fortran gfnff_engrad.F90:453-454 applies TERM 1b to g_es
             if (has_term1b) {
                 m_coulomb_cn_correction = Matrix::Zero(m_natoms, 3);
-                for (int dim = 0; dim < 3; ++dim) {
-                    if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
-                        m_coulomb_cn_correction.col(dim) = -(m_dcn[dim] * qtmp);
-                    }
-                }
+                m_dcn.applyAdd(qtmp, m_coulomb_cn_correction, -1.0);
             }
         }
     }

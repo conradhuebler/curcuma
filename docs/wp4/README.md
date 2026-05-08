@@ -1,6 +1,6 @@
 # WP4 — CPU-GFN-FF Performance-Arbeitspakete
 
-Aufteilung der WP4-Maßnahmen aus [GFNFF-PERFORMANCE-ROADMAP.md](../GFNFF-PERFORMANCE-ROADMAP.md) (Mai 2026, Commit `fc9954f`) in 6 unabhängig umsetzbare Arbeitspakete.
+Aufteilung der WP4-Maßnahmen aus [GFNFF-PERFORMANCE-ROADMAP.md](../GFNFF-PERFORMANCE-ROADMAP.md) (Mai 2026, Commit `fc9954f`) in 6 unabhängig umsetzbare Arbeitspakete plus ein zusätzliches Cross-cutting WP, das durch WP3-Befunde aufkam.
 
 ## Ausgangsprofil (Mai 2026)
 
@@ -22,6 +22,8 @@ WP1 (Threading-Audit) ──► WP2 (EEQ batched parallel)
                           WP4 (CN SIMD)
                           WP5 (D4 Gaussian SIMD)
                           WP6 (Coulomb cutoff — Plan, blockiert auf G2c)
+
+WP-G (m_gradient Layout) — neu nach WP3, größter vermuteter FF-Pool-Hebel
 ```
 
 WP1 zuerst, da es den Befund "serial CPU" entweder als Label-Bug entlarvt (dann ist WP2 trivial) oder eine echte serielle Stelle aufdeckt (dann ist WP2 die Umsetzung).

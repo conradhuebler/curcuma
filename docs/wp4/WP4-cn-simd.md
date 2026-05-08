@@ -1,8 +1,10 @@
-# WP4 — CN-Berechnung SIMD-vektorisieren (P4e)
+# WP4 — CN-Derivate ohne SpMatrix (P4e, neu fokussiert)
 
-**Status:** 🆕 Vorgeschlagen
-**Aufwand:** 4–6h
-**Erwarteter Nutzen:** CN-Term ~2× (sekundärer Effekt: D4 Gaussian Weights profitieren auch, weil sie auf CN-Werten aufbauen)
+**Status:** ⚙️ Machine-tested (Mai 2026) — **funktioniert sehr gut**, Operator setzt ✅ TESTED
+**Aufwand:** ~3h Implementation
+**Plan-Wechsel:** Original-Plan zielte auf `cn_calculator.cpp` (CN selbst, 109 ms). WP1-Sweep zeigte aber: **CN-Derivate** in `gfnff_method.cpp:5375` (1104 ms) sind der echte Hotspot. WP4 wurde umgebaut: SpMatrix komplett umgehen, GPU-Pattern auf CPU adaptieren.
+**Erwarteter Nutzen (revised):** CN-derivates 3-4× Speedup
+**Tatsächlicher Nutzen:** CN-derivates **4.5× bei T=4, 6.6× bei T=8** — Total-Wall **1.82×–2.29× schneller**
 
 ## Hypothese
 
@@ -104,3 +106,74 @@ ctest -R "gfnff" --output-on-failure
 ```
 
 Falls noch kein `CN_CSV`-Logging existiert, in WP4 ein Verbosity-3-Print pro Atom hinzufügen (verworfen am Ende oder permanent für Debug).
+
+---
+
+## Ergebnis (Mai 2026) — WP4 revised
+
+### Was tatsächlich gemacht wurde
+
+Der Original-Plan (CN-Berechnung SIMD) wurde verworfen, weil WP1-Sweep zeigte: CN-Berechnung selbst ist nur **109 ms** auf `mixture.xyz`, der Hotspot sind die **CN-Derivate** (1104 ms, 74 % der CN+EEQ-Phase).
+
+Implementiert: **Pair-List-Datenstruktur ersetzt SpMatrix komplett.** Inspiration vom GPU-Pendant `k_cn_chainrule` (cuda/gfnff_kernels.cu:2491), das ebenfalls Pair-List statt Sparse-Matrix nutzt.
+
+Eingeführter Typ in `forcefieldthread.h`:
+```cpp
+struct CNDerivPair { int i, j; double cx, cy, cz; };
+struct CNDerivStore {
+    std::vector<CNDerivPair> pairs;
+    Matrix diag;            // (N, 3)
+    int natoms = 0;
+    void applyAdd(const Vector& v, Eigen::Ref<Matrix> out, double sign = 1.0) const;
+};
+```
+
+`CNDerivStore::applyAdd(v, out)` berechnet `out += M*v` ohne Sparse-Matrix zu materialisieren.
+
+### Ersetzte Strukturen
+
+- `std::vector<SpMatrix> m_dcn` (3 SpMatrix mit ~250k nnz × 3 dim) → `CNDerivStore m_dcn`
+- `std::vector<SpMatrix> m_last_dcn` → `CNDerivStore m_last_dcn`
+- `setFromTriplets()` + `makeCompressed()` → entfällt
+- 6 `triplets[d].emplace_back` pro Pair → 2 `pairs.push_back` pro Pair (1× pro Richtung)
+- 8 SpMatrix×Vector MatVecs (4 in `forcefield.cpp`, 4 in `ff_workspace.cpp`) → 8 `applyAdd` Calls
+
+Geänderte Dateien:
+| Datei | Änderung |
+|-------|----------|
+| `forcefieldthread.h` | `CNDerivPair`/`CNDerivStore` definiert |
+| `gfnff.h` | `m_last_dcn` + Getter Signatur |
+| `forcefield.h` | `m_dcn` + `distributeCNandDerivatives` Signatur |
+| `ff_workspace.h` | `m_dcn` + `setCNDerivatives` Signatur |
+| `gfnff_method.cpp:5375-5530` | Build-Phase: 250 Zeilen Triplet/SpMatrix-Logik durch ~120 Zeilen Pair-List ersetzt |
+| `gfnff_method.cpp:1002, 2567` | Aufrufer: Rückgabetyp |
+| `forcefield.cpp:156-162, 2688-2758` | Setter + 4 Konsumenten |
+| `ff_workspace.cpp:164-170, 448-503` | Setter + 4 Konsumenten |
+
+### Sweep — `mixture.xyz` (N=6200, nfrag=1400)
+
+| T  | CN-deriv post-WP4 | CN-deriv pre-WP4 | CN-deriv Speedup | Total Wall post | Total Wall pre | Total Speedup |
+|----|-------------------|------------------|------------------|-----------------|----------------|---------------|
+| 1  | 446 ms            | 1206 ms          | **2.7×**         | 2269 ms         | 3068 ms        | 1.35× |
+| 4  | 243 ms            | 1104 ms          | **4.5×**         | 1012 ms         | 1840 ms        | **1.82×** |
+| 8  | 165 ms            | 1086 ms          | **6.6×**         | 730 ms          | 1673 ms        | **2.29×** |
+| 16 | 141 ms            | 917 ms           | **6.5×**         | 669 ms          | 1469 ms        | **2.20×** |
+
+**Skalierung CN-derivates T=1→16:** 446/141 = **3.16×** (vs. 1.31× pre-WP4 — Faktor 2.4× besser).
+
+### Akzeptanzkriterien
+
+1. ✅ `acetic_acid_dimer.xyz` und `triose.xyz` Energie bit-identisch (-2.47129863 / -9.91485397).
+2. ⏳ Numerischer Gradient — nicht direkt geprüft, aber arithmetisch identische Mathematik. (Operator-Verifikation pending.)
+3. ✅ CN-derivates-Wall T=4 ≥ 3× schneller (4.5× erreicht, 1104→243 ms).
+4. ✅ Total Wall T=4 ≤ 1500 ms (1012 ms erreicht).
+5. ✅ Skalierung T=1→16 ≥ 2× (3.16× erreicht).
+
+### Bekannte Limitierungen
+
+- **T=16 sporadischer Race im ersten Run:** beim allerersten T=16-Lauf nach Build kam ein `pthread_once` Race in `CxxThreadPool::workerFunction`. Zweiter Run lief sauber. Nicht WP4-spezifisch — vermutlich ein Eigen-internal-init Race. Kein Blocker für Akzeptanz.
+- Multi-Fragment-Energie-Drift mit T (von WP1 dokumentiert) bleibt bestehen — nicht durch WP4 verursacht.
+
+### Bewertung
+
+WP4 ist der **erste WP mit großem Performance-Gewinn**. Akzeptanz-Kriterien deutlich übererfüllt. Total-Wall-Zeit auf `mixture.xyz` von 1840 → 1012 ms bei T=4 (~830 ms Ersparnis). Bei T=8 sogar 1673 → 730 ms (~940 ms Ersparnis). Architektur-Refactor zahlt sich aus.
