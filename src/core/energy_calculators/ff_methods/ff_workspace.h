@@ -82,6 +82,40 @@ struct FFEnergyComponents {
 };
 
 /**
+ * @brief Per-term timing for FF energy calculation (CPU-sum across threads)
+ *
+ * Claude Generated (May 2026): Tracks ms spent in each calc* function.
+ * Each accumulator owns one; reduce() sums them for CPU-sum timing display
+ * in GFNFFEnergyReport.
+ */
+struct FFTermTimings {
+    double bonds = -1, angles = -1, dihedrals = -1, inversions = -1, stors = -1;
+    double dispersion = -1, bonded_rep = -1, nonbonded_rep = -1;
+    double coulomb = -1, hbond = -1, xbond = -1, atm = -1, batm = -1;
+
+    void reset() {
+        bonds = angles = dihedrals = inversions = stors = -1;
+        dispersion = bonded_rep = nonbonded_rep = -1;
+        coulomb = hbond = xbond = atm = batm = -1;
+    }
+    // Sum across partitions: -1 means "not measured" — only sum positive contributions.
+    static void merge(double& dst, double src) {
+        if (src < 0) return;
+        if (dst < 0) dst = 0;
+        dst += src;
+    }
+    FFTermTimings& operator+=(const FFTermTimings& o) {
+        merge(bonds, o.bonds); merge(angles, o.angles);
+        merge(dihedrals, o.dihedrals); merge(inversions, o.inversions);
+        merge(stors, o.stors); merge(dispersion, o.dispersion);
+        merge(bonded_rep, o.bonded_rep); merge(nonbonded_rep, o.nonbonded_rep);
+        merge(coulomb, o.coulomb); merge(hbond, o.hbond); merge(xbond, o.xbond);
+        merge(atm, o.atm); merge(batm, o.batm);
+        return *this;
+    }
+};
+
+/**
  * @brief Per-partition accumulator for gradient and energy
  *
  * Claude Generated (March 2026): Each partition (thread) writes to its own
@@ -93,6 +127,7 @@ struct FFAccumulator {
     Vector dEdcn;             ///< N dE/dCN for chain-rule
     Vector dEdcn_bond;        ///< N bond-only dE/dCN for per-component attribution
     FFEnergyComponents energy;
+    FFTermTimings timings;    ///< Claude Generated (May 2026): per-term ms (this partition only)
 
     // Optional per-component gradients (only allocated if store_components=true)
     Matrix grad_bond, grad_angle, grad_torsion, grad_repulsion;
@@ -102,6 +137,7 @@ struct FFAccumulator {
 
     void reset(int natoms, bool do_gradient, bool store_components) {
         energy.reset();
+        timings.reset();
         if (do_gradient) {
             if (gradient.rows() != natoms || gradient.cols() != 3)
                 gradient.resize(natoms, 3);
@@ -219,6 +255,8 @@ public:
 
     const Matrix& gradient() const { return m_result_gradient; }
     const FFEnergyComponents& energyComponents() const { return m_result_energy; }
+    const FFTermTimings& termTimings() const { return m_result_timings; }
+    int threadCount() const { return m_num_threads; }
     const Vector& dEdcnTotal() const { return m_dEdcn_total; }
     const Vector& dEdcnBondTotal() const { return m_dEdcn_bond_total; }
 
@@ -251,7 +289,8 @@ public:
 
     // Coulomb self-energy parameters (extracted from pairs at init)
     void setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
-                                     const Vector& alp, const Vector& cnf);
+                                     const Vector& alp, const Vector& cnf,
+                                     const Vector& chi_static);
 
     // Bond-HB data for coordination number calculation
     void setBondHBData(const std::vector<BondHBEntry>& data) { m_bond_hb_data = data; }
@@ -281,7 +320,7 @@ private:
     double m_e0 = 0.0;
 
     // Coulomb self-energy parameters (O(N), extracted at init)
-    Vector m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf;
+    Vector m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf, m_coul_chi_static;
 
     // Term-enable flags
     bool m_dispersion_enabled = true;
@@ -310,6 +349,9 @@ private:
     std::vector<HBGradEntry> m_hb_grad_entries;
     std::vector<vdW> m_vdws;                    ///< UFF/QMDFF LJ non-bonded pairs
 
+    // Cached bonded pairs for fast repulsion lookup
+    std::set<std::pair<int,int>> m_bonded_pairs;
+
     // === Partitions + Accumulators ===
     std::vector<PartitionRanges> m_partitions;
     std::vector<FFAccumulator> m_accumulators;
@@ -317,6 +359,7 @@ private:
     // === Result storage ===
     Matrix m_result_gradient;
     FFEnergyComponents m_result_energy;
+    FFTermTimings m_result_timings;  // Claude Generated (May 2026): aggregated per-term timing
     Vector m_dEdcn_total, m_dEdcn_bond_total;
     Matrix m_grad_before_cn;  ///< Gradient snapshot before CN chain-rule (diagnostic)
     bool m_store_components = false;

@@ -80,35 +80,40 @@ void FFWorkspace::setInteractionLists(GFNFFParameterSet&& params)
     m_repulsion_enabled = params.repulsion_enabled;
     m_coulomb_enabled = params.coulomb_enabled;
 
+    // Build bonded pairs cache for fast repulsion lookup
+    m_bonded_pairs.clear();
+    for (const auto& bond : m_bonds) {
+        m_bonded_pairs.insert({bond.i, bond.j});
+        m_bonded_pairs.insert({bond.j, bond.i});
+    }
+
     // Extract per-atom Coulomb self-energy parameters from pairs (for TERM 2+3 in postProcess)
-    // P3a (Apr 2026): chi_base/cnf from pairs; gam/alp from per-atom vectors
+    // Same logic as ForceField::setGFNFFParameters lines 418-444
     if (!m_coulombs.empty() && m_natoms > 0) {
         m_coul_chi_base = Vector::Zero(m_natoms);
+        m_coul_gam = Vector::Zero(m_natoms);
+        m_coul_alp = Vector::Zero(m_natoms);
         m_coul_cnf = Vector::Zero(m_natoms);
+        m_coul_chi_static = Vector::Zero(m_natoms);
 
         std::vector<bool> atom_seen(m_natoms, false);
         for (const auto& coul : m_coulombs) {
             if (!atom_seen[coul.i]) {
                 m_coul_chi_base(coul.i) = coul.chi_base_i;
+                m_coul_gam(coul.i) = coul.gam_i;
+                m_coul_alp(coul.i) = coul.alp_i;
                 m_coul_cnf(coul.i) = coul.cnf_i;
+                m_coul_chi_static(coul.i) = coul.chi_i;
                 atom_seen[coul.i] = true;
             }
             if (!atom_seen[coul.j]) {
                 m_coul_chi_base(coul.j) = coul.chi_base_j;
+                m_coul_gam(coul.j) = coul.gam_j;
+                m_coul_alp(coul.j) = coul.alp_j;
                 m_coul_cnf(coul.j) = coul.cnf_j;
+                m_coul_chi_static(coul.j) = coul.chi_j;
                 atom_seen[coul.j] = true;
             }
-        }
-        // Per-atom gam/alp from parameter set vectors (P3a: no longer in pair struct)
-        if (params.eeq_gam.size() == m_natoms) {
-            m_coul_gam = params.eeq_gam;
-        } else {
-            m_coul_gam = Vector::Zero(m_natoms);
-        }
-        if (params.eeq_alp.size() == m_natoms) {
-            m_coul_alp = params.eeq_alp;
-        } else {
-            m_coul_alp = Vector::Zero(m_natoms);
         }
     }
 }
@@ -185,16 +190,22 @@ void FFWorkspace::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds)
 }
 
 void FFWorkspace::setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
-                                               const Vector& alp, const Vector& cnf)
+                                               const Vector& alp, const Vector& cnf,
+                                               const Vector& chi_static)
 {
     m_coul_chi_base = chi_base;
     m_coul_gam = gam;
     m_coul_alp = alp;
     m_coul_cnf = cnf;
+    m_coul_chi_static = chi_static;
 }
 
 double FFWorkspace::calculate(bool gradient)
 {
+    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
+    auto t_calc_start = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
+    double t_execute = 0.0, t_reduce = 0.0, t_post = 0.0;
+
     m_do_gradient = gradient;
 
     // Select execute function based on method type
@@ -207,6 +218,7 @@ double FFWorkspace::calculate(bool gradient)
             executeGFNFF(t);
     };
 
+    auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (m_num_threads == 1) {
         // T=1: Direct call, zero pool overhead
         m_accumulators[0].reset(m_natoms, gradient, m_store_components);
@@ -214,6 +226,7 @@ double FFWorkspace::calculate(bool gradient)
 
         // acc[0] IS the result — zero-copy swap
         m_result_energy = m_accumulators[0].energy;
+        m_result_timings = m_accumulators[0].timings;  // Claude Generated (May 2026): per-term timing
         if (gradient) {
             m_result_gradient.swap(m_accumulators[0].gradient);
             m_dEdcn_total = m_accumulators[0].dEdcn;
@@ -245,9 +258,19 @@ double FFWorkspace::calculate(bool gradient)
             f.get();
 
         reduce();
+        if (do_timing) {
+            t_reduce = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count() - t_execute;
+        }
+    }
+    if (do_timing) {
+        t_execute = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
     }
 
+    t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     postProcess(gradient);
+    if (do_timing) {
+        t_post = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    }
 
     // CPU ENERGY TERMS (verbosity >= 3)
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -273,50 +296,62 @@ double FFWorkspace::calculate(bool gradient)
 
 void FFWorkspace::executeGFNFF(int p)
 {
+    // Claude Generated (May 2026): Per-term timing — fills m_accumulators[p].timings.
+    // Aggregated across partitions in reduce() for the GFNFFEnergyReport CPU-sum column.
+    auto& timings = m_accumulators[p].timings;
+    auto tic = []() { return std::chrono::high_resolution_clock::now(); };
+    auto toc = [](auto t0) {
+        return std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t0).count();
+    };
+
     // HB coordination numbers must be computed before bond energy
     computeHBCoordinationNumbers(p);
 
     // Bonded terms
-    calcBonds(p);
-    calcAngles(p);
-    calcDihedrals(p);
-    calcExtraTorsions(p);
-    calcInversions(p);
+    auto t = tic(); calcBonds(p);          timings.bonds      = toc(t);
+    t = tic();      calcAngles(p);         timings.angles     = toc(t);
+    t = tic();      calcDihedrals(p);
+                    calcExtraTorsions(p);  timings.dihedrals  = toc(t);
+    t = tic();      calcInversions(p);     timings.inversions = toc(t);
 
     // Non-bonded pairwise terms
     if (m_dispersion_enabled) {
+        t = tic();
         calcDispersion(p);
         calcD4Dispersion(p);
+        timings.dispersion = toc(t);
     }
     if (m_repulsion_enabled) {
-        calcBondedRepulsion(p);
-        calcNonbondedRepulsion(p);
+        t = tic(); calcBondedRepulsion(p);    timings.bonded_rep    = toc(t);
+        t = tic(); calcNonbondedRepulsion(p); timings.nonbonded_rep = toc(t);
     }
     if (m_coulomb_enabled) {
-        calcCoulomb(p);
+        t = tic(); calcCoulomb(p); timings.coulomb = toc(t);
     }
 
     // HB/XB three-body terms
     if (m_hbond_enabled) {
-        calcHydrogenBonds(p);
-        calcHalogenBonds(p);
+        t = tic(); calcHydrogenBonds(p); timings.hbond = toc(t);
+        t = tic(); calcHalogenBonds(p);  timings.xbond = toc(t);
     }
 
     // Three-body dispersion
     if (!m_atm_triples.empty()) {
+        t = tic();
         calcATM(p);
-        if (m_do_gradient)
-            calcATMGradient(p);
+        if (m_do_gradient) calcATMGradient(p);
+        timings.atm = toc(t);
     }
 
     // Bonded ATM
     if (!m_batm_triples.empty()) {
-        calcBATM(p);
+        t = tic(); calcBATM(p); timings.batm = toc(t);
     }
 
     // Triple bond torsions
     if (!m_storsions.empty()) {
-        calcSTorsions(p);
+        t = tic(); calcSTorsions(p); timings.stors = toc(t);
     }
 }
 
@@ -324,6 +359,7 @@ void FFWorkspace::reduce()
 {
     // Sum all accumulators into result
     m_result_energy = m_accumulators[0].energy;
+    m_result_timings = m_accumulators[0].timings;  // Claude Generated (May 2026)
     if (m_do_gradient) {
         m_result_gradient = m_accumulators[0].gradient;
         m_dEdcn_total = m_accumulators[0].dEdcn;
@@ -344,6 +380,7 @@ void FFWorkspace::reduce()
 
     for (int t = 1; t < m_num_threads; ++t) {
         m_result_energy += m_accumulators[t].energy;
+        m_result_timings += m_accumulators[t].timings;  // Claude Generated (May 2026): CPU-sum
         if (m_do_gradient) {
             m_result_gradient += m_accumulators[t].gradient;
             m_dEdcn_total += m_accumulators[t].dEdcn;
@@ -366,10 +403,15 @@ void FFWorkspace::reduce()
 
 void FFWorkspace::postProcess(bool gradient)
 {
+    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
+    auto t_post_start = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
+    double t_self_energy = 0.0, t_chainrule = 0.0;
+
     // =========================================================================
     // Coulomb TERM 2+3: Self-energy (sequential, thread-count-independent)
     // Reference: Fortran gfnff_engrad.F90:1678-1679
     // =========================================================================
+    auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (m_coul_gam.size() == m_natoms && m_eeq_charges.size() == m_natoms) {
         const double sqrt_2_over_pi = 0.797884560802865;
         const bool has_cn = (m_cn.size() == m_natoms);
@@ -383,7 +425,7 @@ void FFWorkspace::postProcess(bool gradient)
             if (m_coul_cnf(i) != 0.0 && has_cn) {
                 chi = m_coul_chi_base(i) + m_coul_cnf(i) * std::sqrt(std::max(m_cn(i), 0.0));
             } else {
-                chi = m_coul_chi_base(i);  // P3a: equivalent to chi_static when cnf=0
+                chi = m_coul_chi_static(i);
             }
             E_en -= q * chi;
             E_self += 0.5 * q * q * (m_coul_gam(i) + sqrt_2_over_pi / std::sqrt(m_coul_alp(i)));
@@ -394,11 +436,15 @@ void FFWorkspace::postProcess(bool gradient)
             CurcumaLogger::info(fmt::format("  Coulomb self-energy (workspace): EN={:+.12f}, Self={:+.12f} Eh", E_en, E_self));
         }
     }
+    if (do_timing) {
+        t_self_energy = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    }
 
     // =========================================================================
     // dEdcn chain-rule gradient + Coulomb TERM 1b
     // Reference: Fortran gfnff_engrad.F90:418-422 (bond/disp), 449-454 (coulomb)
     // =========================================================================
+    t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (gradient && !m_dcn.empty() && m_dcn.size() == 3) {
         // Snapshot gradient before CN chain-rule (diagnostic)
         m_grad_before_cn = m_result_gradient;
@@ -482,4 +528,5 @@ void FFWorkspace::postProcess(bool gradient)
             }
         }
     }
+
 }

@@ -865,9 +865,16 @@ void FFWorkspace::calcCoulomb(int p)
         double rij = rij_vec.norm();
         if (rij > coul.r_cut || rij < 1e-10) continue;
 
-        // P3a (Apr 2026): Use dynamic EEQ charges directly (no static fallback in struct)
-        double qi = m_eeq_charges(coul.i);
-        double qj = m_eeq_charges(coul.j);
+        // Dynamic EEQ charges (fall back to static if unavailable/NaN)
+        double qi = coul.q_i, qj = coul.q_j;
+        if (m_eeq_charges.size() > 0) {
+            double qi_dyn = m_eeq_charges(coul.i);
+            double qj_dyn = m_eeq_charges(coul.j);
+            if (!std::isnan(qi_dyn) && !std::isnan(qj_dyn)) {
+                qi = qi_dyn;
+                qj = qj_dyn;
+            }
+        }
 
         double gamma_r = coul.gamma_ij * rij;
         double erf_term = std::erf(gamma_r);

@@ -17,6 +17,7 @@
 
 #include "../computational_method.h"
 #include "../ff_methods/gfnff.h"
+#include "../ff_methods/eeq_solver.h"  // EEQSolveMethod enum
 #include "../ff_methods/cuda/ff_workspace_gpu.h"
 #include "../ff_methods/cuda/eeq_solver_gpu.h"
 
@@ -115,20 +116,24 @@ private:
     std::vector<double> m_eeq_z1;           ///< [N] A⁻¹ · b_atoms
     std::vector<double> m_eeq_Z2;           ///< [N*nfrag] A⁻¹ · C^T (column-major)
     std::vector<double> m_eeq_charges_gpu;  ///< [N] final charges from GPU path
+    std::vector<double> m_schur_workspace;  ///< [nfrag*(nfrag+2)] CPU Schur: S matrix + rhs + lambda (no heap after CUDA init)
+
+    // WP2: cached topology-constant EEQ data (avoid prepareEEQParametersForGPU per step)
+    std::vector<int>    m_eeq_fraglist;          ///< [N] fragment IDs (topology-constant)
+    std::vector<double> m_eeq_rhs_constraints;   ///< [nfrag] target charges (topology-constant)
+    int                 m_eeq_nfrag = 1;         ///< number of fragments (topology-constant)
 
     json             m_parameters;
     std::string      m_method_name;
     std::vector<int> m_atom_types;   ///< Element numbers (Z) — stored from setMolecule()
+    bool             m_allow_unconverged_charges = false; ///< Respect allow_unconverged_charges for GPU→CPU fallback (Claude Generated Apr 2026)
+    bool             m_skip_phase2 = false;               ///< Skip Phase 2 EEQ refinement, use Phase 1 topology charges (Claude Generated Apr 2026)
     bool             m_initialized   = false;
     bool             m_has_error     = false;
     std::string      m_error_message;
     double           m_last_energy   = 0.0;
+    double           m_gpu_upload_time_ms = 0.0;
     Matrix           m_cached_gradient; ///< Cached gradient (copied from GPU workspace after calculate)
-
-    // Pre-allocated buffers for per-step HB coordination number computation.
-    // Avoids heap allocations on CUDA-corrupted heap during MD/Opt iterations.
-    std::vector<double> m_hb_cn_values;                ///< [n_bonds] HB CN per bond
-    std::vector<double> m_hb_cn_per_atom;              ///< [natoms] H-atom CN (pre-allocated, replaces unordered_map)
 
     // CN chain-rule pair list (generated once at init, used every gradient step)
     // Claude Generated (March 2026): Full GPU gradient consistency
@@ -139,6 +144,34 @@ private:
 
     // GPU CN result (always used — GPU CN is the default path)
     Vector              m_gpu_cn_final;        ///< Cached GPU CN result
+
+    // RMSD-based EEQ lazy refactorization (Apr 2026)
+    // Caller tracks geometry RMSD from last full Cholesky refactorization.
+    // m_eeq_rmsd_threshold == 0.0 → always refactorize (default, matches reference).
+    // m_eeq_rmsd_threshold >  0.0 → lazy: reuse L when per-atom RMSD < threshold (Bohr).
+    double m_eeq_rmsd_threshold = 0.0;  ///< Bohr; from eeq_rmsd_threshold param
+    Matrix m_eeq_ref_geom;              ///< geometry (Bohr) at last EEQ refactorization
+    bool   m_eeq_has_ref_geom = false;
+
+    // EEQ Coulomb-matrix distance cutoff (Bohr). Default 0 = no cutoff, matches Fortran
+    // goed_gfnff. Set non-zero only for performance experiments — produces HF-inconsistent
+    // gradients vs. the un-truncated Coulomb energy and degrades MD energy conservation.
+    double m_eeq_distance_cutoff = 0.0;  ///< Bohr; from eeq_distance_cutoff param
+
+    // WP7-B (May 2026): GPU EEQ solver strategy for nfrag>1 systems.
+    // SchurCholesky → WP5-A (nfrag=1) / WP7-A (nfrag>1) — exact, full N×N Cholesky.
+    // Batched      → WP7-B (nfrag>1)                   — per-fragment Cholesky, drops cross-fragment Coulomb.
+    // PCG          → WP7-C (nfrag>1)                   — iterative O(k·N²), warm-started.
+    // LU / Auto    → CPU concepts; Auto resolves to PCG above pcg_large_threshold else SchurCholesky.
+    EEQSolveMethod m_eeq_strategy = EEQSolveMethod::SchurCholesky;
+    double m_eeq_batched_min_distance_bohr = 15.0;  ///< warn if min inter-frag distance < this
+
+    // WP7-C (May 2026): GPU PCG parameters (mirror CPU EEQSolver defaults).
+    int    m_eeq_pcg_max_iter   = 200;     ///< per-PCG-call iteration cap
+    double m_eeq_pcg_tolerance  = 1e-10;   ///< convergence tolerance on |r|
+    int    m_eeq_pcg_threshold  = 500;     ///< Auto strategy: PCG for N>=this (else cholesky)
+
+    int  m_calc_count = 0;  ///< counts calculateEnergy() calls; first 5 always print timing
 
     /**
      * @brief Generate CN pair list from geometry and covalent radii.

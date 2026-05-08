@@ -36,10 +36,14 @@ capabilities/
 - **CurcumaOpt**: Geometry optimization dispatcher — legacy system, human-tested
 - **LBFGSpp**: Wrapper around external LBFGSpp library — external code, wrapper is AI-generated
 - **ANCOPT** (`ancopt_optimizer.cpp/h`): 🤖 AI-generated port of XTB's AncOpt (Grimme)
-  - ⚙️ Machine-tested: water, ethane with UFF converge
-  - Not tested: QM gradients, large systems, transition states, linear molecules
-  - Not implemented vs. reference: exact XTB ANC regeneration thresholds, micro-cycle logic
-  - Known issue: crash in cleanup phase (signal 11, under investigation)
+  - ⚙️ Machine-tested: CH4/UFF converges (4 steps); Tier L path runs on 1410-atom polymer+UFF
+  - Large-system enhancements (Apr 2026, all 🤖 AI-generated, not ✅ TESTED):
+    - **Tier L** (600–2000 atoms): Truncated Lanczos ANC (`generateANCLanczos`, top-k modes), implicit T/R projection (O(N²) vs O(N³)), `detrotra8` gated behind `n3<=1800`
+    - **Tier XL** (>2000 atoms): L-BFGS in ANC subspace (`calculateLBFGSStepInternal`), drops dense nvar×nvar Hessian
+    - **Shared RF solver**: `RFSolver::lanczosLowestEigenpair` + `calculateRFStep` in `optimisation/rf_solver.h/.cpp`
+    - **Structured advisory**: tier, algorithm path, per-phase timing at verbosity 2
+    - **EIGEN_USE_LAPACKE**: per-file in rf_solver.cpp (safe, no `I` variable conflict)
+  - Not tested: QM gradients, transition states, linear molecules, XL tier (>2000 atoms)
 - **OptimizerDriver** (`optimizer_driver.cpp/h`): 🤖 AI-generated base class (Template Method)
 - **OptimizerFactory** / **OptimizationDispatcher**: 🤖 AI-generated
 - **Native L-BFGS / DIIS / RFO** (`optimisation/lbfgs.cpp`): 🤖 AI-generated — see `optimisation/CLAUDE.md`

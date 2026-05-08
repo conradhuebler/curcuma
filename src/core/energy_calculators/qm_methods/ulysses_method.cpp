@@ -5,6 +5,7 @@
 
 #include "ulysses_method.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/citation_registry.h"
 #include "src/core/config_manager.h"
 #include <algorithm>
 #include <cctype>
@@ -94,6 +95,19 @@ bool UlyssesMethod::updateGeometry(const Matrix& geometry) {
 
 double UlyssesMethod::calculateEnergy(bool gradient)
 {
+    CitationRegistry::cite("ulysses");
+    auto [base_method, correction] = parseMethodName(m_method_name);
+    if (base_method == "pm6") CitationRegistry::cite("pm6", "ulysses");
+    else if (base_method == "am1") CitationRegistry::cite("am1", "ulysses");
+    else if (base_method == "pm3") CitationRegistry::cite("pm3", "ulysses");
+    else if (base_method == "mndo") CitationRegistry::cite("mndo", "ulysses");
+    else if (base_method == "mndod") CitationRegistry::cite("mndod", "ulysses");
+    else if (base_method == "rm1") CitationRegistry::cite("rm1", "ulysses");
+    else if (base_method == "pm3pddg") CitationRegistry::cite("pm3pddg", "ulysses");
+    else if (base_method == "mndopddg") CitationRegistry::cite("mndopddg", "ulysses");
+    else if (base_method == "pm3bp") CitationRegistry::cite("pm3", "ulysses");
+    else if (base_method == "ugfn2") CitationRegistry::cite("gfn2", "ulysses");
+    if (correction == "D3H4X" || correction == "D3H+") CitationRegistry::cite("d3", "ulysses");
 #ifdef USE_ULYSSES
     m_last_energy = m_ulysses->Calculation(gradient);
     m_calculation_done = true;

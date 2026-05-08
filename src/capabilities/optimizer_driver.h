@@ -22,6 +22,7 @@
 #include "optimizer_interface.h"
 #include "src/capabilities/rmsd.h"
 #include <chrono>
+#include <functional>
 #include <memory>
 
 namespace Optimization {
@@ -117,6 +118,12 @@ protected:
     std::chrono::high_resolution_clock::time_point m_start_time;
     std::chrono::high_resolution_clock::time_point m_end_time;
 
+    // Per-step notification callback (set by interactive simulation callers)
+    // Signature: (iteration, current_molecule, current_energy) → continue?
+    // Return false to request early stop.
+    using StepCallback = std::function<bool(int, const Molecule&, double)>;
+    StepCallback m_step_callback;
+
     // Pure virtual methods for derived classes (Template Method Pattern)
     virtual bool InitializeOptimizerInternal() = 0;
     virtual Vector CalculateOptimizationStep(const Vector& current_coordinates,
@@ -140,6 +147,11 @@ protected:
 public:
     OptimizerDriver();
     virtual ~OptimizerDriver() = default;
+
+    /** @brief Register a callback invoked after every optimization step.
+     *  The callback receives (iteration, current molecule, current energy).
+     *  Return false to request early termination (e.g. stop button pressed). */
+    void setStepCallback(StepCallback cb) { m_step_callback = std::move(cb); }
 
     // Initialization
     bool InitializeOptimization(const Molecule& molecule);

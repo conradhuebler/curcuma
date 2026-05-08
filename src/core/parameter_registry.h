@@ -7,6 +7,10 @@
 #include <string>
 #include <vector>
 
+// Claude Generated - missing json include (needed when building as submodule without PCH)
+#include "external/json.hpp"
+using json = nlohmann::json;
+
 enum class ParamType { String,
     Int,
     Double,

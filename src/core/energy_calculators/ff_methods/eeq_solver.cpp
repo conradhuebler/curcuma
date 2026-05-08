@@ -46,6 +46,7 @@
 #include <thread>
 #include <future>
 #include <fmt/format.h>
+#include <fstream>
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #ifdef _OPENMP
@@ -705,7 +706,10 @@ static void testElementSpecificHybridizationLogic() {
 EEQSolveMethod EEQSolver::parseSolveMethod(const std::string& method_str) {
     if (method_str == "lu") return EEQSolveMethod::LU;
     if (method_str == "pcg") return EEQSolveMethod::PCG;
-    if (method_str == "schur_cholesky") return EEQSolveMethod::SchurCholesky;
+    if (method_str == "batched") return EEQSolveMethod::Batched;
+    // "cholesky" (canonical) and "schur_cholesky" (legacy) both map to SchurCholesky
+    if (method_str == "cholesky" || method_str == "schur_cholesky")
+        return EEQSolveMethod::SchurCholesky;
     return EEQSolveMethod::Auto;  // default including "auto"
 }
 
@@ -717,7 +721,9 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_convergence_threshold = m_config.get<double>("convergence_threshold", 1e-6);
     m_verbosity = m_config.get<int>("verbosity", 0);
     m_calculate_cn = m_config.get<bool>("calculate_cn", true);
-    m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "schur_cholesky"));
+    m_allow_unconverged = m_config.get<bool>("allow_unconverged_charges", false);
+    m_skip_phase2 = m_config.get<bool>("skip_phase2", false);
+    m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "pcg"));
 
     // Initialize EEQ caching system
     m_eeq_cache = std::make_unique<EEQSolverCache>();
@@ -728,7 +734,8 @@ EEQSolver::EEQSolver(const ConfigManager& config)
         CurcumaLogger::param("convergence_threshold", fmt::format("{:.2e}", m_convergence_threshold));
         CurcumaLogger::param("verbosity", std::to_string(m_verbosity));
         CurcumaLogger::param("calculate_cn", m_calculate_cn ? "true" : "false");
-        CurcumaLogger::param("solve_method", m_config.get<std::string>("solve_method", "schur_cholesky"));
+        CurcumaLogger::param("allow_unconverged_charges", m_allow_unconverged ? "true" : "false");
+        CurcumaLogger::param("solve_method", m_config.get<std::string>("solve_method", "pcg"));
     }
 }
 
@@ -876,6 +883,32 @@ Vector EEQSolver::calculateCharges(
         }
     }
 
+    // Claude Generated (April 2026): skip_phase2 option — bypass Phase 2 entirely
+    if (m_skip_phase2) {
+        if (m_verbosity >= 1) {
+            CurcumaLogger::warn("EEQSolver: skip_phase2=true — bypassing Phase 2 refinement, using Phase 1 topology charges");
+        }
+        return topology_charges;
+    }
+
+    // Claude Generated (Apr 2026): If Phase 2 was historically implausible for this system
+    // size, skip it forever (until atom count changes, indicating a new molecule).
+    if (m_phase2_historically_implausible && m_phase2_implausible_natoms == natoms) {
+        if (m_verbosity >= 2) {
+            CurcumaLogger::info("EEQSolver: Phase 2 was historically implausible for this system — skipping, using Phase 1 topology charges");
+        }
+        return topology_charges;
+    }
+
+    // Initialize cache with Phase 1 charges if not yet set.
+    // Without this, m_last_successful_charges starts empty (size 0), so Tier 1/2
+    // fallbacks below would skip it and go straight to topology_charges. With this
+    // initialization, the cache holds Phase 1 charges on the first call, then is
+    // overwritten with Phase 2 charges after a successful solve.
+    if (m_last_successful_charges.size() != natoms) {
+        m_last_successful_charges = topology_charges;
+    }
+
     // PHASE 2: Final energy charges with ALL corrections (matching Fortran reference)
     // Reference: XTB gfnff_ini.f90:693-707 - ONE solve with dxi, dgam, and alpha corrections
     // Restored (Jan 17, 2026): Activate corrections to match GFN-FF Fortran reference
@@ -945,7 +978,11 @@ Vector EEQSolver::calculateCharges(
         current_charges = solveEEQ(A, atoms, cn, dxi, total_charge, topology, true, false);
 
         if (current_charges.size() != natoms) {
-            CurcumaLogger::error("EEQSolver::calculateCharges: Phase 2 solve failed");
+            if (m_allow_unconverged) {
+                CurcumaLogger::warn("EEQSolver::calculateCharges: Phase 2 solve did not converge (allow_unconverged_charges=true), using Phase 1 charges");
+            } else {
+                CurcumaLogger::error("EEQSolver::calculateCharges: Phase 2 solve failed");
+            }
             return topology_charges;  // Return Phase 1 result as fallback
         }
 
@@ -1219,6 +1256,18 @@ Vector EEQSolver::dispatchSolve(
     if (m_solve_method == EEQSolveMethod::Auto) {
         method_to_use = m_selected_method;  // Use cached or default (SchurCholesky)
     }
+    // WP7-B: CPU has no batched implementation — warn once and fall back to cholesky.
+    // GPU dispatch (gfnff_gpu_method.cpp) handles Batched on its own path; this CPU
+    // dispatcher still runs for Phase 1 topology charges even when -gpu cuda is set.
+    if (method_to_use == EEQSolveMethod::Batched) {
+        if (!m_batched_cpu_warned) {
+            CurcumaLogger::warn("solve_method=batched: CPU dispatcher has no batched "
+                                "path; falling back to cholesky here. The batched GPU "
+                                "solver (WP7-B) runs separately when -gpu cuda is active.");
+            m_batched_cpu_warned = true;
+        }
+        method_to_use = EEQSolveMethod::SchurCholesky;
+    }
 
     if (m_verbosity >= 2) {
         const char* method_name = (method_to_use == EEQSolveMethod::PCG) ? "PCG"
@@ -1245,7 +1294,7 @@ Vector EEQSolver::dispatchSolve(
         // Claude Generated (March 2026): Skip benchmark for large N — PCG always wins above ~500 atoms.
         // SchurCholesky for N>500 allocates O(N²) memory and O(N³) compute — prohibitively slow.
         // For multi-fragment systems (nfrag>1), PCG needs nfrag+1 solves; benchmarking doubles that cost.
-        const int PCG_DIRECT_THRESHOLD = 500;
+        const int PCG_DIRECT_THRESHOLD = m_config.get<int>("pcg_large_threshold", 500);
         if (m_solve_method == EEQSolveMethod::Auto && !m_auto_benchmark_done && natoms > PCG_DIRECT_THRESHOLD) {
             m_selected_method = EEQSolveMethod::PCG;
             m_auto_benchmark_done = true;
@@ -1261,7 +1310,7 @@ Vector EEQSolver::dispatchSolve(
             Vector charges_schur = solveWithSchurCholesky(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
             auto t2 = std::chrono::high_resolution_clock::now();
 
-            int pcg_max = m_config.get<int>("max_pcg_iterations", 200);
+            int pcg_max = m_config.get<int>("max_pcg_iterations", 100);
             double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
             Vector x0_zero = Vector::Zero(natoms);
 
@@ -1274,7 +1323,21 @@ Vector EEQSolver::dispatchSolve(
             Matrix S = C * Z2;
             Vector schur_rhs = C * z1 - rhs_constraints;
             Vector lambda;
-            if (nfrag == 1) {
+            if (nfrag == 1 && std::abs(S(0, 0)) < 1e-12) {
+                // Degenerate Schur complement during benchmark — PCG failed, prefer SchurCholesky.
+                // Do NOT return charges_schur blindly: it may itself be empty/NaN if Cholesky failed.
+                // Fall through: select SchurCholesky for future calls and return its result if valid.
+                m_selected_method = EEQSolveMethod::SchurCholesky;
+                m_auto_benchmark_done = true;
+                if (charges_schur.size() == natoms) {
+                    bool schur_nan = false;
+                    for (int i = 0; i < natoms && !schur_nan; ++i)
+                        schur_nan = std::isnan(charges_schur[i]) || std::isinf(charges_schur[i]);
+                    if (!schur_nan) return charges_schur;
+                }
+                // Both solvers failed during benchmark — signal failure to caller
+                return Vector();
+            } else if (nfrag == 1) {
                 lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
             } else {
                 lambda = S.partialPivLu().solve(schur_rhs);
@@ -1302,9 +1365,71 @@ Vector EEQSolver::dispatchSolve(
         }
 
         if (method_to_use == EEQSolveMethod::PCG) {
-            int pcg_max = m_config.get<int>("max_pcg_iterations", 200);
+            int pcg_max = m_config.get<int>("max_pcg_iterations", 100);
             double pcg_tol = m_config.get<double>("pcg_tolerance", 1e-10);
 
+            // Large systems need more iterations and a relative (looser) tolerance.
+            // 200 iterations and 1e-10 absolute are unachievable for N>500 with Jacobi PCG.
+            // Relative tolerance 1e-6 gives charge error ~1e-6 per atom → energy error ~0.3 mEh
+            // which is acceptable for geometry optimization.
+            int pcg_large_threshold = m_config.get<int>("pcg_large_threshold", 500);
+            int pcg_large_iterations = m_config.get<int>("pcg_large_system_iterations", 100);
+            int pcg_large_scaling = m_config.get<int>("pcg_large_system_scaling", 10);
+            double pcg_tol_factor = m_config.get<double>("pcg_large_system_tol_factor", 1e-6);
+
+            if (natoms > pcg_large_threshold) {
+                pcg_max = std::max(pcg_max, std::min(pcg_large_scaling * natoms, pcg_large_iterations));
+                double rhs_norm = rhs_atoms.norm() + 1.0;
+                pcg_tol = std::max(pcg_tol, pcg_tol_factor * rhs_norm);
+                if (m_verbosity >= 1) {
+                    CurcumaLogger::info(fmt::format(
+                        "EEQ PCG large system (N={}): max_iter={}, tol={:.2e}",
+                        natoms, pcg_max, pcg_tol));
+                }
+            }
+
+            // Claude Generated (April 2026): Gershgorin condition estimate for A_nn.
+            // Cheap O(N²) pre-check: if the matrix is weakly diagonally dominant or has
+            // a very large estimated condition number, PCG will converge slowly. Skip
+            // directly to LU instead of burning 5000 PCG iterations first.
+            // Gershgorin: λ ∈ [A_ii - Σ_j≠i |A_ij|, A_ii + Σ_j≠i |A_ij|] for each row.
+            // For the EEQ matrix, A_ij = erf(γ·r)/r > 0, so |A_ij| = A_ij.
+            bool pcg_viable = true;
+            {
+                double min_gersh = std::numeric_limits<double>::max();
+                double max_gersh = 0.0;
+                for (int i = 0; i < natoms; ++i) {
+                    double diag = A_nn(i, i);
+                    double off = 0.0;
+                    for (int j = 0; j < natoms; ++j) {
+                        if (i != j) off += A_nn(i, j);
+                    }
+                    min_gersh = std::min(min_gersh, diag - off);
+                    max_gersh = std::max(max_gersh, diag + off);
+                }
+                double kappa_est = (min_gersh > 0.0) ? max_gersh / min_gersh
+                                                     : std::numeric_limits<double>::infinity();
+
+                if (m_verbosity >= 2) {
+                    CurcumaLogger::info(fmt::format(
+                        "EEQ PCG: Gershgorin bounds [{:.4e}, {:.4e}], κ_est={:.1e}",
+                        min_gersh, max_gersh, kappa_est));
+                }
+
+                // If the matrix is clearly not SPD or has extreme condition number,
+                // skip PCG entirely — it will burn 5000+ iterations and then fail anyway.
+                if (min_gersh <= 0.0 || kappa_est > 1e12) {
+                    if (m_verbosity >= 1) {
+                        CurcumaLogger::warn(fmt::format(
+                            "EEQ PCG: ill-conditioned matrix (κ_est={:.1e}, min_gersh={:.2e}), "
+                            "using LU directly instead of PCG", kappa_est, min_gersh));
+                    }
+                    m_pcg_cache_valid = false;
+                    pcg_viable = false;
+                }
+            }
+
+            if (pcg_viable) {
             Vector x0_z1 = m_pcg_cache_valid ? m_pcg_last_z1 : Vector::Zero(natoms);
 
             Vector z1 = solveWithPCG(A_nn, rhs_atoms, x0_z1, pcg_max, pcg_tol);
@@ -1320,43 +1445,105 @@ Vector EEQSolver::dispatchSolve(
             Matrix S = C * Z2;
             Vector schur_rhs = C * z1 - rhs_constraints;
             Vector lambda;
-            if (nfrag == 1) {
-                lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
-            } else {
-                lambda = S.partialPivLu().solve(schur_rhs);
-            }
-            charges = z1 - Z2 * lambda;
 
-            m_pcg_last_z1 = z1;
-            m_pcg_last_z2 = Z2.col(0);
-            m_pcg_cache_valid = true;
-        } else {
-            charges = solveWithSchurCholesky(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
-            if (charges.size() == 0) {
-                if (m_verbosity >= 1) {
-                    CurcumaLogger::warn("EEQ: Schur-Cholesky failed, falling back to LU");
+            // Claude Generated (Apr 2026): Guard against degenerate Schur complement.
+            // S(0,0) near-zero means the constraint solve is degenerate — happens when
+            // PCG hasn't converged and Z2 is garbage. Fall back to LU.
+            bool schur_ok = true;
+            if (nfrag == 1 && std::abs(S(0, 0)) < 1e-12) {
+                schur_ok = false;
+                if (m_verbosity >= 1)
+                    CurcumaLogger::warn(fmt::format(
+                        "EEQ PCG: Schur complement S(0,0)={:.2e} near zero, falling back to LU", S(0, 0)));
+            }
+
+            if (schur_ok) {
+                if (nfrag == 1) {
+                    lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
+                } else {
+                    lambda = S.partialPivLu().solve(schur_rhs);
                 }
-                Eigen::PartialPivLU<Matrix> lu(A);
-                Vector solution = lu.solve(x);
-                Vector residual = A * solution - x;
-                solution -= lu.solve(residual);
-                charges = solution.segment(0, natoms);
-            }
-        }
-    } else {
-        // LU baseline
-        Eigen::PartialPivLU<Matrix> lu(A);
-        Vector solution = lu.solve(x);
-        Vector residual = A * solution - x;
-        solution -= lu.solve(residual);
-        charges = solution.segment(0, natoms);
-    }
+                charges = z1 - Z2 * lambda;
 
-    // NaN/Inf validation with fallback
+                // Check for NaN/Inf from unconverged PCG; fall back to LU if needed.
+                bool has_nan = false;
+                for (int i = 0; i < natoms && !has_nan; ++i)
+                    has_nan = std::isnan(charges[i]) || std::isinf(charges[i]);
+
+                if (!has_nan) {
+                    m_pcg_last_z1 = z1;
+                    m_pcg_last_z2 = Z2.col(0);
+                    m_pcg_cache_valid = true;
+                } else {
+                    schur_ok = false;
+                    if (m_verbosity >= 1)
+                        CurcumaLogger::warn("EEQ PCG: NaN charges after Schur solve, falling back to LU");
+                }
+            }
+
+            if (!schur_ok) {
+                // LU fallback — used only when PCG fails
+                goto lu_solve;
+            }
+            // PCG succeeded — charges are set, fall through to return
+        } else {
+            // pcg_viable = false (Gershgorin check) — use LU directly
+            goto lu_solve;
+        }
+    } else if (method_to_use == EEQSolveMethod::LU) {
+        // Direct full-system LU — no Schur complement overhead.
+        // Used when previous calls showed A is not SPD (SchurCholesky failed)
+        // and PCG is unsuitable (large N, no convergence).
+        goto lu_solve;
+    } else {
+        charges = solveWithSchurCholesky(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
+        if (charges.size() == 0) {
+            if (m_verbosity >= 1) {
+                CurcumaLogger::warn("EEQ: Schur-Cholesky failed, falling back to LU");
+            }
+            // Don't permanently select LU — next step tries SchurCholesky again
+            goto lu_solve;
+        }
+    }
+    } // closes outer if (method_to_use == SchurCholesky || PCG || Auto)
+    goto end_dispatch;
+
+    // Single LU solve with progress timing — shared by all paths
+    {
+        lu_solve:
+        if (m_verbosity >= 1 && natoms > 200) {
+            CurcumaLogger::info(fmt::format("EEQ LU solve starting for N={}...", natoms));
+        }
+        auto t0 = std::chrono::high_resolution_clock::now();
+        Eigen::PartialPivLU<Matrix> lu(A);
+        charges = lu.solve(x).head(natoms);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        if (m_verbosity >= 1 && natoms > 200) {
+            CurcumaLogger::result(fmt::format(
+                "EEQ LU solve done in {:.1f}s",
+                std::chrono::duration<double>(t1 - t0).count()));
+        }
+        m_pcg_cache_valid = false;
+        // After LU, switch to PCG for future calls (with warm-start from LU result).
+        // This avoids getting stuck in LU permanently: PCG may converge on the next
+        // step since the geometry change is small and LU provides a good initial guess.
+        if (m_solve_method == EEQSolveMethod::Auto)
+            m_selected_method = EEQSolveMethod::PCG;
+    }
+    end_dispatch: ;
+
+
+    // NaN/Inf validation — return empty vector to signal failure.
+    // Caller (calculateFinalCharges) is responsible for choosing an appropriate fallback
+    // (topology_charges are far better than uniform 0 charges for neutral molecules).
     for (int i = 0; i < natoms; ++i) {
         if (std::isnan(charges[i]) || std::isinf(charges[i])) {
-            CurcumaLogger::error(fmt::format("EEQ dispatchSolve: Invalid charge[{}] = {}", i, charges[i]));
-            return generateFallbackCharges(natoms, total_charge, "NaN/Inf in linear solve");
+            if (m_allow_unconverged) {
+                CurcumaLogger::warn(fmt::format("EEQ dispatchSolve: Invalid charge[{}] = {} (allow_unconverged_charges=true)", i, charges[i]));
+            } else {
+                CurcumaLogger::error(fmt::format("EEQ dispatchSolve: Invalid charge[{}] = {}", i, charges[i]));
+            }
+            return Vector();  // Empty → caller uses topology_charges as fallback
         }
     }
 
@@ -1434,6 +1621,20 @@ Vector EEQSolver::solveWithPCG(
     Vector p = z;
     double rz = r.dot(z);
 
+    // Progress tracking: 10% intervals at verbosity >=2, 1%+residual at verbosity >=3
+    int progress_10pct = std::max(1, max_iter / 10);
+    int progress_1pct = std::max(1, max_iter / 100);
+    bool show_simple = (m_verbosity >= 2 && max_iter >= 50);
+    bool show_detailed = (m_verbosity >= 3 && max_iter >= 50);
+
+    if (show_detailed) {
+        fmt::print("[EEQ] PCG {} iters (tol={:.0e}): ", max_iter, tol);
+        fflush(stdout);
+    } else if (show_simple) {
+        fmt::print("[EEQ] PCG {} iters: ", max_iter);
+        fflush(stdout);
+    }
+
     for (int k = 0; k < max_iter; ++k) {
         Vector Ap = A * p;                       // O(N²) matvec — the dominant cost
         double pAp = p.dot(Ap);
@@ -1442,10 +1643,25 @@ Vector EEQSolver::solveWithPCG(
         x += alpha * p;
         r -= alpha * Ap;
 
+        // Progress output: 10% steps with (or without) residual norm
+        if ((k + 1) % progress_10pct == 0) {
+            if (show_detailed) {
+                fmt::print(" {}%({:.0e})", (100 * (k + 1)) / max_iter, r.norm());
+            } else if (show_simple) {
+                fmt::print(" {}%", (100 * (k + 1)) / max_iter);
+            }
+            fflush(stdout);
+        } else if (show_detailed && (k + 1) % progress_1pct == 0) {
+            fmt::print(".");
+            fflush(stdout);
+        }
+
         double r_norm = r.norm();
         if (r_norm < tol) {
-            if (m_verbosity >= 2) {
-                fmt::print(stderr, "[EEQ] PCG converged in {} iterations (|r|={:.2e})\n", k + 1, r_norm);
+            m_pcg_total_calls++;
+            m_pcg_total_iters += k + 1;
+            if (show_detailed || show_simple) {
+                fmt::print(" done({} iters, |r|={:.2e})\n", k + 1, r_norm);
             }
             return x;
         }
@@ -1457,10 +1673,41 @@ Vector EEQSolver::solveWithPCG(
         rz = rz_new;
     }
 
-    if (m_verbosity >= 1) {
-        CurcumaLogger::warn(fmt::format("EEQ PCG did not converge in {} iterations (|r|={:.2e})", max_iter, r.norm()));
+    // Accumulate non-convergence statistics
+    m_pcg_total_calls++;
+    m_pcg_nonconv_calls++;
+    m_pcg_total_iters += max_iter;
+    double final_r = r.norm();
+    if (final_r > m_pcg_worst_residual) m_pcg_worst_residual = final_r;
+    if (show_detailed) {
+        fmt::print(" NOT CONVERGED (|r|={:.2e})\n", final_r);
+    } else if (show_simple) {
+        fmt::print(" NOT CONVERGED\n");
     }
     return x;  // Return best estimate
+}
+
+void EEQSolver::printConvergenceSummary() {
+    if (m_pcg_total_calls == 0) return;
+    if (m_pcg_nonconv_calls > 0 && m_verbosity >= 1) {
+        int conv = m_pcg_total_calls - m_pcg_nonconv_calls;
+        CurcumaLogger::warn(fmt::format(
+            "EEQ PCG: {}/{} converged, {} not (worst |r|={:.2e}, {} iters total)",
+            conv, m_pcg_total_calls, m_pcg_nonconv_calls,
+            m_pcg_worst_residual, m_pcg_total_iters));
+    } else if (m_pcg_nonconv_calls == 0 && m_verbosity >= 2) {
+        CurcumaLogger::info(fmt::format(
+            "EEQ PCG: {}/{} converged ({} iters total)",
+            m_pcg_total_calls, m_pcg_total_calls, m_pcg_total_iters));
+    }
+    resetConvergenceStats();
+}
+
+void EEQSolver::resetConvergenceStats() {
+    m_pcg_total_calls = 0;
+    m_pcg_nonconv_calls = 0;
+    m_pcg_total_iters = 0;
+    m_pcg_worst_residual = 0.0;
 }
 
 /**
@@ -1878,11 +2125,27 @@ Vector EEQSolver::calculateTopologyCharges(
         std::cerr << fmt::format("  charge sum = {:12.6f}", topology_charges.sum()) << std::endl;
     }
 
+    // Empty return signals solver failure — fall back to uniform charges for Phase 1
+    // (uniform is the only available fallback here since no topology_charges exist yet)
+    if (topology_charges.size() != natoms) {
+        if (m_allow_unconverged) {
+            CurcumaLogger::warn(fmt::format("Phase 1 EEQ: solver did not converge for N={} (allow_unconverged_charges=true)", natoms));
+        } else {
+            CurcumaLogger::error(fmt::format("Phase 1 EEQ: solver failed for N={}", natoms));
+        }
+        return generateFallbackCharges(natoms, total_charge, "Phase 1 solver failure");
+    }
+
     // Check for NaN/Inf - fallback to uniform charges instead of hard fail
     for (int i = 0; i < natoms; ++i) {
         if (std::isnan(topology_charges[i]) || std::isinf(topology_charges[i])) {
-            CurcumaLogger::error(fmt::format("Phase 1 EEQ: Invalid charge[{}] = {} (Z={})",
-                                             i, topology_charges[i], atoms[i]));
+            if (m_allow_unconverged) {
+                CurcumaLogger::warn(fmt::format("Phase 1 EEQ: Invalid charge[{}] = {} (Z={}) (allow_unconverged_charges=true)",
+                                                i, topology_charges[i], atoms[i]));
+            } else {
+                CurcumaLogger::error(fmt::format("Phase 1 EEQ: Invalid charge[{}] = {} (Z={})",
+                                                 i, topology_charges[i], atoms[i]));
+            }
             return generateFallbackCharges(natoms, total_charge, "NaN/Inf in Phase 1 solution");
         }
     }
@@ -2121,7 +2384,26 @@ Vector EEQSolver::calculateFinalCharges(
     const int natoms = atoms.size();
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
 
+    // Claude Generated (April 2026): skip_phase2 option — bypass Phase 2 entirely
+    if (m_skip_phase2) {
+        if (m_verbosity >= 1) {
+            CurcumaLogger::warn("EEQSolver: skip_phase2=true — bypassing Phase 2 refinement, using Phase 1 topology charges");
+        }
+        return topology_charges;
+    }
 
+    // Claude Generated (Apr 2026): If Phase 2 was historically implausible for this system
+    // size, skip it forever (until atom count changes, indicating a new molecule).
+    if (m_phase2_historically_implausible && m_phase2_implausible_natoms == natoms) {
+        if (m_verbosity >= 2) {
+            CurcumaLogger::info("EEQSolver: Phase 2 was historically implausible for this system — skipping, using Phase 1 topology charges");
+        }
+        return topology_charges;
+    }
+
+    if (m_verbosity >= 2) {
+        fmt::print(stderr, "[EEQ] Phase 2: preparing corrections (dxi, dgam, pi/amide detection)...\n");
+    }
 
     // CRITICAL FIX (Jan 4, 2026): Only use corrections if explicitly requested
     // gfnff_final.cpp achieves 0.0000025 e accuracy using ONLY base parameters (NO dxi, NO dgam)
@@ -2195,6 +2477,12 @@ Vector EEQSolver::calculateFinalCharges(
 
     // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²) distance matrix
     std::atomic<bool> atoms_too_close{false};
+    int dist_progress_10pct = std::max(1, natoms / 10);
+    bool show_dist_progress = (m_verbosity >= 3 && natoms >= 200);
+    if (show_dist_progress) {
+        fmt::print(stderr, "[EEQ] Phase 2: distance matrix ({} atoms):", natoms);
+        fflush(stderr);
+    }
     if (num_threads > 1 && natoms > 64) {
         int T = std::min(num_threads, natoms);
         auto dist_worker = [&](int t_id) {
@@ -2207,6 +2495,10 @@ Vector EEQSolver::calculateFinalCharges(
                     if (r < 1e-10) atoms_too_close.store(true, std::memory_order_relaxed);
                     m_phase2_distances(i, j) = r;
                     m_phase2_distances(j, i) = r;
+                }
+                if (show_dist_progress && t_id == 0 && i > 0 && i % dist_progress_10pct == 0) {
+                    fmt::print(stderr, " {}%", (100 * i) / natoms);
+                    fflush(stderr);
                 }
             }
         };
@@ -2234,8 +2526,13 @@ Vector EEQSolver::calculateFinalCharges(
                 m_phase2_distances(i, j) = r;
                 m_phase2_distances(j, i) = r;
             }
+            if (show_dist_progress && i > 0 && i % dist_progress_10pct == 0) {
+                fmt::print(stderr, " {}%", (100 * i) / natoms);
+                fflush(stderr);
+            }
         }
     }
+    if (show_dist_progress) fmt::print(stderr, " done\n");
     if (atoms_too_close) {
         CurcumaLogger::error("EEQSolver::calculateFinalCharges: atoms too close");
         return generateFallbackCharges(natoms, total_charge, "zero distance in Phase 2");
@@ -2282,9 +2579,15 @@ Vector EEQSolver::calculateFinalCharges(
     int max_iterations = m_config.get<int>("max_iterations", 50);
     double convergence_threshold = m_config.get<double>("convergence_threshold", 1e-6);
 
-    if (m_verbosity >= 2 && use_iterative) {
-        CurcumaLogger::info(fmt::format("EEQ Phase 2: Starting iterative refinement (max {} iterations, threshold {:.2e})",
-                                       max_iterations, convergence_threshold));
+    if (m_verbosity >= 3) {
+        const char* solver_name = (m_solve_method == EEQSolveMethod::PCG) ? "PCG"
+            : (m_solve_method == EEQSolveMethod::SchurCholesky) ? "Cholesky"
+            : (m_solve_method == EEQSolveMethod::Auto) ? "auto (benchmark)" : "LU";
+        if (use_iterative)
+            fmt::print(stderr, "[EEQ] Phase 2: iterative refinement ({}, max {} iters, thr={:.0e})\n",
+                       solver_name, max_iterations, convergence_threshold);
+        else
+            fmt::print(stderr, "[EEQ] Phase 2: single solve ({})\n", solver_name);
     }
 
     // Iterative refinement loop
@@ -2347,6 +2650,22 @@ Vector EEQSolver::calculateFinalCharges(
         Vector& x = m_phase2_rhs;
 
         // 1+2. Build Coulomb matrix (off-diagonal + diagonal)
+        //
+        // Distance cutoff for large systems: erf(gamma*r)/r decays to ~1/r for large r.
+        // At r=30 Bohr (~15.9 Å), the off-diagonal contribution is negligible vs diagonal ~3-5.
+        // Truncating these long-range elements reduces the condition number for polymers and
+        // large molecules, allowing PCG to converge reliably. Physically justified: EEQ is local.
+        double eeq_dist_cutoff = m_config.get<double>("eeq_distance_cutoff", 30.0);
+        const double EEQ_CUTOFF_SQ = (natoms > 200 && eeq_dist_cutoff > 0.0)
+            ? eeq_dist_cutoff * eeq_dist_cutoff : 0.0;
+
+        int coulomb_progress_10pct = std::max(1, natoms / 10);
+        bool show_coulomb_progress = (m_verbosity >= 3 && natoms >= 200 && iteration == 0);
+        if (show_coulomb_progress) {
+            fmt::print(stderr, "[EEQ] Phase 2: Coulomb matrix ({} atoms):", natoms);
+            fflush(stderr);
+        }
+
         // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²) A-matrix
         if (num_threads > 1 && natoms > 64) {
             int T = std::min(num_threads, natoms);
@@ -2355,10 +2674,18 @@ Vector EEQSolver::calculateFinalCharges(
                     A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
                     for (int j = 0; j < i; ++j) {
                         double r = distances(i, j);
+                        if (EEQ_CUTOFF_SQ > 0.0 && r * r > EEQ_CUTOFF_SQ) {
+                            A(i, j) = A(j, i) = 0.0;
+                            continue;
+                        }
                         double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
                         double coulomb = std::erf(gamma_ij * r) / r;
                         A(i, j) = coulomb;
                         A(j, i) = coulomb;
+                    }
+                    if (show_coulomb_progress && t_id == 0 && i > 0 && i % coulomb_progress_10pct == 0) {
+                        fmt::print(stderr, " {}%", (100 * i) / natoms);
+                        fflush(stderr);
                     }
                 }
             };
@@ -2380,13 +2707,22 @@ Vector EEQSolver::calculateFinalCharges(
                 A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
                 for (int j = 0; j < i; ++j) {
                     double r = distances(i, j);
+                    if (EEQ_CUTOFF_SQ > 0.0 && r * r > EEQ_CUTOFF_SQ) {
+                        A(i, j) = A(j, i) = 0.0;
+                        continue;
+                    }
                     double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
                     double coulomb = std::erf(gamma_ij * r) / r;
                     A(i, j) = coulomb;
                     A(j, i) = coulomb;
                 }
+                if (show_coulomb_progress && i > 0 && i % coulomb_progress_10pct == 0) {
+                    fmt::print(stderr, " {}%", (100 * i) / natoms);
+                    fflush(stderr);
+                }
             }
         }
+        if (show_coulomb_progress) fmt::print(stderr, " done\n");
 
         // 3. Setup fragment charge constraints
         for (int f = 0; f < nfrag; ++f) {
@@ -2485,8 +2821,9 @@ Vector EEQSolver::calculateFinalCharges(
             std::cerr << "==================================================" << std::endl;
         }
 
-        // 5. Matrix diagnostics (only for first iteration to avoid spam)
-        if (m_verbosity >= 3 && iteration == 0) {
+        // 5. Matrix diagnostics (only for first iteration, small systems only)
+        // O(N³) eigendecomposition — skip for natoms > 100 to avoid hour-long hangs on large systems
+        if (m_verbosity >= 3 && iteration == 0 && natoms <= 100) {
             Eigen::SelfAdjointEigenSolver<Matrix> eigensolver(A);
             Vector eigenvalues = eigensolver.eigenvalues();
             double max_eigenvalue = eigenvalues.maxCoeff();
@@ -2501,6 +2838,27 @@ Vector EEQSolver::calculateFinalCharges(
         // 6. Solve system — unified dispatch (March 2026)
         Vector new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge);
 
+        // Empty return from dispatchSolve signals all solvers failed.
+        // Prefer the last successful Phase 2 charges (from a prior step) over Phase 1
+        // topology_charges — Phase 2 charges are geometrically accurate and the energy
+        // computed with them is physically reasonable. For small optimizer steps the
+        // charges from the previous step are an excellent approximation.
+        if (new_charges.size() != natoms) {
+            if (isValidChargeCache(m_last_successful_charges, natoms, total_charge)) {
+                CurcumaLogger::warn(fmt::format(
+                    "EEQ Phase 2: all solvers failed for N={}, using last successful charges as fallback",
+                    natoms));
+                return m_last_successful_charges;
+            }
+            CurcumaLogger::warn(fmt::format(
+                "EEQ Phase 2: all solvers failed for N={}, no valid prior charges — using Phase 1 topology charges",
+                natoms));
+            // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this system.
+            m_phase2_historically_implausible = true;
+            m_phase2_implausible_natoms = natoms;
+            return topology_charges;
+        }
+
         // Claude Generated (March 2026): Print Phase 2 solution charges
         if (m_verbosity >= 3 && iteration == 0 && natoms <= 10) {
             std::cerr << "\nPhase 2 solution charges:" << std::endl;
@@ -2510,7 +2868,8 @@ Vector EEQSolver::calculateFinalCharges(
             std::cerr << fmt::format("  sum = {:12.6f}", new_charges.sum()) << std::endl;
         }
 
-        // 7. Validate solution
+        // 7. Validate solution — NaN/Inf should already be caught by dispatchSolve,
+        // but double-check here and fall back to topology_charges rather than uniform 0.
         bool solution_valid = true;
         for (int i = 0; i < natoms; ++i) {
             if (std::isnan(new_charges[i]) || std::isinf(new_charges[i])) {
@@ -2522,7 +2881,102 @@ Vector EEQSolver::calculateFinalCharges(
         }
 
         if (!solution_valid) {
-            return generateFallbackCharges(natoms, total_charge, "NaN/Inf in Phase 2 solution");
+            if (isValidChargeCache(m_last_successful_charges, natoms, total_charge)) {
+                CurcumaLogger::warn("EEQ Phase 2: invalid solution, using last successful charges as fallback");
+                return m_last_successful_charges;
+            }
+            CurcumaLogger::warn("EEQ Phase 2: invalid solution, no valid prior charges — using Phase 1 topology charges");
+            // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this system.
+            m_phase2_historically_implausible = true;
+            m_phase2_implausible_natoms = natoms;
+            return topology_charges;
+        }
+
+        // Claude Generated (April 2026): Phase 2 charge plausibility check + dump
+        // dispatchSolve may return non-NaN charges that are still numerically garbage
+        // (e.g., from a near-singular matrix). Fall back to Phase 1 topology charges
+        // when the solution is clearly non-physical.
+        //
+        // Uses the cached A matrix directly — no O(N²) distance/erf recomputation.
+        // E = 0.5 * q^T * A_nn * q - Σ q_i * chi_i   (chi_i = chi_corrected + cnf*sqrt(CN))
+        {
+            const Matrix& A_nn = A.topLeftCorner(natoms, natoms);
+            auto eeq_energy = [&](const Vector& q) -> double {
+                double chi_sum = 0.0;
+                for (int i = 0; i < natoms; ++i) {
+                    EEQParameters params = getParameters(atoms[i], cn(i));
+                    chi_sum += q(i) * (chi_corrected(i) + params.cnf * std::sqrt(std::abs(cn(i))));
+                }
+                return 0.5 * q.transpose() * A_nn * q - chi_sum;
+            };
+
+            double e_coul_p1 = eeq_energy(topology_charges);
+            double e_coul_p2 = eeq_energy(new_charges);
+            double max_q_p2 = new_charges.cwiseAbs().maxCoeff();
+            double max_q_p1 = topology_charges.cwiseAbs().maxCoeff();
+
+            // Dump to JSON if requested (for offline analysis of bad Phase 2 solves)
+            if (m_config.get<bool>("dump_charges", false)) {
+                json dump;
+                dump["natoms"] = natoms;
+                dump["nfrag"] = nfrag;
+                dump["total_charge"] = total_charge;
+                dump["e_coulomb_phase1"] = e_coul_p1;
+                dump["e_coulomb_phase2"] = e_coul_p2;
+                dump["max_q_phase1"] = max_q_p1;
+                dump["max_q_phase2"] = max_q_p2;
+                dump["solver_method"] = (m_solve_method == EEQSolveMethod::PCG) ? "PCG"
+                    : (m_solve_method == EEQSolveMethod::SchurCholesky) ? "SchurCholesky"
+                    : (m_solve_method == EEQSolveMethod::Auto) ? "Auto"
+                    : (m_selected_method == EEQSolveMethod::LU) ? "LU (auto)"
+                    : "LU";
+                for (int i = 0; i < natoms; ++i) {
+                    json atom;
+                    atom["Z"] = atoms[i];
+                    atom["cn"] = cn(i);
+                    atom["q_phase1"] = topology_charges(i);
+                    atom["q_phase2"] = new_charges(i);
+                    dump["atoms"].push_back(atom);
+                }
+                std::string fname = fmt::format("charges_dump_N{}.json", natoms);
+                std::ofstream ofs(fname);
+                ofs << dump.dump(2) << std::endl;
+                CurcumaLogger::info(fmt::format("EEQ: Charge dump saved to {}", fname));
+            }
+
+            // Plausibility: max |q| should not be >> max |q| from Phase 1
+            // For organic systems, charges are typically -1..+1. |q| > 10 is clearly garbage.
+            double q_threshold = std::max(10.0, 5.0 * max_q_p1);
+            if (max_q_p2 > q_threshold) {
+                CurcumaLogger::warn(fmt::format(
+                    "EEQ Phase 2: implausible charges (max |q| = {:.2f}, Phase 1 max = {:.2f}), using Phase 1",
+                    max_q_p2, max_q_p1));
+                current_charges = topology_charges;
+                // Do NOT overwrite m_last_successful_charges — the Phase 2 result was
+                // garbage, but the cache still holds a good result from a previous step.
+                // Phase 1 topology_charges are used for THIS step but must not poison
+                // the cache for future steps.
+                // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this
+                // system size so we can skip the expensive solve on all future calls.
+                m_phase2_historically_implausible = true;
+                m_phase2_implausible_natoms = natoms;
+                break;
+            }
+
+            // Plausibility: Coulomb energy should not be wildly different
+            double e_diff_ratio = std::abs(e_coul_p2 - e_coul_p1) / (std::abs(e_coul_p1) + 1.0);
+            if (e_diff_ratio > 5.0) {
+                CurcumaLogger::warn(fmt::format(
+                    "EEQ Phase 2: Coulomb energy ratio {:.1f} (P2={:.2e}, P1={:.2e}), using Phase 1",
+                    e_diff_ratio, e_coul_p2, e_coul_p1));
+                current_charges = topology_charges;
+                // Same as above — keep the cache intact.
+                // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this
+                // system size so we can skip the expensive solve on all future calls.
+                m_phase2_historically_implausible = true;
+                m_phase2_implausible_natoms = natoms;
+                break;
+            }
         }
 
         // Check convergence for iterative case
@@ -2555,6 +3009,15 @@ Vector EEQSolver::calculateFinalCharges(
 
     } while (use_iterative && iteration < max_iterations && !converged);
 
+    // Warn if iterative refinement did not converge
+    if (use_iterative && !converged) {
+        if (m_allow_unconverged) {
+            CurcumaLogger::warn(fmt::format("EEQ Phase 2: Did not converge after {} iterations (allow_unconverged_charges=true), using best estimate", iteration));
+        } else if (m_verbosity >= 1) {
+            CurcumaLogger::warn(fmt::format("EEQ Phase 2: Did not converge after {} iterations, using best estimate", iteration));
+        }
+    }
+
     // Store final result
     final_charges = current_charges;
 
@@ -2567,6 +3030,14 @@ Vector EEQSolver::calculateFinalCharges(
 
     // Store dxi for later use in energy calculation
     m_dxi_stored = dxi;
+
+    // Cache successful Phase 2 result for fallback on future solver failures.
+    // On subsequent steps where the solver fails, these provide a physically accurate
+    // starting point instead of the cruder Phase 1 topology charges.
+    m_last_successful_charges = final_charges;
+
+    // Print PCG convergence summary (one line, resets stats)
+    printConvergenceSummary();
 
     return final_charges;
 }

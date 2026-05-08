@@ -31,6 +31,7 @@
 
 #include "optimizer_driver.h"
 #include "src/core/molecule.h"
+#include "src/core/parameter_macros.h"
 #include <Eigen/Dense>
 #include <memory>
 #include <vector>
@@ -69,6 +70,12 @@ struct ANCCoordinates {
 
     // Generate ANC from model Hessian
     bool generateANC(const Matrix& cartesian_hessian, const Vector& xyz, bool is_linear);
+
+    // Truncated-Lanczos ANC generation for large systems: finds the k_target
+    // largest eigenpairs of the Cartesian Hessian without materializing the
+    // full dense eigendecomposition. Called by generateANC() when n3 is large.
+    bool generateANCLanczos(const Matrix& cartesian_hessian, const Vector& xyz,
+                            bool is_linear, int k_target);
 
     // Transform between coordinate systems
     void getCartesian(Vector& xyz_out) const;
@@ -120,10 +127,11 @@ struct ModelHessianParameters {
 class ANCOptimizer : public OptimizerDriver {
 private:
     // ANC-specific parameters
-    double m_maxdispl = 0.3; // Maximum displacement in ANC (Bohr)
+    double m_maxdispl = 1.0; // Maximum displacement per ANC component (Bohr) — XTB setparam.f90:213
     double m_hlow = 0.01; // Lower frequency cutoff
     double m_hmax = 5.0; // Upper frequency cutoff
-    int m_maxmicro = 25; // Max micro-iterations before ANC regeneration
+    int m_maxmicro = 20; // Max micro-iterations before ANC regeneration (XTB setparam.f90:209)
+    int m_maxmicro_initial = 20; // Initial maxmicro, used as base for ramp-up cap (XTB optimizer.f90:407)
     int m_micro_current = 0; // Current micro-iteration
 
     ModelHessianParameters m_model_hess_params;
@@ -146,23 +154,49 @@ private:
     double m_gnorm_old = 0.0; // Previous gradient norm
     double m_depred = 0.0; // Predicted energy change
 
-    // Convergence parameters (from XTB)
-    double m_ethr = 5e-6; // Energy threshold (Eh)
-    double m_gthr = 1e-3; // Gradient threshold (Eh/Bohr)
-    double m_acc = 1.0; // SCC accuracy scaling
+    // Warm-start vector for Lanczos RF solver (invalidated on ANC regeneration).
+    // Cf. XTB optimizer.f90:691 — steepest-descent start in cycle 1, previous
+    // Ritz vector thereafter. Dramatically reduces Lanczos iteration count.
+    Vector m_last_rf_eigenvector;
+
+    // Tier XL: L-BFGS in ANC subspace (replaces dense hess + RF when nvar > threshold).
+    // nvar > m_anc_lbfgs_threshold: dense hess (nvar x nvar, ~32 MB at nvar=2000) is replaced
+    // by storing the last m_anc_lbfgs_history (s_k, y_k) pairs; H^-1*g via two-loop recursion.
+    // RF mode-following is not available in this tier (only minima, no TS searches).
+    int m_anc_lbfgs_threshold = 2000; // nvar above which to switch to L-BFGS-in-ANC
+    int m_anc_lbfgs_history = 12;     // number of (s,y) pairs stored
+    std::vector<Vector> m_lbfgs_s_int; // step differences in ANC space
+    std::vector<Vector> m_lbfgs_y_int; // gradient differences in ANC space
+    std::vector<double> m_lbfgs_rho_int; // 1/(y·s) values
+    double m_time_lbfgs_step = 0.0;   // timing for L-BFGS step in XL tier
+    int m_lbfgs_step_calls = 0;       // steps taken via L-BFGS
+
+    // Convergence parameters (from XTB, gradient threshold in Eh/Ang).
+    // Note: gradient is converted Eh/Bohr → Eh/Ang in CalculateOptimizationStep
+    // to match the ANC model Hessian units (Eh/Ang²). All gnorm comparisons
+    // (m_gthr, alp thresholds) therefore use Eh/Ang throughout.
+    double m_ethr = 5e-6;    // Energy threshold (Eh)
+    double m_gthr = 1.890e-3; // Gradient threshold (Eh/Ang) — level 0 normal, = 1e-3 Eh/Bohr × A2B
+    double m_acc = 1.0;      // SCC accuracy scaling
 
     // Micro-iteration control
     bool m_needs_anc_regeneration = true;
 
-    // Trust radius (Claude Generated Mar 2026): adaptive step size control.
-    // Limits the RF step norm to prevent overshooting when the model Hessian
-    // is too soft. Updated each iteration based on actual vs. predicted ΔE.
-    // Initial value: 0.05 Bohr = 0.026 Å (conservative start for all methods).
-    double m_trust_radius = 0.05 * 0.529177; // in Å (= 0.05 Bohr)
-
     // Energy tracking for convergence (Bug 3 fix)
     double m_energy_change = 0.0;   // ΔE from last step (Hartree)
     double m_previous_energy = 0.0; // Energy before current step
+
+    // Phase timing accumulators (printed at verbosity >= 2 in Finalize).
+    // Helps identify per-iter hotspots during optimization.
+    double m_time_anc_regen = 0.0;  // ANC regeneration (model Hessian + project + eigendecomp)
+    double m_time_bfgs = 0.0;        // BFGS/Powell Hessian update
+    double m_time_rf_step = 0.0;     // Rational function step (total, for cross-check)
+    double m_time_rf_lanczos = 0.0;  // Lanczos-only time
+    double m_time_rf_fallback = 0.0; // Full-eigendecomp fallback time
+    double m_time_transform = 0.0;   // Gradient transform + cartesian backtransform
+    int m_rf_lanczos_calls = 0;      // Count of Lanczos successful calls
+    int m_rf_fallback_calls = 0;     // Count of full-eigendecomp fallback calls
+    int m_rf_lanczos_iters_total = 0; // Sum of Lanczos iterations used (for avg)
 
 protected:
     // OptimizerDriver interface implementation
@@ -197,9 +231,55 @@ protected:
      * @brief Rational Function step calculation
      * Solves augmented eigenvalue problem for displacement
      * Ported from XTB optimizer.f90:676-729
+     *
+     * For N = nvar+1 >= 50 uses iterative Lanczos (O(N^2) per iter, a few iters total);
+     * for smaller systems or on Lanczos failure, falls back to full SelfAdjointEigenSolver.
      */
     Vector calculateRationalFunctionStep(const Vector& gradient_internal,
                                          const Matrix& hessian_internal);
+
+    /**
+     * @brief Lanczos iteration for the lowest eigenpair of the augmented RF matrix.
+     *
+     * Computes the lowest eigenvalue/eigenvector of the implicit augmented matrix
+     *   A_aug = [[H, g], [g^T, 0]]   (size (nvar+1) x (nvar+1))
+     * using symmetric Lanczos with full reorthogonalization and warm-start.
+     *
+     * The matvec is evaluated implicitly — A_aug is never materialized — which
+     * eliminates an O(nvar^2) matrix allocation + copy per RF call at large nvar.
+     *
+     * Parameters:
+     *   hessian         : nvar x nvar symmetric matrix H
+     *   gradient        : nvar vector g
+     *   start_vector    : normalized initial vector, length nvar+1
+     *   out_eigenvector : Ritz vector on success (length nvar+1)
+     *   out_eigenvalue  : Ritz value on success
+     *   m_max           : max Lanczos iterations (default 100)
+     *   tol             : relative residual threshold (default 1e-6)
+     *
+     * Returns true on convergence. If false, the outputs are undefined.
+     *
+     * Reference: XTB optimizer.f90 solver_sdavidson. Lanczos gives equivalent
+     * convergence on extremal eigenvalues of dense matrices and is simpler.
+     */
+    bool lanczosLowestEigenpair(const Matrix& hessian,
+                                const Vector& gradient,
+                                const Vector& start_vector,
+                                Vector& out_eigenvector,
+                                double& out_eigenvalue,
+                                int m_max = 100,
+                                double tol = 1e-6);
+
+    /**
+     * @brief L-BFGS two-loop recursion in ANC internal space (Tier XL path).
+     *
+     * Replaces the dense hess + RF step when nvar > m_anc_lbfgs_threshold.
+     * Uses the stored (m_lbfgs_s_int, m_lbfgs_y_int, m_lbfgs_rho_int) history.
+     * Returns the L-BFGS search direction (= H^-1 * g, minimizing direction = -result).
+     * On empty history, returns g (caller negates to get steepest-descent).
+     * Reference: Nocedal & Wright Algorithm 7.4 (two-loop recursion).
+     */
+    Vector calculateLBFGSStepInternal(const Vector& gradient);
 
     /**
      * @brief BFGS Hessian update
@@ -269,6 +349,31 @@ public:
     void setModelHessianType(ModelHessianParameters::Type type) {
         m_model_hess_params.model = type;
     }
+
+    // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
+    BEGIN_PARAMETER_DEFINITION(ancopt)
+
+    // Basic optimization parameters
+    PARAM(maxdispl, Double, 1.0, "Maximum displacement per ANC component (Bohr)", "Basic", {"max_displ"})
+    PARAM(hlow, Double, 0.01, "Lower eigenvalue cutoff for ANC basis", "Basic", {})
+    PARAM(hmax, Double, 5.0, "Upper eigenvalue cutoff for ANC basis", "Basic", {})
+    PARAM(maxmicro, Int, 20, "Maximum micro-iterations before ANC regeneration", "Basic", {"max_micro"})
+    PARAM(model_hessian, Int, 1, "Model Hessian type: 0=Lindh_1995 1=Lindh_2007 2=Lindh_D2 3=Swart", "Algorithm", {"hessian_model"})
+    PARAM(hessian_update, Int, 0, "Hessian update method: 0=BFGS 1=Powell", "Algorithm", {})
+
+    // Convergence thresholds (matched to XTB level 0 = 'normal')
+    PARAM(energy_threshold, Double, 5e-6, "Energy convergence threshold (Eh)", "Convergence", {"ethr"})
+    PARAM(gradient_threshold, Double, 1.890e-3, "Gradient convergence threshold (Eh/Ang)", "Convergence", {"gthr"})
+    PARAM(opt_level, Int, 0, "Optimization level 0=normal 1=tight 2=vtight (sets ethr/gthr)", "Convergence", {})
+
+    // Large-system size tiers — thresholds and ANC basis controls (Apr 2026)
+    PARAM(anc_lanczos_threshold, Int, 1800, "n3 = 3*N above which to use truncated Lanczos ANC generation (Tier L). Below: full eigendecomp.", "Advanced", {})
+    PARAM(anc_lanczos_k, Int, 500, "Maximum ANC basis size (nvar cap) for Tier L+ Lanczos path. Bounds dense BFGS cost O(k^2).", "Advanced", {})
+    PARAM(anc_lbfgs_threshold, Int, 2000, "nvar above which to replace dense BFGS+RF with L-BFGS in ANC subspace (Tier XL). RF mode-following disabled.", "Advanced", {})
+    PARAM(anc_lbfgs_history, Int, 12, "Number of (s,y) pairs stored for L-BFGS in ANC subspace (Tier XL)", "Advanced", {})
+
+    END_PARAMETER_DEFINITION
+    // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
 };
 
 } // namespace Optimization

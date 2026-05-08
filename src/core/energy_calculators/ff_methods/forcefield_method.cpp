@@ -64,7 +64,6 @@ ForceFieldMethod::ForceFieldMethod(const std::string& method_name, const json& c
     }
     
     CurcumaLogger::success("ForceFieldMethod created successfully");
-    CurcumaLogger::addCitation("uff");
 }
 
 bool ForceFieldMethod::initializeForceField() {

@@ -706,7 +706,7 @@ json CLI2Json(int argc, char** argv)
                 if ((i + 1) < argc) {
                     try {
                         int verbosity_level = std::stoi(argv[i + 1]);
-                        if (verbosity_level >= 0 && verbosity_level <= 3) {
+                        if (verbosity_level >= 0 && verbosity_level <= 4) {
                             key["verbosity"] = verbosity_level;
                             ++i; // Skip next argument
                             continue;
@@ -1409,6 +1409,12 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
     json energy_controller = controller;
     energy_controller["geometry_file"] = std::string(argv[2]);
 
+    // Set global logger verbosity so GFN-FF and other methods respect -verbosity N
+    if (controller.contains("verbosity")) {
+        int verbosity = std::max(0, std::min(4, controller["verbosity"].get<int>()));
+        CurcumaLogger::set_verbosity(verbosity);
+    }
+
     Molecule molecule(argv[2]);
     EnergyCalculator energy_calc(method, energy_controller);
     energy_calc.setMolecule(molecule.getMolInfo());
@@ -1429,7 +1435,7 @@ int executeOptimization(const json& controller, int argc, char** argv) {
     if (argc < 3) {
         fmt::print("\nUsage: curcuma -opt input.xyz [parameters]\n\n");
         fmt::print("Basic:\n");
-        fmt::print("  -method <name>       Energy method: uff, gfnff, gfn2, eht, ... (default: gfnff)\n");
+        fmt::print("  -method <name>       Energy method: uff, gfnff, gfn2, ... (default: gfnff)\n");
         fmt::print("  -optimizer <name>    Optimization algorithm (default: auto)\n");
         fmt::print("                         auto      - automatic selection based on system size\n");
         fmt::print("                         lbfgspp   - external LBFGSpp library (robust, recommended)\n");
@@ -1437,6 +1443,8 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         fmt::print("                         diis      - native DIIS acceleration (Pulay 1980)\n");
         fmt::print("                         rfo       - native RFO eigenvector following (Banerjee 1985)\n");
         fmt::print("                         ancopt    - approximate normal coordinate optimizer (Grimme)\n");
+        fmt::print("  NOTE: lbfgs, diis, rfo are AI-generated and not yet tested/approved.\n");
+        fmt::print("        Use lbfgspp or ancopt for production calculations.\n");
         fmt::print("  -charge <n>          Molecular charge (default: 0)\n");
         fmt::print("  -spin <n>            Spin multiplicity (default: 0)\n");
         fmt::print("  -threads <n>         Parallel threads (default: 1)\n");
@@ -1485,6 +1493,11 @@ int executeOptimization(const json& controller, int argc, char** argv) {
 
     try {
         auto molecule = std::make_unique<Molecule>(argv[2]);
+        // Apply charge/spin from CLI controller to the molecule before optimization
+        if (controller.contains("charge"))
+            molecule->setCharge(controller["charge"].get<int>());
+        if (controller.contains("spin"))
+            molecule->setSpin(controller["spin"].get<int>());
         std::string method = controller.value("method", "gfnff");
         json energy_controller = controller;
         energy_controller["geometry_file"] = std::string(argv[2]);
@@ -1698,8 +1711,6 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ", "VTF", "MOL2", "SDF", "PDB"}, executeAnalysis}},
     {"rmsd", {"RMSD calculation between structures", "analysis",
               {"XYZ", "VTF", "MOL2", "SDF"}, executeRMSD}},
-    {"rmsdtraj", {"Trajectory RMSD analysis and conformer filtering", "analysis",
-                  {"XYZ", "TRJ"}, executeRMSDTraj}},
     {"sp", {"Single point energy calculation", "calculation",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSinglePoint}},
     {"opt", {"Geometry optimization with various algorithms", "optimization",
@@ -1736,8 +1747,6 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ", "MOL2", "SDF"}, executeGyration}},
     {"dipole", {"Dipole moment optimization and scaling", "calculation",
                 {"XYZ", "MOL2", "SDF"}, executeDipole}},
-    {"modern-opt", {"Modern optimization with Strategy Pattern", "optimization",
-                    {"XYZ", "MOL2", "SDF"}, executeOptimization}},
     {"orca", {"ORCA quantum chemistry software interface", "interface",
               {"INP"}, executeOrca}},
     {"stride", {"Reduce structure count by keeping every N-th image", "analysis",
@@ -1762,7 +1771,7 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ", "MOL2", "SDF"}, executeDistance}},
     {"angle", {"Calculate bond angles between atoms", "analysis",
                {"XYZ", "MOL2", "SDF"}, executeAngle}},
-    {"dMatrix", {"Distance matrix and persistent homology analysis", "analysis",
+    {"dMatrix", {"(deprecated) Use -analysis instead", "analysis",
                  {"XYZ", "VTF"}, executeDMatrix}},
     {"bond", {"Calculate bond length between two atoms", "analysis",
               {"XYZ", "MOL2", "PDB", "SDF"}, executeBond}},
@@ -1797,20 +1806,12 @@ void showStructuredHelp(const std::string& category = "") {
             std::string category_name = cat;
             category_name[0] = std::toupper(category_name[0]);
 
-            std::cout << "📊 " << category_name << " Capabilities:" << std::endl;
+            std::cout << category_name << " Capabilities:" << std::endl;
 
             for (const auto& cap : capabilities) {
                 const auto& info = CAPABILITY_REGISTRY.at(cap);
 
-                // Enhanced formatting with icons
-                std::string icon = "🔬";
-                if (cat == "dynamics") icon = "⚡";
-                else if (cat == "optimization") icon = "🎯";
-                else if (cat == "conformational") icon = "🔄";
-                else if (cat == "docking") icon = "🔗";
-                else if (cat == "calculation") icon = "⚙️";
-
-                std::cout << "  " << icon << " -" << cap
+                std::cout << "  -" << cap
                          << std::string(std::max(1, 18 - static_cast<int>(cap.length())), ' ')
                          << info.description << std::endl;
 
@@ -1826,24 +1827,24 @@ void showStructuredHelp(const std::string& category = "") {
         }
 
         // Enhanced format support section with auto-discovery
-        std::cout << "🗂️ Supported File Formats:" << std::endl;
-        std::cout << "  ┌─────────────────────────────────────────────────────────┐" << std::endl;
-        std::cout << "  │ Atomistic:     XYZ, MOL2, SDF, PDB                     │" << std::endl;
-        std::cout << "  │ Coarse-Grained: VTF (VMD Trajectory Format)            │" << std::endl;
-        std::cout << "  │ Trajectories:   XYZ.trj, VTF multi-timestep           │" << std::endl;
-        std::cout << "  │ All formats work transparently with all capabilities   │" << std::endl;
-        std::cout << "  └─────────────────────────────────────────────────────────┘" << std::endl;
+        std::cout << "Supported File Formats:" << std::endl;
+        std::cout << "  +---------------------------------------------------------+" << std::endl;
+        std::cout << "  | Atomistic:     XYZ, MOL2, SDF, PDB                     |" << std::endl;
+        std::cout << "  | Coarse-Grained: VTF (VMD Trajectory Format)            |" << std::endl;
+        std::cout << "  | Trajectories:   XYZ.trj, VTF multi-timestep           |" << std::endl;
+        std::cout << "  | All formats work transparently with all capabilities   |" << std::endl;
+        std::cout << "  +---------------------------------------------------------+" << std::endl;
         std::cout << std::endl;
 
         // Usage examples
-        std::cout << "💡 Quick Start Examples:" << std::endl;
+        std::cout << "Quick Start Examples:" << std::endl;
         std::cout << "  curcuma -analysis molecule.xyz             # Complete molecular analysis" << std::endl;
         std::cout << "  curcuma -opt protein.pdb -method gfn2      # Quantum optimization" << std::endl;
         std::cout << "  curcuma -casino polymer.vtf -steps 10000   # Casino Monte Carlo simulation" << std::endl;
         std::cout << "  curcuma -traj md_output.xyz -stride 10     # Trajectory analysis" << std::endl;
         std::cout << std::endl;
 
-        std::cout << "📚 Get detailed help: curcuma -help [category]" << std::endl;
+        std::cout << "Get detailed help: curcuma -help [category]" << std::endl;
         std::cout << "   Available categories: ";
         bool first = true;
         for (const auto& [cat, capabilities] : categories) {
@@ -1870,14 +1871,14 @@ void showStructuredHelp(const std::string& category = "") {
             std::string category_name = category;
             category_name[0] = std::toupper(category_name[0]);
 
-            std::cout << "📋 " << category_name << " Capabilities - Detailed Help" << std::endl;
-            std::cout << "══════════════════════════════════════════════════════" << std::endl;
+            std::cout << "== " << category_name << " Capabilities - Detailed Help" << std::endl;
+            std::cout << "======================================================" << std::endl;
             std::cout << std::endl;
 
             for (const auto& cap : found_capabilities) {
                 const auto& info = CAPABILITY_REGISTRY.at(cap);
 
-                std::cout << "🔹 -" << cap << std::endl;
+                std::cout << "  -" << cap << std::endl;
                 std::cout << "   Description: " << info.description << std::endl;
                 std::cout << "   Usage: curcuma -" << cap << " input_file [options]" << std::endl;
                 std::cout << "   Supported formats: ";
@@ -1895,23 +1896,23 @@ void showStructuredHelp(const std::string& category = "") {
 
             // Category-specific examples
             if (category == "analysis") {
-                std::cout << "💡 Analysis Examples:" << std::endl;
+                std::cout << "Analysis Examples:" << std::endl;
                 std::cout << "  curcuma -analysis molecule.xyz -properties all" << std::endl;
                 std::cout << "  curcuma -traj trajectory.vtf -export_timeseries true" << std::endl;
                 std::cout << "  curcuma -rmsd ref.xyz target.xyz" << std::endl;
             } else if (category == "dynamics") {
-                std::cout << "💡 Dynamics Examples:" << std::endl;
+                std::cout << "Dynamics Examples:" << std::endl;
                 std::cout << "  curcuma -md system.xyz -temperature 300 -steps 10000" << std::endl;
                 std::cout << "  curcuma -casino polymer.vtf -move_type mixed -adaptive_step true" << std::endl;
             } else if (category == "optimization") {
-                std::cout << "💡 Optimization Examples:" << std::endl;
+                std::cout << "Optimization Examples:" << std::endl;
                 std::cout << "  curcuma -opt molecule.xyz -method uff" << std::endl;
                 std::cout << "  curcuma -sp system.pdb -method gfn2" << std::endl;
             }
             std::cout << std::endl;
 
         } else {
-            std::cout << "❌ Unknown category: " << category << std::endl;
+            std::cout << "Error: Unknown category: " << category << std::endl;
             std::cout << std::endl;
             std::cout << "Available categories: ";
 
@@ -1932,6 +1933,14 @@ void showStructuredHelp(const std::string& category = "") {
 }
 
 int main(int argc, char **argv) {
+    // RAII guard: prints citation summary and writes BibTeX on any exit path
+    struct CitationGuard {
+        ~CitationGuard() {
+            CitationRegistry::printSummary();
+            CitationRegistry::writeBibTeX();
+        }
+    } citation_guard;
+
 #ifndef _WIN32
 #if __GNUC__
     signal(SIGINT, ctrl_c_handler);
@@ -2130,24 +2139,13 @@ int main(int argc, char **argv) {
     // Try structured dispatch first - Claude Generated
     auto it = CAPABILITY_REGISTRY.find(command);
     if (it != CAPABILITY_REGISTRY.end()) {
-        return it->second.handler(controller, argc, argv);
+        int result = it->second.handler(controller, argc, argv);
+        return result;
     }
 
     // Handle unknown commands
     std::cerr << "Error: Unknown command '-" << command << "'" << std::endl;
     std::cerr << "Use 'curcuma -help' to see available capabilities." << std::endl;
 
-#ifdef C17
-#ifndef _WIN32
-    std::filesystem::remove("stop");
-#endif
-#else
-    remove("stop");
-#endif
-
-    // Print citation summary and write BibTeX file
-    CitationRegistry::printSummary();
-    CitationRegistry::writeBibTeX();
-
-    return 0;
+    return 1;
 }

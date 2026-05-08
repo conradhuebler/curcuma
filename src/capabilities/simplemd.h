@@ -176,6 +176,46 @@ public:
     bool wasStable() const { return !m_unstable; }  ///< Claude Generated: check if MD completed without instability (NaN/Inf)
     void printHelp() const;
 
+    /* ============================================================================
+     * Stepwise MD API (Claude Generated 2026 - Qurcuma interactive simulation)
+     *
+     * Replaces the former callback-based integration. Callers drive the MD loop
+     * themselves by invoking prepareRun() → step() repeatedly → finalizeRun().
+     * Between two step() calls, applyExternalForces() can inject an additive
+     * gradient contribution (e.g. from a user grabbing an atom in a GUI).
+     * ============================================================================ */
+
+    /** Setup phase before the MD loop (thermostat selection, initial energy,
+     *  first trajectory frame, plumed init, console headers). Must be called
+     *  after Initialise(). Safe to call from start(); automatically invoked there. */
+    void prepareRun();
+
+    /** Execute one MD step (position+velocity update, thermostat, rattle, output
+     *  for the current step counter). Returns false when the simulation should
+     *  terminate (m_unstable, maxtime reached, CheckStop()). */
+    bool step();
+
+    /** Final printout, final trajectory frame, plumed/metadynamics finalize,
+     *  curcuma_final.json. Automatically invoked at end of start(). */
+    void finalizeRun();
+
+    /** Add an external per-atom force contribution that will be applied in the
+     *  next step() call (added to m_eigen_gradient before the integrator). The
+     *  contribution is cleared after application. Matrix shape: (natoms, 3) in
+     *  Hartree/Bohr (same units as m_eigen_gradient). */
+    void applyExternalForces(const Geometry& forces);
+
+    // Getters for stepwise GUI feedback
+    const Geometry& positions() const { return m_eigen_geometry; }
+    const Geometry& velocities() const { return m_eigen_velocities; }
+    const Geometry& gradient() const { return m_eigen_gradient; }
+    double potentialEnergy() const { return m_Epot; }
+    double kineticEnergy() const { return m_Ekin; }
+    double currentTemperature() const { return m_T; }
+    int stepCount() const { return m_step; }
+    double currentTime() const { return m_currentStep; }
+    const Molecule& currentMolecule() const { return m_molecule; }
+
 private:
     std::function<void(void)> ThermostatFunction;
     void PrintStatus() const;
@@ -285,6 +325,13 @@ private:
     Geometry m_eigen_geometry, m_eigen_geometry_old, m_eigen_gradient, m_eigen_gradient_old, m_eigen_velocities;
     Vector m_eigen_masses, m_eigen_inv_masses;
 
+    // Stepwise-API state (Claude Generated 2026)
+    Geometry m_external_forces;          // additive per-atom force contribution, cleared after use
+    bool m_external_forces_pending = false;
+    bool m_run_prepared = false;         // true after prepareRun(), false after finalizeRun()
+    bool m_run_aborted = false;          // mirrors former local `aborted` flag in start()
+    std::vector<json> m_run_states;      // rescue states carried across step() calls
+
     std::vector<Geometry> m_bias_structures;
     std::vector<BiasStructure> m_biased_structures;
     std::vector<BiasThread*> m_bias_threads;
@@ -296,7 +343,7 @@ private:
     int m_rattle_dynamic_tol_iter = 100;
     double m_pos_conv = 0, m_scale_velo = 1.0, m_coupling = 10;
     double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
-    double m_rattle_tol_12 = 0.1, m_rattle_tol_13 = 0.5;
+    double m_rattle_tol_12 = 1e-4, m_rattle_tol_13 = 1e-3;
     double m_wall_spheric_radius = 6, m_wall_temp = 298.15, m_wall_beta = 6;
     double m_wall_x_min = 0, m_wall_x_max = 0, m_wall_y_min = 0, m_wall_y_max = 0, m_wall_z_min = 0, m_wall_z_max = 0;
     double m_wall_potential = 0, m_average_wall_potential = 0;
@@ -319,6 +366,13 @@ private:
     int m_rmsd_fragment_count = 0;
     int m_wall_type = 0;
     int m_rattle_counter = 0;
+    // RATTLE diagnostics: accumulated stats per print interval
+    int m_rattle_iters_step1 = 0;    // iterations used in 1st step (position constraints)
+    int m_rattle_iters_step2 = 0;    // iterations used in 2nd step (velocity constraints)
+    int m_rattle_max_err_count = 0;  // how many steps hit max iterations
+    double m_rattle_max_err_12 = 0;  // worst 1-2 constraint error this interval
+    double m_rattle_max_err_13 = 0;  // worst 1-3 constraint error this interval
+    int m_rattle_constrained_atoms = 0; // atoms involved in constraints
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
@@ -415,9 +469,9 @@ private:
     PARAM(rattle, Int, 0, "RATTLE constraint algorithm (0:off, 1:on, 2:H-only).", "RATTLE", {})
     PARAM(rattle_12, Bool, true, "Constrain 1-2 bond distances.", "RATTLE", {})
     PARAM(rattle_13, Bool, false, "Constrain 1-3 distances (angles).", "RATTLE", {})
-    PARAM(rattle_tol_12, Double, 1e-1, "Tolerance for 1-2 constraints.", "RATTLE", {})
-    PARAM(rattle_tol_13, Double, 2.0, "Tolerance for 1-3 constraints.", "RATTLE", {})
-    PARAM(rattle_max_iterations, Int, 50, "Maximum RATTLE iterations.", "RATTLE", {"rattle_maxiter"})
+    PARAM(rattle_tol_12, Double, 1e-4, "Tolerance for 1-2 constraints (squared Bohr).", "RATTLE", {})
+    PARAM(rattle_tol_13, Double, 1e-3, "Tolerance for 1-3 constraints (squared Bohr).", "RATTLE", {})
+    PARAM(rattle_max_iterations, Int, 100, "Maximum RATTLE iterations.", "RATTLE", {"rattle_maxiter"})
 
     // --- Wall Potentials ---
     PARAM(wall_type, String, "none", "Wall type: none|spheric|rect.", "Walls", {"wall"})

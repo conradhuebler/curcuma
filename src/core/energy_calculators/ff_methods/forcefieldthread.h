@@ -40,6 +40,7 @@
 #include "gfnff_geometry.h"  // Claude Generated (2025): GFN-FF geometry functions
 
 #include <functional>
+#include <set>
 #include <vector>
 #include <unordered_map>  // Claude Generated (February 2026): For term timing storage
 #include <chrono>         // Claude Generated (February 2026): For timing measurements
@@ -487,6 +488,8 @@ private:
 protected:
     Matrix m_geometry, m_gradient;
     double m_energy = 0, m_bond_energy = 0.0, m_angle_energy = 0.0, m_dihedral_energy = 0.0, m_inversion_energy = 0.0, m_vdw_energy = 0.0, m_rep_energy = 0.0, m_eq_energy = 0.0;
+    // Verbose-3 cap: count significant torsions per call, log only first 5 (Apr 2026)
+    int m_significant_torsion_count = 0;
 
     // Phase 4: Separate energy components for GFN-FF non-bonded terms
     double m_dispersion_energy = 0.0;  // D3/D4 dispersion
@@ -602,6 +605,11 @@ protected:
         resetMat(m_gradient_batm);
         resetMat(m_gradient_atm);
     }
+
+    // Phase 1.2: Cached bonded pairs for fast lookup in repulsion calculation (Claude Generated - Dec 2025)
+    // Built once in execute() to avoid O(N_bonds × log(N_bonds)) overhead per energy call
+    std::set<std::pair<int, int>> m_bonded_pairs;
+    bool m_bonded_pairs_cached = false;
 
     // Phase 2: Parameter flags for GFN-FF term control (Claude Generated Dec 2025)
     // These control which energy terms are calculated - saves CPU time for disabled terms

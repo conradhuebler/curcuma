@@ -142,7 +142,7 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
     // Handle both legacy verbose and new verbosity parameters for backward compatibility
     if (config.contains("verbosity")) {
         context.verbosity = config["verbosity"].get<int>();
-        if (context.verbosity < 0 || context.verbosity > 3)
+        if (context.verbosity < 0 || context.verbosity > 4)
             context.verbosity = 1;
     } else if (config.contains("verbose")) {
         if (config["verbose"].is_boolean())
@@ -278,21 +278,23 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
     // Optimizer controls its own verbosity level independently.
     // Save+restore global CurcumaLogger level so EnergyCalculator output
     // is also suppressed during silent optimization (verbosity 0).
-    if (verbosity < 0 || verbosity > 3) {
+    if (verbosity < 0 || verbosity > 4) {
         verbosity = 1;
     }
 
     int saved_global_verbosity = CurcumaLogger::get_verbosity();
-    // Suppress all EnergyCalculator output during optimization — the optimizer
-    // prints its own progress table. Restore after optimization.
-    CurcumaLogger::set_verbosity(0);
+    // At verbosity >= 2 (explicitly requested), allow GFN-FF and other energy methods
+    // to print their per-step diagnostic output (timing, decomposition, parameter tables).
+    // At verbosity <= 1 (default), suppress energy method output during the optimization
+    // loop to avoid per-evaluation spam — the optimizer prints its own progress table.
+    CurcumaLogger::set_verbosity(verbosity >= 2 ? verbosity : 0);
     m_context.write_trajectory = write_trajectory;
     m_context.verbosity = verbosity;
 
     m_start_time = std::chrono::high_resolution_clock::now();
 
-    // Optimizer uses fmt::print directly for its own output, controlled by local verbosity.
-    // Global CurcumaLogger is at 0 to suppress EnergyCalculator line-search spam.
+    // Optimizer progress table is output via fmt::print with local verbosity check,
+    // independent of the global CurcumaLogger level.
     if (verbosity >= 1) {
         fmt::print("\n{0: ^{1}} {2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", "Step", 15, "Current Energy", "Energy Change", "RMSD Change", "Gradient Norm", "time");
         fmt::print("{0: ^{1}} {2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", " ", 15, "[Eh]", "[kJ/mol]", "[A]", "[Eh/Bohr]", "[s]");
@@ -316,7 +318,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
                     m_converged = true;
                     m_convergence_reason = "Optimizer reports convergence (zero step)";
                 } else {
-                    CurcumaLogger::warn("Zero optimization step - possible convergence or error");
+                    CurcumaLogger::error("Optimization step is zero - line search or gradient failure");
                 }
                 break;
             }
@@ -372,6 +374,12 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
                 step_start_time = now;
                 logOptimizationStep(m_current_iteration, new_energy, energy_change_kjmol,
                     rmsd_change, new_gradient.norm(), step_time);
+            }
+
+            // Per-step notification: interactive visualization, early stopping
+            if (m_step_callback && !m_step_callback(m_current_iteration, m_molecule, m_current_energy)) {
+                m_convergence_reason = "Stopped by step observer";
+                break;
             }
 
             // Check convergence
@@ -475,11 +483,26 @@ bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, doubl
             // Normal mode: calculate energy with analytical gradient
             energy = m_context.energy_calculator->CalculateEnergy(true);
             if (std::isnan(energy) || std::isinf(energy)) {
+                CurcumaLogger::error_fmt(
+                    "evaluateEnergyAndGradient: energy is NaN/Inf ({:.6e})", energy);
                 return false;
             }
 
             Geometry grad_geom = m_context.energy_calculator->Gradient();
             gradient = Vector::Map(grad_geom.data(), grad_geom.size());
+
+            // Apr 2026 NaN trap: report first NaN component (atom/axis) so the
+            // upstream diagnostic in GFN-FF can correlate with a specific atom.
+            if (!gradient.allFinite()) {
+                int first_bad = -1;
+                for (int i = 0; i < gradient.size(); ++i) {
+                    if (!std::isfinite(gradient(i))) { first_bad = i; break; }
+                }
+                CurcumaLogger::error_fmt(
+                    "evaluateEnergyAndGradient: gradient has NaN/Inf (component={}, atom={}, axis={}; energy={:.6e})",
+                    first_bad, first_bad / 3, first_bad % 3, energy);
+                return false;
+            }
         }
 
         // Apply constraints if specified

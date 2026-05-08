@@ -130,19 +130,16 @@ struct GFNFFRepulsion {
  *
  * Reference: Phase 3 EEQ charges
  * Formula: E_coul = q_i * q_j * erf(gamma_ij * r_ij) / r_ij
- *
- * P3a (Apr 2026): Shrunk from 120→56 bytes.
- * Removed redundant per-atom fields now stored in per-atom vectors:
- *   q_i/q_j → m_eeq_charges (dynamic EEQ charges)
- *   chi_i/chi_j → computed as chi_base + cnf*sqrt(cn) at runtime
- *   gam_i/gam_j → m_coulomb_gam per-atom vector
- *   alp_i/alp_j → m_coulomb_alp per-atom vector
  */
 struct GFNFFCoulomb {
     int i = 0, j = 0;
+    double q_i = 0.0, q_j = 0.0;
     double gamma_ij = 0.0;
+    double chi_i = 0.0, chi_j = 0.0;
     double chi_base_i = 0.0, chi_base_j = 0.0;
     double cnf_i = 0.0, cnf_j = 0.0;
+    double gam_i = 0.0, gam_j = 0.0;
+    double alp_i = 0.0, alp_j = 0.0;
     double r_cut = 50.0;
 };
 
@@ -273,10 +270,6 @@ struct GFNFFParameterSet {
     // Charges
     Eigen::VectorXd eeq_charges;
     Eigen::VectorXd topology_charges;
-
-    // P3a (Apr 2026): Per-atom Coulomb self-energy parameters (extracted from pairs)
-    Eigen::VectorXd eeq_gam;    ///< Per-atom chemical hardness (charge-corrected)
-    Eigen::VectorXd eeq_alp;    ///< Per-atom alpha (charge-corrected)
 
     // Metadata
     std::string dispersion_method = "d4";

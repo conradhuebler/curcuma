@@ -66,6 +66,7 @@ int ForceFieldThread::execute()
     m_dihedral_energy = 0;
     m_angle_energy = 0;
     m_bond_energy = 0.0;
+    m_significant_torsion_count = 0;
 
     // CRITICAL FIX (Nov 2025): Reset GFN-FF pairwise energy terms
     // These were missing, causing energy accumulation across Calculate() calls
@@ -83,8 +84,7 @@ int ForceFieldThread::execute()
     m_atm_energy = 0.0;  // Claude Generated (Dec 2025): Reset ATM three-body dispersion
     m_batm_energy = 0.0;  // Claude Generated (Jan 17, 2026): Reset batm three-body energy - CRITICAL FIX
 
-    // Phase 1.1: Guard debug output with verbosity check (Claude Generated - Dec 2025)
-    if (CurcumaLogger::get_verbosity() >= 3) {
+    if (CurcumaLogger::get_verbosity() >= 4) {
         CurcumaLogger::info(fmt::format("ForceFieldThread {} executing (method={})", m_thread, m_method));
     }
 
@@ -97,9 +97,21 @@ int ForceFieldThread::execute()
         // CalculateUFFBondContribution();
         CalculateQMDFFAngleContribution();
     } else if (m_method == 3) {
-        // Phase 1.1: Guard debug output with verbosity check (Claude Generated - Dec 2025)
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        if (CurcumaLogger::get_verbosity() >= 4) {
             CurcumaLogger::info(fmt::format("GFN-FF energy calculation started in thread {}", m_thread));
+        }
+
+        // Phase 1.2: Build bonded pairs cache ONCE for fast lookup (Claude Generated - Dec 2025)
+        if (!m_bonded_pairs_cached && m_gfnff_bonds.size() > 0) {
+            m_bonded_pairs.clear();
+            for (const auto& bond : m_gfnff_bonds) {
+                m_bonded_pairs.insert({bond.i, bond.j});
+                m_bonded_pairs.insert({bond.j, bond.i});  // symmetric
+            }
+            m_bonded_pairs_cached = true;
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("Cached {} bonded pairs", m_bonded_pairs.size()));
+            }
         }
 
         // Claude Generated (February 2026): Wrap all energy term calculations with timing
@@ -150,14 +162,14 @@ int ForceFieldThread::execute()
 
         // Claude Generated (December 19, 2025): Native D3/D4 dispersion calculation for GFN-FF
         if (m_d3_dispersions.size() > 0) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
+            if (CurcumaLogger::get_verbosity() >= 4) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} D3 dispersion pairs", m_thread, m_d3_dispersions.size()));
             }
             runWithGradCapture("d3_dispersion", [this]() { CalculateD3DispersionContribution(); }, m_gradient_dispersion);
         }
 
         if (m_d4_dispersions.size() > 0) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
+            if (CurcumaLogger::get_verbosity() >= 4) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} D4 dispersion pairs", m_thread, m_d4_dispersions.size()));
             }
             runWithGradCapture("d4_dispersion", [this]() { CalculateD4DispersionContribution(); }, m_gradient_dispersion);
@@ -165,7 +177,7 @@ int ForceFieldThread::execute()
 
         // ATM three-body dispersion (D3/D4)
         if (!m_atm_triples.empty()) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
+            if (CurcumaLogger::get_verbosity() >= 4) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} ATM triples", m_thread, m_atm_triples.size()));
             }
             // Claude Generated (Mar 2026): ATM captured in own component for structural
@@ -180,7 +192,7 @@ int ForceFieldThread::execute()
 
         // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
         if (!m_gfnff_batms.empty()) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
+            if (CurcumaLogger::get_verbosity() >= 4) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} batm triples", m_thread, m_gfnff_batms.size()));
             }
             runWithGradCapture("batm", [this]() { CalculateGFNFFBatmContribution(); }, m_gradient_batm);
@@ -190,7 +202,7 @@ int ForceFieldThread::execute()
             runWithGradCapture("storsions", [this]() { CalculateGFNFFSTorsionContribution(); }, m_gradient_torsion);
         }
 
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        if (CurcumaLogger::get_verbosity() >= 4) {
             CurcumaLogger::info(fmt::format("Thread {}: Bond={:.6f}, Angle={:.6f}, Torsion={:.6f}, Rep={:.6f}, Coul={:.6f}, Disp={:.6f}, Batm={:.6f}",
                 m_thread, m_bond_energy, m_angle_energy, m_dihedral_energy,
                 m_rep_energy, m_coulomb_energy, m_dispersion_energy, m_batm_energy));
@@ -969,15 +981,16 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
         double energy = k_b * exp_term;          // k_b already contains sign
         m_bond_energy += energy * factor;
 
-        // Claude Generated (Feb 14, 2026): Per-bond CSV diagnostic for parameter comparison
-        // Format matches Fortran analyzer "b" mode output for direct comparison
+        // Bond CSV diagnostic (Feb 14, 2026, capped Apr 2026 to first 5 + count)
         if (CurcumaLogger::get_verbosity() >= 3) {
             if (index == 0) {
-                CurcumaLogger::info("BOND_CSV: idx, atom_i, atom_j, Z_i, Z_j, rij, r0, fc, alpha, fqq, energy");
+                CurcumaLogger::info("BOND_CSV (first 5 of N): idx, atom_i, atom_j, Z_i, Z_j, rij, r0, fc, alpha, fqq, energy");
             }
-            CurcumaLogger::info(fmt::format("BOND_CSV: {:3d}, {:3d}, {:3d}, {:2d}, {:2d}, {:.6f}, {:.6f}, {:.9f}, {:.9f}, {:.6f}, {:.12f}",
-                                             index, bond.i, bond.j, bond.z_i, bond.z_j,
-                                             rij, r0_ij, k_b, alpha, bond.fqq, energy * factor));
+            if (index < 5) {
+                CurcumaLogger::info(fmt::format("BOND_CSV: {:3d}, {:3d}, {:3d}, {:2d}, {:2d}, {:.6f}, {:.6f}, {:.9f}, {:.9f}, {:.6f}, {:.12f}",
+                                                 index, bond.i, bond.j, bond.z_i, bond.z_j,
+                                                 rij, r0_ij, k_b, alpha, bond.fqq, energy * factor));
+            }
         }
 
         if (m_calculate_gradient) {
@@ -1101,8 +1114,8 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
         double r_ij_sq = (i - j).squaredNorm();  // r_ij²
         double r_jk_sq = (k - j).squaredNorm();  // r_jk²
 
-        // Angle geometry logging - Claude Generated 2025-11-30, extended Feb 2026
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        // Angle geometry logging — capped Apr 2026 (first 5 of N angles)
+        if (CurcumaLogger::get_verbosity() >= 3 && index < 5) {
             double r_ij = std::sqrt(r_ij_sq);
             double r_jk = std::sqrt(r_jk_sq);
             CurcumaLogger::info(fmt::format(
@@ -1159,13 +1172,10 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
         double angle_contribution = energy * damp * factor;
         m_angle_energy += angle_contribution;
 
-        // DEBUG LOGGING - Claude Generated 2025-11-30, extended Feb 2026
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format(
-                "  → energy_raw={:.10f} Eh, damp_ij={:.8f}, damp_jk={:.8f}, damp_total={:.8f}, "
-                "factor={:.6f}, contribution={:.10f} Eh, cumulative={:.10f} Eh",
-                energy, damp_ij, damp_jk, damp, factor, angle_contribution, m_angle_energy));
-        }
+        // Per-angle dump removed Apr 2026 — produced N_angles lines per Calculate()
+        // call (× threads × steps), unusable for any system beyond a few atoms.
+        // For per-angle inspection use a debugger or temporarily wrap a specific
+        // dihedral.i match.
 
         if (m_calculate_gradient) {
             // ===== COMPLETE GRADIENT WITH DAMPING DERIVATIVES =====
@@ -1334,17 +1344,18 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
 
         primary_torsion_energy += energy * m_dihedral_scaling;  // Claude Generated (Jan 2, 2026): Accumulate primary
 
-        // Torsion geometry analysis (December 2025) - Significant energy torsions
-        if (std::abs(energy) > 1e-4) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("\nSignificant Torsion analysis (Atom {}-{}-{}-{}):",
-                                                 dihedral.i, dihedral.j, dihedral.k, dihedral.l));
-                CurcumaLogger::info(fmt::format("  phi_actual = {:.2f}°", phi * 180.0 / M_PI));
-                CurcumaLogger::info(fmt::format("  phi0 = {:.2f}°", phi0 * 180.0 / M_PI));
-                CurcumaLogger::info(fmt::format("  n = {:.0f}", n));
-                CurcumaLogger::info(fmt::format("  V = {:.6f} Eh", V));
-                CurcumaLogger::info(fmt::format("  damp = {:.6f}", damp));
-                CurcumaLogger::info(fmt::format("  Energy = {:.6f} Eh\n", energy));
+        // Torsion geometry analysis (Dec 2025, capped Apr 2026) — log first 5
+        // significant torsions then count, otherwise this prints 7×N_significant
+        // lines per Calculate() call.
+        if (std::abs(energy) > 1e-4 && CurcumaLogger::get_verbosity() >= 3) {
+            ++m_significant_torsion_count;
+            if (m_significant_torsion_count <= 5) {
+                CurcumaLogger::info(fmt::format(
+                    "Torsion {}-{}-{}-{}: phi={:.1f}° phi0={:.1f}° n={:.0f} V={:.4f} damp={:.4f} E={:.6f} Eh",
+                    dihedral.i, dihedral.j, dihedral.k, dihedral.l,
+                    phi * 180.0 / M_PI, phi0 * 180.0 / M_PI, n, V, damp, energy));
+            } else if (m_significant_torsion_count == 6) {
+                CurcumaLogger::info("  ... (further significant torsions counted only)");
             }
         }
 
@@ -2137,15 +2148,14 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
     // The kJ/mol conversion factor was incorrect - all quantities should be in Hartree
     // Reference: gfnff_par.h chi_gam_alp_cnf_angewChem2020 arrays are in Hartree
 
-    // Verify EEQ charges before Coulomb energy calculation (Nov 2025)
-    // P3a (Apr 2026): Charges are now accessed via eeq_q(), not from struct
-    if (CurcumaLogger::get_verbosity() >= 1 && m_gfnff_coulombs.size() > 0) {
+    // EEQ charge verification (per-pair diagnostic)
+    if (CurcumaLogger::get_verbosity() >= 4 && m_gfnff_coulombs.size() > 0) {
         CurcumaLogger::info("=== Coulomb Energy Calculation: EEQ Charge Verification ===");
         for (int idx = 0; idx < std::min((int)m_gfnff_coulombs.size(), 10); ++idx) {
             const auto& coul = m_gfnff_coulombs[idx];
-            CurcumaLogger::param(fmt::format("Coulomb[{}] i={}, j={}",
+            CurcumaLogger::param(fmt::format("Coulomb[{}] q_i(atom{}), q_j(atom{})",
                                              idx, coul.i, coul.j),
-                                 fmt::format("q_i={:.8f}, q_j={:.8f}", eeq_q(coul.i), eeq_q(coul.j)));
+                                 fmt::format("{:.8f}, {:.8f}", coul.q_i, coul.q_j));
         }
         if (m_gfnff_coulombs.size() > 10) {
             CurcumaLogger::param("...", fmt::format("{} more coulomb pairs", m_gfnff_coulombs.size() - 10));
@@ -2153,15 +2163,9 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
 
         double max_charge = 0.0;
         for (const auto& coul : m_gfnff_coulombs) {
-            max_charge = std::max({max_charge, std::abs(eeq_q(coul.i)), std::abs(eeq_q(coul.j))});
+            max_charge = std::max({max_charge, std::abs(coul.q_i), std::abs(coul.q_j)});
         }
         CurcumaLogger::param("max_absolute_charge", fmt::format("{:.8e}", max_charge));
-
-        if (max_charge < 1e-10) {
-            CurcumaLogger::info("ℹ️  All EEQ partial charges near zero (typical for homonuclear molecules like H₂, Cl₂)");
-        } else {
-            CurcumaLogger::success(fmt::format("✅ Charges up to {:.2e} found - Coulomb energy should be non-zero", max_charge));
-        }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_coulombs.size() > 0) {
@@ -2188,9 +2192,17 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
         if (rij > coul.r_cut || rij < 1e-10) continue;
 
         // Use dynamic EEQ charges via pointer or local copy, fall back to static if unavailable or NaN
-        // P3a (Apr 2026): Use dynamic EEQ charges directly (no static fallback in struct)
-        double qi = eeq_q(coul.i);
-        double qj = eeq_q(coul.j);
+        double qi = coul.q_i;
+        double qj = coul.q_j;
+        const bool have_eeq = m_eeq_charges_ptr ? (m_eeq_charges_ptr->size() > 0) : (m_eeq_charges.size() > 0);
+        if (have_eeq) {
+            qi = eeq_q(coul.i);
+            qj = eeq_q(coul.j);
+            if (std::isnan(qi) || std::isnan(qj)) {
+                qi = coul.q_i;
+                qj = coul.q_j;
+            }
+        }
 
         // Pairwise: E_pair = q_i * q_j * erf(γ_ij*r) / r
         double gamma_r = coul.gamma_ij * rij;
@@ -2348,6 +2360,7 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
 
     //CurcumaLogger::error(fmt::format("Thread {} calculating {} hydrogen bonds", m_thread, m_gfnff_hbonds.size()));
 
+    int hb_log_count = 0;
     for (const auto& hb : m_gfnff_hbonds) {
         // Get atom positions
         Eigen::Vector3d pos_A = geom().row(hb.i).transpose();
@@ -2637,13 +2650,14 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
 
         m_energy_hbond += E_HB * m_final_factor;
 
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        if (CurcumaLogger::get_verbosity() >= 3 && hb_log_count < 5) {
             CurcumaLogger::info(fmt::format(
-                "  HB({}-{}-{}): r_AB={:.3f} Bohr, E={:.6e} Eh",
-                hb.i, hb.j, hb.k, r_AB, E_HB * m_final_factor));
-            CurcumaLogger::info(fmt::format(
-                "    DEBUG: bas={:.6f}, aci={:.6f}, rdamp={:.6e}, qhoutl={:.6f}, case={}",
+                "  HB({}-{}-{}): r_AB={:.3f} Bohr, E={:.6e} Eh, bas={:.4f}, aci={:.4f}, rdamp={:.4e}, qhoutl={:.4f}, case={}",
+                hb.i, hb.j, hb.k, r_AB, E_HB * m_final_factor,
                 bas, aci, rdamp, qhoutl, hb.case_type));
+            ++hb_log_count;
+            if (hb_log_count == 5)
+                CurcumaLogger::info(fmt::format("  ... ({} more H-bonds counted, not logged)", m_gfnff_hbonds.size() - 5));
         }
 
         // ========== ANALYTICAL GRADIENT CALCULATION ==========

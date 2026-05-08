@@ -3,6 +3,7 @@
 //
 
 #include "orcainterface.h"
+#include "src/core/citation_registry.h"
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -59,6 +60,7 @@ bool OrcaInterface::executeOrcaProcess()
 
 bool OrcaInterface::runOrca()
 {
+    CitationRegistry::cite("orca");
     // Starten Sie den ORCA-Prozess und warten Sie auf das Ergebnis
     std::cout << "Starte ORCA..." << std::endl;
     if (executeOrcaProcess()) {

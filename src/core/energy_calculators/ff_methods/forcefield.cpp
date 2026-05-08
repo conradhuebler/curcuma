@@ -472,33 +472,32 @@ void ForceField::setGFNFFParameters(const GFNFFParameterSet& params)
     m_gfnff_nonbonded_repulsions = params.nonbonded_repulsions;
     m_gfnff_coulombs = params.coulombs;
 
-    // Extract per-atom Coulomb parameters from pairs and parameter set (for TERM 2+3 self-energy)
-    // P3a (Apr 2026): chi_base/cnf from pairs; gam/alp from per-atom vectors
+    // Extract per-atom Coulomb parameters from pairs (for TERM 2+3 self-energy)
+    // Same logic as setGFNFFCoulombs() — needed for parent-level computation
     m_coulomb_chi_base = Vector::Zero(m_natoms);
     m_coulomb_gam = Vector::Zero(m_natoms);
     m_coulomb_alp = Vector::Zero(m_natoms);
     m_coulomb_cnf = Vector::Zero(m_natoms);
+    m_coulomb_chi_static = Vector::Zero(m_natoms);
     {
-        // Per-atom chi_base and cnf extracted from Coulomb pairs
         std::vector<bool> atom_seen(m_natoms, false);
         for (const auto& coul : m_gfnff_coulombs) {
             if (!atom_seen[coul.i]) {
                 m_coulomb_chi_base(coul.i) = coul.chi_base_i;
+                m_coulomb_gam(coul.i) = coul.gam_i;
+                m_coulomb_alp(coul.i) = coul.alp_i;
                 m_coulomb_cnf(coul.i) = coul.cnf_i;
+                m_coulomb_chi_static(coul.i) = coul.chi_i;
                 atom_seen[coul.i] = true;
             }
             if (!atom_seen[coul.j]) {
                 m_coulomb_chi_base(coul.j) = coul.chi_base_j;
+                m_coulomb_gam(coul.j) = coul.gam_j;
+                m_coulomb_alp(coul.j) = coul.alp_j;
                 m_coulomb_cnf(coul.j) = coul.cnf_j;
+                m_coulomb_chi_static(coul.j) = coul.chi_j;
                 atom_seen[coul.j] = true;
             }
-        }
-        // Per-atom gam and alp from parameter set vectors (P3a: no longer in pair struct)
-        if (params.eeq_gam.size() == m_natoms) {
-            m_coulomb_gam = params.eeq_gam;
-        }
-        if (params.eeq_alp.size() == m_natoms) {
-            m_coulomb_alp = params.eeq_alp;
         }
     }
 
@@ -1064,45 +1063,56 @@ void ForceField::setGFNFFCoulombs(const json& coulombs)
     }
 
     m_gfnff_coulombs.clear();
-    // Per-atom vectors: extract from JSON directly (P3a: no longer stored in struct)
-    m_coulomb_chi_base = Vector::Zero(m_natoms);
-    m_coulomb_gam = Vector::Zero(m_natoms);
-    m_coulomb_alp = Vector::Zero(m_natoms);
-    m_coulomb_cnf = Vector::Zero(m_natoms);
-    std::vector<bool> atom_seen(m_natoms, false);
-
     for (int i = 0; i < coulombs.size(); ++i) {
         json coul_json = coulombs[i].get<json>();
         GFNFFCoulomb coul;
 
         coul.i = coul_json["i"];
         coul.j = coul_json["j"];
+        coul.q_i = coul_json["q_i"];
+        coul.q_j = coul_json["q_j"];
         coul.gamma_ij = coul_json["gamma_ij"];
-        // P3a (Apr 2026): chi_base/cnf remain in struct; gam/alp/chi_static extracted to per-atom vectors
-        // Backward compat: legacy files may have chi_i which equals chi_base + cnf*sqrt(cn)
-        double chi_i_legacy = coul_json.value("chi_i", 0.0);
-        double chi_j_legacy = coul_json.value("chi_j", 0.0);
-        coul.chi_base_i = coul_json.value("chi_base_i", chi_i_legacy);  // Fall back to static chi for legacy files
-        coul.chi_base_j = coul_json.value("chi_base_j", chi_j_legacy);
+        coul.chi_i = coul_json.value("chi_i", 0.0);      // Default to 0 if missing (backward compat)
+        coul.chi_j = coul_json.value("chi_j", 0.0);
+        // Claude Generated (Feb 22, 2026): Dynamic Coulomb chi reconstruction fields
+        // chi_base = -chi+dxi (WITHOUT cnf*sqrt(cn)), cnf = per-atom CN correction factor
+        // Falls back to static chi_i/chi_j and cnf=0 for legacy parameter files
+        coul.chi_base_i = coul_json.value("chi_base_i", coul.chi_i);
+        coul.chi_base_j = coul_json.value("chi_base_j", coul.chi_j);
         coul.cnf_i = coul_json.value("cnf_i", 0.0);
         coul.cnf_j = coul_json.value("cnf_j", 0.0);
+        coul.gam_i = coul_json.value("gam_i", 0.0);      // Chemical hardness
+        coul.gam_j = coul_json.value("gam_j", 0.0);
+        coul.alp_i = coul_json.value("alp_i", 0.0);
+        coul.alp_j = coul_json.value("alp_j", 0.0);
         coul.r_cut = coul_json.value("r_cut", 50.0);
 
         m_gfnff_coulombs.push_back(coul);
+    }
 
-        // Extract per-atom parameters from JSON (not from struct)
+    // Claude Generated (Feb 23, 2026): Extract per-atom Coulomb parameters from pairs
+    // for parent-level TERM 2+3 (thread-count-independent self-energy computation)
+    m_coulomb_chi_base = Vector::Zero(m_natoms);
+    m_coulomb_gam = Vector::Zero(m_natoms);
+    m_coulomb_alp = Vector::Zero(m_natoms);
+    m_coulomb_cnf = Vector::Zero(m_natoms);
+    m_coulomb_chi_static = Vector::Zero(m_natoms);
+    std::vector<bool> atom_seen(m_natoms, false);
+    for (const auto& coul : m_gfnff_coulombs) {
         if (!atom_seen[coul.i]) {
             m_coulomb_chi_base(coul.i) = coul.chi_base_i;
-            m_coulomb_gam(coul.i) = coul_json.value("gam_i", 0.0);
-            m_coulomb_alp(coul.i) = coul_json.value("alp_i", 0.0);
+            m_coulomb_gam(coul.i) = coul.gam_i;
+            m_coulomb_alp(coul.i) = coul.alp_i;
             m_coulomb_cnf(coul.i) = coul.cnf_i;
+            m_coulomb_chi_static(coul.i) = coul.chi_i;
             atom_seen[coul.i] = true;
         }
         if (!atom_seen[coul.j]) {
             m_coulomb_chi_base(coul.j) = coul.chi_base_j;
-            m_coulomb_gam(coul.j) = coul_json.value("gam_j", 0.0);
-            m_coulomb_alp(coul.j) = coul_json.value("alp_j", 0.0);
+            m_coulomb_gam(coul.j) = coul.gam_j;
+            m_coulomb_alp(coul.j) = coul.alp_j;
             m_coulomb_cnf(coul.j) = coul.cnf_j;
+            m_coulomb_chi_static(coul.j) = coul.chi_j;
             atom_seen[coul.j] = true;
         }
     }
@@ -2084,28 +2094,26 @@ json ForceField::exportCurrentParameters() const
     }
 
     // Claude Generated (December 2025): Export GFN-FF Coulomb parameters
-    // P3a (Apr 2026): Redundant per-atom fields removed from struct; per-atom data in vectors
     if (!m_gfnff_coulombs.empty()) {
         json coulombs = json::array();
         for (const auto& coul : m_gfnff_coulombs) {
             json c;
             c["i"] = coul.i;
             c["j"] = coul.j;
+            c["q_i"] = coul.q_i;
+            c["q_j"] = coul.q_j;
             c["gamma_ij"] = coul.gamma_ij;
+            c["chi_i"] = coul.chi_i;
+            c["chi_j"] = coul.chi_j;
             c["chi_base_i"] = coul.chi_base_i;
             c["chi_base_j"] = coul.chi_base_j;
             c["cnf_i"] = coul.cnf_i;
             c["cnf_j"] = coul.cnf_j;
+            c["gam_i"] = coul.gam_i;
+            c["gam_j"] = coul.gam_j;
+            c["alp_i"] = coul.alp_i;
+            c["alp_j"] = coul.alp_j;
             c["r_cut"] = coul.r_cut;
-            // Per-atom data from vectors (for backward-compatible JSON export)
-            if (coul.i < m_eeq_charges.size()) c["q_i"] = m_eeq_charges(coul.i);
-            if (coul.j < m_eeq_charges.size()) c["q_j"] = m_eeq_charges(coul.j);
-            if (coul.i < m_coulomb_gam.size()) c["gam_i"] = m_coulomb_gam(coul.i);
-            if (coul.j < m_coulomb_gam.size()) c["gam_j"] = m_coulomb_gam(coul.j);
-            if (coul.i < m_coulomb_alp.size()) c["alp_i"] = m_coulomb_alp(coul.i);
-            if (coul.j < m_coulomb_alp.size()) c["alp_j"] = m_coulomb_alp(coul.j);
-            if (coul.i < m_coulomb_chi_base.size()) c["chi_i"] = m_coulomb_chi_base(coul.i) + coul.cnf_i * std::sqrt(std::max(m_cn.size() > 0 ? m_cn(coul.i) : 0.0, 0.0));
-            if (coul.j < m_coulomb_chi_base.size()) c["chi_j"] = m_coulomb_chi_base(coul.j) + coul.cnf_j * std::sqrt(std::max(m_cn.size() > 0 ? m_cn(coul.j) : 0.0, 0.0));
             coulombs.push_back(c);
         }
         output["gfnff_coulombs"] = coulombs;
@@ -2456,8 +2464,13 @@ double ForceField::Calculate(bool gradient)
         }
     }
 
+    auto t_ff_start = std::chrono::high_resolution_clock::now();
+    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
+    double t_thread_reset = 0.0, t_pool = 0.0, t_accumulate = 0.0, t_self_energy = 0.0, t_chainrule = 0.0;
+
     // Claude Generated (Mar 2026): GFN-FF threads use pointer-based sharing — only reset accumulators.
     // UFF/QMDFF threads still copy geometry (no pointer set).
+    auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (m_method == "gfnff") {
         for (int i = 0; i < m_stored_threads.size(); ++i) {
             m_stored_threads[i]->resetForStep(gradient);
@@ -2466,6 +2479,9 @@ double ForceField::Calculate(bool gradient)
         for (int i = 0; i < m_stored_threads.size(); ++i) {
             m_stored_threads[i]->UpdateGeometry(m_geometry, gradient);
         }
+    }
+    if (do_timing) {
+        t_thread_reset = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
     }
 
     // Claude Generated (Mar 2026): Duplicate CN calculation removed — Phase 0 optimization.
@@ -2480,7 +2496,12 @@ double ForceField::Calculate(bool gradient)
     m_threadpool->Reset();
     m_threadpool->setActiveThreadCount(m_threads);
 
+    t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     m_threadpool->StartAndWait();
+    if (do_timing) {
+        t_pool = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+        m_t_pool_wall = t_pool;
+    }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("DEBUG Calculate: All threads completed successfully");
@@ -2488,8 +2509,11 @@ double ForceField::Calculate(bool gradient)
     // m_threadpool->setWakeUp(m_threadpool->WakeUp() / 2);
 
     // Claude Generated (February 2026): Accumulate individual term timings from all threads
-    std::unordered_map<std::string, long long> total_term_timings;
+    // Claude Generated (May 2026): Aliased to member variable for external access (GFN-FF unified report).
+    m_term_timings_aggregate.clear();
+    auto& total_term_timings = m_term_timings_aggregate;
 
+    t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     for (int i = 0; i < m_stored_threads.size(); ++i) {
         // Accumulate timing data
         const auto& thread_timings = m_stored_threads[i]->getTermTimings();
@@ -2579,6 +2603,9 @@ double ForceField::Calculate(bool gradient)
 
         m_gradient += m_stored_threads[i]->Gradient();
     }
+    if (do_timing) {
+        t_accumulate = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    }
 
     // =========================================================================
     // Claude Generated (Feb 23, 2026): TERM 2+3 Coulomb self-energy (sequential, thread-count-independent)
@@ -2586,6 +2613,7 @@ double ForceField::Calculate(bool gradient)
     // Moved out of threads to eliminate atom_to_params coupling with pair distribution.
     // O(N) — negligible cost compared to O(N²) pairwise TERM 1 in threads.
     // =========================================================================
+    t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if ((m_method == "gfnff") &&
         m_coulomb_gam.size() == m_natoms && m_eeq_charges.size() == m_natoms) {
         const double sqrt_2_over_pi = 0.797884560802865;
@@ -2598,12 +2626,11 @@ double ForceField::Calculate(bool gradient)
             double q = m_eeq_charges(i);
             if (std::isnan(q)) continue;
             // Dynamic chi_eff = chi_base + cnf * sqrt(cn_current)
-            // P3a (Apr 2026): Fallback uses chi_base directly (equivalent to chi_static when cnf=0)
             double chi;
             if (m_coulomb_cnf(i) != 0.0 && has_cn) {
                 chi = m_coulomb_chi_base(i) + m_coulomb_cnf(i) * std::sqrt(std::max(m_cn(i), 0.0));
             } else {
-                chi = m_coulomb_chi_base(i);
+                chi = m_coulomb_chi_static(i);
             }
             E_en -= q * chi;
             E_self += 0.5 * q * q * (m_coulomb_gam(i) + sqrt_2_over_pi / std::sqrt(m_coulomb_alp(i)));
@@ -2644,6 +2671,9 @@ double ForceField::Calculate(bool gradient)
             }
         }
     }
+    if (do_timing) {
+        t_self_energy = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    }
 
     // Claude Generated (Feb 15, 2026): Apply dE/dCN chain-rule gradient for bond dr0/dCN and dispersion dC6/dCN
     // Reference: Fortran gfnff_engrad.F90:973-974 (bond), gfnff_gdisp0.f90:393-395 (dispersion)
@@ -2654,6 +2684,7 @@ double ForceField::Calculate(bool gradient)
     // Claude Generated (March 2026): TERM 1b (Coulomb charge derivative) merged into single pass
     // Combined: gradient += dcn * (dEdcn_total - qtmp) instead of two separate matvec passes
     // Saves 3 sparse matvecs per gradient evaluation for gfnff
+    t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (gradient && !m_dcn.empty() && m_dcn.size() == 3) {
         Vector dEdcn_total = Vector::Zero(m_natoms);
         for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
@@ -2726,6 +2757,10 @@ double ForceField::Calculate(bool gradient)
             }
         }
     }
+    if (do_timing) {
+        t_chainrule = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+        m_t_chainrule = t_chainrule;
+    }
 
     // Claude Generated: CG pair interaction calculations (spherical implementation)
     // Only calculated for CG methods (method type 4)
@@ -2763,10 +2798,11 @@ double ForceField::Calculate(bool gradient)
     // Claude Generated (Jan 25, 2026): Total energy calculation
     // CRITICAL FIX: Removed m_d3_energy and m_d4_energy from total sum because they are already accumulated in m_dispersion_energy
     // in ForceFieldThread to avoid double counting for GFN-FF method.
+    // Claude Generated (May 2026): m_stors_energy added — triple-bond torsions were computed but discarded.
     energy = m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy +
-             m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + m_gfnff_repulsion +
-             cg_energy + m_dispersion_energy + m_coulomb_energy + m_energy_hbond +
-             m_energy_xbond + m_atm_energy + m_batm_energy;
+             m_stors_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy +
+             m_gfnff_repulsion + cg_energy + m_dispersion_energy + m_coulomb_energy +
+             m_energy_hbond + m_energy_xbond + m_atm_energy + m_batm_energy;
 
     // Claude Generated (Feb 23, 2026): Per-term energy decomposition for thread-count independence check
     if (CurcumaLogger::get_verbosity() >= 2 && (m_method == "gfnff")) {
@@ -2797,18 +2833,28 @@ double ForceField::Calculate(bool gradient)
     auto energy_calc_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
         energy_calc_end - energy_calc_start);
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    // Claude Generated (May 2026): m_suppress_output gates the entire user-facing output block.
+    // GFN-FF wrapper sets the flag and prints its own GFNFFEnergyReport instead.
+    // TODO: unify UFF/QMDFF energy output to the same GFNFFEnergyReport format and drop this flag.
+    if (do_timing && !m_suppress_output) {
+        double t_total = std::chrono::duration<double, std::milli>(energy_calc_end - t_ff_start).count();
+        CurcumaLogger::info(fmt::format(
+            "ForceField Calculate: total={:.1f}ms thread_reset={:.1f}ms pool={:.1f}ms accumulate={:.1f}ms self_energy={:.1f}ms chain_rule={:.1f}ms",
+            t_total, t_thread_reset, t_pool, t_accumulate, t_self_energy, t_chainrule));
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 1 && !m_suppress_output) {
         CurcumaLogger::result_fmt("Force Field energy calculation: {} ms",
                                   energy_calc_duration.count());
     }
 
     // Level 1+: Final energy result
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    if (CurcumaLogger::get_verbosity() >= 1 && !m_suppress_output) {
         CurcumaLogger::energy_abs(energy, "Force Field Energy");
     }
 
     // Level 1+: Energy decomposition (Claude Generated February 2026: Improved organization)
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    if (CurcumaLogger::get_verbosity() >= 1 && !m_suppress_output) {
         CurcumaLogger::info("\nForce Field Energy Decomposition:");
 
         // Baseline energy (if present)

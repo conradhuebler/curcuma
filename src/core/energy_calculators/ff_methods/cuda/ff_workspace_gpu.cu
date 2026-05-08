@@ -27,7 +27,6 @@
 
 #include <Eigen/Dense>
 
-#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -96,24 +95,47 @@ struct LaunchConfig {
     int gridSize;
 };
 
-static inline LaunchConfig getLaunchConfig(int n_elements, int maxBlockSize = 512) {
+static inline LaunchConfig getLaunchConfig(int n_elements, int block_size_override = 0) {
     LaunchConfig cfg;
-    // Adaptive block size based on problem size
-    // IMPORTANT: maxBlockSize must match __launch_bounds__ in gfnff_kernels.cuh
-    // GFNFF_KERNEL_BOUNDS (512,2): max 512 threads - for lightweight pairwise kernels
-    // GFNFF_KERNEL_BOUNDS_HEAVY (256,2): max 256 threads - for register-heavy bonded kernels
-    if (n_elements < 256) {
-        cfg.blockSize = 32;    // Single warp - minimal overhead for tiny problems
-    } else if (n_elements < 1024) {
-        cfg.blockSize = 128;   // 4 warps - good for small problems
-    } else if (n_elements < 16384) {
-        cfg.blockSize = 256;   // Standard - good balance for medium problems
+    // G3a (Apr 2026): Optional fixed block size override.
+    // If block_size_override > 0, use it directly (clamped 32..512).
+    // If 0, fall back to adaptive logic based on problem size.
+    if (block_size_override > 0) {
+        cfg.blockSize = std::min(512, std::max(32, block_size_override));
     } else {
-        cfg.blockSize = maxBlockSize;  // Max threads - maximize throughput for large problems
+        // Adaptive block size based on problem size
+        // IMPORTANT: maxBlockSize must match GFNFF_KERNEL_BOUNDS in gfnff_kernels.cuh
+        // Current: __launch_bounds__(512, 2) - max 512 threads, min 2 blocks/SM
+        if (n_elements < 256) {
+            cfg.blockSize = 32;    // Single warp - minimal overhead for tiny problems
+        } else if (n_elements < 1024) {
+            cfg.blockSize = 128;   // 4 warps - good for small problems
+        } else if (n_elements < 16384) {
+            cfg.blockSize = 256;   // Standard - good balance for medium problems
+        } else {
+            cfg.blockSize = 512;   // 512 threads - maximize occupancy for large problems
+        }
     }
     // Phase 8 (Claude Generated March 2026): min 1 block so n=0 launches a no-op block
     // instead of gridSize=0 (undefined in CUDA). All kernels early-return for i >= n.
     cfg.gridSize = std::max(1, (n_elements + cfg.blockSize - 1) / cfg.blockSize);
+    return cfg;
+}
+
+// Light variant for kernels declared with GFNFF_KERNEL_BOUNDS_LIGHT
+// (__launch_bounds__(256, 4)). Caps blockSize at 256 so the runtime never
+// rejects the launch with cudaErrorInvalidValue when adaptive logic would
+// pick 512 for n_elements >= 16384. Use this for: k_cn_compute_pairs,
+// k_logcn, k_check_dc6dcn_skip(+final), k_build_eeq_rhs,
+// k_eeq_build_fragment_matrices, k_eeq_gather_rhs_fragments.
+// Discovered May 2026: large mixture.xyz crashed Phase 1 because
+// k_cn_compute_pairs got block=512 from getLaunchConfig at 40907 pairs.
+static inline LaunchConfig getLaunchConfigLight(int n_elements, int block_size_override = 0) {
+    LaunchConfig cfg = getLaunchConfig(n_elements, block_size_override);
+    if (cfg.blockSize > 256) {
+        cfg.blockSize = 256;
+        cfg.gridSize  = std::max(1, (n_elements + cfg.blockSize - 1) / cfg.blockSize);
+    }
     return cfg;
 }
 
@@ -632,14 +654,17 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<int>    d_cn_idx_j;     ///< [n_cn_pairs]
     CudaBuffer<double> d_cn_rcov_sum;  ///< [n_cn_pairs]
     int                n_cn_pairs = 0;
+    CudaBuffer<int>    d_cn_pair_counter; ///< [1] atomic counter for on-GPU pair generation (Apr 2026)
 
     // HB alpha chain-rule: per-atom zz accumulator + HB neighbor pair list
     CudaBuffer<double> d_zz_hb;        ///< [N] per-atom zz accumulator (zeroed each step)
     HBAlphaSoA         hb_alpha;       ///< (H, B) pairs for alpha gradient
+    CudaBuffer<double> d_hb_cn_per_atom; ///< [N] per-H accumulator for HB CN (Apr 2026)
 
     // Coulomb self-energy parameters (uploaded once)
+    // WP5-B (May 2026): d_coul_cnf removed — topology-constant eeq_topo.d_cnf is used
+    // directly by k_coulomb_postprocess, eliminating per-step H2D copy.
     CudaBuffer<double> d_coul_chi_base; ///< [N]
-    CudaBuffer<double> d_coul_cnf;      ///< [N]
     CudaBuffer<double> d_coul_gam;      ///< [N]
     CudaBuffer<double> d_coul_alp;      ///< [N]
     bool               coul_self_on_gpu = false;
@@ -654,6 +679,12 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_cn_raw;        ///< [N] raw CN values (erf sum)
     CudaBuffer<double> d_cn_final;       ///< [N] log-transformed CN values
     CudaBuffer<int>    d_atom_types;    ///< [N] atomic numbers for CN lookup
+
+    // WP5-C (May 2026): GPU-side D4 dc6dcn skip-check buffers
+    CudaBuffer<double> d_cn_d4_ref;        ///< [N] CN snapshot from previous step
+    CudaBuffer<double> d_dc6dcn_block_max; ///< [max_blocks] per-block max for reduction
+    CudaBuffer<int>    d_dc6dcn_skip;      ///< [1] skip flag (0 = recompute, 1 = skip)
+    int*               h_dc6dcn_skip = nullptr; ///< Pinned host buffer for async D2H
 
     // Per-term energy accumulators — consolidated into single contiguous buffer
     // Claude Generated (March 2026): Reduces 14 individual cudaMemcpy to 1
@@ -687,6 +718,21 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_grad_after_sB;      ///< [3*N] snapshot after all stream B kernels
     CudaBuffer<double> d_grad_after_sC;      ///< [3*N] snapshot after stream C (3-body)
 
+    // WP2: topology-constant EEQ parameters on GPU (Claude Generated May 2026)
+    // Uploaded once per topology build; per-step k_build_eeq_rhs reads d_chi_corrected
+    // and d_cnf to construct d_rhs_atoms from d_cn_final without CPU involvement.
+    struct EEQTopologyBuffers {
+        CudaBuffer<double> d_alpha_corrected; ///< [N] charge-corrected alpha²
+        CudaBuffer<double> d_gam_corrected;   ///< [N] gam + dgam
+        CudaBuffer<double> d_chi_corrected;   ///< [N] -chi + dxi + amide_corr (no CN term)
+        CudaBuffer<double> d_cnf;             ///< [N] cnf_eeq per atom
+        CudaBuffer<double> d_rhs_atoms;       ///< [N] output of k_build_eeq_rhs (per-step)
+        CudaBuffer<double> d_rhs_constraints; ///< [nfrag] fragment target charges
+        int  nfrag = 1;
+        bool valid = false;
+    };
+    EEQTopologyBuffers eeq_topo;
+
     int N = 0;
     cudaStream_t stream = nullptr;
 
@@ -699,6 +745,15 @@ struct FFWorkspaceGPUImpl {
     cudaEvent_t  event_bonded    = nullptr;  ///< Sync event for stream B completion
     cudaEvent_t  event_threebody = nullptr;  ///< Sync event for stream C completion
     cudaEvent_t  event_upload    = nullptr;  ///< Reusable event for upload→stream sync
+    // cudaEvent_t  event_cn_ready  = nullptr;  // (disabled) was for overlap experiment: CN D2H before gaussian weights
+
+    // Claude Generated (May 2026): Per-stream timing events (timing-enabled).
+    // Used at verbosity >= 2 to populate FFTermTimings via cudaEventElapsedTime.
+    // 4 stream groups × 2 events. Recorded each step around the kernel block on each stream.
+    cudaEvent_t timing_sA_start = nullptr, timing_sA_end = nullptr;  ///< dispersion + repulsion
+    cudaEvent_t timing_sB_start = nullptr, timing_sB_end = nullptr;  ///< bonded (5 kernels)
+    cudaEvent_t timing_sC_start = nullptr, timing_sC_end = nullptr;  ///< 3-body (4 kernels)
+    cudaEvent_t timing_p2_start = nullptr, timing_p2_end = nullptr;  ///< Phase 2 (Coulomb + post)
 
     // === CUDA Graph Capture — Phase 8 (Claude Generated March 2026) ===
     // For topology-stable MD steps, the entire charge-independent kernel sequence is
@@ -708,6 +763,26 @@ struct FFWorkspaceGPUImpl {
     bool            m_graph_phase1_valid    = false;  ///< True when exec graph is ready to use
     cudaGraph_t     m_graph_phase1          = nullptr; ///< Captured graph (template)
     cudaGraphExec_t m_graph_exec_phase1     = nullptr; ///< Instantiated executable graph
+
+    // === WP4 (May 2026): Phase-2 CUDA Graph Capture ===
+    // launchChargeDependentAndFinish() is captured into one of two graph slots based on
+    // gradient mode (energy-only vs gradient). Replay eliminates ~35 µs/step of kernel-
+    // launch API overhead + ~10 µs of stream-event coordination on the charge-dependent
+    // phase. Disabled when verbosity >= 3 (extra grad_snapshot writes) or per-kernel
+    // diagnostics are active. Invalidated together with phase-1 graph on topology rebuild.
+    bool            m_graph_phase2_grad_valid     = false;
+    cudaGraph_t     m_graph_phase2_grad           = nullptr;
+    cudaGraphExec_t m_graph_exec_phase2_grad      = nullptr;
+    bool            m_graph_phase2_energy_valid   = false;
+    cudaGraph_t     m_graph_phase2_energy         = nullptr;
+    cudaGraphExec_t m_graph_exec_phase2_energy    = nullptr;
+    /// WP4: Dedicated phase-2 events. Decouple phase-2 capture from phase-1's events.
+    /// event_p2_pairwise: stream_pairwise → main stream sync (replaces event_pairwise inside Phase 2)
+    /// event_p2_upload:   main stream → stream_pairwise upload fence (replaces event_upload inside Phase 2)
+    /// Phase 2 still WAITS on event_bonded/event_threebody (recorded by Phase 1 graph), but never
+    /// records them — that one-way dependency is safe under cudaStreamCaptureModeThreadLocal.
+    cudaEvent_t     event_p2_pairwise             = nullptr;
+    cudaEvent_t     event_p2_upload               = nullptr;
 };
 
 // ============================================================================
@@ -758,6 +833,8 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
               "pinned alloc m_h_cn_final");
     checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_cn_raw), natoms * sizeof(double)),
               "pinned alloc m_h_cn_raw");
+    checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_dlogdcn), natoms * sizeof(double)),
+              "pinned alloc m_h_dlogdcn");
     checkCuda(cudaMallocHost(reinterpret_cast<void**>(&m_h_energies),
                              FFWorkspaceGPUImpl::N_ENERGY_SLOTS * sizeof(double)),
               "pinned alloc m_h_energies");
@@ -775,6 +852,17 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_bonded, cudaEventDisableTiming), "cudaEventCreate bonded");
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_threebody, cudaEventDisableTiming), "cudaEventCreate threebody");
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_upload, cudaEventDisableTiming), "cudaEventCreate upload");
+    checkCuda(cudaEventCreateWithFlags(&m_impl->event_p2_pairwise, cudaEventDisableTiming), "cudaEventCreate p2_pairwise");
+    checkCuda(cudaEventCreateWithFlags(&m_impl->event_p2_upload, cudaEventDisableTiming), "cudaEventCreate p2_upload");
+    // Claude Generated (May 2026): timing-enabled events for stream-level kernel timing
+    checkCuda(cudaEventCreate(&m_impl->timing_sA_start), "cudaEventCreate timing_sA_start");
+    checkCuda(cudaEventCreate(&m_impl->timing_sA_end),   "cudaEventCreate timing_sA_end");
+    checkCuda(cudaEventCreate(&m_impl->timing_sB_start), "cudaEventCreate timing_sB_start");
+    checkCuda(cudaEventCreate(&m_impl->timing_sB_end),   "cudaEventCreate timing_sB_end");
+    checkCuda(cudaEventCreate(&m_impl->timing_sC_start), "cudaEventCreate timing_sC_start");
+    checkCuda(cudaEventCreate(&m_impl->timing_sC_end),   "cudaEventCreate timing_sC_end");
+    checkCuda(cudaEventCreate(&m_impl->timing_p2_start), "cudaEventCreate timing_p2_start");
+    checkCuda(cudaEventCreate(&m_impl->timing_p2_end),   "cudaEventCreate timing_p2_end");
     cudaStream_t stream = m_impl->stream;
 
     // Upload covalent radii to constant memory (used by angle/dihedral distance damping)
@@ -784,55 +872,117 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     upload_covalent_radii(GFNFFParameters::covalent_radii.data(),
                           static_cast<int>(GFNFFParameters::covalent_radii.size()));
 
-    // G1a (Apr 2026): Sort dispersion pairs by idx_i (primary), idx_j (secondary)
-    // to improve L2 cache locality when threads access cx/cy/cz atom coordinates.
-    // Nearby threads → nearby atoms → better cache behavior.
-    auto disp_sorted = params.dispersions;
-    std::sort(disp_sorted.begin(), disp_sorted.end(),
-        [](const GFNFFDispersion& a, const GFNFFDispersion& b) {
-            return (a.i != b.i) ? (a.i < b.i) : (a.j < b.j);
-        });
-
     // Store dispersion pair indices on host for per-step dc6dcn extraction
-    // (must use sorted order to match SoA layout)
     {
-        const int nd = static_cast<int>(disp_sorted.size());
+        const int nd = static_cast<int>(params.dispersions.size());
         m_disp_idx_i_host.resize(nd);
         m_disp_idx_j_host.resize(nd);
         m_h_dc6dcn_ij.resize(nd, 0.0);
         m_h_dc6dcn_ji.resize(nd, 0.0);
         for (int k = 0; k < nd; ++k) {
-            m_disp_idx_i_host[k] = disp_sorted[k].i;
-            m_disp_idx_j_host[k] = disp_sorted[k].j;
+            m_disp_idx_i_host[k] = params.dispersions[k].i;
+            m_disp_idx_j_host[k] = params.dispersions[k].j;
         }
     }
 
-    // Store topology charges for BATM kernel (uploaded to GPU each calculate() call)
+    // Store topology charges for BATM kernel; uploaded once below (static per topology)
     m_topology_charges = params.topology_charges;
 
+    // ---------------------------------------------------------------------
+    // DIAGNOSTIC A5 (plan phase A, mixture.xyz crash): validate that every
+    // pair/triple/quadruple index is in [0, natoms). Out-of-bounds indices
+    // would surface on the GPU as cudaErrorInvalidValue/IllegalAddress on
+    // the next kernel launch — exactly the symptom we are chasing on large
+    // systems. This runs once at construction; cost is negligible.
+    // Cleanup-target (plan phase C3): keep, or hide behind gpu_diagnostics.
+    // ---------------------------------------------------------------------
+    {
+        const int N = natoms;
+        int violations = 0;
+        auto check2 = [&](int i, int j, const char* listName, int idx) {
+            if (i < 0 || i >= N || j < 0 || j >= N) {
+                if (violations < 16) {
+                    CurcumaLogger::error(fmt::format(
+                        "OOB index in {}[{}]: i={} j={} (N={})",
+                        listName, idx, i, j, N));
+                }
+                ++violations;
+            }
+        };
+        auto check3 = [&](int i, int j, int k, const char* listName, int idx) {
+            if (i < 0 || i >= N || j < 0 || j >= N || k < 0 || k >= N) {
+                if (violations < 16) {
+                    CurcumaLogger::error(fmt::format(
+                        "OOB index in {}[{}]: i={} j={} k={} (N={})",
+                        listName, idx, i, j, k, N));
+                }
+                ++violations;
+            }
+        };
+        auto check4 = [&](int i, int j, int k, int l, const char* listName, int idx) {
+            if (i < 0 || i >= N || j < 0 || j >= N || k < 0 || k >= N || l < 0 || l >= N) {
+                if (violations < 16) {
+                    CurcumaLogger::error(fmt::format(
+                        "OOB index in {}[{}]: i={} j={} k={} l={} (N={})",
+                        listName, idx, i, j, k, l, N));
+                }
+                ++violations;
+            }
+        };
+        for (size_t i = 0; i < params.dispersions.size(); ++i)
+            check2(params.dispersions[i].i, params.dispersions[i].j, "dispersions", static_cast<int>(i));
+        for (size_t i = 0; i < params.bonded_repulsions.size(); ++i)
+            check2(params.bonded_repulsions[i].i, params.bonded_repulsions[i].j, "bonded_rep", static_cast<int>(i));
+        for (size_t i = 0; i < params.nonbonded_repulsions.size(); ++i)
+            check2(params.nonbonded_repulsions[i].i, params.nonbonded_repulsions[i].j, "nonbonded_rep", static_cast<int>(i));
+        for (size_t i = 0; i < params.coulombs.size(); ++i)
+            check2(params.coulombs[i].i, params.coulombs[i].j, "coulombs", static_cast<int>(i));
+        for (size_t i = 0; i < params.bonds.size(); ++i)
+            check2(params.bonds[i].i, params.bonds[i].j, "bonds", static_cast<int>(i));
+        for (size_t i = 0; i < params.angles.size(); ++i)
+            check3(params.angles[i].i, params.angles[i].j, params.angles[i].k, "angles", static_cast<int>(i));
+        for (size_t i = 0; i < params.dihedrals.size(); ++i)
+            check4(params.dihedrals[i].i, params.dihedrals[i].j,
+                   params.dihedrals[i].k, params.dihedrals[i].l, "dihedrals", static_cast<int>(i));
+        for (size_t i = 0; i < params.extra_dihedrals.size(); ++i)
+            check4(params.extra_dihedrals[i].i, params.extra_dihedrals[i].j,
+                   params.extra_dihedrals[i].k, params.extra_dihedrals[i].l, "extra_dihedrals", static_cast<int>(i));
+        for (size_t i = 0; i < params.inversions.size(); ++i)
+            check4(params.inversions[i].i, params.inversions[i].j,
+                   params.inversions[i].k, params.inversions[i].l, "inversions", static_cast<int>(i));
+        for (size_t i = 0; i < params.storsions.size(); ++i)
+            check4(params.storsions[i].i, params.storsions[i].j,
+                   params.storsions[i].k, params.storsions[i].l, "storsions", static_cast<int>(i));
+        for (size_t i = 0; i < params.atm_triples.size(); ++i)
+            check3(params.atm_triples[i].i, params.atm_triples[i].j,
+                   params.atm_triples[i].k, "atm_triples", static_cast<int>(i));
+        for (size_t i = 0; i < params.batm_triples.size(); ++i)
+            check3(params.batm_triples[i].i, params.batm_triples[i].j,
+                   params.batm_triples[i].k, "batm_triples", static_cast<int>(i));
+        for (size_t i = 0; i < params.hbonds.size(); ++i)
+            check3(params.hbonds[i].i, params.hbonds[i].j, params.hbonds[i].k, "hbonds", static_cast<int>(i));
+        for (size_t i = 0; i < params.xbonds.size(); ++i)
+            check3(params.xbonds[i].i, params.xbonds[i].j, params.xbonds[i].k, "xbonds", static_cast<int>(i));
+
+        if (violations > 0) {
+            CurcumaLogger::error(fmt::format(
+                "FFWorkspaceGPU param validation: {} out-of-bounds indices "
+                "(N={}). First {} reported above; remainder suppressed.",
+                violations, N, std::min(violations, 16)));
+        } else {
+            CurcumaLogger::info(fmt::format(
+                "FFWorkspaceGPU param validation: all pair/triple/quadruple "
+                "indices in range (N={}, disp={}, hb={}, xb={}, atm={}, batm={})",
+                N, params.dispersions.size(), params.hbonds.size(),
+                params.xbonds.size(), params.atm_triples.size(), params.batm_triples.size()));
+        }
+    }
+
     // --- Upload static SoA interaction lists ---
-    m_impl->disp.upload(disp_sorted, stream);
-    // G1c: Sort repulsion pairs by idx_i for L2 locality (same as G1a for dispersion)
-    auto bonded_rep_sorted = params.bonded_repulsions;
-    std::sort(bonded_rep_sorted.begin(), bonded_rep_sorted.end(),
-        [](const GFNFFRepulsion& a, const GFNFFRepulsion& b) {
-            return (a.i != b.i) ? (a.i < b.i) : (a.j < b.j);
-        });
-    auto nonbonded_rep_sorted = params.nonbonded_repulsions;
-    std::sort(nonbonded_rep_sorted.begin(), nonbonded_rep_sorted.end(),
-        [](const GFNFFRepulsion& a, const GFNFFRepulsion& b) {
-            return (a.i != b.i) ? (a.i < b.i) : (a.j < b.j);
-        });
-    m_impl->bonded_rep.upload(bonded_rep_sorted, stream);
-    m_impl->nonbonded_rep.upload(nonbonded_rep_sorted, stream);
-    // G1c (Apr 2026): Sort Coulomb pairs by idx_i (primary), idx_j (secondary)
-    // Same L2 locality optimization as G1a for dispersion pairs.
-    auto coul_sorted = params.coulombs;
-    std::sort(coul_sorted.begin(), coul_sorted.end(),
-        [](const GFNFFCoulomb& a, const GFNFFCoulomb& b) {
-            return (a.i != b.i) ? (a.i < b.i) : (a.j < b.j);
-        });
-    m_impl->coulomb.upload(coul_sorted, stream);
+    m_impl->disp.upload(params.dispersions, stream);
+    m_impl->bonded_rep.upload(params.bonded_repulsions, stream);
+    m_impl->nonbonded_rep.upload(params.nonbonded_repulsions, stream);
+    m_impl->coulomb.upload(params.coulombs, stream);
     m_impl->bonds.upload(params.bonds, atom_types, stream);
     m_impl->angles.upload(params.angles, atom_types, stream);
     m_impl->dihedrals.upload(params.dihedrals, params.extra_dihedrals, atom_types, stream);
@@ -843,7 +993,9 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_impl->batm.upload(params.batm_triples, stream);
     m_impl->atm.upload(params.atm_triples, atom_types, stream);
     m_impl->xbonds.upload(params.xbonds, atom_types, stream);
+    m_last_xbonds = params.xbonds;   // init CPU mirror for debug comparison
     m_impl->hbonds.upload(params.hbonds, atom_types, stream);
+    m_last_hbonds = params.hbonds;   // init CPU mirror for debug comparison
 
     // --- Allocate dynamic per-step buffers ---
     const int N3 = 3 * natoms;
@@ -851,6 +1003,12 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_impl->d_charges.alloc(natoms);
     m_impl->d_cn.alloc(natoms);
     m_impl->d_topo_charges.alloc(natoms);
+    // G-P1 (Apr 2026): Upload topology charges once at init — they are static per topology.
+    // Removes the per-step blocking cudaMemcpy from prepareAndLaunchChargeIndependent().
+    if (m_topology_charges.size() > 0) {
+        m_impl->d_topo_charges.upload(m_topology_charges.data(),
+                                      static_cast<int>(m_topology_charges.size()), stream);
+    }
     m_impl->d_grad.alloc(N3);
     m_impl->d_dEdcn.alloc(natoms);
     m_impl->d_energy.alloc(1);
@@ -858,16 +1016,18 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     // Per-term energy accumulators — single contiguous buffer
     m_impl->d_energies.alloc(FFWorkspaceGPUImpl::N_ENERGY_SLOTS);
 
-    // Diagnostic snapshot buffers (device-to-device copy, no sync stall)
+    // dEdcn snapshot — always needed: dEdcnTotal() is public API (Coulomb chain-rule)
     m_impl->d_dEdcn_snapshot.alloc(natoms);
+    // grad snapshot — always allocated to keep need_snapshots=true, which disables
+    // Phase-1 CUDA graph capture. Graph capture fails on RTX 5080 (Blackwell): the
+    // cudaStreamBeginCapture path captures kernels without executing them; if
+    // cudaStreamEndCapture then fails, Phase-1 work is silently dropped → energy=0.
+    // Keeping this allocated gates both Phase-1 and Phase-2 graph capture off.
+    // Cost: ~32 KB (N3 doubles) GPU memory; acceptable until graph isolation is solved.
     m_impl->d_grad_snapshot.alloc(N3);
-
-    // Per-kernel gradient snapshots (Claude Generated April 2026)
-    m_impl->d_grad_after_sA.alloc(N3);
-    m_impl->d_grad_after_bonds.alloc(N3);
-    m_impl->d_grad_after_angles.alloc(N3);
-    m_impl->d_grad_after_sB.alloc(N3);
-    m_impl->d_grad_after_sC.alloc(N3);
+    // d_grad_after_* are debug-only snapshots. NOT allocated in normal mode:
+    // keeping them null sets force_single_stream=false → enables 3-stream parallelism.
+    // Allocate here only when gradient debugging is needed (guarded by m_verbosity if re-added).
 
     // --- GPU topology displacement check (Claude Generated March 2026) ---
     m_impl->d_disp_flag.alloc(1);
@@ -877,6 +1037,13 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_impl->d_cn_raw.alloc(natoms);
     m_impl->d_cn_final.alloc(natoms);
     m_impl->d_atom_types.alloc(natoms);
+
+    // WP5-C (May 2026): GPU-side D4 dc6dcn skip-check buffers
+    m_impl->d_cn_d4_ref.alloc(natoms);
+    // d_dc6dcn_block_max sized for max possible blocks (~8 for N=2000, blockSize=256)
+    m_impl->d_dc6dcn_block_max.alloc(32);
+    m_impl->d_dc6dcn_skip.alloc(1);
+    cudaHostAlloc(&m_impl->h_dc6dcn_skip, sizeof(int), cudaHostAllocDefault);
     // Upload atom types once (static during simulation)
     std::vector<int> h_atom_types = atom_types;  // copy
     m_impl->d_atom_types.upload(h_atom_types, stream);
@@ -912,37 +1079,34 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_dEdcn_total.setZero();
 
     // --- Extract per-atom Coulomb self-energy params (for CPU postProcess TERM 2+3) ---
-    // P3a (Apr 2026): chi_base/cnf from pairs; gam/alp from per-atom vectors
+    // Mirrors FFWorkspace::setInteractionLists() lines 90-118
     if (!params.coulombs.empty()) {
         m_coul_chi_base  = Vector::Zero(natoms);
-        m_coul_cnf       = Vector::Zero(natoms);
+        m_coul_gam       = Vector::Zero(natoms);
+        m_coul_alp       = Vector::Zero(natoms);
+        m_coul_chi_static= Vector::Zero(natoms);
 
         std::vector<bool> seen(natoms, false);
         for (const auto& c : params.coulombs) {
             if (c.i < natoms && !seen[c.i]) {
                 m_coul_chi_base(c.i)   = c.chi_base_i;
-                m_coul_cnf(c.i)        = c.cnf_i;
+                m_coul_gam(c.i)        = c.gam_i;
+                m_coul_alp(c.i)        = c.alp_i;
+                m_coul_chi_static(c.i) = c.chi_i;
                 seen[c.i] = true;
             }
             if (c.j < natoms && !seen[c.j]) {
                 m_coul_chi_base(c.j)   = c.chi_base_j;
-                m_coul_cnf(c.j)        = c.cnf_j;
+                m_coul_gam(c.j)        = c.gam_j;
+                m_coul_alp(c.j)        = c.alp_j;
+                m_coul_chi_static(c.j) = c.chi_j;
                 seen[c.j] = true;
             }
         }
-        // Per-atom gam/alp from parameter set vectors
-        if (params.eeq_gam.size() == natoms) {
-            m_coul_gam = params.eeq_gam;
-        } else {
-            m_coul_gam = Vector::Zero(natoms);
-        }
-        if (params.eeq_alp.size() == natoms) {
-            m_coul_alp = params.eeq_alp;
-        } else {
-            m_coul_alp = Vector::Zero(natoms);
-        }
         // Upload Coulomb self-energy parameters to GPU for k_coulomb_self kernel
-        setCoulombSelfEnergyParams(m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf);
+        // WP5-B (May 2026): CNF omitted — eeq_topo.d_cnf (topology-constant) used instead.
+        setCoulombSelfEnergyParams(m_coul_chi_base, m_coul_gam, m_coul_alp,
+                                   m_coul_chi_static);
     }
 
     // Store initial charges and E0 from parameter set
@@ -979,19 +1143,26 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
         if (m_impl->stream_bonded)   cudaStreamSynchronize(m_impl->stream_bonded);
         if (m_impl->stream_threebody)cudaStreamSynchronize(m_impl->stream_threebody);
 
-        if (m_impl->event_pairwise)  cudaEventDestroy(m_impl->event_pairwise);
-        if (m_impl->event_bonded)    cudaEventDestroy(m_impl->event_bonded);
-        if (m_impl->event_threebody) cudaEventDestroy(m_impl->event_threebody);
-        if (m_impl->event_upload)    cudaEventDestroy(m_impl->event_upload);
+        if (m_impl->event_pairwise)    cudaEventDestroy(m_impl->event_pairwise);
+        if (m_impl->event_bonded)      cudaEventDestroy(m_impl->event_bonded);
+        if (m_impl->event_threebody)   cudaEventDestroy(m_impl->event_threebody);
+        if (m_impl->event_upload)      cudaEventDestroy(m_impl->event_upload);
+        if (m_impl->event_p2_pairwise) cudaEventDestroy(m_impl->event_p2_pairwise);
+        if (m_impl->event_p2_upload)   cudaEventDestroy(m_impl->event_p2_upload);
 
         if (m_impl->stream)          cudaStreamDestroy(m_impl->stream);
         if (m_impl->stream_pairwise) cudaStreamDestroy(m_impl->stream_pairwise);
         if (m_impl->stream_bonded)   cudaStreamDestroy(m_impl->stream_bonded);
         if (m_impl->stream_threebody)cudaStreamDestroy(m_impl->stream_threebody);
 
-        // Phase 8: destroy graph objects
+        // Phase 8: destroy phase-1 graph objects
         if (m_impl->m_graph_exec_phase1) cudaGraphExecDestroy(m_impl->m_graph_exec_phase1);
         if (m_impl->m_graph_phase1)      cudaGraphDestroy(m_impl->m_graph_phase1);
+        // WP4: destroy phase-2 graph objects (gradient + energy slots)
+        if (m_impl->m_graph_exec_phase2_grad)   cudaGraphExecDestroy(m_impl->m_graph_exec_phase2_grad);
+        if (m_impl->m_graph_phase2_grad)        cudaGraphDestroy(m_impl->m_graph_phase2_grad);
+        if (m_impl->m_graph_exec_phase2_energy) cudaGraphExecDestroy(m_impl->m_graph_exec_phase2_energy);
+        if (m_impl->m_graph_phase2_energy)      cudaGraphDestroy(m_impl->m_graph_phase2_energy);
     }
 
     // Free pinned memory staging buffers
@@ -1008,7 +1179,9 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
     if (m_h_grad_after_sC)     cudaFreeHost(m_h_grad_after_sC);
     if (m_h_cn_final)   cudaFreeHost(m_h_cn_final);
     if (m_h_cn_raw)     cudaFreeHost(m_h_cn_raw);
+    if (m_h_dlogdcn)    cudaFreeHost(m_h_dlogdcn);
     if (m_h_energies)   cudaFreeHost(m_h_energies);
+    if (m_impl && m_impl->h_dc6dcn_skip) cudaFreeHost(m_impl->h_dc6dcn_skip);
 }
 
 // ============================================================================
@@ -1027,6 +1200,28 @@ void FFWorkspaceGPU::invalidateGraph()
         impl.m_graph_phase1 = nullptr;
     }
     impl.m_graph_phase1_valid = false;
+
+    // WP4: invalidate phase-2 gradient slot
+    if (impl.m_graph_exec_phase2_grad) {
+        cudaGraphExecDestroy(impl.m_graph_exec_phase2_grad);
+        impl.m_graph_exec_phase2_grad = nullptr;
+    }
+    if (impl.m_graph_phase2_grad) {
+        cudaGraphDestroy(impl.m_graph_phase2_grad);
+        impl.m_graph_phase2_grad = nullptr;
+    }
+    impl.m_graph_phase2_grad_valid = false;
+
+    // WP4: invalidate phase-2 energy slot
+    if (impl.m_graph_exec_phase2_energy) {
+        cudaGraphExecDestroy(impl.m_graph_exec_phase2_energy);
+        impl.m_graph_exec_phase2_energy = nullptr;
+    }
+    if (impl.m_graph_phase2_energy) {
+        cudaGraphDestroy(impl.m_graph_phase2_energy);
+        impl.m_graph_phase2_energy = nullptr;
+    }
+    impl.m_graph_phase2_energy_valid = false;
 }
 
 // ============================================================================
@@ -1036,6 +1231,15 @@ void FFWorkspaceGPU::invalidateGraph()
 void FFWorkspaceGPU::setEEQCharges(const Vector& q)
 {
     m_eeq_charges = q;
+}
+
+void FFWorkspaceGPU::setEEQDeviceCharges(const double* d_src)
+{
+    // WP5-A: d_src is d_rhs[0..N-1] from EEQ solver (EEQ stream fully synced by caller).
+    // Enqueue D2D copy on main workspace stream — no CPU involvement.
+    cudaMemcpyAsync(m_impl->d_charges.ptr, d_src, m_natoms * sizeof(double),
+                    cudaMemcpyDeviceToDevice, m_impl->stream);
+    m_device_charges_ready = true;
 }
 
 void FFWorkspaceGPU::setTopologyCharges(const Vector& q)
@@ -1048,11 +1252,13 @@ void FFWorkspaceGPU::setD3CN(const Vector& cn)
     m_cn = cn;
 }
 
-void FFWorkspaceGPU::setCNDerivatives(const Vector& cn, const Vector& cnf,
+void FFWorkspaceGPU::setCNDerivatives(const Vector& /* cn */, const Vector& /* cnf */,
                                        const std::vector<SpMatrix>& /* dcn */)
 {
-    // Only cnf is needed (for k_subtract_qtmp). CN pair list replaces sparse dcn.
-    m_cnf = cnf;
+    // WP5-B (May 2026): No-op. CNF for the Coulomb postprocess (TERM 1b / k_subtract_qtmp)
+    // already lives on GPU as the topology-constant `impl.eeq_topo.d_cnf` buffer from
+    // uploadEEQTopologyParams(). The previous per-step copy into m_cnf was only used as a
+    // size probe for the do_subtract guard, which now checks impl.coul_self_on_gpu directly.
 }
 
 void FFWorkspaceGPU::setE0(double e0)
@@ -1067,25 +1273,107 @@ void FFWorkspaceGPU::updateBondHBCN(const std::vector<double>& hb_cn_values)
     m_impl->bonds.hb_cn_H.upload(hb_cn_values.data(), nb);
 }
 
+// Claude Generated (Apr 2026): Re-upload HB alpha (H,B) pair list after dynamic HB re-detection.
+// Mirrors the construction-time logic at ff_workspace_gpu.cu:848-870.
+void FFWorkspaceGPU::updateHBAlphaPairs(const std::vector<BondHBEntry>& bond_hb_data,
+                                          const std::vector<int>& atom_types)
+{
+    if (!m_impl) return;
+    const auto& rcov_d3 = GFNFFParameters::covalent_rad_d3;
+    constexpr double rcov_43 = 4.0 / 3.0;
+    constexpr double rcov_scal = 1.78;
+
+    std::vector<int> hb_h_idx, hb_b_idx;
+    std::vector<double> hb_rcov;
+    for (const auto& entry : bond_hb_data) {
+        int H = entry.H;
+        int ati = (H < m_natoms) ? atom_types[H] : 0;
+        for (int B : entry.B_atoms) {
+            int atj = (B < m_natoms) ? atom_types[B] : 0;
+            if (ati < 1 || atj < 1) continue;
+            double rcovij = rcov_scal * rcov_43 * (rcov_d3[ati - 1] + rcov_d3[atj - 1]);
+            hb_h_idx.push_back(H);
+            hb_b_idx.push_back(B);
+            hb_rcov.push_back(rcovij);
+        }
+    }
+    m_impl->hb_alpha.upload(hb_h_idx, hb_b_idx, hb_rcov, m_impl->stream);
+}
+
+// Claude Generated (Apr 2026): Re-upload per-bond nr_hb and hb_H_atom to GPU BondSoA.
+// Called after updateHBAlphaPairs() to keep k_bonds kernel HB modulation current.
+void FFWorkspaceGPU::updateBondHBMetadata(const std::vector<int>& nr_hb,
+                                            const std::vector<int>& hb_H_atom)
+{
+    if (!m_impl) return;
+    const int nb = m_impl->bonds.n;
+    if (nb == 0) return;
+    if (static_cast<int>(nr_hb.size()) != nb || static_cast<int>(hb_H_atom.size()) != nb)
+        return;
+    m_impl->bonds.nr_hb.upload(nr_hb.data(), nb, m_impl->stream);
+    m_impl->bonds.hb_H_atom.upload(hb_H_atom.data(), nb, m_impl->stream);
+}
+
+// ============================================================================
+// GPU HB CN per-bond computation (Apr 2026)
+// Replaces CPU HB CN loop in gfnff_gpu_method.cpp.
+// ============================================================================
+void FFWorkspaceGPU::computeBondHBCN()
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    if (N <= 0 || impl.hb_alpha.n == 0) return;
+
+    // Allocate/zero per-H accumulator
+    if (!impl.d_hb_cn_per_atom.ptr || impl.d_hb_cn_per_atom.n < N)
+        impl.d_hb_cn_per_atom.alloc(N);
+    cudaMemsetAsync(impl.d_hb_cn_per_atom.ptr, 0, N * sizeof(double), impl.stream);
+
+    // Pass 1: accumulate HB CN per H-atom
+    auto cfg1 = getLaunchConfig(impl.hb_alpha.n, m_block_size);
+    k_hb_cn_per_atom<<<cfg1.gridSize, cfg1.blockSize, 0, impl.stream>>>(
+        impl.hb_alpha.n,
+        impl.hb_alpha.idx_H.ptr,
+        impl.hb_alpha.idx_B.ptr,
+        impl.hb_alpha.rcov_sum.ptr,
+        impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.d_hb_cn_per_atom.ptr,
+        27.5,   // kn
+        900.0); // thr_sq
+
+    // Pass 2: map per-H CN to per-bond CN
+    auto cfg2 = getLaunchConfig(impl.bonds.n, m_block_size);
+    k_hb_cn_map_to_bonds<<<cfg2.gridSize, cfg2.blockSize, 0, impl.stream>>>(
+        impl.bonds.n,
+        impl.bonds.nr_hb.ptr,
+        impl.bonds.hb_H_atom.ptr,
+        impl.d_hb_cn_per_atom.ptr,
+        impl.bonds.hb_cn_H.ptr);
+
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::info("  GPU HB CN per-bond computed on GPU");
+}
+
 void FFWorkspaceGPU::setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
-                                                  const Vector& alp,     const Vector& cnf)
+                                                  const Vector& alp,
+                                                  const Vector& chi_static)
 {
     m_coul_chi_base   = chi_base;
     m_coul_gam        = gam;
     m_coul_alp        = alp;
-    m_coul_cnf        = cnf;
+    m_coul_chi_static = chi_static;
 
     // Upload Coulomb self-energy parameters to GPU
     // Claude Generated (March 2026): GPU-side Coulomb TERM 2+3 + qtmp
+    // WP5-B (May 2026): CNF no longer uploaded here — topology-constant eeq_topo.d_cnf
+    // (from uploadEEQTopologyParams) is used directly by k_coulomb_postprocess.
     const int N = m_natoms;
-    if (chi_base.size() == N && gam.size() == N && alp.size() == N && cnf.size() == N) {
+    if (chi_base.size() == N && gam.size() == N && alp.size() == N) {
         auto& impl = *m_impl;
         impl.d_coul_chi_base.alloc(N);
-        impl.d_coul_cnf.alloc(N);
         impl.d_coul_gam.alloc(N);
         impl.d_coul_alp.alloc(N);
         impl.d_coul_chi_base.upload(chi_base.data(), N);
-        impl.d_coul_cnf.upload(cnf.data(), N);
         impl.d_coul_gam.upload(gam.data(), N);
         impl.d_coul_alp.upload(alp.data(), N);
         impl.coul_self_on_gpu = true;
@@ -1167,6 +1455,72 @@ void FFWorkspaceGPU::setDlogDCN(const Vector& dlogdcn)
     if (dlogdcn.size() != N) return;
     if (!impl.d_dlogdcn.ptr) impl.d_dlogdcn.alloc(N);
     impl.d_dlogdcn.upload(dlogdcn.data(), N);
+}
+
+// ============================================================================
+// GPU CN pair list generation (Apr 2026)
+// Replaces CPU generateCNPairList() O(N^2) loop with two-pass GPU kernels.
+// ============================================================================
+void FFWorkspaceGPU::generateCNPairListOnGPU()
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    if (N <= 0) return;
+
+    // Ensure counter buffer is allocated
+    if (!impl.d_cn_pair_counter.ptr) impl.d_cn_pair_counter.alloc(1);
+
+    // Pass 1: count valid pairs
+    int h_count = 0;
+    impl.d_cn_pair_counter.upload(&h_count, 1);  // zero the counter
+
+    int n_total = N * (N - 1) / 2;
+    auto cfg = getLaunchConfig(n_total, m_block_size);
+    k_generate_cn_pairs_count<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        N,
+        impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.d_atom_types.ptr,
+        2.5,  // cutoff_factor
+        impl.d_cn_pair_counter.ptr);
+    checkCuda(cudaStreamSynchronize(impl.stream), "k_generate_cn_pairs_count sync");
+
+    // Download count
+    impl.d_cn_pair_counter.download(&h_count, 1);
+    checkCuda(cudaStreamSynchronize(impl.stream), "download pair count");
+
+    if (h_count == 0) {
+        impl.n_cn_pairs = 0;
+        m_cn_pairs_on_gpu = false;
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::info("  GPU CN pair list: 0 pairs");
+        return;
+    }
+
+    // Allocate pair buffers based on count
+    impl.d_cn_idx_i.alloc(h_count);
+    impl.d_cn_idx_j.alloc(h_count);
+    impl.d_cn_rcov_sum.alloc(h_count);
+    impl.n_cn_pairs = h_count;
+
+    // Pass 2: write valid pairs
+    int h_zero = 0;
+    impl.d_cn_pair_counter.upload(&h_zero, 1);  // reset counter for write indices
+
+    k_generate_cn_pairs_write<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        N,
+        impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.d_atom_types.ptr,
+        2.5,  // cutoff_factor
+        impl.d_cn_pair_counter.ptr,
+        impl.d_cn_idx_i.ptr,
+        impl.d_cn_idx_j.ptr,
+        impl.d_cn_rcov_sum.ptr);
+    checkCuda(cudaStreamSynchronize(impl.stream), "k_generate_cn_pairs_write sync");
+
+    m_cn_pairs_on_gpu = true;
+
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::info(fmt::format("  GPU CN pair list: {} pairs generated on GPU", h_count));
 }
 
 void FFWorkspaceGPU::updateDispersionDC6DCN(const Matrix& dc6dcn)
@@ -1252,7 +1606,7 @@ void FFWorkspaceGPU::computeDC6DCNOnGPU(const std::vector<std::vector<double>>& 
     impl.d_dgw.upload(m_h_dgw_flat.data(), gw_size);
 
     // Launch dc6dcn per-pair kernel (Phase 6: dynamic block size)
-    LaunchConfig cfg = getLaunchConfig(nd);
+    LaunchConfig cfg = getLaunchConfig(nd, m_block_size);
     // refn read from constant memory d_refn_const (Phase 8)
     k_dc6dcn_per_pair<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
         nd,
@@ -1303,7 +1657,7 @@ void FFWorkspaceGPU::uploadRefCN(const std::vector<std::vector<double>>& refcn)
 // + computeGaussianWeightDerivatives() + flatten + sync H2D upload.
 // ============================================================================
 
-void FFWorkspaceGPU::computeGaussianWeightsOnGPU()
+void FFWorkspaceGPU::computeGaussianWeightsOnGPU(bool use_cn_final)
 {
     auto& impl = *m_impl;
     if (!impl.dc6dcn_gpu_ready) return;
@@ -1312,20 +1666,24 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU()
     const int nd = impl.disp.n;
     if (nd == 0) return;
 
-    // Launch k_gaussian_weights: compute gw and dgw from CN values already on GPU
-    // CN source: d_cn (uploaded in prepareAndLaunchChargeIndependent via setD3CN)
-    LaunchConfig cfg_gw = getLaunchConfig(N);
-    // refcn and refn read from constant memory d_refcn_const/d_refn_const (Phase 8)
+    // Select CN source buffer:
+    //   use_cn_final=true  → d_cn_final (written by computeCN(), current step).
+    //                         Call BEFORE prepareAndLaunchChargeIndependent() so
+    //                         dc6dcn is ready on the main stream before the event_upload
+    //                         fence that sA (dispersion stream) waits on.
+    //   use_cn_final=false → d_cn (updated by D2D copy inside prepareAndLaunchChargeIndependent).
+    //                         Call AFTER prepareAndLaunchChargeIndependent() — legacy path.
+    double* cn_buf = (use_cn_final && impl.d_cn_final.ptr) ? impl.d_cn_final.ptr : impl.d_cn.ptr;
+
+    LaunchConfig cfg_gw = getLaunchConfig(N, m_block_size);
     k_gaussian_weights<<<cfg_gw.gridSize, cfg_gw.blockSize, 0, impl.stream>>>(
         N,
-        impl.d_cn.ptr,
+        cn_buf,
         impl.d_atom_types.ptr,
         impl.d_gw.ptr,
         impl.d_dgw.ptr);
 
-    // Launch k_dc6dcn_per_pair immediately on same stream (gw/dgw ready by ordering)
-    LaunchConfig cfg_dc6 = getLaunchConfig(nd);
-    // refn read from constant memory d_refn_const (Phase 8)
+    LaunchConfig cfg_dc6 = getLaunchConfig(nd, m_block_size);
     k_dc6dcn_per_pair<<<cfg_dc6.gridSize, cfg_dc6.blockSize, 0, impl.stream>>>(
         nd,
         impl.disp.idx_i.ptr,
@@ -1336,9 +1694,8 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU()
         impl.d_c6_flat.ptr,
         impl.disp.dc6dcn_ij.ptr,
         impl.disp.dc6dcn_ji.ptr);
-
-    // No sync needed: same stream ordering guarantees dc6dcn is ready
-    // before k_dispersion in launchChargeDependentAndFinish()
+    // No explicit sync needed: stream ordering + event_upload fence in
+    // prepareAndLaunchChargeIndependent guarantees dc6dcn is ready before k_dispersion on sA.
 }
 
 // ============================================================================
@@ -1368,16 +1725,25 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // was captured on the first call and is replayed here via cudaGraphLaunch().
     // CPU-GPU overlap with EEQ is preserved: cudaGraphLaunch() is asynchronous.
     // =========================================================================
+    // need_snapshots=true when both snapshot buffers are allocated (always true in practice).
+    // d_grad_snapshot is always allocated to keep need_snapshots=true, disabling graph capture.
+    // Phase-1 graph capture fails on RTX 5080: captured kernels are silently dropped when
+    // cudaStreamEndCapture fails (stream isolation due to pending non-captured work on worker
+    // streams). Keep graph capture disabled until root cause is resolved on Blackwell.
     const bool need_snapshots = impl.d_dEdcn_snapshot.ptr && impl.d_grad_snapshot.ptr;
     const bool force_single_stream = (gradient && impl.d_grad_after_bonds.ptr);
-    if (impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream) {
+    // Claude Generated (May 2026): m_record_kernel_timings disables graph replay so
+    // per-stream events get recorded each step (graph-replay events don't update times).
+    if (impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream
+        && !m_record_kernel_timings) {
         cudaGraphLaunch(impl.m_graph_exec_phase1, stream);
         return;  // GPU executes the graph asynchronously; CPU proceeds to EEQ
     }
 
     // === CAPTURE START: on the first topology-stable step, record this execution ===
     bool capturing = false;
-    if (!impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream) {
+    if (!impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream
+        && !m_record_kernel_timings) {
         cudaError_t cap_err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
         capturing = (cap_err == cudaSuccess);
     }
@@ -1392,14 +1758,33 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                     FFWorkspaceGPUImpl::N_ENERGY_SLOTS * sizeof(double), stream);
 
     // =========================================================================
-    // 2. Upload CN and topology charges (NOT EEQ charges — those come later)
+    // 2. Upload CN (NOT EEQ charges — those come later)
     //    Geometry was already uploaded by setGeometry() before this call.
+    //    Topology charges (d_topo_charges) uploaded once at setParameter() — static per topology.
     // =========================================================================
-    if (m_cn.size() == N) {
-        impl.d_cn.upload(m_cn.data(), N, stream);
+    // G-P1 (Apr 2026): Use GPU-side D2D copy d_cn_final → d_cn instead of CPU round-trip.
+    // d_cn_final was written by k_cn_compute on the same (main) stream, so it is ready here.
+    // D2D copy is async on main stream; event_upload recorded below makes worker streams wait.
+    if (impl.d_cn_final.ptr && impl.d_cn.ptr && impl.d_cn_final.n >= N) {
+        cudaMemcpyAsync(impl.d_cn.ptr, impl.d_cn_final.ptr,
+                        N * sizeof(double), cudaMemcpyDeviceToDevice, stream);
+    } else if (static_cast<int>(m_cn.size()) == N) {
+        impl.d_cn.upload(m_cn.data(), N, stream);  // fallback (before first CN compute)
     }
-    if (m_topology_charges.size() == N) {
-        impl.d_topo_charges.upload(m_topology_charges.data(), N, stream);
+
+    // WP2: Build EEQ RHS on GPU — rhs[i] = chi_corr[i] + cnf[i]*sqrt(max(cn[i],0))
+    // Runs on main stream directly after d_cn_final is available; no CPU sync needed.
+    // finalizeCNForCPU() (called later) syncs main stream, so d_rhs_atoms is ready
+    // before solveWithDeviceRHS() starts its D2D copy.
+    if (impl.eeq_topo.valid && impl.d_cn_final.ptr) {
+        // BOUNDS_LIGHT kernel — cap block at 256.
+        LaunchConfig cfg = getLaunchConfigLight(N, m_block_size);
+        k_build_eeq_rhs<<<cfg.gridSize, cfg.blockSize, 0, stream>>>(
+            N,
+            impl.d_cn_final.ptr,
+            impl.eeq_topo.d_chi_corrected.ptr,
+            impl.eeq_topo.d_cnf.ptr,
+            impl.eeq_topo.d_rhs_atoms.ptr);
     }
 
     // =========================================================================
@@ -1422,20 +1807,26 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         cudaStreamWaitEvent(sC, impl.event_upload, 0);
     }
 
+    // Claude Generated (May 2026): Stream-level timing — record start events
+    if (m_record_kernel_timings) {
+        cudaEventRecord(impl.timing_sA_start, sA);
+        cudaEventRecord(impl.timing_sB_start, sB);
+        cudaEventRecord(impl.timing_sC_start, sC);
+    }
+
     // --- Stream A: Charge-independent pairwise terms (dispersion, repulsion) ---
-    // NOTE: When gradient=true, k_dispersion is DEFERRED to launchChargeDependentAndFinish()
-    // because the dEdcn accumulation needs dc6dcn values which come from computeDC6DCNOnGPU()
-    // (called after EEQ completes). Energy-only dispersion runs here for full overlap.
+    // k_dispersion: energy mode only. Gradient mode is deferred to Phase 2
+    // (computeGaussianWeightsOnGPU runs after Phase 1 on d_cn; dc6dcn is only
+    // ready on stream_pairwise after the Phase-2 event_upload fence).
     if (m_dispersion_enabled && !gradient) {
-        // Phase 8: n > 0 guard removed — n=0 produces a 1-block no-op (graph-capture safe)
-        LaunchConfig cfg = getLaunchConfig(impl.disp.n);
+        LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
             impl.disp.n,
             impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
             impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
             impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
             impl.disp.r_cut.ptr,
-            nullptr,   // no dc6dcn for energy-only
+            nullptr,  // dc6dcn: energy-only, no gradient contribution
             nullptr,
             impl.coords.d_x.ptr,
             impl.coords.d_y.ptr,
@@ -1446,7 +1837,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     if (m_repulsion_enabled) {
         // Phase 8: n > 0 guard removed — n=0 produces a 1-block no-op (graph-capture safe)
-        LaunchConfig cfg = getLaunchConfig(impl.bonded_rep.n);
+        LaunchConfig cfg = getLaunchConfig(impl.bonded_rep.n, m_block_size);
         if (impl.use_mixed_precision) {
             k_repulsion_mixed<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
                 impl.bonded_rep.n,
@@ -1473,7 +1864,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     if (m_repulsion_enabled) {
         // Phase 8: n > 0 guard removed — n=0 produces a 1-block no-op (graph-capture safe)
-        LaunchConfig cfg = getLaunchConfig(impl.nonbonded_rep.n);
+        LaunchConfig cfg = getLaunchConfig(impl.nonbonded_rep.n, m_block_size);
         if (impl.use_mixed_precision) {
             k_repulsion_mixed<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
                 impl.nonbonded_rep.n,
@@ -1504,6 +1895,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         cudaMemcpyAsync(impl.d_grad_after_sA.ptr, impl.d_grad.ptr,
                         3*N*sizeof(double), cudaMemcpyDeviceToDevice, sA);
     }
+    if (m_record_kernel_timings) cudaEventRecord(impl.timing_sA_end, sA);
     cudaEventRecord(impl.event_pairwise, sA);
 
     // --- Stream B: Bonded terms (bonds, angles, dihedrals, inversions, storsions, hb_alpha) ---
@@ -1513,7 +1905,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         impl.d_zz_hb.zero(N, sB);
     }
     {
-        LaunchConfig cfg = getLaunchConfig(impl.bonds.n);
+        LaunchConfig cfg = getLaunchConfig(impl.bonds.n, m_block_size);
         k_bonds<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.bonds.n,
             impl.bonds.idx_i.ptr,     impl.bonds.idx_j.ptr,
@@ -1543,7 +1935,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.angles.n, 256);  // HEAVY: __launch_bounds__(256,2)
+        LaunchConfig cfg = getLaunchConfig(impl.angles.n, m_block_size);
         k_angles<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.angles.n,
             impl.angles.idx_i.ptr,  impl.angles.idx_j.ptr,  impl.angles.idx_k.ptr,
@@ -1563,7 +1955,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.dihedrals.n, 256);  // HEAVY: __launch_bounds__(256,2)
+        LaunchConfig cfg = getLaunchConfig(impl.dihedrals.n, m_block_size);
         k_dihedrals<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.dihedrals.n,
             impl.dihedrals.idx_i.ptr, impl.dihedrals.idx_j.ptr,
@@ -1583,7 +1975,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.inversions.n, 256);  // HEAVY: __launch_bounds__(256,2)
+        LaunchConfig cfg = getLaunchConfig(impl.inversions.n, m_block_size);
         k_inversions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.inversions.n,
             impl.inversions.idx_i.ptr, impl.inversions.idx_j.ptr,
@@ -1601,7 +1993,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.storsions.n, 256);  // HEAVY: __launch_bounds__(256,2)
+        LaunchConfig cfg = getLaunchConfig(impl.storsions.n, m_block_size);
         k_storsions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.storsions.n,
             impl.storsions.idx_i.ptr, impl.storsions.idx_j.ptr,
@@ -1615,7 +2007,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     if (gradient && impl.hb_alpha.n > 0 && impl.d_zz_hb.ptr) {
         constexpr double hb_kn = 27.5;
-        LaunchConfig cfg = getLaunchConfig(impl.hb_alpha.n);
+        LaunchConfig cfg = getLaunchConfig(impl.hb_alpha.n, m_block_size);
         k_hb_alpha_chainrule<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
             impl.hb_alpha.n,
             impl.hb_alpha.idx_H.ptr,
@@ -1633,6 +2025,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         cudaMemcpyAsync(impl.d_grad_after_sB.ptr, impl.d_grad.ptr,
                         3*N*sizeof(double), cudaMemcpyDeviceToDevice, sB);
     }
+    if (m_record_kernel_timings) cudaEventRecord(impl.timing_sB_end, sB);
     cudaEventRecord(impl.event_bonded, sB);
 
     // --- Stream C: 3-body terms (batm, atm, xbonds, hbonds) ---
@@ -1640,7 +2033,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // hbonds uses q_H/q_A/q_B baked into SoA at construction time.
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.batm.n);
+        LaunchConfig cfg = getLaunchConfig(impl.batm.n, m_block_size);
         if (impl.use_mixed_precision) {
             k_batm_mixed<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
                 impl.batm.n,
@@ -1667,7 +2060,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.atm.n);
+        LaunchConfig cfg = getLaunchConfig(impl.atm.n, m_block_size);
         k_atm<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
             impl.atm.n,
             impl.atm.idx_i.ptr, impl.atm.idx_j.ptr, impl.atm.idx_k.ptr,
@@ -1683,7 +2076,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.xbonds.n);
+        LaunchConfig cfg = getLaunchConfig(impl.xbonds.n, m_block_size);
         if (impl.use_mixed_precision) {
             k_xbonds_mixed<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
                 impl.xbonds.n,
@@ -1712,7 +2105,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     }
     if (m_hbond_enabled) {
         // Phase 8: hbonds.n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
-        LaunchConfig cfg = getLaunchConfig(impl.hbonds.n, 256);  // HEAVY: __launch_bounds__(256,2)
+        LaunchConfig cfg = getLaunchConfig(impl.hbonds.n, m_block_size);
         k_hbonds<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
             impl.hbonds.n,
             impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr,
@@ -1739,6 +2132,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         cudaMemcpyAsync(impl.d_grad_after_sC.ptr, impl.d_grad.ptr,
                         3*N*sizeof(double), cudaMemcpyDeviceToDevice, sC);
     }
+    if (m_record_kernel_timings) cudaEventRecord(impl.timing_sC_end, sC);
     cudaEventRecord(impl.event_threebody, sC);
 
     // === CAPTURE END: finalise graph and execute immediately ===
@@ -1772,10 +2166,62 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     const int N = m_natoms;
     cudaStream_t stream = impl.stream;
 
+    // Claude Generated (May 2026): Phase 2 timing start
+    if (m_record_kernel_timings) cudaEventRecord(impl.timing_p2_start, stream);
+
     // =========================================================================
-    // 1. Upload EEQ charges (the CPU EEQ solver has completed by now)
+    // WP4 (May 2026): Phase-2 CUDA-Graph capture / replay
+    //   Two graph slots — one for gradient=true, one for energy-only — kept in step
+    //   with the topology cache (invalidateGraph() destroys both alongside Phase 1).
+    //   Capture guard matches Phase 1: stream_pairwise must be idle (no pending Phase 1
+    //   non-captured work) before it can be joined to a capture via cudaStreamWaitEvent.
+    //   d_grad_snapshot is deliberately kept allocated (see Phase 1 comment at
+    //   prepareAndLaunchChargeIndependent()) so this guard always disables capture
+    //   until stream isolation is solved.
+    // Phase-1 graph flag: if Phase-1 ran as a graph, all its sub-streams (sA, sB, sC)
+    // are fully synchronized to the main stream before Phase-2 entries execute.
+    // Phase-1-internal events (event_bonded, event_threebody) are NOT externally signaled
+    // after graph replay → Phase-2 must NOT wait on them in that case.
+    const bool p1_was_graph = impl.m_graph_phase1_valid;
+
+    // WP5-A fix: d_grad_snapshot is only allocated at verbosity >= 3 now.
+    // p2_snapshot_guard is false in normal mode → capture guard is pure verbosity check.
+    const bool p2_snapshot_guard      = impl.d_dEdcn_snapshot.ptr && impl.d_grad_snapshot.ptr;
+    const bool p2_need_snapshots      = (m_verbosity >= 3) || p2_snapshot_guard;
+    const bool p2_force_single_stream = (gradient && impl.d_grad_after_bonds.ptr);
+    // Phase-1 graph fix: when Phase-1 ran as a graph, stream_pairwise may still have
+    // pending graph work when Phase-2 tries to begin capture. CUDA rejects the
+    // cudaStreamWaitEvent join with cudaErrorStreamCaptureIsolation, invalidating
+    // the Phase-2 capture and causing all charge-dependent kernels to be silently
+    // skipped → energy = 0. Disable Phase-2 capture whenever Phase-1 is graph-active.
+    // Claude Generated (May 2026): m_record_kernel_timings disables graph for accurate per-step events.
+    const bool p2_capture_disabled    = p2_need_snapshots || p2_force_single_stream || p1_was_graph
+                                          || m_record_kernel_timings;
+    bool&            p2_valid = gradient ? impl.m_graph_phase2_grad_valid
+                                         : impl.m_graph_phase2_energy_valid;
+    cudaGraph_t&     p2_graph = gradient ? impl.m_graph_phase2_grad
+                                         : impl.m_graph_phase2_energy;
+    cudaGraphExec_t& p2_exec  = gradient ? impl.m_graph_exec_phase2_grad
+                                         : impl.m_graph_exec_phase2_energy;
+    bool p2_capturing = false;
+
+    if (p2_valid && !p2_capture_disabled) {
+        // Replay: cudaGraphLaunch is async; sync + extraction happen below.
+        cudaGraphLaunch(p2_exec, stream);
+    } else {
+        if (!p2_valid && !p2_capture_disabled) {
+            cudaError_t cap_err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+            p2_capturing = (cap_err == cudaSuccess);
+        }
+
     // =========================================================================
-    if (m_eeq_charges.size() == N) {
+    // 1. Upload EEQ charges
+    //    WP5-A: if setEEQDeviceCharges() was called, charges are already in
+    //    impl.d_charges via D2D — skip H2D upload and reset the flag.
+    // =========================================================================
+    if (m_device_charges_ready) {
+        m_device_charges_ready = false;  // consumed; next step will upload normally
+    } else if (m_eeq_charges.size() == N) {
         impl.d_charges.upload(m_eeq_charges.data(), N, stream);
     }
 
@@ -1784,14 +2230,18 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     //    Wait for charge-independent pairwise kernels to finish first,
     //    since these kernels write to the same d_grad/d_energies buffers.
     // =========================================================================
-    // Record event on main stream (after charge upload) so pairwise stream can wait
-    cudaEventRecord(impl.event_upload, stream);
-    cudaStreamWaitEvent(impl.stream_pairwise, impl.event_upload, 0);
+    // Record event on main stream (after charge upload) so pairwise stream can wait.
+    // WP4: dedicated phase-2 event (event_p2_upload) to keep capture isolated from
+    // phase-1's event_upload, which is recorded inside the phase-1 graph.
+    cudaEventRecord(impl.event_p2_upload, stream);
+    cudaStreamWaitEvent(impl.stream_pairwise, impl.event_p2_upload, 0);
 
-    // k_dispersion deferred from charge-independent phase when gradient=true
-    // (needs dc6dcn from computeDC6DCNOnGPU which ran after EEQ)
-    if (m_dispersion_enabled && impl.disp.n > 0 && gradient) {
-        LaunchConfig cfg = getLaunchConfig(impl.disp.n);
+    // k_dispersion (gradient mode): deferred from Phase 1.
+    // computeGaussianWeightsOnGPU() was called after Phase 1 (using d_cn, current step)
+    // and runs on the main stream. The event_upload fence above ensures stream_pairwise
+    // sees the completed dc6dcn values before k_dispersion launches.
+    if (m_dispersion_enabled && gradient) {
+        LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
             impl.disp.n,
             impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
@@ -1806,11 +2256,12 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             impl.d_dEdcn.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_DISP]);
+        checkCuda(cudaGetLastError(), "k_dispersion launch");
     }
 
     // k_coulomb (needs EEQ charges)
     if (m_coulomb_enabled && impl.coulomb.n > 0) {
-        LaunchConfig cfg = getLaunchConfig(impl.coulomb.n);
+        LaunchConfig cfg = getLaunchConfig(impl.coulomb.n, m_block_size);
         k_coulomb<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
             impl.coulomb.n,
             impl.coulomb.idx_i.ptr,  impl.coulomb.idx_j.ptr,
@@ -1822,9 +2273,11 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             impl.d_charges.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_COUL]);
+        checkCuda(cudaGetLastError(), "k_coulomb launch");
     }
-    // Re-record pairwise event to include k_coulomb completion
-    cudaEventRecord(impl.event_pairwise, impl.stream_pairwise);
+    // Re-record pairwise event to include k_coulomb completion.
+    // WP4: event_p2_pairwise — phase-2-dedicated, never aliased with phase-1 graph.
+    cudaEventRecord(impl.event_p2_pairwise, impl.stream_pairwise);
 
     // =========================================================================
     // 3. Postprocess on main stream
@@ -1834,11 +2287,14 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     //   k_cn_chainrule   — needs d_dEdcn complete from ALL streams → wait for all 3
     // =========================================================================
 
-    const bool need_snapshots = true; // TODO: Restore to (m_verbosity >= 3) after GPU gradient debugging complete
+    const bool need_snapshots = (m_verbosity >= 3);
     if (m_coulomb_enabled && impl.coul_self_on_gpu) {
-        // Wait for pairwise+bonded streams (dEdcn dependency for qtmp subtraction)
-        cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
-        cudaStreamWaitEvent(stream, impl.event_bonded, 0);
+        // Wait for pairwise+bonded streams (dEdcn dependency for qtmp subtraction).
+        // event_p2_pairwise: Phase-2-dedicated — always wait (records k_coulomb completion).
+        // event_bonded: Phase-1-internal — skip if Phase-1 ran as graph (already sequenced).
+        cudaStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
+        if (!p1_was_graph)
+            cudaStreamWaitEvent(stream, impl.event_bonded, 0);
 
         // d_dEdcn_snapshot must always be populated — dEdcnTotal() is public API
         // used by external code (tests, chain-rule validation) regardless of verbosity.
@@ -1853,34 +2309,40 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
                             3*N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
         }
 
-        bool do_subtract = gradient && m_cnf.size() == N && m_eeq_charges.size() == N;
-        LaunchConfig cfg = getLaunchConfig(N);
+        // WP5-B: do_subtract only needs the GPU CNF buffer + EEQ charges — no CPU vector.
+        bool do_subtract = gradient && impl.coul_self_on_gpu && m_eeq_charges.size() == N;
+        LaunchConfig cfg = getLaunchConfig(N, m_block_size);
         k_coulomb_postprocess<<<cfg.gridSize, cfg.blockSize, 0, stream>>>(
             N,
             impl.d_charges.ptr,
             impl.d_coul_chi_base.ptr,
-            impl.d_coul_cnf.ptr,
+            impl.eeq_topo.d_cnf.ptr,
             impl.d_cn.ptr,
             impl.d_coul_gam.ptr,
             impl.d_coul_alp.ptr,
             impl.d_dEdcn.ptr,
             &impl.d_energies.ptr[impl.E_COUL_SELF],
             do_subtract);
+        checkCuda(cudaGetLastError(), "k_coulomb_postprocess launch");
     }
 
     // k_cn_chainrule: reads d_dEdcn (must be final) and d_grad (accumulated by ALL
     // kernels), so wait for all 3 stream events.
     if (gradient && m_cn_pairs_on_gpu && impl.n_cn_pairs > 0 && impl.d_dlogdcn.ptr) {
-        cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
-        cudaStreamWaitEvent(stream, impl.event_bonded, 0);
-        cudaStreamWaitEvent(stream, impl.event_threebody, 0);
+        // event_p2_pairwise: Phase-2-dedicated — always wait.
+        // event_bonded/threebody: Phase-1-internal — skip if Phase-1 ran as graph.
+        cudaStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
+        if (!p1_was_graph) {
+            cudaStreamWaitEvent(stream, impl.event_bonded, 0);
+            cudaStreamWaitEvent(stream, impl.event_threebody, 0);
+        }
 
         if (need_snapshots) {
             cudaMemcpyAsync(impl.d_grad_snapshot.ptr, impl.d_grad.ptr,
                             3*N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
         }
 
-        LaunchConfig cfg_cn = getLaunchConfig(impl.n_cn_pairs);
+        LaunchConfig cfg_cn = getLaunchConfig(impl.n_cn_pairs, m_block_size);
         k_cn_chainrule<<<cfg_cn.gridSize, cfg_cn.blockSize, 0, stream>>>(
             impl.n_cn_pairs,
             impl.d_cn_idx_i.ptr,
@@ -1893,6 +2355,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             impl.d_dlogdcn.ptr,
             impl.d_grad.ptr,
             m_kn);
+        checkCuda(cudaGetLastError(), "k_cn_chainrule launch");
     }
 
     // =========================================================================
@@ -1900,11 +2363,16 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // Claude Generated (March 2026): All D2H transfers enqueued on main stream,
     // single cudaStreamSynchronize at end. Pinned buffers enable true async DMA.
     // =========================================================================
-    cudaStreamWaitEvent(stream, impl.event_pairwise, 0);
-    cudaStreamWaitEvent(stream, impl.event_bonded, 0);
-    cudaStreamWaitEvent(stream, impl.event_threebody, 0);
+    // Final fence before D2H: wait for all Phase-2 stream work.
+    // event_p2_pairwise: Phase-2-dedicated (dispersion + Coulomb on stream_pairwise).
+    // event_bonded/threebody: Phase-1-internal — skip if Phase-1 ran as graph.
+    cudaStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
+    if (!p1_was_graph) {
+        cudaStreamWaitEvent(stream, impl.event_bonded, 0);
+        cudaStreamWaitEvent(stream, impl.event_threebody, 0);
+    }
 
-    checkCuda(cudaGetLastError(), "postprocess kernel launch check");
+    checkCuda(cudaGetLastError(), "postprocess final check");
 
     // Async energy download (pinned m_h_energies buffer)
     checkCuda(cudaMemcpyAsync(m_h_energies, impl.d_energies.ptr,
@@ -1964,8 +2432,75 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
         }
     }
 
+        // === WP4: Phase-2 capture end + immediate replay ===
+        // BeginCapture suppressed real kernel execution; the captured graph must be
+        // launched once now to actually run this step's work (matches Phase 1 pattern).
+        if (p2_capturing) {
+            cudaError_t end_err = cudaStreamEndCapture(stream, &p2_graph);
+            if (end_err == cudaSuccess && p2_graph) {
+                cudaError_t inst_err = cudaGraphInstantiate(
+                    &p2_exec, p2_graph, NULL, NULL, 0);
+                if (inst_err == cudaSuccess) {
+                    p2_valid = true;
+                    cudaGraphLaunch(p2_exec, stream);
+                } else {
+                    cudaGraphDestroy(p2_graph);
+                    p2_graph = nullptr;
+                }
+            } else if (p2_graph) {
+                cudaGraphDestroy(p2_graph);
+                p2_graph = nullptr;
+            }
+        }
+    } // end else (WP4 replay-or-capture)
+
+    // Claude Generated (May 2026): Phase 2 timing end (before sync, so it captures kernel time only)
+    if (m_record_kernel_timings) cudaEventRecord(impl.timing_p2_end, stream);
+
     // Single synchronization point — all async transfers complete here
     checkCuda(cudaStreamSynchronize(stream), "final stream sync");
+
+    // Claude Generated (May 2026): Compute per-stream elapsed times after sync.
+    // Stream-level totals are mapped to per-component timings (all kernels in a
+    // stream share its total). True per-kernel timing would require per-kernel
+    // event pairs; stream-level grouping is the pragmatic compromise.
+    if (m_record_kernel_timings) {
+        m_kernel_timings.reset();
+        float ms_sA = 0, ms_sB = 0, ms_sC = 0, ms_p2 = 0;
+        cudaError_t e1 = cudaEventElapsedTime(&ms_sA, impl.timing_sA_start, impl.timing_sA_end);
+        cudaError_t e2 = cudaEventElapsedTime(&ms_sB, impl.timing_sB_start, impl.timing_sB_end);
+        cudaError_t e3 = cudaEventElapsedTime(&ms_sC, impl.timing_sC_start, impl.timing_sC_end);
+        cudaError_t e4 = cudaEventElapsedTime(&ms_p2, impl.timing_p2_start, impl.timing_p2_end);
+        // Map stream times to per-component slots so the unified report's GPU column shows non-empty values.
+        // Components within the same stream share the stream's wall-clock — this is intentional
+        // (per-kernel timing not available without per-kernel event pairs).
+        if (e1 == cudaSuccess) {
+            m_kernel_timings.dispersion    = ms_sA;
+            m_kernel_timings.bonded_rep    = ms_sA;
+            m_kernel_timings.nonbonded_rep = ms_sA;
+        }
+        if (e2 == cudaSuccess) {
+            m_kernel_timings.bonds      = ms_sB;
+            m_kernel_timings.angles     = ms_sB;
+            m_kernel_timings.dihedrals  = ms_sB;
+            m_kernel_timings.inversions = ms_sB;
+            m_kernel_timings.stors      = ms_sB;
+        }
+        if (e3 == cudaSuccess) {
+            m_kernel_timings.atm   = ms_sC;
+            m_kernel_timings.batm  = ms_sC;
+            m_kernel_timings.hbond = ms_sC;
+            m_kernel_timings.xbond = ms_sC;
+        }
+        if (e4 == cudaSuccess) {
+            m_kernel_timings.coulomb = ms_p2;
+        }
+    }
+
+    // WP5-C (May 2026): Update skip-pending flag from async D2H copy.
+    // h_dc6dcn_skip was written by k_check_dc6dcn_skip_final → cudaMemcpyAsync on the
+    // same stream; now that the stream is synchronized, the host buffer is valid.
+    m_dc6dcn_skip_pending = (impl.h_dc6dcn_skip != nullptr && *impl.h_dc6dcn_skip != 0);
 
     // Extract per-term energies from pinned buffer
     const double e_disp      = m_h_energies[impl.E_DISP];
@@ -2065,6 +2600,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             CurcumaLogger::info("=== GPU dEdcn END ===");
         }
 
+        const bool need_snapshots = (m_verbosity >= 3);
         if (need_snapshots) {
             m_grad_before_cn.resize(N, 3);
             for (int i = 0; i < N; ++i) {
@@ -2204,31 +2740,108 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
     // Ensure CN buffers are allocated
     if (impl.d_cn_raw.n < N) impl.d_cn_raw.alloc(N);
     if (impl.d_cn_final.n < N) impl.d_cn_final.alloc(N);
+    if (impl.d_dlogdcn.n < N) impl.d_dlogdcn.alloc(N);
 
-    // Launch CN compute kernel
-    // Uses constant memory d_rcov_d3 for covalent radii (uploaded at construction)
-    LaunchConfig cfg_cn = getLaunchConfig(N);
-    k_cn_compute<<<cfg_cn.gridSize, cfg_cn.blockSize, 0, impl.stream>>>(
-        N,
-        impl.coords.d_x.ptr,
-        impl.coords.d_y.ptr,
-        impl.coords.d_z.ptr,
-        impl.d_atom_types.ptr,
-        impl.d_cn_raw.ptr,   // output: raw CN
-        impl.d_cn_final.ptr, // output: log-transformed CN
-        kn,
-        cnmax,
-        threshold_sq
+    // WP3: Pair-list-based CN path — O(n_pairs) instead of O(N²) per step.
+    // Pair list built once per topology by generateCNPairListOnGPU().
+    // ~5-10x fewer erf() calls for N=1410 (21K pairs vs 2M atoms×atoms).
+    if (m_cn_pairs_on_gpu && impl.n_cn_pairs > 0) {
+        // Zero cn_raw (atomicAdd kernel requires zeroed input)
+        LaunchConfig cfg_zero = getLaunchConfig(N, m_block_size);
+        k_zero_double<<<cfg_zero.gridSize, cfg_zero.blockSize, 0, impl.stream>>>(
+            impl.d_cn_raw.ptr, N);
+
+        // 1 thread per pair: atomicAdd into cn_raw[i] and cn_raw[j]
+        // BOUNDS_LIGHT kernel — must cap block at 256 (May 2026 fix).
+        LaunchConfig cfg_pairs = getLaunchConfigLight(impl.n_cn_pairs, m_block_size);
+        k_cn_compute_pairs<<<cfg_pairs.gridSize, cfg_pairs.blockSize, 0, impl.stream>>>(
+            impl.n_cn_pairs,
+            impl.d_cn_idx_i.ptr,
+            impl.d_cn_idx_j.ptr,
+            impl.d_cn_rcov_sum.ptr,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
+            impl.d_cn_raw.ptr,
+            kn);
+
+        // Log squashing: cn_final[i] = log(1+exp(cnmax)) - log(1+exp(cnmax-cn_raw[i]))
+        // BOUNDS_LIGHT kernel — cap block at 256.
+        LaunchConfig cfg_log = getLaunchConfigLight(N, m_block_size);
+        k_logcn<<<cfg_log.gridSize, cfg_log.blockSize, 0, impl.stream>>>(
+            N, impl.d_cn_raw.ptr, impl.d_cn_final.ptr, cnmax);
+
+    } else {
+        // Fallback: O(N²) kernel (initial step before pair list is built, or n_pairs==0)
+        LaunchConfig cfg_cn = getLaunchConfig(N, m_block_size);
+        k_cn_compute<<<cfg_cn.gridSize, cfg_cn.blockSize, 0, impl.stream>>>(
+            N,
+            impl.coords.d_x.ptr,
+            impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr,
+            impl.d_atom_types.ptr,
+            impl.d_cn_raw.ptr,
+            impl.d_cn_final.ptr,
+            kn,
+            cnmax,
+            threshold_sq);
+    }
+
+    // WP5-C (May 2026): GPU-side D4 dc6dcn skip check.
+    // Compare current CN against previous-step snapshot. If max|ΔCN| < 0.01,
+    // the next step can skip Gaussian weight + dc6dcn recomputation.
+    // Stage 1: per-block max reduction → d_block_max[].
+    // Stage 2: single block reduces d_block_max[] → d_dc6dcn_skip[0].
+    // Asynchronous D2H copy of skip flag (read by caller in next step).
+    {
+        // BOUNDS_LIGHT kernels — cap block at 256.
+        LaunchConfig cfg_skip = getLaunchConfigLight(N, m_block_size);
+        // Zero d_dc6dcn_skip before Stage 2 writes the final flag.
+        cudaMemsetAsync(impl.d_dc6dcn_skip.ptr, 0, sizeof(int), impl.stream);
+        k_check_dc6dcn_skip<<<cfg_skip.gridSize, cfg_skip.blockSize, 0, impl.stream>>>(
+            N, impl.d_cn_final.ptr, impl.d_cn_d4_ref.ptr,
+            impl.d_dc6dcn_block_max.ptr);
+        k_check_dc6dcn_skip_final<<<1, cfg_skip.blockSize, 0, impl.stream>>>(
+            cfg_skip.gridSize, impl.d_dc6dcn_block_max.ptr, 0.01,
+            impl.d_dc6dcn_skip.ptr);
+        cudaMemcpyAsync(impl.h_dc6dcn_skip, impl.d_dc6dcn_skip.ptr, sizeof(int),
+                        cudaMemcpyDeviceToHost, impl.stream);
+
+        // Snapshot current CN for next step's comparison (D2D copy, async)
+        cudaMemcpyAsync(impl.d_cn_d4_ref.ptr, impl.d_cn_final.ptr,
+                        N * sizeof(double), cudaMemcpyDeviceToDevice, impl.stream);
+    }
+
+    // Compute dlogdcn on GPU: dlogdcn[i] = exp(cnmax)/(exp(cnmax)+exp(cn_raw[i]))
+    // Runs on same stream after either CN path — cn_raw is always valid at this point.
+    LaunchConfig cfg_dlog = getLaunchConfig(N, m_block_size);
+    k_dlogdcn<<<cfg_dlog.gridSize, cfg_dlog.blockSize, 0, impl.stream>>>(
+        N, impl.d_cn_raw.ptr, impl.d_dlogdcn.ptr, std::exp(cnmax)
     );
 
-    // Download CN_final and CN_raw to pre-allocated pinned buffers
+    // Download CN_final, CN_raw, and dlogdcn to pre-allocated pinned buffers
     // Claude Generated (March 2026): Avoids heap corruption from CUDA allocator
     // CN_raw needed for correct dlogdcn computation (chain-rule gradient)
     cudaMemcpyAsync(m_h_cn_final, impl.d_cn_final.ptr, N * sizeof(double),
                     cudaMemcpyDeviceToHost, impl.stream);
     cudaMemcpyAsync(m_h_cn_raw, impl.d_cn_raw.ptr, N * sizeof(double),
                     cudaMemcpyDeviceToHost, impl.stream);
-    cudaStreamSynchronize(impl.stream);
+    cudaMemcpyAsync(m_h_dlogdcn, impl.d_dlogdcn.ptr, N * sizeof(double),
+                    cudaMemcpyDeviceToHost, impl.stream);
+    // G-P1 (Apr 2026): Sync deferred — caller calls finalizeCNForCPU() after Phase 4 launch.
+    // GPU finishes CN kernel in ~0.15ms; by the time finalizeCNForCPU() is reached (~0.3ms
+    // later after Phase 4 launch overhead), the stream is already complete → no sleep penalty.
+    m_cn_computed = false;
+}
+
+// G-P1 (Apr 2026): Finalize deferred CN download — sync main stream, copy to caller's buffer.
+// Must be called after Phase 4 launch so the GPU CN kernel completes during launch overhead.
+void FFWorkspaceGPU::finalizeCNForCPU(Vector& out_cn)
+{
+    const int N = m_natoms;
+    cudaStreamSynchronize(m_impl->stream);   // returns near-instantly if GPU already done
+    if (out_cn.size() != N) out_cn.resize(N);
+    std::memcpy(out_cn.data(), m_h_cn_final, N * sizeof(double));
     m_cn_computed = true;
 }
 
@@ -2294,6 +2907,60 @@ void FFWorkspaceGPU::synchronizeMainStream()
 }
 
 // ---------------------------------------------------------------------------
+// WP2: uploadEEQTopologyParams + device pointer getters
+// Claude Generated (May 2026): Upload topology-constant EEQ parameters once
+// per topology build so k_build_eeq_rhs can construct rhs_atoms on GPU.
+// ---------------------------------------------------------------------------
+
+void FFWorkspaceGPU::uploadEEQTopologyParams(const GFNFF::EEQGPUParams& params)
+{
+    if (!m_impl) return;
+    auto& et = m_impl->eeq_topo;
+    const int N = m_natoms;
+
+    et.d_alpha_corrected.upload(params.alpha_corrected.data(), N);
+    et.d_gam_corrected.upload(params.gam_corrected.data(), N);
+    et.d_chi_corrected.upload(params.chi_corrected_static.data(), N);
+    et.d_cnf.upload(params.cnf.data(), N);
+
+    const int nfrag = params.nfrag;
+    if (nfrag > 0)
+        et.d_rhs_constraints.upload(params.rhs_constraints.data(), nfrag);
+    et.nfrag = nfrag;
+
+    // Allocate output buffer for k_build_eeq_rhs (written per-step, not uploaded here)
+    if (et.d_rhs_atoms.n < N)
+        et.d_rhs_atoms.alloc(N);
+
+    et.valid = true;
+}
+
+bool FFWorkspaceGPU::isEEQTopoValid() const
+{
+    return m_impl && m_impl->eeq_topo.valid;
+}
+
+const double* FFWorkspaceGPU::getDeviceRHSPtr() const
+{
+    return (m_impl && m_impl->eeq_topo.valid) ? m_impl->eeq_topo.d_rhs_atoms.ptr : nullptr;
+}
+
+const double* FFWorkspaceGPU::getDeviceRHSConstraintsPtr() const
+{
+    return (m_impl && m_impl->eeq_topo.valid) ? m_impl->eeq_topo.d_rhs_constraints.ptr : nullptr;
+}
+
+const double* FFWorkspaceGPU::getDeviceAlphaPtr() const
+{
+    return (m_impl && m_impl->eeq_topo.valid) ? m_impl->eeq_topo.d_alpha_corrected.ptr : nullptr;
+}
+
+const double* FFWorkspaceGPU::getDeviceGamPtr() const
+{
+    return (m_impl && m_impl->eeq_topo.valid) ? m_impl->eeq_topo.d_gam_corrected.ptr : nullptr;
+}
+
+// ---------------------------------------------------------------------------
 // setMixedPrecision — enable/disable FP32 intermediates for repulsion/batm/xbonds
 // Claude Generated (March 2026)
 // ---------------------------------------------------------------------------
@@ -2319,7 +2986,7 @@ bool FFWorkspaceGPU::checkDisplacement(double threshold)
               "checkDisplacement: zero flag");
 
     // Launch displacement check kernel
-    LaunchConfig cfg = getLaunchConfig(m_natoms);
+    LaunchConfig cfg = getLaunchConfig(m_natoms, m_block_size);
     k_check_displacement<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
         m_natoms,
         impl.coords.d_x.ptr,

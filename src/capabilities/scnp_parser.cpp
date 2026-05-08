@@ -20,6 +20,7 @@
 #include "scnp_parser.h"
 #include <algorithm>
 #include <cctype>
+#include <iostream>  // Claude Generated - fix missing include for std::cout
 #include <sstream>
 #include <cmath>
 #include <iomanip>

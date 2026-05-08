@@ -20,6 +20,7 @@
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
+#include "src/core/parameter_macros.h"
 
 #include <Eigen/Dense>
 #include <vector>
@@ -114,11 +115,23 @@ public:
     void setHessian(const Matrix& hessian);
     void setVerbosity(int level) { m_verbosity = level; }
 
+    // Select line search method: "backtracking" (default) or "strong_wolfe"
+    void setLineSearch(const std::string& method) { m_line_search_method = method; }
+
+    // Select RFO solver: "lanczos" (default, Tier M+) or "dense" (always O(N^3))
+    void setRFOSolver(const std::string& solver) { m_rfo_solver = solver; }
+
+    // Initialize from JSON configuration (reads lbfgs_line_search, rfo_solver, verbosity)
+    void setConfig(const json& config);
+
 private:
     // Line search algorithms
     double lineSearchRFO(const Vector& x, const Vector& p, double c1 = 1e-4, double c2 = 0.9);
     double lineSearchBacktracking(const Vector& x, const Vector& p, double alpha_init,
         double rho = 0.5, double c1 = 1e-4);
+    // Strong-Wolfe (bracket + zoom) — Nocedal & Wright Algorithm 3.5/3.6
+    double lineSearchStrongWolfe(const Vector& x, const Vector& p,
+                                  double alpha_init = 1.0, double c1 = 1e-4, double c2 = 0.9);
 
     // DIIS implementation
     Vector diisExtrapolation();
@@ -181,6 +194,15 @@ private:
     // Mass weighting (for RFO)
     std::vector<double> m_masses;
 
+    // Warm-start cache for the RFO Lanczos solver (size nvar+1, invalidated on size change)
+    Vector m_rfo_warm_start;
+
+    // Line search method: "backtracking" (default) or "strong_wolfe"
+    std::string m_line_search_method = "backtracking";
+
+    // RFO solver: "lanczos" (default, iterative for nvar+1>=50) or "dense" (always O(N^3))
+    std::string m_rfo_solver = "lanczos";
+
     // L-BFGS memory
     std::vector<Vector> m_step_history; // s_list
     std::vector<Vector> m_gradient_history; // y_list
@@ -189,4 +211,19 @@ private:
     // DIIS memory
     std::vector<Vector> m_diis_solutions; // Previous solutions
     std::vector<Vector> m_diis_errors; // Previous errors (gradients)
+
+    // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
+    BEGIN_PARAMETER_DEFINITION(native_lbfgs)
+
+    PARAM(lbfgs_memory, Int, 10, "L-BFGS history size (number of step/gradient pairs stored)", "Algorithm", {"memory_size", "m"})
+    PARAM(lbfgs_line_search, String, "backtracking", "Line search method: backtracking|strong_wolfe", "Algorithm", {"line_search"})
+    PARAM(rfo_solver, String, "lanczos", "RFO eigensolver: lanczos (iterative, O(N^2)) or dense (O(N^3))", "Algorithm", {})
+    PARAM(diis_history, Int, 10, "DIIS history size (number of previous solutions stored)", "Algorithm", {"diis_hist"})
+    PARAM(diis_start, Int, 10, "Iteration at which DIIS takes over from L-BFGS", "Algorithm", {})
+    PARAM(rfo_lambda, Double, 0.1, "RFO lambda shift parameter (legacy)", "Algorithm", {})
+    PARAM(trust_radius, Double, 0.1, "RFO trust radius (Bohr)", "Algorithm", {})
+    PARAM(verbosity, Int, 2, "Output verbosity level (0=silent, 1=minimal, 2=normal, 3=debug)", "Output", {})
+
+    END_PARAMETER_DEFINITION
+    // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
 };
