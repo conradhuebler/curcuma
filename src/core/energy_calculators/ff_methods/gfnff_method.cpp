@@ -157,6 +157,74 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
 }
 
 // =============================================================================
+// printGFNFFParamGenReport — verbosity-2 one-time parameter generation profile
+// Claude Generated (May 2026)
+// =============================================================================
+void printGFNFFParamGenReport(const GFNFFParamGenReport& r)
+{
+    auto fmt_t = [](double t) -> std::string {
+        return (t < 0.0) ? std::string("    --") : fmt::format("{:>6.1f}", t);
+    };
+    auto row = [&](const char* name, double t) {
+        CurcumaLogger::result(fmt::format("  {:<32}  {} ms", name, fmt_t(t)));
+    };
+
+    const char* backend_str = "Sequential";
+    switch (r.backend) {
+        case GFNFFParamGenReport::CxxThreadPool: backend_str = "CxxThreadPool"; break;
+        case GFNFFParamGenReport::OpenMPSections: backend_str = "OpenMP-sections"; break;
+        case GFNFFParamGenReport::Sequential: backend_str = "Sequential"; break;
+    }
+
+    CurcumaLogger::result("");
+    CurcumaLogger::result(fmt::format(
+        "GFN-FF Parameter Generation [N={} atoms, {} threads, backend={}{}]",
+        r.n_atoms, r.n_threads, backend_str,
+        r.topology_cached ? ", topo cached" : ""));
+    CurcumaLogger::result("  ─────────────────────────────────────────────────────────────────");
+    CurcumaLogger::result("  Topology:");
+    row("Distance matrix",              r.t_distance_matrix);
+    row("CN + hybridization + rings",   r.t_cn_hyb_pi_rings);
+    row("EEQ Phase 1 (topo charges)",   r.t_eeq_phase1);
+    row("EEQ Phase 1 corrections",      r.t_eeq_phase1_corr);
+    row("EEQ Phase 2 (refinement)",     r.t_eeq_phase2);
+    row("Pi-bond orders + bond types",  r.t_pi_bond_orders);
+    row("Topo distances + BATM list",   r.t_topo_distances);
+    row("Topology total",               r.t_topology_total);
+    CurcumaLogger::result("  Parameter generation:");
+    row("Bonds",                         r.t_bonds);
+    row("Angles",                        r.t_angles);
+    row("Torsions",                      r.t_torsions);
+    row("Inversions",                    r.t_inversions);
+    row("sTorsions",                     r.t_storsions);
+    row("Coulomb pairs",                 r.t_coulomb);
+    row("Repulsion pairs",               r.t_repulsion);
+    row("Dispersion pairs",              r.t_dispersion);
+    row("BATM triples",                  r.t_batm);
+    row("HB/XB detection",               r.t_hbxb);
+    row("Bond-HB cross-reference",       r.t_crossref);
+
+    if (r.t_parallel_block_wall >= 0.0) {
+        CurcumaLogger::result("  ─────────────────────────────────────────────────────────────────");
+        CurcumaLogger::result(fmt::format(
+            "  Parallel block ({}, {} threads)  wall={:>7.1f}  cpu-sum={:>7.1f}",
+            backend_str, r.n_threads, r.t_parallel_block_wall, r.t_parallel_block_cpu_sum));
+        if (r.n_threads > 1 && r.t_parallel_block_wall > 0.0
+            && r.t_parallel_block_cpu_sum > 0.0) {
+            double eff = 100.0 * r.t_parallel_block_cpu_sum
+                         / (r.n_threads * r.t_parallel_block_wall);
+            CurcumaLogger::result(fmt::format(
+                "    parallel efficiency: {:.1f}% (cpu-sum / N*wall)", eff));
+        }
+    }
+
+    CurcumaLogger::result("  ═════════════════════════════════════════════════════════════════");
+    CurcumaLogger::result(fmt::format(
+        "  {:<32}  {} ms", "Total parameter generation", fmt_t(r.t_param_gen_total)));
+    CurcumaLogger::result("");
+}
+
+// =============================================================================
 // GFNFFParameterSet serialization (Claude Generated March 2026)
 // Used ONLY for file-based parameter caching, not for in-memory transfer.
 // =============================================================================
@@ -3210,6 +3278,33 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     }
 
     m_param_gen_time_ms = static_cast<double>(duration.count());
+
+    // Claude Generated (May 2026): Populate the unified profile report.
+    // Sub-phase timings (t_bonds etc.) come from the chrono guards above; -1 means not measured.
+    auto pos = [&](double v) { return v > 0.0 ? v : (do_timing ? v : -1.0); };
+    m_param_gen_report.t_bonds      = pos(t_bonds);
+    m_param_gen_report.t_angles     = pos(t_angles);
+    m_param_gen_report.t_torsions   = pos(t_torsions);
+    m_param_gen_report.t_inversions = pos(t_inversions);
+    m_param_gen_report.t_storsions  = pos(t_storsions);
+    m_param_gen_report.t_coulomb    = pos(t_coulomb);
+    m_param_gen_report.t_repulsion  = pos(t_repulsion);
+    m_param_gen_report.t_dispersion = pos(t_dispersion);
+    m_param_gen_report.t_batm       = pos(t_batm);
+    m_param_gen_report.t_hbxb       = pos(t_hbxb);
+    m_param_gen_report.t_crossref   = pos(t_crossref);
+    m_param_gen_report.t_param_gen_total = m_param_gen_time_ms;
+    m_param_gen_report.n_atoms     = m_atomcount;
+    m_param_gen_report.n_threads   = m_parameters.value("threads", 1);
+    m_param_gen_report.backend     = (m_param_gen_report.n_threads > 1)
+                                       ? GFNFFParamGenReport::CxxThreadPool
+                                       : GFNFFParamGenReport::Sequential;
+
+    // Print at verbosity >= 2 (always — even on topology cache hit, where many timings are -1).
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        printGFNFFParamGenReport(m_param_gen_report);
+    }
+
     return params;
 }
 
@@ -7786,9 +7881,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         }
     }
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    {
         auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
-        CurcumaLogger::result_fmt("  distance_matrix: {} ms", dt.count());
+        m_param_gen_report.t_distance_matrix = static_cast<double>(dt.count());
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::result_fmt("  distance_matrix: {} ms", dt.count());
+        }
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -7846,9 +7944,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     }
     topo_info.neighbor_counts = Eigen::Map<Vector>(neighbor_counts.data(), neighbor_counts.size());
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    {
         auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
-        CurcumaLogger::result_fmt("  cn+hyb+pi+rings+adjacency: {} ms", dt.count());
+        m_param_gen_report.t_cn_hyb_pi_rings = static_cast<double>(dt.count());
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::result_fmt("  cn+hyb+pi+rings+adjacency: {} ms", dt.count());
+        }
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -7995,9 +8096,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             topo_info.topology_charges = Vector::Constant(m_atomcount, static_cast<double>(m_charge) / m_atomcount);
         }
 
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        {
             auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
-            CurcumaLogger::result_fmt("  eeq_phase1 (topology charges): {} ms", dt.count());
+            m_param_gen_report.t_eeq_phase1 = static_cast<double>(dt.count());
+            if (CurcumaLogger::get_verbosity() >= 1) {
+                CurcumaLogger::result_fmt("  eeq_phase1 (topology charges): {} ms", dt.count());
+            }
             phase_timer = std::chrono::high_resolution_clock::now();
         }
 
@@ -8051,9 +8155,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             }
         }
 
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        {
             auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
-            CurcumaLogger::result_fmt("  eeq_phase1_corrections (dxi+alpeeq+dgam): {} ms", dt.count());
+            m_param_gen_report.t_eeq_phase1_corr = static_cast<double>(dt.count());
+            if (CurcumaLogger::get_verbosity() >= 1) {
+                CurcumaLogger::result_fmt("  eeq_phase1_corrections (dxi+alpeeq+dgam): {} ms", dt.count());
+            }
             phase_timer = std::chrono::high_resolution_clock::now();
         }
         } // end if (!topology_from_cache)
@@ -8149,9 +8256,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         topo_info.topology_charges = topo_info.eeq_charges;
     }
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    {
         auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
-        CurcumaLogger::result_fmt("  eeq_phase2 (energy charges): {} ms", dt.count());
+        m_param_gen_report.t_eeq_phase2 = static_cast<double>(dt.count());
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::result_fmt("  eeq_phase2 (energy charges): {} ms", dt.count());
+        }
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -8241,9 +8351,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
                                         n_single, n_pi, n_sp, n_hyper, n_metal, n_eta, n_tm));
     }
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    {
         auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
-        CurcumaLogger::result_fmt("  pi_bond_orders+bond_types: {} ms", dt.count());
+        m_param_gen_report.t_pi_bond_orders = static_cast<double>(dt.count());
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::result_fmt("  pi_bond_orders+bond_types: {} ms", dt.count());
+        }
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -8314,15 +8427,20 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
                                            topo_info.nbatm, m_atomcount));
     }
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    {
         auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
-        CurcumaLogger::result_fmt("  topo_distances+batm: {} ms", dt.count());
+        m_param_gen_report.t_topo_distances = static_cast<double>(dt.count());
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::result_fmt("  topo_distances+batm: {} ms", dt.count());
+        }
     }
 
     // Claude Generated (March 2026): Timing summary
     auto topo_end = std::chrono::high_resolution_clock::now();
     auto topo_duration = std::chrono::duration_cast<std::chrono::milliseconds>(topo_end - topo_start);
     m_topology_time_ms = static_cast<double>(topo_duration.count());
+    m_param_gen_report.t_topology_total = m_topology_time_ms;
+    m_param_gen_report.n_atoms = m_atomcount;
 
     if (m_print_timing && CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::result_fmt("GFN-FF topology total: {} ms", topo_duration.count());

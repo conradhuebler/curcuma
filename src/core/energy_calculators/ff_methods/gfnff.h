@@ -152,6 +152,55 @@ struct GFNFFEnergyReport {
  */
 void printGFNFFEnergyReport(const GFNFFEnergyReport& r);
 
+/**
+ * @brief One-time parameter generation profiling report (printed at verbosity >= 2)
+ *
+ * Claude Generated (May 2026): Captures timings for both topology construction
+ * (`calculateTopologyInfo()`) and parameter generation (`generateGFNFFParameterSet()`).
+ * On topology-cache hit, topology phase fields are 0 (skipped) but the table still
+ * prints so the layout is stable.
+ *
+ * Future Phase B will fill `t_parallel_block_*` for OpenMP / CxxThreadPool comparison.
+ */
+struct GFNFFParamGenReport {
+    enum Backend { Sequential, CxxThreadPool, OpenMPSections };
+    Backend backend = Sequential;
+    int n_threads = 1;
+    int n_atoms = 0;
+    bool topology_cached = false;     // true if .topo.json hit (most topo phases skipped)
+
+    // Topology sub-phases (-1 = not measured this run)
+    double t_distance_matrix    = -1;
+    double t_cn_hyb_pi_rings    = -1;
+    double t_eeq_phase1         = -1;
+    double t_eeq_phase1_corr    = -1;
+    double t_eeq_phase2         = -1;
+    double t_pi_bond_orders     = -1;
+    double t_topo_distances     = -1;
+    double t_topology_total     = -1;
+
+    // Parameter generation phases — all measured in generateGFNFFParameterSet
+    double t_bonds       = -1;
+    double t_angles      = -1;
+    double t_torsions    = -1;
+    double t_inversions  = -1;
+    double t_storsions   = -1;
+    double t_coulomb     = -1;
+    double t_repulsion   = -1;
+    double t_dispersion  = -1;
+    double t_batm        = -1;
+    double t_hbxb        = -1;
+    double t_crossref    = -1;
+
+    // Parallel-block summary (cxxthreadpool path; -1 if sequential or backend=Sequential)
+    double t_parallel_block_wall    = -1;
+    double t_parallel_block_cpu_sum = -1;
+
+    double t_param_gen_total = -1;
+};
+
+void printGFNFFParamGenReport(const GFNFFParamGenReport& r);
+
 // P2b (Apr 2026): CN cutoff parameters — configurable via CLI
 // Three modes:
 //   cn_cutoff_bohr > 0: Neighbor-list mode (default 6.0 Bohr, fast O(N*k))
@@ -2258,6 +2307,10 @@ private:
     // Claude Generated (April 2026): Timing for consolidated summary
     double m_param_gen_time_ms = 0.0;       ///< Parameter generation time (generateGFNFFParameterSet) for summary
     mutable double m_topology_time_ms = 0.0; ///< Topology generation time (calculateTopologyInfo) for summary (mutable: set in const method)
+
+    // Claude Generated (May 2026): Profiling report for verbosity-2 param-gen breakdown.
+    // mutable so calculateTopologyInfo() (const) can populate sub-phase timings.
+    mutable GFNFFParamGenReport m_param_gen_report;
 
     // Check if geometry change warrants full topology recalculation (vs just dynamic state)
     bool needsFullTopologyUpdate(const Eigen::MatrixXd& geometry_bohr) const;
