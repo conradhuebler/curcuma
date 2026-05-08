@@ -747,6 +747,14 @@ struct FFWorkspaceGPUImpl {
     cudaEvent_t  event_upload    = nullptr;  ///< Reusable event for upload→stream sync
     // cudaEvent_t  event_cn_ready  = nullptr;  // (disabled) was for overlap experiment: CN D2H before gaussian weights
 
+    // Claude Generated (May 2026): Per-stream timing events (timing-enabled).
+    // Used at verbosity >= 2 to populate FFTermTimings via cudaEventElapsedTime.
+    // 4 stream groups × 2 events. Recorded each step around the kernel block on each stream.
+    cudaEvent_t timing_sA_start = nullptr, timing_sA_end = nullptr;  ///< dispersion + repulsion
+    cudaEvent_t timing_sB_start = nullptr, timing_sB_end = nullptr;  ///< bonded (5 kernels)
+    cudaEvent_t timing_sC_start = nullptr, timing_sC_end = nullptr;  ///< 3-body (4 kernels)
+    cudaEvent_t timing_p2_start = nullptr, timing_p2_end = nullptr;  ///< Phase 2 (Coulomb + post)
+
     // === CUDA Graph Capture — Phase 8 (Claude Generated March 2026) ===
     // For topology-stable MD steps, the entire charge-independent kernel sequence is
     // captured once into m_graph_phase1 and replayed via cudaGraphLaunch() — near-zero
@@ -846,6 +854,15 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_upload, cudaEventDisableTiming), "cudaEventCreate upload");
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_p2_pairwise, cudaEventDisableTiming), "cudaEventCreate p2_pairwise");
     checkCuda(cudaEventCreateWithFlags(&m_impl->event_p2_upload, cudaEventDisableTiming), "cudaEventCreate p2_upload");
+    // Claude Generated (May 2026): timing-enabled events for stream-level kernel timing
+    checkCuda(cudaEventCreate(&m_impl->timing_sA_start), "cudaEventCreate timing_sA_start");
+    checkCuda(cudaEventCreate(&m_impl->timing_sA_end),   "cudaEventCreate timing_sA_end");
+    checkCuda(cudaEventCreate(&m_impl->timing_sB_start), "cudaEventCreate timing_sB_start");
+    checkCuda(cudaEventCreate(&m_impl->timing_sB_end),   "cudaEventCreate timing_sB_end");
+    checkCuda(cudaEventCreate(&m_impl->timing_sC_start), "cudaEventCreate timing_sC_start");
+    checkCuda(cudaEventCreate(&m_impl->timing_sC_end),   "cudaEventCreate timing_sC_end");
+    checkCuda(cudaEventCreate(&m_impl->timing_p2_start), "cudaEventCreate timing_p2_start");
+    checkCuda(cudaEventCreate(&m_impl->timing_p2_end),   "cudaEventCreate timing_p2_end");
     cudaStream_t stream = m_impl->stream;
 
     // Upload covalent radii to constant memory (used by angle/dihedral distance damping)
@@ -1715,14 +1732,18 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // streams). Keep graph capture disabled until root cause is resolved on Blackwell.
     const bool need_snapshots = impl.d_dEdcn_snapshot.ptr && impl.d_grad_snapshot.ptr;
     const bool force_single_stream = (gradient && impl.d_grad_after_bonds.ptr);
-    if (impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream) {
+    // Claude Generated (May 2026): m_record_kernel_timings disables graph replay so
+    // per-stream events get recorded each step (graph-replay events don't update times).
+    if (impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream
+        && !m_record_kernel_timings) {
         cudaGraphLaunch(impl.m_graph_exec_phase1, stream);
         return;  // GPU executes the graph asynchronously; CPU proceeds to EEQ
     }
 
     // === CAPTURE START: on the first topology-stable step, record this execution ===
     bool capturing = false;
-    if (!impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream) {
+    if (!impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream
+        && !m_record_kernel_timings) {
         cudaError_t cap_err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
         capturing = (cap_err == cudaSuccess);
     }
@@ -1784,6 +1805,13 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         cudaStreamWaitEvent(sA, impl.event_upload, 0);
         cudaStreamWaitEvent(sB, impl.event_upload, 0);
         cudaStreamWaitEvent(sC, impl.event_upload, 0);
+    }
+
+    // Claude Generated (May 2026): Stream-level timing — record start events
+    if (m_record_kernel_timings) {
+        cudaEventRecord(impl.timing_sA_start, sA);
+        cudaEventRecord(impl.timing_sB_start, sB);
+        cudaEventRecord(impl.timing_sC_start, sC);
     }
 
     // --- Stream A: Charge-independent pairwise terms (dispersion, repulsion) ---
@@ -1867,6 +1895,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         cudaMemcpyAsync(impl.d_grad_after_sA.ptr, impl.d_grad.ptr,
                         3*N*sizeof(double), cudaMemcpyDeviceToDevice, sA);
     }
+    if (m_record_kernel_timings) cudaEventRecord(impl.timing_sA_end, sA);
     cudaEventRecord(impl.event_pairwise, sA);
 
     // --- Stream B: Bonded terms (bonds, angles, dihedrals, inversions, storsions, hb_alpha) ---
@@ -1996,6 +2025,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         cudaMemcpyAsync(impl.d_grad_after_sB.ptr, impl.d_grad.ptr,
                         3*N*sizeof(double), cudaMemcpyDeviceToDevice, sB);
     }
+    if (m_record_kernel_timings) cudaEventRecord(impl.timing_sB_end, sB);
     cudaEventRecord(impl.event_bonded, sB);
 
     // --- Stream C: 3-body terms (batm, atm, xbonds, hbonds) ---
@@ -2102,6 +2132,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         cudaMemcpyAsync(impl.d_grad_after_sC.ptr, impl.d_grad.ptr,
                         3*N*sizeof(double), cudaMemcpyDeviceToDevice, sC);
     }
+    if (m_record_kernel_timings) cudaEventRecord(impl.timing_sC_end, sC);
     cudaEventRecord(impl.event_threebody, sC);
 
     // === CAPTURE END: finalise graph and execute immediately ===
@@ -2135,6 +2166,9 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     const int N = m_natoms;
     cudaStream_t stream = impl.stream;
 
+    // Claude Generated (May 2026): Phase 2 timing start
+    if (m_record_kernel_timings) cudaEventRecord(impl.timing_p2_start, stream);
+
     // =========================================================================
     // WP4 (May 2026): Phase-2 CUDA-Graph capture / replay
     //   Two graph slots — one for gradient=true, one for energy-only — kept in step
@@ -2160,7 +2194,9 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // cudaStreamWaitEvent join with cudaErrorStreamCaptureIsolation, invalidating
     // the Phase-2 capture and causing all charge-dependent kernels to be silently
     // skipped → energy = 0. Disable Phase-2 capture whenever Phase-1 is graph-active.
-    const bool p2_capture_disabled    = p2_need_snapshots || p2_force_single_stream || p1_was_graph;
+    // Claude Generated (May 2026): m_record_kernel_timings disables graph for accurate per-step events.
+    const bool p2_capture_disabled    = p2_need_snapshots || p2_force_single_stream || p1_was_graph
+                                          || m_record_kernel_timings;
     bool&            p2_valid = gradient ? impl.m_graph_phase2_grad_valid
                                          : impl.m_graph_phase2_energy_valid;
     cudaGraph_t&     p2_graph = gradient ? impl.m_graph_phase2_grad
@@ -2418,8 +2454,48 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
         }
     } // end else (WP4 replay-or-capture)
 
+    // Claude Generated (May 2026): Phase 2 timing end (before sync, so it captures kernel time only)
+    if (m_record_kernel_timings) cudaEventRecord(impl.timing_p2_end, stream);
+
     // Single synchronization point — all async transfers complete here
     checkCuda(cudaStreamSynchronize(stream), "final stream sync");
+
+    // Claude Generated (May 2026): Compute per-stream elapsed times after sync.
+    // Stream-level totals are mapped to per-component timings (all kernels in a
+    // stream share its total). True per-kernel timing would require per-kernel
+    // event pairs; stream-level grouping is the pragmatic compromise.
+    if (m_record_kernel_timings) {
+        m_kernel_timings.reset();
+        float ms_sA = 0, ms_sB = 0, ms_sC = 0, ms_p2 = 0;
+        cudaError_t e1 = cudaEventElapsedTime(&ms_sA, impl.timing_sA_start, impl.timing_sA_end);
+        cudaError_t e2 = cudaEventElapsedTime(&ms_sB, impl.timing_sB_start, impl.timing_sB_end);
+        cudaError_t e3 = cudaEventElapsedTime(&ms_sC, impl.timing_sC_start, impl.timing_sC_end);
+        cudaError_t e4 = cudaEventElapsedTime(&ms_p2, impl.timing_p2_start, impl.timing_p2_end);
+        // Map stream times to per-component slots so the unified report's GPU column shows non-empty values.
+        // Components within the same stream share the stream's wall-clock — this is intentional
+        // (per-kernel timing not available without per-kernel event pairs).
+        if (e1 == cudaSuccess) {
+            m_kernel_timings.dispersion    = ms_sA;
+            m_kernel_timings.bonded_rep    = ms_sA;
+            m_kernel_timings.nonbonded_rep = ms_sA;
+        }
+        if (e2 == cudaSuccess) {
+            m_kernel_timings.bonds      = ms_sB;
+            m_kernel_timings.angles     = ms_sB;
+            m_kernel_timings.dihedrals  = ms_sB;
+            m_kernel_timings.inversions = ms_sB;
+            m_kernel_timings.stors      = ms_sB;
+        }
+        if (e3 == cudaSuccess) {
+            m_kernel_timings.atm   = ms_sC;
+            m_kernel_timings.batm  = ms_sC;
+            m_kernel_timings.hbond = ms_sC;
+            m_kernel_timings.xbond = ms_sC;
+        }
+        if (e4 == cudaSuccess) {
+            m_kernel_timings.coulomb = ms_p2;
+        }
+    }
 
     // WP5-C (May 2026): Update skip-pending flag from async D2H copy.
     // h_dc6dcn_skip was written by k_check_dc6dcn_skip_final → cudaMemcpyAsync on the

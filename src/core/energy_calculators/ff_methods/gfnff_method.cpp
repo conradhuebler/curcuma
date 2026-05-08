@@ -58,6 +58,105 @@ static inline bool is_transition_metal(int Z) {
 }
 
 // =============================================================================
+// printGFNFFEnergyReport — unified verbosity-2 output for CPU and GPU paths
+// Claude Generated (May 2026)
+// =============================================================================
+void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
+{
+    using TT = GFNFFEnergyReport::TermTiming;
+    auto fmt_t = [](double t) -> std::string {
+        return (t < 0.0) ? std::string("    --") : fmt::format("{:>6.2f}", t);
+    };
+    // Column layout (positions):
+    //   [0,1]  "  " (indent)
+    //   [2,23] name (22 chars left-aligned)
+    //   [24]   space
+    //   [25,40] energy (16 chars right-aligned)
+    //   [41,44] "    "
+    //   [45,50] CPU ms (6 chars)
+    //   [51,54] "    "
+    //   [55,60] GPU ms (6 chars)
+    auto row = [&](const char* name, double e, const TT& t) {
+        CurcumaLogger::result(fmt::format("  {:<22} {:>+16.10f}    {}    {}",
+            name, e, fmt_t(t.cpu_sum), fmt_t(t.gpu)));
+    };
+
+    CurcumaLogger::result("");
+    CurcumaLogger::result(fmt::format(
+        "GFN-FF Energy Decomposition [{}]", r.is_gpu ? "GPU" : "CPU"));
+    // Header row aligned with data columns
+    CurcumaLogger::result(fmt::format(
+        "  {:<22} {:>16}    {:>6}    {:>6}",
+        "Component", "Energy (Eh)", "CPU ms", "GPU ms"));
+    CurcumaLogger::result("  ─────────────────────────────────────────────────────────────────");
+    CurcumaLogger::result("  Bonded:");
+    row("Bond",                r.bond,         r.t_bond);
+    row("Angle",               r.angle,        r.t_angle);
+    row("Dihedral",            r.dihedral,     r.t_dihedral);
+    row("Inversion",           r.inversion,    r.t_inversion);
+    row("sTors",               r.stors,        r.t_stors);
+    CurcumaLogger::result("  Non-bonded:");
+    row("Dispersion",          r.dispersion,   r.t_dispersion);
+    row("Repulsion (bonded)",  r.bonded_rep,   r.t_bonded_rep);
+    row("Repulsion (nonbond)", r.nonbonded_rep, r.t_nonbonded_rep);
+    CurcumaLogger::result("  Electrostatics:");
+    row("Coulomb",             r.coulomb,      r.t_coulomb);
+    CurcumaLogger::result("  Non-covalent:");
+    row("H-bonds",             r.hbond,        r.t_hbond);
+    row("X-bonds",             r.xbond,        r.t_xbond);
+    row("ATM (3-body)",        r.atm,          r.t_atm);
+    row("BATM",                r.batm,         r.t_batm);
+    CurcumaLogger::result("  ═════════════════════════════════════════════════════════════════");
+    CurcumaLogger::result(fmt::format("  {:<22} {:>+16.10f}", "Total", r.total));
+    if (r.gradient_norm >= 0.0) {
+        CurcumaLogger::result(fmt::format(
+            "  {:<22} {:>16.6e}    {}    {}",
+            "Gradient |g| (Eh/B)", r.gradient_norm,
+            fmt_t(r.t_gradient.cpu_sum), fmt_t(r.t_gradient.gpu)));
+    }
+
+    // Phase summary — wall-clock per phase, with explicit CPU/GPU split
+    CurcumaLogger::result("  Phase summary:");
+    // phase format: "  <name 32>  wall=XX.XX ms   cpu=X.XX   gpu=X.XX"
+    auto phase_row = [&](const std::string& name, double wall, double cpu_ms, double gpu_ms) {
+        CurcumaLogger::result(fmt::format(
+            "  {:<32}  wall={:>7.2f}    cpu={}    gpu={}",
+            name, wall, fmt_t(cpu_ms), fmt_t(gpu_ms)));
+    };
+
+    if (r.t_cn_eeq_cpu >= 0.0)
+        phase_row("CN + EEQ (serial CPU)", r.t_cn_eeq_cpu, r.t_cn_eeq_cpu, -1.0);
+    if (r.t_hbxb >= 0.0)
+        phase_row("HB/XB re-detection", r.t_hbxb, r.t_hbxb, -1.0);
+    if (r.t_pool_wall >= 0.0) {
+        phase_row(fmt::format("Thread pool (N={})", r.n_cpu_threads),
+                  r.t_pool_wall, r.t_pool_cpu_sum, -1.0);
+        if (r.n_cpu_threads > 1 && r.t_pool_wall > 0.0 && r.t_pool_cpu_sum > 0.0) {
+            double eff = 100.0 * r.t_pool_cpu_sum / (r.n_cpu_threads * r.t_pool_wall);
+            CurcumaLogger::result(fmt::format(
+                "    parallel efficiency: {:.1f}%  (cpu-sum / (N * wall))", eff));
+        }
+    }
+    if (r.t_gradient_cpu >= 0.0)
+        phase_row("Chain-rule gradient (serial)", r.t_gradient_cpu, r.t_gradient_cpu, -1.0);
+
+    if (r.is_gpu) {
+        if (r.t_gpu_cn >= 0.0)
+            phase_row("GPU CN", r.t_gpu_cn, -1.0, r.t_gpu_cn);
+        if (r.t_cpu_eeq_gpu_path >= 0.0)
+            phase_row("EEQ solve (CPU || GPU kernels)", r.t_cpu_eeq_gpu_path,
+                      r.t_cpu_eeq_gpu_path, -1.0);
+        if (r.t_gpu_phase2 >= 0.0)
+            phase_row("Phase 2: Coulomb + DMA (GPU)", r.t_gpu_phase2, -1.0, r.t_gpu_phase2);
+    }
+
+    CurcumaLogger::result("  ═════════════════════════════════════════════════════════════════");
+    CurcumaLogger::result(fmt::format("  {:<32}  wall={:>7.2f} ms",
+        "Wall time", r.t_wall));
+    CurcumaLogger::result("");
+}
+
+// =============================================================================
 // GFNFFParameterSet serialization (Claude Generated March 2026)
 // Used ONLY for file-based parameter caching, not for in-memory transfer.
 // =============================================================================
@@ -1226,6 +1325,10 @@ double GFNFF::Calculation(bool gradient)
     auto t_ff_start = std::chrono::high_resolution_clock::now();
     double energy_hartree;
 
+    // Claude Generated (May 2026): Suppress ForceField's own decomposition output —
+    // GFN-FF wrapper prints the unified GFNFFEnergyReport at verbosity >= 2 below.
+    if (m_forcefield) m_forcefield->setSuppressOutput(true);
+
     if (m_use_workspace && m_workspace) {
         energy_hartree = m_workspace->calculate(gradient);
     } else {
@@ -1530,6 +1633,118 @@ double GFNFF::Calculation(bool gradient)
                 "  Sequential fraction: {:.1f}% of calculation — overlap potential: ~{:.1f}%",
                 parallel_headroom, parallel_headroom));
         }
+    }
+
+    // Claude Generated (May 2026): Unified verbosity-2 GFN-FF report (CPU path).
+    // Format identical to GPU path; both populate the same GFNFFEnergyReport struct.
+    if (CurcumaLogger::get_verbosity() >= 2 && (m_forcefield || m_workspace)) {
+        GFNFFEnergyReport rep;
+        rep.is_gpu = false;
+
+        // Energy components — workspace path (preferred) or ForceField legacy path.
+        if (m_use_workspace && m_workspace) {
+            const auto& comp = m_workspace->energyComponents();
+            rep.bond          = comp.bond;
+            rep.angle         = comp.angle;
+            rep.dihedral      = comp.dihedral;
+            rep.inversion     = comp.inversion;
+            rep.stors         = comp.stors;
+            rep.dispersion    = comp.dispersion;
+            rep.bonded_rep    = comp.bonded_rep;
+            rep.nonbonded_rep = comp.nonbonded_rep;
+            rep.coulomb       = comp.coulomb;
+            rep.hbond         = comp.hbond;
+            rep.xbond         = comp.xbond;
+            rep.atm           = comp.atm;
+            rep.batm          = comp.batm;
+        } else if (m_forcefield) {
+            rep.bond          = m_forcefield->BondEnergy();
+            rep.angle         = m_forcefield->AngleEnergy();
+            rep.dihedral      = m_forcefield->DihedralEnergy();
+            rep.inversion     = m_forcefield->InversionEnergy();
+            rep.stors         = m_forcefield->STorsEnergy();
+            rep.dispersion    = m_forcefield->DispersionEnergy();
+            rep.bonded_rep    = m_forcefield->BondedRepulsionEnergy();
+            rep.nonbonded_rep = m_forcefield->NonbondedRepulsionEnergy();
+            rep.coulomb       = m_forcefield->CoulombEnergy();
+            rep.hbond         = m_forcefield->HydrogenBondEnergy();
+            rep.xbond         = m_forcefield->HalogenBondEnergy();
+            rep.atm           = m_forcefield->ATMEnergy();
+            rep.batm          = m_forcefield->BatmEnergy();
+        }
+        rep.total = m_energy_total;
+
+        // Per-term CPU-sum timings — populated by either the workspace path or legacy ForceField.
+        if (m_use_workspace && m_workspace) {
+            const auto& tt = m_workspace->termTimings();
+            rep.t_bond.cpu_sum       = tt.bonds;
+            rep.t_angle.cpu_sum      = tt.angles;
+            rep.t_dihedral.cpu_sum   = tt.dihedrals;
+            rep.t_inversion.cpu_sum  = tt.inversions;
+            rep.t_stors.cpu_sum      = tt.stors;
+            rep.t_dispersion.cpu_sum    = tt.dispersion;
+            rep.t_bonded_rep.cpu_sum    = tt.bonded_rep;
+            rep.t_nonbonded_rep.cpu_sum = tt.nonbonded_rep;
+            rep.t_coulomb.cpu_sum       = tt.coulomb;
+            rep.t_hbond.cpu_sum         = tt.hbond;
+            rep.t_xbond.cpu_sum         = tt.xbond;
+            rep.t_atm.cpu_sum           = tt.atm;
+            rep.t_batm.cpu_sum          = tt.batm;
+
+            // Parallelism summary — workspace tracks thread count + wall-clock t_threads
+            rep.n_cpu_threads  = m_workspace->threadCount();
+            rep.t_pool_wall    = t_threads;  // workspace.calculate() wall-clock
+            // Sum across all term timings
+            double sum_cpu = 0.0;
+            auto add_pos = [&](double v) { if (v > 0) sum_cpu += v; };
+            add_pos(tt.bonds); add_pos(tt.angles); add_pos(tt.dihedrals);
+            add_pos(tt.inversions); add_pos(tt.stors);
+            add_pos(tt.dispersion); add_pos(tt.bonded_rep); add_pos(tt.nonbonded_rep);
+            add_pos(tt.coulomb); add_pos(tt.hbond); add_pos(tt.xbond);
+            add_pos(tt.atm); add_pos(tt.batm);
+            rep.t_pool_cpu_sum = (sum_cpu > 0.0) ? sum_cpu : -1.0;
+        } else if (m_forcefield) {
+            // Legacy ForceField path — uses ForceFieldThread::timeEnergyTerm map
+            const auto& tt = m_forcefield->getTermTimings();
+            auto get_ms = [&](const std::string& key) -> double {
+                auto it = tt.find(key);
+                return (it != tt.end()) ? static_cast<double>(it->second) : -1.0;
+            };
+            rep.t_bond.cpu_sum      = get_ms("bonds");
+            rep.t_angle.cpu_sum     = get_ms("angles");
+            rep.t_dihedral.cpu_sum  = get_ms("torsions");
+            rep.t_inversion.cpu_sum = get_ms("inversions");
+            rep.t_dispersion.cpu_sum    = get_ms("dispersion");
+            rep.t_bonded_rep.cpu_sum    = get_ms("bonded_repulsion");
+            rep.t_nonbonded_rep.cpu_sum = get_ms("nonbonded_repulsion");
+            rep.t_coulomb.cpu_sum       = get_ms("coulomb");
+            rep.t_hbond.cpu_sum         = get_ms("hydrogen_bonds");
+            rep.t_xbond.cpu_sum         = get_ms("halogen_bonds");
+            rep.t_atm.cpu_sum           = get_ms("atm_dispersion");
+            rep.t_batm.cpu_sum          = get_ms("batm");
+
+            rep.n_cpu_threads  = m_forcefield->getThreadCount();
+            rep.t_pool_wall    = m_forcefield->getPoolWallTime();
+            double sum_cpu = 0.0;
+            for (const auto& [k, v] : tt) sum_cpu += static_cast<double>(v);
+            rep.t_pool_cpu_sum = (sum_cpu > 0.0) ? sum_cpu : -1.0;
+
+            rep.t_gradient_cpu = m_forcefield->getChainRuleTime();
+            if (gradient)
+                rep.t_gradient.cpu_sum = m_forcefield->getChainRuleTime();
+        }
+
+        // Serial phases (always available)
+        rep.t_cn_eeq_cpu   = prep_timing.total;
+        rep.t_hbxb         = t_hbxb_update;
+
+        // Gradient
+        if (gradient)
+            rep.gradient_norm = m_gradient.norm();
+
+        rep.t_wall = std::chrono::duration<double, std::milli>(calc_end - calc_start).count();
+
+        printGFNFFEnergyReport(rep);
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {

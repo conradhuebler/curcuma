@@ -98,6 +98,60 @@ inline bool isMetalAtom(int atomic_number) {
            (atomic_number >= 89 && atomic_number <= 103);    // Ac-Lr
 }
 
+/**
+ * @brief Unified GFN-FF energy + timing report (CPU and GPU paths share this format)
+ *
+ * Claude Generated (May 2026): Single source of truth for the verbosity-2 output that
+ * was previously fragmented between forcefield.cpp (CPU) and gfnff_gpu_method.cpp (GPU).
+ * Populated by the wrapper after the energy calculation, then printed by
+ * printGFNFFEnergyReport() for a uniform user-facing display.
+ *
+ * Conventions:
+ *   - All times in milliseconds. -1.0 means "not applicable for this path".
+ *   - cpu_sum: sum of per-thread CPU time (NOT wall-clock). Wall-clock is in t_pool_wall.
+ *   - gpu: GPU phase wall-clock (proxy for kernel time; kernels are async, no per-kernel CUDA events).
+ */
+struct GFNFFEnergyReport {
+    // Energy components (Hartree)
+    double bond = 0, angle = 0, dihedral = 0, inversion = 0, stors = 0;
+    double dispersion = 0, bonded_rep = 0, nonbonded_rep = 0;
+    double coulomb = 0, hbond = 0, xbond = 0, atm = 0, batm = 0;
+    double total = 0;
+
+    // Per-term timing: cpu_sum (across all threads), gpu (phase wall-clock); -1 = N/A
+    struct TermTiming { double cpu_sum = -1.0, gpu = -1.0; };
+    TermTiming t_bond, t_angle, t_dihedral, t_inversion, t_stors;
+    TermTiming t_dispersion, t_bonded_rep, t_nonbonded_rep;
+    TermTiming t_coulomb, t_hbond, t_xbond, t_atm, t_batm;
+
+    // Gradient
+    double gradient_norm = -1.0;
+    TermTiming t_gradient;
+
+    // Phase summary — wall-clock per phase
+    double t_wall = 0.0;          // total wall-clock of Calculation()
+    int    n_cpu_threads = 1;
+    double t_pool_wall = -1.0;    // wall-clock of thread pool (ForceField)
+    double t_pool_cpu_sum = -1.0; // sum of all per-term CPU timings
+    double t_cn_eeq_cpu = -1.0;   // CN + EEQ wall-clock (CPU serial)
+    double t_hbxb = -1.0;         // HB/XB re-detection wall-clock
+    double t_gradient_cpu = -1.0; // chain-rule gradient (CPU serial after pool)
+
+    // GPU-only phase timings (-1 on CPU path)
+    double t_gpu_cn = -1.0;       // GPU CN kernel phase wall-clock
+    double t_cpu_eeq_gpu_path = -1.0; // CPU EEQ overlapping with GPU charge-indep kernels
+    double t_gpu_phase2 = -1.0;   // Phase 2: Coulomb + DMA
+
+    bool is_gpu = false;
+};
+
+/**
+ * @brief Print GFN-FF energy decomposition + timing breakdown at verbosity >= 2.
+ *
+ * Claude Generated (May 2026): Same format for CPU and GPU paths. Uses CurcumaLogger::result().
+ */
+void printGFNFFEnergyReport(const GFNFFEnergyReport& r);
+
 // P2b (Apr 2026): CN cutoff parameters — configurable via CLI
 // Three modes:
 //   cn_cutoff_bohr > 0: Neighbor-list mode (default 6.0 Bohr, fast O(N*k))

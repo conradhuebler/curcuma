@@ -226,6 +226,7 @@ double FFWorkspace::calculate(bool gradient)
 
         // acc[0] IS the result — zero-copy swap
         m_result_energy = m_accumulators[0].energy;
+        m_result_timings = m_accumulators[0].timings;  // Claude Generated (May 2026): per-term timing
         if (gradient) {
             m_result_gradient.swap(m_accumulators[0].gradient);
             m_dEdcn_total = m_accumulators[0].dEdcn;
@@ -302,50 +303,62 @@ double FFWorkspace::calculate(bool gradient)
 
 void FFWorkspace::executeGFNFF(int p)
 {
+    // Claude Generated (May 2026): Per-term timing — fills m_accumulators[p].timings.
+    // Aggregated across partitions in reduce() for the GFNFFEnergyReport CPU-sum column.
+    auto& timings = m_accumulators[p].timings;
+    auto tic = []() { return std::chrono::high_resolution_clock::now(); };
+    auto toc = [](auto t0) {
+        return std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t0).count();
+    };
+
     // HB coordination numbers must be computed before bond energy
     computeHBCoordinationNumbers(p);
 
     // Bonded terms
-    calcBonds(p);
-    calcAngles(p);
-    calcDihedrals(p);
-    calcExtraTorsions(p);
-    calcInversions(p);
+    auto t = tic(); calcBonds(p);          timings.bonds      = toc(t);
+    t = tic();      calcAngles(p);         timings.angles     = toc(t);
+    t = tic();      calcDihedrals(p);
+                    calcExtraTorsions(p);  timings.dihedrals  = toc(t);
+    t = tic();      calcInversions(p);     timings.inversions = toc(t);
 
     // Non-bonded pairwise terms
     if (m_dispersion_enabled) {
+        t = tic();
         calcDispersion(p);
         calcD4Dispersion(p);
+        timings.dispersion = toc(t);
     }
     if (m_repulsion_enabled) {
-        calcBondedRepulsion(p);
-        calcNonbondedRepulsion(p);
+        t = tic(); calcBondedRepulsion(p);    timings.bonded_rep    = toc(t);
+        t = tic(); calcNonbondedRepulsion(p); timings.nonbonded_rep = toc(t);
     }
     if (m_coulomb_enabled) {
-        calcCoulomb(p);
+        t = tic(); calcCoulomb(p); timings.coulomb = toc(t);
     }
 
     // HB/XB three-body terms
     if (m_hbond_enabled) {
-        calcHydrogenBonds(p);
-        calcHalogenBonds(p);
+        t = tic(); calcHydrogenBonds(p); timings.hbond = toc(t);
+        t = tic(); calcHalogenBonds(p);  timings.xbond = toc(t);
     }
 
     // Three-body dispersion
     if (!m_atm_triples.empty()) {
+        t = tic();
         calcATM(p);
-        if (m_do_gradient)
-            calcATMGradient(p);
+        if (m_do_gradient) calcATMGradient(p);
+        timings.atm = toc(t);
     }
 
     // Bonded ATM
     if (!m_batm_triples.empty()) {
-        calcBATM(p);
+        t = tic(); calcBATM(p); timings.batm = toc(t);
     }
 
     // Triple bond torsions
     if (!m_storsions.empty()) {
-        calcSTorsions(p);
+        t = tic(); calcSTorsions(p); timings.stors = toc(t);
     }
 }
 
@@ -353,6 +366,7 @@ void FFWorkspace::reduce()
 {
     // Sum all accumulators into result
     m_result_energy = m_accumulators[0].energy;
+    m_result_timings = m_accumulators[0].timings;  // Claude Generated (May 2026)
     if (m_do_gradient) {
         m_result_gradient = m_accumulators[0].gradient;
         m_dEdcn_total = m_accumulators[0].dEdcn;
@@ -373,6 +387,7 @@ void FFWorkspace::reduce()
 
     for (int t = 1; t < m_num_threads; ++t) {
         m_result_energy += m_accumulators[t].energy;
+        m_result_timings += m_accumulators[t].timings;  // Claude Generated (May 2026): CPU-sum
         if (m_do_gradient) {
             m_result_gradient += m_accumulators[t].gradient;
             m_dEdcn_total += m_accumulators[t].dEdcn;

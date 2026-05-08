@@ -2500,6 +2500,7 @@ double ForceField::Calculate(bool gradient)
     m_threadpool->StartAndWait();
     if (do_timing) {
         t_pool = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+        m_t_pool_wall = t_pool;
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -2508,7 +2509,9 @@ double ForceField::Calculate(bool gradient)
     // m_threadpool->setWakeUp(m_threadpool->WakeUp() / 2);
 
     // Claude Generated (February 2026): Accumulate individual term timings from all threads
-    std::unordered_map<std::string, long long> total_term_timings;
+    // Claude Generated (May 2026): Aliased to member variable for external access (GFN-FF unified report).
+    m_term_timings_aggregate.clear();
+    auto& total_term_timings = m_term_timings_aggregate;
 
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     for (int i = 0; i < m_stored_threads.size(); ++i) {
@@ -2756,6 +2759,7 @@ double ForceField::Calculate(bool gradient)
     }
     if (do_timing) {
         t_chainrule = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+        m_t_chainrule = t_chainrule;
     }
 
     // Claude Generated: CG pair interaction calculations (spherical implementation)
@@ -2794,10 +2798,11 @@ double ForceField::Calculate(bool gradient)
     // Claude Generated (Jan 25, 2026): Total energy calculation
     // CRITICAL FIX: Removed m_d3_energy and m_d4_energy from total sum because they are already accumulated in m_dispersion_energy
     // in ForceFieldThread to avoid double counting for GFN-FF method.
+    // Claude Generated (May 2026): m_stors_energy added — triple-bond torsions were computed but discarded.
     energy = m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy +
-             m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + m_gfnff_repulsion +
-             cg_energy + m_dispersion_energy + m_coulomb_energy + m_energy_hbond +
-             m_energy_xbond + m_atm_energy + m_batm_energy;
+             m_stors_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy +
+             m_gfnff_repulsion + cg_energy + m_dispersion_energy + m_coulomb_energy +
+             m_energy_hbond + m_energy_xbond + m_atm_energy + m_batm_energy;
 
     // Claude Generated (Feb 23, 2026): Per-term energy decomposition for thread-count independence check
     if (CurcumaLogger::get_verbosity() >= 2 && (m_method == "gfnff")) {
@@ -2828,25 +2833,28 @@ double ForceField::Calculate(bool gradient)
     auto energy_calc_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
         energy_calc_end - energy_calc_start);
 
-    if (do_timing) {
+    // Claude Generated (May 2026): m_suppress_output gates the entire user-facing output block.
+    // GFN-FF wrapper sets the flag and prints its own GFNFFEnergyReport instead.
+    // TODO: unify UFF/QMDFF energy output to the same GFNFFEnergyReport format and drop this flag.
+    if (do_timing && !m_suppress_output) {
         double t_total = std::chrono::duration<double, std::milli>(energy_calc_end - t_ff_start).count();
         CurcumaLogger::info(fmt::format(
             "ForceField Calculate: total={:.1f}ms thread_reset={:.1f}ms pool={:.1f}ms accumulate={:.1f}ms self_energy={:.1f}ms chain_rule={:.1f}ms",
             t_total, t_thread_reset, t_pool, t_accumulate, t_self_energy, t_chainrule));
     }
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    if (CurcumaLogger::get_verbosity() >= 1 && !m_suppress_output) {
         CurcumaLogger::result_fmt("Force Field energy calculation: {} ms",
                                   energy_calc_duration.count());
     }
 
     // Level 1+: Final energy result
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    if (CurcumaLogger::get_verbosity() >= 1 && !m_suppress_output) {
         CurcumaLogger::energy_abs(energy, "Force Field Energy");
     }
 
     // Level 1+: Energy decomposition (Claude Generated February 2026: Improved organization)
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    if (CurcumaLogger::get_verbosity() >= 1 && !m_suppress_output) {
         CurcumaLogger::info("\nForce Field Energy Decomposition:");
 
         // Baseline energy (if present)

@@ -307,6 +307,12 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
+    // Claude Generated (May 2026): Enable per-stream kernel timing at verbosity >= 2.
+    // This disables CUDA Graph replay so events get recorded each step.
+    if (m_gpu_workspace) {
+        m_gpu_workspace->setRecordKernelTimings(CurcumaLogger::get_verbosity() >= 2);
+    }
+
     try {
 
     // === Phase 3: CPU/GPU Overlap Architecture (Claude Generated March 2026) ===
@@ -1003,24 +1009,67 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
             overlap_time, t_calc > 0 ? 100.0 * overlap_time / t_calc : 0.0));
     }
 
-    // Energy decomposition at verbosity 2+
+    // Claude Generated (May 2026): Unified verbosity-2 GFN-FF report (GPU path).
+    // Same struct + format as CPU path. GPU kernel timings come from CUDA events
+    // (stream-level grouping — see FFWorkspaceGPU::kernelTimings()).
     if (CurcumaLogger::get_verbosity() >= 2) {
         const auto& comp = m_gpu_workspace->energyComponents();
-        CurcumaLogger::info("GPU Energy Decomposition:");
-        CurcumaLogger::param("  Bond", fmt::format("{:.10f} Eh", comp.bond));
-        CurcumaLogger::param("  Angle", fmt::format("{:.10f} Eh", comp.angle));
-        CurcumaLogger::param("  Dihedral", fmt::format("{:.10f} Eh", comp.dihedral));
-        CurcumaLogger::param("  Inversion", fmt::format("{:.10f} Eh", comp.inversion));
-        CurcumaLogger::param("  Dispersion", fmt::format("{:.10f} Eh", comp.dispersion));
-        CurcumaLogger::param("  BondedRep", fmt::format("{:.10f} Eh", comp.bonded_rep));
-        CurcumaLogger::param("  NonbondedRep", fmt::format("{:.10f} Eh", comp.nonbonded_rep));
-        CurcumaLogger::param("  Coulomb", fmt::format("{:.10f} Eh", comp.coulomb));
-        CurcumaLogger::param("  HBond", fmt::format("{:.10f} Eh", comp.hbond));
-        CurcumaLogger::param("  XBond", fmt::format("{:.10f} Eh", comp.xbond));
-        CurcumaLogger::param("  ATM", fmt::format("{:.10f} Eh", comp.atm));
-        CurcumaLogger::param("  BATM", fmt::format("{:.10f} Eh", comp.batm));
-        CurcumaLogger::param("  sTors", fmt::format("{:.10f} Eh", comp.stors));
+        GFNFFEnergyReport rep;
+        rep.is_gpu = true;
 
+        rep.bond          = comp.bond;
+        rep.angle         = comp.angle;
+        rep.dihedral      = comp.dihedral;
+        rep.inversion     = comp.inversion;
+        rep.stors         = comp.stors;
+        rep.dispersion    = comp.dispersion;
+        rep.bonded_rep    = comp.bonded_rep;
+        rep.nonbonded_rep = comp.nonbonded_rep;
+        rep.coulomb       = comp.coulomb;
+        rep.hbond         = comp.hbond;
+        rep.xbond         = comp.xbond;
+        rep.atm           = comp.atm;
+        rep.batm          = comp.batm;
+        rep.total         = m_last_energy;
+
+        // Per-component GPU timings (stream-level: components in same stream share the time).
+        // Stream A: dispersion + repulsion;  Stream B: bonded;  Stream C: 3-body;  P2: coulomb
+        const auto& kt = m_gpu_workspace->kernelTimings();
+        rep.t_bond.gpu          = kt.bonds;
+        rep.t_angle.gpu         = kt.angles;
+        rep.t_dihedral.gpu      = kt.dihedrals;
+        rep.t_inversion.gpu     = kt.inversions;
+        rep.t_stors.gpu         = kt.stors;
+        rep.t_dispersion.gpu    = kt.dispersion;
+        rep.t_bonded_rep.gpu    = kt.bonded_rep;
+        rep.t_nonbonded_rep.gpu = kt.nonbonded_rep;
+        rep.t_coulomb.gpu       = kt.coulomb;
+        rep.t_hbond.gpu         = kt.hbond;
+        rep.t_xbond.gpu         = kt.xbond;
+        rep.t_atm.gpu           = kt.atm;
+        rep.t_batm.gpu          = kt.batm;
+
+        // Phase summary — repurpose the locally-measured GPU phase wall-clocks
+        double t_gpu_cn_ms   = std::chrono::duration<double, std::milli>(t_cn_end - t_cn_start).count();
+        double t_cpu_eeq_ms  = std::chrono::duration<double, std::milli>(t_eeq_end - t_launch_end).count();
+        double t_phase2_ms   = std::chrono::duration<double, std::milli>(t4 - t_eeq_end).count();
+        double t_calc_ms     = std::chrono::duration<double, std::milli>(t4 - t0).count();
+
+        rep.t_gpu_cn           = t_gpu_cn_ms;
+        rep.t_cpu_eeq_gpu_path = t_cpu_eeq_ms;
+        rep.t_gpu_phase2       = t_phase2_ms;
+        rep.t_wall             = t_calc_ms;
+
+        // Gradient
+        if (gradient && m_gpu_workspace) {
+            const Matrix& gpu_grad = m_gpu_workspace->gradient();
+            if (gpu_grad.size() > 0) {
+                rep.gradient_norm = gpu_grad.norm();
+                rep.t_gradient.gpu = kt.coulomb;  // gradient mostly computed in Phase 2
+            }
+        }
+
+        printGFNFFEnergyReport(rep);
     }
 
     // Cache gradient immediately — use raw memcpy into pre-allocated buffer

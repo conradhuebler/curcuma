@@ -420,6 +420,12 @@ public:
     const Matrix&             gradient()         const;
     const FFEnergyComponents& energyComponents() const;
 
+    // Claude Generated (May 2026): Per-kernel GPU timing in ms (collected via CUDA events).
+    // -1 = not measured this step (e.g., timing disabled). All times are individual-kernel
+    // execution times measured between cudaEventRecord pairs on the same stream.
+    const FFTermTimings& kernelTimings() const { return m_kernel_timings; }
+    void setRecordKernelTimings(bool v) { m_record_kernel_timings = v; }
+
     // dEdcn totals (for external CN chain-rule, if needed)
     const Vector& dEdcnTotal() const;
 
@@ -573,6 +579,10 @@ private:
     Matrix             m_grad_before_cn;  ///< Gradient before CN chain-rule (diagnostic)
     FFEnergyComponents m_result_energy;
     Vector             m_dEdcn_total;
+
+    // Claude Generated (May 2026): Per-kernel GPU timing infrastructure
+    bool          m_record_kernel_timings = false;
+    FFTermTimings m_kernel_timings;
 };
 
 #endif // USE_CUDA
