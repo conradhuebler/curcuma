@@ -909,7 +909,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                     m_gfnff->storeChargesFromGPU(m_eeq_charges_gpu.data(), N);
                     m_gpu_workspace->setEEQCharges(charges);
                 }
-                if (CurcumaLogger::get_verbosity() >= 2) {
+                if (CurcumaLogger::get_verbosity() >= 3) {
                     std::string frag_info;
                     for (int f = 0; f < m_eeq_nfrag; ++f) {
                         double qsum = 0.0;

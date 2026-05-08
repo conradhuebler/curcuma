@@ -714,14 +714,78 @@ private:
      * @param x0 Initial guess (warm start from previous step)
      * @param max_iter Maximum CG iterations
      * @param tol Convergence tolerance on residual norm
+     * @param block_pc Optional block-Jacobi preconditioner (Stage 2, May 2026).
+     *                 When non-null, replaces the diagonal Jacobi with per-fragment
+     *                 Cholesky inversion — typically reduces k from 30-100 to 2-5.
      * @return Solution vector
      */
+    struct BlockJacobiPC;  // Forward decl — defined below
     Vector solveWithPCG(
         const Matrix& A,
         const Vector& b,
         const Vector& x0,
         int max_iter,
-        double tol
+        double tol,
+        const BlockJacobiPC* block_pc = nullptr
+    );
+
+    /**
+     * @brief Block-Jacobi preconditioner for multi-fragment EEQ PCG.
+     *
+     * Stage 2 (May 2026): Replaces the diagonal Jacobi `M_inv = diag(A)^-1` with
+     * a block-diagonal `M^-1 = diag(A_ff^-1)`, where A_ff is the sub-block of A_nn
+     * for fragment f's atoms. Each block is factorized via dense Cholesky once.
+     *
+     * Cost:
+     *   - Build:  O(Σ atoms_f³)  ≤ O(N · max_frag²)  — negligible for small fragments.
+     *   - Apply:  O(Σ atoms_f²)  ≤ O(N · max_frag)   — also negligible.
+     *
+     * Convergence: PCG sees only the inter-fragment Coulomb coupling as residual,
+     * since intra-fragment is exactly inverted. For weakly coupled fragments
+     * (e.g. solvated clusters) k typically drops to 2-5 iterations.
+     *
+     * Falls back to identity (no-op) if any per-fragment block is not SPD.
+     */
+    struct BlockJacobiPC {
+        std::vector<Eigen::LLT<Matrix>> blocks;
+        std::vector<std::vector<int>> atom_ids;  // atom_ids[f] = global indices of fragment f's atoms
+        bool valid = false;
+
+        /// Apply z = M^-1 r blockwise. Atoms not in any fragment fall back to identity (z = r).
+        Vector apply(const Vector& r) const;
+    };
+
+    /// Build BlockJacobiPC from A_nn and the fragment constraint matrix C (nfrag × natoms).
+    /// Returns a default-constructed (invalid) PC if any fragment block fails Cholesky.
+    static BlockJacobiPC buildBlockJacobi(const Matrix& A_nn, const Matrix& C);
+
+    /**
+     * @brief Multi-RHS Block-PCG solver — solves A·X = B with B ∈ R^{N × m} simultaneously.
+     *
+     * Stage 3 (May 2026): Replaces the per-fragment PCG loop in dispatchSolve. The single
+     * matvec `A · P` becomes a GEMM (BLAS-3) over an N × m matrix instead of m independent
+     * BLAS-2 matvecs, sharing memory bandwidth and benefiting from SIMD/cache reuse.
+     *
+     * Each column iterates with its own α, β, residual; convergence is checked per column.
+     * No deflation — once any column has converged below tolerance, it continues to be
+     * updated harmlessly (its residual stays small) until all columns finish or max_iter
+     * is reached. Eigen handles the column-wise scalar broadcasting via .array() ops.
+     *
+     * @param A        N×N SPD matrix (A_nn for EEQ)
+     * @param B        N×m matrix of right-hand-sides (column 0 = atomic RHS, cols 1..m-1 = C^T)
+     * @param X0       N×m initial guess (zeros or warm-start matrix)
+     * @param max_iter Maximum CG iterations
+     * @param tol      Convergence tolerance on max-column residual norm
+     * @param block_pc Optional block-Jacobi preconditioner (applied column-wise)
+     * @return         N×m solution matrix X with A·X ≈ B
+     */
+    Matrix solveWithPCG_multiRHS(
+        const Matrix& A,
+        const Matrix& B,
+        const Matrix& X0,
+        int max_iter,
+        double tol,
+        const BlockJacobiPC* block_pc = nullptr
     );
 
     // ===== Configuration =====
@@ -783,8 +847,10 @@ private:
 
     // PCG warm-start cache for iterative EEQ solve
     // Claude Generated - March 2026 (Performance optimization)
+    // May 2026: m_pcg_last_Z2 promoted from Vector to Matrix so all nfrag constraint
+    // solves warm-start from their previous result, not just fragment 0.
     mutable Vector m_pcg_last_z1;  ///< Previous A⁻¹·b solution (warm start for PCG)
-    mutable Vector m_pcg_last_z2;  ///< Previous A⁻¹·1 constraint solution (very stable between steps)
+    mutable Matrix m_pcg_last_Z2;  ///< Previous A⁻¹·C^T columns (N × nfrag), one warm start per fragment
     mutable bool m_pcg_cache_valid = false;  ///< Whether PCG warm-start cache is usable
 
     // Auto-solver benchmark state
@@ -883,6 +949,15 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Relative tolerance factor for large systems: tol = max(pcg_tolerance, factor*||rhs||)", "Algorithm", {})
     PARAM(pcg_large_threshold, Int, 500,
           "Atom count threshold above which PCG auto-selection and adaptive scaling activate", "Algorithm", {})
+    PARAM(eeq_pcg_nfrag_threshold, Int, 4,
+          "Auto solver: prefer SchurCholesky when nfrag >= this threshold. "
+          "Cholesky factorizes A_nn once and amortizes the cost over nfrag back-substitutions "
+          "via BLAS-3, which beats nfrag independent PCG solves once nfrag is moderate.",
+          "Algorithm", {})
+    PARAM(eeq_pcg_expected_iters, Int, 30,
+          "Auto solver: expected average PCG iteration count. Used in the cost model "
+          "k_pcg*(nfrag+1) > N/6 to decide between PCG and SchurCholesky.",
+          "Algorithm", {})
     PARAM(eeq_distance_cutoff, Double, 0.0,
           "Distance cutoff in Bohr for Coulomb matrix sparsification (0 = no cutoff, matches Fortran goed_gfnff). Non-zero values violate Hellmann-Feynman vs. the full Coulomb energy and degrade MD energy conservation.", "Advanced", {})
     PARAM(eeq_batched_min_distance, Double, 15.0,
