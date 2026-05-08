@@ -307,6 +307,8 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
+    try {
+
     // === Phase 3: CPU/GPU Overlap Architecture (Claude Generated March 2026) ===
     //
     // Pipeline:
@@ -341,12 +343,25 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         }
     }
 
+    // DIAGNOSTIC A4-bridge (plan phase A): check for sticky CUDA error after
+    // every gradient-only GPU call so we can attribute the invalid argument
+    // observed at phase1.entry to its actual originator. Cleanup-target C3.
+    auto bridge_check = [&](const char* where) {
+        cudaError_t e = cudaGetLastError();
+        if (e != cudaSuccess) {
+            CurcumaLogger::error(fmt::format(
+                "Bridge sticky error at [{}]: {}", where, cudaGetErrorString(e)));
+        }
+    };
+    bridge_check("calculate.entry");
+
     // --- Step 1: GPU CN computation (G-P1: truly async, no sync here) ---
     // k_cn_compute + k_dlogdcn + 3 async D2H launches on main stream.
     // d_cn_final / d_dlogdcn are already on GPU and correct after this call.
     // finalizeCNForCPU() is called after Phase 4 launch to sync without sleeping.
     auto t_cn_start = std::chrono::high_resolution_clock::now();
     m_gpu_workspace->computeCN(m_atom_types);
+    bridge_check("after-computeCN");
     // G-P1: removed immediate sync + memcpy + setD3CN here.
     // d_cn_final → d_cn D2D copy happens inside prepareAndLaunchChargeIndependent().
     // setD3CN() no longer needed: d_cn is populated GPU-side from d_cn_final.
@@ -358,11 +373,13 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     if (gradient) {
         if (!m_cn_pairs_generated) {
             m_gpu_workspace->generateCNPairListOnGPU();
+            bridge_check("after-generateCNPairListOnGPU");
             m_cn_pairs_generated = true;
         }
         // G-P1: removed: memcpy dlogdcn from pinned + setDlogDCN()
         // k_dlogdcn already wrote d_dlogdcn on main stream before prepareAndLaunch.
     }
+    bridge_check("after-cn-pair-step");
     auto t_dlogdcn_end = std::chrono::high_resolution_clock::now();
 
     // --- Step 2b: Compute per-bond HB coordination numbers ---
@@ -371,6 +388,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     auto t_hb_cn_start = std::chrono::high_resolution_clock::now();
     if (m_gpu_params_leaked && !m_gpu_params_leaked->bond_hb_data.empty()) {
         m_gpu_workspace->computeBondHBCN();
+        bridge_check("after-computeBondHBCN");
     }
     auto t_hb_cn_end = std::chrono::high_resolution_clock::now();
 
@@ -411,7 +429,9 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
 
         // Phase 8: HB/XB SoA n-values changed → captured graph is stale
         m_gpu_workspace->invalidateGraph();
+        bridge_check("after-hbxb-update");
     }
+    bridge_check("before-prepareAndLaunch");
     auto t_hbxb_end = std::chrono::high_resolution_clock::now();
 
     // HB/XB pair list consistency: CPU vs GPU (verbosity >= 3)
@@ -561,6 +581,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
             || (m_eeq_nfrag > 1 && m_eeq_gpu->isFragmentTopoValid());
 
         bool used_gpu_eeq = false;
+        bool gpu_charges_accepted = true; // cleared if downloaded charges are NaN/|q|>50
         const double rhs_c0 = m_eeq_rhs_constraints.empty() ? 0.0 : m_eeq_rhs_constraints[0];
 
         // EEQ distance cutoff (matches CPU EEQSolver behaviour at eeq_solver.cpp:2641-2643).
@@ -631,6 +652,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                     if (eeq_ok) {
                         used_gpu_schur = true;
                     } else {
+                        CurcumaLogger::warn("EEQ GPU: WP5-A failed, falling back to WP2 + CPU Schur");
                         // Cholesky failed (not SPD): fall back to WP2 + CPU Schur
                         eeq_ok = m_eeq_gpu->solveWithDeviceRHS(
                             N, 1,
@@ -673,8 +695,11 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                             m_eeq_pcg_tolerance,
                             eeq_cutoff_sq,
                             force_refactor);
-                        if (eeq_ok)
+                        if (eeq_ok) {
                             used_gpu_schur = true;
+                        } else {
+                            CurcumaLogger::warn("EEQ GPU: WP7-C PCG stalled, falling through to WP7-A");
+                        }
                         // On stall: silently fall through to WP7-A cholesky below.
                     }
                     if (!eeq_ok && resolved == EEQSolveMethod::Batched
@@ -701,8 +726,11 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                             m_eeq_rhs_constraints,
                             eeq_cutoff_sq,
                             force_refactor);
-                        if (eeq_ok)
+                        if (eeq_ok) {
                             used_gpu_schur = true;
+                        } else {
+                            CurcumaLogger::warn("EEQ GPU: WP7-B batched failed, falling through to WP7-A");
+                        }
                     }
                     // WP7-A: full N×N Cholesky + GPU Schur complement for nfrag > 1.
                     // Replaces D2H of z1+Z2 (~N·(1+nfrag) doubles) with D2H of
@@ -721,12 +749,16 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                             m_eeq_rhs_constraints,
                             eeq_cutoff_sq,
                             force_refactor);
-                        if (eeq_ok)
+                        if (eeq_ok) {
                             used_gpu_schur = true;
+                        } else {
+                            CurcumaLogger::warn("EEQ GPU: WP7-A cholesky failed, falling back to WP2 + CPU Schur");
+                        }
                     }
                     if (!eeq_ok) {
                         // Fallback: WP2 exact GPU solve + CPU Schur complement.
                         // Triggers when fragment topo invalid OR Cholesky failed in WP7-A.
+                        CurcumaLogger::warn("EEQ GPU: all GPU Schur paths failed, falling back to WP2 + CPU Schur");
                         eeq_ok = m_eeq_gpu->solveWithDeviceRHS(
                             N, m_eeq_nfrag,
                             m_gpu_workspace->getDeviceXPtr(),
@@ -746,7 +778,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                 }
             } else {
                 // Fallback: EEQ topo not yet uploaded to GPU (should not happen after init)
-                CurcumaLogger::warn("WP2: EEQ topo not valid — falling back to CPU param upload");
+                CurcumaLogger::warn("EEQ GPU: device RHS topo not valid, falling back to CPU param upload");
                 const Vector& cn = m_gfnff->getLastCN();
                 GFNFF::EEQGPUParams eeq_params = m_gfnff->prepareEEQParametersForGPU(cn);
                 eeq_ok = m_eeq_gpu->solve(
@@ -783,7 +815,30 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                     // Download for storeChargesFromGPU() — EEQ stream already synced.
                     cudaMemcpy(m_eeq_charges_gpu.data(), m_eeq_gpu->getDeviceChargesPtr(),
                                N * sizeof(double), cudaMemcpyDeviceToHost);
-                    m_gfnff->storeChargesFromGPU(m_eeq_charges_gpu.data(), N);
+                    // Validate — mirrors gfnff_method.cpp:864-880 CPU check.
+                    // GPU Cholesky can return info=0 with NaN/huge charges on ill-conditioned systems.
+                    for (int i = 0; i < N && gpu_charges_accepted; ++i)
+                        if (std::isnan(m_eeq_charges_gpu[i]) || std::isinf(m_eeq_charges_gpu[i]))
+                            gpu_charges_accepted = false;
+                    if (gpu_charges_accepted) {
+                        double max_q = 0.0, min_q = 1e300, mean_q = 0.0;
+                        for (int i = 0; i < N; ++i) {
+                            double q = m_eeq_charges_gpu[i];
+                            max_q = std::max(max_q, std::abs(q));
+                            min_q = std::min(min_q, q);
+                            mean_q += q;
+                        }
+                        mean_q /= N;
+                        if (max_q > 50.0) gpu_charges_accepted = false;
+                        CurcumaLogger::info(fmt::format(
+                            "EEQ GPU charges stats: min={:.6f} max_abs={:.6f} mean={:.6f}",
+                            min_q, max_q, mean_q));
+                    }
+                    if (gpu_charges_accepted) {
+                        m_gfnff->storeChargesFromGPU(m_eeq_charges_gpu.data(), N);
+                    } else {
+                        CurcumaLogger::warn("EEQ GPU: invalid charges (NaN/Inf or |q|>50), using Phase 1 topology charges");
+                    }
                 } else {
                     // CPU Schur complement: q = z1 - Z2 * λ
                     if (m_eeq_nfrag == 1) {
@@ -889,7 +944,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                         "EEQ GPU: matrix indefinite (Cholesky info={}), using LU fallback",
                         m_eeq_gpu->getLastCholInfo()));
                 }
-                used_gpu_eeq = true;
+                if (gpu_charges_accepted) used_gpu_eeq = true;
             } else {
                 CurcumaLogger::warn("GPU EEQ Cholesky failed (not SPD), falling back to CPU solver");
             }
@@ -899,10 +954,15 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         }
 
         if (!used_gpu_eeq) {
-            // CPU Phase 2 EEQ fallback (cached from InitialiseMolecule on first step)
-            m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/false);
+            // Phase 1 topology charges fallback: skip EEQ solver, use charges computed
+            // during InitialiseMolecule. Matches CPU path behaviour when EEQ Phase 2 fails.
+            // CN derivatives needed for gradient are still computed by prepareCNAndEEQ.
+            CurcumaLogger::warn("GPU EEQ: all paths exhausted — switching to Phase 1 topology charges");
+            m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/true);
             charges = m_gfnff->getLastCharges();
             m_gpu_workspace->setEEQCharges(charges);
+            if (CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::warn("GPU EEQ: using Phase 1 topology charges as fallback");
         }
     }
 
@@ -992,7 +1052,32 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         }
     }
 
+    // DEBUG: gradient magnitude stats — always printed for gradient mode to diagnose ||g|| issues
+    if (gradient) {
+        double max_g = 0.0, mean_g = 0.0;
+        for (int i = 0; i < m_cached_gradient.rows(); ++i) {
+            double g2 = 0.0;
+            for (int d = 0; d < 3; ++d) g2 += m_cached_gradient(i,d) * m_cached_gradient(i,d);
+            double g = std::sqrt(g2);
+            max_g = std::max(max_g, g);
+            mean_g += g;
+        }
+        if (m_cached_gradient.rows() > 0) mean_g /= m_cached_gradient.rows();
+        CurcumaLogger::warn(fmt::format(
+            "GPU gradient stats: max_per_atom={:.6f} mean_per_atom={:.6f} Eh/Bohr (rows={} cols={})",
+            max_g, mean_g, m_cached_gradient.rows(), m_cached_gradient.cols()));
+    }
+
     return m_last_energy;
+
+    } catch (const std::exception& e) {
+        CurcumaLogger::error(fmt::format(
+            "GFNFFGPU calculateEnergy EXCEPTION: {} — rethrowing", e.what()));
+        throw;
+    } catch (...) {
+        CurcumaLogger::error("GFNFFGPU calculateEnergy: unknown exception — rethrowing");
+        throw;
+    }
 }
 
 // ---------------------------------------------------------------------------

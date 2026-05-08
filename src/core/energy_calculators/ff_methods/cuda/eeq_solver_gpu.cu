@@ -16,6 +16,7 @@
 #include "eeq_solver_gpu.h"
 #include "gfnff_soa.h"
 #include "gfnff_kernels.cuh"
+#include "src/core/curcuma_logger.h"
 
 #include <cusolverDn.h>
 #include <cublas_v2.h>
@@ -992,11 +993,32 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurGeneral(
     bool force_refactor)
 {
     auto& impl = *m_impl;
-    if (nfrag < 1) return false;
-    if (!impl.m_frag_topo_valid) return false;
-    if (impl.m_nfrag_batched != nfrag) return false;
-    if (impl.d_atom_frag.n < natoms) return false;
-    if (impl.d_rhs_constraint_cols.n < natoms * nfrag) return false;
+    if (nfrag < 1) {
+        CurcumaLogger::warn("EEQ WP7-A: nfrag < 1, aborting");
+        return false;
+    }
+    if (!impl.m_frag_topo_valid) {
+        CurcumaLogger::warn("EEQ WP7-A: fragment topo invalid, aborting");
+        return false;
+    }
+    if (impl.m_nfrag_batched != nfrag) {
+        CurcumaLogger::warn(fmt::format(
+            "EEQ WP7-A: nfrag mismatch (batched={}, requested={}), aborting",
+            impl.m_nfrag_batched, nfrag));
+        return false;
+    }
+    if (impl.d_atom_frag.n < natoms) {
+        CurcumaLogger::warn(fmt::format(
+            "EEQ WP7-A: atom_frag buffer too small ({} < {}), aborting",
+            impl.d_atom_frag.n, natoms));
+        return false;
+    }
+    if (impl.d_rhs_constraint_cols.n < natoms * nfrag) {
+        CurcumaLogger::warn(fmt::format(
+            "EEQ WP7-A: rhs_constraint_cols buffer too small ({} < {}), aborting",
+            impl.d_rhs_constraint_cols.n, natoms * nfrag));
+        return false;
+    }
 
     const int N    = natoms;
     const int nrhs = nfrag + 1;
@@ -1039,6 +1061,9 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurGeneral(
         checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after potrf (general)");
 
         if (*impl.h_info != 0) {
+            CurcumaLogger::warn(fmt::format(
+                "EEQ WP7-A: Cholesky factorization failed (info={}), attempting LU fallback",
+                *impl.h_info));
             // Step B (Claude Generated, May 2026): Cholesky failed → LU fallback.
             // Same rationale as in solveWithDeviceRHSAndGPUSchur (WP5-A).
             impl.m_last_chol_info = *impl.h_info;
@@ -1076,6 +1101,9 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurGeneral(
             checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after getrf (general)");
 
             if (*impl.h_info != 0) {
+                CurcumaLogger::warn(fmt::format(
+                    "EEQ WP7-A: LU factorization failed (info={}), aborting",
+                    *impl.h_info));
                 impl.m_has_cached_factor = false;
                 impl.m_using_lu = false;
                 return false;
