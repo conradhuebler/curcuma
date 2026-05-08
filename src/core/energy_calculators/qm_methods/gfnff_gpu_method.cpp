@@ -343,25 +343,12 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         }
     }
 
-    // DIAGNOSTIC A4-bridge (plan phase A): check for sticky CUDA error after
-    // every gradient-only GPU call so we can attribute the invalid argument
-    // observed at phase1.entry to its actual originator. Cleanup-target C3.
-    auto bridge_check = [&](const char* where) {
-        cudaError_t e = cudaGetLastError();
-        if (e != cudaSuccess) {
-            CurcumaLogger::error(fmt::format(
-                "Bridge sticky error at [{}]: {}", where, cudaGetErrorString(e)));
-        }
-    };
-    bridge_check("calculate.entry");
-
     // --- Step 1: GPU CN computation (G-P1: truly async, no sync here) ---
     // k_cn_compute + k_dlogdcn + 3 async D2H launches on main stream.
     // d_cn_final / d_dlogdcn are already on GPU and correct after this call.
     // finalizeCNForCPU() is called after Phase 4 launch to sync without sleeping.
     auto t_cn_start = std::chrono::high_resolution_clock::now();
     m_gpu_workspace->computeCN(m_atom_types);
-    bridge_check("after-computeCN");
     // G-P1: removed immediate sync + memcpy + setD3CN here.
     // d_cn_final → d_cn D2D copy happens inside prepareAndLaunchChargeIndependent().
     // setD3CN() no longer needed: d_cn is populated GPU-side from d_cn_final.
@@ -373,13 +360,11 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     if (gradient) {
         if (!m_cn_pairs_generated) {
             m_gpu_workspace->generateCNPairListOnGPU();
-            bridge_check("after-generateCNPairListOnGPU");
             m_cn_pairs_generated = true;
         }
         // G-P1: removed: memcpy dlogdcn from pinned + setDlogDCN()
         // k_dlogdcn already wrote d_dlogdcn on main stream before prepareAndLaunch.
     }
-    bridge_check("after-cn-pair-step");
     auto t_dlogdcn_end = std::chrono::high_resolution_clock::now();
 
     // --- Step 2b: Compute per-bond HB coordination numbers ---
@@ -388,7 +373,6 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     auto t_hb_cn_start = std::chrono::high_resolution_clock::now();
     if (m_gpu_params_leaked && !m_gpu_params_leaked->bond_hb_data.empty()) {
         m_gpu_workspace->computeBondHBCN();
-        bridge_check("after-computeBondHBCN");
     }
     auto t_hb_cn_end = std::chrono::high_resolution_clock::now();
 
@@ -429,9 +413,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
 
         // Phase 8: HB/XB SoA n-values changed → captured graph is stale
         m_gpu_workspace->invalidateGraph();
-        bridge_check("after-hbxb-update");
     }
-    bridge_check("before-prepareAndLaunch");
     auto t_hbxb_end = std::chrono::high_resolution_clock::now();
 
     // HB/XB pair list consistency: CPU vs GPU (verbosity >= 3)
@@ -1050,22 +1032,6 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
             std::memcpy(m_cached_gradient.data(), gpu_grad.data(),
                         gpu_grad.rows() * gpu_grad.cols() * sizeof(double));
         }
-    }
-
-    // DEBUG: gradient magnitude stats — always printed for gradient mode to diagnose ||g|| issues
-    if (gradient) {
-        double max_g = 0.0, mean_g = 0.0;
-        for (int i = 0; i < m_cached_gradient.rows(); ++i) {
-            double g2 = 0.0;
-            for (int d = 0; d < 3; ++d) g2 += m_cached_gradient(i,d) * m_cached_gradient(i,d);
-            double g = std::sqrt(g2);
-            max_g = std::max(max_g, g);
-            mean_g += g;
-        }
-        if (m_cached_gradient.rows() > 0) mean_g /= m_cached_gradient.rows();
-        CurcumaLogger::warn(fmt::format(
-            "GPU gradient stats: max_per_atom={:.6f} mean_per_atom={:.6f} Eh/Bohr (rows={} cols={})",
-            max_g, mean_g, m_cached_gradient.rows(), m_cached_gradient.cols()));
     }
 
     return m_last_energy;

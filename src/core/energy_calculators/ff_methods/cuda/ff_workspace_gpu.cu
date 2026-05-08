@@ -1658,73 +1658,13 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU(bool use_cn_final)
     //                         Call AFTER prepareAndLaunchChargeIndependent() — legacy path.
     double* cn_buf = (use_cn_final && impl.d_cn_final.ptr) ? impl.d_cn_final.ptr : impl.d_cn.ptr;
 
-    // DIAGNOSTIC A4-pre (plan phase A): drain prior async errors so that
-    // the next post-sync attribution lands on k_gaussian_weights itself
-    // and not on some earlier Phase-1 kernel.
-    {
-        cudaError_t pre_err = cudaStreamSynchronize(impl.stream);
-        if (pre_err != cudaSuccess) {
-            CurcumaLogger::error(fmt::format(
-                "k_gaussian_weights pre-launch (main stream): {}",
-                cudaGetErrorString(pre_err)));
-        }
-        cudaError_t pre_last = cudaGetLastError();
-        if (pre_last != cudaSuccess) {
-            CurcumaLogger::error(fmt::format(
-                "k_gaussian_weights pre-launch (sticky): {}",
-                cudaGetErrorString(pre_last)));
-        }
-        // Also check the worker streams in case Phase-1 had an async error.
-        cudaError_t pre_pair = cudaStreamSynchronize(impl.stream_pairwise);
-        if (pre_pair != cudaSuccess) {
-            CurcumaLogger::error(fmt::format(
-                "k_gaussian_weights pre-launch (pairwise stream): {}",
-                cudaGetErrorString(pre_pair)));
-        }
-        cudaError_t pre_bond = cudaStreamSynchronize(impl.stream_bonded);
-        if (pre_bond != cudaSuccess) {
-            CurcumaLogger::error(fmt::format(
-                "k_gaussian_weights pre-launch (bonded stream): {}",
-                cudaGetErrorString(pre_bond)));
-        }
-        cudaError_t pre_three = cudaStreamSynchronize(impl.stream_threebody);
-        if (pre_three != cudaSuccess) {
-            CurcumaLogger::error(fmt::format(
-                "k_gaussian_weights pre-launch (threebody stream): {}",
-                cudaGetErrorString(pre_three)));
-        }
-        cudaGetLastError();  // clear sticky to isolate k_gaussian_weights itself
-    }
-
     LaunchConfig cfg_gw = getLaunchConfig(N, m_block_size);
-    // DIAGNOSTIC: log the launch arguments so any null-pointer arg surfaces.
-    CurcumaLogger::info(fmt::format(
-        "DEBUG k_gaussian_weights: N={}, grid={}, block={}, "
-        "cn={}, atypes={}, gw={}, dgw={}",
-        N, cfg_gw.gridSize, cfg_gw.blockSize,
-        reinterpret_cast<const void*>(cn_buf),
-        reinterpret_cast<const void*>(impl.d_atom_types.ptr),
-        reinterpret_cast<const void*>(impl.d_gw.ptr),
-        reinterpret_cast<const void*>(impl.d_dgw.ptr)));
-
     k_gaussian_weights<<<cfg_gw.gridSize, cfg_gw.blockSize, 0, impl.stream>>>(
         N,
         cn_buf,
         impl.d_atom_types.ptr,
         impl.d_gw.ptr,
         impl.d_dgw.ptr);
-    // DIAGNOSTIC A3 (plan phase A): isolate failures of k_gaussian_weights
-    // from k_dc6dcn_per_pair on large systems (mixture.xyz, nd=13.7M).
-    // Cleanup-target (plan phase C3): hide behind gpu_diagnostics flag.
-    {
-        cudaError_t err = cudaStreamSynchronize(impl.stream);
-        if (err != cudaSuccess) {
-            CurcumaLogger::error(fmt::format(
-                "k_gaussian_weights post-sync (N={}, grid={}, block={}): {}",
-                N, cfg_gw.gridSize, cfg_gw.blockSize, cudaGetErrorString(err)));
-        }
-        checkCuda(cudaGetLastError(), "k_gaussian_weights post-sync");
-    }
 
     LaunchConfig cfg_dc6 = getLaunchConfig(nd, m_block_size);
     k_dc6dcn_per_pair<<<cfg_dc6.gridSize, cfg_dc6.blockSize, 0, impl.stream>>>(
@@ -1737,18 +1677,7 @@ void FFWorkspaceGPU::computeGaussianWeightsOnGPU(bool use_cn_final)
         impl.d_c6_flat.ptr,
         impl.disp.dc6dcn_ij.ptr,
         impl.disp.dc6dcn_ji.ptr);
-    // DIAGNOSTIC A3 (plan phase A): catch k_dc6dcn_per_pair runtime errors
-    // before they surface as a sticky cudaErrorInvalidValue on the next launch.
-    {
-        cudaError_t err = cudaStreamSynchronize(impl.stream);
-        if (err != cudaSuccess) {
-            CurcumaLogger::error(fmt::format(
-                "k_dc6dcn_per_pair post-sync (nd={}, grid={}, block={}): {}",
-                nd, cfg_dc6.gridSize, cfg_dc6.blockSize, cudaGetErrorString(err)));
-        }
-        checkCuda(cudaGetLastError(), "k_dc6dcn_per_pair post-sync");
-    }
-    // No explicit sync needed for production: stream ordering + event_upload fence in
+    // No explicit sync needed: stream ordering + event_upload fence in
     // prepareAndLaunchChargeIndependent guarantees dc6dcn is ready before k_dispersion on sA.
 }
 
@@ -1772,17 +1701,6 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     auto& impl = *m_impl;
     const int N = m_natoms;
     cudaStream_t stream = impl.stream;
-
-    // DIAGNOSTIC A4 (plan phase A): non-throwing per-checkpoint error logger.
-    // Always-on during debugging (cleanup-target C3 once root-cause fixed).
-    auto diag_check = [&](const char* where) {
-        cudaError_t e = cudaGetLastError();
-        if (e != cudaSuccess) {
-            CurcumaLogger::error(fmt::format(
-                "Phase1 sticky error at [{}]: {}", where, cudaGetErrorString(e)));
-        }
-    };
-    diag_check("phase1.entry");
 
     // =========================================================================
     // Phase 8: CUDA Graph fast path (Claude Generated March 2026)
@@ -1837,7 +1755,6 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // Runs on main stream directly after d_cn_final is available; no CPU sync needed.
     // finalizeCNForCPU() (called later) syncs main stream, so d_rhs_atoms is ready
     // before solveWithDeviceRHS() starts its D2D copy.
-    diag_check("phase1.after-memsets+cn-copy");
     if (impl.eeq_topo.valid && impl.d_cn_final.ptr) {
         // BOUNDS_LIGHT kernel — cap block at 256.
         LaunchConfig cfg = getLaunchConfigLight(N, m_block_size);
@@ -1847,7 +1764,6 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.eeq_topo.d_chi_corrected.ptr,
             impl.eeq_topo.d_cnf.ptr,
             impl.eeq_topo.d_rhs_atoms.ptr);
-        diag_check("phase1.after-k_build_eeq_rhs");
     }
 
     // =========================================================================
@@ -1952,7 +1868,6 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                         3*N*sizeof(double), cudaMemcpyDeviceToDevice, sA);
     }
     cudaEventRecord(impl.event_pairwise, sA);
-    diag_check("phase1.after-sA-block");
 
     // --- Stream B: Bonded terms (bonds, angles, dihedrals, inversions, storsions, hb_alpha) ---
     // Phase 8: outer bonds.n > 0 guard removed — n=0 produces a 1-block no-op.
@@ -2082,7 +1997,6 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                         3*N*sizeof(double), cudaMemcpyDeviceToDevice, sB);
     }
     cudaEventRecord(impl.event_bonded, sB);
-    diag_check("phase1.after-sB-block");
 
     // --- Stream C: 3-body terms (batm, atm, xbonds, hbonds) ---
     // All charge-independent: batm uses topology charges (static),
@@ -2189,7 +2103,6 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                         3*N*sizeof(double), cudaMemcpyDeviceToDevice, sC);
     }
     cudaEventRecord(impl.event_threebody, sC);
-    diag_check("phase1.after-sC-block");
 
     // === CAPTURE END: finalise graph and execute immediately ===
     if (capturing) {
@@ -2212,9 +2125,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         }
         // Capture or instantiation failed — fall back silently (normal execution already done)
         if (impl.m_graph_phase1) { cudaGraphDestroy(impl.m_graph_phase1); impl.m_graph_phase1 = nullptr; }
-        diag_check("phase1.after-graph-capture-fail");
     }
-    diag_check("phase1.exit");
     // Returns immediately — charge-independent kernels run asynchronously on GPU
 }
 
@@ -2289,76 +2200,12 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     cudaEventRecord(impl.event_p2_upload, stream);
     cudaStreamWaitEvent(impl.stream_pairwise, impl.event_p2_upload, 0);
 
-    // ---------------------------------------------------------------------
-    // DIAGNOSTIC A1+A2 (mixture.xyz crash, plan phase A): drain prior async
-    // errors from impl.stream and impl.stream_pairwise so we can attribute
-    // any subsequent cudaErrorInvalidValue to the actual offending launch
-    // instead of seeing it surface here. Also log GPU memory pressure.
-    // Cleanup-target (plan phase C3): hide behind gpu_diagnostics flag.
-    // ---------------------------------------------------------------------
-    {
-        cudaError_t pre_err_main = cudaStreamSynchronize(impl.stream);
-        if (pre_err_main != cudaSuccess) {
-            CurcumaLogger::error(fmt::format(
-                "Phase 2 entry — main stream prior error: {}",
-                cudaGetErrorString(pre_err_main)));
-        }
-        cudaError_t pre_err_pair = cudaStreamSynchronize(impl.stream_pairwise);
-        if (pre_err_pair != cudaSuccess) {
-            CurcumaLogger::error(fmt::format(
-                "Phase 2 entry — pairwise stream prior error: {}",
-                cudaGetErrorString(pre_err_pair)));
-        }
-        cudaGetLastError();  // clear sticky to isolate the next launch
-
-        if (m_verbosity >= 2) {
-            size_t freeB = 0, totB = 0;
-            if (cudaMemGetInfo(&freeB, &totB) == cudaSuccess) {
-                CurcumaLogger::info(fmt::format(
-                    "GPU mem at Phase 2 entry: free={:.0f} MB / total={:.0f} MB",
-                    freeB / 1.0e6, totB / 1.0e6));
-            }
-        }
-    }
-
     // k_dispersion (gradient mode): deferred from Phase 1.
     // computeGaussianWeightsOnGPU() was called after Phase 1 (using d_cn, current step)
     // and runs on the main stream. The event_upload fence above ensures stream_pairwise
     // sees the completed dc6dcn values before k_dispersion launches.
     if (m_dispersion_enabled && gradient) {
-        CurcumaLogger::info(fmt::format(
-            "DEBUG k_dispersion: disp.n={}, block_size={}, stream_pairwise={}",
-            impl.disp.n, m_block_size, reinterpret_cast<void*>(impl.stream_pairwise)));
         LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
-        CurcumaLogger::info(fmt::format(
-            "DEBUG k_dispersion config: grid={} block={}",
-            cfg.gridSize, cfg.blockSize));
-        // DEBUG: check k_dispersion pointer attributes
-        {
-            auto check_ptr = [&](const void* p, const char* name) {
-                cudaPointerAttributes attr;
-                cudaError_t err = cudaPointerGetAttributes(&attr, p);
-                if (err != cudaSuccess) {
-                    CurcumaLogger::warn(fmt::format(
-                        "k_dispersion INVALID param: {} err={}", name, cudaGetErrorString(err)));
-                }
-            };
-            check_ptr(impl.disp.idx_i.ptr, "disp.idx_i");
-            check_ptr(impl.disp.idx_j.ptr, "disp.idx_j");
-            check_ptr(impl.disp.C6.ptr, "disp.C6");
-            check_ptr(impl.disp.r4r2ij.ptr, "disp.r4r2ij");
-            check_ptr(impl.disp.r0_sq.ptr, "disp.r0_sq");
-            check_ptr(impl.disp.zetac6.ptr, "disp.zetac6");
-            check_ptr(impl.disp.r_cut.ptr, "disp.r_cut");
-            check_ptr(impl.disp.dc6dcn_ij.ptr, "disp.dc6dcn_ij");
-            check_ptr(impl.disp.dc6dcn_ji.ptr, "disp.dc6dcn_ji");
-            check_ptr(impl.coords.d_x.ptr, "coords.d_x");
-            check_ptr(impl.coords.d_y.ptr, "coords.d_y");
-            check_ptr(impl.coords.d_z.ptr, "coords.d_z");
-            check_ptr(impl.d_dEdcn.ptr, "d_dEdcn");
-            check_ptr(impl.d_grad.ptr, "d_grad");
-            check_ptr(&impl.d_energies.ptr[impl.E_DISP], "d_energies[E_DISP]");
-        }
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
             impl.disp.n,
             impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
@@ -2428,41 +2275,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
 
         // WP5-B: do_subtract only needs the GPU CNF buffer + EEQ charges — no CPU vector.
         bool do_subtract = gradient && impl.coul_self_on_gpu && m_eeq_charges.size() == N;
-        CurcumaLogger::info(fmt::format(
-            "DEBUG k_coulomb_postprocess: N={}, do_subtract={}, charges_size={}, coul_self_on_gpu={}",
-            N, do_subtract, m_eeq_charges.size(), impl.coul_self_on_gpu));
         LaunchConfig cfg = getLaunchConfig(N, m_block_size);
-        // DEBUG: check pointer attributes before k_coulomb_postprocess
-        {
-            auto check_ptr = [&](const void* p, const char* name) {
-                cudaPointerAttributes attr;
-                cudaError_t err = cudaPointerGetAttributes(&attr, p);
-                if (err != cudaSuccess) {
-                    CurcumaLogger::warn(fmt::format(
-                        "k_coulomb_postprocess INVALID param: {} err={}", name, cudaGetErrorString(err)));
-                } else {
-                    CurcumaLogger::info(fmt::format(
-                        "k_coulomb_postprocess param {}: type={} device={} host={}",
-                        name,
-                        (attr.type == cudaMemoryTypeDevice) ? "device" :
-                        (attr.type == cudaMemoryTypeHost) ? "host" :
-                        (attr.type == cudaMemoryTypeManaged) ? "managed" : "unknown",
-                        attr.devicePointer ? "yes" : "no",
-                        attr.hostPointer ? "yes" : "no"));
-                }
-            };
-            check_ptr(impl.d_charges.ptr, "d_charges");
-            check_ptr(impl.d_coul_chi_base.ptr, "d_coul_chi_base");
-            check_ptr(impl.eeq_topo.d_cnf.ptr, "eeq_topo.d_cnf");
-            check_ptr(impl.d_cn.ptr, "d_cn");
-            check_ptr(impl.d_coul_gam.ptr, "d_coul_gam");
-            check_ptr(impl.d_coul_alp.ptr, "d_coul_alp");
-            check_ptr(impl.d_dEdcn.ptr, "d_dEdcn");
-            check_ptr(&impl.d_energies.ptr[impl.E_COUL_SELF], "d_energies[E_COUL_SELF]");
-        }
-        CurcumaLogger::info(fmt::format(
-            "DEBUG k_coulomb_postprocess launch config: grid={} block={}",
-            cfg.gridSize, cfg.blockSize));
         k_coulomb_postprocess<<<cfg.gridSize, cfg.blockSize, 0, stream>>>(
             N,
             impl.d_charges.ptr,
@@ -2827,17 +2640,6 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
     auto& impl = *m_impl;
     const int N = m_natoms;
 
-    // DIAGNOSTIC A4-cn (plan phase A): per-launch sticky-error logger to
-    // bisect the failing kernel inside computeCN. Cleanup-target C3.
-    auto cn_check = [&](const char* where) {
-        cudaError_t e = cudaGetLastError();
-        if (e != cudaSuccess) {
-            CurcumaLogger::error(fmt::format(
-                "computeCN sticky error at [{}]: {}", where, cudaGetErrorString(e)));
-        }
-    };
-    cn_check("computeCN.entry");
-
     // Constants for GFN-FF CN calculation
     // Reference: gfnff_cn.f90:66-126, cn_calculator.cpp:99-155
     constexpr double kn = -7.5;          // CN decay constant
@@ -2872,7 +2674,6 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
         LaunchConfig cfg_zero = getLaunchConfig(N, m_block_size);
         k_zero_double<<<cfg_zero.gridSize, cfg_zero.blockSize, 0, impl.stream>>>(
             impl.d_cn_raw.ptr, N);
-        cn_check("after-k_zero_double");
 
         // 1 thread per pair: atomicAdd into cn_raw[i] and cn_raw[j]
         // BOUNDS_LIGHT kernel — must cap block at 256 (May 2026 fix).
@@ -2887,15 +2688,12 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
             impl.coords.d_z.ptr,
             impl.d_cn_raw.ptr,
             kn);
-        cn_check(fmt::format("after-k_cn_compute_pairs(n_cn_pairs={}, grid={}, block={})",
-            impl.n_cn_pairs, cfg_pairs.gridSize, cfg_pairs.blockSize).c_str());
 
         // Log squashing: cn_final[i] = log(1+exp(cnmax)) - log(1+exp(cnmax-cn_raw[i]))
         // BOUNDS_LIGHT kernel — cap block at 256.
         LaunchConfig cfg_log = getLaunchConfigLight(N, m_block_size);
         k_logcn<<<cfg_log.gridSize, cfg_log.blockSize, 0, impl.stream>>>(
             N, impl.d_cn_raw.ptr, impl.d_cn_final.ptr, cnmax);
-        cn_check("after-k_logcn");
 
     } else {
         // Fallback: O(N²) kernel (initial step before pair list is built, or n_pairs==0)
@@ -2911,7 +2709,6 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
             kn,
             cnmax,
             threshold_sq);
-        cn_check("after-k_cn_compute (fallback)");
     }
 
     // WP5-C (May 2026): GPU-side D4 dc6dcn skip check.
@@ -2928,21 +2725,15 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
         k_check_dc6dcn_skip<<<cfg_skip.gridSize, cfg_skip.blockSize, 0, impl.stream>>>(
             N, impl.d_cn_final.ptr, impl.d_cn_d4_ref.ptr,
             impl.d_dc6dcn_block_max.ptr);
-        cn_check(fmt::format("after-k_check_dc6dcn_skip(N={}, grid={}, block={})",
-            N, cfg_skip.gridSize, cfg_skip.blockSize).c_str());
         k_check_dc6dcn_skip_final<<<1, cfg_skip.blockSize, 0, impl.stream>>>(
             cfg_skip.gridSize, impl.d_dc6dcn_block_max.ptr, 0.01,
             impl.d_dc6dcn_skip.ptr);
-        cn_check(fmt::format("after-k_check_dc6dcn_skip_final(<<<1, {}>>>, gridIn={})",
-            cfg_skip.blockSize, cfg_skip.gridSize).c_str());
         cudaMemcpyAsync(impl.h_dc6dcn_skip, impl.d_dc6dcn_skip.ptr, sizeof(int),
                         cudaMemcpyDeviceToHost, impl.stream);
-        cn_check("after-memcpy-skip-flag");
 
         // Snapshot current CN for next step's comparison (D2D copy, async)
         cudaMemcpyAsync(impl.d_cn_d4_ref.ptr, impl.d_cn_final.ptr,
                         N * sizeof(double), cudaMemcpyDeviceToDevice, impl.stream);
-        cn_check("after-memcpy-cn-snapshot");
     }
 
     // Compute dlogdcn on GPU: dlogdcn[i] = exp(cnmax)/(exp(cnmax)+exp(cn_raw[i]))
@@ -2951,7 +2742,6 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
     k_dlogdcn<<<cfg_dlog.gridSize, cfg_dlog.blockSize, 0, impl.stream>>>(
         N, impl.d_cn_raw.ptr, impl.d_dlogdcn.ptr, std::exp(cnmax)
     );
-    cn_check("after-k_dlogdcn");
 
     // Download CN_final, CN_raw, and dlogdcn to pre-allocated pinned buffers
     // Claude Generated (March 2026): Avoids heap corruption from CUDA allocator
@@ -2962,7 +2752,6 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
                     cudaMemcpyDeviceToHost, impl.stream);
     cudaMemcpyAsync(m_h_dlogdcn, impl.d_dlogdcn.ptr, N * sizeof(double),
                     cudaMemcpyDeviceToHost, impl.stream);
-    cn_check("after-D2H-downloads");
     // G-P1 (Apr 2026): Sync deferred — caller calls finalizeCNForCPU() after Phase 4 launch.
     // GPU finishes CN kernel in ~0.15ms; by the time finalizeCNForCPU() is reached (~0.3ms
     // later after Phase 4 launch overhead), the stream is already complete → no sleep penalty.
