@@ -24,6 +24,7 @@ WP1 (Threading-Audit) ──► WP2 (EEQ batched parallel)
                           WP6 (Coulomb cutoff — Plan, blockiert auf G2c)
 
 WP-G (m_gradient Layout) — neu nach WP3, größter vermuteter FF-Pool-Hebel
+WP-R (Multi-Thread-Race) — neu nach WP-G, triose T=4 Single-Fragment-Drift
 ```
 
 WP1 zuerst, da es den Befund "serial CPU" entweder als Label-Bug entlarvt (dann ist WP2 trivial) oder eine echte serielle Stelle aufdeckt (dann ist WP2 die Umsetzung).

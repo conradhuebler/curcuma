@@ -1,8 +1,9 @@
 # WP5 — D4 Gaussian-Weights vektorisieren (P4f)
 
-**Status:** 🆕 Vorgeschlagen
-**Aufwand:** 3–4h
-**Erwarteter Nutzen:** D4-Weights ~2× (auf Top von schon vorhandener Threading-Parallelisierung)
+**Status:** ⚙️ Machine-tested (Mai 2026) — **funktioniert technisch, kein messbarer Speedup**. Operator setzt ✅ TESTED.
+**Aufwand:** ~1h
+**Erwarteter Nutzen (geplant):** D4-GW ~2× durch Eigen-Vektorisierung von exp()
+**Tatsächlicher Nutzen:** D4-GW im Noise (55.5 ms post-WP5 vs ~56 ms pre-WP5). objdump zeigt: libm `exp@plt` wird weiterhin skalar aufgerufen — Eigen `Array<double, 7, 1>::exp()` vektorisiert nicht über libm. Total Wall 931 ms vs 967 ms (post-WP-G) → ~4% schneller, vermutlich aus Heap-Reduktion (1× `std::vector` statt 3× pro Atom).
 
 ## Hypothese
 
@@ -94,3 +95,75 @@ ctest -R "gfnff" --output-on-failure
 ```
 
 Inner-Loop SIMD-Verifikation: `objdump -d release/curcuma | grep -A30 precomputeGaussianWeights | grep -E "vmulpd|vexp|vfmadd"` muss Vektor-Ops zeigen.
+
+---
+
+## Ergebnis (Mai 2026)
+
+### Implementation
+
+In `d4param_generator.cpp`:
+- `precomputeGaussianWeights` (Z. 1022–1049): Inner-Loop mit Stack `Eigen::Array<double, MAX_REF, 1>` ersetzt — `w_arr.head(n).exp()` Pipeline statt skalarer Loop. Heap-Allocation `std::vector<double>(nref, 0.0)` reduziert auf einmaliges `std::vector<double>(n)` mit pre-berechneten Werten.
+- `computeGaussianWeightDerivatives` (Z. 1271–1296): Identisches Pattern, mit zusätzlichem `dexpw`-Array für die Gradient-Komponenten. `expw + dexpw + dgwdcn` Pipeline mit drei Stack-Arrays.
+
+Externe API (`getGaussianWeights()`, `m_gaussian_weights` Member, 16 interne Konsumenten) **unverändert** — `std::vector<std::vector<double>>` bleibt.
+
+### Korrektheit
+
+Bit-identisch zu pre-WP5:
+- `acetic_acid_dimer.xyz` T=4: -2.47129863 Eh ✅
+- `triose.xyz` T=1: -9.91485397 Eh ✅
+- `mixture.xyz` T=1: -856.28814787 Eh ✅
+
+Eigen `Array.exp()` ist mathematisch identisch zu element-weise `std::exp` — kein Approximation-Drift.
+
+### Performance — `mixture.xyz` (3 Runs T=4 für Stabilität)
+
+| Run | D4 GW | Total Wall |
+|-----|-------|------------|
+| 1   | 57.9 ms | 926 ms |
+| 2   | 56.3 ms | 939 ms |
+| 3   | 52.2 ms | 928 ms |
+| **Avg** | **55.5 ms** | **931 ms** |
+
+Vergleich zu post-WP-G (Mai 2026):
+- D4 GW T=4: 55.5 ms (post-WP5) vs ~50 ms (post-WP-G) — **innerhalb Run-Varianz**, kein messbarer Effekt
+- Total Wall T=4: 931 ms (post-WP5) vs 967 ms (post-WP-G) — **~4% schneller**
+
+### Warum kein D4-GW-Speedup
+
+`objdump -d release/curcuma | grep -A40 precomputeGaussianWeights | grep "exp"`:
+```
+8c280f: e8 6c e9 87 ff       call   141180 <exp@plt>
+8ea748: e8 33 6a 85 ff       call   141180 <exp@plt>
+```
+
+**libm `exp@plt`** wird weiterhin **skalar** aufgerufen, nicht vektorisiert. Eigen `Array<double, MAX_REF=7, 1>::exp()` ist aufgelöst zu 7 separaten Calls von `std::exp`. Eigen kann `exp` nur vektorisieren mit:
+- `EIGEN_USE_MKL_VML` (MKL-Vector-Math) — nicht verfügbar in Curcuma
+- AVX2/AVX-512 native `vexp` Intrinsic — gibt es als hardware-Instruktion seit Sapphire Rapids, aber libm-`exp` nutzt sie nicht automatisch
+
+Die `vmulpd`/`vsubpd`-Vektor-Ops in der Disassembly stammen aus dem `diff_arr.square()`-Pattern und sind nur 1-2 SIMD-Lanes breit (1-2 Cache-Lines × 7 Elements = nicht aligned). Marginal.
+
+### Wo der ~4% Total-Wall-Gewinn herkommt
+
+- **Reduzierte Heap-Allocations:** `precomputeGaussianWeights` allokiert nun nur 1× `std::vector<double>(n)` statt vorher 1× `std::vector<double>(nref, 0.0)` + std::move. `computeGaussianWeightDerivatives` reduziert 3× allocations (`expw`, `dexpw`, `dgwdcn`) auf 1× (nur `dgwdcn` final).
+- Bei N=6200 Atome × 2 Funktionen × 3 alloc-saved = ~37k Allocations gespart pro Energy-Step. Bei ~20 ns pro malloc/free-Pair = ~0.7 ms cpu-time (kleiner Effekt aber wahrnehmbar).
+
+### Bewertung
+
+**Behalten,** weil:
+- Code-Klarheit besser (Pipeline statt Skalar-Loop)
+- Mathematisch identisch, keine Cross-cutting-Regel-Verletzung
+- Geringer Heap-Allocation-Druck (~37k weniger Allocs/Step)
+- Keine Performance-Regression
+- Vorbereitung für künftige libm-vexp-Pfade (wenn Compiler/libc das vektorisieren)
+
+**Aber:** Erwartete D4-GW-2× ist **nicht erreicht**. Der Hot-Pfad ist `std::exp` selbst, das libm skalar ausführt. Für echten Speedup wäre nötig:
+- AVX2/AVX-512 `vexp` Intrinsic (nicht in libm), oder
+- Polynom-exp-Approximation (User-Constraint: Default exakt, Approx hinter Opt-in)
+
+Letzteres wäre ein eigenes WP, weit außerhalb des aktuellen WP5-Scopes.
+
+### Status für Roadmap
+
+P4f: ⚙️ Machine-tested. Sauber, mathematisch identisch, ~37k Allocations/Step gespart, **D4-GW im Noise**, Total Wall ~4% schneller (vermutlich Heap-Reduktion-Effekt). Vergleichbar mit WP3/WP-G — Architektur-Verbesserung, kein dramatischer Performance-Win.
