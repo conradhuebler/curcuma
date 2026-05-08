@@ -83,6 +83,9 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
 
     CurcumaLogger::result("");
     CurcumaLogger::result(fmt::format(
+        "GFN-FF Energy Calculation [{}]  wall={:.2f} ms",
+        r.is_gpu ? "GPU" : "CPU", r.t_wall));
+    CurcumaLogger::result(fmt::format(
         "GFN-FF Energy Decomposition [{}]", r.is_gpu ? "GPU" : "CPU"));
     // Header row aligned with data columns
     CurcumaLogger::result(fmt::format(
@@ -151,8 +154,22 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
     }
 
     CurcumaLogger::result("  ═════════════════════════════════════════════════════════════════");
+    // Per-call init costs that are not part of param-gen but happen every setMolecule()
+    if (r.t_gpu_upload > 0.0) {
+        CurcumaLogger::result(fmt::format("  {:<32}  {:>14.1f} ms",
+            "GPU workspace upload", r.t_gpu_upload));
+    }
+    if (r.t_topology > 0.0 || r.t_param_gen > 0.0) {
+        CurcumaLogger::result(fmt::format("  {:<32}  topo={}  param={}",
+            "One-time setup",
+            (r.t_topology  > 0.0) ? fmt::format("{:>7.1f} ms", r.t_topology)  : "     --",
+            (r.t_param_gen > 0.0) ? fmt::format("{:>7.1f} ms", r.t_param_gen) : "     --"));
+    }
+    // Total from param-ready to result
+    double t_total = r.t_wall;
+    if (r.t_gpu_upload > 0.0) t_total += r.t_gpu_upload;
     CurcumaLogger::result(fmt::format("  {:<32}  wall={:>7.2f} ms",
-        "Wall time", r.t_wall));
+        "Total energy call", t_total));
     CurcumaLogger::result("");
 }
 
@@ -1090,13 +1107,6 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         }
     }
 
-    if (do_timing) {
-        double t_total = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_prep_total).count();
-        CurcumaLogger::info(fmt::format(
-            "GFN-FF prepareCNAndEEQ: total={:.1f}ms CN={:.1f}ms eeq_topo={:.1f}ms cnf={:.1f}ms dcn={:.1f}ms d4_gw={:.1f}ms eeq_solve={:.1f}ms charge_dist={:.1f}ms",
-            t_total, t_cn, t_eeq_topo, t_cnf, t_dcn, t_d4_gw, t_eeq_solve, t_charge_dist));
-    }
-
     if (out_timing) {
         out_timing->total = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_prep_total).count();
         out_timing->cn = t_cn;
@@ -1337,14 +1347,6 @@ double GFNFF::Calculation(bool gradient)
         return 0.0;
     }
 
-    // Claude Generated (February 2026): General GFN-FF calculation summary at verbosity 1
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::info("\nGFN-FF Calculation:");
-        CurcumaLogger::param("atoms", std::to_string(m_atomcount));
-        CurcumaLogger::param("molecular_charge", fmt::format("{}", m_charge));
-        CurcumaLogger::param("gradient_requested", gradient ? "yes" : "no");
-    }
-
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Calling ForceField::Calculate()...");
     }
@@ -1505,17 +1507,11 @@ double GFNFF::Calculation(bool gradient)
             }
         }
 
-        // Claude Generated (Mar 2026): Report gradient norm like XTB
-        // Reference: gfnff_engrad.F90:857 — gnorm = sqrt(sum(g**2))
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::result(fmt::format("Gradient norm: {:.8f} Eh/a0", m_gradient.norm()));
-        }
-
         // Claude Generated (Feb 21, 2026): Gradient invariance diagnostics
         // Reference: Plan unified-baking-gizmo.md Step 1c
         // Check translation invariance: sum of forces should be ~0
         // Check rotation invariance: sum of torques should be ~0
-        if (CurcumaLogger::get_verbosity() >= 2) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
             // Translation invariance: Σ_i F_i ≈ 0
             Eigen::Vector3d total_force = m_gradient.colwise().sum();
             double translation_error = total_force.norm();
@@ -1604,8 +1600,7 @@ double GFNFF::Calculation(bool gradient)
     // No unit conversion needed - already in Hartree
     m_energy_total = energy_hartree;
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::energy_abs(m_energy_total, "GFN-FF Energy");
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::param("energy_hartree", fmt::format("{:.10f}", energy_hartree));
     }
 
@@ -1613,36 +1608,19 @@ double GFNFF::Calculation(bool gradient)
     auto calc_end = std::chrono::high_resolution_clock::now();
     auto calc_duration = std::chrono::duration_cast<std::chrono::milliseconds>(calc_end - calc_start);
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::result_fmt("GFN-FF total calculation time: {} ms", calc_duration.count());
-    }
-
     // Claude Generated (April 2026): Consolidated timing summary table
-    // Summary prints at verbosity >= 1 (visible during normal operation); sub-step detail stays >= 2
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    // Shows at verbosity >= 2 alongside printGFNFFEnergyReport.
+    if (CurcumaLogger::get_verbosity() >= 2) {
         double t_calc = std::chrono::duration<double, std::milli>(calc_end - calc_start).count();
-        double t_init = m_topology_time_ms + m_param_gen_time_ms;
-        double t_wallclock = t_calc + t_init;
-        auto pct = [&](double t) { return t_wallclock > 0 ? 100.0 * t / t_wallclock : 0.0; };
         auto pct_calc = [&](double t) { return t_calc > 0 ? 100.0 * t / t_calc : 0.0; };
 
-        CurcumaLogger::result("\n[RESULT] GFN-FF Timing Breakdown:");
-        CurcumaLogger::result("  Phase                          Time (ms)   %Wall   %Calc");
+        CurcumaLogger::result("\n[RESULT] GFN-FF (CPU) Timing Breakdown:");
+        CurcumaLogger::result("  Phase                          Time (ms)   %Calc");
         CurcumaLogger::result("  -----------------------------------------------------------");
 
-        // One-time init costs (shown with their share of wallclock time)
-        if (m_topology_time_ms > 0.01) {
-            CurcumaLogger::result(fmt::format("  Topology Generation (one-time)  {:>9.1f}  {:>5.1f}%",
-                m_topology_time_ms, pct(m_topology_time_ms)));
-        }
-        if (m_param_gen_time_ms > 0.01) {
-            CurcumaLogger::result(fmt::format("  Parameter Generation (one-time) {:>9.1f}  {:>5.1f}%",
-                m_param_gen_time_ms, pct(m_param_gen_time_ms)));
-        }
-
         // prepareCNAndEEQ breakdown
-        CurcumaLogger::result(fmt::format("  prepareCNAndEEQ                {:>10.1f}  {:>5.1f}%  {:>5.1f}%",
-            prep_timing.total, pct(prep_timing.total), pct_calc(prep_timing.total)));
+        CurcumaLogger::result(fmt::format("  prepareCNAndEEQ                {:>10.1f}  {:>5.1f}%",
+            prep_timing.total, pct_calc(prep_timing.total)));
         if (prep_timing.cn > 0.01) {
             CurcumaLogger::result(fmt::format("    - CN calculation             {:>10.1f}", prep_timing.cn));
         }
@@ -1667,31 +1645,30 @@ double GFNFF::Calculation(bool gradient)
 
         // HB/XB re-detection
         if (t_hbxb_update > 0.01) {
-            CurcumaLogger::result(fmt::format("  HB/XB Re-detection             {:>10.1f}  {:>5.1f}%  {:>5.1f}%",
-                t_hbxb_update, pct(t_hbxb_update), pct_calc(t_hbxb_update)));
+            CurcumaLogger::result(fmt::format("  HB/XB Re-detection             {:>10.1f}  {:>5.1f}%",
+                t_hbxb_update, pct_calc(t_hbxb_update)));
         }
 
         // Force field / workspace
-        CurcumaLogger::result(fmt::format("  Force Field Energy             {:>10.1f}  {:>5.1f}%  {:>5.1f}%",
-            t_threads, pct(t_threads), pct_calc(t_threads)));
+        CurcumaLogger::result(fmt::format("  Force Field Energy             {:>10.1f}  {:>5.1f}%",
+            t_threads, pct_calc(t_threads)));
 
         // Solvation (if active)
         if (m_solvation && t_solv > 0.01) {
-            CurcumaLogger::result(fmt::format("  ALPB Solvation                 {:>10.1f}  {:>5.1f}%  {:>5.1f}%",
-                t_solv, pct(t_solv), pct_calc(t_solv)));
+            CurcumaLogger::result(fmt::format("  ALPB Solvation                 {:>10.1f}  {:>5.1f}%",
+                t_solv, pct_calc(t_solv)));
         }
 
         // Overhead = calc total minus measured phases
         double t_measured = prep_timing.total + t_hbxb_update + t_threads + t_solv;
         double t_overhead = std::max(0.0, t_calc - t_measured);
         if (t_overhead > 0.01) {
-            CurcumaLogger::result(fmt::format("  Overhead (other)               {:>10.1f}  {:>5.1f}%  {:>5.1f}%",
-                t_overhead, pct(t_overhead), pct_calc(t_overhead)));
+            CurcumaLogger::result(fmt::format("  Overhead (other)               {:>10.1f}  {:>5.1f}%",
+                t_overhead, pct_calc(t_overhead)));
         }
 
         CurcumaLogger::result("  -----------------------------------------------------------");
-        CurcumaLogger::result(fmt::format("  Calculation Total              {:>10.1f}  {:>5.1f}%  100.0%", t_calc, pct(t_calc)));
-        CurcumaLogger::result(fmt::format("  Wallclock Total                {:>10.1f}  100.0%", t_wallclock));
+        CurcumaLogger::result(fmt::format("  Calculation Total              {:>10.1f}  100.0%", t_calc));
 
         // Parallelization analysis: sum ALL sequential phases
         double seq_frac = prep_timing.total + t_hbxb_update + prep_timing.eeq_solve + (m_solvation ? t_solv : 0.0);
@@ -1811,6 +1788,8 @@ double GFNFF::Calculation(bool gradient)
             rep.gradient_norm = m_gradient.norm();
 
         rep.t_wall = std::chrono::duration<double, std::milli>(calc_end - calc_start).count();
+        rep.t_topology  = m_topology_time_ms;
+        rep.t_param_gen = m_param_gen_time_ms;
 
         printGFNFFEnergyReport(rep);
     }
@@ -3108,9 +3087,7 @@ json GFNFF::generateGFNFFParameters()
     // GFN-FF specific settings
     parameters["repulsion_scaling"] = m_parameters.value("repulsion_scaling", 1.0);
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    CurcumaLogger::result_fmt("GFN-FF parameter generation: {} ms", duration.count());
+    (void)start_time;
 
     return parameters;
 }
@@ -3269,13 +3246,6 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    CurcumaLogger::result_fmt("GFN-FF native parameter generation: {} ms", duration.count());
-
-    if (do_timing) {
-        CurcumaLogger::info(fmt::format(
-            "GFN-FF param-gen breakdown: bonds={:.1f}ms angles={:.1f}ms torsions={:.1f}ms inversions={:.1f}ms storsions={:.1f}ms coulomb={:.1f}ms repulsion={:.1f}ms dispersion={:.1f}ms batm={:.1f}ms hbxb={:.1f}ms crossref={:.1f}ms",
-            t_bonds, t_angles, t_torsions, t_inversions, t_storsions, t_coulomb, t_repulsion, t_dispersion, t_batm, t_hbxb, t_crossref));
-    }
 
     m_param_gen_time_ms = static_cast<double>(duration.count());
 
@@ -3423,9 +3393,7 @@ json GFNFF::generateGFNFFBonds() const
             }
     }
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    CurcumaLogger::result_fmt("GFN-FF bond generation: {} ms", duration.count());
+    (void)start_time;
 
     return bonds;
 }
@@ -3558,9 +3526,7 @@ json GFNFF::generateGFNFFAngles(const TopologyInfo& topo_info) const
         CurcumaLogger::success(fmt::format("Generated {} GFN-FF angles", angles.size()));
     }
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    CurcumaLogger::result_fmt("GFN-FF angle generation: {} ms", duration.count());
+    (void)start_time;
 
     return angles;
 }
@@ -6765,9 +6731,7 @@ std::vector<Bond> GFNFF::generateBondsNative(const TopologyInfo& topo_info) cons
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::result_fmt("GFN-FF topology-aware bond generation: {} ms", duration.count());
-    }
+    (void)duration;
 
     return bonds;
 }
@@ -6901,9 +6865,7 @@ std::vector<Angle> GFNFF::generateAnglesNative(const TopologyInfo& topo_info) co
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::result_fmt("GFN-FF topology-aware angle generation: {} ms", duration.count());
-    }
+    (void)duration;
 
     return angles_vec;
 }
@@ -7094,9 +7056,7 @@ json GFNFF::generateTopologyAwareAngles(const Vector& cn, const std::vector<int>
     // Claude Generated (February 2026): Report timing at verbosity 1+
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::result_fmt("GFN-FF topology-aware angle generation: {} ms", duration.count());
-    }
+    (void)duration;
 
     return angles;
 }
@@ -7504,10 +7464,6 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         }
     }
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::result_fmt("GFN-FF HB detection: nhb1={}, nhb2={}", nhb1_count, nhb2_count);
-    }
-
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("Detected {} hydrogen bonds", hbonds.size()));
     }
@@ -7515,9 +7471,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     // Claude Generated (February 2026): Report timing at verbosity 1+
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::result_fmt("GFN-FF hydrogen bond detection: {} ms", duration.count());
-    }
+    (void)duration;
 
     return hbonds;
 }
@@ -7693,9 +7647,7 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::result_fmt("GFN-FF halogen bond detection: {} ms", duration.count());
-    }
+    (void)duration;
 
     return xbonds;
 }
@@ -7884,9 +7836,6 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     {
         auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
         m_param_gen_report.t_distance_matrix = static_cast<double>(dt.count());
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::result_fmt("  distance_matrix: {} ms", dt.count());
-        }
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -7947,9 +7896,6 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     {
         auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
         m_param_gen_report.t_cn_hyb_pi_rings = static_cast<double>(dt.count());
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::result_fmt("  cn+hyb+pi+rings+adjacency: {} ms", dt.count());
-        }
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -8099,9 +8045,6 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         {
             auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
             m_param_gen_report.t_eeq_phase1 = static_cast<double>(dt.count());
-            if (CurcumaLogger::get_verbosity() >= 1) {
-                CurcumaLogger::result_fmt("  eeq_phase1 (topology charges): {} ms", dt.count());
-            }
             phase_timer = std::chrono::high_resolution_clock::now();
         }
 
@@ -8158,9 +8101,6 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         {
             auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
             m_param_gen_report.t_eeq_phase1_corr = static_cast<double>(dt.count());
-            if (CurcumaLogger::get_verbosity() >= 1) {
-                CurcumaLogger::result_fmt("  eeq_phase1_corrections (dxi+alpeeq+dgam): {} ms", dt.count());
-            }
             phase_timer = std::chrono::high_resolution_clock::now();
         }
         } // end if (!topology_from_cache)
@@ -8259,9 +8199,6 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     {
         auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
         m_param_gen_report.t_eeq_phase2 = static_cast<double>(dt.count());
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::result_fmt("  eeq_phase2 (energy charges): {} ms", dt.count());
-        }
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -8354,9 +8291,6 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     {
         auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
         m_param_gen_report.t_pi_bond_orders = static_cast<double>(dt.count());
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::result_fmt("  pi_bond_orders+bond_types: {} ms", dt.count());
-        }
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -8430,9 +8364,6 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     {
         auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
         m_param_gen_report.t_topo_distances = static_cast<double>(dt.count());
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::result_fmt("  topo_distances+batm: {} ms", dt.count());
-        }
     }
 
     // Claude Generated (March 2026): Timing summary
@@ -8442,9 +8373,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     m_param_gen_report.t_topology_total = m_topology_time_ms;
     m_param_gen_report.n_atoms = m_atomcount;
 
-    if (m_print_timing && CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::result_fmt("GFN-FF topology total: {} ms", topo_duration.count());
-    }
+    (void)topo_duration; // timing captured in m_param_gen_report
 
     return topo_info;
 }
@@ -8569,7 +8498,7 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    CurcumaLogger::result_fmt("GFN-FF Coulomb pair generation: {} ms", duration.count());
+    (void)duration;
 
     return coulombs;
 }
@@ -8709,7 +8638,7 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    CurcumaLogger::result_fmt("GFN-FF repulsion pair generation: {} ms", duration.count());
+    (void)duration;
 
     return {std::move(bonded_reps), std::move(nonbonded_reps)};
 }
@@ -8837,11 +8766,7 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
         }
     }
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - disp_start);
-        CurcumaLogger::result_fmt("GFN-FF dispersion generation ({}, {} pairs): {} ms",
-                                  disp_method, dispersions.size(), dt.count());
-    }
+    (void)disp_start;
 
     return {std::move(dispersions), std::move(atm_triples), disp_method};
 }
@@ -8956,12 +8881,7 @@ json GFNFF::generateGFNFFDispersionPairs() const
                     }
                 }
 
-                // Claude Generated (February 2026): Add D4 timing to match other generators
-                auto end_time = std::chrono::high_resolution_clock::now();
-                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-                if (CurcumaLogger::get_verbosity() >= 1) {
-                    CurcumaLogger::result_fmt("GFN-FF D4 dispersion generation: {} ms", duration.count());
-                }
+                (void)start_time;
 
                 return d4_params["d4_dispersion_pairs"];
             } else {
@@ -8985,9 +8905,7 @@ json GFNFF::generateGFNFFDispersionPairs() const
     }
 
     // Step 5: Final fallback (always works)
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    CurcumaLogger::result_fmt("GFN-FF dispersion pair generation: {} ms", duration.count());
+    (void)start_time;
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::warn("No valid dispersion method, using free-atom approximation");
@@ -9117,16 +9035,12 @@ json GFNFF::generateD3Dispersion() const
                                                 gfnff_dispersions.size()));
         }
 
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-        CurcumaLogger::result_fmt("GFN-FF D3 dispersion generation: {} ms", duration.count());
+        (void)start_time;
 
         return gfnff_dispersions;
 
     } catch (const std::exception& e) {
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-        CurcumaLogger::result_fmt("GFN-FF D3 dispersion generation (failed): {} ms", duration.count());
+        (void)start_time;
 
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::error(fmt::format("D3 generation failed: {}, falling back to free-atom", e.what()));
@@ -9209,9 +9123,7 @@ json GFNFF::generateFreeAtomDispersion() const
         CurcumaLogger::warn(fmt::format("Free-atom approximation: {} pairs (consider compiling with USE_D3 or USE_D4 for better accuracy)", dispersion_pairs.size()));
     }
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    CurcumaLogger::result_fmt("GFN-FF free-atom dispersion generation: {} ms", duration.count());
+    (void)start_time;
 
     return dispersion_pairs;
 }

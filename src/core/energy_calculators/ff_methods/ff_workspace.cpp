@@ -291,13 +291,6 @@ double FFWorkspace::calculate(bool gradient)
         CurcumaLogger::info("=== CPU ENERGY END ===");
     }
 
-    if (do_timing) {
-        double t_total = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_calc_start).count();
-        CurcumaLogger::info(fmt::format(
-            "FFWorkspace calculate: total={:.1f}ms execute={:.1f}ms reduce={:.1f}ms postProcess={:.1f}ms",
-            t_total, t_execute, t_reduce, t_post));
-    }
-
     return m_e0 + m_result_energy.total();
 }
 
@@ -536,10 +529,4 @@ void FFWorkspace::postProcess(bool gradient)
         }
     }
 
-    if (do_timing) {
-        double t_total = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_post_start).count();
-        CurcumaLogger::info(fmt::format(
-            "FFWorkspace postProcess: total={:.1f}ms self_energy={:.1f}ms chain_rule={:.1f}ms",
-            t_total, t_self_energy, t_chainrule));
-    }
 }

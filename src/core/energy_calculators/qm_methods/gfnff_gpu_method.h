@@ -132,6 +132,7 @@ private:
     bool             m_has_error     = false;
     std::string      m_error_message;
     double           m_last_energy   = 0.0;
+    double           m_gpu_upload_time_ms = 0.0;
     Matrix           m_cached_gradient; ///< Cached gradient (copied from GPU workspace after calculate)
 
     // CN chain-rule pair list (generated once at init, used every gradient step)

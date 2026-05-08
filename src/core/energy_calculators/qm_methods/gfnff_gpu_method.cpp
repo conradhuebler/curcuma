@@ -114,11 +114,7 @@ bool GFNFFGPUComputationalMethod::setMolecule(const Mol& mol)
     }
     auto t_init_end = std::chrono::high_resolution_clock::now();
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        double ms_topo = std::chrono::duration<double, std::milli>(t_after_topo - t_init_start).count();
-        double ms_gpu  = std::chrono::duration<double, std::milli>(t_init_end - t_after_topo).count();
-        CurcumaLogger::result_fmt("gfnff-gpu init: topology={:.1f}ms GPU upload={:.1f}ms", ms_topo, ms_gpu);
-    }
+    m_gpu_upload_time_ms = std::chrono::duration<double, std::milli>(t_init_end - t_after_topo).count();
 
     m_initialized = true;
 
@@ -963,9 +959,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
 
     ++m_calc_count;
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::energy_abs(m_last_energy, "GFN-FF (GPU) Energy");
-
+    if (CurcumaLogger::get_verbosity() >= 2) {
         // Claude Generated (Apr 2026): Granular GPU timing + wallclock-normalized breakdown
         // Fix (May 2026): t_hbxb now measures actual updateHBXBIfNeeded duration (was ≈0).
         double t_gpu_cn    = std::chrono::duration<double, std::milli>(t_cn_end - t_cn_start).count();
@@ -995,8 +989,6 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         CurcumaLogger::result(fmt::format("  Coulomb + postprocess + DMA    {:>10.1f}  {:>5.1f}%", t_coulomb, pct(t_coulomb)));
         CurcumaLogger::result("  --------------------------------------------------");
         CurcumaLogger::result(fmt::format("  Calculation Total              {:>10.1f}  {:>5.1f}%", t_calc, pct(t_calc)));
-        CurcumaLogger::result(fmt::format("  Initialization (not above)     {:>10.1f}  {:>5.1f}%", t_init, pct(t_init)));
-        CurcumaLogger::result(fmt::format("  Wallclock Total                {:>10.1f}  100.0%", t_wall));
 
         double seq_time = t_cpu_eeq + t_coulomb;
         double overlap_time = std::max(0.0, t_cpu_eeq - t_launch);
@@ -1059,6 +1051,9 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         rep.t_cpu_eeq_gpu_path = t_cpu_eeq_ms;
         rep.t_gpu_phase2       = t_phase2_ms;
         rep.t_wall             = t_calc_ms;
+        rep.t_topology         = m_gfnff->getTopologyTimeMs();
+        rep.t_param_gen        = m_gfnff->getParamGenTimeMs();
+        rep.t_gpu_upload       = m_gpu_upload_time_ms;
 
         // Gradient
         if (gradient && m_gpu_workspace) {

@@ -142,6 +142,12 @@ struct GFNFFEnergyReport {
     double t_cpu_eeq_gpu_path = -1.0; // CPU EEQ overlapping with GPU charge-indep kernels
     double t_gpu_phase2 = -1.0;   // Phase 2: Coulomb + DMA
 
+    // One-time init costs (carried forward from param-gen phase so every
+    // energy report shows the full story: setup + calculation)
+    double t_topology = -1.0;  // ms, -1 if not measured / cached
+    double t_param_gen = -1.0; // ms, -1 if not measured / cached
+    double t_gpu_upload = -1.0; // ms, -1 on CPU path or if not measured
+
     bool is_gpu = false;
 };
 
