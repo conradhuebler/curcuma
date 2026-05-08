@@ -142,7 +142,7 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
     // Handle both legacy verbose and new verbosity parameters for backward compatibility
     if (config.contains("verbosity")) {
         context.verbosity = config["verbosity"].get<int>();
-        if (context.verbosity < 0 || context.verbosity > 3)
+        if (context.verbosity < 0 || context.verbosity > 4)
             context.verbosity = 1;
     } else if (config.contains("verbose")) {
         if (config["verbose"].is_boolean())
@@ -278,21 +278,23 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
     // Optimizer controls its own verbosity level independently.
     // Save+restore global CurcumaLogger level so EnergyCalculator output
     // is also suppressed during silent optimization (verbosity 0).
-    if (verbosity < 0 || verbosity > 3) {
+    if (verbosity < 0 || verbosity > 4) {
         verbosity = 1;
     }
 
     int saved_global_verbosity = CurcumaLogger::get_verbosity();
-    // Suppress all EnergyCalculator output during optimization — the optimizer
-    // prints its own progress table. Restore after optimization.
-    CurcumaLogger::set_verbosity(0);
+    // At verbosity >= 2 (explicitly requested), allow GFN-FF and other energy methods
+    // to print their per-step diagnostic output (timing, decomposition, parameter tables).
+    // At verbosity <= 1 (default), suppress energy method output during the optimization
+    // loop to avoid per-evaluation spam — the optimizer prints its own progress table.
+    CurcumaLogger::set_verbosity(verbosity >= 2 ? verbosity : 0);
     m_context.write_trajectory = write_trajectory;
     m_context.verbosity = verbosity;
 
     m_start_time = std::chrono::high_resolution_clock::now();
 
-    // Optimizer uses fmt::print directly for its own output, controlled by local verbosity.
-    // Global CurcumaLogger is at 0 to suppress EnergyCalculator line-search spam.
+    // Optimizer progress table is output via fmt::print with local verbosity check,
+    // independent of the global CurcumaLogger level.
     if (verbosity >= 1) {
         fmt::print("\n{0: ^{1}} {2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", "Step", 15, "Current Energy", "Energy Change", "RMSD Change", "Gradient Norm", "time");
         fmt::print("{0: ^{1}} {2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", " ", 15, "[Eh]", "[kJ/mol]", "[A]", "[Eh/Bohr]", "[s]");

@@ -29,6 +29,8 @@
 // - 512 threads gives better occupancy on modern GPUs (RTX 3080, A100, etc.)
 // ============================================================================
 #define GFNFF_KERNEL_BOUNDS __launch_bounds__(512, 2)
+// Light kernel bound for simple element-wise kernels (k_build_eeq_rhs, k_zero, etc.)
+#define GFNFF_KERNEL_BOUNDS_LIGHT __launch_bounds__(256, 4)
 
 // D4 constants (matching d4param_generator.h)
 #define D4_MAX_ELEM 118
@@ -495,6 +497,20 @@ __global__ GFNFF_KERNEL_BOUNDS void k_dc6dcn_per_pair(
 );
 
 // ============================================================================
+// GPU dlogdcn computation (Apr 2026)
+// Compute logistic squashing derivative directly on GPU after k_cn_compute.
+// dlogdcn[i] = exp(cnmax) / (exp(cnmax) + exp(cn_raw[i]))
+// Eliminates CPU loop + H2D upload in gfnff_gpu_method.cpp.
+// ============================================================================
+
+__global__ GFNFF_KERNEL_BOUNDS void k_dlogdcn(
+    int natoms,
+    const double* __restrict__ cn_raw,  ///< [N] raw CN values (erf sum)
+    double*       __restrict__ dlogdcn, ///< [N] output: logistic derivative
+    double        exp_cnmax             ///< pre-computed exp(cnmax)
+);
+
+// ============================================================================
 // GPU Gaussian weight computation (Phase 6: March 2026)
 // Claude Generated: Compute gw and dgw/dCN on GPU, eliminating CPU computation
 // + flatten + H2D upload.
@@ -548,5 +564,262 @@ void upload_covalent_radii(const double* radii, int n);
 // ============================================================================
 void upload_refcn_const(const double* data, int n);
 void upload_refn_const(const int* data, int n);
+
+// ============================================================================
+// GPU CN pair list generation (Apr 2026)
+// Two-pass kernels: count valid pairs, then write (i, j, rcov_sum).
+// Replaces CPU generateCNPairList() O(N^2) loop.
+// ============================================================================
+
+__global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_factor,
+    int*          d_count);
+
+__global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_factor,
+    int*          d_counter,
+    int*          idx_i,
+    int*          idx_j,
+    double*       rcov_sum);
+
+// ============================================================================
+// GPU HB CN per-bond computation (Apr 2026)
+// Replaces CPU HB CN loop in gfnff_gpu_method.cpp.
+// ============================================================================
+
+/// 1 thread = 1 (H,B) pair. Atomically accumulates into per-H buffer.
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_per_atom(
+    int n_pairs,
+    const int*    __restrict__ idx_H,
+    const int*    __restrict__ idx_B,
+    const double* __restrict__ rcov_sum,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*       __restrict__ hb_cn_per_atom, // [N] zeroed before launch
+    double        kn,                          // 27.5
+    double        thr_sq);                     // 900.0
+
+/// 1 thread = 1 bond. Reads hb_H_atom from BondSoA and scatters per-H CN into hb_cn_H.
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_map_to_bonds(
+    int nb,
+    const int*    __restrict__ nr_hb,
+    const int*    __restrict__ hb_H_atom,
+    const double* __restrict__ hb_cn_per_atom,
+    double*       __restrict__ hb_cn_H);       // [nb] output, BondSoA buffer
+
+// ============================================================================
+// GPU EEQ Schur complement (Apr 2026)
+// Replaces CPU Schur loop after Cholesky solve in gfnff_gpu_method.cpp.
+// For nfrag == 1 only (common case). nfrag > 1 falls back to CPU path.
+// ============================================================================
+
+/// Block-reduce S = sum(Z2_col0) and Cz1 = sum(z1) on GPU.
+/// Launch with 1 block. Shared mem: 2 * blockSize * sizeof(double).
+/// Writes 2 scalars to d_sums[0] = Cz1, d_sums[1] = S.
+__global__ void k_eeq_reduce_sums(
+    int N,
+    const double* __restrict__ d_rhs,  ///< [N * nrhs] column-major, nrhs >= 2
+    double*       __restrict__ d_sums); ///< [2] output: [Cz1, S]
+
+/// Element-wise Schur complement for nfrag == 1.
+/// charges[i] = z1[i] - Z2[i] * lambda
+__global__ void k_eeq_schur_nfrag1(
+    int N,
+    const double* __restrict__ d_rhs,   ///< [N * 2] column-major: col0=z1, col1=Z2
+    double        lambda,
+    double*       __restrict__ charges); ///< [N] output
+
+// ============================================================================
+// WP7-A: General Schur complement for nfrag > 1 (May 2026)
+// Replaces CPU Schur loop in gfnff_gpu_method.cpp for multi-fragment systems.
+// k_eeq_reduce_fragment_sums: Cz1[f] = Σ_{i∈frag_f} z1[i],
+//                             S[f,g] = Σ_{i∈frag_f} Z2[i,g]
+// k_eeq_schur_general:        q[i] = z1[i] - Σ_g Z2[i,g] * λ[g]
+// ============================================================================
+
+/// Block-reduce per-fragment sums of z1 (column 0) and Z2[:,g] (columns 1..nfrag).
+/// Each block reduces a tile of atoms in shared memory, then atomicAdd's
+/// (nfrag + 1) values into d_Cz1[atom_frag[i]] and d_S[atom_frag[i]*nfrag + g].
+/// Caller must zero d_Cz1 and d_S before launch (cudaMemsetAsync).
+__global__ void k_eeq_reduce_fragment_sums(
+    int N,
+    int nfrag,
+    const double* __restrict__ d_rhs,        ///< [N*(nfrag+1)] column-major
+    const int*    __restrict__ d_atom_frag,  ///< [N] 0-indexed fragment id per atom
+    double*       __restrict__ d_Cz1,        ///< [nfrag] output: per-fragment Σ z1
+    double*       __restrict__ d_S);         ///< [nfrag*nfrag] row-major: S[f*nfrag+g]
+
+/// Element-wise Schur apply for nfrag > 1.
+/// charges[i] = z1[i] - Σ_{g=0..nfrag-1} Z2[i,g] * lambda[g]
+__global__ void k_eeq_schur_general(
+    int N,
+    int nfrag,
+    const double* __restrict__ d_rhs,        ///< [N*(nfrag+1)] column-major
+    const double* __restrict__ d_lambda,     ///< [nfrag] Lagrange multipliers
+    double*       __restrict__ charges);     ///< [N] output (in-place on d_rhs[0..N-1] OK)
+
+// ============================================================================
+// WP7-C: GPU PCG kernels (May 2026)
+// 1-thread-per-atom helpers used by EEQSolverGPU::solveSinglePCG.
+// Matvec / dot / axpy go via cuBLAS (cublasDsymv / Ddot / Daxpy).
+// ============================================================================
+
+/// Extract A's diagonal and invert it: M_inv[i] = 1/A[i,i].
+/// A is column-major N×N (k_eeq_build_matrix output, both triangles filled).
+__global__ void k_pcg_extract_diag_inv(
+    int N,
+    const double* __restrict__ d_A,
+    double*       __restrict__ d_M_inv);
+
+/// Compute initial residual r = b − A·x.
+/// d_Ax must hold A·x (precomputed via cublasDsymv).
+__global__ void k_pcg_init_residual(
+    int N,
+    const double* __restrict__ d_b,
+    const double* __restrict__ d_Ax,
+    double*       __restrict__ d_r);
+
+/// Apply Jacobi preconditioner: z = M_inv ⊙ r (elementwise multiply).
+__global__ void k_pcg_apply_precond(
+    int N,
+    const double* __restrict__ d_M_inv,
+    const double* __restrict__ d_r,
+    double*       __restrict__ d_z);
+
+/// PCG direction update: p_out = z + β·p_in. Single fused kernel.
+__global__ void k_pcg_dir_update(
+    int N,
+    const double* __restrict__ d_z,
+    double        beta,
+    const double* __restrict__ d_p_in,
+    double*       __restrict__ d_p_out);
+
+// ============================================================================
+// WP2: GPU-side EEQ RHS construction
+// ============================================================================
+
+/// Build EEQ RHS vector on GPU: rhs[i] = chi_corr[i] + cnf[i]*sqrt(max(cn[i],0))
+/// Launch after k_cn_compute on same stream — eliminates finalizeCNForCPU() sync
+/// for the EEQ RHS. chi_corr and cnf are topology-constant (upload once per topo).
+/// Reference: gfnff_method.cpp prepareEEQParametersForGPU lines 1029-1037
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_build_eeq_rhs(
+    int N,
+    const double* __restrict__ d_cn,       ///< [N] log-transformed CN (d_cn_final)
+    const double* __restrict__ d_chi_corr, ///< [N] -chi+dxi+amide_corr (topology-const)
+    const double* __restrict__ d_cnf,      ///< [N] cnf_eeq per atom (topology-const)
+    double*       __restrict__ d_rhs       ///< [N] output RHS
+);
+
+// ============================================================================
+// WP5-C: GPU-side D4 dc6dcn skip check
+// ============================================================================
+
+/// Stage 1: per-block max reduction of |cn_cur - cn_ref| → d_block_max[]
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_check_dc6dcn_skip(
+    int N,
+    const double* __restrict__ cn_cur,
+    const double* __restrict__ cn_ref,
+    double* __restrict__ d_block_max);
+
+/// Stage 2: single-block reduction of d_block_max[] → skip_flag (0 or 1)
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_check_dc6dcn_skip_final(
+    int n_blocks,
+    const double* __restrict__ d_block_max,
+    double abs_threshold,
+    int* __restrict__ skip_flag);
+
+// ============================================================================
+// WP3: Pair-list-based CN computation — O(N²) → O(n_pairs)
+// ============================================================================
+
+/// Compute raw GFN-FF CN from pre-built pair list: 1 thread per (i,j) pair.
+/// atomicAdd into d_cn_raw[i] and d_cn_raw[j] — caller must zero d_cn_raw first.
+/// Uses same erf formula as k_cn_compute: contrib = 0.5*(1+erf(kn*(r/rcov-1))).
+/// Reuses CN pair list from generateCNPairListOnGPU() (built once per topology).
+/// Reference: gfnff_cn.f90:66-126
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_cn_compute_pairs(
+    int           n_pairs,
+    const int*    __restrict__ idx_i,    ///< [n_pairs] atom i index
+    const int*    __restrict__ idx_j,    ///< [n_pairs] atom j index
+    const double* __restrict__ rcov_sum, ///< [n_pairs] sum of 4/3-scaled covalent radii
+    const double* __restrict__ cx,       ///< [N] x-coordinates (Bohr, SoA)
+    const double* __restrict__ cy,       ///< [N] y-coordinates (Bohr, SoA)
+    const double* __restrict__ cz,       ///< [N] z-coordinates (Bohr, SoA)
+    double*       __restrict__ cn_raw,   ///< [N] output: erf sum (atomicAdd, zero before)
+    double        kn                     ///< CN decay constant (-7.5)
+);
+
+/// Apply log squashing transform from cn_raw to cn_final: 1 thread per atom.
+/// cn_final[i] = log(1+exp(cnmax)) - log(1+exp(cnmax-cn_raw[i]))
+/// Called after k_cn_compute_pairs; replaces the embedded transform in k_cn_compute.
+/// Reference: gfnff_cn.f90:93-96
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_logcn(
+    int natoms,
+    const double* __restrict__ cn_raw,   ///< [N] raw erf-sum CN
+    double*       __restrict__ cn_final, ///< [N] output: log-squashed CN
+    double        cnmax                  ///< squashing limit (4.4)
+);
+
+// ============================================================================
+// WP6: Batched per-fragment EEQ kernels (nfrag > 1)
+// Claude Generated (May 2026): Independent N_f×N_f Coulomb blocks per fragment.
+// Cross-fragment Coulomb set to zero (valid for well-separated fragments in MD).
+// ============================================================================
+
+/**
+ * @brief Build independent per-fragment N_f×N_f Coulomb blocks for batched EEQ.
+ *
+ * 1 thread per lower-triangle element across ALL fragments (packed).
+ * total_pairs = sum_f N_f*(N_f+1)/2 total threads.
+ * Thread maps to (fragment_f, local_i, local_j) via binary search on frag_offsets_pair.
+ * Writes column-major block into d_A_blocks[frag_offsets_A[f] + local_j*N_f + local_i].
+ *
+ * Reference: same erf(gamma*r)/r formula as k_eeq_build_matrix, intra-fragment only.
+ */
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_build_fragment_matrices(
+    int           total_pairs,               ///< sum_f N_f*(N_f+1)/2
+    const double* __restrict__ cx,           ///< [N] x-coordinates (Bohr, SoA, global order)
+    const double* __restrict__ cy,           ///< [N] y-coordinates
+    const double* __restrict__ cz,           ///< [N] z-coordinates
+    const double* __restrict__ alpha,        ///< [N] alpha² per atom (global order)
+    const double* __restrict__ gam,          ///< [N] gam_corrected per atom (global order)
+    const int*    __restrict__ frag_sizes,       ///< [nfrag] N_f per fragment
+    const int*    __restrict__ frag_offsets_A,   ///< [nfrag] start in d_A_blocks
+    const int*    __restrict__ frag_offsets_pair,///< [nfrag+1] prefix sum N_f*(N_f+1)/2
+    const int*    __restrict__ frag_atom_offsets,///< [nfrag+1] prefix sum N_f (atom start)
+    const int*    __restrict__ frag_atom_map,    ///< [N] sorted-position → global atom index
+    double*       __restrict__ d_A_blocks,       ///< [sum N_f²] output, column-major per block
+    int           nfrag,
+    double        cutoff_sq                      ///< distance cutoff² (0 = no cutoff)
+);
+
+/**
+ * @brief Gather per-atom RHS (b_atoms) from global order into per-fragment RHS blocks.
+ *
+ * 1 thread per sorted atom position k (0..N-1).
+ * Reads d_rhs_global[frag_atom_map[k]] and writes to d_rhs_blocks col0.
+ * Col1 (constraint = all-ones per fragment) is pre-filled at uploadFragmentTopology.
+ */
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_gather_rhs_fragments(
+    int           N,
+    const double* __restrict__ d_rhs_global,      ///< [N] from k_build_eeq_rhs (global order)
+    const int*    __restrict__ frag_atom_map,      ///< [N] sorted-position → global index
+    const int*    __restrict__ frag_atom_offsets,  ///< [nfrag+1] prefix sum N_f
+    const int*    __restrict__ frag_offsets_rhs,   ///< [nfrag] start in d_rhs_blocks
+    const int*    __restrict__ frag_sizes,         ///< [nfrag] N_f per fragment
+    double*       __restrict__ d_rhs_blocks,       ///< [sum N_f*2] col0 written here
+    int           nfrag
+);
 
 #endif // USE_CUDA

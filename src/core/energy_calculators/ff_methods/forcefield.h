@@ -21,6 +21,9 @@
 
 #include "src/core/global.h"
 
+#include <string>
+#include <unordered_map>
+
 #include "forcefieldthread.h"
 #include "ff_workspace.h"
 
@@ -97,6 +100,15 @@ public:
     inline double ATMEnergy() const { return m_atm_energy; }        // Claude Generated (December 2025): ATM energy
     inline double BatmEnergy() const { return m_batm_energy; }       // Claude Generated (Jan 17, 2026): Batm energy
     inline double STorsEnergy() const { return m_stors_energy; }     // Claude Generated (March 2026): Triple bond torsion energy
+
+    // Claude Generated (May 2026): Output control and parallelization metadata for unified GFN-FF reporting.
+    // GFN-FF wrapper sets suppress_output=true and prints its own GFNFFEnergyReport.
+    // TODO: unify UFF/QMDFF energy output to the same GFNFFEnergyReport format.
+    void setSuppressOutput(bool v) { m_suppress_output = v; }
+    double getPoolWallTime() const { return m_t_pool_wall; }
+    double getChainRuleTime() const { return m_t_chainrule; }
+    int getThreadCount() const { return static_cast<int>(m_stored_threads.size()); }
+    const std::unordered_map<std::string, long long>& getTermTimings() const { return m_term_timings_aggregate; }
 
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
@@ -269,6 +281,12 @@ private:
     double m_stors_energy = 0.0;    // Claude Generated (March 2026): Triple bond torsion energy
     double m_d3_energy = 0.0;       // Claude Generated (Jan 2, 2026): D3 dispersion energy (for UFF-D3 and GFN-FF)
     double m_d4_energy = 0.0;       // Claude Generated (Jan 2, 2026): D4 dispersion energy (for GFN-FF)
+
+    // Claude Generated (May 2026): Output suppression flag + last-pool wall-clock for GFN-FF unified report
+    bool m_suppress_output = false;
+    double m_t_pool_wall = 0.0;
+    double m_t_chainrule = 0.0;
+    std::unordered_map<std::string, long long> m_term_timings_aggregate;
 
     Matrix m_geometry, m_gradient;
     std::vector<int> m_atom_types;

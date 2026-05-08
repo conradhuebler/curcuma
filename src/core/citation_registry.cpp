@@ -38,8 +38,8 @@ void CitationRegistry::cite(const std::string& key, const std::string& parent)
         m_subrefs.push_back({key, parent});
     }
 
-    // Log — always visible, regardless of verbosity
-    CurcumaLogger::info("[CITE]  " + key + ": " + data->description);
+    // Registration is silent; citations are printed once in the end-of-run summary.
+    // (Previously logged immediately, but that cluttered the output during calculations.)
 }
 
 void CitationRegistry::printSummary()

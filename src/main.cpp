@@ -706,7 +706,7 @@ json CLI2Json(int argc, char** argv)
                 if ((i + 1) < argc) {
                     try {
                         int verbosity_level = std::stoi(argv[i + 1]);
-                        if (verbosity_level >= 0 && verbosity_level <= 3) {
+                        if (verbosity_level >= 0 && verbosity_level <= 4) {
                             key["verbosity"] = verbosity_level;
                             ++i; // Skip next argument
                             continue;
@@ -1412,6 +1412,12 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
     std::string method = controller.value("method", "gfnff");
     json energy_controller = controller;
     energy_controller["geometry_file"] = std::string(argv[2]);
+
+    // Set global logger verbosity so GFN-FF and other methods respect -verbosity N
+    if (controller.contains("verbosity")) {
+        int verbosity = std::max(0, std::min(4, controller["verbosity"].get<int>()));
+        CurcumaLogger::set_verbosity(verbosity);
+    }
 
     Molecule molecule(argv[2]);
     EnergyCalculator energy_calc(method, energy_controller);

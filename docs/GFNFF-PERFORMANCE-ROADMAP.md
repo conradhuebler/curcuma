@@ -52,13 +52,14 @@ Referenz-Validierung: numerischer vs. analytischer Gradient muss nach jeder Änd
 |-----|-------------|-------|---------|--------|
 | G2a | **`k_dihedrals` / `k_angles` Register-Druck reduzieren** — große Kernel aufteilen oder Hilfsvariablen in shared mem auslagern | `gfnff_kernels.cu:564-1037` | 1-2 Tage | +30% Occupancy |
 | G2b | **Nsight Compute Profiling** — Register-Spilling und Speicherbandbreite empirisch messen, bevor G2a begonnen wird | — | 2-4h | Validierung der Hypothesen |
+| G2c | **Konsistenter EEQ + Coulomb Distance-Cutoff** (CPU **und** GPU, Energie **und** Gradient) — opt-in via `eeq_distance_cutoff > 0`, derzeit Default 0 (matcht Fortran). **Achtung**: Cutoff weicht von Fortran-Referenz ab und verändert das Energie-Surface, daher nur als Performance-Experiment für sehr große Systeme; siehe `docs/GFNFF_GPU_EEQ_CUTOFF_FIX.md` für die vier Pflicht-Sites (EEQ A-Matrix, Coulomb-Pair-List, CPU-Coulomb, GPU-Coulomb). Wenn auch nur **eine** Site den Cutoff anders behandelt → Hellmann-Feynman-Verletzung → MD-Drift. | `eeq_solver.cpp`, `gfnff_method.cpp:8220`, `forcefieldthread.cpp` (Coulomb), `eeq_solver_gpu.cu` + `gfnff_kernels.cu` (`k_coulomb`) | 1 Tag | Moderate Coulomb-Speedup bei N>5000; nicht der Bottleneck (das bleibt EEQ-Cholesky O(N³/6)). Niedrige Priorität bis Cholesky selbst optimiert ist. |
 
 ---
 
 ## Nicht empfohlen
 
 - OpenMP/SIMD-Pragmas CPU: CxxThreadPool + Eigen-SIMD reichen. Kein messbarer Mehrwert.
-- Cutoff-Reduktion: Physikalisch riskant ohne Referenz-Validierung.
+- Coulomb/Dispersion-Cutoff einseitig kürzen: Inkonsistenz zwischen Energie und EEQ-Lösung verletzt Hellmann-Feynman → MD driftet (verifiziert Mai 2026, Polymer N=1410). Nur über die **konsistente** Maßnahme G2c oben anpacken — und dann zusätzlich gegen XTB validieren, weil der gesamte Cutoff-Pfad nicht-Fortran ist.
 - CUTLASS / Tensor Cores: GFN-FF ist kein Matrix-Problem.
 - Texture Memory: Legacy-API; L2-Cache reicht für aktuelle Kernel-Balance.
 - Kooperative CUDA-Gruppen: Kein Gewinn gegenüber bestehendem Warp-Shuffle-Reduktionscode.
@@ -110,6 +111,7 @@ G2b (Profiling)     → G2a (Kernel-Split): Profiling zuerst, um richtige Kernel
 | G1c | ⚙️ Machine-tested | CPU: N/A. GPU: 1.58× (19.0 vs 30.0 ms/step) — Coulomb + Repulsion-Paare ebenfalls nach idx_i sortiert. Kein zusätzlicher Effekt bei 1410 Atomen (Sortierung bringt nur bei Dispersion Gewinn wegen engerem Cutoff). |
 | G2a | ⚙️ Machine-tested | CPU: 1.06× (148.8 vs 157.7 ms/step) — kein CPU-Effekt. GPU: 1.58× (19.0 vs 30.0 ms/step) — Register-Spilling reduziert durch `__launch_bounds__(256, 2)` für k_angles, k_dihedrals, k_inversions, k_storsions, k_hbonds. k_angles/storsions/inversions: 0 Spills (von 88-264 Bytes Stack). k_dihedrals: 88 Bytes Stack (von 432). k_hbonds: 312 Bytes Stack (von 632), noch 548/780 Bytes Spill — benötigt weitere Optimierung. |
 | G2b | ⏭️ Übersprungen | Nsight Compute nicht installiert. Register-Spilling stattdessen via ptxas -v analysiert (siehe G2a-Ergebnisse). |
+| G2c | 🟡 Nicht aktiv | Default `eeq_distance_cutoff = 0` (matcht Fortran) seit Mai 2026. Ein Cutoff-Experiment muss alle vier Sites konsistent abdecken — sonst HF-Verletzung und MD-Drift (verifiziert auf Polymer N=1410: 30-Bohr-Cutoff einseitig in EEQ-Matrix führte zu 0.978 Eh Coulomb-Mismatch GPU/CPU + spürbarem Thermostat-Energieaustausch). Siehe `docs/GFNFF_GPU_EEQ_CUTOFF_FIX.md`. |
 
 *Nur der Operator darf Status auf ✅ TESTED setzen.*
 

@@ -252,6 +252,17 @@ The foundation that enabled rapid angle error debugging:
 - **Per-atom**: 0.4 µEh — well below chemical accuracy (1 kcal/mol ≈ 1.6 mEh)
 - **Status**: ACCEPTED - NOT a parameter bug, confirmed by charge injection diagnostic
 
+### CPU vs GPU Gradient Discrepancy (Apr 2026) — INTERPRETATION REVISED
+
+**Earlier finding**: Isolated HB test showed CPU analytical vs FD: 5.7e-9 ✅, GPU analytical vs FD: 4.2e-3 ❌. GPU gradient was assumed incorrect.
+
+**New evidence (Apr 29, 2026)**: MD simulations (polymer) and heat-bath exchange values show the GPU path (`-gpu cuda`) produces trajectories **closer to XTB GFN-FF** than the CPU path. The CPU MD diverges; the GPU MD stays stable and matches XTB heat exchange.
+
+**Revised interpretation**: The CPU path runs without instability but shows systematic deviations from XTB that are not present (or smaller) in the GPU path. Likely causes: HB gradient distribution, CN chain-rule accumulation order. The GPU `atomicAdd` order may reproduce Fortran summation more faithfully than CPU sequential loops. The isolated HB FD comparison needs re-evaluation — the FD "reference" on CPU may contain the same CPU deviation.
+
+**Status**: UNDER INVESTIGATION — GPU path shows better XTB agreement; CPU deviations still open for production.  
+**Details**: See [docs/GPU_GFNNF_DISCREPANCIES.md](GPU_GFNNF_DISCREPANCIES.md) — "April 2026 Update" section.
+
 ### Dispersion Zeta Scaling (Feb 11, 2026) - SUPERSEDED
 
 **Superseded by**: Dispersion WEIGHT_THRESHOLD fix (Mar 8, 2026) which resolved the energy error.

@@ -418,16 +418,13 @@ private:
     std::string m_error_message;                     ///< Error description
     bool m_gpu_fallback = false;                    ///< GPU requested but CUDA unavailable
     bool m_gpu_fallback_warned = false;              ///< Final GPU warning already printed
-    
     int m_atoms = 0;                                 ///< Number of atoms
     int m_mult = 1;                                  ///< Multiplicity
 
     // Verbosity control (Claude Generated)
     int m_verbosity_override = -1; ///< Override verbosity (-1 = use system)
 
-    // =================================================================================
     // Internal Methods
-    // =================================================================================
     
     /**
      * @brief Initialize EnergyCalculator with ConfigManager settings (new, preferred)

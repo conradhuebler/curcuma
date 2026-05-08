@@ -98,14 +98,142 @@ inline bool isMetalAtom(int atomic_number) {
            (atomic_number >= 89 && atomic_number <= 103);    // Ac-Lr
 }
 
+/**
+ * @brief Unified GFN-FF energy + timing report (CPU and GPU paths share this format)
+ *
+ * Claude Generated (May 2026): Single source of truth for the verbosity-2 output that
+ * was previously fragmented between forcefield.cpp (CPU) and gfnff_gpu_method.cpp (GPU).
+ * Populated by the wrapper after the energy calculation, then printed by
+ * printGFNFFEnergyReport() for a uniform user-facing display.
+ *
+ * Conventions:
+ *   - All times in milliseconds. -1.0 means "not applicable for this path".
+ *   - cpu_sum: sum of per-thread CPU time (NOT wall-clock). Wall-clock is in t_pool_wall.
+ *   - gpu: GPU phase wall-clock (proxy for kernel time; kernels are async, no per-kernel CUDA events).
+ */
+struct GFNFFEnergyReport {
+    // Energy components (Hartree)
+    double bond = 0, angle = 0, dihedral = 0, inversion = 0, stors = 0;
+    double dispersion = 0, bonded_rep = 0, nonbonded_rep = 0;
+    double coulomb = 0, hbond = 0, xbond = 0, atm = 0, batm = 0;
+    double total = 0;
+
+    // Per-term timing: cpu_sum (across all threads), gpu (phase wall-clock); -1 = N/A
+    struct TermTiming { double cpu_sum = -1.0, gpu = -1.0; };
+    TermTiming t_bond, t_angle, t_dihedral, t_inversion, t_stors;
+    TermTiming t_dispersion, t_bonded_rep, t_nonbonded_rep;
+    TermTiming t_coulomb, t_hbond, t_xbond, t_atm, t_batm;
+
+    // Gradient
+    double gradient_norm = -1.0;
+    TermTiming t_gradient;
+
+    // Phase summary — wall-clock per phase
+    double t_wall = 0.0;          // total wall-clock of Calculation()
+    int    n_cpu_threads = 1;
+    double t_pool_wall = -1.0;    // wall-clock of thread pool (ForceField)
+    double t_pool_cpu_sum = -1.0; // sum of all per-term CPU timings
+    double t_cn_eeq_cpu = -1.0;   // CN + EEQ wall-clock (CPU serial)
+    double t_hbxb = -1.0;         // HB/XB re-detection wall-clock
+    double t_gradient_cpu = -1.0; // chain-rule gradient (CPU serial after pool)
+
+    // GPU-only phase timings (-1 on CPU path)
+    double t_gpu_cn = -1.0;       // GPU CN kernel phase wall-clock
+    double t_cpu_eeq_gpu_path = -1.0; // CPU EEQ overlapping with GPU charge-indep kernels
+    double t_gpu_phase2 = -1.0;   // Phase 2: Coulomb + DMA
+
+    // One-time init costs (carried forward from param-gen phase so every
+    // energy report shows the full story: setup + calculation)
+    double t_topology = -1.0;  // ms, -1 if not measured / cached
+    double t_param_gen = -1.0; // ms, -1 if not measured / cached
+    double t_gpu_upload = -1.0; // ms, -1 on CPU path or if not measured
+
+    bool is_gpu = false;
+};
+
+/**
+ * @brief Print GFN-FF energy decomposition + timing breakdown at verbosity >= 2.
+ *
+ * Claude Generated (May 2026): Same format for CPU and GPU paths. Uses CurcumaLogger::result().
+ */
+void printGFNFFEnergyReport(const GFNFFEnergyReport& r);
+
+/**
+ * @brief One-time parameter generation profiling report (printed at verbosity >= 2)
+ *
+ * Claude Generated (May 2026): Captures timings for both topology construction
+ * (`calculateTopologyInfo()`) and parameter generation (`generateGFNFFParameterSet()`).
+ * On topology-cache hit, topology phase fields are 0 (skipped) but the table still
+ * prints so the layout is stable.
+ *
+ * Future Phase B will fill `t_parallel_block_*` for OpenMP / CxxThreadPool comparison.
+ */
+struct GFNFFParamGenReport {
+    enum Backend { Sequential, CxxThreadPool, OpenMPSections };
+    Backend backend = Sequential;
+    int n_threads = 1;
+    int n_atoms = 0;
+    bool topology_cached = false;     // true if .topo.json hit (most topo phases skipped)
+
+    // Topology sub-phases (-1 = not measured this run)
+    double t_distance_matrix    = -1;
+    double t_cn_hyb_pi_rings    = -1;
+    double t_eeq_phase1         = -1;
+    double t_eeq_phase1_corr    = -1;
+    double t_eeq_phase2         = -1;
+    double t_pi_bond_orders     = -1;
+    double t_topo_distances     = -1;
+    double t_topology_total     = -1;
+
+    // Parameter generation phases — all measured in generateGFNFFParameterSet
+    double t_bonds       = -1;
+    double t_angles      = -1;
+    double t_torsions    = -1;
+    double t_inversions  = -1;
+    double t_storsions   = -1;
+    double t_coulomb     = -1;
+    double t_repulsion   = -1;
+    double t_dispersion  = -1;
+    double t_batm        = -1;
+    double t_hbxb        = -1;
+    double t_crossref    = -1;
+
+    // Parallel-block summary (cxxthreadpool path; -1 if sequential or backend=Sequential)
+    double t_parallel_block_wall    = -1;
+    double t_parallel_block_cpu_sum = -1;
+
+    double t_param_gen_total = -1;
+};
+
+void printGFNFFParamGenReport(const GFNFFParamGenReport& r);
+
 // P2b (Apr 2026): CN cutoff parameters — configurable via CLI
 // Three modes:
 //   cn_cutoff_bohr > 0: Neighbor-list mode (default 6.0 Bohr, fast O(N*k))
 //   cn_cutoff_bohr = 0, cn_accuracy > 0: Fortran accuracy-based threshold (cnthr = 100 - log10(acc)*50)
 //   cn_cutoff_bohr = 0, cn_accuracy = 0: Full O(N²) reference mode (no cutoff)
 BEGIN_PARAMETER_DEFINITION(gfnff)
+PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. Maps to EEQ and CN parameters.", "Basic", {})
+PARAM(allow_unconverged_charges, Bool, false, "Allow calculation to continue with unconverged EEQ charges (warn instead of abort).", "Advanced", {})
+PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 topology charges directly. Faster but less accurate.", "Advanced", {})
 PARAM(cn_cutoff_bohr, Double, 6.0, "CN neighbor list cutoff radius in Bohr. 0 = use accuracy-based threshold instead.", "Advanced", {})
 PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
+PARAM(solve, String, "auto",
+      "EEQ solver method: lu, schur_cholesky, pcg, auto. Passed to eeq_solver.", "Algorithm", {})
+PARAM(eeq_max_iterations, Int, -1,
+      "Max EEQ PCG iterations. -1 = use adaptive default (200 small, 5000 large). Passed to eeq_solver.", "Algorithm", {})
+PARAM(eeq_tolerance, Double, -1.0,
+      "EEQ PCG tolerance. -1 = use adaptive default (1e-10 small, 1e-6*||rhs|| large). Passed to eeq_solver.", "Algorithm", {})
+PARAM(eeq_accuracy, Double, 1e-6,
+      "Target EEQ charge accuracy (e). Sets pcg_large_system_tol_factor. Higher = faster but less accurate.", "Algorithm", {})
+PARAM(eeq_distance_cutoff, Double, 30.0,
+      "Distance cutoff in Bohr for EEQ matrix conditioning. 0 = no cutoff. Affects both CPU and GPU.", "Advanced", {})
+PARAM(gpu_block_size, Int, 0,
+      "GPU kernel block size (0 = adaptive, 32/64/128/256/512). 512 = max occupancy. Passed to ff_workspace_gpu.", "Advanced", {})
+PARAM(hb_cell_list_min_atoms, Int, 800,
+      "Min atom count to use SpatialCellList for HB/XB neighbor detection. Below this falls back to O(N²) loop. 0 = always use cell list.", "Advanced", {})
+PARAM(hb_parallel_min_pairs, Int, 500,
+      "Min AB-pair count to parallelise HB detection via CxxThreadPool. 0 = always parallel (if pool available). -1 = never parallel.", "Advanced", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -524,6 +652,21 @@ public:
     // can orchestrate GPU + CPU-residual without duplicating logic.
 
     /**
+     * @brief Timing breakdown for prepareCNAndEEQ sub-steps.
+     * Claude Generated (April 2026): Collected for consolidated summary in Calculation().
+     */
+    struct PrepTiming {
+        double total = 0.0;
+        double cn = 0.0;
+        double eeq_topo = 0.0;
+        double cnf = 0.0;
+        double dcn = 0.0;
+        double d4_gw = 0.0;
+        double eeq_solve = 0.0;
+        double charge_dist = 0.0;
+    };
+
+    /**
      * @brief Compute CN, EEQ charges, and (if gradient) CN derivatives for current geometry.
      * Results are stored internally and distributed to m_forcefield/m_workspace.
      * Call getters below to retrieve results for external workspaces.
@@ -532,8 +675,9 @@ public:
      *                  distribution (GPU has its own k_cn_chainrule kernel)
      * @param external_cn  If non-null, use these CN values instead of computing on CPU.
      *                     Claude Generated (March 2026): Enables GPU CN bypass.
+     * @param out_timing  If non-null, filled with per-sub-step durations (ms).
      */
-    void prepareCNAndEEQ(bool gradient, bool gpu_only = false, const Vector* external_cn = nullptr, bool skip_eeq = false);
+    void prepareCNAndEEQ(bool gradient, bool gpu_only = false, const Vector* external_cn = nullptr, bool skip_eeq = false, PrepTiming* out_timing = nullptr);
 
     /**
      * @brief Extract EEQ parameters for GPU solver (O(N) CPU work only)
@@ -555,8 +699,23 @@ public:
         std::vector<double> rhs_constraints;  ///< [nfrag] target charges per fragment
         std::vector<int>    fraglist;         ///< [N] fragment ID per atom (1-indexed)
         int nfrag = 1;                        ///< Number of molecular fragments
+        // WP2: topology-constant RHS components for GPU kernel k_build_eeq_rhs
+        std::vector<double> chi_corrected_static; ///< [N] -chi + dxi + amide_corr (no CN term)
+        std::vector<double> cnf;                  ///< [N] cnf_eeq per atom
     };
     EEQGPUParams prepareEEQParametersForGPU(const Vector& cn) const;
+
+    /**
+     * @brief Get EEQ distance cutoff from parameters (Bohr).
+     * Used by GPU path to match CPU matrix conditioning behavior.
+     */
+    double getEEQDistanceCutoff() const;
+
+    /**
+     * @brief Forward gfnff-level solver parameters to eeq_solver sub-config.
+     * Handles: solve, eeq_max_iterations, eeq_tolerance, eeq_accuracy, eeq_distance_cutoff.
+     */
+    void forwardEEQSolverParams(json& eeq_params);
 
     /**
      * @brief Re-detect HB/XB pairs if geometry has changed enough (RMSD > 0.3 Bohr).
@@ -567,6 +726,10 @@ public:
 
     /// True if updateHBXBIfNeeded() ran and changed lists since last call
     bool consumeHBXBUpdate() { bool r = m_hbxb_updated; m_hbxb_updated = false; return r; }
+
+    // Claude Generated (Apr 2026): Timing accessors for GPU orchestrator
+    double getParamGenTimeMs() const { return m_param_gen_time_ms; }
+    double getTopologyTimeMs() const { return m_topology_time_ms; }
 
     /// Set external topology decision from GPU displacement check (Claude Generated March 2026).
     /// If set, needsFullTopologyUpdate() uses this value instead of CPU computation.
@@ -615,6 +778,22 @@ public:
     const Vector& getLastCN() const { return m_last_cn; }
     const Vector& getLastCharges() const { return m_charges; }
     const Matrix& getGeometryBohr() const { return m_geometry_bohr; }
+
+    /**
+     * @brief True if m_charges are valid for the supplied geometry.
+     * Mirrors the eeq_charges_current check in prepareCNAndEEQ
+     * (gfnff_method.cpp:761-765). Used by the GPU path to short-circuit
+     * a redundant Phase-2 EEQ when the geometry has not moved since the
+     * last solve (typical for SP at the topology-time geometry).
+     * Claude Generated (May 2026).
+     */
+    bool areEEQChargesCurrent(const Matrix& geom_bohr) const
+    {
+        return (m_charges.size() == m_atomcount)
+            && (m_last_eeq_geometry.rows() == geom_bohr.rows())
+            && (m_last_eeq_geometry.cols() == geom_bohr.cols())
+            && (m_last_eeq_geometry == geom_bohr);
+    }
 
     /**
      * @brief Store GPU-computed charges via memcpy (no Eigen heap alloc, no ForceField distribution).
@@ -2118,6 +2297,7 @@ private:
     // Tier 2: Dynamic state (CN, distances) - invalidates on small geometry change
     mutable std::optional<TopologyInfo> m_cached_topology;
     mutable Eigen::MatrixXd m_last_topology_geometry;  // Geometry when topology was last calculated
+    mutable Eigen::MatrixXd m_last_eeq_geometry;       // Geometry for which m_charges are currently valid
     mutable bool m_static_topology_valid = false;       // True if static topology is current
     mutable bool m_full_topology_recalculated = false;  // Set by getCachedTopology() on full update
     mutable std::optional<bool> m_external_topology_decision; ///< GPU displacement check result
@@ -2129,6 +2309,14 @@ private:
     // Claude Generated (March 2026): Topology persistence in param.json
     bool m_cache_topology = true;   ///< Cache Phase-1 EEQ topology in param.json (opt-out)
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1
+
+    // Claude Generated (April 2026): Timing for consolidated summary
+    double m_param_gen_time_ms = 0.0;       ///< Parameter generation time (generateGFNFFParameterSet) for summary
+    mutable double m_topology_time_ms = 0.0; ///< Topology generation time (calculateTopologyInfo) for summary (mutable: set in const method)
+
+    // Claude Generated (May 2026): Profiling report for verbosity-2 param-gen breakdown.
+    // mutable so calculateTopologyInfo() (const) can populate sub-phase timings.
+    mutable GFNFFParamGenReport m_param_gen_report;
 
     // Check if geometry change warrants full topology recalculation (vs just dynamic state)
     bool needsFullTopologyUpdate(const Eigen::MatrixXd& geometry_bohr) const;
@@ -2144,6 +2332,7 @@ private:
     std::vector<GFNFFHydrogenBond> m_last_hbonds;
     std::vector<GFNFFHalogenBond> m_last_xbonds;
     bool m_hbxb_updated = false;  ///< True if updateHBXBIfNeeded() ran since last check
+    bool m_hbxb_fresh = false;    ///< True if HB/XB lists were freshly built during init and geometry is unchanged
 
     // Claude Generated (March 2026): State from last prepareCNAndEEQ() call
     Vector m_last_cn;    ///< Coordination numbers
