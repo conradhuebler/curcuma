@@ -133,3 +133,77 @@ G2b (Profiling)     → G2a (Kernel-Split): Profiling zuerst, um richtige Kernel
 - GPU ist **5.3× schneller** als native CPU — Ziel der CPU-Optimierungen ist es, diesen Abstand auf ≤3× zu verkleinern.
 - Bei 1410 Atomen dominieren O(N²)-Terme (Dispersion, Coulomb, CN): P1c, P2a, P2b haben hier den größten Hebel.
 - Rohdaten: `test_cases/cli/simplemd/10_gfnff_polymer_md/baseline.dat`
+
+---
+
+## WP4 — CPU-Pfad Multi-Fragment-Profil (Mai 2026)
+
+Nachfolger zur EEQ-Multi-Fragment-Optimierung (Commit `b6a3a42`, Mai 2026). Profil-Datenpunkt: `mixture.xyz` (N=6200, nfrag=1400), single-point + gradient, CPU-Pfad, 4 Threads.
+
+### Profil
+
+| Phase | Zeit | Anteil |
+|-------|------|--------|
+| **Total energy call** | **3341 ms** | 100% |
+| CN + EEQ (serial CPU) | 1766 ms | 53% |
+|   davon EEQ Phase 2 (Stage 4 batched) | ~660 ms | 20% |
+|   davon Param/CN/D4-Gaussian | ~1100 ms | 33% |
+| Force Field Energy (multi-threaded) | 1574 ms | 47% |
+|   Coulomb | 640 ms | 19% |
+|   Bond | 359 ms | 11% |
+|   H-bonds | 205 ms | 6% |
+|   Dispersion | 185 ms | 6% |
+|   Repulsion (nonbond) | 60 ms | 2% |
+
+GPU-Vergleich für dasselbe System: 1.5 s (2.2× schneller als CPU). Force-Field-Energie auf GPU: ~25 ms (63× schneller als CPU). Pro OPT-Schritt zusätzlich ~17 s für `RMSDDriver::start()` (Kabsch+Topologie-Rebuild) — bereits gefixt in Commit `b6a3a42` via O(N) Coordinate-Diff für N≥500.
+
+### Geplante Maßnahmen
+
+#### Stufe 4a — Quick Wins (je 1-3h, hohes Risiko/Nutzen-Verhältnis)
+
+| ID  | Beschreibung | Datei | Aufwand | Geschätzter Nutzen |
+|-----|-------------|-------|---------|---------------------|
+| P4a | **EEQ Batched parallelisieren** — 1400 unabhängige Fragment-LU via `CxxThreadPool` oder OpenMP. Embarrassingly parallel. | `eeq_solver.cpp` (Stage-4-Loop, Mai 2026 Commit) | 1-2h | Phase-2 4-6× (660→120-200 ms) |
+| P4b | **Threading-Audit aller "serial CPU"-Phasen** — `CN + EEQ (serial CPU)` ist explizit als seriell gelabelt; Default-Thread-Anzahl im OPT-Pfad prüfen, sicherstellen dass `-threads N` durchgereicht wird. | `gfnff_method.cpp` Phase-2-Loop, capability-Layer | 2h | 4-8× insgesamt wenn Threads <2 |
+| P4c | **Bond-Term Hotspot-Profiling** — 359 ms / 4800 Bonds = 75 µs/Bond ist ~100× zu langsam für eine simple `exp((r-r0)·α)` Auswertung. Vermutung: Cache-Misses durch Pointer-Indirection oder einzelne Eigen-Matrix-Ops pro Bond statt Batch. `perf record` zur Lokalisierung. | `forcefieldthread.cpp:CalculateGFNFFBondContribution` | 1-2h Profiling, dann 2-4h Fix | Bond 5-10× wenn Hypothese stimmt |
+
+#### Stufe 4b — Mittelfristig (je ~1 Tag, hoher Nutzen bei N>2000)
+
+| ID  | Beschreibung | Datei | Aufwand | Geschätzter Nutzen |
+|-----|-------------|-------|---------|---------------------|
+| P4d | **Coulomb Cell-List / Verlet-List** — räumliche Lokalisierung statt voller O(N²)-Iteration. `erf(γ·r)/r` < 1e-7 jenseits ~12 Bohr; bei mixture sind die meisten Paare > 12 Bohr entfernt. Alternative: einfache Cutoff-Liste (ohne Cell-List) reicht für mittelgroße Systeme. **Achtung**: Konsistenz mit EEQ-Matrix nötig (siehe G2c-Warnung), sonst Hellmann-Feynman-Verletzung. | `forcefieldthread.cpp:CalculateGFNFFCoulombContribution` | 1 Tag | Coulomb 5-20× bei N>2000 |
+| P4e | **CN-Berechnung SIMD-vektorisieren** — `std::erf()` per-Atom-Loop ersetzen durch Eigen array op auf Distance-Matrix-Slice. Funktioniert direkt mit Eigen-AVX2/AVX-512 Vector-Math. | `gfnff_method.cpp:calculateCN` (oder `cn_calculator.cpp`) | 4-6h | CN ~2× |
+| P4f | **D4 Gaussian-Weights vektorisieren** — 144 ms / 6200 Atome / 7 Refs = 3.3 µs pro Atom-Reference-Paar. Inner Loop (MAX_REF=7) als Eigen array op, exp() vektorisiert. | `d4param_generator.cpp:precomputeGaussianWeights` | 3-4h | D4-Weights ~2× |
+
+#### Stufe 4c — Langfristig (Architektur-Eingriff)
+
+| ID  | Beschreibung | Datei | Aufwand | Geschätzter Nutzen |
+|-----|-------------|-------|---------|---------------------|
+| P4g | **Cell-List statt Pair-Listen für alle Non-Bonded-Terme** — gemeinsame räumliche Datenstruktur für Coulomb, Dispersion, Repulsion, H-bonds. Komplett O(N) statt O(N²). | mehrere Dateien, Architektur-Refactor | 1-2 Wochen | 10-30× bei N>5000 |
+
+### Realistisches CPU-Ziel
+
+Mit Stufe 4a+4b umgesetzt: Single-point CPU von 3.3 s → ~0.6-0.8 s (mixture.xyz). Faktor vs. GPU sinkt von 2.2× auf ~1.3-1.5×. Bei kleineren Systemen (N<1000) wird der Abstand komplett verschwinden.
+
+### Abhängigkeiten
+
+```
+P4b (Threading-Audit)  →  P4a (EEQ batched parallel): wenn Threads schon korrekt
+                                                       durchgereicht werden, P4a
+                                                       ist trivial
+P4c (Bond-Profiling)   →  ggf. weitere FF-Term-Optimierungen via gleichem Muster
+P4d (Coulomb Cutoff)   →  G2c (konsistenter EEQ-Cutoff) muss zuerst aktiviert
+                          und gegen XTB validiert sein
+```
+
+### Status
+
+| ID | Status | Ergebnis |
+|----|--------|---------|
+| P4a | 🆕 Vorgeschlagen | — |
+| P4b | 🆕 Vorgeschlagen | — |
+| P4c | 🆕 Vorgeschlagen | — |
+| P4d | 🆕 Vorgeschlagen | Blockiert durch G2c |
+| P4e | 🆕 Vorgeschlagen | — |
+| P4f | 🆕 Vorgeschlagen | — |
+| P4g | 🆕 Vorgeschlagen | Größter Refactor; nicht vor P4d |
