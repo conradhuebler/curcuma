@@ -243,7 +243,7 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
             if (m_eeq_nfrag > 1) {
                 m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, natoms);
                 // WP7-B: cache min inter-fragment distance for batched-solver warning.
-                const Matrix& geom = m_gfnff->getGeometryBohr();
+                const GeoGradMatrix& geom = m_gfnff->getGeometryBohr();
                 if (geom.rows() == natoms && geom.cols() >= 3) {
                     m_eeq_gpu->updateMinFragmentDistance(
                         geom.col(0).data(), geom.col(1).data(), geom.col(2).data(), natoms);
@@ -323,7 +323,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // This overlaps the expensive EEQ solver with ~12 GPU kernels that don't need charges.
 
     const int N = static_cast<int>(m_atom_types.size());
-    const Matrix& geom_bohr = m_gfnff->getGeometryBohr();
+    const GeoGradMatrix& geom_bohr = m_gfnff->getGeometryBohr();
 
     // Claude Generated (April 2026): Upload PBC unit cell to GPU constant memory
     if (m_gfnff->hasPBC()) {
@@ -503,7 +503,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         if (m_eeq_nfrag > 1) {
             m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, N);
             // WP7-B: refresh min inter-fragment distance after topology rebuild.
-            const Matrix& geom = m_gfnff->getGeometryBohr();
+            const GeoGradMatrix& geom = m_gfnff->getGeometryBohr();
             if (geom.rows() == N && geom.cols() >= 3) {
                 m_eeq_gpu->updateMinFragmentDistance(
                     geom.col(0).data(), geom.col(1).data(), geom.col(2).data(), N);
@@ -601,7 +601,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
             // Compute per-atom RMSD (Bohr) from geometry at last full Cholesky build.
             // If RMSD < threshold: reuse cached L (dpotrs only, saves ~12 ms/step).
             // If RMSD >= threshold or threshold==0: full refactorization.
-            const Matrix& cur_geom = m_gfnff->getGeometryBohr();
+            const GeoGradMatrix& cur_geom = m_gfnff->getGeometryBohr();
             bool force_refactor = true;
             if (m_eeq_rmsd_threshold > 0.0 && m_eeq_has_ref_geom
                     && m_eeq_ref_geom.rows() == cur_geom.rows()) {

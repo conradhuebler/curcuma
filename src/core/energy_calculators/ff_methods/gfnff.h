@@ -792,7 +792,11 @@ public:
     // Getters for CN/EEQ results (valid after prepareCNAndEEQ)
     const Vector& getLastCN() const { return m_last_cn; }
     const Vector& getLastCharges() const { return m_charges; }
-    const Matrix& getGeometryBohr() const { return m_geometry_bohr; }
+    // WP-G fix (May 2026): m_geometry_bohr is GeoGradMatrix (RowMajor). Returning
+    // `const Matrix&` was creating a dangling reference to a temporary produced by
+    // Eigen's implicit storage-order conversion — segfaulted in the GPU path
+    // (GFNFFGPUComputationalMethod::calculateEnergy).
+    const GeoGradMatrix& getGeometryBohr() const { return m_geometry_bohr; }
 
     /**
      * @brief True if m_charges are valid for the supplied geometry.
