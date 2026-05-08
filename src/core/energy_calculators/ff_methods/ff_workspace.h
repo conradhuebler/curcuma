@@ -123,15 +123,15 @@ struct FFTermTimings {
  * For T=1, acc[0] IS the result (no reduce needed).
  */
 struct FFAccumulator {
-    Matrix gradient;          ///< N×3 gradient accumulator
+    GeoGradMatrix gradient;          ///< N×3 gradient accumulator (WP-G: RowMajor)
     Vector dEdcn;             ///< N dE/dCN for chain-rule
     Vector dEdcn_bond;        ///< N bond-only dE/dCN for per-component attribution
     FFEnergyComponents energy;
     FFTermTimings timings;    ///< Claude Generated (May 2026): per-term ms (this partition only)
 
     // Optional per-component gradients (only allocated if store_components=true)
-    Matrix grad_bond, grad_angle, grad_torsion, grad_repulsion;
-    Matrix grad_coulomb, grad_dispersion, grad_hb, grad_xb, grad_batm, grad_atm;
+    GeoGradMatrix grad_bond, grad_angle, grad_torsion, grad_repulsion;
+    GeoGradMatrix grad_coulomb, grad_dispersion, grad_hb, grad_xb, grad_batm, grad_atm;
 
     bool has_components = false;
 
@@ -149,7 +149,7 @@ struct FFAccumulator {
         }
         has_components = store_components;
         if (store_components && do_gradient) {
-            auto resetMat = [&](Matrix& m) {
+            auto resetMat = [&](GeoGradMatrix& m) {  // WP-G: lambda matches RowMajor member type
                 if (m.rows() != natoms || m.cols() != 3) m.resize(natoms, 3);
                 m.setZero();
             };
@@ -254,7 +254,7 @@ public:
 
     // === Results ===
 
-    const Matrix& gradient() const { return m_result_gradient; }
+    const GeoGradMatrix& gradient() const { return m_result_gradient; }
     const FFEnergyComponents& energyComponents() const { return m_result_energy; }
     const FFTermTimings& termTimings() const { return m_result_timings; }
     int threadCount() const { return m_num_threads; }
@@ -262,19 +262,19 @@ public:
     const Vector& dEdcnBondTotal() const { return m_dEdcn_bond_total; }
 
     /// Gradient before CN chain-rule (diagnostic, valid after calculate with gradient)
-    const Matrix& gradientBeforeCN() const { return m_grad_before_cn; }
+    const GeoGradMatrix& gradientBeforeCN() const { return m_grad_before_cn; }
 
     // Per-component gradient getters (only valid if store_components=true)
-    const Matrix& gradientBond() const { return m_result_grad_bond; }
-    const Matrix& gradientAngle() const { return m_result_grad_angle; }
-    const Matrix& gradientTorsion() const { return m_result_grad_torsion; }
-    const Matrix& gradientRepulsion() const { return m_result_grad_repulsion; }
-    const Matrix& gradientCoulomb() const { return m_result_grad_coulomb; }
-    const Matrix& gradientDispersion() const { return m_result_grad_dispersion; }
-    const Matrix& gradientHB() const { return m_result_grad_hb; }
-    const Matrix& gradientXB() const { return m_result_grad_xb; }
-    const Matrix& gradientBATM() const { return m_result_grad_batm; }
-    const Matrix& gradientATM() const { return m_result_grad_atm; }
+    const GeoGradMatrix& gradientBond() const { return m_result_grad_bond; }
+    const GeoGradMatrix& gradientAngle() const { return m_result_grad_angle; }
+    const GeoGradMatrix& gradientTorsion() const { return m_result_grad_torsion; }
+    const GeoGradMatrix& gradientRepulsion() const { return m_result_grad_repulsion; }
+    const GeoGradMatrix& gradientCoulomb() const { return m_result_grad_coulomb; }
+    const GeoGradMatrix& gradientDispersion() const { return m_result_grad_dispersion; }
+    const GeoGradMatrix& gradientHB() const { return m_result_grad_hb; }
+    const GeoGradMatrix& gradientXB() const { return m_result_grad_xb; }
+    const GeoGradMatrix& gradientBATM() const { return m_result_grad_batm; }
+    const GeoGradMatrix& gradientATM() const { return m_result_grad_atm; }
 
     // === Configuration ===
 
@@ -312,7 +312,7 @@ private:
     CxxThreadPool* m_pool = nullptr;
 
     // === Shared state (read-only per step) ===
-    Matrix m_geometry;
+    GeoGradMatrix m_geometry;  // WP-G: RowMajor for contiguous row(i) reads in inner loops
     std::vector<int> m_atom_types;
     Vector m_eeq_charges, m_topology_charges, m_d3_cn;
     Vector m_cn, m_cnf;
@@ -358,18 +358,19 @@ private:
     std::vector<FFAccumulator> m_accumulators;
 
     // === Result storage ===
-    Matrix m_result_gradient;
+    GeoGradMatrix m_result_gradient;  // WP-G: RowMajor
     FFEnergyComponents m_result_energy;
     FFTermTimings m_result_timings;  // Claude Generated (May 2026): aggregated per-term timing
     Vector m_dEdcn_total, m_dEdcn_bond_total;
-    Matrix m_grad_before_cn;  ///< Gradient snapshot before CN chain-rule (diagnostic)
+    GeoGradMatrix m_grad_before_cn;  ///< Gradient snapshot before CN chain-rule (diagnostic) — WP-G: RowMajor
     bool m_store_components = false;
     bool m_do_gradient = false;
 
     // Per-component result gradients
-    Matrix m_result_grad_bond, m_result_grad_angle, m_result_grad_torsion;
-    Matrix m_result_grad_repulsion, m_result_grad_coulomb, m_result_grad_dispersion;
-    Matrix m_result_grad_hb, m_result_grad_xb, m_result_grad_batm, m_result_grad_atm;
+    // WP-G: RowMajor result gradient buffers
+    GeoGradMatrix m_result_grad_bond, m_result_grad_angle, m_result_grad_torsion;
+    GeoGradMatrix m_result_grad_repulsion, m_result_grad_coulomb, m_result_grad_dispersion;
+    GeoGradMatrix m_result_grad_hb, m_result_grad_xb, m_result_grad_batm, m_result_grad_atm;
 
     // === Core execution ===
     void executeGFNFF(int partition);

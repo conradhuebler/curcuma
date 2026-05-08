@@ -1,8 +1,9 @@
 # WP-G — `m_gradient`-Layout-Optimierung (P4h)
 
-**Status:** 🆕 Vorgeschlagen
-**Aufwand:** 4–8h (mehrere Aufrufer betroffen)
-**Erwarteter Nutzen:** **Größter Hebel im FF-Pool laut WP3-Befund** — Bond, Coulomb, Dispersion, Repulsion, ATM, H-Bonds profitieren alle. Schätzung Bond cpu-time 170 → ~50 ms (3×), Coulomb 660 → ~250 ms, Dispersion 168 → ~60 ms.
+**Status:** ⚙️ Machine-tested (Mai 2026) — **funktioniert technisch, Speedup gering**. Operator setzt ✅ TESTED.
+**Aufwand:** ~3h Implementation
+**Erwarteter Nutzen (geplant):** Bond cpu-time 170 → ~50 ms (3×), Total Wall 1840 → ~600-700 ms
+**Tatsächlicher Nutzen (gemessen):** Total Wall **3-7% schneller** vs. post-WP4 (mixture.xyz). Bond-cpu-Wall im Noise. Hypothese aus WP3 (Cache-Miss-dominiert) hat sich nicht bestätigt.
 
 ## Hypothese
 
@@ -118,3 +119,71 @@ WP3 hat das Bond-Loop-Heap-Allocation-Problem strukturell aufgeräumt, aber den 
 
 - WP1 abgeschlossen (Threading klar)
 - WP3 abgeschlossen (Bond-Loop ist Stack-Vector statt Heap-Matrix — sauberer Code-Ausgangspunkt für die Layout-Migration)
+
+---
+
+## Ergebnis (Mai 2026)
+
+### Implementation
+
+**Typ-Alias** in `forcefieldthread.h`:
+```cpp
+using GeoGradMatrix = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
+```
+
+**Migrierte Member (~30 Variablen):**
+- `forcefieldthread.h`: `m_geometry`, `m_gradient`, 10 Component-Gradients (`m_gradient_bond/angle/...`); Per-Component-Getter Return-Typ auf `const GeoGradMatrix&`
+- `forcefield.h`: `m_geometry`, `m_gradient`, 3 CN-Korrektionen (`m_bond/disp/coulomb_cn_correction`)
+- `ff_workspace.h`: `m_geometry`, `m_result_gradient`, `m_grad_before_cn`, 10 Result-Gradients, `FFAccumulator::gradient` + 10 Komponenten; Getter Return-Typen
+- `gfnff.h`: `m_geometry`, `m_geometry_bohr`, `m_gradient`, `GeometryChangeDetector::m_last_geometry`
+- `cuda/ff_workspace_gpu.h/.cu`: `setGeometry`-Signatur
+
+**Lambdas + Function-Pointers** angepasst:
+- `runWithGradCapture` Lambda (forcefieldthread.cpp:122) — Parameter `GeoGradMatrix&`
+- `FFAccumulator::reset` Lambda — Parameter `GeoGradMatrix&`
+- `initGradientComponents` Lambda — Parameter `GeoGradMatrix&`
+- `sumComponentGradient` (forcefield.cpp:2990) — Function-Pointer Return-Typ `const GeoGradMatrix&`; interne Aggregation als `GeoGradMatrix`, Konversion zu `Matrix` am API-Rand
+
+**Externe API stable:** `ForceField::Gradient()`, `getGradient()` etc. geben weiter `Matrix` (ColumnMajor) zurück. Eigen konvertiert implizit beim by-value Return. Konversionskosten 50 KB pro Energy-Call — vernachlässigbar.
+
+**ALPB-Boundary:** `m_solvation->addGradient` erwartet ColumnMajor `Matrix&`. Konversion in `gfnff_method.cpp:1471` mit lokalem Temp-Buffer. ALPB nicht im Hot-Path.
+
+### Korrektheit
+
+T=1 (deterministisch): ✅ bit-identisch zu pre-WP-G
+- `acetic_acid_dimer.xyz` T=1: -2.47129863 Eh
+- `triose.xyz` T=1: -9.91485397 Eh
+- `mixture.xyz` T=1: -856.28814787 Eh
+
+T=4: triose zeigt Multi-Thread-Drift zwischen 3 Werten (-9.91485397 / -9.91337978 / -9.91463123). **Verified pre-WP-G hat denselben Drift** (5 Läufe pre-WP-G zeigen dieselbe Verteilung) — bestehende Race-Condition, **nicht durch WP-G eingeführt**. Eigenes WP für die Race-Untersuchung nötig.
+
+### Performance — `mixture.xyz` (N=6200)
+
+| T | CN-deriv post-WPG | post-WP4 | Δ | Total Wall post-WPG | post-WP4 | Δ |
+|---|-------------------|----------|---|---------------------|----------|---|
+| 1 | 426 ms | 446 ms | -4% | 2099 ms | 2269 ms | **-7%** |
+| 4 | 232 ms | 243 ms | -5% | 967 ms | 1012 ms | **-4%** |
+| 8 | 174 ms | 165 ms | +5% | 708 ms | 730 ms | **-3%** |
+
+WP-G bringt **3-7% Total-Wall-Speedup** — deutlich unter den erwarteten 40-50%. Bond-cpu-time bleibt im Run-zu-Run-Noise.
+
+### Warum die Hypothese nur teilweise zutrifft
+
+1. **Eigen Expression-Templates verstecken den Storage-Order:** `m_gradient.row(i) +=` wird intern auf Element-Zugriffe abgebildet — der Compiler optimiert beide Layouts zu ähnlichen Maschinencode-Mustern.
+2. **N×3 ColumnMajor mit 6200 Atomen:** Stride zwar 49.6 KB, aber moderner Hardware-Prefetcher cached die drei x/y/z Cache-Lines effektiv beim sequentiellen Atom-Iteration-Pattern.
+3. **Hot-Pfad ist nicht eindeutig identifizierbar:** Bond + Coulomb + Dispersion + Repulsion verteilen den Anteil, kein Term ist >25% der FF-Pool-Phase.
+4. **Multi-Thread-Reduktion war schon kontiguös:** `m_gradient += t->Gradient()` mit Storage-Order-Crossing kostet 50 KB Konversion — Eigen optimiert das fast gleich gut wie ohne Konversion.
+
+### Bewertung
+
+**Behalten,** weil:
+- Architektur-Konsistenz mit GPU-Pfad (`ff_workspace_gpu.h:81` Doku sagt schon "row-major")
+- Saubere Datenstruktur — `N×3` mit fester Spaltenzahl 3 ist semantisch korrekter als `Dynamic×Dynamic`
+- Voraussetzung für künftige SIMD-Inner-Loops, falls direkte Vektorisierung implementiert wird
+- Kein Performance-Verlust, kleine Verbesserung (3-7%) ohne Risiko
+
+**Aber:** Die WP3-Hypothese "Cache-Miss-Lawine in `m_gradient.row()`" hat sich **nicht bestätigt**. Der echte Bond-Hotspot bleibt unaufgeklärt. Weitere Optimierung würde tiefere Profile-Analyse benötigen (perf c2c für False Sharing, perf stat für IPC/Cache-Miss-Rate).
+
+### Status für Roadmap
+
+P4h: ⚙️ Machine-tested. Layout-Migration sauber durchgeführt, Korrektheit auf T=1 bit-identisch, T=4-Multi-Thread-Drift pre-existiert. Total-Wall mixture.xyz T=4: 1012 → 967 ms (4% schneller). **Kein dramatischer Speedup**, aber strukturell wertvoll und ohne Regression.

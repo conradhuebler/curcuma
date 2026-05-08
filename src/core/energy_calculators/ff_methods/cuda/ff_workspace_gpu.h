@@ -79,7 +79,8 @@ public:
     // =========================================================================
 
     /// Set current geometry (Bohr, N×3 row-major Eigen matrix)
-    void setGeometry(const Matrix& geom);
+    /// WP-G (May 2026): explicit GeoGradMatrix (RowMajor) — matches CPU m_geometry_bohr layout
+    void setGeometry(const GeoGradMatrix& geom);
 
     /// Set dynamic EEQ charges (geometry-dependent, size N)
     void setEEQCharges(const Vector& q);

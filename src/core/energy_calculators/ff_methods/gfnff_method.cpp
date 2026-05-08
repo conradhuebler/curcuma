@@ -1467,8 +1467,13 @@ double GFNFF::Calculation(bool gradient)
         m_gradient = grad_hartree;  // No conversion needed
 
         // Claude Generated (Mar 2026): Add ALPB solvation gradient
+        // WP-G (May 2026): ALPB takes ColumnMajor Matrix; convert at the boundary.
+        // ALPB is not in the hot path — one 50 KB conversion per energy call is fine.
         if (m_solvation) {
-            m_solvation->addGradient(m_atoms, m_geometry_bohr, m_charges, m_gradient);
+            Matrix geom_col = m_geometry_bohr;
+            Matrix grad_col = m_gradient;
+            m_solvation->addGradient(m_atoms, geom_col, m_charges, grad_col);
+            m_gradient = grad_col;
         }
 
         // Apr 2026 NaN trap: when the combined gradient contains NaN/Inf, scan each

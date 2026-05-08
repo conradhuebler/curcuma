@@ -2987,17 +2987,19 @@ void ForceField::setStoreGradientComponents(bool store)
 }
 
 // Helper to sum a component gradient across all threads
+// WP-G (May 2026): per-component getters return GeoGradMatrix& (RowMajor); accumulate
+// internally as RowMajor for cache locality, convert to ColumnMajor Matrix at the API boundary.
 static Matrix sumComponentGradient(const std::vector<ForceFieldThread*>& threads,
-                                    const Matrix& (ForceFieldThread::*getter)() const,
+                                    const GeoGradMatrix& (ForceFieldThread::*getter)() const,
                                     int natoms)
 {
-    Matrix result = Eigen::MatrixXd::Zero(natoms, 3);
+    GeoGradMatrix result = GeoGradMatrix::Zero(natoms, 3);
     for (const auto* thread : threads) {
         if (thread->storeGradientComponents()) {
             result += (thread->*getter)();
         }
     }
-    return result;
+    return Matrix(result);  // Eigen storage-order conversion at API boundary
 }
 
 // Claude Generated (Mar 2026): Bond/Coulomb/Dispersion getters include CN chain-rule corrections

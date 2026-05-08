@@ -2201,8 +2201,8 @@ public:
 private:
     // Molecular structure (formerly from QMInterface base class)
     int m_atomcount = 0; ///< Number of atoms
-    Matrix m_geometry; ///< Molecular geometry in Angström
-    Matrix m_gradient; ///< Gradient in Hartree/Bohr
+    GeoGradMatrix m_geometry; ///< Molecular geometry in Angström — WP-G: RowMajor
+    GeoGradMatrix m_gradient; ///< Gradient in Hartree/Bohr — WP-G: RowMajor
     std::vector<int> m_atoms; ///< Atomic numbers (Z values)
     int m_charge = 0; ///< Total molecular charge
     int m_spin = 0; ///< Spin multiplicity
@@ -2214,7 +2214,7 @@ private:
     std::unique_ptr<FFWorkspace> m_workspace; ///< Claude Generated (Mar 2026): Unified workspace (replaces ForceField path)
     bool m_use_workspace = false; ///< Use FFWorkspace path instead of ForceField
 
-    Matrix m_geometry_bohr; ///< Geometry in Bohr (GFN-FF parameters are in Bohr)
+    GeoGradMatrix m_geometry_bohr; ///< Geometry in Bohr (GFN-FF parameters are in Bohr) — WP-G: RowMajor
 
     // EEQ charge calculation (Dec 2025 - Phase 3: Extraction and delegation)
     std::unique_ptr<EEQSolver> m_eeq_solver; ///< Standalone EEQ solver (replaces embedded EEQ code)
@@ -2271,13 +2271,14 @@ private:
     bool shouldUpdateHBXB(const Eigen::MatrixXd& current_geometry) const;
 
     // Geometry change detection for intelligent caching
+    // WP-G (May 2026): aligned with m_geometry_bohr RowMajor type
     class GeometryChangeDetector {
     private:
-        Matrix m_last_geometry;
+        GeoGradMatrix m_last_geometry;
         double m_change_threshold = 1e-6;
 
     public:
-        bool geometryChanged(const Matrix& new_geometry) const {
+        bool geometryChanged(const GeoGradMatrix& new_geometry) const {
             if (m_last_geometry.rows() != new_geometry.rows() ||
                 m_last_geometry.cols() != new_geometry.cols()) {
                 return true;
@@ -2286,12 +2287,12 @@ private:
             return (m_last_geometry - new_geometry).array().abs().maxCoeff() > m_change_threshold;
         }
 
-        void updateGeometry(const Matrix& new_geometry) {
+        void updateGeometry(const GeoGradMatrix& new_geometry) {
             m_last_geometry = new_geometry;
         }
 
         void reset() {
-            m_last_geometry = Matrix();
+            m_last_geometry = GeoGradMatrix();
         }
     };
 

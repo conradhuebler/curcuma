@@ -290,7 +290,7 @@ private:
     double m_t_chainrule = 0.0;
     std::unordered_map<std::string, long long> m_term_timings_aggregate;
 
-    Matrix m_geometry, m_gradient;
+    GeoGradMatrix m_geometry, m_gradient;  // WP-G: RowMajor N×3 hot data
     std::vector<int> m_atom_types;
     std::string m_method = "uff";
     StringList m_uff_methods = { "uff", "uff-d3" };  // Claude Generated (December 19, 2025): uff-d3 already included
@@ -367,9 +367,10 @@ private:
     // Claude Generated (Mar 2026): Per-component CN chain-rule corrections for GradComp
     // These are computed in Calculate() and added in the component getters
     // Reference: Fortran applies CN chain-rule to g_bond, g_disp, g_es separately
-    Matrix m_bond_cn_correction;     // dEdcn_bond * dcn chain-rule → added to GradientBond()
-    Matrix m_disp_cn_correction;     // dEdcn_disp * dcn chain-rule → added to GradientDispersion()
-    Matrix m_coulomb_cn_correction;  // TERM 1b qtmp * dcn → added to GradientCoulomb()
+    // WP-G: RowMajor for cache-friendly dcn->m_*_cn_correction contraction (CNDerivStore::applyAdd target)
+    GeoGradMatrix m_bond_cn_correction;     // dEdcn_bond * dcn chain-rule → added to GradientBond()
+    GeoGradMatrix m_disp_cn_correction;     // dEdcn_disp * dcn chain-rule → added to GradientDispersion()
+    GeoGradMatrix m_coulomb_cn_correction;  // TERM 1b qtmp * dcn → added to GradientCoulomb()
     bool m_store_gradient_components = false; // mirror of thread flag for getters
 
     json m_parameters;

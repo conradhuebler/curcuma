@@ -507,8 +507,8 @@ void FFWorkspace::postProcess(bool gradient)
             // Per-component CPU gradient decomposition (verbosity >= 3)
             if (m_store_components) {
                 const char* names[] = {"REPULSION", "BONDS", "ANGLES", "DISPERSION", "COULOMB", "HB"};
-                const Matrix* comps[] = {&m_result_grad_repulsion, &m_result_grad_bond, &m_result_grad_angle,
-                                         &m_result_grad_dispersion, &m_result_grad_coulomb, &m_result_grad_hb};
+                const GeoGradMatrix* comps[] = {&m_result_grad_repulsion, &m_result_grad_bond, &m_result_grad_angle,
+                                                 &m_result_grad_dispersion, &m_result_grad_coulomb, &m_result_grad_hb};
                 for (int c = 0; c < 6; ++c) {
                     if (comps[c]->rows() != m_natoms) continue;
                     CurcumaLogger::info(fmt::format("=== CPU {} GRADIENT ===", names[c]));

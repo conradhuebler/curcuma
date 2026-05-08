@@ -2684,7 +2684,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
 // setGeometry — extract N×3 RowMajor matrix to flat array and upload to GPU
 // ============================================================================
 
-void FFWorkspaceGPU::setGeometry(const Matrix& geom)
+void FFWorkspaceGPU::setGeometry(const GeoGradMatrix& geom)
 {
     auto& impl = *m_impl;
     const int N = m_natoms;

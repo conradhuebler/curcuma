@@ -54,6 +54,18 @@ using json = nlohmann::json;
 // GFNFFHydrogenBond, GFNFFHalogenBond, GFNFFSTorsion, ATMTriple, GFNFFBatmTriple
 // are defined in gfnff_parameters.h (included above)
 
+// Claude Generated (WP-G, May 2026): N×3 row-major layout for hot per-atom data.
+// row(i) is contiguous (24 B = one cache line) instead of strided N×8 = 50 KB at
+// N=6200. Eliminates the 3 cache misses per row(i) += that the WP3 audit identified
+// as the bond hotspot. Used for: m_geometry, m_geometry_bohr, m_gradient, all per-
+// component gradient buffers, m_result_gradient, FFAccumulator::gradient,
+// CNDerivStore::diag, m_*_cn_correction.
+//
+// `Matrix` (= MatrixXd, ColumnMajor) typedef stays untouched for non-N×3 data
+// (Hessian, A-matrix, m_dc6dcn, distance matrices). The external getGradient()
+// API still returns Matrix (ColumnMajor) — Eigen converts at the boundary.
+using GeoGradMatrix = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
+
 // Claude Generated (WP4, May 2026): pair-list representation of CN derivatives.
 // Replaces std::vector<SpMatrix> dcn[3] (~250k entries × 3 sparse matrices) — eliminates
 // triplet allocation + setFromTriplets cost (~1000 ms on mixture.xyz, 74 % of CN+EEQ phase).
@@ -67,7 +79,7 @@ struct CNDerivPair {
 
 struct CNDerivStore {
     std::vector<CNDerivPair> pairs;  // off-diagonal contributions
-    Matrix diag;                      // (N, 3): diag(i,d) is multiplied by v(i) on apply
+    GeoGradMatrix diag;               // (N, 3): diag(i,d) is multiplied by v(i) on apply
     int natoms = 0;
 
     void clear() {
@@ -78,8 +90,8 @@ struct CNDerivStore {
     bool empty() const { return natoms == 0; }
 
     // out += sign * M * v, where M is the implied SpMatrix.
-    // out is (N, 3); v is (N).
-    void applyAdd(const Vector& v, Eigen::Ref<Matrix> out, double sign = 1.0) const {
+    // out is (N, 3); v is (N). RowMajor required (matches all gradient consumers post-WP-G).
+    void applyAdd(const Vector& v, Eigen::Ref<GeoGradMatrix> out, double sign = 1.0) const {
         if (natoms == 0 || diag.rows() != natoms || out.rows() != natoms || out.cols() != 3) return;
         for (int i = 0; i < natoms; ++i) {
             double vi = v(i);
@@ -257,7 +269,7 @@ public:
     // Claude Generated (Mar 2026): Pointer-based data sharing — threads read from ForceField memory.
     // Eliminates per-step O(N) vector copies for geometry, charges, CN.
     // Fallback: if pointer not set, uses the local copy (for UFF/QMDFF compatibility).
-    void setGeometryPtr(const Matrix* ptr) { m_geometry_ptr = ptr; }
+    void setGeometryPtr(const GeoGradMatrix* ptr) { m_geometry_ptr = ptr; }  // WP-G
     void setEEQChargesPtr(const Vector* ptr) { m_eeq_charges_ptr = ptr; }
     void setTopologyChargesPtr(const Vector* ptr) { m_topology_charges_ptr = ptr; }
     void setD3CNPtr(const Vector* ptr) { m_d3_cn_ptr = ptr; }
@@ -419,16 +431,18 @@ public:
     bool storeGradientComponents() const { return m_store_gradient_components; }
 
     // Per-component gradient getters (only valid if m_store_gradient_components == true)
-    const Matrix& GradientBond() const { return m_gradient_bond; }
-    const Matrix& GradientAngle() const { return m_gradient_angle; }
-    const Matrix& GradientTorsion() const { return m_gradient_torsion; }
-    const Matrix& GradientRepulsion() const { return m_gradient_repulsion; }
-    const Matrix& GradientCoulomb() const { return m_gradient_coulomb; }
-    const Matrix& GradientDispersion() const { return m_gradient_dispersion; }
-    const Matrix& GradientHB() const { return m_gradient_hb; }
-    const Matrix& GradientXB() const { return m_gradient_xb; }
-    const Matrix& GradientBATM() const { return m_gradient_batm; }
-    const Matrix& GradientATM() const { return m_gradient_atm; }   ///< ATM three-body dispersion gradient (Claude Generated Mar 2026)
+    // WP-G (May 2026): per-component getters return GeoGradMatrix& (RowMajor).
+    // sumComponentGradient in forcefield.cpp converts to Matrix at the API boundary.
+    const GeoGradMatrix& GradientBond() const { return m_gradient_bond; }
+    const GeoGradMatrix& GradientAngle() const { return m_gradient_angle; }
+    const GeoGradMatrix& GradientTorsion() const { return m_gradient_torsion; }
+    const GeoGradMatrix& GradientRepulsion() const { return m_gradient_repulsion; }
+    const GeoGradMatrix& GradientCoulomb() const { return m_gradient_coulomb; }
+    const GeoGradMatrix& GradientDispersion() const { return m_gradient_dispersion; }
+    const GeoGradMatrix& GradientHB() const { return m_gradient_hb; }
+    const GeoGradMatrix& GradientXB() const { return m_gradient_xb; }
+    const GeoGradMatrix& GradientBATM() const { return m_gradient_batm; }
+    const GeoGradMatrix& GradientATM() const { return m_gradient_atm; }   ///< ATM three-body dispersion gradient (Claude Generated Mar 2026)
 
 private:
     void CalculateUFFBondContribution();
@@ -528,7 +542,7 @@ private:
     std::vector<HBGradEntry> m_hb_grad_entries;
 
 protected:
-    Matrix m_geometry, m_gradient;
+    GeoGradMatrix m_geometry, m_gradient;  // WP-G: RowMajor N×3 hot data
     double m_energy = 0, m_bond_energy = 0.0, m_angle_energy = 0.0, m_dihedral_energy = 0.0, m_inversion_energy = 0.0, m_vdw_energy = 0.0, m_rep_energy = 0.0, m_eq_energy = 0.0;
     // Verbose-3 cap: count significant torsions per call, log only first 5 (Apr 2026)
     int m_significant_torsion_count = 0;
@@ -580,13 +594,13 @@ protected:
     // Claude Generated (Mar 2026): Pointer-based data sharing — read-only pointers to ForceField memory.
     // When set, threads read directly from ForceField storage (zero-copy per step).
     // When nullptr, threads fall back to their local copy members (UFF/QMDFF path).
-    const Matrix* m_geometry_ptr = nullptr;
+    const GeoGradMatrix* m_geometry_ptr = nullptr;  // WP-G
     const Vector* m_eeq_charges_ptr = nullptr;
     const Vector* m_topology_charges_ptr = nullptr;
     const Vector* m_d3_cn_ptr = nullptr;
 
     /// Access geometry: prefer pointer, fall back to local copy
-    inline const Matrix& geom() const { return m_geometry_ptr ? *m_geometry_ptr : m_geometry; }
+    inline const GeoGradMatrix& geom() const { return m_geometry_ptr ? *m_geometry_ptr : m_geometry; }  // WP-G
     /// Access EEQ charge for atom i
     inline double eeq_q(int i) const { return m_eeq_charges_ptr ? (*m_eeq_charges_ptr)(i) : m_eeq_charges(i); }
     /// Access topology charge for atom i
@@ -624,15 +638,17 @@ protected:
 
     // Claude Generated (February 2026): Per-component gradient decomposition for validation
     bool m_store_gradient_components = false;
-    Matrix m_gradient_bond, m_gradient_angle, m_gradient_torsion;
-    Matrix m_gradient_repulsion, m_gradient_coulomb, m_gradient_dispersion;
-    Matrix m_gradient_hb, m_gradient_xb;
-    Matrix m_gradient_batm;   ///< BATM three-body gradient component (Claude Generated Mar 2026)
-    Matrix m_gradient_atm;    ///< ATM three-body dispersion gradient component (Claude Generated Mar 2026)
+    // WP-G (May 2026): per-component gradient buffers — RowMajor for cache locality
+    GeoGradMatrix m_gradient_bond, m_gradient_angle, m_gradient_torsion;
+    GeoGradMatrix m_gradient_repulsion, m_gradient_coulomb, m_gradient_dispersion;
+    GeoGradMatrix m_gradient_hb, m_gradient_xb;
+    GeoGradMatrix m_gradient_batm;   ///< BATM three-body gradient component (Claude Generated Mar 2026)
+    GeoGradMatrix m_gradient_atm;    ///< ATM three-body dispersion gradient component (Claude Generated Mar 2026)
 
     // Claude Generated (Mar 2026): Reuse existing allocation, avoid per-step malloc
+    // WP-G (May 2026): lambda accepts GeoGradMatrix& (RowMajor)
     void initGradientComponents(int natoms) {
-        auto resetMat = [&](Matrix& m) {
+        auto resetMat = [&](GeoGradMatrix& m) {
             if (m.rows() != natoms || m.cols() != 3) m.resize(natoms, 3);
             m.setZero();
         };

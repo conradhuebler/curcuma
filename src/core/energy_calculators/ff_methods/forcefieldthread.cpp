@@ -119,9 +119,10 @@ int ForceFieldThread::execute()
 
         // Helper lambda: run calculation and capture gradient delta into component matrix
         // This avoids modifying every inner Calculate*() method individually
-        auto runWithGradCapture = [this](const std::string& name, auto calc_fn, Matrix& comp_grad) {
+        // WP-G (May 2026): comp_grad is GeoGradMatrix& (RowMajor), matches m_gradient_*.
+        auto runWithGradCapture = [this](const std::string& name, auto calc_fn, GeoGradMatrix& comp_grad) {
             if (m_store_gradient_components && m_calculate_gradient) {
-                Matrix before = m_gradient;
+                GeoGradMatrix before = m_gradient;
                 timeEnergyTerm(name, calc_fn);
                 comp_grad += (m_gradient - before);
             } else {
