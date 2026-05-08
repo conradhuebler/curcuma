@@ -574,6 +574,21 @@ public:
     void setParameters(const json& parameters);
 
     /**
+     * @brief Set thread count used for CN/EEQ/D4 phases and parameter generation
+     *
+     * Claude Generated (WP1, May 2026): replaces ad-hoc `m_parameters.value("threads", 1)`
+     * reads scattered through Calculation()/prepareCNAndEEQ()/parameter generation. The
+     * QM-wrapper (GFNFFComputationalMethod::setThreadCount) forwards into here so that
+     * post-construction thread count changes from EnergyCalculator are honored.
+     */
+    void setThreadCount(int threads) { m_threads = (threads > 0 ? threads : 1); m_parameters["threads"] = m_threads; }
+
+    /**
+     * @brief Get currently configured thread count
+     */
+    int threadCount() const { return m_threads; }
+
+    /**
      * @brief Retrieve cached topology information, computing it once if needed
      * @return Reference to topology information
      *
@@ -2191,6 +2206,7 @@ private:
 
     // GFN-FF specific
     json m_parameters; ///< GFN-FF parameters
+    int m_threads = 1; ///< Claude Generated (WP1, May 2026): cached thread count, kept in sync with m_parameters["threads"]
     ForceField* m_forcefield; ///< Force field engine using modern structure
     std::unique_ptr<FFWorkspace> m_workspace; ///< Claude Generated (Mar 2026): Unified workspace (replaces ForceField path)
     bool m_use_workspace = false; ///< Use FFWorkspace path instead of ForceField

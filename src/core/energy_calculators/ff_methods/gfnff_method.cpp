@@ -128,7 +128,10 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
     };
 
     if (r.t_cn_eeq_cpu >= 0.0)
-        phase_row("CN + EEQ (serial CPU)", r.t_cn_eeq_cpu, r.t_cn_eeq_cpu, -1.0);
+        phase_row("CN + EEQ", r.t_cn_eeq_cpu, r.t_cn_eeq_cpu, -1.0);
+        // Claude Generated (WP1, May 2026): label corrected. CN uses OpenMP, EEQ A-matrix
+        // and distance matrix use OpenMP/CxxThreadPool. Only the Stage-4 batched LU loop
+        // (eeq_solver.cpp:1305-1335) is still serial — that is WP2.
     if (r.t_hbxb >= 0.0)
         phase_row("HB/XB re-detection", r.t_hbxb, r.t_hbxb, -1.0);
     if (r.t_pool_wall >= 0.0) {
@@ -463,6 +466,7 @@ GFNFF::GFNFF()
         { "solvent", "none" }  // Claude Generated (Mar 2026): ALPB solvation, "none" = gas phase
     };
     m_parameters = default_parameters;
+    m_threads = m_parameters.value("threads", 1);  // Claude Generated (WP1, May 2026)
 
     // Initialize EEQ solver (Dec 2025 - Phase 3)
     // CRITICAL FIX (Dec 25, 2025): Pass global CurcumaLogger verbosity to EEQSolver
@@ -502,6 +506,7 @@ GFNFF::GFNFF(const json& parameters)
     };
 
     m_parameters = MergeJson(default_parameters, parameters);
+    m_threads = m_parameters.value("threads", 1);  // Claude Generated (WP1, May 2026)
 
     // Extract topology mode
     m_topology_mode = m_parameters.value("topology_mode", "auto");
@@ -987,7 +992,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             t_cnf = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
         }
 
-        int total_threads = m_parameters.value("threads", 1);
+        int total_threads = m_threads;  // WP1: cached member, see GFNFF::setThreadCount
         auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
         if (pool) pool->setActiveThreadCount(total_threads);
 
@@ -1078,11 +1083,16 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 
         if (do_eeq && !skip_eeq && !eeq_charges_current) {
             t0 = std::chrono::high_resolution_clock::now();
+            // Claude Generated (WP2, May 2026): pass thread pool through to enable
+            // Stage-4 batched per-fragment LU parallelisation in the energy-only path.
+            // Mirrors the gradient-path call at gfnff_method.cpp:1025-1029.
+            auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+            if (pool) pool->setActiveThreadCount(m_threads);
             Vector new_charges = m_eeq_solver->calculateFinalCharges(
                 m_atoms, m_geometry_bohr, m_charge,
                 topo_ptr->topology_charges, m_last_cn,
                 topo_ptr->hybridization, eeq_topo,
-                true, topo_ptr->alpeeq);
+                true, topo_ptr->alpeeq, pool, m_threads);
             if (do_timing) {
                 t_eeq_solve = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
             }
@@ -2088,6 +2098,7 @@ GFNFF::GFNFFResults GFNFF::getResults() const
 void GFNFF::setParameters(const json& parameters)
 {
     m_parameters = MergeJson(m_parameters, parameters);
+    m_threads = m_parameters.value("threads", m_threads);  // Claude Generated (WP1, May 2026)
 
     if (m_forcefield && m_initialized) {
         json ff_params = generateGFNFFParameters();
@@ -2413,7 +2424,7 @@ bool GFNFF::initializeForceField()
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Creating ForceField instance...");
-        CurcumaLogger::param("threads", std::to_string(m_parameters.value("threads", 1)));
+        CurcumaLogger::param("threads", std::to_string(m_threads));  // WP1
         CurcumaLogger::param("gradient", std::to_string(m_parameters.value("gradient", 1)));
     }
 
@@ -2564,7 +2575,7 @@ bool GFNFF::initializeForceField()
     // Claude Generated (Mar 2026): Create FFWorkspace from copy of ff_params (single generation)
     // CRITICAL: Do NOT call generateGFNFFParameterSet() again — a third call causes heap corruption.
     {
-        int num_threads = m_parameters.value("threads", 1);
+        int num_threads = m_threads;  // WP1
         m_workspace = std::make_unique<FFWorkspace>(num_threads);
         m_workspace->setAtomTypes(m_atoms);
 
@@ -2657,7 +2668,7 @@ json GFNFF::generateGFNFFParameters()
         // Claude Generated (Feb 2026): Parallel parameter generation
         // After bonds, 6 phases are independent and can run in parallel:
         //   angles, torsions, inversions, coulomb, repulsion, dispersion
-        int thread_count = m_parameters.value("threads", 1);
+        int thread_count = m_threads;  // WP1
 
         if (thread_count > 1) {
             // Parallel path: use CxxThreadPool for inter-phase parallelism
@@ -3265,7 +3276,7 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     m_param_gen_report.t_crossref   = pos(t_crossref);
     m_param_gen_report.t_param_gen_total = m_param_gen_time_ms;
     m_param_gen_report.n_atoms     = m_atomcount;
-    m_param_gen_report.n_threads   = m_parameters.value("threads", 1);
+    m_param_gen_report.n_threads   = m_threads;  // WP1
     m_param_gen_report.backend     = (m_param_gen_report.n_threads > 1)
                                        ? GFNFFParamGenReport::CxxThreadPool
                                        : GFNFFParamGenReport::Sequential;
@@ -8028,13 +8039,18 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             phase_timer = std::chrono::high_resolution_clock::now();
         }
 
+        // Claude Generated (WP2, May 2026): forward pool + thread count to parallelise Stage-4
+        auto* pool_setup = m_forcefield ? m_forcefield->threadPool() : nullptr;
+        if (pool_setup) pool_setup->setActiveThreadCount(m_threads);
         topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
             m_atoms,
             m_geometry_bohr,
             m_charge,
             topo_info.coordination_numbers,
             eeq_topology_input,
-            true  // Phase 1 Charge Sync: enable dxi corrections
+            true,  // Phase 1 Charge Sync: enable dxi corrections
+            pool_setup,
+            m_threads
         );
 
         if (topo_info.topology_charges.size() != m_atomcount) {
@@ -8112,6 +8128,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             CurcumaLogger::info("Computing Phase 2: Energy charges (nlist%q)");
         }
 
+        // Claude Generated (WP2, May 2026): forward pool + thread count to parallelise Stage-4
+        auto* pool_phase2 = m_forcefield ? m_forcefield->threadPool() : nullptr;
+        if (pool_phase2) pool_phase2->setActiveThreadCount(m_threads);
         topo_info.eeq_charges = m_eeq_solver->calculateFinalCharges(
             m_atoms,
             m_geometry_bohr,
@@ -8121,7 +8140,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             topo_info.hybridization,        // Hybridization states
             eeq_topology_input,             // WITH topology - uses neighbors for environmental corrections (dxi)
             true,  // CRITICAL (Jan 5, 2026): YES corrections - Phase 2 needs dxi and dgam (fixes 59% charge error)
-            topo_info.alpeeq  // Claude Generated (January 2026): Charge-dependent alpha from Phase 1B
+            topo_info.alpeeq, // Claude Generated (January 2026): Charge-dependent alpha from Phase 1B
+            pool_phase2,
+            m_threads
         );
 
         if (topo_info.eeq_charges.size() != m_atomcount) {
@@ -9697,13 +9718,18 @@ bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
     // - Hydroxyl oxygens (nh=1): dxi = -0.005
     // This was incorrectly disabled, causing 0.0025 e charge error per hydroxyl oxygen
     // and cumulative Coulomb energy errors of ~26 mEh for triose (66 atoms).
+    // Claude Generated (WP2, May 2026): forward pool + thread count
+    auto* pool_topo = m_forcefield ? m_forcefield->threadPool() : nullptr;
+    if (pool_topo) pool_topo->setActiveThreadCount(m_threads);
     topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
         m_atoms,
         m_geometry_bohr,
         m_charge,
         topo_info.coordination_numbers,
         eeq_topology,  // NEW: Pass topology for Floyd-Warshall (Dec 2025)
-        true  // RESTORED (Jan 29, 2026): Enable dxi corrections to match Fortran goedeckera
+        true,  // RESTORED (Jan 29, 2026): Enable dxi corrections to match Fortran goedeckera
+        pool_topo,
+        m_threads
     );
 
     if (topo_info.topology_charges.size() != m_atomcount) {
@@ -10006,6 +10032,9 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
 
 
     // Delegate to EEQSolver for Phase 2 refinement
+    // Claude Generated (WP2, May 2026): forward pool + thread count
+    auto* pool_final = m_forcefield ? m_forcefield->threadPool() : nullptr;
+    if (pool_final) pool_final->setActiveThreadCount(m_threads);
     topo_info.eeq_charges = m_eeq_solver->calculateFinalCharges(
         m_atoms,
         m_geometry_bohr,
@@ -10015,7 +10044,9 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
         topo_info.hybridization,
         eeq_topology,
         true, // ENABLE corrections to match Fortran goed_gfnff (dxi, dgam)
-        topo_info.alpeeq // Pass charge-dependent alpha (alpeeq) from Phase 1B
+        topo_info.alpeeq, // Pass charge-dependent alpha (alpeeq) from Phase 1B
+        pool_final,
+        m_threads
     );
 
     if (topo_info.eeq_charges.size() != m_atomcount) {

@@ -95,7 +95,13 @@ Position GFNFFComputationalMethod::getDipole() const {
 }
 
 void GFNFFComputationalMethod::setThreadCount(int threads) {
-    (void)threads; // Unused parameter - GFN-FF thread management handled internally
+    // Claude Generated (WP1, May 2026): forward to GFNFF::setThreadCount, which keeps
+    // m_parameters["threads"] and the cached m_threads member in sync. EnergyCalculator
+    // calls this after MethodFactory::create, so the post-construction path now works.
+    if (m_gfnff) {
+        m_gfnff->setThreadCount(threads);
+    }
+    m_parameters["threads"] = (threads > 0 ? threads : 1);
 }
 
 void GFNFFComputationalMethod::setParameters(const json& params) {

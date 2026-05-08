@@ -200,9 +200,9 @@ P4d (Coulomb Cutoff)   →  G2c (konsistenter EEQ-Cutoff) muss zuerst aktiviert
 
 | ID | Status | Ergebnis |
 |----|--------|---------|
-| P4a | 🆕 Vorgeschlagen | — |
-| P4b | 🆕 Vorgeschlagen | — |
-| P4c | 🆕 Vorgeschlagen | — |
+| P4a | ⚙️ Machine-tested | Stage-4-Loop in `eeq_solver.cpp:1294-1387` mit CxxThreadPool parallelisiert (Pool an alle 6 EEQ-Aufrufer durchgereicht). `mixture.xyz` (N=6200, nfrag=1400) Sweep: Total 3068→1479 ms (T=1→16, 2.07×) — **kein nennenswerter Gewinn vs. WP1-Baseline** (war 3074→1469 ms = 2.09×). Phase 2 nur 1.17× über T=1→16. Hebel war im Mai-Plan überschätzt: die 660-ms-Profilzahl gilt heute nicht mehr (Phase 2 ist nur 371 ms wall, davon LU-Loop ~80-100 ms). Per-Fragment-LU mit 4-5 Atomen ist zu klein für effizientes Threading. Strukturell wertvoll als Voraussetzung. Vollständiger Bericht: `docs/wp4/WP2-eeq-batched-parallel.md`. |
+| P4b | ⚙️ Machine-tested | **Bug gefunden + behoben** in `qm_methods/gfnff_method.cpp:97-99` (`setThreadCount` ignorierte den Parameter). Neue `m_threads`-Member in `GFNFF`. Label `"CN + EEQ (serial CPU)"` → `"CN + EEQ"` korrigiert. Skalierungs-Sweep auf `mixture.xyz` T={1,2,4,8,16}: Total 3074→1469 ms (2.09×), FF-Pool skaliert 5.0× von T=1→8 (parallel eff 78.6→41.3 %). **Keine** OpenMP-Pathologie wie im Fortran-Original. Schwachpunkt: CN-Derivate skalieren nur 1.31× — Kandidat für WP4 oder eigenes Sub-WP. Stage-4 Per-Fragment-LU in `eeq_solver.cpp:1305-1335` als einzige echt serielle Stelle bestätigt — direktes WP2-Ziel. Vollständiger Bericht: `docs/wp4/WP1-threading-audit.md`. |
+| P4c | ⚙️ Machine-tested | `Matrix derivate;` Heap-Allocation in `forcefieldthread.cpp:934` durch Stack-`Eigen::Vector3d` ersetzt (analog Repulsion/D3/ATM-Pattern). Korrektheit bit-identisch (`acetic_acid_dimer` -2.47129863). **Kein messbarer Speedup** auf `mixture.xyz` (Bond cpu-time T=4: 173 ms post-WP3 vs. 170 ms pre-WP3, im Noise). Heap-Allocation war **nicht** der Hotspot — 48-byte malloc bei moderner glibc ~20 ns × 4800 Bonds = 0.1 ms cpu-time. Echter Hotspot vermutlich `m_gradient.row()` Cache-Misses (ColumnMajor MatrixXd Stride N×8 = 49.6 KB) oder `std::exp()` selbst. Vollständiger Bericht: `docs/wp4/WP3-bond-hotspot.md`. Folge-WP: `m_gradient` auf RowMajor oder Per-Thread-Buffer (würde alle FF-Terme treffen). |
 | P4d | 🆕 Vorgeschlagen | Blockiert durch G2c |
 | P4e | 🆕 Vorgeschlagen | — |
 | P4f | 🆕 Vorgeschlagen | — |

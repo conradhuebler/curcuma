@@ -1250,7 +1250,9 @@ Vector EEQSolver::dispatchSolve(
     const Vector& x,
     int natoms,
     int nfrag,
-    int total_charge)
+    int total_charge,
+    CxxThreadPool* pool,
+    int num_threads)
 {
     EEQSolveMethod method_to_use = m_solve_method;
     if (m_solve_method == EEQSolveMethod::Auto) {
@@ -1300,43 +1302,80 @@ Vector EEQSolver::dispatchSolve(
                 C_constraints(f, j) = A(natoms + f, j);
         Vector rhs_constraints = x.tail(nfrag);
 
-        // Per-fragment local solves: assemble fragment-local A_ff, augment with one
-        // constraint row, solve via small LU. Each fragment is independent.
-        Vector charges_batched = Vector::Zero(natoms);
-        bool batched_ok = true;
-        for (int f = 0; f < nfrag && batched_ok; ++f) {
-            std::vector<int> ids;
-            for (int j = 0; j < natoms; ++j)
-                if (C_constraints(f, j) != 0.0) ids.push_back(j);
-            const int nf = static_cast<int>(ids.size());
-            if (nf == 0) continue;
-
-            // Assemble augmented (nf+1)×(nf+1) system: [A_ff c^T; c 0] [q;λ] = [b_f; q_target]
-            Matrix Aug(nf + 1, nf + 1);
-            Vector rhs_local(nf + 1);
-            for (int i = 0; i < nf; ++i) {
-                rhs_local(i) = rhs_atoms(ids[i]);
-                for (int j = 0; j < nf; ++j) {
-                    Aug(i, j) = A_nn(ids[i], ids[j]);
-                }
-                Aug(i, nf) = C_constraints(f, ids[i]);
-                Aug(nf, i) = C_constraints(f, ids[i]);
+        // Claude Generated (WP2, May 2026): Pre-pass — build fragment_ids[f] once.
+        // Saves the inner O(N) constraint scan per iteration of the per-fragment loop.
+        std::vector<std::vector<int>> fragment_ids(nfrag);
+        for (int f = 0; f < nfrag; ++f) {
+            for (int j = 0; j < natoms; ++j) {
+                if (C_constraints(f, j) != 0.0) fragment_ids[f].push_back(j);
             }
-            Aug(nf, nf) = 0.0;
-            rhs_local(nf) = rhs_constraints(f);
-
-            Eigen::PartialPivLU<Matrix> lu(Aug);
-            Vector sol = lu.solve(rhs_local);
-            if (!sol.allFinite()) {
-                batched_ok = false;
-                break;
-            }
-            for (int i = 0; i < nf; ++i) charges_batched(ids[i]) = sol(i);
         }
 
-        if (batched_ok) {
+        // Per-fragment local solves: assemble fragment-local A_ff, augment with one
+        // constraint row, solve via small LU. Each fragment is independent — disjoint
+        // write targets in charges_batched (each atom belongs to exactly one fragment),
+        // all reads from A_nn / C_constraints / rhs_atoms / rhs_constraints are read-only.
+        Vector charges_batched = Vector::Zero(natoms);
+        std::atomic<bool> batched_ok{true};
+
+        // Worker — Per-Thread scratch (Aug, rhs_local, lu, sol) avoids realloc per iteration
+        // and prevents False Sharing because every variable is local to the thread.
+        auto fragment_worker = [&](int t_id, int T) {
+            Eigen::PartialPivLU<Matrix> lu;
+            Matrix Aug;
+            Vector rhs_local, sol;
+            for (int f = t_id; f < nfrag; f += T) {
+                if (!batched_ok.load(std::memory_order_relaxed)) return;
+                const auto& ids = fragment_ids[f];
+                const int nf = static_cast<int>(ids.size());
+                if (nf == 0) continue;
+
+                // Assemble augmented (nf+1)×(nf+1) system: [A_ff c^T; c 0] [q;λ] = [b_f; q_target]
+                Aug.resize(nf + 1, nf + 1);
+                rhs_local.resize(nf + 1);
+                for (int i = 0; i < nf; ++i) {
+                    rhs_local(i) = rhs_atoms(ids[i]);
+                    for (int j = 0; j < nf; ++j) {
+                        Aug(i, j) = A_nn(ids[i], ids[j]);
+                    }
+                    Aug(i, nf) = C_constraints(f, ids[i]);
+                    Aug(nf, i) = C_constraints(f, ids[i]);
+                }
+                Aug(nf, nf) = 0.0;
+                rhs_local(nf) = rhs_constraints(f);
+
+                lu.compute(Aug);
+                sol = lu.solve(rhs_local);
+                if (!sol.allFinite()) {
+                    batched_ok.store(false, std::memory_order_relaxed);
+                    return;
+                }
+                for (int i = 0; i < nf; ++i) charges_batched(ids[i]) = sol(i);
+            }
+        };
+
+        // Pool dispatch — pattern mirrors dist_worker (eeq_solver.cpp:2870-2881).
+        // Threshold nfrag >= 16 matches the auto-select gate above (Z. 1283-1285):
+        // below that, threading overhead exceeds gain.
+        const int T = (num_threads > 1 && nfrag >= 16) ? std::min(num_threads, nfrag) : 1;
+        if (T > 1 && pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t) futures.push_back(pool->enqueue(fragment_worker, t, T));
+            fragment_worker(0, T);
+            for (auto& f : futures) f.get();
+        } else if (T > 1) {
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t) threads[t - 1] = std::thread(fragment_worker, t, T);
+            fragment_worker(0, T);
+            for (auto& th : threads) th.join();
+        } else {
+            fragment_worker(0, 1);
+        }
+
+        if (batched_ok.load(std::memory_order_relaxed)) {
             if (m_verbosity >= 2) {
-                fmt::print(stderr, "[EEQ] dispatchSolve: Batched per-fragment solve done (nfrag={})\n", nfrag);
+                fmt::print(stderr, "[EEQ] dispatchSolve: Batched per-fragment solve done (nfrag={}, threads={})\n", nfrag, T);
             }
             return charges_batched;
         }
@@ -2224,7 +2263,9 @@ Vector EEQSolver::calculateTopologyCharges(
     int total_charge,
     const Vector& cn,
     const std::optional<TopologyInput>& topology,
-    bool use_corrections)
+    bool use_corrections,
+    CxxThreadPool* pool,
+    int num_threads)
 {
     const int natoms = atoms.size();
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
@@ -2478,7 +2519,8 @@ Vector EEQSolver::calculateTopologyCharges(
 
     // Claude Generated (March 2026): Use configurable solver dispatch instead of hardcoded LU
     // This allows the user to select solve_method (lu, schur_cholesky, pcg, auto) for Phase 1 too
-    Vector topology_charges = dispatchSolve(A, x, natoms, nfrag, total_charge);
+    // Claude Generated (WP2, May 2026): forward pool/num_threads so Stage-4 batched LU runs in parallel
+    Vector topology_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads);
 
     // Claude Generated (March 2026): Print Phase 1 charge summary
     if (m_verbosity >= 3 && natoms <= 10) {
@@ -3200,7 +3242,9 @@ Vector EEQSolver::calculateFinalCharges(
         }
 
         // 6. Solve system — unified dispatch (March 2026)
-        Vector new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge);
+        // Claude Generated (WP2, May 2026): forward pool/num_threads to dispatchSolve so the
+        // Stage-4 batched per-fragment LU loop (eeq_solver.cpp:1294-1387) runs in parallel.
+        Vector new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads);
 
         // Empty return from dispatchSolve signals all solvers failed.
         // Prefer the last successful Phase 2 charges (from a prior step) over Phase 1

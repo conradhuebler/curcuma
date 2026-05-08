@@ -929,10 +929,14 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
     for (int index = 0; index < m_gfnff_bonds.size(); ++index) {
         const auto& bond = m_gfnff_bonds[index];
 
-        Vector i = geom().row(bond.i);
-        Vector j = geom().row(bond.j);
-        Matrix derivate;
-        double rij = UFF::BondStretching(i, j, derivate, m_calculate_gradient);
+        // Claude Generated (WP3, May 2026): inline distance + gradient on Eigen::Vector3d
+        // stack buffers — eliminates the per-bond MatrixXd heap allocation that
+        // UFF::BondStretching's `derivate = Matrix::Zero(2,3)` used to perform.
+        // Identical pattern as CalculateGFNFFBondedRepulsionContribution / D3 / ATM.
+        Eigen::Vector3d ri = geom().row(bond.i);
+        Eigen::Vector3d rj = geom().row(bond.j);
+        Eigen::Vector3d rij_vec = ri - rj;
+        double rij = rij_vec.norm();
 
         // Calculate r0 - either dynamic (using current CN) or static (from initialization)
         double r0_ij;
@@ -998,8 +1002,11 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
             // E = k_b * exp(-α*dr²) where k_b < 0 (attractive)
             // dE/dr = k_b * (-2α*dr) * exp(-α*dr²) = -2α * dr * E
             double dEdr = -2.0 * alpha * dr * energy;  // Correct sign
-            m_gradient.row(bond.i) += dEdr * factor * derivate.row(0);
-            m_gradient.row(bond.j) += dEdr * factor * derivate.row(1);
+            // Claude Generated (WP3, May 2026): unit-vector form, no Matrix temp.
+            // Equivalent to derivate.row(0) = rij_vec/rij, derivate.row(1) = -rij_vec/rij.
+            Eigen::Vector3d g = (dEdr * factor / rij) * rij_vec;
+            m_gradient.row(bond.i) += g.transpose();
+            m_gradient.row(bond.j) -= g.transpose();
 
             // Claude Generated (Feb 22, 2026): HB alpha-modulation chain-rule gradient
             // Reference: Fortran gfnff_engrad.F90:1054-1063 (egbond_hb, hb_dcn term)

@@ -204,7 +204,9 @@ public:
         int total_charge,
         const Vector& cn,
         const std::optional<TopologyInput>& topology = std::nullopt,
-        bool use_corrections = false  // CRITICAL FIX (Jan 4, 2026): default false to match gfnff_final.cpp
+        bool use_corrections = false,  // CRITICAL FIX (Jan 4, 2026): default false to match gfnff_final.cpp
+        CxxThreadPool* pool = nullptr,  // Claude Generated (WP2, May 2026): pool forwarded to dispatchSolve for Stage-4 batched parallelisation
+        int num_threads = 1
     );
 
     /**
@@ -667,7 +669,9 @@ private:
         const Vector& x,
         int natoms,
         int nfrag,
-        int total_charge
+        int total_charge,
+        CxxThreadPool* pool = nullptr,   // Claude Generated (WP2, May 2026): pool for Stage-4 batched parallelisation
+        int num_threads = 1               // Default 1 keeps existing callers (Phase 1, solveEEQ) serial
     );
 
     /**
