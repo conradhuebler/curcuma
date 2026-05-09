@@ -25,6 +25,7 @@ WP1 (Threading-Audit) ──► WP2 (EEQ batched parallel)
 
 WP-G (m_gradient Layout) — neu nach WP3, größter vermuteter FF-Pool-Hebel
 WP-R (Multi-Thread-Race) — neu nach WP-G, triose T=4 Single-Fragment-Drift
+WP-V (Gradient-Validierung) — CPU vs GPU vs Fortran-Referenz, MD-Thermostat-Drift
 ```
 
 WP1 zuerst, da es den Befund "serial CPU" entweder als Label-Bug entlarvt (dann ist WP2 trivial) oder eine echte serielle Stelle aufdeckt (dann ist WP2 die Umsetzung).

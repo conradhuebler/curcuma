@@ -117,6 +117,36 @@ G2b (Profiling)     → G2a (Kernel-Split): Profiling zuerst, um richtige Kernel
 
 ---
 
+## Kumulative Bilanz WP1–WP5 (Mai 2026)
+
+`mixture.xyz` (N=6200, nfrag=1400), Single-Point + Gradient, AMD Ryzen 9 9950X3D, Topo-Cache vor jedem Lauf gelöscht:
+
+| T | Pre-WP1 (Total Wall) | Post-WP4 | Post-WP-G | Post-WP5 | **Cumulative Speedup** |
+|---|----------------------|----------|-----------|----------|------------------------|
+| 1 | 3074 ms | 2269 ms | 2099 ms | **2078 ms** | **1.48×** |
+| 4 | 1840 ms | 1012 ms | 967 ms | **933 ms** | **1.97×** |
+| 8 | 1673 ms | 730 ms  | 708 ms  | **712 ms**  | **2.35×** |
+| 16| 1469 ms | 669 ms  | n.g.    | n.g.    | **~2.4×** |
+
+**Single-Thread (T=1) gewann 996 ms (32 %)** ohne Threading-Maßnahme — kommt aus
+- WP4 (CN-deriv Pair-Liste, 1206→426 ms bei T=1)
+- WP-G (Layout, ~70 ms)
+- WP5 (Heap-Reduktion, ~21 ms)
+
+**Multi-Thread (T=4, Hauptarbeitsmodus): fast halbiert** (1840→933 ms = 49 % Ersparnis).
+
+WP1, WP2, WP3 lieferten keinen direkten Speedup, aber:
+- WP1 fixte den `setThreadCount`-Bug (`(void)threads` → ignorierte das CLI-Argument), Voraussetzung für korrekte Threading-Skalierung
+- WP2 räumte die EEQ-Pool-Propagation strukturell auf, Voraussetzung für künftige Multi-Fragment-Optimierungen
+- WP3 vereinheitlichte den Bond-Inner-Loop mit dem Repulsion/D3/ATM-Pattern (Stack-Vector statt Heap-Matrix)
+
+**Open issues (nicht performance):**
+- WP-R: Multi-Thread-Race auf triose T=4 (1.47 mEh Drift, pre-existing, eigenes WP)
+- WP-V: Gradient-Validierung CPU vs GPU vs Fortran (MD-heat-bath-Drift, pre-existing, eigenes WP)
+- WP6: Coulomb-Cutoff (blockiert auf G2c)
+
+---
+
 ## Ausgangsmessung — 2026-04-11 (git 1c27621)
 
 **System:** AMD Ryzen 9 9950X3D, NVIDIA GeForce RTX 5080, 4 Threads
@@ -209,3 +239,4 @@ P4d (Coulomb Cutoff)   →  G2c (konsistenter EEQ-Cutoff) muss zuerst aktiviert
 | P4g | 🆕 Vorgeschlagen | Größter Refactor; nicht vor P4d |
 | P4h | ⚙️ Machine-tested | **`m_gradient` + `m_geometry` Layout-Migration** auf RowMajor (`GeoGradMatrix = Matrix<double, Dynamic, 3, RowMajor>`). ~30 Member umgestellt in `forcefieldthread.h/.cpp`, `forcefield.h/.cpp`, `ff_workspace.h/.cpp`, `gfnff.h`, `cuda/ff_workspace_gpu.h/.cu`. Externe API (`getGradient()`) bleibt `Matrix` (ColumnMajor) — Eigen konvertiert am Boundary. ALPB Solvation-Boundary ebenfalls mit Konversion. **Korrektheit T=1 bit-identisch** zu pre-WP-G. T=4 Multi-Thread-Drift auf triose pre-existiert (5 Läufe pre-WP-G zeigen dieselbe Verteilung — eigenständiger Race-Bug, nicht WP-G). **Performance-Gewinn nur 3-7%** auf `mixture.xyz` (Total Wall T=4: 1012 → 967 ms), Bond-cpu-Wall im Run-zu-Run-Noise. Die WP3-Hypothese "Cache-Miss-Lawine in `m_gradient.row()`" hat sich **nicht bestätigt** — moderner Hardware-Prefetcher cached die ColumnMajor-3-Cache-Lines effektiv. Strukturell wertvoll (Konsistenz mit GPU-RowMajor-Erwartung), aber kein dramatischer Speedup. Vollständiger Bericht: `docs/wp4/WP-G-gradient-layout.md`. |
 | P4i | 🆕 Vorgeschlagen | **WP-R Multi-Thread-Race-Bug-Hunt.** `triose.xyz` (22 Atome, 1 Fragment) zeigt bei T=4 nicht-deterministische Energie zwischen Läufen — drei stabile Endzustände mit bis zu 1.47 mEh Drift. T=1 deterministisch. Verifiziert pre-WP-G und post-WP-G — bestehende Race, nicht durch jüngere WPs eingeführt. 1.47 mEh ist KEIN Round-Off → algorithmische Inkonsistenz in iterativem Solver (Kandidaten: EEQ-Phase 2, Hückel-SCF, HB/XB-Detection, Param-Gen-Pool, Eigen-internal-Threading). Vorbedingung für saubere Regression-Tests und MD-Stabilität auf großen Systemen. Vollständiger Plan: `docs/wp4/WP-R-multithread-race.md`. |
+| P4j | 🆕 Vorgeschlagen | **WP-V Gradient-Validierung CPU vs GPU vs Fortran.** Bestehende, dokumentierte Diskrepanz (siehe `docs/GPU_GFNNF_DISCREPANCIES.md` Mar–Apr 2026): CPU/GPU/XTB-Fortran-Gradienten weichen voneinander ab; Energie ist auf < 1 μEh konsistent, der Drift sitzt im Gradient. MD heat-bath-Exchange auf polymer-System driftet ~0.2 Eh (CPU vs Fortran), GPU näher an Fortran. **Pre-existing**, nicht durch WP4-Reihe eingeführt. Strategie: numerische FD-Referenz aus XTB pro Term, dann Term-Bisect, dann Fix. Hot-Kandidaten: HB-Gradient-Distribution, CN chain-rule Reduktions-Reihenfolge, atomicAdd vs sequential summation, Repulsion (CLAUDE.md sagt "⚠️ Partial"). Vorbedingung: WP-R sollte zuerst aufgeklärt sein. Vollständiger Plan: `docs/wp4/WP-V-gradient-validation.md`. |
