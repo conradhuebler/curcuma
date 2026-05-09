@@ -593,7 +593,11 @@ void GFNFF::forwardEEQSolverParams(json& eeq_params) {
 }
 
 double GFNFF::getEEQDistanceCutoff() const {
-    return m_parameters.value("eeq_distance_cutoff", 30.0);
+    // WP-C (May 2026): Default changed from 30.0 → 0.0 to match Fortran goed_gfnff
+    // (full Coulomb in EEQ matrix). The previous 30.0 default was a non-Fortran
+    // approximation that violated Hellmann-Feynman vs the full Coulomb energy.
+    // Canonical PARAM definition lives in eeq_solver.h:965.
+    return m_parameters.value("eeq_distance_cutoff", 0.0);
 }
 
 GFNFF::~GFNFF()
@@ -998,9 +1002,15 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 
         // CN-derivative pair list only needed for CPU path (GPU has k_cn_chainrule kernel).
         // Claude Generated (WP4, May 2026): CNDerivStore replaces std::vector<SpMatrix>.
+        // WP-C (May 2026): explicit 40.0 Bohr cutoff (squared) — consistent with the
+        // topology-init CN cutoff in lines 3440 / 6766 / 6892. CN derivatives need a
+        // larger range than the per-step CN (cn_cutoff_bohr=6.0) because the gradient
+        // of erf-CN extends further than the value itself. This 40 Bohr matches the
+        // "standard GFN-FF" topology threshold and is independent from cn_cutoff_bohr.
         if (!gpu_only) {
             t0 = std::chrono::high_resolution_clock::now();
-            m_last_dcn = calculateCoordinationNumberDerivatives(m_last_cn, 1600.0, pool, total_threads);
+            constexpr double cn_deriv_cutoff_sq = 40.0 * 40.0;
+            m_last_dcn = calculateCoordinationNumberDerivatives(m_last_cn, cn_deriv_cutoff_sq, pool, total_threads);
             if (do_timing) {
                 t_dcn = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
             }
@@ -2431,6 +2441,32 @@ bool GFNFF::initializeForceField()
         CurcumaLogger::info("Creating ForceField instance...");
         CurcumaLogger::param("threads", std::to_string(m_threads));  // WP1
         CurcumaLogger::param("gradient", std::to_string(m_parameters.value("gradient", 1)));
+    }
+
+    // Claude Generated (WP-C, May 2026): cutoff configuration summary at init time.
+    // Visibility at verbosity >= 2 so operators can see which cutoffs are active without
+    // digging through code. Mirrors docs/wp4/cutoff-inventory.md.
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("GFN-FF cutoff configuration:");
+        const double cn_cut = m_parameters.value("cn_cutoff_bohr", 6.0);
+        const double cn_acc = m_parameters.value("cn_accuracy", 1.0);
+        const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
+        CurcumaLogger::param("  cn_cutoff_bohr",
+            fmt::format("{:.2f} Bohr  (per-step CN neighbor list)", cn_cut));
+        CurcumaLogger::param("  cn_accuracy",
+            fmt::format("{:.2f}  (used when cn_cutoff_bohr=0)", cn_acc));
+        CurcumaLogger::param("  cn_deriv_cutoff",
+            std::string("40.00 Bohr  (hardcoded, topology-init + per-step CN derivatives)"));
+        CurcumaLogger::param("  eeq_distance_cutoff",
+            fmt::format("{:.2f} Bohr  ({})", eeq_cut,
+                eeq_cut > 0.0 ? "OPT-IN — Hellmann-Feynman risk if inconsistent across sites"
+                              : "0 = full Coulomb (matches Fortran goed_gfnff)"));
+        CurcumaLogger::param("  coulomb_pair_r_cut",
+            std::string("100.00 Bohr  (per-pair, hardcoded; effective no-cutoff for typical chemistry)"));
+        CurcumaLogger::param("  dispersion_r_cut",
+            std::string("D3: 38.73 Bohr (sqrt(1500), Fortran-match)  |  D4: 60.00 Bohr"));
+        CurcumaLogger::param("  hb_r_cut / xb_r_cut / rep_r_cut",
+            std::string("50.0 / 20.0 / 20.0 Bohr  (Struct defaults, set per pair)"));
     }
 
     m_forcefield = new ForceField(ff_config);

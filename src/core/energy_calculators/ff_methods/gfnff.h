@@ -226,8 +226,11 @@ PARAM(eeq_tolerance, Double, -1.0,
       "EEQ PCG tolerance. -1 = use adaptive default (1e-10 small, 1e-6*||rhs|| large). Passed to eeq_solver.", "Algorithm", {})
 PARAM(eeq_accuracy, Double, 1e-6,
       "Target EEQ charge accuracy (e). Sets pcg_large_system_tol_factor. Higher = faster but less accurate.", "Algorithm", {})
-PARAM(eeq_distance_cutoff, Double, 30.0,
-      "Distance cutoff in Bohr for EEQ matrix conditioning. 0 = no cutoff. Affects both CPU and GPU.", "Advanced", {})
+// WP-C (May 2026): canonical PARAM definition lives in eeq_solver.h:965 with default 0.0
+// (matches Fortran goed_gfnff). Forwarded to eeq_solver sub-config via
+// gfnff_method.cpp::forwardEEQSolverParams. Removing the duplicate here eliminates the
+// 30.0-vs-0.0 default discrepancy that overrode the Fortran-matching behaviour.
+// PARAM(eeq_distance_cutoff, Double, 30.0, ...) — REMOVED, see eeq_solver.h:965
 PARAM(gpu_block_size, Int, 0,
       "GPU kernel block size (0 = adaptive, 32/64/128/256/512). 512 = max occupancy. Passed to ff_workspace_gpu.", "Advanced", {})
 PARAM(hb_cell_list_min_atoms, Int, 800,

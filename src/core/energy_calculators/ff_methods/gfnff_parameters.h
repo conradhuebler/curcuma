@@ -140,7 +140,11 @@ struct GFNFFCoulomb {
     double cnf_i = 0.0, cnf_j = 0.0;
     double gam_i = 0.0, gam_j = 0.0;
     double alp_i = 0.0, alp_j = 0.0;
-    double r_cut = 50.0;
+    // WP-C (May 2026): default aligned with gfnff_method.cpp:8467 (CPU assignment of c.r_cut = 100.0).
+    // Previously 50.0 in struct vs 100.0 at assignment site — could have produced CPU/GPU mismatch
+    // if any path skipped the explicit assignment. 100.0 Bohr is effective "no cutoff" for typical
+    // chemistry (even polymer.xyz max pair < 100 Bohr).
+    double r_cut = 100.0;
 };
 
 /**
