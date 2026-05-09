@@ -1486,6 +1486,12 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
 
     // Claude Generated (Apr 2026): Hard distance cutoff of 60 Bohr for dispersion pairs.
     // BJ-damped dispersion is negligible beyond this range; skipping saves N²/2 pairs.
+    //
+    // WP-C phase D (May 2026, REVERTED): tried aligning to D3's sqrt(dispthr=1500) ≈ 38.73 Bohr.
+    // XTB-GFN-FF reference comparison on polymer.xyz showed this *worsens* the match
+    // (Curcuma-vs-XTB diff: +0.92969 Eh @ cutoff=60.0  →  +0.92993 Eh @ cutoff=38.73).
+    // Fortran's dispthr appears to apply only to D3, not D4 — D4's effective cutoff is larger.
+    // 60 Bohr stays as the empirical Curcuma D4 default.
     constexpr double disp_cutoff_bohr = 60.0;
     constexpr double disp_cutoff_sq = disp_cutoff_bohr * disp_cutoff_bohr;
 
@@ -1528,7 +1534,7 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
                 d.C6 = c6;
                 d.r4r2ij = r4r2ij;
                 d.r0_squared = r0_sq;
-                d.r_cut = 50.0;
+                d.r_cut = 50.0;  // D4 pair-energy cutoff (struct default; verified by XTB comparison May 2026)
                 d.zetac6 = zetac6;
                 // P1c (Apr 2026): Legacy D3 fields removed from GFNFFDispersion
 

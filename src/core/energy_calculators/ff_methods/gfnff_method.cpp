@@ -2464,7 +2464,7 @@ bool GFNFF::initializeForceField()
         CurcumaLogger::param("  coulomb_pair_r_cut",
             std::string("100.00 Bohr  (per-pair, hardcoded; effective no-cutoff for typical chemistry)"));
         CurcumaLogger::param("  dispersion_r_cut",
-            std::string("D3: 38.73 Bohr (sqrt(1500), Fortran-match)  |  D4: 60.00 Bohr"));
+            std::string("D3: 38.73 Bohr (sqrt(dispthr=1500))  |  D4: 50.0 Bohr (pair eval) / 60.0 Bohr (pair generation)"));
         CurcumaLogger::param("  hb_r_cut / xb_r_cut / rep_r_cut",
             std::string("50.0 / 20.0 / 20.0 Bohr  (Struct defaults, set per pair)"));
     }

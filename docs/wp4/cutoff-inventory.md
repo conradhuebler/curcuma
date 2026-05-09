@@ -68,9 +68,20 @@ Wenn die Pair-Liste **immer** durch CPU gesetzt wird und dann hochgeladen, ist d
 
 ### #4 — D3 vs D4 Dispersion-Cutoff (mittlere Priorität)
 
-D3 nutzt `√1500 ≈ 38.73 Bohr` (Fortran-Match), D4 nutzt `60.0 Bohr` (in `d4param_generator.cpp:1489`). Verschiedene Pair-Mengen werden generiert.
+D3 nutzt `√1500 ≈ 38.73 Bohr` (Fortran-Match), D4 nutzt `60.0 Bohr` Pair-Generation + `50.0 Bohr` Pair-Energie-Cutoff (in `d4param_generator.cpp:1489, 1531`). Verschiedene Pair-Mengen werden generiert.
 
-**Semantik:** D4 hat reichweitigere Polarisierbarkeitskoppelungen als D3, daher ist der größere Cutoff potenziell sachlich gerechtfertigt — aber das ist **nicht dokumentiert**. Falls beabsichtigt, als Code-Kommentar erklären; falls Versehen, den D3-Wert übernehmen.
+**WP-C Phase D — XTB-Validierung (Mai 2026):** Versuch unternommen, D4 auf `38.73 Bohr` (D3-Match, Fortran-`dispthr=1500`) zu vereinheitlichen. Energie-Vergleich auf `polymer.xyz` (1410 Atome) gegen XTB-GFN-FF-Fortran-Referenz:
+
+| Konfiguration | Curcuma D4 (Eh) | XTB Fortran (Eh) | Diff vs XTB |
+|---------------|-----------------|-------------------|-------------|
+| D4 cutoff = 60.0 Bohr (Status quo) | -202.58789977 | -203.51759034 | **+0.92969 Eh** |
+| D4 cutoff = 38.73 Bohr (D3-Match) | -202.58766507 | -203.51759034 | **+0.92993 Eh** |
+
+→ Vereinheitlichung verschlechtert den Fortran-Match um 0.23 mEh.
+
+**Schlussfolgerung:** Fortran's `dispthr=1500` gilt offenbar nur für D3, nicht für D4 (in der Fortran-Implementierung hat D4 entweder keinen geometrischen Cutoff oder ein anderes `dispthr_d4`). Curcuma's empirisches `60.0 Bohr` für D4 ist näher an der Fortran-D4-Referenz als das D3-Match. **Phase D wurde revertiert** — Status quo (D4=60.0 Bohr) bleibt.
+
+**Hinweis:** Der absolute Bias zwischen Curcuma-D4 und XTB-Fortran ist **+0.93 Eh auf polymer** — das ist nicht D4-Cutoff-bezogen, sondern andere Quellen (vermutlich EEQ Phase 2, HB, oder kumulierte Term-Diskrepanzen). Siehe WP-V (`docs/wp4/WP-V-gradient-validation.md`). D4-Cutoff-Vereinheitlichung würde das nicht beheben.
 
 ### #5 — CN wird 3× berechnet (Performance, kein Korrektheits-Issue)
 
@@ -125,3 +136,5 @@ Die anderen Cutoffs bleiben **unabhängig** von `eeq_distance_cutoff`:
 | Datum | Änderung | Quelle |
 |-------|----------|--------|
 | Mai 2026 | Initial Audit | Phase-1-Erkundung WP-C |
+| Mai 2026 | Phase A+B umgesetzt — `eeq_distance_cutoff` Doppel-Def aufgelöst, CN-deriv-cutoff benannt, Coulomb r_cut Struct-Default angeglichen, Init-Logging | Commit `2b85963` |
+| Mai 2026 | Phase D versucht + revertiert: D3/D4 Cutoff-Vereinheitlichung verschlechtert XTB-Match (siehe oben) | XTB-Validation auf polymer.xyz |
