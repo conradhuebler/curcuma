@@ -34,14 +34,43 @@
 // =================================================================================
 
 // JSON-based constructors (backward compatible) - delegate to ConfigManager versions
+// WP6/CLI plumbing fix (May 2026): inject method-specific sub-scopes (gfnff,
+// eeq_solver, xtb, …) into m_controller after ConfigManager initialization, then
+// rebuild the method. ConfigManager("energycalculator", controller) only carries
+// the energycalculator scope; method-specific sub-objects are otherwise dropped
+// before reaching MethodFactory.
+static const char* const kEnergyCalcMethodScopes[] = {
+    "gfnff", "eeq_solver", "xtb", "tblite", "ulysses",
+    "d3", "d4", "uff", "qmdff", "eht"
+};
+
+void EnergyCalculator::reattachMethodScopes(const json& controller) {
+    bool needs_recreate = false;
+    for (const char* scope : kEnergyCalcMethodScopes) {
+        if (controller.contains(scope) && !m_controller.contains(scope)) {
+            m_controller[scope] = controller[scope];
+            needs_recreate = true;
+        }
+    }
+    if (needs_recreate) createMethod(m_method_name, m_controller);
+}
+
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
-    : EnergyCalculator(method, ConfigManager("energycalculator", controller))
+    : m_method_name(method)
+    , m_basename("")
+    , m_energy(0.0)
 {
+    initializeCommonFromConfig(ConfigManager("energycalculator", controller));
+    reattachMethodScopes(controller);
 }
 
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller, const std::string& basename)
-    : EnergyCalculator(method, ConfigManager("energycalculator", controller), basename)
+    : m_method_name(method)
+    , m_basename(basename)
+    , m_energy(0.0)
 {
+    initializeCommonFromConfig(ConfigManager("energycalculator", controller));
+    reattachMethodScopes(controller);
 }
 
 // ConfigManager-based constructors (new, preferred) - Claude Generated: Phase 3C
@@ -135,6 +164,7 @@ void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config) {
 // Backward compatible wrapper - delegates to ConfigManager version
 void EnergyCalculator::initializeCommon(const json& controller) {
     initializeCommonFromConfig(ConfigManager("energycalculator", controller));
+    reattachMethodScopes(controller);
 }
 
 bool EnergyCalculator::createMethod(const std::string& method_name, const json& config) {

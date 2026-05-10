@@ -141,6 +141,25 @@ CurcumaOpt::CurcumaOpt(const json& controller, bool silent)
 
 void CurcumaOpt::LoadControlJson()
 {
+    // WP6/CLI plumbing fix (May 2026): forward method-specific sub-configs into the
+    // opt/sp scopes that EnergyCalculator instances are constructed from. Without
+    // this, CLI overrides like -gfnff.eeq_distance_cutoff are dropped because
+    // m_controller["opt"] / ["sp"] don't carry sibling scopes. Add only when missing
+    // — explicit per-scope overrides always win.
+    static constexpr const char* kMethodScopes[] = {
+        "gfnff", "eeq_solver", "xtb", "tblite", "ulysses",
+        "d3", "d4", "uff", "qmdff", "eht"
+    };
+    for (const char* sub : {"opt", "sp"}) {
+        if (!m_controller.contains(sub) || !m_controller[sub].is_object())
+            m_controller[sub] = json::object();
+        for (const char* scope : kMethodScopes) {
+            if (m_controller.contains(scope) && !m_controller[sub].contains(scope)) {
+                m_controller[sub][scope] = m_controller[scope];
+            }
+        }
+    }
+
     // Claude Generated (October 2025): Direct access to m_defaults with fallback values
     // m_defaults is now populated from ParameterRegistry via CurcumaOptJson
     m_threads = m_defaults.value("threads", 1);

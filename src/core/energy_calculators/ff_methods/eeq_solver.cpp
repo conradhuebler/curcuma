@@ -1073,6 +1073,15 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
     int m = natoms + nfrag;
     Matrix A = Matrix::Zero(m, m);
 
+    // WP6/G2c Phase C (May 2026): geometric distance cutoff for off-diagonal Coulomb terms.
+    // Only active in Geometric mode (Phase 2 / fallback) — topological distances are
+    // Floyd-Warshall bond-length sums, where a Bohr cutoff has no clean meaning.
+    // Mirrors the gating used in the parallel A-matrix path at line ~3064.
+    double eeq_dist_cutoff = m_config.get<double>("eeq_distance_cutoff", 0.0);
+    const double EEQ_CUTOFF_SQ =
+        (distance_mode == EEQDistanceMode::Geometric && natoms > 200 && eeq_dist_cutoff > 0.0)
+        ? eeq_dist_cutoff * eeq_dist_cutoff : 0.0;
+
     // Step 1: Calculate charge-dependent alpha
     Vector alpha_corrected(natoms);
     for (int i = 0; i < natoms; ++i) {
@@ -1170,6 +1179,10 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
 
             if (r > 1e6) {
                 // Unconnected atoms - skip Coulomb term
+                A(i, j) = 0.0;
+                A(j, i) = 0.0;
+            } else if (EEQ_CUTOFF_SQ > 0.0 && r * r > EEQ_CUTOFF_SQ) {
+                // WP6/G2c Phase C: long-range geometric truncation
                 A(i, j) = 0.0;
                 A(j, i) = 0.0;
             } else {

@@ -233,8 +233,8 @@ PARAM(eeq_accuracy, Double, 1e-6,
 // PARAM(eeq_distance_cutoff, Double, 30.0, ...) — REMOVED, see eeq_solver.h:965
 PARAM(gpu_block_size, Int, 0,
       "GPU kernel block size (0 = adaptive, 32/64/128/256/512). 512 = max occupancy. Passed to ff_workspace_gpu.", "Advanced", {})
-PARAM(hb_cell_list_min_atoms, Int, 800,
-      "Min atom count to use SpatialCellList for HB/XB neighbor detection. Below this falls back to O(N²) loop. 0 = always use cell list.", "Advanced", {})
+PARAM(nb_cell_list_min_atoms, Int, 800,
+      "Min atom count to use SpatialCellList for non-bonded neighbor detection (HB/XB and Coulomb when eeq_distance_cutoff>0). Below this falls back to O(N²) loop. 0 = always use cell list.", "Advanced", {"hb_cell_list_min_atoms"})
 PARAM(hb_parallel_min_pairs, Int, 500,
       "Min AB-pair count to parallelise HB detection via CxxThreadPool. 0 = always parallel (if pool available). -1 = never parallel.", "Advanced", {})
 END_PARAMETER_DEFINITION

@@ -438,7 +438,14 @@ private:
      * @param controller Configuration JSON
      */
     void initializeCommon(const json& controller);
-    
+
+    /**
+     * @brief Re-attach method-specific sub-scopes (gfnff, eeq_solver, …) onto
+     * m_controller after ConfigManager initialization, then rebuild the method
+     * if any new scope was carried over. Claude Generated (WP6, May 2026).
+     */
+    void reattachMethodScopes(const json& controller);
+
     /**
      * @brief Create computational method using factory
      * @param method_name Method to create

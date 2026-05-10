@@ -506,6 +506,20 @@ GFNFF::GFNFF(const json& parameters)
     };
 
     m_parameters = MergeJson(default_parameters, parameters);
+    // WP6/CLI plumbing fix (May 2026): controller carries gfnff-scoped params under
+    // controller["gfnff"]. Promote those keys to the top of m_parameters so the
+    // existing flat .value("...") readers (e.g. cn_cutoff_bohr, eeq_distance_cutoff,
+    // nb_cell_list_min_atoms) actually see CLI/JSON overrides. Without this, params
+    // remain nested at m_parameters["gfnff"][...] and the flat reads fall back to
+    // defaults — silently ignoring user input. Existing top-level fields (method,
+    // threads, ...) take precedence; we only fill in keys not already present.
+    if (parameters.contains("gfnff") && parameters["gfnff"].is_object()) {
+        for (const auto& [k, v] : parameters["gfnff"].items()) {
+            if (!m_parameters.contains(k)) {
+                m_parameters[k] = v;
+            }
+        }
+    }
     m_threads = m_parameters.value("threads", 1);  // Claude Generated (WP1, May 2026)
 
     // Extract topology mode
@@ -1007,9 +1021,15 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         // larger range than the per-step CN (cn_cutoff_bohr=6.0) because the gradient
         // of erf-CN extends further than the value itself. This 40 Bohr matches the
         // "standard GFN-FF" topology threshold and is independent from cn_cutoff_bohr.
+        // WP6/G2c Phase C (May 2026): if eeq_distance_cutoff > 40, extend the dcn
+        // stencil to cover the Coulomb pair range. Term 1b's reach is bounded by
+        // cn_cutoff_bohr (~6 Bohr) in practice, but we never reduce below 40 — taking
+        // max() keeps Hellmann-Feynman consistent for any eeq_distance_cutoff > 0.
         if (!gpu_only) {
             t0 = std::chrono::high_resolution_clock::now();
-            constexpr double cn_deriv_cutoff_sq = 40.0 * 40.0;
+            const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
+            const double cn_deriv_cutoff_sq =
+                (eeq_cut > 0.0) ? std::max(40.0 * 40.0, eeq_cut * eeq_cut) : 40.0 * 40.0;
             m_last_dcn = calculateCoordinationNumberDerivatives(m_last_cn, cn_deriv_cutoff_sq, pool, total_threads);
             if (do_timing) {
                 t_dcn = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
@@ -7191,9 +7211,10 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
 
     // Claude Generated (Apr 2026): Use spatial cell list for O(N) AB-pair generation.
     // The double loop is O(N²); with a cell list only atom pairs within the HB cutoff
-    // (~15.8 Bohr) are considered.  Threshold configurable via hb_cell_list_min_atoms.
+    // (~15.8 Bohr) are considered.  Threshold configurable via nb_cell_list_min_atoms.
     const double ab_cutoff = std::sqrt(hbthr1);  // ~15.81 Bohr
-    const int hb_cell_threshold = m_parameters.value("hb_cell_list_min_atoms", 800);
+    const int hb_cell_threshold = m_parameters.value("nb_cell_list_min_atoms",
+        m_parameters.value("hb_cell_list_min_atoms", 800));
     if (hb_cell_threshold == 0 || m_atomcount >= hb_cell_threshold) {
         SpatialCellList cell_list;
         cell_list.build(m_geometry_bohr, ab_cutoff);
@@ -7585,8 +7606,9 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     const double xb_cutoff_sq = xb_cutoff * xb_cutoff;
 
     // Claude Generated (Apr 2026): Spatial cell list for O(N) B-atom lookup.
-    // Threshold configurable via hb_cell_list_min_atoms (shared with HB detection).
-    const int xb_cell_threshold = m_parameters.value("hb_cell_list_min_atoms", 800);
+    // Threshold configurable via nb_cell_list_min_atoms (shared with HB and Coulomb).
+    const int xb_cell_threshold = m_parameters.value("nb_cell_list_min_atoms",
+        m_parameters.value("hb_cell_list_min_atoms", 800));
     bool use_cell_list = (xb_cell_threshold == 0 || m_atomcount >= xb_cell_threshold);
     SpatialCellList cell_list;
     if (use_cell_list) {
@@ -8437,6 +8459,13 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
 {
     // Claude Generated (March 2026): Native struct version of generateGFNFFCoulombPairs
     // Reference: Fortran gfnff_engrad.F90:1378-1389
+    //
+    // WP6 (May 2026): when eeq_distance_cutoff > 0, only pairs within the cutoff
+    // are emitted. For N >= nb_cell_list_min_atoms a SpatialCellList is used for
+    // O(N) generation; otherwise O(N²) with an inner distance check.
+    // MD note: rebuilt every parameter-generation cycle (topology cache invalidation).
+    // For per-step MD with large N, a Verlet-skin/per-step-rebuild decoupling is the
+    // logical follow-up — out of scope for WP6.
     auto start_time = std::chrono::high_resolution_clock::now();
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -8448,62 +8477,100 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
     const TopologyInfo& topo_info = getCachedTopology();
     const Vector& charges = topo_info.eeq_charges;
 
-    coulombs.reserve(m_atomcount * (m_atomcount - 1) / 2);
+    const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
+    const bool cutoff_active = (eeq_cut > 0.0);
+    const double effective_r_cut = cutoff_active ? eeq_cut : 100.0;
+    const double cutoff_sq = cutoff_active ? eeq_cut * eeq_cut : 0.0;
 
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
-            GFNFFCoulomb c;
-            c.i = i;
-            c.j = j;
-            c.q_i = charges[i];
-            c.q_j = charges[j];
+    if (cutoff_active) {
+        // Heuristic: typical neighbour density ~64 pairs per atom inside a finite cutoff.
+        // Vector grows on demand if exceeded.
+        coulombs.reserve(static_cast<size_t>(m_atomcount) * 64);
+    } else {
+        coulombs.reserve(static_cast<size_t>(m_atomcount) * (m_atomcount - 1) / 2);
+    }
 
-            // gamma_ij from charge-corrected alpeeq
-            double alp_i_for_gamma = topo_info.eeq_alp[i];
-            double alp_j_for_gamma = topo_info.eeq_alp[j];
-            if (topo_info.alpeeq.size() == m_atomcount) {
-                alp_i_for_gamma = topo_info.alpeeq(i);
-                alp_j_for_gamma = topo_info.alpeeq(j);
+    auto fillPair = [&](int i, int j) -> GFNFFCoulomb {
+        GFNFFCoulomb c;
+        c.i = i;
+        c.j = j;
+        c.q_i = charges[i];
+        c.q_j = charges[j];
+
+        // gamma_ij from charge-corrected alpeeq
+        double alp_i_for_gamma = topo_info.eeq_alp[i];
+        double alp_j_for_gamma = topo_info.eeq_alp[j];
+        if (topo_info.alpeeq.size() == m_atomcount) {
+            alp_i_for_gamma = topo_info.alpeeq(i);
+            alp_j_for_gamma = topo_info.alpeeq(j);
+        }
+        c.gamma_ij = 1.0 / std::sqrt(alp_i_for_gamma + alp_j_for_gamma);
+
+        // Chi: chi_base = -chi + dxi [+ amideH correction]
+        double dxi_i = (i < topo_info.dxi.size()) ? topo_info.dxi(i) : 0.0;
+        double dxi_j = (j < topo_info.dxi.size()) ? topo_info.dxi(j) : 0.0;
+        double chi_base_i = -topo_info.eeq_chi[i] + dxi_i;
+        double chi_base_j = -topo_info.eeq_chi[j] + dxi_j;
+        if (i < static_cast<int>(topo_info.is_amide_h.size()) && topo_info.is_amide_h[i])
+            chi_base_i -= 0.02;
+        if (j < static_cast<int>(topo_info.is_amide_h.size()) && topo_info.is_amide_h[j])
+            chi_base_j -= 0.02;
+
+        double cnf_i = topo_info.eeq_cnf[i];
+        double cnf_j = topo_info.eeq_cnf[j];
+        double cn_i = topo_info.coordination_numbers(i);
+        double cn_j = topo_info.coordination_numbers(j);
+
+        c.chi_i = chi_base_i + cnf_i * std::sqrt(cn_i);  // Legacy: static chi_eff
+        c.chi_j = chi_base_j + cnf_j * std::sqrt(cn_j);
+        c.chi_base_i = chi_base_i;
+        c.chi_base_j = chi_base_j;
+        c.cnf_i = cnf_i;
+        c.cnf_j = cnf_j;
+
+        // Gam: charge-corrected gameeq
+        double gam_i = topo_info.eeq_gam[i];
+        double gam_j = topo_info.eeq_gam[j];
+        if (topo_info.dgam.size() == m_atomcount) {
+            gam_i += topo_info.dgam(i);
+            gam_j += topo_info.dgam(j);
+        }
+        c.gam_i = gam_i;
+        c.gam_j = gam_j;
+        c.alp_i = alp_i_for_gamma;
+        c.alp_j = alp_j_for_gamma;
+        c.r_cut = effective_r_cut;
+
+        return c;
+    };
+
+    if (cutoff_active) {
+        const int nb_threshold = m_parameters.value("nb_cell_list_min_atoms",
+            m_parameters.value("hb_cell_list_min_atoms", 800));
+        if (nb_threshold == 0 || m_atomcount >= nb_threshold) {
+            // O(N) cell-list path: only neighbours within eeq_distance_cutoff are emitted.
+            SpatialCellList cell_list;
+            cell_list.build(m_geometry_bohr, eeq_cut);
+            cell_list.forEachPair([&](int i, int j, double /*r2*/) {
+                coulombs.push_back(fillPair(i, j));
+            });
+        } else {
+            // Small-N fallback: O(N²) with inner distance filter.
+            for (int i = 0; i < m_atomcount; ++i) {
+                for (int j = i + 1; j < m_atomcount; ++j) {
+                    const double rij_sq =
+                        (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).squaredNorm();
+                    if (rij_sq > cutoff_sq) continue;
+                    coulombs.push_back(fillPair(i, j));
+                }
             }
-            c.gamma_ij = 1.0 / std::sqrt(alp_i_for_gamma + alp_j_for_gamma);
-
-            // Chi: chi_base = -chi + dxi [+ amideH correction]
-            double dxi_i = (i < topo_info.dxi.size()) ? topo_info.dxi(i) : 0.0;
-            double dxi_j = (j < topo_info.dxi.size()) ? topo_info.dxi(j) : 0.0;
-            double chi_base_i = -topo_info.eeq_chi[i] + dxi_i;
-            double chi_base_j = -topo_info.eeq_chi[j] + dxi_j;
-            if (i < static_cast<int>(topo_info.is_amide_h.size()) && topo_info.is_amide_h[i])
-                chi_base_i -= 0.02;
-            if (j < static_cast<int>(topo_info.is_amide_h.size()) && topo_info.is_amide_h[j])
-                chi_base_j -= 0.02;
-
-            double cnf_i = topo_info.eeq_cnf[i];
-            double cnf_j = topo_info.eeq_cnf[j];
-            double cn_i = topo_info.coordination_numbers(i);
-            double cn_j = topo_info.coordination_numbers(j);
-
-            c.chi_i = chi_base_i + cnf_i * std::sqrt(cn_i);  // Legacy: static chi_eff
-            c.chi_j = chi_base_j + cnf_j * std::sqrt(cn_j);
-            c.chi_base_i = chi_base_i;
-            c.chi_base_j = chi_base_j;
-            c.cnf_i = cnf_i;
-            c.cnf_j = cnf_j;
-
-            // Gam: charge-corrected gameeq
-            double gam_i = topo_info.eeq_gam[i];
-            double gam_j = topo_info.eeq_gam[j];
-            if (topo_info.dgam.size() == m_atomcount) {
-                gam_i += topo_info.dgam(i);
-                gam_j += topo_info.dgam(j);
+        }
+    } else {
+        // Default Fortran-matching path: full O(N²), no spatial truncation.
+        for (int i = 0; i < m_atomcount; ++i) {
+            for (int j = i + 1; j < m_atomcount; ++j) {
+                coulombs.push_back(fillPair(i, j));
             }
-            c.gam_i = gam_i;
-            c.gam_j = gam_j;
-            c.alp_i = alp_i_for_gamma;
-            c.alp_j = alp_j_for_gamma;
-            c.r_cut = 100.0;
-
-            coulombs.push_back(c);
-
         }
     }
 
