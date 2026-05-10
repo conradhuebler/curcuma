@@ -690,6 +690,32 @@ if(USE_GFNFF)
 
     target_link_libraries(curcuma_gfnff PUBLIC gfnff-lib gfortran)
     target_link_libraries(curcuma_core curcuma_gfnff)
+
+    # Claude Generated (May 2026, ICX-build OpenMP fix): when the C++ side is built with
+    # Intel ICX, libiomp5 is the active OpenMP runtime, but gfnff-lib (built via the
+    # FetchContent gfortran path) pulls in libgomp transitively. Two OpenMP runtimes in
+    # one process corrupt each other's heap (we hit double-free in __kmp_invoke_microtask
+    # on polymer MD). libiomp5 ships GOMP_* compat symbols (263 vs 192 in libgomp), so it
+    # is a runtime drop-in replacement. We can't drop libgomp from the link line because
+    # gfnff-lib carries it as a direct DT_NEEDED entry. Solution: a small wrapper script
+    # that LD_PRELOADs libiomp5 before exec — this forces all GOMP_* calls to resolve
+    # against libiomp5 and the libgomp instance becomes inert.
+    set(_curcuma_need_iomp5_wrapper FALSE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Intel")
+        get_filename_component(_icx_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        get_filename_component(_icx_root_dir "${_icx_bin_dir}" DIRECTORY)
+        find_library(_curcuma_iomp5
+            NAMES iomp5
+            HINTS "${_icx_root_dir}/lib" "${_icx_root_dir}/lib/intel64"
+            NO_DEFAULT_PATH)
+        if(_curcuma_iomp5)
+            set(_curcuma_need_iomp5_wrapper TRUE)
+        else()
+            message(WARNING "ICX detected but libiomp5 not found near ${CMAKE_CXX_COMPILER}. "
+                           "If you USE_GFNFF, polymer MD will crash with double-free in "
+                           "__kmp_invoke_microtask.")
+        endif()
+    endif()
 endif()
 
 if(USE_D3)
@@ -895,6 +921,31 @@ endif(WIN32)
 target_link_libraries(curcuma fmt::fmt-header-only)
 
 target_link_libraries(curcuma curcuma_core)
+
+# Claude Generated (May 2026, ICX + USE_GFNFF OpenMP fix): when both Intel ICX (libiomp5)
+# and gfortran-built gfnff-lib (libgomp DT_NEEDED) end up in the same binary, the two
+# OpenMP runtimes corrupt each other's heap. We hit double-free in __kmp_invoke_microtask
+# on polymer MD. libiomp5 ships GOMP_* compat symbols (263 vs 192 in libgomp), so it is a
+# runtime drop-in replacement. Use patchelf to rewrite curcuma's DT_NEEDED so it loads
+# libiomp5 instead of libgomp.so.1 — single binary, no wrapper, no LD_PRELOAD needed.
+if(_curcuma_need_iomp5_wrapper)
+    find_program(PATCHELF_EXECUTABLE patchelf)
+    if(PATCHELF_EXECUTABLE)
+        add_custom_command(TARGET curcuma POST_BUILD
+            COMMAND "${PATCHELF_EXECUTABLE}" --replace-needed libgomp.so.1 libiomp5.so
+                    "$<TARGET_FILE:curcuma>"
+            COMMENT "ICX + GFN-FF: patchelf replace-needed libgomp.so.1 → libiomp5.so "
+                    "to avoid double-OMP-runtime heap corruption"
+            VERBATIM)
+        message(STATUS "ICX + GFN-FF: patchelf will rewrite libgomp→libiomp5 in curcuma "
+                       "post-build (avoids double-runtime heap corruption).")
+    else()
+        message(WARNING "ICX + USE_GFNFF detected but patchelf not found. The curcuma "
+                        "binary will crash with double-free in MD parallel regions. "
+                        "Install patchelf, OR run with: "
+                        "LD_PRELOAD=${_curcuma_iomp5} ./curcuma ...")
+    endif()
+endif()
 add_executable(curcuma_helper
         src/helpers/main.cpp)
         
