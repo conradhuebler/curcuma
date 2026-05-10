@@ -3489,8 +3489,16 @@ json GFNFF::generateGFNFFAngles(const TopologyInfo& topo_info) const
     //           Reduces CN overhead from 26 seconds to 0.01 seconds (2600× speedup!)
     //
     // LESSON: Always identify and eliminate redundant calculations in nested loops.
-    const double threshold_cn_squared = 40.0 * 40.0;  // ~40 Bohr cutoff (standard GFN-FF)
-    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, threshold_cn_squared);
+    // CN VALUE cutoff = 40 Bohr (squared). This is the conservative outer bound for
+    // CN sum contributions; the erf counting term is essentially zero beyond ~10 Bohr,
+    // so 40 Bohr is a safety margin. Distinct from cn_deriv_cutoff_sq at line ~1014
+    // which controls the CN-DERIVATIVE store reach (Term 1b stencil) and may grow
+    // with eeq_distance_cutoff. The same 40-Bohr value also appears in
+    // generateAnglesNative() and the legacy generateGFNFFAngles() — kept hardcoded
+    // here rather than promoted to a PARAM because it is a Fortran-matching internal
+    // tolerance, not a user-tunable knob.
+    constexpr double cn_value_cutoff_sq = 40.0 * 40.0;
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_value_cutoff_sq);
     Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
     // Claude Generated (February 2026): Phase 2 - OpenMP Angle Loop Parallelization
@@ -6815,8 +6823,10 @@ std::vector<Angle> GFNFF::generateAnglesNative(const TopologyInfo& topo_info) co
 {
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    const double threshold_cn_squared = 40.0 * 40.0;
-    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, threshold_cn_squared);
+    // CN VALUE cutoff: see explanatory comment at the constexpr definition in
+    // generateGFNFFAngles (~ line 3500). Distinct from cn_deriv_cutoff_sq.
+    constexpr double cn_value_cutoff_sq = 40.0 * 40.0;
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_value_cutoff_sq);
     Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
     std::vector<Angle> angles_vec;
@@ -6941,8 +6951,9 @@ json GFNFF::generateTopologyAwareAngles(const Vector& cn, const std::vector<int>
 
     // Claude Generated (February 2026): Phase 1 - CN Pre-computation for legacy function
     // Pre-compute CN once for all angles (same optimization as in new generateGFNFFAngles)
-    const double threshold_cn_squared = 40.0 * 40.0;
-    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, threshold_cn_squared);
+    // CN VALUE cutoff: see comment at constexpr definition in generateGFNFFAngles.
+    constexpr double cn_value_cutoff_sq = 40.0 * 40.0;
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_value_cutoff_sq);
     Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
     // Claude Generated (February 2026): Phase 2 - OpenMP parallelization for legacy function

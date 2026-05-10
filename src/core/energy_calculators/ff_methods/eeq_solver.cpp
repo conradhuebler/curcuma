@@ -3071,10 +3071,14 @@ Vector EEQSolver::calculateFinalCharges(
         // 1+2. Build Coulomb matrix (off-diagonal + diagonal)
         //
         // Distance cutoff for large systems: erf(gamma*r)/r decays to ~1/r for large r.
-        // At r=30 Bohr (~15.9 Å), the off-diagonal contribution is negligible vs diagonal ~3-5.
-        // Truncating these long-range elements reduces the condition number for polymers and
-        // large molecules, allowing PCG to converge reliably. Physically justified: EEQ is local.
-        double eeq_dist_cutoff = m_config.get<double>("eeq_distance_cutoff", 30.0);
+        // Truncating long-range elements reduces matrix condition number for polymers but
+        // shifts the energy surface away from full-Coulomb — Fortran XTB GFN-FF uses no
+        // truncation here (cutoff = 0). The canonical PARAM default in eeq_solver.h:965 is
+        // 0.0 to match Fortran. The previous 30.0 inline fallback masked that default
+        // whenever m_config did not carry the explicit registry entry, which silently
+        // truncated all default-config calls and produced the +0.93 Eh polymer bias vs.
+        // Fortran reported as WP-V (May 2026 finding, fix in WP6 follow-up).
+        double eeq_dist_cutoff = m_config.get<double>("eeq_distance_cutoff", 0.0);
         const double EEQ_CUTOFF_SQ = (natoms > 200 && eeq_dist_cutoff > 0.0)
             ? eeq_dist_cutoff * eeq_dist_cutoff : 0.0;
 
