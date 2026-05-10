@@ -1148,6 +1148,15 @@ void FFWorkspace::calcHydrogenBonds(int p)
         }
         acc.energy.hbond += E_HB;
 
+        // Claude Generated (May 2026, HB-investigation): per-case split for Fortran comparison
+        switch (hb.case_type) {
+            case 1: acc.energy.hbond_case1 += E_HB; ++acc.energy.hbond_case1_count; break;
+            case 2: acc.energy.hbond_case2 += E_HB; ++acc.energy.hbond_case2_count; break;
+            case 3: acc.energy.hbond_case3 += E_HB; ++acc.energy.hbond_case3_count; break;
+            case 4: acc.energy.hbond_case4 += E_HB; ++acc.energy.hbond_case4_count; break;
+            default: break;
+        }
+
         // ========== ANALYTICAL GRADIENT CALCULATION ==========
         // Claude Generated (Mar 2026): Complete port from ForceFieldThread
         // Reference: gfnff_engrad.F90 - abhgfnff_eg1/eg2new/eg2_rnr/eg3

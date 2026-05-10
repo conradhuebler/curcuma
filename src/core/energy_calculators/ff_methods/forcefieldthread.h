@@ -394,6 +394,18 @@ public:
     double HydrogenBondEnergy() { return m_energy_hbond; }
     double HalogenBondEnergy() { return m_energy_xbond; }
 
+    // Claude Generated (May 2026, HB-investigation): per-case HB energy + counts.
+    // Sum of all cases equals m_energy_hbond. Used to compare classification with
+    // Fortran's nhb1 (case 1, "unbound") vs nhb2 (case 2/3/4, "bound") split.
+    double HBondCase1Energy() { return m_hbond_case1_energy; }
+    double HBondCase2Energy() { return m_hbond_case2_energy; }
+    double HBondCase3Energy() { return m_hbond_case3_energy; }
+    double HBondCase4Energy() { return m_hbond_case4_energy; }
+    int HBondCase1Count() { return m_hbond_case1_count; }
+    int HBondCase2Count() { return m_hbond_case2_count; }
+    int HBondCase3Count() { return m_hbond_case3_count; }
+    int HBondCase4Count() { return m_hbond_case4_count; }
+
     // Claude Generated (December 2025): ATM three-body dispersion energy
     double ATMEnergy() { return m_atm_energy; }
 
@@ -558,6 +570,16 @@ protected:
     double m_energy_xbond = 0.0;       // Halogen bond energy
     double m_stors_energy = 0.0;       // Triple bond torsion energy (sTors_eg)
     double m_atm_energy = 0.0;         // ATM three-body dispersion energy (Claude Generated December 2025)
+    // Claude Generated (May 2026, HB-investigation): per-case HB split for diagnostic
+    // against Fortran's nhb1 (unbound, case 1) vs nhb2 (bound, case 2/3/4) classification.
+    double m_hbond_case1_energy = 0.0;
+    double m_hbond_case2_energy = 0.0;
+    double m_hbond_case3_energy = 0.0;
+    double m_hbond_case4_energy = 0.0;
+    int m_hbond_case1_count = 0;
+    int m_hbond_case2_count = 0;
+    int m_hbond_case3_count = 0;
+    int m_hbond_case4_count = 0;
 
     // Claude Generated (March 2026): Separate bonded/non-bonded repulsion for diagnostics
     double m_bonded_rep_energy = 0.0;    // GFN-FF bonded repulsion (REPSCALB=1.7583)

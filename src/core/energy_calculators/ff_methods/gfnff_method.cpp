@@ -106,6 +106,23 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
     row("Coulomb",             r.coulomb,      r.t_coulomb);
     CurcumaLogger::result("  Non-covalent:");
     row("H-bonds",             r.hbond,        r.t_hbond);
+    // Claude Generated (May 2026, HB-investigation): per-case split when verbosity>=2.
+    // Compare counts to Fortran nhb1 (case 1) / nhb2 (case 2+3+4) split.
+    if (CurcumaLogger::get_verbosity() >= 2 &&
+        (r.hbond_case1_count + r.hbond_case2_count + r.hbond_case3_count + r.hbond_case4_count) > 0) {
+        CurcumaLogger::result(fmt::format(
+            "    case 1 (unbound):   {:>6d} pairs   {:>+16.10f} Eh",
+            r.hbond_case1_count, r.hbond_case1));
+        CurcumaLogger::result(fmt::format(
+            "    case 2 (bound):     {:>6d} pairs   {:>+16.10f} Eh",
+            r.hbond_case2_count, r.hbond_case2));
+        CurcumaLogger::result(fmt::format(
+            "    case 3 (carbonyl):  {:>6d} pairs   {:>+16.10f} Eh",
+            r.hbond_case3_count, r.hbond_case3));
+        CurcumaLogger::result(fmt::format(
+            "    case 4 (sp2-N):     {:>6d} pairs   {:>+16.10f} Eh",
+            r.hbond_case4_count, r.hbond_case4));
+    }
     row("X-bonds",             r.xbond,        r.t_xbond);
     row("ATM (3-body)",        r.atm,          r.t_atm);
     row("BATM",                r.batm,         r.t_batm);
@@ -1744,6 +1761,15 @@ double GFNFF::Calculation(bool gradient)
             rep.nonbonded_rep = comp.nonbonded_rep;
             rep.coulomb       = comp.coulomb;
             rep.hbond         = comp.hbond;
+            // Claude Generated (May 2026, HB-investigation): per-case split for Fortran comparison
+            rep.hbond_case1   = comp.hbond_case1;
+            rep.hbond_case2   = comp.hbond_case2;
+            rep.hbond_case3   = comp.hbond_case3;
+            rep.hbond_case4   = comp.hbond_case4;
+            rep.hbond_case1_count = comp.hbond_case1_count;
+            rep.hbond_case2_count = comp.hbond_case2_count;
+            rep.hbond_case3_count = comp.hbond_case3_count;
+            rep.hbond_case4_count = comp.hbond_case4_count;
             rep.xbond         = comp.xbond;
             rep.atm           = comp.atm;
             rep.batm          = comp.batm;
@@ -1758,6 +1784,15 @@ double GFNFF::Calculation(bool gradient)
             rep.nonbonded_rep = m_forcefield->NonbondedRepulsionEnergy();
             rep.coulomb       = m_forcefield->CoulombEnergy();
             rep.hbond         = m_forcefield->HydrogenBondEnergy();
+            // Claude Generated (May 2026, HB-investigation): per-case split for Fortran comparison
+            rep.hbond_case1   = m_forcefield->HBondCase1Energy();
+            rep.hbond_case2   = m_forcefield->HBondCase2Energy();
+            rep.hbond_case3   = m_forcefield->HBondCase3Energy();
+            rep.hbond_case4   = m_forcefield->HBondCase4Energy();
+            rep.hbond_case1_count = m_forcefield->HBondCase1Count();
+            rep.hbond_case2_count = m_forcefield->HBondCase2Count();
+            rep.hbond_case3_count = m_forcefield->HBondCase3Count();
+            rep.hbond_case4_count = m_forcefield->HBondCase4Count();
             rep.xbond         = m_forcefield->HalogenBondEnergy();
             rep.atm           = m_forcefield->ATMEnergy();
             rep.batm          = m_forcefield->BatmEnergy();
@@ -2921,12 +2956,14 @@ json GFNFF::generateGFNFFParameters()
         parameters["vdws"] = json::array(); // Legacy vdW (will be replaced by pairwise)
 
         // Phase 2.3: HB/XB Detection (Claude Generated 2025)
+        // Claude Generated (May 2026, HB-investigation): topology_charges (Phase-1) matches
+        // Fortran gfnff_ini.f90:807-839; eeq_charges (Phase-2) over-polarizes the filter.
         if (m_parameters.value("hbond", true)) {
-            parameters["gfnff_hbonds"] = detectHydrogenBonds(topo_info.eeq_charges);
-            parameters["gfnff_xbonds"] = detectHalogenBonds(topo_info.eeq_charges);
+            parameters["gfnff_hbonds"] = detectHydrogenBonds(topo_info.topology_charges);
+            parameters["gfnff_xbonds"] = detectHalogenBonds(topo_info.topology_charges);
         }
 
-        parameters["hbonds"] = detectHydrogenBonds(topo_info.eeq_charges);  // Legacy (backward compat)
+        parameters["hbonds"] = detectHydrogenBonds(topo_info.topology_charges);  // Legacy (backward compat)
 
         // Claude Generated (Feb 21, 2026): Populate bond nr_hb and bond_hb_data
         // Reference: Fortran gfnff_ini2.f90:1008-1060 (bond_hb_AHB_set0/set1)
@@ -3098,9 +3135,10 @@ json GFNFF::generateGFNFFParameters()
         parameters["vdws"] = json::array(); // Legacy vdW (will be replaced by pairwise)
 
         // Phase 2.3: HB/XB Detection (Claude Generated 2025)
+        // Claude Generated (May 2026, HB-investigation): use Phase-1 topology_charges to match Fortran.
         if (m_parameters.value("hbond", true)) {
-            parameters["gfnff_hbonds"] = detectHydrogenBonds(topo_info.eeq_charges);
-            parameters["gfnff_xbonds"] = detectHalogenBonds(topo_info.eeq_charges);
+            parameters["gfnff_hbonds"] = detectHydrogenBonds(topo_info.topology_charges);
+            parameters["gfnff_xbonds"] = detectHalogenBonds(topo_info.topology_charges);
         }
 
         // Claude Generated (Feb 21, 2026): Populate bond nr_hb (basic mode, same as advanced)
@@ -3264,11 +3302,16 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     if (do_timing) t_batm = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
 
     // HB/XB detection
+    // Claude Generated (May 2026, HB-investigation): use Phase-1 topology_charges (qa)
+    // to match Fortran gfnff_ini.f90:807-839 — Fortran uses topo%qa for HB-H and AB-pair
+    // filtering. Phase-2 EEQ charges are over-polarized and let too many atoms pass the
+    // HB-eligibility thresholds (polymer: 274 H, 46032 HB-bonds vs Fortran ~30 H, 2298 HB).
+    // The runtime re-detection path at line ~1314 already uses topology_charges correctly.
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (m_parameters.value("hbond", true)) {
-        params.hbonds = detectHydrogenBondsNative(topo_info.eeq_charges);
+        params.hbonds = detectHydrogenBondsNative(topo_info.topology_charges);
 
-        params.xbonds = detectHalogenBondsNative(topo_info.eeq_charges);
+        params.xbonds = detectHalogenBondsNative(topo_info.topology_charges);
 
         // Claude Generated (Apr 2026): Cache init-time HB/XB lists so updateHBXBIfNeeded()
         // can skip redundant re-detection on the first calculateEnergy() call when

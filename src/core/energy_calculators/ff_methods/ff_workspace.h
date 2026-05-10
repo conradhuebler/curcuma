@@ -53,6 +53,10 @@ struct FFEnergyComponents {
     double bonded_rep = 0, nonbonded_rep = 0;   // GFN-FF exponential repulsion
     double coulomb = 0, hbond = 0, xbond = 0;
     double atm = 0, batm = 0, stors = 0;
+    // Claude Generated (May 2026, HB-investigation): per-case HB diagnostic split.
+    // Sum of cases equals hbond. Counts compare against Fortran nhb1/nhb2.
+    double hbond_case1 = 0, hbond_case2 = 0, hbond_case3 = 0, hbond_case4 = 0;
+    int hbond_case1_count = 0, hbond_case2_count = 0, hbond_case3_count = 0, hbond_case4_count = 0;
 
     void reset() {
         bond = angle = dihedral = inversion = 0;
@@ -61,6 +65,8 @@ struct FFEnergyComponents {
         bonded_rep = nonbonded_rep = 0;
         coulomb = hbond = xbond = 0;
         atm = batm = stors = 0;
+        hbond_case1 = hbond_case2 = hbond_case3 = hbond_case4 = 0;
+        hbond_case1_count = hbond_case2_count = hbond_case3_count = hbond_case4_count = 0;
     }
 
     FFEnergyComponents& operator+=(const FFEnergyComponents& o) {
@@ -70,6 +76,13 @@ struct FFEnergyComponents {
         bonded_rep += o.bonded_rep; nonbonded_rep += o.nonbonded_rep;
         coulomb += o.coulomb; hbond += o.hbond; xbond += o.xbond;
         atm += o.atm; batm += o.batm; stors += o.stors;
+        // Claude Generated (May 2026, HB-investigation): per-case reduction
+        hbond_case1 += o.hbond_case1; hbond_case2 += o.hbond_case2;
+        hbond_case3 += o.hbond_case3; hbond_case4 += o.hbond_case4;
+        hbond_case1_count += o.hbond_case1_count;
+        hbond_case2_count += o.hbond_case2_count;
+        hbond_case3_count += o.hbond_case3_count;
+        hbond_case4_count += o.hbond_case4_count;
         return *this;
     }
 

@@ -2432,6 +2432,15 @@ double ForceField::Calculate(bool gradient)
     m_coulomb_energy = 0.0;
     m_energy_hbond = 0.0;    // Claude Generated (2025): Phase 5 - Reset HB energy
     m_energy_xbond = 0.0;    // Claude Generated (2025): Phase 5 - Reset XB energy
+    // Claude Generated (May 2026, HB-investigation): reset per-case HB accumulators
+    m_hbond_case1_energy = 0.0;
+    m_hbond_case2_energy = 0.0;
+    m_hbond_case3_energy = 0.0;
+    m_hbond_case4_energy = 0.0;
+    m_hbond_case1_count = 0;
+    m_hbond_case2_count = 0;
+    m_hbond_case3_count = 0;
+    m_hbond_case4_count = 0;
     m_gfnff_repulsion = 0.0;  // Claude Generated (Dec 2025): Reset GFN-FF repulsion energy
     m_gfnff_bonded_repulsion = 0.0;
     m_gfnff_nonbonded_repulsion = 0.0;
@@ -2570,6 +2579,16 @@ double ForceField::Calculate(bool gradient)
             double thread_xb = m_stored_threads[i]->HalogenBondEnergy();
             m_energy_hbond += thread_hb;
             m_energy_xbond += thread_xb;
+
+            // Claude Generated (May 2026, HB-investigation): per-case split for Fortran comparison
+            m_hbond_case1_energy += m_stored_threads[i]->HBondCase1Energy();
+            m_hbond_case2_energy += m_stored_threads[i]->HBondCase2Energy();
+            m_hbond_case3_energy += m_stored_threads[i]->HBondCase3Energy();
+            m_hbond_case4_energy += m_stored_threads[i]->HBondCase4Energy();
+            m_hbond_case1_count += m_stored_threads[i]->HBondCase1Count();
+            m_hbond_case2_count += m_stored_threads[i]->HBondCase2Count();
+            m_hbond_case3_count += m_stored_threads[i]->HBondCase3Count();
+            m_hbond_case4_count += m_stored_threads[i]->HBondCase4Count();
 
             // Claude Generated (December 2025): Collect ATM three-body dispersion energy
             double thread_atm = m_stored_threads[i]->ATMEnergy();

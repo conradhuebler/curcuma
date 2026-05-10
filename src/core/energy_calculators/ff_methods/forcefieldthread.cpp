@@ -75,6 +75,15 @@ int ForceFieldThread::execute()
     m_coulomb_energy = 0.0;
     m_energy_hbond = 0.0;
     m_energy_xbond = 0.0;
+    // Claude Generated (May 2026, HB-investigation): reset per-case HB accumulators
+    m_hbond_case1_energy = 0.0;
+    m_hbond_case2_energy = 0.0;
+    m_hbond_case3_energy = 0.0;
+    m_hbond_case4_energy = 0.0;
+    m_hbond_case1_count = 0;
+    m_hbond_case2_count = 0;
+    m_hbond_case3_count = 0;
+    m_hbond_case4_count = 0;
     m_stors_energy = 0.0; // Claude Generated (March 2026): Reset triple bond torsion energy
     m_eq_energy = 0.0;  // Also reset EQ energy for consistency
 
@@ -2657,6 +2666,17 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
         }
 
         m_energy_hbond += E_HB * m_final_factor;
+
+        // Claude Generated (May 2026, HB-investigation): per-case split for Fortran comparison.
+        // Sum of cases must equal m_energy_hbond — verify in Phase 1 polymer test.
+        const double E_HB_final = E_HB * m_final_factor;
+        switch (hb.case_type) {
+            case 1: m_hbond_case1_energy += E_HB_final; ++m_hbond_case1_count; break;
+            case 2: m_hbond_case2_energy += E_HB_final; ++m_hbond_case2_count; break;
+            case 3: m_hbond_case3_energy += E_HB_final; ++m_hbond_case3_count; break;
+            case 4: m_hbond_case4_energy += E_HB_final; ++m_hbond_case4_count; break;
+            default: break;
+        }
 
         if (CurcumaLogger::get_verbosity() >= 3 && hb_log_count < 5) {
             CurcumaLogger::info(fmt::format(

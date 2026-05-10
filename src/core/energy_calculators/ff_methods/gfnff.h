@@ -116,6 +116,10 @@ struct GFNFFEnergyReport {
     double bond = 0, angle = 0, dihedral = 0, inversion = 0, stors = 0;
     double dispersion = 0, bonded_rep = 0, nonbonded_rep = 0;
     double coulomb = 0, hbond = 0, xbond = 0, atm = 0, batm = 0;
+    // Claude Generated (May 2026, HB-investigation): per-case HB diagnostic split.
+    // hbond = case1 + case2 + case3 + case4. Counts compare against Fortran nhb1/nhb2.
+    double hbond_case1 = 0, hbond_case2 = 0, hbond_case3 = 0, hbond_case4 = 0;
+    int hbond_case1_count = 0, hbond_case2_count = 0, hbond_case3_count = 0, hbond_case4_count = 0;
     double total = 0;
 
     // Per-term timing: cpu_sum (across all threads), gpu (phase wall-clock); -1 = N/A

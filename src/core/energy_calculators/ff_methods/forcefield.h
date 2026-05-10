@@ -98,6 +98,15 @@ public:
     inline double ElectrostatEnergy() const { return m_eq_energy; }
     inline double HydrogenBondEnergy() const { return m_energy_hbond; }   // Claude Generated (2025): Phase 5
     inline double HalogenBondEnergy() const { return m_energy_xbond; }    // Claude Generated (2025): Phase 5
+    // Claude Generated (May 2026, HB-investigation): per-case HB split (sum equals HydrogenBondEnergy()).
+    inline double HBondCase1Energy() const { return m_hbond_case1_energy; }
+    inline double HBondCase2Energy() const { return m_hbond_case2_energy; }
+    inline double HBondCase3Energy() const { return m_hbond_case3_energy; }
+    inline double HBondCase4Energy() const { return m_hbond_case4_energy; }
+    inline int HBondCase1Count() const { return m_hbond_case1_count; }
+    inline int HBondCase2Count() const { return m_hbond_case2_count; }
+    inline int HBondCase3Count() const { return m_hbond_case3_count; }
+    inline int HBondCase4Count() const { return m_hbond_case4_count; }
     inline double ATMEnergy() const { return m_atm_energy; }        // Claude Generated (December 2025): ATM energy
     inline double BatmEnergy() const { return m_batm_energy; }       // Claude Generated (Jan 17, 2026): Batm energy
     inline double STorsEnergy() const { return m_stors_energy; }     // Claude Generated (March 2026): Triple bond torsion energy
@@ -281,6 +290,15 @@ private:
     double m_atm_energy = 0.0;      // Claude Generated (December 2025): ATM three-body dispersion energy
     double m_batm_energy = 0.0;     // Claude Generated (January 17, 2026): Batm three-body dispersion energy
     double m_stors_energy = 0.0;    // Claude Generated (March 2026): Triple bond torsion energy
+    // Claude Generated (May 2026, HB-investigation): per-case HB split for Fortran comparison.
+    double m_hbond_case1_energy = 0.0;
+    double m_hbond_case2_energy = 0.0;
+    double m_hbond_case3_energy = 0.0;
+    double m_hbond_case4_energy = 0.0;
+    int m_hbond_case1_count = 0;
+    int m_hbond_case2_count = 0;
+    int m_hbond_case3_count = 0;
+    int m_hbond_case4_count = 0;
     double m_d3_energy = 0.0;       // Claude Generated (Jan 2, 2026): D3 dispersion energy (for UFF-D3 and GFN-FF)
     double m_d4_energy = 0.0;       // Claude Generated (Jan 2, 2026): D4 dispersion energy (for GFN-FF)
 
