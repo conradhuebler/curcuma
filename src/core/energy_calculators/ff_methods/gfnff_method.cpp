@@ -2342,7 +2342,11 @@ bool GFNFF::importTopology(const json& topo_json)
     }
 
     // Import into cached topology
-    TopologyInfo& topo = m_cached_topology.emplace();
+    // Claude Generated (May 2026, ICX-build): explicit assign instead of emplace() —
+    // ICX rejects the no-arg emplace if TopologyInfo's default ctor isn't visible
+    // through the GFNFFTopology+GFNFFDynamicState multi-inheritance pattern.
+    m_cached_topology = TopologyInfo{};
+    TopologyInfo& topo = *m_cached_topology;
 
     // Fragment information
     topo.nfrag = topo_json.value("nfrag", 1);
