@@ -1,9 +1,19 @@
 # WP-V — Gradient-Validierung CPU vs GPU vs Fortran-Referenz
 
-**Status:** 🆕 Vorgeschlagen
+**Status:** 🟡 **Energie-Anteil aufgelöst** (Mai 2026, Commit `cba0696`); Gradient-Drift in MD weiterhin offen
 **Aufwand:** 1–3 Tage Diagnose + Term-Lokalisation, dann je nach Befund 1–4h pro Bug-Fix
 **Erwarteter Nutzen:** Reproducibility — Voraussetzung für die Behauptung "100 % Referenz-Genauigkeit" laut CLAUDE.md, MD-Long-Run-Stabilität, sauberer Optimizer-Pfad. Kein direkter Performance-Effekt.
 **Voraussetzung:** keine
+
+## Mai-2026-Update — Energie-Bias-Anteil aufgelöst
+
+Der ursprünglich an WP-V mitgekoppelte **+0.93 Eh polymer-ENERGIE-Bias** zu XTB-Fortran (siehe `cutoff-inventory.md`-Verweis Inkohärenz #1) hatte eine separate Ursache und ist mit Commit `cba0696` behoben:
+
+- Ursache: dead-code Inline-Fallback `m_config.get<double>("eeq_distance_cutoff", 30.0)` in `eeq_solver.cpp:3077`, der den canonical PARAM-Default 0.0 stillschweigend mit 30.0 überschrieb. Phase-2-EEQ truncated dadurch silent jede default-Invokation für N>200.
+- Verifikation gegen `xtb --gfnff` auf polymer.xyz: vor Fix -202.588 Eh (+930 mEh), nach Fix -203.566 Eh (+48 mEh).
+- Restdiff (48 mEh) sitzt nahezu vollständig im Torsion-Term — separates Issue, nicht WP-V.
+
+**Noch offen für WP-V:** der MD-Heat-Bath-Drift / Gradient-Diff CPU vs GPU vs FD-Referenz auf acetic_acid_dimer und complex (231 Atome). Diese Befunde wurden mit pre-Fix-Energien gemessen — die Phase-1-Tabelle aus dem ursprünglichen Plan sollte gegen die neue, korrekte Energie-Baseline neu erhoben werden, bevor die Phase-2-Term-Bisect-Strategie weiterläuft. Der Drift kann sich dadurch verändert haben.
 
 ## Symptom
 

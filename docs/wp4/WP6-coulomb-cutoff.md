@@ -1,8 +1,8 @@
-# WP6 — Coulomb Cutoff / Cell-List (P4d) — Plan-only
+# WP6 — Coulomb Cutoff / Cell-List (P4d) — ✅ Implementiert (Mai 2026)
 
-**Status:** ⛔ Blockiert durch G2c — nur dokumentieren, nicht implementieren
-**Aufwand:** 1 Tag (wenn G2c freigegeben)
-**Erwarteter Nutzen:** Coulomb 5–20× bei N > 2000
+**Status:** ✅ Implementiert — Commits `f3ffe97` (WP6 + Phase C + CLI-Fix) und `cba0696` (EEQ-Cutoff-Fallback-Korrektur als Folgefund)
+**Aufwand:** 1 Tag implementiert (Phase C nachgezogen, Cell-List, drei orthogonale Bugfixes)
+**Erwarteter Nutzen:** **erfüllt** — mixture.xyz Coulomb-Wall **611 → 74 ms (8.3×)** bei `eeq_distance_cutoff=30`
 
 ## Warum dieses WP nur ein Plan ist
 
@@ -43,27 +43,35 @@ Wenn auch nur **eine** Site einen anderen Cutoff hat (oder gar keinen) als die a
 | `src/core/energy_calculators/ff_methods/gfnff_method.cpp` | ~Z. 8220 | G2c-Site 4 (EEQ-Gradient) |
 | `docs/GFNFF_GPU_EEQ_CUTOFF_FIX.md` | — | Pflicht-Lektüre vor Beginn |
 
-## Akzeptanzkriterien (für spätere Umsetzung)
+## Akzeptanzkriterien — Stand Mai 2026
 
-1. G2c aktiv und validiert (siehe Roadmap-Status).
-2. ⚙️ `mixture.xyz` Coulomb-Wall von 640 ms → < 100 ms.
-3. ⚙️ Energie-Diff CPU vs. GPU < 1 nEh.
-4. ⚙️ Gradient-Diff vs. numerisch < 1e-5 Hartree/Bohr.
-5. ⚙️ MD-Drift über 1000 Schritte (Polymer N=1410, NVE, kein Thermostat) < 1 mEh.
-6. ⚙️ Energie-Diff vs. XTB-Fortran-Referenz < 50 µEh über fünf Test-Systeme.
+1. ✅ G2c aktiv und validiert (siehe `cutoff-inventory.md` — alle 5 Sites grün).
+2. ✅ `mixture.xyz` Coulomb-Wall **74 ms** bei cutoff=30 (Plan-Target < 100 ms).
+3. ⚪ Energie-Diff CPU vs. GPU < 1 nEh — nicht systematisch verifiziert (eigener Benchmark-Lauf erforderlich, GPU-Pfad strukturell konsistent via `r_cut[tid]`).
+4. ⚪ Gradient-Diff vs. numerisch < 1e-5 Hartree/Bohr bei aktivem Cutoff — nicht systematisch verifiziert (offen für Operator-Validation).
+5. ⚪ MD-Drift über 1000 Schritte (polymer N=1410, NVE, kein Thermostat) < 1 mEh bei cutoff=30 — nicht gelaufen.
+6. ⚪ Energie-Diff vs. XTB-Fortran-Referenz < 50 µEh über fünf Test-Systeme — polymer cutoff=0 hat 48 mEh Restdiff (Torsion-Term), kleine Moleküle <µEh; cutoff>0 weicht erwartungsgemäß stärker ab und wurde nicht systematisch gemessen.
 
-## Risiken
+**Bilanz:** Code-Pfad mechanisch vollständig, Defaults bit-identisch zu pre-WP6, mixture-Performance-Target erfüllt. Vollständige numerische Validation gegen XTB-FD-Gradient bleibt Operator-Aufgabe (Test-Skript ähnlich WP-V Phase 1).
 
-- **Hoch.** Hellmann-Feynman-Verletzung bei einseitigem Cutoff (verifiziert Mai 2026). Der gesamte Cutoff-Pfad ist nicht-Fortran und braucht eigene Referenz-Validierung gegen XTB.
-- **Energie-Surface-Verschiebung:** Selbst bei korrekter HF-Konsistenz weicht das Surface vom Fortran-Original ab. Ab welchem Cutoff der Effekt vernachlässigbar ist, muss gemessen werden.
-- **Bottleneck-Verschiebung:** EEQ-Cholesky ist O(N³/6). Bei N > 5000 dominiert Cholesky, nicht Coulomb. WP6 löst nur einen Teil — siehe Hinweis in der Roadmap (G2c, "nicht der Bottleneck").
+## Risiken (rückblickend)
 
-## Vorbedingung
+- **Hellmann-Feynman:** in Stufe 1 explizit als Validation-Gate vor Stufe 2 abgesichert (alle 5 Sites filtern identisch, Cell-List nur opt-in via `eeq_distance_cutoff > 0`). Sweep-Test bestätigt Monotonie.
+- **Energie-Surface-Verschiebung:** quantifiziert. polymer cutoff=30 weicht ~717 mEh vom Default ab, cutoff=80 weniger als 1 mEh. Erwartetes erfc-Tail-Verhalten.
+- **Bottleneck-Verschiebung:** bestätigt. mixture.xyz-Profil zeigt nach WP6 Coulomb nicht mehr top-3 — D4/Topologie/Pair-Generation dominieren.
 
-- WP1 abgeschlossen (Threading klar)
-- G2c aktiviert und validiert (separater Task, nicht Teil von WP6)
-- WP3, WP4, WP5 vorzugsweise abgeschlossen, damit der Coulomb-Anteil neu gemessen werden kann (Anteilsverschiebung möglich)
+## Implementierungs-Spec (für Code-Lesen)
+
+| Site | Datei:Zeile | Funktion |
+|------|------------|----------|
+| Site 1a Filter (Phase 2 Geometric) | `src/core/energy_calculators/ff_methods/eeq_solver.cpp:1075-1085, 1175-1185` | `buildCorrectedEEQMatrix` |
+| Site 5 Stencil Co-Variation | `src/core/energy_calculators/ff_methods/gfnff_method.cpp:1010-1019` | `Calculation` (gradient block) |
+| Pair-Generierung 3-Branch-Dispatch | `src/core/energy_calculators/ff_methods/gfnff_method.cpp:8444-8580` | `generateCoulombPairsNative` |
+| Threshold-Param | `src/core/energy_calculators/ff_methods/gfnff.h:236` | `nb_cell_list_min_atoms` (Alias `hb_cell_list_min_atoms`) |
+| CLI-Routing-Fix | `src/core/energycalculator.{cpp,h}` | `reattachMethodScopes` |
+| GFNFF Param-Promotion | `src/core/energy_calculators/ff_methods/gfnff_method.cpp:508-525` | `GFNFF(json&)` Konstruktor |
+| Capability-Forwarding | `src/capabilities/curcumaopt.cpp:142-160` | `LoadControlJson` |
 
 ## Cross-cutting-Regel
 
-Cutoff ist eine **Approximation** im Sinne der README-Regel. Default bleibt `coulomb_distance_cutoff_bohr = 0.0` (= aus, voller O(N²)-Pfad bit-identisch zu pre-WP6). Aktivierung nur über expliziten ConfigManager-Schalter durch den Operator. Der voll-Coulomb-Pfad bleibt im Code, nicht entfernen.
+Cutoff ist eine **Approximation** im Sinne der README-Regel. Default `eeq_distance_cutoff = 0.0` bleibt (= aus, voller O(N²)-Pfad bit-identisch zu pre-WP6). Aktivierung erfolgt über `-gfnff.eeq_distance_cutoff <Bohr>` (CLI) oder explizit im JSON-Controller. Der voll-Coulomb-Pfad bleibt im Code.

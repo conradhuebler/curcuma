@@ -39,15 +39,32 @@ Wenn künftig ein neuer Cutoff dazukommt, sollte er sich an die unten beschriebe
 
 ## Top-Inkohärenzen (zu fixen)
 
-### #1 — `eeq_distance_cutoff` Doppel-Definition (kritisch)
+### #1 — `eeq_distance_cutoff` Doppel-Definition (✅ aufgelöst, Mai 2026)
 
-Zwei `PARAM(eeq_distance_cutoff, ...)`-Definitionen mit **verschiedenen Defaults**:
-- `gfnff.h:229` Default `30.0`
-- `eeq_solver.h:965` Default `0.0`
+**Historie:**
 
-Forwarding-Logik in `gfnff_method.cpp:533` (`forwardEEQSolverParams`) überschreibt den eeq-solver-Wert mit dem gfnff-Wert. Effektiv gilt: **30.0**, was **nicht** die Fortran-Referenz ist (XTB GFN-FF nutzt 0 = kein Cutoff für Phase-2-EEQ).
+Phase A+B (Commit `2b85963`): Doppel-PARAM zwischen `gfnff.h:229` (30.0) und `eeq_solver.h:965` (0.0) aufgelöst — gfnff-PARAM entfernt, eeq_solver-PARAM kanonisch mit Default 0.0.
 
-**Folge:** Curcuma-Default-EEQ ist nicht bit-identisch zu XTB. Heute durch andere Drift-Quellen kaschiert (siehe WP-V), aber sobald jene aufgeklärt sind, bleibt dieser systematische Offset.
+**Verstecktes Folge-Problem (Mai 2026, Commit `cba0696`):** Selbst nach Phase A+B verhielt sich Curcuma-Default nicht wie Fortran. Ursache war ein dead-code-Inline-Fallback in `eeq_solver.cpp:3077`:
+
+```cpp
+double eeq_dist_cutoff = m_config.get<double>("eeq_distance_cutoff", 30.0);
+```
+
+Die `30.0` überstimmte den canonical PARAM-Default 0.0 **immer dann**, wenn `m_config` keinen explicit registry-Eintrag trug — was der Default-CLI-Pfad ist. Resultat: Phase-2-EEQ truncated silent jede default-Invokation für N>200 (Gating bei line 3078 `natoms > 200`).
+
+Verifikation gegen Fortran (`gfnff_engrad.F90:1319-1331, 1380-1389`): `goed_gfnff` hat **keinen** Phase-2-Cutoff, voller O(N²) A-Matrix und Energie-Summation.
+
+**Empirisch (polymer.xyz, 1410 Atome, gegen XTB --gfnff):**
+
+| Stand | Curcuma (Eh) | XTB Fortran (Eh) | Diff |
+|-------|--------------:|-----------------:|------:|
+| pre-Fix (silent 30.0) | -202.58789086 | -203.51759134 | **+929.7 mEh** |
+| post-Fix (PARAM-Default 0.0) | -203.56552633 | -203.51759134 | **+47.9 mEh** |
+
+Die Restdifferenz (48 mEh) sitzt nahezu vollständig im Torsion-Term — alle anderen Komponenten (Bond, Angle, Coulomb, Dispersion, BATM, Repulsion) matchen Fortran zu <µEh.
+
+**Korrektur am alten D4-Eintrag unten:** Der +0.93 Eh polymer-Bias war **nicht** D4- oder HB-bezogen, sondern dieser EEQ-Cutoff-Fallback. WP-V (Gradient-Validierung) bleibt davon unberührt — es ging dort um Gradient-Drift in MD, nicht um den Energie-Bias.
 
 ### #2 — CN-Derivate-Cutoff effektiv tot
 
@@ -81,7 +98,7 @@ D3 nutzt `√1500 ≈ 38.73 Bohr` (Fortran-Match), D4 nutzt `60.0 Bohr` Pair-Gen
 
 **Schlussfolgerung:** Fortran's `dispthr=1500` gilt offenbar nur für D3, nicht für D4 (in der Fortran-Implementierung hat D4 entweder keinen geometrischen Cutoff oder ein anderes `dispthr_d4`). Curcuma's empirisches `60.0 Bohr` für D4 ist näher an der Fortran-D4-Referenz als das D3-Match. **Phase D wurde revertiert** — Status quo (D4=60.0 Bohr) bleibt.
 
-**Hinweis:** Der absolute Bias zwischen Curcuma-D4 und XTB-Fortran ist **+0.93 Eh auf polymer** — das ist nicht D4-Cutoff-bezogen, sondern andere Quellen (vermutlich EEQ Phase 2, HB, oder kumulierte Term-Diskrepanzen). Siehe WP-V (`docs/wp4/WP-V-gradient-validation.md`). D4-Cutoff-Vereinheitlichung würde das nicht beheben.
+**Hinweis (Mai 2026 update):** Der damals gemessene +0.93 Eh polymer-Bias war zu jenem Zeitpunkt richtig — aber die Ursache war **nicht** D4. Sie war der EEQ-Cutoff-Fallback (Inkohärenz #1, Commit `cba0696`). Nach jenem Fix ist der polymer-Bias auf ~48 mEh geschrumpft, sitzt im Torsion-Term, und D4 selbst matcht Fortran zu <µEh. Die obigen D4-Tabelle-Werte sind also weiterhin gültige Datenpunkte zum D4-Verhalten in isolation, aber der Polymer-Bias ist kein D4-Issue.
 
 ### #5 — CN wird 3× berechnet (Performance, kein Korrektheits-Issue)
 
@@ -110,26 +127,24 @@ Die anderen Cutoffs bleiben **unabhängig** von `eeq_distance_cutoff`:
 - `hb.r_cut`, `xb.r_cut`, `rep.r_cut` — Term-spezifisch
 - `disp.r_cut` (D3/D4) — Dispersions-spezifisch
 
-## Stand zu G2c-Voraussetzungen (4 Pflicht-Sites)
+## Stand zu G2c-Voraussetzungen (5 Sites — alle vollständig, Mai 2026)
 
-| Site | Komponente | CPU heute | GPU heute | Bedarf |
-|------|------------|-----------|-----------|--------|
-| 1 | EEQ A-Matrix-Aufbau | volle N×N (Cutoff inaktiv trotz Param 30.0?) | `cutoff_sq` Parameter wird übergeben | ⚠️ CPU effektiv 30.0 wegen Doppel-Def, sollte aber 0 sein |
-| 2 | Coulomb-Pair-Liste | `coul.r_cut = 100.0` hardcoded | hochgeladen | ⚠️ Cutoff > 0 hat keinen Effekt, weil 100.0 immer übersteuert |
-| 3 | CPU-Coulomb-Energie | filtert `coul.r_cut` | — | ✅ folgt Site 2 |
-| 4 | GPU-`k_coulomb` | — | filtert `r_cut[tid]` | ✅ folgt Site 2 |
-| 5 | EEQ-Gradient Term 1b | kein expliziter geometrischer Cutoff | kein expliziter Cutoff | ❌ muss bei Cutoff > 0 hinzugefügt werden |
+| Site | Komponente | CPU | GPU | Status |
+|------|------------|-----|-----|--------|
+| 1a | EEQ A-Matrix Phase 2 (`buildCorrectedEEQMatrix`) | filtert in Geometric-Mode bei cutoff>0 (`eeq_solver.cpp:1175-1185`) | `k_eeq_build_matrix` filtert via `cutoff_sq` (`cuda/eeq_solver_gpu.cu:216-251`) | ✅ Commit `f3ffe97` |
+| 1b | EEQ A-Matrix Phase 2 iterativer Solve | filtert seit Mar 2026 (`eeq_solver.cpp:3083-3086`) — Default-Fallback Mai 2026 von 30.0 → 0.0 korrigiert | identisch zu CPU | ✅ Commits `2b85963` + `cba0696` |
+| 2 | Coulomb-Pair-Liste | drei-Branch-Dispatch in `generateCoulombPairsNative` (Cell-List wenn N≥`nb_cell_list_min_atoms` und cutoff>0) | erbt Pair-Liste vom CPU mit identischem `r_cut` | ✅ Commit `f3ffe97` |
+| 3 | CPU-Coulomb-Energie | filtert `coul.r_cut` (war heute Z. 2200, no-op bei r_cut=100) | — | ✅ folgt Site 2 |
+| 4 | GPU-`k_coulomb` | — | filtert `r_cut[tid]` (`cuda/gfnff_kernels.cu:359`) | ✅ folgt Site 2 |
+| 5 | EEQ-Gradient Term 1b — CN-Derivate-Stencil | `cn_deriv_cutoff_sq = max(40², eeq_cut²)` (`gfnff_method.cpp:1014`) — niemals < 40 Bohr | identisch (k_cn_chainrule liest dieselbe `m_dcn`) | ✅ Commit `f3ffe97` |
 
-**Bilanz:** G2c ist heute **strukturell halb-implementiert**. Cutoff-Mechanik existiert in Sites 2/3/4, aber:
-- Site 1 hat zwei verschiedene Defaults (Inkohärenz #1)
-- Site 2 wird durch hardcoded 100.0 übersteuert (Inkohärenz #3)
-- Site 5 fehlt vollständig
+**Bilanz:** G2c ist **vollständig implementiert** (Mai 2026). Cutoff > 0 ist opt-in und über `-gfnff.eeq_distance_cutoff <Bohr>` aktivierbar (CLI-Plumbing-Fix Teil von `f3ffe97`). Default 0 = voller O(N²), bit-identisch zu Fortran-`goed_gfnff`.
 
 ## Beziehung zu anderen WPs
 
-- **WP-V (Gradient-Validierung):** orthogonal. WP-V testet die Gradient-Implementierungen gegen XTB; WP-C testet Cutoff-Konsistenz. Default `eeq_distance_cutoff = 0` ist Fortran-Match, also pre-WP-C-Diff zur Fortran-Referenz bleibt durch WP-C unverändert.
-- **WP6 (Coulomb-Cell-List):** vorbedingung-blockiert auf WP-C. Sobald G2c sauber, Cell-List nutzt `eeq_distance_cutoff` als Bin-Größe.
-- **CN-Performance-Cleanup** (Audit-Punkt #5): unabhängiges WP, eliminiert die 3× CN-Berechnung.
+- **WP-V (Gradient-Validierung):** weiterhin offen für Gradient-Drift in MD. Der Energie-Bias-Verweis aus dem alten WP-V-Doc ist durch Commit `cba0696` beantwortet — der polymer-Bias war der EEQ-Cutoff-Fallback (siehe Inkohärenz #1).
+- **WP6 (Coulomb-Cell-List):** **abgeschlossen** Mai 2026 (Commit `f3ffe97`). mixture.xyz Coulomb-Wall 611 → 74 ms (8.3×) bei cutoff=30.
+- **CN-Performance-Cleanup** (Audit-Punkt #5): unabhängiges WP, eliminiert die 3× CN-Berechnung. Offen.
 
 ## Änderungs-Historie
 
@@ -138,3 +153,5 @@ Die anderen Cutoffs bleiben **unabhängig** von `eeq_distance_cutoff`:
 | Mai 2026 | Initial Audit | Phase-1-Erkundung WP-C |
 | Mai 2026 | Phase A+B umgesetzt — `eeq_distance_cutoff` Doppel-Def aufgelöst, CN-deriv-cutoff benannt, Coulomb r_cut Struct-Default angeglichen, Init-Logging | Commit `2b85963` |
 | Mai 2026 | Phase D versucht + revertiert: D3/D4 Cutoff-Vereinheitlichung verschlechtert XTB-Match (siehe oben) | XTB-Validation auf polymer.xyz |
+| Mai 2026 | WP6 + Phase C umgesetzt: Site 1a + Site 5 Filter-Logik, Cell-List für Coulomb-Pairs, CLI-Plumbing-Fix | Commit `f3ffe97` |
+| Mai 2026 | Inkohärenz #1 vollständig aufgelöst: `eeq_solver.cpp:3077` Inline-Fallback 30.0 → 0.0. Polymer-Bias zu Fortran von 930 mEh auf 48 mEh reduziert | Commit `cba0696` |

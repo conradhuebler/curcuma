@@ -1,6 +1,6 @@
 # GFN-FF Implementation Status
 
-**Last Updated**: 2026-04-11
+**Last Updated**: 2026-05-10
 **Implementation**: AI-generated, machine-tested — **human production testing pending**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
@@ -21,6 +21,40 @@
 | Large system stability (>500 atoms) | ⚠️ Partial | Polymer energy, gradient precision acceptable |
 
 **Recommendation**: Cross-check against `xtb-gfnff` for any system class not in the table above.
+
+---
+
+## Latest: WP6 Coulomb Cell-List + WP-V Energy-Bias Resolved (May 10, 2026) ✅
+
+**Two related findings, both resolved in successive commits:**
+
+### WP6 — Coulomb Cell-List + G2c Phase C (Commit `f3ffe97`)
+
+Optional spatial cutoff for the Coulomb pair list, gated by the `eeq_distance_cutoff` parameter. When set > 0, builds a `SpatialCellList` for `N >= nb_cell_list_min_atoms` atoms and only emits pairs within the cutoff. Default behavior (cutoff = 0) is bit-identical to pre-WP6, full O(N²).
+
+| System | Coulomb wall (cutoff=0) | Coulomb wall (cutoff=30) | Speedup |
+|--------|------------------------:|-------------------------:|--------:|
+| polymer (1410 atoms) | ~22 ms | ~28 ms | neutral (cell-list build cost ≈ pair-reduction gain) |
+| **mixture (6200 atoms)** | **611 ms** | **74 ms** | **8.3×** |
+
+Activation: `curcuma -sp mol.xyz -method gfnff -gfnff.eeq_distance_cutoff 30`. The `nb_cell_list_min_atoms` threshold (default 800, alias `hb_cell_list_min_atoms`) controls when the cell-list path engages.
+
+WP6 also closed the prerequisite G2c Phase C (Site 1a in `buildCorrectedEEQMatrix` Geometric mode + Site 5 CN-derivative stencil that defensively grows with `eeq_distance_cutoff`). The CLI parameter routing (`reattachMethodScopes` in EnergyCalculator + GFNFF top-level promotion + capabilities forwarding) was also fixed as a prerequisite for any cutoff testing — was a pre-existing pipeline bug.
+
+### WP-V Resolution — EEQ Phase 2 Cutoff-Fallback (Commit `cba0696`)
+
+While diagnosing a non-monotonic cutoff sweep on polymer, found that `eeq_solver.cpp:3077` carried a dead inline fallback `m_config.get<double>("eeq_distance_cutoff", 30.0)` that silently overrode the canonical PARAM default 0.0 whenever the registry entry was missing — i.e. for default CLI invocations. Phase 2 EEQ truncated all default runs for N>200, shifting the energy by ~1 Eh on polymer.
+
+Cross-verified against Fortran source (`gfnff_engrad.F90:1319-1389`): `goed_gfnff` has no Phase-2 cutoff. Curcuma's silent truncation was a Curcuma-only PCG-conditioning aid, never validated against the energy surface.
+
+| Stand | Curcuma polymer (Eh) | XTB Fortran (Eh) | Diff |
+|-------|---------------------:|-----------------:|-----:|
+| pre-Fix (silent 30.0) | -202.58789086 | -203.51759134 | +929.7 mEh |
+| post-Fix (PARAM 0.0) | -203.56552633 | -203.51759134 | **+47.9 mEh** |
+
+Component breakdown shows the residual 48 mEh sits almost entirely in the torsion term (Curcuma ~+0.642 Eh vs Fortran +0.691 Eh). All other terms — bond, angle, Coulomb, dispersion, repulsion, BATM — match Fortran to <µEh.
+
+Affects only systems with N>200 (the truncation gating). Small molecules unchanged. The +0.93 Eh polymer bias previously documented in `cutoff-inventory.md` and pointed at WP-V is closed; the gradient-drift portion of WP-V remains open and should be re-measured against the now-correct energy baseline.
 
 ---
 
