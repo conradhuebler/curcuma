@@ -3446,10 +3446,16 @@ void ForceFieldThread::CalculateATMContribution()
 
         // r0 cutoff radii (BJ damping formula)
         // r0_xy = a1 * sqrt(3 * R_cov[X] * R_cov[Y]) + a2
-        // Use rcov_bohr from GFNFFParameters namespace (0-indexed)
-        double r_cov_i = (zi > 0 && zi <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zi - 1] : 1.0;
-        double r_cov_j = (zj > 0 && zj <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zj - 1] : 1.0;
-        double r_cov_k = (zk > 0 && zk <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zk - 1] : 1.0;
+        //
+        // Claude Generated (May 2026, GPU-vs-CPU 8.9 µEh investigation): ATM is a D3/D4
+        // dispersion theory. The CPU previously read rcov_bohr (= r0_gfnff, the GFN-FF
+        // bond-r0 array — values like 0.557 Bohr for H, 0.983 for C) instead of D3
+        // covalent radii (covalent_rad_d3 — 0.605 Bohr for H, 1.417 for C, matches GPU's
+        // s_rcov_d3_bohr exactly). Caused the polymer ATM mismatch CPU=+16.74 µEh vs
+        // GPU=+7.52 µEh that drove the gfnff_gpu_vs_cpu_polymer test failure.
+        double r_cov_i = (zi > 0 && zi <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zi - 1] : 1.0;
+        double r_cov_j = (zj > 0 && zj <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zj - 1] : 1.0;
+        double r_cov_k = (zk > 0 && zk <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zk - 1] : 1.0;
 
         double r0ij = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_j) + triple.a2;
         double r0ik = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_k) + triple.a2;
@@ -3550,9 +3556,11 @@ void ForceFieldThread::CalculateATMGradient()
         int zk = m_atom_types[triple.k];
 
         // r0 cutoff radii (BJ damping formula)
-        double r_cov_i = (zi > 0 && zi <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zi - 1] : 1.0;
-        double r_cov_j = (zj > 0 && zj <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zj - 1] : 1.0;
-        double r_cov_k = (zk > 0 && zk <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zk - 1] : 1.0;
+        // Claude Generated (May 2026): use D3 covalent radii (matches GPU and ATM theory).
+        // See longer comment in CalculateATMContribution above.
+        double r_cov_i = (zi > 0 && zi <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zi - 1] : 1.0;
+        double r_cov_j = (zj > 0 && zj <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zj - 1] : 1.0;
+        double r_cov_k = (zk > 0 && zk <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zk - 1] : 1.0;
 
         double r0ij = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_j) + triple.a2;
         double r0ik = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_k) + triple.a2;

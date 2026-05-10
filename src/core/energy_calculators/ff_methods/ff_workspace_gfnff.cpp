@@ -1550,9 +1550,12 @@ void FFWorkspace::calcATM(int p)
         double c9 = triple.s9 * std::sqrt(std::fabs(triple.C6_ij * triple.C6_ik * triple.C6_jk));
 
         int zi = m_atom_types[triple.i], zj = m_atom_types[triple.j], zk = m_atom_types[triple.k];
-        double r_cov_i = (zi > 0 && zi <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zi - 1] : 1.0;
-        double r_cov_j = (zj > 0 && zj <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zj - 1] : 1.0;
-        double r_cov_k = (zk > 0 && zk <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zk - 1] : 1.0;
+        // Claude Generated (May 2026, GPU/CPU 8.9 µEh fix): D3 covalent radii (matches GPU's
+        // s_rcov_d3_bohr exactly). Earlier rcov_bohr (= r0_gfnff) was a GFN-FF-specific bond-r0
+        // table, not the D3-theory covalent radii ATM expects. Drove the polymer ATM mismatch.
+        double r_cov_i = (zi > 0 && zi <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zi - 1] : 1.0;
+        double r_cov_j = (zj > 0 && zj <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zj - 1] : 1.0;
+        double r_cov_k = (zk > 0 && zk <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zk - 1] : 1.0;
 
         double r0ij = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_j) + triple.a2;
         double r0ik = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_k) + triple.a2;
@@ -1607,9 +1610,10 @@ void FFWorkspace::calcATMGradient(int p)
         double c9 = -triple.s9 * std::sqrt(std::fabs(triple.C6_ij * triple.C6_ik * triple.C6_jk));
 
         int zi = m_atom_types[triple.i], zj = m_atom_types[triple.j], zk = m_atom_types[triple.k];
-        double r_cov_i = (zi > 0 && zi <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zi - 1] : 1.0;
-        double r_cov_j = (zj > 0 && zj <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zj - 1] : 1.0;
-        double r_cov_k = (zk > 0 && zk <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zk - 1] : 1.0;
+        // Claude Generated (May 2026): D3 covalent radii (matches GPU + ATM theory).
+        double r_cov_i = (zi > 0 && zi <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zi - 1] : 1.0;
+        double r_cov_j = (zj > 0 && zj <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zj - 1] : 1.0;
+        double r_cov_k = (zk > 0 && zk <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zk - 1] : 1.0;
 
         double r0ij = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_j) + triple.a2;
         double r0ik = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_k) + triple.a2;
