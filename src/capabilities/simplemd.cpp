@@ -1639,29 +1639,35 @@ void SimpleMD::prepareRun()
 #endif
     std::vector<double> charge(0, m_natoms);
 
-#ifdef GCC
-    //         std::cout << fmt::format("{0: ^{0}} {1: ^{1}} {2: ^{2}} {3: ^{3}} {4: ^{4}}\n", "Step", "Epot", "Ekin", "Etot", "T");
-    // std::cout << fmt::format("{1: ^{0}} {1: ^{1}} {1: ^{2}} {1: ^{3}} {1: ^{4}}\n", "", "Eh", "Eh", "Eh", "K");
-#else
-    std::cout << "Step"
-              << "\t"
-              << "Epot"
-              << "\t"
-              << "Ekin"
-              << "\t"
-              << "Etot"
-              << "\t"
-              << "T" << std::endl;
-    std::cout << "  "
-              << "\t"
-              << "Eh"
-              << "\t"
-              << "Eh"
-              << "\t"
-              << "Eh"
-              << "\t"
-              << "T" << std::endl;
-#endif
+    // Claude Generated (May 2026): unified MD table header — matches the data rows
+    // printed below. Drops the #ifdef GCC branches (the GCC-only fmt::format path was
+    // dead because no compiler defines `GCC`; only `__GNUC__`) and the 5-column
+    // tab-separated fallback that didn't line up with the 15+ column data.
+    {
+        std::string header = fmt::format(
+            "{1: ^{0}} {2: ^{0}} {3: ^{0}} {4: ^{0}} {5: ^{0}} {6: ^{0}} {7: ^{0}} "
+            "{8: ^{0}} {9: ^{0}} {10: ^{0}} {11: ^{0}} {12: ^{0}} {13: ^{0}} {14: ^{0}} "
+            "{15: ^{0}}",
+            15,
+            "Time", "Epot", "<Epot>", "Ekin", "<Ekin>", "Etot", "<Etot>",
+            "T", "<T>", "Wall", "<Wall>", "Virial", "<Virial>", "Remaining", "dt");
+        std::string units = fmt::format(
+            "{1: ^{0}} {2: ^{0}} {3: ^{0}} {4: ^{0}} {5: ^{0}} {6: ^{0}} {7: ^{0}} "
+            "{8: ^{0}} {9: ^{0}} {10: ^{0}} {11: ^{0}} {12: ^{0}} {13: ^{0}} {14: ^{0}} "
+            "{15: ^{0}}",
+            15,
+            "ps", "Eh", "Eh", "Eh", "Eh", "Eh", "Eh",
+            "K", "K", "Eh", "Eh", "Eh", "Eh", "s", "ps");
+        if (m_dipole) {
+            header += fmt::format(" {: ^15}", "Dipole");
+            units  += fmt::format(" {: ^15}", "Debye");
+        }
+        if (m_writeUnique) {
+            header += fmt::format(" {: ^15}", "nUnique");
+            units  += fmt::format(" {: ^15}", "#");
+        }
+        std::cout << header << "\n" << units << "\n";
+    }
     if (m_rmsd_mtd) {
         std::cout << "k\t" << m_k_rmsd << std::endl;
         std::cout << "alpha\t" << m_alpha_rmsd << std::endl;
@@ -2909,26 +2915,28 @@ void SimpleMD::PrintStatus() const
     else
         remaining = (m_maxtime - m_currentStep) * duration;
 #pragma message("awfull, fix it ")
-    if (m_writeUnique) {
-#ifdef GCC
-        std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f} {15: ^{0}} {16: ^{0}}\n", 15,
-            m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, m_virial_correction, m_average_virial_correction, remaining, m_time_step / 1000.0, m_unqiue->StoredStructures());
-#else
-        std::cout << m_currentStep * m_dT / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
-
-#endif
-    } else {
-#ifdef GCC
+    // Claude Generated (May 2026): unified MD step printout — matches the header above.
+    // Base 15 columns always present (Time, energies, T, wall, virial, remaining, dt).
+    // Optional appendix columns: Dipole (when -dipole), nUnique (when -writeUnique).
+    // Replaces three divergent layouts (writeUnique with nUnique-at-end, dipole with
+    // dipole-mid-row, and a 5-col tab-separated fallback). The dropped #ifdef GCC
+    // pre-processor guard was dead — no compiler defines `GCC`.
+    {
+        std::string line = fmt::format(
+            "{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} "
+            "{8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f} "
+            "{15: ^{0}f}",
+            15,
+            m_currentStep * m_dT / fs2amu / 1000.0,  // Time in ps
+            m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot,
+            m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential,
+            m_virial_correction, m_average_virial_correction,
+            remaining, m_time_step / 1000.0);
         if (m_dipole)
-            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f} {15: ^{0}f} {16: ^{0}f}\n", 15,
-                m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, m_aver_dipol_linear * 2.5418 * 3.3356, m_virial_correction, m_average_virial_correction, remaining, m_time_step / 1000.0);
-        else
-            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f} {15: ^{0}f}\n", 15,
-                m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, m_virial_correction, m_average_virial_correction, remaining, m_time_step / 1000.0);
-#else
-        std::cout << m_currentStep * m_dT / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
-
-#endif
+            line += fmt::format(" {: ^15f}", m_aver_dipol_linear * 2.5418 * 3.3356);
+        if (m_writeUnique)
+            line += fmt::format(" {: ^15}", m_unqiue->StoredStructures());
+        std::cout << line << "\n";
     }
 
     // RATTLE constraint summary (only when RATTLE is active)
