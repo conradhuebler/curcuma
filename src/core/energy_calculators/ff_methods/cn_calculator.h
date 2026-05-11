@@ -65,7 +65,8 @@ public:
         const Eigen::MatrixXd& geometry_bohr,
         double threshold = 1600.0,
         double kn = -7.5,
-        double cnmax = 4.4
+        double cnmax = 4.4,
+        std::vector<double>* out_cn_raw = nullptr  ///< WP-D (May 2026): optional raw CN output for reuse in dcn calculation
     );
 
     /**

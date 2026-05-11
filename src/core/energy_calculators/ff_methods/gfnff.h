@@ -863,6 +863,9 @@ public:
     // WP-P1 (May 2026): last per-phase timings (ms) for MD diagnostics JSONL dump.
     const PrepTiming& getLastPrepTiming() const { return m_last_prep_timing; }
 
+    // WP-D (May 2026): raw CN (pre log-squash) — populated by prepareCNAndEEQ.
+    const Vector& getLastCNRaw() const { return m_last_cn_raw; }
+
     /// WP-P1 (May 2026): force per-phase chrono collection regardless of verbosity level.
     /// Set by SimpleMD when md_diagnostics_timing=true so the JSONL gets non-zero values.
     void setForcePhaseTiming(bool on) { m_force_phase_timing = on; }
@@ -1481,7 +1484,21 @@ private:
      */
     // Claude Generated (WP4, May 2026): returns CNDerivStore (pair-list + diag) instead of std::vector<SpMatrix>
     // Eliminates ~1000 ms triplet+setFromTriplets cost on mixture.xyz N=6200 (74 % of CN+EEQ phase per WP1).
-    CNDerivStore calculateCoordinationNumberDerivatives(const Vector& cn, double threshold = 1600.0, CxxThreadPool* pool = nullptr, int num_threads = 1) const;  // 40.0² = 1600 (squared)
+    /// WP-D (May 2026): main implementation. When `cn_raw_in.size() == m_atomcount`
+    /// the function skips the redundant N²-erf loop in step 1 and uses `cn_raw_in`
+    /// directly for dlogdcn. Otherwise (empty vec) falls back to internal recompute.
+    CNDerivStore calculateCoordinationNumberDerivatives(const Vector& cn, const Vector& cn_raw_in,
+                                                       double threshold = 1600.0,
+                                                       CxxThreadPool* pool = nullptr,
+                                                       int num_threads = 1) const;
+
+    /// Backward-compat wrapper — legacy callers without cn_raw access.
+    inline CNDerivStore calculateCoordinationNumberDerivatives(
+        const Vector& cn, double threshold = 1600.0,
+        CxxThreadPool* pool = nullptr, int num_threads = 1) const
+    {
+        return calculateCoordinationNumberDerivatives(cn, Vector{}, threshold, pool, num_threads);
+    }
 
     /**
      * @brief Determine hybridization states for all atoms
@@ -2352,6 +2369,10 @@ private:
     // WP-P1 (May 2026): cached after each prepareCNAndEEQ() call; consumed by MD diagnostics dump.
     mutable PrepTiming m_last_prep_timing{};
     bool m_force_phase_timing = false;  ///< If true, prepareCNAndEEQ collects per-phase timings even at verbosity < 2
+
+    // WP-D (May 2026): cached raw CN from CNCalculator — reused by calculateCoordinationNumberDerivatives
+    // to avoid recomputing the N²-erf loop in dcn step 1.
+    mutable Vector m_last_cn_raw{};
 
     // Claude Generated (April 2026): Periodic Boundary Conditions
     bool m_has_pbc = false;                                              ///< PBC active flag

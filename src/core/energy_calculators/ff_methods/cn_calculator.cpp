@@ -101,18 +101,22 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
     const Eigen::MatrixXd& geometry_bohr,
     double threshold,
     double kn,
-    double cnmax)
+    double cnmax,
+    std::vector<double>* out_cn_raw)
 {
     // Calculate GFN-FF coordination numbers using error function with log transformation
     // Formula: erfCN = 0.5 * (1 + erf(kn * (r - rcov) / rcov))
     //          CN_final = log(1 + e^cnmax) - log(1 + e^(cnmax - CN_raw))
     // Reference: gfnff_cn.f90:66-126, Spicher & Grimme, J. Chem. Theory Comput. 2020
     // Claude Generated - December 21, 2025
+    // WP-D (May 2026): optional out_cn_raw lets callers reuse the raw N²-erf
+    // result for dcn computation instead of recomputing it.
 
     const double ANG2BOHR = 1.8897259886;  // 1 Angstrom = 1.8897259886 Bohr
 
     const int natoms = static_cast<int>(atoms.size());
     std::vector<double> cn_values(natoms, 0.0);
+    if (out_cn_raw) out_cn_raw->assign(natoms, 0.0);
 
     // GFN-FF CN scaling factor (Reference: gfnff_param.f90:381-404)
     const double k_scaled = 4.0 / 3.0;
@@ -149,6 +153,7 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
 
         // Log transformation for numerical stability: CN in [0, cnmax]
         cn_values[i] = std::log(1.0 + std::exp(cnmax)) - std::log(1.0 + std::exp(cnmax - cn_raw));
+        if (out_cn_raw) (*out_cn_raw)[i] = cn_raw;
     }
 
     return cn_values;

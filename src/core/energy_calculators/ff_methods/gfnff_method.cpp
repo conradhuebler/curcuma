@@ -1033,12 +1033,16 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         } else if (external_cn) {
             m_last_cn = *external_cn;
         } else {
-            auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+            // WP-D (May 2026): capture cn_raw too so dcn can skip its own N²-erf loop
+            std::vector<double> cn_raw_std;
+            auto cn_vec = CNCalculator::calculateGFNFFCN(
+                m_atoms, m_geometry_bohr, 1600.0, -7.5, 4.4, &cn_raw_std);
             if (m_gpu_path_preallocated) {
                 std::memcpy(m_last_cn.data(), cn_vec.data(), m_atomcount * sizeof(double));
             } else {
                 m_last_cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
             }
+            m_last_cn_raw = Vector::Map(cn_raw_std.data(), cn_raw_std.size()).eval();
         }
     }
     if (do_timing) {
@@ -1131,7 +1135,9 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
             const double cn_deriv_cutoff_sq =
                 (eeq_cut > 0.0) ? std::max(40.0 * 40.0, eeq_cut * eeq_cut) : 40.0 * 40.0;
-            m_last_dcn = calculateCoordinationNumberDerivatives(m_last_cn, cn_deriv_cutoff_sq, pool, total_threads);
+            // WP-D (May 2026): pass cached cn_raw to skip the redundant N²-erf loop
+            m_last_dcn = calculateCoordinationNumberDerivatives(
+                m_last_cn, m_last_cn_raw, cn_deriv_cutoff_sq, pool, total_threads);
             if (do_timing) {
                 t_dcn = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
             }
@@ -5599,13 +5605,19 @@ bool GFNFF::loadGFNFFCharges()
 // Advanced GFN-FF Parameter Generation (Placeholder implementations)
 // =================================================================================
 
-CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, double threshold, CxxThreadPool* pool, int num_threads) const
+CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, const Vector& cn_raw_in,
+                                                           double threshold, CxxThreadPool* pool, int num_threads) const
 {
     // Claude Generated (Mar 2026, Phase 3): Sparse dcn matrices — replaced WP4 May 2026
     // Claude Generated (WP4, May 2026): Pair-list output (CNDerivStore) instead of 3× SpMatrix.
     // Inner-loop math is identical to the SpMatrix version. The two storage variants both
     // compute (M*v)(i,d) = diag(i,d)*v(i) + Σ_{j: pair (i,j)} comp_d(i,j) * v(j).
     // Reference: external/gfnff/src/gfnff_cn.f90:94-117
+    //
+    // WP-D Stage A (May 2026): when cn_raw_in is populated (size == m_atomcount),
+    // step 1 (the N²-erf loop that recomputes cn_raw) is skipped. Saves ~10 ms/step
+    // on polymer N=1410 (WP-P2 baseline).
+    const bool have_cn_raw = (cn_raw_in.size() == m_atomcount);
 
     const double kn = -7.5;
     const double cnmax = 4.4;
@@ -5619,9 +5631,14 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, dou
         rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * ANG2BOHR;
     }
 
-    // Step 1: Compute raw CN — parallelise over atoms (each atom independent)
-    Vector cn_raw = Vector::Zero(m_atomcount);
-    if (num_threads > 1 && m_atomcount > 64) {
+    // Step 1: Compute raw CN — parallelise over atoms (each atom independent).
+    // WP-D Stage A (May 2026): if caller provided cn_raw_in, reuse it and skip the recompute.
+    Vector cn_raw;
+    if (have_cn_raw) {
+        cn_raw = cn_raw_in;  // shallow Eigen copy; small (size N doubles)
+    } else if (num_threads > 1 && m_atomcount > 64) {
+        cn_raw = Vector::Zero(m_atomcount);
+        // legacy threaded recompute below — only entered when caller did not pass cn_raw_in
         int T = std::min(num_threads, m_atomcount);
         auto cn_worker = [&](int t_id) {
             for (int i = t_id; i < m_atomcount; i += T) {
@@ -5655,6 +5672,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, dou
             for (auto& th : threads) th.join();
         }
     } else {
+        cn_raw = Vector::Zero(m_atomcount);
         for (int i = 0; i < m_atomcount; ++i) {
             double cn_i = 0.0;
             Eigen::Vector3d pos_i = m_geometry_bohr.row(i);
