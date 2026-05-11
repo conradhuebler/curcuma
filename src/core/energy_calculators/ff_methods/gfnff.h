@@ -247,6 +247,8 @@ PARAM(static_cn, Bool, false,
       "Cache CN, dcn, CNF and D4 Gaussian-weights/dc6dcn after first call. Saves ~25 ms/step CPU, ~5-10 ms/step GPU. Invalid for sp2/sp3 changes.", "Performance", {})
 PARAM(static_all, Bool, false,
       "Shorthand: enables static_charges=true AND static_cn=true. Use only for stable production NVT/NPT in equilibrium regime.", "Performance", {})
+PARAM(eeq_distance_cutoff_auto, Bool, false,
+      "Auto-enable eeq_distance_cutoff=30 Bohr after Phase-1 when nfrag==1 and max|q|<0.5 e. Saves ~12 ms/step polymer. Falls back to 0.0 for ionic/multi-fragment systems.", "Performance", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -744,6 +746,14 @@ public:
      * Handles: solve, eeq_max_iterations, eeq_tolerance, eeq_accuracy, eeq_distance_cutoff.
      */
     void forwardEEQSolverParams(json& eeq_params);
+
+    /**
+     * @brief WP-S3 (May 2026): apply eeq_distance_cutoff_auto heuristic after Phase-1.
+     * Pre-condition: m_cached_topology contains valid topology_charges and nfrag.
+     * Sets EEQSolver cutoff to 30 Bohr if nfrag==1 and max|q|<0.5 e, else clears the
+     * override. Honours an explicit user-set eeq_distance_cutoff>0 (manual wins).
+     */
+    void applyEEQCutoffAutoIfRequested();
 
     /**
      * @brief Re-detect HB/XB pairs if geometry has changed enough (RMSD > 0.3 Bohr).
@@ -2327,6 +2337,9 @@ private:
     bool m_static_charges = false;          ///< If true, skip Phase-2 EEQ after first successful call
     bool m_static_cn = false;               ///< If true, skip CN/dcn/D4-weight recompute after first call
     bool m_static_state_captured = false;   ///< Becomes true once initial CN/charges have been captured
+
+    // WP-S3 (May 2026): runtime state of the EEQ cutoff auto-detection
+    bool m_eeq_cutoff_auto_active = false;  ///< true if applyEEQCutoffAutoIfRequested set 30 Bohr
 
     // Claude Generated (April 2026): Periodic Boundary Conditions
     bool m_has_pbc = false;                                              ///< PBC active flag

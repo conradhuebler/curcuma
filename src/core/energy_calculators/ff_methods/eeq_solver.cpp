@@ -1077,7 +1077,8 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
     // Only active in Geometric mode (Phase 2 / fallback) — topological distances are
     // Floyd-Warshall bond-length sums, where a Bohr cutoff has no clean meaning.
     // Mirrors the gating used in the parallel A-matrix path at line ~3064.
-    double eeq_dist_cutoff = m_config.get<double>("eeq_distance_cutoff", 0.0);
+    // WP-S3 (May 2026): honour the post-init override set by GFNFF auto-detection.
+    double eeq_dist_cutoff = getEEQDistanceCutoffEffective();
     const double EEQ_CUTOFF_SQ =
         (distance_mode == EEQDistanceMode::Geometric && natoms > 200 && eeq_dist_cutoff > 0.0)
         ? eeq_dist_cutoff * eeq_dist_cutoff : 0.0;
@@ -3078,7 +3079,8 @@ Vector EEQSolver::calculateFinalCharges(
         // whenever m_config did not carry the explicit registry entry, which silently
         // truncated all default-config calls and produced the +0.93 Eh polymer bias vs.
         // Fortran reported as WP-V (May 2026 finding, fix in WP6 follow-up).
-        double eeq_dist_cutoff = m_config.get<double>("eeq_distance_cutoff", 0.0);
+        // WP-S3 (May 2026): honour the post-init override set by GFNFF auto-detection.
+        double eeq_dist_cutoff = getEEQDistanceCutoffEffective();
         const double EEQ_CUTOFF_SQ = (natoms > 200 && eeq_dist_cutoff > 0.0)
             ? eeq_dist_cutoff * eeq_dist_cutoff : 0.0;
 

@@ -27,6 +27,14 @@ per-step JSONL dump (`md_diagnostics=true`) — energy decomposition, charges,
 CN, gradient norms, HB/XB counts. Essential for static-mode validation and
 drift analysis.
 
+**Performance hint**: for production MD on neutral mono-fragment systems
+(typical organics, polymers without ions), set
+`{"gfnff": {"eeq_distance_cutoff_auto": true}}` — applies a 30 Bohr cutoff
+to the EEQ Coulomb-matrix when Phase-1 detects `nfrag==1` and
+`max|q|<0.5 e`. Saves ~12 ms/step on polymer-sized systems. Heuristic
+falls back to full Coulomb (cutoff=0) for ionic/charged/multi-fragment
+systems. See [GFNFF_STATIC_WP3_EEQ_CUTOFF_DEFAULT.md](GFNFF_STATIC_WP3_EEQ_CUTOFF_DEFAULT.md).
+
 ---
 
 ## Latest: WP6 Coulomb Cell-List + WP-V Energy-Bias Resolved (May 10, 2026) ✅

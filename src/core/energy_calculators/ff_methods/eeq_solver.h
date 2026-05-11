@@ -336,6 +336,20 @@ public:
      */
     static EEQSolveMethod parseSolveMethod(const std::string& method_str);
 
+    /// WP-S3 (May 2026): post-init override for `eeq_distance_cutoff` (Bohr).
+    /// Set by GFNFF after Phase-1 when the auto-detection heuristic triggers
+    /// (nfrag==1 and max|topology_charges| < 0.5 e). Pass a negative value
+    /// to clear the override and fall back to the ConfigManager default.
+    void setEEQDistanceCutoff(double cutoff) { m_eeq_distance_cutoff_override = cutoff; }
+
+    /// WP-S3 (May 2026): effective Coulomb-matrix cutoff used by the
+    /// sparsification (override wins, otherwise the ConfigManager value).
+    double getEEQDistanceCutoffEffective() const {
+        return (m_eeq_distance_cutoff_override >= 0.0)
+                   ? m_eeq_distance_cutoff_override
+                   : m_config.get<double>("eeq_distance_cutoff", 0.0);
+    }
+
 private:
     /**
      * @brief Element-specific EEQ parameters
@@ -802,6 +816,7 @@ private:
     bool m_allow_unconverged;         ///< Allow continuing with unconverged charges (Claude Generated Apr 2026)
     bool m_skip_phase2;               ///< Skip Phase 2 and use Phase 1 topology charges directly (Claude Generated Apr 2026)
     EEQSolveMethod m_solve_method;    ///< Linear solve algorithm selection
+    double m_eeq_distance_cutoff_override = -1.0;  ///< WP-S3: post-init cutoff override (-1 = use config)
 
     // ===== Cached Data for Energy Calculation =====
 

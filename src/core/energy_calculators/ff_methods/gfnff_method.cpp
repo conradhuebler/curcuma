@@ -646,6 +646,52 @@ double GFNFF::getEEQDistanceCutoff() const {
     return m_parameters.value("eeq_distance_cutoff", 0.0);
 }
 
+// WP-S3 (May 2026): apply eeq_distance_cutoff_auto heuristic after Phase-1.
+// Sets EEQSolver cutoff to 30 Bohr when topology yields nfrag==1 and Phase-1
+// charges remain weakly polar (max|q| < 0.5 e). Otherwise clears any override.
+// Manual cutoff > 0 in m_parameters takes precedence over the heuristic.
+void GFNFF::applyEEQCutoffAutoIfRequested()
+{
+    if (!m_parameters.value("eeq_distance_cutoff_auto", false)) {
+        return;  // feature off
+    }
+    if (!m_eeq_solver || !m_cached_topology.has_value()) {
+        return;  // not ready — will be retried on the next Initialise
+    }
+    const double user_cutoff = m_parameters.value("eeq_distance_cutoff", 0.0);
+    if (user_cutoff > 0.0) {
+        return;  // explicit user value wins
+    }
+
+    const TopologyInfo& topo = *m_cached_topology;
+    const int nfrag = topo.nfrag;
+    double max_abs_charge = 0.0;
+    if (topo.topology_charges.size() > 0) {
+        max_abs_charge = topo.topology_charges.cwiseAbs().maxCoeff();
+    }
+
+    constexpr double EEQ_AUTO_THRESHOLD_CHARGE = 0.5;   // e
+    constexpr double EEQ_AUTO_CUTOFF_BOHR = 30.0;
+
+    if (nfrag == 1 && max_abs_charge < EEQ_AUTO_THRESHOLD_CHARGE) {
+        m_eeq_solver->setEEQDistanceCutoff(EEQ_AUTO_CUTOFF_BOHR);
+        m_eeq_cutoff_auto_active = true;
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info(fmt::format(
+                "EEQ cutoff auto-enabled: {:.1f} Bohr (nfrag={}, max|q|={:.3f} e)",
+                EEQ_AUTO_CUTOFF_BOHR, nfrag, max_abs_charge));
+        }
+    } else {
+        m_eeq_solver->setEEQDistanceCutoff(-1.0);  // clear override (defensive)
+        m_eeq_cutoff_auto_active = false;
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info(fmt::format(
+                "EEQ cutoff auto: keeping 0.0 (nfrag={}, max|q|={:.3f} e — not neutral/single)",
+                nfrag, max_abs_charge));
+        }
+    }
+}
+
 GFNFF::~GFNFF()
 {
     if (m_forcefield) {
@@ -738,6 +784,12 @@ bool GFNFF::InitialiseMolecule()
     }
 
     m_initialized = true;
+
+    // WP-S3 (May 2026): apply eeq_distance_cutoff_auto heuristic. Forces the
+    // topology cache to be populated (Phase-1 charges + nfrag) before the
+    // auto-detection reads them; subsequent Phase-2 calls see the override.
+    getCachedTopology();
+    applyEEQCutoffAutoIfRequested();
 
     // Claude Generated (Mar 2026): Initialize ALPB solvation if solvent specified
     // Reference: Fortran gbsa.f90 — newBornModel() called during init
@@ -1537,7 +1589,7 @@ double GFNFF::Calculation(bool gradient)
         t_solv = std::chrono::duration<double, std::milli>(
             std::chrono::high_resolution_clock::now() - t_solv_start).count();
 
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::result(fmt::format("Solvation energy: {:.8f} Eh ({} = {})",
                 solv_parts.total(), "ALPB", m_solvent));
             if (CurcumaLogger::get_verbosity() >= 2) {
@@ -2683,7 +2735,7 @@ bool GFNFF::initializeForceField()
             if (topo_out.is_open()) {
                 topo_out << topo_export.dump(2);
                 topo_out.close();
-                if (CurcumaLogger::get_verbosity() >= 1) {
+                if (CurcumaLogger::get_verbosity() >= 2) {
                     CurcumaLogger::success(fmt::format("Topology cache saved to {}", topo_file));
                 }
             }
@@ -8162,7 +8214,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Computing Phase 1: Topology charges (topo%qa)");
         }
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        if (CurcumaLogger::get_verbosity() >= 2) {
             phase_timer = std::chrono::high_resolution_clock::now();
         }
 
@@ -9078,13 +9130,13 @@ json GFNFF::generateGFNFFDispersionPairs() const
 
                 return d4_params["d4_dispersion_pairs"];
             } else {
-                if (CurcumaLogger::get_verbosity() >= 1) {
+                if (CurcumaLogger::get_verbosity() >= 2) {
                     CurcumaLogger::warn("D4: No pairs generated, falling back to D3");
                 }
                 method = "d3";  // Fallback
             }
         } catch (const std::exception& e) {
-            if (CurcumaLogger::get_verbosity() >= 1) {
+            if (CurcumaLogger::get_verbosity() >= 2) {
                 CurcumaLogger::error(fmt::format("D4 generation failed: {}", e.what()));
             }
             method = "d3";  // Fallback
@@ -9169,7 +9221,7 @@ json GFNFF::generateD3Dispersion() const
 
         // Convert D3 output to GFN-FF dispersion pair format
         if (!d3_params.contains("d3_dispersion_pairs")) {
-            if (CurcumaLogger::get_verbosity() >= 1) {
+            if (CurcumaLogger::get_verbosity() >= 2) {
                 CurcumaLogger::warn("D3 generated no dispersion pairs, falling back to free-atom");
             }
             return generateFreeAtomDispersion();
@@ -9235,7 +9287,7 @@ json GFNFF::generateD3Dispersion() const
     } catch (const std::exception& e) {
         (void)start_time;
 
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::error(fmt::format("D3 generation failed: {}, falling back to free-atom", e.what()));
         }
         return generateFreeAtomDispersion();
