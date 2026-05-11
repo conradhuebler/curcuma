@@ -30,6 +30,7 @@
 #include "plumed2/src/wrapper/Plumed.h"
 #endif
 
+#include "src/capabilities/md_diagnostics.h"
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 
@@ -388,6 +389,11 @@ private:
     bool m_nohillsfile = false;
     bool m_rattle_12 = false;
     bool m_rattle_13 = false;
+
+    // WP-S2 (May 2026): per-step diagnostics JSONL dump
+    bool m_md_diagnostics = false;
+    std::unique_ptr<MDDiagnosticsWriter> m_diag_writer;
+
     int m_mtd_dT = -1;
     int m_seed = -1;
     int m_time_step = 0;
@@ -502,6 +508,9 @@ private:
     PARAM(cg_write_vtf, Bool, true, "Write VTF trajectory for CG systems.", "CG", {"write_vtf"})
     PARAM(cg_timestep_scaling, Bool, true, "Enable automatic timestep scaling for pure CG systems.", "CG", {"cg_dt_scaling"})
     PARAM(cg_timestep_factor, Double, 10.0, "Timestep multiplication factor for pure CG systems.", "CG", {})
+
+    // --- WP-S2 Diagnostics (May 2026) ---
+    PARAM(md_diagnostics, Bool, false, "Write per-step diagnostics to <basename>.diag.jsonl (energy decomposition, charges, CN, gradient norms, HB/XB counts). Frequency follows dump_frequency. One JSON object per line.", "Output", {})
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^

@@ -64,6 +64,11 @@ public:
     // Energy decomposition (JSON output)
     json getEnergyDecomposition() const override;
 
+    // WP-S2 (May 2026): per-step diagnostics hooks
+    Vector getCN() const override;
+    int getHBCount() const override;
+    int getXBCount() const override;
+
     /// Access underlying GFNFF for diagnostics (e.g. workspace dEdcn)
     GFNFF* getGFNFF() const { return m_gfnff.get(); }
 

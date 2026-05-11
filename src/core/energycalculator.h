@@ -257,6 +257,19 @@ public:
     json getEnergyDecomposition() const;
 
     // =================================================================================
+    // Per-step diagnostics (WP-S2, May 2026)
+    // =================================================================================
+
+    /// Get last coordination numbers (GFN-FF / FF methods); empty for QM methods.
+    Vector CN() const;
+
+    /// Number of detected hydrogen bonds (GFN-FF only); 0 elsewhere.
+    int HBCount() const;
+
+    /// Number of detected halogen bonds (GFN-FF only); 0 elsewhere.
+    int XBCount() const;
+
+    // =================================================================================
     // Error Handling and Status
     // =================================================================================
     

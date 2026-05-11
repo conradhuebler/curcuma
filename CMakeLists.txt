@@ -360,6 +360,7 @@ set(curcuma_core_SRC
         src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
+        src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp
         src/capabilities/analysis_output.cpp
         src/capabilities/handlers/general_properties_handler.cpp
@@ -444,6 +445,7 @@ set(curcuma_cap_SRC
         src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
+        src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp
         src/capabilities/analysis_output.cpp
         src/capabilities/handlers/general_properties_handler.cpp

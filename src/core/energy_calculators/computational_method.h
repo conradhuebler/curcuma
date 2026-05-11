@@ -230,6 +230,26 @@ public:
     virtual json getEnergyDecomposition() const = 0;
 
     // =================================================================================
+    // Per-step diagnostics (WP-S2, May 2026)
+    // =================================================================================
+
+    /**
+     * @brief Get coordination numbers from last calculation (GFN-FF / FF methods).
+     * Default returns an empty vector. Used by MD diagnostics dump.
+     */
+    virtual Vector getCN() const { return Vector{}; }
+
+    /**
+     * @brief Get number of hydrogen bonds detected in last calculation (GFN-FF only).
+     */
+    virtual int getHBCount() const { return 0; }
+
+    /**
+     * @brief Get number of halogen bonds detected in last calculation (GFN-FF only).
+     */
+    virtual int getXBCount() const { return 0; }
+
+    // =================================================================================
     // Force Field Energy Component Access (Claude Generated November 2025)
     // =================================================================================
 

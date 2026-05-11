@@ -22,6 +22,11 @@
 
 **Recommendation**: Cross-check against `xtb-gfnff` for any system class not in the table above.
 
+**Forensics tool**: see [MD_DIAGNOSTICS.md](MD_DIAGNOSTICS.md) for the
+per-step JSONL dump (`md_diagnostics=true`) — energy decomposition, charges,
+CN, gradient norms, HB/XB counts. Essential for static-mode validation and
+drift analysis.
+
 ---
 
 ## Latest: WP6 Coulomb Cell-List + WP-V Energy-Bias Resolved (May 10, 2026) ✅

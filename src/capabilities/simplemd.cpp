@@ -280,6 +280,9 @@ void SimpleMD::LoadControlJson()
         m_cg_timestep_factor = cg_timestep_factor_config;
     }
 
+    // WP-S2 (May 2026): per-step diagnostics JSONL dump
+    m_md_diagnostics = m_config.get<bool>("md_diagnostics");
+
     // Claude Generated 2025: RATTLE Parameters
     m_rm_COM = m_config.get<double>("remove_com_motion");
     int rattle = m_config.get<int>("rattle");
@@ -1602,6 +1605,17 @@ void SimpleMD::prepareRun()
     m_Etot = m_Epot + m_Ekin;
     AverageQuantities();
     m_step = 0;
+
+    // WP-S2 (May 2026): open per-step diagnostics JSONL file
+    if (m_md_diagnostics) {
+        m_diag_writer = std::make_unique<MDDiagnosticsWriter>(Basename() + ".diag.jsonl");
+        if (!m_diag_writer->isOpen()) {
+            CurcumaLogger::warn("MD diagnostics requested but JSONL file could not be opened — disabled");
+            m_md_diagnostics = false;
+            m_diag_writer.reset();
+        }
+    }
+
     WriteGeometry();
 #ifdef USE_Plumed
     if (m_mtd) {
@@ -1772,6 +1786,17 @@ bool SimpleMD::step()
         if (bool write = WriteGeometry()) {
             m_run_states.push_back(WriteRestartInformation());
             m_current_rescue = 0;
+            // WP-S2 (May 2026): append diagnostics record parallel to XYZ trajectory
+            if (m_md_diagnostics && m_diag_writer) {
+                m_diag_writer->writeSnapshot(
+                    m_step, m_currentStep,
+                    m_interface->getEnergyDecomposition(),
+                    m_interface->Charges(),
+                    m_interface->CN(),
+                    m_interface->Gradient(),
+                    m_interface->HBCount(),
+                    m_interface->XBCount());
+            }
         } else if (!write && m_rescue && m_run_states.size() > (1 - m_current_rescue)) {
             std::cout << "Molecule exploded, resetting to previous state ..." << std::endl;
             LoadRestartInformation(m_run_states[m_run_states.size() - 1 - m_current_rescue]);

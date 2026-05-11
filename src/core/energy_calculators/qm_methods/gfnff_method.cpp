@@ -162,3 +162,19 @@ json GFNFFComputationalMethod::getEnergyDecomposition() const {
 std::string GFNFFComputationalMethod::getErrorMessage() const {
     return m_error_message;
 }
+
+// WP-S2 (May 2026): per-step diagnostics hooks for MDDiagnosticsWriter
+Vector GFNFFComputationalMethod::getCN() const
+{
+    return m_gfnff ? m_gfnff->getLastCN() : Vector{};
+}
+
+int GFNFFComputationalMethod::getHBCount() const
+{
+    return m_gfnff ? static_cast<int>(m_gfnff->getLastHBonds().size()) : 0;
+}
+
+int GFNFFComputationalMethod::getXBCount() const
+{
+    return m_gfnff ? static_cast<int>(m_gfnff->getLastXBonds().size()) : 0;
+}

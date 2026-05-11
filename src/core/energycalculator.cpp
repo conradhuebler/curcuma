@@ -840,3 +840,19 @@ json EnergyCalculator::getEnergyDecomposition() const {
     };
     return energy_json;
 }
+
+// WP-S2 (May 2026): per-step diagnostics forwarders for MDDiagnosticsWriter
+Vector EnergyCalculator::CN() const
+{
+    return m_method ? m_method->getCN() : Vector{};
+}
+
+int EnergyCalculator::HBCount() const
+{
+    return m_method ? m_method->getHBCount() : 0;
+}
+
+int EnergyCalculator::XBCount() const
+{
+    return m_method ? m_method->getXBCount() : 0;
+}
