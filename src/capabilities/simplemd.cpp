@@ -2952,7 +2952,7 @@ void SimpleMD::PrintStatus() const
             "{8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f} "
             "{15: ^{0}f}",
             15,
-            m_currentStep * m_dT / fs2amu / 1000.0,  // Time in ps
+            m_currentStep / 1000.0,  // Time in ps (m_currentStep accumulates m_dT, both in fs)
             m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot,
             m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential,
             m_virial_correction, m_average_virial_correction,
