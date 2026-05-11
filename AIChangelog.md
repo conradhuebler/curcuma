@@ -6,6 +6,8 @@ Format: One line per change, newest first.
 
 ## May 2026
 
+- **CLI flat-flag auto-routing + JSON round-trip (Mai 2026)**: ParameterRegistry gains `findOwnerModules()`; CLI2Json routes flat flags (e.g. `-cn_cutoff_bohr 5.5`) to their owning module via the registry. `-import_config` now performs recursive deep-merge and accepts a JSON file with `_command`/`_input` as the sole input (`curcuma -import_config run.json`). `-export_run` writes those meta fields plus full registry defaults so the file alone replays the run. CLI flags always win on import. New ctest category `cli_routing_*`. See [docs/CLI_ROUND_TRIP.md](docs/CLI_ROUND_TRIP.md).
+
 - **WP7-A/B/C: nfrag>1 GPU EEQ-Solver-Triple (Mai 2026)**: Drei aufeinanderbauende WP komplettieren den nfrag>1 GPU-Pfad und vereinheitlichen die Solver-Naming-Konventionen.
   - **WP7-A**: `solveWithDeviceRHSAndGPUSchurGeneral` ersetzt CPU-Schur für nfrag>1 — neue Kernels `k_eeq_reduce_fragment_sums` + `k_eeq_schur_general`; D2H pro Schritt `(nfrag + nfrag²)·8 Byte` statt `N·(1+nfrag)·8 Byte`; bit-identisch zur WP2+CPU-Schur Baseline.
   - **WP7-B**: Per-fragment Cholesky aktiviert via `solve_method=batched` — wiederverwendet bereits implementierten `solveWithDeviceRHSAndGPUSchurBatched`; `eeq_batched_min_distance` (Default 15 Bohr) Warnschwelle bei engem Fragment-Kontakt; `solve_method`-Wertraum vereinheitlicht (`cholesky | batched | pcg | auto | lu`, Alias `schur_cholesky`); CPU `batched` warnt einmal + fällt zurück auf cholesky.

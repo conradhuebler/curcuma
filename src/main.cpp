@@ -614,6 +614,24 @@ double DotProduct(const Eigen::Vector3d& pos1, const Eigen::Vector3d& pos2)
     return pos1.dot(pos2);
 }
 
+// Claude Generated 2026: Recursive deep-merge — dst wins where it already has a value (CLI > file).
+// Unlike nlohmann::merge_patch this never deletes on null and recurses through every nested object,
+// fixing the 1-level-only behavior of the old -import_config merge.
+static void mergeJsonRecursive(json& dst, const json& src)
+{
+    if (!src.is_object()) {
+        return;
+    }
+    for (auto it = src.begin(); it != src.end(); ++it) {
+        if (!dst.contains(it.key())) {
+            dst[it.key()] = it.value();
+        } else if (dst[it.key()].is_object() && it.value().is_object()) {
+            mergeJsonRecursive(dst[it.key()], it.value());
+        }
+        // else: dst already has a scalar/array at this key — CLI wins, keep dst.
+    }
+}
+
 // Helper function to set nested JSON values from dot-notation keys - Claude Generated
 void setNestedJsonValue(json& target, const std::string& dotKey, const json& value) {
     if (dotKey.find('.') == std::string::npos) {
@@ -778,6 +796,62 @@ json CLI2Json(int argc, char** argv)
                 }
                 ++i;
             }
+        }
+    }
+
+    // Claude Generated 2026: Auto-route flat CLI flags to their owning module via ParameterRegistry.
+    // Lets "-static_charges true" land in controller["gfnff"]["static_charges"] without requiring
+    // dotted form "-gfnff.static_charges true". Same-name-in-command-module wins; truly ambiguous
+    // names (multiple owners, none matching the current command) emit a warning and stay put.
+    {
+        std::vector<std::string> reroute_remove;
+        json reroute_targets; // module -> {param_name: value}
+        for (auto it = key.begin(); it != key.end(); ++it) {
+            const std::string& pname = it.key();
+            if (global_params.count(pname) > 0)
+                continue;
+            if (it.value().is_object())
+                continue;
+            if (pname.find('.') != std::string::npos)
+                continue;
+
+            auto owners = ParameterRegistry::getInstance().findOwnerModules(pname);
+            if (owners.empty())
+                continue; // legacy / unregistered flag — preserve current behavior
+
+            bool matches_current = false;
+            for (const auto& owner : owners) {
+                if (owner == module_name) {
+                    matches_current = true;
+                    break;
+                }
+            }
+            if (matches_current)
+                continue;
+
+            if (owners.size() > 1) {
+                std::string candidates;
+                for (size_t i = 0; i < owners.size(); ++i) {
+                    if (i)
+                        candidates += ", ";
+                    candidates += owners[i];
+                }
+                CurcumaLogger::warn("CLI flag -" + pname + " is registered in multiple modules ("
+                    + candidates + ") and none match the active command's module \"" + module_name
+                    + "\". Use -<module>." + pname + " to disambiguate. Keeping flag in command module.");
+                continue;
+            }
+
+            reroute_targets[owners[0]][pname] = it.value();
+            reroute_remove.push_back(pname);
+        }
+        for (const auto& k : reroute_remove)
+            key.erase(k);
+        for (auto& [mod, params] : reroute_targets.items()) {
+            if (!key.contains(mod) || !key[mod].is_object())
+                key[mod] = json::object();
+            for (auto& [pname, pval] : params.items())
+                key[mod][pname] = pval;
         }
     }
 
@@ -1959,6 +2033,61 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
+    // Claude Generated 2026: JSON-driven invocation. When argv[1] is "-import_config",
+    // load the JSON early to extract its "_command" (required) and "_input" (optional) and
+    // splice them into a synthetic argv so the remainder of main() can dispatch normally.
+    // Storage lives at main() scope so the pointers stay valid for argv access throughout.
+    std::vector<std::string> synth_args_storage;
+    std::vector<char*> synth_argv_ptrs;
+    {
+        std::string a1 = argv[1];
+        if (a1 == "-import_config" || a1 == "-import-config") {
+            if (argc < 3) {
+                std::cerr << "Error: " << a1 << " requires a JSON file path as the next argument." << std::endl;
+                return 1;
+            }
+            std::string config_file = argv[2];
+            std::ifstream f(config_file);
+            if (!f.is_open()) {
+                std::cerr << "Error: Could not open config file: " << config_file << std::endl;
+                return 1;
+            }
+            json imported;
+            try {
+                f >> imported;
+            } catch (const std::exception& e) {
+                std::cerr << "Error: Failed to parse JSON from " << config_file << ": " << e.what() << std::endl;
+                return 1;
+            }
+            if (!imported.contains("_command") || !imported["_command"].is_string()) {
+                std::cerr << "Error: JSON-driven invocation needs a top-level string field \"_command\" in "
+                          << config_file << "." << std::endl;
+                std::cerr << "Example: { \"_command\": \"sp\", \"_input\": \"mol.xyz\", \"method\": \"gfnff\", ... }" << std::endl;
+                std::cerr << "Or pass a command before -import_config: curcuma -sp mol.xyz -import_config "
+                          << config_file << std::endl;
+                return 1;
+            }
+            std::string cmd = imported["_command"].get<std::string>();
+            synth_args_storage.reserve(argc + 4);
+            synth_args_storage.push_back(argv[0]);
+            synth_args_storage.push_back(std::string("-") + cmd);
+            if (imported.contains("_input") && imported["_input"].is_string()) {
+                synth_args_storage.push_back(imported["_input"].get<std::string>());
+            }
+            synth_args_storage.push_back(a1); // pass -import_config through so CLI2Json sees it too
+            synth_args_storage.push_back(config_file);
+            for (int i = 3; i < argc; ++i) {
+                synth_args_storage.push_back(argv[i]);
+            }
+            synth_argv_ptrs.reserve(synth_args_storage.size());
+            for (auto& s : synth_args_storage) {
+                synth_argv_ptrs.push_back(s.empty() ? nullptr : &s[0]);
+            }
+            argc = static_cast<int>(synth_argv_ptrs.size());
+            argv = synth_argv_ptrs.data();
+        }
+    }
+
     std::string command = argv[1];
     while (!command.empty() && command[0] == '-') command.erase(0, 1);
 
@@ -2066,20 +2195,17 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        // Merge imported config into controller
-        // CLI arguments have higher priority (don't overwrite existing keys)
-        for (auto it = imported_config.begin(); it != imported_config.end(); ++it) {
-            if (!controller.contains(it.key())) {
-                controller[it.key()] = it.value();
-            } else if (controller[it.key()].is_object() && it.value().is_object()) {
-                // Merge nested objects (e.g., controller["analysis"] with imported["analysis"])
-                for (auto nested_it = it.value().begin(); nested_it != it.value().end(); ++nested_it) {
-                    if (!controller[it.key()].contains(nested_it.key())) {
-                        controller[it.key()][nested_it.key()] = nested_it.value();
-                    }
-                }
+        // Claude Generated 2026: Recursive deep-merge replaces the prior 1-level loop so nested
+        // overrides at any depth work correctly. CLI arguments still win at every level.
+        // Warn if the JSON specifies a _command that differs from the CLI-supplied keyword.
+        if (imported_config.contains("_command") && imported_config["_command"].is_string()) {
+            std::string json_cmd = imported_config["_command"].get<std::string>();
+            if (!json_cmd.empty() && json_cmd != command) {
+                CurcumaLogger::warn("Config file " + config_file + " specifies _command=\"" + json_cmd
+                    + "\" but the CLI command is \"" + command + "\". CLI wins; _command from JSON is ignored.");
             }
         }
+        mergeJsonRecursive(controller, imported_config);
 
         std::cout << "Loaded configuration from: " << config_file << std::endl;
     }
@@ -2106,6 +2232,40 @@ int main(int argc, char **argv) {
                     it.value().erase(meta);
                 }
             }
+        }
+
+        // Claude Generated 2026: Record _command + _input so the file alone is enough to replay
+        // the run via "curcuma -import_config <file>". CLI command/input always win on replay.
+        export_config["_command"] = command;
+        if (argc >= 3) {
+            std::string maybe_input = argv[2];
+            if (!maybe_input.empty() && maybe_input[0] != '-') {
+                export_config["_input"] = maybe_input;
+            }
+        }
+
+        // Claude Generated 2026: Merge in registry defaults for every touched module so the
+        // exported JSON is fully self-describing (every registered parameter visible). Explicit
+        // values already in export_config win because mergeJsonRecursive only fills gaps.
+        auto& param_registry = ParameterRegistry::getInstance();
+        std::set<std::string> touched_modules;
+        for (auto it = export_config.begin(); it != export_config.end(); ++it) {
+            if (it.value().is_object() && !param_registry.getForModule(it.key()).empty()) {
+                touched_modules.insert(it.key());
+            }
+        }
+        if (export_config.contains("method") && export_config["method"].is_string()) {
+            std::string method = export_config["method"].get<std::string>();
+            if (!method.empty() && !param_registry.getForModule(method).empty()) {
+                touched_modules.insert(method);
+            }
+        }
+        for (const auto& mod : touched_modules) {
+            json defaults = param_registry.getDefaultJson(mod);
+            if (!export_config.contains(mod) || !export_config[mod].is_object()) {
+                export_config[mod] = json::object();
+            }
+            mergeJsonRecursive(export_config[mod], defaults);
         }
 
         std::ofstream outfile(export_file);
