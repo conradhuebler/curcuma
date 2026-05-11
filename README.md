@@ -138,6 +138,13 @@ Curcuma features an **automated parameter registry system** for all molecular mo
 ./curcuma -list-modules
 ```
 
+**Capture and replay a full run (2026):** any registered parameter is reachable by its flat CLI name, and `-export_run` / `-import_config` form a round-trip. See [docs/CLI_ROUND_TRIP.md](docs/CLI_ROUND_TRIP.md).
+```sh
+./curcuma -sp water.xyz -method gfnff -cn_cutoff_bohr 5.5 -export_run run.json
+./curcuma -import_config run.json                       # replay
+./curcuma -import_config run.json -cn_cutoff_bohr 7.0   # replay with override
+```
+
 ### For Developers
 
 All new capabilities must use the Parameter Registry System. See:

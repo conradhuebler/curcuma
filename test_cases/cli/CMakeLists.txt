@@ -138,6 +138,14 @@ add_cli_test(analysis 01_parallel_equivalence)
 set_tests_properties(cli_analysis_01_parallel_equivalence PROPERTIES TIMEOUT 120)
 
 # =============================================================================
+# CLI Routing Tests — Claude Generated 2026
+# Validates ParameterRegistry-driven flat-flag routing and JSON round-trip
+# =============================================================================
+
+add_cli_test(routing 01_flat_param_routing)
+add_cli_test(routing 02_roundtrip_replay)
+
+# =============================================================================
 # Error Handling Tests (6 scenarios) - Phase 1-2 Implementation
 # =============================================================================
 
