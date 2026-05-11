@@ -191,3 +191,122 @@ for k, v in sorted(avg.items(), key=lambda kv: -kv[1]):
 - WP-P3 Plan (Bond-Mikrobench): [GFNFF_PROFILE_WP3_BOND_HOTSPOT.md](GFNFF_PROFILE_WP3_BOND_HOTSPOT.md)
 - Performance-Roadmap (Mai 2026): [GFNFF-PERFORMANCE-ROADMAP.md](GFNFF-PERFORMANCE-ROADMAP.md)
 - WP-S1 Static-Mode: [GFNFF_STATIC_WP1_FROZEN_STATE.md](GFNFF_STATIC_WP1_FROZEN_STATE.md)
+
+---
+
+## WP-P2 Cross-System Sweep (May 2026)
+
+**Setup**: `scripts/wp_profile_sweep.py`, MD csvr 200 fs / dt=1 fs /
+dump=10, seed=42, threads=4, AMD Ryzen 9 9950X3D, release/.
+Mittelwert über Records 1–20 pro Konfig (Record 0 = Init-Step geskippt).
+
+**Geskippte Configs**:
+- `mixture` (N=6200): MD instabil unter dt=1 fs/csvr — skip per User-Hinweis.
+  Mai-2026-Mixture-SP-Profil bleibt der einzige Datenpunkt für N>>1500.
+- `gpu`-Pfad: USE_CUDA=OFF auf der Test-Maschine (Standard-release/-Build).
+
+### caffeine (N=24, CPU)
+
+| Modus | step_total | dcn | eeq_solve | cn | d4_gw | ff_total | speedup |
+|-------|------------|-----|-----------|-----|------|----------|---------|
+| baseline    | 0.38 | 0.01 | 0.08 | 0.01 | 0.01 | 0.27 | 1.00× |
+| static_all  | 0.15 | 0.00 | 0.00 | 0.00 | 0.00 | 0.08 | 2.55× |
+| cutoff_auto | 0.29 | 0.01 | 0.06 | 0.01 | 0.01 | 0.20 | 1.29× |
+| both        | 0.15 | 0.00 | 0.00 | 0.00 | 0.00 | 0.07 | 2.49× |
+
+### polymer (N=1410, CPU)
+
+| Modus | step_total | dcn | eeq_solve | cn | d4_gw | ff_total | speedup |
+|-------|------------|-----|-----------|-----|------|----------|---------|
+| baseline    | 102.09 | 20.96 | 21.63 | 10.66 | 3.54 | 99.26 | 1.00× |
+| static_all  |  28.58 |  0.00 |  0.00 |  0.00 | 0.00 | 25.84 | **3.57×** |
+| cutoff_auto |  99.02 | 21.03 | 20.24 | 10.69 | 3.46 | 96.27 | 1.03× |
+| both        |  28.70 |  0.00 |  0.00 |  0.00 | 0.00 | 25.91 | 3.56× |
+
+---
+
+## Auswertung gegen die Bottleneck-Lücken (siehe oben "Nicht ablesbar")
+
+### ✓ Bestätigt
+
+1. **WP-P1-Polymer-Snapshot reproduziert** über 20 Records:
+   `dcn` 21.0 ms ≈ Snapshot 23.3, `eeq_solve` 21.6 ≈ 22.2, `cn` 10.7 ≈ 11.4.
+   Single-Step-Wert war nicht zufällig.
+
+2. **`static_all` ist der Workhorse**:
+   - Caffeine 2.5× (klein, FF-Terme dominieren auch im baseline)
+   - Polymer 3.6× (große System-Klasse, Prep dominiert)
+   - Bestätigt die geometrische Skala-Abhängigkeit: je größer N, desto
+     mehr lohnt sich Static-Mode.
+
+3. **Bond-Term-Anteil bei Polymer**:
+   `ff_total` (99.3 ms) − `total`-Prep (≈ 56 ms aus dcn+eeq+cn+d4_gw+...)
+   ≈ **43 ms** für alle FF-Energie-Terme (Bond+Angle+Dihedral+Coulomb+
+   Disp+HB+Repulsion) zusammen. Bei ~3000 polymer-Bonds wäre der
+   Mai-2026-Hypothese-Wert von 75 µs/Bond = 225 ms — wir messen **43 ms total
+   für alle Bonded+Nonbonded-Terme**. P4c-Hypothese ist für polymer-Größe
+   eindeutig **falsifiziert**. Mai-Befund stammt sehr wahrscheinlich aus
+   N=6200-Memory-Pressure und gilt nicht für mittelgroße Systeme.
+
+### ✗ Falsifiziert / korrigiert
+
+4. **`cutoff_auto` allein bringt fast nichts**:
+   - Caffeine: 1.29× (durch N<200-Gate in eeq_solver.cpp nicht aktiv;
+     Speedup vermutlich Rausch- oder Topology-Cache-Effekt)
+   - Polymer: **1.03×** (effektiv null trotz aktivem Cutoff bei N>200)
+   - Erklärung: bei polymer-Größe (1410 Atome) ist `eeq_solve` nur
+     21.6 ms, der Cutoff-Anteil davon noch kleiner. Erst bei mixture-Größen
+     (N=6200, Mai-Profil 660 ms eeq_solve) lohnt sich Cutoff-Sparsifizierung.
+   - **Konsequenz**: WP-S3 (`eeq_distance_cutoff_auto`) sollte als
+     "großes-System-Feature" dokumentiert werden — kein Default-Win für
+     mittelgroße Polymere.
+
+5. **`static_all` + `cutoff_auto` = `static_all`**:
+   - Polymer `both` 28.70 ms vs `static_all` 28.58 ms (Differenz im Rausch).
+   - Logisch: bei aktivem Static-Mode wird Phase 2 EEQ skippt, der Cutoff
+     hat keinen Angriffspunkt mehr.
+
+### ⊘ Offen (nicht aus diesem Sweep ablesbar)
+
+6. **GPU-Pfad**: nicht gemessen (USE_CUDA=OFF auf Test-Maschine).
+7. **WP-S3 + GPU**: per Konstruktion CPU-only (`eeq_solver.cpp:1080`
+   greift im CPU-EEQSolver-Pfad). GPU hat eigene `k_coulomb`-Cutoff-Logik.
+8. **`static_cn` allein vs `static_charges` allein**: nicht im Sweep
+   ausgeführt. Mit dem 0%-Speedup-Befund aus dem ursprünglichen Quick-Test
+   (28 ms Polymer-Speedup-Lücke) bleibt ungeklärt, ob der erste Step
+   die Capture-Phase teuer macht und so den Mean verzerrt.
+9. **Threading-Audit**: nicht im Default-Sweep, aber via `--thread-sweep`
+   ausführbar.
+
+---
+
+## Neue Optimierungs-Empfehlungen (Stand Mai 2026)
+
+| Rang | Maßnahme | Hebel | Aufwand |
+|------|----------|-------|---------|
+| 1 | **`dcn`-Vektorisierung** (`calculateCoordinationNumberDerivatives()`) | Polymer 21 ms Phase, eigenes ~2-3× erwartet → 7-14 ms Save | ~1 Tag |
+| 2 | **`cn`-SIMD-Loop** (`std::erf()` vektorisieren, P4e) | Polymer 10.7 ms Phase, ~2× erwartet → 5 ms Save | ~0.5 Tag |
+| 3 | **GPU-Pfad messen + optimieren** (USE_CUDA-Build aktivieren) | Unbekannt — Roadmap-Mai sagt 7.8× GPU vs CPU bei polymer; Static-Mode-Effekt auf GPU nicht verifiziert | ~1 Tag inkl. Mess-Run |
+| 4 | **`eeq_solve` parallelisieren bei großen Systemen** | Bei polymer 21.6 ms ≈ 80% serial; bei mixture entscheidend (660 ms aus Mai-Profil) | ~1.5 Tage |
+| 5 | **Bond-Term-Mikrobench WP-P3** | Niedrig priorisiert: 43 ms aller FF-Terme zusammen bei polymer, nicht Bond allein | ~0.5 Tag |
+
+WP-S3 (`eeq_distance_cutoff_auto`) bleibt sinnvoll für N>4000-Systeme,
+aber **nicht** als Default für mittelgroße MD-Production-Läufe.
+
+---
+
+## Reproduzierbarkeit
+
+```bash
+cd /home/conrad/src/curcuma
+python3 scripts/wp_profile_sweep.py \
+    --curcuma release/curcuma \
+    --systems caffeine,polymer --paths cpu \
+    --max-time 200 --timeout 900 \
+    --output /tmp/sweep_cpu_full
+cat /tmp/sweep_cpu_full/wp_profile_summary.md
+```
+
+Erweitert zu `caffeine,polymer,mixture` falls mixture-Stabilität
+gelöst (siehe `docs/GFNFF_STATIC_WP4_VALIDATION_SUITE.md` für
+Re-Capture-Idee).

@@ -4,7 +4,9 @@
 **Aufwand**: ~1 Tag (~250 LoC inkl. Skript + Doku)
 **Wirkung**: 24-Konfig Mess-Matrix mit Pro-Phase-Breakdown; klärt welche WP-S-Flags wirklich Speedup bringen und wo die wirklichen Bottlenecks sitzen
 **Abhängigkeiten**: WP-P1 (Timing-Hooks im JSONL); WP-S1/S2/S3 (Static-Mode, Diagnostics, cutoff_auto)
-**Status**: 🤖 Geplant
+**Status**: ✅ Implementiert (May 2026) — ⚙️ machine-tested, caffeine+polymer CPU sweep
+abgeschlossen. Mixture-MD instabil bei dt=1 fs — skip. GPU pending USE_CUDA=ON Build.
+Ergebnisse: [GFNFF_PROFILE_RESULTS_2026-05.md](GFNFF_PROFILE_RESULTS_2026-05.md) (WP-P2-Sektion).
 **Priorität**: nach WP-P1, vor WP-P3 (Microbench-Targets ergeben sich aus den Sweep-Ergebnissen)
 
 ---

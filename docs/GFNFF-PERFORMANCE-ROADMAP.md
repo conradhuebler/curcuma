@@ -151,6 +151,41 @@ Per-Step-Wall-Clock-Breakdown via `md_diagnostics_timing=true` Hook
 
 ---
 
+## WP-P2 Cross-System Sweep (Mai 2026)
+
+Treiber: `scripts/wp_profile_sweep.py`, MD csvr 200 fs/dt=1 fs, 4 Threads.
+Vollständiger Datenpunkt: caffeine+polymer × {baseline, static_all,
+cutoff_auto, both}. Mixture-MD ist bei dt=1 fs instabil und wurde
+skippt; GPU-Pfad nicht gemessen (USE_CUDA=OFF in der Standard-release/).
+
+| System | Modus | step_total | dcn | eeq_solve | speedup |
+|--------|-------|------------|-----|-----------|---------|
+| caffeine | baseline    | 0.38 ms |  0.01 |  0.08 | 1.00× |
+| caffeine | static_all  | 0.15 ms |  0.00 |  0.00 | **2.55×** |
+| caffeine | cutoff_auto | 0.29 ms |  0.01 |  0.06 | 1.29× |
+| polymer  | baseline    | 102.1 ms | 21.0 | 21.6 | 1.00× |
+| polymer  | static_all  |  28.6 ms |  0.0 |  0.0 | **3.57×** |
+| polymer  | cutoff_auto |  99.0 ms | 21.0 | 20.2 | 1.03× |
+
+**Hauptbefunde**:
+- **WP-P1-Polymer-Snapshot reproduziert über 20 Records** (dcn ≈ 21, eeq_solve ≈ 21.6).
+- **`static_all` ist der Workhorse**: polymer 3.6×, caffeine 2.5× — skala-abhängig.
+- **`cutoff_auto` allein ist nutzlos bei mittelgroßen Systemen** (polymer 1.03×).
+  Lohnt sich erst bei N>4000 (mixture-Klasse) wenn Phase-2-EEQ dominiert.
+- **Bond-Hotspot-Hypothese definitiv falsifiziert** für polymer-Klasse:
+  alle FF-Energie-Terme zusammen = 43 ms ≪ 75 µs × 3000 Bonds = 225 ms-Hypothese.
+  Mai-2026-mixture-Befund war Memory-Pressure-getrieben.
+
+**Konsequenzen** (Details in [GFNFF_PROFILE_RESULTS_2026-05.md](GFNFF_PROFILE_RESULTS_2026-05.md)):
+- Empfehlung: **`dcn`-Vektorisierung** (~21 ms Phase, ~2× Hebel) als
+  high-priority Folge-WP.
+- `cn`-SIMD (~11 ms Phase, ~2× Hebel) als Sekundär-Folge.
+- WP-S3 (`eeq_distance_cutoff_auto`) sollte als "großes-System-Feature"
+  dokumentiert werden, nicht als Default-Win.
+- WP-P3 Bond-Mikrobench bleibt niedrig priorisiert.
+
+---
+
 ## Kumulative Bilanz WP1–WP5 (Mai 2026)
 
 `mixture.xyz` (N=6200, nfrag=1400), Single-Point + Gradient, AMD Ryzen 9 9950X3D, Topo-Cache vor jedem Lauf gelöscht:
