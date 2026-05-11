@@ -564,6 +564,21 @@ GFNFF::GFNFF(const json& parameters)
     m_huckel_solver->setVerbosity(CurcumaLogger::get_verbosity());
     // Check if user wants to use simplified approximation instead
     m_use_full_huckel = !m_parameters.value("use_simplified_pbo", false);
+
+    // Static-Mode (WP-S1, May 2026): freeze CN/charges across MD steps
+    m_static_charges = m_parameters.value("static_charges", false);
+    m_static_cn = m_parameters.value("static_cn", false);
+    if (m_parameters.value("static_all", false)) {
+        m_static_charges = true;
+        m_static_cn = true;
+    }
+    if (m_static_charges || m_static_cn) {
+        CurcumaLogger::warn(fmt::format(
+            "GFN-FF Static-Mode active: static_charges={}, static_cn={}. "
+            "Initial CN/charges will be reused for all subsequent calls. "
+            "Recommended only for equilibrium dynamics — invalid for reactions or large conformational moves.",
+            m_static_charges, m_static_cn));
+    }
 }
 
 // Claude Generated (Apr 2026): Forward gfnff-level solver parameters to eeq_solver sub-config.
@@ -808,6 +823,10 @@ const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("GFNFF: Full topology recalculation (large geometry change or first call)");
         }
+        // Static-Mode (WP-S1): warn but do NOT invalidate captured CN/charges — user override.
+        if ((m_static_charges || m_static_cn) && m_static_state_captured) {
+            CurcumaLogger::warn("Static-mode: topology re-initialised but cached CN/charges remain frozen — results may diverge");
+        }
         m_cached_topology = calculateTopologyInfo();
         m_last_topology_geometry = m_geometry_bohr;
         m_static_topology_valid = true;
@@ -945,20 +964,27 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     auto t_prep_total = std::chrono::high_resolution_clock::now();  // always measure, negligible overhead
     double t_cn = 0.0, t_eeq_topo = 0.0, t_cnf = 0.0, t_dcn = 0.0, t_d4_gw = 0.0, t_eeq_solve = 0.0, t_charge_dist = 0.0;
 
+    // Static-Mode (WP-S1, May 2026): reuse cached CN/dcn/D4 outputs after first capture.
+    // m_last_cn, m_last_dcn, m_last_cnf, m_d4_generator's dc6dcn matrix retain previous values.
+    const bool reuse_cn = m_static_cn && m_static_state_captured;
+    const bool freeze_eeq = m_static_charges && m_static_state_captured;
+
     // Claude Generated (March 2026): GPU path uses memcpy into pre-allocated vectors
     // to avoid Eigen heap allocations (CUDA corrupts heap metadata after init).
     auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
-    if (m_gpu_path_preallocated && external_cn) {
-        // memcpy into pre-allocated m_last_cn (no Eigen assignment, no heap alloc)
-        std::memcpy(m_last_cn.data(), external_cn->data(), m_atomcount * sizeof(double));
-    } else if (external_cn) {
-        m_last_cn = *external_cn;
-    } else {
-        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-        if (m_gpu_path_preallocated) {
-            std::memcpy(m_last_cn.data(), cn_vec.data(), m_atomcount * sizeof(double));
+    if (!reuse_cn) {
+        if (m_gpu_path_preallocated && external_cn) {
+            // memcpy into pre-allocated m_last_cn (no Eigen assignment, no heap alloc)
+            std::memcpy(m_last_cn.data(), external_cn->data(), m_atomcount * sizeof(double));
+        } else if (external_cn) {
+            m_last_cn = *external_cn;
         } else {
-            m_last_cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+            auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+            if (m_gpu_path_preallocated) {
+                std::memcpy(m_last_cn.data(), cn_vec.data(), m_atomcount * sizeof(double));
+            } else {
+                m_last_cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+            }
         }
     }
     if (do_timing) {
@@ -978,12 +1004,16 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     EEQSolver::TopologyInput eeq_topo;
     const TopologyInfo* topo_ptr = nullptr;
-    bool do_eeq = (m_eeq_solver && !m_skip_eeq_recalc);
+    // Static-Mode (WP-S1): freeze_eeq overrides do_eeq once initial charges are captured.
+    bool do_eeq = (m_eeq_solver && !m_skip_eeq_recalc && !freeze_eeq);
     bool eeq_charges_current = (m_charges.size() == m_atomcount)
         && (m_last_eeq_geometry.rows() == m_geometry_bohr.rows())
         && (m_last_eeq_geometry == m_geometry_bohr);
     if (eeq_charges_current && CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("GFN-FF: Skipping redundant Phase-2 EEQ (geometry unchanged)");
+    }
+    if (freeze_eeq && CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("GFN-FF: Phase-2 EEQ frozen (static_charges mode)");
     }
     if (do_eeq) {
         topo_ptr = &getCachedTopology();
@@ -1042,7 +1072,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         // stencil to cover the Coulomb pair range. Term 1b's reach is bounded by
         // cn_cutoff_bohr (~6 Bohr) in practice, but we never reduce below 40 — taking
         // max() keeps Hellmann-Feynman consistent for any eeq_distance_cutoff > 0.
-        if (!gpu_only) {
+        if (!gpu_only && !reuse_cn) {
             t0 = std::chrono::high_resolution_clock::now();
             const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
             const double cn_deriv_cutoff_sq =
@@ -1056,7 +1086,8 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         // D4 Gaussian weights + derivatives needed for dc6dcn.
         // gpu_only: GPU computes gw + dgw + dc6dcn entirely on device (Phase 6).
         // CPU path: compute gw + dgw + dc6dcn matrix on CPU.
-        if (m_d4_generator && !gpu_only) {
+        // Static-Mode (WP-S1): skip recompute when CN frozen — d4_generator's cached dc6dcn matrix stays valid.
+        if (m_d4_generator && !gpu_only && !reuse_cn) {
             t0 = std::chrono::high_resolution_clock::now();
             std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_last_cn.size());
             m_d4_generator->updateCNValuesForGradient(cn_std, pool, total_threads,
@@ -1177,6 +1208,28 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 
     if (m_skip_eeq_recalc && CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Phase-2 EEQ recalculation SKIPPED (charge injection mode)");
+    }
+
+    // Static-Mode (WP-S1): capture initial CN/charges after the first successful call.
+    // Subsequent calls with reuse_cn / freeze_eeq reuse these values.
+    if ((m_static_charges || m_static_cn) && !m_static_state_captured) {
+        bool cn_ok = (m_last_cn.size() == m_atomcount);
+        bool charges_ok = (m_charges.size() == m_atomcount) && m_charges.allFinite();
+        // Fallback for static_charges when Phase 2 did not run: seed from topology_charges (Phase 1)
+        if (m_static_charges && !charges_ok) {
+            const TopologyInfo& topo = getCachedTopology();
+            if (topo.topology_charges.size() == m_atomcount) {
+                m_charges = topo.topology_charges;
+                charges_ok = true;
+                CurcumaLogger::info("Static-mode: seeded initial charges from Phase-1 topology_charges (Phase 2 not run)");
+            }
+        }
+        if (cn_ok && (charges_ok || !m_static_charges)) {
+            m_static_state_captured = true;
+            CurcumaLogger::info(fmt::format(
+                "Static-mode captured: cn_size={}, charges_size={}, frozen_charges={}, frozen_cn={}",
+                m_last_cn.size(), m_charges.size(), m_static_charges, m_static_cn));
+        }
     }
 
     // Verbosity 3: per-atom parameter table (CN, EEQ charge, hybridization, fragment)

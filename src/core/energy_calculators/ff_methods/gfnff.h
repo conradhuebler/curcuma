@@ -241,6 +241,12 @@ PARAM(nb_cell_list_min_atoms, Int, 800,
       "Min atom count to use SpatialCellList for non-bonded neighbor detection (HB/XB and Coulomb when eeq_distance_cutoff>0). Below this falls back to O(N²) loop. 0 = always use cell list.", "Advanced", {"hb_cell_list_min_atoms"})
 PARAM(hb_parallel_min_pairs, Int, 500,
       "Min AB-pair count to parallelise HB detection via CxxThreadPool. 0 = always parallel (if pool available). -1 = never parallel.", "Advanced", {})
+PARAM(static_charges, Bool, false,
+      "Skip Phase-2 EEQ refinement after initialisation; reuse initial charges. Saves ~30 ms/step. Invalid for charge-transfer or ionic dynamics.", "Performance", {})
+PARAM(static_cn, Bool, false,
+      "Cache CN, dcn, CNF and D4 Gaussian-weights/dc6dcn after first call. Saves ~25 ms/step CPU, ~5-10 ms/step GPU. Invalid for sp2/sp3 changes.", "Performance", {})
+PARAM(static_all, Bool, false,
+      "Shorthand: enables static_charges=true AND static_cn=true. Use only for stable production NVT/NPT in equilibrium regime.", "Performance", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -838,6 +844,11 @@ public:
     const Vector& getLastCNF() const { return m_last_cnf; }
     const Matrix* getDC6DCNPtr() const { return m_d4_generator ? &m_d4_generator->getDC6DCN() : nullptr; }
     FFWorkspace* getWorkspace() const { return m_workspace.get(); }
+
+    // Static-Mode (WP-S1, May 2026): expose frozen-state flags so the GPU method can
+    // propagate them to FFWorkspaceGPU before launching kernels.
+    bool staticCNFrozen() const { return m_static_cn && m_static_state_captured; }
+    bool staticChargesFrozen() const { return m_static_charges && m_static_state_captured; }
 
     // Claude Generated (March 2026): Phase 2 GPU dc6dcn — expose D4 internals
     D4ParameterGenerator* getD4Generator() { return m_d4_generator.get(); }
@@ -2311,6 +2322,11 @@ private:
     bool m_comparing_gradients = false; ///< Guard to prevent recursion in compareGradients
     bool m_skip_eeq_recalc = false; ///< Skip Phase-2 EEQ recalculation (for charge injection diagnostic)
     bool m_rep_diag = false; ///< Dump repulsion alphanb diagnostic
+
+    // Static-Mode (WP-S1): freeze CN/charges across MD steps to avoid recompute
+    bool m_static_charges = false;          ///< If true, skip Phase-2 EEQ after first successful call
+    bool m_static_cn = false;               ///< If true, skip CN/dcn/D4-weight recompute after first call
+    bool m_static_state_captured = false;   ///< Becomes true once initial CN/charges have been captured
 
     // Claude Generated (April 2026): Periodic Boundary Conditions
     bool m_has_pbc = false;                                              ///< PBC active flag

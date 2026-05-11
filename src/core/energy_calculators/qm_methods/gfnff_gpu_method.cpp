@@ -307,6 +307,11 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // This disables CUDA Graph replay so events get recorded each step.
     if (m_gpu_workspace) {
         m_gpu_workspace->setRecordKernelTimings(CurcumaLogger::get_verbosity() >= 2);
+        // Static-Mode (WP-S1, May 2026): propagate frozen-state flags so GPU kernels for
+        // CN / Gaussian-weights / dc6dcn / EEQ-charge-upload are skipped this step.
+        m_gpu_workspace->setStaticFlags(
+            m_gfnff->staticCNFrozen(),
+            m_gfnff->staticChargesFrozen());
     }
 
     try {
@@ -349,8 +354,11 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // k_cn_compute + k_dlogdcn + 3 async D2H launches on main stream.
     // d_cn_final / d_dlogdcn are already on GPU and correct after this call.
     // finalizeCNForCPU() is called after Phase 4 launch to sync without sleeping.
+    // Static-Mode (WP-S1): skip when frozen_cn — d_cn_final/d_dlogdcn retain previous-step values.
     auto t_cn_start = std::chrono::high_resolution_clock::now();
-    m_gpu_workspace->computeCN(m_atom_types);
+    if (!m_gpu_workspace->frozenCN()) {
+        m_gpu_workspace->computeCN(m_atom_types);
+    }
     // G-P1: removed immediate sync + memcpy + setD3CN here.
     // d_cn_final → d_cn D2D copy happens inside prepareAndLaunchChargeIndependent().
     // setD3CN() no longer needed: d_cn is populated GPU-side from d_cn_final.
@@ -466,7 +474,8 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // Gaussian weights + dc6dcn: must run AFTER Phase 1 so d_cn holds the current step's
     // values (Phase 1 D2D-copies d_cn_final → d_cn on main stream before sA fences).
     // Using d_cn guarantees consistency with the dispersion kernel launched in Phase 2.
-    if (gradient) {
+    // Static-Mode (WP-S1): skip when frozen_cn — gw/dgw/dc6dcn buffers retain previous values.
+    if (gradient && !m_gpu_workspace->frozenCN()) {
         m_gpu_workspace->computeGaussianWeightsOnGPU(/*use_cn_final=*/false);
     }
     auto t_launch_end = std::chrono::high_resolution_clock::now();
@@ -524,7 +533,14 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     //      full matrix — inefficient. TODO: batched-Cholesky per fragment block.
     //   3. CPU Phase 2 EEQ: always valid fallback (already cached from InitialiseMolecule)
     Vector charges(N);
-    if (m_skip_phase2) {
+    if (m_gpu_workspace->frozenCharges()) {
+        // Static-Mode (WP-S1): GPU d_charges retain previous-step values, no upload needed.
+        // CPU-side charges fetched for any consumer that still needs them.
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("EEQ GPU Phase 2: frozen charges (static_charges mode) — skipping solve+upload");
+        }
+        charges = m_gfnff->getLastCharges();
+    } else if (m_skip_phase2) {
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::warn("GPU path: skip_phase2=true — bypassing GPU EEQ, using CPU Phase 1 topology charges");
         }
