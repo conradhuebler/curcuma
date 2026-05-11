@@ -662,6 +662,21 @@ bool SimpleMD::Initialise()
         }
     }
 
+    // WP-S/CLI-routing (May 2026): forward method-specific sub-scopes (gfnff, eeq_solver,
+    // tblite, xtb, ...) routed by CLI2Json::findOwnerModules. Without this the GFNFF
+    // constructor never sees flat flags like -static_all true or -eeq_distance_cutoff_auto
+    // true that the registry routed into controller["gfnff"]. Mirrors the
+    // EnergyCalculator::reattachMethodScopes fix used by the opt/sp path (WP6).
+    static const std::vector<std::string> kMethodScopes = {
+        "gfnff", "eeq_solver", "tblite", "xtb", "ulysses", "eht", "dftd3", "dftd4", "orca"
+    };
+    for (const auto& scope : kMethodScopes) {
+        if (m_controller.contains(scope) && m_controller[scope].is_object()
+            && !ec_config.contains(scope)) {
+            ec_config[scope] = m_controller[scope];
+        }
+    }
+
     // Ensure critical parameters exist with defaults from ParameterRegistry
     json defaults = ParameterRegistry::getInstance().getDefaultJson("energycalculator");
     for (auto& [key, value] : defaults.items()) {
