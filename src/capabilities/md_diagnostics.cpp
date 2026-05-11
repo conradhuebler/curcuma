@@ -22,7 +22,8 @@ void MDDiagnosticsWriter::writeSnapshot(int step, double time_fs,
                                         const Vector& charges,
                                         const Vector& cn,
                                         const Matrix& gradient,
-                                        int hb_count, int xb_count)
+                                        int hb_count, int xb_count,
+                                        const json& timing)
 {
     if (!m_out.is_open()) {
         return;
@@ -46,6 +47,11 @@ void MDDiagnosticsWriter::writeSnapshot(int step, double time_fs,
 
     rec["hb_count"] = hb_count;
     rec["xb_count"] = xb_count;
+
+    // WP-P1 (May 2026): optional per-phase wall-clock breakdown
+    if (!timing.empty()) {
+        rec["timing_ms"] = timing;
+    }
 
     m_out << rec.dump() << "\n";
     m_out.flush();

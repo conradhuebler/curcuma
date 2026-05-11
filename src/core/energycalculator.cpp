@@ -856,3 +856,19 @@ int EnergyCalculator::XBCount() const
 {
     return m_method ? m_method->getXBCount() : 0;
 }
+
+// WP-P1 (May 2026): per-phase timing forwarders for MDDiagnosticsWriter
+json EnergyCalculator::LastPrepTiming() const
+{
+    return m_method ? m_method->getLastPrepTiming() : json{};
+}
+
+json EnergyCalculator::StreamTimings() const
+{
+    return m_method ? m_method->getStreamTimings() : json{};
+}
+
+void EnergyCalculator::setForcePhaseTiming(bool on)
+{
+    if (m_method) m_method->setForcePhaseTiming(on);
+}

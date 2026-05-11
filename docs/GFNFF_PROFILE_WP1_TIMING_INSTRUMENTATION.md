@@ -4,7 +4,8 @@
 **Aufwand**: ~1 Tag (~120 LoC)
 **Wirkung**: Per-Step-Breakdown der MD-Hot-Loop in `<basename>.diag.jsonl`; macht Bottleneck-Analyse messbar statt heuristisch
 **Abhängigkeiten**: WP-S2 (Diagnostics-JSONL); CPU-seitige `PrepTiming` existiert bereits
-**Status**: 🤖 Geplant
+**Status**: ✅ Implementiert (May 2026) — ⚙️ machine-tested, single-system smoke; first
+results in [GFNFF_PROFILE_RESULTS_2026-05.md](GFNFF_PROFILE_RESULTS_2026-05.md)
 **Priorität**: Voraussetzung für WP-P2 (Benchmark-Sweep) und WP-P3 (Bond-Microbench)
 
 ---

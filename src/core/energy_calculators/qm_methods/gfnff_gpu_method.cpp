@@ -1196,6 +1196,52 @@ const Vector& GFNFFGPUComputationalMethod::getGPUdEdcn() const
     return m_gpu_workspace->dEdcnTotal();
 }
 
+// WP-P1 (May 2026): per-phase CPU timings (CN/EEQ on host) for diagnostics
+json GFNFFGPUComputationalMethod::getLastPrepTiming() const
+{
+    if (!m_gfnff) return {};
+    const auto& t = m_gfnff->getLastPrepTiming();
+    return {
+        {"cn",          t.cn},
+        {"eeq_topo",    t.eeq_topo},
+        {"cnf",         t.cnf},
+        {"dcn",         t.dcn},
+        {"d4_gw",       t.d4_gw},
+        {"eeq_solve",   t.eeq_solve},
+        {"charge_dist", t.charge_dist},
+        {"total",       t.total},
+    };
+}
+
+void GFNFFGPUComputationalMethod::setForcePhaseTiming(bool on)
+{
+    if (m_gfnff) m_gfnff->setForcePhaseTiming(on);
+    if (m_gpu_workspace) m_gpu_workspace->setRecordKernelTimings(on);
+}
+
+// WP-P1 (May 2026): per-stream / per-kernel-category GPU timings (FFTermTimings)
+json GFNFFGPUComputationalMethod::getStreamTimings() const
+{
+    if (!m_gpu_workspace) return {};
+    const auto& kt = m_gpu_workspace->kernelTimings();
+    json out;
+    auto add = [&](const char* name, double v) { if (v >= 0.0) out[name] = v; };
+    add("bonds",          kt.bonds);
+    add("angles",         kt.angles);
+    add("dihedrals",      kt.dihedrals);
+    add("inversions",     kt.inversions);
+    add("stors",          kt.stors);
+    add("dispersion",     kt.dispersion);
+    add("bonded_rep",     kt.bonded_rep);
+    add("nonbonded_rep",  kt.nonbonded_rep);
+    add("coulomb",        kt.coulomb);
+    add("hbond",          kt.hbond);
+    add("xbond",          kt.xbond);
+    add("atm",            kt.atm);
+    add("batm",           kt.batm);
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // Generate CN pair list for GPU CN chain-rule kernel
 // Claude Generated (March 2026): Replaces sparse dcn matrices

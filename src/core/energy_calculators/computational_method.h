@@ -249,6 +249,25 @@ public:
      */
     virtual int getXBCount() const { return 0; }
 
+    /**
+     * @brief WP-P1 (May 2026): per-phase CPU timing breakdown from the last calculation.
+     * @return JSON object with ms-granular timings (cn, eeq_topo, dcn, d4_gw, eeq_solve,
+     * charge_dist, total) for GFN-FF; empty json for methods without an FF prep phase.
+     */
+    virtual json getLastPrepTiming() const { return {}; }
+
+    /**
+     * @brief WP-P1 (May 2026): per-stream / per-kernel-category GPU timings from the
+     * last calculation. Empty json for CPU-only methods.
+     */
+    virtual json getStreamTimings() const { return {}; }
+
+    /**
+     * @brief WP-P1 (May 2026): toggle per-phase chrono collection in the FF backend.
+     * Force-on so MD diagnostics get non-zero timing fields without requiring verbosity 2.
+     */
+    virtual void setForcePhaseTiming(bool /*on*/) {}
+
     // =================================================================================
     // Force Field Energy Component Access (Claude Generated November 2025)
     // =================================================================================

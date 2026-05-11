@@ -117,6 +117,40 @@ G2b (Profiling)     → G2a (Kernel-Split): Profiling zuerst, um richtige Kernel
 
 ---
 
+## WP-P1 MD Per-Step-Profil (Mai 2026)
+
+Per-Step-Wall-Clock-Breakdown via `md_diagnostics_timing=true` Hook
+(WP-P1). Quelle: [GFNFF_PROFILE_RESULTS_2026-05.md](GFNFF_PROFILE_RESULTS_2026-05.md).
+
+**Polymer NVE (N=1410, dt=1 fs, 4 Threads), Step 5**:
+
+| Phase | Zeit | Anteil step_total | Hebel |
+|-------|------|--------------------|-------|
+| `dcn` (CN-Derivative pair list) | 23.3 ms | 26 % | **Neu erkannter #1 Bottleneck** — bisher unterschätzt |
+| `eeq_solve` (Phase 2) | 22.2 ms | 24 % | WP-S1 `static_charges` + WP-S3 `cutoff_auto` |
+| `cn` (Coordination Numbers) | 11.4 ms | 13 % | P4e SIMD, OpenMP-Audit |
+| FF-Terme zusammen | 20.3 ms | 22 % | Bond / Angle / Coulomb / Disp; nur ~7 ms Bond-Anteil |
+| `d4_gw` (D4 Gaussian weights) | 3.4 ms | 4 % | P4f SIMD |
+
+**Korrektur zur Mai-2026-Mixture-Hypothese**:
+- P4c "75 µs/Bond" (mixture-Profil) reproduziert sich **nicht** auf Polymer.
+  Gesamte FF-Term-Berechnung ist 20.3 ms, nicht ~225 ms wie aus 75 µs ×
+  ~3000 Bonds extrapoliert. Mixture-Befund war wahrscheinlich Memory-
+  Pressure-getrieben bei N=6200 — WP-P3-Mikrobench würde das klären.
+
+**Konsequenzen**:
+- **WP-S1 `static_all`** ist nun durch Profil-Daten gerechtfertigt:
+  `dcn + eeq_solve + cn + d4_gw = 60.3 ms = 66 %` der step_total werden
+  durch Static-Mode wegrationalisiert. Passt zum gemessenen 3.2×-Speedup
+  im Quick-Test.
+- **Neuer high-priority WP-Kandidat**: `dcn`-Vektorisierung (SIMD oder
+  Pair-Cache-Optimierung) für die `calculateCoordinationNumberDerivatives()`-
+  Inner-Loop.
+- **WP-P3 Bond-Microbench** wird sekundär; WP-P2 Cross-System-Sweep wird
+  priorisiert, um Polymer-vs-Mixture-Diskrepanz zu klären.
+
+---
+
 ## Kumulative Bilanz WP1–WP5 (Mai 2026)
 
 `mixture.xyz` (N=6200, nfrag=1400), Single-Point + Gradient, AMD Ryzen 9 9950X3D, Topo-Cache vor jedem Lauf gelöscht:

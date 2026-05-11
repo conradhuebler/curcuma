@@ -178,3 +178,25 @@ int GFNFFComputationalMethod::getXBCount() const
 {
     return m_gfnff ? static_cast<int>(m_gfnff->getLastXBonds().size()) : 0;
 }
+
+// WP-P1 (May 2026): expose the cached PrepTiming as JSON for MDDiagnosticsWriter
+json GFNFFComputationalMethod::getLastPrepTiming() const
+{
+    if (!m_gfnff) return {};
+    const auto& t = m_gfnff->getLastPrepTiming();
+    return {
+        {"cn",          t.cn},
+        {"eeq_topo",    t.eeq_topo},
+        {"cnf",         t.cnf},
+        {"dcn",         t.dcn},
+        {"d4_gw",       t.d4_gw},
+        {"eeq_solve",   t.eeq_solve},
+        {"charge_dist", t.charge_dist},
+        {"total",       t.total},
+    };
+}
+
+void GFNFFComputationalMethod::setForcePhaseTiming(bool on)
+{
+    if (m_gfnff) m_gfnff->setForcePhaseTiming(on);
+}

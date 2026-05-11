@@ -282,6 +282,8 @@ void SimpleMD::LoadControlJson()
 
     // WP-S2 (May 2026): per-step diagnostics JSONL dump
     m_md_diagnostics = m_config.get<bool>("md_diagnostics");
+    // WP-P1 (May 2026): per-phase wall-clock timing in the JSONL records
+    m_md_diagnostics_timing = m_config.get<bool>("md_diagnostics_timing");
 
     // Claude Generated 2025: RATTLE Parameters
     m_rm_COM = m_config.get<double>("remove_com_motion");
@@ -1631,6 +1633,11 @@ void SimpleMD::prepareRun()
         }
     }
 
+    // WP-P1 (May 2026): force per-phase timing collection when diagnostics-timing is on
+    if (m_md_diagnostics && m_md_diagnostics_timing && m_interface) {
+        m_interface->setForcePhaseTiming(true);
+    }
+
     WriteGeometry();
 #ifdef USE_Plumed
     if (m_mtd) {
@@ -1758,7 +1765,17 @@ bool SimpleMD::step()
         }
     }
 
-    Integrator();
+    // WP-P1 (May 2026): wall-clock the integrator step for MD diagnostics
+    double integrator_ms = 0.0;
+    if (m_md_diagnostics_timing) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        Integrator();
+        auto t1 = std::chrono::high_resolution_clock::now();
+        integrator_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    } else {
+        Integrator();
+    }
+    m_last_integrator_ms = integrator_ms;
     AverageQuantities();
 
     if (m_mtd) {
@@ -1803,6 +1820,20 @@ bool SimpleMD::step()
             m_current_rescue = 0;
             // WP-S2 (May 2026): append diagnostics record parallel to XYZ trajectory
             if (m_md_diagnostics && m_diag_writer) {
+                // WP-P1 (May 2026): optional per-phase wall-clock breakdown
+                json timing;
+                if (m_md_diagnostics_timing) {
+                    timing = m_interface->LastPrepTiming();
+                    timing["ff_total"]    = m_last_ff_ms;
+                    timing["integrator"]  = m_last_integrator_ms;
+                    timing["hbxb_update"] = m_last_hbxb_ms;
+                    auto t_now = std::chrono::system_clock::now();
+                    timing["step_total"] = std::chrono::duration<double, std::milli>(t_now - step0).count();
+                    json gpu_t = m_interface->StreamTimings();
+                    if (!gpu_t.empty()) {
+                        timing["gpu"] = gpu_t;
+                    }
+                }
                 m_diag_writer->writeSnapshot(
                     m_step, m_currentStep,
                     m_interface->getEnergyDecomposition(),
@@ -1810,7 +1841,8 @@ bool SimpleMD::step()
                     m_interface->CN(),
                     m_interface->Gradient(),
                     m_interface->HBCount(),
-                    m_interface->XBCount());
+                    m_interface->XBCount(),
+                    timing);
             }
         } else if (!write && m_rescue && m_run_states.size() > (1 - m_current_rescue)) {
             std::cout << "Molecule exploded, resetting to previous state ..." << std::endl;
@@ -3005,7 +3037,11 @@ double SimpleMD::CleanEnergy()
     interface.setMolecule(m_molecule.getMolInfo());
     interface.updateGeometry(m_eigen_geometry);
     interface.setVerbosity(0);
+    // WP-P1 (May 2026): wall-clock the FF call for MD diagnostics
+    auto t_ff_start = std::chrono::high_resolution_clock::now();
     const double Energy = interface.CalculateEnergy(true);
+    auto t_ff_end = std::chrono::high_resolution_clock::now();
+    m_last_ff_ms = std::chrono::duration<double, std::milli>(t_ff_end - t_ff_start).count();
     m_eigen_gradient = interface.Gradient();
     if (m_dipole && m_method == "gfn2") {
         m_molecule.setDipole(interface.Dipole()*au);//in eA
@@ -3020,7 +3056,11 @@ double SimpleMD::FastEnergy()
 
     m_interface->updateGeometry(m_eigen_geometry);
 
+    // WP-P1 (May 2026): wall-clock the FF call for MD diagnostics
+    auto t_ff_start = std::chrono::high_resolution_clock::now();
     const double Energy = m_interface->CalculateEnergy(true);
+    auto t_ff_end = std::chrono::high_resolution_clock::now();
+    m_last_ff_ms = std::chrono::duration<double, std::milli>(t_ff_end - t_ff_start).count();
     m_eigen_gradient = m_interface->Gradient();
 
     // Claude Generated (Feb 2026): Gradient sanity check for MD stability

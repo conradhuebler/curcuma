@@ -394,6 +394,12 @@ private:
     bool m_md_diagnostics = false;
     std::unique_ptr<MDDiagnosticsWriter> m_diag_writer;
 
+    // WP-P1 (May 2026): per-phase wall-clock breakdown for diagnostics
+    bool m_md_diagnostics_timing = false;
+    double m_last_ff_ms = 0.0;     ///< wall-clock of last m_interface->CalculateEnergy()
+    double m_last_hbxb_ms = 0.0;   ///< placeholder; HBXB-update lives inside Calculation() and is hard to isolate
+    double m_last_integrator_ms = 0.0;  ///< wall-clock of last Integrator() call in step()
+
     int m_mtd_dT = -1;
     int m_seed = -1;
     int m_time_step = 0;
@@ -511,6 +517,8 @@ private:
 
     // --- WP-S2 Diagnostics (May 2026) ---
     PARAM(md_diagnostics, Bool, false, "Write per-step diagnostics to <basename>.diag.jsonl (energy decomposition, charges, CN, gradient norms, HB/XB counts). Frequency follows dump_frequency. One JSON object per line.", "Output", {})
+    // --- WP-P1 Timing Instrumentation (May 2026) ---
+    PARAM(md_diagnostics_timing, Bool, false, "Add a timing_ms block to each <basename>.diag.jsonl record (per-phase wall-clock: CN/EEQ/dcn/D4-weights/FF/integrator/HBXB/I-O). GPU runs add a gpu sub-block with per-kernel-category times. Requires md_diagnostics=true. ~1-2 us per hook.", "Output", {})
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^

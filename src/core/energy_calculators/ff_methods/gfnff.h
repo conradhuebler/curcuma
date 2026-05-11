@@ -860,6 +860,14 @@ public:
     bool staticCNFrozen() const { return m_static_cn && m_static_state_captured; }
     bool staticChargesFrozen() const { return m_static_charges && m_static_state_captured; }
 
+    // WP-P1 (May 2026): last per-phase timings (ms) for MD diagnostics JSONL dump.
+    const PrepTiming& getLastPrepTiming() const { return m_last_prep_timing; }
+
+    /// WP-P1 (May 2026): force per-phase chrono collection regardless of verbosity level.
+    /// Set by SimpleMD when md_diagnostics_timing=true so the JSONL gets non-zero values.
+    void setForcePhaseTiming(bool on) { m_force_phase_timing = on; }
+    bool forcePhaseTiming() const { return m_force_phase_timing; }
+
     // Claude Generated (March 2026): Phase 2 GPU dc6dcn — expose D4 internals
     D4ParameterGenerator* getD4Generator() { return m_d4_generator.get(); }
 
@@ -2340,6 +2348,10 @@ private:
 
     // WP-S3 (May 2026): runtime state of the EEQ cutoff auto-detection
     bool m_eeq_cutoff_auto_active = false;  ///< true if applyEEQCutoffAutoIfRequested set 30 Bohr
+
+    // WP-P1 (May 2026): cached after each prepareCNAndEEQ() call; consumed by MD diagnostics dump.
+    mutable PrepTiming m_last_prep_timing{};
+    bool m_force_phase_timing = false;  ///< If true, prepareCNAndEEQ collects per-phase timings even at verbosity < 2
 
     // Claude Generated (April 2026): Periodic Boundary Conditions
     bool m_has_pbc = false;                                              ///< PBC active flag

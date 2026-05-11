@@ -269,6 +269,15 @@ public:
     /// Number of detected halogen bonds (GFN-FF only); 0 elsewhere.
     int XBCount() const;
 
+    /// WP-P1 (May 2026): per-phase CPU timing JSON from the last calculation.
+    json LastPrepTiming() const;
+
+    /// WP-P1 (May 2026): per-stream GPU timing JSON from the last calculation.
+    json StreamTimings() const;
+
+    /// WP-P1 (May 2026): force the FF backend to collect per-phase timings regardless of verbosity.
+    void setForcePhaseTiming(bool on);
+
     // =================================================================================
     // Error Handling and Status
     // =================================================================================

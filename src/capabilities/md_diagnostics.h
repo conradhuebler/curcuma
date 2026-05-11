@@ -38,13 +38,16 @@ public:
     /**
      * @brief Append one snapshot record to the JSONL file.
      * Per-atom Vectors with size 0 produce empty JSON arrays (not an error).
+     * @param timing  Optional per-phase wall-clock breakdown (WP-P1, May 2026).
+     *                When non-empty, written as a `timing_ms` block.
      */
     void writeSnapshot(int step, double time_fs,
                        const json& energy_decomp,
                        const Vector& charges,
                        const Vector& cn,
                        const Matrix& gradient,
-                       int hb_count, int xb_count);
+                       int hb_count, int xb_count,
+                       const json& timing = json{});
 
 private:
     std::ofstream m_out;

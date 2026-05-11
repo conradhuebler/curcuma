@@ -1012,7 +1012,9 @@ void GFNFF::updateDynamicState(TopologyInfo& topo) const {
 
 void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external_cn, bool skip_eeq, PrepTiming* out_timing)
 {
-    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
+    // WP-P1 (May 2026): also collect timings when forcePhaseTiming() is set, so MD
+    // diagnostics get non-zero values without requiring CurcumaLogger verbosity 2.
+    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2) || m_force_phase_timing;
     auto t_prep_total = std::chrono::high_resolution_clock::now();  // always measure, negligible overhead
     double t_cn = 0.0, t_eeq_topo = 0.0, t_cnf = 0.0, t_dcn = 0.0, t_d4_gw = 0.0, t_eeq_solve = 0.0, t_charge_dist = 0.0;
 
@@ -1247,15 +1249,18 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         }
     }
 
+    // WP-P1 (May 2026): cache phase-timings into a member so MD diagnostics can read them
+    // after every Calculation() pass, independent of whether the caller passed out_timing.
+    m_last_prep_timing.total = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_prep_total).count();
+    m_last_prep_timing.cn = t_cn;
+    m_last_prep_timing.eeq_topo = t_eeq_topo;
+    m_last_prep_timing.cnf = t_cnf;
+    m_last_prep_timing.dcn = t_dcn;
+    m_last_prep_timing.d4_gw = t_d4_gw;
+    m_last_prep_timing.eeq_solve = t_eeq_solve;
+    m_last_prep_timing.charge_dist = t_charge_dist;
     if (out_timing) {
-        out_timing->total = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_prep_total).count();
-        out_timing->cn = t_cn;
-        out_timing->eeq_topo = t_eeq_topo;
-        out_timing->cnf = t_cnf;
-        out_timing->dcn = t_dcn;
-        out_timing->d4_gw = t_d4_gw;
-        out_timing->eeq_solve = t_eeq_solve;
-        out_timing->charge_dist = t_charge_dist;
+        *out_timing = m_last_prep_timing;
     }
 
     if (m_skip_eeq_recalc && CurcumaLogger::get_verbosity() >= 2) {
