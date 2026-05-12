@@ -186,6 +186,30 @@ skippt; GPU-Pfad nicht gemessen (USE_CUDA=OFF in der Standard-release/).
 
 ---
 
+## WP-D Stage A — cn_raw-Reuse (Mai 2026)
+
+Erste Umsetzung der dcn-Optimierung. `CNCalculator::calculateGFNFFCN` gibt
+optional `cn_raw` zurück; `calculateCoordinationNumberDerivatives` skippt
+seine eigene N²-erf-Schleife, wenn der gecachete Wert übergeben wird.
+
+| Phase | Pre-WP-D | Stage A | Delta |
+|-------|----------|---------|-------|
+| polymer `dcn` (baseline) | 21.0 ms | 18.0 ms | −14 % |
+| polymer `step_total` | 102.1 ms | 100.9 ms | −1.2 % |
+
+**Kleiner als erwartet**: Step 1 war seit März 2026 OpenMP-parallel; bei
+4 Threads ist die Wiederholung schon günstig. **Bit-identische Energien**
+(polymer SP −203.51758419 Eh pre/post). gfnff_numgrad-Tests bleiben grün.
+
+**Stage B (Pair-Cache) deferred**: würde nur ~1–2 ms zusätzlich sparen
+für ~120 LoC. Effort/Reward schlecht. **Echter Folge-WP-Kandidat**: SIMD-
+Vektorisierung der `std::exp()`-Loop in dcn step 3 (~10 ms Hebel via
+SLEEF / Polynomial-Approximation).
+
+Details: [GFNFF_PROFILE_RESULTS_2026-05.md](GFNFF_PROFILE_RESULTS_2026-05.md) WP-D-Sektion.
+
+---
+
 ## Kumulative Bilanz WP1–WP5 (Mai 2026)
 
 `mixture.xyz` (N=6200, nfrag=1400), Single-Point + Gradient, AMD Ryzen 9 9950X3D, Topo-Cache vor jedem Lauf gelöscht:

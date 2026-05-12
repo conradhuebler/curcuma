@@ -310,3 +310,54 @@ cat /tmp/sweep_cpu_full/wp_profile_summary.md
 Erweitert zu `caffeine,polymer,mixture` falls mixture-Stabilität
 gelöst (siehe `docs/GFNFF_STATIC_WP4_VALIDATION_SUITE.md` für
 Re-Capture-Idee).
+
+---
+
+## WP-D Stage A (May 2026) — cn_raw-Reuse
+
+**Hypothese (aus WP-P2)**: `calculateCoordinationNumberDerivatives()` rechnet
+in Step 1 die N²-erf-Schleife für `cn_raw` neu, obwohl `CNCalculator` den
+Wert im vorherigen Aufruf bereits intern erzeugt hat. Wenn die rohen CN-
+Werte über `out_cn_raw` zurückgegeben und in dcn wiederverwendet werden,
+sollte ~10 ms / Step Polymer gespart werden.
+
+### Messung (gleicher Sweep wie WP-P2, 200 fs csvr, 4 Threads)
+
+| Phase | Pre-WP-D | Stage A | Delta |
+|-------|----------|---------|-------|
+| polymer `dcn` (baseline) | 21.0 ms | **18.0 ms** | −3.0 ms (−14 %) |
+| polymer `cn` (baseline) | 10.7 ms | 10.8 ms | +0.1 ms (Output-Schreib-Cost) |
+| polymer `step_total` (baseline) | 102.1 ms | 100.9 ms | −1.2 ms (−1.2 %) |
+| caffeine alle Modi | — | unverändert | (System zu klein zum Messen) |
+
+### Befunde
+
+1. **Stage A wirkt, aber kleiner als erwartet**:
+   - Step 1 in dcn ist seit März 2026 OpenMP-parallel (`cn_calculator.cpp:130`).
+     Bei 4 Threads ist die N²-erf-Schleife relativ günstig.
+   - Original-Hypothese (~50 % dcn-Reduktion) entsprach dem singlethread-Profil
+     der WP-P1-Datenaufnahme. Im 4-thread Sweep ist die Reduktion kleiner.
+
+2. **Bit-Identität verifiziert**: polymer SP-Energie −203.51758419 Eh identisch
+   pre- und post-Stage-A. `ctest -R gfnff_numgrad` bleibt grün (2/2).
+
+3. **Stage B (Pair-Cache) verworfen**:
+   - Stage B würde nur die N²/2-Skip-Pairs (Atome jenseits 40-Bohr-Cutoff)
+     einsparen — geschätzt 1–2 ms zusätzlich für ~120 LoC neuer Code.
+   - Memory-Overhead (~20 MB Pair-Liste bei N=1410) und Cache-Invalidierung
+     bei Geometry-Drift in MD machen das fragil.
+   - Effort/Reward schlecht → deferred.
+
+4. **Echter verbleibender Hebel ist SIMD**:
+   - Step 3 in dcn hat ~10 ms an `std::exp(-kn²·dr²)`-Calls (skalar).
+   - SLEEF/SIMD-vektorisierte exp() könnten 3–4× hier bringen → ~7 ms
+     gespart. **Eigenes WP**, ~2–3 Tage.
+
+### Konsequenzen
+
+- **`dcn`-Bottleneck-Rang aktualisiert**: 21 → 18 ms, jetzt knapper Vorsprung
+  vor `eeq_solve` (21 ms — beide nahezu gleichauf).
+- **`static_all`-Speedup** durch WP-D nicht beeinflusst: Static-Mode skippt
+  `dcn` ganz; WP-D wirkt nur im baseline/cutoff_auto-Modus.
+- **Nächstes-WP-Ranking (May 2026)**: SIMD-Vektorisierung der exp()-Loop in
+  dcn step 3 ist jetzt der attraktivste verbleibende CPU-Hebel.
