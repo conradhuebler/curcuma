@@ -1183,9 +1183,13 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         if (!gpu_only && !reuse_cn) {
 #endif
             t0 = std::chrono::high_resolution_clock::now();
-            const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
-            const double cn_deriv_cutoff_sq =
-                (eeq_cut > 0.0) ? std::max(40.0 * 40.0, eeq_cut * eeq_cut) : 40.0 * 40.0;
+            const double eeq_cut  = m_parameters.value("eeq_distance_cutoff", 0.0);
+            const double disp_cut = m_parameters.value("dispersion_cutoff_bohr", 0.0);
+            // WP-Disp (Mai 2026): extend stencil for dispersion cutoff (Site D).
+            // dC6(i,j)/dCN(i) * dCN(i)/dx_k requires CN derivatives to reach all j
+            // in the active dispersion pair-list; stencil must cover that range.
+            const double max_nonbonded_cut = std::max({ 40.0, eeq_cut, disp_cut });
+            const double cn_deriv_cutoff_sq = max_nonbonded_cut * max_nonbonded_cut;
             // WP-D Stage A (May 2026): pass cn_raw to skip the N²-erf loop in dcn step 1.
             // WP-D Stage C (May 2026): pass neighbor list (when available) to replace the
             // N²-threshold scan in dcn step 3 with O(k) neighbor iteration.
@@ -9598,6 +9602,35 @@ json GFNFF::generateGFNFFDispersionPairs() const
                 }
 
                 (void)start_time;
+
+                // WP-Disp (Mai 2026): optional distance cutoff on D4 dispersion pair-list.
+                // Default 0.0 = no filter (Fortran-parity). At 15.0 Bohr: ~38x fewer pairs
+                // for mixture N=6200, O(N^2)->O(N*k) per-step in CalculateGFNFFDispersionContribution.
+                // Hellmann-Feynman consistency: dc6dcn accumulation is over m_gfnff_dispersions only,
+                // so filtering here automatically restricts the CN-derivative chain rule too (Site C).
+                const double disp_cut = m_parameters.value("dispersion_cutoff_bohr", 0.0);
+                if (disp_cut > 0.0) {
+                    const double disp_cut_sq = disp_cut * disp_cut;
+                    const size_t n_full = d4_params["d4_dispersion_pairs"].size();
+                    json filtered_pairs = json::array();
+                    for (const auto& pair : d4_params["d4_dispersion_pairs"]) {
+                        int pi = pair["i"];
+                        int pj = pair["j"];
+                        Eigen::Vector3d ri = m_geometry_bohr.row(pi);
+                        Eigen::Vector3d rj = m_geometry_bohr.row(pj);
+                        if ((ri - rj).squaredNorm() <= disp_cut_sq) {
+                            auto p = pair;
+                            p["r_cut"] = disp_cut; // step-time guard matches init cutoff
+                            filtered_pairs.push_back(std::move(p));
+                        }
+                    }
+                    if (CurcumaLogger::get_verbosity() >= 2) {
+                        CurcumaLogger::param("dispersion_cutoff_bohr",
+                            fmt::format("{:.1f} Bohr  ({} / {} pairs retained)",
+                                disp_cut, filtered_pairs.size(), n_full));
+                    }
+                    d4_params["d4_dispersion_pairs"] = std::move(filtered_pairs);
+                }
 
                 return d4_params["d4_dispersion_pairs"];
             } else {
