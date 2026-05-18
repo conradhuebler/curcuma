@@ -1024,6 +1024,13 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     const bool reuse_cn = m_static_cn && m_static_state_captured;
     const bool freeze_eeq = m_static_charges && m_static_state_captured;
 
+#ifdef GFNFF_CN_DCN_FUSION
+    // WP-D Stage D (May 2026): track whether the fused CN+DCN path was taken so
+    // the separate DCN call below is skipped. Declared here so both the CN block
+    // and the gradient block below can see it.
+    bool m_used_fused_cn_dcn = false;
+#endif
+
     // Claude Generated (March 2026): GPU path uses memcpy into pre-allocated vectors
     // to avoid Eigen heap allocations (CUDA corrupts heap metadata after init).
     auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
@@ -1039,6 +1046,23 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             // WP-D Stage A (May 2026): capture cn_raw for dcn step-1 skip.
             // WP-D Stage C (May 2026): neighbor-list mode also returns the list for dcn step-3.
             double cn_cutoff_bohr = m_parameters.value("cn_cutoff_bohr", 6.0);
+#ifdef GFNFF_CN_DCN_FUSION
+            // WP-D Stage D (May 2026): fused CN+DCN path — single pair loop computes both.
+            // Only active when gradient is needed on CPU (gpu_only=false) with neighbor-list
+            // mode (cn_cutoff_bohr > 0). Timing captured in t_cn; t_dcn stays 0.
+            if (gradient && !gpu_only && cn_cutoff_bohr > 0.0) {
+                int fused_T = m_threads;
+                auto* fused_pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+                if (fused_pool) fused_pool->setActiveThreadCount(fused_T);
+                auto fused = computeCNAndDerivativesFused(cn_cutoff_bohr, fused_pool, fused_T);
+                m_last_cn          = std::move(fused.cn_values);
+                m_last_cn_raw      = std::move(fused.cn_raw);
+                m_last_cn_neighbors= std::move(fused.neighbors);
+                m_last_dcn         = std::move(fused.dcn_store);
+                m_used_fused_cn_dcn = true;
+            }
+            if (!m_used_fused_cn_dcn) {
+#endif
             if (cn_cutoff_bohr > 0.0) {
                 auto cn_result = CNCalculator::calculateGFNFFCNWithNeighbors(
                     m_atoms, m_geometry_bohr, cn_cutoff_bohr);
@@ -1062,6 +1086,9 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
                 m_last_cn_raw = Vector::Map(cn_raw_std.data(), cn_raw_std.size()).eval();
                 m_last_cn_neighbors.clear();
             }
+#ifdef GFNFF_CN_DCN_FUSION
+            }  // !m_used_fused_cn_dcn
+#endif
         }
     }
     if (do_timing) {
@@ -1149,7 +1176,12 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         // stencil to cover the Coulomb pair range. Term 1b's reach is bounded by
         // cn_cutoff_bohr (~6 Bohr) in practice, but we never reduce below 40 — taking
         // max() keeps Hellmann-Feynman consistent for any eeq_distance_cutoff > 0.
+        // WP-D Stage D (May 2026): skip when fused CN+DCN path already produced m_last_dcn.
+#ifdef GFNFF_CN_DCN_FUSION
+        if (!gpu_only && !reuse_cn && !m_used_fused_cn_dcn) {
+#else
         if (!gpu_only && !reuse_cn) {
+#endif
             t0 = std::chrono::high_resolution_clock::now();
             const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
             const double cn_deriv_cutoff_sq =
@@ -6050,6 +6082,192 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
 
     return store;
 }
+
+#ifdef GFNFF_CN_DCN_FUSION
+// WP-D Stage D (May 2026): fused CN + DCN in a single O(N²) pair pass.
+// Replaces the two-call sequence:
+//   1. CNCalculator::calculateGFNFFCNWithNeighbors()   [builds list + computes erfCN]
+//   2. calculateCoordinationNumberDerivatives()        [reads same pairs again for derfCN]
+// into one loop that computes both simultaneously. dlogdcn is applied in a post-pass
+// because it depends on the fully-accumulated cn_raw[i].
+// Reference: Fortran ncoordNeighs (external/xtb/src/gfnff/gfnff_eg.f90:3677).
+GFNFF::CNAndDerivResult GFNFF::computeCNAndDerivativesFused(
+    double cn_cutoff_bohr,
+    CxxThreadPool* pool,
+    int num_threads) const
+{
+    const int N          = m_atomcount;
+    const double kn      = -7.5;
+    const double cnmax   = 4.4;
+    const double sqrtpi  = 1.77245385091;
+    const double ANG2BOHR = 1.8897259886;
+    const double k_scaled = 4.0 / 3.0;
+    const double cutoff_sq = cn_cutoff_bohr * cn_cutoff_bohr;
+
+    // Pre-compute covalent radii in Bohr with GFN-FF 4/3 scaling
+    std::vector<double> rcov_bohr(N);
+    for (int i = 0; i < N; ++i)
+        rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * ANG2BOHR;
+
+    CNAndDerivResult result;
+    result.cn_values.resize(N);
+    result.cn_raw  = Vector::Zero(N);
+    result.neighbors.resize(N);
+    result.dcn_store.natoms = N;
+    result.dcn_store.diag   = Matrix::Zero(N, 3);
+
+    // --------------------------------------------------------------------------
+    // Fused pair loop: upper-triangle O(N²) with cn_cutoff_bohr cutoff.
+    // Per surviving pair (i,j): compute erfCN (→ cn_raw) and derfCN (→ DCN gradient)
+    // in a single geometry read. dlogdcn is NOT applied here — it requires complete cn_raw.
+    // --------------------------------------------------------------------------
+    if (num_threads > 1 && N > 64) {
+        int T = std::min(num_threads, N);
+
+        struct ThreadLocalData {
+            std::vector<double>     cn_raw;
+            std::vector<CNDerivPair> pairs;
+            Matrix                  diag;
+            std::vector<std::vector<int>> neighbors;
+            explicit ThreadLocalData(int n)
+                : cn_raw(n, 0.0), diag(Matrix::Zero(n, 3)), neighbors(n) {
+                pairs.reserve(static_cast<size_t>(n) * 40 / 4 * 2 + 100);
+            }
+        };
+        std::vector<ThreadLocalData> tld;
+        tld.reserve(T);
+        for (int t = 0; t < T; ++t) tld.emplace_back(N);
+
+        // Interleaved row assignment for load-balancing (same pattern as DCN threading).
+        auto worker = [&](int t_id) {
+            auto& loc = tld[t_id];
+            for (int i = t_id; i < N; i += T) {
+                if (rcov_bohr[i] == 0.0) continue;
+                Eigen::Vector3d ri = m_geometry_bohr.row(i);
+                for (int j = 0; j < i; ++j) {
+                    if (rcov_bohr[j] == 0.0) continue;
+                    Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                    double r_ij_sq = r_ij_vec.squaredNorm();
+                    if (r_ij_sq >= cutoff_sq) continue;
+
+                    double r_ij     = std::sqrt(r_ij_sq);
+                    double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                    double dr       = (r_ij - rcov_sum) / rcov_sum;
+
+                    // CN contribution (erf-based, same formula as calculateGFNFFCNWithNeighbors)
+                    double erfCN = 0.5 * (1.0 + std::erf(kn * dr));
+                    loc.cn_raw[i] += erfCN;
+                    loc.cn_raw[j] += erfCN;
+
+                    // DCN gradient (unscaled — dlogdcn applied in post-pass below)
+                    double factor = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / (rcov_sum * r_ij);
+                    Eigen::Vector3d grad = factor * r_ij_vec;
+
+                    loc.diag.row(i) -= grad.transpose();
+                    loc.diag.row(j) += grad.transpose();
+                    // Two CNDerivPair entries per pair — same semantics as calculateCoordinationNumberDerivatives
+                    loc.pairs.push_back({i, j, -grad[0], -grad[1], -grad[2]});
+                    loc.pairs.push_back({j, i,  grad[0],  grad[1],  grad[2]});
+
+                    // Build symmetric neighbor list (reusable by D4 and EEQ steps downstream)
+                    loc.neighbors[i].push_back(j);
+                    loc.neighbors[j].push_back(i);
+                }
+            }
+        };
+
+        if (pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(pool->enqueue(worker, t));
+            worker(0);
+            for (auto& f : futures) f.get();
+        } else {
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t)
+                threads[t - 1] = std::thread(worker, t);
+            worker(0);
+            for (auto& th : threads) th.join();
+        }
+
+        // Merge: sum cn_raw and diag; concatenate pairs and neighbors
+        size_t total_pairs = 0;
+        for (int t = 0; t < T; ++t) total_pairs += tld[t].pairs.size();
+        result.dcn_store.pairs.reserve(total_pairs);
+        for (int t = 0; t < T; ++t) {
+            for (int i = 0; i < N; ++i) {
+                result.cn_raw[i] += tld[t].cn_raw[i];
+                for (int nb : tld[t].neighbors[i])
+                    result.neighbors[i].push_back(nb);
+            }
+            result.dcn_store.diag += tld[t].diag;
+            result.dcn_store.pairs.insert(result.dcn_store.pairs.end(),
+                                          tld[t].pairs.begin(), tld[t].pairs.end());
+        }
+
+    } else {
+        // Sequential path
+        result.dcn_store.pairs.reserve(static_cast<size_t>(N) * 40 + 100);
+        for (int i = 0; i < N; ++i) {
+            if (rcov_bohr[i] == 0.0) continue;
+            Eigen::Vector3d ri = m_geometry_bohr.row(i);
+            for (int j = 0; j < i; ++j) {
+                if (rcov_bohr[j] == 0.0) continue;
+                Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                double r_ij_sq = r_ij_vec.squaredNorm();
+                if (r_ij_sq >= cutoff_sq) continue;
+
+                double r_ij     = std::sqrt(r_ij_sq);
+                double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                double dr       = (r_ij - rcov_sum) / rcov_sum;
+
+                double erfCN = 0.5 * (1.0 + std::erf(kn * dr));
+                result.cn_raw[i] += erfCN;
+                result.cn_raw[j] += erfCN;
+
+                double factor = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / (rcov_sum * r_ij);
+                Eigen::Vector3d grad = factor * r_ij_vec;
+
+                result.dcn_store.diag.row(i) -= grad.transpose();
+                result.dcn_store.diag.row(j) += grad.transpose();
+                result.dcn_store.pairs.push_back({i, j, -grad[0], -grad[1], -grad[2]});
+                result.dcn_store.pairs.push_back({j, i,  grad[0],  grad[1],  grad[2]});
+
+                result.neighbors[i].push_back(j);
+                result.neighbors[j].push_back(i);
+            }
+        }
+    }
+
+    // --------------------------------------------------------------------------
+    // Post-pass: cn_raw is now complete. Compute dlogdcn and apply to DCN store.
+    // --------------------------------------------------------------------------
+    Vector dlogdcn(N);
+    for (int i = 0; i < N; ++i) {
+        // Log-compress cn_raw → cn_values (same formula as calculateGFNFFCNWithNeighbors)
+        result.cn_values[i] = std::log(1.0 + std::exp(cnmax))
+                            - std::log(1.0 + std::exp(cnmax - result.cn_raw[i]));
+        // dlogCN/dcn — same formula as calculateCoordinationNumberDerivatives step 2
+        dlogdcn[i] = std::exp(cnmax) / (std::exp(cnmax) + std::exp(result.cn_raw[i]));
+    }
+
+    // Apply dlogdcn[i] to diagonal row i (all contributions for atom i share the same factor)
+    for (int i = 0; i < N; ++i)
+        result.dcn_store.diag.row(i) *= dlogdcn[i];
+
+    // Apply dlogdcn[p.j] to each pair entry — p.j is the "column" atom.
+    // Matches CNDerivPair semantics: cx = dCN(p.j)/dr(p.i,d) * dlogdcn(p.j).
+    for (auto& p : result.dcn_store.pairs) {
+        double dl = dlogdcn[p.j];
+        p.cx *= dl;
+        p.cy *= dl;
+        p.cz *= dl;
+    }
+
+    return result;
+}
+#endif // GFNFF_CN_DCN_FUSION
 
 std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int>>& adjacency_list) const
 {

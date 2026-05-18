@@ -66,6 +66,11 @@ option(USE_CUDA
 # USE_AVX2 or USE_MARCH_NATIVE alongside); CMake errors out if AVX2 cannot be enabled.
 option(USE_GFNFF_FAST_EXP
     "Enable SIMD-vectorized exp() in GFN-FF dcn hot loop (WP-D Stage B, requires AVX2)" OFF)
+option(GFNFF_CN_DCN_FUSION
+    "Enable fused CN+DCN single-pass (WP-D Stage D, no SIMD dependency)" OFF)
+if(GFNFF_CN_DCN_FUSION)
+    add_compile_definitions(GFNFF_CN_DCN_FUSION=1)
+endif()
 
 if(USE_MKL)
     # Support both MKL_ROOT and MKLROOT (environment and CMake variables)

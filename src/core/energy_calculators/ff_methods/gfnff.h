@@ -851,6 +851,14 @@ public:
     }
     // Claude Generated (WP4, May 2026): CNDerivStore replaces std::vector<SpMatrix>
     const CNDerivStore& getLastCNDerivatives() const { return m_last_dcn; }
+
+    /// WP-D Stage D (May 2026): fused CN + DCN single-pass result.
+    struct CNAndDerivResult {
+        Vector cn_values;                         ///< post-log CN (size N)
+        Vector cn_raw;                            ///< pre-log erf-sum (size N)
+        CNDerivStore dcn_store;                   ///< gradient pair-list + diagonal (dlogdcn applied)
+        std::vector<std::vector<int>> neighbors;  ///< symmetric neighbor list (reusable by D4/EEQ)
+    };
     const Vector& getLastCNF() const { return m_last_cnf; }
     const Matrix* getDC6DCNPtr() const { return m_d4_generator ? &m_d4_generator->getDC6DCN() : nullptr; }
     FFWorkspace* getWorkspace() const { return m_workspace.get(); }
@@ -1503,6 +1511,15 @@ private:
     {
         return calculateCoordinationNumberDerivatives(cn, Vector{}, threshold, pool, num_threads);
     }
+
+    /// WP-D Stage D (May 2026): fused CN + DCN in a single O(N²) pair pass.
+    /// Eliminates the redundant geometry-read pass that calculateCoordinationNumberDerivatives
+    /// performs after calculateGFNFFCNWithNeighbors. Only called when GFNFF_CN_DCN_FUSION is
+    /// defined and gradient=true and cn_cutoff_bohr > 0 and !gpu_only and !reuse_cn.
+    CNAndDerivResult computeCNAndDerivativesFused(
+        double cn_cutoff_bohr,
+        CxxThreadPool* pool,
+        int num_threads) const;
 
     /**
      * @brief Determine hybridization states for all atoms
