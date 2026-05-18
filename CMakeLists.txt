@@ -61,6 +61,12 @@ option(USE_PCH
 option(USE_CUDA
     "Enable CUDA-accelerated GFN-FF (gfnff -gpu cuda, requires CUDA toolkit)" OFF)
 
+# WP-D Stage B (May 2026): hand-rolled AVX2 exp(-x^2) for GFN-FF dcn step 3 hot loop.
+# Opt-in. Default OFF keeps the build bit-identical to pre-WP. Requires AVX2 (set
+# USE_AVX2 or USE_MARCH_NATIVE alongside); CMake errors out if AVX2 cannot be enabled.
+option(USE_GFNFF_FAST_EXP
+    "Enable SIMD-vectorized exp() in GFN-FF dcn hot loop (WP-D Stage B, requires AVX2)" OFF)
+
 if(USE_MKL)
     # Support both MKL_ROOT and MKLROOT (environment and CMake variables)
     if(NOT MKL_ROOT)
@@ -284,6 +290,16 @@ elseif(USE_AVX2)
     endif()
 endif()
 
+# WP-D Stage B (May 2026): USE_GFNFF_FAST_EXP requires AVX2. Either USE_AVX2 or
+# USE_MARCH_NATIVE (or USE_AVX512) must be set so __AVX2__ is defined.
+if(USE_GFNFF_FAST_EXP)
+    if(NOT (USE_AVX2 OR USE_AVX512 OR USE_MARCH_NATIVE))
+        message(FATAL_ERROR "USE_GFNFF_FAST_EXP=ON requires AVX2: enable USE_AVX2, USE_AVX512, or USE_MARCH_NATIVE.")
+    endif()
+    add_compile_definitions(GFNFF_FAST_EXP=1)
+    message(STATUS "GFN-FF: fast SIMD exp() enabled in dcn hot loop (WP-D Stage B)")
+endif()
+
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/json.hpp)
   file(DOWNLOAD https://github.com/nlohmann/json/releases/download/v3.9.1/json.hpp ${PROJECT_SOURCE_DIR}/external/json.hpp
        TIMEOUT 60  # seconds
@@ -410,6 +426,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/ff_methods/cn_calculator.cpp
         src/core/energy_calculators/ff_methods/d4param_generator.cpp
         src/core/energy_calculators/ff_methods/cg_potentials.cpp
+        src/core/energy_calculators/ff_methods/fast_exp.cpp
         src/core/curcuma_logger.cpp
         src/core/citation_database.cpp
         src/core/citation_registry.cpp

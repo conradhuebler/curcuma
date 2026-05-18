@@ -25,3 +25,6 @@
 2026-05-04 12:58:15 | 85ca3cf | gfnff-gpu | threads=4 | 29.39s | 29.4ms/step | ok | 85ca3cf_with_disp_sort_restored
 2026-05-04 13:01:27 | 85ca3cf | gfnff-gpu | threads=4 | 28.88s | 28.9ms/step | ok | disp_moved_to_phase1
 2026-05-04 13:25:23 | 85ca3cf | gfnff-gpu | threads=4 | 28.71s | 28.7ms/step | ok | event_cn_ready_fix
+2026-05-12 14:10:37 | beacabe | gfnff | threads=4 | 105.00s | 105.0ms/step | ok | WP-D-Stage-B_FAST_EXP_on_exploration  [vs 1c27621 speedup=1.50x]
+2026-05-18 17:46:04 | beacabe | gfnff | threads=4 | 104.16s | 104.2ms/step | ok | WP-D-Stage-B_v2_SoA_FAST_EXP_on  [vs 1c27621 speedup=1.51x]
+2026-05-18 17:55:37 | beacabe | gfnff | threads=4 | 105.70s | 105.7ms/step | ok | WP-D-Stage-B_v2_FAST_EXP_off_reference  [vs 1c27621 speedup=1.49x]

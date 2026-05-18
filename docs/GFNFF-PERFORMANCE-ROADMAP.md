@@ -210,6 +210,42 @@ Details: [GFNFF_PROFILE_RESULTS_2026-05.md](GFNFF_PROFILE_RESULTS_2026-05.md) WP
 
 ---
 
+## WP-D Stage B — SIMD `exp(-x²)` in dcn step 3 (Mai 2026)
+
+Hand-rolled AVX2-Remez-Polynom-Kernel (`fast_exp.h/.cpp`) plus Pass-A/B/C
+Loop-Restruktur in `calculateCoordinationNumberDerivatives()`. Opt-in via
+`USE_GFNFF_FAST_EXP=OFF`-Default — Default-Build bleibt bit-identisch zu
+pre-WP. Polymer A/B auf gleichem Hash (`beacabe`) und System-Load:
+
+| Phase | OFF Reference | ON SoA-v2 | Delta |
+|-------|---------------|-----------|-------|
+| polymer `dcn` median | 19.39 ms | 17.21 ms | −2.18 ms (−11 %) |
+| polymer 1000-Step Wall | 105.7 ms/step | 104.2 ms/step | −1.5 ms (−1.4 %) |
+
+**Kleiner als die 10-ms-Hebel-Erwartung des Stage-A-Eintrags**, weil
+`exp()` mit ~0.2 ms Gesamt-Anteil nicht der `dcn`-Bottleneck war —
+dominant sind Memory-Reads/Writes pro überlebendem (i,j)-Paar.
+
+Erkenntnis: v1 (push_back in 7 std::vectors) machte `dcn` **schlechter**
+(21.2 ms). v2 (Eigen-Matrix SoA + counter `K`, fixed-size pre-alloc)
+fängt den Pass-A-Overhead ab. Layout-Effekt > exp-Vektorisierung selbst.
+
+**`fast_exp_neg_sq_block`** ist als wiederverwendbarer Helper angelegt,
+nicht Teil dieses WP, aber gelistet als Roadmap-Anker:
+`dcn` step 1, `dcn` step 2, CN erf-Loop, D4-Gaussian-Weights, Angle-Damping.
+
+Details: [docs/wp4/WP-D-Stage-B-dcn-simd-exp.md](wp4/WP-D-Stage-B-dcn-simd-exp.md).
+
+| Datum | Variante | dcn mean | Wall 1000-step |
+|-------|----------|----------|----------------|
+| Roadmap | Pre-WP-D | 21.0 ms | 102.1 ms |
+| Roadmap | Stage A (cn_raw reuse) | 18.0 ms | 100.9 ms |
+| beacabe 2026-05 | Stage B v1 push_back | 21.2 ms | 105.0 ms |
+| beacabe 2026-05 | Stage B v2 SoA (ON) | 17.9 ms | 104.2 ms |
+| beacabe 2026-05 | Reference (OFF) | 19.8 ms | 105.7 ms |
+
+---
+
 ## Kumulative Bilanz WP1–WP5 (Mai 2026)
 
 `mixture.xyz` (N=6200, nfrag=1400), Single-Point + Gradient, AMD Ryzen 9 9950X3D, Topo-Cache vor jedem Lauf gelöscht:

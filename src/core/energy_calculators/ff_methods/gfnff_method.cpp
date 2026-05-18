@@ -34,6 +34,7 @@
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #include "src/core/energy_calculators/ff_methods/d4param_generator.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"
+#include "src/core/energy_calculators/ff_methods/fast_exp.h"  // Claude Generated (May 2026, WP-D Stage B): SIMD exp(-x^2) for dcn step 3
 #include "src/core/energy_calculators/ff_methods/param_generator_thread.h"  // Claude Generated (Feb 2026): Parallel parameter generation
 #include "src/core/config_manager.h"
 #include <cmath>
@@ -5718,11 +5719,84 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
 
         auto dcn_worker = [&](int t_id) {
             auto& local = tld[t_id];
+
+#ifdef GFNFF_FAST_EXP
+            // Claude Generated (May 2026, WP-D Stage B v2): three-pass dcn step 3
+            // with SoA-layout scratch and fixed-size pre-allocation. Replaces the
+            // earlier 7×std::vector::push_back design that lost the SIMD-exp gain
+            // to vector-metadata cache traffic.
+            //
+            // Scratch layout (per thread, allocated once, NEVER cleared per i —
+            // we use the running counter K and write by index):
+            //   buf_x_sq   : contiguous double[N]  → SIMD-friendly input to fast_exp
+            //   buf_exp    : contiguous double[N]  → SIMD output
+            //   buf_scatter: Eigen Matrix N×4 RowMajor [K_x, K_y, K_z, dlogdcn_j]
+            //                each row = 32 bytes = ½ cache line per surviving pair
+            //   buf_j      : int[N]
+            //
+            // Pass A writes 1 row of buf_scatter (32 B contiguous) + 1 double to
+            // buf_x_sq + 1 int to buf_j per surviving pair — total ~3 cache lines
+            // touched per pair (was 7 with the push_back version).
+            Eigen::Matrix<double, Eigen::Dynamic, 4, Eigen::RowMajor> buf_scatter(m_atomcount, 4);
+            std::vector<int>    buf_j(m_atomcount);
+            std::vector<double> buf_x_sq(m_atomcount);
+            std::vector<double> buf_exp(m_atomcount);
+#endif
+
             // Interleaved row assignment for triangular load-balancing
             for (int i = t_id; i < m_atomcount; i += T) {
                 Eigen::Vector3d ri = m_geometry_bohr.row(i);
                 double dlogdcn_i = dlogdcn[i];
 
+#ifdef GFNFF_FAST_EXP
+                // --- Pass A: collect surviving (i,j) pairs ---
+                int K = 0;
+                for (int j = 0; j < i; ++j) {
+                    Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                    double r_ij_sq = r_ij_vec.squaredNorm();
+                    if (r_ij_sq > threshold) continue;
+
+                    double r_ij = std::sqrt(r_ij_sq);
+                    double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                    double dr = (r_ij - rcov_sum) / rcov_sum;
+                    // factor folds (kn/sqrtpi), 1/rcov_sum, and 1/r_ij of grad_dir.
+                    // Then comp = (factor * r_ij_vec) * exp(-kn²·dr²) — mathematically
+                    // equivalent to the reference derfCN_dr * (r_ij_vec / r_ij).
+                    double factor = (kn / sqrtpi) / (rcov_sum * r_ij);
+
+                    buf_j[K]    = j;
+                    buf_x_sq[K] = kn * kn * dr * dr;
+                    buf_scatter(K, 0) = factor * r_ij_vec[0];
+                    buf_scatter(K, 1) = factor * r_ij_vec[1];
+                    buf_scatter(K, 2) = factor * r_ij_vec[2];
+                    buf_scatter(K, 3) = dlogdcn[j];
+                    ++K;
+                }
+
+                // --- Pass B: vectorized exp(-x_sq) over the surviving-pair buffer ---
+                curcuma::gfnff::fast_exp_neg_sq_block(buf_x_sq.data(), buf_exp.data(), static_cast<std::size_t>(K));
+
+                // --- Pass C: scatter back to local.diag and local.pairs ---
+                for (int k = 0; k < K; ++k) {
+                    int j = buf_j[k];
+                    double e = buf_exp[k];
+                    double comp_x = buf_scatter(k, 0) * e;
+                    double comp_y = buf_scatter(k, 1) * e;
+                    double comp_z = buf_scatter(k, 2) * e;
+                    double dlogdcn_j = buf_scatter(k, 3);
+
+                    local.diag(i, 0) -= dlogdcn_i * comp_x;
+                    local.diag(i, 1) -= dlogdcn_i * comp_y;
+                    local.diag(i, 2) -= dlogdcn_i * comp_z;
+
+                    local.diag(j, 0) += dlogdcn_j * comp_x;
+                    local.diag(j, 1) += dlogdcn_j * comp_y;
+                    local.diag(j, 2) += dlogdcn_j * comp_z;
+
+                    local.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
+                    local.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
+                }
+#else
                 for (int j = 0; j < i; ++j) {
                     Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
                     double r_ij_sq = r_ij_vec.squaredNorm();
@@ -5752,6 +5826,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
                     local.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
                     local.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
                 }
+#endif
             }
         };
 
@@ -5784,10 +5859,62 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
     // Sequential path (num_threads <= 1 or small molecule)
     store.pairs.reserve(static_cast<size_t>(m_atomcount) * 40 + 100);
 
+#ifdef GFNFF_FAST_EXP
+    // Claude Generated (May 2026, WP-D Stage B v2): SoA scratch (Eigen Matrix +
+    // pre-allocated std::vector), no per-i clear, counter K with indexed writes.
+    Eigen::Matrix<double, Eigen::Dynamic, 4, Eigen::RowMajor> buf_scatter(m_atomcount, 4);
+    std::vector<int>    buf_j(m_atomcount);
+    std::vector<double> buf_x_sq(m_atomcount);
+    std::vector<double> buf_exp(m_atomcount);
+#endif
+
     for (int i = 0; i < m_atomcount; ++i) {
         Eigen::Vector3d ri = m_geometry_bohr.row(i);
         double dlogdcn_i = dlogdcn[i];
 
+#ifdef GFNFF_FAST_EXP
+        int K = 0;
+        for (int j = 0; j < i; ++j) {
+            Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+            double r_ij_sq = r_ij_vec.squaredNorm();
+            if (r_ij_sq > threshold) continue;
+
+            double r_ij = std::sqrt(r_ij_sq);
+            double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+            double dr = (r_ij - rcov_sum) / rcov_sum;
+            double factor = (kn / sqrtpi) / (rcov_sum * r_ij);
+
+            buf_j[K]    = j;
+            buf_x_sq[K] = kn * kn * dr * dr;
+            buf_scatter(K, 0) = factor * r_ij_vec[0];
+            buf_scatter(K, 1) = factor * r_ij_vec[1];
+            buf_scatter(K, 2) = factor * r_ij_vec[2];
+            buf_scatter(K, 3) = dlogdcn[j];
+            ++K;
+        }
+
+        curcuma::gfnff::fast_exp_neg_sq_block(buf_x_sq.data(), buf_exp.data(), static_cast<std::size_t>(K));
+
+        for (int k = 0; k < K; ++k) {
+            int j = buf_j[k];
+            double e = buf_exp[k];
+            double comp_x = buf_scatter(k, 0) * e;
+            double comp_y = buf_scatter(k, 1) * e;
+            double comp_z = buf_scatter(k, 2) * e;
+            double dlogdcn_j = buf_scatter(k, 3);
+
+            store.diag(i, 0) -= dlogdcn_i * comp_x;
+            store.diag(i, 1) -= dlogdcn_i * comp_y;
+            store.diag(i, 2) -= dlogdcn_i * comp_z;
+
+            store.diag(j, 0) += dlogdcn_j * comp_x;
+            store.diag(j, 1) += dlogdcn_j * comp_y;
+            store.diag(j, 2) += dlogdcn_j * comp_z;
+
+            store.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
+            store.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
+        }
+#else
         for (int j = 0; j < i; ++j) {
             Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
             double r_ij_sq = r_ij_vec.squaredNorm();
@@ -5816,6 +5943,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
             store.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
             store.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
         }
+#endif
     }
 
     return store;
