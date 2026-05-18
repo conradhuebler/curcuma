@@ -1031,19 +1031,37 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         if (m_gpu_path_preallocated && external_cn) {
             // memcpy into pre-allocated m_last_cn (no Eigen assignment, no heap alloc)
             std::memcpy(m_last_cn.data(), external_cn->data(), m_atomcount * sizeof(double));
+            m_last_cn_neighbors.clear();  // external CN has no associated neighbor list
         } else if (external_cn) {
             m_last_cn = *external_cn;
+            m_last_cn_neighbors.clear();  // external CN has no associated neighbor list
         } else {
-            // WP-D (May 2026): capture cn_raw too so dcn can skip its own N²-erf loop
-            std::vector<double> cn_raw_std;
-            auto cn_vec = CNCalculator::calculateGFNFFCN(
-                m_atoms, m_geometry_bohr, 1600.0, -7.5, 4.4, &cn_raw_std);
-            if (m_gpu_path_preallocated) {
-                std::memcpy(m_last_cn.data(), cn_vec.data(), m_atomcount * sizeof(double));
+            // WP-D Stage A (May 2026): capture cn_raw for dcn step-1 skip.
+            // WP-D Stage C (May 2026): neighbor-list mode also returns the list for dcn step-3.
+            double cn_cutoff_bohr = m_parameters.value("cn_cutoff_bohr", 6.0);
+            if (cn_cutoff_bohr > 0.0) {
+                auto cn_result = CNCalculator::calculateGFNFFCNWithNeighbors(
+                    m_atoms, m_geometry_bohr, cn_cutoff_bohr);
+                if (m_gpu_path_preallocated) {
+                    std::memcpy(m_last_cn.data(), cn_result.cn_values.data(), m_atomcount * sizeof(double));
+                } else {
+                    m_last_cn = Vector::Map(cn_result.cn_values.data(), m_atomcount).eval();
+                }
+                m_last_cn_raw = Vector::Map(cn_result.cn_raw.data(), m_atomcount).eval();
+                m_last_cn_neighbors = std::move(cn_result.neighbors);
             } else {
-                m_last_cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+                // Fallback: threshold-based O(N²) path — no neighbor list available
+                std::vector<double> cn_raw_std;
+                auto cn_vec = CNCalculator::calculateGFNFFCN(
+                    m_atoms, m_geometry_bohr, 1600.0, -7.5, 4.4, &cn_raw_std);
+                if (m_gpu_path_preallocated) {
+                    std::memcpy(m_last_cn.data(), cn_vec.data(), m_atomcount * sizeof(double));
+                } else {
+                    m_last_cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+                }
+                m_last_cn_raw = Vector::Map(cn_raw_std.data(), cn_raw_std.size()).eval();
+                m_last_cn_neighbors.clear();
             }
-            m_last_cn_raw = Vector::Map(cn_raw_std.data(), cn_raw_std.size()).eval();
         }
     }
     if (do_timing) {
@@ -1136,9 +1154,13 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
             const double cn_deriv_cutoff_sq =
                 (eeq_cut > 0.0) ? std::max(40.0 * 40.0, eeq_cut * eeq_cut) : 40.0 * 40.0;
-            // WP-D (May 2026): pass cached cn_raw to skip the redundant N²-erf loop
+            // WP-D Stage A (May 2026): pass cn_raw to skip the N²-erf loop in dcn step 1.
+            // WP-D Stage C (May 2026): pass neighbor list (when available) to replace the
+            // N²-threshold scan in dcn step 3 with O(k) neighbor iteration.
+            const std::vector<std::vector<int>>* nbr_ptr =
+                m_last_cn_neighbors.empty() ? nullptr : &m_last_cn_neighbors;
             m_last_dcn = calculateCoordinationNumberDerivatives(
-                m_last_cn, m_last_cn_raw, cn_deriv_cutoff_sq, pool, total_threads);
+                m_last_cn, m_last_cn_raw, cn_deriv_cutoff_sq, pool, total_threads, nbr_ptr);
             if (do_timing) {
                 t_dcn = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
             }
@@ -5607,7 +5629,8 @@ bool GFNFF::loadGFNFFCharges()
 // =================================================================================
 
 CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, const Vector& cn_raw_in,
-                                                           double threshold, CxxThreadPool* pool, int num_threads) const
+                                                           double threshold, CxxThreadPool* pool, int num_threads,
+                                                           const std::vector<std::vector<int>>* neighbors) const
 {
     // Claude Generated (Mar 2026, Phase 3): Sparse dcn matrices — replaced WP4 May 2026
     // Claude Generated (WP4, May 2026): Pair-list output (CNDerivStore) instead of 3× SpMatrix.
@@ -5751,26 +5774,47 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
 #ifdef GFNFF_FAST_EXP
                 // --- Pass A: collect surviving (i,j) pairs ---
                 int K = 0;
-                for (int j = 0; j < i; ++j) {
-                    Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
-                    double r_ij_sq = r_ij_vec.squaredNorm();
-                    if (r_ij_sq > threshold) continue;
+                // WP-D Stage C: neighbor list available → O(k) iteration, no threshold check.
+                // Otherwise: full N² triangle with distance threshold.
+                if (neighbors != nullptr) {
+                    for (int j : (*neighbors)[i]) {
+                        if (j >= i) continue;  // upper triangle only
+                        Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                        double r_ij_sq = r_ij_vec.squaredNorm();
+                        double r_ij = std::sqrt(r_ij_sq);
+                        double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                        double dr = (r_ij - rcov_sum) / rcov_sum;
+                        double factor = (kn / sqrtpi) / (rcov_sum * r_ij);
+                        buf_j[K]    = j;
+                        buf_x_sq[K] = kn * kn * dr * dr;
+                        buf_scatter(K, 0) = factor * r_ij_vec[0];
+                        buf_scatter(K, 1) = factor * r_ij_vec[1];
+                        buf_scatter(K, 2) = factor * r_ij_vec[2];
+                        buf_scatter(K, 3) = dlogdcn[j];
+                        ++K;
+                    }
+                } else {
+                    for (int j = 0; j < i; ++j) {
+                        Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                        double r_ij_sq = r_ij_vec.squaredNorm();
+                        if (r_ij_sq > threshold) continue;
 
-                    double r_ij = std::sqrt(r_ij_sq);
-                    double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
-                    double dr = (r_ij - rcov_sum) / rcov_sum;
-                    // factor folds (kn/sqrtpi), 1/rcov_sum, and 1/r_ij of grad_dir.
-                    // Then comp = (factor * r_ij_vec) * exp(-kn²·dr²) — mathematically
-                    // equivalent to the reference derfCN_dr * (r_ij_vec / r_ij).
-                    double factor = (kn / sqrtpi) / (rcov_sum * r_ij);
+                        double r_ij = std::sqrt(r_ij_sq);
+                        double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                        double dr = (r_ij - rcov_sum) / rcov_sum;
+                        // factor folds (kn/sqrtpi), 1/rcov_sum, and 1/r_ij of grad_dir.
+                        // Then comp = (factor * r_ij_vec) * exp(-kn²·dr²) — mathematically
+                        // equivalent to the reference derfCN_dr * (r_ij_vec / r_ij).
+                        double factor = (kn / sqrtpi) / (rcov_sum * r_ij);
 
-                    buf_j[K]    = j;
-                    buf_x_sq[K] = kn * kn * dr * dr;
-                    buf_scatter(K, 0) = factor * r_ij_vec[0];
-                    buf_scatter(K, 1) = factor * r_ij_vec[1];
-                    buf_scatter(K, 2) = factor * r_ij_vec[2];
-                    buf_scatter(K, 3) = dlogdcn[j];
-                    ++K;
+                        buf_j[K]    = j;
+                        buf_x_sq[K] = kn * kn * dr * dr;
+                        buf_scatter(K, 0) = factor * r_ij_vec[0];
+                        buf_scatter(K, 1) = factor * r_ij_vec[1];
+                        buf_scatter(K, 2) = factor * r_ij_vec[2];
+                        buf_scatter(K, 3) = dlogdcn[j];
+                        ++K;
+                    }
                 }
 
                 // --- Pass B: vectorized exp(-x_sq) over the surviving-pair buffer ---
@@ -5797,34 +5841,53 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
                     local.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
                 }
 #else
-                for (int j = 0; j < i; ++j) {
-                    Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
-                    double r_ij_sq = r_ij_vec.squaredNorm();
-                    if (r_ij_sq > threshold) continue;
-
-                    double r_ij = std::sqrt(r_ij_sq);
-                    double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
-                    double dr = (r_ij - rcov_sum) / rcov_sum;
-                    double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
-
-                    Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
-                    double dlogdcn_j = dlogdcn[j];
-
-                    double comp_x = derfCN_dr * grad_dir[0];
-                    double comp_y = derfCN_dr * grad_dir[1];
-                    double comp_z = derfCN_dr * grad_dir[2];
-
-                    local.diag(i, 0) -= dlogdcn_i * comp_x;
-                    local.diag(i, 1) -= dlogdcn_i * comp_y;
-                    local.diag(i, 2) -= dlogdcn_i * comp_z;
-
-                    local.diag(j, 0) += dlogdcn_j * comp_x;
-                    local.diag(j, 1) += dlogdcn_j * comp_y;
-                    local.diag(j, 2) += dlogdcn_j * comp_z;
-
-                    // Two off-diagonal entries per (i,j) pair: M(i,j) and M(j,i).
-                    local.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
-                    local.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
+                // WP-D Stage C: neighbor list available → O(k) iteration, no threshold check.
+                if (neighbors != nullptr) {
+                    for (int j : (*neighbors)[i]) {
+                        if (j >= i) continue;
+                        Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                        double r_ij = std::sqrt(r_ij_vec.squaredNorm());
+                        double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                        double dr = (r_ij - rcov_sum) / rcov_sum;
+                        double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
+                        Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
+                        double dlogdcn_j = dlogdcn[j];
+                        double comp_x = derfCN_dr * grad_dir[0];
+                        double comp_y = derfCN_dr * grad_dir[1];
+                        double comp_z = derfCN_dr * grad_dir[2];
+                        local.diag(i, 0) -= dlogdcn_i * comp_x;
+                        local.diag(i, 1) -= dlogdcn_i * comp_y;
+                        local.diag(i, 2) -= dlogdcn_i * comp_z;
+                        local.diag(j, 0) += dlogdcn_j * comp_x;
+                        local.diag(j, 1) += dlogdcn_j * comp_y;
+                        local.diag(j, 2) += dlogdcn_j * comp_z;
+                        local.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
+                        local.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
+                    }
+                } else {
+                    for (int j = 0; j < i; ++j) {
+                        Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                        double r_ij_sq = r_ij_vec.squaredNorm();
+                        if (r_ij_sq > threshold) continue;
+                        double r_ij = std::sqrt(r_ij_sq);
+                        double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                        double dr = (r_ij - rcov_sum) / rcov_sum;
+                        double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
+                        Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
+                        double dlogdcn_j = dlogdcn[j];
+                        double comp_x = derfCN_dr * grad_dir[0];
+                        double comp_y = derfCN_dr * grad_dir[1];
+                        double comp_z = derfCN_dr * grad_dir[2];
+                        local.diag(i, 0) -= dlogdcn_i * comp_x;
+                        local.diag(i, 1) -= dlogdcn_i * comp_y;
+                        local.diag(i, 2) -= dlogdcn_i * comp_z;
+                        local.diag(j, 0) += dlogdcn_j * comp_x;
+                        local.diag(j, 1) += dlogdcn_j * comp_y;
+                        local.diag(j, 2) += dlogdcn_j * comp_z;
+                        // Two off-diagonal entries per (i,j) pair: M(i,j) and M(j,i).
+                        local.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
+                        local.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
+                    }
                 }
 #endif
             }
@@ -5873,26 +5936,46 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
         double dlogdcn_i = dlogdcn[i];
 
 #ifdef GFNFF_FAST_EXP
+        // --- Pass A: collect surviving (i,j) pairs ---
         int K = 0;
-        for (int j = 0; j < i; ++j) {
-            Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
-            double r_ij_sq = r_ij_vec.squaredNorm();
-            if (r_ij_sq > threshold) continue;
-
-            double r_ij = std::sqrt(r_ij_sq);
-            double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
-            double dr = (r_ij - rcov_sum) / rcov_sum;
-            double factor = (kn / sqrtpi) / (rcov_sum * r_ij);
-
-            buf_j[K]    = j;
-            buf_x_sq[K] = kn * kn * dr * dr;
-            buf_scatter(K, 0) = factor * r_ij_vec[0];
-            buf_scatter(K, 1) = factor * r_ij_vec[1];
-            buf_scatter(K, 2) = factor * r_ij_vec[2];
-            buf_scatter(K, 3) = dlogdcn[j];
-            ++K;
+        // WP-D Stage C: neighbor list available → O(k) iteration, no threshold check.
+        if (neighbors != nullptr) {
+            for (int j : (*neighbors)[i]) {
+                if (j >= i) continue;
+                Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                double r_ij_sq = r_ij_vec.squaredNorm();
+                double r_ij = std::sqrt(r_ij_sq);
+                double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                double dr = (r_ij - rcov_sum) / rcov_sum;
+                double factor = (kn / sqrtpi) / (rcov_sum * r_ij);
+                buf_j[K]    = j;
+                buf_x_sq[K] = kn * kn * dr * dr;
+                buf_scatter(K, 0) = factor * r_ij_vec[0];
+                buf_scatter(K, 1) = factor * r_ij_vec[1];
+                buf_scatter(K, 2) = factor * r_ij_vec[2];
+                buf_scatter(K, 3) = dlogdcn[j];
+                ++K;
+            }
+        } else {
+            for (int j = 0; j < i; ++j) {
+                Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                double r_ij_sq = r_ij_vec.squaredNorm();
+                if (r_ij_sq > threshold) continue;
+                double r_ij = std::sqrt(r_ij_sq);
+                double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                double dr = (r_ij - rcov_sum) / rcov_sum;
+                double factor = (kn / sqrtpi) / (rcov_sum * r_ij);
+                buf_j[K]    = j;
+                buf_x_sq[K] = kn * kn * dr * dr;
+                buf_scatter(K, 0) = factor * r_ij_vec[0];
+                buf_scatter(K, 1) = factor * r_ij_vec[1];
+                buf_scatter(K, 2) = factor * r_ij_vec[2];
+                buf_scatter(K, 3) = dlogdcn[j];
+                ++K;
+            }
         }
 
+        // --- Pass B: vectorized exp(-x_sq) over the surviving-pair buffer ---
         curcuma::gfnff::fast_exp_neg_sq_block(buf_x_sq.data(), buf_exp.data(), static_cast<std::size_t>(K));
 
         for (int k = 0; k < K; ++k) {
@@ -5915,33 +5998,52 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
             store.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
         }
 #else
-        for (int j = 0; j < i; ++j) {
-            Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
-            double r_ij_sq = r_ij_vec.squaredNorm();
-            if (r_ij_sq > threshold) continue;
-
-            double r_ij = std::sqrt(r_ij_sq);
-            double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
-            double dr = (r_ij - rcov_sum) / rcov_sum;
-            double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
-
-            Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
-            double dlogdcn_j = dlogdcn[j];
-
-            double comp_x = derfCN_dr * grad_dir[0];
-            double comp_y = derfCN_dr * grad_dir[1];
-            double comp_z = derfCN_dr * grad_dir[2];
-
-            store.diag(i, 0) -= dlogdcn_i * comp_x;
-            store.diag(i, 1) -= dlogdcn_i * comp_y;
-            store.diag(i, 2) -= dlogdcn_i * comp_z;
-
-            store.diag(j, 0) += dlogdcn_j * comp_x;
-            store.diag(j, 1) += dlogdcn_j * comp_y;
-            store.diag(j, 2) += dlogdcn_j * comp_z;
-
-            store.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
-            store.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
+        // WP-D Stage C: neighbor list available → O(k) iteration, no threshold check.
+        if (neighbors != nullptr) {
+            for (int j : (*neighbors)[i]) {
+                if (j >= i) continue;
+                Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                double r_ij = std::sqrt(r_ij_vec.squaredNorm());
+                double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                double dr = (r_ij - rcov_sum) / rcov_sum;
+                double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
+                Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
+                double dlogdcn_j = dlogdcn[j];
+                double comp_x = derfCN_dr * grad_dir[0];
+                double comp_y = derfCN_dr * grad_dir[1];
+                double comp_z = derfCN_dr * grad_dir[2];
+                store.diag(i, 0) -= dlogdcn_i * comp_x;
+                store.diag(i, 1) -= dlogdcn_i * comp_y;
+                store.diag(i, 2) -= dlogdcn_i * comp_z;
+                store.diag(j, 0) += dlogdcn_j * comp_x;
+                store.diag(j, 1) += dlogdcn_j * comp_y;
+                store.diag(j, 2) += dlogdcn_j * comp_z;
+                store.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
+                store.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
+            }
+        } else {
+            for (int j = 0; j < i; ++j) {
+                Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                double r_ij_sq = r_ij_vec.squaredNorm();
+                if (r_ij_sq > threshold) continue;
+                double r_ij = std::sqrt(r_ij_sq);
+                double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                double dr = (r_ij - rcov_sum) / rcov_sum;
+                double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
+                Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
+                double dlogdcn_j = dlogdcn[j];
+                double comp_x = derfCN_dr * grad_dir[0];
+                double comp_y = derfCN_dr * grad_dir[1];
+                double comp_z = derfCN_dr * grad_dir[2];
+                store.diag(i, 0) -= dlogdcn_i * comp_x;
+                store.diag(i, 1) -= dlogdcn_i * comp_y;
+                store.diag(i, 2) -= dlogdcn_i * comp_z;
+                store.diag(j, 0) += dlogdcn_j * comp_x;
+                store.diag(j, 1) += dlogdcn_j * comp_y;
+                store.diag(j, 2) += dlogdcn_j * comp_z;
+                store.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
+                store.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
+            }
         }
 #endif
     }

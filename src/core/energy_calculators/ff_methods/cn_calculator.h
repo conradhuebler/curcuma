@@ -95,6 +95,24 @@ public:
         double cnmax
     );
 
+    /// WP-D Stage C (May 2026): CN + cn_raw + symmetric neighbor list in one pass.
+    /// Returns all three so dcn can skip its own N²-erf loop AND its O(N²) pair scan.
+    struct CNResult {
+        std::vector<double> cn_values;           ///< post-log CN (size N)
+        std::vector<double> cn_raw;              ///< pre-log raw erf-sum (size N)
+        std::vector<std::vector<int>> neighbors; ///< symmetric: neighbors[i] = all j within cutoff
+        double cutoff_sq = 0.0;                  ///< cutoff² in Bohr²
+    };
+
+    /// WP-D Stage C: compute CN values, raw CN, and neighbor list in a single O(N²) pass.
+    static CNResult calculateGFNFFCNWithNeighbors(
+        const std::vector<int>& atoms,
+        const Eigen::MatrixXd& geometry_bohr,
+        double cn_cutoff_bohr,
+        double kn = -7.5,
+        double cnmax = 4.4
+    );
+
     /**
      * Get covalent radius for an element
      *

@@ -1487,10 +1487,14 @@ private:
     /// WP-D (May 2026): main implementation. When `cn_raw_in.size() == m_atomcount`
     /// the function skips the redundant N²-erf loop in step 1 and uses `cn_raw_in`
     /// directly for dlogdcn. Otherwise (empty vec) falls back to internal recompute.
+    /// WP-D Stage C (May 2026): when `neighbors != nullptr`, the dcn step-3 loop iterates
+    /// the pre-filtered neighbor list instead of the full N² triangle, eliminating O(N²)
+    /// threshold checks. Pass nullptr to use the original N² fallback.
     CNDerivStore calculateCoordinationNumberDerivatives(const Vector& cn, const Vector& cn_raw_in,
                                                        double threshold = 1600.0,
                                                        CxxThreadPool* pool = nullptr,
-                                                       int num_threads = 1) const;
+                                                       int num_threads = 1,
+                                                       const std::vector<std::vector<int>>* neighbors = nullptr) const;
 
     /// Backward-compat wrapper — legacy callers without cn_raw access.
     inline CNDerivStore calculateCoordinationNumberDerivatives(
@@ -2373,6 +2377,9 @@ private:
     // WP-D (May 2026): cached raw CN from CNCalculator — reused by calculateCoordinationNumberDerivatives
     // to avoid recomputing the N²-erf loop in dcn step 1.
     mutable Vector m_last_cn_raw{};
+    // WP-D Stage C (May 2026): symmetric CN neighbor list — reused by dcn to avoid N² pair scan.
+    // Populated by prepareCNAndEEQ when cn_cutoff_bohr > 0; empty otherwise (→ N² fallback).
+    mutable std::vector<std::vector<int>> m_last_cn_neighbors{};
 
     // Claude Generated (April 2026): Periodic Boundary Conditions
     bool m_has_pbc = false;                                              ///< PBC active flag
