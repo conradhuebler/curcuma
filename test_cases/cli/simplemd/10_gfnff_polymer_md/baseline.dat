@@ -30,3 +30,5 @@
 2026-05-18 17:55:37 | beacabe | gfnff | threads=4 | 105.70s | 105.7ms/step | ok | WP-D-Stage-B_v2_FAST_EXP_off_reference  [vs 1c27621 speedup=1.49x]
 2026-05-18 22:44:00 | 3575e37 | gfnff | threads=4 | 46.20s | 46.2ms/step | ok | WP-D-Stage-C_neighbor_list_reuse  [vs 1c27621 speedup=3.41x]
 2026-05-18 22:44:00 | 1d382b7 | gfnff | threads=4 | 44.24s | 44.2ms/step | ok | WP-D-Stage-D_CN_DCN_FUSION_on  [vs 1c27621 speedup=3.57x]
+2026-05-19 17:39:57 | 7e50d27 | gfnff | threads=4 | 57.89s | 57.9ms/step | ok | WP-FF-SoA_thread_local  [vs 1c27621 speedup=2.72x]
+2026-05-19 21:40:48 | 7e50d27 | gfnff | threads=4 | 57.23s | 57.2ms/step | ok | WP-FF-SoA_OFF_reference  [vs 1c27621 speedup=2.76x]

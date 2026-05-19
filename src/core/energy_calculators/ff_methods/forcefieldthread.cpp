@@ -23,6 +23,7 @@
 #include "gfnff_par.h"
 
 #include "forcefieldfunctions.h"
+#include "fast_exp.h"
 
 #include "forcefield.h"
 #include "src/core/units.h"
@@ -2023,7 +2024,86 @@ void ForceFieldThread::CalculateGFNFFBondedRepulsionContribution()
     double total_rep_energy = 0.0;
     int pairs_calculated = 0;
 
-    for (int index = 0; index < m_gfnff_bonded_repulsions.size(); ++index) {
+#ifdef GFNFF_FAST_EXP
+    // WP-FF-SoA (May 2026): Pass-A/B/C SoA pattern — separates random geometry
+    // reads (Pass-A) from sequential batch exp() (Pass-B). thread_local static
+    // buffers grow once and are reused every step — no heap allocation in hot path.
+    // Scatter buffer is flat N×5 RowMajor: [e_scale, g_pre, rx, ry, rz].
+    thread_local static std::vector<double> buf_exp_arg;
+    thread_local static std::vector<double> buf_exp_out;
+    thread_local static std::vector<int>    buf_i, buf_j;
+    thread_local static std::vector<double> buf_scatter; // flat N×5 RowMajor
+
+    const std::size_t N = m_gfnff_bonded_repulsions.size();
+    if (buf_exp_arg.size() < N) {
+        buf_exp_arg.resize(N);
+        buf_exp_out.resize(N);
+        buf_i.resize(N);
+        buf_j.resize(N);
+        buf_scatter.resize(N * 5);
+    }
+    int K = 0;
+
+    const double scaling = m_final_factor * m_rep_scaling;
+
+    // Pass-A: collect surviving pairs into compact SoA buffers
+    for (const auto& rep : m_gfnff_bonded_repulsions) {
+        Eigen::Vector3d ri = geom().row(rep.i);
+        Eigen::Vector3d rj = geom().row(rep.j);
+        Eigen::Vector3d rij_vec = ri - rj;
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+        double rij = rij_vec.norm() * m_au;
+
+        if (rij > rep.r_cut || rij < 1e-8) continue;
+
+        double sqrt_rij = std::sqrt(rij);
+        double e_scale  = rep.repab * scaling / rij;
+
+        if (CurcumaLogger::get_verbosity() >= 3 && K == 0) {
+            double exp_preview = std::exp(-rep.alpha * rij * sqrt_rij);
+            CurcumaLogger::param(fmt::format("bonded_repulsion_{}-{}", rep.i, rep.j),
+                fmt::format("r={:.6f}, repab={:.6f}, alpha={:.6f}, E={:.6f}",
+                rij, rep.repab, rep.alpha, exp_preview * e_scale));
+        }
+
+        buf_exp_arg[K]       = rep.alpha * rij * sqrt_rij;
+        buf_i[K] = rep.i;  buf_j[K] = rep.j;
+        buf_scatter[K*5+0]   = e_scale;
+        buf_scatter[K*5+1]   = e_scale * (-1.0/rij - 1.5*rep.alpha*sqrt_rij) / rij;
+        buf_scatter[K*5+2]   = rij_vec.x();
+        buf_scatter[K*5+3]   = rij_vec.y();
+        buf_scatter[K*5+4]   = rij_vec.z();
+        ++K;
+    }
+
+    // Pass-B: batch exp(-arg[k]) over contiguous buffer
+    curcuma::gfnff::fast_exp_neg_sq_block(buf_exp_arg.data(), buf_exp_out.data(),
+                                           static_cast<std::size_t>(K));
+
+    // Pass-C: scatter energy and gradient
+    for (int k = 0; k < K; ++k) {
+        const double e    = buf_exp_out[k];
+        const int    i    = buf_i[k], j = buf_j[k];
+        const double* row = &buf_scatter[k*5];
+        const double se   = e * row[0];
+
+        m_rep_energy        += se;
+        m_bonded_rep_energy += se;
+        total_rep_energy    += se;
+        ++pairs_calculated;
+
+        if (m_calculate_gradient) {
+            const double gf = e * row[1];
+            m_gradient(i, 0) += gf * row[2];
+            m_gradient(i, 1) += gf * row[3];
+            m_gradient(i, 2) += gf * row[4];
+            m_gradient(j, 0) -= gf * row[2];
+            m_gradient(j, 1) -= gf * row[3];
+            m_gradient(j, 2) -= gf * row[4];
+        }
+    }
+#else
+    for (int index = 0; index < static_cast<int>(m_gfnff_bonded_repulsions.size()); ++index) {
         const auto& rep = m_gfnff_bonded_repulsions[index];
 
         Eigen::Vector3d ri = geom().row(rep.i);
@@ -2033,11 +2113,9 @@ void ForceFieldThread::CalculateGFNFFBondedRepulsionContribution()
         double rij = rij_vec.norm() * m_au;
 
         // HIGH PRIORITY FIX (Feb 2026): Strengthen distance check to prevent gradient Inf/NaN
-        // Previous threshold 1e-10 too small, gradient division by rij needs robustness
         if (rij > rep.r_cut || rij < 1e-8) continue;
 
         // Bonded repulsion formula: E = repab * exp(-α * r^1.5) / r
-        // r^1.5 = r * sqrt(r) avoids std::pow()
         double r_1_5 = rij * std::sqrt(rij);
         double exp_term = std::exp(-rep.alpha * r_1_5);
         double base_energy = rep.repab * exp_term / rij;
@@ -2064,6 +2142,7 @@ void ForceFieldThread::CalculateGFNFFBondedRepulsionContribution()
             m_gradient.row(rep.j) -= grad.transpose();
         }
     }
+#endif
 
     if (CurcumaLogger::get_verbosity() >= 2 && pairs_calculated > 0) {
         CurcumaLogger::param("thread_bonded_repulsion_energy", fmt::format("{:.6f} Eh ({} pairs)", total_rep_energy, pairs_calculated));
@@ -2094,7 +2173,84 @@ void ForceFieldThread::CalculateGFNFFNonbondedRepulsionContribution()
     double total_rep_energy = 0.0;
     int pairs_calculated = 0;
 
-    for (int index = 0; index < m_gfnff_nonbonded_repulsions.size(); ++index) {
+#ifdef GFNFF_FAST_EXP
+    // WP-FF-SoA (May 2026): identical Pass-A/B/C pattern as bonded repulsion.
+    // thread_local static buffers — no heap allocation in hot path.
+    thread_local static std::vector<double> buf_exp_arg;
+    thread_local static std::vector<double> buf_exp_out;
+    thread_local static std::vector<int>    buf_i, buf_j;
+    thread_local static std::vector<double> buf_scatter; // flat N×5 RowMajor
+
+    const std::size_t N = m_gfnff_nonbonded_repulsions.size();
+    if (buf_exp_arg.size() < N) {
+        buf_exp_arg.resize(N);
+        buf_exp_out.resize(N);
+        buf_i.resize(N);
+        buf_j.resize(N);
+        buf_scatter.resize(N * 5);
+    }
+    int K = 0;
+
+    const double scaling = m_final_factor * m_rep_scaling;
+
+    // Pass-A
+    for (const auto& rep : m_gfnff_nonbonded_repulsions) {
+        Eigen::Vector3d ri = geom().row(rep.i);
+        Eigen::Vector3d rj = geom().row(rep.j);
+        Eigen::Vector3d rij_vec = ri - rj;
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+        double rij = rij_vec.norm() * m_au;
+
+        if (rij > rep.r_cut || rij < 1e-8) continue;
+
+        double sqrt_rij = std::sqrt(rij);
+        double e_scale  = rep.repab * scaling / rij;
+
+        if (CurcumaLogger::get_verbosity() >= 3 && K == 0) {
+            double exp_preview = std::exp(-rep.alpha * rij * sqrt_rij);
+            CurcumaLogger::param(fmt::format("nonbonded_repulsion_{}-{}", rep.i, rep.j),
+                fmt::format("r={:.6f}, repab={:.6f}, alpha={:.6f}, E={:.6f}",
+                rij, rep.repab, rep.alpha, exp_preview * e_scale));
+        }
+
+        buf_exp_arg[K]     = rep.alpha * rij * sqrt_rij;
+        buf_i[K] = rep.i;  buf_j[K] = rep.j;
+        buf_scatter[K*5+0] = e_scale;
+        buf_scatter[K*5+1] = e_scale * (-1.0/rij - 1.5*rep.alpha*sqrt_rij) / rij;
+        buf_scatter[K*5+2] = rij_vec.x();
+        buf_scatter[K*5+3] = rij_vec.y();
+        buf_scatter[K*5+4] = rij_vec.z();
+        ++K;
+    }
+
+    // Pass-B
+    curcuma::gfnff::fast_exp_neg_sq_block(buf_exp_arg.data(), buf_exp_out.data(),
+                                           static_cast<std::size_t>(K));
+
+    // Pass-C
+    for (int k = 0; k < K; ++k) {
+        const double e    = buf_exp_out[k];
+        const int    i    = buf_i[k], j = buf_j[k];
+        const double* row = &buf_scatter[k*5];
+        const double se   = e * row[0];
+
+        m_rep_energy           += se;
+        m_nonbonded_rep_energy += se;
+        total_rep_energy       += se;
+        ++pairs_calculated;
+
+        if (m_calculate_gradient) {
+            const double gf = e * row[1];
+            m_gradient(i, 0) += gf * row[2];
+            m_gradient(i, 1) += gf * row[3];
+            m_gradient(i, 2) += gf * row[4];
+            m_gradient(j, 0) -= gf * row[2];
+            m_gradient(j, 1) -= gf * row[3];
+            m_gradient(j, 2) -= gf * row[4];
+        }
+    }
+#else
+    for (int index = 0; index < static_cast<int>(m_gfnff_nonbonded_repulsions.size()); ++index) {
         const auto& rep = m_gfnff_nonbonded_repulsions[index];
 
         Eigen::Vector3d ri = geom().row(rep.i);
@@ -2104,11 +2260,9 @@ void ForceFieldThread::CalculateGFNFFNonbondedRepulsionContribution()
         double rij = rij_vec.norm() * m_au;
 
         // HIGH PRIORITY FIX (Feb 2026): Strengthen distance check to prevent gradient Inf/NaN
-        // Previous threshold 1e-10 too small, gradient division by rij needs robustness
         if (rij > rep.r_cut || rij < 1e-8) continue;
 
         // Non-bonded repulsion formula: E = repab * exp(-α * r^1.5) / r
-        // r^1.5 = r * sqrt(r) avoids std::pow()
         double r_1_5 = rij * std::sqrt(rij);
         double exp_term = std::exp(-rep.alpha * r_1_5);
         double base_energy = rep.repab * exp_term / rij;
@@ -2135,6 +2289,7 @@ void ForceFieldThread::CalculateGFNFFNonbondedRepulsionContribution()
             m_gradient.row(rep.j) -= grad.transpose();
         }
     }
+#endif
 
     if (CurcumaLogger::get_verbosity() >= 2 && pairs_calculated > 0) {
         CurcumaLogger::param("thread_nonbonded_repulsion_energy", fmt::format("{:.6f} Eh ({} pairs)", total_rep_energy, pairs_calculated));
