@@ -527,15 +527,14 @@ GFNFF::GFNFF(const json& parameters)
     // WP6/CLI plumbing fix (May 2026): controller carries gfnff-scoped params under
     // controller["gfnff"]. Promote those keys to the top of m_parameters so the
     // existing flat .value("...") readers (e.g. cn_cutoff_bohr, eeq_distance_cutoff,
-    // nb_cell_list_min_atoms) actually see CLI/JSON overrides. Without this, params
-    // remain nested at m_parameters["gfnff"][...] and the flat reads fall back to
-    // defaults — silently ignoring user input. Existing top-level fields (method,
-    // threads, ...) take precedence; we only fill in keys not already present.
+    // nb_cell_list_min_atoms, dispersion_cutoff_bohr) actually see CLI/JSON overrides.
+    // Without this, params remain nested at m_parameters["gfnff"][...] and the flat
+    // reads fall back to defaults — silently ignoring user input.
+    // Note: always overwrite (not just new keys) so CLI values win over any pre-existing
+    // defaults that MergeJson may have placed at the top level.
     if (parameters.contains("gfnff") && parameters["gfnff"].is_object()) {
         for (const auto& [k, v] : parameters["gfnff"].items()) {
-            if (!m_parameters.contains(k)) {
-                m_parameters[k] = v;
-            }
+            m_parameters[k] = v;
         }
     }
     m_threads = m_parameters.value("threads", 1);  // Claude Generated (WP1, May 2026)
@@ -1184,7 +1183,9 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 #endif
             t0 = std::chrono::high_resolution_clock::now();
             const double eeq_cut  = m_parameters.value("eeq_distance_cutoff", 0.0);
-            const double disp_cut = m_parameters.value("dispersion_cutoff_bohr", 0.0);
+            double disp_cut = m_parameters.value("dispersion_cutoff_bohr", 0.0);
+            if (disp_cut <= 0.0 && m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+                disp_cut = m_parameters["gfnff"].value("dispersion_cutoff_bohr", 0.0);
             // WP-Disp (Mai 2026): extend stencil for dispersion cutoff (Site D).
             // dC6(i,j)/dCN(i) * dCN(i)/dx_k requires CN derivatives to reach all j
             // in the active dispersion pair-list; stencil must cover that range.
@@ -9421,6 +9422,33 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
 
         dispersions = m_d4_generator->GenerateDispersionPairsNative(m_atoms, m_geometry_bohr);
 
+        // WP-Disp (Mai 2026): optional distance cutoff on D4 pair list.
+        // Read cutoff — top-level first (promotion loop), then nested fallback.
+        {
+            double disp_cut = m_parameters.value("dispersion_cutoff_bohr", 0.0);
+            if (disp_cut <= 0.0 && m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+                disp_cut = m_parameters["gfnff"].value("dispersion_cutoff_bohr", 0.0);
+            if (disp_cut > 0.0) {
+                const double disp_cut_sq = disp_cut * disp_cut;
+                const size_t n_full = dispersions.size();
+                dispersions.erase(
+                    std::remove_if(dispersions.begin(), dispersions.end(),
+                        [&](const GFNFFDispersion& d) {
+                            Eigen::Vector3d ri = m_geometry_bohr.row(d.i);
+                            Eigen::Vector3d rj = m_geometry_bohr.row(d.j);
+                            return (ri - rj).squaredNorm() > disp_cut_sq;
+                        }),
+                    dispersions.end());
+                for (auto& d : dispersions)
+                    d.r_cut = std::min(d.r_cut, disp_cut);
+                if (CurcumaLogger::get_verbosity() >= 2) {
+                    CurcumaLogger::param("dispersion_cutoff_bohr",
+                        fmt::format("{:.1f} Bohr  ({} / {} pairs retained)",
+                            disp_cut, dispersions.size(), n_full));
+                }
+            }
+        }
+
         // ATM triples: Generate natively from bonded topology (O(N·bonds), fast)
         double s9 = 1.0, atm_a1 = 0.58, atm_a2 = 4.80, atm_alp = 14.0;
         if (s9 > 1e-10) {
@@ -9608,7 +9636,10 @@ json GFNFF::generateGFNFFDispersionPairs() const
                 // for mixture N=6200, O(N^2)->O(N*k) per-step in CalculateGFNFFDispersionContribution.
                 // Hellmann-Feynman consistency: dc6dcn accumulation is over m_gfnff_dispersions only,
                 // so filtering here automatically restricts the CN-derivative chain rule too (Site C).
-                const double disp_cut = m_parameters.value("dispersion_cutoff_bohr", 0.0);
+                // Read cutoff — check top-level first (set by promotion loop), then nested fallback.
+                double disp_cut = m_parameters.value("dispersion_cutoff_bohr", 0.0);
+                if (disp_cut <= 0.0 && m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+                    disp_cut = m_parameters["gfnff"].value("dispersion_cutoff_bohr", 0.0);
                 if (disp_cut > 0.0) {
                     const double disp_cut_sq = disp_cut * disp_cut;
                     const size_t n_full = d4_params["d4_dispersion_pairs"].size();
