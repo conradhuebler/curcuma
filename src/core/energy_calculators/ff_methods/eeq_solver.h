@@ -342,6 +342,10 @@ public:
     /// to clear the override and fall back to the ConfigManager default.
     void setEEQDistanceCutoff(double cutoff) { m_eeq_distance_cutoff_override = cutoff; }
 
+    /// WP-EEQ-Cache (May 2026): invalidate cached Cholesky factor.
+    /// Call after setMolecule() or topology rebuild to force refactorization on next step.
+    void invalidateCholeskyCache() { m_chol_cache.reset(); }
+
     /// WP-S3 (May 2026): effective Coulomb-matrix cutoff used by the
     /// sparsification (override wins, otherwise the ConfigManager value).
     double getEEQDistanceCutoffEffective() const {
@@ -817,6 +821,8 @@ private:
     bool m_skip_phase2;               ///< Skip Phase 2 and use Phase 1 topology charges directly (Claude Generated Apr 2026)
     EEQSolveMethod m_solve_method;    ///< Linear solve algorithm selection
     double m_eeq_distance_cutoff_override = -1.0;  ///< WP-S3: post-init cutoff override (-1 = use config)
+    double m_refactor_eps = 0.05;       ///< WP-EEQ-Cache: max displacement (Bohr) before re-factorizing
+    int    m_refactor_force_every = 0;  ///< WP-EEQ-Cache: force refactorization every N steps (0 = disabled)
 
     // ===== Cached Data for Energy Calculation =====
 
@@ -901,6 +907,24 @@ private:
     mutable Vector m_phase2_rhs;         ///< (N+nfrag) RHS vector buffer
     mutable int m_phase2_buf_natoms = 0; ///< Atom count for current buffer size
     mutable int m_phase2_buf_nfrag = 0;  ///< Fragment count for current buffer size
+
+    // WP-EEQ-Cache (May 2026): Cholesky factor cache across MD/opt steps.
+    // Avoids O(N^3/6) refactorization when geometry displacement < m_refactor_eps.
+    struct EEQCholeskyCache {
+        Eigen::LLT<Matrix> llt;    ///< Cached LLT factorization of A_nn
+        Matrix Z2;                 ///< A_nn^{-1}·C^T  (N x nfrag) — reused across steps
+        Matrix S;                  ///< Schur complement C·Z2 (nfrag x nfrag)
+        Matrix last_geometry;      ///< Geometry (N x 3) at factorization time
+        Vector last_cn;            ///< CN vector at factorization time
+        int steps_since_refactor = 0;
+        int cached_natoms = 0;
+        int cached_nfrag  = 0;
+        bool valid = false;
+        void reset() { valid = false; steps_since_refactor = 0; }
+    };
+    mutable EEQCholeskyCache m_chol_cache;
+    mutable Matrix m_pending_geometry;  ///< Set by calculateFinalCharges() before dispatchSolve
+    mutable Vector m_pending_cn;        ///< Set by calculateFinalCharges() before dispatchSolve
 
     /// Last truly successful charges (Phase 2 if available, otherwise Phase 1).
     /// Initialized from topology_charges on first call, then overwritten with the Phase 2
@@ -987,4 +1011,11 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Advanced", {})
     PARAM(dump_charges, Bool, false,
           "Save Phase 1 and Phase 2 charges to charges_dump_N<size>.json for analysis", "Advanced", {})
+    PARAM(eeq_refactor_eps_bohr, Double, 0.05,
+          "WP-EEQ-Cache: Cholesky refactorization threshold (max atom displacement, Bohr). "
+          "Skips O(N^3) factorization when geometry change is below this. "
+          "0.0 = always refactorize (disables cache, bit-identical to pre-WP).", "Algorithm", {})
+    PARAM(eeq_refactor_force_every, Int, 0,
+          "WP-EEQ-Cache: Force Cholesky refactorization every N steps regardless of geometry. "
+          "0 = never force (only geometry-triggered). Recommended: 100 for long MD runs.", "Algorithm", {})
 END_PARAMETER_DEFINITION

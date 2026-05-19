@@ -250,6 +250,14 @@ PARAM(static_all, Bool, false,
 PARAM(eeq_distance_cutoff_auto, Bool, false,
       "Auto-enable eeq_distance_cutoff=30 Bohr after Phase-1 when nfrag==1 and max|q|<0.5 e. Saves ~12 ms/step polymer. Falls back to 0.0 for ionic/multi-fragment systems.", "Performance", {})
 PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) for D4 dispersion pair-list. 0 = full O(N^2) (Fortran-parity). Recommended for large systems: 15.0. Energy drift < 1 muEh at 15 Bohr. When active, CN-derivative stencil is extended to cover the cutoff range.", "Performance", {})
+PARAM(eeq_refactor_eps_bohr, Double, 0.05,
+      "WP-EEQ-Cache: EEQ Cholesky refactorization threshold (max atom displacement, Bohr). "
+      "Skips O(N^3) factorization when geometry change below this. 0.0 = disable cache. "
+      "Forwarded to eeq_solver.eeq_refactor_eps_bohr.", "Performance", {})
+PARAM(eeq_refactor_force_every, Int, 0,
+      "WP-EEQ-Cache: Force EEQ Cholesky refactorization every N steps. "
+      "0 = geometry-triggered only. Recommended: 100 for long MD. "
+      "Forwarded to eeq_solver.eeq_refactor_force_every.", "Performance", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {

@@ -636,6 +636,12 @@ void GFNFF::forwardEEQSolverParams(json& eeq_params) {
             eeq["eeq_distance_cutoff"] = m_parameters["eeq_distance_cutoff"];
         }
     }
+
+    // WP-EEQ-Cache: forward Cholesky-cache params to eeq_solver
+    if (m_parameters.contains("eeq_refactor_eps_bohr") && !eeq.contains("eeq_refactor_eps_bohr"))
+        eeq["eeq_refactor_eps_bohr"] = m_parameters["eeq_refactor_eps_bohr"];
+    if (m_parameters.contains("eeq_refactor_force_every") && !eeq.contains("eeq_refactor_force_every"))
+        eeq["eeq_refactor_force_every"] = m_parameters["eeq_refactor_force_every"];
 }
 
 double GFNFF::getEEQDistanceCutoff() const {

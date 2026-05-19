@@ -724,6 +724,8 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_allow_unconverged = m_config.get<bool>("allow_unconverged_charges", false);
     m_skip_phase2 = m_config.get<bool>("skip_phase2", false);
     m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "pcg"));
+    m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.05);
+    m_refactor_force_every = m_config.get<int>("eeq_refactor_force_every", 0);
 
     // Initialize EEQ caching system
     m_eeq_cache = std::make_unique<EEQSolverCache>();
@@ -1786,35 +1788,71 @@ Vector EEQSolver::solveWithSchurCholesky(
     int natoms,
     int nfrag)
 {
-    // Step 1: Cholesky factorization of NxN SPD block
-    Eigen::LLT<Matrix> llt(A_nn);
-    if (llt.info() != Eigen::Success) {
-        if (m_verbosity >= 1) {
-            CurcumaLogger::warn("EEQ Schur-Cholesky: A matrix not SPD, falling back to LU");
+    // WP-EEQ-Cache (May 2026): Skip O(N^3/6) Cholesky factorization when geometry
+    // displacement since last factorization is below m_refactor_eps.
+    // m_pending_geometry / m_pending_cn are set by calculateFinalCharges() before
+    // this function is reached.  If called from outside that path (topology Phase 1),
+    // m_pending_geometry.rows() != natoms — treat as cache miss.
+
+    const bool cache_size_ok = m_chol_cache.valid
+        && m_chol_cache.cached_natoms == natoms
+        && m_chol_cache.cached_nfrag  == nfrag
+        && m_pending_geometry.rows()  == natoms
+        && m_pending_cn.size()        == natoms;
+
+    bool need_refactor = !cache_size_ok;
+
+    if (cache_size_ok && m_refactor_eps > 0.0) {
+        // O(N) displacement check — much cheaper than O(N^3) factorization
+        const double max_dr  = (m_pending_geometry - m_chol_cache.last_geometry)
+                                   .rowwise().norm().maxCoeff();
+        const double max_dcn = (m_pending_cn - m_chol_cache.last_cn)
+                                   .cwiseAbs().maxCoeff();
+        if (max_dr > m_refactor_eps || max_dcn > 0.05)
+            need_refactor = true;
+    }
+    if (m_refactor_force_every > 0
+        && m_chol_cache.steps_since_refactor >= m_refactor_force_every)
+        need_refactor = true;
+
+    if (need_refactor) {
+        Eigen::LLT<Matrix> llt(A_nn);
+        if (llt.info() != Eigen::Success) {
+            if (m_verbosity >= 1)
+                CurcumaLogger::warn("EEQ Schur-Cholesky: A matrix not SPD, falling back to LU");
+            m_chol_cache.reset();
+            return Vector();  // Empty = signal to fall back
         }
-        return Vector();  // Empty = signal to fall back
+        m_chol_cache.llt              = std::move(llt);
+        m_chol_cache.Z2               = m_chol_cache.llt.solve(C.transpose());
+        m_chol_cache.S                = C * m_chol_cache.Z2;
+        m_chol_cache.last_geometry    = m_pending_geometry;
+        m_chol_cache.last_cn          = m_pending_cn;
+        m_chol_cache.cached_natoms    = natoms;
+        m_chol_cache.cached_nfrag     = nfrag;
+        m_chol_cache.steps_since_refactor = 0;
+        m_chol_cache.valid            = true;
+        if (m_verbosity >= 3)
+            fmt::print(stderr, "[EEQ-Cache] Refactorized (N={}, nfrag={})\n", natoms, nfrag);
+    } else {
+        if (m_verbosity >= 3)
+            fmt::print(stderr, "[EEQ-Cache] Cache hit (step {})\n",
+                       m_chol_cache.steps_since_refactor);
     }
 
-    // Step 2: Solve A·z₁ = b_atoms and A·Z₂ = C^T
-    Vector z1 = llt.solve(rhs_atoms);
-    Matrix Z2 = llt.solve(C.transpose());  // nfrag columns
+    // O(N^2) triangular solve with cached (or freshly built) factorization
+    Vector z1 = m_chol_cache.llt.solve(rhs_atoms);
+    ++m_chol_cache.steps_since_refactor;
 
-    // Step 3: Form Schur complement S = C·Z₂ (nfrag × nfrag, tiny)
-    Matrix S = C * Z2;
-
-    // Step 4: Solve S·λ = C·z₁ - d
+    // Schur complement with cached Z2 and S (both constant when A is cached)
     Vector schur_rhs = C * z1 - rhs_constraints;
     Vector lambda;
     if (nfrag == 1) {
-        // Single fragment: scalar division (most common case)
-        lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
+        lambda = Vector::Constant(1, schur_rhs(0) / m_chol_cache.S(0, 0));
     } else {
-        // Multi-fragment: small dense solve
-        lambda = S.partialPivLu().solve(schur_rhs);
+        lambda = m_chol_cache.S.partialPivLu().solve(schur_rhs);
     }
-
-    // Step 5: q = z₁ - Z₂·λ
-    return z1 - Z2 * lambda;
+    return z1 - m_chol_cache.Z2 * lambda;
 }
 
 // ===== Block-Jacobi Preconditioner =====
@@ -2891,6 +2929,10 @@ Vector EEQSolver::calculateFinalCharges(
     //   Jan 2, 2026 "fix" used topological distances → 1.53e-02 RMS error (10× WORSE!)
     //   Jan 5, 2026: Reverted to geometric distances → expect 1.5e-3 RMS error
     //
+    // WP-EEQ-Cache (May 2026): expose geometry/CN so solveWithSchurCholesky can check cache
+    m_pending_geometry = geometry_bohr;
+    m_pending_cn       = cn;
+
     // Claude Generated (Mar 2026): Pre-allocated distance buffer — avoids 13 MB alloc per step (N=1280)
     ensurePhase2Buffers(natoms, nfrag);
     m_phase2_distances.setZero();
