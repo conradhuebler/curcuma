@@ -2,6 +2,20 @@
 
 Aufteilung der WP4-Maßnahmen aus [GFNFF-PERFORMANCE-ROADMAP.md](../GFNFF-PERFORMANCE-ROADMAP.md) (Mai 2026, Commit `fc9954f`) in 6 unabhängig umsetzbare Arbeitspakete plus ein zusätzliches Cross-cutting WP, das durch WP3-Befunde aufkam.
 
+## Zweite Welle (Mai 2026, post-WP-EEQ-Cache-Audit)
+
+Nach dem WP-EEQ-Cache-Fix wurde ein Vergleich Curcuma vs XTB-Fortran-Referenz (`external/gfnff/src/gfnff_engrad.F90`) durchgeführt. Befunde in fünf zusätzlichen WPs dokumentiert:
+
+| WP | Status | Hebel | Aufwand |
+|----|--------|-------|---------|
+| [WP-FF-DistMatrix-Sharing](WP-FF-DistMatrix-Sharing.md) | 🆕 | **HOCH** — 0.5-1.0 s/100 Steps | 1-2 Tage |
+| [WP-EEQ-Matrix-Cache](WP-EEQ-Matrix-Cache.md) | 🆕 | mittel — 0.2-0.5 s/100 Steps | 1-2 Tage |
+| [WP-FF-SoA-Extension](WP-FF-SoA-Extension.md) | 🆕 | mittel — 0.3-1.0 s mit FAST_EXP=ON | 2-3 Tage |
+| [WP-FF-Packed-Triangular](WP-FF-Packed-Triangular.md) | 🆕 | klein — −8 MB Memory, 5-10% bandwidth | 1 Tag |
+| [WP-Build-Ulysses-Cleanup](WP-Build-Ulysses-Cleanup.md) | 🆕 | Build-Hygiene (kein Perf) | 1 h |
+
+Empfohlene Reihenfolge: **WP-FF-DistMatrix-Sharing zuerst** (größter Hebel, Voraussetzung für die anderen drei Perf-WPs). Danach in beliebiger Reihenfolge — alle sind unabhängig.
+
 ## Ausgangsprofil (Mai 2026)
 
 `mixture.xyz`, N=6200, nfrag=1400, single-point + gradient, 4 Threads:

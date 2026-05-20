@@ -14,17 +14,54 @@
 | WP-D-Stage-D Baseline (1d382b7) | 44.2 ms | Referenz vor WP-EEQ-Cache |
 
 **Befund**: SoA-Pattern für Repulsion bringt keinen messbaren Gewinn (~±0.7 ms, Rauschen).
-Die Regression 44.2→57 ms stammt aus dem WP-EEQ-Cache-Commit (7e50d27), nicht aus WP-FF-SoA.
 
-**Ursache**: Für die Repulsions-Pair-Listen (klein bis mittel) überwiegt der 3-Pass-Overhead
+**Ursache (SoA)**: Für die Repulsions-Pair-Listen (klein bis mittel) überwiegt der 3-Pass-Overhead
 den exp()-Batch-Gewinn. WP-D Stage B gewann durch SoA, weil der dcn-Loop echte O(N²)
 Pairs ohne Cutoff hatte. Repulsion-Listen sind deutlich kleiner (cutoff-gefiltert).
 
+## Bisektion 44.2→57 ms — Befund 20. Mai 2026
+
+Drei Commits zwischen 1d382b7 und 7e50d27 wurden gebaut und gemessen (cached topology aus 1d382b7 wiederverwendet, identische CLI-Flags, kein `md_diagnostics_timing`):
+
+| Commit  | wall_s (1000 Steps) | Anmerkung |
+|---------|---------------------|-----------|
+| 1d382b7 | 61.10 / 61.32 | Stage D Referenz, run1/run2 |
+| fa7e0a2 | 61.26 | WP-Disp WIP |
+| e6037f2 | 60.89 | WP-Disp Fix (fresh-topo) |
+| c41c0ed | 57.05 / 57.29 | HEAD (= 7e50d27 + WP-FF-SoA opt-in OFF), run1/run2 |
+
+**HEAD ist heute ~4 s SCHNELLER als 1d382b7** unter identischen Bedingungen. Das ist das Gegenteil der publizierten 44.2→57.2 ms Regression. Die Mess-Differenz +0.2 s zwischen run1/run2 ist die Noise-Floor.
+
+**Ursache der Diskrepanz zu den 18./19.-Mai-Zahlen**: System Load avg ≈ 3.0, CPU-Governor `powersave` (statt `performance`), Hintergrund-Threads auf den 16 Cores. Die ursprünglichen 18./19.-Mai-Messungen erfolgten unter günstigeren Bedingungen, vermutlich auf einem leeren System. Die +13 ms "Regression" ist ein Messartefakt — kein Code-Regress.
+
+**Konsequenz**: Die ursprünglich geforderte WP-EEQ-Cache-Regression-Analyse entfällt. Stattdessen wurde **ein anderer realer Bug** im WP-EEQ-Cache gefunden — siehe nächster Abschnitt.
+
+## WP-EEQ-Cache (7e50d27) — Fresh-Topology Segfault (echter Bug)
+
+Bei den Bisektions-Builds crashte HEAD reproduzierbar mit Signal 11 in `solveWithSchurCholesky`, sobald `input.topo.json` fehlt (Fresh-Topology-Build der ersten Step).
+
+**Crashpfad**:
+
+1. `calculateTopologyInfo()` Phase 1 → `calculateTopologyCharges()` → `dispatchSolve()` → erste `solveWithSchurCholesky()`-Call (`method_to_use = SchurCholesky` als Default, bevor der Auto-Benchmark in `eeq_solver.cpp:1441` `m_selected_method` auf PCG umschaltet).
+2. In dem Phase-1-Call ist `m_pending_geometry` noch nicht gesetzt (nur `calculateFinalCharges` setzt ihn auf `eeq_solver.cpp:2933-2934`, Phase 1 tut das nicht). `m_pending_geometry.rows() == 0`.
+3. Cache-Branch (`eeq_solver.cpp:1797-1803`): `cache_size_ok = false` (weil `m_pending_geometry.rows() != natoms`) → `need_refactor = true`. Refactor-Branch läuft, kopiert dabei **`m_chol_cache.last_geometry = m_pending_geometry`** (`eeq_solver.cpp:1829`) — d.h. die leere 0-Zeilen-Matrix wird im Cache abgelegt. `m_chol_cache.valid = true`, `cached_natoms = 1410`.
+4. Phase 2 (`calculateFinalCharges`) setzt jetzt korrekt `m_pending_geometry = geometry_bohr` (1410 × 3). Da Gershgorin im PCG-Pfad `pcg_viable = false` ergibt (polymer EEQ-Matrix), fällt der Code auf `solveWithSchurCholesky` zurück (`eeq_solver.cpp:1706`).
+5. Cache-Check: alle `cache_size_ok`-Bedingungen sind erfüllt (1410==1410, valid, etc.), `m_refactor_eps > 0` → `eeq_solver.cpp:1807`: `(m_pending_geometry - m_chol_cache.last_geometry).rowwise().norm()` rechnet `(1410×3) − (0×3)` → Eigen-Größen-Mismatch → **SEGFAULT**.
+
+**Warum die 57.2-ms-Messung am 19. Mai trotzdem lief**: dort existierte ein gültiger `input.topo.json` aus einem früheren Run. Damit überspringt `getCachedTopology()` Phase 1 komplett; nur Phase 2 läuft (mit gesetztem `m_pending_geometry`) und der Cache wird korrekt initialisiert.
+
+**Fix-Optionen** (für nachfolgenden Patch — nicht Teil dieser Untersuchung):
+
+- (a) zusätzlich `m_chol_cache.last_geometry.rows() == natoms` in `cache_size_ok` aufnehmen
+- (b) im Refactor-Branch nur dann `last_geometry`/`last_cn` schreiben, wenn `m_pending_geometry.rows() == natoms`; sonst `m_chol_cache.valid = false` lassen (Phase-1-Refactorisierung nicht cachen — der Wert ist sowieso wertlos, weil Phase 2 ein anderes A_nn aufbaut)
+- (c) `invalidateCholeskyCache()` (bereits in `eeq_solver.h:345` vorhanden) explizit vor Phase 1 aufrufen
+
+Empfehlung: **(b)** — saubere Trennung, keine Cache-Verschmutzung durch wertlose Phase-1-Daten.
+
 ## TODOs — Was noch geprüft werden muss
 
-- [ ] **WP-EEQ-Cache Regression untersuchen**: 44.2 → 57 ms kommt aus Commit 7e50d27.
-      EEQ-Cholesky-Cache-Overhead messen (Invalidierungslogik? Cache-miss-Rate? RMSD-check-Kosten?).
-      `md_diagnostics_timing` auf Polymer laufen lassen, EEQ-Phase isoliert messen.
+- [x] ~~**WP-EEQ-Cache Regression untersuchen**~~ — falsifiziert (siehe Bisektions-Abschnitt). Stattdessen Fresh-Topology-Crash-Bug dokumentiert.
+- [ ] **WP-EEQ-Cache Crash-Fix** implementieren (Option b oben).
 - [ ] **Repulsion-Listengröße messen**: Wie viele Paare pro Thread bei Polymer N=1410?
       Falls < 500 Paare/Thread: SoA-Overhead > Gewinn — dann `#ifdef`-Block entfernen.
 - [ ] **Mixture N=6200 messen**: Akzeptanzkriterium war "≥1.2× schneller (T=4, mixture)".
