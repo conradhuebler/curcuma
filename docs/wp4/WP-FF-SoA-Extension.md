@@ -1,11 +1,46 @@
 # WP-FF-SoA-Extension — Pass-A/B/C-Pattern auf alle GFN-FF-Inner-Loops
 
-**Status:** 🆕 Vorgeschlagen (Mai 2026, Erweiterung von WP-FF-SoA-pair-loops.md)
-**Aufwand:** ~2-3 Tage
-**Erwarteter Nutzen:** Polymer N=1410, FAST_EXP=ON: **0.3-1.0 s / 100 MD-Steps** je nach Term.
+**Status:** ❌ Verworfen (Mai 2026 — Implementierung getestet, negativer Performance-Beitrag)
+**Aufwand:** ~3 h (Coulomb-Migration prototyped, beide erf-Backends gemessen)
+**Erwarteter Nutzen:** Polymer N=1410, FAST_EXP=ON: 0.3-1.0 s / 100 MD-Steps geschätzt — **nicht erreicht**.
 **Voraussetzung:** WP-D Stage B etablierte `fast_exp_neg_sq_block`. WP-FF-DistMatrix-Sharing optional.
 
-## Hypothese
+## Befund Mai 2026 (Implementation getestet, dann verworfen)
+
+Coulomb-Matrix-Build in `eeq_solver.cpp:calculateFinalCharges` wurde auf Pass-A/B/C umstrukturiert
+(collect γ·r in SoA-Buffer → batched `fast_erf_block` → scatter, symmetrisch). Zwei erf-Backends getestet:
+
+1. **Abramowitz & Stegun 7.1.26 Padé (1.5e-7 max err)** mit AVX2 SIMD:
+   - Caffeine SP: Δ = +1.025 mEh gegen Referenz (Acceptance war ≤ 10 µEh — **100× über**).
+   - Polymer CSVR bath exchange: -0.0493 Eh vs Referenz -0.0481 Eh (Δ = +1.24 mEh).
+   - Diagnose: 10⁶ Coulomb-Paare × 1.5e-7 erf-Fehler akkumulieren über den Matrix-Solve.
+
+2. **`std::erf` in tight loop** (mit Pass-A/B/C-Struktur, bit-identisch):
+   - Polymer T=1: 9.72 s vs 9.27 s OFF-Pfad → **+0.45 s langsamer**.
+   - Polymer T=4: 5.66 s vs 5.35 s OFF-Pfad → **+0.31 s langsamer**.
+   - Diagnose: Buffer-Overhead (4 separate SoA-Arrays) + Scatter-Step > Vectorization-Win.
+     `std::erf` ist nicht auto-vectorized (libm-Opacity), und ohne SIMD-Speedup ist Pass-A/B/C reine
+     Reorganisation, die hier mehr Memory-Traffic verursacht als spart.
+
+**Konsequenz**: Patch verworfen, Repository auf `f2865cf` (WP-EEQ-Matrix-Cache) restauriert.
+Das ist die zweite negative SoA-Erfahrung — vgl. `WP-FF-SoA-pair-loops.md` (Repulsion ebenfalls neutral).
+Für GFN-FF-Inner-Loops mit `std::erf`/`std::exp` ist das Pass-A/B/C-Pattern **nur dann ein Win, wenn die
+Approximation präzise UND schnell ist**. A&S 7.1.26 ist zu ungenau. Eine ausreichende Approximation
+(Cody/Chebyshev range-reduced, Grad ≥ 10, ~1e-10 Genauigkeit) würde dieses WP wieder lohnen.
+Aktuell als out-of-scope verschoben — siehe `## Open Question` unten.
+
+## Open Question — wann lohnt sich dieser WP wieder?
+
+Ein erneuter Versuch wäre sinnvoll, wenn:
+- Eine erf-Approximation mit ≤ 1e-10 Genauigkeit verfügbar ist (Cody-Algorithmus oder libmvec) UND
+- Die Approximation 2-4× schneller als `std::erf` ist (SIMD batched), UND
+- Polymer-Coulomb-Phase ist tatsächlich noch ein Hotspot (heute eeq_solve median ~24 ms, davon
+  Matrix-Build ~5-10 ms — wenig zu holen ohne tatsächliche SIMD).
+
+Aktuell ist die EEQ-Phase bei polymer single-thread durch andere Optimierungen schon < 25% der
+Step-Zeit. Der absolute Hebel selbst bei optimaler erf-Implementierung wäre nur ~0.3 s / 100 Steps.
+
+## (Archiviert) Originale Hypothese
 
 WP-D Stage B (Mai 2026) hat das Pass-A/B/C-SoA-Pattern für den `dcn`-Loop etabliert. WP-FF-SoA-pair-loops.md hat die Erweiterung auf Repulsion (bonded + nonbonded) implementiert — Ergebnis: Repulsion-Listen zu klein, SoA-Overhead > exp-Gewinn (siehe Befund im WP).
 
