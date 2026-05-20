@@ -46,6 +46,8 @@ public:
     Vector getCharges() const override;
     Vector getBondOrders() const override;
     Position getDipole() const override;
+    /// Claude Generated 2026 — return GFN-FF CN from last calculateEnergy() call
+    Vector getCN() const override;
     bool updateGeometry(const Matrix& geometry) override;
     bool hasGradient() const override { return true; }
     bool isThreadSafe() const override { return false; }

@@ -96,6 +96,17 @@ public:
      * @return 3D dipole vector in appropriate units
      */
     virtual Position getDipole() const = 0;
+
+    /**
+     * @brief Get coordination numbers (GFN-FF erf-based) from last calculation.
+     *
+     * Returns the CN vector computed during the last calculateEnergy() call.
+     * Only meaningful after a GFN-FF calculation; other methods return an empty vector.
+     *
+     * Claude Generated 2026 — diagnostic accessor for PolymerBuild CN comparison
+     * @return Vector of per-atom CN values, or empty vector if not supported
+     */
+    virtual Vector getCN() const { return Vector(); }
     
     /**
      * @brief Copy gradient into pre-allocated target (avoids heap allocation).

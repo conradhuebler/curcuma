@@ -1408,11 +1408,11 @@ Vector EEQSolver::dispatchSolve(
         method_to_use = EEQSolveMethod::SchurCholesky;
     }
 
-    if (m_verbosity >= 2) {
+    if (CurcumaLogger::get_verbosity() >= 2) {
         const char* method_name = (method_to_use == EEQSolveMethod::PCG) ? "PCG"
             : (method_to_use == EEQSolveMethod::SchurCholesky) ? "SchurCholesky" : "LU";
         const char* mode_str = (m_solve_method == EEQSolveMethod::Auto) ? " (auto)" : "";
-        fmt::print(stderr, "[EEQ] dispatchSolve: Using {} solver{} (N={})\n", method_name, mode_str, natoms);
+        CurcumaLogger::info(fmt::format("[EEQ] dispatchSolve: Using {} solver{} (N={})", method_name, mode_str, natoms));
     }
 
     Vector charges;
@@ -1519,10 +1519,10 @@ Vector EEQSolver::dispatchSolve(
             m_selected_method = (pcg_ms < schur_ms) ? EEQSolveMethod::PCG : EEQSolveMethod::SchurCholesky;
             m_auto_benchmark_done = true;
 
-            if (m_verbosity >= 2) {
-                fmt::print(stderr, "[EEQ] Auto-benchmark: SchurCholesky={:.1f}ms, PCG={:.1f}ms → {}\n",
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::info(fmt::format("[EEQ] Auto-benchmark: SchurCholesky={:.1f}ms, PCG={:.1f}ms -> {}",
                            schur_ms, pcg_ms,
-                           m_selected_method == EEQSolveMethod::PCG ? "PCG" : "SchurCholesky");
+                           m_selected_method == EEQSolveMethod::PCG ? "PCG" : "SchurCholesky"));
             }
 
             m_pcg_last_z1 = z1;
@@ -2038,8 +2038,8 @@ Vector EEQSolver::solveWithPCG(
         if (r_norm < tol) {
             m_pcg_total_calls++;
             m_pcg_total_iters += k + 1;
-            if (show_detailed || show_simple) {
-                fmt::print(" done({} iters, |r|={:.2e})\n", k + 1, r_norm);
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::info(fmt::format("[EEQ] PCG converged in {} iterations (|r|={:.2e})", k + 1, r_norm));
             }
             return x;
         }

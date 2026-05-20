@@ -94,6 +94,11 @@ Position GFNFFComputationalMethod::getDipole() const {
     return Position{0.0, 0.0, 0.0};
 }
 
+// Claude Generated 2026: Return GFN-FF coordination numbers from last calculateEnergy() call
+Vector GFNFFComputationalMethod::getCN() const {
+    return m_gfnff ? m_gfnff->getLastCN() : Vector();
+}
+
 void GFNFFComputationalMethod::setThreadCount(int threads) {
     // Claude Generated (WP1, May 2026): forward to GFNFF::setThreadCount, which keeps
     // m_parameters["threads"] and the cached m_threads member in sync. EnergyCalculator
