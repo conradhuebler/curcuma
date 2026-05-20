@@ -885,6 +885,8 @@ const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
         if ((m_static_charges || m_static_cn) && m_static_state_captured) {
             CurcumaLogger::warn("Static-mode: topology re-initialised but cached CN/charges remain frozen — results may diverge");
         }
+        // WP-EEQ-Cache: drop stale LLT before Phase 2 rebuilds A with new dxi/dgam.
+        if (m_eeq_solver) m_eeq_solver->invalidateCholeskyCache();
         m_cached_topology = calculateTopologyInfo();
         m_last_topology_geometry = m_geometry_bohr;
         m_static_topology_valid = true;

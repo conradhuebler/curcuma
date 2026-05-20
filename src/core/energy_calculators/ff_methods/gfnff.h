@@ -252,7 +252,8 @@ PARAM(eeq_distance_cutoff_auto, Bool, false,
 PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) for D4 dispersion pair-list. 0 = full O(N^2) (Fortran-parity). Recommended for large systems: 15.0. Energy drift < 1 muEh at 15 Bohr. When active, CN-derivative stencil is extended to cover the cutoff range.", "Performance", {})
 PARAM(eeq_refactor_eps_bohr, Double, 0.05,
       "WP-EEQ-Cache: EEQ Cholesky refactorization threshold (max atom displacement, Bohr). "
-      "Skips O(N^3) factorization when geometry change below this. 0.0 = disable cache. "
+      "Skips O(N^3) factorization when geometry change below this. "
+      "Set to 0.0 (or negative) to disable the cache entirely — bit-identical to pre-WP. "
       "Forwarded to eeq_solver.eeq_refactor_eps_bohr.", "Performance", {})
 PARAM(eeq_refactor_force_every, Int, 0,
       "WP-EEQ-Cache: Force EEQ Cholesky refactorization every N steps. "

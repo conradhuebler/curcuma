@@ -1014,7 +1014,8 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
     PARAM(eeq_refactor_eps_bohr, Double, 0.05,
           "WP-EEQ-Cache: Cholesky refactorization threshold (max atom displacement, Bohr). "
           "Skips O(N^3) factorization when geometry change is below this. "
-          "0.0 = always refactorize (disables cache, bit-identical to pre-WP).", "Algorithm", {})
+          "Set to 0.0 (or negative) to disable the cache entirely — every call refactors, "
+          "bit-identical to pre-WP behavior.", "Algorithm", {})
     PARAM(eeq_refactor_force_every, Int, 0,
           "WP-EEQ-Cache: Force Cholesky refactorization every N steps regardless of geometry. "
           "0 = never force (only geometry-triggered). Recommended: 100 for long MD runs.", "Algorithm", {})

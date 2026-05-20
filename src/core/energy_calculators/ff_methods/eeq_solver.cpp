@@ -1788,13 +1788,20 @@ Vector EEQSolver::solveWithSchurCholesky(
     int natoms,
     int nfrag)
 {
-    // WP-EEQ-Cache (May 2026): Skip O(N^3/6) Cholesky factorization when geometry
-    // displacement since last factorization is below m_refactor_eps.
-    // m_pending_geometry / m_pending_cn are set by calculateFinalCharges() before
-    // this function is reached.  If called from outside that path (topology Phase 1),
-    // m_pending_geometry.rows() != natoms — treat as cache miss.
+    // WP-EEQ-Cache (May 2026, fix May 2026): Skip O(N^3/6) Cholesky factorization
+    // when geometry displacement since last factorization is below m_refactor_eps.
+    //
+    // Contract: m_pending_geometry / m_pending_cn are populated only by Phase 2
+    // (calculateFinalCharges). Phase 1 (calculateTopologyCharges) reaches this
+    // function with empty pending buffers — in that case we must solve locally and
+    // leave the cache untouched, otherwise Phase 2 would later subtract a 0xN matrix
+    // from an NxN one and segfault.
+    //
+    // m_refactor_eps <= 0 disables the cache entirely (every call refactors —
+    // bit-identical to pre-WP behavior).
 
-    const bool cache_size_ok = m_chol_cache.valid
+    const bool cache_size_ok = (m_refactor_eps > 0.0)
+        && m_chol_cache.valid
         && m_chol_cache.cached_natoms == natoms
         && m_chol_cache.cached_nfrag  == nfrag
         && m_pending_geometry.rows()  == natoms
@@ -1802,7 +1809,7 @@ Vector EEQSolver::solveWithSchurCholesky(
 
     bool need_refactor = !cache_size_ok;
 
-    if (cache_size_ok && m_refactor_eps > 0.0) {
+    if (cache_size_ok) {  // m_refactor_eps > 0 implied
         // O(N) displacement check — much cheaper than O(N^3) factorization
         const double max_dr  = (m_pending_geometry - m_chol_cache.last_geometry)
                                    .rowwise().norm().maxCoeff();
@@ -1823,24 +1830,54 @@ Vector EEQSolver::solveWithSchurCholesky(
             m_chol_cache.reset();
             return Vector();  // Empty = signal to fall back
         }
-        m_chol_cache.llt              = std::move(llt);
-        m_chol_cache.Z2               = m_chol_cache.llt.solve(C.transpose());
-        m_chol_cache.S                = C * m_chol_cache.Z2;
-        m_chol_cache.last_geometry    = m_pending_geometry;
-        m_chol_cache.last_cn          = m_pending_cn;
-        m_chol_cache.cached_natoms    = natoms;
-        m_chol_cache.cached_nfrag     = nfrag;
-        m_chol_cache.steps_since_refactor = 0;
-        m_chol_cache.valid            = true;
-        if (m_verbosity >= 3)
-            fmt::print(stderr, "[EEQ-Cache] Refactorized (N={}, nfrag={})\n", natoms, nfrag);
+
+        // Persist into cache ONLY when (a) the cache is enabled (eps > 0) and
+        // (b) the pending buffers reflect this call's geometry (Phase 2 contract).
+        // Phase 1 has empty m_pending_geometry — local-solve path keeps the cache
+        // clean so the next Phase 2 call sees valid=false and refactors normally.
+        const bool can_persist = (m_refactor_eps > 0.0)
+            && (m_pending_geometry.rows() == natoms)
+            && (m_pending_cn.size()       == natoms);
+
+        if (can_persist) {
+            m_chol_cache.llt              = std::move(llt);
+            m_chol_cache.Z2               = m_chol_cache.llt.solve(C.transpose());
+            m_chol_cache.S                = C * m_chol_cache.Z2;
+            m_chol_cache.last_geometry    = m_pending_geometry;
+            m_chol_cache.last_cn          = m_pending_cn;
+            m_chol_cache.cached_natoms    = natoms;
+            m_chol_cache.cached_nfrag     = nfrag;
+            m_chol_cache.steps_since_refactor = 0;
+            m_chol_cache.valid            = true;
+            if (m_verbosity >= 3)
+                fmt::print(stderr, "[EEQ-Cache] Refactorized + persisted (N={}, nfrag={})\n",
+                           natoms, nfrag);
+        } else {
+            // Phase 1 OR cache disabled — local solve, no cache writes
+            m_chol_cache.valid = false;
+            if (m_verbosity >= 3)
+                fmt::print(stderr, "[EEQ-Cache] Local solve (Phase 1 or cache off, N={})\n",
+                           natoms);
+            Vector z1_local = llt.solve(rhs_atoms);
+            Matrix Z2_local = llt.solve(C.transpose());
+            Matrix S_local  = C * Z2_local;
+            Vector schur_rhs_local = C * z1_local - rhs_constraints;
+            Vector lambda_local;
+            if (nfrag == 1) {
+                lambda_local = Vector::Constant(1, schur_rhs_local(0) / S_local(0, 0));
+            } else {
+                lambda_local = S_local.partialPivLu().solve(schur_rhs_local);
+            }
+            return z1_local - Z2_local * lambda_local;
+        }
     } else {
         if (m_verbosity >= 3)
             fmt::print(stderr, "[EEQ-Cache] Cache hit (step {})\n",
                        m_chol_cache.steps_since_refactor);
     }
 
-    // O(N^2) triangular solve with cached (or freshly built) factorization
+    // Cache-hit path: factor was either freshly persisted above OR carried over.
+    // O(N^2) triangular solve with cached factorization.
     Vector z1 = m_chol_cache.llt.solve(rhs_atoms);
     ++m_chol_cache.steps_since_refactor;
 
@@ -2929,9 +2966,12 @@ Vector EEQSolver::calculateFinalCharges(
     //   Jan 2, 2026 "fix" used topological distances → 1.53e-02 RMS error (10× WORSE!)
     //   Jan 5, 2026: Reverted to geometric distances → expect 1.5e-3 RMS error
     //
-    // WP-EEQ-Cache (May 2026): expose geometry/CN so solveWithSchurCholesky can check cache
-    m_pending_geometry = geometry_bohr;
-    m_pending_cn       = cn;
+    // WP-EEQ-Cache (May 2026): expose geometry/CN so solveWithSchurCholesky can check cache.
+    // Skip the ~45 KB/step copy when the cache is disabled (eps <= 0).
+    if (m_refactor_eps > 0.0) {
+        m_pending_geometry = geometry_bohr;
+        m_pending_cn       = cn;
+    }
 
     // Claude Generated (Mar 2026): Pre-allocated distance buffer — avoids 13 MB alloc per step (N=1280)
     ensurePhase2Buffers(natoms, nfrag);
