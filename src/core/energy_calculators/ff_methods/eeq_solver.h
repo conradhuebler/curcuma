@@ -346,6 +346,10 @@ public:
     /// Call after setMolecule() or topology rebuild to force refactorization on next step.
     void invalidateCholeskyCache() { m_chol_cache.reset(); }
 
+    /// WP-EEQ-Matrix-Cache (May 2026): invalidate cached A_nn off-diagonal.
+    /// Call after topology rebuild to force matrix re-build on next Phase 2.
+    void invalidateMatrixCache() { m_A_cache_valid = false; }
+
     /// WP-FF-DistMatrix-Sharing (May 2026): consume externally-computed packed
     /// lower-triangular distance array (srab[i*(i+1)/2 + j] for i > j, Bohr).
     /// When set, calculateFinalCharges skips its own O(N^2) distance loop and
@@ -829,6 +833,7 @@ private:
     double m_eeq_distance_cutoff_override = -1.0;  ///< WP-S3: post-init cutoff override (-1 = use config)
     double m_refactor_eps = 0.05;       ///< WP-EEQ-Cache: max displacement (Bohr) before re-factorizing
     int    m_refactor_force_every = 0;  ///< WP-EEQ-Cache: force refactorization every N steps (0 = disabled)
+    double m_matrix_rebuild_eps = 0.0;  ///< WP-EEQ-Matrix-Cache: max displacement before A_nn off-diag rebuild (0 = disabled)
 
     // ===== Cached Data for Energy Calculation =====
 
@@ -938,6 +943,18 @@ private:
     mutable Matrix m_pending_geometry;  ///< Set by calculateFinalCharges() before dispatchSolve
     mutable Vector m_pending_cn;        ///< Set by calculateFinalCharges() before dispatchSolve
 
+    // WP-EEQ-Matrix-Cache (May 2026): A_nn off-diagonal cache across MD steps.
+    // The Coulomb off-diagonal A_ij = erf(γ_ij·r_ij)/r_ij depends on r_ij and on
+    // alpha_corrected (a function of topology_charges + CN). When geometry change
+    // < m_matrix_rebuild_eps AND CN change < 0.05, the off-diagonal is reusable;
+    // only the diagonal needs rebuilding each step (cheap O(N)). Default disabled
+    // (eps=0) for safety; user opt-in for performance.
+    mutable Matrix m_cached_A_offdiag;     ///< N×N off-diagonal of A_nn at cache time
+    mutable Matrix m_cached_A_geometry;    ///< Geometry (N×3) at cache time
+    mutable Vector m_cached_A_cn;          ///< CN vector at cache time
+    mutable int    m_cached_A_natoms = 0;  ///< Atom count for cache validity check
+    mutable bool   m_A_cache_valid = false;
+
     /// WP-FF-DistMatrix-Sharing (May 2026): external packed-triangular srab from GFNFF.
     /// When non-null, calculateFinalCharges fills m_phase2_distances from this instead of
     /// recomputing the O(N^2) sqrt loop.
@@ -1037,4 +1054,10 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
     PARAM(eeq_refactor_force_every, Int, 0,
           "WP-EEQ-Cache: Force Cholesky refactorization every N steps regardless of geometry. "
           "0 = never force (only geometry-triggered). Recommended: 100 for long MD runs.", "Algorithm", {})
+    PARAM(eeq_matrix_rebuild_eps_bohr, Double, 0.0,
+          "WP-EEQ-Matrix-Cache: max atom displacement (Bohr) before A_nn Coulomb off-diagonal is "
+          "rebuilt from scratch. When below this AND CN drift < 0.05, the cached off-diagonal is "
+          "reused (only the diagonal is rebuilt each step). 0.0 = always rebuild (cache disabled, "
+          "bit-identical to pre-WP). Conservative starting point: 0.05 (same as Cholesky cache).",
+          "Algorithm", {})
 END_PARAMETER_DEFINITION

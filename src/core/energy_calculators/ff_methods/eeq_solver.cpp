@@ -726,6 +726,7 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "pcg"));
     m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.05);
     m_refactor_force_every = m_config.get<int>("eeq_refactor_force_every", 0);
+    m_matrix_rebuild_eps   = m_config.get<double>("eeq_matrix_rebuild_eps_bohr", 0.0);
 
     // Initialize EEQ caching system
     m_eeq_cache = std::make_unique<EEQSolverCache>();
@@ -3182,6 +3183,29 @@ Vector EEQSolver::calculateFinalCharges(
         Matrix& A = m_phase2_A;
         Vector& x = m_phase2_rhs;
 
+        // WP-EEQ-Matrix-Cache (May 2026): check if we can reuse the cached
+        // Coulomb off-diagonal from a previous step.  Off-diag values are
+        // gamma_ij·erf-quotients of r_ij — they depend on geometry AND on
+        // alpha (charges, CN). We reuse only when BOTH geometry drift AND
+        // CN drift are below thresholds; the diagonal is always rebuilt
+        // because it folds in gam_corrected + alpha_corrected fresh.
+        bool reuse_offdiag = false;
+        if (m_matrix_rebuild_eps > 0.0 && m_A_cache_valid
+            && m_cached_A_natoms == natoms
+            && m_cached_A_geometry.rows() == natoms
+            && m_cached_A_cn.size() == natoms
+            && m_cached_A_offdiag.rows() == natoms
+            && m_cached_A_offdiag.cols() == natoms) {
+            const double max_dr = (geometry_bohr - m_cached_A_geometry).rowwise().norm().maxCoeff();
+            const double max_dcn = (cn - m_cached_A_cn).cwiseAbs().maxCoeff();
+            if (max_dr < m_matrix_rebuild_eps && max_dcn < 0.05) {
+                reuse_offdiag = true;
+                if (m_verbosity >= 3)
+                    fmt::print(stderr, "[EEQ-Matrix-Cache] Hit (max_dr={:.3e} Bohr, max_dcn={:.3e})\n",
+                               max_dr, max_dcn);
+            }
+        }
+
         // 1+2. Build Coulomb matrix (off-diagonal + diagonal)
         //
         // Distance cutoff for large systems: erf(gamma*r)/r decays to ~1/r for large r.
@@ -3199,11 +3223,19 @@ Vector EEQSolver::calculateFinalCharges(
 
         int coulomb_progress_10pct = std::max(1, natoms / 10);
         bool show_coulomb_progress = (m_verbosity >= 3 && natoms >= 200 && iteration == 0);
-        if (show_coulomb_progress) {
+        if (show_coulomb_progress && !reuse_offdiag) {
             fmt::print(stderr, "[EEQ] Phase 2: Coulomb matrix ({} atoms):", natoms);
             fflush(stderr);
         }
 
+        if (reuse_offdiag) {
+            // Cache hit: copy cached N×N block (off-diag + stale diag), then overwrite diagonal
+            // with fresh gam_corrected + TSQRT2PI/sqrt(alpha_corrected).
+            A.topLeftCorner(natoms, natoms) = m_cached_A_offdiag;
+            for (int i = 0; i < natoms; ++i) {
+                A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
+            }
+        } else
         // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²) A-matrix
         if (num_threads > 1 && natoms > 64) {
             int T = std::min(num_threads, natoms);
@@ -3261,6 +3293,22 @@ Vector EEQSolver::calculateFinalCharges(
             }
         }
         if (show_coulomb_progress) fmt::print(stderr, " done\n");
+
+        // WP-EEQ-Matrix-Cache: snapshot fresh A_nn block for next-step reuse.
+        // Skip when cache is disabled (eps=0) or we just reused (no change). Cache
+        // stores entire N×N including the diagonal; reuse-path overwrites diagonal.
+        if (m_matrix_rebuild_eps > 0.0 && !reuse_offdiag) {
+            if (m_cached_A_offdiag.rows() != natoms || m_cached_A_offdiag.cols() != natoms) {
+                m_cached_A_offdiag.resize(natoms, natoms);
+            }
+            m_cached_A_offdiag    = A.topLeftCorner(natoms, natoms);
+            m_cached_A_geometry   = geometry_bohr;
+            m_cached_A_cn         = cn;
+            m_cached_A_natoms     = natoms;
+            m_A_cache_valid       = true;
+            if (m_verbosity >= 3)
+                fmt::print(stderr, "[EEQ-Matrix-Cache] Persisted (N={})\n", natoms);
+        }
 
         // 3. Setup fragment charge constraints
         for (int f = 0; f < nfrag; ++f) {
