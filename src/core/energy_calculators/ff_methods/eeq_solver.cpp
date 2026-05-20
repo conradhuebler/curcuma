@@ -1122,6 +1122,12 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
     // - Phase 1 (goedeckera): Topological distances (Floyd-Warshall bond paths)
     // - Phase 2 (goed_gfnff): Geometric distances (Euclidean xyz)
     // Reference: XTB gfnff_ini.f90 - pair(ij) vs r(ij)
+    //
+    // NOTE (WP-FF-Packed-Triangular): we considered reading from m_external_srab here,
+    // but buildCorrectedEEQMatrix is also reached from gradient / numerical-perturbation
+    // paths where geometry_bohr may differ from the geometry that produced
+    // m_external_srab. Falling back to local recomputation keeps the function self-
+    // contained and bit-stable against caller-side geometry mutations.
     Matrix distances;
     if (distance_mode == EEQDistanceMode::Topological && topology.has_value()) {
         distances = computeTopologicalDistancesSparse(atoms, *topology);
@@ -2974,29 +2980,28 @@ Vector EEQSolver::calculateFinalCharges(
     }
 
     // Claude Generated (Mar 2026): Pre-allocated distance buffer — avoids 13 MB alloc per step (N=1280)
+    // WP-FF-Packed-Triangular (May 2026): buffer is now packed lower-triangular (N(N+1)/2 doubles).
     ensurePhase2Buffers(natoms, nfrag);
     m_phase2_distances.setZero();
 
     // WP-FF-DistMatrix-Sharing (May 2026): consume externally-computed packed srab
     // when GFNFF provides it — skip the O(N²) sqrt loop entirely.
-    // Layout: srab[i*(i+1)/2 + j] = r_ij for i > j.
+    // Layout: srab[i*(i+1)/2 + j] = r_ij for i > j. Identical to m_phase2_distances now,
+    // so we can copy the whole vector in one shot.
     const int srab_expected = natoms * (natoms + 1) / 2;
     const bool use_external_srab = (m_external_srab != nullptr)
                                 && (m_external_srab->size() == srab_expected);
     if (use_external_srab) {
-        std::atomic<bool> atoms_too_close_ext{false};
-        for (int i = 0; i < natoms; ++i) {
+        m_phase2_distances = *m_external_srab;  // direct copy, layouts match
+        // Quick atoms-too-close scan (only off-diagonal slots)
+        for (int i = 1; i < natoms; ++i) {
             const int ii = i * (i + 1) / 2;
             for (int j = 0; j < i; ++j) {
-                const double rr = (*m_external_srab)[ii + j];
-                if (rr < 1e-10) atoms_too_close_ext.store(true, std::memory_order_relaxed);
-                m_phase2_distances(i, j) = rr;
-                m_phase2_distances(j, i) = rr;
+                if (m_phase2_distances[ii + j] < 1e-10) {
+                    CurcumaLogger::error("EEQSolver::calculateFinalCharges: atoms too close (external srab)");
+                    return generateFallbackCharges(natoms, total_charge, "zero distance in Phase 2 (external srab)");
+                }
             }
-        }
-        if (atoms_too_close_ext) {
-            CurcumaLogger::error("EEQSolver::calculateFinalCharges: atoms too close (external srab)");
-            return generateFallbackCharges(natoms, total_charge, "zero distance in Phase 2 (external srab)");
         }
     } else {
 
@@ -3012,14 +3017,14 @@ Vector EEQSolver::calculateFinalCharges(
         int T = std::min(num_threads, natoms);
         auto dist_worker = [&](int t_id) {
             for (int i = t_id; i < natoms; i += T) {
+                const int ii = i * (i + 1) / 2;  // packed row offset
                 for (int j = 0; j < i; ++j) {
                     double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
                     double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
                     double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
                     double r = std::sqrt(dx*dx + dy*dy + dz*dz);
                     if (r < 1e-10) atoms_too_close.store(true, std::memory_order_relaxed);
-                    m_phase2_distances(i, j) = r;
-                    m_phase2_distances(j, i) = r;
+                    m_phase2_distances[ii + j] = r;
                 }
                 if (show_dist_progress && t_id == 0 && i > 0 && i % dist_progress_10pct == 0) {
                     fmt::print(stderr, " {}%", (100 * i) / natoms);
@@ -3042,14 +3047,14 @@ Vector EEQSolver::calculateFinalCharges(
         }
     } else {
         for (int i = 0; i < natoms; ++i) {
+            const int ii = i * (i + 1) / 2;
             for (int j = 0; j < i; ++j) {
                 double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
                 double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
                 double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
                 double r = std::sqrt(dx*dx + dy*dy + dz*dz);
                 if (r < 1e-10) atoms_too_close.store(true, std::memory_order_relaxed);
-                m_phase2_distances(i, j) = r;
-                m_phase2_distances(j, i) = r;
+                m_phase2_distances[ii + j] = r;
             }
             if (show_dist_progress && i > 0 && i % dist_progress_10pct == 0) {
                 fmt::print(stderr, " {}%", (100 * i) / natoms);
@@ -3063,8 +3068,10 @@ Vector EEQSolver::calculateFinalCharges(
         return generateFallbackCharges(natoms, total_charge, "zero distance in Phase 2");
     }
     }  // end if (!use_external_srab)
-    // Const reference alias for readability — no copy
-    const Matrix& distances = m_phase2_distances;
+    // WP-FF-Packed-Triangular: lookup helper. Assumes j < i (Coulomb-build only reads lower triangle).
+    auto dist = [&](int i, int j) -> double {
+        return m_phase2_distances[i * (i + 1) / 2 + j];
+    };
 
     if (m_verbosity >= 3) {
         CurcumaLogger::info("EEQ Phase 2: Using geometric distances from xyz coordinates (matches Fortran goed_gfnff)");
@@ -3204,7 +3211,7 @@ Vector EEQSolver::calculateFinalCharges(
                 for (int i = t_id; i < natoms; i += T) {
                     A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
                     for (int j = 0; j < i; ++j) {
-                        double r = distances(i, j);
+                        double r = dist(i, j);  // packed lookup
                         if (EEQ_CUTOFF_SQ > 0.0 && r * r > EEQ_CUTOFF_SQ) {
                             A(i, j) = A(j, i) = 0.0;
                             continue;
@@ -3237,7 +3244,7 @@ Vector EEQSolver::calculateFinalCharges(
             for (int i = 0; i < natoms; ++i) {
                 A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
                 for (int j = 0; j < i; ++j) {
-                    double r = distances(i, j);
+                    double r = dist(i, j);  // packed lookup
                     if (EEQ_CUTOFF_SQ > 0.0 && r * r > EEQ_CUTOFF_SQ) {
                         A(i, j) = A(j, i) = 0.0;
                         continue;
@@ -3308,7 +3315,7 @@ Vector EEQSolver::calculateFinalCharges(
             std::cerr << "\nGeometric distances (Bohr):" << std::endl;
             for (int i = 0; i < natoms; ++i) {
                 for (int j = 0; j < i; ++j) {
-                    std::cerr << fmt::format("  d_geom[{},{}] = {:12.6f}", i, j, distances(i, j)) << std::endl;
+                    std::cerr << fmt::format("  d_geom[{},{}] = {:12.6f}", i, j, dist(i, j)) << std::endl;
                 }
             }
 
@@ -3328,7 +3335,7 @@ Vector EEQSolver::calculateFinalCharges(
             for (int i = 0; i < natoms; ++i) {
                 for (int j = 0; j < i; ++j) {
                     double gammij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
-                    double r = distances(i, j);
+                    double r = dist(i, j);  // packed lookup
                     std::cerr << fmt::format("  A[{},{}] = {:12.6f}  (gammij={:12.6f}, r={:12.6f}, erf={:12.6f})",
                         i, j, A(i, j), gammij, r, std::erf(gammij * r)) << std::endl;
                 }

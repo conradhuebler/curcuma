@@ -908,7 +908,13 @@ private:
     // ===== Pre-allocated Buffers for calculateFinalCharges (Claude Generated Mar 2026) =====
     // Avoid ~26 MB alloc+free per gradient step for large molecules (N=1280).
     // Buffers are allocated once and reused when atom count stays the same.
-    mutable Matrix m_phase2_distances;   ///< N×N distance buffer
+    //
+    // WP-FF-Packed-Triangular (May 2026): m_phase2_distances is packed lower-triangular
+    //   (N(N+1)/2 doubles, half of full N×N). Index: data[i*(i+1)/2 + j] for i > j.
+    //   Diagonal slot exists but is never written (atom self-distance is meaningless;
+    //   Coulomb diagonal is built from gam_corrected + TSQRT2PI/sqrt(alpha) separately).
+    //   Matches the convention used by GFNFF::triIdx / m_shared_srab / m_external_srab.
+    mutable Eigen::VectorXd m_phase2_distances;  ///< packed lower-triangular distance buffer
     mutable Matrix m_phase2_A;           ///< (N+nfrag)×(N+nfrag) augmented matrix buffer
     mutable Vector m_phase2_rhs;         ///< (N+nfrag) RHS vector buffer
     mutable int m_phase2_buf_natoms = 0; ///< Atom count for current buffer size
@@ -958,7 +964,8 @@ private:
     void ensurePhase2Buffers(int natoms, int nfrag) const {
         if (natoms != m_phase2_buf_natoms || nfrag != m_phase2_buf_nfrag) {
             int m = natoms + nfrag;
-            m_phase2_distances.resize(natoms, natoms);
+            // WP-FF-Packed-Triangular: packed lower-triangular = N(N+1)/2 doubles.
+            m_phase2_distances.resize(static_cast<Eigen::Index>(natoms) * (natoms + 1) / 2);
             m_phase2_A.resize(m, m);
             m_phase2_rhs.resize(m);
             m_phase2_buf_natoms = natoms;
