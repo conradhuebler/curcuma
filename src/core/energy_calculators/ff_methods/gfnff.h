@@ -924,6 +924,29 @@ public:
     /// True if preAllocateForGPUPath() was called (enables memcpy path in prepareCNAndEEQ)
     bool isGPUPathPreallocated() const { return m_gpu_path_preallocated; }
 
+    // ===== WP-FF-DistMatrix-Sharing (May 2026) =====
+    // XTB gfnff_engrad.F90:175-195 pattern: compute packed-triangular sqrab/srab
+    // ONCE per energy call, then every term/sub-routine indexes into them.
+    // Curcuma had 95 .norm() calls in forcefieldthread.cpp + 53 in eeq_solver.cpp,
+    // each recomputing the same distances. This API centralizes the work.
+
+    /// Compute shared packed-triangular distance arrays from m_geometry_bohr.
+    /// Allocates/refreshes m_shared_sqrab and m_shared_srab (size N(N+1)/2).
+    /// Thread-pool parallelized via m_forcefield->threadPool().
+    /// Called from GFNFF::Calculation() after prepareCNAndEEQ, before m_forcefield->Calculate().
+    void computeSharedDistances() const;
+
+    const Eigen::VectorXd& sharedSqrab() const { return m_shared_sqrab; }
+    const Eigen::VectorXd& sharedSrab()  const { return m_shared_srab; }
+
+    /// Packed lower-triangular index for atom pair (i, j) with i != j.
+    /// 0-based: idx = i*(i+1)/2 + j  for i > j.
+    /// Caller responsible for i != j; diagonal not stored in packed form.
+    static inline int triIdx(int i, int j) noexcept {
+        if (j > i) { int t = i; i = j; j = t; }
+        return i * (i + 1) / 2 + j;
+    }
+
 private:
     /**
      * @brief Initialize GFN-FF force field and generate parameters
@@ -2466,6 +2489,14 @@ private:
     Vector m_last_cnf;   ///< CN-dependent EEQ factors per atom
     bool m_gpu_path_preallocated = false; ///< True after preAllocateForGPUPath()
     CNDerivStore m_last_dcn; ///< CN derivatives (gradient only). Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
+
+    // WP-FF-DistMatrix-Sharing (May 2026): shared packed-triangular distance arrays.
+    // Filled by computeSharedDistances() once per energy call; consumed by
+    // ForceFieldThread term loops and EEQSolver phase-2.  Layout: lower-triangular,
+    // index via GFNFF::triIdx(i, j) = i*(i+1)/2 + j (i > j).
+    mutable Eigen::VectorXd m_shared_sqrab;
+    mutable Eigen::VectorXd m_shared_srab;
+    mutable int             m_shared_dist_N = 0;
 
     // Conversion factors
     static constexpr double HARTREE_TO_KCAL = 627.5094740631;

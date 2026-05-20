@@ -346,6 +346,12 @@ public:
     /// Call after setMolecule() or topology rebuild to force refactorization on next step.
     void invalidateCholeskyCache() { m_chol_cache.reset(); }
 
+    /// WP-FF-DistMatrix-Sharing (May 2026): consume externally-computed packed
+    /// lower-triangular distance array (srab[i*(i+1)/2 + j] for i > j, Bohr).
+    /// When set, calculateFinalCharges skips its own O(N^2) distance loop and
+    /// fills m_phase2_distances from this view. Lifetime managed by caller (GFNFF).
+    void setExternalDistances(const Eigen::VectorXd* srab) { m_external_srab = srab; }
+
     /// WP-S3 (May 2026): effective Coulomb-matrix cutoff used by the
     /// sparsification (override wins, otherwise the ConfigManager value).
     double getEEQDistanceCutoffEffective() const {
@@ -925,6 +931,11 @@ private:
     mutable EEQCholeskyCache m_chol_cache;
     mutable Matrix m_pending_geometry;  ///< Set by calculateFinalCharges() before dispatchSolve
     mutable Vector m_pending_cn;        ///< Set by calculateFinalCharges() before dispatchSolve
+
+    /// WP-FF-DistMatrix-Sharing (May 2026): external packed-triangular srab from GFNFF.
+    /// When non-null, calculateFinalCharges fills m_phase2_distances from this instead of
+    /// recomputing the O(N^2) sqrt loop.
+    const Eigen::VectorXd* m_external_srab = nullptr;
 
     /// Last truly successful charges (Phase 2 if available, otherwise Phase 1).
     /// Initialized from topology_charges on first call, then overwritten with the Phase 2

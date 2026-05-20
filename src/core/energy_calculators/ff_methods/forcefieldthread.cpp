@@ -1911,14 +1911,14 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
         CurcumaLogger::info("DISP_CSV: idx,i,j,rij_bohr,C6,r4r2ij,r0_sq,zetac6,t6,t8,energy");
     }
 
+    // WP-FF-DistMatrix-Sharing (May 2026): shared srab when non-PBC.
+    const bool use_shared_dist_disp = hasSharedDistances() && !m_has_pbc;
     for (int index = 0; index < m_gfnff_dispersions.size(); ++index) {
         const auto& disp = m_gfnff_dispersions[index];
 
-        Eigen::Vector3d ri = geom().row(disp.i);
-        Eigen::Vector3d rj = geom().row(disp.j);
-        Eigen::Vector3d rij_vec = ri - rj;
+        Eigen::Vector3d rij_vec = geom().row(disp.i) - geom().row(disp.j);
         if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
-        double rij = rij_vec.norm() * m_au;  // Convert to atomic units if needed
+        double rij = use_shared_dist_disp ? r(disp.i, disp.j) : rij_vec.norm() * m_au;
 
         // HIGH PRIORITY FIX (Feb 2026): Reduce epsilon threshold for gradient robustness
         // Gradient has division by rij → strengthen guard from 1e-10 to 1e-8
@@ -2046,13 +2046,14 @@ void ForceFieldThread::CalculateGFNFFBondedRepulsionContribution()
 
     const double scaling = m_final_factor * m_rep_scaling;
 
+    // WP-FF-DistMatrix-Sharing (May 2026): shared srab when non-PBC.
+    const bool use_shared_dist_brep = hasSharedDistances() && !m_has_pbc;
+
     // Pass-A: collect surviving pairs into compact SoA buffers
     for (const auto& rep : m_gfnff_bonded_repulsions) {
-        Eigen::Vector3d ri = geom().row(rep.i);
-        Eigen::Vector3d rj = geom().row(rep.j);
-        Eigen::Vector3d rij_vec = ri - rj;
+        Eigen::Vector3d rij_vec = geom().row(rep.i) - geom().row(rep.j);
         if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
-        double rij = rij_vec.norm() * m_au;
+        double rij = use_shared_dist_brep ? r(rep.i, rep.j) : rij_vec.norm() * m_au;
 
         if (rij > rep.r_cut || rij < 1e-8) continue;
 
@@ -2103,14 +2104,14 @@ void ForceFieldThread::CalculateGFNFFBondedRepulsionContribution()
         }
     }
 #else
+    // WP-FF-DistMatrix-Sharing (May 2026): shared srab when non-PBC.
+    const bool use_shared_dist_brep_scalar = hasSharedDistances() && !m_has_pbc;
     for (int index = 0; index < static_cast<int>(m_gfnff_bonded_repulsions.size()); ++index) {
         const auto& rep = m_gfnff_bonded_repulsions[index];
 
-        Eigen::Vector3d ri = geom().row(rep.i);
-        Eigen::Vector3d rj = geom().row(rep.j);
-        Eigen::Vector3d rij_vec = ri - rj;
+        Eigen::Vector3d rij_vec = geom().row(rep.i) - geom().row(rep.j);
         if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
-        double rij = rij_vec.norm() * m_au;
+        double rij = use_shared_dist_brep_scalar ? r(rep.i, rep.j) : rij_vec.norm() * m_au;
 
         // HIGH PRIORITY FIX (Feb 2026): Strengthen distance check to prevent gradient Inf/NaN
         if (rij > rep.r_cut || rij < 1e-8) continue;
@@ -2193,13 +2194,14 @@ void ForceFieldThread::CalculateGFNFFNonbondedRepulsionContribution()
 
     const double scaling = m_final_factor * m_rep_scaling;
 
+    // WP-FF-DistMatrix-Sharing (May 2026): shared srab when non-PBC.
+    const bool use_shared_dist_rep = hasSharedDistances() && !m_has_pbc;
+
     // Pass-A
     for (const auto& rep : m_gfnff_nonbonded_repulsions) {
-        Eigen::Vector3d ri = geom().row(rep.i);
-        Eigen::Vector3d rj = geom().row(rep.j);
-        Eigen::Vector3d rij_vec = ri - rj;
+        Eigen::Vector3d rij_vec = geom().row(rep.i) - geom().row(rep.j);
         if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
-        double rij = rij_vec.norm() * m_au;
+        double rij = use_shared_dist_rep ? r(rep.i, rep.j) : rij_vec.norm() * m_au;
 
         if (rij > rep.r_cut || rij < 1e-8) continue;
 
@@ -2250,14 +2252,14 @@ void ForceFieldThread::CalculateGFNFFNonbondedRepulsionContribution()
         }
     }
 #else
+    // WP-FF-DistMatrix-Sharing (May 2026): shared srab when non-PBC.
+    const bool use_shared_dist_rep_scalar = hasSharedDistances() && !m_has_pbc;
     for (int index = 0; index < static_cast<int>(m_gfnff_nonbonded_repulsions.size()); ++index) {
         const auto& rep = m_gfnff_nonbonded_repulsions[index];
 
-        Eigen::Vector3d ri = geom().row(rep.i);
-        Eigen::Vector3d rj = geom().row(rep.j);
-        Eigen::Vector3d rij_vec = ri - rj;
+        Eigen::Vector3d rij_vec = geom().row(rep.i) - geom().row(rep.j);
         if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
-        double rij = rij_vec.norm() * m_au;
+        double rij = use_shared_dist_rep_scalar ? r(rep.i, rep.j) : rij_vec.norm() * m_au;
 
         // HIGH PRIORITY FIX (Feb 2026): Strengthen distance check to prevent gradient Inf/NaN
         if (rij > rep.r_cut || rij < 1e-8) continue;
@@ -2352,14 +2354,16 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
     // Reference: Fortran gfnff_engrad.F90:1670-1680 (single sequential loop)
     double E_interaction = 0.0;
 
+    // WP-FF-DistMatrix-Sharing (May 2026): use shared srab when available (no PBC path).
+    // PBC path still computes rij locally because shared srab is built without minimum-image.
+    const bool use_shared_dist = hasSharedDistances() && !m_has_pbc;
+
     for (int index = 0; index < m_gfnff_coulombs.size(); ++index) {
         const auto& coul = m_gfnff_coulombs[index];
 
-        Eigen::Vector3d ri = geom().row(coul.i);
-        Eigen::Vector3d rj = geom().row(coul.j);
-        Eigen::Vector3d rij_vec = ri - rj;
+        Eigen::Vector3d rij_vec = geom().row(coul.i) - geom().row(coul.j);
         if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
-        double rij = rij_vec.norm() * m_au;
+        double rij = use_shared_dist ? r(coul.i, coul.j) : rij_vec.norm() * m_au;
 
         if (rij > coul.r_cut || rij < 1e-10) continue;
 

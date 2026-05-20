@@ -2977,6 +2977,29 @@ Vector EEQSolver::calculateFinalCharges(
     ensurePhase2Buffers(natoms, nfrag);
     m_phase2_distances.setZero();
 
+    // WP-FF-DistMatrix-Sharing (May 2026): consume externally-computed packed srab
+    // when GFNFF provides it — skip the O(N²) sqrt loop entirely.
+    // Layout: srab[i*(i+1)/2 + j] = r_ij for i > j.
+    const int srab_expected = natoms * (natoms + 1) / 2;
+    const bool use_external_srab = (m_external_srab != nullptr)
+                                && (m_external_srab->size() == srab_expected);
+    if (use_external_srab) {
+        std::atomic<bool> atoms_too_close_ext{false};
+        for (int i = 0; i < natoms; ++i) {
+            const int ii = i * (i + 1) / 2;
+            for (int j = 0; j < i; ++j) {
+                const double rr = (*m_external_srab)[ii + j];
+                if (rr < 1e-10) atoms_too_close_ext.store(true, std::memory_order_relaxed);
+                m_phase2_distances(i, j) = rr;
+                m_phase2_distances(j, i) = rr;
+            }
+        }
+        if (atoms_too_close_ext) {
+            CurcumaLogger::error("EEQSolver::calculateFinalCharges: atoms too close (external srab)");
+            return generateFallbackCharges(natoms, total_charge, "zero distance in Phase 2 (external srab)");
+        }
+    } else {
+
     // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²) distance matrix
     std::atomic<bool> atoms_too_close{false};
     int dist_progress_10pct = std::max(1, natoms / 10);
@@ -3039,6 +3062,7 @@ Vector EEQSolver::calculateFinalCharges(
         CurcumaLogger::error("EEQSolver::calculateFinalCharges: atoms too close");
         return generateFallbackCharges(natoms, total_charge, "zero distance in Phase 2");
     }
+    }  // end if (!use_external_srab)
     // Const reference alias for readability — no copy
     const Matrix& distances = m_phase2_distances;
 

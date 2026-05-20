@@ -192,6 +192,19 @@ void ForceField::setUnitCell(const Eigen::Matrix3d& cell_angstrom, bool has_pbc)
     }
 }
 
+// WP-FF-DistMatrix-Sharing (May 2026): forward packed-triangular distance arrays
+// to every ForceFieldThread. The arrays live in GFNFF (mutable members), refreshed
+// once per energy call via GFNFF::computeSharedDistances(). Threads consume them
+// via inline r(i,j)/rsq(i,j) helpers.
+void ForceField::setSharedDistances(const Eigen::VectorXd* srab, const Eigen::VectorXd* sqrab)
+{
+    for (auto* thread : m_stored_threads) {
+        if (auto* ff_thread = dynamic_cast<ForceFieldThread*>(thread)) {
+            ff_thread->setSharedDistancesPtr(srab, sqrab);
+        }
+    }
+}
+
 void ForceField::setParameter(const json& parameters)
 {
     std::string method_name = "unknown";

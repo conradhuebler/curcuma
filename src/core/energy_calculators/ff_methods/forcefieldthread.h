@@ -274,6 +274,25 @@ public:
     void setTopologyChargesPtr(const Vector* ptr) { m_topology_charges_ptr = ptr; }
     void setD3CNPtr(const Vector* ptr) { m_d3_cn_ptr = ptr; }
 
+    /// WP-FF-DistMatrix-Sharing (May 2026): pointers to packed-triangular distance arrays
+    /// owned by GFNFF and refreshed once per energy call. Lifetime managed by caller.
+    void setSharedDistancesPtr(const Eigen::VectorXd* srab, const Eigen::VectorXd* sqrab) {
+        m_shared_srab_ptr  = srab;
+        m_shared_sqrab_ptr = sqrab;
+    }
+
+    /// Convenience accessors. Caller must ensure i != j (diagonal not in packed form).
+    /// Index formula: i*(i+1)/2 + j for i > j (handled by the inline swap).
+    inline double r(int i, int j) const noexcept {
+        if (j > i) { int t = i; i = j; j = t; }
+        return (*m_shared_srab_ptr)[i * (i + 1) / 2 + j];
+    }
+    inline double rsq(int i, int j) const noexcept {
+        if (j > i) { int t = i; i = j; j = t; }
+        return (*m_shared_sqrab_ptr)[i * (i + 1) / 2 + j];
+    }
+    inline bool hasSharedDistances() const noexcept { return m_shared_srab_ptr != nullptr; }
+
     /// Reset per-step accumulators without copying geometry. Used with pointer-sharing.
     void resetForStep(bool gradient) {
         m_calculate_gradient = gradient;
@@ -617,6 +636,8 @@ protected:
     // When set, threads read directly from ForceField storage (zero-copy per step).
     // When nullptr, threads fall back to their local copy members (UFF/QMDFF path).
     const GeoGradMatrix* m_geometry_ptr = nullptr;  // WP-G
+    const Eigen::VectorXd* m_shared_srab_ptr  = nullptr;  // WP-FF-DistMatrix-Sharing
+    const Eigen::VectorXd* m_shared_sqrab_ptr = nullptr;  // WP-FF-DistMatrix-Sharing
     const Vector* m_eeq_charges_ptr = nullptr;
     const Vector* m_topology_charges_ptr = nullptr;
     const Vector* m_d3_cn_ptr = nullptr;

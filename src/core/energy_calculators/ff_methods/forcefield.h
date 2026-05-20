@@ -233,6 +233,11 @@ public:
     /// cell_angstrom: 3×3 matrix (Angstrom); converted to Bohr internally for thread distribution
     void setUnitCell(const Eigen::Matrix3d& cell_angstrom, bool has_pbc);
 
+    /// WP-FF-DistMatrix-Sharing (May 2026): expose external packed-triangular distance arrays
+    /// to all ForceFieldThread instances. Lifetime managed by caller (typically GFNFF).
+    /// Pass nullptr to clear the references.
+    void setSharedDistances(const Eigen::VectorXd* srab, const Eigen::VectorXd* sqrab);
+
 private:
     void AutoRanges();
     void setBonds(const json& bonds);

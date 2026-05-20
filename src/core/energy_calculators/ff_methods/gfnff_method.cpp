@@ -1014,6 +1014,64 @@ void GFNFF::updateDynamicState(TopologyInfo& topo) const {
 }
 
 // ---------------------------------------------------------------------------
+// WP-FF-DistMatrix-Sharing (May 2026): centralized packed-triangular distance arrays.
+// Mirrors XTB gfnff_engrad.F90:175-195 — compute sqrab/srab once per energy call,
+// share across all FF term loops and the EEQ Phase-2 solver.
+// ---------------------------------------------------------------------------
+
+void GFNFF::computeSharedDistances() const
+{
+    const int N = m_geometry_bohr.rows();
+    if (N <= 0) return;
+    const int M = N * (N + 1) / 2;
+    if (m_shared_dist_N != N) {
+        m_shared_sqrab.resize(M);
+        m_shared_srab.resize(M);
+        m_shared_dist_N = N;
+    }
+    // Diagonal (i == j) lives at indices i*(i+1)/2 + i and represents distance 0.
+    // We zero them by zeroing the whole buffer first; off-diagonals are written in the loop.
+    // Cheaper than per-row diagonal stores in the parallel worker.
+    m_shared_sqrab.setZero();
+    m_shared_srab.setZero();
+
+    auto worker = [&](int t_id, int T) {
+        // Same striped row partitioning as dist_worker in eeq_solver.cpp:2990.
+        for (int i = t_id; i < N; i += T) {
+            const int ii = i * (i + 1) / 2;
+            const double xi = m_geometry_bohr(i, 0);
+            const double yi = m_geometry_bohr(i, 1);
+            const double zi = m_geometry_bohr(i, 2);
+            for (int j = 0; j < i; ++j) {
+                const double dx = xi - m_geometry_bohr(j, 0);
+                const double dy = yi - m_geometry_bohr(j, 1);
+                const double dz = zi - m_geometry_bohr(j, 2);
+                const double rsq = dx*dx + dy*dy + dz*dz;
+                m_shared_sqrab[ii + j] = rsq;
+                m_shared_srab[ii + j]  = std::sqrt(rsq);
+            }
+        }
+    };
+
+    auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+    const int T = (m_threads > 1 && N > 64) ? std::min(m_threads, N) : 1;
+    if (T > 1 && pool) {
+        std::vector<std::future<void>> futures;
+        futures.reserve(T - 1);
+        for (int t = 1; t < T; ++t) futures.push_back(pool->enqueue(worker, t, T));
+        worker(0, T);
+        for (auto& f : futures) f.get();
+    } else if (T > 1) {
+        std::vector<std::thread> threads(T - 1);
+        for (int t = 1; t < T; ++t) threads[t - 1] = std::thread(worker, t, T);
+        worker(0, T);
+        for (auto& th : threads) th.join();
+    } else {
+        worker(0, 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // prepareCNAndEEQ — CN + EEQ calculation extracted from Calculation()
 // Claude Generated (March 2026): Exposed for GPU orchestration
 // ---------------------------------------------------------------------------
@@ -1611,6 +1669,17 @@ double GFNFF::Calculation(bool gradient)
         prepareCNAndEEQ(gradient, false, nullptr, false, &prep_timing);
         t_cn = std::chrono::duration<double, std::milli>(
             std::chrono::high_resolution_clock::now() - t0).count();
+    }
+
+    // WP-FF-DistMatrix-Sharing (May 2026): compute packed sqrab/srab ONCE for this
+    // energy/gradient call. Mirrors XTB gfnff_engrad.F90:175-195. Consumed by
+    // ForceFieldThread term loops and by EEQSolver Phase-2.
+    computeSharedDistances();
+    if (m_forcefield) {
+        m_forcefield->setSharedDistances(&m_shared_srab, &m_shared_sqrab);
+    }
+    if (m_eeq_solver) {
+        m_eeq_solver->setExternalDistances(&m_shared_srab);
     }
 
     // Dynamic HB/XB re-detection (delegated to extracted helper)
