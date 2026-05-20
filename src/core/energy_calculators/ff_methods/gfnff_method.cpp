@@ -1662,6 +1662,21 @@ double GFNFF::Calculation(bool gradient)
     const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
     double t_cn = 0, t_threads = 0, t_hbxb_update = 0;
 
+    // WP-FF-DistMatrix-Sharing (May 2026): compute packed sqrab/srab ONCE for this
+    // energy/gradient call BEFORE any consumer reads m_shared_srab. Mirrors XTB
+    // gfnff_engrad.F90:175-195. Order matters: EEQSolver Phase 2 (invoked inside
+    // prepareCNAndEEQ) reads m_external_srab — if we set the pointer first but
+    // forget to refresh m_shared_srab to the CURRENT geometry, Phase 2 sees stale
+    // distances from the previous MD step and produces wrong charges → wrong
+    // gradient → CSVR thermostat exchange ~2× XTB reference (commit 94bdeec bug).
+    computeSharedDistances();
+    if (m_forcefield) {
+        m_forcefield->setSharedDistances(&m_shared_srab, &m_shared_sqrab);
+    }
+    if (m_eeq_solver) {
+        m_eeq_solver->setExternalDistances(&m_shared_srab);
+    }
+
     // Phase A: CN + EEQ calculation (delegated to extracted helper)
     PrepTiming prep_timing{};  // zero-initialize so unused fields are 0.0
     {
@@ -1669,17 +1684,6 @@ double GFNFF::Calculation(bool gradient)
         prepareCNAndEEQ(gradient, false, nullptr, false, &prep_timing);
         t_cn = std::chrono::duration<double, std::milli>(
             std::chrono::high_resolution_clock::now() - t0).count();
-    }
-
-    // WP-FF-DistMatrix-Sharing (May 2026): compute packed sqrab/srab ONCE for this
-    // energy/gradient call. Mirrors XTB gfnff_engrad.F90:175-195. Consumed by
-    // ForceFieldThread term loops and by EEQSolver Phase-2.
-    computeSharedDistances();
-    if (m_forcefield) {
-        m_forcefield->setSharedDistances(&m_shared_srab, &m_shared_sqrab);
-    }
-    if (m_eeq_solver) {
-        m_eeq_solver->setExternalDistances(&m_shared_srab);
     }
 
     // Dynamic HB/XB re-detection (delegated to extracted helper)
