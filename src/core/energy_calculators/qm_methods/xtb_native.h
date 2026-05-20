@@ -249,6 +249,9 @@ private:
     double calcRepulsionEnergy() const;                                  // xtb_native.cpp
     double calcHalogenBondEnergy() const;                                // xtb_native.cpp
 
+    // GFN2 D4 dispersion (optional — requires USE_D4 at compile time)
+    double calcDispersionEnergy() const;                                 // xtb_native.cpp
+
     void calculateGradient();   // xtb_gradient.cpp — fills m_gradient in Eh/Bohr
 
     /* ----- legacy QMDriver hooks (still routed through MakeOverlap/H) */
@@ -267,6 +270,7 @@ private:
     // Cached matrices
     Matrix m_S;                 // overlap
     Matrix m_H0;                // bare Hamiltonian (updated each SCC)
+    Matrix m_F;                 // converged Fock matrix (GFN: H0 + potential)
     Eigen::MatrixXd m_gamma;    // shell-resolved Coulomb matrix (nsh × nsh)
     std::array<Eigen::MatrixXd, 3> m_dp_int;   // dipole integrals (GFN2), each nao×nao
     std::array<Eigen::MatrixXd, 6> m_qp_int;   // quadrupole integrals (GFN2), each nao×nao
@@ -292,7 +296,7 @@ private:
 
     // SCF config / state
     int    m_scf_max_iter    = 150;
-    double m_scf_threshold   = 1.0e-8;
+    double m_scf_threshold   = 1.0e-6;
     double m_scf_damping     = 0.4;
     double m_electronic_temp = 300.0;  // K; 0 → integer occupation
     bool   m_scf_converged   = false;

@@ -139,8 +139,8 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 | Method | Test Status | Notes |
 |--------|-------------|-------|
 | EHT | not systematically tested | qualitative only |
-| Native GFN1-xTB | 2/7 vs TBLite | known accuracy gaps; `-opt` works (AP4); ~5–70 mEh off |
-| Native GFN2-xTB | 0/7 vs TBLite | energy accuracy issue (vat_extra, separate); `-opt` works (AP4+AP5b); FD gradient tests pass H₂O/CH₄/NH₃ (7e-8 max error) after AP5b + unit fix |
+| Native GFN1-xTB | 5/7 vs TBLite | HCN+caffeine still >5 mEh (SCF?); `-opt` works; DIIS integrated (AP6) |
+| Native GFN2-xTB | 3/7 vs TBLite | H₂O/CH₄/HCN pass after DIIS (AP6); CH₃OH/CH₃OCH₃/C₆H₆/caffeine: residual ~1–23 mEh (D4 dispersion missing); `-opt` works |
 | PM3/AM1/MNDO | 21/21 vs Ulysses (< 4 µEh) | most complete |
 | PM6 | not tested | parameters present, untested |
 
