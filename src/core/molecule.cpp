@@ -1440,11 +1440,11 @@ std::string Molecule::Header() const
 
 std::string Molecule::Atom2String(int i) const
 {
-#ifdef GCC
-    return fmt::format("{}  {:f}    {:f}    {:f}\n", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
-#else
-    return fmt::format("{}  {:}    {:}    {:}\n", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry[i][0], m_geometry[i][1], m_geometry[i][2]);
-#endif
+    // Claude Generated (May 2026, ICX-build): drop the #ifdef GCC branch — the else
+    // path used m_geometry[i][j] which is invalid for Eigen Matrix (use parenthesis).
+    return fmt::format("{}  {:f}    {:f}    {:f}\n",
+                       Elements::ElementAbbr[m_atoms[i]].c_str(),
+                       m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
 }
 
 void Molecule::writeXYZFragments(const std::string& filename) const

@@ -101,18 +101,22 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
     const Eigen::MatrixXd& geometry_bohr,
     double threshold,
     double kn,
-    double cnmax)
+    double cnmax,
+    std::vector<double>* out_cn_raw)
 {
     // Calculate GFN-FF coordination numbers using error function with log transformation
     // Formula: erfCN = 0.5 * (1 + erf(kn * (r - rcov) / rcov))
     //          CN_final = log(1 + e^cnmax) - log(1 + e^(cnmax - CN_raw))
     // Reference: gfnff_cn.f90:66-126, Spicher & Grimme, J. Chem. Theory Comput. 2020
     // Claude Generated - December 21, 2025
+    // WP-D (May 2026): optional out_cn_raw lets callers reuse the raw N²-erf
+    // result for dcn computation instead of recomputing it.
 
     const double ANG2BOHR = 1.8897259886;  // 1 Angstrom = 1.8897259886 Bohr
 
     const int natoms = static_cast<int>(atoms.size());
     std::vector<double> cn_values(natoms, 0.0);
+    if (out_cn_raw) out_cn_raw->assign(natoms, 0.0);
 
     // GFN-FF CN scaling factor (Reference: gfnff_param.f90:381-404)
     const double k_scaled = 4.0 / 3.0;
@@ -149,6 +153,7 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
 
         // Log transformation for numerical stability: CN in [0, cnmax]
         cn_values[i] = std::log(1.0 + std::exp(cnmax)) - std::log(1.0 + std::exp(cnmax - cn_raw));
+        if (out_cn_raw) (*out_cn_raw)[i] = cn_raw;
     }
 
     return cn_values;
@@ -271,4 +276,70 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
         double threshold = 1e30;  // Effectively no cutoff
         return calculateGFNFFCN(atoms, geometry_bohr, threshold, kn, cnmax);
     }
+}
+
+// WP-D Stage C (May 2026): single-pass CN + cn_raw + symmetric neighbor list.
+// Consolidates the neighbor-list build and CN computation from Mode 1 and also
+// captures the pre-log raw CN needed by calculateCoordinationNumberDerivatives.
+CNCalculator::CNResult CNCalculator::calculateGFNFFCNWithNeighbors(
+    const std::vector<int>& atoms,
+    const Eigen::MatrixXd& geometry_bohr,
+    double cn_cutoff_bohr,
+    double kn,
+    double cnmax)
+{
+    const int natoms = static_cast<int>(atoms.size());
+    const double ANG2BOHR = 1.8897259886;
+    const double k_scaled = 4.0 / 3.0;
+
+    std::vector<double> rcov_bohr(natoms, 0.0);
+    for (int i = 0; i < natoms; ++i) {
+        int elem = atoms[i] - 1;
+        if (elem >= 0 && elem < static_cast<int>(COVALENT_RADII.size()))
+            rcov_bohr[i] = k_scaled * COVALENT_RADII[elem] * ANG2BOHR;
+    }
+
+    CNResult result;
+    result.cn_values.resize(natoms, 0.0);
+    result.cn_raw.resize(natoms, 0.0);
+    result.neighbors.resize(natoms);
+    result.cutoff_sq = cn_cutoff_bohr * cn_cutoff_bohr;
+    const double cutoff_sq = result.cutoff_sq;
+
+    // Build symmetric neighbor list (upper-triangle traversal)
+    for (int i = 0; i < natoms; ++i) {
+        if (rcov_bohr[i] == 0.0) continue;
+        Eigen::Vector3d pos_i = geometry_bohr.row(i);
+        for (int j = i + 1; j < natoms; ++j) {
+            if (rcov_bohr[j] == 0.0) continue;
+            double dx = pos_i(0) - geometry_bohr(j, 0);
+            double dy = pos_i(1) - geometry_bohr(j, 1);
+            double dz = pos_i(2) - geometry_bohr(j, 2);
+            double dist_sq = dx*dx + dy*dy + dz*dz;
+            if (dist_sq < cutoff_sq) {
+                result.neighbors[i].push_back(j);
+                result.neighbors[j].push_back(i);
+            }
+        }
+    }
+
+    // Compute CN iterating only neighbors — capture cn_raw before log-compression
+    for (int i = 0; i < natoms; ++i) {
+        if (rcov_bohr[i] == 0.0) continue;
+        double cn_raw_i = 0.0;
+        for (int j : result.neighbors[i]) {
+            double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
+            double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
+            double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
+            double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+            double rcov_ij = rcov_bohr[i] + rcov_bohr[j];
+            double dr = (dist - rcov_ij) / rcov_ij;
+            cn_raw_i += 0.5 * (1.0 + std::erf(kn * dr));
+        }
+        result.cn_raw[i] = cn_raw_i;
+        result.cn_values[i] = std::log(1.0 + std::exp(cnmax))
+                            - std::log(1.0 + std::exp(cnmax - cn_raw_i));
+    }
+
+    return result;
 }

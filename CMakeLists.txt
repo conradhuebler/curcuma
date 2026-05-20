@@ -61,6 +61,17 @@ option(USE_PCH
 option(USE_CUDA
     "Enable CUDA-accelerated GFN-FF (gfnff -gpu cuda, requires CUDA toolkit)" OFF)
 
+# WP-D Stage B (May 2026): hand-rolled AVX2 exp(-x^2) for GFN-FF dcn step 3 hot loop.
+# Opt-in. Default OFF keeps the build bit-identical to pre-WP. Requires AVX2 (set
+# USE_AVX2 or USE_MARCH_NATIVE alongside); CMake errors out if AVX2 cannot be enabled.
+option(USE_GFNFF_FAST_EXP
+    "Enable SIMD-vectorized exp() in GFN-FF dcn hot loop (WP-D Stage B, requires AVX2)" OFF)
+option(GFNFF_CN_DCN_FUSION
+    "Enable fused CN+DCN single-pass (WP-D Stage D, no SIMD dependency)" OFF)
+if(GFNFF_CN_DCN_FUSION)
+    add_compile_definitions(GFNFF_CN_DCN_FUSION=1)
+endif()
+
 if(USE_MKL)
     # Support both MKL_ROOT and MKLROOT (environment and CMake variables)
     if(NOT MKL_ROOT)
@@ -284,6 +295,16 @@ elseif(USE_AVX2)
     endif()
 endif()
 
+# WP-D Stage B (May 2026): USE_GFNFF_FAST_EXP requires AVX2. Either USE_AVX2 or
+# USE_MARCH_NATIVE (or USE_AVX512) must be set so __AVX2__ is defined.
+if(USE_GFNFF_FAST_EXP)
+    if(NOT (USE_AVX2 OR USE_AVX512 OR USE_MARCH_NATIVE))
+        message(FATAL_ERROR "USE_GFNFF_FAST_EXP=ON requires AVX2: enable USE_AVX2, USE_AVX512, or USE_MARCH_NATIVE.")
+    endif()
+    add_compile_definitions(GFNFF_FAST_EXP=1)
+    message(STATUS "GFN-FF: fast SIMD exp() enabled in dcn hot loop (WP-D Stage B)")
+endif()
+
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/json.hpp)
   file(DOWNLOAD https://github.com/nlohmann/json/releases/download/v3.9.1/json.hpp ${PROJECT_SOURCE_DIR}/external/json.hpp
        TIMEOUT 60  # seconds
@@ -361,6 +382,7 @@ set(curcuma_core_SRC
         src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
+        src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp
         src/capabilities/analysis_output.cpp
         src/capabilities/handlers/general_properties_handler.cpp
@@ -410,6 +432,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/ff_methods/cn_calculator.cpp
         src/core/energy_calculators/ff_methods/d4param_generator.cpp
         src/core/energy_calculators/ff_methods/cg_potentials.cpp
+        src/core/energy_calculators/ff_methods/fast_exp.cpp
         src/core/curcuma_logger.cpp
         src/core/citation_database.cpp
         src/core/citation_registry.cpp
@@ -446,6 +469,7 @@ set(curcuma_cap_SRC
         src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
+        src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp
         src/capabilities/analysis_output.cpp
         src/capabilities/handlers/general_properties_handler.cpp
@@ -692,6 +716,32 @@ if(USE_GFNFF)
 
     target_link_libraries(curcuma_gfnff PUBLIC gfnff-lib gfortran)
     target_link_libraries(curcuma_core curcuma_gfnff)
+
+    # Claude Generated (May 2026, ICX-build OpenMP fix): when the C++ side is built with
+    # Intel ICX, libiomp5 is the active OpenMP runtime, but gfnff-lib (built via the
+    # FetchContent gfortran path) pulls in libgomp transitively. Two OpenMP runtimes in
+    # one process corrupt each other's heap (we hit double-free in __kmp_invoke_microtask
+    # on polymer MD). libiomp5 ships GOMP_* compat symbols (263 vs 192 in libgomp), so it
+    # is a runtime drop-in replacement. We can't drop libgomp from the link line because
+    # gfnff-lib carries it as a direct DT_NEEDED entry. Solution: a small wrapper script
+    # that LD_PRELOADs libiomp5 before exec — this forces all GOMP_* calls to resolve
+    # against libiomp5 and the libgomp instance becomes inert.
+    set(_curcuma_need_iomp5_wrapper FALSE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Intel")
+        get_filename_component(_icx_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        get_filename_component(_icx_root_dir "${_icx_bin_dir}" DIRECTORY)
+        find_library(_curcuma_iomp5
+            NAMES iomp5
+            HINTS "${_icx_root_dir}/lib" "${_icx_root_dir}/lib/intel64"
+            NO_DEFAULT_PATH)
+        if(_curcuma_iomp5)
+            set(_curcuma_need_iomp5_wrapper TRUE)
+        else()
+            message(WARNING "ICX detected but libiomp5 not found near ${CMAKE_CXX_COMPILER}. "
+                           "If you USE_GFNFF, polymer MD will crash with double-free in "
+                           "__kmp_invoke_microtask.")
+        endif()
+    endif()
 endif()
 
 if(USE_D3)
@@ -897,6 +947,31 @@ endif(WIN32)
 target_link_libraries(curcuma fmt::fmt-header-only)
 
 target_link_libraries(curcuma curcuma_core)
+
+# Claude Generated (May 2026, ICX + USE_GFNFF OpenMP fix): when both Intel ICX (libiomp5)
+# and gfortran-built gfnff-lib (libgomp DT_NEEDED) end up in the same binary, the two
+# OpenMP runtimes corrupt each other's heap. We hit double-free in __kmp_invoke_microtask
+# on polymer MD. libiomp5 ships GOMP_* compat symbols (263 vs 192 in libgomp), so it is a
+# runtime drop-in replacement. Use patchelf to rewrite curcuma's DT_NEEDED so it loads
+# libiomp5 instead of libgomp.so.1 — single binary, no wrapper, no LD_PRELOAD needed.
+if(_curcuma_need_iomp5_wrapper)
+    find_program(PATCHELF_EXECUTABLE patchelf)
+    if(PATCHELF_EXECUTABLE)
+        add_custom_command(TARGET curcuma POST_BUILD
+            COMMAND "${PATCHELF_EXECUTABLE}" --replace-needed libgomp.so.1 libiomp5.so
+                    "$<TARGET_FILE:curcuma>"
+            COMMENT "ICX + GFN-FF: patchelf replace-needed libgomp.so.1 → libiomp5.so "
+                    "to avoid double-OMP-runtime heap corruption"
+            VERBATIM)
+        message(STATUS "ICX + GFN-FF: patchelf will rewrite libgomp→libiomp5 in curcuma "
+                       "post-build (avoids double-runtime heap corruption).")
+    else()
+        message(WARNING "ICX + USE_GFNFF detected but patchelf not found. The curcuma "
+                        "binary will crash with double-free in MD parallel regions. "
+                        "Install patchelf, OR run with: "
+                        "LD_PRELOAD=${_curcuma_iomp5} ./curcuma ...")
+    endif()
+endif()
 add_executable(curcuma_helper
         src/helpers/main.cpp)
         

@@ -282,6 +282,11 @@ void SimpleMD::LoadControlJson()
         m_cg_timestep_factor = cg_timestep_factor_config;
     }
 
+    // WP-S2 (May 2026): per-step diagnostics JSONL dump
+    m_md_diagnostics = m_config.get<bool>("md_diagnostics");
+    // WP-P1 (May 2026): per-phase wall-clock timing in the JSONL records
+    m_md_diagnostics_timing = m_config.get<bool>("md_diagnostics_timing");
+
     // Claude Generated 2025: RATTLE Parameters
     m_rm_COM = m_config.get<double>("remove_com_motion");
     int rattle = m_config.get<int>("rattle");
@@ -672,6 +677,21 @@ bool SimpleMD::Initialise()
             if (!ec_config.contains(key)) {
                 ec_config[key] = value;
             }
+        }
+    }
+
+    // WP-S/CLI-routing (May 2026): forward method-specific sub-scopes (gfnff, eeq_solver,
+    // tblite, xtb, ...) routed by CLI2Json::findOwnerModules. Without this the GFNFF
+    // constructor never sees flat flags like -static_all true or -eeq_distance_cutoff_auto
+    // true that the registry routed into controller["gfnff"]. Mirrors the
+    // EnergyCalculator::reattachMethodScopes fix used by the opt/sp path (WP6).
+    static const std::vector<std::string> kMethodScopes = {
+        "gfnff", "eeq_solver", "tblite", "xtb", "ulysses", "eht", "dftd3", "dftd4", "orca"
+    };
+    for (const auto& scope : kMethodScopes) {
+        if (m_controller.contains(scope) && m_controller[scope].is_object()
+            && !ec_config.contains(scope)) {
+            ec_config[scope] = m_controller[scope];
         }
     }
 
@@ -1624,6 +1644,22 @@ void SimpleMD::prepareRun()
     m_Etot = m_Epot + m_Ekin;
     AverageQuantities();
     m_step = 0;
+
+    // WP-S2 (May 2026): open per-step diagnostics JSONL file
+    if (m_md_diagnostics) {
+        m_diag_writer = std::make_unique<MDDiagnosticsWriter>(Basename() + ".diag.jsonl");
+        if (!m_diag_writer->isOpen()) {
+            CurcumaLogger::warn("MD diagnostics requested but JSONL file could not be opened — disabled");
+            m_md_diagnostics = false;
+            m_diag_writer.reset();
+        }
+    }
+
+    // WP-P1 (May 2026): force per-phase timing collection when diagnostics-timing is on
+    if (m_md_diagnostics && m_md_diagnostics_timing && m_interface) {
+        m_interface->setForcePhaseTiming(true);
+    }
+
     WriteGeometry();
 #ifdef USE_Plumed
     if (m_mtd) {
@@ -1660,6 +1696,36 @@ void SimpleMD::prepareRun()
     }
 #endif
     std::vector<double> charge(0, m_natoms);
+
+    // Claude Generated (May 2026): unified MD table header — matches the data rows
+    // printed below. Drops the #ifdef GCC branches (the GCC-only fmt::format path was
+    // dead because no compiler defines `GCC`; only `__GNUC__`) and the 5-column
+    // tab-separated fallback that didn't line up with the 15+ column data.
+    {
+        std::string header = fmt::format(
+            "{1: ^{0}} {2: ^{0}} {3: ^{0}} {4: ^{0}} {5: ^{0}} {6: ^{0}} {7: ^{0}} "
+            "{8: ^{0}} {9: ^{0}} {10: ^{0}} {11: ^{0}} {12: ^{0}} {13: ^{0}} {14: ^{0}} "
+            "{15: ^{0}}",
+            15,
+            "Time", "Epot", "<Epot>", "Ekin", "<Ekin>", "Etot", "<Etot>",
+            "T", "<T>", "Wall", "<Wall>", "Virial", "<Virial>", "Remaining", "dt");
+        std::string units = fmt::format(
+            "{1: ^{0}} {2: ^{0}} {3: ^{0}} {4: ^{0}} {5: ^{0}} {6: ^{0}} {7: ^{0}} "
+            "{8: ^{0}} {9: ^{0}} {10: ^{0}} {11: ^{0}} {12: ^{0}} {13: ^{0}} {14: ^{0}} "
+            "{15: ^{0}}",
+            15,
+            "ps", "Eh", "Eh", "Eh", "Eh", "Eh", "Eh",
+            "K", "K", "Eh", "Eh", "Eh", "Eh", "s", "ps");
+        if (m_dipole) {
+            header += fmt::format(" {: ^15}", "Dipole");
+            units  += fmt::format(" {: ^15}", "Debye");
+        }
+        if (m_writeUnique) {
+            header += fmt::format(" {: ^15}", "nUnique");
+            units  += fmt::format(" {: ^15}", "#");
+        }
+        std::cout << header << "\n" << units << "\n";
+    }
     if (m_rmsd_mtd) {
         CurcumaLogger::result_fmt("RMSD-MTD: k={} Eh, alpha={} Bohr^-2, pace={} steps",
             m_k_rmsd, m_alpha_rmsd, m_mtd_steps);
@@ -1724,7 +1790,17 @@ bool SimpleMD::step()
         }
     }
 
-    Integrator();
+    // WP-P1 (May 2026): wall-clock the integrator step for MD diagnostics
+    double integrator_ms = 0.0;
+    if (m_md_diagnostics_timing) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        Integrator();
+        auto t1 = std::chrono::high_resolution_clock::now();
+        integrator_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    } else {
+        Integrator();
+    }
+    m_last_integrator_ms = integrator_ms;
     AverageQuantities();
 
     if (m_mtd) {
@@ -1767,6 +1843,32 @@ bool SimpleMD::step()
         if (bool write = WriteGeometry()) {
             m_run_states.push_back(WriteRestartInformation());
             m_current_rescue = 0;
+            // WP-S2 (May 2026): append diagnostics record parallel to XYZ trajectory
+            if (m_md_diagnostics && m_diag_writer) {
+                // WP-P1 (May 2026): optional per-phase wall-clock breakdown
+                json timing;
+                if (m_md_diagnostics_timing) {
+                    timing = m_interface->LastPrepTiming();
+                    timing["ff_total"]    = m_last_ff_ms;
+                    timing["integrator"]  = m_last_integrator_ms;
+                    timing["hbxb_update"] = m_last_hbxb_ms;
+                    auto t_now = std::chrono::system_clock::now();
+                    timing["step_total"] = std::chrono::duration<double, std::milli>(t_now - step0).count();
+                    json gpu_t = m_interface->StreamTimings();
+                    if (!gpu_t.empty()) {
+                        timing["gpu"] = gpu_t;
+                    }
+                }
+                m_diag_writer->writeSnapshot(
+                    m_step, m_currentStep,
+                    m_interface->getEnergyDecomposition(),
+                    m_interface->Charges(),
+                    m_interface->CN(),
+                    m_interface->Gradient(),
+                    m_interface->HBCount(),
+                    m_interface->XBCount(),
+                    timing);
+            }
         } else if (!write && m_rescue && m_run_states.size() > (1 - m_current_rescue)) {
             std::cout << "Molecule exploded, resetting to previous state ..." << std::endl;
             LoadRestartInformation(m_run_states[m_run_states.size() - 1 - m_current_rescue]);
@@ -3072,26 +3174,28 @@ void SimpleMD::PrintStatus() const
     else
         remaining = (m_maxtime - m_currentStep) * duration;
 #pragma message("awfull, fix it ")
-    if (m_writeUnique) {
-#ifdef GCC
-        std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f} {15: ^{0}} {16: ^{0}}\n", 15,
-            m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, m_virial_correction, m_average_virial_correction, remaining, m_time_step / 1000.0, m_unqiue->StoredStructures());
-#else
-        std::cout << m_currentStep * m_dT / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
-
-#endif
-    } else {
-#ifdef GCC
+    // Claude Generated (May 2026): unified MD step printout — matches the header above.
+    // Base 15 columns always present (Time, energies, T, wall, virial, remaining, dt).
+    // Optional appendix columns: Dipole (when -dipole), nUnique (when -writeUnique).
+    // Replaces three divergent layouts (writeUnique with nUnique-at-end, dipole with
+    // dipole-mid-row, and a 5-col tab-separated fallback). The dropped #ifdef GCC
+    // pre-processor guard was dead — no compiler defines `GCC`.
+    {
+        std::string line = fmt::format(
+            "{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} "
+            "{8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f} "
+            "{15: ^{0}f}",
+            15,
+            m_currentStep / 1000.0,  // Time in ps (m_currentStep accumulates m_dT, both in fs)
+            m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot,
+            m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential,
+            m_virial_correction, m_average_virial_correction,
+            remaining, m_time_step / 1000.0);
         if (m_dipole)
-            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f} {15: ^{0}f} {16: ^{0}f}\n", 15,
-                m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, m_aver_dipol_linear * 2.5418 * 3.3356, m_virial_correction, m_average_virial_correction, remaining, m_time_step / 1000.0);
-        else
-            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f} {15: ^{0}f}\n", 15,
-                m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, m_virial_correction, m_average_virial_correction, remaining, m_time_step / 1000.0);
-#else
-        std::cout << m_currentStep * m_dT / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
-
-#endif
+            line += fmt::format(" {: ^15f}", m_aver_dipol_linear * 2.5418 * 3.3356);
+        if (m_writeUnique)
+            line += fmt::format(" {: ^15}", m_unqiue->StoredStructures());
+        std::cout << line << "\n";
     }
 
     // RATTLE constraint summary (only when RATTLE is active)
@@ -3120,7 +3224,11 @@ double SimpleMD::CleanEnergy()
     interface.setMolecule(m_molecule.getMolInfo());
     interface.updateGeometry(m_eigen_geometry);
     interface.setVerbosity(0);
+    // WP-P1 (May 2026): wall-clock the FF call for MD diagnostics
+    auto t_ff_start = std::chrono::high_resolution_clock::now();
     const double Energy = interface.CalculateEnergy(true);
+    auto t_ff_end = std::chrono::high_resolution_clock::now();
+    m_last_ff_ms = std::chrono::duration<double, std::milli>(t_ff_end - t_ff_start).count();
     m_eigen_gradient = interface.Gradient();
     if (m_dipole && m_method == "gfn2") {
         m_molecule.setDipole(interface.Dipole()*au);//in eA
@@ -3135,7 +3243,11 @@ double SimpleMD::FastEnergy()
 
     m_interface->updateGeometry(m_eigen_geometry);
 
+    // WP-P1 (May 2026): wall-clock the FF call for MD diagnostics
+    auto t_ff_start = std::chrono::high_resolution_clock::now();
     const double Energy = m_interface->CalculateEnergy(true);
+    auto t_ff_end = std::chrono::high_resolution_clock::now();
+    m_last_ff_ms = std::chrono::duration<double, std::milli>(t_ff_end - t_ff_start).count();
     m_eigen_gradient = m_interface->Gradient();
 
     // Claude Generated (Feb 2026): Gradient sanity check for MD stability

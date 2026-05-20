@@ -79,7 +79,8 @@ public:
     // =========================================================================
 
     /// Set current geometry (Bohr, N×3 row-major Eigen matrix)
-    void setGeometry(const Matrix& geom);
+    /// WP-G (May 2026): explicit GeoGradMatrix (RowMajor) — matches CPU m_geometry_bohr layout
+    void setGeometry(const GeoGradMatrix& geom);
 
     /// Set dynamic EEQ charges (geometry-dependent, size N)
     void setEEQCharges(const Vector& q);
@@ -486,7 +487,18 @@ public:
     /// WP5-C (May 2026): Return the GPU-side dc6dcn skip flag from the previous step.
     /// True if max|ΔCN| < 0.01 between the last two steps, meaning dc6dcn recomputation
     /// can be skipped. Always false on the first step or after topology invalidation.
-    bool shouldSkipDc6dcn() const { return m_dc6dcn_skip_pending; }
+    /// WP-S1 (May 2026): also true when m_frozen_cn is set by the static-mode override.
+    bool shouldSkipDc6dcn() const { return m_frozen_cn || m_dc6dcn_skip_pending; }
+
+    /// Static-Mode (WP-S1, May 2026): freeze CN / charge recomputation across MD steps.
+    /// Device buffers (d_cn_final, gw, dgw, dc6dcn_ij/ji, d_charges) remain valid from the
+    /// previous step; kernel launches that would overwrite them are skipped.
+    void setStaticFlags(bool frozen_cn, bool frozen_charges) {
+        m_frozen_cn = frozen_cn;
+        m_frozen_charges = frozen_charges;
+    }
+    bool frozenCN() const { return m_frozen_cn; }
+    bool frozenCharges() const { return m_frozen_charges; }
 
 private:
     std::unique_ptr<FFWorkspaceGPUImpl> m_impl;
@@ -527,6 +539,11 @@ private:
 
     // WP5-C (May 2026): GPU-side D4 dc6dcn skip-check state
     bool    m_dc6dcn_skip_pending = false;   ///< skip flag from previous step (read in current step)
+
+    // WP-S1 (May 2026): static-mode overrides — when set, GPU kernels for CN/dgw/dc6dcn
+    // and EEQ-charge upload are skipped (device buffers retain previous-step values).
+    bool    m_frozen_cn = false;
+    bool    m_frozen_charges = false;
 
     // Last uploaded HB/XB bond lists (for CPU vs GPU comparison debugging)
     std::vector<GFNFFHydrogenBond> m_last_hbonds;

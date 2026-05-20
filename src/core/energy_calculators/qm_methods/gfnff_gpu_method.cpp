@@ -243,7 +243,7 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
             if (m_eeq_nfrag > 1) {
                 m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, natoms);
                 // WP7-B: cache min inter-fragment distance for batched-solver warning.
-                const Matrix& geom = m_gfnff->getGeometryBohr();
+                const GeoGradMatrix& geom = m_gfnff->getGeometryBohr();
                 if (geom.rows() == natoms && geom.cols() >= 3) {
                     m_eeq_gpu->updateMinFragmentDistance(
                         geom.col(0).data(), geom.col(1).data(), geom.col(2).data(), natoms);
@@ -307,6 +307,11 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // This disables CUDA Graph replay so events get recorded each step.
     if (m_gpu_workspace) {
         m_gpu_workspace->setRecordKernelTimings(CurcumaLogger::get_verbosity() >= 2);
+        // Static-Mode (WP-S1, May 2026): propagate frozen-state flags so GPU kernels for
+        // CN / Gaussian-weights / dc6dcn / EEQ-charge-upload are skipped this step.
+        m_gpu_workspace->setStaticFlags(
+            m_gfnff->staticCNFrozen(),
+            m_gfnff->staticChargesFrozen());
     }
 
     try {
@@ -323,7 +328,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // This overlaps the expensive EEQ solver with ~12 GPU kernels that don't need charges.
 
     const int N = static_cast<int>(m_atom_types.size());
-    const Matrix& geom_bohr = m_gfnff->getGeometryBohr();
+    const GeoGradMatrix& geom_bohr = m_gfnff->getGeometryBohr();
 
     // Claude Generated (April 2026): Upload PBC unit cell to GPU constant memory
     if (m_gfnff->hasPBC()) {
@@ -349,8 +354,11 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // k_cn_compute + k_dlogdcn + 3 async D2H launches on main stream.
     // d_cn_final / d_dlogdcn are already on GPU and correct after this call.
     // finalizeCNForCPU() is called after Phase 4 launch to sync without sleeping.
+    // Static-Mode (WP-S1): skip when frozen_cn — d_cn_final/d_dlogdcn retain previous-step values.
     auto t_cn_start = std::chrono::high_resolution_clock::now();
-    m_gpu_workspace->computeCN(m_atom_types);
+    if (!m_gpu_workspace->frozenCN()) {
+        m_gpu_workspace->computeCN(m_atom_types);
+    }
     // G-P1: removed immediate sync + memcpy + setD3CN here.
     // d_cn_final → d_cn D2D copy happens inside prepareAndLaunchChargeIndependent().
     // setD3CN() no longer needed: d_cn is populated GPU-side from d_cn_final.
@@ -466,7 +474,8 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // Gaussian weights + dc6dcn: must run AFTER Phase 1 so d_cn holds the current step's
     // values (Phase 1 D2D-copies d_cn_final → d_cn on main stream before sA fences).
     // Using d_cn guarantees consistency with the dispersion kernel launched in Phase 2.
-    if (gradient) {
+    // Static-Mode (WP-S1): skip when frozen_cn — gw/dgw/dc6dcn buffers retain previous values.
+    if (gradient && !m_gpu_workspace->frozenCN()) {
         m_gpu_workspace->computeGaussianWeightsOnGPU(/*use_cn_final=*/false);
     }
     auto t_launch_end = std::chrono::high_resolution_clock::now();
@@ -503,7 +512,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         if (m_eeq_nfrag > 1) {
             m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, N);
             // WP7-B: refresh min inter-fragment distance after topology rebuild.
-            const Matrix& geom = m_gfnff->getGeometryBohr();
+            const GeoGradMatrix& geom = m_gfnff->getGeometryBohr();
             if (geom.rows() == N && geom.cols() >= 3) {
                 m_eeq_gpu->updateMinFragmentDistance(
                     geom.col(0).data(), geom.col(1).data(), geom.col(2).data(), N);
@@ -524,7 +533,14 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     //      full matrix — inefficient. TODO: batched-Cholesky per fragment block.
     //   3. CPU Phase 2 EEQ: always valid fallback (already cached from InitialiseMolecule)
     Vector charges(N);
-    if (m_skip_phase2) {
+    if (m_gpu_workspace->frozenCharges()) {
+        // Static-Mode (WP-S1): GPU d_charges retain previous-step values, no upload needed.
+        // CPU-side charges fetched for any consumer that still needs them.
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("EEQ GPU Phase 2: frozen charges (static_charges mode) — skipping solve+upload");
+        }
+        charges = m_gfnff->getLastCharges();
+    } else if (m_skip_phase2) {
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::warn("GPU path: skip_phase2=true — bypassing GPU EEQ, using CPU Phase 1 topology charges");
         }
@@ -601,7 +617,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
             // Compute per-atom RMSD (Bohr) from geometry at last full Cholesky build.
             // If RMSD < threshold: reuse cached L (dpotrs only, saves ~12 ms/step).
             // If RMSD >= threshold or threshold==0: full refactorization.
-            const Matrix& cur_geom = m_gfnff->getGeometryBohr();
+            const GeoGradMatrix& cur_geom = m_gfnff->getGeometryBohr();
             bool force_refactor = true;
             if (m_eeq_rmsd_threshold > 0.0 && m_eeq_has_ref_geom
                     && m_eeq_ref_geom.rows() == cur_geom.rows()) {
@@ -909,7 +925,7 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
                     m_gfnff->storeChargesFromGPU(m_eeq_charges_gpu.data(), N);
                     m_gpu_workspace->setEEQCharges(charges);
                 }
-                if (CurcumaLogger::get_verbosity() >= 2) {
+                if (CurcumaLogger::get_verbosity() >= 3) {
                     std::string frag_info;
                     for (int f = 0; f < m_eeq_nfrag; ++f) {
                         double qsum = 0.0;
@@ -1178,6 +1194,52 @@ json GFNFFGPUComputationalMethod::getEnergyDecomposition() const
 const Vector& GFNFFGPUComputationalMethod::getGPUdEdcn() const
 {
     return m_gpu_workspace->dEdcnTotal();
+}
+
+// WP-P1 (May 2026): per-phase CPU timings (CN/EEQ on host) for diagnostics
+json GFNFFGPUComputationalMethod::getLastPrepTiming() const
+{
+    if (!m_gfnff) return {};
+    const auto& t = m_gfnff->getLastPrepTiming();
+    return {
+        {"cn",          t.cn},
+        {"eeq_topo",    t.eeq_topo},
+        {"cnf",         t.cnf},
+        {"dcn",         t.dcn},
+        {"d4_gw",       t.d4_gw},
+        {"eeq_solve",   t.eeq_solve},
+        {"charge_dist", t.charge_dist},
+        {"total",       t.total},
+    };
+}
+
+void GFNFFGPUComputationalMethod::setForcePhaseTiming(bool on)
+{
+    if (m_gfnff) m_gfnff->setForcePhaseTiming(on);
+    if (m_gpu_workspace) m_gpu_workspace->setRecordKernelTimings(on);
+}
+
+// WP-P1 (May 2026): per-stream / per-kernel-category GPU timings (FFTermTimings)
+json GFNFFGPUComputationalMethod::getStreamTimings() const
+{
+    if (!m_gpu_workspace) return {};
+    const auto& kt = m_gpu_workspace->kernelTimings();
+    json out;
+    auto add = [&](const char* name, double v) { if (v >= 0.0) out[name] = v; };
+    add("bonds",          kt.bonds);
+    add("angles",         kt.angles);
+    add("dihedrals",      kt.dihedrals);
+    add("inversions",     kt.inversions);
+    add("stors",          kt.stors);
+    add("dispersion",     kt.dispersion);
+    add("bonded_rep",     kt.bonded_rep);
+    add("nonbonded_rep",  kt.nonbonded_rep);
+    add("coulomb",        kt.coulomb);
+    add("hbond",          kt.hbond);
+    add("xbond",          kt.xbond);
+    add("atm",            kt.atm);
+    add("batm",           kt.batm);
+    return out;
 }
 
 // ---------------------------------------------------------------------------

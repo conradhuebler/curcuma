@@ -53,6 +53,10 @@ struct FFEnergyComponents {
     double bonded_rep = 0, nonbonded_rep = 0;   // GFN-FF exponential repulsion
     double coulomb = 0, hbond = 0, xbond = 0;
     double atm = 0, batm = 0, stors = 0;
+    // Claude Generated (May 2026, HB-investigation): per-case HB diagnostic split.
+    // Sum of cases equals hbond. Counts compare against Fortran nhb1/nhb2.
+    double hbond_case1 = 0, hbond_case2 = 0, hbond_case3 = 0, hbond_case4 = 0;
+    int hbond_case1_count = 0, hbond_case2_count = 0, hbond_case3_count = 0, hbond_case4_count = 0;
 
     void reset() {
         bond = angle = dihedral = inversion = 0;
@@ -61,6 +65,8 @@ struct FFEnergyComponents {
         bonded_rep = nonbonded_rep = 0;
         coulomb = hbond = xbond = 0;
         atm = batm = stors = 0;
+        hbond_case1 = hbond_case2 = hbond_case3 = hbond_case4 = 0;
+        hbond_case1_count = hbond_case2_count = hbond_case3_count = hbond_case4_count = 0;
     }
 
     FFEnergyComponents& operator+=(const FFEnergyComponents& o) {
@@ -70,6 +76,13 @@ struct FFEnergyComponents {
         bonded_rep += o.bonded_rep; nonbonded_rep += o.nonbonded_rep;
         coulomb += o.coulomb; hbond += o.hbond; xbond += o.xbond;
         atm += o.atm; batm += o.batm; stors += o.stors;
+        // Claude Generated (May 2026, HB-investigation): per-case reduction
+        hbond_case1 += o.hbond_case1; hbond_case2 += o.hbond_case2;
+        hbond_case3 += o.hbond_case3; hbond_case4 += o.hbond_case4;
+        hbond_case1_count += o.hbond_case1_count;
+        hbond_case2_count += o.hbond_case2_count;
+        hbond_case3_count += o.hbond_case3_count;
+        hbond_case4_count += o.hbond_case4_count;
         return *this;
     }
 
@@ -123,15 +136,15 @@ struct FFTermTimings {
  * For T=1, acc[0] IS the result (no reduce needed).
  */
 struct FFAccumulator {
-    Matrix gradient;          ///< N×3 gradient accumulator
+    GeoGradMatrix gradient;          ///< N×3 gradient accumulator (WP-G: RowMajor)
     Vector dEdcn;             ///< N dE/dCN for chain-rule
     Vector dEdcn_bond;        ///< N bond-only dE/dCN for per-component attribution
     FFEnergyComponents energy;
     FFTermTimings timings;    ///< Claude Generated (May 2026): per-term ms (this partition only)
 
     // Optional per-component gradients (only allocated if store_components=true)
-    Matrix grad_bond, grad_angle, grad_torsion, grad_repulsion;
-    Matrix grad_coulomb, grad_dispersion, grad_hb, grad_xb, grad_batm, grad_atm;
+    GeoGradMatrix grad_bond, grad_angle, grad_torsion, grad_repulsion;
+    GeoGradMatrix grad_coulomb, grad_dispersion, grad_hb, grad_xb, grad_batm, grad_atm;
 
     bool has_components = false;
 
@@ -149,7 +162,7 @@ struct FFAccumulator {
         }
         has_components = store_components;
         if (store_components && do_gradient) {
-            auto resetMat = [&](Matrix& m) {
+            auto resetMat = [&](GeoGradMatrix& m) {  // WP-G: lambda matches RowMajor member type
                 if (m.rows() != natoms || m.cols() != 3) m.resize(natoms, 3);
                 m.setZero();
             };
@@ -236,9 +249,10 @@ public:
     /// Set D3 coordination numbers (for dynamic r0)
     void setD3CN(const Vector& cn) { m_d3_cn = cn; }
 
-    /// Set CN, CNF, and sparse dcn derivatives (gradient only)
+    /// Set CN, CNF, and CN derivatives (gradient only)
+    /// Claude Generated (WP4, May 2026): dcn now CNDerivStore (pair-list) instead of std::vector<SpMatrix>
     void setCNDerivatives(const Vector& cn, const Vector& cnf,
-                          const std::vector<SpMatrix>& dcn);
+                          const CNDerivStore& dcn);
 
     /// Set dc6dcn pointer for D4 dispersion CN gradient
     void setDC6DCNPtr(const Matrix* ptr) { m_dc6dcn_ptr = ptr; }
@@ -253,7 +267,7 @@ public:
 
     // === Results ===
 
-    const Matrix& gradient() const { return m_result_gradient; }
+    const GeoGradMatrix& gradient() const { return m_result_gradient; }
     const FFEnergyComponents& energyComponents() const { return m_result_energy; }
     const FFTermTimings& termTimings() const { return m_result_timings; }
     int threadCount() const { return m_num_threads; }
@@ -261,19 +275,19 @@ public:
     const Vector& dEdcnBondTotal() const { return m_dEdcn_bond_total; }
 
     /// Gradient before CN chain-rule (diagnostic, valid after calculate with gradient)
-    const Matrix& gradientBeforeCN() const { return m_grad_before_cn; }
+    const GeoGradMatrix& gradientBeforeCN() const { return m_grad_before_cn; }
 
     // Per-component gradient getters (only valid if store_components=true)
-    const Matrix& gradientBond() const { return m_result_grad_bond; }
-    const Matrix& gradientAngle() const { return m_result_grad_angle; }
-    const Matrix& gradientTorsion() const { return m_result_grad_torsion; }
-    const Matrix& gradientRepulsion() const { return m_result_grad_repulsion; }
-    const Matrix& gradientCoulomb() const { return m_result_grad_coulomb; }
-    const Matrix& gradientDispersion() const { return m_result_grad_dispersion; }
-    const Matrix& gradientHB() const { return m_result_grad_hb; }
-    const Matrix& gradientXB() const { return m_result_grad_xb; }
-    const Matrix& gradientBATM() const { return m_result_grad_batm; }
-    const Matrix& gradientATM() const { return m_result_grad_atm; }
+    const GeoGradMatrix& gradientBond() const { return m_result_grad_bond; }
+    const GeoGradMatrix& gradientAngle() const { return m_result_grad_angle; }
+    const GeoGradMatrix& gradientTorsion() const { return m_result_grad_torsion; }
+    const GeoGradMatrix& gradientRepulsion() const { return m_result_grad_repulsion; }
+    const GeoGradMatrix& gradientCoulomb() const { return m_result_grad_coulomb; }
+    const GeoGradMatrix& gradientDispersion() const { return m_result_grad_dispersion; }
+    const GeoGradMatrix& gradientHB() const { return m_result_grad_hb; }
+    const GeoGradMatrix& gradientXB() const { return m_result_grad_xb; }
+    const GeoGradMatrix& gradientBATM() const { return m_result_grad_batm; }
+    const GeoGradMatrix& gradientATM() const { return m_result_grad_atm; }
 
     // === Configuration ===
 
@@ -311,11 +325,11 @@ private:
     CxxThreadPool* m_pool = nullptr;
 
     // === Shared state (read-only per step) ===
-    Matrix m_geometry;
+    GeoGradMatrix m_geometry;  // WP-G: RowMajor for contiguous row(i) reads in inner loops
     std::vector<int> m_atom_types;
     Vector m_eeq_charges, m_topology_charges, m_d3_cn;
     Vector m_cn, m_cnf;
-    std::vector<SpMatrix> m_dcn;
+    CNDerivStore m_dcn;  // Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
     const Matrix* m_dc6dcn_ptr = nullptr;
     double m_e0 = 0.0;
 
@@ -357,18 +371,19 @@ private:
     std::vector<FFAccumulator> m_accumulators;
 
     // === Result storage ===
-    Matrix m_result_gradient;
+    GeoGradMatrix m_result_gradient;  // WP-G: RowMajor
     FFEnergyComponents m_result_energy;
     FFTermTimings m_result_timings;  // Claude Generated (May 2026): aggregated per-term timing
     Vector m_dEdcn_total, m_dEdcn_bond_total;
-    Matrix m_grad_before_cn;  ///< Gradient snapshot before CN chain-rule (diagnostic)
+    GeoGradMatrix m_grad_before_cn;  ///< Gradient snapshot before CN chain-rule (diagnostic) — WP-G: RowMajor
     bool m_store_components = false;
     bool m_do_gradient = false;
 
     // Per-component result gradients
-    Matrix m_result_grad_bond, m_result_grad_angle, m_result_grad_torsion;
-    Matrix m_result_grad_repulsion, m_result_grad_coulomb, m_result_grad_dispersion;
-    Matrix m_result_grad_hb, m_result_grad_xb, m_result_grad_batm, m_result_grad_atm;
+    // WP-G: RowMajor result gradient buffers
+    GeoGradMatrix m_result_grad_bond, m_result_grad_angle, m_result_grad_torsion;
+    GeoGradMatrix m_result_grad_repulsion, m_result_grad_coulomb, m_result_grad_dispersion;
+    GeoGradMatrix m_result_grad_hb, m_result_grad_xb, m_result_grad_batm, m_result_grad_atm;
 
     // === Core execution ===
     void executeGFNFF(int partition);

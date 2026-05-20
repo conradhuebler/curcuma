@@ -68,6 +68,16 @@
 
 ## 🟢 CORE DEVELOPMENT (src/core/)
 
+### GFN-FF Static-Mode Performance Initiative (4-WP-Bundle, 2026-05)
+- **Status**: 🤖 GEPLANT — basiert auf Analyse "C++ schneller als xtb"
+- **Ziel**: Polymer 1000 NVE ICX 130 s → ~63 s (40 % schneller als xtb-Fortran)
+- **WP-S1**: [Frozen CN/Charges](docs/GFNFF_STATIC_WP1_FROZEN_STATE.md) — 3 PARAMs, ~150 LoC, ~1 Tag
+- **WP-S2**: [MD-Diagnostics JSONL](docs/GFNFF_STATIC_WP2_MD_DIAGNOSTICS.md) — Streaming-Dump, ~1 Tag
+- **WP-S3**: [EEQ-Cutoff Auto-Default](docs/GFNFF_STATIC_WP3_EEQ_CUTOFF_DEFAULT.md) — 12 ms/Step save, ~0.5+1 Tag
+- **WP-S4**: [Validation-Suite + Re-Capture](docs/GFNFF_STATIC_WP4_VALIDATION_SUITE.md) — 32-Konfig-Matrix, ~1.5 Tage
+- **Reihenfolge**: S1 → S2 (parallel zu S3) → S4
+- **Risiko**: S1/S3 sind physikalische Approximationen — S4 ist die Sicherheits-Klammer
+
 ### cgfnff Parameter Generation Bug
 - **Status**: ❌ OPEN
 - **Problem**: Parameter generation creates null JSON values

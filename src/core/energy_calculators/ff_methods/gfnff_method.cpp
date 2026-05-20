@@ -34,6 +34,7 @@
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #include "src/core/energy_calculators/ff_methods/d4param_generator.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"
+#include "src/core/energy_calculators/ff_methods/fast_exp.h"  // Claude Generated (May 2026, WP-D Stage B): SIMD exp(-x^2) for dcn step 3
 #include "src/core/energy_calculators/ff_methods/param_generator_thread.h"  // Claude Generated (Feb 2026): Parallel parameter generation
 #include "src/core/config_manager.h"
 #include <cmath>
@@ -106,6 +107,23 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
     row("Coulomb",             r.coulomb,      r.t_coulomb);
     CurcumaLogger::result("  Non-covalent:");
     row("H-bonds",             r.hbond,        r.t_hbond);
+    // Claude Generated (May 2026, HB-investigation): per-case split when verbosity>=2.
+    // Compare counts to Fortran nhb1 (case 1) / nhb2 (case 2+3+4) split.
+    if (CurcumaLogger::get_verbosity() >= 2 &&
+        (r.hbond_case1_count + r.hbond_case2_count + r.hbond_case3_count + r.hbond_case4_count) > 0) {
+        CurcumaLogger::result(fmt::format(
+            "    case 1 (unbound):   {:>6d} pairs   {:>+16.10f} Eh",
+            r.hbond_case1_count, r.hbond_case1));
+        CurcumaLogger::result(fmt::format(
+            "    case 2 (bound):     {:>6d} pairs   {:>+16.10f} Eh",
+            r.hbond_case2_count, r.hbond_case2));
+        CurcumaLogger::result(fmt::format(
+            "    case 3 (carbonyl):  {:>6d} pairs   {:>+16.10f} Eh",
+            r.hbond_case3_count, r.hbond_case3));
+        CurcumaLogger::result(fmt::format(
+            "    case 4 (sp2-N):     {:>6d} pairs   {:>+16.10f} Eh",
+            r.hbond_case4_count, r.hbond_case4));
+    }
     row("X-bonds",             r.xbond,        r.t_xbond);
     row("ATM (3-body)",        r.atm,          r.t_atm);
     row("BATM",                r.batm,         r.t_batm);
@@ -128,7 +146,10 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
     };
 
     if (r.t_cn_eeq_cpu >= 0.0)
-        phase_row("CN + EEQ (serial CPU)", r.t_cn_eeq_cpu, r.t_cn_eeq_cpu, -1.0);
+        phase_row("CN + EEQ", r.t_cn_eeq_cpu, r.t_cn_eeq_cpu, -1.0);
+        // Claude Generated (WP1, May 2026): label corrected. CN uses OpenMP, EEQ A-matrix
+        // and distance matrix use OpenMP/CxxThreadPool. Only the Stage-4 batched LU loop
+        // (eeq_solver.cpp:1305-1335) is still serial — that is WP2.
     if (r.t_hbxb >= 0.0)
         phase_row("HB/XB re-detection", r.t_hbxb, r.t_hbxb, -1.0);
     if (r.t_pool_wall >= 0.0) {
@@ -463,6 +484,7 @@ GFNFF::GFNFF()
         { "solvent", "none" }  // Claude Generated (Mar 2026): ALPB solvation, "none" = gas phase
     };
     m_parameters = default_parameters;
+    m_threads = m_parameters.value("threads", 1);  // Claude Generated (WP1, May 2026)
 
     // Initialize EEQ solver (Dec 2025 - Phase 3)
     // CRITICAL FIX (Dec 25, 2025): Pass global CurcumaLogger verbosity to EEQSolver
@@ -502,6 +524,20 @@ GFNFF::GFNFF(const json& parameters)
     };
 
     m_parameters = MergeJson(default_parameters, parameters);
+    // WP6/CLI plumbing fix (May 2026): controller carries gfnff-scoped params under
+    // controller["gfnff"]. Promote those keys to the top of m_parameters so the
+    // existing flat .value("...") readers (e.g. cn_cutoff_bohr, eeq_distance_cutoff,
+    // nb_cell_list_min_atoms, dispersion_cutoff_bohr) actually see CLI/JSON overrides.
+    // Without this, params remain nested at m_parameters["gfnff"][...] and the flat
+    // reads fall back to defaults — silently ignoring user input.
+    // Note: always overwrite (not just new keys) so CLI values win over any pre-existing
+    // defaults that MergeJson may have placed at the top level.
+    if (parameters.contains("gfnff") && parameters["gfnff"].is_object()) {
+        for (const auto& [k, v] : parameters["gfnff"].items()) {
+            m_parameters[k] = v;
+        }
+    }
+    m_threads = m_parameters.value("threads", 1);  // Claude Generated (WP1, May 2026)
 
     // Extract topology mode
     m_topology_mode = m_parameters.value("topology_mode", "auto");
@@ -528,6 +564,21 @@ GFNFF::GFNFF(const json& parameters)
     m_huckel_solver->setVerbosity(CurcumaLogger::get_verbosity());
     // Check if user wants to use simplified approximation instead
     m_use_full_huckel = !m_parameters.value("use_simplified_pbo", false);
+
+    // Static-Mode (WP-S1, May 2026): freeze CN/charges across MD steps
+    m_static_charges = m_parameters.value("static_charges", false);
+    m_static_cn = m_parameters.value("static_cn", false);
+    if (m_parameters.value("static_all", false)) {
+        m_static_charges = true;
+        m_static_cn = true;
+    }
+    if (m_static_charges || m_static_cn) {
+        CurcumaLogger::warn(fmt::format(
+            "GFN-FF Static-Mode active: static_charges={}, static_cn={}. "
+            "Initial CN/charges will be reused for all subsequent calls. "
+            "Recommended only for equilibrium dynamics — invalid for reactions or large conformational moves.",
+            m_static_charges, m_static_cn));
+    }
 }
 
 // Claude Generated (Apr 2026): Forward gfnff-level solver parameters to eeq_solver sub-config.
@@ -585,10 +636,66 @@ void GFNFF::forwardEEQSolverParams(json& eeq_params) {
             eeq["eeq_distance_cutoff"] = m_parameters["eeq_distance_cutoff"];
         }
     }
+
+    // WP-EEQ-Cache: forward Cholesky-cache params to eeq_solver
+    if (m_parameters.contains("eeq_refactor_eps_bohr") && !eeq.contains("eeq_refactor_eps_bohr"))
+        eeq["eeq_refactor_eps_bohr"] = m_parameters["eeq_refactor_eps_bohr"];
+    if (m_parameters.contains("eeq_refactor_force_every") && !eeq.contains("eeq_refactor_force_every"))
+        eeq["eeq_refactor_force_every"] = m_parameters["eeq_refactor_force_every"];
 }
 
 double GFNFF::getEEQDistanceCutoff() const {
-    return m_parameters.value("eeq_distance_cutoff", 30.0);
+    // WP-C (May 2026): Default changed from 30.0 → 0.0 to match Fortran goed_gfnff
+    // (full Coulomb in EEQ matrix). The previous 30.0 default was a non-Fortran
+    // approximation that violated Hellmann-Feynman vs the full Coulomb energy.
+    // Canonical PARAM definition lives in eeq_solver.h:965.
+    return m_parameters.value("eeq_distance_cutoff", 0.0);
+}
+
+// WP-S3 (May 2026): apply eeq_distance_cutoff_auto heuristic after Phase-1.
+// Sets EEQSolver cutoff to 30 Bohr when topology yields nfrag==1 and Phase-1
+// charges remain weakly polar (max|q| < 0.5 e). Otherwise clears any override.
+// Manual cutoff > 0 in m_parameters takes precedence over the heuristic.
+void GFNFF::applyEEQCutoffAutoIfRequested()
+{
+    if (!m_parameters.value("eeq_distance_cutoff_auto", false)) {
+        return;  // feature off
+    }
+    if (!m_eeq_solver || !m_cached_topology.has_value()) {
+        return;  // not ready — will be retried on the next Initialise
+    }
+    const double user_cutoff = m_parameters.value("eeq_distance_cutoff", 0.0);
+    if (user_cutoff > 0.0) {
+        return;  // explicit user value wins
+    }
+
+    const TopologyInfo& topo = *m_cached_topology;
+    const int nfrag = topo.nfrag;
+    double max_abs_charge = 0.0;
+    if (topo.topology_charges.size() > 0) {
+        max_abs_charge = topo.topology_charges.cwiseAbs().maxCoeff();
+    }
+
+    constexpr double EEQ_AUTO_THRESHOLD_CHARGE = 0.5;   // e
+    constexpr double EEQ_AUTO_CUTOFF_BOHR = 30.0;
+
+    if (nfrag == 1 && max_abs_charge < EEQ_AUTO_THRESHOLD_CHARGE) {
+        m_eeq_solver->setEEQDistanceCutoff(EEQ_AUTO_CUTOFF_BOHR);
+        m_eeq_cutoff_auto_active = true;
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info(fmt::format(
+                "EEQ cutoff auto-enabled: {:.1f} Bohr (nfrag={}, max|q|={:.3f} e)",
+                EEQ_AUTO_CUTOFF_BOHR, nfrag, max_abs_charge));
+        }
+    } else {
+        m_eeq_solver->setEEQDistanceCutoff(-1.0);  // clear override (defensive)
+        m_eeq_cutoff_auto_active = false;
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info(fmt::format(
+                "EEQ cutoff auto: keeping 0.0 (nfrag={}, max|q|={:.3f} e — not neutral/single)",
+                nfrag, max_abs_charge));
+        }
+    }
 }
 
 GFNFF::~GFNFF()
@@ -684,6 +791,12 @@ bool GFNFF::InitialiseMolecule()
 
     m_initialized = true;
 
+    // WP-S3 (May 2026): apply eeq_distance_cutoff_auto heuristic. Forces the
+    // topology cache to be populated (Phase-1 charges + nfrag) before the
+    // auto-detection reads them; subsequent Phase-2 calls see the override.
+    getCachedTopology();
+    applyEEQCutoffAutoIfRequested();
+
     // Claude Generated (Mar 2026): Initialize ALPB solvation if solvent specified
     // Reference: Fortran gbsa.f90 — newBornModel() called during init
     if (m_parameters.contains("solvent")) {
@@ -767,6 +880,17 @@ const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
         // Full topology recalculation (expensive, rare during MD)
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("GFNFF: Full topology recalculation (large geometry change or first call)");
+        }
+        // Static-Mode (WP-S1): warn but do NOT invalidate captured CN/charges — user override.
+        if ((m_static_charges || m_static_cn) && m_static_state_captured) {
+            CurcumaLogger::warn("Static-mode: topology re-initialised but cached CN/charges remain frozen — results may diverge");
+        }
+        // WP-EEQ-Cache: drop stale LLT before Phase 2 rebuilds A with new dxi/dgam.
+        // WP-EEQ-Matrix-Cache: same trigger — A_nn off-diag cache is also stale once
+        // topology corrections (dxi/dgam) change.
+        if (m_eeq_solver) {
+            m_eeq_solver->invalidateCholeskyCache();
+            m_eeq_solver->invalidateMatrixCache();
         }
         m_cached_topology = calculateTopologyInfo();
         m_last_topology_geometry = m_geometry_bohr;
@@ -895,30 +1019,146 @@ void GFNFF::updateDynamicState(TopologyInfo& topo) const {
 }
 
 // ---------------------------------------------------------------------------
+// WP-FF-DistMatrix-Sharing (May 2026): centralized packed-triangular distance arrays.
+// Mirrors XTB gfnff_engrad.F90:175-195 — compute sqrab/srab once per energy call,
+// share across all FF term loops and the EEQ Phase-2 solver.
+// ---------------------------------------------------------------------------
+
+void GFNFF::computeSharedDistances() const
+{
+    const int N = m_geometry_bohr.rows();
+    if (N <= 0) return;
+    const int M = N * (N + 1) / 2;
+    if (m_shared_dist_N != N) {
+        m_shared_sqrab.resize(M);
+        m_shared_srab.resize(M);
+        m_shared_dist_N = N;
+    }
+    // Diagonal (i == j) lives at indices i*(i+1)/2 + i and represents distance 0.
+    // We zero them by zeroing the whole buffer first; off-diagonals are written in the loop.
+    // Cheaper than per-row diagonal stores in the parallel worker.
+    m_shared_sqrab.setZero();
+    m_shared_srab.setZero();
+
+    auto worker = [&](int t_id, int T) {
+        // Same striped row partitioning as dist_worker in eeq_solver.cpp:2990.
+        for (int i = t_id; i < N; i += T) {
+            const int ii = i * (i + 1) / 2;
+            const double xi = m_geometry_bohr(i, 0);
+            const double yi = m_geometry_bohr(i, 1);
+            const double zi = m_geometry_bohr(i, 2);
+            for (int j = 0; j < i; ++j) {
+                const double dx = xi - m_geometry_bohr(j, 0);
+                const double dy = yi - m_geometry_bohr(j, 1);
+                const double dz = zi - m_geometry_bohr(j, 2);
+                const double rsq = dx*dx + dy*dy + dz*dz;
+                m_shared_sqrab[ii + j] = rsq;
+                m_shared_srab[ii + j]  = std::sqrt(rsq);
+            }
+        }
+    };
+
+    auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+    const int T = (m_threads > 1 && N > 64) ? std::min(m_threads, N) : 1;
+    if (T > 1 && pool) {
+        std::vector<std::future<void>> futures;
+        futures.reserve(T - 1);
+        for (int t = 1; t < T; ++t) futures.push_back(pool->enqueue(worker, t, T));
+        worker(0, T);
+        for (auto& f : futures) f.get();
+    } else if (T > 1) {
+        std::vector<std::thread> threads(T - 1);
+        for (int t = 1; t < T; ++t) threads[t - 1] = std::thread(worker, t, T);
+        worker(0, T);
+        for (auto& th : threads) th.join();
+    } else {
+        worker(0, 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // prepareCNAndEEQ — CN + EEQ calculation extracted from Calculation()
 // Claude Generated (March 2026): Exposed for GPU orchestration
 // ---------------------------------------------------------------------------
 
 void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external_cn, bool skip_eeq, PrepTiming* out_timing)
 {
-    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
+    // WP-P1 (May 2026): also collect timings when forcePhaseTiming() is set, so MD
+    // diagnostics get non-zero values without requiring CurcumaLogger verbosity 2.
+    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2) || m_force_phase_timing;
     auto t_prep_total = std::chrono::high_resolution_clock::now();  // always measure, negligible overhead
     double t_cn = 0.0, t_eeq_topo = 0.0, t_cnf = 0.0, t_dcn = 0.0, t_d4_gw = 0.0, t_eeq_solve = 0.0, t_charge_dist = 0.0;
+
+    // Static-Mode (WP-S1, May 2026): reuse cached CN/dcn/D4 outputs after first capture.
+    // m_last_cn, m_last_dcn, m_last_cnf, m_d4_generator's dc6dcn matrix retain previous values.
+    const bool reuse_cn = m_static_cn && m_static_state_captured;
+    const bool freeze_eeq = m_static_charges && m_static_state_captured;
+
+#ifdef GFNFF_CN_DCN_FUSION
+    // WP-D Stage D (May 2026): track whether the fused CN+DCN path was taken so
+    // the separate DCN call below is skipped. Declared here so both the CN block
+    // and the gradient block below can see it.
+    bool m_used_fused_cn_dcn = false;
+#endif
 
     // Claude Generated (March 2026): GPU path uses memcpy into pre-allocated vectors
     // to avoid Eigen heap allocations (CUDA corrupts heap metadata after init).
     auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
-    if (m_gpu_path_preallocated && external_cn) {
-        // memcpy into pre-allocated m_last_cn (no Eigen assignment, no heap alloc)
-        std::memcpy(m_last_cn.data(), external_cn->data(), m_atomcount * sizeof(double));
-    } else if (external_cn) {
-        m_last_cn = *external_cn;
-    } else {
-        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-        if (m_gpu_path_preallocated) {
-            std::memcpy(m_last_cn.data(), cn_vec.data(), m_atomcount * sizeof(double));
+    if (!reuse_cn) {
+        if (m_gpu_path_preallocated && external_cn) {
+            // memcpy into pre-allocated m_last_cn (no Eigen assignment, no heap alloc)
+            std::memcpy(m_last_cn.data(), external_cn->data(), m_atomcount * sizeof(double));
+            m_last_cn_neighbors.clear();  // external CN has no associated neighbor list
+        } else if (external_cn) {
+            m_last_cn = *external_cn;
+            m_last_cn_neighbors.clear();  // external CN has no associated neighbor list
         } else {
-            m_last_cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+            // WP-D Stage A (May 2026): capture cn_raw for dcn step-1 skip.
+            // WP-D Stage C (May 2026): neighbor-list mode also returns the list for dcn step-3.
+            double cn_cutoff_bohr = m_parameters.value("cn_cutoff_bohr", 6.0);
+#ifdef GFNFF_CN_DCN_FUSION
+            // WP-D Stage D (May 2026): fused CN+DCN path — single pair loop computes both.
+            // Only active when gradient is needed on CPU (gpu_only=false) with neighbor-list
+            // mode (cn_cutoff_bohr > 0). Timing captured in t_cn; t_dcn stays 0.
+            if (gradient && !gpu_only && cn_cutoff_bohr > 0.0) {
+                int fused_T = m_threads;
+                auto* fused_pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+                if (fused_pool) fused_pool->setActiveThreadCount(fused_T);
+                auto fused = computeCNAndDerivativesFused(cn_cutoff_bohr, fused_pool, fused_T);
+                m_last_cn          = std::move(fused.cn_values);
+                m_last_cn_raw      = std::move(fused.cn_raw);
+                m_last_cn_neighbors= std::move(fused.neighbors);
+                m_last_dcn         = std::move(fused.dcn_store);
+                m_used_fused_cn_dcn = true;
+            }
+            if (!m_used_fused_cn_dcn) {
+#endif
+            if (cn_cutoff_bohr > 0.0) {
+                auto cn_result = CNCalculator::calculateGFNFFCNWithNeighbors(
+                    m_atoms, m_geometry_bohr, cn_cutoff_bohr);
+                if (m_gpu_path_preallocated) {
+                    std::memcpy(m_last_cn.data(), cn_result.cn_values.data(), m_atomcount * sizeof(double));
+                } else {
+                    m_last_cn = Vector::Map(cn_result.cn_values.data(), m_atomcount).eval();
+                }
+                m_last_cn_raw = Vector::Map(cn_result.cn_raw.data(), m_atomcount).eval();
+                m_last_cn_neighbors = std::move(cn_result.neighbors);
+            } else {
+                // Fallback: threshold-based O(N²) path — no neighbor list available
+                std::vector<double> cn_raw_std;
+                auto cn_vec = CNCalculator::calculateGFNFFCN(
+                    m_atoms, m_geometry_bohr, 1600.0, -7.5, 4.4, &cn_raw_std);
+                if (m_gpu_path_preallocated) {
+                    std::memcpy(m_last_cn.data(), cn_vec.data(), m_atomcount * sizeof(double));
+                } else {
+                    m_last_cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+                }
+                m_last_cn_raw = Vector::Map(cn_raw_std.data(), cn_raw_std.size()).eval();
+                m_last_cn_neighbors.clear();
+            }
+#ifdef GFNFF_CN_DCN_FUSION
+            }  // !m_used_fused_cn_dcn
+#endif
         }
     }
     if (do_timing) {
@@ -938,12 +1178,16 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     EEQSolver::TopologyInput eeq_topo;
     const TopologyInfo* topo_ptr = nullptr;
-    bool do_eeq = (m_eeq_solver && !m_skip_eeq_recalc);
+    // Static-Mode (WP-S1): freeze_eeq overrides do_eeq once initial charges are captured.
+    bool do_eeq = (m_eeq_solver && !m_skip_eeq_recalc && !freeze_eeq);
     bool eeq_charges_current = (m_charges.size() == m_atomcount)
         && (m_last_eeq_geometry.rows() == m_geometry_bohr.rows())
         && (m_last_eeq_geometry == m_geometry_bohr);
     if (eeq_charges_current && CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("GFN-FF: Skipping redundant Phase-2 EEQ (geometry unchanged)");
+    }
+    if (freeze_eeq && CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("GFN-FF: Phase-2 EEQ frozen (static_charges mode)");
     }
     if (do_eeq) {
         topo_ptr = &getCachedTopology();
@@ -987,15 +1231,44 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             t_cnf = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
         }
 
-        int total_threads = m_parameters.value("threads", 1);
+        int total_threads = m_threads;  // WP1: cached member, see GFNFF::setThreadCount
         auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
         if (pool) pool->setActiveThreadCount(total_threads);
 
-        // Sparse dcn matrices only needed for CPU path (GPU has k_cn_chainrule kernel)
-        if (!gpu_only) {
+        // CN-derivative pair list only needed for CPU path (GPU has k_cn_chainrule kernel).
+        // Claude Generated (WP4, May 2026): CNDerivStore replaces std::vector<SpMatrix>.
+        // WP-C (May 2026): explicit 40.0 Bohr cutoff (squared) — consistent with the
+        // topology-init CN cutoff in lines 3440 / 6766 / 6892. CN derivatives need a
+        // larger range than the per-step CN (cn_cutoff_bohr=6.0) because the gradient
+        // of erf-CN extends further than the value itself. This 40 Bohr matches the
+        // "standard GFN-FF" topology threshold and is independent from cn_cutoff_bohr.
+        // WP6/G2c Phase C (May 2026): if eeq_distance_cutoff > 40, extend the dcn
+        // stencil to cover the Coulomb pair range. Term 1b's reach is bounded by
+        // cn_cutoff_bohr (~6 Bohr) in practice, but we never reduce below 40 — taking
+        // max() keeps Hellmann-Feynman consistent for any eeq_distance_cutoff > 0.
+        // WP-D Stage D (May 2026): skip when fused CN+DCN path already produced m_last_dcn.
+#ifdef GFNFF_CN_DCN_FUSION
+        if (!gpu_only && !reuse_cn && !m_used_fused_cn_dcn) {
+#else
+        if (!gpu_only && !reuse_cn) {
+#endif
             t0 = std::chrono::high_resolution_clock::now();
-            std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(m_last_cn, 1600.0, pool, total_threads);
-            m_last_dcn = dcn;
+            const double eeq_cut  = m_parameters.value("eeq_distance_cutoff", 0.0);
+            double disp_cut = m_parameters.value("dispersion_cutoff_bohr", 0.0);
+            if (disp_cut <= 0.0 && m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+                disp_cut = m_parameters["gfnff"].value("dispersion_cutoff_bohr", 0.0);
+            // WP-Disp (Mai 2026): extend stencil for dispersion cutoff (Site D).
+            // dC6(i,j)/dCN(i) * dCN(i)/dx_k requires CN derivatives to reach all j
+            // in the active dispersion pair-list; stencil must cover that range.
+            const double max_nonbonded_cut = std::max({ 40.0, eeq_cut, disp_cut });
+            const double cn_deriv_cutoff_sq = max_nonbonded_cut * max_nonbonded_cut;
+            // WP-D Stage A (May 2026): pass cn_raw to skip the N²-erf loop in dcn step 1.
+            // WP-D Stage C (May 2026): pass neighbor list (when available) to replace the
+            // N²-threshold scan in dcn step 3 with O(k) neighbor iteration.
+            const std::vector<std::vector<int>>* nbr_ptr =
+                m_last_cn_neighbors.empty() ? nullptr : &m_last_cn_neighbors;
+            m_last_dcn = calculateCoordinationNumberDerivatives(
+                m_last_cn, m_last_cn_raw, cn_deriv_cutoff_sq, pool, total_threads, nbr_ptr);
             if (do_timing) {
                 t_dcn = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
             }
@@ -1004,7 +1277,8 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         // D4 Gaussian weights + derivatives needed for dc6dcn.
         // gpu_only: GPU computes gw + dgw + dc6dcn entirely on device (Phase 6).
         // CPU path: compute gw + dgw + dc6dcn matrix on CPU.
-        if (m_d4_generator && !gpu_only) {
+        // Static-Mode (WP-S1): skip recompute when CN frozen — d4_generator's cached dc6dcn matrix stays valid.
+        if (m_d4_generator && !gpu_only && !reuse_cn) {
             t0 = std::chrono::high_resolution_clock::now();
             std::vector<double> cn_std(m_last_cn.data(), m_last_cn.data() + m_last_cn.size());
             m_d4_generator->updateCNValuesForGradient(cn_std, pool, total_threads,
@@ -1078,11 +1352,16 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 
         if (do_eeq && !skip_eeq && !eeq_charges_current) {
             t0 = std::chrono::high_resolution_clock::now();
+            // Claude Generated (WP2, May 2026): pass thread pool through to enable
+            // Stage-4 batched per-fragment LU parallelisation in the energy-only path.
+            // Mirrors the gradient-path call at gfnff_method.cpp:1025-1029.
+            auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+            if (pool) pool->setActiveThreadCount(m_threads);
             Vector new_charges = m_eeq_solver->calculateFinalCharges(
                 m_atoms, m_geometry_bohr, m_charge,
                 topo_ptr->topology_charges, m_last_cn,
                 topo_ptr->hybridization, eeq_topo,
-                true, topo_ptr->alpeeq);
+                true, topo_ptr->alpeeq, pool, m_threads);
             if (do_timing) {
                 t_eeq_solve = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
             }
@@ -1107,19 +1386,44 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         }
     }
 
+    // WP-P1 (May 2026): cache phase-timings into a member so MD diagnostics can read them
+    // after every Calculation() pass, independent of whether the caller passed out_timing.
+    m_last_prep_timing.total = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_prep_total).count();
+    m_last_prep_timing.cn = t_cn;
+    m_last_prep_timing.eeq_topo = t_eeq_topo;
+    m_last_prep_timing.cnf = t_cnf;
+    m_last_prep_timing.dcn = t_dcn;
+    m_last_prep_timing.d4_gw = t_d4_gw;
+    m_last_prep_timing.eeq_solve = t_eeq_solve;
+    m_last_prep_timing.charge_dist = t_charge_dist;
     if (out_timing) {
-        out_timing->total = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_prep_total).count();
-        out_timing->cn = t_cn;
-        out_timing->eeq_topo = t_eeq_topo;
-        out_timing->cnf = t_cnf;
-        out_timing->dcn = t_dcn;
-        out_timing->d4_gw = t_d4_gw;
-        out_timing->eeq_solve = t_eeq_solve;
-        out_timing->charge_dist = t_charge_dist;
+        *out_timing = m_last_prep_timing;
     }
 
     if (m_skip_eeq_recalc && CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Phase-2 EEQ recalculation SKIPPED (charge injection mode)");
+    }
+
+    // Static-Mode (WP-S1): capture initial CN/charges after the first successful call.
+    // Subsequent calls with reuse_cn / freeze_eeq reuse these values.
+    if ((m_static_charges || m_static_cn) && !m_static_state_captured) {
+        bool cn_ok = (m_last_cn.size() == m_atomcount);
+        bool charges_ok = (m_charges.size() == m_atomcount) && m_charges.allFinite();
+        // Fallback for static_charges when Phase 2 did not run: seed from topology_charges (Phase 1)
+        if (m_static_charges && !charges_ok) {
+            const TopologyInfo& topo = getCachedTopology();
+            if (topo.topology_charges.size() == m_atomcount) {
+                m_charges = topo.topology_charges;
+                charges_ok = true;
+                CurcumaLogger::info("Static-mode: seeded initial charges from Phase-1 topology_charges (Phase 2 not run)");
+            }
+        }
+        if (cn_ok && (charges_ok || !m_static_charges)) {
+            m_static_state_captured = true;
+            CurcumaLogger::info(fmt::format(
+                "Static-mode captured: cn_size={}, charges_size={}, frozen_charges={}, frozen_cn={}",
+                m_last_cn.size(), m_charges.size(), m_static_charges, m_static_cn));
+        }
     }
 
     // Verbosity 3: per-atom parameter table (CN, EEQ charge, hybridization, fragment)
@@ -1363,6 +1667,21 @@ double GFNFF::Calculation(bool gradient)
     const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
     double t_cn = 0, t_threads = 0, t_hbxb_update = 0;
 
+    // WP-FF-DistMatrix-Sharing (May 2026): compute packed sqrab/srab ONCE for this
+    // energy/gradient call BEFORE any consumer reads m_shared_srab. Mirrors XTB
+    // gfnff_engrad.F90:175-195. Order matters: EEQSolver Phase 2 (invoked inside
+    // prepareCNAndEEQ) reads m_external_srab — if we set the pointer first but
+    // forget to refresh m_shared_srab to the CURRENT geometry, Phase 2 sees stale
+    // distances from the previous MD step and produces wrong charges → wrong
+    // gradient → CSVR thermostat exchange ~2× XTB reference (commit 94bdeec bug).
+    computeSharedDistances();
+    if (m_forcefield) {
+        m_forcefield->setSharedDistances(&m_shared_srab, &m_shared_sqrab);
+    }
+    if (m_eeq_solver) {
+        m_eeq_solver->setExternalDistances(&m_shared_srab);
+    }
+
     // Phase A: CN + EEQ calculation (delegated to extracted helper)
     PrepTiming prep_timing{};  // zero-initialize so unused fields are 0.0
     {
@@ -1427,7 +1746,7 @@ double GFNFF::Calculation(bool gradient)
         t_solv = std::chrono::duration<double, std::milli>(
             std::chrono::high_resolution_clock::now() - t_solv_start).count();
 
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::result(fmt::format("Solvation energy: {:.8f} Eh ({} = {})",
                 solv_parts.total(), "ALPB", m_solvent));
             if (CurcumaLogger::get_verbosity() >= 2) {
@@ -1457,8 +1776,13 @@ double GFNFF::Calculation(bool gradient)
         m_gradient = grad_hartree;  // No conversion needed
 
         // Claude Generated (Mar 2026): Add ALPB solvation gradient
+        // WP-G (May 2026): ALPB takes ColumnMajor Matrix; convert at the boundary.
+        // ALPB is not in the hot path — one 50 KB conversion per energy call is fine.
         if (m_solvation) {
-            m_solvation->addGradient(m_atoms, m_geometry_bohr, m_charges, m_gradient);
+            Matrix geom_col = m_geometry_bohr;
+            Matrix grad_col = m_gradient;
+            m_solvation->addGradient(m_atoms, geom_col, m_charges, grad_col);
+            m_gradient = grad_col;
         }
 
         // Apr 2026 NaN trap: when the combined gradient contains NaN/Inf, scan each
@@ -1699,6 +2023,15 @@ double GFNFF::Calculation(bool gradient)
             rep.nonbonded_rep = comp.nonbonded_rep;
             rep.coulomb       = comp.coulomb;
             rep.hbond         = comp.hbond;
+            // Claude Generated (May 2026, HB-investigation): per-case split for Fortran comparison
+            rep.hbond_case1   = comp.hbond_case1;
+            rep.hbond_case2   = comp.hbond_case2;
+            rep.hbond_case3   = comp.hbond_case3;
+            rep.hbond_case4   = comp.hbond_case4;
+            rep.hbond_case1_count = comp.hbond_case1_count;
+            rep.hbond_case2_count = comp.hbond_case2_count;
+            rep.hbond_case3_count = comp.hbond_case3_count;
+            rep.hbond_case4_count = comp.hbond_case4_count;
             rep.xbond         = comp.xbond;
             rep.atm           = comp.atm;
             rep.batm          = comp.batm;
@@ -1713,6 +2046,15 @@ double GFNFF::Calculation(bool gradient)
             rep.nonbonded_rep = m_forcefield->NonbondedRepulsionEnergy();
             rep.coulomb       = m_forcefield->CoulombEnergy();
             rep.hbond         = m_forcefield->HydrogenBondEnergy();
+            // Claude Generated (May 2026, HB-investigation): per-case split for Fortran comparison
+            rep.hbond_case1   = m_forcefield->HBondCase1Energy();
+            rep.hbond_case2   = m_forcefield->HBondCase2Energy();
+            rep.hbond_case3   = m_forcefield->HBondCase3Energy();
+            rep.hbond_case4   = m_forcefield->HBondCase4Energy();
+            rep.hbond_case1_count = m_forcefield->HBondCase1Count();
+            rep.hbond_case2_count = m_forcefield->HBondCase2Count();
+            rep.hbond_case3_count = m_forcefield->HBondCase3Count();
+            rep.hbond_case4_count = m_forcefield->HBondCase4Count();
             rep.xbond         = m_forcefield->HalogenBondEnergy();
             rep.atm           = m_forcefield->ATMEnergy();
             rep.batm          = m_forcefield->BatmEnergy();
@@ -2088,6 +2430,7 @@ GFNFF::GFNFFResults GFNFF::getResults() const
 void GFNFF::setParameters(const json& parameters)
 {
     m_parameters = MergeJson(m_parameters, parameters);
+    m_threads = m_parameters.value("threads", m_threads);  // Claude Generated (WP1, May 2026)
 
     if (m_forcefield && m_initialized) {
         json ff_params = generateGFNFFParameters();
@@ -2261,7 +2604,11 @@ bool GFNFF::importTopology(const json& topo_json)
     }
 
     // Import into cached topology
-    TopologyInfo& topo = m_cached_topology.emplace();
+    // Claude Generated (May 2026, ICX-build): explicit assign instead of emplace() —
+    // ICX rejects the no-arg emplace if TopologyInfo's default ctor isn't visible
+    // through the GFNFFTopology+GFNFFDynamicState multi-inheritance pattern.
+    m_cached_topology = TopologyInfo{};
+    TopologyInfo& topo = *m_cached_topology;
 
     // Fragment information
     topo.nfrag = topo_json.value("nfrag", 1);
@@ -2413,8 +2760,34 @@ bool GFNFF::initializeForceField()
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Creating ForceField instance...");
-        CurcumaLogger::param("threads", std::to_string(m_parameters.value("threads", 1)));
+        CurcumaLogger::param("threads", std::to_string(m_threads));  // WP1
         CurcumaLogger::param("gradient", std::to_string(m_parameters.value("gradient", 1)));
+    }
+
+    // Claude Generated (WP-C, May 2026): cutoff configuration summary at init time.
+    // Visibility at verbosity >= 2 so operators can see which cutoffs are active without
+    // digging through code. Mirrors docs/wp4/cutoff-inventory.md.
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("GFN-FF cutoff configuration:");
+        const double cn_cut = m_parameters.value("cn_cutoff_bohr", 6.0);
+        const double cn_acc = m_parameters.value("cn_accuracy", 1.0);
+        const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
+        CurcumaLogger::param("  cn_cutoff_bohr",
+            fmt::format("{:.2f} Bohr  (per-step CN neighbor list)", cn_cut));
+        CurcumaLogger::param("  cn_accuracy",
+            fmt::format("{:.2f}  (used when cn_cutoff_bohr=0)", cn_acc));
+        CurcumaLogger::param("  cn_deriv_cutoff",
+            std::string("40.00 Bohr  (hardcoded, topology-init + per-step CN derivatives)"));
+        CurcumaLogger::param("  eeq_distance_cutoff",
+            fmt::format("{:.2f} Bohr  ({})", eeq_cut,
+                eeq_cut > 0.0 ? "OPT-IN — Hellmann-Feynman risk if inconsistent across sites"
+                              : "0 = full Coulomb (matches Fortran goed_gfnff)"));
+        CurcumaLogger::param("  coulomb_pair_r_cut",
+            std::string("100.00 Bohr  (per-pair, hardcoded; effective no-cutoff for typical chemistry)"));
+        CurcumaLogger::param("  dispersion_r_cut",
+            std::string("D3: 38.73 Bohr (sqrt(dispthr=1500))  |  D4: 50.0 Bohr (pair eval) / 60.0 Bohr (pair generation)"));
+        CurcumaLogger::param("  hb_r_cut / xb_r_cut / rep_r_cut",
+            std::string("50.0 / 20.0 / 20.0 Bohr  (Struct defaults, set per pair)"));
     }
 
     m_forcefield = new ForceField(ff_config);
@@ -2519,7 +2892,7 @@ bool GFNFF::initializeForceField()
             if (topo_out.is_open()) {
                 topo_out << topo_export.dump(2);
                 topo_out.close();
-                if (CurcumaLogger::get_verbosity() >= 1) {
+                if (CurcumaLogger::get_verbosity() >= 2) {
                     CurcumaLogger::success(fmt::format("Topology cache saved to {}", topo_file));
                 }
             }
@@ -2553,7 +2926,8 @@ bool GFNFF::initializeForceField()
                         : 0.0;
         }
 
-        std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(cn);
+        // Claude Generated (WP4, May 2026): CNDerivStore replaces std::vector<SpMatrix>
+        CNDerivStore dcn = calculateCoordinationNumberDerivatives(cn);
         m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
 
         if (CurcumaLogger::get_verbosity() >= 3) {
@@ -2564,7 +2938,7 @@ bool GFNFF::initializeForceField()
     // Claude Generated (Mar 2026): Create FFWorkspace from copy of ff_params (single generation)
     // CRITICAL: Do NOT call generateGFNFFParameterSet() again — a third call causes heap corruption.
     {
-        int num_threads = m_parameters.value("threads", 1);
+        int num_threads = m_threads;  // WP1
         m_workspace = std::make_unique<FFWorkspace>(num_threads);
         m_workspace->setAtomTypes(m_atoms);
 
@@ -2657,7 +3031,7 @@ json GFNFF::generateGFNFFParameters()
         // Claude Generated (Feb 2026): Parallel parameter generation
         // After bonds, 6 phases are independent and can run in parallel:
         //   angles, torsions, inversions, coulomb, repulsion, dispersion
-        int thread_count = m_parameters.value("threads", 1);
+        int thread_count = m_threads;  // WP1
 
         if (thread_count > 1) {
             // Parallel path: use CxxThreadPool for inter-phase parallelism
@@ -2848,12 +3222,14 @@ json GFNFF::generateGFNFFParameters()
         parameters["vdws"] = json::array(); // Legacy vdW (will be replaced by pairwise)
 
         // Phase 2.3: HB/XB Detection (Claude Generated 2025)
+        // Claude Generated (May 2026, HB-investigation): topology_charges (Phase-1) matches
+        // Fortran gfnff_ini.f90:807-839; eeq_charges (Phase-2) over-polarizes the filter.
         if (m_parameters.value("hbond", true)) {
-            parameters["gfnff_hbonds"] = detectHydrogenBonds(topo_info.eeq_charges);
-            parameters["gfnff_xbonds"] = detectHalogenBonds(topo_info.eeq_charges);
+            parameters["gfnff_hbonds"] = detectHydrogenBonds(topo_info.topology_charges);
+            parameters["gfnff_xbonds"] = detectHalogenBonds(topo_info.topology_charges);
         }
 
-        parameters["hbonds"] = detectHydrogenBonds(topo_info.eeq_charges);  // Legacy (backward compat)
+        parameters["hbonds"] = detectHydrogenBonds(topo_info.topology_charges);  // Legacy (backward compat)
 
         // Claude Generated (Feb 21, 2026): Populate bond nr_hb and bond_hb_data
         // Reference: Fortran gfnff_ini2.f90:1008-1060 (bond_hb_AHB_set0/set1)
@@ -3025,9 +3401,10 @@ json GFNFF::generateGFNFFParameters()
         parameters["vdws"] = json::array(); // Legacy vdW (will be replaced by pairwise)
 
         // Phase 2.3: HB/XB Detection (Claude Generated 2025)
+        // Claude Generated (May 2026, HB-investigation): use Phase-1 topology_charges to match Fortran.
         if (m_parameters.value("hbond", true)) {
-            parameters["gfnff_hbonds"] = detectHydrogenBonds(topo_info.eeq_charges);
-            parameters["gfnff_xbonds"] = detectHalogenBonds(topo_info.eeq_charges);
+            parameters["gfnff_hbonds"] = detectHydrogenBonds(topo_info.topology_charges);
+            parameters["gfnff_xbonds"] = detectHalogenBonds(topo_info.topology_charges);
         }
 
         // Claude Generated (Feb 21, 2026): Populate bond nr_hb (basic mode, same as advanced)
@@ -3191,11 +3568,16 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     if (do_timing) t_batm = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
 
     // HB/XB detection
+    // Claude Generated (May 2026, HB-investigation): use Phase-1 topology_charges (qa)
+    // to match Fortran gfnff_ini.f90:807-839 — Fortran uses topo%qa for HB-H and AB-pair
+    // filtering. Phase-2 EEQ charges are over-polarized and let too many atoms pass the
+    // HB-eligibility thresholds (polymer: 274 H, 46032 HB-bonds vs Fortran ~30 H, 2298 HB).
+    // The runtime re-detection path at line ~1314 already uses topology_charges correctly.
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (m_parameters.value("hbond", true)) {
-        params.hbonds = detectHydrogenBondsNative(topo_info.eeq_charges);
+        params.hbonds = detectHydrogenBondsNative(topo_info.topology_charges);
 
-        params.xbonds = detectHalogenBondsNative(topo_info.eeq_charges);
+        params.xbonds = detectHalogenBondsNative(topo_info.topology_charges);
 
         // Claude Generated (Apr 2026): Cache init-time HB/XB lists so updateHBXBIfNeeded()
         // can skip redundant re-detection on the first calculateEnergy() call when
@@ -3265,7 +3647,7 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     m_param_gen_report.t_crossref   = pos(t_crossref);
     m_param_gen_report.t_param_gen_total = m_param_gen_time_ms;
     m_param_gen_report.n_atoms     = m_atomcount;
-    m_param_gen_report.n_threads   = m_parameters.value("threads", 1);
+    m_param_gen_report.n_threads   = m_threads;  // WP1
     m_param_gen_report.backend     = (m_param_gen_report.n_threads > 1)
                                        ? GFNFFParamGenReport::CxxThreadPool
                                        : GFNFFParamGenReport::Sequential;
@@ -3416,8 +3798,16 @@ json GFNFF::generateGFNFFAngles(const TopologyInfo& topo_info) const
     //           Reduces CN overhead from 26 seconds to 0.01 seconds (2600× speedup!)
     //
     // LESSON: Always identify and eliminate redundant calculations in nested loops.
-    const double threshold_cn_squared = 40.0 * 40.0;  // ~40 Bohr cutoff (standard GFN-FF)
-    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, threshold_cn_squared);
+    // CN VALUE cutoff = 40 Bohr (squared). This is the conservative outer bound for
+    // CN sum contributions; the erf counting term is essentially zero beyond ~10 Bohr,
+    // so 40 Bohr is a safety margin. Distinct from cn_deriv_cutoff_sq at line ~1014
+    // which controls the CN-DERIVATIVE store reach (Term 1b stencil) and may grow
+    // with eeq_distance_cutoff. The same 40-Bohr value also appears in
+    // generateAnglesNative() and the legacy generateGFNFFAngles() — kept hardcoded
+    // here rather than promoted to a PARAM because it is a Fortran-matching internal
+    // tolerance, not a user-tunable knob.
+    constexpr double cn_value_cutoff_sq = 40.0 * 40.0;
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_value_cutoff_sq);
     Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
     // Claude Generated (February 2026): Phase 2 - OpenMP Angle Loop Parallelization
@@ -5361,11 +5751,20 @@ bool GFNFF::loadGFNFFCharges()
 // Advanced GFN-FF Parameter Generation (Placeholder implementations)
 // =================================================================================
 
-std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, double threshold, CxxThreadPool* pool, int num_threads) const
+CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, const Vector& cn_raw_in,
+                                                           double threshold, CxxThreadPool* pool, int num_threads,
+                                                           const std::vector<std::vector<int>>* neighbors) const
 {
-    // Claude Generated (Mar 2026, Phase 3): Sparse dcn matrices
-    // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²) loops
+    // Claude Generated (Mar 2026, Phase 3): Sparse dcn matrices — replaced WP4 May 2026
+    // Claude Generated (WP4, May 2026): Pair-list output (CNDerivStore) instead of 3× SpMatrix.
+    // Inner-loop math is identical to the SpMatrix version. The two storage variants both
+    // compute (M*v)(i,d) = diag(i,d)*v(i) + Σ_{j: pair (i,j)} comp_d(i,j) * v(j).
     // Reference: external/gfnff/src/gfnff_cn.f90:94-117
+    //
+    // WP-D Stage A (May 2026): when cn_raw_in is populated (size == m_atomcount),
+    // step 1 (the N²-erf loop that recomputes cn_raw) is skipped. Saves ~10 ms/step
+    // on polymer N=1410 (WP-P2 baseline).
+    const bool have_cn_raw = (cn_raw_in.size() == m_atomcount);
 
     const double kn = -7.5;
     const double cnmax = 4.4;
@@ -5379,9 +5778,14 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
         rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * ANG2BOHR;
     }
 
-    // Step 1: Compute raw CN — parallelise over atoms (each atom independent)
-    Vector cn_raw = Vector::Zero(m_atomcount);
-    if (num_threads > 1 && m_atomcount > 64) {
+    // Step 1: Compute raw CN — parallelise over atoms (each atom independent).
+    // WP-D Stage A (May 2026): if caller provided cn_raw_in, reuse it and skip the recompute.
+    Vector cn_raw;
+    if (have_cn_raw) {
+        cn_raw = cn_raw_in;  // shallow Eigen copy; small (size N doubles)
+    } else if (num_threads > 1 && m_atomcount > 64) {
+        cn_raw = Vector::Zero(m_atomcount);
+        // legacy threaded recompute below — only entered when caller did not pass cn_raw_in
         int T = std::min(num_threads, m_atomcount);
         auto cn_worker = [&](int t_id) {
             for (int i = t_id; i < m_atomcount; i += T) {
@@ -5415,6 +5819,7 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
             for (auto& th : threads) th.join();
         }
     } else {
+        cn_raw = Vector::Zero(m_atomcount);
         for (int i = 0; i < m_atomcount; ++i) {
             double cn_i = 0.0;
             Eigen::Vector3d pos_i = m_geometry_bohr.row(i);
@@ -5437,18 +5842,21 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
         dlogdcn[i] = std::exp(cnmax) / (std::exp(cnmax) + std::exp(cn_raw[i]));
     }
 
-    // Step 3: Build sparse dcn via triplet lists
-    // Parallelise with thread-local triplets + diag arrays, merge after join
+    // Step 3: Build CN-derivative pair list and diagonal contributions.
+    // Two pairs per (i,j) pair: (i,j, -dlogdcn_j*comp) and (j,i, +dlogdcn_i*comp).
+    CNDerivStore store;
+    store.natoms = m_atomcount;
+    store.diag = Matrix::Zero(m_atomcount, 3);
+
     if (num_threads > 1 && m_atomcount > 64) {
         int T = std::min(num_threads, m_atomcount);
 
-        // Thread-local storage
+        // Per-thread output buffer — eliminates contention; merged in main thread after join.
         struct ThreadLocalData {
-            std::vector<std::vector<Eigen::Triplet<double>>> triplets{3};
-            std::vector<double> diag_x, diag_y, diag_z;
-            ThreadLocalData(int N) : diag_x(N, 0.0), diag_y(N, 0.0), diag_z(N, 0.0) {
-                int est = N * 40 / 4 + 100;
-                for (int d = 0; d < 3; ++d) triplets[d].reserve(est);
+            std::vector<CNDerivPair> pairs;
+            Matrix diag;
+            ThreadLocalData(int N) : diag(Matrix::Zero(N, 3)) {
+                pairs.reserve(static_cast<size_t>(N) * 40 / 4 * 2 + 100);
             }
         };
         std::vector<ThreadLocalData> tld;
@@ -5457,47 +5865,157 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
 
         auto dcn_worker = [&](int t_id) {
             auto& local = tld[t_id];
+
+#ifdef GFNFF_FAST_EXP
+            // Claude Generated (May 2026, WP-D Stage B v2): three-pass dcn step 3
+            // with SoA-layout scratch and fixed-size pre-allocation. Replaces the
+            // earlier 7×std::vector::push_back design that lost the SIMD-exp gain
+            // to vector-metadata cache traffic.
+            //
+            // Scratch layout (per thread, allocated once, NEVER cleared per i —
+            // we use the running counter K and write by index):
+            //   buf_x_sq   : contiguous double[N]  → SIMD-friendly input to fast_exp
+            //   buf_exp    : contiguous double[N]  → SIMD output
+            //   buf_scatter: Eigen Matrix N×4 RowMajor [K_x, K_y, K_z, dlogdcn_j]
+            //                each row = 32 bytes = ½ cache line per surviving pair
+            //   buf_j      : int[N]
+            //
+            // Pass A writes 1 row of buf_scatter (32 B contiguous) + 1 double to
+            // buf_x_sq + 1 int to buf_j per surviving pair — total ~3 cache lines
+            // touched per pair (was 7 with the push_back version).
+            Eigen::Matrix<double, Eigen::Dynamic, 4, Eigen::RowMajor> buf_scatter(m_atomcount, 4);
+            std::vector<int>    buf_j(m_atomcount);
+            std::vector<double> buf_x_sq(m_atomcount);
+            std::vector<double> buf_exp(m_atomcount);
+#endif
+
             // Interleaved row assignment for triangular load-balancing
             for (int i = t_id; i < m_atomcount; i += T) {
                 Eigen::Vector3d ri = m_geometry_bohr.row(i);
                 double dlogdcn_i = dlogdcn[i];
 
-                for (int j = 0; j < i; ++j) {
-                    Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
-                    double r_ij_sq = r_ij_vec.squaredNorm();
-                    if (r_ij_sq > threshold) continue;
+#ifdef GFNFF_FAST_EXP
+                // --- Pass A: collect surviving (i,j) pairs ---
+                int K = 0;
+                // WP-D Stage C: neighbor list available → O(k) iteration, no threshold check.
+                // Otherwise: full N² triangle with distance threshold.
+                if (neighbors != nullptr) {
+                    for (int j : (*neighbors)[i]) {
+                        if (j >= i) continue;  // upper triangle only
+                        Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                        double r_ij_sq = r_ij_vec.squaredNorm();
+                        double r_ij = std::sqrt(r_ij_sq);
+                        double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                        double dr = (r_ij - rcov_sum) / rcov_sum;
+                        double factor = (kn / sqrtpi) / (rcov_sum * r_ij);
+                        buf_j[K]    = j;
+                        buf_x_sq[K] = kn * kn * dr * dr;
+                        buf_scatter(K, 0) = factor * r_ij_vec[0];
+                        buf_scatter(K, 1) = factor * r_ij_vec[1];
+                        buf_scatter(K, 2) = factor * r_ij_vec[2];
+                        buf_scatter(K, 3) = dlogdcn[j];
+                        ++K;
+                    }
+                } else {
+                    for (int j = 0; j < i; ++j) {
+                        Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                        double r_ij_sq = r_ij_vec.squaredNorm();
+                        if (r_ij_sq > threshold) continue;
 
-                    double r_ij = std::sqrt(r_ij_sq);
-                    double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
-                    double dr = (r_ij - rcov_sum) / rcov_sum;
-                    double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
+                        double r_ij = std::sqrt(r_ij_sq);
+                        double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                        double dr = (r_ij - rcov_sum) / rcov_sum;
+                        // factor folds (kn/sqrtpi), 1/rcov_sum, and 1/r_ij of grad_dir.
+                        // Then comp = (factor * r_ij_vec) * exp(-kn²·dr²) — mathematically
+                        // equivalent to the reference derfCN_dr * (r_ij_vec / r_ij).
+                        double factor = (kn / sqrtpi) / (rcov_sum * r_ij);
 
-                    Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
-                    double dlogdcn_j = dlogdcn[j];
-
-                    double comp_x = derfCN_dr * grad_dir[0];
-                    double comp_y = derfCN_dr * grad_dir[1];
-                    double comp_z = derfCN_dr * grad_dir[2];
-
-                    local.diag_x[i] -= dlogdcn_i * comp_x;
-                    local.diag_y[i] -= dlogdcn_i * comp_y;
-                    local.diag_z[i] -= dlogdcn_i * comp_z;
-
-                    local.diag_x[j] += dlogdcn_j * comp_x;
-                    local.diag_y[j] += dlogdcn_j * comp_y;
-                    local.diag_z[j] += dlogdcn_j * comp_z;
-
-                    local.triplets[0].emplace_back(i, j, -dlogdcn_j * comp_x);
-                    local.triplets[0].emplace_back(j, i,  dlogdcn_i * comp_x);
-                    local.triplets[1].emplace_back(i, j, -dlogdcn_j * comp_y);
-                    local.triplets[1].emplace_back(j, i,  dlogdcn_i * comp_y);
-                    local.triplets[2].emplace_back(i, j, -dlogdcn_j * comp_z);
-                    local.triplets[2].emplace_back(j, i,  dlogdcn_i * comp_z);
+                        buf_j[K]    = j;
+                        buf_x_sq[K] = kn * kn * dr * dr;
+                        buf_scatter(K, 0) = factor * r_ij_vec[0];
+                        buf_scatter(K, 1) = factor * r_ij_vec[1];
+                        buf_scatter(K, 2) = factor * r_ij_vec[2];
+                        buf_scatter(K, 3) = dlogdcn[j];
+                        ++K;
+                    }
                 }
+
+                // --- Pass B: vectorized exp(-x_sq) over the surviving-pair buffer ---
+                curcuma::gfnff::fast_exp_neg_sq_block(buf_x_sq.data(), buf_exp.data(), static_cast<std::size_t>(K));
+
+                // --- Pass C: scatter back to local.diag and local.pairs ---
+                for (int k = 0; k < K; ++k) {
+                    int j = buf_j[k];
+                    double e = buf_exp[k];
+                    double comp_x = buf_scatter(k, 0) * e;
+                    double comp_y = buf_scatter(k, 1) * e;
+                    double comp_z = buf_scatter(k, 2) * e;
+                    double dlogdcn_j = buf_scatter(k, 3);
+
+                    local.diag(i, 0) -= dlogdcn_i * comp_x;
+                    local.diag(i, 1) -= dlogdcn_i * comp_y;
+                    local.diag(i, 2) -= dlogdcn_i * comp_z;
+
+                    local.diag(j, 0) += dlogdcn_j * comp_x;
+                    local.diag(j, 1) += dlogdcn_j * comp_y;
+                    local.diag(j, 2) += dlogdcn_j * comp_z;
+
+                    local.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
+                    local.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
+                }
+#else
+                // WP-D Stage C: neighbor list available → O(k) iteration, no threshold check.
+                if (neighbors != nullptr) {
+                    for (int j : (*neighbors)[i]) {
+                        if (j >= i) continue;
+                        Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                        double r_ij = std::sqrt(r_ij_vec.squaredNorm());
+                        double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                        double dr = (r_ij - rcov_sum) / rcov_sum;
+                        double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
+                        Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
+                        double dlogdcn_j = dlogdcn[j];
+                        double comp_x = derfCN_dr * grad_dir[0];
+                        double comp_y = derfCN_dr * grad_dir[1];
+                        double comp_z = derfCN_dr * grad_dir[2];
+                        local.diag(i, 0) -= dlogdcn_i * comp_x;
+                        local.diag(i, 1) -= dlogdcn_i * comp_y;
+                        local.diag(i, 2) -= dlogdcn_i * comp_z;
+                        local.diag(j, 0) += dlogdcn_j * comp_x;
+                        local.diag(j, 1) += dlogdcn_j * comp_y;
+                        local.diag(j, 2) += dlogdcn_j * comp_z;
+                        local.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
+                        local.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
+                    }
+                } else {
+                    for (int j = 0; j < i; ++j) {
+                        Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                        double r_ij_sq = r_ij_vec.squaredNorm();
+                        if (r_ij_sq > threshold) continue;
+                        double r_ij = std::sqrt(r_ij_sq);
+                        double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                        double dr = (r_ij - rcov_sum) / rcov_sum;
+                        double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
+                        Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
+                        double dlogdcn_j = dlogdcn[j];
+                        double comp_x = derfCN_dr * grad_dir[0];
+                        double comp_y = derfCN_dr * grad_dir[1];
+                        double comp_z = derfCN_dr * grad_dir[2];
+                        local.diag(i, 0) -= dlogdcn_i * comp_x;
+                        local.diag(i, 1) -= dlogdcn_i * comp_y;
+                        local.diag(i, 2) -= dlogdcn_i * comp_z;
+                        local.diag(j, 0) += dlogdcn_j * comp_x;
+                        local.diag(j, 1) += dlogdcn_j * comp_y;
+                        local.diag(j, 2) += dlogdcn_j * comp_z;
+                        // Two off-diagonal entries per (i,j) pair: M(i,j) and M(j,i).
+                        local.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
+                        local.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
+                    }
+                }
+#endif
             }
         };
 
-        // Claude Generated (Mar 2026): pool->enqueue() reuses persistent workers
         if (pool) {
             std::vector<std::future<void>> futures;
             futures.reserve(T - 1);
@@ -5513,105 +6031,334 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
             for (auto& th : threads) th.join();
         }
 
-        // Merge: concatenate triplets, reduce diag arrays
-        std::vector<std::vector<Eigen::Triplet<double>>> merged_triplets(3);
-        std::vector<double> diag_x(m_atomcount, 0.0), diag_y(m_atomcount, 0.0), diag_z(m_atomcount, 0.0);
-
+        // Merge: append per-thread pair vectors, sum per-thread diag matrices.
+        size_t total_pairs = 0;
+        for (int t = 0; t < T; ++t) total_pairs += tld[t].pairs.size();
+        store.pairs.reserve(total_pairs);
         for (int t = 0; t < T; ++t) {
-            for (int d = 0; d < 3; ++d) {
-                merged_triplets[d].insert(merged_triplets[d].end(),
-                    tld[t].triplets[d].begin(), tld[t].triplets[d].end());
-            }
-            for (int i = 0; i < m_atomcount; ++i) {
-                diag_x[i] += tld[t].diag_x[i];
-                diag_y[i] += tld[t].diag_y[i];
-                diag_z[i] += tld[t].diag_z[i];
-            }
+            store.pairs.insert(store.pairs.end(), tld[t].pairs.begin(), tld[t].pairs.end());
+            store.diag += tld[t].diag;
         }
-
-        // Add diagonal entries
-        for (int i = 0; i < m_atomcount; ++i) {
-            if (diag_x[i] != 0.0) merged_triplets[0].emplace_back(i, i, diag_x[i]);
-            if (diag_y[i] != 0.0) merged_triplets[1].emplace_back(i, i, diag_y[i]);
-            if (diag_z[i] != 0.0) merged_triplets[2].emplace_back(i, i, diag_z[i]);
-        }
-
-        // Build sparse matrices
-        std::vector<SpMatrix> dcn(3);
-        for (int dim = 0; dim < 3; ++dim) {
-            dcn[dim].resize(m_atomcount, m_atomcount);
-            dcn[dim].setFromTriplets(merged_triplets[dim].begin(), merged_triplets[dim].end());
-            dcn[dim].makeCompressed();
-        }
-        return dcn;
+        return store;
     }
 
     // Sequential path (num_threads <= 1 or small molecule)
-    std::vector<double> diag_x(m_atomcount, 0.0);
-    std::vector<double> diag_y(m_atomcount, 0.0);
-    std::vector<double> diag_z(m_atomcount, 0.0);
+    store.pairs.reserve(static_cast<size_t>(m_atomcount) * 40 + 100);
 
-    std::vector<std::vector<Eigen::Triplet<double>>> triplets(3);
-    const int est_triplets = m_atomcount * 40 + 100;
-    for (int dim = 0; dim < 3; ++dim) {
-        triplets[dim].reserve(est_triplets);
-    }
+#ifdef GFNFF_FAST_EXP
+    // Claude Generated (May 2026, WP-D Stage B v2): SoA scratch (Eigen Matrix +
+    // pre-allocated std::vector), no per-i clear, counter K with indexed writes.
+    Eigen::Matrix<double, Eigen::Dynamic, 4, Eigen::RowMajor> buf_scatter(m_atomcount, 4);
+    std::vector<int>    buf_j(m_atomcount);
+    std::vector<double> buf_x_sq(m_atomcount);
+    std::vector<double> buf_exp(m_atomcount);
+#endif
 
     for (int i = 0; i < m_atomcount; ++i) {
         Eigen::Vector3d ri = m_geometry_bohr.row(i);
         double dlogdcn_i = dlogdcn[i];
 
-        for (int j = 0; j < i; ++j) {
-            Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
-            double r_ij_sq = r_ij_vec.squaredNorm();
-            if (r_ij_sq > threshold) continue;
+#ifdef GFNFF_FAST_EXP
+        // --- Pass A: collect surviving (i,j) pairs ---
+        int K = 0;
+        // WP-D Stage C: neighbor list available → O(k) iteration, no threshold check.
+        if (neighbors != nullptr) {
+            for (int j : (*neighbors)[i]) {
+                if (j >= i) continue;
+                Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                double r_ij_sq = r_ij_vec.squaredNorm();
+                double r_ij = std::sqrt(r_ij_sq);
+                double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                double dr = (r_ij - rcov_sum) / rcov_sum;
+                double factor = (kn / sqrtpi) / (rcov_sum * r_ij);
+                buf_j[K]    = j;
+                buf_x_sq[K] = kn * kn * dr * dr;
+                buf_scatter(K, 0) = factor * r_ij_vec[0];
+                buf_scatter(K, 1) = factor * r_ij_vec[1];
+                buf_scatter(K, 2) = factor * r_ij_vec[2];
+                buf_scatter(K, 3) = dlogdcn[j];
+                ++K;
+            }
+        } else {
+            for (int j = 0; j < i; ++j) {
+                Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                double r_ij_sq = r_ij_vec.squaredNorm();
+                if (r_ij_sq > threshold) continue;
+                double r_ij = std::sqrt(r_ij_sq);
+                double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                double dr = (r_ij - rcov_sum) / rcov_sum;
+                double factor = (kn / sqrtpi) / (rcov_sum * r_ij);
+                buf_j[K]    = j;
+                buf_x_sq[K] = kn * kn * dr * dr;
+                buf_scatter(K, 0) = factor * r_ij_vec[0];
+                buf_scatter(K, 1) = factor * r_ij_vec[1];
+                buf_scatter(K, 2) = factor * r_ij_vec[2];
+                buf_scatter(K, 3) = dlogdcn[j];
+                ++K;
+            }
+        }
 
-            double r_ij = std::sqrt(r_ij_sq);
-            double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
-            double dr = (r_ij - rcov_sum) / rcov_sum;
-            double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
+        // --- Pass B: vectorized exp(-x_sq) over the surviving-pair buffer ---
+        curcuma::gfnff::fast_exp_neg_sq_block(buf_x_sq.data(), buf_exp.data(), static_cast<std::size_t>(K));
 
-            Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
-            double dlogdcn_j = dlogdcn[j];
+        for (int k = 0; k < K; ++k) {
+            int j = buf_j[k];
+            double e = buf_exp[k];
+            double comp_x = buf_scatter(k, 0) * e;
+            double comp_y = buf_scatter(k, 1) * e;
+            double comp_z = buf_scatter(k, 2) * e;
+            double dlogdcn_j = buf_scatter(k, 3);
 
-            double comp_x = derfCN_dr * grad_dir[0];
-            double comp_y = derfCN_dr * grad_dir[1];
-            double comp_z = derfCN_dr * grad_dir[2];
+            store.diag(i, 0) -= dlogdcn_i * comp_x;
+            store.diag(i, 1) -= dlogdcn_i * comp_y;
+            store.diag(i, 2) -= dlogdcn_i * comp_z;
 
-            diag_x[i] -= dlogdcn_i * comp_x;
-            diag_y[i] -= dlogdcn_i * comp_y;
-            diag_z[i] -= dlogdcn_i * comp_z;
+            store.diag(j, 0) += dlogdcn_j * comp_x;
+            store.diag(j, 1) += dlogdcn_j * comp_y;
+            store.diag(j, 2) += dlogdcn_j * comp_z;
 
-            diag_x[j] += dlogdcn_j * comp_x;
-            diag_y[j] += dlogdcn_j * comp_y;
-            diag_z[j] += dlogdcn_j * comp_z;
+            store.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
+            store.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
+        }
+#else
+        // WP-D Stage C: neighbor list available → O(k) iteration, no threshold check.
+        if (neighbors != nullptr) {
+            for (int j : (*neighbors)[i]) {
+                if (j >= i) continue;
+                Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                double r_ij = std::sqrt(r_ij_vec.squaredNorm());
+                double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                double dr = (r_ij - rcov_sum) / rcov_sum;
+                double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
+                Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
+                double dlogdcn_j = dlogdcn[j];
+                double comp_x = derfCN_dr * grad_dir[0];
+                double comp_y = derfCN_dr * grad_dir[1];
+                double comp_z = derfCN_dr * grad_dir[2];
+                store.diag(i, 0) -= dlogdcn_i * comp_x;
+                store.diag(i, 1) -= dlogdcn_i * comp_y;
+                store.diag(i, 2) -= dlogdcn_i * comp_z;
+                store.diag(j, 0) += dlogdcn_j * comp_x;
+                store.diag(j, 1) += dlogdcn_j * comp_y;
+                store.diag(j, 2) += dlogdcn_j * comp_z;
+                store.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
+                store.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
+            }
+        } else {
+            for (int j = 0; j < i; ++j) {
+                Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                double r_ij_sq = r_ij_vec.squaredNorm();
+                if (r_ij_sq > threshold) continue;
+                double r_ij = std::sqrt(r_ij_sq);
+                double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                double dr = (r_ij - rcov_sum) / rcov_sum;
+                double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
+                Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
+                double dlogdcn_j = dlogdcn[j];
+                double comp_x = derfCN_dr * grad_dir[0];
+                double comp_y = derfCN_dr * grad_dir[1];
+                double comp_z = derfCN_dr * grad_dir[2];
+                store.diag(i, 0) -= dlogdcn_i * comp_x;
+                store.diag(i, 1) -= dlogdcn_i * comp_y;
+                store.diag(i, 2) -= dlogdcn_i * comp_z;
+                store.diag(j, 0) += dlogdcn_j * comp_x;
+                store.diag(j, 1) += dlogdcn_j * comp_y;
+                store.diag(j, 2) += dlogdcn_j * comp_z;
+                store.pairs.push_back({i, j, -dlogdcn_j * comp_x, -dlogdcn_j * comp_y, -dlogdcn_j * comp_z});
+                store.pairs.push_back({j, i,  dlogdcn_i * comp_x,  dlogdcn_i * comp_y,  dlogdcn_i * comp_z});
+            }
+        }
+#endif
+    }
 
-            triplets[0].emplace_back(i, j, -dlogdcn_j * comp_x);
-            triplets[0].emplace_back(j, i,  dlogdcn_i * comp_x);
-            triplets[1].emplace_back(i, j, -dlogdcn_j * comp_y);
-            triplets[1].emplace_back(j, i,  dlogdcn_i * comp_y);
-            triplets[2].emplace_back(i, j, -dlogdcn_j * comp_z);
-            triplets[2].emplace_back(j, i,  dlogdcn_i * comp_z);
+    return store;
+}
+
+#ifdef GFNFF_CN_DCN_FUSION
+// WP-D Stage D (May 2026): fused CN + DCN in a single O(N²) pair pass.
+// Replaces the two-call sequence:
+//   1. CNCalculator::calculateGFNFFCNWithNeighbors()   [builds list + computes erfCN]
+//   2. calculateCoordinationNumberDerivatives()        [reads same pairs again for derfCN]
+// into one loop that computes both simultaneously. dlogdcn is applied in a post-pass
+// because it depends on the fully-accumulated cn_raw[i].
+// Reference: Fortran ncoordNeighs (external/xtb/src/gfnff/gfnff_eg.f90:3677).
+GFNFF::CNAndDerivResult GFNFF::computeCNAndDerivativesFused(
+    double cn_cutoff_bohr,
+    CxxThreadPool* pool,
+    int num_threads) const
+{
+    const int N          = m_atomcount;
+    const double kn      = -7.5;
+    const double cnmax   = 4.4;
+    const double sqrtpi  = 1.77245385091;
+    const double ANG2BOHR = 1.8897259886;
+    const double k_scaled = 4.0 / 3.0;
+    const double cutoff_sq = cn_cutoff_bohr * cn_cutoff_bohr;
+
+    // Pre-compute covalent radii in Bohr with GFN-FF 4/3 scaling
+    std::vector<double> rcov_bohr(N);
+    for (int i = 0; i < N; ++i)
+        rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * ANG2BOHR;
+
+    CNAndDerivResult result;
+    result.cn_values.resize(N);
+    result.cn_raw  = Vector::Zero(N);
+    result.neighbors.resize(N);
+    result.dcn_store.natoms = N;
+    result.dcn_store.diag   = Matrix::Zero(N, 3);
+
+    // --------------------------------------------------------------------------
+    // Fused pair loop: upper-triangle O(N²) with cn_cutoff_bohr cutoff.
+    // Per surviving pair (i,j): compute erfCN (→ cn_raw) and derfCN (→ DCN gradient)
+    // in a single geometry read. dlogdcn is NOT applied here — it requires complete cn_raw.
+    // --------------------------------------------------------------------------
+    if (num_threads > 1 && N > 64) {
+        int T = std::min(num_threads, N);
+
+        struct ThreadLocalData {
+            std::vector<double>     cn_raw;
+            std::vector<CNDerivPair> pairs;
+            Matrix                  diag;
+            std::vector<std::vector<int>> neighbors;
+            explicit ThreadLocalData(int n)
+                : cn_raw(n, 0.0), diag(Matrix::Zero(n, 3)), neighbors(n) {
+                pairs.reserve(static_cast<size_t>(n) * 40 / 4 * 2 + 100);
+            }
+        };
+        std::vector<ThreadLocalData> tld;
+        tld.reserve(T);
+        for (int t = 0; t < T; ++t) tld.emplace_back(N);
+
+        // Interleaved row assignment for load-balancing (same pattern as DCN threading).
+        auto worker = [&](int t_id) {
+            auto& loc = tld[t_id];
+            for (int i = t_id; i < N; i += T) {
+                if (rcov_bohr[i] == 0.0) continue;
+                Eigen::Vector3d ri = m_geometry_bohr.row(i);
+                for (int j = 0; j < i; ++j) {
+                    if (rcov_bohr[j] == 0.0) continue;
+                    Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                    double r_ij_sq = r_ij_vec.squaredNorm();
+                    if (r_ij_sq >= cutoff_sq) continue;
+
+                    double r_ij     = std::sqrt(r_ij_sq);
+                    double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                    double dr       = (r_ij - rcov_sum) / rcov_sum;
+
+                    // CN contribution (erf-based, same formula as calculateGFNFFCNWithNeighbors)
+                    double erfCN = 0.5 * (1.0 + std::erf(kn * dr));
+                    loc.cn_raw[i] += erfCN;
+                    loc.cn_raw[j] += erfCN;
+
+                    // DCN gradient (unscaled — dlogdcn applied in post-pass below)
+                    double factor = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / (rcov_sum * r_ij);
+                    Eigen::Vector3d grad = factor * r_ij_vec;
+
+                    loc.diag.row(i) -= grad.transpose();
+                    loc.diag.row(j) += grad.transpose();
+                    // Two CNDerivPair entries per pair — same semantics as calculateCoordinationNumberDerivatives
+                    loc.pairs.push_back({i, j, -grad[0], -grad[1], -grad[2]});
+                    loc.pairs.push_back({j, i,  grad[0],  grad[1],  grad[2]});
+
+                    // Build symmetric neighbor list (reusable by D4 and EEQ steps downstream)
+                    loc.neighbors[i].push_back(j);
+                    loc.neighbors[j].push_back(i);
+                }
+            }
+        };
+
+        if (pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(pool->enqueue(worker, t));
+            worker(0);
+            for (auto& f : futures) f.get();
+        } else {
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t)
+                threads[t - 1] = std::thread(worker, t);
+            worker(0);
+            for (auto& th : threads) th.join();
+        }
+
+        // Merge: sum cn_raw and diag; concatenate pairs and neighbors
+        size_t total_pairs = 0;
+        for (int t = 0; t < T; ++t) total_pairs += tld[t].pairs.size();
+        result.dcn_store.pairs.reserve(total_pairs);
+        for (int t = 0; t < T; ++t) {
+            for (int i = 0; i < N; ++i) {
+                result.cn_raw[i] += tld[t].cn_raw[i];
+                for (int nb : tld[t].neighbors[i])
+                    result.neighbors[i].push_back(nb);
+            }
+            result.dcn_store.diag += tld[t].diag;
+            result.dcn_store.pairs.insert(result.dcn_store.pairs.end(),
+                                          tld[t].pairs.begin(), tld[t].pairs.end());
+        }
+
+    } else {
+        // Sequential path
+        result.dcn_store.pairs.reserve(static_cast<size_t>(N) * 40 + 100);
+        for (int i = 0; i < N; ++i) {
+            if (rcov_bohr[i] == 0.0) continue;
+            Eigen::Vector3d ri = m_geometry_bohr.row(i);
+            for (int j = 0; j < i; ++j) {
+                if (rcov_bohr[j] == 0.0) continue;
+                Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                double r_ij_sq = r_ij_vec.squaredNorm();
+                if (r_ij_sq >= cutoff_sq) continue;
+
+                double r_ij     = std::sqrt(r_ij_sq);
+                double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                double dr       = (r_ij - rcov_sum) / rcov_sum;
+
+                double erfCN = 0.5 * (1.0 + std::erf(kn * dr));
+                result.cn_raw[i] += erfCN;
+                result.cn_raw[j] += erfCN;
+
+                double factor = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / (rcov_sum * r_ij);
+                Eigen::Vector3d grad = factor * r_ij_vec;
+
+                result.dcn_store.diag.row(i) -= grad.transpose();
+                result.dcn_store.diag.row(j) += grad.transpose();
+                result.dcn_store.pairs.push_back({i, j, -grad[0], -grad[1], -grad[2]});
+                result.dcn_store.pairs.push_back({j, i,  grad[0],  grad[1],  grad[2]});
+
+                result.neighbors[i].push_back(j);
+                result.neighbors[j].push_back(i);
+            }
         }
     }
 
-    // Add diagonal entries
-    for (int i = 0; i < m_atomcount; ++i) {
-        if (diag_x[i] != 0.0) triplets[0].emplace_back(i, i, diag_x[i]);
-        if (diag_y[i] != 0.0) triplets[1].emplace_back(i, i, diag_y[i]);
-        if (diag_z[i] != 0.0) triplets[2].emplace_back(i, i, diag_z[i]);
+    // --------------------------------------------------------------------------
+    // Post-pass: cn_raw is now complete. Compute dlogdcn and apply to DCN store.
+    // --------------------------------------------------------------------------
+    Vector dlogdcn(N);
+    for (int i = 0; i < N; ++i) {
+        // Log-compress cn_raw → cn_values (same formula as calculateGFNFFCNWithNeighbors)
+        result.cn_values[i] = std::log(1.0 + std::exp(cnmax))
+                            - std::log(1.0 + std::exp(cnmax - result.cn_raw[i]));
+        // dlogCN/dcn — same formula as calculateCoordinationNumberDerivatives step 2
+        dlogdcn[i] = std::exp(cnmax) / (std::exp(cnmax) + std::exp(result.cn_raw[i]));
     }
 
-    // Build sparse matrices
-    std::vector<SpMatrix> dcn(3);
-    for (int dim = 0; dim < 3; ++dim) {
-        dcn[dim].resize(m_atomcount, m_atomcount);
-        dcn[dim].setFromTriplets(triplets[dim].begin(), triplets[dim].end());
-        dcn[dim].makeCompressed();
+    // Apply dlogdcn[i] to diagonal row i (all contributions for atom i share the same factor)
+    for (int i = 0; i < N; ++i)
+        result.dcn_store.diag.row(i) *= dlogdcn[i];
+
+    // Apply dlogdcn[p.j] to each pair entry — p.j is the "column" atom.
+    // Matches CNDerivPair semantics: cx = dCN(p.j)/dr(p.i,d) * dlogdcn(p.j).
+    for (auto& p : result.dcn_store.pairs) {
+        double dl = dlogdcn[p.j];
+        p.cx *= dl;
+        p.cy *= dl;
+        p.cz *= dl;
     }
 
-    return dcn;
+    return result;
 }
+#endif // GFNFF_CN_DCN_FUSION
 
 std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int>>& adjacency_list) const
 {
@@ -6790,8 +7537,10 @@ std::vector<Angle> GFNFF::generateAnglesNative(const TopologyInfo& topo_info) co
 {
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    const double threshold_cn_squared = 40.0 * 40.0;
-    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, threshold_cn_squared);
+    // CN VALUE cutoff: see explanatory comment at the constexpr definition in
+    // generateGFNFFAngles (~ line 3500). Distinct from cn_deriv_cutoff_sq.
+    constexpr double cn_value_cutoff_sq = 40.0 * 40.0;
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_value_cutoff_sq);
     Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
     std::vector<Angle> angles_vec;
@@ -6916,8 +7665,9 @@ json GFNFF::generateTopologyAwareAngles(const Vector& cn, const std::vector<int>
 
     // Claude Generated (February 2026): Phase 1 - CN Pre-computation for legacy function
     // Pre-compute CN once for all angles (same optimization as in new generateGFNFFAngles)
-    const double threshold_cn_squared = 40.0 * 40.0;
-    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, threshold_cn_squared);
+    // CN VALUE cutoff: see comment at constexpr definition in generateGFNFFAngles.
+    constexpr double cn_value_cutoff_sq = 40.0 * 40.0;
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_value_cutoff_sq);
     Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
     // Claude Generated (February 2026): Phase 2 - OpenMP parallelization for legacy function
@@ -7186,9 +7936,10 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
 
     // Claude Generated (Apr 2026): Use spatial cell list for O(N) AB-pair generation.
     // The double loop is O(N²); with a cell list only atom pairs within the HB cutoff
-    // (~15.8 Bohr) are considered.  Threshold configurable via hb_cell_list_min_atoms.
+    // (~15.8 Bohr) are considered.  Threshold configurable via nb_cell_list_min_atoms.
     const double ab_cutoff = std::sqrt(hbthr1);  // ~15.81 Bohr
-    const int hb_cell_threshold = m_parameters.value("hb_cell_list_min_atoms", 800);
+    const int hb_cell_threshold = m_parameters.value("nb_cell_list_min_atoms",
+        m_parameters.value("hb_cell_list_min_atoms", 800));
     if (hb_cell_threshold == 0 || m_atomcount >= hb_cell_threshold) {
         SpatialCellList cell_list;
         cell_list.build(m_geometry_bohr, ab_cutoff);
@@ -7580,8 +8331,9 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     const double xb_cutoff_sq = xb_cutoff * xb_cutoff;
 
     // Claude Generated (Apr 2026): Spatial cell list for O(N) B-atom lookup.
-    // Threshold configurable via hb_cell_list_min_atoms (shared with HB detection).
-    const int xb_cell_threshold = m_parameters.value("hb_cell_list_min_atoms", 800);
+    // Threshold configurable via nb_cell_list_min_atoms (shared with HB and Coulomb).
+    const int xb_cell_threshold = m_parameters.value("nb_cell_list_min_atoms",
+        m_parameters.value("hb_cell_list_min_atoms", 800));
     bool use_cell_list = (xb_cell_threshold == 0 || m_atomcount >= xb_cell_threshold);
     SpatialCellList cell_list;
     if (use_cell_list) {
@@ -8024,17 +8776,22 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Computing Phase 1: Topology charges (topo%qa)");
         }
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        if (CurcumaLogger::get_verbosity() >= 2) {
             phase_timer = std::chrono::high_resolution_clock::now();
         }
 
+        // Claude Generated (WP2, May 2026): forward pool + thread count to parallelise Stage-4
+        auto* pool_setup = m_forcefield ? m_forcefield->threadPool() : nullptr;
+        if (pool_setup) pool_setup->setActiveThreadCount(m_threads);
         topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
             m_atoms,
             m_geometry_bohr,
             m_charge,
             topo_info.coordination_numbers,
             eeq_topology_input,
-            true  // Phase 1 Charge Sync: enable dxi corrections
+            true,  // Phase 1 Charge Sync: enable dxi corrections
+            pool_setup,
+            m_threads
         );
 
         if (topo_info.topology_charges.size() != m_atomcount) {
@@ -8112,6 +8869,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             CurcumaLogger::info("Computing Phase 2: Energy charges (nlist%q)");
         }
 
+        // Claude Generated (WP2, May 2026): forward pool + thread count to parallelise Stage-4
+        auto* pool_phase2 = m_forcefield ? m_forcefield->threadPool() : nullptr;
+        if (pool_phase2) pool_phase2->setActiveThreadCount(m_threads);
         topo_info.eeq_charges = m_eeq_solver->calculateFinalCharges(
             m_atoms,
             m_geometry_bohr,
@@ -8121,7 +8881,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             topo_info.hybridization,        // Hybridization states
             eeq_topology_input,             // WITH topology - uses neighbors for environmental corrections (dxi)
             true,  // CRITICAL (Jan 5, 2026): YES corrections - Phase 2 needs dxi and dgam (fixes 59% charge error)
-            topo_info.alpeeq  // Claude Generated (January 2026): Charge-dependent alpha from Phase 1B
+            topo_info.alpeeq, // Claude Generated (January 2026): Charge-dependent alpha from Phase 1B
+            pool_phase2,
+            m_threads
         );
 
         if (topo_info.eeq_charges.size() != m_atomcount) {
@@ -8422,6 +9184,13 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
 {
     // Claude Generated (March 2026): Native struct version of generateGFNFFCoulombPairs
     // Reference: Fortran gfnff_engrad.F90:1378-1389
+    //
+    // WP6 (May 2026): when eeq_distance_cutoff > 0, only pairs within the cutoff
+    // are emitted. For N >= nb_cell_list_min_atoms a SpatialCellList is used for
+    // O(N) generation; otherwise O(N²) with an inner distance check.
+    // MD note: rebuilt every parameter-generation cycle (topology cache invalidation).
+    // For per-step MD with large N, a Verlet-skin/per-step-rebuild decoupling is the
+    // logical follow-up — out of scope for WP6.
     auto start_time = std::chrono::high_resolution_clock::now();
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -8433,62 +9202,100 @@ std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
     const TopologyInfo& topo_info = getCachedTopology();
     const Vector& charges = topo_info.eeq_charges;
 
-    coulombs.reserve(m_atomcount * (m_atomcount - 1) / 2);
+    const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
+    const bool cutoff_active = (eeq_cut > 0.0);
+    const double effective_r_cut = cutoff_active ? eeq_cut : 100.0;
+    const double cutoff_sq = cutoff_active ? eeq_cut * eeq_cut : 0.0;
 
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
-            GFNFFCoulomb c;
-            c.i = i;
-            c.j = j;
-            c.q_i = charges[i];
-            c.q_j = charges[j];
+    if (cutoff_active) {
+        // Heuristic: typical neighbour density ~64 pairs per atom inside a finite cutoff.
+        // Vector grows on demand if exceeded.
+        coulombs.reserve(static_cast<size_t>(m_atomcount) * 64);
+    } else {
+        coulombs.reserve(static_cast<size_t>(m_atomcount) * (m_atomcount - 1) / 2);
+    }
 
-            // gamma_ij from charge-corrected alpeeq
-            double alp_i_for_gamma = topo_info.eeq_alp[i];
-            double alp_j_for_gamma = topo_info.eeq_alp[j];
-            if (topo_info.alpeeq.size() == m_atomcount) {
-                alp_i_for_gamma = topo_info.alpeeq(i);
-                alp_j_for_gamma = topo_info.alpeeq(j);
+    auto fillPair = [&](int i, int j) -> GFNFFCoulomb {
+        GFNFFCoulomb c;
+        c.i = i;
+        c.j = j;
+        c.q_i = charges[i];
+        c.q_j = charges[j];
+
+        // gamma_ij from charge-corrected alpeeq
+        double alp_i_for_gamma = topo_info.eeq_alp[i];
+        double alp_j_for_gamma = topo_info.eeq_alp[j];
+        if (topo_info.alpeeq.size() == m_atomcount) {
+            alp_i_for_gamma = topo_info.alpeeq(i);
+            alp_j_for_gamma = topo_info.alpeeq(j);
+        }
+        c.gamma_ij = 1.0 / std::sqrt(alp_i_for_gamma + alp_j_for_gamma);
+
+        // Chi: chi_base = -chi + dxi [+ amideH correction]
+        double dxi_i = (i < topo_info.dxi.size()) ? topo_info.dxi(i) : 0.0;
+        double dxi_j = (j < topo_info.dxi.size()) ? topo_info.dxi(j) : 0.0;
+        double chi_base_i = -topo_info.eeq_chi[i] + dxi_i;
+        double chi_base_j = -topo_info.eeq_chi[j] + dxi_j;
+        if (i < static_cast<int>(topo_info.is_amide_h.size()) && topo_info.is_amide_h[i])
+            chi_base_i -= 0.02;
+        if (j < static_cast<int>(topo_info.is_amide_h.size()) && topo_info.is_amide_h[j])
+            chi_base_j -= 0.02;
+
+        double cnf_i = topo_info.eeq_cnf[i];
+        double cnf_j = topo_info.eeq_cnf[j];
+        double cn_i = topo_info.coordination_numbers(i);
+        double cn_j = topo_info.coordination_numbers(j);
+
+        c.chi_i = chi_base_i + cnf_i * std::sqrt(cn_i);  // Legacy: static chi_eff
+        c.chi_j = chi_base_j + cnf_j * std::sqrt(cn_j);
+        c.chi_base_i = chi_base_i;
+        c.chi_base_j = chi_base_j;
+        c.cnf_i = cnf_i;
+        c.cnf_j = cnf_j;
+
+        // Gam: charge-corrected gameeq
+        double gam_i = topo_info.eeq_gam[i];
+        double gam_j = topo_info.eeq_gam[j];
+        if (topo_info.dgam.size() == m_atomcount) {
+            gam_i += topo_info.dgam(i);
+            gam_j += topo_info.dgam(j);
+        }
+        c.gam_i = gam_i;
+        c.gam_j = gam_j;
+        c.alp_i = alp_i_for_gamma;
+        c.alp_j = alp_j_for_gamma;
+        c.r_cut = effective_r_cut;
+
+        return c;
+    };
+
+    if (cutoff_active) {
+        const int nb_threshold = m_parameters.value("nb_cell_list_min_atoms",
+            m_parameters.value("hb_cell_list_min_atoms", 800));
+        if (nb_threshold == 0 || m_atomcount >= nb_threshold) {
+            // O(N) cell-list path: only neighbours within eeq_distance_cutoff are emitted.
+            SpatialCellList cell_list;
+            cell_list.build(m_geometry_bohr, eeq_cut);
+            cell_list.forEachPair([&](int i, int j, double /*r2*/) {
+                coulombs.push_back(fillPair(i, j));
+            });
+        } else {
+            // Small-N fallback: O(N²) with inner distance filter.
+            for (int i = 0; i < m_atomcount; ++i) {
+                for (int j = i + 1; j < m_atomcount; ++j) {
+                    const double rij_sq =
+                        (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).squaredNorm();
+                    if (rij_sq > cutoff_sq) continue;
+                    coulombs.push_back(fillPair(i, j));
+                }
             }
-            c.gamma_ij = 1.0 / std::sqrt(alp_i_for_gamma + alp_j_for_gamma);
-
-            // Chi: chi_base = -chi + dxi [+ amideH correction]
-            double dxi_i = (i < topo_info.dxi.size()) ? topo_info.dxi(i) : 0.0;
-            double dxi_j = (j < topo_info.dxi.size()) ? topo_info.dxi(j) : 0.0;
-            double chi_base_i = -topo_info.eeq_chi[i] + dxi_i;
-            double chi_base_j = -topo_info.eeq_chi[j] + dxi_j;
-            if (i < static_cast<int>(topo_info.is_amide_h.size()) && topo_info.is_amide_h[i])
-                chi_base_i -= 0.02;
-            if (j < static_cast<int>(topo_info.is_amide_h.size()) && topo_info.is_amide_h[j])
-                chi_base_j -= 0.02;
-
-            double cnf_i = topo_info.eeq_cnf[i];
-            double cnf_j = topo_info.eeq_cnf[j];
-            double cn_i = topo_info.coordination_numbers(i);
-            double cn_j = topo_info.coordination_numbers(j);
-
-            c.chi_i = chi_base_i + cnf_i * std::sqrt(cn_i);  // Legacy: static chi_eff
-            c.chi_j = chi_base_j + cnf_j * std::sqrt(cn_j);
-            c.chi_base_i = chi_base_i;
-            c.chi_base_j = chi_base_j;
-            c.cnf_i = cnf_i;
-            c.cnf_j = cnf_j;
-
-            // Gam: charge-corrected gameeq
-            double gam_i = topo_info.eeq_gam[i];
-            double gam_j = topo_info.eeq_gam[j];
-            if (topo_info.dgam.size() == m_atomcount) {
-                gam_i += topo_info.dgam(i);
-                gam_j += topo_info.dgam(j);
+        }
+    } else {
+        // Default Fortran-matching path: full O(N²), no spatial truncation.
+        for (int i = 0; i < m_atomcount; ++i) {
+            for (int j = i + 1; j < m_atomcount; ++j) {
+                coulombs.push_back(fillPair(i, j));
             }
-            c.gam_i = gam_i;
-            c.gam_j = gam_j;
-            c.alp_i = alp_i_for_gamma;
-            c.alp_j = alp_j_for_gamma;
-            c.r_cut = 100.0;
-
-            coulombs.push_back(c);
-
         }
     }
 
@@ -8701,6 +9508,33 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
 
         dispersions = m_d4_generator->GenerateDispersionPairsNative(m_atoms, m_geometry_bohr);
 
+        // WP-Disp (Mai 2026): optional distance cutoff on D4 pair list.
+        // Read cutoff — top-level first (promotion loop), then nested fallback.
+        {
+            double disp_cut = m_parameters.value("dispersion_cutoff_bohr", 0.0);
+            if (disp_cut <= 0.0 && m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+                disp_cut = m_parameters["gfnff"].value("dispersion_cutoff_bohr", 0.0);
+            if (disp_cut > 0.0) {
+                const double disp_cut_sq = disp_cut * disp_cut;
+                const size_t n_full = dispersions.size();
+                dispersions.erase(
+                    std::remove_if(dispersions.begin(), dispersions.end(),
+                        [&](const GFNFFDispersion& d) {
+                            Eigen::Vector3d ri = m_geometry_bohr.row(d.i);
+                            Eigen::Vector3d rj = m_geometry_bohr.row(d.j);
+                            return (ri - rj).squaredNorm() > disp_cut_sq;
+                        }),
+                    dispersions.end());
+                for (auto& d : dispersions)
+                    d.r_cut = std::min(d.r_cut, disp_cut);
+                if (CurcumaLogger::get_verbosity() >= 2) {
+                    CurcumaLogger::param("dispersion_cutoff_bohr",
+                        fmt::format("{:.1f} Bohr  ({} / {} pairs retained)",
+                            disp_cut, dispersions.size(), n_full));
+                }
+            }
+        }
+
         // ATM triples: Generate natively from bonded topology (O(N·bonds), fast)
         double s9 = 1.0, atm_a1 = 0.58, atm_a2 = 4.80, atm_alp = 14.0;
         if (s9 > 1e-10) {
@@ -8883,15 +9717,47 @@ json GFNFF::generateGFNFFDispersionPairs() const
 
                 (void)start_time;
 
+                // WP-Disp (Mai 2026): optional distance cutoff on D4 dispersion pair-list.
+                // Default 0.0 = no filter (Fortran-parity). At 15.0 Bohr: ~38x fewer pairs
+                // for mixture N=6200, O(N^2)->O(N*k) per-step in CalculateGFNFFDispersionContribution.
+                // Hellmann-Feynman consistency: dc6dcn accumulation is over m_gfnff_dispersions only,
+                // so filtering here automatically restricts the CN-derivative chain rule too (Site C).
+                // Read cutoff — check top-level first (set by promotion loop), then nested fallback.
+                double disp_cut = m_parameters.value("dispersion_cutoff_bohr", 0.0);
+                if (disp_cut <= 0.0 && m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+                    disp_cut = m_parameters["gfnff"].value("dispersion_cutoff_bohr", 0.0);
+                if (disp_cut > 0.0) {
+                    const double disp_cut_sq = disp_cut * disp_cut;
+                    const size_t n_full = d4_params["d4_dispersion_pairs"].size();
+                    json filtered_pairs = json::array();
+                    for (const auto& pair : d4_params["d4_dispersion_pairs"]) {
+                        int pi = pair["i"];
+                        int pj = pair["j"];
+                        Eigen::Vector3d ri = m_geometry_bohr.row(pi);
+                        Eigen::Vector3d rj = m_geometry_bohr.row(pj);
+                        if ((ri - rj).squaredNorm() <= disp_cut_sq) {
+                            auto p = pair;
+                            p["r_cut"] = disp_cut; // step-time guard matches init cutoff
+                            filtered_pairs.push_back(std::move(p));
+                        }
+                    }
+                    if (CurcumaLogger::get_verbosity() >= 2) {
+                        CurcumaLogger::param("dispersion_cutoff_bohr",
+                            fmt::format("{:.1f} Bohr  ({} / {} pairs retained)",
+                                disp_cut, filtered_pairs.size(), n_full));
+                    }
+                    d4_params["d4_dispersion_pairs"] = std::move(filtered_pairs);
+                }
+
                 return d4_params["d4_dispersion_pairs"];
             } else {
-                if (CurcumaLogger::get_verbosity() >= 1) {
+                if (CurcumaLogger::get_verbosity() >= 2) {
                     CurcumaLogger::warn("D4: No pairs generated, falling back to D3");
                 }
                 method = "d3";  // Fallback
             }
         } catch (const std::exception& e) {
-            if (CurcumaLogger::get_verbosity() >= 1) {
+            if (CurcumaLogger::get_verbosity() >= 2) {
                 CurcumaLogger::error(fmt::format("D4 generation failed: {}", e.what()));
             }
             method = "d3";  // Fallback
@@ -8976,7 +9842,7 @@ json GFNFF::generateD3Dispersion() const
 
         // Convert D3 output to GFN-FF dispersion pair format
         if (!d3_params.contains("d3_dispersion_pairs")) {
-            if (CurcumaLogger::get_verbosity() >= 1) {
+            if (CurcumaLogger::get_verbosity() >= 2) {
                 CurcumaLogger::warn("D3 generated no dispersion pairs, falling back to free-atom");
             }
             return generateFreeAtomDispersion();
@@ -9042,7 +9908,7 @@ json GFNFF::generateD3Dispersion() const
     } catch (const std::exception& e) {
         (void)start_time;
 
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::error(fmt::format("D3 generation failed: {}, falling back to free-atom", e.what()));
         }
         return generateFreeAtomDispersion();
@@ -9697,13 +10563,18 @@ bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
     // - Hydroxyl oxygens (nh=1): dxi = -0.005
     // This was incorrectly disabled, causing 0.0025 e charge error per hydroxyl oxygen
     // and cumulative Coulomb energy errors of ~26 mEh for triose (66 atoms).
+    // Claude Generated (WP2, May 2026): forward pool + thread count
+    auto* pool_topo = m_forcefield ? m_forcefield->threadPool() : nullptr;
+    if (pool_topo) pool_topo->setActiveThreadCount(m_threads);
     topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
         m_atoms,
         m_geometry_bohr,
         m_charge,
         topo_info.coordination_numbers,
         eeq_topology,  // NEW: Pass topology for Floyd-Warshall (Dec 2025)
-        true  // RESTORED (Jan 29, 2026): Enable dxi corrections to match Fortran goedeckera
+        true,  // RESTORED (Jan 29, 2026): Enable dxi corrections to match Fortran goedeckera
+        pool_topo,
+        m_threads
     );
 
     if (topo_info.topology_charges.size() != m_atomcount) {
@@ -10006,6 +10877,9 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
 
 
     // Delegate to EEQSolver for Phase 2 refinement
+    // Claude Generated (WP2, May 2026): forward pool + thread count
+    auto* pool_final = m_forcefield ? m_forcefield->threadPool() : nullptr;
+    if (pool_final) pool_final->setActiveThreadCount(m_threads);
     topo_info.eeq_charges = m_eeq_solver->calculateFinalCharges(
         m_atoms,
         m_geometry_bohr,
@@ -10015,7 +10889,9 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
         topo_info.hybridization,
         eeq_topology,
         true, // ENABLE corrections to match Fortran goed_gfnff (dxi, dgam)
-        topo_info.alpeeq // Pass charge-dependent alpha (alpeeq) from Phase 1B
+        topo_info.alpeeq, // Pass charge-dependent alpha (alpeeq) from Phase 1B
+        pool_final,
+        m_threads
     );
 
     if (topo_info.eeq_charges.size() != m_atomcount) {

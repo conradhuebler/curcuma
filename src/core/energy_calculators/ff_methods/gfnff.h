@@ -116,6 +116,10 @@ struct GFNFFEnergyReport {
     double bond = 0, angle = 0, dihedral = 0, inversion = 0, stors = 0;
     double dispersion = 0, bonded_rep = 0, nonbonded_rep = 0;
     double coulomb = 0, hbond = 0, xbond = 0, atm = 0, batm = 0;
+    // Claude Generated (May 2026, HB-investigation): per-case HB diagnostic split.
+    // hbond = case1 + case2 + case3 + case4. Counts compare against Fortran nhb1/nhb2.
+    double hbond_case1 = 0, hbond_case2 = 0, hbond_case3 = 0, hbond_case4 = 0;
+    int hbond_case1_count = 0, hbond_case2_count = 0, hbond_case3_count = 0, hbond_case4_count = 0;
     double total = 0;
 
     // Per-term timing: cpu_sum (across all threads), gpu (phase wall-clock); -1 = N/A
@@ -226,14 +230,35 @@ PARAM(eeq_tolerance, Double, -1.0,
       "EEQ PCG tolerance. -1 = use adaptive default (1e-10 small, 1e-6*||rhs|| large). Passed to eeq_solver.", "Algorithm", {})
 PARAM(eeq_accuracy, Double, 1e-6,
       "Target EEQ charge accuracy (e). Sets pcg_large_system_tol_factor. Higher = faster but less accurate.", "Algorithm", {})
-PARAM(eeq_distance_cutoff, Double, 30.0,
-      "Distance cutoff in Bohr for EEQ matrix conditioning. 0 = no cutoff. Affects both CPU and GPU.", "Advanced", {})
+// WP-C (May 2026): canonical PARAM definition lives in eeq_solver.h:965 with default 0.0
+// (matches Fortran goed_gfnff). Forwarded to eeq_solver sub-config via
+// gfnff_method.cpp::forwardEEQSolverParams. Removing the duplicate here eliminates the
+// 30.0-vs-0.0 default discrepancy that overrode the Fortran-matching behaviour.
+// PARAM(eeq_distance_cutoff, Double, 30.0, ...) — REMOVED, see eeq_solver.h:965
 PARAM(gpu_block_size, Int, 0,
       "GPU kernel block size (0 = adaptive, 32/64/128/256/512). 512 = max occupancy. Passed to ff_workspace_gpu.", "Advanced", {})
-PARAM(hb_cell_list_min_atoms, Int, 800,
-      "Min atom count to use SpatialCellList for HB/XB neighbor detection. Below this falls back to O(N²) loop. 0 = always use cell list.", "Advanced", {})
+PARAM(nb_cell_list_min_atoms, Int, 800,
+      "Min atom count to use SpatialCellList for non-bonded neighbor detection (HB/XB and Coulomb when eeq_distance_cutoff>0). Below this falls back to O(N²) loop. 0 = always use cell list.", "Advanced", {"hb_cell_list_min_atoms"})
 PARAM(hb_parallel_min_pairs, Int, 500,
       "Min AB-pair count to parallelise HB detection via CxxThreadPool. 0 = always parallel (if pool available). -1 = never parallel.", "Advanced", {})
+PARAM(static_charges, Bool, false,
+      "Skip Phase-2 EEQ refinement after initialisation; reuse initial charges. Saves ~30 ms/step. Invalid for charge-transfer or ionic dynamics.", "Performance", {})
+PARAM(static_cn, Bool, false,
+      "Cache CN, dcn, CNF and D4 Gaussian-weights/dc6dcn after first call. Saves ~25 ms/step CPU, ~5-10 ms/step GPU. Invalid for sp2/sp3 changes.", "Performance", {})
+PARAM(static_all, Bool, false,
+      "Shorthand: enables static_charges=true AND static_cn=true. Use only for stable production NVT/NPT in equilibrium regime.", "Performance", {})
+PARAM(eeq_distance_cutoff_auto, Bool, false,
+      "Auto-enable eeq_distance_cutoff=30 Bohr after Phase-1 when nfrag==1 and max|q|<0.5 e. Saves ~12 ms/step polymer. Falls back to 0.0 for ionic/multi-fragment systems.", "Performance", {})
+PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) for D4 dispersion pair-list. 0 = full O(N^2) (Fortran-parity). Recommended for large systems: 15.0. Energy drift < 1 muEh at 15 Bohr. When active, CN-derivative stencil is extended to cover the cutoff range.", "Performance", {})
+PARAM(eeq_refactor_eps_bohr, Double, 0.05,
+      "WP-EEQ-Cache: EEQ Cholesky refactorization threshold (max atom displacement, Bohr). "
+      "Skips O(N^3) factorization when geometry change below this. "
+      "Set to 0.0 (or negative) to disable the cache entirely — bit-identical to pre-WP. "
+      "Forwarded to eeq_solver.eeq_refactor_eps_bohr.", "Performance", {})
+PARAM(eeq_refactor_force_every, Int, 0,
+      "WP-EEQ-Cache: Force EEQ Cholesky refactorization every N steps. "
+      "0 = geometry-triggered only. Recommended: 100 for long MD. "
+      "Forwarded to eeq_solver.eeq_refactor_force_every.", "Performance", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -574,6 +599,21 @@ public:
     void setParameters(const json& parameters);
 
     /**
+     * @brief Set thread count used for CN/EEQ/D4 phases and parameter generation
+     *
+     * Claude Generated (WP1, May 2026): replaces ad-hoc `m_parameters.value("threads", 1)`
+     * reads scattered through Calculation()/prepareCNAndEEQ()/parameter generation. The
+     * QM-wrapper (GFNFFComputationalMethod::setThreadCount) forwards into here so that
+     * post-construction thread count changes from EnergyCalculator are honored.
+     */
+    void setThreadCount(int threads) { m_threads = (threads > 0 ? threads : 1); m_parameters["threads"] = m_threads; }
+
+    /**
+     * @brief Get currently configured thread count
+     */
+    int threadCount() const { return m_threads; }
+
+    /**
      * @brief Retrieve cached topology information, computing it once if needed
      * @return Reference to topology information
      *
@@ -718,6 +758,14 @@ public:
     void forwardEEQSolverParams(json& eeq_params);
 
     /**
+     * @brief WP-S3 (May 2026): apply eeq_distance_cutoff_auto heuristic after Phase-1.
+     * Pre-condition: m_cached_topology contains valid topology_charges and nfrag.
+     * Sets EEQSolver cutoff to 30 Bohr if nfrag==1 and max|q|<0.5 e, else clears the
+     * override. Honours an explicit user-set eeq_distance_cutoff>0 (manual wins).
+     */
+    void applyEEQCutoffAutoIfRequested();
+
+    /**
      * @brief Re-detect HB/XB pairs if geometry has changed enough (RMSD > 0.3 Bohr).
      * Updates the given workspace with new HB/XB interaction lists.
      * @param ws External workspace to update (e.g. CPU residual workspace for GPU path)
@@ -777,7 +825,11 @@ public:
     // Getters for CN/EEQ results (valid after prepareCNAndEEQ)
     const Vector& getLastCN() const { return m_last_cn; }
     const Vector& getLastCharges() const { return m_charges; }
-    const Matrix& getGeometryBohr() const { return m_geometry_bohr; }
+    // WP-G fix (May 2026): m_geometry_bohr is GeoGradMatrix (RowMajor). Returning
+    // `const Matrix&` was creating a dangling reference to a temporary produced by
+    // Eigen's implicit storage-order conversion — segfaulted in the GPU path
+    // (GFNFFGPUComputationalMethod::calculateEnergy).
+    const GeoGradMatrix& getGeometryBohr() const { return m_geometry_bohr; }
 
     /**
      * @brief True if m_charges are valid for the supplied geometry.
@@ -807,10 +859,35 @@ public:
         if (n == m_charges.size())
             std::memcpy(m_charges.data(), data, n * sizeof(double));
     }
-    const std::vector<SpMatrix>& getLastCNDerivatives() const { return m_last_dcn; }
+    // Claude Generated (WP4, May 2026): CNDerivStore replaces std::vector<SpMatrix>
+    const CNDerivStore& getLastCNDerivatives() const { return m_last_dcn; }
+
+    /// WP-D Stage D (May 2026): fused CN + DCN single-pass result.
+    struct CNAndDerivResult {
+        Vector cn_values;                         ///< post-log CN (size N)
+        Vector cn_raw;                            ///< pre-log erf-sum (size N)
+        CNDerivStore dcn_store;                   ///< gradient pair-list + diagonal (dlogdcn applied)
+        std::vector<std::vector<int>> neighbors;  ///< symmetric neighbor list (reusable by D4/EEQ)
+    };
     const Vector& getLastCNF() const { return m_last_cnf; }
     const Matrix* getDC6DCNPtr() const { return m_d4_generator ? &m_d4_generator->getDC6DCN() : nullptr; }
     FFWorkspace* getWorkspace() const { return m_workspace.get(); }
+
+    // Static-Mode (WP-S1, May 2026): expose frozen-state flags so the GPU method can
+    // propagate them to FFWorkspaceGPU before launching kernels.
+    bool staticCNFrozen() const { return m_static_cn && m_static_state_captured; }
+    bool staticChargesFrozen() const { return m_static_charges && m_static_state_captured; }
+
+    // WP-P1 (May 2026): last per-phase timings (ms) for MD diagnostics JSONL dump.
+    const PrepTiming& getLastPrepTiming() const { return m_last_prep_timing; }
+
+    // WP-D (May 2026): raw CN (pre log-squash) — populated by prepareCNAndEEQ.
+    const Vector& getLastCNRaw() const { return m_last_cn_raw; }
+
+    /// WP-P1 (May 2026): force per-phase chrono collection regardless of verbosity level.
+    /// Set by SimpleMD when md_diagnostics_timing=true so the JSONL gets non-zero values.
+    void setForcePhaseTiming(bool on) { m_force_phase_timing = on; }
+    bool forcePhaseTiming() const { return m_force_phase_timing; }
 
     // Claude Generated (March 2026): Phase 2 GPU dc6dcn — expose D4 internals
     D4ParameterGenerator* getD4Generator() { return m_d4_generator.get(); }
@@ -846,6 +923,29 @@ public:
 
     /// True if preAllocateForGPUPath() was called (enables memcpy path in prepareCNAndEEQ)
     bool isGPUPathPreallocated() const { return m_gpu_path_preallocated; }
+
+    // ===== WP-FF-DistMatrix-Sharing (May 2026) =====
+    // XTB gfnff_engrad.F90:175-195 pattern: compute packed-triangular sqrab/srab
+    // ONCE per energy call, then every term/sub-routine indexes into them.
+    // Curcuma had 95 .norm() calls in forcefieldthread.cpp + 53 in eeq_solver.cpp,
+    // each recomputing the same distances. This API centralizes the work.
+
+    /// Compute shared packed-triangular distance arrays from m_geometry_bohr.
+    /// Allocates/refreshes m_shared_sqrab and m_shared_srab (size N(N+1)/2).
+    /// Thread-pool parallelized via m_forcefield->threadPool().
+    /// Called from GFNFF::Calculation() after prepareCNAndEEQ, before m_forcefield->Calculate().
+    void computeSharedDistances() const;
+
+    const Eigen::VectorXd& sharedSqrab() const { return m_shared_sqrab; }
+    const Eigen::VectorXd& sharedSrab()  const { return m_shared_srab; }
+
+    /// Packed lower-triangular index for atom pair (i, j) with i != j.
+    /// 0-based: idx = i*(i+1)/2 + j  for i > j.
+    /// Caller responsible for i != j; diagonal not stored in packed form.
+    static inline int triIdx(int i, int j) noexcept {
+        if (j > i) { int t = i; i = j; j = t; }
+        return i * (i + 1) / 2 + j;
+    }
 
 private:
     /**
@@ -1423,7 +1523,36 @@ private:
      * @param threshold Coordination number threshold (squared distance in Bohr²)
      * @return 3D tensor of CN derivatives (3 x natoms x natoms)
      */
-    std::vector<SpMatrix> calculateCoordinationNumberDerivatives(const Vector& cn, double threshold = 1600.0, CxxThreadPool* pool = nullptr, int num_threads = 1) const;  // 40.0² = 1600 (squared)
+    // Claude Generated (WP4, May 2026): returns CNDerivStore (pair-list + diag) instead of std::vector<SpMatrix>
+    // Eliminates ~1000 ms triplet+setFromTriplets cost on mixture.xyz N=6200 (74 % of CN+EEQ phase per WP1).
+    /// WP-D (May 2026): main implementation. When `cn_raw_in.size() == m_atomcount`
+    /// the function skips the redundant N²-erf loop in step 1 and uses `cn_raw_in`
+    /// directly for dlogdcn. Otherwise (empty vec) falls back to internal recompute.
+    /// WP-D Stage C (May 2026): when `neighbors != nullptr`, the dcn step-3 loop iterates
+    /// the pre-filtered neighbor list instead of the full N² triangle, eliminating O(N²)
+    /// threshold checks. Pass nullptr to use the original N² fallback.
+    CNDerivStore calculateCoordinationNumberDerivatives(const Vector& cn, const Vector& cn_raw_in,
+                                                       double threshold = 1600.0,
+                                                       CxxThreadPool* pool = nullptr,
+                                                       int num_threads = 1,
+                                                       const std::vector<std::vector<int>>* neighbors = nullptr) const;
+
+    /// Backward-compat wrapper — legacy callers without cn_raw access.
+    inline CNDerivStore calculateCoordinationNumberDerivatives(
+        const Vector& cn, double threshold = 1600.0,
+        CxxThreadPool* pool = nullptr, int num_threads = 1) const
+    {
+        return calculateCoordinationNumberDerivatives(cn, Vector{}, threshold, pool, num_threads);
+    }
+
+    /// WP-D Stage D (May 2026): fused CN + DCN in a single O(N²) pair pass.
+    /// Eliminates the redundant geometry-read pass that calculateCoordinationNumberDerivatives
+    /// performs after calculateGFNFFCNWithNeighbors. Only called when GFNFF_CN_DCN_FUSION is
+    /// defined and gradient=true and cn_cutoff_bohr > 0 and !gpu_only and !reuse_cn.
+    CNAndDerivResult computeCNAndDerivativesFused(
+        double cn_cutoff_bohr,
+        CxxThreadPool* pool,
+        int num_threads) const;
 
     /**
      * @brief Determine hybridization states for all atoms
@@ -2183,19 +2312,20 @@ public:
 private:
     // Molecular structure (formerly from QMInterface base class)
     int m_atomcount = 0; ///< Number of atoms
-    Matrix m_geometry; ///< Molecular geometry in Angström
-    Matrix m_gradient; ///< Gradient in Hartree/Bohr
+    GeoGradMatrix m_geometry; ///< Molecular geometry in Angström — WP-G: RowMajor
+    GeoGradMatrix m_gradient; ///< Gradient in Hartree/Bohr — WP-G: RowMajor
     std::vector<int> m_atoms; ///< Atomic numbers (Z values)
     int m_charge = 0; ///< Total molecular charge
     int m_spin = 0; ///< Spin multiplicity
 
     // GFN-FF specific
     json m_parameters; ///< GFN-FF parameters
+    int m_threads = 1; ///< Claude Generated (WP1, May 2026): cached thread count, kept in sync with m_parameters["threads"]
     ForceField* m_forcefield; ///< Force field engine using modern structure
     std::unique_ptr<FFWorkspace> m_workspace; ///< Claude Generated (Mar 2026): Unified workspace (replaces ForceField path)
     bool m_use_workspace = false; ///< Use FFWorkspace path instead of ForceField
 
-    Matrix m_geometry_bohr; ///< Geometry in Bohr (GFN-FF parameters are in Bohr)
+    GeoGradMatrix m_geometry_bohr; ///< Geometry in Bohr (GFN-FF parameters are in Bohr) — WP-G: RowMajor
 
     // EEQ charge calculation (Dec 2025 - Phase 3: Extraction and delegation)
     std::unique_ptr<EEQSolver> m_eeq_solver; ///< Standalone EEQ solver (replaces embedded EEQ code)
@@ -2252,13 +2382,14 @@ private:
     bool shouldUpdateHBXB(const Eigen::MatrixXd& current_geometry) const;
 
     // Geometry change detection for intelligent caching
+    // WP-G (May 2026): aligned with m_geometry_bohr RowMajor type
     class GeometryChangeDetector {
     private:
-        Matrix m_last_geometry;
+        GeoGradMatrix m_last_geometry;
         double m_change_threshold = 1e-6;
 
     public:
-        bool geometryChanged(const Matrix& new_geometry) const {
+        bool geometryChanged(const GeoGradMatrix& new_geometry) const {
             if (m_last_geometry.rows() != new_geometry.rows() ||
                 m_last_geometry.cols() != new_geometry.cols()) {
                 return true;
@@ -2267,12 +2398,12 @@ private:
             return (m_last_geometry - new_geometry).array().abs().maxCoeff() > m_change_threshold;
         }
 
-        void updateGeometry(const Matrix& new_geometry) {
+        void updateGeometry(const GeoGradMatrix& new_geometry) {
             m_last_geometry = new_geometry;
         }
 
         void reset() {
-            m_last_geometry = Matrix();
+            m_last_geometry = GeoGradMatrix();
         }
     };
 
@@ -2280,6 +2411,25 @@ private:
     bool m_comparing_gradients = false; ///< Guard to prevent recursion in compareGradients
     bool m_skip_eeq_recalc = false; ///< Skip Phase-2 EEQ recalculation (for charge injection diagnostic)
     bool m_rep_diag = false; ///< Dump repulsion alphanb diagnostic
+
+    // Static-Mode (WP-S1): freeze CN/charges across MD steps to avoid recompute
+    bool m_static_charges = false;          ///< If true, skip Phase-2 EEQ after first successful call
+    bool m_static_cn = false;               ///< If true, skip CN/dcn/D4-weight recompute after first call
+    bool m_static_state_captured = false;   ///< Becomes true once initial CN/charges have been captured
+
+    // WP-S3 (May 2026): runtime state of the EEQ cutoff auto-detection
+    bool m_eeq_cutoff_auto_active = false;  ///< true if applyEEQCutoffAutoIfRequested set 30 Bohr
+
+    // WP-P1 (May 2026): cached after each prepareCNAndEEQ() call; consumed by MD diagnostics dump.
+    mutable PrepTiming m_last_prep_timing{};
+    bool m_force_phase_timing = false;  ///< If true, prepareCNAndEEQ collects per-phase timings even at verbosity < 2
+
+    // WP-D (May 2026): cached raw CN from CNCalculator — reused by calculateCoordinationNumberDerivatives
+    // to avoid recomputing the N²-erf loop in dcn step 1.
+    mutable Vector m_last_cn_raw{};
+    // WP-D Stage C (May 2026): symmetric CN neighbor list — reused by dcn to avoid N² pair scan.
+    // Populated by prepareCNAndEEQ when cn_cutoff_bohr > 0; empty otherwise (→ N² fallback).
+    mutable std::vector<std::vector<int>> m_last_cn_neighbors{};
 
     // Claude Generated (April 2026): Periodic Boundary Conditions
     bool m_has_pbc = false;                                              ///< PBC active flag
@@ -2338,7 +2488,15 @@ private:
     Vector m_last_cn;    ///< Coordination numbers
     Vector m_last_cnf;   ///< CN-dependent EEQ factors per atom
     bool m_gpu_path_preallocated = false; ///< True after preAllocateForGPUPath()
-    std::vector<SpMatrix> m_last_dcn; ///< CN derivatives (gradient only)
+    CNDerivStore m_last_dcn; ///< CN derivatives (gradient only). Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
+
+    // WP-FF-DistMatrix-Sharing (May 2026): shared packed-triangular distance arrays.
+    // Filled by computeSharedDistances() once per energy call; consumed by
+    // ForceFieldThread term loops and EEQSolver phase-2.  Layout: lower-triangular,
+    // index via GFNFF::triIdx(i, j) = i*(i+1)/2 + j (i > j).
+    mutable Eigen::VectorXd m_shared_sqrab;
+    mutable Eigen::VectorXd m_shared_srab;
+    mutable int             m_shared_dist_N = 0;
 
     // Conversion factors
     static constexpr double HARTREE_TO_KCAL = 627.5094740631;

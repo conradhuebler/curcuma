@@ -563,6 +563,22 @@ void OptimizerDriver::logOptimizationStep(int iteration, double energy, double e
 
 double OptimizerDriver::calculateRMSD(const Molecule& mol1, const Molecule& mol2) const
 {
+    // Claude Generated (May 2026): Fast path for large systems.
+    // RMSDDriver::start() rebuilds fragment topology + does Kabsch alignment every
+    // call. For mixture.xyz (6200 atoms, 1400 fragments) that costs ~17 s/step,
+    // dwarfing the 1.5 s GPU energy call. LBFGS coordinate updates do not introduce
+    // global rotation/translation between successive iterations, so the unaligned
+    // coordinate-diff RMSD is the physically correct convergence criterion.
+    const int natoms = mol1.AtomCount();
+    if (natoms >= 500 && natoms == mol2.AtomCount()) {
+        const Matrix& g1 = mol1.getGeometry();
+        const Matrix& g2 = mol2.getGeometry();
+        if (g1.rows() == natoms && g2.rows() == natoms) {
+            double sq = (g1 - g2).squaredNorm();
+            return std::sqrt(sq / natoms);
+        }
+    }
+
     if (!m_context.rmsd_driver)
         return 0.0;
 

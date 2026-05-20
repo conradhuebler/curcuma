@@ -176,9 +176,10 @@ void Docking::PerformDocking()
               << "** Docking Phase 0 - Starting **" << std::endl
               << std::endl;
 
-    int max_X = 360 / double(m_step_X);
-    int max_Y = 360 / double(m_step_Y);
-    int max_Z = 360 / double(m_step_Z);
+    // Claude Generated (May 2026, ICX-build): doubles to avoid narrowing in Position{} init.
+    double max_X = 360.0 / m_step_X;
+    double max_Y = 360.0 / m_step_Y;
+    double max_Z = 360.0 / m_step_Z;
 
     int excluded = 0, all = 0, distance = 0;
     while (m_current_cycle < m_cycles) {

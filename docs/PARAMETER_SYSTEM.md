@@ -15,6 +15,7 @@ The Parameter Registry System provides automated, type-safe parameter management
 - **Validation**: Automatic duplicate detection and type consistency checks
 - **Alias Support**: Multiple names for the same parameter
 - **JSON I/O**: Export defaults, import custom configurations
+- **Flat-CLI reachability (2026)**: Registering a parameter via the `PARAM` macros also makes its flat name available on the CLI. The registry's inverse lookup (`findOwnerModules`) lets `CLI2Json` auto-route `-<name> <value>` into `controller["<owning-module>"]["<name>"]` without the user needing dotted form. See [CLI_ROUND_TRIP.md](CLI_ROUND_TRIP.md).
 
 ## Architecture
 
