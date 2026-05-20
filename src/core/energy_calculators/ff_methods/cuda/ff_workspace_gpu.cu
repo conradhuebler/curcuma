@@ -2328,7 +2328,9 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
 
     // k_cn_chainrule: reads d_dEdcn (must be final) and d_grad (accumulated by ALL
     // kernels), so wait for all 3 stream events.
-    if (gradient && m_cn_pairs_on_gpu && impl.n_cn_pairs > 0 && impl.d_dlogdcn.ptr) {
+    // Static-Mode (WP-S1): skip when frozen_cn — Term 1b is zero by definition (dcn=0).
+    if (gradient && m_cn_pairs_on_gpu && impl.n_cn_pairs > 0 && impl.d_dlogdcn.ptr
+        && !m_frozen_cn) {
         // event_p2_pairwise: Phase-2-dedicated — always wait.
         // event_bonded/threebody: Phase-1-internal — skip if Phase-1 ran as graph.
         cudaStreamWaitEvent(stream, impl.event_p2_pairwise, 0);
@@ -2684,7 +2686,7 @@ double FFWorkspaceGPU::calculate(bool gradient)
 // setGeometry — extract N×3 RowMajor matrix to flat array and upload to GPU
 // ============================================================================
 
-void FFWorkspaceGPU::setGeometry(const Matrix& geom)
+void FFWorkspaceGPU::setGeometry(const GeoGradMatrix& geom)
 {
     auto& impl = *m_impl;
     const int N = m_natoms;

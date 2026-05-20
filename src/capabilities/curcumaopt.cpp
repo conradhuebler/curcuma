@@ -141,6 +141,25 @@ CurcumaOpt::CurcumaOpt(const json& controller, bool silent)
 
 void CurcumaOpt::LoadControlJson()
 {
+    // WP6/CLI plumbing fix (May 2026): forward method-specific sub-configs into the
+    // opt/sp scopes that EnergyCalculator instances are constructed from. Without
+    // this, CLI overrides like -gfnff.eeq_distance_cutoff are dropped because
+    // m_controller["opt"] / ["sp"] don't carry sibling scopes. Add only when missing
+    // — explicit per-scope overrides always win.
+    static constexpr const char* kMethodScopes[] = {
+        "gfnff", "eeq_solver", "xtb", "tblite", "ulysses",
+        "d3", "d4", "uff", "qmdff", "eht"
+    };
+    for (const char* sub : {"opt", "sp"}) {
+        if (!m_controller.contains(sub) || !m_controller[sub].is_object())
+            m_controller[sub] = json::object();
+        for (const char* scope : kMethodScopes) {
+            if (m_controller.contains(scope) && !m_controller[sub].contains(scope)) {
+                m_controller[sub][scope] = m_controller[scope];
+            }
+        }
+    }
+
     // Claude Generated (October 2025): Direct access to m_defaults with fallback values
     // m_defaults is now populated from ParameterRegistry via CurcumaOptJson
     m_threads = m_defaults.value("threads", 1);
@@ -650,15 +669,30 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
             }
             next.setGeometry(geometry);
 
-            driver->setReference(previous);
-            driver->setTarget(next);
-            driver->start();
+            // Claude Generated (May 2026): For large systems, replace the heavy
+            // RMSDDriver::start() (rebuilds fragment topology + Kabsch alignment every
+            // step) with a simple coordinate-diff RMSD. LBFGS coordinate updates do not
+            // introduce global rotation/translation between successive iterations, so
+            // alignment is unnecessary; the displacement RMSD is the physically correct
+            // convergence criterion. For mixture.xyz (6200 atoms, 1400 fragments) this
+            // saves ~17 s/step (vs ~1.5 s energy call).
+            double step_rmsd;
+            const int rmsd_fast_threshold = 500;
+            if (atoms_count >= rmsd_fast_threshold) {
+                double sq = (parameter - old_parameter).squaredNorm();
+                step_rmsd = std::sqrt(sq / atoms_count);
+            } else {
+                driver->setReference(previous);
+                driver->setTarget(next);
+                driver->start();
+                step_rmsd = driver->RMSD();
+            }
             end = std::chrono::system_clock::now();
 
 #ifdef GCC
-            output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), solver.final_grad_norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+            output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, step_rmsd, solver.final_grad_norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
 #else
-            output += fmt::format("{1} {2} {3} {4} {5}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+            output += fmt::format("{1} {2} {3} {4} {5}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, step_rmsd, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
 
 #endif
         start = std::chrono::system_clock::now();
@@ -673,7 +707,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
          * Gradient Norm = 8
          * */
         converged = 1 * (abs(fun.m_energy - final_energy) * 2625.5 < m_dE)
-            + 2 * (driver->RMSD() < m_dRMSD)
+            + 2 * (step_rmsd < m_dRMSD)
             + 4 * (solver.isConverged())
             + 8 * (solver.final_grad_norm() < m_GradNorm);
         perform_optimisation = ((converged & m_ConvCount) != m_ConvCount) && (fun.isError() == 0);
@@ -723,8 +757,14 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
 
         error = true;
     }
+    // Claude Generated (May 2026): Reuse cached driver RMSD for small systems; for
+    // large systems where the loop used the fast coordinate-diff RMSD, recompute it
+    // here for the final summary line so it stays consistent.
+    double final_rmsd = (atoms_count >= 500)
+        ? std::sqrt((parameter - old_parameter).squaredNorm() / atoms_count)
+        : driver->RMSD();
     if (error == false) {
-        output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), solver.final_grad_norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+        output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, final_rmsd, solver.final_grad_norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
         output += fmt::format("{0: ^75}\n", "*** Geometry Optimisation converged ***");
         output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 
@@ -733,7 +773,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
             output.clear();
         }
     } else {
-        output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), solver.final_grad_norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+        output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, final_rmsd, solver.final_grad_norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
         output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
         output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 

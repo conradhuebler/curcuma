@@ -154,7 +154,7 @@ void ForceField::distributeD3CN(const Vector& d3_cn)
 // These are NOT distributed to threads (threads never read them).
 // Used after thread completion for chain-rule gradients (TERM 1b, bond/disp dEdcn).
 void ForceField::distributeCNandDerivatives(const Vector& cn, const Vector& cnf,
-                                             const std::vector<SpMatrix>& dcn)
+                                             const CNDerivStore& dcn)
 {
     m_cn = cn;
     m_cnf = cnf;
@@ -189,6 +189,19 @@ void ForceField::setUnitCell(const Eigen::Matrix3d& cell_angstrom, bool has_pbc)
     m_unit_cell_bohr_inv = m_unit_cell_bohr.inverse();
     for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
         m_stored_threads[i]->setUnitCell(m_unit_cell_bohr, m_unit_cell_bohr_inv, has_pbc);
+    }
+}
+
+// WP-FF-DistMatrix-Sharing (May 2026): forward packed-triangular distance arrays
+// to every ForceFieldThread. The arrays live in GFNFF (mutable members), refreshed
+// once per energy call via GFNFF::computeSharedDistances(). Threads consume them
+// via inline r(i,j)/rsq(i,j) helpers.
+void ForceField::setSharedDistances(const Eigen::VectorXd* srab, const Eigen::VectorXd* sqrab)
+{
+    for (auto* thread : m_stored_threads) {
+        if (auto* ff_thread = dynamic_cast<ForceFieldThread*>(thread)) {
+            ff_thread->setSharedDistancesPtr(srab, sqrab);
+        }
     }
 }
 
@@ -2432,6 +2445,15 @@ double ForceField::Calculate(bool gradient)
     m_coulomb_energy = 0.0;
     m_energy_hbond = 0.0;    // Claude Generated (2025): Phase 5 - Reset HB energy
     m_energy_xbond = 0.0;    // Claude Generated (2025): Phase 5 - Reset XB energy
+    // Claude Generated (May 2026, HB-investigation): reset per-case HB accumulators
+    m_hbond_case1_energy = 0.0;
+    m_hbond_case2_energy = 0.0;
+    m_hbond_case3_energy = 0.0;
+    m_hbond_case4_energy = 0.0;
+    m_hbond_case1_count = 0;
+    m_hbond_case2_count = 0;
+    m_hbond_case3_count = 0;
+    m_hbond_case4_count = 0;
     m_gfnff_repulsion = 0.0;  // Claude Generated (Dec 2025): Reset GFN-FF repulsion energy
     m_gfnff_bonded_repulsion = 0.0;
     m_gfnff_nonbonded_repulsion = 0.0;
@@ -2571,6 +2593,16 @@ double ForceField::Calculate(bool gradient)
             m_energy_hbond += thread_hb;
             m_energy_xbond += thread_xb;
 
+            // Claude Generated (May 2026, HB-investigation): per-case split for Fortran comparison
+            m_hbond_case1_energy += m_stored_threads[i]->HBondCase1Energy();
+            m_hbond_case2_energy += m_stored_threads[i]->HBondCase2Energy();
+            m_hbond_case3_energy += m_stored_threads[i]->HBondCase3Energy();
+            m_hbond_case4_energy += m_stored_threads[i]->HBondCase4Energy();
+            m_hbond_case1_count += m_stored_threads[i]->HBondCase1Count();
+            m_hbond_case2_count += m_stored_threads[i]->HBondCase2Count();
+            m_hbond_case3_count += m_stored_threads[i]->HBondCase3Count();
+            m_hbond_case4_count += m_stored_threads[i]->HBondCase4Count();
+
             // Claude Generated (December 2025): Collect ATM three-body dispersion energy
             double thread_atm = m_stored_threads[i]->ATMEnergy();
             m_atm_energy += thread_atm;
@@ -2685,7 +2717,7 @@ double ForceField::Calculate(bool gradient)
     // Combined: gradient += dcn * (dEdcn_total - qtmp) instead of two separate matvec passes
     // Saves 3 sparse matvecs per gradient evaluation for gfnff
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
-    if (gradient && !m_dcn.empty() && m_dcn.size() == 3) {
+    if (gradient && !m_dcn.empty() && m_dcn.natoms == m_natoms) {
         Vector dEdcn_total = Vector::Zero(m_natoms);
         for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
             const Vector& thread_dEdcn = m_stored_threads[i]->getDEdcn();
@@ -2707,13 +2739,10 @@ double ForceField::Calculate(bool gradient)
             }
         }
 
-        // Combined matvec: gradient += dcn * (dEdcn_total - qtmp)
+        // Claude Generated (WP4, May 2026): CNDerivStore::applyAdd replaces 3× SpMatrix*v.
+        // Combined vector: gradient += M * (dEdcn_total - qtmp)
         Vector dEdcn_combined = has_term1b ? (dEdcn_total - qtmp).eval() : dEdcn_total;
-        for (int dim = 0; dim < 3; ++dim) {
-            if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
-                m_gradient.col(dim) += m_dcn[dim] * dEdcn_combined;
-            }
-        }
+        m_dcn.applyAdd(dEdcn_combined, m_gradient);
 
         if (CurcumaLogger::get_verbosity() >= 2) {
             double dEdcn_norm = dEdcn_total.norm();
@@ -2739,21 +2768,13 @@ double ForceField::Calculate(bool gradient)
 
             m_bond_cn_correction = Matrix::Zero(m_natoms, 3);
             m_disp_cn_correction = Matrix::Zero(m_natoms, 3);
-            for (int dim = 0; dim < 3; ++dim) {
-                if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
-                    m_bond_cn_correction.col(dim) = m_dcn[dim] * dEdcn_bond_total;
-                    m_disp_cn_correction.col(dim) = m_dcn[dim] * dEdcn_disp_total;
-                }
-            }
+            m_dcn.applyAdd(dEdcn_bond_total, m_bond_cn_correction);
+            m_dcn.applyAdd(dEdcn_disp_total, m_disp_cn_correction);
             // Coulomb component CN correction for GradComp
             // Reference: Fortran gfnff_engrad.F90:453-454 applies TERM 1b to g_es
             if (has_term1b) {
                 m_coulomb_cn_correction = Matrix::Zero(m_natoms, 3);
-                for (int dim = 0; dim < 3; ++dim) {
-                    if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
-                        m_coulomb_cn_correction.col(dim) = -(m_dcn[dim] * qtmp);
-                    }
-                }
+                m_dcn.applyAdd(qtmp, m_coulomb_cn_correction, -1.0);
             }
         }
     }
@@ -2998,17 +3019,19 @@ void ForceField::setStoreGradientComponents(bool store)
 }
 
 // Helper to sum a component gradient across all threads
+// WP-G (May 2026): per-component getters return GeoGradMatrix& (RowMajor); accumulate
+// internally as RowMajor for cache locality, convert to ColumnMajor Matrix at the API boundary.
 static Matrix sumComponentGradient(const std::vector<ForceFieldThread*>& threads,
-                                    const Matrix& (ForceFieldThread::*getter)() const,
+                                    const GeoGradMatrix& (ForceFieldThread::*getter)() const,
                                     int natoms)
 {
-    Matrix result = Eigen::MatrixXd::Zero(natoms, 3);
+    GeoGradMatrix result = GeoGradMatrix::Zero(natoms, 3);
     for (const auto* thread : threads) {
         if (thread->storeGradientComponents()) {
             result += (thread->*getter)();
         }
     }
-    return result;
+    return Matrix(result);  // Eigen storage-order conversion at API boundary
 }
 
 // Claude Generated (Mar 2026): Bond/Coulomb/Dispersion getters include CN chain-rule corrections

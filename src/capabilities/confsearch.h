@@ -92,7 +92,9 @@ static const nlohmann::json ConfSearchJson{
     { "wall_beta", 6 }
 };
 
-class curcuma::Molecule;
+// Claude Generated (May 2026, ICX-build): forward decl must be inside the namespace.
+// ICX rejects `class curcuma::Molecule;` as a nested-name forward decl; GCC accepts it.
+namespace curcuma { class Molecule; }
 
 class ConfSearch : public CurcumaMethod {
 public:

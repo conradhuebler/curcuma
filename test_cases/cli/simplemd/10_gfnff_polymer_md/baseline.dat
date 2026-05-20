@@ -25,3 +25,16 @@
 2026-05-04 12:58:15 | 85ca3cf | gfnff-gpu | threads=4 | 29.39s | 29.4ms/step | ok | 85ca3cf_with_disp_sort_restored
 2026-05-04 13:01:27 | 85ca3cf | gfnff-gpu | threads=4 | 28.88s | 28.9ms/step | ok | disp_moved_to_phase1
 2026-05-04 13:25:23 | 85ca3cf | gfnff-gpu | threads=4 | 28.71s | 28.7ms/step | ok | event_cn_ready_fix
+2026-05-12 14:10:37 | beacabe | gfnff | threads=4 | 105.00s | 105.0ms/step | ok | WP-D-Stage-B_FAST_EXP_on_exploration  [vs 1c27621 speedup=1.50x]
+2026-05-18 17:46:04 | beacabe | gfnff | threads=4 | 104.16s | 104.2ms/step | ok | WP-D-Stage-B_v2_SoA_FAST_EXP_on  [vs 1c27621 speedup=1.51x]
+2026-05-18 17:55:37 | beacabe | gfnff | threads=4 | 105.70s | 105.7ms/step | ok | WP-D-Stage-B_v2_FAST_EXP_off_reference  [vs 1c27621 speedup=1.49x]
+2026-05-18 22:44:00 | 3575e37 | gfnff | threads=4 | 46.20s | 46.2ms/step | ok | WP-D-Stage-C_neighbor_list_reuse  [vs 1c27621 speedup=3.41x]
+2026-05-18 22:44:00 | 1d382b7 | gfnff | threads=4 | 44.24s | 44.2ms/step | ok | WP-D-Stage-D_CN_DCN_FUSION_on  [vs 1c27621 speedup=3.57x]
+2026-05-19 17:39:57 | 7e50d27 | gfnff | threads=4 | 57.89s | 57.9ms/step | ok | WP-FF-SoA_thread_local  [vs 1c27621 speedup=2.72x]
+2026-05-19 21:40:48 | 7e50d27 | gfnff | threads=4 | 57.23s | 57.2ms/step | ok | WP-FF-SoA_OFF_reference  [vs 1c27621 speedup=2.76x]
+2026-05-20 16:43:00 | c41c0ed | gfnff | threads=4 | 57.05s | 57.0ms/step | ok | bisect-HEAD-cachedtopo-run1  [vs 1c27621 speedup=2.76x]
+2026-05-20 16:43:01 | c41c0ed | gfnff | threads=4 | 57.29s | 57.3ms/step | ok | bisect-HEAD-cachedtopo-run2
+2026-05-20 16:43:02 | 1d382b7 | gfnff | threads=4 | 61.10s | 61.1ms/step | ok | bisect-1d382b7-cachedtopo-run1-LOADED-SYSTEM
+2026-05-20 16:43:03 | 1d382b7 | gfnff | threads=4 | 61.32s | 61.3ms/step | ok | bisect-1d382b7-cachedtopo-run2-LOADED-SYSTEM
+2026-05-20 16:43:04 | fa7e0a2 | gfnff | threads=4 | 61.26s | 61.3ms/step | ok | bisect-fa7e0a2-cachedtopo-LOADED-SYSTEM
+2026-05-20 16:43:05 | e6037f2 | gfnff | threads=4 | 60.89s | 60.9ms/step | ok | bisect-e6037f2-freshtopo-LOADED-SYSTEM

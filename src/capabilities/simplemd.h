@@ -30,6 +30,7 @@
 #include "plumed2/src/wrapper/Plumed.h"
 #endif
 
+#include "src/capabilities/md_diagnostics.h"
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 
@@ -390,6 +391,17 @@ private:
     bool m_nohillsfile = false;
     bool m_rattle_12 = false;
     bool m_rattle_13 = false;
+
+    // WP-S2 (May 2026): per-step diagnostics JSONL dump
+    bool m_md_diagnostics = false;
+    std::unique_ptr<MDDiagnosticsWriter> m_diag_writer;
+
+    // WP-P1 (May 2026): per-phase wall-clock breakdown for diagnostics
+    bool m_md_diagnostics_timing = false;
+    double m_last_ff_ms = 0.0;     ///< wall-clock of last m_interface->CalculateEnergy()
+    double m_last_hbxb_ms = 0.0;   ///< placeholder; HBXB-update lives inside Calculation() and is hard to isolate
+    double m_last_integrator_ms = 0.0;  ///< wall-clock of last Integrator() call in step()
+
     int m_mtd_dT = -1;
     int m_seed = -1;
     int m_time_step = 0;
@@ -504,6 +516,11 @@ private:
     PARAM(cg_write_vtf, Bool, true, "Write VTF trajectory for CG systems.", "CG", {"write_vtf"})
     PARAM(cg_timestep_scaling, Bool, true, "Enable automatic timestep scaling for pure CG systems.", "CG", {"cg_dt_scaling"})
     PARAM(cg_timestep_factor, Double, 10.0, "Timestep multiplication factor for pure CG systems.", "CG", {})
+
+    // --- WP-S2 Diagnostics (May 2026) ---
+    PARAM(md_diagnostics, Bool, false, "Write per-step diagnostics to <basename>.diag.jsonl (energy decomposition, charges, CN, gradient norms, HB/XB counts). Frequency follows dump_frequency. One JSON object per line.", "Output", {})
+    // --- WP-P1 Timing Instrumentation (May 2026) ---
+    PARAM(md_diagnostics_timing, Bool, false, "Add a timing_ms block to each <basename>.diag.jsonl record (per-phase wall-clock: CN/EEQ/dcn/D4-weights/FF/integrator/HBXB/I-O). GPU runs add a gpu sub-block with per-kernel-category times. Requires md_diagnostics=true. ~1-2 us per hook.", "Output", {})
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^

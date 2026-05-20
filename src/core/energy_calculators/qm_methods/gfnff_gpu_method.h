@@ -93,6 +93,11 @@ public:
     /// Get GPU CN result (valid after calculateEnergy)
     const Vector& getGPUCN() const { return m_gpu_cn_final; }
 
+    // WP-P1 (May 2026): per-phase and per-stream timings for MD diagnostics
+    json getLastPrepTiming() const override;
+    json getStreamTimings() const override;
+    void setForcePhaseTiming(bool on) override;
+
 private:
     /**
      * @brief Initialize GPU workspace from GFNFF parameter set.

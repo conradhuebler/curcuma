@@ -130,6 +130,19 @@ endif()
 add_test(NAME test_periodic_table
          COMMAND test_periodic_table)
 
+# Claude Generated (May 2026, WP-D Stage B): fast_exp_neg_sq_block unit test
+add_executable(test_fast_exp
+        test_fast_exp.cpp)
+
+target_link_libraries(test_fast_exp curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_fast_exp REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_fast_exp
+         COMMAND test_fast_exp)
+
 # Claude Generated (Session 5): Two-Phase EEQ System Tests
 # Tests Phase 1 topology charges and Phase 2 environment corrections
 add_executable(test_eeq_two_phase
