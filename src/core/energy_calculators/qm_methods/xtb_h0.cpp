@@ -276,10 +276,19 @@ double XTB::calcRepulsionEnergy() const
                 zeffj = gfn2_params::rep_zeff[zj - 1];
             }
 
-            // xTB repulsion: E_rep = Z_i*Z_j/R * exp( -(α_i·α_j)^kexp * R^rexp )
-            const double a_prod = alf * alfj;
-            const double ri = zeff * zeffj / r;
-            erep += ri * std::exp(-std::pow(a_prod, kexp) * std::pow(r, rexp));
+            // xTB repulsion (TBLite effective.f90):
+            //   alpha_ij = sqrt(alpha_i * alpha_j)
+            //   kexp_ij  = kexp_light  if both Z<=2 (GFN2), else kexp
+            //   E_rep    = Z_i*Z_j / R^rexp * exp(-alpha_ij * R^kexp_ij)
+            const double alpha_pair = std::sqrt(alf * alfj);
+            double kexp_pair = kexp;
+            if (m_method == MethodType::GFN2) {
+                if (zi <= 2 && zj <= 2)
+                    kexp_pair = gfn2_params::rep_kexp_light;
+            }
+            const double r_kexp = std::pow(r, kexp_pair);
+            erep += (zeff * zeffj / std::pow(r, rexp))
+                  * std::exp(-alpha_pair * r_kexp);
         }
     }
     return erep;

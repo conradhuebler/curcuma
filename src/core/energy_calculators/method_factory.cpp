@@ -382,6 +382,26 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         return createXTBExplicit(method, config);
     }
 
+    // TBLite-specific methods (explicit TBLite selection)
+    if (method == "tblite-gfn2") {
+#ifdef USE_TBLITE
+        CurcumaLogger::info("TBLite GFN2: using TBLite explicitly");
+        return std::make_unique<TBLiteMethod>("gfn2", config);
+#else
+        throw MethodCreationException(
+            "Method 'tblite-gfn2' requires TBLite which was not compiled (cmake .. -DUSE_TBLITE=ON)");
+#endif
+    }
+    if (method == "tblite-gfn1") {
+#ifdef USE_TBLITE
+        CurcumaLogger::info("TBLite GFN1: using TBLite explicitly");
+        return std::make_unique<TBLiteMethod>("gfn1", config);
+#else
+        throw MethodCreationException(
+            "Method 'tblite-gfn1' requires TBLite which was not compiled (cmake .. -DUSE_TBLITE=ON)");
+#endif
+    }
+
     // External GFN-FF (External GFNFF > XTB, no native fallback)
     if (method == "xtb-gfnff") return createGFNFF(config);
 
@@ -426,8 +446,11 @@ std::vector<std::string> MethodFactory::getAvailableMethods() {
                                        "gfn1", "gfn2", "ngfn1", "ngfn2",
                                        "gfnff", "uff", "uff-d3", "qmdff"});
 
-    if (hasTBLite())
+    if (hasTBLite()) {
         available.push_back("ipea1");
+        available.push_back("tblite-gfn1");
+        available.push_back("tblite-gfn2");
+    }
 
     // XTB-specific explicit methods
     if (hasXTB()) {

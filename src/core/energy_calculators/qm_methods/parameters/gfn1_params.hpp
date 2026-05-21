@@ -35,6 +35,8 @@ inline constexpr double s9 = 0.0;
 
 inline constexpr double rep_kexp = 1.5;
 
+inline constexpr double rep_kexp_light = 1.5;
+
 inline constexpr double rep_rexp = 1.0;
 
 inline constexpr double gexp = 2.0;

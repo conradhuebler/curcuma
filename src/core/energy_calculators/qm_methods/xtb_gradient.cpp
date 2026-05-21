@@ -121,9 +121,8 @@ void XTB::calculateGradient()
 
     // ==========================================================================
     //  1.  Repulsion gradient
-    //      E_rep_ij = Z_i·Z_j/r · exp(-(α_i·α_j)^kexp · r^rexp)
-    //      dE/dr    = -(rexp/r + a_pair·kexp·r^(kexp-1)) · E_pair   [rexp=1 here]
-    //               = -(1/r + a_pair) · E_pair
+    //      E_rep_ij = Z_i·Z_j / R^rexp * exp(-sqrt(α_i·α_j) * R^kexp_ij)
+    //      dE/dr    = -(rexp/R + alpha_pair*kexp_ij*R^(kexp_ij-1)) * E_pair
     // ==========================================================================
     for (int i = 0; i < nat; ++i) {
         const int zi = m_atoms[i];
@@ -156,11 +155,17 @@ void XTB::calculateGradient()
             if (r2 < 1.0e-12) continue;
             const double r  = std::sqrt(r2);
 
-            // a_pair = (α_i·α_j)^kexp  (constant for this atom pair)
-            const double a_pair  = std::pow(alfi * alfj, kexp);
-            const double E_pair  = zeffi * zeffj / r * std::exp(-a_pair * std::pow(r, rexp));
-            // dE/dr = -(rexp/r + a_pair·rexp·r^(rexp-1)) · E_pair
-            const double dEdr    = -(rexp / r + a_pair * rexp * std::pow(r, rexp - 1.0)) * E_pair;
+            const double alpha_pair = std::sqrt(alfi * alfj);
+            double kexp_pair = kexp;
+            if (m_method == MethodType::GFN2) {
+                if (zi <= 2 && zj <= 2)
+                    kexp_pair = gfn2_params::rep_kexp_light;
+            }
+            const double r_kexp = std::pow(r, kexp_pair);
+            const double E_pair = zeffi * zeffj / std::pow(r, rexp)
+                                * std::exp(-alpha_pair * r_kexp);
+            const double dEdr   = -(rexp / r + alpha_pair * kexp_pair
+                                    * std::pow(r, kexp_pair - 1.0)) * E_pair;
 
             const double fx = dEdr * dx / r;
             const double fy = dEdr * dy / r;
