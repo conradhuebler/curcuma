@@ -57,7 +57,13 @@ bool GFNFFComputationalMethod::updateGeometry(const Matrix& geometry) {
 double GFNFFComputationalMethod::calculateEnergy(bool gradient) {
     CitationRegistry::cite("gfnff");
     CitationRegistry::cite("d4", "gfnff");
-    CitationRegistry::cite("h4", "gfnff");
+    CitationRegistry::cite("eeq", "gfnff");
+    CitationRegistry::cite("pyykko", "gfnff");
+    CitationRegistry::cite("sanderson", "gfnff");
+    CitationRegistry::cite("ghosh_islam", "gfnff");
+    CitationRegistry::cite("atm", "d3");
+    CitationRegistry::cite("bj", "d3");
+    CitationRegistry::cite("casimir_polder", "d4");
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== GFNFFComputationalMethod::calculateEnergy() START ===");
     }
@@ -89,7 +95,13 @@ Position GFNFFComputationalMethod::getDipole() const {
 }
 
 void GFNFFComputationalMethod::setThreadCount(int threads) {
-    (void)threads; // Unused parameter - GFN-FF thread management handled internally
+    // Claude Generated (WP1, May 2026): forward to GFNFF::setThreadCount, which keeps
+    // m_parameters["threads"] and the cached m_threads member in sync. EnergyCalculator
+    // calls this after MethodFactory::create, so the post-construction path now works.
+    if (m_gfnff) {
+        m_gfnff->setThreadCount(threads);
+    }
+    m_parameters["threads"] = (threads > 0 ? threads : 1);
 }
 
 void GFNFFComputationalMethod::setParameters(const json& params) {
@@ -149,4 +161,42 @@ json GFNFFComputationalMethod::getEnergyDecomposition() const {
 
 std::string GFNFFComputationalMethod::getErrorMessage() const {
     return m_error_message;
+}
+
+// WP-S2 (May 2026): per-step diagnostics hooks for MDDiagnosticsWriter
+Vector GFNFFComputationalMethod::getCN() const
+{
+    return m_gfnff ? m_gfnff->getLastCN() : Vector{};
+}
+
+int GFNFFComputationalMethod::getHBCount() const
+{
+    return m_gfnff ? static_cast<int>(m_gfnff->getLastHBonds().size()) : 0;
+}
+
+int GFNFFComputationalMethod::getXBCount() const
+{
+    return m_gfnff ? static_cast<int>(m_gfnff->getLastXBonds().size()) : 0;
+}
+
+// WP-P1 (May 2026): expose the cached PrepTiming as JSON for MDDiagnosticsWriter
+json GFNFFComputationalMethod::getLastPrepTiming() const
+{
+    if (!m_gfnff) return {};
+    const auto& t = m_gfnff->getLastPrepTiming();
+    return {
+        {"cn",          t.cn},
+        {"eeq_topo",    t.eeq_topo},
+        {"cnf",         t.cnf},
+        {"dcn",         t.dcn},
+        {"d4_gw",       t.d4_gw},
+        {"eeq_solve",   t.eeq_solve},
+        {"charge_dist", t.charge_dist},
+        {"total",       t.total},
+    };
+}
+
+void GFNFFComputationalMethod::setForcePhaseTiming(bool on)
+{
+    if (m_gfnff) m_gfnff->setForcePhaseTiming(on);
 }

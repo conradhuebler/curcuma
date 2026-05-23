@@ -1019,30 +1019,27 @@ void D4ParameterGenerator::precomputeGaussianWeights(CxxThreadPool* pool, int nu
         // Charges remain available for potential future full D4 implementation
         double cni = m_cn_values[i];
 
-        // Compute Gaussian weights for all reference states of this atom
-        std::vector<double> weights(nref, 0.0);
-        double sum_weights = 0.0;
-
-        for (int ref = 0; ref < nref && ref < MAX_REF; ++ref) {
-            double cni_ref = (elem_i < static_cast<int>(m_refcn.size()) &&
-                             ref < static_cast<int>(m_refcn[elem_i].size()))
-                            ? m_refcn[elem_i][ref] : 0.0;
-
-            // KEY: CN-only Gaussian weighting (matches GFN-FF hybrid model)
-            // Reference: external/gfnff/src/gfnff_gdisp0.f90:405 - cngw = exp(-wf * (cn - cnref)**2)
-            double diff_cn = cni - cni_ref;
-            weights[ref] = std::exp(-wf * diff_cn * diff_cn);
-            sum_weights += weights[ref];
+        // Claude Generated (WP5, May 2026): Stack-Eigen::Array pipeline for the inner
+        // MAX_REF=7 loop. Replaces per-atom std::vector<double>(nref) heap allocation +
+        // scalar std::exp loop. w_arr.exp() lets Eigen vectorise where possible while
+        // remaining bit-identical to element-wise std::exp (Eigen's default exp() on a
+        // scalar Array element delegates to libm, no approximation).
+        const int n = std::min(nref, MAX_REF);
+        const auto& refcn_row = m_refcn[elem_i];
+        Eigen::Array<double, MAX_REF, 1> w_arr = Eigen::Array<double, MAX_REF, 1>::Zero();
+        for (int ref = 0; ref < n; ++ref) {
+            const double diff = cni - refcn_row[ref];
+            w_arr(ref) = -wf * diff * diff;
         }
+        w_arr.head(n) = w_arr.head(n).exp();
+        const double sum_weights = w_arr.head(n).sum();
 
-        // Normalize weights
+        std::vector<double> weights(n, 0.0);
         if (sum_weights > 1e-10) {
-            for (int ref = 0; ref < nref; ++ref) {
-                weights[ref] /= sum_weights;
-            }
+            const double inv = 1.0 / sum_weights;
+            for (int ref = 0; ref < n; ++ref) weights[ref] = w_arr(ref) * inv;
         } else {
             // Exceptional case: set first reference to 1.0 (neutral state fallback)
-            std::fill(weights.begin(), weights.end(), 0.0);
             weights[0] = 1.0;
         }
 
@@ -1268,28 +1265,25 @@ void D4ParameterGenerator::computeGaussianWeightDerivatives(CxxThreadPool* pool,
 
         double cni = m_cn_values[i];
 
-        std::vector<double> expw(nref, 0.0);
-        std::vector<double> dexpw(nref, 0.0);
-        double norm = 0.0;
-        double dnorm = 0.0;
+        // Claude Generated (WP5, May 2026): Stack-Eigen::Array pipeline. Same as
+        // precomputeGaussianWeights but with the dgw/dCN extension (dexpw, dnorm).
+        const int n = std::min(nref, MAX_REF);
+        const auto& refcn_row = m_refcn[elem_i];
+        Eigen::Array<double, MAX_REF, 1> diff_arr = Eigen::Array<double, MAX_REF, 1>::Zero();
+        for (int ref = 0; ref < n; ++ref) diff_arr(ref) = cni - refcn_row[ref];
+        Eigen::Array<double, MAX_REF, 1> expw = Eigen::Array<double, MAX_REF, 1>::Zero();
+        expw.head(n) = (-wf * diff_arr.head(n).square()).exp();
+        // dexpw = 2*wf * (cni_ref - cni) * expw = -2*wf * diff * expw
+        Eigen::Array<double, MAX_REF, 1> dexpw = Eigen::Array<double, MAX_REF, 1>::Zero();
+        dexpw.head(n) = (-2.0 * wf) * diff_arr.head(n) * expw.head(n);
+        const double norm = expw.head(n).sum();
+        const double dnorm = dexpw.head(n).sum();
 
-        for (int ref = 0; ref < nref && ref < MAX_REF; ++ref) {
-            double cni_ref = (elem_i < static_cast<int>(m_refcn.size()) &&
-                             ref < static_cast<int>(m_refcn[elem_i].size()))
-                            ? m_refcn[elem_i][ref] : 0.0;
-
-            double diff_cn = cni - cni_ref;
-            expw[ref] = std::exp(-wf * diff_cn * diff_cn);
-            dexpw[ref] = 2.0 * wf * (cni_ref - cni) * expw[ref];
-            norm += expw[ref];
-            dnorm += dexpw[ref];
-        }
-
-        std::vector<double> dgwdcn(nref, 0.0);
+        std::vector<double> dgwdcn(n, 0.0);
         if (norm > 1e-10) {
-            double norm2 = norm * norm;
-            for (int ref = 0; ref < nref; ++ref) {
-                dgwdcn[ref] = (dexpw[ref] * norm - expw[ref] * dnorm) / norm2;
+            const double inv_norm2 = 1.0 / (norm * norm);
+            for (int ref = 0; ref < n; ++ref) {
+                dgwdcn[ref] = (dexpw(ref) * norm - expw(ref) * dnorm) * inv_norm2;
             }
         }
 
@@ -1410,9 +1404,15 @@ void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
 // Claude Generated (Feb 15, 2026): Update CN values and recompute weight derivatives + dc6dcn
 // Called from GFNFF::Calculation() when gradient is requested
 // Reference: Fortran gfnff_gdisp0.f90:382-395 - dc6dcn used for dispersion gradient
+// Claude Generated (Apr 2026): P1a — Skip recomputation when CN change < threshold (MD optimization)
 void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool, int num_threads, bool skip_dc6dcn)
 {
     m_cn_values = cn;
+
+    // P1a: Skip recomputation if CN change is below threshold
+    if (canSkipGaussianWeightsUpdate(cn)) {
+        return;  // gw, dgw, dc6dcn all unchanged — valid for this step
+    }
 
     // Recompute gaussian weights with new CN values
     precomputeGaussianWeights(pool, num_threads);
@@ -1425,6 +1425,32 @@ void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& 
     if (!skip_dc6dcn) {
         computeDC6DCN(pool, num_threads);
     }
+
+    // Store CN for next step's threshold check
+    m_prev_cn_values = cn;
+    m_cn_cached = true;
+}
+
+// Claude Generated (Apr 2026): P1a — CN-change threshold check for Gaussian weight caching
+bool D4ParameterGenerator::canSkipGaussianWeightsUpdate(const std::vector<double>& new_cn) const
+{
+    double threshold = m_config.get<double>("d4_cn_cache_threshold", 0.01);
+    if (threshold <= 0.0) return false;  // Caching disabled
+    if (!m_cn_cached || m_prev_cn_values.size() != new_cn.size())
+        return false;
+    double max_change = 0.0;
+    for (size_t i = 0; i < new_cn.size(); ++i) {
+        double delta = std::abs(new_cn[i] - m_prev_cn_values[i]);
+        if (delta > max_change) max_change = delta;
+    }
+    return max_change < threshold;
+}
+
+// Claude Generated (Apr 2026): P1a — Record CN values for next step's threshold check
+void D4ParameterGenerator::recordCNValues(const std::vector<double>& cn)
+{
+    m_prev_cn_values = cn;
+    m_cn_cached = true;
 }
 
 // Claude Generated (March 2026): Native dispersion pair generation — bypasses JSON entirely
@@ -1458,6 +1484,17 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
 
     std::vector<GFNFFDispersion> all_pairs;
 
+    // Claude Generated (Apr 2026): Hard distance cutoff of 60 Bohr for dispersion pairs.
+    // BJ-damped dispersion is negligible beyond this range; skipping saves N²/2 pairs.
+    //
+    // WP-C phase D (May 2026, REVERTED): tried aligning to D3's sqrt(dispthr=1500) ≈ 38.73 Bohr.
+    // XTB-GFN-FF reference comparison on polymer.xyz showed this *worsens* the match
+    // (Curcuma-vs-XTB diff: +0.92969 Eh @ cutoff=60.0  →  +0.92993 Eh @ cutoff=38.73).
+    // Fortran's dispthr appears to apply only to D3, not D4 — D4's effective cutoff is larger.
+    // 60 Bohr stays as the empirical Curcuma D4 default.
+    constexpr double disp_cutoff_bohr = 60.0;
+    constexpr double disp_cutoff_sq = disp_cutoff_bohr * disp_cutoff_bohr;
+
     #pragma omp parallel
     {
         std::vector<GFNFFDispersion> local_pairs;
@@ -1465,6 +1502,9 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
         #pragma omp for schedule(dynamic, 10)
         for (size_t i = 0; i < m_atoms.size(); ++i) {
             for (size_t j = i + 1; j < m_atoms.size(); ++j) {
+                double r2 = (geometry_bohr.row(i) - geometry_bohr.row(j)).squaredNorm();
+                if (r2 > disp_cutoff_sq) continue;
+
                 int atom_i = m_atoms[i];
                 int atom_j = m_atoms[j];
 
@@ -1494,13 +1534,9 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
                 d.C6 = c6;
                 d.r4r2ij = r4r2ij;
                 d.r0_squared = r0_sq;
-                d.r_cut = 50.0;
+                d.r_cut = 50.0;  // D4 pair-energy cutoff (struct default; verified by XTB comparison May 2026)
                 d.zetac6 = zetac6;
-                d.C8 = 3.0 * c6 * sqrt_zr4r2_i * sqrt_zr4r2_j;
-                d.s6 = s6;
-                d.s8 = s8;
-                d.a1 = a1;
-                d.a2 = a2;
+                // P1c (Apr 2026): Legacy D3 fields removed from GFNFFDispersion
 
                 local_pairs.push_back(d);
             }

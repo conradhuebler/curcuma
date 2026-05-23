@@ -36,7 +36,7 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
     const std::vector<int>& pi_fragments,
     const std::vector<double>& charges,
     const std::vector<std::pair<int,int>>& bonds,
-    const Eigen::MatrixXd& distances,
+    const Eigen::MatrixXd& geometry_bohr,
     const std::vector<int>& itag)
 {
     const int natoms = static_cast<int>(atoms.size());
@@ -132,7 +132,7 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
             // Build Hamiltonian with P-dependent off-diagonal coupling
             Eigen::MatrixXd H = buildHamiltonian(
                 pi_atoms, pi_atom_map, pi_electrons,
-                atoms, hybridization, charges, bonds, distances,
+                atoms, hybridization, charges, bonds, geometry_bohr,
                 P_old
             );
 
@@ -269,7 +269,7 @@ Eigen::MatrixXd HuckelSolver::buildHamiltonian(
     const std::vector<int>& hybridization,
     const std::vector<double>& charges,
     const std::vector<std::pair<int,int>>& bonds,
-    const Eigen::MatrixXd& distances,
+    const Eigen::MatrixXd& geometry_bohr,
     const Eigen::MatrixXd& P_old) const
 {
     int npi = static_cast<int>(pi_atoms.size());
@@ -318,8 +318,11 @@ Eigen::MatrixXd HuckelSolver::buildHamiltonian(
             double beta = std::sqrt(h_off_i * h_off_j);
 
             // Small distance distortion to break symmetry in degenerate systems (COT)
-            // Uses distance in Bohr with 1e-9 scaling factor
-            double dist = distances(ii, jj);
+            // P2a (Apr 2026): Compute distance on-the-fly instead of N×N matrix lookup
+            double dx = geometry_bohr(ii, 0) - geometry_bohr(jj, 0);
+            double dy = geometry_bohr(ii, 1) - geometry_bohr(jj, 1);
+            double dz = geometry_bohr(ii, 2) - geometry_bohr(jj, 2);
+            double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
             beta -= 1.0e-9 * dist;
 
             // Iteration damping factor

@@ -24,6 +24,21 @@ void ParameterRegistry::addDefinition(const std::string& module, ParameterDefini
     for (const auto& alias : added_def.aliases) {
         alias_to_name_map[module][alias] = canonical_name;
     }
+
+    // Claude Generated: Populate inverse lookup (lowercased name/alias -> owning modules).
+    // Used by findOwnerModules to auto-route flat CLI flags.
+    auto add_owner = [&](const std::string& key) {
+        std::string lower = key;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        auto& mods = name_to_modules_map[lower];
+        if (std::find(mods.begin(), mods.end(), module) == mods.end()) {
+            mods.push_back(module);
+        }
+    };
+    add_owner(canonical_name);
+    for (const auto& alias : added_def.aliases) {
+        add_owner(alias);
+    }
 }
 
 const ParameterDefinition* ParameterRegistry::findDefinition(const std::string& module, const std::string& alias) const
@@ -238,6 +253,20 @@ bool ParameterRegistry::validateRegistry() const
     }
 
     return valid;
+}
+
+// Claude Generated: Reverse-lookup a parameter name to its owning module(s).
+// Case-insensitive. Returns empty vector for unknown names. Multiple entries indicate
+// the name is shared across modules (CLI2Json treats this as ambiguous).
+std::vector<std::string> ParameterRegistry::findOwnerModules(const std::string& param_name) const
+{
+    std::string lower = param_name;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    auto it = name_to_modules_map.find(lower);
+    if (it == name_to_modules_map.end()) {
+        return {};
+    }
+    return it->second;
 }
 
 // Claude Generated: Resolve alias to canonical name (case-insensitive)

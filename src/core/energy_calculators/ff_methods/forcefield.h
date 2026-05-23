@@ -21,6 +21,9 @@
 
 #include "src/core/global.h"
 
+#include <string>
+#include <unordered_map>
+
 #include "forcefieldthread.h"
 #include "ff_workspace.h"
 
@@ -53,6 +56,7 @@ static const json FFJson = {
     { "gradient", 1 }
 };
 
+// CNDerivStore is defined in forcefieldthread.h (transitively included via ff_workspace.h)
 class ForceField {
 
 public:
@@ -94,9 +98,27 @@ public:
     inline double ElectrostatEnergy() const { return m_eq_energy; }
     inline double HydrogenBondEnergy() const { return m_energy_hbond; }   // Claude Generated (2025): Phase 5
     inline double HalogenBondEnergy() const { return m_energy_xbond; }    // Claude Generated (2025): Phase 5
+    // Claude Generated (May 2026, HB-investigation): per-case HB split (sum equals HydrogenBondEnergy()).
+    inline double HBondCase1Energy() const { return m_hbond_case1_energy; }
+    inline double HBondCase2Energy() const { return m_hbond_case2_energy; }
+    inline double HBondCase3Energy() const { return m_hbond_case3_energy; }
+    inline double HBondCase4Energy() const { return m_hbond_case4_energy; }
+    inline int HBondCase1Count() const { return m_hbond_case1_count; }
+    inline int HBondCase2Count() const { return m_hbond_case2_count; }
+    inline int HBondCase3Count() const { return m_hbond_case3_count; }
+    inline int HBondCase4Count() const { return m_hbond_case4_count; }
     inline double ATMEnergy() const { return m_atm_energy; }        // Claude Generated (December 2025): ATM energy
     inline double BatmEnergy() const { return m_batm_energy; }       // Claude Generated (Jan 17, 2026): Batm energy
     inline double STorsEnergy() const { return m_stors_energy; }     // Claude Generated (March 2026): Triple bond torsion energy
+
+    // Claude Generated (May 2026): Output control and parallelization metadata for unified GFN-FF reporting.
+    // GFN-FF wrapper sets suppress_output=true and prints its own GFNFFEnergyReport.
+    // TODO: unify UFF/QMDFF energy output to the same GFNFFEnergyReport format.
+    void setSuppressOutput(bool v) { m_suppress_output = v; }
+    double getPoolWallTime() const { return m_t_pool_wall; }
+    double getChainRuleTime() const { return m_t_chainrule; }
+    int getThreadCount() const { return static_cast<int>(m_stored_threads.size()); }
+    const std::unordered_map<std::string, long long>& getTermTimings() const { return m_term_timings_aggregate; }
 
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
@@ -172,8 +194,9 @@ public:
 
     // Claude Generated (Feb 1, 2026): Distribute CN, CNF, and CN derivatives for Coulomb gradients
     // Reference: Fortran gfnff_engrad.F90:418-422 - charge derivative via CN
+    // Claude Generated (WP4, May 2026): dcn now passed as CNDerivStore (pair-list) instead of std::vector<SpMatrix>
     void distributeCNandDerivatives(const Vector& cn, const Vector& cnf,
-                                     const std::vector<SpMatrix>& dcn);
+                                     const CNDerivStore& dcn);
 
     // Claude Generated (Feb 22, 2026): Distribute only CN to threads for energy-only evaluations
     // Needed so dynamic r0 in bonds uses current CN, not stale values from last gradient call
@@ -205,6 +228,15 @@ public:
 
     /// Claude Generated (Mar 2026): Expose thread pool for Phase-A sub-task parallelisation
     CxxThreadPool* threadPool() const { return m_threadpool; }
+
+    /// Claude Generated (April 2026): Set unit cell for PBC minimum image convention
+    /// cell_angstrom: 3×3 matrix (Angstrom); converted to Bohr internally for thread distribution
+    void setUnitCell(const Eigen::Matrix3d& cell_angstrom, bool has_pbc);
+
+    /// WP-FF-DistMatrix-Sharing (May 2026): expose external packed-triangular distance arrays
+    /// to all ForceFieldThread instances. Lifetime managed by caller (typically GFNFF).
+    /// Pass nullptr to clear the references.
+    void setSharedDistances(const Eigen::VectorXd* srab, const Eigen::VectorXd* sqrab);
 
 private:
     void AutoRanges();
@@ -263,10 +295,25 @@ private:
     double m_atm_energy = 0.0;      // Claude Generated (December 2025): ATM three-body dispersion energy
     double m_batm_energy = 0.0;     // Claude Generated (January 17, 2026): Batm three-body dispersion energy
     double m_stors_energy = 0.0;    // Claude Generated (March 2026): Triple bond torsion energy
+    // Claude Generated (May 2026, HB-investigation): per-case HB split for Fortran comparison.
+    double m_hbond_case1_energy = 0.0;
+    double m_hbond_case2_energy = 0.0;
+    double m_hbond_case3_energy = 0.0;
+    double m_hbond_case4_energy = 0.0;
+    int m_hbond_case1_count = 0;
+    int m_hbond_case2_count = 0;
+    int m_hbond_case3_count = 0;
+    int m_hbond_case4_count = 0;
     double m_d3_energy = 0.0;       // Claude Generated (Jan 2, 2026): D3 dispersion energy (for UFF-D3 and GFN-FF)
     double m_d4_energy = 0.0;       // Claude Generated (Jan 2, 2026): D4 dispersion energy (for GFN-FF)
 
-    Matrix m_geometry, m_gradient;
+    // Claude Generated (May 2026): Output suppression flag + last-pool wall-clock for GFN-FF unified report
+    bool m_suppress_output = false;
+    double m_t_pool_wall = 0.0;
+    double m_t_chainrule = 0.0;
+    std::unordered_map<std::string, long long> m_term_timings_aggregate;
+
+    GeoGradMatrix m_geometry, m_gradient;  // WP-G: RowMajor N×3 hot data
     std::vector<int> m_atom_types;
     std::string m_method = "uff";
     StringList m_uff_methods = { "uff", "uff-d3" };  // Claude Generated (December 19, 2025): uff-d3 already included
@@ -286,6 +333,7 @@ private:
     // Phase 4.2: GFN-FF pairwise non-bonded storage (Claude Generated 2025)
     std::vector<GFNFFDispersion> m_gfnff_dispersions;
     std::vector<GFNFFDispersion> m_d4_dispersions;  // Claude Generated - Dec 25, 2025: Native D4 dispersion pairs
+    std::vector<D3DispersionPair> m_d3_pairs;        // Claude Generated - Apr 2026: P1c — Separate D3 storage
     std::vector<GFNFFRepulsion> m_gfnff_bonded_repulsions;
     std::vector<GFNFFRepulsion> m_gfnff_nonbonded_repulsions;
     std::vector<GFNFFCoulomb> m_gfnff_coulombs;
@@ -322,7 +370,9 @@ private:
     // Phase 1a (Mar 2026): Stored ONLY in ForceField, not copied to threads.
     Vector m_cn;                    // Coordination numbers per atom
     Vector m_cnf;                   // CNF parameters per atom (for qtmp calculation)
-    std::vector<SpMatrix> m_dcn;    // CN derivatives (sparse): dcn[dim](i,j) = dCN(j)/dr(i,dim)
+    // Claude Generated (WP4, May 2026): CNDerivStore (pair-list + diag) replaces std::vector<SpMatrix>.
+    // Same mathematical semantics: applyAdd(v, out) computes out += M * v with M = full sparse N×N×3.
+    CNDerivStore m_dcn;
 
     // Claude Generated (Mar 2026, Phase 1b): dc6dcn stored here, shared to threads via const pointer.
     Matrix m_dc6dcn;                // dc6dcn(i,j) = dC6(i,j)/dCN(i)
@@ -340,9 +390,10 @@ private:
     // Claude Generated (Mar 2026): Per-component CN chain-rule corrections for GradComp
     // These are computed in Calculate() and added in the component getters
     // Reference: Fortran applies CN chain-rule to g_bond, g_disp, g_es separately
-    Matrix m_bond_cn_correction;     // dEdcn_bond * dcn chain-rule → added to GradientBond()
-    Matrix m_disp_cn_correction;     // dEdcn_disp * dcn chain-rule → added to GradientDispersion()
-    Matrix m_coulomb_cn_correction;  // TERM 1b qtmp * dcn → added to GradientCoulomb()
+    // WP-G: RowMajor for cache-friendly dcn->m_*_cn_correction contraction (CNDerivStore::applyAdd target)
+    GeoGradMatrix m_bond_cn_correction;     // dEdcn_bond * dcn chain-rule → added to GradientBond()
+    GeoGradMatrix m_disp_cn_correction;     // dEdcn_disp * dcn chain-rule → added to GradientDispersion()
+    GeoGradMatrix m_coulomb_cn_correction;  // TERM 1b qtmp * dcn → added to GradientCoulomb()
     bool m_store_gradient_components = false; // mirror of thread flag for getters
 
     json m_parameters;
@@ -350,6 +401,12 @@ private:
     std::string m_auto_param_file; // Auto-detected parameter file path
     bool m_enable_caching = true; // Can be disabled for multi-threading
     bool m_in_setParameter = false; // Claude Generated: Recursive guard for setParameter()
+
+    // Claude Generated (April 2026): Periodic Boundary Conditions
+    // Unit cell in Bohr (ForceField internal units); propagated to threads in AutoRanges()
+    Eigen::Matrix3d m_unit_cell_bohr = Eigen::Matrix3d::Identity();
+    Eigen::Matrix3d m_unit_cell_bohr_inv = Eigen::Matrix3d::Identity();
+    bool m_has_pbc = false;
 
     // Claude Generated (March 2026): FFWorkspace for UFF/QMDFF (replaces ForceFieldThread path)
     std::unique_ptr<FFWorkspace> m_workspace;

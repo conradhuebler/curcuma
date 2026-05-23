@@ -1,6 +1,6 @@
 # GFN-FF Implementation Status
 
-**Last Updated**: 2026-04-25
+**Last Updated**: 2026-05-10
 **Implementation**: AI-generated, machine-tested — **human production testing pending**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
@@ -24,6 +24,53 @@
 | Large system stability (>500 atoms) | ⚠️ Partial | Polymer energy, gradient precision acceptable |
 
 **Recommendation**: Cross-check against `xtb-gfnff` for any system class not in the table above.
+
+**Forensics tool**: see [MD_DIAGNOSTICS.md](MD_DIAGNOSTICS.md) for the
+per-step JSONL dump (`md_diagnostics=true`) — energy decomposition, charges,
+CN, gradient norms, HB/XB counts. Essential for static-mode validation and
+drift analysis.
+
+**Performance hint**: for production MD on neutral mono-fragment systems
+(typical organics, polymers without ions), set
+`{"gfnff": {"eeq_distance_cutoff_auto": true}}` — applies a 30 Bohr cutoff
+to the EEQ Coulomb-matrix when Phase-1 detects `nfrag==1` and
+`max|q|<0.5 e`. Saves ~12 ms/step on polymer-sized systems. Heuristic
+falls back to full Coulomb (cutoff=0) for ionic/charged/multi-fragment
+systems. See [GFNFF_STATIC_WP3_EEQ_CUTOFF_DEFAULT.md](GFNFF_STATIC_WP3_EEQ_CUTOFF_DEFAULT.md).
+
+---
+
+## Latest: WP6 Coulomb Cell-List + WP-V Energy-Bias Resolved (May 10, 2026) ✅
+
+**Two related findings, both resolved in successive commits:**
+
+### WP6 — Coulomb Cell-List + G2c Phase C (Commit `f3ffe97`)
+
+Optional spatial cutoff for the Coulomb pair list, gated by the `eeq_distance_cutoff` parameter. When set > 0, builds a `SpatialCellList` for `N >= nb_cell_list_min_atoms` atoms and only emits pairs within the cutoff. Default behavior (cutoff = 0) is bit-identical to pre-WP6, full O(N²).
+
+| System | Coulomb wall (cutoff=0) | Coulomb wall (cutoff=30) | Speedup |
+|--------|------------------------:|-------------------------:|--------:|
+| polymer (1410 atoms) | ~22 ms | ~28 ms | neutral (cell-list build cost ≈ pair-reduction gain) |
+| **mixture (6200 atoms)** | **611 ms** | **74 ms** | **8.3×** |
+
+Activation: `curcuma -sp mol.xyz -method gfnff -gfnff.eeq_distance_cutoff 30`. The `nb_cell_list_min_atoms` threshold (default 800, alias `hb_cell_list_min_atoms`) controls when the cell-list path engages.
+
+WP6 also closed the prerequisite G2c Phase C (Site 1a in `buildCorrectedEEQMatrix` Geometric mode + Site 5 CN-derivative stencil that defensively grows with `eeq_distance_cutoff`). The CLI parameter routing (`reattachMethodScopes` in EnergyCalculator + GFNFF top-level promotion + capabilities forwarding) was also fixed as a prerequisite for any cutoff testing — was a pre-existing pipeline bug.
+
+### WP-V Resolution — EEQ Phase 2 Cutoff-Fallback (Commit `cba0696`)
+
+While diagnosing a non-monotonic cutoff sweep on polymer, found that `eeq_solver.cpp:3077` carried a dead inline fallback `m_config.get<double>("eeq_distance_cutoff", 30.0)` that silently overrode the canonical PARAM default 0.0 whenever the registry entry was missing — i.e. for default CLI invocations. Phase 2 EEQ truncated all default runs for N>200, shifting the energy by ~1 Eh on polymer.
+
+Cross-verified against Fortran source (`gfnff_engrad.F90:1319-1389`): `goed_gfnff` has no Phase-2 cutoff. Curcuma's silent truncation was a Curcuma-only PCG-conditioning aid, never validated against the energy surface.
+
+| Stand | Curcuma polymer (Eh) | XTB Fortran (Eh) | Diff |
+|-------|---------------------:|-----------------:|-----:|
+| pre-Fix (silent 30.0) | -202.58789086 | -203.51759134 | +929.7 mEh |
+| post-Fix (PARAM 0.0) | -203.56552633 | -203.51759134 | **+47.9 mEh** |
+
+Component breakdown shows the residual 48 mEh sits almost entirely in the torsion term (Curcuma ~+0.642 Eh vs Fortran +0.691 Eh). All other terms — bond, angle, Coulomb, dispersion, repulsion, BATM — match Fortran to <µEh.
+
+Affects only systems with N>200 (the truncation gating). Small molecules unchanged. The +0.93 Eh polymer bias previously documented in `cutoff-inventory.md` and pointed at WP-V is closed; the gradient-drift portion of WP-V remains open and should be re-measured against the now-correct energy baseline.
 
 ---
 
@@ -254,6 +301,17 @@ The foundation that enabled rapid angle error debugging:
 - **Root Cause**: Accumulated EEQ charge precision across 231 atoms. Individual Coulomb terms (TERM 1, 2, 3) differ by hundreds of mEh but cancel to -0.094 mEh.
 - **Per-atom**: 0.4 µEh — well below chemical accuracy (1 kcal/mol ≈ 1.6 mEh)
 - **Status**: ACCEPTED - NOT a parameter bug, confirmed by charge injection diagnostic
+
+### CPU vs GPU Gradient Discrepancy (Apr 2026) — INTERPRETATION REVISED
+
+**Earlier finding**: Isolated HB test showed CPU analytical vs FD: 5.7e-9 ✅, GPU analytical vs FD: 4.2e-3 ❌. GPU gradient was assumed incorrect.
+
+**New evidence (Apr 29, 2026)**: MD simulations (polymer) and heat-bath exchange values show the GPU path (`-gpu cuda`) produces trajectories **closer to XTB GFN-FF** than the CPU path. The CPU MD diverges; the GPU MD stays stable and matches XTB heat exchange.
+
+**Revised interpretation**: The CPU path runs without instability but shows systematic deviations from XTB that are not present (or smaller) in the GPU path. Likely causes: HB gradient distribution, CN chain-rule accumulation order. The GPU `atomicAdd` order may reproduce Fortran summation more faithfully than CPU sequential loops. The isolated HB FD comparison needs re-evaluation — the FD "reference" on CPU may contain the same CPU deviation.
+
+**Status**: UNDER INVESTIGATION — GPU path shows better XTB agreement; CPU deviations still open for production.  
+**Details**: See [docs/GPU_GFNNF_DISCREPANCIES.md](GPU_GFNNF_DISCREPANCIES.md) — "April 2026 Update" section.
 
 ### Dispersion Zeta Scaling (Feb 11, 2026) - SUPERSEDED
 

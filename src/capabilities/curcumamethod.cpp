@@ -57,8 +57,8 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool 
     if (controller.count("verbosity") > 0) {
         try {
             m_verbosity = controller["verbosity"].get<int>();
-            // Clamp to valid range 0-3
-            m_verbosity = std::max(0, std::min(3, m_verbosity));
+            // Clamp to valid range 0-4
+            m_verbosity = std::max(0, std::min(4, m_verbosity));
             // Update legacy flags for backwards compatibility
             m_silent = (m_verbosity == 0);
             m_verbose = (m_verbosity >= 3);
@@ -102,8 +102,8 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, int v
     if (controller.count("verbosity") > 0) {
         try {
             m_verbosity = controller["verbosity"].get<int>();
-            // Clamp to valid range 0-3
-            m_verbosity = std::max(0, std::min(3, m_verbosity));
+            // Clamp to valid range 0-4
+            m_verbosity = std::max(0, std::min(4, m_verbosity));
             m_silent = (m_verbosity == 0);
             m_verbose = (m_verbosity >= 3);
             CurcumaLogger::set_verbosity(m_verbosity); // Claude Generated - Sync to logger

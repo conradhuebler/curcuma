@@ -1,6 +1,6 @@
 /*
  * <Citation Database — compiled-in reference data for all computational methods>
- * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * One source of truth for all citation data. Adding a new method citation
  * means adding one entry to the database() map — no other code changes needed.

@@ -22,6 +22,7 @@
 #include "src/core/global.h"
 
 #include "src/core/hbonds.h"
+#include "src/tools/pbc_utils.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
@@ -52,6 +53,60 @@ using json = nlohmann::json;
 // BondHBEntry, HBGradEntry, GFNFFDispersion, GFNFFRepulsion, GFNFFCoulomb,
 // GFNFFHydrogenBond, GFNFFHalogenBond, GFNFFSTorsion, ATMTriple, GFNFFBatmTriple
 // are defined in gfnff_parameters.h (included above)
+
+// Claude Generated (WP-G, May 2026): N×3 row-major layout for hot per-atom data.
+// row(i) is contiguous (24 B = one cache line) instead of strided N×8 = 50 KB at
+// N=6200. Eliminates the 3 cache misses per row(i) += that the WP3 audit identified
+// as the bond hotspot. Used for: m_geometry, m_geometry_bohr, m_gradient, all per-
+// component gradient buffers, m_result_gradient, FFAccumulator::gradient,
+// CNDerivStore::diag, m_*_cn_correction.
+//
+// `Matrix` (= MatrixXd, ColumnMajor) typedef stays untouched for non-N×3 data
+// (Hessian, A-matrix, m_dc6dcn, distance matrices). The external getGradient()
+// API still returns Matrix (ColumnMajor) — Eigen converts at the boundary.
+using GeoGradMatrix = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
+
+// Claude Generated (WP4, May 2026): pair-list representation of CN derivatives.
+// Replaces std::vector<SpMatrix> dcn[3] (~250k entries × 3 sparse matrices) — eliminates
+// triplet allocation + setFromTriplets cost (~1000 ms on mixture.xyz, 74 % of CN+EEQ phase).
+// Same mathematical semantics: applyAdd(v, out) computes out += M*v where M is the
+// implied N×N sparse derivative matrix. Diagonal stored separately as dense (N,3) matrix.
+struct CNDerivPair {
+    int i;              // row atom (gradient target)
+    int j;              // column atom (vector lookup index)
+    double cx, cy, cz;  // dCN(j)/dr(i,d) already multiplied by dlogdcn(j)
+};
+
+struct CNDerivStore {
+    std::vector<CNDerivPair> pairs;  // off-diagonal contributions
+    GeoGradMatrix diag;               // (N, 3): diag(i,d) is multiplied by v(i) on apply
+    int natoms = 0;
+
+    void clear() {
+        pairs.clear();
+        diag.resize(0, 0);
+        natoms = 0;
+    }
+    bool empty() const { return natoms == 0; }
+
+    // out += sign * M * v, where M is the implied SpMatrix.
+    // out is (N, 3); v is (N). RowMajor required (matches all gradient consumers post-WP-G).
+    void applyAdd(const Vector& v, Eigen::Ref<GeoGradMatrix> out, double sign = 1.0) const {
+        if (natoms == 0 || diag.rows() != natoms || out.rows() != natoms || out.cols() != 3) return;
+        for (int i = 0; i < natoms; ++i) {
+            double vi = v(i);
+            out(i, 0) += sign * diag(i, 0) * vi;
+            out(i, 1) += sign * diag(i, 1) * vi;
+            out(i, 2) += sign * diag(i, 2) * vi;
+        }
+        for (const auto& p : pairs) {
+            double vj = v(p.j);
+            out(p.i, 0) += sign * p.cx * vj;
+            out(p.i, 1) += sign * p.cy * vj;
+            out(p.i, 2) += sign * p.cz * vj;
+        }
+    }
+};
 
 struct Bond {
     int type = 1; // 1 = UFF, 2 = QMDFF
@@ -158,7 +213,7 @@ public:
     void addGFNFFCoulomb(const GFNFFCoulomb& coulomb);
 
     // D3/D4 parameter integration methods
-    void addD3Dispersion(const GFNFFDispersion& d3_dispersion);
+    void addD3Dispersion(const D3DispersionPair& d3_dispersion);
     void addD4Dispersion(const GFNFFDispersion& d4_dispersion);
     void CalculateD3DispersionContribution();
     void CalculateD4DispersionContribution();  // Claude Generated - Dec 25, 2025
@@ -214,10 +269,29 @@ public:
     // Claude Generated (Mar 2026): Pointer-based data sharing — threads read from ForceField memory.
     // Eliminates per-step O(N) vector copies for geometry, charges, CN.
     // Fallback: if pointer not set, uses the local copy (for UFF/QMDFF compatibility).
-    void setGeometryPtr(const Matrix* ptr) { m_geometry_ptr = ptr; }
+    void setGeometryPtr(const GeoGradMatrix* ptr) { m_geometry_ptr = ptr; }  // WP-G
     void setEEQChargesPtr(const Vector* ptr) { m_eeq_charges_ptr = ptr; }
     void setTopologyChargesPtr(const Vector* ptr) { m_topology_charges_ptr = ptr; }
     void setD3CNPtr(const Vector* ptr) { m_d3_cn_ptr = ptr; }
+
+    /// WP-FF-DistMatrix-Sharing (May 2026): pointers to packed-triangular distance arrays
+    /// owned by GFNFF and refreshed once per energy call. Lifetime managed by caller.
+    void setSharedDistancesPtr(const Eigen::VectorXd* srab, const Eigen::VectorXd* sqrab) {
+        m_shared_srab_ptr  = srab;
+        m_shared_sqrab_ptr = sqrab;
+    }
+
+    /// Convenience accessors. Caller must ensure i != j (diagonal not in packed form).
+    /// Index formula: i*(i+1)/2 + j for i > j (handled by the inline swap).
+    inline double r(int i, int j) const noexcept {
+        if (j > i) { int t = i; i = j; j = t; }
+        return (*m_shared_srab_ptr)[i * (i + 1) / 2 + j];
+    }
+    inline double rsq(int i, int j) const noexcept {
+        if (j > i) { int t = i; i = j; j = t; }
+        return (*m_shared_sqrab_ptr)[i * (i + 1) / 2 + j];
+    }
+    inline bool hasSharedDistances() const noexcept { return m_shared_srab_ptr != nullptr; }
 
     /// Reset per-step accumulators without copying geometry. Used with pointer-sharing.
     void resetForStep(bool gradient) {
@@ -339,6 +413,18 @@ public:
     double HydrogenBondEnergy() { return m_energy_hbond; }
     double HalogenBondEnergy() { return m_energy_xbond; }
 
+    // Claude Generated (May 2026, HB-investigation): per-case HB energy + counts.
+    // Sum of all cases equals m_energy_hbond. Used to compare classification with
+    // Fortran's nhb1 (case 1, "unbound") vs nhb2 (case 2/3/4, "bound") split.
+    double HBondCase1Energy() { return m_hbond_case1_energy; }
+    double HBondCase2Energy() { return m_hbond_case2_energy; }
+    double HBondCase3Energy() { return m_hbond_case3_energy; }
+    double HBondCase4Energy() { return m_hbond_case4_energy; }
+    int HBondCase1Count() { return m_hbond_case1_count; }
+    int HBondCase2Count() { return m_hbond_case2_count; }
+    int HBondCase3Count() { return m_hbond_case3_count; }
+    int HBondCase4Count() { return m_hbond_case4_count; }
+
     // Claude Generated (December 2025): ATM three-body dispersion energy
     double ATMEnergy() { return m_atm_energy; }
 
@@ -359,6 +445,15 @@ public:
     void setRepulsionEnabled(bool enabled) { m_repulsion_enabled = enabled; }
     void setCoulombEnabled(bool enabled) { m_coulomb_enabled = enabled; }
 
+    // Claude Generated (April 2026): PBC minimum image convention
+    // cell_bohr: 3×3 unit cell matrix in Bohr (ForceField internal units)
+    // cell_bohr_inv: pre-computed inverse of cell_bohr
+    void setUnitCell(const Eigen::Matrix3d& cell_bohr, const Eigen::Matrix3d& cell_bohr_inv, bool has_pbc) {
+        m_unit_cell_bohr = cell_bohr;
+        m_unit_cell_bohr_inv = cell_bohr_inv;
+        m_has_pbc = has_pbc;
+    }
+
     Matrix Gradient() const { return m_gradient; }
 
     // Claude Generated (February 2026): Per-component gradient storage for validation
@@ -367,16 +462,18 @@ public:
     bool storeGradientComponents() const { return m_store_gradient_components; }
 
     // Per-component gradient getters (only valid if m_store_gradient_components == true)
-    const Matrix& GradientBond() const { return m_gradient_bond; }
-    const Matrix& GradientAngle() const { return m_gradient_angle; }
-    const Matrix& GradientTorsion() const { return m_gradient_torsion; }
-    const Matrix& GradientRepulsion() const { return m_gradient_repulsion; }
-    const Matrix& GradientCoulomb() const { return m_gradient_coulomb; }
-    const Matrix& GradientDispersion() const { return m_gradient_dispersion; }
-    const Matrix& GradientHB() const { return m_gradient_hb; }
-    const Matrix& GradientXB() const { return m_gradient_xb; }
-    const Matrix& GradientBATM() const { return m_gradient_batm; }
-    const Matrix& GradientATM() const { return m_gradient_atm; }   ///< ATM three-body dispersion gradient (Claude Generated Mar 2026)
+    // WP-G (May 2026): per-component getters return GeoGradMatrix& (RowMajor).
+    // sumComponentGradient in forcefield.cpp converts to Matrix at the API boundary.
+    const GeoGradMatrix& GradientBond() const { return m_gradient_bond; }
+    const GeoGradMatrix& GradientAngle() const { return m_gradient_angle; }
+    const GeoGradMatrix& GradientTorsion() const { return m_gradient_torsion; }
+    const GeoGradMatrix& GradientRepulsion() const { return m_gradient_repulsion; }
+    const GeoGradMatrix& GradientCoulomb() const { return m_gradient_coulomb; }
+    const GeoGradMatrix& GradientDispersion() const { return m_gradient_dispersion; }
+    const GeoGradMatrix& GradientHB() const { return m_gradient_hb; }
+    const GeoGradMatrix& GradientXB() const { return m_gradient_xb; }
+    const GeoGradMatrix& GradientBATM() const { return m_gradient_batm; }
+    const GeoGradMatrix& GradientATM() const { return m_gradient_atm; }   ///< ATM three-body dispersion gradient (Claude Generated Mar 2026)
 
 private:
     void CalculateUFFBondContribution();
@@ -453,7 +550,7 @@ private:
     std::vector<int> m_assigned_atoms_for_self_energy;
 
     // D3/D4 native dispersion pairs
-    std::vector<GFNFFDispersion> m_d3_dispersions;  // Native D3 parameters
+    std::vector<D3DispersionPair> m_d3_dispersions;  // Native D3 parameters (P1c: separate struct)
     std::vector<GFNFFDispersion> m_d4_dispersions;  // Native D4 parameters
 
     // Phase 1.2: GFN-FF hydrogen bond and halogen bond terms (Claude Generated 2025)
@@ -476,8 +573,10 @@ private:
     std::vector<HBGradEntry> m_hb_grad_entries;
 
 protected:
-    Matrix m_geometry, m_gradient;
+    GeoGradMatrix m_geometry, m_gradient;  // WP-G: RowMajor N×3 hot data
     double m_energy = 0, m_bond_energy = 0.0, m_angle_energy = 0.0, m_dihedral_energy = 0.0, m_inversion_energy = 0.0, m_vdw_energy = 0.0, m_rep_energy = 0.0, m_eq_energy = 0.0;
+    // Verbose-3 cap: count significant torsions per call, log only first 5 (Apr 2026)
+    int m_significant_torsion_count = 0;
 
     // Phase 4: Separate energy components for GFN-FF non-bonded terms
     double m_dispersion_energy = 0.0;  // D3/D4 dispersion
@@ -490,6 +589,16 @@ protected:
     double m_energy_xbond = 0.0;       // Halogen bond energy
     double m_stors_energy = 0.0;       // Triple bond torsion energy (sTors_eg)
     double m_atm_energy = 0.0;         // ATM three-body dispersion energy (Claude Generated December 2025)
+    // Claude Generated (May 2026, HB-investigation): per-case HB split for diagnostic
+    // against Fortran's nhb1 (unbound, case 1) vs nhb2 (bound, case 2/3/4) classification.
+    double m_hbond_case1_energy = 0.0;
+    double m_hbond_case2_energy = 0.0;
+    double m_hbond_case3_energy = 0.0;
+    double m_hbond_case4_energy = 0.0;
+    int m_hbond_case1_count = 0;
+    int m_hbond_case2_count = 0;
+    int m_hbond_case3_count = 0;
+    int m_hbond_case4_count = 0;
 
     // Claude Generated (March 2026): Separate bonded/non-bonded repulsion for diagnostics
     double m_bonded_rep_energy = 0.0;    // GFN-FF bonded repulsion (REPSCALB=1.7583)
@@ -526,13 +635,15 @@ protected:
     // Claude Generated (Mar 2026): Pointer-based data sharing — read-only pointers to ForceField memory.
     // When set, threads read directly from ForceField storage (zero-copy per step).
     // When nullptr, threads fall back to their local copy members (UFF/QMDFF path).
-    const Matrix* m_geometry_ptr = nullptr;
+    const GeoGradMatrix* m_geometry_ptr = nullptr;  // WP-G
+    const Eigen::VectorXd* m_shared_srab_ptr  = nullptr;  // WP-FF-DistMatrix-Sharing
+    const Eigen::VectorXd* m_shared_sqrab_ptr = nullptr;  // WP-FF-DistMatrix-Sharing
     const Vector* m_eeq_charges_ptr = nullptr;
     const Vector* m_topology_charges_ptr = nullptr;
     const Vector* m_d3_cn_ptr = nullptr;
 
     /// Access geometry: prefer pointer, fall back to local copy
-    inline const Matrix& geom() const { return m_geometry_ptr ? *m_geometry_ptr : m_geometry; }
+    inline const GeoGradMatrix& geom() const { return m_geometry_ptr ? *m_geometry_ptr : m_geometry; }  // WP-G
     /// Access EEQ charge for atom i
     inline double eeq_q(int i) const { return m_eeq_charges_ptr ? (*m_eeq_charges_ptr)(i) : m_eeq_charges(i); }
     /// Access topology charge for atom i
@@ -570,15 +681,17 @@ protected:
 
     // Claude Generated (February 2026): Per-component gradient decomposition for validation
     bool m_store_gradient_components = false;
-    Matrix m_gradient_bond, m_gradient_angle, m_gradient_torsion;
-    Matrix m_gradient_repulsion, m_gradient_coulomb, m_gradient_dispersion;
-    Matrix m_gradient_hb, m_gradient_xb;
-    Matrix m_gradient_batm;   ///< BATM three-body gradient component (Claude Generated Mar 2026)
-    Matrix m_gradient_atm;    ///< ATM three-body dispersion gradient component (Claude Generated Mar 2026)
+    // WP-G (May 2026): per-component gradient buffers — RowMajor for cache locality
+    GeoGradMatrix m_gradient_bond, m_gradient_angle, m_gradient_torsion;
+    GeoGradMatrix m_gradient_repulsion, m_gradient_coulomb, m_gradient_dispersion;
+    GeoGradMatrix m_gradient_hb, m_gradient_xb;
+    GeoGradMatrix m_gradient_batm;   ///< BATM three-body gradient component (Claude Generated Mar 2026)
+    GeoGradMatrix m_gradient_atm;    ///< ATM three-body dispersion gradient component (Claude Generated Mar 2026)
 
     // Claude Generated (Mar 2026): Reuse existing allocation, avoid per-step malloc
+    // WP-G (May 2026): lambda accepts GeoGradMatrix& (RowMajor)
     void initGradientComponents(int natoms) {
-        auto resetMat = [&](Matrix& m) {
+        auto resetMat = [&](GeoGradMatrix& m) {
             if (m.rows() != natoms || m.cols() != 3) m.resize(natoms, 3);
             m.setZero();
         };
@@ -605,6 +718,12 @@ protected:
     bool m_hbond_enabled = true;
     bool m_repulsion_enabled = true;
     bool m_coulomb_enabled = true;
+
+    // Claude Generated (April 2026): Periodic Boundary Conditions (PBC)
+    // Cell stored in Bohr (ForceField internal units); inverse pre-computed in setUnitCell()
+    Eigen::Matrix3d m_unit_cell_bohr = Eigen::Matrix3d::Identity();
+    Eigen::Matrix3d m_unit_cell_bohr_inv = Eigen::Matrix3d::Identity();
+    bool m_has_pbc = false;
 };
 
 class H4Thread : public ForceFieldThread {

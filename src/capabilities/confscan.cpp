@@ -382,7 +382,7 @@ void ConfScan::LoadControlJson()
         CurcumaLogger::warn("Reordering method hybrid has to be combined with element types. I will choose for you nitrogen and oxygen!");
         CurcumaLogger::info("This is equivalent to adding: '-rmsd.element 7,8' to your argument list");
         m_rmsd_element_templates = "7,8";
-        m_element_templates = {7.0, 8.0};
+        m_element_templates = {7, 8};  // Claude Generated (May 2026, ICX-build): int literals (was 7.0/8.0 — narrowing under ICX)
         m_RMSDElement = 7;
     }
 

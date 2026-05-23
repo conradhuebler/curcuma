@@ -35,6 +35,7 @@ __device__ __forceinline__ void add_grad(double* __restrict__ grad, int atom,
     atomicAdd(&grad[3*atom+2], fz);
 }
 
+
 // ============================================================================
 // Warp-level reduction helper (Phase 6: Warp shuffle optimization)
 // Claude Generated (March 2026)
@@ -86,6 +87,33 @@ __device__ __forceinline__ void blockReduceAddEnergy(double local_E, double* ene
         if (lane == 0)
             atomicAdd(energy, sum);
     }
+}
+
+// ============================================================================
+// PBC: Minimum Image Convention (Claude Generated April 2026)
+// d_lattice[9]    — unit cell vectors in Bohr (column-major: col0=a, col1=b, col2=c)
+// d_lattice_inv[9]— inverse of d_lattice
+// d_has_pbc       — non-zero when PBC is active
+//
+// Column-major layout (Eigen Matrix3d default):
+//   d_lattice[3*col + row]
+// Must be declared before first kernel that calls applyMIC().
+// ============================================================================
+__constant__ double d_lattice[9];
+__constant__ double d_lattice_inv[9];
+__constant__ int    d_has_pbc;
+
+/// Apply Minimum Image Convention to displacement vector (dx,dy,dz) in-place.
+/// Operates in Bohr (same units as GPU geometry). Zero overhead when d_has_pbc==0.
+__device__ __forceinline__ void applyMIC(double& dx, double& dy, double& dz) {
+    if (!d_has_pbc) return;
+    double fx = d_lattice_inv[0]*dx + d_lattice_inv[3]*dy + d_lattice_inv[6]*dz;
+    double fy = d_lattice_inv[1]*dx + d_lattice_inv[4]*dy + d_lattice_inv[7]*dz;
+    double fz = d_lattice_inv[2]*dx + d_lattice_inv[5]*dy + d_lattice_inv[8]*dz;
+    fx -= rint(fx); fy -= rint(fy); fz -= rint(fz);
+    dx = d_lattice[0]*fx + d_lattice[3]*fy + d_lattice[6]*fz;
+    dy = d_lattice[1]*fx + d_lattice[4]*fy + d_lattice[7]*fz;
+    dz = d_lattice[2]*fx + d_lattice[5]*fy + d_lattice[8]*fz;
 }
 
 // ============================================================================
@@ -157,6 +185,7 @@ __global__ void k_dispersion(
         double dx = cx[i] - cx[j];
         double dy = cy[i] - cy[j];
         double dz = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
         double r2 = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
@@ -178,10 +207,10 @@ __global__ void k_dispersion(
             double d8   = -8.0 * r4 * r2 * t8 * t8;
             double dEdr = -C6[tid] * zetac6[tid] * (d6 + 2.0 * r4r2ij[tid] * d8) * rij;
             double fac  = dEdr / rij;
+
             add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
 
-            // dEdcn chain-rule: dc6/dcn contribution for CN gradient
             if (dc6dcn_ij && dEdcn) {
                 double disp_value = disp_sum * zetac6[tid];
                 atomicAdd(&dEdcn[i], -dc6dcn_ij[tid] * disp_value);
@@ -221,15 +250,16 @@ __global__ void k_repulsion(
         double dx = cx[i] - cx[j];
         double dy = cy[i] - cy[j];
         double dz = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
         double r2  = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
         if (rij <= r_cut[tid] && rij >= 1e-8) {
-            double r1_5      = rij * sqrt(rij);
-            double alp_r     = alpha[tid] * r1_5;
+            double r1_5  = rij * sqrt(rij);
+            double alp_r = alpha[tid] * r1_5;
             if (!isnan(alp_r) && !isnan(repab[tid]) && alp_r <= 700.0) {
-                double exp_term  = exp(-alp_r);
-                double base_E    = repab[tid] * exp_term / rij;
+                double exp_term = exp(-alp_r);
+                double base_E   = repab[tid] * exp_term / rij;
                 local_E = base_E;
 
                 double dEdr = -base_E / rij - 1.5 * alpha[tid] * sqrt(rij) * base_E;
@@ -267,9 +297,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_repulsion_mixed(
 
     if (tid < n) {
         int i = idx_i[tid], j = idx_j[tid];
-        float dx = (float)(cx[i] - cx[j]);
-        float dy = (float)(cy[i] - cy[j]);
-        float dz = (float)(cz[i] - cz[j]);
+        double ddx = cx[i] - cx[j], ddy = cy[i] - cy[j], ddz = cz[i] - cz[j];
+        applyMIC(ddx, ddy, ddz);
+        float dx = (float)ddx, dy = (float)ddy, dz = (float)ddz;
         float r2  = dx*dx + dy*dy + dz*dz;
         float rij = sqrtf(r2);
 
@@ -285,8 +315,8 @@ __global__ GFNFF_KERNEL_BOUNDS void k_repulsion_mixed(
 
                 float dEdr = -base_E / rij - 1.5f * alp_f * sqrtf(rij) * base_E;
                 float fac  = dEdr / rij;
-                add_grad(grad, i,  (double)( fac*dx), (double)( fac*dy), (double)( fac*dz));
-                add_grad(grad, j,  (double)(-fac*dx), (double)(-fac*dy), (double)(-fac*dz));
+                add_grad(grad, i,  (double)( fac*dx),  (double)( fac*dy),  (double)( fac*dz));
+                add_grad(grad, j, (double)(-fac*dx), (double)(-fac*dy), (double)(-fac*dz));
             }
         }
     }
@@ -322,6 +352,7 @@ __global__ void k_coulomb(
         double dx  = cx[i] - cx[j];
         double dy  = cy[i] - cy[j];
         double dz  = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
         double r2  = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
@@ -333,7 +364,6 @@ __global__ void k_coulomb(
                 double erf_v   = erf(gamma_r);
                 local_E = qi * qj * erf_v / rij;
 
-                // Gradient
                 static const double inv_sqrt_pi = 0.5641895835477563;
                 double exp_v  = exp(-gamma_r * gamma_r);
                 double derf   = gamma_ij[tid] * exp_v * (2.0 * inv_sqrt_pi);
@@ -390,6 +420,7 @@ __global__ void k_bonds(
         double dx  = cx[i] - cx[j];
         double dy  = cy[i] - cy[j];
         double dz  = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
         double r2  = dx*dx + dy*dy + dz*dz;
         double rij = sqrt(r2);
 
@@ -563,9 +594,11 @@ __global__ void k_angles(
             double dij_x = cx[i] - cx[j];
             double dij_y = cy[i] - cy[j];
             double dij_z = cz[i] - cz[j];
+            applyMIC(dij_x, dij_y, dij_z);
             double dkj_x = cx[k] - cx[j];
             double dkj_y = cy[k] - cy[j];
             double dkj_z = cz[k] - cz[j];
+            applyMIC(dkj_x, dkj_y, dkj_z);
 
             double r_ij_sq = dij_x*dij_x + dij_y*dij_y + dij_z*dij_z;
             double r_jk_sq = dkj_x*dkj_x + dkj_y*dkj_y + dkj_z*dkj_z;
@@ -1561,9 +1594,9 @@ __global__ void k_xbonds(
         double xx = cx[X], xy = cy[X], xz = cz[X];
         double bx = cx[B], by = cy[B], bz = cz[B];
 
-        double rAX_x = xx-ax, rAX_y = xy-ay, rAX_z = xz-az;
-        double rXB_x = bx-xx, rXB_y = by-xy, rXB_z = bz-xz;
-        double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az;
+        double rAX_x = xx-ax, rAX_y = xy-ay, rAX_z = xz-az; applyMIC(rAX_x, rAX_y, rAX_z);
+        double rXB_x = bx-xx, rXB_y = by-xy, rXB_z = bz-xz; applyMIC(rXB_x, rXB_y, rXB_z);
+        double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
 
         double r2AX = rAX_x*rAX_x + rAX_y*rAX_y + rAX_z*rAX_z;
         double r2XB = rXB_x*rXB_x + rXB_y*rXB_y + rXB_z*rXB_z;
@@ -1845,9 +1878,9 @@ __global__ void k_hbonds(
     double hx = cx[H], hy = cy[H], hz = cz[H];
     double bx = cx[B], by = cy[B], bz = cz[B];
 
-    double rAH_x = hx-ax, rAH_y = hy-ay, rAH_z = hz-az;
-    double rHB_x = bx-hx, rHB_y = by-hy, rHB_z = bz-hz;
-    double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az;
+    double rAH_x = hx-ax, rAH_y = hy-ay, rAH_z = hz-az; applyMIC(rAH_x, rAH_y, rAH_z);
+    double rHB_x = bx-hx, rHB_y = by-hy, rHB_z = bz-hz; applyMIC(rHB_x, rHB_y, rHB_z);
+    double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
 
     double r2AH = rAH_x*rAH_x + rAH_y*rAH_y + rAH_z*rAH_z;
     double r2HB = rHB_x*rHB_x + rHB_y*rHB_y + rHB_z*rHB_z;
@@ -2475,6 +2508,7 @@ __global__ void k_cn_chainrule(
     double dx = cx[i] - cx[j];
     double dy = cy[i] - cy[j];
     double dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);
     double r2 = dx*dx + dy*dy + dz*dz;
     double rij = sqrt(r2);
     if (rij < 1e-10) return;
@@ -2534,6 +2568,7 @@ __global__ void k_hb_alpha_chainrule(
     double dx = cx[H] - cx[B];
     double dy = cy[H] - cy[B];
     double dz = cz[H] - cz[B];
+    applyMIC(dx, dy, dz);
     double r2 = dx*dx + dy*dy + dz*dz;
     double rij = sqrt(r2);
     if (rij < 1e-10) return;
@@ -2607,6 +2642,7 @@ __global__ void k_cn_compute(
         double dx = xi - cx[j];
         double dy = yi - cy[j];
         double dz = zi_coord - cz[j];
+        applyMIC(dx, dy, dz);
         double r2 = dx*dx + dy*dy + dz*dz;
 
         // Distance cutoff (skip far atoms)
@@ -2626,6 +2662,24 @@ __global__ void k_cn_compute(
 
     // Log transformation for numerical stability
     cn_final[i] = log(1.0 + exp(cnmax)) - log(1.0 + exp(cnmax - cn_sum));
+}
+
+// ============================================================================
+// GPU dlogdcn computation (Apr 2026)
+// Compute logistic squashing derivative directly on GPU after k_cn_compute.
+// dlogdcn[i] = exp(cnmax) / (exp(cnmax) + exp(cn_raw[i]))
+// Reference: Fortran gfnff_cn.f90 create_dlogCN
+// ============================================================================
+
+__global__ GFNFF_KERNEL_BOUNDS void k_dlogdcn(
+    int natoms,
+    const double* __restrict__ cn_raw,
+    double*       __restrict__ dlogdcn,
+    double        exp_cnmax)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= natoms) return;
+    dlogdcn[i] = exp_cnmax / (exp_cnmax + exp(cn_raw[i]));
 }
 
 // ============================================================================
@@ -2780,3 +2834,574 @@ __global__ void k_dc6dcn_per_pair(
 // ============================================================================
 // Utility: zero device array
 // ============================================================================
+
+// ============================================================================
+// GPU CN pair list generation (Apr 2026)
+// Two-pass kernels replacing CPU generateCNPairList() O(N^2) loop.
+// ============================================================================
+
+/// Pass 1: count valid pairs. 1 thread = 1 upper-triangle pair (i<j).
+__global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_factor,
+    int*          d_count)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int n_total = N * (N - 1) / 2;
+    if (tid >= n_total) return;
+
+    // Map linear tid to upper-triangle (i,j) with i<j
+    // n_pairs_before_i = i * (2*N - i - 1) / 2
+    // Solve i*(2*N - i - 1)/2 <= tid for i
+    int i = static_cast<int>((2.0 * N - 1.0 - sqrt((2.0 * N - 1.0) * (2.0 * N - 1.0) - 8.0 * tid)) * 0.5);
+    // Correct rounding drift
+    while (i > 0 && i * (2 * N - i - 1) / 2 > tid) --i;
+    while (i + 1 < N && (i + 1) * (2 * N - (i + 1) - 1) / 2 <= tid) ++i;
+    int offset_i = i * (2 * N - i - 1) / 2;
+    int j = tid - offset_i + i + 1;
+
+    if (j >= N) return;
+
+    int zi = atom_types[i];
+    int zj = atom_types[j];
+    if (zi < 1 || zi > 86 || zj < 1 || zj > 86) return;
+
+    double dx = cx[i] - cx[j];
+    double dy = cy[i] - cy[j];
+    double dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);
+    double r2 = dx * dx + dy * dy + dz * dz;
+    double rij = sqrt(r2);
+
+    constexpr double CN_RCOV_SCALE = 4.0 / 3.0;
+    double rcov_i = d_rcov_d3[zi - 1] * CN_RCOV_SCALE;
+    double rcov_j = d_rcov_d3[zj - 1] * CN_RCOV_SCALE;
+    double rcov_sum = rcov_i + rcov_j;
+
+    if (rij < cutoff_factor * rcov_sum && rij > 1e-10) {
+        atomicAdd(d_count, 1);
+    }
+}
+
+/// Pass 2: write valid pairs into pre-allocated buffers.
+__global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_factor,
+    int*          d_counter,
+    int*          idx_i,
+    int*          idx_j,
+    double*       rcov_sum)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int n_total = N * (N - 1) / 2;
+    if (tid >= n_total) return;
+
+    // Same mapping as Pass 1
+    int i = static_cast<int>((2.0 * N - 1.0 - sqrt((2.0 * N - 1.0) * (2.0 * N - 1.0) - 8.0 * tid)) * 0.5);
+    while (i > 0 && i * (2 * N - i - 1) / 2 > tid) --i;
+    while (i + 1 < N && (i + 1) * (2 * N - (i + 1) - 1) / 2 <= tid) ++i;
+    int offset_i = i * (2 * N - i - 1) / 2;
+    int j = tid - offset_i + i + 1;
+
+    if (j >= N) return;
+
+    int zi = atom_types[i];
+    int zj = atom_types[j];
+    if (zi < 1 || zi > 86 || zj < 1 || zj > 86) return;
+
+    double dx = cx[i] - cx[j];
+    double dy = cy[i] - cy[j];
+    double dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);
+    double r2 = dx * dx + dy * dy + dz * dz;
+    double rij = sqrt(r2);
+
+    constexpr double CN_RCOV_SCALE = 4.0 / 3.0;
+    double rcov_i = d_rcov_d3[zi - 1] * CN_RCOV_SCALE;
+    double rcov_j = d_rcov_d3[zj - 1] * CN_RCOV_SCALE;
+    double rcov_sum_val = rcov_i + rcov_j;
+
+    if (rij < cutoff_factor * rcov_sum_val && rij > 1e-10) {
+        int idx = atomicAdd(d_counter, 1);
+        idx_i[idx] = i;
+        idx_j[idx] = j;
+        rcov_sum[idx] = rcov_sum_val;
+    }
+}
+
+// ============================================================================
+// WP3: Pair-list-based CN computation (Mai 2026)
+// Replaces O(N²) k_cn_compute with O(n_pairs) pair-list kernel every step.
+// Pair list is built once per topology build by generateCNPairListOnGPU().
+// ============================================================================
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_cn_compute_pairs(
+    int           n_pairs,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const double* __restrict__ rcov_sum,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*       __restrict__ cn_raw,
+    double        kn)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_pairs) return;
+
+    int i = idx_i[tid];
+    int j = idx_j[tid];
+
+    double dx = cx[i] - cx[j];
+    double dy = cy[i] - cy[j];
+    double dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);
+    double r = __dsqrt_rn(dx*dx + dy*dy + dz*dz);
+    if (r < 1e-10) return;
+
+    // erf-based CN contribution (same formula as k_cn_compute)
+    double arg = kn * (r / rcov_sum[tid] - 1.0);
+    double contrib = 0.5 * (1.0 + erf(arg));
+
+    // Symmetric: both atoms i and j receive the contribution
+    atomicAdd(&cn_raw[i], contrib);
+    atomicAdd(&cn_raw[j], contrib);
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_logcn(
+    int natoms,
+    const double* __restrict__ cn_raw,
+    double*       __restrict__ cn_final,
+    double        cnmax)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= natoms) return;
+    // Log squashing: CN_final = log(1+exp(cnmax)) - log(1+exp(cnmax-CN_raw))
+    cn_final[i] = log(1.0 + exp(cnmax)) - log(1.0 + exp(cnmax - cn_raw[i]));
+}
+
+// ============================================================================
+// GPU HB CN per-bond computation (Apr 2026)
+// Replaces CPU HB CN loop in gfnff_gpu_method.cpp.
+// ============================================================================
+
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_per_atom(
+    int n_pairs,
+    const int*    __restrict__ idx_H,
+    const int*    __restrict__ idx_B,
+    const double* __restrict__ rcov_sum,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*       __restrict__ hb_cn_per_atom,
+    double        kn,
+    double        thr_sq)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_pairs) return;
+
+    int H = idx_H[tid];
+    int B = idx_B[tid];
+
+    double dx = cx[H] - cx[B];
+    double dy = cy[H] - cy[B];
+    double dz = cz[H] - cz[B];
+    applyMIC(dx, dy, dz);
+    double r2 = dx * dx + dy * dy + dz * dz;
+    if (r2 > thr_sq) return;
+
+    double r = sqrt(r2);
+    double rcovij = rcov_sum[tid];
+    double arg = -kn * (r - rcovij) / rcovij;
+    double contrib = 0.5 * (1.0 + erf(arg));
+
+    atomicAdd(&hb_cn_per_atom[H], contrib);
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_map_to_bonds(
+    int nb,
+    const int*    __restrict__ nr_hb,
+    const int*    __restrict__ hb_H_atom,
+    const double* __restrict__ hb_cn_per_atom,
+    double*       __restrict__ hb_cn_H)
+{
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= nb) return;
+
+    if (nr_hb[b] >= 1) {
+        int H = hb_H_atom[b];
+        if (H >= 0) {
+            hb_cn_H[b] = hb_cn_per_atom[H];
+        } else {
+            hb_cn_H[b] = 0.0;
+        }
+    } else {
+        hb_cn_H[b] = 0.0;
+    }
+}
+
+// ============================================================================
+// GPU EEQ Schur complement (Apr 2026)
+// Replaces CPU Schur loop after Cholesky solve in gfnff_gpu_method.cpp.
+// For nfrag == 1 only (common case). nfrag > 1 falls back to CPU path.
+// ============================================================================
+
+__global__ void k_eeq_reduce_sums(
+    int N,
+    const double* __restrict__ d_rhs,
+    double*       __restrict__ d_sums)
+{
+    extern __shared__ double sdata[];
+    double* s_z1  = sdata;            // [blockDim.x]
+    double* s_Z2  = sdata + blockDim.x; // [blockDim.x]
+
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + tid;
+
+    double val_z1 = 0.0;
+    double val_Z2 = 0.0;
+    if (i < N) {
+        val_z1 = d_rhs[i];          // column 0: z1
+        val_Z2 = d_rhs[N + i];      // column 1: Z2_col0
+    }
+    s_z1[tid] = val_z1;
+    s_Z2[tid] = val_Z2;
+    __syncthreads();
+
+    // Block-level tree reduction
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_z1[tid] += s_z1[tid + s];
+            s_Z2[tid] += s_Z2[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        atomicAdd(&d_sums[0], s_z1[0]);   // Cz1
+        atomicAdd(&d_sums[1], s_Z2[0]);   // S
+    }
+}
+
+__global__ void k_eeq_schur_nfrag1(
+    int N,
+    const double* __restrict__ d_rhs,
+    double        lambda,
+    double*       __restrict__ charges)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double z1 = d_rhs[i];
+    double Z2 = d_rhs[N + i];
+    charges[i] = z1 - Z2 * lambda;
+}
+
+// ============================================================================
+// WP7-A: General Schur for nfrag > 1 (May 2026)
+// k_eeq_reduce_fragment_sums: Cz1[f] = Σ_{i∈frag_f} z1[i],
+//                             S[f,g] = Σ_{i∈frag_f} Z2[i,g]
+// k_eeq_schur_general:        q[i] = z1[i] - Σ_g Z2[i,g] · λ[g]
+// Reference: docs/GPU_WP7_EEQ_LARGE_SYSTEMS.md (Strategie A)
+// ============================================================================
+__global__ void k_eeq_reduce_fragment_sums(
+    int N,
+    int nfrag,
+    const double* __restrict__ d_rhs,
+    const int*    __restrict__ d_atom_frag,
+    double*       __restrict__ d_Cz1,
+    double*       __restrict__ d_S)
+{
+    // 1 thread / atom; per-thread loop over (nfrag+1) RHS columns.
+    // Each atom contributes to its own fragment row in (Cz1, S) → atomicAdd.
+    // Non-deterministic ordering ⇒ <1 µEh energy noise (same class as WP3 CN-pair).
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    int f = d_atom_frag[i];
+    // Column 0 contributes to Cz1[f]
+    atomicAdd(&d_Cz1[f], d_rhs[i]);
+    // Columns 1..nfrag contribute to S[f, g] (row-major layout: f*nfrag + g)
+    for (int g = 0; g < nfrag; ++g) {
+        atomicAdd(&d_S[f * nfrag + g], d_rhs[(g + 1) * N + i]);
+    }
+}
+
+__global__ void k_eeq_schur_general(
+    int N,
+    int nfrag,
+    const double* __restrict__ d_rhs,
+    const double* __restrict__ d_lambda,
+    double*       __restrict__ charges)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double q = d_rhs[i];  // z1[i]
+    for (int g = 0; g < nfrag; ++g) {
+        q -= d_rhs[(g + 1) * N + i] * d_lambda[g];
+    }
+    charges[i] = q;
+}
+
+// ============================================================================
+// WP7-C: GPU PCG kernels (May 2026)
+// All four are 1-thread-per-atom, no shared memory, no atomics.
+// Used by EEQSolverGPU::solveSinglePCG.
+// Reference: docs/GPU_WP7_EEQ_LARGE_SYSTEMS.md (Strategie C)
+// ============================================================================
+
+// Extract A's diagonal and invert it: M_inv[i] = 1/A[i,i].
+// A is column-major N×N; element (i,i) is at A[i*N + i].
+__global__ void k_pcg_extract_diag_inv(
+    int N,
+    const double* __restrict__ d_A,
+    double*       __restrict__ d_M_inv)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double diag = d_A[i * N + i];
+    d_M_inv[i] = (diag != 0.0) ? 1.0 / diag : 0.0;
+}
+
+// PCG init: r = b − A·x. d_Ax holds A·x (computed via cublasDsymv before this call).
+__global__ void k_pcg_init_residual(
+    int N,
+    const double* __restrict__ d_b,
+    const double* __restrict__ d_Ax,
+    double*       __restrict__ d_r)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    d_r[i] = d_b[i] - d_Ax[i];
+}
+
+// Apply Jacobi preconditioner: z = M_inv ⊙ r.
+__global__ void k_pcg_apply_precond(
+    int N,
+    const double* __restrict__ d_M_inv,
+    const double* __restrict__ d_r,
+    double*       __restrict__ d_z)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    d_z[i] = d_M_inv[i] * d_r[i];
+}
+
+// Direction update: p_out = z + β·p_in. Single-pass — avoids cublasDcopy + cublasDaxpy.
+__global__ void k_pcg_dir_update(
+    int N,
+    const double* __restrict__ d_z,
+    double        beta,
+    const double* __restrict__ d_p_in,
+    double*       __restrict__ d_p_out)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    d_p_out[i] = d_z[i] + beta * d_p_in[i];
+}
+
+// ============================================================================
+// WP2: k_build_eeq_rhs — GPU-side EEQ RHS construction
+// Claude Generated (May 2026): Eliminates CPU sync for EEQ RHS per MD step.
+// chi_corr and cnf are topology-constant (uploaded once by uploadEEQTopologyParams).
+// Only sqrt(cn[i]) changes each step — computed directly from d_cn_final on device.
+// Reference: prepareEEQParametersForGPU() in gfnff_method.cpp
+// ============================================================================
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_build_eeq_rhs(
+    int N,
+    const double* __restrict__ d_cn,
+    const double* __restrict__ d_chi_corr,
+    const double* __restrict__ d_cnf,
+    double*       __restrict__ d_rhs)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double cn_i = d_cn[i];
+    double sqrt_cn = (cn_i > 0.0) ? __dsqrt_rn(cn_i) : 0.0;
+    d_rhs[i] = d_chi_corr[i] + d_cnf[i] * sqrt_cn;
+}
+
+// ============================================================================
+// WP5-C: k_check_dc6dcn_skip — GPU-side D4 dc6dcn skip check
+// Claude Generated (May 2026): Two-stage max-reduction on max|ΔCN| to decide
+// whether Gaussian weights + dc6dcn can be skipped. Replaces CPU-side
+// recordCNValues + shouldSkipDc6Reconstruction, eliminating per-step CN D2H memcpy.
+//
+// Stage 1 (k_check_dc6dcn_skip): per-block max reduction → d_block_max[]
+// Stage 2 (k_check_dc6dcn_skip_final): single block reduces d_block_max[] → skip_flag.
+// ============================================================================
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_check_dc6dcn_skip(
+    int N,
+    const double* __restrict__ cn_cur,
+    const double* __restrict__ cn_ref,
+    double* __restrict__ d_block_max)
+{
+    __shared__ double sdata[512];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + tid;
+
+    double local_max = 0.0;
+    if (i < N) {
+        double delta = fabs(cn_cur[i] - cn_ref[i]);
+        local_max = delta;
+    }
+    sdata[tid] = local_max;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (sdata[tid + s] > sdata[tid])
+                sdata[tid] = sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        d_block_max[blockIdx.x] = sdata[0];
+    }
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_check_dc6dcn_skip_final(
+    int n_blocks,
+    const double* __restrict__ d_block_max,
+    double abs_threshold,
+    int* __restrict__ skip_flag)
+{
+    __shared__ double sdata[512];
+    int tid = threadIdx.x;
+
+    double local_max = (tid < n_blocks) ? d_block_max[tid] : 0.0;
+    sdata[tid] = local_max;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (sdata[tid + s] > sdata[tid])
+                sdata[tid] = sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        *skip_flag = (sdata[0] < abs_threshold) ? 1 : 0;
+    }
+}
+
+// ============================================================================
+// WP6: Batched per-fragment EEQ kernels (nfrag > 1)
+// Claude Generated (May 2026)
+// ============================================================================
+
+/// sqrt(2/pi) — matches value in eeq_solver_gpu.cu
+__device__ constexpr double TSQRT2PI_FRAG = 0.797884560802866;
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_build_fragment_matrices(
+    int           total_pairs,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ alpha,
+    const double* __restrict__ gam,
+    const int*    __restrict__ frag_sizes,
+    const int*    __restrict__ frag_offsets_A,
+    const int*    __restrict__ frag_offsets_pair,
+    const int*    __restrict__ frag_atom_offsets,
+    const int*    __restrict__ frag_atom_map,
+    double*       __restrict__ d_A_blocks,
+    int           nfrag,
+    double        cutoff_sq)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= total_pairs) return;
+
+    // Binary search: find which fragment this tid belongs to
+    int f = 0;
+    {
+        int lo = 0, hi = nfrag - 1;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (frag_offsets_pair[mid + 1] <= tid)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        f = lo;
+    }
+
+    int local_tid  = tid - frag_offsets_pair[f];
+    int Nf         = frag_sizes[f];
+    int atom_start = frag_atom_offsets[f];
+
+    // Map local_tid → (li, lj) in lower triangle of the N_f×N_f block: li >= lj
+    int li = static_cast<int>((-1.0 + sqrt(1.0 + 8.0 * static_cast<double>(local_tid))) * 0.5);
+    while (li * (li + 1) / 2 > local_tid) --li;
+    while ((li + 1) * (li + 2) / 2 <= local_tid) ++li;
+    int lj = local_tid - li * (li + 1) / 2;
+
+    // Global atom indices
+    int gi = frag_atom_map[atom_start + li];
+    int gj = frag_atom_map[atom_start + lj];
+
+    // Base pointer for this fragment's N_f×N_f column-major block
+    double* Af = d_A_blocks + frag_offsets_A[f];
+
+    if (li == lj) {
+        Af[lj * Nf + li] = gam[gi] + TSQRT2PI_FRAG / sqrt(alpha[gi]);
+    } else {
+        double dx   = cx[gi] - cx[gj];
+        double dy   = cy[gi] - cy[gj];
+        double dz   = cz[gi] - cz[gj];
+        double r_sq = dx*dx + dy*dy + dz*dz;
+
+        if (cutoff_sq > 0.0 && r_sq > cutoff_sq) {
+            Af[lj * Nf + li] = 0.0;
+            Af[li * Nf + lj] = 0.0;
+        } else {
+            double r          = sqrt(r_sq);
+            double gamma_ij   = 1.0 / sqrt(alpha[gi] + alpha[gj]);
+            double val        = erf(gamma_ij * r) / r;
+            Af[lj * Nf + li] = val;  // lower triangle (col=lj, row=li)
+            Af[li * Nf + lj] = val;  // upper triangle (col=li, row=lj)
+        }
+    }
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_gather_rhs_fragments(
+    int           N,
+    const double* __restrict__ d_rhs_global,
+    const int*    __restrict__ frag_atom_map,
+    const int*    __restrict__ frag_atom_offsets,
+    const int*    __restrict__ frag_offsets_rhs,
+    const int*    __restrict__ frag_sizes,
+    double*       __restrict__ d_rhs_blocks,
+    int           nfrag)
+{
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= N) return;
+
+    // Binary search: find which fragment sorted position k belongs to
+    int f = 0;
+    {
+        int lo = 0, hi = nfrag - 1;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (frag_atom_offsets[mid + 1] <= k)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        f = lo;
+    }
+
+    int local_k = k - frag_atom_offsets[f];
+    int gi      = frag_atom_map[k];
+
+    // Write to col0 of this fragment's RHS block (col1 = ones, pre-filled at topo upload)
+    d_rhs_blocks[frag_offsets_rhs[f] + local_k] = d_rhs_global[gi];
+}

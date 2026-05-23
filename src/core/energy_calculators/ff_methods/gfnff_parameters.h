@@ -79,6 +79,9 @@ struct HBGradEntry {
  *
  * Reference: gfnff_gdisp0.f90:365-377
  * GFN-FF uses MODIFIED BJ damping: E = -0.5 * C6 * (t6 + 2*r4r2ij*t8)
+ *
+ * P1c (Apr 2026): Removed legacy D3 fields (C8, s6, s8, a1, a2).
+ * 88 bytes → 48 bytes per pair. D3 uses separate D3DispersionPair struct.
  */
 struct GFNFFDispersion {
     int i = 0, j = 0;           ///< Atom pair indices
@@ -87,13 +90,26 @@ struct GFNFFDispersion {
     double r0_squared = 0.0;    ///< Pre-computed R0^2 = (a1*sqrt(r4r2ij) + a2)^2
     double r_cut = 50.0;        ///< Cutoff radius (Bohr)
     double zetac6 = 1.0;        ///< Zeta charge scaling
+};
 
-    // Legacy fields (backward compatibility with D3)
+/**
+ * @brief D3 Dispersion pairwise term (standard BJ damping)
+ *
+ * D3 uses standard BJ damping: E = -s6*C6/(r^6+R0^6) - s8*C8/(r^8+R0^8)
+ * with R0 = a1*sqrt(C8/C6) + a2
+ *
+ * Claude Generated (Apr 2026): P1c — Separated from GFNFFDispersion to enable
+ * struct size optimization (88 → 48 bytes for GFN-FF/D4 hot path).
+ */
+struct D3DispersionPair {
+    int i = 0, j = 0;
+    double C6 = 0.0;
     double C8 = 0.0;
     double s6 = 1.0;
     double s8 = 1.0;
     double a1 = 0.0;
     double a2 = 0.0;
+    double r_cut = 50.0;
 };
 
 /**
@@ -124,7 +140,11 @@ struct GFNFFCoulomb {
     double cnf_i = 0.0, cnf_j = 0.0;
     double gam_i = 0.0, gam_j = 0.0;
     double alp_i = 0.0, alp_j = 0.0;
-    double r_cut = 50.0;
+    // WP-C (May 2026): default aligned with gfnff_method.cpp:8467 (CPU assignment of c.r_cut = 100.0).
+    // Previously 50.0 in struct vs 100.0 at assignment site — could have produced CPU/GPU mismatch
+    // if any path skipped the explicit assignment. 100.0 Bohr is effective "no cutoff" for typical
+    // chemistry (even polymer.xyz max pair < 100 Bohr).
+    double r_cut = 100.0;
 };
 
 /**

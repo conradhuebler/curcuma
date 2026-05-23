@@ -7,6 +7,10 @@
 #include <string>
 #include <vector>
 
+// Claude Generated - missing json include (needed when building as submodule without PCH)
+#include "external/json.hpp"
+using json = nlohmann::json;
+
 enum class ParamType { String,
     Int,
     Double,
@@ -43,10 +47,18 @@ public:
     // Claude Generated: Alias resolution
     std::string resolveAlias(const std::string& module, const std::string& alias) const;
 
+    // Claude Generated: Inverse lookup — which modules own a given parameter name or alias?
+    // Returns all module names that register the given name (or any alias resolving to it).
+    // Case-insensitive. Empty vector means the name is unknown to the registry.
+    // Drives flat-CLI auto-routing in main.cpp::CLI2Json.
+    std::vector<std::string> findOwnerModules(const std::string& param_name) const;
+
 private:
     ParameterRegistry() = default;
     std::map<std::string, std::vector<ParameterDefinition>> registry;
     std::map<std::string, std::map<std::string, std::string>> alias_to_name_map;
+    // Lowercased name/alias -> deduped list of owning modules. Built incrementally in addDefinition.
+    std::map<std::string, std::vector<std::string>> name_to_modules_map;
 };
 
 // Deklaration der Initialisierungsfunktion, die vom generierten Code kommt

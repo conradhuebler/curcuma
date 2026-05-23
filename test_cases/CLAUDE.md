@@ -169,6 +169,24 @@ ctest -R "cli_rmsd_01" --verbose
 
 **Golden References**: RMSD 2.87214 Å (AAA-bGal, 90 atoms) - see GOLDEN_REFERENCES.md
 
+## Molecule Registry — MANDATORY Rule
+
+**NEVER hardcode molecule geometry in test files.**
+
+All test molecules live in `core/test_molecule_registry.cpp` and are accessible via:
+```cpp
+#include "core/test_molecule_registry.h"
+curcuma::Molecule mol = TestMolecules::TestMoleculeRegistry::createMolecule("CH4", false);
+//                                                                                  ^^^^
+//                                           false = keep Angstrom (Molecule expects Angstrom)
+```
+
+Available molecules: `H2`, `HCl`, `OH`, `HCN`, `H2O`, `H2O_dimer`, `O3`, `CH4`, `CH3OH`, `CH3OCH3`, `C6H6`, `monosaccharide`, `triose`
+
+**To add a new molecule**: edit `core/test_molecule_registry.cpp` — atoms in Angstrom, then link `test_molecule_registry` in CMakeLists.txt.
+
+**Why**: hardcoded geometry in test files produces inconsistent results (geometry-dependent pass/fail), duplicates data, and is hard to audit.
+
 ## Unit Tests (C++)
 
 ### test_molecule.cpp

@@ -26,6 +26,7 @@
 #include "src/core/global.h"
 #include "../ff_workspace.h"           // FFEnergyComponents, Matrix, Vector, SpMatrix
 #include "../gfnff_parameters.h"       // GFNFFParameterSet
+#include "../gfnff.h"                  // GFNFF::EEQGPUParams (WP2)
 
 #include <memory>
 #include <vector>
@@ -78,10 +79,17 @@ public:
     // =========================================================================
 
     /// Set current geometry (Bohr, N×3 row-major Eigen matrix)
-    void setGeometry(const Matrix& geom);
+    /// WP-G (May 2026): explicit GeoGradMatrix (RowMajor) — matches CPU m_geometry_bohr layout
+    void setGeometry(const GeoGradMatrix& geom);
 
     /// Set dynamic EEQ charges (geometry-dependent, size N)
     void setEEQCharges(const Vector& q);
+
+    /// WP5-A: D2D path — charges already on GPU after GPU Schur complement.
+    /// Enqueues a D2D copy on the main workspace stream; no H2D upload happens
+    /// in launchChargeDependentAndFinish() for this step.
+    /// Caller must ensure d_src is valid (EEQ stream fully synced) before calling.
+    void setEEQDeviceCharges(const double* d_src);
 
     /// Set topology charges (size N — used for BATM kernel)
     void setTopologyCharges(const Vector& q);
@@ -115,6 +123,15 @@ public:
     void computeCN(const std::vector<int>& atom_types);
 
     /**
+     * @brief Finalize deferred CN download after Phase 4 launch (G-P1, Apr 2026).
+     * Syncs the main CUDA stream and copies CN_final from pinned buffer to out_cn.
+     * Call after prepareAndLaunchChargeIndependent() so the GPU finishes CN during
+     * the Phase 4 launch overhead (~0.3ms), eliminating the 4ms sleep penalty.
+     * @param out_cn Output vector resized to N doubles (log-transformed CN)
+     */
+    void finalizeCNForCPU(Vector& out_cn);
+
+    /**
      * @brief Get pointer to pinned CN_final buffer (valid after computeCN()).
      * Caller copies into their pre-allocated Vector via memcpy.
      * @return Pointer to N doubles (log-transformed CN values)
@@ -127,6 +144,13 @@ public:
      * @return Pointer to N doubles (raw erf-sum CN values)
      */
     const double* getCNRawPinnedBuffer() const { return m_h_cn_raw; }
+
+    /**
+     * @brief Get pointer to pinned dlogdcn buffer (valid after computeCN() with gradient=true).
+     * dlogdcn is computed on GPU by k_dlogdcn kernel (Apr 2026).
+     * @return Pointer to N doubles (logistic derivative)
+     */
+    const double* getDlogdcnPinnedBuffer() const { return m_h_dlogdcn; }
 
     /**
      * @brief Check if GPU CN has been computed this step.
@@ -165,11 +189,50 @@ public:
      */
     void setDlogDCN(const Vector& dlogdcn);
 
+    /**
+     * @brief Generate CN pair list entirely on GPU (Apr 2026).
+     *
+     * Two-pass kernel: count valid pairs, allocate buffers, write (i,j,rcov_sum).
+     * Replaces CPU generateCNPairList() O(N^2) loop.
+     * Coordinates and atom types must already be on GPU.
+     */
+    void generateCNPairListOnGPU();
+
     /// Set baseline energy (e0 from parameter set, added to total)
     void setE0(double e0);
 
     /// Update per-bond HB coordination numbers (for egbond_hb alpha modulation)
     void updateBondHBCN(const std::vector<double>& hb_cn_values);
+
+    /**
+     * @brief Re-upload HB alpha (H,B) pair list after dynamic HB re-detection.
+     *
+     * Claude Generated (Apr 2026): Replaces the HBAlphaSoA built at construction time
+     * with updated (H,B) pairs from the new HB list.  Must be called after
+     * updateHBonds() when consumeHBXBUpdate() returns true.
+     *
+     * @param bond_hb_data  New flat BondHBEntry list (from GFNFF::rebuildBondHBData)
+     * @param atom_types    Atomic numbers (1-based, size N) for covalent radius lookup
+     */
+    void updateHBAlphaPairs(const std::vector<BondHBEntry>& bond_hb_data,
+                             const std::vector<int>& atom_types);
+
+    /**
+     * @brief Re-upload per-bond nr_hb and hb_H_atom arrays after dynamic HB re-detection.
+     *
+     * Claude Generated (Apr 2026): Overwrites the BondSoA nr_hb and hb_H_atom buffers
+     * on the GPU so the k_bonds kernel uses updated HB participation counts.
+     * Must be called after updateHBAlphaPairs() when consumeHBXBUpdate() returns true.
+     *
+     * @param nr_hb       Per-bond HB count (size = bond count)
+     * @param hb_H_atom   Per-bond H atom index, -1 if not an HB bond (size = bond count)
+     */
+    void updateBondHBMetadata(const std::vector<int>& nr_hb,
+                               const std::vector<int>& hb_H_atom);
+
+    /// Compute HB CN per-bond entirely on GPU (Apr 2026).
+    /// Uses HBAlphaSoA + BondSoA; no CPU loop or H2D upload.
+    void computeBondHBCN();
 
     /// Re-upload HBond SoA after dynamic re-detection (called after updateHBXBIfNeeded)
     void updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
@@ -192,7 +255,7 @@ public:
      * Coulomb data.  Can be overridden by GFNFF::Calculation().
      */
     void setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
-                                     const Vector& alp,     const Vector& cnf,
+                                     const Vector& alp,
                                      const Vector& chi_static);
 
     /**
@@ -237,8 +300,12 @@ public:
      * @brief Compute Gaussian weights + dc6dcn entirely on GPU (Phase 6).
      * Replaces: CPU precomputeGaussianWeights() + computeGaussianWeightDerivatives()
      * + computeDC6DCNOnGPU(). CN values must be on GPU (from computeCN() or setD3CN()).
+     * @param use_cn_final If true, read CN from d_cn_final (current step, written by computeCN).
+     *                     If false (default), read from d_cn (updated in prepareAndLaunch).
+     *                     Set use_cn_final=true to call BEFORE prepareAndLaunchChargeIndependent()
+     *                     so dc6dcn is ready for Phase 1 dispersion overlap with EEQ.
      */
-    void computeGaussianWeightsOnGPU();
+    void computeGaussianWeightsOnGPU(bool use_cn_final = false);
 
     // =========================================================================
     // Term enable flags (match FFWorkspace API)
@@ -249,12 +316,22 @@ public:
     void setRepulsionEnabled(bool v);
     void setCoulombEnabled(bool v);
 
+    /// Claude Generated (April 2026): Set unit cell for PBC minimum image convention.
+    /// cell_bohr: 3×3 matrix (column-major, in Bohr). Uploads to GPU constant memory.
+    void setUnitCell(const double* cell_bohr_9, const double* cell_bohr_inv_9, bool has_pbc);
+
     /// Set verbosity for diagnostic snapshot downloads (only >= 3 triggers snapshot D2H)
     void setVerbosity(int v) { m_verbosity = v; }
 
     /// Enable/disable FP32 mixed precision for repulsion, BATM, and XBonds kernels.
     /// Default: enabled. FP64 fallback available for validation.
     void setMixedPrecision(bool enable);
+
+    /// G3a (Apr 2026): Set fixed GPU kernel block size (0 = adaptive default).
+    /// Valid: 0, 32, 64, 128, 256, 512. 0 uses adaptive logic (32/128/256/512).
+    /// 512 maximizes occupancy but may be slower for small systems.
+    void setBlockSize(int block_size) { m_block_size = block_size; }
+    int getBlockSize() const { return m_block_size; }
 
     // =========================================================================
     // GPU Topology Displacement Check (Claude Generated March 2026)
@@ -344,6 +421,12 @@ public:
     const Matrix&             gradient()         const;
     const FFEnergyComponents& energyComponents() const;
 
+    // Claude Generated (May 2026): Per-kernel GPU timing in ms (collected via CUDA events).
+    // -1 = not measured this step (e.g., timing disabled). All times are individual-kernel
+    // execution times measured between cudaEventRecord pairs on the same stream.
+    const FFTermTimings& kernelTimings() const { return m_kernel_timings; }
+    void setRecordKernelTimings(bool v) { m_record_kernel_timings = v; }
+
     // dEdcn totals (for external CN chain-rule, if needed)
     const Vector& dEdcnTotal() const;
 
@@ -374,11 +457,48 @@ public:
     /// Claude Generated (March 2026): Required before cross-stream reads (e.g. EEQSolverGPU).
     void synchronizeMainStream();
 
+    // =========================================================================
+    // WP2: GPU-side EEQ topology parameters (Claude Generated May 2026)
+    // =========================================================================
+
+    /// Upload topology-constant EEQ parameters to GPU (once per topology build).
+    /// Enables k_build_eeq_rhs to construct rhs_atoms[i] entirely on GPU each step.
+    /// Call after InitialiseMolecule() and after each full topology recalculation.
+    void uploadEEQTopologyParams(const GFNFF::EEQGPUParams& params);
+
+    /// Returns true if uploadEEQTopologyParams() has been called at least once.
+    bool isEEQTopoValid() const;
+
+    /// Device pointer to EEQ RHS vector [N] (valid after k_build_eeq_rhs ran).
+    const double* getDeviceRHSPtr() const;
+    /// Device pointer to EEQ fragment target charges [nfrag] (topology-constant).
+    const double* getDeviceRHSConstraintsPtr() const;
+    /// Device pointer to alpha_corrected [N] (topology-constant).
+    const double* getDeviceAlphaPtr() const;
+    /// Device pointer to gam_corrected [N] (topology-constant).
+    const double* getDeviceGamPtr() const;
+
     /// Invalidate the CUDA Graph — call whenever any SoA topology changes
     /// (full topology recalculation, HB/XB re-detection, or any n-value change).
     /// The next prepareAndLaunchChargeIndependent() call will re-capture the graph.
     /// Claude Generated (Phase 8, March 2026).
     void invalidateGraph();
+
+    /// WP5-C (May 2026): Return the GPU-side dc6dcn skip flag from the previous step.
+    /// True if max|ΔCN| < 0.01 between the last two steps, meaning dc6dcn recomputation
+    /// can be skipped. Always false on the first step or after topology invalidation.
+    /// WP-S1 (May 2026): also true when m_frozen_cn is set by the static-mode override.
+    bool shouldSkipDc6dcn() const { return m_frozen_cn || m_dc6dcn_skip_pending; }
+
+    /// Static-Mode (WP-S1, May 2026): freeze CN / charge recomputation across MD steps.
+    /// Device buffers (d_cn_final, gw, dgw, dc6dcn_ij/ji, d_charges) remain valid from the
+    /// previous step; kernel launches that would overwrite them are skipped.
+    void setStaticFlags(bool frozen_cn, bool frozen_charges) {
+        m_frozen_cn = frozen_cn;
+        m_frozen_charges = frozen_charges;
+    }
+    bool frozenCN() const { return m_frozen_cn; }
+    bool frozenCharges() const { return m_frozen_charges; }
 
 private:
     std::unique_ptr<FFWorkspaceGPUImpl> m_impl;
@@ -388,15 +508,18 @@ private:
     double  m_e0     = 0.0;
 
     // Coulomb self-energy parameters (O(N), extracted at init)
-    Vector  m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_cnf, m_coul_chi_static;
+    Vector  m_coul_chi_base, m_coul_gam, m_coul_alp, m_coul_chi_static;
 
     // CN state for GPU upload and k_subtract_qtmp (Coulomb TERM 1b)
-    Vector  m_cn, m_cnf;
+    // WP5-B (May 2026): m_cnf removed — CNF lives on GPU as impl.d_coul_cnf
+    // (topology-constant). m_cn kept for legacy setD3CN() compatibility.
+    Vector  m_cn;
 
     // GPU CN computation state
     // NOTE: No Eigen Vectors here — heap-corruption-safe.  CN data lives in pinned buffer only.
     double* m_h_cn_final = nullptr; ///< [N] pinned staging buffer for CN_final download
     double* m_h_cn_raw   = nullptr; ///< [N] pinned staging buffer for CN_raw download
+    double* m_h_dlogdcn  = nullptr; ///< [N] pinned staging buffer for dlogdcn download (Apr 2026)
     bool    m_cn_computed = false; ///< GPU CN computed this step?
     std::vector<int> m_atom_types_cached; ///< Cached atom types for GPU CN
 
@@ -412,6 +535,15 @@ private:
     // Dynamic per-step state
     Vector  m_eeq_charges;
     Vector  m_topology_charges;
+    bool    m_device_charges_ready = false;  ///< WP5-A: set by setEEQDeviceCharges(), skips H2D upload
+
+    // WP5-C (May 2026): GPU-side D4 dc6dcn skip-check state
+    bool    m_dc6dcn_skip_pending = false;   ///< skip flag from previous step (read in current step)
+
+    // WP-S1 (May 2026): static-mode overrides — when set, GPU kernels for CN/dgw/dc6dcn
+    // and EEQ-charge upload are skipped (device buffers retain previous-step values).
+    bool    m_frozen_cn = false;
+    bool    m_frozen_charges = false;
 
     // Last uploaded HB/XB bond lists (for CPU vs GPU comparison debugging)
     std::vector<GFNFFHydrogenBond> m_last_hbonds;
@@ -437,6 +569,9 @@ private:
     bool m_coulomb_enabled    = true;
     int  m_verbosity          = 0;
 
+    // G3a (Apr 2026): GPU kernel block size override (0 = adaptive default)
+    int  m_block_size         = 0;
+
     // Pre-allocated pinned staging buffers for async DMA transfers.
     // Claude Generated (March 2026): Pinned memory enables true async H2D/D2H via
     // cudaMemcpyAsync without CPU page-fault overhead. This is the primary per-step
@@ -461,6 +596,10 @@ private:
     Matrix             m_grad_before_cn;  ///< Gradient before CN chain-rule (diagnostic)
     FFEnergyComponents m_result_energy;
     Vector             m_dEdcn_total;
+
+    // Claude Generated (May 2026): Per-kernel GPU timing infrastructure
+    bool          m_record_kernel_timings = false;
+    FFTermTimings m_kernel_timings;
 };
 
 #endif // USE_CUDA

@@ -30,12 +30,11 @@
 #include "src/capabilities/confscan.h"
 #include "src/capabilities/confsearch.h"
 #include "src/capabilities/confstat.h"
-#include "src/capabilities/curcumaopt.h"
 // Modern optimizer system - Claude Generated (simplified)
 #include "src/capabilities/docking.h"
 #include "src/capabilities/hessian.h"
 #include "src/capabilities/casino.h"
-#include "src/capabilities/optimisation/modern_optimizer_simple.h"
+#include "src/capabilities/optimizer_factory.h"
 #include "src/capabilities/nebdocking.h"
 #include "src/capabilities/pairmapper.h"
 #include "src/capabilities/persistentdiagram.h"
@@ -56,7 +55,6 @@
 #include "src/core/parameter_registry.h"
 
 #include "src/capabilities/optimiser/OptimiseDipoleScaling.h"
-#include "src/capabilities/optimisation/modern_optimizer_simple.h"
 
 #include <cmath>
 #include <cstring>
@@ -616,6 +614,24 @@ double DotProduct(const Eigen::Vector3d& pos1, const Eigen::Vector3d& pos2)
     return pos1.dot(pos2);
 }
 
+// Claude Generated 2026: Recursive deep-merge — dst wins where it already has a value (CLI > file).
+// Unlike nlohmann::merge_patch this never deletes on null and recurses through every nested object,
+// fixing the 1-level-only behavior of the old -import_config merge.
+static void mergeJsonRecursive(json& dst, const json& src)
+{
+    if (!src.is_object()) {
+        return;
+    }
+    for (auto it = src.begin(); it != src.end(); ++it) {
+        if (!dst.contains(it.key())) {
+            dst[it.key()] = it.value();
+        } else if (dst[it.key()].is_object() && it.value().is_object()) {
+            mergeJsonRecursive(dst[it.key()], it.value());
+        }
+        // else: dst already has a scalar/array at this key — CLI wins, keep dst.
+    }
+}
+
 // Helper function to set nested JSON values from dot-notation keys - Claude Generated
 void setNestedJsonValue(json& target, const std::string& dotKey, const json& value) {
     if (dotKey.find('.') == std::string::npos) {
@@ -649,7 +665,7 @@ void setNestedJsonValue(json& target, const std::string& dotKey, const json& val
 json CLI2Json(int argc, char** argv)
 {
     json controller;
-    json key;
+    json key = json::object();  // Initialize as empty object (not null) so controller["opt"] is always usable
     if (argc < 2)
         return controller;
 
@@ -708,7 +724,7 @@ json CLI2Json(int argc, char** argv)
                 if ((i + 1) < argc) {
                     try {
                         int verbosity_level = std::stoi(argv[i + 1]);
-                        if (verbosity_level >= 0 && verbosity_level <= 3) {
+                        if (verbosity_level >= 0 && verbosity_level <= 4) {
                             key["verbosity"] = verbosity_level;
                             ++i; // Skip next argument
                             continue;
@@ -780,6 +796,62 @@ json CLI2Json(int argc, char** argv)
                 }
                 ++i;
             }
+        }
+    }
+
+    // Claude Generated 2026: Auto-route flat CLI flags to their owning module via ParameterRegistry.
+    // Lets "-static_charges true" land in controller["gfnff"]["static_charges"] without requiring
+    // dotted form "-gfnff.static_charges true". Same-name-in-command-module wins; truly ambiguous
+    // names (multiple owners, none matching the current command) emit a warning and stay put.
+    {
+        std::vector<std::string> reroute_remove;
+        json reroute_targets; // module -> {param_name: value}
+        for (auto it = key.begin(); it != key.end(); ++it) {
+            const std::string& pname = it.key();
+            if (global_params.count(pname) > 0)
+                continue;
+            if (it.value().is_object())
+                continue;
+            if (pname.find('.') != std::string::npos)
+                continue;
+
+            auto owners = ParameterRegistry::getInstance().findOwnerModules(pname);
+            if (owners.empty())
+                continue; // legacy / unregistered flag — preserve current behavior
+
+            bool matches_current = false;
+            for (const auto& owner : owners) {
+                if (owner == module_name) {
+                    matches_current = true;
+                    break;
+                }
+            }
+            if (matches_current)
+                continue;
+
+            if (owners.size() > 1) {
+                std::string candidates;
+                for (size_t i = 0; i < owners.size(); ++i) {
+                    if (i)
+                        candidates += ", ";
+                    candidates += owners[i];
+                }
+                CurcumaLogger::warn("CLI flag -" + pname + " is registered in multiple modules ("
+                    + candidates + ") and none match the active command's module \"" + module_name
+                    + "\". Use -<module>." + pname + " to disambiguate. Keeping flag in command module.");
+                continue;
+            }
+
+            reroute_targets[owners[0]][pname] = it.value();
+            reroute_remove.push_back(pname);
+        }
+        for (const auto& k : reroute_remove)
+            key.erase(k);
+        for (auto& [mod, params] : reroute_targets.items()) {
+            if (!key.contains(mod) || !key[mod].is_object())
+                key[mod] = json::object();
+            for (auto& [pname, pval] : params.items())
+                key[mod][pname] = pval;
         }
     }
 
@@ -1406,29 +1478,76 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         return 1;
     }
 
-    json sp_controller = controller;
-    json opt_params = sp_controller.contains("opt") ? sp_controller["opt"] : json{};
-    opt_params["single_point"] = true;
+    // Claude Generated (Apr 2026): Direct EnergyCalculator for single point — no CurcumaOpt needed
+    std::string method = controller.value("method", "gfnff");
+    json energy_controller = controller;
+    energy_controller["geometry_file"] = std::string(argv[2]);
 
-    // Claude Generated (December 2025): Set geometry_file for automatic parameter caching
-    std::string geometry_file(argv[2]);
-    opt_params["geometry_file"] = geometry_file;
-    sp_controller["geometry_file"] = geometry_file;  // Also set at top level for EnergyCalculator
+    // Set global logger verbosity so GFN-FF and other methods respect -verbosity N
+    if (controller.contains("verbosity")) {
+        int verbosity = std::max(0, std::min(4, controller["verbosity"].get<int>()));
+        CurcumaLogger::set_verbosity(verbosity);
+    }
 
-    sp_controller["opt"] = opt_params;
+    Molecule molecule(argv[2]);
+    EnergyCalculator energy_calc(method, energy_controller);
+    energy_calc.setMolecule(molecule.getMolInfo());
+    double energy = energy_calc.CalculateEnergy(true);
 
-    CurcumaOpt opt(sp_controller, false);
-    opt.setFileName(argv[2]);
-    opt.start();
+    fmt::print("\nCharge {} Spin {}\n", molecule.Charge(), molecule.Spin());
+    CurcumaLogger::energy_abs(energy, "Single Point Energy");
+
+    Geometry gradient = energy_calc.Gradient();
+    double grad_norm = Eigen::Map<Eigen::VectorXd>(gradient.data(), gradient.size()).norm();
+    CurcumaLogger::param("Gradient norm", fmt::format("{:.6e} Eh/Bohr", grad_norm));
+
     return 0;
 }
 
 // Additional capability handlers - Claude Generated
 int executeOptimization(const json& controller, int argc, char** argv) {
     if (argc < 3) {
-        json safe_opt_config = controller.contains("opt") ? controller["opt"] : json{};
-        ModernOptimization::ModernOptimizerDispatcher helper(safe_opt_config, false);
-        helper.printHelp();
+        fmt::print("\nUsage: curcuma -opt input.xyz [parameters]\n\n");
+        fmt::print("Basic:\n");
+        fmt::print("  -method <name>       Energy method: uff, gfnff, gfn2, ... (default: gfnff)\n");
+        fmt::print("  -optimizer <name>    Optimization algorithm (default: auto)\n");
+        fmt::print("                         auto      - automatic selection based on system size\n");
+        fmt::print("                         lbfgspp   - external LBFGSpp library (robust, recommended)\n");
+        fmt::print("                         lbfgs     - native Curcuma L-BFGS (two-loop recursion)\n");
+        fmt::print("                         diis      - native DIIS acceleration (Pulay 1980)\n");
+        fmt::print("                         rfo       - native RFO eigenvector following (Banerjee 1985)\n");
+        fmt::print("                         ancopt    - approximate normal coordinate optimizer (Grimme)\n");
+        fmt::print("  NOTE: lbfgs, diis, rfo are AI-generated and not yet tested/approved.\n");
+        fmt::print("        Use lbfgspp or ancopt for production calculations.\n");
+        fmt::print("  -charge <n>          Molecular charge (default: 0)\n");
+        fmt::print("  -spin <n>            Spin multiplicity (default: 0)\n");
+        fmt::print("  -threads <n>         Parallel threads (default: 1)\n");
+        fmt::print("  -verbosity <n>       Output level: 0=silent, 1=table, 2=detailed, 3=debug (default: 1)\n\n");
+        fmt::print("Convergence:\n");
+        fmt::print("  -energy_threshold <f>    Energy change [kJ/mol] (default: 0.1)\n");
+        fmt::print("  -rmsd_threshold <f>      RMSD change [Angstrom] (default: 0.01)\n");
+        fmt::print("  -gradient_threshold <f>  Gradient norm [Eh/Bohr] (default: 5e-4)\n");
+        fmt::print("  -max_iterations <n>      Max steps (default: 5000)\n");
+        fmt::print("  -convergence_count <n>   Criteria bit field: 1=energy, 2=RMSD, 4=gradient (default: 7=all)\n");
+        fmt::print("  -max_energy_rise <f>     Abort if energy rises by more than this [kJ/mol] (default: 100)\n\n");
+        fmt::print("Output:\n");
+        fmt::print("  -write_trajectory <0|1>  Write .trj.xyz file (default: 1)\n\n");
+        fmt::print("L-BFGS tuning (lbfgspp optimizer):\n");
+        fmt::print("  -lbfgs_m <n>             Memory: number of stored steps (default: 2000)\n");
+        fmt::print("  -lbfgs_line_search <n>   Line search: 1=Armijo, 2=Wolfe, 3=StrongWolfe, 4=Backtrack (default: 3)\n");
+        fmt::print("  -lbfgs_max_line_search <n>  Max line search iterations (default: 20)\n");
+        fmt::print("  -lbfgs_min_step <f>      Minimum step size (default: 1e-4)\n");
+        fmt::print("  -lbfgs_ftol <f>          Armijo sufficient-decrease parameter (default: 1e-4)\n");
+        fmt::print("  -lbfgs_wolfe <f>         Wolfe curvature parameter (default: 0.9)\n\n");
+        fmt::print("Native optimizer tuning (lbfgs/diis/rfo):\n");
+        fmt::print("  -diis_history <n>        DIIS stored error vectors (default: 5)\n");
+        fmt::print("  -diis_start <n>          First iteration with DIIS extrapolation (default: 5)\n");
+        fmt::print("  -rfo_lambda <f>          RFO initial trust radius (default: 0.1)\n\n");
+        fmt::print("Examples:\n");
+        fmt::print("  curcuma -opt molecule.xyz\n");
+        fmt::print("  curcuma -opt molecule.xyz -method gfnff -optimizer lbfgspp\n");
+        fmt::print("  curcuma -opt molecule.xyz -method gfn2 -gradient_threshold 1e-4 -max_iterations 1000\n");
+        fmt::print("  curcuma -opt molecule.xyz -method uff -verbosity 0   (silent)\n");
         return 0;
     }
 
@@ -1439,71 +1558,50 @@ int executeOptimization(const json& controller, int argc, char** argv) {
     std::string optimizer_method = opt_config_base.value("optimizer", "auto");
 
     if (optimizer_method != "auto" && optimizer_method != "") {
-        std::cout << "🧪 Using native Curcuma optimizer: " << optimizer_method << std::endl;
+        std::cout << "Using native Curcuma optimizer: " << optimizer_method << std::endl;
     }
 
-    // Check if we should use modern native optimizers
-    bool use_modern = (optimizer_method == "native_lbfgs" || optimizer_method == "lbfgs" ||
-        optimizer_method == "diis" || optimizer_method == "rfo" || optimizer_method == "auto");
-
-    if (use_modern) {
-
-        try {
-            auto molecule = std::make_unique<Molecule>(argv[2]);
-            std::string method = controller.value("method", "uff");
-
-            // Claude Generated (December 2025): Set geometry_file for automatic parameter caching
-            json energy_controller = controller;
-            energy_controller["geometry_file"] = std::string(argv[2]);
-
-            EnergyCalculator energy_calc(method, energy_controller);
-            energy_calc.setMolecule(molecule->getMolInfo());
-
-            // Claude Generated (October 2025): Merge with default opt parameters from ParameterRegistry
-            json opt_defaults = ParameterRegistry::getInstance().getDefaultJson("opt");
-            json opt_config = MergeJson(opt_defaults, controller.contains("opt") ? controller["opt"] : json{});
-
-            auto result = ModernOptimization::ModernOptimizerDispatcher::optimizeStructure(
-                molecule.get(), optimizer_method, &energy_calc, opt_config);
-
-            if (result.success) {
-                // Claude Generated: Derive output filename from input basename like Legacy CurcumaOpt
-                // Extract basename from argv[2] (e.g., "input.xyz" → "input")
-                std::string filename(argv[2]);
-                std::string basename = filename.size() >= 4 ?
-                    filename.substr(0, filename.size() - 4) : filename;  // Remove last 4 chars (.xyz)
-                std::string output_file = opt_config.value("output", basename + ".opt.xyz");
-
-                molecule->writeXYZFile(output_file);
-                CurcumaLogger::success_fmt("Optimized structure written to: {}", output_file);
-                return 0;
-            } else {
-                // Modern optimizer failed, fall through to legacy
-                CurcumaLogger::warn(fmt::format("Modern optimization failed: {}, using legacy optimizer", result.error_message));
-            }
-        } catch (const std::exception& e) {
-            // Fall through to legacy code below
-            CurcumaLogger::warn(fmt::format("Modern optimization failed: {}, using legacy optimizer", e.what()));
-        }
-    }
-
-    // Legacy optimization (fallback for exceptions or non-modern methods)
-    // Claude Generated 2025: Apply same parameter merging as modern optimizer to fix JSON null bug
-    json legacy_controller = controller;
+    // Unified optimizer path: ALL optimizer types go through OptimizerFactory
     json opt_defaults = ParameterRegistry::getInstance().getDefaultJson("opt");
-    json opt_params = MergeJson(opt_defaults, controller.contains("opt") ? controller["opt"] : json{});
+    json opt_config = MergeJson(opt_defaults, controller.contains("opt") ? controller["opt"] : json{});
 
-    // Claude Generated (December 2025): Set geometry_file for automatic parameter caching
-    std::string geometry_file(argv[2]);
-    opt_params["geometry_file"] = geometry_file;
-    legacy_controller["geometry_file"] = geometry_file;  // Also set at top level for EnergyCalculator
+    try {
+        auto molecule = std::make_unique<Molecule>(argv[2]);
+        // Apply charge/spin from CLI controller to the molecule before optimization
+        if (controller.contains("charge"))
+            molecule->setCharge(controller["charge"].get<int>());
+        if (controller.contains("spin"))
+            molecule->setSpin(controller["spin"].get<int>());
+        std::string method = controller.value("method", "gfnff");
+        json energy_controller = controller;
+        energy_controller["geometry_file"] = std::string(argv[2]);
+        EnergyCalculator energy_calc(method, energy_controller);
+        // Note: setMolecule() is called inside OptimizerDriver::InitializeOptimization()
+        // Do NOT call it here — double-init crashes GFN-FF (generateDispersionPairsNative)
 
-    legacy_controller["opt"] = opt_params;
+        Optimization::OptimizerType opt_type = Optimization::parseOptimizerType(optimizer_method);
+        auto result = Optimization::OptimizationDispatcher::optimizeStructure(
+            molecule.get(), opt_type, &energy_calc, opt_config);
 
-    CurcumaOpt opt(legacy_controller, false);
-    opt.setFileName(argv[2]);
-    opt.start();
-    return 0;
+        if (result.success) {
+            std::string filename(argv[2]);
+            std::string basename = filename.size() >= 4 ?
+                filename.substr(0, filename.size() - 4) : filename;
+            std::string output_file = opt_config.value("output", basename + ".opt.xyz");
+            molecule->writeXYZFile(output_file);
+            CurcumaLogger::success_fmt("Optimized structure written to: {}", output_file);
+            return 0;
+        } else {
+            CurcumaLogger::warn_fmt("{} optimizer failed: {}", optimizer_method, result.error_message);
+            CurcumaLogger::info("Falling back to legacy CurcumaOpt optimizer");
+        }
+    } catch (const std::exception& e) {
+        CurcumaLogger::warn_fmt("{} optimizer threw exception: {}", optimizer_method, e.what());
+        CurcumaLogger::info("Falling back to legacy CurcumaOpt optimizer");
+    }
+
+    // No legacy fallback — all optimization goes through OptimizerFactory
+    return 1;
 }
 
 int executeConfScan(const json& controller, int argc, char** argv) {
@@ -1673,8 +1771,6 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ", "VTF", "MOL2", "SDF", "PDB"}, executeAnalysis}},
     {"rmsd", {"RMSD calculation between structures", "analysis",
               {"XYZ", "VTF", "MOL2", "SDF"}, executeRMSD}},
-    {"rmsdtraj", {"Trajectory RMSD analysis and conformer filtering", "analysis",
-                  {"XYZ", "TRJ"}, executeRMSDTraj}},
     {"sp", {"Single point energy calculation", "calculation",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSinglePoint}},
     {"opt", {"Geometry optimization with various algorithms", "optimization",
@@ -1709,8 +1805,6 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ", "MOL2", "SDF"}, executeGyration}},
     {"dipole", {"Dipole moment optimization and scaling", "calculation",
                 {"XYZ", "MOL2", "SDF"}, executeDipole}},
-    {"modern-opt", {"Modern optimization with Strategy Pattern", "optimization",
-                    {"XYZ", "MOL2", "SDF"}, executeOptimization}},
     {"orca", {"ORCA quantum chemistry software interface", "interface",
               {"INP"}, executeOrca}},
     {"stride", {"Reduce structure count by keeping every N-th image", "analysis",
@@ -1735,7 +1829,7 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ", "MOL2", "SDF"}, executeDistance}},
     {"angle", {"Calculate bond angles between atoms", "analysis",
                {"XYZ", "MOL2", "SDF"}, executeAngle}},
-    {"dMatrix", {"Distance matrix and persistent homology analysis", "analysis",
+    {"dMatrix", {"(deprecated) Use -analysis instead", "analysis",
                  {"XYZ", "VTF"}, executeDMatrix}},
     {"bond", {"Calculate bond length between two atoms", "analysis",
               {"XYZ", "MOL2", "PDB", "SDF"}, executeBond}},
@@ -1770,20 +1864,12 @@ void showStructuredHelp(const std::string& category = "") {
             std::string category_name = cat;
             category_name[0] = std::toupper(category_name[0]);
 
-            std::cout << "📊 " << category_name << " Capabilities:" << std::endl;
+            std::cout << category_name << " Capabilities:" << std::endl;
 
             for (const auto& cap : capabilities) {
                 const auto& info = CAPABILITY_REGISTRY.at(cap);
 
-                // Enhanced formatting with icons
-                std::string icon = "🔬";
-                if (cat == "dynamics") icon = "⚡";
-                else if (cat == "optimization") icon = "🎯";
-                else if (cat == "conformational") icon = "🔄";
-                else if (cat == "docking") icon = "🔗";
-                else if (cat == "calculation") icon = "⚙️";
-
-                std::cout << "  " << icon << " -" << cap
+                std::cout << "  -" << cap
                          << std::string(std::max(1, 18 - static_cast<int>(cap.length())), ' ')
                          << info.description << std::endl;
 
@@ -1799,24 +1885,24 @@ void showStructuredHelp(const std::string& category = "") {
         }
 
         // Enhanced format support section with auto-discovery
-        std::cout << "🗂️ Supported File Formats:" << std::endl;
-        std::cout << "  ┌─────────────────────────────────────────────────────────┐" << std::endl;
-        std::cout << "  │ Atomistic:     XYZ, MOL2, SDF, PDB                     │" << std::endl;
-        std::cout << "  │ Coarse-Grained: VTF (VMD Trajectory Format)            │" << std::endl;
-        std::cout << "  │ Trajectories:   XYZ.trj, VTF multi-timestep           │" << std::endl;
-        std::cout << "  │ All formats work transparently with all capabilities   │" << std::endl;
-        std::cout << "  └─────────────────────────────────────────────────────────┘" << std::endl;
+        std::cout << "Supported File Formats:" << std::endl;
+        std::cout << "  +---------------------------------------------------------+" << std::endl;
+        std::cout << "  | Atomistic:     XYZ, MOL2, SDF, PDB                     |" << std::endl;
+        std::cout << "  | Coarse-Grained: VTF (VMD Trajectory Format)            |" << std::endl;
+        std::cout << "  | Trajectories:   XYZ.trj, VTF multi-timestep           |" << std::endl;
+        std::cout << "  | All formats work transparently with all capabilities   |" << std::endl;
+        std::cout << "  +---------------------------------------------------------+" << std::endl;
         std::cout << std::endl;
 
         // Usage examples
-        std::cout << "💡 Quick Start Examples:" << std::endl;
+        std::cout << "Quick Start Examples:" << std::endl;
         std::cout << "  curcuma -analysis molecule.xyz             # Complete molecular analysis" << std::endl;
         std::cout << "  curcuma -opt protein.pdb -method gfn2      # Quantum optimization" << std::endl;
         std::cout << "  curcuma -casino polymer.vtf -steps 10000   # Casino Monte Carlo simulation" << std::endl;
         std::cout << "  curcuma -traj md_output.xyz -stride 10     # Trajectory analysis" << std::endl;
         std::cout << std::endl;
 
-        std::cout << "📚 Get detailed help: curcuma -help [category]" << std::endl;
+        std::cout << "Get detailed help: curcuma -help [category]" << std::endl;
         std::cout << "   Available categories: ";
         bool first = true;
         for (const auto& [cat, capabilities] : categories) {
@@ -1843,14 +1929,14 @@ void showStructuredHelp(const std::string& category = "") {
             std::string category_name = category;
             category_name[0] = std::toupper(category_name[0]);
 
-            std::cout << "📋 " << category_name << " Capabilities - Detailed Help" << std::endl;
-            std::cout << "══════════════════════════════════════════════════════" << std::endl;
+            std::cout << "== " << category_name << " Capabilities - Detailed Help" << std::endl;
+            std::cout << "======================================================" << std::endl;
             std::cout << std::endl;
 
             for (const auto& cap : found_capabilities) {
                 const auto& info = CAPABILITY_REGISTRY.at(cap);
 
-                std::cout << "🔹 -" << cap << std::endl;
+                std::cout << "  -" << cap << std::endl;
                 std::cout << "   Description: " << info.description << std::endl;
                 std::cout << "   Usage: curcuma -" << cap << " input_file [options]" << std::endl;
                 std::cout << "   Supported formats: ";
@@ -1868,23 +1954,23 @@ void showStructuredHelp(const std::string& category = "") {
 
             // Category-specific examples
             if (category == "analysis") {
-                std::cout << "💡 Analysis Examples:" << std::endl;
+                std::cout << "Analysis Examples:" << std::endl;
                 std::cout << "  curcuma -analysis molecule.xyz -properties all" << std::endl;
                 std::cout << "  curcuma -traj trajectory.vtf -export_timeseries true" << std::endl;
                 std::cout << "  curcuma -rmsd ref.xyz target.xyz" << std::endl;
             } else if (category == "dynamics") {
-                std::cout << "💡 Dynamics Examples:" << std::endl;
+                std::cout << "Dynamics Examples:" << std::endl;
                 std::cout << "  curcuma -md system.xyz -temperature 300 -steps 10000" << std::endl;
                 std::cout << "  curcuma -casino polymer.vtf -move_type mixed -adaptive_step true" << std::endl;
             } else if (category == "optimization") {
-                std::cout << "💡 Optimization Examples:" << std::endl;
+                std::cout << "Optimization Examples:" << std::endl;
                 std::cout << "  curcuma -opt molecule.xyz -method uff" << std::endl;
                 std::cout << "  curcuma -sp system.pdb -method gfn2" << std::endl;
             }
             std::cout << std::endl;
 
         } else {
-            std::cout << "❌ Unknown category: " << category << std::endl;
+            std::cout << "Error: Unknown category: " << category << std::endl;
             std::cout << std::endl;
             std::cout << "Available categories: ";
 
@@ -1905,6 +1991,14 @@ void showStructuredHelp(const std::string& category = "") {
 }
 
 int main(int argc, char **argv) {
+    // RAII guard: prints citation summary and writes BibTeX on any exit path
+    struct CitationGuard {
+        ~CitationGuard() {
+            CitationRegistry::printSummary();
+            CitationRegistry::writeBibTeX();
+        }
+    } citation_guard;
+
 #ifndef _WIN32
 #if __GNUC__
     signal(SIGINT, ctrl_c_handler);
@@ -1937,6 +2031,61 @@ int main(int argc, char **argv) {
     if(argc < 2) {
         showStructuredHelp();
         exit(1);
+    }
+
+    // Claude Generated 2026: JSON-driven invocation. When argv[1] is "-import_config",
+    // load the JSON early to extract its "_command" (required) and "_input" (optional) and
+    // splice them into a synthetic argv so the remainder of main() can dispatch normally.
+    // Storage lives at main() scope so the pointers stay valid for argv access throughout.
+    std::vector<std::string> synth_args_storage;
+    std::vector<char*> synth_argv_ptrs;
+    {
+        std::string a1 = argv[1];
+        if (a1 == "-import_config" || a1 == "-import-config") {
+            if (argc < 3) {
+                std::cerr << "Error: " << a1 << " requires a JSON file path as the next argument." << std::endl;
+                return 1;
+            }
+            std::string config_file = argv[2];
+            std::ifstream f(config_file);
+            if (!f.is_open()) {
+                std::cerr << "Error: Could not open config file: " << config_file << std::endl;
+                return 1;
+            }
+            json imported;
+            try {
+                f >> imported;
+            } catch (const std::exception& e) {
+                std::cerr << "Error: Failed to parse JSON from " << config_file << ": " << e.what() << std::endl;
+                return 1;
+            }
+            if (!imported.contains("_command") || !imported["_command"].is_string()) {
+                std::cerr << "Error: JSON-driven invocation needs a top-level string field \"_command\" in "
+                          << config_file << "." << std::endl;
+                std::cerr << "Example: { \"_command\": \"sp\", \"_input\": \"mol.xyz\", \"method\": \"gfnff\", ... }" << std::endl;
+                std::cerr << "Or pass a command before -import_config: curcuma -sp mol.xyz -import_config "
+                          << config_file << std::endl;
+                return 1;
+            }
+            std::string cmd = imported["_command"].get<std::string>();
+            synth_args_storage.reserve(argc + 4);
+            synth_args_storage.push_back(argv[0]);
+            synth_args_storage.push_back(std::string("-") + cmd);
+            if (imported.contains("_input") && imported["_input"].is_string()) {
+                synth_args_storage.push_back(imported["_input"].get<std::string>());
+            }
+            synth_args_storage.push_back(a1); // pass -import_config through so CLI2Json sees it too
+            synth_args_storage.push_back(config_file);
+            for (int i = 3; i < argc; ++i) {
+                synth_args_storage.push_back(argv[i]);
+            }
+            synth_argv_ptrs.reserve(synth_args_storage.size());
+            for (auto& s : synth_args_storage) {
+                synth_argv_ptrs.push_back(s.empty() ? nullptr : &s[0]);
+            }
+            argc = static_cast<int>(synth_argv_ptrs.size());
+            argv = synth_argv_ptrs.data();
+        }
     }
 
     std::string command = argv[1];
@@ -2046,20 +2195,17 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        // Merge imported config into controller
-        // CLI arguments have higher priority (don't overwrite existing keys)
-        for (auto it = imported_config.begin(); it != imported_config.end(); ++it) {
-            if (!controller.contains(it.key())) {
-                controller[it.key()] = it.value();
-            } else if (controller[it.key()].is_object() && it.value().is_object()) {
-                // Merge nested objects (e.g., controller["analysis"] with imported["analysis"])
-                for (auto nested_it = it.value().begin(); nested_it != it.value().end(); ++nested_it) {
-                    if (!controller[it.key()].contains(nested_it.key())) {
-                        controller[it.key()][nested_it.key()] = nested_it.value();
-                    }
-                }
+        // Claude Generated 2026: Recursive deep-merge replaces the prior 1-level loop so nested
+        // overrides at any depth work correctly. CLI arguments still win at every level.
+        // Warn if the JSON specifies a _command that differs from the CLI-supplied keyword.
+        if (imported_config.contains("_command") && imported_config["_command"].is_string()) {
+            std::string json_cmd = imported_config["_command"].get<std::string>();
+            if (!json_cmd.empty() && json_cmd != command) {
+                CurcumaLogger::warn("Config file " + config_file + " specifies _command=\"" + json_cmd
+                    + "\" but the CLI command is \"" + command + "\". CLI wins; _command from JSON is ignored.");
             }
         }
+        mergeJsonRecursive(controller, imported_config);
 
         std::cout << "Loaded configuration from: " << config_file << std::endl;
     }
@@ -2088,6 +2234,40 @@ int main(int argc, char **argv) {
             }
         }
 
+        // Claude Generated 2026: Record _command + _input so the file alone is enough to replay
+        // the run via "curcuma -import_config <file>". CLI command/input always win on replay.
+        export_config["_command"] = command;
+        if (argc >= 3) {
+            std::string maybe_input = argv[2];
+            if (!maybe_input.empty() && maybe_input[0] != '-') {
+                export_config["_input"] = maybe_input;
+            }
+        }
+
+        // Claude Generated 2026: Merge in registry defaults for every touched module so the
+        // exported JSON is fully self-describing (every registered parameter visible). Explicit
+        // values already in export_config win because mergeJsonRecursive only fills gaps.
+        auto& param_registry = ParameterRegistry::getInstance();
+        std::set<std::string> touched_modules;
+        for (auto it = export_config.begin(); it != export_config.end(); ++it) {
+            if (it.value().is_object() && !param_registry.getForModule(it.key()).empty()) {
+                touched_modules.insert(it.key());
+            }
+        }
+        if (export_config.contains("method") && export_config["method"].is_string()) {
+            std::string method = export_config["method"].get<std::string>();
+            if (!method.empty() && !param_registry.getForModule(method).empty()) {
+                touched_modules.insert(method);
+            }
+        }
+        for (const auto& mod : touched_modules) {
+            json defaults = param_registry.getDefaultJson(mod);
+            if (!export_config.contains(mod) || !export_config[mod].is_object()) {
+                export_config[mod] = json::object();
+            }
+            mergeJsonRecursive(export_config[mod], defaults);
+        }
+
         std::ofstream outfile(export_file);
         if (!outfile.is_open()) {
             std::cerr << "Error: Could not write to " << export_file << std::endl;
@@ -2103,24 +2283,13 @@ int main(int argc, char **argv) {
     // Try structured dispatch first - Claude Generated
     auto it = CAPABILITY_REGISTRY.find(command);
     if (it != CAPABILITY_REGISTRY.end()) {
-        return it->second.handler(controller, argc, argv);
+        int result = it->second.handler(controller, argc, argv);
+        return result;
     }
 
     // Handle unknown commands
     std::cerr << "Error: Unknown command '-" << command << "'" << std::endl;
     std::cerr << "Use 'curcuma -help' to see available capabilities." << std::endl;
 
-#ifdef C17
-#ifndef _WIN32
-    std::filesystem::remove("stop");
-#endif
-#else
-    remove("stop");
-#endif
-
-    // Print citation summary and write BibTeX file
-    CitationRegistry::printSummary();
-    CitationRegistry::writeBibTeX();
-
-    return 0;
+    return 1;
 }

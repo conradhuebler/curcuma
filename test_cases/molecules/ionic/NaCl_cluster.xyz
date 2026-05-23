@@ -1,0 +1,6 @@
+4
+4 isolated Na+/Cl- ions, pairwise distance > 5 Å — WP-S3 negative test
+Na   0.000   0.000   0.000
+Cl   5.500   0.000   0.000
+Na   0.000   5.500   0.000
+Cl   5.500   5.500   0.000

@@ -118,12 +118,18 @@ add_cli_test(simplemd 06_alias_temperature)
 add_cli_test(simplemd 07_restart_simulation)
 add_cli_test(simplemd 08_gfnff_acetic_acid_dimer_md)
 add_cli_test(simplemd 09_xtbgfnff_acetic_acid_dimer_md)
+add_cli_test(simplemd 10_gfnff_polymer_md)
+set_tests_properties(cli_simplemd_10_gfnff_polymer_md PROPERTIES TIMEOUT 3600 LABELS "simplemd;gfnff;large_system;performance")
+add_cli_test(simplemd 11_diagnostics_dump)
+set_tests_properties(cli_simplemd_11_diagnostics_dump PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;diagnostics")
+add_cli_test(simplemd 12_eeq_cutoff_auto)
+set_tests_properties(cli_simplemd_12_eeq_cutoff_auto PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;eeq_cutoff")
 
 # =============================================================================
-# CG (Coarse Graining) Tests (1 scenario)
+# CG (Coarse Graining) Tests — disabled: -vtf command not implemented in main.cpp
 # =============================================================================
 
-add_cli_test(cg 01_single_point)
+# add_cli_test(cg 01_single_point)
 
 # =============================================================================
 # Analysis Tests (1 scenario)
@@ -132,6 +138,14 @@ add_cli_test(cg 01_single_point)
 add_cli_test(analysis 01_parallel_equivalence)
 # 100 Frames × Scattering braucht länger als Standard-30s
 set_tests_properties(cli_analysis_01_parallel_equivalence PROPERTIES TIMEOUT 120)
+
+# =============================================================================
+# CLI Routing Tests — Claude Generated 2026
+# Validates ParameterRegistry-driven flat-flag routing and JSON round-trip
+# =============================================================================
+
+add_cli_test(routing 01_flat_param_routing)
+add_cli_test(routing 02_roundtrip_replay)
 
 # =============================================================================
 # Error Handling Tests (6 scenarios) - Phase 1-2 Implementation

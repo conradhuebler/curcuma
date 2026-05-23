@@ -116,11 +116,13 @@ public:
      * @brief Available optimizer types
      */
     enum class OptimizerType {
-        LBFGSPP, // External LBFGSpp library (working)
+        LBFGSPP, // External LBFGSpp library (working - legacy)
         INTERNAL, // Internal LBFGS (placeholder)
         NATIVE_LBFGS, // Native LBFGS implementation (Claude 3.5)
         NATIVE_DIIS, // Native DIIS implementation (Claude 3.5)
         NATIVE_RFO, // Native RFO implementation (Claude 3.5)
+        ANCOPT, // Approximate Normal Coordinate Optimizer from XTB (Claude Nov 2025)
+        NEW_LBFGSPP, // New OptimizerFactory-based LBFGSPP (Claude Nov 2025)
         AUTO // Automatic selection
     };
 

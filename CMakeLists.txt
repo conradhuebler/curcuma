@@ -31,8 +31,14 @@ option (WriteMoreInfo
 option (USE_Plumed
     "Enable interface to plumed for metadynamics")
 
+option(USE_MARCH_NATIVE
+    "Enable -march=native (best performance, NOT portable)" OFF)
+
 option(USE_AVX2
-    "Enable AVX2 instructions" OFF)
+    "Enable AVX2 + FMA instructions (Haswell+, not portable)" OFF)
+
+option(USE_AVX512
+    "Enable AVX-512 instructions (Skylake-X+, not portable)" OFF)
 
 option(USE_BLAS
     "Enable BLAS" OFF)
@@ -70,19 +76,38 @@ option(USE_PCH
 option(USE_CUDA
     "Enable CUDA-accelerated GFN-FF (gfnff -gpu cuda, requires CUDA toolkit)" OFF)
 
+# WP-D Stage B (May 2026): hand-rolled AVX2 exp(-x^2) for GFN-FF dcn step 3 hot loop.
+# Opt-in. Default OFF keeps the build bit-identical to pre-WP. Requires AVX2 (set
+# USE_AVX2 or USE_MARCH_NATIVE alongside); CMake errors out if AVX2 cannot be enabled.
+option(USE_GFNFF_FAST_EXP
+    "Enable SIMD-vectorized exp() in GFN-FF dcn hot loop (WP-D Stage B, requires AVX2)" OFF)
+option(GFNFF_CN_DCN_FUSION
+    "Enable fused CN+DCN single-pass (WP-D Stage D, no SIMD dependency)" OFF)
+if(GFNFF_CN_DCN_FUSION)
+    add_compile_definitions(GFNFF_CN_DCN_FUSION=1)
+endif()
+
 if(USE_MKL)
-    if(NOT DEFINED MKL_ROOT)
-        set(MKL_ROOT $ENV{MKL_ROOT})
+    # Support both MKL_ROOT and MKLROOT (environment and CMake variables)
+    if(NOT MKL_ROOT)
+        if(DEFINED ENV{MKL_ROOT})
+            set(MKL_ROOT $ENV{MKL_ROOT})
+        elseif(DEFINED ENV{MKLROOT})
+            set(MKL_ROOT $ENV{MKLROOT})
+        endif()
     endif()
+    if(NOT MKL_ROOT AND DEFINED MKLROOT)
+        set(MKL_ROOT ${MKLROOT})
+    endif()
+
     message(STATUS "MKL_ROOT set to ${MKL_ROOT}")
-    if( MKL_ROOT STREQUAL "")
-        message(FATAL_ERROR "MKL_ROOT not set")
-        message(FATAL_ERROR "Please set MKL_ROOT to the root directory of your MKL installation")
-        message(FATAL_ERROR "For example: export MKL_ROOT=/opt/intel/oneapi/mkl/latest")
-        message(FATAL_ERROR "Or use -DMKL_ROOT=/opt/intel/oneapi/mkl/latest")
+    if(NOT MKL_ROOT OR MKL_ROOT STREQUAL "")
+        message(FATAL_ERROR "MKL_ROOT not set. Please set MKL_ROOT or MKLROOT to the root directory of your MKL installation.\n"
+                            "Examples:\n"
+                            "  export MKL_ROOT=/opt/intel/oneapi/mkl/latest\n"
+                            "  cmake -DMKL_ROOT=/opt/intel/oneapi/mkl/latest ..")
     endif()
     set(MKLROOT ${MKL_ROOT})
-
 endif()
 
 
@@ -169,17 +194,17 @@ set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
 
 
-include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
-                            ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include
-                            ${PROJECT_SOURCE_DIR}/external/ripser
+include_directories(SYSTEM  ${CMAKE_SOURCE_DIR}/external/fmt/include
+                            ${CMAKE_SOURCE_DIR}/external/LBFGSpp/include
+                            ${CMAKE_SOURCE_DIR}/external/ripser
                             ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
-                            ${PROJECT_SOURCE_DIR}/external/cpp-d4/include
+                            ${CMAKE_SOURCE_DIR}/external/cpp-d4/include
                             ${PROJECT_SOURCE_DIR}/external/
-                            ${PROJECT_SOURCE_DIR}/external/ulysses-main/src/
+                            ${CMAKE_SOURCE_DIR}/external/ulysses-main/src/
                             )
 
 
-include_directories(${PROJECT_SOURCE_DIR} ${PROJECT_BINARY_DIR} )
+include_directories(${CMAKE_SOURCE_DIR} ${PROJECT_SOURCE_DIR} ${PROJECT_BINARY_DIR} )
 
 # Get the current working branch
 execute_process(
@@ -257,9 +282,42 @@ else()
 endif(WIN32)
 ENDIF(CMAKE_COMPILER_IS_GNUCXX)
 
-if(USE_AVX2)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2")
+# CPU feature flags — safe default: none (portable). Enable for target machine only.
+include(CheckCXXCompilerFlag)
+if(USE_MARCH_NATIVE)
+    check_cxx_compiler_flag("-march=native" COMPILER_SUPPORTS_MARCH_NATIVE)
+    if(COMPILER_SUPPORTS_MARCH_NATIVE)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+        message(STATUS "CPU: -march=native enabled")
+    else()
+        message(WARNING "-march=native not supported by compiler")
+    endif()
+elseif(USE_AVX512)
+    check_cxx_compiler_flag("-mavx512f" COMPILER_SUPPORTS_AVX512)
+    if(COMPILER_SUPPORTS_AVX512)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx512f -mavx512vl -mavx512dq -mfma")
+        message(STATUS "CPU: AVX-512 enabled")
+    else()
+        message(WARNING "AVX-512 not supported by compiler")
+    endif()
+elseif(USE_AVX2)
+    check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
+    if(COMPILER_SUPPORTS_AVX2)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2 -mfma")
+        message(STATUS "CPU: AVX2 + FMA enabled")
+    else()
+        message(WARNING "AVX2 not supported by compiler")
+    endif()
+endif()
 
+# WP-D Stage B (May 2026): USE_GFNFF_FAST_EXP requires AVX2. Either USE_AVX2 or
+# USE_MARCH_NATIVE (or USE_AVX512) must be set so __AVX2__ is defined.
+if(USE_GFNFF_FAST_EXP)
+    if(NOT (USE_AVX2 OR USE_AVX512 OR USE_MARCH_NATIVE))
+        message(FATAL_ERROR "USE_GFNFF_FAST_EXP=ON requires AVX2: enable USE_AVX2, USE_AVX512, or USE_MARCH_NATIVE.")
+    endif()
+    add_compile_definitions(GFNFF_FAST_EXP=1)
+    message(STATUS "GFN-FF: fast SIMD exp() enabled in dcn hot loop (WP-D Stage B)")
 endif()
 
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/json.hpp)
@@ -312,13 +370,18 @@ configure_file(
 
 set(curcuma_core_SRC
         # Optimization algorithms - Claude Generated (Educational-First Design)
+        src/capabilities/optimisation/rf_solver.cpp
         src/capabilities/optimisation/lbfgs.cpp
-        src/capabilities/optimisation/modern_optimizer_simple.cpp
+        src/capabilities/optimizer_interface.cpp
+        src/capabilities/optimizer_driver.cpp
+        src/capabilities/optimizer_factory.cpp
+        src/capabilities/ancopt_optimizer.cpp
+        src/capabilities/lbfgspp_optimizer.cpp
+        src/capabilities/native_optimizer_adapters.cpp
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/curcumamethod.cpp
-        src/capabilities/curcumaopt.cpp
-        # Native LBFGS optimizer - Claude Generated (disabled for now due to compilation issues)
+        # Native LBFGS optimizer - Claude Generated (disabled, superseded by native_optimizer_adapters)
         # src/capabilities/native_lbfgs_optimizer.cpp
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
@@ -333,6 +396,7 @@ set(curcuma_core_SRC
         src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
+        src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp
         src/capabilities/analysis_output.cpp
         src/capabilities/handlers/general_properties_handler.cpp
@@ -399,6 +463,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/ff_methods/cn_calculator.cpp
         src/core/energy_calculators/ff_methods/d4param_generator.cpp
         src/core/energy_calculators/ff_methods/cg_potentials.cpp
+        src/core/energy_calculators/ff_methods/fast_exp.cpp
         src/core/curcuma_logger.cpp
         src/core/citation_database.cpp
         src/core/citation_registry.cpp
@@ -416,11 +481,11 @@ set(curcuma_core_SRC
 )
 
 set(curcuma_cap_SRC
+        src/capabilities/optimisation/rf_solver.cpp
         src/capabilities/optimisation/lbfgs.cpp
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/curcumamethod.cpp
-        src/capabilities/curcumaopt.cpp
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
         src/capabilities/confstat.cpp
@@ -434,6 +499,7 @@ set(curcuma_cap_SRC
         src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
+        src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp
         src/capabilities/analysis_output.cpp
         src/capabilities/handlers/general_properties_handler.cpp
@@ -513,6 +579,7 @@ endif()
     src/capabilities/c_code/interface.c
 )
 add_library(km ${km_SRC})
+target_link_libraries(curcuma_core km)
 
 if(USE_ULYSSES)
     add_library(ulysses_lib
@@ -523,7 +590,8 @@ if(USE_ULYSSES)
         target_link_libraries(ulysses_lib ${BLAS_LIBRARIES})
     endif()
     if(USE_MKL)
-        target_link_libraries(ulysses_lib -m64 -I${MKLROOT}/include  -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)
+        target_include_directories(ulysses_lib PRIVATE ${MKLROOT}/include)
+        target_link_libraries(ulysses_lib -m64 -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)
     endif()
 
     add_executable(ulysses_helper
@@ -675,6 +743,32 @@ if(USE_GFNFF)
 
     target_link_libraries(curcuma_gfnff PUBLIC gfnff-lib gfortran)
     target_link_libraries(curcuma_core curcuma_gfnff)
+
+    # Claude Generated (May 2026, ICX-build OpenMP fix): when the C++ side is built with
+    # Intel ICX, libiomp5 is the active OpenMP runtime, but gfnff-lib (built via the
+    # FetchContent gfortran path) pulls in libgomp transitively. Two OpenMP runtimes in
+    # one process corrupt each other's heap (we hit double-free in __kmp_invoke_microtask
+    # on polymer MD). libiomp5 ships GOMP_* compat symbols (263 vs 192 in libgomp), so it
+    # is a runtime drop-in replacement. We can't drop libgomp from the link line because
+    # gfnff-lib carries it as a direct DT_NEEDED entry. Solution: a small wrapper script
+    # that LD_PRELOADs libiomp5 before exec — this forces all GOMP_* calls to resolve
+    # against libiomp5 and the libgomp instance becomes inert.
+    set(_curcuma_need_iomp5_wrapper FALSE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Intel")
+        get_filename_component(_icx_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        get_filename_component(_icx_root_dir "${_icx_bin_dir}" DIRECTORY)
+        find_library(_curcuma_iomp5
+            NAMES iomp5
+            HINTS "${_icx_root_dir}/lib" "${_icx_root_dir}/lib/intel64"
+            NO_DEFAULT_PATH)
+        if(_curcuma_iomp5)
+            set(_curcuma_need_iomp5_wrapper TRUE)
+        else()
+            message(WARNING "ICX detected but libiomp5 not found near ${CMAKE_CXX_COMPILER}. "
+                           "If you USE_GFNFF, polymer MD will crash with double-free in "
+                           "__kmp_invoke_microtask.")
+        endif()
+    endif()
 endif()
 
 if(USE_D3)
@@ -760,16 +854,42 @@ if(USE_D4)
 endif()
 
 if(USE_Plumed)
-    # Build plumed2 from source via FetchContent (plumed2 >= 2.8 has CMake support)
-    FetchContent_MakeAvailable(plumed2)
-    # plumed2 CMake target is 'plumed' — link to curcuma_core
-    if(TARGET plumed)
-        target_link_libraries(curcuma_core plumed)
-        message(STATUS "Plumed2 built from source via FetchContent")
-    else()
-        message(FATAL_ERROR "Plumed2 CMake target 'plumed' not found after FetchContent_MakeAvailable. "
-                            "Check external/plumed2/CMakeLists.txt for the correct target name.")
+    # Build plumed2 from source via autotools (FetchContent only fetches, does not add_subdirectory)
+    FetchContent_GetProperties(plumed2)
+    if(NOT plumed2_POPULATED)
+        FetchContent_Populate(plumed2)
     endif()
+
+    set(PLUMED2_SOURCE_DIR ${CMAKE_SOURCE_DIR}/external/plumed2)
+    set(PLUMED2_LIB        ${PLUMED2_SOURCE_DIR}/src/lib/libplumed.so)
+
+    include(ExternalProject)
+    ExternalProject_Add(plumed2_build
+        SOURCE_DIR        ${PLUMED2_SOURCE_DIR}
+        BINARY_DIR        ${PLUMED2_SOURCE_DIR}
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env "CXXFLAGS=-fpermissive -O3" ${PLUMED2_SOURCE_DIR}/configure --disable-python
+        BUILD_COMMAND     make -C src/lib -j
+        INSTALL_COMMAND   ""
+        BUILD_BYPRODUCTS  ${PLUMED2_LIB}
+    )
+
+    add_custom_target(plumed2_patch_rpath
+        COMMAND patchelf --set-rpath '$$ORIGIN' ${PLUMED2_LIB}
+        DEPENDS plumed2_build
+        COMMENT "Patching RPATH of libplumed.so"
+    )
+
+    add_library(plumed UNKNOWN IMPORTED GLOBAL)
+    set_target_properties(plumed PROPERTIES
+        IMPORTED_LOCATION             ${PLUMED2_LIB}
+        INTERFACE_INCLUDE_DIRECTORIES ${PLUMED2_SOURCE_DIR}/src/wrapper
+    )
+    add_dependencies(plumed plumed2_build plumed2_patch_rpath)
+
+    target_link_libraries(curcuma_core plumed)
+    target_compile_definitions(curcuma_core PRIVATE USE_Plumed)
+
+    message(STATUS "PLUMED2: external project configured, library expected at ${PLUMED2_LIB}")
 endif()
 
 # Claude Generated (March 2026): CUDA-accelerated GFN-FF (gfnff -gpu cuda)
@@ -796,7 +916,7 @@ if(USE_CUDA)
     # Add CUDA sources to curcuma_core
     target_sources(curcuma_core PRIVATE ${CUDA_SOURCES})
     target_include_directories(curcuma_core PRIVATE ${PROJECT_SOURCE_DIR})
-    target_link_libraries(curcuma_core CUDA::cudart CUDA::cusolver)
+    target_link_libraries(curcuma_core CUDA::cudart CUDA::cusolver CUDA::cublas)
     target_compile_definitions(curcuma_core PUBLIC USE_CUDA)
 
     message(STATUS "CUDA support enabled: gfnff -gpu cuda available")
@@ -806,17 +926,37 @@ endif()
 target_link_libraries(curcuma_core pthread fmt::fmt-header-only )
 target_link_libraries(curcuma_cap pthread fmt::fmt-header-only )
 
-# Claude Generated (March 2026): Link BLAS/LAPACK for curcuma_core
-# Per-file EIGEN_USE_BLAS defined in eeq_solver.cpp to avoid Eigen 3.4 complex-type conflicts
+# Link BLAS/LAPACK for curcuma_core.
+# EIGEN_USE_BLAS: per-file in eeq_solver.cpp (avoids Eigen 3.4 complex-type conflict).
+# EIGEN_USE_LAPACKE: per-target on curcuma_core — safe because no TU uses complex Eigen types
+#   alongside LAPACKE. Enables LAPACK dsyevd (divide-and-conquer) inside SelfAdjointEigenSolver
+#   for ~3-5x speedup on matrices with N > 300 (Tier M/L ANC regeneration fallback).
 find_package(BLAS QUIET)
 find_package(LAPACK QUIET)
 if(BLAS_FOUND)
     target_link_libraries(curcuma_core ${BLAS_LIBRARIES})
-    message(STATUS "BLAS linked for curcuma_core (Eigen BLAS in eeq_solver only)")
+    message(STATUS "BLAS linked for curcuma_core")
 endif()
 if(LAPACK_FOUND)
     target_link_libraries(curcuma_core ${LAPACK_LIBRARIES})
-    message(STATUS "LAPACK linked for curcuma_core (Eigen LAPACK in eeq_solver only)")
+    message(STATUS "LAPACK linked for curcuma_core")
+endif()
+
+# LAPACKE C interface — needed for EIGEN_USE_LAPACKE. Re-use the LAPACKE_LIBRARY already
+# discovered by the DFT-D4 search above, or do a fresh search if that block was skipped.
+if(NOT LAPACKE_LIBRARY)
+    find_library(LAPACKE_LIBRARY lapacke
+                 HINTS /usr/lib /usr/lib64 /usr/local/lib)
+endif()
+if(LAPACKE_LIBRARY)
+    target_link_libraries(curcuma_core ${LAPACKE_LIBRARY})
+    # EIGEN_USE_LAPACKE is NOT set globally here — it breaks TUs that use local variables
+    # named 'I' (C99 complex macro conflict with LAPACKE headers). Define it per-file instead:
+    #   rf_solver.cpp, lbfgs.cpp — both safe (no variable named 'I').
+    # See ancopt_optimizer.cpp: renamed Matrix3d I -> inertia to fix the same issue.
+    message(STATUS "LAPACKE found: ${LAPACKE_LIBRARY} — linking, EIGEN_USE_LAPACKE applied per-file")
+else()
+    message(STATUS "LAPACKE not found — SelfAdjointEigenSolver uses Eigen built-in path")
 endif()
 
 
@@ -832,8 +972,9 @@ if(USE_BLAS)
     endif()
 endif()
 if(USE_MKL)
-    target_link_libraries(curcuma_core -m64 -I${MKLROOT}/include  -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)
-
+    target_include_directories(curcuma_core PRIVATE ${MKLROOT}/include)
+    target_include_directories(curcuma_cap PRIVATE ${MKLROOT}/include)
+    target_link_libraries(curcuma_core -m64 -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)
 endif()
 if(WIN32) # Check if we are on Windows
 else()
@@ -843,6 +984,31 @@ endif(WIN32)
 target_link_libraries(curcuma fmt::fmt-header-only)
 
 target_link_libraries(curcuma curcuma_core)
+
+# Claude Generated (May 2026, ICX + USE_GFNFF OpenMP fix): when both Intel ICX (libiomp5)
+# and gfortran-built gfnff-lib (libgomp DT_NEEDED) end up in the same binary, the two
+# OpenMP runtimes corrupt each other's heap. We hit double-free in __kmp_invoke_microtask
+# on polymer MD. libiomp5 ships GOMP_* compat symbols (263 vs 192 in libgomp), so it is a
+# runtime drop-in replacement. Use patchelf to rewrite curcuma's DT_NEEDED so it loads
+# libiomp5 instead of libgomp.so.1 — single binary, no wrapper, no LD_PRELOAD needed.
+if(_curcuma_need_iomp5_wrapper)
+    find_program(PATCHELF_EXECUTABLE patchelf)
+    if(PATCHELF_EXECUTABLE)
+        add_custom_command(TARGET curcuma POST_BUILD
+            COMMAND "${PATCHELF_EXECUTABLE}" --replace-needed libgomp.so.1 libiomp5.so
+                    "$<TARGET_FILE:curcuma>"
+            COMMENT "ICX + GFN-FF: patchelf replace-needed libgomp.so.1 → libiomp5.so "
+                    "to avoid double-OMP-runtime heap corruption"
+            VERBATIM)
+        message(STATUS "ICX + GFN-FF: patchelf will rewrite libgomp→libiomp5 in curcuma "
+                       "post-build (avoids double-runtime heap corruption).")
+    else()
+        message(WARNING "ICX + USE_GFNFF detected but patchelf not found. The curcuma "
+                        "binary will crash with double-free in MD parallel regions. "
+                        "Install patchelf, OR run with: "
+                        "LD_PRELOAD=${_curcuma_iomp5} ./curcuma ...")
+    endif()
+endif()
 add_executable(curcuma_helper
         src/helpers/main.cpp)
         
@@ -852,8 +1018,7 @@ add_executable(curcuma_helper
 
 add_executable(parallel_scf
         src/helpers/parallel_scf.cpp)
-
-
+target_link_libraries(parallel_scf curcuma_core)
 
 target_link_libraries(curcuma_helper fmt::fmt-header-only)
 target_link_libraries(curcuma_helper curcuma_core)

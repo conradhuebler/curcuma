@@ -23,6 +23,7 @@
 #include "src/tools/general.h"
 #include "src/core/curcuma_logger.h"
 #include "config_manager.h"
+#include <algorithm>
 
 #include <iostream>
 #include <cmath>
@@ -33,14 +34,43 @@
 // =================================================================================
 
 // JSON-based constructors (backward compatible) - delegate to ConfigManager versions
+// WP6/CLI plumbing fix (May 2026): inject method-specific sub-scopes (gfnff,
+// eeq_solver, xtb, …) into m_controller after ConfigManager initialization, then
+// rebuild the method. ConfigManager("energycalculator", controller) only carries
+// the energycalculator scope; method-specific sub-objects are otherwise dropped
+// before reaching MethodFactory.
+static const char* const kEnergyCalcMethodScopes[] = {
+    "gfnff", "eeq_solver", "xtb", "tblite", "ulysses",
+    "d3", "d4", "uff", "qmdff", "eht"
+};
+
+void EnergyCalculator::reattachMethodScopes(const json& controller) {
+    bool needs_recreate = false;
+    for (const char* scope : kEnergyCalcMethodScopes) {
+        if (controller.contains(scope) && !m_controller.contains(scope)) {
+            m_controller[scope] = controller[scope];
+            needs_recreate = true;
+        }
+    }
+    if (needs_recreate) createMethod(m_method_name, m_controller);
+}
+
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
-    : EnergyCalculator(method, ConfigManager("energycalculator", controller))
+    : m_method_name(method)
+    , m_basename("")
+    , m_energy(0.0)
 {
+    initializeCommonFromConfig(ConfigManager("energycalculator", controller));
+    reattachMethodScopes(controller);
 }
 
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller, const std::string& basename)
-    : EnergyCalculator(method, ConfigManager("energycalculator", controller), basename)
+    : m_method_name(method)
+    , m_basename(basename)
+    , m_energy(0.0)
 {
+    initializeCommonFromConfig(ConfigManager("energycalculator", controller));
+    reattachMethodScopes(controller);
 }
 
 // ConfigManager-based constructors (new, preferred) - Claude Generated: Phase 3C
@@ -134,6 +164,7 @@ void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config) {
 // Backward compatible wrapper - delegates to ConfigManager version
 void EnergyCalculator::initializeCommon(const json& controller) {
     initializeCommonFromConfig(ConfigManager("energycalculator", controller));
+    reattachMethodScopes(controller);
 }
 
 bool EnergyCalculator::createMethod(const std::string& method_name, const json& config) {
@@ -178,6 +209,16 @@ bool EnergyCalculator::createMethod(const std::string& method_name, const json& 
         }
         
         ClearError();
+
+#ifndef USE_CUDA
+        // Track GPU fallback: user requested -gpu cuda but CUDA unavailable
+        std::string gpu_req = config.value("gpu", "none");
+        std::transform(gpu_req.begin(), gpu_req.end(), gpu_req.begin(), ::tolower);
+        if (gpu_req == "cuda") {
+            m_gpu_fallback = true;
+        }
+#endif
+
         return true;
         
     } catch (const MethodCreationException& e) {
@@ -393,15 +434,25 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
             m_method->copyGradientTo(m_gradient);
         }
         
-        // Check for NaN values
+        // Check for NaN values — always emit error regardless of verbosity, since
+        // silent NaN causes optimizer to see energy=0.0 and fail with no diagnostic.
         if (checkForNaN(m_energy, gradient ? m_gradient : Matrix{})) {
             m_containsNaN = true;
+            CurcumaLogger::error(fmt::format(
+                "NaN/Inf in {} energy or gradient — returning 0.0 (optimizer will fail silently without this message)",
+                m_method_name));
             handleMethodError("NaN values detected in calculation results");
             return 0.0;
         }
 
         if (getEffectiveVerbosity() >= 1) {
             CurcumaLogger::energy_abs(m_energy, fmt::format("{} Final Energy", m_method_name));
+        }
+
+        // Final warning if GPU was requested but fell back to CPU
+        if (m_gpu_fallback && !m_gpu_fallback_warned) {
+            CurcumaLogger::warn("Calculation completed on CPU. The requested -gpu cuda was not used.");
+            m_gpu_fallback_warned = true;
         }
 
         return m_energy;
@@ -788,4 +839,36 @@ json EnergyCalculator::getEnergyDecomposition() const {
         {"BATM", 0.0}
     };
     return energy_json;
+}
+
+// WP-S2 (May 2026): per-step diagnostics forwarders for MDDiagnosticsWriter
+Vector EnergyCalculator::CN() const
+{
+    return m_method ? m_method->getCN() : Vector{};
+}
+
+int EnergyCalculator::HBCount() const
+{
+    return m_method ? m_method->getHBCount() : 0;
+}
+
+int EnergyCalculator::XBCount() const
+{
+    return m_method ? m_method->getXBCount() : 0;
+}
+
+// WP-P1 (May 2026): per-phase timing forwarders for MDDiagnosticsWriter
+json EnergyCalculator::LastPrepTiming() const
+{
+    return m_method ? m_method->getLastPrepTiming() : json{};
+}
+
+json EnergyCalculator::StreamTimings() const
+{
+    return m_method ? m_method->getStreamTimings() : json{};
+}
+
+void EnergyCalculator::setForcePhaseTiming(bool on)
+{
+    if (m_method) m_method->setForcePhaseTiming(on);
 }

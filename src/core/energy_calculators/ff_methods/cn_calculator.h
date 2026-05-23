@@ -20,16 +20,17 @@
 #include <vector>
 #include <Eigen/Dense>
 
+class ConfigManager;  // Forward declaration — avoids circular include
+
 /**
  * @brief Coordination Number Calculator
  *
- * Calculates D3-style coordination numbers using exponential counting function.
- * Shared utility for D3, D4, and GFN-FF dispersion methods.
+ * Calculates coordination numbers using different methods:
+ * - GFN-FF erf-based CN with configurable neighbor list cutoff (P2b)
+ * - D3 exponential CN
  *
- * Formula: CN_i = sum_{j≠i} 1 / (1 + exp(-k1 * (k2 * (R_cov_i + R_cov_j) / R_ij - 1)))
- * Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010)
- *
- * Claude Generated - December 20, 2025
+ * Claude Generated 2025 - Consolidated CN calculation utility
+ * P2b (Apr 2026) - Added neighbor list mode and ConfigManager integration
  */
 class CNCalculator {
 public:
@@ -50,27 +51,64 @@ public:
     );
 
     /**
-     * Calculate GFN-FF coordination numbers
+     * Calculate GFN-FF coordination numbers (original threshold-based API)
      *
-     * Purpose: EEQ parameter corrections and topology classification
-     * Formula: Error function with logarithmic transformation
-     *   CN_erf = 0.5 * (1 + erf(kn * (r_cov/r_ij - 1)))
-     *   CN_log = log(1 + e^cnmax) - log(1 + e^(cnmax - CN_erf))
-     *
-     * @param atoms Atomic numbers (1-based: H=1, C=6, O=8, etc.)
+     * @param atoms Atomic numbers (1-based)
      * @param geometry_bohr Molecular geometry in Bohr
-     * @param threshold Distance cutoff in Bohr² (default: 1600.0)
+     * @param threshold Distance cutoff in Bohr² (default: 1600.0 = 40²)
      * @param kn Steepness parameter (default: -7.5)
      * @param cnmax Max CN for log compression (default: 4.4)
      * @return Vector of coordination numbers (one per atom, max 4.4)
-     *
-     * Reference: gfnff_cn.f90:66-126, Spicher & Grimme, J. Chem. Theory Comput. 2020
-     * Claude Generated - December 21, 2025
      */
     static std::vector<double> calculateGFNFFCN(
         const std::vector<int>& atoms,
         const Eigen::MatrixXd& geometry_bohr,
         double threshold = 1600.0,
+        double kn = -7.5,
+        double cnmax = 4.4,
+        std::vector<double>* out_cn_raw = nullptr  ///< WP-D (May 2026): optional raw CN output for reuse in dcn calculation
+    );
+
+    /**
+     * Calculate GFN-FF coordination numbers with configurable cutoff mode (P2b)
+     *
+     * Three modes selected by parameters:
+     *   cn_cutoff_bohr > 0: Neighbor-list mode — O(N*k) where k is avg neighbors
+     *   cn_cutoff_bohr = 0, cn_accuracy > 0: Fortran accuracy-based threshold
+     *     cnthr = 100 - log10(acc)*50, threshold = cnthr Bohr²
+     *   cn_cutoff_bohr = 0, cn_accuracy = 0: Full O(N²) reference mode (threshold = inf)
+     *
+     * @param atoms Atomic numbers (1-based)
+     * @param geometry_bohr Molecular geometry in Bohr
+     * @param cn_cutoff_bohr Neighbor list cutoff in Bohr (>0: neighbor list, 0: threshold mode)
+     * @param cn_accuracy Accuracy for threshold mode (only used when cn_cutoff_bohr = 0)
+     * @param kn Steepness parameter (default: -7.5)
+     * @param cnmax Max CN for log compression (default: 4.4)
+     * @return Vector of coordination numbers (one per atom)
+     */
+    static std::vector<double> calculateGFNFFCN(
+        const std::vector<int>& atoms,
+        const Eigen::MatrixXd& geometry_bohr,
+        double cn_cutoff_bohr,
+        double cn_accuracy,
+        double kn,
+        double cnmax
+    );
+
+    /// WP-D Stage C (May 2026): CN + cn_raw + symmetric neighbor list in one pass.
+    /// Returns all three so dcn can skip its own N²-erf loop AND its O(N²) pair scan.
+    struct CNResult {
+        std::vector<double> cn_values;           ///< post-log CN (size N)
+        std::vector<double> cn_raw;              ///< pre-log raw erf-sum (size N)
+        std::vector<std::vector<int>> neighbors; ///< symmetric: neighbors[i] = all j within cutoff
+        double cutoff_sq = 0.0;                  ///< cutoff² in Bohr²
+    };
+
+    /// WP-D Stage C: compute CN values, raw CN, and neighbor list in a single O(N²) pass.
+    static CNResult calculateGFNFFCNWithNeighbors(
+        const std::vector<int>& atoms,
+        const Eigen::MatrixXd& geometry_bohr,
+        double cn_cutoff_bohr,
         double kn = -7.5,
         double cnmax = 4.4
     );
@@ -85,6 +123,6 @@ public:
 
 private:
     // Covalent radii from simple-dftd3 (Angstrom)
-    // Data source: s-dftd3 atomic radii - 18 elements (H through Ar)
+    // Data source: s-dftd3 atomic radii - 86 elements (H through Rn)
     static const std::vector<double> COVALENT_RADII;
 };

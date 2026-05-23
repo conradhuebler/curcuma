@@ -257,6 +257,28 @@ public:
     json getEnergyDecomposition() const;
 
     // =================================================================================
+    // Per-step diagnostics (WP-S2, May 2026)
+    // =================================================================================
+
+    /// Get last coordination numbers (GFN-FF / FF methods); empty for QM methods.
+    Vector CN() const;
+
+    /// Number of detected hydrogen bonds (GFN-FF only); 0 elsewhere.
+    int HBCount() const;
+
+    /// Number of detected halogen bonds (GFN-FF only); 0 elsewhere.
+    int XBCount() const;
+
+    /// WP-P1 (May 2026): per-phase CPU timing JSON from the last calculation.
+    json LastPrepTiming() const;
+
+    /// WP-P1 (May 2026): per-stream GPU timing JSON from the last calculation.
+    json StreamTimings() const;
+
+    /// WP-P1 (May 2026): force the FF backend to collect per-phase timings regardless of verbosity.
+    void setForcePhaseTiming(bool on);
+
+    // =================================================================================
     // Error Handling and Status
     // =================================================================================
     
@@ -416,16 +438,15 @@ private:
     bool m_containsNaN = false;                      ///< NaN detection flag
     bool m_error = false;                            ///< Error state flag
     std::string m_error_message;                     ///< Error description
-    
+    bool m_gpu_fallback = false;                    ///< GPU requested but CUDA unavailable
+    bool m_gpu_fallback_warned = false;              ///< Final GPU warning already printed
     int m_atoms = 0;                                 ///< Number of atoms
     int m_mult = 1;                                  ///< Multiplicity
 
     // Verbosity control (Claude Generated)
     int m_verbosity_override = -1; ///< Override verbosity (-1 = use system)
 
-    // =================================================================================
     // Internal Methods
-    // =================================================================================
     
     /**
      * @brief Initialize EnergyCalculator with ConfigManager settings (new, preferred)
@@ -439,7 +460,14 @@ private:
      * @param controller Configuration JSON
      */
     void initializeCommon(const json& controller);
-    
+
+    /**
+     * @brief Re-attach method-specific sub-scopes (gfnff, eeq_solver, …) onto
+     * m_controller after ConfigManager initialization, then rebuild the method
+     * if any new scope was carried over. Claude Generated (WP6, May 2026).
+     */
+    void reattachMethodScopes(const json& controller);
+
     /**
      * @brief Create computational method using factory
      * @param method_name Method to create

@@ -74,6 +74,7 @@ enum class EEQDistanceMode {
 enum class EEQSolveMethod {
     LU,             ///< PartialPivLU on full augmented system (baseline)
     SchurCholesky,  ///< Cholesky on NxN SPD block + Schur complement for constraints
+    Batched,        ///< Per-fragment Cholesky (GPU only); CPU falls back to SchurCholesky
     PCG,            ///< Preconditioned Conjugate Gradient with warm start
     Auto            ///< Auto-select via first-call benchmark (SchurCholesky vs PCG)
 };
@@ -125,6 +126,22 @@ public:
      * @brief Default destructor
      */
     ~EEQSolver() = default;
+
+    // ===== Convergence Statistics =====
+
+    /**
+     * @brief Print summary of PCG convergence statistics since last reset.
+     *
+     * Prints one line: "EEQ PCG: X/Y converged (worst |r|=Z.ZeZZ)" if any
+     * calls did not converge, or nothing if all converged.
+     * Resets statistics after printing.
+     */
+    void printConvergenceSummary();
+
+    /**
+     * @brief Reset convergence statistics counters.
+     */
+    void resetConvergenceStats();
 
     // ===== Main API =====
 
@@ -187,7 +204,9 @@ public:
         int total_charge,
         const Vector& cn,
         const std::optional<TopologyInput>& topology = std::nullopt,
-        bool use_corrections = false  // CRITICAL FIX (Jan 4, 2026): default false to match gfnff_final.cpp
+        bool use_corrections = false,  // CRITICAL FIX (Jan 4, 2026): default false to match gfnff_final.cpp
+        CxxThreadPool* pool = nullptr,  // Claude Generated (WP2, May 2026): pool forwarded to dispatchSolve for Stage-4 batched parallelisation
+        int num_threads = 1
     );
 
     /**
@@ -310,6 +329,40 @@ public:
         const Vector& cn,
         const std::optional<TopologyInput>& topology = std::nullopt
     ) const;
+
+    /**
+     * @brief Parse solve method string to enum (public so GPU dispatch can reuse).
+     * Claude Generated - March 2026; moved to public for WP7-B (May 2026).
+     */
+    static EEQSolveMethod parseSolveMethod(const std::string& method_str);
+
+    /// WP-S3 (May 2026): post-init override for `eeq_distance_cutoff` (Bohr).
+    /// Set by GFNFF after Phase-1 when the auto-detection heuristic triggers
+    /// (nfrag==1 and max|topology_charges| < 0.5 e). Pass a negative value
+    /// to clear the override and fall back to the ConfigManager default.
+    void setEEQDistanceCutoff(double cutoff) { m_eeq_distance_cutoff_override = cutoff; }
+
+    /// WP-EEQ-Cache (May 2026): invalidate cached Cholesky factor.
+    /// Call after setMolecule() or topology rebuild to force refactorization on next step.
+    void invalidateCholeskyCache() { m_chol_cache.reset(); }
+
+    /// WP-EEQ-Matrix-Cache (May 2026): invalidate cached A_nn off-diagonal.
+    /// Call after topology rebuild to force matrix re-build on next Phase 2.
+    void invalidateMatrixCache() { m_A_cache_valid = false; }
+
+    /// WP-FF-DistMatrix-Sharing (May 2026): consume externally-computed packed
+    /// lower-triangular distance array (srab[i*(i+1)/2 + j] for i > j, Bohr).
+    /// When set, calculateFinalCharges skips its own O(N^2) distance loop and
+    /// fills m_phase2_distances from this view. Lifetime managed by caller (GFNFF).
+    void setExternalDistances(const Eigen::VectorXd* srab) { m_external_srab = srab; }
+
+    /// WP-S3 (May 2026): effective Coulomb-matrix cutoff used by the
+    /// sparsification (override wins, otherwise the ConfigManager value).
+    double getEEQDistanceCutoffEffective() const {
+        return (m_eeq_distance_cutoff_override >= 0.0)
+                   ? m_eeq_distance_cutoff_override
+                   : m_config.get<double>("eeq_distance_cutoff", 0.0);
+    }
 
 private:
     /**
@@ -644,7 +697,9 @@ private:
         const Vector& x,
         int natoms,
         int nfrag,
-        int total_charge
+        int total_charge,
+        CxxThreadPool* pool = nullptr,   // Claude Generated (WP2, May 2026): pool for Stage-4 batched parallelisation
+        int num_threads = 1               // Default 1 keeps existing callers (Phase 1, solveEEQ) serial
     );
 
     /**
@@ -691,21 +746,79 @@ private:
      * @param x0 Initial guess (warm start from previous step)
      * @param max_iter Maximum CG iterations
      * @param tol Convergence tolerance on residual norm
+     * @param block_pc Optional block-Jacobi preconditioner (Stage 2, May 2026).
+     *                 When non-null, replaces the diagonal Jacobi with per-fragment
+     *                 Cholesky inversion — typically reduces k from 30-100 to 2-5.
      * @return Solution vector
      */
+    struct BlockJacobiPC;  // Forward decl — defined below
     Vector solveWithPCG(
         const Matrix& A,
         const Vector& b,
         const Vector& x0,
         int max_iter,
-        double tol
+        double tol,
+        const BlockJacobiPC* block_pc = nullptr
     );
 
     /**
-     * @brief Parse solve method string to enum
-     * Claude Generated - March 2026
+     * @brief Block-Jacobi preconditioner for multi-fragment EEQ PCG.
+     *
+     * Stage 2 (May 2026): Replaces the diagonal Jacobi `M_inv = diag(A)^-1` with
+     * a block-diagonal `M^-1 = diag(A_ff^-1)`, where A_ff is the sub-block of A_nn
+     * for fragment f's atoms. Each block is factorized via dense Cholesky once.
+     *
+     * Cost:
+     *   - Build:  O(Σ atoms_f³)  ≤ O(N · max_frag²)  — negligible for small fragments.
+     *   - Apply:  O(Σ atoms_f²)  ≤ O(N · max_frag)   — also negligible.
+     *
+     * Convergence: PCG sees only the inter-fragment Coulomb coupling as residual,
+     * since intra-fragment is exactly inverted. For weakly coupled fragments
+     * (e.g. solvated clusters) k typically drops to 2-5 iterations.
+     *
+     * Falls back to identity (no-op) if any per-fragment block is not SPD.
      */
-    static EEQSolveMethod parseSolveMethod(const std::string& method_str);
+    struct BlockJacobiPC {
+        std::vector<Eigen::LLT<Matrix>> blocks;
+        std::vector<std::vector<int>> atom_ids;  // atom_ids[f] = global indices of fragment f's atoms
+        bool valid = false;
+
+        /// Apply z = M^-1 r blockwise. Atoms not in any fragment fall back to identity (z = r).
+        Vector apply(const Vector& r) const;
+    };
+
+    /// Build BlockJacobiPC from A_nn and the fragment constraint matrix C (nfrag × natoms).
+    /// Returns a default-constructed (invalid) PC if any fragment block fails Cholesky.
+    static BlockJacobiPC buildBlockJacobi(const Matrix& A_nn, const Matrix& C);
+
+    /**
+     * @brief Multi-RHS Block-PCG solver — solves A·X = B with B ∈ R^{N × m} simultaneously.
+     *
+     * Stage 3 (May 2026): Replaces the per-fragment PCG loop in dispatchSolve. The single
+     * matvec `A · P` becomes a GEMM (BLAS-3) over an N × m matrix instead of m independent
+     * BLAS-2 matvecs, sharing memory bandwidth and benefiting from SIMD/cache reuse.
+     *
+     * Each column iterates with its own α, β, residual; convergence is checked per column.
+     * No deflation — once any column has converged below tolerance, it continues to be
+     * updated harmlessly (its residual stays small) until all columns finish or max_iter
+     * is reached. Eigen handles the column-wise scalar broadcasting via .array() ops.
+     *
+     * @param A        N×N SPD matrix (A_nn for EEQ)
+     * @param B        N×m matrix of right-hand-sides (column 0 = atomic RHS, cols 1..m-1 = C^T)
+     * @param X0       N×m initial guess (zeros or warm-start matrix)
+     * @param max_iter Maximum CG iterations
+     * @param tol      Convergence tolerance on max-column residual norm
+     * @param block_pc Optional block-Jacobi preconditioner (applied column-wise)
+     * @return         N×m solution matrix X with A·X ≈ B
+     */
+    Matrix solveWithPCG_multiRHS(
+        const Matrix& A,
+        const Matrix& B,
+        const Matrix& X0,
+        int max_iter,
+        double tol,
+        const BlockJacobiPC* block_pc = nullptr
+    );
 
     // ===== Configuration =====
 
@@ -714,7 +827,13 @@ private:
     double m_convergence_threshold;   ///< Convergence threshold for charge changes (e)
     int m_verbosity;                  ///< Verbosity level (0-3)
     bool m_calculate_cn;              ///< Auto-calculate CN if not provided
+    bool m_allow_unconverged;         ///< Allow continuing with unconverged charges (Claude Generated Apr 2026)
+    bool m_skip_phase2;               ///< Skip Phase 2 and use Phase 1 topology charges directly (Claude Generated Apr 2026)
     EEQSolveMethod m_solve_method;    ///< Linear solve algorithm selection
+    double m_eeq_distance_cutoff_override = -1.0;  ///< WP-S3: post-init cutoff override (-1 = use config)
+    double m_refactor_eps = 0.05;       ///< WP-EEQ-Cache: max displacement (Bohr) before re-factorizing
+    int    m_refactor_force_every = 0;  ///< WP-EEQ-Cache: force refactorization every N steps (0 = disabled)
+    double m_matrix_rebuild_eps = 0.0;  ///< WP-EEQ-Matrix-Cache: max displacement before A_nn off-diag rebuild (0 = disabled)
 
     // ===== Cached Data for Energy Calculation =====
 
@@ -764,8 +883,10 @@ private:
 
     // PCG warm-start cache for iterative EEQ solve
     // Claude Generated - March 2026 (Performance optimization)
+    // May 2026: m_pcg_last_Z2 promoted from Vector to Matrix so all nfrag constraint
+    // solves warm-start from their previous result, not just fragment 0.
     mutable Vector m_pcg_last_z1;  ///< Previous A⁻¹·b solution (warm start for PCG)
-    mutable Vector m_pcg_last_z2;  ///< Previous A⁻¹·1 constraint solution (very stable between steps)
+    mutable Matrix m_pcg_last_Z2;  ///< Previous A⁻¹·C^T columns (N × nfrag), one warm start per fragment
     mutable bool m_pcg_cache_valid = false;  ///< Whether PCG warm-start cache is usable
 
     // Auto-solver benchmark state
@@ -773,20 +894,95 @@ private:
     mutable EEQSolveMethod m_selected_method = EEQSolveMethod::SchurCholesky;  ///< Method chosen by auto-benchmark
     mutable bool m_auto_benchmark_done = false;  ///< Whether auto-benchmark has run
 
+    // WP7-B (May 2026): warn-once flag for CPU "batched" → cholesky fallback
+    mutable bool m_batched_cpu_warned = false;
+
+    // Convergence statistics — accumulate across calls, print summary instead of per-call spam
+    // Claude Generated (April 2026)
+    mutable int m_pcg_total_calls = 0;       ///< Total PCG solve calls
+    mutable int m_pcg_nonconv_calls = 0;    ///< PCG calls that did not converge
+    mutable int m_pcg_total_iters = 0;      ///< Total PCG iterations across all calls
+    mutable double m_pcg_worst_residual = 0.0; ///< Worst |r| among non-converged calls
+
+    // Claude Generated (Apr 2026): Cache for historically implausible Phase 2 results.
+    // Once Phase 2 has produced garbage charges for a given system size, skip it forever
+    // (until the atom count changes, which indicates a new molecule).
+    mutable bool m_phase2_historically_implausible = false;
+    mutable int m_phase2_implausible_natoms = 0;
+
     // ===== Pre-allocated Buffers for calculateFinalCharges (Claude Generated Mar 2026) =====
     // Avoid ~26 MB alloc+free per gradient step for large molecules (N=1280).
     // Buffers are allocated once and reused when atom count stays the same.
-    mutable Matrix m_phase2_distances;   ///< N×N distance buffer
+    //
+    // WP-FF-Packed-Triangular (May 2026): m_phase2_distances is packed lower-triangular
+    //   (N(N+1)/2 doubles, half of full N×N). Index: data[i*(i+1)/2 + j] for i > j.
+    //   Diagonal slot exists but is never written (atom self-distance is meaningless;
+    //   Coulomb diagonal is built from gam_corrected + TSQRT2PI/sqrt(alpha) separately).
+    //   Matches the convention used by GFNFF::triIdx / m_shared_srab / m_external_srab.
+    mutable Eigen::VectorXd m_phase2_distances;  ///< packed lower-triangular distance buffer
     mutable Matrix m_phase2_A;           ///< (N+nfrag)×(N+nfrag) augmented matrix buffer
     mutable Vector m_phase2_rhs;         ///< (N+nfrag) RHS vector buffer
     mutable int m_phase2_buf_natoms = 0; ///< Atom count for current buffer size
     mutable int m_phase2_buf_nfrag = 0;  ///< Fragment count for current buffer size
 
+    // WP-EEQ-Cache (May 2026): Cholesky factor cache across MD/opt steps.
+    // Avoids O(N^3/6) refactorization when geometry displacement < m_refactor_eps.
+    struct EEQCholeskyCache {
+        Eigen::LLT<Matrix> llt;    ///< Cached LLT factorization of A_nn
+        Matrix Z2;                 ///< A_nn^{-1}·C^T  (N x nfrag) — reused across steps
+        Matrix S;                  ///< Schur complement C·Z2 (nfrag x nfrag)
+        Matrix last_geometry;      ///< Geometry (N x 3) at factorization time
+        Vector last_cn;            ///< CN vector at factorization time
+        int steps_since_refactor = 0;
+        int cached_natoms = 0;
+        int cached_nfrag  = 0;
+        bool valid = false;
+        void reset() { valid = false; steps_since_refactor = 0; }
+    };
+    mutable EEQCholeskyCache m_chol_cache;
+    mutable Matrix m_pending_geometry;  ///< Set by calculateFinalCharges() before dispatchSolve
+    mutable Vector m_pending_cn;        ///< Set by calculateFinalCharges() before dispatchSolve
+
+    // WP-EEQ-Matrix-Cache (May 2026): A_nn off-diagonal cache across MD steps.
+    // The Coulomb off-diagonal A_ij = erf(γ_ij·r_ij)/r_ij depends on r_ij and on
+    // alpha_corrected (a function of topology_charges + CN). When geometry change
+    // < m_matrix_rebuild_eps AND CN change < 0.05, the off-diagonal is reusable;
+    // only the diagonal needs rebuilding each step (cheap O(N)). Default disabled
+    // (eps=0) for safety; user opt-in for performance.
+    mutable Matrix m_cached_A_offdiag;     ///< N×N off-diagonal of A_nn at cache time
+    mutable Matrix m_cached_A_geometry;    ///< Geometry (N×3) at cache time
+    mutable Vector m_cached_A_cn;          ///< CN vector at cache time
+    mutable int    m_cached_A_natoms = 0;  ///< Atom count for cache validity check
+    mutable bool   m_A_cache_valid = false;
+
+    /// WP-FF-DistMatrix-Sharing (May 2026): external packed-triangular srab from GFNFF.
+    /// When non-null, calculateFinalCharges fills m_phase2_distances from this instead of
+    /// recomputing the O(N^2) sqrt loop.
+    const Eigen::VectorXd* m_external_srab = nullptr;
+
+    /// Last truly successful charges (Phase 2 if available, otherwise Phase 1).
+    /// Initialized from topology_charges on first call, then overwritten with the Phase 2
+    /// result after a successful solve (line 2919). NOT overwritten on plausibility-check
+    /// failure — the cache preserves the last good result. Used as fallback when the solver
+    /// fails on subsequent steps. Validated on read: allFinite(), |q|_max < 50, charge sum
+    /// within tolerance, to avoid using a corrupted cache.
+    mutable Vector m_last_successful_charges;
+
+    /// Validate cached charges are plausible for use as fallback
+    bool isValidChargeCache(const Vector& charges, int natoms, int total_charge) const {
+        return charges.size() == natoms
+            && charges.allFinite()
+            && std::abs(charges.sum() - total_charge) < 1.0
+            && charges.cwiseAbs().maxCoeff() < 50.0;
+    }
+
+
     /// Ensure buffers are large enough. Only reallocates if size changed.
     void ensurePhase2Buffers(int natoms, int nfrag) const {
         if (natoms != m_phase2_buf_natoms || nfrag != m_phase2_buf_nfrag) {
             int m = natoms + nfrag;
-            m_phase2_distances.resize(natoms, natoms);
+            // WP-FF-Packed-Triangular: packed lower-triangular = N(N+1)/2 doubles.
+            m_phase2_distances.resize(static_cast<Eigen::Index>(natoms) * (natoms + 1) / 2);
             m_phase2_A.resize(m, m);
             m_phase2_rhs.resize(m);
             m_phase2_buf_natoms = natoms;
@@ -798,6 +994,9 @@ private:
 // ===== Parameter Definitions =====
 
 BEGIN_PARAMETER_DEFINITION(eeq_solver)
+    PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. Maps to solver tolerances and iteration limits.", "Basic", {})
+    PARAM(allow_unconverged_charges, Bool, false, "Allow calculation to continue with unconverged charges (warn instead of abort).", "Advanced", {})
+    PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 topology charges directly. Faster but less accurate.", "Advanced", {})
     PARAM(max_iterations, Int, 50,
           "Maximum iterations for EEQ charge refinement (Phase 2)", "Algorithm", {})
     PARAM(convergence_threshold, Double, 1e-6,
@@ -808,10 +1007,57 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Auto-calculate coordination numbers if not provided", "Algorithm", {})
     PARAM(use_iterative_refinement, Bool, false,
           "Use iterative refinement for EEQ Phase 2", "Algorithm", {})
-    PARAM(solve_method, String, "auto",
-          "EEQ linear solve method: lu, schur_cholesky, pcg, auto", "Algorithm", {})
+    PARAM(solve_method, String, "cholesky",
+          "EEQ linear solve algorithm: cholesky | batched | pcg | auto | lu (legacy). "
+          "GPU paths: cholesky → WP5-A/WP7-A (exact, full N×N Cholesky); "
+          "batched → WP7-B (per-fragment Cholesky, ignores cross-fragment Coulomb — "
+          "use only for well-separated fragments, see eeq_batched_min_distance). "
+          "CPU 'batched' logs a warning and falls back to cholesky. "
+          "Legacy alias 'schur_cholesky' maps to 'cholesky'.",
+          "Algorithm", {})
     PARAM(max_pcg_iterations, Int, 200,
           "Maximum PCG iterations for EEQ solve", "Algorithm", {})
     PARAM(pcg_tolerance, Double, 1e-10,
           "PCG convergence tolerance", "Algorithm", {})
+    PARAM(pcg_large_system_iterations, Int, 5000,
+          "Max PCG iterations for large systems (N>pcg_large_threshold). Overrides max_pcg_iterations.", "Algorithm", {})
+    PARAM(pcg_large_system_scaling, Int, 10,
+          "PCG iteration scaling factor for large systems: max_iter = min(scaling*N, pcg_large_system_iterations)", "Algorithm", {})
+    PARAM(pcg_large_system_tol_factor, Double, 1e-6,
+          "Relative tolerance factor for large systems: tol = max(pcg_tolerance, factor*||rhs||)", "Algorithm", {})
+    PARAM(pcg_large_threshold, Int, 500,
+          "Atom count threshold above which PCG auto-selection and adaptive scaling activate", "Algorithm", {})
+    PARAM(eeq_pcg_nfrag_threshold, Int, 4,
+          "Auto solver: prefer SchurCholesky when nfrag >= this threshold. "
+          "Cholesky factorizes A_nn once and amortizes the cost over nfrag back-substitutions "
+          "via BLAS-3, which beats nfrag independent PCG solves once nfrag is moderate.",
+          "Algorithm", {})
+    PARAM(eeq_pcg_expected_iters, Int, 30,
+          "Auto solver: expected average PCG iteration count. Used in the cost model "
+          "k_pcg*(nfrag+1) > N/6 to decide between PCG and SchurCholesky.",
+          "Algorithm", {})
+    PARAM(eeq_distance_cutoff, Double, 0.0,
+          "Distance cutoff in Bohr for Coulomb matrix sparsification (0 = no cutoff, matches Fortran goed_gfnff). Non-zero values violate Hellmann-Feynman vs. the full Coulomb energy and degrade MD energy conservation.", "Advanced", {})
+    PARAM(eeq_batched_min_distance, Double, 15.0,
+          "Minimum atom-atom distance between different fragments (Bohr) below which "
+          "the batched EEQ solver logs a warning. Batched still runs — the warning "
+          "alerts the user that cross-fragment Coulomb (which batched ignores) may be "
+          "non-negligible. 0 = no warning. Default 15 Bohr ≈ 8 Å.",
+          "Advanced", {})
+    PARAM(dump_charges, Bool, false,
+          "Save Phase 1 and Phase 2 charges to charges_dump_N<size>.json for analysis", "Advanced", {})
+    PARAM(eeq_refactor_eps_bohr, Double, 0.05,
+          "WP-EEQ-Cache: Cholesky refactorization threshold (max atom displacement, Bohr). "
+          "Skips O(N^3) factorization when geometry change is below this. "
+          "Set to 0.0 (or negative) to disable the cache entirely — every call refactors, "
+          "bit-identical to pre-WP behavior.", "Algorithm", {})
+    PARAM(eeq_refactor_force_every, Int, 0,
+          "WP-EEQ-Cache: Force Cholesky refactorization every N steps regardless of geometry. "
+          "0 = never force (only geometry-triggered). Recommended: 100 for long MD runs.", "Algorithm", {})
+    PARAM(eeq_matrix_rebuild_eps_bohr, Double, 0.0,
+          "WP-EEQ-Matrix-Cache: max atom displacement (Bohr) before A_nn Coulomb off-diagonal is "
+          "rebuilt from scratch. When below this AND CN drift < 0.05, the cached off-diagonal is "
+          "reused (only the diagonal is rebuilt each step). 0.0 = always rebuild (cache disabled, "
+          "bit-identical to pre-WP). Conservative starting point: 0.05 (same as Cholesky cache).",
+          "Algorithm", {})
 END_PARAMETER_DEFINITION

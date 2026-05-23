@@ -23,6 +23,7 @@
 #include "gfnff_par.h"
 
 #include "forcefieldfunctions.h"
+#include "fast_exp.h"
 
 #include "forcefield.h"
 #include "src/core/units.h"
@@ -66,6 +67,7 @@ int ForceFieldThread::execute()
     m_dihedral_energy = 0;
     m_angle_energy = 0;
     m_bond_energy = 0.0;
+    m_significant_torsion_count = 0;
 
     // CRITICAL FIX (Nov 2025): Reset GFN-FF pairwise energy terms
     // These were missing, causing energy accumulation across Calculate() calls
@@ -74,6 +76,15 @@ int ForceFieldThread::execute()
     m_coulomb_energy = 0.0;
     m_energy_hbond = 0.0;
     m_energy_xbond = 0.0;
+    // Claude Generated (May 2026, HB-investigation): reset per-case HB accumulators
+    m_hbond_case1_energy = 0.0;
+    m_hbond_case2_energy = 0.0;
+    m_hbond_case3_energy = 0.0;
+    m_hbond_case4_energy = 0.0;
+    m_hbond_case1_count = 0;
+    m_hbond_case2_count = 0;
+    m_hbond_case3_count = 0;
+    m_hbond_case4_count = 0;
     m_stors_energy = 0.0; // Claude Generated (March 2026): Reset triple bond torsion energy
     m_eq_energy = 0.0;  // Also reset EQ energy for consistency
 
@@ -83,8 +94,7 @@ int ForceFieldThread::execute()
     m_atm_energy = 0.0;  // Claude Generated (Dec 2025): Reset ATM three-body dispersion
     m_batm_energy = 0.0;  // Claude Generated (Jan 17, 2026): Reset batm three-body energy - CRITICAL FIX
 
-    // Phase 1.1: Guard debug output with verbosity check (Claude Generated - Dec 2025)
-    if (CurcumaLogger::get_verbosity() >= 3) {
+    if (CurcumaLogger::get_verbosity() >= 4) {
         CurcumaLogger::info(fmt::format("ForceFieldThread {} executing (method={})", m_thread, m_method));
     }
 
@@ -97,8 +107,7 @@ int ForceFieldThread::execute()
         // CalculateUFFBondContribution();
         CalculateQMDFFAngleContribution();
     } else if (m_method == 3) {
-        // Phase 1.1: Guard debug output with verbosity check (Claude Generated - Dec 2025)
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        if (CurcumaLogger::get_verbosity() >= 4) {
             CurcumaLogger::info(fmt::format("GFN-FF energy calculation started in thread {}", m_thread));
         }
 
@@ -120,9 +129,10 @@ int ForceFieldThread::execute()
 
         // Helper lambda: run calculation and capture gradient delta into component matrix
         // This avoids modifying every inner Calculate*() method individually
-        auto runWithGradCapture = [this](const std::string& name, auto calc_fn, Matrix& comp_grad) {
+        // WP-G (May 2026): comp_grad is GeoGradMatrix& (RowMajor), matches m_gradient_*.
+        auto runWithGradCapture = [this](const std::string& name, auto calc_fn, GeoGradMatrix& comp_grad) {
             if (m_store_gradient_components && m_calculate_gradient) {
-                Matrix before = m_gradient;
+                GeoGradMatrix before = m_gradient;
                 timeEnergyTerm(name, calc_fn);
                 comp_grad += (m_gradient - before);
             } else {
@@ -163,14 +173,14 @@ int ForceFieldThread::execute()
 
         // Claude Generated (December 19, 2025): Native D3/D4 dispersion calculation for GFN-FF
         if (m_d3_dispersions.size() > 0) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
+            if (CurcumaLogger::get_verbosity() >= 4) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} D3 dispersion pairs", m_thread, m_d3_dispersions.size()));
             }
             runWithGradCapture("d3_dispersion", [this]() { CalculateD3DispersionContribution(); }, m_gradient_dispersion);
         }
 
         if (m_d4_dispersions.size() > 0) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
+            if (CurcumaLogger::get_verbosity() >= 4) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} D4 dispersion pairs", m_thread, m_d4_dispersions.size()));
             }
             runWithGradCapture("d4_dispersion", [this]() { CalculateD4DispersionContribution(); }, m_gradient_dispersion);
@@ -178,7 +188,7 @@ int ForceFieldThread::execute()
 
         // ATM three-body dispersion (D3/D4)
         if (!m_atm_triples.empty()) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
+            if (CurcumaLogger::get_verbosity() >= 4) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} ATM triples", m_thread, m_atm_triples.size()));
             }
             // Claude Generated (Mar 2026): ATM captured in own component for structural
@@ -193,7 +203,7 @@ int ForceFieldThread::execute()
 
         // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
         if (!m_gfnff_batms.empty()) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
+            if (CurcumaLogger::get_verbosity() >= 4) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} batm triples", m_thread, m_gfnff_batms.size()));
             }
             runWithGradCapture("batm", [this]() { CalculateGFNFFBatmContribution(); }, m_gradient_batm);
@@ -203,7 +213,7 @@ int ForceFieldThread::execute()
             runWithGradCapture("storsions", [this]() { CalculateGFNFFSTorsionContribution(); }, m_gradient_torsion);
         }
 
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        if (CurcumaLogger::get_verbosity() >= 4) {
             CurcumaLogger::info(fmt::format("Thread {}: Bond={:.6f}, Angle={:.6f}, Torsion={:.6f}, Rep={:.6f}, Coul={:.6f}, Disp={:.6f}, Batm={:.6f}",
                 m_thread, m_bond_energy, m_angle_energy, m_dihedral_energy,
                 m_rep_energy, m_coulomb_energy, m_dispersion_energy, m_batm_energy));
@@ -444,10 +454,15 @@ void ForceFieldThread::CalculateUFFAngleContribution()
         m_angle_energy += angle.fc * (angle.C0 + angle.C1 * costheta + angle.C2 * cos2theta) * m_final_factor * m_angle_scaling;
 
         if (m_calculate_gradient) {
-            double diff = angle.fc * (angle.C1 + 4 * angle.C2 * costheta) * m_final_factor * m_angle_scaling;
-            m_gradient.row(angle.i) += diff * derivate.row(0);
-            m_gradient.row(angle.j) += diff * derivate.row(1);
-            m_gradient.row(angle.k) += diff * derivate.row(2);
+            // UFF gradient fix (Claude Generated Mar 2026):
+            // AngleBending returns derivate = dθ/dr_i (gradient of angle θ, NOT cosθ).
+            // diff must be dE/dθ, not dE/d(cosθ):
+            //   dE/dθ = dE/d(cosθ) * d(cosθ)/dθ = fc*(C1+4*C2*cosθ) * (-sinθ)
+            double sintheta = std::sin(std::acos(costheta));
+            double dEdTheta = -sintheta * angle.fc * (angle.C1 + 4 * angle.C2 * costheta) * m_final_factor * m_angle_scaling;
+            m_gradient.row(angle.i) += dEdTheta * derivate.row(0);
+            m_gradient.row(angle.j) += dEdTheta * derivate.row(1);
+            m_gradient.row(angle.k) += dEdTheta * derivate.row(2);
         }
     }
 }
@@ -925,10 +940,14 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
     for (int index = 0; index < m_gfnff_bonds.size(); ++index) {
         const auto& bond = m_gfnff_bonds[index];
 
-        Vector i = geom().row(bond.i);
-        Vector j = geom().row(bond.j);
-        Matrix derivate;
-        double rij = UFF::BondStretching(i, j, derivate, m_calculate_gradient);
+        // Claude Generated (WP3, May 2026): inline distance + gradient on Eigen::Vector3d
+        // stack buffers — eliminates the per-bond MatrixXd heap allocation that
+        // UFF::BondStretching's `derivate = Matrix::Zero(2,3)` used to perform.
+        // Identical pattern as CalculateGFNFFBondedRepulsionContribution / D3 / ATM.
+        Eigen::Vector3d ri = geom().row(bond.i);
+        Eigen::Vector3d rj = geom().row(bond.j);
+        Eigen::Vector3d rij_vec = ri - rj;
+        double rij = rij_vec.norm();
 
         // Calculate r0 - either dynamic (using current CN) or static (from initialization)
         double r0_ij;
@@ -977,15 +996,16 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
         double energy = k_b * exp_term;          // k_b already contains sign
         m_bond_energy += energy * factor;
 
-        // Claude Generated (Feb 14, 2026): Per-bond CSV diagnostic for parameter comparison
-        // Format matches Fortran analyzer "b" mode output for direct comparison
+        // Bond CSV diagnostic (Feb 14, 2026, capped Apr 2026 to first 5 + count)
         if (CurcumaLogger::get_verbosity() >= 3) {
             if (index == 0) {
-                CurcumaLogger::info("BOND_CSV: idx, atom_i, atom_j, Z_i, Z_j, rij, r0, fc, alpha, fqq, energy");
+                CurcumaLogger::info("BOND_CSV (first 5 of N): idx, atom_i, atom_j, Z_i, Z_j, rij, r0, fc, alpha, fqq, energy");
             }
-            CurcumaLogger::info(fmt::format("BOND_CSV: {:3d}, {:3d}, {:3d}, {:2d}, {:2d}, {:.6f}, {:.6f}, {:.9f}, {:.9f}, {:.6f}, {:.12f}",
-                                             index, bond.i, bond.j, bond.z_i, bond.z_j,
-                                             rij, r0_ij, k_b, alpha, bond.fqq, energy * factor));
+            if (index < 5) {
+                CurcumaLogger::info(fmt::format("BOND_CSV: {:3d}, {:3d}, {:3d}, {:2d}, {:2d}, {:.6f}, {:.6f}, {:.9f}, {:.9f}, {:.6f}, {:.12f}",
+                                                 index, bond.i, bond.j, bond.z_i, bond.z_j,
+                                                 rij, r0_ij, k_b, alpha, bond.fqq, energy * factor));
+            }
         }
 
         if (m_calculate_gradient) {
@@ -993,8 +1013,11 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
             // E = k_b * exp(-α*dr²) where k_b < 0 (attractive)
             // dE/dr = k_b * (-2α*dr) * exp(-α*dr²) = -2α * dr * E
             double dEdr = -2.0 * alpha * dr * energy;  // Correct sign
-            m_gradient.row(bond.i) += dEdr * factor * derivate.row(0);
-            m_gradient.row(bond.j) += dEdr * factor * derivate.row(1);
+            // Claude Generated (WP3, May 2026): unit-vector form, no Matrix temp.
+            // Equivalent to derivate.row(0) = rij_vec/rij, derivate.row(1) = -rij_vec/rij.
+            Eigen::Vector3d g = (dEdr * factor / rij) * rij_vec;
+            m_gradient.row(bond.i) += g.transpose();
+            m_gradient.row(bond.j) -= g.transpose();
 
             // Claude Generated (Feb 22, 2026): HB alpha-modulation chain-rule gradient
             // Reference: Fortran gfnff_engrad.F90:1054-1063 (egbond_hb, hb_dcn term)
@@ -1109,8 +1132,8 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
         double r_ij_sq = (i - j).squaredNorm();  // r_ij²
         double r_jk_sq = (k - j).squaredNorm();  // r_jk²
 
-        // Angle geometry logging - Claude Generated 2025-11-30, extended Feb 2026
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        // Angle geometry logging — capped Apr 2026 (first 5 of N angles)
+        if (CurcumaLogger::get_verbosity() >= 3 && index < 5) {
             double r_ij = std::sqrt(r_ij_sq);
             double r_jk = std::sqrt(r_jk_sq);
             CurcumaLogger::info(fmt::format(
@@ -1167,13 +1190,10 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
         double angle_contribution = energy * damp * factor;
         m_angle_energy += angle_contribution;
 
-        // DEBUG LOGGING - Claude Generated 2025-11-30, extended Feb 2026
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format(
-                "  → energy_raw={:.10f} Eh, damp_ij={:.8f}, damp_jk={:.8f}, damp_total={:.8f}, "
-                "factor={:.6f}, contribution={:.10f} Eh, cumulative={:.10f} Eh",
-                energy, damp_ij, damp_jk, damp, factor, angle_contribution, m_angle_energy));
-        }
+        // Per-angle dump removed Apr 2026 — produced N_angles lines per Calculate()
+        // call (× threads × steps), unusable for any system beyond a few atoms.
+        // For per-angle inspection use a debugger or temporarily wrap a specific
+        // dihedral.i match.
 
         if (m_calculate_gradient) {
             // ===== COMPLETE GRADIENT WITH DAMPING DERIVATIVES =====
@@ -1342,17 +1362,18 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
 
         primary_torsion_energy += energy * m_dihedral_scaling;  // Claude Generated (Jan 2, 2026): Accumulate primary
 
-        // Torsion geometry analysis (December 2025) - Significant energy torsions
-        if (std::abs(energy) > 1e-4) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("\nSignificant Torsion analysis (Atom {}-{}-{}-{}):",
-                                                 dihedral.i, dihedral.j, dihedral.k, dihedral.l));
-                CurcumaLogger::info(fmt::format("  phi_actual = {:.2f}°", phi * 180.0 / M_PI));
-                CurcumaLogger::info(fmt::format("  phi0 = {:.2f}°", phi0 * 180.0 / M_PI));
-                CurcumaLogger::info(fmt::format("  n = {:.0f}", n));
-                CurcumaLogger::info(fmt::format("  V = {:.6f} Eh", V));
-                CurcumaLogger::info(fmt::format("  damp = {:.6f}", damp));
-                CurcumaLogger::info(fmt::format("  Energy = {:.6f} Eh\n", energy));
+        // Torsion geometry analysis (Dec 2025, capped Apr 2026) — log first 5
+        // significant torsions then count, otherwise this prints 7×N_significant
+        // lines per Calculate() call.
+        if (std::abs(energy) > 1e-4 && CurcumaLogger::get_verbosity() >= 3) {
+            ++m_significant_torsion_count;
+            if (m_significant_torsion_count <= 5) {
+                CurcumaLogger::info(fmt::format(
+                    "Torsion {}-{}-{}-{}: phi={:.1f}° phi0={:.1f}° n={:.0f} V={:.4f} damp={:.4f} E={:.6f} Eh",
+                    dihedral.i, dihedral.j, dihedral.k, dihedral.l,
+                    phi * 180.0 / M_PI, phi0 * 180.0 / M_PI, n, V, damp, energy));
+            } else if (m_significant_torsion_count == 6) {
+                CurcumaLogger::info("  ... (further significant torsions counted only)");
             }
         }
 
@@ -1890,13 +1911,14 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
         CurcumaLogger::info("DISP_CSV: idx,i,j,rij_bohr,C6,r4r2ij,r0_sq,zetac6,t6,t8,energy");
     }
 
+    // WP-FF-DistMatrix-Sharing (May 2026): shared srab when non-PBC.
+    const bool use_shared_dist_disp = hasSharedDistances() && !m_has_pbc;
     for (int index = 0; index < m_gfnff_dispersions.size(); ++index) {
         const auto& disp = m_gfnff_dispersions[index];
 
-        Eigen::Vector3d ri = geom().row(disp.i);
-        Eigen::Vector3d rj = geom().row(disp.j);
-        Eigen::Vector3d rij_vec = ri - rj;
-        double rij = rij_vec.norm() * m_au;  // Convert to atomic units if needed
+        Eigen::Vector3d rij_vec = geom().row(disp.i) - geom().row(disp.j);
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+        double rij = use_shared_dist_disp ? r(disp.i, disp.j) : rij_vec.norm() * m_au;
 
         // HIGH PRIORITY FIX (Feb 2026): Reduce epsilon threshold for gradient robustness
         // Gradient has division by rij → strengthen guard from 1e-10 to 1e-8
@@ -2002,20 +2024,99 @@ void ForceFieldThread::CalculateGFNFFBondedRepulsionContribution()
     double total_rep_energy = 0.0;
     int pairs_calculated = 0;
 
-    for (int index = 0; index < m_gfnff_bonded_repulsions.size(); ++index) {
+#ifdef GFNFF_FAST_EXP
+    // WP-FF-SoA (May 2026): Pass-A/B/C SoA pattern — separates random geometry
+    // reads (Pass-A) from sequential batch exp() (Pass-B). thread_local static
+    // buffers grow once and are reused every step — no heap allocation in hot path.
+    // Scatter buffer is flat N×5 RowMajor: [e_scale, g_pre, rx, ry, rz].
+    thread_local static std::vector<double> buf_exp_arg;
+    thread_local static std::vector<double> buf_exp_out;
+    thread_local static std::vector<int>    buf_i, buf_j;
+    thread_local static std::vector<double> buf_scatter; // flat N×5 RowMajor
+
+    const std::size_t N = m_gfnff_bonded_repulsions.size();
+    if (buf_exp_arg.size() < N) {
+        buf_exp_arg.resize(N);
+        buf_exp_out.resize(N);
+        buf_i.resize(N);
+        buf_j.resize(N);
+        buf_scatter.resize(N * 5);
+    }
+    int K = 0;
+
+    const double scaling = m_final_factor * m_rep_scaling;
+
+    // WP-FF-DistMatrix-Sharing (May 2026): shared srab when non-PBC.
+    const bool use_shared_dist_brep = hasSharedDistances() && !m_has_pbc;
+
+    // Pass-A: collect surviving pairs into compact SoA buffers
+    for (const auto& rep : m_gfnff_bonded_repulsions) {
+        Eigen::Vector3d rij_vec = geom().row(rep.i) - geom().row(rep.j);
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+        double rij = use_shared_dist_brep ? r(rep.i, rep.j) : rij_vec.norm() * m_au;
+
+        if (rij > rep.r_cut || rij < 1e-8) continue;
+
+        double sqrt_rij = std::sqrt(rij);
+        double e_scale  = rep.repab * scaling / rij;
+
+        if (CurcumaLogger::get_verbosity() >= 3 && K == 0) {
+            double exp_preview = std::exp(-rep.alpha * rij * sqrt_rij);
+            CurcumaLogger::param(fmt::format("bonded_repulsion_{}-{}", rep.i, rep.j),
+                fmt::format("r={:.6f}, repab={:.6f}, alpha={:.6f}, E={:.6f}",
+                rij, rep.repab, rep.alpha, exp_preview * e_scale));
+        }
+
+        buf_exp_arg[K]       = rep.alpha * rij * sqrt_rij;
+        buf_i[K] = rep.i;  buf_j[K] = rep.j;
+        buf_scatter[K*5+0]   = e_scale;
+        buf_scatter[K*5+1]   = e_scale * (-1.0/rij - 1.5*rep.alpha*sqrt_rij) / rij;
+        buf_scatter[K*5+2]   = rij_vec.x();
+        buf_scatter[K*5+3]   = rij_vec.y();
+        buf_scatter[K*5+4]   = rij_vec.z();
+        ++K;
+    }
+
+    // Pass-B: batch exp(-arg[k]) over contiguous buffer
+    curcuma::gfnff::fast_exp_neg_sq_block(buf_exp_arg.data(), buf_exp_out.data(),
+                                           static_cast<std::size_t>(K));
+
+    // Pass-C: scatter energy and gradient
+    for (int k = 0; k < K; ++k) {
+        const double e    = buf_exp_out[k];
+        const int    i    = buf_i[k], j = buf_j[k];
+        const double* row = &buf_scatter[k*5];
+        const double se   = e * row[0];
+
+        m_rep_energy        += se;
+        m_bonded_rep_energy += se;
+        total_rep_energy    += se;
+        ++pairs_calculated;
+
+        if (m_calculate_gradient) {
+            const double gf = e * row[1];
+            m_gradient(i, 0) += gf * row[2];
+            m_gradient(i, 1) += gf * row[3];
+            m_gradient(i, 2) += gf * row[4];
+            m_gradient(j, 0) -= gf * row[2];
+            m_gradient(j, 1) -= gf * row[3];
+            m_gradient(j, 2) -= gf * row[4];
+        }
+    }
+#else
+    // WP-FF-DistMatrix-Sharing (May 2026): shared srab when non-PBC.
+    const bool use_shared_dist_brep_scalar = hasSharedDistances() && !m_has_pbc;
+    for (int index = 0; index < static_cast<int>(m_gfnff_bonded_repulsions.size()); ++index) {
         const auto& rep = m_gfnff_bonded_repulsions[index];
 
-        Eigen::Vector3d ri = geom().row(rep.i);
-        Eigen::Vector3d rj = geom().row(rep.j);
-        Eigen::Vector3d rij_vec = ri - rj;
-        double rij = rij_vec.norm() * m_au;
+        Eigen::Vector3d rij_vec = geom().row(rep.i) - geom().row(rep.j);
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+        double rij = use_shared_dist_brep_scalar ? r(rep.i, rep.j) : rij_vec.norm() * m_au;
 
         // HIGH PRIORITY FIX (Feb 2026): Strengthen distance check to prevent gradient Inf/NaN
-        // Previous threshold 1e-10 too small, gradient division by rij needs robustness
         if (rij > rep.r_cut || rij < 1e-8) continue;
 
         // Bonded repulsion formula: E = repab * exp(-α * r^1.5) / r
-        // r^1.5 = r * sqrt(r) avoids std::pow()
         double r_1_5 = rij * std::sqrt(rij);
         double exp_term = std::exp(-rep.alpha * r_1_5);
         double base_energy = rep.repab * exp_term / rij;
@@ -2042,6 +2143,7 @@ void ForceFieldThread::CalculateGFNFFBondedRepulsionContribution()
             m_gradient.row(rep.j) -= grad.transpose();
         }
     }
+#endif
 
     if (CurcumaLogger::get_verbosity() >= 2 && pairs_calculated > 0) {
         CurcumaLogger::param("thread_bonded_repulsion_energy", fmt::format("{:.6f} Eh ({} pairs)", total_rep_energy, pairs_calculated));
@@ -2072,20 +2174,97 @@ void ForceFieldThread::CalculateGFNFFNonbondedRepulsionContribution()
     double total_rep_energy = 0.0;
     int pairs_calculated = 0;
 
-    for (int index = 0; index < m_gfnff_nonbonded_repulsions.size(); ++index) {
+#ifdef GFNFF_FAST_EXP
+    // WP-FF-SoA (May 2026): identical Pass-A/B/C pattern as bonded repulsion.
+    // thread_local static buffers — no heap allocation in hot path.
+    thread_local static std::vector<double> buf_exp_arg;
+    thread_local static std::vector<double> buf_exp_out;
+    thread_local static std::vector<int>    buf_i, buf_j;
+    thread_local static std::vector<double> buf_scatter; // flat N×5 RowMajor
+
+    const std::size_t N = m_gfnff_nonbonded_repulsions.size();
+    if (buf_exp_arg.size() < N) {
+        buf_exp_arg.resize(N);
+        buf_exp_out.resize(N);
+        buf_i.resize(N);
+        buf_j.resize(N);
+        buf_scatter.resize(N * 5);
+    }
+    int K = 0;
+
+    const double scaling = m_final_factor * m_rep_scaling;
+
+    // WP-FF-DistMatrix-Sharing (May 2026): shared srab when non-PBC.
+    const bool use_shared_dist_rep = hasSharedDistances() && !m_has_pbc;
+
+    // Pass-A
+    for (const auto& rep : m_gfnff_nonbonded_repulsions) {
+        Eigen::Vector3d rij_vec = geom().row(rep.i) - geom().row(rep.j);
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+        double rij = use_shared_dist_rep ? r(rep.i, rep.j) : rij_vec.norm() * m_au;
+
+        if (rij > rep.r_cut || rij < 1e-8) continue;
+
+        double sqrt_rij = std::sqrt(rij);
+        double e_scale  = rep.repab * scaling / rij;
+
+        if (CurcumaLogger::get_verbosity() >= 3 && K == 0) {
+            double exp_preview = std::exp(-rep.alpha * rij * sqrt_rij);
+            CurcumaLogger::param(fmt::format("nonbonded_repulsion_{}-{}", rep.i, rep.j),
+                fmt::format("r={:.6f}, repab={:.6f}, alpha={:.6f}, E={:.6f}",
+                rij, rep.repab, rep.alpha, exp_preview * e_scale));
+        }
+
+        buf_exp_arg[K]     = rep.alpha * rij * sqrt_rij;
+        buf_i[K] = rep.i;  buf_j[K] = rep.j;
+        buf_scatter[K*5+0] = e_scale;
+        buf_scatter[K*5+1] = e_scale * (-1.0/rij - 1.5*rep.alpha*sqrt_rij) / rij;
+        buf_scatter[K*5+2] = rij_vec.x();
+        buf_scatter[K*5+3] = rij_vec.y();
+        buf_scatter[K*5+4] = rij_vec.z();
+        ++K;
+    }
+
+    // Pass-B
+    curcuma::gfnff::fast_exp_neg_sq_block(buf_exp_arg.data(), buf_exp_out.data(),
+                                           static_cast<std::size_t>(K));
+
+    // Pass-C
+    for (int k = 0; k < K; ++k) {
+        const double e    = buf_exp_out[k];
+        const int    i    = buf_i[k], j = buf_j[k];
+        const double* row = &buf_scatter[k*5];
+        const double se   = e * row[0];
+
+        m_rep_energy           += se;
+        m_nonbonded_rep_energy += se;
+        total_rep_energy       += se;
+        ++pairs_calculated;
+
+        if (m_calculate_gradient) {
+            const double gf = e * row[1];
+            m_gradient(i, 0) += gf * row[2];
+            m_gradient(i, 1) += gf * row[3];
+            m_gradient(i, 2) += gf * row[4];
+            m_gradient(j, 0) -= gf * row[2];
+            m_gradient(j, 1) -= gf * row[3];
+            m_gradient(j, 2) -= gf * row[4];
+        }
+    }
+#else
+    // WP-FF-DistMatrix-Sharing (May 2026): shared srab when non-PBC.
+    const bool use_shared_dist_rep_scalar = hasSharedDistances() && !m_has_pbc;
+    for (int index = 0; index < static_cast<int>(m_gfnff_nonbonded_repulsions.size()); ++index) {
         const auto& rep = m_gfnff_nonbonded_repulsions[index];
 
-        Eigen::Vector3d ri = geom().row(rep.i);
-        Eigen::Vector3d rj = geom().row(rep.j);
-        Eigen::Vector3d rij_vec = ri - rj;
-        double rij = rij_vec.norm() * m_au;
+        Eigen::Vector3d rij_vec = geom().row(rep.i) - geom().row(rep.j);
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+        double rij = use_shared_dist_rep_scalar ? r(rep.i, rep.j) : rij_vec.norm() * m_au;
 
         // HIGH PRIORITY FIX (Feb 2026): Strengthen distance check to prevent gradient Inf/NaN
-        // Previous threshold 1e-10 too small, gradient division by rij needs robustness
         if (rij > rep.r_cut || rij < 1e-8) continue;
 
         // Non-bonded repulsion formula: E = repab * exp(-α * r^1.5) / r
-        // r^1.5 = r * sqrt(r) avoids std::pow()
         double r_1_5 = rij * std::sqrt(rij);
         double exp_term = std::exp(-rep.alpha * r_1_5);
         double base_energy = rep.repab * exp_term / rij;
@@ -2112,6 +2291,7 @@ void ForceFieldThread::CalculateGFNFFNonbondedRepulsionContribution()
             m_gradient.row(rep.j) -= grad.transpose();
         }
     }
+#endif
 
     if (CurcumaLogger::get_verbosity() >= 2 && pairs_calculated > 0) {
         CurcumaLogger::param("thread_nonbonded_repulsion_energy", fmt::format("{:.6f} Eh ({} pairs)", total_rep_energy, pairs_calculated));
@@ -2142,8 +2322,8 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
     // The kJ/mol conversion factor was incorrect - all quantities should be in Hartree
     // Reference: gfnff_par.h chi_gam_alp_cnf_angewChem2020 arrays are in Hartree
 
-    // Verify EEQ charges before Coulomb energy calculation (Nov 2025)
-    if (CurcumaLogger::get_verbosity() >= 1 && m_gfnff_coulombs.size() > 0) {
+    // EEQ charge verification (per-pair diagnostic)
+    if (CurcumaLogger::get_verbosity() >= 4 && m_gfnff_coulombs.size() > 0) {
         CurcumaLogger::info("=== Coulomb Energy Calculation: EEQ Charge Verification ===");
         for (int idx = 0; idx < std::min((int)m_gfnff_coulombs.size(), 10); ++idx) {
             const auto& coul = m_gfnff_coulombs[idx];
@@ -2160,12 +2340,6 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
             max_charge = std::max({max_charge, std::abs(coul.q_i), std::abs(coul.q_j)});
         }
         CurcumaLogger::param("max_absolute_charge", fmt::format("{:.8e}", max_charge));
-
-        if (max_charge < 1e-10) {
-            CurcumaLogger::info("ℹ️  All EEQ partial charges near zero (typical for homonuclear molecules like H₂, Cl₂)");
-        } else {
-            CurcumaLogger::success(fmt::format("✅ Charges up to {:.2e} found - Coulomb energy should be non-zero", max_charge));
-        }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_coulombs.size() > 0) {
@@ -2180,13 +2354,16 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
     // Reference: Fortran gfnff_engrad.F90:1670-1680 (single sequential loop)
     double E_interaction = 0.0;
 
+    // WP-FF-DistMatrix-Sharing (May 2026): use shared srab when available (no PBC path).
+    // PBC path still computes rij locally because shared srab is built without minimum-image.
+    const bool use_shared_dist = hasSharedDistances() && !m_has_pbc;
+
     for (int index = 0; index < m_gfnff_coulombs.size(); ++index) {
         const auto& coul = m_gfnff_coulombs[index];
 
-        Eigen::Vector3d ri = geom().row(coul.i);
-        Eigen::Vector3d rj = geom().row(coul.j);
-        Eigen::Vector3d rij_vec = ri - rj;
-        double rij = rij_vec.norm() * m_au;
+        Eigen::Vector3d rij_vec = geom().row(coul.i) - geom().row(coul.j);
+        if (m_has_pbc) rij_vec = PBCUtils::applyMinimumImage(rij_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+        double rij = use_shared_dist ? r(coul.i, coul.j) : rij_vec.norm() * m_au;
 
         if (rij > coul.r_cut || rij < 1e-10) continue;
 
@@ -2359,16 +2536,22 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
 
     //CurcumaLogger::error(fmt::format("Thread {} calculating {} hydrogen bonds", m_thread, m_gfnff_hbonds.size()));
 
+    int hb_log_count = 0;
     for (const auto& hb : m_gfnff_hbonds) {
         // Get atom positions
         Eigen::Vector3d pos_A = geom().row(hb.i).transpose();
         Eigen::Vector3d pos_H = geom().row(hb.j).transpose();
         Eigen::Vector3d pos_B = geom().row(hb.k).transpose();
 
-        // Calculate distance vectors
+        // Calculate distance vectors (apply MIC for periodic systems)
         Eigen::Vector3d r_AH_vec = pos_H - pos_A;
         Eigen::Vector3d r_HB_vec = pos_B - pos_H;
         Eigen::Vector3d r_AB_vec = pos_B - pos_A;
+        if (m_has_pbc) {
+            r_AH_vec = PBCUtils::applyMinimumImage(r_AH_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+            r_HB_vec = PBCUtils::applyMinimumImage(r_HB_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+            r_AB_vec = PBCUtils::applyMinimumImage(r_AB_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+        }
 
         // Calculate distances (convert to Bohr via m_au)
         double r_AH = r_AH_vec.norm() * m_au;
@@ -2643,13 +2826,25 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
 
         m_energy_hbond += E_HB * m_final_factor;
 
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        // Claude Generated (May 2026, HB-investigation): per-case split for Fortran comparison.
+        // Sum of cases must equal m_energy_hbond — verify in Phase 1 polymer test.
+        const double E_HB_final = E_HB * m_final_factor;
+        switch (hb.case_type) {
+            case 1: m_hbond_case1_energy += E_HB_final; ++m_hbond_case1_count; break;
+            case 2: m_hbond_case2_energy += E_HB_final; ++m_hbond_case2_count; break;
+            case 3: m_hbond_case3_energy += E_HB_final; ++m_hbond_case3_count; break;
+            case 4: m_hbond_case4_energy += E_HB_final; ++m_hbond_case4_count; break;
+            default: break;
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 3 && hb_log_count < 5) {
             CurcumaLogger::info(fmt::format(
-                "  HB({}-{}-{}): r_AB={:.3f} Bohr, E={:.6e} Eh",
-                hb.i, hb.j, hb.k, r_AB, E_HB * m_final_factor));
-            CurcumaLogger::info(fmt::format(
-                "    DEBUG: bas={:.6f}, aci={:.6f}, rdamp={:.6e}, qhoutl={:.6f}, case={}",
+                "  HB({}-{}-{}): r_AB={:.3f} Bohr, E={:.6e} Eh, bas={:.4f}, aci={:.4f}, rdamp={:.4e}, qhoutl={:.4f}, case={}",
+                hb.i, hb.j, hb.k, r_AB, E_HB * m_final_factor,
                 bas, aci, rdamp, qhoutl, hb.case_type));
+            ++hb_log_count;
+            if (hb_log_count == 5)
+                CurcumaLogger::info(fmt::format("  ... ({} more H-bonds counted, not logged)", m_gfnff_hbonds.size() - 5));
         }
 
         // ========== ANALYTICAL GRADIENT CALCULATION ==========
@@ -2986,10 +3181,15 @@ void ForceFieldThread::CalculateGFNFFHalogenBondContribution()
         Eigen::Vector3d pos_X = geom().row(xb.j).transpose();
         Eigen::Vector3d pos_B = geom().row(xb.k).transpose();
 
-        // Calculate distance vectors
+        // Calculate distance vectors (apply MIC for periodic systems)
         Eigen::Vector3d r_AX_vec = pos_X - pos_A;
         Eigen::Vector3d r_XB_vec = pos_B - pos_X;
         Eigen::Vector3d r_AB_vec = pos_B - pos_A;
+        if (m_has_pbc) {
+            r_AX_vec = PBCUtils::applyMinimumImage(r_AX_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+            r_XB_vec = PBCUtils::applyMinimumImage(r_XB_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+            r_AB_vec = PBCUtils::applyMinimumImage(r_AB_vec, m_unit_cell_bohr, m_unit_cell_bohr_inv);
+        }
 
         // Calculate distances (convert to Bohr via m_au)
         double r_AX = r_AX_vec.norm() * m_au;
@@ -3340,7 +3540,7 @@ void ForceFieldThread::CalculateD4DispersionContribution()
 }
 
 // Claude Generated 2025: D3/D4 dispersion addition methods
-void ForceFieldThread::addD3Dispersion(const GFNFFDispersion& d3_dispersion)
+void ForceFieldThread::addD3Dispersion(const D3DispersionPair& d3_dispersion)
 {
     m_d3_dispersions.push_back(d3_dispersion);
 }
@@ -3405,10 +3605,16 @@ void ForceFieldThread::CalculateATMContribution()
 
         // r0 cutoff radii (BJ damping formula)
         // r0_xy = a1 * sqrt(3 * R_cov[X] * R_cov[Y]) + a2
-        // Use rcov_bohr from GFNFFParameters namespace (0-indexed)
-        double r_cov_i = (zi > 0 && zi <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zi - 1] : 1.0;
-        double r_cov_j = (zj > 0 && zj <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zj - 1] : 1.0;
-        double r_cov_k = (zk > 0 && zk <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zk - 1] : 1.0;
+        //
+        // Claude Generated (May 2026, GPU-vs-CPU 8.9 µEh investigation): ATM is a D3/D4
+        // dispersion theory. The CPU previously read rcov_bohr (= r0_gfnff, the GFN-FF
+        // bond-r0 array — values like 0.557 Bohr for H, 0.983 for C) instead of D3
+        // covalent radii (covalent_rad_d3 — 0.605 Bohr for H, 1.417 for C, matches GPU's
+        // s_rcov_d3_bohr exactly). Caused the polymer ATM mismatch CPU=+16.74 µEh vs
+        // GPU=+7.52 µEh that drove the gfnff_gpu_vs_cpu_polymer test failure.
+        double r_cov_i = (zi > 0 && zi <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zi - 1] : 1.0;
+        double r_cov_j = (zj > 0 && zj <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zj - 1] : 1.0;
+        double r_cov_k = (zk > 0 && zk <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zk - 1] : 1.0;
 
         double r0ij = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_j) + triple.a2;
         double r0ik = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_k) + triple.a2;
@@ -3509,9 +3715,11 @@ void ForceFieldThread::CalculateATMGradient()
         int zk = m_atom_types[triple.k];
 
         // r0 cutoff radii (BJ damping formula)
-        double r_cov_i = (zi > 0 && zi <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zi - 1] : 1.0;
-        double r_cov_j = (zj > 0 && zj <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zj - 1] : 1.0;
-        double r_cov_k = (zk > 0 && zk <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zk - 1] : 1.0;
+        // Claude Generated (May 2026): use D3 covalent radii (matches GPU and ATM theory).
+        // See longer comment in CalculateATMContribution above.
+        double r_cov_i = (zi > 0 && zi <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zi - 1] : 1.0;
+        double r_cov_j = (zj > 0 && zj <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zj - 1] : 1.0;
+        double r_cov_k = (zk > 0 && zk <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zk - 1] : 1.0;
 
         double r0ij = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_j) + triple.a2;
         double r0ik = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_k) + triple.a2;
