@@ -649,6 +649,30 @@ void XTB::calculateGradient()
     }
 
     // ==========================================================================
+    //  3b.  D4 dispersion gradient (GFN2 only) — Claude Generated 2026
+    //
+    //  The D4 energy was computed in xtb_native.cpp::calcDispersionEnergy().
+    //  That function also produced two cached side-products with with_gradient=true:
+    //    m_disp_gradient[i,:]  — geometry term  ∂E_D4/∂R_i  (Eh/Bohr)
+    //    m_disp_dEdcn(i)       — chain-rule accumulator  dE_D4/dCN_i
+    //
+    //  The geometry term is added directly here; the CN-chain-rule contribution
+    //  is folded into dEdcn so the existing CN-distribution loop in section 4
+    //  carries it through ∂CN/∂x for free — no extra distance evaluations.
+    //
+    //  Caveat: the q-response chain rule (∂E_D4/∂q · ∂q/∂R via SCF response)
+    //  is not yet implemented; zetac6 is treated as a static prefactor (sub-mEh
+    //  residual on the AP test set). See dispersion/CLAUDE.md.
+    // ==========================================================================
+    if (m_disp_gradient_valid
+        && m_disp_gradient.rows() == nat && m_disp_gradient.cols() == 3) {
+        m_gradient += m_disp_gradient;
+        if (m_disp_dEdcn.size() == nat) {
+            dEdcn += m_disp_dEdcn;
+        }
+    }
+
+    // ==========================================================================
     //  4.  CN chain-rule gradient
     //      G_iat += Σ_j (dEdcn[i] + dEdcn[j]) · dcount_ij/dr · (R_i−R_j)/r
     //

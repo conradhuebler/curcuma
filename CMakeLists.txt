@@ -461,7 +461,8 @@ set(curcuma_core_SRC
         src/core/energy_calculators/ff_methods/d3_reference_cn.cpp
         src/core/energy_calculators/ff_methods/d3_reference_c6.cpp
         src/core/energy_calculators/ff_methods/cn_calculator.cpp
-        src/core/energy_calculators/ff_methods/d4param_generator.cpp
+        src/core/energy_calculators/dispersion/d4param_generator.cpp
+        src/core/energy_calculators/dispersion/d4_evaluator.cpp
         src/core/energy_calculators/ff_methods/cg_potentials.cpp
         src/core/energy_calculators/ff_methods/fast_exp.cpp
         src/core/curcuma_logger.cpp

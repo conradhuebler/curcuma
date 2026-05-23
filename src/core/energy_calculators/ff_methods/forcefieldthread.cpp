@@ -26,6 +26,7 @@
 #include "fast_exp.h"
 
 #include "forcefield.h"
+#include "src/core/energy_calculators/dispersion/d4_evaluator.h"
 #include "src/core/units.h"
 
 // Claude Generated (Jan 17, 2026): Required for diagnostic logging in batm calculation
@@ -3407,134 +3408,106 @@ void ForceFieldThread::CalculateD3DispersionContribution()
     }
 }
 
-// Claude Generated 2025: Native D4/GFN-FF Dispersion with MODIFIED Becke-Johnson damping
-// UPDATED (January 25, 2026): Fix to match XTB 6.6.1 reference
+// Claude Generated 2025/2026: GFN-FF D4 dispersion
+//
+// The math was extracted into curcuma::dispersion::D4Evaluator (see
+// src/core/energy_calculators/dispersion/d4_evaluator.{h,cpp}) so that
+// native GFN2 can reuse the same kernel with its own (s6, s8, a1, a2)
+// scaling parameters. GFN-FF's "modified BJ" and standard D4 BJ are
+// mathematically the same formula, parameterised by s6/s8 — see the
+// evaluator header for the derivation.
+//
+// This function is now a thin shim: pair loop owned by the thread, math
+// delegated to the evaluator. dc6dcn chain rule is still applied here
+// because the matrix is plumbed in via m_dc6dcn_ptr (the thread does not
+// hold a D4ParameterGenerator instance).
+//
+// Reference: gfnff_gdisp0.f90:365-377
 void ForceFieldThread::CalculateD4DispersionContribution()
 {
-    /**
-     * @brief GFN-FF Dispersion with MODIFIED Becke-Johnson damping
-     *
-     * CLAUDE GENERATED (January 25, 2026): Fix to match XTB 6.6.1 reference
-     *
-     * Reference: gfnff_gdisp0.f90:365-377
-     *
-     * GFN-FF uses a MODIFIED BJ damping formula (NOT standard D3/D4):
-     *   E = -0.5 * C6 * (t6 + 2*r4r2ij*t8)
-     * where:
-     *   t6 = 1/(r^6 + R0^6)
-     *   t8 = 1/(r^8 + R0^8)
-     *   r4r2ij = 3 * sqrtZr4r2_i * sqrtZr4r2_j  (implicit C8/C6 ratio)
-     *   R0^2 = (a1*sqrt(r4r2ij) + a2)^2 with a1=0.58, a2=4.80
-     *
-     * Key differences from standard BJ damping:
-     * 1. R0 computed from sqrtZr4r2 product (NOT from C8/C6 ratio)
-     * 2. C8 is implicit: factor 2*r4r2ij*t8 instead of separate C8*t8
-     * 3. 0.5 factor for pair counting (each pair counted once)
-     */
+    if (m_d4_dispersions.empty()) return;
 
-    if (CurcumaLogger::get_verbosity() >= 3 && m_d4_dispersions.size() > 0) {
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("Thread {} calculating {} GFN-FF/D4 dispersion pairs",
                                         m_thread, m_d4_dispersions.size()));
     }
-    // Claude Generated (Feb 8, 2026): Per-pair diagnostic for dispersion accuracy investigation (verbosity >= 3 only)
-    bool d4_disp_diag = (CurcumaLogger::get_verbosity() >= 3 && m_d4_dispersions.size() > 0 && m_d4_dispersions.size() <= 50);
+    bool d4_disp_diag = (CurcumaLogger::get_verbosity() >= 3 && m_d4_dispersions.size() <= 50);
     if (d4_disp_diag) {
-        CurcumaLogger::info("D4_DISP_CSV: idx,i,j,rij_bohr,C6,r4r2ij,r0_sq,zetac6,t6,t8,energy");
+        CurcumaLogger::info("D4_DISP_CSV: idx,i,j,rij_bohr,C6,r4r2ij,r0_sq,zetac6,energy");
     }
 
-    for (int index = 0; index < m_d4_dispersions.size(); ++index) {
+    // GFN-FF D4 scaling parameters (gfnff_par.h:589-592).
+    // Hard-coded here because the values are fixed for the GFN-FF method
+    // definition; the evaluator's params are explicit per call site to
+    // catch silent misuse (see evaluator constructor).
+    curcuma::dispersion::D4Params params;
+    params.s6 = 1.0;
+    params.s8 = 2.0;
+    params.a1 = 0.58;
+    params.a2 = 4.80;
+    params.alpha = 14.0;
+    params.damping = curcuma::dispersion::DampingFormula::ModifiedBJ_GFNFF;
+
+    // Stateless evaluator without a backing generator — the dc6dcn chain
+    // rule is handled here using m_dc6dcn_ptr (the thread's existing pipe).
+    curcuma::dispersion::D4Evaluator evaluator(nullptr, params);
+
+    for (int index = 0; index < static_cast<int>(m_d4_dispersions.size()); ++index) {
         const auto& disp = m_d4_dispersions[index];
 
         Eigen::Vector3d ri = geom().row(disp.i);
         Eigen::Vector3d rj = geom().row(disp.j);
         Eigen::Vector3d rij_vec = ri - rj;
-        double rij = rij_vec.norm() * m_au;  // Convert to atomic units if needed
 
-        if (rij > disp.r_cut || rij < 1e-10) continue;  // Skip if beyond cutoff or too close
+        // m_au converts geometry units to Bohr (1.0 for GFN-FF, ~1.89 for UFF).
+        Eigen::Vector3d rij_bohr_vec = rij_vec * m_au;
 
-        // GFN-FF modified BJ damping (NOT standard D3/D4!)
-        // Reference: gfnff_gdisp0.f90:365-377
-        //
-        // Optimized power calculations: r^6 = (r^2)^3, r^8 = (r^2)^4
-        double r2 = rij * rij;
-        double r6 = r2 * r2 * r2;     // (r^2)^3 = r^6
+        double E_pair = 0.0;
+        Eigen::Vector3d dE_dr_bohr;
+        double dEdCN_i_unused = 0.0, dEdCN_j_unused = 0.0;
+        double disp_sum = 0.0;
 
-        // R0^6 = (R0^2)^3 where r0_squared is pre-computed as (a1*sqrt(r4r2ij)+a2)^2
-        double r0_6 = disp.r0_squared * disp.r0_squared * disp.r0_squared;
+        if (!evaluator.pairEnergyAndGradient(disp, rij_bohr_vec, m_calculate_gradient,
+                                             E_pair, dE_dr_bohr,
+                                             dEdCN_i_unused, dEdCN_j_unused,
+                                             disp_sum)) {
+            continue;
+        }
 
-        // t6 = 1/(r^6 + R0^6)
-        double t6 = 1.0 / (r6 + r0_6);
-
-        // t8 = 1/(r^8 + R0^8)
-        double r8 = r6 * r2;          // r^8 = r^6 * r^2
-        double r0_8 = r0_6 * disp.r0_squared;  // R0^8 = R0^6 * R0^2
-        double t8 = 1.0 / (r8 + r0_8);
-
-        // GFN-FF dispersion formula: disp = (t6 + 2*r4r2ij*t8) * zetac6
-        // Energy: dE = -c6 * disp (no 0.5 - see line 1586 comment)
-        // Reference: gfnff_gdisp0.f90:374,377
-        // Claude Generated (Jan 31, 2026): Added zetac6 charge scaling
-        // Claude Generated (Feb 8, 2026): Removed 0.5 factor - consistent with energy fix
-        double disp_sum = t6 + 2.0 * disp.r4r2ij * t8;
-        double pair_energy = -disp.C6 * disp_sum * disp.zetac6 * m_final_factor;
-
-        // Claude Generated (Jan 31, 2026): Fix dispersion energy reporting
-        // Previously only m_d4_energy was updated, causing total_gfnff_dispersion to show 0
-        // Now both are updated, matching CalculateGFNFFDispersionContribution() behavior
+        const double pair_energy = E_pair * m_final_factor;
         m_dispersion_energy += pair_energy;
         m_d4_energy += pair_energy;
 
-        // Debug: Per-pair diagnostic CSV (verbosity >= 3 only)
         if (d4_disp_diag) {
-            CurcumaLogger::info(fmt::format("D4_DISP_CSV: {},{},{},{:.6f},{:.6e},{:.6f},{:.6f},{:.6e},{:.6e},{:.6e},{:.10e}",
+            CurcumaLogger::info(fmt::format("D4_DISP_CSV: {},{},{},{:.6f},{:.6e},{:.6f},{:.6f},{:.6e},{:.10e}",
                                            index, disp.i, disp.j,
-                                           rij, disp.C6, disp.r4r2ij, disp.r0_squared, disp.zetac6,
-                                           t6, t8, pair_energy));
+                                           rij_bohr_vec.norm(), disp.C6, disp.r4r2ij,
+                                           disp.r0_squared, disp.zetac6, pair_energy));
         }
 
         if (m_calculate_gradient) {
-            // Analytical gradient for GFN-FF dispersion formula
-            // d/dr[E] = d/dr[-0.5 * C6 * (t6 + 2*r4r2ij*t8) * zetac6]
-            //
-            // Reference: gfnff_gdisp0.f90:371-372, 375
-            // d6 = -6*r2**2*t6**2  -> derivative of t6 w.r.t. r
-            // d8 = -8*r2**3*t8**2  -> derivative of t8 w.r.t. r
-            // Note: zetac6 is constant during gradient evaluation (fixed charges)
-
-            double d6 = -6.0 * r2 * r2 * t6 * t6;  // d(t6)/d(r^2) scaled appropriately
-            double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;  // d(t8)/d(r^2) scaled appropriately
-
-            // ddisp/d(r^2) = d6 + 2*r4r2ij*d8
-            double ddisp_dr2 = d6 + 2.0 * disp.r4r2ij * d8;
-
-            // dE/dr = -0.5 * C6 * zetac6 * ddisp/d(r^2) * d(r^2)/dr = -0.5 * C6 * zetac6 * ddisp_dr2 * 2*r
-            //       = -C6 * zetac6 * ddisp_dr2 * r
-            // Claude Generated (Jan 31, 2026): Added zetac6 to gradient
-            double dEdr = -disp.C6 * disp.zetac6 * ddisp_dr2 * rij * m_final_factor;
-
-            Eigen::Vector3d grad = dEdr * rij_vec / rij;
-
+            // dE_dr_bohr is in Hartree/Bohr. m_gradient lives in
+            // Hartree/[geom_unit]; for GFN-FF (m_au=1) geom is Bohr and the
+            // scale is unity. For UFF-style methods (m_au=1.89) the gradient
+            // must be converted to Hartree/Angstrom by dividing by m_au.
+            const Eigen::Vector3d grad = dE_dr_bohr * (m_final_factor / m_au);
             m_gradient.row(disp.i) += grad.transpose();
             m_gradient.row(disp.j) -= grad.transpose();
 
-            // Claude Generated (Mar 2026): Dispersion dC6/dCN chain-rule contribution
-            // Reference: Fortran gfnff_gdisp0.f90:382-395
-            // CRITICAL FIX: Was missing in D4 path, causing dispersion gradient errors
-            // (D3 path in CalculateGFNFFDispersionContribution already had this)
+            // dC6/dCN chain rule — Fortran gfnff_gdisp0.f90:382-395
             if (m_dc6dcn_ptr && m_dc6dcn_ptr->size() > 0 &&
                 disp.i < m_dc6dcn_ptr->rows() && disp.j < m_dc6dcn_ptr->cols()) {
-                double disp_value = disp_sum * disp.zetac6 * m_final_factor;
+                const double disp_value = disp_sum * disp.zetac6 * m_final_factor;
                 m_dEdcn(disp.i) -= (*m_dc6dcn_ptr)(disp.i, disp.j) * disp_value;
                 m_dEdcn(disp.j) -= (*m_dc6dcn_ptr)(disp.j, disp.i) * disp_value;
             }
         }
     }
 
-    if (CurcumaLogger::get_verbosity() >= 3 && m_d4_dispersions.size() > 0) {
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::param("thread_d4_energy", fmt::format("{:.6f} Eh", m_d4_energy));
     }
-
-    if (CurcumaLogger::get_verbosity() >= 2 && m_d4_dispersions.size() > 0) {
+    if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::result(fmt::format("GFN-FF D4 Dispersion Energy: {:.6e} Eh", m_d4_energy));
     }
 }

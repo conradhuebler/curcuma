@@ -139,8 +139,8 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 | Method | Test Status | Notes |
 |--------|-------------|-------|
 | EHT | not systematically tested | qualitative only |
-| Native GFN1-xTB | 5/7 vs TBLite | HCN+caffeine still >5 mEh (SCF?); `-opt` works; DIIS integrated (AP6) |
-| Native GFN2-xTB | 3/7 vs TBLite | H₂O/CH₄/HCN pass after DIIS (AP6); CH₃OH/CH₃OCH₃/C₆H₆/caffeine: residual ~1–23 mEh (D4 dispersion missing); `-opt` works |
+| Native GFN1-xTB | 5/7 vs TBLite | HCN+caffeine still >5 mEh (SCF?); `-opt` works; DIIS integrated (AP6). **D3 dispersion still missing** — separate AP |
+| Native GFN2-xTB | revalidation pending | **D4 dispersion integrated (AP7, 2026-05)** via `curcuma::dispersion::D4Evaluator` with Caldeweyher 2019 BJ params (s6=1, s8=2.7, a1=0.52, a2=5.0). Energy + analytical gradient (FD-validated < 5e-5 Eh/Å on H₂O/CH₄/NH₃/C₆H₆). q-response chain rule (∂E_D4/∂q · ∂q/∂x) deferred — expected sub-mEh residual vs TBLite |
 | PM3/AM1/MNDO | 21/21 vs Ulysses (< 4 µEh) | most complete |
 | PM6 | not tested | parameters present, untested |
 

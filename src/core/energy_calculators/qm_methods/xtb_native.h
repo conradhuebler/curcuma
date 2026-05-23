@@ -37,6 +37,11 @@
 #include <string>
 #include <vector>
 
+// Forward declarations — the D4 stack only lives in xtb_native.cpp /
+// xtb_gradient.cpp, so we keep this header free of the dispersion include.
+class D4ParameterGenerator;
+namespace curcuma::dispersion { class D4Evaluator; }
+
 namespace curcuma::xtb {
 
 /* ------------------------------------------------------------------------- *
@@ -303,6 +308,15 @@ private:
     int    m_scf_iterations  = 0;
 
     Vector m_coordination_numbers;   ///< CN, filled in Calculation()
+
+    // GFN2 D4 dispersion (forward-declared types to keep this header light)
+    // — implementation in xtb_native.cpp, gradient hook in xtb_gradient.cpp.
+    // Created lazily on first dispersion evaluation; only meaningful for GFN2.
+    mutable std::unique_ptr<::D4ParameterGenerator> m_d4_generator;
+    mutable std::unique_ptr<curcuma::dispersion::D4Evaluator> m_d4_evaluator;
+    mutable Matrix m_disp_gradient;       ///< Cached D4 geometry gradient (Eh/Bohr)
+    mutable Vector m_disp_dEdcn;          ///< Cached D4 dE/dCN (Eh per CN unit)
+    mutable bool   m_disp_gradient_valid = false;
 };
 
 } // namespace curcuma::xtb

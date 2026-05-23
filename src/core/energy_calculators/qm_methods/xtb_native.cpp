@@ -27,6 +27,9 @@
 
 #include "STO_CGTO.hpp"
 #include "src/core/curcuma_logger.h"
+#include "src/core/config_manager.h"
+#include "src/core/energy_calculators/dispersion/d4_evaluator.h"
+#include "src/core/energy_calculators/dispersion/d4param_generator.h"
 #include "diis_accelerator.h"
 
 #include <stdexcept>
@@ -517,35 +520,75 @@ nlohmann::json XTB::getEnergyDecomposition() const
 }
 
 /* ------------------------------------------------------------------------- *
- *  GFN2 D4 dispersion (optional — requires USE_D4 at compile time)
- *  TBLite GFN2 parameters: s6=1.0, s8=2.7, a1=0.52, a2=5.0, s9=5.0
+ *  GFN2 D4 dispersion — native, via curcuma::dispersion::D4Evaluator
+ *
+ *  Standard BJ damping (Caldeweyher 2019), GFN2 parameters from TBLite
+ *  (gfn2.f90 / Ulysses D4par.hpp): s6=1.0, s8=2.7, a1=0.52, a2=5.0,
+ *  s9=5.0, alpha=16.0.
+ *
+ *  The same D4Evaluator class also powers GFN-FF's D4 (with modified-BJ
+ *  parameters s6=1, s8=2). See dispersion/CLAUDE.md for the unified
+ *  formula derivation.
+ *
+ *  Caveat: zeta-charge scaling (zetac6) is currently treated as a static
+ *  prefactor as in GFN-FF. The full GFN2 q-response chain rule
+ *  (∂E_D4/∂q · ∂q/∂x via SCF response) is deferred — expected residual
+ *  is sub-mEh on the AP test set (H2O, CH4, CH3OCH3, caffeine).
+ *
+ *  GFN1 still uses D3 (separate AP) — returns 0 here for now, preserving
+ *  the existing GFN1 behaviour at the cost of a small dispersion deficit.
  * ------------------------------------------------------------------------- */
 double XTB::calcDispersionEnergy() const
 {
-    // GFN2 uses D4 dispersion; GFN1 uses D3. Both require external libraries.
-    // When USE_D4 / USE_D3 is off, dispersion is zero (energy will be ~2-3 mEh
-    // high for larger molecules like ethanol, but gradients remain valid).
-#ifdef USE_D4
-    if (m_method == MethodType::GFN2) {
-        try {
-            // Forward-declared to avoid header include when USE_D4=OFF
-            class DFTD4Interface;
-            // D4 parameters for GFN2 (tblite/src/tblite/xtb/gfn2.f90)
-            const double d4_s6  = 1.0;
-            const double d4_s8  = 2.7;
-            const double d4_a1  = 0.52;
-            const double d4_a2  = 5.0;
-            const double d4_s9  = 5.0;
-            // ... D4 calculation would go here using DFTD4Interface
-            // For now: placeholder — full integration needs the D4 library.
-            // TODO: Integrate DFTD4Interface once USE_D4 is enabled.
-            return 0.0;
-        } catch (...) {
-            return 0.0;
-        }
+    m_disp_gradient_valid = false;
+
+    if (m_method != MethodType::GFN2) {
+        // GFN1 D3 integration is a follow-up AP. Returning 0 preserves the
+        // current (D3-missing) energy for GFN1 — see qm_methods/CLAUDE.md.
+        return 0.0;
     }
-#endif
-    return 0.0;
+
+    // Lazy initialization (cached across SCF cycles for the same geometry)
+    if (!m_d4_generator) {
+        nlohmann::json d4_config;
+        d4_config["d4_s6"] = 1.0;
+        d4_config["d4_s8"] = 2.7;
+        d4_config["d4_a1"] = 0.52;
+        d4_config["d4_a2"] = 5.0;
+        d4_config["d4_alp"] = 16.0;
+        ConfigManager cfg("d4param", d4_config);
+        m_d4_generator = std::make_unique<::D4ParameterGenerator>(cfg);
+    }
+    if (!m_d4_evaluator) {
+        curcuma::dispersion::D4Params p;
+        p.s6 = 1.0;
+        p.s8 = 2.7;
+        p.a1 = 0.52;
+        p.a2 = 5.0;
+        p.s9 = 5.0;
+        p.alpha = 16.0;
+        p.damping = curcuma::dispersion::DampingFormula::StandardBJ_D4;
+        m_d4_evaluator = std::make_unique<curcuma::dispersion::D4Evaluator>(
+            m_d4_generator.get(), p);
+    }
+
+    // m_geometry is in Angstrom; D4 expects Bohr.
+    Matrix geom_bohr = m_geometry * AA_TO_AU;
+    m_d4_generator->GenerateParameters(m_atoms, geom_bohr);
+
+    // Always compute the gradient block — D4 is cheap and the cached
+    // m_disp_gradient / m_disp_dEdcn are folded into calculateGradient()
+    // when a gradient was requested at the top of Calculation().
+    const double E = m_d4_evaluator->computeEnergyAndGradient(
+        m_atoms, geom_bohr,
+        /*with_gradient=*/true,
+        m_disp_gradient, m_disp_dEdcn);
+    m_disp_gradient_valid = true;
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("dispersion_d4_native", fmt::format("{:.6f} Eh", E));
+    }
+    return E;
 }
 
 /* ------------------------------------------------------------------------- *

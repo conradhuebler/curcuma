@@ -749,13 +749,19 @@ double GFN2::calculateDispersionEnergy() const {
 
     return dispersion_energy;
 #else
-    // Claude Generated: Native D4 fallback using D4ParameterGenerator from GFN-FF infrastructure
-    // Uses CN-only Gaussian weighting (GFN-FF style), not full CN+charge weighting of standard D4.
-    // When the external USE_D4 library is available, the full D4 is used instead.
+    // Claude Generated 2026: Native D4 via the standalone D4Evaluator
+    // (src/core/energy_calculators/dispersion/d4_evaluator.h). Uses the
+    // same Casimir-Polder C6 reference data that GFN-FF carries, but
+    // with GFN2's own scaling parameters (s8=2.7 instead of GFN-FF's 2.0)
+    // — the BJ damping math is identical, just the coefficients differ.
     //
-    // GFN2-xTB D4 parameters: s6=1.0, s8=2.7, a1=0.52, a2=5.0
-    // Reference: Bannwarth et al. JCTC 2019, 15, 1652 (GFN2 paper)
-    // BJ damping formula from GFN-FF: E = -0.5 * C6 * (t6 + 2*r4r2ij*t8)
+    // GFN2-xTB D4 parameters (TBLite/Ulysses-confirmed): s6=1.0, s8=2.7,
+    // a1=0.52, a2=5.0, s9=5.0, alpha=16.0.
+    //
+    // Caveat: zeta-charge scaling (zetac6) is currently treated as a static
+    // prefactor as in GFN-FF. A full GFN2-style q-response chain rule
+    // (dE/dq · dq/dx via SCF response) is deferred to a follow-up AP — the
+    // expected residual is sub-mEh vs TBLite. See dispersion/CLAUDE.md.
 
     GFN2* nonconst_this = const_cast<GFN2*>(this);
 
@@ -765,50 +771,37 @@ double GFN2::calculateDispersionEnergy() const {
         d4_config["d4_s8"] = GFN2Params::GFN2_D4_S8;   // 2.7
         d4_config["d4_a1"] = GFN2Params::GFN2_D4_A1;   // 0.52
         d4_config["d4_a2"] = GFN2Params::GFN2_D4_A2;   // 5.0
-        d4_config["d4_alp"] = 14.0;
+        d4_config["d4_alp"] = 16.0;                    // GFN2 (Caldeweyher 2019)
         ConfigManager config("d4param", d4_config);
         nonconst_this->m_d4_native = std::make_unique<D4ParameterGenerator>(config);
+    }
+
+    if (!nonconst_this->m_d4_evaluator) {
+        curcuma::dispersion::D4Params p;
+        p.s6 = GFN2Params::GFN2_D4_S6;
+        p.s8 = GFN2Params::GFN2_D4_S8;
+        p.a1 = GFN2Params::GFN2_D4_A1;
+        p.a2 = GFN2Params::GFN2_D4_A2;
+        p.s9 = 5.0;                                    // Ulysses GFN2 ATM scaling
+        p.alpha = 16.0;
+        p.damping = curcuma::dispersion::DampingFormula::StandardBJ_D4;
+        nonconst_this->m_d4_evaluator = std::make_unique<curcuma::dispersion::D4Evaluator>(
+            nonconst_this->m_d4_native.get(), p);
     }
 
     // D4 expects geometry in Bohr
     Matrix geometry_bohr = m_geometry / au;
     nonconst_this->m_d4_native->GenerateParameters(m_atoms, geometry_bohr);
 
-    // Compute D4-BJ energy using GFN-FF modified BJ damping formula
-    // Reference: gfnff_gdisp0.f90:365-377
-    const double s6 = GFN2Params::GFN2_D4_S6;
-    const double s8 = GFN2Params::GFN2_D4_S8;
-    const double a1 = GFN2Params::GFN2_D4_A1;
-    const double a2 = GFN2Params::GFN2_D4_A2;
-
-    double disp_energy = 0.0;
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
-            double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
-            double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
-            double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
-            double r2 = dx*dx + dy*dy + dz*dz;
-            double r = std::sqrt(r2);
-            if (r < 1e-10) continue;
-
-            double c6 = nonconst_this->m_d4_native->getChargeWeightedC6(m_atoms[i], m_atoms[j], i, j);
-            double sqrt_zr4r2_i = nonconst_this->m_d4_native->getSqrtZr4r2(m_atoms[i]);
-            double sqrt_zr4r2_j = nonconst_this->m_d4_native->getSqrtZr4r2(m_atoms[j]);
-            double r4r2ij = 3.0 * sqrt_zr4r2_i * sqrt_zr4r2_j;
-
-            double r0 = a1 * std::sqrt(r4r2ij) + a2;
-            double r0_6 = std::pow(r0, 6);
-            double r0_8 = std::pow(r0, 8);
-            double r6 = r2 * r2 * r2;
-            double r8 = r6 * r2;
-
-            double t6 = 1.0 / (r6 + r0_6);
-            double t8 = 1.0 / (r8 + r0_8);
-
-            // GFN-FF modified BJ: E = -C6 * (s6*t6 + s8*2*r4r2ij*t8)
-            disp_energy -= c6 * (s6 * t6 + s8 * 2.0 * r4r2ij * t8);
-        }
-    }
+    // Compute dispersion gradient + dE/dCN regardless of whether the caller
+    // requested a gradient: GFN2's calculateGradient() folds these in if
+    // present, and the cost is dominated by the energy loop anyway. The
+    // cached Matrix/Vector are reused across SCF cycles for the same geometry.
+    double disp_energy = nonconst_this->m_d4_evaluator->computeEnergyAndGradient(
+        m_atoms, geometry_bohr,
+        /*with_gradient=*/true,
+        nonconst_this->m_disp_gradient,
+        nonconst_this->m_disp_dEdcn);
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::param("dispersion_d4_native", fmt::format("{:.6f} Eh", disp_energy));

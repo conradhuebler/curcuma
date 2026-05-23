@@ -34,7 +34,8 @@
 #include "STOIntegrals.hpp"
 #include "src/core/solvation/gbsa.h"
 
-#include "src/core/energy_calculators/ff_methods/d4param_generator.h"
+#include "src/core/energy_calculators/dispersion/d4param_generator.h"
+#include "src/core/energy_calculators/dispersion/d4_evaluator.h"
 
 #ifdef USE_D4
 #include "dftd4interface.h"
@@ -666,6 +667,12 @@ private:
     std::unique_ptr<DFTD4Interface> m_d4;      ///< D4 dispersion calculator (external cpp-d4)
 #endif
     mutable std::unique_ptr<D4ParameterGenerator> m_d4_native;  ///< Native D4 fallback (CN-only weighting)
+
+    /// Native D4 evaluator — caches the energy-evaluation gradient + dE/dCN
+    /// so calculateGradient() can fold them in without recomputing.
+    mutable std::unique_ptr<curcuma::dispersion::D4Evaluator> m_d4_evaluator;
+    mutable Matrix m_disp_gradient;            ///< D4 geometry gradient (Hartree/Bohr)
+    mutable Vector m_disp_dEdcn;               ///< D4 dE/dCN (Hartree per CN unit)
 
     // SCF convergence parameters
     int m_scf_max_iterations;                  ///< Maximum SCF iterations (default: 100)

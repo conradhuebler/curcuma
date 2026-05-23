@@ -23,9 +23,9 @@
 #include "src/core/global.h"
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
-#include "eeq_solver.h"  // EEQ charge calculation for D4
-#include "gfnff_parameters.h"  // GFNFFDispersion struct for native generation
-#include "cn_calculator.h"  // CN calculation for D4 (Claude Generated - December 2025)
+#include "src/core/energy_calculators/ff_methods/eeq_solver.h"  // EEQ charge calculation for D4
+#include "src/core/energy_calculators/ff_methods/gfnff_parameters.h"  // GFNFFDispersion struct
+#include "src/core/energy_calculators/ff_methods/cn_calculator.h"  // CN calculation for D4
 
 #include <Eigen/Dense>
 #include <memory>
