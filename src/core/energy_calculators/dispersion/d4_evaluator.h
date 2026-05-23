@@ -107,6 +107,13 @@ public:
     // elsewhere) to obtain the CN-chain-rule contribution to the Cartesian
     // gradient.
     //
+    // dEdq_out holds the per-atom charge derivative dE_D4/dq_A. It is the
+    // first half of the charge-response chain rule; the caller multiplies it
+    // by dq_A/dx (from EEQ response or CPSCF) to obtain the Cartesian
+    // contribution. Only the zetac6 factor is charge-dependent (the CN-only
+    // C6 weighting is not), so this term is exact for the GFN-FF/GFN2 model.
+    // Pass with_dEdq=false to skip it (e.g. static-prefactor mode).
+    //
     // Side effect: refreshes the underlying generator's CN-dependent state
     // (dc6dcn matrix) via D4ParameterGenerator::updateCNValuesForGradient()
     // if with_gradient is true.
@@ -116,7 +123,9 @@ public:
                                     const Matrix& geometry_bohr,
                                     bool with_gradient,
                                     Matrix& gradient_out,
-                                    Vector& dEdCN_out);
+                                    Vector& dEdCN_out,
+                                    Vector& dEdq_out,
+                                    bool with_dEdq = false);
 
     // ---------- CUDA hook (not used in this AP) ----------
     //

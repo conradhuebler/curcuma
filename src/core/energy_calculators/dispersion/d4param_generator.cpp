@@ -302,8 +302,20 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::success(fmt::format("D4: Reused topology charges in {:.2f} ms (skipped EEQ solve)", t_eeq_ms));
         }
+    } else if (m_use_d4_single_shot_eeq) {
+        // Claude Generated (2026): canonical single-shot dftd4 EEQ (q-response path).
+        // One smooth linear system → analytical dq/dx (D4ChargeModel). Used by
+        // native GFN2 when d4_charge_source="eeq". Charges differ from the
+        // GFN-FF two-phase solver, so D4 energies were re-validated for this mode.
+        m_eeq_charges = m_d4_charge_model.computeCharges(m_atoms, geometry_bohr, 0.0);
+        auto t_eeq_end = std::chrono::high_resolution_clock::now();
+        t_eeq_ms = std::chrono::duration<double, std::milli>(t_eeq_end - t_eeq_start).count();
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::success(fmt::format("D4: single-shot EEQ charges in {:.2f} ms", t_eeq_ms));
+        }
     } else {
-        // Fallback: compute fresh EEQ charges
+        // Fallback: compute fresh EEQ charges via the GFN-FF two-phase solver.
         Vector cn_eigen = Eigen::Map<const Vector>(m_cn_values.data(), m_cn_values.size());
         m_eeq_charges = m_eeq_solver->calculateCharges(m_atoms, geometry_bohr, 0, &cn_eigen);
         auto t_eeq_end = std::chrono::high_resolution_clock::now();
@@ -794,6 +806,19 @@ double D4ParameterGenerator::getSqrtZr4r2(int atom) const
         return m_sqrt_z_r4_r2[atom];
     }
     return 1.0; // Default fallback
+}
+
+// Claude Generated (2026): D4 q-response chain rule (AP ∂q/∂x)
+// Thin forwards to the closed-form zeta scaling and its derivative so the
+// D4Evaluator can assemble dE_D4/dq without depending on gfnff_par.h directly.
+double D4ParameterGenerator::getZeta(int Z, double q) const
+{
+    return GFNFFParameters::zetaChargeScale(Z, q);
+}
+
+double D4ParameterGenerator::getZetaDerivative(int Z, double q) const
+{
+    return GFNFFParameters::zetaChargeScaleDerivative(Z, q);
 }
 
 double D4ParameterGenerator::getAtomicPolarizability(int atom, int frequency_index) const

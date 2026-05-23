@@ -26,6 +26,7 @@
 #include "src/core/energy_calculators/ff_methods/eeq_solver.h"  // EEQ charge calculation for D4
 #include "src/core/energy_calculators/ff_methods/gfnff_parameters.h"  // GFNFFDispersion struct
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"  // CN calculation for D4
+#include "d4_charge_model.h"  // single-shot EEQ + analytical dq/dx (q-response)
 
 #include <Eigen/Dense>
 #include <memory>
@@ -107,6 +108,40 @@ public:
     double getChargeWeightedC6(int Zi, int Zj, size_t atom_i, size_t atom_j) const;
     double calculateTripleScale(int i, int j, int k) const;
 
+    // Claude Generated (2026): D4 q-response chain rule (AP ∂q/∂x)
+    // Per-atom zeta scaling and its closed-form charge derivative, used by
+    // D4Evaluator to assemble dE_D4/dq. Both forward to GFNFFParameters.
+    double getZeta(int Z, double q) const;
+    double getZetaDerivative(int Z, double q) const;
+
+    // The charge vector that actually drives zetac6: topology charges if set
+    // (GFN-FF path), otherwise the geometry-dependent EEQ charges (GFN2 path).
+    // The dE_D4/dq term must use exactly these charges for consistency.
+    const Vector& getZetaCharges() const {
+        return (m_topology_charges.size() > 0) ? m_topology_charges : m_eeq_charges;
+    }
+
+    // Non-owning access to the EEQ solver that produced m_eeq_charges, so the
+    // q-response path can reuse its cached factorisation for dq/dx (Phase 2).
+    EEQSolver* getEEQSolver() const { return m_eeq_solver.get(); }
+    const Vector& getEEQCharges() const { return m_eeq_charges; }
+
+    // Claude Generated (2026): D4 q-response chain rule (AP ∂q/∂x, Phase 2)
+    // Enable the canonical single-shot dftd4 EEQ charge model for zetac6. When
+    // on (and no GFN-FF topology charges are set), GenerateParameters() fills
+    // m_eeq_charges from D4ChargeModel — a single smooth linear system whose
+    // dq/dx has a closed form. GFN-FF leaves this off (uses topology charges).
+    void setUseD4SingleShotEEQ(bool on) { m_use_d4_single_shot_eeq = on; }
+    bool usesD4SingleShotEEQ() const { return m_use_d4_single_shot_eeq; }
+
+    // Accumulate the D4 charge-response gradient Σ_A dEdq(A)·∂q_A/∂R into
+    // grad_out (Hartree/Bohr). Valid only when the single-shot EEQ model was
+    // used for the current geometry; otherwise a no-op.
+    void addChargeResponseGradient(const Vector& dEdq, Matrix& grad_out) const {
+        if (m_use_d4_single_shot_eeq && m_d4_charge_model.valid())
+            m_d4_charge_model.addChargeResponseGradient(dEdq, grad_out);
+    }
+
     // Claude Generated (Apr 2026): P1a — CN-change threshold cache for Gaussian weights
     // Skip recomputation of gw/dgw/dc6dcn when CN changes < d4_cn_cache_threshold (MD optimization)
     bool canSkipGaussianWeightsUpdate(const std::vector<double>& new_cn) const;
@@ -154,6 +189,10 @@ private:
     // EEQ charge calculation (Dec 2025 - Phase 2 D4 integration)
     std::unique_ptr<EEQSolver> m_eeq_solver;
     Vector m_eeq_charges;  // Cached EEQ charges for current geometry
+
+    // Claude Generated (2026): single-shot EEQ for D4 q-response (Phase 2)
+    bool m_use_d4_single_shot_eeq = false;
+    mutable curcuma::dispersion::D4ChargeModel m_d4_charge_model;
 
     // Claude Generated (Jan 31, 2026): Topology charges for zeta scaling
     // Reference: Fortran gfnff_ini.f90:789 - f1 = zeta(ati, topo%qa(i))

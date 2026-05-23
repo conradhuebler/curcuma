@@ -572,6 +572,19 @@ double XTB::calcDispersionEnergy() const
             m_d4_generator.get(), p);
     }
 
+    // Charge source for the q-response:
+    //  - "eeq": canonical single-shot dftd4 EEQ (analytical dq/dx, D4ChargeModel).
+    //  - "mulliken": the converged GFN2 SCF atomic charges drive zetac6; the
+    //    dq/dx response comes from CPSCF (computeMullikenChargeResponse).
+    const bool use_mulliken = (m_d4_charge_source == "mulliken");
+    m_d4_generator->setUseD4SingleShotEEQ(m_d4_charge_source == "eeq");
+    if (use_mulliken) {
+        // Feed the SCF Mulliken charges as the zeta charges. setTopologyCharges
+        // makes getZetaCharges() return them and GenerateDispersionPairsNative
+        // build zetac6 from them; dEdq (Phase 1) is then taken w.r.t. these.
+        m_d4_generator->setTopologyCharges(m_wfn.q_at);
+    }
+
     // m_geometry is in Angstrom; D4 expects Bohr.
     Matrix geom_bohr = m_geometry * AA_TO_AU;
     m_d4_generator->GenerateParameters(m_atoms, geom_bohr);
@@ -579,10 +592,25 @@ double XTB::calcDispersionEnergy() const
     // Always compute the gradient block — D4 is cheap and the cached
     // m_disp_gradient / m_disp_dEdcn are folded into calculateGradient()
     // when a gradient was requested at the top of Calculation().
+    //
+    // m_disp_dEdq holds dE_D4/dq (charge-response chain rule, first half). It
+    // is populated whenever a charge source is selected; the dq/dx contraction
+    // that turns it into a Cartesian contribution is applied below (EEQ) or in
+    // the GFN2 CPSCF path (mulliken). With the default "eeq" source this is
+    // the dftd4-conform behaviour.
+    const bool want_dEdq = !m_d4_charge_source.empty();
     const double E = m_d4_evaluator->computeEnergyAndGradient(
         m_atoms, geom_bohr,
         /*with_gradient=*/true,
-        m_disp_gradient, m_disp_dEdcn);
+        m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, want_dEdq);
+
+    // q-response chain rule: fold Σ_A dE_D4/dq_A · ∂q_A/∂R into the cached
+    // geometry gradient. For the "eeq" source this is the analytical single-shot
+    // EEQ response (D4ChargeModel); xtb_gradient.cpp then adds m_disp_gradient
+    // to the total gradient unchanged.
+    if (want_dEdq && m_d4_charge_source == "eeq" && m_disp_dEdq.size() == m_atomcount) {
+        m_d4_generator->addChargeResponseGradient(m_disp_dEdq, m_disp_gradient);
+    }
     m_disp_gradient_valid = true;
 
     if (CurcumaLogger::get_verbosity() >= 2) {

@@ -953,6 +953,43 @@ inline double zetaChargeScale(int Z, double q) {
     return std::exp(3.0 * (1.0 - std::exp(c_val * (1.0 - zeff_val / qmod))));
 }
 
+/**
+ * @brief Analytical derivative dzeta/dq of the D4 zeta charge-scaling factor
+ *
+ * Closed-form derivative of zetaChargeScale() w.r.t. the atomic charge q.
+ * Needed for the D4 dispersion charge-response gradient term
+ * (dE_D4/dq * dq/dx). Reference: gfnff_ini.f90:2187-2234.
+ *
+ * Let qmod = zeff + q, g = exp(c*(1 - zeff/qmod)), zeta = exp(3*(1-g)).
+ *   d(zeta)/dq = -3 * zeta * g * c * zeff / qmod^2
+ * In the clamped regions (qmod < 0 or unsupported Z) zeta is constant,
+ * so the derivative is exactly zero.
+ *
+ * @param Z Atomic number (1-based)
+ * @param q Atomic partial charge (Hartree)
+ * @return d(zeta)/dq (dimensionless per electron)
+ *
+ * Claude Generated (2026): D4 q-response chain rule (AP ∂q/∂x)
+ */
+inline double zetaChargeScaleDerivative(int Z, double q) {
+    if (Z < 1 || Z > 86) {
+        return 0.0;  // No scaling -> zeta constant -> derivative zero
+    }
+
+    int idx = Z - 1;
+    double zeff_val = zeta_zeff[idx];
+    double c_val = zeta_c[idx];
+
+    double qmod = zeff_val + q;
+    if (qmod < 0.0) {
+        return 0.0;  // zeta clamped to exp(3) -> derivative zero
+    }
+
+    double g = std::exp(c_val * (1.0 - zeff_val / qmod));
+    double zeta = std::exp(3.0 * (1.0 - g));
+    return -3.0 * zeta * g * c_val * zeff_val / (qmod * qmod);
+}
+
 // ============================================================================
 // SECTION: RAB Bond Length Estimation Parameters
 // Claude Generated (2026): Port of Fortran gfnff_rab.f90:gfnffrab()

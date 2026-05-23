@@ -213,6 +213,11 @@ public:
     bool isConverged() const { return m_scf_converged; }
     int  scfIterations() const { return m_scf_iterations; }
 
+    // D4 charge-response source: "eeq" (single-shot dftd4 EEQ, default) or
+    // "mulliken" (GFN2 SCF charges + CPSCF response). Set by the wrapper.
+    void setD4ChargeSource(const std::string& s) { m_d4_charge_source = s; }
+    const std::string& d4ChargeSource() const { return m_d4_charge_source; }
+
 private:
     /* ----- build-once state ------------------------------------------- */
     void buildBasis();                                   // xtb_native.cpp
@@ -316,7 +321,13 @@ private:
     mutable std::unique_ptr<curcuma::dispersion::D4Evaluator> m_d4_evaluator;
     mutable Matrix m_disp_gradient;       ///< Cached D4 geometry gradient (Eh/Bohr)
     mutable Vector m_disp_dEdcn;          ///< Cached D4 dE/dCN (Eh per CN unit)
+    mutable Vector m_disp_dEdq;           ///< Cached D4 dE/dq (Eh per electron), q-response
     mutable bool   m_disp_gradient_valid = false;
+
+    // D4 charge-response source: "eeq" (dftd4-conform, default) or "mulliken"
+    // (CPSCF response on the GFN2 SCF). Empty disables the q-response term
+    // (static-prefactor mode). Set from config in the constructor.
+    std::string m_d4_charge_source = "eeq";
 };
 
 } // namespace curcuma::xtb

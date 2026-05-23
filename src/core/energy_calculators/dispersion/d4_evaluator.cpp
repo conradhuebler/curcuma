@@ -119,10 +119,18 @@ double D4Evaluator::computeEnergyAndGradient(const std::vector<int>& atoms,
                                              const Matrix& geometry_bohr,
                                              bool with_gradient,
                                              Matrix& gradient_out,
-                                             Vector& dEdCN_out)
+                                             Vector& dEdCN_out,
+                                             Vector& dEdq_out,
+                                             bool with_dEdq)
 {
     assert(m_data != nullptr && "computeEnergyAndGradient requires a D4ParameterGenerator");
     const int natoms = static_cast<int>(atoms.size());
+
+    // The charge-response term needs the same charges that produced zetac6
+    // (topology charges for GFN-FF, EEQ charges for GFN2). Disable cleanly
+    // if no charge data is available for this geometry.
+    const bool do_dEdq = with_gradient && with_dEdq
+        && (m_data->getZetaCharges().size() == natoms);
 
     if (with_gradient) {
         if (gradient_out.rows() != natoms || gradient_out.cols() != 3) {
@@ -134,6 +142,11 @@ double D4Evaluator::computeEnergyAndGradient(const std::vector<int>& atoms,
             dEdCN_out = Vector::Zero(natoms);
         } else {
             dEdCN_out.setZero();
+        }
+        if (dEdq_out.size() != natoms) {
+            dEdq_out = Vector::Zero(natoms);
+        } else {
+            dEdq_out.setZero();
         }
     }
 
@@ -173,6 +186,24 @@ double D4Evaluator::computeEnergyAndGradient(const std::vector<int>& atoms,
             gradient_out.row(pair.j) -= dE_dr.transpose();
             dEdCN_out(pair.i) += dEdCN_i;
             dEdCN_out(pair.j) += dEdCN_j;
+
+            // Charge-response chain rule (first half): dE_D4/dq_A.
+            //   E_pair = -C6 * disp_sum * zeta_i * zeta_j
+            //   dE/dq_i = -C6 * disp_sum * (dzeta_i/dq_i) * zeta_j
+            //   dE/dq_j = -C6 * disp_sum * zeta_i * (dzeta_j/dq_j)
+            // Recomputing zeta from the same charges that produced pair.zetac6
+            // keeps this consistent with the energy (GenerateDispersionPairsNative).
+            if (do_dEdq) {
+                const Vector& q = m_data->getZetaCharges();
+                const int Zi = atoms[pair.i];
+                const int Zj = atoms[pair.j];
+                const double zeta_i = m_data->getZeta(Zi, q(pair.i));
+                const double zeta_j = m_data->getZeta(Zj, q(pair.j));
+                const double dzeta_i = m_data->getZetaDerivative(Zi, q(pair.i));
+                const double dzeta_j = m_data->getZetaDerivative(Zj, q(pair.j));
+                dEdq_out(pair.i) += -pair.C6 * disp_sum * dzeta_i * zeta_j;
+                dEdq_out(pair.j) += -pair.C6 * disp_sum * zeta_i * dzeta_j;
+            }
         }
     }
 

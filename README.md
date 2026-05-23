@@ -45,6 +45,12 @@ xtb methods:
 
 Using only **d3** or **d4** should be possible.
 
+Native GFN2 includes an analytic D4 dispersion charge-response gradient
+(∂E_D4/∂q · ∂q/∂x). The zeta charges default to a single-shot dftd4 EEQ model
+(`-d4_charge_source eeq`, analytic ∂q/∂x); `-d4_charge_source mulliken` feeds the
+GFN2 SCF charges (energy + ∂E/∂q; the CPSCF gradient response is still pending —
+see [docs/D4_Q_RESPONSE.md](docs/D4_Q_RESPONSE.md)).
+
 Please cite xtb, tblite etc if external methods are used within curcuma! The most recent information can be found at the respective github pages, some are listed below.
 
 UFF

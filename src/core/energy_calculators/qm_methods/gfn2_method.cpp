@@ -42,7 +42,8 @@ json GFN2Method::getDefaultConfig()
         { "threads", 1 },                    // Single-threaded by default
         { "print_orbitals", false },         // Print orbital analysis
         { "save_orbitals", false },          // Save orbital data to file
-        { "dispersion", "d4" }               // Dispersion correction (stub)
+        { "dispersion", "d4" },              // Dispersion correction (stub)
+        { "d4_charge_source", "eeq" }        // D4 zeta charges: "eeq" | "mulliken"
     };
 }
 
@@ -127,6 +128,19 @@ double GFN2Method::calculateEnergy(bool gradient)
             }
         }
         */
+
+        // D4 charge-response source ("eeq" default, or "mulliken" via CPSCF).
+        // The CLI flag -d4_charge_source auto-routes to the "xtb" scope; fall
+        // back to a top-level key, then the default.
+        {
+            std::string d4src = "eeq";
+            if (m_parameters.contains("xtb") && m_parameters["xtb"].is_object()
+                && m_parameters["xtb"].contains("d4_charge_source"))
+                d4src = m_parameters["xtb"]["d4_charge_source"].get<std::string>();
+            else
+                d4src = m_parameters.value("d4_charge_source", std::string("eeq"));
+            m_xtb->setD4ChargeSource(d4src);
+        }
 
         // Perform GFN2 calculation
         m_last_energy = m_xtb->Calculation(gradient);

@@ -16,6 +16,7 @@ parameters) and GFN2 (Caldeweyher 2019 BJ parameters).
 dispersion/
 ├── d4param_generator.{h,cpp}            Reference data + EEQ + dc6/dCN matrix
 ├── d4_evaluator.{h,cpp}                 Energy + analytical gradient kernel
+├── d4_charge_model.{h,cpp}              Single-shot EEQ + analytical dq/dx (q-response)
 ├── d4_reference_data_fixed.cpp          118-element D4 reference data (Fortran-extracted)
 ├── d4_reference_data.cpp                Legacy reference data (deprecated, kept for diff)
 ├── d4_reference_cn_fortran.cpp          D4 reference CN values (dftd3param.f90)
@@ -127,10 +128,22 @@ to plug it in without touching the CPU evaluator.
   (Tolerance: 5e-4 Eh/Å. All pass.)
 
 ### Known limitations
-1. **q-response chain rule not implemented.** `zetac6` is treated as a
-   static prefactor as in GFN-FF. The full GFN2 path (`∂E_D4/∂q · ∂q/∂x`
-   via SCF response) is a separate AP. Expected residual: sub-mEh on the
-   test set, much smaller than the 1–23 mEh D4-energy correction itself.
+1. **q-response chain rule — EEQ source implemented, Mulliken deferred.**
+   For GFN2 with `d4_charge_source="eeq"` (default) the full charge chain
+   rule `∂E_D4/∂q · ∂q/∂x` is now analytic: `∂E/∂q` from `D4Evaluator`
+   (Phase 1) and `∂q/∂x` from the canonical single-shot EEQ in
+   `d4_charge_model.{h,cpp}` (Phase 2). Validated by `test_d4_dedq`
+   (`∂E/∂q` to 1e-14 Eh/e, `∂q/∂x` to ~1e-11 Eh/Bohr) and the full FD
+   gradient (`test_xtb_gradient`, < 5e-5 Eh/Å). **GFN-FF still treats
+   `zetac6` as a static prefactor** (it uses two-phase topology charges,
+   whose ∂q/∂x is not analytic) — residual sub-mEh as before.
+   **`d4_charge_source="mulliken"` (Phase 3a):** the GFN2 SCF Mulliken
+   charges now drive zetac6 (energy + ∂E/∂q), selectable via the CLI flag
+   `-d4_charge_source mulliken` (routed through the `xtb` scope). The
+   ∂q_Mulliken/∂x **gradient response (CPSCF/Z-vector, Phase 3b) is NOT yet
+   implemented** — the mulliken gradient currently uses the static-prefactor
+   approximation for the q-term (same sub-mEh residual as before). Until 3b
+   lands, prefer `d4_charge_source="eeq"` (default) for gradient work.
 2. **GFN1 D3 still missing in `xtb_native.cpp`.** `calcDispersionEnergy()`
    returns 0 for GFN1; native D3 integration is a follow-up AP (the
    infrastructure in `D3ParameterGenerator` already exists).
@@ -144,13 +157,20 @@ to plug it in without touching the CPU evaluator.
 cd release && make -j4
 # GFN-FF regression (bit-equivalent expected):
 ctest -R "gfnff" --output-on-failure
-# GFN2 analytical-vs-FD gradient:
+# D4 q-response: ∂E/∂q (Phase 1) + single-shot EEQ ∂q/∂x (Phase 2):
+./test_cases/test_d4_dedq            # or: ctest -R d4_dedq
+# GFN2 analytical-vs-FD gradient (incl. q-response):
 ./test_cases/test_xtb_gradient \
    ../test_cases/sqm_reference/molecules/H2O.xyz \
    ../test_cases/sqm_reference/molecules/CH4.xyz \
    ../test_cases/sqm_reference/molecules/NH3.xyz \
    ../test_cases/sqm_reference/molecules/C6H6.xyz
 ```
+
+## Charge response (∂E_D4/∂q · ∂q/∂x)
+
+See [docs/D4_Q_RESPONSE.md](../../../../docs/D4_Q_RESPONSE.md) for the full
+feature description, math, and the Phase 3b (CPSCF/Z-vector) roadmap.
 
 ## References
 

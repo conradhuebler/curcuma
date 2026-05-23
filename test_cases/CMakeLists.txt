@@ -234,6 +234,16 @@ foreach(_mol H2O CH4 NH3)
         PROPERTIES TIMEOUT 120 LABELS "gradient;native_xtb")
 endforeach()
 
+# Claude Generated (2026, AP ∂q/∂x — Phase 1): D4 dE/dq analytical-vs-FD test
+add_executable(test_d4_dedq test_d4_dedq.cpp)
+target_link_libraries(test_d4_dedq curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_d4_dedq REUSE_FROM curcuma_core)
+endif()
+add_test(NAME d4_dedq COMMAND test_d4_dedq
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(d4_dedq PROPERTIES TIMEOUT 120 LABELS "gradient;dispersion")
+
 # Claude Generated: CLI argument validation test suite (October 2025)
 # Include comprehensive Bash-based CLI tests for all capabilities
 add_subdirectory(cli)

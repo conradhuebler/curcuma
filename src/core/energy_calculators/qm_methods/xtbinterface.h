@@ -35,6 +35,7 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     PARAM(max_iterations, Int, 100, "Maximum number of SCF iterations.", "SCF", {"SCFmaxiter"})
     PARAM(electronic_temperature, Double, 300.0, "Electronic temperature in Kelvin for Fermi smearing.", "SCF", {"Tele"})
     PARAM(spin, Double, 0.0, "Total spin of the system (0.0 = singlet).", "Molecular", {})
+    PARAM(d4_charge_source, String, "eeq", "Native GFN2 D4 zeta charge source: 'eeq' (single-shot dftd4 EEQ, analytical dq/dx) or 'mulliken' (GFN2 SCF charges + CPSCF response).", "Dispersion", {})
 END_PARAMETER_DEFINITION
 
 class UFF;

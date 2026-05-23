@@ -797,11 +797,15 @@ double GFN2::calculateDispersionEnergy() const {
     // requested a gradient: GFN2's calculateGradient() folds these in if
     // present, and the cost is dominated by the energy loop anyway. The
     // cached Matrix/Vector are reused across SCF cycles for the same geometry.
+    // Legacy GFN2 class: q-response not wired here (uses static prefactor).
+    // dEdq_unused only binds the reference; with_dEdq defaults to false.
+    Vector dEdq_unused;
     double disp_energy = nonconst_this->m_d4_evaluator->computeEnergyAndGradient(
         m_atoms, geometry_bohr,
         /*with_gradient=*/true,
         nonconst_this->m_disp_gradient,
-        nonconst_this->m_disp_dEdcn);
+        nonconst_this->m_disp_dEdcn,
+        dEdq_unused);
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::param("dispersion_d4_native", fmt::format("{:.6f} Eh", disp_energy));
