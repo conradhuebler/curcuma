@@ -48,6 +48,86 @@ static inline int ao_to_type_r(int ang, int local_ao)
 }
 
 /* ------------------------------------------------------------------ *
+ *  mpPairGrad()  —  bilinear multipole-interaction pair gradient     *
+ *                                                                    *
+ *  Evaluates G(M_i, M_j), the per-pair Cartesian gradient of the     *
+ *  GFN2 SD/DD/SQ multipole interaction energy, for atom iat (force   *
+ *  on iat; jat receives −g). Faithful copy of the energy gradient    *
+ *  (xtb_gradient.cpp Section 5) factored so that EVERY bilinear term *
+ *  draws exactly one moment factor from M_i and one from M_j, and    *
+ *  the geometry/damping prefactors (g3/g5/g7, fdmp*, ddmp*, rr_dmp)  *
+ *  are moment-independent.                                           *
+ *                                                                    *
+ *  Because G is bilinear in (M_i, M_j), its linearization in the     *
+ *  moments is  G(δM_i, M_j) + G(M_i, δM_j)  — i.e. call this twice   *
+ *  with one atom's moment triple swapped to its δ-counterpart. This  *
+ *  is the Mulliken charge-response of the multipole interaction      *
+ *  (Phase 3b-4b); the δ-moments come from mullikenFromDensity(D_z).  *
+ *                                                                    *
+ *  vec = R_jat − R_iat (TBLite convention). qp packing: xx,xy,yy,    *
+ *  xz,yz,zz. fddr is the ∂E/∂mrad scalar (added to both atoms).      *
+ *  mask selects term families (bit0 SD, bit1 DD, bit2 SQ) for        *
+ *  incremental FD validation.                                        *
+ * ------------------------------------------------------------------ */
+static void mpPairGrad(
+    const double vec[3], double r2,
+    double g1, double g3, double g5, double g7,
+    double fdmp3, double fdmp5, double ddmp3, double ddmp5,
+    double rr_dmp, double mp_dmp3v, double mp_dmp5v,
+    double qi, const double dpi[3], const double qpi[6],
+    double qj, const double dpj[3], const double qpj[6],
+    double g_out[3], double& fddr_out, unsigned mask)
+{
+    const double vx = vec[0], vy = vec[1], vz = vec[2];
+    g_out[0] = g_out[1] = g_out[2] = 0.0;
+    fddr_out = 0.0;
+
+    // ── SD (charge-dipole, g3) ────────────────────────────────────────
+    if (mask & 1u) {
+        const double dpiqj = (vx*dpi[0] + vy*dpi[1] + vz*dpi[2]) * qj;
+        const double qidpj = (vx*dpj[0] + vy*dpj[1] + vz*dpj[2]) * qi;
+        const double diff_sd = dpiqj - qidpj;
+        g_out[0] += -ddmp3*vx*diff_sd + fdmp3*g3*(qi*dpj[0] - qj*dpi[0]);
+        g_out[1] += -ddmp3*vy*diff_sd + fdmp3*g3*(qi*dpj[1] - qj*dpi[1]);
+        g_out[2] += -ddmp3*vz*diff_sd + fdmp3*g3*(qi*dpj[2] - qj*dpi[2]);
+        fddr_out += 3.0*diff_sd*mp_dmp3v*fdmp3*g3*(fdmp3/rr_dmp)*std::pow(rr_dmp*g1, mp_dmp3v);
+    }
+
+    // ── DD (dipole-dipole, g5) ────────────────────────────────────────
+    if (mask & 2u) {
+        const double dpidpj = dpi[0]*dpj[0] + dpi[1]*dpj[1] + dpi[2]*dpj[2];
+        const double dpiv = vx*dpi[0] + vy*dpi[1] + vz*dpi[2];
+        const double dpjv = vx*dpj[0] + vy*dpj[1] + vz*dpj[2];
+        const double edd = dpidpj*r2 - 3.0*dpjv*dpiv;
+        g_out[0] += -2.0*fdmp5*g5*dpidpj*vx + 3.0*fdmp5*g5*(dpiv*dpj[0] + dpjv*dpi[0]) - edd*ddmp5*g7*vx;
+        g_out[1] += -2.0*fdmp5*g5*dpidpj*vy + 3.0*fdmp5*g5*(dpiv*dpj[1] + dpjv*dpi[1]) - edd*ddmp5*g7*vy;
+        g_out[2] += -2.0*fdmp5*g5*dpidpj*vz + 3.0*fdmp5*g5*(dpiv*dpj[2] + dpjv*dpi[2]) - edd*ddmp5*g7*vz;
+        fddr_out += 3.0*edd*mp_dmp5v*fdmp5*g5*(fdmp5/rr_dmp)*std::pow(rr_dmp*g1, mp_dmp5v);
+    }
+
+    // ── SQ (charge-quadrupole, g5) ────────────────────────────────────
+    if (mask & 4u) {
+        const double eq =
+              (qj*qpi[0] + qpj[0]*qi) * vx*vx
+            + 2.0*(qj*qpi[1] + qpj[1]*qi) * vx*vy
+            + (qj*qpi[2] + qpj[2]*qi) * vy*vy
+            + 2.0*(qj*qpi[3] + qpj[3]*qi) * vx*vz
+            + 2.0*(qj*qpi[4] + qpj[4]*qi) * vy*vz
+            + (qj*qpi[5] + qpj[5]*qi) * vz*vz;
+        const double tivx = qpi[0]*vx + qpi[1]*vy + qpi[3]*vz;
+        const double tivy = qpi[1]*vx + qpi[2]*vy + qpi[4]*vz;
+        const double tivz = qpi[3]*vx + qpi[4]*vy + qpi[5]*vz;
+        const double tjvx = qpj[0]*vx + qpj[1]*vy + qpj[3]*vz;
+        const double tjvy = qpj[1]*vx + qpj[2]*vy + qpj[4]*vz;
+        const double tjvz = qpj[3]*vx + qpj[4]*vy + qpj[5]*vz;
+        g_out[0] += -eq*ddmp5*g7*vx - 2.0*fdmp5*g5*(qi*tjvx + qj*tivx);
+        g_out[1] += -eq*ddmp5*g7*vy - 2.0*fdmp5*g5*(qi*tjvy + qj*tivy);
+        g_out[2] += -eq*ddmp5*g7*vz - 2.0*fdmp5*g5*(qi*tjvz + qj*tivz);
+        fddr_out += eq*3.0*mp_dmp5v*fdmp5*g5*(fdmp5/rr_dmp)*std::pow(rr_dmp*g1, mp_dmp5v);
+    }
+}
+
+/* ------------------------------------------------------------------ *
  *  applyOrbitalHessian()                                             *
  *                                                                    *
  *  Computes A·z = (ε_a − ε_i)·z + K·z  where K is the SCC coupling  *
@@ -190,15 +270,19 @@ Matrix XTB::solveZVector(const Matrix& rhs_ov) const
  *  grad_out (Eh/Bohr), with w_A = dEdq(A) = ∂E_D4/∂q_A.             *
  *                                                                    *
  *  L = Σ_A w_A q_A = const − Tr(Λw·P·S),  Λw = diag(w_{atom(μ)}).   *
- *  dL/dx = −Tr(Λw·P·Sˣ)                    [explicit overlap]        *
- *        + Tr(D_z·Fˣ_skel) − Tr(W_z·Sˣ)    [Z-vector response]       *
+ *  dL/dx = Tr(D_z·Fˣ_skel) − Tr(W_z·Sˣ)    [Z-vector response]       *
+ *          + linearized SCC charge products (Coulomb δq·q + q·δq).   *
  *                                                                    *
- *  The response part is the LINEARIZATION of the energy gradient:    *
+ *  The response is the LINEARIZATION of the energy gradient:         *
  *  P→D_z (Pulay sval), W→W_z, and the Coulomb charge product is      *
  *  linearized (q_is·q_js → δq_is·q_js + q_is·δq_js with δq from D_z).*
  *                                                                    *
- *  Isotropic GFN2: multipole-Pulay deferred to Phase 3b-4.           *
- *  Sign/factor knobs (RHS_SIGN, EXPL_FAC) fixed at the FD gate.      *
+ *  RHS_SIGN=+1 is FD-validated against the raw ∂q_A/∂x (test Test D).*
+ *  Multipole charge-response terms exist but are gated OFF            *
+ *  (MP_RESPONSE_ENABLED): correct for low-multipole systems, but     *
+ *  mis-contracted for strongly polar molecules — see                 *
+ *  docs/PHASE3B5_MULTIPOLE_RESPONSE_WP.md. The D4 gradient target     *
+ *  (<5e-5) is met without them.                                      *
  * ------------------------------------------------------------------ */
 void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) const
 {
@@ -212,14 +296,21 @@ void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) co
     const int nvirt = nao - nocc;
     if (nocc <= 0 || nvirt <= 0) return;
 
-    // ---- FD-fixed sign/factor knobs ----
-    // RHS_SIGN=-1 validated against FD on HCN (z-response sign+scale, ratio≈1.1).
-    // EXPL_FAC: the explicit overlap term −Tr(Λw·P·Sˣ) is an Sˣ-contraction of
-    // the same family as the deferred multipole-Pulay (Phase 3b-4). Empirically
-    // it must be calibrated jointly with the multipole-Pulay against FD; kept at
-    // 0 in the isotropic stage (3b-3) where adding it alone degrades agreement.
-    constexpr double RHS_SIGN = -1.0;
-    constexpr double EXPL_FAC = 0.0;
+    // ---- response sign and multipole gating ----
+    // RHS_SIGN=+1: sign of the property-gradient RHS. Validated against FD on the
+    // RAW charge response ∂q_A/∂x (decoupled from D4) for H2O/HCN/CH4 — see
+    // test_xtb_cpscf Test D, which calls this routine with dEdq=e_A. The previous
+    // −1 was an artifact of a sign-blind max-abs validation metric and inverted
+    // the entire response (anal ≈ −num); fixing it cut the error 5–8×.
+    constexpr double RHS_SIGN = 1.0;
+
+    // Multipole charge-response terms (3b-4a integral-Pulay + 7b interaction).
+    // Correct and necessary for low-multipole systems (CH4 → ~1% vs FD) but
+    // over-/mis-contracted for strongly multipolar molecules (H2O/HCN worsen).
+    // Disabled pending a corrected property-gradient derivation; the D4 gradient
+    // target (<5e-5) is met without them. See docs/PHASE3B5_MULTIPOLE_RESPONSE_WP.md.
+    constexpr bool MP_RESPONSE_ENABLED = false;
+    constexpr unsigned MP_RESP_MASK = 0x7u;  // bit0 SD, bit1 DD, bit2 SQ (when enabled)
 
     // ---- geometry in Bohr ----
     std::vector<double> xyz(3 * nat);
@@ -299,8 +390,6 @@ void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) co
             const double rad_sum = atomic_rad_au(zi) + atomic_rad_au(zj);
             const double rr = std::sqrt(r / rad_sum);
 
-            const double lam_pair = dEdq(iat) + dEdq(jat);   // explicit Λw weight
-
             for (int ia = 0; ia < m_basis.nsh_at[iat]; ++ia) {
                 const int ish_a    = m_basis.ish_at[iat] + ia;
                 const int ia_start = m_basis.iao_sh[ish_a];
@@ -363,7 +452,6 @@ void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) co
                             const double Wmn = W_z(mu, nu);
                             const double Smn = m_S(mu, nu);
                             const double H0mn = m_H0(mu, nu);
-                            const double Pmn = m_wfn.P(mu, nu);
 
                             double dS[3];
                             CGTO::cgto_overlap_grad(sh_a, sh_b,
@@ -372,16 +460,14 @@ void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) co
                                 t_a, t_b, dS);
 
                             // response sval = linearization of energy sval (P→D_z, W→W_z)
-                            //                 + explicit overlap term −EXPL·lam_pair·P
-                            const double sval = 2.0*Dmn*h_av - 2.0*Wmn - Dmn*(v_a + v_b)
-                                              - EXPL_FAC * lam_pair * Pmn;
+                            const double sval = 2.0*Dmn*h_av - 2.0*Wmn - Dmn*(v_a + v_b);
                             G_sval[0] += sval * dS[0];
                             G_sval[1] += sval * dS[1];
                             G_sval[2] += sval * dS[2];
 
                             // Multipole integral Pulay (AP5b) with D_z (converged v_dp/v_qp).
                             // Same contraction as the energy gradient, P→D_z.
-                            if (m_method == MethodType::GFN2 && m_mp_initialized) {
+                            if (m_method == MethodType::GFN2 && m_mp_initialized && MP_RESPONSE_ENABLED) {
                                 double S_mp, D_mp[3], Q_mp[6];
                                 double dD_dA[3][3], dD_dB[3][3];
                                 double dQ_dA[3][6], dQ_dB[3][6];
@@ -478,6 +564,78 @@ void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) co
                 grad_out(iat, 1) += force * dy;  grad_out(jat, 1) -= force * dy;
                 grad_out(iat, 2) += force * dz;  grad_out(jat, 2) -= force * dz;
             }
+        }
+    }
+
+    // ---- 7b. Multipole-interaction response (Phase 3b-4b, GFN2 only) ----
+    //  Linearization of the SD/DD/SQ interaction gradient (xtb_gradient.cpp
+    //  Section 5) in the moments: G(δM_i,M_j)+G(M_i,δM_j), with δ-moments
+    //  (dq_at, ddp, dqp) from D_z. The mrad/CN chain rule (fddr) is folded
+    //  into the existing dEdcn accumulator (distributed in section 8).
+    if (m_method == MethodType::GFN2 && m_mp_initialized && MP_RESPONSE_ENABLED) {
+        Vector dEdr_mp = Vector::Zero(nat);
+        for (int iat = 0; iat < nat; ++iat) {
+            for (int jat = 0; jat < iat; ++jat) {
+                const double vec[3] = {
+                    xyz[3*jat+0] - xyz[3*iat+0],
+                    xyz[3*jat+1] - xyz[3*iat+1],
+                    xyz[3*jat+2] - xyz[3*iat+2]};
+                const double r2 = vec[0]*vec[0] + vec[1]*vec[1] + vec[2]*vec[2];
+                if (r2 < 1.0e-12) continue;
+                const double r1 = std::sqrt(r2);
+                const double g1 = 1.0/r1, g3 = g1*g1*g1, g5 = g3*g1*g1, g7 = g5*g1*g1;
+                const double rr_dmp = 0.5*(m_mp_mrad[iat] + m_mp_mrad[jat]);
+                const double fdmp3 = 1.0/(1.0 + 6.0*std::pow(rr_dmp*g1, mp_dmp3));
+                const double fdmp5 = 1.0/(1.0 + 6.0*std::pow(rr_dmp*g1, mp_dmp5));
+                const double ddmp3 = g5*fdmp3*(-3.0 + mp_dmp3*(1.0 - fdmp3));
+                const double ddmp5 = fdmp5*(-5.0 - mp_dmp5*(fdmp5 - 1.0));
+
+                // SCF moments M
+                const double qi = m_wfn.q_at(iat), qj = m_wfn.q_at(jat);
+                const double dpi[3] = {m_wfn.dp_at(0,iat), m_wfn.dp_at(1,iat), m_wfn.dp_at(2,iat)};
+                const double dpj[3] = {m_wfn.dp_at(0,jat), m_wfn.dp_at(1,jat), m_wfn.dp_at(2,jat)};
+                double qpi[6], qpj[6];
+                for (int k = 0; k < 6; ++k) { qpi[k] = m_wfn.qp_at(k,iat); qpj[k] = m_wfn.qp_at(k,jat); }
+
+                // δ-moments from D_z (same convention as M)
+                const double dqi = dq_at(iat), dqj = dq_at(jat);
+                const double ddpi[3] = {ddp(0,iat), ddp(1,iat), ddp(2,iat)};
+                const double ddpj[3] = {ddp(0,jat), ddp(1,jat), ddp(2,jat)};
+                double dqpi[6], dqpj[6];
+                for (int k = 0; k < 6; ++k) { dqpi[k] = dqp(k,iat); dqpj[k] = dqp(k,jat); }
+
+                double gp1[3], gp2[3], f1 = 0.0, f2 = 0.0;
+                // Pass 1: G(δM_i, M_j)
+                mpPairGrad(vec, r2, g1, g3, g5, g7, fdmp3, fdmp5, ddmp3, ddmp5,
+                           rr_dmp, mp_dmp3, mp_dmp5,
+                           dqi, ddpi, dqpi, qj, dpj, qpj, gp1, f1, MP_RESP_MASK);
+                // Pass 2: G(M_i, δM_j)
+                mpPairGrad(vec, r2, g1, g3, g5, g7, fdmp3, fdmp5, ddmp3, ddmp5,
+                           rr_dmp, mp_dmp3, mp_dmp5,
+                           qi, dpi, qpi, dqj, ddpj, dqpj, gp2, f2, MP_RESP_MASK);
+
+                const double gx = gp1[0] + gp2[0];
+                const double gy = gp1[1] + gp2[1];
+                const double gz = gp1[2] + gp2[2];
+                grad_out(iat, 0) += gx;  grad_out(jat, 0) -= gx;
+                grad_out(iat, 1) += gy;  grad_out(jat, 1) -= gy;
+                grad_out(iat, 2) += gz;  grad_out(jat, 2) -= gz;
+
+                const double fddr = f1 + f2;
+                dEdr_mp(iat) += fddr;
+                dEdr_mp(jat) += fddr;
+            }
+        }
+        // mrad/CN chain rule (same dmrdcn as xtb_gradient.cpp Section 5)
+        for (int i = 0; i < nat; ++i) {
+            const int zi = m_atoms[i];
+            const double rad = p_rad[zi - 1];
+            const double vcn = p_vcn[zi - 1];
+            const double arg = cn_resp(i) - vcn - mp_shift;
+            const double t1  = std::exp(-mp_kexp * arg);
+            const double t2  = (mp_rmax - rad) / (1.0 + t1);
+            const double dmrdcn = -t2 * mp_kexp * t1 / (1.0 + t1);
+            dEdcn(i) += dEdr_mp(i) * dmrdcn;
         }
     }
 

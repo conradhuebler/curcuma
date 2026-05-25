@@ -247,6 +247,9 @@ public:
     void setD4ChargeSource(const std::string& s) { m_d4_charge_source = s; }
     const std::string& d4ChargeSource() const { return m_d4_charge_source; }
 
+    // Tighten the SCF convergence threshold (for FD charge-response validation).
+    void setScfThreshold(double t) { m_scf_threshold = t; }
+
 private:
     /* ----- build-once state ------------------------------------------- */
     void buildBasis();                                   // xtb_native.cpp

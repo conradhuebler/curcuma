@@ -213,6 +213,15 @@ static TestResult testC_responseIsolation(const Mol& mol, const std::string& nam
     const Matrix d_anal = gm_a - ge_a;   // analytical q-response difference
     const Matrix d_num  = gm_n - ge_n;   // numerical q-response difference
     const double err = (d_anal - d_num).cwiseAbs().maxCoeff();
+    if (std::getenv("CPSCF_DUMP")) {
+        std::cout << "    --- " << name << " q-response vectors (anal | num | residual) ---\n";
+        for (int i = 0; i < d_anal.rows(); ++i)
+            for (int k = 0; k < 3; ++k)
+                std::cout << "      atom " << i << " " << "xyz"[k] << ":  "
+                          << std::setw(13) << d_anal(i,k) << "  "
+                          << std::setw(13) << d_num(i,k) << "  "
+                          << std::setw(13) << (d_anal(i,k)-d_num(i,k)) << "\n";
+    }
     std::cout << "        [" << name << "] |Δanal|=" << std::scientific << std::setprecision(3)
               << d_anal.cwiseAbs().maxCoeff() << "  |Δnum|=" << d_num.cwiseAbs().maxCoeff()
               << "  ratio(a/n)=" << (d_num.cwiseAbs().maxCoeff() > 1e-12
@@ -221,11 +230,82 @@ static TestResult testC_responseIsolation(const Mol& mol, const std::string& nam
             err, tol, err < tol};
 }
 
+// ================================================================
+// Test D: direct ∂q_A/∂x validation, fully decoupled from D4.
+// Calling computeMullikenChargeResponse with dEdq = e_A yields
+// ∂q_A/∂R (Eh-free, units 1/Bohr). FD-validate against the Mulliken
+// atomic charge q_A. This isolates the CPSCF charge response itself.
+// ================================================================
+static constexpr double AU_PER_AA = 1.0 / 0.529177210903;  // AA_TO_AU
+static TestResult testD_chargeResponse(const Mol& mol, const std::string& name, int targetA)
+{
+    CurcumaLogger::set_verbosity(0);
+    const int nat = mol.m_number_atoms;
+
+    // Tolerance 3e-2: the isotropic charge response (multipole terms gated off,
+    // MP_RESPONSE_ENABLED=false) agrees with FD to ~12-25% on polar molecules;
+    // this gate guards the validated RHS_SIGN=+1 (a sign regression gives ~150%).
+    // Tightening to <1% is the subject of docs/PHASE3B5_MULTIPOLE_RESPONSE_WP.md.
+    const double tolD = 3.0e-2;
+    const double scf_thr = 1.0e-9;  // tight SCF → low-noise FD charge reference
+    XTB xtb(MethodType::GFN2);
+    xtb.setScfThreshold(scf_thr);
+    xtb.InitialiseMolecule(mol);
+    xtb.Calculation(false);
+    if (!xtb.isConverged())
+        return {"(D) " + name + " dq/dR", 1.0, tolD, false};
+
+    Vector dEdq = Vector::Zero(nat);
+    dEdq(targetA) = 1.0;
+    Matrix g_anal = Matrix::Zero(nat, 3);
+    xtb.computeMullikenChargeResponse(dEdq, g_anal);   // ∂q_A/∂R, 1/Bohr
+
+    const double h = 2.0e-4;  // Angstrom (stable with tight SCF)
+    Matrix g_num(nat, 3);
+    for (int i = 0; i < nat; ++i)
+        for (int k = 0; k < 3; ++k) {
+            Mol mp = mol, mm = mol;
+            mp.m_geometry(i, k) += h;
+            mm.m_geometry(i, k) -= h;
+            XTB xp(MethodType::GFN2), xm(MethodType::GFN2);
+            xp.setScfThreshold(scf_thr); xm.setScfThreshold(scf_thr);
+            xp.InitialiseMolecule(mp); xp.Calculation(false);
+            xm.InitialiseMolecule(mm); xm.Calculation(false);
+            const double qp = xp.getCharges()(targetA);
+            const double qm = xm.getCharges()(targetA);
+            g_num(i, k) = (qp - qm) / (2.0 * h) / AU_PER_AA;  // 1/Bohr
+        }
+
+    if (std::getenv("CPSCF_DUMP")) {
+        std::cout << "    --- " << name << " dq_" << targetA
+                  << "/dR (anal | num | res) ---\n";
+        for (int i = 0; i < nat; ++i)
+            for (int k = 0; k < 3; ++k)
+                std::cout << "      " << i << " " << "xyz"[k] << ":  "
+                          << std::setw(13) << g_anal(i,k) << "  "
+                          << std::setw(13) << g_num(i,k) << "  "
+                          << std::setw(13) << (g_anal(i,k)-g_num(i,k)) << "\n";
+    }
+    const double err = (g_anal - g_num).cwiseAbs().maxCoeff();
+    std::cout << "        [" << name << " dq_" << targetA << "/dR] |anal|="
+              << std::scientific << std::setprecision(3) << g_anal.cwiseAbs().maxCoeff()
+              << "  |num|=" << g_num.cwiseAbs().maxCoeff() << "  err=" << err << "\n";
+    return {"(D) " + name + " dq_" + std::to_string(targetA) + "/dR", err, tolD, err < tolD};
+}
+
 int main()
 {
     std::cout << "=== test_xtb_cpscf: Gate 3b-2 — orbital Hessian + Z-vector ===\n";
 
     bool ok = true;
+
+    // --- Test D: direct charge-response validation (gates RHS_SIGN) ---
+    for (const char* nm : {"H2O", "HCN", "CH4"}) {
+        curcuma::Molecule m =
+            TestMolecules::TestMoleculeRegistry::createMolecule(nm, false);
+        const TestResult r = testD_chargeResponse(m.getMolInfo(), nm, 0);
+        print(r); ok &= r.passed;
+    }
 
     // --- Test A: H2O only (no orbital degeneracy) ---
     {
@@ -259,16 +339,15 @@ int main()
                            err, 1.0e-6, err < 1.0e-6};
         print(r); ok &= r.passed;
     }
-    //   INFORMATIONAL: H2O/HCN have multipoles → the isotropic z-response leaves
-    //   a multipole-Pulay + explicit-overlap residual (calibrated in Phase 3b-4).
-    //   HCN's ratio≈1.1 shows the z-response sign and scale are correct.
+    //   GATED (<5e-5): with RHS_SIGN=+1 the D4-mulliken charge-response gradient
+    //   meets the target for H2O/HCN even with multipole terms off (the residual
+    //   in the raw ∂q/∂x is immaterial here because ∂E_D4/∂q is small). The raw
+    //   ∂q/∂x accuracy is gated separately by Test D.
     for (const char* name : {"H2O", "HCN"}) {
         curcuma::Molecule m =
             TestMolecules::TestMoleculeRegistry::createMolecule(name, false);
         const TestResult r = testC_responseIsolation(m.getMolInfo(), name, 5.0e-5);
-        std::cout << "  [INFO] " << r.name << "  isotropic err=" << std::scientific
-                  << std::setprecision(3) << r.max_err
-                  << "  (multipole+explicit residual → Phase 3b-4)\n";
+        print(r); ok &= r.passed;
     }
 
     std::cout << "\n=== " << (ok ? "ALL PASSED" : "SOME FAILED") << " ===\n";
