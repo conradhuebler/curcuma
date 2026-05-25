@@ -28,6 +28,11 @@ and per-family `MP_RESP_MASK` in `xtb_response.cpp`):
 
 `|num|`: H₂O 8.95e-2, HCN 8.60e-2, CH₄ 3.96e-2.
 
+Additional informational anchors (multipole OFF, Test D, not gated): **NH₃**
+err 1.04e-1 (|num| 9.19e-2) — strongly multipolar, badly wrong on the C₃ axis
+(atom0-z anal −1.2e-2 vs num +9.2e-2); **C₆H₆** err 3.83e-2 (|num| 9.80e-2). These
+are the hardest cases and the primary targets once the multipole response is fixed.
+
 **Key facts:**
 - With both multipole terms ON, **CH₄ reaches ~1.2%** — the machinery is
   structurally sound for low-multipole systems.

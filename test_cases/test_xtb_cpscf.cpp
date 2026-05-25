@@ -300,11 +300,25 @@ int main()
     bool ok = true;
 
     // --- Test D: direct charge-response validation (gates RHS_SIGN) ---
+    // GATED: low-/moderately-polar systems where the isotropic response (multipole
+    // terms off) is accurate enough to make a sign regression unmistakable.
     for (const char* nm : {"H2O", "HCN", "CH4"}) {
         curcuma::Molecule m =
             TestMolecules::TestMoleculeRegistry::createMolecule(nm, false);
         const TestResult r = testD_chargeResponse(m.getMolInfo(), nm, 0);
         print(r); ok &= r.passed;
+    }
+    // INFORMATIONAL: strongly multipolar (NH3) / larger aromatic (C6H6). With the
+    // multipole charge-response terms gated off (MP_RESPONSE_ENABLED=false) the
+    // isotropic-only response is too inaccurate here to gate; they are diagnostic
+    // anchors for docs/PHASE3B5_MULTIPOLE_RESPONSE_WP.md.
+    for (const char* nm : {"NH3", "C6H6"}) {
+        curcuma::Molecule m =
+            TestMolecules::TestMoleculeRegistry::createMolecule(nm, false);
+        const TestResult r = testD_chargeResponse(m.getMolInfo(), nm, 0);
+        std::cout << "  [INFO] " << r.name << " err=" << std::scientific
+                  << std::setprecision(3) << r.max_err
+                  << " (not gated — multipole response off, see PHASE3B5)\n";
     }
 
     // --- Test A: H2O only (no orbital degeneracy) ---
