@@ -422,6 +422,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/xtb_thirdorder.cpp
         src/core/energy_calculators/qm_methods/xtb_scf.cpp
         src/core/energy_calculators/qm_methods/xtb_multipole.cpp
+        src/core/energy_calculators/qm_methods/xtb_response.cpp
         src/core/energy_calculators/qm_methods/xtb_gradient.cpp
         src/core/energy_calculators/qm_methods/nddo_params.cpp
         src/core/energy_calculators/ff_methods/gfnff_method.cpp

@@ -244,6 +244,16 @@ add_test(NAME d4_dedq COMMAND test_d4_dedq
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(d4_dedq PROPERTIES TIMEOUT 120 LABELS "gradient;dispersion")
 
+# Claude Generated (Phase 3b-2, May 2026): CPSCF orbital-Hessian + Z-vector gate test
+add_executable(test_xtb_cpscf test_xtb_cpscf.cpp)
+target_link_libraries(test_xtb_cpscf curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_xtb_cpscf REUSE_FROM curcuma_core)
+endif()
+add_test(NAME xtb_cpscf COMMAND test_xtb_cpscf
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(xtb_cpscf PROPERTIES TIMEOUT 120 LABELS "cpscf;native_xtb")
+
 # Claude Generated: CLI argument validation test suite (October 2025)
 # Include comprehensive Bash-based CLI tests for all capabilities
 add_subdirectory(cli)

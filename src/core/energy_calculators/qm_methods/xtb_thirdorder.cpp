@@ -18,26 +18,51 @@ namespace curcuma::xtb {
  *  Add third-order potential.                                        *
  *    GFN1: v_at(i) += q_i^2 · Γ_i   (atom-resolved)                 *
  *    GFN2: v_sh(s) += qsh_s^2 · Γ_s (shell-resolved)                *
+ *  Parametrized overload takes q_sh / q_at explicitly.              *
  * ------------------------------------------------------------------ */
+void XTB::addThirdOrderPotential(Potential& pot,
+                                  const Vector& q_sh,
+                                  const Vector& q_at) const
+{
+    if (m_method == MethodType::GFN1) {
+        Vector v_at = coulomb::potential_third_order_atom(m_basis.z, q_at);
+        pot.v_at += v_at;
+        for (int s = 0; s < m_basis.nsh; ++s)
+            pot.v_sh(s) += v_at(m_basis.sh2at[s]);
+    } else {
+        pot.v_sh += coulomb::potential_third_order_shell(
+            m_basis.z, m_basis.sh2at, m_basis.ang_sh, q_sh);
+    }
+}
+
 void XTB::addThirdOrderPotential(Potential& pot) const
 {
-    const auto meth = (m_method == MethodType::GFN1)
-        ? coulomb::Method::GFN1 : coulomb::Method::GFN2;
-    const int nat = m_atomcount;
+    addThirdOrderPotential(pot, m_wfn.q_sh, m_wfn.q_at);
+}
 
+/* ------------------------------------------------------------------ *
+ *  Linearized third-order Jacobian diagonal d(v_sh)/d(q_sh):        *
+ *    GFN2: diag_s = 2·Γ_s·q_sh_s    (shell-resolved)                *
+ *    GFN1: diag_s = 2·Γ_{at(s)}·q_at_{at(s)} (broadcast to shells)  *
+ *  Used in CPSCF orbital-Hessian kernel K·z.                        *
+ * ------------------------------------------------------------------ */
+Vector XTB::thirdOrderKernelDiag(const Vector& q_sh, const Vector& q_at) const
+{
+    const int nsh = m_basis.nsh;
+    Vector diag(nsh);
     if (m_method == MethodType::GFN1) {
-        // GFN1: atom-resolved — broadcast to shells
-        Vector v_at = coulomb::potential_third_order_atom(m_basis.z, m_wfn.q_at);
-        pot.v_at += v_at;
-        for (int s = 0; s < m_basis.nsh; ++s) {
+        for (int s = 0; s < nsh; ++s) {
             const int iat = m_basis.sh2at[s];
-            pot.v_sh(s) += v_at(iat);
+            diag(s) = 2.0 * coulomb::atom_hubbard_deriv_gfn1(m_basis.z[iat]) * q_at(iat);
         }
     } else {
-        // GFN2: shell-resolved
-        pot.v_sh += coulomb::potential_third_order_shell(
-            m_basis.z, m_basis.sh2at, m_basis.ang_sh, m_wfn.q_sh);
+        for (int s = 0; s < nsh; ++s) {
+            const int z = m_basis.z[m_basis.sh2at[s]];
+            const int l = m_basis.ang_sh[s];
+            diag(s) = 2.0 * coulomb::shell_hubbard_deriv_gfn2(z, l) * q_sh(s);
+        }
     }
+    return diag;
 }
 
 /* ------------------------------------------------------------------ *

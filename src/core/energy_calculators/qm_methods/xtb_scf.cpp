@@ -202,4 +202,97 @@ static bool checkConvergence(const Vector& q_sh_old,
     return (dq < threshold && de < threshold);
 }
 
+/* ------------------------------------------------------------------ *
+ *  buildFockFromPotential()                                          *
+ *                                                                    *
+ *  H0-free delta-Fock from a potential perturbation δpot:           *
+ *    δF_μν = -0.5·S_μν·(δv_ao(μ) + δv_ao(ν))                        *
+ *  + GFN2 multipole terms if δpot.v_dp/v_qp are populated.          *
+ *                                                                    *
+ *  Used in the CPSCF orbital-Hessian to compute (K·z)_ai:           *
+ *    δF = buildFockFromPotential(δpot)  → (Cᵀ δF C)_ai             *
+ * ------------------------------------------------------------------ */
+Matrix XTB::buildFockFromPotential(const Potential& dpot) const
+{
+    const int nao = m_basis.nao;
+    const int nat = m_atomcount;
+    Eigen::VectorXd v_ao;
+    expand_potential(m_basis, dpot, v_ao);
+
+    Matrix dF = Matrix::Zero(nao, nao);
+    for (int mu = 0; mu < nao; ++mu)
+        for (int nu = 0; nu < nao; ++nu)
+            dF(mu, nu) -= 0.5 * m_S(mu, nu) * (v_ao(mu) + v_ao(nu));
+
+    if (m_method == MethodType::GFN2 && m_mp_initialized
+        && dpot.v_dp.cols() == nat && dpot.v_qp.cols() == nat) {
+        for (int mu = 0; mu < nao; ++mu) {
+            const int iat = m_basis.ao2at[mu];
+            for (int nu = 0; nu < nao; ++nu) {
+                const int jat = m_basis.ao2at[nu];
+                double dd = 0.0;
+                for (int k = 0; k < 3; ++k)
+                    dd += m_dp_int[k](mu, nu) * dpot.v_dp(k, jat)
+                        + m_dp_int[k](nu, mu) * dpot.v_dp(k, iat);
+                double qq = 0.0;
+                for (int k = 0; k < 6; ++k)
+                    qq += m_qp_int[k](mu, nu) * dpot.v_qp(k, jat)
+                        + m_qp_int[k](nu, mu) * dpot.v_qp(k, iat);
+                dF(mu, nu) -= 0.5 * (dd + qq);
+            }
+        }
+    }
+    return dF;
+}
+
+/* ------------------------------------------------------------------ *
+ *  mullikenFromDensity()                                             *
+ *                                                                    *
+ *  Compute Mulliken charges and multipoles from a density            *
+ *  perturbation δP without modifying any member state.              *
+ *                                                                    *
+ *    δn_sh(s) = Σ_{μ∈s,ν} δP_μν · S_νμ                              *
+ *    δq_sh    = -δn_sh     (n0 constant)                             *
+ *    δq_at    = -Σ_{s∈i} δn_sh(s)                                   *
+ *    δdp_at, δqp_at  via tblite-convention integrals (GFN2 only)    *
+ * ------------------------------------------------------------------ */
+void XTB::mullikenFromDensity(const Matrix& dP,
+                               Vector& dq_sh, Vector& dq_at,
+                               Eigen::MatrixXd& ddp_at,
+                               Eigen::MatrixXd& dqp_at) const
+{
+    const int nao = m_basis.nao;
+    const int nsh = m_basis.nsh;
+    const int nat = m_atomcount;
+
+    Vector dn_sh = Vector::Zero(nsh);
+    for (int s = 0; s < nsh; ++s) {
+        const int ao_start = m_basis.iao_sh[s];
+        const int ao_nao   = m_basis.nao_sh[s];
+        for (int mu = ao_start; mu < ao_start + ao_nao; ++mu)
+            for (int nu = 0; nu < nao; ++nu)
+                dn_sh(s) += dP(mu, nu) * m_S(nu, mu);
+    }
+    dq_sh = -dn_sh;
+
+    dq_at = Vector::Zero(nat);
+    for (int s = 0; s < nsh; ++s)
+        dq_at(m_basis.sh2at[s]) -= dn_sh(s);
+
+    ddp_at = Eigen::MatrixXd::Zero(3, nat);
+    dqp_at = Eigen::MatrixXd::Zero(6, nat);
+    if (m_method == MethodType::GFN2 && m_mp_initialized) {
+        for (int mu = 0; mu < nao; ++mu) {
+            const int iat = m_basis.ao2at[mu];
+            for (int nu = 0; nu < nao; ++nu) {
+                const double dPji = dP(nu, mu);
+                for (int k = 0; k < 3; ++k)
+                    ddp_at(k, iat) -= dPji * m_dp_int[k](nu, mu);
+                for (int k = 0; k < 6; ++k)
+                    dqp_at(k, iat) -= dPji * m_qp_int[k](nu, mu);
+            }
+        }
+    }
+}
+
 } // namespace curcuma::xtb

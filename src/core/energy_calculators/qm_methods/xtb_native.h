@@ -173,6 +173,7 @@ public:
     ~XTB() override;
 
     // QMDriver API
+    using QMInterface::InitialiseMolecule;   // unhide base-class overloads (Mol& / Mol*)
     bool   InitialiseMolecule() override;
     double Calculation(bool gradient = false) override;
 
@@ -185,6 +186,8 @@ public:
     Vector  getOrbitalEnergies() const { return m_wfn.eps; }
     Matrix  getMOCoefficients() const { return m_wfn.C; }
     Matrix  getDensity() const { return m_wfn.P; }
+    const Matrix& getOverlap() const { return m_S; }
+    const Matrix& getFock()    const { return m_F; }
     double  getHOMOEnergy() const;
     double  getLUMOEnergy() const;
     double  getHOMOLUMOGap() const;
@@ -208,6 +211,32 @@ public:
     // API compatibility for GFN1Method/GFN2Method wrappers
     Vector getPartialCharges() const { return getCharges(); }
     Vector getCoordinationNumbers() const { return m_coordination_numbers; }
+
+    // --- CPSCF / Z-vector public API (Phase 3b) ---
+
+    // Orbital-Hessian matrix-vector product A·z = (ε_a−ε_i)·z + K·z.
+    // K is the SCC coupling kernel: δP → δq/δmultipole → δv → δF → occ-virt block.
+    // z_ov: nocc × nvirt, returns A·z of same shape.
+    Matrix applyOrbitalHessian(const Matrix& z_ov) const;  // xtb_response.cpp
+
+    // Preconditioned CG solver for A·z = rhs_ov.
+    // Preconditioner: 1/(ε_a−ε_i). Tolerance 1e-10, max 200 iterations.
+    Matrix solveZVector(const Matrix& rhs_ov) const;       // xtb_response.cpp
+
+    // Mulliken charge-response gradient: folds Σ_A dEdq(A)·∂q_A/∂x into grad_out
+    // (Eh/Bohr) via the CPSCF/Z-vector. Isotropic GFN2 (multipole-Pulay deferred,
+    // Phase 3b-4). grad_out is accumulated into, not overwritten.
+    void computeMullikenChargeResponse(const Vector& dEdq,
+                                       Matrix& grad_out) const; // xtb_response.cpp
+
+    // H0-free delta-Fock from a potential perturbation δpot (public for test access).
+    Matrix buildFockFromPotential(const Potential& dpot) const; // xtb_scf.cpp
+
+    // Mulliken charges and multipoles from a density perturbation δP (public for tests).
+    void mullikenFromDensity(const Matrix& dP,
+                             Vector& dq_sh, Vector& dq_at,
+                             Eigen::MatrixXd& ddp_at,
+                             Eigen::MatrixXd& dqp_at) const; // xtb_scf.cpp
 
     // Convergence
     bool isConverged() const { return m_scf_converged; }
@@ -234,14 +263,24 @@ private:
 
     // Isotropic Coulomb: v_sh update from current shell charges.
     void addCoulombShellPotential(Potential& pot) const;                 // xtb_coulomb.cpp
+    void addCoulombShellPotential(Potential& pot, const Vector& q_sh) const; // parametrized
     double energyCoulombShell() const;                                   // xtb_coulomb.cpp
 
     // Third-order (on-site, GFN2: shell-resolved; GFN1: atom-resolved).
     void addThirdOrderPotential(Potential& pot) const;                   // xtb_thirdorder.cpp
+    void addThirdOrderPotential(Potential& pot,                          // parametrized
+                                const Vector& q_sh,
+                                const Vector& q_at) const;
+    // Linearized third-order Jacobian: 2·Γ_s·q_sh (GFN2) or 2·Γ_i·q_at broadcast (GFN1)
+    Vector thirdOrderKernelDiag(const Vector& q_sh, const Vector& q_at) const; // xtb_thirdorder.cpp
     double energyThirdOrder() const;                                     // xtb_thirdorder.cpp
 
     // GFN2 multipole interactions (damped).
     void addMultipolePotential(Potential& pot) const;                    // xtb_multipole.cpp
+    void addMultipolePotential(Potential& pot,                           // parametrized
+                               const Vector& q_at,
+                               const Eigen::MatrixXd& dp_at,
+                               const Eigen::MatrixXd& qp_at) const;
     double energyMultipole() const;                                      // xtb_multipole.cpp
 
     // Assemble full Fock matrix: F = H0 + isotropic potential + multipole.

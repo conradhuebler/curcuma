@@ -41,10 +41,16 @@ void XTB::buildGammaMatrix()
 
 /* ------------------------------------------------------------------ *
  *  Add isotropic Coulomb potential to v_sh: v_sh += γ * q_sh         *
+ *  Parametrized overload: takes q_sh explicitly (CPSCF kernel base). *
  * ------------------------------------------------------------------ */
+void XTB::addCoulombShellPotential(Potential& pot, const Vector& q_sh) const
+{
+    pot.v_sh += coulomb::potential_shell(m_gamma, q_sh);
+}
+
 void XTB::addCoulombShellPotential(Potential& pot) const
 {
-    pot.v_sh += coulomb::potential_shell(m_gamma, m_wfn.q_sh);
+    addCoulombShellPotential(pot, m_wfn.q_sh);
 }
 
 /* ------------------------------------------------------------------ *

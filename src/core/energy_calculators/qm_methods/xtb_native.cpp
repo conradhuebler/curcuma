@@ -32,6 +32,7 @@
 #include "src/core/energy_calculators/dispersion/d4param_generator.h"
 #include "diis_accelerator.h"
 
+#include <chrono>
 #include <stdexcept>
 
 namespace curcuma::xtb {
@@ -72,8 +73,24 @@ namespace {
 
 double XTB::Calculation(bool gradient)
 {
+    using clock = std::chrono::steady_clock;
+    auto ms = [](clock::time_point a, clock::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    const int verb = CurcumaLogger::get_verbosity();
+    const auto t0 = clock::now();
+
+    if (verb >= 2) {
+        CurcumaLogger::header(fmt::format("{} SCF", methodName()));
+        CurcumaLogger::param("atoms",    m_atomcount);
+        CurcumaLogger::param("shells",   m_basis.nsh);
+        CurcumaLogger::param("basis_fns", m_basis.nao);
+        CurcumaLogger::param("electrons", static_cast<int>(m_wfn.nocc));
+    }
+
     // 1. Coordination numbers
     Vector cn = computeCoordinationNumbers();
+    const auto t_cn = clock::now();
 
     // 2. Self-energies
     Vector se;
@@ -84,17 +101,34 @@ double XTB::Calculation(bool gradient)
     getHamiltonianH0(se, S, H0);
     m_S  = S;
     m_H0 = H0;
+    const auto t_h0 = clock::now();
 
     // 4. Build gamma matrix (once per geometry)
     buildGammaMatrix();
+    const auto t_gamma = clock::now();
 
     // 5. Multipole setup (GFN2 only) — fills m_dp_int, m_qp_int, interaction matrices
     if (m_method == MethodType::GFN2) {
         setupMultipole();
     }
+    const auto t_setup = clock::now();
+
+    if (verb >= 3) {
+        CurcumaLogger::info("Setup timing:");
+        CurcumaLogger::info_fmt("  coordination numbers : {:8.2f} ms", ms(t0, t_cn));
+        CurcumaLogger::info_fmt("  overlap + H0         : {:8.2f} ms", ms(t_cn, t_h0));
+        CurcumaLogger::info_fmt("  Coulomb gamma matrix : {:8.2f} ms", ms(t_h0, t_gamma));
+        if (m_method == MethodType::GFN2)
+            CurcumaLogger::info_fmt("  multipole setup      : {:8.2f} ms", ms(t_gamma, t_setup));
+    }
 
     // 6. SCF loop with DIIS acceleration (Pulay 1980/1982)
     m_pot.reset();
+
+    if (verb >= 2) {
+        CurcumaLogger::info("SCF iterations (DIIS):");
+        CurcumaLogger::info("  iter             E(SCC)/Eh            dE        max|dq|     t/ms");
+    }
 
     const int max_iter   = m_scf_max_iter;
     const double thresh  = m_scf_threshold;
@@ -109,8 +143,10 @@ double XTB::Calculation(bool gradient)
     // Push from iter >= 1 (P is valid only after first solveEigen call)
     DIISAccelerator diis(6);
 
+    const auto t_scf_start = clock::now();
     int iter;
     for (iter = 0; iter < max_iter; ++iter) {
+        const auto t_iter0 = clock::now();
         // Reset and build potentials
         m_pot.reset();
 
@@ -161,6 +197,18 @@ double XTB::Calculation(bool gradient)
         const double e_scc = m_E_electronic + m_E_coulomb_shell
                            + m_E_third_order + m_E_multipole;
 
+        // Per-iteration diagnostics
+        const double dq = (q_sh_new - q_sh_old).cwiseAbs().maxCoeff();
+        const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
+        const double t_iter_ms = ms(t_iter0, clock::now());
+        if (verb >= 2) {
+            std::string line = fmt::format("  {:4d}   {:18.10f}   {:10.2e}   {:10.2e}   {:6.1f}",
+                                           iter, e_scc, de, dq, t_iter_ms);
+            if (verb >= 3)
+                line += fmt::format("   [DIIS n={} err={:.2e}]", diis.size(), diis.lastErrorNorm());
+            CurcumaLogger::info(line);
+        }
+
         // Check convergence (after first iteration)
         if (iter > 0) {
             if (checkConvergence_impl(q_sh_old, q_sh_new,
@@ -175,6 +223,16 @@ double XTB::Calculation(bool gradient)
     }
 
     m_scf_iterations = iter + 1;
+    const auto t_scf_end = clock::now();
+
+    if (verb >= 1) {
+        if (m_scf_converged)
+            CurcumaLogger::success_fmt("SCF converged in {} iterations ({:.1f} ms)",
+                                       m_scf_iterations, ms(t_scf_start, t_scf_end));
+        else
+            CurcumaLogger::warn_fmt("SCF NOT converged after {} iterations ({:.1f} ms)",
+                                    m_scf_iterations, ms(t_scf_start, t_scf_end));
+    }
 
     // Persist converged Fock matrix for gradient / debug
     m_F = buildFock(m_H0, m_S, m_pot);
@@ -189,20 +247,26 @@ double XTB::Calculation(bool gradient)
 
     m_E_total = m_E_electronic + m_E_repulsion
               + m_E_halogen_bond + m_E_dispersion;
+    const auto t_energies = clock::now();
 
-    if (CurcumaLogger::get_verbosity() >= 2) {
+    if (verb >= 2) {
         CurcumaLogger::info("Energy decomposition:");
         CurcumaLogger::info(fmt::format("  Electronic   = {: .8f} Eh", m_E_electronic));
         CurcumaLogger::info(fmt::format("  Coulomb ES2  = {: .8f} Eh", m_E_coulomb_shell));
         CurcumaLogger::info(fmt::format("  Third-order  = {: .8f} Eh", m_E_third_order));
-        CurcumaLogger::info(fmt::format("  Multipole    = {: .8f} Eh", m_E_multipole));
+        if (m_method == MethodType::GFN2)
+            CurcumaLogger::info(fmt::format("  Multipole    = {: .8f} Eh", m_E_multipole));
         CurcumaLogger::info(fmt::format("  Repulsion    = {: .8f} Eh", m_E_repulsion));
-        CurcumaLogger::info(fmt::format("  Halogen bond = {: .8f} Eh", m_E_halogen_bond));
+        if (m_method == MethodType::GFN1)
+            CurcumaLogger::info(fmt::format("  Halogen bond = {: .8f} Eh", m_E_halogen_bond));
         CurcumaLogger::info(fmt::format("  Dispersion   = {: .8f} Eh", m_E_dispersion));
-        CurcumaLogger::info(fmt::format("  Total        = {: .8f} Eh", m_E_total));
-        CurcumaLogger::info(fmt::format("  SCF iters    = {}", m_scf_iterations));
-        CurcumaLogger::info(fmt::format("  DIIS vectors = {}", diis.size()));
-        CurcumaLogger::info(fmt::format("  DIIS error   = {:.4e}", diis.lastErrorNorm()));
+        CurcumaLogger::result(fmt::format("  Total        = {: .8f} Eh", m_E_total));
+
+        // Frontier orbitals
+        const double homo = getHOMOEnergy();
+        const double lumo = getLUMOEnergy();
+        CurcumaLogger::info(fmt::format("HOMO = {: .6f} Eh   LUMO = {: .6f} Eh   gap = {:.4f} eV",
+                                        homo, lumo, (lumo - homo) * 27.211386245988));
     }
 
     // Update QMDriver state for wrapper compatibility
@@ -211,6 +275,7 @@ double XTB::Calculation(bool gradient)
     m_num_electrons = static_cast<int>(m_wfn.nocc);
     m_coordination_numbers = cn;
 
+    const auto t_grad0 = clock::now();
     if (gradient) {
         // Rebuild potential with converged shell charges before computing gradient.
         // (m_pot was overwritten during SCF; final values must be regenerated.)
@@ -222,10 +287,16 @@ double XTB::Calculation(bool gradient)
         calculateGradient();       // fills m_gradient in Eh/Bohr
         m_gradient /= au;          // Eh/Bohr → Eh/Å: 1 Eh/Bohr = (1/au) Eh/Å
     }
+    const auto t_end = clock::now();
 
-    if (!m_scf_converged) {
-        CurcumaLogger::warn("XTB::Calculation did NOT converge after "
-                           + std::to_string(max_iter) + " iterations");
+    if (verb >= 2) {
+        CurcumaLogger::info("Timing breakdown:");
+        CurcumaLogger::info_fmt("  setup        : {:8.2f} ms", ms(t0, t_setup));
+        CurcumaLogger::info_fmt("  SCF ({:3d} it) : {:8.2f} ms", m_scf_iterations, ms(t_scf_start, t_scf_end));
+        CurcumaLogger::info_fmt("  post-SCF E   : {:8.2f} ms", ms(t_scf_end, t_energies));
+        if (gradient)
+            CurcumaLogger::info_fmt("  gradient     : {:8.2f} ms", ms(t_grad0, t_end));
+        CurcumaLogger::info_fmt("  TOTAL        : {:8.2f} ms", ms(t0, t_end));
     }
 
     return m_E_total;
@@ -610,6 +681,10 @@ double XTB::calcDispersionEnergy() const
     // to the total gradient unchanged.
     if (want_dEdq && m_d4_charge_source == "eeq" && m_disp_dEdq.size() == m_atomcount) {
         m_d4_generator->addChargeResponseGradient(m_disp_dEdq, m_disp_gradient);
+    } else if (want_dEdq && m_d4_charge_source == "mulliken"
+               && m_disp_dEdq.size() == m_atomcount) {
+        // GFN2 CPSCF/Z-vector response ∂q_Mulliken/∂x (Phase 3b, isotropic).
+        computeMullikenChargeResponse(m_disp_dEdq, m_disp_gradient);
     }
     m_disp_gradient_valid = true;
 

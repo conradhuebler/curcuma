@@ -231,8 +231,14 @@ void XTB::setupMultipole()
  *                                                                    *
  *  Must be called AFTER addCoulombShellPotential/addThirdOrder so    *
  *  those contributions are already in v_sh.                          *
+ *                                                                    *
+ *  Parametrized overload takes q_at, dp_at, qp_at explicitly so     *
+ *  the CPSCF kernel can apply the same maps to δ-quantities.        *
  * ------------------------------------------------------------------ */
-void XTB::addMultipolePotential(Potential& pot) const
+void XTB::addMultipolePotential(Potential& pot,
+                                 const Vector& q_at,
+                                 const Eigen::MatrixXd& dp_at,
+                                 const Eigen::MatrixXd& qp_at) const
 {
     if (!m_mp_initialized) return;
     const int nat = m_atomcount;
@@ -245,22 +251,22 @@ void XTB::addMultipolePotential(Potential& pot) const
     for (int i = 0; i < nat; ++i) {
         double vd0 = 0.0, vd1 = 0.0, vd2 = 0.0;
         for (int j = 0; j < nat; ++j) {
-            vd0 += m_mp_amat_sd[0](i, j) * m_wfn.q_at(j);
-            vd1 += m_mp_amat_sd[1](i, j) * m_wfn.q_at(j);
-            vd2 += m_mp_amat_sd[2](i, j) * m_wfn.q_at(j);
-            vd0 += m_mp_amat_dd[0][0](i, j) * m_wfn.dp_at(0, j)
-                 + m_mp_amat_dd[0][1](i, j) * m_wfn.dp_at(1, j)
-                 + m_mp_amat_dd[0][2](i, j) * m_wfn.dp_at(2, j);
-            vd1 += m_mp_amat_dd[1][0](i, j) * m_wfn.dp_at(0, j)
-                 + m_mp_amat_dd[1][1](i, j) * m_wfn.dp_at(1, j)
-                 + m_mp_amat_dd[1][2](i, j) * m_wfn.dp_at(2, j);
-            vd2 += m_mp_amat_dd[2][0](i, j) * m_wfn.dp_at(0, j)
-                 + m_mp_amat_dd[2][1](i, j) * m_wfn.dp_at(1, j)
-                 + m_mp_amat_dd[2][2](i, j) * m_wfn.dp_at(2, j);
+            vd0 += m_mp_amat_sd[0](i, j) * q_at(j);
+            vd1 += m_mp_amat_sd[1](i, j) * q_at(j);
+            vd2 += m_mp_amat_sd[2](i, j) * q_at(j);
+            vd0 += m_mp_amat_dd[0][0](i, j) * dp_at(0, j)
+                 + m_mp_amat_dd[0][1](i, j) * dp_at(1, j)
+                 + m_mp_amat_dd[0][2](i, j) * dp_at(2, j);
+            vd1 += m_mp_amat_dd[1][0](i, j) * dp_at(0, j)
+                 + m_mp_amat_dd[1][1](i, j) * dp_at(1, j)
+                 + m_mp_amat_dd[1][2](i, j) * dp_at(2, j);
+            vd2 += m_mp_amat_dd[2][0](i, j) * dp_at(0, j)
+                 + m_mp_amat_dd[2][1](i, j) * dp_at(1, j)
+                 + m_mp_amat_dd[2][2](i, j) * dp_at(2, j);
         }
-        vdp(0, i) = vd0 + 2.0 * m_mp_dkernel[i] * m_wfn.dp_at(0, i);
-        vdp(1, i) = vd1 + 2.0 * m_mp_dkernel[i] * m_wfn.dp_at(1, i);
-        vdp(2, i) = vd2 + 2.0 * m_mp_dkernel[i] * m_wfn.dp_at(2, i);
+        vdp(0, i) = vd0 + 2.0 * m_mp_dkernel[i] * dp_at(0, i);
+        vdp(1, i) = vd1 + 2.0 * m_mp_dkernel[i] * dp_at(1, i);
+        vdp(2, i) = vd2 + 2.0 * m_mp_dkernel[i] * dp_at(2, i);
     }
 
     // --- vqp(k, iat) = Σ_jat amat_sq[k](iat,jat)·q_at(jat)
@@ -272,8 +278,8 @@ void XTB::addMultipolePotential(Potential& pot) const
         for (int k = 0; k < 6; ++k) {
             double v = 0.0;
             for (int j = 0; j < nat; ++j)
-                v += m_mp_amat_sq[k](i, j) * m_wfn.q_at(j);
-            vqp(k, i) = v + 2.0 * m_mp_qkernel[i] * m_wfn.qp_at(k, i) * mpscale_q[k];
+                v += m_mp_amat_sq[k](i, j) * q_at(j);
+            vqp(k, i) = v + 2.0 * m_mp_qkernel[i] * qp_at(k, i) * mpscale_q[k];
         }
     }
 
@@ -284,14 +290,19 @@ void XTB::addMultipolePotential(Potential& pot) const
     for (int i = 0; i < nat; ++i) {
         double acc = 0.0;
         for (int j = 0; j < nat; ++j) {
-            acc += m_mp_amat_sd[0](j, i) * m_wfn.dp_at(0, j)
-                 + m_mp_amat_sd[1](j, i) * m_wfn.dp_at(1, j)
-                 + m_mp_amat_sd[2](j, i) * m_wfn.dp_at(2, j);
+            acc += m_mp_amat_sd[0](j, i) * dp_at(0, j)
+                 + m_mp_amat_sd[1](j, i) * dp_at(1, j)
+                 + m_mp_amat_sd[2](j, i) * dp_at(2, j);
             for (int k = 0; k < 6; ++k)
-                acc += m_mp_amat_sq[k](j, i) * m_wfn.qp_at(k, j);
+                acc += m_mp_amat_sq[k](j, i) * qp_at(k, j);
         }
         pot.v_at(i) += acc;  // add to existing v_at (from third-order, etc.)
     }
+}
+
+void XTB::addMultipolePotential(Potential& pot) const
+{
+    addMultipolePotential(pot, m_wfn.q_at, m_wfn.dp_at, m_wfn.qp_at);
 }
 
 /* ------------------------------------------------------------------ *
