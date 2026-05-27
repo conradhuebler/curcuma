@@ -265,6 +265,13 @@ int main(int argc, char** argv)
 
     tblite_set_calculator_save_integrals(ctx, calc, 1);
 
+    // AP6b Option(b) diagnostic (Claude Generated): optionally tighten SCF accuracy
+    // to test whether the exposed pot%vat lags wfn%dpat by one SCF step.
+    if (const char* acc = std::getenv("CURCUMA_TBLITE_ACC")) {
+        tblite_set_calculator_accuracy(ctx, calc, std::atof(acc));
+        tblite_set_calculator_max_iter(ctx, calc, 500);
+    }
+
     tblite_result res = tblite_new_result();
     tblite_get_singlepoint(ctx, mol, calc, res);
 
@@ -366,6 +373,45 @@ int main(int argc, char** argv)
     //  GFN2 multipole reconstruction
     // =====================================================================
     if (is_gfn2) {
+        // AP6b diagnostic (Claude Generated): genuine tblite multipole AO integrals.
+        // res%results%dipole has Fortran shape (3, nao, nao); column-major flatten gives
+        //   dpI_vec[k + 3*p + 3*nao*q] = dpint(k, p, q)  (centered on atom of index q).
+        // res%results%quadrupole has shape (6, nao, nao) analogously. These are the
+        // post-shift_operator, traceless, atom-centered arrays that enter the Fock build.
+        std::vector<double> dpI_vec(3 * nao * nao), qpI_vec(6 * nao * nao);
+        tblite_get_result_dipole_integral    (err, res, dpI_vec.data());
+        tblite_get_result_quadrupole_integral(err, res, qpI_vec.data());
+        std::array<Eigen::MatrixXd, 3> dp_tbl_real;
+        std::array<Eigen::MatrixXd, 6> qp_tbl_real;
+        for (int k = 0; k < 3; ++k) dp_tbl_real[k] = Eigen::MatrixXd::Zero(nao, nao);
+        for (int k = 0; k < 6; ++k) qp_tbl_real[k] = Eigen::MatrixXd::Zero(nao, nao);
+        for (int p = 0; p < nao; ++p) {
+            for (int q = 0; q < nao; ++q) {
+                for (int k = 0; k < 3; ++k) dp_tbl_real[k](p, q) = dpI_vec[k + 3*p + 3*nao*q];
+                for (int k = 0; k < 6; ++k) qp_tbl_real[k](p, q) = qpI_vec[k + 6*p + 6*nao*q];
+            }
+        }
+
+        // AP6b Option(b) (Claude Generated): genuine tblite atomic multipole moments and
+        // multipole potentials. tblite arrays are (k, nat, nspin) / (nat, nspin) column-major;
+        // the charge channel (ispin=0) is the first k*nat / nat entries.
+        int nspin_tbl = 1;
+        tblite_get_result_number_of_spins(err, res, &nspin_tbl);
+        std::vector<double> dpat_vec(3 * nat * nspin_tbl), qpat_vec(6 * nat * nspin_tbl);
+        std::vector<double> vat_vec(nat * nspin_tbl), vdp_vec(3 * nat * nspin_tbl), vqp_vec(6 * nat * nspin_tbl);
+        tblite_get_result_atomic_dipole    (err, res, dpat_vec.data());
+        tblite_get_result_atomic_quadrupole(err, res, qpat_vec.data());
+        tblite_get_result_potential_vat    (err, res, vat_vec.data());
+        tblite_get_result_potential_vdp    (err, res, vdp_vec.data());
+        tblite_get_result_potential_vqp    (err, res, vqp_vec.data());
+        Eigen::MatrixXd dpat_real(3, nat), qpat_real(6, nat), vdp_real(3, nat), vqp_real(6, nat);
+        Eigen::VectorXd vat_real(nat);
+        for (int iat = 0; iat < nat; ++iat) {
+            for (int k = 0; k < 3; ++k) { dpat_real(k, iat) = dpat_vec[k + 3*iat]; vdp_real(k, iat) = vdp_vec[k + 3*iat]; }
+            for (int k = 0; k < 6; ++k) { qpat_real(k, iat) = qpat_vec[k + 6*iat]; vqp_real(k, iat) = vqp_vec[k + 6*iat]; }
+            vat_real(iat) = vat_vec[iat];
+        }
+
         // 1) Build local basis.
         const auto shells_local = buildBasis(num, method_s);
         int my_nao = 0;
@@ -630,6 +676,25 @@ int main(int argc, char** argv)
         for (int i = 0; i < nat; ++i)
             out["gf2"]["vat_extra"].push_back(vat_extra(i));
 
+        // AP6b Option(b): genuine tblite atomic moments + multipole potentials (charge channel).
+        out["dpat_tblite"] = json::array();
+        for (int i = 0; i < nat; ++i)
+            out["dpat_tblite"].push_back({dpat_real(0,i), dpat_real(1,i), dpat_real(2,i)});
+        out["qpat_tblite"] = json::array();
+        for (int i = 0; i < nat; ++i)
+            out["qpat_tblite"].push_back(
+                {qpat_real(0,i), qpat_real(1,i), qpat_real(2,i), qpat_real(3,i), qpat_real(4,i), qpat_real(5,i)});
+        out["vdp_tblite"] = json::array();
+        for (int i = 0; i < nat; ++i)
+            out["vdp_tblite"].push_back({vdp_real(0,i), vdp_real(1,i), vdp_real(2,i)});
+        out["vqp_tblite"] = json::array();
+        for (int i = 0; i < nat; ++i)
+            out["vqp_tblite"].push_back(
+                {vqp_real(0,i), vqp_real(1,i), vqp_real(2,i), vqp_real(3,i), vqp_real(4,i), vqp_real(5,i)});
+        out["vat_tblite"] = json::array();
+        for (int i = 0; i < nat; ++i)
+            out["vat_tblite"].push_back(vat_real(i));
+
         // Dump interaction matrices for small systems
         if (nat <= 6) {
             out["gf2"]["amat_sd"] = json::array();
@@ -644,6 +709,13 @@ int main(int argc, char** argv)
             out["gf2"]["qp_int"] = json::array();
             for (int k = 0; k < 6; ++k)
                 out["gf2"]["qp_int"].push_back(storeEigenMatrix(qp_int_tbl[k]));
+            // AP6b: genuine tblite integrals (authoritative reference for the audit).
+            out["dipole_integral_tblite"] = json::array();
+            for (int k = 0; k < 3; ++k)
+                out["dipole_integral_tblite"].push_back(storeEigenMatrix(dp_tbl_real[k]));
+            out["quadrupole_integral_tblite"] = json::array();
+            for (int k = 0; k < 6; ++k)
+                out["quadrupole_integral_tblite"].push_back(storeEigenMatrix(qp_tbl_real[k]));
         }
     }
 

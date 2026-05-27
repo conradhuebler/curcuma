@@ -37,9 +37,10 @@
 #include <string>
 #include <vector>
 
-// Forward declarations — the D4 stack only lives in xtb_native.cpp /
+// Forward declarations — the D3/D4 stack only lives in xtb_native.cpp /
 // xtb_gradient.cpp, so we keep this header free of the dispersion include.
 class D4ParameterGenerator;
+class D3ParameterGenerator;
 namespace curcuma::dispersion { class D4Evaluator; }
 
 namespace curcuma::xtb {
@@ -304,6 +305,12 @@ private:
     // GFN2 D4 dispersion (optional — requires USE_D4 at compile time)
     double calcDispersionEnergy() const;                                 // xtb_native.cpp
 
+    // GFN2 self-consistent D4 (AP6b): add dE_D4/dq_A (exact per-reference,
+    // at the current SCF Mulliken charges m_wfn.q_at) to the atom potential
+    // pot.v_at, so the D4 charge-coupling enters the Fock during the SCF
+    // (matches tblite's dispersion%get_potential). GFN2 only. Claude Generated.
+    void addDispersionPotential(Potential& pot) const;                   // xtb_native.cpp
+
     void calculateGradient();   // xtb_gradient.cpp — fills m_gradient in Eh/Bohr
 
     /* ----- legacy QMDriver hooks (still routed through MakeOverlap/H) */
@@ -361,7 +368,10 @@ private:
     // Created lazily on first dispersion evaluation; only meaningful for GFN2.
     mutable std::unique_ptr<::D4ParameterGenerator> m_d4_generator;
     mutable std::unique_ptr<curcuma::dispersion::D4Evaluator> m_d4_evaluator;
-    mutable Matrix m_disp_gradient;       ///< Cached D4 geometry gradient (Eh/Bohr)
+    // GFN1 D3(BJ) dispersion — energy from D3ParameterGenerator, geometry
+    // gradient by finite differences (the generator exposes no analytic grad).
+    mutable std::unique_ptr<::D3ParameterGenerator> m_d3_generator;
+    mutable Matrix m_disp_gradient;       ///< Cached D3/D4 geometry gradient (Eh/Bohr)
     mutable Vector m_disp_dEdcn;          ///< Cached D4 dE/dCN (Eh per CN unit)
     mutable Vector m_disp_dEdq;           ///< Cached D4 dE/dq (Eh per electron), q-response
     mutable bool   m_disp_gradient_valid = false;

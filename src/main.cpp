@@ -1495,7 +1495,7 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
     double energy = energy_calc.CalculateEnergy(true);
 
     fmt::print("\nCharge {} Spin {}\n", molecule.Charge(), molecule.Spin());
-    CurcumaLogger::energy_abs(energy, "Single Point Energy");
+    fmt::print("Single Point Energy = {:.8f} Eh\n", energy);
 
     Geometry gradient = energy_calc.Gradient();
     double grad_norm = Eigen::Map<Eigen::VectorXd>(gradient.data(), gradient.size()).norm();

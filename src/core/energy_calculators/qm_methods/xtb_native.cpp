@@ -30,6 +30,7 @@
 #include "src/core/config_manager.h"
 #include "src/core/energy_calculators/dispersion/d4_evaluator.h"
 #include "src/core/energy_calculators/dispersion/d4param_generator.h"
+#include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #include "diis_accelerator.h"
 
 #include <chrono>
@@ -139,8 +140,16 @@ double XTB::Calculation(bool gradient)
     Vector q_sh_new;
     double e_total_old = 0.0;
 
+    // Charge-sloshing control: damp the density during a warmup phase before
+    // enabling DIIS. Polar / multiple-bond systems (HCN, nitriles, amides) have
+    // more than one self-consistent solution; starting DIIS straight from the
+    // bare-H0 guess can lock onto a wrong charge-transfer state. A few strongly
+    // damped iterations keep the iteration in the ground-state basin first.
+    const double damp = m_scf_damping;   // density mixing (default 0.4)
+    const int diis_start = 5;            // damped warmup iterations before DIIS
+    Matrix P_old;
+
     // DIIS accelerator: keep last 6 Fock matrices
-    // Push from iter >= 1 (P is valid only after first solveEigen call)
     DIISAccelerator diis(6);
 
     const auto t_scf_start = clock::now();
@@ -159,14 +168,16 @@ double XTB::Calculation(bool gradient)
         // GFN2 multipole
         if (m_method == MethodType::GFN2) {
             addMultipolePotential(m_pot);
+            // Self-consistent D4: exact per-reference dE_D4/dq into the atom potential.
+            addDispersionPotential(m_pot);
         }
 
         // Expand to AO potential and build Fock
         Matrix F = buildFock(m_H0, m_S, m_pot);
 
-        // DIIS: push F+P into history and extrapolate when ≥2 vectors available.
-        // P is only valid from iter >= 1 (after the first solveEigen call).
-        if (iter >= 1) {
+        // DIIS extrapolation only after the damped warmup, so the early
+        // iterations cannot extrapolate the density out of the right basin.
+        if (iter >= diis_start) {
             diis.push(F, m_wfn.P, m_S);
             if (diis.size() >= 2) {
                 F = diis.extrapolate();
@@ -180,6 +191,13 @@ double XTB::Calculation(bool gradient)
             m_scf_iterations = iter;
             return m_E_total;
         }
+
+        // Density damping during warmup: P = damp·P_new + (1-damp)·P_old.
+        // Suppresses charge sloshing; DIIS takes over once warmed up.
+        if (iter > 0 && iter < diis_start) {
+            m_wfn.P = damp * m_wfn.P + (1.0 - damp) * P_old;
+        }
+        P_old = m_wfn.P;
 
         // Update populations
         updatePopulations(m_S);
@@ -614,9 +632,49 @@ double XTB::calcDispersionEnergy() const
     m_disp_gradient_valid = false;
 
     if (m_method != MethodType::GFN2) {
-        // GFN1 D3 integration is a follow-up AP. Returning 0 preserves the
-        // current (D3-missing) energy for GFN1 — see qm_methods/CLAUDE.md.
-        return 0.0;
+        // GFN1: native D3(BJ) dispersion (s6=1.0, s8=2.4, a1=0.63, a2=5.0).
+        // D3ParameterGenerator exposes only the energy, so the geometry
+        // gradient is obtained by central finite differences (D3 is cheap;
+        // this mirrors the legacy gfn1.cpp path). m_geometry is in Angstrom
+        // (the generator converts to Bohr internally). The FD gradient is
+        // returned in Eh/Bohr to match the rest of calculateGradient(), which
+        // divides the assembled gradient by `au` (Eh/Bohr -> Eh/Angstrom) at
+        // the end. The FD is a *full* gradient: regenerating parameters at each
+        // displaced geometry also captures the CN-dependence of the C6 values.
+        if (!m_d3_generator) {
+            m_d3_generator = std::make_unique<::D3ParameterGenerator>(
+                ::D3ParameterGenerator::createForGFN1());
+        }
+        ::D3ParameterGenerator& d3 = *m_d3_generator;
+        d3.GenerateParameters(m_atoms, m_geometry);
+        const double e_disp = d3.getTotalEnergy();
+
+        // Central-difference geometry gradient (Eh/Bohr).
+        const double h = 1.0e-4;  // Angstrom displacement
+        m_disp_gradient = Matrix::Zero(m_atomcount, 3);
+        Matrix geom = m_geometry;
+        for (int a = 0; a < m_atomcount; ++a) {
+            for (int c = 0; c < 3; ++c) {
+                const double orig = geom(a, c);
+                geom(a, c) = orig + h;
+                d3.GenerateParameters(m_atoms, geom);
+                const double ep = d3.getTotalEnergy();
+                geom(a, c) = orig - h;
+                d3.GenerateParameters(m_atoms, geom);
+                const double em = d3.getTotalEnergy();
+                geom(a, c) = orig;
+                // dE/dAngstrom -> dE/dBohr : multiply by au (1 Bohr = au Angstrom)
+                m_disp_gradient(a, c) = (ep - em) / (2.0 * h) * au;
+            }
+        }
+        // Restore unperturbed parameters for any later query.
+        d3.GenerateParameters(m_atoms, m_geometry);
+        // The FD gradient is complete (it already differentiates the CN-dependent
+        // C6 values), so there is no separate dE/dCN chain-rule term: keep
+        // m_disp_dEdcn empty so the GFN2 CN-fold in xtb_gradient.cpp is skipped.
+        m_disp_dEdcn = Vector();
+        m_disp_gradient_valid = true;
+        return e_disp;
     }
 
     // Lazy initialization (cached across SCF cycles for the same geometry)
@@ -639,22 +697,18 @@ double XTB::calcDispersionEnergy() const
         p.s9 = 5.0;
         p.alpha = 16.0;
         p.damping = curcuma::dispersion::DampingFormula::StandardBJ_D4;
+        // AP6b: native GFN2 uses the exact dftd4 per-reference charge weighting.
+        p.per_reference_charge = true;
         m_d4_evaluator = std::make_unique<curcuma::dispersion::D4Evaluator>(
             m_d4_generator.get(), p);
     }
 
-    // Charge source for the q-response:
-    //  - "eeq": canonical single-shot dftd4 EEQ (analytical dq/dx, D4ChargeModel).
-    //  - "mulliken": the converged GFN2 SCF atomic charges drive zetac6; the
-    //    dq/dx response comes from CPSCF (computeMullikenChargeResponse).
-    const bool use_mulliken = (m_d4_charge_source == "mulliken");
-    m_d4_generator->setUseD4SingleShotEEQ(m_d4_charge_source == "eeq");
-    if (use_mulliken) {
-        // Feed the SCF Mulliken charges as the zeta charges. setTopologyCharges
-        // makes getZetaCharges() return them and GenerateDispersionPairsNative
-        // build zetac6 from them; dEdq (Phase 1) is then taken w.r.t. these.
-        m_d4_generator->setTopologyCharges(m_wfn.q_at);
-    }
+    // AP6b: the exact per-reference GFN2 D4 (weightedC6Gfn2) drives the C6 charge
+    // weighting with the converged SCF Mulliken charges (tblite uses wfn%qat). The
+    // dftd4 single-shot EEQ is disabled; getZetaCharges() returns the Mulliken set.
+    // The dq/dx gradient response then comes from CPSCF (computeMullikenChargeResponse).
+    m_d4_generator->setUseD4SingleShotEEQ(false);
+    m_d4_generator->setTopologyCharges(m_wfn.q_at);
 
     // m_geometry is in Angstrom; D4 expects Bohr.
     Matrix geom_bohr = m_geometry * AA_TO_AU;
@@ -669,21 +723,16 @@ double XTB::calcDispersionEnergy() const
     // that turns it into a Cartesian contribution is applied below (EEQ) or in
     // the GFN2 CPSCF path (mulliken). With the default "eeq" source this is
     // the dftd4-conform behaviour.
-    const bool want_dEdq = !m_d4_charge_source.empty();
+    const bool want_dEdq = true;
     const double E = m_d4_evaluator->computeEnergyAndGradient(
         m_atoms, geom_bohr,
         /*with_gradient=*/true,
         m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, want_dEdq);
 
-    // q-response chain rule: fold Σ_A dE_D4/dq_A · ∂q_A/∂R into the cached
-    // geometry gradient. For the "eeq" source this is the analytical single-shot
-    // EEQ response (D4ChargeModel); xtb_gradient.cpp then adds m_disp_gradient
-    // to the total gradient unchanged.
-    if (want_dEdq && m_d4_charge_source == "eeq" && m_disp_dEdq.size() == m_atomcount) {
-        m_d4_generator->addChargeResponseGradient(m_disp_dEdq, m_disp_gradient);
-    } else if (want_dEdq && m_d4_charge_source == "mulliken"
-               && m_disp_dEdq.size() == m_atomcount) {
-        // GFN2 CPSCF/Z-vector response ∂q_Mulliken/∂x (Phase 3b, isotropic).
+    // q-response chain rule: fold Σ_A dE_D4/dq_A · ∂q_A/∂R into the cached geometry
+    // gradient. The per-reference path is Mulliken-self-consistent, so ∂q/∂x comes
+    // from the GFN2 CPSCF/Z-vector response.
+    if (m_disp_dEdq.size() == m_atomcount) {
         computeMullikenChargeResponse(m_disp_dEdq, m_disp_gradient);
     }
     m_disp_gradient_valid = true;
@@ -692,6 +741,54 @@ double XTB::calcDispersionEnergy() const
         CurcumaLogger::param("dispersion_d4_native", fmt::format("{:.6f} Eh", E));
     }
     return E;
+}
+
+/* ------------------------------------------------------------------------- *
+ *  Self-consistent D4 dispersion potential (GFN2, AP6b)
+ *
+ *  GFN2-xTB couples D4 to the SCF: the C6 are charge-scaled (per-reference
+ *  zeta of the SCF Mulliken charges), so E_D4 = E_D4(q) and dE_D4/dq_A is an
+ *  extra atom potential in the Fock. tblite adds exactly this (`dispersion%
+ *  get_potential`: pot%vat += dE_disp/dq) every SCF iteration. We evaluate the
+ *  exact per-reference dE_D4/dq at m_wfn.q_at and add it to pot.v_at (the same
+ *  atom potential the multipole back-reaction writes; verified bit-for-bit vs
+ *  tblite's pot%vat). GFN2 only. Claude Generated.
+ * ------------------------------------------------------------------------- */
+void XTB::addDispersionPotential(Potential& pot) const
+{
+    if (m_method != MethodType::GFN2) return;
+
+    // Lazy init shared with calcDispersionEnergy (idempotent).
+    if (!m_d4_generator) {
+        nlohmann::json d4_config;
+        d4_config["d4_s6"] = 1.0; d4_config["d4_s8"] = 2.7;
+        d4_config["d4_a1"] = 0.52; d4_config["d4_a2"] = 5.0; d4_config["d4_alp"] = 16.0;
+        ConfigManager cfg("d4param", d4_config);
+        m_d4_generator = std::make_unique<::D4ParameterGenerator>(cfg);
+    }
+    if (!m_d4_evaluator) {
+        curcuma::dispersion::D4Params p;
+        p.s6 = 1.0; p.s8 = 2.7; p.a1 = 0.52; p.a2 = 5.0; p.s9 = 5.0; p.alpha = 16.0;
+        p.damping = curcuma::dispersion::DampingFormula::StandardBJ_D4;
+        p.per_reference_charge = true;
+        m_d4_evaluator = std::make_unique<curcuma::dispersion::D4Evaluator>(
+            m_d4_generator.get(), p);
+    }
+
+    // Exact per-reference dE_D4/dq at the current SCF Mulliken charges.
+    m_d4_generator->setUseD4SingleShotEEQ(false);
+    m_d4_generator->setTopologyCharges(m_wfn.q_at);
+    const Matrix geom_bohr = m_geometry * AA_TO_AU;
+    m_d4_generator->GenerateParameters(m_atoms, geom_bohr);
+
+    Matrix scratch_grad; Vector scratch_dEdcn, dEdq;
+    m_d4_evaluator->computeEnergyAndGradient(
+        m_atoms, geom_bohr, /*with_gradient=*/true,
+        scratch_grad, scratch_dEdcn, dEdq, /*with_dEdq=*/true);
+
+    if (dEdq.size() != m_atomcount) return;
+    for (int A = 0; A < m_atomcount; ++A)
+        pot.v_at(A) += dEdq(A);
 }
 
 /* ------------------------------------------------------------------------- *

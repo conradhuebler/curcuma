@@ -114,6 +114,27 @@ public:
     double getZeta(int Z, double q) const;
     double getZetaDerivative(int Z, double q) const;
 
+    // Claude Generated (AP6b exact D4 port, 2026): tblite/dftd4-exact charge-weighted
+    // C6 for native GFN2. Unlike getChargeWeightedC6 (CN-only, single per-atom zeta
+    // prefactor — the GFN-FF approximation), this applies the charge-dependent zeta
+    // PER REFERENCE STATE with the dftd4 weighting (wf=6, ngw multi-gaussian, gi=eta·gc,
+    // gc=2, qref=refq[ref]+zeff). Mirrors dftd4 model.f90 weight_references+get_atomic_c6.
+    //   C6  = ΣΣ (gw_i^ri·ζ_i^ri)(gw_j^rj·ζ_j^rj)·c6ref
+    // Optional outputs (pass nullptr to skip): dC6/dq, dC6/dCN, and the second
+    // charge derivative ∂²C6/∂q² (diagonal) for the self-consistent CPSCF kernel.
+    // qi/qj are the SCF Mulliken atomic charges; cni/cnj the D4 coordination numbers.
+    struct C6Gfn2 {
+        double c6 = 0.0;
+        double dc6dqi = 0.0, dc6dqj = 0.0;     // ∂C6/∂q
+        double dc6dcni = 0.0, dc6dcnj = 0.0;   // ∂C6/∂CN
+        double d2c6dqi2 = 0.0, d2c6dqj2 = 0.0; // ∂²C6/∂q² (diagonal, for CPSCF kernel)
+    };
+    // Per-atom CN is read internally from m_cn_values (same CN that drives the
+    // existing CN-gaussian weights), so call after GenerateParameters().
+    C6Gfn2 weightedC6Gfn2(int Zi, int Zj, size_t atom_i, size_t atom_j,
+                          double qi, double qj,
+                          bool want_grad = false, bool want_hess = false) const;
+
     // The charge vector that actually drives zetac6: topology charges if set
     // (GFN-FF path), otherwise the geometry-dependent EEQ charges (GFN2 path).
     // The dE_D4/dq term must use exactly these charges for consistency.

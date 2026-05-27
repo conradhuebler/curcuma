@@ -7,6 +7,7 @@
  */
 
 #include "d4param_generator.h"
+#include "d4_charge_scaling.h"  // shared exact dftd4 zeta (AP6b)
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "d4_reference_data_fixed.cpp"  // D4 reference data (365 lines)
 #include "d4_reference_cn_fortran.cpp"  // D4 reference CN data (Fortran dftd3param.f90 - January 2026)
@@ -1241,6 +1242,126 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
     }
 
     return c6_weighted;
+}
+
+// Claude Generated (AP6b exact D4 port, 2026): tblite/dftd4-exact per-reference
+// charge-weighted C6 for native GFN2. Mirrors dftd4 model.f90 weight_references
+// (gwk with wf=6 + ngw multi-gaussian) and get_atomic_c6.
+D4ParameterGenerator::C6Gfn2
+D4ParameterGenerator::weightedC6Gfn2(int Zi, int Zj, size_t atom_i, size_t atom_j,
+                                     double qi, double qj,
+                                     bool want_grad, bool want_hess) const
+{
+    using curcuma::dispersion::d4_zeta;
+    using curcuma::dispersion::d4_dzeta;
+    using curcuma::dispersion::d4_d2zeta;
+
+    C6Gfn2 out;
+    const int ei = Zi - 1, ej = Zj - 1;
+    if (ei < 0 || ei >= MAX_ELEM || ej < 0 || ej >= MAX_ELEM) return out;
+    if (atom_i >= m_cn_values.size() || atom_j >= m_cn_values.size()) return out;
+    const double cni = m_cn_values[atom_i];
+    const double cnj = m_cn_values[atom_j];
+
+    constexpr double ga = 3.0;     // dftd4 ga_default (charge-scaling height)
+    constexpr double gc = 2.0;     // dftd4 gc_default (charge-scaling steepness)
+    constexpr double wf = 6.0;     // dftd4 wf_default (CN gaussian width)
+    constexpr int    MAXCN = 19;   // dftd4 set_refgw max_cn
+
+    // Per-atom reference weight vector W[ref] = gwk(CN)·zeta(q), and its q/CN
+    // first + second derivatives. Mirrors dftd4 weight_references exactly.
+    struct RefW {
+        double W[MAX_REF]   = {0};
+        double dWq[MAX_REF] = {0};
+        double dWc[MAX_REF] = {0};
+        double d2Wq[MAX_REF]= {0};
+        int    nref = 0;
+    };
+    auto buildRefW = [&](int elem, double q, double cn) -> RefW {
+        RefW r;
+        const int nref = (elem < (int)m_refn.size()) ? m_refn[elem] : 0;
+        r.nref = nref;
+        if (nref <= 0) return r;
+        const double eta  = GFNFFParameters::zeta_c[elem];      // = dftd4 chemical_hardness
+        const double zeff = GFNFFParameters::zeta_zeff[elem];   // = dftd4 effective_nuclear_charge
+        const double gi   = eta * gc;
+        const double* refcn = m_refcn[elem].data();
+
+        // ngw[ref] from refcn (dftd4 set_refgw): count references sharing the
+        // same rounded CN, then ngw = k(k+1)/2.
+        int cnc[MAXCN + 1];
+        for (int k = 0; k <= MAXCN; ++k) cnc[k] = 0;
+        cnc[0] = 1;
+        for (int ir = 0; ir < nref; ++ir) {
+            int icn = (int)std::lround(refcn[ir]); if (icn < 0) icn = 0; if (icn > MAXCN) icn = MAXCN;
+            cnc[icn] += 1;
+        }
+        int ngw[MAX_REF];
+        for (int ir = 0; ir < nref; ++ir) {
+            int icn = (int)std::lround(refcn[ir]); if (icn < 0) icn = 0; if (icn > MAXCN) icn = MAXCN;
+            int k = cnc[icn];
+            ngw[ir] = k * (k + 1) / 2;
+        }
+
+        // CN gaussian weights gwk[ref] (+ dgwk/dCN). dftd4 weight_cn = exp(-wf·(cn-cnref)²),
+        // summed over igw=1..ngw with wf_eff = igw·wf.
+        double expw[MAX_REF] = {0}, expd[MAX_REF] = {0};
+        double norm = 0.0, dnorm = 0.0;
+        for (int ir = 0; ir < nref; ++ir) {
+            double ew = 0.0, ed = 0.0;
+            for (int igw = 1; igw <= ngw[ir]; ++igw) {
+                const double wfe = igw * wf;
+                const double d   = cn - refcn[ir];
+                const double gw  = std::exp(-wfe * d * d);
+                ew += gw;
+                ed += 2.0 * wfe * (refcn[ir] - cn) * gw;   // d(gw)/dCN
+            }
+            expw[ir] = ew; expd[ir] = ed;
+            norm += ew; dnorm += ed;
+        }
+        const double ninv = (norm > 0.0) ? 1.0 / norm : 0.0;
+
+        for (int ir = 0; ir < nref; ++ir) {
+            double gwk  = expw[ir] * ninv;
+            double dgwk = ninv * (expd[ir] - expw[ir] * dnorm * ninv);
+            if (!std::isfinite(gwk))  gwk  = 0.0;
+            if (!std::isfinite(dgwk)) dgwk = 0.0;
+            const double qref = m_refq[elem][ir] + zeff;
+            const double qmod = q + zeff;
+            const double z  = d4_zeta(ga, gi, qref, qmod);
+            r.W[ir]   = gwk * z;
+            if (want_grad) {
+                r.dWq[ir] = gwk  * d4_dzeta(ga, gi, qref, qmod);
+                r.dWc[ir] = dgwk * z;
+            }
+            if (want_hess) r.d2Wq[ir] = gwk * d4_d2zeta(ga, gi, qref, qmod);
+        }
+        return r;
+    };
+
+    const RefW ri = buildRefW(ei, qi, cni);
+    const RefW rj = buildRefW(ej, qj, cnj);
+
+    const size_t base = static_cast<size_t>(ei) * MAX_ELEM * MAX_REF * MAX_REF
+                      + static_cast<size_t>(ej) * MAX_REF * MAX_REF;
+    for (int a = 0; a < ri.nref; ++a) {
+        const size_t base_a = base + static_cast<size_t>(a) * MAX_REF;
+        for (int b = 0; b < rj.nref; ++b) {
+            const double c6ref = m_c6_flat_cache[base_a + b];
+            out.c6 += ri.W[a] * rj.W[b] * c6ref;
+            if (want_grad) {
+                out.dc6dqi  += ri.dWq[a] * rj.W[b]   * c6ref;
+                out.dc6dqj  += ri.W[a]   * rj.dWq[b] * c6ref;
+                out.dc6dcni += ri.dWc[a] * rj.W[b]   * c6ref;
+                out.dc6dcnj += ri.W[a]   * rj.dWc[b] * c6ref;
+            }
+            if (want_hess) {
+                out.d2c6dqi2 += ri.d2Wq[a] * rj.W[b]   * c6ref;
+                out.d2c6dqj2 += ri.W[a]    * rj.d2Wq[b]* c6ref;
+            }
+        }
+    }
+    return out;
 }
 
 // Claude Generated (2025): ATM three-body symmetry factor calculation

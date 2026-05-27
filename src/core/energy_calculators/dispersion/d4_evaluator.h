@@ -49,6 +49,10 @@ struct D4Params {
     double a2 = 0.0;     ///< In Bohr
     double alpha = 16.0; ///< ATM exponent (reserved)
     DampingFormula damping = DampingFormula::ModifiedBJ_GFNFF;
+    /// AP6b: native GFN2 uses the exact dftd4 per-reference charge weighting
+    /// (D4ParameterGenerator::weightedC6Gfn2). GFN-FF leaves this false and keeps
+    /// its CN-only + single-zeta-prefactor pair data (pair.C6·pair.zetac6).
+    bool per_reference_charge = false;
 };
 
 /**

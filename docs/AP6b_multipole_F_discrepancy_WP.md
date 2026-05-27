@@ -1,7 +1,89 @@
 # AP6b Working Plan — Native xTB F-Matrix Discrepancy gegenüber tblite
 
-**Status:** Diagnose abgeschlossen (Mai 2026), Implementierung offen.
+**Status:** GELÖST + **FIX IMPLEMENTIERT** (2026-05-27). Root Cause = fehlendes selbstkonsistentes D4-Potential + native D4 war eine GFN-FF-Näherung. Fix: exakter dftd4-per-Referenz-D4-Port + SCF-Kopplung. **H₂ vs tblite: E −3.3e-9, HOMO +1.9e-6** (war 1.5e-4); H₂O/CH₄/NH₃ sub-0.1 mEh. GFN-FF unverändert (7e-8). Regression 6/6 grün.
+
+### FIX-IMPLEMENTIERUNG (2026-05-27)
+- **`dispersion/d4_charge_scaling.h`** (neu): geteilte exakte dftd4-Zeta (`d4_zeta/d4_dzeta/d4_d2zeta`, Port von model.f90:725). GFN-FFs `zetaChargeScale` = formel-identischer gc=1-Spezialfall (unangetastet).
+- **`D4ParameterGenerator::weightedC6Gfn2`** (neu): exakte per-Referenz-C6 + dC6/dq + dC6/dCN (+ d²C6/dq²). wf=6 + ngw-Multi-Gauss (aus `m_refcn` via set_refgw), gi=eta·gc (gc=2), qref=`m_refq[ref]`+zeff. **Kein Tabellen-Port nötig: `m_refq` IST bereits der dftd4-GFN2-Satz, `zeta_zeff`=zeff, `zeta_c`=eta.**
+- **`D4Params.per_reference_charge`**: GFN2=true (exakt), GFN-FF=false (CN-only-single-zeta + CUDA-Layout intakt).
+- **`D4Evaluator::computeEnergyAndGradient`** GFN2-Pfad nutzt weightedC6Gfn2; `pairEnergyAndGradient` (GFN-FF) unangetastet.
+- **`XTB::addDispersionPotential`** (re-added): dE_D4/dq → `pot.v_at` in der SCF-Schleife. GFN2-D4 jetzt Mulliken-selbstkonsistent (Energie+Potential+Gradient).
+- **CPSCF-Kernel (Phase E) nicht nötig**: per-Referenz-dEdq macht die mulliken-CPSCF-Antwort konsistent → `test_xtb_cpscf` grün ohne expliziten ∂²E_D4/∂q²-Term.
+- **Rest** H₂O/CH₄/NH₃ ~3-9e-5: NICHT D4 (H₂ beweist D4 exakt) — separater kleinerer Effekt (gated Multipol-Response/CN), außerhalb D4-Scope. Optionale Politur: D4-CN an dftd4 angleichen.
+
+---
+
+## FIX-VERSUCH (2026-05-27): SCF-Kopplung implementiert, dann sauber zurückgerollt
+
+Der strukturelle Fix (`addDispersionPotential`: ∂E_D4/∂q an Mulliken-Ladungen → `pot.v_at` in jeder SCF-Iteration, GFN2-Default „mulliken") wurde implementiert und **funktioniert grundsätzlich** (Energie mEh→μEh, H₂-HOMO-Fehler 1.5e-4→7.4e-5). Bei der Validierung zeigten sich aber zwei Probleme, die zeigen, dass die volle tblite-Genauigkeit eine **komplette dftd4-Modell-Portierung** erfordert — zu groß/risikoreich für einen einzelnen Fix. Daher zurückgerollt; **Baum ist grün** (6/6 Regression). Diagnose-Tooling bleibt.
+
+### Warum nur ~50% des Fehlers geschlossen wurde — die native D4 ist eine GFN-FF-Näherung
+- Unsere native GFN2-D4 (`d4param_generator.cpp` + `d4_evaluator.cpp`) nutzt **ein einziges per-Atom-zeta × CN-gewichtetes C6** (GFN-FF-Stil), tblite/dftd4 nutzt **per-Referenzzustand ladungsabhängige Gewichte**.
+- **Dominanter Faktor 2:** unsere Zeta-Steilheit nutzt `c = eta` (= `zeta_c`), dftd4 nutzt `c = eta·gc` mit **gc=2.0** (`model.f90:454`, `gi = eta·gc`). Das halbiert unser dEdq. (`zeta_c[H]=0.47259` = dftd4 `chemical_hardness[H]` exakt; der Kommentar „×2" in `gfnff_par.h:893` ist falsch.)
+- **Rest-~3%:** unsere CN-gewichtete C6 selbst ist ~3% von tblite entfernt (unsere D4-Energie ist ~3% daneben) — breitere Modell-Näherung (CN, Gauss-Gewichte).
+- **Tabellen, die exakt sind:** `zeta_zeff` = dftd4 `effective_nuclear_charge` ✓; `zeta_c` = dftd4 `chemical_hardness` ✓.
+- **Tabellen, die NICHT passen:** `m_refq` (Hirshfeld, `d4_refq=2`) ≠ tblites GFN2-Referenzladungen (`set_refq_gfn2`, `d4.f90:80` nutzt `ref=d4_ref%gfn2`).
+
+### Zweites Problem: CPSCF-Gradienten-Antwort
+Die SCF-Kopplung verändert den konvergierten Zustand, aber der Z-Vektor-Response-Kernel (`computeMullikenChargeResponse`) enthält den D4-Selbstkonsistenz-Term (∂²E_D4/∂q²) nicht → `test_xtb_cpscf` Test C regrediert (HCN 7.75e-6→1.17e-4; die „mulliken==eeq"-Prämisse ist durch die Selbstkonsistenz ohnehin ungültig). Voller Gradient (`test_xtb_gradient`, tol 5e-4) bleibt grün.
+
+### Vollständige Spezifikation für den exakten Fix (Folge-AP)
+1. **`addDispersionPotential`** (wieder einführen): ∂E_D4/∂q_A an `m_wfn.q_at` → `pot.v_at` in der SCF-Schleife (`xtb_native.cpp` nach `addMultipolePotential`). dEdq nur mit `with_gradient=true` aus `D4Evaluator::computeEnergyAndGradient` verfügbar.
+2. **GFN2-D4-Zeta exakt**: per-Referenz-Gewichtung `W_i^ref = gw_i^ref(CN)·zeta(ga=3, gi=zeta_c[Z]·2.0, refq_i^ref+zeff, q_i+zeff)`, `C6 = ΣΣ W_i·W_j·c6ref`; zeff=`zeta_zeff[Z]`, refq = **GFN2-Referenzladungen** (dftd4 `set_refq_gfn2`, in `reference.inc`; unser `d4_refq` ist Hirshfeld — GFN2-Satz portieren). Energie + dC6/dq + dC6/dCN konsistent. GFN-FF-Pfad (gc=1, single-zeta) **nicht** anfassen → GFN2-spezifische Funktion.
+3. **CPSCF-Kernel** um ∂²E_D4/∂q²-Term erweitern; `test_xtb_cpscf` Test C neu konzipieren.
+4. **Validierung**: H₂/H₂O/CH₄/NH₃ Energie+Orbitale vs tblite (Dumps in `release_tblite/dumps/`, `diff_multipole_potential.py`); Regression grün.
+
+### Diagnose-Tooling (bleibt, im Baum)
+tblite-Patch exponiert Integrale + Potentiale/Momente (`*_tblite`-JSON-Keys); `CURCUMA_TBLITE_ACC`-env im Dump-Tool; `diff_multipole_ints.py` / `diff_multipole_potential.py`.
+
+---
+
+## ERGEBNIS Option (b) — Potential-Audit (2026-05-27): ROOT CAUSE
+
+Der ~1.5e-4 Eh F-Shift ist **kein Multipol-Bug**. Er entsteht, weil das native GFN2-SCF das **selbstkonsistente D4-Dispersions-Potential** nicht in den Fock einbezieht.
+
+**Beweiskette (tblite-Patch erweitert um `pot%vat/vdp/vqp` + `wfn%dpat/qpat`, alle bit-genau exponiert):**
+1. `dpat`/`qpat` (atomare Momente aus tblite-P): bit-identisch (≤1e-15).
+2. CN, mrad, `amat_sd/dd/sq`: tblite-Laufzeitwerte **bit-identisch** mit unseren (per Diagnose-Dump verifiziert).
+3. tblites Multipol-`get_potential` auf der konvergierten Dichte liefert vat = −0.0315754 — **identisch mit unserem `vat_extra` −0.0315765** (Δ~1e-6). Der Multipol-Potential-Pfad ist also korrekt.
+4. Das nach dem SCF erfasste `pot%vat` = −0.0314267. Die Differenz **+1.487e-4** entsteht in `iterator.f90` **zwischen `coulomb%get_potential` und `dispersion%get_potential`**: GFN2 nutzt **selbstkonsistentes D4**, dessen Ladungs-Potential (∂E_D4/∂q) via `add_pot_to_h1` in die Fock-Matrix und damit in tblites gespeicherte Orbitalenergien eingeht.
+5. `test_xtb_scf_snapshot` (H₂): Δε_max = 1.504e-4 ≈ der D4-Potential-Beitrag (+1.487e-4). Match.
+
+**Unser nativer Code** (`xtb_native.cpp:262`, `calcDispersionEnergy()`) addiert D4 nur als **Energie (post-SCF)** + Gradient; der Kommentar (`xtb_native.cpp:622-626`) hält den SCF-Response explizit für „deferred". Genau dieser Term fehlt.
+
+**Fix (offen):** In jeder SCF-Iteration den D4-Atompotential-Term ∂E_D4/∂q_A auf `pot.v_at` addieren (analog tblites `dispersion%get_potential`). Die ∂E_D4/∂q-Maschinerie existiert bereits (`m_disp_dEdq`, AP7-Gradientenarbeit) — sie muss in den Fock-Build (`xtb_scf.cpp::buildFock` / Potential-Assembly) statt nur in den Gradienten einfließen. Erwartung danach: H₂ Δε_max < 1e-6, GFN2-Energie-Restfehler weiter reduziert.
+
+**Tooling (wiederverwendbar):** tblite-Patch exponiert jetzt Integrale (`dipole/quadrupole_integral`) UND Potentiale/Momente (`atomic_dipole/quadrupole`, `potential_vat/vdp/vqp`); `dump_tblite_multipole` schreibt `*_tblite`-Keys (+ `CURCUMA_TBLITE_ACC` env-Toggle). Audits: `diff_multipole_ints.py`, `diff_multipole_potential.py`.
+
+---
+
+## ERGEBNIS Option (a) — Multipol-Integral-Audit (2026-05-26): Hypothese A widerlegt
 **Vorgängerarbeit:** AP6 (DIIS-Integration, commit a6922de). Nach AP6 erreicht GFN2 3/7 vs TBLite. Verbleibende Fehler ~1–23 mEh werden zum großen Teil von fehlender D4-Dispersion verursacht (AP6c geplant), aber ein systematischer Anteil kommt aus einer **Orbital-Energie-Diskrepanz** die selbst für H₂ (2 AO) auftritt.
+
+---
+
+## ERGEBNIS Option (a) — Multipol-Integral-Audit (2026-05-26)
+
+**Hypothese A (dp_int/qp_int weichen ab) ist widerlegt.** Die nativen GFN2-Multipol-AO-Integrale stimmen **bit-identisch** mit tblite überein.
+
+**Methode:** tblite (Tag `9ca469a`) minimal gepatcht, um die internen `ints%dipole`/`ints%quadrupole` (post-`get_hamiltonian`/`shift_operator`, traceless, atom-zentriert — exakt die Arrays, die in den Fock-Build eingehen) über die C-API zu exponieren. `dump_tblite_multipole` schreibt sie als JSON-Keys `dipole_integral_tblite`/`quadrupole_integral_tblite` neben unsere Rekonstruktion (`gf2.dp_int`/`gf2.qp_int`, Produktionspfad via `MI::cgto_multipole`). Diff: `test_cases/sqm_reference/diff_multipole_ints.py`.
+
+**Befund (max|Δ|, getrennt Same-Atom- vs Off-Atom-Blöcke):**
+
+| Molekül | nao | dp same/off | qp same/off |
+|---|---|---|---|
+| H₂ | 2 | 2.2e-16 / 1.1e-16 | 2.2e-16 / 0 |
+| H₂O | 6 | 2.2e-16 / 2.4e-16 | 4.4e-16 / 5.0e-16 |
+| CH₄ | 8 | 2.2e-16 / 1.9e-16 | 4.4e-16 / 4.2e-16 |
+| NH₃ | 7 | 2.2e-16 / 3.1e-16 | 4.4e-16 / 1.1e-15 |
+
+Alle ≤ Maschinenpräzision, inkl. der zuvor verdächtigten Same-Atom-s-p-Blöcke. Der "globaler Ursprung + uniformer Spalten-Atom-Shift"-Ansatz (`xtb_multipole.cpp:setupMultipole`) ist exakt äquivalent zu tblites "Produktzentrum + `shift_operator`".
+
+**Wo der 1.5e-4-Shift tatsächlich herkommt (neu eingegrenzt):** Für H₂ sind die Diagonal-Integrale `dp_int(0,0)=qp_int(0,0)=0` (traceless-Quadrupol einer s-Funktion ist null). Der Multipol koppelt also **nicht** über die Diagonal-Integrale, sondern über **`vat_extra`** (= `amat_sd^T·dpat + amat_sq^T·qpat`, für H₂ = −0.0316 ≠ 0) zurück auf das **isotrope Atompotential** `vat`, das diagonal in F eingeht. Der Fehler liegt damit **stromabwärts der Integrale**: in `dpat`/`qpat`, `amat_sd/dd/sq` oder der Kontraktion zu `vat_extra`/`vdp`/`vqp`.
+
+**Nächster Schritt → Option (b):** denselben tblite-Patch erweitern, um `pot%vat`/`vdp`/`vqp` und `wfn%dpat`/`qpat` zu exponieren (Abschnitt 5, B1–B7). Direkter Vergleich entscheidet: stimmen `dpat`/`qpat` → Bug in `amat`/Kontraktion; weichen sie ab → Bug in Mulliken-Moment-Bildung/Referenz-Momenten.
+
+---
 
 ## 1. Symptom
 

@@ -89,7 +89,11 @@ Matrix XTB::buildFock(const Matrix& H0,
  *  Solve generalized eigenvalue problem: F C = ε S C                 *
  *  using Eigen's GeneralizedSelfAdjointEigenSolver.                  *
  *                                                                    *
- *  Build closed-shell density matrix: P = 2 * C_occ * C_occ^T       *
+ *  Two occupation schemes controlled by m_electronic_temp:           *
+ *    temp == 0  → integer closed-shell (2/0 per orbital)             *
+ *    temp > 0   → Fermi-Dirac smearing (fractional occupation)       *
+ *                                                                    *
+ *  Default: 300 K (matches TBLite default).                          *
  * ------------------------------------------------------------------ */
 bool XTB::solveEigen(const Matrix& F, const Matrix& S)
 {
@@ -103,13 +107,42 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
     m_wfn.eps = solver.eigenvalues();
     m_wfn.C   = solver.eigenvectors();
 
-    // Number of doubly occupied orbitals
-    const int nocc = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
-    if (nocc < 0 || nocc > nao) return false;
+    if (m_electronic_temp > 0.0) {
+        // Fermi-Dirac smearing: bisect for Fermi level, build fractional-occupation density
+        // Pattern mirrors GFN2::buildDensityMatrix (gfn2.cpp:607-634).
+        const double kT = m_electronic_temp * 3.166808e-6;  // K → Hartree
+        const double n_elec = m_wfn.nocc;
 
-    // Build density: P = 2 * C_occ * C_occ^T
-    const Matrix C_occ = m_wfn.C.leftCols(nocc);
-    m_wfn.P = 2.0 * C_occ * C_occ.transpose();
+        double mu_lo = m_wfn.eps.minCoeff() - 1.0;
+        double mu_hi = m_wfn.eps.maxCoeff() + 1.0;
+        for (int bisect = 0; bisect < 100; ++bisect) {
+            const double mu = 0.5 * (mu_lo + mu_hi);
+            double n_sum = 0.0;
+            for (int i = 0; i < nao; ++i) {
+                const double x = (m_wfn.eps(i) - mu) / kT;
+                n_sum += 2.0 / (1.0 + std::exp(std::min(x, 500.0)));
+            }
+            if (n_sum > n_elec) mu_hi = mu;
+            else                mu_lo = mu;
+            if (mu_hi - mu_lo < 1e-14) break;
+        }
+        const double mu_f = 0.5 * (mu_lo + mu_hi);
+
+        m_wfn.P = Matrix::Zero(nao, nao);
+        for (int i = 0; i < nao; ++i) {
+            const double x   = (m_wfn.eps(i) - mu_f) / kT;
+            const double f_i = 2.0 / (1.0 + std::exp(std::min(x, 500.0)));
+            if (f_i < 1e-12) continue;
+            m_wfn.P += f_i * m_wfn.C.col(i) * m_wfn.C.col(i).transpose();
+        }
+    } else {
+        // Integer occupation: closed-shell, 2 electrons per occupied orbital
+        const int nocc = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
+        if (nocc < 0 || nocc > nao) return false;
+
+        const Matrix C_occ = m_wfn.C.leftCols(nocc);
+        m_wfn.P = 2.0 * C_occ * C_occ.transpose();
+    }
 
     return true;
 }

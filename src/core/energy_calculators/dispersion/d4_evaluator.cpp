@@ -180,6 +180,27 @@ double D4Evaluator::computeEnergyAndGradient(const std::vector<int>& atoms,
             continue;
         }
 
+        // AP6b exact path: replace the CN-only·single-zeta C6 (pair.C6·pair.zetac6)
+        // with the dftd4 per-reference charge-weighted C6. The damping (disp_sum,
+        // dE_dr direction) is unchanged; only the C6 prefactor and its q/CN
+        // derivatives differ. GFN-FF keeps per_reference_charge=false.
+        D4ParameterGenerator::C6Gfn2 c6g;
+        const bool per_ref = m_params.per_reference_charge && (m_data != nullptr)
+            && (m_data->getZetaCharges().size() == natoms);
+        if (per_ref) {
+            const Vector& q = m_data->getZetaCharges();
+            c6g = m_data->weightedC6Gfn2(atoms[pair.i], atoms[pair.j], pair.i, pair.j,
+                                         q(pair.i), q(pair.j), with_gradient, false);
+            const double denom = pair.C6 * pair.zetac6;
+            const double scale = (std::abs(denom) > 1e-300) ? (c6g.c6 / denom) : 0.0;
+            E_pair = -c6g.c6 * disp_sum;
+            if (with_gradient) {
+                dE_dr  *= scale;                      // radial: C6 const in r, just rescale
+                dEdCN_i = -c6g.dc6dcni * disp_sum;    // exact per-reference dC6/dCN
+                dEdCN_j = -c6g.dc6dcnj * disp_sum;
+            }
+        }
+
         E_total += E_pair;
         if (with_gradient) {
             gradient_out.row(pair.i) += dE_dr.transpose();
@@ -187,22 +208,23 @@ double D4Evaluator::computeEnergyAndGradient(const std::vector<int>& atoms,
             dEdCN_out(pair.i) += dEdCN_i;
             dEdCN_out(pair.j) += dEdCN_j;
 
-            // Charge-response chain rule (first half): dE_D4/dq_A.
-            //   E_pair = -C6 * disp_sum * zeta_i * zeta_j
-            //   dE/dq_i = -C6 * disp_sum * (dzeta_i/dq_i) * zeta_j
-            //   dE/dq_j = -C6 * disp_sum * zeta_i * (dzeta_j/dq_j)
-            // Recomputing zeta from the same charges that produced pair.zetac6
-            // keeps this consistent with the energy (GenerateDispersionPairsNative).
+            // Charge-response chain rule (first half): dE_D4/dq_A = -dC6/dq · disp_sum.
             if (do_dEdq) {
-                const Vector& q = m_data->getZetaCharges();
-                const int Zi = atoms[pair.i];
-                const int Zj = atoms[pair.j];
-                const double zeta_i = m_data->getZeta(Zi, q(pair.i));
-                const double zeta_j = m_data->getZeta(Zj, q(pair.j));
-                const double dzeta_i = m_data->getZetaDerivative(Zi, q(pair.i));
-                const double dzeta_j = m_data->getZetaDerivative(Zj, q(pair.j));
-                dEdq_out(pair.i) += -pair.C6 * disp_sum * dzeta_i * zeta_j;
-                dEdq_out(pair.j) += -pair.C6 * disp_sum * zeta_i * dzeta_j;
+                if (per_ref) {
+                    dEdq_out(pair.i) += -c6g.dc6dqi * disp_sum;
+                    dEdq_out(pair.j) += -c6g.dc6dqj * disp_sum;
+                } else {
+                    // Legacy single-zeta path (GFN-FF-style prefactor).
+                    const Vector& q = m_data->getZetaCharges();
+                    const int Zi = atoms[pair.i];
+                    const int Zj = atoms[pair.j];
+                    const double zeta_i = m_data->getZeta(Zi, q(pair.i));
+                    const double zeta_j = m_data->getZeta(Zj, q(pair.j));
+                    const double dzeta_i = m_data->getZetaDerivative(Zi, q(pair.i));
+                    const double dzeta_j = m_data->getZetaDerivative(Zj, q(pair.j));
+                    dEdq_out(pair.i) += -pair.C6 * disp_sum * dzeta_i * zeta_j;
+                    dEdq_out(pair.j) += -pair.C6 * disp_sum * zeta_i * dzeta_j;
+                }
             }
         }
     }
