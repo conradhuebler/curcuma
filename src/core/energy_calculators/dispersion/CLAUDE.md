@@ -108,6 +108,10 @@ to plug it in without touching the CPU evaluator.
 
 > ⚠️ **AI-generated, automated tests pass — human production testing pending.**
 
+> 📊 **Current GFN2-D4 alignment status, residuals, and open issues:**
+> [`docs/GFN2_D4_STATUS.md`](../../../../docs/GFN2_D4_STATUS.md). Tracked via
+> `ctest -L d4_diag` (`diag_curcuma_d4_potential`).
+
 ### GFN-FF
 - Energy + gradient bit-identical to the pre-refactor inline ForceFieldThread
   code (24 GFN-FF ctest entries unchanged before/after).

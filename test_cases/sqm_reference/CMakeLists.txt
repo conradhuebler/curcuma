@@ -37,6 +37,8 @@ target_include_directories(test_xtb_scf_snapshot PRIVATE
 target_compile_features(test_xtb_scf_snapshot PRIVATE cxx_std_17)
 
 # === Step 3a diagnostic: curcuma D4 SCF potential vs (vat_tblite − gf2.vat_extra) ===
+# Reads tblite dumps from ${D4_DIAG_DUMP_DIR} (default: <source>/release_tblite/dumps).
+# Dumps must be generated separately via dump_tblite_multipole (USE_TBLITE build).
 add_executable(diag_curcuma_d4_potential diag_curcuma_d4_potential.cpp)
 target_link_libraries(diag_curcuma_d4_potential PRIVATE curcuma_core)
 target_include_directories(diag_curcuma_d4_potential PRIVATE
@@ -44,6 +46,31 @@ target_include_directories(diag_curcuma_d4_potential PRIVATE
     ${CMAKE_SOURCE_DIR}/external
 )
 target_compile_features(diag_curcuma_d4_potential PRIVATE cxx_std_17)
+
+# Per-molecule ctest entries — track the GFN2 D4 SCF potential vs tblite. Each
+# tolerance is set just above the current state so the suite is green now, and
+# tightens as the D4 model gets fixed. Run via:  ctest -R "d4_diag"
+set(D4_DIAG_DUMP_DIR "${CMAKE_SOURCE_DIR}/release_tblite/dumps"
+    CACHE PATH "Directory containing tblite GFN2 dumps (*_gfn2.json) for diag_d4 ctest")
+set(_D4_DIAG_MOLS_TOL
+    "H2:1.5e-6"      # symmetric, refh=0 → exact-ish
+    "H2O:1.0e-6"     # sub-µ after CN+α-zeta
+    "NH3:1.5e-6"     # sub-µ after CN+α-zeta
+    "CH4:1.5e-5"     # C-path overcorrection — to be fixed
+    "triose:1.5e-4"  # 66-atom sum of C-path residual — to be fixed
+)
+foreach(_mt ${_D4_DIAG_MOLS_TOL})
+    string(REPLACE ":" ";" _mt_list ${_mt})
+    list(GET _mt_list 0 _mol)
+    list(GET _mt_list 1 _tol)
+    add_test(
+        NAME d4_diag_${_mol}
+        COMMAND diag_curcuma_d4_potential --quiet --tol ${_tol}
+            ${D4_DIAG_DUMP_DIR}/${_mol}_gfn2.json
+            ${CMAKE_CURRENT_SOURCE_DIR}/molecules/${_mol}.xyz
+    )
+    set_tests_properties(d4_diag_${_mol} PROPERTIES TIMEOUT 60 LABELS "d4_diag")
+endforeach()
 
 # === tblite-dependent executables (dump + multipole) ===
 if(USE_TBLITE)

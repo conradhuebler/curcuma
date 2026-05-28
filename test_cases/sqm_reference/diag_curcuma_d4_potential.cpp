@@ -72,20 +72,21 @@ static bool readXYZ(const std::string& path,
     return true;
 }
 
-static void analyse(const std::string& dump_path, const std::string& xyz_path)
+// Returns max|diff| (per-atom D4-vat residual) for the dump/xyz pair, or -1.0 on error.
+static double analyse(const std::string& dump_path, const std::string& xyz_path, bool verbose)
 {
     std::ifstream f(dump_path);
-    if (!f) { std::cerr << "cannot open " << dump_path << "\n"; return; }
+    if (!f) { std::cerr << "cannot open " << dump_path << "\n"; return -1.0; }
     json d;
     f >> d;
 
     std::vector<int> atoms;
     Matrix geom_ang;
-    if (!readXYZ(xyz_path, atoms, geom_ang)) return;
+    if (!readXYZ(xyz_path, atoms, geom_ang)) return -1.0;
     const int nat = static_cast<int>(atoms.size());
     if (static_cast<int>(d["atomic_charges"].size()) != nat) {
         std::cerr << "atom-count mismatch between dump and xyz\n";
-        return;
+        return -1.0;
     }
     const Matrix geom_bohr = geom_ang * AA_TO_AU;
 
@@ -121,6 +122,10 @@ static void analyse(const std::string& dump_path, const std::string& xyz_path)
     //   implied = vat_tblite − gf2.vat_extra
     // (multipole-machinery residual at fixed density is ~1e-7, so this is
     //  effectively tblite's D4 contribution to vat at tblite's converged charges)
+    if (!d.contains("vat_tblite") || !d.contains("gf2") || !d["gf2"].contains("vat_extra")) {
+        std::cerr << dump_path << ": missing vat_tblite/gf2.vat_extra (rerun dump_tblite_multipole)\n";
+        return -1.0;
+    }
     Vector vat_tbl(nat), vat_extra(nat);
     for (int i = 0; i < nat; ++i) {
         vat_tbl(i)   = d["vat_tblite"][i].get<double>();
@@ -129,27 +134,62 @@ static void analyse(const std::string& dump_path, const std::string& xyz_path)
     const Vector implied = vat_tbl - vat_extra;
 
     std::cout << dump_path << "  (nat=" << nat << ")\n";
-    std::cout << "  atom   curcuma_dE_D4/dq    implied_D4_vat       diff         sum\n";
     double max_diff = 0.0, max_sum = 0.0;
+    int max_diff_atom = -1;
+    if (verbose) {
+        std::cout << "  atom   curcuma_dE_D4/dq    implied_D4_vat       diff         sum\n";
+    }
     for (int i = 0; i < nat; ++i) {
         const double diff = dEdq(i) - implied(i);
         const double sum  = dEdq(i) + implied(i);
-        if (std::abs(diff) > max_diff) max_diff = std::abs(diff);
+        if (std::abs(diff) > max_diff) { max_diff = std::abs(diff); max_diff_atom = i; }
         if (std::abs(sum)  > max_sum)  max_sum  = std::abs(sum);
-        std::printf("  %3d  %18.10e  %18.10e  %10.2e  %10.2e\n",
-                    i, dEdq(i), implied(i), diff, sum);
+        if (verbose) {
+            std::printf("  %3d  %18.10e  %18.10e  %10.2e  %10.2e\n",
+                        i, dEdq(i), implied(i), diff, sum);
+        }
     }
-    std::printf("  max|diff|=%.2e   max|sum|=%.2e%s\n",
-                max_diff, max_sum,
+    std::printf("  max|diff|=%.2e (atom %d, Z=%d)   max|sum|=%.2e%s\n",
+                max_diff, max_diff_atom,
+                (max_diff_atom >= 0 ? atoms[max_diff_atom] : -1),
+                max_sum,
                 (max_sum < max_diff * 0.5 && max_diff > 1e-9) ? "   <-- sign flip" : "");
+    return max_diff;
 }
 
 int main(int argc, char** argv)
 {
-    if (argc < 3 || (argc - 1) % 2 != 0) {
-        std::cerr << "usage: diag_curcuma_d4_potential <dump.json> <xyz.xyz> [<dump.json> <xyz.xyz> ...]\n";
+    // Parse optional flags: --tol <value> (regression threshold on max|diff|),
+    // --quiet (suppress per-atom table).
+    double tol = -1.0;
+    bool verbose = true;
+    std::vector<std::string> positional;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--tol" && i + 1 < argc) { tol = std::stod(argv[++i]); }
+        else if (a == "--quiet") { verbose = false; }
+        else if (a == "-h" || a == "--help") {
+            std::cerr << "usage: diag_curcuma_d4_potential [--tol <value>] [--quiet]"
+                         " <dump.json> <xyz.xyz> [<dump.json> <xyz.xyz> ...]\n"
+                         "  --tol VALUE   exit with code 1 if any molecule's max|diff| > VALUE\n"
+                         "  --quiet       suppress per-atom table, print summary only\n";
+            return 0;
+        }
+        else positional.push_back(a);
+    }
+    if (positional.size() < 2 || positional.size() % 2 != 0) {
+        std::cerr << "usage: diag_curcuma_d4_potential [--tol <value>] [--quiet]"
+                     " <dump.json> <xyz.xyz> [<dump.json> <xyz.xyz> ...]\n";
         return 2;
     }
-    for (int i = 1; i < argc; i += 2) analyse(argv[i], argv[i + 1]);
-    return 0;
+    int rc = 0;
+    for (size_t i = 0; i < positional.size(); i += 2) {
+        const double max_diff = analyse(positional[i], positional[i + 1], verbose);
+        if (max_diff < 0.0) { rc = 2; continue; }
+        if (tol > 0.0 && max_diff > tol) {
+            std::printf("  FAIL: max|diff|=%.2e > tol=%.2e\n", max_diff, tol);
+            rc = 1;
+        }
+    }
+    return rc;
 }
