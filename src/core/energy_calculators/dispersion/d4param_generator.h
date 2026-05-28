@@ -159,7 +159,14 @@ public:
     // for the D4 C6 interpolation instead of the GFN-FF erf-CN. GFN2 turns this
     // on to match tblite's get_coordination_number(rcov, en); GFN-FF leaves it
     // off (its Fortran reference uses the log-capped, EN-free CN). See d4_ncoord.h.
-    void setD4CovalentCN(bool on) { m_use_d4_covalent_cn = on; }
+    void setD4CovalentCN(bool on) {
+        if (m_use_d4_covalent_cn != on) {
+            m_use_d4_covalent_cn = on;
+            // The α-zeta correction in computeC6Reference is gated by this flag,
+            // so the cached C6 reference matrix must be rebuilt on toggle.
+            m_c6_reference_cached = false;
+        }
+    }
     bool usesD4CovalentCN() const { return m_use_d4_covalent_cn; }
 
     // Accumulate the D4 charge-response gradient Σ_A dEdq(A)·∂q_A/∂R into
@@ -200,7 +207,8 @@ private:
 
     // D4 reference data from external/gfnff/src/dftd4param.f90
     std::vector<int> m_refn;    // Number of reference systems per element
-    std::vector<std::vector<double>> m_refq, m_refh;  // Reference charges and hydrogen counts
+    std::vector<std::vector<double>> m_refq, m_refh;  // Reference charges and hydrogen counts (m_refh = dftd4 hcount, integer-valued)
+    std::vector<std::vector<double>> m_refh_charges;  // dftd4 refh table: H-atom partial charges in compound reference states (used by GFN2 α-correction)
     std::vector<std::vector<double>> m_refcn;   // Reference coordination numbers (cpp-d4)
 
     // Legacy placeholders (deprecated - replaced with real data)

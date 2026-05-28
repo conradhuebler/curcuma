@@ -83,7 +83,8 @@ void D4ParameterGenerator::initializeReferenceData()
     // Load reference data from d4_reference_data_fixed.cpp
     m_refn = ::d4_refn;  // Number of reference states per element (118 elements)
     m_refq = ::d4_refq;  // Reference charges (118 × 7)
-    m_refh = ::d4_refh;  // Reference hydrogen counts (118 × 7)
+    m_refh = ::d4_refh;  // Reference hydrogen counts (118 × 7) — dftd4 calls this hcount
+    m_refh_charges = ::d4_refh_charges;  // Reference H-charges (dftd4 refh) — used by GFN2 α-correction zeta scaling
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success(fmt::format("D4: Loaded {} elements from reference data", m_refn.size()));
@@ -958,6 +959,27 @@ double D4ParameterGenerator::computeC6Reference(int elem_i, int elem_j, int ref_
     double sscale_i = (d4_sscale_data.find(refsys_i) != d4_sscale_data.end()) ? d4_sscale_data.at(refsys_i) : 0.0;
     double sscale_j = (d4_sscale_data.find(refsys_j) != d4_sscale_data.end()) ? d4_sscale_data.at(refsys_j) : 0.0;
 
+    // dftd4 GFN2 α-correction zeta scaling (set_refalpha_gfn2 in reference.f90:343-377):
+    //   aiw[freq] = sscale·secaiw[freq] · zeta(ga, hardness(refsys)·gc, zeff(refsys), refh+zeff(refsys))
+    // The zeta factor is frequency-independent → precompute once per (elem, ref).
+    // Gated by m_use_d4_covalent_cn: GFN2 turns it on (dftd4 set_refalpha_gfn2 path);
+    // GFN-FF keeps it off (its existing C6 reference is tuned against the Fortran
+    // GFN-FF reference, which uses a different/no scaling — touching this regresses
+    // the GFN-FF validation suite).
+    auto zetaCorrection = [&](int elem, int ref, int refsys) -> double {
+        if (!m_use_d4_covalent_cn) return 1.0;
+        if (refsys <= 0 || refsys > MAX_ELEM) return 1.0;
+        const int idx = refsys - 1;
+        const double hardness = GFNFFParameters::zeta_c[idx];        // dftd4 chemical_hardness(refsys)
+        const double zeff_rs  = GFNFFParameters::zeta_zeff[idx];     // dftd4 effective_nuclear_charge(refsys)
+        const double refh_q   = (elem < static_cast<int>(m_refh_charges.size())
+                                 && ref < static_cast<int>(m_refh_charges[elem].size()))
+                                ? m_refh_charges[elem][ref] : 0.0;
+        return curcuma::dispersion::d4_zeta(3.0, hardness * 2.0, zeff_rs, refh_q + zeff_rs);
+    };
+    const double zeta_corr_i = zetaCorrection(elem_i, ref_i, refsys_i);
+    const double zeta_corr_j = zetaCorrection(elem_j, ref_j, refsys_j);
+
     // Debug output for ascale and hcount verification (Phase A - Dec 2025)
     static int debug_hcount = 0;
     if (CurcumaLogger::get_verbosity() >= 3 && debug_hcount < 5) {
@@ -988,11 +1010,12 @@ double D4ParameterGenerator::computeC6Reference(int elem_i, int elem_j, int ref_
             secaiw_j_next = d4_secaiw_data.at(refsys_j)[iw + 1];
         }
 
-        // Apply correction formula
-        double alpha_i_iw = ascale_i * (alphaiw_i_iw - hcount_i * sscale_i * secaiw_i_iw);
-        double alpha_i_next = ascale_i * (alphaiw_i_next - hcount_i * sscale_i * secaiw_i_next);
-        double alpha_j_iw = ascale_j * (alphaiw_j_iw - hcount_j * sscale_j * secaiw_j_iw);
-        double alpha_j_next = ascale_j * (alphaiw_j_next - hcount_j * sscale_j * secaiw_j_next);
+        // Apply correction formula (dftd4 set_refalpha_gfn2): the inner-shell
+        // aiw is scaled by the precomputed zeta factor (zeta_corr_*).
+        double alpha_i_iw = ascale_i * (alphaiw_i_iw - hcount_i * sscale_i * secaiw_i_iw * zeta_corr_i);
+        double alpha_i_next = ascale_i * (alphaiw_i_next - hcount_i * sscale_i * secaiw_i_next * zeta_corr_i);
+        double alpha_j_iw = ascale_j * (alphaiw_j_iw - hcount_j * sscale_j * secaiw_j_iw * zeta_corr_j);
+        double alpha_j_next = ascale_j * (alphaiw_j_next - hcount_j * sscale_j * secaiw_j_next * zeta_corr_j);
 
         // Ensure non-negative (as per Fortran: max(correction, 0.0))
         alpha_i_iw = std::max(alpha_i_iw, 0.0);
