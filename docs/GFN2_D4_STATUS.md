@@ -54,16 +54,33 @@ The per-atom error sums for triose:
 - D4-vat max|diff| = 1.20e-4 per atom
 - 66 atoms × ~50 µEh/atom = ~3 mEh total — exactly the observed ΔE.
 
-Likely candidates for the remaining ~5 % on the C side:
-- a missing layer in the C reference data (per-ref `ascale` / `sscale` subtleties
-  for the CH/CH₂/CH₃/CH₄ refs);
-- the `max(α_corrected, 0)` clamp interacting differently for small refh;
-- an alphaiw extraction discrepancy specific to C reference states.
+**What we ruled out (cross-checked line-by-line against `dftd4-src/src/dftd4/`):**
+- `weight_references`, `zeta`, `dzeta` formulas — identical.
+- Constants `ga=3`, `gc=2`, `wf=6` — identical.
+- `effective_nuclear_charge`, `chemical_hardness` (curcuma's `zeta_zeff`/`zeta_c`)
+  — bit-identical for H/C/N/O (and likely for all 118).
+- `refq` (GFN2 reference charges) — bit-identical (verified for H/C/N/O).
+- `refh` (newly-added `d4_refh_charges`) — verbatim from dftd4 reference.inc.
+- `set_refgw` multi-gaussian `ngw` — formula identical.
+- `refsys` (curcuma `d4_refsys_data`) — bit-identical for C/N/O.
+- Casimir-Polder integrator (trapezoidal over 23-point freq grid) — identical
+  closed-form weights.
+- The zeta-correction is gated by `m_use_d4_covalent_cn` with cache invalidation
+  on toggle (verified GFN-FF unaffected).
 
-Probe: per-pair `C6(C,H)` and `C6(C,C)` at tblite's charges — extend
-`diag_curcuma_d4_potential` to also print per-pair C6 and diff against tblite's
-`d4%c6` (would need a small dump-tblite patch to expose `model%c6`, or compute
-the per-pair C6 from `gwvec ⊗ c6ref` independently).
+**Where the remaining ~5 % likely hides:**
+- The base `alphaiw` table itself (curcuma's `d4_alphaiw_data` was extracted at
+  some point — its provenance for C reference states isn't bit-verified against
+  the dftd4 GFN2 source).
+- The per-(elem, ref) `ascale`/`sscale`/`secaiw` for C may have a subtle factor
+  applied that O/N don't see.
+
+**Next concrete probe (when picked up again):** dump curcuma's per-pair
+`C6(iat, jat)` at tblite's converged charges (extend
+`diag_curcuma_d4_potential`) and compare against tblite's `model%c6`. tblite
+would need a small C-API patch to expose `model%c6` (the existing dump tool
+exposes converged moments and potentials but not `c6`). With both sides
+visible, a per-(iref, jref) diff localises the exact entry that deviates.
 
 ### 2. complex (231 atoms) — SCF divergence, **not** a D4 issue
 
