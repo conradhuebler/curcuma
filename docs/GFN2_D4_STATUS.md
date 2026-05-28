@@ -68,12 +68,18 @@ The per-atom error sums for triose:
 - The zeta-correction is gated by `m_use_d4_covalent_cn` with cache invalidation
   on toggle (verified GFN-FF unaffected).
 
-**Where the remaining ~5 % likely hides:**
-- The base `alphaiw` table itself (curcuma's `d4_alphaiw_data` was extracted at
-  some point — its provenance for C reference states isn't bit-verified against
-  the dftd4 GFN2 source).
-- The per-(elem, ref) `ascale`/`sscale`/`secaiw` for C may have a subtle factor
-  applied that O/N don't see.
+**Where the remaining ~5 % likely hides** (after exhaustive table audit on
+2026-05-28, **all tables bit-identical to dftd4-src**):
+- `alphaiw` for H/C/N/O — `max|diff|=0` across all 23 freq × all refs.
+- `ascale`, `sscale`, `secaiw`, `refsys`, `refcn`, `refq`, `refh`, `m_refh`
+  (hcount), `refn` — all bit-identical.
+- Tblite GFN2 puts third-order into `pot%vsh` not `pot%vat`
+  (`thirdorder.f90:162`), so `implied = vat_tblite − gf2.vat_extra` IS the D4
+  SCF potential alone, no third-order contamination.
+- Yet the 4-5 % per-atom mismatch persists. Suspected: the `d4_model%c6` matrix
+  itself (computed once during `new_d4_model` from `alphaiw + zeta-corrected
+  aiw`). To confirm, need a direct dump of tblite's `model%c6` and a
+  per-(iref, jref) diff against curcuma's `m_c6_flat_cache`.
 
 **Next concrete probe (when picked up again):** dump curcuma's per-pair
 `C6(iat, jat)` at tblite's converged charges (extend
