@@ -36,6 +36,15 @@ target_include_directories(test_xtb_scf_snapshot PRIVATE
 )
 target_compile_features(test_xtb_scf_snapshot PRIVATE cxx_std_17)
 
+# === Step 3a diagnostic: curcuma D4 SCF potential vs (vat_tblite − gf2.vat_extra) ===
+add_executable(diag_curcuma_d4_potential diag_curcuma_d4_potential.cpp)
+target_link_libraries(diag_curcuma_d4_potential PRIVATE curcuma_core)
+target_include_directories(diag_curcuma_d4_potential PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/external
+)
+target_compile_features(diag_curcuma_d4_potential PRIVATE cxx_std_17)
+
 # === tblite-dependent executables (dump + multipole) ===
 if(USE_TBLITE)
     # Phase 0 reference dumper
