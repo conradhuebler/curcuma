@@ -209,7 +209,8 @@ private:
     std::vector<int> m_refn;    // Number of reference systems per element
     std::vector<std::vector<double>> m_refq, m_refh;  // Reference charges and hydrogen counts (m_refh = dftd4 hcount, integer-valued)
     std::vector<std::vector<double>> m_refh_charges;  // dftd4 refh table: H-atom partial charges in compound reference states (used by GFN2 α-correction)
-    std::vector<std::vector<double>> m_refcn;   // Reference coordination numbers (cpp-d4)
+    std::vector<std::vector<double>> m_refcn;   // Reference CN — dftd4 'refcn', used ONLY for ngw bucketing (set_refgw)
+    std::vector<std::vector<double>> m_refcovcn; // dftd4 'refcovcn' — covalent reference CN for the CN-Gaussian weighting (set_refcn -> model%cn -> weight_references). Distinct from m_refcn.
 
     // Legacy placeholders (deprecated - replaced with real data)
     std::vector<double> m_r4_over_r2;

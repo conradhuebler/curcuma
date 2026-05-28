@@ -3,6 +3,9 @@
 Konkretes Vorgehen, um curcumas native GFN2 Komponente-für-Komponente gegen
 tblite (Fortran) zu validieren. Master-Roadmap: [`GFN2_NATIVE_ROADMAP.md`](GFN2_NATIVE_ROADMAP.md).
 
+> **Phase A+B+C (Coarse) implementiert, 2026-05-28** — `ctest -L gfn2_align`,
+> 5/5 grün. Details siehe Abschnitt "Status" am Ende.
+
 ## Grundprinzip
 
 Bei *fixierter tblite-Dichte* die Energie jeder Komponente parallel berechnen
@@ -141,6 +144,53 @@ Mit den Per-Komponenten-Werten:
 - Was, falls Phase-A-Patch nicht alle Container so feinkörnig auflöst? Plan B:
   Komponenten-Energien aus tblite via mehrere Singlepoint-Runs mit selektivem
   Container-Off-Schalten extrahieren.
+
+## Status (2026-05-28)
+
+**Phase A+B+C+D Coarse-Variante implementiert.**
+
+- **Phase A (tblite-Patch)**: 5 neue C-API-Getter
+  `tblite_get_result_energy_component_{halogen,repulsion,dispersion,interactions,electronic}`,
+  jeweils nat-resolved. `results_type` um 5 `ecomp_*` Felder erweitert,
+  `xtb/singlepoint.f90` kopiert die `exbond/erep/edisp/eint`-Arrays direkt
+  nach `get_engrad`, `eelec` nach SCF-Loop. Patch-Stil identisch zum AP6b-Patch.
+- **Phase B**: `dump_tblite_multipole.cpp` schreibt jetzt einen
+  `e_components_tblite`-Block mit `{halogen, repulsion, dispersion,
+  interactions, electronic}` plus `sums.{...}`. Container ohne
+  Calculator-Zuweisung werden gracefully übersprungen (tblite_check_error +
+  clear_error).
+- **Phase C**: `XTB::evaluateComponentsAtFixedDensity(P, q_at, q_sh, dp_at, qp_at)`
+  überspringt SCF, injiziert die externe Dichte/Moments, ruft jeden
+  Energie-Helper einmal auf. `XTB::getReferenceShellOccupations()` exponiert
+  `n0_sh` für die `q_sh = n0 - n_sh`-Rekonstruktion (kritisch: GFN2 hat
+  *nicht-ganzzahlige* Referenz, z.B. N=`{1.5, 3.5}` — eine Spiegelung der
+  Tabelle wäre fehleranfällig). `diag_curcuma_energy_components` reportet
+  per-Container-Diff plus die **kombinierte** disp+elec-Diff (die einzige
+  apples-to-apples-Zahl, weil tblite D4 SCF-coupled in `eelec` ablegt,
+  während curcuma alles in `m_E_dispersion` hat).
+- **Phase D**: `ctest -L gfn2_align`, 5 Moleküle, alle grün:
+  | Molekül | combined \|disp+elec\| |
+  |---------|----------------------|
+  | H₂      | 1.50e-10 |
+  | H₂O     | 6.69e-7 |
+  | NH₃     | 1.42e-6 |
+  | CH₄     | 1.79e-5 |
+  | triose  | 3.21e-3 |
+
+  Reproduziert die Total-Energy-Ist-Stand-Tabelle im Master exakt.
+  Repulsion separat bit-identisch (≤ 1e-17).
+
+**Folgerung**: Der gesamte triose-3.2-mEh-Residuum lebt in der D4+electronic-
+Maschinerie, *nicht* in Repulsion. Das per-Container-Bild zeigt zusätzlich,
+dass tblites `dispersion`-Container nur die pre-SCF-D4-Baseline (q=0)
+einfängt; die SCC-gekoppelte D4-Energie wandert in `eelec`. Curcuma packt
+alles in `m_E_dispersion`. Die Differenz pro Container ist also gross
+(z.B. 7e-2 für triose), die Summe stimmt aber bis auf das 3.2-mEh-Residuum.
+
+**Nächster Schritt** (P1 fortgeführt): per-Paar `d4_model%c6`-Export aus
+tblite + curcuma `m_c6_flat_cache`-Diff, um die D4-Tiefe zu auditieren.
+Oder Phase A2 (Fine): GFN2-Coulomb-Container intern in ES2/3rd/mp splitten,
+um eine zweite Komponente auszuschließen.
 
 ## Verwandte Dokumente
 

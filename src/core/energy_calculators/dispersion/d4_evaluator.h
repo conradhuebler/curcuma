@@ -44,10 +44,10 @@ enum class DampingFormula {
 struct D4Params {
     double s6 = 0.0;
     double s8 = 0.0;
-    double s9 = 0.0;     ///< Three-body ATM scaling (not used by this evaluator yet)
+    double s9 = 0.0;     ///< Three-body ATM scaling (s9; GFN2=5.0). 0 disables ATM.
     double a1 = 0.0;
     double a2 = 0.0;     ///< In Bohr
-    double alpha = 16.0; ///< ATM exponent (reserved)
+    double alpha = 16.0; ///< ATM zero-damping exponent (dftd4 alp; GFN2=16.0)
     DampingFormula damping = DampingFormula::ModifiedBJ_GFNFF;
     /// AP6b: native GFN2 uses the exact dftd4 per-reference charge weighting
     /// (D4ParameterGenerator::weightedC6Gfn2). GFN-FF leaves this false and keeps
@@ -130,6 +130,27 @@ public:
                                     Vector& dEdCN_out,
                                     Vector& dEdq_out,
                                     bool with_dEdq = false);
+
+    // ---------- ATM three-body term (GFN2) ----------
+    //
+    // Axilrod-Teller-Muto triple-dipole dispersion with Chai--Head-Gordon zero
+    // damping + BJ critical radii. Exact port of dftd4 get_atm_dispersion
+    // (damping/atm.f90). Returns the ATM energy (Hartree) and, if with_gradient,
+    // ACCUMULATES the Cartesian gradient (Hartree/Bohr) into gradient_out and the
+    // CN chain-rule term into dEdCN_out (both are += , not overwritten — call
+    // after computeEnergyAndGradient so the 2-body contributions stay).
+    //
+    // dftd4 evaluates the ATM at the q=0 (CN-only) reference C6, so the term is
+    // charge-INDEPENDENT — there is no q-response (matches tblite
+    // get_dispersion_nonsc). No-op when m_params.s9 == 0.
+    //
+    // cutoff_bohr: real-space cutoff for the 3-body sum (tblite GFN2 uses 25.0).
+    double computeATM(const std::vector<int>& atoms,
+                      const Matrix& geometry_bohr,
+                      bool with_gradient,
+                      Matrix& gradient_out,
+                      Vector& dEdCN_out,
+                      double cutoff_bohr = 25.0);
 
     // ---------- CUDA hook (not used in this AP) ----------
     //

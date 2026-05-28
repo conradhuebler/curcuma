@@ -284,6 +284,27 @@ int main(int argc, char** argv)
     std::vector<double> charges(nat);
     tblite_get_result_charges(err, res, charges.data());
 
+    // GFN2 component audit (Claude Generated): per-container atom-resolved energies.
+    // A getter raises an error if its container is absent (e.g. halogen for H/C/N/O
+    // molecules) or if SCF aborted before populating it. Treat those as 'not present'
+    // and clear the error so subsequent calls still work.
+    auto try_get_ecomp = [&](void (*fn)(tblite_error, tblite_result, double*),
+                             std::vector<double>& buf) -> bool {
+        buf.assign(nat, 0.0);
+        fn(err, res, buf.data());
+        if (tblite_check_error(err)) {
+            tblite_clear_error(err);
+            return false;
+        }
+        return true;
+    };
+    std::vector<double> ec_halogen, ec_repulsion, ec_dispersion, ec_interactions, ec_electronic;
+    bool have_halogen      = try_get_ecomp(tblite_get_result_energy_component_halogen,      ec_halogen);
+    bool have_repulsion    = try_get_ecomp(tblite_get_result_energy_component_repulsion,    ec_repulsion);
+    bool have_dispersion   = try_get_ecomp(tblite_get_result_energy_component_dispersion,   ec_dispersion);
+    bool have_interactions = try_get_ecomp(tblite_get_result_energy_component_interactions, ec_interactions);
+    bool have_electronic   = try_get_ecomp(tblite_get_result_energy_component_electronic,   ec_electronic);
+
     std::vector<double> dipole(3);
     tblite_get_result_dipole(err, res, dipole.data());
 
@@ -368,6 +389,23 @@ int main(int argc, char** argv)
     out["density"]         = storeSymmetricMatrix(P_vec, nao);
     out["overlap"]         = storeSymmetricMatrix(S_vec, nao);
     out["hamiltonian"]     = storeSymmetricMatrix(H_vec, nao);
+
+    // GFN2 component audit (Claude Generated): per-container energies for the
+    // curcuma-side fixed-density diff (see diag_curcuma_energy_components).
+    // "electronic" is the lump Tr(P*H0) + Coulomb-shell + 3rd-order + multipole;
+    // curcuma decomposes it itself using the injected density.
+    {
+        json ec;
+        auto sum = [](const std::vector<double>& v) {
+            double s = 0.0; for (double x : v) s += x; return s;
+        };
+        if (have_halogen)      { ec["halogen"]      = ec_halogen;      ec["sums"]["halogen"]      = sum(ec_halogen); }
+        if (have_repulsion)    { ec["repulsion"]    = ec_repulsion;    ec["sums"]["repulsion"]    = sum(ec_repulsion); }
+        if (have_dispersion)   { ec["dispersion"]   = ec_dispersion;   ec["sums"]["dispersion"]   = sum(ec_dispersion); }
+        if (have_interactions) { ec["interactions"] = ec_interactions; ec["sums"]["interactions"] = sum(ec_interactions); }
+        if (have_electronic)   { ec["electronic"]   = ec_electronic;   ec["sums"]["electronic"]   = sum(ec_electronic); }
+        out["e_components_tblite"] = ec;
+    }
 
     // =====================================================================
     //  GFN2 multipole reconstruction

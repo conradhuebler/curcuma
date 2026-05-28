@@ -85,6 +85,7 @@ void D4ParameterGenerator::initializeReferenceData()
     m_refq = ::d4_refq;  // Reference charges (118 × 7)
     m_refh = ::d4_refh;  // Reference hydrogen counts (118 × 7) — dftd4 calls this hcount
     m_refh_charges = ::d4_refh_charges;  // Reference H-charges (dftd4 refh) — used by GFN2 α-correction zeta scaling
+    m_refcovcn = ::d4_refcovcn;  // dftd4 refcovcn — covalent reference CN for the CN-Gaussian weighting (set_refcn)
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success(fmt::format("D4: Loaded {} elements from reference data", m_refn.size()));
@@ -347,6 +348,19 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                                  fmt::format("q={:.6f}", m_eeq_charges(i)));
         }
     }
+
+    // Claude Generated (2026-05-28, GFN2-D4 C-path fix): rebuild the C6 reference
+    // matrix if it was invalidated by a setD4CovalentCN()/setUseD4SingleShotEEQ()
+    // toggle after construction. The constructor builds the cache with
+    // m_use_d4_covalent_cn=false (unscaled); native GFN2 sets the flag true
+    // afterwards to enable the set_refalpha_gfn2 alpha-zeta correction in
+    // computeC6Reference. Without this rebuild, GenerateParameters/weightedC6Gfn2
+    // read the stale UNSCALED reference C6 — bit-identical on hcount=0 references
+    // but up to ~57% off on the zeta-corrected intermediate references, which is
+    // the source of the CH4/triose C-path residual (see docs/GFN2_D4_STATUS.md,
+    // diag_curcuma_d4_c6). GFN-FF (flag off) is unaffected: computeC6Reference's
+    // zeta correction is gated by m_use_d4_covalent_cn.
+    if (!m_c6_reference_cached) precomputeC6ReferenceMatrix();
 
     // Claude Generated (Dec 27, 2025): Pre-compute Gaussian weights ONCE for all atoms
     // This eliminates redundant exp() calls in getChargeWeightedC6()
@@ -1315,6 +1329,14 @@ D4ParameterGenerator::weightedC6Gfn2(int Zi, int Zj, size_t atom_i, size_t atom_
         const double zeff = GFNFFParameters::zeta_zeff[elem];   // = dftd4 effective_nuclear_charge
         const double gi   = eta * gc;
         const double* refcn = m_refcn[elem].data();
+        // dftd4 uses TWO reference-CN tables: refcn for the ngw bucketing
+        // (set_refgw, below) and refcovcn (covalent CN) for the actual
+        // CN-Gaussian (set_refcn -> model%cn -> weight_references). Using refcn
+        // for the Gaussian over-broadens the weights (up to 14% wrong weighted
+        // C6 on carbon -> the triose C-path residual). Fall back to refcn only
+        // if the refcovcn table is unavailable. (Claude Generated 2026-05-28.)
+        const double* refcovcn = (elem < (int)m_refcovcn.size() && !m_refcovcn[elem].empty())
+                                 ? m_refcovcn[elem].data() : refcn;
 
         // ngw[ref] from refcn (dftd4 set_refgw): count references sharing the
         // same rounded CN, then ngw = k(k+1)/2.
@@ -1340,10 +1362,10 @@ D4ParameterGenerator::weightedC6Gfn2(int Zi, int Zj, size_t atom_i, size_t atom_
             double ew = 0.0, ed = 0.0;
             for (int igw = 1; igw <= ngw[ir]; ++igw) {
                 const double wfe = igw * wf;
-                const double d   = cn - refcn[ir];
+                const double d   = cn - refcovcn[ir];        // Gaussian uses refcovcn (dftd4 model%cn)
                 const double gw  = std::exp(-wfe * d * d);
                 ew += gw;
-                ed += 2.0 * wfe * (refcn[ir] - cn) * gw;   // d(gw)/dCN
+                ed += 2.0 * wfe * (refcovcn[ir] - cn) * gw;  // d(gw)/dCN
             }
             expw[ir] = ew; expd[ir] = ed;
             norm += ew; dnorm += ed;

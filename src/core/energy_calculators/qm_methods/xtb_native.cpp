@@ -322,6 +322,106 @@ double XTB::Calculation(bool gradient)
 }
 
 /* ------------------------------------------------------------------------- *
+ *  GFN2 component audit (Claude Generated): SCF-free per-container energy
+ *  evaluation at an externally supplied wavefunction state. Mirrors the
+ *  pre-SCF setup steps from Calculation() and the post-SCF energy
+ *  accumulators, but skips diagonalisation. See xtb_native.h for the
+ *  contract; intended to be driven by diag_curcuma_energy_components.
+ * ------------------------------------------------------------------------- */
+bool XTB::evaluateComponentsAtFixedDensity(
+    const Matrix& P,
+    const Vector& q_at,
+    const Vector& q_sh,
+    const Eigen::MatrixXd& dp_at,
+    const Eigen::MatrixXd& qp_at)
+{
+    const int nat = m_basis.nat;
+    const int nsh = m_basis.nsh;
+    const int nao = m_basis.nao;
+    if (nat <= 0 || nsh <= 0 || nao <= 0) {
+        CurcumaLogger::error("XTB::evaluateComponentsAtFixedDensity: basis not built; call InitialiseMolecule() first");
+        return false;
+    }
+    if (P.rows() != nao || P.cols() != nao) {
+        CurcumaLogger::error_fmt("XTB::evaluateComponentsAtFixedDensity: P shape ({}x{}) != nao ({})",
+                                 P.rows(), P.cols(), nao);
+        return false;
+    }
+    if (q_at.size() != nat) {
+        CurcumaLogger::error_fmt("XTB::evaluateComponentsAtFixedDensity: q_at size {} != nat {}",
+                                 q_at.size(), nat);
+        return false;
+    }
+    if (q_sh.size() != nsh) {
+        CurcumaLogger::error_fmt("XTB::evaluateComponentsAtFixedDensity: q_sh size {} != nsh {}",
+                                 q_sh.size(), nsh);
+        return false;
+    }
+
+    // Pre-SCF setup (mirrors Calculation() steps 1-5 minus the SCF loop).
+    Vector cn = computeCoordinationNumbers();
+    Vector se;
+    getSelfEnergies(cn, se);
+    Matrix S, H0;
+    getHamiltonianH0(se, S, H0);
+    m_S  = S;
+    m_H0 = H0;
+    buildGammaMatrix();
+    if (m_method == MethodType::GFN2) {
+        setupMultipole();
+    }
+    m_coordination_numbers = cn;
+
+    // Inject wavefunction state. q_at/q_sh and the dual n_at/n_sh stay
+    // consistent (n = n0 - q) so any helper that reads either form sees the
+    // same physical state.
+    m_wfn.P    = P;
+    m_wfn.q_at = q_at;
+    m_wfn.q_sh = q_sh;
+    m_wfn.n_at = m_wfn.n0_at - q_at;
+    m_wfn.n_sh = m_wfn.n0_sh - q_sh;
+    if (m_method == MethodType::GFN2) {
+        if (dp_at.rows() != 3 || dp_at.cols() != nat) {
+            CurcumaLogger::error_fmt("XTB::evaluateComponentsAtFixedDensity: dp_at shape ({}x{}) != (3x{})",
+                                     dp_at.rows(), dp_at.cols(), nat);
+            return false;
+        }
+        if (qp_at.rows() != 6 || qp_at.cols() != nat) {
+            CurcumaLogger::error_fmt("XTB::evaluateComponentsAtFixedDensity: qp_at shape ({}x{}) != (6x{})",
+                                     qp_at.rows(), qp_at.cols(), nat);
+            return false;
+        }
+        m_wfn.dp_at = dp_at;
+        m_wfn.qp_at = qp_at;
+    } else {
+        m_wfn.dp_at = Eigen::MatrixXd::Zero(3, nat);
+        m_wfn.qp_at = Eigen::MatrixXd::Zero(6, nat);
+    }
+
+    // Evaluate every per-container energy at the injected state. Order matches
+    // Calculation()'s final-energy block (lines 260-268) so the m_E_* fields
+    // and the public getters report the same quantities, just at the
+    // *injected* density rather than at curcuma's own SCF fixpoint.
+    m_E_coulomb_shell = energyCoulombShell();
+    m_E_third_order   = energyThirdOrder();
+    m_E_multipole     = energyMultipole();
+    const double e_band = (m_wfn.P.cwiseProduct(m_H0)).sum();
+    m_E_electronic = e_band + m_E_coulomb_shell + m_E_third_order + m_E_multipole;
+    m_E_repulsion    = calcRepulsionEnergy();
+    m_E_halogen_bond = calcHalogenBondEnergy();
+    // Skip the dispersion CPSCF charge-response fold: it needs MO coefficients
+    // (m_wfn.C / m_wfn.eps) which are absent because we did not diagonalise.
+    // The dispersion energy itself is unaffected.
+    m_disp_audit_mode = true;
+    m_E_dispersion   = calcDispersionEnergy();
+    m_disp_audit_mode = false;
+    m_E_total = m_E_electronic + m_E_repulsion
+              + m_E_halogen_bond + m_E_dispersion;
+
+    return true;
+}
+
+/* ------------------------------------------------------------------------- *
  *  Build-once state (stub implementations)
  * ------------------------------------------------------------------------- */
 void XTB::buildBasis()
@@ -728,10 +828,18 @@ double XTB::calcDispersionEnergy() const
     // the GFN2 CPSCF path (mulliken). With the default "eeq" source this is
     // the dftd4-conform behaviour.
     const bool want_dEdq = true;
-    const double E = m_d4_evaluator->computeEnergyAndGradient(
+    double E = m_d4_evaluator->computeEnergyAndGradient(
         m_atoms, geom_bohr,
         /*with_gradient=*/true,
         m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, want_dEdq);
+
+    // ATM three-body term (GFN2 s9=5.0). Charge-independent (dftd4 evaluates it at
+    // the q=0 reference C6 — matches tblite get_dispersion_nonsc), so no q-response.
+    // ACCUMULATES into m_disp_gradient and m_disp_dEdcn (the latter folded together
+    // with the 2-body dEdcn via the D4 covalent CN below). Closes the triose C-path
+    // remainder (see docs/GFN2_D4_STATUS.md). Claude Generated 2026-05-29.
+    E += m_d4_evaluator->computeATM(
+        m_atoms, geom_bohr, /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn);
 
     // CN chain rule: fold Σ_A dE_D4/dCN_A · ∂CN_A/∂R into the cached gradient using
     // the D4 CN's OWN derivative (EN-weighted erf), keeping the dispersion gradient
@@ -746,8 +854,8 @@ double XTB::calcDispersionEnergy() const
 
     // q-response chain rule: fold Σ_A dE_D4/dq_A · ∂q_A/∂R into the cached geometry
     // gradient. The per-reference path is Mulliken-self-consistent, so ∂q/∂x comes
-    // from the GFN2 CPSCF/Z-vector response.
-    if (m_disp_dEdq.size() == m_atomcount) {
+    // from the GFN2 CPSCF/Z-vector response. Skipped in audit mode (no MO state).
+    if (m_disp_dEdq.size() == m_atomcount && !m_disp_audit_mode) {
         computeMullikenChargeResponse(m_disp_dEdq, m_disp_gradient);
     }
     m_disp_gradient_valid = true;

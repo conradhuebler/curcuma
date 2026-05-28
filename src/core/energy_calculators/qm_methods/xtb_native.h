@@ -184,6 +184,12 @@ public:
 
     Vector  getCharges() const { return m_wfn.q_at; }
     Vector  getShellCharges() const { return m_wfn.q_sh; }
+    // GFN2 component audit (Claude Generated): reference shell occupations
+    // n0_sh (length nsh). Built in buildReferenceOccupations() from the gfn1_
+    // / gfn2_params reference_occ tables. Exposing this lets diagnostics
+    // reconstruct q_sh from external (tblite) shell populations without
+    // mirroring the params table.
+    Vector  getReferenceShellOccupations() const { return m_wfn.n0_sh; }
     Vector  getOrbitalEnergies() const { return m_wfn.eps; }
     Matrix  getMOCoefficients() const { return m_wfn.C; }
     Matrix  getDensity() const { return m_wfn.P; }
@@ -250,6 +256,29 @@ public:
 
     // Tighten the SCF convergence threshold (for FD charge-response validation).
     void setScfThreshold(double t) { m_scf_threshold = t; }
+
+    // GFN2 component audit (Claude Generated): SCF-free evaluation of every
+    // per-container energy at an externally supplied (typically tblite-derived)
+    // wavefunction state. Skips diagonalisation, performs the pre-SCF setup
+    // (CN, self-energies, S+H0, gamma, multipole), copies the inputs into
+    // m_wfn, then calls every energy helper once. After it returns, all
+    // m_E_* members and the public getters (getElectronicEnergy(),
+    // getCoulombShellEnergy(), …) report values evaluated *at the injected
+    // density* — directly comparable to tblite's per-container exports.
+    //
+    //   P:     density matrix, nao x nao
+    //   q_at:  Mulliken atomic charges, length nat (= z_eff - n_at)
+    //   q_sh:  Mulliken shell charges, length nsh (= n0_sh - n_sh)
+    //   dp_at: atomic dipole moments, 3 x nat (GFN2 only; ignored for GFN1)
+    //   qp_at: atomic traceless quadrupoles, 6 x nat (GFN2 only; ignored for GFN1)
+    //
+    // Returns false if shapes are inconsistent with the built basis.
+    bool evaluateComponentsAtFixedDensity(
+        const Matrix& P,
+        const Vector& q_at,
+        const Vector& q_sh,
+        const Eigen::MatrixXd& dp_at,
+        const Eigen::MatrixXd& qp_at);
 
 private:
     /* ----- build-once state ------------------------------------------- */
@@ -375,6 +404,12 @@ private:
     mutable Vector m_disp_dEdcn;          ///< Cached D4 dE/dCN (Eh per CN unit)
     mutable Vector m_disp_dEdq;           ///< Cached D4 dE/dq (Eh per electron), q-response
     mutable bool   m_disp_gradient_valid = false;
+    // GFN2 component audit (Claude Generated): when set, calcDispersionEnergy
+    // skips the Mulliken CPSCF charge-response fold. The diagnostic injects a
+    // density without running SCF, so m_wfn.C / m_wfn.eps are empty and the
+    // Z-vector solver in computeMullikenChargeResponse would dereference into
+    // unallocated MO storage. The dispersion *energy* is still computed.
+    mutable bool   m_disp_audit_mode = false;
 
     // D4 charge-response source: "eeq" (dftd4-conform, default) or "mulliken"
     // (CPSCF response on the GFN2 SCF). Empty disables the q-response term

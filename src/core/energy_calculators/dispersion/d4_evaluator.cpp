@@ -9,6 +9,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <limits>
 
 namespace curcuma::dispersion {
 
@@ -230,6 +231,135 @@ double D4Evaluator::computeEnergyAndGradient(const std::vector<int>& atoms,
     }
 
     return E_total;
+}
+
+// triple_scale: distribute a triple energy to atomwise energies (dftd4 atm.f90).
+static inline double atm_triple_scale(int ii, int jj, int kk)
+{
+    if (ii == jj) {
+        return (ii == kk) ? (1.0 / 6.0) : 0.5;   // ii'i" -> 1/6 ; ii'j -> 1/2
+    }
+    return (ii != kk && jj != kk) ? 1.0 : 0.5;    // ijk -> 1 ; ijj'/iji' -> 1/2
+}
+
+double D4Evaluator::computeATM(const std::vector<int>& atoms,
+                               const Matrix& geometry_bohr,
+                               bool with_gradient,
+                               Matrix& gradient_out,
+                               Vector& dEdCN_out,
+                               double cutoff_bohr)
+{
+    if (std::abs(m_params.s9) < 1e-300 || m_data == nullptr) return 0.0;
+    const int nat = static_cast<int>(atoms.size());
+    if (nat < 3) return 0.0;
+
+    const double s9  = m_params.s9;
+    const double a1  = m_params.a1;
+    const double a2  = m_params.a2;
+    const double alp = m_params.alpha;
+    const double cutoff2 = cutoff_bohr * cutoff_bohr;
+    const double eps = std::numeric_limits<double>::epsilon();
+
+    // q=0 (CN-only) reference C6 + dC6/dCN, exactly as dftd4 get_dispersion_nonsc
+    // (weight_references at qat=0). c6[a][b] symmetric; dc6dcn[a][b] = dC6(a,b)/dCN_a.
+    Matrix c6 = Matrix::Zero(nat, nat);
+    Matrix dc6dcn;
+    if (with_gradient) dc6dcn = Matrix::Zero(nat, nat);
+    for (int a = 0; a < nat; ++a) {
+        for (int b = 0; b <= a; ++b) {
+            D4ParameterGenerator::C6Gfn2 g = m_data->weightedC6Gfn2(
+                atoms[a], atoms[b], a, b, /*qi=*/0.0, /*qj=*/0.0, with_gradient, false);
+            c6(a, b) = g.c6;
+            c6(b, a) = g.c6;
+            if (with_gradient) {
+                dc6dcn(a, b) = g.dc6dcni;   // dC6(a,b)/dCN_a
+                dc6dcn(b, a) = g.dc6dcnj;   // dC6(a,b)/dCN_b
+            }
+        }
+    }
+
+    // Per-element r4r2 (dftd4 r4r2[Z] == curcuma getSqrtZr4r2(Z)).
+    std::vector<double> r4r2(nat);
+    for (int a = 0; a < nat; ++a) r4r2[a] = m_data->getSqrtZr4r2(atoms[a]);
+
+    double E_atm = 0.0;
+
+    // Single unit cell (non-periodic): trans = {0}. Loops iat >= jat >= kat,
+    // degenerate triples self-skip via r2 < eps. Mirrors dftd4 atm.f90 exactly.
+    for (int iat = 0; iat < nat; ++iat) {
+        const Eigen::Vector3d ri = geometry_bohr.row(iat);
+        for (int jat = 0; jat <= iat; ++jat) {
+            const double c6ij = c6(jat, iat);
+            const double r0ij = a1 * std::sqrt(3.0 * r4r2[jat] * r4r2[iat]) + a2;
+            const Eigen::Vector3d rj = geometry_bohr.row(jat);
+            const Eigen::Vector3d vij = rj - ri;
+            const double r2ij = vij.squaredNorm();
+            if (r2ij > cutoff2 || r2ij < eps) continue;
+            for (int kat = 0; kat <= jat; ++kat) {
+                const double c6ik = c6(kat, iat);
+                const double c6jk = c6(kat, jat);
+                const double c9 = -s9 * std::sqrt(std::abs(c6ij * c6ik * c6jk));
+                const double r0ik = a1 * std::sqrt(3.0 * r4r2[kat] * r4r2[iat]) + a2;
+                const double r0jk = a1 * std::sqrt(3.0 * r4r2[kat] * r4r2[jat]) + a2;
+                const double r0 = r0ij * r0ik * r0jk;
+                const double triple = atm_triple_scale(iat, jat, kat);
+
+                const Eigen::Vector3d rk = geometry_bohr.row(kat);
+                const Eigen::Vector3d vik = rk - ri;
+                const double r2ik = vik.squaredNorm();
+                if (r2ik > cutoff2 || r2ik < eps) continue;
+                const Eigen::Vector3d vjk = rk - rj;
+                const double r2jk = vjk.squaredNorm();
+                if (r2jk > cutoff2 || r2jk < eps) continue;
+
+                const double r2 = r2ij * r2ik * r2jk;
+                const double r1 = std::sqrt(r2);
+                const double r3 = r2 * r1;
+                const double r5 = r3 * r2;
+
+                const double fdmp = 1.0 / (1.0 + 6.0 * std::pow(r0 / r1, alp / 3.0));
+                const double ang = 0.375 * (r2ij + r2jk - r2ik) * (r2ij - r2jk + r2ik)
+                                       * (-r2ij + r2jk + r2ik) / r5
+                                 + 1.0 / r3;
+                const double rr = ang * fdmp;
+                const double dE = rr * c9 * triple;
+                E_atm -= dE;   // energy[iat,jat,kat] each -= dE/3
+
+                if (with_gradient) {
+                    const double dfdmp = -2.0 * alp * std::pow(r0 / r1, alp / 3.0) * fdmp * fdmp;
+
+                    double dang = -0.375 * (r2ij*r2ij*r2ij + r2ij*r2ij*(r2jk + r2ik)
+                                  + r2ij*(3.0*r2jk*r2jk + 2.0*r2jk*r2ik + 3.0*r2ik*r2ik)
+                                  - 5.0*(r2jk - r2ik)*(r2jk - r2ik)*(r2jk + r2ik)) / r5;
+                    const Eigen::Vector3d dGij = c9 * (-dang*fdmp + ang*dfdmp) / r2ij * vij;
+
+                    dang = -0.375 * (r2ik*r2ik*r2ik + r2ik*r2ik*(r2jk + r2ij)
+                           + r2ik*(3.0*r2jk*r2jk + 2.0*r2jk*r2ij + 3.0*r2ij*r2ij)
+                           - 5.0*(r2jk - r2ij)*(r2jk - r2ij)*(r2jk + r2ij)) / r5;
+                    const Eigen::Vector3d dGik = c9 * (-dang*fdmp + ang*dfdmp) / r2ik * vik;
+
+                    dang = -0.375 * (r2jk*r2jk*r2jk + r2jk*r2jk*(r2ik + r2ij)
+                           + r2jk*(3.0*r2ik*r2ik + 2.0*r2ik*r2ij + 3.0*r2ij*r2ij)
+                           - 5.0*(r2ik - r2ij)*(r2ik - r2ij)*(r2ik + r2ij)) / r5;
+                    const Eigen::Vector3d dGjk = c9 * (-dang*fdmp + ang*dfdmp) / r2jk * vjk;
+
+                    // dftd4 gradient signs (atm.f90:329-331). Note vij=rj-ri here
+                    // matches dftd4 (xyz[jat]-xyz[iat]); gradient() is dE/dxyz.
+                    gradient_out.row(iat) -= (dGij + dGik).transpose();
+                    gradient_out.row(jat) += (dGij - dGjk).transpose();
+                    gradient_out.row(kat) += (dGik + dGjk).transpose();
+
+                    // CN chain rule (atm.f90:339-344): folded into dEdCN_out, which
+                    // the caller contracts with this CN's own dCN/dx.
+                    dEdCN_out(iat) -= dE * 0.5 * (dc6dcn(iat, jat) / c6ij + dc6dcn(iat, kat) / c6ik);
+                    dEdCN_out(jat) -= dE * 0.5 * (dc6dcn(jat, iat) / c6ij + dc6dcn(jat, kat) / c6jk);
+                    dEdCN_out(kat) -= dE * 0.5 * (dc6dcn(kat, iat) / c6ik + dc6dcn(kat, jat) / c6jk);
+                }
+            }
+        }
+    }
+
+    return E_atm;
 }
 
 }  // namespace curcuma::dispersion
