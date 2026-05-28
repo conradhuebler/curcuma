@@ -30,6 +30,7 @@
 #include "src/core/config_manager.h"
 #include "src/core/energy_calculators/dispersion/d4_evaluator.h"
 #include "src/core/energy_calculators/dispersion/d4param_generator.h"
+#include "src/core/energy_calculators/dispersion/d4_ncoord.h"  // D4 CN gradient (GFN2)
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #include "diis_accelerator.h"
 
@@ -709,6 +710,9 @@ double XTB::calcDispersionEnergy() const
     // The dq/dx gradient response then comes from CPSCF (computeMullikenChargeResponse).
     m_d4_generator->setUseD4SingleShotEEQ(false);
     m_d4_generator->setTopologyCharges(m_wfn.q_at);
+    // GFN2: use the dftd4 EN-weighted covalent CN (matches tblite's
+    // get_coordination_number(rcov, en)) instead of the GFN-FF log-capped erf-CN.
+    m_d4_generator->setD4CovalentCN(true);
 
     // m_geometry is in Angstrom; D4 expects Bohr.
     Matrix geom_bohr = m_geometry * AA_TO_AU;
@@ -728,6 +732,17 @@ double XTB::calcDispersionEnergy() const
         m_atoms, geom_bohr,
         /*with_gradient=*/true,
         m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, want_dEdq);
+
+    // CN chain rule: fold Σ_A dE_D4/dCN_A · ∂CN_A/∂R into the cached gradient using
+    // the D4 CN's OWN derivative (EN-weighted erf), keeping the dispersion gradient
+    // self-consistent with the D4 CN. m_disp_dEdcn is then cleared so the GFN2
+    // Hamiltonian CN loop in calculateGradient() does not double-distribute it
+    // through the (different) logistic Hamiltonian-CN derivative.
+    if (m_disp_dEdcn.size() == m_atomcount) {
+        curcuma::dispersion::addD4CovalentCNGradient(
+            m_atoms, geom_bohr, m_disp_dEdcn, m_disp_gradient);
+        m_disp_dEdcn = Vector();
+    }
 
     // q-response chain rule: fold Σ_A dE_D4/dq_A · ∂q_A/∂R into the cached geometry
     // gradient. The per-reference path is Mulliken-self-consistent, so ∂q/∂x comes
@@ -778,6 +793,7 @@ void XTB::addDispersionPotential(Potential& pot) const
     // Exact per-reference dE_D4/dq at the current SCF Mulliken charges.
     m_d4_generator->setUseD4SingleShotEEQ(false);
     m_d4_generator->setTopologyCharges(m_wfn.q_at);
+    m_d4_generator->setD4CovalentCN(true);  // GFN2 dftd4 EN-weighted covalent CN
     const Matrix geom_bohr = m_geometry * AA_TO_AU;
     m_d4_generator->GenerateParameters(m_atoms, geom_bohr);
 

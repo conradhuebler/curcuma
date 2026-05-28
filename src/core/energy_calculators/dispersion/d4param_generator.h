@@ -155,6 +155,13 @@ public:
     void setUseD4SingleShotEEQ(bool on) { m_use_d4_single_shot_eeq = on; }
     bool usesD4SingleShotEEQ() const { return m_use_d4_single_shot_eeq; }
 
+    // Claude Generated (2026): use the dftd4 EN-weighted covalent CN (no log-cap)
+    // for the D4 C6 interpolation instead of the GFN-FF erf-CN. GFN2 turns this
+    // on to match tblite's get_coordination_number(rcov, en); GFN-FF leaves it
+    // off (its Fortran reference uses the log-capped, EN-free CN). See d4_ncoord.h.
+    void setD4CovalentCN(bool on) { m_use_d4_covalent_cn = on; }
+    bool usesD4CovalentCN() const { return m_use_d4_covalent_cn; }
+
     // Accumulate the D4 charge-response gradient Σ_A dEdq(A)·∂q_A/∂R into
     // grad_out (Hartree/Bohr). Valid only when the single-shot EEQ model was
     // used for the current geometry; otherwise a no-op.
@@ -214,6 +221,10 @@ private:
     // Claude Generated (2026): single-shot EEQ for D4 q-response (Phase 2)
     bool m_use_d4_single_shot_eeq = false;
     mutable curcuma::dispersion::D4ChargeModel m_d4_charge_model;
+
+    // Claude Generated (2026): GFN2 uses the dftd4 EN-weighted covalent CN for
+    // the C6 interpolation (see setD4CovalentCN / d4_ncoord.h).
+    bool m_use_d4_covalent_cn = false;
 
     // Claude Generated (Jan 31, 2026): Topology charges for zeta scaling
     // Reference: Fortran gfnff_ini.f90:789 - f1 = zeta(ati, topo%qa(i))

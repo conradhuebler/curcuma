@@ -8,6 +8,7 @@
 
 #include "d4param_generator.h"
 #include "d4_charge_scaling.h"  // shared exact dftd4 zeta (AP6b)
+#include "d4_ncoord.h"          // dftd4 EN-weighted covalent CN (GFN2 D4 path)
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "d4_reference_data_fixed.cpp"  // D4 reference data (365 lines)
 #include "d4_reference_cn_fortran.cpp"  // D4 reference CN data (Fortran dftd3param.f90 - January 2026)
@@ -256,7 +257,12 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     // Claude Generated (2025): Calculate CN FIRST, then pass to EEQ to avoid duplicate calculation
     // This eliminates redundant O(n²) CN computation inside EEQ solver
     auto t_cn_start = std::chrono::high_resolution_clock::now();
-    m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
+    if (m_use_d4_covalent_cn) {
+        // GFN2: dftd4 EN-weighted covalent CN (no log-cap) for the C6 interpolation.
+        m_cn_values = curcuma::dispersion::computeD4CovalentCN(m_atoms, geometry_bohr);
+    } else {
+        m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
+    }
     auto t_cn_end = std::chrono::high_resolution_clock::now();
     double t_cn_ms = std::chrono::duration<double, std::milli>(t_cn_end - t_cn_start).count();
 
@@ -1607,7 +1613,13 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     m_atoms = atoms;
 
     // Step 1: CN calculation
-    m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
+    if (m_use_d4_covalent_cn) {
+        // GFN2: dftd4 EN-weighted covalent CN (no log-cap). This is the CN that
+        // weightedC6Gfn2 reads, so it is the authoritative one for the GFN2 C6.
+        m_cn_values = curcuma::dispersion::computeD4CovalentCN(m_atoms, geometry_bohr);
+    } else {
+        m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
+    }
 
     // Step 2: Reuse topology charges or compute fresh
     if (m_topology_charges.size() != static_cast<Eigen::Index>(m_atoms.size())) {
