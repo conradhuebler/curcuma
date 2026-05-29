@@ -420,7 +420,7 @@ double XTB::Calculation(bool gradient)
     m_E_electronic   += (m_wfn.P.cwiseProduct(m_H0)).sum();
     m_E_repulsion     = calcRepulsionEnergy();
     m_E_halogen_bond  = calcHalogenBondEnergy();
-    m_E_dispersion    = calcDispersionEnergy();
+    m_E_dispersion    = calcDispersionEnergy(gradient);
 
     m_E_total = m_E_electronic + m_E_repulsion
               + m_E_halogen_bond + m_E_dispersion;
@@ -886,7 +886,7 @@ nlohmann::json XTB::getEnergyDecomposition() const
  *  GFN1 still uses D3 (separate AP) — returns 0 here for now, preserving
  *  the existing GFN1 behaviour at the cost of a small dispersion deficit.
  * ------------------------------------------------------------------------- */
-double XTB::calcDispersionEnergy() const
+double XTB::calcDispersionEnergy(bool need_gradient) const
 {
     m_disp_gradient_valid = false;
 
@@ -907,6 +907,18 @@ double XTB::calcDispersionEnergy() const
         ::D3ParameterGenerator& d3 = *m_d3_generator;
         d3.GenerateParameters(m_atoms, m_geometry);
         const double e_disp = d3.getTotalEnergy();
+
+        // The central-difference geometry gradient regenerates the D3 parameters
+        // at 6·N displaced geometries — O(N) full D3 evaluations, prohibitively
+        // expensive on large systems (≈ 1400 evaluations × 26k pairs for the
+        // 231-atom complex). Compute it only when a gradient is actually
+        // requested; a single-point energy never reads m_disp_gradient.
+        if (!need_gradient) {
+            m_disp_gradient = Matrix::Zero(m_atomcount, 3);
+            m_disp_dEdcn = Vector();
+            m_disp_gradient_valid = false;
+            return e_disp;
+        }
 
         // Central-difference geometry gradient (Eh/Bohr).
         const double h = 1.0e-4;  // Angstrom displacement

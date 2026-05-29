@@ -405,8 +405,10 @@ private:
     double calcRepulsionEnergy() const;                                  // xtb_native.cpp
     double calcHalogenBondEnergy() const;                                // xtb_native.cpp
 
-    // GFN2 D4 dispersion (optional — requires USE_D4 at compile time)
-    double calcDispersionEnergy() const;                                 // xtb_native.cpp
+    // GFN2 D4 dispersion (optional — requires USE_D4 at compile time).
+    // need_gradient gates the (expensive) GFN1 D3 finite-difference geometry
+    // gradient — skip it for single-point energies, where it is unused.
+    double calcDispersionEnergy(bool need_gradient = false) const;        // xtb_native.cpp
 
     // GFN2 self-consistent D4 (AP6b): add dE_D4/dq_A (exact per-reference,
     // at the current SCF Mulliken charges m_wfn.q_at) to the atom potential
