@@ -128,6 +128,25 @@ public:
     // Energy calculation
     double getTotalEnergy() const;  // Returns total D3 dispersion energy (Eh)
 
+    /**
+     * Compute D3 energy and analytical gradient.
+     * Claude Generated (May 2026): Replaces central finite-difference gradient.
+     *
+     * @param need_gradient If true, compute gradient and dEdcn.
+     * @param gradient_out  [N,3] Cartesian gradient in Eh/Bohr (accumulated, NOT zeroed).
+     * @param dEdcn_out     [N] dE/dCN for CN chain-rule (accumulated, NOT zeroed).
+     * @return D3 dispersion energy in Hartree.
+     */
+    double getEnergyAndGradient(bool need_gradient,
+                                Matrix& gradient_out,
+                                Vector& dEdcn_out) const;
+
+    /** Access dc6/dcn matrix (computed on first call, cached). */
+    const Eigen::MatrixXd& getDC6DCN() const;
+
+    /** Access cached Gaussian weights [atom][ref]. */
+    const std::vector<std::vector<double>>& getGaussianWeights() const { return m_gaussian_weights; }
+
     // Individual parameter accessors
     // NOTE: Default ref indices use first valid reference (not 0,0 which is empty)
     double getC6(int atom_i, int atom_j, int ref_i = 0, int ref_j = 1) const;
@@ -183,4 +202,10 @@ private:
     std::vector<std::vector<double>> m_gaussian_weights;  // [atom_idx][ref_idx]
     std::vector<double> m_cached_cn;  // Coordination numbers
     bool m_weights_cached = false;
+
+    // Claude Generated (May 2026): Analytical gradient support
+    mutable Eigen::MatrixXd m_dc6dcn;       // dC6(i,j)/dCN(i)  [N x N]
+    mutable bool m_dc6dcn_computed = false;
+
+    void computeDC6DCN() const;             // Build m_dc6dcn from cached weights
 };

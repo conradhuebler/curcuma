@@ -935,6 +935,212 @@ double D3ParameterGenerator::getTotalEnergy() const
     return energy;
 }
 
+// Claude Generated (May 2026): Analytical gradient for D3 dispersion
+// -------------------------------------------------------------------------
+
+void D3ParameterGenerator::computeDC6DCN() const
+{
+    // Reference: s-dftd3/src/dftd3/model.f90:248-324 (get_atomic_c6 derivatives)
+    // Build the matrix m_dc6dcn where:
+    //   m_dc6dcn(i,j) = dC6(i,j) / dCN(i)
+    //   m_dc6dcn(j,i) = dC6(i,j) / dCN(j)
+    // This is needed for the CN chain rule in the analytical gradient.
+
+    if (m_dc6dcn_computed || !m_weights_cached)
+        return;
+
+    const size_t n = m_atoms.size();
+    m_dc6dcn = Eigen::MatrixXd::Zero(n, n);
+
+    const double wf = 4.0;  // Gaussian width parameter (same as precomputeGaussianWeights)
+
+    // Pre-compute dgw/dcn for each atom's Gaussian weights
+    // gw(ref) = exp(-wf*(cn - cn_ref)^2) / norm
+    // d_gw/dcn = gw(ref) * 2*wf*(cn_ref - cn) / norm  [unnormalised raw derivative]
+    // Actually: d/dcn[exp(-wf*(cn-cn_ref)^2)] = -2*wf*(cn-cn_ref)*exp(...)
+    // Normalised derivative: d(gw/norm)/dcn = (d_gw*norm - gw*sum(d_gw)) / norm^2
+    std::vector<std::vector<double>> dgw(n);
+
+    for (size_t idx = 0; idx < n; ++idx) {
+        int elem = m_atoms[idx];
+        int nref = getNumberofReferences(elem);
+        if (nref == 0) continue;
+
+        double cn = m_cached_cn[idx];
+        const auto& gw = m_gaussian_weights[idx];
+
+        // Un-normalised weights and their derivatives
+        std::vector<double> raw_gw(nref);
+        std::vector<double> raw_dgw(nref);
+        double norm = 0.0;
+        double dnorm = 0.0;
+
+        for (int ref = 0; ref < nref; ++ref) {
+            double cn_ref = getReferenceCN(elem, ref);
+            double diff = cn - cn_ref;
+            raw_gw[ref] = std::exp(-wf * diff * diff);
+            raw_dgw[ref] = -2.0 * wf * diff * raw_gw[ref];
+            norm += raw_gw[ref];
+            dnorm += raw_dgw[ref];
+        }
+
+        if (norm < 1e-10) {
+            // Exceptional case: all weights negligible -> delta on max CN ref
+            dgw[idx].resize(nref, 0.0);
+            continue;
+        }
+
+        dgw[idx].resize(nref);
+        for (int ref = 0; ref < nref; ++ref) {
+            dgw[idx][ref] = (raw_dgw[ref] * norm - raw_gw[ref] * dnorm) / (norm * norm);
+        }
+    }
+
+    // Now build dc6dcn using the weight derivatives
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t j = i + 1; j < n; ++j) {
+            int elem_i = m_atoms[i];
+            int elem_j = m_atoms[j];
+
+            if (elem_i < 1 || elem_i > MAX_ELEM || elem_j < 1 || elem_j > MAX_ELEM)
+                continue;
+
+            const auto& gw_i = m_gaussian_weights[i];
+            const auto& gw_j = m_gaussian_weights[j];
+            const auto& dgw_i = dgw[i];
+            const auto& dgw_j = dgw[j];
+
+            if (gw_i.empty() || gw_j.empty()) continue;
+
+            double dc6_di = 0.0;
+            double dc6_dj = 0.0;
+
+            for (size_t ref_i = 0; ref_i < gw_i.size(); ++ref_i) {
+                for (size_t ref_j = 0; ref_j < gw_j.size(); ++ref_j) {
+                    double c6_ref = getC6(elem_i, elem_j, ref_i, ref_j);
+                    dc6_di += dgw_i[ref_i] * gw_j[ref_j] * c6_ref;
+                    dc6_dj += gw_i[ref_i] * dgw_j[ref_j] * c6_ref;
+                }
+            }
+
+            m_dc6dcn(i, j) = dc6_di;
+            m_dc6dcn(j, i) = dc6_dj;
+        }
+    }
+
+    m_dc6dcn_computed = true;
+}
+
+const Eigen::MatrixXd& D3ParameterGenerator::getDC6DCN() const
+{
+    if (!m_dc6dcn_computed)
+        computeDC6DCN();
+    return m_dc6dcn;
+}
+
+double D3ParameterGenerator::getEnergyAndGradient(bool need_gradient,
+                                                  Matrix& gradient_out,
+                                                  Vector& dEdcn_out) const
+{
+    // Reference: s-dftd3/src/dftd3/damping/rational.f90 (get_dispersion_derivs)
+    // Computes D3(BJ) two-body dispersion energy and analytical gradient.
+    //
+    // The direct geometry gradient is folded into gradient_out immediately.
+    // The CN-chain-rule term dE/dCN is returned in dEdcn_out; the caller must
+    // multiply by dCN/dR (exponential counting function) and add to gradient.
+
+    if (!m_data_initialized || !m_weights_cached || m_atoms.empty()) {
+        return 0.0;
+    }
+
+    const double au = 1.88972612546;  // Angstrom -> Bohr
+    const size_t n = m_atoms.size();
+
+    double a1 = m_config.get<double>("d3_a1", 0.4);
+    double a2 = m_config.get<double>("d3_a2", 4.0);
+    double s6 = m_config.get<double>("d3_s6", 1.0);
+    double s8 = m_config.get<double>("d3_s8", 1.0);
+
+    double energy = 0.0;
+
+    if (need_gradient) {
+        computeDC6DCN();
+        // Ensure outputs are sized (caller may or may not have pre-allocated)
+        if (gradient_out.rows() != static_cast<int>(n) || gradient_out.cols() != 3)
+            gradient_out = Eigen::MatrixXd::Zero(n, 3);
+        if (dEdcn_out.size() != static_cast<int>(n))
+            dEdcn_out = Eigen::VectorXd::Zero(n);
+    }
+
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t j = i + 1; j < n; ++j) {
+            int elem_i = m_atoms[i];
+            int elem_j = m_atoms[j];
+
+            if (elem_i < 1 || elem_i > MAX_ELEM || elem_j < 1 || elem_j > MAX_ELEM)
+                continue;
+
+            double c6 = interpolateC6(elem_i, elem_j, i, j);
+            if (c6 <= 0.0) continue;
+
+            double r6_ratio = getR6(elem_i, elem_j);
+            double c8 = c6 * r6_ratio;
+
+            Eigen::Vector3d pos_i = m_geometry.row(i);
+            Eigen::Vector3d pos_j = m_geometry.row(j);
+            Eigen::Vector3d rij_vec = pos_i - pos_j;          // Angstrom
+            double r_angstrom = rij_vec.norm();
+            if (r_angstrom < 1e-6) continue;
+
+            double r = r_angstrom * au;                       // Bohr
+            double r2 = r * r;
+
+            // Becke-Johnson damping
+            double r0 = a1 * std::sqrt(r6_ratio) + a2;        // Bohr
+
+            double r6_0 = std::pow(r0, 6);
+            double r8_0 = std::pow(r0, 8);
+            double t6 = 1.0 / (std::pow(r, 6) + r6_0);
+            double t8 = 1.0 / (std::pow(r, 8) + r8_0);
+
+            // Two-body energy
+            double e6 = -s6 * c6 * t6;
+            double e8 = -s8 * c8 * t8;
+            energy += (e6 + e8);
+
+            if (!need_gradient) continue;
+
+            // --- Direct geometry gradient (dE/dR) ---
+            // d/dr [t6] = -6*r^5 * t6^2  ->  d6_contrib = -c6 * s6 * (-6*r^5*t6^2)
+            // In s-dftd3 code: d6 = -6*r2^2*t6^2  (r2 = r^2)
+            //   -> gdisp = s6*d6 + s8*rrij*d8
+            //   -> dG = -c6ij * gdisp * vec   (vec = R_i - R_j in Bohr)
+            //
+            // But careful: vec in s-dftd3 is in Bohr, and dG is Eh/Bohr.
+            // Our rij_vec is in Angstrom. We must convert to Bohr for consistency.
+
+            double d6 = -6.0 * r2 * r2 * t6 * t6;   // = -6*r^4*t6^2
+            double d8 = -8.0 * r2 * r2 * r2 * t8 * t8; // = -8*r^6*t8^2
+            double gdisp = s6 * d6 + s8 * r6_ratio * d8;
+
+            // rij in Bohr for gradient accumulation
+            Eigen::Vector3d vec_bohr = rij_vec * au;
+            Eigen::Vector3d dG = -c6 * gdisp * vec_bohr;   // Eh/Bohr
+
+            gradient_out.row(i) += dG.transpose();
+            gradient_out.row(j) -= dG.transpose();
+
+            // --- CN chain-rule term (dE/dCN) ---
+            // edisp = s6*t6 + s8*rrij*t8   (factor common to both dE/dCN terms)
+            double edisp = s6 * t6 + s8 * r6_ratio * t8;
+            dEdcn_out(i) -= m_dc6dcn(i, j) * edisp;
+            dEdcn_out(j) -= m_dc6dcn(j, i) * edisp;
+        }
+    }
+
+    return energy;
+}
+
 // Claude Generated (2025): ATM three-body symmetry factor calculation
 double D3ParameterGenerator::calculateTripleScale(int i, int j, int k) const
 {

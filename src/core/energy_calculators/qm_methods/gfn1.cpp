@@ -22,6 +22,7 @@
 #include "STO_CGTO.hpp"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
+#include "src/core/energy_calculators/ff_methods/cn_calculator.h"  // D3 CN gradient (May 2026)
 #include "ParallelEigenSolver.hpp"
 
 #include <fmt/format.h>
@@ -1444,23 +1445,24 @@ Matrix GFN1::calculateGradient() const
         }
     }
 
-    // ===== 6. D3 dispersion gradient (via D3ParameterGenerator) =====
-    // D3 gradient is computed by finite differences on D3 energy
-    // (D3ParameterGenerator doesn't have analytical gradient API yet)
+    // ===== 6. D3 dispersion gradient (analytical, May 2026) =====
+    // Replaces central finite differences with O(N²) analytical gradient.
     if (m_d3) {
-        const double delta = 1.0e-5;  // Angstrom
-        for (int atom = 0; atom < m_atomcount; ++atom) {
-            for (int coord = 0; coord < 3; ++coord) {
-                Matrix geom_p = m_geometry, geom_m = m_geometry;
-                geom_p(atom, coord) += delta;
-                geom_m(atom, coord) -= delta;
-                D3ParameterGenerator d3p(D3ParameterGenerator::createForGFN1());
-                D3ParameterGenerator d3m(D3ParameterGenerator::createForGFN1());
-                d3p.GenerateParameters(m_atoms, geom_p);
-                d3m.GenerateParameters(m_atoms, geom_m);
-                gradient(atom, coord) += (d3p.getTotalEnergy() - d3m.getTotalEnergy()) / (2.0 * delta);
-            }
-        }
+        D3ParameterGenerator d3(D3ParameterGenerator::createForGFN1());
+        d3.GenerateParameters(m_atoms, m_geometry);
+
+        Matrix disp_grad = Matrix::Zero(m_atomcount, 3);
+        Vector dEdcn = Vector::Zero(m_atomcount);
+        d3.getEnergyAndGradient(/*need_gradient=*/true, disp_grad, dEdcn);
+
+        // Direct distance gradient: getEnergyAndGradient returns Eh/Bohr;
+        // gfn1.cpp gradient is accumulated in Eh/Å.
+        gradient += disp_grad / au;
+
+        // CN chain rule: addD3CNGradient with geometry in Å produces Eh/Å directly.
+        CNCalculator::addD3CNGradient(
+            m_atoms, m_geometry, dEdcn, gradient,
+            /*k1=*/16.0, /*k2=*/4.0/3.0, /*distance_unit_to_bohr=*/1.0);
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {

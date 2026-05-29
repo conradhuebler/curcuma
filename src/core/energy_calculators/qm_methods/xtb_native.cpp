@@ -32,6 +32,7 @@
 #include "src/core/energy_calculators/dispersion/d4param_generator.h"
 #include "src/core/energy_calculators/dispersion/d4_ncoord.h"  // D4 CN gradient (GFN2)
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
+#include "src/core/energy_calculators/ff_methods/cn_calculator.h"  // D3 CN gradient (May 2026)
 #include "diis_accelerator.h"
 #include "broyden_mixer.h"
 
@@ -892,58 +893,43 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
 
     if (m_method != MethodType::GFN2) {
         // GFN1: native D3(BJ) dispersion (s6=1.0, s8=2.4, a1=0.63, a2=5.0).
-        // D3ParameterGenerator exposes only the energy, so the geometry
-        // gradient is obtained by central finite differences (D3 is cheap;
-        // this mirrors the legacy gfn1.cpp path). m_geometry is in Angstrom
-        // (the generator converts to Bohr internally). The FD gradient is
-        // returned in Eh/Bohr to match the rest of calculateGradient(), which
-        // divides the assembled gradient by `au` (Eh/Bohr -> Eh/Angstrom) at
-        // the end. The FD is a *full* gradient: regenerating parameters at each
-        // displaced geometry also captures the CN-dependence of the C6 values.
+        // Claude Generated (May 2026): analytical gradient replaces central
+        // finite differences. The direct geometry gradient + CN chain rule
+        // are computed in one pass through the D3 pair list.
         if (!m_d3_generator) {
             m_d3_generator = std::make_unique<::D3ParameterGenerator>(
                 ::D3ParameterGenerator::createForGFN1());
         }
         ::D3ParameterGenerator& d3 = *m_d3_generator;
         d3.GenerateParameters(m_atoms, m_geometry);
-        const double e_disp = d3.getTotalEnergy();
 
-        // The central-difference geometry gradient regenerates the D3 parameters
-        // at 6·N displaced geometries — O(N) full D3 evaluations, prohibitively
-        // expensive on large systems (≈ 1400 evaluations × 26k pairs for the
-        // 231-atom complex). Compute it only when a gradient is actually
-        // requested; a single-point energy never reads m_disp_gradient.
         if (!need_gradient) {
             m_disp_gradient = Matrix::Zero(m_atomcount, 3);
             m_disp_dEdcn = Vector();
             m_disp_gradient_valid = false;
-            return e_disp;
+            return d3.getTotalEnergy();
         }
 
-        // Central-difference geometry gradient (Eh/Bohr).
-        const double h = 1.0e-4;  // Angstrom displacement
+        // Analytical energy + gradient + dEdcn
         m_disp_gradient = Matrix::Zero(m_atomcount, 3);
-        Matrix geom = m_geometry;
-        for (int a = 0; a < m_atomcount; ++a) {
-            for (int c = 0; c < 3; ++c) {
-                const double orig = geom(a, c);
-                geom(a, c) = orig + h;
-                d3.GenerateParameters(m_atoms, geom);
-                const double ep = d3.getTotalEnergy();
-                geom(a, c) = orig - h;
-                d3.GenerateParameters(m_atoms, geom);
-                const double em = d3.getTotalEnergy();
-                geom(a, c) = orig;
-                // dE/dAngstrom -> dE/dBohr : multiply by au (1 Bohr = au Angstrom)
-                m_disp_gradient(a, c) = (ep - em) / (2.0 * h) * au;
-            }
+        m_disp_dEdcn = Vector::Zero(m_atomcount);
+        const double e_disp = d3.getEnergyAndGradient(
+            /*need_gradient=*/true, m_disp_gradient, m_disp_dEdcn);
+
+        // CN chain rule: fold Σ_A dE_D3/dCN_A · ∂CN_A/∂R into the cached
+        // gradient using the D3 exponential counting function's derivative.
+        // This keeps the dispersion gradient self-consistent with the D3 CN.
+        // m_disp_dEdcn is then cleared so the GFN1 Hamiltonian CN loop in
+        // calculateGradient() does not double-distribute it.
+        if (m_disp_dEdcn.size() == m_atomcount) {
+            // addD3CNGradient produces Eh/Å (geometry is in Å); scale by au
+            // to convert to Eh/Bohr so m_disp_gradient matches the direct term.
+            CNCalculator::addD3CNGradient(
+                m_atoms, m_geometry, m_disp_dEdcn, m_disp_gradient,
+                /*k1=*/16.0, /*k2=*/4.0/3.0, /*distance_unit_to_bohr=*/au);
+            m_disp_dEdcn = Vector();
         }
-        // Restore unperturbed parameters for any later query.
-        d3.GenerateParameters(m_atoms, m_geometry);
-        // The FD gradient is complete (it already differentiates the CN-dependent
-        // C6 values), so there is no separate dE/dCN chain-rule term: keep
-        // m_disp_dEdcn empty so the GFN2 CN-fold in xtb_gradient.cpp is skipped.
-        m_disp_dEdcn = Vector();
+
         m_disp_gradient_valid = true;
         return e_disp;
     }

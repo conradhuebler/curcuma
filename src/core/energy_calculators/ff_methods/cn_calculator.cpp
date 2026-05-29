@@ -174,6 +174,64 @@ double CNCalculator::getCovalentRadius(int atomic_number)
     return COVALENT_RADII[idx];
 }
 
+void CNCalculator::addD3CNGradient(
+    const std::vector<int>& atoms,
+    const Matrix& geometry,
+    const Vector& dEdcn,
+    Matrix& gradient_out,
+    double k1,
+    double k2,
+    double distance_unit_to_bohr)
+{
+    // Reference: s-dftd3/src/dftd3/ncoord.f90 (add_coordination_number_derivs)
+    // D3 exponential counting function:
+    //   count_ij = 1 / (1 + exp(-k1 * (k2 * r0 / r_ij - 1)))
+    //   r0 = rcov_i + rcov_j  (in Angstrom, same units as geometry)
+    //
+    // Derivative:
+    //   d(count)/dr = -count * (1-count) * k1 * k2 * r0 / r^2
+    //
+    // Chain rule into Cartesian gradient:
+    //   dE/dR_i = sum_j (dE/dCN_i + dE/dCN_j) * d(count)/dr * (R_i - R_j) / r
+
+    const int natoms = static_cast<int>(atoms.size());
+    if (gradient_out.rows() != natoms || gradient_out.cols() != 3)
+        gradient_out = Eigen::MatrixXd::Zero(natoms, 3);
+
+    for (int i = 0; i < natoms; ++i) {
+        int elem_i = atoms[i] - 1;
+        if (elem_i < 0 || elem_i >= static_cast<int>(COVALENT_RADII.size()))
+            continue;
+        double rcov_i = COVALENT_RADII[elem_i];
+
+        for (int j = i + 1; j < natoms; ++j) {
+            int elem_j = atoms[j] - 1;
+            if (elem_j < 0 || elem_j >= static_cast<int>(COVALENT_RADII.size()))
+                continue;
+            double rcov_j = COVALENT_RADII[elem_j];
+
+            Eigen::Vector3d pos_i = geometry.row(i);
+            Eigen::Vector3d pos_j = geometry.row(j);
+            Eigen::Vector3d rij = pos_i - pos_j;
+            double r = rij.norm();
+            if (r < 1e-10) continue;
+
+            double r0 = rcov_i + rcov_j;   // in Angstrom
+            double arg = -k1 * (k2 * r0 / r - 1.0);
+            double expterm = std::exp(arg);
+            double count = 1.0 / (1.0 + expterm);
+
+            // d(count)/dr = -count * (1-count) * k1 * k2 * r0 / r^2
+            double dcount_dr = -count * (1.0 - count) * k1 * k2 * r0 / (r * r);
+
+            double factor = (dEdcn(i) + dEdcn(j)) * dcount_dr / r;
+            Eigen::Vector3d grad = factor * rij * distance_unit_to_bohr;
+            gradient_out.row(i) += grad.transpose();
+            gradient_out.row(j) -= grad.transpose();
+        }
+    }
+}
+
 std::vector<double> CNCalculator::calculateGFNFFCN(
     const std::vector<int>& atoms,
     const Eigen::MatrixXd& geometry_bohr,
