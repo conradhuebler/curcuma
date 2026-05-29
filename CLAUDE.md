@@ -143,8 +143,8 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 > Results should be validated against external references (TBLite, Ulysses, XTB) before use in research.
 
 - ⚠️ **Extended Hückel Theory (EHT)** - AI-implemented, machine-tested
-- ⚠️ **GFN2-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn2` backend; `-opt` works; DIIS SCF (AP6); 3/7 vs TBLite; H₂O/CH₄/HCN pass; residual ~1–23 mEh (D4 dispersion missing, AP6b)
-- ⚠️ **GFN1-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn1` backend; `-opt` works; DIIS SCF (AP6); 5/7 vs TBLite; HCN+caffeine SCF issues remain
+- ⚠️ **GFN2-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn2` backend; `-opt` works; Broyden SCF default (`-scf_mode diis|plain|level-shift`, `-scf_guess h0|eeq`; 231-atom `complex` converges, see [docs/SCF_MODES.md](docs/SCF_MODES.md)); 3/7 vs TBLite; H₂O/CH₄/HCN pass; residual ~1–23 mEh
+- ⚠️ **GFN1-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn1` backend; `-opt` works; Broyden SCF default (modes via `-scf_mode`); 5/7 vs TBLite; HCN+caffeine SCF issues remain
 - ⚠️ **PM3/AM1/MNDO (Native NDDO)** - AI-implemented, machine-tested; 21/21 tests vs Ulysses reference (< 4 µEh)
 - ⚠️ **Native GFN-FF** - AI-implemented, machine-tested; see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
 

@@ -55,6 +55,14 @@ see [docs/D4_Q_RESPONSE.md](docs/D4_Q_RESPONSE.md)). Current alignment vs tblite
 Komponenten-Audit-Plan und SCF-Status), [docs/GFN2_D4_STATUS.md](docs/GFN2_D4_STATUS.md)
 für die D4-Tiefe, und via `ctest -L d4_diag`.
 
+The native GFN SCF defaults to `broyden` mixing — a modified-Broyden quasi-Newton
+scheme on the SCC charge vector, the same mixer tblite/xtb use — which converges
+large polar systems that the old Fock-DIIS diverged on (e.g. the 231-atom
+`complex` now converges from the bare guess with plain `-method gfn2`). Other
+modes remain selectable: `-scf_mode diis|plain|level-shift` and `-scf_guess
+h0|eeq` (plus `-scf_damping`, `-diis_start`, `-level_shift`). See
+[docs/SCF_MODES.md](docs/SCF_MODES.md).
+
 Please cite xtb, tblite etc if external methods are used within curcuma! The most recent information can be found at the respective github pages, some are listed below.
 
 UFF

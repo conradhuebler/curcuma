@@ -148,6 +148,33 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
 }
 
 /* ------------------------------------------------------------------ *
+ *  Saunders–Hillier level shift (Claude Generated).                  *
+ *                                                                    *
+ *  Raises the virtual-orbital energies by `shift` to damp the        *
+ *  density's response to changes in the Fock matrix, which keeps a   *
+ *  charge-sloshing iteration inside the convergence basin:           *
+ *                                                                    *
+ *     F' = F + shift·(S − ½·S·P·S)                                   *
+ *                                                                    *
+ *  The bracket is the virtual-space projector in the S metric:       *
+ *  with the closed-shell P = 2·C_occ·C_occᵀ one has ½·S·P·S =        *
+ *  S·C_occ·C_occᵀ·S, and S − that = S·C_virt·C_virtᵀ·S. Hence F'     *
+ *  leaves the occupied orbitals (and the density) invariant at       *
+ *  self-consistency and only shifts the virtuals up by `shift`.      *
+ *  Reference: V. R. Saunders, I. H. Hillier, Int. J. Quantum Chem.   *
+ *  7, 699 (1973).                                                    *
+ * ------------------------------------------------------------------ */
+Matrix XTB::applyLevelShift(const Matrix& F, const Matrix& S,
+                            const Matrix& P, double shift) const
+{
+    if (shift == 0.0 || P.rows() != S.rows() || P.cols() != S.cols())
+        return F;
+    // S·P·S is symmetric; 0.5 because the closed-shell P already carries the
+    // factor 2 (½·P = C_occ·C_occᵀ).
+    return F + shift * (S - 0.5 * (S * P * S));
+}
+
+/* ------------------------------------------------------------------ *
  *  Update Mulliken populations from density and overlap.             *
  *    n_sh(s) = sum_{μ∈s, ν} P_μν * S_νμ                             *
  *    q_sh(s) = n0_sh(s) - n_sh(s)                                    *

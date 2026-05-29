@@ -13,10 +13,12 @@ GFN1Method::GFN1Method(const json& config)
     , m_calculation_done(false)
     , m_last_energy(0.0)
 {
-    // Merge with defaults
-    json full_config = getDefaultConfig();
+    // Merge with defaults and keep the result so calculateEnergy() can push
+    // SCF-convergence settings into the native object (the base member
+    // m_parameters was previously discarded for GFN1). Claude Generated.
+    m_parameters = getDefaultConfig();
     if (!config.empty()) {
-        full_config.merge_patch(config);
+        m_parameters.merge_patch(config);
     }
 
     m_xtb = std::make_unique<curcuma::xtb::XTB>(curcuma::xtb::MethodType::GFN1);
@@ -45,6 +47,11 @@ bool GFN1Method::updateGeometry(const Matrix& geometry)
 
 double GFN1Method::calculateEnergy(bool gradient)
 {
+    // Apply SCF-convergence settings (mode/guess/damping/DIIS/level-shift) from
+    // the controller each call, so geometry steps in -opt / MD pick them up.
+    if (m_xtb)
+        curcuma::xtb::applyXtbScfConfig(*m_xtb, m_parameters);
+
     m_last_energy = m_xtb->Calculation(gradient);
     m_calculation_done = true;
 
@@ -92,6 +99,11 @@ json GFN1Method::getDefaultConfig()
         { "scf_max_iterations", 100 },
         { "scf_threshold", 1.0e-6 },
         { "scf_damping", 0.4 },
+        { "scf_mode", "broyden" },     // SCF strategy: broyden(default) | diis | plain | level-shift
+        { "scf_guess", "h0" },         // Initial charge guess: h0 | eeq
+        { "diis_start", 5 },           // Damped warmup iterations before DIIS
+        { "diis_subspace", 6 },        // DIIS history depth
+        { "level_shift", 0.2 },        // Virtual-orbital shift (Eh), level-shift mode
         { "threads", 1 },
         { "dispersion", "d3" }
     };

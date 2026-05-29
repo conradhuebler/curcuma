@@ -62,6 +62,53 @@ inline const char* methodName(MethodType m) {
 }
 
 /* ------------------------------------------------------------------------- *
+ *  SCF convergence strategy (Claude Generated)
+ *
+ *  Plain      : pure linear density mixing every iteration, no DIIS. The most
+ *               robust (and slowest) path — the safe fallback for systems where
+ *               DIIS extrapolates out of the convergence basin.
+ *  Diis       : damped warmup for the first `diis_start` iterations, then Pulay
+ *               DIIS extrapolation. The default; unchanged from the historic
+ *               behaviour for backward compatibility.
+ *  LevelShift : Saunders–Hillier virtual-orbital level shift on the Fock matrix
+ *               (faded out near convergence so the fixed point is unshifted),
+ *               combined with DIIS once the iteration has settled. Designed for
+ *               large / polar systems prone to charge sloshing (e.g. the 231-atom
+ *               `complex`). See docs/SCF_MODES.md.
+ *  Broyden    : modified-Broyden quasi-Newton mixing of the SCC charge/multipole
+ *               vector (q_sh, and for GFN2 the atomic dipoles/quadrupoles), the
+ *               same scheme tblite/xtb use by default. Mixes the low-dimensional
+ *               charge vector rather than the density matrix or Fock matrix — the
+ *               most robust mode for stiff systems. See broyden_mixer.h.
+ * ------------------------------------------------------------------------- */
+enum class ScfMode {
+    Plain,
+    Diis,
+    LevelShift,
+    Broyden,
+};
+
+/// Parse a user string to a ScfMode. Unknown strings fall back to Broyden (the
+/// default). Aliases: normal->plain, levelshift/ls->level-shift. Claude Generated.
+inline ScfMode parseScfMode(const std::string& s) {
+    if (s == "plain" || s == "normal" || s == "damped") return ScfMode::Plain;
+    if (s == "level-shift" || s == "levelshift" || s == "level_shift" || s == "ls")
+        return ScfMode::LevelShift;
+    if (s == "diis" || s == "pulay") return ScfMode::Diis;
+    return ScfMode::Broyden;
+}
+
+inline const char* scfModeName(ScfMode m) {
+    switch (m) {
+    case ScfMode::Plain:      return "plain";
+    case ScfMode::Diis:       return "diis";
+    case ScfMode::LevelShift: return "level-shift";
+    case ScfMode::Broyden:    return "broyden";
+    }
+    return "diis";
+}
+
+/* ------------------------------------------------------------------------- *
  *  Contracted gaussian primitive description for one shell.
  *  Mirrors tblite %cgto(ish, izp) record.
  * ------------------------------------------------------------------------- */
@@ -257,6 +304,19 @@ public:
     // Tighten the SCF convergence threshold (for FD charge-response validation).
     void setScfThreshold(double t) { m_scf_threshold = t; }
 
+    /* ----- SCF convergence controls (Claude Generated) -------------------- *
+     * Set by the GFN1/GFN2 wrappers from the `xtb` config scope. Defaults
+     * reproduce the historic DIIS behaviour, so unset = no change.          */
+    void setScfMode(ScfMode m)            { m_scf_mode = m; }
+    void setScfMode(const std::string& s) { m_scf_mode = parseScfMode(s); }
+    void setScfDamping(double d)          { m_scf_damping = d; }
+    void setScfMaxIter(int n)             { if (n > 0) m_scf_max_iter = n; }
+    void setDiisStart(int n)              { if (n >= 0) m_diis_start = n; }
+    void setDiisSubspace(int n)           { if (n >= 2) m_diis_subspace = n; }
+    void setLevelShift(double b)          { m_level_shift = b; }
+    void setScfGuess(const std::string& g){ m_scf_guess = g; }
+    ScfMode scfMode() const               { return m_scf_mode; }
+
     // GFN2 component audit (Claude Generated): SCF-free evaluation of every
     // per-container energy at an externally supplied (typically tblite-derived)
     // wavefunction state. Skips diagonalisation, performs the pre-SCF setup
@@ -327,6 +387,20 @@ private:
     bool solveEigen(const Matrix& F, const Matrix& S);                   // xtb_scf.cpp
     void updatePopulations(const Matrix& S);                             // xtb_scf.cpp
 
+    // Saunders–Hillier level shift (Claude Generated): raise virtual orbital
+    // energies by `shift` to damp the density's response during the SCF.
+    //   F' = F + shift·(S − ½·S·P·S) = F + shift·S·Q_virt·S
+    // At self-consistency (P fixed) the occupied block and density are exactly
+    // unchanged, so the converged fixed point is identical to no shift.
+    Matrix applyLevelShift(const Matrix& F, const Matrix& S,
+                           const Matrix& P, double shift) const;         // xtb_scf.cpp
+
+    // EEQ initial guess (Claude Generated): seed m_wfn.q_sh / q_at from a
+    // single-shot dftd4 EEQ solve so iter 0 builds the Fock with a physically
+    // correct Coulomb shift. Returns false if EEQ is unavailable (caller then
+    // falls back to the bare-H0 guess).
+    bool seedEEQGuess(Vector& q_sh_out);                                 // xtb_native.cpp
+
     // Repulsion + (GFN1) halogen-bond energies.
     double calcRepulsionEnergy() const;                                  // xtb_native.cpp
     double calcHalogenBondEnergy() const;                                // xtb_native.cpp
@@ -390,6 +464,15 @@ private:
     bool   m_scf_converged   = false;
     int    m_scf_iterations  = 0;
 
+    // SCF convergence strategy (Claude Generated). Default is Broyden charge
+    // mixing (tblite-style) — robust on stiff systems and energy-identical to
+    // DIIS on the established set. `-scf_mode diis` selects the historic path.
+    ScfMode     m_scf_mode      = ScfMode::Broyden;
+    int         m_diis_start    = 5;     // damped warmup iterations before DIIS
+    int         m_diis_subspace = 6;     // DIIS history depth (Fock matrices kept)
+    double      m_level_shift   = 0.2;   // virtual-orbital shift magnitude (Eh), LevelShift mode
+    std::string m_scf_guess     = "h0";  // initial charge guess: "h0" (bare) | "eeq"
+
     Vector m_coordination_numbers;   ///< CN, filled in Calculation()
 
     // GFN2 D4 dispersion (forward-declared types to keep this header light)
@@ -416,5 +499,34 @@ private:
     // (static-prefactor mode). Set from config in the constructor.
     std::string m_d4_charge_source = "eeq";
 };
+
+/* ------------------------------------------------------------------------- *
+ *  Apply SCF-convergence settings from a controller JSON to a native XTB.
+ *
+ *  Reads the "xtb" config scope first (where the registered flat CLI flags
+ *  auto-route, e.g. -scf_mode / -scf_guess), then the top-level as a fallback.
+ *  Keys absent from the config leave the native defaults untouched, and every
+ *  registered default equals the native default, so a plain run is unchanged.
+ *  Shared by the GFN1 and GFN2 wrappers. Claude Generated.
+ * ------------------------------------------------------------------------- */
+inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
+{
+    // Look up `key` in cfg["xtb"] first, then cfg at top level; call `apply`
+    // with the value if found.
+    auto lookup = [&](const char* key, auto&& apply) {
+        if (cfg.contains("xtb") && cfg["xtb"].is_object() && cfg["xtb"].contains(key))
+            apply(cfg["xtb"][key]);
+        else if (cfg.contains(key))
+            apply(cfg[key]);
+    };
+
+    lookup("scf_mode",     [&](const json& v){ if (v.is_string()) xtb.setScfMode(v.get<std::string>()); });
+    lookup("scf_guess",    [&](const json& v){ if (v.is_string()) xtb.setScfGuess(v.get<std::string>()); });
+    lookup("scf_damping",  [&](const json& v){ if (v.is_number()) xtb.setScfDamping(v.get<double>()); });
+    lookup("scf_threshold",[&](const json& v){ if (v.is_number()) xtb.setScfThreshold(v.get<double>()); });
+    lookup("diis_start",   [&](const json& v){ if (v.is_number_integer()) xtb.setDiisStart(v.get<int>()); });
+    lookup("diis_subspace",[&](const json& v){ if (v.is_number_integer()) xtb.setDiisSubspace(v.get<int>()); });
+    lookup("level_shift",  [&](const json& v){ if (v.is_number()) xtb.setLevelShift(v.get<double>()); });
+}
 
 } // namespace curcuma::xtb

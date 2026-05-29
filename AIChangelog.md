@@ -4,6 +4,8 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+- Native GFN SCF: Broyden-Charge-Mixing ist neuer Default — `complex` (231 Atome) Divergenz behoben (2026-05-29): **Default-`scf_mode` ist jetzt `broyden`** (`broyden_mixer.h`, modified Broyden / Johnson 1988), das den SCC-**Ladungsvektor** (q_sh + GFN2-Multipole) quasi-Newton mischt — wie tblite/xtb, der eigentliche Architektur-Unterschied zum alten linearen-Dichte+Fock-DIIS. `-method gfn2` konvergiert `complex` jetzt ohne Flags aus bare-H0 in **34 Iter** → −329.52707823 Eh. Energiegleich zu `-scf_mode diis` auf kleinen Molekülen; volle native-GFN-ctest-Suite grün (xtb_gradient_{H2O,CH4,NH3}, d4_dedq, xtb_cpscf, ngfn1+ngfn2-Baseline, 7/7). Weitere Modi wählbar: `-scf_mode diis|plain|level-shift` (`applyLevelShift`, Saunders-Hillier), Initial-Guess `-scf_guess h0|eeq` (single-shot dftd4 EEQ via `seedEEQGuess`/`D4ChargeModel`). Außerdem SCF-Parameter endlich durchgereicht (`updateGFN2Parameters()` war ein leerer Stub); DIIS extrapoliert nicht mehr aus pathologischem Kommutator-Fehler. Neu: `xtb`-PARAMs `scf_mode/scf_guess/scf_damping/scf_threshold/diis_start/diis_subspace/level_shift`. Docs: [docs/SCF_MODES.md](docs/SCF_MODES.md). 🤖 AI-generated.
+
 - AP6b GFN2 D4 exact port (2026-05-27): native GFN2 D4 now uses the exact dftd4 per-reference charge weighting (new d4_charge_scaling.h shared zeta + D4ParameterGenerator::weightedC6Gfn2 with wf=6/ngw/gc=2) and a self-consistent SCF dispersion potential (XTB::addDispersionPotential); H2 matches tblite to 3e-9 (HOMO 1.9e-6, was 1.5e-4), GFN-FF numerically unchanged, regression 6/6 green.
 
 ## May 2026

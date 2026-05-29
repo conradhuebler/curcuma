@@ -3,7 +3,53 @@
 Separates Thema vom D4/Energie-Komponenten-Alignment — die SCF-Iteration selbst.
 Master: [`GFN2_NATIVE_ROADMAP.md`](GFN2_NATIVE_ROADMAP.md).
 
-## Bekannte SCF-Probleme
+## Status: complex GELÖST (2026-05-29) — Broyden ist jetzt Default
+
+Die `complex`-Divergenz ist behoben: der **Default-Mischer ist jetzt `broyden`**
+(Charge-Vektor-Quasi-Newton, wie tblite — siehe [`SCF_MODES.md`](SCF_MODES.md)).
+`-method gfn2` konvergiert `complex` ohne Flags aus dem bare-H0-Guess (34 Iter →
+−329.52707823 Eh). Der historische Pfad ist als `-scf_mode diis` weiter wählbar.
+
+Default `gfn2` (jetzt broyden) auf `complex`:
+```
+curcuma -sp complex.xyz -method gfn2            # 34 Iter → −329.527 Eh (ohne Flags)
+```
+Alternativen (nicht mehr nötig): `-scf_mode level-shift -scf_damping 0.2` (56),
+`-scf_guess eeq -scf_mode diis -scf_damping 0.1` (43). `-scf_mode diis`
+divergiert auf `complex` (Eigensolve-Crash).
+
+Energiegleich zu `-scf_mode diis` auf kleinen Molekülen; volle native-GFN-ctest-
+Suite grün (Gradient/CPSCF/D4/ngfn1+ngfn2-Baseline, 7/7).
+
+**Warum konvergiert tblite und curcuma-Default nicht?** Der Kern-Unterschied ist
+der Mischer: tblite mischt den **SCC-Ladungsvektor** (q_sh + Multipole) mit
+**modified-Broyden** (Quasi-Newton), curcuma mischte die Dichtematrix linear +
+Pulay-DIIS auf der Fock-Matrix. Broyden ist für steife Systeme weit robuster.
+`-scf_mode broyden` baut genau das nach (`broyden_mixer.h`) und konvergiert
+`complex` aus dem bare-H0-Guess mit Default-Damping (34 Iter), identische Energie
+wie alle anderen Modi (−329.52707823 Eh) und bit-identisch zum Default auf kleinen
+Molekülen.
+
+Schlüssel-Erkenntnisse:
+1. **EEQ-Guess** (`-scf_guess eeq`, single-shot dftd4 EEQ): startet bei iter 0
+   in der richtigen Senke (−330.55 Eh, max|dq| 0.66) statt bare-H0 (−328 Eh,
+   max|dq| 1.36, falsche Senke). Allein reicht das nicht — die Dämpfung muss
+   stärker sein (0.1–0.2 statt 0.4).
+2. **Level-shift** (`-scf_mode level-shift`): konvergiert `complex` sogar aus
+   dem bare-H0-Guess (damp 0.2), weil der Shift die Dichte-Antwort dämpft.
+3. **DIIS-Gating**: DIIS extrapoliert nicht mehr aus pathologisch großem
+   Kommutator-Fehler (`err > 1e3`) — verhindert den iter-5-NaN, ändert aber
+   gutartige Systeme nicht (Default bit-identisch).
+4. SCF-Config wird jetzt durchgereicht (`updateGFN2Parameters()` war ein
+   leerer Stub — alle `scf_*`-Parameter wurden ignoriert).
+
+Implementierung: `xtb_native.{h,cpp}` (Loop + `seedEEQGuess`), `xtb_scf.cpp`
+(`applyLevelShift`), `gfn2_method.cpp` / `gfn1_method.cpp` (Wiring),
+`xtbinterface.h` (PARAM-Registrierung im `xtb`-Scope).
+
+---
+
+## Historie: Bekannte SCF-Probleme (vor 2026-05-29)
 
 ### complex (231 Atome, C₈₃H₁₂₂N₁₂O₁₄) — Divergenz
 

@@ -33,6 +33,7 @@
 #include "src/core/energy_calculators/dispersion/d4_ncoord.h"  // D4 CN gradient (GFN2)
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #include "diis_accelerator.h"
+#include "broyden_mixer.h"
 
 #include <chrono>
 #include <stdexcept>
@@ -71,6 +72,44 @@ namespace {
         const double de = std::fabs(e_new - e_old);
         return (dq < thresh && de < thresh * 100.0);
     }
+}
+
+/* ------------------------------------------------------------------------- *
+ *  EEQ initial guess (Claude Generated).
+ *
+ *  Seeds shell charges from a single-shot dftd4 EEQ solve (one smooth linear
+ *  system, curcuma::dispersion::D4ChargeModel). The per-atom EEQ charge is
+ *  partitioned across that atom's shells in proportion to the reference
+ *  occupations n0_sh, so Σ_{s∈A} q_sh(s) = q_at(A). Building the iter-0 Fock
+ *  from these charges starts the SCF with a physically correct Coulomb shift
+ *  and keeps polar systems out of the wrong charge-transfer basin.
+ * ------------------------------------------------------------------------- */
+bool XTB::seedEEQGuess(Vector& q_sh_out)
+{
+    const int nsh = m_basis.nsh;
+    const int nat = m_atomcount;
+    if (nat <= 0 || nsh <= 0)
+        return false;
+
+    // m_geometry is in Angstrom; the EEQ model expects Bohr.
+    const Matrix geom_bohr = m_geometry * AA_TO_AU;
+    curcuma::dispersion::D4ChargeModel eeq;
+    Vector q_at = eeq.computeCharges(m_atoms, geom_bohr,
+                                     static_cast<double>(m_charge));
+    if (q_at.size() != nat || !q_at.allFinite())
+        return false;
+
+    q_sh_out = Vector::Zero(nsh);
+    for (int s = 0; s < nsh; ++s) {
+        const int iat = m_basis.sh2at[s];
+        const double n0a = m_wfn.n0_at(iat);
+        const double w = (n0a > 1.0e-12)
+                             ? (m_wfn.n0_sh(s) / n0a)
+                             : (1.0 / static_cast<double>(
+                                   m_basis.nsh_at[iat] > 0 ? m_basis.nsh_at[iat] : 1));
+        q_sh_out(s) = q_at(iat) * w;
+    }
+    return true;
 }
 
 double XTB::Calculation(bool gradient)
@@ -128,7 +167,8 @@ double XTB::Calculation(bool gradient)
     m_pot.reset();
 
     if (verb >= 2) {
-        CurcumaLogger::info("SCF iterations (DIIS):");
+        CurcumaLogger::info(fmt::format("SCF iterations (mode={}, guess={}):",
+                                        scfModeName(m_scf_mode), m_scf_guess));
         CurcumaLogger::info("  iter             E(SCC)/Eh            dE        max|dq|     t/ms");
     }
 
@@ -136,27 +176,101 @@ double XTB::Calculation(bool gradient)
     const double thresh  = m_scf_threshold;
     const int nsh = m_basis.nsh;
 
-    // Initial guess: zero potential → F = H0
+    // Initial guess. Default ("h0"): zero shell charges → F = H0. The optional
+    // "eeq" guess seeds q_sh from a single-shot dftd4 EEQ solve so iter 0 builds
+    // the Fock with a physically correct Coulomb shift, avoiding the wrong
+    // charge-transfer basin instead of having to recover from it.
     Vector q_sh_old = Vector::Zero(nsh);
+    if (m_scf_guess == "eeq") {
+        Vector q_sh_guess;
+        if (seedEEQGuess(q_sh_guess)) {
+            q_sh_old   = q_sh_guess;
+            m_wfn.q_sh = q_sh_guess;
+            m_wfn.q_at.setZero(m_atomcount);
+            for (int s = 0; s < nsh; ++s)
+                m_wfn.q_at(m_basis.sh2at[s]) += q_sh_guess(s);
+            if (verb >= 2)
+                CurcumaLogger::info("SCF initial guess: single-shot EEQ shell charges");
+        } else if (verb >= 1) {
+            CurcumaLogger::warn("EEQ initial guess unavailable; falling back to bare-H0 guess");
+        }
+    }
     Vector q_sh_new;
     double e_total_old = 0.0;
 
-    // Charge-sloshing control: damp the density during a warmup phase before
-    // enabling DIIS. Polar / multiple-bond systems (HCN, nitriles, amides) have
-    // more than one self-consistent solution; starting DIIS straight from the
-    // bare-H0 guess can lock onto a wrong charge-transfer state. A few strongly
-    // damped iterations keep the iteration in the ground-state basin first.
-    const double damp = m_scf_damping;   // density mixing (default 0.4)
-    const int diis_start = 5;            // damped warmup iterations before DIIS
+    // SCF strategy (selectable). The default DIIS path with diis_start=5 and a
+    // 6-Fock subspace reproduces the historic charge-sloshing control: a few
+    // strongly damped warmup iterations keep polar / multiple-bond systems in
+    // the ground-state basin before Pulay DIIS takes over.
+    const double  damp       = m_scf_damping;   // density mixing factor
+    const int     diis_start = m_diis_start;    // damped warmup iterations before DIIS
+    const ScfMode mode       = m_scf_mode;
     Matrix P_old;
+    double dq_prev = 1.0e30;   // last max|dq| — controls the level-shift fade-out
 
-    // DIIS accelerator: keep last 6 Fock matrices
-    DIISAccelerator diis(6);
+    // DIIS accelerator (history depth configurable). Unused in Plain mode.
+    DIISAccelerator diis(m_diis_subspace);
+    // Never extrapolate from a pathologically large commutator error — that is
+    // exactly what threw `complex` out of the basin at iter 5. The cutoff is
+    // generous; a well-behaved SCF never approaches it, so the default DIIS path
+    // is bit-for-bit unchanged on the existing test set.
+    constexpr double kDiisErrorCutoff = 1.0e3;
+
+    // Broyden mixer on the SCC charge/multipole vector (tblite-style). Unused in
+    // the other modes. alpha = m_scf_damping so -scf_damping tunes the seed step.
+    BroydenMixer broyden(damp, /*max_history=*/m_diis_subspace > 2 ? 20 : m_diis_subspace);
+    const int nat = m_atomcount;
+
+    // Pack the self-consistent SCC vector from m_wfn: shell charges for GFN1;
+    // shell charges + atomic dipoles + quadrupoles for GFN2 (mirrors what tblite
+    // mixes). Claude Generated.
+    auto packSCC = [&]() -> Vector {
+        if (m_method == MethodType::GFN2) {
+            Vector v = Vector::Zero(nsh + 9 * nat);
+            v.head(nsh) = m_wfn.q_sh;
+            if (m_wfn.dp_at.cols() == nat)
+                for (int k = 0; k < 3; ++k)
+                    v.segment(nsh + k * nat, nat) = m_wfn.dp_at.row(k).transpose();
+            if (m_wfn.qp_at.cols() == nat)
+                for (int k = 0; k < 6; ++k)
+                    v.segment(nsh + 3 * nat + k * nat, nat) = m_wfn.qp_at.row(k).transpose();
+            return v;
+        }
+        return m_wfn.q_sh;
+    };
+    // Unpack an SCC vector back into m_wfn (q_at is rederived from q_sh).
+    auto unpackSCC = [&](const Vector& v) {
+        m_wfn.q_sh = v.head(nsh);
+        m_wfn.q_at = Vector::Zero(nat);
+        for (int s = 0; s < nsh; ++s)
+            m_wfn.q_at(m_basis.sh2at[s]) += m_wfn.q_sh(s);
+        if (m_method == MethodType::GFN2) {
+            m_wfn.dp_at = Eigen::MatrixXd::Zero(3, nat);
+            m_wfn.qp_at = Eigen::MatrixXd::Zero(6, nat);
+            for (int k = 0; k < 3; ++k)
+                m_wfn.dp_at.row(k) = v.segment(nsh + k * nat, nat).transpose();
+            for (int k = 0; k < 6; ++k)
+                m_wfn.qp_at.row(k) = v.segment(nsh + 3 * nat + k * nat, nat).transpose();
+        }
+    };
+    // Ensure the GFN2 multipole moments are sized before the first pack.
+    if (mode == ScfMode::Broyden && m_method == MethodType::GFN2) {
+        if (m_wfn.dp_at.cols() != nat) m_wfn.dp_at = Eigen::MatrixXd::Zero(3, nat);
+        if (m_wfn.qp_at.cols() != nat) m_wfn.qp_at = Eigen::MatrixXd::Zero(6, nat);
+    }
 
     const auto t_scf_start = clock::now();
     int iter;
     for (iter = 0; iter < max_iter; ++iter) {
         const auto t_iter0 = clock::now();
+
+        // Broyden mixes the SCC charge vector: capture the input x_in (current
+        // m_wfn charges) before the potential is built and the populations are
+        // overwritten by the diagonalisation.
+        Vector x_in;
+        if (mode == ScfMode::Broyden)
+            x_in = packSCC();
+
         // Reset and build potentials
         m_pot.reset();
 
@@ -176,13 +290,38 @@ double XTB::Calculation(bool gradient)
         // Expand to AO potential and build Fock
         Matrix F = buildFock(m_H0, m_S, m_pot);
 
-        // DIIS extrapolation only after the damped warmup, so the early
-        // iterations cannot extrapolate the density out of the right basin.
-        if (iter >= diis_start) {
-            diis.push(F, m_wfn.P, m_S);
-            if (diis.size() >= 2) {
-                F = diis.extrapolate();
+        // --- SCF acceleration strategy (Claude Generated) -----------------
+        switch (mode) {
+        case ScfMode::Plain:
+            // No DIIS, no level shift. Convergence comes entirely from the
+            // density mixing applied after the solve below.
+            break;
+
+        case ScfMode::Broyden:
+            // The Fock matrix is left untouched; Broyden mixes the SCC charge
+            // vector after the populations are computed (end of the loop body).
+            break;
+
+        case ScfMode::Diis:
+            // DIIS only after the damped warmup, and never from a diverging
+            // Fock — so the early iterations cannot extrapolate the density out
+            // of the right basin.
+            if (iter >= diis_start) {
+                diis.push(F, m_wfn.P, m_S);
+                if (diis.size() >= 2 && diis.lastErrorNorm() < kDiisErrorCutoff)
+                    F = diis.extrapolate();
             }
+            break;
+
+        case ScfMode::LevelShift:
+            // Virtual-orbital level shift layered on top of the density mixing
+            // applied after the solve. The shift raises the empty orbitals so
+            // the density responds less violently to the Fock update; it is
+            // faded out once max|dq| has settled, so the converged eps / density
+            // are unshifted. No DIIS — the shift + mixing are the stabiliser.
+            if (iter > 0 && P_old.size() > 0 && dq_prev > 1.0e-3)
+                F = applyLevelShift(F, m_S, P_old, m_level_shift);
+            break;
         }
 
         // Diagonalize
@@ -193,9 +332,15 @@ double XTB::Calculation(bool gradient)
             return m_E_total;
         }
 
-        // Density damping during warmup: P = damp·P_new + (1-damp)·P_old.
-        // Suppresses charge sloshing; DIIS takes over once warmed up.
-        if (iter > 0 && iter < diis_start) {
+        // Density damping: P = damp·P_new + (1-damp)·P_old. Plain and LevelShift
+        // mix every iteration (Plain's only convergence mechanism; LevelShift
+        // layers the Fock shift on top); DIIS mixes only during the warmup, then
+        // lets the extrapolation take over. Broyden never mixes the density — it
+        // mixes the SCC charge vector at the end of the loop body instead.
+        const bool mix = (mode != ScfMode::Broyden)
+                         && (mode == ScfMode::Plain || mode == ScfMode::LevelShift
+                             || iter < diis_start);
+        if (iter > 0 && mix) {
             m_wfn.P = damp * m_wfn.P + (1.0 - damp) * P_old;
         }
         P_old = m_wfn.P;
@@ -218,6 +363,7 @@ double XTB::Calculation(bool gradient)
 
         // Per-iteration diagnostics
         const double dq = (q_sh_new - q_sh_old).cwiseAbs().maxCoeff();
+        dq_prev = dq;   // drives the LevelShift fade-out on the next iteration
         const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
         const double t_iter_ms = ms(t_iter0, clock::now());
         if (verb >= 2) {
@@ -228,13 +374,25 @@ double XTB::Calculation(bool gradient)
             CurcumaLogger::info(line);
         }
 
-        // Check convergence (after first iteration)
+        // Check convergence (after first iteration). On convergence we break
+        // here, so m_wfn keeps the consistent output charges x_out (the Broyden
+        // mix below is skipped — no re-mixing of the converged state).
         if (iter > 0) {
             if (checkConvergence_impl(q_sh_old, q_sh_new,
                                        e_total_old, e_scc, thresh)) {
                 m_scf_converged = true;
                 break;
             }
+        }
+
+        // Broyden: mix the SCC charge vector to get the next input. The raw
+        // output x_out (in m_wfn after updatePopulations) is combined with the
+        // input x_in via the modified-Broyden quasi-Newton update; unpacking
+        // writes the next input back into m_wfn so q_sh_old below tracks it.
+        if (mode == ScfMode::Broyden) {
+            const Vector x_out  = packSCC();
+            const Vector x_next = broyden.update(x_in, x_out);
+            unpackSCC(x_next);
         }
 
         q_sh_old = m_wfn.q_sh;

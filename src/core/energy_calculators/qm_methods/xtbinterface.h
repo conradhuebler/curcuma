@@ -36,6 +36,15 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     PARAM(electronic_temperature, Double, 300.0, "Electronic temperature in Kelvin for Fermi smearing.", "SCF", {"Tele"})
     PARAM(spin, Double, 0.0, "Total spin of the system (0.0 = singlet).", "Molecular", {})
     PARAM(d4_charge_source, String, "eeq", "Native GFN2 D4 zeta charge source: 'eeq' (single-shot dftd4 EEQ, analytical dq/dx) or 'mulliken' (GFN2 SCF charges + CPSCF response).", "Dispersion", {})
+    // Native GFN1/GFN2 SCF convergence controls (Claude Generated). Default mode
+    // is 'broyden' (tblite-style charge mixing); '-scf_mode diis' is the historic path.
+    PARAM(scf_mode, String, "broyden", "Native GFN SCF strategy: 'broyden' (modified-Broyden quasi-Newton mixing of the SCC charge vector, the tblite-style mixer; default, most robust), 'diis' (Pulay on Fock, the historic path), 'plain' (damped density mixing only), or 'level-shift' (Saunders-Hillier virtual shift + density mixing).", "SCF", {})
+    PARAM(scf_guess, String, "h0", "Native GFN SCF initial charge guess: 'h0' (bare Hamiltonian, default) or 'eeq' (single-shot dftd4 EEQ charges, helps polar systems start in the right basin).", "SCF", {})
+    PARAM(scf_damping, Double, 0.4, "Native GFN SCF density mixing factor: P = damp*P_new + (1-damp)*P_old. Lower = stronger damping (more robust, slower).", "SCF", {})
+    PARAM(scf_threshold, Double, 1.0e-6, "Native GFN SCF convergence threshold on max|dq_shell| (and dE).", "SCF", {})
+    PARAM(diis_start, Int, 5, "Native GFN SCF: number of damped warmup iterations before Pulay DIIS engages (diis/level-shift modes).", "SCF", {})
+    PARAM(diis_subspace, Int, 6, "Native GFN SCF: DIIS history depth (number of Fock matrices kept).", "SCF", {})
+    PARAM(level_shift, Double, 0.2, "Native GFN SCF: virtual-orbital level-shift magnitude (Eh) for scf_mode='level-shift'. Faded out near convergence so the fixed point is unshifted.", "SCF", {})
 END_PARAMETER_DEFINITION
 
 class UFF;

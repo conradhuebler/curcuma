@@ -39,6 +39,11 @@ json GFN2Method::getDefaultConfig()
         { "scf_max_iterations", 100 },       // Maximum SCF iterations
         { "scf_threshold", 1.0e-6 },         // Convergence threshold
         { "scf_damping", 0.4 },              // Density damping factor
+        { "scf_mode", "broyden" },           // SCF strategy: broyden(default) | diis | plain | level-shift
+        { "scf_guess", "h0" },               // Initial charge guess: h0 | eeq
+        { "diis_start", 5 },                 // Damped warmup iterations before DIIS
+        { "diis_subspace", 6 },              // DIIS history depth
+        { "level_shift", 0.2 },              // Virtual-orbital shift (Eh), level-shift mode
         { "threads", 1 },                    // Single-threaded by default
         { "print_orbitals", false },         // Print orbital analysis
         { "save_orbitals", false },          // Save orbital data to file
@@ -141,6 +146,10 @@ double GFN2Method::calculateEnergy(bool gradient)
                 d4src = m_parameters.value("d4_charge_source", std::string("eeq"));
             m_xtb->setD4ChargeSource(d4src);
         }
+
+        // Apply SCF-convergence settings (mode/guess/damping/DIIS/level-shift)
+        // each call, so geometry steps in -opt / MD pick up the configuration.
+        updateGFN2Parameters();
 
         // Perform GFN2 calculation
         m_last_energy = m_xtb->Calculation(gradient);
@@ -400,8 +409,10 @@ void GFN2Method::updateGFN2Parameters()
 {
     if (!m_xtb) return;
 
-    // Update SCF parameters if available
-    // TODO: Pass parameters to GFN2 core implementation
+    // Push SCF-convergence settings (mode, guess, damping, DIIS, level shift)
+    // from the controller into the native XTB object. Reads the "xtb" scope
+    // (where -scf_mode etc. auto-route) with a top-level fallback. Claude Generated.
+    curcuma::xtb::applyXtbScfConfig(*m_xtb, m_parameters);
 }
 
 void GFN2Method::handleGFN2Error(const std::string& operation)
