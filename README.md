@@ -38,6 +38,8 @@ tblite methods:
 - gfn1
 - gfn2
 
+> Native GFN1/GFN2 (the canonical `gfn1`/`gfn2` backends, no external dependency) are validated against tblite to a 1e-8 Eh target — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md).
+
 xtb methods:
 - xtb-gfnff : GFN-FF via the xtb library
 - xtb-gfn1

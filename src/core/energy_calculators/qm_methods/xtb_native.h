@@ -489,6 +489,14 @@ private:
     mutable Vector m_disp_dEdcn;          ///< Cached D4 dE/dCN (Eh per CN unit)
     mutable Vector m_disp_dEdq;           ///< Cached D4 dE/dq (Eh per electron), q-response
     mutable bool   m_disp_gradient_valid = false;
+    // Claude Generated (2026-05): D4 "prepared for this geometry" guard. The heavy
+    // D4 setup (CN + Gaussian weights + C6 reference) is geometry-dependent and fixed
+    // across SCF iterations; only the SCF Mulliken charges change. Reset to false at
+    // the top of Calculation() (new geometry -> re-prepare); set true after the first
+    // GenerateParameters of the current geometry so per-SCF addDispersionPotential()
+    // only refreshes the charges instead of regenerating the full reference set.
+    mutable bool   m_d4_prepared = false;
+    mutable int    m_d4_genparams_calls = 0;  // diagnostic: GenerateParameters calls (verbosity>=3)
     // GFN2 component audit (Claude Generated): when set, calcDispersionEnergy
     // skips the Mulliken CPSCF charge-response fold. The diagnostic injects a
     // density without running SCF, so m_wfn.C / m_wfn.eps are empty and the

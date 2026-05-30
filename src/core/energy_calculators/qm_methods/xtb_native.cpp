@@ -130,6 +130,14 @@ double XTB::Calculation(bool gradient)
         CurcumaLogger::param("electrons", static_cast<int>(m_wfn.nocc));
     }
 
+    // Claude Generated (2026-05): new geometry -> the geometry-dependent D4 reference
+    // set (CN, Gaussian weights, C6 cache) must be regenerated once this Calculation.
+    // Per-SCF addDispersionPotential() then only refreshes the SCF charges. Resetting
+    // here is REQUIRED for opt/MD correctness: without it later geometries would reuse
+    // the first geometry's stale D4 CN/weights.
+    m_d4_prepared = false;
+    m_d4_genparams_calls = 0;
+
     // 1. Coordination numbers
     Vector cn = computeCoordinationNumbers();
     const auto t_cn = clock::now();
@@ -964,15 +972,23 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     // weighting with the converged SCF Mulliken charges (tblite uses wfn%qat). The
     // dftd4 single-shot EEQ is disabled; getZetaCharges() returns the Mulliken set.
     // The dq/dx gradient response then comes from CPSCF (computeMullikenChargeResponse).
-    m_d4_generator->setUseD4SingleShotEEQ(false);
-    m_d4_generator->setTopologyCharges(m_wfn.q_at);
-    // GFN2: use the dftd4 EN-weighted covalent CN (matches tblite's
-    // get_coordination_number(rcov, en)) instead of the GFN-FF log-capped erf-CN.
-    m_d4_generator->setD4CovalentCN(true);
-
     // m_geometry is in Angstrom; D4 expects Bohr.
     Matrix geom_bohr = m_geometry * AA_TO_AU;
-    m_d4_generator->GenerateParameters(m_atoms, geom_bohr);
+    // Claude Generated (2026-05): reuse the geometry-prepared D4 reference set from the
+    // SCF loop (addDispersionPotential). Only the converged Mulliken charges are pushed
+    // here. If the SCF never prepared it (energy-only path with no potential build),
+    // run the full GenerateParameters once. updateCNValuesForGradient (dc6/dCN) is then
+    // refreshed inside computeEnergyAndGradient(with_gradient=true) below.
+    m_d4_generator->setTopologyCharges(m_wfn.q_at);
+    if (!m_d4_prepared) {
+        m_d4_generator->setUseD4SingleShotEEQ(false);
+        // GFN2: use the dftd4 EN-weighted covalent CN (matches tblite's
+        // get_coordination_number(rcov, en)) instead of the GFN-FF log-capped erf-CN.
+        m_d4_generator->setD4CovalentCN(true);
+        m_d4_generator->GenerateParameters(m_atoms, geom_bohr);
+        ++m_d4_genparams_calls;
+        m_d4_prepared = true;
+    }
 
     // Always compute the gradient block — D4 is cheap and the cached
     // m_disp_gradient / m_disp_dEdcn are folded into calculateGradient()
@@ -1019,6 +1035,10 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::param("dispersion_d4_native", fmt::format("{:.6f} Eh", E));
     }
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("d4_genparams_calls_this_geometry",
+                             std::to_string(m_d4_genparams_calls));
+    }
     return E;
 }
 
@@ -1055,11 +1075,26 @@ void XTB::addDispersionPotential(Potential& pot) const
     }
 
     // Exact per-reference dE_D4/dq at the current SCF Mulliken charges.
-    m_d4_generator->setUseD4SingleShotEEQ(false);
-    m_d4_generator->setTopologyCharges(m_wfn.q_at);
-    m_d4_generator->setD4CovalentCN(true);  // GFN2 dftd4 EN-weighted covalent CN
+    //
+    // Claude Generated (2026-05): the heavy D4 reference set (CN + Gaussian weights +
+    // C6 reference cache) is geometry-dependent and identical across SCF iterations;
+    // only the SCF charges change. Run the full GenerateParameters once per geometry
+    // (m_d4_prepared); on subsequent iterations only push the new SCF charges and
+    // re-evaluate dE_D4/dq against the cached reference set. This removes the per-SCF
+    // CN + Gaussian-weight regeneration while keeping the result bit-identical (the
+    // weights/CN are geometry-fixed; only the charges enter the per-reference C6
+    // scaling). with_gradient stays true because D4Evaluator only fills dEdq when a
+    // gradient is requested (do_dEdq = with_gradient && with_dEdq); the scratch
+    // Cartesian gradient is discarded here and reassembled once post-SCF.
     const Matrix geom_bohr = m_geometry * AA_TO_AU;
-    m_d4_generator->GenerateParameters(m_atoms, geom_bohr);
+    m_d4_generator->setTopologyCharges(m_wfn.q_at);
+    if (!m_d4_prepared) {
+        m_d4_generator->setUseD4SingleShotEEQ(false);
+        m_d4_generator->setD4CovalentCN(true);  // GFN2 dftd4 EN-weighted covalent CN
+        m_d4_generator->GenerateParameters(m_atoms, geom_bohr);
+        ++m_d4_genparams_calls;
+        m_d4_prepared = true;
+    }
 
     Matrix scratch_grad; Vector scratch_dEdcn, dEdq;
     m_d4_evaluator->computeEnergyAndGradient(

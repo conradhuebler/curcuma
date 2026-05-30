@@ -716,12 +716,20 @@ int D3ParameterGenerator::getNumberofReferences(int atom) const
 D3ParameterGenerator D3ParameterGenerator::createForGFN1()
 {
     // Claude Generated: GFN1-xTB D3(BJ) parameters
-    // Reference: TBLite gfn1-xtb.toml, Grimme et al. JCTC 2017, 13, 1989
+    // Reference: tblite src/tblite/xtb/gfn1.f90:53 (Grimme et al. JCTC 2017, 13, 1989)
+    //   s6 = 1.0, s8 = 2.4, a1 = 0.63, a2 = 5.0, s9 = 0.0
+    // s9 = 0.0 pins GFN1-xTB's D3 to TWO-BODY ONLY (no Axilrod-Teller-Muto term),
+    // matching tblite. This call already behaved as s9=0 (the PARAM default 1.0 is
+    // not merged into this locally-built config), so this is an explicit guard, not
+    // a behaviour change -- it prevents a future registry-default leak from silently
+    // switching ATM on for GFN1. (The GFN1 dispersion residual vs tblite is in the
+    // TWO-body term, not ATM; see SQM_WP2.)
     json config_json;
     config_json["d3_s6"] = 1.0;
     config_json["d3_s8"] = 2.4;
     config_json["d3_a1"] = 0.63;
     config_json["d3_a2"] = 5.0;
+    config_json["d3_s9"] = 0.0;   // no three-body ATM (tblite gfn1.f90:53)
     config_json["d3_alp"] = 14.0;
 
     ConfigManager config("d3param", config_json);

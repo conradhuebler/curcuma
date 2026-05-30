@@ -109,7 +109,6 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
 
     if (m_electronic_temp > 0.0) {
         // Fermi-Dirac smearing: bisect for Fermi level, build fractional-occupation density
-        // Pattern mirrors GFN2::buildDensityMatrix (gfn2.cpp:607-634).
         const double kT = m_electronic_temp * 3.166808e-6;  // K → Hartree
         const double n_elec = m_wfn.nocc;
 

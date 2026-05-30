@@ -1,0 +1,121 @@
+# WP2 — GFN1 to 1e-8 Eh vs tblite (localize & close residuals)
+
+> Part of [SQM_VALIDATION_ROADMAP.md](SQM_VALIDATION_ROADMAP.md).
+> Status: **ADD** (specified, not started). Depends on **WP3** (per-container diff).
+> 🤖 AI-generated plan.
+
+## Target
+
+Bring native GFN1 (`curcuma::xtb::XTB(GFN1)`, `xtb_native.cpp` + `xtb_h0.cpp` /
+`xtb_coulomb.cpp` / `xtb_scf.cpp`) to **|E_native − E_tblite| ≤ 1e-8 Eh** on the
+full validation set, removing its 12 xfails from the suite (WP1). Also re-examine
+the single GFN2 `complex` 6.95e-5 residual.
+
+## Measured residuals to close (2026-05-30)
+
+| molecule | \|dE\| (Eh) | sign (native−tblite) |
+|---|---:|:--:|
+| He2 | 1.5e-8 | − |
+| H2O | 2.1e-6 | + |
+| H2 | 1.3e-6 | − |
+| NH3 | 1.6e-5 | − |
+| LiH | 4.3e-5 | + |
+| HCN | 4.4e-5 | + |
+| CH4 | 4.7e-5 | − |
+| C6H6 | 4.8e-4 | − |
+| acetic_acid_dimer | 1.4e-3 | + |
+| caffeine | 1.8e-3 | − |
+| triose | 8.4e-3 | − |
+| complex | 3.5e-2 | − |
+
+Two regimes:
+- **Small covalent (H2…HCN), ~1µEh–50µEh:** likely H0 self-energy / repulsion /
+  CN-counting precision differences vs tblite (parameter or formula detail), not
+  dispersion (too small, mixed sign).
+- **Larger (C6H6, acetic, caffeine, triose, complex), 0.5–35 mEh, growing with
+  size and mostly over-binding:** a size-extensive term is off. Candidates:
+  isotropic/3rd-order Coulomb, GFN1 D3 (BJ) scaling/cutoff, or the halogen-bond /
+  repulsion container. **Cause is open** — do not assume; localize first (WP3).
+
+## Method (localize before fixing)
+
+1. **Per-container diff (uses WP3).** Run `diag_curcuma_energy_components` (GFN1)
+   on triose + complex (the largest residuals) with tblite's injected density, to
+   attribute the mEh to repulsion / dispersion / electronic / halogen. The
+   container carrying the residual names the bug. Extend the `gfn2_align`-style
+   audit to GFN1 (WP3 delivers this).
+2. **Cross-check the existing Phase-0 diagnostics for GFN1** already present in
+   `test_cases/sqm_reference/` (`test_xtb_overlap`, `test_xtb_h0`,
+   `test_xtb_coulomb`, `test_xtb_scf_snapshot`) — currently only run on the small
+   Phase-0 dump set (H2/He2/LiH/H2O/CH4/NH3/C6H6). Confirm overlap/H0/Coulomb are
+   bit-clean for GFN1 there; if a small-molecule residual (e.g. CH4 47µEh) shows
+   up in H0 or Coulomb, that isolates the parameter/formula gap cheaply.
+3. **Dispersion check.** GFN1 uses D3(BJ) (`D3ParameterGenerator::createForGFN1`,
+   `calcDispersionEnergy` GFN1 branch). Diff native GFN1 D3 energy against tblite's
+   D3 container on triose/complex. The over-binding sign means if D3 is the cause
+   it is *too attractive* (wrong s8/a1/a2 or cutoff), not missing.
+4. **Fix the localized term**, re-measure, tighten the corresponding `sqm_val_*`
+   xfail to a normal 1e-8 test (WP1 mechanism flips it automatically).
+
+## Suggested order (cheap → expensive)
+
+1. Small-molecule H0/Coulomb diff (steps 2) — fast, isolates parameter gaps.
+2. triose container audit (step 1) — one molecule, names the dominant term.
+3. D3 container diff (step 3) if dispersion implicated.
+4. complex last (largest, slowest) to confirm size-extensivity of the fix.
+
+## Done when
+
+- All 12 GFN1 `sqm_val_*` tests pass at 1e-8 (xfails removed in WP1's CMake).
+- The GFN1 row of `docs/SQM_VALIDATION.md` shows ≤1e-8 across the set.
+- Each closed residual has a one-line root-cause note in `AIChangelog.md`.
+
+## Caveats / not in scope
+
+- No `✅ TESTED`/`APPROVED` by AI; machine-tested only.
+- 1e-8 is the agreement-with-tblite target, not a statement of physical
+  correctness — both implement the same model; this measures *implementation*
+  fidelity. Genuinely different but defensible choices (if any are found) must be
+  documented, not silently tolerance-loosened.
+- Elements/regimes outside the set (open-shell, charged, heavy elements,
+  solvation) are not covered here.
+
+## Results (2026-05-30) — 🤖 AI-generated, machine-tested only
+
+**Localized (WP3 tooling + new D3 probes):** the entire GFN1 dispersion residual
+was the **two-body D3 C6 coefficient**. Every other D3 term was verified
+bit-matching s-dftd3 (tblite's GFN1 D3 engine): the molecular CN, the C8/C6 ratio
+(`10.72·r4r2_i·r4r2_j` ≡ s-dftd3 `3·sqrt_z·sqrt_z`), the BJ critical radius
+`a1·sqrt(c8/c6)+a2`, and the pair energy `-s6·c6·t6 - s8·c8·t8`; He2 (CN=0) was
+exact. New probes: `dump_dftd3_atomic_c6.f90` (s-dftd3 `get_atomic_c6`) and
+`diag_d3_c6.cpp` (curcuma interpolated C6).
+
+**Root cause:** `src/core/.../ff_methods/d3_reference_cn.cpp`
+(`reference_cn_data_complete`, 721 values) was **scrambled** — carbon read
+`[-1,-1,0.96,-1,-1,9.81,0]` instead of s-dftd3's `[0,0.987,1.999,2.999,3.984,-1,-1]`,
+corrupting the Gaussian reference weights → carbon C6 +61% (C-C) / +26% (C-H),
+H −3.6%, O ≈exact. The **C6 reference table** (262444 values) and
+`m_number_of_references` were correct.
+
+**Fix:** regenerated the CN table from s-dftd3 `reference.f90 reference_cn(7,103)`
+(column-major = curcuma's `[elem*7+ref]` layout). Also pinned `d3_s9=0.0` in
+`createForGFN1` (tblite `gfn1.f90:53`; already effectively 0). Outcome:
+
+| metric | before | after |
+|---|---:|---:|
+| interpolated C6 vs s-dftd3 (worst pair) | +61% | 0.00000% |
+| injected-density \|disp+elec\| triose | 9.28e-3 | 1.44e-5 |
+| GFN1 total dE triose | +8.4e-3 | +8.96e-4 |
+| GFN1 total dE complex | +3.5e-2 | +3.36e-3 |
+
+Shared with UFF-D3 / GFN-FF-D3 → **regression-checked, none** (GFN-FF 21/22 as
+baseline, gfn2/gradient/cpscf/d4 green). `gfn1_align` tolerances tightened.
+
+**Still open (blocks 1e-8 for all 12):** a smaller, size-extensive **electronic**
+self-consistent difference (triose ~8.8e-4, acetic_acid_dimer ~2.1e-3; small
+molecules ~1e-6..1e-5). It is **not** SCF convergence (energy identical from
+scf_threshold 1e-6 down to 1e-12) and **not** dispersion (D3 now matches). Next
+step: the Phase-0 GFN1 H0/Coulomb/overlap audit (`test_xtb_h0/coulomb/overlap`)
+to attribute it to the bare Hamiltonian / isotropic Coulomb / third-order. Plus a
+~0.06% C8 (`r4r2`) tail (triose injected dispersion residual 1.44e-5). No xfails
+removed yet.

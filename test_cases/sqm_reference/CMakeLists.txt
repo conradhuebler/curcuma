@@ -59,6 +59,17 @@ target_include_directories(diag_curcuma_energy_components PRIVATE
 )
 target_compile_features(diag_curcuma_energy_components PRIVATE cxx_std_17)
 
+# === GFN1 D3 C6 probe (Claude Generated, WP2): curcuma interpolated D3 C6 ===
+# Dumps curcuma's per-pair interpolated GFN1 D3 C6 for diffing against s-dftd3
+# (dump_dftd3_atomic_c6). Localises the GFN1 dispersion residual to the C6 table.
+add_executable(diag_d3_c6 diag_d3_c6.cpp)
+target_link_libraries(diag_d3_c6 PRIVATE curcuma_core)
+target_include_directories(diag_d3_c6 PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/external
+)
+target_compile_features(diag_d3_c6 PRIVATE cxx_std_17)
+
 # === GFN2-D4 reference-C6 audit (Claude Generated): curcuma cache vs dftd4 model%c6 ===
 # Reads a c6 dump from dump_dftd4_c6 (Fortran, dftd4 new_d4_model ref=gfn2) and
 # diffs against curcuma's D4ParameterGenerator::getC6FlatCache() per
@@ -139,6 +150,91 @@ foreach(_mt ${_ECOMP_MOLS_TOL})
     set_tests_properties(ecomp_${_mol} PROPERTIES TIMEOUT 60 LABELS "gfn2_align")
 endforeach()
 
+# Per-molecule ctest entries for the GFN1 component audit (label gfn1_align).
+# Same injected-density per-container diff as ecomp_* above, but reads the
+# *_gfn1.json forensic dumps (dump_tblite_multipole gfn1 ...). Repulsion is
+# bit-clean; the residual is the D3 dispersion container. After the D3
+# reference-CN fix (2026-05-30, WP2 -- the table was scrambled, corrupting C6
+# interpolation, carbon worst) the injected-density combined |disp+elec| dropped
+# 100-640x; the tolerances below are set just above the post-fix values. The
+# small remaining dispersion tail is the C8/r4r2 ~0.06% mismatch. Like the GFN2
+# align/d4_diag tests these read generated (not committed) dumps from
+# ${D4_DIAG_DUMP_DIR}; a clean checkout must run dump_tblite_multipole first.
+# Run: ctest -L gfn1_align
+set(_ECOMP_MOLS_TOL_GFN1
+    "H2:3.0e-8"      # disp 1.30e-8  (was 1.30e-6 pre-fix)
+    "H2O:1.0e-7"     # disp 5.80e-8  (was 2.03e-6)
+    "NH3:2.0e-7"     # disp 1.21e-7  (was 1.96e-5)
+    "CH4:3.0e-7"     # disp 1.95e-7  (was 5.94e-5)
+    "triose:2.0e-5"  # disp 1.44e-5  (was 9.28e-3; C8/r4r2 tail -- WP2 follow-up)
+)
+foreach(_mt ${_ECOMP_MOLS_TOL_GFN1})
+    string(REPLACE ":" ";" _mt_list ${_mt})
+    list(GET _mt_list 0 _mol)
+    list(GET _mt_list 1 _tol)
+    add_test(
+        NAME ecomp_${_mol}_gfn1
+        COMMAND diag_curcuma_energy_components --quiet --tol ${_tol}
+            ${D4_DIAG_DUMP_DIR}/${_mol}_gfn1.json
+            ${CMAKE_CURRENT_SOURCE_DIR}/molecules/${_mol}.xyz
+    )
+    set_tests_properties(ecomp_${_mol}_gfn1 PROPERTIES TIMEOUT 60 LABELS "gfn1_align")
+endforeach()
+
+# === Native GFN1/GFN2 vs committed tblite references (Claude Generated, 2026-05) ===
+# End-to-end validation: runs the real `curcuma` binary (native ngfn1/ngfn2) and
+# compares the single-point energy against the committed tblite reference JSONs in
+# reference_data/ (produced by dump_tblite_reference in a USE_TBLITE build). Needs
+# NO tblite build -- the references are committed (like the GFN-FF suite).
+#
+# HONEST GATE: every test gates total energy at 1e-8 Eh (the target agreement with
+# tblite). Molecules that do NOT yet reach 1e-8 are marked WILL_FAIL (ctest
+# expected-failure) with their MEASURED residual in the list below -- the gate is
+# never loosened to mask a gap. When a method reaches 1e-8 for an xfail molecule,
+# ctest reports it as a FAILURE ("passed but expected to fail"), forcing removal of
+# the xfail: progress is self-documenting and a closed gap cannot silently re-open.
+# Baseline measured 2026-05-30 (release/, USE_TBLITE=OFF). See docs/SQM_VALIDATION.md
+# and docs/SQM_VALIDATION_ROADMAP.md. Run:  ctest -L gfn2_validation / gfn1_validation
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    set(_SQM_VAL_PY   ${CMAKE_CURRENT_SOURCE_DIR}/validate_sqm.py)
+    set(_SQM_VAL_REF  ${CMAKE_CURRENT_SOURCE_DIR}/reference_data)
+    set(_SQM_VAL_MOL  ${CMAKE_CURRENT_SOURCE_DIR}/molecules)
+    set(_SQM_VAL_TOL  1e-8)
+    set(_SQM_MOLS H2 He2 LiH H2O CH4 NH3 C6H6 HCN acetic_acid_dimer caffeine triose complex)
+
+    # Molecules NOT yet at 1e-8 -> tracked expected-failures (WILL_FAIL). Measured
+    # |dE| = |E_native - E_tblite| (Eh), 2026-05-30 baseline:
+    #   GFN2: only complex (6.95e-5). All others <= 1e-8 (bit-identical).
+    #   GFN1: ALL twelve. H2 1.3e-6, He2 1.5e-8, LiH 4.3e-5, H2O 2.1e-6, CH4 4.7e-5,
+    #         NH3 1.6e-5, C6H6 4.8e-4, HCN 4.4e-5, acetic_acid_dimer 1.4e-3,
+    #         caffeine 1.8e-3, triose 8.4e-3, complex 3.5e-2. Cause OPEN (NOT missing
+    #         D3 -- native GFN1 D3 exists; the large systems over-bind). See
+    #         docs/SQM_WP2_gfn1_accuracy.md.
+    set(_GFN2_XFAIL complex)
+    set(_GFN1_XFAIL H2 He2 LiH H2O CH4 NH3 C6H6 HCN acetic_acid_dimer caffeine triose complex)
+
+    foreach(_meth gfn1 gfn2)
+        if(_meth STREQUAL gfn1)
+            set(_xfail ${_GFN1_XFAIL})
+        else()
+            set(_xfail ${_GFN2_XFAIL})
+        endif()
+        foreach(_mol ${_SQM_MOLS})
+            add_test(NAME sqm_val_${_mol}_${_meth}
+                COMMAND ${Python3_EXECUTABLE} ${_SQM_VAL_PY}
+                    --curcuma $<TARGET_FILE:curcuma> --quiet --tol-energy ${_SQM_VAL_TOL}
+                    --ref ${_SQM_VAL_REF}/${_mol}_${_meth}.ref.json
+                    --xyz ${_SQM_VAL_MOL}/${_mol}.xyz)
+            set_tests_properties(sqm_val_${_mol}_${_meth}
+                PROPERTIES TIMEOUT 120 LABELS "${_meth}_validation")
+            if(${_mol} IN_LIST _xfail)
+                set_tests_properties(sqm_val_${_mol}_${_meth} PROPERTIES WILL_FAIL TRUE)
+            endif()
+        endforeach()
+    endforeach()
+endif()
+
 # === tblite-dependent executables (dump + multipole) ===
 if(USE_TBLITE)
     # Phase 0 reference dumper
@@ -159,6 +255,17 @@ if(USE_TBLITE)
     )
     target_link_libraries(dump_tblite_multipole PRIVATE tblite gfortran)
     target_compile_features(dump_tblite_multipole PRIVATE cxx_std_17)
+
+    # Compact reference dumper for the committed SQM validation suite.
+    # Emits only validation-relevant fields (small, git-friendly *.ref.json).
+    add_executable(dump_tblite_reference dump_tblite_reference.cpp)
+    target_include_directories(dump_tblite_reference PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_SOURCE_DIR}/external/tblite/include
+    )
+    target_link_libraries(dump_tblite_reference PRIVATE tblite gfortran)
+    target_compile_features(dump_tblite_reference PRIVATE cxx_std_17)
 
     # Molecule set for Phase 0
     set(_SQM_MOLS
@@ -245,6 +352,17 @@ if(USE_TBLITE)
         ${CMAKE_BINARY_DIR}/_deps/mctc-lib-build/include
     )
     target_link_libraries(dump_dftd4_atm PRIVATE dftd4 mctc-lib multicharge)
+
+    # === simple-dftd3 atomic-C6 dumper (Claude Generated, WP2) ===
+    # Dumps s-dftd3's weighted per-atom C6 (the exact term GFN1 D3 uses, since
+    # tblite GFN1 dispersion IS s-dftd3 with s9=0). Diffed against curcuma's
+    # interpolated D3 C6 to localise the GFN1 dispersion residual to the C6 table.
+    add_executable(dump_dftd3_atomic_c6 dump_dftd3_atomic_c6.f90)
+    target_include_directories(dump_dftd3_atomic_c6 PRIVATE
+        ${CMAKE_BINARY_DIR}/_deps/s-dftd3-build/include
+        ${CMAKE_BINARY_DIR}/_deps/mctc-lib-build/include
+    )
+    target_link_libraries(dump_dftd3_atomic_c6 PRIVATE s-dftd3 mctc-lib)
 
     # c6 audit: dump dftd4 model%c6, then diff against curcuma's cache.
     # Element coverage: H2O (H,O), CH4 (C,H), NH3 (N,H), C6H6 (C,H),

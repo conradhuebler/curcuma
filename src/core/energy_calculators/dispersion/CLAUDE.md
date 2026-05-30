@@ -102,7 +102,15 @@ to plug it in without touching the CPU evaluator.
 | `ff_methods/forcefieldthread.cpp::CalculateD4DispersionContribution` | `ModifiedBJ_GFNFF` | Per-pair, uses `m_d4_dispersions` pre-baked by GFN-FF, applies dc6/dCN via `m_dc6dcn_ptr`. |
 | `qm_methods/xtb_native.cpp::calcDispersionEnergy` | `StandardBJ_D4` | Whole-molecule; caches gradient + dE/dCN in mutable members on `XTB`. |
 | `qm_methods/xtb_gradient.cpp::calculateGradient` | (consumer) | Folds cached `m_disp_gradient` directly into `m_gradient`; adds `m_disp_dEdcn` into the local `dEdcn` so the existing CN-distribution loop carries it through ∂CN/∂x. |
-| `qm_methods/gfn2.cpp::calculateDispersionEnergy` | `StandardBJ_D4` | Legacy GFN2 class (not currently routed via MethodFactory). Wired to the evaluator for parity, but not the active code path for `-method ngfn2`. |
+
+> The native GFN2 SCF couples D4 self-consistently: `XTB::addDispersionPotential`
+> adds the per-atom `dE_D4/dq` to the Fock atom-potential each SCF iteration. The
+> heavy D4 reference build (CN + Gaussian weights + C6 cache) is geometry-fixed and
+> runs once per geometry (guarded by `m_d4_prepared`, reset in `Calculation()`);
+> only the SCF charges are refreshed per iteration. (Removed a duplicate per-SCF
+> `GenerateParameters` here, 2026-05 — ~35% faster on `complex`, energies
+> bit-identical.) The legacy standalone `gfn2.cpp`/`gfn1.cpp` classes were deleted
+> the same session; the active path is `xtb_native.cpp`.
 
 ## Status & caveats
 

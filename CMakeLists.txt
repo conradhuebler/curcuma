@@ -412,10 +412,6 @@ set(curcuma_core_SRC
         src/capabilities/qmdfffit.cpp
         src/core/energy_calculators/qm_methods/eht.cpp
         src/core/energy_calculators/qm_methods/eht_parameters.cpp
-        src/core/energy_calculators/qm_methods/gfn1.cpp
-        src/core/energy_calculators/qm_methods/gfn1_params_loader.cpp
-        src/core/energy_calculators/qm_methods/gfn2.cpp
-        src/core/energy_calculators/qm_methods/gfn2_params_loader.cpp
         src/core/energy_calculators/qm_methods/xtb_native.cpp
         src/core/energy_calculators/qm_methods/xtb_h0.cpp
         src/core/energy_calculators/qm_methods/xtb_coulomb.cpp
