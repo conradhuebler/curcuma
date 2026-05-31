@@ -154,6 +154,7 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - **✅ GFN2 Multipole Gradient Schritt 1 (AP5)**: Section 5 in `xtb_gradient.cpp` — SD/DD/SQ direct interaction gradient + mrad/CN chain-rule (port of `get_multipole_gradient_0d`)
 - **✅ GFN2 Multipole Integral Pulay (AP5b)**: `xtb_gradient.cpp` lines ~316–390 — d(dp_iat)/dR and d(qp_iat)/dR terms via origin-shift correction from `dD_dA`; `cgto_multipole_grad_transformed()` in `xtb_multipole_ints.hpp`
 - **✅ Gradient unit fix**: `m_gradient /= au` (was `*= au`) in `xtb_native.cpp` — caused au² error (~72% wrong) at non-equilibrium geometries
+- **⚙️ SCF performance (2026-05-31)**: per-iteration eigensolve now cached `X=S^{-1/2}` + standard MKL `dsyevd` (`buildOrthonormalizer`/`solveEigen`, `xtb_scf.cpp`); `Calculation()` pinned MKL-serial (`MklSerialScope`); GFN2 skips unused D4 JSON pair list (`setBuildPairLists(false)`). complex(231) gfn1 1.75×, gfn2 1.52×; energies bit-stable, 12/12 native + 17 gfnff_val green. See [docs/SQM_PERFORMANCE.md](../../../../docs/SQM_PERFORMANCE.md)
 - **🔧 Native GFN-FF (gfnff)**: Architecture complete, parameter debugging in progress
 
 ### Verbosity Integration Status ✅

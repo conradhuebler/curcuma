@@ -46,6 +46,29 @@ namespace curcuma::dispersion { class D4Evaluator; }
 namespace curcuma::xtb {
 
 /* ------------------------------------------------------------------------- *
+ *  MKL serial scope (Claude Generated)
+ *
+ *  MKL spawns an OpenMP thread team for every BLAS/LAPACK call. The native xTB
+ *  SCF is an inherently serial iteration over small/medium dense matrices, so
+ *  that per-call threading is pure overhead and measured slower than serial up
+ *  to at least 231 atoms. We pin MKL to one thread for the duration of each
+ *  Calculation() via this thread-local, scoped guard: it only affects the
+ *  calling thread, so running many calculations in parallel through the
+ *  project's CxxThreadPool keeps each one serial (no oversubscription) while
+ *  the coarse parallelism stays at the molecule level. No-op without MKL.
+ * ------------------------------------------------------------------------- */
+#ifdef USE_MKL
+extern "C" int MKL_Set_Num_Threads_Local(int nt);
+struct MklSerialScope {
+    int prev;
+    MklSerialScope()  : prev(MKL_Set_Num_Threads_Local(1)) {}
+    ~MklSerialScope() { MKL_Set_Num_Threads_Local(prev); }
+};
+#else
+struct MklSerialScope { MklSerialScope() {} };
+#endif
+
+/* ------------------------------------------------------------------------- *
  *  Method selector
  * ------------------------------------------------------------------------- */
 enum class MethodType {
@@ -383,6 +406,10 @@ private:
                      const Matrix& S,
                      const Potential& pot) const;                        // xtb_scf.cpp
 
+    // Build the Löwdin orthonormalizer m_X = S^{-1/2} from m_S. Called once per
+    // geometry so solveEigen() can reduce the generalized problem to a standard
+    // one each SCF iteration. (xtb_scf.cpp)
+    void buildOrthonormalizer();
     // Diagonalise F in S metric, update wavefunction populations.
     bool solveEigen(const Matrix& F, const Matrix& S);                   // xtb_scf.cpp
     void updatePopulations(const Matrix& S);                             // xtb_scf.cpp
@@ -435,6 +462,11 @@ private:
     Matrix m_S;                 // overlap
     Matrix m_H0;                // bare Hamiltonian (updated each SCC)
     Matrix m_F;                 // converged Fock matrix (GFN: H0 + potential)
+    // Löwdin orthonormalizer X = S^{-1/2}, built once per geometry (xtb_scf.cpp).
+    // Caches the otherwise per-iteration Cholesky/transform of the constant S, so
+    // each SCF step solves the *standard* eigenproblem (X·F·X) instead of the
+    // generalized one. Eigenvectors back-transform as C = X·C~, preserving Cᵀ S C = I.
+    Matrix m_X;
     Eigen::MatrixXd m_gamma;    // shell-resolved Coulomb matrix (nsh × nsh)
     std::array<Eigen::MatrixXd, 3> m_dp_int;   // dipole integrals (GFN2), each nao×nao
     std::array<Eigen::MatrixXd, 6> m_qp_int;   // quadrupole integrals (GFN2), each nao×nao

@@ -115,6 +115,11 @@ bool XTB::seedEEQGuess(Vector& q_sh_out)
 
 double XTB::Calculation(bool gradient)
 {
+    // Pin MKL to one thread for the whole native SCF (see MklSerialScope in
+    // xtb_native.h): the serial iteration over small/medium matrices is faster
+    // without MKL's per-call thread team up to at least 231 atoms.
+    MklSerialScope mkl_serial;
+
     using clock = std::chrono::steady_clock;
     auto ms = [](clock::time_point a, clock::time_point b) {
         return std::chrono::duration<double, std::milli>(b - a).count();
@@ -151,6 +156,9 @@ double XTB::Calculation(bool gradient)
     getHamiltonianH0(se, S, H0);
     m_S  = S;
     m_H0 = H0;
+    // Orthonormalizer X = S^{-1/2}, built once here so every SCF iteration solves
+    // the cheap standard eigenproblem instead of re-factorizing the constant S.
+    buildOrthonormalizer();
     const auto t_h0 = clock::now();
 
     // 4. Build gamma matrix (once per geometry)
@@ -952,6 +960,9 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         d4_config["d4_alp"] = 16.0;
         ConfigManager cfg("d4param", d4_config);
         m_d4_generator = std::make_unique<::D4ParameterGenerator>(cfg);
+        // Native GFN2 consumes the C6 reference cache through D4Evaluator, not the
+        // JSON pair list — skip building it (json-per-pair + OpenMP every geometry).
+        m_d4_generator->setBuildPairLists(false);
     }
     if (!m_d4_evaluator) {
         curcuma::dispersion::D4Params p;
@@ -1064,6 +1075,9 @@ void XTB::addDispersionPotential(Potential& pot) const
         d4_config["d4_a1"] = 0.52; d4_config["d4_a2"] = 5.0; d4_config["d4_alp"] = 16.0;
         ConfigManager cfg("d4param", d4_config);
         m_d4_generator = std::make_unique<::D4ParameterGenerator>(cfg);
+        // Native GFN2 consumes the C6 reference cache through D4Evaluator, not the
+        // JSON pair list — skip building it (json-per-pair + OpenMP every geometry).
+        m_d4_generator->setBuildPairLists(false);
     }
     if (!m_d4_evaluator) {
         curcuma::dispersion::D4Params p;

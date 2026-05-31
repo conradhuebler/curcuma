@@ -22,8 +22,65 @@
 #include <Eigen/Dense>
 
 #include <cmath>
+#include <vector>
+
+// When MKL/BLAS is linked (EIGEN_USE_BLAS is set by CMake via USE_BLAS/USE_MKL,
+// see curcuma_eigen_config.h) we call LAPACK's divide-and-conquer symmetric
+// eigensolver dsyevd directly. It is several times faster than Eigen's built-in
+// QR path for full eigenvector computation, which dominates the SCF on large
+// systems. No LAPACKE header is needed — we declare the Fortran symbol. Without
+// BLAS, solveEigenStandard() falls back to Eigen's SelfAdjointEigenSolver.
+#if defined(EIGEN_USE_BLAS) || defined(USE_BLAS) || defined(USE_MKL)
+#  define CURCUMA_XTB_HAVE_LAPACK_SYEVD 1
+extern "C" void dsyevd_(const char* jobz, const char* uplo, const int* n,
+                        double* a, const int* lda, double* w,
+                        double* work, const int* lwork,
+                        int* iwork, const int* liwork, int* info);
+#endif
+
+// The whole native xTB Calculation() runs MKL-serial via curcuma::xtb::
+// MklSerialScope (declared in xtb_native.h) — MKL's per-call thread team is
+// pure overhead for the serial SCF up to at least 231 atoms (measured). The
+// canonical C symbol MKL_Set_Num_Threads_Local lives there; nothing extra is
+// needed here.
 
 namespace curcuma::xtb {
+
+namespace {
+// Solve the standard symmetric eigenproblem A·C = C·ε for a symmetric matrix A.
+// On success fills `evals` (ascending) and `evecs` (columns = eigenvectors).
+// Uses LAPACK dsyevd (divide-and-conquer) when available, else Eigen.
+// `A` is taken by value as a column-major buffer LAPACK can overwrite.
+bool solveStandardSymmetric(Eigen::MatrixXd A,
+                            Eigen::VectorXd& evals,
+                            Eigen::MatrixXd& evecs)
+{
+    const int n = static_cast<int>(A.rows());
+    if (n == 0) return false;
+    evals.resize(n);
+#ifdef CURCUMA_XTB_HAVE_LAPACK_SYEVD
+    // A is Eigen::MatrixXd → column-major contiguous, exactly what LAPACK wants.
+    // For a symmetric matrix the triangle choice is immaterial (full matrix set).
+    const char jobz = 'V', uplo = 'U';
+    int info = 0;
+    int lwork = 1 + 6 * n + 2 * n * n;
+    int liwork = 3 + 5 * n;
+    std::vector<double> work(static_cast<size_t>(lwork));
+    std::vector<int>    iwork(static_cast<size_t>(liwork));
+    dsyevd_(&jobz, &uplo, &n, A.data(), &n, evals.data(),
+            work.data(), &lwork, iwork.data(), &liwork, &info);
+    if (info != 0) return false;
+    evecs = std::move(A);  // dsyevd overwrote A with eigenvectors (column-major)
+    return true;
+#else
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(A);
+    if (es.info() != Eigen::Success) return false;
+    evals = es.eigenvalues();
+    evecs = es.eigenvectors();
+    return true;
+#endif
+}
+} // namespace
 
 /* ------------------------------------------------------------------ *
  *  Expand shell + atom potential to AO-resolved v_ao:                *
@@ -95,17 +152,57 @@ Matrix XTB::buildFock(const Matrix& H0,
  *                                                                    *
  *  Default: 300 K (matches TBLite default).                          *
  * ------------------------------------------------------------------ */
+void XTB::buildOrthonormalizer()
+{
+    const int nao = m_basis.nao;
+    if (nao == 0 || m_S.rows() != nao) { m_X.resize(0, 0); return; }
+
+    // X = S^{-1/2} (Löwdin) via one eigendecomposition of the constant overlap.
+    // Built once per geometry; amortized over all SCF iterations.
+    Eigen::SelfAdjointEigenSolver<Matrix> es(m_S);
+    if (es.info() != Eigen::Success) { m_X.resize(0, 0); return; }
+
+    const double smin = es.eigenvalues().minCoeff();
+    if (smin < 1.0e-8) {
+        // Near-linear-dependent overlap: S^{-1/2} is ill-conditioned. Leave m_X
+        // empty so solveEigen() falls back to the robust generalized solver.
+        if (CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::warn_fmt(
+                "Overlap near-singular (min eig {:.2e}); using generalized eigensolver",
+                smin);
+        m_X.resize(0, 0);
+        return;
+    }
+    const Eigen::VectorXd inv_sqrt = es.eigenvalues().cwiseSqrt().cwiseInverse();
+    const Matrix Us = es.eigenvectors() * inv_sqrt.asDiagonal();
+    m_X.noalias() = Us * es.eigenvectors().transpose();
+}
+
 bool XTB::solveEigen(const Matrix& F, const Matrix& S)
 {
     const int nao = m_basis.nao;
 
-    Eigen::GeneralizedSelfAdjointEigenSolver<Matrix> solver(F, S);
-    if (solver.info() != Eigen::Success) {
-        return false;
+    // Eigenvalues + eigenvectors of F in the S metric. With the cached
+    // orthonormalizer m_X = S^{-1/2} we reduce the generalized problem
+    //   F C = S C ε   to the standard one   (X F X) C~ = C~ ε,   C = X C~,
+    // which avoids the per-iteration Cholesky/transform of the constant S and
+    // lets the fast divide-and-conquer dsyevd do the heavy lifting. The result
+    // satisfies Cᵀ S C = I, identical to the generalized solver, so the gradient
+    // and CPSCF paths are unaffected.
+    if (m_X.rows() == nao && m_X.cols() == nao) {
+        Eigen::MatrixXd Ftil = m_X * F * m_X;   // X symmetric ⇒ Xᵀ F X (MKL GEMMs)
+        Eigen::VectorXd eps;
+        Eigen::MatrixXd Ctil;
+        if (!solveStandardSymmetric(std::move(Ftil), eps, Ctil)) return false;
+        m_wfn.eps = eps;
+        m_wfn.C.noalias() = m_X * Ctil;         // back-transform C = X C~
+    } else {
+        // Fallback: generalized solver (m_X unavailable / near-singular overlap).
+        Eigen::GeneralizedSelfAdjointEigenSolver<Matrix> solver(F, S);
+        if (solver.info() != Eigen::Success) return false;
+        m_wfn.eps = solver.eigenvalues();
+        m_wfn.C   = solver.eigenvectors();
     }
-
-    m_wfn.eps = solver.eigenvalues();
-    m_wfn.C   = solver.eigenvectors();
 
     if (m_electronic_temp > 0.0) {
         // Fermi-Dirac smearing: bisect for Fermi level, build fractional-occupation density
@@ -127,20 +224,21 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         }
         const double mu_f = 0.5 * (mu_lo + mu_hi);
 
-        m_wfn.P = Matrix::Zero(nao, nao);
+        // Fractional occupations, then P = C·diag(occ)·Cᵀ as a single weighted GEMM
+        // (replaces the per-orbital rank-1 accumulation).
+        Eigen::VectorXd occ(nao);
         for (int i = 0; i < nao; ++i) {
-            const double x   = (m_wfn.eps(i) - mu_f) / kT;
-            const double f_i = 2.0 / (1.0 + std::exp(std::min(x, 500.0)));
-            if (f_i < 1e-12) continue;
-            m_wfn.P += f_i * m_wfn.C.col(i) * m_wfn.C.col(i).transpose();
+            const double x = (m_wfn.eps(i) - mu_f) / kT;
+            occ(i) = 2.0 / (1.0 + std::exp(std::min(x, 500.0)));
         }
+        const Matrix Cw = m_wfn.C * occ.asDiagonal();
+        m_wfn.P.noalias() = Cw * m_wfn.C.transpose();
     } else {
         // Integer occupation: closed-shell, 2 electrons per occupied orbital
         const int nocc = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
         if (nocc < 0 || nocc > nao) return false;
-
-        const Matrix C_occ = m_wfn.C.leftCols(nocc);
-        m_wfn.P = 2.0 * C_occ * C_occ.transpose();
+        m_wfn.P.noalias() =
+            2.0 * m_wfn.C.leftCols(nocc) * m_wfn.C.leftCols(nocc).transpose();
     }
 
     return true;

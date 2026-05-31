@@ -406,6 +406,14 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     //   - local_pairs: Thread-local ✅
     //   - pairs_vec: Protected by critical section ✅
 
+    json dispersion_pairs = json::array();
+
+    // Native GFN2 disables this whole block (setBuildPairLists(false)): it reads
+    // the C6 reference cache through D4Evaluator and never consumes the JSON pair
+    // list, which is otherwise rebuilt — a nlohmann::json object per atom pair
+    // (12 string-keyed inserts each) plus an OpenMP spawn — on every geometry.
+    // GFN-FF keeps it on; its ForceFieldThread consumes d4_dispersion_pairs.
+    if (m_build_pair_lists) {
     std::vector<json> pairs_vec;
 
     #pragma omp parallel
@@ -542,11 +550,11 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     }  // end omp parallel
 
     // Convert vector to JSON array and count pairs
-    json dispersion_pairs = json::array();
     for (const auto& p : pairs_vec) {
         dispersion_pairs.push_back(p);
         num_pairs++;
     }
+    }  // end if (m_build_pair_lists)
 
     auto t_pairs_end = std::chrono::high_resolution_clock::now();
     double t_pairs_ms = std::chrono::duration<double, std::milli>(t_pairs_end - t_pairs_start).count();

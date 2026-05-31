@@ -177,6 +177,14 @@ public:
             m_d4_charge_model.addChargeResponseGradient(dEdq, grad_out);
     }
 
+    // Claude Generated: native GFN2 reads the C6 reference cache directly through
+    // D4Evaluator and never consumes the per-pair JSON list, so it disables that
+    // construction — a per-geometry nlohmann::json-per-pair build (12 string-keyed
+    // inserts/pair) plus an OpenMP spawn that is pure overhead for it. GFN-FF
+    // leaves this on; its ForceFieldThread consumes m_parameters["d4_dispersion_pairs"].
+    void setBuildPairLists(bool on) { m_build_pair_lists = on; }
+    bool buildsPairLists() const { return m_build_pair_lists; }
+
     // Claude Generated (Apr 2026): P1a — CN-change threshold cache for Gaussian weights
     // Skip recomputation of gw/dgw/dc6dcn when CN changes < d4_cn_cache_threshold (MD optimization)
     bool canSkipGaussianWeightsUpdate(const std::vector<double>& new_cn) const;
@@ -234,6 +242,10 @@ private:
     // Claude Generated (2026): GFN2 uses the dftd4 EN-weighted covalent CN for
     // the C6 interpolation (see setD4CovalentCN / d4_ncoord.h).
     bool m_use_d4_covalent_cn = false;
+
+    // Claude Generated: build the JSON d4_dispersion_pairs / ATM-triple lists.
+    // On by default for GFN-FF; native GFN2 turns it off (setBuildPairLists).
+    bool m_build_pair_lists = true;
 
     // Claude Generated (Jan 31, 2026): Topology charges for zeta scaling
     // Reference: Fortran gfnff_ini.f90:789 - f1 = zeta(ati, topo%qa(i))
