@@ -28,8 +28,7 @@
 #include "qm_methods/dispersion_method.h"
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
-#include "qm_methods/gfn1_method.h"
-#include "qm_methods/gfn2_method.h"
+#include "qm_methods/native_xtb_method.h"
 #include "qm_methods/gfnff_method.h"
 #include "qm_methods/nddo_method.h"
 #ifdef USE_CUDA
@@ -162,14 +161,14 @@ bool MethodFactory::isUlyssesMethod(const std::string& method) {
 // For other providers use explicit names: "ipea1" (TBLite), "ugfn2" (Ulysses), "xtb-gfn2" (XTB).
 std::unique_ptr<ComputationalMethod> MethodFactory::createGFN2(const json& config) {
     CurcumaLogger::info("GFN2: using native xTB implementation");
-    return std::make_unique<GFN2Method>(config);
+    return std::make_unique<NativeXtbMethod>(curcuma::xtb::MethodType::GFN2, config);
 }
 
 // AP3 (2026-04-25): Native xTB is now the canonical gfn1 provider.
 // For other providers use explicit names: "xtb-gfn1" (XTB), "ipea1" (TBLite).
 std::unique_ptr<ComputationalMethod> MethodFactory::createGFN1(const json& config) {
     CurcumaLogger::info("GFN1: using native xTB implementation");
-    return std::make_unique<GFN1Method>(config);
+    return std::make_unique<NativeXtbMethod>(curcuma::xtb::MethodType::GFN1, config);
 }
 
 std::unique_ptr<ComputationalMethod> MethodFactory::createIPEA1(const json& config) {
@@ -285,7 +284,7 @@ std::unique_ptr<ComputationalMethod> MethodFactory::createDFTD4(const json& conf
  * - "mndo" → native MNDOMethod (always available, no external deps)
  * - "am1"  → native AM1Method (always available, no external deps)
  * - "pm6"  → native PM6Method (always available, no external deps)
- * - "ngfn2"→ native GFN2Method directly (bypass priority chain)
+ * - "ngfn1"/"ngfn2" → native NativeXtbMethod directly (bypass priority chain)
  * - "uff"  → ForceFieldMethod with threading support
  * - "gfnff"→ createGFNFF() tries External > XTB > Native chain
  */
@@ -332,13 +331,13 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
     // Direct native GFN2 access (bypasses priority chain, always uses native implementation)
     if (method == "ngfn2") {
         CurcumaLogger::success("Method 'ngfn2' resolved to native GFN2");
-        return std::make_unique<GFN2Method>(config);
+        return std::make_unique<NativeXtbMethod>(curcuma::xtb::MethodType::GFN2, config);
     }
 
     // Direct native GFN1 access (bypasses priority chain, always uses native implementation)
     if (method == "ngfn1") {
         CurcumaLogger::success("Method 'ngfn1' resolved to native GFN1");
-        return std::make_unique<GFN1Method>(config);
+        return std::make_unique<NativeXtbMethod>(curcuma::xtb::MethodType::GFN1, config);
     }
 
     // Native GFN-FF (always available, Curcuma's own implementation)

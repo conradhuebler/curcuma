@@ -435,8 +435,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/ulyssesinterface.cpp
         src/core/energy_calculators/method_factory.cpp
         src/core/energy_calculators/qm_methods/eht_method.cpp
-        src/core/energy_calculators/qm_methods/gfn1_method.cpp
-        src/core/energy_calculators/qm_methods/gfn2_method.cpp
+        src/core/energy_calculators/qm_methods/native_xtb_method.cpp
         src/core/energy_calculators/qm_methods/nddo.cpp
         src/core/energy_calculators/qm_methods/nddo_method.cpp
         src/core/energy_calculators/qm_methods/gfnff_method.cpp

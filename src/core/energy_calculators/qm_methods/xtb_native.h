@@ -285,7 +285,7 @@ public:
     nlohmann::json getEnergyDecomposition() const;
     int getNumElectrons() const { return static_cast<int>(m_wfn.nocc); }
 
-    // API compatibility for GFN1Method/GFN2Method wrappers
+    // API compatibility for the NativeXtbMethod wrapper
     Vector getPartialCharges() const { return getCharges(); }
     Vector getCoordinationNumbers() const { return m_coordination_numbers; }
 
