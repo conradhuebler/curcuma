@@ -153,20 +153,24 @@ endforeach()
 # Per-molecule ctest entries for the GFN1 component audit (label gfn1_align).
 # Same injected-density per-container diff as ecomp_* above, but reads the
 # *_gfn1.json forensic dumps (dump_tblite_multipole gfn1 ...). Repulsion is
-# bit-clean; the residual is the D3 dispersion container. After the D3
-# reference-CN fix (2026-05-30, WP2 -- the table was scrambled, corrupting C6
-# interpolation, carbon worst) the injected-density combined |disp+elec| dropped
-# 100-640x; the tolerances below are set just above the post-fix values. The
-# small remaining dispersion tail is the C8/r4r2 ~0.06% mismatch. Like the GFN2
-# align/d4_diag tests these read generated (not committed) dumps from
-# ${D4_DIAG_DUMP_DIR}; a clean checkout must run dump_tblite_multipole first.
-# Run: ctest -L gfn1_align
+# bit-clean. Three WP2 fixes brought the injected-density combined |disp+elec|
+# from ~1e-2 (triose) down to <1e-8 on every molecule:
+#   2026-05-30  D3 reference-CN table regenerated (was scrambled; C6 wrong).
+#   2026-05-31  D3 C8/C6 exact s-dftd3 form (was empirical 10.72*r4r2, +0.06%/pair).
+#   2026-05-31  D3 CN real-space cutoff 25 Bohr to match tblite (tblite/disp/d3.f90;
+#               curcuma had summed all pairs -> CN too high on large molecules).
+# The worst container is now "electronic" (GFN1 electronic floor), not dispersion.
+# Tolerances are set just above the current values. Like the GFN2 align/d4_diag
+# tests these read generated (not committed) dumps from ${D4_DIAG_DUMP_DIR}; a
+# clean checkout must run dump_tblite_multipole first (incl. the 231-atom complex,
+# ~33 MB; its diag runs in <1 s). Run: ctest -L gfn1_align
 set(_ECOMP_MOLS_TOL_GFN1
-    "H2:3.0e-8"      # disp 1.30e-8  (was 1.30e-6 pre-fix)
-    "H2O:1.0e-7"     # disp 5.80e-8  (was 2.03e-6)
-    "NH3:2.0e-7"     # disp 1.21e-7  (was 1.96e-5)
-    "CH4:3.0e-7"     # disp 1.95e-7  (was 5.94e-5)
-    "triose:2.0e-5"  # disp 1.44e-5  (was 9.28e-3; C8/r4r2 tail -- WP2 follow-up)
+    "H2:1.0e-9"      # 7.8e-11 (electronic)
+    "H2O:1.0e-9"     # 2.5e-10
+    "NH3:1.0e-9"     # 2.1e-10
+    "CH4:1.0e-9"     # 2.2e-10
+    "triose:1.0e-8"  # 5.3e-9
+    "complex:1.0e-8" # 7.4e-9 (231 atoms; worst term electronic, dispersion now exact)
 )
 foreach(_mt ${_ECOMP_MOLS_TOL_GFN1})
     string(REPLACE ":" ";" _mt_list ${_mt})
@@ -205,12 +209,14 @@ if(Python3_Interpreter_FOUND)
 
     # Molecules NOT yet at 1e-8 -> tracked expected-failures (WILL_FAIL). Measured
     # |dE| = |E_native - E_tblite| (Eh), 2026-05-31 (after the GFN1 third-order
-    # double-count fix + the D3 C8/C6 exact-form fix):
+    # double-count fix, the D3 C8/C6 exact-form fix, and the D3 CN 25-Bohr cutoff
+    # fix that matches tblite):
     #   GFN2: only complex (6.95e-5). All others <= 1e-8 (bit-identical).
-    #   GFN1: 10/12 now <= 1e-8 (H2, LiH, H2O, CH4, NH3, C6H6, HCN,
-    #         acetic_acid_dimer, caffeine, triose all bit-identical). Only two
-    #         remain: He2 ~1.5e-8 (dispersion-only, numerical floor) and
-    #         complex ~2.6e-7 (231 atoms, residual accumulates). See
+    #   GFN1: 10/12 now <= 1e-8. Two remain at the same ~1.5e-8 numerical floor:
+    #         He2 (dispersion-only) and complex (231 atoms). complex was 2.6e-7
+    #         until the D3 CN cutoff fix removed the dispersion gap (now exact,
+    #         <1e-9 at fixed density); its residual is now the GFN1 electronic
+    #         floor (~7e-9 at fixed density) plus SCF density relaxation. See
     #         docs/SQM_WP2_gfn1_accuracy.md.
     set(_GFN2_XFAIL complex)
     set(_GFN1_XFAIL He2 complex)

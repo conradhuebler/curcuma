@@ -43,13 +43,18 @@ public:
      * @param geometry Molecular geometry in Ångström
      * @param k1 Steepness parameter (default: 16.0)
      * @param k2 Scaling factor (default: 4.0/3.0)
+     * @param cn_cutoff_bohr Real-space cutoff for the CN sum in Bohr
+     *        (default: 25.0, matching tblite's d3 dispersion container,
+     *        tblite/disp/d3.f90: realspace_cutoff(cn=25.0)). <=0 disables.
+     *        NOTE: the s-dftd3 *standalone* default is 40.0; tblite overrides it.
      * @return Vector of coordination numbers (one per atom)
      */
     static std::vector<double> calculateD3CN(
         const std::vector<int>& atoms,
         const Eigen::MatrixXd& geometry,
         double k1 = 16.0,
-        double k2 = 4.0 / 3.0
+        double k2 = 4.0 / 3.0,
+        double cn_cutoff_bohr = 25.0
     );
 
     /**
@@ -136,6 +141,9 @@ public:
      * @param gradient_out [N,3] Cartesian gradient in Eh/Angstrom (accumulated)
      * @param k1 Steepness parameter (default: 16.0)
      * @param k2 Scaling factor (default: 4.0/3.0)
+     * @param cn_cutoff_bohr Real-space cutoff for the CN sum in Bohr
+     *        (default: 25.0, matching tblite's d3 dispersion container). <=0
+     *        disables. Must match calculateD3CN so energy and gradient agree.
      */
     static void addD3CNGradient(
         const std::vector<int>& atoms,
@@ -144,7 +152,8 @@ public:
         Matrix& gradient_out,
         double k1 = 16.0,
         double k2 = 4.0 / 3.0,
-        double distance_unit_to_bohr = 1.0  // multiply output by this (e.g. au=1.8897)
+        double distance_unit_to_bohr = 1.0,  // multiply output by this (e.g. au=1.8897)
+        double cn_cutoff_bohr = 25.0
     );
 
 private:

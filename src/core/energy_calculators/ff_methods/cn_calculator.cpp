@@ -40,11 +40,24 @@ std::vector<double> CNCalculator::calculateD3CN(
     const std::vector<int>& atoms,
     const Eigen::MatrixXd& geometry,
     double k1,
-    double k2)
+    double k2,
+    double cn_cutoff_bohr)
 {
     // Calculate D3 coordination numbers using exponential counting function
     // Formula: CN_i = sum_{j≠i} 1 / (1 + exp(-k1 * (k2 * (R_cov_i + R_cov_j) / R_ij - 1)))
     // Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010)
+    //
+    // tblite's D3 dispersion truncates this sum at a 25-Bohr real-space cutoff
+    // (tblite/disp/d3.f90:59, realspace_cutoff(cn=25.0); it overrides the
+    // s-dftd3 standalone default of 40). Without it, curcuma summed all pairs,
+    // so its CN was higher than tblite's by the 25-40 Bohr tail -> C6 too low
+    // -> dispersion under-binds. On large molecules this is sizeable: complex
+    // (231 atoms, ~40 Bohr across) had a +2.8e-7 Eh GFN1 dispersion residual
+    // vs tblite that vanishes once the 25-Bohr cutoff matches tblite's CN.
+    // Geometry is in Angstrom.
+    const double cn_cutoff_ang = (cn_cutoff_bohr > 0.0)
+        ? cn_cutoff_bohr * 0.529177210903  // CODATA-2018 bohr radius (Angstrom)
+        : 0.0;
 
     std::vector<double> cn_values(atoms.size(), 0.0);
 
@@ -76,6 +89,9 @@ std::vector<double> CNCalculator::calculateD3CN(
             Eigen::Vector3d pos_i = geometry.row(i);
             Eigen::Vector3d pos_j = geometry.row(j);
             double r_ij = (pos_i - pos_j).norm();
+
+            // s-dftd3 real-space cutoff on the CN sum (see header note).
+            if (cn_cutoff_ang > 0.0 && r_ij > cn_cutoff_ang) continue;
 
             // D3 counting function
             double r_cov_sum = rcov_i + rcov_j;
@@ -181,7 +197,8 @@ void CNCalculator::addD3CNGradient(
     Matrix& gradient_out,
     double k1,
     double k2,
-    double distance_unit_to_bohr)
+    double distance_unit_to_bohr,
+    double cn_cutoff_bohr)
 {
     // Reference: s-dftd3/src/dftd3/ncoord.f90 (add_coordination_number_derivs)
     // D3 exponential counting function:
@@ -193,6 +210,13 @@ void CNCalculator::addD3CNGradient(
     //
     // Chain rule into Cartesian gradient:
     //   dE/dR_i = sum_j (dE/dCN_i + dE/dCN_j) * d(count)/dr * (R_i - R_j) / r
+    //
+    // Apply the SAME 25-Bohr real-space cutoff as calculateD3CN (tblite's d3
+    // dispersion cutoff) so the CN derivative is consistent with the (cut) CN
+    // used in the energy.
+    const double cn_cutoff_ang = (cn_cutoff_bohr > 0.0)
+        ? cn_cutoff_bohr * 0.529177210903  // CODATA-2018 bohr radius (Angstrom)
+        : 0.0;
 
     const int natoms = static_cast<int>(atoms.size());
     if (gradient_out.rows() != natoms || gradient_out.cols() != 3)
@@ -215,6 +239,7 @@ void CNCalculator::addD3CNGradient(
             Eigen::Vector3d rij = pos_i - pos_j;
             double r = rij.norm();
             if (r < 1e-10) continue;
+            if (cn_cutoff_ang > 0.0 && r > cn_cutoff_ang) continue;
 
             double r0 = rcov_i + rcov_j;   // in Angstrom
             double arg = -k1 * (k2 * r0 / r - 1.0);
