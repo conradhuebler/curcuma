@@ -277,14 +277,14 @@ std::unique_ptr<ComputationalMethod> MethodFactory::createDFTD4(const json& conf
  * - API preservation: maintains EnergyCalculator compatibility
  *
  * RUNTIME BEHAVIOR:
- * - "gfn2" → createGFN2() tries TBLite > Ulysses > XTB > Native fallback chain
- * - "gfn1" → createGFN1() tries TBLite > XTB > Native fallback chain
+ * - "gfn1"/"gfn2" → native curcuma xTB (NativeXtbMethod), the canonical provider
+ * - "xtb-gfn1"/"xtb-gfn2" → external GFN: TBLite > external XTB binary (like xtb-gfnff)
+ * - "tblite-gfn1"/"tblite-gfn2" → TBLite explicitly; "ipea1" → TBLite iPEA1
  * - "eht"  → direct EHTMethod creation (always available)
  * - "pm3"  → native PM3Method (always available, no external deps)
  * - "mndo" → native MNDOMethod (always available, no external deps)
  * - "am1"  → native AM1Method (always available, no external deps)
  * - "pm6"  → native PM6Method (always available, no external deps)
- * - "ngfn1"/"ngfn2" → native NativeXtbMethod directly (bypass priority chain)
  * - "uff"  → ForceFieldMethod with threading support
  * - "gfnff"→ createGFNFF() tries External > XTB > Native chain
  */
@@ -328,18 +328,6 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         return std::make_unique<NDDOMethod>(NDDOMethodType::PM6, config);
     }
 
-    // Direct native GFN2 access (bypasses priority chain, always uses native implementation)
-    if (method == "ngfn2") {
-        CurcumaLogger::success("Method 'ngfn2' resolved to native GFN2");
-        return std::make_unique<NativeXtbMethod>(curcuma::xtb::MethodType::GFN2, config);
-    }
-
-    // Direct native GFN1 access (bypasses priority chain, always uses native implementation)
-    if (method == "ngfn1") {
-        CurcumaLogger::success("Method 'ngfn1' resolved to native GFN1");
-        return std::make_unique<NativeXtbMethod>(curcuma::xtb::MethodType::GFN1, config);
-    }
-
     // Native GFN-FF (always available, Curcuma's own implementation)
     // GPU acceleration via -gpu cuda flag
     if (method == "gfnff") {
@@ -376,9 +364,24 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         return std::make_unique<ForceFieldMethod>(method, config);
     }
 
-    // XTB-specific methods (explicit XTB selection)
+    // External GFN1/GFN2: TBLite preferred, external XTB binary as fallback
+    // (mirrors xtb-gfnff's External > XTB chain). "tblite-gfn*" / explicit XTB
+    // are still reachable below by name for forcing a specific backend.
     if (method == "xtb-gfn1" || method == "xtb-gfn2") {
-        return createXTBExplicit(method, config);
+        const std::string gfn = (method == "xtb-gfn2") ? "gfn2" : "gfn1";
+        if (hasTBLite()) {
+            CurcumaLogger::success("Method '" + method + "' resolved to TBLite " + gfn);
+#ifdef USE_TBLITE
+            return std::make_unique<TBLiteMethod>(gfn, config);
+#endif
+        }
+        if (hasXTB()) {
+            CurcumaLogger::success("Method '" + method + "' resolved to external XTB " + gfn);
+            return createXTBExplicit(method, config);
+        }
+        throw MethodCreationException(
+            "Method '" + method + "' requires TBLite or XTB "
+            "(cmake .. -DUSE_TBLITE=ON or -DUSE_XTB=ON)");
     }
 
     // TBLite-specific methods (explicit TBLite selection)
@@ -440,9 +443,9 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
 std::vector<std::string> MethodFactory::getAvailableMethods() {
     std::vector<std::string> available;
 
-    // Always available: native methods, force fields, and native xTB (gfn1/gfn2/ngfn1/ngfn2)
+    // Always available: native methods, force fields, and native xTB (gfn1/gfn2)
     available.insert(available.end(), {"eht", "pm3", "mndo", "am1", "pm6",
-                                       "gfn1", "gfn2", "ngfn1", "ngfn2",
+                                       "gfn1", "gfn2",
                                        "gfnff", "uff", "uff-d3", "qmdff"});
 
     if (hasTBLite()) {
@@ -451,8 +454,8 @@ std::vector<std::string> MethodFactory::getAvailableMethods() {
         available.push_back("tblite-gfn2");
     }
 
-    // XTB-specific explicit methods
-    if (hasXTB()) {
+    // External GFN1/GFN2 (xtb-gfn*): TBLite preferred, external XTB binary fallback
+    if (hasTBLite() || hasXTB()) {
         available.push_back("xtb-gfn1");
         available.push_back("xtb-gfn2");
     }
@@ -486,12 +489,7 @@ json MethodFactory::getMethodInfo(const std::string& method_name) {
     info["providers"] = json::array();
 
     // Native xTB methods (AP3: canonical providers since 2026-04-25)
-    if (method_name == "gfn2" || method_name == "ngfn2") {
-        info["type"] = "explicit";
-        info["providers"].push_back({{"name", "Native xTB"}, {"available", true}});
-        return info;
-    }
-    if (method_name == "gfn1" || method_name == "ngfn1") {
+    if (method_name == "gfn2" || method_name == "gfn1") {
         info["type"] = "explicit";
         info["providers"].push_back({{"name", "Native xTB"}, {"available", true}});
         return info;
@@ -529,7 +527,8 @@ json MethodFactory::getMethodInfo(const std::string& method_name) {
         return info;
     }
     if (method_name == "xtb-gfn1" || method_name == "xtb-gfn2") {
-        info["type"] = "explicit";
+        info["type"] = "priority_based";
+        info["providers"].push_back({{"name", "TBLite"}, {"available", hasTBLite()}});
         info["providers"].push_back({{"name", "XTB"}, {"available", hasXTB()}});
         return info;
     }
@@ -561,10 +560,8 @@ void MethodFactory::printAvailableMethods() {
     fmt::print("  - mndo:  Native MNDO semi-empirical\n");
     fmt::print("  - am1:   Native AM1 semi-empirical\n");
     fmt::print("  - pm6:   Native PM6 semi-empirical\n");
-    fmt::print("  - gfn2:  Native GFN2-xTB (canonical, via curcuma::xtb::XTB) — alias ngfn2\n");
-    fmt::print("  - gfn1:  Native GFN1-xTB (canonical, via curcuma::xtb::XTB) — alias ngfn1\n");
-    fmt::print("  - ngfn2: Alias for gfn2 (backward compatibility)\n");
-    fmt::print("  - ngfn1: Alias for gfn1 (backward compatibility)\n");
+    fmt::print("  - gfn2:  Native GFN2-xTB (canonical, via curcuma::xtb::XTB)\n");
+    fmt::print("  - gfn1:  Native GFN1-xTB (canonical, via curcuma::xtb::XTB)\n");
     fmt::print("  - gfnff: Native C++ GFN-FF implementation\n");
 #ifdef USE_CUDA
     fmt::print("    (GPU acceleration: use '-gpu cuda' or '-gpu auto')\n");
@@ -599,6 +596,14 @@ void MethodFactory::printAvailableMethods() {
     gfnff_providers.push_back("Native+GPU");
 #endif
     fmt::print("{}\n", fmt::format("{}", fmt::join(gfnff_providers, " > ")));
+
+    // External GFN1/GFN2 (xtb-gfn*): TBLite preferred, external XTB binary fallback
+    fmt::print("  - xtb-gfn1 / xtb-gfn2: ");
+    std::vector<std::string> xtbgfn_providers;
+    if (hasTBLite()) xtbgfn_providers.push_back("TBLite");
+    if (hasXTB())    xtbgfn_providers.push_back("XTB");
+    if (xtbgfn_providers.empty()) xtbgfn_providers.push_back("UNAVAILABLE");
+    fmt::print("{}\n", fmt::join(xtbgfn_providers, " > "));
 
     fmt::print("===================================\n");
 }

@@ -225,8 +225,9 @@ double energy = method->calculateEnergy();
 ```
 
 ##### **Supported Method Hierarchies** (AP3, April 2026)
-- **gfn2**: Native xTB (canonical, alias `ngfn2`); `ipea1`/`ugfn2`/`xtb-gfn2` for other providers
-- **gfn1**: Native xTB (canonical, alias `ngfn1`); `xtb-gfn1` for external XTB
+- **gfn1/gfn2**: Native curcuma xTB (canonical); `ipea1`/`ugfn2` for other providers
+- **xtb-gfn1/xtb-gfn2**: External GFN — TBLite (USE_TBLITE) → XTB binary (USE_XTB), like `xtb-gfnff`
+- **tblite-gfn1/tblite-gfn2**: TBLite explicitly (forces that backend)
 - **eht**: Native only (always available, no dependencies)
 - **pm3**: Native only (H, C, N, O supported, no dependencies)
 - **uff/qmdff**: ForceField wrapper with parameter generation

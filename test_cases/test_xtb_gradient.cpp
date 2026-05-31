@@ -169,7 +169,7 @@ int main(int argc, char** argv)
         const std::size_t dot = name.rfind('.');
         if (dot != std::string::npos) name = name.substr(0, dot);
 
-        for (const std::string& meth : {"ngfn1", "ngfn2"}) {
+        for (const std::string& meth : {"gfn1", "gfn2"}) {
             GradResult r = validateGradient(path, name, meth);
             printResult(r);
             all_pass = all_pass && r.passed;

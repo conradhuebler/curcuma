@@ -18,9 +18,9 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../test_utils.sh"
 
-TEST_NAME="sqm - 08: ngfn1 (Native GFN1) vs TBLite gfn1 reference"
+TEST_NAME="sqm - 08: native GFN1 (gfn1) vs TBLite gfn1 reference"
 TEST_DIR="$SCRIPT_DIR"
-METHOD="ngfn1"
+METHOD="gfn1"   # canonical native GFN1 (the former 'ngfn1' alias was removed)
 
 # 5 mEh tolerance: today's max native-vs-TBLite drift is ~3 mEh (caffeine).
 # AP 5 will re-baseline with 1e-5 Eh.

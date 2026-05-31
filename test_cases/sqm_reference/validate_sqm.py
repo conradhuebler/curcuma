@@ -3,12 +3,13 @@
 SQM native-vs-tblite validation driver (Claude Generated, 2026-05).
 
 Runs the real `curcuma` binary on a molecule with a native xTB method
-(ngfn1 / ngfn2) and compares the single-point energy against a committed
-tblite reference (test_cases/sqm_reference/reference_data/*.ref.json,
+(gfn1 / gfn2 — the canonical native methods) and compares the single-point
+energy against a committed tblite reference
+(test_cases/sqm_reference/reference_data/*.ref.json,
 produced by dump_tblite_reference in a USE_TBLITE build).
 
 This is the end-to-end user path — the same dispatch that surfaced the
-NH3 ngfn1 anomaly — so it validates MethodFactory routing + native SCF, not
+NH3 native-GFN1 anomaly — so it validates MethodFactory routing + native SCF, not
 just an isolated class. It needs NO tblite build (references are committed),
 matching how the GFN-FF suite works.
 
@@ -93,7 +94,7 @@ def main():
         ref = json.load(f)
 
     method = ref["method"]                      # "gfn1" | "gfn2"
-    native = "ngfn1" if method == "gfn1" else "ngfn2"
+    native = method                             # canonical native xTB (gfn1/gfn2)
     e_ref = ref["total_energy"]
     nat = ref["molecule"]["natoms"]
 

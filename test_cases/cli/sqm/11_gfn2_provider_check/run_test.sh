@@ -1,12 +1,12 @@
 #!/bin/bash
 # Test: gfn2 provider routing — anchor for NATIVE_XTB_ROADMAP AP 3
 # Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
-# Claude Generated — verifies dispatch via MethodFactory for gfn2/ngfn2/ipea1.
+# Claude Generated — verifies dispatch via MethodFactory for gfn2/ipea1.
 #
-# AP 3 (2026-04-25): -method gfn2 routes to native xTB (= ngfn2). -method ipea1 stays TBLite.
+# -method gfn2 routes to native curcuma xTB; -method ipea1 stays TBLite.
 # This test verifies:
-#   1) gfn2, ngfn2, ipea1 each dispatch and produce a finite energy
-#   2) gfn2 and ngfn2 produce identical energies (same native backend)
+#   1) gfn2 and ipea1 each dispatch and produce a finite energy
+#   2) gfn2 routes to the native xTB backend (routing marker)
 #   3) ipea1 matches its TBLite reference
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,16 +58,10 @@ main() {
 
     # 1) Each method must dispatch and produce a finite energy
     run_method_finite gfn2
-    run_method_finite ngfn2
     run_method_finite ipea1
 
-    local E_GFN2 E_NGFN2 E_IPEA1
-    E_GFN2=$(sed 's/\x1b\[[0-9;]*m//g' out_gfn2.log   | grep -oP 'Single Point Energy = \K[-0-9.e]+' | head -1)
-    E_NGFN2=$(sed 's/\x1b\[[0-9;]*m//g' out_ngfn2.log | grep -oP 'Single Point Energy = \K[-0-9.e]+' | head -1)
+    local E_IPEA1
     E_IPEA1=$(sed 's/\x1b\[[0-9;]*m//g' out_ipea1.log | grep -oP 'Single Point Energy = \K[-0-9.e]+' | head -1)
-
-    # 2) AP3: gfn2 == ngfn2 (both route to native xTB)
-    assert_numeric_match "$E_GFN2"   "$E_NGFN2" "$IDENTITY_TOLERANCE" "gfn2 == ngfn2 (same native backend)"
 
     # 3) ipea1 must match TBLite reference
     assert_numeric_match "$REF_IPEA1" "$E_IPEA1" "$ENERGY_TOLERANCE" "ipea1 (TBLite) energy"

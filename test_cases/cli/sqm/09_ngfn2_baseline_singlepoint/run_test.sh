@@ -21,9 +21,9 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../test_utils.sh"
 
-TEST_NAME="sqm - 09: ngfn2 (Native GFN2) vs TBLite gfn2 reference"
+TEST_NAME="sqm - 09: native GFN2 (gfn2) vs TBLite gfn2 reference"
 TEST_DIR="$SCRIPT_DIR"
-METHOD="ngfn2"
+METHOD="gfn2"   # canonical native GFN2 (the former 'ngfn2' alias was removed)
 
 # 1 mEh tolerance — same as test 05 (gfn2 via TBLite). The native must
 # eventually reach this accuracy. Currently fails until AP 4 complete.

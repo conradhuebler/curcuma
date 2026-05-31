@@ -12,8 +12,9 @@
 
 An end-to-end validation suite for the **native** GFN1/GFN2-xTB implementation
 (`curcuma::xtb::XTB` in `src/core/energy_calculators/qm_methods/xtb_native.cpp`),
-modeled on the GFN-FF suite. It runs the real `curcuma` binary via `ngfn1`/`ngfn2`
-and compares the single-point energy against **committed** tblite reference JSONs,
+modeled on the GFN-FF suite. It runs the real `curcuma` binary via `gfn1`/`gfn2`
+(the canonical native methods) and compares the single-point energy against
+**committed** tblite reference JSONs,
 so a native-only build (no tblite) can validate.
 
 ## The target and how the tests reflect it
