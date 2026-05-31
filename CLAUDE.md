@@ -144,7 +144,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 
 - ⚠️ **Extended Hückel Theory (EHT)** - AI-implemented, machine-tested
 - ⚠️ **GFN2-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn2` backend; `-opt` works; Broyden SCF default (`-scf_mode diis|plain|level-shift`, `-scf_guess h0|eeq`; 231-atom `complex` converges, see [docs/SCF_MODES.md](docs/SCF_MODES.md)); **vs TBLite: meets the 1e-8 Eh target on 11/12 of the validation set, only `complex` open (6.95e-5)** — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md)
-- ⚠️ **GFN1-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn1` backend; `-opt` works; Broyden SCF default (modes via `-scf_mode`); **vs TBLite: electronic now matches (was a double-counted third-order potential, fixed 2026-05-30); residual is now the D3 C8 tail only (6e-8…5e-5 Eh, size∝dispersion; still >1e-8 → xfails remain)** — see [docs/SQM_WP2_gfn1_accuracy.md](docs/SQM_WP2_gfn1_accuracy.md)
+- ⚠️ **GFN1-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn1` backend; `-opt` works; Broyden SCF default (modes via `-scf_mode`); **vs TBLite: now 10/12 SQM molecules at 1e-8** (fixed 2026-05: double-counted third-order potential + D3 C8/C6 made exact vs s-dftd3); only He2 (~1.5e-8 floor) and complex (~2.6e-7) remain — see [docs/SQM_WP2_gfn1_accuracy.md](docs/SQM_WP2_gfn1_accuracy.md)
 - ⚠️ **PM3/AM1/MNDO (Native NDDO)** - AI-implemented, machine-tested; 21/21 tests vs Ulysses reference (< 4 µEh)
 - ⚠️ **Native GFN-FF** - AI-implemented, machine-tested; see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
 

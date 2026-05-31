@@ -204,15 +204,16 @@ if(Python3_Interpreter_FOUND)
     set(_SQM_MOLS H2 He2 LiH H2O CH4 NH3 C6H6 HCN acetic_acid_dimer caffeine triose complex)
 
     # Molecules NOT yet at 1e-8 -> tracked expected-failures (WILL_FAIL). Measured
-    # |dE| = |E_native - E_tblite| (Eh), 2026-05-30 baseline:
+    # |dE| = |E_native - E_tblite| (Eh), 2026-05-31 (after the GFN1 third-order
+    # double-count fix + the D3 C8/C6 exact-form fix):
     #   GFN2: only complex (6.95e-5). All others <= 1e-8 (bit-identical).
-    #   GFN1: ALL twelve. H2 1.3e-6, He2 1.5e-8, LiH 4.3e-5, H2O 2.1e-6, CH4 4.7e-5,
-    #         NH3 1.6e-5, C6H6 4.8e-4, HCN 4.4e-5, acetic_acid_dimer 1.4e-3,
-    #         caffeine 1.8e-3, triose 8.4e-3, complex 3.5e-2. Cause OPEN (NOT missing
-    #         D3 -- native GFN1 D3 exists; the large systems over-bind). See
+    #   GFN1: 10/12 now <= 1e-8 (H2, LiH, H2O, CH4, NH3, C6H6, HCN,
+    #         acetic_acid_dimer, caffeine, triose all bit-identical). Only two
+    #         remain: He2 ~1.5e-8 (dispersion-only, numerical floor) and
+    #         complex ~2.6e-7 (231 atoms, residual accumulates). See
     #         docs/SQM_WP2_gfn1_accuracy.md.
     set(_GFN2_XFAIL complex)
-    set(_GFN1_XFAIL H2 He2 LiH H2O CH4 NH3 C6H6 HCN acetic_acid_dimer caffeine triose complex)
+    set(_GFN1_XFAIL He2 complex)
 
     foreach(_meth gfn1 gfn2)
         if(_meth STREQUAL gfn1)

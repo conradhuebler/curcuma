@@ -493,56 +493,56 @@ double D3ParameterGenerator::getC6(int atom_i, int atom_j, int ref_i, int ref_j)
 
 double D3ParameterGenerator::getR6(int atom_i, int atom_j) const
 {
-    // Calculate C8/C6 ratio for BJ damping using r4/r2 reference data
-    // Formula from simple-dftd3: C8/C6 = 10.72 * r4/r2_A * r4/r2_B
-    // where r4/r2 = sqrt(Z * <r^4>/<r^2>) is element-specific
-
-    // r4/r2 values from simple-dftd3 for elements 1-94
-    // Data source: s-dftd3 atomic radii output
-    static const std::vector<double> r4_over_r2 = {
-        1.0622, // 1 H
-        0.8289, // 2 He
-        2.6564, // 3 Li
-        2.0393, // 4 Be
-        1.9286, // 5 B
-        1.6431, // 6 C
-        1.4350, // 7 N
-        1.3725, // 8 O
-        1.2638, // 9 F
-        1.1722, // 10 Ne
-        3.4851, // 11 Na
-        2.8909, // 12 Mg
-        2.9910, // 13 Al
-        2.5839, // 14 Si
-        2.2740, // 15 P
-        2.1385, // 16 S
-        1.9735, // 17 Cl
-        1.8240, // 18 Ar
-        // Add more elements as needed - for now use fallback for Z>18
+    // C8/C6 ratio for BJ damping — exact s-dftd3 / dftd4 form:
+    //   rrij = C8/C6 = 3 * r4r2(i) * r4r2(j)            (s-dftd3 damping/rational.f90:173)
+    //   r4r2(z) = sqrt(0.5 * <r^4>/<r^2>(z) * sqrt(z))  (s-dftd3 data/r4r2.f90:69-70)
+    // The raw <r^4>/<r^2> table below is verbatim from s-dftd3 data/r4r2.f90
+    // (PBE0/def2-QZVP, Grimme 2010; identical to D4ParameterGenerator::m_r4_over_r2).
+    // Earlier code used an empirical "10.72 * r4r2" fit with a non-standard table
+    // that was ~0.06% high on every pair — a size-extensive dispersion bias vs
+    // tblite/s-dftd3. This reproduces s-dftd3's C8/C6 (and BJ R0) exactly.
+    static const double raw_r4_over_r2[] = {
+        8.0589,  3.4698,                                                                  // H,He
+        29.0974, 14.8517, 11.8799, 7.8715, 5.5588, 4.7566, 3.8025, 3.1036,               // Li-Ne
+        26.1552, 17.2304, 17.7210, 12.7442, 9.5361, 8.1652, 6.7463, 5.6004,              // Na-Ar
+        29.2012, 22.3934,                                                                // K,Ca
+        19.0598, 16.8590, 15.4023, 12.5589, 13.4788,                                     // Sc-Mn
+        12.2309, 11.2809, 10.5569, 10.1428, 9.4907,                                      // Fe-Zn
+        13.4606, 10.8544, 8.9386, 8.1350, 7.1251, 6.1971,                                // Ga-Kr
+        30.0162, 24.4103,                                                                // Rb,Sr
+        20.3537, 17.4780, 13.5528, 11.8451, 11.0355, 10.1997, 9.5414, 9.0061, 8.6417, 8.9975, // Y-Cd
+        14.0834, 11.8333, 10.0179, 9.3844, 8.4110, 7.5152,                               // In-Xe
+        32.7622, 27.5708,                                                                // Cs,Ba
+        23.1671, 21.6003, 20.9615, 20.4562, 20.1010, 19.7475, 19.4828,                   // La-Eu
+        15.6013, 19.2362, 17.4717, 17.8321, 17.4237, 17.1954, 17.1631,                   // Gd-Yb
+        14.5716, 15.8758, 13.8989, 12.4834, 11.4421, 10.2671, 8.3549, 7.8496, 7.3278, 7.4820, // Lu-Hg
+        13.5124, 11.6554, 10.0959, 9.7340, 8.8584, 8.0125,                               // Tl-Rn
+        29.8135, 26.3157,                                                                // Fr,Ra
+        19.1885, 15.8542, 16.1305, 15.6161, 15.1226, 16.1576, 14.6510,                   // Ac-Am
+        14.7178, 13.9108, 13.5623, 13.2326, 12.9189, 12.6133, 12.3142,                   // Cm-No
+        14.8326, 12.3771, 10.6378, 9.3638, 8.2297, 7.5667, 6.9456, 6.3946, 5.9159, 5.4929, // Lr-Cn
+        6.7286, 6.5144, 10.9169, 10.3600, 9.4723, 8.6641                                 // Nh-Og
     };
+    static const int n_r4r2 = static_cast<int>(sizeof(raw_r4_over_r2) / sizeof(double));
 
     // Elements from Molecule are 1-based (H=1, C=6, ...) - convert to 0-based for array indexing
-    int elem_i = atom_i - 1;
-    int elem_j = atom_j - 1;
-
-    if (elem_i < 0 || elem_i >= MAX_ELEM || elem_j < 0 || elem_j >= MAX_ELEM) {
+    const int elem_i = atom_i - 1;
+    const int elem_j = atom_j - 1;
+    if (elem_i < 0 || elem_j < 0 || elem_i >= n_r4r2 || elem_j >= n_r4r2) {
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::warn("getR6: Elements out of range - using default");
         }
         return 12.0; // Conservative default for unknown elements
     }
 
-    // Get r4/r2 values (use default if element not in table)
-    double r4r2_i = (elem_i < static_cast<int>(r4_over_r2.size())) ? r4_over_r2[elem_i] : 2.0;
-    double r4r2_j = (elem_j < static_cast<int>(r4_over_r2.size())) ? r4_over_r2[elem_j] : 2.0;
-
-    // Calculate C8/C6 ratio using empirical formula from simple-dftd3
-    // Factor 10.72 determined from D3 reference data analysis
-    double c8_over_c6 = 10.72 * r4r2_i * r4r2_j;
+    // Pre-scale: sqrtZr4r2(z) = sqrt(0.5 * <r^4>/<r^2> * sqrt(Z)).
+    const double szr_i = std::sqrt(0.5 * raw_r4_over_r2[elem_i] * std::sqrt(static_cast<double>(atom_i)));
+    const double szr_j = std::sqrt(0.5 * raw_r4_over_r2[elem_j] * std::sqrt(static_cast<double>(atom_j)));
+    const double c8_over_c6 = 3.0 * szr_i * szr_j;
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("getR6(" + std::to_string(atom_i) + "," + std::to_string(atom_j) + "): " +
-                           "r4/r2_i=" + std::to_string(r4r2_i) + " r4/r2_j=" + std::to_string(r4r2_j) +
+                           "sqrtZr4r2_i=" + std::to_string(szr_i) + " sqrtZr4r2_j=" + std::to_string(szr_j) +
                            " C8/C6=" + std::to_string(c8_over_c6));
     }
 

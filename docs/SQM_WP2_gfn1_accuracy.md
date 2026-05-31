@@ -135,7 +135,29 @@ matches tblite to 8 decimals (−131.33260976). Gradient FD-validated
 (`test_xtb_gradient` ngfn1) and CPSCF green — the fix also corrects the GFN1
 gradient/response, which double-counted too.
 
-**Still open (blocks 1e-8 for all 12):** only the ~0.06% D3 C8 (`r4r2`) tail —
-the remaining total residual is now **dispersion-dominated** (triose 1.45e-5 ≈
-the injected-density dispersion residual 1.44e-5; size-extensive with the
-dispersion fraction). No xfails removed (operator's call).
+**D3 C8 tail — FIXED (2026-05-31).** The dispersion residual was a systematic
+**+0.06% error in the D3 `C8/C6` ratio**. `D3ParameterGenerator::getR6`
+(`d3param_generator.cpp`) used an empirical `C8/C6 = 10.72·r4r2_i·r4r2_j` with a
+non-standard `r4r2` table; the authoritative s-dftd3 form is
+`C8/C6 = 3·r4r2_i·r4r2_j` with `r4r2(z)=√(½·⟨r⁴⟩/⟨r²⟩·√Z)` (s-dftd3
+`data/r4r2.f90:69`, `damping/rational.f90:173`). The empirical fit was +0.055…
++0.069% high on every pair → a size-extensive dispersion bias. Fix: exact form +
+the verbatim s-dftd3 raw `⟨r⁴⟩/⟨r²⟩` table (118 elements; identical to
+`D4ParameterGenerator::m_r4_over_r2`). This also corrects the BJ radius
+`R0=a1·√(C8/C6)+a2`.
+
+Result: triose dispersion −0.04199628 → **−0.04201074** (= tblite, exact); GFN1
+total now bit-matches tblite. **10/12 molecules at 1e-8** (H2, LiH, H2O, CH4,
+NH3, C6H6, HCN, acetic_acid_dimer, caffeine, triose). xfail list reduced to
+`He2` (~1.5e-8, dispersion-only numerical floor) and `complex` (~2.6e-7, 231
+atoms — residual accumulates; cause not yet localized).
+
+**Scope of validation (important).** This is validated **only** against tblite
+(genuine s-dftd3) via the GFN1 path — that pins the shared D3 kernel (C6 tables,
+CN, `C8/C6`, BJ `R0`, damping sum) as correct at GFN1's params
+(s6=1, s8=2.4, a1=0.63, a2=5.0, s9=0). **UFF-D3, `gfnff-d3`, and standalone-D3
+remain UNVALIDATED** — they use different damping params / code paths and have no
+authoritative s-dftd3 reference. The `getR6` fix improves their `C8/C6` to exact,
+but their full energies are not checked against anything authoritative. The older
+"D3 <1% on 10/11" table does not establish correctness (its references were never
+tied to s-dftd3).
