@@ -395,8 +395,10 @@ int main(int argc, char** argv)
     // DIAGNOSTIC: one-shot F evaluation using tblite's reference P.
     // If orbital energies match reference here, the Fock formula is correct
     // and any remaining error comes from SCF convergence / mixer differences.
+    // Runs for BOTH methods: GFN1 (isotropic + atomic third-order, no
+    // multipole) and GFN2 (+ shell third-order + damped dipole/quadrupole).
     // ------------------------------------------------------------------
-    if (is_gfn2 && dump.contains("density")) {
+    if (dump.contains("density")) {
         const Eigen::MatrixXd P_ref = read_symmetric_matrix(dump.at("density"), nao);
 
         // Mulliken shell populations from P_ref.
@@ -411,10 +413,22 @@ int main(int argc, char** argv)
         Eigen::VectorXd q_at_ref = Eigen::VectorXd::Zero(nat);
         for (int s = 0; s < nsh; ++s) q_at_ref(shell_atom[s]) += q_sh_ref(s);
 
-        // Mulliken multipoles from P_ref.
+        // n0 consistency: the atomic charge implied by (curcuma n0_sh − tblite
+        // n_sh) must reproduce tblite's reported atomic_charges. A nonzero
+        // max|Δq_at| means curcuma's GFN1 reference occupations differ from
+        // tblite's — a size-extensive driver of the SCF fixed-point mismatch.
+        if (dump.contains("atomic_charges")) {
+            auto ch = dump.at("atomic_charges").get<std::vector<double>>();
+            double qmax = 0.0;
+            for (int iat = 0; iat < nat; ++iat)
+                qmax = std::max(qmax, std::abs(q_at_ref(iat) - ch[iat]));
+            std::printf("  q_at(curcuma n0 − tblite n_sh) vs tblite q_at: max|Δ|=%.3e\n", qmax);
+        }
+
+        // Mulliken multipoles from P_ref (GFN2 only).
         Eigen::MatrixXd dpat_ref = Eigen::MatrixXd::Zero(3, nat);
         Eigen::MatrixXd qpat_ref = Eigen::MatrixXd::Zero(6, nat);
-        for (int iao = 0; iao < nao; ++iao) {
+        if (is_gfn2) for (int iao = 0; iao < nao; ++iao) {
             const int iat = ao2at[iao];
             double d0=0,d1=0,d2=0,q0=0,q1=0,q2=0,q3=0,q4=0,q5=0;
             for (int jao = 0; jao < nao; ++jao) {
@@ -434,17 +448,21 @@ int main(int argc, char** argv)
             qpat_ref(3,iat)-=q3; qpat_ref(4,iat)-=q4; qpat_ref(5,iat)-=q5;
         }
 
-        // Build potential from P_ref charges.
+        // Build potential from P_ref charges (isotropic + third-order).
+        // GFN1: atomic third-order broadcast to shells; GFN2: shell-resolved.
         Eigen::VectorXd v_sh_ref = gamma * q_sh_ref;
-        Eigen::VectorXd v_sh_third_ref =
-            C::potential_third_order_shell(z_atoms, shell_atom, shell_ang, q_sh_ref);
-        v_sh_ref += v_sh_third_ref;
+        if (is_gfn2) {
+            v_sh_ref += C::potential_third_order_shell(z_atoms, shell_atom, shell_ang, q_sh_ref);
+        } else {
+            const Eigen::VectorXd v_at_third_ref = C::potential_third_order_atom(z_atoms, q_at_ref);
+            for (int s = 0; s < nsh; ++s) v_sh_ref(s) += v_at_third_ref(shell_atom[s]);
+        }
 
         Eigen::MatrixXd vdp_ref(3, nat); vdp_ref.setZero();
         Eigen::MatrixXd vqp_ref(6, nat); vqp_ref.setZero();
         Eigen::VectorXd vat_extra_ref = Eigen::VectorXd::Zero(nat);
         static const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
-        for (int iat = 0; iat < nat; ++iat) {
+        if (is_gfn2) for (int iat = 0; iat < nat; ++iat) {
             double vd0=0,vd1=0,vd2=0;
             for (int jat = 0; jat < nat; ++jat) {
                 vd0 += amat_sd[0](iat,jat)*q_at_ref(jat)
@@ -487,7 +505,7 @@ int main(int argc, char** argv)
         for (int mu = 0; mu < nao; ++mu)
             for (int nu = 0; nu < nao; ++nu)
                 F_ref(mu,nu) = H0(mu,nu) - 0.5*S(mu,nu)*(v_ao_ref(mu)+v_ao_ref(nu));
-        for (int mu = 0; mu < nao; ++mu) {
+        if (is_gfn2) for (int mu = 0; mu < nao; ++mu) {
             const int iat = ao2at[mu];
             for (int nu = 0; nu < nao; ++nu) {
                 const int jat = ao2at[nu];
@@ -514,8 +532,8 @@ int main(int argc, char** argv)
                 std::printf("    ε[%d] mine=%.8f  ref=%.8f  Δ=%.3e\n",
                             i, emo_ref_shot(i), emo_ref[i],
                             emo_ref_shot(i) - emo_ref[i]);
-            // Print dpat/qpat/vdp/vqp for small systems.
-            if (nat <= 4) {
+            // Print dpat/qpat/vdp/vqp for small systems (GFN2 multipole only).
+            if (is_gfn2 && nat <= 4) {
                 for (int iat = 0; iat < nat; ++iat) {
                     std::printf("  iat=%d  dpat=(%.6f,%.6f,%.6f)  qat=%.6f\n",
                                 iat, dpat_ref(0,iat), dpat_ref(1,iat), dpat_ref(2,iat),

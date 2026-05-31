@@ -111,11 +111,31 @@ H −3.6%, O ≈exact. The **C6 reference table** (262444 values) and
 Shared with UFF-D3 / GFN-FF-D3 → **regression-checked, none** (GFN-FF 21/22 as
 baseline, gfn2/gradient/cpscf/d4 green). `gfn1_align` tolerances tightened.
 
-**Still open (blocks 1e-8 for all 12):** a smaller, size-extensive **electronic**
-self-consistent difference (triose ~8.8e-4, acetic_acid_dimer ~2.1e-3; small
-molecules ~1e-6..1e-5). It is **not** SCF convergence (energy identical from
-scf_threshold 1e-6 down to 1e-12) and **not** dispersion (D3 now matches). Next
-step: the Phase-0 GFN1 H0/Coulomb/overlap audit (`test_xtb_h0/coulomb/overlap`)
-to attribute it to the bare Hamiltonian / isotropic Coulomb / third-order. Plus a
-~0.06% C8 (`r4r2`) tail (triose injected dispersion residual 1.44e-5). No xfails
-removed yet.
+**Electronic residual — FIXED (2026-05-30).** The size-extensive electronic
+difference (triose ~8.8e-4, complex ~3.36e-3) was a **double-counted GFN1
+third-order potential**. `XTB::addThirdOrderPotential` (`xtb_thirdorder.cpp`)
+added the atom-resolved `v_at(i)=q_i²·Γ_i` into **both** `pot.v_at` *and*
+(broadcast) `pot.v_sh`; `expand_potential` forms `v_ao = v_sh + v_at`, so the
+Fock saw the third-order at 2×. Over-penalised charge → less polarised SCF fixed
+point (triose Coulomb-ES2 0.660 vs tblite 0.676), electronic +8.8e-4. The same
+double-broadcast was mirrored in the CPSCF response (`xtb_response.cpp`). Fix:
+keep the GFN1 third-order in `v_at` only (its intended home) in both places.
+
+How it was localized: Phase-0 diffs proved **S and H0 bit-perfect** for GFN1
+(max|Δ| ~1e-13) and γ structurally exact; the **n0 reference occupations exact**
+(`q_at` from curcuma-n0 − tblite-n_sh matched tblite to ~1e-16); the **ref-P
+one-shot Fock** (now extended to GFN1 in `test_xtb_scf_snapshot.cpp`) reproduced
+tblite orbital energies to ~5e-6. All three SCF modes (plain/diis/broyden)
+converged to the *same* wrong fixed point → not the mixer, the Fock/potential.
+
+Result (curcuma − tblite total, after fix): triose 8.96e-4 → **1.45e-5**, complex
+3.36e-3 → **5.09e-5**, caffeine 1.8e-3 → 5.3e-6, acetic_acid_dimer 1.4e-3 →
+2.1e-6, C6H6 4.8e-4 → 2.2e-6, small molecules ~6e-8..2e-7. triose electronic now
+matches tblite to 8 decimals (−131.33260976). Gradient FD-validated
+(`test_xtb_gradient` ngfn1) and CPSCF green — the fix also corrects the GFN1
+gradient/response, which double-counted too.
+
+**Still open (blocks 1e-8 for all 12):** only the ~0.06% D3 C8 (`r4r2`) tail —
+the remaining total residual is now **dispersion-dominated** (triose 1.45e-5 ≈
+the injected-density dispersion residual 1.44e-5; size-extensive with the
+dispersion fraction). No xfails removed (operator's call).

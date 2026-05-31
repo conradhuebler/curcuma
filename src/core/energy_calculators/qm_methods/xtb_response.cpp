@@ -179,14 +179,14 @@ Matrix XTB::applyOrbitalHessian(const Matrix& z_ov) const
         Vector kernel = thirdOrderKernelDiag(m_wfn.q_sh, m_wfn.q_at);
         dpot.v_sh += kernel.cwiseProduct(dq_sh);
     } else {
-        // GFN1: atom-resolved δv_at, broadcast to shells (mirrors addThirdOrderPotential)
+        // GFN1: atom-resolved δv_at only. buildFockFromPotential() sums
+        // v_sh + v_at, so broadcasting into v_sh as well would double-count the
+        // third-order response (mirrors the addThirdOrderPotential fix).
         for (int i = 0; i < nat; ++i) {
             const double dv = 2.0 * coulomb::atom_hubbard_deriv_gfn1(m_basis.z[i])
                             * m_wfn.q_at(i) * dq_at(i);
             dpot.v_at(i) += dv;
         }
-        for (int s = 0; s < nsh; ++s)
-            dpot.v_sh(s) += dpot.v_at(m_basis.sh2at[s]);
     }
 
     // Multipole interaction kernel (GFN2 only): δv_at, δv_dp, δv_qp

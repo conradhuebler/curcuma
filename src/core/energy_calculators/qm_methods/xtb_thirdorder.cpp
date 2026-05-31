@@ -25,10 +25,12 @@ void XTB::addThirdOrderPotential(Potential& pot,
                                   const Vector& q_at) const
 {
     if (m_method == MethodType::GFN1) {
-        Vector v_at = coulomb::potential_third_order_atom(m_basis.z, q_at);
-        pot.v_at += v_at;
-        for (int s = 0; s < m_basis.nsh; ++s)
-            pot.v_sh(s) += v_at(m_basis.sh2at[s]);
+        // Atom-resolved third-order lives in v_at. expand_potential() forms
+        // v_ao = v_sh + v_at, so the potential must be added to exactly one of
+        // them — broadcasting into v_sh *as well* double-counts the third-order
+        // in the Fock, which over-penalises charge and shifts the SCF to a
+        // wrong fixed point (~1e-3 Eh, size-extensive). Keep it in v_at only.
+        pot.v_at += coulomb::potential_third_order_atom(m_basis.z, q_at);
     } else {
         pot.v_sh += coulomb::potential_third_order_shell(
             m_basis.z, m_basis.sh2at, m_basis.ang_sh, q_sh);
