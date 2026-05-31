@@ -2112,7 +2112,9 @@ int main(int argc, char **argv) {
                 method.find("eht") != std::string::npos ||
                 method.find("pm") != std::string::npos ||
                 method.find("am") != std::string::npos ||
-                method.find("mndo") != std::string::npos) {
+                method.find("mndo") != std::string::npos ||
+                method.find("-3c") != std::string::npos ||
+                method == "orca") {
                 std::cout << "  - " << method << "\n";
             }
         }
