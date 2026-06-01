@@ -353,14 +353,19 @@ int main()
                            err, 1.0e-6, err < 1.0e-6};
         print(r); ok &= r.passed;
     }
-    //   GATED (<5e-5): with RHS_SIGN=+1 the D4-mulliken charge-response gradient
-    //   meets the target for H2O/HCN even with multipole terms off (the residual
-    //   in the raw ∂q/∂x is immaterial here because ∂E_D4/∂q is small). The raw
-    //   ∂q/∂x accuracy is gated separately by Test D.
+    //   GATED (<1.5e-4): isolates the Mulliken-CPSCF charge-response gradient by
+    //   comparing it to the analytic single-shot-EEQ response (mull_anal − eeq_anal;
+    //   the FD difference is 0 because the energy weighting is Mulliken in both).
+    //   Both responses are independently FD-validated to <5e-4 (test_xtb_gradient),
+    //   so they are two valid approximations and agree to ~1e-4 (H2O 8.6e-5, HCN
+    //   3.8e-5). The gate catches gross divergence, not the sub-1e-4 method spread.
+    //   (Until the eeq routing was wired in calcDispersionEnergy, d4_charge_source
+    //   "eeq" silently fell back to the Mulliken CPSCF, so this difference was 0 and
+    //   a 5e-5 gate passed trivially.) Raw ∂q/∂x accuracy is gated separately by Test D.
     for (const char* name : {"H2O", "HCN"}) {
         curcuma::Molecule m =
             TestMolecules::TestMoleculeRegistry::createMolecule(name, false);
-        const TestResult r = testC_responseIsolation(m.getMolInfo(), name, 5.0e-5);
+        const TestResult r = testC_responseIsolation(m.getMolInfo(), name, 1.5e-4);
         print(r); ok &= r.passed;
     }
 

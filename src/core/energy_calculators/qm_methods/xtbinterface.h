@@ -39,9 +39,9 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     // Native GFN1/GFN2 SCF convergence controls (Claude Generated). Default mode
     // is 'broyden' (tblite-style charge mixing); '-scf_mode diis' is the historic path.
     PARAM(scf_mode, String, "broyden", "Native GFN SCF strategy: 'broyden' (modified-Broyden quasi-Newton mixing of the SCC charge vector, the tblite-style mixer; default, most robust), 'diis' (Pulay on Fock, the historic path), 'plain' (damped density mixing only), or 'level-shift' (Saunders-Hillier virtual shift + density mixing).", "SCF", {})
-    PARAM(scf_guess, String, "h0", "Native GFN SCF initial charge guess: 'h0' (bare Hamiltonian, default) or 'eeq' (single-shot dftd4 EEQ charges, helps polar systems start in the right basin).", "SCF", {})
+    PARAM(scf_guess, String, "eeq", "Native GFN SCF initial charge guess: 'eeq' (single-shot dftd4 EEQ charges, default; starts polar/large systems in the right basin, ~halves SCF iterations on large systems, energy-neutral) or 'h0' (bare Hamiltonian). Falls back to 'h0' if the EEQ solve fails.", "SCF", {})
     PARAM(scf_damping, Double, 0.4, "Native GFN SCF density mixing factor: P = damp*P_new + (1-damp)*P_old. Lower = stronger damping (more robust, slower).", "SCF", {})
-    PARAM(scf_threshold, Double, 1.0e-6, "Native GFN SCF convergence threshold on max|dq_shell| (and dE).", "SCF", {})
+    PARAM(scf_threshold, Double, 1.0e-5, "Native GFN SCF convergence threshold on max|dq_shell| (and dE). Default 1e-5: energy bit-identical to 1e-6 (<1e-8 Eh) with ~10-20% fewer iterations. The default eeq D4 gradient is insensitive; tighten to 1e-6 for the opt-in mulliken-CPSCF response or high-precision force work.", "SCF", {})
     PARAM(diis_start, Int, 5, "Native GFN SCF: number of damped warmup iterations before Pulay DIIS engages (diis/level-shift modes).", "SCF", {})
     PARAM(diis_subspace, Int, 6, "Native GFN SCF: DIIS history depth (number of Fock matrices kept).", "SCF", {})
     PARAM(level_shift, Double, 0.2, "Native GFN SCF: virtual-orbital level-shift magnitude (Eh) for scf_mode='level-shift'. Faded out near convergence so the fixed point is unshifted.", "SCF", {})

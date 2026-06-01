@@ -21,6 +21,7 @@
 
 #include <Eigen/Dense>
 
+#include <chrono>
 #include <cmath>
 #include <vector>
 
@@ -36,6 +37,16 @@ extern "C" void dsyevd_(const char* jobz, const char* uplo, const int* n,
                         double* a, const int* lda, double* w,
                         double* work, const int* lwork,
                         int* iwork, const int* liwork, int* info);
+// Cholesky-based reduction of the generalized problem F C = S C ε. The overlap
+// S is constant over the SCF, so we factor it once (Eigen LLT → L, BLAS-backed)
+// and per iteration reduce F to standard form with LAPACK dsygst (triangular,
+// ~3x fewer flops than the former dense S^{-1/2} double-GEMM), then back-transform
+// eigenvectors with one triangular solve (Eigen's triangularView, BLAS dtrsm).
+// dsygst is LAPACK and not declared by the BLAS backend; dtrsm/dpotrf WOULD
+// collide with the BLAS-backend prototypes, so we route those through Eigen.
+extern "C" void dsygst_(const int* itype, const char* uplo, const int* n,
+                        double* a, const int* lda, const double* b,
+                        const int* ldb, int* info);
 #endif
 
 // The whole native xTB Calculation() runs MKL-serial via curcuma::xtb::
@@ -51,7 +62,7 @@ namespace {
 // On success fills `evals` (ascending) and `evecs` (columns = eigenvectors).
 // Uses LAPACK dsyevd (divide-and-conquer) when available, else Eigen.
 // `A` is taken by value as a column-major buffer LAPACK can overwrite.
-bool solveStandardSymmetric(Eigen::MatrixXd A,
+[[maybe_unused]] bool solveStandardSymmetric(Eigen::MatrixXd A,
                             Eigen::VectorXd& evals,
                             Eigen::MatrixXd& evecs)
 {
@@ -157,25 +168,31 @@ void XTB::buildOrthonormalizer()
     const int nao = m_basis.nao;
     if (nao == 0 || m_S.rows() != nao) { m_X.resize(0, 0); return; }
 
-    // X = S^{-1/2} (Löwdin) via one eigendecomposition of the constant overlap.
-    // Built once per geometry; amortized over all SCF iterations.
-    Eigen::SelfAdjointEigenSolver<Matrix> es(m_S);
-    if (es.info() != Eigen::Success) { m_X.resize(0, 0); return; }
-
-    const double smin = es.eigenvalues().minCoeff();
-    if (smin < 1.0e-8) {
-        // Near-linear-dependent overlap: S^{-1/2} is ill-conditioned. Leave m_X
-        // empty so solveEigen() falls back to the robust generalized solver.
+#ifdef CURCUMA_XTB_HAVE_LAPACK_SYEVD
+    // Cache the lower Cholesky factor L of the constant overlap, S = L·Lᵀ
+    // (Eigen LLT, BLAS-backed, ~nao³/3 flops — far cheaper than the former full
+    // eigendecomposition of S). solveEigen() reduces each F to standard form with
+    // dsygst and back-transforms eigenvectors with a triangular solve; m_X holds L.
+    Eigen::LLT<Matrix> llt(m_S);
+    if (llt.info() != Eigen::Success) {
+        // S not positive definite (near-linear-dependent basis): fall back to the
+        // robust generalized solver by leaving m_X empty.
         if (CurcumaLogger::get_verbosity() >= 1)
-            CurcumaLogger::warn_fmt(
-                "Overlap near-singular (min eig {:.2e}); using generalized eigensolver",
-                smin);
+            CurcumaLogger::warn("Overlap Cholesky failed; using generalized eigensolver");
         m_X.resize(0, 0);
         return;
     }
+    m_X = llt.matrixL();             // dense lower-triangular L (upper part zero)
+#else
+    // No LAPACK: X = S^{-1/2} (Löwdin) via one eigendecomposition of the overlap.
+    Eigen::SelfAdjointEigenSolver<Matrix> es(m_S);
+    if (es.info() != Eigen::Success) { m_X.resize(0, 0); return; }
+    const double smin = es.eigenvalues().minCoeff();
+    if (smin < 1.0e-8) { m_X.resize(0, 0); return; }
     const Eigen::VectorXd inv_sqrt = es.eigenvalues().cwiseSqrt().cwiseInverse();
     const Matrix Us = es.eigenvectors() * inv_sqrt.asDiagonal();
     m_X.noalias() = Us * es.eigenvectors().transpose();
+#endif
 }
 
 bool XTB::solveEigen(const Matrix& F, const Matrix& S)
@@ -190,12 +207,61 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
     // satisfies Cᵀ S C = I, identical to the generalized solver, so the gradient
     // and CPSCF paths are unaffected.
     if (m_X.rows() == nao && m_X.cols() == nao) {
-        Eigen::MatrixXd Ftil = m_X * F * m_X;   // X symmetric ⇒ Xᵀ F X (MKL GEMMs)
+        // Sub-phase timing for the verbosity>=3 SCF profile (a few steady_clock
+        // reads per iteration — negligible vs the ms-scale GEMM/eigensolve work).
+        using clk = std::chrono::steady_clock;
+        auto ms = [](clk::time_point a, clk::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+#ifdef CURCUMA_XTB_HAVE_LAPACK_SYEVD
+        // m_X holds the lower Cholesky factor L of S (S = L·Lᵀ). Reduce F to the
+        // standard problem  Ftil = L⁻¹·F·L⁻ᵀ  (dsygst, itype=1, lower), solve it
+        // (dsyevd), then back-transform the eigenvectors  C = L⁻ᵀ·C~  by solving
+        // Lᵀ·C = C~ (dtrsm). All three steps use the triangular L, so this costs
+        // ~2·nao³ versus the ~6·nao³ of the former dense S^{-1/2} double-GEMM.
+        const int n = nao;
+        const char uplo = 'L';
+        int info = 0;
+        const auto te0 = clk::now();
+        Eigen::MatrixXd A = F;                  // dsygst reduces the lower triangle in place
+        int itype = 1;
+        dsygst_(&itype, &uplo, &n, A.data(), &n, m_X.data(), &n, &info);
+        if (info != 0) return false;
+        const auto te1 = clk::now();
+        Eigen::VectorXd eps(n);
+        int lwork = 1 + 6 * n + 2 * n * n, liwork = 3 + 5 * n;
+        std::vector<double> work(static_cast<size_t>(lwork));
+        std::vector<int>    iwork(static_cast<size_t>(liwork));
+        const char jobz = 'V';
+        dsyevd_(&jobz, &uplo, &n, A.data(), &n, eps.data(),
+                work.data(), &lwork, iwork.data(), &liwork, &info);
+        if (info != 0) return false;
+        const auto te2 = clk::now();
+        // Back-transform C = L⁻ᵀ·C~  ⇔ solve Lᵀ·C = C~. Eigen's triangular solve
+        // dispatches to BLAS dtrsm under EIGEN_USE_BLAS (avoids declaring dtrsm_,
+        // which would collide with the BLAS-backend prototype).
+        m_X.triangularView<Eigen::Lower>().transpose().solveInPlace(A);
+        const auto te3 = clk::now();
+        m_wfn.eps = std::move(eps);
+        m_wfn.C   = std::move(A);               // A now holds the generalized eigenvectors
+        m_t_xfx  += ms(te0, te1);               // reduce (dsygst)
+        m_t_diag += ms(te1, te2);               // dsyevd
+        m_t_back += ms(te2, te3);               // back-transform (dtrsm)
+#else
+        const auto te0 = clk::now();
+        Eigen::MatrixXd Ftil = m_X * F * m_X;   // X = S^{-1/2}: Xᵀ F X (dense GEMMs)
+        const auto te1 = clk::now();
         Eigen::VectorXd eps;
         Eigen::MatrixXd Ctil;
         if (!solveStandardSymmetric(std::move(Ftil), eps, Ctil)) return false;
+        const auto te2 = clk::now();
         m_wfn.eps = eps;
         m_wfn.C.noalias() = m_X * Ctil;         // back-transform C = X C~
+        const auto te3 = clk::now();
+        m_t_xfx += ms(te0, te1);
+        m_t_diag += ms(te1, te2);
+        m_t_back += ms(te2, te3);
+#endif
     } else {
         // Fallback: generalized solver (m_X unavailable / near-singular overlap).
         Eigen::GeneralizedSelfAdjointEigenSolver<Matrix> solver(F, S);
@@ -204,6 +270,7 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         m_wfn.C   = solver.eigenvectors();
     }
 
+    const auto t_dens0 = std::chrono::steady_clock::now();
     if (m_electronic_temp > 0.0) {
         // Fermi-Dirac smearing: bisect for Fermi level, build fractional-occupation density
         const double kT = m_electronic_temp * 3.166808e-6;  // K → Hartree
@@ -225,14 +292,20 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         const double mu_f = 0.5 * (mu_lo + mu_hi);
 
         // Fractional occupations, then P = C·diag(occ)·Cᵀ as a single weighted GEMM
-        // (replaces the per-orbital rank-1 accumulation).
+        // (replaces the per-orbital rank-1 accumulation). Eigenvalues are ascending,
+        // so occupations are descending: only the leading `ncol` columns carry a
+        // non-negligible weight. Restricting the GEMM to leftCols(ncol) cuts it from
+        // nao³ to nao²·ncol (ncol ≈ nocc); the dropped columns weigh < 1e-12.
         Eigen::VectorXd occ(nao);
+        int ncol = 0;
         for (int i = 0; i < nao; ++i) {
             const double x = (m_wfn.eps(i) - mu_f) / kT;
             occ(i) = 2.0 / (1.0 + std::exp(std::min(x, 500.0)));
+            if (occ(i) > 1.0e-12) ncol = i + 1;
         }
-        const Matrix Cw = m_wfn.C * occ.asDiagonal();
-        m_wfn.P.noalias() = Cw * m_wfn.C.transpose();
+        const auto Cocc = m_wfn.C.leftCols(ncol);
+        const Matrix Cw = Cocc * occ.head(ncol).asDiagonal();
+        m_wfn.P.noalias() = Cw * Cocc.transpose();
     } else {
         // Integer occupation: closed-shell, 2 electrons per occupied orbital
         const int nocc = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
@@ -240,6 +313,8 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         m_wfn.P.noalias() =
             2.0 * m_wfn.C.leftCols(nocc) * m_wfn.C.leftCols(nocc).transpose();
     }
+    m_t_dens += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t_dens0).count();
 
     return true;
 }

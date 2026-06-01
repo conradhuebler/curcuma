@@ -462,11 +462,14 @@ private:
     Matrix m_S;                 // overlap
     Matrix m_H0;                // bare Hamiltonian (updated each SCC)
     Matrix m_F;                 // converged Fock matrix (GFN: H0 + potential)
-    // Löwdin orthonormalizer X = S^{-1/2}, built once per geometry (xtb_scf.cpp).
-    // Caches the otherwise per-iteration Cholesky/transform of the constant S, so
-    // each SCF step solves the *standard* eigenproblem (X·F·X) instead of the
-    // generalized one. Eigenvectors back-transform as C = X·C~, preserving Cᵀ S C = I.
-    Matrix m_X;
+    // Cached factor of the constant overlap S, built once per geometry
+    // (buildOrthonormalizer, xtb_scf.cpp): the lower Cholesky factor L (S = L·Lᵀ)
+    // when LAPACK is available, else the dense Löwdin S^{-1/2}. solveEigen() uses
+    // it to reduce the generalized problem F C = S C ε to standard form each SCF
+    // iteration. COLUMN-MAJOR (Eigen::MatrixXd, not the row-major project Matrix)
+    // so its raw buffer can be passed straight to the column-major Fortran
+    // LAPACK dsygst — a row-major buffer would feed dsygst Lᵀ and corrupt the SCF.
+    Eigen::MatrixXd m_X;
     Eigen::MatrixXd m_gamma;    // shell-resolved Coulomb matrix (nsh × nsh)
     std::array<Eigen::MatrixXd, 3> m_dp_int;   // dipole integrals (GFN2), each nao×nao
     std::array<Eigen::MatrixXd, 6> m_qp_int;   // quadrupole integrals (GFN2), each nao×nao
@@ -492,11 +495,19 @@ private:
 
     // SCF config / state
     int    m_scf_max_iter    = 150;
-    double m_scf_threshold   = 1.0e-6;
+    double m_scf_threshold   = 1.0e-5;  // max|dq_shell|; energy bit-identical to 1e-6
     double m_scf_damping     = 0.4;
     double m_electronic_temp = 300.0;  // K; 0 → integer occupation
     bool   m_scf_converged   = false;
     int    m_scf_iterations  = 0;
+
+    // Intra-SCF eigensolve timing buckets (ms), summed over iterations by
+    // solveEigen() and printed at verbosity >= 3. Reset in Calculation().
+    // Claude Generated 2026-06 (SCF profiling).
+    mutable double m_t_xfx = 0.0;   // X·F·X transform (two GEMMs)
+    mutable double m_t_diag = 0.0;  // dsyevd standard eigensolve
+    mutable double m_t_back = 0.0;  // back-transform C = X·C~ (one GEMM)
+    mutable double m_t_dens = 0.0;  // density P = C·occ·Cᵀ
 
     // SCF convergence strategy (Claude Generated). Default is Broyden charge
     // mixing (tblite-style) — robust on stiff systems and energy-identical to
@@ -505,7 +516,7 @@ private:
     int         m_diis_start    = 5;     // damped warmup iterations before DIIS
     int         m_diis_subspace = 6;     // DIIS history depth (Fock matrices kept)
     double      m_level_shift   = 0.2;   // virtual-orbital shift magnitude (Eh), LevelShift mode
-    std::string m_scf_guess     = "h0";  // initial charge guess: "h0" (bare) | "eeq"
+    std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare)
 
     Vector m_coordination_numbers;   ///< CN, filled in Calculation()
 

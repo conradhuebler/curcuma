@@ -1,0 +1,55 @@
+{
+  "_generator": "dump_tblite_reference (curcuma SQM validation suite)",
+  "charges": [
+    8.964725628501924e-09,
+    8.964726072591134e-09
+  ],
+  "dipole": [
+    5.0822631178467714e-08,
+    0.0,
+    0.0
+  ],
+  "energy_components": {
+    "dispersion": -1.7847859233171616e-05,
+    "electronic": -3.2517307673153524,
+    "halogen": 0.0,
+    "repulsion": 2.672339301768813e-10
+  },
+  "gradient": {
+    "norm": 8.918617924022519e-06,
+    "values": [
+      [
+        -6.306415212888212e-06,
+        0.0,
+        0.0
+      ],
+      [
+        6.306415212888212e-06,
+        0.0,
+        0.0
+      ]
+    ]
+  },
+  "homo_energy": -0.8127470432637462,
+  "method": "gfn1",
+  "molecule": {
+    "atoms": [
+      {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 2,
+        "z_coord": 0.0
+      },
+      {
+        "x": 5.66917837387731,
+        "y": 0.0,
+        "z": 2,
+        "z_coord": 0.0
+      }
+    ],
+    "comment": "He2 non-bonded test 3.0 Å separation",
+    "name": "He2",
+    "natoms": 2
+  },
+  "total_energy": -3.251748614907352
+}

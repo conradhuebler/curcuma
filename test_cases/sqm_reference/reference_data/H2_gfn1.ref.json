@@ -1,0 +1,56 @@
+{
+  "_generator": "dump_tblite_reference (curcuma SQM validation suite)",
+  "charges": [
+    -2.9487588586174507e-16,
+    -6.241209805912806e-16
+  ],
+  "dipole": [
+    -8.881784197001252e-16,
+    0.0,
+    0.0
+  ],
+  "energy_components": {
+    "dispersion": -3.54797997660261e-05,
+    "electronic": -1.0589904111452522,
+    "halogen": 0.0,
+    "repulsion": 0.02286295482451513
+  },
+  "gradient": {
+    "norm": 0.03402734553920533,
+    "values": [
+      [
+        0.024060966776549904,
+        0.0,
+        0.0
+      ],
+      [
+        -0.024060966776549904,
+        0.0,
+        0.0
+      ]
+    ]
+  },
+  "homo_energy": -0.5294952055726256,
+  "lumo_energy": -0.09287048387961425,
+  "method": "gfn1",
+  "molecule": {
+    "atoms": [
+      {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1,
+        "z_coord": 0.0
+      },
+      {
+        "x": 1.4002870583476956,
+        "y": 0.0,
+        "z": 1,
+        "z_coord": 0.0
+      }
+    ],
+    "comment": "H2 equilibrium bond length 0.741 Å",
+    "name": "H2",
+    "natoms": 2
+  },
+  "total_energy": -1.0361629361205031
+}

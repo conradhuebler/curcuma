@@ -276,6 +276,12 @@ double XTB::Calculation(bool gradient)
         if (m_wfn.qp_at.cols() != nat) m_wfn.qp_at = Eigen::MatrixXd::Zero(6, nat);
     }
 
+    // Intra-iteration timing buckets (printed at verbosity >= 3). A handful of
+    // steady_clock reads per phase — negligible vs the ms-scale work — so they
+    // run unconditionally, matching the existing per-iter timer. Claude Generated.
+    double acc_pot = 0.0, acc_fock = 0.0, acc_solve = 0.0, acc_mull = 0.0, acc_energy = 0.0;
+    m_t_xfx = m_t_diag = m_t_back = m_t_dens = 0.0;
+
     const auto t_scf_start = clock::now();
     int iter;
     for (iter = 0; iter < max_iter; ++iter) {
@@ -303,6 +309,7 @@ double XTB::Calculation(bool gradient)
             // Self-consistent D4: exact per-reference dE_D4/dq into the atom potential.
             addDispersionPotential(m_pot);
         }
+        const auto t_pot = clock::now();
 
         // Expand to AO potential and build Fock
         Matrix F = buildFock(m_H0, m_S, m_pot);
@@ -341,6 +348,8 @@ double XTB::Calculation(bool gradient)
             break;
         }
 
+        const auto t_fock = clock::now();
+
         // Diagonalize
         if (!solveEigen(F, m_S)) {
             CurcumaLogger::warn("XTB::Calculation: eigen solve failed at iteration " + std::to_string(iter));
@@ -348,6 +357,7 @@ double XTB::Calculation(bool gradient)
             m_scf_iterations = iter;
             return m_E_total;
         }
+        const auto t_solve = clock::now();
 
         // Density damping: P = damp·P_new + (1-damp)·P_old. Plain and LevelShift
         // mix every iteration (Plain's only convergence mechanism; LevelShift
@@ -365,6 +375,7 @@ double XTB::Calculation(bool gradient)
         // Update populations
         updatePopulations(m_S);
         q_sh_new = m_wfn.q_sh;
+        const auto t_mull = clock::now();
 
         // Energies for this iteration
         m_E_coulomb_shell = energyCoulombShell();
@@ -377,6 +388,13 @@ double XTB::Calculation(bool gradient)
         // Total SCC = band + coulomb + third-order + multipole
         const double e_scc = m_E_electronic + m_E_coulomb_shell
                            + m_E_third_order + m_E_multipole;
+
+        // Accumulate per-phase timings (see breakdown at verbosity >= 3).
+        acc_pot    += ms(t_iter0, t_pot);
+        acc_fock   += ms(t_pot,   t_fock);
+        acc_solve  += ms(t_fock,  t_solve);
+        acc_mull   += ms(t_solve, t_mull);
+        acc_energy += ms(t_mull,  clock::now());
 
         // Per-iteration diagnostics
         const double dq = (q_sh_new - q_sh_old).cwiseAbs().maxCoeff();
@@ -491,6 +509,23 @@ double XTB::Calculation(bool gradient)
         if (gradient)
             CurcumaLogger::info_fmt("  gradient     : {:8.2f} ms", ms(t_grad0, t_end));
         CurcumaLogger::info_fmt("  TOTAL        : {:8.2f} ms", ms(t0, t_end));
+    }
+
+    if (verb >= 3) {
+        const int it = m_scf_iterations > 0 ? m_scf_iterations : 1;
+        const double solve_sum = m_t_xfx + m_t_diag + m_t_back + m_t_dens;
+        CurcumaLogger::info("SCF per-phase breakdown (summed over iterations):");
+        CurcumaLogger::info_fmt("  potential build : {:8.2f} ms ({:5.2f}/it)", acc_pot,    acc_pot / it);
+        CurcumaLogger::info_fmt("  build Fock      : {:8.2f} ms ({:5.2f}/it)", acc_fock,   acc_fock / it);
+        CurcumaLogger::info_fmt("  solve eigen     : {:8.2f} ms ({:5.2f}/it)", acc_solve,  acc_solve / it);
+        CurcumaLogger::info_fmt("    - reduce      : {:8.2f} ms ({:5.2f}/it)", m_t_xfx,    m_t_xfx / it);
+        CurcumaLogger::info_fmt("    - dsyevd      : {:8.2f} ms ({:5.2f}/it)", m_t_diag,   m_t_diag / it);
+        CurcumaLogger::info_fmt("    - back-transf : {:8.2f} ms ({:5.2f}/it)", m_t_back,   m_t_back / it);
+        CurcumaLogger::info_fmt("    - density P   : {:8.2f} ms ({:5.2f}/it)", m_t_dens,   m_t_dens / it);
+        CurcumaLogger::info_fmt("    (solve detail sum = {:.2f} ms, untimed = {:.2f} ms)",
+                                solve_sum, acc_solve - solve_sum);
+        CurcumaLogger::info_fmt("  populations     : {:8.2f} ms ({:5.2f}/it)", acc_mull,   acc_mull / it);
+        CurcumaLogger::info_fmt("  energy/mix      : {:8.2f} ms ({:5.2f}/it)", acc_energy, acc_energy / it);
     }
 
     return m_E_total;
@@ -1011,10 +1046,16 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     // the GFN2 CPSCF path (mulliken). With the default "eeq" source this is
     // the dftd4-conform behaviour.
     const bool want_dEdq = true;
+    using d4clk = std::chrono::steady_clock;
+    auto d4ms = [](d4clk::time_point a, d4clk::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    const auto td0 = d4clk::now();
     double E = m_d4_evaluator->computeEnergyAndGradient(
         m_atoms, geom_bohr,
         /*with_gradient=*/true,
         m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, want_dEdq);
+    const auto td1 = d4clk::now();
 
     // ATM three-body term (GFN2 s9=5.0). Charge-independent (dftd4 evaluates it at
     // the q=0 reference C6 — matches tblite get_dispersion_nonsc), so no q-response.
@@ -1023,6 +1064,7 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     // remainder (see docs/GFN2_D4_STATUS.md). Claude Generated 2026-05-29.
     E += m_d4_evaluator->computeATM(
         m_atoms, geom_bohr, /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn);
+    const auto td2 = d4clk::now();
 
     // CN chain rule: fold Σ_A dE_D4/dCN_A · ∂CN_A/∂R into the cached gradient using
     // the D4 CN's OWN derivative (EN-weighted erf), keeping the dispersion gradient
@@ -1038,8 +1080,33 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     // q-response chain rule: fold Σ_A dE_D4/dq_A · ∂q_A/∂R into the cached geometry
     // gradient. The per-reference path is Mulliken-self-consistent, so ∂q/∂x comes
     // from the GFN2 CPSCF/Z-vector response. Skipped in audit mode (no MO state).
+    const auto td3 = d4clk::now();
     if (m_disp_dEdq.size() == m_atomcount && !m_disp_audit_mode) {
-        computeMullikenChargeResponse(m_disp_dEdq, m_disp_gradient);
+        // q-response source (m_d4_charge_source, default "eeq"):
+        //   "eeq"      — analytic ∂q/∂x from the single-shot dftd4 EEQ model
+        //                (one LU solve + adjoint contraction, ~ms). dftd4-conform
+        //                and the validated default. ~100x cheaper than the CPSCF.
+        //   "mulliken" — exact ∂q_Mulliken/∂x via the GFN2 CPSCF/Z-vector solve
+        //                (computeMullikenChargeResponse). Self-consistent with the
+        //                Mulliken-charge D4 energy but expensive (dominates the
+        //                post-SCF time on large systems: ~88% of D4 on complex).
+        // The energy weighting stays on the SCF Mulliken charges either way, so
+        // this choice only affects the gradient, never the energy.
+        if (m_d4_charge_source == "mulliken") {
+            computeMullikenChargeResponse(m_disp_dEdq, m_disp_gradient);
+        } else {
+            curcuma::dispersion::D4ChargeModel eeq;
+            eeq.computeCharges(m_atoms, geom_bohr, static_cast<double>(m_charge));
+            if (eeq.valid())
+                eeq.addChargeResponseGradient(m_disp_dEdq, m_disp_gradient);
+        }
+    }
+    const auto td4 = d4clk::now();
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info_fmt("  D4 energy+grad   : {:8.2f} ms", d4ms(td0, td1));
+        CurcumaLogger::info_fmt("  D4 ATM 3-body    : {:8.2f} ms", d4ms(td1, td2));
+        CurcumaLogger::info_fmt("  D4 CN-grad fold  : {:8.2f} ms", d4ms(td2, td3));
+        CurcumaLogger::info_fmt("  D4 q-resp CPSCF  : {:8.2f} ms", d4ms(td3, td4));
     }
     m_disp_gradient_valid = true;
 
