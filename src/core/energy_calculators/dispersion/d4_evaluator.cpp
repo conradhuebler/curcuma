@@ -156,8 +156,19 @@ double D4Evaluator::computeEnergyAndGradient(const std::vector<int>& atoms,
     // using the parameters the generator was constructed with — for GFN2
     // those PARAM defaults are GFN-FF values, so we recompute r0_squared
     // here per our D4Params instead of trusting the pair's pre-baked one.
-    std::vector<GFNFFDispersion> pairs =
-        m_data->GenerateDispersionPairsNative(atoms, geometry_bohr);
+    // Pair list (WP2): geometry-fixed. For the per-reference path (GFN2) its baked C6 is
+    // overridden below from the current charges, so the same cached list is valid across
+    // SCF iterations — regenerate only on a new geometry (invalidatePairCache). The
+    // non-per-reference path keeps the original per-call behaviour (uses pair.C6 directly).
+    const bool use_cache = m_params.per_reference_charge;
+    std::vector<GFNFFDispersion> local_pairs;
+    if (!use_cache) {
+        local_pairs = m_data->GenerateDispersionPairsNative(atoms, geometry_bohr);
+    } else if (!m_pairs_cached) {
+        m_pairs_cache = m_data->GenerateDispersionPairsNative(atoms, geometry_bohr);
+        m_pairs_cached = true;
+    }
+    std::vector<GFNFFDispersion>& pairs = use_cache ? m_pairs_cache : local_pairs;
 
     double E_total = 0.0;
 

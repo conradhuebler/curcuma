@@ -49,7 +49,17 @@ in batch, no numerical change). **Exit:** `ldd` shows no `mkl_sequential`; eigen
 BLAS-3 parts scale with `-threads`; energies bit-identical; native-xTB ctests green;
 batch (conformer/Hessian) wall unchanged.
 
-## WP2 — Trim the D4 in-SCF potential  ⏳
+## WP2 — Trim the D4 in-SCF potential  ✅ DONE (machine-tested, partial)
+**Result:** the D4 evaluator rebuilt the geometry-fixed pair list every SCF iteration,
+repeating a per-reference C6 weighting whose result the GFN2 per-ref loop discards anyway.
+Added a geometry-keyed **pair-list cache** in `D4Evaluator` (invalidated by the xTB driver
+on a new geometry via `invalidatePairCache()`). **D4 in-SCF 336→152 ms/SCF at t1 (2.2×)**;
+gfn2 complex TOTAL t1 ~1567→1362 ms. Energy bit-identical (SP −329.52707823; opt CH4
+converges identically t1/t4). d4/gfn2/gradient/cpscf ctests green (only pre-existing #40).
+Remaining D4 cost (~152 ms) is the inherent per-iter q-dependent `weightedC6Gfn2` — not
+threaded; a future step could parallelise the evaluator's pair loop or skip the discarded
+Cartesian gradient (dEdq-only). Added a `-verbosity 3` "of which D4" sub-timer.
+
 **Goal:** stop recomputing the full D4 Cartesian gradient every SCF iteration.
 **Approach:** `addDispersionPotential` (`xtb_native.cpp`) calls
 `computeEnergyAndGradient(with_gradient=true)` only to read `dEdq`, discarding the

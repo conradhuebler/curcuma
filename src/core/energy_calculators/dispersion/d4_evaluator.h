@@ -162,6 +162,11 @@ public:
 
     const D4Params& params() const { return m_params; }
 
+    // Invalidate the geometry-keyed pair-list cache (WP2, Claude Generated). Called by
+    // the native xTB driver whenever the geometry changes (new opt/MD step). See the
+    // cache rationale on m_pairs_cache below.
+    void invalidatePairCache() { m_pairs_cached = false; }
+
 private:
     // The unified single-pair formula (see header comment).
     // Returns disp_sum = s6·t6 + s8·r4r2ij·t8 so callers can reuse it.
@@ -169,6 +174,16 @@ private:
 
     D4ParameterGenerator* m_data;  // non-owning
     D4Params m_params;
+
+    // WP2 (2026-06): per-geometry pair-list cache. computeEnergyAndGradient runs every
+    // SCF iteration with a FIXED geometry while only the SCF charges change; the pair
+    // list is geometry-only and (for the GFN2 per-reference path) its baked C6 is
+    // discarded and recomputed from the current charges in the loop — so regenerating it
+    // each iteration was pure waste (it repeats the same per-reference C6 weighting the
+    // loop already does). Cached here and reused until invalidatePairCache(). Only used
+    // when per_reference_charge (GFN2); the GFN-FF per-pair path does not call this method.
+    std::vector<GFNFFDispersion> m_pairs_cache;
+    bool m_pairs_cached = false;
 };
 
 }  // namespace curcuma::dispersion

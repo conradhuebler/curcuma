@@ -343,6 +343,7 @@ double XTB::Calculation(bool gradient)
     // steady_clock reads per phase — negligible vs the ms-scale work — so they
     // run unconditionally, matching the existing per-iter timer. Claude Generated.
     double acc_pot = 0.0, acc_fock = 0.0, acc_solve = 0.0, acc_mull = 0.0, acc_energy = 0.0;
+    double acc_disp = 0.0;   // D4 in-SCF potential subset of acc_pot (GFN2), verbosity 3
     m_t_xfx = m_t_diag = m_t_back = m_t_dens = 0.0;
 
     // Intra-molecule thread count for the per-iteration eigensolve. The eigensolve
@@ -378,7 +379,9 @@ double XTB::Calculation(bool gradient)
         if (m_method == MethodType::GFN2) {
             addMultipolePotential(m_pot);
             // Self-consistent D4: exact per-reference dE_D4/dq into the atom potential.
+            const auto t_disp0 = clock::now();
             addDispersionPotential(m_pot);
+            acc_disp += ms(t_disp0, clock::now());
         }
         const auto t_pot = clock::now();
 
@@ -594,6 +597,8 @@ double XTB::Calculation(bool gradient)
         const double solve_sum = m_t_xfx + m_t_diag + m_t_back + m_t_dens;
         CurcumaLogger::info("SCF per-phase breakdown (summed over iterations):");
         CurcumaLogger::info_fmt("  potential build : {:8.2f} ms ({:5.2f}/it)", acc_pot,    acc_pot / it);
+        if (m_method == MethodType::GFN2)
+            CurcumaLogger::info_fmt("    - of which D4 : {:8.2f} ms ({:5.2f}/it)", acc_disp, acc_disp / it);
         CurcumaLogger::info_fmt("  build Fock      : {:8.2f} ms ({:5.2f}/it)", acc_fock,   acc_fock / it);
         CurcumaLogger::info_fmt("  solve eigen     : {:8.2f} ms ({:5.2f}/it)", acc_solve,  acc_solve / it);
         CurcumaLogger::info_fmt("    - reduce      : {:8.2f} ms ({:5.2f}/it)", m_t_xfx,    m_t_xfx / it);
@@ -1261,6 +1266,9 @@ void XTB::addDispersionPotential(Potential& pot) const
         m_d4_generator->GenerateParameters(m_atoms, geom_bohr);
         ++m_d4_genparams_calls;
         m_d4_prepared = true;
+        // WP2: new geometry → the evaluator's cached pair list is stale (rebuilt on the
+        // next computeEnergyAndGradient). Per-iter calls within this geometry reuse it.
+        m_d4_evaluator->invalidatePairCache();
     }
 
     Matrix scratch_grad; Vector scratch_dEdcn, dEdq;
