@@ -417,6 +417,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/xtb_coulomb.cpp
         src/core/energy_calculators/qm_methods/xtb_thirdorder.cpp
         src/core/energy_calculators/qm_methods/xtb_scf.cpp
+        src/core/energy_calculators/qm_methods/native_eigensolver.cpp
         src/core/energy_calculators/qm_methods/xtb_multipole.cpp
         src/core/energy_calculators/qm_methods/xtb_response.cpp
         src/core/energy_calculators/qm_methods/xtb_gradient.cpp

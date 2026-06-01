@@ -17,6 +17,7 @@
  */
 
 #include "xtb_native.h"
+#include "native_eigensolver.h"
 #include "src/core/curcuma_logger.h"
 
 #include <Eigen/Dense>
@@ -228,31 +229,49 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         const int n = nao;
         const char uplo = 'L';
         int info = 0;
+        const bool use_native = (m_eigensolver == "native" || m_eigensolver == "dnc");
         const auto te0 = clk::now();
-        Eigen::MatrixXd A = F;                  // dsygst reduces the lower triangle in place
-        int itype = 1;
-        dsygst_(&itype, &uplo, &n, A.data(), &n, m_X.data(), &n, &info);
-        if (info != 0) return false;
-        const auto te1 = clk::now();
+        Eigen::MatrixXd A(n, n);                 // holds the standard-form matrix, then its eigenvectors
         Eigen::VectorXd eps(n);
-        int lwork = 1 + 6 * n + 2 * n * n, liwork = 3 + 5 * n;
-        std::vector<double> work(static_cast<size_t>(lwork));
-        std::vector<int>    iwork(static_cast<size_t>(liwork));
-        const char jobz = 'V';
-        dsyevd_(&jobz, &uplo, &n, A.data(), &n, eps.data(),
-                work.data(), &lwork, iwork.data(), &liwork, &info);
-        if (info != 0) return false;
-        const auto te2 = clk::now();
-        // Back-transform C = L⁻ᵀ·C~  ⇔ solve Lᵀ·C = C~. Eigen's triangular solve
-        // dispatches to BLAS dtrsm under EIGEN_USE_BLAS (avoids declaring dtrsm_,
-        // which would collide with the BLAS-backend prototype).
+        if (!use_native) {
+            // MKL path: reduce F to standard form (dsygst, in-place lower triangle) then
+            // solve with the divide-and-conquer dsyevd.
+            A = F;
+            int itype = 1;
+            dsygst_(&itype, &uplo, &n, A.data(), &n, m_X.data(), &n, &info);
+            if (info != 0) return false;
+            const auto te1 = clk::now();
+            int lwork = 1 + 6 * n + 2 * n * n, liwork = 3 + 5 * n;
+            std::vector<double> work(static_cast<size_t>(lwork));
+            std::vector<int>    iwork(static_cast<size_t>(liwork));
+            const char jobz = 'V';
+            dsyevd_(&jobz, &uplo, &n, A.data(), &n, eps.data(),
+                    work.data(), &lwork, iwork.data(), &liwork, &info);
+            if (info != 0) return false;
+            const auto te2 = clk::now();
+            m_t_xfx  += ms(te0, te1);            // reduce (dsygst)
+            m_t_diag += ms(te1, te2);            // dsyevd
+        } else {
+            // Native path (no LAPACK eigensolve): reduce A = L⁻¹·F·L⁻ᵀ with Eigen
+            // triangular solves (BLAS dtrsm), then diagonalise with our own self-contained
+            // solver. Y = L⁻¹·F; A = L⁻¹·Yᵀ = L⁻¹·F·L⁻ᵀ (F symmetric). Claude Generated.
+            const Eigen::MatrixXd Y = m_X.triangularView<Eigen::Lower>().solve(F);
+            A = m_X.triangularView<Eigen::Lower>().solve(Y.transpose());
+            const auto te1 = clk::now();
+            Eigen::MatrixXd Cstd;
+            if (!curcuma::eigsolver::solveSymmetric(A, eps, Cstd)) return false;
+            A = std::move(Cstd);                 // standard-problem eigenvectors
+            const auto te2 = clk::now();
+            m_t_xfx  += ms(te0, te1);            // reduce (triangular solves)
+            m_t_diag += ms(te1, te2);            // native eigensolve
+        }
+        // Back-transform C = L⁻ᵀ·C~  ⇔ solve Lᵀ·C = C~ (Eigen triangular solve → BLAS dtrsm).
+        const auto te2b = clk::now();
         m_X.triangularView<Eigen::Lower>().transpose().solveInPlace(A);
         const auto te3 = clk::now();
         m_wfn.eps = std::move(eps);
         m_wfn.C   = std::move(A);               // A now holds the generalized eigenvectors
-        m_t_xfx  += ms(te0, te1);               // reduce (dsygst)
-        m_t_diag += ms(te1, te2);               // dsyevd
-        m_t_back += ms(te2, te3);               // back-transform (dtrsm)
+        m_t_back += ms(te2b, te3);              // back-transform (dtrsm)
 #else
         const auto te0 = clk::now();
         Eigen::MatrixXd Ftil = m_X * F * m_X;   // X = S^{-1/2}: Xᵀ F X (dense GEMMs)

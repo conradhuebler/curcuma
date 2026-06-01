@@ -234,6 +234,17 @@ foreach(_mol H2O CH4 NH3)
         PROPERTIES TIMEOUT 120 LABELS "gradient;native_xtb")
 endforeach()
 
+# Claude Generated (WP4, Jun 2026): native self-contained symmetric eigensolver
+# (the `-eigensolver native` backend) vs Eigen on random symmetric matrices.
+add_executable(test_native_eigensolver test_native_eigensolver.cpp)
+target_link_libraries(test_native_eigensolver curcuma_core)
+if(USE_PCH)
+    target_precompile_headers(test_native_eigensolver REUSE_FROM curcuma_core)
+endif()
+add_test(NAME native_eigensolver COMMAND test_native_eigensolver
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(native_eigensolver PROPERTIES TIMEOUT 60 LABELS "native_xtb;eigensolver")
+
 # Claude Generated (2026, AP ∂q/∂x — Phase 1): D4 dE/dq analytical-vs-FD test
 add_executable(test_d4_dedq test_d4_dedq.cpp)
 target_link_libraries(test_d4_dedq curcuma_core test_molecule_registry)

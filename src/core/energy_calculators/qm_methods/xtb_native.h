@@ -355,6 +355,13 @@ public:
     void setScfGuess(const std::string& g){ m_scf_guess = g; }
     ScfMode scfMode() const               { return m_scf_mode; }
 
+    // Eigensolver backend for the per-iteration generalized eigenproblem (WP4):
+    // "mkl" (default) = LAPACK dsygst + dsyevd; "native"/"dnc" = self-contained
+    // Householder+QL solver (native_eigensolver.h, no LAPACK eigensolve). MKL stays
+    // default; native is selectable for a no-MKL / future-GPU path. Claude Generated.
+    void setEigensolver(const std::string& s) { if (!s.empty()) m_eigensolver = s; }
+    const std::string& eigensolver() const    { return m_eigensolver; }
+
     // Warm-start: reuse converged charges from the previous geometry step.
     // Activated by MD/opt capabilities; also settable via -warm_start false.
     // DIIS/Broyden history is always reset per geometry step by default;
@@ -578,6 +585,7 @@ private:
     int         m_diis_subspace = 6;     // DIIS history depth (Fock matrices kept)
     double      m_level_shift   = 0.2;   // virtual-orbital shift magnitude (Eh), LevelShift mode
     std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare)
+    std::string m_eigensolver   = "mkl"; // eigensolve backend: "mkl" (dsyevd) | "native"/"dnc"
 
     Vector m_coordination_numbers;   ///< CN, filled in Calculation()
 
@@ -664,6 +672,7 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
 
     lookup("scf_mode",     [&](const json& v){ if (v.is_string()) xtb.setScfMode(v.get<std::string>()); });
     lookup("scf_guess",    [&](const json& v){ if (v.is_string()) xtb.setScfGuess(v.get<std::string>()); });
+    lookup("eigensolver",  [&](const json& v){ if (v.is_string()) xtb.setEigensolver(v.get<std::string>()); });
     lookup("scf_damping",  [&](const json& v){ if (v.is_number()) xtb.setScfDamping(v.get<double>()); });
     lookup("scf_threshold",[&](const json& v){ if (v.is_number()) xtb.setScfThreshold(v.get<double>()); });
     lookup("diis_start",   [&](const json& v){ if (v.is_number_integer()) xtb.setDiisStart(v.get<int>()); });

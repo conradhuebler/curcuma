@@ -55,6 +55,8 @@ json NativeXtbMethod::getDefaultConfig(MethodType method)
         { "scf_damping", 0.4 },          // Density damping factor
         { "scf_mode", "broyden" },       // broyden(default) | diis | plain | level-shift
         { "scf_guess", "eeq" },          // Initial charge guess: eeq(default) | h0
+        { "eigensolver", "mkl" },        // Eigensolve backend: mkl(default, dsyevd) | native/dnc
+                                         // (self-contained Householder+QL, no LAPACK; WP4)
                                          // eeq seeds shell charges from a single-shot dftd4 EEQ
                                          // solve; on complex(231) it cuts SCF iters gfn1 35->16,
                                          // gfn2 34->22 (energy bit-identical). Falls back to h0
