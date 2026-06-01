@@ -63,7 +63,9 @@ json NativeXtbMethod::getDefaultConfig(MethodType method)
         { "diis_subspace", 6 },          // DIIS history depth
         { "level_shift", 0.2 },          // Virtual-orbital shift (Eh), level-shift mode
         { "threads", 1 },                // Single-threaded by default
-        { "print_orbitals", false }      // Print energy decomposition at verbosity >= 2
+        { "print_orbitals", false },     // Print energy decomposition at verbosity >= 2
+        { "warm_start", true },          // Reuse converged charges as SCF guess (harmless for SP)
+        { "keep_diis", false }           // Preserve DIIS/Broyden history across geometry steps
     };
     if (method == MethodType::GFN1) {
         cfg["dispersion"] = "d3";        // GFN1: D3(BJ)
@@ -201,6 +203,19 @@ double NativeXtbMethod::calculateEnergy(bool gradient)
         handleError(fmt::format("energy calculation: {}", e.what()));
         return 0.0;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Warm-start / iterative-mode controls (Claude Generated)
+// ---------------------------------------------------------------------------
+void NativeXtbMethod::setWarmStart(bool on)
+{
+    if (m_xtb) m_xtb->setWarmStart(on);
+}
+
+void NativeXtbMethod::setIterativeMode(bool on)
+{
+    if (m_xtb) m_xtb->setIterativeMode(on);
 }
 
 // ---------------------------------------------------------------------------

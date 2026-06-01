@@ -531,6 +531,11 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
     EnergyCalculator interface(m_method, m_controller["opt"], Basename());
 
     interface.setMolecule(initial->getMolInfo());
+    // Iterative mode + warm-start for native GFN1/GFN2: each geometry step
+    // reuses the previous converged charges, cutting SCF iterations. Claude Generated.
+    interface.setIterativeMode(true);
+    if (m_method == "gfn1" || m_method == "gfn2")
+        interface.setWarmStart(true);
     m_parameters = interface.Parameter();
     double final_energy = interface.CalculateEnergy(true);
     initial->setEnergy(final_energy);
@@ -818,6 +823,10 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
     EnergyCalculator interface(m_method, m_controller["opt"], Basename());
 
     interface.setMolecule(initial->getMolInfo());
+    // Iterative mode + warm-start for native GFN1/GFN2. Claude Generated.
+    interface.setIterativeMode(true);
+    if (m_method == "gfn1" || m_method == "gfn2")
+        interface.setWarmStart(true);
     m_parameters = interface.Parameter();
     double final_energy = interface.CalculateEnergy(true);
     initial->setEnergy(final_energy);

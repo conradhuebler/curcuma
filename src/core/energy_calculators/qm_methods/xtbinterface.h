@@ -45,6 +45,8 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     PARAM(diis_start, Int, 5, "Native GFN SCF: number of damped warmup iterations before Pulay DIIS engages (diis/level-shift modes).", "SCF", {})
     PARAM(diis_subspace, Int, 6, "Native GFN SCF: DIIS history depth (number of Fock matrices kept).", "SCF", {})
     PARAM(level_shift, Double, 0.2, "Native GFN SCF: virtual-orbital level-shift magnitude (Eh) for scf_mode='level-shift'. Faded out near convergence so the fixed point is unshifted.", "SCF", {})
+    PARAM(warm_start, Bool, true, "Native GFN SCF: reuse converged shell charges from the previous geometry step as the SCF initial guess. Harmless for single-point (no saved charges). Disable with -warm_start false to always start from EEQ/h0.", "SCF", {})
+    PARAM(keep_diis, Bool, false, "Native GFN SCF: preserve DIIS/Broyden history across geometry steps (experimental). Default false resets history on each new geometry; true may help near-converged MD trajectories or hurt if geometry changes significantly.", "SCF", {})
 END_PARAMETER_DEFINITION
 
 class UFF;

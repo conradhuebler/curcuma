@@ -730,6 +730,16 @@ int EnergyCalculator::getEffectiveVerbosity() const
     return (m_verbosity_override >= 0) ? m_verbosity_override : CurcumaLogger::get_verbosity();
 }
 
+void EnergyCalculator::setWarmStart(bool on)
+{
+    if (m_method) m_method->setWarmStart(on);
+}
+
+void EnergyCalculator::setIterativeMode(bool on)
+{
+    if (m_method) m_method->setIterativeMode(on);
+}
+
 // =================================================================================
 // Internal Helper Methods
 // =================================================================================

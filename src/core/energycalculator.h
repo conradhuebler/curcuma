@@ -415,6 +415,17 @@ public:
      */
     int getEffectiveVerbosity() const;
 
+    // =================================================================================
+    // SCF warm-start and iterative-mode (Claude Generated)
+    // Delegates to the underlying ComputationalMethod; no-op for non-XTB methods.
+    // =================================================================================
+
+    /** @brief Enable/disable SCF warm-start (reuse converged charges across steps). */
+    void setWarmStart(bool on);
+
+    /** @brief Enable/disable iterative mode (raise SCF display threshold by one level). */
+    void setIterativeMode(bool on);
+
 private:
     // =================================================================================
     // Internal State

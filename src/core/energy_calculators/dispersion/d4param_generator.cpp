@@ -1763,7 +1763,7 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     computeGaussianWeightDerivatives();
     computeDC6DCN();
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::result_fmt("D4 native dispersion: {} pairs generated", all_pairs.size());
     }
 

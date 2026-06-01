@@ -1579,6 +1579,12 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         // Note: setMolecule() is called inside OptimizerDriver::InitializeOptimization()
         // Do NOT call it here — double-init crashes GFN-FF (generateDispersionPairsNative)
 
+        // Enable iterative mode + warm-start for native GFN so SCF iterations are
+        // suppressed at verbosity 1 and converged charges are reused across steps.
+        energy_calc.setIterativeMode(true);
+        if (method == "gfn1" || method == "gfn2")
+            energy_calc.setWarmStart(true);
+
         Optimization::OptimizerType opt_type = Optimization::parseOptimizerType(optimizer_method);
         auto result = Optimization::OptimizationDispatcher::optimizeStructure(
             molecule.get(), opt_type, &energy_calc, opt_config);

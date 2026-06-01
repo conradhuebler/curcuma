@@ -183,22 +183,34 @@ double XTB::Calculation(bool gradient)
     // 6. SCF loop with DIIS acceleration (Pulay 1980/1982)
     m_pot.reset();
 
-    if (verb >= 2) {
-        CurcumaLogger::info(fmt::format("SCF iterations (mode={}, guess={}):",
-                                        scfModeName(m_scf_mode), m_scf_guess));
-        CurcumaLogger::info("  iter             E(SCC)/Eh            dE        max|dq|     t/ms");
+    // Context-aware verbosity: in iterative mode (MD/opt) raise the display
+    // threshold by one so -verbosity 2 is needed to see per-iteration output.
+    // SP mode uses -verbosity 1 as the normal threshold. Claude Generated.
+    const int scf_min = m_is_iterative ? 2 : 1;
+
+    if (verb >= scf_min) {
+        CurcumaLogger::result(fmt::format("SCF iterations (mode={}, guess={}):",
+                                          scfModeName(m_scf_mode), m_scf_guess));
+        CurcumaLogger::result("  iter             E(SCC)/Eh            dE        max|dq|     t/ms");
     }
 
     const int max_iter   = m_scf_max_iter;
     const double thresh  = m_scf_threshold;
     const int nsh = m_basis.nsh;
 
-    // Initial guess. Default ("h0"): zero shell charges → F = H0. The optional
-    // "eeq" guess seeds q_sh from a single-shot dftd4 EEQ solve so iter 0 builds
-    // the Fock with a physically correct Coulomb shift, avoiding the wrong
-    // charge-transfer basin instead of having to recover from it.
+    // Initial guess. Warm-start: reuse converged shell charges from the previous
+    // geometry (saved by UpdateMolecule). Otherwise: "h0" (zero) or "eeq".
+    // Claude Generated warm-start path.
     Vector q_sh_old = Vector::Zero(nsh);
-    if (m_scf_guess == "eeq") {
+    if (m_warmstart && m_warmstart_q_sh.size() == nsh) {
+        q_sh_old   = m_warmstart_q_sh;
+        m_wfn.q_sh = m_warmstart_q_sh;
+        m_wfn.q_at.setZero(m_atomcount);
+        for (int s = 0; s < nsh; ++s)
+            m_wfn.q_at(m_basis.sh2at[s]) += m_warmstart_q_sh(s);
+        if (verb >= scf_min)
+            CurcumaLogger::result("SCF initial guess: warm-start from previous step");
+    } else if (m_scf_guess == "eeq") {
         Vector q_sh_guess;
         if (seedEEQGuess(q_sh_guess)) {
             q_sh_old   = q_sh_guess;
@@ -206,9 +218,9 @@ double XTB::Calculation(bool gradient)
             m_wfn.q_at.setZero(m_atomcount);
             for (int s = 0; s < nsh; ++s)
                 m_wfn.q_at(m_basis.sh2at[s]) += q_sh_guess(s);
-            if (verb >= 2)
-                CurcumaLogger::info("SCF initial guess: single-shot EEQ shell charges");
-        } else if (verb >= 1) {
+            if (verb >= scf_min)
+                CurcumaLogger::result("SCF initial guess: single-shot EEQ shell charges");
+        } else if (verb >= scf_min) {
             CurcumaLogger::warn("EEQ initial guess unavailable; falling back to bare-H0 guess");
         }
     }
@@ -225,17 +237,19 @@ double XTB::Calculation(bool gradient)
     Matrix P_old;
     double dq_prev = 1.0e30;   // last max|dq| — controls the level-shift fade-out
 
-    // DIIS accelerator (history depth configurable). Unused in Plain mode.
-    DIISAccelerator diis(m_diis_subspace);
-    // Never extrapolate from a pathologically large commutator error — that is
-    // exactly what threw `complex` out of the basin at iter 5. The cutoff is
-    // generous; a well-behaved SCF never approaches it, so the default DIIS path
-    // is bit-for-bit unchanged on the existing test set.
+    // DIIS and Broyden are member variables so history can optionally survive
+    // across geometry steps (m_keep_diis=true, set via -keep_diis true). Default
+    // (m_keep_diis=false): always reset — old error vectors from a different
+    // geometry typically slow convergence. Charge warm-start (m_warmstart_q_sh)
+    // is independent of this flag and always reused when available. Claude Generated.
     constexpr double kDiisErrorCutoff = 1.0e3;
-
-    // Broyden mixer on the SCC charge/multipole vector (tblite-style). Unused in
-    // the other modes. alpha = m_scf_damping so -scf_damping tunes the seed step.
-    BroydenMixer broyden(damp, /*max_history=*/m_diis_subspace > 2 ? 20 : m_diis_subspace);
+    if (!m_keep_diis) {
+        m_diis    = DIISAccelerator(m_diis_subspace);
+        m_broyden = BroydenMixer(damp, /*max_history=*/m_diis_subspace > 2 ? 20 : m_diis_subspace);
+    }
+    // Local aliases for brevity in the SCF loop body.
+    DIISAccelerator& diis    = m_diis;
+    BroydenMixer&    broyden = m_broyden;
     const int nat = m_atomcount;
 
     // Pack the self-consistent SCC vector from m_wfn: shell charges for GFN1;
@@ -401,12 +415,12 @@ double XTB::Calculation(bool gradient)
         dq_prev = dq;   // drives the LevelShift fade-out on the next iteration
         const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
         const double t_iter_ms = ms(t_iter0, clock::now());
-        if (verb >= 2) {
+        if (verb >= scf_min) {
             std::string line = fmt::format("  {:4d}   {:18.10f}   {:10.2e}   {:10.2e}   {:6.1f}",
                                            iter, e_scc, de, dq, t_iter_ms);
             if (verb >= 3)
                 line += fmt::format("   [DIIS n={} err={:.2e}]", diis.size(), diis.lastErrorNorm());
-            CurcumaLogger::info(line);
+            CurcumaLogger::result(line);
         }
 
         // Check convergence (after first iteration). On convergence we break
@@ -437,7 +451,7 @@ double XTB::Calculation(bool gradient)
     m_scf_iterations = iter + 1;
     const auto t_scf_end = clock::now();
 
-    if (verb >= 1) {
+    if (verb >= scf_min) {
         if (m_scf_converged)
             CurcumaLogger::success_fmt("SCF converged in {} iterations ({:.1f} ms)",
                                        m_scf_iterations, ms(t_scf_start, t_scf_end));
@@ -842,7 +856,15 @@ bool XTB::UpdateMolecule(const Matrix& geometry)
     m_mp_dkernel.clear();
     m_mp_qkernel.clear();
 
-    // 5. Reset wavefunction populations (Mulliken charges depend on geometry)
+    // 5. Reset wavefunction populations (Mulliken charges depend on geometry).
+    //    Save the converged shell charges before clearing so Calculation() can
+    //    use them as a warm-start guess for the next SCF (Claude Generated).
+    // Save converged shell charges for warm-start only when the previous SCF
+    // actually converged; zero-initialized charges (from InitialiseMolecule)
+    // are a worse starting guess than EEQ and must not be saved. Claude Generated.
+    const bool had_converged = m_scf_converged;
+    if (m_warmstart && had_converged && m_wfn.q_sh.size() == m_basis.nsh)
+        m_warmstart_q_sh = m_wfn.q_sh;
     //    Keep m_wfn.n0_at / n0_sh (reference occupations, geometry-independent)
     m_wfn.q_at.setZero(m_basis.nat);
     m_wfn.q_sh.setZero(m_basis.nsh);

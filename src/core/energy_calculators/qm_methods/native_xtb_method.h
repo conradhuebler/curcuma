@@ -63,6 +63,10 @@ public:
     json getEnergyDecomposition() const override;
     bool saveToFile(const std::string& filename) const override;
 
+    // ---- SCF warm-start / iterative-mode (Claude Generated) ---------------
+    void setWarmStart(bool on) override;
+    void setIterativeMode(bool on) override;
+
     // ---- Native xTB extras (not in the base interface) --------------------
     Matrix getMolecularOrbitals() const;
     double getHOMOLUMOGap() const;

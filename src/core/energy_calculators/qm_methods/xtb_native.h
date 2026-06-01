@@ -43,6 +43,9 @@ class D4ParameterGenerator;
 class D3ParameterGenerator;
 namespace curcuma::dispersion { class D4Evaluator; }
 
+#include "diis_accelerator.h"
+#include "broyden_mixer.h"
+
 namespace curcuma::xtb {
 
 /* ------------------------------------------------------------------------- *
@@ -340,6 +343,24 @@ public:
     void setScfGuess(const std::string& g){ m_scf_guess = g; }
     ScfMode scfMode() const               { return m_scf_mode; }
 
+    // Warm-start: reuse converged charges from the previous geometry step.
+    // Activated by MD/opt capabilities; also settable via -warm_start false.
+    // DIIS/Broyden history is always reset per geometry step by default;
+    // set m_keep_diis=true via -keep_diis true to experiment with history reuse.
+    // Claude Generated.
+    void setWarmStart(bool on)    { m_warmstart = on; }
+    bool isWarmStart() const      { return m_warmstart; }
+    void setKeepDiis(bool on)     { m_keep_diis = on; }
+    bool isKeepDiis() const       { return m_keep_diis; }
+
+    // Iterative-mode flag: when true, the SCF loop raises its display threshold
+    // by one level so the caller needs -verbosity 2 (not 1) to see per-iteration
+    // output. Set by MD/opt capabilities to avoid flooding output at default
+    // verbosity while still allowing inspection with explicit -verbosity 2.
+    // Claude Generated.
+    void setIterativeMode(bool on) { m_is_iterative = on; }
+    bool isIterativeMode() const   { return m_is_iterative; }
+
     // GFN2 component audit (Claude Generated): SCF-free evaluation of every
     // per-container energy at an externally supplied (typically tblite-derived)
     // wavefunction state. Skips diagonalisation, performs the pre-SCF setup
@@ -551,6 +572,26 @@ private:
     // (CPSCF response on the GFN2 SCF). Empty disables the q-response term
     // (static-prefactor mode). Set from config in the constructor.
     std::string m_d4_charge_source = "eeq";
+
+    // Warm-start and iterative-mode state (Claude Generated).
+    // m_warmstart: reuse converged q_sh from the previous call as initial guess.
+    //   UpdateMolecule() saves q_sh to m_warmstart_q_sh before clearing it;
+    //   Calculation() restores it as the starting shell-charge vector.
+    // m_keep_diis: when true, DIIS/Broyden history survives across geometry steps
+    //   (experimental; default false — old error vectors from a different geometry
+    //   typically slow convergence).
+    // m_is_iterative: raises SCF display threshold so -verbosity 2 is needed
+    //   to see per-iteration output (SP default needs only -verbosity 1).
+    bool   m_warmstart      = true;   ///< on by default; harmless for SP (no saved guess)
+    Vector m_warmstart_q_sh;          ///< Converged q_sh saved before geometry update
+    bool   m_keep_diis      = false;  ///< preserve DIIS/Broyden history across steps
+    bool   m_is_iterative   = false;
+
+    // DIIS and Broyden mixers promoted from stack-local to member variables so
+    // their history can optionally be preserved across Calculation() calls
+    // (m_keep_diis=true). Reset unconditionally by default.
+    DIISAccelerator m_diis;
+    BroydenMixer    m_broyden;
 };
 
 /* ------------------------------------------------------------------------- *
@@ -580,6 +621,8 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("diis_start",   [&](const json& v){ if (v.is_number_integer()) xtb.setDiisStart(v.get<int>()); });
     lookup("diis_subspace",[&](const json& v){ if (v.is_number_integer()) xtb.setDiisSubspace(v.get<int>()); });
     lookup("level_shift",  [&](const json& v){ if (v.is_number()) xtb.setLevelShift(v.get<double>()); });
+    lookup("warm_start",   [&](const json& v){ if (v.is_boolean()) xtb.setWarmStart(v.get<bool>()); });
+    lookup("keep_diis",    [&](const json& v){ if (v.is_boolean()) xtb.setKeepDiis(v.get<bool>()); });
 }
 
 } // namespace curcuma::xtb
