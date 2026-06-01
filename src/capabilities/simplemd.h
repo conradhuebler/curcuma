@@ -219,6 +219,13 @@ private:
     std::function<void(void)> ThermostatFunction;
     void PrintStatus() const;
 
+    // Claude Generated 2026: Build path inside snapshots subdirectory
+    std::string snapshotPath(const std::string& filename) const {
+        if (m_snapshots_dir.empty())
+            return outputPath(filename);
+        return m_snapshots_dir + "/" + filename;
+    }
+
     /* Lets have this for all modules */
     virtual nlohmann::json WriteRestartInformation() override;
 
@@ -289,7 +296,11 @@ private:
     std::vector<std::pair<std::pair<int, int>, double>> m_bond_constrained, m_bond_13_constrained;
 #ifdef USE_Plumed
     plumed m_plumedmain;
+    std::vector<double> m_plumed_positions;  // Positions in Bohr for PLUMED
+    double m_plumed_box[9] = {};             // Box vectors in Bohr for PLUMED (3x3 row-major)
 #endif
+
+    std::string m_snapshots_dir;  // Claude Generated 2026: Snapshots subdirectory inside BMT
 
     int m_natoms = 0;
     int m_dump = 1;

@@ -416,6 +416,20 @@ void SimpleMD::printHelp() const
 bool SimpleMD::Initialise()
 {
     checkHelp();
+    // Claude Generated 2026: Create .snapshots subdirectory inside BMT for JSON restarts,
+    // but keep m_output_dir pointing at BMT root so trajectory files land there.
+    if (OutputDir().empty()) {
+        setOutputDir(Basename() + ".snapshots");
+    } else {
+        // BMT is active: m_output_dir stays as BMT root, create snapshots subdirectory separately
+        m_snapshots_dir = outputPath(Basename() + ".snapshots");
+        ensureOutputDir();  // already ensured by setOutputDir, but ensure snapshots subdir too
+#ifdef C17
+#ifndef _WIN32
+        std::filesystem::create_directories(m_snapshots_dir);
+#endif
+#endif
+    }
     m_natoms = m_molecule.AtomCount();
     if(m_natoms == 0)
         return false;
@@ -516,7 +530,7 @@ bool SimpleMD::Initialise()
 
     if (!m_restart) {
         std::ofstream result_file;
-        result_file.open(Basename() + ".trj.xyz");
+        result_file.open(outputPath(Basename() + ".trj.xyz"));
         result_file.close();
     }
 
@@ -593,7 +607,7 @@ bool SimpleMD::Initialise()
         if (result.success) {
             m_molecule.setGeometry(result.final_molecule.getGeometry());
         }
-        m_molecule.appendXYZFile(Basename() + ".opt.xyz");
+        m_molecule.appendXYZFile(outputPath(Basename() + ".opt.xyz"));
     }
     double mass = 0;
     for (int i = 0; i < m_natoms; ++i) {
@@ -700,7 +714,7 @@ bool SimpleMD::Initialise()
         rmsdtraj["rmsd"] = m_rmsd;
         rmsdtraj["writeRMSD"] = false;
         m_unqiue = new RMSDTraj(rmsdtraj, true);
-        m_unqiue->setBaseName(Basename() + ".xyz");
+        m_unqiue->setBaseName(outputPath(Basename() + ".xyz"));
         m_unqiue->Initialise();
     }
     m_dof = 3 * m_natoms;
@@ -721,7 +735,7 @@ bool SimpleMD::Initialise()
     if (m_writeinit) {
         json init = WriteRestartInformation();
         std::ofstream result_file;
-        result_file.open(Basename() + ".init.json");
+        result_file.open(snapshotPath(Basename() + ".init.json"));
         result_file << init;
         result_file.close();
     }
@@ -1792,7 +1806,7 @@ bool SimpleMD::step()
         //linear Dipoles
         auto curr_dipoles_lin = m_molecule.CalculateDipoleMoments(m_scaling_vector_linear, m_start_fragments);
         std::ofstream file;
-        file.open(Basename() + "_dipole_linear.out", std::ios_base::app);
+        file.open(outputPath(Basename() + "_dipole_linear.out"), std::ios_base::app);
         Position d = {0,0,0};
         for (const auto& dipole_lin : curr_dipoles_lin) {
             d += dipole_lin;
@@ -1803,7 +1817,7 @@ bool SimpleMD::step()
         //nonlinear Dipoles
         auto curr_dipoles_nlin = m_molecule.CalculateDipoleMoments(m_scaling_vector_nonlinear, m_start_fragments);
         std::ofstream file2;
-        file2.open(Basename() + "_dipole_nonlinear.out", std::ios_base::app);
+        file2.open(outputPath(Basename() + "_dipole_nonlinear.out"), std::ios_base::app);
         Position sum = {0,0,0};
         for (const auto& dipole_nlin : curr_dipoles_nlin) {
             sum += dipole_nlin;
@@ -1869,7 +1883,7 @@ bool SimpleMD::step()
         PrintStatus();
         fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Simulation got unstable, exiting!\n");
 
-        std::ofstream restart_file("unstable_curcuma.json");
+        std::ofstream restart_file(snapshotPath("unstable_curcuma.json"));
         nlohmann::json restart;
         restart[MethodName()[0]] = WriteRestartInformation();
         restart_file << restart << std::endl;
@@ -1887,7 +1901,7 @@ bool SimpleMD::step()
     }
 
     if (m_writerestart > -1 && m_step % m_writerestart == 0) {
-        std::ofstream restart_file("curcuma_step_" + std::to_string(static_cast<int>(m_step * m_dT)) + ".json");
+        std::ofstream restart_file(snapshotPath("curcuma_step_" + std::to_string(static_cast<int>(m_step * m_dT)) + ".json"));
         json restart;
         restart[MethodName()[0]] = WriteRestartInformation();
         restart_file << restart << std::endl;
@@ -1961,18 +1975,18 @@ void SimpleMD::finalizeRun()
                 m_rmsd_mtd_molecule.setEnergy(structures[j].energy);
                 m_rmsd_mtd_molecule.setName(std::to_string(structures[j].index) + " " + std::to_string(structures[j].rmsd_reference));
                 if (i == j && i == 0)
-                    m_rmsd_mtd_molecule.writeXYZFile(Basename() + ".mtd.xyz");
+                    m_rmsd_mtd_molecule.writeXYZFile(outputPath(Basename() + ".mtd.xyz"));
                 else
-                    m_rmsd_mtd_molecule.appendXYZFile(Basename() + ".mtd.xyz");
+                    m_rmsd_mtd_molecule.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
             }
         }
     }
-    std::ofstream restart_file("curcuma_final.json");
+    std::ofstream restart_file(snapshotPath("curcuma_final.json"));
     nlohmann::json restart;
     restart[MethodName()[0]] = WriteRestartInformation();
     restart_file << restart << std::endl;
     if (m_run_aborted == false)
-        std::remove("curcuma_restart.json");
+        std::remove(snapshotPath("curcuma_restart.json").c_str());
 
     m_run_prepared = false;
 }
@@ -2300,7 +2314,7 @@ void SimpleMD::Rattle()
                 }
                 m_molecule.setGeometry(geometry);
 
-                m_molecule.appendXYZFile(Basename() + ".rattle.trj.xyz");
+                m_molecule.appendXYZFile(outputPath(Basename() + ".rattle.trj.xyz"));
         */
         if (active == 0)
             break;
@@ -2494,7 +2508,7 @@ void SimpleMD::ApplyRMSDMTD()
     if (m_bias_structure_count == 0) {
         m_bias_threads[0]->addGeometry(current_geometry, 0, m_currentStep, 0);
         m_bias_structure_count++;
-        m_rmsd_mtd_molecule.writeXYZFile(Basename() + ".mtd.xyz");
+        m_rmsd_mtd_molecule.writeXYZFile(outputPath(Basename() + ".mtd.xyz"));
         if (m_nocolvarfile == false) {
             std::ofstream colvarfile;
             colvarfile.open("COLVAR");
@@ -2568,7 +2582,7 @@ void SimpleMD::ApplyRMSDMTD()
         int thread_index = m_bias_structure_count % m_bias_threads.size();
         m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentStep, m_bias_structure_count);
         m_bias_structure_count++;
-        m_rmsd_mtd_molecule.appendXYZFile(Basename() + ".mtd.xyz");
+        m_rmsd_mtd_molecule.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
         std::cout << m_bias_structure_count << " stored structures currently" << std::endl;
     }
     m_end = std::chrono::system_clock::now();
@@ -3119,13 +3133,13 @@ bool SimpleMD::WriteGeometry()
     if (m_is_cg_system && m_cg_write_vtf) {
         m_molecule.setEnergy(m_Epot);
         m_molecule.setName(std::to_string(m_currentStep));
-        m_molecule.appendVTFFile(Basename() + ".trj.vtf");
+        m_molecule.appendVTFFile(outputPath(Basename() + ".trj.vtf"));
     }
 
     if (m_writeXYZ) {
         m_molecule.setEnergy(m_Epot);
         m_molecule.setName(std::to_string(m_currentStep));
-        m_molecule.appendXYZFile(Basename() + ".trj.xyz");
+        m_molecule.appendXYZFile(outputPath(Basename() + ".trj.xyz"));
     }
     if (m_writeUnique) {
         if (m_unqiue->CheckMolecule(new Molecule(m_molecule))) {
