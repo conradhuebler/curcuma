@@ -259,7 +259,10 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
             A = m_X.triangularView<Eigen::Lower>().solve(Y.transpose());
             const auto te1 = clk::now();
             Eigen::MatrixXd Cstd;
-            if (!curcuma::eigsolver::solveSymmetric(A, eps, Cstd)) return false;
+            // Parallelise the D&C's independent subtrees on the gated intra-thread budget
+            // (serial under molecule-level parallelism / for small bases).
+            if (!curcuma::eigsolver::solveSymmetric(A, eps, Cstd, effectiveIntraThreads(n)))
+                return false;
             A = std::move(Cstd);                 // standard-problem eigenvectors
             const auto te2 = clk::now();
             m_t_xfx  += ms(te0, te1);            // reduce (triangular solves)

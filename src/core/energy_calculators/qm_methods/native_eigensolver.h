@@ -43,12 +43,17 @@ namespace curcuma::eigsolver {
  * Only the lower triangle of A is read (A is assumed symmetric). Returns false on a
  * non-square/empty matrix or a convergence failure.
  *
- * @param A     symmetric input matrix (n×n), read-only
- * @param evals output eigenvalues, ascending
- * @param evecs output eigenvectors (columns)
+ * @param A        symmetric input matrix (n×n), read-only
+ * @param evals    output eigenvalues, ascending
+ * @param evecs    output eigenvectors (columns)
+ * @param nThreads intra-eigensolver thread budget (default 1 = serial). When >1 and the
+ *                 matrix is large enough, the divide-and-conquer's independent subtrees are
+ *                 solved in parallel (the merges' BLAS gemms thread separately). Caller must
+ *                 gate this (the native xTB passes its effectiveIntraThreads).
  */
 bool solveSymmetric(const Eigen::MatrixXd& A,
                     Eigen::VectorXd& evals,
-                    Eigen::MatrixXd& evecs);
+                    Eigen::MatrixXd& evecs,
+                    int nThreads = 1);
 
 } // namespace curcuma::eigsolver

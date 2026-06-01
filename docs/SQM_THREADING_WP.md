@@ -109,10 +109,19 @@ random, degenerate, identity-like and tight-cluster spectra up to n=558 (ctest
 **Speed: on par with MKL `dsyevd`** — gfn2 complex min-of-5 TOTAL t1 1390 vs 1377 ms (~1%),
 t8 519 vs 521 ms. The serial D&C matches MKL because the surrounding BLAS (reduce,
 back-transform) threads.
-**Seed:** `ParallelEigenSolver.hpp` confirmed dead-end (block-D&C abandoned as mathematically
-wrong); not reused — candidate for removal.
-**Future:** the D&C recursion's sub-problems are independent — thread/GPU them (and the merge
-gemms) for further large-N speedup; this is the GPU-ready split. Original notes:
+**Seed:** `ParallelEigenSolver.hpp`'s internal *block-D&C* was abandoned as mathematically
+wrong (its `parallelDiagonalizeF` now just wraps Eigen), so it was no usable seed for a real
+D&C — BUT the class is still live: EHT/PM3/AM1/MNDO/PM6/NDDO use it as their eigensolver
+wrapper. **Do not remove it.**
+**Parallel recursion (done):** the D&C's independent subtrees are now solved in parallel —
+descend the split tree to depth ~log2(threads), apply the rank-1 tearings, solve the balanced
+subtrees FLAT in parallel (deadlock-free: no nested fork-join), then merge up serially (the
+back-transform gemms thread via BLAS). Gated by the native xTB's `effectiveIntraThreads`.
+**Native eigensolve scales 3.07× (complex/231, min-of-3 solve-eigen 598→195 ms t1→t8) — now
+on par with MKL's threaded dsyevd (~190 ms).** Bit-identical, ctest `native_eigensolver`
+unchanged. The same flat subtree split is the GPU offload point (future).
+
+**Future:** GPU-offload the subtree solves + merge gemms (WP5). Original notes:
 
 ## WP4 — Custom divide-and-conquer eigensolver (CPU first, GPU-ready)  ⏳ (original notes)
 **Goal:** replace MKL `dsyevd` with our own **threaded CPU** divide-and-conquer symmetric

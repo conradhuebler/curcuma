@@ -14,9 +14,15 @@
 
 #include "native_eigensolver.h"
 
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
+
 #include <algorithm>
 #include <cmath>
+#include <functional>
+#include <future>
 #include <limits>
+#include <map>
+#include <utility>
 #include <vector>
 
 namespace curcuma::eigsolver {
@@ -389,11 +395,133 @@ bool tridiagDC(const Eigen::VectorXd& d, const Eigen::VectorXd& e,
     return true;
 }
 
+/* ------------------------------------------------------------------ *
+ *  Parallel divide-and-conquer (Claude Generated).                    *
+ *                                                                     *
+ *  The recursion's two sub-problems are independent. To exploit that  *
+ *  without nested fork-join on a bounded pool (which can deadlock), we *
+ *  descend the binary split tree to a fixed depth, applying the rank-1 *
+ *  tearings to a working diagonal, and solve the resulting balanced    *
+ *  subtrees FLAT in parallel (each by the serial tridiagDC). The merge *
+ *  nodes above the cut are then processed bottom-up serially — their   *
+ *  O(n²) secular solve is small and their O(n³) back-transform gemms   *
+ *  thread through BLAS. This is the natural GPU-ready split.           *
+ * ------------------------------------------------------------------ */
+
+// Persistent per-thread worker pool (the eigensolve is driven from one thread per SCF).
+CxxThreadPool& eigPool()
+{
+    static thread_local CxxThreadPool pool;
+    static thread_local bool init = false;
+    if (!init) { pool.setProgressBar(CxxThreadPool::ProgressBarType::None); init = true; }
+    return pool;
+}
+
+// Run worker(thread_id, n_threads) on n_threads (main thread does stripe 0). Flat — the
+// worker bodies must be independent (no nested dispatch), so this never deadlocks.
+void parFor(int n_threads, const std::function<void(int, int)>& worker)
+{
+    if (n_threads <= 1) { worker(0, 1); return; }
+    CxxThreadPool& pool = eigPool();
+    pool.setActiveThreadCount(n_threads);
+    std::vector<std::future<void>> fut;
+    fut.reserve(n_threads - 1);
+    for (int t = 1; t < n_threads; ++t) fut.push_back(pool.enqueue(worker, t, n_threads));
+    worker(0, n_threads);
+    for (auto& f : fut) f.get();
+}
+
+struct MergeNode { int lo, hi, split; double rho; };
+
+// Descend to `depth` (or until a block is small), applying the rank-1 tearings to d_work;
+// collect leaf ranges (left-to-right) and merge nodes (post-order: children before parent).
+void collectAndTear(Eigen::VectorXd& d_work, const Eigen::VectorXd& e,
+                    int lo, int hi, int depth,
+                    std::vector<std::pair<int, int>>& leaves,
+                    std::vector<MergeNode>& merges)
+{
+    const int n = hi - lo;
+    if (depth <= 0 || n <= 16) { leaves.emplace_back(lo, hi); return; }
+    const int m = lo + n / 2;
+    const double rho = e(m - 1);
+    d_work(m - 1) -= rho;
+    d_work(m)     -= rho;
+    collectAndTear(d_work, e, lo, m, depth - 1, leaves, merges);
+    collectAndTear(d_work, e, m, hi, depth - 1, leaves, merges);
+    merges.push_back({lo, hi, m, rho});
+}
+
+// Parallel tridiagonal eigensolve. `eval` ← eigenvalues, `evec` ← eigenvectors (columns).
+bool tridiagDCparallel(const Eigen::VectorXd& d, const Eigen::VectorXd& e,
+                       int nThreads, Eigen::VectorXd& eval, Eigen::MatrixXd& evec)
+{
+    const int n = static_cast<int>(d.size());
+    if (nThreads <= 1 || n <= 128) return tridiagDC(d, e, eval, evec);
+
+    // Cut depth: ~2× as many leaves as threads for load balance (capped by size).
+    int depth = 1;
+    while ((1 << (depth + 1)) <= 2 * nThreads && (n >> (depth + 1)) > 16) ++depth;
+
+    Eigen::VectorXd d_work = d;
+    std::vector<std::pair<int, int>> leaves;
+    std::vector<MergeNode> merges;
+    collectAndTear(d_work, e, 0, n, depth, leaves, merges);
+
+    // Solve the balanced subtrees in parallel (each by the serial D&C). Disjoint outputs.
+    const int L = static_cast<int>(leaves.size());
+    std::vector<Eigen::VectorXd> lev(L);
+    std::vector<Eigen::MatrixXd> lV(L);
+    parFor(nThreads, [&](int tid, int T) {
+        for (int li = tid; li < L; li += T) {
+            const int lo = leaves[li].first, hi = leaves[li].second, nn = hi - lo;
+            const Eigen::VectorXd dd = d_work.segment(lo, nn);
+            const Eigen::VectorXd ee = (nn > 1) ? Eigen::VectorXd(e.segment(lo, nn - 1))
+                                                : Eigen::VectorXd();
+            tridiagDC(dd, ee, lev[li], lV[li]);
+        }
+    });
+
+    // Merge bottom-up (serial; the back-transform gemms thread via BLAS).
+    std::map<std::pair<int, int>, std::pair<Eigen::VectorXd, Eigen::MatrixXd>> res;
+    for (int li = 0; li < L; ++li)
+        res[leaves[li]] = { std::move(lev[li]), std::move(lV[li]) };
+
+    for (const MergeNode& mg : merges) {
+        auto& c1 = res[{mg.lo, mg.split}];
+        auto& c2 = res[{mg.split, mg.hi}];
+        const Eigen::VectorXd& ev1 = c1.first;  const Eigen::MatrixXd& V1 = c1.second;
+        const Eigen::VectorXd& ev2 = c2.first;  const Eigen::MatrixXd& V2 = c2.second;
+        const int n1 = mg.split - mg.lo, n2 = mg.hi - mg.split, nn = n1 + n2;
+
+        Eigen::VectorXd D(nn);  D.head(n1) = ev1;  D.tail(n2) = ev2;
+        Eigen::VectorXd z(nn);
+        z.head(n1) = V1.row(n1 - 1).transpose();
+        z.tail(n2) = V2.row(0).transpose();
+
+        Eigen::VectorXd lam;  Eigen::MatrixXd Wm;
+        rank1Eigen(D, z, mg.rho, lam, Wm);
+
+        Eigen::MatrixXd Vp(nn, nn);
+        Vp.topRows(n1)    = V1 * Wm.topRows(n1);
+        Vp.bottomRows(n2) = V2 * Wm.bottomRows(n2);
+
+        res.erase({mg.lo, mg.split});
+        res.erase({mg.split, mg.hi});
+        res[{mg.lo, mg.hi}] = { std::move(lam), std::move(Vp) };
+    }
+
+    auto& full = res[{0, n}];
+    eval = std::move(full.first);
+    evec = std::move(full.second);
+    return true;
+}
+
 } // namespace
 
 bool solveSymmetric(const Eigen::MatrixXd& A,
                     Eigen::VectorXd& evals,
-                    Eigen::MatrixXd& evecs)
+                    Eigen::MatrixXd& evecs,
+                    int nThreads)
 {
     const int n = static_cast<int>(A.rows());
     if (n == 0 || A.cols() != n) return false;
@@ -411,7 +539,7 @@ bool solveSymmetric(const Eigen::MatrixXd& A,
     for (int k = 0; k < n - 1; ++k) eoff(k) = efull(k + 1);   // off(k) connects (k,k+1)
     Eigen::VectorXd ev;
     Eigen::MatrixXd V;
-    if (!tridiagDC(d, eoff, ev, V)) return false;
+    if (!tridiagDCparallel(d, eoff, nThreads, ev, V)) return false;
 
     // 3. Back-transform eigenvectors C = Q·V and sort eigenpairs ascending.
     const Eigen::MatrixXd QV = Q * V;
