@@ -169,6 +169,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - **SimpleMD** - Basic molecular dynamics simulation
 - **NEB Docking** - Nudged elastic band for transition states
 - **Trajectory Analysis** - Analysis of MD trajectories
+- **PLUMED Metadynamics** - Enhanced sampling via PLUMED2 plugin (`-mtd` flag) — see [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md)
 
 ### 7. Analysis Tools
 - **✅ Parallel Analysis** - Frame-level parallelization with CxxThreadPool (3-8x speedup, January 2026)

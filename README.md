@@ -620,8 +620,10 @@ curcuma -md input.xyz -mtd
 ``` 
 a metadynamics simulation can be performed using plumed. It is a ***plumed.dat*** expected, or can be set with
 ```sh
-curcuma -md input.xyz -mtd -plumed input.plumed
-``` 
+curcuma -md input.xyz -mtd -plumed plumed.dat
+```
+
+See [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md) for the full PLUMED integration guide (unit conversions, output files, available CVs, thermal equilibration gate, internal RMSD-MTD). 
 
 # Funding
 The development of curcuma is funded by:
