@@ -194,19 +194,9 @@ json OrcaMethod::getEnergyDecomposition() const
 {
     // ORCA composite methods do not expose energy decomposition in a
     // machine-readable format via the text/JSON output we consume.
-    json energy_json = {
-        {"Bond", 0.0},
-        {"Angle", 0.0},
-        {"Torsion", 0.0},
-        {"Inversion", 0.0},
-        {"Dispersion", 0.0},
-        {"Coulomb", 0.0},
-        {"HBond", 0.0},
-        {"XBond", 0.0},
-        {"ATM", 0.0},
-        {"BATM", 0.0}
-    };
-    return energy_json;
+    // Return an empty JSON object instead of fake zero-valued components
+    // (caller should check is_null() / empty before reading).
+    return json::object();
 }
 
 void OrcaMethod::setCustomKeywords(const std::string& keywords)

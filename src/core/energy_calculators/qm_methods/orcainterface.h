@@ -24,6 +24,7 @@ BEGIN_PARAMETER_DEFINITION(orca)
     PARAM(orca_extra_keywords, String, "EnGrad TightSCF", "Additional ORCA simple-input keywords appended to the ! line (e.g. 'EnGrad TightSCF').", "Method", {})
     PARAM(orca_basename, String, "orca_calc", "Basename for ORCA input/output files written to disk.", "Output", {})
     PARAM(orca_executable, String, "", "Full path to the ORCA executable. If empty, the environment variable ORCA_PATH (or ORCA_ROOT) is checked, then 'orca' is searched via PATH.", "Method", {})
+    PARAM(orca_allow_cg, Bool, false, "Allow ORCA inputs to include CG (coarse-grained) atoms. ORCA cannot parse element 226 (CG_ELEMENT). Leave false unless the molecule has been pre-converted to all-atom.", "Validation", {})
 
     // Solvation Models
     PARAM(cpcm_solvent, String, "none", "CPCM solvent name (none, water, acetone, etc.).", "Solvation", {"cpcm_solv"})
@@ -32,10 +33,29 @@ BEGIN_PARAMETER_DEFINITION(orca)
     PARAM(alpb_epsilon, Double, -1.0, "ALPB dielectric constant. -1 = auto-detect from name.", "Solvation", {"alpb_eps"})
 END_PARAMETER_DEFINITION
 
+/**
+ * @brief ORCA external-process interface.
+ *
+ * Resolves the ORCA executable, writes input files, runs ORCA via popen,
+ * and parses energy/gradient/charges from .property.json (preferred) or
+ * the .out text (fallback).
+ *
+ * @note NOT thread-safe. Each thread needs its own instance with a unique
+ *       orca_basename, because calculate() writes to m_input_path + ".inp" /
+ *       ".out" / ".property.json" on disk. The wrapper OrcaMethod exposes
+ *       isThreadSafe() == false; setThreadCount() re-creates the
+ *       OrcaInterface, which does NOT guarantee unique basenames (caller's
+ *       responsibility).
+ */
 class OrcaInterface {
 public:
     explicit OrcaInterface(const ConfigManager& config);
     explicit OrcaInterface();
+    /**
+     * @brief Convenience constructor for raw JSON config.
+     *        Equivalent to OrcaInterface(ConfigManager("orca", json_config)).
+     */
+    explicit OrcaInterface(const json& json_config);
     ~OrcaInterface();
 
     // =================================================================================
@@ -49,6 +69,73 @@ public:
     // =================================================================================
     // ComputationalMethod support (Claude Generated - June 2026)
     // =================================================================================
+
+    /**
+     * @brief Run a user-supplied ORCA input file (legacy CLI path).
+     *
+     * For `curcuma -orca <input.inp>` style invocation. Skips generateInput()
+     * and uses the file at m_input_path as-is.
+     *
+     * @param injectEnGrad If true, append "EnGrad" to the ! line if missing.
+     * @param verbosity Curcuma verbosity (0=silent ... 3=full). Pass -1 for default.
+     * @return true on success.
+     *
+     * @note This is the new public entry point for the legacy -orca CLI flow.
+     *       Replaces the setInputFile+runOrca+getOrcaJSON sequence.
+     */
+    bool runExistingInput(bool injectEnGrad = false, int verbosity = -1);
+
+    // =================================================================================
+    // Helpers exposed for unit testing (@public-for-testing)
+    // =================================================================================
+
+    /**
+     * @brief Build the *xyz block (Claude Generated - June 2026).
+     * @public-for-testing Used by test_orca_interface.cpp.
+     */
+    std::string buildGeometryBlock(const Mol& mol) const;
+
+    /**
+     * @brief Parse gradient (natoms x 3) from .property.json or .out text.
+     * @public-for-testing Used by test_orca_interface.cpp.
+     */
+    Matrix parseGradient(int natoms) const;
+
+    /**
+     * @brief Parse atomic charges from .property.json or .out text.
+     * @public-for-testing Used by test_orca_interface.cpp.
+     */
+    Vector parseCharges(int natoms) const;
+
+    /**
+     * @brief Parse gradient from ORCA text output (fallback).
+     * @public-for-testing Used by test_orca_interface.cpp.
+     */
+    Matrix parseGradientFromText(int natoms) const;
+
+    /**
+     * @brief Parse charges from ORCA text output (fallback).
+     * @public-for-testing Used by test_orca_interface.cpp.
+     */
+    Vector parseChargesFromText(int natoms) const;
+
+    /**
+     * @brief Read .property.json into m_property_json.
+     * @public-for-testing Tests inject a JSON mock via this method.
+     */
+    bool loadPropertyJSON();
+
+    /**
+     * @brief Parse energy from .property.json or .out text.
+     * @public-for-testing Used by test_orca_interface.cpp.
+     */
+    double parseEnergy() const;
+
+    /**
+     * @brief Parse dipole moment from .property.json.
+     * @public-for-testing Used by test_orca_interface.cpp.
+     */
+    Position parseDipole() const;
 
     /**
      * @brief Check if the 'orca' executable is available via system PATH.
@@ -96,6 +183,10 @@ public:
      *
      * Replaces the *xyz ... * block with current geometry.
      *
+     * @note This function performs a non-atomic read-modify-write of the
+     *       input file. The file write is the de-facto synchronization
+     *       point; do not call from multiple threads on the same instance.
+     *
      * @param mol New geometry.
      * @return true on success.
      */
@@ -123,6 +214,12 @@ public:
     std::string getErrorMessage() const { return m_error_message; }
     void clearError() { m_has_error = false; m_error_message.clear(); }
 
+    /**
+     * @brief Run orca_2json to produce .property.json, then load it.
+     * @public-for-testing Used by test_orca_interface.cpp.
+     */
+    bool produceAndLoadJSON();
+
     // File paths
     std::string getInputPath() const { return m_input_path; }
     std::string getOutputPath() const { return m_output_path; }
@@ -138,61 +235,19 @@ private:
     bool createInputFile(const std::string& content);
     bool executeOrcaProcess();
 
-    // =================================================================================
-    // New private helpers (Claude Generated - June 2026)
-    // =================================================================================
+    // Citation is handled by the OrcaMethod wrapper (single source of truth).
 
     /**
-     * @brief Build the geometry block (*xyz charge multiplicity ... *) as string.
-     */
-    std::string buildGeometryBlock(const Mol& mol) const;
-
-    /**
-     * @brief Parse energy from .property.json or .out text.
-     */
-    double parseEnergy() const;
-
-    /**
-     * @brief Parse gradient (natoms x 3) from .property.json or .out text.
-     */
-    Matrix parseGradient(int natoms) const;
-
-    /**
-     * @brief Parse atomic charges from .property.json or .out text.
-     */
-    Vector parseCharges(int natoms) const;
-
-    /**
-     * @brief Parse dipole moment from .property.json.
-     */
-    Position parseDipole() const;
-
-    /**
-     * @brief Run orca_2json to produce .property.json, then load it.
-     */
-    bool produceAndLoadJSON();
-
-    /**
-     * @brief Read .property.json into m_property_json.
-     */
-    bool loadPropertyJSON();
-
-    /**
-     * @brief Parse gradient from ORCA text output (fallback).
+     * @brief Run orca via popen and capture stdout/stderr into the .out file
+     *        while applying the live-output verbosity filter.
      *
-     * Searches for "The cartesian gradient:" after "CARTESIAN GRADIENT".
-     */
-    Matrix parseGradientFromText(int natoms) const;
-
-    /**
-     * @brief Parse charges from ORCA text output (fallback).
+     * Extracted from calculate() so both calculate() and runExistingInput()
+     * can share the same process-execution path.
      *
-     * Searches for "MULLIKEN ATOMIC CHARGES" block.
+     * @param verbosity Curcuma verbosity (0=silent ... 3=full).
+     * @return true on exit-status 0, false otherwise (sets m_has_error).
      */
-    Vector parseChargesFromText(int natoms) const;
-
-    // Citation helper
-    void citeOrca();
+    bool runProcessAndCapture(int verbosity);
 
     // State
     std::string m_input_path = "orca.inp";

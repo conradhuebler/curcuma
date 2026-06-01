@@ -4,12 +4,12 @@
 //
 
 #include "orcainterface.h"
-#include "src/core/citation_registry.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
 
 #include <cstdlib>
 #include <cstdio>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -22,6 +22,62 @@
 #endif
 
 namespace fs = std::filesystem;
+
+// Claude Generated - June 2026
+// Tolerant numeric token extractor: walks a whitespace-separated token list and
+// returns the first n tokens that parse as double. Skips "pure" non-numeric
+// tokens (element symbols, colons, indices) but accepts tokens that are
+// pure-numeric strings. This is intentionally simple: it does not know
+// about a column layout, so on a header line like "# 0 C : 1.0 2.0 3.0"
+// it would still find 0, 1.0, 2.0, 3.0 (4 doubles).
+// Callers that need a strict "first 3 doubles after skipping all non-numeric
+// preamble" behavior should use extractDataDoubles instead.
+static std::vector<double> extractFirstNDoubles(const std::string& line, int n)
+{
+    std::vector<double> result;
+    result.reserve(n);
+    std::istringstream iss(line);
+    std::string token;
+    while (iss >> token && static_cast<int>(result.size()) < n) {
+        try {
+            std::size_t pos = 0;
+            double v = std::stod(token, &pos);
+            // Only accept full-token numeric parses (pos == token.size()).
+            // This rejects "0.123abc" but accepts "0.123", "1e-5", "-3.14".
+            if (pos == token.size()) {
+                result.push_back(v);
+            }
+        } catch (...) {
+            // Non-numeric token (e.g. element symbol, colon, index) - skip.
+        }
+    }
+    return result;
+}
+
+// Claude Generated - June 2026
+// Strict data-line extractor: skips all non-numeric tokens at the start
+// (index, element symbol, colons, comment markers), then returns the
+// first n numeric tokens. Designed for ORCA gradient/charge lines where
+// the format is "   0 C   :    0.123   -0.234    0.345" or just three
+// numbers. Returns fewer than n entries if the line is not a data line.
+static std::vector<double> extractDataDoubles(const std::string& line, int n)
+{
+    std::vector<double> result;
+    std::istringstream iss(line);
+    std::string token;
+    while (iss >> token && static_cast<int>(result.size()) < n) {
+        try {
+            std::size_t pos = 0;
+            double v = std::stod(token, &pos);
+            if (pos == token.size()) {
+                result.push_back(v);
+            }
+        } catch (...) {
+            // Non-numeric token - skip; keep scanning
+        }
+    }
+    return result;
+}
 
 // Simple element symbol lookup for ORCA input generation.
 // Claude Generated - June 2026
@@ -62,6 +118,15 @@ OrcaInterface::OrcaInterface()
     outputFilePath = "orca.out";
 }
 
+OrcaInterface::OrcaInterface(const json& json_config)
+    : m_config("orca", json_config)
+{
+    inputFilePath = "orca.inp";
+    outputFilePath = "orca.out";
+    m_input_path = m_config.get<std::string>("orca_basename", "orca_calc") + ".inp";
+    m_output_path = m_config.get<std::string>("orca_basename", "orca_calc") + ".out";
+}
+
 OrcaInterface::~OrcaInterface()
 {
     // Optional cleanup
@@ -71,6 +136,16 @@ void OrcaInterface::setInputFile(const std::string& inputFile)
 {
     inputFilePath = inputFile;
     m_input_path = inputFile;
+    // Mirror to output path: replace .inp with .out (or append .out)
+    std::string out = inputFile;
+    size_t dot = out.rfind('.');
+    if (dot != std::string::npos && out.substr(dot) == ".inp") {
+        out.replace(dot, 4, ".out");
+    } else {
+        out += ".out";
+    }
+    outputFilePath = out;
+    m_output_path = out;
 }
 
 bool OrcaInterface::createInputFile(const std::string& content)
@@ -93,31 +168,43 @@ bool OrcaInterface::executeOrcaProcess()
     return (result == 0);
 }
 
+/**
+ * @brief Legacy CLI helper: run ORCA on inputFilePath.
+ * @deprecated Use runExistingInput() or OrcaMethod::calculateEnergy().
+ */
 bool OrcaInterface::runOrca()
 {
-    CitationRegistry::cite("orca");
-    std::cout << "Starte ORCA..." << std::endl;
-    if (executeOrcaProcess()) {
-        std::cout << "ORCA abgeschlossen!" << std::endl;
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::success("Starting ORCA: " + inputFilePath);
+    }
+    if (runExistingInput(false, CurcumaLogger::get_verbosity())) {
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::success("ORCA finished: " + inputFilePath);
+        }
         return true;
     } else {
-        std::cerr << "Fehler beim Ausführen von ORCA!" << std::endl;
+        CurcumaLogger::error("ORCA process failed: " + inputFilePath);
         return false;
     }
 }
 
+/**
+ * @brief Legacy CLI helper: load .property.json into legacy OrcaJSON field.
+ * @deprecated Use loadPropertyJSON() / parseEnergy() / parseGradient() accessors.
+ */
 void OrcaInterface::readOrcaJSON()
 {
-    std::ifstream property(inputFilePath + ".property.json");
-    property >> OrcaJSON;
+    loadPropertyJSON();
+    OrcaJSON = m_property_json;
 }
 
+/**
+ * @brief Legacy CLI helper: invoke orca_2json.
+ * @deprecated Use produceAndLoadJSON() internally; this is a no-op wrapper.
+ */
 bool OrcaInterface::getOrcaJSON()
 {
-    std::stringstream command;
-    command << "orca_2json " << inputFilePath << " -property >> " << outputFilePath;
-    const int result = std::system(command.str().c_str());
-    return (result == 0);
+    return produceAndLoadJSON();
 }
 
 // =================================================================================
@@ -174,9 +261,9 @@ bool OrcaInterface::checkOrcaExecutable()
 {
     // Quick static check without config — sufficient for isAvailable()
 #ifdef _WIN32
-    int result = std::system("where orca > NUL 2>>1");
+    int result = std::system("where orca > NUL 2>&1");
 #else
-    int result = std::system("which orca > /dev/null 2>>1");
+    int result = std::system("which orca > /dev/null 2>&1");
 #endif
     if (result == 0) return true;
 
@@ -218,6 +305,18 @@ std::string OrcaInterface::buildGeometryBlock(const Mol& mol) const
 bool OrcaInterface::generateInput(const Mol& mol, const std::string& method_keyword)
 {
     clearError();
+
+    // CG-atom guard: ORCA cannot parse element 226 (CG_ELEMENT).
+    if (!m_config.get<bool>("orca_allow_cg", false)) {
+        if (std::any_of(mol.m_atoms.begin(), mol.m_atoms.end(),
+                        [](int z) { return z == 226; })) {
+            m_has_error = true;
+            m_error_message = "Molecule contains CG atoms (element 226) which ORCA cannot parse. "
+                              "Set orca_allow_cg=true to bypass (only for pre-converted all-atom systems).";
+            CurcumaLogger::error(m_error_message);
+            return false;
+        }
+    }
 
     // Determine paths from config
     std::string basename = m_config.get<std::string>("orca_basename", "orca_calc");
@@ -289,6 +388,18 @@ bool OrcaInterface::updateGeometryInInput(const Mol& mol)
 {
     clearError();
 
+    // CG-atom guard (same logic as generateInput)
+    if (!m_config.get<bool>("orca_allow_cg", false)) {
+        if (std::any_of(mol.m_atoms.begin(), mol.m_atoms.end(),
+                        [](int z) { return z == 226; })) {
+            m_has_error = true;
+            m_error_message = "Molecule contains CG atoms (element 226) which ORCA cannot parse. "
+                              "Set orca_allow_cg=true to bypass (only for pre-converted all-atom systems).";
+            CurcumaLogger::error(m_error_message);
+            return false;
+        }
+    }
+
     std::ifstream in(m_input_path);
     if (!in) {
         m_has_error = true;
@@ -340,7 +451,7 @@ bool OrcaInterface::updateGeometryInInput(const Mol& mol)
 bool OrcaInterface::produceAndLoadJSON()
 {
     // Run orca_2json to produce .property.json
-    std::string json_cmd = "orca_2json " + m_input_path + " -property > /dev/null 2>>1";
+    std::string json_cmd = "orca_2json " + m_input_path + " -property > /dev/null 2>&1";
     int result = std::system(json_cmd.c_str());
     if (result != 0) {
         return false;
@@ -348,6 +459,18 @@ bool OrcaInterface::produceAndLoadJSON()
     return loadPropertyJSON();
 }
 
+/**
+ * JSON schema contract for m_property_json:
+ *   Validated against: orca_2json output (ORCA 5.0.4 / June 2026).
+ *   Path layout:
+ *     Calculation.CalculationType.Energy.TotalEnergy.Value       (double, Eh)
+ *     Calculation.CalculationType.Properties.Gradient            (array, natoms*3)
+ *     Calculation.CalculationType.Properties.MullikenCharges     (array, natoms)
+ *     Calculation.CalculationType.Properties.LoewdinCharges      (array, natoms; fallback)
+ *     Calculation.CalculationType.Properties.DipoleMoment        (array, 3)
+ *   Optional top-level "SchemaVersion" is logged at verbosity 2.
+ *   Unknown schema versions fall back to text parsing (existing behavior).
+ */
 bool OrcaInterface::loadPropertyJSON()
 {
     std::string json_path = m_input_path + ".property.json";
@@ -357,6 +480,12 @@ bool OrcaInterface::loadPropertyJSON()
     }
     try {
         in >> m_property_json;
+        if (m_property_json.is_object() && m_property_json.contains("SchemaVersion")) {
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::info("ORCA .property.json SchemaVersion: " +
+                    m_property_json["SchemaVersion"].dump());
+            }
+        }
         return true;
     } catch (...) {
         return false;
@@ -434,10 +563,12 @@ Matrix OrcaInterface::parseGradientFromText(int natoms) const
     std::string line;
     bool found_gradient = false;
 
+    // ORCA 5.x: "The cartesian gradient:" or "CARTESIAN GRADIENT"
+    // ORCA 6.x: "Gradient (Eh/Bohr)" or "CARTESIAN GRADIENT (Eh/Bohr)"
     while (std::getline(out, line)) {
-        // Look for "CARTESIAN GRADIENT" or "The cartesian gradient:"
-        if (line.find("The cartesian gradient:") != std::string::npos ||
-            line.find("CARTESIAN GRADIENT") != std::string::npos) {
+        if (line.find("cartesian gradient") != std::string::npos ||
+            line.find("CARTESIAN GRADIENT") != std::string::npos ||
+            line.find("Gradient (Eh/Bohr)") != std::string::npos) {
             found_gradient = true;
             break;
         }
@@ -447,42 +578,41 @@ Matrix OrcaInterface::parseGradientFromText(int natoms) const
         return Matrix::Zero(natoms, 3);
     }
 
-    // Skip blank lines
-    while (std::getline(out, line)) {
-        if (!line.empty()) break;
-    }
-
-    // Read natoms lines of gradient data
+    // Read natoms lines of gradient data, tolerantly.
+    // Skip lines that contain no numeric tokens (separators, blank lines, comments).
     Matrix g(natoms, 3);
     for (int i = 0; i < natoms; ++i) {
-        if (!std::getline(out, line)) break;
+        // Find next line with at least 3 numeric tokens (the data line)
+        std::string line;
+        while (std::getline(out, line)) {
+            // End-of-block marker
+            if (!line.empty() && line[0] == '*') break;
 
-        // Format: "   0 C   :    0.123456   -0.234567    0.345678"
-        // or just: "   0.123456   -0.234567    0.345678"
-        std::istringstream iss(line);
-        // Try to skip index and symbol
-        int idx;
-        std::string symbol;
-        if (iss >> idx >> symbol) {
-            // Skip colon if present
-            if (symbol == ":") {
-                // already skipped, read next token as first gradient component
-                if (iss >> g(i, 0) >> g(i, 1) >> g(i, 2)) continue;
-            } else {
-                // symbol was element name, next should be colon
-                char c;
-                if (iss >> c && c == ':') {
-                    if (iss >> g(i, 0) >> g(i, 1) >> g(i, 2)) continue;
-                } else {
-                    // No colon, try reading as numbers directly
-                    iss.clear();
-                    iss.str(line);
-                    if (iss >> g(i, 0) >> g(i, 1) >> g(i, 2)) continue;
-                }
+            // Skip ORCA comment lines (start with "#")
+            if (!line.empty() && line.find_first_not_of(" \t") == '#') continue;
+
+            // Two accepted formats:
+            //   ORCA 5.x: "  0   C   :    0.123   -0.234    0.345"
+            //   ORCA 6.x: "    0.123   -0.234    0.345"
+            //
+            // For ORCA 5.x, parse only the part after the LAST ":" (gradient
+            // values are guaranteed to be after the symbol separator).
+            // For ORCA 6.x (no colon), use the first 3 doubles directly.
+            std::string data_part = line;
+            size_t colon = line.rfind(':');
+            if (colon != std::string::npos) {
+                data_part = line.substr(colon + 1);
             }
+
+            auto vals = extractFirstNDoubles(data_part, 3);
+            if (static_cast<int>(vals.size()) == 3) {
+                g(i, 0) = vals[0];
+                g(i, 1) = vals[1];
+                g(i, 2) = vals[2];
+                break; // Found data line for this atom
+            }
+            // else: skip this line (separator/header) and try next
         }
-        // If we can't parse, set to zero
-        g.row(i).setZero();
     }
 
     return g;
@@ -543,22 +673,33 @@ Vector OrcaInterface::parseChargesFromText(int natoms) const
         return Vector::Zero(natoms);
     }
 
-    // Skip header lines (usually 1-2)
-    for (int skip = 0; skip < 2; ++skip) {
-        if (!std::getline(out, line)) break;
-    }
-
+    // Read natoms lines of charge data, tolerantly.
+    // Charge lines: "  0 C    :    0.123456" (after the colon is the value)
     Vector charges(natoms);
     for (int i = 0; i < natoms; ++i) {
-        if (!std::getline(out, line)) break;
-        std::istringstream iss(line);
-        int idx;
-        std::string symbol;
-        double q;
-        if (iss >> idx >> symbol >> q) {
-            charges(i) = q;
-        } else {
-            charges(i) = 0.0;
+        std::string line;
+        while (std::getline(out, line)) {
+            if (!line.empty() && line[0] == '*') break;
+
+            // Skip ORCA comment/separator lines
+            if (!line.empty() && line.find_first_not_of(" \t") == '#') continue;
+            if (line.find_first_not_of(" \t-=") == std::string::npos) continue;
+
+            // For "0 C : 0.123" format, take the part after the LAST colon
+            // (or the only number if no colon)
+            std::string data_part = line;
+            size_t colon = line.rfind(':');
+            if (colon != std::string::npos) {
+                data_part = line.substr(colon + 1);
+            }
+
+            std::istringstream iss(data_part);
+            double q;
+            if (iss >> q) {
+                charges(i) = q;
+                break;
+            }
+            // else: skip line
         }
     }
 
@@ -586,11 +727,6 @@ Position OrcaInterface::parseDipole() const
     return {0.0, 0.0, 0.0};
 }
 
-void OrcaInterface::citeOrca()
-{
-    CitationRegistry::cite("orca");
-}
-
 double OrcaInterface::calculate(bool gradient, int verbosity)
 {
     clearError();
@@ -607,7 +743,7 @@ double OrcaInterface::calculate(bool gradient, int verbosity)
         return 0.0;
     }
 
-    citeOrca();
+    // Citation is registered by the OrcaMethod wrapper (single source of truth).
 
     // Ensure gradient keyword is present if needed
     if (gradient) {
@@ -632,6 +768,58 @@ double OrcaInterface::calculate(bool gradient, int verbosity)
         }
     }
 
+    if (!runProcessAndCapture(verbosity)) {
+        return 0.0;
+    }
+
+    // Parse results
+    m_last_energy = parseEnergy();
+
+    // Determine natoms from input (rough)
+    // We'll read the input to count atoms in the xyz block
+    int natoms = 0;
+    {
+        std::ifstream inp(m_input_path);
+        if (inp) {
+            std::string line;
+            bool in_xyz = false;
+            while (std::getline(inp, line)) {
+                if (line.find("*xyz") != std::string::npos || line.find("* XYZ") != std::string::npos) {
+                    in_xyz = true;
+                    continue;
+                }
+                if (in_xyz) {
+                    if (line.find("*") != std::string::npos && line.find("*xyz") == std::string::npos) {
+                        break;
+                    }
+                    if (!line.empty() && line.find_first_not_of(" \t\r\n") != std::string::npos) {
+                        natoms++;
+                    }
+                }
+            }
+        }
+    }
+
+    if (gradient && natoms > 0) {
+        m_last_gradient = parseGradient(natoms);
+    }
+    if (natoms > 0) {
+        m_last_charges = parseCharges(natoms);
+    }
+    m_last_dipole = parseDipole();
+
+    return m_last_energy;
+}
+
+bool OrcaInterface::runProcessAndCapture(int verbosity)
+{
+    std::string orca_exe = findOrcaExecutable();
+    if (orca_exe.empty()) {
+        m_has_error = true;
+        m_error_message = "ORCA executable not found. Set ORCA_PATH environment variable or use -orca_executable /full/path/to/orca.";
+        return false;
+    }
+
     // Run ORCA using the resolved executable path.
     // For parallel runs ORCA requires the absolute path to the binary.
     // Live output filter:
@@ -648,7 +836,7 @@ double OrcaInterface::calculate(bool gradient, int verbosity)
     if (!pipe) {
         m_has_error = true;
         m_error_message = "Failed to start ORCA process. Command: " + cmd.str();
-        return 0.0;
+        return false;
     }
 
     std::ofstream out_file(m_output_path);
@@ -699,17 +887,59 @@ double OrcaInterface::calculate(bool gradient, int verbosity)
     if (result != 0) {
         m_has_error = true;
         m_error_message = "ORCA process exited with non-zero status (" + std::to_string(result) + ").";
-        return 0.0;
+        return false;
     }
 
     // Try to get JSON output
     produceAndLoadJSON();
+    return true;
+}
 
-    // Parse results
+bool OrcaInterface::runExistingInput(bool injectEnGrad, int verbosity)
+{
+    if (verbosity < 0) {
+        verbosity = CurcumaLogger::get_verbosity();
+    }
+    clearError();
+    m_property_json = json{};
+    m_last_energy = 0.0;
+    m_last_gradient = Matrix::Zero(0, 3);
+    m_last_charges = Vector::Zero(0);
+    m_last_dipole = {0.0, 0.0, 0.0};
+
+    if (m_input_path.empty()) {
+        m_has_error = true;
+        m_error_message = "No ORCA input file set. Call setInputFile() first.";
+        return false;
+    }
+
+    // Optionally inject EnGrad
+    if (injectEnGrad) {
+        std::ifstream in(m_input_path);
+        if (in) {
+            std::string content((std::istreambuf_iterator<char>(in)),
+                                std::istreambuf_iterator<char>());
+            in.close();
+            if (content.find("EnGrad") == std::string::npos &&
+                content.find("engrad") == std::string::npos) {
+                size_t bang = content.find("!");
+                if (bang != std::string::npos) {
+                    size_t eol = content.find("\n", bang);
+                    content.insert(eol, " EnGrad");
+                    std::ofstream out(m_input_path);
+                    out << content;
+                    out.close();
+                }
+            }
+        }
+    }
+
+    if (!runProcessAndCapture(verbosity)) {
+        return false;
+    }
+
+    // Parse results (count atoms from input)
     m_last_energy = parseEnergy();
-
-    // Determine natoms from input (rough)
-    // We'll read the input to count atoms in the xyz block
     int natoms = 0;
     {
         std::ifstream inp(m_input_path);
@@ -733,13 +963,13 @@ double OrcaInterface::calculate(bool gradient, int verbosity)
         }
     }
 
-    if (gradient && natoms > 0) {
-        m_last_gradient = parseGradient(natoms);
-    }
     if (natoms > 0) {
         m_last_charges = parseCharges(natoms);
     }
     m_last_dipole = parseDipole();
 
-    return m_last_energy;
+    if (verbosity >= 1 && CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result(fmt::format("ORCA final energy: {} Eh", m_last_energy));
+    }
+    return true;
 }

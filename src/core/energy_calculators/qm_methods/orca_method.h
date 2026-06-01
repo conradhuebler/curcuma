@@ -104,6 +104,12 @@ public:
      */
     static std::vector<std::string> getSupportedMethods();
 
+    /**
+     * @brief Map canonical method name to ORCA keyword.
+     * @public-for-testing Used by test_orca_interface.cpp.
+     */
+    static std::string methodToOrcaKeyword(const std::string& method);
+
 private:
     std::unique_ptr<OrcaInterface> m_orca;
     std::string m_method_name;       ///< Canonical method name (e.g. "hf-3c")
@@ -114,11 +120,6 @@ private:
 
     int m_charge_override = 0;       ///< 0 = use molecule charge
     int m_multiplicity_override = 1; ///< 1 = singlet default
-
-    /**
-     * @brief Map canonical method name to ORCA keyword.
-     */
-    static std::string methodToOrcaKeyword(const std::string& method);
 
     /**
      * @brief Initialize OrcaInterface with current parameters.

@@ -1188,12 +1188,16 @@ int executeDipole(const json& controller, int argc, char** argv) {
 
 int executeOrca(const json& controller, int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Please use curcuma as follows:\ncurcuma -orca input" << std::endl;
+        CurcumaLogger::error("Please use curcuma as follows: curcuma -orca input");
         return 1;
     }
     OrcaInterface orca;
     orca.setInputFile(argv[2]);
-    if (!orca.runOrca()) return 1;
+    if (!orca.runExistingInput(false, CurcumaLogger::get_verbosity())) {
+        CurcumaLogger::error("ORCA run failed: " + orca.getErrorMessage());
+        return 1;
+    }
+    // Populate legacy OrcaJSON field for backward compatibility
     orca.getOrcaJSON();
     orca.readOrcaJSON();
     return 0;
