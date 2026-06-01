@@ -71,12 +71,14 @@ Per-phase, gfn2, min-representative (`-verbosity 3`):
 | gradient | 218 ms | 59 ms | 3.7× |
 | **TOTAL** | **1550 ms** | **679 ms** | **2.3×** (after WP1) |
 
-Total min-of-5 scaling, complex/231 (after WP1 — threaded MKL):
+Total min-of-5 scaling, complex/231 (after WP1+WP2+WP2b — threaded MKL + D4 cache/threading):
 
 | method | t1 | t2 | t4 | t8 |
 |---|---|---|---|---|
-| gfn1 | 1152 | 741 | 485 | **375 (3.07×)** |
-| gfn2 | 1469 | 983 | 747 | **650 (2.26×)** |
+| gfn1 | 1149 | 738 | 478 | **372 (3.09×)** |
+| gfn2 | 1371 | 896 | 631 | **513 (2.67×)** |
+
+(After WP1 alone it was gfn1 375 / gfn2 650 at t8; WP2/2b cut the D4 in-SCF cost.)
 
 **Single-core unchanged** (taskset -c 0, default, no `-threads`): gfn1 1160 ms,
 gfn2 1336 ms (≈ the pre-WP1 1200/1362; slightly faster from the `W`-as-gemm).

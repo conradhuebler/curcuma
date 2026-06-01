@@ -76,7 +76,14 @@ Optionally then parallelize the D4 evaluator's O(nat²) loops (helps GFN-FF too)
 **Files:** `dispersion/d4_evaluator.*`, `xtb_native.cpp`. **Risk:** low (algorithmic,
 energy-neutral). **Exit:** potential-build per-iter drops; energy+gradient bit-identical.
 
-## WP3 — Seeded / iterative eigensolver  ⏳
+## WP3 — Seeded / iterative eigensolver  ⏸ DEPRIORITISED
+After WP1 the eigensolve threads (dsyevd ~130 ms at t8). A seeded/iterative refinement
+must produce ALL eigenpairs for GFN's ~50 %-occupied minimal basis, where iterative/partial
+solvers are a documented net-loss (see [[native-gfn-scf-singlecore-perf-deadends]]; dsyevr
+partial-solve was already rejected). Low reward vs the threaded `dsyevd`, real convergence
+risk — parked unless a specific large case motivates it.
+
+## WP3 — Seeded / iterative eigensolver  ⏳ (original notes)
 **Goal:** exploit that near convergence the occupied subspace barely rotates — refine the
 previous eigenvectors instead of a full `dsyevd` each iteration.
 **Approach:** subspace iteration / block-Davidson seeded from the previous `C` (and across
@@ -96,7 +103,13 @@ replace only the tridiagonal-eigensolve core with a blocked Cuppen divide-and-co
 parallelised over subproblems via `CxxThreadPool` and written with tile/batch structure
 suitable for a future cuSOLVER/custom-CUDA backend. Assess
 `ParallelEigenSolver.hpp` (already in `qm_methods/`) as a seed or remove it if dead.
-Gate behind a config switch so MKL stays default until parity is proven.
+**Seed assessment (2026-06):** `ParallelEigenSolver.hpp` (928 lines) IS a CxxThreadPool
+Cuppen-style D&C skeleton (`BlockDiagonalizationThread` + `ResultsMergeThread` +
+`MatrixMultiplicationThread`) but is **dead code — referenced nowhere**, correctness
+unknown/unvalidated. Candidate seed, but completing+validating a from-scratch symmetric
+eigensolver to MKL accuracy (eigenvalues feed energy/gradient) is a large standalone effort;
+on CPU it must beat MKL's now-threaded `dsyevd` (~130 ms) — the payoff is mainly strategic
+(GPU-portable, no MKL dependency). Gate behind a config switch so MKL stays default until parity.
 **Files:** new `qm_methods/dc_eigensolver.*`, `xtb_scf.cpp`. **Risk:** high (correctness of
 a from-scratch eigensolver; eigenvalue accuracy feeds energy/gradient). **Exit:** matches
 MKL eigenpairs to ~1e-10; energy bit-identical; competitive wall at N≥500 single molecule.
