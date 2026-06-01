@@ -52,24 +52,20 @@ public:
 
 **Priority-based method creation** with automatic fallbacks:
 
-#### **Method Hierarchies**
+#### **Method Hierarchies** (canonical, AP3 April 2026 — see top-level CLAUDE.md)
 ```cpp
-// gfn2 priority: TBLite → Ulysses → XTB
-"gfn2" -> TBLiteMethod("gfn2") [preferred]
-       -> UlyssesMethod("ugfn2") [fallback]  
-       -> XTBMethod("gfn2") [last resort]
-
-// gfn1 priority: TBLite → XTB → Ulysses
-"gfn1" -> TBLiteMethod("gfn1") [preferred]
-       -> XTBMethod("gfn1") [fallback]
-       -> UlyssesMethod("ugfn1") [last resort]
+// gfn1 / gfn2: NATIVE curcuma xTB is canonical (no external dependency)
+"gfn1" / "gfn2"  -> NativeXtbMethod  (curcuma::xtb::XTB)
+// External GFN providers are explicit, not fallbacks:
+"xtb-gfn1/2"     -> TBLite (USE_TBLITE) -> XTB binary (USE_XTB)
+"tblite-gfn1/2"  -> TBLite (forces that backend)
+"ipea1"          -> TBLite ; "ugfn1/2" -> Ulysses
 ```
 
 #### **Method Creation**
 ```cpp
-std::unique_ptr<ComputationalMethod> method = 
-    MethodFactory::createMethod("gfn2", config);
-// Automatically tries TBLite first, falls back to Ulysses, then XTB
+std::unique_ptr<ComputationalMethod> method =
+    MethodFactory::createMethod("gfn2", config);  // -> NativeXtbMethod (GFN2)
 ```
 
 ## Method Implementations

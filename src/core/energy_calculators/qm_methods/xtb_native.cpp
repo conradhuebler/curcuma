@@ -28,6 +28,7 @@
 #include "STO_CGTO.hpp"
 #include "src/core/curcuma_logger.h"
 #include "src/core/config_manager.h"
+#include "src/core/intra_parallel_context.h"
 #include "src/core/energy_calculators/dispersion/d4_evaluator.h"
 #include "src/core/energy_calculators/dispersion/d4param_generator.h"
 #include "src/core/energy_calculators/dispersion/d4_ncoord.h"  // D4 CN gradient (GFN2)
@@ -36,7 +37,10 @@
 #include "diis_accelerator.h"
 #include "broyden_mixer.h"
 
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
+
 #include <chrono>
+#include <future>
 #include <stdexcept>
 
 namespace curcuma::xtb {
@@ -51,6 +55,51 @@ XTB::XTB(MethodType method)
 }
 
 XTB::~XTB() = default;
+
+/* ------------------------------------------------------------------------- *
+ *  Intra-molecule parallelism helpers (Claude Generated).
+ *
+ *  Curcuma parallelises at the molecule level (one CxxThreadPool worker per
+ *  molecule in MD/conformer/batch runs), so these honour the intra-SCF thread
+ *  budget ONLY for a single large molecule and otherwise stay serial. See the
+ *  auto-gate rationale in xtb_native.h (CxxThreadPoolWorkerFlag, MklThreadScope).
+ * ------------------------------------------------------------------------- */
+int XTB::effectiveIntraThreads(int work_units) const
+{
+    if (m_intra_threads <= 1) return 1;
+    // Already running under molecule-level parallelism → stay serial (no N^2).
+    if (curcuma::intraParallelSuppressed()) return 1;
+    // Size guard: keep at least kMinWorkPerThread items per thread; tiny systems
+    // are dominated by dispatch overhead (tuned in the benchmark step).
+    const int by_work = work_units / kMinWorkPerThread;
+    const int t = std::min(m_intra_threads, std::max(1, by_work));
+    return t;
+}
+
+void XTB::ensurePool(int n_threads) const
+{
+    if (n_threads <= 1) return;
+    if (!m_pool) {
+        m_pool = std::make_unique<CxxThreadPool>();
+        m_pool->setProgressBar(CxxThreadPool::ProgressBarType::None);
+    }
+    // setActiveThreadCount is idempotent: it only rebuilds workers when the count
+    // actually changes, so calling it every region is cheap.
+    m_pool->setActiveThreadCount(n_threads);
+}
+
+void XTB::parallelStripes(int n_threads,
+                          const std::function<void(int, int)>& worker) const
+{
+    if (n_threads <= 1) { worker(0, 1); return; }
+    ensurePool(n_threads);
+    std::vector<std::future<void>> futures;
+    futures.reserve(n_threads - 1);
+    for (int t = 1; t < n_threads; ++t)
+        futures.push_back(m_pool->enqueue(worker, t, n_threads));
+    worker(0, n_threads);                 // main thread does stripe 0
+    for (auto& f : futures) f.get();       // join
+}
 
 bool XTB::InitialiseMolecule()
 {
@@ -296,6 +345,14 @@ double XTB::Calculation(bool gradient)
     double acc_pot = 0.0, acc_fock = 0.0, acc_solve = 0.0, acc_mull = 0.0, acc_energy = 0.0;
     m_t_xfx = m_t_diag = m_t_back = m_t_dens = 0.0;
 
+    // Intra-molecule thread count for the per-iteration eigensolve. The eigensolve
+    // (dsygst/dsyevd/dtrsm) is the one region handed to MKL rather than the
+    // CxxThreadPool; effectiveIntraThreads() gates it (serial under molecule-level
+    // parallelism or for small bases). nao is constant over the SCF. Claude Generated.
+    const int eig_threads = effectiveIntraThreads(m_basis.nao);
+    if (verb >= 3 && eig_threads > 1)
+        CurcumaLogger::info_fmt("Eigensolve MKL threads: {}", eig_threads);
+
     const auto t_scf_start = clock::now();
     int iter;
     for (iter = 0; iter < max_iter; ++iter) {
@@ -364,8 +421,15 @@ double XTB::Calculation(bool gradient)
 
         const auto t_fock = clock::now();
 
-        // Diagonalize
-        if (!solveEigen(F, m_S)) {
+        // Diagonalize. Let MKL thread the eigensolve (dsygst/dsyevd/dtrsm) for a
+        // single large molecule; the surrounding MklSerialScope keeps MKL serial
+        // everywhere else so the hand-threaded regions are not oversubscribed.
+        bool eig_ok;
+        {
+            MklThreadScope eig_scope(eig_threads);
+            eig_ok = solveEigen(F, m_S);
+        }
+        if (!eig_ok) {
             CurcumaLogger::warn("XTB::Calculation: eigen solve failed at iteration " + std::to_string(iter));
             m_scf_converged = false;
             m_scf_iterations = iter;

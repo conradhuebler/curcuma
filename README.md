@@ -40,6 +40,8 @@ tblite methods:
 
 > Native GFN1/GFN2 (the canonical `gfn1`/`gfn2` backends, no external dependency) are validated against tblite to a 1e-8 Eh target — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md).
 
+> Native GFN1/GFN2 can use multiple cores **within one calculation** of a single large molecule: pass `-threads N` to a `-sp`/`-opt`/MD run (default is serial and bit-identical). Integral setup, gradient and Fock build scale ~3–5×; see [docs/SQM_THREADING.md](docs/SQM_THREADING.md).
+
 xtb methods:
 - xtb-gfnff : GFN-FF via the xtb library
 - xtb-gfn1

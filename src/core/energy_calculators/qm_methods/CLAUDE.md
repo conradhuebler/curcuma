@@ -66,15 +66,12 @@ Base class for matrix-based quantum methods providing:
 
 ## EnergyCalculator Integration
 
-Methods are routed via `SwitchMethod()` in energycalculator.cpp:
-```cpp
-case 9: GFNFF (gfnff)      // Native GFN-FF - WORK IN PROGRESS
-case 6: EHT                 // Extended Hückel Theory
-case 4: DFT-D3              // Dispersion corrections
-case 3: Ulysses             // Semi-empirical methods
-case 2: XTB                 // Extended tight-binding
-case 1: TBLite              // Tight-binding DFT
-```
+Methods are created by the polymorphic **`MethodFactory`** (`method_factory.cpp`) —
+the old `SwitchMethod()` case-switch was removed in the Jan-2025 refactor. Each name
+maps to a `ComputationalMethod` subclass: `gfn1`/`gfn2` -> `NativeXtbMethod`,
+`gfnff` -> `GFNFFComputationalMethod`, `eht`/`pm3` -> native, `uff`/`qmdff` ->
+`ForceFieldMethod`, `xtb-*`/`tblite-*`/`ipea1`/`ugfn*` -> external interfaces. See the
+top-level CLAUDE.md "Supported Method Hierarchies".
 
 ## Configuration System
 
@@ -155,6 +152,7 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - **✅ GFN2 Multipole Integral Pulay (AP5b)**: `xtb_gradient.cpp` lines ~316–390 — d(dp_iat)/dR and d(qp_iat)/dR terms via origin-shift correction from `dD_dA`; `cgto_multipole_grad_transformed()` in `xtb_multipole_ints.hpp`
 - **✅ Gradient unit fix**: `m_gradient /= au` (was `*= au`) in `xtb_native.cpp` — caused au² error (~72% wrong) at non-equilibrium geometries
 - **⚙️ SCF performance (2026-06-01)**: deep single-core retiming + 5 fixes — energy-neutral, 45/45 native-GFN ctests green. complex(231) energy+gradient: **gfn1 2982→1221 ms (beats tblite 2562 & xtb 1367); gfn2 2944→1364 ms (beats tblite 1567; 1.39× xtb 979)**. Fixes: (1) **EEQ initial guess default** (`scf_guess=eeq`) — gfn1 35→16 it, gfn2 34→22 it; (2) **Cholesky reduction** of the generalized eigenproblem — cache L=chol(S), per-iter `dsygst`+triangular back-transform replaces the dense `S^{-1/2}` double-GEMM (`buildOrthonormalizer`/`solveEigen`; `m_X` is now column-major `Eigen::MatrixXd` for Fortran dsygst); (3) occupied-only **density GEMM** (`leftCols(ncol)`); (4) **GFN2 D4 q-response routed to analytic EEQ** (`d4_charge_source=eeq` now actually wired) — post-SCF 653→83 ms, replaces the 574 ms Mulliken CPSCF; (5) **scf_threshold 1e-6→1e-5 default** (energy bit-identical, fewer iters; MD/opt may tighten). Per-iter `-verbosity 3` breakdown + `scripts/sqm_bench.sh` harness added. See [docs/SQM_PERFORMANCE.md](../../../../docs/SQM_PERFORMANCE.md)
+- **⚙️ SCF intra-molecule multi-threading (2026-06-01)**: a single large molecule (`-sp`/`-opt`/MD) fans the SCF over `-threads N` via the project `CxxThreadPool`; default serial + bit-identical. Auto-gated (`src/core/intra_parallel_context.h`): molecule-level batch workers suppress it (no N×N oversubscribe), size-guarded. Parallelised: overlap+H0, GFN2 multipole integrals, gradient (thread-local reduce), `buildFock`. **complex/231 gfn2: setup 4.2×, gradient 3.7×, TOTAL 1.5× (1593→1072 ms); single-core unchanged.** Eigensolver does NOT thread — build links sequential MKL (`MklThreadScope` no-op until threaded-MKL link or the deferred custom D&C). Energy+gradient bit-identical t1/t8. See [docs/SQM_THREADING.md](../../../../docs/SQM_THREADING.md)
 - **🔧 Native GFN-FF (gfnff)**: Architecture complete, parameter debugging in progress
 
 ### Verbosity Integration Status ✅

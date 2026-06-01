@@ -207,7 +207,19 @@ void XTB::calculateGradient()
     //    dEdcn[iat] += (-kcn[ish_a]) · h_factor · Σ_μν P_μν·S_μν
     //    dEdcn[jat] += (-kcn[ish_b]) · h_factor · Σ_μν P_μν·S_μν
     // ==========================================================================
-    for (int iat = 0; iat < nat; ++iat) {
+    // Parallel over iat (Claude Generated). This is the dominant gradient cost
+    // (per AO-pair overlap- and multipole-integral derivatives). Each thread writes
+    // BOTH iat and jat (Newton's 3rd law) and accumulates dEdcn(iat)/dEdcn(jat),
+    // which span thread boundaries — so threads write into private grad/dEdcn
+    // partials that are summed afterwards. Bit-identical to the serial sum up to
+    // floating-point reassociation (validated against the serial reference).
+    const int grad_threads = effectiveIntraThreads(nat);
+    std::vector<Matrix> grad_parts(grad_threads, Matrix::Zero(nat, 3));
+    std::vector<Vector> dEdcn_parts(grad_threads, Vector::Zero(nat));
+    parallelStripes(grad_threads, [&](int tid, int nth) {
+    Matrix& g_loc    = grad_parts[tid];
+    Vector& dEdcn_loc = dEdcn_parts[tid];
+    for (int iat = tid; iat < nat; iat += nth) {
         for (int jat = iat + 1; jat < nat; ++jat) {
 
             const double dx_ij = xyz[3*iat+0] - xyz[3*jat+0];
@@ -404,19 +416,26 @@ void XTB::calculateGradient()
                     const double Gx = G_sval[0] + G_shpoly_scalar * dx_ij;
                     const double Gy = G_sval[1] + G_shpoly_scalar * dy_ij;
                     const double Gz = G_sval[2] + G_shpoly_scalar * dz_ij;
-                    m_gradient(iat, 0) += Gx;  m_gradient(jat, 0) -= Gx;
-                    m_gradient(iat, 1) += Gy;  m_gradient(jat, 1) -= Gy;
-                    m_gradient(iat, 2) += Gz;  m_gradient(jat, 2) -= Gz;
+                    g_loc(iat, 0) += Gx;  g_loc(jat, 0) -= Gx;
+                    g_loc(iat, 1) += Gy;  g_loc(jat, 1) -= Gy;
+                    g_loc(iat, 2) += Gz;  g_loc(jat, 2) -= Gz;
 
                     // ── CN accumulation (off-site) ───────────────────────────
                     // d(avg_eps·h_factor)/d(CN_iat) = 0.5·(-kcn_a)·h_factor
                     // Full-sum factor of 2 cancels the 0.5:
                     // dEdcn[iat] += (-kcn_a) · h_factor · Σ P·S
-                    dEdcn(iat) += (-m_h0.kcn[ish_a]) * h_factor * cn_sum;
-                    dEdcn(jat) += (-m_h0.kcn[ish_b]) * h_factor * cn_sum;
+                    dEdcn_loc(iat) += (-m_h0.kcn[ish_a]) * h_factor * cn_sum;
+                    dEdcn_loc(jat) += (-m_h0.kcn[ish_b]) * h_factor * cn_sum;
                 }
             }
         }
+    }
+    });  // parallelStripes over iat
+    // Reduce the per-thread partials into the shared accumulators. dEdcn must be
+    // complete here: sections 5 (multipole mrad) and 4 (CN chain rule) read it.
+    for (int t = 0; t < grad_threads; ++t) {
+        m_gradient += grad_parts[t];
+        dEdcn      += dEdcn_parts[t];
     }
 
     // ==========================================================================

@@ -130,7 +130,14 @@ void XTB::getHamiltonianH0(const Vector& se,
     // Build overlap + H0 element-by-element.
     // For each pair of shells (ish_a, ish_b) we compute the CGTO overlap
     // once and broadcast to all AO pairs.
-    for (int ish_a = 0; ish_a < nsh; ++ish_a) {
+    //
+    // Parallel over the outer shell ish_a (Claude Generated): each ish_a writes
+    // only its own AO rows of S/H0, so the stripes touch disjoint matrix blocks —
+    // no locking, bit-identical to the serial result. effectiveIntraThreads() keeps
+    // this serial unless a single large molecule was granted a thread budget.
+    const int n_threads = effectiveIntraThreads(nsh);
+    parallelStripes(n_threads, [&](int tid, int nth) {
+    for (int ish_a = tid; ish_a < nsh; ish_a += nth) {
         const int iat  = m_basis.sh2at[ish_a];
         const int ia_start = m_basis.iao_sh[ish_a];
         const int ia_nao   = m_basis.nao_sh[ish_a];
@@ -221,6 +228,7 @@ void XTB::getHamiltonianH0(const Vector& se,
             }
         }
     }
+    });  // parallelStripes over ish_a
 }
 
 /* ------------------------------------------------------------------ *

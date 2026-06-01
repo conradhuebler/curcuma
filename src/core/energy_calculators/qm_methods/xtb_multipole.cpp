@@ -87,7 +87,11 @@ void XTB::setupMultipole()
     for (int k = 0; k < 3; ++k) dp_global[k]     = Eigen::MatrixXd::Zero(nao, nao);
     for (int k = 0; k < 6; ++k) qp_global_raw[k] = Eigen::MatrixXd::Zero(nao, nao);
 
-    for (int mu = 0; mu < nao; ++mu) {
+    // Parallel over the row AO mu (Claude Generated): disjoint rows of dp_global /
+    // qp_global_raw, so the stripes are independent and bit-identical to serial.
+    const int mp_threads = effectiveIntraThreads(nao);
+    parallelStripes(mp_threads, [&](int tid, int nth) {
+    for (int mu = tid; mu < nao; mu += nth) {
         const int ish_a = m_basis.ao2sh[mu];
         const int iat   = m_basis.ao2at[mu];
         const int local_a = mu - m_basis.iao_sh[ish_a];
@@ -111,13 +115,15 @@ void XTB::setupMultipole()
             for (int k = 0; k < 6; ++k) qp_global_raw[k](mu, nu) = Q[k];
         }
     }
+    });  // parallelStripes over mu
 
     // ---- 2. Shift to "origin at atom(column)" (tblite convention) ----
     //       and traceless quadrupole transform.
     for (int k = 0; k < 3; ++k) m_dp_int[k] = Eigen::MatrixXd::Zero(nao, nao);
     for (int k = 0; k < 6; ++k) m_qp_int[k] = Eigen::MatrixXd::Zero(nao, nao);
 
-    for (int mu = 0; mu < nao; ++mu) {
+    parallelStripes(mp_threads, [&](int tid, int nth) {
+    for (int mu = tid; mu < nao; mu += nth) {
         for (int nu = 0; nu < nao; ++nu) {
             const int iat = m_basis.ao2at[nu];   // column atom
             const double Rx = xyz_bohr[3*iat+0];
@@ -150,6 +156,7 @@ void XTB::setupMultipole()
             m_qp_int[5](mu, nu) = 1.5 * qzz - tr;
         }
     }
+    });  // parallelStripes over mu
 
     // ---- 3. Coordination numbers (GFN2 double-exp form) ----
     std::vector<double> cn = cn_gfn(std::vector<int>(m_atoms.begin(), m_atoms.end()), xyz_bohr);
@@ -177,7 +184,11 @@ void XTB::setupMultipole()
         for (int b = 0; b < 3; ++b) m_mp_amat_dd[a][b] = Eigen::MatrixXd::Zero(nat, nat);
     for (int k = 0; k < 6; ++k) m_mp_amat_sq[k] = Eigen::MatrixXd::Zero(nat, nat);
 
-    for (int i = 0; i < nat; ++i) {
+    // Parallel over the source atom i (Claude Generated): every amat_*(j, i) entry
+    // is written for column i only, so striping over i touches disjoint columns.
+    const int amat_threads = effectiveIntraThreads(nat);
+    parallelStripes(amat_threads, [&](int tid, int nth) {
+    for (int i = tid; i < nat; i += nth) {
         for (int j = 0; j < nat; ++j) {
             if (i == j) continue;
             const double vx = xyz_bohr[3*i+0] - xyz_bohr[3*j+0];
@@ -217,6 +228,7 @@ void XTB::setupMultipole()
             m_mp_amat_sq[5](j, i) += vz * vz * g5 * fdmp5;
         }
     }
+    });  // parallelStripes over i
 
     m_mp_initialized = true;
 }
@@ -246,6 +258,11 @@ void XTB::addMultipolePotential(Potential& pot,
     // --- vdp(k, iat) = Σ_jat amat_sd[k](iat,jat)·q_at(jat)
     //                 + Σ_a   amat_dd[k][a](iat,jat)·dpat(a,jat)
     //                 + 2·dkernel·dpat(k,iat)
+    // Note (Claude Generated): these per-atom potential loops are O(nat^2) scalar
+    // work (~1.4 ms/it for nat=231) — too small to amortise a per-iteration pool
+    // dispatch, so they stay serial. The SCF in-loop parallelism is concentrated in
+    // buildFock (the one region with enough per-call work). The big setup/gradient
+    // integral loops are parallelised in their own files.
     pot.v_dp.resize(3, nat);
     Eigen::MatrixXd& vdp = pot.v_dp;
     for (int i = 0; i < nat; ++i) {

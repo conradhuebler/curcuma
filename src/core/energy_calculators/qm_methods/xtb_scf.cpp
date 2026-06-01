@@ -128,15 +128,19 @@ Matrix XTB::buildFock(const Matrix& H0,
     expand_potential(m_basis, pot, v_ao);
 
     Matrix F = H0;
-    for (int mu = 0; mu < nao; ++mu)
-        for (int nu = 0; nu < nao; ++nu)
-            F(mu, nu) -= 0.5 * S(mu, nu) * (v_ao(mu) + v_ao(nu));
+    const bool gfn2_mp = (m_method == MethodType::GFN2 && m_mp_initialized);
 
-    // GFN2 multipole Fock contribution (tblite add_vmp_to_h1)
-    if (m_method == MethodType::GFN2 && m_mp_initialized) {
-        for (int mu = 0; mu < nao; ++mu) {
-            const int iat = m_basis.ao2at[mu];
-            for (int nu = 0; nu < nao; ++nu) {
+    // Parallel over the row AO mu (Claude Generated): each mu writes only row mu of
+    // F, so the stripes are independent (disjoint rows, bit-identical to serial).
+    // Combines the isotropic shift and the GFN2 multipole Fock contribution
+    // (tblite add_vmp_to_h1) into one pass to dispatch the pool only once per build.
+    const int n_threads = effectiveIntraThreads(nao);
+    parallelStripes(n_threads, [&](int tid, int nth) {
+    for (int mu = tid; mu < nao; mu += nth) {
+        const int iat = gfn2_mp ? m_basis.ao2at[mu] : 0;
+        for (int nu = 0; nu < nao; ++nu) {
+            double f = -0.5 * S(mu, nu) * (v_ao(mu) + v_ao(nu));
+            if (gfn2_mp) {
                 const int jat = m_basis.ao2at[nu];
                 double dd = 0.0;
                 for (int k = 0; k < 3; ++k)
@@ -146,10 +150,12 @@ Matrix XTB::buildFock(const Matrix& H0,
                 for (int k = 0; k < 6; ++k)
                     qq += m_qp_int[k](mu, nu) * pot.v_qp(k, jat)
                         + m_qp_int[k](nu, mu) * pot.v_qp(k, iat);
-                F(mu, nu) -= 0.5 * (dd + qq);
+                f -= 0.5 * (dd + qq);
             }
+            F(mu, nu) += f;
         }
     }
+    });  // parallelStripes over mu
     return F;
 }
 
@@ -358,6 +364,7 @@ void XTB::updatePopulations(const Matrix& S)
     const int nsh = m_basis.nsh;
 
     // Shell populations via Mulliken: n_sh = sum_{μ∈sh, ν} P_μν * S_νμ
+    // (Serial: ~1.3 ms/it — too small to amortise a per-iteration pool dispatch.)
     Vector n_sh = Vector::Zero(nsh);
     for (int s = 0; s < nsh; ++s) {
         const int ao_start = m_basis.iao_sh[s];

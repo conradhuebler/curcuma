@@ -33,6 +33,7 @@
 
 #include <Eigen/Dense>
 #include <array>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -43,33 +44,44 @@ class D4ParameterGenerator;
 class D3ParameterGenerator;
 namespace curcuma::dispersion { class D4Evaluator; }
 
+// The native xTB owns an optional intra-molecule worker pool (built lazily for a
+// single large molecule, see m_pool). Forward-declared to keep the heavy
+// CxxThreadPool header out of this widely-included file; the .cpp includes it.
+class CxxThreadPool;
+
 #include "diis_accelerator.h"
 #include "broyden_mixer.h"
 
 namespace curcuma::xtb {
 
 /* ------------------------------------------------------------------------- *
- *  MKL serial scope (Claude Generated)
+ *  MKL thread scope (Claude Generated)
  *
  *  MKL spawns an OpenMP thread team for every BLAS/LAPACK call. The native xTB
- *  SCF is an inherently serial iteration over small/medium dense matrices, so
- *  that per-call threading is pure overhead and measured slower than serial up
- *  to at least 231 atoms. We pin MKL to one thread for the duration of each
- *  Calculation() via this thread-local, scoped guard: it only affects the
- *  calling thread, so running many calculations in parallel through the
- *  project's CxxThreadPool keeps each one serial (no oversubscription) while
- *  the coarse parallelism stays at the molecule level. No-op without MKL.
+ *  SCF is mostly a serial iteration over small/medium dense matrices, so for the
+ *  hand-threaded regions (integral setup, Fock build, gradient — which own the
+ *  cores via the project CxxThreadPool) MKL must stay at ONE thread to avoid
+ *  oversubscription. The one region that genuinely benefits from BLAS threading
+ *  is the per-iteration generalized eigensolve (dsygst/dsyevd/dtrsm), so we bump
+ *  MKL up only around solveEigen for a single large molecule.
+ *
+ *  MklThreadScope(n) sets the thread-local MKL count to n and restores the
+ *  previous value on scope exit (nesting-safe: an inner scope restores the outer
+ *  count). It only affects the calling thread, so running many calculations in
+ *  parallel through CxxThreadPool keeps each one independent. No-op without MKL.
  * ------------------------------------------------------------------------- */
 #ifdef USE_MKL
 extern "C" int MKL_Set_Num_Threads_Local(int nt);
-struct MklSerialScope {
+struct MklThreadScope {
     int prev;
-    MklSerialScope()  : prev(MKL_Set_Num_Threads_Local(1)) {}
-    ~MklSerialScope() { MKL_Set_Num_Threads_Local(prev); }
+    explicit MklThreadScope(int n) : prev(MKL_Set_Num_Threads_Local(n < 1 ? 1 : n)) {}
+    ~MklThreadScope() { MKL_Set_Num_Threads_Local(prev); }
 };
 #else
-struct MklSerialScope { MklSerialScope() {} };
+struct MklThreadScope { explicit MklThreadScope(int) {} };
 #endif
+// Back-compat alias: pin MKL to one thread for the enclosing scope.
+struct MklSerialScope { MklThreadScope s{1}; };
 
 /* ------------------------------------------------------------------------- *
  *  Method selector
@@ -361,6 +373,17 @@ public:
     void setIterativeMode(bool on) { m_is_iterative = on; }
     bool isIterativeMode() const   { return m_is_iterative; }
 
+    // Intra-molecule thread budget (Claude Generated). The number of cores this
+    // single SCF may fan out over (integral setup, Fock build, gradient, and the
+    // MKL eigensolve). Set by the wrapper from the global -threads. Default 1
+    // (serial). It is only ever honoured for a single large molecule: the runtime
+    // gate effectiveIntraThreads() forces 1 when this calculation is itself running
+    // under molecule-level parallelism (curcuma::intraParallelSuppressed) or the
+    // work is too small, so conformer/batch/Hessian runs keep their coarse
+    // molecule-level parallelism. See src/core/intra_parallel_context.h.
+    void setIntraThreads(int n) { m_intra_threads = (n < 1) ? 1 : n; }
+    int  intraThreads() const   { return m_intra_threads; }
+
     // GFN2 component audit (Claude Generated): SCF-free evaluation of every
     // per-container energy at an externally supplied (typically tblite-derived)
     // wavefunction state. Skips diagonalisation, performs the pre-SCF setup
@@ -465,6 +488,23 @@ private:
     void addDispersionPotential(Potential& pot) const;                   // xtb_native.cpp
 
     void calculateGradient();   // xtb_gradient.cpp — fills m_gradient in Eh/Bohr
+
+    /* ----- intra-molecule parallelism (Claude Generated) -------------------- *
+     * effectiveIntraThreads(work_units): the thread count to actually use for a
+     * region with `work_units` independent items. Returns 1 when m_intra_threads<=1,
+     * when running under molecule-level parallelism (intraParallelSuppressed), or
+     * when there is too little work per thread (size guard kMinWorkPerThread).
+     *
+     * parallelStripes(n_threads, worker): runs worker(thread_id, n_threads) on
+     * n_threads, the main thread doing stripe 0 and the rest dispatched to the
+     * lazily-created pool (ensurePool). worker must only touch state disjoint per
+     * stripe, or accumulate into per-thread buffers the caller reduces afterwards.
+     * Mirrors the gfnff cn_worker idiom. Defined in xtb_native.cpp. */
+    static constexpr int kMinWorkPerThread = 24;
+    int  effectiveIntraThreads(int work_units) const;                        // xtb_native.cpp
+    void ensurePool(int n_threads) const;                                    // xtb_native.cpp
+    void parallelStripes(int n_threads,
+                         const std::function<void(int, int)>& worker) const; // xtb_native.cpp
 
     /* ----- legacy QMDriver hooks (still routed through MakeOverlap/H) */
     Matrix MakeOverlap(std::vector<STO::Orbital>& basisset) override;
@@ -592,6 +632,14 @@ private:
     // (m_keep_diis=true). Reset unconditionally by default.
     DIISAccelerator m_diis;
     BroydenMixer    m_broyden;
+
+    // Intra-molecule parallelism (Claude Generated). m_intra_threads is the budget
+    // granted by the wrapper (global -threads); m_pool is the persistent worker pool,
+    // created lazily by ensurePool() only for a single large molecule and reused
+    // across SCF iterations and geometry steps. unique_ptr to a forward-declared type;
+    // ~XTB() is defined in the .cpp where CxxThreadPool is complete.
+    int m_intra_threads = 1;
+    mutable std::unique_ptr<CxxThreadPool> m_pool;
 };
 
 /* ------------------------------------------------------------------------- *

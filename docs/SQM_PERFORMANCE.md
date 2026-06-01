@@ -9,6 +9,12 @@ GFN1/GFN2 path (the canonical `gfn1`/`gfn2` backend). Supersedes the scattered
 per-WP perf notes. Methodology, measured breakdown, what worked, what did not,
 and the residual gap to the Fortran references.
 
+> **Single-core** record below. For **intra-molecule multi-threading** (`-threads N`
+> on one large molecule) see [SQM_THREADING.md](SQM_THREADING.md). Key cross-finding:
+> the "MKL threading the eigensolve — no effect" note here is a build artifact — this
+> build links `libmkl_sequential`, so MKL BLAS/LAPACK never threads; the multi-thread
+> wins (setup/gradient/Fock 3–5×) come from the CxxThreadPool, not MKL.
+
 ## Methodology — reproduce with `scripts/sqm_bench.sh`
 
 ```bash

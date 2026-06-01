@@ -26,6 +26,7 @@
 #include "src/core/energycalculator.h"
 #include "src/core/fileiterator.h"
 #include "src/core/global.h"
+#include "src/core/intra_parallel_context.h"
 #include "src/core/molecule.h"
 
 #include <LBFGS.h>
@@ -96,6 +97,10 @@ void LBFGSInterface::setMolecule(const Molecule* molecule)
 
 int SPThread::execute()
 {
+    // This worker is one of several molecule-level batch tasks running concurrently
+    // (ProcessMolecules pool). Suppress intra-molecule threading inside the energy
+    // method so the cores are not oversubscribed N_molecules x N_intra. Claude Generated.
+    curcuma::SuppressIntraParallel intra_guard;
     auto start = std::chrono::system_clock::now();
     Vector charges;
     double energy = m_curcumaOpt->SinglePoint(&m_molecule, m_result, charges);
@@ -112,6 +117,9 @@ int SPThread::execute()
 
 int OptThread::execute()
 {
+    // Concurrent molecule-level batch task — keep the energy method serial (see
+    // SPThread::execute). Claude Generated.
+    curcuma::SuppressIntraParallel intra_guard;
     Vector charges;
     if (m_optimethod == 0)
         m_final = m_curcumaOpt->LBFGSOptimise(&m_molecule, m_result, &m_intermediate, charges, getThreadId(), Basename() + ".opt.trj");

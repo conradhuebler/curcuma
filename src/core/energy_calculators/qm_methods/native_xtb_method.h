@@ -48,7 +48,14 @@ public:
 
     std::string getMethodName() const override;
     bool isThreadSafe() const override { return true; }
-    void setThreadCount(int threads) override { m_thread_count = std::max(1, threads); }
+    // Forward the global -threads budget to the solver as its intra-molecule
+    // thread count. The solver auto-gates it (serial when run under molecule-level
+    // parallelism or for small systems), so this is safe to set unconditionally.
+    void setThreadCount(int threads) override
+    {
+        m_thread_count = std::max(1, threads);
+        if (m_xtb) m_xtb->setIntraThreads(m_thread_count);
+    }
 
     void setParameters(const json& params) override;
     json getParameters() const override { return m_parameters; }
