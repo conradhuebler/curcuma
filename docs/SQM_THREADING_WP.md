@@ -93,21 +93,26 @@ back to a full solve on the first iteration / when the residual is large.
 robustness; must not change the converged fixed point). **Exit:** fewer full solves; energy
 bit-identical at convergence; SCF iteration count unchanged.
 
-## WP4 — Custom divide-and-conquer eigensolver (CPU first, GPU-ready)  ◐ FOUNDATION DONE
+## WP4 — Custom divide-and-conquer eigensolver (CPU first, GPU-ready)  ✅ DONE (machine-tested)
 **Done:** a self-contained, dependency-free symmetric eigensolver
-(`native_eigensolver.{h,cpp}`: Householder tridiagonalization `tred2` + implicit-shift QL
-`tql2`), selectable via **`-eigensolver mkl|native`** (MKL default). The native path in
-`solveEigen` reduces `A=L⁻¹·F·L⁻ᵀ` with Eigen triangular solves (no LAPACK eigensolve) and
-diagonalises with our solver. **Validated:** standalone vs Eigen to ~1.4e-12 (eigenvalues),
-5e-14 (reconstruction/orthonormality) up to n=558 (ctest `native_eigensolver`); SCF energy
-AND gradient **bit-identical** to MKL for gfn1/gfn2 (complex, t1 and t8); default MKL path
-unregressed. **Cost:** native QL ~20-30 % slower than MKL `dsyevd` at t1 (784 vs 639 ms,
-complex) — expected for a from-scratch single-threaded QL vs optimised D&C.
-**Seed:** `ParallelEigenSolver.hpp` confirmed dead-end (its block-D&C was abandoned as
-mathematically wrong); not reused — candidate for removal.
-**Next:** replace the `tql2` step with a parallel Cuppen divide-and-conquer (recursive
-split + rank-1 secular equation + deflation) for speed/GPU — same interface
-(`tridiagonal d,e → eigenpairs`). Original notes:
+(`native_eigensolver.{h,cpp}`), selectable via **`-eigensolver mkl|native`** (MKL default).
+Householder tridiagonalization (`tred2`) + **Cuppen divide-and-conquer** on the tridiagonal
+(recursive tearing + rank-1 secular equation, **shifted bisection** for accurate denominators
+à la dlaed4, **deflation** of negligible weights and degenerate diagonals via Givens, and
+**Löwner/Gu–Eisenstat**-reconstructed weights for orthogonal eigenvectors; QL base case for
+n≤32). The native path in `solveEigen` reduces `A=L⁻¹·F·L⁻ᵀ` with Eigen triangular solves
+(no LAPACK eigensolve) and diagonalises with this solver.
+**Validated:** vs Eigen to ~1e-12 (eigenvalues), ~1e-14 (reconstruction/orthonormality) over
+random, degenerate, identity-like and tight-cluster spectra up to n=558 (ctest
+`native_eigensolver`); SCF energy AND gradient **bit-identical** to MKL for gfn1/gfn2
+(complex, t1 and t8); default MKL path unregressed (67/68, pre-existing #40 only).
+**Speed: on par with MKL `dsyevd`** — gfn2 complex min-of-5 TOTAL t1 1390 vs 1377 ms (~1%),
+t8 519 vs 521 ms. The serial D&C matches MKL because the surrounding BLAS (reduce,
+back-transform) threads.
+**Seed:** `ParallelEigenSolver.hpp` confirmed dead-end (block-D&C abandoned as mathematically
+wrong); not reused — candidate for removal.
+**Future:** the D&C recursion's sub-problems are independent — thread/GPU them (and the merge
+gemms) for further large-N speedup; this is the GPU-ready split. Original notes:
 
 ## WP4 — Custom divide-and-conquer eigensolver (CPU first, GPU-ready)  ⏳ (original notes)
 **Goal:** replace MKL `dsyevd` with our own **threaded CPU** divide-and-conquer symmetric

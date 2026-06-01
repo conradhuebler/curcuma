@@ -10,19 +10,23 @@
  * run without a proprietary BLAS and as the CPU foundation for a future GPU port.
  *
  * Pipeline (the standard symmetric eigensolve):
- *   1. Householder tridiagonalization  A = Q·T·Qᵀ        (tridiagonalizeHouseholder)
- *   2. Symmetric tridiagonal eigensolve  T = V·Λ·Vᵀ      (tridiagonalEigen)
+ *   1. Householder tridiagonalization  A = Q·T·Qᵀ        (tred2)
+ *   2. Symmetric tridiagonal eigensolve  T = V·Λ·Vᵀ      (Cuppen divide-and-conquer)
  *   3. Back-transform  eigenvectors = Q·V
  *
- * Step 2 currently uses the implicit-shift QL algorithm (tql2), which is correct and
- * self-contained. The Cuppen *divide-and-conquer* tridiagonal solver — the performance/
- * GPU-parallel core — is the planned drop-in replacement for tridiagonalEigen (same
- * interface); see docs/SQM_THREADING_WP.md WP4. Until it lands and is validated to MKL
- * accuracy, `native` is QL-based.
+ * Step 2 is the Cuppen divide-and-conquer (Cuppen 1981; Dongarra–Sorensen 1987;
+ * Gu–Eisenstat 1994): recursively tear the tridiagonal into two halves plus a rank-1
+ * coupling, solve each half, then merge by solving the rank-1-updated eigenproblem —
+ * roots of the secular equation found by shifted bisection (dlaed4-style, accurate
+ * denominators), with deflation (negligible weights + degenerate diagonals via Givens)
+ * and Löwner/Gu–Eisenstat-reconstructed weights for orthogonal eigenvectors. Small blocks
+ * (n ≤ 32) fall back to implicit-shift QL (tql2). The recursion's sub-problems are
+ * independent (a natural parallel/GPU split); the current implementation is serial but
+ * already on par with MKL dsyevd on the GFN workload (the surrounding BLAS threads).
  *
- * Accuracy target: eigenpairs match LAPACK dsyevd to ~1e-10 (validated by
- * test_native_eigensolver). Eigenvalues are returned in ascending order with
- * Cᵀ·C = I (orthonormal eigenvectors).
+ * Accuracy: eigenpairs match LAPACK/Eigen to ~1e-12 (eigenvalues) and ~1e-14
+ * (reconstruction, orthonormality) over random, degenerate, identity-like and tight-cluster
+ * spectra up to n=558 (test_native_eigensolver). Eigenvalues ascending, Cᵀ·C = I.
  */
 
 #pragma once
