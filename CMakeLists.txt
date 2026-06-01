@@ -932,11 +932,15 @@ target_link_libraries(curcuma_cap pthread fmt::fmt-header-only )
 #   for ~3-5x speedup on matrices with N > 300 (Tier M/L ANC regeneration fallback).
 find_package(BLAS QUIET)
 find_package(LAPACK QUIET)
-if(BLAS_FOUND)
+# WP1 (2026-06): when USE_MKL, link ONLY the explicit threaded MKL below
+# (mkl_gnu_thread). find_package(BLAS) resolves to the SEQUENTIAL MKL
+# (libmkl_sequential), which — linked alongside the threaded layer — loads first and
+# wins, forcing every BLAS/LAPACK call (incl. the SCF eigensolve) single-threaded.
+if(BLAS_FOUND AND NOT USE_MKL)
     target_link_libraries(curcuma_core ${BLAS_LIBRARIES})
     message(STATUS "BLAS linked for curcuma_core")
 endif()
-if(LAPACK_FOUND)
+if(LAPACK_FOUND AND NOT USE_MKL)
     target_link_libraries(curcuma_core ${LAPACK_LIBRARIES})
     message(STATUS "LAPACK linked for curcuma_core")
 endif()
@@ -959,7 +963,9 @@ else()
 endif()
 
 
-if(USE_BLAS)
+# NOT USE_MKL: the threaded MKL block below already provides BLAS/LAPACK symbols, and
+# linking the find_package (sequential MKL) result here would override its threading (WP1).
+if(USE_BLAS AND NOT USE_MKL)
     if(BLAS_FOUND)
         target_link_libraries(curcuma_core ${BLAS_LIBRARIES})
         if(LAPACK_FOUND)

@@ -1996,6 +1996,16 @@ void showStructuredHelp(const std::string& category = "") {
     }
 }
 
+#ifdef USE_MKL
+// File-scope language-linkage declaration for the MKL global thread-count setter
+// (extern "C" is illegal inside a function body). Used once in main() to keep MKL
+// serial by default; the native xTB eigensolve bumps it locally. Use the CAPITALISED
+// C API MKL_Set_Num_Threads (by value) — the lowercase mkl_set_num_threads is the
+// Fortran alias that takes its argument BY REFERENCE (passing a value segfaults).
+// Claude Generated.
+extern "C" void MKL_Set_Num_Threads(int);
+#endif
+
 int main(int argc, char **argv) {
     // RAII guard: prints citation summary and writes BibTeX on any exit path
     struct CitationGuard {
@@ -2011,6 +2021,15 @@ int main(int argc, char **argv) {
     signal(SIGSEGV, bt_handler);
     signal(SIGABRT, bt_handler);
 #endif
+#endif
+
+#ifdef USE_MKL
+    // WP1 (2026-06): the build now links the THREADED MKL layer (mkl_gnu_thread).
+    // Keep MKL serial by DEFAULT so all existing BLAS users (GFN-FF, UFF, optimizers)
+    // and molecule-level batch parallelism behave exactly as before; only the native
+    // xTB eigensolve bumps the thread count locally via MklThreadScope (thread-local,
+    // overrides this global default). Declared at file scope below. Claude Generated.
+    MKL_Set_Num_Threads(1);
 #endif
 
     General::StartUp(argc, argv);

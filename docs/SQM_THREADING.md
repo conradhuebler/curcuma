@@ -67,48 +67,46 @@ Per-phase, gfn2, min-representative (`-verbosity 3`):
 | multipole setup | 116 ms | 30 ms | 3.8× |
 | **setup total** | **206 ms** | **49 ms** | **4.2×** |
 | build Fock | 92 ms | 28 ms | 3.3× |
-| solve eigen | 605 ms | 607 ms | **1.0×** |
+| solve eigen | 614 ms | 215 ms | **2.85×** (after WP1) |
 | gradient | 218 ms | 59 ms | 3.7× |
-| **TOTAL** | **1593 ms** | **1072 ms** | **1.5×** |
+| **TOTAL** | **1550 ms** | **679 ms** | **2.3×** (after WP1) |
 
-Total min-of-5 scaling (unpinned, 32-core host):
+Total min-of-5 scaling, complex/231 (after WP1 — threaded MKL):
 
 | method | t1 | t2 | t4 | t8 |
 |---|---|---|---|---|
-| gfn1 | 1192 | 1080 | 976 | 922 (1.29×) |
-| gfn2 | 1509 | 1244 | 1122 | 1062 (1.42×) |
+| gfn1 | 1152 | 741 | 485 | **375 (3.07×)** |
+| gfn2 | 1469 | 983 | 747 | **650 (2.26×)** |
 
-**Single-core unchanged** (taskset -c 0, MKL=1, default): gfn1 1200 ms (was 1221),
-gfn2 1362 ms (was 1364).
+**Single-core unchanged** (taskset -c 0, default, no `-threads`): gfn1 1160 ms,
+gfn2 1336 ms (≈ the pre-WP1 1200/1362; slightly faster from the `W`-as-gemm).
 
-## The eigensolve wall — and why (re-validated, root cause found)
+## The eigensolve — was the wall, now threads (WP1, fixed)
 
-The embarrassingly-parallel parts scale 3–5×, but they are ~30 % of the run, so the
-overall speedup is ~1.3–1.4×, plateauing by t4. The bottleneck is the per-iteration
-eigensolve, which does **not** thread:
+Originally the per-iteration eigensolve did **not** thread (dsyevd unchanged t1→t8 at
+nao=558 *and* 4028, even with `MKL_NUM_THREADS=8`). Root cause: the build linked
+**`libmkl_sequential`** alongside the threaded layer (CMake's `find_package(BLAS)`
+resolved to the sequential MKL; it loaded first and won), so MKL's BLAS/LAPACK was
+single-threaded regardless of any setting — `MklThreadScope` was a no-op. The old
+single-core note "MKL threading the eigensolve: no effect at 231 atoms" was a
+build-config artifact, not a `dsyevd` limitation.
 
-| nao | dsyevd t1 | dsyevd t8 |
-|---|---|---|
-| 558 (231 atoms) | 417 ms/it | 419 ms/it |
-| 4028 (1410 atoms) | 9442 ms/it | 9378 ms/it |
+**WP1 removed the sequential MKL** (guard `find_package(BLAS/LAPACK)` linkage with
+`if(NOT USE_MKL)` so only the explicit threaded `mkl_gnu_thread` links; `main.cpp` sets
+`MKL_Set_Num_Threads(1)` as the global default so existing BLAS users and
+molecule-level batches are unchanged, and only `MklThreadScope(eig_threads)` around
+`solveEigen` bumps it). The eigensolve now threads:
 
-It is unchanged at *both* sizes, and unchanged even with `MKL_NUM_THREADS=8` forced.
-**Root cause: this build links `libmkl_sequential` (the CMake MKL discovery pulls in
-both `mkl_sequential` and `mkl_gnu_thread`; the sequential layer loads first and
-wins).** So MKL's BLAS/LAPACK is single-threaded regardless of any thread setting, and
-`MklThreadScope` around `solveEigen` is currently a harmless no-op. This *explains* the
-earlier single-core note "MKL threading the eigensolve: no effect at 231 atoms" — it
-was a build-config artifact, not a `dsyevd` limitation. The CxxThreadPool wins (setup,
-gradient, Fock) are independent of MKL and scale at *both* sizes (polymer setup
-10065→2469 ms, 4.1×).
+| gfn2 complex/231 | t1 | t8 | speedup |
+|---|---|---|---|
+| dsyevd | 425 ms | 133 ms | 3.2× |
+| back-transform | 63 ms | 11 ms | 5.6× |
+| solve eigen (total) | 614 ms | 215 ms | 2.85× |
 
-**Two ways to unlock the eigensolve (follow-ups, not in this change):**
-1. Link threaded MKL only (drop `mkl_sequential`, keep `mkl_gnu_thread` + libgomp).
-   Then `MklThreadScope` takes effect immediately — but it must stay gated by the
-   intra-thread budget so molecule-level batches are not oversubscribed.
-2. A custom, GPU-ready divide-and-conquer symmetric solver (deferred track) replacing
-   only the `dsyevd` core and keeping the dsygst/dtrsm reduction — avoids the MKL
-   threading-layer dependency entirely. See the implementation plan.
+This is why the totals above scale 2.3–3.1× rather than the pre-WP1 1.3–1.4×. gfn1
+scales best (3.07×); gfn2 is gated by the serial D4 in-SCF potential (~180 ms),
+addressed by WP2. Further headroom (custom CPU divide-and-conquer eigensolver,
+purification, GPU) is tracked in [SQM_THREADING_WP.md](SQM_THREADING_WP.md).
 
 ## Tested / not tested
 

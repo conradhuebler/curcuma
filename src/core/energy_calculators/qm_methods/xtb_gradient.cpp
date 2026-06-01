@@ -87,10 +87,12 @@ void XTB::calculateGradient()
 
     // ── Energy-weighted density matrix: W_μν = 2·Σ_{i<nocc} ε_i C_μi C_νi ─
     // Closed-shell: factor 2 for spin degeneracy; nocc counts electrons not pairs.
+    // W = C_occ · diag(2·ε_occ) · C_occᵀ as one BLAS-3 gemm (WP1, Claude Generated):
+    // replaces the per-orbital rank-1 accumulation — faster serial and threads under MKL.
     const int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
-    Matrix W = Matrix::Zero(nao, nao);
-    for (int i = 0; i < nocc_orbs; ++i)
-        W += 2.0 * m_wfn.eps(i) * m_wfn.C.col(i) * m_wfn.C.col(i).transpose();
+    const auto Cocc = m_wfn.C.leftCols(nocc_orbs);
+    const Eigen::VectorXd w2 = 2.0 * m_wfn.eps.head(nocc_orbs);
+    Matrix W = (Cocc * w2.asDiagonal()) * Cocc.transpose();
 
     // ── v_ao: expand shell+atom potential to AO resolution ──────────────────
     // F_μν = H0_μν - 0.5·S_μν·(v_ao(μ)+v_ao(ν))  (xtb_scf.cpp:expand_potential)
