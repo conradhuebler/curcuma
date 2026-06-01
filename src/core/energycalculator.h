@@ -455,7 +455,8 @@ private:
     int m_mult = 1;                                  ///< Multiplicity
 
     // Verbosity control (Claude Generated)
-    int m_verbosity_override = -1; ///< Override verbosity (-1 = use system)
+    int  m_verbosity_override = -1; ///< Override verbosity (-1 = use system)
+    bool m_is_iterative       = false; ///< MD/opt mode: raise output threshold by 1
 
     // Internal Methods
     
