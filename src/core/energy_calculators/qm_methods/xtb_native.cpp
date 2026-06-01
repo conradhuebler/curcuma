@@ -1142,6 +1142,8 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         return std::chrono::duration<double, std::milli>(b - a).count();
     };
     const auto td0 = d4clk::now();
+    // WP2-ext: let the D4 pair loop fan out over the same gated intra-thread budget.
+    m_d4_evaluator->setThreads(effectiveIntraThreads(m_atomcount));
     double E = m_d4_evaluator->computeEnergyAndGradient(
         m_atoms, geom_bohr,
         /*with_gradient=*/true,
@@ -1272,6 +1274,8 @@ void XTB::addDispersionPotential(Potential& pot) const
     }
 
     Matrix scratch_grad; Vector scratch_dEdcn, dEdq;
+    // WP2-ext: thread the per-SCF D4 pair loop on the same gated budget.
+    m_d4_evaluator->setThreads(effectiveIntraThreads(m_atomcount));
     m_d4_evaluator->computeEnergyAndGradient(
         m_atoms, geom_bohr, /*with_gradient=*/true,
         scratch_grad, scratch_dEdcn, dEdq, /*with_dEdq=*/true);

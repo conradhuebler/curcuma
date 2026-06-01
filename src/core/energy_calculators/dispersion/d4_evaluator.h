@@ -32,7 +32,13 @@
 #include "src/core/global.h"
 
 #include <Eigen/Dense>
+#include <memory>
 #include <vector>
+
+// Optional intra-evaluator worker pool (WP2 extension): the GFN2 whole-molecule D4
+// loop can fan out over atoms. Forward-declared to keep the heavy CxxThreadPool header
+// out of this widely-included file; d4_evaluator.cpp includes it.
+class CxxThreadPool;
 
 namespace curcuma::dispersion {
 
@@ -79,7 +85,15 @@ struct D4Params {
 class D4Evaluator {
 public:
     D4Evaluator(D4ParameterGenerator* data, const D4Params& params);
-    virtual ~D4Evaluator() = default;
+    virtual ~D4Evaluator();  // defined in .cpp (unique_ptr<CxxThreadPool> member)
+
+    // Intra-evaluator thread budget (WP2 extension, Claude Generated): how many cores
+    // the whole-molecule computeEnergyAndGradient() pair loop may use. Set by the caller
+    // (native xTB passes its gated effectiveIntraThreads); default 1 (serial). The pair
+    // loop writes thread-local partials reduced afterwards, so results are bit-identical
+    // up to floating-point reassociation. Per-pair reads of the generator (weightedC6Gfn2,
+    // dc6dcn) are const and thread-safe.
+    void setThreads(int n) { m_threads = (n < 1) ? 1 : n; }
 
     // ---------- per-pair (ForceFieldThread style) ----------
     //
@@ -184,6 +198,11 @@ private:
     // when per_reference_charge (GFN2); the GFN-FF per-pair path does not call this method.
     std::vector<GFNFFDispersion> m_pairs_cache;
     bool m_pairs_cached = false;
+
+    // WP2-extension intra-evaluator parallelism (Claude Generated). m_pool is created
+    // lazily for m_threads>1; reused across SCF iterations and geometry steps.
+    int m_threads = 1;
+    std::unique_ptr<CxxThreadPool> m_pool;
 };
 
 }  // namespace curcuma::dispersion

@@ -56,9 +56,17 @@ Added a geometry-keyed **pair-list cache** in `D4Evaluator` (invalidated by the 
 on a new geometry via `invalidatePairCache()`). **D4 in-SCF 336→152 ms/SCF at t1 (2.2×)**;
 gfn2 complex TOTAL t1 ~1567→1362 ms. Energy bit-identical (SP −329.52707823; opt CH4
 converges identically t1/t4). d4/gfn2/gradient/cpscf ctests green (only pre-existing #40).
-Remaining D4 cost (~152 ms) is the inherent per-iter q-dependent `weightedC6Gfn2` — not
-threaded; a future step could parallelise the evaluator's pair loop or skip the discarded
-Cartesian gradient (dEdq-only). Added a `-verbosity 3` "of which D4" sub-timer.
+Added a `-verbosity 3` "of which D4" sub-timer.
+
+**WP2b — parallelised the D4 evaluator pair loop** (`D4Evaluator::computeEnergyAndGradient`,
+the GFN2-only whole-molecule path; GFN-FF's `pairEnergyAndGradient` is untouched).
+Thread-local E/gradient/dEdCN/dEdq partials reduced afterwards; per-pair generator reads
+(`weightedC6Gfn2`, `getZetaCharges`, `dc6dcn`) are `const`/thread-safe. The evaluator owns a
+lazy `CxxThreadPool`; the native xTB driver passes its gated `effectiveIntraThreads`
+(serial under molecule-level parallelism). **D4 in-SCF t8 154→46 ms (3.8×)**; gfn2 complex
+t8 ~640→593 ms. Energy bit-identical; **GFN-FF 17/17 `gfnff_val` green** (integration
+verified). The remaining inherent q-dependent weighting is now threaded; the eigensolve
+(~180 ms) is again the dominant SCF cost.
 
 **Goal:** stop recomputing the full D4 Cartesian gradient every SCF iteration.
 **Approach:** `addDispersionPotential` (`xtb_native.cpp`) calls

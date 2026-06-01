@@ -7,11 +7,19 @@
 
 #include "d4_evaluator.h"
 
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
+
 #include <cassert>
 #include <cmath>
+#include <future>
 #include <limits>
+#include <vector>
 
 namespace curcuma::dispersion {
+
+// Out-of-line destructor: m_pool is a unique_ptr<CxxThreadPool> (forward-declared in the
+// header); the complete type is visible here. Claude Generated.
+D4Evaluator::~D4Evaluator() = default;
 
 D4Evaluator::D4Evaluator(D4ParameterGenerator* data, const D4Params& params)
     : m_data(data)
@@ -172,72 +180,120 @@ double D4Evaluator::computeEnergyAndGradient(const std::vector<int>& atoms,
 
     double E_total = 0.0;
 
-    for (auto& pair : pairs) {
-        // Recompute R0 from our local a1/a2 — pair.r4r2ij is method-agnostic
-        // (depends only on atomic Zr4r2 values, not on damping parameters).
-        const double r0 = m_params.a1 * std::sqrt(pair.r4r2ij) + m_params.a2;
-        pair.r0_squared = r0 * r0;
+    // Parallel over pairs (WP2 extension, Claude Generated). Each pair contributes to
+    // per-atom arrays (gradient/dEdCN/dEdq) that span thread boundaries, so threads
+    // accumulate into private partials reduced afterwards (bit-identical up to FP
+    // reassociation). Per-pair generator reads (weightedC6Gfn2, getZetaCharges, dc6dcn)
+    // are const → thread-safe. m_threads is pre-gated by the caller (native xTB passes
+    // its effectiveIntraThreads, =1 under molecule-level parallelism).
+    const int npairs = static_cast<int>(pairs.size());
+    const int nthr = (m_threads > 1 && npairs >= 4 * m_threads) ? m_threads : 1;
 
-        const Eigen::Vector3d ri = geometry_bohr.row(pair.i);
-        const Eigen::Vector3d rj = geometry_bohr.row(pair.j);
-        const Eigen::Vector3d rij = ri - rj;
+    std::vector<double> E_part(nthr, 0.0);
+    std::vector<Matrix> grad_part;
+    std::vector<Vector> dcn_part, dq_part;
+    if (with_gradient) {
+        grad_part.assign(nthr, Matrix::Zero(natoms, 3));
+        dcn_part.assign(nthr, Vector::Zero(natoms));
+        dq_part.assign(nthr, Vector::Zero(natoms));
+    }
 
-        double E_pair = 0.0;
-        Eigen::Vector3d dE_dr;
-        double dEdCN_i = 0.0, dEdCN_j = 0.0;
-        double disp_sum = 0.0;
+    auto worker = [&](int tid, int T) {
+        double Ep = 0.0;
+        for (int p = tid; p < npairs; p += T) {
+            GFNFFDispersion& pair = pairs[p];
+            // Recompute R0 from our local a1/a2 — pair.r4r2ij is method-agnostic
+            // (depends only on atomic Zr4r2 values, not on damping parameters).
+            const double r0 = m_params.a1 * std::sqrt(pair.r4r2ij) + m_params.a2;
+            pair.r0_squared = r0 * r0;
 
-        if (!pairEnergyAndGradient(pair, rij, with_gradient,
-                                   E_pair, dE_dr, dEdCN_i, dEdCN_j, disp_sum)) {
-            continue;
-        }
+            const Eigen::Vector3d ri = geometry_bohr.row(pair.i);
+            const Eigen::Vector3d rj = geometry_bohr.row(pair.j);
+            const Eigen::Vector3d rij = ri - rj;
 
-        // AP6b exact path: replace the CN-only·single-zeta C6 (pair.C6·pair.zetac6)
-        // with the dftd4 per-reference charge-weighted C6. The damping (disp_sum,
-        // dE_dr direction) is unchanged; only the C6 prefactor and its q/CN
-        // derivatives differ. GFN-FF keeps per_reference_charge=false.
-        D4ParameterGenerator::C6Gfn2 c6g;
-        const bool per_ref = m_params.per_reference_charge && (m_data != nullptr)
-            && (m_data->getZetaCharges().size() == natoms);
-        if (per_ref) {
-            const Vector& q = m_data->getZetaCharges();
-            c6g = m_data->weightedC6Gfn2(atoms[pair.i], atoms[pair.j], pair.i, pair.j,
-                                         q(pair.i), q(pair.j), with_gradient, false);
-            const double denom = pair.C6 * pair.zetac6;
-            const double scale = (std::abs(denom) > 1e-300) ? (c6g.c6 / denom) : 0.0;
-            E_pair = -c6g.c6 * disp_sum;
-            if (with_gradient) {
-                dE_dr  *= scale;                      // radial: C6 const in r, just rescale
-                dEdCN_i = -c6g.dc6dcni * disp_sum;    // exact per-reference dC6/dCN
-                dEdCN_j = -c6g.dc6dcnj * disp_sum;
+            double E_pair = 0.0;
+            Eigen::Vector3d dE_dr;
+            double dEdCN_i = 0.0, dEdCN_j = 0.0;
+            double disp_sum = 0.0;
+
+            if (!pairEnergyAndGradient(pair, rij, with_gradient,
+                                       E_pair, dE_dr, dEdCN_i, dEdCN_j, disp_sum)) {
+                continue;
             }
-        }
 
-        E_total += E_pair;
-        if (with_gradient) {
-            gradient_out.row(pair.i) += dE_dr.transpose();
-            gradient_out.row(pair.j) -= dE_dr.transpose();
-            dEdCN_out(pair.i) += dEdCN_i;
-            dEdCN_out(pair.j) += dEdCN_j;
-
-            // Charge-response chain rule (first half): dE_D4/dq_A = -dC6/dq · disp_sum.
-            if (do_dEdq) {
-                if (per_ref) {
-                    dEdq_out(pair.i) += -c6g.dc6dqi * disp_sum;
-                    dEdq_out(pair.j) += -c6g.dc6dqj * disp_sum;
-                } else {
-                    // Legacy single-zeta path (GFN-FF-style prefactor).
-                    const Vector& q = m_data->getZetaCharges();
-                    const int Zi = atoms[pair.i];
-                    const int Zj = atoms[pair.j];
-                    const double zeta_i = m_data->getZeta(Zi, q(pair.i));
-                    const double zeta_j = m_data->getZeta(Zj, q(pair.j));
-                    const double dzeta_i = m_data->getZetaDerivative(Zi, q(pair.i));
-                    const double dzeta_j = m_data->getZetaDerivative(Zj, q(pair.j));
-                    dEdq_out(pair.i) += -pair.C6 * disp_sum * dzeta_i * zeta_j;
-                    dEdq_out(pair.j) += -pair.C6 * disp_sum * zeta_i * dzeta_j;
+            // AP6b exact path: replace the CN-only·single-zeta C6 (pair.C6·pair.zetac6)
+            // with the dftd4 per-reference charge-weighted C6. The damping (disp_sum,
+            // dE_dr direction) is unchanged; only the C6 prefactor and its q/CN
+            // derivatives differ. GFN-FF keeps per_reference_charge=false.
+            D4ParameterGenerator::C6Gfn2 c6g;
+            const bool per_ref = m_params.per_reference_charge && (m_data != nullptr)
+                && (m_data->getZetaCharges().size() == natoms);
+            if (per_ref) {
+                const Vector& q = m_data->getZetaCharges();
+                c6g = m_data->weightedC6Gfn2(atoms[pair.i], atoms[pair.j], pair.i, pair.j,
+                                             q(pair.i), q(pair.j), with_gradient, false);
+                const double denom = pair.C6 * pair.zetac6;
+                const double scale = (std::abs(denom) > 1e-300) ? (c6g.c6 / denom) : 0.0;
+                E_pair = -c6g.c6 * disp_sum;
+                if (with_gradient) {
+                    dE_dr  *= scale;                      // radial: C6 const in r, just rescale
+                    dEdCN_i = -c6g.dc6dcni * disp_sum;    // exact per-reference dC6/dCN
+                    dEdCN_j = -c6g.dc6dcnj * disp_sum;
                 }
             }
+
+            Ep += E_pair;
+            if (with_gradient) {
+                grad_part[tid].row(pair.i) += dE_dr.transpose();
+                grad_part[tid].row(pair.j) -= dE_dr.transpose();
+                dcn_part[tid](pair.i) += dEdCN_i;
+                dcn_part[tid](pair.j) += dEdCN_j;
+
+                // Charge-response chain rule (first half): dE_D4/dq_A = -dC6/dq · disp_sum.
+                if (do_dEdq) {
+                    if (per_ref) {
+                        dq_part[tid](pair.i) += -c6g.dc6dqi * disp_sum;
+                        dq_part[tid](pair.j) += -c6g.dc6dqj * disp_sum;
+                    } else {
+                        // Legacy single-zeta path (GFN-FF-style prefactor).
+                        const Vector& q = m_data->getZetaCharges();
+                        const int Zi = atoms[pair.i];
+                        const int Zj = atoms[pair.j];
+                        const double zeta_i = m_data->getZeta(Zi, q(pair.i));
+                        const double zeta_j = m_data->getZeta(Zj, q(pair.j));
+                        const double dzeta_i = m_data->getZetaDerivative(Zi, q(pair.i));
+                        const double dzeta_j = m_data->getZetaDerivative(Zj, q(pair.j));
+                        dq_part[tid](pair.i) += -pair.C6 * disp_sum * dzeta_i * zeta_j;
+                        dq_part[tid](pair.j) += -pair.C6 * disp_sum * zeta_i * dzeta_j;
+                    }
+                }
+            }
+        }
+        E_part[tid] = Ep;
+    };
+
+    if (nthr <= 1) {
+        worker(0, 1);
+    } else {
+        if (!m_pool) {
+            m_pool = std::make_unique<CxxThreadPool>();
+            m_pool->setProgressBar(CxxThreadPool::ProgressBarType::None);
+        }
+        m_pool->setActiveThreadCount(nthr);
+        std::vector<std::future<void>> fut;
+        fut.reserve(nthr - 1);
+        for (int t = 1; t < nthr; ++t) fut.push_back(m_pool->enqueue(worker, t, nthr));
+        worker(0, nthr);
+        for (auto& f : fut) f.get();
+    }
+
+    // Reduce thread-local partials into the (already zeroed) output accumulators.
+    for (int t = 0; t < nthr; ++t) {
+        E_total += E_part[t];
+        if (with_gradient) {
+            gradient_out += grad_part[t];
+            dEdCN_out    += dcn_part[t];
+            dEdq_out     += dq_part[t];
         }
     }
 
