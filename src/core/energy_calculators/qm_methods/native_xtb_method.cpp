@@ -105,6 +105,14 @@ void NativeXtbMethod::handleError(const std::string& operation)
     m_error_message = fmt::format("{} error during {}", getMethodName(), operation);
 }
 
+std::string NativeXtbMethod::c1ModeString() const
+{
+    if (m_parameters.contains("xtb") && m_parameters["xtb"].is_object()
+        && m_parameters["xtb"].contains("c1_mode"))
+        return m_parameters["xtb"]["c1_mode"].get<std::string>();
+    return m_parameters.value("c1_mode", std::string("none"));
+}
+
 bool NativeXtbMethod::isMoleculeSupported(const Mol& mol)
 {
     // Native GFN1/GFN2 parameters cover Z = 1..86 (H to Rn).
@@ -132,6 +140,22 @@ bool NativeXtbMethod::setMolecule(const Mol& mol)
         m_initialized = true;
         clearError();
 
+        // C1 large-system path: when c1_mode != none, delegate to the
+        // fragmentation driver (it owns its own per-fragment XTB instances).
+        if (curcuma::xtb::parseC1Mode(c1ModeString()) != curcuma::xtb::C1Mode::None) {
+            m_c1_driver = std::make_unique<curcuma::xtb::FragmentScfDriver>(m_method, m_parameters);
+            m_c1_driver->setIntraThreads(m_thread_count);
+            if (!m_c1_driver->setMolecule(mol)) {
+                handleError("C1 driver molecule initialization");
+                return false;
+            }
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info(fmt::format("{}: C1 mode '{}' active",
+                                                getMethodName(), c1ModeString()));
+            return true;
+        }
+        m_c1_driver.reset();
+
         if (!m_xtb->QMInterface::InitialiseMolecule(mol)) {
             handleError("molecule initialization");
             return false;
@@ -158,6 +182,14 @@ bool NativeXtbMethod::updateGeometry(const Matrix& geometry)
         m_calculation_done = false;
         clearError();
 
+        if (m_c1_driver) {
+            if (!m_c1_driver->updateGeometry(geometry)) {
+                handleError("C1 driver geometry update");
+                return false;
+            }
+            return true;
+        }
+
         if (!m_xtb->UpdateMolecule(geometry)) {
             handleError("geometry update");
             return false;
@@ -181,6 +213,17 @@ double NativeXtbMethod::calculateEnergy(bool gradient)
 
     try {
         clearError();
+
+        // C1 large-system path: delegate the whole calculation to the driver.
+        if (m_c1_driver) {
+            m_last_energy = m_c1_driver->calculate(gradient);
+            m_calculation_done = true;
+            if (m_c1_driver->hasError()) {
+                handleError(m_c1_driver->errorMessage());
+                return 0.0;
+            }
+            return m_last_energy;
+        }
 
         // Apply controller settings each call so geometry steps in -opt / MD pick
         // up the configuration (D4 charge source + SCF convergence settings).
@@ -225,6 +268,10 @@ void NativeXtbMethod::setIterativeMode(bool on)
 // ---------------------------------------------------------------------------
 Matrix NativeXtbMethod::getGradient() const
 {
+    if (m_c1_driver)
+        return m_calculation_done ? m_c1_driver->getGradient()
+                                  : Matrix::Zero(m_molecule.AtomCount(), 3);
+
     if (!m_calculation_done || !m_xtb)
         return Matrix::Zero(m_molecule.AtomCount(), 3);
 
@@ -236,6 +283,9 @@ Matrix NativeXtbMethod::getGradient() const
 
 Vector NativeXtbMethod::getCharges() const
 {
+    if (m_c1_driver)
+        return m_calculation_done ? m_c1_driver->getCharges()
+                                  : Vector::Zero(m_molecule.AtomCount());
     if (!m_calculation_done || !m_xtb)
         return Vector::Zero(m_molecule.AtomCount());
     return m_xtb->getPartialCharges();
@@ -294,6 +344,8 @@ Vector NativeXtbMethod::getCoordinationNumbers() const
 
 json NativeXtbMethod::getEnergyDecomposition() const
 {
+    if (m_c1_driver)
+        return m_calculation_done ? m_c1_driver->getEnergyDecomposition() : json{};
     if (!m_calculation_done || !m_xtb) return json{};
     try { return m_xtb->getEnergyDecomposition(); } catch (const std::exception&) { return json{}; }
 }

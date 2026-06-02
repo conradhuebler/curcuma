@@ -44,6 +44,8 @@ tblite methods:
 
 > Opt-in **MKL-free / GPU-portable eigensolve kernels** are available for the native GFN SCF (MKL stays the default): `-eigensolver native` (own Householder + Cuppen divide-and-conquer), `-eigensolver purify` (0 K density-matrix purification, GEMM-only, no diagonalization), `-eigensolver lobpcg` (seeded block LOBPCG, experimental), and `CURCUMA_EIG_TRED2=blocked` (BLAS-3 blocked tridiagonalization). See [docs/SQM_EIGENSOLVE_GPU.md](docs/SQM_EIGENSOLVE_GPU.md).
 
+> Opt-in **approximate large-system modes** scale the native GFN SCF beyond ~1000 atoms by exploiting locality (default is the exact dense path): `-c1_mode fragments` (disconnected-fragment SCF, energy+gradient), `-c1_mode dc` (divide-and-conquer, `-c1_buffer_bohr` accuracy knob), `-c1_mode sparse` (non-orthogonal density purification, 0 K gapped, `-c1_sparse_threshold`). Each converges to the dense energy as its knob tightens. See [docs/SQM_LARGE_SYSTEMS.md](docs/SQM_LARGE_SYSTEMS.md).
+
 xtb methods:
 - xtb-gfnff : GFN-FF via the xtb library
 - xtb-gfn1

@@ -17,6 +17,7 @@
 
 #include "../computational_method.h"
 #include "xtb_native.h"
+#include "xtb_fragment_scf.h"
 #include "src/core/molecule.h"
 
 #include <memory>
@@ -55,6 +56,7 @@ public:
     {
         m_thread_count = std::max(1, threads);
         if (m_xtb) m_xtb->setIntraThreads(m_thread_count);
+        if (m_c1_driver) m_c1_driver->setIntraThreads(m_thread_count);
     }
 
     void setParameters(const json& params) override;
@@ -84,9 +86,16 @@ public:
 private:
     curcuma::xtb::MethodType m_method;
     std::unique_ptr<curcuma::xtb::XTB> m_xtb;
+    // C1 large-system driver (opt-in, c1_mode != none). When active, all
+    // calculate/gradient/charge calls delegate here instead of m_xtb. Built in
+    // setMolecule once the c1_mode is known. Claude Generated.
+    std::unique_ptr<curcuma::xtb::FragmentScfDriver> m_c1_driver;
     Mol m_molecule;
     bool m_calculation_done = false;
     double m_last_energy = 0.0;
+
+    // Read c1_mode from the controller ("xtb" scope, top-level fallback).
+    std::string c1ModeString() const;
 
     // Push the controller settings into the native solver: the D4 charge-response
     // source (harmless for GFN1, which uses D3) and the SCF-convergence settings

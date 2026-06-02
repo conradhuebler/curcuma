@@ -427,6 +427,40 @@ public:
         const Eigen::MatrixXd& dp_at,
         const Eigen::MatrixXd& qp_at);
 
+    // --- C1a divide-and-conquer DC-SCF (Claude Generated, June 2026) --------
+    // Energy-only large-system SCF that exploits locality: each outer iteration
+    // builds the GLOBAL potential + Fock from the current density (so severed
+    // covalent bonds still see their real neighbours), diagonalises only the
+    // core+buffer SUB-BLOCKS instead of the full O(N^3) matrix, finds a shared
+    // chemical potential by global electron-count bisection over all sub-spectra
+    // (Fermi smearing at m_electronic_temp), and assembles a global density by
+    // Yang's core-projection. The converged density is fed to
+    // evaluateComponentsAtFixedDensity for the (validated) energy. APPROXIMATE:
+    // the energy converges to the dense SCF result as the buffer grows.
+    //   subsystems[a] : global atom indices of core+buffer for sub-system a
+    //   cores[a]      : global atom indices of the core (subset of subsystems[a]);
+    //                   the cores must tile the molecule (disjoint, covering all).
+    // Fills converged_out / iters_out; returns the total energy (Eh). xtb_dc.cpp.
+    double calculateDivideConquer(const std::vector<std::vector<int>>& subsystems,
+                                  const std::vector<std::vector<int>>& cores,
+                                  bool& converged_out, int& iters_out);
+
+    // --- C1b sparse + non-orthogonal density purification (Claude Generated) -
+    // Energy-only SCF that replaces the O(N^3) eigensolve with non-orthogonal
+    // canonical density-matrix purification (Palser & Manolopoulos, PRB 58
+    // (1998) 12704, generalised to the S metric: products P^2 -> PSP, P^3 ->
+    // PSPSP, traces Tr(P) -> Tr(PS)). The density is thresholded each step
+    // (drop |P_ij| < threshold) to expose the achievable sparsity. 0 K, GAPPED
+    // systems only — purification needs a HOMO-LUMO gap; on non-convergence it
+    // warns and falls back to the eigensolver. The Coulomb gamma.q stays an
+    // O(N^2) matvec. First cut: dense Eigen storage with thresholding (measures
+    // energy error and nnz fraction vs the threshold); true sparse storage /
+    // S^-1-free O(N) is deferred. Fills converged_out / iters_out / nnz_frac_out;
+    // returns the total energy (Eh). xtb_sparse.cpp.
+    double calculateSparsePurification(double threshold,
+                                       bool& converged_out, int& iters_out,
+                                       double& nnz_frac_out);
+
 private:
     /* ----- build-once state ------------------------------------------- */
     void buildBasis();                                   // xtb_native.cpp
