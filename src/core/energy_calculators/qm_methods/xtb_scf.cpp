@@ -48,6 +48,17 @@ extern "C" void dsyevd_(const char* jobz, const char* uplo, const int* n,
 extern "C" void dsygst_(const int* itype, const char* uplo, const int* n,
                         double* a, const int* lda, const double* b,
                         const int* ldb, int* info);
+// Single-precision counterparts for the opt-in mixed-precision SCF: the early SCF
+// iterations (far from convergence) solve the eigenproblem in FP32 (~2x faster), and the
+// loop switches back to the FP64 path above once max|dq| drops below the threshold, so the
+// converged fixed point — and the energy — are FP64. Claude Generated.
+extern "C" void ssygst_(const int* itype, const char* uplo, const int* n,
+                        float* a, const int* lda, const float* b,
+                        const int* ldb, int* info);
+extern "C" void ssyevd_(const char* jobz, const char* uplo, const int* n,
+                        float* a, const int* lda, float* w,
+                        float* work, const int* lwork,
+                        int* iwork, const int* liwork, int* info);
 #endif
 
 // The whole native xTB Calculation() runs MKL-serial via curcuma::xtb::
@@ -233,7 +244,32 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         const auto te0 = clk::now();
         Eigen::MatrixXd A(n, n);                 // holds the standard-form matrix, then its eigenvectors
         Eigen::VectorXd eps(n);
-        if (!use_native) {
+        if (!use_native && m_eig_fp32) {
+            // Mixed-precision early iteration (opt-in): FP32 reduce (ssygst) + FP32
+            // divide-and-conquer (ssyevd), ~2x faster. The FP64 back-transform below runs on
+            // the FP32-quality eigenvectors; the SCF loop reverts to the FP64 branch once
+            // max|dq| < scf_fp32_threshold, so the converged fixed point — and the energy —
+            // is FP64. Claude Generated.
+            Eigen::MatrixXf Af = F.cast<float>();
+            Eigen::MatrixXf Lf = m_X.cast<float>();
+            int itype = 1;
+            ssygst_(&itype, &uplo, &n, Af.data(), &n, Lf.data(), &n, &info);
+            if (info != 0) return false;
+            const auto te1 = clk::now();
+            int lwork = 1 + 6 * n + 2 * n * n, liwork = 3 + 5 * n;
+            std::vector<float> work(static_cast<size_t>(lwork));
+            std::vector<int>   iwork(static_cast<size_t>(liwork));
+            Eigen::VectorXf epsf(n);
+            const char jobz = 'V';
+            ssyevd_(&jobz, &uplo, &n, Af.data(), &n, epsf.data(),
+                    work.data(), &lwork, iwork.data(), &liwork, &info);
+            if (info != 0) return false;
+            const auto te2 = clk::now();
+            A   = Af.cast<double>();             // standard-form eigenvectors → FP64 for the shared back-transform
+            eps = epsf.cast<double>();
+            m_t_xfx  += ms(te0, te1);            // reduce (ssygst)
+            m_t_diag += ms(te1, te2);            // ssyevd
+        } else if (!use_native) {
             // MKL path: reduce F to standard form (dsygst, in-place lower triangle) then
             // solve with the divide-and-conquer dsyevd.
             A = F;

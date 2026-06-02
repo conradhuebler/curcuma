@@ -362,6 +362,12 @@ public:
     void setEigensolver(const std::string& s) { if (!s.empty()) m_eigensolver = s; }
     const std::string& eigensolver() const    { return m_eigensolver; }
 
+    // Mixed-precision SCF (opt-in, MKL path): early iterations (max|dq| above the threshold)
+    // solve the eigenproblem in FP32 (~2x), reverting to FP64 near convergence so the energy
+    // is FP64. Default off. Claude Generated.
+    void setMixedPrecision(bool b)      { m_scf_mixed_precision = b; }
+    void setFp32Threshold(double t)     { if (t > 0.0) m_scf_fp32_threshold = t; }
+
     // Warm-start: reuse converged charges from the previous geometry step.
     // Activated by MD/opt capabilities; also settable via -warm_start false.
     // DIIS/Broyden history is always reset per geometry step by default;
@@ -586,6 +592,9 @@ private:
     double      m_level_shift   = 0.2;   // virtual-orbital shift magnitude (Eh), LevelShift mode
     std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare)
     std::string m_eigensolver   = "mkl"; // eigensolve backend: "mkl" (dsyevd) | "native"/"dnc"
+    bool        m_scf_mixed_precision = false;   // opt-in FP32 early-iteration eigensolve (MKL path)
+    double      m_scf_fp32_threshold  = 1.0e-3;  // switch FP32→FP64 once max|dq| < this
+    bool        m_eig_fp32 = false;              // per-iteration flag set by the SCF loop
 
     Vector m_coordination_numbers;   ///< CN, filled in Calculation()
 
@@ -680,6 +689,8 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("level_shift",  [&](const json& v){ if (v.is_number()) xtb.setLevelShift(v.get<double>()); });
     lookup("warm_start",   [&](const json& v){ if (v.is_boolean()) xtb.setWarmStart(v.get<bool>()); });
     lookup("keep_diis",    [&](const json& v){ if (v.is_boolean()) xtb.setKeepDiis(v.get<bool>()); });
+    lookup("scf_mixed_precision", [&](const json& v){ if (v.is_boolean()) xtb.setMixedPrecision(v.get<bool>()); });
+    lookup("scf_fp32_threshold",  [&](const json& v){ if (v.is_number()) xtb.setFp32Threshold(v.get<double>()); });
 }
 
 } // namespace curcuma::xtb

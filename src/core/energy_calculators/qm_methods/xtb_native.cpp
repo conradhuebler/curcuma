@@ -424,6 +424,11 @@ double XTB::Calculation(bool gradient)
 
         const auto t_fock = clock::now();
 
+        // Mixed precision (opt-in, MKL path): solve in FP32 while far from convergence
+        // (previous max|dq| above the threshold; iter 0 starts in FP32 via dq_prev=1e30),
+        // reverting to FP64 near convergence so the converged energy is FP64. Claude Generated.
+        m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
+
         // Diagonalize. Let MKL thread the eigensolve (dsygst/dsyevd/dtrsm) for a
         // single large molecule; the surrounding MklSerialScope keeps MKL serial
         // everywhere else so the hand-threaded regions are not oversubscribed.
