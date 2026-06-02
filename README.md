@@ -124,11 +124,7 @@ cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release -G "MinGW Makefiles"
 ```
 
-Open the file explorer, navigate to \curcuma\scripts\param_parser\ and open main.cpp. Add the following line to the #include-Part of the file:
-```sh
-#include <sstream>
-```
-Save the file and return to the terminal. Execute the installation by typing
+Open the file explorer, navigate to \curcuma\scripts\param_parser\ and open main.cpp. Add #include <sstream> to the #include-Part of the file. Save the file and return to the terminal. Execute the installation by typing
 ```sh
 make
 ```
