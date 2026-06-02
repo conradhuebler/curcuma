@@ -91,11 +91,11 @@ Dispersion correction parameters are yet complicated to change, this will be imp
 ## Compiling
 To compile Curcuma you will need [CMake](https://cmake.org/download/) 3.15 or newer and a C++17-capable compiler, both gcc and icc (quite recent version) work. One possible option is MinGW. For Windows, it is further necessary to add the bin-folder in the MinGW installation to the path (Edit the system environment variables > Environment Variables > under "System Variables" select "Path" > Edit > New > paste path, for example "C:\MinGW\bin").
 
+### Unix
 To obtain the most recent version
 ```sh
 git clone --recursive https://github.com/conradhuebler/curcuma
 ```
-For Windows: you need to make sure to navigate to a folder outside the Windows System before clone to avoid conflicts of usage rights.
 
 Compile it as follows on Unix Platform:
 ```sh
@@ -105,10 +105,34 @@ cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make
 ```
-For Windows: you need to tell the CMD which compiler to use to avoid errors if using the wrong compiler. Using MinGW as example, the "cmake ..." command would become
+
+### Windows
+#### Preliminary installations
+Install MinGW and cmake and add the paths to their executable files to the System environment variables. Furthermore, download and extract w64devkit. The following installation will be executed using the terminal within this toolkit (in the extracted folder) to enable the usage of OpenMP under Windows.
+
+#### Installation of Curcuma
+To obtain the most recent version, open the Terminal and make sure to navigate to a folder outside the Windows System before clone to avoid conflicts of usage rights.
 ```sh
+git clone --recursive https://github.com/conradhuebler/curcuma
+```
+
+Compile it as follows:
+```sh
+cd curcuma 
+mkdir build
+cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release -G "MinGW Makefiles"
 ```
+
+Open the file explorer, navigate to \curcuma\scripts\param_parser\ and open main.cpp. Add the following line to the #include-Part of the file:
+```sh
+#include <sstream>
+```
+Save the file and return to the terminal. Execute the installation by typing
+```sh
+make
+```
+and wait for the installation to finish.
 
 ## Modern Parameter System (October 2025)
 
