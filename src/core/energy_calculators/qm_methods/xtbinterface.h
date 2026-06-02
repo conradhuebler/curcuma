@@ -47,6 +47,7 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     PARAM(level_shift, Double, 0.2, "Native GFN SCF: virtual-orbital level-shift magnitude (Eh) for scf_mode='level-shift'. Faded out near convergence so the fixed point is unshifted.", "SCF", {})
     PARAM(warm_start, Bool, true, "Native GFN SCF: reuse converged shell charges from the previous geometry step as the SCF initial guess. Harmless for single-point (no saved charges). Disable with -warm_start false to always start from EEQ/h0.", "SCF", {})
     PARAM(keep_diis, Bool, false, "Native GFN SCF: preserve DIIS/Broyden history across geometry steps (experimental). Default false resets history on each new geometry; true may help near-converged MD trajectories or hurt if geometry changes significantly.", "SCF", {})
+    PARAM(eigensolver, String, "mkl", "Native GFN SCF symmetric eigensolver backend: 'mkl' (LAPACK dsyevd, default, blocked+threaded) or 'native' (self-contained Householder reduction + Cuppen divide-and-conquer, no LAPACK eigensolve dependency; the GPU-portable foundation. Currently ~1.6x slower than MKL on a 231-atom system; the tridiagonal D&C merge is the remaining gap).", "SCF", {})
 END_PARAMETER_DEFINITION
 
 class UFF;
