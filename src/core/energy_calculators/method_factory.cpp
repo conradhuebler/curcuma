@@ -34,6 +34,9 @@
 #ifdef USE_CUDA
 #include "qm_methods/gfnff_gpu_method.h"
 #endif
+#if defined(USE_CUDA) && defined(USE_CUDA_XTB)
+#include "qm_methods/xtb_gpu_method.h"
+#endif
 #ifdef USE_TBLITE
 #include "qm_methods/tblite_method.h"
 #endif
@@ -159,7 +162,39 @@ bool MethodFactory::isUlyssesMethod(const std::string& method) {
 
 // AP3 (2026-04-25): Native xTB is now the canonical gfn2 provider.
 // For other providers use explicit names: "ipea1" (TBLite), "ugfn2" (Ulysses), "xtb-gfn2" (XTB).
+// Claude Generated (2026-06): resolve the -gpu mode for the native xTB path.
+// Returns "cuda" only when GPU was requested AND the build supports it; warns and
+// returns "none" when requested but unavailable. Mirrors the gfnff GPU dispatch.
+static std::string resolveNativeXtbGpuMode(const json& config, const char* label) {
+    std::string gpu_mode = config.value("gpu", std::string("none"));
+    std::transform(gpu_mode.begin(), gpu_mode.end(), gpu_mode.begin(), ::tolower);
+    if (gpu_mode == "auto") {
+#if defined(USE_CUDA) && defined(USE_CUDA_XTB)
+        return "cuda";
+#else
+        return "none";
+#endif
+    }
+    if (gpu_mode == "cuda") {
+#if defined(USE_CUDA) && defined(USE_CUDA_XTB)
+        return "cuda";
+#else
+        CurcumaLogger::warn(std::string(label) + ": GPU acceleration requested (-gpu cuda) "
+            "but native xTB CUDA support was not compiled. Falling back to CPU.");
+        CurcumaLogger::warn("To enable it, recompile with: cmake -DUSE_CUDA=ON -DUSE_CUDA_XTB=ON");
+        return "none";
+#endif
+    }
+    return "none";
+}
+
 std::unique_ptr<ComputationalMethod> MethodFactory::createGFN2(const json& config) {
+    if (resolveNativeXtbGpuMode(config, "GFN2") == "cuda") {
+#if defined(USE_CUDA) && defined(USE_CUDA_XTB)
+        CurcumaLogger::info("GFN2: using native xTB on GPU (CUDA)");
+        return std::make_unique<XtbGpuComputationalMethod>(curcuma::xtb::MethodType::GFN2, config);
+#endif
+    }
     CurcumaLogger::info("GFN2: using native xTB implementation");
     return std::make_unique<NativeXtbMethod>(curcuma::xtb::MethodType::GFN2, config);
 }
@@ -167,6 +202,12 @@ std::unique_ptr<ComputationalMethod> MethodFactory::createGFN2(const json& confi
 // AP3 (2026-04-25): Native xTB is now the canonical gfn1 provider.
 // For other providers use explicit names: "xtb-gfn1" (XTB), "ipea1" (TBLite).
 std::unique_ptr<ComputationalMethod> MethodFactory::createGFN1(const json& config) {
+    if (resolveNativeXtbGpuMode(config, "GFN1") == "cuda") {
+#if defined(USE_CUDA) && defined(USE_CUDA_XTB)
+        CurcumaLogger::info("GFN1: using native xTB on GPU (CUDA)");
+        return std::make_unique<XtbGpuComputationalMethod>(curcuma::xtb::MethodType::GFN1, config);
+#endif
+    }
     CurcumaLogger::info("GFN1: using native xTB implementation");
     return std::make_unique<NativeXtbMethod>(curcuma::xtb::MethodType::GFN1, config);
 }

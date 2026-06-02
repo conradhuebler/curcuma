@@ -76,6 +76,11 @@ public:
     void setWarmStart(bool on) override;
     void setIterativeMode(bool on) override;
 
+    // Access the underlying dense native solver (null when a large_system_mode
+    // driver is active). Used by the GPU wrapper to install an external
+    // eigensolver hook. Claude Generated (GPU port).
+    curcuma::xtb::XTB* solver() { return m_xtb.get(); }
+
     // ---- Native xTB extras (not in the base interface) --------------------
     Matrix getMolecularOrbitals() const;
     double getHOMOLUMOGap() const;

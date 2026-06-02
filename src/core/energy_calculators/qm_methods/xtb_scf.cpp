@@ -278,6 +278,18 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         auto ms = [](clk::time_point a, clk::time_point b) {
             return std::chrono::duration<double, std::milli>(b - a).count();
         };
+
+        // External (GPU) eigensolver hook (Claude Generated, GPU port): delegate
+        // the generalized eigenproblem (F, S=L·Lᵀ)→(C, eps) to the device using the
+        // cached lower Cholesky factor L (m_X). On success the shared density build
+        // below runs unchanged; on failure (or when unset) the CPU path runs.
+        bool external_done = false;
+        if (m_external_eigensolver) {
+            const auto tge0 = clk::now();
+            external_done = m_external_eigensolver(F, m_X, m_wfn.C, m_wfn.eps);
+            if (external_done) m_t_diag += ms(tge0, clk::now());
+        }
+        if (!external_done) {
 #ifdef CURCUMA_XTB_HAVE_LAPACK_SYEVD
         // m_X holds the lower Cholesky factor L of S (S = L·Lᵀ). Reduce F to the
         // standard problem  Ftil = L⁻¹·F·L⁻ᵀ  (dsygst, itype=1, lower), solve it
@@ -408,6 +420,7 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         m_t_diag += ms(te1, te2);
         m_t_back += ms(te2, te3);
 #endif
+        } // end CPU eigensolve (skipped when the external GPU solver handled it)
     } else {
         // Fallback: generalized solver (m_X unavailable / near-singular overlap).
         Eigen::GeneralizedSelfAdjointEigenSolver<Matrix> solver(F, S);

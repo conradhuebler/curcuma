@@ -45,11 +45,16 @@ _COMP_RE = {
 }
 
 
-def run_curcuma(curcuma, xyz, method, quiet):
+def run_curcuma(curcuma, xyz, method, quiet, gpu=None):
     # -verbosity 2 surfaces the per-container decomposition; the
     # "Single Point Energy = ..." line is printed unconditionally, so the total
     # gate is unaffected by the verbosity bump.
     cmd = [curcuma, "-sp", xyz, "-method", method, "-verbosity", "2"]
+    if gpu:
+        # GPU path (Claude Generated, GPU port): -gpu cuda routes gfn1/gfn2 to the
+        # native xTB GPU backend. With no CUDA device the wrapper falls back to CPU,
+        # so the test still validates (the energy is identical), it just is not on GPU.
+        cmd += ["-gpu", gpu]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
@@ -88,6 +93,9 @@ def main():
                          "to the 1e-8 total-energy gate (so the WILL_FAIL xfail "
                          "mechanism is undisturbed).")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--gpu", default=None,
+                    help="pass -gpu <mode> to curcuma (e.g. 'cuda') to exercise the "
+                         "native xTB GPU backend; falls back to CPU without a device")
     args = ap.parse_args()
 
     with open(args.ref) as f:
@@ -101,7 +109,7 @@ def main():
     # Size-scaled default tolerance: 1e-4 Eh floor, +1e-5 Eh/atom for accumulation.
     tol = args.tol_energy if args.tol_energy is not None else max(1e-4, nat * 1e-5)
 
-    res = run_curcuma(args.curcuma, args.xyz, native, args.quiet)
+    res = run_curcuma(args.curcuma, args.xyz, native, args.quiet, args.gpu)
     name = ref["molecule"]["name"]
     if res is None:
         print(f"FAIL {name:20s} {native}: native run produced no energy")

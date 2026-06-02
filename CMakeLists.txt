@@ -76,6 +76,12 @@ option(USE_PCH
 option(USE_CUDA
     "Enable CUDA-accelerated GFN-FF (gfnff -gpu cuda, requires CUDA toolkit)" OFF)
 
+# Claude Generated (2026-06): CUDA-accelerated native xTB (gfn1/gfn2 -gpu cuda).
+# Defaults to USE_CUDA. Controls only which xTB GPU sources are added; the runtime
+# code gates on USE_CUDA, the factory offers the GPU path when USE_CUDA_XTB is set.
+option(USE_CUDA_XTB
+    "Enable CUDA-accelerated native xTB SCF/integrals/gradient (gfn1/gfn2 -gpu cuda)" ${USE_CUDA})
+
 # WP-D Stage B (May 2026): hand-rolled AVX2 exp(-x^2) for GFN-FF dcn step 3 hot loop.
 # Opt-in. Default OFF keeps the build bit-identical to pre-WP. Requires AVX2 (set
 # USE_AVX2 or USE_MARCH_NATIVE alongside); CMake errors out if AVX2 cannot be enabled.
@@ -913,6 +919,12 @@ if(USE_CUDA)
         src/core/energy_calculators/ff_methods/cuda/gpu_utils.cpp
         src/core/energy_calculators/qm_methods/gfnff_gpu_method.cpp
     )
+    # Claude Generated (2026-06): native xTB GPU kernels (compiled by nvcc).
+    # The host-side wrapper (xtb_gpu_method.cpp) is added below as a normal source.
+    if(USE_CUDA_XTB)
+        list(APPEND CUDA_SOURCES
+            src/core/energy_calculators/qm_methods/cuda/xtb_gpu_context.cu)
+    endif()
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY LANGUAGE CUDA)
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
@@ -921,6 +933,17 @@ if(USE_CUDA)
     target_include_directories(curcuma_core PRIVATE ${PROJECT_SOURCE_DIR})
     target_link_libraries(curcuma_core CUDA::cudart CUDA::cusolver CUDA::cublas)
     target_compile_definitions(curcuma_core PUBLIC USE_CUDA)
+    # curcuma_core is created before this block, so its CUDA_ARCHITECTURES target
+    # property is still empty (CMP0104). Set it explicitly from the global list.
+    set_target_properties(curcuma_core PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+
+    # Claude Generated (2026-06): native xTB GPU host wrapper + feature flag.
+    if(USE_CUDA_XTB)
+        target_sources(curcuma_core PRIVATE
+            src/core/energy_calculators/qm_methods/xtb_gpu_method.cpp)
+        target_compile_definitions(curcuma_core PUBLIC USE_CUDA_XTB)
+        message(STATUS "CUDA native xTB enabled: gfn1/gfn2 -gpu cuda available")
+    endif()
 
     message(STATUS "CUDA support enabled: gfnff -gpu cuda available")
     message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")

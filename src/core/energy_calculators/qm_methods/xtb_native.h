@@ -369,6 +369,26 @@ public:
     void setEigensolver(const std::string& s) { if (!s.empty()) m_eigensolver = s; }
     const std::string& eigensolver() const    { return m_eigensolver; }
 
+    // External (GPU) eigensolver hook (Claude Generated, GPU port). When set,
+    // solveEigen() delegates the per-iteration generalized eigenproblem
+    //   F C = S C ε,  S = L·Lᵀ
+    // to this callback instead of LAPACK/native: it receives the Fock matrix F and
+    // the cached lower Cholesky factor L (m_X), and must return the generalized
+    // eigenvectors C (Cᵀ S C = I) with ascending eigenvalues eps. The density
+    // (incl. Fermi smearing) is still assembled by solveEigen, so this only
+    // replaces the diagonalisation. Return false to fall back to the CPU path for
+    // that step. Unset (default) → the CPU eigensolve is bit-identical to before.
+    // Types match the members passed at the call site: F and C are the row-major
+    // project Matrix (F=Fock, C=m_wfn.C); L is the column-major Cholesky factor
+    // m_X (Eigen::MatrixXd); eps is Vector (m_wfn.eps). A GPU backend that works
+    // column-major must transpose C on the way out (F is symmetric, so it needs no
+    // transpose on the way in).
+    using ExternalEigensolver =
+        std::function<bool(const Matrix& F, const Eigen::MatrixXd& L,
+                           Matrix& C, Vector& eps)>;
+    void setExternalEigensolver(ExternalEigensolver fn) { m_external_eigensolver = std::move(fn); }
+    bool hasExternalEigensolver() const { return static_cast<bool>(m_external_eigensolver); }
+
     // Mixed-precision SCF (opt-in, MKL path): early iterations (max|dq| above the threshold)
     // solve the eigenproblem in FP32 (~2x), reverting to FP64 near convergence so the energy
     // is FP64. Default off. Claude Generated.
@@ -639,6 +659,8 @@ private:
     std::string m_eigensolver   = "mkl"; // eigensolve backend: "mkl" (dsyevd) | "native"/"dnc"
     bool        m_scf_mixed_precision = false;   // opt-in FP32 early-iteration eigensolve (MKL path)
     double      m_scf_fp32_threshold  = 1.0e-3;  // switch FP32→FP64 once max|dq| < this
+    // Optional GPU eigensolver; default unset → CPU path unchanged. Claude Generated.
+    ExternalEigensolver m_external_eigensolver;
     bool        m_eig_fp32 = false;              // per-iteration flag set by the SCF loop
 
     Vector m_coordination_numbers;   ///< CN, filled in Calculation()

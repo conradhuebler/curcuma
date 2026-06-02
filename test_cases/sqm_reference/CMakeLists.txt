@@ -240,6 +240,35 @@ if(Python3_Interpreter_FOUND)
             endif()
         endforeach()
     endforeach()
+
+    # GPU native xTB validation (Claude Generated, GPU port): identical 1e-8 gate
+    # vs the committed tblite references, but with -gpu cuda so the eigensolve (and,
+    # in later stages, the whole SCF/gradient) runs on the device. The GPU energies
+    # match the CPU path to <1e-8, so the SAME xfail set applies. Without a CUDA
+    # device the wrapper falls back to CPU, so these never false-fail off-GPU.
+    # Labels: gpu_gfn1_validation / gpu_gfn2_validation. Only built with USE_CUDA_XTB.
+    if(USE_CUDA_XTB)
+        foreach(_meth gfn1 gfn2)
+            if(_meth STREQUAL gfn1)
+                set(_xfail ${_GFN1_XFAIL})
+            else()
+                set(_xfail ${_GFN2_XFAIL})
+            endif()
+            foreach(_mol ${_SQM_MOLS})
+                add_test(NAME sqm_val_gpu_${_mol}_${_meth}
+                    COMMAND ${Python3_EXECUTABLE} ${_SQM_VAL_PY}
+                        --curcuma $<TARGET_FILE:curcuma> --quiet --tol-energy ${_SQM_VAL_TOL}
+                        --gpu cuda
+                        --ref ${_SQM_VAL_REF}/${_mol}_${_meth}.ref.json
+                        --xyz ${_SQM_VAL_MOL}/${_mol}.xyz)
+                set_tests_properties(sqm_val_gpu_${_mol}_${_meth}
+                    PROPERTIES TIMEOUT 120 LABELS "gpu_${_meth}_validation")
+                if(${_mol} IN_LIST _xfail)
+                    set_tests_properties(sqm_val_gpu_${_mol}_${_meth} PROPERTIES WILL_FAIL TRUE)
+                endif()
+            endforeach()
+        endforeach()
+    endif()
 endif()
 
 # === tblite-dependent executables (dump + multipole) ===
