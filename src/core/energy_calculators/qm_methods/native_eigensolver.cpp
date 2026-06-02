@@ -546,6 +546,103 @@ bool tridiagDCparallel(const Eigen::VectorXd& d, const Eigen::VectorXd& e,
     return true;
 }
 
+/* ------------------------------------------------------------------ *
+ *  Blocked Householder tridiagonalization (Claude Generated).         *
+ *                                                                     *
+ *  Our own BLAS-3 / GPU-portable reduction A = Q·T·Qᵀ (dsytrd-style),  *
+ *  the MKL-free alternative to Eigen's Tridiagonalization. Right-      *
+ *  looking, panel by panel: a panel of `nb` columns is reduced        *
+ *  (dlatrd) while accumulating the Householder vectors V and the       *
+ *  matrices W = β(A·v − ½β(vᵀA·v)v); the trailing submatrix is then    *
+ *  updated ONCE per panel by a symmetric rank-2k update                *
+ *  A₂₂ −= V₂·W₂ᵀ + W₂·V₂ᵀ (the BLAS-3 / GPU offload point). Within the *
+ *  panel each column's deferred update is folded in from V,W (gemv),   *
+ *  so A's trailing block keeps panel-start values for the symv.        *
+ *  Reads/uses the lower triangle. Eigen's makeHouseholder supplies the *
+ *  per-column reflector (tested signs). Eigenpairs feed the energy, so *
+ *  validated bit-identical via ctest native_eigensolver.               *
+ * ------------------------------------------------------------------ */
+bool blockedTridiag(const Eigen::MatrixXd& Ain, Eigen::VectorXd& d,
+                    Eigen::VectorXd& eoff, Eigen::MatrixXd& Q)
+{
+    const int n = static_cast<int>(Ain.rows());
+    Eigen::MatrixXd A = 0.5 * (Ain + Ain.transpose());   // symmetrise; we use lower triangle
+    d.resize(n);
+    eoff.resize(n > 1 ? n - 1 : 0);
+    Q = Eigen::MatrixXd::Identity(n, n);
+    if (n == 1) { d(0) = A(0, 0); return true; }
+
+    constexpr int nb = 32;                                // panel width
+    for (int k = 0; k < n - 1; k += nb) {
+        const int kb = std::min(nb, (n - 1) - k);         // Householder columns in this panel
+        const int m  = n - k;                             // trailing dim (local row r ↔ global k+r)
+        Eigen::MatrixXd V = Eigen::MatrixXd::Zero(m, kb);
+        Eigen::MatrixXd W = Eigen::MatrixXd::Zero(m, kb);
+
+        for (int i = 0; i < kb; ++i) {
+            const int j  = k + i;                         // global column
+            const int mj = n - j - 1;                     // length of subdiagonal column A[j+1:, j]
+
+            // Diagonal d(j): panel-start A(j,j) plus the within-panel deferred rank-2 updates.
+            double djj = A(j, j);
+            for (int l = 0; l < i; ++l) djj -= 2.0 * V(i, l) * W(i, l);
+            d(j) = djj;
+
+            // Subdiagonal column with the within-panel deferred correction (local rows i+1..m-1).
+            Eigen::VectorXd col = A.block(j + 1, j, mj, 1);
+            if (i > 0) {
+                col.noalias() -= V.block(i + 1, 0, mj, i) * W.row(i).head(i).transpose();
+                col.noalias() -= W.block(i + 1, 0, mj, i) * V.row(i).head(i).transpose();
+            }
+
+            // Householder reflector of `col`: H = I − tau·v·vᵀ, v = [1; essential], H·col = beta·e0.
+            double tau = 0.0, beta;
+            Eigen::VectorXd v(mj);
+            v(0) = 1.0;
+            if (mj == 1) {
+                beta = col(0);                            // last column: nothing to zero
+            } else {
+                Eigen::VectorXd essential(mj - 1);
+                col.makeHouseholder(essential, tau, beta);
+                v.tail(mj - 1) = essential;
+            }
+            eoff(j) = beta;
+            V.block(i + 1, i, mj, 1) = v;
+
+            if (tau != 0.0) {
+                // p = tau · A_updated · v, with A_updated = A_panelstart[j+1:,j+1:] − Σ_{l<i}(v_l w_lᵀ + w_l v_lᵀ).
+                Eigen::VectorXd Av =
+                    A.block(j + 1, j + 1, mj, mj).selfadjointView<Eigen::Lower>() * v;   // symv (panel-start)
+                if (i > 0) {
+                    const Eigen::MatrixXd Vp = V.block(i + 1, 0, mj, i);
+                    const Eigen::MatrixXd Wp = W.block(i + 1, 0, mj, i);
+                    Av.noalias() -= Vp * (Wp.transpose() * v);
+                    Av.noalias() -= Wp * (Vp.transpose() * v);
+                }
+                Eigen::VectorXd p = tau * Av;
+                Eigen::VectorXd w = p - (0.5 * tau * p.dot(v)) * v;
+                W.block(i + 1, i, mj, 1) = w;
+
+                // Accumulate Q := Q·H (right-apply; only columns j+1.. change). BLAS-2 rank-1.
+                Eigen::VectorXd Qv = Q.block(0, j + 1, n, mj) * v;
+                Q.block(0, j + 1, n, mj).noalias() -= tau * Qv * v.transpose();
+            }
+        }
+
+        // Trailing symmetric rank-2k update (the BLAS-3 step): A₂₂ −= V₂·W₂ᵀ + W₂·V₂ᵀ
+        // over the beyond-panel block [k+kb:, k+kb:] (local rows kb..m-1).
+        const int mt = m - kb;
+        if (mt > 0) {
+            const Eigen::MatrixXd V2 = V.block(kb, 0, mt, kb);
+            const Eigen::MatrixXd W2 = W.block(kb, 0, mt, kb);
+            A.block(k + kb, k + kb, mt, mt).triangularView<Eigen::Lower>() -=
+                V2 * W2.transpose() + W2 * V2.transpose();
+        }
+    }
+    d(n - 1) = A(n - 1, n - 1);   // last diagonal: fully updated by the final panel's rank-2k
+    return true;
+}
+
 } // namespace
 
 bool solveSymmetric(const Eigen::MatrixXd& A,
@@ -562,35 +659,38 @@ bool solveSymmetric(const Eigen::MatrixXd& A,
     // blocked reduction). Claude Generated — zero cost when the env var is unset.
     using clk = std::chrono::steady_clock;
     static const bool prof = (std::getenv("CURCUMA_EIG_PROFILE") != nullptr);
-    // Tridiagonalization backend. DEFAULT: Eigen's vectorized Householder
-    // Tridiagonalization — 6× faster than the legacy scalar tred2 on the GFN workload
-    // (complex t8 56.8→9.5 ms/it), energy AND gradient bit-identical, native_eigensolver
-    // ctest green. The legacy scalar reduction (the original from-scratch EISPACK lineage)
-    // stays reachable via env CURCUMA_EIG_TRED2=scalar as the no-MKL / GPU-blueprint
-    // reference: the production GPU-portable path is a blocked BLAS-3 (or two-stage)
-    // reduction, and the scalar code is the unvectorized baseline to A/B it against.
-    // NOTE: with EIGEN_USE_BLAS the Eigen reduction routes BLAS-2 through MKL; built
-    // without MKL it still beats the scalar code via Eigen SIMD. Claude Generated.
-    static const bool tred_scalar = [] {
+    // Tridiagonalization backend (env CURCUMA_EIG_TRED2). DEFAULT 'eigen': Eigen's
+    // vectorized Householder reduction — 6× faster than the legacy scalar tred2 on the GFN
+    // workload, bit-identical, ctest green; routes BLAS-2 through MKL when EIGEN_USE_BLAS.
+    // 'blocked': our own dsytrd-style blocked BLAS-3 reduction (blockedTridiag) — the
+    // MKL-free / GPU-portable kernel (panel reduction + per-panel rank-2k trailing update).
+    // 'scalar': the original from-scratch unvectorized tred2, the A/B baseline. All three
+    // feed the same Cuppen D&C and are validated bit-identical via ctest. Claude Generated.
+    static const int tred_mode = [] {
         const char* e = std::getenv("CURCUMA_EIG_TRED2");
-        return e && std::strcmp(e, "scalar") == 0; }();
+        if (!e) return 0;
+        if (std::strcmp(e, "scalar")  == 0) return 1;
+        if (std::strcmp(e, "blocked") == 0) return 2;
+        return 0; }();
     auto t0 = clk::now();
 
     // 1. Householder tridiagonalization: A = Q·T·Qᵀ. Symmetrise a copy first to guard
     //    against tiny input asymmetries.
     Eigen::MatrixXd Q;
     Eigen::VectorXd d(n), eoff(n - 1);   // d = diagonal of T; eoff(k) = subdiag connecting (k,k+1)
-    if (!tred_scalar) {
+    if (tred_mode == 1) {
+        Q = 0.5 * (A + A.transpose());                       // tred2 reduces in place → Q
+        Eigen::VectorXd efull(n);
+        tred2(Q, d, efull);              // efull(i) = subdiag(i-1,i), efull(0)=0
+        for (int k = 0; k < n - 1; ++k) eoff(k) = efull(k + 1);
+    } else if (tred_mode == 2) {
+        if (!blockedTridiag(A, d, eoff, Q)) return false;    // our BLAS-3 / GPU-blueprint kernel
+    } else {
         Eigen::MatrixXd As = 0.5 * (A + A.transpose());
         Eigen::Tridiagonalization<Eigen::MatrixXd> tri(As);  // A = Q·T·Qᵀ, vectorized
         d    = tri.diagonal();
         eoff = tri.subDiagonal();
         Q    = tri.matrixQ();
-    } else {
-        Q = 0.5 * (A + A.transpose());                       // tred2 reduces in place → Q
-        Eigen::VectorXd efull(n);
-        tred2(Q, d, efull);              // efull(i) = subdiag(i-1,i), efull(0)=0
-        for (int k = 0; k < n - 1; ++k) eoff(k) = efull(k + 1);
     }
     auto t1 = clk::now();
 
