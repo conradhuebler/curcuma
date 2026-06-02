@@ -205,24 +205,35 @@ bool solveTriQL(const Eigen::VectorXd& diag, const Eigen::VectorXd& off,
     return true;
 }
 
+// Forward declaration: flat thread-pool fan-out (defined below, after eigPool). Lets the
+// secular solve below thread its independent per-root work via the same pool the D&C uses.
+void parFor(int n_threads, const std::function<void(int, int)>& worker);
+
 // Eigenproblem of diag(D) + rho·z·zᵀ (rho>0, D strictly ascending, z all non-negligible).
 // Roots of the secular equation 1 + rho·Σ z_i²/(D_i−λ)=0 lie one per gap (D_j, D_{j+1})
 // plus one in (D_{k-1}, D_{k-1}+rho·‖z‖²); found by bisection. Eigenvectors via the
 // Gu–Eisenstat (Löwner) reconstructed weights for numerical orthogonality.
+//
+// The three phases below (roots, Löwner weights, eigenvector columns) are independent across
+// the loop index, so they are fanned out over `nThreads` for large merges (the dominant serial
+// cost of the D&C). Each work item writes a disjoint slice (lam(j)/dml col j, zt(i), W col j),
+// so the result is bit-identical to the serial order. nThreads=1 (default) runs serially.
 void secularSolve(const Eigen::VectorXd& D, const Eigen::VectorXd& z, double rho,
-                  Eigen::VectorXd& lam, Eigen::MatrixXd& W)
+                  Eigen::VectorXd& lam, Eigen::MatrixXd& W, int nThreads = 1)
 {
     const int k = static_cast<int>(D.size());
     lam.resize(k);
     const double znorm2 = z.squaredNorm();
-    const double eps = std::numeric_limits<double>::epsilon();
+    // Only fan out when the work per merge is large enough to amortise the dispatch.
+    const int nth = (nThreads > 1 && k >= 128) ? nThreads : 1;
 
     // dml(i,j) = D_i − λ_j, computed WITHOUT cancellation: anchor each root at its nearer
     // pole (dlaed4 trick) and solve for the shift τ, so D_i − λ = (D_i − anchor) − τ stays
     // accurate even when the root sits next to a pole. Direct bisection on λ loses the
     // relative precision of the small denominators and corrupts the eigenvectors.
     Eigen::MatrixXd dml(k, k);
-    for (int j = 0; j < k; ++j) {
+    parFor(nth, [&](int tid, int T) {
+    for (int j = tid; j < k; j += T) {
         const double left  = D(j);
         const double right = (j < k - 1) ? D(j + 1) : (D(k - 1) + rho * znorm2);
         // f increasing on (left,right) from −∞ to +∞; pick the nearer pole as origin.
@@ -246,33 +257,39 @@ void secularSolve(const Eigen::VectorXd& D, const Eigen::VectorXd& z, double rho
             if (h < 0.0) a = t; else b = t;
             tau = t;
         }
-        (void)eps;
         lam(j) = origin + tau;
         for (int i = 0; i < k; ++i) dml(i, j) = (D(i) - origin) - tau;  // D_i − λ_j (accurate)
     }
+    });
 
     // Löwner-reconstructed weights: z̃_i² = ∏_j (λ_j−D_i) / ∏_{j≠i}(D_j−D_i), each ratio O(1).
     // Gives eigenvectors that are orthogonal even for tight (post-deflation) gaps. Uses the
     // accurate dml (λ_j−D_i = −dml(i,j)).
     Eigen::VectorXd zt(k);
-    for (int i = 0; i < k; ++i) {
+    parFor(nth, [&](int tid, int T) {
+    for (int i = tid; i < k; i += T) {
         double prod = -dml(i, i);                              // λ_i − D_i
         for (int j = 0; j < k; ++j)
             if (j != i) prod *= (-dml(i, j)) / (D(j) - D(i));  // (λ_j−D_i)/(D_j−D_i)
         zt(i) = std::sqrt(std::max(prod, 0.0)) * (z(i) >= 0.0 ? 1.0 : -1.0);
     }
+    });
+
     W.resize(k, k);
-    for (int j = 0; j < k; ++j) {
+    parFor(nth, [&](int tid, int T) {
+    for (int j = tid; j < k; j += T) {
         for (int i = 0; i < k; ++i) W(i, j) = zt(i) / dml(i, j);  // z̃_i/(D_i−λ_j)
         const double nrm = W.col(j).norm();
         if (nrm > 0.0) W.col(j) /= nrm;
     }
+    });
 }
 
 // Eigenproblem of diag(D_in) + rho_in·z_in·z_inᵀ with deflation. Returns eigenvalues
 // `eval` and eigenvectors `W` (columns), eval(j) ↔ W.col(j), in the input basis/order.
+// `nThreads` is forwarded to the secular solve (the parallelisable heavy part).
 void rank1Eigen(const Eigen::VectorXd& D_in, const Eigen::VectorXd& z_in, double rho_in,
-                Eigen::VectorXd& eval, Eigen::MatrixXd& W)
+                Eigen::VectorXd& eval, Eigen::MatrixXd& W, int nThreads = 1)
 {
     const int n = static_cast<int>(D_in.size());
     eval.resize(n);
@@ -333,7 +350,7 @@ void rank1Eigen(const Eigen::VectorXd& D_in, const Eigen::VectorXd& z_in, double
         const int ksz = static_cast<int>(sec.size());
         Eigen::VectorXd delta(ksz), zeta(ksz);
         for (int t = 0; t < ksz; ++t) { delta(t) = Ds(sec[t]); zeta(t) = zs(sec[t]); }
-        secularSolve(delta, zeta, rho, lam_sec, W_sec);
+        secularSolve(delta, zeta, rho, lam_sec, W_sec, nThreads);
     }
 
     // Assemble eigenpairs in the rotated sorted basis (M'): deflated → e_i, secular → W_sec.
@@ -508,8 +525,11 @@ bool tridiagDCparallel(const Eigen::VectorXd& d, const Eigen::VectorXd& e,
         z.head(n1) = V1.row(n1 - 1).transpose();
         z.tail(n2) = V2.row(0).transpose();
 
+        // The bottom-up merges are processed serially (each parent needs its children), so
+        // the secular solve of each merge — the dominant serial cost — is itself threaded.
+        // The back-transform gemms below thread via BLAS. Claude Generated.
         Eigen::VectorXd lam;  Eigen::MatrixXd Wm;
-        rank1Eigen(D, z, mg.rho, lam, Wm);
+        rank1Eigen(D, z, mg.rho, lam, Wm, nThreads);
 
         Eigen::MatrixXd Vp(nn, nn);
         Vp.topRows(n1)    = V1 * Wm.topRows(n1);
