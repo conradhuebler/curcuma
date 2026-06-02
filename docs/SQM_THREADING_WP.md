@@ -106,9 +106,17 @@ n≤32). The native path in `solveEigen` reduces `A=L⁻¹·F·L⁻ᵀ` with Eig
 random, degenerate, identity-like and tight-cluster spectra up to n=558 (ctest
 `native_eigensolver`); SCF energy AND gradient **bit-identical** to MKL for gfn1/gfn2
 (complex, t1 and t8); default MKL path unregressed (67/68, pre-existing #40 only).
-**Speed: on par with MKL `dsyevd`** — gfn2 complex min-of-5 TOTAL t1 1390 vs 1377 ms (~1%),
-t8 519 vs 521 ms. The serial D&C matches MKL because the surrounding BLAS (reduce,
-back-transform) threads.
+**Speed — CORRECTED 2026-06-02 (the earlier "on par with MKL" was a measurement bug).**
+The old "t1 1390 vs 1377, t8 519 vs 521" parity was measured through a **no-op CLI flag**:
+`-eigensolver` was never registered as an xtb PARAM, so the bare flag stayed in the command
+module and `native` silently ran **MKL** (MKL-vs-MKL → "on par"). With the flag fixed
+(`PARAM(eigensolver)` registered) and the native path actually active, native was **~3.4×
+slower** than MKL (complex t8 1888 vs 558 ms) — the cost was the from-scratch **scalar `tred2`**
+(unthreaded Householder reduction, 57 ms/it, 75% of the native solve, 0× t1→t8). **Fixed** by
+defaulting the tridiagonalization to Eigen's vectorized Householder reduction: tred2 57→9.5
+ms/it (6×), native total **1848→899 ms (2.05×)**, native-vs-MKL **3.4×→1.6×**, energy+gradient
+bit-identical, 46/46 native-GFN ctests green. The scalar baseline stays via env
+`CURCUMA_EIG_TRED2=scalar`; `CURCUMA_EIG_PROFILE=1` prints the per-call phase split.
 **Seed:** `ParallelEigenSolver.hpp`'s internal *block-D&C* was abandoned as mathematically
 wrong (its `parallelDiagonalizeF` now just wraps Eigen), so it was no usable seed for a real
 D&C — BUT the class is still live: EHT/PM3/AM1/MNDO/PM6/NDDO use it as their eigensolver
@@ -117,9 +125,12 @@ wrapper. **Do not remove it.**
 descend the split tree to depth ~log2(threads), apply the rank-1 tearings, solve the balanced
 subtrees FLAT in parallel (deadlock-free: no nested fork-join), then merge up serially (the
 back-transform gemms thread via BLAS). Gated by the native xTB's `effectiveIntraThreads`.
-**Native eigensolve scales 3.07× (complex/231, min-of-3 solve-eigen 598→195 ms t1→t8) — now
-on par with MKL's threaded dsyevd (~190 ms).** Bit-identical, ctest `native_eigensolver`
-unchanged. The same flat subtree split is the GPU offload point (future).
+The D&C's flat subtree split is the GPU offload point (future). (The earlier "scales 3.07×,
+on par with MKL ~190 ms / solve-eigen 598→195" line was the same no-op-flag artifact — see the
+Speed correction above. Real native solve after the Eigen-tridiag fix: ~26 ms/it at t8, where
+the **D&C merge** (triDC ~16 ms/it, serial secular roots) is now the largest piece — the next
+target.) Bit-identical, ctest `native_eigensolver` unchanged (correctness always held; only the
+speed claim was wrong).
 
 **Future:** GPU-offload the subtree solves + merge gemms (WP5). Original notes:
 
