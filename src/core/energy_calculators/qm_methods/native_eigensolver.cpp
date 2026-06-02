@@ -32,6 +32,7 @@
 #include <future>
 #include <limits>
 #include <map>
+#include <random>
 #include <utility>
 #include <vector>
 
@@ -558,6 +559,10 @@ bool tridiagDCparallel(const Eigen::VectorXd& d, const Eigen::VectorXd& e,
  *  A₂₂ −= V₂·W₂ᵀ + W₂·V₂ᵀ (the BLAS-3 / GPU offload point). Within the *
  *  panel each column's deferred update is folded in from V,W (gemv),   *
  *  so A's trailing block keeps panel-start values for the symv.        *
+ *  The orthogonal Q is likewise accumulated ONCE per panel by a        *
+ *  compact-WY block apply Q := Q·(I − V·T·Vᵀ) (two GEMMs, T built       *
+ *  columnwise like dlarft) — so the whole kernel is GEMM-only, no       *
+ *  per-column rank-1 update.                                            *
  *  Reads/uses the lower triangle. Eigen's makeHouseholder supplies the *
  *  per-column reflector (tested signs). Eigenpairs feed the energy, so *
  *  validated bit-identical via ctest native_eigensolver.               *
@@ -578,6 +583,7 @@ bool blockedTridiag(const Eigen::MatrixXd& Ain, Eigen::VectorXd& d,
         const int m  = n - k;                             // trailing dim (local row r ↔ global k+r)
         Eigen::MatrixXd V = Eigen::MatrixXd::Zero(m, kb);
         Eigen::MatrixXd W = Eigen::MatrixXd::Zero(m, kb);
+        Eigen::MatrixXd T = Eigen::MatrixXd::Zero(kb, kb);   // compact-WY: ΠH_i = I − V·T·Vᵀ
 
         for (int i = 0; i < kb; ++i) {
             const int j  = k + i;                         // global column
@@ -609,6 +615,19 @@ bool blockedTridiag(const Eigen::MatrixXd& Ain, Eigen::VectorXd& d,
             eoff(j) = beta;
             V.block(i + 1, i, mj, 1) = v;
 
+            // Compact-WY column (dlarft, forward/columnwise): T(i,i)=tau; for i>0
+            //   T(0:i,i) = −tau·T(0:i,0:i)·(V[:,0:i]ᵀ·v_i).
+            // Lets the whole panel's reflectors be applied to Q as one BLAS-3 sweep below,
+            // replacing the former per-column rank-1 update. tau==0 → zero column (harmless,
+            // matches dlarft). The identity ΠH_i = I − V·T·Vᵀ holds for the staggered V
+            // (leading 1 at local row i+1) — it is algebraic, independent of V's sparsity.
+            // Claude Generated.
+            T(i, i) = tau;
+            if (i > 0 && tau != 0.0) {
+                const Eigen::VectorXd VtV = V.leftCols(i).transpose() * V.col(i);
+                T.col(i).head(i).noalias() = -tau * (T.topLeftCorner(i, i) * VtV);
+            }
+
             if (tau != 0.0) {
                 // p = tau · A_updated · v, with A_updated = A_panelstart[j+1:,j+1:] − Σ_{l<i}(v_l w_lᵀ + w_l v_lᵀ).
                 Eigen::VectorXd Av =
@@ -622,11 +641,16 @@ bool blockedTridiag(const Eigen::MatrixXd& Ain, Eigen::VectorXd& d,
                 Eigen::VectorXd p = tau * Av;
                 Eigen::VectorXd w = p - (0.5 * tau * p.dot(v)) * v;
                 W.block(i + 1, i, mj, 1) = w;
-
-                // Accumulate Q := Q·H (right-apply; only columns j+1.. change). BLAS-2 rank-1.
-                Eigen::VectorXd Qv = Q.block(0, j + 1, n, mj) * v;
-                Q.block(0, j + 1, n, mj).noalias() -= tau * Qv * v.transpose();
             }
+        }
+
+        // Accumulate Q := Q·(I − V·T·Vᵀ) for the whole panel in one BLAS-3 sweep (compact-WY):
+        //   Q_panel −= ((Q_panel·V)·T)·Vᵀ.  Q_panel spans the trailing columns [k:]; V's row 0
+        // is zero so the pivot column k is unchanged. GEMM-only → GPU-portable. Claude Generated.
+        {
+            auto Qp = Q.block(0, k, n, m);
+            const Eigen::MatrixXd Y = Qp * V;                 // n×kb (reads Q before the update)
+            Qp.noalias() -= (Y * T) * V.transpose();          // n×kb·kb×kb, then n×kb·kb×m
         }
 
         // Trailing symmetric rank-2k update (the BLAS-3 step): A₂₂ −= V₂·W₂ᵀ + W₂·V₂ᵀ
@@ -718,6 +742,205 @@ bool solveSymmetric(const Eigen::MatrixXd& A,
             n, nThreads, ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t0, t3));
     }
     return true;
+}
+
+/* ================================================================== *
+ *  TC2 density-matrix purification (Claude Generated).                *
+ *                                                                     *
+ *  Builds the 0 K idempotent density P̃ = projector onto the nocc      *
+ *  lowest eigenstates of the symmetric Ã directly, with only matrix    *
+ *  products and traces — no diagonalization. Niklasson's trace-        *
+ *  correcting 2nd-order scheme (Niklasson, PRB 66, 155115, 2002):      *
+ *  map Ã's spectrum to [0,1] (low ε → 1), then each step squares       *
+ *  (Tr too high) or expands 2P−P² (Tr too low), driving the trace to   *
+ *  nocc while sharpening the occupations toward {0,1}. The idempotency  *
+ *  monitor Tr(P) − Tr(P²) = Σ λ(1−λ) ≥ 0 reuses the P² already formed,  *
+ *  so the loop costs one GEMM per iteration. The GPU-portable density   *
+ *  path: pure GEMM/trace. Requires a gap + integer nocc; returns false  *
+ *  otherwise so the caller can fall back to a diagonalization.          *
+ * ================================================================== */
+bool purifyDensity(const Eigen::MatrixXd& Atil, int nocc,
+                   Eigen::MatrixXd& Ptil, Eigen::MatrixXd& Wtil,
+                   int maxIter, double tol)
+{
+    const int n = static_cast<int>(Atil.rows());
+    if (n == 0 || Atil.cols() != n) return false;
+    if (nocc <= 0 || nocc >= n) {                       // empty / full occupation: trivial
+        if (nocc <= 0) Ptil = Eigen::MatrixXd::Zero(n, n);
+        else           Ptil = Eigen::MatrixXd::Identity(n, n);
+        Wtil.noalias() = Ptil * Atil * Ptil;
+        return true;
+    }
+
+    // Gershgorin spectral bounds of the symmetric Ã: every eigenvalue lies in [emin, emax].
+    double emin = std::numeric_limits<double>::infinity();
+    double emax = -std::numeric_limits<double>::infinity();
+    for (int i = 0; i < n; ++i) {
+        double r = 0.0;
+        for (int j = 0; j < n; ++j) if (j != i) r += std::fabs(Atil(i, j));
+        emin = std::min(emin, Atil(i, i) - r);
+        emax = std::max(emax, Atil(i, i) + r);
+    }
+    if (!(emax > emin)) return false;
+
+    // Initial guess: P = (emax·I − Ã)/(emax − emin) maps the spectrum to [0,1] with the
+    // lowest (occupied) eigenstates near 1, the highest (virtual) near 0.
+    Eigen::MatrixXd P = (emax * Eigen::MatrixXd::Identity(n, n) - Atil) / (emax - emin);
+
+    const double dnocc = static_cast<double>(nocc);
+    for (int it = 0; it < maxIter; ++it) {
+        const Eigen::MatrixXd P2 = P * P;               // the one GEMM per step
+        const double trP  = P.trace();
+        const double idem = trP - P2.trace();           // Σ λ(1−λ) ≥ 0 → 0 at idempotency
+        if (idem < tol && std::fabs(trP - dnocc) < std::max(tol, 1e-9)) {
+            Ptil = std::move(P);                        // already idempotent with Tr = nocc
+            Wtil.noalias() = Ptil * Atil * Ptil;        // energy-weighted density Σ_occ ε_i c_i c_iᵀ
+            return true;
+        }
+        if (trP > dnocc) P = P2;                        // trace too high → square it down
+        else             P = 2.0 * P - P2;              // trace too low  → expand it up
+    }
+    // Last-resort accept if essentially idempotent (let the caller's tolerance decide otherwise).
+    const Eigen::MatrixXd P2 = P * P;
+    if ((P - P2).cwiseAbs().maxCoeff() < 1e-7 && std::fabs(P.trace() - dnocc) < 1e-6) {
+        Ptil = std::move(P);
+        Wtil.noalias() = Ptil * Atil * Ptil;
+        return true;
+    }
+    return false;
+}
+
+/* ================================================================== *
+ *  Seeded block LOBPCG for the lowest k eigenpairs (Claude Generated). *
+ *  Knyazev (2001), with a diagonal preconditioner and a robust         *
+ *  generalized Rayleigh-Ritz: the [X|W|P] subspace is filtered through  *
+ *  its Gram matrix (drop near-null directions), so ill-conditioned      *
+ *  search directions cannot corrupt the Ritz solve. GEMM-based;         *
+ *  GPU-portable; the partner of a future sparse/fragmented Ã.           *
+ * ================================================================== */
+namespace {
+
+// Scale each column of M to unit 2-norm; apply the SAME scaling to AM so AM = A·M stays
+// consistent (column scaling commutes with the linear map). Near-zero columns are left as-is.
+void normalizeColsPair(Eigen::MatrixXd& M, Eigen::MatrixXd& AM)
+{
+    for (int j = 0; j < M.cols(); ++j) {
+        const double nrm = M.col(j).norm();
+        if (nrm > 1e-300) { M.col(j) /= nrm; AM.col(j) /= nrm; }
+    }
+}
+
+// Symmetric orthonormalization basis: given a symmetric Gram matrix G (= UᵀU), return B such that
+// BᵀGB = I over the numerically non-null directions (eigenvalue > relTol·λmax). B is m×mk.
+Eigen::MatrixXd gramOrthoBasis(const Eigen::MatrixXd& G, double relTol)
+{
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (G + G.transpose()));
+    const Eigen::VectorXd lam = es.eigenvalues();           // ascending
+    const double thr = relTol * std::max(lam.maxCoeff(), 1e-300);
+    const int m = static_cast<int>(G.rows());
+    int mk = 0;
+    for (int i = 0; i < m; ++i) if (lam(i) > thr) ++mk;
+    Eigen::MatrixXd B(m, mk);
+    int c = 0;
+    for (int i = 0; i < m; ++i)
+        if (lam(i) > thr) { B.col(c++) = es.eigenvectors().col(i) / std::sqrt(lam(i)); }
+    return B;
+}
+
+} // namespace
+
+bool lobpcgLowest(const Eigen::MatrixXd& A, int k,
+                  Eigen::MatrixXd& X, Eigen::VectorXd& evals,
+                  int maxIter, double tol, int nConverge)
+{
+    const int n = static_cast<int>(A.rows());
+    if (k <= 0 || k > n || A.cols() != n) return false;
+    const int nconv = (nConverge <= 0 || nConverge > k) ? k : nConverge;
+
+    // Seed (reuse a valid X, e.g. the previous SCF iteration's vectors) or deterministic random.
+    if (X.rows() != n || X.cols() != k) {
+        std::mt19937 rng(20260602u);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        X.resize(n, k);
+        for (int i = 0; i < n; ++i) for (int j = 0; j < k; ++j) X(i, j) = nd(rng);
+    }
+    // Orthonormalize the seed columns (thin QR).
+    {
+        Eigen::HouseholderQR<Eigen::MatrixXd> qr(X);
+        X = qr.householderQ() * Eigen::MatrixXd::Identity(n, k);
+    }
+
+    Eigen::MatrixXd AX = A * X;
+    // Initial Rayleigh-Ritz on X so evals/X are an ordered Ritz pair to start the recurrence.
+    {
+        Eigen::MatrixXd G = X.transpose() * AX;
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (G + G.transpose()));
+        X  = (X  * es.eigenvectors()).eval();
+        AX = (AX * es.eigenvectors()).eval();
+        evals = es.eigenvalues();
+    }
+
+    const Eigen::VectorXd dA = A.diagonal();
+    Eigen::MatrixXd P, AP;                       // conjugate search directions (empty at start)
+
+    for (int it = 0; it < maxIter; ++it) {
+        // Residuals R = A·X − X·diag(evals), and the relative residual for convergence.
+        const Eigen::MatrixXd R = AX - X * evals.asDiagonal();
+        double rmax = 0.0;                       // worst residual over the WANTED (lowest nconv) states
+        for (int j = 0; j < nconv; ++j) rmax = std::max(rmax, R.col(j).norm());
+        const double scale = std::max(1.0, evals.cwiseAbs().maxCoeff());
+        if (std::getenv("CURCUMA_LOBPCG_DEBUG"))
+            std::fprintf(stderr, "[LOBPCG it=%d rmax/scale=%.3e ev0=%.6f]\n", it, rmax / scale, evals(0));
+        if (rmax / scale < tol) {                // wanted states converged (ascending, lowest k)
+            return true;
+        }
+
+        // Preconditioned residuals W = T·R with the diagonal (Jacobi) preconditioner 1/(A_ii − ε_j).
+        Eigen::MatrixXd W = R;
+        for (int j = 0; j < k; ++j)
+            for (int i = 0; i < n; ++i) {
+                double d = dA(i) - evals(j);
+                if (std::fabs(d) < 1e-6) d = (d < 0.0 ? -1e-6 : 1e-6);
+                W(i, j) = R(i, j) / d;
+            }
+        W -= X * (X.transpose() * W);            // project ⟂ X (conditions the subspace)
+        Eigen::MatrixXd AW = A * W;
+        normalizeColsPair(W, AW);
+
+        // Subspace U = [X | W | P] and AU = [AX | AW | AP].
+        const int wc = static_cast<int>(W.cols());
+        const int pc = static_cast<int>(P.cols());
+        const int m  = k + wc + pc;
+        Eigen::MatrixXd U(n, m), AU(n, m);
+        U.leftCols(k)        = X;   AU.leftCols(k)        = AX;
+        U.middleCols(k, wc)  = W;   AU.middleCols(k, wc)  = AW;
+        if (pc) { U.rightCols(pc) = P; AU.rightCols(pc) = AP; }
+
+        // Generalized Rayleigh-Ritz, robust to a rank-deficient subspace: filter U through its
+        // Gram matrix (B: BᵀGB = I over the non-null directions), solve the reduced standard
+        // problem, lift back. New X = U·Z has XᵀX = ZᵀGZ = I automatically.
+        const Eigen::MatrixXd G  = U.transpose() * U;
+        const Eigen::MatrixXd Ap = U.transpose() * AU;
+        const Eigen::MatrixXd B  = gramOrthoBasis(G, 1e-10);
+        if (B.cols() < k) return false;          // subspace collapsed — fall back to a dense solve
+        const Eigen::MatrixXd Ahat = B.transpose() * (0.5 * (Ap + Ap.transpose())) * B;
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> esA(Ahat);
+        const Eigen::MatrixXd Z = B * esA.eigenvectors().leftCols(k);   // m×k, G-orthonormal
+        evals = esA.eigenvalues().head(k);
+
+        // New iterate X = U·Z (orthonormal: ZᵀGZ = I) and conjugate direction P = the non-X part
+        // of the new Ritz vectors (rows for [W|P]), so the recurrence stays G-conjugate.
+        const Eigen::MatrixXd Zwp = Z.bottomRows(wc + pc);
+        Eigen::MatrixXd WP(n, wc + pc), AWP(n, wc + pc);
+        WP.leftCols(wc) = W;  AWP.leftCols(wc) = AW;
+        if (pc) { WP.rightCols(pc) = P; AWP.rightCols(pc) = AP; }
+
+        X  = U  * Z;     AX = AU * Z;
+        P  = WP * Zwp;   AP = AWP * Zwp;
+        normalizeColsPair(P, AP);
+    }
+    // Not converged within maxIter → let the caller fall back to a dense diagonalization.
+    return false;
 }
 
 } // namespace curcuma::eigsolver

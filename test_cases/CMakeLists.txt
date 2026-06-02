@@ -245,6 +245,41 @@ add_test(NAME native_eigensolver COMMAND test_native_eigensolver
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(native_eigensolver PROPERTIES TIMEOUT 60 LABELS "native_xtb;eigensolver")
 
+# Same binary, the alternative tridiagonalization backends (CURCUMA_EIG_TRED2):
+# 'blocked' = our MKL-free BLAS-3 panel reduction with compact-WY block-Q accumulation
+# (the GPU-portable kernel), 'scalar' = the unvectorized reference baseline. The default
+# run above covers Eigen's vectorized reduction. Claude Generated.
+add_test(NAME native_eigensolver_blocked COMMAND test_native_eigensolver
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(native_eigensolver_blocked PROPERTIES TIMEOUT 60
+    LABELS "native_xtb;eigensolver" ENVIRONMENT "CURCUMA_EIG_TRED2=blocked")
+add_test(NAME native_eigensolver_scalar COMMAND test_native_eigensolver
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(native_eigensolver_scalar PROPERTIES TIMEOUT 60
+    LABELS "native_xtb;eigensolver" ENVIRONMENT "CURCUMA_EIG_TRED2=scalar")
+
+# Claude Generated (Jun 2026): 0 K density-matrix purification kernel (the GEMM-only
+# `-eigensolver purify` density path) vs the occupied-subspace projector from Eigen.
+add_executable(test_purification test_purification.cpp)
+target_link_libraries(test_purification curcuma_core)
+if(USE_PCH)
+    target_precompile_headers(test_purification REUSE_FROM curcuma_core)
+endif()
+add_test(NAME purification COMMAND test_purification
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(purification PROPERTIES TIMEOUT 60 LABELS "native_xtb;eigensolver;purification")
+
+# Claude Generated (Jun 2026): seeded block LOBPCG kernel (the iterative `-eigensolver lobpcg`
+# path) vs Eigen's lowest-k eigenpairs, incl. a warm-start (subspace-recycling) case.
+add_executable(test_lobpcg test_lobpcg.cpp)
+target_link_libraries(test_lobpcg curcuma_core)
+if(USE_PCH)
+    target_precompile_headers(test_lobpcg REUSE_FROM curcuma_core)
+endif()
+add_test(NAME lobpcg COMMAND test_lobpcg
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(lobpcg PROPERTIES TIMEOUT 60 LABELS "native_xtb;eigensolver;lobpcg")
+
 # Claude Generated (2026, AP ∂q/∂x — Phase 1): D4 dE/dq analytical-vs-FD test
 add_executable(test_d4_dedq test_d4_dedq.cpp)
 target_link_libraries(test_d4_dedq curcuma_core test_molecule_registry)

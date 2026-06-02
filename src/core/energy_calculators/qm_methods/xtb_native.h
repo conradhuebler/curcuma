@@ -227,6 +227,13 @@ struct Wavefunction {
     Matrix  P;        // density matrix, nao × nao
     Matrix  C;        // MO coefficients, nao × nao
     Vector  eps;      // MO energies, length nao
+
+    // Energy-weighted density matrix (AO basis): W_μν = 2·Σ_occ ε_i C_μi C_νi. Normally the
+    // gradient rebuilds this from C/eps; the purification density path (eigensolver="purify",
+    // no eigenpairs) instead stores it here as W = 2·L⁻ᵀ·(P̃·Ã·P̃)·L⁻¹ and sets W_valid so the
+    // gradient uses it directly. Claude Generated.
+    Matrix  W;
+    bool    W_valid = false;
     Vector  n_at;     // atomic populations, length nat
     Vector  n_sh;     // shell populations, length nsh
     Vector  q_at;     // atomic charges (= z_eff - n_at), length nat
@@ -544,6 +551,10 @@ private:
     // so its raw buffer can be passed straight to the column-major Fortran
     // LAPACK dsygst — a row-major buffer would feed dsygst Lᵀ and corrupt the SCF.
     Eigen::MatrixXd m_X;
+    // Seeded LOBPCG (eigensolver="lobpcg") subspace recycled across SCF iterations: the previous
+    // iteration's lowest-kb standard-basis eigenvectors (n × kb), used as the next solve's initial
+    // guess. Empty/size-mismatched → LOBPCG cold-starts. Claude Generated.
+    Eigen::MatrixXd m_eig_seed;
     Eigen::MatrixXd m_gamma;    // shell-resolved Coulomb matrix (nsh × nsh)
     std::array<Eigen::MatrixXd, 3> m_dp_int;   // dipole integrals (GFN2), each nao×nao
     std::array<Eigen::MatrixXd, 6> m_qp_int;   // quadrupole integrals (GFN2), each nao×nao

@@ -12,7 +12,7 @@
 #include "nddo_params.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
-#include "ParallelEigenSolver.hpp"
+#include "native_eigensolver.h"
 #include "integrals/MNDOIntegrals.hpp"  // MNDO multipole expansion integrals
 
 #include <fmt/format.h>
@@ -405,10 +405,10 @@ bool MNDO::runSCF()
     for (int iter = 0; iter < m_scf_max_iterations; ++iter) {
         m_fock = buildFockMatrix(m_density);
 
-        ParallelEigenSolver solver(500, 128, 1.0e-10, false);
-        solver.setThreadCount(m_threads);
-
-        bool success = solver.solve(m_overlap, m_fock, m_energies, m_mo, m_threads, false);
+        // ZDO: S=I, so the generalized problem reduces to F*C = C*eps directly
+        Eigen::MatrixXd c_std;
+        bool success = curcuma::eigsolver::solveSymmetric(Eigen::MatrixXd(m_fock), m_energies, c_std, m_threads);
+        m_mo = c_std;
 
         if (!success) {
             CurcumaLogger::error("Eigenvalue solution failed in MNDO SCF");

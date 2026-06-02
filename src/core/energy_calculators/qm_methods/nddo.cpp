@@ -24,7 +24,7 @@
 #include "nddo.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
-#include "ParallelEigenSolver.hpp"
+#include "native_eigensolver.h"
 #include "integrals/MNDOIntegrals.hpp"
 
 #include <fmt/format.h>
@@ -826,8 +826,6 @@ bool NDDO::runSCF()
     std::vector<Matrix> diis_fock;
     std::vector<Matrix> diis_error;
 
-    Matrix S_identity = Matrix::Identity(m_nbasis, m_nbasis);
-
     for (int iter = 0; iter < m_scf_max_iterations; ++iter) {
         m_fock = buildFockMatrix(m_density);
 
@@ -881,11 +879,10 @@ bool NDDO::runSCF()
             }
         }
 
-        // NDDO uses standard eigenvalue problem F*C = ε*C (ZDO: S = I)
-        ParallelEigenSolver solver(500, 128, 1.0e-10, false);
-        solver.setThreadCount(m_threads);
-
-        bool success = solver.solve(S_identity, fock_use, m_energies, m_mo, m_threads, false);
+        // NDDO uses standard eigenvalue problem F*C = eps*C (ZDO: S = I)
+        Eigen::MatrixXd c_std;
+        bool success = curcuma::eigsolver::solveSymmetric(Eigen::MatrixXd(fock_use), m_energies, c_std, m_threads);
+        m_mo = c_std;
 
         if (!success) {
             CurcumaLogger::error(fmt::format("Eigenvalue solution failed in {} SCF", name));

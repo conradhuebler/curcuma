@@ -216,6 +216,53 @@ void XTB::buildOrthonormalizer()
 bool XTB::solveEigen(const Matrix& F, const Matrix& S)
 {
     const int nao = m_basis.nao;
+    m_wfn.W_valid = false;            // only the purification path supplies W directly
+
+#ifdef CURCUMA_XTB_HAVE_LAPACK_SYEVD
+    // Opt-in density-matrix purification (eigensolver="purify"): build the 0 K idempotent
+    // density straight from F by trace-correcting TC2 (GEMM/trace only, no eigendecomposition) —
+    // the GPU-portable density path. Requires the cached Cholesky L (m_X) and 0 K (integer
+    // occupation); finite-T Fermi smearing keeps the eigensolver. No eps/C are produced, so the
+    // gradient's energy-weighted density is supplied as W = 2·L⁻ᵀ·(P̃·Ã·P̃)·L⁻¹. Falls back to the
+    // eigensolver below if T>0, the overlap is near-singular, or purification fails to converge.
+    // Claude Generated.
+    if (m_eigensolver == "purify" && m_X.rows() == nao && m_X.cols() == nao) {
+        if (m_electronic_temp > 0.0) {
+            static bool warned_T = false;
+            if (!warned_T && CurcumaLogger::get_verbosity() >= 1) {
+                CurcumaLogger::warn("eigensolver=purify is a 0 K density path; set "
+                                    "-electronic_temperature 0 to use it. Falling back to the "
+                                    "eigensolver for this run.");
+                warned_T = true;
+            }
+        } else {
+            const int Nocc = static_cast<int>(std::lround(m_wfn.nocc / 2.0));
+            // Ã = L⁻¹·F·L⁻ᵀ (same reduction as the native eigensolver path).
+            const Eigen::MatrixXd Yred = m_X.triangularView<Eigen::Lower>().solve(F);
+            const Eigen::MatrixXd Atil = m_X.triangularView<Eigen::Lower>().solve(Yred.transpose());
+            Eigen::MatrixXd Ptil, Wtil;
+            if (curcuma::eigsolver::purifyDensity(Atil, Nocc, Ptil, Wtil)) {
+                // Congruence back-transform L⁻ᵀ·M·L⁻¹ (M symmetric) via two triangular solves.
+                auto congr = [&](const Eigen::MatrixXd& M) {
+                    const Eigen::MatrixXd t =
+                        m_X.triangularView<Eigen::Lower>().transpose().solve(M);   // L⁻ᵀ·M
+                    return Eigen::MatrixXd(
+                        m_X.triangularView<Eigen::Lower>().transpose().solve(t.transpose())); // ·L⁻¹
+                };
+                m_wfn.P.noalias() = 2.0 * congr(Ptil);    // closed-shell: 2 e⁻ per occupied orbital
+                m_wfn.W.noalias() = 2.0 * congr(Wtil);
+                m_wfn.W_valid = true;
+                return true;
+            }
+            static bool warned_conv = false;
+            if (!warned_conv && CurcumaLogger::get_verbosity() >= 1) {
+                CurcumaLogger::warn("Density purification did not converge (gapless?); "
+                                    "using the eigensolver for this step.");
+                warned_conv = true;
+            }
+        }
+    }
+#endif
 
     // Eigenvalues + eigenvectors of F in the S metric. With the cached
     // orthonormalizer m_X = S^{-1/2} we reduce the generalized problem
@@ -241,10 +288,61 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         const char uplo = 'L';
         int info = 0;
         const bool use_native = (m_eigensolver == "native" || m_eigensolver == "dnc");
+        const bool use_lobpcg = (m_eigensolver == "lobpcg");
         const auto te0 = clk::now();
         Eigen::MatrixXd A(n, n);                 // holds the standard-form matrix, then its eigenvectors
         Eigen::VectorXd eps(n);
-        if (!use_native && m_eig_fp32) {
+
+        // Seeded block LOBPCG (opt-in, EXPERIMENTAL): solve only the lowest nocc(+margin)
+        // eigenpairs of Ã = L⁻¹·F·L⁻ᵀ, recycled from the previous SCF iteration's subspace
+        // (m_eig_seed). GEMM-based / GPU-portable, BUT a net-loss vs dsyevd on a dense GFN basis at
+        // ~50% occupancy (the ~3·nocc Rayleigh-Ritz subspace > one dsyevd) — see the eigensolver
+        // PARAM help. The kb computed eigenvectors fill the lowest columns of A; virtuals beyond kb
+        // are sentinels (occ ≈ 0), so HOMO and the buffer LUMOs are real but higher virtuals are
+        // absent (no mulliken-CPSCF in this mode). Falls back to dsyevd on non-convergence. The
+        // default eeq-D4 gradient uses only occupied W, so it is unaffected. Claude Generated.
+        bool lobpcg_done = false;
+        if (use_lobpcg) {
+            const Eigen::MatrixXd Yl   = m_X.triangularView<Eigen::Lower>().solve(F);
+            const Eigen::MatrixXd Atil = m_X.triangularView<Eigen::Lower>().solve(Yl.transpose());
+            const auto te1 = clk::now();
+            const int npair = static_cast<int>(std::lround(m_wfn.nocc / 2.0));   // doubly-occupied
+            const int guard = std::max(8, n / 16);
+            const int kb    = std::min(n, npair + guard);
+            const int nconv = std::min(kb, npair + 2);     // occupied + HOMO/LUMO margin must be tight
+            Eigen::VectorXd evk;
+            if (npair > 0 && kb >= 1
+                && curcuma::eigsolver::lobpcgLowest(Atil, kb, m_eig_seed, evk, 50, 1e-8, nconv)) {
+                A.setZero();
+                A.leftCols(kb) = m_eig_seed;               // standard-basis lowest-kb eigenvectors
+                eps.setConstant(1.0e3);                    // sentinel virtuals beyond kb (occ ≈ 0)
+                eps.head(kb) = evk;
+                lobpcg_done = true;
+                const auto te2 = clk::now();
+                m_t_xfx  += ms(te0, te1);                  // reduce (triangular solves)
+                m_t_diag += ms(te1, te2);                  // LOBPCG
+            } else {
+                m_eig_seed.resize(0, 0);                   // drop a bad seed before the dense fallback
+            }
+        }
+
+        if (!lobpcg_done && use_native) {
+            // Native path (no LAPACK eigensolve): reduce A = L⁻¹·F·L⁻ᵀ with Eigen
+            // triangular solves (BLAS dtrsm), then diagonalise with our own self-contained
+            // solver. Y = L⁻¹·F; A = L⁻¹·Yᵀ = L⁻¹·F·L⁻ᵀ (F symmetric). Claude Generated.
+            const Eigen::MatrixXd Y = m_X.triangularView<Eigen::Lower>().solve(F);
+            A = m_X.triangularView<Eigen::Lower>().solve(Y.transpose());
+            const auto te1 = clk::now();
+            Eigen::MatrixXd Cstd;
+            // Parallelise the D&C's independent subtrees on the gated intra-thread budget
+            // (serial under molecule-level parallelism / for small bases).
+            if (!curcuma::eigsolver::solveSymmetric(A, eps, Cstd, effectiveIntraThreads(n)))
+                return false;
+            A = std::move(Cstd);                 // standard-problem eigenvectors
+            const auto te2 = clk::now();
+            m_t_xfx  += ms(te0, te1);            // reduce (triangular solves)
+            m_t_diag += ms(te1, te2);            // native eigensolve
+        } else if (!lobpcg_done && m_eig_fp32 && !use_lobpcg) {
             // Mixed-precision early iteration (opt-in): FP32 reduce (ssygst) + FP32
             // divide-and-conquer (ssyevd), ~2x faster. The FP64 back-transform below runs on
             // the FP32-quality eigenvectors; the SCF loop reverts to the FP64 branch once
@@ -269,9 +367,9 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
             eps = epsf.cast<double>();
             m_t_xfx  += ms(te0, te1);            // reduce (ssygst)
             m_t_diag += ms(te1, te2);            // ssyevd
-        } else if (!use_native) {
-            // MKL path: reduce F to standard form (dsygst, in-place lower triangle) then
-            // solve with the divide-and-conquer dsyevd.
+        } else if (!lobpcg_done) {
+            // MKL path (default, and the LOBPCG dense fallback): reduce F to standard form
+            // (dsygst, in-place lower triangle) then solve with the divide-and-conquer dsyevd.
             A = F;
             int itype = 1;
             dsygst_(&itype, &uplo, &n, A.data(), &n, m_X.data(), &n, &info);
@@ -287,22 +385,6 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
             const auto te2 = clk::now();
             m_t_xfx  += ms(te0, te1);            // reduce (dsygst)
             m_t_diag += ms(te1, te2);            // dsyevd
-        } else {
-            // Native path (no LAPACK eigensolve): reduce A = L⁻¹·F·L⁻ᵀ with Eigen
-            // triangular solves (BLAS dtrsm), then diagonalise with our own self-contained
-            // solver. Y = L⁻¹·F; A = L⁻¹·Yᵀ = L⁻¹·F·L⁻ᵀ (F symmetric). Claude Generated.
-            const Eigen::MatrixXd Y = m_X.triangularView<Eigen::Lower>().solve(F);
-            A = m_X.triangularView<Eigen::Lower>().solve(Y.transpose());
-            const auto te1 = clk::now();
-            Eigen::MatrixXd Cstd;
-            // Parallelise the D&C's independent subtrees on the gated intra-thread budget
-            // (serial under molecule-level parallelism / for small bases).
-            if (!curcuma::eigsolver::solveSymmetric(A, eps, Cstd, effectiveIntraThreads(n)))
-                return false;
-            A = std::move(Cstd);                 // standard-problem eigenvectors
-            const auto te2 = clk::now();
-            m_t_xfx  += ms(te0, te1);            // reduce (triangular solves)
-            m_t_diag += ms(te1, te2);            // native eigensolve
         }
         // Back-transform C = L⁻ᵀ·C~  ⇔ solve Lᵀ·C = C~ (Eigen triangular solve → BLAS dtrsm).
         const auto te2b = clk::now();
