@@ -216,8 +216,12 @@ public:
     /// and dEdcn_out (nat, the H0/Pulay CN coupling). The caller folds in the
     /// dispersion gradient (section 3b) and the CN chain-rule (section 4) on the
     /// host. Claude Generated (Stage 4a).
+    /// v_dp (3·nat) / v_qp (6·nat) are the converged GFN2 multipole potentials
+    /// (column-major); pass nullptr for GFN1 (then the multipole Pulay term is
+    /// skipped). Claude Generated (Stage 4a/4b).
     bool computeGradient(const double* P, const double* C, const double* eps,
                          int nocc_orbs, const double* v_ao, const double* q_sh,
+                         const double* v_dp, const double* v_qp,
                          double* grad_out, double* dEdcn_out);
 
     /// Allocate the resident SCF work buffers (C/P/Cw/eps/occ/pop + cuSOLVER

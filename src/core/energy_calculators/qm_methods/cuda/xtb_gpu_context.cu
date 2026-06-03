@@ -433,6 +433,7 @@ __global__ void k_grad_h0_pulay(
     const int* __restrict__ valence, const int* __restrict__ z, const double* __restrict__ se,
     const double* __restrict__ xyz, const double* __restrict__ P, const double* __restrict__ S,
     const double* __restrict__ H0, const double* __restrict__ W, const double* __restrict__ v_ao,
+    const double* __restrict__ v_dp, const double* __restrict__ v_qp,
     double* __restrict__ grad, double* __restrict__ dEdcn)
 {
     const int mu = blockIdx.x * blockDim.x + threadIdx.x;
@@ -488,9 +489,52 @@ __global__ void k_grad_h0_pulay(
 
     const double sval = 2.0*Pmn*h_av - 2.0*Wmn - Pmn*(v_ao[mu] + v_ao[nu]);
     const double shp  = 2.0*Pmn*H0mn*dlog_pi_dr_r;
-    const double Gx = sval*dS[0] + shp*dxij;
-    const double Gy = sval*dS[1] + shp*dyij;
-    const double Gz = sval*dS[2] + shp*dzij;
+    double Gx = sval*dS[0] + shp*dxij;
+    double Gy = sval*dS[1] + shp*dyij;
+    double Gz = sval*dS[2] + shp*dzij;
+
+    // GFN2 multipole-integral Pulay term (xtb_gradient.cpp:350-414). The
+    // transformed dp_int/qp_int derivatives are contracted with the converged
+    // multipole potential v_dp/v_qp; G_sval[l] -= Pmn·term[l]. dp_int origin is
+    // the column atom jat, so dR = R_jat − R_iat.
+    if (is_gfn2 && v_dp) {
+        double D_mp[3], dD_dA[3][3], dQ_dA[3][6];
+        d_cgto_multipole_grad_transformed(
+            prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+            prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+            xa, ya, za, xb, yb, zb, ta, tb, D_mp, dD_dA, dQ_dA);
+        const double dR[3] = { xb - xa, yb - ya, zb - za };
+        const int qa6[6] = {0,0,1,0,1,2}, qb6[6] = {0,1,1,2,2,2};
+        double term[3];
+        for (int l = 0; l < 3; ++l) {
+            double t = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                t += dD_dA[l][k] * v_dp[k + jat*3];
+                const double dDiat = dD_dA[l][k] + dR[k]*dS[l] - (k==l ? Smn : 0.0);
+                t += dDiat * v_dp[k + iat*3];
+            }
+            double dqr[6];
+            for (int q = 0; q < 6; ++q) {
+                const int a = qa6[q], b = qb6[q];
+                dqr[q] = -(b==l ? D_mp[a] : 0.0) + dR[b]*dD_dA[l][a]
+                       -  (a==l ? D_mp[b] : 0.0) + dR[a]*dD_dA[l][b]
+                       + (-(a==l ? dR[b] : 0.0) - (b==l ? dR[a] : 0.0))*Smn
+                       + dR[a]*dR[b]*dS[l];
+            }
+            const double dtr_c = 0.5*(dqr[0] + dqr[2] + dqr[5]);
+            for (int q = 0; q < 6; ++q) {
+                const bool is_diag = (qa6[q] == qb6[q]);
+                t += dQ_dA[l][q] * v_qp[q + jat*6];
+                const double dQiat = dQ_dA[l][q] + 1.5*dqr[q] - (is_diag ? dtr_c : 0.0);
+                t += dQiat * v_qp[q + iat*6];
+            }
+            term[l] = t;
+        }
+        Gx -= Pmn * term[0];
+        Gy -= Pmn * term[1];
+        Gz -= Pmn * term[2];
+    }
+
     atomicAdd(&grad[3*iat+0], Gx); atomicAdd(&grad[3*jat+0], -Gx);
     atomicAdd(&grad[3*iat+1], Gy); atomicAdd(&grad[3*jat+1], -Gy);
     atomicAdd(&grad[3*iat+2], Gz); atomicAdd(&grad[3*jat+2], -Gz);
@@ -1269,6 +1313,7 @@ bool XtbGpuContext::computeOverlapGrad(const double* xyz_bohr, double* dSdR_out)
 
 bool XtbGpuContext::computeGradient(const double* P, const double* C, const double* eps,
                                     int nocc_orbs, const double* v_ao, const double* q_sh,
+                                    const double* v_dp, const double* v_qp,
                                     double* grad_out, double* dEdcn_out)
 {
     if (!ok() || m_impl->basis_nao <= 0 || !P || !C || !eps || !v_ao || !q_sh
@@ -1298,6 +1343,16 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     m_impl->dC.upload(C, static_cast<int>(nn), stream);
     m_impl->dVao.upload(v_ao, nao, stream);
     m_impl->dQsh.upload(q_sh, nsh, stream);
+    // GFN2 multipole potentials (converged) for the multipole-integral Pulay term.
+    const bool with_mp = (m_impl->basis_is_gfn2 && v_dp && v_qp);
+    if (with_mp) {
+        try {
+            if (m_impl->dVdp.n < 3 * nat) m_impl->dVdp.alloc(3 * nat);
+            if (m_impl->dVqp.n < 6 * nat) m_impl->dVqp.alloc(6 * nat);
+        } catch (...) { return false; }
+        m_impl->dVdp.upload(v_dp, 3 * nat, stream);
+        m_impl->dVqp.upload(v_qp, 6 * nat, stream);
+    }
 
     // Energy-weighted density W = C_occ · diag(2·ε_occ) · C_occᵀ.
     if (nocc_orbs > 0) {
@@ -1346,6 +1401,7 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         m_impl->dPrimCoeff.ptr, m_impl->dShZeta.ptr, m_impl->dShpoly.ptr, m_impl->dKcn.ptr,
         m_impl->dValence.ptr, m_impl->dZ.ptr, m_impl->dSE.ptr, m_impl->dXyz.ptr, m_impl->dP.ptr,
         m_impl->dS.ptr, m_impl->dH0.ptr, m_impl->dW.ptr, m_impl->dVao.ptr,
+        with_mp ? m_impl->dVdp.ptr : nullptr, with_mp ? m_impl->dVqp.ptr : nullptr,
         m_impl->dGrad.ptr, m_impl->dEdcn.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
 

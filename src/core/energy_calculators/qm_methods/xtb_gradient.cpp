@@ -788,10 +788,15 @@ bool XTB::calculateGradientGpu()
     const int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
     Eigen::MatrixXd Ccm = m_wfn.C;   // column-major copy of the MO coefficients
 
-    Matrix grad_dev;   // nat×3, Eh/Bohr (sections 1/2/3)
+    // GFN2 multipole potentials for the device multipole-integral Pulay term.
+    Eigen::MatrixXd v_dp_empty, v_qp_empty;
+    const Eigen::MatrixXd& v_dp = (m_method == MethodType::GFN2) ? m_pot.v_dp : v_dp_empty;
+    const Eigen::MatrixXd& v_qp = (m_method == MethodType::GFN2) ? m_pot.v_qp : v_qp_empty;
+
+    Matrix grad_dev;   // nat×3, Eh/Bohr (sections 1/2/3 incl. GFN2 multipole Pulay)
     Vector dEdcn;      // nat
     if (!m_gpu_scf->gradient(m_wfn.P, Ccm, m_wfn.eps, nocc_orbs, v_ao, m_wfn.q_sh,
-                             grad_dev, dEdcn))
+                             v_dp, v_qp, grad_dev, dEdcn))
         return false;
     if (grad_dev.rows() != nat || grad_dev.cols() != 3 || dEdcn.size() != nat)
         return false;
@@ -811,6 +816,82 @@ bool XTB::calculateGradientGpu()
         && m_disp_gradient.rows() == nat && m_disp_gradient.cols() == 3) {
         m_gradient += m_disp_gradient;
         if (m_disp_dEdcn.size() == nat) dEdcn += m_disp_dEdcn;
+    }
+
+    // 5. GFN2 direct multipole interaction gradient (host; O(nat²) over the
+    // atomic moments dp_at/qp_at — identical to section 5 in calculateGradient).
+    // Must precede section 4 so dEdcn carries the mrad/CN chain contribution.
+    if (m_method == MethodType::GFN2 && m_mp_initialized) {
+        using namespace gfn2_params;
+        Vector dEdr_mp = Vector::Zero(nat);
+        for (int iat = 0; iat < nat; ++iat) {
+            for (int jat = 0; jat < iat; ++jat) {
+                const double vx = xyz[3*jat+0] - xyz[3*iat+0];
+                const double vy = xyz[3*jat+1] - xyz[3*iat+1];
+                const double vz = xyz[3*jat+2] - xyz[3*iat+2];
+                const double r2 = vx*vx + vy*vy + vz*vz;
+                if (r2 < 1.0e-12) continue;
+                const double r1 = std::sqrt(r2);
+                const double g1 = 1.0 / r1;
+                const double g3 = g1*g1*g1, g5 = g3*g1*g1, g7 = g5*g1*g1;
+                const double rr_dmp = 0.5 * (m_mp_mrad[iat] + m_mp_mrad[jat]);
+                const double fdmp3 = 1.0 / (1.0 + 6.0 * std::pow(rr_dmp * g1, mp_dmp3));
+                const double fdmp5 = 1.0 / (1.0 + 6.0 * std::pow(rr_dmp * g1, mp_dmp5));
+                const double ddmp3 = g5 * fdmp3 * (-3.0 + mp_dmp3 * (1.0 - fdmp3));
+                const double ddmp5 = fdmp5 * (-5.0 - mp_dmp5 * (fdmp5 - 1.0));
+
+                const double dpiqj = (vx*m_wfn.dp_at(0,iat)+vy*m_wfn.dp_at(1,iat)+vz*m_wfn.dp_at(2,iat))*m_wfn.q_at(jat);
+                const double qidpj = (vx*m_wfn.dp_at(0,jat)+vy*m_wfn.dp_at(1,jat)+vz*m_wfn.dp_at(2,jat))*m_wfn.q_at(iat);
+                const double diff_sd = dpiqj - qidpj;
+                double gx = -ddmp3*vx*diff_sd + fdmp3*g3*(m_wfn.q_at(iat)*m_wfn.dp_at(0,jat) - m_wfn.q_at(jat)*m_wfn.dp_at(0,iat));
+                double gy = -ddmp3*vy*diff_sd + fdmp3*g3*(m_wfn.q_at(iat)*m_wfn.dp_at(1,jat) - m_wfn.q_at(jat)*m_wfn.dp_at(1,iat));
+                double gz = -ddmp3*vz*diff_sd + fdmp3*g3*(m_wfn.q_at(iat)*m_wfn.dp_at(2,jat) - m_wfn.q_at(jat)*m_wfn.dp_at(2,iat));
+                const double fddr_sd = 3.0*diff_sd*mp_dmp3*fdmp3*g3*(fdmp3/rr_dmp)*std::pow(rr_dmp*g1, mp_dmp3);
+                dEdr_mp(iat) += fddr_sd; dEdr_mp(jat) += fddr_sd;
+
+                const double dpidpj = m_wfn.dp_at(0,iat)*m_wfn.dp_at(0,jat)+m_wfn.dp_at(1,iat)*m_wfn.dp_at(1,jat)+m_wfn.dp_at(2,iat)*m_wfn.dp_at(2,jat);
+                const double dpiv = vx*m_wfn.dp_at(0,iat)+vy*m_wfn.dp_at(1,iat)+vz*m_wfn.dp_at(2,iat);
+                const double dpjv = vx*m_wfn.dp_at(0,jat)+vy*m_wfn.dp_at(1,jat)+vz*m_wfn.dp_at(2,jat);
+                const double edd = dpidpj*r2 - 3.0*dpjv*dpiv;
+                gx += -2.0*fdmp5*g5*dpidpj*vx + 3.0*fdmp5*g5*(dpiv*m_wfn.dp_at(0,jat)+dpjv*m_wfn.dp_at(0,iat)) - edd*ddmp5*g7*vx;
+                gy += -2.0*fdmp5*g5*dpidpj*vy + 3.0*fdmp5*g5*(dpiv*m_wfn.dp_at(1,jat)+dpjv*m_wfn.dp_at(1,iat)) - edd*ddmp5*g7*vy;
+                gz += -2.0*fdmp5*g5*dpidpj*vz + 3.0*fdmp5*g5*(dpiv*m_wfn.dp_at(2,jat)+dpjv*m_wfn.dp_at(2,iat)) - edd*ddmp5*g7*vz;
+                const double fddr_dd = 3.0*edd*mp_dmp5*fdmp5*g5*(fdmp5/rr_dmp)*std::pow(rr_dmp*g1, mp_dmp5);
+                dEdr_mp(iat) += fddr_dd; dEdr_mp(jat) += fddr_dd;
+
+                const double qi = m_wfn.q_at(iat), qj = m_wfn.q_at(jat);
+                const double eq =
+                      (qj*m_wfn.qp_at(0,iat)+m_wfn.qp_at(0,jat)*qi)*vx*vx
+                    + 2.0*(qj*m_wfn.qp_at(1,iat)+m_wfn.qp_at(1,jat)*qi)*vx*vy
+                    + (qj*m_wfn.qp_at(2,iat)+m_wfn.qp_at(2,jat)*qi)*vy*vy
+                    + 2.0*(qj*m_wfn.qp_at(3,iat)+m_wfn.qp_at(3,jat)*qi)*vx*vz
+                    + 2.0*(qj*m_wfn.qp_at(4,iat)+m_wfn.qp_at(4,jat)*qi)*vy*vz
+                    + (qj*m_wfn.qp_at(5,iat)+m_wfn.qp_at(5,jat)*qi)*vz*vz;
+                const double tivx = m_wfn.qp_at(0,iat)*vx+m_wfn.qp_at(1,iat)*vy+m_wfn.qp_at(3,iat)*vz;
+                const double tivy = m_wfn.qp_at(1,iat)*vx+m_wfn.qp_at(2,iat)*vy+m_wfn.qp_at(4,iat)*vz;
+                const double tivz = m_wfn.qp_at(3,iat)*vx+m_wfn.qp_at(4,iat)*vy+m_wfn.qp_at(5,iat)*vz;
+                const double tjvx = m_wfn.qp_at(0,jat)*vx+m_wfn.qp_at(1,jat)*vy+m_wfn.qp_at(3,jat)*vz;
+                const double tjvy = m_wfn.qp_at(1,jat)*vx+m_wfn.qp_at(2,jat)*vy+m_wfn.qp_at(4,jat)*vz;
+                const double tjvz = m_wfn.qp_at(3,jat)*vx+m_wfn.qp_at(4,jat)*vy+m_wfn.qp_at(5,jat)*vz;
+                gx += -eq*ddmp5*g7*vx - 2.0*fdmp5*g5*(qi*tjvx+qj*tivx);
+                gy += -eq*ddmp5*g7*vy - 2.0*fdmp5*g5*(qi*tjvy+qj*tivy);
+                gz += -eq*ddmp5*g7*vz - 2.0*fdmp5*g5*(qi*tjvz+qj*tivz);
+                const double fddr_sq = eq*3.0*mp_dmp5*fdmp5*g5*(fdmp5/rr_dmp)*std::pow(rr_dmp*g1, mp_dmp5);
+                dEdr_mp(iat) += fddr_sq; dEdr_mp(jat) += fddr_sq;
+
+                m_gradient(iat,0) += gx; m_gradient(jat,0) -= gx;
+                m_gradient(iat,1) += gy; m_gradient(jat,1) -= gy;
+                m_gradient(iat,2) += gz; m_gradient(jat,2) -= gz;
+            }
+        }
+        for (int i = 0; i < nat; ++i) {
+            const int zi = m_atoms[i];
+            const double rad = p_rad[zi-1], vcn = p_vcn[zi-1];
+            const double arg = m_coordination_numbers(i) - vcn - mp_shift;
+            const double t1 = std::exp(-mp_kexp * arg);
+            const double t2 = (mp_rmax - rad) / (1.0 + t1);
+            dEdcn(i) += dEdr_mp(i) * (-t2 * mp_kexp * t1 / (1.0 + t1));
+        }
     }
 
     // 4. CN chain-rule gradient (host; identical to section 4 in calculateGradient).
