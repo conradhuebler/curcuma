@@ -200,6 +200,38 @@ struct H0Data {
 };
 
 /* ------------------------------------------------------------------------- *
+ *  Flattened, CUDA-free snapshot of the basis (BasisMap) and H0 parameters
+ *  (H0Data) for the GPU integral build (Stage 3, Claude Generated). The GPU
+ *  path keeps no project types; XTB::exportGpuBasis fills these plain-vector
+ *  bundles once per molecule and the device context uploads them. The post-
+ *  orthogonalisation primitives are flattened with an exclusive-prefix-sum
+ *  offset per shell (sh_prim_off); the device consumes them verbatim and never
+ *  re-orthogonalises.
+ * ------------------------------------------------------------------------- */
+struct GpuBasisFlat {
+    int nat = 0, nsh = 0, nao = 0;
+
+    std::vector<int>    z;            // atomic number per atom, length nat
+    std::vector<double> xyz_bohr;     // geometry in bohr, length 3·nat (per geometry)
+
+    std::vector<int>    sh2at, ang_sh, iao_sh, nao_sh;  // length nsh
+    std::vector<int>    ish_at, nsh_at;                 // length nat
+    std::vector<int>    ao2at, ao2sh;                   // length nao
+
+    std::vector<int>    sh_nprim, sh_prim_off;          // length nsh
+    std::vector<double> sh_zeta;                        // slater_exp per shell, length nsh
+    std::vector<double> prim_alpha, prim_coeff;         // length Σ nprim (post-ortho)
+
+    std::vector<int>    valence;                        // GFN1 valence flags, length nsh
+    std::vector<double> shell_hardness;                 // Coulomb per-shell hardness, length nsh
+    int                 is_gfn2 = 0;                    // method flag for the device
+};
+
+struct GpuH0Flat {
+    std::vector<double> selfenergy, kcn, shpoly;        // length nsh
+};
+
+/* ------------------------------------------------------------------------- *
  *  Density-dependent potential container.  Mirrors tblite potential_type:
  *    v_at[nat]       — atom-resolved shift (third-order in GFN1)
  *    v_sh[nsh]       — shell-resolved shift (isotropic Coulomb)
@@ -302,6 +334,24 @@ struct GpuScfBackend {
     virtual bool beginMultipole(const std::array<Eigen::MatrixXd, 3>& dp_int,
                                 const std::array<Eigen::MatrixXd, 6>& qp_int,
                                 const std::vector<int>& ao2at) { (void)dp_int; (void)qp_int; (void)ao2at; return false; }
+
+    /* ----- Device-side integral build (Stage 3) ------------------------- *
+     * Instead of begin() uploading the CPU-built H0/S/L, the device builds them
+     * itself from the geometry: beginBasis uploads the molecule-constant
+     * flattened basis once, beginComputed (per geometry) runs CN → self-energy →
+     * S/H0 → L = chol(S) on the device and allocates the resident SCF buffers,
+     * so no nao²-sized matrix crosses the bus. A backend that does not implement
+     * them returns false and the caller falls back to the begin() upload path. */
+    virtual bool beginBasis(const GpuBasisFlat& basis, const GpuH0Flat& h0) { (void)basis; (void)h0; return false; }
+    virtual bool beginComputed(const std::vector<double>& xyz_bohr) { (void)xyz_bohr; return false; }
+    /// Fetch the device-computed Coulomb γ matrix (nsh×nsh) so the host
+    /// potential build (v_sh += γ·q_sh) uses the device-built γ. Returns false if
+    /// unavailable (caller keeps its own CPU γ). Claude Generated (Stage 3c).
+    virtual bool downloadGamma(Eigen::MatrixXd& gamma_out) { (void)gamma_out; return false; }
+    /// GFN2: enter the device-resident multipole loop using the device-computed
+    /// dp_int/qp_int (no upload of the 9 nao² matrices). Returns false → caller
+    /// falls back to beginMultipole (upload). Claude Generated (Stage 3d).
+    virtual bool beginMultipoleComputed() { return false; }
     virtual bool solveMultipole(const Eigen::VectorXd& v_ao,
                                 const Eigen::MatrixXd& v_dp,
                                 const Eigen::MatrixXd& v_qp,
@@ -346,6 +396,17 @@ public:
     Matrix  getMOCoefficients() const { return m_wfn.C; }
     Matrix  getDensity() const { return m_wfn.P; }
     const Matrix& getOverlap() const { return m_S; }
+    // Bare Hamiltonian H0 (CN-shifted self-energies × hscale × overlap), the
+    // reference for the Stage-3b GPU overlap/H0 validation. Claude Generated.
+    const Matrix& getBareHamiltonian() const { return m_H0; }
+    // Shell-resolved Coulomb γ matrix (nsh×nsh), the reference for the Stage-3c
+    // GPU gamma validation. Claude Generated.
+    const Eigen::MatrixXd& getGammaMatrix() const { return m_gamma; }
+    // GFN2 dipole (3) / traceless quadrupole (6) AO integral matrices (nao×nao),
+    // the reference for the Stage-3d GPU multipole-integral validation. Built by
+    // setupMultipole. Claude Generated.
+    const std::array<Eigen::MatrixXd, 3>& getDipoleIntegrals() const { return m_dp_int; }
+    const std::array<Eigen::MatrixXd, 6>& getQuadrupoleIntegrals() const { return m_qp_int; }
     const Matrix& getFock()    const { return m_F; }
     double  getHOMOEnergy() const;
     double  getLUMOEnergy() const;
@@ -466,6 +527,13 @@ public:
     // (default) → unchanged CPU SCF. begin() returning false → CPU fallback.
     void setGpuScfBackend(GpuScfBackend* b) { m_gpu_scf = b; }
     bool hasGpuScfBackend() const { return m_gpu_scf != nullptr; }
+
+    // Export a flattened, CUDA-free snapshot of the built basis (m_basis) and H0
+    // parameters (m_h0) for the GPU integral build (Stage 3, Claude Generated).
+    // Requires the basis to be built (run a Calculation or InitialiseMolecule
+    // first). Fills the geometry-dependent xyz_bohr from the current geometry, so
+    // it can be re-called per step while the rest stays molecule-constant.
+    void exportGpuBasis(GpuBasisFlat& basis, GpuH0Flat& h0) const;  // xtb_h0.cpp
 
     // Mixed-precision SCF (opt-in, MKL path): early iterations (max|dq| above the threshold)
     // solve the eigenproblem in FP32 (~2x), reverting to FP64 near convergence so the energy

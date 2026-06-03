@@ -122,10 +122,71 @@ public:
         return m_ctx->residentMultipoleMoments(dp_at.data(), qp_at.data(), m_n, m_nat);
     }
 
+    // ---- Device-side integral build (Stage 3) -----------------------------
+    bool beginBasis(const curcuma::xtb::GpuBasisFlat& bf,
+                    const curcuma::xtb::GpuH0Flat& hf) override
+    {
+        if (!m_ctx || bf.nao <= 0) return false;
+        // Own copies so the device-upload pointers stay valid past this call.
+        m_bf = bf;
+        m_hf = hf;
+        XtbGpuContext::XtbGpuBasisData bd;
+        bd.nat         = m_bf.nat;
+        bd.nsh         = m_bf.nsh;
+        bd.nao         = m_bf.nao;
+        bd.is_gfn2     = m_bf.is_gfn2;
+        bd.z           = m_bf.z.data();
+        bd.sh2at       = m_bf.sh2at.data();
+        bd.ang_sh      = m_bf.ang_sh.data();
+        bd.iao_sh      = m_bf.iao_sh.data();
+        bd.nao_sh      = m_bf.nao_sh.data();
+        bd.sh_nprim    = m_bf.sh_nprim.data();
+        bd.sh_prim_off = m_bf.sh_prim_off.data();
+        bd.nprim_total = static_cast<int>(m_bf.prim_alpha.size());
+        bd.prim_alpha  = m_bf.prim_alpha.data();
+        bd.prim_coeff  = m_bf.prim_coeff.data();
+        bd.sh_zeta     = m_bf.sh_zeta.data();
+        bd.selfenergy  = m_hf.selfenergy.data();
+        bd.kcn         = m_hf.kcn.data();
+        bd.shpoly      = m_hf.shpoly.data();
+        bd.valence     = m_bf.valence.empty() ? nullptr : m_bf.valence.data();
+        bd.shell_hardness = m_bf.shell_hardness.empty() ? nullptr : m_bf.shell_hardness.data();
+        bd.ao2at       = m_bf.ao2at.empty() ? nullptr : m_bf.ao2at.data();
+        bd.ao2sh       = m_bf.ao2sh.empty() ? nullptr : m_bf.ao2sh.data();
+        m_n = m_bf.nao;
+        m_nat = m_bf.nat;
+        return m_ctx->beginBasis(bd);
+    }
+
+    bool beginComputed(const std::vector<double>& xyz_bohr) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        return m_ctx->computeIntegrals(xyz_bohr.data())
+            && m_ctx->residentBeginComputed();
+    }
+
+    bool downloadGamma(Eigen::MatrixXd& gamma_out) override
+    {
+        if (!m_ctx) return false;
+        const int nsh = static_cast<int>(m_bf.nsh);
+        if (nsh <= 0) return false;
+        gamma_out.resize(nsh, nsh);  // Eigen column-major matches the device layout
+        return m_ctx->downloadGamma(gamma_out.data());
+    }
+
+    bool beginMultipoleComputed() override
+    {
+        if (!m_ctx || m_nat <= 0) return false;
+        m_nat = m_bf.nat;  // matches the resident_nat set by residentBeginMultipoleComputed
+        return m_ctx->residentBeginMultipoleComputed();
+    }
+
 private:
     XtbGpuContext* m_ctx = nullptr;
     int            m_n   = 0;
     int            m_nat = 0;
+    curcuma::xtb::GpuBasisFlat m_bf;
+    curcuma::xtb::GpuH0Flat    m_hf;
 };
 
 } // namespace

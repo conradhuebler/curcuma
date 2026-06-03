@@ -124,6 +124,92 @@ public:
     /// Call after residentDensity (reads the resident P). Column-major outputs.
     bool residentMultipoleMoments(double* dp_at3, double* qp_at6, int n, int nat);
 
+    /* ----- Device-side integral build (Stage 3) -------------------------- *
+     * Move the one-time-per-geometry integral build (CN, self-energies, S, H0,
+     * γ, GFN2 multipole) onto the device. beginBasis uploads the molecule-
+     * constant flattened basis + H0 parameters ONCE; the per-geometry compute
+     * calls then build the integrals from the geometry alone, so nothing nao²-
+     * sized crosses the bus per step. The flattened arrays are plain pointers so
+     * this header stays free of the project basis types. Claude Generated. */
+
+    /// Molecule-constant flattened basis + H0 parameters for the device integral
+    /// build. Raw pointers (host-owned, copied during beginBasis); the post-
+    /// orthogonalisation primitives are flattened with an exclusive-prefix-sum
+    /// offset per shell (sh_prim_off). valence (length nsh, GFN1 valence flags)
+    /// may be null for GFN2. Plain POD so this header stays project-type-free.
+    struct XtbGpuBasisData {
+        int nat = 0, nsh = 0, nao = 0;
+        int is_gfn2 = 0;
+        const int*    z = nullptr;            // nat
+        const int*    sh2at = nullptr;        // nsh
+        const int*    ang_sh = nullptr;       // nsh
+        const int*    iao_sh = nullptr;       // nsh
+        const int*    nao_sh = nullptr;       // nsh
+        const int*    sh_nprim = nullptr;     // nsh
+        const int*    sh_prim_off = nullptr;  // nsh
+        int           nprim_total = 0;
+        const double* prim_alpha = nullptr;   // nprim_total (post-ortho)
+        const double* prim_coeff = nullptr;   // nprim_total
+        const double* sh_zeta = nullptr;      // nsh (slater_exp)
+        const double* selfenergy = nullptr;   // nsh
+        const double* kcn = nullptr;          // nsh
+        const double* shpoly = nullptr;       // nsh
+        const int*    valence = nullptr;      // nsh (GFN1; null/zeros for GFN2)
+        const double* shell_hardness = nullptr; // nsh (Coulomb gamma hardness)
+        const int*    ao2at = nullptr;        // nao (AO→atom; GFN2 multipole)
+        const int*    ao2sh = nullptr;        // nao (AO→shell; GFN2 multipole)
+    };
+
+    /// Upload the molecule-constant flattened basis + H0 parameters and allocate
+    /// the resident integral buffers (CN, self-energies, S, H0, L). Loads the
+    /// element parameter tables into __constant__ memory on first use. Call once
+    /// per molecule, before the per-geometry compute. Returns false on any error.
+    bool beginBasis(const XtbGpuBasisData& basis);
+
+    /// Per-geometry: upload xyz_bohr (3·nat) and run the CN kernel (cn_exp/cn_gfn
+    /// per is_gfn2 from beginBasis) + the self-energy kernel. Results resident;
+    /// download with downloadCn / downloadSelfEnergy. Requires a prior beginBasis.
+    bool computeCnSelfEnergy(const double* xyz_bohr);
+
+    /// Per-geometry: CN → self-energy → overlap S + bare Hamiltonian H0 (device
+    /// k_overlap_h0) → lower Cholesky L = chol(S) (cusolverDnDpotrf). All resident
+    /// in the same dH0/dS/dL buffers the resident SCF consumes. Requires beginBasis.
+    bool computeIntegrals(const double* xyz_bohr);
+
+    /// Download the resident coordination numbers (length nat) to the host.
+    bool downloadCn(double* cn_out);
+    /// Download the resident CN-shifted shell self-energies (length nsh).
+    bool downloadSelfEnergy(double* se_out);
+    /// Download the resident overlap S / bare Hamiltonian H0 / Cholesky L
+    /// (nao×nao column-major; S and H0 symmetric). For Stage-3b validation.
+    bool downloadOverlap(double* S_out);
+    bool downloadH0(double* H0_out);
+    bool downloadCholesky(double* L_out);
+    /// Download the resident Coulomb γ matrix (nsh×nsh column-major, symmetric).
+    /// Computed by computeIntegrals; consumed host-side for v_sh += γ·q_sh (3c).
+    bool downloadGamma(double* gamma_out);
+    /// Download the resident GFN2 multipole integrals (3 dipole + 6 quadrupole,
+    /// each nao×nao column-major, contiguous 3·nn / 6·nn). For Stage-3d validation.
+    bool downloadMultipoleInts(double* dp_int3, double* qp_int6);
+
+    /// GFN2: allocate the per-iteration multipole potential / moment buffers and
+    /// mark the device-computed dp_int/qp_int (from computeIntegrals) as resident,
+    /// so residentSolveMultipole/residentMultipoleMoments run without any upload.
+    /// Requires a prior beginBasis(is_gfn2) + computeIntegrals. Claude Generated (3d).
+    bool residentBeginMultipoleComputed();
+
+    /// Stage 4 primitive: overlap derivative dS_μν/dR_{atom(μ)} for every AO pair,
+    /// written to dSdR_out (contiguous 3·nao² column-major). The crux of the
+    /// nuclear-gradient H0/Pulay term; validated standalone before the full
+    /// gradient assembly. Requires a prior beginBasis. Claude Generated (Stage 4).
+    bool computeOverlapGrad(const double* xyz_bohr, double* dSdR_out);
+
+    /// Allocate the resident SCF work buffers (C/P/Cw/eps/occ/pop + cuSOLVER
+    /// dsyevd workspace) sized to the basis nao, and mark the device-computed
+    /// dH0/dS/dL as the resident matrices. Call after computeIntegrals to enter
+    /// the resident SCF loop without uploading any nao²-sized matrix.
+    bool residentBeginComputed();
+
 private:
     /// Reduce the resident Fock in dC to standard form with the cached L, solve
     /// it (cusolverDnDsyevd) and back-transform → generalized eigenvectors in dC,

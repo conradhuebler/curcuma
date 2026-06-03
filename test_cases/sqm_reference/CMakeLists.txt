@@ -271,6 +271,109 @@ if(Python3_Interpreter_FOUND)
     endif()
 endif()
 
+# === Stage 3 GPU integral component tests (Claude Generated, GPU port) ======
+# Each compares a device integral kernel to its CPU reference elementwise @1e-9.
+# Built only with USE_CUDA_XTB; the exes runtime-skip (exit 0) without a device,
+# so they never false-fail off-GPU. Linked against curcuma_core (CPU reference
+# + the compiled device kernels).
+if(USE_CUDA_XTB)
+    set(_SQM_CUDA_MOL ${CMAKE_CURRENT_SOURCE_DIR}/molecules)
+    set(_SQM_CUDA_COMP_MOLS H2O CH4 NH3 C6H6 HCN triose)
+
+    # 3a: coordination numbers + CN-shifted self-energies.
+    add_executable(test_xtb_cuda_cn test_xtb_cuda_cn.cpp)
+    target_link_libraries(test_xtb_cuda_cn PRIVATE curcuma_core)
+    target_include_directories(test_xtb_cuda_cn PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_features(test_xtb_cuda_cn PRIVATE cxx_std_17)
+    foreach(_meth gfn1 gfn2)
+        foreach(_mol ${_SQM_CUDA_COMP_MOLS})
+            add_test(NAME sqm_cuda_cn_${_mol}_${_meth}
+                COMMAND test_xtb_cuda_cn --quiet --tol 1e-9 ${_meth}
+                        ${_SQM_CUDA_MOL}/${_mol}.xyz)
+            set_tests_properties(sqm_cuda_cn_${_mol}_${_meth}
+                PROPERTIES TIMEOUT 120 LABELS "gpu_integrals")
+        endforeach()
+    endforeach()
+
+    # 3b: overlap S + bare Hamiltonian H0 + device Cholesky L.
+    add_executable(test_xtb_cuda_h0 test_xtb_cuda_h0.cpp)
+    target_link_libraries(test_xtb_cuda_h0 PRIVATE curcuma_core)
+    target_include_directories(test_xtb_cuda_h0 PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_features(test_xtb_cuda_h0 PRIVATE cxx_std_17)
+    foreach(_meth gfn1 gfn2)
+        foreach(_mol ${_SQM_CUDA_COMP_MOLS})
+            add_test(NAME sqm_cuda_h0_${_mol}_${_meth}
+                COMMAND test_xtb_cuda_h0 --quiet --tol 1e-9 ${_meth}
+                        ${_SQM_CUDA_MOL}/${_mol}.xyz)
+            set_tests_properties(sqm_cuda_h0_${_mol}_${_meth}
+                PROPERTIES TIMEOUT 120 LABELS "gpu_integrals")
+        endforeach()
+    endforeach()
+
+    # 3c: Coulomb gamma matrix.
+    add_executable(test_xtb_cuda_gamma test_xtb_cuda_gamma.cpp)
+    target_link_libraries(test_xtb_cuda_gamma PRIVATE curcuma_core)
+    target_include_directories(test_xtb_cuda_gamma PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_features(test_xtb_cuda_gamma PRIVATE cxx_std_17)
+    foreach(_meth gfn1 gfn2)
+        foreach(_mol ${_SQM_CUDA_COMP_MOLS})
+            add_test(NAME sqm_cuda_gamma_${_mol}_${_meth}
+                COMMAND test_xtb_cuda_gamma --quiet --tol 1e-9 ${_meth}
+                        ${_SQM_CUDA_MOL}/${_mol}.xyz)
+            set_tests_properties(sqm_cuda_gamma_${_mol}_${_meth}
+                PROPERTIES TIMEOUT 120 LABELS "gpu_integrals")
+        endforeach()
+    endforeach()
+
+    # 3d: GFN2 multipole integrals (dipole + traceless quadrupole). GFN2 only.
+    add_executable(test_xtb_cuda_multipole test_xtb_cuda_multipole.cpp)
+    target_link_libraries(test_xtb_cuda_multipole PRIVATE curcuma_core)
+    target_include_directories(test_xtb_cuda_multipole PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_features(test_xtb_cuda_multipole PRIVATE cxx_std_17)
+    foreach(_mol ${_SQM_CUDA_COMP_MOLS})
+        add_test(NAME sqm_cuda_multipole_${_mol}
+            COMMAND test_xtb_cuda_multipole --quiet --tol 1e-9
+                    ${_SQM_CUDA_MOL}/${_mol}.xyz)
+        set_tests_properties(sqm_cuda_multipole_${_mol}
+            PROPERTIES TIMEOUT 120 LABELS "gpu_integrals")
+    endforeach()
+
+    # 4 (primitive): overlap derivative dS/dR — crux of the nuclear gradient.
+    add_executable(test_xtb_cuda_overlap_grad test_xtb_cuda_overlap_grad.cpp)
+    target_link_libraries(test_xtb_cuda_overlap_grad PRIVATE curcuma_core)
+    target_include_directories(test_xtb_cuda_overlap_grad PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_features(test_xtb_cuda_overlap_grad PRIVATE cxx_std_17)
+    foreach(_meth gfn1 gfn2)
+        foreach(_mol ${_SQM_CUDA_COMP_MOLS})
+            add_test(NAME sqm_cuda_overlapgrad_${_mol}_${_meth}
+                COMMAND test_xtb_cuda_overlap_grad --quiet --tol 1e-9 ${_meth}
+                        ${_SQM_CUDA_MOL}/${_mol}.xyz)
+            set_tests_properties(sqm_cuda_overlapgrad_${_mol}_${_meth}
+                PROPERTIES TIMEOUT 120 LABELS "gpu_gradient")
+        endforeach()
+    endforeach()
+endif()
+
 # === tblite-dependent executables (dump + multipole) ===
 if(USE_TBLITE)
     # Phase 0 reference dumper

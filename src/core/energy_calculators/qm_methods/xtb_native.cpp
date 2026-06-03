@@ -369,21 +369,52 @@ double XTB::Calculation(bool gradient)
     bool gpu_multipole    = false;
     if (m_gpu_scf && mode == ScfMode::Broyden
         && m_X.rows() == m_basis.nao && m_X.cols() == m_basis.nao) {
+        // Stage 3: prefer the device-computed integral build (beginBasis once +
+        // beginComputed per geometry: CN/S/H0/L on the device, no nao² upload).
+        // Fall back to the Stage-2 begin() upload path if the device build is
+        // unavailable. The device S/H0/L match the CPU to ~1e-15 (component
+        // tests sqm_cuda_*), so the converged energy is unchanged. Claude Generated.
+        GpuBasisFlat gbf;
+        GpuH0Flat    gh0;
+        exportGpuBasis(gbf, gh0);
+        const bool computed = m_gpu_scf->beginBasis(gbf, gh0)
+                           && m_gpu_scf->beginComputed(gbf.xyz_bohr);
         if (m_method == MethodType::GFN1) {
-            use_gpu_resident = m_gpu_scf->begin(m_H0, m_S, m_X);
+            use_gpu_resident = computed || m_gpu_scf->begin(m_H0, m_S, m_X);
             if (verb >= 2)
-                CurcumaLogger::info(use_gpu_resident
-                    ? "SCF: device-resident GFN1 path (H0/S/L on GPU; per-iter vectors only)"
-                    : "SCF: GPU resident begin() failed; running CPU SCF");
+                CurcumaLogger::info(!use_gpu_resident
+                    ? "SCF: GPU resident begin() failed; running CPU SCF"
+                    : (computed
+                        ? "SCF: device-resident GFN1 path (CN/S/H0/L built on GPU; no nao^2 upload)"
+                        : "SCF: device-resident GFN1 path (H0/S/L uploaded; per-iter vectors only)"));
         } else if (m_method == MethodType::GFN2 && m_mp_initialized
                    && m_gpu_scf->supportsMultipole()) {
-            use_gpu_resident = m_gpu_scf->begin(m_H0, m_S, m_X)
-                            && m_gpu_scf->beginMultipole(m_dp_int, m_qp_int, m_basis.ao2at);
+            const bool base = computed || m_gpu_scf->begin(m_H0, m_S, m_X);
+            // Stage 3d: when the device built the integrals, it also built the
+            // multipole dp_int/qp_int — enter the resident multipole loop without
+            // uploading the 9 nao² matrices. Otherwise upload the CPU-built ones.
+            const bool mp = computed
+                ? m_gpu_scf->beginMultipoleComputed()
+                : m_gpu_scf->beginMultipole(m_dp_int, m_qp_int, m_basis.ao2at);
+            use_gpu_resident = base && mp;
             gpu_multipole = use_gpu_resident;
             if (verb >= 2)
-                CurcumaLogger::info(use_gpu_resident
-                    ? "SCF: device-resident GFN2 path (H0/S/L + multipole integrals on GPU)"
-                    : "SCF: GPU resident GFN2 begin() failed; running CPU SCF");
+                CurcumaLogger::info(!use_gpu_resident
+                    ? "SCF: GPU resident GFN2 begin() failed; running CPU SCF"
+                    : (computed
+                        ? "SCF: device-resident GFN2 path (CN/S/H0/L on GPU; multipole integrals uploaded)"
+                        : "SCF: device-resident GFN2 path (H0/S/L + multipole integrals uploaded)"));
+        }
+        // Stage 3c: when the device built the integrals, use its Coulomb γ for the
+        // host potential (v_sh += γ·q_sh). γ is nsh² (cheap to download once per
+        // geometry) and matches the CPU build to ~1e-13; the gemv stays on the
+        // host (the rest of v_sh — third-order, D4 — is assembled there too).
+        if (use_gpu_resident && computed) {
+            Eigen::MatrixXd dev_gamma;
+            if (m_gpu_scf->downloadGamma(dev_gamma)
+                && dev_gamma.rows() == m_gamma.rows()
+                && dev_gamma.cols() == m_gamma.cols())
+                m_gamma = dev_gamma;
         }
     }
 

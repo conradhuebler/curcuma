@@ -15,6 +15,7 @@
 #include "parameters/gfn2_params.hpp"
 #include "parameters/xtb_params_extra.hpp"
 #include "STO_CGTO.hpp"
+#include "xtb_coulomb.hpp"
 
 #include "src/core/curcuma_logger.h"
 
@@ -83,6 +84,93 @@ void XTB::getSelfEnergies(const Vector& cn, Vector& se_out) const
         const int iat = m_basis.sh2at[s];
         se_out(s) = m_h0.selfenergy[s] - m_h0.kcn[s] * cn(iat);
     }
+}
+
+/* ------------------------------------------------------------------ *
+ *  Flatten the built basis + H0 parameters for the GPU integral build *
+ *  (Stage 3, Claude Generated). Plain std::vector bundles only — no   *
+ *  CUDA types — so the GPU wrapper can upload them and the core stays  *
+ *  CUDA-free. The primitives are already post-orthogonalised on the   *
+ *  host (CGTO::orthogonalize); we flatten them verbatim.              *
+ * ------------------------------------------------------------------ */
+void XTB::exportGpuBasis(GpuBasisFlat& bf, GpuH0Flat& hf) const
+{
+    const int nat = m_basis.nat;
+    const int nsh = m_basis.nsh;
+    const int nao = m_basis.nao;
+
+    bf.nat = nat;
+    bf.nsh = nsh;
+    bf.nao = nao;
+
+    bf.z = m_basis.z;
+    bf.xyz_bohr.resize(3 * nat);
+    for (int i = 0; i < nat; ++i) {
+        bf.xyz_bohr[3 * i + 0] = m_geometry(i, 0) * AA_TO_AU;
+        bf.xyz_bohr[3 * i + 1] = m_geometry(i, 1) * AA_TO_AU;
+        bf.xyz_bohr[3 * i + 2] = m_geometry(i, 2) * AA_TO_AU;
+    }
+
+    bf.sh2at  = m_basis.sh2at;
+    bf.ang_sh = m_basis.ang_sh;
+    bf.iao_sh = m_basis.iao_sh;
+    bf.nao_sh = m_basis.nao_sh;
+    bf.ish_at = m_basis.ish_at;
+    bf.nsh_at = m_basis.nsh_at;
+    bf.ao2at  = m_basis.ao2at;
+    bf.ao2sh  = m_basis.ao2sh;
+
+    // Flatten the per-shell CGTO primitives with an exclusive-prefix-sum offset.
+    bf.sh_nprim.resize(nsh);
+    bf.sh_prim_off.resize(nsh);
+    bf.sh_zeta.resize(nsh);
+    int off = 0;
+    for (int s = 0; s < nsh; ++s) {
+        const int nprim = static_cast<int>(m_basis.cgto[s].alpha.size());
+        bf.sh_nprim[s]    = nprim;
+        bf.sh_prim_off[s] = off;
+        bf.sh_zeta[s]     = m_basis.cgto[s].slater_exp;
+        off += nprim;
+    }
+    bf.prim_alpha.resize(off);
+    bf.prim_coeff.resize(off);
+    for (int s = 0; s < nsh; ++s) {
+        const int base = bf.sh_prim_off[s];
+        const auto& cg = m_basis.cgto[s];
+        for (int p = 0; p < bf.sh_nprim[s]; ++p) {
+            bf.prim_alpha[base + p] = cg.alpha[p];
+            bf.prim_coeff[base + p] = cg.coeff[p];
+        }
+    }
+
+    // GFN1 valence flags: first shell of each ℓ per atom is "valence"
+    // (mirrors getHamiltonianH0, xtb_h0.cpp:113-124). Zeroed for GFN2 (unused).
+    bf.is_gfn2 = (m_method == MethodType::GFN2) ? 1 : 0;
+    bf.valence.assign(nsh, 0);
+    if (m_method == MethodType::GFN1) {
+        for (int iat = 0; iat < nat; ++iat) {
+            bool ang_seen[3] = {false, false, false};
+            for (int ish = 0; ish < m_basis.nsh_at[iat]; ++ish) {
+                const int sh = m_basis.ish_at[iat] + ish;
+                const int l  = m_basis.ang_sh[sh];
+                if (l >= 0 && l < 3 && !ang_seen[l]) { bf.valence[sh] = 1; ang_seen[l] = true; }
+            }
+        }
+    }
+
+    // Per-shell Coulomb hardness (molecule-constant): hubbard_parameter(Z) ×
+    // shell_hubbard(ang, Z). Precomputed here so the device k_gamma needs no
+    // element tables (mirrors coulomb::shell_hardness, xtb_coulomb.hpp:45).
+    const coulomb::Method cm = (m_method == MethodType::GFN2)
+        ? coulomb::Method::GFN2 : coulomb::Method::GFN1;
+    bf.shell_hardness.resize(nsh);
+    for (int s = 0; s < nsh; ++s)
+        bf.shell_hardness[s] = coulomb::shell_hardness(cm, m_basis.z[m_basis.sh2at[s]],
+                                                       m_basis.ang_sh[s]);
+
+    hf.selfenergy = m_h0.selfenergy;
+    hf.kcn        = m_h0.kcn;
+    hf.shpoly     = m_h0.shpoly;
 }
 
 /* ------------------------------------------------------------------ *

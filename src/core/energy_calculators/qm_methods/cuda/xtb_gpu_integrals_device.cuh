@@ -1,0 +1,362 @@
+/*
+ * <Native xTB GPU integral device functions — Stage 3>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * This program is free software under GPL-3.0.
+ *
+ * Claude Generated (2026-06, Stage 3): __device__ ports of the native xTB
+ * integral kernels, mirroring the CPU reference in xtb_h0.cpp / STO_CGTO.hpp /
+ * xtb_coulomb.hpp / xtb_multipole_ints.hpp index-for-index. These run on the
+ * flattened, post-orthogonalisation basis uploaded by XtbGpuContext::beginBasis;
+ * the device NEVER re-orthogonalises (the host already did, STO_CGTO.hpp:313).
+ *
+ * Stage 3a (this file, first cut): coordination-number counting functions.
+ * Later sub-stages add d_cgto_overlap (3b) and d_cgto_multipole (3d) here.
+ *
+ * The math is bit-faithful to the host; the only expected divergence is a few
+ * ULP from the device exp()/pow() overloads vs libm — hence component tests use
+ * a 1e-9 tolerance, not 1e-12.
+ */
+
+#pragma once
+
+#ifdef USE_CUDA_XTB
+
+#include <cuda_runtime.h>
+
+namespace curcuma {
+namespace xtb {
+namespace gpu {
+
+/// Logistic counting function used by both CN models (xtb_params_extra.hpp:188):
+///   gcount(k, r, r0) = 1 / (1 + exp(-k·(r0/r − 1))).
+__device__ __forceinline__ double d_gcount(double k, double r, double r0)
+{
+    return 1.0 / (1.0 + exp(-k * (r0 / r - 1.0)));
+}
+
+/// CN pair contribution c_ij for a single neighbour at distance r with summed
+/// covalent radius rc (au). Mirrors cn_exp (GFN1, kcn=16) and cn_gfn (GFN2,
+/// double-exp ka=10/kb=20, r_shift=2.0) in xtb_params_extra.hpp:153/183.
+__device__ __forceinline__ double d_cn_pair(double r, double rc, bool is_gfn2)
+{
+    if (is_gfn2)
+        return d_gcount(10.0, r, rc) * d_gcount(20.0, r, rc + 2.0);
+    return d_gcount(16.0, r, rc);
+}
+
+// ---- Overlap (S) + H0 device functions (Stage 3b) -------------------------
+// Verbatim ports of STO_CGTO.hpp:187-298 (primitive + contracted overlap) and
+// the h_factor scaling of xtb_h0.cpp:140-231. s/p only (no d), bit-faithful.
+
+__device__ __forceinline__ double d_pi() { return 3.14159265358979323846; }
+
+/// AO type for a local AO index in a shell (xtb_h0.cpp:41): s→0, p→{py=2,pz=3,
+/// px=1} (tblite ordering). Returns −1 for d (unhandled, as on the CPU).
+__device__ __forceinline__ int d_ao_to_type(int ang, int local_ao)
+{
+    if (ang == 0) return 0;
+    if (ang == 1) { const int p_map[3] = {2, 3, 1}; return p_map[local_ao]; }
+    return -1;
+}
+
+__device__ __forceinline__ double d_primitive_ss_overlap(double aa, double ab, double R2)
+{
+    const double g = aa + ab;
+    return pow(d_pi() / g, 1.5) * exp(-aa * ab / g * R2);
+}
+
+__device__ __forceinline__ double d_primitive_sp_overlap(double as, double ap, double R2,
+                                                         double PB_component)
+{
+    const double g = as + ap;
+    const double S00 = pow(d_pi() / g, 1.5) * exp(-as * ap / g * R2);
+    return S00 * PB_component;
+}
+
+__device__ __forceinline__ double d_primitive_pp_overlap(double aa, double ab, double R2,
+                                                        double PA, double PB, bool same_axis)
+{
+    const double g = aa + ab;
+    const double S00 = pow(d_pi() / g, 1.5) * exp(-aa * ab / g * R2);
+    return same_axis ? S00 * (PA * PB + 0.5 / g) : S00 * PA * PB;
+}
+
+/// Contracted GTO overlap on flattened primitive arrays (mirrors cgto_overlap,
+/// STO_CGTO.hpp:242). type 0=s, 1=px, 2=py, 3=pz.
+__device__ __forceinline__ double d_cgto_overlap(
+    const double* alpha_a, const double* coeff_a, int npa,
+    const double* alpha_b, const double* coeff_b, int npb,
+    double xa, double ya, double za, double xb, double yb, double zb,
+    int type_a, int type_b)
+{
+    const double dx = xb - xa, dy = yb - ya, dz = zb - za;
+    const double R2 = dx * dx + dy * dy + dz * dz;
+    double S = 0.0;
+    for (int i = 0; i < npa; ++i) {
+        const double ai = alpha_a[i], ci = coeff_a[i];
+        for (int j = 0; j < npb; ++j) {
+            const double aj = alpha_b[j], cj = coeff_b[j];
+            const double g = ai + aj;
+            const double Px = (ai * xa + aj * xb) / g;
+            const double Py = (ai * ya + aj * yb) / g;
+            const double Pz = (ai * za + aj * zb) / g;
+            if (type_a == 0 && type_b == 0) {
+                S += ci * cj * d_primitive_ss_overlap(ai, aj, R2);
+            } else if (type_a == 0 && type_b >= 1 && type_b <= 3) {
+                double PB = (type_b == 1) ? Px - xb : (type_b == 2) ? Py - yb : Pz - zb;
+                S += ci * cj * d_primitive_sp_overlap(ai, aj, R2, PB);
+            } else if (type_a >= 1 && type_a <= 3 && type_b == 0) {
+                double PA = (type_a == 1) ? Px - xa : (type_a == 2) ? Py - ya : Pz - za;
+                S += ci * cj * d_primitive_sp_overlap(aj, ai, R2, PA);
+            } else if (type_a >= 1 && type_a <= 3 && type_b >= 1 && type_b <= 3) {
+                double PA, PB; int axis_a, axis_b;
+                if (type_a == 1) { PA = Px - xa; axis_a = 0; }
+                else if (type_a == 2) { PA = Py - ya; axis_a = 1; }
+                else { PA = Pz - za; axis_a = 2; }
+                if (type_b == 1) { PB = Px - xb; axis_b = 0; }
+                else if (type_b == 2) { PB = Py - yb; axis_b = 1; }
+                else { PB = Pz - zb; axis_b = 2; }
+                S += ci * cj * d_primitive_pp_overlap(ai, aj, R2, PA, PB, axis_a == axis_b);
+            }
+        }
+    }
+    return S;
+}
+
+// ---- H0 shell-pair scaling (h_factor) parameter helpers -------------------
+// Ports of xtb_params_extra.hpp gfn1::/gfn2:: kshell/kpair. No element tables
+// needed (those are __constant__ in the .cu); these are pure scalar logic.
+
+__device__ __forceinline__ double d_kshell_gfn1(int il, int jl)
+{
+    const double kdiag[5] = {1.85, 2.25, 2.00, 2.00, 2.00};
+    const bool sp = (il == 0 && jl == 1) || (il == 1 && jl == 0);
+    return sp ? 2.08 : 0.5 * (kdiag[il] + kdiag[jl]);
+}
+
+__device__ __forceinline__ double d_kshell_gfn2(int il, int jl)
+{
+    const double kdiag[5] = {1.85, 2.23, 2.23, 2.23, 2.23};
+    const bool sd = (jl == 2 && (il == 0 || il == 1)) || (il == 2 && (jl == 0 || jl == 1));
+    return sd ? 2.0 : 0.5 * (kdiag[il] + kdiag[jl]);
+}
+
+__device__ __forceinline__ int d_dblock_row(int z)
+{
+    if (z > 20 && z < 30) return 1;
+    if (z > 38 && z < 48) return 2;
+    if (z > 56 && z < 80) return 3;
+    return 0;
+}
+
+/// GFN1 kpair (gfn1.f90:723-754): hardcoded special pairs, then d-block average.
+__device__ __forceinline__ double d_kpair_gfn1(int izp, int jzp)
+{
+    if (izp == 1 && jzp == 1) return 0.96;
+    const int lo = izp < jzp ? izp : jzp;
+    const int hi = izp < jzp ? jzp : izp;
+    if (lo == 1 && hi == 5)  return 0.95;
+    if (lo == 1 && hi == 7)  return 1.04;
+    if (lo == 1 && hi == 28) return 0.90;
+    if (lo == 1 && hi == 75) return 0.80;
+    if (lo == 1 && hi == 78) return 0.80;
+    if (lo == 5 && hi == 15) return 0.97;
+    if (lo == 7 && hi == 14) return 1.01;
+    const int itr = d_dblock_row(izp), jtr = d_dblock_row(jzp);
+    if (itr > 0 && jtr > 0) {
+        const double kp[3] = {1.1, 1.2, 1.2};
+        return 0.5 * (kp[itr - 1] + kp[jtr - 1]);
+    }
+    return 1.0;
+}
+
+// ---- Overlap derivative dS/dA (Stage 4) -----------------------------------
+// Verbatim port of CGTO::cgto_overlap_grad (STO_CGTO.hpp:376), Obara-Saika
+// dS/dA_k = 2α·S(a+e_k,b) − n_k·S(a−e_k,b). s/p only; dS/dB = −dS/dA. This is
+// the crux primitive of the Stage-4 nuclear gradient (H0/Pulay term).
+__device__ __forceinline__ void d_cgto_overlap_grad(
+    const double* alpha_a, const double* coeff_a, int npa,
+    const double* alpha_b, const double* coeff_b, int npb,
+    double xa, double ya, double za, double xb, double yb, double zb,
+    int type_a, int type_b, double grad[3])
+{
+    grad[0] = grad[1] = grad[2] = 0.0;
+    if (type_a > 3 || type_b > 3) return;
+    const double dx = xb - xa, dy = yb - ya, dz = zb - za;
+    const double R2 = dx*dx + dy*dy + dz*dz;
+    const int nk[3] = { (type_a == 1) ? 1 : 0, (type_a == 2) ? 1 : 0, (type_a == 3) ? 1 : 0 };
+
+    for (int ip = 0; ip < npa; ++ip) {
+        const double ai = alpha_a[ip], ci = coeff_a[ip];
+        for (int jp = 0; jp < npb; ++jp) {
+            const double aj = alpha_b[jp], cj = coeff_b[jp];
+            const double fac = ci * cj;
+            const double g = ai + aj, invg = 1.0 / g;
+            const double Px = (ai*xa + aj*xb) * invg;
+            const double Py = (ai*ya + aj*yb) * invg;
+            const double Pz = (ai*za + aj*zb) * invg;
+            const double PAx = Px - xa, PAy = Py - ya, PAz = Pz - za;
+            const double PBx = Px - xb, PBy = Py - yb, PBz = Pz - zb;
+            const double S00 = pow(d_pi() * invg, 1.5) * exp(-ai*aj * invg * R2);
+            const double h = 0.5 * invg;
+            double Sr[3];
+
+            if (type_a == 0) {
+                if (type_b == 0)      { Sr[0] = PAx*S00; Sr[1] = PAy*S00; Sr[2] = PAz*S00; }
+                else if (type_b == 1) { Sr[0] = (PAx*PBx+h)*S00; Sr[1] = PAy*PBx*S00; Sr[2] = PAz*PBx*S00; }
+                else if (type_b == 2) { Sr[0] = PAx*PBy*S00; Sr[1] = (PAy*PBy+h)*S00; Sr[2] = PAz*PBy*S00; }
+                else                  { Sr[0] = PAx*PBz*S00; Sr[1] = PAy*PBz*S00; Sr[2] = (PAz*PBz+h)*S00; }
+            } else if (type_a == 1) {
+                if (type_b == 0)      { Sr[0] = (PAx*PAx+h)*S00; Sr[1] = PAx*PAy*S00; Sr[2] = PAx*PAz*S00; }
+                else if (type_b == 1) { Sr[0] = (PAx*PAx*PBx + PAx*invg + PBx*h)*S00; Sr[1] = PAy*(PAx*PBx+h)*S00; Sr[2] = PAz*(PAx*PBx+h)*S00; }
+                else if (type_b == 2) { Sr[0] = (PAx*PAx+h)*PBy*S00; Sr[1] = PAx*(PAy*PBy+h)*S00; Sr[2] = PAz*PAx*PBy*S00; }
+                else                  { Sr[0] = (PAx*PAx+h)*PBz*S00; Sr[1] = PAy*PAx*PBz*S00; Sr[2] = PAx*(PAz*PBz+h)*S00; }
+            } else if (type_a == 2) {
+                if (type_b == 0)      { Sr[0] = PAy*PAx*S00; Sr[1] = (PAy*PAy+h)*S00; Sr[2] = PAy*PAz*S00; }
+                else if (type_b == 1) { Sr[0] = PAy*(PAx*PBx+h)*S00; Sr[1] = (PAy*PAy+h)*PBx*S00; Sr[2] = PAz*PAy*PBx*S00; }
+                else if (type_b == 2) { Sr[0] = PAx*(PAy*PBy+h)*S00; Sr[1] = (PAy*PAy*PBy + PAy*invg + PBy*h)*S00; Sr[2] = PAz*(PAy*PBy+h)*S00; }
+                else                  { Sr[0] = PAx*PAy*PBz*S00; Sr[1] = (PAy*PAy+h)*PBz*S00; Sr[2] = PAy*(PAz*PBz+h)*S00; }
+            } else { // type_a == 3
+                if (type_b == 0)      { Sr[0] = PAz*PAx*S00; Sr[1] = PAz*PAy*S00; Sr[2] = (PAz*PAz+h)*S00; }
+                else if (type_b == 1) { Sr[0] = PAz*(PAx*PBx+h)*S00; Sr[1] = PAy*PAz*PBx*S00; Sr[2] = (PAz*PAz+h)*PBx*S00; }
+                else if (type_b == 2) { Sr[0] = PAx*PAz*PBy*S00; Sr[1] = PAz*(PAy*PBy+h)*S00; Sr[2] = (PAz*PAz+h)*PBy*S00; }
+                else                  { Sr[0] = PAx*(PAz*PBz+h)*S00; Sr[1] = PAy*(PAz*PBz+h)*S00; Sr[2] = (PAz*PAz*PBz + PAz*invg + PBz*h)*S00; }
+            }
+
+            double S_s_b = 0.0;
+            if (type_a >= 1) {
+                if      (type_b == 0) S_s_b = S00;
+                else if (type_b == 1) S_s_b = PBx * S00;
+                else if (type_b == 2) S_s_b = PBy * S00;
+                else                  S_s_b = PBz * S00;
+            }
+            for (int k = 0; k < 3; ++k)
+                grad[k] += fac * (2.0 * ai * Sr[k] - nk[k] * S_s_b);
+        }
+    }
+}
+
+// ---- Multipole integrals (Stage 3d, GFN2) ---------------------------------
+// Verbatim ports of xtb_multipole_ints.hpp:47-169 (moment1d, type_to_cart,
+// primitive_multipole, cgto_multipole). s/p only; quadrupole order (xx,xy,yy,
+// xz,yz,zz). Origin for the moment operator is 0 (global); the per-column origin
+// shift + traceless transform are applied in the kernel (mirroring setupMultipole).
+
+/// 1-D moment integral ∫(u+PA)^la (u+PB)^lb (u+P)^n exp(-γu²) du, la,lb∈{0,1},
+/// n∈{0,1,2}. Even-order moments M0=√(π/γ), M2=M0/(2γ), M4=3M0/(4γ²).
+__device__ __forceinline__ double d_moment1d(int la, int lb, int n,
+                                            double PA, double PB, double P, double gamma)
+{
+    const double a0 = (la == 0) ? 1.0 : PA;
+    const double a1 = (la == 0) ? 0.0 : 1.0;
+    const double b0 = (lb == 0) ? 1.0 : PB;
+    const double b1 = (lb == 0) ? 0.0 : 1.0;
+    double p0, p1, p2;
+    if (n == 0)      { p0 = 1.0;   p1 = 0.0;   p2 = 0.0; }
+    else if (n == 1) { p0 = P;     p1 = 1.0;   p2 = 0.0; }
+    else             { p0 = P * P; p1 = 2.0*P; p2 = 1.0; }
+    const double ab0 = a0 * b0;
+    const double ab1 = a0 * b1 + a1 * b0;
+    const double ab2 = a1 * b1;
+    const double c0 = ab0 * p0;
+    const double c2 = ab0 * p2 + ab1 * p1 + ab2 * p0;
+    const double c4 = ab2 * p2;
+    const double M0 = sqrt(d_pi() / gamma);
+    const double M2 = M0 / (2.0 * gamma);
+    const double M4 = 3.0 * M0 / (4.0 * gamma * gamma);
+    return c0 * M0 + c2 * M2 + c4 * M4;
+}
+
+__device__ __forceinline__ void d_type_to_cart(int type, int& lx, int& ly, int& lz)
+{
+    switch (type) {
+    case 1: lx = 1; ly = 0; lz = 0; break;
+    case 2: lx = 0; ly = 1; lz = 0; break;
+    case 3: lx = 0; ly = 0; lz = 1; break;
+    default: lx = 0; ly = 0; lz = 0; break;
+    }
+}
+
+/// Primitive overlap + dipole(3) + raw-Cartesian quadrupole(6), global origin.
+__device__ __forceinline__ void d_primitive_multipole(
+    double aa, double ab, double Ax, double Ay, double Az,
+    double Bx, double By, double Bz, int type_a, int type_b,
+    double& S, double D[3], double Q[6])
+{
+    int lxa, lya, lza, lxb, lyb, lzb;
+    d_type_to_cart(type_a, lxa, lya, lza);
+    d_type_to_cart(type_b, lxb, lyb, lzb);
+    const double gamma = aa + ab;
+    const double Px = (aa * Ax + ab * Bx) / gamma;
+    const double Py = (aa * Ay + ab * By) / gamma;
+    const double Pz = (aa * Az + ab * Bz) / gamma;
+    const double dx = Ax - Bx, dy = Ay - By, dz = Az - Bz;
+    const double R2 = dx*dx + dy*dy + dz*dz;
+    const double K = exp(-aa * ab / gamma * R2);
+    const double PAx = Px - Ax, PAy = Py - Ay, PAz = Pz - Az;
+    const double PBx = Px - Bx, PBy = Py - By, PBz = Pz - Bz;
+    const double Sx0 = d_moment1d(lxa, lxb, 0, PAx, PBx, Px, gamma);
+    const double Sy0 = d_moment1d(lya, lyb, 0, PAy, PBy, Py, gamma);
+    const double Sz0 = d_moment1d(lza, lzb, 0, PAz, PBz, Pz, gamma);
+    const double Sx1 = d_moment1d(lxa, lxb, 1, PAx, PBx, Px, gamma);
+    const double Sy1 = d_moment1d(lya, lyb, 1, PAy, PBy, Py, gamma);
+    const double Sz1 = d_moment1d(lza, lzb, 1, PAz, PBz, Pz, gamma);
+    const double Sx2 = d_moment1d(lxa, lxb, 2, PAx, PBx, Px, gamma);
+    const double Sy2 = d_moment1d(lya, lyb, 2, PAy, PBy, Py, gamma);
+    const double Sz2 = d_moment1d(lza, lzb, 2, PAz, PBz, Pz, gamma);
+    S    = K * Sx0 * Sy0 * Sz0;
+    D[0] = K * Sx1 * Sy0 * Sz0;
+    D[1] = K * Sx0 * Sy1 * Sz0;
+    D[2] = K * Sx0 * Sy0 * Sz1;
+    Q[0] = K * Sx2 * Sy0 * Sz0;  // xx
+    Q[1] = K * Sx1 * Sy1 * Sz0;  // xy
+    Q[2] = K * Sx0 * Sy2 * Sz0;  // yy
+    Q[3] = K * Sx1 * Sy0 * Sz1;  // xz
+    Q[4] = K * Sx0 * Sy1 * Sz1;  // yz
+    Q[5] = K * Sx0 * Sy0 * Sz2;  // zz
+}
+
+/// Contracted overlap + dipole + raw quadrupole over flattened primitives.
+__device__ __forceinline__ void d_cgto_multipole(
+    const double* alpha_a, const double* coeff_a, int npa,
+    const double* alpha_b, const double* coeff_b, int npb,
+    double xa, double ya, double za, double xb, double yb, double zb,
+    int type_a, int type_b, double& S, double D[3], double Q[6])
+{
+    S = 0.0;
+    for (int k = 0; k < 3; ++k) D[k] = 0.0;
+    for (int k = 0; k < 6; ++k) Q[k] = 0.0;
+    for (int i = 0; i < npa; ++i) {
+        const double ai = alpha_a[i], ci = coeff_a[i];
+        for (int j = 0; j < npb; ++j) {
+            const double aj = alpha_b[j], cj = coeff_b[j];
+            double s, d[3], q[6];
+            d_primitive_multipole(ai, aj, xa, ya, za, xb, yb, zb, type_a, type_b, s, d, q);
+            const double cc = ci * cj;
+            S += cc * s;
+            D[0] += cc * d[0]; D[1] += cc * d[1]; D[2] += cc * d[2];
+            for (int k = 0; k < 6; ++k) Q[k] += cc * q[k];
+        }
+    }
+}
+
+// ---- Coulomb gamma matrix (Stage 3c) --------------------------------------
+// Klopman–Ohno kernel (xtb_coulomb.hpp:98). gexp=2 for both methods. The
+// per-shell hardness g is precomputed on the host (molecule-constant) and
+// uploaded, so no element tables are needed here.
+
+/// Pairwise average of shell hardness: GFN1 harmonic, GFN2 arithmetic
+/// (xtb_coulomb.hpp:58-69).
+__device__ __forceinline__ double d_coulomb_average(double gi, double gj, bool is_gfn2)
+{
+    if (is_gfn2) return 0.5 * (gi + gj);
+    if (gi == 0.0 || gj == 0.0) return 0.0;
+    return 2.0 / (1.0 / gi + 1.0 / gj);
+}
+
+} // namespace gpu
+} // namespace xtb
+} // namespace curcuma
+
+#endif // USE_CUDA_XTB
