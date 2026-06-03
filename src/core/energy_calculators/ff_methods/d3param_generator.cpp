@@ -199,6 +199,22 @@ void D3ParameterGenerator::copyReferenceData()
     }
 }
 
+void D3ParameterGenerator::prepareForEnergyGradient(const std::vector<int>& atoms,
+                                                    const Eigen::MatrixXd& geometry)
+{
+    // Only the prerequisites getEnergyAndGradient actually reads: geometry, the
+    // CN-dependent Gaussian weights (m_weights_cached), and a fresh dC6/dCN. No
+    // JSON pair list. Mirrors GenerateParameters' first two steps.
+    m_atoms = atoms;
+    m_geometry = geometry;
+    const std::vector<double> coordination_numbers = calculateCoordinationNumbers(atoms, geometry);
+    precomputeGaussianWeights(atoms, coordination_numbers);  // sets m_weights_cached
+    // dC6/dCN is geometry-dependent; force a recompute (computeDC6DCN otherwise
+    // returns early on its m_dc6dcn_computed guard, which is never reset → stale
+    // CN-chain gradient across -opt/-md steps).
+    m_dc6dcn_computed = false;
+}
+
 void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry)
 {
     auto t_start_total = std::chrono::high_resolution_clock::now();
@@ -409,6 +425,21 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         CurcumaLogger::info(fmt::format("  └─ Breakdown: CN={:.1f}ms, Weights={:.1f}ms, C6Interp={:.1f}ms, ATM={:.1f}ms",
             t_cn_ms, t_weights_ms, t_pairs_ms, t_atm_triples_ms));
     }
+}
+
+const std::vector<std::vector<double>>*
+D3ParameterGenerator::refC6Block(int atom_i, int atom_j, bool& swap_refs) const
+{
+    const int ei = atom_i - 1, ej = atom_j - 1;
+    if (ei < 0 || ei >= MAX_ELEM || ej < 0 || ej >= MAX_ELEM || !m_data_initialized)
+        return nullptr;
+    // Triangular pair index (0-based) + s-dftd3 ref-index swap, same condition as getC6.
+    const int pair_index = (ei > ej) ? ej + ei * (ei + 1) / 2
+                                     : ei + ej * (ej + 1) / 2;
+    if (pair_index < 0 || pair_index >= static_cast<int>(m_reference_c6.size()))
+        return nullptr;
+    swap_refs = !(ei > ej);  // swap when elem_i <= elem_j
+    return &m_reference_c6[pair_index];
 }
 
 double D3ParameterGenerator::getC6(int atom_i, int atom_j, int ref_i, int ref_j) const
@@ -672,18 +703,22 @@ double D3ParameterGenerator::interpolateC6(int elem_i, int elem_j, size_t atom_i
         return 0.0;
     }
 
-    // Weighted sum over reference combinations (NO EXP CALLS, only multiplications)
+    // Weighted sum over reference combinations. The reference C6 block is hoisted
+    // out of the loop (vs getC6 recomputing the pair index + nested lookup on every
+    // ref-pair); this hot path runs O(N²×49) times. Claude Generated (perf).
+    bool swap_refs = false;
+    const auto* blk = refC6Block(elem_i, elem_j, swap_refs);
+    if (!blk) return 0.0;
+    const auto& block = *blk;
     double c6_interpolated = 0.0;
     for (size_t ref_i = 0; ref_i < weights_i.size(); ++ref_i) {
+        const double wi = weights_i[ref_i];
         for (size_t ref_j = 0; ref_j < weights_j.size(); ++ref_j) {
-            double c6_ref = getC6(elem_i, elem_j, ref_i, ref_j);
-            double contrib = weights_i[ref_i] * weights_j[ref_j] * c6_ref;
-            c6_interpolated += contrib;
-
-            if (CurcumaLogger::get_verbosity() >= 3 && contrib > 1e-6) {
-                CurcumaLogger::info("    C6[" + std::to_string(ref_i) + "," + std::to_string(ref_j) +
-                                   "]=" + std::to_string(c6_ref) + " contrib=" + std::to_string(contrib));
-            }
+            int ri = swap_refs ? static_cast<int>(ref_j) : static_cast<int>(ref_i);
+            int rj = swap_refs ? static_cast<int>(ref_i) : static_cast<int>(ref_j);
+            if (ri > MAX_REF - 1) ri = MAX_REF - 1;
+            if (rj > MAX_REF - 1) rj = MAX_REF - 1;
+            c6_interpolated += wi * weights_j[ref_j] * block[ri][rj];
         }
     }
 
@@ -1023,9 +1058,19 @@ void D3ParameterGenerator::computeDC6DCN() const
             double dc6_di = 0.0;
             double dc6_dj = 0.0;
 
+            // Hoist the reference C6 block out of the ref-pair loop (perf; same
+            // result as getC6 per ref). Claude Generated.
+            bool swap_refs = false;
+            const auto* blk = refC6Block(elem_i, elem_j, swap_refs);
+            if (!blk) continue;
+            const auto& block = *blk;
             for (size_t ref_i = 0; ref_i < gw_i.size(); ++ref_i) {
                 for (size_t ref_j = 0; ref_j < gw_j.size(); ++ref_j) {
-                    double c6_ref = getC6(elem_i, elem_j, ref_i, ref_j);
+                    int ri = swap_refs ? static_cast<int>(ref_j) : static_cast<int>(ref_i);
+                    int rj = swap_refs ? static_cast<int>(ref_i) : static_cast<int>(ref_j);
+                    if (ri > MAX_REF - 1) ri = MAX_REF - 1;
+                    if (rj > MAX_REF - 1) rj = MAX_REF - 1;
+                    const double c6_ref = block[ri][rj];
                     dc6_di += dgw_i[ref_i] * gw_j[ref_j] * c6_ref;
                     dc6_dj += gw_i[ref_i] * dgw_j[ref_j] * c6_ref;
                 }

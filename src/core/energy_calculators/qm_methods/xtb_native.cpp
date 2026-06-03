@@ -1194,13 +1194,18 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
                 ::D3ParameterGenerator::createForGFN1());
         }
         ::D3ParameterGenerator& d3 = *m_d3_generator;
-        d3.GenerateParameters(m_atoms, m_geometry);
+        // Lightweight prepare (CN + Gaussian weights only) — getEnergyAndGradient
+        // computes C6/C8/energy/gradient directly from the references, so the
+        // O(N²) JSON pair list that GenerateParameters builds is pure overhead
+        // here (≈0.5 s on complex/231). Claude Generated.
+        d3.prepareForEnergyGradient(m_atoms, m_geometry);
 
         if (!need_gradient) {
             m_disp_gradient = Matrix::Zero(m_atomcount, 3);
             m_disp_dEdcn = Vector();
             m_disp_gradient_valid = false;
-            return d3.getTotalEnergy();
+            Matrix g_unused; Vector cn_unused;
+            return d3.getEnergyAndGradient(/*need_gradient=*/false, g_unused, cn_unused);
         }
 
         // Analytical energy + gradient + dEdcn

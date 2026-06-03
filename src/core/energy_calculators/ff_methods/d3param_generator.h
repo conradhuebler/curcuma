@@ -125,6 +125,16 @@ public:
     void GenerateParameters(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry);
     json getParameters() const { return m_parameters; }
 
+    /**
+     * Lightweight prepare for the analytical energy/gradient path (getEnergyAndGradient):
+     * sets geometry, computes the CN-dependent Gaussian weights, and invalidates the
+     * cached dC6/dCN — WITHOUT building the O(N²) JSON pair list that GenerateParameters
+     * produces for the force-field path. getEnergyAndGradient computes C6/C8/energy/
+     * gradient directly from the references, so the JSON is pure overhead for the native
+     * GFN1 dispersion (≈0.5 s on complex/231). Claude Generated (2026-06).
+     */
+    void prepareForEnergyGradient(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry);
+
     // Energy calculation
     double getTotalEnergy() const;  // Returns total D3 dispersion energy (Eh)
 
@@ -151,6 +161,12 @@ public:
     // NOTE: Default ref indices use first valid reference (not 0,0 which is empty)
     double getC6(int atom_i, int atom_j, int ref_i = 0, int ref_j = 1) const;
     double getR6(int atom_i, int atom_j) const;
+
+    // Hoisted reference-C6 block: the 7×7 block for an element pair, computed ONCE
+    // per pair (vs the triangular-index recompute + nested lookup getC6 does on every
+    // ref-pair — the O(N²×49) interpolateC6/computeDC6DCN hot loops). swap_refs carries
+    // the s-dftd3 index asymmetry. Returns nullptr if out of range. Claude Generated (perf).
+    const std::vector<std::vector<double>>* refC6Block(int atom_i, int atom_j, bool& swap_refs) const;
     double getReferenceCN(int atom, int ref_index) const;
     int getNumberofReferences(int atom) const;
 
