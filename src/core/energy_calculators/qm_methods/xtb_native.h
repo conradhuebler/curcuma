@@ -224,6 +224,7 @@ struct GpuBasisFlat {
 
     std::vector<int>    valence;                        // GFN1 valence flags, length nsh
     std::vector<double> shell_hardness;                 // Coulomb per-shell hardness, length nsh
+    std::vector<double> rep_alpha, rep_zeff;            // per-atom repulsion params, length nat
     int                 is_gfn2 = 0;                    // method flag for the device
 };
 
@@ -348,6 +349,17 @@ struct GpuScfBackend {
     /// potential build (v_sh += γ·q_sh) uses the device-built γ. Returns false if
     /// unavailable (caller keeps its own CPU γ). Claude Generated (Stage 3c).
     virtual bool downloadGamma(Eigen::MatrixXd& gamma_out) { (void)gamma_out; return false; }
+
+    /* ----- Device nuclear gradient (Stage 4) ---------------------------- *
+     * The electronic + repulsion + Coulomb gradient (sections 1/2/3 of
+     * calculateGradient) on the device, from the converged SCF state. The
+     * dispersion gradient (3b) and the CN chain-rule (4) stay on the host. */
+    virtual bool supportsGradient() const { return false; }
+    virtual bool gradient(const Matrix& P, const Eigen::MatrixXd& C, const Vector& eps,
+                          int nocc_orbs, const Vector& v_ao, const Vector& q_sh,
+                          Matrix& grad_out, Vector& dEdcn_out)
+    { (void)P; (void)C; (void)eps; (void)nocc_orbs; (void)v_ao; (void)q_sh;
+      (void)grad_out; (void)dEdcn_out; return false; }
     /// GFN2: enter the device-resident multipole loop using the device-computed
     /// dp_int/qp_int (no upload of the 9 nao² matrices). Returns false → caller
     /// falls back to beginMultipole (upload). Claude Generated (Stage 3d).
@@ -725,6 +737,11 @@ private:
     void addDispersionPotential(Potential& pot) const;                   // xtb_native.cpp
 
     void calculateGradient();   // xtb_gradient.cpp — fills m_gradient in Eh/Bohr
+    // GFN1 device gradient (Stage 4a, Claude Generated): sections 1/2/3 via the
+    // GpuScfBackend, dispersion (3b) + CN chain-rule (4) on the host. Fills
+    // m_gradient in Eh/Bohr like calculateGradient. Returns false (→ CPU fallback)
+    // if the backend has no gradient or shapes mismatch.
+    bool calculateGradientGpu();  // xtb_gradient.cpp
 
     /* ----- intra-molecule parallelism (Claude Generated) -------------------- *
      * effectiveIntraThreads(work_units): the thread count to actually use for a

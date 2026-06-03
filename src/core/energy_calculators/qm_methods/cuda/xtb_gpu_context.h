@@ -158,6 +158,8 @@ public:
         const double* shell_hardness = nullptr; // nsh (Coulomb gamma hardness)
         const int*    ao2at = nullptr;        // nao (AO→atom; GFN2 multipole)
         const int*    ao2sh = nullptr;        // nao (AO→shell; GFN2 multipole)
+        const double* rep_alpha = nullptr;    // nat (repulsion; Stage-4 gradient)
+        const double* rep_zeff = nullptr;     // nat (repulsion; Stage-4 gradient)
     };
 
     /// Upload the molecule-constant flattened basis + H0 parameters and allocate
@@ -203,6 +205,20 @@ public:
     /// nuclear-gradient H0/Pulay term; validated standalone before the full
     /// gradient assembly. Requires a prior beginBasis. Claude Generated (Stage 4).
     bool computeOverlapGrad(const double* xyz_bohr, double* dSdR_out);
+
+    /// Stage 4: the electronic + repulsion + Coulomb nuclear gradient on the
+    /// device — sections 1 (repulsion), 2a/2b (on-site CN + H0/Pulay) and 3
+    /// (isotropic Coulomb) of XTB::calculateGradient. Requires a prior
+    /// beginBasis + computeIntegrals (S/H0/SE resident). The converged SCF state
+    /// (density P, MO coefficients C, eigenvalues eps, AO potential v_ao, shell
+    /// charges q_sh) is uploaded; the energy-weighted density W = 2·Σ ε_i c_i c_iᵀ
+    /// is built on the device. Outputs grad_out (3·nat, layout [3*i+k], Eh/Bohr)
+    /// and dEdcn_out (nat, the H0/Pulay CN coupling). The caller folds in the
+    /// dispersion gradient (section 3b) and the CN chain-rule (section 4) on the
+    /// host. Claude Generated (Stage 4a).
+    bool computeGradient(const double* P, const double* C, const double* eps,
+                         int nocc_orbs, const double* v_ao, const double* q_sh,
+                         double* grad_out, double* dEdcn_out);
 
     /// Allocate the resident SCF work buffers (C/P/Cw/eps/occ/pop + cuSOLVER
     /// dsyevd workspace) sized to the basis nao, and mark the device-computed

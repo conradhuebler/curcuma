@@ -708,7 +708,17 @@ double XTB::Calculation(bool gradient)
         addThirdOrderPotential(m_pot);
         if (m_method == MethodType::GFN2) addMultipolePotential(m_pot);
 
-        calculateGradient();       // fills m_gradient in Eh/Bohr
+        // Stage 4a (Claude Generated): GFN1 nuclear gradient on the device when the
+        // SCF ran device-resident. Sections 1/2/3 on the GPU, dispersion (3b) +
+        // CN chain-rule (4) on the host; falls back to the full CPU gradient if the
+        // backend has no gradient. GFN2 (multipole gradient) stays on the CPU
+        // until Stage 4b.
+        bool gpu_grad = false;
+        if (use_gpu_resident && m_gpu_scf && m_gpu_scf->supportsGradient()
+            && m_method == MethodType::GFN1)
+            gpu_grad = calculateGradientGpu();
+        if (!gpu_grad)
+            calculateGradient();   // fills m_gradient in Eh/Bohr
         m_gradient /= au;          // Eh/Bohr → Eh/Å: 1 Eh/Bohr = (1/au) Eh/Å
     }
     const auto t_end = clock::now();

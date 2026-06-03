@@ -153,6 +153,8 @@ public:
         bd.shell_hardness = m_bf.shell_hardness.empty() ? nullptr : m_bf.shell_hardness.data();
         bd.ao2at       = m_bf.ao2at.empty() ? nullptr : m_bf.ao2at.data();
         bd.ao2sh       = m_bf.ao2sh.empty() ? nullptr : m_bf.ao2sh.data();
+        bd.rep_alpha   = m_bf.rep_alpha.empty() ? nullptr : m_bf.rep_alpha.data();
+        bd.rep_zeff    = m_bf.rep_zeff.empty() ? nullptr : m_bf.rep_zeff.data();
         m_n = m_bf.nao;
         m_nat = m_bf.nat;
         return m_ctx->beginBasis(bd);
@@ -181,6 +183,32 @@ public:
         return m_ctx->residentBeginMultipoleComputed();
     }
 
+    // ---- Device nuclear gradient (Stage 4) --------------------------------
+    bool supportsGradient() const override { return true; }
+
+    bool gradient(const Matrix& P, const Eigen::MatrixXd& C, const Vector& eps,
+                  int nocc_orbs, const Vector& v_ao, const Vector& q_sh,
+                  Matrix& grad_out, Vector& dEdcn_out) override
+    {
+        if (!m_ctx || m_n <= 0 || m_nat <= 0) return false;
+        if (P.rows() != m_n || C.rows() != m_n || static_cast<int>(eps.size()) < nocc_orbs
+            || static_cast<int>(v_ao.size()) != m_n) return false;
+        Eigen::MatrixXd Pcm = P;  // column-major copy (P symmetric → values preserved)
+        std::vector<double> grad(3 * m_nat, 0.0), dEdcn(m_nat, 0.0);
+        if (!m_ctx->computeGradient(Pcm.data(), C.data(), eps.data(), nocc_orbs,
+                                    v_ao.data(), q_sh.data(), grad.data(), dEdcn.data()))
+            return false;
+        grad_out.resize(m_nat, 3);
+        for (int i = 0; i < m_nat; ++i) {
+            grad_out(i, 0) = grad[3*i+0];
+            grad_out(i, 1) = grad[3*i+1];
+            grad_out(i, 2) = grad[3*i+2];
+        }
+        dEdcn_out.resize(m_nat);
+        for (int i = 0; i < m_nat; ++i) dEdcn_out(i) = dEdcn[i];
+        return true;
+    }
+
 private:
     XtbGpuContext* m_ctx = nullptr;
     int            m_n   = 0;
@@ -190,6 +218,15 @@ private:
 };
 
 } // namespace
+
+// Public factory (Stage 4 validation, Claude Generated): build a device-resident
+// SCF+gradient backend over an existing context, so a bare XTB can be driven on
+// the GPU path from a test without the full XtbGpuComputationalMethod wrapper.
+std::unique_ptr<curcuma::xtb::GpuScfBackend>
+createXtbGpuScfBackend(curcuma::xtb::gpu::XtbGpuContext* ctx)
+{
+    return std::make_unique<XtbGpuScfBackend>(ctx);
+}
 
 XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const json& config)
     : m_method(method)

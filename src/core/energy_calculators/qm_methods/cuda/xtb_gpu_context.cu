@@ -89,6 +89,14 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dSdR;             // overlap derivative dS/dR_A, 3·nn (Stage 4)
     CudaBuffer<double> dPotrfWork;       // cuSOLVER potrf workspace (device chol)
     int                potrf_lwork = 0;
+
+    // Stage 4 gradient: per-atom repulsion params (molecule-constant) + the
+    // gradient work buffers. dGrad layout [3*i+k] Eh/Bohr.
+    CudaBuffer<double> dRepAlpha, dRepZeff;  // per-atom, length nat
+    CudaBuffer<double> dW;                    // energy-weighted density, nao²
+    CudaBuffer<double> dQsh;                  // shell charges, length nsh
+    CudaBuffer<double> dGrad;                 // gradient, 3·nat
+    CudaBuffer<double> dEdcn;                 // CN coupling, length nat
 };
 
 // ---- Stage 3 element parameter tables in __constant__ memory --------------
@@ -369,6 +377,154 @@ __global__ void k_overlap_grad(
     dSdR[0*nn + mn] = g[0];
     dSdR[1*nn + mn] = g[1];
     dSdR[2*nn + mn] = g[2];
+}
+
+// ---- Stage 4 gradient kernels (grad layout [3*i+k], Eh/Bohr) ---------------
+
+// Section 1: repulsion gradient. One thread per atom i, inner loop j<i.
+__global__ void k_grad_repulsion(int nat, int is_gfn2, const int* __restrict__ z,
+                                 const double* __restrict__ xyz, const double* __restrict__ rep_alpha,
+                                 const double* __restrict__ rep_zeff, double kexp, double rexp,
+                                 double kexp_light, double* __restrict__ grad)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const int zi = z[i];
+    const double alfi = rep_alpha[i], zeffi = rep_zeff[i];
+    const double xi = xyz[3*i+0], yi = xyz[3*i+1], zit = xyz[3*i+2];
+    for (int j = 0; j < i; ++j) {
+        const double dx = xi - xyz[3*j+0], dy = yi - xyz[3*j+1], dz = zit - xyz[3*j+2];
+        const double r2 = dx*dx + dy*dy + dz*dz;
+        if (r2 < 1.0e-12) continue;
+        const double r = sqrt(r2);
+        const double alpha_pair = sqrt(alfi * rep_alpha[j]);
+        double kexp_pair = kexp;
+        if (is_gfn2 && zi <= 2 && z[j] <= 2) kexp_pair = kexp_light;
+        const double r_kexp = pow(r, kexp_pair);
+        const double E_pair = zeffi * rep_zeff[j] / pow(r, rexp) * exp(-alpha_pair * r_kexp);
+        const double dEdr = -(rexp / r + alpha_pair * kexp_pair * pow(r, kexp_pair - 1.0)) * E_pair;
+        const double fx = dEdr*dx/r, fy = dEdr*dy/r, fz = dEdr*dz/r;
+        atomicAdd(&grad[3*i+0], fx); atomicAdd(&grad[3*j+0], -fx);
+        atomicAdd(&grad[3*i+1], fy); atomicAdd(&grad[3*j+1], -fy);
+        atomicAdd(&grad[3*i+2], fz); atomicAdd(&grad[3*j+2], -fz);
+    }
+}
+
+// Section 2a: on-site CN coupling dEdcn[iat] += −kcn[ish]·P(μ,μ). One thread per AO μ.
+__global__ void k_grad_cn_onsite(int nao, const double* __restrict__ P,
+                                 const double* __restrict__ kcn, const int* __restrict__ ao2sh,
+                                 const int* __restrict__ ao2at, double* __restrict__ dEdcn)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= nao) return;
+    const double Pmm = P[static_cast<size_t>(mu) + static_cast<size_t>(mu) * nao];
+    atomicAdd(&dEdcn[ao2at[mu]], (-kcn[ao2sh[mu]]) * Pmm);
+}
+
+// Section 2b: H0/Pulay off-site gradient. One thread per AO pair (μ,ν) with iat<jat.
+// Mirrors xtb_gradient.cpp:228-438 (GFN1/GFN2 isotropic part; the GFN2 multipole
+// integral Pulay block is Stage 4b and handled separately).
+__global__ void k_grad_h0_pulay(
+    int nao, int is_gfn2,
+    const int* __restrict__ ao2sh, const int* __restrict__ ao2at, const int* __restrict__ ang,
+    const int* __restrict__ iao_sh, const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ sh_zeta, const double* __restrict__ shpoly, const double* __restrict__ kcn,
+    const int* __restrict__ valence, const int* __restrict__ z, const double* __restrict__ se,
+    const double* __restrict__ xyz, const double* __restrict__ P, const double* __restrict__ S,
+    const double* __restrict__ H0, const double* __restrict__ W, const double* __restrict__ v_ao,
+    double* __restrict__ grad, double* __restrict__ dEdcn)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    const int nu = blockIdx.y * blockDim.y + threadIdx.y;
+    if (mu >= nao || nu >= nao) return;
+    const int iat = ao2at[mu], jat = ao2at[nu];
+    if (iat >= jat) return;  // unique atom pairs, off-site only
+
+    const int isha = ao2sh[mu], ishb = ao2sh[nu];
+    const int la = ang[isha], lb = ang[ishb];
+    const int ta = d_ao_to_type(la, mu - iao_sh[isha]);
+    const int tb = d_ao_to_type(lb, nu - iao_sh[ishb]);
+    if (ta < 0 || tb < 0) return;
+
+    const double xa = xyz[3*iat+0], ya = xyz[3*iat+1], za = xyz[3*iat+2];
+    const double xb = xyz[3*jat+0], yb = xyz[3*jat+1], zb = xyz[3*jat+2];
+    const double dxij = xa - xb, dyij = ya - yb, dzij = za - zb;
+    const double r2 = dxij*dxij + dyij*dyij + dzij*dzij;
+    if (r2 < 1.0e-12) return;
+    const double r = sqrt(r2);
+    const int zi = z[iat], zj = z[jat];
+    const double rad_sum = c_atomic_rad[zi-1] + c_atomic_rad[zj-1];
+    const double rr = sqrt(r / rad_sum);
+    const double pi_a = 1.0 + shpoly[isha] * rr, pi_b = 1.0 + shpoly[ishb] * rr;
+
+    double hs;
+    if (is_gfn2 == 0) {
+        const bool vi = valence[isha] != 0, vj = valence[ishb] != 0;
+        if (vi && vj) {
+            double den = c_pauling[zi-1] - c_pauling[zj-1]; den *= den;
+            hs = d_kpair_gfn1(zi, zj) * d_kshell_gfn1(la, lb) * (1.0 + (-7.0e-3) * den);
+        } else if (vi && !vj) hs = 0.5 * (d_kshell_gfn1(la, la) + 2.85);
+        else if (!vi && vj)   hs = 0.5 * (d_kshell_gfn1(lb, lb) + 2.85);
+        else                  hs = 2.85;
+    } else {
+        double den = c_pauling[zi-1] - c_pauling[zj-1]; den *= den;
+        const double enp = 1.0 + 2.0e-2 * den;
+        const double km = d_kshell_gfn2(la, lb) * enp;
+        const double za_ = sh_zeta[isha], zb_ = sh_zeta[ishb];
+        hs = pow(2.0 * sqrt(za_ * zb_) / (za_ + zb_), 0.5) * km;
+    }
+    const double h_factor = hs * pi_a * pi_b;
+    const double h_av = 0.5 * (se[isha] + se[ishb]) * h_factor;
+    const double dlog_pi_dr_r = (shpoly[isha] / pi_a + shpoly[ishb] / pi_b) * rr / (2.0 * r2);
+
+    const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
+    const double Pmn = P[mn], Smn = S[mn], H0mn = H0[mn], Wmn = W[mn];
+    double dS[3];
+    d_cgto_overlap_grad(
+        prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+        prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+        xa, ya, za, xb, yb, zb, ta, tb, dS);
+
+    const double sval = 2.0*Pmn*h_av - 2.0*Wmn - Pmn*(v_ao[mu] + v_ao[nu]);
+    const double shp  = 2.0*Pmn*H0mn*dlog_pi_dr_r;
+    const double Gx = sval*dS[0] + shp*dxij;
+    const double Gy = sval*dS[1] + shp*dyij;
+    const double Gz = sval*dS[2] + shp*dzij;
+    atomicAdd(&grad[3*iat+0], Gx); atomicAdd(&grad[3*jat+0], -Gx);
+    atomicAdd(&grad[3*iat+1], Gy); atomicAdd(&grad[3*jat+1], -Gy);
+    atomicAdd(&grad[3*iat+2], Gz); atomicAdd(&grad[3*jat+2], -Gz);
+
+    const double cn_c = h_factor * Pmn * Smn;
+    atomicAdd(&dEdcn[iat], (-kcn[isha]) * cn_c);
+    atomicAdd(&dEdcn[jat], (-kcn[ishb]) * cn_c);
+}
+
+// Section 3: isotropic Coulomb gradient. One thread per shell is, inner js<is.
+__global__ void k_grad_coulomb(int nsh, int is_gfn2, const int* __restrict__ sh2at,
+                               const double* __restrict__ g, const double* __restrict__ q_sh,
+                               const double* __restrict__ xyz, double gexp, double* __restrict__ grad)
+{
+    const int is = blockIdx.x * blockDim.x + threadIdx.x;
+    if (is >= nsh) return;
+    const int iat = sh2at[is];
+    for (int js = 0; js < is; ++js) {
+        const int jat = sh2at[js];
+        if (iat == jat) continue;
+        const double dx = xyz[3*iat+0] - xyz[3*jat+0];
+        const double dy = xyz[3*iat+1] - xyz[3*jat+1];
+        const double dz = xyz[3*iat+2] - xyz[3*jat+2];
+        const double r2 = dx*dx + dy*dy + dz*dz;
+        if (r2 < 1.0e-12) continue;
+        const double r1 = sqrt(r2);
+        const double gam_bar = d_coulomb_average(g[is], g[js], is_gfn2 != 0);
+        const double gamma = pow(pow(r1, gexp) + pow(gam_bar, -gexp), -1.0 / gexp);
+        const double dgamma_dr = -pow(r1, gexp - 2.0) * pow(gamma, gexp + 1.0);
+        const double force = q_sh[is] * q_sh[js] * dgamma_dr;
+        atomicAdd(&grad[3*iat+0], force*dx); atomicAdd(&grad[3*jat+0], -force*dx);
+        atomicAdd(&grad[3*iat+1], force*dy); atomicAdd(&grad[3*jat+1], -force*dy);
+        atomicAdd(&grad[3*iat+2], force*dz); atomicAdd(&grad[3*jat+2], -force*dz);
+    }
 }
 
 // ---- Device kernels (Stage 2 resident SCF) -------------------------------
@@ -867,6 +1023,8 @@ bool XtbGpuContext::beginBasis(const XtbGpuBasisData& b)
         m_impl->dKcn.upload(b.kcn, b.nsh, m_impl->stream);
         m_impl->dShpoly.upload(b.shpoly, b.nsh, m_impl->stream);
         if (b.shell_hardness) m_impl->dHardness.upload(b.shell_hardness, b.nsh, m_impl->stream);
+        if (b.rep_alpha) m_impl->dRepAlpha.upload(b.rep_alpha, b.nat, m_impl->stream);
+        if (b.rep_zeff)  m_impl->dRepZeff.upload(b.rep_zeff, b.nat, m_impl->stream);
         // Valence flags (GFN1). For GFN2 the kernel ignores them; upload zeros so
         // the device pointer is always valid.
         if (b.valence) {
@@ -1106,6 +1264,98 @@ bool XtbGpuContext::computeOverlapGrad(const double* xyz_bohr, double* dSdR_out)
         m_impl->dPrimCoeff.ptr, m_impl->dXyz.ptr, m_impl->dSdR.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
     m_impl->dSdR.download(dSdR_out, static_cast<int>(3 * nn), stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+bool XtbGpuContext::computeGradient(const double* P, const double* C, const double* eps,
+                                    int nocc_orbs, const double* v_ao, const double* q_sh,
+                                    double* grad_out, double* dEdcn_out)
+{
+    if (!ok() || m_impl->basis_nao <= 0 || !P || !C || !eps || !v_ao || !q_sh
+        || !grad_out || !dEdcn_out)
+        return false;
+    const int nat = m_impl->basis_nat;
+    const int nsh = m_impl->basis_nsh;
+    const int nao = m_impl->basis_nao;
+    cudaStream_t stream = m_impl->stream;
+    const size_t nn = static_cast<size_t>(nao) * static_cast<size_t>(nao);
+    const double one = 1.0, zero = 0.0;
+
+    try {
+        if (m_impl->dW.n < static_cast<int>(nn)) m_impl->dW.alloc(static_cast<int>(nn));
+        if (m_impl->dCw.n < static_cast<int>(nn)) m_impl->dCw.alloc(static_cast<int>(nn));
+        if (m_impl->dP.n  < static_cast<int>(nn)) m_impl->dP.alloc(static_cast<int>(nn));
+        if (m_impl->dC.n  < static_cast<int>(nn)) m_impl->dC.alloc(static_cast<int>(nn));
+        if (m_impl->dVao.n < nao) m_impl->dVao.alloc(nao);
+        if (m_impl->dOcc.n < nao) m_impl->dOcc.alloc(nao);
+        m_impl->dQsh.alloc(nsh);
+        m_impl->dGrad.alloc(3 * nat);
+        m_impl->dEdcn.alloc(nat);
+    } catch (...) { return false; }
+
+    // Upload the converged SCF state (P/C symmetric-or-column-major from host).
+    m_impl->dP.upload(P, static_cast<int>(nn), stream);
+    m_impl->dC.upload(C, static_cast<int>(nn), stream);
+    m_impl->dVao.upload(v_ao, nao, stream);
+    m_impl->dQsh.upload(q_sh, nsh, stream);
+
+    // Energy-weighted density W = C_occ · diag(2·ε_occ) · C_occᵀ.
+    if (nocc_orbs > 0) {
+        std::vector<double> occ2(nocc_orbs);
+        for (int k = 0; k < nocc_orbs; ++k) occ2[k] = 2.0 * eps[k];
+        m_impl->dOcc.upload(occ2.data(), nocc_orbs, stream);
+        const dim3 block(16, 16);
+        const dim3 grid((nao + block.x - 1) / block.x, (nocc_orbs + block.y - 1) / block.y);
+        k_scale_cols<<<grid, block, 0, stream>>>(m_impl->dCw.ptr, m_impl->dC.ptr,
+                                                 m_impl->dOcc.ptr, nao, nocc_orbs);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        if (cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_T, nao, nao, nocc_orbs,
+                        &one, m_impl->dCw.ptr, nao, m_impl->dC.ptr, nao,
+                        &zero, m_impl->dW.ptr, nao) != CUBLAS_STATUS_SUCCESS)
+            return false;
+    } else {
+        if (cudaMemsetAsync(m_impl->dW.ptr, 0, sizeof(double) * nn, stream) != cudaSuccess)
+            return false;
+    }
+
+    if (cudaMemsetAsync(m_impl->dGrad.ptr, 0, sizeof(double) * 3 * nat, stream) != cudaSuccess)
+        return false;
+    if (cudaMemsetAsync(m_impl->dEdcn.ptr, 0, sizeof(double) * nat, stream) != cudaSuccess)
+        return false;
+
+    // Repulsion scalars (rep_kexp=1.5, rep_rexp=1.0 both; rep_kexp_light: GFN1 1.5, GFN2 1.0).
+    const double kexp = 1.5, rexp = 1.0;
+    const double kexp_light = m_impl->basis_is_gfn2 ? 1.0 : 1.5;
+
+    const int b1 = 128;
+    k_grad_repulsion<<<(nat + b1 - 1) / b1, b1, 0, stream>>>(
+        nat, m_impl->basis_is_gfn2, m_impl->dZ.ptr, m_impl->dXyz.ptr,
+        m_impl->dRepAlpha.ptr, m_impl->dRepZeff.ptr, kexp, rexp, kexp_light, m_impl->dGrad.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    k_grad_cn_onsite<<<(nao + b1 - 1) / b1, b1, 0, stream>>>(
+        nao, m_impl->dP.ptr, m_impl->dKcn.ptr, m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr,
+        m_impl->dEdcn.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    const dim3 block(16, 16);
+    const dim3 grid((nao + block.x - 1) / block.x, (nao + block.y - 1) / block.y);
+    k_grad_h0_pulay<<<grid, block, 0, stream>>>(
+        nao, m_impl->basis_is_gfn2, m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr, m_impl->dAng.ptr,
+        m_impl->dIaoSh.ptr, m_impl->dShNprim.ptr, m_impl->dShPrimOff.ptr, m_impl->dPrimAlpha.ptr,
+        m_impl->dPrimCoeff.ptr, m_impl->dShZeta.ptr, m_impl->dShpoly.ptr, m_impl->dKcn.ptr,
+        m_impl->dValence.ptr, m_impl->dZ.ptr, m_impl->dSE.ptr, m_impl->dXyz.ptr, m_impl->dP.ptr,
+        m_impl->dS.ptr, m_impl->dH0.ptr, m_impl->dW.ptr, m_impl->dVao.ptr,
+        m_impl->dGrad.ptr, m_impl->dEdcn.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    k_grad_coulomb<<<(nsh + b1 - 1) / b1, b1, 0, stream>>>(
+        nsh, m_impl->basis_is_gfn2, m_impl->dSh2at.ptr, m_impl->dHardness.ptr,
+        m_impl->dQsh.ptr, m_impl->dXyz.ptr, 2.0, m_impl->dGrad.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    m_impl->dGrad.download(grad_out, 3 * nat, stream);
+    m_impl->dEdcn.download(dEdcn_out, nat, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 

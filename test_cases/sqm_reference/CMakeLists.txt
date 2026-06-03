@@ -372,6 +372,25 @@ if(USE_CUDA_XTB)
                 PROPERTIES TIMEOUT 120 LABELS "gpu_gradient")
         endforeach()
     endforeach()
+
+    # 4a: full GFN1 nuclear gradient (device sections 1/2/3 + host 3b/4) vs CPU.
+    add_executable(test_xtb_cuda_gradient test_xtb_cuda_gradient.cpp)
+    target_link_libraries(test_xtb_cuda_gradient PRIVATE curcuma_core)
+    target_include_directories(test_xtb_cuda_gradient PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_features(test_xtb_cuda_gradient PRIVATE cxx_std_17)
+    foreach(_meth gfn1 gfn2)
+        foreach(_mol ${_SQM_CUDA_COMP_MOLS})
+            add_test(NAME sqm_cuda_gradient_${_mol}_${_meth}
+                COMMAND test_xtb_cuda_gradient --quiet --tol 1e-7 ${_meth}
+                        ${_SQM_CUDA_MOL}/${_mol}.xyz)
+            set_tests_properties(sqm_cuda_gradient_${_mol}_${_meth}
+                PROPERTIES TIMEOUT 180 LABELS "gpu_gradient")
+        endforeach()
+    endforeach()
 endif()
 
 # === tblite-dependent executables (dump + multipole) ===

@@ -38,5 +38,7 @@ makeGpuBasisData(const curcuma::xtb::GpuBasisFlat& bf, const curcuma::xtb::GpuH0
     bd.shell_hardness = bf.shell_hardness.empty() ? nullptr : bf.shell_hardness.data();
     bd.ao2at       = bf.ao2at.empty() ? nullptr : bf.ao2at.data();
     bd.ao2sh       = bf.ao2sh.empty() ? nullptr : bf.ao2sh.data();
+    bd.rep_alpha   = bf.rep_alpha.empty() ? nullptr : bf.rep_alpha.data();
+    bd.rep_zeff    = bf.rep_zeff.empty() ? nullptr : bf.rep_zeff.data();
     return bd;
 }

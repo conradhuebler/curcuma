@@ -168,6 +168,20 @@ void XTB::exportGpuBasis(GpuBasisFlat& bf, GpuH0Flat& hf) const
         bf.shell_hardness[s] = coulomb::shell_hardness(cm, m_basis.z[m_basis.sh2at[s]],
                                                        m_basis.ang_sh[s]);
 
+    // Per-atom repulsion parameters (molecule-constant) for the Stage-4 gradient.
+    bf.rep_alpha.resize(nat);
+    bf.rep_zeff.resize(nat);
+    for (int i = 0; i < nat; ++i) {
+        const int z = m_basis.z[i];
+        if (m_method == MethodType::GFN1) {
+            bf.rep_alpha[i] = gfn1_params::rep_alpha[z - 1];
+            bf.rep_zeff[i]  = gfn1_params::rep_zeff[z - 1];
+        } else {
+            bf.rep_alpha[i] = gfn2_params::rep_alpha[z - 1];
+            bf.rep_zeff[i]  = gfn2_params::rep_zeff[z - 1];
+        }
+    }
+
     hf.selfenergy = m_h0.selfenergy;
     hf.kcn        = m_h0.kcn;
     hf.shpoly     = m_h0.shpoly;

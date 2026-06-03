@@ -765,4 +765,86 @@ void XTB::calculateGradient()
     }
 }
 
+/* ============================================================================ *
+ *  GFN1 device nuclear gradient (Stage 4a, Claude Generated)
+ *
+ *  Sections 1 (repulsion), 2a/2b (on-site CN + H0/Pulay) and 3 (isotropic
+ *  Coulomb) run on the GPU via the GpuScfBackend (device kernels mirror the
+ *  corresponding host loops above). The dispersion gradient (3b, host-cached)
+ *  and the CN chain-rule (4) stay on the host — identical formulas to
+ *  calculateGradient. Fills m_gradient in Eh/Bohr; the caller applies /au.
+ * ============================================================================ */
+bool XTB::calculateGradientGpu()
+{
+    if (!m_gpu_scf || !m_gpu_scf->supportsGradient()) return false;
+    const int nat = m_atomcount;
+    const int nao = m_basis.nao;
+
+    // Converged AO potential (v_sh + v_at expanded to AO resolution).
+    Vector v_ao = Vector::Zero(nao);
+    for (int ao = 0; ao < nao; ++ao)
+        v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
+
+    const int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
+    Eigen::MatrixXd Ccm = m_wfn.C;   // column-major copy of the MO coefficients
+
+    Matrix grad_dev;   // nat×3, Eh/Bohr (sections 1/2/3)
+    Vector dEdcn;      // nat
+    if (!m_gpu_scf->gradient(m_wfn.P, Ccm, m_wfn.eps, nocc_orbs, v_ao, m_wfn.q_sh,
+                             grad_dev, dEdcn))
+        return false;
+    if (grad_dev.rows() != nat || grad_dev.cols() != 3 || dEdcn.size() != nat)
+        return false;
+
+    m_gradient = grad_dev;
+
+    // Geometry in Bohr (for the host sections below).
+    std::vector<double> xyz(3 * nat);
+    for (int i = 0; i < nat; ++i) {
+        xyz[3*i+0] = m_geometry(i, 0) * AA_TO_AU;
+        xyz[3*i+1] = m_geometry(i, 1) * AA_TO_AU;
+        xyz[3*i+2] = m_geometry(i, 2) * AA_TO_AU;
+    }
+
+    // 3b. Dispersion gradient (host-cached) + its CN chain-rule contribution.
+    if (m_disp_gradient_valid
+        && m_disp_gradient.rows() == nat && m_disp_gradient.cols() == 3) {
+        m_gradient += m_disp_gradient;
+        if (m_disp_dEdcn.size() == nat) dEdcn += m_disp_dEdcn;
+    }
+
+    // 4. CN chain-rule gradient (host; identical to section 4 in calculateGradient).
+    std::vector<double> rcov(nat);
+    for (int i = 0; i < nat; ++i) rcov[i] = covalent_rad_d3_au(m_atoms[i]);
+    for (int i = 0; i < nat; ++i) {
+        for (int j = 0; j < i; ++j) {
+            const double dx = xyz[3*i+0] - xyz[3*j+0];
+            const double dy = xyz[3*i+1] - xyz[3*j+1];
+            const double dz = xyz[3*i+2] - xyz[3*j+2];
+            const double r2 = dx*dx + dy*dy + dz*dz;
+            if (r2 < 1.0e-12) continue;
+            const double r  = std::sqrt(r2);
+            const double rc = rcov[i] + rcov[j];
+            double dcndr;
+            if (m_method == MethodType::GFN1) {
+                constexpr double k = 16.0;
+                const double c = 1.0 / (1.0 + std::exp(-k * (rc / r - 1.0)));
+                dcndr = -c * (1.0 - c) * k * rc / r2;
+            } else {
+                constexpr double ka = 10.0, kb = 20.0, rs = 2.0;
+                const double c1 = 1.0 / (1.0 + std::exp(-ka * (rc / r - 1.0)));
+                const double c2 = 1.0 / (1.0 + std::exp(-kb * ((rc + rs) / r - 1.0)));
+                const double dc1dr = -c1 * (1.0 - c1) * ka * rc / r2;
+                const double dc2dr = -c2 * (1.0 - c2) * kb * (rc + rs) / r2;
+                dcndr = dc1dr * c2 + c1 * dc2dr;
+            }
+            const double factor = (dEdcn(i) + dEdcn(j)) * dcndr / r;
+            m_gradient(i, 0) += factor * dx;  m_gradient(j, 0) -= factor * dx;
+            m_gradient(i, 1) += factor * dy;  m_gradient(j, 1) -= factor * dy;
+            m_gradient(i, 2) += factor * dz;  m_gradient(j, 2) -= factor * dz;
+        }
+    }
+    return true;
+}
+
 } // namespace curcuma::xtb

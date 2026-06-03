@@ -94,4 +94,10 @@ private:
     std::unique_ptr<NativeXtbMethod>                  m_cpu; ///< validated CPU pipeline + hook holder
 };
 
+/// Build a device-resident SCF+gradient backend over an existing context
+/// (Stage 4 validation, Claude Generated). Lets a bare XTB be driven on the GPU
+/// path via XTB::setGpuScfBackend without the full XtbGpuComputationalMethod.
+std::unique_ptr<curcuma::xtb::GpuScfBackend>
+createXtbGpuScfBackend(curcuma::xtb::gpu::XtbGpuContext* ctx);
+
 #endif // USE_CUDA_XTB
