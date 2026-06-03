@@ -105,12 +105,28 @@ void NativeXtbMethod::handleError(const std::string& operation)
     m_error_message = fmt::format("{} error during {}", getMethodName(), operation);
 }
 
-std::string NativeXtbMethod::c1ModeString() const
+std::string NativeXtbMethod::largeSystemModeString() const
 {
     if (m_parameters.contains("xtb") && m_parameters["xtb"].is_object()
-        && m_parameters["xtb"].contains("c1_mode"))
-        return m_parameters["xtb"]["c1_mode"].get<std::string>();
-    return m_parameters.value("c1_mode", std::string("none"));
+        && m_parameters["xtb"].contains("large_system_mode"))
+        return m_parameters["xtb"]["large_system_mode"].get<std::string>();
+    return m_parameters.value("large_system_mode", std::string("none"));
+}
+
+std::string NativeXtbMethod::eigensolverString() const
+{
+    if (m_parameters.contains("xtb") && m_parameters["xtb"].is_object()
+        && m_parameters["xtb"].contains("eigensolver"))
+        return m_parameters["xtb"]["eigensolver"].get<std::string>();
+    return m_parameters.value("eigensolver", std::string("mkl"));
+}
+
+double NativeXtbMethod::electronicTemperature() const
+{
+    if (m_parameters.contains("xtb") && m_parameters["xtb"].is_object()
+        && m_parameters["xtb"].contains("electronic_temperature"))
+        return m_parameters["xtb"]["electronic_temperature"].get<double>();
+    return m_parameters.value("electronic_temperature", 300.0);
 }
 
 bool NativeXtbMethod::isMoleculeSupported(const Mol& mol)
@@ -140,18 +156,36 @@ bool NativeXtbMethod::setMolecule(const Mol& mol)
         m_initialized = true;
         clearError();
 
-        // C1 large-system path: when c1_mode != none, delegate to the
+        // large_system_mode path: when mode != none, delegate to the
         // fragmentation driver (it owns its own per-fragment XTB instances).
-        if (curcuma::xtb::parseC1Mode(c1ModeString()) != curcuma::xtb::C1Mode::None) {
+        const std::string mode_str = largeSystemModeString();
+        const auto mode = curcuma::xtb::parseLargeSystemMode(mode_str);
+        if (mode != curcuma::xtb::LargeSystemMode::None) {
+            // Hard-error: large_system_mode=fragments|dc + -eigensolver=purify
+            // requires -electronic_temperature 0 (purification is 0-K by
+            // construction). large_system_mode=sparse is unaffected (sparse IS
+            // the eigensolver replacement, no m_eigensolver involved).
+            if (mode != curcuma::xtb::LargeSystemMode::Sparse
+                && eigensolverString() == "purify"
+                && electronicTemperature() > 0.0) {
+                m_has_error = true;
+                m_error_message = fmt::format(
+                    "{}: -eigensolver=purify is 0-K only; set -electronic_temperature 0 "
+                    "(currently {:.1f} K) or use -eigensolver={}",
+                    getMethodName(), electronicTemperature(),
+                    mode == curcuma::xtb::LargeSystemMode::Fragments
+                        ? "mkl|native|lobpcg" : "mkl|native|lobpcg");
+                return false;
+            }
             m_c1_driver = std::make_unique<curcuma::xtb::FragmentScfDriver>(m_method, m_parameters);
             m_c1_driver->setIntraThreads(m_thread_count);
             if (!m_c1_driver->setMolecule(mol)) {
-                handleError("C1 driver molecule initialization");
+                handleError("large_system driver molecule initialization");
                 return false;
             }
             if (CurcumaLogger::get_verbosity() >= 2)
-                CurcumaLogger::info(fmt::format("{}: C1 mode '{}' active",
-                                                getMethodName(), c1ModeString()));
+                CurcumaLogger::info(fmt::format("{}: -large_system_mode '{}' active",
+                                                getMethodName(), mode_str));
             return true;
         }
         m_c1_driver.reset();
@@ -184,7 +218,7 @@ bool NativeXtbMethod::updateGeometry(const Matrix& geometry)
 
         if (m_c1_driver) {
             if (!m_c1_driver->updateGeometry(geometry)) {
-                handleError("C1 driver geometry update");
+                handleError("large_system driver geometry update");
                 return false;
             }
             return true;
@@ -214,7 +248,7 @@ double NativeXtbMethod::calculateEnergy(bool gradient)
     try {
         clearError();
 
-        // C1 large-system path: delegate the whole calculation to the driver.
+        // large_system_mode path: delegate the whole calculation to the driver.
         if (m_c1_driver) {
             m_last_energy = m_c1_driver->calculate(gradient);
             m_calculation_done = true;

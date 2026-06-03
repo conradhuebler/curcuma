@@ -1,10 +1,10 @@
 /*
- * <Native xTB sparse + non-orthogonal purification SCF (C1b) — implementation>
+ * <Native xTB sparse + non-orthogonal purification SCF — implementation>
  * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software under GPL-3.0.
  *
- * Claude Generated (C1b, June 2026). Implements XTB::calculateSparsePurification
+ * Claude Generated (June 2026). Implements XTB::calculateSparsePurification
  * (declared in xtb_native.h). It replaces the O(N^3) generalized eigensolve with
  * non-orthogonal canonical density-matrix purification:
  *
@@ -169,7 +169,7 @@ double XTB::calculateSparsePurification(double threshold,
 
     const int Nocc = static_cast<int>(std::lround(m_wfn.nocc / 2.0));
     if (std::abs(m_wfn.nocc - 2.0 * Nocc) > 1.0e-6) {
-        CurcumaLogger::warn("C1b sparse purification needs a closed-shell (even-electron) "
+        CurcumaLogger::warn("large_system_mode=sparse: purification needs a closed-shell (even-electron) "
                             "system; falling back to dense.");
         return 0.0;   // driver falls back to dense
     }
@@ -232,7 +232,7 @@ double XTB::calculateSparsePurification(double threshold,
 
     if (verb >= 1) {
         CurcumaLogger::result(fmt::format(
-            "C1b sparse purification SCF (nao={}, Nocc={}, P-threshold={:.1e})", nao, Nocc, threshold));
+            "large_system_mode=sparse: purification SCF (nao={}, Nocc={}, P-threshold={:.1e})", nao, Nocc, threshold));
         CurcumaLogger::result("  iter        max|dq|     nnz(M)     path     t/ms");
     }
 
@@ -296,7 +296,7 @@ double XTB::calculateSparsePurification(double threshold,
                 got_density = true;
             } else {
                 if (!warned_gapless && verb >= 1)
-                    CurcumaLogger::warn("C1b: density purification did not converge (gapless / no "
+                    CurcumaLogger::warn("large_system_mode=sparse: density purification did not converge (gapless / no "
                                         "HOMO-LUMO gap?). Falling back to the eigensolver.");
                 warned_gapless = true;
                 use_purify = false;
@@ -306,7 +306,7 @@ double XTB::calculateSparsePurification(double threshold,
             // Dense fallback (gapless): the validated generalized eigensolve.
             path = "eigen";
             if (!solveEigen(F, m_S)) {
-                CurcumaLogger::warn("C1b: eigensolver fallback failed");
+                CurcumaLogger::warn("large_system_mode=sparse: eigensolver fallback failed");
                 return 0.0;
             }
             last_nnz = 1.0;
@@ -328,7 +328,7 @@ double XTB::calculateSparsePurification(double threshold,
     nnz_frac_out = last_nnz;
 
     if (!converged_out)
-        CurcumaLogger::warn(fmt::format("C1b sparse SCF did not converge in {} iterations (max|dq|={:.2e})",
+        CurcumaLogger::warn(fmt::format("large_system_mode=sparse: SCF did not converge in {} iterations (max|dq|={:.2e})",
                                         maxit, final_dq));
 
     evaluateComponentsAtFixedDensity(m_wfn.P, m_wfn.q_at, m_wfn.q_sh, m_wfn.dp_at, m_wfn.qp_at);
@@ -337,7 +337,7 @@ double XTB::calculateSparsePurification(double threshold,
 
     if (verb >= 1)
         CurcumaLogger::result(fmt::format(
-            "C1b total energy = {:.8f} Eh  ({} it, nnz(M)={:.3f}, {:.0f} ms{})",
+            "large_system_mode=sparse: total energy = {:.8f} Eh  ({} it, nnz(M)={:.3f}, {:.0f} ms{})",
             m_E_total, iters_out, nnz_frac_out,
             std::chrono::duration<double, std::milli>(clock::now() - t0).count(),
             use_purify ? "" : ", DENSE fallback (gapless)"));

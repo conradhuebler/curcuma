@@ -1,14 +1,15 @@
 /*
- * <Native xTB large-system fragmentation driver (C1) — implementation>
+ * <Native xTB large-system fragmentation driver — implementation>
  * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software under GPL-3.0.
  *
- * Claude Generated (C1, June 2026). See xtb_fragment_scf.h for the design.
- * This file implements the scaffold + C1c (disconnected-fragment SCF). C1a
- * (divide-and-conquer) and C1b (sparse purification) are filled in later steps;
- * until then they warn and fall back to the dense path so the mode is wired but
- * honest about not yet approximating.
+ * Claude Generated (June 2026). See xtb_fragment_scf.h for the design.
+ * The driver runs the existing, validated dense XTB on sub-systems and assembles
+ * the result. The eigensolver chosen by the user via -eigensolver is honoured
+ * by every per-XTB solver dispatch (configureXtb -> applyXtbScfConfig ->
+ * setEigensolver) — so e.g. -eigensolver=native on every fragment makes the
+ * whole pipeline MKL-free.
  */
 
 #include "xtb_fragment_scf.h"
@@ -29,7 +30,7 @@ FragmentScfDriver::FragmentScfDriver(MethodType method, const json& config)
     : m_method(method)
     , m_config(config)
 {
-    // Read the C1 mode + knobs from the "xtb" config scope (where the flat CLI
+    // Read the mode + knobs from the "xtb" config scope (where the flat CLI
     // flags auto-route), with a top-level fallback.
     auto get_scoped = [&](const char* key, auto fallback) {
         if (m_config.contains("xtb") && m_config["xtb"].is_object()
@@ -40,10 +41,10 @@ FragmentScfDriver::FragmentScfDriver(MethodType method, const json& config)
         return fallback;
     };
 
-    m_mode            = parseC1Mode(get_scoped("c1_mode", std::string("none")));
-    m_buffer_bohr     = get_scoped("c1_buffer_bohr", 10.0);
-    m_cell_bohr       = get_scoped("c1_cell_bohr", 12.0);
-    m_sparse_threshold = get_scoped("c1_sparse_threshold", 1.0e-6);
+    m_mode            = parseLargeSystemMode(get_scoped("large_system_mode", std::string("none")));
+    m_buffer_bohr     = get_scoped("large_system_buffer_bohr", 10.0);
+    m_cell_bohr       = get_scoped("large_system_cell_bohr", 12.0);
+    m_sparse_threshold = get_scoped("large_system_sparse_threshold", 1.0e-6);
 }
 
 void FragmentScfDriver::configureXtb(XTB& xtb) const
@@ -58,6 +59,7 @@ void FragmentScfDriver::configureXtb(XTB& xtb) const
     xtb.setD4ChargeSource(d4src);
 
     // SCF-convergence settings (mode/guess/damping/DIIS/level-shift/eigensolver).
+    // Note: setEigensolver is what propagates the user's choice into this sub-XTB.
     applyXtbScfConfig(xtb, m_config);
 
     xtb.setIntraThreads(m_intra_threads);
@@ -92,11 +94,11 @@ bool FragmentScfDriver::updateGeometry(const Matrix& geometry)
 double FragmentScfDriver::calculate(bool gradient)
 {
     switch (m_mode) {
-    case C1Mode::Fragments: return runFragments(gradient);
-    case C1Mode::DC:        return runDivideConquer(gradient);
-    case C1Mode::Sparse:    return runSparse(gradient);
-    case C1Mode::None:
-    default:                return runDense(gradient);
+    case LargeSystemMode::Fragments: return runFragments(gradient);
+    case LargeSystemMode::DC:        return runDivideConquer(gradient);
+    case LargeSystemMode::Sparse:    return runSparse(gradient);
+    case LargeSystemMode::None:
+    default:                         return runDense(gradient);
     }
 }
 
@@ -142,7 +144,7 @@ double FragmentScfDriver::runDense(bool gradient)
 }
 
 // ---------------------------------------------------------------------------
-// C1c — disconnected-fragment SCF
+// Fragments — disconnected-fragment SCF
 //
 // Partition by bond connectivity, run a dense XTB per fragment, sum energies
 // and scatter each fragment's charges/gradient onto its global atoms. Exact for
@@ -159,7 +161,7 @@ double FragmentScfDriver::runFragments(bool gradient)
         // Connected system: one fragment == the whole molecule. Transparent
         // dense fallback (exact). Keep the fragment count reported as 1.
         if (CurcumaLogger::get_verbosity() >= 2)
-            CurcumaLogger::info("C1c: single connected fragment -> dense fallback (exact)");
+            CurcumaLogger::info("large_system_mode=fragments: single connected fragment -> dense fallback (exact)");
         double e = runDense(gradient);
         m_num_fragments = 1;
         return e;
@@ -170,13 +172,13 @@ double FragmentScfDriver::runFragments(bool gradient)
     // total charge was dropped.
     if (m_mol.m_charge != 0) {
         CurcumaLogger::warn(fmt::format(
-            "C1c: system charge {} cannot be auto-partitioned across {} fragments; "
-            "each fragment treated as neutral. Use c1_mode=none for charged systems.",
+            "large_system_mode=fragments: system charge {} cannot be auto-partitioned across {} fragments; "
+            "each fragment treated as neutral. Use large_system_mode=none for charged systems.",
             m_mol.m_charge, m_num_fragments));
     }
 
     if (CurcumaLogger::get_verbosity() >= 1)
-        CurcumaLogger::result(fmt::format("C1c disconnected-fragment SCF: {} fragments", m_num_fragments));
+        CurcumaLogger::result(fmt::format("large_system_mode=fragments disconnected-fragment SCF: {} fragments", m_num_fragments));
 
     double E = 0.0;
     Matrix grad = Matrix::Zero(nat, 3);
@@ -196,7 +198,7 @@ double FragmentScfDriver::runFragments(bool gradient)
         configureXtb(xtb);
         if (!xtb.InitialiseMolecule(sub)) {
             m_has_error = true;
-            m_error_message = fmt::format("C1c: fragment {} initialisation failed", f);
+            m_error_message = fmt::format("large_system_mode=fragments: fragment {} initialisation failed", f);
             return 0.0;
         }
 
@@ -251,22 +253,23 @@ double FragmentScfDriver::runFragments(bool gradient)
         { "total",          E },
         { "scf_converged",  all_converged },
         { "scf_iterations", max_iter },
-        { "c1_mode",        "fragments" },
-        { "c1_fragments",   m_num_fragments },
+        { "large_system_mode", "fragments" },
+        { "large_system_fragments", m_num_fragments },
     };
 
     if (!all_converged)
-        CurcumaLogger::warn("C1c: at least one fragment SCF did not converge");
+        CurcumaLogger::warn("large_system_mode=fragments: at least one fragment SCF did not converge");
 
     return E;
 }
 
 // ---------------------------------------------------------------------------
-// C1a — divide-and-conquer overlapping fragments
+// DC — divide-and-conquer overlapping fragments
 //
-// Spatial cubic-cell core partition (c1_cell_bohr) + a buffer shell
-// (c1_buffer_bohr); each core+buffer is a sub-system. The dense XTB engine runs
-// the DC-SCF (calculateDivideConquer): global Fock, sub-block diagonalisation,
+// Spatial cubic-cell core partition (large_system_cell_bohr) + a buffer shell
+// (large_system_buffer_bohr); each core+buffer is a sub-system. The dense XTB
+// engine runs the DC-SCF (calculateDivideConquer): global Fock, sub-block
+// diagonalisation (using the user-selected -eigensolver on each sub-block),
 // shared chemical potential, Yang core-projection. Energy-only first cut.
 // ---------------------------------------------------------------------------
 double FragmentScfDriver::runDivideConquer(bool gradient)
@@ -313,17 +316,19 @@ double FragmentScfDriver::runDivideConquer(bool gradient)
         std::size_t maxsub = 0, sumsub = 0;
         for (auto& s : subsystems) { maxsub = std::max(maxsub, s.size()); sumsub += s.size(); }
         CurcumaLogger::result(fmt::format(
-            "C1a DC: {} cells, cell={:.2f} A, buffer={:.2f} A; largest sub-system {} atoms, avg {:.0f}",
+            "large_system_mode=dc: {} cells, cell={:.2f} A, buffer={:.2f} A; largest sub-system {} atoms, avg {:.0f}",
             cores.size(), cell_A, buffer_A, maxsub,
             cores.empty() ? 0.0 : double(sumsub) / cores.size()));
     }
 
-    // 3. One global XTB engine drives the DC-SCF.
+    // 3. One global XTB engine drives the DC-SCF. configureXtb applies the
+    //    user-selected -eigensolver, which calculateDivideConquer respects
+    //    per sub-block (mkl/native/lobpcg/purify).
     XTB xtb(m_method);
     configureXtb(xtb);
     if (!xtb.InitialiseMolecule(m_mol)) {
         m_has_error = true;
-        m_error_message = "C1a: global molecule initialisation failed";
+        m_error_message = "large_system_mode=dc: global molecule initialisation failed";
         return 0.0;
     }
     bool converged = false; int iters = 0;
@@ -334,26 +339,27 @@ double FragmentScfDriver::runDivideConquer(bool gradient)
     m_num_fragments = static_cast<int>(cores.size());
     m_charges       = xtb.getCharges();
     m_decomp        = xtb.getEnergyDecomposition();
-    m_decomp["c1_mode"]      = "dc";
-    m_decomp["c1_subsystems"] = m_num_fragments;
+    m_decomp["large_system_mode"]      = "dc";
+    m_decomp["large_system_subsystems"] = m_num_fragments;
 
     // Energy-only first cut: no analytic DC gradient yet.
     m_gradient = Matrix::Zero(nat, 3);
     if (gradient)
-        CurcumaLogger::warn("C1a (dc) is energy-only — gradient returned as zero (use c1_mode=none for forces)");
+        CurcumaLogger::warn("large_system_mode=dc is energy-only — gradient returned as zero (use large_system_mode=none for forces)");
 
     return E;
 }
 
 // ---------------------------------------------------------------------------
-// C1b — sparse build + non-orthogonal density purification
+// Sparse — sparse build + non-orthogonal density purification
 //
 // Replaces the O(N^3) eigensolve with non-orthogonal canonical purification of
 // the density matrix (0 K, gapped systems). The dense XTB engine drives it
 // (calculateSparsePurification): global Fock each iteration, purify M=P*S, AO
 // density D=2*M*S^-1. The achievable sparsity (nnz fraction) is measured vs the
-// c1_sparse_threshold knob. Energy-only first cut; falls back to dense if the
-// system is gapless.
+// large_system_sparse_threshold knob. Energy-only first cut; falls back to
+// dense if the system is gapless. The -eigensolver flag is intentionally
+// ignored here (sparse IS the eigensolver replacement).
 // ---------------------------------------------------------------------------
 double FragmentScfDriver::runSparse(bool gradient)
 {
@@ -363,16 +369,21 @@ double FragmentScfDriver::runSparse(bool gradient)
     configureXtb(xtb);
     if (!xtb.InitialiseMolecule(m_mol)) {
         m_has_error = true;
-        m_error_message = "C1b: global molecule initialisation failed";
+        m_error_message = "large_system_mode=sparse: global molecule initialisation failed";
         return 0.0;
     }
 
+    // Note: -eigensolver is intentionally NOT consulted here. sparse IS the
+    // eigensolver replacement; respecting m_eigensolver would mean running
+    // purification only when it equals "purify" and falling back to the dense
+    // eigensolver otherwise — which would defeat the point of opting into
+    // large_system_mode=sparse.
     bool converged = false; int iters = 0; double nnz = 1.0;
     double E = xtb.calculateSparsePurification(m_sparse_threshold, converged, iters, nnz);
 
     // The engine returns exactly 0.0 only when it declined (open shell) — fall back.
     if (E == 0.0 && !converged) {
-        CurcumaLogger::warn("C1b unavailable for this system — running dense instead");
+        CurcumaLogger::warn("large_system_mode=sparse unavailable for this system — running dense instead");
         return runDense(gradient);
     }
 
@@ -381,12 +392,12 @@ double FragmentScfDriver::runSparse(bool gradient)
     m_num_fragments = 1;
     m_charges       = xtb.getCharges();
     m_decomp        = xtb.getEnergyDecomposition();
-    m_decomp["c1_mode"]      = "sparse";
-    m_decomp["c1_nnz_fraction"] = nnz;
+    m_decomp["large_system_mode"]      = "sparse";
+    m_decomp["large_system_nnz_fraction"] = nnz;
 
     m_gradient = Matrix::Zero(nat, 3);
     if (gradient)
-        CurcumaLogger::warn("C1b (sparse) is energy-only — gradient returned as zero (use c1_mode=none for forces)");
+        CurcumaLogger::warn("large_system_mode=sparse is energy-only — gradient returned as zero (use large_system_mode=none for forces)");
 
     return E;
 }

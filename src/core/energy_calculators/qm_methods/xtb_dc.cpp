@@ -1,12 +1,12 @@
 /*
- * <Native xTB divide-and-conquer DC-SCF (C1a) — implementation>
+ * <Native xTB divide-and-conquer DC-SCF — implementation>
  * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software under GPL-3.0.
  *
- * Claude Generated (C1a, June 2026). Implements XTB::calculateDivideConquer,
- * the divide-and-conquer SCF declared in xtb_native.h. It is a member of XTB so
- * it reuses the validated build-once setup (CN, self-energies, S/H0, gamma,
+ * Claude Generated (June 2026). Implements XTB::calculateDivideConquer, the
+ * divide-and-conquer SCF declared in xtb_native.h. It is a member of XTB so it
+ * reuses the validated build-once setup (CN, self-energies, S/H0, gamma,
  * multipole), the per-iteration potential builders, buildFock, updatePopulations
  * and evaluateComponentsAtFixedDensity verbatim — the only new physics is:
  *   (1) diagonalising core+buffer sub-blocks of the GLOBAL Fock instead of the
@@ -16,11 +16,21 @@
  *       1438), and
  *   (3) Yang's core-projection assembly of the global density.
  *
+ * The sub-block diagonalisation is dispatched on the user-selected -eigensolver
+ * (m_eigensolver). For 'mkl' the standard Eigen GES is used (default, fast for
+ * moderate blocks). For 'native' the self-contained solveSymmetric (Householder
+ * reduction + Cuppen D&C, no LAPACK eigensolve dependency; useful for GPU-portable
+ * builds) is used on each sub-block. For 'lobpcg' the seeded block LOBPCG from
+ * curcuma::eigsolver::lobpcgLowest is used (sub-blocks are LOBPCG's sweet spot:
+ * k=nocc/2 << n). For 'purify' the non-orthogonal Palser-Manolopoulos purification
+ * is used, requiring T=0 and a HOMO-LUMO gap.
+ *
  * First cut: ENERGY ONLY (no analytic gradient). Approximate — converges to the
  * dense SCF energy as the buffer radius grows, which is the validation contract.
  */
 
 #include "xtb_native.h"
+#include "native_eigensolver.h"
 #include "src/core/curcuma_logger.h"
 
 #include <Eigen/Eigenvalues>
@@ -38,6 +48,86 @@ static inline double fermiOcc(double e, double mu, double kT)
     if (kT <= 0.0) return (e <= mu) ? 2.0 : 0.0;
     const double x = (e - mu) / kT;
     return 2.0 / (1.0 + std::exp(std::min(std::max(x, -500.0), 500.0)));
+}
+
+// ---------------------------------------------------------------------------
+// Sub-block diagonalisation — dispatched on m_eigensolver.
+//
+// Returns (eps, C, ok). Columns of C satisfy C^T Ss C = I. On failure returns
+// false and the caller should abort the DC-SCF.
+//
+// DC needs the FULL eigenspectrum (all n eigenvalues) for Fermi occupation /
+// chemical-potential bisection. Eigensolvers that can't provide this fall back
+// to the dense GES:
+//   - purify: produces projector eigenvalues 0/1, not orbital energies
+//   - lobpcg: gives only the lowest kb eigenvalues, not all n
+//   - native / dnc: full spectrum via self-contained Householder+Cuppen (GPU-portable)
+//   - mkl (default): full spectrum via Eigen GES (LAPACK dsyevd)
+//
+// Memory layout: the per-block Fock + overlap are full n×n Eigen matrices; this
+// matches the dense solveEigen() path so the gradient/CPSCF code paths are
+// unaffected. n=200..500 blocks are the typical regime; the temporary matrices
+// are stack/heap-cheap and freed at scope exit.
+// ---------------------------------------------------------------------------
+static bool diagonalizeSubBlock(const Eigen::MatrixXd& Fs, const Eigen::MatrixXd& Ss,
+                                const std::string& solver,
+                                Eigen::VectorXd& eps_out, Eigen::MatrixXd& C_out,
+                                std::string& path_out)
+{
+    const int n = static_cast<int>(Fs.rows());
+    if (n == 0) { eps_out.resize(0); C_out.resize(0, 0); path_out = "empty"; return true; }
+
+    // --- purify / lobpcg: need full spectrum, can't provide it. Fall back. ---
+    // Log the fallback once (not per sub-block per iteration — the DC outer
+    // loop calls this many times).
+    static bool logged_purify_dc = false, logged_lobpcg_dc = false;
+    if (solver == "purify" && !logged_purify_dc) {
+        CurcumaLogger::info("DC sub-block: eigensolver=purify produces projector "
+                            "eigenvalues (0/1), not orbital energies needed for "
+                            "Fermi occupation; falling back to dense GES per sub-block");
+        logged_purify_dc = true;
+    } else if (solver == "lobpcg" && !logged_lobpcg_dc) {
+        CurcumaLogger::info("DC sub-block: eigensolver=lobpcg gives partial spectrum "
+                            "(needs full spectrum for Fermi occupation); "
+                            "falling back to dense GES per sub-block");
+        logged_lobpcg_dc = true;
+    }
+
+    // --- native / dnc: self-contained Householder + Cuppen D&C ---------------
+    if (solver == "native" || solver == "dnc") {
+        Eigen::LLT<Eigen::MatrixXd> llt(Ss);
+        if (llt.info() != Eigen::Success) {
+            CurcumaLogger::error("DC sub-block: native eigensolver needs Cholesky of Ss");
+            return false;
+        }
+        const Eigen::MatrixXd L = llt.matrixL();
+        const Eigen::MatrixXd Y = L.triangularView<Eigen::Lower>().solve(Fs);
+        Eigen::MatrixXd Atil = L.triangularView<Eigen::Lower>().solve(Y.transpose());
+        Atil = 0.5 * (Atil + Atil.transpose());
+        Eigen::VectorXd evals;
+        Eigen::MatrixXd evecs_std;
+        if (curcuma::eigsolver::solveSymmetric(Atil, evals, evecs_std, 1)) {
+            C_out = L.triangularView<Eigen::Lower>().transpose().solve(evecs_std);
+            const Eigen::MatrixXd SC = Ss * C_out;
+            for (int i = 0; i < n; ++i) C_out.col(i) /= std::sqrt(std::max(1e-30, C_out.col(i).dot(SC.col(i))));
+            eps_out = evals;
+            path_out = "native";
+            return true;
+        }
+        CurcumaLogger::warn("DC sub-block: native eigensolver failed; falling back to mkl");
+        // fall through to mkl
+    }
+
+    // --- mkl: default Eigen GES ---------------------------------------------
+    Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> ges(Fs, Ss);
+    if (ges.info() != Eigen::Success) {
+        CurcumaLogger::error(fmt::format("DC sub-block: mkl eigensolve failed (n={})", n));
+        return false;
+    }
+    eps_out = ges.eigenvalues();
+    C_out = ges.eigenvectors();
+    path_out = "mkl";
+    return true;
 }
 
 double XTB::calculateDivideConquer(const std::vector<std::vector<int>>& subsystems,
@@ -71,6 +161,11 @@ double XTB::calculateDivideConquer(const std::vector<std::vector<int>>& subsyste
     for (int at = 0; at < nat; ++at) if (core_owner[at] == -1) ++uncovered;
     if (uncovered)
         CurcumaLogger::warn(fmt::format("DC: {} atom(s) belong to no core — their density block is dropped", uncovered));
+
+    // The T=0 hard check for eigensolver=purify is enforced upstream in
+    // NativeXtbMethod::setMolecule. We trust m_eigensolver here; the sub-block
+    // diagonaliser logs + falls back on per-block failures.
+    const std::string solver = m_eigensolver;
 
     // ---- build-once global setup (mirror Calculation steps 1-5) ----
     m_d4_prepared = false;
@@ -127,8 +222,8 @@ double XTB::calculateDivideConquer(const std::vector<std::vector<int>>& subsyste
 
     if (verb >= 1) {
         CurcumaLogger::result(fmt::format(
-            "C1a divide-and-conquer DC-SCF: {} subsystems, largest sub-block {} AOs (global nao={})",
-            nsub, max_sub_ao, nao));
+            "large_system_mode=dc: {} subsystems, largest sub-block {} AOs (global nao={}), eigensolver={}",
+            nsub, max_sub_ao, nao, solver));
     }
 
     // ---- initial charge guess (EEQ, falls back to zero) ----
@@ -202,11 +297,13 @@ double XTB::calculateDivideConquer(const std::vector<std::vector<int>>& subsyste
         }
         const Matrix F = buildFock(m_H0, m_S, m_pot);
 
-        // (b) Diagonalise each core+buffer sub-block; collect (eps, weight) pairs
-        //     and keep the sub-eigvecs/occupied density for the assembly.
+        // (b) Diagonalise each core+buffer sub-block via the user-selected
+        //     eigensolver; collect (eps, weight) pairs and keep the sub-eigvecs
+        //     / occupied density for the assembly.
         std::vector<Eigen::VectorXd> sub_eps(nsub);
         std::vector<Eigen::MatrixXd> sub_C(nsub);
         std::vector<Eigen::VectorXd> sub_w(nsub);   // core-projected Mulliken weight per orbital
+        std::map<std::string, int> sub_paths;       // for the iter-1 info line
         for (int a = 0; a < nsub; ++a) {
             const auto& g = sub[a].gao;
             const int n = static_cast<int>(g.size());
@@ -217,19 +314,22 @@ double XTB::calculateDivideConquer(const std::vector<std::vector<int>>& subsyste
                     Fs(i, j) = F(g[i], g[j]);
                     Ss(i, j) = m_S(g[i], g[j]);
                 }
-            Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> ges(Fs, Ss);
-            if (ges.info() != Eigen::Success) {
-                CurcumaLogger::error(fmt::format("DC: sub-block {} eigensolve failed", a));
+            Eigen::VectorXd eps;
+            Eigen::MatrixXd C;
+            std::string path;
+            // diagonalizeSubBlock: purify/lobpcg fall back to the dense GES
+            // internally (they can't provide the full spectrum DC needs).
+            if (!diagonalizeSubBlock(Fs, Ss, solver, eps, C, path))
                 return 0.0;
-            }
-            sub_eps[a] = ges.eigenvalues();
-            sub_C[a]   = ges.eigenvectors();          // columns satisfy C^T Ss C = I
-            const Eigen::MatrixXd SC = Ss * sub_C[a]; // for Mulliken weights / density Mulliken
+            sub_eps[a] = eps;
+            sub_C[a]   = C;
+            sub_paths[path]++;
+            const Eigen::MatrixXd SC = Ss * C; // for Mulliken weights / density Mulliken
             Eigen::VectorXd w(n);
             for (int i = 0; i < n; ++i) {
                 double wi = 0.0;
                 for (int mu = 0; mu < n; ++mu)
-                    if (sub[a].is_core[mu]) wi += sub_C[a](mu, i) * SC(mu, i);
+                    if (sub[a].is_core[mu]) wi += C(mu, i) * SC(mu, i);
                 w(i) = wi;
             }
             sub_w[a] = w;

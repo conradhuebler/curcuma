@@ -1,27 +1,34 @@
 /*
- * <Native xTB large-system fragmentation driver (C1) — header>
+ * <Native xTB large-system fragmentation driver — header>
  * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software under GPL-3.0.
  *
- * Claude Generated (C1, June 2026): a shared fragmentation scaffold that scales
- * the native GFN1/GFN2 SCF to large systems by exploiting locality. The dense
- * O(N^3) eigensolve in curcuma::xtb::XTB is the wall above ~1000 atoms; this
- * driver runs the *existing, validated* dense XTB on sub-systems and assembles
- * the result, trading a controlled accuracy loss for tractable large-N runs.
+ * Claude Generated (June 2026): a shared fragmentation scaffold that scales the
+ * native GFN1/GFN2 SCF to large systems by exploiting locality. The dense O(N^3)
+ * eigensolve in curcuma::xtb::XTB is the wall above ~1000 atoms; this driver
+ * runs the *existing, validated* dense XTB on sub-systems and assembles the
+ * result, trading a controlled accuracy loss for tractable large-N runs.
  *
  * Three opt-in modes (default `none` = the normal dense path, untouched):
- *   - Fragments (C1c): disconnected-fragment SCF. Partition by bond
- *     connectivity, one dense SCF per fragment, sum energies + block-diagonal
- *     gradient. Exact for non-interacting clusters; neglects all inter-fragment
- *     coupling. A connected molecule yields one fragment -> falls back to dense.
- *   - DC (C1a): divide-and-conquer overlapping fragments (general large-system
- *     method, connected systems). [implemented in a later step]
- *   - Sparse (C1b): sparse build + non-orthogonal density purification, the
- *     O(N) path for gapped systems at 0 K. [implemented in a later step]
+ *   - fragments: disconnected-fragment SCF. Partition by bond connectivity,
+ *     one dense SCF per fragment, sum energies + block-diagonal gradient.
+ *     Exact for non-interacting clusters; neglects all inter-fragment coupling.
+ *     A connected molecule yields one fragment -> falls back to dense.
+ *   - dc: divide-and-conquer overlapping fragments (general large-system
+ *     method, connected systems). GLOBAL Fock each outer iter, sub-block
+ *     diagonalisation, shared chemical potential, Yang core-projection.
+ *   - sparse: sparse build + non-orthogonal density purification, the O(N)
+ *     path for gapped systems at 0 K. Replaces the eigensolve.
  *
  * The per-fragment engine is curcuma::xtb::XTB reused verbatim — all the
  * validated SCF / gradient / dispersion code comes for free.
+ *
+ * Combination with -eigensolver: configured on the underlying XTB instance via
+ * applyXtbScfConfig() (which already calls setEigensolver). The driver does not
+ * branch on the eigensolver itself; the per-XTB solver dispatch in xtb_scf.cpp
+ * does. The wrapper's T-check in NativeXtbMethod::setMolecule is what enforces
+ * the "purify requires T=0" hard error when large_system_mode != none.
  */
 
 #pragma once
@@ -36,32 +43,32 @@
 namespace curcuma::xtb {
 
 /* ------------------------------------------------------------------------- *
- *  C1 fragmentation mode selector
+ *  Large-system mode selector
  * ------------------------------------------------------------------------- */
-enum class C1Mode {
+enum class LargeSystemMode {
     None,       // dense reference (default) — driver not engaged
-    Fragments,  // C1c — disconnected-fragment SCF
-    DC,         // C1a — divide-and-conquer overlapping fragments
-    Sparse,     // C1b — sparse build + non-orthogonal purification
+    Fragments,  // disconnected-fragment SCF
+    DC,         // divide-and-conquer overlapping fragments
+    Sparse,     // sparse build + non-orthogonal purification
 };
 
-/// Parse a user string to a C1Mode. Unknown / empty -> None (dense).
+/// Parse a user string to a LargeSystemMode. Unknown / empty -> None (dense).
 /// Aliases: frag->fragments, divide-conquer/divide_and_conquer->dc.
-inline C1Mode parseC1Mode(const std::string& s)
+inline LargeSystemMode parseLargeSystemMode(const std::string& s)
 {
-    if (s == "fragments" || s == "frag" || s == "fragment") return C1Mode::Fragments;
-    if (s == "dc" || s == "divide-conquer" || s == "divide_and_conquer") return C1Mode::DC;
-    if (s == "sparse") return C1Mode::Sparse;
-    return C1Mode::None;
+    if (s == "fragments" || s == "frag" || s == "fragment") return LargeSystemMode::Fragments;
+    if (s == "dc" || s == "divide-conquer" || s == "divide_and_conquer") return LargeSystemMode::DC;
+    if (s == "sparse") return LargeSystemMode::Sparse;
+    return LargeSystemMode::None;
 }
 
-inline const char* c1ModeName(C1Mode m)
+inline const char* largeSystemModeName(LargeSystemMode m)
 {
     switch (m) {
-    case C1Mode::None:      return "none";
-    case C1Mode::Fragments: return "fragments";
-    case C1Mode::DC:        return "dc";
-    case C1Mode::Sparse:    return "sparse";
+    case LargeSystemMode::None:      return "none";
+    case LargeSystemMode::Fragments: return "fragments";
+    case LargeSystemMode::DC:        return "dc";
+    case LargeSystemMode::Sparse:    return "sparse";
     }
     return "none";
 }
@@ -70,7 +77,7 @@ inline const char* c1ModeName(C1Mode m)
  *  FragmentScfDriver
  *
  *  Orchestrates the dense curcuma::xtb::XTB over sub-systems. Owns the full
- *  molecule, the chosen C1 mode and its accuracy knobs, and after calculate()
+ *  molecule, the chosen mode and its accuracy knobs, and after calculate()
  *  exposes the assembled energy, gradient, charges and decomposition.
  * ------------------------------------------------------------------------- */
 class FragmentScfDriver {
@@ -98,9 +105,9 @@ public:
 private:
     // Per-mode drivers.
     double runDense(bool gradient);          // single dense XTB on the whole system
-    double runFragments(bool gradient);      // C1c
-    double runDivideConquer(bool gradient);  // C1a  (later step)
-    double runSparse(bool gradient);         // C1b  (later step)
+    double runFragments(bool gradient);      // disconnected-fragment SCF
+    double runDivideConquer(bool gradient);  // DC overlapping fragments
+    double runSparse(bool gradient);         // sparse + non-orthogonal purification
 
     // Helpers.
     void configureXtb(XTB& xtb) const;       // apply D4 source + SCF config to a fragment XTB
@@ -108,15 +115,15 @@ private:
 
     MethodType m_method;
     json       m_config;
-    C1Mode     m_mode = C1Mode::None;
+    LargeSystemMode m_mode = LargeSystemMode::None;
 
     Mol      m_mol;          // full system (atoms/geometry/charge)
     Molecule m_molecule;     // same system as a Molecule, for GetFragments()
 
-    // C1 knobs (from the xtb config scope; Bohr units for radii).
-    double m_buffer_bohr     = 10.0;  // C1a DC buffer radius
-    double m_cell_bohr       = 12.0;  // C1a DC cell size
-    double m_sparse_threshold = 1.0e-6; // C1b drop tolerance
+    // large_system_mode knobs (from the xtb config scope; Bohr units for radii).
+    double m_buffer_bohr     = 10.0;  // large_system_mode=dc buffer radius
+    double m_cell_bohr       = 12.0;  // large_system_mode=dc cell size
+    double m_sparse_threshold = 1.0e-6; // large_system_mode=sparse drop tolerance
     int    m_intra_threads   = 1;     // forwarded -threads budget
 
     // Assembled outputs.

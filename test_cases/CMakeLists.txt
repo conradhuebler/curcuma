@@ -300,14 +300,15 @@ add_test(NAME xtb_cpscf COMMAND test_xtb_cpscf
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(xtb_cpscf PROPERTIES TIMEOUT 120 LABELS "cpscf;native_xtb")
 
-# Claude Generated (C1, Jun 2026): native-GFN large-system modes (c1_mode
-# fragments/dc/sparse) fast-proxy regression on caffeine — each mode vs its
-# exact/known dense limit + the default path unchanged. See docs/SQM_LARGE_SYSTEMS.md.
-add_test(NAME c1_large_systems
-         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/c1_large_systems.sh
+# Claude Generated (large_system_mode, Jun 2026): native-GFN large-system modes
+# (-large_system_mode fragments|dc|sparse) fast-proxy regression on caffeine —
+# each mode vs its exact/known dense limit + the default path unchanged, plus
+# the -eigensolver propagation through fragments/dc. See docs/SQM_LARGE_SYSTEMS.md.
+add_test(NAME large_system_modes
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/large_system_modes.sh
                  $<TARGET_FILE:curcuma> ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-set_tests_properties(c1_large_systems PROPERTIES TIMEOUT 120 LABELS "c1;native_xtb")
+set_tests_properties(large_system_modes PROPERTIES TIMEOUT 180 LABELS "large_system;native_xtb")
 
 # Claude Generated: CLI argument validation test suite (October 2025)
 # Include comprehensive Bash-based CLI tests for all capabilities

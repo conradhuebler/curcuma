@@ -91,16 +91,20 @@ public:
 private:
     curcuma::xtb::MethodType m_method;
     std::unique_ptr<curcuma::xtb::XTB> m_xtb;
-    // C1 large-system driver (opt-in, c1_mode != none). When active, all
+    // large_system_mode driver (opt-in, mode != none). When active, all
     // calculate/gradient/charge calls delegate here instead of m_xtb. Built in
-    // setMolecule once the c1_mode is known. Claude Generated.
+    // setMolecule once the mode is known. Claude Generated.
     std::unique_ptr<curcuma::xtb::FragmentScfDriver> m_c1_driver;
     Mol m_molecule;
     bool m_calculation_done = false;
     double m_last_energy = 0.0;
 
-    // Read c1_mode from the controller ("xtb" scope, top-level fallback).
-    std::string c1ModeString() const;
+    // Read large_system_mode / eigensolver / electronic_temperature from the
+    // controller ("xtb" scope, top-level fallback). Used by the T=0 hard-error
+    // on -eigensolver=purify when large_system_mode=fragments|dc.
+    std::string largeSystemModeString() const;
+    std::string eigensolverString() const;
+    double      electronicTemperature() const;
 
     // Push the controller settings into the native solver: the D4 charge-response
     // source (harmless for GFN1, which uses D3) and the SCF-convergence settings
