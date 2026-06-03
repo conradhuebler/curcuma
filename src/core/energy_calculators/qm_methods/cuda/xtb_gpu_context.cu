@@ -44,6 +44,16 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dWork;            // cuSOLVER dsyevd workspace
     CudaBuffer<int>    dInfo;            // cuSOLVER devInfo
     int                lwork = 0;
+
+    // GFN2 multipole (Stage 2b). dDpInt holds the 3 dipole AO-integral matrices
+    // contiguously (3·n·n), dQpInt the 6 quadrupole matrices (6·n·n); both
+    // geometry-constant. dVdp/dVqp are the per-iteration multipole potentials
+    // (3·nat / 6·nat), dDpAt/dQpAt the per-iteration atomic moments.
+    int                resident_nat = 0;
+    CudaBuffer<double> dDpInt, dQpInt;   // 3·nn / 6·nn (uploaded once)
+    CudaBuffer<int>    dAo2at;           // AO→atom map, length n (uploaded once)
+    CudaBuffer<double> dVdp, dVqp;       // 3·nat / 6·nat (per iteration)
+    CudaBuffer<double> dDpAt, dQpAt;     // 3·nat / 6·nat (per iteration)
 };
 
 // ---- Device kernels (Stage 2 resident SCF) -------------------------------
@@ -84,6 +94,65 @@ __global__ void k_pop_ao(double* pop, const double* P, const double* S, int n)
             s += P[idx] * S[idx];
         }
         pop[mu] = s;
+    }
+}
+
+// GFN2 anisotropic Fock contribution (mirrors the multipole branch of XTB::buildFock):
+//   F(μ,ν) −= ½·[ Σ_k dp_int[k](μ,ν)·v_dp(k,jat) + dp_int[k](ν,μ)·v_dp(k,iat)
+//              + Σ_k qp_int[k](μ,ν)·v_qp(k,jat) + qp_int[k](ν,μ)·v_qp(k,iat) ]
+// with iat=ao2at[μ], jat=ao2at[ν]. dp_int contiguous 3·nn, qp_int 6·nn (col-major).
+__global__ void k_add_fock_multipole(double* F, const double* dp_int, const double* qp_int,
+                                     const double* v_dp, const double* v_qp,
+                                     const int* ao2at, int n)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    const int nu = blockIdx.y * blockDim.y + threadIdx.y;
+    if (mu < n && nu < n) {
+        const size_t nn  = static_cast<size_t>(n) * static_cast<size_t>(n);
+        const size_t mn  = static_cast<size_t>(mu) + static_cast<size_t>(nu) * n; // (μ,ν)
+        const size_t nm  = static_cast<size_t>(nu) + static_cast<size_t>(mu) * n; // (ν,μ)
+        const int iat = ao2at[mu];
+        const int jat = ao2at[nu];
+        double dd = 0.0;
+        for (int k = 0; k < 3; ++k) {
+            const double* dk = dp_int + static_cast<size_t>(k) * nn;
+            dd += dk[mn] * v_dp[k + jat * 3] + dk[nm] * v_dp[k + iat * 3];
+        }
+        double qq = 0.0;
+        for (int k = 0; k < 6; ++k) {
+            const double* qk = qp_int + static_cast<size_t>(k) * nn;
+            qq += qk[mn] * v_qp[k + jat * 6] + qk[nm] * v_qp[k + iat * 6];
+        }
+        F[mn] -= 0.5 * (dd + qq);
+    }
+}
+
+// GFN2 atomic multipole moments (mirrors the multipole block of updatePopulations):
+//   dp_at(k,iat) −= Σ_ν P(ν,μ)·dp_int[k](ν,μ)   summed over μ∈iat   (3×nat)
+//   qp_at(k,iat) −= Σ_ν P(ν,μ)·qp_int[k](ν,μ)   summed over μ∈iat   (6×nat)
+// One thread per μ; column-μ dot products, atomic-scattered into the owning atom.
+// dp_at/qp_at must be zeroed before launch.
+__global__ void k_multipole_moments(double* dp_at, double* qp_at,
+                                    const double* P, const double* dp_int, const double* qp_int,
+                                    const int* ao2at, int n)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu < n) {
+        const size_t nn   = static_cast<size_t>(n) * static_cast<size_t>(n);
+        const size_t col  = static_cast<size_t>(mu) * n;   // start of column μ
+        const int    iat  = ao2at[mu];
+        for (int k = 0; k < 3; ++k) {
+            const double* dk = dp_int + static_cast<size_t>(k) * nn + col;
+            double acc = 0.0;
+            for (int nu = 0; nu < n; ++nu) acc += P[col + nu] * dk[nu];
+            atomicAdd(&dp_at[k + iat * 3], -acc);
+        }
+        for (int k = 0; k < 6; ++k) {
+            const double* qk = qp_int + static_cast<size_t>(k) * nn + col;
+            double acc = 0.0;
+            for (int nu = 0; nu < n; ++nu) acc += P[col + nu] * qk[nu];
+            atomicAdd(&qp_at[k + iat * 6], -acc);
+        }
     }
 }
 
@@ -257,27 +326,17 @@ bool XtbGpuContext::residentBegin(const double* H0, const double* S,
     return cudaStreamSynchronize(m_impl->stream) == cudaSuccess;
 }
 
-bool XtbGpuContext::residentSolve(const double* v_ao, int n, double* eps_out)
+// Reduce the Fock now in dC to standard form with the cached L, solve (dsyevd),
+// back-transform → generalized eigenvectors in dC, eigenvalues → eps_out. The
+// device analogue of the CPU dsygst+dsyevd+dtrsm path, reusing the resident L (no
+// per-iteration L upload). Shared by residentSolve and residentSolveMultipole.
+bool XtbGpuContext::eigensolveResidentFock(double* eps_out)
 {
-    if (!ok() || n <= 0 || n != m_impl->resident_n || !v_ao || !eps_out)
-        return false;
+    const int n = m_impl->resident_n;
     cudaStream_t stream = m_impl->stream;
-
-    // Upload the AO potential (the only matrix-sized input is already resident).
-    m_impl->dVao.upload(v_ao, n, stream);
-
-    // F = H0 − ½·S·(v_ao⊕v_ao), built straight into the eigenvector buffer dC.
-    const dim3 block(16, 16);
-    const dim3 grid((n + block.x - 1) / block.x, (n + block.y - 1) / block.y);
-    k_build_fock_iso<<<grid, block, 0, stream>>>(m_impl->dC.ptr, m_impl->dH0.ptr,
-                                                 m_impl->dS.ptr, m_impl->dVao.ptr, n);
-    if (cudaGetLastError() != cudaSuccess)
-        return false;
-
-    // Reduce to standard form Ã = L⁻¹·F·L⁻ᵀ via two triangular solves, then
-    // dsyevd, then back-transform C = L⁻ᵀ·C̃ — identical to the Stage-1 path but
-    // reusing the resident L (no per-iteration L upload). dC holds F → Ã → C̃ → C.
     const double one = 1.0;
+
+    // dC holds F → Ã = L⁻¹·F·L⁻ᵀ → C̃ → C.
     if (cublasDtrsm(m_impl->cublas, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_LOWER,
                     CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, n, &one,
                     m_impl->dL.ptr, n, m_impl->dC.ptr, n) != CUBLAS_STATUS_SUCCESS)
@@ -303,6 +362,26 @@ bool XtbGpuContext::residentSolve(const double* v_ao, int n, double* eps_out)
     if (cudaStreamSynchronize(stream) != cudaSuccess)
         return false;
     return info == 0;
+}
+
+bool XtbGpuContext::residentSolve(const double* v_ao, int n, double* eps_out)
+{
+    if (!ok() || n <= 0 || n != m_impl->resident_n || !v_ao || !eps_out)
+        return false;
+    cudaStream_t stream = m_impl->stream;
+
+    // Upload the AO potential (the only matrix-sized input is already resident).
+    m_impl->dVao.upload(v_ao, n, stream);
+
+    // F = H0 − ½·S·(v_ao⊕v_ao), built straight into the eigenvector buffer dC.
+    const dim3 block(16, 16);
+    const dim3 grid((n + block.x - 1) / block.x, (n + block.y - 1) / block.y);
+    k_build_fock_iso<<<grid, block, 0, stream>>>(m_impl->dC.ptr, m_impl->dH0.ptr,
+                                                 m_impl->dS.ptr, m_impl->dVao.ptr, n);
+    if (cudaGetLastError() != cudaSuccess)
+        return false;
+
+    return eigensolveResidentFock(eps_out);
 }
 
 bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
@@ -359,6 +438,89 @@ bool XtbGpuContext::residentFinalize(double* P_colmajor, double* C_colmajor, int
     const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
     m_impl->dP.download(P_colmajor, static_cast<int>(nn), stream);
     m_impl->dC.download(C_colmajor, static_cast<int>(nn), stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+/* ====================================================================== *
+ *  Device-resident GFN2 multipole (Stage 2b). Layered on residentBegin.
+ * ====================================================================== */
+
+bool XtbGpuContext::residentBeginMultipole(const double* dp_int3, const double* qp_int6,
+                                           const int* ao2at, int n, int nat)
+{
+    if (!ok() || n <= 0 || n != m_impl->resident_n || nat <= 0
+        || !dp_int3 || !qp_int6 || !ao2at)
+        return false;
+    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    try {
+        // Geometry-constant multipole integrals (3·nn / 6·nn) + AO→atom map.
+        m_impl->dDpInt.upload(dp_int3, static_cast<int>(3 * nn), m_impl->stream);
+        m_impl->dQpInt.upload(qp_int6, static_cast<int>(6 * nn), m_impl->stream);
+        m_impl->dAo2at.upload(ao2at, n, m_impl->stream);
+        // Per-iteration multipole potentials / atomic moments.
+        m_impl->dVdp.alloc(3 * nat);
+        m_impl->dVqp.alloc(6 * nat);
+        m_impl->dDpAt.alloc(3 * nat);
+        m_impl->dQpAt.alloc(6 * nat);
+    } catch (...) {
+        return false;
+    }
+    m_impl->resident_nat = nat;
+    return cudaStreamSynchronize(m_impl->stream) == cudaSuccess;
+}
+
+bool XtbGpuContext::residentSolveMultipole(const double* v_ao, const double* v_dp,
+                                           const double* v_qp, int n, double* eps_out)
+{
+    if (!ok() || n <= 0 || n != m_impl->resident_n || m_impl->resident_nat <= 0
+        || !v_ao || !v_dp || !v_qp || !eps_out)
+        return false;
+    cudaStream_t stream = m_impl->stream;
+    const int nat = m_impl->resident_nat;
+
+    // Upload the iteration's potentials (isotropic AO + anisotropic multipole).
+    m_impl->dVao.upload(v_ao, n, stream);
+    m_impl->dVdp.upload(v_dp, 3 * nat, stream);
+    m_impl->dVqp.upload(v_qp, 6 * nat, stream);
+
+    // F = H0 − ½·S·(v_ao⊕v_ao) into dC, then add the GFN2 multipole contribution.
+    const dim3 block(16, 16);
+    const dim3 grid((n + block.x - 1) / block.x, (n + block.y - 1) / block.y);
+    k_build_fock_iso<<<grid, block, 0, stream>>>(m_impl->dC.ptr, m_impl->dH0.ptr,
+                                                 m_impl->dS.ptr, m_impl->dVao.ptr, n);
+    if (cudaGetLastError() != cudaSuccess)
+        return false;
+    k_add_fock_multipole<<<grid, block, 0, stream>>>(m_impl->dC.ptr, m_impl->dDpInt.ptr,
+                                                     m_impl->dQpInt.ptr, m_impl->dVdp.ptr,
+                                                     m_impl->dVqp.ptr, m_impl->dAo2at.ptr, n);
+    if (cudaGetLastError() != cudaSuccess)
+        return false;
+
+    return eigensolveResidentFock(eps_out);
+}
+
+bool XtbGpuContext::residentMultipoleMoments(double* dp_at3, double* qp_at6, int n, int nat)
+{
+    if (!ok() || n <= 0 || n != m_impl->resident_n || nat != m_impl->resident_nat
+        || !dp_at3 || !qp_at6)
+        return false;
+    cudaStream_t stream = m_impl->stream;
+
+    // Accumulator-scatter kernel needs zeroed targets.
+    if (cudaMemsetAsync(m_impl->dDpAt.ptr, 0, sizeof(double) * 3 * nat, stream) != cudaSuccess)
+        return false;
+    if (cudaMemsetAsync(m_impl->dQpAt.ptr, 0, sizeof(double) * 6 * nat, stream) != cudaSuccess)
+        return false;
+
+    const int b1 = 128;
+    k_multipole_moments<<<(n + b1 - 1) / b1, b1, 0, stream>>>(
+        m_impl->dDpAt.ptr, m_impl->dQpAt.ptr, m_impl->dP.ptr,
+        m_impl->dDpInt.ptr, m_impl->dQpInt.ptr, m_impl->dAo2at.ptr, n);
+    if (cudaGetLastError() != cudaSuccess)
+        return false;
+
+    m_impl->dDpAt.download(dp_at3, 3 * nat, stream);
+    m_impl->dQpAt.download(qp_at6, 6 * nat, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 

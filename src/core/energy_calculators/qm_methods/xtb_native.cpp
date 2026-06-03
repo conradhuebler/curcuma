@@ -354,22 +354,37 @@ double XTB::Calculation(bool gradient)
     if (verb >= 3 && eig_threads > 1)
         CurcumaLogger::info_fmt("Eigensolve MKL threads: {}", eig_threads);
 
-    // Device-resident GFN1 SCF (Claude Generated, GPU port Stage 2). Enabled only
-    // for GFN1 with the default Broyden charge mixing and an available lower
-    // Cholesky factor L (m_X). begin() uploads the geometry-constant H0/S/L once;
-    // the per-iteration heavy linear algebra (Fock build, eigensolve, density,
-    // Mulliken-AO, band) then runs on the device with those matrices resident, so
-    // only length-nao vectors cross the bus each iteration. On any failure we
-    // silently keep the full CPU SCF. GFN2 / non-Broyden modes keep the
-    // per-iteration GPU eigensolver hook (Stage 1) instead.
+    // Device-resident SCF (Claude Generated, GPU port Stage 2). Enabled with the
+    // default Broyden charge mixing and an available lower Cholesky factor L
+    // (m_X). begin() uploads the geometry-constant H0/S/L once; the per-iteration
+    // heavy linear algebra (Fock build, eigensolve, density, Mulliken-AO, band)
+    // then runs on the device with those matrices resident, so only length-nao
+    // vectors cross the bus each iteration. GFN2 additionally keeps the multipole
+    // integrals resident and adds the anisotropic Fock + atomic moments on the
+    // device (Stage 2b); the isotropic potential (third-order, multipole scalar
+    // shift, in-SCF D4) is still folded into v_ao on the host. On any failure we
+    // silently keep the full CPU SCF. Non-Broyden modes keep the per-iteration
+    // GPU eigensolver hook (Stage 1) instead.
     bool use_gpu_resident = false;
-    if (m_gpu_scf && m_method == MethodType::GFN1 && mode == ScfMode::Broyden
+    bool gpu_multipole    = false;
+    if (m_gpu_scf && mode == ScfMode::Broyden
         && m_X.rows() == m_basis.nao && m_X.cols() == m_basis.nao) {
-        use_gpu_resident = m_gpu_scf->begin(m_H0, m_S, m_X);
-        if (verb >= 2)
-            CurcumaLogger::info(use_gpu_resident
-                ? "SCF: device-resident GFN1 path (H0/S/L on GPU; per-iter vectors only)"
-                : "SCF: GPU resident begin() failed; running CPU SCF");
+        if (m_method == MethodType::GFN1) {
+            use_gpu_resident = m_gpu_scf->begin(m_H0, m_S, m_X);
+            if (verb >= 2)
+                CurcumaLogger::info(use_gpu_resident
+                    ? "SCF: device-resident GFN1 path (H0/S/L on GPU; per-iter vectors only)"
+                    : "SCF: GPU resident begin() failed; running CPU SCF");
+        } else if (m_method == MethodType::GFN2 && m_mp_initialized
+                   && m_gpu_scf->supportsMultipole()) {
+            use_gpu_resident = m_gpu_scf->begin(m_H0, m_S, m_X)
+                            && m_gpu_scf->beginMultipole(m_dp_int, m_qp_int, m_basis.ao2at);
+            gpu_multipole = use_gpu_resident;
+            if (verb >= 2)
+                CurcumaLogger::info(use_gpu_resident
+                    ? "SCF: device-resident GFN2 path (H0/S/L + multipole integrals on GPU)"
+                    : "SCF: GPU resident GFN2 begin() failed; running CPU SCF");
+        }
     }
 
     const auto t_scf_start = clock::now();
@@ -413,14 +428,21 @@ double XTB::Calculation(bool gradient)
         std::chrono::steady_clock::time_point t_fock, t_solve, t_mull;
         if (use_gpu_resident) {
             // Expand shell+atom potential to AO resolution (host; mirrors
-            // expand_potential in xtb_scf.cpp). GFN1: v_ao(μ)=v_sh(sh)+v_at(at).
+            // expand_potential in xtb_scf.cpp). v_ao(μ)=v_sh(sh)+v_at(at) — this
+            // isotropic part carries Coulomb + third-order (v_sh) and, for GFN2,
+            // the multipole scalar shift + in-SCF D4 (v_at), all built on the host
+            // above. The GFN2 anisotropic dipole/quadrupole potential (v_dp/v_qp)
+            // is applied in the device Fock build via solveMultipole.
             Eigen::VectorXd v_ao(m_basis.nao);
             for (int ao = 0; ao < m_basis.nao; ++ao)
                 v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
             t_fock = clock::now();   // Fock build is fused into solve() on the device
 
-            // Device: F = H0 − ½·S·(v_ao⊕v_ao); solve F C = S C ε with cached L.
-            if (!m_gpu_scf->solve(v_ao, m_wfn.eps)) {
+            // Device: F = H0 − ½·S·(v_ao⊕v_ao) [+ GFN2 multipole]; solve F C = S C ε.
+            const bool solve_ok = gpu_multipole
+                ? m_gpu_scf->solveMultipole(v_ao, m_pot.v_dp, m_pot.v_qp, m_wfn.eps)
+                : m_gpu_scf->solve(v_ao, m_wfn.eps);
+            if (!solve_ok) {
                 CurcumaLogger::warn("XTB::Calculation: GPU resident solve failed at iteration "
                                     + std::to_string(iter));
                 m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
@@ -437,7 +459,15 @@ double XTB::Calculation(bool gradient)
             }
             t_solve = clock::now();
             // Broyden never mixes the density, so there is no P damping here.
-            updatePopulationsFromPopAo(pop_ao);
+            updatePopulationsFromPopAo(pop_ao);   // isotropic q_sh / q_at
+            // GFN2: atomic dipole/quadrupole moments from the resident density
+            // (the multipole block of updatePopulations), into m_wfn.dp_at/qp_at
+            // so the shared Broyden pack/mix/unpack and energyMultipole work.
+            if (gpu_multipole && !m_gpu_scf->multipoleMoments(m_wfn.dp_at, m_wfn.qp_at)) {
+                CurcumaLogger::warn("XTB::Calculation: GPU resident multipole moments failed at iteration "
+                                    + std::to_string(iter));
+                m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
+            }
             q_sh_new = m_wfn.q_sh;
             t_mull = clock::now();
         } else {

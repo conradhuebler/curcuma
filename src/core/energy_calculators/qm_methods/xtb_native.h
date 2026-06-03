@@ -285,6 +285,28 @@ struct GpuScfBackend {
     virtual bool density(const Eigen::VectorXd& occ, int ncol,
                          Eigen::VectorXd& pop_ao, double& band) = 0;
     virtual bool finalize(Matrix& P, Matrix& C) = 0;
+
+    /* ----- GFN2 multipole extensions (Stage 2b) ------------------------- *
+     * GFN2 adds an anisotropic (dipole/quadrupole) Fock contribution and
+     * atomic multipole moments to the isotropic GFN1 loop. The isotropic
+     * potential (incl. shell third-order, the multipole scalar shift and the
+     * in-SCF D4 charge coupling) is still folded into v_ao on the host, so only
+     * these three device hooks are extra. A backend that does not implement them
+     * leaves supportsMultipole() false and GFN2 falls back to the Stage-1
+     * per-iteration eigensolver path. The integrals dp_int (3) / qp_int (6) are
+     * geometry-constant (uploaded once). solveMultipole adds the multipole Fock
+     * term v_dp (3×nat) / v_qp (6×nat) to the isotropic Fock before the solve;
+     * multipoleMoments returns the atom-resolved dp_at (3×nat) / qp_at (6×nat)
+     * from the resident density (the GFN2 part of updatePopulations). */
+    virtual bool supportsMultipole() const { return false; }
+    virtual bool beginMultipole(const std::array<Eigen::MatrixXd, 3>& dp_int,
+                                const std::array<Eigen::MatrixXd, 6>& qp_int,
+                                const std::vector<int>& ao2at) { (void)dp_int; (void)qp_int; (void)ao2at; return false; }
+    virtual bool solveMultipole(const Eigen::VectorXd& v_ao,
+                                const Eigen::MatrixXd& v_dp,
+                                const Eigen::MatrixXd& v_qp,
+                                Vector& eps) { (void)v_ao; (void)v_dp; (void)v_qp; (void)eps; return false; }
+    virtual bool multipoleMoments(Eigen::MatrixXd& dp_at, Eigen::MatrixXd& qp_at) { (void)dp_at; (void)qp_at; return false; }
 };
 
 /* ------------------------------------------------------------------------- *

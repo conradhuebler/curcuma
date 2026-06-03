@@ -23,7 +23,7 @@ This is a staged port. Each stage is independently buildable and validated at th
 | 0 | Scaffolding: context, method wrapper, CMake sub-option, factory branch (pass-through to CPU) | ✅ done |
 | 1 | Per-iteration generalized eigensolve on the GPU (cuSOLVER), rest on CPU | ✅ done |
 | 2a | **GFN1 device-resident SCF**: H0/S/L stay on the device for the whole loop; per-iter only length-nao vectors cross | ✅ done |
-| 2b | GFN2 device-resident SCF (multipole Fock + multipole Mulliken + in-SCF D4 host callback) | ⏳ next |
+| 2b | **GFN2 device-resident SCF**: + multipole integrals resident, anisotropic Fock + atomic moments on the device (isotropic potential incl. in-SCF D4 stays on host) | ✅ done |
 | 3 | Integrals on the GPU (S, H0, CN, γ, multipole) | ⏳ |
 | 4 | Gradients on the GPU → device-resident `-opt`/`-md` | ⏳ |
 | 5 | Mixed precision (FP32 bulk / FP64 refinement) + tuning | ⏳ |
@@ -82,6 +82,36 @@ only project types (`Matrix`/`Vector`/`Eigen`) so the core `XTB` class stays fre
 of every CUDA header. Set to `nullptr` (default, and always in a non-CUDA build)
 it is completely inert — the CPU SCF is byte-unchanged.
 
+## How Stage 2b works (GFN2 device-resident SCF)
+
+GFN2 adds an anisotropic (dipole/quadrupole) channel on top of the isotropic
+GFN1 loop. Stage 2b keeps that channel's heavy parts on the device too, so the
+whole GFN2 SCF (Broyden) is device-resident; only the cheap O(nat²) bits and the
+mixing stay on the host.
+
+- **Additionally resident** (uploaded once per geometry, `beginMultipole`): the
+  3 dipole + 6 quadrupole AO integral matrices (`m_dp_int`, `m_qp_int`, each
+  n×n) and the AO→atom map.
+- **Device, per iteration:**
+  - `solveMultipole`: the isotropic Fock kernel **plus** the multipole
+    contribution `F −= ½·Σ_k(dp_int[k]·v_dp + qp_int[k]·v_qp)` (the GFN2 branch
+    of `buildFock`), then the same cached-L eigensolve as GFN1.
+  - `multipoleMoments`: the atomic dipole/quadrupole moments
+    `dp_at(k,iat) = −Σ_{μ∈iat}Σ_ν P_νμ·dp_int[k]_νμ` (and quadrupole), one thread
+    per AO with an `atomicAdd` scatter into the owning atom — the multipole block
+    of `updatePopulations`.
+- **Host, per iteration (unchanged CPU code):** the multipole *potential*
+  `v_dp`/`v_qp`/`v_at`-shift (`addMultipolePotential`, O(nat²)), the shell
+  third-order, the **in-SCF D4** charge coupling (`addDispersionPotential` folds
+  `dE_D4/dq` into `v_at` from the host-resident charges — no device work, no
+  special callback), the Fermi occupation, the Mulliken shell/atom aggregation,
+  the Coulomb/third-order/multipole energies, the Broyden mix of the larger SCC
+  vector (`q_sh` + `dp_at` + `qp_at`), and convergence.
+
+So GFN2's only extra device traffic per iteration is `v_dp` (3·nat) and `v_qp`
+(6·nat) up, and `dp_at`/`qp_at` (9·nat) down — all small. The n×n multipole
+integrals never move during the loop.
+
 ## Validation
 
 ```bash
@@ -93,12 +123,15 @@ ctest -L "gfn1_validation" -L "gfn2_validation"   # CPU must stay green too
 
 Measured (2026-06-03, RTX 5080, CUDA 13.1):
 
-- `gpu_gfn1_validation` (resident GFN1) **12/12** — 10 molecules ≤ 1e-8 vs tblite,
-  the two documented xfails (He2 ~1.5e-8 floor, complex) reproduced exactly.
-- `gpu_gfn2_validation` **12/12** (unchanged), CPU `gfn{1,2}_validation` **12/12**.
-- GFN1 GPU-vs-CPU total energy matches to all printed decimals on H2O, caffeine,
-  triose and **complex (231 atoms)** — ≤ 1e-8 Eh.
-- `compute-sanitizer --tool memcheck`: **0 errors** on the resident path.
+- `gpu_gfn1_validation` (resident GFN1, Stage 2a) **12/12** and
+  `gpu_gfn2_validation` (resident GFN2, Stage 2b) **12/12** — vs tblite at 1e-8,
+  the documented xfails (GFN1 He2 ~1.5e-8 floor + complex; GFN2 complex)
+  reproduced exactly. CPU `gfn{1,2}_validation` **12/12**.
+- GPU-vs-CPU total energy matches to all printed decimals on H2O, caffeine,
+  triose, acetic_acid_dimer and **complex (231 atoms)** for both GFN1 and GFN2 —
+  ≤ 1e-8 Eh.
+- `compute-sanitizer --tool memcheck`: **0 errors** on the GFN1 and the GFN2
+  (atomicAdd-scatter) resident paths.
 - `release/` (canonical, no CUDA) rebuilds with the core edits and passes the CPU
   `native_xtb` + `gfn{1,2}_validation` suites — the seam is `#ifdef`-free.
 

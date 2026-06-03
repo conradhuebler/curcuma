@@ -100,7 +100,37 @@ public:
     /// major; symmetric P may be read as row-major). Called once after the loop.
     bool residentFinalize(double* P_colmajor, double* C_colmajor, int n);
 
+    /* ----- Device-resident GFN2 multipole (Stage 2b) --------------------- *
+     * Layered on residentBegin: the geometry-constant dipole (3) and quadrupole
+     * (6) AO integrals and the AO→atom map are uploaded once, then each iteration
+     * adds the anisotropic Fock term and reads off the atomic moments. Matrices
+     * column-major n×n; dp_int/qp_int are NOT symmetric (both triangles used).
+     * Claude Generated. */
+
+    /// Upload the geometry-constant multipole integrals (3 dipole + 6 quadrupole,
+    /// each n×n column-major) and the AO→atom map (length n). After residentBegin.
+    bool residentBeginMultipole(const double* dp_int3, const double* qp_int6,
+                                const int* ao2at, int n, int nat);
+
+    /// Like residentSolve, but the device Fock additionally gets the GFN2 multipole
+    /// contribution −½·Σ(dp_int·v_dp + qp_int·v_qp) before the eigensolve.
+    /// v_dp is 3×nat, v_qp is 6×nat (column-major). Eigenvalues → eps_out.
+    bool residentSolveMultipole(const double* v_ao, const double* v_dp,
+                                const double* v_qp, int n, double* eps_out);
+
+    /// Atom-resolved multipole moments from the resident density:
+    ///   dp_at(k,iat) = −Σ_{μ∈iat} Σ_ν P_νμ·dp_int[k]_νμ   (3×nat)
+    ///   qp_at(k,iat) = −Σ_{μ∈iat} Σ_ν P_νμ·qp_int[k]_νμ   (6×nat)
+    /// Call after residentDensity (reads the resident P). Column-major outputs.
+    bool residentMultipoleMoments(double* dp_at3, double* qp_at6, int n, int nat);
+
 private:
+    /// Reduce the resident Fock in dC to standard form with the cached L, solve
+    /// it (cusolverDnDsyevd) and back-transform → generalized eigenvectors in dC,
+    /// ascending eigenvalues downloaded to eps_out. Shared by residentSolve and
+    /// residentSolveMultipole (which differ only in how dC's Fock is built).
+    bool eigensolveResidentFock(double* eps_out);
+
     struct Impl;
     std::unique_ptr<Impl> m_impl;
 };

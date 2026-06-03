@@ -19,6 +19,10 @@
 
 #include <fmt/format.h>
 
+#include <algorithm>
+#include <cstring>
+#include <vector>
+
 using curcuma::xtb::MethodType;
 using curcuma::xtb::gpu::XtbGpuContext;
 
@@ -74,9 +78,54 @@ public:
         return true;
     }
 
+    // ---- GFN2 multipole (Stage 2b) ----------------------------------------
+    bool supportsMultipole() const override { return true; }
+
+    bool beginMultipole(const std::array<Eigen::MatrixXd, 3>& dp_int,
+                        const std::array<Eigen::MatrixXd, 6>& qp_int,
+                        const std::vector<int>& ao2at) override
+    {
+        if (!m_ctx || m_n <= 0 || static_cast<int>(ao2at.size()) != m_n) return false;
+        const size_t nn = static_cast<size_t>(m_n) * static_cast<size_t>(m_n);
+        // Pack the 3 dipole / 6 quadrupole integral matrices contiguously. Each
+        // Eigen::MatrixXd is column-major n×n, so block k is its raw buffer.
+        std::vector<double> dp(3 * nn), qp(6 * nn);
+        for (int k = 0; k < 3; ++k) {
+            if (dp_int[k].rows() != m_n || dp_int[k].cols() != m_n) return false;
+            std::memcpy(dp.data() + static_cast<size_t>(k) * nn, dp_int[k].data(), nn * sizeof(double));
+        }
+        for (int k = 0; k < 6; ++k) {
+            if (qp_int[k].rows() != m_n || qp_int[k].cols() != m_n) return false;
+            std::memcpy(qp.data() + static_cast<size_t>(k) * nn, qp_int[k].data(), nn * sizeof(double));
+        }
+        m_nat = *std::max_element(ao2at.begin(), ao2at.end()) + 1;
+        if (m_nat <= 0) return false;
+        return m_ctx->residentBeginMultipole(dp.data(), qp.data(), ao2at.data(), m_n, m_nat);
+    }
+
+    bool solveMultipole(const Eigen::VectorXd& v_ao, const Eigen::MatrixXd& v_dp,
+                        const Eigen::MatrixXd& v_qp, Vector& eps) override
+    {
+        if (!m_ctx || static_cast<int>(v_ao.size()) != m_n
+            || v_dp.rows() != 3 || v_dp.cols() != m_nat
+            || v_qp.rows() != 6 || v_qp.cols() != m_nat) return false;
+        eps.resize(m_n);
+        return m_ctx->residentSolveMultipole(v_ao.data(), v_dp.data(), v_qp.data(),
+                                             m_n, eps.data());
+    }
+
+    bool multipoleMoments(Eigen::MatrixXd& dp_at, Eigen::MatrixXd& qp_at) override
+    {
+        if (!m_ctx || m_nat <= 0) return false;
+        dp_at.resize(3, m_nat);
+        qp_at.resize(6, m_nat);
+        return m_ctx->residentMultipoleMoments(dp_at.data(), qp_at.data(), m_n, m_nat);
+    }
+
 private:
     XtbGpuContext* m_ctx = nullptr;
     int            m_n   = 0;
+    int            m_nat = 0;
 };
 
 } // namespace
@@ -130,18 +179,21 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                     "{}: GPU eigensolver active (cuSOLVER Dsyevd, FP64); "
                     "SCF/integrals/gradient on CPU (Stage 1)", getMethodName()));
 
-            // Stage 2: install the device-resident SCF backend. For GFN1 with the
-            // default Broyden charge mixing, XTB::Calculation keeps H0/S/L and the
+            // Stage 2: install the device-resident SCF backend. With the default
+            // Broyden charge mixing, XTB::Calculation keeps H0/S/L and the
             // density/MO matrices on the device for the whole SCF (begin/solve/
             // density/finalize), so only length-nao vectors cross the bus each
-            // iteration instead of the per-iteration Fock upload of Stage 1. GFN2
-            // and the non-Broyden modes keep the Stage-1 eigensolver hook above.
+            // iteration instead of the per-iteration Fock upload of Stage 1. GFN1
+            // runs the isotropic loop (Stage 2a); GFN2 additionally keeps the
+            // multipole integrals resident and adds the anisotropic Fock + atomic
+            // moments on the device (Stage 2b). Non-Broyden modes keep the
+            // Stage-1 eigensolver hook above.
             m_scf_backend = std::make_unique<XtbGpuScfBackend>(ctx);
             xtb->setGpuScfBackend(m_scf_backend.get());
-            if (CurcumaLogger::get_verbosity() >= 2 && m_method == MethodType::GFN1)
+            if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::info(fmt::format(
-                    "{}: GPU device-resident SCF backend active for GFN1/Broyden "
-                    "(Stage 2)", getMethodName()));
+                    "{}: GPU device-resident SCF backend active (Broyden; "
+                    "GFN1 Stage 2a, GFN2 Stage 2b)", getMethodName()));
         }
     } else {
         CurcumaLogger::warn(fmt::format(
