@@ -1046,10 +1046,10 @@ bool XtbGpuContext::residentBeginMultipole(const double* dp_int3, const double* 
         m_impl->dQpInt.upload(qp_int6, static_cast<int>(6 * nn), m_impl->stream);
         m_impl->dAo2at.upload(ao2at, n, m_impl->stream);
         // Per-iteration multipole potentials / atomic moments.
-        m_impl->dVdp.alloc(3 * nat);
-        m_impl->dVqp.alloc(6 * nat);
-        m_impl->dDpAt.alloc(3 * nat);
-        m_impl->dQpAt.alloc(6 * nat);
+        m_impl->dVdp.ensure(3 * nat);
+        m_impl->dVqp.ensure(6 * nat);
+        m_impl->dDpAt.ensure(3 * nat);
+        m_impl->dQpAt.ensure(6 * nat);
     } catch (...) {
         return false;
     }
@@ -1152,14 +1152,14 @@ bool XtbGpuContext::beginBasis(const XtbGpuBasisData& b)
             m_impl->dValence.upload(zeros.data(), b.nsh, m_impl->stream);
         }
         // Resident integral outputs + per-geometry geometry buffer.
-        m_impl->dCN.alloc(b.nat);
-        m_impl->dSE.alloc(b.nsh);
-        m_impl->dXyz.alloc(3 * b.nat);
-        m_impl->dGamma.alloc(b.nsh * b.nsh);
+        m_impl->dCN.ensure(b.nat);
+        m_impl->dSE.ensure(b.nsh);
+        m_impl->dXyz.ensure(3 * b.nat);
+        m_impl->dGamma.ensure(b.nsh * b.nsh);
         const size_t nn = static_cast<size_t>(b.nao) * static_cast<size_t>(b.nao);
-        m_impl->dS.alloc(static_cast<int>(nn));
-        m_impl->dH0.alloc(static_cast<int>(nn));
-        m_impl->dL.alloc(static_cast<int>(nn));
+        m_impl->dS.ensure(static_cast<int>(nn));
+        m_impl->dH0.ensure(static_cast<int>(nn));
+        m_impl->dL.ensure(static_cast<int>(nn));
         // AO→atom / AO→shell maps (used by the multipole integrals and the
         // overlap-derivative kernel; cheap, uploaded for both methods).
         if (b.ao2at) m_impl->dAo2at.upload(b.ao2at, b.nao, m_impl->stream);
@@ -1167,8 +1167,8 @@ bool XtbGpuContext::beginBasis(const XtbGpuBasisData& b)
         // GFN2: the resident multipole integral buffers (computed by
         // computeIntegrals; no upload). dp_int 3·nn, qp_int 6·nn col-major.
         if (b.is_gfn2) {
-            m_impl->dDpInt.alloc(static_cast<int>(3 * nn));
-            m_impl->dQpInt.alloc(static_cast<int>(6 * nn));
+            m_impl->dDpInt.ensure(static_cast<int>(3 * nn));
+            m_impl->dQpInt.ensure(static_cast<int>(6 * nn));
         }
         // Device Cholesky workspace (size is geometry-constant for fixed nao).
         int lwork = 0;
@@ -1177,7 +1177,7 @@ bool XtbGpuContext::beginBasis(const XtbGpuBasisData& b)
             != CUSOLVER_STATUS_SUCCESS)
             return false;
         m_impl->potrf_lwork = lwork;
-        m_impl->dPotrfWork.alloc(lwork > 0 ? lwork : 1);
+        m_impl->dPotrfWork.ensure(lwork > 0 ? lwork : 1);
         if (m_impl->dInfo.n < 1) m_impl->dInfo.alloc(1);
     } catch (...) {
         return false;
@@ -1284,21 +1284,21 @@ bool XtbGpuContext::residentBeginComputed()
     try {
         // dH0/dS/dL already hold the device-computed integrals (computeIntegrals).
         // Allocate the resident SCF work buffers, like residentBegin but without
-        // uploading any matrix.
-        m_impl->dC.alloc(static_cast<int>(nn));
-        m_impl->dP.alloc(static_cast<int>(nn));
-        m_impl->dCw.alloc(static_cast<int>(nn));
-        m_impl->dEps.alloc(n);
-        m_impl->dVao.alloc(n);
-        m_impl->dOcc.alloc(n);
-        m_impl->dPop.alloc(n);
+        // uploading any matrix. ensure() reuses the allocation across MD/opt steps.
+        m_impl->dC.ensure(static_cast<int>(nn));
+        m_impl->dP.ensure(static_cast<int>(nn));
+        m_impl->dCw.ensure(static_cast<int>(nn));
+        m_impl->dEps.ensure(n);
+        m_impl->dVao.ensure(n);
+        m_impl->dOcc.ensure(n);
+        m_impl->dPop.ensure(n);
         int lwork = 0;
         if (cusolverDnDsyevd_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
                                         CUBLAS_FILL_MODE_LOWER, n, m_impl->dC.ptr, n,
                                         m_impl->dEps.ptr, &lwork) != CUSOLVER_STATUS_SUCCESS)
             return false;
         m_impl->lwork = lwork;
-        m_impl->dWork.alloc(lwork > 0 ? lwork : 1);
+        m_impl->dWork.ensure(lwork > 0 ? lwork : 1);
         if (m_impl->dInfo.n < 1) m_impl->dInfo.alloc(1);
     } catch (...) {
         return false;
@@ -1407,9 +1407,9 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         if (m_impl->dC.n  < static_cast<int>(nn)) m_impl->dC.alloc(static_cast<int>(nn));
         if (m_impl->dVao.n < nao) m_impl->dVao.alloc(nao);
         if (m_impl->dOcc.n < nao) m_impl->dOcc.alloc(nao);
-        m_impl->dQsh.alloc(nsh);
-        m_impl->dGrad.alloc(3 * nat);
-        m_impl->dEdcn.alloc(nat);
+        m_impl->dQsh.ensure(nsh);
+        m_impl->dGrad.ensure(3 * nat);
+        m_impl->dEdcn.ensure(nat);
     } catch (...) { return false; }
 
     // Upload the converged SCF state (P/C symmetric-or-column-major from host).
@@ -1496,10 +1496,10 @@ bool XtbGpuContext::residentBeginMultipoleComputed()
     try {
         // dp_int/qp_int are already resident (computeIntegrals); dAo2at uploaded in
         // beginBasis. Allocate only the per-iteration potential / moment buffers.
-        m_impl->dVdp.alloc(3 * nat);
-        m_impl->dVqp.alloc(6 * nat);
-        m_impl->dDpAt.alloc(3 * nat);
-        m_impl->dQpAt.alloc(6 * nat);
+        m_impl->dVdp.ensure(3 * nat);
+        m_impl->dVqp.ensure(6 * nat);
+        m_impl->dDpAt.ensure(3 * nat);
+        m_impl->dQpAt.ensure(6 * nat);
     } catch (...) {
         return false;
     }

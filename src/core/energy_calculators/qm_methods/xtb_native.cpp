@@ -377,8 +377,15 @@ double XTB::Calculation(bool gradient)
         GpuBasisFlat gbf;
         GpuH0Flat    gh0;
         exportGpuBasis(gbf, gh0);
-        const bool computed = m_gpu_scf->beginBasis(gbf, gh0)
-                           && m_gpu_scf->beginComputed(gbf.xyz_bohr);
+        // beginBasis uploads the molecule-constant arrays + allocates the device
+        // buffers ONCE per molecule (m_gpu_basis_dirty); MD/opt steps skip it and
+        // re-upload only xyz inside beginComputed. Claude Generated.
+        bool basis_ok = true;
+        if (m_gpu_basis_dirty) {
+            basis_ok = m_gpu_scf->beginBasis(gbf, gh0);
+            if (basis_ok) m_gpu_basis_dirty = false;
+        }
+        const bool computed = basis_ok && m_gpu_scf->beginComputed(gbf.xyz_bohr);
         if (m_method == MethodType::GFN1) {
             use_gpu_resident = computed || m_gpu_scf->begin(m_H0, m_S, m_X);
             if (verb >= 2)
@@ -962,6 +969,7 @@ void XTB::buildBasis()
     }
     m_basis.nsh = shell_cursor;
     m_basis.nao = ao_cursor;
+    m_gpu_basis_dirty = true;   // basis changed → re-upload to the device once
 }
 
 void XTB::buildH0Data()

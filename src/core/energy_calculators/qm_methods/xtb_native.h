@@ -849,6 +849,10 @@ private:
     // Optional device-resident SCF backend (GPU port Stage 2); non-owning, set by
     // the GPU wrapper, default null → CPU SCF unchanged. Claude Generated.
     GpuScfBackend* m_gpu_scf = nullptr;
+    // GPU: the molecule-constant flattened basis is uploaded to the device only
+    // when the basis is (re)built (set in buildBasis), not every geometry — so
+    // MD/opt steps re-upload only xyz and recompute the integrals. Claude Generated.
+    bool m_gpu_basis_dirty = true;
 
     Vector m_coordination_numbers;   ///< CN, filled in Calculation()
 
