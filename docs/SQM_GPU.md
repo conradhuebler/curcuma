@@ -135,13 +135,44 @@ Measured (2026-06-03, RTX 5080, CUDA 13.1):
 - `release/` (canonical, no CUDA) rebuilds with the core edits and passes the CPU
   `native_xtb` + `gfn{1,2}_validation` suites — the seam is `#ifdef`-free.
 
+## Stage 3 — integrals on the device (2026-06-03, DONE + validated)
+
+The one-time-per-geometry integral build now runs on the GPU, so the resident SCF
+**computes** S/H0/L instead of receiving them — no nao²-sized matrix is uploaded
+per geometry. New device header `cuda/xtb_gpu_integrals_device.cuh` carries the
+`__device__` ports; `XTB::exportGpuBasis` flattens the basis/H0 (post-ortho
+primitives, GFN1 valence flags, per-shell Coulomb hardness, ao2at/ao2sh) into
+CUDA-free bundles; `XtbGpuContext::beginBasis` uploads them once and
+`computeIntegrals` runs `k_cn → k_self_energy → k_overlap_h0 → cusolverDnDpotrf(L)
+→ k_gamma (+k_multipole_ints for GFN2)`. The seam prefers the device-computed path
+and falls back to the Stage-2 upload. Each kernel matches the CPU **elementwise**:
+CN/self-energy bit-identical, S/H0/L ~1e-15, γ ~5e-17, GFN2 dp_int/qp_int ~1e-13
+(`ctest -L gpu_integrals`, 42 component tests).
+
+## Stage 4 — nuclear gradient on the device (2026-06-03, DONE + validated)
+
+The native gradient runs on the GPU when the SCF is device-resident, so
+`-opt`/`-md` are **fully device-resident** (integrals + SCF + gradient; only xyz
+up, gradient+energy down per step). GFN1: repulsion / on-site CN / H0-Pulay
+(reusing the validated `d_cgto_overlap_grad`) / isotropic Coulomb on the GPU
+(`k_grad_*`), energy-weighted density `W=2·Σ ε_i c_i c_iᵀ` built on the device.
+GFN2 adds the multipole-integral Pulay (`d_cgto_multipole_grad_transformed`) on the
+GPU; the direct SD/DD/SQ interaction + mrad/CN chain (section 5) and the dispersion
+gradient + CN chain-rule stay on the host. Full gradient device-vs-CPU matches to
+**~1e-15 Eh/Å** on H2O/CH4/NH3/C6H6/HCN/triose (both methods, `ctest -L
+gpu_gradient`); GPU `-opt` converges to the same geometry/energy as CPU;
+compute-sanitizer 0 errors. The `γ`/CN host-consumer choice was option (a) — γ is
+computed on the device and downloaded once per geometry (nsh², cheap); moving the
+Coulomb gemv on-device (option b) would *add* per-iteration transfers until the
+whole isotropic potential moves to the device.
+
 ## Notes / limits
 
 - GeForce FP64 is ~1/64 of FP32, so a pure-FP64 resident GFN1 SCF is **not**
   necessarily faster than the 8-core MKL CPU on small/medium systems; Stage 2a is
-  a correctness + residency milestone. The throughput win arrives with Stage 5
-  (FP32 bulk) and device-resident `-opt`/`-md` (Stage 4, no host round-trip per
-  step).
+  a correctness + residency milestone. Device-resident `-opt`/`-md` (no host
+  round-trip per step) landed with Stage 4; the remaining throughput lever is
+  mixed precision (FP32 bulk + FP64 refinement).
 - Memory headroom (16 GB): `complex` (231 atoms) is ~tens of MB; the dense path's
   practical ceiling is ~`polymer` (1410 atoms, ~3–4 GB). Larger → large-system
   modes (CPU-orchestrated; the GPU dense kernel is the per-block solver).
