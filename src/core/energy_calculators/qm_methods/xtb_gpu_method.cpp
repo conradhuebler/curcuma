@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 using curcuma::xtb::MethodType;
@@ -306,6 +307,10 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                     "{}: GPU device-resident SCF backend active (Broyden; "
                     "GFN1 Stage 2a, GFN2 Stage 2b)", getMethodName()));
         }
+        // Default the host work to several cores (the SCF/gradient are on the GPU,
+        // but the host integral build + per-iter potential are not). Overridden by
+        // an explicit -threads via setThreadCount. Claude Generated.
+        setThreadCount(0);
     } else {
         CurcumaLogger::warn(fmt::format(
             "{}: no usable CUDA device; running CPU path", getMethodName()));
@@ -327,7 +332,22 @@ bool XtbGpuComputationalMethod::hasGradient() const { return m_cpu->hasGradient(
 
 std::string XtbGpuComputationalMethod::getMethodName() const { return m_cpu->getMethodName(); }
 bool XtbGpuComputationalMethod::isThreadSafe() const { return m_cpu->isThreadSafe(); }
-void XtbGpuComputationalMethod::setThreadCount(int threads) { m_cpu->setThreadCount(threads); }
+void XtbGpuComputationalMethod::setThreadCount(int threads)
+{
+    // On the GPU path the eigensolve + gradient run on the device, but the host
+    // still does the per-geometry integral build and the per-iteration isotropic
+    // potential. Those parallelise well, so default to several host cores when no
+    // explicit -threads is given — otherwise a `-gpu cuda` run without `-threads`
+    // runs that host work serial and loses to the threaded CPU. An explicit
+    // -threads N (>1) is respected; capped at 8 (the host work stops scaling past
+    // that for these sizes, and the device eigensolve is the real bottleneck).
+    // Claude Generated.
+    if (m_gpu && m_gpu->ok() && threads <= 1) {
+        const unsigned hc = std::thread::hardware_concurrency();
+        threads = (hc > 0) ? static_cast<int>(std::min(hc, 8u)) : 4;
+    }
+    m_cpu->setThreadCount(threads);
+}
 
 void XtbGpuComputationalMethod::setParameters(const json& params) { m_cpu->setParameters(params); }
 json XtbGpuComputationalMethod::getParameters() const { return m_cpu->getParameters(); }
