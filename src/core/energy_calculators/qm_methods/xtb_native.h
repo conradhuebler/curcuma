@@ -314,7 +314,8 @@ struct GpuScfBackend {
     virtual ~GpuScfBackend() = default;
     virtual bool begin(const Matrix& H0, const Matrix& S,
                        const Eigen::MatrixXd& L) = 0;
-    virtual bool solve(const Eigen::VectorXd& v_ao, Vector& eps) = 0;
+    // fp32=true solves this SCF step in single precision (far-from-convergence).
+    virtual bool solve(const Eigen::VectorXd& v_ao, Vector& eps, bool fp32 = false) = 0;
     virtual bool density(const Eigen::VectorXd& occ, int ncol,
                          Eigen::VectorXd& pop_ao, double& band) = 0;
     virtual bool finalize(Matrix& P, Matrix& C) = 0;
@@ -370,7 +371,7 @@ struct GpuScfBackend {
     virtual bool solveMultipole(const Eigen::VectorXd& v_ao,
                                 const Eigen::MatrixXd& v_dp,
                                 const Eigen::MatrixXd& v_qp,
-                                Vector& eps) { (void)v_ao; (void)v_dp; (void)v_qp; (void)eps; return false; }
+                                Vector& eps, bool fp32 = false) { (void)v_ao; (void)v_dp; (void)v_qp; (void)eps; (void)fp32; return false; }
     virtual bool multipoleMoments(Eigen::MatrixXd& dp_at, Eigen::MatrixXd& qp_at) { (void)dp_at; (void)qp_at; return false; }
 };
 

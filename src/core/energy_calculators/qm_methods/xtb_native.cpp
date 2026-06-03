@@ -469,10 +469,14 @@ double XTB::Calculation(bool gradient)
                 v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
             t_fock = clock::now();   // Fock build is fused into solve() on the device
 
+            // Mixed precision (GPU): solve in FP32 while far from convergence
+            // (max|dq| above the threshold; iter 0 starts FP32 via dq_prev=1e30),
+            // reverting to FP64 near convergence so the converged energy is FP64.
+            m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
             // Device: F = H0 − ½·S·(v_ao⊕v_ao) [+ GFN2 multipole]; solve F C = S C ε.
             const bool solve_ok = gpu_multipole
-                ? m_gpu_scf->solveMultipole(v_ao, m_pot.v_dp, m_pot.v_qp, m_wfn.eps)
-                : m_gpu_scf->solve(v_ao, m_wfn.eps);
+                ? m_gpu_scf->solveMultipole(v_ao, m_pot.v_dp, m_pot.v_qp, m_wfn.eps, m_eig_fp32)
+                : m_gpu_scf->solve(v_ao, m_wfn.eps, m_eig_fp32);
             if (!solve_ok) {
                 CurcumaLogger::warn("XTB::Calculation: GPU resident solve failed at iteration "
                                     + std::to_string(iter));
@@ -618,7 +622,13 @@ double XTB::Calculation(bool gradient)
         // Check convergence (after first iteration). On convergence we break
         // here, so m_wfn keeps the consistent output charges x_out (the Broyden
         // mix below is skipped — no re-mixing of the converged state).
-        if (iter > 0) {
+        // Never accept convergence on a mixed-precision (FP32) step — otherwise a
+        // fast-converging molecule (e.g. LiH) can declare convergence on an
+        // FP32-accurate density (~1e-7 error). Requiring !m_eig_fp32 forces a final
+        // FP64 polish: once max|dq| drops below the FP32 threshold the next step is
+        // FP64, and that step is the one allowed to converge. No-op when mixed
+        // precision is off (m_eig_fp32 always false). Claude Generated.
+        if (iter > 0 && !m_eig_fp32) {
             if (checkConvergence_impl(q_sh_old, q_sh_new,
                                        e_total_old, e_scc, thresh)) {
                 m_scf_converged = true;

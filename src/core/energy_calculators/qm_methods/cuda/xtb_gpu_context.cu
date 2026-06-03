@@ -50,6 +50,13 @@ struct XtbGpuContext::Impl {
     CudaBuffer<int>    dInfo;            // cuSOLVER devInfo
     int                lwork = 0;
 
+    // Mixed-precision (FP32) eigensolve buffers — far-from-convergence SCF
+    // iterations solve in FP32 (≫ faster on consumer FP64-limited GPUs), the
+    // FP64 path takes over near convergence so the converged energy is FP64.
+    CudaBuffer<float>  dCf, dLf, dWorkf; // F/eigenvectors, lower L, ssyevd workspace
+    CudaBuffer<float>  dEpsf;            // FP32 eigenvalues
+    int                lwork_f32 = 0;
+
     // GFN2 multipole (Stage 2b). dDpInt holds the 3 dipole AO-integral matrices
     // contiguously (3·n·n), dQpInt the 6 quadrupole matrices (6·n·n); both
     // geometry-constant. dVdp/dVqp are the per-iteration multipole potentials
@@ -586,6 +593,18 @@ __global__ void k_build_fock_iso(double* F, const double* H0, const double* S,
     }
 }
 
+// FP64↔FP32 element-wise conversion (mixed-precision eigensolve).
+__global__ void k_d2f(const double* __restrict__ in, float* __restrict__ out, size_t n)
+{
+    const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = static_cast<float>(in[i]);
+}
+__global__ void k_f2d(const float* __restrict__ in, double* __restrict__ out, size_t n)
+{
+    const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = static_cast<double>(in[i]);
+}
+
 // Scale the leading ncol columns of C by the occupation: Cw(:,k) = occ[k]·C(:,k).
 __global__ void k_scale_cols(double* Cw, const double* C, const double* occ,
                              int n, int ncol)
@@ -845,11 +864,65 @@ bool XtbGpuContext::residentBegin(const double* H0, const double* S,
 // back-transform → generalized eigenvectors in dC, eigenvalues → eps_out. The
 // device analogue of the CPU dsygst+dsyevd+dtrsm path, reusing the resident L (no
 // per-iteration L upload). Shared by residentSolve and residentSolveMultipole.
-bool XtbGpuContext::eigensolveResidentFock(double* eps_out)
+bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32)
 {
     const int n = m_impl->resident_n;
     cudaStream_t stream = m_impl->stream;
     const double one = 1.0;
+    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+
+    if (fp32) {
+        // Mixed precision: reduce + diagonalise + back-transform in FP32, then
+        // convert the eigenvectors/values back to FP64 so the resident density
+        // (FP64) is unchanged. ~5–10× faster than FP64 on consumer GPUs.
+        try {
+            if (m_impl->dCf.n   < static_cast<int>(nn)) m_impl->dCf.alloc(static_cast<int>(nn));
+            if (m_impl->dLf.n   < static_cast<int>(nn)) m_impl->dLf.alloc(static_cast<int>(nn));
+            if (m_impl->dEpsf.n < n)                    m_impl->dEpsf.alloc(n);
+        } catch (...) { return false; }
+        const int b = 256;
+        const int gnn = static_cast<int>((nn + b - 1) / b);
+        k_d2f<<<gnn, b, 0, stream>>>(m_impl->dC.ptr, m_impl->dCf.ptr, nn);  // F → FP32
+        k_d2f<<<gnn, b, 0, stream>>>(m_impl->dL.ptr, m_impl->dLf.ptr, nn);  // L → FP32
+        if (cudaGetLastError() != cudaSuccess) return false;
+        const float onef = 1.0f;
+        if (cublasStrsm(m_impl->cublas, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_LOWER,
+                        CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, n, &onef,
+                        m_impl->dLf.ptr, n, m_impl->dCf.ptr, n) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        if (cublasStrsm(m_impl->cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
+                        CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, n, &onef,
+                        m_impl->dLf.ptr, n, m_impl->dCf.ptr, n) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        int lwork = 0;
+        if (cusolverDnSsyevd_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
+                                        CUBLAS_FILL_MODE_LOWER, n, m_impl->dCf.ptr, n,
+                                        m_impl->dEpsf.ptr, &lwork) != CUSOLVER_STATUS_SUCCESS)
+            return false;
+        if (m_impl->lwork_f32 < lwork) {
+            try { m_impl->dWorkf.alloc(lwork > 0 ? lwork : 1); } catch (...) { return false; }
+            m_impl->lwork_f32 = lwork;
+        }
+        if (cusolverDnSsyevd(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
+                             n, m_impl->dCf.ptr, n, m_impl->dEpsf.ptr, m_impl->dWorkf.ptr,
+                             m_impl->lwork_f32, m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
+            return false;
+        if (cublasStrsm(m_impl->cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
+                        CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, n, &onef,
+                        m_impl->dLf.ptr, n, m_impl->dCf.ptr, n) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        k_f2d<<<gnn, b, 0, stream>>>(m_impl->dCf.ptr, m_impl->dC.ptr, nn);  // eigvecs → FP64
+        k_f2d<<<(n + b - 1) / b, b, 0, stream>>>(m_impl->dEpsf.ptr, m_impl->dEps.ptr, n);
+        if (cudaGetLastError() != cudaSuccess) return false;
+
+        int info = 1;
+        if (cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
+                            cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+            return false;
+        m_impl->dEps.download(eps_out, n, stream);
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        return info == 0;
+    }
 
     // dC holds F → Ã = L⁻¹·F·L⁻ᵀ → C̃ → C.
     if (cublasDtrsm(m_impl->cublas, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_LOWER,
@@ -879,7 +952,7 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out)
     return info == 0;
 }
 
-bool XtbGpuContext::residentSolve(const double* v_ao, int n, double* eps_out)
+bool XtbGpuContext::residentSolve(const double* v_ao, int n, double* eps_out, bool fp32)
 {
     if (!ok() || n <= 0 || n != m_impl->resident_n || !v_ao || !eps_out)
         return false;
@@ -896,7 +969,7 @@ bool XtbGpuContext::residentSolve(const double* v_ao, int n, double* eps_out)
     if (cudaGetLastError() != cudaSuccess)
         return false;
 
-    return eigensolveResidentFock(eps_out);
+    return eigensolveResidentFock(eps_out, fp32);
 }
 
 bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
@@ -985,7 +1058,8 @@ bool XtbGpuContext::residentBeginMultipole(const double* dp_int3, const double* 
 }
 
 bool XtbGpuContext::residentSolveMultipole(const double* v_ao, const double* v_dp,
-                                           const double* v_qp, int n, double* eps_out)
+                                           const double* v_qp, int n, double* eps_out,
+                                           bool fp32)
 {
     if (!ok() || n <= 0 || n != m_impl->resident_n || m_impl->resident_nat <= 0
         || !v_ao || !v_dp || !v_qp || !eps_out)
@@ -1011,7 +1085,7 @@ bool XtbGpuContext::residentSolveMultipole(const double* v_ao, const double* v_d
     if (cudaGetLastError() != cudaSuccess)
         return false;
 
-    return eigensolveResidentFock(eps_out);
+    return eigensolveResidentFock(eps_out, fp32);
 }
 
 bool XtbGpuContext::residentMultipoleMoments(double* dp_at3, double* qp_at6, int n, int nat)

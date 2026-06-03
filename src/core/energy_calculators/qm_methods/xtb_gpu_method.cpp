@@ -52,11 +52,11 @@ public:
         return m_ctx->residentBegin(Hcm.data(), Scm.data(), L.data(), n);
     }
 
-    bool solve(const Eigen::VectorXd& v_ao, Vector& eps) override
+    bool solve(const Eigen::VectorXd& v_ao, Vector& eps, bool fp32 = false) override
     {
         if (!m_ctx || static_cast<int>(v_ao.size()) != m_n) return false;
         eps.resize(m_n);
-        return m_ctx->residentSolve(v_ao.data(), m_n, eps.data());
+        return m_ctx->residentSolve(v_ao.data(), m_n, eps.data(), fp32);
     }
 
     bool density(const Eigen::VectorXd& occ, int ncol,
@@ -104,14 +104,14 @@ public:
     }
 
     bool solveMultipole(const Eigen::VectorXd& v_ao, const Eigen::MatrixXd& v_dp,
-                        const Eigen::MatrixXd& v_qp, Vector& eps) override
+                        const Eigen::MatrixXd& v_qp, Vector& eps, bool fp32 = false) override
     {
         if (!m_ctx || static_cast<int>(v_ao.size()) != m_n
             || v_dp.rows() != 3 || v_dp.cols() != m_nat
             || v_qp.rows() != 6 || v_qp.cols() != m_nat) return false;
         eps.resize(m_n);
         return m_ctx->residentSolveMultipole(v_ao.data(), v_dp.data(), v_qp.data(),
-                                             m_n, eps.data());
+                                             m_n, eps.data(), fp32);
     }
 
     bool multipoleMoments(Eigen::MatrixXd& dp_at, Eigen::MatrixXd& qp_at) override
@@ -295,6 +295,12 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
             // Stage-1 eigensolver hook above.
             m_scf_backend = std::make_unique<XtbGpuScfBackend>(ctx);
             xtb->setGpuScfBackend(m_scf_backend.get());
+            // FP64 is ~1/64 of FP32 on consumer GPUs, so the per-iteration FP64
+            // eigensolve is the bottleneck. Default mixed precision ON for the GPU
+            // path: far-from-convergence iterations solve in FP32, reverting to
+            // FP64 near convergence (max|dq| < threshold) so the converged energy
+            // stays FP64 (gpu_gfn{1,2}_validation @1e-8 holds). Claude Generated.
+            xtb->setMixedPrecision(true);
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::info(fmt::format(
                     "{}: GPU device-resident SCF backend active (Broyden; "

@@ -87,8 +87,9 @@ public:
 
     /// One SCF step: build F = H0 − ½·S·(v_ao⊕v_ao) on the device, solve
     /// F C = S C ε with the cached L, write the ascending eigenvalues to eps_out
-    /// (length n). The eigenvectors C stay resident. Returns false on error.
-    bool residentSolve(const double* v_ao, int n, double* eps_out);
+    /// (length n). The eigenvectors C stay resident. fp32=true solves in single
+    /// precision (far-from-convergence iterations). Returns false on error.
+    bool residentSolve(const double* v_ao, int n, double* eps_out, bool fp32 = false);
 
     /// Build the density P = C·diag(occ)·Cᵀ over the leading ncol columns, then
     /// return the Mulliken AO populations pop_ao_out(μ)=Σ_ν P_μν·S_μν (length n)
@@ -116,7 +117,8 @@ public:
     /// contribution −½·Σ(dp_int·v_dp + qp_int·v_qp) before the eigensolve.
     /// v_dp is 3×nat, v_qp is 6×nat (column-major). Eigenvalues → eps_out.
     bool residentSolveMultipole(const double* v_ao, const double* v_dp,
-                                const double* v_qp, int n, double* eps_out);
+                                const double* v_qp, int n, double* eps_out,
+                                bool fp32 = false);
 
     /// Atom-resolved multipole moments from the resident density:
     ///   dp_at(k,iat) = −Σ_{μ∈iat} Σ_ν P_νμ·dp_int[k]_νμ   (3×nat)
@@ -235,7 +237,7 @@ private:
     /// it (cusolverDnDsyevd) and back-transform → generalized eigenvectors in dC,
     /// ascending eigenvalues downloaded to eps_out. Shared by residentSolve and
     /// residentSolveMultipole (which differ only in how dC's Fock is built).
-    bool eigensolveResidentFock(double* eps_out);
+    bool eigensolveResidentFock(double* eps_out, bool fp32);
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;
