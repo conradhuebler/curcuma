@@ -171,8 +171,15 @@ whole isotropic potential moves to the device.
 - GeForce FP64 is ~1/64 of FP32, so a pure-FP64 resident GFN1 SCF is **not**
   necessarily faster than the 8-core MKL CPU on small/medium systems; Stage 2a is
   a correctness + residency milestone. Device-resident `-opt`/`-md` (no host
-  round-trip per step) landed with Stage 4; the remaining throughput lever is
-  mixed precision (FP32 bulk + FP64 refinement).
+  round-trip per step) landed with Stage 4.
+- **Mixed-precision eigensolve (default ON for `-gpu`)**: far-from-convergence SCF
+  iterations solve in FP32 (`cusolverDnSsyevd`), reverting to FP64 near convergence
+  (max|dq| < `fp32_threshold`, default 1e-3) so the converged energy is FP64 and
+  the 1e-8 gate holds. Convergence is never accepted on an FP32 step. This closed
+  the gap to the threaded CPU: `complex`/231 gfn2 `-sp -threads 8` eigensolve
+  519→278 ms, TOTAL ~515 ms — **~8% faster than CPU `-threads 8`** (~554 ms). gfn1
+  is on par (both bounded by the host D3 finite-difference dispersion gradient).
+  Use `-threads N` so the host setup/potential build parallelise alongside the GPU.
 - Memory headroom (16 GB): `complex` (231 atoms) is ~tens of MB; the dense path's
   practical ceiling is ~`polymer` (1410 atoms, ~3–4 GB). Larger → large-system
   modes (CPU-orchestrated; the GPU dense kernel is the per-block solver).
