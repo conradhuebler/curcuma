@@ -71,6 +71,35 @@ public:
                                   double*       C_colmajor,
                                   double*       eps);
 
+    /* ----- Device-resident GFN1 SCF (Stage 2) ---------------------------- *
+     * These four calls keep H0, S, the Cholesky factor L and the per-iteration
+     * density P and MO coefficients C RESIDENT on the device for one geometry,
+     * so only length-n vectors cross the bus inside the SCF loop. All matrices
+     * are column-major n×n; H0 and S are symmetric, so a row-major host buffer
+     * may be passed unchanged. The driving SCF loop (mixing, energies,
+     * occupation, convergence) stays on the host. Claude Generated. */
+
+    /// Upload the geometry-constant H0, overlap S and lower Cholesky L (S=L·Lᵀ);
+    /// allocate the resident F/C/P work buffers + the cuSOLVER workspace. Once
+    /// per geometry, before the SCF loop. Returns false on any CUDA error.
+    bool residentBegin(const double* H0_colmajor, const double* S_colmajor,
+                       const double* L_colmajor, int n);
+
+    /// One SCF step: build F = H0 − ½·S·(v_ao⊕v_ao) on the device, solve
+    /// F C = S C ε with the cached L, write the ascending eigenvalues to eps_out
+    /// (length n). The eigenvectors C stay resident. Returns false on error.
+    bool residentSolve(const double* v_ao, int n, double* eps_out);
+
+    /// Build the density P = C·diag(occ)·Cᵀ over the leading ncol columns, then
+    /// return the Mulliken AO populations pop_ao_out(μ)=Σ_ν P_μν·S_μν (length n)
+    /// and the band energy band_out = Σ_μν P_μν·H0_μν. P stays resident.
+    bool residentDensity(const double* occ, int ncol, int n,
+                         double* pop_ao_out, double* band_out);
+
+    /// Download the converged density and MO coefficients to the host (column
+    /// major; symmetric P may be read as row-major). Called once after the loop.
+    bool residentFinalize(double* P_colmajor, double* C_colmajor, int n);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;

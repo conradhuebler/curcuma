@@ -581,6 +581,83 @@ void XTB::updatePopulations(const Matrix& S)
 }
 
 /* ------------------------------------------------------------------ *
+ *  occupationsFromEps()  (Claude Generated, GPU port Stage 2)         *
+ *                                                                    *
+ *  Occupation numbers for the device-resident density build, a       *
+ *  bit-faithful copy of the occupation logic inside solveEigen() so   *
+ *  the GPU loop produces the same P = C·diag(occ)·Cᵀ as the CPU path. *
+ *  Fills occ (length nao) and ncol (leading columns with weight).     *
+ *    T > 0 : Fermi–Dirac smearing (bisect Fermi level).               *
+ *    T = 0 : integer closed-shell (2 per occupied orbital).           *
+ *  Keep in sync with solveEigen (xtb_scf.cpp).                        *
+ * ------------------------------------------------------------------ */
+void XTB::occupationsFromEps(const Vector& eps,
+                             Eigen::VectorXd& occ, int& ncol) const
+{
+    const int nao = m_basis.nao;
+    occ.setZero(nao);
+    ncol = 0;
+    if (m_electronic_temp > 0.0) {
+        const double kT = m_electronic_temp * 3.166808e-6;  // K → Hartree
+        const double n_elec = m_wfn.nocc;
+        double mu_lo = eps.minCoeff() - 1.0;
+        double mu_hi = eps.maxCoeff() + 1.0;
+        for (int bisect = 0; bisect < 100; ++bisect) {
+            const double mu = 0.5 * (mu_lo + mu_hi);
+            double n_sum = 0.0;
+            for (int i = 0; i < nao; ++i) {
+                const double x = (eps(i) - mu) / kT;
+                n_sum += 2.0 / (1.0 + std::exp(std::min(x, 500.0)));
+            }
+            if (n_sum > n_elec) mu_hi = mu;
+            else                mu_lo = mu;
+            if (mu_hi - mu_lo < 1e-14) break;
+        }
+        const double mu_f = 0.5 * (mu_lo + mu_hi);
+        for (int i = 0; i < nao; ++i) {
+            const double x = (eps(i) - mu_f) / kT;
+            occ(i) = 2.0 / (1.0 + std::exp(std::min(x, 500.0)));
+            if (occ(i) > 1.0e-12) ncol = i + 1;
+        }
+    } else {
+        const int nocc = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
+        const int n = std::max(0, std::min(nocc, nao));
+        for (int i = 0; i < n; ++i) occ(i) = 2.0;
+        ncol = n;
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ *  updatePopulationsFromPopAo()  (Claude Generated, GPU port Stage 2) *
+ *                                                                    *
+ *  Shell/atom Mulliken charges from precomputed AO populations        *
+ *    pop_ao(μ) = Σ_ν P_μν·S_μν      (= Σ_ν P_μν·S_νμ, S symmetric)   *
+ *  so n_sh(s) = Σ_{μ∈s} pop_ao(μ). Bit-faithful to updatePopulations  *
+ *  (xtb_scf.cpp) minus the GFN2 multipole-moment block (GFN1 path).   *
+ * ------------------------------------------------------------------ */
+void XTB::updatePopulationsFromPopAo(const Eigen::VectorXd& pop_ao)
+{
+    const int nsh = m_basis.nsh;
+
+    Vector n_sh = Vector::Zero(nsh);
+    for (int s = 0; s < nsh; ++s) {
+        const int ao_start = m_basis.iao_sh[s];
+        const int ao_nao   = m_basis.nao_sh[s];
+        for (int mu = ao_start; mu < ao_start + ao_nao; ++mu)
+            n_sh(s) += pop_ao(mu);
+    }
+
+    m_wfn.q_sh = m_wfn.n0_sh - n_sh;
+
+    m_wfn.n_at.setZero(m_atomcount);
+    m_wfn.q_at.setZero(m_atomcount);
+    for (int s = 0; s < nsh; ++s)
+        m_wfn.n_at(m_basis.sh2at[s]) += n_sh(s);
+    for (int i = 0; i < m_atomcount; ++i)
+        m_wfn.q_at(i) = m_wfn.n0_at(i) - m_wfn.n_at(i);
+}
+
+/* ------------------------------------------------------------------ *
  *  SCF convergence check.                                            *
  *  Returns true when max |Δq| < threshold and |ΔE| < threshold.      *
  * ------------------------------------------------------------------ */

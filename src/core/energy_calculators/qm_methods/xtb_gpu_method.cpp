@@ -22,6 +22,65 @@
 using curcuma::xtb::MethodType;
 using curcuma::xtb::gpu::XtbGpuContext;
 
+namespace {
+
+/**
+ * @brief Concrete device-resident SCF backend (GPU port Stage 2, Claude Generated).
+ *
+ * Adapts the column-major XtbGpuContext resident kernels to the project-typed
+ * GpuScfBackend interface the core XTB calls. Owns nothing but a context pointer
+ * (the wrapper owns both). H0/S are symmetric, so the row-major→column-major copy
+ * (Eigen::MatrixXd = H0) preserves values; L (m_X) is already column-major.
+ */
+class XtbGpuScfBackend : public curcuma::xtb::GpuScfBackend {
+public:
+    explicit XtbGpuScfBackend(XtbGpuContext* ctx) : m_ctx(ctx) {}
+
+    bool begin(const Matrix& H0, const Matrix& S, const Eigen::MatrixXd& L) override
+    {
+        const int n = static_cast<int>(H0.rows());
+        if (!m_ctx || n <= 0 || S.rows() != n || L.rows() != n || L.cols() != n)
+            return false;
+        m_n = n;
+        // Column-major copies of the symmetric H0/S; Hcm.data()[i+j*n] == H0(i,j).
+        Eigen::MatrixXd Hcm = H0;
+        Eigen::MatrixXd Scm = S;
+        return m_ctx->residentBegin(Hcm.data(), Scm.data(), L.data(), n);
+    }
+
+    bool solve(const Eigen::VectorXd& v_ao, Vector& eps) override
+    {
+        if (!m_ctx || static_cast<int>(v_ao.size()) != m_n) return false;
+        eps.resize(m_n);
+        return m_ctx->residentSolve(v_ao.data(), m_n, eps.data());
+    }
+
+    bool density(const Eigen::VectorXd& occ, int ncol,
+                 Eigen::VectorXd& pop_ao, double& band) override
+    {
+        if (!m_ctx || ncol < 0 || ncol > m_n) return false;
+        pop_ao.resize(m_n);
+        band = 0.0;
+        return m_ctx->residentDensity(occ.data(), ncol, m_n, pop_ao.data(), &band);
+    }
+
+    bool finalize(Matrix& P, Matrix& C) override
+    {
+        if (!m_ctx) return false;
+        Eigen::MatrixXd Pcm(m_n, m_n), Ccm(m_n, m_n);  // column-major device layout
+        if (!m_ctx->residentFinalize(Pcm.data(), Ccm.data(), m_n)) return false;
+        P = Pcm;   // → row-major project Matrix, values preserved (P symmetric)
+        C = Ccm;   // col-major eigenvectors → row-major, values preserved
+        return true;
+    }
+
+private:
+    XtbGpuContext* m_ctx = nullptr;
+    int            m_n   = 0;
+};
+
+} // namespace
+
 XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const json& config)
     : m_method(method)
 {
@@ -70,6 +129,19 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                 CurcumaLogger::info(fmt::format(
                     "{}: GPU eigensolver active (cuSOLVER Dsyevd, FP64); "
                     "SCF/integrals/gradient on CPU (Stage 1)", getMethodName()));
+
+            // Stage 2: install the device-resident SCF backend. For GFN1 with the
+            // default Broyden charge mixing, XTB::Calculation keeps H0/S/L and the
+            // density/MO matrices on the device for the whole SCF (begin/solve/
+            // density/finalize), so only length-nao vectors cross the bus each
+            // iteration instead of the per-iteration Fock upload of Stage 1. GFN2
+            // and the non-Broyden modes keep the Stage-1 eigensolver hook above.
+            m_scf_backend = std::make_unique<XtbGpuScfBackend>(ctx);
+            xtb->setGpuScfBackend(m_scf_backend.get());
+            if (CurcumaLogger::get_verbosity() >= 2 && m_method == MethodType::GFN1)
+                CurcumaLogger::info(fmt::format(
+                    "{}: GPU device-resident SCF backend active for GFN1/Broyden "
+                    "(Stage 2)", getMethodName()));
         }
     } else {
         CurcumaLogger::warn(fmt::format(

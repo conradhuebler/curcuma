@@ -250,6 +250,44 @@ struct Wavefunction {
 };
 
 /* ------------------------------------------------------------------------- *
+ *  Device-resident SCF backend (Claude Generated, GPU port Stage 2).
+ *
+ *  Abstract seam that lets the SCF loop offload its heavy linear algebra to a
+ *  GPU while keeping H0/S/L (and the per-iteration density and MO coefficients)
+ *  RESIDENT on the device — so only small length-nao vectors cross the bus each
+ *  iteration, never the nao×nao matrices that Stage 1 still re-uploaded. The
+ *  interface speaks only project types (Matrix/Vector/Eigen), so the core XTB
+ *  class stays free of every CUDA header; the concrete backend (built by nvcc in
+ *  the GPU wrapper) owns the device context.
+ *
+ *  Contract (one calculation = one geometry; GFN1 isotropic Fock only):
+ *    begin(H0,S,L)  — upload the geometry-constant H0, overlap S and its lower
+ *                     Cholesky factor L (S = L·Lᵀ, column-major); allocate the
+ *                     resident F/C/P work buffers. Called once before the loop.
+ *    solve(v_ao,eps)— build F = H0 − ½·S·(v_ao⊕v_ao) on the device, solve the
+ *                     generalized eigenproblem F C = S C ε with the cached L,
+ *                     return ascending eps (C stays resident).
+ *    density(occ,ncol,pop_ao,band)
+ *                   — P = C·diag(occ)·Cᵀ over the leading ncol columns; return
+ *                     the Mulliken AO populations pop_ao(μ) = Σ_ν P_μν·S_μν and
+ *                     the band energy band = Σ_μν P_μν·H0_μν (P stays resident).
+ *    finalize(P,C)  — download the converged P and C to the host for the
+ *                     post-SCF energies and the (still CPU) gradient.
+ *
+ *  Any method returning false makes the caller fall back to the CPU path for the
+ *  whole calculation, so an unavailable / failing device never corrupts results.
+ * ------------------------------------------------------------------------- */
+struct GpuScfBackend {
+    virtual ~GpuScfBackend() = default;
+    virtual bool begin(const Matrix& H0, const Matrix& S,
+                       const Eigen::MatrixXd& L) = 0;
+    virtual bool solve(const Eigen::VectorXd& v_ao, Vector& eps) = 0;
+    virtual bool density(const Eigen::VectorXd& occ, int ncol,
+                         Eigen::VectorXd& pop_ao, double& band) = 0;
+    virtual bool finalize(Matrix& P, Matrix& C) = 0;
+};
+
+/* ------------------------------------------------------------------------- *
  *  Unified xTB solver.  A single class, parametrised by MethodType, covering
  *  GFN1-xTB and GFN2-xTB.  Implementation is distributed across the files
  *     xtb_native.cpp    — public API, SCF driver, glue
@@ -362,6 +400,12 @@ public:
     void setScfGuess(const std::string& g){ m_scf_guess = g; }
     ScfMode scfMode() const               { return m_scf_mode; }
 
+    // Electronic temperature in Kelvin (0 → integer occupation, no Fermi smearing).
+    // Propagated by applyXtbScfConfig so that -xtb.electronic_temperature 0 reaches
+    // both the dense solveEigen() path and the per-block sub-block diagonaliser in
+    // large_system_mode=dc.
+    void setElectronicTemperature(double K) { if (K >= 0.0) m_electronic_temp = K; }
+
     // Eigensolver backend for the per-iteration generalized eigenproblem (WP4):
     // "mkl" (default) = LAPACK dsygst + dsyevd; "native"/"dnc" = self-contained
     // Householder+QL solver (native_eigensolver.h, no LAPACK eigensolve). MKL stays
@@ -388,6 +432,18 @@ public:
                            Matrix& C, Vector& eps)>;
     void setExternalEigensolver(ExternalEigensolver fn) { m_external_eigensolver = std::move(fn); }
     bool hasExternalEigensolver() const { return static_cast<bool>(m_external_eigensolver); }
+
+    // Device-resident SCF backend (Claude Generated, GPU port Stage 2). When set
+    // AND the run is GFN1 with the default Broyden charge mixing, Calculation()
+    // keeps H0/S/L and the density/MO matrices on the device for the whole SCF,
+    // delegating Fock build + eigensolve + density + Mulliken-AO + band to it
+    // (begin/solve/density/finalize). Mixing, energies, occupation and
+    // convergence stay on the validated CPU path. Non-Broyden modes and GFN2 keep
+    // the per-iteration eigensolver hook above. The backend is owned by the
+    // caller (the GPU wrapper) and must outlive every Calculation(). Unset
+    // (default) → unchanged CPU SCF. begin() returning false → CPU fallback.
+    void setGpuScfBackend(GpuScfBackend* b) { m_gpu_scf = b; }
+    bool hasGpuScfBackend() const { return m_gpu_scf != nullptr; }
 
     // Mixed-precision SCF (opt-in, MKL path): early iterations (max|dq| above the threshold)
     // solve the eigenproblem in FP32 (~2x), reverting to FP64 near convergence so the energy
@@ -447,7 +503,7 @@ public:
         const Eigen::MatrixXd& dp_at,
         const Eigen::MatrixXd& qp_at);
 
-    // --- C1a divide-and-conquer DC-SCF (Claude Generated, June 2026) --------
+    // --- large_system_mode=dc divide-and-conquer DC-SCF (Claude Generated, June 2026) -
     // Energy-only large-system SCF that exploits locality: each outer iteration
     // builds the GLOBAL potential + Fock from the current density (so severed
     // covalent bonds still see their real neighbours), diagonalises only the
@@ -457,6 +513,9 @@ public:
     // Yang's core-projection. The converged density is fed to
     // evaluateComponentsAtFixedDensity for the (validated) energy. APPROXIMATE:
     // the energy converges to the dense SCF result as the buffer grows.
+    // The sub-block diagonaliser honours m_eigensolver (mkl/native/lobpcg/purify),
+    // so combining -large_system_mode=dc with -eigensolver=native/lobpcg gives a
+    // fully GPU-portable (or subspace-recycled) pipeline.
     //   subsystems[a] : global atom indices of core+buffer for sub-system a
     //   cores[a]      : global atom indices of the core (subset of subsystems[a]);
     //                   the cores must tile the molecule (disjoint, covering all).
@@ -465,7 +524,7 @@ public:
                                   const std::vector<std::vector<int>>& cores,
                                   bool& converged_out, int& iters_out);
 
-    // --- C1b sparse + non-orthogonal density purification (Claude Generated) -
+    // --- large_system_mode=sparse non-orthogonal density purification (Claude Generated) -
     // Energy-only SCF that replaces the O(N^3) eigensolve with non-orthogonal
     // canonical density-matrix purification (Palser & Manolopoulos, PRB 58
     // (1998) 12704, generalised to the S metric: products P^2 -> PSP, P^3 ->
@@ -475,8 +534,10 @@ public:
     // warns and falls back to the eigensolver. The Coulomb gamma.q stays an
     // O(N^2) matvec. First cut: dense Eigen storage with thresholding (measures
     // energy error and nnz fraction vs the threshold); true sparse storage /
-    // S^-1-free O(N) is deferred. Fills converged_out / iters_out / nnz_frac_out;
-    // returns the total energy (Eh). xtb_sparse.cpp.
+    // S^-1-free O(N) is deferred. The -eigensolver flag is intentionally
+    // ignored here (sparse IS the eigensolver replacement). Fills
+    // converged_out / iters_out / nnz_frac_out; returns the total energy (Eh).
+    // xtb_sparse.cpp.
     double calculateSparsePurification(double threshold,
                                        bool& converged_out, int& iters_out,
                                        double& nnz_frac_out);
@@ -531,6 +592,18 @@ private:
     // Diagonalise F in S metric, update wavefunction populations.
     bool solveEigen(const Matrix& F, const Matrix& S);                   // xtb_scf.cpp
     void updatePopulations(const Matrix& S);                             // xtb_scf.cpp
+
+    // Device-resident GFN1 SCF helpers (Claude Generated, GPU port Stage 2),
+    // both bit-faithful copies of the corresponding solveEigen/updatePopulations
+    // sub-steps so the GPU loop shares the CPU occupation + Mulliken logic.
+    //   occupationsFromEps: ascending eps → occupations occ (length nao) and the
+    //     count ncol of columns with non-negligible weight (Fermi smearing at
+    //     m_electronic_temp, or integer closed-shell at T=0). Mirrors solveEigen.
+    //   updatePopulationsFromPopAo: shell/atom Mulliken charges from precomputed
+    //     AO populations pop_ao(μ)=Σ_ν P_μν·S_μν (GFN1: no multipole moments).
+    void occupationsFromEps(const Vector& eps,
+                            Eigen::VectorXd& occ, int& ncol) const;      // xtb_scf.cpp
+    void updatePopulationsFromPopAo(const Eigen::VectorXd& pop_ao);      // xtb_scf.cpp
 
     // Saunders–Hillier level shift (Claude Generated): raise virtual orbital
     // energies by `shift` to damp the density's response during the SCF.
@@ -662,6 +735,9 @@ private:
     // Optional GPU eigensolver; default unset → CPU path unchanged. Claude Generated.
     ExternalEigensolver m_external_eigensolver;
     bool        m_eig_fp32 = false;              // per-iteration flag set by the SCF loop
+    // Optional device-resident SCF backend (GPU port Stage 2); non-owning, set by
+    // the GPU wrapper, default null → CPU SCF unchanged. Claude Generated.
+    GpuScfBackend* m_gpu_scf = nullptr;
 
     Vector m_coordination_numbers;   ///< CN, filled in Calculation()
 
@@ -758,6 +834,7 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("keep_diis",    [&](const json& v){ if (v.is_boolean()) xtb.setKeepDiis(v.get<bool>()); });
     lookup("scf_mixed_precision", [&](const json& v){ if (v.is_boolean()) xtb.setMixedPrecision(v.get<bool>()); });
     lookup("scf_fp32_threshold",  [&](const json& v){ if (v.is_number()) xtb.setFp32Threshold(v.get<double>()); });
+    lookup("electronic_temperature", [&](const json& v){ if (v.is_number()) xtb.setElectronicTemperature(v.get<double>()); });
 }
 
 } // namespace curcuma::xtb

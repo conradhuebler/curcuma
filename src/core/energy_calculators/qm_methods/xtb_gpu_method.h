@@ -87,8 +87,10 @@ public:
 private:
     curcuma::xtb::MethodType                          m_method;
     // Declared before m_cpu so it is destroyed AFTER m_cpu: m_cpu owns the XTB
-    // that holds the eigensolver hook capturing this context.
-    std::unique_ptr<curcuma::xtb::gpu::XtbGpuContext> m_gpu; ///< device handles
+    // that holds the eigensolver hook + resident-SCF backend pointer capturing
+    // this context / the backend.
+    std::unique_ptr<curcuma::xtb::gpu::XtbGpuContext> m_gpu;         ///< device handles
+    std::unique_ptr<curcuma::xtb::GpuScfBackend>      m_scf_backend; ///< Stage-2 resident SCF (GFN1)
     std::unique_ptr<NativeXtbMethod>                  m_cpu; ///< validated CPU pipeline + hook holder
 };
 

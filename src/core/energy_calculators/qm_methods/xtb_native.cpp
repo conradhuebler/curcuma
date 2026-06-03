@@ -354,6 +354,24 @@ double XTB::Calculation(bool gradient)
     if (verb >= 3 && eig_threads > 1)
         CurcumaLogger::info_fmt("Eigensolve MKL threads: {}", eig_threads);
 
+    // Device-resident GFN1 SCF (Claude Generated, GPU port Stage 2). Enabled only
+    // for GFN1 with the default Broyden charge mixing and an available lower
+    // Cholesky factor L (m_X). begin() uploads the geometry-constant H0/S/L once;
+    // the per-iteration heavy linear algebra (Fock build, eigensolve, density,
+    // Mulliken-AO, band) then runs on the device with those matrices resident, so
+    // only length-nao vectors cross the bus each iteration. On any failure we
+    // silently keep the full CPU SCF. GFN2 / non-Broyden modes keep the
+    // per-iteration GPU eigensolver hook (Stage 1) instead.
+    bool use_gpu_resident = false;
+    if (m_gpu_scf && m_method == MethodType::GFN1 && mode == ScfMode::Broyden
+        && m_X.rows() == m_basis.nao && m_X.cols() == m_basis.nao) {
+        use_gpu_resident = m_gpu_scf->begin(m_H0, m_S, m_X);
+        if (verb >= 2)
+            CurcumaLogger::info(use_gpu_resident
+                ? "SCF: device-resident GFN1 path (H0/S/L on GPU; per-iter vectors only)"
+                : "SCF: GPU resident begin() failed; running CPU SCF");
+    }
+
     const auto t_scf_start = clock::now();
     int iter;
     for (iter = 0; iter < max_iter; ++iter) {
@@ -385,91 +403,132 @@ double XTB::Calculation(bool gradient)
         }
         const auto t_pot = clock::now();
 
-        // Expand to AO potential and build Fock
-        Matrix F = buildFock(m_H0, m_S, m_pot);
+        // Build Fock, diagonalise, build the density and update populations. The
+        // device-resident GFN1 path (Claude Generated, GPU port Stage 2) fuses
+        // the Fock build + eigensolve + density + Mulliken-AO onto the GPU with
+        // H0/S/L resident — only length-nao vectors cross the bus — while the CPU
+        // path below is unchanged. The shared scaffolding (mixing, energies,
+        // convergence) follows both branches.
+        double gpu_band = 0.0;
+        std::chrono::steady_clock::time_point t_fock, t_solve, t_mull;
+        if (use_gpu_resident) {
+            // Expand shell+atom potential to AO resolution (host; mirrors
+            // expand_potential in xtb_scf.cpp). GFN1: v_ao(μ)=v_sh(sh)+v_at(at).
+            Eigen::VectorXd v_ao(m_basis.nao);
+            for (int ao = 0; ao < m_basis.nao; ++ao)
+                v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
+            t_fock = clock::now();   // Fock build is fused into solve() on the device
 
-        // --- SCF acceleration strategy (Claude Generated) -----------------
-        switch (mode) {
-        case ScfMode::Plain:
-            // No DIIS, no level shift. Convergence comes entirely from the
-            // density mixing applied after the solve below.
-            break;
-
-        case ScfMode::Broyden:
-            // The Fock matrix is left untouched; Broyden mixes the SCC charge
-            // vector after the populations are computed (end of the loop body).
-            break;
-
-        case ScfMode::Diis:
-            // DIIS only after the damped warmup, and never from a diverging
-            // Fock — so the early iterations cannot extrapolate the density out
-            // of the right basin.
-            if (iter >= diis_start) {
-                diis.push(F, m_wfn.P, m_S);
-                if (diis.size() >= 2 && diis.lastErrorNorm() < kDiisErrorCutoff)
-                    F = diis.extrapolate();
+            // Device: F = H0 − ½·S·(v_ao⊕v_ao); solve F C = S C ε with cached L.
+            if (!m_gpu_scf->solve(v_ao, m_wfn.eps)) {
+                CurcumaLogger::warn("XTB::Calculation: GPU resident solve failed at iteration "
+                                    + std::to_string(iter));
+                m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
             }
-            break;
+            // Occupations on the host (shared Fermi/integer logic with the CPU path).
+            Eigen::VectorXd occ; int ncol = 0;
+            occupationsFromEps(m_wfn.eps, occ, ncol);
+            // Device: P = C·diag(occ)·Cᵀ; pop_ao(μ)=Σ_ν P_μν·S_μν; band=Σ P⊙H0.
+            Eigen::VectorXd pop_ao;
+            if (!m_gpu_scf->density(occ, ncol, pop_ao, gpu_band)) {
+                CurcumaLogger::warn("XTB::Calculation: GPU resident density failed at iteration "
+                                    + std::to_string(iter));
+                m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
+            }
+            t_solve = clock::now();
+            // Broyden never mixes the density, so there is no P damping here.
+            updatePopulationsFromPopAo(pop_ao);
+            q_sh_new = m_wfn.q_sh;
+            t_mull = clock::now();
+        } else {
+            // Expand to AO potential and build Fock
+            Matrix F = buildFock(m_H0, m_S, m_pot);
 
-        case ScfMode::LevelShift:
-            // Virtual-orbital level shift layered on top of the density mixing
-            // applied after the solve. The shift raises the empty orbitals so
-            // the density responds less violently to the Fock update; it is
-            // faded out once max|dq| has settled, so the converged eps / density
-            // are unshifted. No DIIS — the shift + mixing are the stabiliser.
-            if (iter > 0 && P_old.size() > 0 && dq_prev > 1.0e-3)
-                F = applyLevelShift(F, m_S, P_old, m_level_shift);
-            break;
+            // --- SCF acceleration strategy (Claude Generated) -----------------
+            switch (mode) {
+            case ScfMode::Plain:
+                // No DIIS, no level shift. Convergence comes entirely from the
+                // density mixing applied after the solve below.
+                break;
+
+            case ScfMode::Broyden:
+                // The Fock matrix is left untouched; Broyden mixes the SCC charge
+                // vector after the populations are computed (end of the loop body).
+                break;
+
+            case ScfMode::Diis:
+                // DIIS only after the damped warmup, and never from a diverging
+                // Fock — so the early iterations cannot extrapolate the density out
+                // of the right basin.
+                if (iter >= diis_start) {
+                    diis.push(F, m_wfn.P, m_S);
+                    if (diis.size() >= 2 && diis.lastErrorNorm() < kDiisErrorCutoff)
+                        F = diis.extrapolate();
+                }
+                break;
+
+            case ScfMode::LevelShift:
+                // Virtual-orbital level shift layered on top of the density mixing
+                // applied after the solve. The shift raises the empty orbitals so
+                // the density responds less violently to the Fock update; it is
+                // faded out once max|dq| has settled, so the converged eps / density
+                // are unshifted. No DIIS — the shift + mixing are the stabiliser.
+                if (iter > 0 && P_old.size() > 0 && dq_prev > 1.0e-3)
+                    F = applyLevelShift(F, m_S, P_old, m_level_shift);
+                break;
+            }
+
+            t_fock = clock::now();
+
+            // Mixed precision (opt-in, MKL path): solve in FP32 while far from convergence
+            // (previous max|dq| above the threshold; iter 0 starts in FP32 via dq_prev=1e30),
+            // reverting to FP64 near convergence so the converged energy is FP64. Claude Generated.
+            m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
+
+            // Diagonalize. Let MKL thread the eigensolve (dsygst/dsyevd/dtrsm) for a
+            // single large molecule; the surrounding MklSerialScope keeps MKL serial
+            // everywhere else so the hand-threaded regions are not oversubscribed.
+            bool eig_ok;
+            {
+                MklThreadScope eig_scope(eig_threads);
+                eig_ok = solveEigen(F, m_S);
+            }
+            if (!eig_ok) {
+                CurcumaLogger::warn("XTB::Calculation: eigen solve failed at iteration " + std::to_string(iter));
+                m_scf_converged = false;
+                m_scf_iterations = iter;
+                return m_E_total;
+            }
+            t_solve = clock::now();
+
+            // Density damping: P = damp·P_new + (1-damp)·P_old. Plain and LevelShift
+            // mix every iteration (Plain's only convergence mechanism; LevelShift
+            // layers the Fock shift on top); DIIS mixes only during the warmup, then
+            // lets the extrapolation take over. Broyden never mixes the density — it
+            // mixes the SCC charge vector at the end of the loop body instead.
+            const bool mix = (mode != ScfMode::Broyden)
+                             && (mode == ScfMode::Plain || mode == ScfMode::LevelShift
+                                 || iter < diis_start);
+            if (iter > 0 && mix) {
+                m_wfn.P = damp * m_wfn.P + (1.0 - damp) * P_old;
+            }
+            P_old = m_wfn.P;
+
+            // Update populations
+            updatePopulations(m_S);
+            q_sh_new = m_wfn.q_sh;
+            t_mull = clock::now();
         }
-
-        const auto t_fock = clock::now();
-
-        // Mixed precision (opt-in, MKL path): solve in FP32 while far from convergence
-        // (previous max|dq| above the threshold; iter 0 starts in FP32 via dq_prev=1e30),
-        // reverting to FP64 near convergence so the converged energy is FP64. Claude Generated.
-        m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
-
-        // Diagonalize. Let MKL thread the eigensolve (dsygst/dsyevd/dtrsm) for a
-        // single large molecule; the surrounding MklSerialScope keeps MKL serial
-        // everywhere else so the hand-threaded regions are not oversubscribed.
-        bool eig_ok;
-        {
-            MklThreadScope eig_scope(eig_threads);
-            eig_ok = solveEigen(F, m_S);
-        }
-        if (!eig_ok) {
-            CurcumaLogger::warn("XTB::Calculation: eigen solve failed at iteration " + std::to_string(iter));
-            m_scf_converged = false;
-            m_scf_iterations = iter;
-            return m_E_total;
-        }
-        const auto t_solve = clock::now();
-
-        // Density damping: P = damp·P_new + (1-damp)·P_old. Plain and LevelShift
-        // mix every iteration (Plain's only convergence mechanism; LevelShift
-        // layers the Fock shift on top); DIIS mixes only during the warmup, then
-        // lets the extrapolation take over. Broyden never mixes the density — it
-        // mixes the SCC charge vector at the end of the loop body instead.
-        const bool mix = (mode != ScfMode::Broyden)
-                         && (mode == ScfMode::Plain || mode == ScfMode::LevelShift
-                             || iter < diis_start);
-        if (iter > 0 && mix) {
-            m_wfn.P = damp * m_wfn.P + (1.0 - damp) * P_old;
-        }
-        P_old = m_wfn.P;
-
-        // Update populations
-        updatePopulations(m_S);
-        q_sh_new = m_wfn.q_sh;
-        const auto t_mull = clock::now();
 
         // Energies for this iteration
         m_E_coulomb_shell = energyCoulombShell();
         m_E_third_order   = energyThirdOrder();
         m_E_multipole     = energyMultipole();
 
-        // Band energy: Tr(P · H0)
-        m_E_electronic = (m_wfn.P.cwiseProduct(m_H0)).sum();
+        // Band energy: Tr(P · H0). Device-resident path returns it from the GPU
+        // (P is not on the host during the loop); CPU path sums P⊙H0 directly.
+        m_E_electronic = use_gpu_resident ? gpu_band
+                                          : (m_wfn.P.cwiseProduct(m_H0)).sum();
 
         // Total SCC = band + coulomb + third-order + multipole
         const double e_scc = m_E_electronic + m_E_coulomb_shell
@@ -531,6 +590,12 @@ double XTB::Calculation(bool gradient)
             CurcumaLogger::warn_fmt("SCF NOT converged after {} iterations ({:.1f} ms)",
                                     m_scf_iterations, ms(t_scf_start, t_scf_end));
     }
+
+    // Device-resident path: download the converged density and MO coefficients
+    // once, so the post-SCF energies (band Tr(P·H0)) and the (still CPU) gradient
+    // read them from the host. Claude Generated, GPU port Stage 2.
+    if (use_gpu_resident && m_gpu_scf)
+        m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
 
     // Persist converged Fock matrix for gradient / debug
     m_F = buildFock(m_H0, m_S, m_pot);
