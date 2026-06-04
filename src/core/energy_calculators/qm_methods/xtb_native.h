@@ -413,6 +413,23 @@ struct GpuScfBackend {
      * downloads it for validation. Default false → host updatePopulations. */
     virtual bool atomicCharges(const Vector& n0_at, Vector& q_at_out)
     { (void)n0_at; (void)q_at_out; return false; }
+
+    /* ----- In-SCF GFN2 D4 atom-potential (Stage 5, Part B2) -------------- *
+     * Move the per-iteration dE_D4/dq (XTB::addDispersionPotential) to the
+     * device: the host builds the per-atom reference weights W/∂W/∂q once per
+     * iteration (D4ParameterGenerator::buildRefWFlat) and the device runs the
+     * O(N²) 7×7 contraction × BJ disp_sum. beginDispersion uploads the geometry-
+     * fixed reference data once per geometry. Default false → host evaluator. */
+    virtual bool supportsDeviceDispersion() const { return false; }
+    virtual bool beginDispersion(int nat, const int* Z, const double* sqrtZr4r2,
+                                 const int* nref, const double* xyz_bohr,
+                                 const double* c6_flat, int c6_flat_len,
+                                 double s6, double s8, double a1, double a2, double cutoff)
+    { (void)nat; (void)Z; (void)sqrtZr4r2; (void)nref; (void)xyz_bohr; (void)c6_flat;
+      (void)c6_flat_len; (void)s6; (void)s8; (void)a1; (void)a2; (void)cutoff; return false; }
+    /// Per iteration: host-built W/∂W/∂q (each nat·7) → device dE_D4/dq (nat).
+    virtual bool dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out)
+    { (void)nat; (void)W; (void)dWq; (void)dEdq_out; return false; }
 };
 
 /* ------------------------------------------------------------------------- *
@@ -451,6 +468,11 @@ public:
     // Reference atom occupations n0_at (length nat). Feeds the device atomic-charge
     // reduction q_at(A)=n0_at(A)−Σ pop_ao (Stage 5, Part B1). Claude Generated.
     Vector  getReferenceAtomOccupations() const { return m_wfn.n0_at; }
+    // GFN2 in-SCF D4 atom-potential dE_D4/dq at the given charges, on the active
+    // path (device when a GPU backend supports it, else the host evaluator). The
+    // body addDispersionPotential folds into pot.v_at; exposed for the Stage-5
+    // Part-B2 component test (device-vs-host at a frozen q). Claude Generated.
+    bool computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const;  // xtb_native.cpp
     Vector  getOrbitalEnergies() const { return m_wfn.eps; }
     Matrix  getMOCoefficients() const { return m_wfn.C; }
     Matrix  getDensity() const { return m_wfn.P; }

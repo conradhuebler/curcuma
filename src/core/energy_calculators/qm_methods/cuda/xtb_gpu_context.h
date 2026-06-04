@@ -267,6 +267,29 @@ public:
      * residentDensity + a resident ao2at map (GFN2). Claude Generated. */
     bool residentAtomicCharges(const double* n0_at, int nat, double* q_at_out);
 
+    /* ----- Stage 5 (Part B2): in-SCF GFN2 D4 atom-potential ------------- *
+     * Port of XTB::addDispersionPotential's per-reference dE_D4/dq. The CN-Gaussian
+     * + zeta reference weights are built on the host (D4ParameterGenerator::
+     * buildRefWFlat) and uploaded per iteration as W/dWq; the device runs the
+     * O(N²) 7×7 contraction × BJ disp_sum. beginDispersion uploads the geometry-
+     * fixed reference data once per geometry (the element-only c6_flat block once
+     * per process). Claude Generated. */
+
+    /// Upload the geometry-fixed D4 reference data: per-atom Z, sqrtZr4r2, nref
+    /// (length nat), geometry xyz_bohr (3·nat), the reference C6 block c6_flat
+    /// (MAX_ELEM²·MAX_REF² = 118²·7²), and the BJ parameters s6/s8/a1/a2 + the
+    /// pair cutoff (Bohr). Call once per geometry before dispersionDedq.
+    bool beginDispersion(int nat, const int* Z, const double* sqrtZr4r2,
+                         const int* nref, const double* xyz_bohr,
+                         const double* c6_flat, int c6_flat_len,
+                         double s6, double s8, double a1, double a2, double cutoff);
+
+    /// Per SCF iteration: the host-built per-atom reference weights W and ∂W/∂q
+    /// (each nat·MAX_REF, MAX_REF=7) drive the device contraction; the per-atom
+    /// dE_D4/dq is written to dEdq_out (length nat). Requires a prior
+    /// beginDispersion for the same geometry. Returns false on error.
+    bool dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out);
+
 private:
     /// Reduce the resident Fock in dC to standard form with the cached L, solve
     /// it and back-transform → generalized eigenvectors in dC, ascending

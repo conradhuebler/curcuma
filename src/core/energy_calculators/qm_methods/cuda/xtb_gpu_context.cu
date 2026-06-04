@@ -131,6 +131,23 @@ struct XtbGpuContext::Impl {
     // the resident dAo2at map, kept resident for the in-SCF D4 potential (B2).
     CudaBuffer<double> dN0at;                 // reference atom occupations (nat)
     CudaBuffer<double> dQat;                  // atomic charges q_at (nat, resident)
+
+    // Stage 5 (Part B2): in-SCF GFN2 D4 atom-potential dE_D4/dq on the device.
+    // The CN-Gaussian + zeta weights are built on the host (buildRefWFlat) and
+    // uploaded per iteration as W/dWq (nat·MAX_REF); the device runs the O(N²)
+    // 7×7 reference contraction × BJ disp_sum → dEdq(A). Reference data
+    // (c6_flat, sqrtZr4r2, refn, Z) + geometry + BJ params upload once/geometry.
+    static constexpr int D4_MAX_REF = 7;      // mirrors D4ParameterGenerator::MAX_REF
+    int                d4_nat = 0;
+    double             d4_s6 = 0, d4_s8 = 0, d4_a1 = 0, d4_a2 = 0, d4_cut = 0;
+    bool               d4_c6_uploaded = false;  // c6_flat is element data → upload once/process
+    CudaBuffer<int>    dD4Z;                   // atomic numbers (nat)
+    CudaBuffer<int>    dD4Nref;                // reference count per atom (nat)
+    CudaBuffer<double> dD4Sqrt;                // sqrtZr4r2 per atom (nat)
+    CudaBuffer<double> dD4Xyz;                 // geometry, Bohr (3·nat)
+    CudaBuffer<double> dD4C6Flat;              // reference C6 block (MAX_ELEM²·MAX_REF²)
+    CudaBuffer<double> dD4W, dD4dWq;           // per-iter weights (nat·MAX_REF)
+    CudaBuffer<double> dD4Dedq;                // output dE_D4/dq (nat)
 };
 
 // ---- Stage 3 element parameter tables in __constant__ memory --------------
@@ -884,6 +901,73 @@ __global__ void k_qat_scatter(int nao, const double* __restrict__ pop,
     const int mu = blockIdx.x * blockDim.x + threadIdx.x;
     if (mu >= nao) return;
     atomicAdd(&q_at[ao2at[mu]], -pop[mu]);
+}
+
+// Stage 5 (Part B2): in-SCF GFN2 D4 atom-potential dE_D4/dq, one thread per atom
+// i (no atomicAdd — like k_d4eeq_response, each atom sums its own half of the
+// symmetric pair contributions). For every j≠i within the 50-Bohr cutoff:
+//   r4r2ij = 3·sqrtZr4r2_i·sqrtZr4r2_j ; R0 = a1·√r4r2ij + a2
+//   disp_sum = s6/(r⁶+R0⁶) + s8·r4r2ij/(r⁸+R0⁸)              (BJ, geometry-fixed)
+//   dc6/dq_i = ΣΣ dWq_i[a]·W_j[b]·c6ref(ei,ej,a,b)            (7×7 contraction)
+//   dEdq(i) += −dc6/dq_i · disp_sum
+// Mirrors D4Evaluator::computeEnergyAndGradient's per-reference path + contractC6Gfn2
+// (the c6 cache is element-symmetric, so atom j's thread yields the CPU's dc6dqj).
+// MAX_ELEM=118, MAX_REF=7. Claude Generated.
+__global__ void k_d4_dedq(int nat, int max_elem, int max_ref,
+                          const int* __restrict__ Z, const int* __restrict__ nref,
+                          const double* __restrict__ sqrtZr4r2, const double* __restrict__ xyz,
+                          const double* __restrict__ c6_flat,
+                          const double* __restrict__ W, const double* __restrict__ dWq,
+                          double s6, double s8, double a1, double a2, double cut2,
+                          double* __restrict__ dEdq)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const int ei = Z[i] - 1;
+    const int nri = nref[i];
+    if (ei < 0 || ei >= max_elem || nri <= 0) { dEdq[i] = 0.0; return; }
+    const double xi = xyz[3 * i + 0], yi = xyz[3 * i + 1], zi = xyz[3 * i + 2];
+    const double sq_i = sqrtZr4r2[i];
+    const double* dWqi = dWq + static_cast<size_t>(i) * max_ref;
+
+    double acc = 0.0;
+    for (int j = 0; j < nat; ++j) {
+        if (j == i) continue;
+        const double dx = xi - xyz[3 * j + 0];
+        const double dy = yi - xyz[3 * j + 1];
+        const double dz = zi - xyz[3 * j + 2];
+        const double r2 = dx * dx + dy * dy + dz * dz;
+        if (r2 > cut2 || r2 < 1.0e-20) continue;
+        const int ej = Z[j] - 1;
+        const int nrj = nref[j];
+        if (ej < 0 || ej >= max_elem || nrj <= 0) continue;
+
+        const double r4r2ij = 3.0 * sq_i * sqrtZr4r2[j];
+        const double r0 = a1 * sqrt(r4r2ij) + a2;
+        const double r0_2 = r0 * r0;
+        const double r0_6 = r0_2 * r0_2 * r0_2;
+        const double r0_8 = r0_6 * r0_2;
+        const double r6 = r2 * r2 * r2;
+        const double r8 = r6 * r2;
+        const double t6 = 1.0 / (r6 + r0_6);
+        const double t8 = 1.0 / (r8 + r0_8);
+        const double disp_sum = s6 * t6 + s8 * r4r2ij * t8;
+
+        const double* Wj = W + static_cast<size_t>(j) * max_ref;
+        const size_t base = (static_cast<size_t>(ei) * max_elem + ej)
+                          * static_cast<size_t>(max_ref) * max_ref;
+        double dc6dqi = 0.0;
+        for (int a = 0; a < nri; ++a) {
+            const double dwa = dWqi[a];
+            if (dwa == 0.0) continue;
+            const size_t basea = base + static_cast<size_t>(a) * max_ref;
+            double s = 0.0;
+            for (int b = 0; b < nrj; ++b) s += Wj[b] * c6_flat[basea + b];
+            dc6dqi += dwa * s;
+        }
+        acc += -dc6dqi * disp_sum;
+    }
+    dEdq[i] = acc;
 }
 
 XtbGpuContext::XtbGpuContext()
@@ -1793,6 +1877,71 @@ bool XtbGpuContext::residentAtomicCharges(const double* n0_at, int nat, double* 
                                                        m_impl->dAo2at.ptr, m_impl->dQat.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
     if (q_at_out) m_impl->dQat.download(q_at_out, nat, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+/* ====================================================================== *
+ *  Stage 5 (Part B2): in-SCF GFN2 D4 atom-potential dE_D4/dq on the device.
+ *  beginDispersion uploads the geometry-fixed reference data once per geometry
+ *  (c6_flat is element data → uploaded once per process); dispersionDedq runs
+ *  the per-iteration O(N²) contraction + BJ disp_sum from the host-built W/dWq.
+ * ====================================================================== */
+bool XtbGpuContext::beginDispersion(int nat, const int* Z, const double* sqrtZr4r2,
+                                    const int* nref, const double* xyz_bohr,
+                                    const double* c6_flat, int c6_flat_len,
+                                    double s6, double s8, double a1, double a2, double cutoff)
+{
+    if (!ok() || nat <= 0 || !Z || !sqrtZr4r2 || !nref || !xyz_bohr
+        || !c6_flat || c6_flat_len <= 0)
+        return false;
+    cudaStream_t stream = m_impl->stream;
+    try {
+        m_impl->dD4Z.ensure(nat);
+        m_impl->dD4Nref.ensure(nat);
+        m_impl->dD4Sqrt.ensure(nat);
+        m_impl->dD4Xyz.ensure(3 * nat);
+        m_impl->dD4W.ensure(nat * Impl::D4_MAX_REF);
+        m_impl->dD4dWq.ensure(nat * Impl::D4_MAX_REF);
+        m_impl->dD4Dedq.ensure(nat);
+        if (!m_impl->d4_c6_uploaded || m_impl->dD4C6Flat.n < c6_flat_len)
+            m_impl->dD4C6Flat.ensure(c6_flat_len);
+    } catch (...) {
+        return false;
+    }
+    m_impl->dD4Z.upload(Z, nat, stream);
+    m_impl->dD4Nref.upload(nref, nat, stream);
+    m_impl->dD4Sqrt.upload(sqrtZr4r2, nat, stream);
+    m_impl->dD4Xyz.upload(xyz_bohr, 3 * nat, stream);
+    // The reference C6 block is element data (geometry- AND molecule-independent):
+    // upload it only once per process. ensure() keeps the allocation across steps.
+    if (!m_impl->d4_c6_uploaded) {
+        m_impl->dD4C6Flat.upload(c6_flat, c6_flat_len, stream);
+        m_impl->d4_c6_uploaded = true;
+    }
+    m_impl->d4_nat = nat;
+    m_impl->d4_s6 = s6; m_impl->d4_s8 = s8; m_impl->d4_a1 = a1; m_impl->d4_a2 = a2;
+    m_impl->d4_cut = cutoff;
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+bool XtbGpuContext::dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out)
+{
+    if (!ok() || nat <= 0 || nat != m_impl->d4_nat || !W || !dWq || !dEdq_out
+        || m_impl->dD4C6Flat.empty())
+        return false;
+    cudaStream_t stream = m_impl->stream;
+    m_impl->dD4W.upload(W, nat * Impl::D4_MAX_REF, stream);
+    m_impl->dD4dWq.upload(dWq, nat * Impl::D4_MAX_REF, stream);
+    const double cut2 = m_impl->d4_cut * m_impl->d4_cut;
+    const int b = 128;
+    k_d4_dedq<<<(nat + b - 1) / b, b, 0, stream>>>(
+        nat, 118, Impl::D4_MAX_REF, m_impl->dD4Z.ptr, m_impl->dD4Nref.ptr,
+        m_impl->dD4Sqrt.ptr, m_impl->dD4Xyz.ptr, m_impl->dD4C6Flat.ptr,
+        m_impl->dD4W.ptr, m_impl->dD4dWq.ptr,
+        m_impl->d4_s6, m_impl->d4_s8, m_impl->d4_a1, m_impl->d4_a2, cut2,
+        m_impl->dD4Dedq.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    m_impl->dD4Dedq.download(dEdq_out, nat, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 

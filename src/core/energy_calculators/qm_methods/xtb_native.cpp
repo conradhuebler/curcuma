@@ -1518,9 +1518,9 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
  *  atom potential the multipole back-reaction writes; verified bit-for-bit vs
  *  tblite's pot%vat). GFN2 only. Claude Generated.
  * ------------------------------------------------------------------------- */
-void XTB::addDispersionPotential(Potential& pot) const
+bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
 {
-    if (m_method != MethodType::GFN2) return;
+    if (m_method != MethodType::GFN2) return false;
 
     // Lazy init shared with calcDispersionEnergy (idempotent).
     if (!m_d4_generator) {
@@ -1555,7 +1555,11 @@ void XTB::addDispersionPotential(Potential& pot) const
     // gradient is requested (do_dEdq = with_gradient && with_dEdq); the scratch
     // Cartesian gradient is discarded here and reassembled once post-SCF.
     const Matrix geom_bohr = m_geometry * AA_TO_AU;
-    m_d4_generator->setTopologyCharges(m_wfn.q_at);
+    m_d4_generator->setTopologyCharges(q_at);
+    // Stage 5 (Part B2): on the device-resident path run the per-iteration O(N²)
+    // dE_D4/dq pair loop on the GPU (the host still builds the per-atom reference
+    // weights once per iteration; the device does the contraction + BJ damping).
+    const bool use_device_disp = (m_gpu_scf && m_gpu_scf->supportsDeviceDispersion());
     if (!m_d4_prepared) {
         m_d4_generator->setUseD4SingleShotEEQ(false);
         m_d4_generator->setD4CovalentCN(true);  // GFN2 dftd4 EN-weighted covalent CN
@@ -1565,16 +1569,67 @@ void XTB::addDispersionPotential(Potential& pot) const
         // WP2: new geometry → the evaluator's cached pair list is stale (rebuilt on the
         // next computeEnergyAndGradient). Per-iter calls within this geometry reuse it.
         m_d4_evaluator->invalidatePairCache();
+        if (use_device_disp) {
+            // Upload the geometry-fixed D4 reference data once per geometry. The
+            // BJ params (1, 2.7, 0.52, 5.0) match the evaluator init above; the
+            // effective pair cutoff is 50 Bohr (GFNFFDispersion::r_cut).
+            const int nat = m_atomcount;
+            const std::vector<int>& refn = m_d4_generator->getRefN();
+            std::vector<int> Zv(nat), nrefv(nat);
+            std::vector<double> sqrtv(nat), xyzv(3 * nat);
+            for (int a = 0; a < nat; ++a) {
+                const int Z = m_atoms[a];
+                Zv[a]    = Z;
+                nrefv[a] = (Z >= 1 && (Z - 1) < static_cast<int>(refn.size())) ? refn[Z - 1] : 0;
+                sqrtv[a] = m_d4_generator->getSqrtZr4r2(Z);
+                xyzv[3 * a + 0] = geom_bohr(a, 0);
+                xyzv[3 * a + 1] = geom_bohr(a, 1);
+                xyzv[3 * a + 2] = geom_bohr(a, 2);
+            }
+            const std::vector<double>& c6 = m_d4_generator->getC6FlatCache();
+            m_gpu_scf->beginDispersion(nat, Zv.data(), sqrtv.data(), nrefv.data(),
+                                       xyzv.data(), c6.data(),
+                                       static_cast<int>(c6.size()),
+                                       1.0, 2.7, 0.52, 5.0, 50.0);
+        }
     }
 
-    Matrix scratch_grad; Vector scratch_dEdcn, dEdq;
-    // WP2-ext: thread the per-SCF D4 pair loop on the same gated budget.
-    m_d4_evaluator->setThreads(effectiveIntraThreads(m_atomcount));
-    m_d4_evaluator->computeEnergyAndGradient(
-        m_atoms, geom_bohr, /*with_gradient=*/true,
-        scratch_grad, scratch_dEdcn, dEdq, /*with_dEdq=*/true);
+    bool device_ok = false;
+    if (use_device_disp) {
+        // Host builds the per-atom reference weights (CN-Gaussian × zeta) once per
+        // iteration; the device runs the O(N²) contraction + BJ disp_sum → dEdq.
+        std::vector<double> W, dWq;
+        m_d4_generator->buildRefWFlat(m_atoms, q_at, W, dWq);
+        std::vector<double> dedq(m_atomcount, 0.0);
+        if (m_gpu_scf->dispersionDedq(m_atomcount, W.data(), dWq.data(), dedq.data())) {
+            dEdq = Vector::Zero(m_atomcount);
+            for (int A = 0; A < m_atomcount; ++A) dEdq(A) = dedq[A];
+            device_ok = true;
+        }
+    }
+    if (!device_ok) {
+        Matrix scratch_grad; Vector scratch_dEdcn;
+        // WP2-ext: thread the per-SCF D4 pair loop on the same gated budget.
+        m_d4_evaluator->setThreads(effectiveIntraThreads(m_atomcount));
+        m_d4_evaluator->computeEnergyAndGradient(
+            m_atoms, geom_bohr, /*with_gradient=*/true,
+            scratch_grad, scratch_dEdcn, dEdq, /*with_dEdq=*/true);
+    }
 
-    if (dEdq.size() != m_atomcount) return;
+    return dEdq.size() == m_atomcount;
+}
+
+/* ------------------------------------------------------------------------- *
+ *  Self-consistent D4 dispersion potential (GFN2, AP6b) — thin wrapper that
+ *  folds the per-atom dE_D4/dq (computeD4PotentialDedq, device or host) into the
+ *  Fock atom-potential. Claude Generated.
+ * ------------------------------------------------------------------------- */
+void XTB::addDispersionPotential(Potential& pot) const
+{
+    if (m_method != MethodType::GFN2) return;
+    Vector dEdq;
+    if (!computeD4PotentialDedq(m_wfn.q_at, dEdq) || dEdq.size() != m_atomcount)
+        return;
     for (int A = 0; A < m_atomcount; ++A)
         pot.v_at(A) += dEdq(A);
 }

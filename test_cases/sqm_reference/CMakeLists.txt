@@ -429,6 +429,24 @@ if(USE_CUDA_XTB)
         set_tests_properties(sqm_cuda_qat_${_mol}
             PROPERTIES TIMEOUT 120 LABELS "gpu_integrals")
     endforeach()
+
+    # 5 (Part B2): in-SCF GFN2 D4 atom-potential dE_D4/dq on the device vs the host
+    # D4Evaluator at a frozen charge set (GFN2 only).
+    add_executable(test_xtb_cuda_d4pot test_xtb_cuda_d4pot.cpp)
+    target_link_libraries(test_xtb_cuda_d4pot PRIVATE curcuma_core)
+    target_include_directories(test_xtb_cuda_d4pot PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_features(test_xtb_cuda_d4pot PRIVATE cxx_std_17)
+    foreach(_mol ${_SQM_CUDA_COMP_MOLS})
+        add_test(NAME sqm_cuda_d4pot_${_mol}
+            COMMAND test_xtb_cuda_d4pot --quiet --tol 1e-9 gfn2
+                    ${_SQM_CUDA_MOL}/${_mol}.xyz)
+        set_tests_properties(sqm_cuda_d4pot_${_mol}
+            PROPERTIES TIMEOUT 120 LABELS "gpu_integrals")
+    endforeach()
 endif()
 
 # === tblite-dependent executables (dump + multipole) ===

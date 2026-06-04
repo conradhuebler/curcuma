@@ -161,6 +161,15 @@ public:
     C6Gfn2 contractC6Gfn2(const RefW& ri, const RefW& rj, int Zi, int Zj,
                           bool want_grad = false, bool want_hess = false) const;
 
+    // Stage 5 (Part B2, Claude Generated 2026-06): flattened per-atom reference
+    // weights for the GPU in-SCF D4 potential. W_out[a·MAX_REF+ref] = gwk(CN)·ζ(q),
+    // dWq_out[…] = ∂W/∂q (the only per-iteration-varying inputs the device pair
+    // loop needs; the CN-Gaussian + reference contraction stay the validated CPU
+    // buildAtomRefW). q = current SCF charges (length nat). Requires a prior
+    // GenerateParameters (m_cn_values). Both outputs are sized nat·MAX_REF.
+    void buildRefWFlat(const std::vector<int>& atoms, const Vector& q,
+                       std::vector<double>& W_out, std::vector<double>& dWq_out) const;
+
     // The charge vector that actually drives zetac6: topology charges if set
     // (GFN-FF path), otherwise the geometry-dependent EEQ charges (GFN2 path).
     // The dE_D4/dq term must use exactly these charges for consistency.

@@ -269,6 +269,25 @@ public:
         return m_ctx->residentAtomicCharges(n0_at.data(), nat, q_at_out.data());
     }
 
+    // ---- In-SCF GFN2 D4 atom-potential (Stage 5, Part B2) -----------------
+    bool supportsDeviceDispersion() const override { return true; }
+
+    bool beginDispersion(int nat, const int* Z, const double* sqrtZr4r2,
+                         const int* nref, const double* xyz_bohr,
+                         const double* c6_flat, int c6_flat_len,
+                         double s6, double s8, double a1, double a2, double cutoff) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->beginDispersion(nat, Z, sqrtZr4r2, nref, xyz_bohr,
+                                      c6_flat, c6_flat_len, s6, s8, a1, a2, cutoff);
+    }
+
+    bool dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->dispersionDedq(nat, W, dWq, dEdq_out);
+    }
+
 private:
     XtbGpuContext* m_ctx = nullptr;
     int            m_n   = 0;

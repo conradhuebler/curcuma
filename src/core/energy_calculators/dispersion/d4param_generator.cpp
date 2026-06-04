@@ -1418,6 +1418,28 @@ D4ParameterGenerator::contractC6Gfn2(const RefW& ri, const RefW& rj, int Zi, int
     return out;
 }
 
+// Claude Generated (Stage 5 Part B2, 2026-06): flatten the per-atom reference
+// weights (W = gwk·ζ, dWq = ∂W/∂q) the GPU D4-potential pair loop consumes. The
+// CN-Gaussian + zeta math stays here on the validated CPU (buildAtomRefW); the
+// device only does the O(N²) 7×7 contraction × BJ disp_sum.
+void D4ParameterGenerator::buildRefWFlat(const std::vector<int>& atoms, const Vector& q,
+                                         std::vector<double>& W_out,
+                                         std::vector<double>& dWq_out) const
+{
+    const int nat = static_cast<int>(atoms.size());
+    W_out.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    dWq_out.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    for (int a = 0; a < nat; ++a) {
+        const double qa = (a < q.size()) ? q(a) : 0.0;
+        const RefW r = buildAtomRefW(atoms[a], static_cast<size_t>(a), qa, true, false);
+        const int nr = (r.nref < MAX_REF) ? r.nref : MAX_REF;
+        for (int ref = 0; ref < nr; ++ref) {
+            W_out[static_cast<size_t>(a) * MAX_REF + ref]   = r.W[ref];
+            dWq_out[static_cast<size_t>(a) * MAX_REF + ref] = r.dWq[ref];
+        }
+    }
+}
+
 // Claude Generated (AP6b exact D4 port, 2026): tblite/dftd4-exact per-reference
 // charge-weighted C6 for native GFN2. Per-pair entry point — now a thin wrapper over
 // buildAtomRefW + contractC6Gfn2 (numerics unchanged). Mirrors dftd4 model.f90
