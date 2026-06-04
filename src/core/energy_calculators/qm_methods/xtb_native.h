@@ -430,6 +430,30 @@ struct GpuScfBackend {
     /// Per iteration: host-built W/∂W/∂q (each nat·7) → device dE_D4/dq (nat).
     virtual bool dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out)
     { (void)nat; (void)W; (void)dWq; (void)dEdq_out; return false; }
+
+    /* ----- Full device GFN2 potential build (Stage 5, Part B3/B4) -------- *
+     * Build the WHOLE per-iteration potential (γ·q_sh + shell third-order +
+     * multipole v_dp/v_qp/v_at scalar shift + in-SCF D4) on the device, folded
+     * straight into the Fock + eigensolve, so the SCF loop uploads only the mixed
+     * q_sh/dp_at/qp_at (+ host D4 reference weights) instead of v_ao. beginPotential
+     * uploads the geometry-fixed multipole interaction matrices + third-order
+     * hardness once per geometry. Default false → the host builds the potential. */
+    virtual bool supportsDevicePotential() const { return false; }
+    virtual bool beginPotential(int nat, int nsh,
+                                const double* amat_sd, const double* amat_dd,
+                                const double* amat_sq, const double* dkernel,
+                                const double* qkernel, const double* gamma3)
+    { (void)nat; (void)nsh; (void)amat_sd; (void)amat_dd; (void)amat_sq;
+      (void)dkernel; (void)qkernel; (void)gamma3; return false; }
+    /// q_sh (nsh), dp_at (3×nat), qp_at (6×nat) are the mixed SCC input; W/dWq
+    /// (each nat·7) the host-built D4 reference weights at those charges. Builds
+    /// the potential + Fock on the device and writes the eigenvalues to eps.
+    virtual bool solvePotential(const Vector& q_sh, const Eigen::MatrixXd& dp_at,
+                                const Eigen::MatrixXd& qp_at, const std::vector<double>& W,
+                                const std::vector<double>& dWq, Vector& eps,
+                                bool fp32 = false, int n_eig = 0)
+    { (void)q_sh; (void)dp_at; (void)qp_at; (void)W; (void)dWq; (void)eps;
+      (void)fp32; (void)n_eig; return false; }
 };
 
 /* ------------------------------------------------------------------------- *

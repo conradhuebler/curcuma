@@ -477,6 +477,45 @@ double XTB::Calculation(bool gradient)
         }
     }
 
+    // Stage 5 (Part B3/B4, Claude Generated): full device GFN2 potential build.
+    // When the backend supports it, the WHOLE per-iteration potential (γ·q_sh +
+    // shell third-order + multipole v_dp/v_qp/v_at scalar shift + in-SCF D4) is
+    // built on the device, so the SCF loop uploads only the mixed q_sh/dp_at/qp_at
+    // (+ the host-built D4 reference weights) instead of v_ao. The geometry-fixed
+    // reference data (D4 cache + multipole interaction matrices + third-order
+    // hardness) is uploaded once here. Falls back to the host potential build on
+    // any failure. GFN2 only (the D4/multipole coupling).
+    bool use_device_potential = false;
+    if (use_gpu_resident && gpu_multipole && m_method == MethodType::GFN2 && m_mp_initialized
+        && m_gpu_scf->supportsDeviceDispersion() && m_gpu_scf->supportsDevicePotential()) {
+        // Prime the D4 reference set + device beginDispersion (the m_d4_prepared
+        // first-call path); the returned potential is discarded here.
+        Vector warm_dedq;
+        computeD4PotentialDedq(m_wfn.q_at, warm_dedq);
+        // Flatten + upload the multipole interaction matrices (column-major nat²
+        // blocks), the on-site XC kernels, and the per-shell third-order hardness
+        // Γ_s (= ½·thirdOrderKernelDiag at q_sh=1, GFN2 shell-resolved).
+        const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
+        std::vector<double> sd(3 * nn), dd(9 * nn), sq(6 * nn), dk(nat), qk(nat), g3(nsh);
+        for (int k = 0; k < 3; ++k)
+            std::memcpy(sd.data() + static_cast<size_t>(k) * nn, m_mp_amat_sd[k].data(), nn * sizeof(double));
+        for (int a = 0; a < 3; ++a)
+            for (int bb = 0; bb < 3; ++bb)
+                std::memcpy(dd.data() + (static_cast<size_t>(a) * 3 + bb) * nn,
+                            m_mp_amat_dd[a][bb].data(), nn * sizeof(double));
+        for (int k = 0; k < 6; ++k)
+            std::memcpy(sq.data() + static_cast<size_t>(k) * nn, m_mp_amat_sq[k].data(), nn * sizeof(double));
+        for (int i = 0; i < nat; ++i) { dk[i] = m_mp_dkernel[i]; qk[i] = m_mp_qkernel[i]; }
+        const Vector g3diag = thirdOrderKernelDiag(Vector::Ones(nsh), m_wfn.q_at);  // = 2·Γ_s
+        for (int s = 0; s < nsh; ++s) g3[s] = 0.5 * g3diag(s);
+        use_device_potential = m_gpu_scf->beginPotential(nat, nsh, sd.data(), dd.data(),
+                                                         sq.data(), dk.data(), qk.data(), g3.data());
+        if (verb >= 2)
+            CurcumaLogger::info(use_device_potential
+                ? "SCF: GFN2 potential (Coulomb+third-order+multipole+D4) built on the device"
+                : "SCF: device potential build unavailable; host potential build");
+    }
+
     // AP1 (Claude Generated): GPU partial diagonalisation window. The device density
     // only needs the occupied(+buffer) eigenvectors, so the resident eigensolve can
     // compute just the lowest gpu_n_eig pairs (cusolverDnDsyevdx) instead of the full
@@ -487,9 +526,10 @@ double XTB::Calculation(bool gradient)
     // response (d4_charge_source=mulliken) and the verbosity>=3 orbital listing both
     // read virtual orbitals. The buffer covers the LUMO plus a few-kT Fermi tail; if
     // the occupied tail ever reaches the window edge (tiny-gap/metallic), the loop
-    // widens to the full solve once so the 1e-8 energy is never at risk.
+    // widens to the full solve once so the 1e-8 energy is never at risk. Disabled on
+    // the device-potential path (its re-solve would need the host D4 weights again).
     int gpu_n_eig = 0;  // 0 = full spectrum
-    bool gpu_partial_diag = m_gpu_partial_diag && use_gpu_resident
+    bool gpu_partial_diag = m_gpu_partial_diag && use_gpu_resident && !use_device_potential
         && (m_d4_charge_source != "mulliken") && (verb < 3);
     if (gpu_partial_diag) {
         const int nocc_orbs = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
@@ -514,22 +554,28 @@ double XTB::Calculation(bool gradient)
         if (mode == ScfMode::Broyden)
             x_in = packSCC();
 
-        // Reset and build potentials
-        m_pot.reset();
+        // Reset and build potentials. On the device-potential path (Stage 5 B3/B4)
+        // the whole potential is built inside the GPU solve below, so the host
+        // build is skipped entirely (the per-iteration energies are recomputed
+        // from the charges, not from m_pot — see energyCoulombShell/ThirdOrder/
+        // Multipole below). m_pot is rebuilt once post-SCF for the gradient.
+        if (!use_device_potential) {
+            m_pot.reset();
 
-        // Isotropic Coulomb: v_sh += γ * q_sh
-        addCoulombShellPotential(m_pot);
+            // Isotropic Coulomb: v_sh += γ * q_sh
+            addCoulombShellPotential(m_pot);
 
-        // Third-order: add to v_at/v_sh
-        addThirdOrderPotential(m_pot);
+            // Third-order: add to v_at/v_sh
+            addThirdOrderPotential(m_pot);
 
-        // GFN2 multipole
-        if (m_method == MethodType::GFN2) {
-            addMultipolePotential(m_pot);
-            // Self-consistent D4: exact per-reference dE_D4/dq into the atom potential.
-            const auto t_disp0 = clock::now();
-            addDispersionPotential(m_pot);
-            acc_disp += ms(t_disp0, clock::now());
+            // GFN2 multipole
+            if (m_method == MethodType::GFN2) {
+                addMultipolePotential(m_pot);
+                // Self-consistent D4: exact per-reference dE_D4/dq into the atom potential.
+                const auto t_disp0 = clock::now();
+                addDispersionPotential(m_pot);
+                acc_disp += ms(t_disp0, clock::now());
+            }
         }
         const auto t_pot = clock::now();
 
@@ -548,20 +594,41 @@ double XTB::Calculation(bool gradient)
             // the multipole scalar shift + in-SCF D4 (v_at), all built on the host
             // above. The GFN2 anisotropic dipole/quadrupole potential (v_dp/v_qp)
             // is applied in the device Fock build via solveMultipole.
-            Eigen::VectorXd v_ao(m_basis.nao);
-            for (int ao = 0; ao < m_basis.nao; ++ao)
-                v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
-            t_fock = clock::now();   // Fock build is fused into solve() on the device
-
             // Mixed precision (GPU): solve in FP32 while far from convergence
             // (max|dq| above the threshold; iter 0 starts FP32 via dq_prev=1e30),
             // reverting to FP64 near convergence so the converged energy is FP64.
             m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
-            // Device: F = H0 − ½·S·(v_ao⊕v_ao) [+ GFN2 multipole]; solve F C = S C ε.
-            // AP1: gpu_n_eig>0 solves only the lowest occupied(+buffer) eigenpairs.
-            const bool solve_ok = gpu_multipole
-                ? m_gpu_scf->solveMultipole(v_ao, m_pot.v_dp, m_pot.v_qp, m_wfn.eps, m_eig_fp32, gpu_n_eig)
-                : m_gpu_scf->solve(v_ao, m_wfn.eps, m_eig_fp32, gpu_n_eig);
+            bool solve_ok;
+            Eigen::VectorXd v_ao;  // host-expanded potential (non-device-potential path)
+            if (use_device_potential) {
+                // Stage 5 (B3/B4): the device builds v_sh/v_at/v_dp/v_qp from the
+                // mixed q_sh/dp_at/qp_at + the host-built D4 reference weights, then
+                // the Fock + eigensolve — no v_ao upload. buildRefWFlat reuses the
+                // validated host per-atom CN-Gaussian × zeta weights at the current
+                // (mixed) charges.
+                const auto t_disp0 = clock::now();
+                std::vector<double> W, dWq;
+                m_d4_generator->buildRefWFlat(m_atoms, m_wfn.q_at, W, dWq);
+                acc_disp += ms(t_disp0, clock::now());
+                t_fock = clock::now();
+                solve_ok = m_gpu_scf->solvePotential(m_wfn.q_sh, m_wfn.dp_at, m_wfn.qp_at,
+                                                     W, dWq, m_wfn.eps, m_eig_fp32, gpu_n_eig);
+            } else {
+                // Expand shell+atom potential to AO resolution (host; mirrors
+                // expand_potential in xtb_scf.cpp). v_ao(μ)=v_sh(sh)+v_at(at) carries
+                // Coulomb + third-order (v_sh) and, for GFN2, the multipole scalar
+                // shift + in-SCF D4 (v_at), all built on the host above. The GFN2
+                // anisotropic v_dp/v_qp is applied in the device Fock via solveMultipole.
+                v_ao.resize(m_basis.nao);
+                for (int ao = 0; ao < m_basis.nao; ++ao)
+                    v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
+                t_fock = clock::now();   // Fock build is fused into solve() on the device
+                // Device: F = H0 − ½·S·(v_ao⊕v_ao) [+ GFN2 multipole]; solve F C = S C ε.
+                // AP1: gpu_n_eig>0 solves only the lowest occupied(+buffer) eigenpairs.
+                solve_ok = gpu_multipole
+                    ? m_gpu_scf->solveMultipole(v_ao, m_pot.v_dp, m_pot.v_qp, m_wfn.eps, m_eig_fp32, gpu_n_eig)
+                    : m_gpu_scf->solve(v_ao, m_wfn.eps, m_eig_fp32, gpu_n_eig);
+            }
             if (!solve_ok) {
                 CurcumaLogger::warn("XTB::Calculation: GPU resident solve failed at iteration "
                                     + std::to_string(iter));
@@ -773,7 +840,17 @@ double XTB::Calculation(bool gradient)
     if (use_gpu_resident && m_gpu_scf)
         m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
 
-    // Persist converged Fock matrix for gradient / debug
+    // Persist converged Fock matrix for gradient / debug. On the device-potential
+    // path (Stage 5 B3/B4) the host m_pot was skipped during the loop, so rebuild
+    // it once at the converged charges before forming m_F (the gradient block below
+    // rebuilds it again, but m_F must be consistent here too).
+    if (use_device_potential) {
+        m_pot.reset();
+        addCoulombShellPotential(m_pot);
+        addThirdOrderPotential(m_pot);
+        addMultipolePotential(m_pot);
+        addDispersionPotential(m_pot);
+    }
     m_F = buildFock(m_H0, m_S, m_pot);
 
     // Final energies

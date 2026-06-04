@@ -288,6 +288,30 @@ public:
         return m_ctx->dispersionDedq(nat, W, dWq, dEdq_out);
     }
 
+    // ---- Full device GFN2 potential build (Stage 5, Part B3/B4) -----------
+    bool supportsDevicePotential() const override { return true; }
+
+    bool beginPotential(int nat, int nsh,
+                        const double* amat_sd, const double* amat_dd, const double* amat_sq,
+                        const double* dkernel, const double* qkernel, const double* gamma3) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->beginPotential(nat, nsh, amat_sd, amat_dd, amat_sq,
+                                     dkernel, qkernel, gamma3);
+    }
+
+    bool solvePotential(const Vector& q_sh, const Eigen::MatrixXd& dp_at,
+                        const Eigen::MatrixXd& qp_at, const std::vector<double>& W,
+                        const std::vector<double>& dWq, Vector& eps,
+                        bool fp32 = false, int n_eig = 0) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        eps.resize(m_n);
+        // dp_at/qp_at are Eigen::MatrixXd (column-major): .data() is [k + j*rows].
+        return m_ctx->residentSolvePotential(q_sh.data(), dp_at.data(), qp_at.data(),
+                                             W.data(), dWq.data(), m_n, eps.data(), fp32, n_eig);
+    }
+
 private:
     XtbGpuContext* m_ctx = nullptr;
     int            m_n   = 0;

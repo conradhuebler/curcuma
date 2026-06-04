@@ -148,6 +148,25 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dD4C6Flat;              // reference C6 block (MAX_ELEM²·MAX_REF²)
     CudaBuffer<double> dD4W, dD4dWq;           // per-iter weights (nat·MAX_REF)
     CudaBuffer<double> dD4Dedq;                // output dE_D4/dq (nat)
+
+    // Stage 5 (Part B3/B4): full device GFN2 potential build. The geometry-fixed
+    // multipole interaction matrices (amat_*, nat²) + the per-shell third-order
+    // hardness gamma3 upload once per geometry (beginPotential); residentSolvePotential
+    // then builds v_sh (γ·q_sh + third-order) + the multipole v_dp/v_qp/v_at scalar
+    // shift + the resident D4 dEdq, expands v_ao, and folds into the Fock+eigensolve —
+    // so the host uploads only q_sh/dp_at/qp_at (+ the host-built D4 W/dWq) per iter.
+    int                pot_nsh = 0;
+    CudaBuffer<double> dMpAmatSD;   // charge-dipole, 3·nat² (col-major blocks [k])
+    CudaBuffer<double> dMpAmatDD;   // dipole-dipole, 9·nat² (block [a*3+b])
+    CudaBuffer<double> dMpAmatSQ;   // charge-quadrupole, 6·nat²
+    CudaBuffer<double> dMpDkernel;  // on-site dipole XC kernel, nat
+    CudaBuffer<double> dMpQkernel;  // on-site quadrupole XC kernel, nat
+    CudaBuffer<double> dGamma3;     // per-shell third-order hardness Γ_s, nsh
+    CudaBuffer<double> dPotQsh;     // uploaded shell charges q_sh, nsh
+    CudaBuffer<double> dInDpAt;     // uploaded atomic dipoles dp_at, 3·nat
+    CudaBuffer<double> dInQpAt;     // uploaded atomic quadrupoles qp_at, 6·nat
+    CudaBuffer<double> dVsh;        // shell potential v_sh, nsh
+    CudaBuffer<double> dVat;        // atom potential v_at, nat
 };
 
 // ---- Stage 3 element parameter tables in __constant__ memory --------------
@@ -968,6 +987,90 @@ __global__ void k_d4_dedq(int nat, int max_elem, int max_ref,
         acc += -dc6dqi * disp_sum;
     }
     dEdq[i] = acc;
+}
+
+// ---- Stage 5 (Part B3/B4): full device GFN2 potential build kernels ---------
+
+// q_at(A) = Σ_{s∈A} q_sh(s). One thread per shell, atomicAdd into the (zeroed)
+// atom bin. (q_at = n0_at − n_at = Σ_{s∈A}(n0_sh − n_sh) = Σ_{s∈A} q_sh.)
+__global__ void k_qsh_to_qat(int nsh, const double* __restrict__ q_sh,
+                             const int* __restrict__ sh2at, double* __restrict__ q_at)
+{
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nsh) return;
+    atomicAdd(&q_at[sh2at[s]], q_sh[s]);
+}
+
+// GFN2 shell third-order: v_sh(s) += q_sh(s)²·Γ_s (added onto the γ·q_sh gemv
+// result already in v_sh). Mirrors addThirdOrderPotential (shell-resolved).
+__global__ void k_vsh_third(int nsh, const double* __restrict__ q_sh,
+                            const double* __restrict__ gamma3, double* __restrict__ v_sh)
+{
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nsh) return;
+    v_sh[s] += q_sh[s] * q_sh[s] * gamma3[s];
+}
+
+// GFN2 multipole potential (one thread per atom i) — port of addMultipolePotential
+// (xtb_multipole.cpp). amat_* are column-major nat×nat blocks; dp_at/qp_at are the
+// uploaded mixed atomic moments ([k+j*3] / [k+j*6]); q_at the device shell→atom sum.
+//   vdp(k,i) = Σ_j amat_sd[k](i,j)·q_at(j) + Σ_a amat_dd[k][a](i,j)·dp_at(a,j)
+//              + 2·dkernel(i)·dp_at(k,i)
+//   vqp(k,i) = Σ_j amat_sq[k](i,j)·q_at(j) + 2·qkernel(i)·qp_at(k,i)·mpscale_q[k]
+//   v_at(i)  = Σ_j [Σ_k amat_sd[k](j,i)·dp_at(k,j) + Σ_k amat_sq[k](j,i)·qp_at(k,j)]
+__global__ void k_multipole_potential(
+    int nat, const double* __restrict__ amat_sd, const double* __restrict__ amat_dd,
+    const double* __restrict__ amat_sq, const double* __restrict__ dkernel,
+    const double* __restrict__ qkernel, const double* __restrict__ q_at,
+    const double* __restrict__ dp_at, const double* __restrict__ qp_at,
+    double* __restrict__ v_dp, double* __restrict__ v_qp, double* __restrict__ v_at)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
+    const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
+    double vd[3] = {0.0, 0.0, 0.0};
+    double vq[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    double vat = 0.0;
+    for (int j = 0; j < nat; ++j) {
+        const double qj = q_at[j];
+        const size_t ij = static_cast<size_t>(i) + static_cast<size_t>(j) * nat;  // (i,j)
+        const size_t ji = static_cast<size_t>(j) + static_cast<size_t>(i) * nat;  // (j,i)
+        const double dpj0 = dp_at[0 + j * 3], dpj1 = dp_at[1 + j * 3], dpj2 = dp_at[2 + j * 3];
+        for (int k = 0; k < 3; ++k) {
+            vd[k] += amat_sd[static_cast<size_t>(k) * nn + ij] * qj
+                   + amat_dd[(static_cast<size_t>(k) * 3 + 0) * nn + ij] * dpj0
+                   + amat_dd[(static_cast<size_t>(k) * 3 + 1) * nn + ij] * dpj1
+                   + amat_dd[(static_cast<size_t>(k) * 3 + 2) * nn + ij] * dpj2;
+            vat += amat_sd[static_cast<size_t>(k) * nn + ji] * dp_at[k + j * 3];
+        }
+        for (int k = 0; k < 6; ++k) {
+            vq[k] += amat_sq[static_cast<size_t>(k) * nn + ij] * qj;
+            vat += amat_sq[static_cast<size_t>(k) * nn + ji] * qp_at[k + j * 6];
+        }
+    }
+    for (int k = 0; k < 3; ++k) v_dp[k + i * 3] = vd[k] + 2.0 * dkernel[i] * dp_at[k + i * 3];
+    for (int k = 0; k < 6; ++k)
+        v_qp[k + i * 6] = vq[k] + 2.0 * qkernel[i] * qp_at[k + i * 6] * mpscale_q[k];
+    v_at[i] = vat;
+}
+
+// v_at(A) += dE_D4/dq(A) (resident from k_d4_dedq). One thread per atom.
+__global__ void k_vat_add_d4(int nat, const double* __restrict__ d4_dedq, double* __restrict__ v_at)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= nat) return;
+    v_at[a] += d4_dedq[a];
+}
+
+// Expand the shell+atom potential to AO resolution: v_ao(μ)=v_sh(ao2sh[μ])+v_at(ao2at[μ]).
+__global__ void k_expand_vao(int nao, const double* __restrict__ v_sh, const double* __restrict__ v_at,
+                             const int* __restrict__ ao2sh, const int* __restrict__ ao2at,
+                             double* __restrict__ v_ao)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= nao) return;
+    v_ao[mu] = v_sh[ao2sh[mu]] + v_at[ao2at[mu]];
 }
 
 XtbGpuContext::XtbGpuContext()
@@ -1943,6 +2046,127 @@ bool XtbGpuContext::dispersionDedq(int nat, const double* W, const double* dWq, 
     if (cudaGetLastError() != cudaSuccess) return false;
     m_impl->dD4Dedq.download(dEdq_out, nat, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+/* ====================================================================== *
+ *  Stage 5 (Part B3/B4): full device GFN2 potential build + resident solve.
+ *  beginPotential uploads the geometry-fixed multipole interaction matrices +
+ *  the per-shell third-order hardness once per geometry. residentSolvePotential
+ *  builds v_sh (γ·q_sh + third-order) + the multipole v_dp/v_qp/v_at scalar shift
+ *  + the resident D4 dE/dq on the device, expands v_ao, and folds into the same
+ *  Fock build + eigensolve as residentSolveMultipole — so the host SCF loop
+ *  uploads only q_sh/dp_at/qp_at (+ the host-built D4 reference weights).
+ * ====================================================================== */
+bool XtbGpuContext::beginPotential(int nat, int nsh,
+                                   const double* amat_sd, const double* amat_dd,
+                                   const double* amat_sq, const double* dkernel,
+                                   const double* qkernel, const double* gamma3)
+{
+    if (!ok() || nat <= 0 || nsh <= 0 || !amat_sd || !amat_dd || !amat_sq
+        || !dkernel || !qkernel || !gamma3)
+        return false;
+    cudaStream_t stream = m_impl->stream;
+    const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
+    try {
+        m_impl->dMpAmatSD.ensure(static_cast<int>(3 * nn));
+        m_impl->dMpAmatDD.ensure(static_cast<int>(9 * nn));
+        m_impl->dMpAmatSQ.ensure(static_cast<int>(6 * nn));
+        m_impl->dMpDkernel.ensure(nat);
+        m_impl->dMpQkernel.ensure(nat);
+        m_impl->dGamma3.ensure(nsh);
+        m_impl->dPotQsh.ensure(nsh);
+        m_impl->dInDpAt.ensure(3 * nat);
+        m_impl->dInQpAt.ensure(6 * nat);
+        m_impl->dVsh.ensure(nsh);
+        m_impl->dVat.ensure(nat);
+        m_impl->dQat.ensure(nat);
+    } catch (...) {
+        return false;
+    }
+    m_impl->dMpAmatSD.upload(amat_sd, static_cast<int>(3 * nn), stream);
+    m_impl->dMpAmatDD.upload(amat_dd, static_cast<int>(9 * nn), stream);
+    m_impl->dMpAmatSQ.upload(amat_sq, static_cast<int>(6 * nn), stream);
+    m_impl->dMpDkernel.upload(dkernel, nat, stream);
+    m_impl->dMpQkernel.upload(qkernel, nat, stream);
+    m_impl->dGamma3.upload(gamma3, nsh, stream);
+    m_impl->pot_nsh = nsh;
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+bool XtbGpuContext::residentSolvePotential(const double* q_sh, const double* dp_at,
+                                           const double* qp_at, const double* W,
+                                           const double* dWq, int n, double* eps_out,
+                                           bool fp32, int n_eig)
+{
+    if (!ok() || n <= 0 || n != m_impl->resident_n || m_impl->resident_nat <= 0
+        || m_impl->pot_nsh <= 0 || m_impl->dD4C6Flat.empty() || m_impl->dGamma.empty()
+        || !q_sh || !dp_at || !qp_at || !W || !dWq || !eps_out)
+        return false;
+    cudaStream_t stream = m_impl->stream;
+    const int nat = m_impl->resident_nat;
+    const int nsh = m_impl->pot_nsh;
+
+    // Upload the iteration's mixed SCC quantities + the host-built D4 weights.
+    m_impl->dPotQsh.upload(q_sh, nsh, stream);
+    m_impl->dInDpAt.upload(dp_at, 3 * nat, stream);
+    m_impl->dInQpAt.upload(qp_at, 6 * nat, stream);
+    m_impl->dD4W.upload(W, nat * Impl::D4_MAX_REF, stream);
+    m_impl->dD4dWq.upload(dWq, nat * Impl::D4_MAX_REF, stream);
+
+    const int b = 128;
+    // D4 atom-potential dE/dq (B2 kernel; resident, no download).
+    {
+        const double cut2 = m_impl->d4_cut * m_impl->d4_cut;
+        k_d4_dedq<<<(nat + b - 1) / b, b, 0, stream>>>(
+            nat, 118, Impl::D4_MAX_REF, m_impl->dD4Z.ptr, m_impl->dD4Nref.ptr,
+            m_impl->dD4Sqrt.ptr, m_impl->dD4Xyz.ptr, m_impl->dD4C6Flat.ptr,
+            m_impl->dD4W.ptr, m_impl->dD4dWq.ptr,
+            m_impl->d4_s6, m_impl->d4_s8, m_impl->d4_a1, m_impl->d4_a2, cut2,
+            m_impl->dD4Dedq.ptr);
+        if (cudaGetLastError() != cudaSuccess) return false;
+    }
+    // q_at = Σ_{s∈A} q_sh(s).
+    m_impl->dQat.zero(nat, stream);
+    k_qsh_to_qat<<<(nsh + b - 1) / b, b, 0, stream>>>(nsh, m_impl->dPotQsh.ptr,
+                                                      m_impl->dSh2at.ptr, m_impl->dQat.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    // v_sh = γ·q_sh (cuBLAS gemv on the resident symmetric γ) + shell third-order.
+    {
+        const double one = 1.0, zero = 0.0;
+        if (cublasDgemv(m_impl->cublas, CUBLAS_OP_N, nsh, nsh, &one, m_impl->dGamma.ptr, nsh,
+                        m_impl->dPotQsh.ptr, 1, &zero, m_impl->dVsh.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        k_vsh_third<<<(nsh + b - 1) / b, b, 0, stream>>>(nsh, m_impl->dPotQsh.ptr,
+                                                         m_impl->dGamma3.ptr, m_impl->dVsh.ptr);
+        if (cudaGetLastError() != cudaSuccess) return false;
+    }
+    // Multipole potential v_dp/v_qp + v_at scalar shift, then v_at += D4.
+    k_multipole_potential<<<(nat + b - 1) / b, b, 0, stream>>>(
+        nat, m_impl->dMpAmatSD.ptr, m_impl->dMpAmatDD.ptr, m_impl->dMpAmatSQ.ptr,
+        m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dQat.ptr,
+        m_impl->dInDpAt.ptr, m_impl->dInQpAt.ptr,
+        m_impl->dVdp.ptr, m_impl->dVqp.ptr, m_impl->dVat.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    k_vat_add_d4<<<(nat + b - 1) / b, b, 0, stream>>>(nat, m_impl->dD4Dedq.ptr, m_impl->dVat.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    // Expand to AO: v_ao(μ) = v_sh(ao2sh[μ]) + v_at(ao2at[μ]).
+    k_expand_vao<<<(n + b - 1) / b, b, 0, stream>>>(n, m_impl->dVsh.ptr, m_impl->dVat.ptr,
+                                                    m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr,
+                                                    m_impl->dVao.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    // F = H0 − ½·S·(v_ao⊕v_ao) + GFN2 multipole; then eigensolve (shared path).
+    const dim3 block(16, 16);
+    const dim3 grid((n + block.x - 1) / block.x, (n + block.y - 1) / block.y);
+    k_build_fock_iso<<<grid, block, 0, stream>>>(m_impl->dC.ptr, m_impl->dH0.ptr,
+                                                 m_impl->dS.ptr, m_impl->dVao.ptr, n);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    k_add_fock_multipole<<<grid, block, 0, stream>>>(m_impl->dC.ptr, m_impl->dDpInt.ptr,
+                                                     m_impl->dQpInt.ptr, m_impl->dVdp.ptr,
+                                                     m_impl->dVqp.ptr, m_impl->dAo2at.ptr, n);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    return eigensolveResidentFock(eps_out, fp32, n_eig);
 }
 
 bool XtbGpuContext::computeOverlapGrad(const double* xyz_bohr, double* dSdR_out)

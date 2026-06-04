@@ -290,6 +290,27 @@ public:
     /// beginDispersion for the same geometry. Returns false on error.
     bool dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out);
 
+    /* ----- Stage 5 (Part B3/B4): full device GFN2 potential build -------- *
+     * Move the WHOLE per-iteration isotropic+anisotropic potential build onto the
+     * device so the SCF loop uploads only q_sh/dp_at/qp_at (+ host D4 weights)
+     * instead of v_ao. beginPotential uploads the geometry-fixed multipole
+     * interaction matrices (amat_sd 3·nat², amat_dd 9·nat², amat_sq 6·nat²,
+     * column-major blocks) + the on-site XC kernels (dkernel/qkernel, nat) + the
+     * per-shell third-order hardness (gamma3, nsh), once per geometry. Requires a
+     * prior beginDispersion (D4 reference data) + the resident integrals/γ. */
+    bool beginPotential(int nat, int nsh,
+                        const double* amat_sd, const double* amat_dd, const double* amat_sq,
+                        const double* dkernel, const double* qkernel, const double* gamma3);
+
+    /// Per SCF iteration: build v_sh (γ·q_sh + shell third-order) + the multipole
+    /// v_dp/v_qp + v_at scalar shift + the resident D4 dE/dq, expand v_ao, fold into
+    /// the Fock and eigensolve. q_sh (nsh), dp_at (3·nat), qp_at (6·nat) are the
+    /// mixed SCC input; W/dWq (each nat·MAX_REF) are the host-built D4 reference
+    /// weights at the same charges. n = nao. Returns false on error.
+    bool residentSolvePotential(const double* q_sh, const double* dp_at, const double* qp_at,
+                                const double* W, const double* dWq, int n, double* eps_out,
+                                bool fp32 = false, int n_eig = 0);
+
 private:
     /// Reduce the resident Fock in dC to standard form with the cached L, solve
     /// it and back-transform → generalized eigenvectors in dC, ascending
