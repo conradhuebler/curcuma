@@ -35,8 +35,33 @@
   — the same reason the CPU `dsyevr` partial-solve was a dead-end. Kept **opt-in,
   default OFF** (`-scf_gpu_partial_diag true`) as a research path for FP64-bound GPUs /
   future kernels; the default GPU path is unchanged (full `cusolverDnDsyevd`).
-- **Not done:** AP1-CPU (skipped per the prior `dsyevr` rejection), AP3/AP4 (GPU
-  on-device potential/integral), AP5 (device purification), AP6–AP9.
+- **AP4 — skip the redundant host integral build: IMPLEMENTED** (`27a39fe`). On the
+  GPU device-resident path the device already builds CN/S/H0/L/γ (`beginComputed`);
+  AP4 hoists that build ahead of the host build and downloads `S/H0/L/γ` into
+  `m_S/m_H0/m_X/m_gamma` instead of rebuilding them on the host (new
+  `GpuScfBackend::downloadOverlap/H0/Cholesky`). GFN2 multipole AO integrals stay
+  host-built (uploaded). Energies bit-identical (`gpu_gfn{1,2}_validation` 24/24,
+  90/90 GPU tests; non-CUDA `release/` 24/24 unchanged). **Setup 63.9 → 47.8 ms;
+  complex `-sp` total ~16–20 ms faster** (per geometry on `-opt`/`-md`).
+- **AP3 — isotropic potential on the device: DEFERRED into a fuller WP.** Measured
+  this session: the literal AP3 (γ·q_sh + third-order on device) moves only ~13 ms of
+  host compute and gives **no transfer win** (uploading `q_sh`[nsh] + D4 `v_at`[nat] ≈
+  the `v_ao`[nao] it replaces), in the validated per-iteration hot path. The real
+  content is the **in-SCF D4 potential (~34 ms/run)**, which is genuinely per-iteration
+  (it uses the SCF Mulliken charges) — moving it off the host means a **device GFN2 D4
+  kernel**. Scoped in **[docs/SQM_GPU_STAGE5_WP.md](SQM_GPU_STAGE5_WP.md)** (device
+  D4/EEQ potential + the AP3 fold-in), to be weighed against the larger eigensolve-
+  latency lever (the 276 ms `solve eigen` is per-iteration `eps`/`pop` round-trips,
+  not eigensolve compute — see below).
+- **Not done:** AP1-CPU (skipped per the prior `dsyevr` rejection), AP5 (device
+  purification), AP6–AP9.
+
+> **Reframing from the AP1/AP3/AP4 measurements (2026-06-04):** the GPU GFN2 SCF on
+> complex is **latency-bound, not compute-bound** — FP32 ≈ FP64 ≈ partial-diag all
+> ~330 ms, so the 276 ms "solve eigen" is dominated by the per-iteration `eps`/`pop_ao`
+> download+sync round-trips, NOT the eigensolve kernel. The largest remaining GPU lever
+> is therefore **device-side occupation → a fully device-resident SCF loop with no
+> per-iter `eps`/`pop` round-trip**, a separate WP from anything in this doc.
 
 ## 0. Measured baseline (complex / 231 atoms, `-sp`, `-threads 8`)
 
