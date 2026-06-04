@@ -391,6 +391,44 @@ if(USE_CUDA_XTB)
                 PROPERTIES TIMEOUT 180 LABELS "gpu_gradient")
         endforeach()
     endforeach()
+
+    # 5 (Part A): single-shot D4 EEQ charges + dq/dx charge-response on the device
+    # vs D4ChargeModel CPU. Charges FP64 LU (~1e-10); response has reductions → 1e-9.
+    add_executable(test_xtb_cuda_eeq test_xtb_cuda_eeq.cpp)
+    target_link_libraries(test_xtb_cuda_eeq PRIVATE curcuma_core)
+    target_include_directories(test_xtb_cuda_eeq PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_features(test_xtb_cuda_eeq PRIVATE cxx_std_17)
+    foreach(_meth gfn1 gfn2)
+        foreach(_mol ${_SQM_CUDA_COMP_MOLS})
+            add_test(NAME sqm_cuda_eeq_${_mol}_${_meth}
+                COMMAND test_xtb_cuda_eeq --quiet --tol 1e-9 ${_meth}
+                        ${_SQM_CUDA_MOL}/${_mol}.xyz)
+            set_tests_properties(sqm_cuda_eeq_${_mol}_${_meth}
+                PROPERTIES TIMEOUT 120 LABELS "gpu_integrals")
+        endforeach()
+    endforeach()
+
+    # 5 (Part B1): device atomic Mulliken charges from the resident density vs the
+    # host updatePopulations (GFN2 only — the resident ao2at map + in-SCF D4 q_at).
+    add_executable(test_xtb_cuda_qat test_xtb_cuda_qat.cpp)
+    target_link_libraries(test_xtb_cuda_qat PRIVATE curcuma_core)
+    target_include_directories(test_xtb_cuda_qat PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_features(test_xtb_cuda_qat PRIVATE cxx_std_17)
+    foreach(_mol ${_SQM_CUDA_COMP_MOLS})
+        add_test(NAME sqm_cuda_qat_${_mol}
+            COMMAND test_xtb_cuda_qat --quiet --tol 1e-9 gfn2
+                    ${_SQM_CUDA_MOL}/${_mol}.xyz)
+        set_tests_properties(sqm_cuda_qat_${_mol}
+            PROPERTIES TIMEOUT 120 LABELS "gpu_integrals")
+    endforeach()
 endif()
 
 # === tblite-dependent executables (dump + multipole) ===

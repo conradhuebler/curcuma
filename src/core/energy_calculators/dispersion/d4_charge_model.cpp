@@ -24,6 +24,31 @@ namespace {
     constexpr double CN_EPS          = 1.0e-10;            // guard for 1/sqrt(CN)
 }
 
+void D4ChargeModel::resolveParams(const std::vector<int>& atoms,
+                                  std::vector<double>& chi,
+                                  std::vector<double>& gam,
+                                  std::vector<double>& alpha_sq,
+                                  std::vector<double>& cnf,
+                                  std::vector<double>& rcov_bohr)
+{
+    const int N = static_cast<int>(atoms.size());
+    chi.assign(N, 1.0);
+    gam.assign(N, 0.0);
+    alpha_sq.assign(N, 1.0);
+    cnf.assign(N, 0.0);
+    rcov_bohr.assign(N, 0.0);
+    for (int i = 0; i < N; ++i) {
+        const int Z = atoms[i];
+        if (Z >= 1 && Z <= 86) {
+            chi[i]       = GFNFFParameters::chi_eeq[Z - 1];
+            gam[i]       = GFNFFParameters::gam_eeq[Z - 1];
+            alpha_sq[i]  = GFNFFParameters::alpha_eeq[Z - 1] * GFNFFParameters::alpha_eeq[Z - 1];
+            cnf[i]       = GFNFFParameters::cnf_eeq[Z - 1];
+            rcov_bohr[i] = K_SCALED * CNCalculator::getCovalentRadius(Z) * ANG2BOHR;
+        }
+    }
+}
+
 Vector D4ChargeModel::computeCharges(const std::vector<int>& atoms,
                                      const Matrix& geom_bohr,
                                      double total_charge)
@@ -36,22 +61,9 @@ Vector D4ChargeModel::computeCharges(const std::vector<int>& atoms,
     if (N == 0) { m_q = Vector(); return m_q; }
 
     // Resolve per-atom EEQ parameters (angewChem2020 set, α stored squared).
-    std::vector<double> chi(N), gam(N);
-    m_alp.assign(N, 1.0);
-    m_cnf.assign(N, 0.0);
-    m_rcov_bohr.assign(N, 0.0);
-    for (int i = 0; i < N; ++i) {
-        const int Z = atoms[i];
-        if (Z >= 1 && Z <= 86) {
-            chi[i]      = GFNFFParameters::chi_eeq[Z - 1];
-            gam[i]      = GFNFFParameters::gam_eeq[Z - 1];
-            m_alp[i]    = GFNFFParameters::alpha_eeq[Z - 1] * GFNFFParameters::alpha_eeq[Z - 1];
-            m_cnf[i]    = GFNFFParameters::cnf_eeq[Z - 1];
-            m_rcov_bohr[i] = K_SCALED * CNCalculator::getCovalentRadius(Z) * ANG2BOHR;
-        } else {
-            chi[i] = 1.0; gam[i] = 0.0; m_alp[i] = 1.0; m_cnf[i] = 0.0;
-        }
-    }
+    // resolveParams is the single source of truth shared with the GPU port.
+    std::vector<double> chi, gam;
+    resolveParams(atoms, chi, gam, m_alp, m_cnf, m_rcov_bohr);
 
     // Coordination numbers (GFN-FF log-compressed erf form) + raw sum for the
     // log-compression chain factor used in the gradient.

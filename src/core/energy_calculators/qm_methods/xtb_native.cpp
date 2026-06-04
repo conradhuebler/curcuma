@@ -143,9 +143,34 @@ bool XTB::seedEEQGuess(Vector& q_sh_out)
 
     // m_geometry is in Angstrom; the EEQ model expects Bohr.
     const Matrix geom_bohr = m_geometry * AA_TO_AU;
-    curcuma::dispersion::D4ChargeModel eeq;
-    Vector q_at = eeq.computeCharges(m_atoms, geom_bohr,
-                                     static_cast<double>(m_charge));
+
+    // Stage 5 (Part A): on the device-resident path solve the single-shot EEQ on
+    // the GPU (self-contained — no resident SCF state needed yet), so the per-step
+    // guess does not pull back to the host. resolveParams is the shared parameter
+    // source; the host D4ChargeModel is the fallback on any device failure.
+    Vector q_at;
+    bool got_device = false;
+    if (m_gpu_scf && m_gpu_scf->supportsDeviceEeq()) {
+        std::vector<double> chi, gam, alp, cnf, rcov;
+        curcuma::dispersion::D4ChargeModel::resolveParams(m_atoms, chi, gam, alp, cnf, rcov);
+        std::vector<double> xyz(3 * nat), q(nat, 0.0);
+        for (int i = 0; i < nat; ++i) {
+            xyz[3 * i + 0] = geom_bohr(i, 0);
+            xyz[3 * i + 1] = geom_bohr(i, 1);
+            xyz[3 * i + 2] = geom_bohr(i, 2);
+        }
+        if (m_gpu_scf->eeqCharges(nat, xyz.data(), chi.data(), gam.data(), alp.data(),
+                                  cnf.data(), rcov.data(), static_cast<double>(m_charge),
+                                  q.data())) {
+            q_at = Vector::Zero(nat);
+            for (int i = 0; i < nat; ++i) q_at(i) = q[i];
+            got_device = q_at.allFinite();
+        }
+    }
+    if (!got_device) {
+        curcuma::dispersion::D4ChargeModel eeq;
+        q_at = eeq.computeCharges(m_atoms, geom_bohr, static_cast<double>(m_charge));
+    }
     if (q_at.size() != nat || !q_at.allFinite())
         return false;
 
@@ -1424,6 +1449,38 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         // this choice only affects the gradient, never the energy.
         if (m_d4_charge_source == "mulliken") {
             computeMullikenChargeResponse(m_disp_dEdq, m_disp_gradient);
+        } else if (m_gpu_scf && m_gpu_scf->supportsDeviceEeq()) {
+            // Stage 5 (Part A): device EEQ charges + adjoint dq/dx response. The
+            // GPU writes the per-atom response into a scratch N×3 buffer; we add it
+            // to m_disp_gradient. Host D4ChargeModel is the fallback on failure.
+            const int nat = m_atomcount;
+            std::vector<double> chi, gam, alp, cnf, rcov;
+            curcuma::dispersion::D4ChargeModel::resolveParams(m_atoms, chi, gam, alp, cnf, rcov);
+            std::vector<double> xyz(3 * nat), qscratch(nat, 0.0), dedq(nat, 0.0),
+                grad(3 * nat, 0.0);
+            for (int i = 0; i < nat; ++i) {
+                xyz[3 * i + 0] = geom_bohr(i, 0);
+                xyz[3 * i + 1] = geom_bohr(i, 1);
+                xyz[3 * i + 2] = geom_bohr(i, 2);
+                dedq[i] = m_disp_dEdq(i);
+            }
+            const bool ok =
+                m_gpu_scf->eeqCharges(nat, xyz.data(), chi.data(), gam.data(), alp.data(),
+                                      cnf.data(), rcov.data(), static_cast<double>(m_charge),
+                                      qscratch.data())
+                && m_gpu_scf->eeqChargeResponse(nat, dedq.data(), grad.data());
+            if (ok) {
+                for (int a = 0; a < nat; ++a) {
+                    m_disp_gradient(a, 0) += grad[3 * a + 0];
+                    m_disp_gradient(a, 1) += grad[3 * a + 1];
+                    m_disp_gradient(a, 2) += grad[3 * a + 2];
+                }
+            } else {
+                curcuma::dispersion::D4ChargeModel eeq;
+                eeq.computeCharges(m_atoms, geom_bohr, static_cast<double>(m_charge));
+                if (eeq.valid())
+                    eeq.addChargeResponseGradient(m_disp_dEdq, m_disp_gradient);
+            }
         } else {
             curcuma::dispersion::D4ChargeModel eeq;
             eeq.computeCharges(m_atoms, geom_bohr, static_cast<double>(m_charge));

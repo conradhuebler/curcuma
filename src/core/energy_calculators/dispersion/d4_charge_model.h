@@ -75,6 +75,23 @@ public:
     const Vector& charges() const { return m_q; }
     bool valid() const { return m_n > 0; }
 
+    /**
+     * @brief Resolve the per-atom EEQ parameters (angewChem2020 set).
+     *
+     * Single source of truth for the element-table lookups used by the EEQ
+     * system: χ_i, γ_i, α_i² (stored squared, matching getParameters), κ_i (CN
+     * scaling) and the 4/3-scaled covalent radius in Bohr. computeCharges() uses
+     * it; the GPU port (Stage 5) calls it to feed the device solver the identical
+     * parameters. Out-of-range Z (not 1..86) → χ=1, γ=0, α²=1, κ=0, rcov=0.
+     * Each output vector is resized to atoms.size(). Claude Generated 2026.
+     */
+    static void resolveParams(const std::vector<int>& atoms,
+                              std::vector<double>& chi,
+                              std::vector<double>& gam,
+                              std::vector<double>& alpha_sq,
+                              std::vector<double>& cnf,
+                              std::vector<double>& rcov_bohr);
+
 private:
     // Cached state from the last computeCharges() call.
     int m_n = 0;

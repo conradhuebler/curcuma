@@ -235,6 +235,38 @@ public:
     /// the resident SCF loop without uploading any nao²-sized matrix.
     bool residentBeginComputed();
 
+    /* ----- Stage 5 (Part A): single-shot D4 EEQ charge model ------------- *
+     * Port of curcuma::dispersion::D4ChargeModel. Self-contained (independent of
+     * beginBasis): builds the GFN-FF log-compressed CN, the (N+1) augmented EEQ
+     * matrix M=[[A,1],[1,0]] and RHS [b;Q] on the device, factors M with a
+     * partial-pivot LU (cusolverDnDgetrf — M is symmetric *indefinite*, so LU,
+     * not Cholesky) and solves for the atomic charges. The LU factor + CN + the
+     * per-atom params stay resident so eeqChargeResponseGradient can reuse them
+     * for the adjoint (Z-vector) solve. Claude Generated. */
+
+    /// Solve the single-shot EEQ system on the device. Inputs are length-N host
+    /// arrays (per-atom χ, γ, α² (squared), κ, 4/3·rcov·Å→Bohr) + xyz_bohr (3·N)
+    /// + the total molecular charge. Writes the N atomic charges to q_out.
+    /// Returns false on any CUDA/cuSOLVER error (caller falls back to the host).
+    bool eeqCharges(int N, const double* xyz_bohr,
+                    const double* chi, const double* gam, const double* alpha_sq,
+                    const double* cnf, const double* rcov_bohr,
+                    double total_charge, double* q_out);
+
+    /// Accumulate the D4 charge-response gradient Σ_A dEdq(A)·∂q_A/∂R into
+    /// grad_add (N×3, layout [3a+k], Eh/Bohr) — written, not added (the host
+    /// adds it to its own accumulator). Reuses the LU factor from the most recent
+    /// eeqCharges call for the same geometry/N. Returns false on error.
+    bool eeqChargeResponseGradient(int N, const double* dEdq, double* grad_add);
+
+    /* ----- Stage 5 (Part B1): device atomic Mulliken charges -------------- *
+     * q_at(A) = n0_at(A) − Σ_{μ∈A} pop_ao(μ), reduced from the resident density
+     * populations (dPop, set by residentDensity) via the resident AO→atom map.
+     * The result stays resident (dQat) for the in-SCF D4 potential (Part B2);
+     * q_at_out optionally downloads it for validation. Requires a prior
+     * residentDensity + a resident ao2at map (GFN2). Claude Generated. */
+    bool residentAtomicCharges(const double* n0_at, int nat, double* q_at_out);
+
 private:
     /// Reduce the resident Fock in dC to standard form with the cached L, solve
     /// it and back-transform → generalized eigenvectors in dC, ascending

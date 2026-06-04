@@ -240,6 +240,35 @@ public:
         return true;
     }
 
+    // ---- Single-shot D4 EEQ charge model (Stage 5, Part A) ----------------
+    bool supportsDeviceEeq() const override { return true; }
+
+    bool eeqCharges(int N, const double* xyz_bohr,
+                    const double* chi, const double* gam, const double* alpha_sq,
+                    const double* cnf, const double* rcov_bohr,
+                    double total_charge, double* q_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->eeqCharges(N, xyz_bohr, chi, gam, alpha_sq, cnf, rcov_bohr,
+                                 total_charge, q_out);
+    }
+
+    bool eeqChargeResponse(int N, const double* dEdq, double* grad_add) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->eeqChargeResponseGradient(N, dEdq, grad_add);
+    }
+
+    // ---- Device atomic Mulliken charges (Stage 5, Part B1) ----------------
+    bool atomicCharges(const Vector& n0_at, Vector& q_at_out) override
+    {
+        if (!m_ctx) return false;
+        const int nat = static_cast<int>(n0_at.size());
+        if (nat <= 0) return false;
+        q_at_out.resize(nat);
+        return m_ctx->residentAtomicCharges(n0_at.data(), nat, q_at_out.data());
+    }
+
 private:
     XtbGpuContext* m_ctx = nullptr;
     int            m_n   = 0;

@@ -104,6 +104,33 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dQsh;                  // shell charges, length nsh
     CudaBuffer<double> dGrad;                 // gradient, 3·nat
     CudaBuffer<double> dEdcn;                 // CN coupling, length nat
+
+    // Stage 5 (Part A): single-shot D4 EEQ charge model. Self-contained — does
+    // NOT depend on beginBasis; eeqCharges allocates/uploads its own length-N
+    // params + (N+1)×(N+1) augmented matrix and keeps the LU factor + CN resident
+    // so eeqChargeResponseGradient reuses them for the adjoint solve. Claude Generated.
+    int                eeq_n = 0;             // N for which the LU factor is valid
+    CudaBuffer<double> dEeqXyz;               // 3·N geometry (Bohr)
+    CudaBuffer<double> dEeqChi, dEeqGam;      // per-atom χ, γ (length N)
+    CudaBuffer<double> dEeqAlp, dEeqCnf;      // per-atom α² , κ (length N)
+    CudaBuffer<double> dEeqRcov;              // per-atom 4/3·rcov·Å→Bohr (length N)
+    CudaBuffer<double> dEeqCn, dEeqCnRaw;     // log-compressed CN + raw CN (length N)
+    CudaBuffer<double> dEeqM;                 // augmented matrix / LU factor, (N+1)²
+    CudaBuffer<double> dEeqRhs;               // RHS [b;Q] → [q;λ], length N+1
+    CudaBuffer<double> dEeqQ;                 // atomic charges q (length N, resident)
+    CudaBuffer<double> dEeqAdjRhs;            // adjoint RHS [dEdq;0] → [z;…], length N+1
+    CudaBuffer<double> dEeqDedq;              // uploaded dE_D4/dq (length N)
+    CudaBuffer<double> dEeqU;                 // per-atom CN-response weight (length N)
+    CudaBuffer<double> dEeqGrad;              // response gradient [3·N], [3a+k]
+    CudaBuffer<double> dEeqWork;              // cuSOLVER getrf workspace
+    CudaBuffer<int>    dEeqIpiv;              // LU pivots, length N+1
+    int                eeq_lwork = 0;
+
+    // Stage 5 (Part B1): device atomic Mulliken charges from the resident density.
+    // dQat(A) = n0_at(A) − Σ_{μ∈A} pop_ao(μ); reduced from the resident dPop via
+    // the resident dAo2at map, kept resident for the in-SCF D4 potential (B2).
+    CudaBuffer<double> dN0at;                 // reference atom occupations (nat)
+    CudaBuffer<double> dQat;                  // atomic charges q_at (nat, resident)
 };
 
 // ---- Stage 3 element parameter tables in __constant__ memory --------------
@@ -688,6 +715,175 @@ __global__ void k_multipole_moments(double* dp_at, double* qp_at,
             atomicAdd(&qp_at[k + iat * 6], -acc);
         }
     }
+}
+
+// ====================================================================== *
+//  Stage 5 (Part A): single-shot D4 EEQ charge model device kernels.
+//  Verbatim port of curcuma::dispersion::D4ChargeModel (d4_charge_model.cpp):
+//  one smooth augmented linear system [[A,1],[1,0]]·[q;λ]=[b;Q], solved via LU,
+//  plus the analytic ∂q/∂x charge-response (adjoint + closed-form pair loop).
+//  Constants mirror the CPU file exactly. Claude Generated (2026-06).
+// ====================================================================== *
+namespace {
+constexpr double D4EEQ_TSQRT2PI        = 0.797884560802866;   // sqrt(2/π)
+constexpr double D4EEQ_TWO_OVER_SQRTPI = 1.1283791670955126;  // 2/sqrt(π)
+constexpr double D4EEQ_KN     = -7.5;       // GFN-FF erf-CN steepness
+constexpr double D4EEQ_CNMAX  = 4.4;        // CN log-compression cap
+constexpr double D4EEQ_CN_EPS = 1.0e-10;    // guard for 1/sqrt(CN)
+} // namespace
+
+// CN (GFN-FF log-compressed erf form) + raw CN. One thread per atom i. rcov_bohr
+// is the pre-scaled (4/3·rcov·Å→Bohr) covalent radius; rcov==0 → CN 0 (skipped).
+// Mirrors D4ChargeModel::computeCharges CN loop (d4_charge_model.cpp:58-73).
+__global__ void k_d4eeq_cn(int N, const double* __restrict__ xyz,
+                           const double* __restrict__ rcov_bohr,
+                           double* __restrict__ cn, double* __restrict__ cn_raw)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    const double rci = rcov_bohr[i];
+    if (rci == 0.0) { cn[i] = 0.0; cn_raw[i] = 0.0; return; }
+    const double xi = xyz[3 * i + 0], yi = xyz[3 * i + 1], zi = xyz[3 * i + 2];
+    double raw = 0.0;
+    for (int j = 0; j < N; ++j) {
+        if (j == i) continue;
+        const double rcj = rcov_bohr[j];
+        if (rcj == 0.0) continue;
+        const double dx = xi - xyz[3 * j + 0];
+        const double dy = yi - xyz[3 * j + 1];
+        const double dz = zi - xyz[3 * j + 2];
+        const double r = sqrt(dx * dx + dy * dy + dz * dz);
+        const double rcij = rci + rcj;
+        const double dr = (r - rcij) / rcij;
+        raw += 0.5 * (1.0 + erf(D4EEQ_KN * dr));
+    }
+    cn_raw[i] = raw;
+    const double log1p_ecnmax = log(1.0 + exp(D4EEQ_CNMAX));
+    cn[i] = log1p_ecnmax - log(1.0 + exp(D4EEQ_CNMAX - raw));
+}
+
+// Augmented EEQ matrix M = [[A,1],[1ᵀ,0]], column-major (N+1)×(N+1). One thread
+// per (row r, col c). A_ii = γ_i + √(2/π)/√α_i² ; A_ij = erf(γ_ij·r)/r with
+// γ_ij = 1/√(α_i²+α_j²); border = 1; corner = 0. (d4_charge_model.cpp:79-92).
+__global__ void k_d4eeq_build(int N, const double* __restrict__ xyz,
+                              const double* __restrict__ alpha_sq,
+                              const double* __restrict__ gam,
+                              double* __restrict__ M)
+{
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    const int c = blockIdx.y * blockDim.y + threadIdx.y;
+    const int m = N + 1;
+    if (r >= m || c >= m) return;
+    double val;
+    if (r == N && c == N) {
+        val = 0.0;
+    } else if (r == N || c == N) {
+        val = 1.0;
+    } else if (r == c) {
+        val = gam[r] + D4EEQ_TSQRT2PI / sqrt(alpha_sq[r]);
+    } else {
+        const double dx = xyz[3 * r + 0] - xyz[3 * c + 0];
+        const double dy = xyz[3 * r + 1] - xyz[3 * c + 1];
+        const double dz = xyz[3 * r + 2] - xyz[3 * c + 2];
+        const double rr = sqrt(dx * dx + dy * dy + dz * dz);
+        const double gammij = 1.0 / sqrt(alpha_sq[r] + alpha_sq[c]);
+        val = erf(gammij * rr) / rr;
+    }
+    M[static_cast<size_t>(r) + static_cast<size_t>(c) * m] = val;
+}
+
+// RHS c = [b; Q], length N+1. b_i = -χ_i + κ_i·√max(CN_i,0); c(N)=total_charge.
+__global__ void k_d4eeq_rhs(int N, const double* __restrict__ chi,
+                            const double* __restrict__ cnf, const double* __restrict__ cn,
+                            double total_charge, double* __restrict__ c_out)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i > N) return;
+    if (i == N) { c_out[N] = total_charge; return; }
+    c_out[i] = -chi[i] + cnf[i] * sqrt(fmax(cn[i], 0.0));
+}
+
+// Adjoint RHS [dEdq; 0], length N+1 (for M·z = [dEdq;0]).
+__global__ void k_d4eeq_adjoint_rhs(int N, const double* __restrict__ dEdq,
+                                    double* __restrict__ rhs)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i > N) return;
+    rhs[i] = (i < N) ? dEdq[i] : 0.0;
+}
+
+// Per-atom b-term response weight u_i = z_q(i)·κ_i/(2√CN_i)·g_i, g_i the
+// log-compression factor 1/(1+e^(cn_raw_i−cnmax)). (d4_charge_model.cpp:116-122).
+__global__ void k_d4eeq_u(int N, const double* __restrict__ zq, const double* __restrict__ cnf,
+                          const double* __restrict__ cn, const double* __restrict__ cn_raw,
+                          double* __restrict__ u)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    const double cni = cn[i];
+    if (cni <= D4EEQ_CN_EPS || cnf[i] == 0.0) { u[i] = 0.0; return; }
+    const double g = 1.0 / (1.0 + exp(cn_raw[i] - D4EEQ_CNMAX));
+    u[i] = zq[i] * cnf[i] / (2.0 * sqrt(cni)) * g;
+}
+
+// Charge-response gradient, one thread per atom a (no atomicAdd): the CPU pair
+// loop (b<a) gives a += g_pair and b −= g_pair; summing the full b≠a loop per
+// atom reproduces both halves since coeff is pair-symmetric and û flips sign.
+// grad layout [3a+k], Eh/Bohr. Mirrors addChargeResponseGradient (lines 124-152).
+__global__ void k_d4eeq_response(int N, const double* __restrict__ xyz,
+                                 const double* __restrict__ alpha_sq,
+                                 const double* __restrict__ rcov_bohr,
+                                 const double* __restrict__ q, const double* __restrict__ zq,
+                                 const double* __restrict__ u, double* __restrict__ grad)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= N) return;
+    const double xa = xyz[3 * a + 0], ya = xyz[3 * a + 1], za = xyz[3 * a + 2];
+    const double alp_a = alpha_sq[a], rc_a = rcov_bohr[a];
+    double gx = 0.0, gy = 0.0, gz = 0.0;
+    for (int b = 0; b < N; ++b) {
+        if (b == a) continue;
+        const double dx = xa - xyz[3 * b + 0];
+        const double dy = ya - xyz[3 * b + 1];
+        const double dz = za - xyz[3 * b + 2];
+        const double r = sqrt(dx * dx + dy * dy + dz * dz);
+        if (r < 1.0e-10) continue;
+        const double inv_r = 1.0 / r;
+        // A-term: −c_ab·A'(r)·û,  c_ab = z_q(a)q_b + z_q(b)q_a.
+        const double gammij = 1.0 / sqrt(alp_a + alpha_sq[b]);
+        const double gr = gammij * r;
+        const double Aprime = gammij * D4EEQ_TWO_OVER_SQRTPI * exp(-gr * gr) * inv_r
+                              - erf(gr) * inv_r * inv_r;
+        const double c_ab = zq[a] * q[b] + zq[b] * q[a];
+        // b-term (CN): (u_a+u_b)·d(cn_raw)/dr·û.
+        double Draw = 0.0;
+        const double rc_b = rcov_bohr[b];
+        if (rc_a > 0.0 && rc_b > 0.0) {
+            const double rcij = rc_a + rc_b;
+            const double dr = (r - rcij) / rcij;
+            const double earg = D4EEQ_KN * dr;
+            Draw = 0.5 * D4EEQ_TWO_OVER_SQRTPI * exp(-earg * earg) * D4EEQ_KN / rcij;
+        }
+        const double coeff = (u[a] + u[b]) * Draw - c_ab * Aprime;
+        gx += coeff * dx * inv_r;
+        gy += coeff * dy * inv_r;
+        gz += coeff * dz * inv_r;
+    }
+    grad[3 * a + 0] = gx;
+    grad[3 * a + 1] = gy;
+    grad[3 * a + 2] = gz;
+}
+
+// Stage 5 (Part B1): atomic Mulliken charges from the resident AO populations.
+// q_at is pre-seeded to n0_at; one thread per AO subtracts its population into
+// its atom bin. Mirrors updatePopulationsFromPopAo (xtb_scf.cpp): n_at(A) =
+// Σ_{μ∈A} pop_ao(μ), q_at(A) = n0_at(A) − n_at(A). Claude Generated.
+__global__ void k_qat_scatter(int nao, const double* __restrict__ pop,
+                              const int* __restrict__ ao2at, double* __restrict__ q_at)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= nao) return;
+    atomicAdd(&q_at[ao2at[mu]], -pop[mu]);
 }
 
 XtbGpuContext::XtbGpuContext()
@@ -1427,6 +1623,177 @@ bool XtbGpuContext::downloadMultipoleInts(double* dp_int3, double* qp_int6)
     m_impl->dDpInt.download(dp_int3, static_cast<int>(3 * nn), m_impl->stream);
     m_impl->dQpInt.download(qp_int6, static_cast<int>(6 * nn), m_impl->stream);
     return cudaStreamSynchronize(m_impl->stream) == cudaSuccess;
+}
+
+/* ====================================================================== *
+ *  Stage 5 (Part A): single-shot D4 EEQ charge model on the device.
+ *  Self-contained (no beginBasis): builds CN + the (N+1) augmented matrix +
+ *  RHS on the device, factors with cusolverDnDgetrf (partial-pivot LU — the
+ *  augmented system is symmetric *indefinite*, so LU, not Cholesky), solves
+ *  with getrs. The LU factor, CN and per-atom params stay resident so
+ *  eeqChargeResponseGradient reuses them. Claude Generated.
+ * ====================================================================== */
+bool XtbGpuContext::eeqCharges(int N, const double* xyz_bohr,
+                               const double* chi, const double* gam,
+                               const double* alpha_sq, const double* cnf,
+                               const double* rcov_bohr, double total_charge,
+                               double* q_out)
+{
+    if (!ok() || N <= 0 || !xyz_bohr || !chi || !gam || !alpha_sq || !cnf
+        || !rcov_bohr || !q_out)
+        return false;
+    const int m = N + 1;
+    cudaStream_t stream = m_impl->stream;
+    try {
+        m_impl->dEeqXyz.ensure(3 * N);
+        m_impl->dEeqChi.ensure(N);
+        m_impl->dEeqGam.ensure(N);
+        m_impl->dEeqAlp.ensure(N);
+        m_impl->dEeqCnf.ensure(N);
+        m_impl->dEeqRcov.ensure(N);
+        m_impl->dEeqCn.ensure(N);
+        m_impl->dEeqCnRaw.ensure(N);
+        m_impl->dEeqM.ensure(m * m);
+        m_impl->dEeqRhs.ensure(m);
+        m_impl->dEeqQ.ensure(N);
+        m_impl->dEeqIpiv.ensure(m);
+        if (m_impl->dInfo.n < 1) m_impl->dInfo.alloc(1);
+    } catch (...) {
+        return false;
+    }
+
+    m_impl->dEeqXyz.upload(xyz_bohr, 3 * N, stream);
+    m_impl->dEeqChi.upload(chi, N, stream);
+    m_impl->dEeqGam.upload(gam, N, stream);
+    m_impl->dEeqAlp.upload(alpha_sq, N, stream);
+    m_impl->dEeqCnf.upload(cnf, N, stream);
+    m_impl->dEeqRcov.upload(rcov_bohr, N, stream);
+
+    const int b = 128;
+    k_d4eeq_cn<<<(N + b - 1) / b, b, 0, stream>>>(N, m_impl->dEeqXyz.ptr,
+                                                  m_impl->dEeqRcov.ptr,
+                                                  m_impl->dEeqCn.ptr, m_impl->dEeqCnRaw.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    const dim3 blk(16, 16);
+    const dim3 grd((m + blk.x - 1) / blk.x, (m + blk.y - 1) / blk.y);
+    k_d4eeq_build<<<grd, blk, 0, stream>>>(N, m_impl->dEeqXyz.ptr, m_impl->dEeqAlp.ptr,
+                                           m_impl->dEeqGam.ptr, m_impl->dEeqM.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    k_d4eeq_rhs<<<(m + b - 1) / b, b, 0, stream>>>(N, m_impl->dEeqChi.ptr, m_impl->dEeqCnf.ptr,
+                                                   m_impl->dEeqCn.ptr, total_charge,
+                                                   m_impl->dEeqRhs.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    // LU factor M (getrf) then solve M·[q;λ] = [b;Q] (getrs). Workspace query is
+    // size-stable for fixed m, so the buffer is reused across geometry steps.
+    int lwork = 0;
+    if (cusolverDnDgetrf_bufferSize(m_impl->cusolver, m, m, m_impl->dEeqM.ptr, m, &lwork)
+        != CUSOLVER_STATUS_SUCCESS)
+        return false;
+    try {
+        m_impl->eeq_lwork = lwork;
+        m_impl->dEeqWork.ensure(lwork > 0 ? lwork : 1);
+    } catch (...) {
+        return false;
+    }
+    if (cusolverDnDgetrf(m_impl->cusolver, m, m, m_impl->dEeqM.ptr, m,
+                         m_impl->dEeqWork.ptr, m_impl->dEeqIpiv.ptr, m_impl->dInfo.ptr)
+        != CUSOLVER_STATUS_SUCCESS)
+        return false;
+    if (cusolverDnDgetrs(m_impl->cusolver, CUBLAS_OP_N, m, 1, m_impl->dEeqM.ptr, m,
+                         m_impl->dEeqIpiv.ptr, m_impl->dEeqRhs.ptr, m, m_impl->dInfo.ptr)
+        != CUSOLVER_STATUS_SUCCESS)
+        return false;
+    // rhs head N holds the atomic charges q → keep resident for the response.
+    if (cudaMemcpyAsync(m_impl->dEeqQ.ptr, m_impl->dEeqRhs.ptr, sizeof(double) * N,
+                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+        return false;
+    int info = 1;
+    if (cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
+                        cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+        return false;
+    m_impl->dEeqQ.download(q_out, N, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    m_impl->eeq_n = (info == 0) ? N : 0;
+    return info == 0;
+}
+
+bool XtbGpuContext::eeqChargeResponseGradient(int N, const double* dEdq, double* grad_add)
+{
+    if (!ok() || N <= 0 || N != m_impl->eeq_n || !dEdq || !grad_add)
+        return false;
+    const int m = N + 1;
+    cudaStream_t stream = m_impl->stream;
+    if (N <= 1) {                       // no pairwise geometry dependence
+        for (int i = 0; i < 3 * N; ++i) grad_add[i] = 0.0;
+        return true;
+    }
+    try {
+        m_impl->dEeqDedq.ensure(N);
+        m_impl->dEeqAdjRhs.ensure(m);
+        m_impl->dEeqU.ensure(N);
+        m_impl->dEeqGrad.ensure(3 * N);
+    } catch (...) {
+        return false;
+    }
+    m_impl->dEeqDedq.upload(dEdq, N, stream);
+
+    const int b = 128;
+    k_d4eeq_adjoint_rhs<<<(m + b - 1) / b, b, 0, stream>>>(N, m_impl->dEeqDedq.ptr,
+                                                           m_impl->dEeqAdjRhs.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    // Adjoint: M·z = [dEdq;0], reusing the LU factor + pivots from eeqCharges.
+    if (cusolverDnDgetrs(m_impl->cusolver, CUBLAS_OP_N, m, 1, m_impl->dEeqM.ptr, m,
+                         m_impl->dEeqIpiv.ptr, m_impl->dEeqAdjRhs.ptr, m, m_impl->dInfo.ptr)
+        != CUSOLVER_STATUS_SUCCESS)
+        return false;
+    // dEeqAdjRhs head N = z_q. Build the per-atom CN-response weight then the pairs.
+    k_d4eeq_u<<<(N + b - 1) / b, b, 0, stream>>>(N, m_impl->dEeqAdjRhs.ptr, m_impl->dEeqCnf.ptr,
+                                                 m_impl->dEeqCn.ptr, m_impl->dEeqCnRaw.ptr,
+                                                 m_impl->dEeqU.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    k_d4eeq_response<<<(N + b - 1) / b, b, 0, stream>>>(N, m_impl->dEeqXyz.ptr, m_impl->dEeqAlp.ptr,
+                                                        m_impl->dEeqRcov.ptr, m_impl->dEeqQ.ptr,
+                                                        m_impl->dEeqAdjRhs.ptr, m_impl->dEeqU.ptr,
+                                                        m_impl->dEeqGrad.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    // Download the N×3 [3a+k] response contribution; the host adds it to its accumulator.
+    m_impl->dEeqGrad.download(grad_add, 3 * N, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+/* ====================================================================== *
+ *  Stage 5 (Part B1): atomic Mulliken charges from the resident density.
+ *  Reduces the resident dPop (= pop_ao, set by residentDensity) into the
+ *  resident dQat via the resident AO→atom map; q_at_out optionally downloads
+ *  the result for validation. dQat stays resident for the in-SCF D4 potential.
+ * ====================================================================== */
+bool XtbGpuContext::residentAtomicCharges(const double* n0_at, int nat, double* q_at_out)
+{
+    if (!ok() || nat <= 0 || m_impl->resident_n <= 0 || m_impl->dPop.empty()
+        || m_impl->dAo2at.empty() || !n0_at)
+        return false;
+    const int nao = m_impl->resident_n;
+    cudaStream_t stream = m_impl->stream;
+    try {
+        m_impl->dN0at.ensure(nat);
+        m_impl->dQat.ensure(nat);
+    } catch (...) {
+        return false;
+    }
+    // q_at ← n0_at, then subtract each AO population into its atom bin.
+    m_impl->dN0at.upload(n0_at, nat, stream);
+    if (cudaMemcpyAsync(m_impl->dQat.ptr, m_impl->dN0at.ptr, sizeof(double) * nat,
+                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+        return false;
+    const int b = 128;
+    k_qat_scatter<<<(nao + b - 1) / b, b, 0, stream>>>(nao, m_impl->dPop.ptr,
+                                                       m_impl->dAo2at.ptr, m_impl->dQat.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    if (q_at_out) m_impl->dQat.download(q_at_out, nat, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
 bool XtbGpuContext::computeOverlapGrad(const double* xyz_bohr, double* dSdR_out)

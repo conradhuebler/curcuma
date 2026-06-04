@@ -384,6 +384,35 @@ struct GpuScfBackend {
                                 const Eigen::MatrixXd& v_qp,
                                 Vector& eps, bool fp32 = false, int n_eig = 0) { (void)v_ao; (void)v_dp; (void)v_qp; (void)eps; (void)fp32; (void)n_eig; return false; }
     virtual bool multipoleMoments(Eigen::MatrixXd& dp_at, Eigen::MatrixXd& qp_at) { (void)dp_at; (void)qp_at; return false; }
+
+    /* ----- Single-shot D4 EEQ charge model (Stage 5, Part A) ------------- *
+     * The default scf_guess=eeq and d4_charge_source=eeq both run the
+     * curcuma::dispersion::D4ChargeModel (one (N+1) augmented LU solve per
+     * geometry) on the host. On the device-resident path the backend solves it
+     * on the GPU instead, so -opt/-md need not pull back to the host for the EEQ
+     * guess or the D4 gradient charge-response. A backend that does not implement
+     * it leaves supportsDeviceEeq() false and the host D4ChargeModel is used.
+     * Inputs are length-N host arrays from D4ChargeModel::resolveParams. */
+    virtual bool supportsDeviceEeq() const { return false; }
+    virtual bool eeqCharges(int N, const double* xyz_bohr,
+                            const double* chi, const double* gam, const double* alpha_sq,
+                            const double* cnf, const double* rcov_bohr,
+                            double total_charge, double* q_out)
+    { (void)N; (void)xyz_bohr; (void)chi; (void)gam; (void)alpha_sq; (void)cnf;
+      (void)rcov_bohr; (void)total_charge; (void)q_out; return false; }
+    /// Write the D4 charge-response gradient Σ_A dEdq(A)·∂q_A/∂R into grad_add
+    /// (N×3, layout [3a+k], Eh/Bohr). Reuses the LU factor from the most recent
+    /// eeqCharges call (same geometry). The caller adds it to its accumulator.
+    virtual bool eeqChargeResponse(int N, const double* dEdq, double* grad_add)
+    { (void)N; (void)dEdq; (void)grad_add; return false; }
+
+    /* ----- Device atomic Mulliken charges (Stage 5, Part B1) ------------- *
+     * q_at(A) = n0_at(A) − Σ_{μ∈A} pop_ao(μ), reduced on the device from the
+     * resident density populations (set by the preceding density() call). The
+     * result stays resident for the in-SCF D4 potential; q_at_out optionally
+     * downloads it for validation. Default false → host updatePopulations. */
+    virtual bool atomicCharges(const Vector& n0_at, Vector& q_at_out)
+    { (void)n0_at; (void)q_at_out; return false; }
 };
 
 /* ------------------------------------------------------------------------- *
@@ -419,6 +448,9 @@ public:
     // reconstruct q_sh from external (tblite) shell populations without
     // mirroring the params table.
     Vector  getReferenceShellOccupations() const { return m_wfn.n0_sh; }
+    // Reference atom occupations n0_at (length nat). Feeds the device atomic-charge
+    // reduction q_at(A)=n0_at(A)−Σ pop_ao (Stage 5, Part B1). Claude Generated.
+    Vector  getReferenceAtomOccupations() const { return m_wfn.n0_at; }
     Vector  getOrbitalEnergies() const { return m_wfn.eps; }
     Matrix  getMOCoefficients() const { return m_wfn.C; }
     Matrix  getDensity() const { return m_wfn.P; }
