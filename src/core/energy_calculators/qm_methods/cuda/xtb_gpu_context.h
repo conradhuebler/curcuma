@@ -89,7 +89,10 @@ public:
     /// F C = S C ε with the cached L, write the ascending eigenvalues to eps_out
     /// (length n). The eigenvectors C stay resident. fp32=true solves in single
     /// precision (far-from-convergence iterations). Returns false on error.
-    bool residentSolve(const double* v_ao, int n, double* eps_out, bool fp32 = false);
+    /// n_eig (AP1): if 0 < n_eig < n, solve only the lowest n_eig eigenpairs; the
+    /// density only needs the occupied(+buffer) columns. 0/>=n = full spectrum.
+    bool residentSolve(const double* v_ao, int n, double* eps_out, bool fp32 = false,
+                       int n_eig = 0);
 
     /// Build the density P = C·diag(occ)·Cᵀ over the leading ncol columns, then
     /// return the Mulliken AO populations pop_ao_out(μ)=Σ_ν P_μν·S_μν (length n)
@@ -118,7 +121,7 @@ public:
     /// v_dp is 3×nat, v_qp is 6×nat (column-major). Eigenvalues → eps_out.
     bool residentSolveMultipole(const double* v_ao, const double* v_dp,
                                 const double* v_qp, int n, double* eps_out,
-                                bool fp32 = false);
+                                bool fp32 = false, int n_eig = 0);
 
     /// Atom-resolved multipole moments from the resident density:
     ///   dp_at(k,iat) = −Σ_{μ∈iat} Σ_ν P_νμ·dp_int[k]_νμ   (3×nat)
@@ -234,10 +237,14 @@ public:
 
 private:
     /// Reduce the resident Fock in dC to standard form with the cached L, solve
-    /// it (cusolverDnDsyevd) and back-transform → generalized eigenvectors in dC,
-    /// ascending eigenvalues downloaded to eps_out. Shared by residentSolve and
+    /// it and back-transform → generalized eigenvectors in dC, ascending
+    /// eigenvalues downloaded to eps_out. Shared by residentSolve and
     /// residentSolveMultipole (which differ only in how dC's Fock is built).
-    bool eigensolveResidentFock(double* eps_out, bool fp32);
+    /// AP1 (Claude Generated): if 0 < n_eig < n, only the lowest n_eig eigenpairs
+    /// are computed (cusolverDnDsyevdx / Ssyevdx, range il=1..n_eig); eps_out[n_eig..n)
+    /// is filled with an ascending sentinel (occ≈0) so the host occupation logic is
+    /// unchanged. n_eig<=0 or >=n solves the full spectrum (cusolverDnDsyevd).
+    bool eigensolveResidentFock(double* eps_out, bool fp32, int n_eig = 0);
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;

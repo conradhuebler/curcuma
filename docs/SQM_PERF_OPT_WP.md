@@ -9,6 +9,35 @@
 > implemented or human-tested. Mark new code "Claude Generated"; do **not**
 > self-assign ✅ TESTED.
 
+## Implementation status (2026-06-04)
+
+> 🤖 AI-implemented + machine-tested, **not** human production-tested. Validated
+> bit-/1e-8-faithful; human ✅ TESTED/APPROVED pending.
+
+- **AP2 — D4 reference-block hoist: IMPLEMENTED.** `weightedC6Gfn2` split into
+  `buildAtomRefW` (per-atom CN-Gaussian × charge-zeta weights) + `contractC6Gfn2`
+  (the 7×7 block contraction). `d4_evaluator.cpp` now builds each atom's `RefW` once
+  (O(N)) before the O(N²) pair loop and the ATM `c6` fill, instead of ~N times each.
+  Numbers bit-identical (`gfn2_validation` 24/24 @1e-8, `d4_dedq`/`d4_diag` green;
+  `gfnff` unaffected — it never enters these whole-molecule paths). **Measured win:
+  GFN2 post-SCF E 73.2 → 66.2 ms on complex/231 (~10 %, the removed `buildRefW`
+  redundancy)** — smaller than the ~40 ms guess: the BJ damping, the O(N³) ATM triple
+  loop and the gradient/dq assembly dominate post-SCF and are untouched.
+- **AP1-GPU — partial diagonalization (`cusolverDnDsyevdx`/`Ssyevdx`): IMPLEMENTED,
+  OPT-IN, net-neutral.** `eigensolveResidentFock(…, n_eig)` solves the lowest
+  `nocc+~5%` eigenpairs (range `il=1..n_eig`), back-transforms only those columns, and
+  sentinel-pads `eps` so the host occupation is bit-faithful; auto-widens to the full
+  solve if a tiny-gap occupied tail reaches the window. Energies **identical** to the
+  full solve (caffeine/triose/complex × gfn1/gfn2), `gpu_gfn{1,2}_validation` 24/24,
+  `gpu_gradient`/`gpu_integrals` 66/66, compute-sanitizer 0 errors. **But measured
+  net-neutral on an RTX 5080** (complex GFN2 SCF ~330 ms with and without it): a range
+  solve does not avoid the **tridiagonalization**, which dominates the dense eigensolve
+  — the same reason the CPU `dsyevr` partial-solve was a dead-end. Kept **opt-in,
+  default OFF** (`-scf_gpu_partial_diag true`) as a research path for FP64-bound GPUs /
+  future kernels; the default GPU path is unchanged (full `cusolverDnDsyevd`).
+- **Not done:** AP1-CPU (skipped per the prior `dsyevr` rejection), AP3/AP4 (GPU
+  on-device potential/integral), AP5 (device purification), AP6–AP9.
+
 ## 0. Measured baseline (complex / 231 atoms, `-sp`, `-threads 8`)
 
 Phase breakdown from `-verbosity 3` (after the D3 + mixed-precision + auto-thread

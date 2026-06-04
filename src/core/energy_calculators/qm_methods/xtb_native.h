@@ -315,7 +315,10 @@ struct GpuScfBackend {
     virtual bool begin(const Matrix& H0, const Matrix& S,
                        const Eigen::MatrixXd& L) = 0;
     // fp32=true solves this SCF step in single precision (far-from-convergence).
-    virtual bool solve(const Eigen::VectorXd& v_ao, Vector& eps, bool fp32 = false) = 0;
+    // n_eig>0 (AP1): compute only the lowest n_eig eigenpairs (occupied+buffer);
+    // eps beyond the window is sentinel-padded. 0 = full spectrum (default).
+    virtual bool solve(const Eigen::VectorXd& v_ao, Vector& eps, bool fp32 = false,
+                       int n_eig = 0) = 0;
     virtual bool density(const Eigen::VectorXd& occ, int ncol,
                          Eigen::VectorXd& pop_ao, double& band) = 0;
     virtual bool finalize(Matrix& P, Matrix& C) = 0;
@@ -371,7 +374,7 @@ struct GpuScfBackend {
     virtual bool solveMultipole(const Eigen::VectorXd& v_ao,
                                 const Eigen::MatrixXd& v_dp,
                                 const Eigen::MatrixXd& v_qp,
-                                Vector& eps, bool fp32 = false) { (void)v_ao; (void)v_dp; (void)v_qp; (void)eps; (void)fp32; return false; }
+                                Vector& eps, bool fp32 = false, int n_eig = 0) { (void)v_ao; (void)v_dp; (void)v_qp; (void)eps; (void)fp32; (void)n_eig; return false; }
     virtual bool multipoleMoments(Eigen::MatrixXd& dp_at, Eigen::MatrixXd& qp_at) { (void)dp_at; (void)qp_at; return false; }
 };
 
@@ -556,6 +559,7 @@ public:
     // is FP64. Default off. Claude Generated.
     void setMixedPrecision(bool b)      { m_scf_mixed_precision = b; }
     void setFp32Threshold(double t)     { if (t > 0.0) m_scf_fp32_threshold = t; }
+    void setGpuPartialDiag(bool b)      { m_gpu_partial_diag = b; }
 
     // Warm-start: reuse converged charges from the previous geometry step.
     // Activated by MD/opt capabilities; also settable via -warm_start false.
@@ -843,6 +847,7 @@ private:
     std::string m_eigensolver   = "mkl"; // eigensolve backend: "mkl" (dsyevd) | "native"/"dnc"
     bool        m_scf_mixed_precision = false;   // opt-in FP32 early-iteration eigensolve (MKL path)
     double      m_scf_fp32_threshold  = 1.0e-3;  // switch FP32→FP64 once max|dq| < this
+    bool        m_gpu_partial_diag    = false;   // opt-in GPU partial diagonalisation (AP1; net-neutral, see PARAM)
     // Optional GPU eigensolver; default unset → CPU path unchanged. Claude Generated.
     ExternalEigensolver m_external_eigensolver;
     bool        m_eig_fp32 = false;              // per-iteration flag set by the SCF loop
@@ -949,6 +954,7 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("keep_diis",    [&](const json& v){ if (v.is_boolean()) xtb.setKeepDiis(v.get<bool>()); });
     lookup("scf_mixed_precision", [&](const json& v){ if (v.is_boolean()) xtb.setMixedPrecision(v.get<bool>()); });
     lookup("scf_fp32_threshold",  [&](const json& v){ if (v.is_number()) xtb.setFp32Threshold(v.get<double>()); });
+    lookup("scf_gpu_partial_diag",[&](const json& v){ if (v.is_boolean()) xtb.setGpuPartialDiag(v.get<bool>()); });
     lookup("electronic_temperature", [&](const json& v){ if (v.is_number()) xtb.setElectronicTemperature(v.get<double>()); });
 }
 

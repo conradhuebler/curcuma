@@ -64,6 +64,9 @@ the evaluator:
 - `GenerateDispersionPairsNative(atoms, geom_bohr)` — pair list with
   pre-baked `C6, r4r2ij, r0_squared, zetac6, r_cut`
 - `getChargeWeightedC6(...)`, `getSqrtZr4r2(...)`
+- `buildAtomRefW(Z, atom, q)` + `contractC6Gfn2(ri, rj, ...)` — AP2 perf split of
+  `weightedC6Gfn2` (per-atom CN-Gaussian×zeta weights once, then the 7×7 contraction);
+  `D4Evaluator` hoists the per-atom build out of the O(N²) pair loop (bit-identical)
 - `updateCNValuesForGradient(cn)` — refreshes `dc6/dCN`
 - `getDC6DCN()`, `getGaussianWeights()`, `getC6FlatCache()`, `getRefN()`,
   `getRefCN()` (used by the GFN-FF GPU pipeline)

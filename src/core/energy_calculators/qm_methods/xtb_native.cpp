@@ -425,6 +425,31 @@ double XTB::Calculation(bool gradient)
         }
     }
 
+    // AP1 (Claude Generated): GPU partial diagonalisation window. The device density
+    // only needs the occupied(+buffer) eigenvectors, so the resident eigensolve can
+    // compute just the lowest gpu_n_eig pairs (cusolverDnDsyevdx) instead of the full
+    // nao spectrum. OPT-IN (m_gpu_partial_diag, -gpu_partial_diag): measured
+    // net-neutral on an RTX 5080 (the tridiagonalization, not the eigenvector count,
+    // dominates the dense eigensolve), so the default GPU path stays the full solve.
+    // Disabled when virtuals are genuinely required: the Mulliken-CPSCF D4 charge
+    // response (d4_charge_source=mulliken) and the verbosity>=3 orbital listing both
+    // read virtual orbitals. The buffer covers the LUMO plus a few-kT Fermi tail; if
+    // the occupied tail ever reaches the window edge (tiny-gap/metallic), the loop
+    // widens to the full solve once so the 1e-8 energy is never at risk.
+    int gpu_n_eig = 0;  // 0 = full spectrum
+    bool gpu_partial_diag = m_gpu_partial_diag && use_gpu_resident
+        && (m_d4_charge_source != "mulliken") && (verb < 3);
+    if (gpu_partial_diag) {
+        const int nocc_orbs = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
+        const int buffer = std::max(8, (m_basis.nao + 19) / 20);  // ~5% of nao, >= 8
+        gpu_n_eig = std::min(m_basis.nao, nocc_orbs + buffer);
+        if (gpu_n_eig >= m_basis.nao) { gpu_n_eig = 0; gpu_partial_diag = false; }
+    }
+    if (gpu_partial_diag && verb >= 2)
+        CurcumaLogger::info("GPU partial diagonalisation: lowest " + std::to_string(gpu_n_eig)
+            + " of " + std::to_string(m_basis.nao) + " eigenpairs (occupied " +
+            std::to_string(static_cast<int>(std::floor(m_wfn.nocc / 2.0))) + " + buffer)");
+
     const auto t_scf_start = clock::now();
     int iter;
     for (iter = 0; iter < max_iter; ++iter) {
@@ -481,9 +506,10 @@ double XTB::Calculation(bool gradient)
             // reverting to FP64 near convergence so the converged energy is FP64.
             m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
             // Device: F = H0 − ½·S·(v_ao⊕v_ao) [+ GFN2 multipole]; solve F C = S C ε.
+            // AP1: gpu_n_eig>0 solves only the lowest occupied(+buffer) eigenpairs.
             const bool solve_ok = gpu_multipole
-                ? m_gpu_scf->solveMultipole(v_ao, m_pot.v_dp, m_pot.v_qp, m_wfn.eps, m_eig_fp32)
-                : m_gpu_scf->solve(v_ao, m_wfn.eps, m_eig_fp32);
+                ? m_gpu_scf->solveMultipole(v_ao, m_pot.v_dp, m_pot.v_qp, m_wfn.eps, m_eig_fp32, gpu_n_eig)
+                : m_gpu_scf->solve(v_ao, m_wfn.eps, m_eig_fp32, gpu_n_eig);
             if (!solve_ok) {
                 CurcumaLogger::warn("XTB::Calculation: GPU resident solve failed at iteration "
                                     + std::to_string(iter));
@@ -492,6 +518,26 @@ double XTB::Calculation(bool gradient)
             // Occupations on the host (shared Fermi/integer logic with the CPU path).
             Eigen::VectorXd occ; int ncol = 0;
             occupationsFromEps(m_wfn.eps, occ, ncol);
+            // AP1 validation: ncol reaching the partial window edge means the occupied
+            // tail spilled past gpu_n_eig (tiny-gap / metallic). Widen to the full
+            // spectrum once and re-occupy so the density/energy stay exact; the rest of
+            // the SCF then runs the full solve.
+            if (gpu_partial_diag && gpu_n_eig > 0 && ncol >= gpu_n_eig) {
+                if (verb >= 1)
+                    CurcumaLogger::warn("GPU partial diagonalisation window too small (occupied "
+                        "tail reached eigenpair " + std::to_string(gpu_n_eig)
+                        + "); switching to the full spectrum for the rest of the SCF.");
+                gpu_partial_diag = false; gpu_n_eig = 0;
+                const bool re_ok = gpu_multipole
+                    ? m_gpu_scf->solveMultipole(v_ao, m_pot.v_dp, m_pot.v_qp, m_wfn.eps, m_eig_fp32, gpu_n_eig)
+                    : m_gpu_scf->solve(v_ao, m_wfn.eps, m_eig_fp32, gpu_n_eig);
+                if (!re_ok) {
+                    CurcumaLogger::warn("XTB::Calculation: GPU resident full re-solve failed at "
+                                        "iteration " + std::to_string(iter));
+                    m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
+                }
+                occupationsFromEps(m_wfn.eps, occ, ncol);
+            }
             // Device: P = C·diag(occ)·Cᵀ; pop_ao(μ)=Σ_ν P_μν·S_μν; band=Σ P⊙H0.
             Eigen::VectorXd pop_ao;
             if (!m_gpu_scf->density(occ, ncol, pop_ao, gpu_band)) {

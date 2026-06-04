@@ -1295,111 +1295,106 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
     return c6_weighted;
 }
 
-// Claude Generated (AP6b exact D4 port, 2026): tblite/dftd4-exact per-reference
-// charge-weighted C6 for native GFN2. Mirrors dftd4 model.f90 weight_references
-// (gwk with wf=6 + ngw multi-gaussian) and get_atomic_c6.
-D4ParameterGenerator::C6Gfn2
-D4ParameterGenerator::weightedC6Gfn2(int Zi, int Zj, size_t atom_i, size_t atom_j,
-                                     double qi, double qj,
-                                     bool want_grad, bool want_hess) const
+// Claude Generated (AP2 perf, 2026-06): per-atom reference weights, lifted out of
+// weightedC6Gfn2 so the O(N) build runs once per atom instead of ~N times inside the
+// O(N²) pair loop. Depends only on the atom's element/charge/CN. Mirrors dftd4
+// weight_references exactly (numbers bit-identical to the old inline lambda).
+D4ParameterGenerator::RefW
+D4ParameterGenerator::buildAtomRefW(int Z, size_t atom_idx, double q,
+                                    bool want_grad, bool want_hess) const
 {
     using curcuma::dispersion::d4_zeta;
     using curcuma::dispersion::d4_dzeta;
     using curcuma::dispersion::d4_d2zeta;
 
-    C6Gfn2 out;
-    const int ei = Zi - 1, ej = Zj - 1;
-    if (ei < 0 || ei >= MAX_ELEM || ej < 0 || ej >= MAX_ELEM) return out;
-    if (atom_i >= m_cn_values.size() || atom_j >= m_cn_values.size()) return out;
-    const double cni = m_cn_values[atom_i];
-    const double cnj = m_cn_values[atom_j];
+    RefW r;
+    const int elem = Z - 1;
+    if (elem < 0 || elem >= MAX_ELEM) return r;
+    if (atom_idx >= m_cn_values.size()) return r;
+    const double cn = m_cn_values[atom_idx];
 
     constexpr double ga = 3.0;     // dftd4 ga_default (charge-scaling height)
     constexpr double gc = 2.0;     // dftd4 gc_default (charge-scaling steepness)
     constexpr double wf = 6.0;     // dftd4 wf_default (CN gaussian width)
     constexpr int    MAXCN = 19;   // dftd4 set_refgw max_cn
 
-    // Per-atom reference weight vector W[ref] = gwk(CN)·zeta(q), and its q/CN
-    // first + second derivatives. Mirrors dftd4 weight_references exactly.
-    struct RefW {
-        double W[MAX_REF]   = {0};
-        double dWq[MAX_REF] = {0};
-        double dWc[MAX_REF] = {0};
-        double d2Wq[MAX_REF]= {0};
-        int    nref = 0;
-    };
-    auto buildRefW = [&](int elem, double q, double cn) -> RefW {
-        RefW r;
-        const int nref = (elem < (int)m_refn.size()) ? m_refn[elem] : 0;
-        r.nref = nref;
-        if (nref <= 0) return r;
-        const double eta  = GFNFFParameters::zeta_c[elem];      // = dftd4 chemical_hardness
-        const double zeff = GFNFFParameters::zeta_zeff[elem];   // = dftd4 effective_nuclear_charge
-        const double gi   = eta * gc;
-        const double* refcn = m_refcn[elem].data();
-        // dftd4 uses TWO reference-CN tables: refcn for the ngw bucketing
-        // (set_refgw, below) and refcovcn (covalent CN) for the actual
-        // CN-Gaussian (set_refcn -> model%cn -> weight_references). Using refcn
-        // for the Gaussian over-broadens the weights (up to 14% wrong weighted
-        // C6 on carbon -> the triose C-path residual). Fall back to refcn only
-        // if the refcovcn table is unavailable. (Claude Generated 2026-05-28.)
-        const double* refcovcn = (elem < (int)m_refcovcn.size() && !m_refcovcn[elem].empty())
-                                 ? m_refcovcn[elem].data() : refcn;
+    const int nref = (elem < (int)m_refn.size()) ? m_refn[elem] : 0;
+    r.nref = nref;
+    if (nref <= 0) return r;
+    const double eta  = GFNFFParameters::zeta_c[elem];      // = dftd4 chemical_hardness
+    const double zeff = GFNFFParameters::zeta_zeff[elem];   // = dftd4 effective_nuclear_charge
+    const double gi   = eta * gc;
+    const double* refcn = m_refcn[elem].data();
+    // dftd4 uses TWO reference-CN tables: refcn for the ngw bucketing
+    // (set_refgw, below) and refcovcn (covalent CN) for the actual
+    // CN-Gaussian (set_refcn -> model%cn -> weight_references). Using refcn
+    // for the Gaussian over-broadens the weights (up to 14% wrong weighted
+    // C6 on carbon -> the triose C-path residual). Fall back to refcn only
+    // if the refcovcn table is unavailable. (Claude Generated 2026-05-28.)
+    const double* refcovcn = (elem < (int)m_refcovcn.size() && !m_refcovcn[elem].empty())
+                             ? m_refcovcn[elem].data() : refcn;
 
-        // ngw[ref] from refcn (dftd4 set_refgw): count references sharing the
-        // same rounded CN, then ngw = k(k+1)/2.
-        int cnc[MAXCN + 1];
-        for (int k = 0; k <= MAXCN; ++k) cnc[k] = 0;
-        cnc[0] = 1;
-        for (int ir = 0; ir < nref; ++ir) {
-            int icn = (int)std::lround(refcn[ir]); if (icn < 0) icn = 0; if (icn > MAXCN) icn = MAXCN;
-            cnc[icn] += 1;
-        }
-        int ngw[MAX_REF];
-        for (int ir = 0; ir < nref; ++ir) {
-            int icn = (int)std::lround(refcn[ir]); if (icn < 0) icn = 0; if (icn > MAXCN) icn = MAXCN;
-            int k = cnc[icn];
-            ngw[ir] = k * (k + 1) / 2;
-        }
+    // ngw[ref] from refcn (dftd4 set_refgw): count references sharing the
+    // same rounded CN, then ngw = k(k+1)/2.
+    int cnc[MAXCN + 1];
+    for (int k = 0; k <= MAXCN; ++k) cnc[k] = 0;
+    cnc[0] = 1;
+    for (int ir = 0; ir < nref; ++ir) {
+        int icn = (int)std::lround(refcn[ir]); if (icn < 0) icn = 0; if (icn > MAXCN) icn = MAXCN;
+        cnc[icn] += 1;
+    }
+    int ngw[MAX_REF];
+    for (int ir = 0; ir < nref; ++ir) {
+        int icn = (int)std::lround(refcn[ir]); if (icn < 0) icn = 0; if (icn > MAXCN) icn = MAXCN;
+        int k = cnc[icn];
+        ngw[ir] = k * (k + 1) / 2;
+    }
 
-        // CN gaussian weights gwk[ref] (+ dgwk/dCN). dftd4 weight_cn = exp(-wf·(cn-cnref)²),
-        // summed over igw=1..ngw with wf_eff = igw·wf.
-        double expw[MAX_REF] = {0}, expd[MAX_REF] = {0};
-        double norm = 0.0, dnorm = 0.0;
-        for (int ir = 0; ir < nref; ++ir) {
-            double ew = 0.0, ed = 0.0;
-            for (int igw = 1; igw <= ngw[ir]; ++igw) {
-                const double wfe = igw * wf;
-                const double d   = cn - refcovcn[ir];        // Gaussian uses refcovcn (dftd4 model%cn)
-                const double gw  = std::exp(-wfe * d * d);
-                ew += gw;
-                ed += 2.0 * wfe * (refcovcn[ir] - cn) * gw;  // d(gw)/dCN
-            }
-            expw[ir] = ew; expd[ir] = ed;
-            norm += ew; dnorm += ed;
+    // CN gaussian weights gwk[ref] (+ dgwk/dCN). dftd4 weight_cn = exp(-wf·(cn-cnref)²),
+    // summed over igw=1..ngw with wf_eff = igw·wf.
+    double expw[MAX_REF] = {0}, expd[MAX_REF] = {0};
+    double norm = 0.0, dnorm = 0.0;
+    for (int ir = 0; ir < nref; ++ir) {
+        double ew = 0.0, ed = 0.0;
+        for (int igw = 1; igw <= ngw[ir]; ++igw) {
+            const double wfe = igw * wf;
+            const double d   = cn - refcovcn[ir];        // Gaussian uses refcovcn (dftd4 model%cn)
+            const double gw  = std::exp(-wfe * d * d);
+            ew += gw;
+            ed += 2.0 * wfe * (refcovcn[ir] - cn) * gw;  // d(gw)/dCN
         }
-        const double ninv = (norm > 0.0) ? 1.0 / norm : 0.0;
+        expw[ir] = ew; expd[ir] = ed;
+        norm += ew; dnorm += ed;
+    }
+    const double ninv = (norm > 0.0) ? 1.0 / norm : 0.0;
 
-        for (int ir = 0; ir < nref; ++ir) {
-            double gwk  = expw[ir] * ninv;
-            double dgwk = ninv * (expd[ir] - expw[ir] * dnorm * ninv);
-            if (!std::isfinite(gwk))  gwk  = 0.0;
-            if (!std::isfinite(dgwk)) dgwk = 0.0;
-            const double qref = m_refq[elem][ir] + zeff;
-            const double qmod = q + zeff;
-            const double z  = d4_zeta(ga, gi, qref, qmod);
-            r.W[ir]   = gwk * z;
-            if (want_grad) {
-                r.dWq[ir] = gwk  * d4_dzeta(ga, gi, qref, qmod);
-                r.dWc[ir] = dgwk * z;
-            }
-            if (want_hess) r.d2Wq[ir] = gwk * d4_d2zeta(ga, gi, qref, qmod);
+    for (int ir = 0; ir < nref; ++ir) {
+        double gwk  = expw[ir] * ninv;
+        double dgwk = ninv * (expd[ir] - expw[ir] * dnorm * ninv);
+        if (!std::isfinite(gwk))  gwk  = 0.0;
+        if (!std::isfinite(dgwk)) dgwk = 0.0;
+        const double qref = m_refq[elem][ir] + zeff;
+        const double qmod = q + zeff;
+        const double z  = d4_zeta(ga, gi, qref, qmod);
+        r.W[ir]   = gwk * z;
+        if (want_grad) {
+            r.dWq[ir] = gwk  * d4_dzeta(ga, gi, qref, qmod);
+            r.dWc[ir] = dgwk * z;
         }
-        return r;
-    };
+        if (want_hess) r.d2Wq[ir] = gwk * d4_d2zeta(ga, gi, qref, qmod);
+    }
+    return r;
+}
 
-    const RefW ri = buildRefW(ei, qi, cni);
-    const RefW rj = buildRefW(ej, qj, cnj);
+// Claude Generated (AP2 perf, 2026-06): the bit-identical inner 7×7 contraction of
+// weightedC6Gfn2 — ΣΣ ri.W[a]·rj.W[b]·c6ref over the cached element-pair block.
+D4ParameterGenerator::C6Gfn2
+D4ParameterGenerator::contractC6Gfn2(const RefW& ri, const RefW& rj, int Zi, int Zj,
+                                     bool want_grad, bool want_hess) const
+{
+    C6Gfn2 out;
+    const int ei = Zi - 1, ej = Zj - 1;
+    if (ei < 0 || ei >= MAX_ELEM || ej < 0 || ej >= MAX_ELEM) return out;
 
     const size_t base = static_cast<size_t>(ei) * MAX_ELEM * MAX_REF * MAX_REF
                       + static_cast<size_t>(ej) * MAX_REF * MAX_REF;
@@ -1421,6 +1416,20 @@ D4ParameterGenerator::weightedC6Gfn2(int Zi, int Zj, size_t atom_i, size_t atom_
         }
     }
     return out;
+}
+
+// Claude Generated (AP6b exact D4 port, 2026): tblite/dftd4-exact per-reference
+// charge-weighted C6 for native GFN2. Per-pair entry point — now a thin wrapper over
+// buildAtomRefW + contractC6Gfn2 (numerics unchanged). Mirrors dftd4 model.f90
+// weight_references (gwk with wf=6 + ngw multi-gaussian) and get_atomic_c6.
+D4ParameterGenerator::C6Gfn2
+D4ParameterGenerator::weightedC6Gfn2(int Zi, int Zj, size_t atom_i, size_t atom_j,
+                                     double qi, double qj,
+                                     bool want_grad, bool want_hess) const
+{
+    const RefW ri = buildAtomRefW(Zi, atom_i, qi, want_grad, want_hess);
+    const RefW rj = buildAtomRefW(Zj, atom_j, qj, want_grad, want_hess);
+    return contractC6Gfn2(ri, rj, Zi, Zj, want_grad, want_hess);
 }
 
 // Claude Generated (2025): ATM three-body symmetry factor calculation

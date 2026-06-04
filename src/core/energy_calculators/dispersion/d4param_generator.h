@@ -135,6 +135,32 @@ public:
                           double qi, double qj,
                           bool want_grad = false, bool want_hess = false) const;
 
+    // Dimensions of the 118-element / 7-reference C6 tables (public so the RefW
+    // struct below — and external callers — can size against MAX_REF).
+    static constexpr int MAX_ELEM = 118;
+    static constexpr int MAX_REF = 7;
+
+    // Claude Generated (AP2 perf, 2026-06): split weightedC6Gfn2 into a per-atom
+    // weight build + a per-pair contraction so the O(N) atom weights are computed
+    // ONCE instead of ~N times inside the O(N²) D4 pair loop (mirror of the D3
+    // refC6Block hoist, commit 4b41562). buildAtomRefW depends only on the atom's
+    // element/charge/CN, not on its partner; contractC6Gfn2 reuses two cached RefW.
+    // The numbers are bit-identical to weightedC6Gfn2 (same weights, same 7×7 order).
+    struct RefW {
+        double W[MAX_REF]    = { 0 };  // gwk(CN)·zeta(q) per reference state
+        double dWq[MAX_REF]  = { 0 };  // ∂W/∂q
+        double dWc[MAX_REF]  = { 0 };  // ∂W/∂CN
+        double d2Wq[MAX_REF] = { 0 };  // ∂²W/∂q² (CPSCF kernel)
+        int    nref = 0;
+    };
+    // Build the per-atom reference weights (CN read from m_cn_values[atom_idx]).
+    RefW buildAtomRefW(int Z, size_t atom_idx, double q,
+                       bool want_grad = false, bool want_hess = false) const;
+    // Contract two per-atom RefW with the cached 7×7 reference-C6 block into the
+    // charge-weighted C6 (+ q/CN derivatives) — the inner loop of weightedC6Gfn2.
+    C6Gfn2 contractC6Gfn2(const RefW& ri, const RefW& rj, int Zi, int Zj,
+                          bool want_grad = false, bool want_hess = false) const;
+
     // The charge vector that actually drives zetac6: topology charges if set
     // (GFN-FF path), otherwise the geometry-dependent EEQ charges (GFN2 path).
     // The dE_D4/dq term must use exactly these charges for consistency.
@@ -208,8 +234,7 @@ private:
 
     // Reference data from GFN-FF Fortran implementation
     // constexpr ensures inline definition (ODR-safe for C++14 and C++17)
-    static constexpr int MAX_ELEM = 118;
-    static constexpr int MAX_REF = 7;
+    // (MAX_ELEM/MAX_REF moved to the public section so the RefW struct can use MAX_REF.)
     static constexpr int N_FREQ = 23;  // Frequency grid points
     static constexpr int N_REFQ = 17;  // Reference charge states
 

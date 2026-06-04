@@ -860,16 +860,37 @@ bool XtbGpuContext::residentBegin(const double* H0, const double* S,
     return cudaStreamSynchronize(m_impl->stream) == cudaSuccess;
 }
 
+// AP1 (Claude Generated): pad the host eigenvalue array beyond the partial window
+// [0,neig) with an ascending sentinel safely above the highest computed eigenvalue.
+// Those orbitals then carry occ≈0 in the host Fermi/integer occupation, so the
+// density (lowest ncol≤neig columns) and the band/Fermi search are bit-faithful to
+// a full solve whenever neig covers the occupied(+kT) window (validated by the caller).
+static inline void fillEpsSentinel(double* eps_out, int neig, int n)
+{
+    const double sentinel = eps_out[neig - 1] + 1.0e3;  // Hartree; >> any valence eps
+    for (int i = neig; i < n; ++i) eps_out[i] = sentinel;
+}
+
 // Reduce the Fock now in dC to standard form with the cached L, solve (dsyevd),
 // back-transform → generalized eigenvectors in dC, eigenvalues → eps_out. The
 // device analogue of the CPU dsygst+dsyevd+dtrsm path, reusing the resident L (no
 // per-iteration L upload). Shared by residentSolve and residentSolveMultipole.
-bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32)
+bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig)
 {
     const int n = m_impl->resident_n;
     cudaStream_t stream = m_impl->stream;
     const double one = 1.0;
     const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+
+    // AP1 (Claude Generated): partial diagonalisation. The density only needs the
+    // occupied(+buffer) columns, so when 0 < n_eig < n we compute the lowest n_eig
+    // eigenpairs (cusolverDnDsyevdx / Ssyevdx, range il=1..neig). The reduction
+    // (full n×n) and the FP32/FP64 split are unchanged; only the eigensolver and the
+    // back-transform (neig columns) shrink. eps_out[neig..n) gets an ascending
+    // sentinel so the host occupation/Fermi logic is bit-faithful (those orbitals
+    // carry occ≈0). neig==n is the full spectrum (cusolverDnDsyevd).
+    const bool partial = (n_eig > 0 && n_eig < n);
+    const int neig = partial ? n_eig : n;
 
     if (fp32) {
         // Mixed precision: reduce + diagonalise + back-transform in FP32, then
@@ -895,32 +916,55 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32)
                         m_impl->dLf.ptr, n, m_impl->dCf.ptr, n) != CUBLAS_STATUS_SUCCESS)
             return false;
         int lwork = 0;
-        if (cusolverDnSsyevd_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
-                                        CUBLAS_FILL_MODE_LOWER, n, m_impl->dCf.ptr, n,
-                                        m_impl->dEpsf.ptr, &lwork) != CUSOLVER_STATUS_SUCCESS)
-            return false;
-        if (m_impl->lwork_f32 < lwork) {
-            try { m_impl->dWorkf.alloc(lwork > 0 ? lwork : 1); } catch (...) { return false; }
-            m_impl->lwork_f32 = lwork;
+        if (partial) {
+            const float vl = 0.0f, vu = 0.0f; int h_meig = 0;
+            if (cusolverDnSsyevdx_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
+                                             CUSOLVER_EIG_RANGE_I, CUBLAS_FILL_MODE_LOWER, n,
+                                             m_impl->dCf.ptr, n, vl, vu, 1, neig, &h_meig,
+                                             m_impl->dEpsf.ptr, &lwork) != CUSOLVER_STATUS_SUCCESS)
+                return false;
+            if (m_impl->lwork_f32 < lwork) {
+                try { m_impl->dWorkf.alloc(lwork > 0 ? lwork : 1); } catch (...) { return false; }
+                m_impl->lwork_f32 = lwork;
+            }
+            if (cusolverDnSsyevdx(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
+                                  CUSOLVER_EIG_RANGE_I, CUBLAS_FILL_MODE_LOWER, n,
+                                  m_impl->dCf.ptr, n, vl, vu, 1, neig, &h_meig,
+                                  m_impl->dEpsf.ptr, m_impl->dWorkf.ptr, m_impl->lwork_f32,
+                                  m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
+                return false;
+        } else {
+            if (cusolverDnSsyevd_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
+                                            CUBLAS_FILL_MODE_LOWER, n, m_impl->dCf.ptr, n,
+                                            m_impl->dEpsf.ptr, &lwork) != CUSOLVER_STATUS_SUCCESS)
+                return false;
+            if (m_impl->lwork_f32 < lwork) {
+                try { m_impl->dWorkf.alloc(lwork > 0 ? lwork : 1); } catch (...) { return false; }
+                m_impl->lwork_f32 = lwork;
+            }
+            if (cusolverDnSsyevd(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
+                                 n, m_impl->dCf.ptr, n, m_impl->dEpsf.ptr, m_impl->dWorkf.ptr,
+                                 m_impl->lwork_f32, m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
+                return false;
         }
-        if (cusolverDnSsyevd(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
-                             n, m_impl->dCf.ptr, n, m_impl->dEpsf.ptr, m_impl->dWorkf.ptr,
-                             m_impl->lwork_f32, m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
-            return false;
+        // Back-transform only the neig computed eigenvectors (columns 0..neig-1).
         if (cublasStrsm(m_impl->cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
-                        CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, n, &onef,
+                        CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, neig, &onef,
                         m_impl->dLf.ptr, n, m_impl->dCf.ptr, n) != CUBLAS_STATUS_SUCCESS)
             return false;
-        k_f2d<<<gnn, b, 0, stream>>>(m_impl->dCf.ptr, m_impl->dC.ptr, nn);  // eigvecs → FP64
-        k_f2d<<<(n + b - 1) / b, b, 0, stream>>>(m_impl->dEpsf.ptr, m_impl->dEps.ptr, n);
+        // Convert the neig columns (column-major: first neig·n contiguous) + neig eps.
+        const size_t conv = static_cast<size_t>(neig) * static_cast<size_t>(n);
+        k_f2d<<<static_cast<int>((conv + b - 1) / b), b, 0, stream>>>(m_impl->dCf.ptr, m_impl->dC.ptr, conv);
+        k_f2d<<<(neig + b - 1) / b, b, 0, stream>>>(m_impl->dEpsf.ptr, m_impl->dEps.ptr, neig);
         if (cudaGetLastError() != cudaSuccess) return false;
 
         int info = 1;
         if (cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
                             cudaMemcpyDeviceToHost, stream) != cudaSuccess)
             return false;
-        m_impl->dEps.download(eps_out, n, stream);
+        m_impl->dEps.download(eps_out, neig, stream);
         if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        if (partial) fillEpsSentinel(eps_out, neig, n);
         return info == 0;
     }
 
@@ -933,12 +977,32 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32)
                     CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, n, &one,
                     m_impl->dL.ptr, n, m_impl->dC.ptr, n) != CUBLAS_STATUS_SUCCESS)
         return false;
-    if (cusolverDnDsyevd(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
-                         n, m_impl->dC.ptr, n, m_impl->dEps.ptr, m_impl->dWork.ptr,
-                         m_impl->lwork, m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
-        return false;
+    if (partial) {
+        const double vl = 0.0, vu = 0.0; int h_meig = 0; int lwork_dx = 0;
+        if (cusolverDnDsyevdx_bufferSize(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
+                                         CUSOLVER_EIG_RANGE_I, CUBLAS_FILL_MODE_LOWER, n,
+                                         m_impl->dC.ptr, n, vl, vu, 1, neig, &h_meig,
+                                         m_impl->dEps.ptr, &lwork_dx) != CUSOLVER_STATUS_SUCCESS)
+            return false;
+        if (m_impl->lwork < lwork_dx) {   // only grow; dWork stays ≥ both syevd and syevdx
+            try { m_impl->dWork.alloc(lwork_dx > 0 ? lwork_dx : 1); } catch (...) { return false; }
+            m_impl->lwork = lwork_dx;
+        }
+        if (cusolverDnDsyevdx(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR,
+                              CUSOLVER_EIG_RANGE_I, CUBLAS_FILL_MODE_LOWER, n,
+                              m_impl->dC.ptr, n, vl, vu, 1, neig, &h_meig,
+                              m_impl->dEps.ptr, m_impl->dWork.ptr, m_impl->lwork,
+                              m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
+            return false;
+    } else {
+        if (cusolverDnDsyevd(m_impl->cusolver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
+                             n, m_impl->dC.ptr, n, m_impl->dEps.ptr, m_impl->dWork.ptr,
+                             m_impl->lwork, m_impl->dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
+            return false;
+    }
+    // Back-transform only the neig computed eigenvectors (columns 0..neig-1).
     if (cublasDtrsm(m_impl->cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
-                    CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, n, &one,
+                    CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, neig, &one,
                     m_impl->dL.ptr, n, m_impl->dC.ptr, n) != CUBLAS_STATUS_SUCCESS)
         return false;
 
@@ -946,13 +1010,15 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32)
     if (cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
                         cudaMemcpyDeviceToHost, stream) != cudaSuccess)
         return false;
-    m_impl->dEps.download(eps_out, n, stream);
+    m_impl->dEps.download(eps_out, neig, stream);
     if (cudaStreamSynchronize(stream) != cudaSuccess)
         return false;
+    if (partial) fillEpsSentinel(eps_out, neig, n);
     return info == 0;
 }
 
-bool XtbGpuContext::residentSolve(const double* v_ao, int n, double* eps_out, bool fp32)
+bool XtbGpuContext::residentSolve(const double* v_ao, int n, double* eps_out, bool fp32,
+                                  int n_eig)
 {
     if (!ok() || n <= 0 || n != m_impl->resident_n || !v_ao || !eps_out)
         return false;
@@ -969,7 +1035,7 @@ bool XtbGpuContext::residentSolve(const double* v_ao, int n, double* eps_out, bo
     if (cudaGetLastError() != cudaSuccess)
         return false;
 
-    return eigensolveResidentFock(eps_out, fp32);
+    return eigensolveResidentFock(eps_out, fp32, n_eig);
 }
 
 bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
@@ -1059,7 +1125,7 @@ bool XtbGpuContext::residentBeginMultipole(const double* dp_int3, const double* 
 
 bool XtbGpuContext::residentSolveMultipole(const double* v_ao, const double* v_dp,
                                            const double* v_qp, int n, double* eps_out,
-                                           bool fp32)
+                                           bool fp32, int n_eig)
 {
     if (!ok() || n <= 0 || n != m_impl->resident_n || m_impl->resident_nat <= 0
         || !v_ao || !v_dp || !v_qp || !eps_out)
@@ -1085,7 +1151,7 @@ bool XtbGpuContext::residentSolveMultipole(const double* v_ao, const double* v_d
     if (cudaGetLastError() != cudaSuccess)
         return false;
 
-    return eigensolveResidentFock(eps_out, fp32);
+    return eigensolveResidentFock(eps_out, fp32, n_eig);
 }
 
 bool XtbGpuContext::residentMultipoleMoments(double* dp_at3, double* qp_at6, int n, int nat)

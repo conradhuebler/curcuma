@@ -180,12 +180,30 @@ double D4Evaluator::computeEnergyAndGradient(const std::vector<int>& atoms,
 
     double E_total = 0.0;
 
+    // AP2 perf (Claude Generated, 2026-06): hoist the per-atom D4 reference weights out
+    // of the O(N²) pair loop. weightedC6Gfn2 rebuilds each atom's RefW (CN-Gaussian ×
+    // charge-zeta) once per pair it appears in (~N times); here it runs once per atom,
+    // and the worker only does the cheap 7×7 contraction (contractC6Gfn2). The condition
+    // and the resulting C6 are bit-identical to the per-pair weightedC6Gfn2 (mirror of
+    // the D3 refC6Block hoist, commit 4b41562).
+    const bool per_ref_global = m_params.per_reference_charge && (m_data != nullptr)
+        && (m_data->getZetaCharges().size() == natoms);
+    std::vector<D4ParameterGenerator::RefW> atom_refw;
+    if (per_ref_global) {
+        const Vector& q = m_data->getZetaCharges();
+        atom_refw.resize(natoms);
+        for (int a = 0; a < natoms; ++a)
+            atom_refw[a] = m_data->buildAtomRefW(atoms[a], static_cast<size_t>(a),
+                                                 q(a), with_gradient, false);
+    }
+
     // Parallel over pairs (WP2 extension, Claude Generated). Each pair contributes to
     // per-atom arrays (gradient/dEdCN/dEdq) that span thread boundaries, so threads
     // accumulate into private partials reduced afterwards (bit-identical up to FP
-    // reassociation). Per-pair generator reads (weightedC6Gfn2, getZetaCharges, dc6dcn)
-    // are const → thread-safe. m_threads is pre-gated by the caller (native xTB passes
-    // its effectiveIntraThreads, =1 under molecule-level parallelism).
+    // reassociation). Per-pair generator reads (contractC6Gfn2, getZetaCharges, dc6dcn)
+    // are const and the hoisted atom_refw is read-only → thread-safe. m_threads is
+    // pre-gated by the caller (native xTB passes its effectiveIntraThreads, =1 under
+    // molecule-level parallelism).
     const int npairs = static_cast<int>(pairs.size());
     const int nthr = (m_threads > 1 && npairs >= 4 * m_threads) ? m_threads : 1;
 
@@ -226,12 +244,11 @@ double D4Evaluator::computeEnergyAndGradient(const std::vector<int>& atoms,
             // dE_dr direction) is unchanged; only the C6 prefactor and its q/CN
             // derivatives differ. GFN-FF keeps per_reference_charge=false.
             D4ParameterGenerator::C6Gfn2 c6g;
-            const bool per_ref = m_params.per_reference_charge && (m_data != nullptr)
-                && (m_data->getZetaCharges().size() == natoms);
+            const bool per_ref = per_ref_global;
             if (per_ref) {
-                const Vector& q = m_data->getZetaCharges();
-                c6g = m_data->weightedC6Gfn2(atoms[pair.i], atoms[pair.j], pair.i, pair.j,
-                                             q(pair.i), q(pair.j), with_gradient, false);
+                c6g = m_data->contractC6Gfn2(atom_refw[pair.i], atom_refw[pair.j],
+                                             atoms[pair.i], atoms[pair.j],
+                                             with_gradient, false);
                 const double denom = pair.C6 * pair.zetac6;
                 const double scale = (std::abs(denom) > 1e-300) ? (c6g.c6 / denom) : 0.0;
                 E_pair = -c6g.c6 * disp_sum;
@@ -329,13 +346,19 @@ double D4Evaluator::computeATM(const std::vector<int>& atoms,
 
     // q=0 (CN-only) reference C6 + dC6/dCN, exactly as dftd4 get_dispersion_nonsc
     // (weight_references at qat=0). c6[a][b] symmetric; dc6dcn[a][b] = dC6(a,b)/dCN_a.
+    // AP2 perf (Claude Generated, 2026-06): hoist the per-atom q=0 reference weights out
+    // of the N²/2 fill loop (each was rebuilt ~N times by weightedC6Gfn2); bit-identical.
     Matrix c6 = Matrix::Zero(nat, nat);
     Matrix dc6dcn;
     if (with_gradient) dc6dcn = Matrix::Zero(nat, nat);
+    std::vector<D4ParameterGenerator::RefW> refw0(nat);
+    for (int a = 0; a < nat; ++a)
+        refw0[a] = m_data->buildAtomRefW(atoms[a], static_cast<size_t>(a),
+                                         /*q=*/0.0, with_gradient, false);
     for (int a = 0; a < nat; ++a) {
         for (int b = 0; b <= a; ++b) {
-            D4ParameterGenerator::C6Gfn2 g = m_data->weightedC6Gfn2(
-                atoms[a], atoms[b], a, b, /*qi=*/0.0, /*qj=*/0.0, with_gradient, false);
+            D4ParameterGenerator::C6Gfn2 g = m_data->contractC6Gfn2(
+                refw0[a], refw0[b], atoms[a], atoms[b], with_gradient, false);
             c6(a, b) = g.c6;
             c6(b, a) = g.c6;
             if (with_gradient) {
