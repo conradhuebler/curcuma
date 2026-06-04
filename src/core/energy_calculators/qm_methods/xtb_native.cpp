@@ -200,21 +200,57 @@ double XTB::Calculation(bool gradient)
     Vector se;
     getSelfEnergies(cn, se);
 
-    // 3. Build overlap and H0
+    // 3+4. Overlap S, bare Hamiltonian H0, Cholesky L (=m_X), Coulomb gamma.
+    // AP4 (Claude Generated): on the GPU device-resident path the device builds these
+    // integrals itself (beginComputed), so build them on the device FIRST and download
+    // S/H0/L/gamma into the host matrices, SKIPPING the redundant host
+    // getHamiltonianH0/buildOrthonormalizer/buildGammaMatrix (~27 ms/geometry — matters
+    // on -opt/-md). The device matrices match the CPU to ~1e-15 (component tests
+    // sqm_cuda_*). exportGpuBasis/beginBasis/beginComputed are hoisted here (out of the
+    // SCF-setup block below) and their result (gpu_computed) is reused there, so the
+    // device build runs exactly once. Any failure / non-resident mode → full host build.
     Matrix S, H0;
-    getHamiltonianH0(se, S, H0);
-    m_S  = S;
-    m_H0 = H0;
-    // Orthonormalizer X = S^{-1/2}, built once here so every SCF iteration solves
-    // the cheap standard eigenproblem instead of re-factorizing the constant S.
-    buildOrthonormalizer();
+    bool gpu_computed = false;        // device integral build succeeded (reused below)
+    bool integrals_from_device = false;
+    if (m_gpu_scf && m_scf_mode == ScfMode::Broyden) {
+        GpuBasisFlat gbf;
+        GpuH0Flat    gh0;
+        exportGpuBasis(gbf, gh0);
+        bool basis_ok = true;
+        if (m_gpu_basis_dirty) {
+            basis_ok = m_gpu_scf->beginBasis(gbf, gh0);
+            if (basis_ok) m_gpu_basis_dirty = false;
+        }
+        gpu_computed = basis_ok && m_gpu_scf->beginComputed(gbf.xyz_bohr);
+        if (gpu_computed) {
+            const int nao = m_basis.nao, nsh = m_basis.nsh;
+            Eigen::MatrixXd Scm(nao, nao), H0cm(nao, nao), Lcm(nao, nao), Gcm(nsh, nsh);
+            if (m_gpu_scf->downloadOverlap(Scm) && m_gpu_scf->downloadH0(H0cm)
+                && m_gpu_scf->downloadCholesky(Lcm) && m_gpu_scf->downloadGamma(Gcm)) {
+                m_S     = Scm;   // col-major device → row-major Matrix (S symmetric)
+                m_H0    = H0cm;  // H0 symmetric
+                m_X     = Lcm;   // m_X is column-major Eigen::MatrixXd → direct
+                m_gamma = Gcm;
+                integrals_from_device = true;
+            }
+        }
+    }
+    if (!integrals_from_device) {
+        // Full host integral build (CPU path, or device build unavailable).
+        getHamiltonianH0(se, S, H0);
+        m_S  = S;
+        m_H0 = H0;
+        // Orthonormalizer X = S^{-1/2}, built once here so every SCF iteration solves
+        // the cheap standard eigenproblem instead of re-factorizing the constant S.
+        buildOrthonormalizer();
+        buildGammaMatrix();   // Coulomb gamma (once per geometry)
+    }
     const auto t_h0 = clock::now();
+    const auto t_gamma = clock::now();   // S/H0/L/gamma fused above (AP4 device path)
 
-    // 4. Build gamma matrix (once per geometry)
-    buildGammaMatrix();
-    const auto t_gamma = clock::now();
-
-    // 5. Multipole setup (GFN2 only) — fills m_dp_int, m_qp_int, interaction matrices
+    // 5. Multipole setup (GFN2 only) — fills m_dp_int, m_qp_int, interaction matrices.
+    // Always on the host: the AP4 device path uploads dp_int/qp_int, it does not build
+    // the AO multipole integrals.
     if (m_method == MethodType::GFN2) {
         setupMultipole();
     }
@@ -369,23 +405,14 @@ double XTB::Calculation(bool gradient)
     bool gpu_multipole    = false;
     if (m_gpu_scf && mode == ScfMode::Broyden
         && m_X.rows() == m_basis.nao && m_X.cols() == m_basis.nao) {
-        // Stage 3: prefer the device-computed integral build (beginBasis once +
-        // beginComputed per geometry: CN/S/H0/L on the device, no nao² upload).
-        // Fall back to the Stage-2 begin() upload path if the device build is
-        // unavailable. The device S/H0/L match the CPU to ~1e-15 (component
+        // Stage 3: the device-computed integral build (beginBasis once + beginComputed
+        // per geometry: CN/S/H0/L on the device, no nao² upload) was hoisted into the
+        // integral-build step above (AP4) so S/H0/L/gamma could be downloaded in place
+        // of the redundant host build; reuse its result here (the device build runs
+        // exactly once). Fall back to the Stage-2 begin() upload path if the device
+        // build was unavailable. The device S/H0/L match the CPU to ~1e-15 (component
         // tests sqm_cuda_*), so the converged energy is unchanged. Claude Generated.
-        GpuBasisFlat gbf;
-        GpuH0Flat    gh0;
-        exportGpuBasis(gbf, gh0);
-        // beginBasis uploads the molecule-constant arrays + allocates the device
-        // buffers ONCE per molecule (m_gpu_basis_dirty); MD/opt steps skip it and
-        // re-upload only xyz inside beginComputed. Claude Generated.
-        bool basis_ok = true;
-        if (m_gpu_basis_dirty) {
-            basis_ok = m_gpu_scf->beginBasis(gbf, gh0);
-            if (basis_ok) m_gpu_basis_dirty = false;
-        }
-        const bool computed = basis_ok && m_gpu_scf->beginComputed(gbf.xyz_bohr);
+        const bool computed = gpu_computed;
         if (m_method == MethodType::GFN1) {
             use_gpu_resident = computed || m_gpu_scf->begin(m_H0, m_S, m_X);
             if (verb >= 2)

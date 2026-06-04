@@ -179,6 +179,27 @@ public:
         return m_ctx->downloadGamma(gamma_out.data());
     }
 
+    // AP4 (Claude Generated): download the device-built S/H0/L (nao×nao, column-major)
+    // so the host can skip its redundant integral build on the resident path.
+    bool downloadOverlap(Eigen::MatrixXd& S_out) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        S_out.resize(m_n, m_n);
+        return m_ctx->downloadOverlap(S_out.data());
+    }
+    bool downloadH0(Eigen::MatrixXd& H0_out) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        H0_out.resize(m_n, m_n);
+        return m_ctx->downloadH0(H0_out.data());
+    }
+    bool downloadCholesky(Eigen::MatrixXd& L_out) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        L_out.resize(m_n, m_n);
+        return m_ctx->downloadCholesky(L_out.data());
+    }
+
     bool beginMultipoleComputed() override
     {
         if (!m_ctx || m_nat <= 0) return false;

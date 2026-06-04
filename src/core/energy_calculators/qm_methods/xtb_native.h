@@ -353,6 +353,14 @@ struct GpuScfBackend {
     /// potential build (v_sh += γ·q_sh) uses the device-built γ. Returns false if
     /// unavailable (caller keeps its own CPU γ). Claude Generated (Stage 3c).
     virtual bool downloadGamma(Eigen::MatrixXd& gamma_out) { (void)gamma_out; return false; }
+    /// AP4 (Claude Generated): fetch the device-computed overlap S, bare Hamiltonian
+    /// H0 (both nao×nao, column-major; symmetric so a row-major host copy is value-
+    /// identical) and lower Cholesky factor L (nao×nao, column-major) so the caller
+    /// can SKIP the redundant host integral build on the device-resident path. Return
+    /// false if unavailable. Require a prior beginComputed.
+    virtual bool downloadOverlap(Eigen::MatrixXd& S_out)   { (void)S_out;  return false; }
+    virtual bool downloadH0(Eigen::MatrixXd& H0_out)       { (void)H0_out; return false; }
+    virtual bool downloadCholesky(Eigen::MatrixXd& L_out)  { (void)L_out;  return false; }
 
     /* ----- Device nuclear gradient (Stage 4) ---------------------------- *
      * The electronic + repulsion + Coulomb gradient (sections 1/2/3 of
