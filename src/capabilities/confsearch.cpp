@@ -68,6 +68,7 @@ bool ConfSearch::Initialise()
 
 void ConfSearch::start()
 {
+    const std::string p = Basename();
     nlohmann::json md = ParameterRegistry::getInstance().getDefaultJson("simplemd");
 
     // Forward user-specified parameters from the ConfSearch controller to the MD config.
@@ -128,10 +129,10 @@ void ConfSearch::start()
         md.value("remove_com_motion", -1.0), md.value("remove_com_mode", -1), md.value("no_center", false));
     // Dump all MD parameters to file for debugging
     {
-        std::ofstream debug_file("confsearch_md_params.json");
+        std::ofstream debug_file(p + "_md_params.json");
         debug_file << md.dump(2) << std::endl;
         debug_file.close();
-        CurcumaLogger::result("ConfSearch: Full MD parameters written to confsearch_md_params.json");
+        CurcumaLogger::result_fmt("ConfSearch: Full MD parameters written to {}_md_params.json", p);
     }
 
     if (md.value("rmsd_mtd", false)) {
@@ -156,19 +157,19 @@ void ConfSearch::start()
     {
         bool first = true;
         for (auto* mol : m_in_stack) {
-            if (first) { mol->writeXYZFile("confsearch.input.xyz"); first = false; }
-            else          mol->appendXYZFile("confsearch.input.xyz");
+            if (first) { mol->writeXYZFile(p + ".input.xyz"); first = false; }
+            else          mol->appendXYZFile(p + ".input.xyz");
         }
         nlohmann::json opt_init;
         opt_init["method"] = m_method;
         opt_init["threads"] = m_threads;
         if (md.contains("gpu") && !md["gpu"].is_null())
             opt_init["gpu"] = md["gpu"];
-        PerformOptimisation("confsearch.input", opt_init);
+        PerformOptimisation(p + ".input", opt_init);
 
         for (auto* mol : m_in_stack) delete mol;
         m_in_stack.clear();
-        FileIterator opt_in("confsearch.input.opt.xyz");
+        FileIterator opt_in(p + ".input.opt.xyz");
         while (!opt_in.AtEnd()) {
             Molecule mol = opt_in.Next();
             if (mol.AtomCount() > 0)
@@ -188,8 +189,8 @@ void ConfSearch::start()
     }
 
     // Cumulative output: all accepted conformers across all temperature cycles.
-    // confsearch.cumulative.xyz grows each cycle; a final ConfScan at the end deduplicates.
-    const std::string cumulative_file = "confsearch.cumulative.xyz";
+    // <basename>.cumulative.xyz grows each cycle; a final ConfScan at the end deduplicates.
+    const std::string cumulative_file = p + ".cumulative.xyz";
     std::ofstream(cumulative_file).close();
 
     // Energy reference: cycle 1's best sets the baseline; best_energy tracks the running minimum.
@@ -253,10 +254,10 @@ void ConfSearch::start()
             opt["gpu"] = md["gpu"];
         // Bias structures are the primary conformers discovered by RMSD-MTD.
         // MD unique snapshots (confsearch.unique.xyz) are secondary and not used here.
-        PerformOptimisation("confsearch.bias", opt);
+        PerformOptimisation(p + ".bias", opt);
         int opt_count = 0;
         {
-            FileIterator opt_file("confsearch.bias.opt.xyz");
+            FileIterator opt_file(p + ".bias.opt.xyz");
             while (!opt_file.AtEnd()) { opt_file.Next(); opt_count++; }
         }
         CurcumaLogger::result_fmt("ConfSearch: Optimisation complete. {} bias structures optimised.", opt_count);
@@ -271,10 +272,10 @@ void ConfSearch::start()
         scan["max_energy"] = m_energy_window;
         if (md.contains("gpu") && !md["gpu"].is_null())
             scan["gpu"] = md["gpu"];
-        PerformFilter("confsearch.bias", scan);
+        PerformFilter(p + ".bias", scan);
         int rmsd_count = 0;
         {
-            FileIterator rmsd_file("confsearch.bias.opt.accepted.xyz");
+            FileIterator rmsd_file(p + ".bias.opt.accepted.xyz");
             while (!rmsd_file.AtEnd()) { rmsd_file.Next(); rmsd_count++; }
         }
         CurcumaLogger::result_fmt("ConfSearch: RMSD filtering complete. {} structures accepted.", rmsd_count);
@@ -285,7 +286,7 @@ void ConfSearch::start()
         double lowest_energy = std::numeric_limits<double>::infinity();
         int accepted = 0, rejected_topo = 0, rejected_energy = 0;
         std::vector<Molecule*> candidates;
-        FileIterator file("confsearch.bias.opt.accepted.xyz");
+        FileIterator file(p + ".bias.opt.accepted.xyz");
         while (!file.AtEnd()) {
             Molecule* mol = new Molecule(file.Next());
             // Float-safe topology check: any single broken/formed bond changes distances by >> 1e-4 A
@@ -348,8 +349,8 @@ void ConfSearch::start()
     final_scan["threads"] = m_threads;
     final_scan["energy_method"] = m_method;
     final_scan["max_energy"] = m_energy_window;
-    PerformFilter("confsearch.cumulative", final_scan);
-    CurcumaLogger::success("ConfSearch: Final result in confsearch.cumulative.accepted.xyz");
+    PerformFilter(p + ".cumulative", final_scan);
+    CurcumaLogger::success_fmt("ConfSearch: Final result in {}.cumulative.accepted.xyz", p);
 
     // Claude Generated (Apr 2026): Clean up shared bias pool
     delete m_bias_pool;
@@ -366,7 +367,7 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
         for (size_t i = 0; i < molecules.size(); ++i) {
             MDThread* thread = new MDThread(parameter);
             thread->setThreadId(index++);
-            thread->setBasename("confsearch.r" + std::to_string(repeat));
+            thread->setBasename(Basename() + ".r" + std::to_string(repeat));
             thread->setMolecule(molecules[i]);
             thread->setSharedBiasPool(m_bias_pool);
             pool->addThread(thread);
@@ -390,8 +391,8 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
             Molecule mol(ref_mol);
             mol.setGeometry(bs.geometry);
             mol.setName("bias_" + std::to_string(bs.index) + " t=" + std::to_string(static_cast<int>(bs.time)));
-            if (first) { mol.writeXYZFile("confsearch.mtd.xyz"); first = false; }
-            else          mol.appendXYZFile("confsearch.mtd.xyz");
+            if (first) { mol.writeXYZFile(Basename() + ".mtd.xyz"); first = false; }
+            else          mol.appendXYZFile(Basename() + ".mtd.xyz");
         }
 
         int stride = (bias_count <= m_max_bias_export) ? 1
@@ -402,12 +403,12 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
             Molecule mol(ref_mol);
             mol.setGeometry(snapshot[i].geometry);
             mol.setName("bias_" + std::to_string(snapshot[i].index));
-            if (first) { mol.writeXYZFile("confsearch.bias.xyz"); first = false; }
-            else          mol.appendXYZFile("confsearch.bias.xyz");
+            if (first) { mol.writeXYZFile(Basename() + ".bias.xyz"); first = false; }
+            else          mol.appendXYZFile(Basename() + ".bias.xyz");
             exported++;
         }
-        CurcumaLogger::result_fmt("ConfSearch: {} bias structures (of {}, stride={}) written to confsearch.bias.xyz",
-            exported, bias_count, stride);
+        CurcumaLogger::result_fmt("ConfSearch: {} bias structures (of {}, stride={}) written to {}.bias.xyz",
+            exported, bias_count, stride, Basename());
     }
 
     delete pool;
