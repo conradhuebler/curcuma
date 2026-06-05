@@ -416,6 +416,50 @@ struct GpuScfBackend {
     virtual bool atomicCharges(const Vector& n0_at, Vector& q_at_out)
     { (void)n0_at; (void)q_at_out; return false; }
 
+    /* ----- Device shell Mulliken charges (Stage 6, S6.2) ---------------- *
+     * q_sh(s) = n0_sh(s) − Σ_{μ∈s} pop_ao(μ), reduced on the device from the
+     * resident density populations via the AO→shell map. The shell analogue of
+     * atomicCharges; the result stays resident for the device SCC energy + the
+     * device Broyden mixer in the fused resident loop. Default false → host
+     * updatePopulationsFromPopAo. */
+    virtual bool shellCharges(const Vector& n0_sh, Vector& q_sh_out)
+    { (void)n0_sh; (void)q_sh_out; return false; }
+
+    /* ----- Device SCC energy (Stage 6, S6.3) ---------------------------- *
+     * The per-iteration SCC energy components from the resident OUTPUT charges /
+     * moments: E_coulomb = ½ q_shᵀ γ q_sh, the GFN2 shell third-order, and the
+     * GFN2 multipole energy. The band energy stays the resident density's
+     * Σ P⊙H0. Default false → the host energyCoulombShell/ThirdOrder/Multipole. */
+    virtual bool sccEnergy(int nat, int nsh, double& e_coulomb, double& e_third,
+                           double& e_multipole)
+    { (void)nat; (void)nsh; (void)e_coulomb; (void)e_third; (void)e_multipole; return false; }
+
+    /* ----- Fully device-resident SCF loop (Stage 6, S6.5) --------------- *
+     * The fused device-driven loop: beginResidentLoop uploads the initial SCC
+     * guess + the EEQ-guess q_at + the reference occupations once and sets up the
+     * device Broyden; residentScfStep runs ONE iteration entirely on the device
+     * (potential → Fock → eigensolve → occupation → density → charges/moments →
+     * SCC energy → Broyden) and returns only dq + the 4 energy scalars; nothing of
+     * size > O(1) crosses the bus per step. residentLoopCharges downloads the
+     * converged charges once at the end (finalize() still downloads P/C). Default
+     * false → the per-iteration host-driven loop. GFN2 device-potential path. */
+    virtual bool supportsResidentLoop() const { return false; }
+    virtual bool beginResidentLoop(const Vector& q_sh0, const Eigen::MatrixXd& dp_at0,
+                                   const Eigen::MatrixXd& qp_at0, const Vector& q_at0,
+                                   const Vector& n0_sh, const Vector& n0_at,
+                                   double Tele, double n_elec, int nocc_pairs,
+                                   double alpha, int max_hist, double w0)
+    { (void)q_sh0; (void)dp_at0; (void)qp_at0; (void)q_at0; (void)n0_sh; (void)n0_at;
+      (void)Tele; (void)n_elec; (void)nocc_pairs; (void)alpha; (void)max_hist; (void)w0;
+      return false; }
+    virtual bool residentScfStep(bool fp32, double& dq, double& e_band, double& e_coulomb,
+                                 double& e_third, double& e_multipole)
+    { (void)fp32; (void)dq; (void)e_band; (void)e_coulomb; (void)e_third; (void)e_multipole;
+      return false; }
+    virtual bool residentLoopCharges(Vector& q_sh, Vector& q_at, Eigen::MatrixXd& dp_at,
+                                     Eigen::MatrixXd& qp_at, Vector& eps)
+    { (void)q_sh; (void)q_at; (void)dp_at; (void)qp_at; (void)eps; return false; }
+
     /* ----- In-SCF GFN2 D4 atom-potential (Stage 5, Part B2) -------------- *
      * Move the per-iteration dE_D4/dq (XTB::addDispersionPotential) to the
      * device: the host builds the per-atom reference weights W/∂W/∂q once per
@@ -432,6 +476,15 @@ struct GpuScfBackend {
     /// Per iteration: host-built W/∂W/∂q (each nat·7) → device dE_D4/dq (nat).
     virtual bool dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out)
     { (void)nat; (void)W; (void)dWq; (void)dEdq_out; return false; }
+    /// Stage 6 (S6.2b): upload the q-independent D4 reference tables once per
+    /// geometry so the fused resident loop rebuilds W/dWq on the device from the
+    /// resident SCF charges (no host buildRefWFlat per iteration). Arrays are
+    /// length nat (cn/gi/zeff/nref) or nat·7 (refcn/refcovcn/refq).
+    virtual bool beginDispersionWeights(const std::vector<double>& cn, const std::vector<double>& gi,
+                                        const std::vector<double>& zeff, const std::vector<double>& refcn,
+                                        const std::vector<double>& refcovcn, const std::vector<double>& refq,
+                                        const std::vector<int>& nref)
+    { (void)cn; (void)gi; (void)zeff; (void)refcn; (void)refcovcn; (void)refq; (void)nref; return false; }
 
     /* ----- Full device GFN2 potential build (Stage 5, Part B3/B4) -------- *
      * Build the WHOLE per-iteration potential (γ·q_sh + shell third-order +
@@ -499,9 +552,26 @@ public:
     // body addDispersionPotential folds into pot.v_at; exposed for the Stage-5
     // Part-B2 component test (device-vs-host at a frozen q). Claude Generated.
     bool computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const;  // xtb_native.cpp
+    // Stage 6 (S6.2b) validation passthroughs (Claude Generated). buildD4RefWFlat:
+    // the host reference per-atom D4 weights W/dWq (= D4ParameterGenerator::
+    // buildRefWFlat at q). exportD4RefWDeviceData: the q-independent per-atom
+    // reference tables the device kernel rebuilds W/dWq from. Both require a prior
+    // GFN2 Calculation (m_d4_generator prepared); no-op if it is null.
+    void buildD4RefWFlat(const Vector& q, std::vector<double>& W,
+                         std::vector<double>& dWq) const;                 // xtb_native.cpp
+    void exportD4RefWDeviceData(std::vector<double>& cn, std::vector<double>& gi,
+                                std::vector<double>& zeff, std::vector<double>& refcn,
+                                std::vector<double>& refcovcn, std::vector<double>& refq,
+                                std::vector<int>& nref) const;            // xtb_native.cpp
     Vector  getOrbitalEnergies() const { return m_wfn.eps; }
     Matrix  getMOCoefficients() const { return m_wfn.C; }
     Matrix  getDensity() const { return m_wfn.P; }
+    // Converged per-iteration SCC energy components (Eh), cached from the last
+    // SCF iteration. Reference for the device SCC-energy reductions (Stage 6,
+    // S6.3). Claude Generated.
+    double  getECoulombShell() const { return m_E_coulomb_shell; }
+    double  getEThirdOrder()   const { return m_E_third_order; }
+    double  getEMultipole()    const { return m_E_multipole; }
     const Matrix& getOverlap() const { return m_S; }
     // Bare Hamiltonian H0 (CN-shifted self-energies × hscale × overlap), the
     // reference for the Stage-3b GPU overlap/H0 validation. Claude Generated.
@@ -595,6 +665,14 @@ public:
     // both the dense solveEigen() path and the per-block sub-block diagonaliser in
     // large_system_mode=dc.
     void setElectronicTemperature(double K) { if (K >= 0.0) m_electronic_temp = K; }
+    /// Electronic temperature in Kelvin (Stage-6 GPU occupation validation).
+    double electronicTemperature() const { return m_electronic_temp; }
+    /// Public diagnostic accessor (Stage-6 GPU validation, Claude Generated):
+    /// Fermi/integer occupations for the current electronic temperature from a
+    /// given ascending eps, via the SCF's own occupationsFromEps. Lets a device
+    /// occupation kernel be compared to the authoritative host logic.
+    void computeOccupations(const Vector& eps, Eigen::VectorXd& occ, int& ncol) const
+    { occupationsFromEps(eps, occ, ncol); }
 
     // Eigensolver backend for the per-iteration generalized eigenproblem (WP4):
     // "mkl" (default) = LAPACK dsygst + dsyevd; "native"/"dnc" = self-contained

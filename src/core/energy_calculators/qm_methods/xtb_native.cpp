@@ -516,6 +516,33 @@ double XTB::Calculation(bool gradient)
                 : "SCF: device potential build unavailable; host potential build");
     }
 
+    // Stage 6 (S6.5, Claude Generated): fully device-resident SCF loop. When the
+    // backend supports it, the WHOLE per-iteration loop body (potential → Fock →
+    // eigensolve → occupation → density → charges/moments → SCC energy → Broyden)
+    // runs on the device; the host polls only the convergence dq + the 4 energy
+    // scalars per step (eps/occ/pop_ao/moments/q_sh stay resident). Upload the
+    // q-independent D4 reference tables once (so the device rebuilds W/dWq from the
+    // resident charges) and the initial SCC guess + EEQ-guess q_at + reference
+    // occupations, then drive m_gpu_scf->residentScfStep below. Falls back to the
+    // host-driven device-potential loop on any failure. GFN2 only.
+    bool use_resident_loop = false;
+    if (use_device_potential && mode == ScfMode::Broyden && m_gpu_scf->supportsResidentLoop()) {
+        std::vector<double> rcn, rgi, rzeff, rrefcn, rrefcovcn, rrefq;
+        std::vector<int> rnref;
+        exportD4RefWDeviceData(rcn, rgi, rzeff, rrefcn, rrefcovcn, rrefq, rnref);
+        const int nocc_pairs = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
+        const int b_maxhist = (m_diis_subspace > 2) ? 20 : m_diis_subspace;
+        use_resident_loop = !rcn.empty()
+            && m_gpu_scf->beginDispersionWeights(rcn, rgi, rzeff, rrefcn, rrefcovcn, rrefq, rnref)
+            && m_gpu_scf->beginResidentLoop(m_wfn.q_sh, m_wfn.dp_at, m_wfn.qp_at, m_wfn.q_at,
+                                            m_wfn.n0_sh, m_wfn.n0_at, m_electronic_temp,
+                                            m_wfn.nocc, nocc_pairs, damp, b_maxhist, 0.01);
+        if (verb >= 2)
+            CurcumaLogger::info(use_resident_loop
+                ? "SCF: fully device-resident loop (host polls only dq + energy scalars)"
+                : "SCF: resident-loop setup unavailable; host-driven device-potential loop");
+    }
+
     // AP1 (Claude Generated): GPU partial diagonalisation window. The device density
     // only needs the occupied(+buffer) eigenvectors, so the resident eigensolve can
     // compute just the lowest gpu_n_eig pairs (cusolverDnDsyevdx) instead of the full
@@ -546,6 +573,38 @@ double XTB::Calculation(bool gradient)
     int iter;
     for (iter = 0; iter < max_iter; ++iter) {
         const auto t_iter0 = clock::now();
+
+        // Stage 6 (S6.5): fully device-resident step. One backend call runs the
+        // whole iteration on the GPU; only the convergence dq + the 4 SCC energy
+        // scalars come back. The host keeps the iteration counter, the mixed-
+        // precision (FP32→FP64) decision, the convergence test, and the verbosity
+        // line — the rest (incl. the Broyden mix) is device-resident. Claude Generated.
+        if (use_resident_loop) {
+            m_eig_fp32 = m_scf_mixed_precision && (dq_prev > m_scf_fp32_threshold);
+            double dq = 0.0, eb = 0.0, ecoul = 0.0, ethird = 0.0, emp = 0.0;
+            if (!m_gpu_scf->residentScfStep(m_eig_fp32, dq, eb, ecoul, ethird, emp)) {
+                CurcumaLogger::warn("XTB::Calculation: GPU resident SCF step failed at iteration "
+                                    + std::to_string(iter));
+                m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
+            }
+            m_E_electronic = eb; m_E_coulomb_shell = ecoul;
+            m_E_third_order = ethird; m_E_multipole = emp;
+            const double e_scc = eb + ecoul + ethird + emp;
+            const double de = (iter > 0) ? std::fabs(e_scc - e_total_old) : 0.0;
+            dq_prev = dq;
+            if (verb >= scf_min) {
+                const double t_iter_ms = ms(t_iter0, clock::now());
+                CurcumaLogger::result(fmt::format("  {:4d}   {:18.10f}   {:10.2e}   {:10.2e}   {:6.1f}",
+                                                  iter, e_scc, de, dq, t_iter_ms));
+            }
+            if (iter > 0 && !m_eig_fp32 && dq < thresh && de < thresh * 100.0) {
+                m_scf_converged = true;
+                e_total_old = e_scc;
+                break;
+            }
+            e_total_old = e_scc;
+            continue;
+        }
 
         // Broyden mixes the SCC charge vector: capture the input x_in (current
         // m_wfn charges) before the potential is built and the populations are
@@ -832,6 +891,18 @@ double XTB::Calculation(bool gradient)
         else
             CurcumaLogger::warn_fmt("SCF NOT converged after {} iterations ({:.1f} ms)",
                                     m_scf_iterations, ms(t_scf_start, t_scf_end));
+    }
+
+    // Stage 6 (S6.5): the fused device loop kept the converged charges/moments
+    // resident — download them once into the host wavefunction so the post-SCF
+    // potential rebuild + energies + gradient below run unchanged. Claude Generated.
+    if (use_resident_loop && m_gpu_scf) {
+        m_wfn.q_sh.resize(m_basis.nsh);
+        m_wfn.q_at.resize(m_atomcount);
+        m_wfn.dp_at.resize(3, m_atomcount);
+        m_wfn.qp_at.resize(6, m_atomcount);
+        m_wfn.eps.resize(m_basis.nao);
+        m_gpu_scf->residentLoopCharges(m_wfn.q_sh, m_wfn.q_at, m_wfn.dp_at, m_wfn.qp_at, m_wfn.eps);
     }
 
     // Device-resident path: download the converged density and MO coefficients
@@ -1694,6 +1765,29 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
     }
 
     return dEdq.size() == m_atomcount;
+}
+
+/* ------------------------------------------------------------------------- *
+ *  Stage 6 (S6.2b) validation passthroughs (Claude Generated). The host
+ *  reference W/dWq and the q-independent per-atom reference tables the device
+ *  kernel k_d4_build_refw rebuilds them from. Require a prior GFN2 Calculation
+ *  (m_d4_generator prepared by computeD4PotentialDedq / calcDispersionEnergy).
+ * ------------------------------------------------------------------------- */
+void XTB::buildD4RefWFlat(const Vector& q, std::vector<double>& W,
+                          std::vector<double>& dWq) const
+{
+    W.clear(); dWq.clear();
+    if (m_d4_generator) m_d4_generator->buildRefWFlat(m_atoms, q, W, dWq);
+}
+
+void XTB::exportD4RefWDeviceData(std::vector<double>& cn, std::vector<double>& gi,
+                                 std::vector<double>& zeff, std::vector<double>& refcn,
+                                 std::vector<double>& refcovcn, std::vector<double>& refq,
+                                 std::vector<int>& nref) const
+{
+    cn.clear(); gi.clear(); zeff.clear(); refcn.clear(); refcovcn.clear(); refq.clear(); nref.clear();
+    if (m_d4_generator)
+        m_d4_generator->exportRefWDeviceData(m_atoms, cn, gi, zeff, refcn, refcovcn, refq, nref);
 }
 
 /* ------------------------------------------------------------------------- *

@@ -1440,6 +1440,48 @@ void D4ParameterGenerator::buildRefWFlat(const std::vector<int>& atoms, const Ve
     }
 }
 
+// Stage 6 (S6.2b, Claude Generated 2026-06): export the q-independent per-atom
+// reference data for the device W/dWq rebuild (k_d4_build_refw). Mirrors the
+// per-atom setup at the top of buildAtomRefW (gc=2 → gi=eta·gc; the refcovcn
+// fallback to refcn). The device kernel then redoes the ngw bucketing + CN-
+// Gaussian + zeta from these tables, so the resident SCF charges drive W/dWq
+// without a host round-trip.
+void D4ParameterGenerator::exportRefWDeviceData(const std::vector<int>& atoms,
+                                                std::vector<double>& cn, std::vector<double>& gi,
+                                                std::vector<double>& zeff, std::vector<double>& refcn,
+                                                std::vector<double>& refcovcn, std::vector<double>& refq,
+                                                std::vector<int>& nref) const
+{
+    constexpr double gc = 2.0;   // dftd4 gc_default (matches buildAtomRefW)
+    const int nat = static_cast<int>(atoms.size());
+    cn.assign(nat, 0.0);
+    gi.assign(nat, 0.0);
+    zeff.assign(nat, 0.0);
+    nref.assign(nat, 0);
+    refcn.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    refcovcn.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    refq.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    for (int a = 0; a < nat; ++a) {
+        const int elem = atoms[a] - 1;
+        if (elem < 0 || elem >= MAX_ELEM) continue;
+        cn[a]   = (static_cast<size_t>(a) < m_cn_values.size()) ? m_cn_values[a] : 0.0;
+        gi[a]   = GFNFFParameters::zeta_c[elem] * gc;
+        zeff[a] = GFNFFParameters::zeta_zeff[elem];
+        const int nr = (elem < static_cast<int>(m_refn.size())) ? m_refn[elem] : 0;
+        nref[a] = nr;
+        const double* rcn = (elem < static_cast<int>(m_refcn.size())) ? m_refcn[elem].data() : nullptr;
+        const double* rcov = (elem < static_cast<int>(m_refcovcn.size()) && !m_refcovcn[elem].empty())
+                             ? m_refcovcn[elem].data() : rcn;
+        const double* rq = (elem < static_cast<int>(m_refq.size())) ? m_refq[elem].data() : nullptr;
+        for (int ir = 0; ir < nr && ir < MAX_REF; ++ir) {
+            const size_t idx = static_cast<size_t>(a) * MAX_REF + ir;
+            if (rcn)  refcn[idx]    = rcn[ir];
+            if (rcov) refcovcn[idx] = rcov[ir];
+            if (rq)   refq[idx]     = rq[ir];
+        }
+    }
+}
+
 // Claude Generated (AP6b exact D4 port, 2026): tblite/dftd4-exact per-reference
 // charge-weighted C6 for native GFN2. Per-pair entry point — now a thin wrapper over
 // buildAtomRefW + contractC6Gfn2 (numerics unchanged). Mirrors dftd4 model.f90

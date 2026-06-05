@@ -17,6 +17,8 @@
 #include <cuda_runtime.h>
 #include <cusolverDn.h>
 
+#include <cmath>
+
 // CudaBuffer<T> (RAII cudaMalloc/cudaFree) — the project's established device
 // allocation helper; routing every allocation through it is the mitigation for
 // the GFN-FF GPU heap-corruption class of bug.
@@ -131,6 +133,10 @@ struct XtbGpuContext::Impl {
     // the resident dAo2at map, kept resident for the in-SCF D4 potential (B2).
     CudaBuffer<double> dN0at;                 // reference atom occupations (nat)
     CudaBuffer<double> dQat;                  // atomic charges q_at (nat, resident)
+    // Stage 6 (S6.2): reference shell occupations for the resident q_sh reduction
+    // (q_sh = n0_sh − Σ_{μ∈s} pop_ao(μ), scattered via dAo2sh into the resident
+    // dQsh). Mirrors dN0at/dQat for shells. Claude Generated.
+    CudaBuffer<double> dN0sh;                 // reference shell occupations (nsh)
 
     // Stage 5 (Part B2): in-SCF GFN2 D4 atom-potential dE_D4/dq on the device.
     // The CN-Gaussian + zeta weights are built on the host (buildRefWFlat) and
@@ -148,6 +154,17 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dD4C6Flat;              // reference C6 block (MAX_ELEM²·MAX_REF²)
     CudaBuffer<double> dD4W, dD4dWq;           // per-iter weights (nat·MAX_REF)
     CudaBuffer<double> dD4Dedq;                // output dE_D4/dq (nat)
+
+    // Stage 6 (S6.2b): q-independent per-atom reference data so the device rebuilds
+    // W/dWq from the resident SCF charges (k_d4_build_refw), removing the host
+    // buildRefWFlat + W/dWq upload from the loop. Uploaded once per geometry by
+    // beginDispersionWeights. Claude Generated.
+    CudaBuffer<double> dD4Cn;                  // geometry-fixed CN per atom (nat)
+    CudaBuffer<double> dD4Gi;                  // eta·gc per atom (nat)
+    CudaBuffer<double> dD4Zeff;                // effective nuclear charge per atom (nat)
+    CudaBuffer<double> dD4Refcn;              // ngw-bucketing reference CN (nat·MAX_REF)
+    CudaBuffer<double> dD4Refcovcn;          // CN-Gaussian reference covCN (nat·MAX_REF)
+    CudaBuffer<double> dD4Refq;              // reference charges (nat·MAX_REF)
 
     // Stage 5 (Part B3/B4): full device GFN2 potential build. The geometry-fixed
     // multipole interaction matrices (amat_*, nat²) + the per-shell third-order
@@ -167,6 +184,39 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dInQpAt;     // uploaded atomic quadrupoles qp_at, 6·nat
     CudaBuffer<double> dVsh;        // shell potential v_sh, nsh
     CudaBuffer<double> dVat;        // atom potential v_at, nat
+
+    // Stage 6 (S6.1): device occupation. k_occupations fills the resident dOcc
+    // from the resident dEps (no host round-trip in the loop); dOccMu/dOccNcol
+    // carry the converged chemical potential + the occupied-column count for the
+    // component test. Claude Generated.
+    CudaBuffer<double> dOccMu;      // chemical potential µ (1 double)
+    CudaBuffer<int>    dOccNcol;    // last column with occ>1e-12 (1 int)
+
+    // Stage 6 (S6.3): device SCC energy. dEScratch holds γ·q_sh (nsh) for the
+    // Coulomb dot; dESca accumulates the third-order + multipole scalars (2 doubles,
+    // atomicAdd targets). Claude Generated.
+    CudaBuffer<double> dEScratch;   // γ·q_sh, nsh
+    CudaBuffer<double> dESca;       // [E_third, E_multipole]
+
+    // Stage 6 (S6.4): device Broyden mixer state. The packed SCC vector has length
+    // broyden_N (= nsh + 9·nat for GFN2). The history dF/u live as the first M
+    // columns of N×max_hist column-major matrices (a ring buffer over the slots —
+    // vnext is invariant to the column order, so dropping the oldest slot matches
+    // the host FIFO); vin_last/F_last + the M×M Gram solve scratch stay resident
+    // across SCF iterations. Claude Generated.
+    int    broyden_N = 0, broyden_iter = 0, broyden_push = 0, broyden_maxhist = 20;
+    double broyden_alpha = 0.25, broyden_w0 = 0.01;
+    CudaBuffer<double> dBroyVin, dBroyVout, dBroyVnext;          // scratch (test upload)
+    CudaBuffer<double> dBroyF, dBroyFLast, dBroyVinLast, dBroyDFtmp;  // length N
+    CudaBuffer<double> dBroyDFmat, dBroyUmat;                    // N × max_hist (col-major)
+    CudaBuffer<double> dBroyGram, dBroyC, dBroyGamma;            // M×M / M / M
+
+    // Stage 6 (S6.5): fused device-driven loop. The geometry-fixed scalars + the
+    // convergence dq scratch; everything else reuses the resident Stage 2-5/6
+    // buffers. The host polls only dq + the 4 energy scalars (O(1)) per step.
+    int    loop_nsh = 0, loop_nat = 0, loop_nao = 0, loop_nocc_pairs = 0;
+    double loop_Tele = 0.0, loop_nelec = 0.0;
+    CudaBuffer<double> dDq;         // max|q_sh_out − q_sh_in| (1 double)
 };
 
 // ---- Stage 3 element parameter tables in __constant__ memory --------------
@@ -922,6 +972,98 @@ __global__ void k_qat_scatter(int nao, const double* __restrict__ pop,
     atomicAdd(&q_at[ao2at[mu]], -pop[mu]);
 }
 
+// Stage 6 (S6.2): shell Mulliken charges from the resident AO populations. q_sh is
+// pre-seeded to n0_sh; one thread per AO subtracts its population into its shell
+// bin. The shell half of updatePopulationsFromPopAo (xtb_scf.cpp): n_sh(s) =
+// Σ_{μ∈s} pop_ao(μ), q_sh(s) = n0_sh(s) − n_sh(s). Claude Generated.
+__global__ void k_qsh_scatter(int nao, const double* __restrict__ pop,
+                              const int* __restrict__ ao2sh, double* __restrict__ q_sh)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= nao) return;
+    atomicAdd(&q_sh[ao2sh[mu]], -pop[mu]);
+}
+
+// Stage 6 (S6.2b): device ports of d4_zeta / d4_dzeta (d4_charge_scaling.h).
+__device__ __forceinline__ double d4_zeta_dev(double a, double c, double qref, double qmod)
+{
+    if (qmod < 0.0) return exp(a);
+    return exp(a * (1.0 - exp(c * (1.0 - qref / qmod))));
+}
+__device__ __forceinline__ double d4_dzeta_dev(double a, double c, double qref, double qmod)
+{
+    if (qmod < 0.0) return 0.0;
+    const double g = exp(c * (1.0 - qref / qmod));
+    const double z = exp(a * (1.0 - g));
+    return -a * c * g * z * qref / (qmod * qmod);
+}
+
+// Stage 6 (S6.2b): rebuild the per-atom D4 reference weights W = gwk(CN)·ζ(q) and
+// dWq = ∂W/∂q from the SCF charges on the device — the exact port of
+// D4ParameterGenerator::buildAtomRefW (want_grad). One thread per atom; the
+// q-independent tables (cn, gi=eta·gc, zeff, refcn, refcovcn, refq, nref) are
+// uploaded once per geometry, q is read from the resident charges, and the
+// outputs feed k_d4_dedq with no host round-trip. ga=3, wf=6, MAXCN=19 (dftd4
+// defaults); the ngw bucketing uses refcn, the CN-Gaussian uses refcovcn.
+// Claude Generated.
+__global__ void k_d4_build_refw(int nat, int max_ref, const double* __restrict__ q,
+                                const double* __restrict__ cn, const double* __restrict__ gi,
+                                const double* __restrict__ zeff, const int* __restrict__ nref,
+                                const double* __restrict__ refcn, const double* __restrict__ refcovcn,
+                                const double* __restrict__ refq,
+                                double* __restrict__ W, double* __restrict__ dWq)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= nat) return;
+    constexpr double ga = 3.0, wf = 6.0;
+    constexpr int MAXCN = 19;
+    const int MR = max_ref;                       // 7
+    const size_t base = static_cast<size_t>(a) * MR;
+    for (int ir = 0; ir < MR; ++ir) { W[base + ir] = 0.0; dWq[base + ir] = 0.0; }
+    int nr = nref[a];
+    if (nr <= 0) return;
+    if (nr > MR) nr = MR;
+    const double cna = cn[a];
+    const double gia = gi[a];
+    const double zef = zeff[a];
+
+    // ngw[ir] from refcn (dftd4 set_refgw): count refs sharing a rounded CN bucket.
+    int cnc[MAXCN + 1];
+    for (int k = 0; k <= MAXCN; ++k) cnc[k] = 0;
+    cnc[0] = 1;
+    for (int ir = 0; ir < nr; ++ir) {
+        int icn = static_cast<int>(lround(refcn[base + ir]));
+        if (icn < 0) icn = 0; if (icn > MAXCN) icn = MAXCN;
+        cnc[icn] += 1;
+    }
+    // CN-Gaussian weights gwk = expw/norm (uses refcovcn, dftd4 weight_references).
+    double expw[7];
+    double norm = 0.0;
+    for (int ir = 0; ir < nr; ++ir) {
+        int icn = static_cast<int>(lround(refcn[base + ir]));
+        if (icn < 0) icn = 0; if (icn > MAXCN) icn = MAXCN;
+        const int k = cnc[icn];
+        const int ngw = k * (k + 1) / 2;
+        const double dcov = cna - refcovcn[base + ir];
+        double ew = 0.0;
+        for (int igw = 1; igw <= ngw; ++igw) {
+            const double wfe = igw * wf;
+            ew += exp(-wfe * dcov * dcov);
+        }
+        expw[ir] = ew;
+        norm += ew;
+    }
+    const double ninv = (norm > 0.0) ? 1.0 / norm : 0.0;
+    const double qmod = q[a] + zef;
+    for (int ir = 0; ir < nr; ++ir) {
+        double gwk = expw[ir] * ninv;
+        if (!isfinite(gwk)) gwk = 0.0;
+        const double qref = refq[base + ir] + zef;
+        W[base + ir]   = gwk * d4_zeta_dev(ga, gia, qref, qmod);
+        dWq[base + ir] = gwk * d4_dzeta_dev(ga, gia, qref, qmod);
+    }
+}
+
 // Stage 5 (Part B2): in-SCF GFN2 D4 atom-potential dE_D4/dq, one thread per atom
 // i (no atomicAdd — like k_d4eeq_response, each atom sums its own half of the
 // symmetric pair contributions). For every j≠i within the 50-Bohr cutoff:
@@ -1071,6 +1213,210 @@ __global__ void k_expand_vao(int nao, const double* __restrict__ v_sh, const dou
     const int mu = blockIdx.x * blockDim.x + threadIdx.x;
     if (mu >= nao) return;
     v_ao[mu] = v_sh[ao2sh[mu]] + v_at[ao2at[mu]];
+}
+
+// ---- Stage 6 (S6.1) occupation kernel -------------------------------------
+// Single-block port of XTB::occupationsFromEps (xtb_scf.cpp). One block, blockDim
+// a power of two; eps/occ are length n (grid-stride within the block). For Tele=0
+// the closed-shell integer fill (2.0 per occupied pair) is exact; for Tele>0 the
+// Fermi level is found by bisection over [eps_min-1, eps_max+1] — 100 iterations,
+// the same x<=500 exp clamp and 1e-14 width break as the host. The block-tree
+// electron-count sum differs from the host's sequential sum only in rounding, so
+// µ and occ agree to ~1e-13 (the bisection is self-correcting). mu_out/ncol_out
+// optional (component test). Claude Generated.
+__global__ void k_occupations(const double* __restrict__ eps, double* __restrict__ occ,
+                              int n, double kT, double n_elec, int nocc_pairs,
+                              int use_fermi, double* mu_out, int* ncol_out)
+{
+    extern __shared__ double sdata[];   // blockDim doubles
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+
+    if (!use_fermi) {
+        for (int i = tid; i < n; i += nthreads)
+            occ[i] = (i < nocc_pairs) ? 2.0 : 0.0;
+        if (tid == 0) { if (mu_out) *mu_out = 0.0; if (ncol_out) *ncol_out = nocc_pairs; }
+        return;
+    }
+
+    // eps_min / eps_max via block reduction.
+    double vmin = 1e300, vmax = -1e300;
+    for (int i = tid; i < n; i += nthreads) {
+        const double e = eps[i];
+        vmin = fmin(vmin, e); vmax = fmax(vmax, e);
+    }
+    sdata[tid] = vmin; __syncthreads();
+    for (int s = nthreads >> 1; s > 0; s >>= 1) { if (tid < s) sdata[tid] = fmin(sdata[tid], sdata[tid + s]); __syncthreads(); }
+    const double eps_min = sdata[0]; __syncthreads();
+    sdata[tid] = vmax; __syncthreads();
+    for (int s = nthreads >> 1; s > 0; s >>= 1) { if (tid < s) sdata[tid] = fmax(sdata[tid], sdata[tid + s]); __syncthreads(); }
+    const double eps_max = sdata[0]; __syncthreads();
+
+    __shared__ double mu_lo_s, mu_hi_s;
+    if (tid == 0) { mu_lo_s = eps_min - 1.0; mu_hi_s = eps_max + 1.0; }
+    __syncthreads();
+
+    for (int bisect = 0; bisect < 100; ++bisect) {
+        const double mu = 0.5 * (mu_lo_s + mu_hi_s);
+        double psum = 0.0;
+        for (int i = tid; i < n; i += nthreads) {
+            const double x = (eps[i] - mu) / kT;
+            psum += 2.0 / (1.0 + exp(fmin(x, 500.0)));
+        }
+        sdata[tid] = psum; __syncthreads();
+        for (int s = nthreads >> 1; s > 0; s >>= 1) { if (tid < s) sdata[tid] += sdata[tid + s]; __syncthreads(); }
+        const double n_sum = sdata[0];
+        __syncthreads();
+        if (tid == 0) { if (n_sum > n_elec) mu_hi_s = mu; else mu_lo_s = mu; }
+        __syncthreads();
+        if (mu_hi_s - mu_lo_s < 1e-14) break;
+    }
+    const double mu_f = 0.5 * (mu_lo_s + mu_hi_s);
+    int local_ncol = 0;
+    for (int i = tid; i < n; i += nthreads) {
+        const double x = (eps[i] - mu_f) / kT;
+        const double o = 2.0 / (1.0 + exp(fmin(x, 500.0)));
+        occ[i] = o;
+        if (o > 1.0e-12) local_ncol = i + 1;
+    }
+    __syncthreads();
+    sdata[tid] = static_cast<double>(local_ncol); __syncthreads();
+    for (int s = nthreads >> 1; s > 0; s >>= 1) { if (tid < s) sdata[tid] = fmax(sdata[tid], sdata[tid + s]); __syncthreads(); }
+    if (tid == 0) { if (mu_out) *mu_out = mu_f; if (ncol_out) *ncol_out = static_cast<int>(sdata[0]); }
+}
+
+// ---- Stage 6 (S6.3) SCC energy kernels ------------------------------------
+// GFN2 shell third-order energy E = Σ_s q_sh(s)³·Γ_s/3 (coulomb::energy_third_order,
+// GFN2 branch). Grid-stride block reduction → atomicAdd into e_out (pre-zeroed).
+// Claude Generated.
+__global__ void k_energy_third_order_shell(int nsh, const double* __restrict__ q_sh,
+                                           const double* __restrict__ gamma3, double* e_out)
+{
+    extern __shared__ double sdata[];
+    const int tid = threadIdx.x;
+    double e = 0.0;
+    for (int s = blockIdx.x * blockDim.x + tid; s < nsh; s += gridDim.x * blockDim.x) {
+        const double q = q_sh[s];
+        e += q * q * q * gamma3[s] / 3.0;
+    }
+    sdata[tid] = e; __syncthreads();
+    for (int st = blockDim.x >> 1; st > 0; st >>= 1) { if (tid < st) sdata[tid] += sdata[tid + st]; __syncthreads(); }
+    if (tid == 0) atomicAdd(e_out, sdata[0]);
+}
+
+// GFN2 multipole energy E (XTB::energyMultipole): one thread per atom i sums its
+// SD/DD/SQ row contractions over j plus the on-site dipole/quadrupole XC, then a
+// block reduction → atomicAdd into e_out (pre-zeroed). amat layouts mirror
+// k_multipole_potential exactly (block a*3+b for DD; col-major (i,j)=i+j·nat;
+// moments dp_at[k+i·3], qp_at[k+i·6]). Uses the OUTPUT moments/charges. Claude Generated.
+__global__ void k_energy_multipole(int nat, const double* __restrict__ amat_sd,
+                                   const double* __restrict__ amat_dd, const double* __restrict__ amat_sq,
+                                   const double* __restrict__ dkernel, const double* __restrict__ qkernel,
+                                   const double* __restrict__ dp_at, const double* __restrict__ qp_at,
+                                   const double* __restrict__ q_at, double* e_out)
+{
+    extern __shared__ double sdata[];
+    const int tid = threadIdx.x;
+    const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
+    const int i = blockIdx.x * blockDim.x + tid;
+    double ei = 0.0;
+    if (i < nat) {
+        const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
+        double dpi[3], qpi[6];
+        for (int k = 0; k < 3; ++k) dpi[k] = dp_at[k + static_cast<size_t>(i) * 3];
+        for (int k = 0; k < 6; ++k) qpi[k] = qp_at[k + static_cast<size_t>(i) * 6];
+        for (int j = 0; j < nat; ++j) {
+            const double qj = q_at[j];
+            const size_t ij = static_cast<size_t>(i) + static_cast<size_t>(j) * nat;
+            for (int k = 0; k < 3; ++k)
+                ei += dpi[k] * amat_sd[static_cast<size_t>(k) * nn + ij] * qj;
+            for (int a = 0; a < 3; ++a) {
+                const double dpia = dpi[a];
+                for (int b = 0; b < 3; ++b)
+                    ei += 0.5 * dpia * amat_dd[(static_cast<size_t>(a) * 3 + b) * nn + ij]
+                              * dp_at[b + static_cast<size_t>(j) * 3];
+            }
+            for (int k = 0; k < 6; ++k)
+                ei += qpi[k] * amat_sq[static_cast<size_t>(k) * nn + ij] * qj;
+        }
+        const double dk = dkernel[i], qk = qkernel[i];
+        for (int k = 0; k < 3; ++k) ei += dk * dpi[k] * dpi[k];
+        for (int k = 0; k < 6; ++k) ei += qk * qpi[k] * qpi[k] * mpscale_q[k];
+    }
+    sdata[tid] = ei; __syncthreads();
+    for (int st = blockDim.x >> 1; st > 0; st >>= 1) { if (tid < st) sdata[tid] += sdata[tid + st]; __syncthreads(); }
+    if (tid == 0) atomicAdd(e_out, sdata[0]);
+}
+
+// ---- Stage 6 (S6.4) Broyden mixer kernels ---------------------------------
+__global__ void k_vec_sub(double* __restrict__ out, const double* __restrict__ a,
+                          const double* __restrict__ b, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = a[i] - b[i];
+}
+
+// Normalised residual change dF = dFraw/norm and the Broyden direction
+// u = alpha·dF + (vin − vin_last)/norm, written into the history slot columns.
+// Mirrors BroydenMixer::update lines 106-107. Claude Generated.
+__global__ void k_broyden_dfu(double* __restrict__ dfcol, double* __restrict__ ucol,
+                              const double* __restrict__ dfraw, const double* __restrict__ vin,
+                              const double* __restrict__ vinlast, double alpha, double inv_norm, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const double dfn = dfraw[i] * inv_norm;
+    dfcol[i] = dfn;
+    ucol[i]  = alpha * dfn + (vin[i] - vinlast[i]) * inv_norm;
+}
+
+// Single-thread solve of (w0²I + a)·gamma = c (M ≤ 20; a col-major M×M, symmetric):
+// Gaussian elimination with partial pivoting → gamma = (w0²I+a)^{-1}·c, the host
+// beta·c (BroydenMixer::update lines 133-135). Claude Generated.
+__global__ void k_broyden_solve(int M, const double* __restrict__ a, const double* __restrict__ c,
+                                double reg, double* __restrict__ gamma)
+{
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    const int MM = 20;
+    double A[MM][MM];
+    double b[MM];
+    for (int i = 0; i < M; ++i) {
+        b[i] = c[i];
+        for (int j = 0; j < M; ++j) A[i][j] = a[i + j * M] + (i == j ? reg : 0.0);
+    }
+    for (int k = 0; k < M; ++k) {
+        int piv = k; double mx = fabs(A[k][k]);
+        for (int i = k + 1; i < M; ++i) { const double v = fabs(A[i][k]); if (v > mx) { mx = v; piv = i; } }
+        if (piv != k) {
+            for (int j = 0; j < M; ++j) { const double t = A[k][j]; A[k][j] = A[piv][j]; A[piv][j] = t; }
+            const double t = b[k]; b[k] = b[piv]; b[piv] = t;
+        }
+        const double akk = A[k][k];
+        for (int i = k + 1; i < M; ++i) {
+            const double f = A[i][k] / akk;
+            for (int j = k; j < M; ++j) A[i][j] -= f * A[k][j];
+            b[i] -= f * b[k];
+        }
+    }
+    for (int i = M - 1; i >= 0; --i) {
+        double s = b[i];
+        for (int j = i + 1; j < M; ++j) s -= A[i][j] * gamma[j];
+        gamma[i] = s / A[i][i];
+    }
+}
+
+// Stage 6 (S6.5): max|a[i] − b[i]| over n (the SCF convergence dq on q_sh).
+// One block, grid-stride, tree max-reduction → out (1 double). Claude Generated.
+__global__ void k_maxabsdiff(const double* __restrict__ a, const double* __restrict__ b,
+                             int n, double* out)
+{
+    extern __shared__ double sdata[];
+    const int tid = threadIdx.x;
+    double m = 0.0;
+    for (int i = tid; i < n; i += blockDim.x) m = fmax(m, fabs(a[i] - b[i]));
+    sdata[tid] = m; __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) { if (tid < s) sdata[tid] = fmax(sdata[tid], sdata[tid + s]); __syncthreads(); }
+    if (tid == 0) *out = sdata[0];
 }
 
 XtbGpuContext::XtbGpuContext()
@@ -1258,7 +1604,8 @@ static inline void fillEpsSentinel(double* eps_out, int neig, int n)
 // back-transform → generalized eigenvectors in dC, eigenvalues → eps_out. The
 // device analogue of the CPU dsygst+dsyevd+dtrsm path, reusing the resident L (no
 // per-iteration L upload). Shared by residentSolve and residentSolveMultipole.
-bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig)
+bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig,
+                                           bool download_eps)
 {
     const int n = m_impl->resident_n;
     cudaStream_t stream = m_impl->stream;
@@ -1345,9 +1692,9 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
         if (cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
                             cudaMemcpyDeviceToHost, stream) != cudaSuccess)
             return false;
-        m_impl->dEps.download(eps_out, neig, stream);
+        if (download_eps && eps_out) m_impl->dEps.download(eps_out, neig, stream);
         if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
-        if (partial) fillEpsSentinel(eps_out, neig, n);
+        if (download_eps && eps_out && partial) fillEpsSentinel(eps_out, neig, n);
         return info == 0;
     }
 
@@ -1393,10 +1740,10 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
     if (cudaMemcpyAsync(&info, m_impl->dInfo.ptr, sizeof(int),
                         cudaMemcpyDeviceToHost, stream) != cudaSuccess)
         return false;
-    m_impl->dEps.download(eps_out, neig, stream);
+    if (download_eps && eps_out) m_impl->dEps.download(eps_out, neig, stream);
     if (cudaStreamSynchronize(stream) != cudaSuccess)
         return false;
-    if (partial) fillEpsSentinel(eps_out, neig, n);
+    if (download_eps && eps_out && partial) fillEpsSentinel(eps_out, neig, n);
     return info == 0;
 }
 
@@ -1465,6 +1812,37 @@ bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
 
     m_impl->dPop.download(pop_ao_out, n, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+// Stage 6: density + Mulliken-AO from the RESIDENT occupations (dOcc, set by
+// k_occupations) — no occ upload, no pop_ao download (dPop stays resident for the
+// device q_sh/q_at reductions). band_out = Σ P⊙H0 (host scalar). Claude Generated.
+bool XtbGpuContext::residentDensityResident(int n, int ncol, double* band_out)
+{
+    if (!ok() || n <= 0 || n != m_impl->resident_n || !band_out) return false;
+    cudaStream_t stream = m_impl->stream;
+    const double one = 1.0, zero = 0.0;
+    if (ncol > 0) {
+        const dim3 block(16, 16);
+        const dim3 grid((n + block.x - 1) / block.x, (ncol + block.y - 1) / block.y);
+        k_scale_cols<<<grid, block, 0, stream>>>(m_impl->dCw.ptr, m_impl->dC.ptr,
+                                                 m_impl->dOcc.ptr, n, ncol);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        if (cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol,
+                        &one, m_impl->dCw.ptr, n, m_impl->dC.ptr, n,
+                        &zero, m_impl->dP.ptr, n) != CUBLAS_STATUS_SUCCESS)
+            return false;
+    } else if (cudaMemsetAsync(m_impl->dP.ptr, 0, sizeof(double) * static_cast<size_t>(n) * n,
+                               stream) != cudaSuccess) {
+        return false;
+    }
+    const int b1 = 128;
+    k_pop_ao<<<(n + b1 - 1) / b1, b1, 0, stream>>>(m_impl->dPop.ptr, m_impl->dP.ptr,
+                                                   m_impl->dS.ptr, n);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    return cublasDdot(m_impl->cublas, static_cast<int>(nn), m_impl->dP.ptr, 1,
+                      m_impl->dH0.ptr, 1, band_out) == CUBLAS_STATUS_SUCCESS;
 }
 
 bool XtbGpuContext::residentFinalize(double* P_colmajor, double* C_colmajor, int n)
@@ -1983,6 +2361,37 @@ bool XtbGpuContext::residentAtomicCharges(const double* n0_at, int nat, double* 
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
+// Stage 6 (S6.2): shell Mulliken charges from the resident density populations.
+// q_sh ← n0_sh, then subtract each AO population into its shell bin (dAo2sh). The
+// shell half of updatePopulationsFromPopAo, mirroring residentAtomicCharges. The
+// result stays resident in dQsh for the device SCC energy (S6.3) + Broyden (S6.4);
+// q_sh_out optionally downloads it for validation. Requires the resident dAo2sh
+// (Stage-3 device-integral path). Claude Generated.
+bool XtbGpuContext::residentShellCharges(const double* n0_sh, int nsh, double* q_sh_out)
+{
+    if (!ok() || nsh <= 0 || m_impl->resident_n <= 0 || m_impl->dPop.empty()
+        || m_impl->dAo2sh.empty() || !n0_sh)
+        return false;
+    const int nao = m_impl->resident_n;
+    cudaStream_t stream = m_impl->stream;
+    try {
+        m_impl->dN0sh.ensure(nsh);
+        m_impl->dQsh.ensure(nsh);
+    } catch (...) {
+        return false;
+    }
+    m_impl->dN0sh.upload(n0_sh, nsh, stream);
+    if (cudaMemcpyAsync(m_impl->dQsh.ptr, m_impl->dN0sh.ptr, sizeof(double) * nsh,
+                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+        return false;
+    const int b = 128;
+    k_qsh_scatter<<<(nao + b - 1) / b, b, 0, stream>>>(nao, m_impl->dPop.ptr,
+                                                       m_impl->dAo2sh.ptr, m_impl->dQsh.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    if (q_sh_out) m_impl->dQsh.download(q_sh_out, nsh, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
 /* ====================================================================== *
  *  Stage 5 (Part B2): in-SCF GFN2 D4 atom-potential dE_D4/dq on the device.
  *  beginDispersion uploads the geometry-fixed reference data once per geometry
@@ -2045,6 +2454,376 @@ bool XtbGpuContext::dispersionDedq(int nat, const double* W, const double* dWq, 
         m_impl->dD4Dedq.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
     m_impl->dD4Dedq.download(dEdq_out, nat, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+/* ====================================================================== *
+ *  Stage 6 (S6.2b): device rebuild of the per-atom D4 reference weights W/dWq
+ *  from the SCF charges (k_d4_build_refw). beginDispersionWeights uploads the
+ *  q-independent reference tables once per geometry; dispersionBuildRefW (test
+ *  entry) uploads a frozen q and downloads W/dWq. The device-driven loop (S6.5)
+ *  launches k_d4_build_refw directly on the resident charges + dD4W/dD4dWq.
+ * ====================================================================== */
+bool XtbGpuContext::beginDispersionWeights(int nat, const double* cn, const double* gi,
+                                           const double* zeff, const double* refcn,
+                                           const double* refcovcn, const double* refq,
+                                           const int* nref)
+{
+    if (!ok() || nat <= 0 || !cn || !gi || !zeff || !refcn || !refcovcn || !refq || !nref)
+        return false;
+    cudaStream_t stream = m_impl->stream;
+    const int MR = Impl::D4_MAX_REF;
+    try {
+        m_impl->dD4Cn.ensure(nat);
+        m_impl->dD4Gi.ensure(nat);
+        m_impl->dD4Zeff.ensure(nat);
+        m_impl->dD4Nref.ensure(nat);
+        m_impl->dD4Refcn.ensure(nat * MR);
+        m_impl->dD4Refcovcn.ensure(nat * MR);
+        m_impl->dD4Refq.ensure(nat * MR);
+        m_impl->dD4W.ensure(nat * MR);
+        m_impl->dD4dWq.ensure(nat * MR);
+    } catch (...) {
+        return false;
+    }
+    m_impl->dD4Cn.upload(cn, nat, stream);
+    m_impl->dD4Gi.upload(gi, nat, stream);
+    m_impl->dD4Zeff.upload(zeff, nat, stream);
+    m_impl->dD4Nref.upload(nref, nat, stream);
+    m_impl->dD4Refcn.upload(refcn, nat * MR, stream);
+    m_impl->dD4Refcovcn.upload(refcovcn, nat * MR, stream);
+    m_impl->dD4Refq.upload(refq, nat * MR, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+bool XtbGpuContext::dispersionBuildRefW(int nat, const double* q, double* W_out, double* dWq_out)
+{
+    if (!ok() || nat <= 0 || !q || m_impl->dD4Cn.empty()) return false;
+    cudaStream_t stream = m_impl->stream;
+    const int MR = Impl::D4_MAX_REF;
+    m_impl->dQat.ensure(nat);
+    m_impl->dQat.upload(q, nat, stream);
+    const int b = 128;
+    k_d4_build_refw<<<(nat + b - 1) / b, b, 0, stream>>>(
+        nat, MR, m_impl->dQat.ptr, m_impl->dD4Cn.ptr, m_impl->dD4Gi.ptr,
+        m_impl->dD4Zeff.ptr, m_impl->dD4Nref.ptr, m_impl->dD4Refcn.ptr,
+        m_impl->dD4Refcovcn.ptr, m_impl->dD4Refq.ptr,
+        m_impl->dD4W.ptr, m_impl->dD4dWq.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    if (W_out)   m_impl->dD4W.download(W_out, nat * MR, stream);
+    if (dWq_out) m_impl->dD4dWq.download(dWq_out, nat * MR, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+/* ====================================================================== *
+ *  Stage 6 (S6.3): device SCC energy from the resident OUTPUT charges/moments.
+ *  E_coulomb = ½ q_shᵀ γ q_sh (cuBLAS gemv+dot on the resident dGamma/dQsh);
+ *  E_third = Σ q_sh³·Γ_s/3 (GFN2 shell, dGamma3) and E_multipole (SD/DD/SQ +
+ *  on-site) via block reductions. The band energy stays Σ P⊙H0 (residentDensity).
+ *  Requires the resident dQsh (residentShellCharges) + dQat (residentAtomicCharges)
+ *  + dDpAt/dQpAt (residentMultipoleMoments) + dGamma/dGamma3/amat (Stage 3/5).
+ * ====================================================================== */
+bool XtbGpuContext::sccEnergy(int nat, int nsh, double* e_coulomb, double* e_third,
+                              double* e_multipole)
+{
+    if (!ok() || nat <= 0 || nsh <= 0 || m_impl->dGamma.empty() || m_impl->dQsh.empty())
+        return false;
+    cudaStream_t stream = m_impl->stream;
+    const double one = 1.0, zero = 0.0;
+
+    // E_coulomb = ½ q_shᵀ (γ q_sh).
+    m_impl->dEScratch.ensure(nsh);
+    if (cublasDgemv(m_impl->cublas, CUBLAS_OP_N, nsh, nsh, &one, m_impl->dGamma.ptr, nsh,
+                    m_impl->dQsh.ptr, 1, &zero, m_impl->dEScratch.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+        return false;
+    double ec = 0.0;
+    if (cublasDdot(m_impl->cublas, nsh, m_impl->dQsh.ptr, 1, m_impl->dEScratch.ptr, 1, &ec)
+        != CUBLAS_STATUS_SUCCESS)
+        return false;
+
+    // E_third (GFN2 shell) + E_multipole via reductions into dESca[0..1].
+    m_impl->dESca.ensure(2);
+    if (cudaMemsetAsync(m_impl->dESca.ptr, 0, sizeof(double) * 2, stream) != cudaSuccess)
+        return false;
+    const int block = 256;
+    if (m_impl->dGamma3.n >= nsh && e_third) {
+        const int grid = (nsh + block - 1) / block;
+        k_energy_third_order_shell<<<grid, block, block * sizeof(double), stream>>>(
+            nsh, m_impl->dQsh.ptr, m_impl->dGamma3.ptr, m_impl->dESca.ptr + 0);
+        if (cudaGetLastError() != cudaSuccess) return false;
+    }
+    if (!m_impl->dMpAmatSD.empty() && e_multipole) {
+        const int grid = (nat + block - 1) / block;
+        k_energy_multipole<<<grid, block, block * sizeof(double), stream>>>(
+            nat, m_impl->dMpAmatSD.ptr, m_impl->dMpAmatDD.ptr, m_impl->dMpAmatSQ.ptr,
+            m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dDpAt.ptr, m_impl->dQpAt.ptr,
+            m_impl->dQat.ptr, m_impl->dESca.ptr + 1);
+        if (cudaGetLastError() != cudaSuccess) return false;
+    }
+    double esca[2] = {0.0, 0.0};
+    m_impl->dESca.download(esca, 2, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    if (e_coulomb)   *e_coulomb   = 0.5 * ec;
+    if (e_third)     *e_third     = esca[0];
+    if (e_multipole) *e_multipole = esca[1];
+    return true;
+}
+
+/* ====================================================================== *
+ *  Stage 6 (S6.4): device Broyden mixer (port of BroydenMixer::update). The
+ *  vector ops + the M dot products (Gram via cuBLAS gemv/gemm) + the tiny M×M
+ *  regularised solve all run on the device; the history + vin_last/F_last stay
+ *  resident, so the mixed SCC vector never leaves the GPU in the fused loop.
+ * ====================================================================== */
+bool XtbGpuContext::broydenBegin(int N, double alpha, int max_hist, double w0)
+{
+    if (!ok() || N <= 0 || max_hist <= 0 || max_hist > 20) return false;
+    try {
+        m_impl->dBroyVin.ensure(N); m_impl->dBroyVout.ensure(N); m_impl->dBroyVnext.ensure(N);
+        m_impl->dBroyF.ensure(N); m_impl->dBroyFLast.ensure(N);
+        m_impl->dBroyVinLast.ensure(N); m_impl->dBroyDFtmp.ensure(N);
+        m_impl->dBroyDFmat.ensure(N * max_hist); m_impl->dBroyUmat.ensure(N * max_hist);
+        m_impl->dBroyGram.ensure(max_hist * max_hist);
+        m_impl->dBroyC.ensure(max_hist); m_impl->dBroyGamma.ensure(max_hist);
+    } catch (...) {
+        return false;
+    }
+    m_impl->broyden_N = N; m_impl->broyden_iter = 0; m_impl->broyden_push = 0;
+    m_impl->broyden_maxhist = max_hist; m_impl->broyden_alpha = alpha; m_impl->broyden_w0 = w0;
+    return true;
+}
+
+// Device-pointer core (resident loop + the test wrapper). dvin/dvout/dvnext are
+// device pointers of length broyden_N. Queues all work on the stream; the only
+// host sync is the cuBLAS nrm2 (the norm<1e-14 branch decision). Claude Generated.
+bool XtbGpuContext::runBroydenUpdate(const double* dvin, const double* dvout, double* dvnext)
+{
+    if (m_impl->broyden_N <= 0) return false;
+    cudaStream_t stream = m_impl->stream;
+    const int N = m_impl->broyden_N;
+    const int maxh = m_impl->broyden_maxhist;
+    const double alpha = m_impl->broyden_alpha;
+    const size_t bytesN = sizeof(double) * static_cast<size_t>(N);
+    const int b1 = 256;
+    const int grid = (N + b1 - 1) / b1;
+
+    // F = vout − vin.
+    k_vec_sub<<<grid, b1, 0, stream>>>(m_impl->dBroyF.ptr, dvout, dvin, N);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    ++m_impl->broyden_iter;
+
+    auto linear_step = [&]() -> bool {
+        // vnext = vin + alpha·F; store vin_last, F_last.
+        if (cudaMemcpyAsync(dvnext, dvin, bytesN, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+            return false;
+        if (cublasDaxpy(m_impl->cublas, N, &alpha, m_impl->dBroyF.ptr, 1, dvnext, 1) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        cudaMemcpyAsync(m_impl->dBroyVinLast.ptr, dvin, bytesN, cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(m_impl->dBroyFLast.ptr, m_impl->dBroyF.ptr, bytesN, cudaMemcpyDeviceToDevice, stream);
+        return true;
+    };
+
+    if (m_impl->broyden_iter == 1)
+        return linear_step();
+
+    // dFraw = F − F_last; norm = ‖dFraw‖.
+    k_vec_sub<<<grid, b1, 0, stream>>>(m_impl->dBroyDFtmp.ptr, m_impl->dBroyF.ptr, m_impl->dBroyFLast.ptr, N);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    double norm = 0.0;
+    if (cublasDnrm2(m_impl->cublas, N, m_impl->dBroyDFtmp.ptr, 1, &norm) != CUBLAS_STATUS_SUCCESS)
+        return false;
+    if (norm < 1.0e-14)
+        return linear_step();
+
+    const double inv_norm = 1.0 / norm;
+    const int slot = m_impl->broyden_push % maxh;
+    k_broyden_dfu<<<grid, b1, 0, stream>>>(
+        m_impl->dBroyDFmat.ptr + static_cast<size_t>(slot) * N,
+        m_impl->dBroyUmat.ptr + static_cast<size_t>(slot) * N,
+        m_impl->dBroyDFtmp.ptr, dvin, m_impl->dBroyVinLast.ptr, alpha, inv_norm, N);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    ++m_impl->broyden_push;
+    const int M = (m_impl->broyden_push < maxh) ? m_impl->broyden_push : maxh;
+
+    // c = DFmatᵀ·F  (length M);  a = DFmatᵀ·DFmat  (M×M, col-major).
+    const double one = 1.0, zero = 0.0, neg = -1.0;
+    if (cublasDgemv(m_impl->cublas, CUBLAS_OP_T, N, M, &one, m_impl->dBroyDFmat.ptr, N,
+                    m_impl->dBroyF.ptr, 1, &zero, m_impl->dBroyC.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+        return false;
+    if (cublasDgemm(m_impl->cublas, CUBLAS_OP_T, CUBLAS_OP_N, M, M, N, &one,
+                    m_impl->dBroyDFmat.ptr, N, m_impl->dBroyDFmat.ptr, N, &zero,
+                    m_impl->dBroyGram.ptr, M) != CUBLAS_STATUS_SUCCESS)
+        return false;
+    // (w0²I + a)·gamma = c  (one thread, M ≤ 20).
+    const double reg = m_impl->broyden_w0 * m_impl->broyden_w0;
+    k_broyden_solve<<<1, 1, 0, stream>>>(M, m_impl->dBroyGram.ptr, m_impl->dBroyC.ptr, reg,
+                                         m_impl->dBroyGamma.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    // vnext = vin + alpha·F − Umat·gamma.
+    if (cudaMemcpyAsync(dvnext, dvin, bytesN, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+        return false;
+    if (cublasDaxpy(m_impl->cublas, N, &alpha, m_impl->dBroyF.ptr, 1, dvnext, 1) != CUBLAS_STATUS_SUCCESS)
+        return false;
+    if (cublasDgemv(m_impl->cublas, CUBLAS_OP_N, N, M, &neg, m_impl->dBroyUmat.ptr, N,
+                    m_impl->dBroyGamma.ptr, 1, &one, dvnext, 1) != CUBLAS_STATUS_SUCCESS)
+        return false;
+    // store vin_last = vin, F_last = F.
+    cudaMemcpyAsync(m_impl->dBroyVinLast.ptr, dvin, bytesN, cudaMemcpyDeviceToDevice, stream);
+    cudaMemcpyAsync(m_impl->dBroyFLast.ptr, m_impl->dBroyF.ptr, bytesN, cudaMemcpyDeviceToDevice, stream);
+    return true;
+}
+
+// Component-test entry: upload vin/vout, run the device update, download vnext.
+bool XtbGpuContext::broydenUpdate(int N, const double* vin, const double* vout, double* vnext)
+{
+    if (!ok() || N != m_impl->broyden_N || !vin || !vout || !vnext) return false;
+    cudaStream_t stream = m_impl->stream;
+    m_impl->dBroyVin.upload(vin, N, stream);
+    m_impl->dBroyVout.upload(vout, N, stream);
+    if (!runBroydenUpdate(m_impl->dBroyVin.ptr, m_impl->dBroyVout.ptr, m_impl->dBroyVnext.ptr))
+        return false;
+    m_impl->dBroyVnext.download(vnext, N, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+/* ====================================================================== *
+ *  Stage 6 (S6.5): fully device-resident GFN2 SCF loop (host polls only O(1)).
+ *  beginResidentLoop uploads the initial SCC guess + the EEQ-guess q_at once and
+ *  sets up the device Broyden; residentScfStep runs ONE fused iteration —
+ *    D4 refw(q_at) → potential build + Fock + eigensolve → occupation → density →
+ *    q_sh/q_at/moments → SCC energy → Broyden mix → unpack (next input) —
+ *  entirely on the device, returning only dq + the 4 energy scalars. The eps /
+ *  occ / pop_ao / moments / q_sh never cross the bus. residentLoopCharges
+ *  downloads the converged charges into the host wavefunction once at the end, so
+ *  the existing post-SCF energy + gradient path runs unchanged. Claude Generated.
+ * ====================================================================== */
+bool XtbGpuContext::beginResidentLoop(int nsh, int nat, int nao, double Tele, double n_elec,
+                                      int nocc_pairs, const double* q_sh0, const double* dp_at0,
+                                      const double* qp_at0, const double* q_at0,
+                                      const double* n0_sh, const double* n0_at,
+                                      double alpha, int max_hist, double w0)
+{
+    if (!ok() || nsh <= 0 || nat <= 0 || nao <= 0 || nao != m_impl->resident_n
+        || m_impl->pot_nsh != nsh || m_impl->resident_nat != nat
+        || !q_sh0 || !dp_at0 || !qp_at0 || !q_at0 || !n0_sh || !n0_at)
+        return false;
+    cudaStream_t stream = m_impl->stream;
+    try {
+        m_impl->dQat.ensure(nat); m_impl->dQsh.ensure(nsh);
+        m_impl->dN0sh.ensure(nsh); m_impl->dN0at.ensure(nat);
+        m_impl->dDq.ensure(1);
+    } catch (...) {
+        return false;
+    }
+    // Initial mixed SCC input + the EEQ-guess q_at (drives the first D4 weights) +
+    // the reference shell/atom occupations (scatter seeds for the q_sh/q_at output).
+    m_impl->dPotQsh.upload(q_sh0, nsh, stream);
+    m_impl->dInDpAt.upload(dp_at0, 3 * nat, stream);
+    m_impl->dInQpAt.upload(qp_at0, 6 * nat, stream);
+    m_impl->dQat.upload(q_at0, nat, stream);
+    m_impl->dN0sh.upload(n0_sh, nsh, stream);
+    m_impl->dN0at.upload(n0_at, nat, stream);
+    // Device Broyden over the packed [q_sh; dp_at; qp_at] vector.
+    if (!broydenBegin(nsh + 9 * nat, alpha, max_hist, w0)) return false;
+    m_impl->loop_nsh = nsh; m_impl->loop_nat = nat; m_impl->loop_nao = nao;
+    m_impl->loop_Tele = Tele; m_impl->loop_nelec = n_elec; m_impl->loop_nocc_pairs = nocc_pairs;
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
+                                    double* e_coulomb, double* e_third, double* e_multipole)
+{
+    if (!ok() || m_impl->loop_nao <= 0 || !dq_out || !e_band) return false;
+    cudaStream_t stream = m_impl->stream;
+    const int nsh = m_impl->loop_nsh, nat = m_impl->loop_nat, nao = m_impl->loop_nao;
+    const int b = 128;
+
+    // 1. D4 reference weights from the current (previous-output) resident q_at.
+    k_d4_build_refw<<<(nat + b - 1) / b, b, 0, stream>>>(
+        nat, Impl::D4_MAX_REF, m_impl->dQat.ptr, m_impl->dD4Cn.ptr, m_impl->dD4Gi.ptr,
+        m_impl->dD4Zeff.ptr, m_impl->dD4Nref.ptr, m_impl->dD4Refcn.ptr,
+        m_impl->dD4Refcovcn.ptr, m_impl->dD4Refq.ptr, m_impl->dD4W.ptr, m_impl->dD4dWq.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    // 2. Potential build (overwrites dQat with the input-derived q_at) + Fock +
+    //    eigensolve; eps stays resident (no download).
+    if (!buildDevicePotentialAndSolve(nao, fp32, /*n_eig=*/0, /*eps_out=*/nullptr,
+                                      /*download_eps=*/false))
+        return false;
+
+    // 3. Occupation on the device (resident eps → resident occ).
+    const double kT = m_impl->loop_Tele * 3.166808e-6;
+    const int use_fermi = (m_impl->loop_Tele > 0.0) ? 1 : 0;
+    const int blk = 256;
+    k_occupations<<<1, blk, blk * sizeof(double), stream>>>(
+        m_impl->dEps.ptr, m_impl->dOcc.ptr, nao, kT, m_impl->loop_nelec,
+        m_impl->loop_nocc_pairs, use_fermi, nullptr, nullptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    // 4. Density + Mulliken-AO (full columns; occ is 0 past the Fermi window).
+    if (!residentDensityResident(nao, nao, e_band)) return false;
+
+    // 5. Output charges/moments from the resident density.
+    // q_sh = n0_sh − Σ_{μ∈s} pop_ao; q_at = n0_at − Σ_{μ∈A} pop_ao.
+    if (cudaMemcpyAsync(m_impl->dQsh.ptr, m_impl->dN0sh.ptr, sizeof(double) * nsh,
+                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess) return false;
+    k_qsh_scatter<<<(nao + b - 1) / b, b, 0, stream>>>(nao, m_impl->dPop.ptr,
+                                                       m_impl->dAo2sh.ptr, m_impl->dQsh.ptr);
+    if (cudaMemcpyAsync(m_impl->dQat.ptr, m_impl->dN0at.ptr, sizeof(double) * nat,
+                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess) return false;
+    k_qat_scatter<<<(nao + b - 1) / b, b, 0, stream>>>(nao, m_impl->dPop.ptr,
+                                                       m_impl->dAo2at.ptr, m_impl->dQat.ptr);
+    // Atomic multipole moments dp_at/qp_at from the resident density (resident;
+    // the scatter kernel needs zeroed targets).
+    if (cudaMemsetAsync(m_impl->dDpAt.ptr, 0, sizeof(double) * 3 * nat, stream) != cudaSuccess) return false;
+    if (cudaMemsetAsync(m_impl->dQpAt.ptr, 0, sizeof(double) * 6 * nat, stream) != cudaSuccess) return false;
+    k_multipole_moments<<<(nao + b - 1) / b, b, 0, stream>>>(
+        m_impl->dDpAt.ptr, m_impl->dQpAt.ptr, m_impl->dP.ptr,
+        m_impl->dDpInt.ptr, m_impl->dQpInt.ptr, m_impl->dAo2at.ptr, nao);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    // 6. SCC energy components (resident charges/moments).
+    if (!sccEnergy(nat, nsh, e_coulomb, e_third, e_multipole)) return false;
+
+    // 7. Convergence dq = max|q_sh_out − q_sh_in| (q_sh_in = current dPotQsh).
+    k_maxabsdiff<<<1, blk, blk * sizeof(double), stream>>>(m_impl->dQsh.ptr, m_impl->dPotQsh.ptr,
+                                                           nsh, m_impl->dDq.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    m_impl->dDq.download(dq_out, 1, stream);
+
+    // 8. Broyden: pack input [dPotQsh; dInDpAt; dInQpAt] + output [dQsh; dDpAt; dQpAt],
+    //    mix, and unpack the next input back into the resident dPotQsh/dInDpAt/dInQpAt.
+    {
+        double* vin = m_impl->dBroyVin.ptr;
+        double* vout = m_impl->dBroyVout.ptr;
+        const size_t off_dp = static_cast<size_t>(nsh);
+        const size_t off_qp = static_cast<size_t>(nsh) + 3 * nat;
+        cudaMemcpyAsync(vin, m_impl->dPotQsh.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(vin + off_dp, m_impl->dInDpAt.ptr, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(vin + off_qp, m_impl->dInQpAt.ptr, sizeof(double) * 6 * nat, cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(vout, m_impl->dQsh.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(vout + off_dp, m_impl->dDpAt.ptr, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(vout + off_qp, m_impl->dQpAt.ptr, sizeof(double) * 6 * nat, cudaMemcpyDeviceToDevice, stream);
+        if (!runBroydenUpdate(vin, vout, m_impl->dBroyVnext.ptr)) return false;
+        cudaMemcpyAsync(m_impl->dPotQsh.ptr, m_impl->dBroyVnext.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(m_impl->dInDpAt.ptr, m_impl->dBroyVnext.ptr + off_dp, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(m_impl->dInQpAt.ptr, m_impl->dBroyVnext.ptr + off_qp, sizeof(double) * 6 * nat, cudaMemcpyDeviceToDevice, stream);
+    }
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+bool XtbGpuContext::residentLoopCharges(double* q_sh, double* q_at, double* dp_at,
+                                        double* qp_at, double* eps)
+{
+    if (!ok() || m_impl->loop_nao <= 0) return false;
+    cudaStream_t stream = m_impl->stream;
+    const int nsh = m_impl->loop_nsh, nat = m_impl->loop_nat, nao = m_impl->loop_nao;
+    if (q_sh)  m_impl->dQsh.download(q_sh, nsh, stream);
+    if (q_at)  m_impl->dQat.download(q_at, nat, stream);
+    if (dp_at) m_impl->dDpAt.download(dp_at, 3 * nat, stream);
+    if (qp_at) m_impl->dQpAt.download(qp_at, 6 * nat, stream);
+    if (eps)   m_impl->dEps.download(eps, nao, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
@@ -2113,6 +2892,19 @@ bool XtbGpuContext::residentSolvePotential(const double* q_sh, const double* dp_
     m_impl->dD4W.upload(W, nat * Impl::D4_MAX_REF, stream);
     m_impl->dD4dWq.upload(dWq, nat * Impl::D4_MAX_REF, stream);
 
+    return buildDevicePotentialAndSolve(n, fp32, n_eig, eps_out, /*download_eps=*/true);
+}
+
+// Stage 6 core: build the full GFN2 potential from the RESIDENT mixed SCC inputs
+// (dPotQsh/dInDpAt/dInQpAt + dD4W/dD4dWq, set by an upload or by the fused step)
+// → Fock → eigensolve. Identical to residentSolvePotential's body minus the host
+// uploads; download_eps=false keeps the eigenvalues resident for the device loop.
+bool XtbGpuContext::buildDevicePotentialAndSolve(int n, bool fp32, int n_eig,
+                                                 double* eps_out, bool download_eps)
+{
+    cudaStream_t stream = m_impl->stream;
+    const int nat = m_impl->resident_nat;
+    const int nsh = m_impl->pot_nsh;
     const int b = 128;
     // D4 atom-potential dE/dq (B2 kernel; resident, no download).
     {
@@ -2125,7 +2917,7 @@ bool XtbGpuContext::residentSolvePotential(const double* q_sh, const double* dp_
             m_impl->dD4Dedq.ptr);
         if (cudaGetLastError() != cudaSuccess) return false;
     }
-    // q_at = Σ_{s∈A} q_sh(s).
+    // q_at = Σ_{s∈A} q_sh(s) (input-derived, for the multipole potential).
     m_impl->dQat.zero(nat, stream);
     k_qsh_to_qat<<<(nsh + b - 1) / b, b, 0, stream>>>(nsh, m_impl->dPotQsh.ptr,
                                                       m_impl->dSh2at.ptr, m_impl->dQat.ptr);
@@ -2166,7 +2958,7 @@ bool XtbGpuContext::residentSolvePotential(const double* q_sh, const double* dp_
                                                      m_impl->dVqp.ptr, m_impl->dAo2at.ptr, n);
     if (cudaGetLastError() != cudaSuccess) return false;
 
-    return eigensolveResidentFock(eps_out, fp32, n_eig);
+    return eigensolveResidentFock(eps_out, fp32, n_eig, download_eps);
 }
 
 bool XtbGpuContext::computeOverlapGrad(const double* xyz_bohr, double* dSdR_out)
@@ -2302,6 +3094,40 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     m_impl->dGrad.download(grad_out, 3 * nat, stream);
     m_impl->dEdcn.download(dEdcn_out, nat, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+// Stage 6 (S6.1): device occupation. Component-test entry — uploads a frozen eps
+// into the resident dEps, runs the single-block k_occupations, downloads occ (+
+// µ, ncol). The device-driven loop (S6.5) calls the same kernel on the resident
+// dEps with no upload/download. Claude Generated.
+bool XtbGpuContext::occupations(const double* eps, int n, double Tele, double n_elec,
+                                double* occ_out, int* ncol_out, double* mu_out)
+{
+    if (!ok() || n <= 0 || !eps || !occ_out) return false;
+    cudaStream_t stream = m_impl->stream;
+    m_impl->dEps.ensure(n);
+    m_impl->dOcc.ensure(n);
+    m_impl->dOccMu.ensure(1);
+    m_impl->dOccNcol.ensure(1);
+    m_impl->dEps.upload(eps, n, stream);
+
+    const double kT = Tele * 3.166808e-6;            // K → Hartree (host constant)
+    const int nocc_pairs = static_cast<int>(std::floor(n_elec / 2.0));
+    const int use_fermi = (Tele > 0.0) ? 1 : 0;
+    const int block = 256;                            // power of two for the tree reduction
+    k_occupations<<<1, block, block * sizeof(double), stream>>>(
+        m_impl->dEps.ptr, m_impl->dOcc.ptr, n, kT, n_elec, nocc_pairs, use_fermi,
+        m_impl->dOccMu.ptr, m_impl->dOccNcol.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    m_impl->dOcc.download(occ_out, n, stream);
+    int ncol_h = 0; double mu_h = 0.0;
+    m_impl->dOccNcol.download(&ncol_h, 1, stream);
+    m_impl->dOccMu.download(&mu_h, 1, stream);
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    if (ncol_out) *ncol_out = ncol_h;
+    if (mu_out)   *mu_out   = mu_h;
+    return true;
 }
 
 bool XtbGpuContext::residentBeginMultipoleComputed()

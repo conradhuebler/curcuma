@@ -279,6 +279,24 @@ public:
         return m_ctx->residentAtomicCharges(n0_at.data(), nat, q_at_out.data());
     }
 
+    // ---- Device shell Mulliken charges (Stage 6, S6.2) --------------------
+    bool shellCharges(const Vector& n0_sh, Vector& q_sh_out) override
+    {
+        if (!m_ctx) return false;
+        const int nsh = static_cast<int>(n0_sh.size());
+        if (nsh <= 0) return false;
+        q_sh_out.resize(nsh);
+        return m_ctx->residentShellCharges(n0_sh.data(), nsh, q_sh_out.data());
+    }
+
+    // ---- Device SCC energy (Stage 6, S6.3) --------------------------------
+    bool sccEnergy(int nat, int nsh, double& e_coulomb, double& e_third,
+                   double& e_multipole) override
+    {
+        if (!m_ctx || nat <= 0 || nsh <= 0) return false;
+        return m_ctx->sccEnergy(nat, nsh, &e_coulomb, &e_third, &e_multipole);
+    }
+
     // ---- In-SCF GFN2 D4 atom-potential (Stage 5, Part B2) -----------------
     bool supportsDeviceDispersion() const override { return true; }
 
@@ -296,6 +314,52 @@ public:
     {
         if (!m_ctx) return false;
         return m_ctx->dispersionDedq(nat, W, dWq, dEdq_out);
+    }
+
+    // ---- Device D4 reference weights from resident q_at (Stage 6, S6.2b) ---
+    bool beginDispersionWeights(const std::vector<double>& cn, const std::vector<double>& gi,
+                                const std::vector<double>& zeff, const std::vector<double>& refcn,
+                                const std::vector<double>& refcovcn, const std::vector<double>& refq,
+                                const std::vector<int>& nref) override
+    {
+        if (!m_ctx || cn.empty()) return false;
+        return m_ctx->beginDispersionWeights(static_cast<int>(cn.size()), cn.data(), gi.data(),
+                                             zeff.data(), refcn.data(), refcovcn.data(),
+                                             refq.data(), nref.data());
+    }
+
+    // ---- Fully device-resident SCF loop (Stage 6, S6.5) -------------------
+    bool supportsResidentLoop() const override { return true; }
+
+    bool beginResidentLoop(const Vector& q_sh0, const Eigen::MatrixXd& dp_at0,
+                           const Eigen::MatrixXd& qp_at0, const Vector& q_at0,
+                           const Vector& n0_sh, const Vector& n0_at,
+                           double Tele, double n_elec, int nocc_pairs,
+                           double alpha, int max_hist, double w0) override
+    {
+        if (!m_ctx) return false;
+        const int nsh = static_cast<int>(q_sh0.size());
+        const int nat = static_cast<int>(q_at0.size());
+        const int nao = m_n;
+        if (nsh <= 0 || nat <= 0 || nao <= 0) return false;
+        return m_ctx->beginResidentLoop(nsh, nat, nao, Tele, n_elec, nocc_pairs,
+                                        q_sh0.data(), dp_at0.data(), qp_at0.data(), q_at0.data(),
+                                        n0_sh.data(), n0_at.data(), alpha, max_hist, w0);
+    }
+
+    bool residentScfStep(bool fp32, double& dq, double& e_band, double& e_coulomb,
+                         double& e_third, double& e_multipole) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->residentScfStep(fp32, &dq, &e_band, &e_coulomb, &e_third, &e_multipole);
+    }
+
+    bool residentLoopCharges(Vector& q_sh, Vector& q_at, Eigen::MatrixXd& dp_at,
+                             Eigen::MatrixXd& qp_at, Vector& eps) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->residentLoopCharges(q_sh.data(), q_at.data(), dp_at.data(),
+                                          qp_at.data(), eps.data());
     }
 
     // ---- Full device GFN2 potential build (Stage 5, Part B3/B4) -----------

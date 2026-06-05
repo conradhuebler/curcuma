@@ -104,11 +104,19 @@ int main(int argc, char* argv[])
         if (!readXYZ(xyz, atoms, coords_ang)) { ++failures; continue; }
         const int nat = static_cast<int>(atoms.size());
 
+        // Tight SCF: the analytic gradient is only as accurate as the SCF fixed
+        // point. The GPU device-resident loop (Stage 6) mixes charges on the device
+        // (≈ the host Broyden to ~1e-11/step), so it lands at a slightly different
+        // point in the 1e-5 default convergence ball than the CPU host Broyden —
+        // tightening both to 1e-8 shrinks the ball below the gradient tolerance.
+        const double tight = 1.0e-8;
+
         // CPU reference.
         XTB xtb_cpu(mt);
         if (!xtb_cpu.InitialiseMolecule(atoms.data(), coords_ang.data(), nat, 0.0, 0)) {
             std::cerr << xyz << ": CPU InitialiseMolecule failed\n"; ++failures; continue;
         }
+        xtb_cpu.setScfThreshold(tight);
         xtb_cpu.Calculation(true);
         const Matrix G_cpu = xtb_cpu.Gradient();
 
@@ -119,6 +127,7 @@ int main(int argc, char* argv[])
         if (!xtb_gpu.InitialiseMolecule(atoms.data(), coords_ang.data(), nat, 0.0, 0)) {
             std::cerr << xyz << ": GPU InitialiseMolecule failed\n"; ++failures; continue;
         }
+        xtb_gpu.setScfThreshold(tight);
         xtb_gpu.Calculation(true);
         const Matrix G_gpu = xtb_gpu.Gradient();
 

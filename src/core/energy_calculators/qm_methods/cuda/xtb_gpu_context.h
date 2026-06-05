@@ -314,7 +314,83 @@ public:
                                 const double* W, const double* dWq, int n, double* eps_out,
                                 bool fp32 = false, int n_eig = 0);
 
+    /* ----- Stage 6 (S6.1): device occupation (Fermi / integer) ----------- *
+     * Port of XTB::occupationsFromEps to a single-block kernel: integer closed-
+     * shell fill at Tele=0, else a Fermi-level bisection (100 iterations, the
+     * same exp clamp + 1e-14 break as the host). Reads the ascending eps and
+     * writes occ (length n); ncol_out (last column with occ>1e-12) and mu_out
+     * (the converged chemical potential) are downloaded for validation. This
+     * upload/download form is for the component test; the device-driven loop
+     * (S6.5) runs the same kernel on the resident eps with no round-trip.
+     * Claude Generated. */
+    bool occupations(const double* eps, int n, double Tele, double n_elec,
+                     double* occ_out, int* ncol_out, double* mu_out);
+
+    /* ----- Stage 6 (S6.2): resident shell charges q_sh ------------------- *
+     * q_sh(s) = n0_sh(s) − Σ_{μ∈s} pop_ao(μ), reduced from the resident density
+     * populations (dPop, set by residentDensity) via the resident AO→shell map
+     * (dAo2sh, Stage-3 path). The shell analogue of residentAtomicCharges; the
+     * result stays resident in dQsh for the device SCC energy + Broyden mixer,
+     * and q_sh_out optionally downloads it for validation. Claude Generated. */
+    bool residentShellCharges(const double* n0_sh, int nsh, double* q_sh_out);
+
+    /* ----- Stage 6 (S6.2b): device D4 reference weights from q ------------ *
+     * Rebuild the per-atom D4 reference weights W = gwk(CN)·ζ(q) / dWq = ∂W/∂q on
+     * the device (k_d4_build_refw, the port of D4ParameterGenerator::buildAtomRefW)
+     * so the in-SCF D4 potential needs no host buildRefWFlat + upload each
+     * iteration. beginDispersionWeights uploads the q-independent reference tables
+     * once per geometry; dispersionBuildRefW (component test) uploads a frozen q
+     * and downloads W/dWq. The device-driven loop (S6.5) launches the kernel on the
+     * resident charges. Each table is length nat (cn/gi/zeff/nref) or nat·MAX_REF
+     * (refcn/refcovcn/refq). Claude Generated. */
+    bool beginDispersionWeights(int nat, const double* cn, const double* gi,
+                                const double* zeff, const double* refcn,
+                                const double* refcovcn, const double* refq, const int* nref);
+    bool dispersionBuildRefW(int nat, const double* q, double* W_out, double* dWq_out);
+
+    /* ----- Stage 6 (S6.3): device SCC energy ----------------------------- *
+     * E_coulomb = ½ q_shᵀ γ q_sh, E_third = Σ q_sh³·Γ_s/3 (GFN2 shell), and the
+     * GFN2 multipole energy, all from the resident OUTPUT charges/moments (dQsh,
+     * dQat, dDpAt/dQpAt) + the resident γ/Γ_s/amat. The band energy stays the
+     * residentDensity Σ P⊙H0. Three host scalars out per call; the device-driven
+     * loop sums them with the band into E_scc. Claude Generated. */
+    bool sccEnergy(int nat, int nsh, double* e_coulomb, double* e_third, double* e_multipole);
+
+    /* ----- Stage 6 (S6.4): device Broyden mixer -------------------------- *
+     * Port of BroydenMixer::update over the packed SCC vector (length N = nsh for
+     * GFN1, nsh+9·nat for GFN2). broydenBegin allocates the resident history +
+     * scratch and resets the iteration state; broydenUpdate (component test) takes
+     * host vin/vout and returns the mixed vnext, with the history kept resident
+     * across calls. The device-driven loop (S6.5) drives the device-pointer core
+     * (runBroydenUpdate) on the resident packed vectors. Claude Generated. */
+    bool broydenBegin(int N, double alpha, int max_hist, double w0);
+    bool broydenUpdate(int N, const double* vin, const double* vout, double* vnext);
+
+    /* ----- Stage 6 (S6.5): fully device-resident GFN2 SCF loop ----------- *
+     * beginResidentLoop uploads the initial SCC guess (q_sh/dp_at/qp_at), the
+     * EEQ-guess q_at, and the reference shell/atom occupations once, and sets up
+     * the device Broyden. residentScfStep runs ONE fused iteration entirely on the
+     * device (D4 refw → potential+Fock+eigensolve → occupation → density →
+     * charges/moments → SCC energy → Broyden → unpack) and returns only dq + the 4
+     * energy scalars — eps/occ/pop_ao/moments/q_sh never cross the bus.
+     * residentLoopCharges downloads the converged charges once at the end so the
+     * host post-SCF energy + gradient path is unchanged. GFN2 device-potential
+     * path only. Claude Generated. */
+    bool beginResidentLoop(int nsh, int nat, int nao, double Tele, double n_elec,
+                           int nocc_pairs, const double* q_sh0, const double* dp_at0,
+                           const double* qp_at0, const double* q_at0,
+                           const double* n0_sh, const double* n0_at,
+                           double alpha, int max_hist, double w0);
+    bool residentScfStep(bool fp32, double* dq_out, double* e_band, double* e_coulomb,
+                         double* e_third, double* e_multipole);
+    bool residentLoopCharges(double* q_sh, double* q_at, double* dp_at, double* qp_at,
+                             double* eps);
+
 private:
+    /// Device-pointer Broyden update core (S6.4); shared by broydenUpdate (test
+    /// upload/download) and the fused resident loop. Queues all work on the stream.
+    bool runBroydenUpdate(const double* dvin, const double* dvout, double* dvnext);
+
     /// Reduce the resident Fock in dC to standard form with the cached L, solve
     /// it and back-transform → generalized eigenvectors in dC, ascending
     /// eigenvalues downloaded to eps_out. Shared by residentSolve and
@@ -323,7 +399,20 @@ private:
     /// are computed (cusolverDnDsyevdx / Ssyevdx, range il=1..n_eig); eps_out[n_eig..n)
     /// is filled with an ascending sentinel (occ≈0) so the host occupation logic is
     /// unchanged. n_eig<=0 or >=n solves the full spectrum (cusolverDnDsyevd).
-    bool eigensolveResidentFock(double* eps_out, bool fp32, int n_eig = 0);
+    /// download_eps=false (Stage 6 device loop) keeps the eigenvalues resident in
+    /// dEps for the device occupation kernel — no per-iteration nao-sized eps
+    /// round-trip. The default true downloads eps_out as before.
+    bool eigensolveResidentFock(double* eps_out, bool fp32, int n_eig = 0,
+                                bool download_eps = true);
+    /// Stage 6: device potential build + Fock + eigensolve from the RESIDENT mixed
+    /// SCC inputs (dPotQsh/dInDpAt/dInQpAt + dD4W/dD4dWq) — the body of
+    /// residentSolvePotential without the host uploads. Shared by it and the fused
+    /// resident step.
+    bool buildDevicePotentialAndSolve(int n, bool fp32, int n_eig, double* eps_out,
+                                      bool download_eps);
+    /// Stage 6: density + Mulliken-AO from the RESIDENT occupations (dOcc), keeping
+    /// the populations resident (no pop_ao download). band_out = Σ P⊙H0.
+    bool residentDensityResident(int n, int ncol, double* band_out);
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;

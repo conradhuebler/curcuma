@@ -170,6 +170,20 @@ public:
     void buildRefWFlat(const std::vector<int>& atoms, const Vector& q,
                        std::vector<double>& W_out, std::vector<double>& dWq_out) const;
 
+    // Stage 6 (S6.2b, Claude Generated 2026-06): the q-INDEPENDENT per-atom
+    // reference data the GPU needs to rebuild W/dWq on the device from the
+    // resident SCF charges (k_d4_build_refw), so the in-SCF D4 weights need not be
+    // host-built + uploaded each iteration. Per atom a (elem = Z−1): cn[a] =
+    // m_cn_values[a], gi[a] = zeta_c[elem]·gc, zeff[a] = zeta_zeff[elem], nref[a] =
+    // m_refn[elem]; the MAX_REF-strided refcn / refcovcn / refq tables. Requires a
+    // prior GenerateParameters (m_cn_values). All outputs sized nat (scalars) or
+    // nat·MAX_REF (tables).
+    void exportRefWDeviceData(const std::vector<int>& atoms,
+                              std::vector<double>& cn, std::vector<double>& gi,
+                              std::vector<double>& zeff, std::vector<double>& refcn,
+                              std::vector<double>& refcovcn, std::vector<double>& refq,
+                              std::vector<int>& nref) const;
+
     // The charge vector that actually drives zetac6: topology charges if set
     // (GFN-FF path), otherwise the geometry-dependent EEQ charges (GFN2 path).
     // The dE_D4/dq term must use exactly these charges for consistency.
