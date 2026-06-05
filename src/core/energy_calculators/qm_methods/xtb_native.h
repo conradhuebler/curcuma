@@ -917,6 +917,11 @@ private:
     void            unpackSccState(const Eigen::VectorXd& v);
     static Eigen::VectorXd extrapolationWeights(const std::string& mode, int order,
                                                 int n_hist);
+    // Niklasson dissipative XL-BOMD coefficients for dissipation order K (3..7):
+    // kappa (spring), alpha (dissipation scale), c[0..K] (sum to 0). Returns false
+    // for an unsupported K. xtb_native.cpp. Claude Generated (Phase 2).
+    static bool xlbomdCoefficients(int K, double& kappa, double& alpha,
+                                   std::vector<double>& c);
 
     // Repulsion + (GFN1) halogen-bond energies.
     double calcRepulsionEnergy() const;                                  // xtb_native.cpp
@@ -1116,8 +1121,13 @@ private:
     int         m_scf_extrap_order    = 3;
     std::string m_scf_extrap_apply    = "guess";
     int         m_scf_xlbomd_correctors = 1;
-    bool        m_xlbomd_warned       = false; ///< one-shot "xlbomd not yet implemented" notice
+    bool        m_xlbomd_warned       = false; ///< one-shot "xlbomd experimental" notice
     std::deque<Eigen::VectorXd> m_scf_history; ///< packed converged SCC vectors, front=newest
+    // XL-BOMD (apply=xlbomd): the time-reversibly propagated auxiliary SCC trajectory
+    // (NOT converged densities — the dynamical variable of the extended Lagrangian).
+    // Bootstrap seeds it with converged states; the Niklasson integrator advances it
+    // per step. front()=newest, length K+1. Claude Generated (Phase 2).
+    std::deque<Eigen::VectorXd> m_xlbomd_aux;
 
     // DIIS and Broyden mixers promoted from stack-local to member variables so
     // their history can optionally be preserved across Calculation() calls

@@ -55,14 +55,22 @@ and `-md`.
   density are unchanged within the threshold (same guarantee as the 1-step
   warm-start). A poor prediction can only cost a few extra iterations, never
   accuracy.
-- **`xlbomd`** (**planned, Phase 2 — not yet implemented**) — extended-Lagrangian
-  Born-Oppenheimer MD: the predicted density would be propagated and only
-  `scf_xlbomd_correctors` corrector SCF maps applied, with **no convergence loop**.
-  The flag and its citation are wired, but the corrector code path is not in yet;
-  requesting it **warns once and falls back to the safe `guess` coupling**. When
-  implemented it will be MD-only and time-reversible only with
-  `scf_extrapolation=aspc` (the Gauss predictor is not time-reversible), with
-  unvalidated energy conservation.
+- **`xlbomd`** (**experimental**) — extended-Lagrangian Born-Oppenheimer MD: the
+  SCC density is a **time-reversibly propagated auxiliary variable** (Verlet +
+  Niklasson dissipation, `J. Chem. Phys.` **130**, 214109 (2009)) that seeds the
+  SCF each step. The SCF then **converges normally** (the auxiliary is a good
+  guess, so this is few iterations), so the energy is **exact**, and the
+  time-reversibility of the auxiliary lowers long-MD energy drift. The dissipation
+  order is `scf_extrapolation_order` clamped to 3..7 (default 3). The first K+1
+  steps bootstrap with a normal SCF seeding the auxiliary trajectory.
+
+  Note: a naive "few bare SCF maps, no convergence" corrector is **not
+  contractive** for tight-binding SCF and diverges, so the implemented corrector
+  converges — the iteration savings come from the good guess (like `guess` mode),
+  while XL-BOMD's distinct value is the time-reversible auxiliary for MD energy
+  conservation. `scf_xlbomd_correctors` is a minimum-corrector-iteration floor
+  (default 1 = no effect; raise for tighter MD forces). MD only; use with
+  `scf_extrapolation=aspc` and a fixed timestep. **Energy drift is unvalidated.**
 
 ## Usage
 
@@ -73,7 +81,7 @@ curcuma -md mol.xyz -method gfn2 -scf_extrapolation aspc -scf_extrapolation_orde
 # Optimisation — prefer gauss (or a lower aspc order) for irregular LBFGS steps
 curcuma -opt mol.xyz -method gfn1 -scf_extrapolation gauss -scf_extrapolation_order 2
 
-# XL-BOMD single-corrector MD (planned — currently warns and falls back to guess)
+# XL-BOMD MD (experimental — time-reversible auxiliary density, converged corrector)
 curcuma -md mol.xyz -method gfn2 -scf_extrapolation aspc -scf_extrapolation_apply xlbomd
 ```
 
@@ -100,15 +108,17 @@ shows `SCF initial guess: aspc extrapolation over N steps`.
 
 ## What was tested / not tested
 
-- **Tested**: caffeine GFN1+GFN2 along a smooth interpolated trajectory (`guess`
-  mode, `aspc` and `gauss`): same converged energy as `none`, iteration count
-  ≤ `none`. Default-path regression (`none`) byte-unchanged across the
-  `gfn1_validation`/`gfn2_validation`/`xtb_gradient`/`native_xtb`/`xtb_cpscf`
-  suites.
-- **Not tested**: long production MD energy drift; `xlbomd` mode beyond smoke
-  runs; systems with large per-step geometry changes / bond breaking; charged /
-  open-shell systems; the GPU resident path (it consumes the same `m_wfn` guess,
-  so it benefits transparently, but this was not separately benchmarked).
+- **Tested**: caffeine GFN1+GFN2 along a smooth interpolated trajectory.
+  `guess` (`aspc`/`gauss`): same converged energy as `none`, iteration count
+  ≤ `none`. `xlbomd`: energy bit-identical to `none` (converged corrector) with
+  fewer iterations; a short NVE MD stays bounded. Default-path regression (`none`)
+  byte-unchanged across the `gfn1_validation`/`gfn2_validation`/`xtb_gradient`/
+  `native_xtb`/`xtb_cpscf` suites. All in `ctest -L scf_extrapolation`.
+- **Not tested**: long production MD energy drift / conservation (the distinct
+  XL-BOMD benefit — only smoke-tested for boundedness); systems with large
+  per-step geometry changes / bond breaking; charged / open-shell systems; the GPU
+  resident path (it consumes the same `m_wfn` guess, so it benefits transparently,
+  but this was not separately benchmarked).
 
 ## Citations
 

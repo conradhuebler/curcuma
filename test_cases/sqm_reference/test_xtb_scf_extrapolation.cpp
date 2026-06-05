@@ -91,7 +91,8 @@ struct Result {
 // strategy and return the final-frame energy + cumulative SCF iterations.
 Result run(MethodType mt, std::vector<int> atoms,
            const std::vector<double>& a, const std::vector<double>& b,
-           int nsteps, const std::string& mode, int order)
+           int nsteps, const std::string& mode, int order,
+           const std::string& apply = "guess", int correctors = 1)
 {
     Result r;
     const int nat = static_cast<int>(atoms.size());
@@ -100,6 +101,8 @@ Result run(MethodType mt, std::vector<int> atoms,
     xtb.setWarmStart(true);
     xtb.setScfExtrapolation(mode);
     xtb.setScfExtrapolationOrder(order);
+    xtb.setScfExtrapolationApply(apply);
+    xtb.setScfXlbomdCorrectors(correctors);
 
     if (!xtb.InitialiseMolecule(atoms.data(), a.data(), nat, 0.0, 0)) {
         std::cerr << "InitialiseMolecule failed\n";
@@ -174,6 +177,43 @@ bool checkMethod(MethodType mt, const char* name,
     return ok;
 }
 
+// XL-BOMD (apply=xlbomd) check: the time-reversibly propagated auxiliary density seeds
+// the SCF, which still converges, so the energy must (a) stay finite, (b) equal the
+// fully-converged (none) energy, and (c) cost fewer SCF iterations (good guess).
+bool checkXlbomd(MethodType mt, const char* name,
+                 const std::vector<int>& atoms,
+                 const std::vector<double>& a, const std::vector<double>& b,
+                 int nsteps, int order)
+{
+    const double E_TRACK = 1.0e-6; // corrector converges -> same fixpoint as none
+    Result none = run(mt, atoms, a, b, nsteps, "none",  order);
+    Result xl   = run(mt, atoms, a, b, nsteps, "aspc",  order, "xlbomd", 1);
+
+    if (!none.ok || !xl.ok) {
+        std::printf("[%s/xlbomd] FAIL: a calculation did not finish (non-finite energy)\n", name);
+        return false;
+    }
+    const double dE = std::fabs(xl.energy - none.energy);
+    std::printf("[%s/xlbomd] final E: none=%.10f  xlbomd=%.10f (dE=%.2e)\n",
+                name, none.energy, xl.energy, dE);
+    std::printf("[%s/xlbomd] SCF iters over %d steps: none=%ld  xlbomd=%ld (%+ld)\n",
+                name, nsteps + 1, none.iters, xl.iters, xl.iters - none.iters);
+
+    bool ok = true;
+    if (dE > E_TRACK) {
+        std::printf("[%s/xlbomd] FAIL: energy tracking %.2e > %.0e\n", name, dE, E_TRACK);
+        ok = false;
+    }
+    if (xl.iters >= none.iters) {
+        std::printf("[%s/xlbomd] FAIL: xlbomd did not reduce iterations (%ld >= %ld)\n",
+                    name, xl.iters, none.iters);
+        ok = false;
+    }
+    if (ok)
+        std::printf("[%s/xlbomd] PASS\n", name);
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -199,6 +239,9 @@ int main(int argc, char** argv)
     bool ok = true;
     ok &= checkMethod(MethodType::GFN1, "gfn1", a_atoms, a_xyz, b_xyz, nsteps, order);
     ok &= checkMethod(MethodType::GFN2, "gfn2", a_atoms, a_xyz, b_xyz, nsteps, order);
+    // XL-BOMD (Phase 2, experimental) corrector-only coupling.
+    ok &= checkXlbomd(MethodType::GFN1, "gfn1", a_atoms, a_xyz, b_xyz, nsteps, order);
+    ok &= checkXlbomd(MethodType::GFN2, "gfn2", a_atoms, a_xyz, b_xyz, nsteps, order);
 
     std::printf("%s\n", ok ? "ALL PASS" : "FAILURES");
     return ok ? 0 : 1;

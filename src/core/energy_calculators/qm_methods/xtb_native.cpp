@@ -113,6 +113,7 @@ bool XTB::InitialiseMolecule()
     // A fresh molecule invalidates any SCC-extrapolation history from a previous
     // system (different nsh/nat). Claude Generated.
     m_scf_history.clear();
+    m_xlbomd_aux.clear();
     return true;
 }
 
@@ -289,6 +290,27 @@ Eigen::VectorXd XTB::extrapolationWeights(const std::string& mode, int order, in
     return {}; // unknown mode -> fall back to warm-start
 }
 
+/* ------------------------------------------------------------------------- *
+ *  Niklasson dissipative XL-BOMD coefficients (J. Chem. Phys. 130, 214109
+ *  (2009), Table I). The integrator is
+ *    P_{n+1} = 2 P_n - P_{n-1} + kappa (D[P_n] - P_n) + alpha Σ_{k=0}^{K} c_k P_{n-k},
+ *  where D[P_n] is the SCF map applied to P_n. kappa is the spring constant,
+ *  alpha scales the weak dissipation that drains accumulated numerical noise, and
+ *  the c_k (which sum to zero, so the dissipation does not shift the fixpoint) are
+ *  tabulated by the dissipation order K. Claude Generated (Phase 2).
+ * ------------------------------------------------------------------------- */
+bool XTB::xlbomdCoefficients(int K, double& kappa, double& alpha, std::vector<double>& c)
+{
+    switch (K) {
+    case 3: kappa = 1.69; alpha = 0.150;  c = { -2,  3,   0,  -1 };                 return true;
+    case 4: kappa = 1.75; alpha = 0.057;  c = { -3,  6,  -2,  -2,  1 };             return true;
+    case 5: kappa = 1.82; alpha = 0.018;  c = { -6, 14,  -8,  -3,  4,  -1 };        return true;
+    case 6: kappa = 1.84; alpha = 0.0055; c = { -14, 36, -27, -2, 12,  -6,  1 };    return true;
+    case 7: kappa = 1.86; alpha = 0.0016; c = { -36, 99, -88, 11, 32, -25,  8, -1 };return true;
+    default: return false;
+    }
+}
+
 double XTB::Calculation(bool gradient)
 {
     // Pin MKL to one thread for the whole native SCF (see MklSerialScope in
@@ -406,9 +428,40 @@ double XTB::Calculation(bool gradient)
         CurcumaLogger::result("  iter             E(SCC)/Eh            dE        max|dq|     t/ms");
     }
 
-    const int max_iter   = m_scf_max_iter;
-    const double thresh  = m_scf_threshold;
     const int nsh = m_basis.nsh;
+    const int packed_len = (m_method == MethodType::GFN2) ? (nsh + 9 * m_atomcount) : nsh;
+
+    // XL-BOMD (extended-Lagrangian Born-Oppenheimer MD) — opt-in, EXPERIMENTAL.
+    // Each Calculation() is treated as one MD/geometry step. When a time-reversibly
+    // propagated auxiliary SCC trajectory (m_xlbomd_aux, length K+1) is available, this
+    // step SEEDS the SCF from the auxiliary front() and runs the normal SCF to
+    // convergence (the auxiliary is a near-perfect guess, so this is few iterations);
+    // the auxiliary is then advanced post-loop by the time-reversible Niklasson
+    // dissipative integrator from the CONVERGED density D[P_n]. (A naive "few bare maps,
+    // no convergence" corrector is NOT contractive for tight-binding SCF and diverges,
+    // so the corrector converges; XL-BOMD's value here is the time-reversible auxiliary
+    // for low MD energy drift, plus the guess-driven iteration savings.) The first K+1
+    // steps bootstrap by running the normal SCF and seeding the trajectory with
+    // converged densities. Claude Generated (Phase 2).
+    const bool xlbomd_active = (m_scf_extrapolation != "none" && m_scf_extrap_apply == "xlbomd");
+    const int  xlbomd_K = std::min(std::max(m_scf_extrap_order, 3), 7); // dissipation order (table 3..7)
+    bool   xlbomd_corrector_step = false;
+    Vector xlbomd_Pn;
+    if (xlbomd_active && static_cast<int>(m_xlbomd_aux.size()) >= xlbomd_K + 1
+        && m_xlbomd_aux.front().size() == packed_len) {
+        xlbomd_corrector_step = true;
+        xlbomd_Pn = m_xlbomd_aux.front();
+    }
+    if (xlbomd_active && !m_xlbomd_warned) {
+        m_xlbomd_warned = true;
+        if (verb >= 1)
+            CurcumaLogger::warn("scf_extrapolation_apply=xlbomd is EXPERIMENTAL "
+                                "(extended-Lagrangian; MD energy-drift unvalidated). "
+                                "Use with scf_extrapolation=aspc and a fixed MD timestep.");
+    }
+
+    const int    max_iter = m_scf_max_iter;
+    const double thresh   = m_scf_threshold;
 
     // Initial guess. Warm-start: reuse converged shell charges from the previous
     // geometry (saved by UpdateMolecule). Otherwise: "h0" (zero) or "eeq".
@@ -416,21 +469,27 @@ double XTB::Calculation(bool gradient)
     Vector q_sh_old = Vector::Zero(nsh);
     bool guess_set = false;
 
+    // XL-BOMD corrector step: seed the SCF from the time-reversibly propagated
+    // auxiliary density, then converge normally below. Takes precedence over the
+    // guess-mode extrapolation. Claude Generated (Phase 2).
+    if (xlbomd_corrector_step) {
+        unpackSccState(xlbomd_Pn);
+        q_sh_old  = m_wfn.q_sh;
+        guess_set = true;
+        CurcumaLogger::citation("xlbomd");
+        if (verb >= scf_min)
+            CurcumaLogger::result(fmt::format(
+                "SCF guess: XL-BOMD auxiliary density (K={})", xlbomd_K));
+    }
+
     // (0) Multi-step SCC extrapolation (opt-in, guess mode). Predict the new-step
     //     SCC vector from the history of converged steps so the SCF starts closer
     //     to the new fixpoint than the previous step alone (fewer iterations, esp.
     //     in MD). Only the initial guess changes; the SCF below still converges to
     //     the same fixpoint within scf_threshold. A poor prediction or too-short
-    //     history simply falls through to the 1-step warm-start. Claude Generated.
-    const int packed_len = (m_method == MethodType::GFN2) ? (nsh + 9 * m_atomcount) : nsh;
-    // XL-BOMD corrector-only coupling is Phase 2 / not yet implemented; warn once and
-    // fall back to the safe full-SCF guess mode so the result stays correct. Claude Generated.
-    if (m_scf_extrapolation != "none" && m_scf_extrap_apply == "xlbomd" && !m_xlbomd_warned) {
-        m_xlbomd_warned = true;
-        CurcumaLogger::warn("scf_extrapolation_apply=xlbomd is not yet implemented; "
-                            "using the safe full-SCF 'guess' coupling instead");
-    }
-    if (m_warmstart && m_scf_extrapolation != "none"
+    //     history simply falls through to the 1-step warm-start. Also runs during the
+    //     XL-BOMD bootstrap steps (guess_set still false there). Claude Generated.
+    if (!guess_set && m_warmstart && m_scf_extrapolation != "none"
         && static_cast<int>(m_scf_history.size()) >= 2) {
         Eigen::VectorXd w = extrapolationWeights(m_scf_extrapolation, m_scf_extrap_order,
                                                  static_cast<int>(m_scf_history.size()));
@@ -754,7 +813,8 @@ double XTB::Calculation(bool gradient)
                 CurcumaLogger::result(fmt::format("  {:4d}   {:18.10f}   {:10.2e}   {:10.2e}   {:6.1f}",
                                                   iter, e_scc, de, dq, t_iter_ms));
             }
-            if (iter > 0 && !m_eig_fp32 && dq < thresh && de < thresh * 100.0) {
+            if (iter > 0 && !m_eig_fp32 && dq < thresh && de < thresh * 100.0
+                && (!xlbomd_corrector_step || iter + 1 >= m_scf_xlbomd_correctors)) {
                 m_scf_converged = true;
                 e_total_old = e_scc;
                 break;
@@ -1016,7 +1076,11 @@ double XTB::Calculation(bool gradient)
         // FP64 polish: once max|dq| drops below the FP32 threshold the next step is
         // FP64, and that step is the one allowed to converge. No-op when mixed
         // precision is off (m_eig_fp32 always false). Claude Generated.
-        if (iter > 0 && !m_eig_fp32) {
+        // XL-BOMD corrector: optionally require a minimum number of corrector SCF
+        // cycles (scf_xlbomd_correctors) before accepting convergence, polishing the
+        // density beyond the loose threshold. Default 1 = no effect. Claude Generated.
+        if (iter > 0 && !m_eig_fp32
+            && (!xlbomd_corrector_step || iter + 1 >= m_scf_xlbomd_correctors)) {
             if (checkConvergence_impl(q_sh_old, q_sh_new,
                                        e_total_old, e_scc, thresh)) {
                 m_scf_converged = true;
@@ -1040,6 +1104,39 @@ double XTB::Calculation(bool gradient)
 
     m_scf_iterations = iter + 1;
     const auto t_scf_end = clock::now();
+
+    // XL-BOMD (Phase 2): advance / seed the auxiliary SCC trajectory from the CONVERGED
+    // density D[P_n] (= current m_wfn). Claude Generated.
+    //  - Corrector step: propagate the auxiliary with the time-reversible Niklasson
+    //    dissipative integrator P_{n+1}=2P_n-P_{n-1}+kappa(D-P_n)+alpha Σ c_k P_{n-k}.
+    //  - Bootstrap step (aux not yet full): seed the trajectory with the converged density.
+    if (xlbomd_active && m_scf_converged) {
+        const Vector D_n = packSccState();
+        if (D_n.size() == packed_len) {
+            if (xlbomd_corrector_step) {
+                double kappa = 0.0, alpha = 0.0;
+                std::vector<double> cc;
+                if (xlbomdCoefficients(xlbomd_K, kappa, alpha, cc)
+                    && static_cast<int>(m_xlbomd_aux.size()) >= xlbomd_K + 1) {
+                    Vector Pnext = 2.0 * m_xlbomd_aux[0] - m_xlbomd_aux[1]
+                                 + kappa * (D_n - m_xlbomd_aux[0]);
+                    for (int k = 0; k <= xlbomd_K; ++k)
+                        Pnext.noalias() += (alpha * cc[k]) * m_xlbomd_aux[k];
+                    if (Pnext.allFinite()) {
+                        m_xlbomd_aux.push_front(std::move(Pnext));
+                        while (static_cast<int>(m_xlbomd_aux.size()) > xlbomd_K + 1)
+                            m_xlbomd_aux.pop_back();
+                    }
+                }
+            } else {
+                if (!m_xlbomd_aux.empty() && m_xlbomd_aux.front().size() != packed_len)
+                    m_xlbomd_aux.clear();
+                m_xlbomd_aux.push_front(D_n);
+                while (static_cast<int>(m_xlbomd_aux.size()) > xlbomd_K + 1)
+                    m_xlbomd_aux.pop_back();
+            }
+        }
+    }
 
     if (verb >= scf_min) {
         if (m_scf_converged)
