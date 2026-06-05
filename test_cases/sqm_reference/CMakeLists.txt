@@ -447,6 +447,98 @@ if(USE_CUDA_XTB)
         set_tests_properties(sqm_cuda_d4pot_${_mol}
             PROPERTIES TIMEOUT 120 LABELS "gpu_integrals")
     endforeach()
+
+    # === Stage 6 device-resident SCF component tests (Claude Generated) ======
+    # The fused per-iteration loop body broken into device-vs-host kernel checks.
+    # All runtime-skip (exit 0) without a CUDA device. Label: gpu_scf.
+
+    # 6 (S6.1): device occupations (Fermi / integer fill) vs host occupationsFromEps
+    # at a converged eps spectrum. Method-independent kernel — gfn1 + gfn2.
+    add_executable(test_xtb_cuda_occ test_xtb_cuda_occ.cpp)
+    target_link_libraries(test_xtb_cuda_occ PRIVATE curcuma_core)
+    target_include_directories(test_xtb_cuda_occ PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_features(test_xtb_cuda_occ PRIVATE cxx_std_17)
+    foreach(_meth gfn1 gfn2)
+        foreach(_mol ${_SQM_CUDA_COMP_MOLS})
+            add_test(NAME sqm_cuda_occ_${_mol}_${_meth}
+                COMMAND test_xtb_cuda_occ --quiet --tol 1e-9 ${_meth}
+                        ${_SQM_CUDA_MOL}/${_mol}.xyz)
+            set_tests_properties(sqm_cuda_occ_${_mol}_${_meth}
+                PROPERTIES TIMEOUT 120 LABELS "gpu_scf")
+        endforeach()
+    endforeach()
+
+    # 6 (S6.2): device resident shell Mulliken charges vs host getShellCharges (gfn2).
+    add_executable(test_xtb_cuda_qsh test_xtb_cuda_qsh.cpp)
+    target_link_libraries(test_xtb_cuda_qsh PRIVATE curcuma_core)
+    target_include_directories(test_xtb_cuda_qsh PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_features(test_xtb_cuda_qsh PRIVATE cxx_std_17)
+    foreach(_mol ${_SQM_CUDA_COMP_MOLS})
+        add_test(NAME sqm_cuda_qsh_${_mol}
+            COMMAND test_xtb_cuda_qsh --quiet --tol 1e-9 gfn2
+                    ${_SQM_CUDA_MOL}/${_mol}.xyz)
+        set_tests_properties(sqm_cuda_qsh_${_mol}
+            PROPERTIES TIMEOUT 120 LABELS "gpu_scf")
+    endforeach()
+
+    # 6 (S6.2b): device D4 reference weights W/dWq rebuilt from q vs host buildRefWFlat
+    # at a frozen charge set (gfn2).
+    add_executable(test_xtb_cuda_d4refw test_xtb_cuda_d4refw.cpp)
+    target_link_libraries(test_xtb_cuda_d4refw PRIVATE curcuma_core)
+    target_include_directories(test_xtb_cuda_d4refw PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_features(test_xtb_cuda_d4refw PRIVATE cxx_std_17)
+    foreach(_mol ${_SQM_CUDA_COMP_MOLS})
+        add_test(NAME sqm_cuda_d4refw_${_mol}
+            COMMAND test_xtb_cuda_d4refw --quiet --tol 1e-9 gfn2
+                    ${_SQM_CUDA_MOL}/${_mol}.xyz)
+        set_tests_properties(sqm_cuda_d4refw_${_mol}
+            PROPERTIES TIMEOUT 120 LABELS "gpu_scf")
+    endforeach()
+
+    # 6 (S6.3): device SCC energy (coulomb / third-order / multipole) vs the host
+    # evaluateComponentsAtFixedDensity at the identical resident state (gfn2).
+    add_executable(test_xtb_cuda_scc_energy test_xtb_cuda_scc_energy.cpp)
+    target_link_libraries(test_xtb_cuda_scc_energy PRIVATE curcuma_core)
+    target_include_directories(test_xtb_cuda_scc_energy PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_features(test_xtb_cuda_scc_energy PRIVATE cxx_std_17)
+    foreach(_mol ${_SQM_CUDA_COMP_MOLS})
+        add_test(NAME sqm_cuda_scc_energy_${_mol}
+            COMMAND test_xtb_cuda_scc_energy --quiet --tol 1e-9 gfn2
+                    ${_SQM_CUDA_MOL}/${_mol}.xyz)
+        set_tests_properties(sqm_cuda_scc_energy_${_mol}
+            PROPERTIES TIMEOUT 180 LABELS "gpu_scf")
+    endforeach()
+
+    # 6 (S6.4): device modified-Broyden mixer vs host BroydenMixer over a synthetic
+    # contractive sequence (standalone numeric, no molecule).
+    add_executable(test_xtb_cuda_broyden test_xtb_cuda_broyden.cpp)
+    target_link_libraries(test_xtb_cuda_broyden PRIVATE curcuma_core)
+    target_include_directories(test_xtb_cuda_broyden PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/external
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_features(test_xtb_cuda_broyden PRIVATE cxx_std_17)
+    add_test(NAME sqm_cuda_broyden
+        COMMAND test_xtb_cuda_broyden --quiet --tol 1e-10)
+    set_tests_properties(sqm_cuda_broyden
+        PROPERTIES TIMEOUT 120 LABELS "gpu_scf")
 endif()
 
 # === tblite-dependent executables (dump + multipole) ===

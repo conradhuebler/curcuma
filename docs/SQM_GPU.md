@@ -203,9 +203,10 @@ resident loop matches the CPU to ~1e-10 Eh/Å **once the SCF is converged tightl
 (the device Broyden lands at a slightly different point in the loose 1e-5
 convergence ball than the host Broyden — energy is stationary so it matches to
 1e-8, the gradient needs `-scf_threshold 1e-8`; `test_xtb_cuda_gradient` does this).
-CH4 `-opt` converges to `−4.17521844`. New component tests (`ctest -L gpu_scf`, 37):
-device occupation, `q_sh`, D4 ref-weights, SCC energy, Broyden — each vs the host
-at a frozen state (~1e-10..1e-16). compute-sanitizer 0 errors (H2O + triose);
+CH4 `-opt` converges to `−4.17521844`. Component tests (`ctest -L gpu_scf`, 31/31;
+the 5 files were lost in a WIP restore and re-authored 2026-06-05): device
+occupation, `q_sh`, D4 ref-weights, SCC energy, Broyden — each vs the host
+at a frozen state (residuals ~0..1e-14). compute-sanitizer 0 errors (H2O + triose);
 no-CUDA `release/` rebuilds + CPU `gfn{1,2}_validation` 12/12 (seam `#ifdef`-free).
 
 **Honest performance note:** Stage 6 is a **residency / correctness milestone, not
