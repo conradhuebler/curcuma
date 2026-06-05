@@ -383,10 +383,9 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
 
             // C) Write sampled bias structures to confsearch.bias.xyz (separate from unique).
             // These are the actually explored conformations and always bypass ConfScan filtering.
-            // Limit to 200 to avoid overwhelming the optimisation stage; stride evenly samples.
-            const int max_bias_export = 200;
-            int stride = (bias_count <= max_bias_export) ? 1
-                                                          : static_cast<int>(std::ceil(static_cast<double>(bias_count) / max_bias_export));
+            // Stride-sample down to m_max_bias_export structures for the optimisation stage.
+            int stride = (bias_count <= m_max_bias_export) ? 1
+                                                           : static_cast<int>(std::ceil(static_cast<double>(bias_count) / m_max_bias_export));
             int exported = 0;
             bool first_bias = true;
             for (int i = 0; i < bias_count; i += stride) {
@@ -508,4 +507,5 @@ void ConfSearch::LoadControlJson()
     m_threads = Json2KeyWord<int>(m_defaults, "threads");
     m_energy_window = Json2KeyWord<double>(m_defaults, "energy_window");
     m_dT = Json2KeyWord<double>(m_defaults, "dT");
+    m_max_bias_export = Json2KeyWord<int>(m_defaults, "max_bias_export");
 }

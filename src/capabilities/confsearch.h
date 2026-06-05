@@ -77,6 +77,7 @@ static const nlohmann::json ConfSearchJson{
     { "respa", 1 },
     { "dipole", false },
     { "seed", -1 },
+    { "max_bias_export", 1000 },
     { "cleanenergy", false },
     { "wall", "none" }, // can be spheric or rect
     { "wall_type", "logfermi" }, // can be logfermi or harmonic
@@ -173,7 +174,7 @@ private:
     bool m_silent = true, m_rattle = true;
     double m_dT = 4;
     std::vector<Molecule*> m_in_stack, m_final_stack;
-    int m_spin = 0, m_charge = 0, m_repeat = 5, m_threads = 1;
+    int m_spin = 0, m_charge = 0, m_repeat = 5, m_threads = 1, m_max_bias_export = 1000;
     double m_time = 1e4, m_startT = 500, m_endT = 300, m_deltaT = 50, m_currentT = 0, m_rmsd = 1.25, m_energy_window = 100;
     Matrix m_topo_matrix;
     SharedBiasPool* m_bias_pool = nullptr;  // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
