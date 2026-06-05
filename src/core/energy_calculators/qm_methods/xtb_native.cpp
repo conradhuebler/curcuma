@@ -110,6 +110,9 @@ bool XTB::InitialiseMolecule()
     buildBasis();
     buildH0Data();
     buildReferenceOccupations();
+    // A fresh molecule invalidates any SCC-extrapolation history from a previous
+    // system (different nsh/nat). Claude Generated.
+    m_scf_history.clear();
     return true;
 }
 
@@ -185,6 +188,105 @@ bool XTB::seedEEQGuess(Vector& q_sh_out)
         q_sh_out(s) = q_at(iat) * w;
     }
     return true;
+}
+
+/* ------------------------------------------------------------------------- *
+ *  Multi-step SCC extrapolation helpers (Claude Generated).
+ *
+ *  packSccState / unpackSccState (de)serialise the SCC mixing vector — the
+ *  quantity the SCF iterates on. GFN1: shell charges q_sh only. GFN2: the full
+ *  vector [q_sh; vec(dp_at); vec(qp_at)] (atomic dipoles 3×nat and quadrupoles
+ *  6×nat, column-major flatten), matching exactly what the 1-step warm-start
+ *  saves/restores (see xtb_native.cpp warm-start block + UpdateMolecule).
+ * ------------------------------------------------------------------------- */
+Eigen::VectorXd XTB::packSccState() const
+{
+    const int nsh = m_basis.nsh;
+    const int nat = m_atomcount;
+    // GFN1 (SCC vector IS q_sh), or a GFN2 state whose multipoles are not yet sized
+    // (degenerate): return just q_sh. A shorter-than-packed_len vector is rejected by
+    // the size guard in Calculation(), which then falls back to the 1-step warm-start.
+    if (m_method != MethodType::GFN2
+        || m_wfn.dp_at.cols() != nat || m_wfn.qp_at.cols() != nat) {
+        return m_wfn.q_sh;
+    }
+    Eigen::VectorXd v(nsh + 3 * nat + 6 * nat);
+    v.head(nsh) = m_wfn.q_sh;
+    // dp_at is 3×nat, qp_at is 6×nat; Eigen is column-major, so .data() is the
+    // column-major flatten that Eigen::Map reads back identically.
+    v.segment(nsh, 3 * nat)            = Eigen::Map<const Eigen::VectorXd>(m_wfn.dp_at.data(), 3 * nat);
+    v.segment(nsh + 3 * nat, 6 * nat)  = Eigen::Map<const Eigen::VectorXd>(m_wfn.qp_at.data(), 6 * nat);
+    return v;
+}
+
+void XTB::unpackSccState(const Eigen::VectorXd& v)
+{
+    const int nsh = m_basis.nsh;
+    const int nat = m_atomcount;
+    m_wfn.q_sh = v.head(nsh);
+    // Rebuild atomic charges from shell charges (as the warm-start block does).
+    m_wfn.q_at.setZero(nat);
+    for (int s = 0; s < nsh; ++s)
+        m_wfn.q_at(m_basis.sh2at[s]) += m_wfn.q_sh(s);
+    if (m_method == MethodType::GFN2 && v.size() == nsh + 9 * nat) {
+        m_wfn.dp_at = Eigen::Map<const Eigen::MatrixXd>(v.data() + nsh, 3, nat);
+        m_wfn.qp_at = Eigen::Map<const Eigen::MatrixXd>(v.data() + nsh + 3 * nat, 6, nat);
+    }
+}
+
+/* ------------------------------------------------------------------------- *
+ *  Charge-conserving extrapolation weights w_j for P_pred = Σ_j w_j P_hist[j],
+ *  history[0] = newest. Σ w_j = 1 (so the predicted SCC vector keeps the total
+ *  charge / trace of the history). Returns an empty vector when there is too
+ *  little history (caller then keeps the 1-step warm-start). Claude Generated.
+ *
+ *  aspc : Always Stable Predictor-Corrector (Kolafa 2004). m = min(k+2, n_hist)
+ *         points, w_j = (-1)^j C(m, j+1). Time-reversible for fixed-step MD.
+ *  gauss: least-squares polynomial of degree d = min(order, m-1) fit to the
+ *         history at abscissae x_j = -(j+1) and extrapolated to x = 0. With
+ *         w = V·a where (VᵀV)a = e_0 the value at x=0 is Σ w_j y_j; robust for
+ *         the irregular steps of a geometry optimisation.
+ * ------------------------------------------------------------------------- */
+Eigen::VectorXd XTB::extrapolationWeights(const std::string& mode, int order, int n_hist)
+{
+    if (n_hist < 2)
+        return {};
+
+    if (mode == "aspc") {
+        const int m = std::min(order + 2, n_hist);
+        if (m < 2) return {};
+        // Binomial C(m, i) via the multiplicative recurrence (exact for small m).
+        Eigen::VectorXd w(m);
+        long long c = 1; // C(m,0)
+        for (int j = 0; j < m; ++j) {
+            // c currently holds C(m, j); advance to C(m, j+1)
+            c = c * (m - j) / (j + 1);
+            w(j) = (j % 2 == 0 ? 1.0 : -1.0) * static_cast<double>(c);
+        }
+        return w;
+    }
+
+    if (mode == "gauss") {
+        const int m = n_hist;
+        const int d = std::min(order, m - 1); // polynomial degree actually fit
+        if (d < 1) return {};
+        Eigen::MatrixXd V(m, d + 1);
+        for (int j = 0; j < m; ++j) {
+            const double x = -static_cast<double>(j + 1);
+            double xp = 1.0;
+            for (int p = 0; p <= d; ++p) { V(j, p) = xp; xp *= x; }
+        }
+        Eigen::VectorXd e0 = Eigen::VectorXd::Zero(d + 1);
+        e0(0) = 1.0;
+        Eigen::MatrixXd VtV = V.transpose() * V;
+        Eigen::VectorXd a = VtV.ldlt().solve(e0);
+        Eigen::VectorXd w = V * a;
+        if (!w.allFinite())
+            return {};
+        return w;
+    }
+
+    return {}; // unknown mode -> fall back to warm-start
 }
 
 double XTB::Calculation(bool gradient)
@@ -312,7 +414,52 @@ double XTB::Calculation(bool gradient)
     // geometry (saved by UpdateMolecule). Otherwise: "h0" (zero) or "eeq".
     // Claude Generated warm-start path.
     Vector q_sh_old = Vector::Zero(nsh);
-    if (m_warmstart && m_warmstart_q_sh.size() == nsh) {
+    bool guess_set = false;
+
+    // (0) Multi-step SCC extrapolation (opt-in, guess mode). Predict the new-step
+    //     SCC vector from the history of converged steps so the SCF starts closer
+    //     to the new fixpoint than the previous step alone (fewer iterations, esp.
+    //     in MD). Only the initial guess changes; the SCF below still converges to
+    //     the same fixpoint within scf_threshold. A poor prediction or too-short
+    //     history simply falls through to the 1-step warm-start. Claude Generated.
+    const int packed_len = (m_method == MethodType::GFN2) ? (nsh + 9 * m_atomcount) : nsh;
+    // XL-BOMD corrector-only coupling is Phase 2 / not yet implemented; warn once and
+    // fall back to the safe full-SCF guess mode so the result stays correct. Claude Generated.
+    if (m_scf_extrapolation != "none" && m_scf_extrap_apply == "xlbomd" && !m_xlbomd_warned) {
+        m_xlbomd_warned = true;
+        CurcumaLogger::warn("scf_extrapolation_apply=xlbomd is not yet implemented; "
+                            "using the safe full-SCF 'guess' coupling instead");
+    }
+    if (m_warmstart && m_scf_extrapolation != "none"
+        && static_cast<int>(m_scf_history.size()) >= 2) {
+        Eigen::VectorXd w = extrapolationWeights(m_scf_extrapolation, m_scf_extrap_order,
+                                                 static_cast<int>(m_scf_history.size()));
+        if (w.size() >= 2) {
+            Eigen::VectorXd pred = Eigen::VectorXd::Zero(packed_len);
+            bool ok = true;
+            for (int j = 0; j < w.size(); ++j) {
+                if (m_scf_history[j].size() != packed_len) { ok = false; break; }
+                pred.noalias() += w(j) * m_scf_history[j];
+            }
+            if (ok && pred.allFinite()) {
+                unpackSccState(pred);
+                q_sh_old  = m_wfn.q_sh;
+                guess_set = true;
+                // Cite the extrapolation scheme actually used (deduplicated, so
+                // calling it every step is a no-op after the first). Claude Generated.
+                CurcumaLogger::citation(m_scf_extrapolation == "aspc"
+                                            ? "aspc" : "density_extrapolation");
+                if (verb >= scf_min)
+                    CurcumaLogger::result(fmt::format(
+                        "SCF initial guess: {} extrapolation over {} steps",
+                        m_scf_extrapolation, static_cast<int>(w.size())));
+            }
+        }
+    }
+
+    if (guess_set) {
+        // extrapolation already populated m_wfn / q_sh_old
+    } else if (m_warmstart && m_warmstart_q_sh.size() == nsh) {
         q_sh_old   = m_warmstart_q_sh;
         m_wfn.q_sh = m_warmstart_q_sh;
         m_wfn.q_at.setZero(m_atomcount);
@@ -1356,6 +1503,21 @@ bool XTB::UpdateMolecule(const Matrix& geometry)
             && m_wfn.dp_at.cols() == m_basis.nat && m_wfn.qp_at.cols() == m_basis.nat) {
             m_warmstart_dp_at = m_wfn.dp_at;
             m_warmstart_qp_at = m_wfn.qp_at;
+        }
+        // Multi-step SCC extrapolation (opt-in): record the converged SCC vector so
+        // Calculation() can predict the next step from several past steps, not just
+        // this one. Pushed before m_wfn is zeroed below. Trimmed to the order the
+        // predictor needs. Claude Generated.
+        if (m_scf_extrapolation != "none") {
+            Eigen::VectorXd state = packSccState();
+            if (!m_scf_history.empty() && m_scf_history.front().size() != state.size())
+                m_scf_history.clear(); // geometry/basis changed -> stale history
+            m_scf_history.push_front(std::move(state));
+            const int maxlen = (m_scf_extrapolation == "aspc")
+                                   ? std::max(m_scf_extrap_order + 2, 2)
+                                   : std::min(2 * m_scf_extrap_order + 2, 10);
+            while (static_cast<int>(m_scf_history.size()) > maxlen)
+                m_scf_history.pop_back();
         }
     }
     //    Keep m_wfn.n0_at / n0_sh (reference occupations, geometry-independent)

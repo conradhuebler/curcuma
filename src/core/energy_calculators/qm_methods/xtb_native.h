@@ -33,6 +33,7 @@
 
 #include <Eigen/Dense>
 #include <array>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <string>
@@ -737,6 +738,16 @@ public:
     void setKeepDiis(bool on)     { m_keep_diis = on; }
     bool isKeepDiis() const       { return m_keep_diis; }
 
+    // Multi-step SCC extrapolation across geometry steps (Claude Generated, opt-in;
+    // generalises the 1-step warm-start). See applyXtbScfConfig / the m_scf_history
+    // member doc and docs/SQM_SCF_EXTRAPOLATION.md. Unknown strings leave the value
+    // untouched (parsed/validated lazily in Calculation()).
+    void setScfExtrapolation(const std::string& s)      { if (!s.empty()) m_scf_extrapolation = s; }
+    void setScfExtrapolationOrder(int k)                { if (k >= 0) m_scf_extrap_order = k; }
+    void setScfExtrapolationApply(const std::string& s) { if (!s.empty()) m_scf_extrap_apply = s; }
+    void setScfXlbomdCorrectors(int n)                  { if (n >= 1) m_scf_xlbomd_correctors = n; }
+    const std::string& scfExtrapolation() const         { return m_scf_extrapolation; }
+
     // Iterative-mode flag: when true, the SCF loop raises its display threshold
     // by one level so the caller needs -verbosity 2 (not 1) to see per-iteration
     // output. Set by MD/opt capabilities to avoid flooding output at default
@@ -894,6 +905,18 @@ private:
     // correct Coulomb shift. Returns false if EEQ is unavailable (caller then
     // falls back to the bare-H0 guess).
     bool seedEEQGuess(Vector& q_sh_out);                                 // xtb_native.cpp
+
+    // Multi-step SCC extrapolation helpers (Claude Generated). xtb_native.cpp.
+    // packSccState  : flatten the current m_wfn SCC vector — GFN1 [q_sh],
+    //                 GFN2 [q_sh; vec(dp_at); vec(qp_at)] (column-major).
+    // unpackSccState: inverse; also rebuilds q_at from q_sh (like the warm-start).
+    // extrapolationWeights: charge-conserving weights w_j (Σ w_j = 1) for
+    //                 P_pred = Σ_j w_j * history[j] (history[0] = newest). Empty
+    //                 vector => fall back to the 1-step warm-start. mode = aspc|gauss.
+    Eigen::VectorXd packSccState() const;
+    void            unpackSccState(const Eigen::VectorXd& v);
+    static Eigen::VectorXd extrapolationWeights(const std::string& mode, int order,
+                                                int n_hist);
 
     // Repulsion + (GFN1) halogen-bond energies.
     double calcRepulsionEnergy() const;                                  // xtb_native.cpp
@@ -1080,6 +1103,22 @@ private:
     bool   m_keep_diis      = false;  ///< preserve DIIS/Broyden history across steps
     bool   m_is_iterative   = false;
 
+    // Multi-step SCC extrapolation (Claude Generated, opt-in). Generalises the
+    // 1-step warm-start: instead of reusing only the previous converged SCC vector,
+    // predict the new-geometry SCC vector from a history of the last few converged
+    // steps. m_scf_history holds the packed SCC vectors (packSccState()), most-recent
+    // at front(); a poor prediction only costs iterations (guess mode keeps full SCF).
+    //   m_scf_extrapolation: "none" (default, 1-step) | "aspc" | "gauss"
+    //   m_scf_extrap_order : ASPC order k (history k+2) / Gauss polynomial degree
+    //   m_scf_extrap_apply : "guess" (full SCF) | "xlbomd" (corrector-only, experimental)
+    //   m_scf_xlbomd_correctors: corrector SCF maps per step in xlbomd mode
+    std::string m_scf_extrapolation   = "none";
+    int         m_scf_extrap_order    = 3;
+    std::string m_scf_extrap_apply    = "guess";
+    int         m_scf_xlbomd_correctors = 1;
+    bool        m_xlbomd_warned       = false; ///< one-shot "xlbomd not yet implemented" notice
+    std::deque<Eigen::VectorXd> m_scf_history; ///< packed converged SCC vectors, front=newest
+
     // DIIS and Broyden mixers promoted from stack-local to member variables so
     // their history can optionally be preserved across Calculation() calls
     // (m_keep_diis=true). Reset unconditionally by default.
@@ -1128,6 +1167,10 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_mixed_precision", [&](const json& v){ if (v.is_boolean()) xtb.setMixedPrecision(v.get<bool>()); });
     lookup("scf_fp32_threshold",  [&](const json& v){ if (v.is_number()) xtb.setFp32Threshold(v.get<double>()); });
     lookup("scf_gpu_partial_diag",[&](const json& v){ if (v.is_boolean()) xtb.setGpuPartialDiag(v.get<bool>()); });
+    lookup("scf_extrapolation",      [&](const json& v){ if (v.is_string())          xtb.setScfExtrapolation(v.get<std::string>()); });
+    lookup("scf_extrapolation_order",[&](const json& v){ if (v.is_number_integer())  xtb.setScfExtrapolationOrder(v.get<int>()); });
+    lookup("scf_extrapolation_apply",[&](const json& v){ if (v.is_string())          xtb.setScfExtrapolationApply(v.get<std::string>()); });
+    lookup("scf_xlbomd_correctors",  [&](const json& v){ if (v.is_number_integer())  xtb.setScfXlbomdCorrectors(v.get<int>()); });
     lookup("electronic_temperature", [&](const json& v){ if (v.is_number()) xtb.setElectronicTemperature(v.get<double>()); });
 }
 

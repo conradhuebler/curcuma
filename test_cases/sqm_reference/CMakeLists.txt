@@ -97,6 +97,27 @@ target_include_directories(diag_curcuma_atomic_c6 PRIVATE
 )
 target_compile_features(diag_curcuma_atomic_c6 PRIVATE cxx_std_17)
 
+# === Multi-step SCC extrapolation (Claude Generated, June 2026) ===========
+# Self-contained (reads committed xyz, no tblite dumps): drives the native
+# GFN1/GFN2 SCF along a smooth interpolated trajectory and checks that the
+# opt-in aspc/gauss SCC extrapolation (a) lands on the same fixpoint as the
+# 1-step warm-start and (b) does not cost more SCF iterations. Run via:
+#   ctest -L scf_extrapolation
+add_executable(test_xtb_scf_extrapolation test_xtb_scf_extrapolation.cpp)
+target_link_libraries(test_xtb_scf_extrapolation PRIVATE curcuma_core)
+target_include_directories(test_xtb_scf_extrapolation PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/external
+)
+target_compile_features(test_xtb_scf_extrapolation PRIVATE cxx_std_17)
+add_test(
+    NAME scf_extrapolation_caffeine
+    COMMAND test_xtb_scf_extrapolation
+        ${CMAKE_CURRENT_SOURCE_DIR}/molecules/caffeine.xyz
+        ${CMAKE_CURRENT_SOURCE_DIR}/molecules/caffeine.opt.xyz
+)
+set_tests_properties(scf_extrapolation_caffeine PROPERTIES TIMEOUT 120 LABELS "scf_extrapolation")
+
 # Per-molecule ctest entries — track the GFN2 D4 SCF potential vs tblite. Each
 # tolerance is set just above the current state so the suite is green now, and
 # tightens as the D4 model gets fixed. Run via:  ctest -R "d4_diag"

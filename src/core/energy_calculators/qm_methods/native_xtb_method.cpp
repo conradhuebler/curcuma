@@ -67,7 +67,11 @@ json NativeXtbMethod::getDefaultConfig(MethodType method)
         { "threads", 1 },                // Single-threaded by default
         { "print_orbitals", false },     // Print energy decomposition at verbosity >= 2
         { "warm_start", true },          // Reuse converged charges as SCF guess (harmless for SP)
-        { "keep_diis", false }           // Preserve DIIS/Broyden history across geometry steps
+        { "keep_diis", false },          // Preserve DIIS/Broyden history across geometry steps
+        { "scf_extrapolation", "none" }, // Multi-step SCC extrapolation: none|aspc|gauss (opt-in)
+        { "scf_extrapolation_order", 3 },// ASPC order k (history k+2) / Gauss polynomial degree
+        { "scf_extrapolation_apply", "guess" }, // guess (full SCF) | xlbomd (corrector-only, experimental)
+        { "scf_xlbomd_correctors", 1 }   // Corrector SCF maps per step (xlbomd only)
     };
     if (method == MethodType::GFN1) {
         cfg["dispersion"] = "d3";        // GFN1: D3(BJ)
