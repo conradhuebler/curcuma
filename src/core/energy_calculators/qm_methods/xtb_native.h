@@ -1070,6 +1070,13 @@ private:
     //   to see per-iteration output (SP default needs only -verbosity 1).
     bool   m_warmstart      = true;   ///< on by default; harmless for SP (no saved guess)
     Vector m_warmstart_q_sh;          ///< Converged q_sh saved before geometry update
+    // GFN2: the rest of the converged SCC vector (atomic dipoles/quadrupoles), saved
+    // alongside q_sh so the warm-start restores the FULL state [q_sh; dp_at; qp_at].
+    // Restoring only q_sh leaves the multipoles to re-converge from zero each geometry
+    // step, keeping the GFN2 opt/md SCF plateaued instead of dropping toward the
+    // GFN1-like few-iteration tail. Claude Generated (opt/md warm-start).
+    Eigen::MatrixXd m_warmstart_dp_at; ///< Converged 3×nat atomic dipoles (GFN2)
+    Eigen::MatrixXd m_warmstart_qp_at; ///< Converged 6×nat atomic quadrupoles (GFN2)
     bool   m_keep_diis      = false;  ///< preserve DIIS/Broyden history across steps
     bool   m_is_iterative   = false;
 

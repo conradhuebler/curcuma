@@ -318,6 +318,16 @@ double XTB::Calculation(bool gradient)
         m_wfn.q_at.setZero(m_atomcount);
         for (int s = 0; s < nsh; ++s)
             m_wfn.q_at(m_basis.sh2at[s]) += m_warmstart_q_sh(s);
+        // GFN2: restore the converged atomic multipoles too (the rest of the SCC
+        // vector), so the first Fock is built from the full previous-step state rather
+        // than q_sh + zero multipoles. This is what lets the GFN2 opt/md SCF drop toward
+        // the GFN1-like few-iteration tail near convergence. Claude Generated.
+        if (m_method == MethodType::GFN2
+            && m_warmstart_dp_at.cols() == m_atomcount
+            && m_warmstart_qp_at.cols() == m_atomcount) {
+            m_wfn.dp_at = m_warmstart_dp_at;
+            m_wfn.qp_at = m_warmstart_qp_at;
+        }
         if (verb >= scf_min)
             CurcumaLogger::result("SCF initial guess: warm-start from previous step");
     } else if (m_scf_guess == "eeq") {
@@ -1337,8 +1347,17 @@ bool XTB::UpdateMolecule(const Matrix& geometry)
     // actually converged; zero-initialized charges (from InitialiseMolecule)
     // are a worse starting guess than EEQ and must not be saved. Claude Generated.
     const bool had_converged = m_scf_converged;
-    if (m_warmstart && had_converged && m_wfn.q_sh.size() == m_basis.nsh)
+    if (m_warmstart && had_converged && m_wfn.q_sh.size() == m_basis.nsh) {
         m_warmstart_q_sh = m_wfn.q_sh;
+        // GFN2: carry the converged atomic multipoles too, so Calculation() can restore
+        // the FULL SCC vector. Without this the multipoles re-converge from zero each
+        // step and the opt/md SCF plateaus (see m_warmstart_dp_at doc). Claude Generated.
+        if (m_method == MethodType::GFN2
+            && m_wfn.dp_at.cols() == m_basis.nat && m_wfn.qp_at.cols() == m_basis.nat) {
+            m_warmstart_dp_at = m_wfn.dp_at;
+            m_warmstart_qp_at = m_wfn.qp_at;
+        }
+    }
     //    Keep m_wfn.n0_at / n0_sh (reference occupations, geometry-independent)
     m_wfn.q_at.setZero(m_basis.nat);
     m_wfn.q_sh.setZero(m_basis.nsh);
