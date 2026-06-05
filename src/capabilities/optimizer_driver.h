@@ -143,6 +143,7 @@ protected:
     void logOptimizationStep(int iteration, double energy, double energy_change,
         double rmsd_change, double gradient_norm, double elapsed_time) const;
     double calculateRMSD(const Molecule& mol1, const Molecule& mol2) const;
+    std::string formatConvergenceReport(double energy_change, double rmsd_change, double gradient_norm) const;
 
 public:
     OptimizerDriver();

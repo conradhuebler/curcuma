@@ -90,10 +90,20 @@ void ConfSearch::start()
         }
     }
 
+    // GPU + Multi-Threading Safety: Deactivate GPU when threads > 1 to prevent
+    // GPU contention. Multiple MD instances cannot share the GPU simultaneously.
+    if (m_threads > 1 && md.contains("gpu") && !md["gpu"].is_null() && md["gpu"] != "none") {
+        CurcumaLogger::warn("GPU cannot be used with multiple threads simultaneously. Disabling GPU for this run.");
+        md["gpu"] = "none";
+    }
+
     md["unique"] = true;
     md["method"] = m_method;
     md["rmsd"] = m_rmsd;
-    md["threads"] = m_threads;
+    // When ConfSearch itself runs multiple cycles in parallel (m_threads > 1),
+    // each individual MD simulation should run single-threaded to avoid nested
+    // thread pools (CxxThreadPool inside CxxThreadPool), which causes crashes.
+    md["threads"] = (m_threads > 1) ? 1 : m_threads;
     md["time_step"] = m_dT;
     md["max_time"] = m_time;
     md["restart"] = false;       // ConfSearch manages its own state, no MD restart
@@ -199,7 +209,8 @@ void ConfSearch::start()
         CurcumaLogger::result("ConfSearch: === Phase 2: Geometry Optimisation ===");
         nlohmann::json opt;
         opt["method"] = m_method;
-        opt["threads"] = m_threads;
+        // Single-threaded per optimization when ConfSearch parallelizes externally
+        opt["threads"] = (m_threads > 1) ? 1 : m_threads;
         if (md.contains("gpu") && !md["gpu"].is_null())
             opt["gpu"] = md["gpu"];
         PerformOptimisation("ff", opt);
@@ -215,8 +226,10 @@ void ConfSearch::start()
         nlohmann::json scan = ConfSearchJson;
         scan["rmsdmethod"] = "hybrid";
         scan["fewerFile"] = true;
-        scan["threads"] = m_threads;
-        scan["method"] = m_method;
+        // Single-threaded per ConfScan when ConfSearch parallelizes externally
+        scan["threads"] = (m_threads > 1) ? 1 : m_threads;
+        scan["energy_method"] = m_method; // Forward energy method for EnergyCalculator in ConfScan
+        scan["max_energy"] = m_energy_window; // Forward energy window to ConfScan for early filtering
         if (md.contains("gpu") && !md["gpu"].is_null())
             scan["gpu"] = md["gpu"];
         PerformFilter("ff", scan);
@@ -232,8 +245,9 @@ void ConfSearch::start()
         for (int i = 0; i < m_in_stack.size(); ++i)
             delete m_in_stack[i];
         m_in_stack.clear();
-        double lowest_energy = 0;
+        double lowest_energy = std::numeric_limits<double>::infinity();
         int accepted = 0, rejected_topo = 0, rejected_energy = 0;
+        std::vector<Molecule*> candidates;
         FileIterator file("confsearch.unique.opt.accepted.xyz");
         while (!file.AtEnd()) {
             Molecule* mol = new Molecule(file.Next());
@@ -242,18 +256,16 @@ void ConfSearch::start()
                 delete mol;
                 continue;
             }
-            if (lowest_energy < 0) {
-                if ((mol->Energy() - lowest_energy) * 2625.5 < m_energy_window) {
-                    m_in_stack.push_back(mol);
-                    accepted++;
-                } else {
-                    rejected_energy++;
-                    delete mol;
-                }
-            } else {
+            candidates.push_back(mol);
+            lowest_energy = std::min(lowest_energy, mol->Energy());
+        }
+        for (auto* mol : candidates) {
+            if ((mol->Energy() - lowest_energy) * 2625.5 < m_energy_window) {
                 m_in_stack.push_back(mol);
                 accepted++;
-                lowest_energy = mol->Energy();
+            } else {
+                rejected_energy++;
+                delete mol;
             }
         }
 
@@ -399,6 +411,11 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
     std::string input_file = basename + ".xyz";
     std::string output_file = basename + ".opt.xyz";
 
+    // Suppress per-step output and trajectory for batch intermediate optimizations
+    json local_param = parameter;
+    local_param["verbosity"] = 0;
+    local_param["write_trajectory"] = false;
+
     // Clear output file
     std::ofstream(output_file).close();
 
@@ -414,37 +431,32 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
     if (molecules.empty())
         return basename;
 
-    if (m_threads <= 1) {
-        // Serial path (existing behavior)
-        std::string method = parameter.value("method", std::string("gfnff"));
-        for (auto& mol : molecules) {
-            EnergyCalculator energy_calc(method, parameter);
-            auto result = Optimization::OptimizationDispatcher::optimizeStructure(
-                &mol, Optimization::OptimizerType::LBFGSPP, &energy_calc, parameter);
-            if (result.success) {
-                result.final_molecule.appendXYZFile(output_file);
-            }
-        }
-    } else {
-        // Claude Generated (Apr 2026): Parallel optimization using OptThread
-        CxxThreadPool pool;
-        pool.setActiveThreadCount(m_threads);
-        pool.setProgressBar(CxxThreadPool::ProgressBarType::None);
+    // Claude Generated (May 2026): Unified optimization path using CxxThreadPool.
+    // Worker pool mode (default) is used instead of legacy mode to avoid
+    // conflicts with GFN-FF's internal ForceFieldThread/CxxThreadPool.
+    int total = static_cast<int>(molecules.size());
+    if (total == 0)
+        return basename;
 
-        std::vector<OptThread*> threads;
-        for (const auto& mol : molecules) {
-            OptThread* t = new OptThread(mol, parameter);
-            pool.addThread(t);
-            threads.push_back(t);
-        }
-        pool.StartAndWait();
+    CxxThreadPool pool;
+    pool.setActiveThreadCount(m_threads);
 
-        for (auto* t : threads) {
-            if (t->result().success) {
-                t->result().final_molecule.appendXYZFile(output_file);
-            }
-            delete t;
+    std::vector<OptThread*> threads;
+    for (const auto& mol : molecules) {
+        OptThread* t = new OptThread(mol, local_param);
+        pool.addThread(t);
+        threads.push_back(t);
+    }
+
+    CurcumaLogger::result_fmt("Optimizing {} structures using {} threads", total, m_threads);
+    pool.StartAndWait();
+    CurcumaLogger::result("Optimization batch complete.");
+
+    for (auto* t : threads) {
+        if (t->result().success) {
+            t->result().final_molecule.appendXYZFile(output_file);
         }
+        delete t;
     }
 
     return basename;

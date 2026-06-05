@@ -188,6 +188,39 @@ std::unique_ptr<OptimizerDriver> OptimizerFactory::createNativeRFO()
     return std::make_unique<NativeRFOAdapter>();
 }
 
+// Claude Generated (May 2026): Build preset config from user-provided preset string
+static json buildPresetConfig(const json& config)
+{
+    if (!config.contains("convergence_preset"))
+        return json::object();
+
+    std::string preset = config["convergence_preset"].get<std::string>();
+    json preset_config;
+    preset_config["convergence_preset"] = preset;
+    if (preset == "loose") {
+        preset_config["energy_threshold"] = 1.0;
+        preset_config["rmsd_threshold"] = 0.05;
+        preset_config["gradient_threshold"] = 1e-3;
+        preset_config["max_iterations"] = 1000;
+    } else if (preset == "normal") {
+        preset_config["energy_threshold"] = 0.1;
+        preset_config["rmsd_threshold"] = 0.01;
+        preset_config["gradient_threshold"] = 5e-4;
+        preset_config["max_iterations"] = 5000;
+    } else if (preset == "tight") {
+        preset_config["energy_threshold"] = 1e-6 * 2625.5; // 1e-6 Eh in kJ/mol
+        preset_config["rmsd_threshold"] = 1e-3;
+        preset_config["gradient_threshold"] = 1e-5;
+        preset_config["max_iterations"] = 10000;
+    } else if (preset == "verytight") {
+        preset_config["energy_threshold"] = 1e-7 * 2625.5; // 1e-7 Eh in kJ/mol
+        preset_config["rmsd_threshold"] = 1e-4;
+        preset_config["gradient_threshold"] = 1e-6;
+        preset_config["max_iterations"] = 20000;
+    }
+    return preset_config;
+}
+
 // Claude Generated - OptimizationDispatcher implementation
 OptimizationResult OptimizationDispatcher::optimizeStructure(
     Molecule* molecule,
@@ -212,7 +245,25 @@ OptimizationResult OptimizationDispatcher::optimizeStructure(
         }
 
         // Configure optimizer
-        json merged_config = mergeConfigurations(optimizer->GetDefaultConfiguration(), config);
+        // Claude Generated (May 2026): Apply convergence preset as intermediate layer:
+        // defaults → preset → user-specified individual parameters (only those differing from defaults)
+        json preset_config = buildPresetConfig(config);
+        json merged_config = mergeConfigurations(optimizer->GetDefaultConfiguration(), preset_config);
+
+        // Override preset only with explicitly user-provided individual parameters.
+        // Defaults already in config must not wipe out the preset. We detect explicit
+        // user overrides by checking if the value differs from the default.
+        json default_config = optimizer->GetDefaultConfiguration();
+        for (auto it = config.begin(); it != config.end(); ++it) {
+            const std::string& key = it.key();
+            if (key == "convergence_preset")
+                continue; // Preset itself is already applied above
+            if (!default_config.contains(key)) {
+                merged_config[key] = it.value(); // New parameter not in defaults
+            } else if (default_config[key] != it.value()) {
+                merged_config[key] = it.value(); // Explicitly changed from default
+            }
+        }
         optimizer->LoadConfiguration(merged_config);
         optimizer->setEnergyCalculator(energy_calculator);
 

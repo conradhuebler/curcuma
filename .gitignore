@@ -94,9 +94,28 @@ test_cases/**/*.log
 test_cases/**/*.dat
 !test_cases/**/baseline.dat
 
+# GFN-FF / MD topology dumps (generated during runs) - Claude Generated May 2026
+*.topo.json
+
+# Metadynamics trajectory output (generated) - Claude Generated May 2026
+*.mtd.xyz
+
+# ConfScan ensemble outputs under molecules/ (generated during runs).
+# NOTE: cli/confscan/*/conformers.*.xyz are tracked regression baselines - do NOT
+# add a broad test_cases/** pattern here. Claude Generated May 2026
+test_cases/molecules/**/*.initial.xyz
+test_cases/molecules/**/*.accepted.xyz
+test_cases/molecules/**/*.rejected.xyz
+test_cases/molecules/**/*.reorder.*.xyz
+test_cases/molecules/**/*.reuse.xyz
+test_cases/molecules/**/*.thresh.xyz
+
 # Root-level output files (optimization and trajectory outputs)
 *.opt.xyz
 *.trj.xyz
+
+# ConfSearch exported MD parameter dump (run artifact) - Claude Generated May 2026
+confsearch_md_params.json
 
 # Debug executables and analysis scripts - Claude Generated December 2025
 debug_*

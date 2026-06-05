@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -40,4 +41,5 @@ private:
     static std::vector<std::string> m_cited_keys;                        // ordered, deduped
     static std::set<std::string> m_seen;                                  // fast lookup
     static std::vector<std::pair<std::string, std::string>> m_subrefs;   // (child, parent)
+    static std::mutex m_mutex;                                             // thread safety
 };

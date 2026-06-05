@@ -16,9 +16,12 @@
 std::vector<std::string> CitationRegistry::m_cited_keys;
 std::set<std::string> CitationRegistry::m_seen;
 std::vector<std::pair<std::string, std::string>> CitationRegistry::m_subrefs;
+std::mutex CitationRegistry::m_mutex;
 
 void CitationRegistry::cite(const std::string& key, const std::string& parent)
 {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     // Already cited — silent no-op
     if (m_seen.count(key)) return;
 
@@ -44,6 +47,7 @@ void CitationRegistry::cite(const std::string& key, const std::string& parent)
 
 void CitationRegistry::printSummary()
 {
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (m_cited_keys.empty()) return;
 
     fmt::print("\n");
@@ -86,6 +90,7 @@ void CitationRegistry::printSummary()
 
 void CitationRegistry::writeBibTeX(const std::string& output_dir, const std::string& basename)
 {
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (m_cited_keys.empty()) return;
 
     // Derive filename
@@ -123,6 +128,7 @@ void CitationRegistry::writeBibTeX(const std::string& output_dir, const std::str
 
 void CitationRegistry::clear()
 {
+    std::lock_guard<std::mutex> lock(m_mutex);
     m_cited_keys.clear();
     m_seen.clear();
     m_subrefs.clear();
@@ -130,5 +136,6 @@ void CitationRegistry::clear()
 
 bool CitationRegistry::hasKey(const std::string& key)
 {
+    std::lock_guard<std::mutex> lock(m_mutex);
     return m_seen.count(key) > 0;
 }

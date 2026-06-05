@@ -131,6 +131,28 @@
 - **Verweis**: src/capabilities/CLAUDE.md:80
 - **Phases**: Phase 1-2 ✅, Phase 3 ⏳
 
+### ConfSearch: CxxThreadPool Crash mit threads=1 + Progress-Bar
+- **Status**: ⏳ PENDING
+- **Problem**: CxxThreadPool im Legacy-Modus crashed bei threads=1 (SIGSEGV nach Optimization). Discrete-Progress-Bar funktioniert nur im Legacy-Modus (ParallelLoop ruft updateStatus()), nicht im Worker-Pool-Modus.
+- **Task**: 
+  1. Crash in CxxThreadPool Legacy-Modus bei threads=1 debuggen und fixen
+  2. Alternative: Progress-Bar im Worker-Pool-Modus aktivieren (updateStatus() während wait() poll)
+  3. Danach: Serial-Path in PerformOptimisation() entfernen, unified CxxThreadPool für alle threads
+- **Betroffene Dateien**: src/capabilities/confsearch.cpp, external/CxxThreadPool/include/CxxThreadPool.hpp
+- **Verweis**: confsearch-branch, May 2026
+- **Workaround**: Aktuell Serial-Path für threads <= 1, Parallel-Path (Legacy-Modus) für threads > 1
+
+### ConfSearch: GPU + Multi-Threading (Future)
+- **Status**: ⏳ PLANNED
+- **Problem**: Bei threads > 1 konkurrieren mehrere MD-Instanzen um die GPU. Aktuell wird GPU deaktiviert wenn threads > 1.
+- **Task**: 
+  1. Implementiere GPU-Lock (Mutex) oder Queue, sodass nur 1 Thread gleichzeitig die GPU nutzt
+  2. Alternative: Ein Thread bekommt GPU-CUDA, andere nutzen CPU-Fallback
+  3. Dann kann GPU auch bei threads > 1 aktiviert werden
+- **Betroffene Dateien**: src/capabilities/confsearch.cpp, src/core/energycalculator.cpp
+- **Verweis**: confsearch-branch, May 2026
+- **Workaround**: Aktuell wird GPU auf "none" gesetzt wenn threads > 1
+
 ### Enhanced Conformational Search Algorithms
 - **Status**: ⏳ PLANNED
 - **Betroffene Dateien**: src/capabilities/confsearch.cpp/h

@@ -170,6 +170,32 @@ void CurcumaOpt::LoadControlJson()
     m_GradNorm = m_defaults.value("GradNorm", 5e-4);
     m_ConvCount = m_defaults.value("ConvCount", 11);
 
+    // Claude Generated (May 2026): Apply convergence preset before individual overrides
+    if (m_defaults.contains("convergence_preset")) {
+        std::string preset = m_defaults["convergence_preset"].get<std::string>();
+        if (preset == "loose") {
+            m_dE = 1.0;
+            m_dRMSD = 0.05;
+            m_GradNorm = 1e-3;
+            m_maxiter = 1000;
+        } else if (preset == "normal") {
+            m_dE = 0.1;
+            m_dRMSD = 0.01;
+            m_GradNorm = 5e-4;
+            m_maxiter = 5000;
+        } else if (preset == "tight") {
+            m_dE = 1e-6 * 2625.5; // 1e-6 Eh in kJ/mol
+            m_dRMSD = 1e-3;
+            m_GradNorm = 1e-5;
+            m_maxiter = 10000;
+        } else if (preset == "verytight") {
+            m_dE = 1e-7 * 2625.5; // 1e-7 Eh in kJ/mol
+            m_dRMSD = 1e-4;
+            m_GradNorm = 1e-6;
+            m_maxiter = 20000;
+        }
+    }
+
     m_method = m_defaults.value("method", std::string("uff"));
     // Override method from controller if provided (CLI parameter)
     if (m_controller.contains("method")) {
@@ -582,6 +608,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
     }
     bool perform_optimisation = true;
     bool error = false;
+    double last_energy_change = 0.0;
 
     int atoms_count = initial->AtomCount();
     int converged = solver.InitializeSingleSteps(fun, parameter, fx);
@@ -729,6 +756,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
             break;
         }
         */
+        last_energy_change = std::abs(fun.m_energy - final_energy) * 2625.5;
         final_energy = fun.m_energy;
         if (next.Check() == 0 || (next.Check() == 1 && m_fusion)) {
             previous = next;
@@ -759,9 +787,17 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
     double final_rmsd = (atoms_count >= 500)
         ? std::sqrt((parameter - old_parameter).squaredNorm() / atoms_count)
         : driver->RMSD();
+
+    std::string conv_report = fmt::format(
+        "Converged: dE={:.4f} (<{:.4f}) [{}], RMSD={:.4f} (<{:.4f}) [{}], LBFGS={} [{}], GradNorm={:.4e} (<{:.4e}) [{}]\n",
+        last_energy_change, m_dE, (converged & 1) ? "OK" : "FAIL",
+        final_rmsd, m_dRMSD, (converged & 2) ? "OK" : "FAIL",
+        solver.isConverged(), (converged & 4) ? "OK" : "FAIL",
+        solver.final_grad_norm(), m_GradNorm, (converged & 8) ? "OK" : "FAIL");
     if (error == false) {
         output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, final_rmsd, solver.final_grad_norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
         output += fmt::format("{0: ^75}\n", "*** Geometry Optimisation converged ***");
+        output += conv_report;
         output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 
         if (m_printoutput) {
@@ -771,6 +807,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
     } else {
         output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, final_rmsd, solver.final_grad_norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
         output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
+        output += conv_report;
         output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 
         if (m_printoutput) {
@@ -869,6 +906,7 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
     }
     bool perform_optimisation = true;
     bool error = false;
+    double last_energy_change = 0.0;
 
     int atoms_count = initial->AtomCount();
     int converged = 0;
@@ -986,6 +1024,7 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
         //     break;
         // }
 
+        last_energy_change = std::abs(gptfgs.Energy() - final_energy) * 2625.5;
         final_energy = gptfgs.Energy();
         if (next.Check() == 0 || (next.Check() == 1 && m_fusion)) {
             previous = next;
@@ -1020,9 +1059,17 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
 
         error = true;
     }
+    std::string conv_report_gpt = fmt::format(
+        "Converged: dE={:.4f} (<{:.4f}) [{}], RMSD={:.4f} (<{:.4f}) [{}], LBFGS={} [{}], GradNorm={:.4e} (<{:.4e}) [{}]\n",
+        last_energy_change, m_dE, (converged & 1) ? "OK" : "FAIL",
+        driver->RMSD(), m_dRMSD, (converged & 2) ? "OK" : "FAIL",
+        gptfgs.isConverged(), (converged & 4) ? "OK" : "FAIL",
+        gptfgs.getCurrentGradient().norm(), m_GradNorm, (converged & 8) ? "OK" : "FAIL");
+
     if (error == false) {
         output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, gptfgs.Energy(), (gptfgs.Energy() - final_energy) * 2625.5, driver->RMSD(), gptfgs.getCurrentGradient().norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
         output += fmt::format("{0: ^75}\n", "*** Geometry Optimisation converged ***");
+        output += conv_report_gpt;
         output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 
         if (m_printoutput) {
@@ -1032,6 +1079,7 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
     } else {
         output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, gptfgs.Energy(), (gptfgs.Energy() - final_energy) * 2625.5, driver->RMSD(), gptfgs.getCurrentGradient().norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
         output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
+        output += conv_report_gpt;
         output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 
         if (m_printoutput) {

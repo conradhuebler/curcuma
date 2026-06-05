@@ -81,6 +81,12 @@ struct OptimizationResult {
     // Timing
     double optimization_time_seconds = 0.0;
 
+    // Convergence diagnostics
+    std::string convergence_report;
+
+    // Output files written during optimization
+    std::string trajectory_filename;
+
     // Factory methods for common cases
     static OptimizationResult success_result(const Molecule& final_mol, double energy,
         int iterations, double time_s);

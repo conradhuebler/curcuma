@@ -309,7 +309,7 @@ private:
     PARAM(restart, Bool, true, "Enable restarting from previous scan", "General", {})
     PARAM(noname, Bool, true, "Auto-generate structure names", "General", {})
     PARAM(threads, Int, 1, "Number of parallel threads for ensemble processing", "Performance", {})
-    PARAM(method, String, "subspace", "RMSD alignment method for structure comparison: incr|template|hybrid|subspace|inertia|molalign|dtemplate|hungarian|predefined", "General", {})
+    PARAM(method, String, "inertia", "RMSD alignment method for structure comparison: incr|template|hybrid|subspace|inertia|molalign|dtemplate|hungarian|predefined", "General", {})
 
     // --- Filtering & Thresholds ---
     PARAM(rmsd, Double, 0.9, "RMSD threshold for accepting conformer", "Filtering", {})

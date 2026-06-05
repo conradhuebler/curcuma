@@ -1528,12 +1528,18 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         fmt::print("  -threads <n>         Parallel threads (default: 1)\n");
         fmt::print("  -verbosity <n>       Output level: 0=silent, 1=table, 2=detailed, 3=debug (default: 1)\n\n");
         fmt::print("Convergence:\n");
-        fmt::print("  -energy_threshold <f>    Energy change [kJ/mol] (default: 0.1)\n");
-        fmt::print("  -rmsd_threshold <f>      RMSD change [Angstrom] (default: 0.01)\n");
-        fmt::print("  -gradient_threshold <f>  Gradient norm [Eh/Bohr] (default: 5e-4)\n");
-        fmt::print("  -max_iterations <n>      Max steps (default: 5000)\n");
-        fmt::print("  -convergence_count <n>   Criteria bit field: 1=energy, 2=RMSD, 4=gradient (default: 7=all)\n");
-        fmt::print("  -max_energy_rise <f>     Abort if energy rises by more than this [kJ/mol] (default: 100)\n\n");
+        fmt::print("  -convergence_preset <name>  Preset: loose, normal, tight, verytight (default: normal)\n");
+        fmt::print("                               loose      - fast, coarse (for pre-optimization)\n");
+        fmt::print("                               normal     - balanced (default)\n");
+        fmt::print("                               tight      - accurate (for publication-quality)\n");
+        fmt::print("                               verytight  - extreme accuracy (rarely needed)\n");
+        fmt::print("                               Individual thresholds below override the preset.\n");
+        fmt::print("  -energy_threshold <f>       Energy change [kJ/mol] (default: 0.1)\n");
+        fmt::print("  -rmsd_threshold <f>         RMSD change [Angstrom] (default: 0.01)\n");
+        fmt::print("  -gradient_threshold <f>     Gradient norm [Eh/Bohr] (default: 5e-4)\n");
+        fmt::print("  -max_iterations <n>          Max steps (default: 5000)\n");
+        fmt::print("  -convergence_count <n>       Criteria bit field: 1=energy, 2=RMSD, 4=gradient (default: 7=all)\n");
+        fmt::print("  -max_energy_rise <f>         Abort if energy rises by more than this [kJ/mol] (default: 100)\n\n");
         fmt::print("Output:\n");
         fmt::print("  -write_trajectory <0|1>  Write .trj.xyz file (default: 1)\n\n");
         fmt::print("L-BFGS tuning (lbfgspp optimizer):\n");
@@ -1583,17 +1589,27 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         // Note: setMolecule() is called inside OptimizerDriver::InitializeOptimization()
         // Do NOT call it here — double-init crashes GFN-FF (generateDispersionPairsNative)
 
+        std::string filename(argv[2]);
+        std::string basename = filename.size() >= 4 ?
+            filename.substr(0, filename.size() - 4) : filename;
+        std::string output_file = opt_config.value("output", basename + ".opt.xyz");
+        CurcumaLogger::result(fmt::format("Input structure: {}", filename));
+        CurcumaLogger::result(fmt::format("Output structure: {}", output_file));
+
         Optimization::OptimizerType opt_type = Optimization::parseOptimizerType(optimizer_method);
         auto result = Optimization::OptimizationDispatcher::optimizeStructure(
             molecule.get(), opt_type, &energy_calc, opt_config);
 
         if (result.success) {
-            std::string filename(argv[2]);
-            std::string basename = filename.size() >= 4 ?
-                filename.substr(0, filename.size() - 4) : filename;
-            std::string output_file = opt_config.value("output", basename + ".opt.xyz");
             molecule->writeXYZFile(output_file);
-            CurcumaLogger::success_fmt("Optimized structure written to: {}", output_file);
+
+            // End summary — always visible, independent of global verbosity
+            fmt::print("\n");
+            fmt::print("Files written:\n");
+            fmt::print("  Optimized structure: {}\n", output_file);
+            if (!result.trajectory_filename.empty()) {
+                fmt::print("  Trajectory:          {}\n", result.trajectory_filename);
+            }
             return 0;
         } else {
             CurcumaLogger::warn_fmt("{} optimizer failed: {}", optimizer_method, result.error_message);

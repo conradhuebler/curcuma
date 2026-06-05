@@ -70,6 +70,7 @@ namespace {
     PARAM(verbosity, Int, 1, "Output level: 0=silent, 1=table, 2=detailed, 3=debug", "Basic", { "verbose" })
 
     // Convergence
+    PARAM(convergence_preset, String, "normal", "Convergence preset: loose, normal, tight, verytight (sets all thresholds)", "Convergence", { "conv_preset", "ConvPreset" })
     PARAM(energy_threshold, Double, 0.1, "Energy change threshold [kJ/mol]", "Convergence", { "d_e", "dE" })
     PARAM(rmsd_threshold, Double, 0.01, "RMSD change threshold [Angstrom]", "Convergence", { "d_rmsd", "dRMSD" })
     PARAM(gradient_threshold, Double, 5e-4, "Gradient norm threshold [Eh/Bohr]", "Convergence", { "grad_norm", "GradNorm" })

@@ -8625,17 +8625,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     // PHASE 2 OPTIMIZED (Feb 7, 2026): Pass adjacency_list to eliminate redundant O(N²) bond detection
     topo_info.hybridization = determineHybridization(topo_info.adjacency_list);
 
-    // Claude Generated (March 2026): Run pi-detection, ring-detection, and neighbor-lists in parallel
-    // All three only read hybridization+adjacency_list, write to different topo_info fields
-    auto pi_future = std::async(std::launch::async, [&]() {
-        return detectPiSystems(topo_info.hybridization, topo_info.adjacency_list);
-    });
-    auto nb_future = std::async(std::launch::async, [&]() {
-        return buildNeighborLists();
-    });
+    // NOTE: Removed std::async parallelization (May 2026) to prevent nested thread
+    // creation when GFN-FF is called from an external thread pool (e.g. ConfSearch).
+    // The overhead is negligible for parameter generation; thread safety is critical.
+    topo_info.pi_fragments = detectPiSystems(topo_info.hybridization, topo_info.adjacency_list);
+    topo_info.neighbor_lists = buildNeighborLists();
     topo_info.ring_sizes = findSmallestRings(topo_info.adjacency_list, topo_info);
-    topo_info.pi_fragments = pi_future.get();
-    topo_info.neighbor_lists = nb_future.get();
 
     // Calculate simple neighbor counts for XTB compatibility in torsions
     // XTB uses raw neighbor count (topo%nb(20,i)) rather than effective CN for torsion correction
@@ -8833,15 +8828,13 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Computing Phase 1C: Hardness corrections (dgam) + amideH detection");
         }
-        // Run dgam and amideH detection in parallel (independent computations)
-        auto amide_future = std::async(std::launch::async, [&]() {
-            return m_eeq_solver->detectAmideHydrogensFull(
-                m_atoms, topo_info.hybridization, topo_info.coordination_numbers, eeq_topology_input);
-        });
+        // NOTE: Removed std::async parallelization (May 2026) to prevent nested thread
+        // creation when GFN-FF is called from an external thread pool.
         topo_info.dgam = m_eeq_solver->calculateDgamFull(
             m_atoms, topo_info.topology_charges, topo_info.hybridization,
             topo_info.coordination_numbers, eeq_topology_input);
-        topo_info.is_amide_h = amide_future.get();
+        topo_info.is_amide_h = m_eeq_solver->detectAmideHydrogensFull(
+            m_atoms, topo_info.hybridization, topo_info.coordination_numbers, eeq_topology_input);
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             std::cout << "  First 3 dgam values:" << std::endl;
@@ -11316,47 +11309,50 @@ double GFNFF::compareGradients(double dx)
         // Temporarily suppress output during per-term numerical gradient
         int saved_verbosity = CurcumaLogger::get_verbosity();
         CurcumaLogger::set_verbosity(0);
+        try {
+            for (int dim = 0; dim < 3; ++dim) {
+                int i = max_atom_fixed;
 
-        for (int dim = 0; dim < 3; ++dim) {
-            int i = max_atom_fixed;
+                // Forward perturbation
+                m_geometry_bohr(i, dim) += dx;
+                m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
+                m_forcefield->UpdateGeometry(m_geometry_bohr);
+                auto cn_p = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+                Vector cn_plus = Vector::Map(cn_p.data(), cn_p.size()).eval();
+                m_forcefield->distributeCNOnly(cn_plus);
+                m_forcefield->Calculate(false);
 
-            // Forward perturbation
-            m_geometry_bohr(i, dim) += dx;
-            m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
-            m_forcefield->UpdateGeometry(m_geometry_bohr);
-            auto cn_p = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-            Vector cn_plus = Vector::Map(cn_p.data(), cn_p.size()).eval();
-            m_forcefield->distributeCNOnly(cn_plus);
-            m_forcefield->Calculate(false);
+                std::vector<double> E_plus(terms.size());
+                for (size_t t = 0; t < terms.size(); ++t) {
+                    E_plus[t] = terms[t].getter();
+                }
 
-            std::vector<double> E_plus(terms.size());
-            for (size_t t = 0; t < terms.size(); ++t) {
-                E_plus[t] = terms[t].getter();
+                // Backward perturbation
+                m_geometry_bohr(i, dim) -= 2 * dx;
+                m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
+                m_forcefield->UpdateGeometry(m_geometry_bohr);
+                auto cn_m = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+                Vector cn_minus = Vector::Map(cn_m.data(), cn_m.size()).eval();
+                m_forcefield->distributeCNOnly(cn_minus);
+                m_forcefield->Calculate(false);
+
+                std::vector<double> E_minus(terms.size());
+                for (size_t t = 0; t < terms.size(); ++t) {
+                    E_minus[t] = terms[t].getter();
+                }
+
+                for (size_t t = 0; t < terms.size(); ++t) {
+                    term_numgrad[t][dim] = (E_plus[t] - E_minus[t]) / (2 * dx);
+                }
+
+                // Restore
+                m_geometry_bohr(i, dim) = orig_geom_bohr(i, dim);
+                m_geometry(i, dim) = orig_geom(i, dim);
             }
-
-            // Backward perturbation
-            m_geometry_bohr(i, dim) -= 2 * dx;
-            m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
-            m_forcefield->UpdateGeometry(m_geometry_bohr);
-            auto cn_m = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-            Vector cn_minus = Vector::Map(cn_m.data(), cn_m.size()).eval();
-            m_forcefield->distributeCNOnly(cn_minus);
-            m_forcefield->Calculate(false);
-
-            std::vector<double> E_minus(terms.size());
-            for (size_t t = 0; t < terms.size(); ++t) {
-                E_minus[t] = terms[t].getter();
-            }
-
-            for (size_t t = 0; t < terms.size(); ++t) {
-                term_numgrad[t][dim] = (E_plus[t] - E_minus[t]) / (2 * dx);
-            }
-
-            // Restore
-            m_geometry_bohr(i, dim) = orig_geom_bohr(i, dim);
-            m_geometry(i, dim) = orig_geom(i, dim);
+        } catch (...) {
+            CurcumaLogger::set_verbosity(saved_verbosity);
+            throw;
         }
-
         CurcumaLogger::set_verbosity(saved_verbosity);
 
         // Restore geometry and CN

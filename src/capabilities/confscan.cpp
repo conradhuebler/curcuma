@@ -199,6 +199,10 @@ void ConfScan::LoadControlJson()
 {
     // Claude Generated 2025: Migrated to ConfigManager - Multi-Module architecture
 
+    // Load energy method from controller (separate from RMSD "method" which is alignment)
+    if (m_controller.contains("energy_method") && m_controller["energy_method"].is_string())
+        m_method = m_controller["energy_method"].get<std::string>();
+
     // ConfScan-specific parameters
     m_noname = m_config.get<bool>("noname");
     m_restart = m_config.get<bool>("restart");
@@ -332,7 +336,7 @@ void ConfScan::LoadControlJson()
         m_RMSDmethod = m_config.get<std::string>("rmsd.method");
     } catch (...) {
         // Fallback: try to get method from confscan level (inherited)
-        m_RMSDmethod = m_config.get<std::string>("method", "subspace");
+        m_RMSDmethod = m_config.get<std::string>("method", "inertia");
     }
     m_update_rotation = m_config.get<bool>("rmsd.update_rotation");
     m_nomunkres = m_config.get<bool>("rmsd.nomunkres", false);  // May not exist in RMSD
@@ -445,7 +449,7 @@ bool ConfScan::openFile()
         if (std::abs(energy) < 1e-5 || m_method.compare("") != 0) {
             // XTBInterface interface; // As long as xtb leaks, we have to put it heare
             if (m_method == "")
-                m_method = "gfn2";
+                m_method = "gfnff";
             // Claude Generated: Use new constructor with basename for parameter caching
             EnergyCalculator interface(m_method, m_controller, Basename());
             // I might not leak really, but was unable to clear everything
