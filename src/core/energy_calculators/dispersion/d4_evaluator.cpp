@@ -374,9 +374,12 @@ double D4Evaluator::computeATM(const std::vector<int>& atoms,
 
     double E_atm = 0.0;
 
-    // Single unit cell (non-periodic): trans = {0}. Loops iat >= jat >= kat,
-    // degenerate triples self-skip via r2 < eps. Mirrors dftd4 atm.f90 exactly.
-    for (int iat = 0; iat < nat; ++iat) {
+    // Per-iat triple work, factored so the serial path stays bit-identical and the
+    // O(N^3) outer atom loop can fan out over private accumulators (Claude Generated,
+    // 2026-06, ATM threading). Const reads (c6/dc6dcn/r4r2/geometry) → thread-safe;
+    // writes go to the passed-in E / grad / dcn. Loops iat >= jat >= kat, degenerate
+    // triples self-skip via r2 < eps. Mirrors dftd4 atm.f90 exactly.
+    auto processIat = [&](int iat, double& E, Matrix& grad, Vector& dcn) {
         const Eigen::Vector3d ri = geometry_bohr.row(iat);
         for (int jat = 0; jat <= iat; ++jat) {
             const double c6ij = c6(jat, iat);
@@ -413,7 +416,7 @@ double D4Evaluator::computeATM(const std::vector<int>& atoms,
                                  + 1.0 / r3;
                 const double rr = ang * fdmp;
                 const double dE = rr * c9 * triple;
-                E_atm -= dE;   // energy[iat,jat,kat] each -= dE/3
+                E -= dE;   // energy[iat,jat,kat] each -= dE/3
 
                 if (with_gradient) {
                     const double dfdmp = -2.0 * alp * std::pow(r0 / r1, alp / 3.0) * fdmp * fdmp;
@@ -435,16 +438,55 @@ double D4Evaluator::computeATM(const std::vector<int>& atoms,
 
                     // dftd4 gradient signs (atm.f90:329-331). Note vij=rj-ri here
                     // matches dftd4 (xyz[jat]-xyz[iat]); gradient() is dE/dxyz.
-                    gradient_out.row(iat) -= (dGij + dGik).transpose();
-                    gradient_out.row(jat) += (dGij - dGjk).transpose();
-                    gradient_out.row(kat) += (dGik + dGjk).transpose();
+                    grad.row(iat) -= (dGij + dGik).transpose();
+                    grad.row(jat) += (dGij - dGjk).transpose();
+                    grad.row(kat) += (dGik + dGjk).transpose();
 
                     // CN chain rule (atm.f90:339-344): folded into dEdCN_out, which
                     // the caller contracts with this CN's own dCN/dx.
-                    dEdCN_out(iat) -= dE * 0.5 * (dc6dcn(iat, jat) / c6ij + dc6dcn(iat, kat) / c6ik);
-                    dEdCN_out(jat) -= dE * 0.5 * (dc6dcn(jat, iat) / c6ij + dc6dcn(jat, kat) / c6jk);
-                    dEdCN_out(kat) -= dE * 0.5 * (dc6dcn(kat, iat) / c6ik + dc6dcn(kat, jat) / c6jk);
+                    dcn(iat) -= dE * 0.5 * (dc6dcn(iat, jat) / c6ij + dc6dcn(iat, kat) / c6ik);
+                    dcn(jat) -= dE * 0.5 * (dc6dcn(jat, iat) / c6ij + dc6dcn(jat, kat) / c6jk);
+                    dcn(kat) -= dE * 0.5 * (dc6dcn(kat, iat) / c6ik + dc6dcn(kat, jat) / c6jk);
                 }
+            }
+        }
+    };  // processIat
+
+    // The O(N^3) outer atom loop fans out over the gated intra-thread budget with the
+    // same private-partial reduction as the 2-body loop (bit-identical up to FP
+    // reassociation). The serial path (nthr=1) writes the outputs directly so it stays
+    // byte-for-byte unchanged. m_threads is pre-gated by the caller (effectiveIntraThreads).
+    const int nthr = (m_threads > 1 && nat >= 4 * m_threads) ? m_threads : 1;
+    if (nthr <= 1) {
+        for (int iat = 0; iat < nat; ++iat)
+            processIat(iat, E_atm, gradient_out, dEdCN_out);
+    } else {
+        std::vector<double> E_part(nthr, 0.0);
+        std::vector<Matrix> grad_part(nthr);
+        std::vector<Vector> dcn_part(nthr);
+        for (int t = 0; t < nthr; ++t) {
+            grad_part[t] = Matrix::Zero(nat, 3);
+            dcn_part[t]  = Vector::Zero(nat);
+        }
+        auto worker = [&](int tid, int T) {
+            for (int iat = tid; iat < nat; iat += T)
+                processIat(iat, E_part[tid], grad_part[tid], dcn_part[tid]);
+        };
+        if (!m_pool) {
+            m_pool = std::make_unique<CxxThreadPool>();
+            m_pool->setProgressBar(CxxThreadPool::ProgressBarType::None);
+        }
+        m_pool->setActiveThreadCount(nthr);
+        std::vector<std::future<void>> fut;
+        fut.reserve(nthr - 1);
+        for (int t = 1; t < nthr; ++t) fut.push_back(m_pool->enqueue(worker, t, nthr));
+        worker(0, nthr);
+        for (auto& f : fut) f.get();
+        for (int t = 0; t < nthr; ++t) {
+            E_atm += E_part[t];
+            if (with_gradient) {
+                gradient_out += grad_part[t];
+                dEdCN_out    += dcn_part[t];
             }
         }
     }
