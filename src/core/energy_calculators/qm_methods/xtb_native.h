@@ -369,12 +369,14 @@ struct GpuScfBackend {
     virtual bool supportsGradient() const { return false; }
     // v_dp (3×nat) / v_qp (6×nat) are the converged GFN2 multipole potentials;
     // empty for GFN1 (then the multipole-integral Pulay term is skipped).
+    // pc_resident=true (AP8): the device-resident SCF left the converged density /
+    // MO coefficients on the GPU, so skip re-uploading P/C (which may be empty).
     virtual bool gradient(const Matrix& P, const Eigen::MatrixXd& C, const Vector& eps,
                           int nocc_orbs, const Vector& v_ao, const Vector& q_sh,
                           const Eigen::MatrixXd& v_dp, const Eigen::MatrixXd& v_qp,
-                          Matrix& grad_out, Vector& dEdcn_out)
+                          Matrix& grad_out, Vector& dEdcn_out, bool pc_resident = false)
     { (void)P; (void)C; (void)eps; (void)nocc_orbs; (void)v_ao; (void)q_sh;
-      (void)v_dp; (void)v_qp; (void)grad_out; (void)dEdcn_out; return false; }
+      (void)v_dp; (void)v_qp; (void)grad_out; (void)dEdcn_out; (void)pc_resident; return false; }
     /// GFN2: enter the device-resident multipole loop using the device-computed
     /// dp_int/qp_int (no upload of the 9 nao² matrices). Returns false → caller
     /// falls back to beginMultipole (upload). Claude Generated (Stage 3d).

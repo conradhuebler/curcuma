@@ -224,10 +224,13 @@ public:
     /// v_dp (3·nat) / v_qp (6·nat) are the converged GFN2 multipole potentials
     /// (column-major); pass nullptr for GFN1 (then the multipole Pulay term is
     /// skipped). Claude Generated (Stage 4a/4b).
+    /// pc_resident=true (AP8): reuse the resident dP/dC from the device-resident
+    /// SCF instead of uploading P/C (skips the two nao²-sized H2D transfers); P/C
+    /// may then be nullptr. The gradient only reads dP/dC, so it is bit-identical.
     bool computeGradient(const double* P, const double* C, const double* eps,
                          int nocc_orbs, const double* v_ao, const double* q_sh,
                          const double* v_dp, const double* v_qp,
-                         double* grad_out, double* dEdcn_out);
+                         double* grad_out, double* dEdcn_out, bool pc_resident = false);
 
     /// Allocate the resident SCF work buffers (C/P/Cw/eps/occ/pop + cuSOLVER
     /// dsyevd workspace) sized to the basis nao, and mark the device-computed

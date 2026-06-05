@@ -2194,10 +2194,16 @@ bool XtbGpuContext::computeOverlapGrad(const double* xyz_bohr, double* dSdR_out)
 bool XtbGpuContext::computeGradient(const double* P, const double* C, const double* eps,
                                     int nocc_orbs, const double* v_ao, const double* q_sh,
                                     const double* v_dp, const double* v_qp,
-                                    double* grad_out, double* dEdcn_out)
+                                    double* grad_out, double* dEdcn_out, bool pc_resident)
 {
-    if (!ok() || m_impl->basis_nao <= 0 || !P || !C || !eps || !v_ao || !q_sh
-        || !grad_out || !dEdcn_out)
+    // AP8 (Claude Generated): pc_resident=true reuses the resident density dP and MO
+    // coefficients dC the device-resident SCF already left on the GPU (downloaded
+    // once by residentFinalize but not cleared), skipping the two nao²-sized P/C
+    // host→device uploads (~2 ms/step on complex). The caller (calculateGradientGpu,
+    // only invoked on the device-resident path) guarantees they are the converged
+    // values; the gradient only reads dP/dC, so reuse is bit-identical to uploading.
+    if (!ok() || m_impl->basis_nao <= 0 || !eps || !v_ao || !q_sh
+        || !grad_out || !dEdcn_out || (!pc_resident && (!P || !C)))
         return false;
     const int nat = m_impl->basis_nat;
     const int nsh = m_impl->basis_nsh;
@@ -2219,8 +2225,11 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     } catch (...) { return false; }
 
     // Upload the converged SCF state (P/C symmetric-or-column-major from host).
-    m_impl->dP.upload(P, static_cast<int>(nn), stream);
-    m_impl->dC.upload(C, static_cast<int>(nn), stream);
+    // AP8: skip the nao²-sized P/C uploads when they are already resident.
+    if (!pc_resident) {
+        m_impl->dP.upload(P, static_cast<int>(nn), stream);
+        m_impl->dC.upload(C, static_cast<int>(nn), stream);
+    }
     m_impl->dVao.upload(v_ao, nao, stream);
     m_impl->dQsh.upload(q_sh, nsh, stream);
     // GFN2 multipole potentials (converged) for the multipole-integral Pulay term.

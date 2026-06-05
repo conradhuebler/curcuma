@@ -213,21 +213,31 @@ public:
     bool gradient(const Matrix& P, const Eigen::MatrixXd& C, const Vector& eps,
                   int nocc_orbs, const Vector& v_ao, const Vector& q_sh,
                   const Eigen::MatrixXd& v_dp, const Eigen::MatrixXd& v_qp,
-                  Matrix& grad_out, Vector& dEdcn_out) override
+                  Matrix& grad_out, Vector& dEdcn_out, bool pc_resident = false) override
     {
         if (!m_ctx || m_n <= 0 || m_nat <= 0) return false;
-        if (P.rows() != m_n || C.rows() != m_n || static_cast<int>(eps.size()) < nocc_orbs
-            || static_cast<int>(v_ao.size()) != m_n) return false;
-        Eigen::MatrixXd Pcm = P;  // column-major copy (P symmetric → values preserved)
+        if (static_cast<int>(eps.size()) < nocc_orbs || static_cast<int>(v_ao.size()) != m_n)
+            return false;
+        // AP8: when the SCF left dP/dC resident, skip the host column-major copy +
+        // the upload; otherwise pass P/C (P symmetric → column-major copy preserves it).
+        Eigen::MatrixXd Pcm;
+        const double* Pp = nullptr;
+        const double* Cp = nullptr;
+        if (!pc_resident) {
+            if (P.rows() != m_n || C.rows() != m_n) return false;
+            Pcm = P;
+            Pp = Pcm.data();
+            Cp = C.data();
+        }
         // v_dp/v_qp are Eigen::MatrixXd (column-major) → contiguous [k + iat*rows].
         const bool with_mp = (v_dp.rows() == 3 && v_dp.cols() == m_nat
                            && v_qp.rows() == 6 && v_qp.cols() == m_nat);
         std::vector<double> grad(3 * m_nat, 0.0), dEdcn(m_nat, 0.0);
-        if (!m_ctx->computeGradient(Pcm.data(), C.data(), eps.data(), nocc_orbs,
+        if (!m_ctx->computeGradient(Pp, Cp, eps.data(), nocc_orbs,
                                     v_ao.data(), q_sh.data(),
                                     with_mp ? v_dp.data() : nullptr,
                                     with_mp ? v_qp.data() : nullptr,
-                                    grad.data(), dEdcn.data()))
+                                    grad.data(), dEdcn.data(), pc_resident))
             return false;
         grad_out.resize(m_nat, 3);
         for (int i = 0; i < m_nat; ++i) {

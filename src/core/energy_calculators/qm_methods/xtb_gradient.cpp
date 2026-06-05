@@ -786,17 +786,22 @@ bool XTB::calculateGradientGpu()
         v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
 
     const int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
-    Eigen::MatrixXd Ccm = m_wfn.C;   // column-major copy of the MO coefficients
 
     // GFN2 multipole potentials for the device multipole-integral Pulay term.
     Eigen::MatrixXd v_dp_empty, v_qp_empty;
     const Eigen::MatrixXd& v_dp = (m_method == MethodType::GFN2) ? m_pot.v_dp : v_dp_empty;
     const Eigen::MatrixXd& v_qp = (m_method == MethodType::GFN2) ? m_pot.v_qp : v_qp_empty;
 
+    // AP8 (Claude Generated): calculateGradientGpu only runs on the device-resident
+    // SCF path, so dP/dC are already the converged values on the GPU — reuse them
+    // (pc_resident=true) and pass empty P/C, skipping the two nao²-sized uploads and
+    // the host column-major copy. Bit-identical (the gradient only reads dP/dC).
+    const Matrix P_empty;
+    const Eigen::MatrixXd C_empty;
     Matrix grad_dev;   // nat×3, Eh/Bohr (sections 1/2/3 incl. GFN2 multipole Pulay)
     Vector dEdcn;      // nat
-    if (!m_gpu_scf->gradient(m_wfn.P, Ccm, m_wfn.eps, nocc_orbs, v_ao, m_wfn.q_sh,
-                             v_dp, v_qp, grad_dev, dEdcn))
+    if (!m_gpu_scf->gradient(P_empty, C_empty, m_wfn.eps, nocc_orbs, v_ao, m_wfn.q_sh,
+                             v_dp, v_qp, grad_dev, dEdcn, /*pc_resident=*/true))
         return false;
     if (grad_dev.rows() != nat || grad_dev.cols() != 3 || dEdcn.size() != nat)
         return false;
