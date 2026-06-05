@@ -75,7 +75,7 @@ namespace {
     PARAM(rmsd_threshold, Double, 0.01, "RMSD change threshold [Angstrom]", "Convergence", { "d_rmsd", "dRMSD" })
     PARAM(gradient_threshold, Double, 5e-4, "Gradient norm threshold [Eh/Bohr]", "Convergence", { "grad_norm", "GradNorm" })
     PARAM(max_iterations, Int, 5000, "Maximum number of optimization steps", "Convergence", { "max_iter", "MaxIter" })
-    PARAM(convergence_count, Int, 7, "Convergence bit field: 1=energy, 2=RMSD, 4=gradient (7=all)", "Convergence", { "conv_count", "ConvCount" })
+    PARAM(convergence_count, Int, 7, "Convergence bit field: 1=energy, 2=RMSD, 4=gradient, 8=optimizer-internal (7=all main criteria)", "Convergence", { "conv_count", "ConvCount" })
     PARAM(max_energy_rise, Double, 100.0, "Maximum allowed energy rise [kJ/mol] before abort", "Convergence", { "maxrise" })
 
     // Output

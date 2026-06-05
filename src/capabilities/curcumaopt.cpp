@@ -168,9 +168,10 @@ void CurcumaOpt::LoadControlJson()
     m_dE = m_defaults.value("dE", 0.1);
     m_dRMSD = m_defaults.value("dRMSD", 0.01);
     m_GradNorm = m_defaults.value("GradNorm", 5e-4);
-    m_ConvCount = m_defaults.value("ConvCount", 11);
+    m_ConvCount = m_defaults.value("convergence_count", m_defaults.value("ConvCount", 7));
+    m_maxiter = m_defaults.value("max_iterations", 5000);
 
-    // Claude Generated (May 2026): Apply convergence preset before individual overrides
+    // Apply convergence preset: overrides defaults, individual params below still win
     if (m_defaults.contains("convergence_preset")) {
         std::string preset = m_defaults["convergence_preset"].get<std::string>();
         if (preset == "loose") {
@@ -208,7 +209,6 @@ void CurcumaOpt::LoadControlJson()
     m_serial = m_defaults.value("serial", false);
     m_hessian = m_defaults.value("hessian", 0);
     m_optH = m_defaults.value("opt_h", false);
-    m_maxiter = m_defaults.value("max_iter", 5000);
     m_maxrise = m_defaults.value("max_rise", 100);
     m_fusion = m_defaults.value("fusion", false);
     m_optimethod = m_defaults.value("opti_method", 0);
@@ -726,13 +726,13 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
         /*
          * Energy = 1
          * RMSD = 2
-         * LBFGS Conv = 4
-         * Gradient Norm = 8
+         * Gradient Norm = 4  (matches OptimizerDriver bit semantics: 7=all main criteria)
+         * LBFGS Conv = 8
          * */
         converged = 1 * (abs(fun.m_energy - final_energy) * 2625.5 < m_dE)
             + 2 * (step_rmsd < m_dRMSD)
-            + 4 * (solver.isConverged())
-            + 8 * (solver.final_grad_norm() < m_GradNorm);
+            + 4 * (solver.final_grad_norm() < m_GradNorm)
+            + 8 * (solver.isConverged());
         perform_optimisation = ((converged & m_ConvCount) != m_ConvCount) && (fun.isError() == 0);
         std::ifstream test_file("stop");
         bool result = test_file.is_open();
@@ -789,11 +789,11 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
         : driver->RMSD();
 
     std::string conv_report = fmt::format(
-        "Converged: dE={:.4f} (<{:.4f}) [{}], RMSD={:.4f} (<{:.4f}) [{}], LBFGS={} [{}], GradNorm={:.4e} (<{:.4e}) [{}]\n",
+        "Converged: dE={:.4f} (<{:.4f}) [{}], RMSD={:.4f} (<{:.4f}) [{}], GradNorm={:.4e} (<{:.4e}) [{}], LBFGS={} [{}]\n",
         last_energy_change, m_dE, (converged & 1) ? "OK" : "FAIL",
         final_rmsd, m_dRMSD, (converged & 2) ? "OK" : "FAIL",
-        solver.isConverged(), (converged & 4) ? "OK" : "FAIL",
-        solver.final_grad_norm(), m_GradNorm, (converged & 8) ? "OK" : "FAIL");
+        solver.final_grad_norm(), m_GradNorm, (converged & 4) ? "OK" : "FAIL",
+        solver.isConverged(), (converged & 8) ? "OK" : "FAIL");
     if (error == false) {
         output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, final_rmsd, solver.final_grad_norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
         output += fmt::format("{0: ^75}\n", "*** Geometry Optimisation converged ***");
@@ -994,13 +994,13 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
         /*
          * Energy = 1
          * RMSD = 2
-         * LBFGS Conv = 4
-         * Gradient Norm = 8
+         * Gradient Norm = 4  (matches OptimizerDriver bit semantics: 7=all main criteria)
+         * LBFGS Conv = 8
          * */
         converged = 1 * (abs(gptfgs.Energy() - final_energy) * 2625.5 < m_dE)
             + 2 * (driver->RMSD() < m_dRMSD)
-            + 4 * (gptfgs.isConverged())
-            + 8 * (gptfgs.getCurrentGradient().norm() < m_GradNorm);
+            + 4 * (gptfgs.getCurrentGradient().norm() < m_GradNorm)
+            + 8 * (gptfgs.isConverged());
         perform_optimisation = ((converged & m_ConvCount) != m_ConvCount) && (gptfgs.isError() == 0);
         std::ifstream test_file("stop");
         bool result = test_file.is_open();
@@ -1060,11 +1060,11 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
         error = true;
     }
     std::string conv_report_gpt = fmt::format(
-        "Converged: dE={:.4f} (<{:.4f}) [{}], RMSD={:.4f} (<{:.4f}) [{}], LBFGS={} [{}], GradNorm={:.4e} (<{:.4e}) [{}]\n",
+        "Converged: dE={:.4f} (<{:.4f}) [{}], RMSD={:.4f} (<{:.4f}) [{}], GradNorm={:.4e} (<{:.4e}) [{}], LBFGS={} [{}]\n",
         last_energy_change, m_dE, (converged & 1) ? "OK" : "FAIL",
         driver->RMSD(), m_dRMSD, (converged & 2) ? "OK" : "FAIL",
-        gptfgs.isConverged(), (converged & 4) ? "OK" : "FAIL",
-        gptfgs.getCurrentGradient().norm(), m_GradNorm, (converged & 8) ? "OK" : "FAIL");
+        gptfgs.getCurrentGradient().norm(), m_GradNorm, (converged & 4) ? "OK" : "FAIL",
+        gptfgs.isConverged(), (converged & 8) ? "OK" : "FAIL");
 
     if (error == false) {
         output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, gptfgs.Energy(), (gptfgs.Energy() - final_energy) * 2625.5, driver->RMSD(), gptfgs.getCurrentGradient().norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);

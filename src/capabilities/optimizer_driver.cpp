@@ -100,7 +100,33 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
     OptimizationContext context;
     context.energy_calculator = calc;
 
-    // Load convergence criteria (Claude Nov 2025: Type-safe conversions)
+    // Apply convergence preset as base layer; individual params below override it
+    if (config.contains("convergence_preset")) {
+        std::string preset = config["convergence_preset"].get<std::string>();
+        if (preset == "loose") {
+            context.energy_threshold = 1.0;
+            context.rmsd_threshold = 0.05;
+            context.gradient_threshold = 1e-3;
+            context.max_iterations = 1000;
+        } else if (preset == "normal") {
+            context.energy_threshold = 0.1;
+            context.rmsd_threshold = 0.01;
+            context.gradient_threshold = 5e-4;
+            context.max_iterations = 5000;
+        } else if (preset == "tight") {
+            context.energy_threshold = 1e-6 * 2625.5;
+            context.rmsd_threshold = 1e-3;
+            context.gradient_threshold = 1e-5;
+            context.max_iterations = 10000;
+        } else if (preset == "verytight") {
+            context.energy_threshold = 1e-7 * 2625.5;
+            context.rmsd_threshold = 1e-4;
+            context.gradient_threshold = 1e-6;
+            context.max_iterations = 20000;
+        }
+    }
+
+    // Load convergence criteria (Type-safe conversions; override preset if explicitly set)
     if (config.contains("energy_threshold"))
         context.energy_threshold = config["energy_threshold"].get<double>();
     if (config.contains("rmsd_threshold"))
