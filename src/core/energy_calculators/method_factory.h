@@ -90,6 +90,10 @@ private:
     static std::unique_ptr<ComputationalMethod> createDFTD3(const json& config);
     static std::unique_ptr<ComputationalMethod> createDFTD4(const json& config);
 
+    // ORCA external method (runtime check, no compilation flag)
+    static std::unique_ptr<ComputationalMethod> createOrca(const std::string& method, const json& config);
+    static bool hasOrca();
+
     // Compilation flag checks
     static bool hasTBLite();
     static bool hasXTB();

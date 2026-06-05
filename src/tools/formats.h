@@ -213,7 +213,15 @@ inline Mol Coord2Mol(const std::string& filename)
     int line_number = 0;
     for (std::string line; getline(*file, line);) {
         line_number++;
-        //if (readblock) {
+        // Trim trailing/leading whitespace — handles coord files with trailing spaces
+        // Claude Generated 2026
+        size_t end = line.find_last_not_of(" \t\n\r\f\v");
+        if (end == std::string::npos) continue; // blank line
+        line = line.substr(0, end + 1);
+        size_t start = line.find_first_not_of(" \t\n\r\f\v");
+        if (start > 0) line = line.substr(start);
+        if (line.empty() || line[0] == '$')
+            continue; // Skip Turbomole directives ($coord, $end, etc.)
         auto strings = SplitString(line, " ");
         if (strings.size() == 4) {
             try {

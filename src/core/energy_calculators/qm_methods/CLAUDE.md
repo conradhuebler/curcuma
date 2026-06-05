@@ -57,6 +57,7 @@ Base class for matrix-based quantum methods providing:
 - **XTB Interface**: Extended tight-binding methods (GFN-FF, GFN1, GFN2)
 - **TBLite Interface**: Tight-binding DFT methods (GFN1, GFN2, iPEA1)
 - **Ulysses Interface**: Various semi-empirical methods (PM3, AM1, MNDO)
+- **ORCA Interface** (Jun 2026): External composite methods (HF-3c, B97-3c, r2SCAN-3c, PBEh-3c, custom via `orca`) — see ORCA Notes below
 - **DFT-D3/D4**: Dispersion correction interfaces
 
 ### Integral Support
@@ -143,6 +144,7 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - **✅ XTB/TBLite Interfaces**: Native library verbosity synchronized with CurcumaLogger
 - **✅ Ulysses Interface**: Complete CurcumaLogger integration with SCF progress
 - **🔧 Native GFN-FF (gfnff)**: Architecture complete, parameter debugging in progress
+- **🤖 AI-generated ORCA Interface** (Jun 2026): Wrapper for ORCA composite methods via external process (popen). Supports HF-3c, B97-3c, r2SCAN-3c, PBEh-3c and custom input. Status: AI-generated, pending human production test (no ✅ TESTED label).
 
 ### Verbosity Integration Status ✅
 - **✅ EHT**: Complete integration with `printOrbitalAnalysisVerbose()` for Level 2
@@ -211,6 +213,15 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - Efficient integral calculation algorithms
 - Memory-optimized basis set handling
 - **Silent Mode**: Zero-overhead Level 0 for iterative calculations
+
+### ORCA Interface Notes (Jun 2026)
+- **🤖 AI-generated** — pending human production test (no ✅ TESTED label).
+- **NOT thread-safe**: each thread needs its own instance with unique orca_basename; `OrcaMethod::isThreadSafe() == false`.
+- **CG atoms (element 226)**: rejected by default; opt-in via `orca_allow_cg=true`.
+- **JSON schema**: validated against orca_2json (ORCA 5.0.4); unknown schemas fall back to text parsing.
+- **Parser supports ORCA 5.x and 6.x** output formats (header variants: `The cartesian gradient`, `CARTESIAN GRADIENT`, `Gradient (Eh/Bohr)`).
+- **Legacy CLI** (`curcuma -orca <input>`): preserved via `runExistingInput()`, which delegates to the new code path.
+- **Tested**: unit-tested via `test_orca_interface` (8 sections, 30+ assertions). No integration test against a real ORCA binary in CI.
 
 ---
 
