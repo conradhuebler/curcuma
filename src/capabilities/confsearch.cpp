@@ -206,40 +206,40 @@ void ConfSearch::start()
             }
         }
 
-        CurcumaLogger::result("ConfSearch: === Phase 2: Geometry Optimisation ===");
+        CurcumaLogger::result("ConfSearch: === Phase 2: Geometry Optimisation of Bias Structures ===");
         nlohmann::json opt;
         opt["method"] = m_method;
         // Single-threaded per optimization when ConfSearch parallelizes externally
         opt["threads"] = (m_threads > 1) ? 1 : m_threads;
         if (md.contains("gpu") && !md["gpu"].is_null())
             opt["gpu"] = md["gpu"];
-        PerformOptimisation("ff", opt);
-        // Count optimised structures
+        // Bias structures are the primary conformers discovered by RMSD-MTD.
+        // MD unique snapshots (confsearch.unique.xyz) are secondary and not used here.
+        PerformOptimisation("confsearch.bias", opt);
         int opt_count = 0;
         {
-            FileIterator opt_file("confsearch.unique.opt.xyz");
+            FileIterator opt_file("confsearch.bias.opt.xyz");
             while (!opt_file.AtEnd()) { opt_file.Next(); opt_count++; }
         }
-        CurcumaLogger::result_fmt("ConfSearch: Optimisation complete. {} structures optimised.", opt_count);
+        CurcumaLogger::result_fmt("ConfSearch: Optimisation complete. {} bias structures optimised.", opt_count);
 
         CurcumaLogger::result("ConfSearch: === Phase 3: RMSD-Based Conformer Filtering ===");
         nlohmann::json scan = ConfSearchJson;
-        scan["rmsdmethod"] = "hybrid";
+        scan["rmsdmethod"] = "inertia";
         scan["fewerFile"] = true;
         // Single-threaded per ConfScan when ConfSearch parallelizes externally
         scan["threads"] = (m_threads > 1) ? 1 : m_threads;
-        scan["energy_method"] = m_method; // Forward energy method for EnergyCalculator in ConfScan
-        scan["max_energy"] = m_energy_window; // Forward energy window to ConfScan for early filtering
+        scan["energy_method"] = m_method;
+        scan["max_energy"] = m_energy_window;
         if (md.contains("gpu") && !md["gpu"].is_null())
             scan["gpu"] = md["gpu"];
-        PerformFilter("ff", scan);
-        // Count after RMSD filter
+        PerformFilter("confsearch.bias", scan);
         int rmsd_count = 0;
         {
-            FileIterator rmsd_file("confsearch.unique.opt.accepted.xyz");
+            FileIterator rmsd_file("confsearch.bias.opt.accepted.xyz");
             while (!rmsd_file.AtEnd()) { rmsd_file.Next(); rmsd_count++; }
         }
-        CurcumaLogger::result_fmt("ConfSearch: RMSD filtering complete. {} structures accepted after RMSD filter.", rmsd_count);
+        CurcumaLogger::result_fmt("ConfSearch: RMSD filtering complete. {} structures accepted.", rmsd_count);
 
         CurcumaLogger::result("ConfSearch: === Phase 4: Energy Window and Topology Filter ===");
         for (int i = 0; i < m_in_stack.size(); ++i)
@@ -248,7 +248,7 @@ void ConfSearch::start()
         double lowest_energy = std::numeric_limits<double>::infinity();
         int accepted = 0, rejected_topo = 0, rejected_energy = 0;
         std::vector<Molecule*> candidates;
-        FileIterator file("confsearch.unique.opt.accepted.xyz");
+        FileIterator file("confsearch.bias.opt.accepted.xyz");
         while (!file.AtEnd()) {
             Molecule* mol = new Molecule(file.Next());
             if ((m_topo_matrix - mol->DistanceMatrix().second).cwiseAbs().sum() != 0) {
@@ -381,22 +381,28 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
             }
             CurcumaLogger::result_fmt("ConfSearch: Wrote {} bias structures to confsearch.mtd.xyz", bias_count);
 
-            // C) Append sampled bias structures to confsearch.unique.xyz for downstream opt/filter
-            // Limit to ~200 to avoid overwhelming the optimisation stage; stride evenly samples.
+            // C) Write sampled bias structures to confsearch.bias.xyz (separate from unique).
+            // These are the actually explored conformations and always bypass ConfScan filtering.
+            // Limit to 200 to avoid overwhelming the optimisation stage; stride evenly samples.
             const int max_bias_export = 200;
             int stride = (bias_count <= max_bias_export) ? 1
                                                           : static_cast<int>(std::ceil(static_cast<double>(bias_count) / max_bias_export));
             int exported = 0;
+            bool first_bias = true;
             for (int i = 0; i < bias_count; i += stride) {
                 Molecule mol(ref_mol);
                 mol.setGeometry(snapshot[i].geometry);
                 mol.setName("bias_" + std::to_string(snapshot[i].index));
-                mol.appendXYZFile(file);
+                if (first_bias) {
+                    mol.writeXYZFile("confsearch.bias.xyz");
+                    first_bias = false;
+                } else {
+                    mol.appendXYZFile("confsearch.bias.xyz");
+                }
                 exported++;
             }
-            CurcumaLogger::result_fmt("ConfSearch: Appended {} sampled bias structures (stride={}) to {}",
-                exported, stride, file);
-            total_structures += exported;
+            CurcumaLogger::result_fmt("ConfSearch: Wrote {} bias structures (stride={}) to confsearch.bias.xyz (bypass ConfScan)",
+                exported, stride);
         }
     }
 
@@ -406,8 +412,7 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
 
 std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann::json& parameter)
 {
-    // Claude Generated (Apr 2026): Use unified optimizer with parallel batch support
-    std::string basename = "confsearch.unique";
+    std::string basename = f;
     std::string input_file = basename + ".xyz";
     std::string output_file = basename + ".opt.xyz";
 
@@ -465,9 +470,10 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
 std::string ConfSearch::PerformFilter(const std::string& f, const nlohmann::json& parameter)
 {
     ConfScan* scan = new ConfScan(parameter, false);
-    scan->setFileName("confsearch.unique.opt.xyz");
+    scan->setFileName(f + ".opt.xyz");
     scan->start();
-    return std::string("fff");
+    delete scan;
+    return f;
 }
 
 nlohmann::json ConfSearch::WriteRestartInformation()
