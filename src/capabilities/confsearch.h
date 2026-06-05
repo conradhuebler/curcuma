@@ -146,7 +146,7 @@ public:
     }
 
 private:
-    std::string PerformMolecularDynamics(const std::vector<Molecule*>& molecules, const nlohmann::json& parameter);
+    void PerformMolecularDynamics(const std::vector<Molecule*>& molecules, const nlohmann::json& parameter);
 
     std::string PerformOptimisation(const std::string& filename, const nlohmann::json& parameter);
 

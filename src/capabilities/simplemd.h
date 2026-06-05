@@ -551,7 +551,7 @@ public:
     {
         setAutoDelete(true);
     }
-    ~MDThread() = default;
+    ~MDThread() { delete m_mddriver; }
     void setBasename(const std::string& basename) { m_basename = basename; }
     inline void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
     SimpleMD* MDDriver() const { return m_mddriver; }
