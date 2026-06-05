@@ -149,7 +149,37 @@ void ConfSearch::start()
         CurcumaLogger::result("ConfSearch: RMSD-MTD Disabled");
     }
 
-    // Claude Generated (Apr 2026): Create shared bias pool for parallel ConfSearch.
+    // Optimise all input structures before any MD run.
+    // m_topo_matrix is updated from the first optimised structure so Phase 4
+    // topology checks compare against the relaxed geometry, not the raw input.
+    CurcumaLogger::header("=== ConfSearch: Initial Geometry Optimisation ===");
+    {
+        bool first = true;
+        for (auto* mol : m_in_stack) {
+            if (first) { mol->writeXYZFile("confsearch.input.xyz"); first = false; }
+            else          mol->appendXYZFile("confsearch.input.xyz");
+        }
+        nlohmann::json opt_init;
+        opt_init["method"] = m_method;
+        opt_init["threads"] = m_threads;
+        if (md.contains("gpu") && !md["gpu"].is_null())
+            opt_init["gpu"] = md["gpu"];
+        PerformOptimisation("confsearch.input", opt_init);
+
+        for (auto* mol : m_in_stack) delete mol;
+        m_in_stack.clear();
+        FileIterator opt_in("confsearch.input.opt.xyz");
+        while (!opt_in.AtEnd()) {
+            Molecule mol = opt_in.Next();
+            if (mol.AtomCount() > 0)
+                m_in_stack.push_back(new Molecule(mol));
+        }
+        if (!m_in_stack.empty())
+            m_topo_matrix = m_in_stack[0]->DistanceMatrix().second;
+        CurcumaLogger::result_fmt("ConfSearch: {} input structures optimised", m_in_stack.size());
+    }
+
+    // Create shared bias pool for parallel ConfSearch.
     // When rmsd_mtd is enabled, workers share bias structures for better exploration.
     bool use_shared_pool = md.value("rmsd_mtd", false);
     if (use_shared_pool) {

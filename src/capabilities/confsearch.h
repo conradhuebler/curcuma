@@ -36,7 +36,7 @@
 #include "src/core/energycalculator.h"
 using namespace curcuma;
 static const nlohmann::json ConfSearchJson{
-    { "method", "uff" },
+    { "method", "gfnff" },
     { "startT", 600 },
     { "endT", 300 },
     { "deltaT", 50 },
