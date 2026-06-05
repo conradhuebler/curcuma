@@ -1,6 +1,12 @@
 # Work Package: Stage 6 — fully device-resident GFN1/GFN2 SCF iteration
 
-> 🤖 AI-prepared work package (2026-06-04), not yet implemented. Companion to
+> ✅ **IMPLEMENTED + machine-validated for GFN2 (2026-06-05)** — see the
+> [Stage 6 section in docs/SQM_GPU.md](SQM_GPU.md#stage-6--fully-device-resident-gfn2-scf-iteration-2026-06-05-done--validated)
+> for what landed, the validation, and the honest performance note (residency
+> milestone, not a measured `-sp` speed-up; the GFN1 fused loop was deferred —
+> GFN1 keeps its Stage-2a resident path). The WP below is the original proposal.
+>
+> 🤖 AI-prepared work package (2026-06-04). Companion to
 > [docs/SQM_GPU.md](SQM_GPU.md) and [docs/SQM_GPU_STAGE5_WP.md](SQM_GPU_STAGE5_WP.md).
 > Stage 5 (committed: EEQ charge model, device `q_at`, in-SCF D4 `dE/dq`, and the
 > **whole** GFN2 potential build — `γ·q_sh` + shell third-order + multipole

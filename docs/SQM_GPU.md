@@ -24,9 +24,16 @@ This is a staged port. Each stage is independently buildable and validated at th
 | 1 | Per-iteration generalized eigensolve on the GPU (cuSOLVER), rest on CPU | ✅ done |
 | 2a | **GFN1 device-resident SCF**: H0/S/L stay on the device for the whole loop; per-iter only length-nao vectors cross | ✅ done |
 | 2b | **GFN2 device-resident SCF**: + multipole integrals resident, anisotropic Fock + atomic moments on the device (isotropic potential incl. in-SCF D4 stays on host) | ✅ done |
-| 3 | Integrals on the GPU (S, H0, CN, γ, multipole) | ⏳ |
-| 4 | Gradients on the GPU → device-resident `-opt`/`-md` | ⏳ |
-| 5 | Mixed precision (FP32 bulk / FP64 refinement) + tuning | ⏳ |
+| 3 | Integrals on the GPU (S, H0, CN, γ, multipole) | ✅ done |
+| 4 | Gradients on the GPU → device-resident `-opt`/`-md` | ✅ done |
+| 5 | Mixed precision (FP32 bulk / FP64 refinement) — default ON for `-gpu` | ✅ done |
+| 5-pot | **GFN2 in-SCF D4/EEQ + whole isotropic+multipole potential on the device** ([Stage-5 WP](SQM_GPU_STAGE5_WP.md)) | ✅ done |
+| 6 | **Fully device-resident GFN2 SCF loop** (occupation/populations/SCC energy/Broyden on the device; host polls only O(1)) ([Stage-6 WP](SQM_GPU_STAGE6_WP.md)) | ✅ done (GFN2) |
+
+> The "Stage N" labels here and in the WP docs (`SQM_GPU_STAGE{3,5,6}_WP.md`) are
+> historical and do **not** form one linear sequence: stage 5 in this table is the
+> mixed-precision eigensolve, while the *Stage-5 WP* is the device potential build
+> (row `5-pot`). Each row's detail is in the dated section below or the linked WP.
 
 ## Build
 
@@ -165,6 +172,54 @@ compute-sanitizer 0 errors. The `γ`/CN host-consumer choice was option (a) — 
 computed on the device and downloaded once per geometry (nsh², cheap); moving the
 Coulomb gemv on-device (option b) would *add* per-iteration transfers until the
 whole isotropic potential moves to the device.
+
+## Stage 6 — fully device-resident GFN2 SCF iteration (2026-06-05, DONE + validated)
+
+> 🤖 AI-generated, ⚙️ machine-tested. **Not** human production tested. Companion
+> WP: [docs/SQM_GPU_STAGE6_WP.md](SQM_GPU_STAGE6_WP.md).
+
+After Stage 5 (device GFN2 potential build) the only per-SCF-iteration work left
+on the host was the **loop driver**: occupation, populations, the SCC energy, the
+Broyden charge mix, and convergence — forcing the `eps`↓ / `occ`↑ / `pop_ao`↓ /
+`dp_at`/`qp_at`↓ / `q_sh`↑ round-trips. Stage 6 moves the whole loop body onto the
+device. A new backend seam (`supportsResidentLoop`/`beginResidentLoop`/
+`residentScfStep`/`residentLoopCharges`) runs one fused GFN2 iteration entirely on
+the GPU — D4 reference weights (`k_d4_build_refw`, from the resident charges) →
+device potential build + Fock + eigensolve (`eps` stays resident) → device Fermi
+occupation (`k_occupations`) → density → device `q_sh`/`q_at`/moments → device SCC
+energy (Coulomb gemv+dot, shell third-order, multipole reductions) → **device
+Broyden mixer** (`k_broyden_*`, cuBLAS Gram + a single-block M×M solve) → unpack.
+**Per iteration only `max|Δq_sh|` + the 4 SCC energy scalars (O(1)) come down**;
+`eps`/`occ`/`pop_ao`/moments/`q_sh` never cross the bus. The converged charges +
+P/C/eps download once at the end, so the post-SCF energy + gradient path is
+unchanged. Gated behind the GFN2 device-potential + Broyden path; the host-driven
+loop is the byte-unchanged fallback (and GFN1 keeps its Stage-2a path).
+
+**Validation:** energy bit-stable vs the CPU host loop — H2O/CH4/NH3/C6H6/HCN/
+triose match to all printed decimals; `complex` (231) `−329.52707822` (1e-8 to the
+host bar). `gpu_gfn2_validation` 12/12 @1e-8 vs tblite (xfails unchanged);
+`gpu_gfn1_validation` 12/12 (unaffected). The analytic gradient through the
+resident loop matches the CPU to ~1e-10 Eh/Å **once the SCF is converged tightly**
+(the device Broyden lands at a slightly different point in the loose 1e-5
+convergence ball than the host Broyden — energy is stationary so it matches to
+1e-8, the gradient needs `-scf_threshold 1e-8`; `test_xtb_cuda_gradient` does this).
+CH4 `-opt` converges to `−4.17521844`. New component tests (`ctest -L gpu_scf`, 37):
+device occupation, `q_sh`, D4 ref-weights, SCC energy, Broyden — each vs the host
+at a frozen state (~1e-10..1e-16). compute-sanitizer 0 errors (H2O + triose);
+no-CUDA `release/` rebuilds + CPU `gfn{1,2}_validation` 12/12 (seam `#ifdef`-free).
+
+**Honest performance note:** Stage 6 is a **residency / correctness milestone, not
+a measured speed-up** on `-sp`. `complex/231` GFN2 `-sp -threads 8`: SCF 341 ms
+(GPU resident) vs 417 ms (CPU), TOTAL 511 vs 587 ms — but ≈ the Stage-5 host-driven
+device-potential path (~515 ms). Removing the nao-sized round-trips did **not**
+shrink the SCF, because the per-iteration latency is dominated by the cuSOLVER
+eigensolve plus the residual **O(1) host-pointer cuBLAS syncs** the step still
+performs (the band `Ddot`, the Coulomb `Ddot`, the Broyden `nrm2`, the `dq` poll,
+the eigensolve `info` — ~5 syncs/iteration), not by the size of the data crossing.
+The k=1 host poll removes the *transfers* but not the *sync count*. The remaining
+lever (deferred) is batching those reductions into device-pointer accumulators with
+**one** download per step and a **k-iteration** convergence poll (the device-side
+FP32→FP64 decision) — only then does the latency region actually shrink.
 
 ## Notes / limits
 
