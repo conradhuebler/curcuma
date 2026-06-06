@@ -84,6 +84,16 @@ private:
 
 namespace Tools {
 
+// Trim whitespace from both ends of a string - Claude Generated 2026
+inline std::string trim(const std::string& str)
+{
+    size_t first = str.find_first_not_of(" \t\n\r\f\v");
+    if (first == std::string::npos)
+        return "";
+    size_t last = str.find_last_not_of(" \t\n\r\f\v");
+    return str.substr(first, (last - first + 1));
+}
+
 inline std::vector<int> ParseStringToVector(const std::string& input)
 {
     std::vector<int> result;

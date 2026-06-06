@@ -57,6 +57,7 @@ Base class for matrix-based quantum methods providing:
 - **XTB Interface**: Extended tight-binding methods (GFN-FF, GFN1, GFN2)
 - **TBLite Interface**: Tight-binding DFT methods (GFN1, GFN2, iPEA1)
 - **Ulysses Interface**: Various semi-empirical methods (PM3, AM1, MNDO)
+- **ORCA Interface** (Jun 2026): External composite methods (HF-3c, B97-3c, r2SCAN-3c, PBEh-3c, custom via `orca`) — see ORCA Notes below
 - **DFT-D3/D4**: Dispersion correction interfaces
 
 ### Integral Support
@@ -158,6 +159,7 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - **⚙️ SQM GPU Stage 6 — fully device-resident GFN2 SCF loop (2026-06-05)**: the whole per-iteration loop body (potential→Fock→eigensolve→occupation→density→charges/moments→SCC energy→**device Broyden mixer**) runs on the GPU; the host polls only `max|Δq_sh|`+4 energy scalars (O(1))/step — eps/occ/pop_ao/moments/q_sh never cross the bus. New kernels `k_occupations`/`k_qsh_scatter`/`k_d4_build_refw`/`k_energy_*`/`k_broyden_*`/`k_maxabsdiff`; seam `GpuScfBackend::{supportsResidentLoop,beginResidentLoop,residentScfStep,residentLoopCharges,…}`; gated GFN2 device-potential+Broyden path, host loop is byte-unchanged fallback (GFN1 unaffected). Energy bit-stable vs CPU (complex/231 −329.52707822); `gpu_gfn2_validation` 12/12; gradient ~1e-10 Eh/Å at `-scf_threshold 1e-8` (device Broyden lands at a different point in the loose 1e-5 ball — energy stationary→1e-8, gradient needs tight SCF); `ctest -L gpu_scf` 31/31 (occupation/q_sh/d4refw/scc_energy/broyden component tests — re-authored 2026-06-05 after the 5 files were lost in a WIP restore; residuals ~0..1e-14); sanitizer 0 errors; non-CUDA `release/` 24/24. **Honest: residency/correctness milestone, NOT a measured `-sp` speed-up** (complex SCF 341 ms GPU vs 417 ms CPU but ≈ Stage-5 ~515 ms TOTAL; the eigensolve + residual O(1) host-pointer cuBLAS syncs ~5/iter dominate, not the removed transfers). See [docs/SQM_GPU.md](../../../../docs/SQM_GPU.md)
 - **⚙️ Multi-step SCC extrapolation (2026-06-05)**: opt-in generalisation of the 1-step warm-start — predicts the new-step SCC vector (GFN1 `q_sh`, GFN2 `[q_sh; dp_at; qp_at]`) from a history (`m_scf_history`) of converged steps. `-scf_extrapolation none|aspc|gauss` (ASPC Kolafa-2004 binomial coeffs / least-squares polynomial; both `Σw_j=1` charge-conserving), `-scf_extrapolation_order`, `-scf_extrapolation_apply guess|xlbomd`. `guess` keeps the full SCF (safe, same fixpoint within `scf_threshold`). `xlbomd` (Phase 2, EXPERIMENTAL) = extended-Lagrangian MD: the SCC density is a time-reversibly propagated auxiliary (Verlet + Niklasson dissipation, `xlbomdCoefficients` K=3..7) seeding a **converged** corrector (a naive bare-map/no-convergence corrector is non-contractive for tight-binding and diverges — verified), so the energy is exact; value is low MD energy drift (unvalidated). `m_xlbomd_aux` deque; bootstrap seeds K+1 converged states, then propagate from D[P_n]. `scf_xlbomd_correctors` = min corrector iters (default 1, no effect). Helpers `packSccState`/`unpackSccState`/`extrapolationWeights` in `xtb_native.cpp`; push in `UpdateMolecule`, predict in `Calculation` guess block, reset in `InitialiseMolecule`. Default `none` byte-unchanged. **Caffeine smooth-trajectory (guess, thr 1e-8):** SCF iters gfn1 170→79(aspc)/72(gauss), gfn2 215→90/92 (~55% fewer), final E bit-identical; xlbomd 170→141/215→180, energy bit-identical. Cites `aspc`(Kolafa 2004)/`density_extrapolation`(Pulay-Fogarasi 2004)/`xlbomd`(Niklasson 2008) on use. `ctest -L scf_extrapolation` green; default-path 29/29. Caveat: ideal-case numbers (uniform steps); real opt smaller, MD closer. See [docs/SQM_SCF_EXTRAPOLATION.md](../../../../docs/SQM_SCF_EXTRAPOLATION.md)
 - **🔧 Native GFN-FF (gfnff)**: Architecture complete, parameter debugging in progress
+- **🤖 AI-generated ORCA Interface** (Jun 2026): Wrapper for ORCA composite methods via external process (popen). Supports HF-3c, B97-3c, r2SCAN-3c, PBEh-3c and custom input. Status: AI-generated, pending human production test (no ✅ TESTED label).
 
 ### Verbosity Integration Status ✅
 - **✅ EHT**: Complete integration with `printOrbitalAnalysisVerbose()` for Level 2
@@ -226,6 +228,15 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - Efficient integral calculation algorithms
 - Memory-optimized basis set handling
 - **Silent Mode**: Zero-overhead Level 0 for iterative calculations
+
+### ORCA Interface Notes (Jun 2026)
+- **🤖 AI-generated** — pending human production test (no ✅ TESTED label).
+- **NOT thread-safe**: each thread needs its own instance with unique orca_basename; `OrcaMethod::isThreadSafe() == false`.
+- **CG atoms (element 226)**: rejected by default; opt-in via `orca_allow_cg=true`.
+- **JSON schema**: validated against orca_2json (ORCA 5.0.4); unknown schemas fall back to text parsing.
+- **Parser supports ORCA 5.x and 6.x** output formats (header variants: `The cartesian gradient`, `CARTESIAN GRADIENT`, `Gradient (Eh/Bohr)`).
+- **Legacy CLI** (`curcuma -orca <input>`): preserved via `runExistingInput()`, which delegates to the new code path.
+- **Tested**: unit-tested via `test_orca_interface` (8 sections, 30+ assertions). No integration test against a real ORCA binary in CI.
 
 ---
 

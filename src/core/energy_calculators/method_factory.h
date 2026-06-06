@@ -128,11 +128,15 @@ private:
      * @brief Create DFT-D4 dispersion correction
      */
     static std::unique_ptr<ComputationalMethod> createDFTD4(const json& config);
-    
+
+    // ORCA external method (runtime check, no compilation flag)
+    static std::unique_ptr<ComputationalMethod> createOrca(const std::string& method, const json& config);
+    static bool hasOrca();
+
     // =================================================================================
     // Compilation Flag Checks (from original isCompiled logic)
     // =================================================================================
-    
+
     static bool hasTBLite();
     static bool hasXTB();
     static bool hasUlysses();

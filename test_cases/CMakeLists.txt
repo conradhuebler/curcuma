@@ -130,6 +130,21 @@ endif()
 add_test(NAME test_periodic_table
          COMMAND test_periodic_table)
 
+# Claude Generated (June 2026, Phase 0 ORCA improvement plan):
+# Unit tests for ORCA interface helpers, parsers, and CG-atom guard.
+add_executable(test_orca_interface
+        test_orca_interface.cpp)
+
+target_link_libraries(test_orca_interface curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_orca_interface REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_orca_interface
+         COMMAND test_orca_interface)
+set_tests_properties(test_orca_interface PROPERTIES TIMEOUT 30 LABELS "orca;unit")
+
 # Claude Generated (May 2026, WP-D Stage B): fast_exp_neg_sq_block unit test
 add_executable(test_fast_exp
         test_fast_exp.cpp)
