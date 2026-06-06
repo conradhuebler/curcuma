@@ -11,6 +11,7 @@
 #pragma once
 
 #include "src/global_config.h"
+#include "src/core/curcuma_eigen_config.h"  // BLAS/LAPACK macros BEFORE Eigen headers
 
 // Standard C++ Library Headers (most frequently used)
 #include <algorithm>

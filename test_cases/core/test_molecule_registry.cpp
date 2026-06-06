@@ -189,6 +189,22 @@ namespace TestMolecules {
             }
         },
         {
+            "NH3", {
+                .name = "NH3",
+                .description = "Ammonia (C3v, N at origin) — pyramidal polar test molecule",
+                .category = "small",
+                .atoms = {
+                    {7, Eigen::Vector3d(0.000000, 0.000000, 0.000000)},    // N
+                    {1, Eigen::Vector3d(0.000000, -0.937700, -0.381600)},  // H
+                    {1, Eigen::Vector3d(0.812000, 0.468850, -0.381600)},   // H
+                    {1, Eigen::Vector3d(-0.812000, 0.468850, -0.381600)}   // H
+                },
+                .reference_energies = {},
+                .tolerances = {},
+                .atom_count = 4
+            }
+        },
+        {
             "O3", {
                 .name = "O3",
                 .description = "Ozone from trimers/O3.xyz",
@@ -372,7 +388,7 @@ namespace TestMolecules {
     const MoleculeData& TestMoleculeRegistry::getMolecule(const std::string& name) {
         auto it = s_molecule_registry.find(name);
         if (it == s_molecule_registry.end()) {
-            throw std::invalid_argument("Molecule '" + name + "' not found in registry. Available molecules: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, H2O_dimer, O3, monosaccharide, triose. Note: 'polymer' is xyz-path-only (1410 atoms — too large to inline).");
+            throw std::invalid_argument("Molecule '" + name + "' not found in registry. Available molecules: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, H2O_dimer, NH3, O3, monosaccharide, triose. Note: 'polymer' is xyz-path-only (1410 atoms — too large to inline).");
         }
         return it->second;
     }

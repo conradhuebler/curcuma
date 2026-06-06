@@ -38,12 +38,42 @@ tblite methods:
 - gfn1
 - gfn2
 
+> Native GFN1/GFN2 (the canonical `gfn1`/`gfn2` backends, no external dependency) are validated against tblite to a 1e-8 Eh target — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md).
+
+> Native GFN1/GFN2 can use multiple cores **within one calculation** of a single large molecule: pass `-threads N` to a `-sp`/`-opt`/MD run (default is serial and bit-identical). Integral setup, gradient and Fock build scale ~3–5×; see [docs/SQM_THREADING.md](docs/SQM_THREADING.md).
+
+> Opt-in **MKL-free / GPU-portable eigensolve kernels** are available for the native GFN SCF (MKL stays the default): `-eigensolver native` (own Householder + Cuppen divide-and-conquer), `-eigensolver purify` (0 K density-matrix purification, GEMM-only, no diagonalization), `-eigensolver lobpcg` (seeded block LOBPCG, experimental), and `CURCUMA_EIG_TRED2=blocked` (BLAS-3 blocked tridiagonalization). See [docs/SQM_EIGENSOLVE_GPU.md](docs/SQM_EIGENSOLVE_GPU.md).
+
+> Opt-in **CUDA GPU path** for the native GFN1/GFN2 solver: `-method gfn1|gfn2 -gpu cuda` (build `release_cuda/` with `-DUSE_CUDA_XTB=ON`). Staged cuSOLVER/cuBLAS port (the CPU path is unchanged and `#ifdef`-free); both **GFN1** and **GFN2** run a device-resident SCF under the default Broyden mixing, and **Stage 3 builds the integrals (CN/S/H0/L/γ/multipole) on the device and Stage 4 the nuclear gradient — so `-opt`/`-md` are fully device-resident** (only xyz up, gradient+energy down per step; every device kernel matches the CPU elementwise to ~1e-15). 🤖 AI-generated / ⚙️ machine-tested only. See [docs/SQM_GPU.md](docs/SQM_GPU.md).
+
+> Opt-in **approximate large-system modes** scale the native GFN SCF beyond ~1000 atoms by exploiting locality (default is the exact dense path): `-large_system_mode fragments` (disconnected-fragment SCF, energy+gradient, `-eigensolver` propagates per fragment), `-large_system_mode dc` (divide-and-conquer, energy-only, `-eigensolver` propagates per sub-block, `-large_system_buffer_bohr` accuracy knob), `-large_system_mode sparse` (non-orthogonal density purification, 0 K gapped, `-eigensolver` ignored, `-large_system_sparse_threshold` knob). Each converges to the dense energy as its knob tightens; combining `-large_system_mode=fragments|dc` with `-eigensolver=purify` requires `-electronic_temperature 0` (hard error otherwise). See [docs/SQM_LARGE_SYSTEMS.md](docs/SQM_LARGE_SYSTEMS.md).
+
+> Opt-in **multi-step SCC extrapolation** for the native GFN SCF cuts SCF iterations across geometry steps in `-opt`/`-md` by predicting the next charge state from several past converged steps (generalises the 1-step warm-start; default `none` is unchanged). `-scf_extrapolation aspc` (Kolafa ASPC, best for fixed-timestep MD) or `-scf_extrapolation gauss` (least-squares, better for irregular opt steps), with `-scf_extrapolation_order`. The safe default `guess` coupling still converges the SCF fully; `-scf_extrapolation_apply xlbomd` is an experimental extended-Lagrangian Born-Oppenheimer mode (time-reversible auxiliary density + converged corrector, for low MD energy drift). On a smooth caffeine trajectory, `aspc`/`gauss` roughly halve SCF iterations (gfn2 215→90, gfn1 170→79) with bit-identical converged energy. 🤖 AI-generated / ⚙️ machine-tested only. See [docs/SQM_SCF_EXTRAPOLATION.md](docs/SQM_SCF_EXTRAPOLATION.md).
+
 xtb methods:
 - xtb-gfnff : GFN-FF via the xtb library
 - xtb-gfn1
 - xtb-gfn2
 
 Using only **d3** or **d4** should be possible.
+
+Native GFN2 includes an analytic D4 dispersion charge-response gradient
+(∂E_D4/∂q · ∂q/∂x). The zeta charges default to a single-shot dftd4 EEQ model
+(`-d4_charge_source eeq`, analytic ∂q/∂x); `-d4_charge_source mulliken` feeds the
+GFN2 SCF charges (energy + ∂E/∂q; the CPSCF gradient response is still pending —
+see [docs/D4_Q_RESPONSE.md](docs/D4_Q_RESPONSE.md)). Current alignment vs tblite
+(H₂O/NH₃ sub-µEh, open issues for CH₄/triose/complex) is tracked in
+[docs/GFN2_NATIVE_ROADMAP.md](docs/GFN2_NATIVE_ROADMAP.md) (Master, mit
+Komponenten-Audit-Plan und SCF-Status), [docs/GFN2_D4_STATUS.md](docs/GFN2_D4_STATUS.md)
+für die D4-Tiefe, und via `ctest -L d4_diag`.
+
+The native GFN SCF defaults to `broyden` mixing — a modified-Broyden quasi-Newton
+scheme on the SCC charge vector, the same mixer tblite/xtb use — which converges
+large polar systems that the old Fock-DIIS diverged on (e.g. the 231-atom
+`complex` now converges from the bare guess with plain `-method gfn2`). Other
+modes remain selectable: `-scf_mode diis|plain|level-shift` and `-scf_guess
+h0|eeq` (plus `-scf_damping`, `-diis_start`, `-level_shift`). See
+[docs/SCF_MODES.md](docs/SCF_MODES.md).
 
 Please cite xtb, tblite etc if external methods are used within curcuma! The most recent information can be found at the respective github pages, some are listed below.
 

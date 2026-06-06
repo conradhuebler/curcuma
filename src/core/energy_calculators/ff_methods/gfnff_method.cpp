@@ -32,7 +32,7 @@
 
 // Claude Generated (December 2025): D3/D4 dispersion integration
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
-#include "src/core/energy_calculators/ff_methods/d4param_generator.h"
+#include "src/core/energy_calculators/dispersion/d4param_generator.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"
 #include "src/core/energy_calculators/ff_methods/fast_exp.h"  // Claude Generated (May 2026, WP-D Stage B): SIMD exp(-x^2) for dcn step 3
 #include "src/core/energy_calculators/ff_methods/param_generator_thread.h"  // Claude Generated (Feb 2026): Parallel parameter generation

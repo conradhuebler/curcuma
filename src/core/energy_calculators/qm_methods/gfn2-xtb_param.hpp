@@ -302,5 +302,3 @@ public:
         return count;
     }
 };
-
-#endif // GFN2_XTB_ARRAY_PARAMETERS_H

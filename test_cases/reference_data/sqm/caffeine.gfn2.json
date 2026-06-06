@@ -1,0 +1,378 @@
+{
+  "molecule": "caffeine",
+  "geometry_file": "test_cases/molecules/larger/caffeine.xyz",
+  "charge": 0,
+  "spin_unpaired": 0,
+  "method": "gfn2",
+  "xtb_version": "6.6.1",
+  "energies": {
+    "total_energy": -42.147230219167,
+    "scc_energy": -42.640451657097,
+    "repulsion": 0.493123531855,
+    "isotropic_es": 0.084363905852,
+    "anisotropic_es": 0.003856598068,
+    "anisotropic_xc": 0.014431298887,
+    "dispersion": -0.023273198559,
+    "homo_lumo_gap_eV": 3.359412366712
+  },
+  "orbitals": [
+    {
+      "index": 1,
+      "occupation": 2.0,
+      "energy_Eh": -0.7202061,
+      "energy_eV": -19.5978,
+      "tag": ""
+    },
+    {
+      "index": 25,
+      "occupation": 2.0,
+      "energy_Eh": -0.5048683,
+      "energy_eV": -13.7382,
+      "tag": ""
+    },
+    {
+      "index": 26,
+      "occupation": 2.0,
+      "energy_Eh": -0.5045924,
+      "energy_eV": -13.7307,
+      "tag": ""
+    },
+    {
+      "index": 27,
+      "occupation": 2.0,
+      "energy_Eh": -0.5031975,
+      "energy_eV": -13.6927,
+      "tag": ""
+    },
+    {
+      "index": 28,
+      "occupation": 2.0,
+      "energy_Eh": -0.4949082,
+      "energy_eV": -13.4671,
+      "tag": ""
+    },
+    {
+      "index": 29,
+      "occupation": 2.0,
+      "energy_Eh": -0.4808492,
+      "energy_eV": -13.0846,
+      "tag": ""
+    },
+    {
+      "index": 30,
+      "occupation": 2.0,
+      "energy_Eh": -0.4766153,
+      "energy_eV": -12.9694,
+      "tag": ""
+    },
+    {
+      "index": 31,
+      "occupation": 2.0,
+      "energy_Eh": -0.4579256,
+      "energy_eV": -12.4608,
+      "tag": ""
+    },
+    {
+      "index": 32,
+      "occupation": 2.0,
+      "energy_Eh": -0.4374774,
+      "energy_eV": -11.9044,
+      "tag": ""
+    },
+    {
+      "index": 33,
+      "occupation": 2.0,
+      "energy_Eh": -0.4259664,
+      "energy_eV": -11.5911,
+      "tag": ""
+    },
+    {
+      "index": 34,
+      "occupation": 2.0,
+      "energy_Eh": -0.4193488,
+      "energy_eV": -11.4111,
+      "tag": ""
+    },
+    {
+      "index": 35,
+      "occupation": 2.0,
+      "energy_Eh": -0.414445,
+      "energy_eV": -11.2776,
+      "tag": ""
+    },
+    {
+      "index": 36,
+      "occupation": 2.0,
+      "energy_Eh": -0.4036024,
+      "energy_eV": -10.9826,
+      "tag": ""
+    },
+    {
+      "index": 37,
+      "occupation": 2.0,
+      "energy_Eh": -0.3884531,
+      "energy_eV": -10.5703,
+      "tag": "HOMO"
+    },
+    {
+      "index": 38,
+      "occupation": 0.0,
+      "energy_Eh": -0.264997,
+      "energy_eV": -7.2109,
+      "tag": "LUMO"
+    },
+    {
+      "index": 39,
+      "occupation": 0.0,
+      "energy_Eh": -0.2271751,
+      "energy_eV": -6.1818,
+      "tag": ""
+    },
+    {
+      "index": 40,
+      "occupation": 0.0,
+      "energy_Eh": -0.2097848,
+      "energy_eV": -5.7085,
+      "tag": ""
+    },
+    {
+      "index": 41,
+      "occupation": 0.0,
+      "energy_Eh": -0.1217667,
+      "energy_eV": -3.3134,
+      "tag": ""
+    },
+    {
+      "index": 42,
+      "occupation": 0.0,
+      "energy_Eh": -0.0545511,
+      "energy_eV": -1.4844,
+      "tag": ""
+    },
+    {
+      "index": 43,
+      "occupation": 0.0,
+      "energy_Eh": -0.0062715,
+      "energy_eV": -0.1707,
+      "tag": ""
+    },
+    {
+      "index": 44,
+      "occupation": 0.0,
+      "energy_Eh": 0.0157032,
+      "energy_eV": 0.4273,
+      "tag": ""
+    },
+    {
+      "index": 45,
+      "occupation": 0.0,
+      "energy_Eh": 0.0696574,
+      "energy_eV": 1.8955,
+      "tag": ""
+    },
+    {
+      "index": 46,
+      "occupation": 0.0,
+      "energy_Eh": 0.0893629,
+      "energy_eV": 2.4317,
+      "tag": ""
+    },
+    {
+      "index": 47,
+      "occupation": 0.0,
+      "energy_Eh": 0.1115081,
+      "energy_eV": 3.0343,
+      "tag": ""
+    },
+    {
+      "index": 48,
+      "occupation": 0.0,
+      "energy_Eh": 0.1162423,
+      "energy_eV": 3.1631,
+      "tag": ""
+    },
+    {
+      "index": 66,
+      "occupation": 0.0,
+      "energy_Eh": 0.6602187,
+      "energy_eV": 17.9655,
+      "tag": ""
+    }
+  ],
+  "mulliken": [
+    {
+      "index": 1,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 3.688,
+      "q_mulliken": -0.055
+    },
+    {
+      "index": 2,
+      "Z": 7,
+      "symbol": "N",
+      "cov_cn": 2.866,
+      "q_mulliken": -0.004
+    },
+    {
+      "index": 3,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 3.148,
+      "q_mulliken": 0.084
+    },
+    {
+      "index": 4,
+      "Z": 7,
+      "symbol": "N",
+      "cov_cn": 1.896,
+      "q_mulliken": -0.282
+    },
+    {
+      "index": 5,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 3.193,
+      "q_mulliken": 0.12
+    },
+    {
+      "index": 6,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 3.086,
+      "q_mulliken": -0.027
+    },
+    {
+      "index": 7,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 2.768,
+      "q_mulliken": 0.261
+    },
+    {
+      "index": 8,
+      "Z": 7,
+      "symbol": "N",
+      "cov_cn": 2.744,
+      "q_mulliken": -0.107
+    },
+    {
+      "index": 9,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 3.701,
+      "q_mulliken": -0.038
+    },
+    {
+      "index": 10,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 2.716,
+      "q_mulliken": 0.303
+    },
+    {
+      "index": 11,
+      "Z": 7,
+      "symbol": "N",
+      "cov_cn": 2.739,
+      "q_mulliken": -0.074
+    },
+    {
+      "index": 12,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 3.694,
+      "q_mulliken": -0.046
+    },
+    {
+      "index": 13,
+      "Z": 8,
+      "symbol": "O",
+      "cov_cn": 0.857,
+      "q_mulliken": -0.439
+    },
+    {
+      "index": 14,
+      "Z": 8,
+      "symbol": "O",
+      "cov_cn": 0.858,
+      "q_mulliken": -0.443
+    },
+    {
+      "index": 15,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.064
+    },
+    {
+      "index": 16,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.084
+    },
+    {
+      "index": 17,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.084
+    },
+    {
+      "index": 18,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.925,
+      "q_mulliken": 0.057
+    },
+    {
+      "index": 19,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.087
+    },
+    {
+      "index": 20,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.069
+    },
+    {
+      "index": 21,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.069
+    },
+    {
+      "index": 22,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.086
+    },
+    {
+      "index": 23,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.074
+    },
+    {
+      "index": 24,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.074
+    }
+  ],
+  "dipole": {
+    "x": 1.487,
+    "y": 0.284,
+    "z": -0.0,
+    "total_Debye": 3.849
+  }
+}

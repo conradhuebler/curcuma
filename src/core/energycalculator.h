@@ -415,6 +415,17 @@ public:
      */
     int getEffectiveVerbosity() const;
 
+    // =================================================================================
+    // SCF warm-start and iterative-mode (Claude Generated)
+    // Delegates to the underlying ComputationalMethod; no-op for non-XTB methods.
+    // =================================================================================
+
+    /** @brief Enable/disable SCF warm-start (reuse converged charges across steps). */
+    void setWarmStart(bool on);
+
+    /** @brief Enable/disable iterative mode (raise SCF display threshold by one level). */
+    void setIterativeMode(bool on);
+
 private:
     // =================================================================================
     // Internal State
@@ -444,7 +455,8 @@ private:
     int m_mult = 1;                                  ///< Multiplicity
 
     // Verbosity control (Claude Generated)
-    int m_verbosity_override = -1; ///< Override verbosity (-1 = use system)
+    int  m_verbosity_override = -1; ///< Override verbosity (-1 = use system)
+    bool m_is_iterative       = false; ///< MD/opt mode: raise output threshold by 1
 
     // Internal Methods
     

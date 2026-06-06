@@ -51,6 +51,12 @@ public:
     bool isThreadSafe() const override { return false; }
     std::string getMethodName() const override { return m_method_name; }
 
+    /// Test hook: #EEQ PCG solves that used the multi-step warm-start extrapolation.
+    /// Claude Generated.
+    long eeqPcgExtrapolationCount() const {
+        return m_gfnff ? m_gfnff->eeqPcgExtrapolationCount() : -1;
+    }
+
     // Configuration
     void setThreadCount(int threads) override;
     void setParameters(const json& params) override;

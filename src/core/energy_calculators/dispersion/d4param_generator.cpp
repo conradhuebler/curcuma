@@ -7,12 +7,14 @@
  */
 
 #include "d4param_generator.h"
-#include "gfnff_par.h"
+#include "d4_charge_scaling.h"  // shared exact dftd4 zeta (AP6b)
+#include "d4_ncoord.h"          // dftd4 EN-weighted covalent CN (GFN2 D4 path)
+#include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "d4_reference_data_fixed.cpp"  // D4 reference data (365 lines)
 #include "d4_reference_cn_fortran.cpp"  // D4 reference CN data (Fortran dftd3param.f90 - January 2026)
 #include "d4_alphaiw_data.cpp"  // D4 alphaiw polarizability data
 #include "d4_corrections_data.cpp"  // D4 correction factors
-#include "../../curcuma_logger.h"
+#include "src/core/curcuma_logger.h"
 
 #include <algorithm>
 #include <cmath>
@@ -81,7 +83,9 @@ void D4ParameterGenerator::initializeReferenceData()
     // Load reference data from d4_reference_data_fixed.cpp
     m_refn = ::d4_refn;  // Number of reference states per element (118 elements)
     m_refq = ::d4_refq;  // Reference charges (118 × 7)
-    m_refh = ::d4_refh;  // Reference hydrogen counts (118 × 7)
+    m_refh = ::d4_refh;  // Reference hydrogen counts (118 × 7) — dftd4 calls this hcount
+    m_refh_charges = ::d4_refh_charges;  // Reference H-charges (dftd4 refh) — used by GFN2 α-correction zeta scaling
+    m_refcovcn = ::d4_refcovcn;  // dftd4 refcovcn — covalent reference CN for the CN-Gaussian weighting (set_refcn)
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success(fmt::format("D4: Loaded {} elements from reference data", m_refn.size()));
@@ -255,7 +259,12 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     // Claude Generated (2025): Calculate CN FIRST, then pass to EEQ to avoid duplicate calculation
     // This eliminates redundant O(n²) CN computation inside EEQ solver
     auto t_cn_start = std::chrono::high_resolution_clock::now();
-    m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
+    if (m_use_d4_covalent_cn) {
+        // GFN2: dftd4 EN-weighted covalent CN (no log-cap) for the C6 interpolation.
+        m_cn_values = curcuma::dispersion::computeD4CovalentCN(m_atoms, geometry_bohr);
+    } else {
+        m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
+    }
     auto t_cn_end = std::chrono::high_resolution_clock::now();
     double t_cn_ms = std::chrono::duration<double, std::milli>(t_cn_end - t_cn_start).count();
 
@@ -302,8 +311,20 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::success(fmt::format("D4: Reused topology charges in {:.2f} ms (skipped EEQ solve)", t_eeq_ms));
         }
+    } else if (m_use_d4_single_shot_eeq) {
+        // Claude Generated (2026): canonical single-shot dftd4 EEQ (q-response path).
+        // One smooth linear system → analytical dq/dx (D4ChargeModel). Used by
+        // native GFN2 when d4_charge_source="eeq". Charges differ from the
+        // GFN-FF two-phase solver, so D4 energies were re-validated for this mode.
+        m_eeq_charges = m_d4_charge_model.computeCharges(m_atoms, geometry_bohr, 0.0);
+        auto t_eeq_end = std::chrono::high_resolution_clock::now();
+        t_eeq_ms = std::chrono::duration<double, std::milli>(t_eeq_end - t_eeq_start).count();
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::success(fmt::format("D4: single-shot EEQ charges in {:.2f} ms", t_eeq_ms));
+        }
     } else {
-        // Fallback: compute fresh EEQ charges
+        // Fallback: compute fresh EEQ charges via the GFN-FF two-phase solver.
         Vector cn_eigen = Eigen::Map<const Vector>(m_cn_values.data(), m_cn_values.size());
         m_eeq_charges = m_eeq_solver->calculateCharges(m_atoms, geometry_bohr, 0, &cn_eigen);
         auto t_eeq_end = std::chrono::high_resolution_clock::now();
@@ -327,6 +348,19 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                                  fmt::format("q={:.6f}", m_eeq_charges(i)));
         }
     }
+
+    // Claude Generated (2026-05-28, GFN2-D4 C-path fix): rebuild the C6 reference
+    // matrix if it was invalidated by a setD4CovalentCN()/setUseD4SingleShotEEQ()
+    // toggle after construction. The constructor builds the cache with
+    // m_use_d4_covalent_cn=false (unscaled); native GFN2 sets the flag true
+    // afterwards to enable the set_refalpha_gfn2 alpha-zeta correction in
+    // computeC6Reference. Without this rebuild, GenerateParameters/weightedC6Gfn2
+    // read the stale UNSCALED reference C6 — bit-identical on hcount=0 references
+    // but up to ~57% off on the zeta-corrected intermediate references, which is
+    // the source of the CH4/triose C-path residual (see docs/GFN2_D4_STATUS.md,
+    // diag_curcuma_d4_c6). GFN-FF (flag off) is unaffected: computeC6Reference's
+    // zeta correction is gated by m_use_d4_covalent_cn.
+    if (!m_c6_reference_cached) precomputeC6ReferenceMatrix();
 
     // Claude Generated (Dec 27, 2025): Pre-compute Gaussian weights ONCE for all atoms
     // This eliminates redundant exp() calls in getChargeWeightedC6()
@@ -372,6 +406,14 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     //   - local_pairs: Thread-local ✅
     //   - pairs_vec: Protected by critical section ✅
 
+    json dispersion_pairs = json::array();
+
+    // Native GFN2 disables this whole block (setBuildPairLists(false)): it reads
+    // the C6 reference cache through D4Evaluator and never consumes the JSON pair
+    // list, which is otherwise rebuilt — a nlohmann::json object per atom pair
+    // (12 string-keyed inserts each) plus an OpenMP spawn — on every geometry.
+    // GFN-FF keeps it on; its ForceFieldThread consumes d4_dispersion_pairs.
+    if (m_build_pair_lists) {
     std::vector<json> pairs_vec;
 
     #pragma omp parallel
@@ -508,11 +550,11 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     }  // end omp parallel
 
     // Convert vector to JSON array and count pairs
-    json dispersion_pairs = json::array();
     for (const auto& p : pairs_vec) {
         dispersion_pairs.push_back(p);
         num_pairs++;
     }
+    }  // end if (m_build_pair_lists)
 
     auto t_pairs_end = std::chrono::high_resolution_clock::now();
     double t_pairs_ms = std::chrono::duration<double, std::milli>(t_pairs_end - t_pairs_start).count();
@@ -796,6 +838,19 @@ double D4ParameterGenerator::getSqrtZr4r2(int atom) const
     return 1.0; // Default fallback
 }
 
+// Claude Generated (2026): D4 q-response chain rule (AP ∂q/∂x)
+// Thin forwards to the closed-form zeta scaling and its derivative so the
+// D4Evaluator can assemble dE_D4/dq without depending on gfnff_par.h directly.
+double D4ParameterGenerator::getZeta(int Z, double q) const
+{
+    return GFNFFParameters::zetaChargeScale(Z, q);
+}
+
+double D4ParameterGenerator::getZetaDerivative(int Z, double q) const
+{
+    return GFNFFParameters::zetaChargeScaleDerivative(Z, q);
+}
+
 double D4ParameterGenerator::getAtomicPolarizability(int atom, int frequency_index) const
 {
     --atom; // Convert to 0-based
@@ -926,6 +981,27 @@ double D4ParameterGenerator::computeC6Reference(int elem_i, int elem_j, int ref_
     double sscale_i = (d4_sscale_data.find(refsys_i) != d4_sscale_data.end()) ? d4_sscale_data.at(refsys_i) : 0.0;
     double sscale_j = (d4_sscale_data.find(refsys_j) != d4_sscale_data.end()) ? d4_sscale_data.at(refsys_j) : 0.0;
 
+    // dftd4 GFN2 α-correction zeta scaling (set_refalpha_gfn2 in reference.f90:343-377):
+    //   aiw[freq] = sscale·secaiw[freq] · zeta(ga, hardness(refsys)·gc, zeff(refsys), refh+zeff(refsys))
+    // The zeta factor is frequency-independent → precompute once per (elem, ref).
+    // Gated by m_use_d4_covalent_cn: GFN2 turns it on (dftd4 set_refalpha_gfn2 path);
+    // GFN-FF keeps it off (its existing C6 reference is tuned against the Fortran
+    // GFN-FF reference, which uses a different/no scaling — touching this regresses
+    // the GFN-FF validation suite).
+    auto zetaCorrection = [&](int elem, int ref, int refsys) -> double {
+        if (!m_use_d4_covalent_cn) return 1.0;
+        if (refsys <= 0 || refsys > MAX_ELEM) return 1.0;
+        const int idx = refsys - 1;
+        const double hardness = GFNFFParameters::zeta_c[idx];        // dftd4 chemical_hardness(refsys)
+        const double zeff_rs  = GFNFFParameters::zeta_zeff[idx];     // dftd4 effective_nuclear_charge(refsys)
+        const double refh_q   = (elem < static_cast<int>(m_refh_charges.size())
+                                 && ref < static_cast<int>(m_refh_charges[elem].size()))
+                                ? m_refh_charges[elem][ref] : 0.0;
+        return curcuma::dispersion::d4_zeta(3.0, hardness * 2.0, zeff_rs, refh_q + zeff_rs);
+    };
+    const double zeta_corr_i = zetaCorrection(elem_i, ref_i, refsys_i);
+    const double zeta_corr_j = zetaCorrection(elem_j, ref_j, refsys_j);
+
     // Debug output for ascale and hcount verification (Phase A - Dec 2025)
     static int debug_hcount = 0;
     if (CurcumaLogger::get_verbosity() >= 3 && debug_hcount < 5) {
@@ -956,11 +1032,12 @@ double D4ParameterGenerator::computeC6Reference(int elem_i, int elem_j, int ref_
             secaiw_j_next = d4_secaiw_data.at(refsys_j)[iw + 1];
         }
 
-        // Apply correction formula
-        double alpha_i_iw = ascale_i * (alphaiw_i_iw - hcount_i * sscale_i * secaiw_i_iw);
-        double alpha_i_next = ascale_i * (alphaiw_i_next - hcount_i * sscale_i * secaiw_i_next);
-        double alpha_j_iw = ascale_j * (alphaiw_j_iw - hcount_j * sscale_j * secaiw_j_iw);
-        double alpha_j_next = ascale_j * (alphaiw_j_next - hcount_j * sscale_j * secaiw_j_next);
+        // Apply correction formula (dftd4 set_refalpha_gfn2): the inner-shell
+        // aiw is scaled by the precomputed zeta factor (zeta_corr_*).
+        double alpha_i_iw = ascale_i * (alphaiw_i_iw - hcount_i * sscale_i * secaiw_i_iw * zeta_corr_i);
+        double alpha_i_next = ascale_i * (alphaiw_i_next - hcount_i * sscale_i * secaiw_i_next * zeta_corr_i);
+        double alpha_j_iw = ascale_j * (alphaiw_j_iw - hcount_j * sscale_j * secaiw_j_iw * zeta_corr_j);
+        double alpha_j_next = ascale_j * (alphaiw_j_next - hcount_j * sscale_j * secaiw_j_next * zeta_corr_j);
 
         // Ensure non-negative (as per Fortran: max(correction, 0.0))
         alpha_i_iw = std::max(alpha_i_iw, 0.0);
@@ -1218,6 +1295,207 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
     return c6_weighted;
 }
 
+// Claude Generated (AP2 perf, 2026-06): per-atom reference weights, lifted out of
+// weightedC6Gfn2 so the O(N) build runs once per atom instead of ~N times inside the
+// O(N²) pair loop. Depends only on the atom's element/charge/CN. Mirrors dftd4
+// weight_references exactly (numbers bit-identical to the old inline lambda).
+D4ParameterGenerator::RefW
+D4ParameterGenerator::buildAtomRefW(int Z, size_t atom_idx, double q,
+                                    bool want_grad, bool want_hess) const
+{
+    using curcuma::dispersion::d4_zeta;
+    using curcuma::dispersion::d4_dzeta;
+    using curcuma::dispersion::d4_d2zeta;
+
+    RefW r;
+    const int elem = Z - 1;
+    if (elem < 0 || elem >= MAX_ELEM) return r;
+    if (atom_idx >= m_cn_values.size()) return r;
+    const double cn = m_cn_values[atom_idx];
+
+    constexpr double ga = 3.0;     // dftd4 ga_default (charge-scaling height)
+    constexpr double gc = 2.0;     // dftd4 gc_default (charge-scaling steepness)
+    constexpr double wf = 6.0;     // dftd4 wf_default (CN gaussian width)
+    constexpr int    MAXCN = 19;   // dftd4 set_refgw max_cn
+
+    const int nref = (elem < (int)m_refn.size()) ? m_refn[elem] : 0;
+    r.nref = nref;
+    if (nref <= 0) return r;
+    const double eta  = GFNFFParameters::zeta_c[elem];      // = dftd4 chemical_hardness
+    const double zeff = GFNFFParameters::zeta_zeff[elem];   // = dftd4 effective_nuclear_charge
+    const double gi   = eta * gc;
+    const double* refcn = m_refcn[elem].data();
+    // dftd4 uses TWO reference-CN tables: refcn for the ngw bucketing
+    // (set_refgw, below) and refcovcn (covalent CN) for the actual
+    // CN-Gaussian (set_refcn -> model%cn -> weight_references). Using refcn
+    // for the Gaussian over-broadens the weights (up to 14% wrong weighted
+    // C6 on carbon -> the triose C-path residual). Fall back to refcn only
+    // if the refcovcn table is unavailable. (Claude Generated 2026-05-28.)
+    const double* refcovcn = (elem < (int)m_refcovcn.size() && !m_refcovcn[elem].empty())
+                             ? m_refcovcn[elem].data() : refcn;
+
+    // ngw[ref] from refcn (dftd4 set_refgw): count references sharing the
+    // same rounded CN, then ngw = k(k+1)/2.
+    int cnc[MAXCN + 1];
+    for (int k = 0; k <= MAXCN; ++k) cnc[k] = 0;
+    cnc[0] = 1;
+    for (int ir = 0; ir < nref; ++ir) {
+        int icn = (int)std::lround(refcn[ir]); if (icn < 0) icn = 0; if (icn > MAXCN) icn = MAXCN;
+        cnc[icn] += 1;
+    }
+    int ngw[MAX_REF];
+    for (int ir = 0; ir < nref; ++ir) {
+        int icn = (int)std::lround(refcn[ir]); if (icn < 0) icn = 0; if (icn > MAXCN) icn = MAXCN;
+        int k = cnc[icn];
+        ngw[ir] = k * (k + 1) / 2;
+    }
+
+    // CN gaussian weights gwk[ref] (+ dgwk/dCN). dftd4 weight_cn = exp(-wf·(cn-cnref)²),
+    // summed over igw=1..ngw with wf_eff = igw·wf.
+    double expw[MAX_REF] = {0}, expd[MAX_REF] = {0};
+    double norm = 0.0, dnorm = 0.0;
+    for (int ir = 0; ir < nref; ++ir) {
+        double ew = 0.0, ed = 0.0;
+        for (int igw = 1; igw <= ngw[ir]; ++igw) {
+            const double wfe = igw * wf;
+            const double d   = cn - refcovcn[ir];        // Gaussian uses refcovcn (dftd4 model%cn)
+            const double gw  = std::exp(-wfe * d * d);
+            ew += gw;
+            ed += 2.0 * wfe * (refcovcn[ir] - cn) * gw;  // d(gw)/dCN
+        }
+        expw[ir] = ew; expd[ir] = ed;
+        norm += ew; dnorm += ed;
+    }
+    const double ninv = (norm > 0.0) ? 1.0 / norm : 0.0;
+
+    for (int ir = 0; ir < nref; ++ir) {
+        double gwk  = expw[ir] * ninv;
+        double dgwk = ninv * (expd[ir] - expw[ir] * dnorm * ninv);
+        if (!std::isfinite(gwk))  gwk  = 0.0;
+        if (!std::isfinite(dgwk)) dgwk = 0.0;
+        const double qref = m_refq[elem][ir] + zeff;
+        const double qmod = q + zeff;
+        const double z  = d4_zeta(ga, gi, qref, qmod);
+        r.W[ir]   = gwk * z;
+        if (want_grad) {
+            r.dWq[ir] = gwk  * d4_dzeta(ga, gi, qref, qmod);
+            r.dWc[ir] = dgwk * z;
+        }
+        if (want_hess) r.d2Wq[ir] = gwk * d4_d2zeta(ga, gi, qref, qmod);
+    }
+    return r;
+}
+
+// Claude Generated (AP2 perf, 2026-06): the bit-identical inner 7×7 contraction of
+// weightedC6Gfn2 — ΣΣ ri.W[a]·rj.W[b]·c6ref over the cached element-pair block.
+D4ParameterGenerator::C6Gfn2
+D4ParameterGenerator::contractC6Gfn2(const RefW& ri, const RefW& rj, int Zi, int Zj,
+                                     bool want_grad, bool want_hess) const
+{
+    C6Gfn2 out;
+    const int ei = Zi - 1, ej = Zj - 1;
+    if (ei < 0 || ei >= MAX_ELEM || ej < 0 || ej >= MAX_ELEM) return out;
+
+    const size_t base = static_cast<size_t>(ei) * MAX_ELEM * MAX_REF * MAX_REF
+                      + static_cast<size_t>(ej) * MAX_REF * MAX_REF;
+    for (int a = 0; a < ri.nref; ++a) {
+        const size_t base_a = base + static_cast<size_t>(a) * MAX_REF;
+        for (int b = 0; b < rj.nref; ++b) {
+            const double c6ref = m_c6_flat_cache[base_a + b];
+            out.c6 += ri.W[a] * rj.W[b] * c6ref;
+            if (want_grad) {
+                out.dc6dqi  += ri.dWq[a] * rj.W[b]   * c6ref;
+                out.dc6dqj  += ri.W[a]   * rj.dWq[b] * c6ref;
+                out.dc6dcni += ri.dWc[a] * rj.W[b]   * c6ref;
+                out.dc6dcnj += ri.W[a]   * rj.dWc[b] * c6ref;
+            }
+            if (want_hess) {
+                out.d2c6dqi2 += ri.d2Wq[a] * rj.W[b]   * c6ref;
+                out.d2c6dqj2 += ri.W[a]    * rj.d2Wq[b]* c6ref;
+            }
+        }
+    }
+    return out;
+}
+
+// Claude Generated (Stage 5 Part B2, 2026-06): flatten the per-atom reference
+// weights (W = gwk·ζ, dWq = ∂W/∂q) the GPU D4-potential pair loop consumes. The
+// CN-Gaussian + zeta math stays here on the validated CPU (buildAtomRefW); the
+// device only does the O(N²) 7×7 contraction × BJ disp_sum.
+void D4ParameterGenerator::buildRefWFlat(const std::vector<int>& atoms, const Vector& q,
+                                         std::vector<double>& W_out,
+                                         std::vector<double>& dWq_out) const
+{
+    const int nat = static_cast<int>(atoms.size());
+    W_out.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    dWq_out.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    for (int a = 0; a < nat; ++a) {
+        const double qa = (a < q.size()) ? q(a) : 0.0;
+        const RefW r = buildAtomRefW(atoms[a], static_cast<size_t>(a), qa, true, false);
+        const int nr = (r.nref < MAX_REF) ? r.nref : MAX_REF;
+        for (int ref = 0; ref < nr; ++ref) {
+            W_out[static_cast<size_t>(a) * MAX_REF + ref]   = r.W[ref];
+            dWq_out[static_cast<size_t>(a) * MAX_REF + ref] = r.dWq[ref];
+        }
+    }
+}
+
+// Stage 6 (S6.2b, Claude Generated 2026-06): export the q-independent per-atom
+// reference data for the device W/dWq rebuild (k_d4_build_refw). Mirrors the
+// per-atom setup at the top of buildAtomRefW (gc=2 → gi=eta·gc; the refcovcn
+// fallback to refcn). The device kernel then redoes the ngw bucketing + CN-
+// Gaussian + zeta from these tables, so the resident SCF charges drive W/dWq
+// without a host round-trip.
+void D4ParameterGenerator::exportRefWDeviceData(const std::vector<int>& atoms,
+                                                std::vector<double>& cn, std::vector<double>& gi,
+                                                std::vector<double>& zeff, std::vector<double>& refcn,
+                                                std::vector<double>& refcovcn, std::vector<double>& refq,
+                                                std::vector<int>& nref) const
+{
+    constexpr double gc = 2.0;   // dftd4 gc_default (matches buildAtomRefW)
+    const int nat = static_cast<int>(atoms.size());
+    cn.assign(nat, 0.0);
+    gi.assign(nat, 0.0);
+    zeff.assign(nat, 0.0);
+    nref.assign(nat, 0);
+    refcn.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    refcovcn.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    refq.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    for (int a = 0; a < nat; ++a) {
+        const int elem = atoms[a] - 1;
+        if (elem < 0 || elem >= MAX_ELEM) continue;
+        cn[a]   = (static_cast<size_t>(a) < m_cn_values.size()) ? m_cn_values[a] : 0.0;
+        gi[a]   = GFNFFParameters::zeta_c[elem] * gc;
+        zeff[a] = GFNFFParameters::zeta_zeff[elem];
+        const int nr = (elem < static_cast<int>(m_refn.size())) ? m_refn[elem] : 0;
+        nref[a] = nr;
+        const double* rcn = (elem < static_cast<int>(m_refcn.size())) ? m_refcn[elem].data() : nullptr;
+        const double* rcov = (elem < static_cast<int>(m_refcovcn.size()) && !m_refcovcn[elem].empty())
+                             ? m_refcovcn[elem].data() : rcn;
+        const double* rq = (elem < static_cast<int>(m_refq.size())) ? m_refq[elem].data() : nullptr;
+        for (int ir = 0; ir < nr && ir < MAX_REF; ++ir) {
+            const size_t idx = static_cast<size_t>(a) * MAX_REF + ir;
+            if (rcn)  refcn[idx]    = rcn[ir];
+            if (rcov) refcovcn[idx] = rcov[ir];
+            if (rq)   refq[idx]     = rq[ir];
+        }
+    }
+}
+
+// Claude Generated (AP6b exact D4 port, 2026): tblite/dftd4-exact per-reference
+// charge-weighted C6 for native GFN2. Per-pair entry point — now a thin wrapper over
+// buildAtomRefW + contractC6Gfn2 (numerics unchanged). Mirrors dftd4 model.f90
+// weight_references (gwk with wf=6 + ngw multi-gaussian) and get_atomic_c6.
+D4ParameterGenerator::C6Gfn2
+D4ParameterGenerator::weightedC6Gfn2(int Zi, int Zj, size_t atom_i, size_t atom_j,
+                                     double qi, double qj,
+                                     bool want_grad, bool want_hess) const
+{
+    const RefW ri = buildAtomRefW(Zi, atom_i, qi, want_grad, want_hess);
+    const RefW rj = buildAtomRefW(Zj, atom_j, qj, want_grad, want_hess);
+    return contractC6Gfn2(ri, rj, Zi, Zj, want_grad, want_hess);
+}
+
 // Claude Generated (2025): ATM three-body symmetry factor calculation
 double D4ParameterGenerator::calculateTripleScale(int i, int j, int k) const
 {
@@ -1461,7 +1739,13 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     m_atoms = atoms;
 
     // Step 1: CN calculation
-    m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
+    if (m_use_d4_covalent_cn) {
+        // GFN2: dftd4 EN-weighted covalent CN (no log-cap). This is the CN that
+        // weightedC6Gfn2 reads, so it is the authoritative one for the GFN2 C6.
+        m_cn_values = curcuma::dispersion::computeD4CovalentCN(m_atoms, geometry_bohr);
+    } else {
+        m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
+    }
 
     // Step 2: Reuse topology charges or compute fresh
     if (m_topology_charges.size() != static_cast<Eigen::Index>(m_atoms.size())) {
@@ -1552,7 +1836,7 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     computeGaussianWeightDerivatives();
     computeDC6DCN();
 
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::result_fmt("D4 native dispersion: {} pairs generated", all_pairs.size());
     }
 

@@ -820,6 +820,54 @@ const std::unordered_map<std::string, CitationData>& database()
             "  doi = {10.1063/5.0005356}\n"
             "}"
         }},
+
+        // Multi-step SCC extrapolation across geometry steps (native GFN SCF).
+        // Claude Generated (June 2026).
+        { "aspc", {
+            "Always Stable Predictor-Corrector charge extrapolation (Kolafa 2004)",
+            "Kolafa, J. J. Comput. Chem. 2004, 25, 335–342 (DOI: 10.1002/jcc.10385)",
+            "kolafa2004aspc",
+            "@article{kolafa2004aspc,\n"
+            "  author = {Kolafa, Jiri},\n"
+            "  title = {Time-reversible always stable predictor-corrector method for\n"
+            "           molecular dynamics of polarizable molecules},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {2004},\n"
+            "  volume = {25},\n"
+            "  pages = {335--342},\n"
+            "  doi = {10.1002/jcc.10385}\n"
+            "}"
+        }},
+
+        { "density_extrapolation", {
+            "Least-squares (polynomial) SCF density/charge extrapolation (Pulay & Fogarasi 2004)",
+            "Pulay, P.; Fogarasi, G. Chem. Phys. Lett. 2004, 386, 272–278 (DOI: 10.1016/j.cplett.2004.01.069)",
+            "pulay2004fockdynamics",
+            "@article{pulay2004fockdynamics,\n"
+            "  author = {Pulay, Peter and Fogarasi, Geza},\n"
+            "  title = {Fock matrix dynamics},\n"
+            "  journal = {Chem. Phys. Lett.},\n"
+            "  year = {2004},\n"
+            "  volume = {386},\n"
+            "  pages = {272--278},\n"
+            "  doi = {10.1016/j.cplett.2004.01.069}\n"
+            "}"
+        }},
+
+        { "xlbomd", {
+            "Extended Lagrangian Born-Oppenheimer molecular dynamics (Niklasson 2008)",
+            "Niklasson, A. M. N. Phys. Rev. Lett. 2008, 100, 123004 (DOI: 10.1103/PhysRevLett.100.123004)",
+            "niklasson2008xlbomd",
+            "@article{niklasson2008xlbomd,\n"
+            "  author = {Niklasson, Anders M. N.},\n"
+            "  title = {Extended {B}orn-{O}ppenheimer molecular dynamics},\n"
+            "  journal = {Phys. Rev. Lett.},\n"
+            "  year = {2008},\n"
+            "  volume = {100},\n"
+            "  pages = {123004},\n"
+            "  doi = {10.1103/PhysRevLett.100.123004}\n"
+            "}"
+        }},
     };
     return db;
 }

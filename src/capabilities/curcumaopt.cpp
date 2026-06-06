@@ -26,6 +26,7 @@
 #include "src/core/energycalculator.h"
 #include "src/core/fileiterator.h"
 #include "src/core/global.h"
+#include "src/core/intra_parallel_context.h"
 #include "src/core/molecule.h"
 
 #include <LBFGS.h>
@@ -58,6 +59,10 @@ double LBFGSInterface::operator()(const VectorXd& x, VectorXd& grad)
     fx = m_interface->CalculateEnergy(true);
     Geometry gradient = m_interface->Gradient();
     m_error = std::isnan(fx);
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("LBFGSInterface_gradient_norm", fmt::format("{:.6e}", gradient.norm()));
+    }
 
     const bool have_external = m_external_grad_pending && m_external_grad.size() == 3 * m_atoms;
     for (int i = 0; i < m_atoms; ++i) {
@@ -92,6 +97,10 @@ void LBFGSInterface::setMolecule(const Molecule* molecule)
 
 int SPThread::execute()
 {
+    // This worker is one of several molecule-level batch tasks running concurrently
+    // (ProcessMolecules pool). Suppress intra-molecule threading inside the energy
+    // method so the cores are not oversubscribed N_molecules x N_intra. Claude Generated.
+    curcuma::SuppressIntraParallel intra_guard;
     auto start = std::chrono::system_clock::now();
     Vector charges;
     double energy = m_curcumaOpt->SinglePoint(&m_molecule, m_result, charges);
@@ -108,6 +117,9 @@ int SPThread::execute()
 
 int OptThread::execute()
 {
+    // Concurrent molecule-level batch task — keep the energy method serial (see
+    // SPThread::execute). Claude Generated.
+    curcuma::SuppressIntraParallel intra_guard;
     Vector charges;
     if (m_optimethod == 0)
         m_final = m_curcumaOpt->LBFGSOptimise(&m_molecule, m_result, &m_intermediate, charges, getThreadId(), Basename() + ".opt.trj");
@@ -551,6 +563,11 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
     EnergyCalculator interface(m_method, m_controller["opt"], Basename());
 
     interface.setMolecule(initial->getMolInfo());
+    // Iterative mode + warm-start for native GFN1/GFN2: each geometry step
+    // reuses the previous converged charges, cutting SCF iterations. Claude Generated.
+    interface.setIterativeMode(true);
+    if (m_method == "gfn1" || m_method == "gfn2")
+        interface.setWarmStart(true);
     m_parameters = interface.Parameter();
     double final_energy = interface.CalculateEnergy(true);
     initial->setEnergy(final_energy);
@@ -849,6 +866,10 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
     EnergyCalculator interface(m_method, m_controller["opt"], Basename());
 
     interface.setMolecule(initial->getMolInfo());
+    // Iterative mode + warm-start for native GFN1/GFN2. Claude Generated.
+    interface.setIterativeMode(true);
+    if (m_method == "gfn1" || m_method == "gfn2")
+        interface.setWarmStart(true);
     m_parameters = interface.Parameter();
     double final_energy = interface.CalculateEnergy(true);
     initial->setEnergy(final_energy);

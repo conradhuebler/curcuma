@@ -51,6 +51,14 @@ public:
 
     // Factory methods for standard D3 parameter sets (Claude Generated Phase 3.1)
     /**
+     * Create D3ParameterGenerator with GFN1-xTB D3(BJ) parameters
+     * Parameters: s6=1.0, s8=2.4, a1=0.63, a2=5.0 (Bohr)
+     * Reference: Grimme et al. JCTC 2017, 13, 1989 (gfn1-xtb.toml)
+     * Claude Generated: Native D3 for GFN1
+     */
+    static D3ParameterGenerator createForGFN1();
+
+    /**
      * Create D3ParameterGenerator with GFN-FF parameters
      * Parameters: s6=1.0, s8=2.85, a1=0.80, a2=4.60 (Bohr)
      * Reference: Spicher & Grimme, J. Chem. Theory Comput. 2020
@@ -117,13 +125,48 @@ public:
     void GenerateParameters(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry);
     json getParameters() const { return m_parameters; }
 
+    /**
+     * Lightweight prepare for the analytical energy/gradient path (getEnergyAndGradient):
+     * sets geometry, computes the CN-dependent Gaussian weights, and invalidates the
+     * cached dC6/dCN — WITHOUT building the O(N²) JSON pair list that GenerateParameters
+     * produces for the force-field path. getEnergyAndGradient computes C6/C8/energy/
+     * gradient directly from the references, so the JSON is pure overhead for the native
+     * GFN1 dispersion (≈0.5 s on complex/231). Claude Generated (2026-06).
+     */
+    void prepareForEnergyGradient(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry);
+
     // Energy calculation
     double getTotalEnergy() const;  // Returns total D3 dispersion energy (Eh)
+
+    /**
+     * Compute D3 energy and analytical gradient.
+     * Claude Generated (May 2026): Replaces central finite-difference gradient.
+     *
+     * @param need_gradient If true, compute gradient and dEdcn.
+     * @param gradient_out  [N,3] Cartesian gradient in Eh/Bohr (accumulated, NOT zeroed).
+     * @param dEdcn_out     [N] dE/dCN for CN chain-rule (accumulated, NOT zeroed).
+     * @return D3 dispersion energy in Hartree.
+     */
+    double getEnergyAndGradient(bool need_gradient,
+                                Matrix& gradient_out,
+                                Vector& dEdcn_out) const;
+
+    /** Access dc6/dcn matrix (computed on first call, cached). */
+    const Eigen::MatrixXd& getDC6DCN() const;
+
+    /** Access cached Gaussian weights [atom][ref]. */
+    const std::vector<std::vector<double>>& getGaussianWeights() const { return m_gaussian_weights; }
 
     // Individual parameter accessors
     // NOTE: Default ref indices use first valid reference (not 0,0 which is empty)
     double getC6(int atom_i, int atom_j, int ref_i = 0, int ref_j = 1) const;
     double getR6(int atom_i, int atom_j) const;
+
+    // Hoisted reference-C6 block: the 7×7 block for an element pair, computed ONCE
+    // per pair (vs the triangular-index recompute + nested lookup getC6 does on every
+    // ref-pair — the O(N²×49) interpolateC6/computeDC6DCN hot loops). swap_refs carries
+    // the s-dftd3 index asymmetry. Returns nullptr if out of range. Claude Generated (perf).
+    const std::vector<std::vector<double>>* refC6Block(int atom_i, int atom_j, bool& swap_refs) const;
     double getReferenceCN(int atom, int ref_index) const;
     int getNumberofReferences(int atom) const;
 
@@ -175,4 +218,10 @@ private:
     std::vector<std::vector<double>> m_gaussian_weights;  // [atom_idx][ref_idx]
     std::vector<double> m_cached_cn;  // Coordination numbers
     bool m_weights_cached = false;
+
+    // Claude Generated (May 2026): Analytical gradient support
+    mutable Eigen::MatrixXd m_dc6dcn;       // dC6(i,j)/dCN(i)  [N x N]
+    mutable bool m_dc6dcn_computed = false;
+
+    void computeDC6DCN() const;             // Build m_dc6dcn from cached weights
 };

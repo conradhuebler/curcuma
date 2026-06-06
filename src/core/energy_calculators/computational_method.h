@@ -269,6 +269,17 @@ public:
     virtual void setForcePhaseTiming(bool /*on*/) {}
 
     // =================================================================================
+    // SCF warm-start and iterative-mode controls (Claude Generated)
+    // Only meaningful for native GFN1/GFN2 (NativeXtbMethod); all others no-op.
+    // =================================================================================
+
+    /** @brief Enable/disable warm-start: reuse converged charges from previous step. */
+    virtual void setWarmStart(bool /*on*/) {}
+
+    /** @brief Enable/disable iterative mode: raise SCF display threshold by one level. */
+    virtual void setIterativeMode(bool /*on*/) {}
+
+    // =================================================================================
     // Force Field Energy Component Access (Claude Generated November 2025)
     // =================================================================================
 

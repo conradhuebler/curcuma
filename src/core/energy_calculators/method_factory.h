@@ -1,6 +1,6 @@
 /*
  * < Method Factory for Computational Methods >
- * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,55 +25,77 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <map>
+#include <functional>
 
 using json = nlohmann::json;
 
 /**
  * @brief Factory for creating computational methods with priority-based resolution
- *
- * Maps method names to ComputationalMethod instances. Priority methods like "gfn2"
- * try multiple providers (TBLite > Ulysses > XTB) based on compilation flags.
- *
- * Claude Generated: Simplified from registry-based to direct if/else dispatch
+ * 
+ * This factory implements the method resolution logic from the original 
+ * EnergyCalculator::SwitchMethod(), maintaining the hierarchical priority
+ * system where methods like "gfn2" can be provided by multiple libraries
+ * (TBLite > Ulysses > XTB) based on compilation flags and availability.
+ * 
+ * Claude Generated: Big-Bang refactoring of EnergyCalculator method dispatch
  */
 class MethodFactory {
 public:
     /**
      * @brief Create computational method based on method name and configuration
-     * @param method_name Method identifier (e.g., "gfn2", "eht", "uff", "gfnff")
+     * @param method_name Method identifier (e.g., "gfn2", "eht", "uff", "cgfnff")
      * @param config JSON configuration for the method
-     * @return Unique pointer to computational method
-     * @throws MethodCreationException if method cannot be created
+     * @return Unique pointer to computational method or nullptr on failure
      */
     static std::unique_ptr<ComputationalMethod> create(
-        const std::string& method_name,
+        const std::string& method_name, 
         const json& config = json{}
     );
-
+    
     /**
      * @brief Get list of available methods based on compilation flags
+     * @return Vector of available method names
      */
     static std::vector<std::string> getAvailableMethods();
-
+    
     /**
      * @brief Check if specific method is available
+     * @param method_name Method to check
+     * @return true if method can be created
      */
     static bool isMethodAvailable(const std::string& method_name);
-
+    
     /**
      * @brief Get information about method resolution
+     * @param method_name Method to query
+     * @return JSON with resolution details (provider, priority, etc.)
      */
     static json getMethodInfo(const std::string& method_name);
-
+    
     /**
-     * @brief Print available methods and their providers
+     * @brief Print available methods and their providers (for debugging)
      */
     static void printAvailableMethods();
-
+    
 private:
-    // Priority-based method creation (multiple providers with fallback)
+    // =================================================================================
+    // Priority-based Method Resolution (from original SwitchMethod logic)
+    // =================================================================================
+    
+    /**
+     * @brief Create GFN2 method with priority: TBLite > Ulysses > XTB > Native
+     */
     static std::unique_ptr<ComputationalMethod> createGFN2(const json& config);
+    
+    /**
+     * @brief Create GFN1 method with priority: TBLite > XTB > Native
+     */
     static std::unique_ptr<ComputationalMethod> createGFN1(const json& config);
+    
+    /**
+     * @brief Create IPEA1 method (TBLite only)
+     */
     static std::unique_ptr<ComputationalMethod> createIPEA1(const json& config);
     static std::unique_ptr<ComputationalMethod> createGFNFF(const json& config);
 
@@ -81,36 +103,61 @@ private:
     // Explicit Method Creation (single provider)
     // =================================================================================
 
+    /**
+     * @brief Create Extended Hückel Theory method
+     */
     static std::unique_ptr<ComputationalMethod> createEHT(const json& config);
     static std::unique_ptr<ComputationalMethod> createForceField(const json& config);
+    
+    /**
+     * @brief Create explicit Ulysses method (ugfn2, pm3, am1, etc.)
+     */
     static std::unique_ptr<ComputationalMethod> createUlyssesExplicit(const std::string& method, const json& config);
-
-    // Explicit XTB method creation (xtb-gfn1, xtb-gfn2, gfnff)
+    
+    /**
+     * @brief Create explicit XTB method (xtb-gfn1, xtb-gfn2, gfnff)
+     */
     static std::unique_ptr<ComputationalMethod> createXTBExplicit(const std::string& method, const json& config);
+    
+    /**
+     * @brief Create DFT-D3 dispersion correction
+     */
     static std::unique_ptr<ComputationalMethod> createDFTD3(const json& config);
+    
+    /**
+     * @brief Create DFT-D4 dispersion correction
+     */
     static std::unique_ptr<ComputationalMethod> createDFTD4(const json& config);
 
     // ORCA external method (runtime check, no compilation flag)
     static std::unique_ptr<ComputationalMethod> createOrca(const std::string& method, const json& config);
     static bool hasOrca();
 
-    // Compilation flag checks
+    // =================================================================================
+    // Compilation Flag Checks (from original isCompiled logic)
+    // =================================================================================
+
     static bool hasTBLite();
     static bool hasXTB();
     static bool hasUlysses();
     static bool hasGFNFF();
     static bool hasD3();
     static bool hasD4();
-    static bool checkCompilationFlag(const std::string& flag);
-
-    // Method classification helpers
+    static bool checkCompilationFlag(const std::string& flag);  // native-gfnff addition
+    
     static bool isUlyssesMethod(const std::string& method);
-
-    // Method lists
-    static const std::vector<std::string> m_ff_methods;
-    static const std::vector<std::string> m_tblite_methods;
-    static const std::vector<std::string> m_xtb_methods;
-    static const std::vector<std::string> m_ulysses_methods;
+    static bool matchesMethodList(const std::string& method, const std::vector<std::string>& method_list);
+    
+    // =================================================================================
+    // Method Lists (from original EnergyCalculator)
+    // =================================================================================
+    
+    static const std::vector<std::string> m_ff_methods;      // {"uff", "uff-d3", "qmdff", "cgfnff"}
+    static const std::vector<std::string> m_tblite_methods;  // {"ipea1", "gfn1", "gfn2"}
+    static const std::vector<std::string> m_xtb_methods;     // {"gfnff", "xtb-gfn1", "xtb-gfn2"}
+    static const std::vector<std::string> m_ulysses_methods; // {"ugfn2", "GFN2L", "pm3", "PM3PDDG", ...}
+    static const std::vector<std::string> m_d3_methods;      // {"d3"}
+    static const std::vector<std::string> m_d4_methods;      // {"d4"}
 };
 
 /**
@@ -118,6 +165,16 @@ private:
  */
 class MethodCreationException : public std::runtime_error {
 public:
-    explicit MethodCreationException(const std::string& message)
+    explicit MethodCreationException(const std::string& message) 
         : std::runtime_error(message) {}
 };
+
+/**
+ * @brief Utility macros for method availability checking
+ */
+#define CURCUMA_HAS_TBLITE() MethodFactory::hasTBLite()
+#define CURCUMA_HAS_XTB() MethodFactory::hasXTB()  
+#define CURCUMA_HAS_ULYSSES() MethodFactory::hasUlysses()
+#define CURCUMA_HAS_GFNFF() MethodFactory::hasGFNFF()
+#define CURCUMA_HAS_D3() MethodFactory::hasD3()
+#define CURCUMA_HAS_D4() MethodFactory::hasD4()

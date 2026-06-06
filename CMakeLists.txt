@@ -46,6 +46,21 @@ option(USE_BLAS
 option(USE_MKL
     "Enable MKL" OFF)
 
+# BLAS/LAPACK discovery for Eigen optimization
+# Claude Generated (March 2026): Enable BLAS/LAPACK for native QM methods
+if(USE_BLAS AND NOT USE_MKL)
+    find_package(BLAS QUIET)
+    find_package(LAPACK QUIET)
+    if(BLAS_FOUND)
+        message(STATUS "BLAS found: ${BLAS_LIBRARIES}")
+    else()
+        message(WARNING "BLAS requested via USE_BLAS but not found - using Eigen internal implementations")
+    endif()
+    if(LAPACK_FOUND)
+        message(STATUS "LAPACK found: ${LAPACK_LIBRARIES}")
+    endif()
+endif()
+
 option(CURCUMA_DEBUG
     "Enable debug output and timing" OFF)
 
@@ -60,6 +75,12 @@ option(USE_PCH
 
 option(USE_CUDA
     "Enable CUDA-accelerated GFN-FF (gfnff -gpu cuda, requires CUDA toolkit)" OFF)
+
+# Claude Generated (2026-06): CUDA-accelerated native xTB (gfn1/gfn2 -gpu cuda).
+# Defaults to USE_CUDA. Controls only which xTB GPU sources are added; the runtime
+# code gates on USE_CUDA, the factory offers the GPU path when USE_CUDA_XTB is set.
+option(USE_CUDA_XTB
+    "Enable CUDA-accelerated native xTB SCF/integrals/gradient (gfn1/gfn2 -gpu cuda)" ${USE_CUDA})
 
 # WP-D Stage B (May 2026): hand-rolled AVX2 exp(-x^2) for GFN-FF dcn step 3 hot loop.
 # Opt-in. Default OFF keeps the build bit-identical to pre-WP. Requires AVX2 (set
@@ -398,7 +419,19 @@ set(curcuma_core_SRC
         src/capabilities/qmdfffit.cpp
         src/core/energy_calculators/qm_methods/eht.cpp
         src/core/energy_calculators/qm_methods/eht_parameters.cpp
-        src/core/energy_calculators/qm_methods/gfnff_method.cpp
+        src/core/energy_calculators/qm_methods/xtb_native.cpp
+        src/core/energy_calculators/qm_methods/xtb_h0.cpp
+        src/core/energy_calculators/qm_methods/xtb_coulomb.cpp
+        src/core/energy_calculators/qm_methods/xtb_thirdorder.cpp
+        src/core/energy_calculators/qm_methods/xtb_scf.cpp
+        src/core/energy_calculators/qm_methods/xtb_fragment_scf.cpp
+        src/core/energy_calculators/qm_methods/xtb_dc.cpp
+        src/core/energy_calculators/qm_methods/xtb_sparse.cpp
+        src/core/energy_calculators/qm_methods/native_eigensolver.cpp
+        src/core/energy_calculators/qm_methods/xtb_multipole.cpp
+        src/core/energy_calculators/qm_methods/xtb_response.cpp
+        src/core/energy_calculators/qm_methods/xtb_gradient.cpp
+        src/core/energy_calculators/qm_methods/nddo_params.cpp
         src/core/energy_calculators/ff_methods/gfnff_method.cpp
         src/core/energy_calculators/ff_methods/gfnff_advanced.cpp
         src/core/energy_calculators/ff_methods/gfnff_torsions.cpp
@@ -413,12 +446,17 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/ulyssesinterface.cpp
         src/core/energy_calculators/method_factory.cpp
         src/core/energy_calculators/qm_methods/eht_method.cpp
+        src/core/energy_calculators/qm_methods/native_xtb_method.cpp
+        src/core/energy_calculators/qm_methods/nddo.cpp
+        src/core/energy_calculators/qm_methods/nddo_method.cpp
+        src/core/energy_calculators/qm_methods/gfnff_method.cpp
         src/core/energy_calculators/qm_methods/xtb_method.cpp
         src/core/energy_calculators/qm_methods/tblite_method.cpp
         src/core/energy_calculators/qm_methods/ulysses_method.cpp
         src/core/energy_calculators/qm_methods/dispersion_method.cpp
         src/core/energy_calculators/ff_methods/forcefield_method.cpp
         src/core/energycalculator.cpp
+        src/core/solvation/gbsa.cpp
         src/core/molecule.cpp
         src/core/xyz_comment_parser.cpp
         src/core/fileiterator.cpp
@@ -430,7 +468,10 @@ set(curcuma_core_SRC
         src/core/energy_calculators/ff_methods/d3_reference_cn.cpp
         src/core/energy_calculators/ff_methods/d3_reference_c6.cpp
         src/core/energy_calculators/ff_methods/cn_calculator.cpp
-        src/core/energy_calculators/ff_methods/d4param_generator.cpp
+        src/core/energy_calculators/dispersion/d4param_generator.cpp
+        src/core/energy_calculators/dispersion/d4_evaluator.cpp
+        src/core/energy_calculators/dispersion/d4_charge_model.cpp
+        src/core/energy_calculators/dispersion/d4_ncoord.cpp
         src/core/energy_calculators/ff_methods/cg_potentials.cpp
         src/core/energy_calculators/ff_methods/fast_exp.cpp
         src/core/curcuma_logger.cpp
@@ -516,6 +557,16 @@ if(USE_D4)
     target_compile_definitions(curcuma_core PRIVATE USE_D4)
 endif()
 
+# Claude Generated (March 2026): BLAS/MKL compile definitions for native QM methods
+# Enables EIGEN_USE_BLAS/EIGEN_USE_LAPACKE optimizations in curcuma_eigen_config.h
+if(USE_BLAS)
+    target_compile_definitions(curcuma_core PRIVATE USE_BLAS)
+endif()
+
+if(USE_MKL)
+    target_compile_definitions(curcuma_core PRIVATE USE_MKL)
+endif()
+
 add_library(curcuma_cap  ${curcuma_cap_SRC})
 
 # Enable precompiled headers for faster compilation
@@ -541,41 +592,28 @@ endif()
     src/capabilities/c_code/interface.c
 )
 add_library(km ${km_SRC})
-if(USE_ULYSSES)
+target_link_libraries(curcuma_core km)
 
-set(ulysess_SRC
-    src/core/energy_calculators/qm_methods/interface/ulysses.cpp
-)
-add_executable(ulysses_helper
-src/helpers/ulysses_helper.cpp
-)
-else()
-set(ulysess_SRC
-    src/core/energy_calculators/qm_methods/eht.cpp
-)
-endif(USE_ULYSSES)
-add_library(ulysses_lib ${ulysess_SRC})
-
-# Claude Generated (October 2025): Add USE_ULYSSES compile definition
 if(USE_ULYSSES)
+    add_library(ulysses_lib
+        src/core/energy_calculators/qm_methods/interface/ulysses.cpp
+    )
     target_compile_definitions(ulysses_lib PRIVATE USE_ULYSSES)
+    if(USE_BLAS)
+        target_link_libraries(ulysses_lib ${BLAS_LIBRARIES})
+    endif()
+    if(USE_MKL)
+        target_include_directories(ulysses_lib PRIVATE ${MKLROOT}/include)
+        target_link_libraries(ulysses_lib -m64 -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)
+    endif()
+
+    add_executable(ulysses_helper
+        src/helpers/ulysses_helper.cpp
+    )
+    target_link_libraries(ulysses_helper PUBLIC ulysses_lib curcuma_core)
+
+    target_link_libraries(curcuma_core km ulysses_lib)
 endif()
-
-if(USE_BLAS)
-    target_link_libraries(ulysses_lib blas)
-endif()
-if(USE_MKL)
-    target_link_libraries(ulysses_lib -m64 -I${MKLROOT}/include  -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)
-
-endif()
-if(USE_ULYSSES)
-
-target_link_libraries(ulysses_helper PUBLIC ulysses_lib curcuma_core)
-endif()
-
-
-
-target_link_libraries(curcuma_core km ulysses_lib)
 
 add_executable(curcuma
         src/main.cpp
@@ -885,6 +923,12 @@ if(USE_CUDA)
         src/core/energy_calculators/ff_methods/cuda/gpu_utils.cpp
         src/core/energy_calculators/qm_methods/gfnff_gpu_method.cpp
     )
+    # Claude Generated (2026-06): native xTB GPU kernels (compiled by nvcc).
+    # The host-side wrapper (xtb_gpu_method.cpp) is added below as a normal source.
+    if(USE_CUDA_XTB)
+        list(APPEND CUDA_SOURCES
+            src/core/energy_calculators/qm_methods/cuda/xtb_gpu_context.cu)
+    endif()
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY LANGUAGE CUDA)
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
@@ -893,6 +937,17 @@ if(USE_CUDA)
     target_include_directories(curcuma_core PRIVATE ${PROJECT_SOURCE_DIR})
     target_link_libraries(curcuma_core CUDA::cudart CUDA::cusolver CUDA::cublas)
     target_compile_definitions(curcuma_core PUBLIC USE_CUDA)
+    # curcuma_core is created before this block, so its CUDA_ARCHITECTURES target
+    # property is still empty (CMP0104). Set it explicitly from the global list.
+    set_target_properties(curcuma_core PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+
+    # Claude Generated (2026-06): native xTB GPU host wrapper + feature flag.
+    if(USE_CUDA_XTB)
+        target_sources(curcuma_core PRIVATE
+            src/core/energy_calculators/qm_methods/xtb_gpu_method.cpp)
+        target_compile_definitions(curcuma_core PUBLIC USE_CUDA_XTB)
+        message(STATUS "CUDA native xTB enabled: gfn1/gfn2 -gpu cuda available")
+    endif()
 
     message(STATUS "CUDA support enabled: gfnff -gpu cuda available")
     message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
@@ -908,11 +963,15 @@ target_link_libraries(curcuma_cap pthread fmt::fmt-header-only )
 #   for ~3-5x speedup on matrices with N > 300 (Tier M/L ANC regeneration fallback).
 find_package(BLAS QUIET)
 find_package(LAPACK QUIET)
-if(BLAS_FOUND)
+# WP1 (2026-06): when USE_MKL, link ONLY the explicit threaded MKL below
+# (mkl_gnu_thread). find_package(BLAS) resolves to the SEQUENTIAL MKL
+# (libmkl_sequential), which — linked alongside the threaded layer — loads first and
+# wins, forcing every BLAS/LAPACK call (incl. the SCF eigensolve) single-threaded.
+if(BLAS_FOUND AND NOT USE_MKL)
     target_link_libraries(curcuma_core ${BLAS_LIBRARIES})
     message(STATUS "BLAS linked for curcuma_core")
 endif()
-if(LAPACK_FOUND)
+if(LAPACK_FOUND AND NOT USE_MKL)
     target_link_libraries(curcuma_core ${LAPACK_LIBRARIES})
     message(STATUS "LAPACK linked for curcuma_core")
 endif()
@@ -934,12 +993,24 @@ else()
     message(STATUS "LAPACKE not found — SelfAdjointEigenSolver uses Eigen built-in path")
 endif()
 
-if(USE_BLAS)
-    target_link_libraries(curcuma_core blas)
+
+# NOT USE_MKL: the threaded MKL block below already provides BLAS/LAPACK symbols, and
+# linking the find_package (sequential MKL) result here would override its threading (WP1).
+if(USE_BLAS AND NOT USE_MKL)
+    if(BLAS_FOUND)
+        target_link_libraries(curcuma_core ${BLAS_LIBRARIES})
+        if(LAPACK_FOUND)
+            target_link_libraries(curcuma_core ${LAPACK_LIBRARIES})
+        endif()
+    else()
+        # Fallback to hardcoded library name if find_package failed but library exists
+        target_link_libraries(curcuma_core blas)
+    endif()
 endif()
 if(USE_MKL)
-    target_link_libraries(curcuma_core -m64 -I${MKLROOT}/include  -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)
-
+    target_include_directories(curcuma_core PRIVATE ${MKLROOT}/include)
+    target_include_directories(curcuma_cap PRIVATE ${MKLROOT}/include)
+    target_link_libraries(curcuma_core -m64 -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)
 endif()
 if(WIN32) # Check if we are on Windows
 else()
@@ -983,8 +1054,7 @@ add_executable(curcuma_helper
 
 add_executable(parallel_scf
         src/helpers/parallel_scf.cpp)
-
-
+target_link_libraries(parallel_scf curcuma_core)
 
 target_link_libraries(curcuma_helper fmt::fmt-header-only)
 target_link_libraries(curcuma_helper curcuma_core)

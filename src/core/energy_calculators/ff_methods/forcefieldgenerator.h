@@ -25,7 +25,7 @@
 #include <set>
 
 #include "d3param_generator.h"
-#include "d4param_generator.h"
+#include "src/core/energy_calculators/dispersion/d4param_generator.h"
 #include "qmdff_par.h"
 #include "src/core/molecule.h"
 #include "uff_par.h"

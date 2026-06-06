@@ -30,7 +30,7 @@
 #include "src/core/energy_calculators/ff_methods/ff_workspace.h"  // Claude Generated (Mar 2026): Unified workspace
 #include "src/core/energy_calculators/ff_methods/eeq_solver.h"  // EEQ charge calculation (Dec 2025 - Phase 3)
 #include "src/core/energy_calculators/ff_methods/huckel_solver.h"  // Full Hückel calculation (Jan 2026 - Phase 1)
-#include "src/core/energy_calculators/ff_methods/d4param_generator.h"  // Claude Generated (Feb 15, 2026): D4 for dc6dcn gradient
+#include "src/core/energy_calculators/dispersion/d4param_generator.h"  // Claude Generated (Feb 15, 2026): D4 for dc6dcn gradient
 #include "src/core/energy_calculators/ff_methods/alpb_solvation.h"  // Claude Generated (Mar 2026): ALPB solvation
 #include "src/core/global.h"
 #include "src/core/functional_groups.h"
@@ -263,6 +263,12 @@ END_PARAMETER_DEFINITION
 
 class GFNFF {
 public:
+    /// Test hook: #EEQ PCG solves that used the multi-step warm-start extrapolation
+    /// (eeq_extrapolation). 0 with the default 'none'. Claude Generated.
+    long eeqPcgExtrapolationCount() const {
+        return m_eeq_solver ? m_eeq_solver->pcgExtrapolationCount() : -1;
+    }
+
     /**
      * @brief Static topology data — computed once at initialization, never changes
      *
