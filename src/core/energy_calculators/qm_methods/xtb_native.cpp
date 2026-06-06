@@ -28,6 +28,7 @@
 #include "STO_CGTO.hpp"
 #include "src/core/curcuma_logger.h"
 #include "src/core/config_manager.h"
+#include "src/core/charge_extrapolation.h"
 #include "src/core/intra_parallel_context.h"
 #include "src/core/energy_calculators/dispersion/d4_evaluator.h"
 #include "src/core/energy_calculators/dispersion/d4param_generator.h"
@@ -250,44 +251,8 @@ void XTB::unpackSccState(const Eigen::VectorXd& v)
  * ------------------------------------------------------------------------- */
 Eigen::VectorXd XTB::extrapolationWeights(const std::string& mode, int order, int n_hist)
 {
-    if (n_hist < 2)
-        return {};
-
-    if (mode == "aspc") {
-        const int m = std::min(order + 2, n_hist);
-        if (m < 2) return {};
-        // Binomial C(m, i) via the multiplicative recurrence (exact for small m).
-        Eigen::VectorXd w(m);
-        long long c = 1; // C(m,0)
-        for (int j = 0; j < m; ++j) {
-            // c currently holds C(m, j); advance to C(m, j+1)
-            c = c * (m - j) / (j + 1);
-            w(j) = (j % 2 == 0 ? 1.0 : -1.0) * static_cast<double>(c);
-        }
-        return w;
-    }
-
-    if (mode == "gauss") {
-        const int m = n_hist;
-        const int d = std::min(order, m - 1); // polynomial degree actually fit
-        if (d < 1) return {};
-        Eigen::MatrixXd V(m, d + 1);
-        for (int j = 0; j < m; ++j) {
-            const double x = -static_cast<double>(j + 1);
-            double xp = 1.0;
-            for (int p = 0; p <= d; ++p) { V(j, p) = xp; xp *= x; }
-        }
-        Eigen::VectorXd e0 = Eigen::VectorXd::Zero(d + 1);
-        e0(0) = 1.0;
-        Eigen::MatrixXd VtV = V.transpose() * V;
-        Eigen::VectorXd a = VtV.ldlt().solve(e0);
-        Eigen::VectorXd w = V * a;
-        if (!w.allFinite())
-            return {};
-        return w;
-    }
-
-    return {}; // unknown mode -> fall back to warm-start
+    // Shared with the GFN-FF EEQ PCG warm-start (src/core/charge_extrapolation.h).
+    return curcuma::extrapolation::weights(mode, order, n_hist);
 }
 
 /* ------------------------------------------------------------------------- *

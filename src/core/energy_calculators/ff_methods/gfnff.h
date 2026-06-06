@@ -263,6 +263,12 @@ END_PARAMETER_DEFINITION
 
 class GFNFF {
 public:
+    /// Test hook: #EEQ PCG solves that used the multi-step warm-start extrapolation
+    /// (eeq_extrapolation). 0 with the default 'none'. Claude Generated.
+    long eeqPcgExtrapolationCount() const {
+        return m_eeq_solver ? m_eeq_solver->pcgExtrapolationCount() : -1;
+    }
+
     /**
      * @brief Static topology data — computed once at initialization, never changes
      *

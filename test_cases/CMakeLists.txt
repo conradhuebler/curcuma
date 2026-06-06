@@ -140,6 +140,21 @@ if(USE_PCH)
         target_precompile_headers(test_fast_exp REUSE_FROM curcuma_core)
 endif()
 
+# Claude Generated (June 2026): opt-in multi-step EEQ PCG warm-start extrapolation.
+# Drives GFN-FF (forced PCG) over a smooth trajectory of a multi-fragment system;
+# asserts aspc/gauss energies == none (PCG result-neutral) and that the extrapolation
+# path fired. Run via: ctest -L eeq_extrapolation
+add_executable(test_eeq_extrapolation
+        test_eeq_extrapolation.cpp)
+target_link_libraries(test_eeq_extrapolation curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_eeq_extrapolation REUSE_FROM curcuma_core)
+endif()
+add_test(NAME test_eeq_extrapolation
+         COMMAND test_eeq_extrapolation
+                 ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/complex.xyz 12)
+set_tests_properties(test_eeq_extrapolation PROPERTIES TIMEOUT 180 LABELS "eeq_extrapolation")
+
 add_test(NAME test_fast_exp
          COMMAND test_fast_exp)
 
