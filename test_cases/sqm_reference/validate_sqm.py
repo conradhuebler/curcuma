@@ -52,9 +52,9 @@ def run_curcuma(curcuma, xyz, method, quiet, gpu=None, solvent=None, solvent_mod
     cmd = [curcuma, "-sp", xyz, "-method", method, "-verbosity", "2"]
     if solvent:
         # Native implicit solvation. Dotted form because the flat -solvent flag is
-        # ambiguous across providers. solvent_model: 3 = ALPB, 2 = GBSA.
-        model_id = "2" if solvent_model == "gbsa" else "3"
-        cmd += ["-xtb.solvent", solvent, "-xtb.solvent_model", model_id]
+        # ambiguous across providers. solvent_model is a descriptive name ("alpb"/"gbsa")
+        # taken straight from the reference.
+        cmd += ["-xtb.solvent", solvent, "-xtb.solvent_model", solvent_model]
     if gpu:
         # GPU path (Claude Generated, GPU port): -gpu cuda routes gfn1/gfn2 to the
         # native xTB GPU backend. With no CUDA device the wrapper falls back to CPU,

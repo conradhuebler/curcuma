@@ -24,13 +24,14 @@ classical Still kernel (exactly tblite's ALPB=11/12 vs GBSA=21/22 distinction).
 
 ```bash
 # Dotted form required (the flat -solvent is ambiguous across providers):
-curcuma -sp mol.xyz -method gfn2 -xtb.solvent water -xtb.solvent_model 3   # ALPB
-curcuma -sp mol.xyz -method gfn2 -xtb.solvent water -xtb.solvent_model 2   # GBSA
-curcuma -opt mol.xyz -method gfn1 -xtb.solvent dmso -xtb.solvent_model 3
+curcuma -sp mol.xyz -method gfn2 -xtb.solvent water -xtb.solvent_model alpb
+curcuma -sp mol.xyz -method gfn2 -xtb.solvent water -xtb.solvent_model gbsa
+curcuma -opt mol.xyz -method gfn1 -xtb.solvent dmso                          # defaults to alpb
 ```
 
 - `-xtb.solvent <name>`: water, dmso, acetone, chloroform, methanol, … (tblite set)
-- `-xtb.solvent_model`: 3 = ALPB (default when a solvent is given), 2 = GBSA, 1 = CPCM (not yet native)
+- `-xtb.solvent_model`: `alpb` (default when a solvent is given), `gbsa`, `cpcm` (not yet native), `none`.
+  Legacy numeric codes (3=alpb, 2=gbsa, 1=cpcm, 0=none) are still accepted.
 
 **Validation (machine-tested):** native total energy matches tblite to ≤1e-8 Eh for
 7 molecules × {water, dmso, acetone, chloroform} × {gfn1, gfn2} — for **both** models

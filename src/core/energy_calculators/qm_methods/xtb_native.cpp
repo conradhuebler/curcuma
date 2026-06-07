@@ -140,8 +140,8 @@ bool XTB::InitialiseMolecule()
                                     + meth + "); running gas phase");
             }
         } else {
-            CurcumaLogger::warn("Native solvation: only ALPB (solvent_model 3) and "
-                                "GBSA (solvent_model 2) are implemented for native GFN; "
+            CurcumaLogger::warn("Native solvation: only solvent_model alpb and gbsa "
+                                "are implemented for native GFN (cpcm pending); "
                                 "running gas phase");
         }
     }

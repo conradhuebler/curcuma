@@ -40,7 +40,7 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     // into the native GFN1/GFN2 SCF. Use the dotted form (-xtb.solvent water) because
     // the flat -solvent flag is ambiguous (also registered by tblite/ulysses/gfnff_external).
     PARAM(solvent, String, "none", "Implicit solvent for the native GFN1/GFN2 SCF (e.g. 'water', 'dmso', 'acetone', 'chloroform'). 'none' (default) runs gas phase. Self-consistent ALPB matching the tblite parameterization (Born + CDS surface tension/H-bond + state shift); GFN1 uses CM5 charges, GFN2 Mulliken. Set solvent_model=3 (ALPB). Use the dotted -xtb.solvent (the flat -solvent is ambiguous across providers).", "Solvation", {})
-    PARAM(solvent_model, Int, 0, "Implicit solvation model for the native GFN SCF: 0=none, 1=CPCM (not yet implemented natively), 2=GBSA (not yet implemented natively), 3=ALPB. When a solvent is given, model 3 (ALPB) is used by default.", "Solvation", {})
+    PARAM(solvent_model, String, "none", "Implicit solvation model for the native GFN SCF: 'none', 'cpcm' (not yet implemented natively), 'gbsa', 'alpb'. Legacy numeric codes (0=none, 1=cpcm, 2=gbsa, 3=alpb) are still accepted. When a solvent is given without a model, ALPB is used by default.", "Solvation", {})
     PARAM(solvent_epsilon, Double, -1.0, "Explicit solvent dielectric constant (only used by CPCM; ALPB/GBSA take the dielectric from the named-solvent parameter set). -1 = derive from the solvent name.", "Solvation", {})
     // Native GFN1/GFN2 SCF convergence controls (Claude Generated). Default mode
     // is 'broyden' (tblite-style charge mixing); '-scf_mode diis' is the historic path.

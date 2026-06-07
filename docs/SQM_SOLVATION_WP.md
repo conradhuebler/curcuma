@@ -27,7 +27,9 @@
 >   the per-method labels are `gfn1_solvation`/`gfn2_solvation`, but ctest ANDs multiple `-L`
 >   so use the shared `_solvation` substring) + `ctest -R xtb_solvation_numgrad`; gas-phase
 >   byte-identical (gfn{1,2}_validation 24/24).
-> - **WP2 (GBSA, 2026-06-07)**: `-xtb.solvent_model 2`. GBSA = ALPB with `alpbet=0`
+> - **WP2 (GBSA, 2026-06-07)**: `-xtb.solvent_model gbsa` (descriptive names
+>   `none`/`cpcm`/`gbsa`/`alpb`, case-insensitive; legacy numeric 0..3 still accepted —
+>   `solventModelCode()` in xtb_native.h; the PARAM is now a String). GBSA = ALPB with `alpbet=0`
 >   (so `keps=1/eps-1`, shape term drops) + the classical **Still** Born kernel
 >   (tblite api/solvation.f90:191 sets `born_kernel%still` for GBSA versions 21/22,
 >   vs P16 for ALPB 11/12). `ALPBSolvation::setUseAlpb(false)` branches the param

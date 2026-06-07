@@ -34,6 +34,7 @@
 
 #include <Eigen/Dense>
 #include <array>
+#include <cctype>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -524,6 +525,23 @@ struct GpuScfBackend {
  *     xtb_scf.cpp       — SCF iterator + DIIS mixer
  *  matching tblite's module split.
  * ------------------------------------------------------------------------- */
+
+// Map a solvation-model name to the internal code (0=none, 1=CPCM, 2=GBSA, 3=ALPB).
+// Accepts descriptive names (preferred, case-insensitive) and the legacy numeric
+// codes for backward compatibility. Returns -1 for an unrecognised value.
+// Claude Generated (June 2026).
+inline int solventModelCode(const std::string& s)
+{
+    std::string t;
+    t.reserve(s.size());
+    for (char c : s) t += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (t == "none" || t == "0" || t == "gas" || t == "vacuum") return 0;
+    if (t == "cpcm" || t == "1")                                return 1;
+    if (t == "gbsa" || t == "gb" || t == "2")                   return 2;
+    if (t == "alpb" || t == "3")                                return 3;
+    return -1;
+}
+
 class XTB : public QMDriver {
 public:
     explicit XTB(MethodType method);
@@ -649,6 +667,12 @@ public:
     // Implicit-solvation config (set by the wrapper from the `xtb` scope).
     void setSolvent(const std::string& s) { m_solvent = s; }
     void setSolventModel(int m) { m_solvent_model = m; }
+    // Name-based overload (preferred): "none"/"cpcm"/"gbsa"/"alpb" (case-insensitive),
+    // numeric codes still accepted. An unrecognised name is ignored (keeps current).
+    void setSolventModel(const std::string& name) {
+        int c = solventModelCode(name);
+        if (c >= 0) m_solvent_model = c;
+    }
     void setSolventEpsilon(double e) { m_solvent_epsilon = e; }
 
     // Tighten the SCF convergence threshold (for FD charge-response validation).
@@ -1205,14 +1229,14 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_extrapolation_apply",[&](const json& v){ if (v.is_string())          xtb.setScfExtrapolationApply(v.get<std::string>()); });
     lookup("scf_xlbomd_correctors",  [&](const json& v){ if (v.is_number_integer())  xtb.setScfXlbomdCorrectors(v.get<int>()); });
     lookup("electronic_temperature", [&](const json& v){ if (v.is_number()) xtb.setElectronicTemperature(v.get<double>()); });
-    // Implicit solvation (Claude Generated, June 2026). solvent_model accepts any
-    // number or numeric string: CLI flat-flags (-xtb.solvent_model 2) are routed as
-    // a float (2.0), so an is_number_integer()-only check silently dropped the value
-    // and kept the default (ALPB).
+    // Implicit solvation (Claude Generated, June 2026). solvent_model is a
+    // descriptive name ("none"/"cpcm"/"gbsa"/"alpb"); legacy numeric codes (0..3) are
+    // still accepted. The number branch also covers CLI flat-flags, which arrive as a
+    // float (2.0) — an is_number_integer()-only check would silently drop them.
     lookup("solvent",         [&](const json& v){ if (v.is_string()) xtb.setSolvent(v.get<std::string>()); });
     lookup("solvent_model",   [&](const json& v){
-        if (v.is_number()) xtb.setSolventModel(static_cast<int>(std::lround(v.get<double>())));
-        else if (v.is_string()) { try { xtb.setSolventModel(std::stoi(v.get<std::string>())); } catch (...) {} }
+        if (v.is_string())      xtb.setSolventModel(v.get<std::string>());        // name or numeric string
+        else if (v.is_number()) xtb.setSolventModel(static_cast<int>(std::lround(v.get<double>())));
     });
     lookup("solvent_epsilon", [&](const json& v){
         if (v.is_number()) xtb.setSolventEpsilon(v.get<double>());
