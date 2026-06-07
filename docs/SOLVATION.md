@@ -14,8 +14,9 @@ Curcuma supports implicit solvation models for quantum chemistry calculations:
 - **Native GFN-FF**: ⚠️ self-consistent **ALPB** (June 2026, WP5) — the Born reaction
   field couples into the EEQ charge solve (`A_eeq += B`), so the EEQ charges polarize in
   the solvent. Matches **xtb 6.7.1** (`--gfnff --alpb`) to ≤1e-8 Eh (7 mol × 4 solvents,
-  `ctest -L gfnff_solvation`); analytic gradient FD-validated. GBSA approximate (~1-3 mEh,
-  reuses the ALPB params; warns). `-method gfnff -gfnff.solvent water -gfnff.solvent_model alpb`.
+  `ctest -L gfnff_solvation`); analytic gradient FD-validated. GFN-FF has no separate GBSA
+  model (the reference always uses ALPB, `gfnff_alpb.F90:23-24`), so `-gfnff.solvent_model
+  gbsa` maps to ALPB. `-method gfnff -gfnff.solvent water -gfnff.solvent_model alpb`.
   Machine-tested only.
 
 ## Native GFN1/GFN2 ALPB / GBSA (no external dependency)

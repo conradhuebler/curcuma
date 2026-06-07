@@ -172,8 +172,8 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - ⚠️ **Native GFN-FF ALPB** (June 2026, AI/machine-tested) - self-consistent: the Born
   reaction field couples into the EEQ solve (`A_eeq += B`), so charges polarize in the solvent.
   `-method gfnff -gfnff.solvent water -gfnff.solvent_model alpb` matches **xtb 6.7.1** (`--gfnff
-  --alpb`) to **≤1e-8 Eh** (7 mol × 4 solvents); analytic gradient FD-validated. **GBSA**
-  (`-gfnff.solvent_model gbsa`) is approximate (~1-3 mEh, reuses ALPB params; warns). See
+  --alpb`) to **≤1e-8 Eh** (7 mol × 4 solvents); analytic gradient FD-validated. GFN-FF has
+  no separate GBSA (reference uses ALPB), so `-gfnff.solvent_model gbsa` maps to ALPB. See
   [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md) WP5
 - **25+ Solvents** - water, methanol, DMSO, acetone, benzene, etc.
 - **Auto-Activation** - Specify `-solvent water` to enable

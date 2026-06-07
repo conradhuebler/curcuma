@@ -804,32 +804,26 @@ bool GFNFF::InitialiseMolecule()
     }
     if (m_solvent != "none" && !m_solvent.empty()) {
         m_solvation = std::make_unique<ALPBSolvation>();
-        // solvent_model: alpb (default) | gbsa. Accept the descriptive name (case-
-        // insensitive) and the legacy numeric codes (2=gbsa, 3=alpb). GBSA = ALPB
-        // with the shape term off + the Still Born kernel (ALPBSolvation::setUseAlpb).
+        // GFN-FF has NO separate GBSA model: the reference (gfnff_alpb.F90:23-24,66)
+        // ALWAYS uses the improved ALPB model (alpb=.true., P16 kernel), even when GBSA
+        // is requested. So a -gfnff.solvent_model gbsa request maps to ALPB here (the
+        // earlier Still-kernel + ALPB-param mix was neither model and was ~1-3 mEh off).
         std::string sm = m_parameters.value("solvent_model", std::string("alpb"));
         std::transform(sm.begin(), sm.end(), sm.begin(),
                        [](unsigned char c) { return std::tolower(c); });
-        const bool use_gbsa = (sm == "gbsa" || sm == "gb" || sm == "2" || sm == "2.0");
-        m_solvation->setUseAlpb(!use_gbsa);
-        m_solvent_model_label = use_gbsa ? "GBSA" : "ALPB";
+        const bool requested_gbsa = (sm == "gbsa" || sm == "gb" || sm == "2" || sm == "2.0");
+        m_solvation->setUseAlpb(true);          // GFN-FF: always ALPB (P16 kernel)
+        m_solvent_model_label = "ALPB";
         if (!m_solvation->init(m_atoms, m_solvent)) {
             CurcumaLogger::warn("ALPB solvation initialization failed for solvent '" + m_solvent + "', continuing gas-phase");
             m_solvation.reset();
         } else {
-            // WP5 (June 2026): ALPB is self-consistent and matches xtb 6.7.1
-            // (--gfnff --alpb) to <=1e-8 Eh. GBSA currently reuses the ALPB parameter
-            // set with the Still kernel (the dedicated gfnff GBSA params, named
-            // gfn1_/gfn2_<solvent> in the reference, are not yet extracted), so GBSA is
-            // approximate (~1-3 mEh vs xtb --gbsa). Warn so results are not over-trusted.
-            if (use_gbsa) {
-                CurcumaLogger::warn("GFN-FF GBSA solvation is APPROXIMATE (reuses the ALPB "
-                    "parameter set; ~1-3 mEh vs xtb). Use -gfnff.solvent_model alpb for the "
-                    "validated self-consistent model.");
+            if (requested_gbsa) {
+                CurcumaLogger::warn("GFN-FF has no separate GBSA model; using the improved "
+                    "ALPB model instead (gfnff_alpb.F90:23-24). -gfnff.solvent_model gbsa == alpb.");
             }
             if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::info(std::string("GFN-FF implicit solvation: ")
-                    + (use_gbsa ? "GBSA" : "ALPB") + " (" + m_solvent + ")");
+                CurcumaLogger::info(std::string("GFN-FF implicit solvation: ALPB (") + m_solvent + ")");
             }
         }
     }

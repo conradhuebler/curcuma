@@ -81,7 +81,8 @@
 >   the reference is xtb 6.7.1 (`--gfnff --alpb`), the self-consistent EEQ coupling
 >   (A_eeq += B, what WP5a called "WP5b") is implemented, and the ALPB energy matches
 >   xtb to ≤1e-8 Eh. GBSA remains approximate (params not extracted).
-> - **Remaining**: CPCM (WP3); gfnff GBSA param extraction; GPU-solvation test coverage.
+> - **Remaining**: CPCM (WP3); GPU-solvation test coverage. (GFN-FF GBSA resolved — see below:
+>   GFN-FF has no separate GBSA, the request maps to ALPB per the reference.)
 >   Wrapper `tblite-gfn2 -tblite.solvent_model 3` segfaults (pre-existing TBLiteInterface
 >   bug, unrelated; native path unaffected).
 
@@ -154,9 +155,11 @@
 > - **Validated:** native gfnff+ALPB total = xtb to ≤1e-8 Eh, 7 mol × {water,dmso,acetone,
 >   chloroform} (`ctest -L gfnff_solvation`, refs `reference_data/gfnff_alpb_xtb.ref.json`);
 >   gradient FD `gfnff_numgrad_alpb_water`; gfnff gas byte-identical; native gfn1/gfn2 untouched.
-> - **GBSA approximate** (~1-3 mEh): reuses the ALPB param set + Still kernel; the dedicated
->   gfnff GBSA params (`gfn1_/gfn2_<solvent>` in the reference) are not yet extracted (warns).
-> - Remaining: extract gfnff GBSA params; self-consistent gradient adjoint (optional — the
+> - **GBSA = ALPB for GFN-FF**: the reference (`gfnff_alpb.F90:23-24,66`) states GFN-FF has
+>   no separate GBSA and always uses the improved ALPB (`alpb=.true.`, P16), so
+>   `-gfnff.solvent_model gbsa` maps to ALPB (exact, ≤1e-8; warns). The earlier Still-kernel
+>   + ALPB-param mix (~1-3 mEh off, neither model) was removed.
+> - Remaining: self-consistent gradient adjoint (optional — the
 >   reference is frozen-charge); GPU residency for gfnff solvation.
 
 ## WP0 — Parameters + reference harness
