@@ -185,6 +185,13 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dVsh;        // shell potential v_sh, nsh
     CudaBuffer<double> dVat;        // atom potential v_at, nat
 
+    // WP4b (Claude Generated June 2026): in-SCF implicit-solvation reaction field.
+    // dSolvB is the nat×nat Born interaction matrix B (keps-scaled, incl. self-energy
+    // + HB diagonal; symmetric, column-major). When solv_active, the device potential
+    // build adds v_at += B·q_at (GFN2 Mulliken charges) so the SCF feels the solvent.
+    CudaBuffer<double> dSolvB;      // Born matrix B, nat·nat
+    bool               solv_active = false;
+
     // Stage 6 (S6.1): device occupation. k_occupations fills the resident dOcc
     // from the resident dEps (no host round-trip in the loop); dOccMu/dOccNcol
     // carry the converged chemical potential + the occupied-column count for the
@@ -2869,6 +2876,28 @@ bool XtbGpuContext::beginPotential(int nat, int nsh,
     m_impl->dMpQkernel.upload(qkernel, nat, stream);
     m_impl->dGamma3.upload(gamma3, nsh, stream);
     m_impl->pot_nsh = nsh;
+    // WP4b: solvation is opt-in per geometry via beginSolvation() (called after this);
+    // reset here so a solvent-free geometry never re-uses a stale Born matrix.
+    m_impl->solv_active = false;
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+// WP4b (Claude Generated June 2026): upload the nat×nat Born interaction matrix B so
+// the device potential build adds the in-SCF reaction field v_at += B·q_at. Call once
+// per geometry after beginPotential() (GFN2 Mulliken path only). born_mat is the
+// symmetric, keps-scaled m_born_mat (column-major == row-major for a symmetric matrix).
+bool XtbGpuContext::beginSolvation(int nat, const double* born_mat)
+{
+    if (!ok() || nat <= 0 || !born_mat) return false;
+    cudaStream_t stream = m_impl->stream;
+    const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
+    try {
+        m_impl->dSolvB.ensure(static_cast<int>(nn));
+    } catch (...) {
+        return false;
+    }
+    m_impl->dSolvB.upload(born_mat, static_cast<int>(nn), stream);
+    m_impl->solv_active = true;
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
@@ -2941,6 +2970,15 @@ bool XtbGpuContext::buildDevicePotentialAndSolve(int n, bool fp32, int n_eig,
     if (cudaGetLastError() != cudaSuccess) return false;
     k_vat_add_d4<<<(nat + b - 1) / b, b, 0, stream>>>(nat, m_impl->dD4Dedq.ptr, m_impl->dVat.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
+    // WP4b: in-SCF implicit solvation reaction field v_at += B·q_at (GFN2 Mulliken).
+    // B is symmetric so column-major (uploaded) vs row-major is identical; beta=1
+    // accumulates onto the multipole+D4 v_at. dQat is the input-derived atomic charge.
+    if (m_impl->solv_active) {
+        const double one = 1.0;
+        if (cublasDgemv(m_impl->cublas, CUBLAS_OP_N, nat, nat, &one, m_impl->dSolvB.ptr, nat,
+                        m_impl->dQat.ptr, 1, &one, m_impl->dVat.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+            return false;
+    }
     // Expand to AO: v_ao(μ) = v_sh(ao2sh[μ]) + v_at(ao2at[μ]).
     k_expand_vao<<<(n + b - 1) / b, b, 0, stream>>>(n, m_impl->dVsh.ptr, m_impl->dVat.ptr,
                                                     m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr,

@@ -374,6 +374,14 @@ public:
                                      dkernel, qkernel, gamma3);
     }
 
+    // WP4b: in-SCF implicit solvation on the device potential path.
+    bool supportsDeviceSolvation() const override { return true; }
+    bool beginSolvation(int nat, const double* born_mat) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->beginSolvation(nat, born_mat);
+    }
+
     bool solvePotential(const Vector& q_sh, const Eigen::MatrixXd& dp_at,
                         const Eigen::MatrixXd& qp_at, const std::vector<double>& W,
                         const std::vector<double>& dWq, Vector& eps,

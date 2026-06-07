@@ -155,6 +155,19 @@ public:
                      Matrix& gradient) override;
 
     /**
+     * @brief Device hook (WP4b): the symmetric Born matrix B for the GPU build.
+     *
+     * Returns m_born_mat.data() (column-major nat×nat == row-major for a symmetric
+     * matrix), valid after update(). Returns nullptr when CM5 charges are in play
+     * (GFN1 tblite path), because the device builds v_at = B·q_at from the plain
+     * Mulliken q_at and cannot reproduce q_solute = q_at + cm5 — those keep the
+     * host-driven loop. Claude Generated (June 2026).
+     */
+    const double* deviceBornMatrix() const override {
+        return (m_initialized && !m_use_cm5) ? m_born_mat.data() : nullptr;
+    }
+
+    /**
      * @brief Print solvation model info
      */
     void printInfo() const;

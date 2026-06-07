@@ -53,14 +53,24 @@
 >   Now bit-identical to CPU (0.0 µEh, H2O→caffeine). New `ctest -L gpu_*_solvation /
 >   gpu_*_gbsa` (28, water × 7 mol × {gfn1,gfn2} × {alpb,gbsa}); gpu component
 >   suite 121/121, gas-phase gpu 24/24 unchanged.
-> - **WP4b (full GPU residency for GFN2+solvent)**: add `v_at += B·q_at` to the device
->   potential build (upload the Born matrix once per geometry; no device energy change
->   — the host recomputes the total from the downloaded charges), then lift the WP4a
->   gate. NOTE: the resident loop is net-neutral on `-sp` at tested sizes (eigensolve-
->   bound), so this is residency-not-speedup. **Status: deferred/optional.**
-> - **Remaining**: CPCM (WP3), WP4b (optional), GFN-FF self-consistent +
->   `-solvent` routing fix (WP5). Wrapper `tblite-gfn2 -tblite.solvent_model 3`
->   segfaults (pre-existing TBLiteInterface bug, unrelated; native path unaffected).
+> - **WP4b (full GPU residency for GFN2+solvent, 2026-06-07, DONE)**: the device
+>   potential build now adds `v_at += B·q_at` in-SCF (cuBLAS dgemv on the resident
+>   `dQat`), so GFN2+solvent uses the fully device-resident loop instead of the WP4a
+>   host fallback. New seam `GpuScfBackend::{supportsDeviceSolvation,beginSolvation}`
+>   (`XtbGpuContext::beginSolvation` uploads the nat×nat Born matrix once per geometry;
+>   reset in `beginPotential`); `ImplicitSolvationModel::deviceBornMatrix()` returns
+>   `m_born_mat.data()` for GFN2 (Mulliken) and nullptr for the GFN1 CM5 path (which
+>   keeps the host loop). No device **energy** change — the host recomputes the total
+>   from the downloaded charges; only the in-SCF charges needed the reaction field.
+>   The WP4a gate now blocks the device path only when the device can't take solvation
+>   (CM5 / no backend support). Verbosity-2 logs "…+solvation) built on the device".
+>   **Validation**: GFN2+solvent+GPU bit-matches CPU (0.0 µEh, H2O→caffeine, both
+>   models); `ctest -L gpu_*_solvation|gpu_*_gbsa` 28, gpu component 121/121, gas-phase
+>   gpu 24/24, CPU suite 112+1+24 unchanged. NOTE: residency, not a measured `-sp`
+>   speedup (eigensolve-bound).
+> - **Remaining**: CPCM (WP3), GFN-FF self-consistent + `-solvent` routing fix (WP5).
+>   Wrapper `tblite-gfn2 -tblite.solvent_model 3` segfaults (pre-existing TBLiteInterface
+>   bug, unrelated; native path unaffected).
 
 ## 0. Context & key facts (read first)
 

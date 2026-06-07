@@ -720,17 +720,20 @@ double XTB::Calculation(bool gradient)
     // hardness) is uploaded once here. Falls back to the host potential build on
     // any failure. GFN2 only (the D4/multipole coupling).
     //
-    // Solvation gate (WP4a, Claude Generated June 2026): the device potential build
-    // does NOT yet include the implicit-solvation reaction field v_at += B*q_at, so
-    // with an active solvent it would converge to the gas-phase fixpoint and miss the
-    // self-consistent polarization (measured: GFN2 water ALPB off by 3.8 mEh, GBSA
-    // 1.8 mEh vs CPU). Disable the device-potential path when solvation is active so
-    // GFN2+solvent falls back to the host-driven device loop (addSolvationPotential
-    // in the host m_pot, uploaded as v_ao) — fully self-consistent, still GPU-resident
-    // eigensolve. WP4b lifts this once the device build adds the Born potential.
+    // Solvation on the device-potential path (WP4b, Claude Generated June 2026): the
+    // device build adds the in-SCF reaction field v_at += B·q_at when the Born matrix
+    // is uploaded (beginSolvation, below). This needs q_solute = q_at, which holds for
+    // GFN2 (Mulliken) — deviceBornMatrix() returns the matrix only then, and nullptr
+    // for the GFN1 CM5 path. If solvation is active but the device cannot take it
+    // (no born matrix / backend lacks supportsDeviceSolvation), block the device path
+    // so GFN2+solvent falls back to the host-driven device loop (WP4a), which folds
+    // addSolvationPotential into the uploaded v_ao — still correct, still GPU eigensolve.
+    const double* solv_born = m_solvation ? m_solvation->deviceBornMatrix() : nullptr;
+    const bool solv_blocks_device =
+        m_solvation && !(solv_born && m_gpu_scf && m_gpu_scf->supportsDeviceSolvation());
     bool use_device_potential = false;
     if (use_gpu_resident && gpu_multipole && m_method == MethodType::GFN2 && m_mp_initialized
-        && !m_solvation
+        && !solv_blocks_device
         && m_gpu_scf->supportsDeviceDispersion() && m_gpu_scf->supportsDevicePotential()) {
         // Prime the D4 reference set + device beginDispersion (the m_d4_prepared
         // first-call path); the returned potential is discarded here.
@@ -754,9 +757,19 @@ double XTB::Calculation(bool gradient)
         for (int s = 0; s < nsh; ++s) g3[s] = 0.5 * g3diag(s);
         use_device_potential = m_gpu_scf->beginPotential(nat, nsh, sd.data(), dd.data(),
                                                          sq.data(), dk.data(), qk.data(), g3.data());
+        // WP4b: upload the Born matrix so the device build adds v_at += B·q_at in-SCF.
+        // On failure, drop to the host-driven loop (which still applies solvation).
+        if (use_device_potential && solv_born) {
+            if (!m_gpu_scf->beginSolvation(nat, solv_born)) {
+                use_device_potential = false;
+                if (verb >= 2)
+                    CurcumaLogger::warn("SCF: device solvation upload failed; host potential build");
+            }
+        }
         if (verb >= 2)
             CurcumaLogger::info(use_device_potential
-                ? "SCF: GFN2 potential (Coulomb+third-order+multipole+D4) built on the device"
+                ? "SCF: GFN2 potential (Coulomb+third-order+multipole+D4"
+                  + std::string(solv_born ? "+solvation" : "") + ") built on the device"
                 : "SCF: device potential build unavailable; host potential build");
     }
 

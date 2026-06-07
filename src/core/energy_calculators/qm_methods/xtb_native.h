@@ -512,6 +512,15 @@ struct GpuScfBackend {
                                 bool fp32 = false, int n_eig = 0)
     { (void)q_sh; (void)dp_at; (void)qp_at; (void)W; (void)dWq; (void)eps;
       (void)fp32; (void)n_eig; return false; }
+
+    /* ----- WP4b: in-SCF implicit solvation on the device potential path ----- *
+     * When supported, beginSolvation uploads the nat×nat Born matrix B (keps-scaled,
+     * symmetric) once per geometry so the device potential build adds v_at += B·q_at
+     * (GFN2 Mulliken). Lets GFN2+solvent use the fully device-resident loop instead
+     * of the WP4a host-driven fallback. Default false → host-driven path. */
+    virtual bool supportsDeviceSolvation() const { return false; }
+    virtual bool beginSolvation(int nat, const double* born_mat)
+    { (void)nat; (void)born_mat; return false; }
 };
 
 /* ------------------------------------------------------------------------- *

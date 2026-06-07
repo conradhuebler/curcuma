@@ -305,6 +305,12 @@ public:
                         const double* amat_sd, const double* amat_dd, const double* amat_sq,
                         const double* dkernel, const double* qkernel, const double* gamma3);
 
+    /* ----- WP4b: in-SCF implicit solvation on the device potential path ----- *
+     * Upload the nat×nat Born interaction matrix B (keps-scaled, symmetric) once per
+     * geometry, after beginPotential; the device build then adds v_at += B·q_at so the
+     * GFN2 device/resident SCF feels the reaction field (GFN2 Mulliken charges). */
+    bool beginSolvation(int nat, const double* born_mat);
+
     /// Per SCF iteration: build v_sh (γ·q_sh + shell third-order) + the multipole
     /// v_dp/v_qp + v_at scalar shift + the resident D4 dE/dq, expand v_ao, fold into
     /// the Fock and eigensolve. q_sh (nsh), dp_at (3·nat), qp_at (6·nat) are the

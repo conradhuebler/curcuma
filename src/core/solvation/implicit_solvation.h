@@ -102,4 +102,16 @@ public:
                              const Matrix& xyz_bohr,
                              const Vector& q_at,
                              Matrix& gradient) = 0;
+
+    /**
+     * @brief Device (GPU) hook: the symmetric Born matrix B for v_at += B·q_at.
+     *
+     * Returns a pointer to the current nat×nat Born interaction matrix (the same B
+     * that @ref addPotential contracts), valid after @ref update, so the GPU
+     * potential build can add the reaction field on-device. Returns nullptr when the
+     * device path is not applicable — in particular when the solute charge is not the
+     * plain atomic charge (e.g. GFN1 CM5, where q_solute = q_at + cm5), so callers
+     * must fall back to the host-driven loop. Default nullptr. Claude Generated (WP4b).
+     */
+    virtual const double* deviceBornMatrix() const { return nullptr; }
 };
