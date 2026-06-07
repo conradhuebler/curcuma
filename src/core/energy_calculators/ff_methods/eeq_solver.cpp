@@ -3493,6 +3493,17 @@ Vector EEQSolver::calculateFinalCharges(
             }
         }
 
+        // WP5 (June 2026): self-consistent implicit-solvation reaction field. Add the
+        // Born interaction matrix B into the top-left atom block of the augmented EEQ
+        // matrix so the solved charges feel the solvent — matches the gfnff reference
+        // A(:n,:n) += gbsa%bornMat (gfnff_engrad.F90:1346-1350). B is geometry-only and
+        // is added on top of the (cached) off-diagonal Coulomb block each solve, so the
+        // off-diagonal cache stays clean. nullptr = gas phase (no change).
+        if (m_reaction_field && m_reaction_field->rows() == natoms
+            && m_reaction_field->cols() == natoms) {
+            A.topLeftCorner(natoms, natoms) += *m_reaction_field;
+        }
+
         // 6. Solve system — unified dispatch (March 2026)
         // Claude Generated (WP2, May 2026): forward pool/num_threads to dispatchSolve so the
         // Stage-4 batched per-fragment LU loop (eeq_solver.cpp:1294-1387) runs in parallel.

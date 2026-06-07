@@ -310,6 +310,30 @@ if(Python3_Interpreter_FOUND)
         endforeach()
     endforeach()
 
+    # ── GFN-FF self-consistent ALPB solvation validation (Claude Generated, WP5, June 2026) ──
+    # The self-consistent EEQ<->ALPB coupling (A_eeq += Born matrix, gfnff_engrad.F90:1346-1350)
+    # makes native GFN-FF + ALPB match xtb 6.7.1 (--gfnff --alpb SOLVENT) to <=1e-8 Eh.
+    # References committed in reference_data/gfnff_alpb_xtb.ref.json (no xtb at test time).
+    # validate_gfnff_solvation.py runs curcuma -method gfnff -gfnff.solvent SOLVENT.
+    # Label: gfnff_solvation.
+    set(_GFNFF_SOLV_PY  ${CMAKE_CURRENT_SOURCE_DIR}/validate_gfnff_solvation.py)
+    set(_GFNFF_SOLV_REF ${_SQM_VAL_REF}/gfnff_alpb_xtb.ref.json)
+    set(_GFNFF_SOLV_MOLS H2O NH3 CH4 HCN C6H6 acetic_acid_dimer caffeine)
+    set(_GFNFF_SOLV_SOLVENTS water dmso acetone chloroform)
+    if(EXISTS ${_GFNFF_SOLV_REF})
+        foreach(_mol ${_GFNFF_SOLV_MOLS})
+            foreach(_solv ${_GFNFF_SOLV_SOLVENTS})
+                add_test(NAME gfnff_solv_${_mol}_${_solv}
+                    COMMAND ${Python3_EXECUTABLE} ${_GFNFF_SOLV_PY}
+                        --curcuma $<TARGET_FILE:curcuma> --quiet --tol 1e-7
+                        --ref ${_GFNFF_SOLV_REF} --xyz-dir ${_SQM_VAL_MOL}
+                        --mol ${_mol} --solvent ${_solv})
+                set_tests_properties(gfnff_solv_${_mol}_${_solv}
+                    PROPERTIES TIMEOUT 120 LABELS "gfnff_solvation")
+            endforeach()
+        endforeach()
+    endif()
+
     # GPU native xTB validation (Claude Generated, GPU port): identical 1e-8 gate
     # vs the committed tblite references, but with -gpu cuda so the eigensolve (and,
     # in later stages, the whole SCF/gradient) runs on the device. The GPU energies

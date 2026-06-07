@@ -178,6 +178,17 @@ public:
     bool isInitialized() const { return m_initialized; }
 
     /**
+     * @brief Get the symmetric Born interaction matrix B (nat × nat).
+     *
+     * B already includes keps, the Born self-energy, the HB diagonal and the ALPB
+     * shape correction (see buildBornMatrix). For self-consistent GFN-FF solvation
+     * the reaction field couples into the linear EEQ solve as A_eeq += B (matching
+     * the reference gfnff gbsa%bornMat, gfnff_engrad.F90:1346-1350). Valid after
+     * update(). Claude Generated (June 2026).
+     */
+    const Eigen::MatrixXd& bornMatrix() const { return m_born_mat; }
+
+    /**
      * @brief Get Born radii (for diagnostics)
      */
     const Eigen::VectorXd& getBornRadii() const { return m_brad; }

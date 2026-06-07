@@ -169,10 +169,12 @@ Every new method or capability added by AI must include in its CLAUDE.md:
   ≤1e-8 Eh on the validation set (CPU + GPU); `-method gfn2 -xtb.solvent water -xtb.solvent_model gbsa`
   (legacy numeric codes 3/2 still accepted). CPCM native solvation still pending.
   See [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md)
-- ⚠️ **Native GFN-FF ALPB/GBSA** (June 2026, AI/machine-tested) - `-method gfnff -gfnff.solvent water
-  [-gfnff.solvent_model gbsa]` runs (WP5 routing fix); energy changes sensibly but is **unvalidated**
-  (no external GFN-FF ALPB reference) and the gradient is frozen-charge-approx for polar+solvent.
-  Self-consistent EEQ coupling pending. See [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md) WP5
+- ⚠️ **Native GFN-FF ALPB** (June 2026, AI/machine-tested) - self-consistent: the Born
+  reaction field couples into the EEQ solve (`A_eeq += B`), so charges polarize in the solvent.
+  `-method gfnff -gfnff.solvent water -gfnff.solvent_model alpb` matches **xtb 6.7.1** (`--gfnff
+  --alpb`) to **≤1e-8 Eh** (7 mol × 4 solvents); analytic gradient FD-validated. **GBSA**
+  (`-gfnff.solvent_model gbsa`) is approximate (~1-3 mEh, reuses ALPB params; warns). See
+  [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md) WP5
 - **25+ Solvents** - water, methanol, DMSO, acetone, benzene, etc.
 - **Auto-Activation** - Specify `-solvent water` to enable
 - **Documentation** - See [docs/SOLVATION.md](docs/SOLVATION.md) for details

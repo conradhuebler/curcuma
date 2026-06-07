@@ -358,6 +358,14 @@ public:
     /// fills m_phase2_distances from this view. Lifetime managed by caller (GFNFF).
     void setExternalDistances(const Eigen::VectorXd* srab) { m_external_srab = srab; }
 
+    /// WP5 (June 2026): self-consistent implicit-solvation reaction field. When set,
+    /// calculateFinalCharges adds this symmetric nat×nat Born matrix B into the
+    /// top-left block of the augmented EEQ matrix before the linear solve, so the
+    /// charges feel the solvent (matches the gfnff reference A_eeq += gbsa%bornMat,
+    /// gfnff_engrad.F90:1346-1350). nullptr = gas phase. Lifetime managed by caller
+    /// (GFNFF holds the ALPBSolvation that owns the matrix). Claude Generated.
+    void setReactionField(const Eigen::MatrixXd* born_matrix) { m_reaction_field = born_matrix; }
+
     /// WP-S3 (May 2026): effective Coulomb-matrix cutoff used by the
     /// sparsification (override wins, otherwise the ConfigManager value).
     double getEEQDistanceCutoffEffective() const {
@@ -979,6 +987,12 @@ private:
     /// When non-null, calculateFinalCharges fills m_phase2_distances from this instead of
     /// recomputing the O(N^2) sqrt loop.
     const Eigen::VectorXd* m_external_srab = nullptr;
+
+    /// WP5 (June 2026): implicit-solvation reaction-field Born matrix (nat×nat),
+    /// added to the EEQ matrix in calculateFinalCharges. nullptr = gas phase.
+    /// Column-major to match ALPBSolvation::bornMatrix(); symmetric, so the storage
+    /// order vs the row-major augmented EEQ matrix is irrelevant.
+    const Eigen::MatrixXd* m_reaction_field = nullptr;
 
     /// Last truly successful charges (Phase 2 if available, otherwise Phase 1).
     /// Initialized from topology_charges on first call, then overwritten with the Phase 2

@@ -209,6 +209,16 @@ add_test(NAME gfnff_numgrad_fixed_charges
 set_tests_properties(gfnff_numgrad_fixed_charges
     PROPERTIES TIMEOUT 120 LABELS "gfnff;gradient;cpu")
 
+# Claude Generated (WP5, June 2026): GFN-FF self-consistent ALPB solvation gradient.
+# Analytical Gradient() vs NumGrad() (full FD incl. solvated EEQ re-solve) in water.
+# Same 5e-3 Eh/Bohr full-EEQ tolerance as the gas-phase test (the reference gfnff
+# gradient is itself frozen-charge — see docs/SQM_SOLVATION_WP.md WP5/S5).
+add_test(NAME gfnff_numgrad_alpb_water
+         COMMAND test_gfnff_numgrad --solvent water
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_numgrad_alpb_water
+    PROPERTIES TIMEOUT 180 LABELS "gfnff;gradient;solvation;cpu")
+
 # Claude Generated (June 2026): native GFN1/GFN2 ALPB-solvation gradient test.
 # Analytical XTB::Gradient() vs central finite difference of the total energy,
 # GFN1 (CM5) + GFN2 (Mulliken) in water. See docs/SQM_SOLVATION_WP.md (WP1.4).

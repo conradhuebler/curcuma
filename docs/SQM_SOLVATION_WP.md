@@ -76,18 +76,12 @@
 >   ALPB creation (`setUseAlpb`, Still kernel for gbsa); fixed the hard-coded "ALPB" log
 >   label. Energy now changes sensibly (H2O gfnff: gas −0.32726 → water ALPB −0.33982,
 >   GBSA −0.33920). `test_gfnff_numgrad --solvent NAME [--solvent-model gbsa]` added.
->   **Honest status**: (1) **No external reference** — tblite has no GFN-FF ALPB and
->   native gfnff is not bit-exact to Fortran xtb even in gas phase, so there is no 1e-8
->   target; energy is unvalidated. (2) **Gradient** inherits GFN-FF's documented
->   frozen-charge approximation (no dq/dr): tight for non-polar (CH4 7e-5, C6H6 1e-4
->   Eh/Bohr at full-EEQ) but the solvent amplifies the polar charge-response error
->   (H2O gas 2.4e-3 → water 2.4e-2 Eh/Bohr), so solvated opt/MD on polar systems is
->   approximate. The solvation gradient *formula* is consistent (non-polar matches FD).
-> - **WP5b (deferred): self-consistent EEQ coupling** — fold the Born potential B·q into
->   the EEQ solve (`eeq_solver`) so the charges feel the solvent (fixes both the energy
->   self-consistency and the polar gradient charge-response). Changes core GFN-FF charges
->   with no external reference; the FD-gradient test would be the internal validation.
-> - **Remaining**: CPCM (WP3), WP5b EEQ coupling (optional, no reference).
+>   **SUPERSEDED by the "✅ DONE WP5" section at the top of this file:** the WP5a "no
+>   external reference / energy unvalidated / WP5b-deferred" status no longer holds —
+>   the reference is xtb 6.7.1 (`--gfnff --alpb`), the self-consistent EEQ coupling
+>   (A_eeq += B, what WP5a called "WP5b") is implemented, and the ALPB energy matches
+>   xtb to ≤1e-8 Eh. GBSA remains approximate (params not extracted).
+> - **Remaining**: CPCM (WP3); gfnff GBSA param extraction; GPU-solvation test coverage.
 >   Wrapper `tblite-gfn2 -tblite.solvent_model 3` segfaults (pre-existing TBLiteInterface
 >   bug, unrelated; native path unaffected).
 
@@ -141,6 +135,29 @@
   - GFN-FF call site unchanged (default argument).
 
 ---
+
+## ✅ DONE (2026-06-07): WP5 — GFN-FF self-consistent ALPB ("the riddle")
+> ⚙️ Machine-tested. The GFN-FF ALPB was a frozen-charge post-hoc add-on (energy at
+> gas EEQ charges) and unvalidated. **Fix:** couple the Born reaction field into the
+> *linear* EEQ solve — `A_eeq(:n,:n) += B` (the symmetric Born matrix) before solving,
+> exactly the reference `gfnff_engrad.F90:1346-1350` (`A(:n,:n)+=gbsa%bornMat`). EEQ is
+> linear, so one solve gives the self-consistent (solvated) charges; the GFN-FF Coulomb
+> term then uses them and the gsolv parts (gborn+ghb+gsasa+gshift) are added separately
+> — no double count. The reference EEQ gradient is itself frozen-charge ("without dq/dr",
+> :308), so curcuma matches it by using the solvated charges in the existing addGradient.
+> - Reference source: `/home/conrad/src/curcuma/external/gfnff` (read in place; network
+>   clone failed). Reference numbers: `/opt/bin/xtb` 6.7.1 (`--gfnff --alpb SOLVENT`).
+> - `EEQSolver::setReactionField(const Eigen::MatrixXd*)` + injection in
+>   `calculateFinalCharges` before `dispatchSolve`; `ALPBSolvation::bornMatrix()`;
+>   `gfnff_method.cpp` sets the field in `prepareCNAndEEQ` (update→setReactionField) and
+>   forces the Phase-2 re-solve when solvated (`eeq_charges_current && !m_solvation`).
+> - **Validated:** native gfnff+ALPB total = xtb to ≤1e-8 Eh, 7 mol × {water,dmso,acetone,
+>   chloroform} (`ctest -L gfnff_solvation`, refs `reference_data/gfnff_alpb_xtb.ref.json`);
+>   gradient FD `gfnff_numgrad_alpb_water`; gfnff gas byte-identical; native gfn1/gfn2 untouched.
+> - **GBSA approximate** (~1-3 mEh): reuses the ALPB param set + Still kernel; the dedicated
+>   gfnff GBSA params (`gfn1_/gfn2_<solvent>` in the reference) are not yet extracted (warns).
+> - Remaining: extract gfnff GBSA params; self-consistent gradient adjoint (optional — the
+>   reference is frozen-charge); GPU residency for gfnff solvation.
 
 ## WP0 — Parameters + reference harness
 
