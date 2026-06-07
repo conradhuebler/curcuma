@@ -719,8 +719,18 @@ double XTB::Calculation(bool gradient)
     // reference data (D4 cache + multipole interaction matrices + third-order
     // hardness) is uploaded once here. Falls back to the host potential build on
     // any failure. GFN2 only (the D4/multipole coupling).
+    //
+    // Solvation gate (WP4a, Claude Generated June 2026): the device potential build
+    // does NOT yet include the implicit-solvation reaction field v_at += B*q_at, so
+    // with an active solvent it would converge to the gas-phase fixpoint and miss the
+    // self-consistent polarization (measured: GFN2 water ALPB off by 3.8 mEh, GBSA
+    // 1.8 mEh vs CPU). Disable the device-potential path when solvation is active so
+    // GFN2+solvent falls back to the host-driven device loop (addSolvationPotential
+    // in the host m_pot, uploaded as v_ao) — fully self-consistent, still GPU-resident
+    // eigensolve. WP4b lifts this once the device build adds the Born potential.
     bool use_device_potential = false;
     if (use_gpu_resident && gpu_multipole && m_method == MethodType::GFN2 && m_mp_initialized
+        && !m_solvation
         && m_gpu_scf->supportsDeviceDispersion() && m_gpu_scf->supportsDevicePotential()) {
         // Prime the D4 reference set + device beginDispersion (the m_d4_prepared
         // first-call path); the returned potential is discarded here.

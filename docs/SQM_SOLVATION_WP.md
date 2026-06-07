@@ -42,7 +42,23 @@
 >   (version 21/22), `validate_sqm.py` maps `solvent_model` → `-xtb.solvent_model 2/3`.
 >   **Validation**: 56 gbsa refs ≤1e-8 Eh (`ctest -L _gbsa`); FD gradient 16/16
 >   (alpb+gbsa, `ctest -R xtb_solvation_numgrad`); ALPB 56/56 + gas-phase 24/24 unchanged.
-> - **Remaining**: CPCM (WP3), GPU residency (WP4), GFN-FF self-consistent +
+> - **WP4a (GPU correctness, 2026-06-07)**: GFN1+solvent on GPU was already correct
+>   (host-driven path folds `addSolvationPotential` into the uploaded `v_ao`), but
+>   **GFN2+solvent+GPU was wrong by up to 3.8 mEh** (ALPB) / 1.8 mEh (GBSA): the
+>   device-potential / resident-loop path builds the potential on-device and omitted
+>   the reaction field, so the SCF converged to the gas-phase fixpoint and the
+>   post-SCF `energySolvation()` was evaluated at unpolarized charges. Fix: gate the
+>   device-potential path off when `m_solvation` is active (`xtb_native.cpp:~722`),
+>   so GFN2+solvent falls back to the host-driven device loop (in-SCF, GPU eigensolve).
+>   Now bit-identical to CPU (0.0 µEh, H2O→caffeine). New `ctest -L gpu_*_solvation /
+>   gpu_*_gbsa` (28, water × 7 mol × {gfn1,gfn2} × {alpb,gbsa}); gpu component
+>   suite 121/121, gas-phase gpu 24/24 unchanged.
+> - **WP4b (full GPU residency for GFN2+solvent)**: add `v_at += B·q_at` to the device
+>   potential build (upload the Born matrix once per geometry; no device energy change
+>   — the host recomputes the total from the downloaded charges), then lift the WP4a
+>   gate. NOTE: the resident loop is net-neutral on `-sp` at tested sizes (eigensolve-
+>   bound), so this is residency-not-speedup. **Status: deferred/optional.**
+> - **Remaining**: CPCM (WP3), WP4b (optional), GFN-FF self-consistent +
 >   `-solvent` routing fix (WP5). Wrapper `tblite-gfn2 -tblite.solvent_model 3`
 >   segfaults (pre-existing TBLiteInterface bug, unrelated; native path unaffected).
 

@@ -224,6 +224,14 @@ FP32→FP64 decision) — only then does the latency region actually shrink.
 
 ## Notes / limits
 
+- **Implicit solvation (ALPB/GBSA) on GPU (WP4a, 2026-06-07)**: `-xtb.solvent` works
+  on `-gpu cuda` for both GFN1 and GFN2, matching the CPU/tblite refs to 1e-8
+  (`ctest -L gpu_*_solvation|gpu_*_gbsa`, 28 tests). GFN1 uses the host-driven loop
+  (the reaction field is folded into the uploaded `v_ao`). GFN2: the device-potential /
+  Stage-6 resident loop does **not** yet build the reaction field on-device, so it is
+  disabled when a solvent is active (falls back to the host-driven device loop —
+  in-SCF, GPU eigensolve). Fully device-resident GFN2+solvent (Born potential on the
+  device) is the deferred WP4b; it would be residency, not a measured speedup.
 - GeForce FP64 is ~1/64 of FP32, so a pure-FP64 resident GFN1 SCF is **not**
   necessarily faster than the 8-core MKL CPU on small/medium systems; Stage 2a is
   a correctness + residency milestone. Device-resident `-opt`/`-md` (no host

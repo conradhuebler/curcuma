@@ -337,6 +337,35 @@ if(Python3_Interpreter_FOUND)
                 endif()
             endforeach()
         endforeach()
+
+        # GPU solvation validation (WP4, Claude Generated June 2026): the committed
+        # ALPB + GBSA references re-run with -gpu cuda (water, all 7 molecules, both
+        # methods/models = 28 tests). WP4a: when a solvent is active the GFN2 device
+        # path falls back to the host potential build so the reaction field stays
+        # in-SCF (without it GFN2 was off by up to 3.8 mEh); the GPU total must match
+        # the committed tblite refs to 1e-8. Labels: gpu_${_meth}_solvation / _gbsa.
+        foreach(_meth gfn1 gfn2)
+            foreach(_mol ${_SQM_SOLV_MOLS})
+                set(_aref ${_SQM_VAL_REF}/${_mol}_${_meth}_water.ref.json)
+                if(EXISTS ${_aref})
+                    add_test(NAME sqm_solv_gpu_${_mol}_${_meth}_water
+                        COMMAND ${Python3_EXECUTABLE} ${_SQM_VAL_PY}
+                            --curcuma $<TARGET_FILE:curcuma> --quiet --tol-energy ${_SQM_VAL_TOL}
+                            --gpu cuda --ref ${_aref} --xyz ${_SQM_VAL_MOL}/${_mol}.xyz)
+                    set_tests_properties(sqm_solv_gpu_${_mol}_${_meth}_water
+                        PROPERTIES TIMEOUT 120 LABELS "gpu_${_meth}_solvation")
+                endif()
+                set(_gref ${_SQM_VAL_REF}/${_mol}_${_meth}_water_gbsa.ref.json)
+                if(EXISTS ${_gref})
+                    add_test(NAME sqm_gbsa_gpu_${_mol}_${_meth}_water
+                        COMMAND ${Python3_EXECUTABLE} ${_SQM_VAL_PY}
+                            --curcuma $<TARGET_FILE:curcuma> --quiet --tol-energy ${_SQM_VAL_TOL}
+                            --gpu cuda --ref ${_gref} --xyz ${_SQM_VAL_MOL}/${_mol}.xyz)
+                    set_tests_properties(sqm_gbsa_gpu_${_mol}_${_meth}_water
+                        PROPERTIES TIMEOUT 120 LABELS "gpu_${_meth}_gbsa")
+                endif()
+            endforeach()
+        endforeach()
     endif()
 endif()
 
