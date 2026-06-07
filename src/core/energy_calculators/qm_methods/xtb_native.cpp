@@ -35,6 +35,7 @@
 #include "src/core/energy_calculators/dispersion/d4_ncoord.h"  // D4 CN gradient (GFN2)
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"  // D3 CN gradient (May 2026)
+#include "src/core/energy_calculators/ff_methods/alpb_solvation.h"  // implicit solvation (June 2026)
 #include "diis_accelerator.h"
 #include "broyden_mixer.h"
 
@@ -115,7 +116,47 @@ bool XTB::InitialiseMolecule()
     // system (different nsh/nat). Claude Generated.
     m_scf_history.clear();
     m_xlbomd_aux.clear();
+
+    // ── Implicit solvation (Claude Generated, June 2026) ──
+    // Build the self-consistent ALPB model when a solvent is requested. Created
+    // here (atoms known); update() refreshes the geometry-dependent state each
+    // Calculation(). solvent_model: 3=ALPB (wired), 2=GBSA / 1=CPCM are later WPs.
+    m_solvation.reset();
+    m_E_solvation = 0.0;
+    if (m_solvent != "none" && !m_solvent.empty()) {
+        const int model = (m_solvent_model > 0) ? m_solvent_model : 3;  // default ALPB
+        const std::string meth = (m_method == MethodType::GFN1) ? "gfn1" : "gfn2";
+        if (model == 3) {
+            auto solv = std::make_unique<ALPBSolvation>();
+            if (solv->init(m_atoms, m_solvent, meth)) {
+                m_solvation = std::move(solv);
+            } else {
+                CurcumaLogger::warn("Native solvation: no ALPB parameters for solvent '"
+                                    + m_solvent + "' (" + meth + "); running gas phase");
+            }
+        } else {
+            CurcumaLogger::warn("Native solvation: only ALPB (solvent_model 3) is "
+                                "implemented for native GFN; running gas phase");
+        }
+    }
     return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Implicit solvation hooks (Claude Generated, June 2026).
+// addSolvationPotential adds the in-SCF Fock contribution v_at += dE_solv/dq;
+// energySolvation returns the solvation free energy at the current charges.
+// Both are no-ops when no solvent is active. See docs/SQM_SOLVATION_WP.md.
+// ═══════════════════════════════════════════════════════════════════
+void XTB::addSolvationPotential(Potential& pot) const
+{
+    if (m_solvation)
+        m_solvation->addPotential(m_wfn.q_at, pot.v_at);
+}
+
+double XTB::energySolvation() const
+{
+    return m_solvation ? m_solvation->energy(m_wfn.q_at) : 0.0;
 }
 
 // Non-member helper for convergence check (must be defined before Calculation)
@@ -368,6 +409,12 @@ double XTB::Calculation(bool gradient)
     if (m_method == MethodType::GFN2) {
         setupMultipole();
     }
+
+    // Implicit solvation: refresh the geometry-dependent state (Born radii, SASA,
+    // Born matrix, CM5) once per geometry, before the SCF loop. m_geometry is in
+    // Angstrom; the model works in Bohr (Claude Generated, June 2026).
+    if (m_solvation)
+        m_solvation->update(m_atoms, m_geometry * AA_TO_AU);
     const auto t_setup = clock::now();
 
     if (verb >= 3) {
@@ -817,6 +864,11 @@ double XTB::Calculation(bool gradient)
                 addDispersionPotential(m_pot);
                 acc_disp += ms(t_disp0, clock::now());
             }
+
+            // Implicit solvation: v_at += (B * q_at). Folded into v_ao by
+            // expand_potential below, so it enters the Fock (and the host->GPU
+            // upload) automatically. Charge-independent SASA/shift do not appear.
+            addSolvationPotential(m_pot);
         }
         const auto t_pot = clock::now();
 
@@ -1140,6 +1192,7 @@ double XTB::Calculation(bool gradient)
         addThirdOrderPotential(m_pot);
         addMultipolePotential(m_pot);
         addDispersionPotential(m_pot);
+        addSolvationPotential(m_pot);
     }
     m_F = buildFock(m_H0, m_S, m_pot);
 
@@ -1150,9 +1203,13 @@ double XTB::Calculation(bool gradient)
     m_E_repulsion     = calcRepulsionEnergy();
     m_E_halogen_bond  = calcHalogenBondEnergy();
     m_E_dispersion    = calcDispersionEnergy(gradient);
+    // Implicit solvation free energy (Born + CDS + shift). Added separately to the
+    // total — NOT into Tr(P·H0) — mirroring the Coulomb ES2 handling, so there is no
+    // double counting (the in-SCF v_at only polarized the density). Claude Generated.
+    m_E_solvation     = energySolvation();
 
     m_E_total = m_E_electronic + m_E_repulsion
-              + m_E_halogen_bond + m_E_dispersion;
+              + m_E_halogen_bond + m_E_dispersion + m_E_solvation;
     const auto t_energies = clock::now();
 
     if (verb >= 2) {
@@ -1166,6 +1223,8 @@ double XTB::Calculation(bool gradient)
         if (m_method == MethodType::GFN1)
             CurcumaLogger::info(fmt::format("  Halogen bond = {: .8f} Eh", m_E_halogen_bond));
         CurcumaLogger::info(fmt::format("  Dispersion   = {: .8f} Eh", m_E_dispersion));
+        if (m_solvation)
+            CurcumaLogger::info(fmt::format("  Solvation    = {: .8f} Eh", m_E_solvation));
         CurcumaLogger::result(fmt::format("  Total        = {: .8f} Eh", m_E_total));
 
         // Frontier orbitals
@@ -1189,6 +1248,12 @@ double XTB::Calculation(bool gradient)
         addCoulombShellPotential(m_pot);
         addThirdOrderPotential(m_pot);
         if (m_method == MethodType::GFN2) addMultipolePotential(m_pot);
+        // Solvation v_at must be in m_pot here too: calculateGradient's overlap-
+        // derivative (Pulay) term uses -P·(v_ao(μ)+v_ao(ν))·dS/dR with the FULL
+        // converged potential, and W is built from the solvation-polarized orbital
+        // energies — omitting v_solv would make the two inconsistent. The explicit
+        // ∂E_solv/∂R is added separately below via m_solvation->addGradient.
+        addSolvationPotential(m_pot);
 
         // Stage 4 (Claude Generated): native nuclear gradient on the device when the
         // SCF ran device-resident. GFN1: repulsion/H0-Pulay/Coulomb (1/2/3) on the
@@ -1201,6 +1266,13 @@ double XTB::Calculation(bool gradient)
             gpu_grad = calculateGradientGpu();
         if (!gpu_grad)
             calculateGradient();   // fills m_gradient in Eh/Bohr
+
+        // Explicit solvation nuclear gradient ∂E_solv/∂R at the converged charges
+        // (Born radii / SASA / HB-surface / CM5 derivatives). Added in Eh/Bohr,
+        // i.e. in the SAME space as calculateGradient, BEFORE the unit conversion.
+        if (m_solvation)
+            m_solvation->addGradient(m_atoms, m_geometry * AA_TO_AU, m_wfn.q_at, m_gradient);
+
         m_gradient /= au;          // Eh/Bohr → Eh/Å: 1 Eh/Bohr = (1/au) Eh/Å
     }
     const auto t_end = clock::now();

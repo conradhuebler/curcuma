@@ -28,6 +28,7 @@
 #pragma once
 
 #include "src/core/global.h"
+#include "src/core/solvation/implicit_solvation.h"
 #include "qm_driver.h"
 #include "STOIntegrals.hpp"
 
@@ -645,6 +646,11 @@ public:
     void setD4ChargeSource(const std::string& s) { m_d4_charge_source = s; }
     const std::string& d4ChargeSource() const { return m_d4_charge_source; }
 
+    // Implicit-solvation config (set by the wrapper from the `xtb` scope).
+    void setSolvent(const std::string& s) { m_solvent = s; }
+    void setSolventModel(int m) { m_solvent_model = m; }
+    void setSolventEpsilon(double e) { m_solvent_epsilon = e; }
+
     // Tighten the SCF convergence threshold (for FD charge-response validation).
     void setScfThreshold(double t) { m_scf_threshold = t; }
 
@@ -856,6 +862,11 @@ private:
     // Linearized third-order Jacobian: 2·Γ_s·q_sh (GFN2) or 2·Γ_i·q_at broadcast (GFN1)
     Vector thirdOrderKernelDiag(const Vector& q_sh, const Vector& q_at) const; // xtb_thirdorder.cpp
     double energyThirdOrder() const;                                     // xtb_thirdorder.cpp
+
+    // Implicit solvation (Claude Generated, June 2026; xtb_native.cpp).
+    // In-SCF potential v_at += dE_solv/dq = (B*q_at); energy added separately.
+    void addSolvationPotential(Potential& pot) const;
+    double energySolvation() const;
 
     // GFN2 multipole interactions (damped).
     void addMultipolePotential(Potential& pot) const;                    // xtb_multipole.cpp
@@ -1087,6 +1098,18 @@ private:
     // (static-prefactor mode). Set from config in the constructor.
     std::string m_d4_charge_source = "eeq";
 
+    // ── Implicit solvation (Claude Generated, June 2026) ──
+    // Self-consistent ALPB (later GBSA/CPCM) coupled into the SCF. The model is
+    // built in InitialiseMolecule when m_solvent != "none"; its potential v = B*q
+    // enters the Fock via m_pot.v_at each iteration, its energy is added to
+    // m_E_total (separately, NOT into Tr(P*H0)), and its gradient is added in
+    // Eh/Bohr before the final unit conversion. See docs/SQM_SOLVATION_WP.md.
+    std::unique_ptr<ImplicitSolvationModel> m_solvation;
+    std::string m_solvent = "none";   ///< solvent name; "none" disables solvation
+    int    m_solvent_model = 0;        ///< 0=none, 1=CPCM, 2=GBSA, 3=ALPB
+    double m_solvent_epsilon = -1.0;   ///< explicit dielectric (CPCM); -1 = from name
+    double m_E_solvation = 0.0;        ///< last solvation free energy (Eh)
+
     // Warm-start and iterative-mode state (Claude Generated).
     // m_warmstart: reuse converged q_sh from the previous call as initial guess.
     //   UpdateMolecule() saves q_sh to m_warmstart_q_sh before clearing it;
@@ -1182,6 +1205,10 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_extrapolation_apply",[&](const json& v){ if (v.is_string())          xtb.setScfExtrapolationApply(v.get<std::string>()); });
     lookup("scf_xlbomd_correctors",  [&](const json& v){ if (v.is_number_integer())  xtb.setScfXlbomdCorrectors(v.get<int>()); });
     lookup("electronic_temperature", [&](const json& v){ if (v.is_number()) xtb.setElectronicTemperature(v.get<double>()); });
+    // Implicit solvation (Claude Generated, June 2026).
+    lookup("solvent",         [&](const json& v){ if (v.is_string()) xtb.setSolvent(v.get<std::string>()); });
+    lookup("solvent_model",   [&](const json& v){ if (v.is_number_integer()) xtb.setSolventModel(v.get<int>()); });
+    lookup("solvent_epsilon", [&](const json& v){ if (v.is_number()) xtb.setSolventEpsilon(v.get<double>()); });
 }
 
 } // namespace curcuma::xtb

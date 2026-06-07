@@ -36,6 +36,12 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     PARAM(electronic_temperature, Double, 300.0, "Electronic temperature in Kelvin for Fermi smearing.", "SCF", {"Tele"})
     PARAM(spin, Double, 0.0, "Total spin of the system (0.0 = singlet).", "Molecular", {})
     PARAM(d4_charge_source, String, "eeq", "Native GFN2 D4 zeta charge source: 'eeq' (single-shot dftd4 EEQ, analytical dq/dx) or 'mulliken' (GFN2 SCF charges + CPSCF response).", "Dispersion", {})
+    // Implicit solvation (Claude Generated, June 2026): self-consistent ALPB coupled
+    // into the native GFN1/GFN2 SCF. Use the dotted form (-xtb.solvent water) because
+    // the flat -solvent flag is ambiguous (also registered by tblite/ulysses/gfnff_external).
+    PARAM(solvent, String, "none", "Implicit solvent for the native GFN1/GFN2 SCF (e.g. 'water', 'dmso', 'acetone', 'chloroform'). 'none' (default) runs gas phase. Self-consistent ALPB matching the tblite parameterization (Born + CDS surface tension/H-bond + state shift); GFN1 uses CM5 charges, GFN2 Mulliken. Set solvent_model=3 (ALPB). Use the dotted -xtb.solvent (the flat -solvent is ambiguous across providers).", "Solvation", {})
+    PARAM(solvent_model, Int, 0, "Implicit solvation model for the native GFN SCF: 0=none, 1=CPCM (not yet implemented natively), 2=GBSA (not yet implemented natively), 3=ALPB. When a solvent is given, model 3 (ALPB) is used by default.", "Solvation", {})
+    PARAM(solvent_epsilon, Double, -1.0, "Explicit solvent dielectric constant (only used by CPCM; ALPB/GBSA take the dielectric from the named-solvent parameter set). -1 = derive from the solvent name.", "Solvation", {})
     // Native GFN1/GFN2 SCF convergence controls (Claude Generated). Default mode
     // is 'broyden' (tblite-style charge mixing); '-scf_mode diis' is the historic path.
     PARAM(scf_mode, String, "broyden", "Native GFN SCF strategy: 'broyden' (modified-Broyden quasi-Newton mixing of the SCC charge vector, the tblite-style mixer; default, most robust), 'diis' (Pulay on Fock, the historic path), 'plain' (damped density mixing only), or 'level-shift' (Saunders-Hillier virtual shift + density mixing).", "SCF", {})

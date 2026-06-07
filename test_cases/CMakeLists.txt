@@ -209,6 +209,21 @@ add_test(NAME gfnff_numgrad_fixed_charges
 set_tests_properties(gfnff_numgrad_fixed_charges
     PROPERTIES TIMEOUT 120 LABELS "gfnff;gradient;cpu")
 
+# Claude Generated (June 2026): native GFN1/GFN2 ALPB-solvation gradient test.
+# Analytical XTB::Gradient() vs central finite difference of the total energy,
+# GFN1 (CM5) + GFN2 (Mulliken) in water. See docs/SQM_SOLVATION_WP.md (WP1.4).
+add_executable(test_xtb_solvation_numgrad test_xtb_solvation_numgrad.cpp)
+target_link_libraries(test_xtb_solvation_numgrad curcuma_core test_molecule_registry)
+target_include_directories(test_xtb_solvation_numgrad PRIVATE ${CMAKE_SOURCE_DIR})
+if(USE_PCH)
+    target_precompile_headers(test_xtb_solvation_numgrad REUSE_FROM curcuma_core)
+endif()
+add_test(NAME xtb_solvation_numgrad
+         COMMAND test_xtb_solvation_numgrad
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(xtb_solvation_numgrad
+    PROPERTIES TIMEOUT 180 LABELS "sqm;solvation;gradient;cpu")
+
 # Claude Generated (March 2026): GPU GFN-FF Validation Test (gfnff GPU vs CPU)
 # Only built and registered when USE_CUDA=ON
 if(USE_CUDA)

@@ -13,6 +13,8 @@
 #include "alpb_parameters.h"
 #include "src/core/citation_registry.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/solvation/cm5_data.h"
+#include "src/core/solvation/tblite_solvation_params.h"
 #include "src/core/units.h"
 
 #include <algorithm>
@@ -191,9 +193,11 @@ void generateLebedev230(Eigen::MatrixXd& grid, Eigen::VectorXd& weights) {
 ALPBSolvation::ALPBSolvation() = default;
 ALPBSolvation::~ALPBSolvation() = default;
 
-bool ALPBSolvation::init(const std::vector<int>& atomic_numbers, const std::string& solvent)
+bool ALPBSolvation::init(const std::vector<int>& atomic_numbers, const std::string& solvent,
+                         const std::string& method)
 {
     m_solvent = solvent;
+    m_host_method = method;
     m_nat = static_cast<int>(atomic_numbers.size());
     m_ntpair = m_nat * (m_nat - 1) / 2;
 
@@ -262,6 +266,55 @@ bool ALPBSolvation::init(const std::vector<int>& atomic_numbers, const std::stri
 
 bool ALPBSolvation::loadSolventParameters(const std::string& solvent)
 {
+    m_gamscale_elem.resize(MAX_ELEM);
+    m_sx_elem.resize(MAX_ELEM);
+    m_hb_elem.resize(MAX_ELEM);
+
+    // ── tblite GFN1/GFN2 ALPB parameter set (Claude Generated, June 2026) ──
+    // Born (epsv,c1,soset,sx) + CDS (rprobe,gamscale,sqrtGhbond) + shift (gshift),
+    // joined per (method, solvent) in tblite_solvation_params.h. Only ALPB
+    // (solvent_model 3) is wired here; GBSA would pass alpb=false (WP2).
+    // The non-electrostatic CDS terms reuse the existing SASA/HB machinery by
+    // feeding tblite's per-element values (see below) — radii stay D3 for both
+    // Born and CDS, exactly as tblite's load_alpb_param / load_cds_param do.
+    if (m_host_method == "gfn1" || m_host_method == "gfn2") {
+        const auto* tp =
+            curcuma::solvation::getTbliteSolvationParam(m_host_method, /*alpb=*/true, solvent);
+        if (!tp) return false;
+
+        m_dielectric_const = tp->epsv;
+        m_molar_mass = tp->smass;
+        m_density = tp->rhos / tp->smass * molcm3toau;
+        // gsolv reference state (refstate=1) => total_shift = gshift (stateshift 0),
+        // distributed per atom in tblite; the molecular total is gshift*kcaltoau.
+        m_gshift = tp->gshift * kcaltoau;
+        m_born_scale = tp->c1;
+        m_born_offset = tp->soset * 0.1 * aatoau;  // born.f90: svdw = vdwr - soset*0.1*aatoau
+        m_probe_rad = tp->rprobe * aatoau;
+        m_alpbet = alpb_factor / m_dielectric_const;
+        m_keps = (1.0 / m_dielectric_const - 1.0) / (1.0 + m_alpbet);
+        m_lrcut = lrcut;
+        m_use_cm5 = (m_host_method == "gfn1");  // tblite useCM5 (alpb.f90:193)
+
+        for (int i = 0; i < MAX_ELEM; ++i) {
+            // CDS surface tension. tblite: E = tblite_surface * (gamscale*1e-5).
+            // curcuma's m_sasa is tblite_surface/(4*pi) (the gfnff convention puts the
+            // 4*pi in the tension), so restore the 4*pi here:
+            //   gsasa = sum_i m_sasa_i * (gamscale_i * 4*pi * 1e-5)
+            //         = sum_i tblite_surface_i * gamscale_i * 1e-5.   (matches tblite)
+            m_gamscale_elem[i] = tp->gamscale[i] * fourpi * surfaceTension;
+            m_sx_elem[i] = tp->sx[i];
+            // CDS H-bond folded into the Born diagonal via the existing HB machinery:
+            //   tblite E_hb = sum_i [-kcaltoau*g_i^2/(4*pi*vdwsa_i^2)] * tblite_surface_i * q^2
+            //              = sum_i [-kcaltoau*g_i^2/vdwsa_i^2] * m_sasa_i * q^2  (4*pi cancels).
+            // computeHBCorrection forms m_hbw = m_hbmag * m_sasa/vdwsa^2, so m_hbmag = -kcaltoau*g^2.
+            const double g = tp->sqrtGhbond[i];
+            m_hb_elem[i] = -kcaltoau * g * g;
+        }
+        return true;
+    }
+
+    // ── GFN-FF path (unchanged) ──
     const SolventParameters* p = getSolventParameters(solvent);
     if (!p) return false;
 
@@ -383,6 +436,10 @@ void ALPBSolvation::update(const std::vector<int>& atomic_numbers, const Matrix&
     // 7. Build Born interaction matrix
     m_born_mat.setZero();
     buildBornMatrix();
+
+    // 8. CM5 charge correction (GFN1 tblite path only) — geometry-dependent.
+    if (m_use_cm5)
+        computeCM5(atomic_numbers, xyz_bohr);
 }
 
 
@@ -935,15 +992,18 @@ ALPBEnergyParts ALPBSolvation::getEnergyParts(const Vector& charges) const
 {
     ALPBEnergyParts parts;
 
-    // Born energy: E = 0.5 * q^T * B * q
+    // Solute charges entering the Born/HB contraction (q + cm5 for GFN1 tblite).
+    const Vector qs = soluteCharges(charges);
+
+    // Born energy: E = 0.5 * qs^T * B * qs
     // (including HB and ALPB correction which are already in bornMat)
-    Vector shift = 0.5 * m_born_mat * charges;
-    double total_born = charges.dot(shift);
+    Vector shift = 0.5 * m_born_mat * qs;
+    double total_born = qs.dot(shift);
 
     // HB energy (separate for decomposition)
     if (m_lhb) {
         for (int i = 0; i < m_nat; ++i) {
-            parts.ghb += m_hbw(i) * charges(i) * charges(i);
+            parts.ghb += m_hbw(i) * qs(i) * qs(i);
         }
     }
 
@@ -953,6 +1013,97 @@ ALPBEnergyParts ALPBSolvation::getEnergyParts(const Vector& charges) const
     parts.gshift = m_gshift;
 
     return parts;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// In-SCF solvation potential  v_i = dE_solv/dq_i = (B q)_i
+// Claude Generated (June 2026): self-consistent coupling into the GFN SCF.
+// E_solv(q) = 1/2 q^T B q with the symmetric Born matrix B = m_born_mat
+// (already including keps, Born self-energy, HB diagonal and ALPB shape),
+// so the exact derivative is v = B q. SASA / gshift are charge-independent.
+// ═══════════════════════════════════════════════════════════════════
+void ALPBSolvation::addPotential(const Vector& q_at, Vector& v_at) const
+{
+    if (!m_initialized || m_nat == 0)
+        return;
+    // v_i = dE/dq_at_i = (B * q_solute)_i. q_solute = q_at + cm5 (GFN1 tblite),
+    // and cm5 is constant w.r.t. q_at, so the derivative is just B*q_solute.
+    v_at.noalias() += m_born_mat * soluteCharges(q_at);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Solute charges entering the Born/HB contraction (Claude Generated, June 2026).
+// GFN1 tblite ALPB/GBSA uses q_solute = q_Mulliken + cm5 (alpb.f90:193, useCM5);
+// every other path uses the bare charges. cm5 is geometry-only (filled in update).
+// ═══════════════════════════════════════════════════════════════════
+Vector ALPBSolvation::soluteCharges(const Vector& q) const
+{
+    if (m_use_cm5 && m_cm5.size() == q.size())
+        return q + m_cm5;
+    return q;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// CM5 charges + derivatives (port of tblite cm5.f90 get_cm5_charges).
+// q_solute = q_Mulliken + cm5; cm5 depends only on geometry. m_dcm5dr(3k+c, m)
+// stores d cm5(m) / d r_k[c]. Claude Generated (June 2026).
+// ═══════════════════════════════════════════════════════════════════
+void ALPBSolvation::computeCM5(const std::vector<int>& atomic_numbers, const Matrix& xyz_bohr)
+{
+    using namespace curcuma::solvation;
+    m_cm5 = Eigen::VectorXd::Zero(m_nat);
+    m_dcm5dr = Eigen::MatrixXd::Zero(3 * m_nat, m_nat);
+
+    const double alpha = cm5_alpha_per_aa / aatoau;   // 2.4740/aatoau -> 1/Bohr
+
+    // pairpar(zi,zj) = cm5_a0[zi]-cm5_a0[zj] with the six element-pair overrides
+    // (antisymmetric). zi,zj are 1-based atomic numbers.
+    auto pairpar = [](int zi, int zj) -> double {
+        for (const auto& o : cm5_pair_overrides) {
+            if (o.zi == zi && o.zj == zj) return o.pij;
+            if (o.zi == zj && o.zj == zi) return -o.pij;
+        }
+        const double ai = (zi >= 1 && zi <= 118) ? cm5_a0[zi - 1] : 0.0;
+        const double aj = (zj >= 1 && zj <= 118) ? cm5_a0[zj - 1] : 0.0;
+        return ai - aj;
+    };
+    auto radOf = [](int z) -> double {
+        return (z >= 1 && z <= 118) ? cm5_atomic_rad_aa[z - 1] * aatoau : 0.0;
+    };
+
+    for (int iat = 0; iat < m_nat; ++iat) {
+        const int nati = atomic_numbers[iat];
+        const double radi = radOf(nati);
+        for (int jat = 0; jat < iat; ++jat) {
+            const int natj = atomic_numbers[jat];
+            if (nati == natj) continue;                       // same element: no contribution
+            const double radj = radOf(natj);
+            const double pij = pairpar(nati, natj);
+            const double pji = pairpar(natj, nati);
+            const double dx = xyz_bohr(iat, 0) - xyz_bohr(jat, 0);
+            const double dy = xyz_bohr(iat, 1) - xyz_bohr(jat, 1);
+            const double dz = xyz_bohr(iat, 2) - xyz_bohr(jat, 2);
+            const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist < 1e-12) continue;
+            const double bkk = std::exp(-alpha * (dist - radi - radj));
+            const double bkkda = bkk * alpha / dist;
+            m_cm5(iat) += bkk * pij;
+            m_cm5(jat) += bkk * pji;
+            // d cm5(m)/d r_k[c] stored at (3k+c, m); see tblite cm5.f90:117-120.
+            m_dcm5dr(3 * iat + 0, iat) -= bkkda * dx * pij;
+            m_dcm5dr(3 * iat + 1, iat) -= bkkda * dy * pij;
+            m_dcm5dr(3 * iat + 2, iat) -= bkkda * dz * pij;
+            m_dcm5dr(3 * jat + 0, jat) += bkkda * dx * pji;
+            m_dcm5dr(3 * jat + 1, jat) += bkkda * dy * pji;
+            m_dcm5dr(3 * jat + 2, jat) += bkkda * dz * pji;
+            m_dcm5dr(3 * iat + 0, jat) -= bkkda * dx * pji;
+            m_dcm5dr(3 * iat + 1, jat) -= bkkda * dy * pji;
+            m_dcm5dr(3 * iat + 2, jat) -= bkkda * dz * pji;
+            m_dcm5dr(3 * jat + 0, iat) += bkkda * dx * pij;
+            m_dcm5dr(3 * jat + 1, iat) += bkkda * dy * pij;
+            m_dcm5dr(3 * jat + 2, iat) += bkkda * dz * pij;
+        }
+    }
 }
 
 
@@ -1032,26 +1183,49 @@ void ALPBSolvation::addGradient(const std::vector<int>& atomic_numbers,
 {
     double gborn = 0.0;
 
-    // P16 Born gradient
-    addGradientP16(charges, gborn, gradient);
+    // Solute charges (q + cm5 for GFN1 tblite). All charge-dependent gradient
+    // terms below are evaluated at the solute charges, matching tblite.
+    const Vector qs = soluteCharges(charges);
 
-    // SASA gradient: dsdr already contracted
+    // P16 Born gradient
+    addGradientP16(qs, gborn, gradient);
+
+    // SASA gradient: dsdr already contracted (charge-independent surface tension)
     for (int j = 0; j < m_nat; ++j) {
         gradient(j, 0) += m_dsdr(0, j);
         gradient(j, 1) += m_dsdr(1, j);
         gradient(j, 2) += m_dsdr(2, j);
     }
 
-    // HB gradient
+    // HB gradient (CDS H-bond surface-derivative term, folded via m_hbw)
     double ghb = 0.0;
     if (m_lhb) {
-        addGradientHBond(charges, ghb, gradient);
+        addGradientHBond(qs, ghb, gradient);
     }
 
     // ALPB shape gradient
     if (m_alpbet > 0.0) {
-        gborn += charges.sum() * charges.sum() * m_alpbet / m_adet * m_keps;
-        addADetDeriv(xyz_bohr, m_keps * m_alpbet, charges, gradient);
+        gborn += qs.sum() * qs.sum() * m_alpbet / m_adet * m_keps;
+        addADetDeriv(xyz_bohr, m_keps * m_alpbet, qs, gradient);
+    }
+
+    // CM5 nuclear-gradient term (GFN1 tblite): grad(k) += sum_m dcm5dr(k,m)*v(m),
+    // v = B*qs is the Born potential at the solute charges; v already includes the
+    // self/shape/HB-diagonal contributions, so this single term reproduces both the
+    // alpb and CDS CM5 gradients of tblite (alpb.f90:378-380 + cds.f90).
+    if (m_use_cm5 && m_dcm5dr.size() == 3 * m_nat * m_nat) {
+        const Vector v = m_born_mat * qs;            // length nat
+        for (int k = 0; k < m_nat; ++k) {
+            double gx = 0.0, gy = 0.0, gz = 0.0;
+            for (int m = 0; m < m_nat; ++m) {
+                gx += m_dcm5dr(3 * k + 0, m) * v(m);
+                gy += m_dcm5dr(3 * k + 1, m) * v(m);
+                gz += m_dcm5dr(3 * k + 2, m) * v(m);
+            }
+            gradient(k, 0) += gx;
+            gradient(k, 1) += gy;
+            gradient(k, 2) += gz;
+        }
     }
 }
 
