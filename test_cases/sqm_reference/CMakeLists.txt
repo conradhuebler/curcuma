@@ -288,6 +288,28 @@ if(Python3_Interpreter_FOUND)
         endforeach()
     endforeach()
 
+    # ── Native GBSA solvation validation (Claude Generated, June 2026, WP2) ──
+    # Same harness as ALPB, but vs the GBSA references (<mol>_<meth>_<solv>_gbsa.ref.json,
+    # dump_tblite_reference --model gbsa => tblite version 21/22, Still Born kernel).
+    # validate_sqm.py reads solvent_model="gbsa" from the ref and passes
+    # -xtb.solvent_model 2. Labels: gfn{1,2}_gbsa (run via `ctest -L _gbsa`).
+    foreach(_meth gfn1 gfn2)
+        foreach(_mol ${_SQM_SOLV_MOLS})
+            foreach(_solv ${_SQM_SOLV_SOLVENTS})
+                set(_ref ${_SQM_VAL_REF}/${_mol}_${_meth}_${_solv}_gbsa.ref.json)
+                if(EXISTS ${_ref})
+                    add_test(NAME sqm_gbsa_${_mol}_${_meth}_${_solv}
+                        COMMAND ${Python3_EXECUTABLE} ${_SQM_VAL_PY}
+                            --curcuma $<TARGET_FILE:curcuma> --quiet --tol-energy ${_SQM_VAL_TOL}
+                            --ref ${_ref}
+                            --xyz ${_SQM_VAL_MOL}/${_mol}.xyz)
+                    set_tests_properties(sqm_gbsa_${_mol}_${_meth}_${_solv}
+                        PROPERTIES TIMEOUT 120 LABELS "${_meth}_gbsa")
+                endif()
+            endforeach()
+        endforeach()
+    endforeach()
+
     # GPU native xTB validation (Claude Generated, GPU port): identical 1e-8 gate
     # vs the committed tblite references, but with -gpu cuda so the eigensolve (and,
     # in later stages, the whole SCF/gradient) runs on the device. The GPU energies

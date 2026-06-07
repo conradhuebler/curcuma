@@ -33,14 +33,15 @@ using curcuma::xtb::MethodType;
 
 namespace {
 
-// Build + run a fresh native xTB with ALPB solvation; return total energy.
+// Build + run a fresh native xTB with implicit solvation; return total energy.
 // A tight SCF threshold keeps the finite difference clean. gradient optional.
+// solvent_model: 3 = ALPB (P16 kernel), 2 = GBSA (Still kernel).
 double runXtb(MethodType method, const Mol& mol, const std::string& solvent,
-              bool gradient, Eigen::MatrixXd* grad_out = nullptr)
+              int solvent_model, bool gradient, Eigen::MatrixXd* grad_out = nullptr)
 {
     XTB xtb(method);
     xtb.setSolvent(solvent);
-    xtb.setSolventModel(3);          // ALPB
+    xtb.setSolventModel(solvent_model);
     xtb.setScfThreshold(1e-9);       // tighten so the FD reference is converged
     if (!xtb.InitialiseMolecule(mol))
         throw std::runtime_error("InitialiseMolecule failed");
@@ -53,15 +54,17 @@ double runXtb(MethodType method, const Mol& mol, const std::string& solvent,
 struct Result { std::string tag; int nat; double emax; bool pass; };
 
 Result testMol(MethodType method, const std::string& mname, const std::string& solvent,
-               const std::string& methname, double tol)
+               int solvent_model, const std::string& methname, double tol)
 {
+    const std::string modtag = (solvent_model == 2) ? "gbsa" : "alpb";
+
     // registry stores Angstrom; Molecule expects Angstrom
     curcuma::Molecule cmol = TestMolecules::TestMoleculeRegistry::createMolecule(mname, false);
     Mol mol = cmol.getMolInfo();
     const int nat = mol.m_number_atoms;
 
     Eigen::MatrixXd G;
-    const double e0 = runXtb(method, mol, solvent, true, &G);   // analytical, Eh/Angstrom
+    const double e0 = runXtb(method, mol, solvent, solvent_model, true, &G);   // analytical, Eh/Angstrom
 
     const double h = 1e-4;  // Angstrom
     Eigen::MatrixXd Gnum(nat, 3);
@@ -70,16 +73,16 @@ Result testMol(MethodType method, const std::string& mname, const std::string& s
             Mol mp = mol, mm = mol;
             mp.m_geometry(i, d) += h;
             mm.m_geometry(i, d) -= h;
-            const double ep = runXtb(method, mp, solvent, false);
-            const double em = runXtb(method, mm, solvent, false);
+            const double ep = runXtb(method, mp, solvent, solvent_model, false);
+            const double em = runXtb(method, mm, solvent, solvent_model, false);
             Gnum(i, d) = (ep - em) / (2.0 * h);
         }
     }
 
     double emax = (G - Gnum).cwiseAbs().maxCoeff();
     bool pass = emax < tol;
-    std::cout << "  " << methname << " " << mname << " (" << nat << " atoms) in "
-              << solvent << ": E=" << std::fixed << std::setprecision(8) << e0
+    std::cout << "  " << methname << "/" << modtag << " " << mname << " (" << nat
+              << " atoms) in " << solvent << ": E=" << std::fixed << std::setprecision(8) << e0
               << "  max|dG|=" << std::scientific << std::setprecision(3) << emax
               << " Eh/A  " << (pass ? "PASS" : "FAIL") << "\n";
     if (!pass) {
@@ -87,7 +90,7 @@ Result testMol(MethodType method, const std::string& mname, const std::string& s
             std::cout << "    atom " << i << "  anal=[" << G.row(i)
                       << "]  num=[" << Gnum.row(i) << "]\n";
     }
-    return {methname + "/" + mname, nat, emax, pass};
+    return {methname + "/" + modtag + "/" + mname, nat, emax, pass};
 }
 
 }  // namespace
@@ -102,17 +105,21 @@ int main(int argc, char** argv)
     // agrees to ~1e-5 Eh/A. 5e-4 leaves margin for the FD truncation/SCF floor.
     const double tol = 5e-4;
     const std::vector<std::string> mols = {"H2O", "CH4", "CH3OH", "NH3"};
+    // 3 = ALPB (P16 kernel), 2 = GBSA (Still kernel) — both share the SASA/HB/CM5 path.
+    const std::vector<int> models = {3, 2};
 
-    std::cout << "Native xTB ALPB solvation gradient validation (analytical vs FD)\n"
+    std::cout << "Native xTB ALPB/GBSA solvation gradient validation (analytical vs FD)\n"
               << "solvent=" << solvent << "  tol=" << tol << " Eh/Angstrom\n"
               << std::string(70, '=') << "\n";
 
     std::vector<Result> results;
-    for (const auto& m : mols) {
-        try { results.push_back(testMol(MethodType::GFN2, m, solvent, "gfn2", tol)); }
-        catch (const std::exception& e) { std::cerr << "[SKIP] gfn2 " << m << ": " << e.what() << "\n"; }
-        try { results.push_back(testMol(MethodType::GFN1, m, solvent, "gfn1", tol)); }
-        catch (const std::exception& e) { std::cerr << "[SKIP] gfn1 " << m << ": " << e.what() << "\n"; }
+    for (int model : models) {
+        for (const auto& m : mols) {
+            try { results.push_back(testMol(MethodType::GFN2, m, solvent, model, "gfn2", tol)); }
+            catch (const std::exception& e) { std::cerr << "[SKIP] gfn2 " << m << ": " << e.what() << "\n"; }
+            try { results.push_back(testMol(MethodType::GFN1, m, solvent, model, "gfn1", tol)); }
+            catch (const std::exception& e) { std::cerr << "[SKIP] gfn1 " << m << ": " << e.what() << "\n"; }
+        }
     }
 
     bool all = true;

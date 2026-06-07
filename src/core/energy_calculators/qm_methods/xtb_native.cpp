@@ -118,25 +118,31 @@ bool XTB::InitialiseMolecule()
     m_xlbomd_aux.clear();
 
     // ── Implicit solvation (Claude Generated, June 2026) ──
-    // Build the self-consistent ALPB model when a solvent is requested. Created
-    // here (atoms known); update() refreshes the geometry-dependent state each
-    // Calculation(). solvent_model: 3=ALPB (wired), 2=GBSA / 1=CPCM are later WPs.
+    // Build the self-consistent reaction-field model when a solvent is requested.
+    // Created here (atoms known); update() refreshes the geometry-dependent state
+    // each Calculation(). solvent_model: 3=ALPB, 2=GBSA (both wired); 1=CPCM is a
+    // later WP. GBSA = ALPB with the shape term off (see ALPBSolvation::setUseAlpb).
     m_solvation.reset();
     m_E_solvation = 0.0;
     if (m_solvent != "none" && !m_solvent.empty()) {
         const int model = (m_solvent_model > 0) ? m_solvent_model : 3;  // default ALPB
         const std::string meth = (m_method == MethodType::GFN1) ? "gfn1" : "gfn2";
-        if (model == 3) {
+        if (model == 3 || model == 2) {
+            const bool use_alpb = (model == 3);
+            const char* tag = use_alpb ? "ALPB" : "GBSA";
             auto solv = std::make_unique<ALPBSolvation>();
+            solv->setUseAlpb(use_alpb);
             if (solv->init(m_atoms, m_solvent, meth)) {
                 m_solvation = std::move(solv);
             } else {
-                CurcumaLogger::warn("Native solvation: no ALPB parameters for solvent '"
-                                    + m_solvent + "' (" + meth + "); running gas phase");
+                CurcumaLogger::warn(std::string("Native solvation: no ") + tag
+                                    + " parameters for solvent '" + m_solvent + "' ("
+                                    + meth + "); running gas phase");
             }
         } else {
-            CurcumaLogger::warn("Native solvation: only ALPB (solvent_model 3) is "
-                                "implemented for native GFN; running gas phase");
+            CurcumaLogger::warn("Native solvation: only ALPB (solvent_model 3) and "
+                                "GBSA (solvent_model 2) are implemented for native GFN; "
+                                "running gas phase");
         }
     }
     return true;

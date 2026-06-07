@@ -45,15 +45,16 @@ _COMP_RE = {
 }
 
 
-def run_curcuma(curcuma, xyz, method, quiet, gpu=None, solvent=None):
+def run_curcuma(curcuma, xyz, method, quiet, gpu=None, solvent=None, solvent_model="alpb"):
     # -verbosity 2 surfaces the per-container decomposition; the
     # "Single Point Energy = ..." line is printed unconditionally, so the total
     # gate is unaffected by the verbosity bump.
     cmd = [curcuma, "-sp", xyz, "-method", method, "-verbosity", "2"]
     if solvent:
-        # Native implicit solvation (ALPB). Dotted form because the flat -solvent
-        # flag is ambiguous across providers. solvent_model 3 = ALPB.
-        cmd += ["-xtb.solvent", solvent, "-xtb.solvent_model", "3"]
+        # Native implicit solvation. Dotted form because the flat -solvent flag is
+        # ambiguous across providers. solvent_model: 3 = ALPB, 2 = GBSA.
+        model_id = "2" if solvent_model == "gbsa" else "3"
+        cmd += ["-xtb.solvent", solvent, "-xtb.solvent_model", model_id]
     if gpu:
         # GPU path (Claude Generated, GPU port): -gpu cuda routes gfn1/gfn2 to the
         # native xTB GPU backend. With no CUDA device the wrapper falls back to CPU,
@@ -109,12 +110,13 @@ def main():
     native = method                             # canonical native xTB (gfn1/gfn2)
     e_ref = ref["total_energy"]
     nat = ref["molecule"]["natoms"]
-    solvent = ref.get("solvent")                # present => ALPB-solvated reference
+    solvent = ref.get("solvent")                # present => solvated reference
+    solvent_model = ref.get("solvent_model", "alpb")  # "alpb" | "gbsa"
 
     # Size-scaled default tolerance: 1e-4 Eh floor, +1e-5 Eh/atom for accumulation.
     tol = args.tol_energy if args.tol_energy is not None else max(1e-4, nat * 1e-5)
 
-    res = run_curcuma(args.curcuma, args.xyz, native, args.quiet, args.gpu, solvent)
+    res = run_curcuma(args.curcuma, args.xyz, native, args.quiet, args.gpu, solvent, solvent_model)
     name = ref["molecule"]["name"]
     if res is None:
         print(f"FAIL {name:20s} {native}: native run produced no energy")

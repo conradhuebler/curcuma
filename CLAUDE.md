@@ -163,10 +163,11 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 ### 3. Solvation Models (Implicit Solvent)
 - ✅ **TBLite Solvation** - CPCM, GB (Generalized Born), ALPB for GFN methods
 - ✅ **Ulysses Solvation** - GBSA (Generalized Born + SA) for GFN/MNDO methods
-- ⚠️ **Native GFN1/GFN2 ALPB** (June 2026, AI/machine-tested) - self-consistent ALPB
-  in the native xTB SCF, matching tblite total ΔG (Born + CDS + shift; CM5 for gfn1)
-  to ≤1e-8 Eh on the validation set; `-method gfn2 -xtb.solvent water -xtb.solvent_model 3`.
-  CPCM/GBSA/GPU/GFN-FF native solvation still pending. See [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md)
+- ⚠️ **Native GFN1/GFN2 ALPB + GBSA** (June 2026, AI/machine-tested) - self-consistent
+  ALPB (`-xtb.solvent_model 3`, P16 kernel) and GBSA (`-xtb.solvent_model 2`, Still kernel)
+  in the native xTB SCF, matching tblite total ΔG (Born + CDS + shift; CM5 for gfn1) to
+  ≤1e-8 Eh on the validation set; `-method gfn2 -xtb.solvent water -xtb.solvent_model 2`.
+  CPCM/GPU/GFN-FF native solvation still pending. See [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md)
 - **25+ Solvents** - water, methanol, DMSO, acetone, benzene, etc.
 - **Auto-Activation** - Specify `-solvent water` to enable
 - **Documentation** - See [docs/SOLVATION.md](docs/SOLVATION.md) for details

@@ -68,6 +68,18 @@ public:
     ~ALPBSolvation() override;
 
     /**
+     * @brief Select ALPB (true, default) or plain GBSA (false) before init().
+     *
+     * GBSA is ALPB with the analytical-linearized-PB shape term switched off
+     * (alpbet = 0, so keps = 1/eps - 1 and the constant keps*alpbet/adet term
+     * vanishes); identical P16 Born kernel, CDS surface term, state shift and
+     * CM5-for-gfn1 rule. tblite solvent_model: 3 = ALPB, 2 = GBSA. Must be
+     * called before init(). Only affects the gfn1/gfn2 tblite path; the GFN-FF
+     * path is always ALPB. Claude Generated (June 2026).
+     */
+    void setUseAlpb(bool use_alpb) { m_use_alpb = use_alpb; }
+
+    /**
      * @brief Initialize solvation model for a given molecule and solvent
      *
      * Loads solvent parameters, sets up VDW radii, Lebedev grid,
@@ -193,6 +205,7 @@ private:
     // ─── Kernel (alpb_kernel.cpp) ───
     void buildBornMatrix();
     void addGradientP16(const Vector& charges, double& energy, Matrix& gradient);
+    void addGradientStill(const Vector& charges, double& energy, Matrix& gradient);
 
     // ─── ALPB shape correction ───
     void computeADet(const Matrix& xyz_bohr);
@@ -214,6 +227,7 @@ private:
     // ─── Solvent parameters ───
     std::string m_solvent;
     std::string m_host_method = "gfnff";  ///< Parameter set selector: gfn1/gfn2/gfnff
+    bool m_use_alpb = true;               ///< true=ALPB (solvent_model 3), false=GBSA (2)
     double m_dielectric_const = 0.0;  ///< Dielectric constant ε
     double m_keps = 0.0;              ///< (1/ε - 1) / (1 + αβ)
     double m_alpbet = 0.0;            ///< ALPB constant: 0.571412/ε

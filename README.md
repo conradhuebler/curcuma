@@ -96,7 +96,7 @@ The native `gfnff` implementation is **AI-implemented and machine-tested** — h
 - Geometry optimization and MD using gradients
 
 **Not validated / not implemented:**
-- **GFN-FF Solvation (ALPB/GBSA)**: Code exists but never validated against reference — result unknown. (Note: the **native GFN1/GFN2 ALPB** path was validated to ≤1e-8 Eh vs tblite in June 2026 — `-method gfn2 -xtb.solvent water -xtb.solvent_model 3` — see [docs/SOLVATION.md](docs/SOLVATION.md); machine-tested only.)
+- **GFN-FF Solvation (ALPB/GBSA)**: Code exists but never validated against reference — result unknown. (Note: the **native GFN1/GFN2 ALPB and GBSA** paths were validated to ≤1e-8 Eh vs tblite in June 2026 — `-method gfn2 -xtb.solvent water -xtb.solvent_model 3` (ALPB) or `2` (GBSA) — see [docs/SOLVATION.md](docs/SOLVATION.md); machine-tested only.)
 - **Periodic boundary conditions**: Not implemented
 - **Organometallics / transition metals**: No test molecule with metal center; parameter quality unknown
 - **Gradient accuracy for large systems**: Dispersion gradients show √N accumulation error (expected for O(N²) terms, scientifically acceptable for MD/opt)

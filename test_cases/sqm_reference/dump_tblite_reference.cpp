@@ -129,19 +129,25 @@ bool pullComponent(tblite_error err, tblite_result res, int nat,
 int main(int argc, char** argv)
 {
     if (argc < 3) {
-        std::fprintf(stderr, "usage: %s <gfn1|gfn2> <in.xyz> [out.json] [--solvent NAME]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <gfn1|gfn2> <in.xyz> [out.json] [--solvent NAME] [--model alpb|gbsa]\n", argv[0]);
         return 1;
     }
-    // Collect positionals + the optional --solvent flag (parse-anywhere).
+    // Collect positionals + the optional --solvent / --model flags (parse-anywhere).
     std::string solvent;          // empty -> gas phase
+    std::string solv_model = "alpb";  // alpb (default) | gbsa; selects tblite version
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--solvent" && i + 1 < argc) { solvent = argv[++i]; }
+        else if (a == "--model" && i + 1 < argc) { solv_model = argv[++i]; }
         else pos.push_back(a);
     }
     if (pos.size() < 2) {
-        std::fprintf(stderr, "usage: %s <gfn1|gfn2> <in.xyz> [out.json] [--solvent NAME]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <gfn1|gfn2> <in.xyz> [out.json] [--solvent NAME] [--model alpb|gbsa]\n", argv[0]);
+        return 1;
+    }
+    if (solv_model != "alpb" && solv_model != "gbsa") {
+        std::fprintf(stderr, "error: --model must be 'alpb' or 'gbsa' (got '%s')\n", solv_model.c_str());
         return 1;
     }
     const std::string method_s = pos[0];
@@ -183,17 +189,22 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    // Attach ALPB implicit solvation (version: ALPB(GFN1)=11, ALPB(GFN2)=12;
-    // refstate: gsolv=1 -> total_shift = gshift only, matching the native target).
+    // Attach implicit solvation via the same constructor; the version selects the
+    // model+method (ALPB(GFN1)=11, ALPB(GFN2)=12, GBSA(GFN1)=21, GBSA(GFN2)=22).
+    // refstate: gsolv=1 -> total_shift = gshift only, matching the native target.
     if (!solvent.empty()) {
-        const int version = (method_s == "gfn1") ? 11 : 12;
+        const bool is_gbsa = (solv_model == "gbsa");
+        int version;
+        if (method_s == "gfn1") version = is_gbsa ? 21 : 11;
+        else                    version = is_gbsa ? 22 : 12;
         const int refstate = 1;  // gsolv
         std::vector<char> sbuf(solvent.begin(), solvent.end());
         sbuf.push_back('\0');
         tblite_container cont =
             tblite_new_alpb_solvation_solvent(err, mol, sbuf.data(), version, refstate);
         if (tblite_check_error(err)) {
-            std::fprintf(stderr, "tblite ALPB setup failed for solvent '%s'\n", solvent.c_str());
+            std::fprintf(stderr, "tblite %s setup failed for solvent '%s'\n",
+                         solv_model.c_str(), solvent.c_str());
             return 1;
         }
         tblite_calculator_push_back(ctx, calc, &cont);
@@ -260,7 +271,7 @@ int main(int argc, char** argv)
     out["method"] = method_s;
     if (!solvent.empty()) {
         out["solvent"] = solvent;
-        out["solvent_model"] = "alpb";
+        out["solvent_model"] = solv_model;
     }
 
     json m;

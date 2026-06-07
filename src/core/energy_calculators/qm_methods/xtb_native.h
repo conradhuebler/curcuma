@@ -1205,10 +1205,19 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_extrapolation_apply",[&](const json& v){ if (v.is_string())          xtb.setScfExtrapolationApply(v.get<std::string>()); });
     lookup("scf_xlbomd_correctors",  [&](const json& v){ if (v.is_number_integer())  xtb.setScfXlbomdCorrectors(v.get<int>()); });
     lookup("electronic_temperature", [&](const json& v){ if (v.is_number()) xtb.setElectronicTemperature(v.get<double>()); });
-    // Implicit solvation (Claude Generated, June 2026).
+    // Implicit solvation (Claude Generated, June 2026). solvent_model accepts any
+    // number or numeric string: CLI flat-flags (-xtb.solvent_model 2) are routed as
+    // a float (2.0), so an is_number_integer()-only check silently dropped the value
+    // and kept the default (ALPB).
     lookup("solvent",         [&](const json& v){ if (v.is_string()) xtb.setSolvent(v.get<std::string>()); });
-    lookup("solvent_model",   [&](const json& v){ if (v.is_number_integer()) xtb.setSolventModel(v.get<int>()); });
-    lookup("solvent_epsilon", [&](const json& v){ if (v.is_number()) xtb.setSolventEpsilon(v.get<double>()); });
+    lookup("solvent_model",   [&](const json& v){
+        if (v.is_number()) xtb.setSolventModel(static_cast<int>(std::lround(v.get<double>())));
+        else if (v.is_string()) { try { xtb.setSolventModel(std::stoi(v.get<std::string>())); } catch (...) {} }
+    });
+    lookup("solvent_epsilon", [&](const json& v){
+        if (v.is_number()) xtb.setSolventEpsilon(v.get<double>());
+        else if (v.is_string()) { try { xtb.setSolventEpsilon(std::stod(v.get<std::string>())); } catch (...) {} }
+    });
 }
 
 } // namespace curcuma::xtb

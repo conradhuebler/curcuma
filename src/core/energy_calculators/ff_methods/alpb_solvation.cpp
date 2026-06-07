@@ -270,16 +270,17 @@ bool ALPBSolvation::loadSolventParameters(const std::string& solvent)
     m_sx_elem.resize(MAX_ELEM);
     m_hb_elem.resize(MAX_ELEM);
 
-    // ── tblite GFN1/GFN2 ALPB parameter set (Claude Generated, June 2026) ──
+    // ── tblite GFN1/GFN2 ALPB/GBSA parameter set (Claude Generated, June 2026) ──
     // Born (epsv,c1,soset,sx) + CDS (rprobe,gamscale,sqrtGhbond) + shift (gshift),
-    // joined per (method, solvent) in tblite_solvation_params.h. Only ALPB
-    // (solvent_model 3) is wired here; GBSA would pass alpb=false (WP2).
+    // joined per (method, model, solvent) in tblite_solvation_params.h. m_use_alpb
+    // selects ALPB (solvent_model 3) vs plain GBSA (solvent_model 2); GBSA differs
+    // only by alpbet=0 (see below), reusing the same P16 Born kernel and CDS terms.
     // The non-electrostatic CDS terms reuse the existing SASA/HB machinery by
     // feeding tblite's per-element values (see below) — radii stay D3 for both
     // Born and CDS, exactly as tblite's load_alpb_param / load_cds_param do.
     if (m_host_method == "gfn1" || m_host_method == "gfn2") {
         const auto* tp =
-            curcuma::solvation::getTbliteSolvationParam(m_host_method, /*alpb=*/true, solvent);
+            curcuma::solvation::getTbliteSolvationParam(m_host_method, m_use_alpb, solvent);
         if (!tp) return false;
 
         m_dielectric_const = tp->epsv;
@@ -291,10 +292,13 @@ bool ALPBSolvation::loadSolventParameters(const std::string& solvent)
         m_born_scale = tp->c1;
         m_born_offset = tp->soset * 0.1 * aatoau;  // born.f90: svdw = vdwr - soset*0.1*aatoau
         m_probe_rad = tp->rprobe * aatoau;
-        m_alpbet = alpb_factor / m_dielectric_const;
+        // ALPB: alpbet = 0.571412/eps; GBSA: alpbet = 0 (tblite alpb.f90:189,
+        // merge(alpha_alpb/eps, 0, alpb)). keps then collapses to 1/eps-1 for GBSA,
+        // and the keps*alpbet/adet shape term (guarded by m_alpbet>0) drops out.
+        m_alpbet = m_use_alpb ? (alpb_factor / m_dielectric_const) : 0.0;
         m_keps = (1.0 / m_dielectric_const - 1.0) / (1.0 + m_alpbet);
         m_lrcut = lrcut;
-        m_use_cm5 = (m_host_method == "gfn1");  // tblite useCM5 (alpb.f90:193)
+        m_use_cm5 = (m_host_method == "gfn1");  // tblite useCM5 (alpb.f90:193), model-independent
 
         for (int i = 0; i < MAX_ELEM; ++i) {
             // CDS surface tension. tblite: E = tblite_surface * (gamscale*1e-5).
@@ -797,28 +801,49 @@ void ALPBSolvation::computeSASA(const Matrix& xyz_bohr)
 
 
 // ═══════════════════════════════════════════════════════════════════
-// Born interaction matrix (P16 kernel) — kernel.f90:713-767
+// Born interaction matrix. ALPB -> P16 kernel (Lange/Herbert), GBSA ->
+// classical Still kernel — exactly tblite's switch (alpb.f90 get_jmat:
+// add_born_mat_p16 for alpb=true, add_born_mat_still for gbsa). The
+// self-energy, HB diagonal and ALPB shape term are kernel-independent.
 // ═══════════════════════════════════════════════════════════════════
 
 void ALPBSolvation::buildBornMatrix()
 {
-    // P16 kernel (kernel.f90: addBornMatP16)
-    for (int kk = 0; kk < m_ntpair; ++kk) {
-        double r1 = m_ddpair(0, kk);
-        int iat = m_ppind[kk].first;
-        int jat = m_ppind[kk].second;
+    if (m_use_alpb) {
+        // P16 kernel (alpb.f90: add_born_mat_p16)
+        for (int kk = 0; kk < m_ntpair; ++kk) {
+            double r1 = m_ddpair(0, kk);
+            int iat = m_ppind[kk].first;
+            int jat = m_ppind[kk].second;
 
-        double ab = std::sqrt(m_brad(iat) * m_brad(jat));
-        double arg = ab / (ab + zetaP16o16 * r1);
-        arg = arg * arg;  // ^2
-        arg = arg * arg;  // ^4
-        arg = arg * arg;  // ^8
-        arg = arg * arg;  // ^16
-        double fgb = r1 + ab * arg;
-        double dfgb = 1.0 / fgb;
+            double ab = std::sqrt(m_brad(iat) * m_brad(jat));
+            double arg = ab / (ab + zetaP16o16 * r1);
+            arg = arg * arg;  // ^2
+            arg = arg * arg;  // ^4
+            arg = arg * arg;  // ^8
+            arg = arg * arg;  // ^16
+            double fgb = r1 + ab * arg;
+            double dfgb = 1.0 / fgb;
 
-        m_born_mat(iat, jat) += m_keps * dfgb;
-        m_born_mat(jat, iat) += m_keps * dfgb;
+            m_born_mat(iat, jat) += m_keps * dfgb;
+            m_born_mat(jat, iat) += m_keps * dfgb;
+        }
+    } else {
+        // Still kernel (alpb.f90: add_born_mat_still):
+        //   fgb^2 = r^2 + aa*exp(-r^2/(4 aa)),  aa = brad_i*brad_j
+        for (int kk = 0; kk < m_ntpair; ++kk) {
+            double r1 = m_ddpair(0, kk);
+            int iat = m_ppind[kk].first;
+            int jat = m_ppind[kk].second;
+
+            double r2 = r1 * r1;
+            double aa = m_brad(iat) * m_brad(jat);
+            double expd = std::exp(-0.25 * r2 / aa);
+            double dfgb = 1.0 / std::sqrt(r2 + aa * expd);
+
+            m_born_mat(iat, jat) += m_keps * dfgb;
+            m_born_mat(jat, iat) += m_keps * dfgb;
+        }
     }
 
     // Self-energy
@@ -1176,6 +1201,67 @@ void ALPBSolvation::addGradientP16(const Vector& charges, double& energy, Matrix
     energy = egb;
 }
 
+void ALPBSolvation::addGradientStill(const Vector& charges, double& energy, Matrix& gradient)
+{
+    // Still Born gradient (alpb.f90: add_born_deriv_still). vec = r_iat - r_jat is
+    // stored full in m_ddpair(1..3); dr = ap*vec enters without a 1/r factor.
+    Eigen::VectorXd dEdbr = Eigen::VectorXd::Zero(m_nat);
+    double egb = 0.0;
+
+    // Pair contributions
+    for (int kk = 0; kk < m_ntpair; ++kk) {
+        double r1 = m_ddpair(0, kk);
+        double r2 = r1 * r1;
+        int iat = m_ppind[kk].first;
+        int jat = m_ppind[kk].second;
+        double qq = charges(iat) * charges(jat);
+
+        double aa = m_brad(iat) * m_brad(jat);
+        double dd = 0.25 * r2 / aa;
+        double expd = std::exp(-dd);
+        double fgb2 = r2 + aa * expd;
+        double dfgb2 = 1.0 / fgb2;
+        double dfgb = std::sqrt(dfgb2);
+        double dfgb3 = dfgb2 * dfgb * m_keps;
+
+        egb += qq * m_keps * dfgb;
+
+        // Direct gradient: dr = (1 - 0.25*expd)*dfgb3 * vec
+        double ap = (1.0 - 0.25 * expd) * dfgb3;
+        double drx = ap * m_ddpair(1, kk) * qq;
+        double dry = ap * m_ddpair(2, kk) * qq;
+        double drz = ap * m_ddpair(3, kk) * qq;
+        gradient(iat, 0) -= drx; gradient(iat, 1) -= dry; gradient(iat, 2) -= drz;
+        gradient(jat, 0) += drx; gradient(jat, 1) += dry; gradient(jat, 2) += drz;
+
+        // Born radii derivatives
+        double bp = -0.5 * expd * (1.0 + dd) * dfgb3;
+        dEdbr(iat) += m_brad(jat) * bp * qq;
+        dEdbr(jat) += m_brad(iat) * bp * qq;
+    }
+
+    // Self-energy
+    for (int i = 0; i < m_nat; ++i) {
+        double bp = 1.0 / m_brad(i);
+        double qq = charges(i) * bp;
+        egb += 0.5 * charges(i) * qq * m_keps;
+        double dEdbri = -0.5 * m_keps * qq * bp;
+        dEdbr(i) += dEdbri * charges(i);
+    }
+
+    // Contract Born radii derivatives: gradient += brdr * dEdbr
+    for (int i = 0; i < m_nat; ++i) {
+        if (std::abs(dEdbr(i)) < 1e-30) continue;
+        for (int j = 0; j < m_nat; ++j) {
+            gradient(j, 0) += m_brdr(3*j+0, i) * dEdbr(i);
+            gradient(j, 1) += m_brdr(3*j+1, i) * dEdbr(i);
+            gradient(j, 2) += m_brdr(3*j+2, i) * dEdbr(i);
+        }
+    }
+
+    energy = egb;
+}
+
 void ALPBSolvation::addGradient(const std::vector<int>& atomic_numbers,
                                  const Matrix& xyz_bohr,
                                  const Vector& charges,
@@ -1187,8 +1273,11 @@ void ALPBSolvation::addGradient(const std::vector<int>& atomic_numbers,
     // terms below are evaluated at the solute charges, matching tblite.
     const Vector qs = soluteCharges(charges);
 
-    // P16 Born gradient
-    addGradientP16(qs, gborn, gradient);
+    // Born gradient: P16 for ALPB, Still for GBSA (matching the energy kernel).
+    if (m_use_alpb)
+        addGradientP16(qs, gborn, gradient);
+    else
+        addGradientStill(qs, gborn, gradient);
 
     // SASA gradient: dsdr already contracted (charge-independent surface tension)
     for (int j = 0; j < m_nat; ++j) {

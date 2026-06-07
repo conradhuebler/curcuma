@@ -7,7 +7,7 @@
 > This file is the executable hand-off. Each WP lists concrete files, functions,
 > line anchors (approximate — re-grep), and acceptance criteria.
 
-## ✅ DONE (2026-06-07): WP0 + WP1 — self-consistent ALPB in native GFN1/GFN2 (CPU)
+## ✅ DONE (2026-06-07): WP0 + WP1 + WP2 — self-consistent ALPB & GBSA in native GFN1/GFN2 (CPU)
 > ⚙️ Machine-tested, **not** human production tested. Operator decided: full total ΔG
 > (Born + CDS + shift), validated per-WP against `release_tblite/`.
 > - **WP0**: `scripts/extract_tblite_solvation_params.py` → `src/core/solvation/tblite_solvation_params.h`
@@ -27,8 +27,21 @@
 >   the per-method labels are `gfn1_solvation`/`gfn2_solvation`, but ctest ANDs multiple `-L`
 >   so use the shared `_solvation` substring) + `ctest -R xtb_solvation_numgrad`; gas-phase
 >   byte-identical (gfn{1,2}_validation 24/24).
-> - **Remaining**: GBSA (WP2, params extracted), CPCM (WP3), GPU residency (WP4),
->   GFN-FF self-consistent + `-solvent` routing fix (WP5). Wrapper `tblite-gfn2 -tblite.solvent_model 3`
+> - **WP2 (GBSA, 2026-06-07)**: `-xtb.solvent_model 2`. GBSA = ALPB with `alpbet=0`
+>   (so `keps=1/eps-1`, shape term drops) + the classical **Still** Born kernel
+>   (tblite api/solvation.f90:191 sets `born_kernel%still` for GBSA versions 21/22,
+>   vs P16 for ALPB 11/12). `ALPBSolvation::setUseAlpb(false)` branches the param
+>   load (`getTbliteSolvationParam(...,alpb=false)` → gbsa entries, already in the
+>   header), `buildBornMatrix`, and a new `addGradientStill`; CDS/SASA/HB/CM5/shift
+>   shared. **Bug fixed en route**: `applyXtbScfConfig` read `solvent_model` only via
+>   `is_number_integer()`, but the CLI routes it as a float (`2.0`) — so the value was
+>   silently dropped and ALPB-by-default ran regardless (ALPB tests passed only because
+>   the default is 3). Now accepts any number/numeric-string. Dumper `--model gbsa`
+>   (version 21/22), `validate_sqm.py` maps `solvent_model` → `-xtb.solvent_model 2/3`.
+>   **Validation**: 56 gbsa refs ≤1e-8 Eh (`ctest -L _gbsa`); FD gradient 16/16
+>   (alpb+gbsa, `ctest -R xtb_solvation_numgrad`); ALPB 56/56 + gas-phase 24/24 unchanged.
+> - **Remaining**: CPCM (WP3), GPU residency (WP4), GFN-FF self-consistent +
+>   `-solvent` routing fix (WP5). Wrapper `tblite-gfn2 -tblite.solvent_model 3`
 >   segfaults (pre-existing TBLiteInterface bug, unrelated; native path unaffected).
 
 ## 0. Context & key facts (read first)
@@ -166,7 +179,9 @@ passes; regression ctest green.
 
 ---
 
-## WP2 — Self-consistent GBSA
+## WP2 — Self-consistent GBSA  ✅ DONE (2026-06-07, see top of file)
+> Implemented by extending `ALPBSolvation` (setUseAlpb + Still kernel), not by
+> resurrecting `gbsa.{h,cpp}`. The notes below are the original spec.
 
 - Consolidate the second, unused GBSA implementation `src/core/solvation/gbsa.{h,cpp}`
   (GBOBC-II, energy+gradient) under `ImplicitSolvationModel`: add `addPotential`
