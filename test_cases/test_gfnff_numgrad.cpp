@@ -65,7 +65,9 @@ struct GradTestResult {
 
 static GradTestResult runGradTest(const std::string& name,
                                    const curcuma::Molecule& cmol,
-                                   bool fixed_charges, double tol)
+                                   bool fixed_charges, double tol,
+                                   const std::string& solvent = "none",
+                                   const std::string& solvent_model = "alpb")
 {
     GradTestResult res;
     res.name         = name;
@@ -78,6 +80,10 @@ static GradTestResult runGradTest(const std::string& name,
     json config = json::object();
     config["verbosity"] = 0;
     config["threads"]   = 1;
+    if (solvent != "none" && !solvent.empty()) {
+        config["solvent"]       = solvent;        // WP5: GFN-FF implicit solvation
+        config["solvent_model"] = solvent_model;  // alpb | gbsa
+    }
 
     GFNFF gfnff(config);
     if (!gfnff.InitialiseMolecule(mol)) {
@@ -149,11 +155,17 @@ int main(int argc, char* argv[])
 
     bool fixed_charges = false;
     std::string xyz_file;
+    std::string solvent = "none";          // WP5: GFN-FF implicit solvation
+    std::string solvent_model = "alpb";    // alpb | gbsa
 
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
         if (arg == "--fixed-charges" || arg == "-fc")
             fixed_charges = true;
+        else if (arg == "--solvent" && i + 1 < argc)
+            solvent = argv[++i];
+        else if (arg == "--solvent-model" && i + 1 < argc)
+            solvent_model = argv[++i];
         else
             xyz_file = arg;
     }
@@ -191,7 +203,7 @@ int main(int argc, char* argv[])
     std::vector<GradTestResult> results;
     for (auto& [name, cmol] : molecules) {
         std::cout << "\n--- " << name << " (" << cmol.AtomCount() << " atoms) ---\n";
-        auto res = runGradTest(name, cmol, fixed_charges, tol);
+        auto res = runGradTest(name, cmol, fixed_charges, tol, solvent, solvent_model);
         results.push_back(res);
 
         if (!res.nan_detected) {

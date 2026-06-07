@@ -212,7 +212,7 @@ ctest -R test_gfnff_gradients --verbose
 ## Current Implementation Status (Apr 2026)
 
 ### ⚠️ Overall Readiness: AI-implemented, machine-tested — human production testing pending
-- Solvation (ALPB): code exists, **not validated**
+- Solvation (ALPB/GBSA): `-gfnff.solvent water [-gfnff.solvent_model gbsa]` runs (WP5 routing fix, Jun 2026); **energy unvalidated** (no external GFN-FF ALPB reference), gradient is frozen-charge-approx (polar+solvent ~2.4e-2 Eh/Bohr); self-consistent EEQ coupling not done — see [docs/SQM_SOLVATION_WP.md](../../../../docs/SQM_SOLVATION_WP.md) WP5
 - Periodic boundary conditions: **not implemented**
 - Organometallics/metals: code path exists, **not tested**
 - Optimization/MD: gradient-driven workflows run, **long-run stability untested by humans**

@@ -804,9 +804,21 @@ bool GFNFF::InitialiseMolecule()
     }
     if (m_solvent != "none" && !m_solvent.empty()) {
         m_solvation = std::make_unique<ALPBSolvation>();
+        // solvent_model: alpb (default) | gbsa. Accept the descriptive name (case-
+        // insensitive) and the legacy numeric codes (2=gbsa, 3=alpb). GBSA = ALPB
+        // with the shape term off + the Still Born kernel (ALPBSolvation::setUseAlpb).
+        std::string sm = m_parameters.value("solvent_model", std::string("alpb"));
+        std::transform(sm.begin(), sm.end(), sm.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        const bool use_gbsa = (sm == "gbsa" || sm == "gb" || sm == "2" || sm == "2.0");
+        m_solvation->setUseAlpb(!use_gbsa);
+        m_solvent_model_label = use_gbsa ? "GBSA" : "ALPB";
         if (!m_solvation->init(m_atoms, m_solvent)) {
             CurcumaLogger::warn("ALPB solvation initialization failed for solvent '" + m_solvent + "', continuing gas-phase");
             m_solvation.reset();
+        } else if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info(std::string("GFN-FF implicit solvation: ")
+                + (use_gbsa ? "GBSA" : "ALPB") + " (" + m_solvent + ")");
         }
     }
 
@@ -1748,7 +1760,7 @@ double GFNFF::Calculation(bool gradient)
 
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::result(fmt::format("Solvation energy: {:.8f} Eh ({} = {})",
-                solv_parts.total(), "ALPB", m_solvent));
+                solv_parts.total(), m_solvent_model_label, m_solvent));
             if (CurcumaLogger::get_verbosity() >= 2) {
                 CurcumaLogger::param("  gborn", fmt::format("{:.8f} Eh", solv_parts.gborn));
                 CurcumaLogger::param("  ghb",   fmt::format("{:.8f} Eh", solv_parts.ghb));

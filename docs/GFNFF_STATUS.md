@@ -18,7 +18,7 @@
 | Analytical gradients (GPU) | ✅ Validated | 18/19 GPU tests pass; polymer energy tolerance 8.9 µEh |
 | Geometry optimization | ⚠️ Untested by humans | CI only; convergence on real systems unknown |
 | Molecular dynamics | ⚠️ Untested by humans | Gradients enabled; long-run stability unknown |
-| Solvation (ALPB/GBSA) | ❌ Not validated | Code exists, never tested vs. reference |
+| Solvation (ALPB/GBSA) | ⚠️ Runs, unvalidated energy | `-gfnff.solvent water [-gfnff.solvent_model gbsa]` works (WP5, routing fixed June 2026); energy changes sensibly but no external reference exists (tblite has no GFN-FF ALPB). Gradient: frozen-charge approx — tight for non-polar (~1e-4 Eh/Bohr), ~2.4e-2 for polar+solvent. Self-consistent EEQ coupling not done. See [SQM_SOLVATION_WP.md](SQM_SOLVATION_WP.md) WP5 |
 | Periodic boundary conditions | ❌ Not implemented | — |
 | Organometallics / metals | ❌ Not tested | Parameter code present; quality unknown |
 | Large system stability (>500 atoms) | ⚠️ Partial | Polymer energy, gradient precision acceptable |

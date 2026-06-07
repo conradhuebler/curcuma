@@ -68,7 +68,26 @@
 >   models); `ctest -L gpu_*_solvation|gpu_*_gbsa` 28, gpu component 121/121, gas-phase
 >   gpu 24/24, CPU suite 112+1+24 unchanged. NOTE: residency, not a measured `-sp`
 >   speedup (eigensolve-bound).
-> - **Remaining**: CPCM (WP3), GFN-FF self-consistent + `-solvent` routing fix (WP5).
+> - **WP5a (GFN-FF routing + model select, 2026-06-07, DONE)**: `-gfnff.solvent water`
+>   now works. Root cause: the native `gfnff` PARAM module declared no `solvent`, so the
+>   CLI value never reached `GFNFF::InitialiseMolecule` (`m_parameters["solvent"]`) and
+>   solvation was silently gas-phase. Registered `solvent` + `solvent_model` (`alpb`
+>   default / `gbsa`; numeric 2/3 accepted) in `gfnff.h`; wired `solvent_model` into the
+>   ALPB creation (`setUseAlpb`, Still kernel for gbsa); fixed the hard-coded "ALPB" log
+>   label. Energy now changes sensibly (H2O gfnff: gas −0.32726 → water ALPB −0.33982,
+>   GBSA −0.33920). `test_gfnff_numgrad --solvent NAME [--solvent-model gbsa]` added.
+>   **Honest status**: (1) **No external reference** — tblite has no GFN-FF ALPB and
+>   native gfnff is not bit-exact to Fortran xtb even in gas phase, so there is no 1e-8
+>   target; energy is unvalidated. (2) **Gradient** inherits GFN-FF's documented
+>   frozen-charge approximation (no dq/dr): tight for non-polar (CH4 7e-5, C6H6 1e-4
+>   Eh/Bohr at full-EEQ) but the solvent amplifies the polar charge-response error
+>   (H2O gas 2.4e-3 → water 2.4e-2 Eh/Bohr), so solvated opt/MD on polar systems is
+>   approximate. The solvation gradient *formula* is consistent (non-polar matches FD).
+> - **WP5b (deferred): self-consistent EEQ coupling** — fold the Born potential B·q into
+>   the EEQ solve (`eeq_solver`) so the charges feel the solvent (fixes both the energy
+>   self-consistency and the polar gradient charge-response). Changes core GFN-FF charges
+>   with no external reference; the FD-gradient test would be the internal validation.
+> - **Remaining**: CPCM (WP3), WP5b EEQ coupling (optional, no reference).
 >   Wrapper `tblite-gfn2 -tblite.solvent_model 3` segfaults (pre-existing TBLiteInterface
 >   bug, unrelated; native path unaffected).
 
