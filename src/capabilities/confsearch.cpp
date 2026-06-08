@@ -28,6 +28,10 @@
 
 #include "src/tools/general.h"
 #include "src/core/parameter_registry.h"
+#include "src/capabilities/rmsd/rmsd_functions.h"  // Claude Generated (Jun 2026): Kabsch helpers for bias calibration
+
+#include <algorithm>
+#include <cmath>
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
@@ -141,15 +145,18 @@ void ConfSearch::start()
     // bias_couple_factor*m_rmsd -> alpha = ln2/(factor*rmsd)^2, so one hill ~ one basin. RMSD and
     // m_rmsd are both in Angstrom (m_eigen_geometry is set without unit conversion) -> alpha in A^-2.
     // Applied before the dump/log below so they reflect the calibrated value.
-    if (m_bias_calibration == "couple") {
+    // "couple" sets alpha once from the dedup threshold. "cluster" uses the same formula only as
+    // the cycle-1 bootstrap (no cluster data yet) and then relearns alpha each cycle in CalibrateBias.
+    if (m_bias_calibration == "couple" || m_bias_calibration == "cluster") {
         double r = m_bias_couple_factor * m_rmsd;
         if (r > 1e-6) {
             double alpha = std::log(2.0) / (r * r);
             md["rmsd_mtd_alpha"] = alpha;
-            CurcumaLogger::result_fmt("ConfSearch: bias_calibration=couple -> RMSD-MTD alpha={:.4f} A^-2 (hill half-max at {:.3f} A)", alpha, r);
+            CurcumaLogger::result_fmt("ConfSearch: bias_calibration={} -> initial RMSD-MTD alpha={:.4f} A^-2 (hill half-max at {:.3f} A)",
+                m_bias_calibration, alpha, r);
         }
     } else if (m_bias_calibration != "off") {
-        CurcumaLogger::warn_fmt("ConfSearch: bias_calibration='{}' not yet implemented (cluster/weighted pending) -- treating as off", m_bias_calibration);
+        CurcumaLogger::warn_fmt("ConfSearch: bias_calibration='{}' unknown -- treating as off", m_bias_calibration);
     }
 
     // Dump all MD parameters to file for debugging
@@ -336,6 +343,14 @@ void ConfSearch::start()
             while (!rmsd_file.AtEnd()) { rmsd_file.Next(); rmsd_count++; }
         }
         CurcumaLogger::result_fmt("ConfSearch: RMSD filtering complete. {} structures accepted.", rmsd_count);
+
+        // Claude Generated (Jun 2026): experimental adaptive calibration (Phase C). Learns the MTD
+        // hill width (cluster) and/or per-atom RMSF weights (weighted) from this cycle's opt+filter
+        // clustering and applies them to the NEXT cycle's MD. No-op for the default off/global.
+        if (m_bias_calibration == "cluster" || m_bias_scale_mode == "weighted") {
+            CalibrateBias(p, md);
+            CurcumaLogger::set_verbosity(m_verbosity);
+        }
 
         CurcumaLogger::result("ConfSearch: === Phase 4: Energy Window and Topology Filter ===");
         for (auto* m : m_in_stack) delete m;
@@ -608,6 +623,184 @@ std::string ConfSearch::PerformFilter(const std::string& f, const nlohmann::json
     return f;
 }
 
+// Claude Generated (Jun 2026): permutation-aware best-fit (Kabsch) RMSD in Angstrom. Centres both
+// geometries by their centroid, computes the optimal rotation, and returns the minimum RMSD over
+// the identity plus every cached symmetry permutation (applied to the target). Both geometries must
+// share the canonical atom order. Built directly on RMSDFunctions to avoid RMSDDriver state.
+double ConfSearch::PermRMSD(const Geometry& reference, const Geometry& target) const
+{
+    auto kabsch = [](const Geometry& ref, const Geometry& tar) -> double {
+        const int n = ref.rows();
+        if (n == 0 || tar.rows() != n)
+            return std::numeric_limits<double>::infinity();
+        Geometry r = ref, t = tar;
+        Eigen::Vector3d cr = Eigen::Vector3d::Zero(), ct = Eigen::Vector3d::Zero();
+        for (int i = 0; i < n; ++i) { cr += r.row(i).transpose(); ct += t.row(i).transpose(); }
+        cr /= n; ct /= n;
+        for (int i = 0; i < n; ++i) { r.row(i) -= cr.transpose(); t.row(i) -= ct.transpose(); }
+        Eigen::Matrix3d R = RMSDFunctions::BestFitRotation(r, t, 1);
+        return RMSDFunctions::getRMSD(r, RMSDFunctions::applyRotation(t, R));
+    };
+    double best = kabsch(reference, target);
+    const int natoms = reference.rows();
+    for (const auto& rule : m_permutation_cache) {
+        if (static_cast<int>(rule.size()) != natoms)
+            continue;
+        Geometry tp(natoms, 3);
+        bool ok = true;
+        for (int j = 0; j < natoms; ++j) {
+            int s = rule[j];
+            if (s < 0 || s >= natoms) { ok = false; break; }
+            tp.row(j) = target.row(s);
+        }
+        if (ok)
+            best = std::min(best, kabsch(reference, tp));
+    }
+    return best;
+}
+
+void ConfSearch::CalibrateBias(const std::string& p, nlohmann::json& md)
+{
+    auto load = [](const std::string& file) {
+        std::vector<Molecule> v;
+        FileIterator f(file);
+        while (!f.AtEnd()) { Molecule m = f.Next(); if (m.AtomCount() > 0) v.push_back(m); }
+        return v;
+    };
+    std::vector<Molecule> pre = load(p + ".bias.xyz");           // pre-optimisation MD snapshots
+    std::vector<Molecule> post = load(p + ".bias.opt.xyz");      // optimised (index-aligned with pre)
+    std::vector<Molecule> minima = load(p + ".bias.opt.accepted.xyz"); // distinct minima (deduped)
+    if (minima.empty() || post.empty()) {
+        CurcumaLogger::warn("ConfSearch: bias calibration skipped (no clusters available this cycle)");
+        return;
+    }
+    const int natoms = minima[0].AtomCount();
+    const int nmin = static_cast<int>(minima.size());
+    const bool index_aligned = (pre.size() == post.size());
+
+    // Assign each optimised structure to its nearest distinct minimum (permutation-aware RMSD AND
+    // an energy tolerance -> "same minimum" requires geometric AND energetic match).
+    std::vector<int> assign(post.size(), -1);
+    for (size_t k = 0; k < post.size(); ++k) {
+        double bestr = std::numeric_limits<double>::infinity();
+        int bestj = -1;
+        for (int j = 0; j < nmin; ++j) {
+            if (std::abs(post[k].Energy() - minima[j].Energy()) * 2625.5 > m_bias_energy_tol)
+                continue;
+            double r = PermRMSD(minima[j].getGeometry(), post[k].getGeometry());
+            if (r < bestr) { bestr = r; bestj = j; }
+        }
+        assign[k] = bestj;
+    }
+
+    // Calibration needs >=2 distinct minima: with a single accepted minimum every structure is
+    // lumped into one "cluster", which makes both the basin radius and the inter-minimum distance
+    // meaningless (this produced absurd alpha values in testing). Degrade gracefully -> keep the
+    // bootstrap alpha / uniform weights. Claude Generated (Jun 2026).
+    if (nmin < 2 || !index_aligned) {
+        CurcumaLogger::warn_fmt("ConfSearch: bias calibration skipped this cycle ({} distinct minima, index_aligned={}) -- keeping current alpha/uniform weights",
+            nmin, index_aligned);
+        return;
+    }
+
+    // Inter-minimum separation: the closest pair of distinct minima. A hill wider than this would
+    // merge two genuinely different conformers, so it is the hard upper bound on the learned width.
+    double d_inter = std::numeric_limits<double>::infinity();
+    for (int a = 0; a < nmin; ++a)
+        for (int b = a + 1; b < nmin; ++b)
+            d_inter = std::min(d_inter, PermRMSD(minima[a].getGeometry(), minima[b].getGeometry()));
+    if (!std::isfinite(d_inter) || d_inter < 1e-3) {
+        CurcumaLogger::warn("ConfSearch: bias calibration skipped (degenerate inter-minimum distance)");
+        return;
+    }
+
+    // Intra-cluster spread (basin capture radius) and per-atom RMSF, from the PRE-optimisation
+    // geometries of structures that optimised to the same minimum, Kabsch-aligned to the cluster's
+    // lowest-energy representative. ROBUSTNESS: only pairs closer than d_inter count as genuinely
+    // same-basin -- a larger pre-opt RMSD signals a mis-assignment (energy-degenerate but distinct)
+    // and would otherwise blow up the scale, so it is dropped from both the radius and the RMSF.
+    std::vector<double> sigma2(natoms, 0.0);
+    std::vector<double> basin_rmsds; // for a robust median
+    long pair_count = 0;
+    for (int j = 0; j < nmin; ++j) {
+        int rep = -1;
+        double repE = std::numeric_limits<double>::infinity();
+        std::vector<int> members;
+        for (size_t k = 0; k < post.size(); ++k)
+            if (assign[k] == j) {
+                members.push_back(static_cast<int>(k));
+                if (post[k].Energy() < repE) { repE = post[k].Energy(); rep = static_cast<int>(k); }
+            }
+        if (rep < 0 || members.size() < 2)
+            continue;
+        Geometry refc = pre[rep].getGeometry();
+        Eigen::Vector3d cr = Eigen::Vector3d::Zero();
+        for (int i = 0; i < natoms; ++i) cr += refc.row(i).transpose();
+        cr /= natoms;
+        for (int i = 0; i < natoms; ++i) refc.row(i) -= cr.transpose();
+        for (int k : members) {
+            if (k == rep) continue;
+            Geometry t = pre[k].getGeometry();
+            Eigen::Vector3d ct = Eigen::Vector3d::Zero();
+            for (int i = 0; i < natoms; ++i) ct += t.row(i).transpose();
+            ct /= natoms;
+            for (int i = 0; i < natoms; ++i) t.row(i) -= ct.transpose();
+            Eigen::Matrix3d R = RMSDFunctions::BestFitRotation(refc, t, 1);
+            Geometry ta = RMSDFunctions::applyRotation(t, R);
+            double rmsd = RMSDFunctions::getRMSD(refc, ta);
+            if (!std::isfinite(rmsd) || rmsd >= d_inter)
+                continue; // drop cross-basin outliers
+            basin_rmsds.push_back(rmsd);
+            for (int i = 0; i < natoms; ++i)
+                sigma2[i] += (refc.row(i) - ta.row(i)).squaredNorm();
+            pair_count++;
+        }
+    }
+
+    // --- cluster mode: set the MTD hill width from the learned, bounded basin radius ---
+    if (m_bias_calibration == "cluster") {
+        double r_eff;
+        if (!basin_rmsds.empty()) {
+            std::sort(basin_rmsds.begin(), basin_rmsds.end());
+            r_eff = basin_rmsds[basin_rmsds.size() / 2]; // median capture radius (robust to outliers)
+        } else {
+            r_eff = 0.5 * d_inter; // no multi-member basins -> half the nearest-minima distance
+        }
+        // Keep the hill inside its basin: lower floor + hard cap below the nearest distinct minimum.
+        r_eff = std::min(std::max(r_eff, 0.05), 0.8 * d_inter);
+        double alpha = std::log(2.0) / (r_eff * r_eff);
+        md["rmsd_mtd_alpha"] = alpha;
+        CurcumaLogger::result_fmt("ConfSearch: bias_calibration=cluster -> alpha={:.4f} A^-2 (r_basin={:.3f} A, d_inter={:.3f} A, {} minima, {} same-basin pairs)",
+            alpha, r_eff, d_inter, nmin, pair_count);
+    }
+
+    // --- weighted mode: per-atom flexibility weights w_i = 1/(sigma_i^2 + floor), clamped + normalised ---
+    if (m_bias_scale_mode == "weighted") {
+        if (pair_count > 0) {
+            const double floor2 = 1e-2 * 1e-2; // 0.01 A floor: a near-rigid atom must not dominate
+            std::vector<double> w(natoms, 1.0);
+            double wmean = 0.0;
+            for (int i = 0; i < natoms; ++i) {
+                double s2 = sigma2[i] / static_cast<double>(pair_count);
+                w[i] = 1.0 / (s2 + floor2);
+                wmean += w[i];
+            }
+            wmean /= natoms;
+            // Clamp the dynamic range to 10x around the mean (cap rigid/floppy ratio ~100) so a few
+            // noisy atoms cannot dominate the metric, then normalise the mean to 1.
+            if (wmean > 0)
+                for (int i = 0; i < natoms; ++i)
+                    w[i] = std::min(std::max(w[i] / wmean, 0.1), 10.0);
+            if (m_bias_pool)
+                m_bias_pool->setWeights(w);
+            CurcumaLogger::result_fmt("ConfSearch: bias_scale_mode=weighted -> RMSF weights from {} same-basin pairs (rigid/floppy ratio {:.1f}, clamped <=100)",
+                pair_count, *std::max_element(w.begin(), w.end()) / std::max(1e-9, *std::min_element(w.begin(), w.end())));
+        } else {
+            CurcumaLogger::warn("ConfSearch: weighted scale found no same-basin pairs this cycle (uniform weights kept)");
+        }
+    }
+}
+
 nlohmann::json ConfSearch::WriteRestartInformation()
 {
     nlohmann::json restart;
@@ -656,4 +849,6 @@ void ConfSearch::LoadControlJson()
     m_mtd_permutation = Json2KeyWord<bool>(m_defaults, "mtd_permutation");
     m_bias_calibration = Json2KeyWord<std::string>(m_defaults, "bias_calibration");
     m_bias_couple_factor = Json2KeyWord<double>(m_defaults, "bias_couple_factor");
+    m_bias_scale_mode = Json2KeyWord<std::string>(m_defaults, "bias_scale_mode");
+    m_bias_energy_tol = Json2KeyWord<double>(m_defaults, "bias_energy_tol");
 }

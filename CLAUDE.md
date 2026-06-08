@@ -458,3 +458,9 @@ ctest -R "cli_rmsd_01" --verbose
 
 2. **Unit migration**: Some legacy code still uses hardcoded constants instead of CurcumaUnit functions
 
+3. **Verbosity ownership rework (cross-cutting, architectural)**: the global `CurcumaLogger` verbosity is mutable shared state that every `CurcumaMethod` sub-object sets in its ctor without restoring, and `OptimizerDriver`/energy-method setup clamp to 0 — so a parent's level is lost after the first sub-call (ConfSearch per-cycle logs were hidden; `SimpleMD::InitConstrainedBonds` must use `std::cout` since its logger calls are dropped even at `-verbosity 3`). Locally patched (optimizer RAII restore + ConfSearch re-asserts); proper fix = scope the level (save/restore in the `CurcumaMethod` base, stop the energy path leaking 0). See `FIXME` in `simplemd.cpp` and [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md).
+
+4. **`CitationRegistry::cite` thread race (crash)**: `GFNFFComputationalMethod::calculateEnergy` cites on every energy eval; concurrent MD workers (`threads>1`) race the global registry → SIGSEGV/SIGABRT during instability cleanup. Workaround: gfnff multi-run drivers (ConfSearch) use `threads=1`. Fix: make `cite` thread-safe (`std::call_once`) or cite once at init.
+
+5. **ConfSearch Phase A-C**: efficiency/robustness features (RATTLE threshold, topo/Epot abort, seed funnel, opt→bias feedback, permutation-aware + adaptive MTD bias) — roadmap, open TODOs and experimental caveats in [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md).
+

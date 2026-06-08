@@ -306,7 +306,11 @@ void SimpleMD::LoadControlJson()
 
     m_rattle_dynamic_tol = m_config.get<bool>("rattle_dynamic_tol", false);  // Not in PARAM block - legacy
 
-    if (rattle == 1) {
+    // Claude Generated (Jun 2026): mode 2 (constrain X-H only) was documented (PARAM: 0:off,1:on,
+    // 2:H-only) and handled by InitConstrainedBonds (m_rattle==2 path), but this activation gate
+    // only fired for ==1, so -rattle 2 silently ran plain Verlet with 0 constraints. Activate the
+    // RATTLE integrator for both modes.
+    if (rattle == 1 || rattle == 2) {
         Integrator = [=]() {
             this->Rattle();
         };
@@ -827,13 +831,14 @@ bool SimpleMD::Initialise()
 
 void SimpleMD::InitConstrainedBonds()
 {
-
+    int total_bonds = 0; // Claude Generated (Jun 2026): all 1-2 bonds in the topology (for the summary)
     if (m_rattle) {
         auto m = m_molecule.DistanceMatrix();
         m_topo_initial = m.second;
         for (int i = 0; i < m_molecule.AtomCount(); ++i) {
             for (int j = 0; j < i; ++j) {
                 if (m.second(i, j)) {
+                    ++total_bonds;
                     if (m_rattle == 2) {
                         if (m_molecule.Atom(i).first != 1 && m_molecule.Atom(j).first != 1)
                             continue;
@@ -843,7 +848,6 @@ void SimpleMD::InitConstrainedBonds()
                     std::pair<std::pair<int, int>, double> bond(indicies, m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j));
                     if (m_rattle_12) {
                         m_bond_constrained.emplace_back(bond);
-                        std::cout << "1,2: " << i << " " << j << " " << bond.second << " ";
                     }
 
                     for (int k = 0; k < j; ++k) {
@@ -853,7 +857,6 @@ void SimpleMD::InitConstrainedBonds()
                             std::pair<std::pair<int, int>, double> bond(indicies, m_molecule.CalculateDistance(i, k) * m_molecule.CalculateDistance(i, k));
                             if (m_rattle_13) {
                                 m_bond_13_constrained.push_back(std::pair<std::pair<int, int>, double>(bond));
-                                std::cout << "1,3: " << i << " " << k << " " << bond.second << " ";
                             }
                         }
                     }
@@ -864,14 +867,51 @@ void SimpleMD::InitConstrainedBonds()
 
     // Subtract constrained DOF: each bond/angle constraint removes 1 degree of freedom
     int n_constraints = static_cast<int>(m_bond_constrained.size() + m_bond_13_constrained.size());
+    const int total_dof = m_dof; // 3N before removing constraints
     m_dof -= n_constraints;
     if (m_dof < 1)
         m_dof = 1;
 
-    std::cout << std::endl
-              << m_dof + n_constraints << " initial degrees of freedom (3N)" << std::endl;
-    std::cout << n_constraints << " constraints active (" << m_bond_constrained.size() << " 1-2, " << m_bond_13_constrained.size() << " 1-3)" << std::endl;
-    std::cout << m_dof << " effective degrees of freedom" << std::endl;
+    // Claude Generated (Jun 2026): clean RATTLE constraint report. The per-bond list the user asked
+    // for is element-labelled (e.g. C5-H12) with the constrained distance, wrapped 5 per line, and a
+    // one-line summary gives constrained/total bonds, angles, and the DOF before -> after (delta).
+    //
+    // FIXME (verbosity rework, see docs/CONFSEARCH_ROADMAP.md): this uses std::cout instead of
+    // CurcumaLogger because the global logger verbosity is clamped to 0 by the energy-method setup
+    // that runs before InitConstrainedBonds, so a level-gated logger call is silently dropped here
+    // (verified: even -verbosity 3 shows nothing via CurcumaLogger). The proper fix is the planned
+    // verbosity-ownership rework (sub-objects must save/restore the global level); once that lands,
+    // move this report to CurcumaLogger::result_fmt and gate the per-bond list at verbosity >= 3.
+    if (m_rattle) {
+        std::cout << fmt::format("\nRATTLE: {} constraints | {} of {} 1-2 bonds{} + {} 1-3 angles | DOF {} -> {} ({:+d})\n",
+            n_constraints, m_bond_constrained.size(), total_bonds, m_rattle == 2 ? " (X-H only)" : "",
+            m_bond_13_constrained.size(), total_dof, m_dof, m_dof - total_dof);
+        if (!m_bond_constrained.empty()) {
+            std::cout << "  1-2:";
+            int col = 0;
+            for (const auto& b : m_bond_constrained) {
+                int i = b.first.first, j = b.first.second;
+                std::cout << fmt::format(" {}{}-{}{}({:.3f})",
+                    Elements::ElementAbbr[m_molecule.Atom(i).first], i,
+                    Elements::ElementAbbr[m_molecule.Atom(j).first], j, std::sqrt(b.second));
+                if (++col % 5 == 0 && col < static_cast<int>(m_bond_constrained.size()))
+                    std::cout << "\n     ";
+            }
+            std::cout << "\n";
+        }
+        if (!m_bond_13_constrained.empty()) {
+            std::cout << "  1-3:";
+            int col = 0;
+            for (const auto& b : m_bond_13_constrained) {
+                std::cout << fmt::format(" {}-{}({:.3f})", b.first.first, b.first.second, std::sqrt(b.second));
+                if (++col % 6 == 0 && col < static_cast<int>(m_bond_13_constrained.size()))
+                    std::cout << "\n     ";
+            }
+            std::cout << "\n";
+        }
+    } else {
+        std::cout << fmt::format("{} degrees of freedom (no constraints)\n", m_dof);
+    }
 }
 
 void SimpleMD::InitVelocities(double scaling)
@@ -2643,6 +2683,17 @@ void SimpleMD::ApplyRMSDMTD()
         std::vector<std::vector<int>> perms;
         if (static_cast<int>(m_rmsd_indicies.size()) == m_natoms)
             perms = m_shared_pool->permutations();
+
+        // Claude Generated (Jun 2026): flexibility/RMSF weights (Phase C "weighted"). Empty ->
+        // uniform -> standard best-fit RMSD (bit-identical). Only when the RMSD subset is the full
+        // molecule (the weights are full-atom). Set once here; persists for every image below.
+        if (static_cast<int>(m_rmsd_indicies.size()) == m_natoms) {
+            std::vector<double> w = m_shared_pool->weights();
+            if (static_cast<int>(w.size()) == m_natoms)
+                m_shared_pool_driver.setRMSDWeights(w);
+            else
+                m_shared_pool_driver.clearRMSDWeights();
+        }
 
         // Evaluate the bias from the snapshot — hill height W_i = k * counter_i,
         // V(x) = Sum_i Sum_p W_i * exp(-alpha*RMSD_{i,p}^2) (p over identity + symmetry images),

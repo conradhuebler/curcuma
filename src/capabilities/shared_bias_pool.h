@@ -72,6 +72,14 @@ public:
      *  Gaussian over each image (smooth), so a discontinuous hard min is never formed. */
     std::vector<std::vector<int>> permutations() const;
 
+    /** Claude Generated (Jun 2026): per-atom flexibility weights (1/sigma^2) for the RMSF-weighted
+     *  RMSD-MTD bias (Phase C "weighted"). Set between cycles; read every MD step. Empty (default)
+     *  -> uniform weights -> the standard unweighted best-fit RMSD (bit-identical). */
+    void setWeights(const std::vector<double>& weights);
+
+    /** Snapshot of the current per-atom weights (shared_lock, deep copy). */
+    std::vector<double> weights() const;
+
     /** Remove all structures. Used when starting fresh
      *  or when resetting between temperature cycles. */
     void clear();
@@ -96,4 +104,5 @@ private:
     std::vector<BiasStructure> m_structures;
     std::atomic<int> m_global_count{0};
     std::vector<std::vector<int>> m_permutations;  // Claude Generated (Jun 2026): symmetry reorder rules (full-atom)
+    std::vector<double> m_weights;                 // Claude Generated (Jun 2026): per-atom RMSF weights (empty = uniform)
 };

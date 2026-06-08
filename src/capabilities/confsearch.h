@@ -93,8 +93,10 @@ static const nlohmann::json ConfSearchJson{
     { "opt_feedback_bias", true }, // deposit optimised minima back into the shared bias pool
     { "opt_feedback_height", 5 }, // hill counter (height = k*counter) assigned to fed-back minima
     { "mtd_permutation", true }, // feed ConfScan's symmetry reorder rules into the RMSD-MTD bias (smooth, sum-over-images)
-    { "bias_calibration", "off" }, // adaptive MTD width: off | couple (alpha from the dedup RMSD scale); experimental
+    { "bias_calibration", "off" }, // adaptive MTD width: off | couple | cluster; experimental
     { "bias_couple_factor", 1.0 }, // couple: hill half-max at factor*rmsd -> alpha = ln2/(factor*rmsd)^2
+    { "bias_scale_mode", "global" }, // global | weighted (flexibility/RMSF-weighted RMSD in the MTD bias); experimental
+    { "bias_energy_tol", 4.0 }, // kJ/mol: |dE| tolerance when assigning optimised structures to the same minimum
     { "cleanenergy", false },
     { "wall", "none" }, // can be spheric or rect
     { "wall_type", "logfermi" }, // can be logfermi or harmonic
@@ -174,6 +176,17 @@ private:
 
     std::string PerformFilter(const std::string& filename, const nlohmann::json& parameter);
 
+    /* Claude Generated (Jun 2026): experimental adaptive bias calibration (Phase C). Clusters the
+     * cycle's optimised structures onto the accepted distinct minima (best-fit RMSD + cached
+     * permutations + energy tolerance), then derives the basin capture radius and per-atom RMSF.
+     * In "cluster" mode it sets md["rmsd_mtd_alpha"] from the basin radius; in "weighted" mode it
+     * sets flexibility weights (1/sigma^2) on the shared pool for the RMSF-weighted MTD bias. */
+    void CalibrateBias(const std::string& basename, nlohmann::json& md);
+
+    /* Permutation-aware best-fit (Kabsch) RMSD in Angstrom: min over identity + cached symmetry
+     * permutations applied to the target. Both geometries must share the canonical atom order. */
+    double PermRMSD(const Geometry& reference, const Geometry& target) const;
+
     /* Lets have this for all modules */
     virtual nlohmann::json WriteRestartInformation() override;
 
@@ -203,8 +216,9 @@ private:
     int m_rattle_hot_mode = 2, m_topo_check_interval = 0, m_opt_feedback_height = 5;
     bool m_topo_check = false, m_epot_abort = false, m_opt_feedback_bias = true, m_mtd_permutation = true;
     std::string m_seed_window_schedule = "static";
-    std::string m_bias_calibration = "off"; // adaptive MTD width mode: off | couple
-    double m_bias_couple_factor = 1.0;
+    std::string m_bias_calibration = "off"; // adaptive MTD width mode: off | couple | cluster
+    std::string m_bias_scale_mode = "global"; // global | weighted (RMSF-weighted RMSD)
+    double m_bias_couple_factor = 1.0, m_bias_energy_tol = 4.0;
     double m_global_min = std::numeric_limits<double>::infinity(); // running lowest energy across all cycles
     std::vector<std::vector<int>> m_permutation_cache; // Claude Generated (Jun 2026): symmetry reorder rules from ConfScan, fed into MTD
     Matrix m_topo_matrix;

@@ -90,6 +90,18 @@ std::vector<std::vector<int>> SharedBiasPool::permutations() const
     return m_permutations;
 }
 
+void SharedBiasPool::setWeights(const std::vector<double>& weights)
+{
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    m_weights = weights;
+}
+
+std::vector<double> SharedBiasPool::weights() const
+{
+    std::shared_lock<std::shared_mutex> lock(m_mutex);
+    return m_weights;
+}
+
 void SharedBiasPool::clear()
 {
     std::unique_lock<std::shared_mutex> lock(m_mutex);
