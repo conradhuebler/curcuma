@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -79,6 +80,18 @@ static const nlohmann::json ConfSearchJson{
     { "dipole", false },
     { "seed", -1 },
     { "max_bias_export", 1000 },
+    // Claude Generated (Jun 2026): ConfSearch efficiency/robustness controls
+    { "rattle_threshold_temp", 400 }, // K; at/above this cycle temperature RATTLE is auto-enabled
+    { "rattle_hot_mode", 2 }, // RATTLE mode used above the threshold (2 = constrain X-H only)
+    { "topo_check", false }, // opt-in: abort an MD run when the molecule fragments (GetFragments grows)
+    { "topo_check_interval", 0 }, // steps between topology checks (0 -> use the MD dump frequency)
+    { "seed_energy_window", 50 }, // kJ/mol vs. the running global minimum; selects next-cycle MD seeds
+    { "seed_window_schedule", "static" }, // "static" or "exp" (funnel: window shrinks each cycle)
+    { "seed_window_decay", 0.5 }, // per-cycle multiplier for the exp funnel schedule
+    { "epot_abort", false }, // opt-in: abort an MD run when the running-mean potential climbs too high
+    { "epot_abort_window", 250 }, // kJ/mol above the run's starting energy (must exceed thermal baseline)
+    { "opt_feedback_bias", true }, // deposit optimised minima back into the shared bias pool
+    { "opt_feedback_height", 5 }, // hill counter (height = k*counter) assigned to fed-back minima
     { "cleanenergy", false },
     { "wall", "none" }, // can be spheric or rect
     { "wall_type", "logfermi" }, // can be logfermi or harmonic
@@ -182,6 +195,12 @@ private:
     std::vector<Molecule*> m_in_stack, m_final_stack;
     int m_spin = 0, m_charge = 0, m_repeat = 5, m_threads = 1, m_max_bias_export = 1000;
     double m_time = 1e4, m_startT = 500, m_endT = 300, m_deltaT = 50, m_currentT = 0, m_rmsd = 1.25, m_energy_window = 100;
+    // Claude Generated (Jun 2026): efficiency/robustness controls (see ConfSearchJson for meaning)
+    double m_rattle_threshold_temp = 400, m_seed_energy_window = 50, m_seed_window_decay = 0.5, m_epot_abort_window = 250;
+    int m_rattle_hot_mode = 2, m_topo_check_interval = 0, m_opt_feedback_height = 5;
+    bool m_topo_check = false, m_epot_abort = false, m_opt_feedback_bias = true;
+    std::string m_seed_window_schedule = "static";
+    double m_global_min = std::numeric_limits<double>::infinity(); // running lowest energy across all cycles
     Matrix m_topo_matrix;
     SharedBiasPool* m_bias_pool = nullptr;  // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
 };

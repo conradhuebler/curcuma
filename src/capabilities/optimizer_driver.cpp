@@ -310,6 +310,17 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
 
     int saved_global_verbosity = CurcumaLogger::get_verbosity();
 
+    // Claude Generated (Jun 2026): RAII guard so the global CurcumaLogger verbosity is
+    // restored on EVERY exit path (early return, break-to-end, exception, future edits).
+    // Previously a suppressed optimisation (verbosity 0) could leak its level into the
+    // caller — e.g. ConfSearch lost all per-cycle logging after its first optimisation.
+    // The explicit restore before final reporting (below) stays, so the optimiser's own
+    // summary prints at the user's level; this guard only covers paths that miss it.
+    struct VerbosityGuard {
+        int level;
+        ~VerbosityGuard() { CurcumaLogger::set_verbosity(level); }
+    } verbosity_guard{ saved_global_verbosity };
+
     // Print convergence criteria at start (before suppressing global verbosity)
     if (verbosity >= 2) {
         std::string preset = m_configuration.value("convergence_preset", "normal");

@@ -66,7 +66,9 @@ void SharedBiasPool::pruneByCounter(int min_counter)
     std::unique_lock<std::shared_mutex> lock(m_mutex);
     auto it = std::remove_if(m_structures.begin(), m_structures.end(),
         [min_counter](const BiasStructure& bs) {
-            return bs.counter < min_counter;
+            // Persistent structures (fed-back optimised minima) are never pruned -- they
+            // represent real basins the search should keep biasing against. Claude Generated (Jun 2026).
+            return bs.counter < min_counter && !bs.persistent;
         });
     m_structures.erase(it, m_structures.end());
     // Re-index after pruning
@@ -96,6 +98,7 @@ nlohmann::json SharedBiasPool::serializeMetadata() const
         entry["index"] = bs.index;
         entry["counter"] = bs.counter;
         entry["temperature"] = bs.temperature;
+        entry["persistent"] = bs.persistent;
         bias_array.push_back(entry);
     }
     return bias_array;
@@ -135,6 +138,7 @@ void SharedBiasPool::deserializeMetadata(const nlohmann::json& metadata)
         bs.index = entry.value("index", 0);
         bs.counter = entry.value("counter", 0);
         bs.temperature = entry.value("temperature", 0.0);
+        bs.persistent = entry.value("persistent", false);
         m_structures.push_back(std::move(bs));
     }
     m_global_count.store(static_cast<int>(m_structures.size()), std::memory_order_release);

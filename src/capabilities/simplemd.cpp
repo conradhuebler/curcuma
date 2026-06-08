@@ -253,6 +253,12 @@ void SimpleMD::LoadControlJson()
 
     m_rmsd_atoms = m_config.get<std::string>("rmsd_mtd_atoms");
 
+    // Claude Generated (Jun 2026): ConfSearch robustness gates
+    m_topo_check = m_config.get<bool>("topo_check", false);
+    m_topo_check_interval = m_config.get<int>("topo_check_interval", 0);
+    m_epot_abort = m_config.get<bool>("epot_abort", false);
+    m_epot_abort_window = m_config.get<double>("epot_abort_window", 250.0);
+
     // Claude Generated 2025: Output & Restart Parameters
     m_writerestart = m_config.get<int>("write_restart_frequency");
     m_respa = m_config.get<int>("respa", 1);  // Not in PARAM block - legacy
@@ -534,6 +540,7 @@ bool SimpleMD::Initialise()
 
 
     m_start_fragments = m_molecule.GetFragments();
+    m_start_fragment_count = static_cast<int>(m_start_fragments.size());  // Claude Generated (Jun 2026): topo-check reference
     m_scaling_vector_linear = std::vector<double>(m_natoms, 1);
     m_scaling_vector_nonlinear = std::vector<double>(m_natoms, 1);
     if (m_scaling_json != "none") {
@@ -1653,6 +1660,11 @@ void SimpleMD::prepareRun()
     AverageQuantities();
     m_step = 0;
 
+    // Claude Generated (Jun 2026): reference state for the opt-in robustness gates.
+    // epot_ref is the bare starting potential; the topology check interval defaults to dump.
+    m_epot_ref = m_Epot;
+    m_topo_check_every = (m_topo_check_interval > 0) ? m_topo_check_interval : m_dump;
+
     // WP-S2 (May 2026): open per-step diagnostics JSONL file
     if (m_md_diagnostics) {
         m_diag_writer = std::make_unique<MDDiagnosticsWriter>(Basename() + ".diag.jsonl");
@@ -1813,6 +1825,36 @@ bool SimpleMD::step()
     }
     m_last_integrator_ms = integrator_ms;
     AverageQuantities();
+
+    // Claude Generated (Jun 2026): ConfSearch robustness gates (opt-in, default off).
+    // Both set m_run_aborted (like the stop-file path) so finalizeRun() still runs and
+    // the bias pool / final frame are finalised cleanly.
+    //
+    // Early Epot abort: a sustained climb of the running-mean BARE potential (bias is
+    // separate from m_Epot) means the walker left the relevant low-energy region. The
+    // window must exceed the thermal baseline (~N_dof*kT/2) plus typical barriers, so a
+    // single barrier crossing (transient spike) does not trip it. Warm up first so the
+    // cumulative mean is not dominated by the initial transient.
+    if (m_epot_abort && m_step > 100
+        && (m_aver_Epot - m_epot_ref) * 2625.5 > m_epot_abort_window) {
+        CurcumaLogger::warn_fmt("MD aborted: <Epot> climbed {:.1f} kJ/mol above start (window {:.1f})",
+            (m_aver_Epot - m_epot_ref) * 2625.5, m_epot_abort_window);
+        m_run_aborted = true;
+        return false;
+    }
+    // Topology abort: a growth in the connected-component count means the molecule
+    // fragmented. Only the fragment count is used (robust against transient bond-length
+    // fluctuations at high T). m_eigen_geometry holds the current coordinates.
+    if (m_topo_check && m_topo_check_every > 0 && m_step > 0 && m_step % m_topo_check_every == 0) {
+        m_molecule.setGeometry(m_eigen_geometry);
+        int nfrag = static_cast<int>(m_molecule.GetFragments().size());
+        if (nfrag > m_start_fragment_count) {
+            CurcumaLogger::warn_fmt("MD aborted: topology broke (fragments {} -> {})",
+                m_start_fragment_count, nfrag);
+            m_run_aborted = true;
+            return false;
+        }
+    }
 
     if (m_mtd) {
         if (!m_eval_mtd) {
@@ -2664,6 +2706,13 @@ void SimpleMD::ApplyRMSDMTD()
         int pool_count = m_shared_pool->biasStructureCount();
         bool deposit = !m_rmsd_fix_structure
             && (pool_count == 0 || current_bias * m_rmsd_econv < static_cast<double>(pool_count));
+        // Claude Generated (Jun 2026): never deposit a fragmented structure into the shared
+        // pool (only relevant when topo_check is on; the run aborts shortly after anyway).
+        if (deposit && m_topo_check) {
+            m_molecule.setGeometry(full_geometry);
+            if (static_cast<int>(m_molecule.GetFragments().size()) > m_start_fragment_count)
+                deposit = false;
+        }
         if (deposit) {
             BiasStructure new_bs;
             new_bs.geometry = full_geometry;

@@ -54,6 +54,7 @@ struct BiasStructure {
     int index = 0;
     int counter = 0;
     double temperature = 0;  // Claude Generated (Apr 2026): deposition temperature for cross-T propagation
+    bool persistent = false; // Claude Generated (Jun 2026): fed-back optimised minimum; exempt from counter pruning
 };
 
 class SharedBiasPool;  // Claude Generated (Apr 2026): forward declaration
@@ -341,6 +342,15 @@ private:
     bool m_run_aborted = false;          // mirrors former local `aborted` flag in start()
     std::vector<json> m_run_states;      // rescue states carried across step() calls
 
+    // Claude Generated (Jun 2026): ConfSearch robustness gates (opt-in, default off)
+    bool m_topo_check = false;           // abort on fragmentation; also gates bias deposition
+    int m_topo_check_interval = 0;       // user value (0 -> resolved to dump in prepareRun)
+    int m_topo_check_every = 0;          // resolved interval actually used in step()
+    int m_start_fragment_count = 1;      // connected-component count at run start (reference)
+    bool m_epot_abort = false;           // abort when running-mean potential climbs too high
+    double m_epot_abort_window = 250.0;  // kJ/mol above the starting energy
+    double m_epot_ref = 0.0;             // bare potential energy at run start (reference)
+
     std::vector<Geometry> m_bias_structures;
     std::vector<BiasStructure> m_biased_structures;
     std::vector<BiasThread*> m_bias_threads;
@@ -532,6 +542,12 @@ private:
     PARAM(md_diagnostics, Bool, false, "Write per-step diagnostics to <basename>.diag.jsonl (energy decomposition, charges, CN, gradient norms, HB/XB counts). Frequency follows dump_frequency. One JSON object per line.", "Output", {})
     // --- WP-P1 Timing Instrumentation (May 2026) ---
     PARAM(md_diagnostics_timing, Bool, false, "Add a timing_ms block to each <basename>.diag.jsonl record (per-phase wall-clock: CN/EEQ/dcn/D4-weights/FF/integrator/HBXB/I-O). GPU runs add a gpu sub-block with per-kernel-category times. Requires md_diagnostics=true. ~1-2 us per hook.", "Output", {})
+
+    // --- ConfSearch robustness gates (Jun 2026, Claude Generated) ---
+    PARAM(topo_check, Bool, false, "Abort the MD run when the molecule fragments (number of connected components grows above the start value). Off by default so reactive paths are still sampled.", "ConfSearch", {})
+    PARAM(topo_check_interval, Int, 0, "Steps between topology checks (0 -> use dump_frequency).", "ConfSearch", {})
+    PARAM(epot_abort, Bool, false, "Abort the MD run when the running-mean potential energy climbs more than epot_abort_window above the run's starting energy.", "ConfSearch", {})
+    PARAM(epot_abort_window, Double, 250.0, "Energy window (kJ/mol) above the starting energy for epot_abort. Must exceed the thermal baseline (~N_dof*kT/2) plus typical barriers.", "ConfSearch", {})
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^

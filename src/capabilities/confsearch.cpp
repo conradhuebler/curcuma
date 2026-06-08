@@ -110,6 +110,14 @@ void ConfSearch::start()
     md["restart"] = false;       // ConfSearch manages its own state, no MD restart
     md["norestart"] = true;
 
+    // Claude Generated (Jun 2026): forward the robustness controls into every MD run.
+    // Both checks self-reference inside SimpleMD (start fragment count / start energy),
+    // so only the enable flags and windows need to be passed; no per-seed data required.
+    md["topo_check"] = m_topo_check;
+    md["topo_check_interval"] = m_topo_check_interval;
+    md["epot_abort"] = m_epot_abort;
+    md["epot_abort_window"] = m_epot_abort_window;
+
     // RMSD metadynamics is the default driver for conformational exploration.
     // The SimpleMD default is false, but ConfSearch enables it by default.
     // Only disable if the user explicitly passed -rmsd_mtd false.
@@ -166,6 +174,7 @@ void ConfSearch::start()
         if (md.contains("gpu") && !md["gpu"].is_null())
             opt_init["gpu"] = md["gpu"];
         PerformOptimisation(p + ".input", opt_init);
+        CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after initial optimisation (see temperature loop)
 
         for (auto* mol : m_in_stack) delete mol;
         m_in_stack.clear();
@@ -198,9 +207,18 @@ void ConfSearch::start()
     double initial_energy = std::numeric_limits<double>::infinity();
     double best_energy = std::numeric_limits<double>::infinity();
 
+    // Claude Generated (Jun 2026): baseline RATTLE setting (whatever the user/registry chose).
+    // Hot cycles override it with rattle_hot_mode; cooler cycles restore this baseline.
+    nlohmann::json rattle_base = md.contains("rattle") ? md["rattle"] : nlohmann::json(0);
+
     int temperature_cycle = 0;
     for (m_currentT = m_startT; m_currentT >= m_endT; m_currentT -= m_deltaT) {
         temperature_cycle++;
+        // Claude Generated (Jun 2026): sub-methods (initial Opt, per-cycle Opt/ConfScan/MD)
+        // drive the global CurcumaLogger verbosity down to their own level and do not restore
+        // it, so ConfSearch's per-cycle progress would be invisible. Re-assert our level here
+        // and after each sub-phase below so the cycle logs are actually shown.
+        CurcumaLogger::set_verbosity(m_verbosity);
         CurcumaLogger::header("=== ConfSearch Temperature Cycle " + std::to_string(temperature_cycle)
             + " / " + std::to_string(static_cast<int>((m_startT - m_endT) / m_deltaT) + 1)
             + " : T = " + std::to_string(static_cast<int>(m_currentT)) + " K ===");
@@ -209,6 +227,17 @@ void ConfSearch::start()
         CurcumaLogger::info("Each repetition starts from the same input geometry with fresh velocities (exploration via shared bias pool).");
         md["T"] = m_currentT;
         md["temperature"] = m_currentT;
+        // Claude Generated (Jun 2026): auto-enable RATTLE for hot cycles. A 1 fs step at high T
+        // under-samples X-H stretches (period ~10 fs) -> energy drift / spurious bond breaking;
+        // constraining them (mode 2 = H-only) stabilises the dynamics. Cooler cycles keep the
+        // user's/registry baseline so flexible low-T sampling is unaffected.
+        if (m_currentT >= m_rattle_threshold_temp) {
+            md["rattle"] = m_rattle_hot_mode;
+            CurcumaLogger::result_fmt("ConfSearch: T={}K >= {}K -> RATTLE auto-enabled (mode {})",
+                m_currentT, m_rattle_threshold_temp, m_rattle_hot_mode);
+        } else {
+            md["rattle"] = rattle_base;
+        }
         // Impuls: optional initial velocity boost (reinitializes velocities each
         // step while m_impuls > m_T). ConfSearch does NOT set impuls by default
         // because SimpleMD already initializes velocities at m_T0 during Initialise().
@@ -232,6 +261,7 @@ void ConfSearch::start()
 #endif
         // std::vector<Molecule*> uniques;
         PerformMolecularDynamics(m_in_stack, md);
+        CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after MD sub-instances (see cycle top)
 
         // Cross-temperature: log pool statistics after MD phase and prune
         if (m_bias_pool) {
@@ -256,6 +286,7 @@ void ConfSearch::start()
         // Bias structures are the primary conformers discovered by RMSD-MTD.
         // MD unique snapshots (confsearch.unique.xyz) are secondary and not used here.
         PerformOptimisation(p + ".bias", opt);
+        CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after optimisation (see cycle top)
         int opt_count = 0;
         {
             FileIterator opt_file(p + ".bias.opt.xyz");
@@ -274,6 +305,7 @@ void ConfSearch::start()
         if (md.contains("gpu") && !md["gpu"].is_null())
             scan["gpu"] = md["gpu"];
         PerformFilter(p + ".bias", scan);
+        CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after ConfScan filter (see cycle top)
         int rmsd_count = 0;
         {
             FileIterator rmsd_file(p + ".bias.opt.accepted.xyz");
@@ -299,8 +331,39 @@ void ConfSearch::start()
             candidates.push_back(mol);
             lowest_energy = std::min(lowest_energy, mol->Energy());
         }
+        // Update the running global minimum across all cycles (anchor for seed selection).
+        if (lowest_energy < m_global_min)
+            m_global_min = lowest_energy;
+
+        // Funnel: the seed window may shrink each cycle so later cycles only refine the
+        // deepest basins. "static" keeps it constant; "exp" multiplies by decay^(cycle-1).
+        double eff_seed_window = m_seed_energy_window;
+        if (m_seed_window_schedule == "exp")
+            eff_seed_window *= std::pow(m_seed_window_decay, temperature_cycle - 1);
+
+        // Two independent windows (Claude Generated, Jun 2026):
+        //  - cumulative OUTPUT keeps the wide energy_window relative to this cycle's lowest,
+        //    so the final pool stays rich for the closing dedup;
+        //  - next-cycle SEEDS use the tighter seed_energy_window relative to the GLOBAL
+        //    minimum, so no MD time is spent exploring from irrelevant high-energy basins.
+        // Every topology-valid optimised minimum is also fed back into the shared bias pool
+        // (opt_feedback_bias) so the next MTD cycle is biased away from what we already found.
+        std::vector<BiasStructure> feedback;
         for (auto* mol : candidates) {
-            if ((mol->Energy() - lowest_energy) * 2625.5 < m_energy_window) {
+            if ((mol->Energy() - lowest_energy) * 2625.5 < m_energy_window)
+                mol->appendXYZFile(cumulative_file);
+
+            if (m_opt_feedback_bias && m_bias_pool) {
+                BiasStructure bs;
+                bs.geometry = mol->getGeometry();  // full-atom, Angstrom (same units as the pool)
+                bs.energy = mol->Energy();
+                bs.counter = m_opt_feedback_height;  // hill height W = k*counter
+                bs.temperature = m_currentT;
+                bs.persistent = true;                // never pruned: represents a real basin
+                feedback.push_back(std::move(bs));
+            }
+
+            if ((mol->Energy() - m_global_min) * 2625.5 < eff_seed_window) {
                 m_in_stack.push_back(mol);
                 accepted++;
             } else {
@@ -308,10 +371,14 @@ void ConfSearch::start()
                 delete mol;
             }
         }
-
-        // Append accepted structures to the cumulative pool for the final output.
-        for (auto* mol : m_in_stack)
-            mol->appendXYZFile(cumulative_file);
+        if (!feedback.empty()) {
+            m_bias_pool->depositBatch(feedback);
+            CurcumaLogger::result_fmt("ConfSearch: {} optimised minima fed back into bias pool (height={}), pool now {} structures",
+                static_cast<int>(feedback.size()), m_opt_feedback_height, m_bias_pool->biasStructureCount());
+        }
+        if (m_seed_window_schedule == "exp")
+            CurcumaLogger::result_fmt("ConfSearch: seed window (funnel) = {:.1f} kJ/mol vs. global min {:.6f} Eh",
+                eff_seed_window, m_global_min);
 
         // Energy tracking: cycle 1 sets the initial reference; subsequent cycles compare against both.
         if (temperature_cycle == 1) {
@@ -351,6 +418,7 @@ void ConfSearch::start()
     final_scan["energy_method"] = m_method;
     final_scan["max_energy"] = m_energy_window;
     PerformFilter(p + ".cumulative", final_scan);
+    CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after final ConfScan filter (see temperature loop)
     CurcumaLogger::success_fmt("ConfSearch: Final result in {}.cumulative.opt.accepted.xyz", p);
 
     // Claude Generated (Apr 2026): Clean up shared bias pool
@@ -533,4 +601,16 @@ void ConfSearch::LoadControlJson()
     m_energy_window = Json2KeyWord<double>(m_defaults, "energy_window");
     m_dT = Json2KeyWord<double>(m_defaults, "dT");
     m_max_bias_export = Json2KeyWord<int>(m_defaults, "max_bias_export");
+    // Claude Generated (Jun 2026): efficiency/robustness controls
+    m_rattle_threshold_temp = Json2KeyWord<double>(m_defaults, "rattle_threshold_temp");
+    m_rattle_hot_mode = Json2KeyWord<int>(m_defaults, "rattle_hot_mode");
+    m_topo_check = Json2KeyWord<bool>(m_defaults, "topo_check");
+    m_topo_check_interval = Json2KeyWord<int>(m_defaults, "topo_check_interval");
+    m_seed_energy_window = Json2KeyWord<double>(m_defaults, "seed_energy_window");
+    m_seed_window_schedule = Json2KeyWord<std::string>(m_defaults, "seed_window_schedule");
+    m_seed_window_decay = Json2KeyWord<double>(m_defaults, "seed_window_decay");
+    m_epot_abort = Json2KeyWord<bool>(m_defaults, "epot_abort");
+    m_epot_abort_window = Json2KeyWord<double>(m_defaults, "epot_abort_window");
+    m_opt_feedback_bias = Json2KeyWord<bool>(m_defaults, "opt_feedback_bias");
+    m_opt_feedback_height = Json2KeyWord<int>(m_defaults, "opt_feedback_height");
 }
