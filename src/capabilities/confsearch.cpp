@@ -135,6 +135,23 @@ void ConfSearch::start()
     CurcumaLogger::result_fmt("ConfSearch MD config: method={}, thermostat={}, coupling={}, remove_com={}, remove_com_mode={}, no_center={}",
         md.value("method", "?"), md.value("thermostat", "?"), md.value("coupling", -1.0),
         md.value("remove_com_motion", -1.0), md.value("remove_com_mode", -1), md.value("no_center", false));
+    // Claude Generated (Jun 2026): adaptive MTD hill width (experimental, opt-in). The default
+    // alpha=10 (half-max ~0.26 A) is far narrower than the dedup RMSD scale (m_rmsd ~1.25 A), so
+    // filling a basin needs many hills and exploration is slow. "couple" sets the hill half-max at
+    // bias_couple_factor*m_rmsd -> alpha = ln2/(factor*rmsd)^2, so one hill ~ one basin. RMSD and
+    // m_rmsd are both in Angstrom (m_eigen_geometry is set without unit conversion) -> alpha in A^-2.
+    // Applied before the dump/log below so they reflect the calibrated value.
+    if (m_bias_calibration == "couple") {
+        double r = m_bias_couple_factor * m_rmsd;
+        if (r > 1e-6) {
+            double alpha = std::log(2.0) / (r * r);
+            md["rmsd_mtd_alpha"] = alpha;
+            CurcumaLogger::result_fmt("ConfSearch: bias_calibration=couple -> RMSD-MTD alpha={:.4f} A^-2 (hill half-max at {:.3f} A)", alpha, r);
+        }
+    } else if (m_bias_calibration != "off") {
+        CurcumaLogger::warn_fmt("ConfSearch: bias_calibration='{}' not yet implemented (cluster/weighted pending) -- treating as off", m_bias_calibration);
+    }
+
     // Dump all MD parameters to file for debugging
     {
         std::ofstream debug_file(p + "_md_params.json");
@@ -149,7 +166,7 @@ void ConfSearch::start()
         double alpha = md.value("rmsd_mtd_alpha", 10.0);
         int pace = md.value("rmsd_mtd_pace", 1);
         bool wtmtd = md.value("wtmtd", false);
-        CurcumaLogger::result_fmt("ConfSearch: RMSD-MTD k={} Eh, alpha={} Bohr^-2, pace={} steps", k, alpha, pace);
+        CurcumaLogger::result_fmt("ConfSearch: RMSD-MTD k={} Eh, alpha={} A^-2, pace={} steps", k, alpha, pace);
         if (wtmtd)
             CurcumaLogger::result_fmt("ConfSearch: RMSD-MTD Well-tempered (dT={})", md.value("rmsd_mtd_dt", 1000000.0));
         else
@@ -637,4 +654,6 @@ void ConfSearch::LoadControlJson()
     m_opt_feedback_bias = Json2KeyWord<bool>(m_defaults, "opt_feedback_bias");
     m_opt_feedback_height = Json2KeyWord<int>(m_defaults, "opt_feedback_height");
     m_mtd_permutation = Json2KeyWord<bool>(m_defaults, "mtd_permutation");
+    m_bias_calibration = Json2KeyWord<std::string>(m_defaults, "bias_calibration");
+    m_bias_couple_factor = Json2KeyWord<double>(m_defaults, "bias_couple_factor");
 }
