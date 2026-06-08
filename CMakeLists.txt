@@ -908,6 +908,7 @@ find_package(BLAS QUIET)
 find_package(LAPACK QUIET)
 if(BLAS_FOUND)
     target_link_libraries(curcuma_core ${BLAS_LIBRARIES})
+    target_compile_definitions(curcuma_core PUBLIC HAVE_BLAS)
     message(STATUS "BLAS linked for curcuma_core")
 endif()
 if(LAPACK_FOUND)
@@ -923,10 +924,13 @@ if(NOT LAPACKE_LIBRARY)
 endif()
 if(LAPACKE_LIBRARY)
     target_link_libraries(curcuma_core ${LAPACKE_LIBRARY})
+    target_compile_definitions(curcuma_core PUBLIC HAVE_LAPACKE)
     # EIGEN_USE_LAPACKE is NOT set globally here — it breaks TUs that use local variables
     # named 'I' (C99 complex macro conflict with LAPACKE headers). Define it per-file instead:
     #   rf_solver.cpp, lbfgs.cpp — both safe (no variable named 'I').
     # See ancopt_optimizer.cpp: renamed Matrix3d I -> inertia to fix the same issue.
+    # Source files guard their EIGEN_USE_LAPACKE with #ifdef HAVE_LAPACKE so the build
+    # works without LAPACKE installed.
     message(STATUS "LAPACKE found: ${LAPACKE_LIBRARY} — linking, EIGEN_USE_LAPACKE applied per-file")
 else()
     message(STATUS "LAPACKE not found — SelfAdjointEigenSolver uses Eigen built-in path")
