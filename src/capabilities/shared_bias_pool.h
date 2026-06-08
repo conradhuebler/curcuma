@@ -63,6 +63,15 @@ public:
      *  Removes rarely-visited regions to keep pool size manageable. */
     void pruneByCounter(int min_counter);
 
+    /** Claude Generated (Jun 2026): set the symmetry/atom-permutation set (full-atom reorder
+     *  rules discovered by ConfScan). Set between temperature cycles; read every MD step.
+     *  Empty (default) -> the RMSD-MTD bias uses the identity only (unpermuted, bit-identical). */
+    void setPermutations(const std::vector<std::vector<int>>& permutations);
+
+    /** Snapshot of the current permutation set (shared_lock, deep copy). The MTD sums a
+     *  Gaussian over each image (smooth), so a discontinuous hard min is never formed. */
+    std::vector<std::vector<int>> permutations() const;
+
     /** Remove all structures. Used when starting fresh
      *  or when resetting between temperature cycles. */
     void clear();
@@ -86,4 +95,5 @@ private:
     mutable std::shared_mutex m_mutex;
     std::vector<BiasStructure> m_structures;
     std::atomic<int> m_global_count{0};
+    std::vector<std::vector<int>> m_permutations;  // Claude Generated (Jun 2026): symmetry reorder rules (full-atom)
 };

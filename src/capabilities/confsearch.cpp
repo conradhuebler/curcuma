@@ -260,6 +260,13 @@ void ConfSearch::start()
         }
 #endif
         // std::vector<Molecule*> uniques;
+        // Claude Generated (Jun 2026): expose the accumulated symmetry permutations to the MTD
+        // bias for this cycle (empty until the first ConfScan -> identity-only, unchanged).
+        if (m_bias_pool && m_mtd_permutation && !m_permutation_cache.empty()) {
+            m_bias_pool->setPermutations(m_permutation_cache);
+            CurcumaLogger::result_fmt("ConfSearch: {} symmetry permutation(s) active in RMSD-MTD bias (smooth sum-over-images)",
+                static_cast<int>(m_permutation_cache.size()));
+        }
         PerformMolecularDynamics(m_in_stack, md);
         CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after MD sub-instances (see cycle top)
 
@@ -564,6 +571,22 @@ std::string ConfSearch::PerformFilter(const std::string& f, const nlohmann::json
     ConfScan* scan = new ConfScan(parameter, false);
     scan->setFileName(f + ".opt.xyz");
     scan->start();
+    // Claude Generated (Jun 2026): harvest the symmetry/atom-permutation rules ConfScan found
+    // (Hungarian reorder after inertia prealignment) and accumulate the distinct, non-identity
+    // ones across cycles. They are fed into the RMSD-MTD bias as extra smooth Gaussian images.
+    if (m_mtd_permutation) {
+        for (const auto& rule : scan->getReorderRules()) {
+            if (rule.empty())
+                continue;
+            bool identity = true;
+            for (int i = 0; i < static_cast<int>(rule.size()); ++i)
+                if (rule[i] != i) { identity = false; break; }
+            if (identity)
+                continue;
+            if (std::find(m_permutation_cache.begin(), m_permutation_cache.end(), rule) == m_permutation_cache.end())
+                m_permutation_cache.push_back(rule);
+        }
+    }
     delete scan;
     return f;
 }
@@ -613,4 +636,5 @@ void ConfSearch::LoadControlJson()
     m_epot_abort_window = Json2KeyWord<double>(m_defaults, "epot_abort_window");
     m_opt_feedback_bias = Json2KeyWord<bool>(m_defaults, "opt_feedback_bias");
     m_opt_feedback_height = Json2KeyWord<int>(m_defaults, "opt_feedback_height");
+    m_mtd_permutation = Json2KeyWord<bool>(m_defaults, "mtd_permutation");
 }

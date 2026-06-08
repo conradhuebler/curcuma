@@ -92,6 +92,7 @@ static const nlohmann::json ConfSearchJson{
     { "epot_abort_window", 250 }, // kJ/mol above the run's starting energy (must exceed thermal baseline)
     { "opt_feedback_bias", true }, // deposit optimised minima back into the shared bias pool
     { "opt_feedback_height", 5 }, // hill counter (height = k*counter) assigned to fed-back minima
+    { "mtd_permutation", true }, // feed ConfScan's symmetry reorder rules into the RMSD-MTD bias (smooth, sum-over-images)
     { "cleanenergy", false },
     { "wall", "none" }, // can be spheric or rect
     { "wall_type", "logfermi" }, // can be logfermi or harmonic
@@ -198,9 +199,10 @@ private:
     // Claude Generated (Jun 2026): efficiency/robustness controls (see ConfSearchJson for meaning)
     double m_rattle_threshold_temp = 400, m_seed_energy_window = 50, m_seed_window_decay = 0.5, m_epot_abort_window = 250;
     int m_rattle_hot_mode = 2, m_topo_check_interval = 0, m_opt_feedback_height = 5;
-    bool m_topo_check = false, m_epot_abort = false, m_opt_feedback_bias = true;
+    bool m_topo_check = false, m_epot_abort = false, m_opt_feedback_bias = true, m_mtd_permutation = true;
     std::string m_seed_window_schedule = "static";
     double m_global_min = std::numeric_limits<double>::infinity(); // running lowest energy across all cycles
+    std::vector<std::vector<int>> m_permutation_cache; // Claude Generated (Jun 2026): symmetry reorder rules from ConfScan, fed into MTD
     Matrix m_topo_matrix;
     SharedBiasPool* m_bias_pool = nullptr;  // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
 };

@@ -226,6 +226,12 @@ public:
 
     inline int AcceptedCount() const { return m_stored_structures.size(); }
     inline int ReorderSuccessfull() const { return m_reorder_successfull_count; }
+
+    /*! \brief Claude Generated (Jun 2026): the accumulated atom-permutation (reorder) rules that
+     *  ConfScan found while matching duplicate conformers (Hungarian on quadratic distance after
+     *  inertia/subspace prealignment). For a fixed-atom-order ensemble these are the molecule's
+     *  symmetry relabelings. ConfSearch feeds them into the RMSD-MTD bias as extra Gaussian images. */
+    inline std::vector<std::vector<int>> getReorderRules() const { return m_reorder_rules; }
     inline int ReorderCount() const { return m_reorder_count; }
     inline int ReorderSkippedCount() const { return m_skipped_count; }
     inline int ReuseCount() const { return m_reordered_reused; }

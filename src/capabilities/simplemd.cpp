@@ -2632,42 +2632,81 @@ void SimpleMD::ApplyRMSDMTD()
         // Visited references to bump after the loop (the WT weight needs the full V).
         std::vector<int> visited;
 
-        // Evaluate the bias from the snapshot — identical physics to the local BiasThread
-        // path: hill height W_i = k * counter_i, V(x) = Sum_i W_i * exp(-alpha*RMSD^2), and
-        // the force is its exact negative gradient. Well-tempered (opt-in) only contributes
-        // to current_bias_wt (output) and never to the force or deposition.
+        // Symmetry/atom-permutation set discovered by ConfScan (full-atom reorder rules), set
+        // on the shared pool between cycles. Empty -> identity only -> bit-identical to before.
+        // We SUM a Gaussian over every symmetry image (NOT a hard min over images): the bias and
+        // its force stay C-infinity smooth as the walker crosses a symmetry seam (a hard min would
+        // make the force discontinuous there and break the MD integration). For well-separated
+        // images only the nearest contributes appreciably, so it behaves like the min but smoothly.
+        // Only applied when the RMSD subset is the full molecule (the reorder rules are full-atom).
+        // Claude Generated (Jun 2026).
+        std::vector<std::vector<int>> perms;
+        if (static_cast<int>(m_rmsd_indicies.size()) == m_natoms)
+            perms = m_shared_pool->permutations();
+
+        // Evaluate the bias from the snapshot — hill height W_i = k * counter_i,
+        // V(x) = Sum_i Sum_p W_i * exp(-alpha*RMSD_{i,p}^2) (p over identity + symmetry images),
+        // force = exact negative gradient. Well-tempered (opt-in) only feeds current_bias_wt.
         for (const auto& bs : bias_snapshot) {
-            // bs.geometry is full-atom; need RMSD-subset for evaluation
+            const double height = m_k_rmsd * bs.counter; // W_i = k * counter_i
+            double expr_sum = 0.0;      // Sum over images: drives deposition/visited bookkeeping
+            double rmsd_identity = 0.0; // identity-image RMSD for COLVAR / rmsd_reference
+
+            // Evaluate one image (a reordered copy of the bias structure subset) and accumulate
+            // its Gaussian into the bias + its analytic force into the walker gradient.
+            auto eval_image = [&](const Geometry& subset, bool is_identity) {
+                m_shared_pool_target.setGeometry(subset);
+                m_shared_pool_driver.setTarget(m_shared_pool_target);
+                double rmsd = m_shared_pool_driver.BestFitRMSD();
+                double expr = exp(-rmsd * rmsd * m_alpha_rmsd);
+                current_bias += height * expr;
+                if (m_wtmtd)
+                    current_bias_wt += m_k_rmsd * bs.factor * expr;
+                double dEdR = -2.0 * m_alpha_rmsd * height * rmsd * expr;
+                Geometry grad = m_shared_pool_driver.Gradient();
+                for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
+                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += dEdR * grad(j, 0);
+                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 1] += dEdR * grad(j, 1);
+                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 2] += dEdR * grad(j, 2);
+                }
+                expr_sum += expr;
+                if (is_identity)
+                    rmsd_identity = rmsd;
+            };
+
+            // Identity image (bs.geometry is full-atom; project onto the RMSD subset).
             Geometry bs_rmsd_subset = m_shared_pool_target.getGeometry();
             for (int i = 0; i < m_rmsd_indicies.size(); ++i) {
                 bs_rmsd_subset(i, 0) = bs.geometry(m_rmsd_indicies[i], 0);
                 bs_rmsd_subset(i, 1) = bs.geometry(m_rmsd_indicies[i], 1);
                 bs_rmsd_subset(i, 2) = bs.geometry(m_rmsd_indicies[i], 2);
             }
-            m_shared_pool_target.setGeometry(bs_rmsd_subset);
-            m_shared_pool_driver.setTarget(m_shared_pool_target);
-            double rmsd = m_shared_pool_driver.BestFitRMSD();
-            double expr = exp(-rmsd * rmsd * m_alpha_rmsd);
-            double height = m_k_rmsd * bs.counter; // W_i = k * counter_i
+            eval_image(bs_rmsd_subset, true);
 
-            current_bias += height * expr;
-            if (m_wtmtd)
-                current_bias_wt += m_k_rmsd * bs.factor * expr;
-
-            // Force = -dV/dx: W_i*exp*(-2*alpha*rmsd) * dRMSD/dx, Gradient() = dRMSD/dx_walker.
-            double dEdR = -2.0 * m_alpha_rmsd * height * rmsd * expr;
-            Geometry grad = m_shared_pool_driver.Gradient();
-            for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
-                m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += dEdR * grad(j, 0);
-                m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 1] += dEdR * grad(j, 1);
-                m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 2] += dEdR * grad(j, 2);
+            // Symmetry images: position j holds atom rule[j] (same convention as ConfScan's
+            // Rules2RMSD). Reference (walker) stays in canonical order, so this measures the
+            // RMSD to the relabelled bias structure.
+            for (const auto& rule : perms) {
+                if (static_cast<int>(rule.size()) != m_natoms)
+                    continue;
+                Geometry bs_perm(m_natoms, 3);
+                bool ok = true;
+                for (int j = 0; j < m_natoms; ++j) {
+                    int src = rule[j];
+                    if (src < 0 || src >= m_natoms) { ok = false; break; }
+                    bs_perm(j, 0) = bs.geometry(src, 0);
+                    bs_perm(j, 1) = bs.geometry(src, 1);
+                    bs_perm(j, 2) = bs.geometry(src, 2);
+                }
+                if (ok)
+                    eval_image(bs_perm, false);
             }
 
-            if (expr * m_rmsd_econv > static_cast<double>(global_count))
+            if (expr_sum * m_rmsd_econv > static_cast<double>(global_count))
                 visited.push_back(bs.index);
 
             if (bs.index == 0)
-                rmsd_reference = rmsd;
+                rmsd_reference = rmsd_identity;
         }
 
         // Phase 2: bump the visited references in the shared pool. counter++ always (drives

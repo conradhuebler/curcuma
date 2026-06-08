@@ -78,6 +78,18 @@ void SharedBiasPool::pruneByCounter(int min_counter)
     m_global_count.store(static_cast<int>(m_structures.size()), std::memory_order_release);
 }
 
+void SharedBiasPool::setPermutations(const std::vector<std::vector<int>>& permutations)
+{
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    m_permutations = permutations;
+}
+
+std::vector<std::vector<int>> SharedBiasPool::permutations() const
+{
+    std::shared_lock<std::shared_mutex> lock(m_mutex);
+    return m_permutations;
+}
+
 void SharedBiasPool::clear()
 {
     std::unique_lock<std::shared_mutex> lock(m_mutex);
