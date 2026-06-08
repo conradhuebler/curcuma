@@ -69,7 +69,7 @@ FileIterator::FileIterator(const std::string& filename, bool silent)
     m_init = CheckNext();
 }
 
-FileIterator::FileIterator(char* filename, bool silent)
+FileIterator::FileIterator(const char* filename, bool silent)
 {
     m_filename = std::string(filename);
 
@@ -219,9 +219,16 @@ bool FileIterator::CheckNext()
             index++;
         }
     } else {
+        // Non-XYZ single-molecule file (mol2, sdf, json, coord). Deliver it once,
+        // then report end-of-file. Returning false unconditionally here caused an
+        // infinite loop for any non-XYZ (or empty) filename iterated via
+        // while(!AtEnd()).
+        if (m_nonxyz_loaded)
+            return true;
+        m_nonxyz_loaded = true;
         m_current = Files::LoadFile(m_filename);
         m_init = true;
-        return false;
+        return m_current.AtomCount() == 0; // failed/empty load -> end immediately
     }
     return true;
 }

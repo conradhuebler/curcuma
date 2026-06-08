@@ -50,6 +50,14 @@ public:
      *  Returns the index of the first deposited structure. */
     int depositBatch(const std::vector<BiasStructure>& structures);
 
+    /** Atomically register a visit to the given structures: counter++ (raises the
+     *  exploration hill height W = k*counter) and factor += weight (the opt-in
+     *  well-tempered OUTPUT weight; pass 0 when well-tempering is off, so the force
+     *  and deposition are never affected). One unique_lock per batch -- called at most
+     *  once per MD step, so it does not defeat the read-heavy snapshot() design.
+     *  updates: (structure index, well-tempered weight increment) pairs. */
+    void registerVisits(const std::vector<std::pair<int, double>>& updates);
+
     /** Prune structures whose counter is below threshold.
      *  Called between temperature cycles (no concurrent access).
      *  Removes rarely-visited regions to keep pool size manageable. */

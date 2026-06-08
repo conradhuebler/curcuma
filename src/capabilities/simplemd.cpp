@@ -83,59 +83,61 @@ int BiasThread::execute()
 {
     if (m_biased_structures.empty())
         return 0;
-    m_current_bias = 0;
+    m_current_bias = 0;    // exploration bias V(x): drives the force and deposition
+    m_current_bias_wt = 0; // optional well-tempered energy (opt-in, output only)
     m_counter = 0;
-    m_driver.setReference(m_reference);
+    m_driver.setReference(m_reference); // reference = current walker geometry
     m_gradient = Eigen::MatrixXd::Zero(m_reference.AtomCount(), 3);
 
+    // Non-textbook design (intentional): instead of depositing a fresh fixed-height
+    // Gaussian every 'pace' steps, we keep ONE reference per region and raise its
+    // height on every visit. Hill height W_i = m_k * counter_i, so the bias potential is
+    //   V(x) = Sum_i W_i * exp(-alpha * RMSD(x, x_i)^2)
+    // and the force below is its EXACT negative gradient. Claude Generated (Jun 2026).
+    std::vector<int> visited;
+
     for (int i = 0; i < m_biased_structures.size(); ++i) {
-        double factor = 1;
         m_target.setGeometry(m_biased_structures[i].geometry);
         m_driver.setTarget(m_target);
         double rmsd = m_driver.BestFitRMSD();
         double expr = exp(-rmsd * rmsd * m_alpha);
-        double bias_energy = expr * m_dT;
-        factor = m_biased_structures[i].factor;
-
-        if (!m_wtmtd)
-            factor = m_biased_structures[i].counter;
-        else
-            factor += (exp(-(m_biased_structures[i].energy) / kb_Eh / m_DT));
-        m_biased_structures[i].factor = factor;
-        if (i == 0) {
-            m_rmsd_reference = rmsd;
-        }
-        if (expr * m_rmsd_econv > 1 * m_biased_structures.size()) {
-            m_biased_structures[i].counter++;
-            m_biased_structures[i].energy += bias_energy;
-        }
-        bias_energy *= factor * m_k;
+        double height = m_k * m_biased_structures[i].counter; // W_i = k * counter_i
+        double bias_energy = height * expr;
 
         m_current_bias += bias_energy;
+        if (m_wtmtd) // separate well-tempered weight 'factor', output only
+            m_current_bias_wt += m_k * m_biased_structures[i].factor * expr;
+
+        if (i == 0)
+            m_rmsd_reference = rmsd;
+
+        // Force = -dV/dx for this hill. RMSDDriver::Gradient() returns dRMSD/dx of the
+        // reference (= the walker), so dV/dx = W_i * exp * (-2*alpha*rmsd) * Gradient().
+        double dEdR = -2.0 * m_alpha * height * rmsd * expr;
+        m_gradient += m_driver.Gradient() * dEdR;
+
         if (m_nocolvarfile == false) {
             std::ofstream colvarfile;
             colvarfile.open("COLVAR_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
-            colvarfile << m_currentStep << " " << rmsd << " " << bias_energy << " " << m_biased_structures[i].counter << " " << factor << std::endl;
+            colvarfile << m_currentStep << " " << rmsd << " " << bias_energy << " "
+                       << m_biased_structures[i].counter << " " << m_biased_structures[i].factor << std::endl;
             colvarfile.close();
         }
-        /*
-        if(nohillsfile == false)
-        {
-            std::ofstream hillsfile;
-            if (i == 0) {
-                hillsfile.open("HILLS", std::iostream::app);
-            } else {
-                hillsfile.open("HILLS_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
-            }
-            hillsfile << m_currentStep << " " << rmsd << " " << m_alpha_rmsd << " " << m_k_rmsd << " " << "-1" << std::endl;
-            hillsfile.close();
-        }
-        */
 
-        double dEdR = -2 * m_alpha * m_k / m_atoms * exp(-rmsd * rmsd * m_alpha) * factor;
+        // Visited if the walker sits inside this Gaussian (heuristic deposition gate).
+        if (expr * m_rmsd_econv > static_cast<double>(m_biased_structures.size()))
+            visited.push_back(i);
 
-        m_gradient += m_driver.Gradient() * dEdR;
         m_counter += m_biased_structures[i].counter;
+    }
+
+    // Phase 2: update visited references. Exploration (counter) is ALWAYS undamped so
+    // well-tempering never slows the search. WT (opt-in) only feeds the separate output
+    // weight 'factor' with the standard W*exp(-V/(kB*Delta_T)) damping.
+    for (int i : visited) {
+        m_biased_structures[i].counter++;
+        if (m_wtmtd)
+            m_biased_structures[i].factor += exp(-m_current_bias / (kb_Eh * m_DT));
     }
     return 1;
 }
@@ -1726,7 +1728,10 @@ void SimpleMD::prepareRun()
             header += fmt::format(" {: ^15}", "Dipole");
             units  += fmt::format(" {: ^15}", "Debye");
         }
-        if (m_writeUnique) {
+        if (m_rmsd_mtd) {
+            header += fmt::format(" {: ^15}", "nBias");
+            units  += fmt::format(" {: ^15}", "#");
+        } else if (m_writeUnique) {
             header += fmt::format(" {: ^15}", "nUnique");
             units  += fmt::format(" {: ^15}", "#");
         }
@@ -2532,7 +2537,8 @@ void SimpleMD::ApplyRMSDMTD()
         full_geometry(i, 2) = m_eigen_geometry.data()[3 * i + 2];
     }
 
-    double current_bias = 0;
+    double current_bias = 0;    // exploration bias: drives force + deposition
+    double current_bias_wt = 0; // optional well-tempered energy (opt-in, COLVAR output only)
     double rmsd_reference = 0;
 
     // Claude Generated (Apr 2026): Shared bias pool path for parallel ConfSearch
@@ -2551,6 +2557,7 @@ void SimpleMD::ApplyRMSDMTD()
             initial.index = 0;
             initial.temperature = m_T0;
             int deposited = m_shared_pool->depositBiasStructure(initial);
+            m_bias_structure_count++;
             CurcumaLogger::result_fmt("RMSD-MTD: Initial bias structure {} deposited (pool total: {})",
                 deposited, m_shared_pool->biasStructureCount());
             // Write full molecule to per-thread .mtd.xyz for reference
@@ -2571,11 +2578,25 @@ void SimpleMD::ApplyRMSDMTD()
         // Snapshot all current bias structures from the shared pool
         auto bias_snapshot = m_shared_pool->snapshot();
 
-        // Evaluate bias locally using the snapshot
+        // Reference for the RMSD driver must be the CURRENT walker geometry, set once
+        // per step. Without this the driver keeps the initial geometry from Initialise()
+        // (setReference copies), so RMSD would be measured against the start structure
+        // (structure 0 -> rmsd~0 -> current_bias huge -> deposition never triggers and
+        // the bias force is bogus). This mirrors the local BiasThread path (setReference
+        // of the moving geometry each step). Claude Generated (Jun 2026).
+        m_rmsd_mtd_molecule.setGeometry(current_geometry);
+        m_shared_pool_driver.setReference(m_rmsd_mtd_molecule);
+
+        // Visited references to bump after the loop (the WT weight needs the full V).
+        std::vector<int> visited;
+
+        // Evaluate the bias from the snapshot — identical physics to the local BiasThread
+        // path: hill height W_i = k * counter_i, V(x) = Sum_i W_i * exp(-alpha*RMSD^2), and
+        // the force is its exact negative gradient. Well-tempered (opt-in) only contributes
+        // to current_bias_wt (output) and never to the force or deposition.
         for (const auto& bs : bias_snapshot) {
-            m_rmsd_mtd_molecule.setGeometry(current_geometry);
             // bs.geometry is full-atom; need RMSD-subset for evaluation
-            Geometry bs_rmsd_subset = m_rmsd_mtd_molecule.getGeometry();
+            Geometry bs_rmsd_subset = m_shared_pool_target.getGeometry();
             for (int i = 0; i < m_rmsd_indicies.size(); ++i) {
                 bs_rmsd_subset(i, 0) = bs.geometry(m_rmsd_indicies[i], 0);
                 bs_rmsd_subset(i, 1) = bs.geometry(m_rmsd_indicies[i], 1);
@@ -2585,21 +2606,14 @@ void SimpleMD::ApplyRMSDMTD()
             m_shared_pool_driver.setTarget(m_shared_pool_target);
             double rmsd = m_shared_pool_driver.BestFitRMSD();
             double expr = exp(-rmsd * rmsd * m_alpha_rmsd);
-            double bias_energy = expr * m_rmsd_DT;
-            double factor = 1.0;
+            double height = m_k_rmsd * bs.counter; // W_i = k * counter_i
 
-            if (m_wtmtd) {
-                factor += exp(-bs.energy / (8.3145e-3 * m_T0 / 2625.5) / m_rmsd_DT);
-            } else {
-                factor = bs.counter;
-            }
+            current_bias += height * expr;
+            if (m_wtmtd)
+                current_bias_wt += m_k_rmsd * bs.factor * expr;
 
-            bias_energy *= factor * m_k_rmsd;
-            current_bias += bias_energy;
-
-            // Gradient contribution
-            double dEdR = -2.0 * m_alpha_rmsd * m_k_rmsd / m_rmsd_indicies.size()
-                          * expr * factor;
+            // Force = -dV/dx: W_i*exp*(-2*alpha*rmsd) * dRMSD/dx, Gradient() = dRMSD/dx_walker.
+            double dEdR = -2.0 * m_alpha_rmsd * height * rmsd * expr;
             Geometry grad = m_shared_pool_driver.Gradient();
             for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
                 m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += dEdR * grad(j, 0);
@@ -2607,9 +2621,22 @@ void SimpleMD::ApplyRMSDMTD()
                 m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 2] += dEdR * grad(j, 2);
             }
 
-            if (bs.index == 0) {
+            if (expr * m_rmsd_econv > static_cast<double>(global_count))
+                visited.push_back(bs.index);
+
+            if (bs.index == 0)
                 rmsd_reference = rmsd;
-            }
+        }
+
+        // Phase 2: bump the visited references in the shared pool. counter++ always (drives
+        // exploration); the well-tempered weight 'factor' grows only when opt-in (output-only).
+        {
+            std::vector<std::pair<int, double>> visit_updates;
+            visit_updates.reserve(visited.size());
+            double wt_inc = m_wtmtd ? exp(-current_bias / (kb_Eh * m_rmsd_DT)) : 0.0;
+            for (int idx : visited)
+                visit_updates.emplace_back(idx, wt_inc);
+            m_shared_pool->registerVisits(visit_updates);
         }
 
         m_rmsd_mtd_molecule.setGeometry(current_geometry);
@@ -2625,14 +2652,19 @@ void SimpleMD::ApplyRMSDMTD()
                 for (int j = 0; j < i; ++j) {
                     colvarfile << (m_rmsd_mtd_molecule.Centroid(true, i) - m_rmsd_mtd_molecule.Centroid(true, j)).norm() << " ";
                 }
-            colvarfile << current_bias << " " << std::endl;
+            colvarfile << (m_wtmtd ? current_bias_wt : current_bias) << " " << std::endl;
             colvarfile.close();
         }
         m_bias_energy += current_bias;
 
-        // Deposition criterion: deposit a new bias structure unless the structure is fixed.
-        // This matches the normal RMSD-MTD behavior (deposits at each mtd_steps interval).
-        if (!m_rmsd_fix_structure) {
+        // Deposition criterion: same as local path — only deposit when in a genuinely new region.
+        // current_bias * m_rmsd_econv < pool_count means: the region is under-biased relative
+        // to the number of existing reference structures → it is a new conformation.
+        // First structure (pool empty) is always accepted.
+        int pool_count = m_shared_pool->biasStructureCount();
+        bool deposit = !m_rmsd_fix_structure
+            && (pool_count == 0 || current_bias * m_rmsd_econv < static_cast<double>(pool_count));
+        if (deposit) {
             BiasStructure new_bs;
             new_bs.geometry = full_geometry;
             new_bs.rmsd_reference = rmsd_reference;
@@ -2640,13 +2672,15 @@ void SimpleMD::ApplyRMSDMTD()
             new_bs.counter = 1;
             new_bs.temperature = m_T0;
             int new_count = m_shared_pool->depositBiasStructure(new_bs);
+            m_bias_structure_count++;
             // Write full molecule to per-thread .mtd.xyz
             Molecule out_mol(m_molecule);
             out_mol.setGeometry(full_geometry);
             out_mol.setName(std::to_string(m_currentStep));
             out_mol.appendXYZFile(Basename() + ".mtd.xyz");
-            CurcumaLogger::result_fmt("RMSD-MTD: Deposited bias structure {} (pool total: {})",
-                new_count, m_shared_pool->biasStructureCount());
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::result_fmt("RMSD-MTD: Deposited bias structure {} (pool total: {})",
+                    new_count, m_shared_pool->biasStructureCount());
         }
 
         m_end = std::chrono::system_clock::now();
@@ -2670,6 +2704,7 @@ void SimpleMD::ApplyRMSDMTD()
             m_bias_thread->setCurrentGeometry(current_geometry, m_currentStep);
             m_bias_thread->start();
             current_bias += m_bias_thread->BiasEnergy();
+            current_bias_wt += m_bias_thread->BiasEnergyWT();
             for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
                 m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += m_bias_thread->Gradient()(j, 0);
                 m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 1] += m_bias_thread->Gradient()(j, 1);
@@ -2698,6 +2733,7 @@ void SimpleMD::ApplyRMSDMTD()
             if (m_bias_thread->getReturnValue() == 1) {
 
                 current_bias += m_bias_thread->BiasEnergy();
+                current_bias_wt += m_bias_thread->BiasEnergyWT();
                 for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
                     m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += m_bias_thread->Gradient()(j, 0);
                     m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 1] += m_bias_thread->Gradient()(j, 1);
@@ -2723,11 +2759,13 @@ void SimpleMD::ApplyRMSDMTD()
             for (int j = 0; j < i; ++j) {
                 colvarfile << (m_rmsd_mtd_molecule.Centroid(true, i) - m_rmsd_mtd_molecule.Centroid(true, j)).norm() << " ";
             }
-        colvarfile << current_bias << " " << std::endl;
+        // Report the well-tempered energy when opt-in; the exploration bias otherwise.
+        colvarfile << (m_wtmtd ? current_bias_wt : current_bias) << " " << std::endl;
         colvarfile.close();
     }
     m_bias_energy += current_bias;
 
+    // Deposition uses the exploration bias only (well-tempering never gates the search).
     if (current_bias * m_rmsd_econv < m_bias_structure_count && m_rmsd_fix_structure == false) {
         int thread_index = m_bias_structure_count % m_bias_threads.size();
         m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentStep, m_bias_structure_count);
@@ -3141,34 +3179,7 @@ void SimpleMD::RemoveRotation()
 
 void SimpleMD::PrintStatus() const
 {
-    // Print table header once, directly before the first data row
-    if (m_step == 0) {
-#ifdef GCC
-        std::cout << fmt::format("{0: >{1}} {2: >{1}} {3: >{1}} {4: >{1}} {5: >{1}} {6: >{1}} {7: >{1}} {8: >{1}} {9: >{1}} {10: >{1}} {11: >{1}} {12: >{1}} {13: >{1}} {14: >{1}} {15: >{1}} {16: >{1}}\n",
-                                  "Step", 15, "Epot", "avEpot", "Ekin", "avEkin", "Etot", "avEtot", "T", "avT", "Wall", "avWall", "Vir", "avVir", "Rem", "t_step", "Uniq");
-        std::cout << fmt::format("{0: >{1}} {2: >{1}} {3: >{1}} {4: >{1}} {5: >{1}} {6: >{1}} {7: >{1}} {8: >{1}} {9: >{1}} {10: >{1}} {11: >{1}} {12: >{1}} {13: >{1}} {14: >{1}} {15: >{1}} {16: >{1}}\n",
-                                  "ps", 15, "Eh", "Eh", "Eh", "Eh", "Eh", "Eh", "K", "K", "Eh", "Eh", "Eh", "Eh", "min", "ms", "#");
-#else
-        std::cout << "Step"
-                  << "\t"
-                  << "Epot"
-                  << "\t"
-                  << "Ekin"
-                  << "\t"
-                  << "Etot"
-                  << "\t"
-                  << "T" << std::endl;
-        std::cout << "  "
-                  << "\t"
-                  << "Eh"
-                  << "\t"
-                  << "Eh"
-                  << "\t"
-                  << "Eh"
-                  << "\t"
-                  << "T" << std::endl;
-#endif
-    }
+    // Header is printed once before the MD loop starts (not here).
 
     const auto unix_timestamp = std::chrono::seconds(std::time(NULL));
 
@@ -3199,7 +3210,9 @@ void SimpleMD::PrintStatus() const
             remaining, m_time_step / 1000.0);
         if (m_dipole)
             line += fmt::format(" {: ^15f}", m_aver_dipol_linear * 2.5418 * 3.3356);
-        if (m_writeUnique)
+        if (m_rmsd_mtd)
+            line += fmt::format(" {: ^15}", m_bias_structure_count);
+        else if (m_writeUnique)
             line += fmt::format(" {: ^15}", m_unqiue->StoredStructures());
         std::cout << line << "\n";
     }

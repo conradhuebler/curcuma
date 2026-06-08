@@ -25,6 +25,7 @@
 #include "src/tools/general.h"
 
 #include "src/core/molecule.h"
+#include "src/core/intra_parallel_context.h"
 
 #include "json.hpp"
 
@@ -41,7 +42,7 @@ static const nlohmann::json ConfSearchJson{
     { "endT", 300 },
     { "deltaT", 50 },
     { "repeat", 10 },
-    { "time", 5e4 }, // 10 ps
+    { "time", 1e4 }, // 2 ps
     { "rmsd", 1.25 },
     { "threads", 1 },
     { "energy_window", 100 },
@@ -106,6 +107,11 @@ public:
 
     virtual int execute() override
     {
+        // This OptThread runs as one task among many under a molecule-level pool.
+        // Suppress intra-molecule fan-out so methods that honor the flag (native
+        // gfn1/gfn2) stay serial and the cores are not oversubscribed.
+        curcuma::SuppressIntraParallel intra_guard;
+
         std::string method = m_parameter.value("method", std::string("gfnff"));
         EnergyCalculator energy_calc(method, m_parameter);
         m_result = Optimization::OptimizationDispatcher::optimizeStructure(

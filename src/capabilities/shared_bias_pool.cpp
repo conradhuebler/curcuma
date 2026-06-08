@@ -48,6 +48,19 @@ int SharedBiasPool::depositBatch(const std::vector<BiasStructure>& structures)
     return first_index;
 }
 
+void SharedBiasPool::registerVisits(const std::vector<std::pair<int, double>>& updates)
+{
+    if (updates.empty())
+        return;
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    for (const auto& [idx, wt_weight] : updates) {
+        if (idx >= 0 && idx < static_cast<int>(m_structures.size())) {
+            m_structures[idx].counter++;          // exploration: hill height W = k*counter
+            m_structures[idx].factor += wt_weight; // opt-in well-tempered output weight
+        }
+    }
+}
+
 void SharedBiasPool::pruneByCounter(int min_counter)
 {
     std::unique_lock<std::shared_mutex> lock(m_mutex);

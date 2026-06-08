@@ -189,8 +189,9 @@ void ConfSearch::start()
     }
 
     // Cumulative output: all accepted conformers across all temperature cycles.
-    // <basename>.cumulative.xyz grows each cycle; a final ConfScan at the end deduplicates.
-    const std::string cumulative_file = p + ".cumulative.xyz";
+    // The structures are already optimised, so the file is named ".cumulative.opt.xyz"
+    // to match PerformFilter's "<f>.opt.xyz" convention for the final ConfScan below.
+    const std::string cumulative_file = p + ".cumulative.opt.xyz";
     std::ofstream(cumulative_file).close();
 
     // Energy reference: cycle 1's best sets the baseline; best_energy tracks the running minimum.
@@ -339,7 +340,7 @@ void ConfSearch::start()
     CurcumaLogger::header("=== ConfSearch: Final Deduplication Pass ===");
     {
         int total_cumulative = 0;
-        FileIterator cf(cumulative_file.c_str());
+        FileIterator cf(cumulative_file);
         while (!cf.AtEnd()) { cf.Next(); total_cumulative++; }
         CurcumaLogger::result_fmt("ConfSearch: {} structures in cumulative pool before final filter", total_cumulative);
     }
@@ -350,7 +351,7 @@ void ConfSearch::start()
     final_scan["energy_method"] = m_method;
     final_scan["max_energy"] = m_energy_window;
     PerformFilter(p + ".cumulative", final_scan);
-    CurcumaLogger::success_fmt("ConfSearch: Final result in {}.cumulative.accepted.xyz", p);
+    CurcumaLogger::success_fmt("ConfSearch: Final result in {}.cumulative.opt.accepted.xyz", p);
 
     // Claude Generated (Apr 2026): Clean up shared bias pool
     delete m_bias_pool;
@@ -440,34 +441,53 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
     if (molecules.empty())
         return basename;
 
-    // Claude Generated (May 2026): Unified optimization path using CxxThreadPool.
-    // Worker pool mode (default) is used instead of legacy mode to avoid
-    // conflicts with GFN-FF's internal ForceFieldThread/CxxThreadPool.
     int total = static_cast<int>(molecules.size());
-    if (total == 0)
-        return basename;
 
+    // Write criterion: accept the final geometry whenever it has atoms,
+    // regardless of convergence. For conformational search, a partially
+    // optimised structure is still useful as input for the next MD cycle.
+    int written = 0;
+    auto write_result = [&](const Optimization::OptimizationResult& res, const Molecule& fallback, int idx) {
+        double e_start = res.energy_trajectory.empty() ? 0.0 : res.energy_trajectory.front();
+        double e_end   = res.final_energy;
+        double dE_kjmol = (e_end - e_start) * 2625.5;  // Eh -> kJ/mol
+        if (res.final_molecule.AtomCount() > 0) {
+            res.final_molecule.appendXYZFile(output_file);
+            CurcumaLogger::result_fmt("  Struct {:2d}: {:4d} steps, E = {:+.6f} Eh, dE = {:+.2f} kJ/mol{}",
+                idx + 1, res.iterations_performed, e_end, dE_kjmol,
+                res.success ? "" : "  (not converged)");
+            ++written;
+        } else if (fallback.AtomCount() > 0) {
+            fallback.appendXYZFile(output_file);
+            CurcumaLogger::result_fmt("  Struct {:2d}: optimizer failed, using input geometry", idx + 1);
+            ++written;
+        }
+    };
+
+    // Unified path: CxxThreadPool runs the optimizations inline on the calling
+    // thread when m_threads == 1 (no worker spawned) and in parallel otherwise.
+    // OptThread uses autoDelete=false, so the pool never touches these pointers
+    // in its destructor — we own and delete them here.
     CxxThreadPool pool;
     pool.setActiveThreadCount(m_threads);
 
     std::vector<OptThread*> threads;
-    for (const auto& mol : molecules) {
-        OptThread* t = new OptThread(mol, local_param);
+    threads.reserve(total);
+    for (int i = 0; i < total; ++i) {
+        OptThread* t = new OptThread(molecules[i], local_param);
         pool.addThread(t);
         threads.push_back(t);
     }
 
-    CurcumaLogger::result_fmt("Optimizing {} structures using {} threads", total, m_threads);
+    CurcumaLogger::result_fmt("Optimizing {} structures using {} thread(s)", total, m_threads);
     pool.StartAndWait();
-    CurcumaLogger::result("Optimization batch complete.");
 
-    for (auto* t : threads) {
-        if (t->result().success) {
-            t->result().final_molecule.appendXYZFile(output_file);
-        }
-        delete t;
+    for (int i = 0; i < static_cast<int>(threads.size()); ++i) {
+        write_result(threads[i]->result(), molecules[i], i);
+        delete threads[i];
     }
 
+    CurcumaLogger::result_fmt("Optimization batch complete: {}/{} structures written to {}", written, total, output_file);
     return basename;
 }
 
