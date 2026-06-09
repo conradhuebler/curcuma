@@ -1,6 +1,6 @@
 /*
  * <Conformational Search based on Molecular Dynamics>
- * Copyright (C) 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2022 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -235,6 +235,14 @@ void ConfSearch::start()
     // Hot cycles override it with rattle_hot_mode; cooler cycles restore this baseline.
     nlohmann::json rattle_base = md.contains("rattle") ? md["rattle"] : nlohmann::json(0);
 
+    // Save a copy of the initial optimised input structures as fallback seeds.
+    // When a temperature cycle leaves m_in_stack empty (all structures topo/energy-rejected),
+    // subsequent cycles would run 0 MD steps and re-process the same stale bias pool forever.
+    // The fallback restores the initial seeds so lower-T cycles still get a fresh start.
+    std::vector<Molecule*> initial_seeds;
+    for (auto* mol : m_in_stack)
+        initial_seeds.push_back(new Molecule(*mol));
+
     int temperature_cycle = 0;
     for (m_currentT = m_startT; m_currentT >= m_endT; m_currentT -= m_deltaT) {
         temperature_cycle++;
@@ -272,9 +280,11 @@ void ConfSearch::start()
         }
 
         // Cross-temperature: log pool statistics before MD phase
+        const bool in_stack_empty_before_md = m_in_stack.empty();
+        const std::size_t bias_pool_size_before_md = m_bias_pool ? m_bias_pool->biasStructureCount() : 0;
         if (m_bias_pool) {
             CurcumaLogger::result_fmt("ConfSearch: Bias pool has {} structures before T={}K cycle",
-                m_bias_pool->biasStructureCount(), m_currentT);
+                bias_pool_size_before_md, m_currentT);
         }
 
 #ifdef CURCUMA_DEBUG
@@ -308,41 +318,56 @@ void ConfSearch::start()
         }
 
         CurcumaLogger::result("ConfSearch: === Phase 2: Geometry Optimisation of Bias Structures ===");
-        nlohmann::json opt;
-        opt["method"] = m_method;
-        // Single-threaded per optimization when ConfSearch parallelizes externally
-        opt["threads"] = (m_threads > 1) ? 1 : m_threads;
-        if (md.contains("gpu") && !md["gpu"].is_null())
-            opt["gpu"] = md["gpu"];
-        // Bias structures are the primary conformers discovered by RMSD-MTD.
-        // MD unique snapshots (confsearch.unique.xyz) are secondary and not used here.
-        PerformOptimisation(p + ".bias", opt);
-        CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after optimisation (see cycle top)
-        int opt_count = 0;
-        {
-            FileIterator opt_file(p + ".bias.opt.xyz");
-            while (!opt_file.AtEnd()) { opt_file.Next(); opt_count++; }
+        // Skip Phase 2 when no new MD ran (empty in_stack going in) and the bias pool
+        // did not grow. Re-optimising the same stale bias structures would produce the
+        // same topo/energy rejections and waste the entire remaining temperature schedule.
+        const std::size_t bias_pool_size_after_md = m_bias_pool ? m_bias_pool->biasStructureCount() : 0;
+        const bool no_new_bias_structures = in_stack_empty_before_md
+            && (bias_pool_size_after_md == bias_pool_size_before_md);
+        if (no_new_bias_structures) {
+            CurcumaLogger::warn_fmt("ConfSearch: T={}K -- no new MD runs and bias pool unchanged -- skipping Phase 2/3.",
+                m_currentT);
+        } else {
+            nlohmann::json opt;
+            opt["method"] = m_method;
+            // Single-threaded per optimization when ConfSearch parallelizes externally
+            opt["threads"] = (m_threads > 1) ? 1 : m_threads;
+            if (md.contains("gpu") && !md["gpu"].is_null())
+                opt["gpu"] = md["gpu"];
+            // Bias structures are the primary conformers discovered by RMSD-MTD.
+            // MD unique snapshots (confsearch.unique.xyz) are secondary and not used here.
+            PerformOptimisation(p + ".bias", opt);
+            CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after optimisation (see cycle top)
+            int opt_count = 0;
+            {
+                FileIterator opt_file(p + ".bias.opt.xyz");
+                while (!opt_file.AtEnd()) { opt_file.Next(); opt_count++; }
+            }
+            CurcumaLogger::result_fmt("ConfSearch: Optimisation complete. {} bias structures optimised.", opt_count);
         }
-        CurcumaLogger::result_fmt("ConfSearch: Optimisation complete. {} bias structures optimised.", opt_count);
 
         CurcumaLogger::result("ConfSearch: === Phase 3: RMSD-Based Conformer Filtering ===");
-        nlohmann::json scan = ConfSearchJson;
-        scan["rmsdmethod"] = "inertia";
-        scan["fewerFile"] = true;
-        // Single-threaded per ConfScan when ConfSearch parallelizes externally
-        scan["threads"] = (m_threads > 1) ? 1 : m_threads;
-        scan["energy_method"] = m_method;
-        scan["max_energy"] = m_energy_window;
-        if (md.contains("gpu") && !md["gpu"].is_null())
-            scan["gpu"] = md["gpu"];
-        PerformFilter(p + ".bias", scan);
-        CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after ConfScan filter (see cycle top)
         int rmsd_count = 0;
-        {
-            FileIterator rmsd_file(p + ".bias.opt.accepted.xyz");
-            while (!rmsd_file.AtEnd()) { rmsd_file.Next(); rmsd_count++; }
+        if (no_new_bias_structures) {
+            CurcumaLogger::warn_fmt("ConfSearch: T={}K -- skipping Phase 3 (no new structures).", m_currentT);
+        } else {
+            nlohmann::json scan = ConfSearchJson;
+            scan["rmsdmethod"] = "inertia";
+            scan["fewerFile"] = true;
+            // Single-threaded per ConfScan when ConfSearch parallelizes externally
+            scan["threads"] = (m_threads > 1) ? 1 : m_threads;
+            scan["energy_method"] = m_method;
+            scan["max_energy"] = m_energy_window;
+            if (md.contains("gpu") && !md["gpu"].is_null())
+                scan["gpu"] = md["gpu"];
+            PerformFilter(p + ".bias", scan);
+            CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after ConfScan filter (see cycle top)
+            {
+                FileIterator rmsd_file(p + ".bias.opt.accepted.xyz");
+                while (!rmsd_file.AtEnd()) { rmsd_file.Next(); rmsd_count++; }
+            }
+            CurcumaLogger::result_fmt("ConfSearch: RMSD filtering complete. {} structures accepted.", rmsd_count);
         }
-        CurcumaLogger::result_fmt("ConfSearch: RMSD filtering complete. {} structures accepted.", rmsd_count);
 
         // Claude Generated (Jun 2026): experimental adaptive calibration (Phase C). Learns the MTD
         // hill width (cluster) and/or per-atom RMSF weights (weighted) from this cycle's opt+filter
@@ -358,17 +383,46 @@ void ConfSearch::start()
         double lowest_energy = std::numeric_limits<double>::infinity();
         int accepted = 0, rejected_topo = 0, rejected_energy = 0;
         std::vector<Molecule*> candidates;
-        FileIterator file(p + ".bias.opt.accepted.xyz");
-        while (!file.AtEnd()) {
-            Molecule* mol = new Molecule(file.Next());
-            // Float-safe topology check: any single broken/formed bond changes distances by >> 1e-4 A
-            if ((m_topo_matrix - mol->DistanceMatrix().second).cwiseAbs().sum() > 1e-4) {
-                rejected_topo++;
-                delete mol;
-                continue;
+        if (!no_new_bias_structures) {
+            FileIterator file(p + ".bias.opt.accepted.xyz");
+            while (!file.AtEnd()) {
+                Molecule* mol = new Molecule(file.Next());
+                // Topology check: compare bond connectivity (0/1 matrix) against reference.
+                // A broken or formed bond changes >=2 entries by 1.0 -> sum >> 1e-4.
+                // Log the first mismatched pair to help distinguish GFN-FF artefacts from
+                // genuine chemical reactions (proton transfer, ring opening, etc.).
+                auto topo_cur = mol->DistanceMatrix().second;
+                double topo_diff_sum = (m_topo_matrix - topo_cur).cwiseAbs().sum();
+                if (topo_diff_sum > 1e-4) {
+                    if (rejected_topo == 0) {
+                        // Find first differing bond for diagnostic output
+                        int natoms = mol->AtomCount();
+                        for (int ii = 0; ii < natoms; ++ii) {
+                            bool found = false;
+                            for (int jj = ii + 1; jj < natoms; ++jj) {
+                                if (std::abs(m_topo_matrix(ii, jj) - topo_cur(ii, jj)) > 0.5) {
+                                    CurcumaLogger::warn_fmt(
+                                        "ConfSearch: topo reject (first diff): atoms {}-{} ref_bond={} cur_bond={} "
+                                        "(energy {:.0f} kJ/mol above ref; total bond changes: {:.0f})",
+                                        ii, jj,
+                                        static_cast<int>(std::round(m_topo_matrix(ii, jj))),
+                                        static_cast<int>(std::round(topo_cur(ii, jj))),
+                                        (mol->Energy() - initial_energy) * 2625.5,
+                                        topo_diff_sum / 2.0);
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (found) break;
+                        }
+                    }
+                    rejected_topo++;
+                    delete mol;
+                    continue;
+                }
+                candidates.push_back(mol);
+                lowest_energy = std::min(lowest_energy, mol->Energy());
             }
-            candidates.push_back(mol);
-            lowest_energy = std::min(lowest_energy, mol->Energy());
         }
         // Update the running global minimum across all cycles (anchor for seed selection).
         if (lowest_energy < m_global_min)
@@ -439,26 +493,50 @@ void ConfSearch::start()
 
         CurcumaLogger::result_fmt("ConfSearch: T={}K cycle complete -- {} accepted, {} rejected (topo), {} rejected (energy), {} in next cycle",
             m_currentT, accepted, rejected_topo, rejected_energy, static_cast<int>(m_in_stack.size()));
+
+        // Fallback: if Phase 4 left m_in_stack empty, restore the initial optimised seeds.
+        // Without this, all remaining temperature cycles run 0 MD steps and repeatedly
+        // re-optimise the same stale bias pool, wasting time and producing the same rejections.
+        if (m_in_stack.empty() && !initial_seeds.empty()) {
+            CurcumaLogger::warn_fmt(
+                "ConfSearch: T={}K produced no valid seeds -- falling back to initial {} input structure(s) for next cycle.",
+                m_currentT, static_cast<int>(initial_seeds.size()));
+            for (auto* mol : initial_seeds)
+                m_in_stack.push_back(new Molecule(*mol));
+        }
+
         CurcumaLogger::header("=== End Temperature Cycle T = " + std::to_string(static_cast<int>(m_currentT)) + " K ===");
     }  // end temperature loop
 
+    for (auto* mol : initial_seeds) delete mol;
+    initial_seeds.clear();
+
     // Final deduplication pass over all conformers collected across all temperature cycles.
     CurcumaLogger::header("=== ConfSearch: Final Deduplication Pass ===");
+    int total_cumulative = 0;
     {
-        int total_cumulative = 0;
         FileIterator cf(cumulative_file);
         while (!cf.AtEnd()) { cf.Next(); total_cumulative++; }
         CurcumaLogger::result_fmt("ConfSearch: {} structures in cumulative pool before final filter", total_cumulative);
     }
-    nlohmann::json final_scan = ConfSearchJson;
-    final_scan["rmsdmethod"] = "inertia";
-    final_scan["fewerFile"] = true;
-    final_scan["threads"] = m_threads;
-    final_scan["energy_method"] = m_method;
-    final_scan["max_energy"] = m_energy_window;
-    PerformFilter(p + ".cumulative", final_scan);
-    CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after final ConfScan filter (see temperature loop)
-    CurcumaLogger::success_fmt("ConfSearch: Final result in {}.cumulative.opt.accepted.xyz", p);
+    if (total_cumulative == 0) {
+        CurcumaLogger::warn("ConfSearch: cumulative pool is empty -- all structures were rejected by topology or energy filters.");
+        CurcumaLogger::warn("ConfSearch: Check the topo-reject diagnostics above. Common causes: reactive conditions (high T + strong bias),");
+        CurcumaLogger::warn("ConfSearch: GFN-FF bond-length sensitivity near covalent-radii cutoffs, or mismatched input topology.");
+        // Write an empty accepted file so downstream tools don't crash on a missing path.
+        std::ofstream(p + ".cumulative.opt.accepted.xyz").close();
+        CurcumaLogger::warn_fmt("ConfSearch: Empty result written to {}.cumulative.opt.accepted.xyz", p);
+    } else {
+        nlohmann::json final_scan = ConfSearchJson;
+        final_scan["rmsdmethod"] = "inertia";
+        final_scan["fewerFile"] = true;
+        final_scan["threads"] = m_threads;
+        final_scan["energy_method"] = m_method;
+        final_scan["max_energy"] = m_energy_window;
+        PerformFilter(p + ".cumulative", final_scan);
+        CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after final ConfScan filter (see temperature loop)
+        CurcumaLogger::success_fmt("ConfSearch: Final result in {}.cumulative.opt.accepted.xyz", p);
+    }
 
     // Claude Generated (Apr 2026): Clean up shared bias pool
     delete m_bias_pool;
