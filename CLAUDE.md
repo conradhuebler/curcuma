@@ -462,5 +462,5 @@ ctest -R "cli_rmsd_01" --verbose
 
 4. **`CitationRegistry::cite` thread race (crash)**: `GFNFFComputationalMethod::calculateEnergy` cites on every energy eval; concurrent MD workers (`threads>1`) race the global registry → SIGSEGV/SIGABRT during instability cleanup. Workaround: gfnff multi-run drivers (ConfSearch) use `threads=1`. Fix: make `cite` thread-safe (`std::call_once`) or cite once at init.
 
-5. **ConfSearch Phase A-C**: efficiency/robustness features (RATTLE threshold, topo/Epot abort, seed funnel, opt→bias feedback, permutation-aware + adaptive MTD bias) — roadmap, open TODOs and experimental caveats in [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md).
+5. **ConfSearch Phase A-C**: efficiency/robustness features (RATTLE threshold, topo/Epot abort, seed funnel, opt→bias feedback, permutation-aware + adaptive MTD bias) — roadmap, open TODOs and experimental caveats in [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md). Cross-run bias heating (shared-pool hills `W=k·counter` grow unbounded → `<T>` climbs run-by-run → NaN) is now bounded by `temp_abort`/`rmsd_mtd_max_height`/`rmsd_mtd_freeze_inherited` (roadmap TODO #4 partially addressed; intra-run wide-hill blow-up still open).
 
