@@ -2025,7 +2025,9 @@ bool SimpleMD::step()
         PrintStatus();
         fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Simulation got unstable, exiting!\n");
 
-        std::ofstream restart_file("unstable_curcuma.json");
+        // Per-instance filename (Basename() carries the ConfSearch ".t<id>" suffix) so concurrent
+        // MD workers do not clobber each other's crash dump during simultaneous instability cleanup.
+        std::ofstream restart_file(Basename() + ".unstable.json");
         nlohmann::json restart;
         restart[MethodName()[0]] = WriteRestartInformation();
         restart_file << restart << std::endl;
@@ -2043,7 +2045,7 @@ bool SimpleMD::step()
     }
 
     if (m_writerestart > -1 && m_step % m_writerestart == 0) {
-        std::ofstream restart_file("curcuma_step_" + std::to_string(static_cast<int>(m_step * m_dT)) + ".json");
+        std::ofstream restart_file(Basename() + "_step_" + std::to_string(static_cast<int>(m_step * m_dT)) + ".json");
         json restart;
         restart[MethodName()[0]] = WriteRestartInformation();
         restart_file << restart << std::endl;
@@ -2127,7 +2129,8 @@ void SimpleMD::finalizeRun()
             }
         }
     }
-    std::ofstream restart_file("curcuma_final.json");
+    // Per-instance filename so concurrent MD workers don't overwrite each other's final dump.
+    std::ofstream restart_file(Basename() + ".final.json");
     nlohmann::json restart;
     restart[MethodName()[0]] = WriteRestartInformation();
     restart_file << restart << std::endl;

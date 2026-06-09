@@ -20,26 +20,43 @@ std::mutex CitationRegistry::m_mutex;
 
 void CitationRegistry::cite(const std::string& key, const std::string& parent)
 {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    // Lock-free fast path (Claude Generated, Jun 2026): cite() is called from every
+    // ComputationalMethod::calculateEnergy, i.e. on the hot path — every MD/opt step times every
+    // parallel worker (e.g. GFN-FF fires 9 cites per energy eval). The registry below is already
+    // mutex-safe, but taking the global lock that often needlessly serialises the workers. A
+    // thread_local cache of keys this thread has already registered lets each worker skip the
+    // global mutex after the first sighting, so the lock is taken at most once per (thread, key).
+    // NOTE: CitationRegistry::clear() (testing only; currently unused) does NOT reset this cache —
+    // if clear() is ever used for re-citation, add a generation counter to invalidate the cache.
+    thread_local std::set<std::string> tls_seen;
+    if (tls_seen.count(key)) return;
 
-    // Already cited — silent no-op
-    if (m_seen.count(key)) return;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
 
-    // Look up citation data
-    const Citations::CitationData* data = Citations::lookup(key);
-    if (!data) {
-        CurcumaLogger::warn("CitationRegistry: unknown key '" + key + "'");
-        return;
+        // Already cited by some thread — record locally so this thread skips the lock next time.
+        if (m_seen.count(key)) {
+            tls_seen.insert(key);
+            return;
+        }
+
+        // Look up citation data
+        const Citations::CitationData* data = Citations::lookup(key);
+        if (!data) {
+            CurcumaLogger::warn("CitationRegistry: unknown key '" + key + "'");
+            return; // not cached: an unknown key is a bug worth re-warning if it recurs
+        }
+
+        // Register
+        m_cited_keys.push_back(key);
+        m_seen.insert(key);
+
+        // Track sub-reference relationship
+        if (!parent.empty()) {
+            m_subrefs.push_back({key, parent});
+        }
     }
-
-    // Register
-    m_cited_keys.push_back(key);
-    m_seen.insert(key);
-
-    // Track sub-reference relationship
-    if (!parent.empty()) {
-        m_subrefs.push_back({key, parent});
-    }
+    tls_seen.insert(key);
 
     // Registration is silent; citations are printed once in the end-of-run summary.
     // (Previously logged immediately, but that cluttered the output during calculations.)

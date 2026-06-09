@@ -37,14 +37,25 @@ level on destruction, and stop the energy-setup path from leaking 0. Once done: 
 report (and the ConfSearch re-asserts) back to `CurcumaLogger`, gate per-bond lists at verbosity ≥ 3,
 and drop the local patches. **Anchor:** `FIXME` in `SimpleMD::InitConstrainedBonds` (simplemd.cpp).
 
-### 2. FIXME: `CitationRegistry::cite` thread race (crash at threads>1)
-`GFNFFComputationalMethod::calculateEnergy` calls `CitationRegistry::cite` on every energy
-evaluation; under ConfSearch `threads>1` several MD workers call it concurrently → data race in the
-global registry → SIGSEGV (in `cite`) / SIGABRT (malloc), triggered during the NaN/instability
-cleanup. Reproduced: triose `threads=4 startT 600`; `threads=1/2` ok. **Workaround:** run ConfSearch
-MD with `threads=1` and use the 16 cores via parallel processes. **Fix options:** (a) make
-`CitationRegistry::cite` thread-safe (`std::call_once`/mutex); (b) cite once at method init, not in
-the hot `calculateEnergy` path.
+### 2. ~~`CitationRegistry::cite` thread race (crash at threads>1)~~ — RESOLVED (Jun 2026)
+Original report: `GFNFFComputationalMethod::calculateEnergy` cites on every energy eval; under
+ConfSearch `threads>1` several MD workers call it concurrently → SIGSEGV/SIGABRT during the
+NaN/instability cleanup (repro: triose `threads=4 startT 600`).
+**Resolution:** (a) `CitationRegistry::cite` was already fully `std::mutex`-guarded on every path
+(since `9721f55`) and `Citations::database()` is a thread-safe function-local `static`, so the
+registry race itself was gone; (b) a `thread_local` fast path now skips the global lock after a
+thread's first sighting of a key, removing the per-step lock traffic on the hot path; (c) the
+concurrent crash dumps got per-instance filenames (`<basename>.unstable.json`/`.final.json`/
+`_step_*.json`) so workers no longer clobber a shared `unstable_curcuma.json`. The residual
+`threads=4 startT 600` blow-up was the **bias-heating runaway** (issue #4 above / TODO #4), now
+bounded. **Verified:** triose `threads=4 startT 600` runs to completion (exit 0) even with 4
+concurrent instabilities (4 distinct `*.unstable.json`, no crash); with `-temp_abort`/
+`-rmsd_mtd_max_height` it is fully clean and prints one citation summary. ConfSearch MD may now use
+`threads>1` with gfnff when the bias is bounded. (`confsearch.cpp:111` still collapses the inner MD
+to 1 thread when ConfSearch parallelises *cycles* — that is to avoid nested thread pools, unrelated.)
+The shared base `curcuma_restart.json` (`CurcumaMethod::TriggerWriteRestart`) is still a single name
+across instances, but it is a benign last-writer-wins dump (no crash; ConfSearch does not use MD
+restart). 🤖 AI-generated, ⚙️ machine-tested only.
 
 ### 3. Phase C validation (experimental)
 - `cluster`/`weighted` are bounded/guarded but **unvalidated**: the basin-radius and RMSF estimates
