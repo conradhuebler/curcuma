@@ -37,6 +37,7 @@ public:
     CurcumaMethod(const json& defaults, const json& controller, int verbosity); // New verbosity constructor - Claude Generated
     CurcumaMethod()
     {
+        m_saved_global_verbosity = CurcumaLogger::get_verbosity(); // restored in dtor (scoped verbosity)
         m_help = true;
         m_verbosity = 1; // Default: Normal Print
     }
@@ -104,6 +105,11 @@ protected:
     bool m_help = false;
     int m_verbosity = 1; // New verbosity system: 0=Silent, 1=Small, 2=Normal, 3=Informative
     int m_threads = 1; // Number of threads for parallel processing - Claude Generated
+    // Claude Generated (Jun 2026): scoped global verbosity. Captured in the ctor (the parent's
+    // level), restored in the dtor — so a sub-method (SimpleMD/ConfScan/...) created by a parent
+    // (e.g. ConfSearch) restores the parent's level when it is destroyed, instead of leaving the
+    // global CurcumaLogger verbosity clamped to its own. -1 = nothing to restore.
+    int m_saved_global_verbosity = -1;
 
 private:
     /* Lets have this for all modules */

@@ -724,6 +724,14 @@ bool SimpleMD::Initialise()
     m_interface = new EnergyCalculator(m_method, ec_config, Basename());
 
     m_interface->setMolecule(m_molecule.getMolInfo());
+    // Energy-method-setup boundary (Claude Generated, Jun 2026): EnergyCalculator construction +
+    // setMolecule (e.g. GFN-FF parameter generation) leaves the global CurcumaLogger verbosity
+    // clamped to 0 (it captures/restores around an already-clamped level), so the remaining setup
+    // output below — notably the RATTLE report in InitConstrainedBonds — was silently dropped. The
+    // CurcumaMethod base RAII can't help (EnergyCalculator is not a CurcumaMethod), so re-assert our
+    // level here. (A deeper fix would stop the EnergyCalculator setup path leaking 0 in the first
+    // place.)
+    CurcumaLogger::set_verbosity(m_verbosity);
     // Iterative mode: raise SCF display threshold by one level so system verbosity
     // controls output (silent at default=1, visible at -v 2). Claude Generated.
     m_interface->setIterativeMode(true);
@@ -881,41 +889,41 @@ void SimpleMD::InitConstrainedBonds()
     // for is element-labelled (e.g. C5-H12) with the constrained distance, wrapped 5 per line, and a
     // one-line summary gives constrained/total bonds, angles, and the DOF before -> after (delta).
     //
-    // FIXME (verbosity rework, see docs/CONFSEARCH_ROADMAP.md): this uses std::cout instead of
-    // CurcumaLogger because the global logger verbosity is clamped to 0 by the energy-method setup
-    // that runs before InitConstrainedBonds, so a level-gated logger call is silently dropped here
-    // (verified: even -verbosity 3 shows nothing via CurcumaLogger). The proper fix is the planned
-    // verbosity-ownership rework (sub-objects must save/restore the global level); once that lands,
-    // move this report to CurcumaLogger::result_fmt and gate the per-bond list at verbosity >= 3.
+    // Verbosity is now scoped (CurcumaMethod base RAII + thread-pool boundary restores), and the
+    // energy-method setup (gfnff param-gen) restores the level after itself, so the global level is
+    // correct here again — this report uses CurcumaLogger. The summary shows at verbosity >= 1; the
+    // element-labelled per-bond/angle lists are gated at verbosity >= 3. Claude Generated (Jun 2026).
     if (m_rattle) {
-        std::cout << fmt::format("\nRATTLE: {} constraints | {} of {} 1-2 bonds{} + {} 1-3 angles | DOF {} -> {} ({:+d})\n",
+        CurcumaLogger::result_fmt("RATTLE: {} constraints | {} of {} 1-2 bonds{} + {} 1-3 angles | DOF {} -> {} ({:+d})",
             n_constraints, m_bond_constrained.size(), total_bonds, m_rattle == 2 ? " (X-H only)" : "",
             m_bond_13_constrained.size(), total_dof, m_dof, m_dof - total_dof);
-        if (!m_bond_constrained.empty()) {
-            std::cout << "  1-2:";
-            int col = 0;
-            for (const auto& b : m_bond_constrained) {
-                int i = b.first.first, j = b.first.second;
-                std::cout << fmt::format(" {}{}-{}{}({:.3f})",
-                    Elements::ElementAbbr[m_molecule.Atom(i).first], i,
-                    Elements::ElementAbbr[m_molecule.Atom(j).first], j, std::sqrt(b.second));
-                if (++col % 5 == 0 && col < static_cast<int>(m_bond_constrained.size()))
-                    std::cout << "\n     ";
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            if (!m_bond_constrained.empty()) {
+                std::string line = "  1-2:";
+                int col = 0;
+                for (const auto& b : m_bond_constrained) {
+                    int i = b.first.first, j = b.first.second;
+                    line += fmt::format(" {}{}-{}{}({:.3f})",
+                        Elements::ElementAbbr[m_molecule.Atom(i).first], i,
+                        Elements::ElementAbbr[m_molecule.Atom(j).first], j, std::sqrt(b.second));
+                    if (++col % 5 == 0 && col < static_cast<int>(m_bond_constrained.size()))
+                        line += "\n     ";
+                }
+                CurcumaLogger::result(line);
             }
-            std::cout << "\n";
-        }
-        if (!m_bond_13_constrained.empty()) {
-            std::cout << "  1-3:";
-            int col = 0;
-            for (const auto& b : m_bond_13_constrained) {
-                std::cout << fmt::format(" {}-{}({:.3f})", b.first.first, b.first.second, std::sqrt(b.second));
-                if (++col % 6 == 0 && col < static_cast<int>(m_bond_13_constrained.size()))
-                    std::cout << "\n     ";
+            if (!m_bond_13_constrained.empty()) {
+                std::string line = "  1-3:";
+                int col = 0;
+                for (const auto& b : m_bond_13_constrained) {
+                    line += fmt::format(" {}-{}({:.3f})", b.first.first, b.first.second, std::sqrt(b.second));
+                    if (++col % 6 == 0 && col < static_cast<int>(m_bond_13_constrained.size()))
+                        line += "\n     ";
+                }
+                CurcumaLogger::result(line);
             }
-            std::cout << "\n";
         }
     } else {
-        std::cout << fmt::format("{} degrees of freedom (no constraints)\n", m_dof);
+        CurcumaLogger::result_fmt("{} degrees of freedom (no constraints)", m_dof);
     }
 }
 

@@ -213,7 +213,6 @@ void ConfSearch::start()
         if (md.contains("gpu") && !md["gpu"].is_null())
             opt_init["gpu"] = md["gpu"];
         PerformOptimisation(p + ".input", opt_init);
-        CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after initial optimisation (see temperature loop)
 
         for (auto* mol : m_in_stack) delete mol;
         m_in_stack.clear();
@@ -261,11 +260,8 @@ void ConfSearch::start()
     int temperature_cycle = 0;
     for (m_currentT = m_startT; m_currentT >= m_endT; m_currentT -= m_deltaT) {
         temperature_cycle++;
-        // Claude Generated (Jun 2026): sub-methods (initial Opt, per-cycle Opt/ConfScan/MD)
-        // drive the global CurcumaLogger verbosity down to their own level and do not restore
-        // it, so ConfSearch's per-cycle progress would be invisible. Re-assert our level here
-        // and after each sub-phase below so the cycle logs are actually shown.
-        CurcumaLogger::set_verbosity(m_verbosity);
+        // Verbosity is scoped by the CurcumaMethod base (ctor captures, dtor restores), so each
+        // sub-phase below (Opt/MD/ConfScan) restores this level on its own — no re-assert needed.
         CurcumaLogger::header("=== ConfSearch Temperature Cycle " + std::to_string(temperature_cycle)
             + " / " + std::to_string(static_cast<int>((m_startT - m_endT) / m_deltaT) + 1)
             + " : T = " + std::to_string(static_cast<int>(m_currentT)) + " K ===");
@@ -317,7 +313,6 @@ void ConfSearch::start()
                 static_cast<int>(m_permutation_cache.size()));
         }
         PerformMolecularDynamics(m_in_stack, md);
-        CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after MD sub-instances (see cycle top)
 
         // Cross-temperature: log pool statistics after MD phase and prune
         if (m_bias_pool) {
@@ -352,7 +347,6 @@ void ConfSearch::start()
             // Bias structures are the primary conformers discovered by RMSD-MTD.
             // MD unique snapshots (confsearch.unique.xyz) are secondary and not used here.
             PerformOptimisation(p + ".bias", opt);
-            CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after optimisation (see cycle top)
             int opt_count = 0;
             {
                 FileIterator opt_file(p + ".bias.opt.xyz");
@@ -376,7 +370,6 @@ void ConfSearch::start()
             if (md.contains("gpu") && !md["gpu"].is_null())
                 scan["gpu"] = md["gpu"];
             PerformFilter(p + ".bias", scan);
-            CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after ConfScan filter (see cycle top)
             {
                 FileIterator rmsd_file(p + ".bias.opt.accepted.xyz");
                 while (!rmsd_file.AtEnd()) { rmsd_file.Next(); rmsd_count++; }
@@ -389,7 +382,6 @@ void ConfSearch::start()
         // clustering and applies them to the NEXT cycle's MD. No-op for the default off/global.
         if (m_bias_calibration == "cluster" || m_bias_scale_mode == "weighted") {
             CalibrateBias(p, md);
-            CurcumaLogger::set_verbosity(m_verbosity);
         }
 
         CurcumaLogger::result("ConfSearch: === Phase 4: Energy Window and Topology Filter ===");
@@ -549,7 +541,6 @@ void ConfSearch::start()
         final_scan["energy_method"] = m_method;
         final_scan["max_energy"] = m_energy_window;
         PerformFilter(p + ".cumulative", final_scan);
-        CurcumaLogger::set_verbosity(m_verbosity);  // re-assert after final ConfScan filter (see temperature loop)
         CurcumaLogger::success_fmt("ConfSearch: Final result in {}.cumulative.opt.accepted.xyz", p);
     }
 
@@ -613,6 +604,13 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
     }
 
     delete pool;
+
+    // Thread-pool boundary (Claude Generated, Jun 2026): the MD workers run and are destroyed on
+    // CxxThreadPool worker threads, where the global CurcumaLogger verbosity (a shared static) is
+    // left unreliable (e.g. clamped to 0 by an energy-eval on a worker) — the CurcumaMethod base
+    // RAII only restores the level on the thread that owns the object, not this main thread. So the
+    // pool-owning helper restores the orchestrator's level here, before returning to start().
+    CurcumaLogger::set_verbosity(m_verbosity);
 }
 
 std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann::json& parameter)
@@ -688,6 +686,9 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
     }
 
     CurcumaLogger::result_fmt("Optimization batch complete: {}/{} structures written to {}", written, total, output_file);
+    // Thread-pool boundary: restore the orchestrator's verbosity (workers leave the shared-static
+    // CurcumaLogger level unreliable). See the matching note in PerformMolecularDynamics.
+    CurcumaLogger::set_verbosity(m_verbosity);
     return basename;
 }
 

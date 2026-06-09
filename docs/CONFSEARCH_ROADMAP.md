@@ -23,19 +23,39 @@ All features below are 🤖 AI-generated, ⚙️ machine-tested only — **human
 
 ## Open TODOs / Roadmap
 
-### 1. Verbosity ownership rework (BIG, cross-cutting)
+### 1. Verbosity ownership rework — LARGELY RESOLVED (Jun 2026)
 **Problem:** the global `CurcumaLogger` verbosity is mutable shared state. Every `CurcumaMethod`
-sub-object (`ConfScan`, `SimpleMD`, the Opt drivers) sets it to its own level in its constructor
-and never restores it; `OptimizerDriver::Optimize` and the energy-method setup clamp it to 0. Net
-effect: after the first sub-call the parent's level is gone, so ConfSearch's per-cycle logs were
-invisible at default verbosity, and `SimpleMD::InitConstrainedBonds` had to fall back to `std::cout`
-(its `CurcumaLogger` calls were silently dropped even at `-verbosity 3`).
-**Patched locally** (not architecturally): RAII restore in `OptimizerDriver::Optimize`; ConfSearch
-re-asserts `m_verbosity` after each sub-phase. **Proper fix:** make verbosity scoped — e.g. a RAII
-guard in the `CurcumaMethod` base (save in ctor, restore in dtor) so a child restores the parent's
-level on destruction, and stop the energy-setup path from leaking 0. Once done: move the RATTLE
-report (and the ConfSearch re-asserts) back to `CurcumaLogger`, gate per-bond lists at verbosity ≥ 3,
-and drop the local patches. **Anchor:** `FIXME` in `SimpleMD::InitConstrainedBonds` (simplemd.cpp).
+sub-object set it to its own level in its ctor and never restored it; the optimizer + energy-method
+setup clamp it to 0. After the first sub-call the parent's level was gone, so ConfSearch's per-cycle
+logs were invisible and `SimpleMD::InitConstrainedBonds` had to use `std::cout`.
+
+**What was done:**
+- **Base RAII** in `CurcumaMethod` (ctor captures the parent's global level, dtor restores it). This
+  scopes the level for all standalone commands and same-thread nesting (e.g. ConfSearch's main-thread
+  `ConfScan` filter restores the ConfSearch level on its own).
+- **Thread-pool boundary:** the global verbosity is a non-thread-safe shared static; the MD and
+  batch-opt phases run/destroy their sub-objects on `CxxThreadPool` worker threads, where the base
+  RAII restore happens on the *worker* thread and the static is left clamped (verified: 1 worker →
+  level intact, 2 workers → left at 0). So the pool-owning helpers `ConfSearch::PerformMolecularDynamics`
+  and `PerformOptimisation` re-assert `m_verbosity` on the main thread before returning. The 7
+  per-phase `set_verbosity` re-asserts in `ConfSearch::start()` were removed (base RAII + these two
+  helper-boundary restores cover them).
+- **Energy-setup boundary:** `EnergyCalculator` construction + `setMolecule` (GFN-FF param-gen) still
+  leaves the global clamped to 0, so `SimpleMD::Initialise` re-asserts `m_verbosity` right after the
+  energy-method setup; the `InitConstrainedBonds` RATTLE report is now on `CurcumaLogger`
+  (summary ≥ 1, per-bond/angle list ≥ 3, and correctly silent at 0 — the old `std::cout` leaked even
+  in silent mode).
+
+**Verified:** ConfSearch per-cycle logs survive both temperature cycles and multi-worker MD without
+the re-asserts; the RATTLE report shows at `-v 3` (summary at `-v 1`), hidden at `-v 0`.
+
+**Remaining caveat (NOT fixed, out of scope):** the verbosity is still a single shared static, so a
+*truly parallel* ConfSearch (`activeThreadCount > 1`) can transiently race the level across workers
+(cosmetic — workers may briefly log at the wrong level mid-run; the main-thread state is restored at
+the pool boundary). A fully clean fix would make the verbosity `thread_local`, but that breaks the
+main→worker level propagation, so it is deferred. The two helper-boundary + one energy-setup
+re-asserts are the residual "local patches" — kept deliberately, with comments, because the shared
+static cannot be cleanly scoped across threads.
 
 ### 2. ~~`CitationRegistry::cite` thread race (crash at threads>1)~~ — RESOLVED (Jun 2026)
 Original report: `GFNFFComputationalMethod::calculateEnergy` cites on every energy eval; under
