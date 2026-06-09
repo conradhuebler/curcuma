@@ -95,15 +95,24 @@ the COLVAR energy, not the force. So each run inherits a taller, non-conservativ
 out-paces the thermostat → `<T>` climbs run-by-run until a NaN blow-up (baseline triose: 552→596
 →654→explode).
 
-**Implemented (opt-in, default off → behaviour-neutral):**
-- `rmsd_mtd_max_height` (Int, 0=unbounded): cap the counter in the force, `W_i = k·min(counter_i,
-  cap)`. Strongest bound (triose cap=3 holds `<T>`~500–525 K).
-- `rmsd_mtd_freeze_inherited` (Bool): freeze the heights of structures present at a run's start
-  (snapshot in `prepareRun()`); only this run's own deposits grow (and inherited ones are not
-  bumped). Bounds the cross-run escalation while keeping geometry sharing.
-- `temp_abort` + `temp_abort_factor`(1.5) + `temp_abort_delta`(300 K): abort an MD run when the
-  running-mean `<T>` runs away from the target (mirrors `epot_abort`; either threshold trips,
-  `<=0` disables one). Catches the runaway before the NaN.
+**Implemented controls:**
+- `rmsd_mtd_freeze_inherited` (Bool) — **ON by default for ConfSearch**: freeze the heights of
+  structures present at a run's start (snapshot in `prepareRun()`); only this run's own deposits grow
+  (and inherited ones are not bumped). Bounds the cross-run escalation while keeping geometry sharing.
+- `temp_abort` + `temp_abort_factor`(1.5) + `temp_abort_delta`(300 K) — **ON by default for
+  ConfSearch**: abort an MD run when the running-mean `<T>` runs away from the target (mirrors
+  `epot_abort`; either threshold trips, `<=0` disables one). Safety net that catches a runaway run.
+- `rmsd_mtd_max_height` (Int, 0=unbounded) — opt-in: cap the counter in the force,
+  `W_i = k·min(counter_i, cap)`. Tightest temperature (triose cap=3 holds `<T>`~500–525 K) but
+  caps exploration, so it stays off by default.
+
+**Default choice (measured on triose `startT 500→400, repeat 2`):** A=current/none → max⟨T⟩ 2e21 K,
+**4 blow-ups**, 20 conformers; B=`freeze`+`temp_abort` → max⟨T⟩ 984 K, **0 blow-ups**, **42
+conformers**; C=`cap20`+`temp_abort` → 616 K, 0 blow-ups, 25 conformers; D=`temp_abort` only →
+4e10 K, **2 blow-ups**, 5 conformers. `temp_abort` alone is insufficient (sudden single-step NaNs
+still blow up + constant aborting starves exploration); **freeze + temp_abort wins** (no blow-ups,
+best yield), so both are ON by default. The exact `-startT 500` default command now runs with
+0 blow-ups (was 4+ NaN explosions to ~1e63 K).
 
 **Also fixed here (pre-existing latent bug):** `topo_check`/`epot_abort`/`temp_abort`/the new MTD
 bounds are SimpleMD-owned PARAMs, so a flat CLI flag (`-topo_check`, `-temp_abort`, …) is
