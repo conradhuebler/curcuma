@@ -54,10 +54,38 @@ the hot `calculateEnergy` path.
   should also feed ConfScan's metric. Not yet plumbed.
 - `bias_couple_factor`/`bias_energy_tol` defaults are guesses — tune against real benchmarks.
 
-### 4. MD stability with wide hills
+### 4. MD stability with wide hills — PARTIALLY ADDRESSED (Jun 2026)
 Wide `couple`/`cluster` hills + a dense shared pool sum many simultaneous Gaussians → large
 cumulative bias force → possible NaN blow-up at high T (seen at `threads=4`, masked by issue #2).
-Investigate coupling `k` to `alpha`, or capping the total bias force, or well-tempered damping.
+**Root cause for the cross-run heating** (`-startT 500`, "MD temperature climbs with every MD
+run"): the shared pool persists across all runs/cycles, the hill height `W_i = k·counter_i` grows
+on every visit (never capped/reset — `pruneByCounter(1)` removes nothing), and `wtmtd` damps only
+the COLVAR energy, not the force. So each run inherits a taller, non-conservative bias that
+out-paces the thermostat → `<T>` climbs run-by-run until a NaN blow-up (baseline triose: 552→596
+→654→explode).
+
+**Implemented (opt-in, default off → behaviour-neutral):**
+- `rmsd_mtd_max_height` (Int, 0=unbounded): cap the counter in the force, `W_i = k·min(counter_i,
+  cap)`. Strongest bound (triose cap=3 holds `<T>`~500–525 K).
+- `rmsd_mtd_freeze_inherited` (Bool): freeze the heights of structures present at a run's start
+  (snapshot in `prepareRun()`); only this run's own deposits grow (and inherited ones are not
+  bumped). Bounds the cross-run escalation while keeping geometry sharing.
+- `temp_abort` + `temp_abort_factor`(1.5) + `temp_abort_delta`(300 K): abort an MD run when the
+  running-mean `<T>` runs away from the target (mirrors `epot_abort`; either threshold trips,
+  `<=0` disables one). Catches the runaway before the NaN.
+
+**Also fixed here (pre-existing latent bug):** `topo_check`/`epot_abort`/`temp_abort`/the new MTD
+bounds are SimpleMD-owned PARAMs, so a flat CLI flag (`-topo_check`, `-temp_abort`, …) is
+auto-routed to `controller["simplemd"]`, which `ConfSearch` never consumed (it only forwarded its
+own `controller["confsearch"]` members, all left at `false`) → the flags were silently ignored.
+`ConfSearch::start()` now reads each gate from `controller["simplemd"]` (fallback = ConfSearch
+default). The three gate aborts also print via `fmt::print` (visible despite issue #3) instead of
+the swallowed `warn_fmt`.
+
+**Still open:** the *intra-run* blow-up with very wide `couple`/`cluster` hills at high T
+(coupling `k`↔`alpha`, total-force capping, or a true well-tempered force damping) is not yet
+addressed — the caps/abort above bound the cross-run heating and provide a safety net, but a
+single run with an over-wide hill can still spike. 🤖 AI-generated, ⚙️ machine-tested only.
 
 ## Verification anchors
 - Bit-identity of the Phase-B MTD refactor (perms off): byte-identical `.mtd.xyz`/`.bias.xyz` vs the

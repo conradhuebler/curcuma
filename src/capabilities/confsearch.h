@@ -90,6 +90,9 @@ static const nlohmann::json ConfSearchJson{
     { "seed_window_decay", 0.5 }, // per-cycle multiplier for the exp funnel schedule
     { "epot_abort", false }, // opt-in: abort an MD run when the running-mean potential climbs too high
     { "epot_abort_window", 250 }, // kJ/mol above the run's starting energy (must exceed thermal baseline)
+    { "temp_abort", false }, // opt-in: abort an MD run when the running-mean temperature runs away from target
+    { "temp_abort_factor", 1.5 }, // abort if <T> > factor*T (<= 0 disables this threshold)
+    { "temp_abort_delta", 300 }, // abort if <T> > T + delta [K] (<= 0 disables this threshold)
     { "opt_feedback_bias", true }, // deposit optimised minima back into the shared bias pool
     { "opt_feedback_height", 5 }, // hill counter (height = k*counter) assigned to fed-back minima
     { "mtd_permutation", true }, // feed ConfScan's symmetry reorder rules into the RMSD-MTD bias (smooth, sum-over-images)
@@ -97,6 +100,8 @@ static const nlohmann::json ConfSearchJson{
     { "bias_couple_factor", 1.0 }, // couple: hill half-max at factor*rmsd -> alpha = ln2/(factor*rmsd)^2
     { "bias_scale_mode", "global" }, // global | weighted (flexibility/RMSF-weighted RMSD in the MTD bias); experimental
     { "bias_energy_tol", 4.0 }, // kJ/mol: |dE| tolerance when assigning optimised structures to the same minimum
+    { "rmsd_mtd_max_height", 0 }, // cap on the per-structure hill counter in the bias force (0 = unbounded); curbs bias-driven heating
+    { "rmsd_mtd_freeze_inherited", false }, // freeze heights of bias structures inherited at each MD run's start (only new deposits grow)
     { "cleanenergy", false },
     { "wall", "none" }, // can be spheric or rect
     { "wall_type", "logfermi" }, // can be logfermi or harmonic
@@ -215,6 +220,10 @@ private:
     double m_rattle_threshold_temp = 400, m_seed_energy_window = 50, m_seed_window_decay = 0.5, m_epot_abort_window = 250;
     int m_rattle_hot_mode = 2, m_topo_check_interval = 0, m_opt_feedback_height = 5;
     bool m_topo_check = false, m_epot_abort = false, m_opt_feedback_bias = true, m_mtd_permutation = true;
+    // Claude Generated (Jun 2026): temperature runaway abort + bias-height bounds (opt-in, default off)
+    bool m_temp_abort = false, m_freeze_inherited = false;
+    double m_temp_abort_factor = 1.5, m_temp_abort_delta = 300;
+    int m_rmsd_mtd_max_height = 0;
     std::string m_seed_window_schedule = "static";
     std::string m_bias_calibration = "off"; // adaptive MTD width mode: off | couple | cluster
     std::string m_bias_scale_mode = "global"; // global | weighted (RMSF-weighted RMSD)

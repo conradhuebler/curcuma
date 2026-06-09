@@ -115,12 +115,27 @@ void ConfSearch::start()
     md["norestart"] = true;
 
     // Claude Generated (Jun 2026): forward the robustness controls into every MD run.
-    // Both checks self-reference inside SimpleMD (start fragment count / start energy),
-    // so only the enable flags and windows need to be passed; no per-seed data required.
-    md["topo_check"] = m_topo_check;
-    md["topo_check_interval"] = m_topo_check_interval;
-    md["epot_abort"] = m_epot_abort;
-    md["epot_abort_window"] = m_epot_abort_window;
+    // These checks self-reference inside SimpleMD (start fragment count / start energy /
+    // target T / per-run inherited pool), so only the enable flags and windows need to be
+    // forwarded; no per-seed data required.
+    //
+    // IMPORTANT: these are SimpleMD-owned PARAMs, so a flat CLI flag (e.g. -topo_check,
+    // -temp_abort, -rmsd_mtd_freeze_inherited) is routed by the auto-router to
+    // controller["simplemd"], NOT controller["confsearch"]. ConfSearch does not otherwise
+    // consume controller["simplemd"], so we must read the user value from there (falling back
+    // to the ConfSearch default) -- otherwise the flag is silently ignored. The dotted form
+    // -confsearch.<key> still works via the ConfSearch member default.
+    json sd = (m_controller.contains("simplemd") && m_controller["simplemd"].is_object())
+        ? m_controller["simplemd"] : json::object();
+    md["topo_check"] = sd.value("topo_check", m_topo_check);
+    md["topo_check_interval"] = sd.value("topo_check_interval", m_topo_check_interval);
+    md["epot_abort"] = sd.value("epot_abort", m_epot_abort);
+    md["epot_abort_window"] = sd.value("epot_abort_window", m_epot_abort_window);
+    md["temp_abort"] = sd.value("temp_abort", m_temp_abort);
+    md["temp_abort_factor"] = sd.value("temp_abort_factor", m_temp_abort_factor);
+    md["temp_abort_delta"] = sd.value("temp_abort_delta", m_temp_abort_delta);
+    md["rmsd_mtd_max_height"] = sd.value("rmsd_mtd_max_height", m_rmsd_mtd_max_height);
+    md["rmsd_mtd_freeze_inherited"] = sd.value("rmsd_mtd_freeze_inherited", m_freeze_inherited);
 
     // RMSD metadynamics is the default driver for conformational exploration.
     // The SimpleMD default is false, but ConfSearch enables it by default.
@@ -922,6 +937,11 @@ void ConfSearch::LoadControlJson()
     m_seed_window_decay = Json2KeyWord<double>(m_defaults, "seed_window_decay");
     m_epot_abort = Json2KeyWord<bool>(m_defaults, "epot_abort");
     m_epot_abort_window = Json2KeyWord<double>(m_defaults, "epot_abort_window");
+    m_temp_abort = Json2KeyWord<bool>(m_defaults, "temp_abort");
+    m_temp_abort_factor = Json2KeyWord<double>(m_defaults, "temp_abort_factor");
+    m_temp_abort_delta = Json2KeyWord<double>(m_defaults, "temp_abort_delta");
+    m_rmsd_mtd_max_height = Json2KeyWord<int>(m_defaults, "rmsd_mtd_max_height");
+    m_freeze_inherited = Json2KeyWord<bool>(m_defaults, "rmsd_mtd_freeze_inherited");
     m_opt_feedback_bias = Json2KeyWord<bool>(m_defaults, "opt_feedback_bias");
     m_opt_feedback_height = Json2KeyWord<int>(m_defaults, "opt_feedback_height");
     m_mtd_permutation = Json2KeyWord<bool>(m_defaults, "mtd_permutation");

@@ -245,6 +245,8 @@ void SimpleMD::LoadControlJson()
     m_max_rmsd_N = m_config.get<int>("rmsd_mtd_max_gaussians");
     m_rmsd_econv = m_config.get<double>("rmsd_econv", 1e8);  // Not in PARAM block - legacy
     m_rmsd_DT = m_config.get<double>("rmsd_mtd_dt");
+    m_rmsd_mtd_max_height = m_config.get<int>("rmsd_mtd_max_height", 0);  // Claude Generated (Jun 2026): cap on hill height
+    m_freeze_inherited = m_config.get<bool>("rmsd_mtd_freeze_inherited", false);  // Claude Generated (Jun 2026)
     m_wtmtd = m_config.get<bool>("wtmtd", false);  // Not in PARAM block - legacy
     m_rmsd_ref_file = m_config.get<std::string>("rmsd_mtd_ref_file");
     m_rmsd_fix_structure = m_config.get<bool>("rmsd_fix_structure", false);  // Not in PARAM block - legacy
@@ -258,6 +260,9 @@ void SimpleMD::LoadControlJson()
     m_topo_check_interval = m_config.get<int>("topo_check_interval", 0);
     m_epot_abort = m_config.get<bool>("epot_abort", false);
     m_epot_abort_window = m_config.get<double>("epot_abort_window", 250.0);
+    m_temp_abort = m_config.get<bool>("temp_abort", false);
+    m_temp_abort_factor = m_config.get<double>("temp_abort_factor", 1.5);
+    m_temp_abort_delta = m_config.get<double>("temp_abort_delta", 300.0);
 
     // Claude Generated 2025: Output & Restart Parameters
     m_writerestart = m_config.get<int>("write_restart_frequency");
@@ -1705,6 +1710,16 @@ void SimpleMD::prepareRun()
     m_epot_ref = m_Epot;
     m_topo_check_every = (m_topo_check_interval > 0) ? m_topo_check_interval : m_dump;
 
+    // Claude Generated (Jun 2026): when freezing inherited hill heights, record the counters of
+    // every bias structure already in the shared pool at this run's start. Those structures then
+    // contribute at a fixed height for the whole run (and are not bumped by it), so only this run's
+    // own deposits grow -> the cumulative bias force no longer escalates run after run.
+    m_frozen_height.clear();
+    if (m_shared_pool && m_freeze_inherited) {
+        for (const auto& bs : m_shared_pool->snapshot())
+            m_frozen_height[bs.index] = bs.counter;
+    }
+
     // WP-S2 (May 2026): open per-step diagnostics JSONL file
     if (m_md_diagnostics) {
         m_diag_writer = std::make_unique<MDDiagnosticsWriter>(Basename() + ".diag.jsonl");
@@ -1877,10 +1892,31 @@ bool SimpleMD::step()
     // cumulative mean is not dominated by the initial transient.
     if (m_epot_abort && m_step > 100
         && (m_aver_Epot - m_epot_ref) * 2625.5 > m_epot_abort_window) {
-        CurcumaLogger::warn_fmt("MD aborted: <Epot> climbed {:.1f} kJ/mol above start (window {:.1f})",
+        // fmt::print (not CurcumaLogger): abort diagnostics must stay visible even when the
+        // global logger verbosity is clamped to 0 by the energy-setup path (see roadmap issue #3),
+        // mirroring the "Simulation got unstable" message below.
+        fmt::print(fg(fmt::color::orange) | fmt::emphasis::bold,
+            "MD aborted: <Epot> climbed {:.1f} kJ/mol above start (window {:.1f})\n",
             (m_aver_Epot - m_epot_ref) * 2625.5, m_epot_abort_window);
         m_run_aborted = true;
         return false;
+    }
+    // Temperature runaway abort: the shared bias pool's hills (W_i = k*counter_i) grow over
+    // successive runs and pump energy in faster than the thermostat removes it -> the running-mean
+    // temperature climbs above the target. Either an over-factor (relative) or over-delta (absolute)
+    // threshold trips it; a threshold with value <= 0 is disabled. Warm up first so the cumulative
+    // mean is not dominated by the initial transient. Claude Generated (Jun 2026).
+    if (m_temp_abort && m_step > 100) {
+        const bool over_factor = (m_temp_abort_factor > 0 && m_aver_Temp > m_temp_abort_factor * m_T0);
+        const bool over_delta = (m_temp_abort_delta > 0 && m_aver_Temp > m_T0 + m_temp_abort_delta);
+        if (over_factor || over_delta) {
+            // fmt::print: stay visible despite the verbosity clamp (see epot_abort note above).
+            fmt::print(fg(fmt::color::orange) | fmt::emphasis::bold,
+                "MD aborted: <T>={:.0f} K ran away from target {:.0f} K (factor limit {}x, delta limit {} K)\n",
+                m_aver_Temp, m_T0, m_temp_abort_factor, m_temp_abort_delta);
+            m_run_aborted = true;
+            return false;
+        }
     }
     // Topology abort: a growth in the connected-component count means the molecule
     // fragmented. Only the fragment count is used (robust against transient bond-length
@@ -1889,7 +1925,9 @@ bool SimpleMD::step()
         m_molecule.setGeometry(m_eigen_geometry);
         int nfrag = static_cast<int>(m_molecule.GetFragments().size());
         if (nfrag > m_start_fragment_count) {
-            CurcumaLogger::warn_fmt("MD aborted: topology broke (fragments {} -> {})",
+            // fmt::print: stay visible despite the verbosity clamp (see epot_abort note above).
+            fmt::print(fg(fmt::color::orange) | fmt::emphasis::bold,
+                "MD aborted: topology broke (fragments {} -> {})\n",
                 m_start_fragment_count, nfrag);
             m_run_aborted = true;
             return false;
@@ -2699,7 +2737,18 @@ void SimpleMD::ApplyRMSDMTD()
         // V(x) = Sum_i Sum_p W_i * exp(-alpha*RMSD_{i,p}^2) (p over identity + symmetry images),
         // force = exact negative gradient. Well-tempered (opt-in) only feeds current_bias_wt.
         for (const auto& bs : bias_snapshot) {
-            const double height = m_k_rmsd * bs.counter; // W_i = k * counter_i
+            // Effective hill counter: frozen if inherited at run start (only this run's deposits
+            // grow), then capped by rmsd_mtd_max_height. Both default-off -> eff = bs.counter
+            // (legacy W_i = k * counter_i). Claude Generated (Jun 2026).
+            int eff_counter = bs.counter;
+            if (m_freeze_inherited) {
+                auto it = m_frozen_height.find(bs.index);
+                if (it != m_frozen_height.end())
+                    eff_counter = it->second;
+            }
+            if (m_rmsd_mtd_max_height > 0)
+                eff_counter = std::min(eff_counter, m_rmsd_mtd_max_height);
+            const double height = m_k_rmsd * eff_counter; // W_i = k * counter_i
             double expr_sum = 0.0;      // Sum over images: drives deposition/visited bookkeeping
             double rmsd_identity = 0.0; // identity-image RMSD for COLVAR / rmsd_reference
 
@@ -2766,8 +2815,13 @@ void SimpleMD::ApplyRMSDMTD()
             std::vector<std::pair<int, double>> visit_updates;
             visit_updates.reserve(visited.size());
             double wt_inc = m_wtmtd ? exp(-current_bias / (kb_Eh * m_rmsd_DT)) : 0.0;
-            for (int idx : visited)
+            for (int idx : visited) {
+                // When freezing inherited heights, do not bump structures this run inherited:
+                // their height stays fixed so the run's cumulative bias does not escalate.
+                if (m_freeze_inherited && m_frozen_height.count(idx))
+                    continue;
                 visit_updates.emplace_back(idx, wt_inc);
+            }
             m_shared_pool->registerVisits(visit_updates);
         }
 

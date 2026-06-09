@@ -25,6 +25,7 @@
 #include <functional>
 #include <random>
 #include <ratio>
+#include <unordered_map>
 
 #ifdef USE_Plumed
 #include "plumed2/src/wrapper/Plumed.h"
@@ -350,6 +351,9 @@ private:
     bool m_epot_abort = false;           // abort when running-mean potential climbs too high
     double m_epot_abort_window = 250.0;  // kJ/mol above the starting energy
     double m_epot_ref = 0.0;             // bare potential energy at run start (reference)
+    bool m_temp_abort = false;           // abort when running-mean temperature runs away from target
+    double m_temp_abort_factor = 1.5;    // abort if <T> > factor * T0 (<= 0 disables)
+    double m_temp_abort_delta = 300.0;   // abort if <T> > T0 + delta [K] (<= 0 disables)
 
     std::vector<Geometry> m_bias_structures;
     std::vector<BiasStructure> m_biased_structures;
@@ -380,6 +384,9 @@ private:
     double m_rattle_max = 10;
     double m_rattle_min = 1e-4;
     int m_max_rmsd_N = -1;
+    int m_rmsd_mtd_max_height = 0;       // Claude Generated (Jun 2026): cap on counter used in W_i (0 = unbounded)
+    bool m_freeze_inherited = false;     // Claude Generated (Jun 2026): freeze heights of structures inherited at run start
+    std::unordered_map<int, int> m_frozen_height; // index -> frozen counter for inherited bias structures
     int m_mtd_steps = 10;
     int m_rattle = 0;
     int m_colvar_incr = 0;
@@ -532,6 +539,8 @@ private:
     PARAM(rmsd_mtd_ref_file, String, "none", "File with reference structures for RMSD-MTD.", "RMSD-MTD", {"rmsd_ref_file"})
     PARAM(rmsd_mtd_atoms, String, "-1", "Atom indices to use for RMSD calculation.", "RMSD-MTD", {"rmsd_atoms"})
     PARAM(rmsd_mtd_dt, Double, 2000.0, "Well-tempered bias temperature Delta_T (K). Only used when wtmtd=true, and only for the reported well-tempered energy -- it never affects the force or the exploration.", "RMSD-MTD", {"rmsd_DT"})
+    PARAM(rmsd_mtd_max_height, Int, 0, "Cap the per-structure hill counter used in the bias force: W_i = k * min(counter_i, cap). 0 = unbounded (legacy). Stops the shared bias pool from heating the dynamics over many runs (counter_i grows on every visit).", "RMSD-MTD", {})
+    PARAM(rmsd_mtd_freeze_inherited, Bool, false, "Freeze the hill heights of bias structures already present at this MD run's start; only structures deposited during this run gain height. Bounds the cumulative bias force across successive shared-pool runs (geometry sharing is preserved).", "RMSD-MTD", {})
 
     // --- Coarse Graining (CG) Parameters --- Claude Generated (Nov 2025)
     PARAM(cg_write_vtf, Bool, true, "Write VTF trajectory for CG systems.", "CG", {"write_vtf"})
@@ -548,6 +557,9 @@ private:
     PARAM(topo_check_interval, Int, 0, "Steps between topology checks (0 -> use dump_frequency).", "ConfSearch", {})
     PARAM(epot_abort, Bool, false, "Abort the MD run when the running-mean potential energy climbs more than epot_abort_window above the run's starting energy.", "ConfSearch", {})
     PARAM(epot_abort_window, Double, 250.0, "Energy window (kJ/mol) above the starting energy for epot_abort. Must exceed the thermal baseline (~N_dof*kT/2) plus typical barriers.", "ConfSearch", {})
+    PARAM(temp_abort, Bool, false, "Abort the MD run when the running-mean temperature runs away from the target (catches bias-driven heating). Uses temp_abort_factor and/or temp_abort_delta.", "ConfSearch", {})
+    PARAM(temp_abort_factor, Double, 1.5, "Abort when <T> exceeds temp_abort_factor * target T. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
+    PARAM(temp_abort_delta, Double, 300.0, "Abort when <T> exceeds (target T + temp_abort_delta) Kelvin. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
