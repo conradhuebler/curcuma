@@ -65,6 +65,15 @@ capabilities/
 - **Enhanced TDA (dMatrix replacement)**: Complete topological data analysis with TDAEngine
 - **Pairmapper**: Advanced structure matching algorithms
 
+### BMT Output Directory Integration (CurcumaMethod)
+- **Default**: `CurcumaMethod::createBMTDir(keyword)` creates `Basename.Keyword.YYYYMMDD_HHMMSS/` and sets `m_output_dir`
+- **`initializeBMT()`** (main.cpp): Helper that calls `setFile()`, `createBMTDir()`, and registers `-bak` files
+- **`addBakFile()`** / **`processBakFiles()`**: Register and copy files back to CWD after calculation
+- **`outputPath()`**: Route all output through BMT directory when set; returns bare filename when BMT is disabled
+- **Commands using BMT**: md, opt, hessian, qmdfffit, confsearch, confscan, confstat, dock, analysis, rmsd
+- **Standalone BMT**: `BMTUtils::` functions used directly for analysis/rmsd (non-CurcumaMethod handlers)
+- **Status**: 🤖 AI-generated, machine-tested — human production testing pending
+
 ## Development Guidelines
 
 ### Interface Design

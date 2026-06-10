@@ -247,8 +247,8 @@ public:
     }
 */
 
-    inline std::string Optfile() const { return std::string(Basename() + ".opt.xyz"); }
-    inline std::string Trjfile() const { return std::string(Basename() + ".trj.xyz"); }
+    inline std::string Optfile() const { return outputPath(Basename() + ".opt.xyz"); }
+    inline std::string Trjfile() const { return outputPath(Basename() + ".trj.xyz"); }
     void start() override; // TODO make pure virtual and move all main action here
 
     void setSinglePoint(bool sp) { m_singlepoint = sp; }

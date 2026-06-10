@@ -280,7 +280,7 @@ void Docking::PerformDocking()
             for (std::size_t i = 0; i < guest.AtomCount(); ++i) {
                 molecule.addPair(guest.Atom(i));
             }
-            molecule.appendXYZFile("Docking_Failed.xyz");
+            molecule.appendXYZFile(outputPath("Docking_Failed.xyz"));
         }
 
         std::cout << m_anchor_accepted.size() << " stored structures. " << std::endl
@@ -299,9 +299,9 @@ void Docking::PerformDocking()
         ++index;
         std::string name;
         if (!m_NoOpt)
-            name = "Docking_F" + std::to_string(pair.second->GetFragments(frag_scaling).size()) + ".xyz";
+            name = outputPath("Docking_F" + std::to_string(pair.second->GetFragments(frag_scaling).size()) + ".xyz");
         else
-            name = "Docking.xyz";
+            name = outputPath("Docking.xyz");
         pair.second->appendXYZFile(name);
         if (!std::binary_search(m_files.begin(), m_files.end(), name))
             m_files.push_back(name);
@@ -375,7 +375,7 @@ void Docking::OptimiseBatch()
     std::cout << " *** energy threshold " << e0 << " Eh ***" << std::endl;
 
     // Filter singlepoint structures by energy
-    const std::string exclude_energy = "AboveThreshold.xyz";
+    const std::string exclude_energy = outputPath("AboveThreshold.xyz");
     int added = 0, excluded = 0;
     for (const auto& m : m_singlepoint_molecules) {
         if (abs(m.Energy() - e0) * 2625.5 < m_energy_threshold) {
@@ -405,8 +405,8 @@ void Docking::OptimiseBatch()
 void Docking::CollectStructures()
 {
     double frag_scaling = 1.5;
-    const std::string name = "Final_Result.xyz";
-    const std::string excluded = "Excluded_Result.xyz";
+    const std::string name = outputPath("Final_Result.xyz");
+    const std::string excluded = outputPath("Excluded_Result.xyz");
     int added = 0, dropped = 0;
 
     for (const auto& m : m_optimise_molecules) {
