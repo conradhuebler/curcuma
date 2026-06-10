@@ -19,8 +19,10 @@
 
 #pragma once
 
+#ifdef HAVE_BLAS
 #ifndef EIGEN_USE_BLAS
 #define EIGEN_USE_BLAS
+#endif
 #endif
 
 #include <Eigen/Dense>

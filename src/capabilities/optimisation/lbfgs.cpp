@@ -18,8 +18,10 @@
 
 // EIGEN_USE_LAPACKE: enables LAPACK dsyevd inside SelfAdjointEigenSolver.
 // Safe here — this file has no variable named 'I'.
+#ifdef HAVE_LAPACKE
 #ifndef EIGEN_USE_LAPACKE
 #define EIGEN_USE_LAPACKE
+#endif
 #endif
 
 #include "lbfgs.h"

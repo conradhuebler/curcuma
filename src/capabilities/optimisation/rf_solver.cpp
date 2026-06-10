@@ -10,13 +10,17 @@
  * (at your option) any later version.
  */
 
+#ifdef HAVE_BLAS
 #ifndef EIGEN_USE_BLAS
 #define EIGEN_USE_BLAS
 #endif
+#endif
 // EIGEN_USE_LAPACKE: enables LAPACK dsyevd (divide-and-conquer) inside
 // SelfAdjointEigenSolver. Safe here — no variable named 'I' in this file.
+#ifdef HAVE_LAPACKE
 #ifndef EIGEN_USE_LAPACKE
 #define EIGEN_USE_LAPACKE
+#endif
 #endif
 
 #include "rf_solver.h"

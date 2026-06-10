@@ -37,6 +37,7 @@
 #endif
 #include "qm_methods/ulysses_method.h"
 #include "qm_methods/xtb_method.h"
+#include "qm_methods/orca_method.h"
 
 #include <iostream>
 #include <algorithm>
@@ -303,6 +304,25 @@ std::unique_ptr<ComputationalMethod> MethodFactory::createDFTD4(const json& conf
 }
 
 // =================================================================================
+// ORCA Method Creation (runtime availability check)
+// =================================================================================
+
+std::unique_ptr<ComputationalMethod> MethodFactory::createOrca(const std::string& method, const json& config) {
+    if (!hasOrca()) {
+        CurcumaLogger::error("Method '" + method + "' requires ORCA which was not found in PATH");
+        CurcumaLogger::error("Please install ORCA and ensure the 'orca' executable is accessible.");
+        throw MethodCreationException(
+            "Method '" + method + "' unavailable - ORCA executable not found in PATH");
+    }
+    CurcumaLogger::success("Method '" + method + "' resolved to ORCA");
+    return std::make_unique<OrcaMethod>(method, config);
+}
+
+bool MethodFactory::hasOrca() {
+    return OrcaMethod::isAvailable();
+}
+
+// =================================================================================
 // Main Factory Method - Direct if/else dispatch
 // =================================================================================
 
@@ -401,6 +421,11 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
     if (method == "d3") return createDFTD3(config);
     if (method == "d4") return createDFTD4(config);
 
+    // ORCA composite methods and custom input
+    if (method == "hf-3c" || method == "b97-3c" || method == "r2scan-3c" || method == "pbeh-3c" || method == "orca") {
+        return createOrca(method, config);
+    }
+
     // Unknown method - suggest alternatives
     auto available = getAvailableMethods();
     auto suggestions = StringUtils::find_closest_matches(method_name, available, 3, 3);
@@ -457,6 +482,11 @@ std::vector<std::string> MethodFactory::getAvailableMethods() {
     // Dispersion corrections
     if (hasD3()) available.push_back("d3");
     if (hasD4()) available.push_back("d4");
+
+    // ORCA composite methods (runtime check)
+    if (hasOrca()) {
+        available.insert(available.end(), {"hf-3c", "b97-3c", "r2scan-3c", "pbeh-3c", "orca"});
+    }
 
     return available;
 }
@@ -538,6 +568,14 @@ json MethodFactory::getMethodInfo(const std::string& method_name) {
         return info;
     }
 
+    // ORCA methods
+    if (method_name == "hf-3c" || method_name == "b97-3c" || method_name == "r2scan-3c" ||
+        method_name == "pbeh-3c" || method_name == "orca") {
+        info["type"] = "explicit";
+        info["providers"].push_back({{"name", "ORCA"}, {"available", hasOrca()}});
+        return info;
+    }
+
     return info;
 }
 
@@ -559,6 +597,7 @@ void MethodFactory::printAvailableMethods() {
     fmt::print("  - External GFN-FF: {}\n", hasGFNFF() ? "YES" : "NO");
     fmt::print("  - DFT-D3: {}\n", hasD3() ? "YES" : "NO");
     fmt::print("  - DFT-D4: {}\n", hasD4() ? "YES" : "NO");
+    fmt::print("  - ORCA: {}\n", hasOrca() ? "YES" : "NO");
 #ifdef USE_CUDA
     fmt::print("  - CUDA GPU: YES (gfnff -gpu cuda)\n");
 #else
@@ -595,6 +634,16 @@ void MethodFactory::printAvailableMethods() {
     gfnff_providers.push_back("Native+GPU");
 #endif
     fmt::print("{}\n", fmt::format("{}", fmt::join(gfnff_providers, " > ")));
+
+    // ORCA methods
+    if (hasOrca()) {
+        fmt::print("\nORCA Composite Methods (external process):\n");
+        fmt::print("  - hf-3c:    Hartree-Fock with 3c minimal basis\n");
+        fmt::print("  - b97-3c:   B97 with 3c minimal basis\n");
+        fmt::print("  - r2scan-3c: r2SCAN with 3c minimal basis\n");
+        fmt::print("  - pbeh-3c:  PBEh with 3c minimal basis\n");
+        fmt::print("  - orca:     Custom input via -orca_input\n");
+    }
 
     fmt::print("===================================\n");
 }

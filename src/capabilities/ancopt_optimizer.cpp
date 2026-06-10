@@ -15,8 +15,10 @@
 // same pattern used in eeq_solver.cpp. Must be defined before any Eigen header.
 // For nvar~700 the H*v matvec in the Lanczos inner loop dominates the RF step;
 // BLAS GEMV is roughly 5x faster than Eigen's generic path on typical hardware.
+#ifdef HAVE_BLAS
 #ifndef EIGEN_USE_BLAS
 #define EIGEN_USE_BLAS
+#endif
 #endif
 
 #include "ancopt_optimizer.h"

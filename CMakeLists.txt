@@ -327,19 +327,26 @@ if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip)
 endif()
 file(ARCHIVE_EXTRACT INPUT ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip DESTINATION ${PROJECT_SOURCE_DIR}/external)
 
-# Ulysses: fetched via FetchContent (replaces fragile file(DOWNLOAD) with hardcoded hash)
+# Ulysses: fetched via FetchContent.
+# UPDATE_DISCONNECTED prevents the "not a git repository" CI failure when the
+# source tree was already populated as a plain directory (no .git present).
+# GIT_SHALLOW reduces network traffic on first download.
 FetchContent_Declare(ulysses
-    GIT_REPOSITORY https://gitlab.com/siriius/ulysses.git
-    GIT_TAG        main
-    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/ulysses-main
+    GIT_REPOSITORY      https://gitlab.com/siriius/ulysses.git
+    GIT_TAG             main
+    GIT_SHALLOW         TRUE
+    UPDATE_DISCONNECTED TRUE
+    SOURCE_DIR          ${CMAKE_SOURCE_DIR}/external/ulysses-main
 )
 if(USE_ULYSSES)
     FetchContent_MakeAvailable(ulysses)
 else()
-    # Headers always needed (include path at line 160), just populate source tree
-    FetchContent_GetProperties(ulysses POPULATED ulysses_populated)
-    if(NOT ulysses_populated)
-        FetchContent_Populate(ulysses)
+    # Headers needed for the include path; only fetch if not already present.
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/external/ulysses-main/src")
+        FetchContent_GetProperties(ulysses POPULATED ulysses_populated)
+        if(NOT ulysses_populated)
+            FetchContent_Populate(ulysses)
+        endif()
     endif()
 endif()
 
@@ -441,7 +448,10 @@ set(curcuma_core_SRC
         src/tools/general.h
         src/core/energy_calculators/qm_methods/orcainterface.h
         src/core/energy_calculators/qm_methods/orcainterface.cpp
+        src/core/energy_calculators/qm_methods/orca_method.h
+        src/core/energy_calculators/qm_methods/orca_method.cpp
         src/tools/trajectory_writer.cpp
+        src/tools/bmt_utils.cpp
         src/core/imagewriter.cpp
         src/core/parameter_registry.cpp
         src/core/config_manager.cpp
@@ -908,6 +918,7 @@ find_package(BLAS QUIET)
 find_package(LAPACK QUIET)
 if(BLAS_FOUND)
     target_link_libraries(curcuma_core ${BLAS_LIBRARIES})
+    target_compile_definitions(curcuma_core PUBLIC HAVE_BLAS)
     message(STATUS "BLAS linked for curcuma_core")
 endif()
 if(LAPACK_FOUND)
@@ -923,10 +934,13 @@ if(NOT LAPACKE_LIBRARY)
 endif()
 if(LAPACKE_LIBRARY)
     target_link_libraries(curcuma_core ${LAPACKE_LIBRARY})
+    target_compile_definitions(curcuma_core PUBLIC HAVE_LAPACKE)
     # EIGEN_USE_LAPACKE is NOT set globally here — it breaks TUs that use local variables
     # named 'I' (C99 complex macro conflict with LAPACKE headers). Define it per-file instead:
     #   rf_solver.cpp, lbfgs.cpp — both safe (no variable named 'I').
     # See ancopt_optimizer.cpp: renamed Matrix3d I -> inertia to fix the same issue.
+    # Source files guard their EIGEN_USE_LAPACKE with #ifdef HAVE_LAPACKE so the build
+    # works without LAPACKE installed.
     message(STATUS "LAPACKE found: ${LAPACKE_LIBRARY} — linking, EIGEN_USE_LAPACKE applied per-file")
 else()
     message(STATUS "LAPACKE not found — SelfAdjointEigenSolver uses Eigen built-in path")

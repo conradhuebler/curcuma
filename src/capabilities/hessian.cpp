@@ -38,7 +38,7 @@ HessianThread::HessianThread(const json& controller, int i, int j, int xi, int x
     , m_fullnumerical(fullnumerical)
 {
     setAutoDelete(true);
-    m_method = m_controller["method"];
+    m_method = m_controller.value("method", std::string("uff"));
     if (i == j && xi == i && xj == i && i == 0)
         m_schema = [this]() {
             this->Threaded();
@@ -223,7 +223,7 @@ Hessian::Hessian(const std::string& method, const ConfigManager& config, bool si
 {
     UpdateController(config.exportConfig());
     m_controller = MergeJson(m_defaults, config.exportConfig());
-    m_threads = m_controller["threads"];
+    m_threads = m_controller.value("threads", m_threads);
     m_method = method;
     m_scale_functions = [](double eigenvalue_sqrt) -> double {
         return eigenvalue_sqrt * CurcumaUnit::Energy::HARTREE_TO_WAVENUMBER / std::sqrt(CurcumaUnit::Constants::AMU_TO_AU) + 47.349;
@@ -235,7 +235,7 @@ Hessian::Hessian(const ConfigManager& config, bool silent)
 {
     UpdateController(config.exportConfig());
     m_controller = MergeJson(m_defaults, config.exportConfig());
-    m_threads = m_controller["threads"];
+    m_threads = m_controller.value("threads", m_threads);
     m_scale_functions = [](double eigenvalue_sqrt) -> double {
         return eigenvalue_sqrt * CurcumaUnit::Energy::HARTREE_TO_WAVENUMBER / std::sqrt(CurcumaUnit::Constants::AMU_TO_AU) + 47.349;
     };
@@ -246,25 +246,31 @@ Hessian::~Hessian()
 void Hessian::LoadControlJson()
 {
     m_controller = MergeJson(m_defaults, m_controller);
-    m_hess_calc = Json2KeyWord<bool>(m_controller, "hess_calc");
-    m_write_file = Json2KeyWord<std::string>(m_controller, "hess_write_file");
-    m_hess_read = Json2KeyWord<bool>(m_controller, "hess_read");
-    m_read_file = Json2KeyWord<std::string>(m_controller, "hess_read_file");
-    m_read_xyz = Json2KeyWord<std::string>(m_controller, "hess_read_xyz");
 
-    m_write_file = Json2KeyWord<std::string>(m_controller, "hess_write_file");
+    // Use canonical parameter names from ParameterRegistry (not old aliases)
+    // .value() provides safe access with fallback defaults instead of throwing
+    m_hess_calc = m_controller.value("calculate", true);
+    m_hess_read = m_controller.value("read", false);
+    m_write_file = outputPath(m_controller.value("write_file", std::string("hessian.out")));
+    m_read_file = m_controller.value("read_file", std::string("hessian.json"));
+    m_read_xyz = m_controller.value("read_xyz", std::string(""));
+
     if (m_hess_read) {
         m_hess_calc = false;
     }
 
-    m_freq_scale = Json2KeyWord<double>(m_controller, "freq_scale");
-    m_thermo = Json2KeyWord<double>(m_controller, "thermo");
-    m_freq_cutoff = Json2KeyWord<double>(m_controller, "freq_cutoff");
-    m_finite_diff_step = Json2KeyWord<double>(m_controller, "finite_diff_step");
-    m_verbosity = Json2KeyWord<int>(m_controller, "verbosity");
-    m_hess = Json2KeyWord<int>(m_controller, "hess");
-    m_method = Json2KeyWord<std::string>(m_controller, "method");
-    m_threads = m_controller["threads"];
+    m_freq_scale = m_controller.value("freq_scale", 1.0);
+    m_thermo = m_controller.value("thermo", 298.15);
+    m_freq_cutoff = m_controller.value("freq_cutoff", 50.0);
+    m_finite_diff_step = m_controller.value("finite_diff_step", 5e-3);
+    m_verbosity = m_controller.value("verbosity", 1);
+    m_hess = m_controller.value("hess", 1);
+    m_method = m_controller.value("method", std::string("uff"));
+    m_threads = m_controller.value("threads", 1);
+
+    // Ensure method and threads are in m_controller for downstream code (HessianThread, etc.)
+    m_controller["method"] = m_method;
+    m_controller["threads"] = m_threads;
 
     // Initialize CurcumaLogger with verbosity level
     CurcumaLogger::set_verbosity(m_verbosity);

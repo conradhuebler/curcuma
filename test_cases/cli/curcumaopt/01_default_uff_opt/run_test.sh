@@ -20,8 +20,11 @@ run_test() {
     $CURCUMA -opt input.xyz > stdout.log 2> stderr.log
     local exit_code=$?
 
+    # BMT-aware: resolve output file from CWD or BMT directory
+    local output_file=$(find_output_file "input.opt.xyz")
+
     # Note: curcuma may return exit 1 even on success (known bug), so check output file instead
-    assert_curcuma_success "input.opt.xyz" "UFF optimization completed successfully"
+    assert_curcuma_success "$output_file" "UFF optimization completed successfully"
 
     # Check for completion message (optional, since verbosity may be 0)
     if grep -qi "converged\|finished\|complete" stdout.log 2>/dev/null; then
@@ -34,13 +37,16 @@ run_test() {
 }
 
 validate_results() {
+    # BMT-aware: resolve output file
+    local output_file=$(find_output_file "input.opt.xyz")
+
     # Scientific validation: Check optimized energy is physically reasonable
-    if [ ! -f "input.opt.xyz" ]; then
+    if [ -z "$output_file" ] || [ ! -f "$output_file" ]; then
         echo -e "${RED}✗${NC} Cannot validate: input.opt.xyz missing"
         return 1
     fi
 
-    local final_energy=$(extract_energy_from_xyz "input.opt.xyz")
+    local final_energy=$(extract_energy_from_xyz "$output_file")
 
     if [ -z "$final_energy" ]; then
         echo -e "${YELLOW}⚠${NC} Could not extract energy from XYZ comment"

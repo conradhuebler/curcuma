@@ -49,7 +49,7 @@ Casino::Casino(const json& controller, bool silent)
     m_step_size = Json2KeyWord<double>(m_config, "step_size");
     m_output_frequency = Json2KeyWord<int>(m_config, "output_frequency");
     m_energy_frequency = Json2KeyWord<int>(m_config, "energy_frequency");
-    m_output_file = Json2KeyWord<std::string>(m_config, "output_file");
+    m_output_file = outputPath(Json2KeyWord<std::string>(m_config, "output_file"));
     m_move_type = Json2KeyWord<std::string>(m_config, "move_type");
     m_move_strategy = Json2KeyWord<std::string>(m_config, "move_strategy");
     m_acceptance_target = Json2KeyWord<double>(m_config, "acceptance_target");
@@ -439,7 +439,7 @@ void Casino::updateParametersFromConfig()
     m_step_size = Json2KeyWord<double>(m_config, "step_size");
     m_output_frequency = Json2KeyWord<int>(m_config, "output_frequency");
     m_energy_frequency = Json2KeyWord<int>(m_config, "energy_frequency");
-    m_output_file = Json2KeyWord<std::string>(m_config, "output_file");
+    m_output_file = outputPath(Json2KeyWord<std::string>(m_config, "output_file"));
     m_move_type = Json2KeyWord<std::string>(m_config, "move_type");
     m_move_strategy = Json2KeyWord<std::string>(m_config, "move_strategy");
     m_acceptance_target = Json2KeyWord<double>(m_config, "acceptance_target");

@@ -52,7 +52,8 @@ run_test() {
 
     # Check for required output files
     assert_file_exists "stdout.log" "Standard output captured"
-    assert_curcuma_success "caffeine.opt.xyz" "GFN-FF single point completed successfully"
+    # Note: -sp (single point) does not write an output XYZ file; verify via stdout.log
+    assert_string_in_file "Single Point Energy" "stdout.log" "GFN-FF single point completed successfully"
 
     return 0
 }
@@ -76,10 +77,8 @@ extract_energy_components() {
         TOTAL_ENERGY=$(grep "Single Point Energy =" "$log_file" | sed 's/\x1b\[[0-9;]*m//g' | grep -oE '[-+]?[0-9]+\.?[0-9]*([eE][-+]?[0-9]+)?' | head -1)
     fi
 
-    # Fallback: Try XYZ file if stdout extraction failed
-    if [ -z "$TOTAL_ENERGY" ]; then
-        TOTAL_ENERGY=$(extract_energy_from_xyz "caffeine.opt.xyz" 2>/dev/null || echo "NaN")
-    fi
+    # Note: -sp (single point) does not write an output XYZ file
+    # Energy is extracted from stdout.log only; no XYZ fallback
 
     if [ -n "$TOTAL_ENERGY" ] && [ "$TOTAL_ENERGY" != "NaN" ]; then
         echo "Extracted total energy: $TOTAL_ENERGY"
