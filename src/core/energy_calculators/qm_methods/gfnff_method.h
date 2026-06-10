@@ -67,7 +67,6 @@ public:
     json getEnergyDecomposition() const override;
 
     // WP-S2 (May 2026): per-step diagnostics hooks
-    Vector getCN() const override;
     int getHBCount() const override;
     int getXBCount() const override;
 

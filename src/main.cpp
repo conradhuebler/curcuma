@@ -1907,7 +1907,9 @@ int executePolymerBuild(const json& controller, int argc, char** argv)
     }
 
     PolymerBuild builder(controller, false);
+    initializeBMT(&builder, "polymer", "polymerbuild", controller);
     builder.start();
+    builder.processBakFiles();
     return 0;
 }
 

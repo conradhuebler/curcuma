@@ -443,7 +443,7 @@ std::pair<Position, Position> PolymerBuild::optimizeFragmentPlacement(
 
     // Always write trajectory — one file per LM call, one frame per iteration.
     // Claude Generated: helper lambda to render a single XYZ frame
-    std::string traj_filename = fmt::format("{}_lm_{:03d}.xyz", polymer.Name(), step_number);
+    std::string traj_filename = outputPath(fmt::format("{}_lm_{:03d}.xyz", polymer.Name(), step_number));
     std::ofstream traj_file(traj_filename);
 
     Geometry frag_geom_orig = fragment.getGeometry();
@@ -1206,7 +1206,7 @@ int PolymerBuild::localLJRefinement(Molecule& polymer,
         for (int k = 0; k < debug_mol.AtomCount(); ++k)
             if (debug_info.m_atoms[k] == 0) debug_info.m_atoms[k] = ci_elem;
         debug_mol.LoadMolecule(debug_info);
-        debug_mol.writeXYZFile(fmt::format("{}_ljlm_{:02d}.xyz", polymer.Name(), step_number));
+        debug_mol.writeXYZFile(outputPath(fmt::format("{}_ljlm_{:02d}.xyz", polymer.Name(), step_number)));
     }
 
     // 8. Check distances and report
@@ -2166,7 +2166,7 @@ SubchainResult PolymerBuild::buildSubchain(
         CurcumaLogger::info(fmt::format("DEBUG STEP 1: Raw first fragment '{}' ({} atoms, with Xx)",
                                         first_name, polymer.AtomCount()));
         // Claude Generated: one debug file per step, all frames within a step have the same atom count
-        std::string debug_file = fmt::format("{}_debug_01.xyz", polymer.Name());
+        std::string debug_file = outputPath(fmt::format("{}_debug_01.xyz", polymer.Name()));
         polymer.appendXYZFile(debug_file, fmt::format("step 01: raw_Xx ({} atoms)", polymer.AtomCount()));
         CurcumaLogger::info(fmt::format("DEBUG: Appended step1 raw_Xx frame to {}", debug_file));
 
@@ -2274,7 +2274,7 @@ SubchainResult PolymerBuild::buildSubchain(
             CurcumaLogger::info(fmt::format("DEBUG: After connectFragment - {} atoms, {} Xx remaining",
                                             polymer.AtomCount(), xx_count));
             // Claude Generated: one debug file per step — all frames have the same atom count
-            std::string debug_file = fmt::format("{}_debug_{:02d}.xyz", polymer.Name(), i);
+            std::string debug_file = outputPath(fmt::format("{}_debug_{:02d}.xyz", polymer.Name(), i));
             polymer.appendXYZFile(debug_file, fmt::format("step {:02d}: connected ({} atoms)", i, polymer.AtomCount()));
             CurcumaLogger::info(fmt::format("DEBUG: Appended step {:02d} connected frame to {}", i, debug_file));
         }
@@ -2470,7 +2470,7 @@ SubchainResult PolymerBuild::buildSubchain(
 
                 if (CurcumaLogger::get_verbosity() >= 3) {
                     // Claude Generated: same per-step debug file — postLJ has same atom count as connected
-                    std::string debug_file = fmt::format("{}_debug_{:02d}.xyz", polymer.Name(), i);
+                    std::string debug_file = outputPath(fmt::format("{}_debug_{:02d}.xyz", polymer.Name(), i));
                     polymer.appendXYZFile(debug_file, fmt::format("step {:02d}: postLJ ({} atoms)", i, polymer.AtomCount()));
                     CurcumaLogger::info(fmt::format("DEBUG: Appended step {:02d} postLJ frame to {}", i, debug_file));
                 }
@@ -2553,7 +2553,7 @@ SubchainResult PolymerBuild::buildSubchain(
 
                 if (CurcumaLogger::get_verbosity() >= 3) {
                     // Claude Generated: same per-step debug file — forFF (Xx→H) has same atom count
-                    std::string debug_file = fmt::format("{}_debug_{:02d}.xyz", polymer.Name(), i);
+                    std::string debug_file = outputPath(fmt::format("{}_debug_{:02d}.xyz", polymer.Name(), i));
                     polymer_opt.appendXYZFile(debug_file, fmt::format("step {:02d}: forFF ({} atoms)", i, polymer_opt.AtomCount()));
                     CurcumaLogger::info(fmt::format("DEBUG: Appended step {:02d} forFF frame to {}", i, debug_file));
                 }
@@ -2586,7 +2586,7 @@ SubchainResult PolymerBuild::buildSubchain(
 
                         if (CurcumaLogger::get_verbosity() >= 3) {
                             // Claude Generated: same per-step debug file — postFF has same atom count
-                            std::string debug_file = fmt::format("{}_debug_{:02d}.xyz", polymer.Name(), i);
+                            std::string debug_file = outputPath(fmt::format("{}_debug_{:02d}.xyz", polymer.Name(), i));
                             polymer.appendXYZFile(debug_file, fmt::format("step {:02d}: postFF ({} atoms)", i, polymer.AtomCount()));
                             CurcumaLogger::info(fmt::format("DEBUG: Appended step {:02d} postFF frame to {}", i, debug_file));
                         }
@@ -2957,7 +2957,7 @@ SubchainResult PolymerBuild::buildSubchain(
                 }
             }
             debug_mol.LoadMolecule(debug_info);
-            std::string step_file = fmt::format("{}_step_{:03d}.xyz", polymer.Name(), i);
+            std::string step_file = outputPath(fmt::format("{}_step_{:03d}.xyz", polymer.Name(), i));
             debug_mol.writeXYZFile(step_file);
             CurcumaLogger::info(fmt::format("Wrote intermediate (Xx→H): {}", step_file));
         }
@@ -3175,7 +3175,7 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
         // Phase 3: Capping + final output
         polymer.setName("polymer_A");
         applyCapping(polymer);
-        polymer.writeXYZFile(polymer.Name() + "_final.xyz");
+        polymer.writeXYZFile(outputPath(polymer.Name() + "_final.xyz"));
         CurcumaLogger::success(fmt::format(
             "D&C polymer assembly completed: {}_final.xyz ({} atoms)",
             polymer.Name(), polymer.AtomCount()));
@@ -3186,7 +3186,7 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
         Molecule polymer = result.molecule;
         polymer.setName("polymer_A");
         applyCapping(polymer);
-        polymer.writeXYZFile(polymer.Name() + "_final.xyz");
+        polymer.writeXYZFile(outputPath(polymer.Name() + "_final.xyz"));
         CurcumaLogger::success("Polymer assembly completed: " + polymer.Name() + "_final.xyz");
     }
 }
@@ -3238,7 +3238,7 @@ void PolymerBuild::saveBuildingBlock(const Molecule& mol,
     std::string prefix = m_config.get<std::string>("block_prefix", "");
     if (prefix.empty()) prefix = mol.Name();
 
-    std::string filename = fmt::format("{}_block_{:03d}.xyz", prefix, step_number);
+    std::string filename = outputPath(fmt::format("{}_block_{:03d}.xyz", prefix, step_number));
     mol.writeXYZFile(filename);
 
     // Count Xx atoms for reporting

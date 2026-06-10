@@ -245,12 +245,6 @@ public:
     // =================================================================================
 
     /**
-     * @brief Get coordination numbers from last calculation (GFN-FF / FF methods).
-     * Default returns an empty vector. Used by MD diagnostics dump.
-     */
-    virtual Vector getCN() const { return Vector{}; }
-
-    /**
      * @brief Get number of hydrogen bonds detected in last calculation (GFN-FF only).
      */
     virtual int getHBCount() const { return 0; }
