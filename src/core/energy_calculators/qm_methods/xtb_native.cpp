@@ -27,6 +27,7 @@
 
 #include "STO_CGTO.hpp"
 #include "src/core/curcuma_logger.h"
+#include "src/core/citation_registry.h"
 #include "src/core/config_manager.h"
 #include "src/core/charge_extrapolation.h"
 #include "src/core/intra_parallel_context.h"
@@ -109,6 +110,23 @@ bool XTB::InitialiseMolecule()
         CurcumaLogger::error("XTB::InitialiseMolecule: no atoms set");
         return false;
     }
+
+    // ── Citation registry (Claude Generated, June 2026) ──
+    // Register the method and all sub-component citations, matching xtb output.
+    const std::string meth = (m_method == MethodType::GFN1) ? "gfn1" : "gfn2";
+    CitationRegistry::cite("xtb");
+    CitationRegistry::cite(meth, "xtb");
+    if (m_method == MethodType::GFN1)
+        CitationRegistry::cite("d3", meth);        // D3(BJ) dispersion (GFN1 only)
+    else
+        CitationRegistry::cite("d4", meth);        // D4 dispersion (GFN2 only)
+    if (m_solvent != "none" && !m_solvent.empty()) {
+        const int model = (m_solvent_model > 0) ? m_solvent_model : 3;
+        if (model == 3) CitationRegistry::cite("alpb", meth);
+        else if (model == 2) { CitationRegistry::cite("alpb", meth); CitationRegistry::cite("still_gb", meth); }
+    }
+    CitationRegistry::cite("diis", meth);         // SCF convergence (DIIS/Broyden)
+
     buildBasis();
     buildH0Data();
     buildReferenceOccupations();
