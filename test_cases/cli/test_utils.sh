@@ -339,12 +339,59 @@ setup_test_dir() {
     cd "$test_dir" || exit 1
 }
 
+# ============================================================================
+# BMT (Basename.Method.Timestamp) output directory helpers
+# With BMT default-on, output files go to basename.keyword.YYYYMMDD_HHMMSS/
+# These helpers resolve file paths whether BMT is on or off.
+# Claude Generated 2026
+# ============================================================================
+
+# Find a BMT output directory matching basename.keyword.* pattern
+# Usage: find_bmt_dir "input" "opt" -> "input.opt.20260609_143000"
+find_bmt_dir() {
+    local basename="$1"
+    local keyword="$2"
+    find . -maxdepth 1 -type d -name "${basename}.${keyword}.*" 2>/dev/null | head -1
+}
+
+# Find an output file, checking CWD first then BMT directories (depth 2)
+# Usage: find_output_file "input.opt.xyz" -> "input.opt.xyz" or "input.opt.20260609_143000/input.opt.xyz"
+find_output_file() {
+    local filename="$1"
+    # Check CWD first (backward compatibility with -no_bmt / BMT off)
+    if [ -f "$filename" ]; then
+        echo "$filename"
+        return 0
+    fi
+    # Search in BMT directories (basename.keyword.YYYYMMDD_HHMMSS/filename)
+    find . -maxdepth 2 -name "$filename" -type f 2>/dev/null | head -1
+}
+
+# Remove BMT output directories in current directory
+cleanup_bmt_dirs() {
+    find . -maxdepth 1 -type d \( \
+        -name "*.opt.*" -o \
+        -name "*.md.*" -o \
+        -name "*.confscan.*" -o \
+        -name "*.confsearch.*" -o \
+        -name "*.confstat.*" -o \
+        -name "*.dock.*" -o \
+        -name "*.analysis.*" -o \
+        -name "*.rmsd.*" -o \
+        -name "*.hessian.*" -o \
+        -name "*.qmdfffit.*" -o \
+        -name "*.sp.*" \
+    \) -exec rm -rf {} + 2>/dev/null || true
+}
+
 # Helper: Cleanup test artifacts
 cleanup_test_artifacts() {
-    # Remove common Curcuma output files
+    # Remove common Curcuma output files in CWD
     rm -f *.opt.xyz *.trj.xyz *.restart.json *.vtf
     rm -f *.accepted.xyz *.rejected.xyz *.thresh.xyz *.initial.xyz
     rm -f *.reorder.*.xyz *.centered.xyz *.reordered.xyz
-    rm -f *.log *.dat *.pairs
+    rm -f *.log *.dat *.pairs *.diag.jsonl
     rm -f stdout.log stderr.log
+    # Remove BMT output directories
+    cleanup_bmt_dirs
 }

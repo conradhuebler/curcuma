@@ -298,6 +298,9 @@ private:
     plumed m_plumedmain;
     std::vector<double> m_plumed_positions;  // Positions in Bohr for PLUMED
     double m_plumed_box[9] = {};             // Box vectors in Bohr for PLUMED (3x3 row-major)
+                                             // NOTE: Currently never populated — PBC/PLUMED periodic box is NOT supported.
+                                             // To enable: populate from lattice vectors when PBC is active, then call
+                                             // plumed_cmd("setBox", m_plumed_box) during PLUMED initialization.
 #endif
 
     std::string m_snapshots_dir;  // Claude Generated 2026: Snapshots subdirectory inside BMT

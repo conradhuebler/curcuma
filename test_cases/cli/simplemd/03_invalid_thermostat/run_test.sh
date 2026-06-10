@@ -12,14 +12,18 @@ run_test() {
     cd "$TEST_DIR"
     $CURCUMA -md input.xyz -md.max_time 10 > stdout.log 2> stderr.log
     assert_exit_code $? 0 "MD should succeed"
-    assert_file_exists "input.trj.xyz" "Trajectory file"
+
+    # BMT-aware: resolve trajectory file from CWD or BMT directory
+    local trj_file=$(find_output_file "input.trj.xyz")
+    assert_file_exists "$trj_file" "Trajectory file"
     return 0
 }
 
 validate_results() {
-    [ ! -f "input.trj.xyz" ] && return 1
-    
-    frames=$(count_xyz_structures "input.trj.xyz")
+    local trj_file=$(find_output_file "input.trj.xyz")
+    [ -z "$trj_file" ] || [ ! -f "$trj_file" ] && return 1
+
+    frames=$(count_xyz_structures "$trj_file")
     # Claude Generated (October 2025): Relaxed validation for short simulations
     if [ $frames -ge 2 ]; then
         echo -e "${GREEN}✓ PASS${NC}: Trajectory has $frames frames (minimum 2 required)"

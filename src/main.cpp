@@ -1489,9 +1489,7 @@ int executeAnalysis(const json& controller, int argc, char** argv) {
 
     // Claude Generated 2026: BMT output directory for analysis command
     std::string analysis_filename(argv[2]);
-    std::string analysis_basename = analysis_filename;
-    size_t dot_pos = analysis_basename.find_last_of('.');
-    if (dot_pos != std::string::npos) analysis_basename = analysis_basename.substr(0, dot_pos);
+    std::string analysis_basename = BMTUtils::stripExtension(analysis_filename);
     std::string analysis_bmt_dir = BMTUtils::createBMTDir(analysis_basename, "analysis");
     BMTUtils::writeMetadata(analysis_bmt_dir, analysis_basename, "analysis", analysis_filename);
 
@@ -1501,14 +1499,7 @@ int executeAnalysis(const json& controller, int argc, char** argv) {
     analysis->start();
 
     // Process -bak files
-    std::vector<std::string> analysis_bak_files;
-    if (controller.contains("bak")) {
-        if (controller["bak"].is_string())
-            analysis_bak_files.push_back(controller["bak"].get<std::string>());
-        else if (controller["bak"].is_array())
-            for (const auto& f : controller["bak"])
-                if (f.is_string()) analysis_bak_files.push_back(f.get<std::string>());
-    }
+    std::vector<std::string> analysis_bak_files = BMTUtils::collectBakFiles(controller);
     BMTUtils::processBakFiles(analysis_bmt_dir, analysis_bak_files);
 
     delete analysis;
@@ -1564,14 +1555,7 @@ int executeRMSD(const json& controller, int argc, char** argv) {
     driver->TargetReorderd().writeXYZFile(BMTUtils::outputPath(rmsd_bmt_dir, tarfile + ".reordered.xyz"));
 
     // Process -bak files
-    std::vector<std::string> rmsd_bak_files;
-    if (controller.contains("bak")) {
-        if (controller["bak"].is_string())
-            rmsd_bak_files.push_back(controller["bak"].get<std::string>());
-        else if (controller["bak"].is_array())
-            for (const auto& f : controller["bak"])
-                if (f.is_string()) rmsd_bak_files.push_back(f.get<std::string>());
-    }
+    std::vector<std::string> rmsd_bak_files = BMTUtils::collectBakFiles(controller);
     BMTUtils::processBakFiles(rmsd_bmt_dir, rmsd_bak_files);
 
     delete driver;
@@ -1687,8 +1671,7 @@ int executeOptimization(const json& controller, int argc, char** argv) {
 
         // Claude Generated 2026: BMT output directory for opt command
         std::string filename(argv[2]);
-        std::string basename = filename.size() >= 4 ?
-            filename.substr(0, filename.size() - 4) : filename;
+        std::string basename = BMTUtils::stripExtension(filename);
         std::string bmt_dir = BMTUtils::createBMTDir(basename, "opt");
         BMTUtils::writeMetadata(bmt_dir, basename, "opt", filename);
 
@@ -1701,14 +1684,7 @@ int executeOptimization(const json& controller, int argc, char** argv) {
             molecule->writeXYZFile(output_file);
             CurcumaLogger::success_fmt("Optimized structure written to: {}", output_file);
             // Process -bak files
-            std::vector<std::string> bak_files;
-            if (controller.contains("bak")) {
-                if (controller["bak"].is_string())
-                    bak_files.push_back(controller["bak"].get<std::string>());
-                else if (controller["bak"].is_array())
-                    for (const auto& f : controller["bak"])
-                        if (f.is_string()) bak_files.push_back(f.get<std::string>());
-            }
+            std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
             BMTUtils::processBakFiles(bmt_dir, bak_files);
             return 0;
         } else {

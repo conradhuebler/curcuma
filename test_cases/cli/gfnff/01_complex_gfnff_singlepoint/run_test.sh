@@ -44,9 +44,9 @@ run_test() {
     # Check successful execution
     assert_exit_code $exit_code 0 "GFN-FF single point calculation should succeed"
 
-    # Check for required output files
+    # Note: -sp (single point) does not write an output XYZ file; verify via stdout.log
     assert_file_exists "stdout.log" "Standard output captured"
-    assert_curcuma_success "complex.opt.xyz" "GFN-FF single point completed successfully"
+    assert_string_in_file "Single Point Energy" "stdout.log" "GFN-FF single point completed successfully"
 
     return 0
 }
@@ -70,10 +70,8 @@ extract_energy_components() {
         TOTAL_ENERGY=$(grep "Single Point Energy =" "$log_file" | sed 's/\x1b\[[0-9;]*m//g' | grep -oE '[-+]?[0-9]+\.?[0-9]*([eE][-+]?[0-9]+)?' | head -1)
     fi
 
-    # Fallback: Try XYZ file if stdout extraction failed
-    if [ -z "$TOTAL_ENERGY" ]; then
-        TOTAL_ENERGY=$(extract_energy_from_xyz "complex.opt.xyz" 2>/dev/null || echo "NaN")
-    fi
+    # Note: -sp (single point) does not write an output XYZ file
+    # Energy is extracted from stdout.log only; no XYZ fallback
 
     if [ -n "$TOTAL_ENERGY" ] && [ "$TOTAL_ENERGY" != "NaN" ]; then
         echo "Extracted total energy: $TOTAL_ENERGY"
@@ -174,7 +172,7 @@ validate_energy_component() {
         TESTS_PASSED=$((TESTS_PASSED + 1))
         return 0
     else
-        echo -e "${RED}✗ FAIL${NC}: $comp_name energy NOT within tolerance ($comp_value vs $ref_value, diff: $diff > $tolerance)"
+        echo -e "${RED}✗ FAIL${NC}: $comp_name energy NOT within tolerance ($comp_value vs $ref_value, diff: $diff > tolerance: $tolerance)"
         TESTS_FAILED=$((TESTS_FAILED + 1))
 
         # Additional diagnostic for large errors

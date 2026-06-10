@@ -29,6 +29,7 @@ EXPECTED_MIN_RECORDS=10   # tolerate slight off-by-one across versions
 run_test() {
     cd "$TEST_DIR"
     rm -f "$DIAG_FILE" input.trj.xyz input.opt.xyz input.restart stdout.log stderr.log
+    cleanup_bmt_dirs
 
     echo "Running: $CURCUMA -md input.xyz -method gfnff -maxtime $MD_MAXTIME"
     echo "         -md.md_diagnostics true -md.dump_frequency $MD_DUMP -md.seed $MD_SEED"

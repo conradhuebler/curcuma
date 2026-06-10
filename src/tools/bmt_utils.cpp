@@ -76,8 +76,14 @@ void writeMetadata(const std::string& bmt_dir,
 void processBakFiles(const std::string& bmt_dir,
                      const std::vector<std::string>& bak_files)
 {
-    if (bmt_dir.empty() || bak_files.empty())
+    if (bak_files.empty())
         return;
+
+    // Claude Generated 2026: Warn when -bak is used without an active BMT path
+    if (bmt_dir.empty()) {
+        CurcumaLogger::warn_fmt("-bak flag has no effect without BMT output directory (use default mode or remove -no_bmt)");
+        return;
+    }
 
 #ifdef C17
 #ifndef _WIN32
@@ -100,6 +106,43 @@ std::string outputPath(const std::string& bmt_dir, const std::string& filename)
     if (bmt_dir.empty())
         return filename;
     return bmt_dir + "/" + filename;
+}
+
+std::string stripExtension(const std::string& filename)
+{
+    // Claude Generated 2026: Properly strip file extension for .xyz, .mol2, .sdf, .pdb, etc.
+    // Handles multi-dot filenames correctly (e.g. "input.opt.xyz" -> "input.opt")
+#ifdef C17
+#ifndef _WIN32
+    std::filesystem::path p(filename);
+    return p.stem().string();
+#else
+    size_t pos = filename.find_last_of('.');
+    return (pos != std::string::npos) ? filename.substr(0, pos) : filename;
+#endif
+#else
+    size_t pos = filename.find_last_of('.');
+    return (pos != std::string::npos) ? filename.substr(0, pos) : filename;
+#endif
+}
+
+std::vector<std::string> collectBakFiles(const nlohmann::json& controller)
+{
+    // Claude Generated 2026: Extract -bak file names from JSON controller
+    // Handles both "bak": "file.xyz" (string) and "bak": ["a.xyz", "b.xyz"] (array)
+    std::vector<std::string> bak_files;
+    if (!controller.contains("bak"))
+        return bak_files;
+
+    if (controller["bak"].is_string()) {
+        bak_files.push_back(controller["bak"].get<std::string>());
+    } else if (controller["bak"].is_array()) {
+        for (const auto& f : controller["bak"]) {
+            if (f.is_string())
+                bak_files.push_back(f.get<std::string>());
+        }
+    }
+    return bak_files;
 }
 
 } // namespace BMTUtils

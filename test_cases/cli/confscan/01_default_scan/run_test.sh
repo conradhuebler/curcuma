@@ -24,16 +24,18 @@ run_test() {
     local exit_code=$?
 
     assert_exit_code $exit_code 0 "ConfScan should succeed"
-    assert_file_exists "conformers.accepted.xyz" "Accepted conformers file created"
-    assert_file_exists "conformers.rejected.xyz" "Rejected conformers file created"
+    local accepted_file=$(find_output_file "conformers.accepted.xyz")
+    local rejected_file=$(find_output_file "conformers.rejected.xyz")
+    assert_file_exists "$accepted_file" "Accepted conformers file created"
+    assert_file_exists "$rejected_file" "Rejected conformers file created"
 
     return 0
 }
 
 validate_results() {
     # Scientific Validation: Count and validate conformer populations
-    local accepted=$(count_xyz_structures "conformers.accepted.xyz")
-    local rejected=$(count_xyz_structures "conformers.rejected.xyz")
+    local accepted=$(count_xyz_structures "$(find_output_file 'conformers.accepted.xyz')")
+    local rejected=$(count_xyz_structures "$(find_output_file 'conformers.rejected.xyz')")
 
     # Golden references from unit test runs (44 total input structures)
     assert_numeric_match 14 "$accepted" "Expected 14 accepted conformers"

@@ -4,6 +4,10 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+## June 2026
+
+- **BMT output directory system**: All commands default to creating a `Basename.Keyword.YYYYMMDD_HHMMSS/` directory for output. `-bak` flag copies specified files back to CWD. `-no_bmt` disables BMT (legacy CWD output). `BMTUtils` namespace provides `createBMTDir`, `writeMetadata`, `processBakFiles`, `outputPath`, `stripExtension`, `collectBakFiles`. `CurcumaMethod` integration via `createBMTDir()`, `addBakFile()`, `processBakFiles()`. 🤖 AI-generated.
+
 ## May 2026
 
 - **GFN-FF WP-FF-SoA — Pass-A/B/C für Repulsion-Pair-Loops (May 2026, Branch `native-gfnff`)**: `thread_local static`-Buffer (flat N×5 RowMajor, keine Heap-Allokation im Hot-Path) in `CalculateGFNFFBondedRepulsionContribution` und `CalculateGFNFFNonbondedRepulsionContribution`. Nutzt bestehenden `fast_exp_neg_sq_block` direkt (arg = α·r^1.5, Funktion berechnet exp(-arg)). Gated via `#ifdef GFNFF_FAST_EXP` — FAST_EXP=OFF bleibt bit-identisch. **Messung**: Polymer N=1410 T=4: FAST_EXP=ON 57.9 ms/step, FAST_EXP=OFF 57.2 ms/step — kein messbarer Gewinn (±0.7 ms Rauschen). Ursache: Repulsions-Listen zu klein für 3-Pass-Overhead-Amortisation. BATM/Angles wurden analysiert und korrekt übersprungen (kein exp()). Mixture N=6200 noch nicht gemessen. Erkenntnis dokumentiert in WP-Dok. 🤖 AI-generated.

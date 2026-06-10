@@ -418,7 +418,10 @@ bool SimpleMD::Initialise()
     checkHelp();
     // Claude Generated 2026: Create .snapshots subdirectory inside BMT for JSON restarts,
     // but keep m_output_dir pointing at BMT root so trajectory files land there.
+    // NOTE: With BMT default-on, OutputDir() is always set. The legacy CWD path (empty OutputDir)
+    // is preserved for -no_bmt / -bmt false usage but is effectively unreachable in default config.
     if (OutputDir().empty()) {
+        // Legacy path: no BMT directory, snapshots go to basename.snapshots/ in CWD
         setOutputDir(Basename() + ".snapshots");
     } else {
         // BMT is active: m_output_dir stays as BMT root, create snapshots subdirectory separately

@@ -14,6 +14,8 @@
 #include <string>
 #include <vector>
 
+#include "src/core/global.h" // for nlohmann::json
+
 namespace BMTUtils {
 
 // Create BMT directory: basename.keyword.YYYYMMDD_HHMMSS
@@ -32,5 +34,13 @@ void processBakFiles(const std::string& bmt_dir,
 
 // Build full output path: bmt_dir/filename (or just filename if bmt_dir empty)
 std::string outputPath(const std::string& bmt_dir, const std::string& filename);
+
+// Strip file extension from filename (handles .xyz, .mol2, .sdf, .pdb, etc.)
+// Returns the basename without extension
+std::string stripExtension(const std::string& filename);
+
+// Collect -bak file names from JSON controller
+// Handles both string and array forms of the "bak" parameter
+std::vector<std::string> collectBakFiles(const nlohmann::json& controller);
 
 } // namespace BMTUtils
