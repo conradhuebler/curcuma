@@ -315,7 +315,7 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
             json hjson;
             hjson["atoms"] = hessian.cols() / 3;
             hjson["hessian"] = hessian_string;
-            std::ofstream hess_file("hessian.json");
+            std::ofstream hess_file(outputPath("hessian.json"));
             hess_file << hjson;
 
             json scfjson;
@@ -324,7 +324,7 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
                 std::string charges = Tools::DoubleVector2String(interface.Charges());
                 scfjson["charges"] = charges;
             }
-            std::ofstream scffile("scf.json");
+            std::ofstream scffile(outputPath("scf.json"));
             scffile << scfjson;
         }
         auto end = std::chrono::system_clock::now();
@@ -400,10 +400,10 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
             json hjson;
             hjson["atoms"] = hessian.cols() / 3;
             hjson["hessian"] = hessian_string;
-            std::ofstream hess_file("hessian.json");
+            std::ofstream hess_file(outputPath("hessian.json"));
             hess_file << hjson;
 
-            std::ofstream scffile("scf.json");
+            std::ofstream scffile(outputPath("scf.json"));
             scffile << thread->SCF();
         }
         if (!m_singlepoint)

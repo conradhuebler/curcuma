@@ -683,7 +683,8 @@ json CLI2Json(int argc, char** argv)
         "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
         "export_run", "export-run", // Export current run configuration
         "import_config", "import-config", // Import custom configuration
-        "bak"  // Files to copy back from BMT output directory to CWD
+        "bak",   // Files to copy back from BMT output directory to CWD
+        "no_bmt" // Disable BMT output directory (legacy: write to CWD)
     };
 
     // Claude Generated (October 2025): CLI keyword to module name mapping
@@ -989,7 +990,9 @@ void initializeBMT(CurcumaMethod* method, const std::string& filename,
                    const std::string& cli_keyword, const json& controller)
 {
     method->setFile(filename);
-    method->createBMTDir(cli_keyword);
+    bool no_bmt = controller.value("no_bmt", false);
+    if (!no_bmt)
+        method->createBMTDir(cli_keyword);
 
     // Register -bak files for post-computation copy to CWD
     if (controller.contains("bak")) {
@@ -1495,8 +1498,11 @@ int executeAnalysis(const json& controller, int argc, char** argv) {
     // Claude Generated 2026: BMT output directory for analysis command
     std::string analysis_filename(argv[2]);
     std::string analysis_basename = BMTUtils::stripExtension(analysis_filename);
-    std::string analysis_bmt_dir = BMTUtils::createBMTDir(analysis_basename, "analysis");
-    BMTUtils::writeMetadata(analysis_bmt_dir, analysis_basename, "analysis", analysis_filename);
+    std::string analysis_bmt_dir;
+    if (!controller.value("no_bmt", false)) {
+        analysis_bmt_dir = BMTUtils::createBMTDir(analysis_basename, "analysis");
+        BMTUtils::writeMetadata(analysis_bmt_dir, analysis_basename, "analysis", analysis_filename);
+    }
 
     auto* analysis = new UnifiedAnalysis(analysis_config, false);
     analysis->setFileName(argv[2]);
@@ -1578,8 +1584,11 @@ int executeRMSD(const json& controller, int argc, char** argv) {
         rmsd_result["reference_file"] = reffile;
         rmsd_result["target_file"] = tarfile;
 
-        std::ofstream rmsd_out(driver->outputPath(tarfile + ".rmsd.json"));
-        rmsd_out << rmsd_result.dump(2) << std::endl;
+        // Write to both BMT directory and CWD for fixed workflows
+        std::ofstream rmsd_out_bmt(driver->outputPath(tarfile + ".rmsd.json"));
+        rmsd_out_bmt << rmsd_result.dump(2) << std::endl;
+        std::ofstream rmsd_out_cwd(tarfile + ".rmsd.json");
+        rmsd_out_cwd << rmsd_result.dump(2) << std::endl;
     }
 
     driver->processBakFiles();
@@ -1703,8 +1712,11 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         // Claude Generated 2026: BMT output directory for opt command
         std::string filename(argv[2]);
         std::string basename = BMTUtils::stripExtension(filename);
-        std::string bmt_dir = BMTUtils::createBMTDir(basename, "opt");
-        BMTUtils::writeMetadata(bmt_dir, basename, "opt", filename);
+        std::string bmt_dir;
+        if (!controller.value("no_bmt", false)) {
+            bmt_dir = BMTUtils::createBMTDir(basename, "opt");
+            BMTUtils::writeMetadata(bmt_dir, basename, "opt", filename);
+        }
 
         // Enable iterative mode + warm-start for native GFN so SCF iterations are
         // suppressed at verbosity 1 and converged charges are reused across steps.

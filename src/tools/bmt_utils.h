@@ -22,7 +22,7 @@ namespace BMTUtils {
 // Returns the created directory path
 std::string createBMTDir(const std::string& basename, const std::string& keyword);
 
-// Write metadata.txt inside BMT directory with calculation info
+// Write metadata.json inside BMT directory with calculation info
 void writeMetadata(const std::string& bmt_dir,
                    const std::string& basename,
                    const std::string& method,

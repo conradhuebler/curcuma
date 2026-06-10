@@ -154,7 +154,7 @@ void AnalyseNCIPlot::start()
     }
 
     std::ofstream input;
-    input.open("combined.dat", std::ios::out);
+    input.open(outputPath("combined.dat"), std::ios::out);
 
     for (auto i : final)
         input << i.first << " " << i.second << std::endl;

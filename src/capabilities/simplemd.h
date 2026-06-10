@@ -62,7 +62,8 @@ class SharedBiasPool;  // Claude Generated (Apr 2026): forward declaration
 
 class BiasThread : public CxxThread {
 public:
-    BiasThread(const Molecule& reference, const json& rmsdconfig, bool nocolvarfile, bool nohillsfile);
+    BiasThread(const Molecule& reference, const json& rmsdconfig, bool nocolvarfile, bool nohillsfile,
+               const std::string& colvar_base = "COLVAR");
     ~BiasThread();
 
     virtual int execute() override;
@@ -77,7 +78,7 @@ public:
         m_biased_structures.push_back(str);
         if (m_nocolvarfile == false) {
             std::ofstream colvarfile;
-            colvarfile.open("COLVAR_" + std::to_string(index));
+            colvarfile.open(m_colvar_base + "_" + std::to_string(index));
             colvarfile << "#m_currentStep  rmsd  bias_energy   counter  factor" << std::endl;
             colvarfile.close();
         }
@@ -135,6 +136,7 @@ private:
     double m_current_bias_wt = 0; // well-tempered bias energy (opt-in, output only)
     int m_counter = 0, m_atoms = 0;
     bool m_wtmtd = false, m_nocolvarfile = false, m_nohillsfile = false;
+    std::string m_colvar_base = "COLVAR";
 };
 
 // Claude Generated 2025: CurcumaMDJson removed - replaced by ParameterRegistry + ConfigManager

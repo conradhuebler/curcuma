@@ -57,7 +57,7 @@ void writeMetadata(const std::string& bmt_dir,
                    const std::string& method,
                    const std::string& input_file)
 {
-    std::string meta_path = bmt_dir + "/metadata.txt";
+    std::string meta_path = bmt_dir + "/metadata.json";
     std::ofstream meta(meta_path);
     if (!meta.is_open()) {
         CurcumaLogger::warn_fmt("Could not create metadata file: {}", meta_path);
@@ -75,11 +75,12 @@ void writeMetadata(const std::string& bmt_dir,
     char timestamp[32];
     std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &local_tm_buf);
 
-    meta << "# Curcuma Calculation Metadata\n";
-    meta << "basename: " << basename << "\n";
-    meta << "method: " << method << "\n";
-    meta << "timestamp: " << timestamp << "\n";
-    meta << "input_file: " << input_file << "\n";
+    nlohmann::json j;
+    j["basename"] = basename;
+    j["method"] = method;
+    j["timestamp"] = std::string(timestamp);
+    j["input_file"] = input_file;
+    meta << j.dump(2) << "\n";
     meta.close();
 }
 

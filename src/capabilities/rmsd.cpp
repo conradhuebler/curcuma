@@ -1059,7 +1059,7 @@ void RMSDDriver::FinaliseTemplate()
     std::ofstream result_file;
     m_kuhn_munkres_iterations = 0;
     if (m_kmstat)
-        result_file.open("kmstat.dat", std::ios_base::app);
+        result_file.open(outputPath("kmstat.dat"), std::ios_base::app);
     for (auto permutation : m_prepared_cost_matrices) {
 #ifdef CURCUMA_DEBUG
         if (m_verbosity >= 3)

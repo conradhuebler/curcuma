@@ -14,16 +14,16 @@ TEST_DIR="$SCRIPT_DIR"
 run_test() {
     cd "$TEST_DIR"
 
-    # Sequential run (threads=1)
-    $CURCUMA -analysis input.vtf -threads 1 -scattering_enable > seq_stdout.log 2> seq_stderr.log
+    # Sequential run (threads=1) — -no_bmt so output lands in CWD
+    $CURCUMA -analysis input.vtf -threads 1 -scattering_enable -no_bmt > seq_stdout.log 2> seq_stderr.log
     assert_exit_code $? 0 "Sequential analysis should succeed"
 
     # Rename sequential outputs
     mv input.general.csv seq.general.csv
     mv input.scattering_statistics.csv seq.scattering_statistics.csv
 
-    # Parallel run (threads=4)
-    $CURCUMA -analysis input.vtf -threads 4 -scattering_enable > par_stdout.log 2> par_stderr.log
+    # Parallel run (threads=4) — -no_bmt so output lands in CWD
+    $CURCUMA -analysis input.vtf -threads 4 -scattering_enable -no_bmt > par_stdout.log 2> par_stderr.log
     assert_exit_code $? 0 "Parallel analysis should succeed"
 
     # Rename parallel outputs

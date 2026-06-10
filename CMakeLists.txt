@@ -949,7 +949,11 @@ if(USE_CUDA)
     target_compile_definitions(curcuma_core PUBLIC USE_CUDA)
     # curcuma_core is created before this block, so its CUDA_ARCHITECTURES target
     # property is still empty (CMP0104). Set it explicitly from the global list.
-    set_target_properties(curcuma_core PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+    # CUDA_RESOLVE_DEVICE_SYMBOLS: resolve device code within the static library so
+    # the final curcuma binary does not need a device-link step and links as plain PIC.
+    set_target_properties(curcuma_core PROPERTIES
+        CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 
     # Claude Generated (2026-06): native xTB GPU host wrapper + feature flag.
     if(USE_CUDA_XTB)

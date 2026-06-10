@@ -697,7 +697,7 @@ curcuma -md water.xyz -method gfnff
 # Output goes to: water.md.20260609_143052/
 ```
 
-The BMT directory contains all trajectory files, restart data, and a `metadata.txt` file with calculation details. This keeps the working directory clean and makes it easy to compare runs.
+The BMT directory contains all trajectory files, restart data, and a `metadata.json` file with calculation details (basename, method, timestamp, input file). This keeps the working directory clean and makes it easy to compare runs.
 
 To copy specific files back to the working directory after the calculation finishes, use the `-bak` flag:
 

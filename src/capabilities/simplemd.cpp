@@ -60,11 +60,13 @@
 const double au2eV = 1.0 / eV2Eh; // Convert Hartree to eV
 const double au2N = 8.2387225e-8; // Convert atomic force units (Eh/bohr) to Newton
 
-BiasThread::BiasThread(const Molecule& reference, const json& rmsdconfig, bool nocolvarfile, bool nohillsfile)
+BiasThread::BiasThread(const Molecule& reference, const json& rmsdconfig, bool nocolvarfile, bool nohillsfile,
+                       const std::string& colvar_base)
     : m_reference(reference)
     , m_target(reference)
     , m_nocolvarfile(nocolvarfile)
     , m_nohillsfile(nohillsfile)
+    , m_colvar_base(colvar_base)
     , m_driver(rmsdconfig, true)
 {
     m_config = rmsdconfig;
@@ -118,7 +120,7 @@ int BiasThread::execute()
 
         if (m_nocolvarfile == false) {
             std::ofstream colvarfile;
-            colvarfile.open("COLVAR_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
+            colvarfile.open(m_colvar_base + "_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
             colvarfile << m_currentStep << " " << rmsd << " " << bias_energy << " "
                        << m_biased_structures[i].counter << " " << m_biased_structures[i].factor << std::endl;
             colvarfile.close();
@@ -815,7 +817,7 @@ bool SimpleMD::Initialise()
         m_shared_pool_target = m_rmsd_mtd_molecule;
 
         for (int i = 0; i < m_threads; ++i) {
-            auto* thread = new BiasThread(m_rmsd_mtd_molecule, config, m_nocolvarfile, m_nohillsfile);
+            auto* thread = new BiasThread(m_rmsd_mtd_molecule, config, m_nocolvarfile, m_nohillsfile, outputPath("COLVAR"));
             thread->setDT(m_rmsd_DT);
             thread->setk(m_k_rmsd);
             thread->setalpha(m_alpha_rmsd);
@@ -2715,7 +2717,7 @@ void SimpleMD::ApplyRMSDMTD()
             out_mol.writeXYZFile(Basename() + ".mtd.xyz");
             if (m_nocolvarfile == false) {
                 std::ofstream colvarfile;
-                colvarfile.open("COLVAR");
+                colvarfile.open(outputPath("COLVAR"));
                 colvarfile.close();
             }
             m_end = std::chrono::system_clock::now();
@@ -2858,7 +2860,7 @@ void SimpleMD::ApplyRMSDMTD()
         // COLVAR output
         if (m_nocolvarfile == false) {
             std::ofstream colvarfile;
-            colvarfile.open("COLVAR", std::iostream::app);
+            colvarfile.open(outputPath("COLVAR"), std::iostream::app);
             colvarfile << m_currentStep << " ";
             if (m_rmsd_fragment_count < 2)
                 colvarfile << rmsd_reference << " ";
@@ -2916,7 +2918,7 @@ void SimpleMD::ApplyRMSDMTD()
         m_rmsd_mtd_molecule.writeXYZFile(outputPath(Basename() + ".mtd.xyz"));
         if (m_nocolvarfile == false) {
             std::ofstream colvarfile;
-            colvarfile.open("COLVAR");
+            colvarfile.open(outputPath("COLVAR"));
             colvarfile.close();
         }
     }
@@ -2971,7 +2973,7 @@ void SimpleMD::ApplyRMSDMTD()
 
     if (m_nocolvarfile == false) {
         std::ofstream colvarfile;
-        colvarfile.open("COLVAR", std::iostream::app);
+        colvarfile.open(outputPath("COLVAR"), std::iostream::app);
         colvarfile << m_currentStep << " ";
         if (m_rmsd_fragment_count < 2)
             colvarfile << rmsd_reference << " ";
