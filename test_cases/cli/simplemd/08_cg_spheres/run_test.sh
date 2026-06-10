@@ -25,8 +25,11 @@ run_test() {
 }
 
 validate_results() {
+    local trj_xyz=$(find_output_file "input.trj.xyz")
+    local trj_vtf=$(find_output_file "input.trj.vtf")
+
     # Check XYZ trajectory exists (always written)
-    if [ -f "input.trj.xyz" ]; then
+    if [ -n "$trj_xyz" ] && [ -f "$trj_xyz" ]; then
         echo -e "${GREEN}✓ PASS${NC}: XYZ trajectory generated"
         TESTS_RUN=$((TESTS_RUN + 1))
         TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -38,7 +41,7 @@ validate_results() {
     fi
 
     # Check VTF trajectory exists (NEW: CG-specific output)
-    if [ -f "input.trj.vtf" ]; then
+    if [ -n "$trj_vtf" ] && [ -f "$trj_vtf" ]; then
         echo -e "${GREEN}✓ PASS${NC}: VTF trajectory generated for CG system"
         TESTS_RUN=$((TESTS_RUN + 1))
         TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -47,7 +50,7 @@ validate_results() {
     fi
 
     # Count frames in XYZ trajectory (should have at least 2: initial + final)
-    frames=$(count_xyz_structures "input.trj.xyz")
+    frames=$(count_xyz_structures "$trj_xyz")
     if [ $frames -ge 2 ]; then
         echo -e "${GREEN}✓ PASS${NC}: Trajectory has $frames frames (minimum 2 required)"
         TESTS_RUN=$((TESTS_RUN + 1))

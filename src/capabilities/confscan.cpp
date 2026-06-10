@@ -646,19 +646,20 @@ void ConfScan::SetUp()
     m_result_basename = Filename();
     m_result_basename.erase(m_result_basename.end() - 4, m_result_basename.end());
 
-    m_accepted_filename = m_result_basename + ".accepted.xyz";
-    m_1st_filename = m_result_basename + ".initial.xyz";
-    m_2nd_filename = m_result_basename + ".reorder";
-    m_3rd_filename = m_result_basename + ".reuse.xyz";
-    m_rejected_filename = m_result_basename + ".rejected.xyz";
-    m_statistic_filename = m_result_basename + ".statistic.log";
-    m_joined_filename = m_result_basename + ".joined.xyz";
-    m_threshold_filename = m_result_basename + ".thresh.xyz";
-    m_param_file = m_result_basename + ".param.dat";
-    m_skip_file = m_result_basename + ".param.skip.dat";
-    m_perform_file = m_result_basename + ".param.perf.dat";
-    m_success_file = m_result_basename + ".param.success.dat";
-    m_limit_file = m_result_basename + ".param.limit.dat";
+    // Claude Generated 2026: Route all output files through BMT directory
+    m_accepted_filename = outputPath(m_result_basename + ".accepted.xyz");
+    m_1st_filename = outputPath(m_result_basename + ".initial.xyz");
+    m_2nd_filename = outputPath(m_result_basename + ".reorder");
+    m_3rd_filename = outputPath(m_result_basename + ".reuse.xyz");
+    m_rejected_filename = outputPath(m_result_basename + ".rejected.xyz");
+    m_statistic_filename = outputPath(m_result_basename + ".statistic.log");
+    m_joined_filename = outputPath(m_result_basename + ".joined.xyz");
+    m_threshold_filename = outputPath(m_result_basename + ".thresh.xyz");
+    m_param_file = outputPath(m_result_basename + ".param.dat");
+    m_skip_file = outputPath(m_result_basename + ".param.skip.dat");
+    m_perform_file = outputPath(m_result_basename + ".param.perf.dat");
+    m_success_file = outputPath(m_result_basename + ".param.success.dat");
+    m_limit_file = outputPath(m_result_basename + ".param.limit.dat");
 
     auto createFile = [](const std::string& filename) {
         std::ofstream file(filename);
@@ -802,7 +803,7 @@ void ConfScan::start()
         CheckOnly(m_sLE[0], m_sLI[0], m_sLH[0]);
         PrintStatus("Result initial pass:");
         if (m_analyse) {
-            WriteDotFile(m_result_basename + ".initial.dot", m_first_content);
+            WriteDotFile(outputPath(m_result_basename + ".initial.dot"), m_first_content);
         }
         // m_sLE[0] = 1;
         // m_sLI[0] = 1;
@@ -905,7 +906,7 @@ void ConfScan::start()
                 logPass(fmt::format("Reorder Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0));
                 timer.Reset();
                 if (m_analyse) {
-                    WriteDotFile(m_result_basename + ".reorder." + std::to_string(run + 1) + ".dot", m_second_content);
+                    WriteDotFile(outputPath(m_result_basename + ".reorder." + std::to_string(run + 1) + ".dot"), m_second_content);
 
                     m_collective_content += "edge [color=red];\n";
                     for (auto node : m_nodes)
@@ -974,7 +975,7 @@ void ConfScan::start()
             timer.Reset();
 
             if (m_analyse) {
-                WriteDotFile(m_result_basename + ".reuse.dot", m_second_content);
+                WriteDotFile(outputPath(m_result_basename + ".reuse.dot"), m_second_content);
 
                 m_collective_content += "edge [color=blue];\n";
                 for (auto node : m_nodes)
@@ -986,7 +987,7 @@ void ConfScan::start()
     }
     if (m_analyse) {
         std::ofstream energy;
-        energy.open(m_result_basename + ".energy.gnuplot");
+        energy.open(outputPath(m_result_basename + ".energy.gnuplot"));
         energy << "scale = 4063.0/800.0" << std::endl;
         energy << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
         energy << "set encoding utf8" << std::endl;
@@ -998,7 +999,7 @@ void ConfScan::start()
         energy.close();
 
         std::ofstream ripser;
-        ripser.open(m_result_basename + ".ripser.gnuplot");
+        ripser.open(outputPath(m_result_basename + ".ripser.gnuplot"));
         ripser << "scale = 4063.0/800.0" << std::endl;
         ripser << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
         ripser << "set encoding utf8" << std::endl;
@@ -1010,7 +1011,7 @@ void ConfScan::start()
         ripser.close();
 
         std::ofstream rotational;
-        rotational.open(m_result_basename + ".rotational.gnuplot");
+        rotational.open(outputPath(m_result_basename + ".rotational.gnuplot"));
         rotational << "scale = 4063.0/800.0" << std::endl;
         rotational << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
         rotational << "set encoding utf8" << std::endl;
@@ -1044,7 +1045,7 @@ void ConfScan::start()
     Finalise();
     if (m_analyse) {
         std::ofstream dotfile;
-        dotfile.open(m_result_basename + ".dot");
+        dotfile.open(outputPath(m_result_basename + ".dot"));
         dotfile << "digraph graphname \n {\n";
         dotfile << m_collective_content;
         dotfile << "}";

@@ -620,8 +620,36 @@ curcuma -md input.xyz -mtd
 ``` 
 a metadynamics simulation can be performed using plumed. It is a ***plumed.dat*** expected, or can be set with
 ```sh
-curcuma -md input.xyz -mtd -plumed input.plumed
-``` 
+curcuma -md input.xyz -mtd -plumed plumed.dat
+```
+
+See [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md) for the full PLUMED integration guide (unit conversions, output files, available CVs, thermal equilibration gate, internal RMSD-MTD).
+
+## Output Directory System (BMT)
+
+By default, all curcuma commands create a **Basename.Method.Timestamp** directory for their output files. For example:
+
+```sh
+curcuma -md water.xyz -method gfnff
+# Output goes to: water.md.20260609_143052/
+```
+
+The BMT directory contains all trajectory files, restart data, and a `metadata.txt` file with calculation details. This keeps the working directory clean and makes it easy to compare runs.
+
+To copy specific files back to the working directory after the calculation finishes, use the `-bak` flag:
+
+```sh
+curcuma -opt water.xyz -method gfnff -bak water.opt.xyz
+# water.opt.xyz is copied from the BMT directory to the working directory
+```
+
+Multiple files can be specified: `-bak water.opt.xyz -bak water.trj.xyz`.
+
+To disable BMT and write output to the working directory (legacy behavior):
+
+```sh
+curcuma -md input.xyz -method uff -no_bmt
+```
 
 # Funding
 The development of curcuma is funded by:

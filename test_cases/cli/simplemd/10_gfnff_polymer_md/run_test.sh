@@ -26,7 +26,7 @@ MD_MAXTIME=1000           # 1000 fs = 1 ps (1 step = 1 fs default)
 MD_SEED=42
 MD_THREADS=4
 MD_PRINT=100              # print every 100 steps → 10 output lines
-TRJ_FILE="input.trj.xyz"
+TRJ_FILE=""  # resolved after curcuma run via find_output_file
 
 # Expected: at least 8 frames in trajectory
 MIN_FRAMES=8
@@ -37,7 +37,8 @@ ENERGY_DRIFT_TOL=0.50
 
 run_test() {
     cd "$TEST_DIR"
-    rm -f "$TRJ_FILE" input.opt.xyz input.restart stdout.log stderr.log
+    rm -f input.trj.xyz input.opt.xyz input.restart stdout.log stderr.log
+    cleanup_bmt_dirs
 
     echo "Running: $CURCUMA -md input.xyz -method gfnff -maxtime $MD_MAXTIME"
     echo "         -threads $MD_THREADS -md.seed $MD_SEED -md.no_restart"
@@ -53,6 +54,9 @@ run_test() {
         -md.print_frequency $MD_PRINT \
         > stdout.log 2> stderr.log
     local exit_code=$?
+
+    # BMT-aware: resolve trajectory file after run
+    TRJ_FILE=$(find_output_file "input.trj.xyz")
 
     echo "Exit code: $exit_code"
     return $exit_code

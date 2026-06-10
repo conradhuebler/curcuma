@@ -20,6 +20,7 @@ CONFIG_FILE="auto.json"
 setup() {
     cd "$TEST_DIR"
     rm -f "$CONFIG_FILE" caffeine.opt.xyz NaCl.opt.xyz pos_stdout.log pos_stderr.log neg_stdout.log neg_stderr.log
+    cleanup_bmt_dirs
     echo '{"gfnff": {"eeq_distance_cutoff_auto": true}}' > "$CONFIG_FILE"
 }
 
