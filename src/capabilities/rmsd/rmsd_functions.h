@@ -107,4 +107,56 @@ inline double getRMSD(const Geometry& reference, const Geometry& target)
     rmsd = sqrt(rmsd / double(target.rows()));
     return rmsd;
 }
+
+/* Claude Generated (Jun 2026): weighted Kabsch variants for flexibility-weighted RMSD.
+ * With uniform weights (all equal) these reduce EXACTLY to the unweighted functions above,
+ * so the default ConfSearch/MTD path stays bit-identical. Per-atom weight w_i down-weights
+ * floppy atoms (large positional fluctuation) so the RMSD reflects rigid-core conformer
+ * identity. The rotation derivative is neglected (same approximation as the analytic
+ * RMSDDriver::Gradient()). */
+
+inline Eigen::Vector3d WeightedCentroid(const Geometry& g, const std::vector<double>& w)
+{
+    Eigen::Vector3d c = Eigen::Vector3d::Zero();
+    double wsum = 0.0;
+    for (int i = 0; i < g.rows(); ++i) {
+        c += w[i] * g.row(i).transpose();
+        wsum += w[i];
+    }
+    if (wsum > 0)
+        c /= wsum;
+    return c;
+}
+
+__attribute__((optimize("no-tree-vectorize"))) inline Eigen::Matrix3d BestFitRotationW(const Geometry& reference, const Geometry& target, const std::vector<double>& w)
+{
+    Eigen::Matrix3d Cov;
+    Cov.setZero();
+    const int n = reference.rows();
+    for (int i = 0; i < n; ++i)
+        Cov += w[i] * reference.row(i).transpose() * target.row(i);
+
+    if (std::abs(Cov.determinant()) < 1e-10)
+        return Eigen::Matrix3d::Identity();
+
+    Eigen::JacobiSVD<Eigen::Matrix3d> svd(Cov, Eigen::ComputeFullU | Eigen::ComputeFullV);
+    Eigen::Matrix3d V = svd.matrixV();
+    Eigen::Matrix3d U = svd.matrixU();
+    if ((V * U.transpose()).determinant() < 0)
+        V.col(2) *= -1.0;
+    return V * U.transpose();
+}
+
+inline double getRMSDW(const Geometry& reference, const Geometry& target, const std::vector<double>& w)
+{
+    double rmsd = 0.0, wsum = 0.0;
+    for (int i = 0; i < target.rows(); ++i) {
+        double d2 = (target(i, 0) - reference(i, 0)) * (target(i, 0) - reference(i, 0))
+            + (target(i, 1) - reference(i, 1)) * (target(i, 1) - reference(i, 1))
+            + (target(i, 2) - reference(i, 2)) * (target(i, 2) - reference(i, 2));
+        rmsd += w[i] * d2;
+        wsum += w[i];
+    }
+    return sqrt(rmsd / (wsum > 0 ? wsum : 1.0));
+}
 };

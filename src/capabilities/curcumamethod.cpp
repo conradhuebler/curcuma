@@ -45,6 +45,8 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool 
     , m_controller(controller)
     , m_silent(silent)
 {
+    // Capture the parent's global verbosity before we overwrite it; the dtor restores it.
+    m_saved_global_verbosity = CurcumaLogger::get_verbosity();
     // Legacy constructor - convert boolean silent to verbosity levels
     if (controller.count("verbose") > 0) {
         m_silent = false;
@@ -96,6 +98,8 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, int v
     , m_controller(controller)
     , m_verbosity(verbosity)
 {
+    // Capture the parent's global verbosity before we overwrite it; the dtor restores it.
+    m_saved_global_verbosity = CurcumaLogger::get_verbosity();
     // Set legacy flags for backwards compatibility
     m_silent = (verbosity == 0);
     m_verbose = (verbosity >= 3);
@@ -137,6 +141,11 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, int v
 CurcumaMethod::~CurcumaMethod()
 {
     CurcumaLogger::printCitations();
+    // Restore the parent's global verbosity (see m_saved_global_verbosity). This is what makes the
+    // global level scoped: a sub-method created by a parent leaves the parent's level intact on
+    // destruction, so callers no longer need to re-assert their verbosity after each sub-call.
+    if (m_saved_global_verbosity >= 0)
+        CurcumaLogger::set_verbosity(m_saved_global_verbosity);
 }
 
 // Claude Generated 2025: Enhanced restart writing with automatic checksum and version

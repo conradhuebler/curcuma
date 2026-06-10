@@ -37,6 +37,7 @@
 #include "src/capabilities/optimizer_factory.h"
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
+#include "src/capabilities/shared_bias_pool.h"  // Claude Generated (Apr 2026)
 
 #include "src/core/elements.h"
 #include "src/core/energycalculator.h"
@@ -82,59 +83,61 @@ int BiasThread::execute()
 {
     if (m_biased_structures.empty())
         return 0;
-    m_current_bias = 0;
+    m_current_bias = 0;    // exploration bias V(x): drives the force and deposition
+    m_current_bias_wt = 0; // optional well-tempered energy (opt-in, output only)
     m_counter = 0;
-    m_driver.setReference(m_reference);
+    m_driver.setReference(m_reference); // reference = current walker geometry
     m_gradient = Eigen::MatrixXd::Zero(m_reference.AtomCount(), 3);
 
+    // Non-textbook design (intentional): instead of depositing a fresh fixed-height
+    // Gaussian every 'pace' steps, we keep ONE reference per region and raise its
+    // height on every visit. Hill height W_i = m_k * counter_i, so the bias potential is
+    //   V(x) = Sum_i W_i * exp(-alpha * RMSD(x, x_i)^2)
+    // and the force below is its EXACT negative gradient. Claude Generated (Jun 2026).
+    std::vector<int> visited;
+
     for (int i = 0; i < m_biased_structures.size(); ++i) {
-        double factor = 1;
         m_target.setGeometry(m_biased_structures[i].geometry);
         m_driver.setTarget(m_target);
         double rmsd = m_driver.BestFitRMSD();
         double expr = exp(-rmsd * rmsd * m_alpha);
-        double bias_energy = expr * m_dT;
-        factor = m_biased_structures[i].factor;
-
-        if (!m_wtmtd)
-            factor = m_biased_structures[i].counter;
-        else
-            factor += (exp(-(m_biased_structures[i].energy) / kb_Eh / m_DT));
-        m_biased_structures[i].factor = factor;
-        if (i == 0) {
-            m_rmsd_reference = rmsd;
-        }
-        if (expr * m_rmsd_econv > 1 * m_biased_structures.size()) {
-            m_biased_structures[i].counter++;
-            m_biased_structures[i].energy += bias_energy;
-        }
-        bias_energy *= factor * m_k;
+        double height = m_k * m_biased_structures[i].counter; // W_i = k * counter_i
+        double bias_energy = height * expr;
 
         m_current_bias += bias_energy;
+        if (m_wtmtd) // separate well-tempered weight 'factor', output only
+            m_current_bias_wt += m_k * m_biased_structures[i].factor * expr;
+
+        if (i == 0)
+            m_rmsd_reference = rmsd;
+
+        // Force = -dV/dx for this hill. RMSDDriver::Gradient() returns dRMSD/dx of the
+        // reference (= the walker), so dV/dx = W_i * exp * (-2*alpha*rmsd) * Gradient().
+        double dEdR = -2.0 * m_alpha * height * rmsd * expr;
+        m_gradient += m_driver.Gradient() * dEdR;
+
         if (m_nocolvarfile == false) {
             std::ofstream colvarfile;
             colvarfile.open("COLVAR_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
-            colvarfile << m_currentStep << " " << rmsd << " " << bias_energy << " " << m_biased_structures[i].counter << " " << factor << std::endl;
+            colvarfile << m_currentStep << " " << rmsd << " " << bias_energy << " "
+                       << m_biased_structures[i].counter << " " << m_biased_structures[i].factor << std::endl;
             colvarfile.close();
         }
-        /*
-        if(nohillsfile == false)
-        {
-            std::ofstream hillsfile;
-            if (i == 0) {
-                hillsfile.open("HILLS", std::iostream::app);
-            } else {
-                hillsfile.open("HILLS_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
-            }
-            hillsfile << m_currentStep << " " << rmsd << " " << m_alpha_rmsd << " " << m_k_rmsd << " " << "-1" << std::endl;
-            hillsfile.close();
-        }
-        */
 
-        double dEdR = -2 * m_alpha * m_k / m_atoms * exp(-rmsd * rmsd * m_alpha) * factor * m_dT;
+        // Visited if the walker sits inside this Gaussian (heuristic deposition gate).
+        if (expr * m_rmsd_econv > static_cast<double>(m_biased_structures.size()))
+            visited.push_back(i);
 
-        m_gradient += m_driver.Gradient() * dEdR;
         m_counter += m_biased_structures[i].counter;
+    }
+
+    // Phase 2: update visited references. Exploration (counter) is ALWAYS undamped so
+    // well-tempering never slows the search. WT (opt-in) only feeds the separate output
+    // weight 'factor' with the standard W*exp(-V/(kB*Delta_T)) damping.
+    for (int i : visited) {
+        m_biased_structures[i].counter++;
+        if (m_wtmtd)
+            m_biased_structures[i].factor += exp(-m_current_bias / (kb_Eh * m_DT));
     }
     return 1;
 }
@@ -165,6 +168,7 @@ SimpleMD::SimpleMD(const json& controller, const bool silent)
 
 SimpleMD::~SimpleMD()
 {
+    delete m_interface;
     for (const auto & m_unique_structure : m_unique_structures)
         delete m_unique_structure;
     // delete m_bias_pool;
@@ -241,6 +245,8 @@ void SimpleMD::LoadControlJson()
     m_max_rmsd_N = m_config.get<int>("rmsd_mtd_max_gaussians");
     m_rmsd_econv = m_config.get<double>("rmsd_econv", 1e8);  // Not in PARAM block - legacy
     m_rmsd_DT = m_config.get<double>("rmsd_mtd_dt");
+    m_rmsd_mtd_max_height = m_config.get<int>("rmsd_mtd_max_height", 0);  // Claude Generated (Jun 2026): cap on hill height
+    m_freeze_inherited = m_config.get<bool>("rmsd_mtd_freeze_inherited", false);  // Claude Generated (Jun 2026)
     m_wtmtd = m_config.get<bool>("wtmtd", false);  // Not in PARAM block - legacy
     m_rmsd_ref_file = m_config.get<std::string>("rmsd_mtd_ref_file");
     m_rmsd_fix_structure = m_config.get<bool>("rmsd_fix_structure", false);  // Not in PARAM block - legacy
@@ -248,6 +254,15 @@ void SimpleMD::LoadControlJson()
     m_nohillsfile = m_config.get<bool>("noHILSfile", false);  // Not in PARAM block - legacy
 
     m_rmsd_atoms = m_config.get<std::string>("rmsd_mtd_atoms");
+
+    // Claude Generated (Jun 2026): ConfSearch robustness gates
+    m_topo_check = m_config.get<bool>("topo_check", false);
+    m_topo_check_interval = m_config.get<int>("topo_check_interval", 0);
+    m_epot_abort = m_config.get<bool>("epot_abort", false);
+    m_epot_abort_window = m_config.get<double>("epot_abort_window", 250.0);
+    m_temp_abort = m_config.get<bool>("temp_abort", false);
+    m_temp_abort_factor = m_config.get<double>("temp_abort_factor", 1.5);
+    m_temp_abort_delta = m_config.get<double>("temp_abort_delta", 300.0);
 
     // Claude Generated 2025: Output & Restart Parameters
     m_writerestart = m_config.get<int>("write_restart_frequency");
@@ -296,7 +311,11 @@ void SimpleMD::LoadControlJson()
 
     m_rattle_dynamic_tol = m_config.get<bool>("rattle_dynamic_tol", false);  // Not in PARAM block - legacy
 
-    if (rattle == 1) {
+    // Claude Generated (Jun 2026): mode 2 (constrain X-H only) was documented (PARAM: 0:off,1:on,
+    // 2:H-only) and handled by InitConstrainedBonds (m_rattle==2 path), but this activation gate
+    // only fired for ==1, so -rattle 2 silently ran plain Verlet with 0 constraints. Activate the
+    // RATTLE integrator for both modes.
+    if (rattle == 1 || rattle == 2) {
         Integrator = [=]() {
             this->Rattle();
         };
@@ -547,6 +566,7 @@ bool SimpleMD::Initialise()
 
 
     m_start_fragments = m_molecule.GetFragments();
+    m_start_fragment_count = static_cast<int>(m_start_fragments.size());  // Claude Generated (Jun 2026): topo-check reference
     m_scaling_vector_linear = std::vector<double>(m_natoms, 1);
     m_scaling_vector_nonlinear = std::vector<double>(m_natoms, 1);
     if (m_scaling_json != "none") {
@@ -670,7 +690,21 @@ bool SimpleMD::Initialise()
     m_molecule.setSpin(m_spin);
     // Claude Generated (October 2025 - FIXED): Use controller["simplemd"] like CurcumaOpt uses controller["opt"]
     // Also merge in global parameters and defaults from ParameterRegistry
-    json ec_config = m_controller.contains("simplemd") ? m_controller["simplemd"] : json::object();
+    json ec_config = m_controller.contains("simplemd") && m_controller["simplemd"].is_object()
+        ? m_controller["simplemd"]
+        : json::object();
+
+    // Forward flat user parameters from controller to energy calculator config.
+    // ConfSearch and other callers may pass parameters at the top level rather
+    // than nested inside controller["simplemd"]. Without this forwarding, keys
+    // like "gpu" or "charge" are silently dropped.
+    for (auto& [key, value] : m_controller.items()) {
+        if (key == "simplemd" || key == "global" || value.is_object())
+            continue;
+        if (!ec_config.contains(key) || ec_config[key].is_null()) {
+            ec_config[key] = value;
+        }
+    }
 
     // Merge global parameters as fallback
     if (m_controller.contains("global") && m_controller["global"].is_object()) {
@@ -707,6 +741,14 @@ bool SimpleMD::Initialise()
     m_interface = new EnergyCalculator(m_method, ec_config, Basename());
 
     m_interface->setMolecule(m_molecule.getMolInfo());
+    // Energy-method-setup boundary (Claude Generated, Jun 2026): EnergyCalculator construction +
+    // setMolecule (e.g. GFN-FF parameter generation) leaves the global CurcumaLogger verbosity
+    // clamped to 0 (it captures/restores around an already-clamped level), so the remaining setup
+    // output below — notably the RATTLE report in InitConstrainedBonds — was silently dropped. The
+    // CurcumaMethod base RAII can't help (EnergyCalculator is not a CurcumaMethod), so re-assert our
+    // level here. (A deeper fix would stop the EnergyCalculator setup path leaking 0 in the first
+    // place.)
+    CurcumaLogger::set_verbosity(m_verbosity);
     // Iterative mode: raise SCF display threshold by one level so system verbosity
     // controls output (silent at default=1, visible at -v 2). Claude Generated.
     m_interface->setIterativeMode(true);
@@ -766,6 +808,12 @@ bool SimpleMD::Initialise()
         json config = ParameterRegistry::getInstance().getDefaultJson("rmsd");  // Claude Generated 2025: Use ParameterRegistry instead of RMSDJson
         config["silent"] = true;
         config["reorder"] = false;
+
+        // Claude Generated (Apr 2026): Initialize shared pool RMSDDriver for parallel ConfSearch
+        m_shared_pool_driver = RMSDDriver(config, true);
+        m_shared_pool_driver.setReference(m_rmsd_mtd_molecule);
+        m_shared_pool_target = m_rmsd_mtd_molecule;
+
         for (int i = 0; i < m_threads; ++i) {
             auto* thread = new BiasThread(m_rmsd_mtd_molecule, config, m_nocolvarfile, m_nohillsfile);
             thread->setDT(m_rmsd_DT);
@@ -813,13 +861,14 @@ bool SimpleMD::Initialise()
 
 void SimpleMD::InitConstrainedBonds()
 {
-
+    int total_bonds = 0; // Claude Generated (Jun 2026): all 1-2 bonds in the topology (for the summary)
     if (m_rattle) {
         auto m = m_molecule.DistanceMatrix();
         m_topo_initial = m.second;
         for (int i = 0; i < m_molecule.AtomCount(); ++i) {
             for (int j = 0; j < i; ++j) {
                 if (m.second(i, j)) {
+                    ++total_bonds;
                     if (m_rattle == 2) {
                         if (m_molecule.Atom(i).first != 1 && m_molecule.Atom(j).first != 1)
                             continue;
@@ -829,7 +878,6 @@ void SimpleMD::InitConstrainedBonds()
                     std::pair<std::pair<int, int>, double> bond(indicies, m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j));
                     if (m_rattle_12) {
                         m_bond_constrained.emplace_back(bond);
-                        std::cout << "1,2: " << i << " " << j << " " << bond.second << " ";
                     }
 
                     for (int k = 0; k < j; ++k) {
@@ -839,7 +887,6 @@ void SimpleMD::InitConstrainedBonds()
                             std::pair<std::pair<int, int>, double> bond(indicies, m_molecule.CalculateDistance(i, k) * m_molecule.CalculateDistance(i, k));
                             if (m_rattle_13) {
                                 m_bond_13_constrained.push_back(std::pair<std::pair<int, int>, double>(bond));
-                                std::cout << "1,3: " << i << " " << k << " " << bond.second << " ";
                             }
                         }
                     }
@@ -850,14 +897,51 @@ void SimpleMD::InitConstrainedBonds()
 
     // Subtract constrained DOF: each bond/angle constraint removes 1 degree of freedom
     int n_constraints = static_cast<int>(m_bond_constrained.size() + m_bond_13_constrained.size());
+    const int total_dof = m_dof; // 3N before removing constraints
     m_dof -= n_constraints;
     if (m_dof < 1)
         m_dof = 1;
 
-    std::cout << std::endl
-              << m_dof + n_constraints << " initial degrees of freedom (3N)" << std::endl;
-    std::cout << n_constraints << " constraints active (" << m_bond_constrained.size() << " 1-2, " << m_bond_13_constrained.size() << " 1-3)" << std::endl;
-    std::cout << m_dof << " effective degrees of freedom" << std::endl;
+    // Claude Generated (Jun 2026): clean RATTLE constraint report. The per-bond list the user asked
+    // for is element-labelled (e.g. C5-H12) with the constrained distance, wrapped 5 per line, and a
+    // one-line summary gives constrained/total bonds, angles, and the DOF before -> after (delta).
+    //
+    // Verbosity is now scoped (CurcumaMethod base RAII + thread-pool boundary restores), and the
+    // energy-method setup (gfnff param-gen) restores the level after itself, so the global level is
+    // correct here again — this report uses CurcumaLogger. The summary shows at verbosity >= 1; the
+    // element-labelled per-bond/angle lists are gated at verbosity >= 3. Claude Generated (Jun 2026).
+    if (m_rattle) {
+        CurcumaLogger::result_fmt("RATTLE: {} constraints | {} of {} 1-2 bonds{} + {} 1-3 angles | DOF {} -> {} ({:+d})",
+            n_constraints, m_bond_constrained.size(), total_bonds, m_rattle == 2 ? " (X-H only)" : "",
+            m_bond_13_constrained.size(), total_dof, m_dof, m_dof - total_dof);
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            if (!m_bond_constrained.empty()) {
+                std::string line = "  1-2:";
+                int col = 0;
+                for (const auto& b : m_bond_constrained) {
+                    int i = b.first.first, j = b.first.second;
+                    line += fmt::format(" {}{}-{}{}({:.3f})",
+                        Elements::ElementAbbr[m_molecule.Atom(i).first], i,
+                        Elements::ElementAbbr[m_molecule.Atom(j).first], j, std::sqrt(b.second));
+                    if (++col % 5 == 0 && col < static_cast<int>(m_bond_constrained.size()))
+                        line += "\n     ";
+                }
+                CurcumaLogger::result(line);
+            }
+            if (!m_bond_13_constrained.empty()) {
+                std::string line = "  1-3:";
+                int col = 0;
+                for (const auto& b : m_bond_13_constrained) {
+                    line += fmt::format(" {}-{}({:.3f})", b.first.first, b.first.second, std::sqrt(b.second));
+                    if (++col % 6 == 0 && col < static_cast<int>(m_bond_13_constrained.size()))
+                        line += "\n     ";
+                }
+                CurcumaLogger::result(line);
+            }
+        }
+    } else {
+        CurcumaLogger::result_fmt("{} degrees of freedom (no constraints)", m_dof);
+    }
 }
 
 void SimpleMD::InitVelocities(double scaling)
@@ -1646,6 +1730,21 @@ void SimpleMD::prepareRun()
     AverageQuantities();
     m_step = 0;
 
+    // Claude Generated (Jun 2026): reference state for the opt-in robustness gates.
+    // epot_ref is the bare starting potential; the topology check interval defaults to dump.
+    m_epot_ref = m_Epot;
+    m_topo_check_every = (m_topo_check_interval > 0) ? m_topo_check_interval : m_dump;
+
+    // Claude Generated (Jun 2026): when freezing inherited hill heights, record the counters of
+    // every bias structure already in the shared pool at this run's start. Those structures then
+    // contribute at a fixed height for the whole run (and are not bumped by it), so only this run's
+    // own deposits grow -> the cumulative bias force no longer escalates run after run.
+    m_frozen_height.clear();
+    if (m_shared_pool && m_freeze_inherited) {
+        for (const auto& bs : m_shared_pool->snapshot())
+            m_frozen_height[bs.index] = bs.counter;
+    }
+
     // WP-S2 (May 2026): open per-step diagnostics JSONL file
     if (m_md_diagnostics) {
         m_diag_writer = std::make_unique<MDDiagnosticsWriter>(Basename() + ".diag.jsonl");
@@ -1721,21 +1820,27 @@ void SimpleMD::prepareRun()
             header += fmt::format(" {: ^15}", "Dipole");
             units  += fmt::format(" {: ^15}", "Debye");
         }
-        if (m_writeUnique) {
+        if (m_rmsd_mtd) {
+            header += fmt::format(" {: ^15}", "nBias");
+            units  += fmt::format(" {: ^15}", "#");
+        } else if (m_writeUnique) {
             header += fmt::format(" {: ^15}", "nUnique");
             units  += fmt::format(" {: ^15}", "#");
         }
         std::cout << header << "\n" << units << "\n";
     }
     if (m_rmsd_mtd) {
-        std::cout << "k\t" << m_k_rmsd << std::endl;
-        std::cout << "alpha\t" << m_alpha_rmsd << std::endl;
-        std::cout << "steps\t" << m_mtd_steps << std::endl;
-        std::cout << "Ethresh\t" << m_rmsd_econv << std::endl;
+        CurcumaLogger::result_fmt("RMSD-MTD: k={} Eh, alpha={} Bohr^-2, pace={} steps",
+            m_k_rmsd, m_alpha_rmsd, m_mtd_steps);
+        CurcumaLogger::result_fmt("RMSD-MTD: Econv={}, max_gaussians={}",
+            m_rmsd_econv, m_max_rmsd_N);
         if (m_wtmtd)
-            std::cout << "Well Tempered\tOn (" << m_rmsd_DT << ")" << std::endl;
+            CurcumaLogger::result_fmt("RMSD-MTD: Well-tempered (dT={})", m_rmsd_DT);
         else
-            std::cout << "Well Tempered\tOff" << std::endl;
+            CurcumaLogger::result("RMSD-MTD: Well-tempered Off");
+        if (m_shared_pool)
+            CurcumaLogger::result_fmt("RMSD-MTD: Shared bias pool active ({} structures)",
+                m_shared_pool->biasStructureCount());
     }
     PrintStatus();
     m_run_prepared = true;
@@ -1800,6 +1905,59 @@ bool SimpleMD::step()
     }
     m_last_integrator_ms = integrator_ms;
     AverageQuantities();
+
+    // Claude Generated (Jun 2026): ConfSearch robustness gates (opt-in, default off).
+    // Both set m_run_aborted (like the stop-file path) so finalizeRun() still runs and
+    // the bias pool / final frame are finalised cleanly.
+    //
+    // Early Epot abort: a sustained climb of the running-mean BARE potential (bias is
+    // separate from m_Epot) means the walker left the relevant low-energy region. The
+    // window must exceed the thermal baseline (~N_dof*kT/2) plus typical barriers, so a
+    // single barrier crossing (transient spike) does not trip it. Warm up first so the
+    // cumulative mean is not dominated by the initial transient.
+    if (m_epot_abort && m_step > 100
+        && (m_aver_Epot - m_epot_ref) * 2625.5 > m_epot_abort_window) {
+        // fmt::print (not CurcumaLogger): abort diagnostics must stay visible even when the
+        // global logger verbosity is clamped to 0 by the energy-setup path (see roadmap issue #3),
+        // mirroring the "Simulation got unstable" message below.
+        fmt::print(fg(fmt::color::orange) | fmt::emphasis::bold,
+            "MD aborted: <Epot> climbed {:.1f} kJ/mol above start (window {:.1f})\n",
+            (m_aver_Epot - m_epot_ref) * 2625.5, m_epot_abort_window);
+        m_run_aborted = true;
+        return false;
+    }
+    // Temperature runaway abort: the shared bias pool's hills (W_i = k*counter_i) grow over
+    // successive runs and pump energy in faster than the thermostat removes it -> the running-mean
+    // temperature climbs above the target. Either an over-factor (relative) or over-delta (absolute)
+    // threshold trips it; a threshold with value <= 0 is disabled. Warm up first so the cumulative
+    // mean is not dominated by the initial transient. Claude Generated (Jun 2026).
+    if (m_temp_abort && m_step > 100) {
+        const bool over_factor = (m_temp_abort_factor > 0 && m_aver_Temp > m_temp_abort_factor * m_T0);
+        const bool over_delta = (m_temp_abort_delta > 0 && m_aver_Temp > m_T0 + m_temp_abort_delta);
+        if (over_factor || over_delta) {
+            // fmt::print: stay visible despite the verbosity clamp (see epot_abort note above).
+            fmt::print(fg(fmt::color::orange) | fmt::emphasis::bold,
+                "MD aborted: <T>={:.0f} K ran away from target {:.0f} K (factor limit {}x, delta limit {} K)\n",
+                m_aver_Temp, m_T0, m_temp_abort_factor, m_temp_abort_delta);
+            m_run_aborted = true;
+            return false;
+        }
+    }
+    // Topology abort: a growth in the connected-component count means the molecule
+    // fragmented. Only the fragment count is used (robust against transient bond-length
+    // fluctuations at high T). m_eigen_geometry holds the current coordinates.
+    if (m_topo_check && m_topo_check_every > 0 && m_step > 0 && m_step % m_topo_check_every == 0) {
+        m_molecule.setGeometry(m_eigen_geometry);
+        int nfrag = static_cast<int>(m_molecule.GetFragments().size());
+        if (nfrag > m_start_fragment_count) {
+            // fmt::print: stay visible despite the verbosity clamp (see epot_abort note above).
+            fmt::print(fg(fmt::color::orange) | fmt::emphasis::bold,
+                "MD aborted: topology broke (fragments {} -> {})\n",
+                m_start_fragment_count, nfrag);
+            m_run_aborted = true;
+            return false;
+        }
+    }
 
     if (m_mtd) {
         if (!m_eval_mtd) {
@@ -1892,7 +2050,9 @@ bool SimpleMD::step()
         PrintStatus();
         fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Simulation got unstable, exiting!\n");
 
-        std::ofstream restart_file(snapshotPath("unstable_curcuma.json"));
+        // Per-instance filename (Basename() carries the ConfSearch ".t<id>" suffix) so concurrent
+        // MD workers do not clobber each other's crash dump during simultaneous instability cleanup.
+        std::ofstream restart_file(snapshotPath(Basename() + ".unstable.json"));
         nlohmann::json restart;
         restart[MethodName()[0]] = WriteRestartInformation();
         restart_file << restart << std::endl;
@@ -1910,7 +2070,7 @@ bool SimpleMD::step()
     }
 
     if (m_writerestart > -1 && m_step % m_writerestart == 0) {
-        std::ofstream restart_file(snapshotPath("curcuma_step_" + std::to_string(static_cast<int>(m_step * m_dT)) + ".json"));
+        std::ofstream restart_file(snapshotPath(Basename() + "_step_" + std::to_string(static_cast<int>(m_step * m_dT)) + ".json"));
         json restart;
         restart[MethodName()[0]] = WriteRestartInformation();
         restart_file << restart << std::endl;
@@ -1930,11 +2090,15 @@ bool SimpleMD::step()
         if (m_rattle_counter == m_rattle_dynamic_tol_iter)
             AdjustRattleTolerance();
     }
+    // Temporarily disabled: impuls re-initialization overrides thermostat-controlled
+    // temperature ramps in ConfSearch. Re-enable after testing temperature stability.
+    /*
     if (m_impuls > m_T) {
         InitVelocities(m_scale_velo * m_impuls_scaling);
         EKin();
         m_time_step = 0;
     }
+    */
 
     if (m_current_rescue >= m_max_rescue) {
         fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Nothing really helps");
@@ -1990,7 +2154,8 @@ void SimpleMD::finalizeRun()
             }
         }
     }
-    std::ofstream restart_file(snapshotPath("curcuma_final.json"));
+    // Per-instance filename so concurrent MD workers don't overwrite each other's final dump.
+    std::ofstream restart_file(snapshotPath(Basename() + ".final.json"));
     nlohmann::json restart;
     restart[MethodName()[0]] = WriteRestartInformation();
     restart_file << restart << std::endl;
@@ -2504,6 +2669,7 @@ void SimpleMD::ApplyRMSDMTD()
     m_start = std::chrono::system_clock::now();
     m_colvar_incr = 0;
 
+    // RMSD-subset geometry for bias evaluation
     Geometry current_geometry = m_rmsd_mtd_molecule.getGeometry();
     for (int i = 0; i < m_rmsd_indicies.size(); ++i) {
         current_geometry(i, 0) = m_eigen_geometry.data()[3 * m_rmsd_indicies[i] + 0];
@@ -2511,9 +2677,239 @@ void SimpleMD::ApplyRMSDMTD()
         current_geometry(i, 2) = m_eigen_geometry.data()[3 * m_rmsd_indicies[i] + 2];
     }
 
-    double current_bias = 0;
+    // Full molecule geometry for storage and XYZ output (all atoms)
+    Geometry full_geometry(m_natoms, 3);
+    for (int i = 0; i < m_natoms; ++i) {
+        full_geometry(i, 0) = m_eigen_geometry.data()[3 * i + 0];
+        full_geometry(i, 1) = m_eigen_geometry.data()[3 * i + 1];
+        full_geometry(i, 2) = m_eigen_geometry.data()[3 * i + 2];
+    }
+
+    double current_bias = 0;    // exploration bias: drives force + deposition
+    double current_bias_wt = 0; // optional well-tempered energy (opt-in, COLVAR output only)
     double rmsd_reference = 0;
 
+    // Claude Generated (Apr 2026): Shared bias pool path for parallel ConfSearch
+    // When a shared pool is set, read bias structures from the pool and evaluate locally.
+    // Deposit new structures back to the shared pool when the deposition criterion is met.
+    if (m_shared_pool) {
+        int global_count = m_shared_pool->biasStructureCount();
+
+        if (global_count == 0) {
+            // First structure: deposit initial reference with full geometry
+            BiasStructure initial;
+            initial.geometry = full_geometry;
+            initial.time = m_currentStep;
+            initial.rmsd_reference = 0;
+            initial.counter = 1;
+            initial.index = 0;
+            initial.temperature = m_T0;
+            int deposited = m_shared_pool->depositBiasStructure(initial);
+            m_bias_structure_count++;
+            CurcumaLogger::result_fmt("RMSD-MTD: Initial bias structure {} deposited (pool total: {})",
+                deposited, m_shared_pool->biasStructureCount());
+            // Write full molecule to per-thread .mtd.xyz for reference
+            Molecule out_mol(m_molecule);
+            out_mol.setGeometry(full_geometry);
+            out_mol.setName(std::to_string(m_currentStep));
+            out_mol.writeXYZFile(Basename() + ".mtd.xyz");
+            if (m_nocolvarfile == false) {
+                std::ofstream colvarfile;
+                colvarfile.open("COLVAR");
+                colvarfile.close();
+            }
+            m_end = std::chrono::system_clock::now();
+            m_mtd_time += std::chrono::duration_cast<std::chrono::milliseconds>(m_end - m_start).count();
+            return;
+        }
+
+        // Snapshot all current bias structures from the shared pool
+        auto bias_snapshot = m_shared_pool->snapshot();
+
+        // Reference for the RMSD driver must be the CURRENT walker geometry, set once
+        // per step. Without this the driver keeps the initial geometry from Initialise()
+        // (setReference copies), so RMSD would be measured against the start structure
+        // (structure 0 -> rmsd~0 -> current_bias huge -> deposition never triggers and
+        // the bias force is bogus). This mirrors the local BiasThread path (setReference
+        // of the moving geometry each step). Claude Generated (Jun 2026).
+        m_rmsd_mtd_molecule.setGeometry(current_geometry);
+        m_shared_pool_driver.setReference(m_rmsd_mtd_molecule);
+
+        // Visited references to bump after the loop (the WT weight needs the full V).
+        std::vector<int> visited;
+
+        // Symmetry/atom-permutation set discovered by ConfScan (full-atom reorder rules), set
+        // on the shared pool between cycles. Empty -> identity only -> bit-identical to before.
+        // We SUM a Gaussian over every symmetry image (NOT a hard min over images): the bias and
+        // its force stay C-infinity smooth as the walker crosses a symmetry seam (a hard min would
+        // make the force discontinuous there and break the MD integration). For well-separated
+        // images only the nearest contributes appreciably, so it behaves like the min but smoothly.
+        // Only applied when the RMSD subset is the full molecule (the reorder rules are full-atom).
+        // Claude Generated (Jun 2026).
+        std::vector<std::vector<int>> perms;
+        if (static_cast<int>(m_rmsd_indicies.size()) == m_natoms)
+            perms = m_shared_pool->permutations();
+
+        // Claude Generated (Jun 2026): flexibility/RMSF weights (Phase C "weighted"). Empty ->
+        // uniform -> standard best-fit RMSD (bit-identical). Only when the RMSD subset is the full
+        // molecule (the weights are full-atom). Set once here; persists for every image below.
+        if (static_cast<int>(m_rmsd_indicies.size()) == m_natoms) {
+            std::vector<double> w = m_shared_pool->weights();
+            if (static_cast<int>(w.size()) == m_natoms)
+                m_shared_pool_driver.setRMSDWeights(w);
+            else
+                m_shared_pool_driver.clearRMSDWeights();
+        }
+
+        // Evaluate the bias from the snapshot — hill height W_i = k * counter_i,
+        // V(x) = Sum_i Sum_p W_i * exp(-alpha*RMSD_{i,p}^2) (p over identity + symmetry images),
+        // force = exact negative gradient. Well-tempered (opt-in) only feeds current_bias_wt.
+        for (const auto& bs : bias_snapshot) {
+            // Effective hill counter: frozen if inherited at run start (only this run's deposits
+            // grow), then capped by rmsd_mtd_max_height. Both default-off -> eff = bs.counter
+            // (legacy W_i = k * counter_i). Claude Generated (Jun 2026).
+            int eff_counter = bs.counter;
+            if (m_freeze_inherited) {
+                auto it = m_frozen_height.find(bs.index);
+                if (it != m_frozen_height.end())
+                    eff_counter = it->second;
+            }
+            if (m_rmsd_mtd_max_height > 0)
+                eff_counter = std::min(eff_counter, m_rmsd_mtd_max_height);
+            const double height = m_k_rmsd * eff_counter; // W_i = k * counter_i
+            double expr_sum = 0.0;      // Sum over images: drives deposition/visited bookkeeping
+            double rmsd_identity = 0.0; // identity-image RMSD for COLVAR / rmsd_reference
+
+            // Evaluate one image (a reordered copy of the bias structure subset) and accumulate
+            // its Gaussian into the bias + its analytic force into the walker gradient.
+            auto eval_image = [&](const Geometry& subset, bool is_identity) {
+                m_shared_pool_target.setGeometry(subset);
+                m_shared_pool_driver.setTarget(m_shared_pool_target);
+                double rmsd = m_shared_pool_driver.BestFitRMSD();
+                double expr = exp(-rmsd * rmsd * m_alpha_rmsd);
+                current_bias += height * expr;
+                if (m_wtmtd)
+                    current_bias_wt += m_k_rmsd * bs.factor * expr;
+                double dEdR = -2.0 * m_alpha_rmsd * height * rmsd * expr;
+                Geometry grad = m_shared_pool_driver.Gradient();
+                for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
+                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += dEdR * grad(j, 0);
+                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 1] += dEdR * grad(j, 1);
+                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 2] += dEdR * grad(j, 2);
+                }
+                expr_sum += expr;
+                if (is_identity)
+                    rmsd_identity = rmsd;
+            };
+
+            // Identity image (bs.geometry is full-atom; project onto the RMSD subset).
+            Geometry bs_rmsd_subset = m_shared_pool_target.getGeometry();
+            for (int i = 0; i < m_rmsd_indicies.size(); ++i) {
+                bs_rmsd_subset(i, 0) = bs.geometry(m_rmsd_indicies[i], 0);
+                bs_rmsd_subset(i, 1) = bs.geometry(m_rmsd_indicies[i], 1);
+                bs_rmsd_subset(i, 2) = bs.geometry(m_rmsd_indicies[i], 2);
+            }
+            eval_image(bs_rmsd_subset, true);
+
+            // Symmetry images: position j holds atom rule[j] (same convention as ConfScan's
+            // Rules2RMSD). Reference (walker) stays in canonical order, so this measures the
+            // RMSD to the relabelled bias structure.
+            for (const auto& rule : perms) {
+                if (static_cast<int>(rule.size()) != m_natoms)
+                    continue;
+                Geometry bs_perm(m_natoms, 3);
+                bool ok = true;
+                for (int j = 0; j < m_natoms; ++j) {
+                    int src = rule[j];
+                    if (src < 0 || src >= m_natoms) { ok = false; break; }
+                    bs_perm(j, 0) = bs.geometry(src, 0);
+                    bs_perm(j, 1) = bs.geometry(src, 1);
+                    bs_perm(j, 2) = bs.geometry(src, 2);
+                }
+                if (ok)
+                    eval_image(bs_perm, false);
+            }
+
+            if (expr_sum * m_rmsd_econv > static_cast<double>(global_count))
+                visited.push_back(bs.index);
+
+            if (bs.index == 0)
+                rmsd_reference = rmsd_identity;
+        }
+
+        // Phase 2: bump the visited references in the shared pool. counter++ always (drives
+        // exploration); the well-tempered weight 'factor' grows only when opt-in (output-only).
+        {
+            std::vector<std::pair<int, double>> visit_updates;
+            visit_updates.reserve(visited.size());
+            double wt_inc = m_wtmtd ? exp(-current_bias / (kb_Eh * m_rmsd_DT)) : 0.0;
+            for (int idx : visited) {
+                // When freezing inherited heights, do not bump structures this run inherited:
+                // their height stays fixed so the run's cumulative bias does not escalate.
+                if (m_freeze_inherited && m_frozen_height.count(idx))
+                    continue;
+                visit_updates.emplace_back(idx, wt_inc);
+            }
+            m_shared_pool->registerVisits(visit_updates);
+        }
+
+        m_rmsd_mtd_molecule.setGeometry(current_geometry);
+
+        // COLVAR output
+        if (m_nocolvarfile == false) {
+            std::ofstream colvarfile;
+            colvarfile.open("COLVAR", std::iostream::app);
+            colvarfile << m_currentStep << " ";
+            if (m_rmsd_fragment_count < 2)
+                colvarfile << rmsd_reference << " ";
+            for (int i = 0; i < m_rmsd_fragment_count; ++i)
+                for (int j = 0; j < i; ++j) {
+                    colvarfile << (m_rmsd_mtd_molecule.Centroid(true, i) - m_rmsd_mtd_molecule.Centroid(true, j)).norm() << " ";
+                }
+            colvarfile << (m_wtmtd ? current_bias_wt : current_bias) << " " << std::endl;
+            colvarfile.close();
+        }
+        m_bias_energy += current_bias;
+
+        // Deposition criterion: same as local path — only deposit when in a genuinely new region.
+        // current_bias * m_rmsd_econv < pool_count means: the region is under-biased relative
+        // to the number of existing reference structures → it is a new conformation.
+        // First structure (pool empty) is always accepted.
+        int pool_count = m_shared_pool->biasStructureCount();
+        bool deposit = !m_rmsd_fix_structure
+            && (pool_count == 0 || current_bias * m_rmsd_econv < static_cast<double>(pool_count));
+        // Claude Generated (Jun 2026): never deposit a fragmented structure into the shared
+        // pool (only relevant when topo_check is on; the run aborts shortly after anyway).
+        if (deposit && m_topo_check) {
+            m_molecule.setGeometry(full_geometry);
+            if (static_cast<int>(m_molecule.GetFragments().size()) > m_start_fragment_count)
+                deposit = false;
+        }
+        if (deposit) {
+            BiasStructure new_bs;
+            new_bs.geometry = full_geometry;
+            new_bs.rmsd_reference = rmsd_reference;
+            new_bs.time = m_currentStep;
+            new_bs.counter = 1;
+            new_bs.temperature = m_T0;
+            int new_count = m_shared_pool->depositBiasStructure(new_bs);
+            m_bias_structure_count++;
+            // Write full molecule to per-thread .mtd.xyz
+            Molecule out_mol(m_molecule);
+            out_mol.setGeometry(full_geometry);
+            out_mol.setName(std::to_string(m_currentStep));
+            out_mol.appendXYZFile(Basename() + ".mtd.xyz");
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::result_fmt("RMSD-MTD: Deposited bias structure {} (pool total: {})",
+                    new_count, m_shared_pool->biasStructureCount());
+        }
+
+        m_end = std::chrono::system_clock::now();
+        m_mtd_time += std::chrono::duration_cast<std::chrono::milliseconds>(m_end - m_start).count();
+        return;
+    }
+
+    // Original local-only bias path (unchanged)
     if (m_bias_structure_count == 0) {
         m_bias_threads[0]->addGeometry(current_geometry, 0, m_currentStep, 0);
         m_bias_structure_count++;
@@ -2529,6 +2925,7 @@ void SimpleMD::ApplyRMSDMTD()
             m_bias_thread->setCurrentGeometry(current_geometry, m_currentStep);
             m_bias_thread->start();
             current_bias += m_bias_thread->BiasEnergy();
+            current_bias_wt += m_bias_thread->BiasEnergyWT();
             for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
                 m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += m_bias_thread->Gradient()(j, 0);
                 m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 1] += m_bias_thread->Gradient()(j, 1);
@@ -2557,6 +2954,7 @@ void SimpleMD::ApplyRMSDMTD()
             if (m_bias_thread->getReturnValue() == 1) {
 
                 current_bias += m_bias_thread->BiasEnergy();
+                current_bias_wt += m_bias_thread->BiasEnergyWT();
                 for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
                     m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += m_bias_thread->Gradient()(j, 0);
                     m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 1] += m_bias_thread->Gradient()(j, 1);
@@ -2582,11 +2980,13 @@ void SimpleMD::ApplyRMSDMTD()
             for (int j = 0; j < i; ++j) {
                 colvarfile << (m_rmsd_mtd_molecule.Centroid(true, i) - m_rmsd_mtd_molecule.Centroid(true, j)).norm() << " ";
             }
-        colvarfile << current_bias << " " << std::endl;
+        // Report the well-tempered energy when opt-in; the exploration bias otherwise.
+        colvarfile << (m_wtmtd ? current_bias_wt : current_bias) << " " << std::endl;
         colvarfile.close();
     }
     m_bias_energy += current_bias;
 
+    // Deposition uses the exploration bias only (well-tempering never gates the search).
     if (current_bias * m_rmsd_econv < m_bias_structure_count && m_rmsd_fix_structure == false) {
         int thread_index = m_bias_structure_count % m_bias_threads.size();
         m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentStep, m_bias_structure_count);
@@ -3000,6 +3400,8 @@ void SimpleMD::RemoveRotation()
 
 void SimpleMD::PrintStatus() const
 {
+    // Header is printed once before the MD loop starts (not here).
+
     const auto unix_timestamp = std::chrono::seconds(std::time(NULL));
 
     const int current = std::chrono::milliseconds(unix_timestamp).count();
@@ -3029,7 +3431,9 @@ void SimpleMD::PrintStatus() const
             remaining, m_time_step / 1000.0);
         if (m_dipole)
             line += fmt::format(" {: ^15f}", m_aver_dipol_linear * 2.5418 * 3.3356);
-        if (m_writeUnique)
+        if (m_rmsd_mtd)
+            line += fmt::format(" {: ^15}", m_bias_structure_count);
+        else if (m_writeUnique)
             line += fmt::format(" {: ^15}", m_unqiue->StoredStructures());
         std::cout << line << "\n";
     }

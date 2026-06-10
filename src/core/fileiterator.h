@@ -32,7 +32,11 @@ class FileIterator {
 public:
     FileIterator(bool silent = false);
     FileIterator(const std::string& filename, bool silent = false);
-    FileIterator(char* filename, bool silent = false);
+    // const char* (not char*): a const char* such as std::string::c_str() cannot
+    // bind to char* and would otherwise resolve to FileIterator(bool) (pointer ->
+    // bool conversion), silently default-constructing an unusable iterator with an
+    // empty filename. That bug caused an infinite LoadFile("") loop in ConfSearch.
+    FileIterator(const char* filename, bool silent = false);
     ~FileIterator();
 
     void setFile(const std::string& filename);
@@ -59,8 +63,9 @@ private:
     bool ParseVTFTimestep();
 
     std::string m_filename, m_basename;
-    std::ifstream* m_file;
+    std::ifstream* m_file = nullptr;
     bool m_end = false, m_init = false;
+    bool m_nonxyz_loaded = false; // non-XYZ single-molecule file already delivered
     Molecule m_current;
     int m_lines = 0, m_current_mol = 0, m_mols = 0;
 

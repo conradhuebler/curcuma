@@ -339,6 +339,8 @@ void Docking::OptimiseBatch()
     crude_config["threads"] = m_threads;
     crude_config["energy_threshold"] = 10.0;
     crude_config["gradient_threshold"] = 0.01;
+    crude_config["verbosity"] = 0;
+    crude_config["write_trajectory"] = false;
 
     m_optimise_molecules.clear();
     m_singlepoint_molecules.clear();
@@ -393,6 +395,8 @@ void Docking::OptimiseBatch()
     json std_config;
     std_config["method"] = std::string("gfn2");
     std_config["threads"] = m_threads;
+    std_config["verbosity"] = 0;
+    std_config["write_trajectory"] = false;
 
     std::cout << "** Standard optimsation of " << m_optimise_molecules.size() << " complexes **" << std::endl;
     for (auto& mol : m_optimise_molecules) {

@@ -123,6 +123,7 @@ capabilities/
 - Memory optimization needed for large systems (>1000 atoms)
 - ConfScan verbosity: Accept/Reject messages not visible at default level
 - SimpleMD wall potential: Boundary logic and force calculation accuracy issues (TODO)
+- **ConfSearch efficiency/robustness (Phase A-C) — roadmap & open TODOs**: see [docs/CONFSEARCH_ROADMAP.md](../../docs/CONFSEARCH_ROADMAP.md). Big items: (1) verbosity-ownership rework (global CurcumaLogger level is leaked/clamped by sub-objects → ConfSearch logs hidden, RATTLE report forced to std::cout — `FIXME` in `SimpleMD::InitConstrainedBonds`); (2) `CitationRegistry::cite` thread race → crash at gfnff `threads>1` (workaround: threads=1); (3) Phase C `cluster`/`weighted` calibration is experimental/unvalidated. Cross-run bias heating bounded by **defaults ON**: `rmsd_mtd_freeze_inherited`+`temp_abort` (`rmsd_mtd_max_height` opt-in); bare `-startT 500` no longer blows up (TODO #4; intra-run wide-hill blow-up still open). Verbosity-ownership (1) is now largely resolved (CurcumaMethod base RAII).
 
 ### Unported Features from Old CurcumaOpt (TODO)
 

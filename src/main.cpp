@@ -1375,7 +1375,11 @@ int executeBlock(const json& controller, int argc, char** argv) {
 }
 
 int executeConfSearch(const json& controller, int argc, char** argv) {
-    if (argc < 3) return 1;
+    if (argc < 3) {
+        ConfSearch search(controller, false);
+        search.printHelp();
+        return 0;
+    }
     ConfSearch search(controller, false);
     initializeBMT(&search, argv[2], "confsearch", controller);
     search.start();
@@ -1635,12 +1639,18 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         fmt::print("  -threads <n>         Parallel threads (default: 1)\n");
         fmt::print("  -verbosity <n>       Output level: 0=silent, 1=table, 2=detailed, 3=debug (default: 1)\n\n");
         fmt::print("Convergence:\n");
-        fmt::print("  -energy_threshold <f>    Energy change [kJ/mol] (default: 0.1)\n");
-        fmt::print("  -rmsd_threshold <f>      RMSD change [Angstrom] (default: 0.01)\n");
-        fmt::print("  -gradient_threshold <f>  Gradient norm [Eh/Bohr] (default: 5e-4)\n");
-        fmt::print("  -max_iterations <n>      Max steps (default: 5000)\n");
-        fmt::print("  -convergence_count <n>   Criteria bit field: 1=energy, 2=RMSD, 4=gradient (default: 7=all)\n");
-        fmt::print("  -max_energy_rise <f>     Abort if energy rises by more than this [kJ/mol] (default: 100)\n\n");
+        fmt::print("  -convergence_preset <name>  Preset: loose, normal, tight, verytight (default: normal)\n");
+        fmt::print("                               loose      - fast, coarse (for pre-optimization)\n");
+        fmt::print("                               normal     - balanced (default)\n");
+        fmt::print("                               tight      - accurate (for publication-quality)\n");
+        fmt::print("                               verytight  - extreme accuracy (rarely needed)\n");
+        fmt::print("                               Individual thresholds below override the preset.\n");
+        fmt::print("  -energy_threshold <f>       Energy change [kJ/mol] (default: 0.1)\n");
+        fmt::print("  -rmsd_threshold <f>         RMSD change [Angstrom] (default: 0.01)\n");
+        fmt::print("  -gradient_threshold <f>     Gradient norm [Eh/Bohr] (default: 5e-4)\n");
+        fmt::print("  -max_iterations <n>          Max steps (default: 5000)\n");
+        fmt::print("  -convergence_count <n>       Criteria bit field: 1=energy, 2=RMSD, 4=gradient (default: 7=all)\n");
+        fmt::print("  -max_energy_rise <f>         Abort if energy rises by more than this [kJ/mol] (default: 100)\n\n");
         fmt::print("Output:\n");
         fmt::print("  -write_trajectory <0|1>  Write .trj.xyz file (default: 1)\n\n");
         fmt::print("L-BFGS tuning (lbfgspp optimizer):\n");

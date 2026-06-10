@@ -22,6 +22,7 @@
 #include "src/tools/general.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/config_manager.h"
+#include "src/core/units.h"
 
 #include <fmt/format.h>
 #include <iostream>
@@ -187,10 +188,10 @@ bool ForceFieldMethod::updateGeometry(const Matrix& geometry) {
         m_molecule.m_geometry = geometry;
         m_calculation_done = false;
         clearError();
-        
+
         // Update geometry in ForceField
         m_forcefield->UpdateGeometry(geometry);
-        
+
         return true;
         
     } catch (const std::exception& e) {

@@ -632,6 +632,30 @@ double RMSDDriver::SimpleRMSD()
 double RMSDDriver::BestFitRMSD()
 {
     double rmsd = 0;
+    // Claude Generated (Jun 2026): flexibility-weighted Kabsch path. Only taken when
+    // per-atom weights are set and match the atom count; otherwise the unweighted path
+    // below runs unchanged (bit-identical to before).
+    if (!m_rmsd_weights.empty()
+        && static_cast<int>(m_rmsd_weights.size()) == m_reference.getGeometry().rows()) {
+        Geometry ref = m_reference.getGeometry();
+        Geometry tar = m_target.getGeometry();
+        Eigen::Vector3d cr = RMSDFunctions::WeightedCentroid(ref, m_rmsd_weights);
+        Eigen::Vector3d ct = RMSDFunctions::WeightedCentroid(tar, m_rmsd_weights);
+        for (int i = 0; i < ref.rows(); ++i) {
+            ref.row(i) -= cr.transpose();
+            tar.row(i) -= ct.transpose();
+        }
+        Eigen::Matrix3d R = RMSDFunctions::BestFitRotationW(ref, tar, m_rmsd_weights);
+        const auto t = RMSDFunctions::applyRotation(tar, R);
+        m_reference_aligned.setGeometry(ref);
+        m_target_aligned.setGeometry(t);
+        m_reference.setGeometry(ref);
+        m_target.setGeometry(t);
+        rmsd = RMSDFunctions::getRMSDW(ref, t, m_rmsd_weights);
+        m_rmsd = rmsd;
+        m_rotation = R;
+        return rmsd;
+    }
     auto reference = CenterMolecule(m_reference.getGeometry());
     auto target = CenterMolecule(m_target.getGeometry());
     // const auto t = RMSDFunctions::getAligned(reference, target, 1);
@@ -1667,5 +1691,17 @@ bool RMSDDriver::MolAlignLib()
 
 Geometry RMSDDriver::Gradient() const
 {
+    // Claude Generated (Jun 2026): weighted gradient d(rmsd_w)/dx_i = w_i*(ref_i-tar_i)/(rmsd_w*Σw)
+    // when per-atom weights are set; otherwise the unweighted form (unchanged).
+    if (!m_rmsd_weights.empty()
+        && static_cast<int>(m_rmsd_weights.size()) == m_reference.getGeometry().rows()) {
+        Geometry g = m_reference.getGeometry() - m_target.getGeometry();
+        double wsum = 0.0;
+        for (double w : m_rmsd_weights)
+            wsum += w;
+        for (int i = 0; i < g.rows(); ++i)
+            g.row(i) *= m_rmsd_weights[i];
+        return g / (RMSD() * (wsum > 0 ? wsum : 1.0));
+    }
     return (m_reference.getGeometry() - m_target.getGeometry()) / (RMSD() * m_target.getGeometry().rows());
 }

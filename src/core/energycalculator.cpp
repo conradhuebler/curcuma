@@ -140,7 +140,7 @@ void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config) {
     }
 
     // Extract multiplicity and other settings
-    m_mult = m_controller.value("multi", 1);
+    m_mult = (m_controller.contains("multi") && !m_controller["multi"].is_null()) ? m_controller.value("multi", 1) : 1;
     if (getEffectiveVerbosity() >= 2) {
         CurcumaLogger::param("multiplicity", m_mult);
     }

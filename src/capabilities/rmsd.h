@@ -126,6 +126,13 @@ public:
         m_target_original = target;
     }
 
+    /*! \brief Claude Generated (Jun 2026): per-atom weights for flexibility-weighted
+     *  best-fit RMSD (used by RMSD-MTD / ConfSearch calibration). Empty = uniform =
+     *  the previous unweighted behaviour (bit-identical). Size must match the atom count
+     *  used in BestFitRMSD()/Gradient(); otherwise the weights are ignored. */
+    inline void setRMSDWeights(const std::vector<double>& weights) { m_rmsd_weights = weights; }
+    inline void clearRMSDWeights() { m_rmsd_weights.clear(); }
+
     void setMatchingAtoms(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms);
 
     double Rules2RMSD(const std::vector<int> rules, int fragment = -1);
@@ -347,6 +354,7 @@ private:
     std::vector<int> m_reorder_rules;
     std::vector<std::vector<int>> m_stored_rules, m_intermedia_rules;
     std::vector<double> m_tmp_rmsd;
+    std::vector<double> m_rmsd_weights;  // Claude Generated (Jun 2026): optional per-atom weights for BestFitRMSD/Gradient (empty = uniform)
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99, m_damping = 0.8, m_km_convergence = 1e-3;
     bool m_check = false;
     bool m_check_connections = false, m_postprocess = true, m_noreorder = false, m_swap = false, m_dynamic_center = false;

@@ -25,6 +25,7 @@
 #include <functional>
 #include <random>
 #include <ratio>
+#include <unordered_map>
 
 #ifdef USE_Plumed
 #include "plumed2/src/wrapper/Plumed.h"
@@ -35,6 +36,7 @@
 #include "src/capabilities/rmsdtraj.h"
 
 #include "src/core/energycalculator.h"
+#include "src/core/intra_parallel_context.h"
 #include "src/core/molecule.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
@@ -52,7 +54,11 @@ struct BiasStructure {
     double factor = 1;
     int index = 0;
     int counter = 0;
+    double temperature = 0;  // Claude Generated (Apr 2026): deposition temperature for cross-T propagation
+    bool persistent = false; // Claude Generated (Jun 2026): fed-back optimised minimum; exempt from counter pruning
 };
+
+class SharedBiasPool;  // Claude Generated (Apr 2026): forward declaration
 
 class BiasThread : public CxxThread {
 public:
@@ -105,11 +111,13 @@ public:
 
     inline Geometry Gradient() const { return m_gradient; }
     inline double RMSDReference() const { return m_rmsd_reference; }
+    // Exploration bias V(x) = Sum_i k*counter_i*exp(-alpha*RMSD_i^2): drives force + deposition.
     inline double BiasEnergy() const { return m_current_bias; }
+    // Optional well-tempered energy (opt-in, output only — never used for force/deposition).
+    inline double BiasEnergyWT() const { return m_current_bias_wt; }
     inline void setk(double k) { m_k = k; }
     inline void setalpha(double alpha) { m_alpha = alpha; }
-    inline void setDT(double DT) { m_DT = DT; }
-    inline void setdT(double dT) { m_dT = dT; }
+    inline void setDT(double DT) { m_DT = DT; } // well-tempered bias temperature Delta_T (K)
 
     inline void setEnergyConv(double rmsd_econv) { m_rmsd_econv = rmsd_econv; }
     inline void setWTMTD(bool wtmtd) { m_wtmtd = wtmtd; }
@@ -123,7 +131,8 @@ private:
     json m_config, m_constrained;
     Molecule m_reference, m_target;
     Geometry m_gradient;
-    double m_k, m_alpha, m_DT, m_currentStep, m_rmsd_reference, m_current_bias, m_rmsd_econv, m_dT = 1;
+    double m_k, m_alpha, m_DT, m_currentStep, m_rmsd_reference, m_current_bias, m_rmsd_econv;
+    double m_current_bias_wt = 0; // well-tempered bias energy (opt-in, output only)
     int m_counter = 0, m_atoms = 0;
     bool m_wtmtd = false, m_nocolvarfile = false, m_nohillsfile = false;
 };
@@ -214,6 +223,9 @@ public:
     int stepCount() const { return m_step; }
     double currentTime() const { return m_currentStep; }
     const Molecule& currentMolecule() const { return m_molecule; }
+
+    // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
+    void setSharedBiasPool(SharedBiasPool* pool) { m_shared_pool = pool; }
 
 private:
     std::function<void(void)> ThermostatFunction;
@@ -345,11 +357,26 @@ private:
     bool m_run_aborted = false;          // mirrors former local `aborted` flag in start()
     std::vector<json> m_run_states;      // rescue states carried across step() calls
 
+    // Claude Generated (Jun 2026): ConfSearch robustness gates (opt-in, default off)
+    bool m_topo_check = false;           // abort on fragmentation; also gates bias deposition
+    int m_topo_check_interval = 0;       // user value (0 -> resolved to dump in prepareRun)
+    int m_topo_check_every = 0;          // resolved interval actually used in step()
+    int m_start_fragment_count = 1;      // connected-component count at run start (reference)
+    bool m_epot_abort = false;           // abort when running-mean potential climbs too high
+    double m_epot_abort_window = 250.0;  // kJ/mol above the starting energy
+    double m_epot_ref = 0.0;             // bare potential energy at run start (reference)
+    bool m_temp_abort = false;           // abort when running-mean temperature runs away from target
+    double m_temp_abort_factor = 1.5;    // abort if <T> > factor * T0 (<= 0 disables)
+    double m_temp_abort_delta = 300.0;   // abort if <T> > T0 + delta [K] (<= 0 disables)
+
     std::vector<Geometry> m_bias_structures;
     std::vector<BiasStructure> m_biased_structures;
     std::vector<BiasThread*> m_bias_threads;
     json m_bias_json;
     CxxThreadPool* m_bias_pool;
+    SharedBiasPool* m_shared_pool = nullptr;  // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
+    RMSDDriver m_shared_pool_driver;  // Claude Generated (Apr 2026): local RMSDDriver for shared pool path
+    Molecule m_shared_pool_target;  // Claude Generated (Apr 2026): target molecule for shared pool RMSD
     int m_unix_started = 0, m_prev_index = 0, m_max_rescue = 10, m_current_rescue = 0, m_currentTime = 0, m_max_top_diff = 15, m_step = 0;
     int m_writerestart = -1;
     int m_respa = 1;
@@ -362,15 +389,18 @@ private:
     double m_wall_potential = 0, m_average_wall_potential = 0;
     double m_virial_correction = 0, m_average_virial_correction = 0;
     double m_deltaT = 0;
-    double m_k_rmsd = 0.1;
+    double m_k_rmsd = 0.01;
     double m_alpha_rmsd = 10;
     double m_bias_energy = 1e8;
     double m_rmsd_rmsd = 1;
     double m_rmsd_econv = 1e8;
-    double m_rmsd_DT = 1000000;
+    double m_rmsd_DT = 2000; // well-tempered bias temperature Delta_T (K), used only when wtmtd=true
     double m_rattle_max = 10;
     double m_rattle_min = 1e-4;
     int m_max_rmsd_N = -1;
+    int m_rmsd_mtd_max_height = 0;       // Claude Generated (Jun 2026): cap on counter used in W_i (0 = unbounded)
+    bool m_freeze_inherited = false;     // Claude Generated (Jun 2026): freeze heights of structures inherited at run start
+    std::unordered_map<int, int> m_frozen_height; // index -> frozen counter for inherited bias structures
     int m_mtd_steps = 10;
     int m_rattle = 0;
     int m_colvar_incr = 0;
@@ -516,13 +546,15 @@ private:
 
     // --- RMSD-based Metadynamics (Internal) ---
     PARAM(rmsd_mtd, Bool, false, "Enable internal RMSD-based metadynamics.", "RMSD-MTD", {})
-    PARAM(rmsd_mtd_k, Double, 0.1, "Force constant for RMSD bias.", "RMSD-MTD", {"k_rmsd"})
+    PARAM(rmsd_mtd_k, Double, 0.01, "Hill-height constant: bias height W_i = k * counter_i (Eh). The force is the exact gradient of the bias, so k is ~100x smaller than the pre-2026 value.", "RMSD-MTD", {"k_rmsd"})
     PARAM(rmsd_mtd_alpha, Double, 10.0, "Width parameter for RMSD Gaussians.", "RMSD-MTD", {"alpha_rmsd"})
-    PARAM(rmsd_mtd_pace, Int, 1, "Add a new bias potential every N steps.", "RMSD-MTD", {"mtd_steps"})
+    PARAM(rmsd_mtd_pace, Int, 1, "Unused in the counter-based scheme (kept for compatibility); deposition is gated by the bias level, not a fixed pace.", "RMSD-MTD", {"mtd_steps"})
     PARAM(rmsd_mtd_max_gaussians, Int, -1, "Maximum number of stored bias structures.", "RMSD-MTD", {"max_rmsd_N"})
     PARAM(rmsd_mtd_ref_file, String, "none", "File with reference structures for RMSD-MTD.", "RMSD-MTD", {"rmsd_ref_file"})
     PARAM(rmsd_mtd_atoms, String, "-1", "Atom indices to use for RMSD calculation.", "RMSD-MTD", {"rmsd_atoms"})
-    PARAM(rmsd_mtd_dt, Double, 1000000.0, "RMSD-MTD bias deposition time.", "RMSD-MTD", {"rmsd_DT"})
+    PARAM(rmsd_mtd_dt, Double, 2000.0, "Well-tempered bias temperature Delta_T (K). Only used when wtmtd=true, and only for the reported well-tempered energy -- it never affects the force or the exploration.", "RMSD-MTD", {"rmsd_DT"})
+    PARAM(rmsd_mtd_max_height, Int, 0, "Cap the per-structure hill counter used in the bias force: W_i = k * min(counter_i, cap). 0 = unbounded (legacy). Stops the shared bias pool from heating the dynamics over many runs (counter_i grows on every visit).", "RMSD-MTD", {})
+    PARAM(rmsd_mtd_freeze_inherited, Bool, false, "Freeze the hill heights of bias structures already present at this MD run's start; only structures deposited during this run gain height. Bounds the cumulative bias force across successive shared-pool runs (geometry sharing is preserved).", "RMSD-MTD", {})
 
     // --- Coarse Graining (CG) Parameters --- Claude Generated (Nov 2025)
     PARAM(cg_write_vtf, Bool, true, "Write VTF trajectory for CG systems.", "CG", {"write_vtf"})
@@ -533,6 +565,15 @@ private:
     PARAM(md_diagnostics, Bool, false, "Write per-step diagnostics to <basename>.diag.jsonl (energy decomposition, charges, CN, gradient norms, HB/XB counts). Frequency follows dump_frequency. One JSON object per line.", "Output", {})
     // --- WP-P1 Timing Instrumentation (May 2026) ---
     PARAM(md_diagnostics_timing, Bool, false, "Add a timing_ms block to each <basename>.diag.jsonl record (per-phase wall-clock: CN/EEQ/dcn/D4-weights/FF/integrator/HBXB/I-O). GPU runs add a gpu sub-block with per-kernel-category times. Requires md_diagnostics=true. ~1-2 us per hook.", "Output", {})
+
+    // --- ConfSearch robustness gates (Jun 2026, Claude Generated) ---
+    PARAM(topo_check, Bool, false, "Abort the MD run when the molecule fragments (number of connected components grows above the start value). Off by default so reactive paths are still sampled.", "ConfSearch", {})
+    PARAM(topo_check_interval, Int, 0, "Steps between topology checks (0 -> use dump_frequency).", "ConfSearch", {})
+    PARAM(epot_abort, Bool, false, "Abort the MD run when the running-mean potential energy climbs more than epot_abort_window above the run's starting energy.", "ConfSearch", {})
+    PARAM(epot_abort_window, Double, 250.0, "Energy window (kJ/mol) above the starting energy for epot_abort. Must exceed the thermal baseline (~N_dof*kT/2) plus typical barriers.", "ConfSearch", {})
+    PARAM(temp_abort, Bool, false, "Abort the MD run when the running-mean temperature runs away from the target (catches bias-driven heating). Uses temp_abort_factor and/or temp_abort_delta.", "ConfSearch", {})
+    PARAM(temp_abort_factor, Double, 1.5, "Abort when <T> exceeds temp_abort_factor * target T. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
+    PARAM(temp_abort_delta, Double, 300.0, "Abort when <T> exceeds (target T + temp_abort_delta) Kelvin. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
@@ -556,18 +597,24 @@ public:
     {
         setAutoDelete(true);
     }
-    ~MDThread() = default;
+    ~MDThread() { delete m_mddriver; }
     void setBasename(const std::string& basename) { m_basename = basename; }
     inline void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
     SimpleMD* MDDriver() const { return m_mddriver; }
 
+    // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
+    void setSharedBiasPool(SharedBiasPool* pool) { m_shared_pool = pool; }
+
     virtual int execute() override
     {
-        json controller;
-        controller["md"] = m_controller;
-        m_mddriver = new SimpleMD(controller, false);
+        // One MD run among many under a molecule-level pool: keep intra-molecule
+        // fan-out suppressed so methods that honor the flag stay serial.
+        curcuma::SuppressIntraParallel intra_guard;
+
+        m_mddriver = new SimpleMD(m_controller, false);
         m_mddriver->setMolecule(m_molecule);
         m_mddriver->overrideBasename(m_basename + ".t" + std::to_string(getThreadId()));
+        m_mddriver->setSharedBiasPool(m_shared_pool);
         m_mddriver->Initialise();
         m_mddriver->start();
         return 0;
@@ -579,4 +626,5 @@ protected:
     std::string m_result;
     json m_controller;
     SimpleMD* m_mddriver;
+    SharedBiasPool* m_shared_pool = nullptr;  // Claude Generated (Apr 2026)
 };

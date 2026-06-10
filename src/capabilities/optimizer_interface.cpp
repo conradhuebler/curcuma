@@ -63,6 +63,7 @@ const json OptimizerInterfaceJson{
     { "use_hessian", false },
     { "single_step_mode", 0 },
     { "max_energy_rise", 100 },
+    { "convergence_preset", "normal" },
 
     // Internal optimizer parameters (for InternalLBFGS, DIIS, RFO)
     { "diis_history", 5 },
@@ -129,7 +130,7 @@ OptimizationResult OptimizationResult::success_result(const Molecule& final_mol,
     OptimizationResult result;
     result.success = true;
     result.final_molecule = final_mol;
-    result.final_energy = energy;
+    result.final_molecule.setEnergy(energy);
     result.iterations_performed = iterations;
     result.optimization_time_seconds = time_s;
     return result;
