@@ -273,19 +273,27 @@ void CurcumaMethod::getBasename(const std::string& filename)
 {
     // Claude Generated 2026: Use proper extension stripping instead of crude 4-char removal
     // This correctly handles .xyz, .mol2, .sdf, .pdb, .trj, etc.
+    // Note: strips directory path so that a BMT-routed full path does not leak into m_basename.
 #ifdef C17
 #ifndef _WIN32
     std::filesystem::path p(filename);
     m_basename = p.stem().string();
 #else
-    size_t pos = filename.find_last_of('.');
-    m_basename = (pos != std::string::npos) ? filename.substr(0, pos) : filename;
+    std::string base = filename;
+    size_t slash = base.find_last_of("/\\");
+    if (slash != std::string::npos)
+        base = base.substr(slash + 1);
+    size_t pos = base.find_last_of('.');
+    m_basename = (pos != std::string::npos) ? base.substr(0, pos) : base;
 #endif
 #else
-    size_t pos = filename.find_last_of('.');
-    m_basename = (pos != std::string::npos) ? filename.substr(0, pos) : filename;
+    std::string base = filename;
+    size_t slash = base.find_last_of("/\\");
+    if (slash != std::string::npos)
+        base = base.substr(slash + 1);
+    size_t pos = base.find_last_of('.');
+    m_basename = (pos != std::string::npos) ? base.substr(0, pos) : base;
 #endif
-    m_filename = filename;
 }
 
 void CurcumaMethod::setFile(const std::string& filename)

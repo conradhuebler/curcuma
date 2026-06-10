@@ -1803,7 +1803,8 @@ int executeDocking(const json& controller, int argc, char** argv) {
         return 1;
     }
     docking->start();
-    docking->processBakFiles();
+    if (!dock_basename.empty())
+        docking->processBakFiles();
     delete docking;
     return 0;
 }
