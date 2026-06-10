@@ -327,19 +327,26 @@ if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip)
 endif()
 file(ARCHIVE_EXTRACT INPUT ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip DESTINATION ${PROJECT_SOURCE_DIR}/external)
 
-# Ulysses: fetched via FetchContent (replaces fragile file(DOWNLOAD) with hardcoded hash)
+# Ulysses: fetched via FetchContent.
+# UPDATE_DISCONNECTED prevents the "not a git repository" CI failure when the
+# source tree was already populated as a plain directory (no .git present).
+# GIT_SHALLOW reduces network traffic on first download.
 FetchContent_Declare(ulysses
-    GIT_REPOSITORY https://gitlab.com/siriius/ulysses.git
-    GIT_TAG        main
-    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/ulysses-main
+    GIT_REPOSITORY      https://gitlab.com/siriius/ulysses.git
+    GIT_TAG             main
+    GIT_SHALLOW         TRUE
+    UPDATE_DISCONNECTED TRUE
+    SOURCE_DIR          ${CMAKE_SOURCE_DIR}/external/ulysses-main
 )
 if(USE_ULYSSES)
     FetchContent_MakeAvailable(ulysses)
 else()
-    # Headers always needed (include path at line 160), just populate source tree
-    FetchContent_GetProperties(ulysses POPULATED ulysses_populated)
-    if(NOT ulysses_populated)
-        FetchContent_Populate(ulysses)
+    # Headers needed for the include path; only fetch if not already present.
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/external/ulysses-main/src")
+        FetchContent_GetProperties(ulysses POPULATED ulysses_populated)
+        if(NOT ulysses_populated)
+            FetchContent_Populate(ulysses)
+        endif()
     endif()
 endif()
 
