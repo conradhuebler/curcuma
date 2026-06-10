@@ -110,6 +110,26 @@ For Windows: you need to tell the CMD which compiler to use to avoid errors if u
 cmake .. -DCMAKE_BUILD_TYPE=Release -G "MinGW Makefiles"
 ```
 
+### Windows with OpenMP support (w64devkit)
+
+Standard MinGW does not ship with OpenMP. To enable OpenMP on Windows, use [w64devkit](https://github.com/skeeto/w64devkit), which provides a GCC toolchain with OpenMP support out of the box.
+
+1. Install [MinGW](https://sourceforge.net/projects/mingw/) and [CMake](https://cmake.org/download/), and add their `bin` directories to the System environment variables (`PATH`).
+2. Download and extract [w64devkit](https://github.com/skeeto/w64devkit/releases).
+3. Open the w64devkit terminal from the extracted folder (run `w64devkit.exe`).
+4. Inside that terminal, build Curcuma:
+
+```sh
+git clone --recursive https://github.com/conradhuebler/curcuma
+cd curcuma
+mkdir build
+cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -G "MinGW Makefiles"
+mingw32-make
+```
+
+The w64devkit environment provides the correct `libgomp` runtime, so `-DUSE_OpenMP=ON` will be picked up automatically by CMake.
+
 ## Modern Parameter System (October 2025)
 
 Curcuma features an **automated parameter registry system** for all molecular modeling capabilities:
