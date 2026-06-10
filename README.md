@@ -7,10 +7,10 @@
 A simple Open Source molecular modelling tool.
 
 ## Download and requirements
-git clones automatically some submodules.
+Dependencies are fetched automatically via CMake FetchContent (no manual submodule init required).
 - [LBFGSpp](https://github.com/conradhuebler/LBFGSpp) a fork of [yixuan/LBFGSpp](https://github.com/yixuan/LBFGSpp/) provides LBFGS optimiser, the fork allows performing single step optimisation without resetting any calculated optimsation history
-- [XTB](https://github.com/conradhuebler/xtb) a fork of the [official xtb](https://github.com/grimme-lab/xtb) program for eXtended TightBinding - It is only used for GFN-FFF calculation. The adaptions in the fork suppress the output in the GFN-FF calculations. 
-- [tblite](https://github.com/tblite/tblite) eXtended TightBinding via tblite for GFN1 and GFN2 calculation
+- [XTB](https://github.com/grimme-lab/xtb) the official xtb program — optional external backend for `xtb-gfn1`, `xtb-gfn2`, `xtb-gfnff` (USE_XTB build flag). Not required for the native GFN1/GFN2/GFN-FF implementations.
+- [tblite](https://github.com/tblite/tblite) optional external backend for `tblite-gfn1`, `tblite-gfn2`, `xtb-gfn1`, `xtb-gfn2` (USE_TBLITE build flag). The canonical `gfn1`/`gfn2` methods use the native curcuma implementation instead.
 - [simple-d3](https://github.com/dftd3/simple-dftd3) Dispersion Correction D3
 - [cpp-d4](https://github.com/conradhuebler/cpp-d4) Fork of the cpp-d4 repository for Dispersion Correction D4
 - [CxxThreadPool](https://github.com/conradhuebler/CxxThreadPool) - C++ Thread Pool for parallel calculation
@@ -23,6 +23,20 @@ Additionally, [nlohmann/json](https://github.com/nlohmann/json) is obtained via 
 
 A C++/Eigen implementation of the Munkres Algorithmus (Hungarian Method) based on [the workshop here](https://brc2.com/the-algorithm-workshop/) is included.
 
+## Validation Status Labels
+
+Curcuma contains a mix of production-tested and AI-generated code. The following labels appear throughout this README and the internal `CLAUDE.md` documentation to indicate the confidence level of each feature:
+
+| Label | Meaning | Who sets it |
+|-------|---------|-------------|
+| 🤖 AI-generated | Code written by AI, not yet reviewed by a human | AI |
+| ⚙️ Machine-tested | Passes automated tests (CI, ctest) | AI |
+| 👁️ Human-reviewed | Human has read and understood the code | Human only |
+| ✅ TESTED | Human has run it on real problems and verified correct behaviour | **Human only** |
+| ✅ APPROVED | Human confirms correctness, ready for production use | **Human only** |
+
+**Important**: passing automated tests does not imply physical correctness for all inputs. AI-generated scientific code can produce plausible but wrong results in untested regimes. Features marked only 🤖/⚙️ should be cross-checked against an established reference before use in research.
+
 ### UFF, xTB, GFN-FF and Dispersion Correction
 Curcuma has an interface to tblite, xtb as well simple-d3 and cpp-d4, enabling semiempirical calculations or combinations of UFF with D3, D4 and H4 (no parameters are adjusted yet). To use one of the methods, please add **-method methodname** to your arguments:
 
@@ -34,11 +48,11 @@ Native force field (no external dependency required):
 - **gfnff** + `-gpu cuda` : CUDA-accelerated variant; topology cached, charges on CPU, all kernels on GPU
 - **xtb-gfnff** : GFN-FF via the xtb Fortran library (USE_GFNFF build flag)
 
-tblite methods:
-- gfn1
-- gfn2
+Native GFN methods (no external dependency required, canonical backends since AP3 2026-04-25):
+- **gfn1** : Native GFN1-xTB — 10/12 validation molecules at 1e-8 vs tblite
+- **gfn2** : Native GFN2-xTB — 11/12 validation molecules at 1e-8 vs tblite (only `complex` open at 6.95e-5)
 
-> Native GFN1/GFN2 (the canonical `gfn1`/`gfn2` backends, no external dependency) are validated against tblite to a 1e-8 Eh target — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md).
+> Native GFN1/GFN2 are validated against tblite to a 1e-8 Eh target — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md). For explicit tblite or xtb backends use `tblite-gfn1`/`tblite-gfn2` or `xtb-gfn1`/`xtb-gfn2`.
 
 > Native GFN1/GFN2 can use multiple cores **within one calculation** of a single large molecule: pass `-threads N` to a `-sp`/`-opt`/MD run (default is serial and bit-identical). Integral setup, gradient and Fock build scale ~3–5×; see [docs/SQM_THREADING.md](docs/SQM_THREADING.md).
 
@@ -61,11 +75,10 @@ Native GFN2 includes an analytic D4 dispersion charge-response gradient
 (∂E_D4/∂q · ∂q/∂x). The zeta charges default to a single-shot dftd4 EEQ model
 (`-d4_charge_source eeq`, analytic ∂q/∂x); `-d4_charge_source mulliken` feeds the
 GFN2 SCF charges (energy + ∂E/∂q; the CPSCF gradient response is still pending —
-see [docs/D4_Q_RESPONSE.md](docs/D4_Q_RESPONSE.md)). Current alignment vs tblite
-(H₂O/NH₃ sub-µEh, open issues for CH₄/triose/complex) is tracked in
-[docs/GFN2_NATIVE_ROADMAP.md](docs/GFN2_NATIVE_ROADMAP.md) (Master, mit
-Komponenten-Audit-Plan und SCF-Status), [docs/GFN2_D4_STATUS.md](docs/GFN2_D4_STATUS.md)
-für die D4-Tiefe, und via `ctest -L d4_diag`.
+see [docs/D4_Q_RESPONSE.md](docs/D4_Q_RESPONSE.md)). Current alignment vs tblite:
+11/12 at 1e-8 — only `complex` (231 atoms, 6.95e-5 Eh residual) remains open.
+Status tracked in [docs/GFN2_NATIVE_ROADMAP.md](docs/GFN2_NATIVE_ROADMAP.md) and
+[docs/GFN2_D4_STATUS.md](docs/GFN2_D4_STATUS.md); `ctest -L d4_diag`.
 
 The native GFN SCF defaults to `broyden` mixing — a modified-Broyden quasi-Newton
 scheme on the SCC charge vector, the same mixer tblite/xtb use — which converges
@@ -94,9 +107,9 @@ The native `gfnff` implementation is **AI-implemented and machine-tested** — h
 - 20 validation molecules (H₂ to a 1280-atom polymer) — energy vs. Fortran reference within tolerances
 - CUDA acceleration: topology caching, async CPU/GPU overlap, shared-memory reduction
 - Geometry optimization and MD using gradients
+- **GFN-FF ALPB solvation**: self-consistent Born reaction field coupled into EEQ (`A_eeq += B`); validated against xtb 6.7.1 (`--gfnff --alpb`) to ≤1e-8 Eh (7 molecules × 4 solvents, `ctest -L gfnff_solvation`; June 2026). Gradient FD-validated at frozen solvated charges (same approximation as the Fortran reference). `-gfnff.solvent_model gbsa` maps to ALPB (GFN-FF has no separate GBSA model; warns at runtime). See [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md).
 
 **Not validated / not implemented:**
-- **GFN-FF Solvation (ALPB/GBSA)**: `-method gfnff -gfnff.solvent water [-gfnff.solvent_model gbsa]` runs (WP5 routing fix, June 2026) and changes the energy sensibly, but is **not validated against any reference** (tblite has no GFN-FF ALPB) and the gradient is frozen-charge-approximate for polar+solvent — use solvated GFN-FF opt/MD cautiously. (Note: the **native GFN1/GFN2 ALPB and GBSA** paths *were* validated to ≤1e-8 Eh vs tblite — `-method gfn2 -xtb.solvent water -xtb.solvent_model alpb` (or `gbsa`) — see [docs/SOLVATION.md](docs/SOLVATION.md); machine-tested only.)
 - **Periodic boundary conditions**: Not implemented
 - **Organometallics / transition metals**: No test molecule with metal center; parameter quality unknown
 - **Gradient accuracy for large systems**: Dispersion gradients show √N accumulation error (expected for O(N²) terms, scientifically acceptable for MD/opt)
