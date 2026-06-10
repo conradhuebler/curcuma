@@ -371,7 +371,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
                     m_converged = true;
                     m_convergence_reason = "Optimizer reports convergence (zero step)";
                 } else {
-                    CurcumaLogger::error("Optimization step is zero - line search or gradient failure");
+                    CurcumaLogger::warn("Optimization step is zero - line search or gradient failure");
                 }
                 break;
             }

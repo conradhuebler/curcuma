@@ -63,6 +63,12 @@ public:
      *  Removes rarely-visited regions to keep pool size manageable. */
     void pruneByCounter(int min_counter);
 
+    /** Remove all non-persistent (raw MD snapshot) structures, keeping only
+     *  the optimised minima (persistent=true). Called after feeding back
+     *  optimised minima so the raw snapshots are replaced by their converged
+     *  geometries and the pool stays clean for the next MD cycle. */
+    void pruneNonPersistent();
+
     /** Claude Generated (Jun 2026): set the symmetry/atom-permutation set (full-atom reorder
      *  rules discovered by ConfScan). Set between temperature cycles; read every MD step.
      *  Empty (default) -> the RMSD-MTD bias uses the identity only (unpermuted, bit-identical). */

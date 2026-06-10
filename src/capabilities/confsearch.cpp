@@ -146,7 +146,7 @@ void ConfSearch::start()
     // Log ConfSearch configuration (visible at verbosity >= 1)
     CurcumaLogger::result_fmt("ConfSearch: Method={}, Thermostat={}, Threads={}", m_method, m_thermostat, m_threads);
     CurcumaLogger::result_fmt("ConfSearch: Temperature={}K -> {}K, step={}K", m_startT, m_endT, m_deltaT);
-    CurcumaLogger::result_fmt("ConfSearch: Repetitions={}, RMSD threshold={} A, Energy window={} kJ/mol", m_repeat, m_rmsd, m_energy_window);
+    CurcumaLogger::result_fmt("ConfSearch: Repetitions={}, RMSD threshold={} A, Energy window={} kJ/mol, Seed rank={}", m_repeat, m_rmsd, m_energy_window, m_seed_rank);
     // Debug: log full MD parameter set for diagnosing dynamics issues
     CurcumaLogger::result_fmt("ConfSearch MD config: temperature={}, T={}, impuls={}, time_step={}, max_time={}, rmsd_mtd={}",
         md.value("temperature", -1.0), md.value("T", -1.0), md.value("impuls", -1.0),
@@ -446,8 +446,14 @@ void ConfSearch::start()
         //    so the final pool stays rich for the closing dedup;
         //  - next-cycle SEEDS use the tighter seed_energy_window relative to the GLOBAL
         //    minimum, so no MD time is spent exploring from irrelevant high-energy basins.
+        // seed_rank (default 1 = only most stable): when > 0, only the N lowest-energy seeds that pass
+        //  the energy window are kept for the next cycle. This focuses MD time on the
+        //  currently most stable structures rather than spreading it across many basins.
         // Every topology-valid optimised minimum is also fed back into the shared bias pool
         // (opt_feedback_bias) so the next MTD cycle is biased away from what we already found.
+
+        // Collect all candidates that pass the energy window, then optionally trim by count.
+        std::vector<Molecule*> window_seeds;
         std::vector<BiasStructure> feedback;
         for (auto* mol : candidates) {
             if ((mol->Energy() - lowest_energy) * 2625.5 < m_energy_window)
@@ -464,17 +470,50 @@ void ConfSearch::start()
             }
 
             if ((mol->Energy() - m_global_min) * 2625.5 < eff_seed_window) {
-                m_in_stack.push_back(mol);
-                accepted++;
+                window_seeds.push_back(mol);
             } else {
                 rejected_energy++;
                 delete mol;
             }
         }
+
+        // seed_rank trimming: keep only the N lowest-energy seeds.
+        if (m_seed_rank > 0 && static_cast<int>(window_seeds.size()) > m_seed_rank) {
+            int rejected_by_rank = static_cast<int>(window_seeds.size()) - m_seed_rank;
+            std::partial_sort(window_seeds.begin(),
+                               window_seeds.begin() + m_seed_rank,
+                               window_seeds.end(),
+                               [](const Molecule* a, const Molecule* b) {
+                                   return a->Energy() < b->Energy();
+                               });
+            // Delete the excess seeds.
+            for (int i = m_seed_rank; i < static_cast<int>(window_seeds.size()); ++i) {
+                delete window_seeds[i];
+            }
+            window_seeds.resize(m_seed_rank);
+            rejected_energy += rejected_by_rank;
+            CurcumaLogger::result_fmt("ConfSearch: seed_rank={}: keeping {} lowest-energy seeds ({} rejected by rank)",
+                m_seed_rank, m_seed_rank, rejected_by_rank);
+        }
+        for (auto* mol : window_seeds) {
+            m_in_stack.push_back(mol);
+            accepted++;
+        }
         if (!feedback.empty()) {
             m_bias_pool->depositBatch(feedback);
-            CurcumaLogger::result_fmt("ConfSearch: {} optimised minima fed back into bias pool (height={}), pool now {} structures",
-                static_cast<int>(feedback.size()), m_opt_feedback_height, m_bias_pool->biasStructureCount());
+            if (m_opt_feedback_prune_snapshots) {
+                // Default ON: remove raw MD snapshots now that their basins are
+                // represented by the optimised persistent minima. Unoptimised
+                // snapshot geometries would otherwise re-enter the bias next cycle
+                // and cause marginal re-optimisation artifacts.
+                // Disable with -opt_feedback_prune_snapshots false to keep all snapshots.
+                m_bias_pool->pruneNonPersistent();
+                CurcumaLogger::result_fmt("ConfSearch: {} optimised minima fed back, raw snapshots removed -- pool now {} structures",
+                    static_cast<int>(feedback.size()), m_bias_pool->biasStructureCount());
+            } else {
+                CurcumaLogger::result_fmt("ConfSearch: {} optimised minima fed back (snapshots kept) -- pool now {} structures",
+                    static_cast<int>(feedback.size()), m_bias_pool->biasStructureCount());
+            }
         }
         if (m_seed_window_schedule == "exp")
             CurcumaLogger::result_fmt("ConfSearch: seed window (funnel) = {:.1f} kJ/mol vs. global min {:.6f} Eh",
@@ -486,15 +525,15 @@ void ConfSearch::start()
             best_energy = lowest_energy;
             CurcumaLogger::result_fmt("ConfSearch: Initial best energy: {:.6f} Eh", initial_energy);
         } else if (lowest_energy < std::numeric_limits<double>::infinity()) {
-            double vs_initial = (lowest_energy - initial_energy) * 2625.5;
+            double delta_best = (best_energy - lowest_energy) * 2625.5;    // >0 = improvement vs. last best
+            double delta_initial = (initial_energy - lowest_energy) * 2625.5; // >0 = improvement vs. start
             if (lowest_energy < best_energy) {
-                double vs_best = (lowest_energy - best_energy) * 2625.5;
-                CurcumaLogger::success_fmt("ConfSearch: New best! {:.6f} Eh | vs. initial: {:.2f} kJ/mol | improvement: {:.2f} kJ/mol",
-                    lowest_energy, vs_initial, vs_best);
+                CurcumaLogger::success_fmt("ConfSearch: New best! {:.6f} Eh (+{:.2f} kJ/mol vs. prev best {:.6f} Eh, +{:.2f} kJ/mol vs. initial {:.6f} Eh)",
+                    lowest_energy, delta_best, best_energy, delta_initial, initial_energy);
                 best_energy = lowest_energy;
             } else {
-                CurcumaLogger::result_fmt("ConfSearch: Lowest this cycle: {:.6f} Eh ({:.2f} kJ/mol vs. initial, best still {:.6f} Eh)",
-                    lowest_energy, vs_initial, best_energy);
+                CurcumaLogger::result_fmt("ConfSearch: No new best this cycle: lowest {:.6f} Eh (best still {:.6f} Eh, {:.2f} kJ/mol vs. initial {:.6f} Eh)",
+                    lowest_energy, best_energy, delta_initial, initial_energy);
             }
         }
 
@@ -572,12 +611,15 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
         index, m_bias_pool ? m_bias_pool->biasStructureCount() : 0);
 
     // Export bias pool structures to confsearch.bias.xyz (primary conformer source).
-    // confsearch.mtd.xyz gets the full unsampled pool for inspection.
+    // Only raw MD snapshots (persistent=false) are exported for optimization — persistent
+    // structures are already-optimized fed-back minima and must not be re-optimized every
+    // cycle (would cause false "New best!" triggers via numerical noise).
+    // confsearch.mtd.xyz gets the full unsampled pool (including persistent) for inspection.
     if (m_bias_pool && m_bias_pool->biasStructureCount() > 0 && !m_in_stack.empty()) {
         auto snapshot = m_bias_pool->snapshot();
-        int bias_count = static_cast<int>(snapshot.size());
         const Molecule& ref_mol = *m_in_stack[0];
 
+        // .mtd.xyz: full pool for inspection
         bool first = true;
         for (const auto& bs : snapshot) {
             Molecule mol(ref_mol);
@@ -587,20 +629,26 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
             else          mol.appendXYZFile(Basename() + ".mtd.xyz");
         }
 
+        // .bias.xyz: only new MD snapshots, not already-optimized persistent minima
+        std::vector<BiasStructure> new_snapshots;
+        std::copy_if(snapshot.begin(), snapshot.end(), std::back_inserter(new_snapshots),
+            [](const BiasStructure& bs) { return !bs.persistent; });
+
+        int bias_count = static_cast<int>(new_snapshots.size());
         int stride = (bias_count <= m_max_bias_export) ? 1
                      : static_cast<int>(std::ceil(static_cast<double>(bias_count) / m_max_bias_export));
         int exported = 0;
         first = true;
         for (int i = 0; i < bias_count; i += stride) {
             Molecule mol(ref_mol);
-            mol.setGeometry(snapshot[i].geometry);
-            mol.setName("bias_" + std::to_string(snapshot[i].index));
+            mol.setGeometry(new_snapshots[i].geometry);
+            mol.setName("bias_" + std::to_string(new_snapshots[i].index));
             if (first) { mol.writeXYZFile(Basename() + ".bias.xyz"); first = false; }
             else          mol.appendXYZFile(Basename() + ".bias.xyz");
             exported++;
         }
-        CurcumaLogger::result_fmt("ConfSearch: {} bias structures (of {}, stride={}) written to {}.bias.xyz",
-            exported, bias_count, stride, Basename());
+        CurcumaLogger::result_fmt("ConfSearch: {} new MD snapshots (of {} total pool, {} persistent skipped, stride={}) written to {}.bias.xyz",
+            exported, static_cast<int>(snapshot.size()), static_cast<int>(snapshot.size()) - bias_count, stride, Basename());
     }
 
     delete pool;
@@ -680,12 +728,18 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
     CurcumaLogger::result_fmt("Optimizing {} structures using {} thread(s)", total, m_threads);
     pool.StartAndWait();
 
+    int failed = 0;
     for (int i = 0; i < static_cast<int>(threads.size()); ++i) {
+        if (!threads[i]->result().success) ++failed;
         write_result(threads[i]->result(), molecules[i], i);
         delete threads[i];
     }
 
-    CurcumaLogger::result_fmt("Optimization batch complete: {}/{} structures written to {}", written, total, output_file);
+    if (failed > 0)
+        CurcumaLogger::result_fmt("Optimization batch complete: {}/{} structures written ({} failed: zero step / gradient failure)",
+            written, total, failed);
+    else
+        CurcumaLogger::result_fmt("Optimization batch complete: {}/{} structures written to {}", written, total, output_file);
     // Thread-pool boundary: restore the orchestrator's verbosity (workers leave the shared-static
     // CurcumaLogger level unreliable). See the matching note in PerformMolecularDynamics.
     CurcumaLogger::set_verbosity(m_verbosity);
@@ -934,6 +988,7 @@ void ConfSearch::LoadControlJson()
     m_topo_check = Json2KeyWord<bool>(m_defaults, "topo_check");
     m_topo_check_interval = Json2KeyWord<int>(m_defaults, "topo_check_interval");
     m_seed_energy_window = Json2KeyWord<double>(m_defaults, "seed_energy_window");
+    m_seed_rank = Json2KeyWord<int>(m_defaults, "seed_rank");
     m_seed_window_schedule = Json2KeyWord<std::string>(m_defaults, "seed_window_schedule");
     m_seed_window_decay = Json2KeyWord<double>(m_defaults, "seed_window_decay");
     m_epot_abort = Json2KeyWord<bool>(m_defaults, "epot_abort");
@@ -945,6 +1000,7 @@ void ConfSearch::LoadControlJson()
     m_freeze_inherited = Json2KeyWord<bool>(m_defaults, "rmsd_mtd_freeze_inherited");
     m_opt_feedback_bias = Json2KeyWord<bool>(m_defaults, "opt_feedback_bias");
     m_opt_feedback_height = Json2KeyWord<int>(m_defaults, "opt_feedback_height");
+    m_opt_feedback_prune_snapshots = Json2KeyWord<bool>(m_defaults, "opt_feedback_prune_snapshots");
     m_mtd_permutation = Json2KeyWord<bool>(m_defaults, "mtd_permutation");
     m_bias_calibration = Json2KeyWord<std::string>(m_defaults, "bias_calibration");
     m_bias_couple_factor = Json2KeyWord<double>(m_defaults, "bias_couple_factor");

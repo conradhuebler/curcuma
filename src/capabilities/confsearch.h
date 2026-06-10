@@ -42,8 +42,8 @@ static const nlohmann::json ConfSearchJson{
     { "startT", 600 },
     { "endT", 300 },
     { "deltaT", 50 },
-    { "repeat", 10 },
-    { "time", 1e4 }, // 2 ps
+    { "repeat", 4 },
+    { "time", 2000 }, // 2 ps
     { "rmsd", 1.25 },
     { "threads", 1 },
     { "energy_window", 100 },
@@ -85,6 +85,7 @@ static const nlohmann::json ConfSearchJson{
     { "rattle_hot_mode", 2 }, // RATTLE mode used above the threshold (2 = constrain X-H only)
     { "topo_check", false }, // opt-in: abort an MD run when the molecule fragments (GetFragments grows)
     { "topo_check_interval", 0 }, // steps between topology checks (0 -> use the MD dump frequency)
+    { "seed_rank", 1 }, // max lowest-energy seeds per cycle (0 = all in energy window; 1 = only the most stable)
     { "seed_energy_window", 50 }, // kJ/mol vs. the running global minimum; selects next-cycle MD seeds
     { "seed_window_schedule", "static" }, // "static" or "exp" (funnel: window shrinks each cycle)
     { "seed_window_decay", 0.5 }, // per-cycle multiplier for the exp funnel schedule
@@ -95,6 +96,7 @@ static const nlohmann::json ConfSearchJson{
     { "temp_abort_delta", 300 }, // abort if <T> > T + delta [K] (<= 0 disables this threshold)
     { "opt_feedback_bias", true }, // deposit optimised minima back into the shared bias pool
     { "opt_feedback_height", 5 }, // hill counter (height = k*counter) assigned to fed-back minima
+    { "opt_feedback_prune_snapshots", true }, // remove raw MD snapshots after feeding back optimised minima (opt-out)
     { "mtd_permutation", true }, // feed ConfScan's symmetry reorder rules into the RMSD-MTD bias (smooth, sum-over-images)
     { "bias_calibration", "off" }, // adaptive MTD width: off | couple | cluster; experimental
     { "bias_couple_factor", 1.0 }, // couple: hill half-max at factor*rmsd -> alpha = ln2/(factor*rmsd)^2
@@ -134,6 +136,11 @@ public:
         // Suppress intra-molecule fan-out so methods that honor the flag (native
         // gfn1/gfn2) stay serial and the cores are not oversubscribed.
         curcuma::SuppressIntraParallel intra_guard;
+
+        // Sync the global logger level with the json verbosity so GFN-FF init,
+        // EnergyCalculator setup, and optimizer messages respect the requested level.
+        // PerformOptimisation() restores the parent level after the pool finishes.
+        CurcumaLogger::set_verbosity(m_parameter.value("verbosity", 0));
 
         std::string method = m_parameter.value("method", std::string("gfnff"));
         EnergyCalculator energy_calc(method, m_parameter);
@@ -218,8 +225,9 @@ private:
     double m_time = 1e4, m_startT = 500, m_endT = 300, m_deltaT = 50, m_currentT = 0, m_rmsd = 1.25, m_energy_window = 100;
     // Claude Generated (Jun 2026): efficiency/robustness controls (see ConfSearchJson for meaning)
     double m_rattle_threshold_temp = 400, m_seed_energy_window = 50, m_seed_window_decay = 0.5, m_epot_abort_window = 250;
+    int m_seed_rank = 1; // max lowest-energy seeds per cycle (0 = all in window; 1 = only most stable)
     int m_rattle_hot_mode = 2, m_topo_check_interval = 0, m_opt_feedback_height = 5;
-    bool m_topo_check = false, m_epot_abort = false, m_opt_feedback_bias = true, m_mtd_permutation = true;
+    bool m_topo_check = false, m_epot_abort = false, m_opt_feedback_bias = true, m_opt_feedback_prune_snapshots = true, m_mtd_permutation = true;
     // Claude Generated (Jun 2026): temperature runaway abort + cross-run bias-height freeze.
     // ON by default for ConfSearch (bias-heating safety net + best conformer yield); see ConfSearchJson.
     bool m_temp_abort = true, m_freeze_inherited = true;

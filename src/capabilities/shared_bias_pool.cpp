@@ -78,6 +78,17 @@ void SharedBiasPool::pruneByCounter(int min_counter)
     m_global_count.store(static_cast<int>(m_structures.size()), std::memory_order_release);
 }
 
+void SharedBiasPool::pruneNonPersistent()
+{
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    auto it = std::remove_if(m_structures.begin(), m_structures.end(),
+        [](const BiasStructure& bs) { return !bs.persistent; });
+    m_structures.erase(it, m_structures.end());
+    for (int i = 0; i < static_cast<int>(m_structures.size()); ++i)
+        m_structures[i].index = i;
+    m_global_count.store(static_cast<int>(m_structures.size()), std::memory_order_release);
+}
+
 void SharedBiasPool::setPermutations(const std::vector<std::vector<int>>& permutations)
 {
     std::unique_lock<std::shared_mutex> lock(m_mutex);
