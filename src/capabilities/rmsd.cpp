@@ -250,7 +250,6 @@ void RMSDDriver::LoadAlignmentMethodParameters()
 {
     std::string method = m_config.get<std::string>("method");
     m_munkress_cycle = 1;
-    m_limit = 0;
 
     // Claude Generated 2025: Clean enum-based method selection
     auto it = method_map.find(method);
@@ -261,10 +260,13 @@ void RMSDDriver::LoadAlignmentMethodParameters()
         m_method = static_cast<int>(AlignmentMethod::INCREMENTAL);
     }
 
-    // Set limit for subspace and dtemplate methods
+    // Set limit for atom_template and dtemplate; 0 means use class default (m_limit = 10)
     if (m_method == static_cast<int>(AlignmentMethod::ATOM_TEMPLATE) ||
         m_method == static_cast<int>(AlignmentMethod::DISTANCE_TEMPLATE)) {
-        m_limit = m_config.get<int>("limit");
+        int limit = m_config.get<int>("limit");
+        if (limit > 0)
+            m_limit = limit;
+        // else keep class default m_limit = 10
     }
 
     // Level 1: Method approach display - Claude Generated
@@ -1337,7 +1339,14 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareDistanceTemplat
     auto ref_end = m_distance_reference.cend();
     auto tar_end = m_distance_target.cend();
 
-    while (reference_indicies.size() < m_limit) {
+    // Claude Generated: cap to available atoms and guard against iterator underflow
+    // (see DistanceTemplateStrategy::align — this is an unused legacy duplicate).
+    const std::size_t limit = std::min<std::size_t>(m_limit,
+        std::min(m_reference.AtomCount(), m_target.AtomCount()));
+
+    while (reference_indicies.size() < limit
+        && ref_end != m_distance_reference.cbegin()
+        && tar_end != m_distance_target.cbegin()) {
         ref_end--;
         tar_end--;
         std::pair<int, Position> atom_r1 = m_reference.Atom(ref_end->second.first);

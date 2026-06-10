@@ -62,6 +62,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -1471,6 +1472,31 @@ int executeRMSD(const json& controller, int argc, char** argv) {
     driver->ReferenceAligned().writeXYZFile(reffile + ".centered.xyz");
     driver->TargetAligned().writeXYZFile(tarfile + ".centered.xyz");
     driver->TargetReorderd().writeXYZFile(tarfile + ".reordered.xyz");
+
+    // Write RMSD results as JSON
+    {
+        json rmsd_result;
+        rmsd_result["rmsd"] = driver->RMSD();
+        rmsd_result["rmsd_raw"] = driver->RMSDRaw();
+
+        // Permutation vector: identity if no reordering was performed
+        std::vector<int> permutation = driver->ReorderRules();
+        if (permutation.empty()) {
+            permutation.resize(driver->ReferenceAligned().AtomCount());
+            std::iota(permutation.begin(), permutation.end(), 0);
+        }
+        rmsd_result["permutation"] = permutation;
+        rmsd_result["reference_xyz"] = driver->ReferenceAligned().XYZString();
+        // Use TargetAligned as fallback when reordering was skipped (TargetReorderd is empty)
+        rmsd_result["reorder_xyz"] = (driver->TargetReorderd().AtomCount() > 0)
+            ? driver->TargetReorderd().XYZString()
+            : driver->TargetAligned().XYZString();
+        rmsd_result["reference_file"] = reffile;
+        rmsd_result["target_file"] = tarfile;
+
+        std::ofstream rmsd_out(tarfile + ".rmsd.json");
+        rmsd_out << rmsd_result.dump(2) << std::endl;
+    }
 
     delete driver;
     return 0;

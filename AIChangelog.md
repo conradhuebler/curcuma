@@ -4,6 +4,13 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+## June 2026
+
+- **RMSD JSON output file (June 10)**: `executeRMSD()` in `main.cpp` now writes `<target>.rmsd.json` containing `rmsd`, `rmsd_raw`, `permutation` (identity when no reordering), `reference_xyz`, `reorder_xyz`, `reference_file`, `target_file`. Always generated (even in no-reorder mode). When `TargetReorderd()` is empty (atoms matched, reordering skipped), falls back to `TargetAligned()`. Cleanup in `test_utils.sh` includes `*.rmsd.json`. Tests 01 and 02 verify JSON file existence. 🤖 AI-generated.
+
+- **ConfScan pass output visible at verbosity 1 (June 9)**: Initial/Reorder/Reuse pass start/finish messages and the final "structures were kept" summary were swallowed at verbosity 1 because `CurcumaLogger::success()` checks the global logger verbosity, which the RMSD machinery lowers to 0 mid-scan. Added `ConfScan::logPass()` helper that temporarily syncs the global verbosity to `m_verbosity` (same workaround as `AcceptMolecule`/`RejectMolecule`); routed all pass messages through it and wrapped the end-of-scan summary in `Finalise()`. 13/13 confscan+rmsd CLI tests pass. 🤖 AI-generated.
+- **RMSD dtemplate crash fix (June 9)**: `DistanceTemplateStrategy::align` decremented the distance-map iterators without a lower bound; with the new default `limit=10`, molecules offering fewer than 10 matchable template atoms underflowed past `cbegin()` (UB/crash). Capped the effective limit to the available atom count, guarded the iterators against reaching `cbegin()`, and fail cleanly on an empty template. Mirrored in the unused legacy `RMSDDriver::PrepareDistanceTemplate`. Verified: 6-atom methanol now runs (RMSD 0), 90-atom case unaffected (RMSD 2.87). 🤖 AI-generated.
+
 ## May 2026
 
 - **GFN-FF WP-FF-SoA — Pass-A/B/C für Repulsion-Pair-Loops (May 2026, Branch `native-gfnff`)**: `thread_local static`-Buffer (flat N×5 RowMajor, keine Heap-Allokation im Hot-Path) in `CalculateGFNFFBondedRepulsionContribution` und `CalculateGFNFFNonbondedRepulsionContribution`. Nutzt bestehenden `fast_exp_neg_sq_block` direkt (arg = α·r^1.5, Funktion berechnet exp(-arg)). Gated via `#ifdef GFNFF_FAST_EXP` — FAST_EXP=OFF bleibt bit-identisch. **Messung**: Polymer N=1410 T=4: FAST_EXP=ON 57.9 ms/step, FAST_EXP=OFF 57.2 ms/step — kein messbarer Gewinn (±0.7 ms Rauschen). Ursache: Repulsions-Listen zu klein für 3-Pass-Overhead-Amortisation. BATM/Angles wurden analysiert und korrekt übersprungen (kein exp()). Mixture N=6200 noch nicht gemessen. Erkenntnis dokumentiert in WP-Dok. 🤖 AI-generated.

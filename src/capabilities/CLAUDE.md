@@ -28,6 +28,7 @@ capabilities/
 - **ConfScan**: Systematic scanning of conformational space along defined coordinates
 - **ConfSearch**: Automated conformational searching with energy filtering
 - **RMSD Analysis**: Structure comparison, alignment, and trajectory analysis
+  - JSON output: `<target>.rmsd.json` with rmsd, rmsd_raw, permutation, reference_xyz, reorder_xyz, file provenance (always generated, even no-reorder mode)
 
 ### Optimization
 

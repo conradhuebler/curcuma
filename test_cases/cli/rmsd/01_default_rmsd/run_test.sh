@@ -55,6 +55,9 @@ validate_results() {
 
     assert_scientific_value "$expected_rmsd" "$rmsd_value" "$tolerance" "RMSD with reordering (AAA-bGal)"
 
+    # Verify JSON output was created
+    assert_file_exists "target.rmsd.json" "RMSD JSON output file"
+
     return 0
 }
 

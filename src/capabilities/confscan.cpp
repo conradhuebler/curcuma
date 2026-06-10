@@ -217,7 +217,7 @@ void ConfScan::LoadControlJson()
     }
     if (m_rmsd_threshold < 0) {
         m_rmsd_set = false;
-        m_rmsd_threshold = 1e5;
+        m_rmsd_threshold = 0.0; // accumulate max nearest-neighbour RMSD in getrmsd mode
         CurcumaLogger::warn("RMSD value is not set, will obtain it from ensemble");
     }
     m_maxrank = m_config.get<double>("rank");
@@ -751,6 +751,22 @@ void ConfScan::RejectMolecule(Molecule* molecule)
     }
 }
 
+void ConfScan::logPass(const std::string& msg, bool neutral)
+{
+    // Claude Generated: Pass-level status at verbosity >= 1.
+    // success()/result() check the GLOBAL logger verbosity, which the RMSD
+    // machinery lowers to 0 mid-scan; sync it to m_verbosity for this message.
+    if (m_verbosity < 1)
+        return;
+    int old_verbosity = CurcumaLogger::get_verbosity();
+    CurcumaLogger::set_verbosity(m_verbosity);
+    if (neutral)
+        CurcumaLogger::result(msg);
+    else
+        CurcumaLogger::success(msg);
+    CurcumaLogger::set_verbosity(old_verbosity);
+}
+
 void ConfScan::WriteDotFile(const std::string& filename, const std::string& content)
 {
     std::ofstream result_file;
@@ -776,9 +792,7 @@ void ConfScan::start()
     std::ofstream result_file;
 
     if (!m_skipinit) {
-        if (m_verbosity >= 1) {
-            CurcumaLogger::success("Initial Pass: Performing RMSD calculation without reordering");
-        }
+        logPass("Initial Pass: Performing RMSD calculation without reordering");
         m_current_filename = m_1st_filename;
         if (m_writeFiles && !m_reduced_file) {
             result_file.open(m_statistic_filename, std::ios_base::app);
@@ -812,13 +826,9 @@ void ConfScan::start()
                 parameters_file << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
             }
         }
-        if (m_verbosity >= 1) {
-            CurcumaLogger::success_fmt("Initial Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0);
-        }
+        logPass(fmt::format("Initial Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0));
     } else {
-        if (m_verbosity >= 1) {
-            CurcumaLogger::info("Skipping initial pass - Setting thresholds to high value");
-        }
+        logPass("Skipping initial pass - Setting thresholds to high value", true);
 
         for (const auto& i : m_ordered_list)
             m_stored_structures.push_back(m_molecules.at(i.second).second);
@@ -877,9 +887,7 @@ void ConfScan::start()
             }
             if (!CheckStop()) {
                 timer.Reset();
-                if (m_verbosity >= 1) {
-                    CurcumaLogger::success("Reorder Pass: Performing RMSD calculation with reordering");
-                }
+                logPass("Reorder Pass: Performing RMSD calculation with reordering");
                 if (m_writeFiles && !m_reduced_file) {
                     result_file.open(m_statistic_filename, std::ios_base::app);
                     result_file << "Results of Reorder Pass #" << run + 1 << std::endl;
@@ -894,9 +902,7 @@ void ConfScan::start()
                 Reorder(dLE, dLI, dLH, false);
                 PrintStatus("Result Reorder pass:");
 
-                if (m_verbosity >= 1) {
-                    CurcumaLogger::success_fmt("Reorder Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0);
-                }
+                logPass(fmt::format("Reorder Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0));
                 timer.Reset();
                 if (m_analyse) {
                     WriteDotFile(m_result_basename + ".reorder." + std::to_string(run + 1) + ".dot", m_second_content);
@@ -938,18 +944,16 @@ void ConfScan::start()
             parameters_skip.close();
             parameters_performed.close();
         }
-    } else if (m_verbosity >= 1)
-        CurcumaLogger::success("Reorder Pass skipped");
+    } else
+        logPass("Reorder Pass skipped");
     if (!m_skipreuse) {
         if (!CheckStop()) {
             timer.Reset();
             m_current_filename = m_3rd_filename;
-            if (m_verbosity >= 1) {
-                if (m_reset)
-                    CurcumaLogger::success("Reuse Pass: Performing RMSD calculation with stored reorder rules using all structures");
-                else
-                    CurcumaLogger::success("Reuse Pass: Performing RMSD calculation with stored reorder rules using previously accepted structures");
-            }
+            if (m_reset)
+                logPass("Reuse Pass: Performing RMSD calculation with stored reorder rules using all structures");
+            else
+                logPass("Reuse Pass: Performing RMSD calculation with stored reorder rules using previously accepted structures");
 
             if (m_writeFiles && !m_reduced_file) {
                 result_file.open(m_statistic_filename, std::ios_base::app);
@@ -966,9 +970,7 @@ void ConfScan::start()
             Reorder(-1, -1, -1, true, m_reset);
             PrintStatus("Result reuse pass:");
 
-            if (m_verbosity >= 1) {
-                CurcumaLogger::success_fmt("Reuse Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0);
-            }
+            logPass(fmt::format("Reuse Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0));
             timer.Reset();
 
             if (m_analyse) {
@@ -1169,9 +1171,8 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
         } else {
             RejectMolecule(mol1);
         }
-        if (!m_rmsd_set) {
-            m_rmsd_threshold = std::min(min_rmsd, m_rmsd_threshold);
-            // std::cout << "RMSD threshold set to " << m_rmsd_threshold << " Å" << "obtained (" <<  min_rmsd << ")" << std::endl;
+        if (!m_rmsd_set && min_rmsd < 1e3) {
+            m_rmsd_threshold = std::max(min_rmsd, m_rmsd_threshold); // paper: maximal RMSD between structures
         }
         PrintStatus();
         m_all_structures.push_back(mol1);
@@ -1179,15 +1180,15 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
     p->clear();
     delete p;
     if (!m_rmsd_set) {
+        m_rmsd_threshold *= m_getrmsd_scale; // apply user-defined scale factor (default 1.1)
         if (m_verbosity >= 2)
-            CurcumaLogger::info_fmt("RMSD threshold set to {:.6f} Å", m_rmsd_threshold);
+            CurcumaLogger::info_fmt("RMSD threshold set to {:.6f} Å (scale={:.2f})", m_rmsd_threshold, m_getrmsd_scale);
         for (const auto& i : m_listThresh) {
             if (i.first > m_getrmsd_thresh)
                 break;
             m_dLI = std::max(m_dLI, i.second[2]);
             m_dLH = std::max(m_dLH, i.second[1]);
             m_dLE = std::max(m_dLE, i.second[0]);
-            // std::cout << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
         }
     }
 
@@ -1581,9 +1582,16 @@ void ConfScan::Finalise()
     m_collective_content += "\"" + m_first_node + "\";\n";
     m_collective_content += content_after;
 
-    // Always show final result regardless of verbosity - this is critical information
-    CurcumaLogger::success_fmt("{} structures were kept - of {} total!",
-        m_stored_structures.size(), m_molecules.size() - m_fail);
+    // End-of-scan summary - critical final result. Sync the global logger verbosity
+    // to m_verbosity, since the RMSD machinery lowers it to 0 during the scan and would
+    // otherwise swallow this success() output at verbosity 1. Claude Generated.
+    if (m_verbosity >= 1) {
+        int old_verbosity = CurcumaLogger::get_verbosity();
+        CurcumaLogger::set_verbosity(m_verbosity);
+        CurcumaLogger::success_fmt("{} structures were kept - of {} total!",
+            m_stored_structures.size(), m_molecules.size() - m_fail);
+        CurcumaLogger::set_verbosity(old_verbosity);
+    }
 
     // Show conformer statistics at the end - this is the final analysis
     if (!m_energies.empty()) {
