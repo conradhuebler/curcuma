@@ -99,7 +99,9 @@ bool UlyssesInterface::InitialiseMolecule()
             CurcumaLogger::param("correction", m_correction);
         }
         if (m_solvent != "none") {
+            CurcumaLogger::param("solvation_model", "GBSA (Generalized Born)");
             CurcumaLogger::param("solvent", m_solvent);
+            CurcumaLogger::info("Ulysses implicit solvation enabled");
         }
     }
 

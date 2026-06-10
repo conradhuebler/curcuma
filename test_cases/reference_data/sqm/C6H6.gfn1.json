@@ -1,0 +1,203 @@
+{
+  "molecule": "C6H6",
+  "geometry_file": "test_cases/molecules/larger/C6H6.xyz",
+  "charge": 0,
+  "spin_unpaired": 0,
+  "method": "gfn1",
+  "xtb_version": "6.6.1",
+  "energies": {
+    "total_energy": -15.894349456591,
+    "scc_energy": -16.198246374398,
+    "repulsion": 0.308557548746,
+    "electrostatic": 0.000607988792,
+    "dispersion": -0.004660630939,
+    "halogen_bond": 0.0,
+    "homo_lumo_gap_eV": 4.903319075441
+  },
+  "orbitals": [
+    {
+      "index": 1,
+      "occupation": 2.0,
+      "energy_Eh": -0.6688444,
+      "energy_eV": -18.2002,
+      "tag": ""
+    },
+    {
+      "index": 3,
+      "occupation": 2.0,
+      "energy_Eh": -0.6445015,
+      "energy_eV": -17.5378,
+      "tag": ""
+    },
+    {
+      "index": 4,
+      "occupation": 2.0,
+      "energy_Eh": -0.6111229,
+      "energy_eV": -16.6295,
+      "tag": ""
+    },
+    {
+      "index": 5,
+      "occupation": 2.0,
+      "energy_Eh": -0.6111214,
+      "energy_eV": -16.6295,
+      "tag": ""
+    },
+    {
+      "index": 6,
+      "occupation": 2.0,
+      "energy_Eh": -0.5816606,
+      "energy_eV": -15.8278,
+      "tag": ""
+    },
+    {
+      "index": 7,
+      "occupation": 2.0,
+      "energy_Eh": -0.5411068,
+      "energy_eV": -14.7243,
+      "tag": ""
+    },
+    {
+      "index": 8,
+      "occupation": 2.0,
+      "energy_Eh": -0.5323632,
+      "energy_eV": -14.4863,
+      "tag": ""
+    },
+    {
+      "index": 9,
+      "occupation": 2.0,
+      "energy_Eh": -0.523409,
+      "energy_eV": -14.2427,
+      "tag": ""
+    },
+    {
+      "index": 10,
+      "occupation": 2.0,
+      "energy_Eh": -0.5233957,
+      "energy_eV": -14.2423,
+      "tag": ""
+    },
+    {
+      "index": 11,
+      "occupation": 2.0,
+      "energy_Eh": -0.5106642,
+      "energy_eV": -13.8959,
+      "tag": ""
+    },
+    {
+      "index": 12,
+      "occupation": 2.0,
+      "energy_Eh": -0.465428,
+      "energy_eV": -12.6649,
+      "tag": ""
+    },
+    {
+      "index": 13,
+      "occupation": 2.0,
+      "energy_Eh": -0.4654264,
+      "energy_eV": -12.6649,
+      "tag": ""
+    },
+    {
+      "index": 14,
+      "occupation": 2.0,
+      "energy_Eh": -0.4369053,
+      "energy_eV": -11.8888,
+      "tag": ""
+    },
+    {
+      "index": 15,
+      "occupation": 2.0,
+      "energy_Eh": -0.4368939,
+      "energy_eV": -11.8885,
+      "tag": "HOMO"
+    },
+    {
+      "index": 16,
+      "occupation": 0.0,
+      "energy_Eh": -0.2567003,
+      "energy_eV": -6.9852,
+      "tag": "LUMO"
+    },
+    {
+      "index": 17,
+      "occupation": 0.0,
+      "energy_Eh": -0.2566868,
+      "energy_eV": -6.9848,
+      "tag": ""
+    },
+    {
+      "index": 18,
+      "occupation": 0.0,
+      "energy_Eh": -0.1287054,
+      "energy_eV": -3.5023,
+      "tag": ""
+    },
+    {
+      "index": 19,
+      "occupation": 0.0,
+      "energy_Eh": -0.1023617,
+      "energy_eV": -2.7854,
+      "tag": ""
+    },
+    {
+      "index": 20,
+      "occupation": 0.0,
+      "energy_Eh": -0.1023614,
+      "energy_eV": -2.7854,
+      "tag": ""
+    },
+    {
+      "index": 21,
+      "occupation": 0.0,
+      "energy_Eh": -0.0979682,
+      "energy_eV": -2.6658,
+      "tag": ""
+    },
+    {
+      "index": 22,
+      "occupation": 0.0,
+      "energy_Eh": -0.0824386,
+      "energy_eV": -2.2433,
+      "tag": ""
+    },
+    {
+      "index": 23,
+      "occupation": 0.0,
+      "energy_Eh": -0.0824368,
+      "energy_eV": -2.2432,
+      "tag": ""
+    },
+    {
+      "index": 24,
+      "occupation": 0.0,
+      "energy_Eh": -0.0590396,
+      "energy_eV": -1.6065,
+      "tag": ""
+    },
+    {
+      "index": 25,
+      "occupation": 0.0,
+      "energy_Eh": 0.2279181,
+      "energy_eV": 6.202,
+      "tag": ""
+    },
+    {
+      "index": 26,
+      "occupation": 0.0,
+      "energy_Eh": 0.2389916,
+      "energy_eV": 6.5033,
+      "tag": ""
+    },
+    {
+      "index": 36,
+      "occupation": 0.0,
+      "energy_Eh": 0.69618,
+      "energy_eV": 18.944,
+      "tag": ""
+    }
+  ],
+  "mulliken": [],
+  "dipole": {}
+}

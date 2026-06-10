@@ -1,0 +1,203 @@
+{
+  "molecule": "caffeine",
+  "geometry_file": "test_cases/molecules/larger/caffeine.xyz",
+  "charge": 0,
+  "spin_unpaired": 0,
+  "method": "gfn1",
+  "xtb_version": "6.6.1",
+  "energies": {
+    "total_energy": -44.50985539989,
+    "scc_energy": -44.974345907622,
+    "repulsion": 0.477553751949,
+    "electrostatic": 0.166611726763,
+    "dispersion": -0.013063244217,
+    "halogen_bond": 0.0,
+    "homo_lumo_gap_eV": 3.355178188069
+  },
+  "orbitals": [
+    {
+      "index": 1,
+      "occupation": 2.0,
+      "energy_Eh": -0.827875,
+      "energy_eV": -22.5276,
+      "tag": ""
+    },
+    {
+      "index": 25,
+      "occupation": 2.0,
+      "energy_Eh": -0.5405849,
+      "energy_eV": -14.7101,
+      "tag": ""
+    },
+    {
+      "index": 26,
+      "occupation": 2.0,
+      "energy_Eh": -0.5364793,
+      "energy_eV": -14.5983,
+      "tag": ""
+    },
+    {
+      "index": 27,
+      "occupation": 2.0,
+      "energy_Eh": -0.5360218,
+      "energy_eV": -14.5859,
+      "tag": ""
+    },
+    {
+      "index": 28,
+      "occupation": 2.0,
+      "energy_Eh": -0.5340627,
+      "energy_eV": -14.5326,
+      "tag": ""
+    },
+    {
+      "index": 29,
+      "occupation": 2.0,
+      "energy_Eh": -0.5221748,
+      "energy_eV": -14.2091,
+      "tag": ""
+    },
+    {
+      "index": 30,
+      "occupation": 2.0,
+      "energy_Eh": -0.5150126,
+      "energy_eV": -14.0142,
+      "tag": ""
+    },
+    {
+      "index": 31,
+      "occupation": 2.0,
+      "energy_Eh": -0.4816311,
+      "energy_eV": -13.1059,
+      "tag": ""
+    },
+    {
+      "index": 32,
+      "occupation": 2.0,
+      "energy_Eh": -0.4689233,
+      "energy_eV": -12.7601,
+      "tag": ""
+    },
+    {
+      "index": 33,
+      "occupation": 2.0,
+      "energy_Eh": -0.4566781,
+      "energy_eV": -12.4268,
+      "tag": ""
+    },
+    {
+      "index": 34,
+      "occupation": 2.0,
+      "energy_Eh": -0.4566136,
+      "energy_eV": -12.4251,
+      "tag": ""
+    },
+    {
+      "index": 35,
+      "occupation": 2.0,
+      "energy_Eh": -0.4447956,
+      "energy_eV": -12.1035,
+      "tag": ""
+    },
+    {
+      "index": 36,
+      "occupation": 2.0,
+      "energy_Eh": -0.4442557,
+      "energy_eV": -12.0888,
+      "tag": ""
+    },
+    {
+      "index": 37,
+      "occupation": 2.0,
+      "energy_Eh": -0.412678,
+      "energy_eV": -11.2295,
+      "tag": "HOMO"
+    },
+    {
+      "index": 38,
+      "occupation": 0.0,
+      "energy_Eh": -0.2893775,
+      "energy_eV": -7.8744,
+      "tag": "LUMO"
+    },
+    {
+      "index": 39,
+      "occupation": 0.0,
+      "energy_Eh": -0.2535408,
+      "energy_eV": -6.8992,
+      "tag": ""
+    },
+    {
+      "index": 40,
+      "occupation": 0.0,
+      "energy_Eh": -0.239057,
+      "energy_eV": -6.5051,
+      "tag": ""
+    },
+    {
+      "index": 41,
+      "occupation": 0.0,
+      "energy_Eh": -0.1579759,
+      "energy_eV": -4.2987,
+      "tag": ""
+    },
+    {
+      "index": 42,
+      "occupation": 0.0,
+      "energy_Eh": -0.1538396,
+      "energy_eV": -4.1862,
+      "tag": ""
+    },
+    {
+      "index": 43,
+      "occupation": 0.0,
+      "energy_Eh": -0.1425905,
+      "energy_eV": -3.8801,
+      "tag": ""
+    },
+    {
+      "index": 44,
+      "occupation": 0.0,
+      "energy_Eh": -0.1313617,
+      "energy_eV": -3.5745,
+      "tag": ""
+    },
+    {
+      "index": 45,
+      "occupation": 0.0,
+      "energy_Eh": -0.1241229,
+      "energy_eV": -3.3776,
+      "tag": ""
+    },
+    {
+      "index": 46,
+      "occupation": 0.0,
+      "energy_Eh": -0.087807,
+      "energy_eV": -2.3894,
+      "tag": ""
+    },
+    {
+      "index": 47,
+      "occupation": 0.0,
+      "energy_Eh": -0.0845618,
+      "energy_eV": -2.301,
+      "tag": ""
+    },
+    {
+      "index": 48,
+      "occupation": 0.0,
+      "energy_Eh": -0.0778955,
+      "energy_eV": -2.1196,
+      "tag": ""
+    },
+    {
+      "index": 76,
+      "occupation": 0.0,
+      "energy_Eh": 0.7049391,
+      "energy_eV": 19.1824,
+      "tag": ""
+    }
+  ],
+  "mulliken": [],
+  "dipole": {}
+}

@@ -1,0 +1,217 @@
+{
+  "molecule": "CH3OCH3",
+  "geometry_file": "test_cases/molecules/larger/CH3OCH3.xyz",
+  "charge": 0,
+  "spin_unpaired": 0,
+  "method": "gfn2",
+  "xtb_version": "6.6.1",
+  "energies": {
+    "total_energy": -11.387712382993,
+    "scc_energy": -11.499269555844,
+    "repulsion": 0.111556787279,
+    "isotropic_es": 0.018228492787,
+    "anisotropic_es": 0.002779981471,
+    "anisotropic_xc": 0.002059108773,
+    "dispersion": -0.002805668125,
+    "homo_lumo_gap_eV": 11.73102150757
+  },
+  "orbitals": [
+    {
+      "index": 1,
+      "occupation": 2.0,
+      "energy_Eh": -0.6929668,
+      "energy_eV": -18.8566,
+      "tag": ""
+    },
+    {
+      "index": 2,
+      "occupation": 2.0,
+      "energy_Eh": -0.6335526,
+      "energy_eV": -17.2398,
+      "tag": ""
+    },
+    {
+      "index": 3,
+      "occupation": 2.0,
+      "energy_Eh": -0.6018418,
+      "energy_eV": -16.3769,
+      "tag": ""
+    },
+    {
+      "index": 4,
+      "occupation": 2.0,
+      "energy_Eh": -0.545154,
+      "energy_eV": -14.8344,
+      "tag": ""
+    },
+    {
+      "index": 5,
+      "occupation": 2.0,
+      "energy_Eh": -0.5415077,
+      "energy_eV": -14.7352,
+      "tag": ""
+    },
+    {
+      "index": 6,
+      "occupation": 2.0,
+      "energy_Eh": -0.5397629,
+      "energy_eV": -14.6877,
+      "tag": ""
+    },
+    {
+      "index": 7,
+      "occupation": 2.0,
+      "energy_Eh": -0.4851709,
+      "energy_eV": -13.2022,
+      "tag": ""
+    },
+    {
+      "index": 8,
+      "occupation": 2.0,
+      "energy_Eh": -0.4684297,
+      "energy_eV": -12.7466,
+      "tag": ""
+    },
+    {
+      "index": 9,
+      "occupation": 2.0,
+      "energy_Eh": -0.4548357,
+      "energy_eV": -12.3767,
+      "tag": ""
+    },
+    {
+      "index": 10,
+      "occupation": 2.0,
+      "energy_Eh": -0.4018881,
+      "energy_eV": -10.9359,
+      "tag": "HOMO"
+    },
+    {
+      "index": 11,
+      "occupation": 0.0,
+      "energy_Eh": 0.029219,
+      "energy_eV": 0.7951,
+      "tag": "LUMO"
+    },
+    {
+      "index": 12,
+      "occupation": 0.0,
+      "energy_Eh": 0.1070779,
+      "energy_eV": 2.9137,
+      "tag": ""
+    },
+    {
+      "index": 13,
+      "occupation": 0.0,
+      "energy_Eh": 0.1221495,
+      "energy_eV": 3.3239,
+      "tag": ""
+    },
+    {
+      "index": 14,
+      "occupation": 0.0,
+      "energy_Eh": 0.166799,
+      "energy_eV": 4.5388,
+      "tag": ""
+    },
+    {
+      "index": 15,
+      "occupation": 0.0,
+      "energy_Eh": 0.1824963,
+      "energy_eV": 4.966,
+      "tag": ""
+    },
+    {
+      "index": 16,
+      "occupation": 0.0,
+      "energy_Eh": 0.2017896,
+      "energy_eV": 5.491,
+      "tag": ""
+    },
+    {
+      "index": 17,
+      "occupation": 0.0,
+      "energy_Eh": 0.2075939,
+      "energy_eV": 5.6489,
+      "tag": ""
+    },
+    {
+      "index": 18,
+      "occupation": 0.0,
+      "energy_Eh": 0.2377084,
+      "energy_eV": 6.4684,
+      "tag": ""
+    }
+  ],
+  "mulliken": [
+    {
+      "index": 1,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 3.652,
+      "q_mulliken": 0.039
+    },
+    {
+      "index": 2,
+      "Z": 6,
+      "symbol": "C",
+      "cov_cn": 3.652,
+      "q_mulliken": 0.039
+    },
+    {
+      "index": 3,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.031
+    },
+    {
+      "index": 4,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.056
+    },
+    {
+      "index": 5,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.031
+    },
+    {
+      "index": 6,
+      "Z": 8,
+      "symbol": "O",
+      "cov_cn": 1.698,
+      "q_mulliken": -0.314
+    },
+    {
+      "index": 7,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.056
+    },
+    {
+      "index": 8,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.031
+    },
+    {
+      "index": 9,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.924,
+      "q_mulliken": 0.031
+    }
+  ],
+  "dipole": {
+    "x": 0.428,
+    "y": -0.226,
+    "z": 0.452,
+    "total_Debye": 1.684
+  }
+}

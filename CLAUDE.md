@@ -137,10 +137,22 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 ## Current Capabilities
 
 ### 1. Quantum Mechanical Methods
-- **Extended Hückel Theory (EHT)** - Semi-empirical quantum chemistry
-- **TBLite Interface** - Tight-binding DFT methods (GFN1, GFN2, iPEA1)
+
+#### Native Implementations (Educational, No External Dependencies)
+
+> ⚠️ **All native QM methods are AI-implemented and machine-tested only — not human production tested.**
+> Results should be validated against external references (TBLite, Ulysses, XTB) before use in research.
+
+- ⚠️ **Extended Hückel Theory (EHT)** - AI-implemented, machine-tested
+- ⚠️ **GFN2-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn2` backend; `-opt` works; Broyden SCF default (`-scf_mode diis|plain|level-shift`, `-scf_guess h0|eeq`; 231-atom `complex` converges, see [docs/SCF_MODES.md](docs/SCF_MODES.md)); **vs TBLite: meets the 1e-8 Eh target on 11/12 of the validation set, only `complex` open (6.95e-5)** — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md); native GFN1/GFN2 support **intra-molecule multi-threading** for a single large molecule (`-threads N`: setup 4×, gradient 3.6×; eigensolver MKL-link-bound) — see [docs/SQM_THREADING.md](docs/SQM_THREADING.md); opt-in **MKL-free / GPU-portable eigensolve kernels** (`-eigensolver native\|purify\|lobpcg`, `CURCUMA_EIG_TRED2=blocked`) — MKL stays default — see [docs/SQM_EIGENSOLVE_GPU.md](docs/SQM_EIGENSOLVE_GPU.md); opt-in **approximate large-system modes** (`-large_system_mode fragments\|dc\|sparse`) scale the SCF past ~1000 atoms by locality (default dense unchanged; `-eigensolver` propagates into fragments / sub-blocks; `-eigensolver=purify` requires `-electronic_temperature 0`) — see [docs/SQM_LARGE_SYSTEMS.md](docs/SQM_LARGE_SYSTEMS.md); opt-in **multi-step SCC extrapolation** across geometry steps (`-scf_extrapolation aspc\|gauss`, `-scf_extrapolation_order`) generalises the 1-step warm-start to cut SCF iterations in opt/MD (default `none` unchanged; safe `guess` mode keeps full SCF — caffeine smooth-trajectory SCF iters gfn2 215→90, gfn1 170→79, energy bit-identical; experimental `-scf_extrapolation_apply xlbomd` = extended-Lagrangian MD, time-reversible auxiliary + converged corrector, energy-exact, MD-drift unvalidated; cites Kolafa 2004 / Pulay-Fogarasi 2004 / Niklasson 2008) — see [docs/SQM_SCF_EXTRAPOLATION.md](docs/SQM_SCF_EXTRAPOLATION.md); opt-in **CUDA GPU path** (`-gpu cuda|auto`, build `release_cuda/` with `-DUSE_CUDA_XTB=ON`): staged port (cuSOLVER/cuBLAS), CPU path `#ifdef`-free; **both GFN1 (Stage 2a) and GFN2 (Stage 2b) run a device-resident SCF** under the default Broyden mixing — H0/S/L + density/MO (+ GFN2 multipole integrals) stay on the GPU, only length-nao vectors cross per iteration; the isotropic potential incl. in-SCF D4 stays on the host; **Stage 3 builds the integrals (CN/S/H0/L/γ/multipole) on the device and Stage 4 the nuclear gradient, so `-opt`/`-md` are fully device-resident** (only xyz up, gradient+energy down per step); every device kernel matches the CPU elementwise (S/H0/L ~1e-15, full gradient ~1e-15 Eh/Å), `gpu_gfn{1,2}_validation` 12/12 @1e-8 vs tblite, `ctest -L gpu_integrals|gpu_gradient` green — see [docs/SQM_GPU.md](docs/SQM_GPU.md)
+- ⚠️ **GFN1-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn1` backend; `-opt` works; Broyden SCF default (modes via `-scf_mode`); **vs TBLite: now 10/12 SQM molecules at 1e-8** (fixed 2026-05: double-counted third-order potential + D3 C8/C6 made exact vs s-dftd3); only He2 (~1.5e-8 floor) and complex (~2.6e-7) remain — see [docs/SQM_WP2_gfn1_accuracy.md](docs/SQM_WP2_gfn1_accuracy.md)
+- ⚠️ **PM3/AM1/MNDO (Native NDDO)** - AI-implemented, machine-tested; 21/21 tests vs Ulysses reference (< 4 µEh)
+- ⚠️ **Native GFN-FF** - AI-implemented, machine-tested; see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
+
+#### External Interfaces (Production Quality, Requires Compilation)
+- **TBLite Interface** - Tight-binding DFT methods (GFN1, GFN2, iPEA1) + **Solvation** (CPCM, GB, ALPB)
 - **XTB Interface** - Extended tight-binding methods (GFN-FF, GFN1, GFN2)
-- **Ulysses Interface** - Various semi-empirical methods (PM3, AM1, MNDO, etc.)
+- **Ulysses Interface** - Semi-empirical methods (PM3, PM6, AM1, MNDO, RM1, etc.) + **Solvation** (GBSA)
 - **Native GFN-FF** - Curcuma's own implementation (`gfnff`) - ✅ **IMPLEMENTED**
 
 ### 2. Force Field Methods
@@ -149,30 +161,49 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - **QMDFF** - Quantum Mechanically Derived Force Fields
 - **Universal Parameter Caching** - Automatic save/load for all FF methods
 
-### 3. Dispersion and Non-Covalent Corrections
+### 3. Solvation Models (Implicit Solvent)
+- ✅ **TBLite Solvation** - CPCM, GB (Generalized Born), ALPB for GFN methods
+- ✅ **Ulysses Solvation** - GBSA (Generalized Born + SA) for GFN/MNDO methods
+- ⚠️ **Native GFN1/GFN2 ALPB + GBSA** (June 2026, AI/machine-tested) - self-consistent
+  ALPB (`-xtb.solvent_model alpb`, P16 kernel) and GBSA (`-xtb.solvent_model gbsa`, Still kernel)
+  in the native xTB SCF, matching tblite total ΔG (Born + CDS + shift; CM5 for gfn1) to
+  ≤1e-8 Eh on the validation set (CPU + GPU); `-method gfn2 -xtb.solvent water -xtb.solvent_model gbsa`
+  (legacy numeric codes 3/2 still accepted). CPCM native solvation still pending.
+  See [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md)
+- ⚠️ **Native GFN-FF ALPB** (June 2026, AI/machine-tested) - self-consistent: the Born
+  reaction field couples into the EEQ solve (`A_eeq += B`), so charges polarize in the solvent.
+  `-method gfnff -gfnff.solvent water -gfnff.solvent_model alpb` matches **xtb 6.7.1** (`--gfnff
+  --alpb`) to **≤1e-8 Eh** (7 mol × 4 solvents); analytic gradient FD-validated. GFN-FF has
+  no separate GBSA (reference uses ALPB), so `-gfnff.solvent_model gbsa` maps to ALPB. See
+  [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md) WP5
+- **25+ Solvents** - water, methanol, DMSO, acetone, benzene, etc.
+- **Auto-Activation** - Specify `-solvent water` to enable
+- **Documentation** - See [docs/SOLVATION.md](docs/SOLVATION.md) for details
+
+### 4. Dispersion and Non-Covalent Corrections
 - **DFT-D3** - Grimme's D3 dispersion correction
-- **DFT-D4** - Next-generation D4 dispersion correction  
+- **DFT-D4** - Next-generation D4 dispersion correction
 - **H4 Correction** - Hydrogen bonding and halogen bonding corrections
 
-### 4. Geometry Optimization
+### 5. Geometry Optimization
 - **LBFGS Optimizer** - Limited-memory Broyden-Fletcher-Goldfarb-Shanno
 - **Multiple Convergence Criteria** - Energy, gradient, RMSD-based
 - **Constrained Optimization** - Distance, angle, and dihedral constraints
 
-### 5. Conformational Analysis ✅ REFACTORED 2025
+### 6. Conformational Analysis ✅ REFACTORED 2025
 - **ConfSearch** - Systematic conformational searching (unified trajectory framework)
 - **ConfScan** - Conformational scanning along reaction coordinates
 - **RMSD Analysis** - Structure comparison and alignment
 - **Energy-based Filtering** - Automatic conformer ranking
 - **Refactored Geometry Commands** - TrajectoryWriter for JSON format (Phase 5)
 
-### 6. Molecular Dynamics
+### 7. Molecular Dynamics
 - **SimpleMD** - Basic molecular dynamics simulation
 - **NEB Docking** - Nudged elastic band for transition states
 - **Trajectory Analysis** - Analysis of MD trajectories
 - **PLUMED Metadynamics** - Enhanced sampling via PLUMED2 plugin (`-mtd` flag) — see [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md)
 
-### 7. Analysis Tools
+### 8. Analysis Tools
 - **✅ Parallel Analysis** - Frame-level parallelization with CxxThreadPool (3-8x speedup, January 2026)
 
 ### 8. Output Directory System
@@ -186,6 +217,9 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - **Hessian Analysis** - Second derivative calculations
 - **Orbital Analysis** - Molecular orbital visualization and analysis
 
+### 9. Core Computational Libraries
+- ✅ **MNDO Integrals** - Dewar-Thiel multipole expansion for semi-empirical 2e⁻ integrals, see [docs/MNDO_INTEGRALS.md](docs/MNDO_INTEGRALS.md)
+
 ## Architecture
 
 ### Core Components
@@ -197,7 +231,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - **Polymorphic Design**: Single `ComputationalMethod` interface for all QM/MM methods
 - **MethodFactory**: Priority-based method resolution with hierarchical fallbacks
 - **Unified Interface**: `calculateEnergy()`, `getGradient()`, consistent API across all methods
-- **Method Priority System**: `gfn2` → TBLite > Ulysses > XTB (automatic fallback)
+- **Method Priority System**: `gfn2`/`gfn1` → Native xTB (AP3); `ipea1` → TBLite; `ugfn2` → Ulysses
 - **Thread-Safe**: Full multi-threading support maintained
 - **Universal Verbosity**: Consistent output control across all computational methods
 
@@ -209,11 +243,13 @@ std::unique_ptr<ComputationalMethod> method =
 double energy = method->calculateEnergy();
 ```
 
-##### **Supported Method Hierarchies**
-- **gfn2**: TBLite → Ulysses → XTB (automatic priority resolution)
-- **gfn1**: TBLite → XTB → Ulysses
-- **uff**: ForceField wrapper with parameter generation
-- **eht**: Extended Hückel Theory (native implementation)
+##### **Supported Method Hierarchies** (AP3, April 2026)
+- **gfn1/gfn2**: Native curcuma xTB (canonical); `ipea1`/`ugfn2` for other providers
+- **xtb-gfn1/xtb-gfn2**: External GFN — TBLite (USE_TBLITE) → XTB binary (USE_XTB), like `xtb-gfnff`
+- **tblite-gfn1/tblite-gfn2**: TBLite explicitly (forces that backend)
+- **eht**: Native only (always available, no dependencies)
+- **pm3**: Native only (H, C, N, O supported, no dependencies)
+- **uff/qmdff**: ForceField wrapper with parameter generation
 - **gfnff**: Native C++ GFN-FF (always available, ✅ **COMPLETE**)
 - **xtb-gfnff**: Fortran/XTB GFN-FF — ExternalGFNFF (USE_GFNFF) → XTB (USE_XTB)
 
@@ -294,11 +330,16 @@ curcuma/
 ✅ **ConfigManager Layer** - Type-safe parameter access, hierarchical dot notation
 ✅ **EnergyCalculator Refactoring** - Polymorphic interface, priority-based method resolution
 ✅ **Universal Verbosity System** - Consistent 4-level output across all methods (0-3)
-✅ **Method Hierarchies** - `gfn2` auto-falls back: TBLite → Ulysses → XTB
+✅ **Method Hierarchies** - `gfn2`/`gfn1` → Native xTB canonical (AP3); `ipea1` → TBLite; `ugfn2` → Ulysses
 ✅ **Physical Architecture** - QM/MM methods organized under `src/core/energy_calculators/`
 ✅ **Topological Data Analysis** - dMatrix legacy functionality integrated as TDAEngine
 ✅ **Parameter Routing Fix** - Multi-module parameter hierarchies now work (json null-error fixed)
-✅ **GFN-FF Implementation** - Complete and operational in ff_methods/ - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
+✅ **Native GFN2-xTB** (November 2025) - Complete implementation with CN, Hamiltonian, SCF, energies
+✅ **Native GFN1-xTB** (November 2025) - With halogen bond correction, simpler than GFN2
+✅ **Native PM3** (November 2025) - NDDO semi-empirical for H, C, N, O thermochemistry
+✅ **GFN2 Parameter Loader** (November 2025) - Infrastructure for TBLite TOML extraction with real parameters (H, C, N, O)
+✅ **Ulysses Methods Documentation** (November 2025) - Complete guide: 27 semi-empirical methods (AM1, MNDO, PM6, RM1, etc.)
+✅ **MNDO Integrals Library** (November 2025) - Standalone Dewar-Thiel multipole expansion, pedagogically documented, extracted from Ulysses
 ✅ **GFN-FF Full Implementation** (2025-2026) - All energy terms, gradients, EEQ charges, D4 dispersion; sub-mEh accuracy on most molecules - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
 ✅ **Scattering Analysis Enhancements** (January 2026) - Logarithmic q-spacing (default), automatic gnuplot script generation with 4-panel plots
 ✅ **Analysis Parallelization** (January 2026) - Frame-level parallelization with CxxThreadPool, 3-8x speedup for trajectory analysis

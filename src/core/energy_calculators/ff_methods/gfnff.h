@@ -30,7 +30,7 @@
 #include "src/core/energy_calculators/ff_methods/ff_workspace.h"  // Claude Generated (Mar 2026): Unified workspace
 #include "src/core/energy_calculators/ff_methods/eeq_solver.h"  // EEQ charge calculation (Dec 2025 - Phase 3)
 #include "src/core/energy_calculators/ff_methods/huckel_solver.h"  // Full Hückel calculation (Jan 2026 - Phase 1)
-#include "src/core/energy_calculators/ff_methods/d4param_generator.h"  // Claude Generated (Feb 15, 2026): D4 for dc6dcn gradient
+#include "src/core/energy_calculators/dispersion/d4param_generator.h"  // Claude Generated (Feb 15, 2026): D4 for dc6dcn gradient
 #include "src/core/energy_calculators/ff_methods/alpb_solvation.h"  // Claude Generated (Mar 2026): ALPB solvation
 #include "src/core/global.h"
 #include "src/core/functional_groups.h"
@@ -259,10 +259,30 @@ PARAM(eeq_refactor_force_every, Int, 0,
       "WP-EEQ-Cache: Force EEQ Cholesky refactorization every N steps. "
       "0 = geometry-triggered only. Recommended: 100 for long MD. "
       "Forwarded to eeq_solver.eeq_refactor_force_every.", "Performance", {})
+// Implicit solvation (WP5, Claude Generated June 2026). Registering these here is
+// what makes -gfnff.solvent reach GFNFF::InitialiseMolecule (the value was silently
+// ignored before, since the gfnff module declared no solvent PARAM). Use the dotted
+// -gfnff.solvent form; the flat -solvent is ambiguous across providers.
+PARAM(solvent, String, "none",
+      "Implicit solvent for the native GFN-FF ALPB/GBSA model (e.g. 'water', 'dmso', "
+      "'acetone', 'chloroform'). 'none' (default) runs gas phase. Born electrostatics "
+      "at the EEQ charges + CDS surface term + state shift; the reaction field is a "
+      "post-hoc add-on (the EEQ charges do not yet feel the solvent). Use the dotted "
+      "-gfnff.solvent (the flat -solvent is ambiguous across providers).", "Solvation", {})
+PARAM(solvent_model, String, "alpb",
+      "GFN-FF implicit solvation model: 'alpb' (default, P16 Born kernel) or 'gbsa' "
+      "(Still kernel, no shape term). CPCM is not implemented natively. Legacy numeric "
+      "codes (2=gbsa, 3=alpb) are also accepted.", "Solvation", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
 public:
+    /// Test hook: #EEQ PCG solves that used the multi-step warm-start extrapolation
+    /// (eeq_extrapolation). 0 with the default 'none'. Claude Generated.
+    long eeqPcgExtrapolationCount() const {
+        return m_eeq_solver ? m_eeq_solver->pcgExtrapolationCount() : -1;
+    }
+
     /**
      * @brief Static topology data — computed once at initialization, never changes
      *
@@ -2346,6 +2366,7 @@ private:
     // Initialized when solvent != "none", called in Calculation() after EEQ charges
     std::unique_ptr<ALPBSolvation> m_solvation;
     std::string m_solvent = "none";  ///< Solvent name ("none" = gas phase)
+    std::string m_solvent_model_label = "ALPB";  ///< "ALPB" | "GBSA" for logging (WP5)
 
     /**
      * @brief HB/XB dynamic update support for MD simulations

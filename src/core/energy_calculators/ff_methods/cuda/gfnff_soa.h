@@ -54,6 +54,13 @@ struct CudaBuffer {
     }
     ~CudaBuffer() { free(); }
 
+    /// Allocate count elements only if the current buffer is smaller — reuse the
+    /// existing allocation across calls (e.g. MD/opt geometry steps) instead of
+    /// free+realloc churn. Claude Generated.
+    void ensure(int count) {
+        if (count > n) alloc(count);
+    }
+
     /// Allocate count elements on GPU (frees previous allocation)
     void alloc(int count) {
         free();

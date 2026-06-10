@@ -30,8 +30,10 @@
 #include "src/core/global.h"
 #include "src/core/config_manager.h"
 #include "src/core/parameter_macros.h"
+#include "src/core/charge_extrapolation.h"
 
 #include <Eigen/Dense>
+#include <deque>
 #include <vector>
 #include <memory>
 #include <optional>
@@ -355,6 +357,14 @@ public:
     /// When set, calculateFinalCharges skips its own O(N^2) distance loop and
     /// fills m_phase2_distances from this view. Lifetime managed by caller (GFNFF).
     void setExternalDistances(const Eigen::VectorXd* srab) { m_external_srab = srab; }
+
+    /// WP5 (June 2026): self-consistent implicit-solvation reaction field. When set,
+    /// calculateFinalCharges adds this symmetric nat×nat Born matrix B into the
+    /// top-left block of the augmented EEQ matrix before the linear solve, so the
+    /// charges feel the solvent (matches the gfnff reference A_eeq += gbsa%bornMat,
+    /// gfnff_engrad.F90:1346-1350). nullptr = gas phase. Lifetime managed by caller
+    /// (GFNFF holds the ALPBSolvation that owns the matrix). Claude Generated.
+    void setReactionField(const Eigen::MatrixXd* born_matrix) { m_reaction_field = born_matrix; }
 
     /// WP-S3 (May 2026): effective Coulomb-matrix cutoff used by the
     /// sparsification (override wins, otherwise the ConfigManager value).
@@ -889,6 +899,24 @@ private:
     mutable Matrix m_pcg_last_Z2;  ///< Previous A⁻¹·C^T columns (N × nfrag), one warm start per fragment
     mutable bool m_pcg_cache_valid = false;  ///< Whether PCG warm-start cache is usable
 
+    // Multi-step PCG warm-start extrapolation (opt-in; generalises the 1-step cache above).
+    // History of the converged solution matrix X = [z1 | Z2] (N × (nfrag+1)), most-recent at
+    // front(); the PCG initial guess X0 is extrapolated from it (charge_extrapolation.h). The
+    // converged charges are unchanged (PCG converges regardless of X0) — only iterations drop.
+    // Claude Generated.
+    std::string m_eeq_extrapolation = "none";   ///< none | aspc | gauss
+    int         m_eeq_extrap_order  = 3;         ///< ASPC order / Gauss degree
+    mutable std::deque<Matrix> m_pcg_x_history;  ///< past [z1|Z2] solutions, front=newest
+    mutable bool m_eeq_extrap_cited = false;     ///< one-shot citation guard
+    mutable long m_pcg_extrap_count = 0;         ///< #PCG solves that used the multi-step warm-start
+
+public:
+    /// Number of PCG solves whose initial guess was built by multi-step extrapolation
+    /// (0 when eeq_extrapolation=none or before the history is long enough). Test hook.
+    long pcgExtrapolationCount() const { return m_pcg_extrap_count; }
+
+private:
+
     // Auto-solver benchmark state
     // Claude Generated - March 2026 (Auto-solver selection)
     mutable EEQSolveMethod m_selected_method = EEQSolveMethod::SchurCholesky;  ///< Method chosen by auto-benchmark
@@ -959,6 +987,12 @@ private:
     /// When non-null, calculateFinalCharges fills m_phase2_distances from this instead of
     /// recomputing the O(N^2) sqrt loop.
     const Eigen::VectorXd* m_external_srab = nullptr;
+
+    /// WP5 (June 2026): implicit-solvation reaction-field Born matrix (nat×nat),
+    /// added to the EEQ matrix in calculateFinalCharges. nullptr = gas phase.
+    /// Column-major to match ALPBSolvation::bornMatrix(); symmetric, so the storage
+    /// order vs the row-major augmented EEQ matrix is irrelevant.
+    const Eigen::MatrixXd* m_reaction_field = nullptr;
 
     /// Last truly successful charges (Phase 2 if available, otherwise Phase 1).
     /// Initialized from topology_charges on first call, then overwritten with the Phase 2
@@ -1059,5 +1093,19 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "rebuilt from scratch. When below this AND CN drift < 0.05, the cached off-diagonal is "
           "reused (only the diagonal is rebuilt each step). 0.0 = always rebuild (cache disabled, "
           "bit-identical to pre-WP). Conservative starting point: 0.05 (same as Cholesky cache).",
+          "Algorithm", {})
+    PARAM(eeq_extrapolation, String, "none",
+          "Multi-step extrapolation of the iterative (PCG) EEQ warm-start across geometry steps "
+          "(opt-in; generalises the existing 1-step PCG warm-start). 'none' (default, reuse only the "
+          "last solution), 'aspc' (Kolafa ASPC over the last eeq_extrapolation_order+2 steps, best for "
+          "fixed-timestep MD) or 'gauss' (least-squares polynomial fit, better for irregular "
+          "optimisation steps). Only affects the PCG initial guess for large systems (N>pcg_large_threshold "
+          "or solve_method=pcg); the converged charges are unchanged (PCG converges to the same solution), "
+          "only the iteration count drops. No effect on the direct LU/Cholesky solvers.",
+          "Algorithm", {})
+    PARAM(eeq_extrapolation_order, Int, 3,
+          "EEQ PCG warm-start extrapolation order: for 'aspc' the predictor order k (last k+2 steps; "
+          "k=0 is the 2-point linear predictor); for 'gauss' the least-squares polynomial degree. "
+          "Only used when eeq_extrapolation != none.",
           "Algorithm", {})
 END_PARAMETER_DEFINITION

@@ -729,6 +729,8 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.05);
     m_refactor_force_every = m_config.get<int>("eeq_refactor_force_every", 0);
     m_matrix_rebuild_eps   = m_config.get<double>("eeq_matrix_rebuild_eps_bohr", 0.0);
+    m_eeq_extrapolation    = m_config.get<std::string>("eeq_extrapolation", "none");
+    m_eeq_extrap_order     = m_config.get<int>("eeq_extrapolation_order", 3);
 
     // Initialize EEQ caching system
     m_eeq_cache = std::make_unique<EEQSolverCache>();
@@ -1419,7 +1421,13 @@ Vector EEQSolver::dispatchSolve(
 
     Vector charges;
 
-    if (method_to_use == EEQSolveMethod::SchurCholesky || method_to_use == EEQSolveMethod::PCG || m_solve_method == EEQSolveMethod::Auto) {
+    // Claude Generated (June 2026): EEQSolveMethod::LU must be in this guard too —
+    // otherwise an explicit `-eeq_solver.solve_method lu` makes this whole block fall
+    // through to `goto end_dispatch` with `charges` never assigned (segfault downstream),
+    // and the `else if (method_to_use == LU)` branch below stays dead code. With LU in
+    // the guard, explicit-LU routes through that branch's `goto lu_solve`.
+    if (method_to_use == EEQSolveMethod::SchurCholesky || method_to_use == EEQSolveMethod::PCG
+        || method_to_use == EEQSolveMethod::LU || m_solve_method == EEQSolveMethod::Auto) {
         Matrix A_nn = A.topLeftCorner(natoms, natoms);
         Vector rhs_atoms = x.head(natoms);
 
@@ -1588,7 +1596,18 @@ Vector EEQSolver::dispatchSolve(
 
                 // If the matrix is clearly not SPD or has extreme condition number,
                 // skip PCG entirely — it will burn 5000+ iterations and then fail anyway.
-                if (min_gersh <= 0.0 || kappa_est > 1e12) {
+                //
+                // Claude Generated (June 2026): the bypass is honored ONLY in Auto mode.
+                // The Gershgorin lower bound diag - Σ|A_ij| is intrinsically negative for
+                // SPD EEQ matrices (the off-diagonal erf(γ·r)/r terms sum past the diagonal
+                // hardness on most atoms), so this pre-check fires on essentially every real
+                // system. Left unscoped it silently overrode an explicit
+                // `-eeq_solver.solve_method pcg` — the PCG loop (and with it the warm-start
+                // and the multi-step EEQ extrapolation) then never ran. PCG converges for any
+                // SPD matrix; the NaN→LU fallback below already guards genuine failures, so an
+                // explicit PCG request runs PCG and only Auto keeps the heuristic bypass.
+                if (m_solve_method == EEQSolveMethod::Auto
+                    && (min_gersh <= 0.0 || kappa_est > 1e12)) {
                     if (m_verbosity >= 2) {
                         // Demoted to verbosity 2 (May 2026): Gershgorin lower bound is
                         // overly pessimistic for EEQ matrices, so the warning fires on
@@ -1599,6 +1618,7 @@ Vector EEQSolver::dispatchSolve(
                             "trying SchurCholesky next, LU as last resort", kappa_est, min_gersh));
                     }
                     m_pcg_cache_valid = false;
+                    m_pcg_x_history.clear();   // gap -> drop multi-step warm-start history
                     pcg_viable = false;
                 }
             }
@@ -1649,6 +1669,43 @@ Vector EEQSolver::dispatchSolve(
                 X0_multi.rightCols(nfrag).setZero();
             }
 
+            // Multi-step extrapolation of the PCG warm-start (opt-in). Predict the initial
+            // guess X0 = [z1|Z2] from the history of converged solutions instead of reusing
+            // only the previous step — a better guess means fewer PCG iterations (esp. in
+            // smooth MD). The converged charges are unchanged (PCG converges regardless of
+            // X0); on too-short history / shape mismatch it keeps the 1-step warm-start
+            // above. Claude Generated.
+            if (m_eeq_extrapolation != "none"
+                && static_cast<int>(m_pcg_x_history.size()) >= 2
+                && m_pcg_x_history.front().rows() == natoms
+                && m_pcg_x_history.front().cols() == nfrag + 1) {
+                Eigen::VectorXd w = curcuma::extrapolation::weights(
+                    m_eeq_extrapolation, m_eeq_extrap_order,
+                    static_cast<int>(m_pcg_x_history.size()));
+                if (w.size() >= 2) {
+                    Matrix X0_ext = Matrix::Zero(natoms, nfrag + 1);
+                    bool ok = true;
+                    for (int j = 0; j < w.size(); ++j) {
+                        if (m_pcg_x_history[j].rows() != natoms
+                            || m_pcg_x_history[j].cols() != nfrag + 1) { ok = false; break; }
+                        X0_ext.noalias() += w(j) * m_pcg_x_history[j];
+                    }
+                    if (ok && X0_ext.allFinite()) {
+                        X0_multi = X0_ext;
+                        ++m_pcg_extrap_count;
+                        if (!m_eeq_extrap_cited) {
+                            m_eeq_extrap_cited = true;
+                            CurcumaLogger::citation(m_eeq_extrapolation == "aspc"
+                                                        ? "aspc" : "density_extrapolation");
+                        }
+                        if (m_verbosity >= 2)
+                            CurcumaLogger::info(fmt::format(
+                                "EEQ PCG: {} warm-start extrapolation over {} steps",
+                                m_eeq_extrapolation, static_cast<int>(w.size())));
+                    }
+                }
+            }
+
             Matrix X_multi = solveWithPCG_multiRHS(A_nn, B_multi, X0_multi, pcg_max, pcg_tol, block_pc_ptr);
             Vector z1 = X_multi.col(0);
             Matrix Z2 = X_multi.rightCols(nfrag);
@@ -1685,6 +1742,19 @@ Vector EEQSolver::dispatchSolve(
                     m_pcg_last_z1 = z1;
                     m_pcg_last_Z2 = Z2;  // Cache all nfrag warm starts (May 2026)
                     m_pcg_cache_valid = true;
+                    // Record the converged [z1|Z2] for the multi-step warm-start (opt-in).
+                    if (m_eeq_extrapolation != "none") {
+                        if (!m_pcg_x_history.empty()
+                            && (m_pcg_x_history.front().rows() != X_multi.rows()
+                                || m_pcg_x_history.front().cols() != X_multi.cols()))
+                            m_pcg_x_history.clear();
+                        m_pcg_x_history.push_front(X_multi);
+                        const int maxlen = (m_eeq_extrapolation == "aspc")
+                                               ? std::max(m_eeq_extrap_order + 2, 2)
+                                               : std::min(2 * m_eeq_extrap_order + 2, 10);
+                        while (static_cast<int>(m_pcg_x_history.size()) > maxlen)
+                            m_pcg_x_history.pop_back();
+                    }
                 } else {
                     schur_ok = false;
                     if (m_verbosity >= 1)
@@ -1720,6 +1790,7 @@ Vector EEQSolver::dispatchSolve(
             }
             // SchurCholesky succeeded — invalidate PCG warmstart (it would mismatch on next call)
             m_pcg_cache_valid = false;
+            m_pcg_x_history.clear();   // gap -> drop multi-step warm-start history
         }
     } else if (method_to_use == EEQSolveMethod::LU) {
         // Direct full-system LU — no Schur complement overhead.
@@ -1755,6 +1826,7 @@ Vector EEQSolver::dispatchSolve(
                 std::chrono::duration<double>(t1 - t0).count()));
         }
         m_pcg_cache_valid = false;
+        m_pcg_x_history.clear();   // LU discontinuity -> drop multi-step warm-start history
         // After LU, switch to PCG for future calls (with warm-start from LU result).
         // This avoids getting stuck in LU permanently: PCG may converge on the next
         // step since the geometry change is small and LU provides a good initial guess.
@@ -3421,6 +3493,17 @@ Vector EEQSolver::calculateFinalCharges(
             if (condition_number > 1e12) {
                 CurcumaLogger::warn(fmt::format("Phase 2 EEQ matrix ill-conditioned (cond={:.2e})", condition_number));
             }
+        }
+
+        // WP5 (June 2026): self-consistent implicit-solvation reaction field. Add the
+        // Born interaction matrix B into the top-left atom block of the augmented EEQ
+        // matrix so the solved charges feel the solvent — matches the gfnff reference
+        // A(:n,:n) += gbsa%bornMat (gfnff_engrad.F90:1346-1350). B is geometry-only and
+        // is added on top of the (cached) off-diagonal Coulomb block each solve, so the
+        // off-diagonal cache stays clean. nullptr = gas phase (no change).
+        if (m_reaction_field && m_reaction_field->rows() == natoms
+            && m_reaction_field->cols() == natoms) {
+            A.topLeftCorner(natoms, natoms) += *m_reaction_field;
         }
 
         // 6. Solve system — unified dispatch (March 2026)

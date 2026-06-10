@@ -212,7 +212,7 @@ ctest -R test_gfnff_gradients --verbose
 ## Current Implementation Status (Apr 2026)
 
 ### ⚠️ Overall Readiness: AI-implemented, machine-tested — human production testing pending
-- Solvation (ALPB): code exists, **not validated**
+- Solvation: ⚙️ **GFN-FF ALPB is now self-consistent and validated** (WP5, Jun 2026). The Born reaction field couples into the EEQ solve (`A_eeq += B`, `EEQSolver::setReactionField`, matching the gfnff reference `gfnff_engrad.F90:1346-1350`), so the EEQ charges polarize in the solvent. `-method gfnff -gfnff.solvent water -gfnff.solvent_model alpb` matches **xtb 6.7.1** (`--gfnff --alpb`) to **≤1e-8 Eh** (7 mol × 4 solvents, `ctest -L gfnff_solvation`); analytic gradient FD-validated (`gfnff_numgrad_alpb_water`, frozen-charge at solvated q like the reference). **GBSA**: GFN-FF has **no separate GBSA model** — the reference always uses the improved ALPB (`gfnff_alpb.F90:23-24,66`: `alpb=.true.`), so `-gfnff.solvent_model gbsa` maps to ALPB (== alpb, ≤1e-8; warns at runtime). See [docs/SQM_SOLVATION_WP.md](../../../../docs/SQM_SOLVATION_WP.md) WP5
 - Periodic boundary conditions: **not implemented**
 - Organometallics/metals: code path exists, **not tested**
 - Optimization/MD: gradient-driven workflows run, **long-run stability untested by humans**
@@ -294,9 +294,27 @@ ctest -R test_gfnff_gradients --verbose
 - 4 threads: 0.120s
 - Speedup: 2.67x ✅
 
-## D3 Implementation Status (December 19, 2025)
+## D3 Implementation Status
 
-### ✅ FULLY VALIDATED - Production Ready
+> ⚠️ **Validation scope (2026-05-31): the shared D3 kernel is validated ONLY
+> through the native GFN1 path vs tblite (genuine s-dftd3).** With the exact
+> `C8/C6` fix (below), GFN1 native D3 bit-matches tblite's s-dftd3 at GFN1's
+> damping params (s6=1, s8=2.4, a1=0.63, a2=5.0, s9=0) → 10/12 SQM molecules at
+> 1e-8. **UFF-D3, `gfnff-d3`, and standalone-D3 remain UNVALIDATED** — different
+> damping params / code paths, no authoritative s-dftd3 reference. The "<1%"
+> table below is historical and does NOT establish correctness (its references
+> were never tied to s-dftd3); treat it as 🤖 AI-generated, not validated.
+
+### C8/C6 ratio — exact s-dftd3 form (2026-05-31)
+
+`D3ParameterGenerator::getR6` previously used an empirical
+`C8/C6 = 10.72·r4r2_i·r4r2_j` with a non-standard `r4r2` table — **+0.06% high on
+every pair** vs s-dftd3, a size-extensive dispersion bias. Now uses the exact
+`C8/C6 = 3·r4r2_i·r4r2_j`, `r4r2(z)=√(½·⟨r⁴⟩/⟨r²⟩·√Z)` with the verbatim
+s-dftd3 raw `⟨r⁴⟩/⟨r²⟩` table (`data/r4r2.f90`; 118 elements). Fixed the GFN1 D3
+residual (triose dispersion now −0.04201074 = tblite, exact).
+
+### Historical accuracy table (🤖 AI-generated, NOT authoritative)
 
 **Accuracy**: **8/9 test molecules <1% error** (H₂: 0.026%, HCl: 0.036%, CH₃OCH₃: 0.659%, etc.)
 

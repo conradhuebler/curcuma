@@ -107,12 +107,11 @@ Testing/
 FINAL_COMMIT_MESSAGE.md
 COMMIT_MESSAGE_*.md
 
-
-# Downloaded external dependencies (should be fetched via submodules/CMake)
-external/eigen-3.4.0.zip
+# External dependencies (CMake downloads) - Claude Generated November 2025
 external/eigen-3.4.0/
-external/ulysses.zip
+external/eigen-3.4.0.zip
 external/ulysses-main/
+external/ulysses.zip
 external/json.hpp
 external/stb_image_write.h
 

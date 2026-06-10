@@ -26,6 +26,7 @@
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
+#include "src/core/intra_parallel_context.h"
 
 #include "hessian.h"
 
@@ -78,6 +79,10 @@ void HessianThread::setMolecule(const Molecule& molecule)
 
 int HessianThread::execute()
 {
+    // Numerical Hessian runs many displaced single points of the SAME molecule
+    // concurrently across these workers; suppress intra-molecule threading so the
+    // cores stay with the coarse parallelism (no N x N oversubscription). Claude Generated.
+    curcuma::SuppressIntraParallel intra_guard;
     m_schema();
     return 0;
 }

@@ -1,0 +1,91 @@
+{
+  "molecule": "H2O",
+  "geometry_file": "test_cases/molecules/larger/H2O.xyz",
+  "charge": 0,
+  "spin_unpaired": 0,
+  "method": "gfn2",
+  "xtb_version": "6.6.1",
+  "energies": {
+    "total_energy": -5.070370761845,
+    "scc_energy": -5.105299543132,
+    "repulsion": 0.034928781256,
+    "isotropic_es": 0.031401322598,
+    "anisotropic_es": 0.000597418704,
+    "anisotropic_xc": -0.00083451974,
+    "dispersion": -0.000141213172,
+    "homo_lumo_gap_eV": 14.629673576893
+  },
+  "orbitals": [
+    {
+      "index": 1,
+      "occupation": 2.0,
+      "energy_Eh": -0.6816642,
+      "energy_eV": -18.549,
+      "tag": ""
+    },
+    {
+      "index": 2,
+      "occupation": 2.0,
+      "energy_Eh": -0.5664674,
+      "energy_eV": -15.4144,
+      "tag": ""
+    },
+    {
+      "index": 3,
+      "occupation": 2.0,
+      "energy_Eh": -0.5147063,
+      "energy_eV": -14.0059,
+      "tag": ""
+    },
+    {
+      "index": 4,
+      "occupation": 2.0,
+      "energy_Eh": -0.4474927,
+      "energy_eV": -12.1769,
+      "tag": "HOMO"
+    },
+    {
+      "index": 5,
+      "occupation": 0.0,
+      "energy_Eh": 0.0901379,
+      "energy_eV": 2.4528,
+      "tag": "LUMO"
+    },
+    {
+      "index": 6,
+      "occupation": 0.0,
+      "energy_Eh": 0.2456096,
+      "energy_eV": 6.6834,
+      "tag": ""
+    }
+  ],
+  "mulliken": [
+    {
+      "index": 1,
+      "Z": 8,
+      "symbol": "O",
+      "cov_cn": 1.611,
+      "q_mulliken": -0.564
+    },
+    {
+      "index": 2,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.806,
+      "q_mulliken": 0.282
+    },
+    {
+      "index": 3,
+      "Z": 1,
+      "symbol": "H",
+      "cov_cn": 0.806,
+      "q_mulliken": 0.282
+    }
+  ],
+  "dipole": {
+    "x": 0.0,
+    "y": -0.0,
+    "z": -0.894,
+    "total_Debye": 2.271
+  }
+}

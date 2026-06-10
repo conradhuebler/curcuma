@@ -32,7 +32,7 @@
 
 // Claude Generated (December 2025): D3/D4 dispersion integration
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
-#include "src/core/energy_calculators/ff_methods/d4param_generator.h"
+#include "src/core/energy_calculators/dispersion/d4param_generator.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"
 #include "src/core/energy_calculators/ff_methods/fast_exp.h"  // Claude Generated (May 2026, WP-D Stage B): SIMD exp(-x^2) for dcn step 3
 #include "src/core/energy_calculators/ff_methods/param_generator_thread.h"  // Claude Generated (Feb 2026): Parallel parameter generation
@@ -804,9 +804,27 @@ bool GFNFF::InitialiseMolecule()
     }
     if (m_solvent != "none" && !m_solvent.empty()) {
         m_solvation = std::make_unique<ALPBSolvation>();
+        // GFN-FF has NO separate GBSA model: the reference (gfnff_alpb.F90:23-24,66)
+        // ALWAYS uses the improved ALPB model (alpb=.true., P16 kernel), even when GBSA
+        // is requested. So a -gfnff.solvent_model gbsa request maps to ALPB here (the
+        // earlier Still-kernel + ALPB-param mix was neither model and was ~1-3 mEh off).
+        std::string sm = m_parameters.value("solvent_model", std::string("alpb"));
+        std::transform(sm.begin(), sm.end(), sm.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        const bool requested_gbsa = (sm == "gbsa" || sm == "gb" || sm == "2" || sm == "2.0");
+        m_solvation->setUseAlpb(true);          // GFN-FF: always ALPB (P16 kernel)
+        m_solvent_model_label = "ALPB";
         if (!m_solvation->init(m_atoms, m_solvent)) {
             CurcumaLogger::warn("ALPB solvation initialization failed for solvent '" + m_solvent + "', continuing gas-phase");
             m_solvation.reset();
+        } else {
+            if (requested_gbsa) {
+                CurcumaLogger::warn("GFN-FF has no separate GBSA model; using the improved "
+                    "ALPB model instead (gfnff_alpb.F90:23-24). -gfnff.solvent_model gbsa == alpb.");
+            }
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::info(std::string("GFN-FF implicit solvation: ALPB (") + m_solvent + ")");
+            }
         }
     }
 
@@ -1089,6 +1107,21 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     auto t_prep_total = std::chrono::high_resolution_clock::now();  // always measure, negligible overhead
     double t_cn = 0.0, t_eeq_topo = 0.0, t_cnf = 0.0, t_dcn = 0.0, t_d4_gw = 0.0, t_eeq_solve = 0.0, t_charge_dist = 0.0;
 
+    // WP5 (June 2026): self-consistent implicit solvation. Build the Born interaction
+    // matrix at the current geometry and hand it to the EEQ solver so the charges feel
+    // the solvent reaction field (the solver adds it as A_eeq += B before the linear
+    // solve, matching the gfnff reference, gfnff_engrad.F90:1346-1350). Born radii are
+    // geometry-only, so this one update covers every EEQ solve this step. Gas phase
+    // (no solvation model) clears the reaction field, leaving the solve byte-unchanged.
+    if (m_eeq_solver) {
+        if (m_solvation) {
+            m_solvation->update(m_atoms, m_geometry_bohr);
+            m_eeq_solver->setReactionField(&m_solvation->bornMatrix());
+        } else {
+            m_eeq_solver->setReactionField(nullptr);
+        }
+    }
+
     // Static-Mode (WP-S1, May 2026): reuse cached CN/dcn/D4 outputs after first capture.
     // m_last_cn, m_last_dcn, m_last_cnf, m_d4_generator's dc6dcn matrix retain previous values.
     const bool reuse_cn = m_static_cn && m_static_state_captured;
@@ -1182,7 +1215,13 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     bool do_eeq = (m_eeq_solver && !m_skip_eeq_recalc && !freeze_eeq);
     bool eeq_charges_current = (m_charges.size() == m_atomcount)
         && (m_last_eeq_geometry.rows() == m_geometry_bohr.rows())
-        && (m_last_eeq_geometry == m_geometry_bohr);
+        && (m_last_eeq_geometry == m_geometry_bohr)
+        // WP5 (June 2026): with implicit solvation the charges depend on the Born
+        // reaction field (set above), which the topology/initialisation gas-phase
+        // solve did not include. Force the Phase-2 solve so m_charges is solvated.
+        // The reaction field is geometry-only, so re-solving at an unchanged geometry
+        // gives the same result (negligible redundant cost for solvated runs).
+        && !m_solvation;
     if (eeq_charges_current && CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("GFN-FF: Skipping redundant Phase-2 EEQ (geometry unchanged)");
     }
@@ -1748,7 +1787,7 @@ double GFNFF::Calculation(bool gradient)
 
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::result(fmt::format("Solvation energy: {:.8f} Eh ({} = {})",
-                solv_parts.total(), "ALPB", m_solvent));
+                solv_parts.total(), m_solvent_model_label, m_solvent));
             if (CurcumaLogger::get_verbosity() >= 2) {
                 CurcumaLogger::param("  gborn", fmt::format("{:.8f} Eh", solv_parts.gborn));
                 CurcumaLogger::param("  ghb",   fmt::format("{:.8f} Eh", solv_parts.ghb));

@@ -26,10 +26,14 @@
 #include <stdexcept>
 #include <string>
 
+// Claude Generated (March 2026): BLAS/LAPACK config must be included BEFORE Eigen headers
+// This enables EIGEN_USE_BLAS/EIGEN_USE_LAPACKE optimizations for native QM methods
+#include "src/global_config.h"
+#include "src/core/curcuma_eigen_config.h"
+
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 
-#include "src/global_config.h"
 #include "src/version.h"
 
 #include "json.hpp"
@@ -85,7 +89,7 @@ struct Mol {
     Eigen::Matrix3d m_unit_cell = Eigen::Matrix3d::Zero(); // 3x3 lattice vectors matrix (Angstroms)
     bool m_has_pbc = false; // PBC active flag
 
-    int AtomCount()
+    int AtomCount() const
     {
         return m_number_atoms;
     }

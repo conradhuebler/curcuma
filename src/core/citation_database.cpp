@@ -46,14 +46,13 @@ const std::unordered_map<std::string, CitationData>& database()
         }},
 
         { "gfn1", {
-            "GFN1-xTB (Grimme et al. 2017)",
-            "Grimme, S. et al., J. Chem. Theory Comput. 2017, 13, 1989–2009 (DOI: 10.1021/acs.jctc.7b00118)",
+            "GFN1-xTB (Grimme, Bannwarth, Shushkov 2017)",
+            "Grimme, S.; Bannwarth, C.; Shushkov, P. J. Chem. Theory Comput. 2017, 13, 1989-2009 (DOI: 10.1021/acs.jctc.7b00118)",
             "grimme2017gfn1",
             "@article{grimme2017gfn1,\n"
-            "  author = {Grimme, Stefan and Bannwarth, Christoph and Caldeweyher, Eike\n"
-            "            and Ehlert, Sebastian and Hansen, Andreas and Pracht, Philipp\n"
-            "            and Seibert, Jan and Spicher, Sebastian},\n"
-            "  title = {Extended Tight-Binding in ORCA},\n"
+            "  author = {Grimme, Stefan and Bannwarth, Christoph and Shushkov, Pavlo},\n"
+            "  title = {A Robust and Efficient Tight Binding Quantum Chemical Method\n"
+            "           for Chemistry, Noncovalent Interactions, and Reactivity},\n"
             "  journal = {J. Chem. Theory Comput.},\n"
             "  year = {2017},\n"
             "  volume = {13},\n"
@@ -63,17 +62,35 @@ const std::unordered_map<std::string, CitationData>& database()
         }},
 
         { "gfn2", {
-            "GFN2-xTB (Bannwarth et al. 2019)",
-            "Bannwarth, C. et al., J. Chem. Theory Comput. 2019, 15, 1652–1671 (DOI: 10.1021/acs.jctc.8b01176)",
+            "GFN2-xTB (Bannwarth, Ehlert, Grimme 2019)",
+            "Bannwarth, C.; Ehlert, S.; Grimme, S. J. Chem. Theory Comput. 2019, 15, 1652-1671 (DOI: 10.1021/acs.jctc.8b01176)",
             "bannwarth2019gfn2",
             "@article{bannwarth2019gfn2,\n"
             "  author = {Bannwarth, Christoph and Ehlert, Sebastian and Grimme, Stefan},\n"
-            "  title = {GFN2-xTB — An Accurate and Broadly Parametrized Self-Consistent Tight-Binding Quantum Chemical Method},\n"
+            "  title = {GFN2-xTB -- An Accurate and Broadly Parametrized Self-Consistent\n"
+            "           Extended Tight-Binding Quantum Chemical Method with Multipole\n"
+            "           Electrostatics and Dispersion},\n"
             "  journal = {J. Chem. Theory Comput.},\n"
             "  year = {2019},\n"
             "  volume = {15},\n"
             "  pages = {1652--1671},\n"
             "  doi = {10.1021/acs.jctc.8b01176}\n"
+            "}"
+        }},
+
+        { "gfn0", {
+            "GFN0-xTB (Pracht, Caldeweyher, Ehlert, Grimme 2019)",
+            "Pracht, P.; Caldeweyher, E.; Ehlert, S.; Grimme, S. ChemRxiv 2019, preprint (DOI: 10.26434/chemrxiv.8326202.v1)",
+            "pracht2019gfn0",
+            "@article{pracht2019gfn0,\n"
+            "  author = {Pracht, Philipp and Caldeweyher, Eike and Ehlert, Sebastian\n"
+            "            and Grimme, Stefan},\n"
+            "  title = {Gradient extended tight-binding: A general framework for\n"
+            "           the calculation of potential energy surfaces and forces},\n"
+            "  journal = {ChemRxiv},\n"
+            "  year = {2019},\n"
+            "  doi = {10.26434/chemrxiv.8326202.v1},\n"
+            "  note = {Preprint}\n"
             "}"
         }},
 
@@ -296,9 +313,20 @@ const std::unordered_map<std::string, CitationData>& database()
         }},
 
         { "d4", {
-            "DFT-D4 Dispersion Correction (Caldeweyher et al. 2019)",
-            "Caldeweyher, E. et al., J. Chem. Phys. 2019, 150, 154122 (DOI: 10.1063/1.5090222)",
-            "caldeweyher2019d4",
+            "DFT-D4 Dispersion Correction (Caldeweyher et al. 2017, 2019, 2020)",
+            "Caldeweyher, E.; Bannwarth, C.; Grimme, S. J. Chem. Phys. 2017, 147, 034112 (DOI: 10.1063/1.4993215)\n"
+            "Caldeweyher, E. et al. J. Chem. Phys. 2019, 150, 154122 (DOI: 10.1063/1.5090222)\n"
+            "Caldeweyher, E. et al. Phys. Chem. Chem. Phys. 2020, 22, 8499-8512 (DOI: 10.1039/D0CP00502A)",
+            "caldeweyher2017d4",
+            "@article{caldeweyher2017d4,\n"
+            "  author = {Caldeweyher, Eike and Bannwarth, Christoph and Grimme, Stefan},\n"
+            "  title = {Extension of the {D3} dispersion coefficient model},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2017},\n"
+            "  volume = {147},\n"
+            "  pages = {034112},\n"
+            "  doi = {10.1063/1.4993215}\n"
+            "}\n"
             "@article{caldeweyher2019d4,\n"
             "  author = {Caldeweyher, Eike and Ehlert, Sebastian and Hansen, Andreas\n"
             "            and Grimme, Stefan},\n"
@@ -308,6 +336,17 @@ const std::unordered_map<std::string, CitationData>& database()
             "  volume = {150},\n"
             "  pages = {154122},\n"
             "  doi = {10.1063/1.5090222}\n"
+            "}\n"
+            "@article{caldeweyher2020d4,\n"
+            "  author = {Caldeweyher, Eike and Mewes, Jan-Michael and Ehlert, Sebastian\n"
+            "            and Grimme, Stefan},\n"
+            "  title = {Extension and evaluation of the {D4} London-dispersion model\n"
+            "           for periodic systems},\n"
+            "  journal = {Phys. Chem. Chem. Phys.},\n"
+            "  year = {2020},\n"
+            "  volume = {22},\n"
+            "  pages = {8499--8512},\n"
+            "  doi = {10.1039/D0CP00502A}\n"
             "}"
         }},
 
@@ -399,7 +438,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "atm", {
             "Three-Body Dispersion (Axilrod-Teller-Muto)",
-            "Axilrod, B. M. J. Chem. Phys. 1951, 19, 719–724 (DOI: 10.1063/1.1748205); "
+            "Axilrod, B. M. J. Chem. Phys. 1951, 19, 719-724 (DOI: 10.1063/1.1748205)\n"
             "Muto, Y. Proc. Phys. Math. Soc. Jpn. 1943, 17, 629",
             "axilrod1951atm",
             "@article{axilrod1951atm,\n"
@@ -512,6 +551,20 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        { "cpcm_x", {
+            "CPCM-X / ddCOSMO Implicit Solvation (Stahn, Ehlert, Grimme 2023)",
+            "Stahn, M.; Ehlert, S.; Grimme, S. J. Phys. Chem. A 2023 (DOI: 10.1021/acs.jpca.3c04382)",
+            "stahn2023cpcmx",
+            "@article{stahn2023cpcmx,\n"
+            "  author = {Stahn, Marcel and Ehlert, Sebastian and Grimme, Stefan},\n"
+            "  title = {Accurate and Efficient Molecular Polarizable Continuum Model\n"
+            "           Solvation for Semiempirical Quantum Mechanical Methods},\n"
+            "  journal = {J. Phys. Chem. A},\n"
+            "  year = {2023},\n"
+            "  doi = {10.1021/acs.jpca.3c04382}\n"
+            "}"
+        }},
+
         { "obc2", {
             "Onufriev-Bashford-Case Born Radii Model (Onufriev, Bashford, Case 2004)",
             "Onufriev, A.; Bashford, D.; Case, D. A. Proteins 2004, 55, 383–394 (DOI: 10.1002/prot.20033)",
@@ -589,8 +642,8 @@ const std::unordered_map<std::string, CitationData>& database()
         // === Optimization algorithms ===
         { "lbfgs", {
             "Limited-Memory BFGS Optimization (Liu & Nocedal 1989)",
-            "Liu, D. C.; Nocedal, J. Math. Program. 1989, 45, 503–528 (DOI: 10.1007/BF01589116); "
-            "Nocedal, J. Math. Comput. 1980, 35, 773–782 (DOI: 10.1090/S0025-5718-1980-0572855-7)",
+            "Liu, D. C.; Nocedal, J. Math. Program. 1989, 45, 503-528 (DOI: 10.1007/BF01589116)\n"
+            "Nocedal, J. Math. Comput. 1980, 35, 773-782 (DOI: 10.1090/S0025-5718-1980-0572855-7)",
             "liu1989lbfgs",
             "@article{liu1989lbfgs,\n"
             "  author = {Liu, Dong C. and Nocedal, Jorge},\n"
@@ -704,8 +757,8 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "rfo", {
             "Rational Function Optimization (Simons et al. 1983)",
-            "Simons, J. et al., J. Phys. Chem. 1983, 87, 2745–2753 (DOI: 10.1021/j100238a013); "
-            "Banerjee, A. et al., J. Phys. Chem. 1985, 89, 52–57 (DOI: 10.1021/j100247a013)",
+            "Simons, J. et al., J. Phys. Chem. 1983, 87, 2745-2753 (DOI: 10.1021/j100238a013)\n"
+            "Banerjee, A. et al., J. Phys. Chem. 1985, 89, 52-57 (DOI: 10.1021/j100247a013)",
             "simons1983rfo",
             "@article{simons1983rfo,\n"
             "  author = {Simons, Jack and Jorgensen, Poul and Taylor, Hugh and Ozment, Judy},\n"
@@ -796,7 +849,7 @@ const std::unordered_map<std::string, CitationData>& database()
         // === ORCA interface ===
         { "orca", {
             "Quantum Chemistry Package (Neese 2024)",
-            "Neese, F. WIREs Comput. Mol. Sci. 2024, 14, e1692 (DOI: 10.1002/wcms.1692); "
+            "Neese, F. WIREs Comput. Mol. Sci. 2024, 14, e1692 (DOI: 10.1002/wcms.1692)\n"
             "Neese, F. et al., J. Chem. Phys. 2020, 152, 224108 (DOI: 10.1063/5.0005356)",
             "neese2024orca",
             "@article{neese2024orca,\n"
@@ -818,6 +871,54 @@ const std::unordered_map<std::string, CitationData>& database()
             "  volume = {152},\n"
             "  pages = {224108},\n"
             "  doi = {10.1063/5.0005356}\n"
+            "}"
+        }},
+
+        // Multi-step SCC extrapolation across geometry steps (native GFN SCF).
+        // Claude Generated (June 2026).
+        { "aspc", {
+            "Always Stable Predictor-Corrector charge extrapolation (Kolafa 2004)",
+            "Kolafa, J. J. Comput. Chem. 2004, 25, 335–342 (DOI: 10.1002/jcc.10385)",
+            "kolafa2004aspc",
+            "@article{kolafa2004aspc,\n"
+            "  author = {Kolafa, Jiri},\n"
+            "  title = {Time-reversible always stable predictor-corrector method for\n"
+            "           molecular dynamics of polarizable molecules},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {2004},\n"
+            "  volume = {25},\n"
+            "  pages = {335--342},\n"
+            "  doi = {10.1002/jcc.10385}\n"
+            "}"
+        }},
+
+        { "density_extrapolation", {
+            "Least-squares (polynomial) SCF density/charge extrapolation (Pulay & Fogarasi 2004)",
+            "Pulay, P.; Fogarasi, G. Chem. Phys. Lett. 2004, 386, 272–278 (DOI: 10.1016/j.cplett.2004.01.069)",
+            "pulay2004fockdynamics",
+            "@article{pulay2004fockdynamics,\n"
+            "  author = {Pulay, Peter and Fogarasi, Geza},\n"
+            "  title = {Fock matrix dynamics},\n"
+            "  journal = {Chem. Phys. Lett.},\n"
+            "  year = {2004},\n"
+            "  volume = {386},\n"
+            "  pages = {272--278},\n"
+            "  doi = {10.1016/j.cplett.2004.01.069}\n"
+            "}"
+        }},
+
+        { "xlbomd", {
+            "Extended Lagrangian Born-Oppenheimer molecular dynamics (Niklasson 2008)",
+            "Niklasson, A. M. N. Phys. Rev. Lett. 2008, 100, 123004 (DOI: 10.1103/PhysRevLett.100.123004)",
+            "niklasson2008xlbomd",
+            "@article{niklasson2008xlbomd,\n"
+            "  author = {Niklasson, Anders M. N.},\n"
+            "  title = {Extended {B}orn-{O}ppenheimer molecular dynamics},\n"
+            "  journal = {Phys. Rev. Lett.},\n"
+            "  year = {2008},\n"
+            "  volume = {100},\n"
+            "  pages = {123004},\n"
+            "  doi = {10.1103/PhysRevLett.100.123004}\n"
             "}"
         }},
     };

@@ -199,6 +199,22 @@ void D3ParameterGenerator::copyReferenceData()
     }
 }
 
+void D3ParameterGenerator::prepareForEnergyGradient(const std::vector<int>& atoms,
+                                                    const Eigen::MatrixXd& geometry)
+{
+    // Only the prerequisites getEnergyAndGradient actually reads: geometry, the
+    // CN-dependent Gaussian weights (m_weights_cached), and a fresh dC6/dCN. No
+    // JSON pair list. Mirrors GenerateParameters' first two steps.
+    m_atoms = atoms;
+    m_geometry = geometry;
+    const std::vector<double> coordination_numbers = calculateCoordinationNumbers(atoms, geometry);
+    precomputeGaussianWeights(atoms, coordination_numbers);  // sets m_weights_cached
+    // dC6/dCN is geometry-dependent; force a recompute (computeDC6DCN otherwise
+    // returns early on its m_dc6dcn_computed guard, which is never reset → stale
+    // CN-chain gradient across -opt/-md steps).
+    m_dc6dcn_computed = false;
+}
+
 void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry)
 {
     auto t_start_total = std::chrono::high_resolution_clock::now();
@@ -411,6 +427,21 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     }
 }
 
+const std::vector<std::vector<double>>*
+D3ParameterGenerator::refC6Block(int atom_i, int atom_j, bool& swap_refs) const
+{
+    const int ei = atom_i - 1, ej = atom_j - 1;
+    if (ei < 0 || ei >= MAX_ELEM || ej < 0 || ej >= MAX_ELEM || !m_data_initialized)
+        return nullptr;
+    // Triangular pair index (0-based) + s-dftd3 ref-index swap, same condition as getC6.
+    const int pair_index = (ei > ej) ? ej + ei * (ei + 1) / 2
+                                     : ei + ej * (ej + 1) / 2;
+    if (pair_index < 0 || pair_index >= static_cast<int>(m_reference_c6.size()))
+        return nullptr;
+    swap_refs = !(ei > ej);  // swap when elem_i <= elem_j
+    return &m_reference_c6[pair_index];
+}
+
 double D3ParameterGenerator::getC6(int atom_i, int atom_j, int ref_i, int ref_j) const
 {
     // Elements from Molecule are 1-based (H=1, C=6, ...) - convert to 0-based for array indexing
@@ -493,56 +524,56 @@ double D3ParameterGenerator::getC6(int atom_i, int atom_j, int ref_i, int ref_j)
 
 double D3ParameterGenerator::getR6(int atom_i, int atom_j) const
 {
-    // Calculate C8/C6 ratio for BJ damping using r4/r2 reference data
-    // Formula from simple-dftd3: C8/C6 = 10.72 * r4/r2_A * r4/r2_B
-    // where r4/r2 = sqrt(Z * <r^4>/<r^2>) is element-specific
-
-    // r4/r2 values from simple-dftd3 for elements 1-94
-    // Data source: s-dftd3 atomic radii output
-    static const std::vector<double> r4_over_r2 = {
-        1.0622, // 1 H
-        0.8289, // 2 He
-        2.6564, // 3 Li
-        2.0393, // 4 Be
-        1.9286, // 5 B
-        1.6431, // 6 C
-        1.4350, // 7 N
-        1.3725, // 8 O
-        1.2638, // 9 F
-        1.1722, // 10 Ne
-        3.4851, // 11 Na
-        2.8909, // 12 Mg
-        2.9910, // 13 Al
-        2.5839, // 14 Si
-        2.2740, // 15 P
-        2.1385, // 16 S
-        1.9735, // 17 Cl
-        1.8240, // 18 Ar
-        // Add more elements as needed - for now use fallback for Z>18
+    // C8/C6 ratio for BJ damping — exact s-dftd3 / dftd4 form:
+    //   rrij = C8/C6 = 3 * r4r2(i) * r4r2(j)            (s-dftd3 damping/rational.f90:173)
+    //   r4r2(z) = sqrt(0.5 * <r^4>/<r^2>(z) * sqrt(z))  (s-dftd3 data/r4r2.f90:69-70)
+    // The raw <r^4>/<r^2> table below is verbatim from s-dftd3 data/r4r2.f90
+    // (PBE0/def2-QZVP, Grimme 2010; identical to D4ParameterGenerator::m_r4_over_r2).
+    // Earlier code used an empirical "10.72 * r4r2" fit with a non-standard table
+    // that was ~0.06% high on every pair — a size-extensive dispersion bias vs
+    // tblite/s-dftd3. This reproduces s-dftd3's C8/C6 (and BJ R0) exactly.
+    static const double raw_r4_over_r2[] = {
+        8.0589,  3.4698,                                                                  // H,He
+        29.0974, 14.8517, 11.8799, 7.8715, 5.5588, 4.7566, 3.8025, 3.1036,               // Li-Ne
+        26.1552, 17.2304, 17.7210, 12.7442, 9.5361, 8.1652, 6.7463, 5.6004,              // Na-Ar
+        29.2012, 22.3934,                                                                // K,Ca
+        19.0598, 16.8590, 15.4023, 12.5589, 13.4788,                                     // Sc-Mn
+        12.2309, 11.2809, 10.5569, 10.1428, 9.4907,                                      // Fe-Zn
+        13.4606, 10.8544, 8.9386, 8.1350, 7.1251, 6.1971,                                // Ga-Kr
+        30.0162, 24.4103,                                                                // Rb,Sr
+        20.3537, 17.4780, 13.5528, 11.8451, 11.0355, 10.1997, 9.5414, 9.0061, 8.6417, 8.9975, // Y-Cd
+        14.0834, 11.8333, 10.0179, 9.3844, 8.4110, 7.5152,                               // In-Xe
+        32.7622, 27.5708,                                                                // Cs,Ba
+        23.1671, 21.6003, 20.9615, 20.4562, 20.1010, 19.7475, 19.4828,                   // La-Eu
+        15.6013, 19.2362, 17.4717, 17.8321, 17.4237, 17.1954, 17.1631,                   // Gd-Yb
+        14.5716, 15.8758, 13.8989, 12.4834, 11.4421, 10.2671, 8.3549, 7.8496, 7.3278, 7.4820, // Lu-Hg
+        13.5124, 11.6554, 10.0959, 9.7340, 8.8584, 8.0125,                               // Tl-Rn
+        29.8135, 26.3157,                                                                // Fr,Ra
+        19.1885, 15.8542, 16.1305, 15.6161, 15.1226, 16.1576, 14.6510,                   // Ac-Am
+        14.7178, 13.9108, 13.5623, 13.2326, 12.9189, 12.6133, 12.3142,                   // Cm-No
+        14.8326, 12.3771, 10.6378, 9.3638, 8.2297, 7.5667, 6.9456, 6.3946, 5.9159, 5.4929, // Lr-Cn
+        6.7286, 6.5144, 10.9169, 10.3600, 9.4723, 8.6641                                 // Nh-Og
     };
+    static const int n_r4r2 = static_cast<int>(sizeof(raw_r4_over_r2) / sizeof(double));
 
     // Elements from Molecule are 1-based (H=1, C=6, ...) - convert to 0-based for array indexing
-    int elem_i = atom_i - 1;
-    int elem_j = atom_j - 1;
-
-    if (elem_i < 0 || elem_i >= MAX_ELEM || elem_j < 0 || elem_j >= MAX_ELEM) {
+    const int elem_i = atom_i - 1;
+    const int elem_j = atom_j - 1;
+    if (elem_i < 0 || elem_j < 0 || elem_i >= n_r4r2 || elem_j >= n_r4r2) {
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::warn("getR6: Elements out of range - using default");
         }
         return 12.0; // Conservative default for unknown elements
     }
 
-    // Get r4/r2 values (use default if element not in table)
-    double r4r2_i = (elem_i < static_cast<int>(r4_over_r2.size())) ? r4_over_r2[elem_i] : 2.0;
-    double r4r2_j = (elem_j < static_cast<int>(r4_over_r2.size())) ? r4_over_r2[elem_j] : 2.0;
-
-    // Calculate C8/C6 ratio using empirical formula from simple-dftd3
-    // Factor 10.72 determined from D3 reference data analysis
-    double c8_over_c6 = 10.72 * r4r2_i * r4r2_j;
+    // Pre-scale: sqrtZr4r2(z) = sqrt(0.5 * <r^4>/<r^2> * sqrt(Z)).
+    const double szr_i = std::sqrt(0.5 * raw_r4_over_r2[elem_i] * std::sqrt(static_cast<double>(atom_i)));
+    const double szr_j = std::sqrt(0.5 * raw_r4_over_r2[elem_j] * std::sqrt(static_cast<double>(atom_j)));
+    const double c8_over_c6 = 3.0 * szr_i * szr_j;
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("getR6(" + std::to_string(atom_i) + "," + std::to_string(atom_j) + "): " +
-                           "r4/r2_i=" + std::to_string(r4r2_i) + " r4/r2_j=" + std::to_string(r4r2_j) +
+                           "sqrtZr4r2_i=" + std::to_string(szr_i) + " sqrtZr4r2_j=" + std::to_string(szr_j) +
                            " C8/C6=" + std::to_string(c8_over_c6));
     }
 
@@ -672,18 +703,22 @@ double D3ParameterGenerator::interpolateC6(int elem_i, int elem_j, size_t atom_i
         return 0.0;
     }
 
-    // Weighted sum over reference combinations (NO EXP CALLS, only multiplications)
+    // Weighted sum over reference combinations. The reference C6 block is hoisted
+    // out of the loop (vs getC6 recomputing the pair index + nested lookup on every
+    // ref-pair); this hot path runs O(N²×49) times. Claude Generated (perf).
+    bool swap_refs = false;
+    const auto* blk = refC6Block(elem_i, elem_j, swap_refs);
+    if (!blk) return 0.0;
+    const auto& block = *blk;
     double c6_interpolated = 0.0;
     for (size_t ref_i = 0; ref_i < weights_i.size(); ++ref_i) {
+        const double wi = weights_i[ref_i];
         for (size_t ref_j = 0; ref_j < weights_j.size(); ++ref_j) {
-            double c6_ref = getC6(elem_i, elem_j, ref_i, ref_j);
-            double contrib = weights_i[ref_i] * weights_j[ref_j] * c6_ref;
-            c6_interpolated += contrib;
-
-            if (CurcumaLogger::get_verbosity() >= 3 && contrib > 1e-6) {
-                CurcumaLogger::info("    C6[" + std::to_string(ref_i) + "," + std::to_string(ref_j) +
-                                   "]=" + std::to_string(c6_ref) + " contrib=" + std::to_string(contrib));
-            }
+            int ri = swap_refs ? static_cast<int>(ref_j) : static_cast<int>(ref_i);
+            int rj = swap_refs ? static_cast<int>(ref_i) : static_cast<int>(ref_j);
+            if (ri > MAX_REF - 1) ri = MAX_REF - 1;
+            if (rj > MAX_REF - 1) rj = MAX_REF - 1;
+            c6_interpolated += wi * weights_j[ref_j] * block[ri][rj];
         }
     }
 
@@ -712,6 +747,29 @@ int D3ParameterGenerator::getNumberofReferences(int atom) const
 
 // Claude Generated Phase 3.1: Factory Methods
 // Provide convenient creation with standard D3 parameter sets
+
+D3ParameterGenerator D3ParameterGenerator::createForGFN1()
+{
+    // Claude Generated: GFN1-xTB D3(BJ) parameters
+    // Reference: tblite src/tblite/xtb/gfn1.f90:53 (Grimme et al. JCTC 2017, 13, 1989)
+    //   s6 = 1.0, s8 = 2.4, a1 = 0.63, a2 = 5.0, s9 = 0.0
+    // s9 = 0.0 pins GFN1-xTB's D3 to TWO-BODY ONLY (no Axilrod-Teller-Muto term),
+    // matching tblite. This call already behaved as s9=0 (the PARAM default 1.0 is
+    // not merged into this locally-built config), so this is an explicit guard, not
+    // a behaviour change -- it prevents a future registry-default leak from silently
+    // switching ATM on for GFN1. (The GFN1 dispersion residual vs tblite is in the
+    // TWO-body term, not ATM; see SQM_WP2.)
+    json config_json;
+    config_json["d3_s6"] = 1.0;
+    config_json["d3_s8"] = 2.4;
+    config_json["d3_a1"] = 0.63;
+    config_json["d3_a2"] = 5.0;
+    config_json["d3_s9"] = 0.0;   // no three-body ATM (tblite gfn1.f90:53)
+    config_json["d3_alp"] = 14.0;
+
+    ConfigManager config("d3param", config_json);
+    return D3ParameterGenerator(config);
+}
 
 D3ParameterGenerator D3ParameterGenerator::createForGFNFF()
 {
@@ -823,7 +881,9 @@ D3ParameterGenerator D3ParameterGenerator::createForMethod(const std::string& me
     std::string lower_method = method;
     std::transform(lower_method.begin(), lower_method.end(), lower_method.begin(), ::tolower);
 
-    if (lower_method == "gfnff") {
+    if (lower_method == "gfn1" || lower_method == "gfn1-xtb") {
+        return createForGFN1();
+    } else if (lower_method == "gfnff") {
         return createForGFNFF();
     } else if (lower_method == "uff-d3" || lower_method == "uffd3") {
         return createForUFFD3();
@@ -913,6 +973,222 @@ double D3ParameterGenerator::getTotalEnergy() const
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::result("D3 total energy: " + std::to_string(energy) + " Eh");
+    }
+
+    return energy;
+}
+
+// Claude Generated (May 2026): Analytical gradient for D3 dispersion
+// -------------------------------------------------------------------------
+
+void D3ParameterGenerator::computeDC6DCN() const
+{
+    // Reference: s-dftd3/src/dftd3/model.f90:248-324 (get_atomic_c6 derivatives)
+    // Build the matrix m_dc6dcn where:
+    //   m_dc6dcn(i,j) = dC6(i,j) / dCN(i)
+    //   m_dc6dcn(j,i) = dC6(i,j) / dCN(j)
+    // This is needed for the CN chain rule in the analytical gradient.
+
+    if (m_dc6dcn_computed || !m_weights_cached)
+        return;
+
+    const size_t n = m_atoms.size();
+    m_dc6dcn = Eigen::MatrixXd::Zero(n, n);
+
+    const double wf = 4.0;  // Gaussian width parameter (same as precomputeGaussianWeights)
+
+    // Pre-compute dgw/dcn for each atom's Gaussian weights
+    // gw(ref) = exp(-wf*(cn - cn_ref)^2) / norm
+    // d_gw/dcn = gw(ref) * 2*wf*(cn_ref - cn) / norm  [unnormalised raw derivative]
+    // Actually: d/dcn[exp(-wf*(cn-cn_ref)^2)] = -2*wf*(cn-cn_ref)*exp(...)
+    // Normalised derivative: d(gw/norm)/dcn = (d_gw*norm - gw*sum(d_gw)) / norm^2
+    std::vector<std::vector<double>> dgw(n);
+
+    for (size_t idx = 0; idx < n; ++idx) {
+        int elem = m_atoms[idx];
+        int nref = getNumberofReferences(elem);
+        if (nref == 0) continue;
+
+        double cn = m_cached_cn[idx];
+        const auto& gw = m_gaussian_weights[idx];
+
+        // Un-normalised weights and their derivatives
+        std::vector<double> raw_gw(nref);
+        std::vector<double> raw_dgw(nref);
+        double norm = 0.0;
+        double dnorm = 0.0;
+
+        for (int ref = 0; ref < nref; ++ref) {
+            double cn_ref = getReferenceCN(elem, ref);
+            double diff = cn - cn_ref;
+            raw_gw[ref] = std::exp(-wf * diff * diff);
+            raw_dgw[ref] = -2.0 * wf * diff * raw_gw[ref];
+            norm += raw_gw[ref];
+            dnorm += raw_dgw[ref];
+        }
+
+        if (norm < 1e-10) {
+            // Exceptional case: all weights negligible -> delta on max CN ref
+            dgw[idx].resize(nref, 0.0);
+            continue;
+        }
+
+        dgw[idx].resize(nref);
+        for (int ref = 0; ref < nref; ++ref) {
+            dgw[idx][ref] = (raw_dgw[ref] * norm - raw_gw[ref] * dnorm) / (norm * norm);
+        }
+    }
+
+    // Now build dc6dcn using the weight derivatives
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t j = i + 1; j < n; ++j) {
+            int elem_i = m_atoms[i];
+            int elem_j = m_atoms[j];
+
+            if (elem_i < 1 || elem_i > MAX_ELEM || elem_j < 1 || elem_j > MAX_ELEM)
+                continue;
+
+            const auto& gw_i = m_gaussian_weights[i];
+            const auto& gw_j = m_gaussian_weights[j];
+            const auto& dgw_i = dgw[i];
+            const auto& dgw_j = dgw[j];
+
+            if (gw_i.empty() || gw_j.empty()) continue;
+
+            double dc6_di = 0.0;
+            double dc6_dj = 0.0;
+
+            // Hoist the reference C6 block out of the ref-pair loop (perf; same
+            // result as getC6 per ref). Claude Generated.
+            bool swap_refs = false;
+            const auto* blk = refC6Block(elem_i, elem_j, swap_refs);
+            if (!blk) continue;
+            const auto& block = *blk;
+            for (size_t ref_i = 0; ref_i < gw_i.size(); ++ref_i) {
+                for (size_t ref_j = 0; ref_j < gw_j.size(); ++ref_j) {
+                    int ri = swap_refs ? static_cast<int>(ref_j) : static_cast<int>(ref_i);
+                    int rj = swap_refs ? static_cast<int>(ref_i) : static_cast<int>(ref_j);
+                    if (ri > MAX_REF - 1) ri = MAX_REF - 1;
+                    if (rj > MAX_REF - 1) rj = MAX_REF - 1;
+                    const double c6_ref = block[ri][rj];
+                    dc6_di += dgw_i[ref_i] * gw_j[ref_j] * c6_ref;
+                    dc6_dj += gw_i[ref_i] * dgw_j[ref_j] * c6_ref;
+                }
+            }
+
+            m_dc6dcn(i, j) = dc6_di;
+            m_dc6dcn(j, i) = dc6_dj;
+        }
+    }
+
+    m_dc6dcn_computed = true;
+}
+
+const Eigen::MatrixXd& D3ParameterGenerator::getDC6DCN() const
+{
+    if (!m_dc6dcn_computed)
+        computeDC6DCN();
+    return m_dc6dcn;
+}
+
+double D3ParameterGenerator::getEnergyAndGradient(bool need_gradient,
+                                                  Matrix& gradient_out,
+                                                  Vector& dEdcn_out) const
+{
+    // Reference: s-dftd3/src/dftd3/damping/rational.f90 (get_dispersion_derivs)
+    // Computes D3(BJ) two-body dispersion energy and analytical gradient.
+    //
+    // The direct geometry gradient is folded into gradient_out immediately.
+    // The CN-chain-rule term dE/dCN is returned in dEdcn_out; the caller must
+    // multiply by dCN/dR (exponential counting function) and add to gradient.
+
+    if (!m_data_initialized || !m_weights_cached || m_atoms.empty()) {
+        return 0.0;
+    }
+
+    const double au = 1.88972612546;  // Angstrom -> Bohr
+    const size_t n = m_atoms.size();
+
+    double a1 = m_config.get<double>("d3_a1", 0.4);
+    double a2 = m_config.get<double>("d3_a2", 4.0);
+    double s6 = m_config.get<double>("d3_s6", 1.0);
+    double s8 = m_config.get<double>("d3_s8", 1.0);
+
+    double energy = 0.0;
+
+    if (need_gradient) {
+        computeDC6DCN();
+        // Ensure outputs are sized (caller may or may not have pre-allocated)
+        if (gradient_out.rows() != static_cast<int>(n) || gradient_out.cols() != 3)
+            gradient_out = Eigen::MatrixXd::Zero(n, 3);
+        if (dEdcn_out.size() != static_cast<int>(n))
+            dEdcn_out = Eigen::VectorXd::Zero(n);
+    }
+
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t j = i + 1; j < n; ++j) {
+            int elem_i = m_atoms[i];
+            int elem_j = m_atoms[j];
+
+            if (elem_i < 1 || elem_i > MAX_ELEM || elem_j < 1 || elem_j > MAX_ELEM)
+                continue;
+
+            double c6 = interpolateC6(elem_i, elem_j, i, j);
+            if (c6 <= 0.0) continue;
+
+            double r6_ratio = getR6(elem_i, elem_j);
+            double c8 = c6 * r6_ratio;
+
+            Eigen::Vector3d pos_i = m_geometry.row(i);
+            Eigen::Vector3d pos_j = m_geometry.row(j);
+            Eigen::Vector3d rij_vec = pos_i - pos_j;          // Angstrom
+            double r_angstrom = rij_vec.norm();
+            if (r_angstrom < 1e-6) continue;
+
+            double r = r_angstrom * au;                       // Bohr
+            double r2 = r * r;
+
+            // Becke-Johnson damping
+            double r0 = a1 * std::sqrt(r6_ratio) + a2;        // Bohr
+
+            double r6_0 = std::pow(r0, 6);
+            double r8_0 = std::pow(r0, 8);
+            double t6 = 1.0 / (std::pow(r, 6) + r6_0);
+            double t8 = 1.0 / (std::pow(r, 8) + r8_0);
+
+            // Two-body energy
+            double e6 = -s6 * c6 * t6;
+            double e8 = -s8 * c8 * t8;
+            energy += (e6 + e8);
+
+            if (!need_gradient) continue;
+
+            // --- Direct geometry gradient (dE/dR) ---
+            // d/dr [t6] = -6*r^5 * t6^2  ->  d6_contrib = -c6 * s6 * (-6*r^5*t6^2)
+            // In s-dftd3 code: d6 = -6*r2^2*t6^2  (r2 = r^2)
+            //   -> gdisp = s6*d6 + s8*rrij*d8
+            //   -> dG = -c6ij * gdisp * vec   (vec = R_i - R_j in Bohr)
+            //
+            // But careful: vec in s-dftd3 is in Bohr, and dG is Eh/Bohr.
+            // Our rij_vec is in Angstrom. We must convert to Bohr for consistency.
+
+            double d6 = -6.0 * r2 * r2 * t6 * t6;   // = -6*r^4*t6^2
+            double d8 = -8.0 * r2 * r2 * r2 * t8 * t8; // = -8*r^6*t8^2
+            double gdisp = s6 * d6 + s8 * r6_ratio * d8;
+
+            // rij in Bohr for gradient accumulation
+            Eigen::Vector3d vec_bohr = rij_vec * au;
+            Eigen::Vector3d dG = -c6 * gdisp * vec_bohr;   // Eh/Bohr
+
+            gradient_out.row(i) += dG.transpose();
+            gradient_out.row(j) -= dG.transpose();
+
+            // --- CN chain-rule term (dE/dCN) ---
+            // edisp = s6*t6 + s8*rrij*t8   (factor common to both dE/dCN terms)
+            double edisp = s6 * t6 + s8 * r6_ratio * t8;
+            dEdcn_out(i) -= m_dc6dcn(i, j) * edisp;
+            dEdcn_out(j) -= m_dc6dcn(j, i) * edisp;
+        }
     }
 
     return energy;

@@ -28,7 +28,7 @@
 #include "src/core/molecule.h"
 #include <fmt/format.h>
 
-#include "ParallelEigenSolver.hpp"
+#include "native_eigensolver.h"
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <algorithm>
@@ -214,19 +214,26 @@ double EHT::Calculation(bool gradient)
             CurcumaLogger::param("matrix_size", fmt::format("{}x{}", basis_size, basis_size));
         }
 
-        // Use parallel eigenvalue solver for efficiency
-        ParallelEigenSolver solver(500, 128, 1e-10, false);
-        solver.setThreadCount(m_threads);
-        Eigen::MatrixXd mo_coefficients;
+        // Löwdin orthogonalization: X = S^{-1/2}, then diagonalize X*H*X
+        Eigen::SelfAdjointEigenSolver<Matrix> es_S(S);
+        if (es_S.info() != Eigen::Success || es_S.eigenvalues().minCoeff() < 1.0e-8) {
+            CurcumaLogger::error("Overlap diagonalization failed in EHT");
+            return 0.0;
+        }
+        const Matrix X = es_S.eigenvectors()
+                       * es_S.eigenvalues().cwiseSqrt().cwiseInverse().asDiagonal()
+                       * es_S.eigenvectors().transpose();
+        const Matrix H_prime = X * H * X;
 
-        bool success = solver.solve(S, H, m_energies, mo_coefficients, m_threads, false);
+        Eigen::MatrixXd c_std;
+        bool success = curcuma::eigsolver::solveSymmetric(Eigen::MatrixXd(H_prime), m_energies, c_std, m_threads);
 
         if (!success) {
             CurcumaLogger::error("Eigenvalue solution failed!");
             return 0.0;
         }
 
-        m_mo = mo_coefficients;
+        m_mo = c_std; // MOs in orthogonalized basis (C' = X^{-1}*C)
 
         // Step 5: Calculate electronic energy
         double electronic_energy = calculateElectronicEnergy() / eV2Eh;

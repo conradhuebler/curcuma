@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include "src/core/global.h"
+
 #include <vector>
 #include <Eigen/Dense>
 
@@ -41,13 +43,18 @@ public:
      * @param geometry Molecular geometry in Ångström
      * @param k1 Steepness parameter (default: 16.0)
      * @param k2 Scaling factor (default: 4.0/3.0)
+     * @param cn_cutoff_bohr Real-space cutoff for the CN sum in Bohr
+     *        (default: 25.0, matching tblite's d3 dispersion container,
+     *        tblite/disp/d3.f90: realspace_cutoff(cn=25.0)). <=0 disables.
+     *        NOTE: the s-dftd3 *standalone* default is 40.0; tblite overrides it.
      * @return Vector of coordination numbers (one per atom)
      */
     static std::vector<double> calculateD3CN(
         const std::vector<int>& atoms,
         const Eigen::MatrixXd& geometry,
         double k1 = 16.0,
-        double k2 = 4.0 / 3.0
+        double k2 = 4.0 / 3.0,
+        double cn_cutoff_bohr = 25.0
     );
 
     /**
@@ -120,6 +127,34 @@ public:
      * @return Covalent radius in Ångström
      */
     static double getCovalentRadius(int atomic_number);
+
+    /**
+     * Add D3 CN chain-rule gradient to Cartesian gradient matrix.
+     * Claude Generated (May 2026): Analytical gradient for D3 dispersion CN dependence.
+     *
+     * Uses the D3 exponential counting function:
+     *   CN_i = sum_j 1/(1+exp(-k1*(k2*(R_cov_i+R_cov_j)/R_ij - 1)))
+     *
+     * @param atoms Atomic numbers (1-based)
+     * @param geometry Molecular geometry in Ångström
+     * @param dEdcn Per-atom dE/dCN values [N]
+     * @param gradient_out [N,3] Cartesian gradient in Eh/Angstrom (accumulated)
+     * @param k1 Steepness parameter (default: 16.0)
+     * @param k2 Scaling factor (default: 4.0/3.0)
+     * @param cn_cutoff_bohr Real-space cutoff for the CN sum in Bohr
+     *        (default: 25.0, matching tblite's d3 dispersion container). <=0
+     *        disables. Must match calculateD3CN so energy and gradient agree.
+     */
+    static void addD3CNGradient(
+        const std::vector<int>& atoms,
+        const Matrix& geometry,
+        const Vector& dEdcn,
+        Matrix& gradient_out,
+        double k1 = 16.0,
+        double k2 = 4.0 / 3.0,
+        double distance_unit_to_bohr = 1.0,  // multiply output by this (e.g. au=1.8897)
+        double cn_cutoff_bohr = 25.0
+    );
 
 private:
     // Covalent radii from simple-dftd3 (Angstrom)

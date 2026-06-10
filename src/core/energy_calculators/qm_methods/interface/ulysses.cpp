@@ -17,18 +17,10 @@
  *
  */
 
-#include "src/global_config.h"
+// Claude Generated (March 2026): BLAS/LAPACK config now centralized in curcuma_eigen_config.h
+// Included via global.h - enables EIGEN_USE_BLAS/EIGEN_USE_LAPACKE for all native QM methods
+#include "src/core/global.h"
 
-#ifdef USE_BLAS
-#define EIGEN_USE_BLAS
-#endif
-
-#ifdef USE_MKL
-#define EIGEN_USE_BLAS
-#define EIGEN_USE_LAPACK
-#endif
-
-#include "Eigen/Dense"
 #include <vector>
 
 #include "QC.hpp"

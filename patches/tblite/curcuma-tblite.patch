@@ -1,0 +1,580 @@
+diff --git a/include/tblite/result.h b/include/tblite/result.h
+index 530dd8a..9d84f8a 100644
+--- a/include/tblite/result.h
++++ b/include/tblite/result.h
+@@ -235,6 +235,101 @@ tblite_get_result_hamiltonian_matrix(tblite_error error,
+                                      tblite_result res,
+                                      double* hmat);
+ 
++/// AP6b diagnostic patch (Claude Generated)
++/// Retrieve dipole moment AO integrals from result container
++///
++/// @param error: Handle for error messages
++/// @param res: Result container
++/// @param dpint: Dipole integrals, shape [nao][nao][3]
++TBLITE_API_ENTRY void TBLITE_API_CALL
++tblite_get_result_dipole_integral(tblite_error error,
++                                  tblite_result res,
++                                  double* dpint);
++
++/// AP6b diagnostic patch (Claude Generated)
++/// Retrieve quadrupole moment AO integrals from result container
++///
++/// @param error: Handle for error messages
++/// @param res: Result container
++/// @param qpint: Quadrupole integrals, shape [nao][nao][6]
++TBLITE_API_ENTRY void TBLITE_API_CALL
++tblite_get_result_quadrupole_integral(tblite_error error,
++                                      tblite_result res,
++                                      double* qpint);
++
++/// AP6b Option(b) diagnostic patch (Claude Generated)
++/// Retrieve atomic dipole moments wfn%dpat, shape [nspin][nat][3]
++TBLITE_API_ENTRY void TBLITE_API_CALL
++tblite_get_result_atomic_dipole(tblite_error error,
++                                tblite_result res,
++                                double* dpat);
++
++/// AP6b Option(b) diagnostic patch (Claude Generated)
++/// Retrieve atomic quadrupole moments wfn%qpat, shape [nspin][nat][6]
++TBLITE_API_ENTRY void TBLITE_API_CALL
++tblite_get_result_atomic_quadrupole(tblite_error error,
++                                    tblite_result res,
++                                    double* qpat);
++
++/// AP6b Option(b) diagnostic patch (Claude Generated)
++/// Retrieve isotropic atom potential pot%vat, shape [nspin][nat]
++TBLITE_API_ENTRY void TBLITE_API_CALL
++tblite_get_result_potential_vat(tblite_error error,
++                                tblite_result res,
++                                double* vat);
++
++/// AP6b Option(b) diagnostic patch (Claude Generated)
++/// Retrieve dipole potential pot%vdp, shape [nspin][nat][3]
++TBLITE_API_ENTRY void TBLITE_API_CALL
++tblite_get_result_potential_vdp(tblite_error error,
++                                tblite_result res,
++                                double* vdp);
++
++/// AP6b Option(b) diagnostic patch (Claude Generated)
++/// Retrieve quadrupole potential pot%vqp, shape [nspin][nat][6]
++TBLITE_API_ENTRY void TBLITE_API_CALL
++tblite_get_result_potential_vqp(tblite_error error,
++                                tblite_result res,
++                                double* vqp);
++
++/// GFN2 component audit (Claude Generated)
++/// Retrieve per-atom halogen-bond energy, length [nat].
++/// Errors if the calculator has no halogen container.
++TBLITE_API_ENTRY void TBLITE_API_CALL
++tblite_get_result_energy_component_halogen(tblite_error error,
++                                           tblite_result res,
++                                           double* ecomp);
++
++/// GFN2 component audit (Claude Generated)
++/// Retrieve per-atom effective repulsion energy, length [nat].
++TBLITE_API_ENTRY void TBLITE_API_CALL
++tblite_get_result_energy_component_repulsion(tblite_error error,
++                                             tblite_result res,
++                                             double* ecomp);
++
++/// GFN2 component audit (Claude Generated)
++/// Retrieve per-atom dispersion (D4) energy, length [nat].
++TBLITE_API_ENTRY void TBLITE_API_CALL
++tblite_get_result_energy_component_dispersion(tblite_error error,
++                                              tblite_result res,
++                                              double* ecomp);
++
++/// GFN2 component audit (Claude Generated)
++/// Retrieve per-atom interactions container energy (e.g. solvation), length [nat].
++TBLITE_API_ENTRY void TBLITE_API_CALL
++tblite_get_result_energy_component_interactions(tblite_error error,
++                                                tblite_result res,
++                                                double* ecomp);
++
++/// GFN2 component audit (Claude Generated)
++/// Retrieve per-atom electronic-lump energy, length [nat].
++/// Lump = Tr(P*H0) + Coulomb-shell + 3rd-order + multipole, before the
++/// classical containers are added.
++TBLITE_API_ENTRY void TBLITE_API_CALL
++tblite_get_result_energy_component_electronic(tblite_error error,
++                                              tblite_result res,
++                                              double* ecomp);
++
+ /// Retrieve Hamiltonian matrix from result container
+ ///
+ /// @param error: Handle for error messages
+diff --git a/src/tblite/api/result.f90 b/src/tblite/api/result.f90
+index 90bc387..cbdf9d0 100644
+--- a/src/tblite/api/result.f90
++++ b/src/tblite/api/result.f90
+@@ -38,6 +38,15 @@ module tblite_api_result
+       & get_result_orbital_coefficients_api, get_result_energies_api, &
+       & get_result_density_matrix_api, get_result_overlap_matrix_api, &
+       & get_result_hamiltonian_matrix_api, get_result_bond_orders_api, &
++      & get_result_dipole_integral_api, get_result_quadrupole_integral_api, &
++      & get_result_atomic_dipole_api, get_result_atomic_quadrupole_api, &
++      & get_result_potential_vat_api, get_result_potential_vdp_api, &
++      & get_result_potential_vqp_api, &
++      & get_result_energy_component_halogen_api, &
++      & get_result_energy_component_repulsion_api, &
++      & get_result_energy_component_dispersion_api, &
++      & get_result_energy_component_interactions_api, &
++      & get_result_energy_component_electronic_api, &
+       & get_post_processing_dict_api
+ 
+ 
+@@ -536,6 +545,211 @@ subroutine get_result_hamiltonian_matrix_api(verror, vres, hmat) &
+ end subroutine get_result_hamiltonian_matrix_api
+ 
+ 
++! AP6b diagnostic patch (Claude Generated): expose dipole AO integrals, shape [3, nao, nao]
++subroutine get_result_dipole_integral_api(verror, vres, dpint) &
++      & bind(C, name=namespace//"get_result_dipole_integral")
++   type(c_ptr), value :: verror
++   type(vp_error), pointer :: error
++   type(c_ptr), value :: vres
++   type(vp_result), pointer :: res
++   real(c_double), intent(out) :: dpint(*)
++   logical :: ok
++
++   if (debug) print '("[Info]", 1x, a)', "get_result_dipole_integral"
++
++   call get_result(verror, vres, error, res, ok)
++   if (.not.ok) return
++
++   if (.not.allocated(res%results)) then
++      call fatal_error(error%ptr, "Result does not contain dipole integrals")
++      return
++   end if
++
++   if (.not.allocated(res%results%dipole)) then
++      call fatal_error(error%ptr, "Result does not contain dipole integrals")
++      return
++   end if
++
++   dpint(:size(res%results%dipole)) = &
++      & reshape(res%results%dipole, [size(res%results%dipole)])
++end subroutine get_result_dipole_integral_api
++
++
++! AP6b diagnostic patch (Claude Generated): expose quadrupole AO integrals, shape [6, nao, nao]
++subroutine get_result_quadrupole_integral_api(verror, vres, qpint) &
++      & bind(C, name=namespace//"get_result_quadrupole_integral")
++   type(c_ptr), value :: verror
++   type(vp_error), pointer :: error
++   type(c_ptr), value :: vres
++   type(vp_result), pointer :: res
++   real(c_double), intent(out) :: qpint(*)
++   logical :: ok
++
++   if (debug) print '("[Info]", 1x, a)', "get_result_quadrupole_integral"
++
++   call get_result(verror, vres, error, res, ok)
++   if (.not.ok) return
++
++   if (.not.allocated(res%results)) then
++      call fatal_error(error%ptr, "Result does not contain quadrupole integrals")
++      return
++   end if
++
++   if (.not.allocated(res%results%quadrupole)) then
++      call fatal_error(error%ptr, "Result does not contain quadrupole integrals")
++      return
++   end if
++
++   qpint(:size(res%results%quadrupole)) = &
++      & reshape(res%results%quadrupole, [size(res%results%quadrupole)])
++end subroutine get_result_quadrupole_integral_api
++
++
++! AP6b Option(b) (Claude Generated): atomic dipole moments wfn%dpat, shape [3, nat, nspin]
++subroutine get_result_atomic_dipole_api(verror, vres, dpat) &
++      & bind(C, name=namespace//"get_result_atomic_dipole")
++   type(c_ptr), value :: verror
++   type(vp_error), pointer :: error
++   type(c_ptr), value :: vres
++   type(vp_result), pointer :: res
++   real(c_double), intent(out) :: dpat(*)
++   logical :: ok
++
++   if (debug) print '("[Info]", 1x, a)', "get_result_atomic_dipole"
++
++   call get_result(verror, vres, error, res, ok)
++   if (.not.ok) return
++
++   if (.not.allocated(res%results)) then
++      call fatal_error(error%ptr, "Result does not contain atomic dipole moments")
++      return
++   end if
++   if (.not.allocated(res%results%dpat)) then
++      call fatal_error(error%ptr, "Result does not contain atomic dipole moments")
++      return
++   end if
++
++   dpat(:size(res%results%dpat)) = &
++      & reshape(res%results%dpat, [size(res%results%dpat)])
++end subroutine get_result_atomic_dipole_api
++
++
++! AP6b Option(b) (Claude Generated): atomic quadrupole moments wfn%qpat, shape [6, nat, nspin]
++subroutine get_result_atomic_quadrupole_api(verror, vres, qpat) &
++      & bind(C, name=namespace//"get_result_atomic_quadrupole")
++   type(c_ptr), value :: verror
++   type(vp_error), pointer :: error
++   type(c_ptr), value :: vres
++   type(vp_result), pointer :: res
++   real(c_double), intent(out) :: qpat(*)
++   logical :: ok
++
++   if (debug) print '("[Info]", 1x, a)', "get_result_atomic_quadrupole"
++
++   call get_result(verror, vres, error, res, ok)
++   if (.not.ok) return
++
++   if (.not.allocated(res%results)) then
++      call fatal_error(error%ptr, "Result does not contain atomic quadrupole moments")
++      return
++   end if
++   if (.not.allocated(res%results%qpat)) then
++      call fatal_error(error%ptr, "Result does not contain atomic quadrupole moments")
++      return
++   end if
++
++   qpat(:size(res%results%qpat)) = &
++      & reshape(res%results%qpat, [size(res%results%qpat)])
++end subroutine get_result_atomic_quadrupole_api
++
++
++! AP6b Option(b) (Claude Generated): isotropic atom potential pot%vat, shape [nat, nspin]
++subroutine get_result_potential_vat_api(verror, vres, vat) &
++      & bind(C, name=namespace//"get_result_potential_vat")
++   type(c_ptr), value :: verror
++   type(vp_error), pointer :: error
++   type(c_ptr), value :: vres
++   type(vp_result), pointer :: res
++   real(c_double), intent(out) :: vat(*)
++   logical :: ok
++
++   if (debug) print '("[Info]", 1x, a)', "get_result_potential_vat"
++
++   call get_result(verror, vres, error, res, ok)
++   if (.not.ok) return
++
++   if (.not.allocated(res%results)) then
++      call fatal_error(error%ptr, "Result does not contain isotropic potential")
++      return
++   end if
++   if (.not.allocated(res%results%vat)) then
++      call fatal_error(error%ptr, "Result does not contain isotropic potential")
++      return
++   end if
++
++   vat(:size(res%results%vat)) = &
++      & reshape(res%results%vat, [size(res%results%vat)])
++end subroutine get_result_potential_vat_api
++
++
++! AP6b Option(b) (Claude Generated): dipole potential pot%vdp, shape [3, nat, nspin]
++subroutine get_result_potential_vdp_api(verror, vres, vdp) &
++      & bind(C, name=namespace//"get_result_potential_vdp")
++   type(c_ptr), value :: verror
++   type(vp_error), pointer :: error
++   type(c_ptr), value :: vres
++   type(vp_result), pointer :: res
++   real(c_double), intent(out) :: vdp(*)
++   logical :: ok
++
++   if (debug) print '("[Info]", 1x, a)', "get_result_potential_vdp"
++
++   call get_result(verror, vres, error, res, ok)
++   if (.not.ok) return
++
++   if (.not.allocated(res%results)) then
++      call fatal_error(error%ptr, "Result does not contain dipole potential")
++      return
++   end if
++   if (.not.allocated(res%results%vdp)) then
++      call fatal_error(error%ptr, "Result does not contain dipole potential")
++      return
++   end if
++
++   vdp(:size(res%results%vdp)) = &
++      & reshape(res%results%vdp, [size(res%results%vdp)])
++end subroutine get_result_potential_vdp_api
++
++
++! AP6b Option(b) (Claude Generated): quadrupole potential pot%vqp, shape [6, nat, nspin]
++subroutine get_result_potential_vqp_api(verror, vres, vqp) &
++      & bind(C, name=namespace//"get_result_potential_vqp")
++   type(c_ptr), value :: verror
++   type(vp_error), pointer :: error
++   type(c_ptr), value :: vres
++   type(vp_result), pointer :: res
++   real(c_double), intent(out) :: vqp(*)
++   logical :: ok
++
++   if (debug) print '("[Info]", 1x, a)', "get_result_potential_vqp"
++
++   call get_result(verror, vres, error, res, ok)
++   if (.not.ok) return
++
++   if (.not.allocated(res%results)) then
++      call fatal_error(error%ptr, "Result does not contain quadrupole potential")
++      return
++   end if
++   if (.not.allocated(res%results%vqp)) then
++      call fatal_error(error%ptr, "Result does not contain quadrupole potential")
++      return
++   end if
++
++   vqp(:size(res%results%vqp)) = &
++      & reshape(res%results%vqp, [size(res%results%vqp)])
++end subroutine get_result_potential_vqp_api
++
++
+ subroutine get_result_bond_orders_api(verror, vres, mbo) &
+       & bind(C, name=namespace//"get_result_bond_orders")
+    type(c_ptr), value :: verror
+@@ -612,4 +826,130 @@ subroutine get_result(verror, vres, error, res, ok)
+ end subroutine get_result
+ 
+ 
++! GFN2 component audit (Claude Generated): per-container atom-resolved energies.
++! All five getters follow the AP6b vat/vdp/vqp pattern: write nat doubles into
++! the caller buffer, raise a fatal_error if the component was not populated
++! (container not allocated in the calculator, or SCF aborted before reaching
++! that point).
++
++subroutine get_result_energy_component_halogen_api(verror, vres, ecomp) &
++      & bind(C, name=namespace//"get_result_energy_component_halogen")
++   type(c_ptr), value :: verror
++   type(vp_error), pointer :: error
++   type(c_ptr), value :: vres
++   type(vp_result), pointer :: res
++   real(c_double), intent(out) :: ecomp(*)
++   logical :: ok
++
++   if (debug) print '("[Info]", 1x, a)', "get_result_energy_component_halogen"
++   call get_result(verror, vres, error, res, ok)
++   if (.not.ok) return
++   if (.not.allocated(res%results)) then
++      call fatal_error(error%ptr, "Result does not contain energy components")
++      return
++   end if
++   if (.not.allocated(res%results%ecomp_halogen)) then
++      call fatal_error(error%ptr, "Result does not contain halogen energy component")
++      return
++   end if
++   ecomp(:size(res%results%ecomp_halogen)) = res%results%ecomp_halogen
++end subroutine get_result_energy_component_halogen_api
++
++
++subroutine get_result_energy_component_repulsion_api(verror, vres, ecomp) &
++      & bind(C, name=namespace//"get_result_energy_component_repulsion")
++   type(c_ptr), value :: verror
++   type(vp_error), pointer :: error
++   type(c_ptr), value :: vres
++   type(vp_result), pointer :: res
++   real(c_double), intent(out) :: ecomp(*)
++   logical :: ok
++
++   if (debug) print '("[Info]", 1x, a)', "get_result_energy_component_repulsion"
++   call get_result(verror, vres, error, res, ok)
++   if (.not.ok) return
++   if (.not.allocated(res%results)) then
++      call fatal_error(error%ptr, "Result does not contain energy components")
++      return
++   end if
++   if (.not.allocated(res%results%ecomp_repulsion)) then
++      call fatal_error(error%ptr, "Result does not contain repulsion energy component")
++      return
++   end if
++   ecomp(:size(res%results%ecomp_repulsion)) = res%results%ecomp_repulsion
++end subroutine get_result_energy_component_repulsion_api
++
++
++subroutine get_result_energy_component_dispersion_api(verror, vres, ecomp) &
++      & bind(C, name=namespace//"get_result_energy_component_dispersion")
++   type(c_ptr), value :: verror
++   type(vp_error), pointer :: error
++   type(c_ptr), value :: vres
++   type(vp_result), pointer :: res
++   real(c_double), intent(out) :: ecomp(*)
++   logical :: ok
++
++   if (debug) print '("[Info]", 1x, a)', "get_result_energy_component_dispersion"
++   call get_result(verror, vres, error, res, ok)
++   if (.not.ok) return
++   if (.not.allocated(res%results)) then
++      call fatal_error(error%ptr, "Result does not contain energy components")
++      return
++   end if
++   if (.not.allocated(res%results%ecomp_dispersion)) then
++      call fatal_error(error%ptr, "Result does not contain dispersion energy component")
++      return
++   end if
++   ecomp(:size(res%results%ecomp_dispersion)) = res%results%ecomp_dispersion
++end subroutine get_result_energy_component_dispersion_api
++
++
++subroutine get_result_energy_component_interactions_api(verror, vres, ecomp) &
++      & bind(C, name=namespace//"get_result_energy_component_interactions")
++   type(c_ptr), value :: verror
++   type(vp_error), pointer :: error
++   type(c_ptr), value :: vres
++   type(vp_result), pointer :: res
++   real(c_double), intent(out) :: ecomp(*)
++   logical :: ok
++
++   if (debug) print '("[Info]", 1x, a)', "get_result_energy_component_interactions"
++   call get_result(verror, vres, error, res, ok)
++   if (.not.ok) return
++   if (.not.allocated(res%results)) then
++      call fatal_error(error%ptr, "Result does not contain energy components")
++      return
++   end if
++   if (.not.allocated(res%results%ecomp_interactions)) then
++      call fatal_error(error%ptr, "Result does not contain interactions energy component")
++      return
++   end if
++   ecomp(:size(res%results%ecomp_interactions)) = res%results%ecomp_interactions
++end subroutine get_result_energy_component_interactions_api
++
++
++subroutine get_result_energy_component_electronic_api(verror, vres, ecomp) &
++      & bind(C, name=namespace//"get_result_energy_component_electronic")
++   type(c_ptr), value :: verror
++   type(vp_error), pointer :: error
++   type(c_ptr), value :: vres
++   type(vp_result), pointer :: res
++   real(c_double), intent(out) :: ecomp(*)
++   logical :: ok
++
++   if (debug) print '("[Info]", 1x, a)', "get_result_energy_component_electronic"
++   call get_result(verror, vres, error, res, ok)
++   if (.not.ok) return
++   if (.not.allocated(res%results)) then
++      call fatal_error(error%ptr, "Result does not contain energy components")
++      return
++   end if
++   if (.not.allocated(res%results%ecomp_electronic)) then
++      call fatal_error(error%ptr, "Result does not contain electronic energy component")
++      return
++   end if
++   ecomp(:size(res%results%ecomp_electronic)) = res%results%ecomp_electronic
++end subroutine get_result_energy_component_electronic_api
++
++
+ end module tblite_api_result
+diff --git a/src/tblite/results.f90 b/src/tblite/results.f90
+index a593d5e..b01d21c 100644
+--- a/src/tblite/results.f90
++++ b/src/tblite/results.f90
+@@ -33,6 +33,32 @@ module tblite_results
+       real(wp), allocatable :: overlap(:, :)
+       !> (Core) Hamiltonian integrals
+       real(wp), allocatable :: hamiltonian(:, :)
++      !> Dipole moment integrals (3, nao, nao) -- AP6b diagnostic patch (Claude Generated)
++      real(wp), allocatable :: dipole(:, :, :)
++      !> Quadrupole moment integrals (6, nao, nao) -- AP6b diagnostic patch (Claude Generated)
++      real(wp), allocatable :: quadrupole(:, :, :)
++      !> AP6b Option(b) diagnostic patch (Claude Generated): converged multipole potentials + atomic moments
++      !> Atom-resolved isotropic potential (nat, nspin)
++      real(wp), allocatable :: vat(:, :)
++      !> Atom-resolved dipole potential (3, nat, nspin)
++      real(wp), allocatable :: vdp(:, :, :)
++      !> Atom-resolved quadrupole potential (6, nat, nspin)
++      real(wp), allocatable :: vqp(:, :, :)
++      !> Atomic dipole moments (3, nat, nspin)
++      real(wp), allocatable :: dpat(:, :, :)
++      !> Atomic quadrupole moments (6, nat, nspin)
++      real(wp), allocatable :: qpat(:, :, :)
++      !> Per-container atom-resolved energies (Claude Generated, GFN2 component audit)
++      !> Halogen-bond energy (nat)
++      real(wp), allocatable :: ecomp_halogen(:)
++      !> Effective repulsion energy (nat)
++      real(wp), allocatable :: ecomp_repulsion(:)
++      !> Dispersion energy (D4, nat)
++      real(wp), allocatable :: ecomp_dispersion(:)
++      !> Interactions container energy (e.g. solvation, nat)
++      real(wp), allocatable :: ecomp_interactions(:)
++      !> Electronic energy lump (Tr(P*H0) + Coulomb-shell + 3rd-order + multipole, nat)
++      real(wp), allocatable :: ecomp_electronic(:)
+       type(double_dictionary_type), allocatable :: dict
+    end type results_type
+ 
+diff --git a/src/tblite/xtb/singlepoint.f90 b/src/tblite/xtb/singlepoint.f90
+index c11bd83..8b5edc8 100644
+--- a/src/tblite/xtb/singlepoint.f90
++++ b/src/tblite/xtb/singlepoint.f90
+@@ -160,6 +160,8 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
+       if (prlevel > 1) &
+          call ctx%message(label_halogen // format_string(sum(exbond), real_format) // " Eh")
+       energies(:) = energies + exbond
++      ! Claude Generated (GFN2 component audit): capture per-atom container energy
++      if (present(results)) results%ecomp_halogen = exbond
+       call timer%pop
+    end if
+ 
+@@ -171,6 +173,8 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
+       if (prlevel > 1) &
+          call ctx%message(label_repulsion // format_string(sum(erep), real_format) // " Eh")
+       energies(:) = energies + erep
++      ! Claude Generated (GFN2 component audit): capture per-atom container energy
++      if (present(results)) results%ecomp_repulsion = erep
+       call timer%pop
+    end if
+ 
+@@ -182,6 +186,8 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
+       if (prlevel > 1) &
+          call ctx%message(label_dispersion // format_string(sum(edisp), real_format) // " Eh")
+       energies(:) = energies + edisp
++      ! Claude Generated (GFN2 component audit): capture per-atom container energy
++      if (present(results)) results%ecomp_dispersion = edisp
+       call timer%pop
+    end if
+ 
+@@ -193,6 +199,8 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
+       if (prlevel > 1) &
+          call ctx%message(label_other // format_string(sum(eint), real_format) // " Eh")
+       energies(:) = energies + eint
++      ! Claude Generated (GFN2 component audit): capture per-atom container energy
++      if (present(results)) results%ecomp_interactions = eint
+       call timer%pop
+    end if
+ 
+@@ -272,11 +280,23 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
+       call ctx%message(repeat("-", 60))
+       call ctx%message("")
+    end if
++   ! Claude Generated (GFN2 component audit): capture per-atom electronic-lump energy
++   ! Tr(P*H0) + Coulomb-shell + 3rd-order + multipole, before atom-resolution aggregation
++   if (present(results)) results%ecomp_electronic = eelec
+    energies(:) = energies + eelec
+    energy = sum(energies)
+    if (present(results)) then
+       results%energies = energies
+    end if
++   ! AP6b Option(b) (Claude Generated): capture converged multipole potential + moments
++   ! HERE (right after SCF), before the gradient block can modify pot.
++   if (present(results)) then
++      if (allocated(pot%vat))  results%vat  = pot%vat
++      if (allocated(pot%vdp))  results%vdp  = pot%vdp
++      if (allocated(pot%vqp))  results%vqp  = pot%vqp
++      if (allocated(wfn%dpat)) results%dpat = wfn%dpat
++      if (allocated(wfn%qpat)) results%qpat = wfn%qpat
++   end if
+    call timer%pop
+ 
+    if (prlevel > 1) then
+@@ -351,6 +371,9 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
+    if (calc%save_integrals .and. present(results)) then
+       call move_alloc(ints%overlap, results%overlap)
+       call move_alloc(ints%hamiltonian, results%hamiltonian)
++      ! AP6b diagnostic patch (Claude Generated): expose multipole AO integrals
++      if (allocated(ints%dipole)) call move_alloc(ints%dipole, results%dipole)
++      if (allocated(ints%quadrupole)) call move_alloc(ints%quadrupole, results%quadrupole)
+    end if
+ 
+    block

@@ -707,7 +707,13 @@ bool SimpleMD::Initialise()
     m_interface = new EnergyCalculator(m_method, ec_config, Basename());
 
     m_interface->setMolecule(m_molecule.getMolInfo());
-    m_interface->setVerbosity(0);
+    // Iterative mode: raise SCF display threshold by one level so system verbosity
+    // controls output (silent at default=1, visible at -v 2). Claude Generated.
+    m_interface->setIterativeMode(true);
+    // Warm-start: reuse converged shell charges from the previous geometry step.
+    // Reduces SCF iterations for native GFN1/GFN2 in MD; no-op for other methods.
+    if (m_method == "gfn1" || m_method == "gfn2")
+        m_interface->setWarmStart(true);
     // m_interface->setGeometryFile(Basename() + ".xyz"); TODO this does not really work
     // m_interface->setBasename(Basename()); TODO this does not really work
     if (m_writeUnique) {
@@ -3053,7 +3059,7 @@ double SimpleMD::CleanEnergy()
     EnergyCalculator interface(m_method, m_defaults, Basename());
     interface.setMolecule(m_molecule.getMolInfo());
     interface.updateGeometry(m_eigen_geometry);
-    interface.setVerbosity(0);
+    interface.setIterativeMode(true);
     // WP-P1 (May 2026): wall-clock the FF call for MD diagnostics
     auto t_ff_start = std::chrono::high_resolution_clock::now();
     const double Energy = interface.CalculateEnergy(true);
@@ -3069,8 +3075,6 @@ double SimpleMD::CleanEnergy()
 
 double SimpleMD::FastEnergy()
 {
-    m_interface->setVerbosity(0);
-
     m_interface->updateGeometry(m_eigen_geometry);
 
     // WP-P1 (May 2026): wall-clock the FF call for MD diagnostics

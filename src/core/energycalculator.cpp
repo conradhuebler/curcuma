@@ -445,7 +445,8 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
             return 0.0;
         }
 
-        if (getEffectiveVerbosity() >= 1) {
+        const int energy_min = m_is_iterative ? 2 : 1;
+        if (getEffectiveVerbosity() >= energy_min) {
             CurcumaLogger::energy_abs(m_energy, fmt::format("{} Final Energy", m_method_name));
         }
 
@@ -728,6 +729,17 @@ void EnergyCalculator::resetVerbosity()
 int EnergyCalculator::getEffectiveVerbosity() const
 {
     return (m_verbosity_override >= 0) ? m_verbosity_override : CurcumaLogger::get_verbosity();
+}
+
+void EnergyCalculator::setWarmStart(bool on)
+{
+    if (m_method) m_method->setWarmStart(on);
+}
+
+void EnergyCalculator::setIterativeMode(bool on)
+{
+    m_is_iterative = on;
+    if (m_method) m_method->setIterativeMode(on);
 }
 
 // =================================================================================
