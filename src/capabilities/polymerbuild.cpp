@@ -28,6 +28,26 @@ bool containsNaN(const Geometry& geom) {
     return geom.array().isNaN().any();
 }
 
+namespace {
+/**
+ * @brief RAII guard for CurcumaLogger verbosity.
+ *
+ * Records the current verbosity on construction and restores it on destruction,
+ * including when the guarded code throws or returns early. Wraps the
+ * set-to-silent / call-optimizer-or-MD / restore patterns so a throwing
+ * optimizer or MD run cannot leave global verbosity pinned at 0.
+ *
+ * Claude Generated 2026
+ */
+struct VerbosityGuard {
+    int saved;
+    VerbosityGuard() : saved(CurcumaLogger::get_verbosity()) {}
+    ~VerbosityGuard() { CurcumaLogger::set_verbosity(saved); }
+    VerbosityGuard(const VerbosityGuard&) = delete;
+    VerbosityGuard& operator=(const VerbosityGuard&) = delete;
+};
+} // namespace
+
 // ============================================================================
 // Claude Generated: PolymerPlacementFunctor for LM optimization
 // ============================================================================
@@ -321,7 +341,17 @@ std::vector<SequenceEntry> PolymerBuild::parseSequence(const std::string& sequen
         if (match[1].matched) {
             // Repetition group: (content)N
             std::string inner = match[2].str();
-            int count = std::stoi(match[3].str());
+            // Guard against malformed/overflowing repetition counts — Claude Generated 2026
+            int count = 0;
+            try {
+                count = std::stoi(match[3].str());
+            } catch (const std::exception&) {
+                CurcumaLogger::error(fmt::format(
+                    "parseSequence: invalid repetition count '{}' in group ({})N - skipping",
+                    match[3].str(), inner));
+                continue;
+            }
+            if (count < 0) count = 0;
             std::vector<SequenceEntry> inner_tokens = parseTokens(inner);
             for (int i = 0; i < count; ++i) {
                 for (const auto& tok : inner_tokens)
@@ -441,14 +471,20 @@ std::pair<Position, Position> PolymerBuild::optimizeFragmentPlacement(
     int max_iter = m_config.get<int>("lm_max_iter", 500);
     double tolerance = m_config.get<double>("lm_tolerance", 1e-6);
 
-    // Always write trajectory — one file per LM call, one frame per iteration.
-    // Claude Generated: helper lambda to render a single XYZ frame
-    std::string traj_filename = outputPath(fmt::format("{}_lm_{:03d}.xyz", polymer.Name(), step_number));
-    std::ofstream traj_file(traj_filename);
+    // Optional per-iteration LM trajectory: one file per LM call, one frame per iteration.
+    // Gated behind write_intermediates / verbosity >= 3 — this is called for every fragment
+    // connection, retry, and LJ-LM iteration, so on long chains it is large disk + I/O.
+    // Claude Generated 2026
+    bool write_traj = m_config.get<bool>("write_intermediates", false)
+                      || CurcumaLogger::get_verbosity() >= 3;
+    std::ofstream traj_file;
+    if (write_traj)
+        traj_file.open(outputPath(fmt::format("{}_lm_{:03d}.xyz", polymer.Name(), step_number)));
 
     Geometry frag_geom_orig = fragment.getGeometry();
 
     auto writeFrame = [&](const Vector& p, const std::string& label) {
+        if (!traj_file.is_open()) return;
         Position trans{p(0), p(1), p(2)};
         Position rot{p(3), p(4), p(5)};
         traj_file << polymer.AtomCount() + fragment.AtomCount() << "\n"
@@ -595,7 +631,7 @@ ConnectionResult PolymerBuild::connectMolecule(
                 xx_selection, next_xx_idx));
     } else {
         CurcumaLogger::error(fmt::format(
-            "Requested Xx#{} but fragment has only {} Xx — using Xx#0",
+            "Requested Xx#{} but fragment has only {} Xx - using Xx#0",
             xx_selection, next_xx.size()));
         next_xx_idx = next_xx[0];
     }
@@ -817,28 +853,18 @@ ConnectionResult PolymerBuild::connectMolecule(
                 frag_geom = best_geom;
                 if (CurcumaLogger::get_verbosity() >= 2) {
                     CurcumaLogger::info(fmt::format(
-                        "Dihedral scan: best orientation at {}° (clash energy {:.2f} → {:.2f})",
+                        "Dihedral scan: best orientation at {} deg (clash energy {:.2f} -> {:.2f})",
                         best_step * 30, best_clash_energy, best_clash_energy));
                 }
             }
         }
     }
 
-    // Build combined: polymer_lm (interface Xx already removed, other Xx as cap_intermediate)
-    // + fragment_lm (interface Xx already removed, other Xx as cap_intermediate)
-    Molecule combined = polymer_lm;
-    int offset = combined.AtomCount();
-
-    for (int i = 0; i < fragment_lm.AtomCount(); ++i)
-        combined.addAtom(fragment_lm.Atom(i));
-
-    Geometry combined_geom = combined.getGeometry();
-    for (int i = 0; i < fragment_lm.AtomCount(); ++i)
-        combined_geom.row(offset + i) = frag_geom.row(i);
-    combined.setGeometry(combined_geom);
-
-    // No need to remove interface Xx — already removed before LM
-    // No need to convert I back to Xx — fragment Xx are already cap_intermediate
+    // offset = start index of the fragment block in the combined molecule.
+    // Computed here (geometry-independent) because the index math below needs it.
+    // The combined molecule itself is assembled AFTER the LM retry/contraction block
+    // so that any geometry correction made there reaches result.polymer. Claude Generated 2026
+    int offset = polymer_lm.AtomCount();
 
     // --- Optional LM retry + bond contraction — Claude Generated 2026 ---
     double bond_tolerance = m_config.get<double>("lm_bond_tolerance", 0.1);
@@ -851,7 +877,7 @@ ConnectionResult PolymerBuild::connectMolecule(
     if (actual_bond_length > bond_length + bond_tolerance
         && m_config.get<bool>("lm_retry_on_stretch", true)) {
         CurcumaLogger::warn(fmt::format(
-            "LM bond length {:.3f} Å exceeds target {:.3f} Å by {:.3f} Å — retrying with stronger constraint",
+            "LM bond length {:.3f} A exceeds target {:.3f} A by {:.3f} A - retrying with stronger constraint",
             actual_bond_length, bond_length, actual_bond_length - bond_length));
 
         // Correct initial guess: slide fragment along bond axis so anchor distance = target
@@ -864,7 +890,6 @@ ConnectionResult PolymerBuild::connectMolecule(
             bond_length, corrected_translation, opt_rotation,
             step_number + 1000, -1, -1);  // step_number offset to avoid filename collision
 
-        Position retry_anchor_frag = fragment_lm.Centroid();
         Geometry retry_geom = fragment_lm.getGeometry();
         for (int i = 0; i < retry_geom.rows(); ++i) {
             Position p = retry_geom.row(i).transpose();
@@ -877,16 +902,17 @@ ConnectionResult PolymerBuild::connectMolecule(
         double retry_bond = (retry_anchor - anchor_poly).norm();
 
         if (retry_bond < actual_bond_length) {
+            double old_bond = actual_bond_length;
             opt_translation = retry_trans;
             opt_rotation = retry_rot;
             frag_geom = retry_geom;
             actual_bond_length = retry_bond;
             did_retry = true;
             CurcumaLogger::info(fmt::format(
-                "LM retry improved bond length: {:.3f} Å (was {:.3f} Å)",
-                actual_bond_length, actual_bond_length + (retry_bond < actual_bond_length ? 0 : 1)));
+                "LM retry improved bond length: {:.3f} A (was {:.3f} A)",
+                actual_bond_length, old_bond));
         } else {
-            CurcumaLogger::warn("LM retry did not improve bond length — keeping original");
+            CurcumaLogger::warn("LM retry did not improve bond length - keeping original");
         }
     }
 
@@ -902,22 +928,35 @@ ConnectionResult PolymerBuild::connectMolecule(
         }
         double new_length = (frag_geom.row(next_active_idx_lm).transpose() - anchor_poly).norm();
         CurcumaLogger::info(fmt::format(
-            "Bond contraction: {:.3f} Å → {:.3f} Å (target {:.3f} Å)",
+            "Bond contraction: {:.3f} A -> {:.3f} A (target {:.3f} A)",
             actual_bond_length, new_length, bond_length));
         actual_bond_length = new_length;
     }
 
     if (actual_bond_length > bond_length + bond_tolerance) {
         CurcumaLogger::warn(fmt::format(
-            "LM bond length {:.3f} Å exceeds target {:.3f} Å by {:.3f} Å (tolerance: {:.3f} Å){}",
+            "LM bond length {:.3f} A exceeds target {:.3f} A by {:.3f} A (tolerance: {:.3f} A){}",
             actual_bond_length, bond_length, actual_bond_length - bond_length, bond_tolerance,
             did_retry ? " [retry attempted]" : ""));
     } else if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format(
-            "LM bond length: {:.3f} Å (target: {:.3f} Å){}",
+            "LM bond length: {:.3f} A (target: {:.3f} A){}",
             actual_bond_length, bond_length,
             did_retry ? " [retry succeeded]" : ""));
     }
+
+    // Build combined molecule from the FINAL fragment geometry (after dihedral scan,
+    // LM retry, and optional bond contraction). Building it earlier would discard those
+    // corrections. Claude Generated 2026
+    Molecule combined = polymer_lm;
+    for (int i = 0; i < fragment_lm.AtomCount(); ++i)
+        combined.addAtom(fragment_lm.Atom(i));
+
+    Geometry combined_geom = combined.getGeometry();
+    for (int i = 0; i < fragment_lm.AtomCount(); ++i)
+        combined_geom.row(offset + i) = frag_geom.row(i);
+    combined.setGeometry(combined_geom);
+    // Interface Xx already removed before LM; fragment Xx are already cap_intermediate.
 
     // Set up interface bond between polymer_active and fragment_active
     // Adjust indices: polymer_active_idx in original → polymer_active_idx_lm in polymer_lm
@@ -962,12 +1001,10 @@ ConnectionResult PolymerBuild::connectMolecule(
             int orig_xx = fragment_xx_indices[j];
             int lm_xx = (orig_xx > next_xx_idx) ? orig_xx - 1 : orig_xx;
             if (lm_xx == xx_lm) {
-                // Found matching Xx, now find its active atom in original
-                for (int orig_active : {findBondedAtom(next, orig_xx)}) {
-                    if (orig_active < 0) continue;
+                // Found matching Xx, now find its active atom in original and map back to lm indices
+                int orig_active = findBondedAtom(next, orig_xx);
+                if (orig_active >= 0)
                     active_lm = (orig_active > next_xx_idx) ? orig_active - 1 : orig_active;
-                    break;
-                }
                 break;
             }
         }
@@ -1035,13 +1072,13 @@ int PolymerBuild::checkDistances(const Molecule& mol,
                 ++problems;
                 if (CurcumaLogger::get_verbosity() >= 3)
                     CurcumaLogger::warn(fmt::format(
-                        "{}: FUSION {}{}–{}{}: {:.3f} Å (r_cov {:.3f}, not in topology)",
+                        "{}: FUSION {}{}-{}{}: {:.3f} A (r_cov {:.3f}, not in topology)",
                         tag, Elements::ElementAbbr[ei], i, Elements::ElementAbbr[ej], j, d, r_cov));
             } else if (d < r_vdw * 0.65) {
                 ++problems;
                 if (CurcumaLogger::get_verbosity() >= 3)
                     CurcumaLogger::warn(fmt::format(
-                        "{}: clash {}{}–{}{}: {:.3f} Å (0.65·r_vdw {:.3f})",
+                        "{}: clash {}{}-{}{}: {:.3f} A (0.65*r_vdw {:.3f})",
                         tag, Elements::ElementAbbr[ei], i, Elements::ElementAbbr[ej], j, d, r_vdw * 0.65));
             }
         }
@@ -1067,7 +1104,7 @@ int PolymerBuild::localLJRefinement(Molecule& polymer,
     std::vector<int> polymer_indices;
     if (static_cast<int>(atom_monomer_id.size()) != polymer.AtomCount()) {
         CurcumaLogger::error(fmt::format(
-            "localLJRefinement: atom_monomer_id size {} != polymer atom count {} — skipping",
+            "localLJRefinement: atom_monomer_id size {} != polymer atom count {} - skipping",
             atom_monomer_id.size(), polymer.AtomCount()));
         return checkDistances(polymer, "localLJRefinement-stale", interface_bonds);
     }
@@ -1091,7 +1128,7 @@ int PolymerBuild::localLJRefinement(Molecule& polymer,
     // Guard against internal inconsistency that leads to SIGSEGV in AtomsRemoved
     if (polymer.AtomCount() != polymer.getGeometry().rows()) {
         CurcumaLogger::error(fmt::format(
-            "localLJRefinement step {:02d}: polymer internal inconsistency — AtomCount()={} != geometry.rows()={}. Skipping.",
+            "localLJRefinement step {:02d}: polymer internal inconsistency - AtomCount()={} != geometry.rows()={}. Skipping.",
             step_number, polymer.AtomCount(), polymer.getGeometry().rows()));
         return checkDistances(polymer, fmt::format("localLJRefinement-inconsistent", step_number), interface_bonds);
     }
@@ -1260,7 +1297,7 @@ int PolymerBuild::validateTopology(const Molecule& mol,
                 } else {
                     ++spurious;
                     CurcumaLogger::error(fmt::format(
-                        "{}: SPURIOUS bond {}{}-{}{} (mono {}-{}, dist {:.3f} Å)",
+                        "{}: SPURIOUS bond {}{}-{}{} (mono {}-{}, dist {:.3f} A)",
                         tag,
                         Elements::ElementAbbr[mol.Atom(ii).first], ii,
                         Elements::ElementAbbr[mol.Atom(jj).first], jj,
@@ -1283,7 +1320,7 @@ int PolymerBuild::validateTopology(const Molecule& mol,
         if (bond_count == 0) {
             ++unbound;
             CurcumaLogger::error(fmt::format(
-                "{}: UNBOUND atom {}{}(monomer {}) at ({:.2f}, {:.2f}, {:.2f}) — no bonds in topology",
+                "{}: UNBOUND atom {}{}(monomer {}) at ({:.2f}, {:.2f}, {:.2f}) - no bonds in topology",
                 tag, Elements::ElementAbbr[ei], ii, get_monomer(ii),
                 mol.Atom(ii).second(0), mol.Atom(ii).second(1), mol.Atom(ii).second(2)));
         }
@@ -1371,8 +1408,8 @@ int PolymerBuild::repairUnboundAtoms(Molecule& mol,
 
         ++repaired;
         CurcumaLogger::warn(fmt::format(
-            "{}: repaired UNBOUND {}{} (monomer {}) → bonded to {}{} (monomer {}), "
-            "moved {:.2f} → {:.2f} Å (cov {:.2f} Å)",
+            "{}: repaired UNBOUND {}{} (monomer {}) -> bonded to {}{} (monomer {}), "
+            "moved {:.2f} -> {:.2f} A (cov {:.2f} A)",
             tag, Elements::ElementAbbr[ei], ii,
             (ii < (int)atom_monomer_id.size()) ? atom_monomer_id[ii] : -1,
             Elements::ElementAbbr[ej], best_partner,
@@ -1713,7 +1750,7 @@ int PolymerBuild::validatePolymerInvariants(
 
     if (violations > 0) {
         CurcumaLogger::error(fmt::format(
-            "{} INVARIANT CHECK FAILED: {} violation(s) — downstream vector access may crash",
+            "{} INVARIANT CHECK FAILED: {} violation(s) - downstream vector access may crash",
             tag, violations));
     } else if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format(
@@ -1819,7 +1856,7 @@ int PolymerBuild::reportCNDiagnostics(
 
         m_fragment_cn_templates[frag_name] = heavy_cn;
         CurcumaLogger::info(fmt::format(
-            "CN-Diag: Cached template CN for '{}' ({} heavy atoms, {} Xx→H counted in CN)",
+            "CN-Diag: Cached template CN for '{}' ({} heavy atoms, {} Xx->H counted in CN)",
             frag_name, (int)heavy_pos.size(), templ.AtomCount() - (int)heavy_pos.size()));
     }
     const Vector& tmpl_cn = m_fragment_cn_templates.at(frag_name);
@@ -1860,7 +1897,7 @@ int PolymerBuild::reportCNDiagnostics(
 
     if (n_heavy != n_tmpl && CurcumaLogger::get_verbosity() >= 2)
         CurcumaLogger::warn(fmt::format(
-            "CN-Diag step {:02d}: heavy atom count polymer={} vs template={} — comparing min",
+            "CN-Diag step {:02d}: heavy atom count polymer={} vs template={} - comparing min",
             step, n_heavy, n_tmpl));
 
     // Collect interface atoms for this monomer (global indices)
@@ -1895,12 +1932,12 @@ int PolymerBuild::reportCNDiagnostics(
             const char* tag_str = is_iface ? " [Interface]" : "";
             if (std::abs(delta) > threshold) {
                 CurcumaLogger::warn(fmt::format(
-                    "  {}{} (m{})  template={:.2f}  polymer={:.2f}  Δ={:+.2f}  ⚠{}",
+                    "  {}{} (m{})  template={:.2f}  polymer={:.2f}  d={:+.2f}  {}",
                     Elements::ElementAbbr[elem], poly_idx, current_monomer_idx,
                     cn_t, cn_p, delta, tag_str));
             } else {
                 CurcumaLogger::info(fmt::format(
-                    "  {}{} (m{})  template={:.2f}  polymer={:.2f}  Δ={:+.2f}{}",
+                    "  {}{} (m{})  template={:.2f}  polymer={:.2f}  d={:+.2f}{}",
                     Elements::ElementAbbr[elem], poly_idx, current_monomer_idx,
                     cn_t, cn_p, delta, tag_str));
             }
@@ -1910,18 +1947,18 @@ int PolymerBuild::reportCNDiagnostics(
     // Summary visible at verbosity >= 1
     if (n_warnings == 0) {
         CurcumaLogger::success(fmt::format(
-            "[step {:02d}] CN-Diag: OK — {} heavy atoms, |ΔCN| < {:.2f} for all",
+            "[step {:02d}] CN-Diag: OK - {} heavy atoms, |dCN| < {:.2f} for all",
             step, n_compared, threshold));
     } else {
         CurcumaLogger::warn(fmt::format(
-            "[step {:02d}] CN-Diag: {} atom(s) |ΔCN| > {:.2f} — geometry problem",
+            "[step {:02d}] CN-Diag: {} atom(s) |dCN| > {:.2f} - geometry problem",
             step, n_warnings, threshold));
         // Show failing atoms at verbosity >= 3 (detailed per-atom diagnostics)
         if (CurcumaLogger::get_verbosity() >= 3) {
             for (const auto& a : bad_atoms) {
                 const char* tag_str = a.is_iface ? " [Interface]" : "";
                 CurcumaLogger::warn(fmt::format(
-                    "  {}{} (m{})  template={:.2f}  polymer={:.2f}  Δ={:+.2f}  ⚠{}",
+                    "  {}{} (m{})  template={:.2f}  polymer={:.2f}  d={:+.2f}  {}",
                     Elements::ElementAbbr[a.elem], a.poly_idx, current_monomer_idx,
                     a.cn_t, a.cn_p, a.delta, tag_str));
             }
@@ -2018,7 +2055,7 @@ void PolymerBuild::resolveOverlaps(Molecule& mol,
         }
     }
     CurcumaLogger::info(fmt::format(
-        "resolveOverlaps: residual heavy-atom min-distance = {:.3f} Å", min_d));
+        "resolveOverlaps: residual heavy-atom min-distance = {:.3f} A", min_d));
 }
 
 /**
@@ -2194,7 +2231,7 @@ SubchainResult PolymerBuild::buildSubchain(
 
     CurcumaLogger::info(fmt::format("First fragment: {} Xx atoms tracked", tracked_xx.size()));
     for (const auto& [xx, active] : tracked_xx) {
-        CurcumaLogger::info(fmt::format("  Xx{} → active atom {} ({})",
+        CurcumaLogger::info(fmt::format("  Xx{} -> active atom {} ({})",
             xx, active, Elements::ElementAbbr[polymer.Atom(active).first]));
     }
 
@@ -2316,7 +2353,7 @@ SubchainResult PolymerBuild::buildSubchain(
         else if (topo_issues > 0)
             CurcumaLogger::error(fmt::format("step {:02d}: {} topology issue(s)", i, topo_issues));
         else if (cn_warnings > 0 && repaired == 0)
-            CurcumaLogger::warn(fmt::format("step {:02d}: CN geometry: {} atom(s) deviate — pre-opt overlap", i, cn_warnings));
+            CurcumaLogger::warn(fmt::format("step {:02d}: CN geometry: {} atom(s) deviate - pre-opt overlap", i, cn_warnings));
         else if (cn_warnings > 0)
             CurcumaLogger::warn(fmt::format("step {:02d}: {} atom(s) repaired, {} CN deviation(s)", i, repaired, cn_warnings));
         else
@@ -2395,7 +2432,7 @@ SubchainResult PolymerBuild::buildSubchain(
                         }
                         if (!is_iface && CurcumaLogger::get_verbosity() >= 2) {
                             CurcumaLogger::warn(fmt::format(
-                                "step {:02d} BOND-CHECK: cross-monomer overlap {}{}(m{})-{}{}(m{}): {:.3f} Å ({:.2f}×cov)",
+                                "step {:02d} BOND-CHECK: cross-monomer overlap {}{}(m{})-{}{}(m{}): {:.3f} A ({:.2f}xcov)",
                                 i, Elements::ElementAbbr[ei], ii, atom_monomer_id[ii],
                                 Elements::ElementAbbr[ej], jj, atom_monomer_id[jj],
                                 dist_v(ii, jj), dist_v(ii, jj) / co));
@@ -2414,7 +2451,7 @@ SubchainResult PolymerBuild::buildSubchain(
             } else {
                 if (CurcumaLogger::get_verbosity() >= 2)
                     CurcumaLogger::info(fmt::format(
-                        "step {:02d} BOND-CHECK: OK — topo={}, geo_all={}, atoms={}, monomers={}",
+                        "step {:02d} BOND-CHECK: OK - topo={}, geo_all={}, atoms={}, monomers={}",
                         i, topo_bonds, geo_bonds_all, n, (int)atoms_per_monomer.size()));
             }
 
@@ -2564,14 +2601,14 @@ SubchainResult PolymerBuild::buildSubchain(
 
                 // OptimizationDispatcher replaces CurcumaOpt
                 // Suppress all internal output during polymer optimization
-                int saved_verbosity = CurcumaLogger::get_verbosity();
+                VerbosityGuard vg;  // restores verbosity even if the optimizer throws
                 CurcumaLogger::set_verbosity(0);
                 EnergyCalculator energy_calc(opt_method, opt_ctrl["opt"]);
                 Optimization::OptimizerType opt_type = Optimization::parseOptimizerType(
                     opt_ctrl["opt"].value("optimizer", "auto"));
                 auto opt_result = Optimization::OptimizationDispatcher::optimizeStructure(
                     &polymer_opt, opt_type, &energy_calc, opt_ctrl["opt"]);
-                CurcumaLogger::set_verbosity(saved_verbosity);
+                CurcumaLogger::set_verbosity(vg.saved);
                 if (opt_result.success && !opt_result.trajectory.empty()) {
                     // Check if result contains NaN before using it
                     Geometry result_geom = opt_result.final_molecule.Coords();
@@ -2580,7 +2617,7 @@ SubchainResult PolymerBuild::buildSubchain(
                             polymer.setGeometry(result_geom);
                         } else {
                             CurcumaLogger::error(fmt::format(
-                                "step {:02d}: Geometry size mismatch — result {} atoms vs polymer {} atoms. Skipping setGeometry.",
+                                "step {:02d}: Geometry size mismatch - result {} atoms vs polymer {} atoms. Skipping setGeometry.",
                                 i, result_geom.rows(), polymer.AtomCount()));
                         }
 
@@ -2739,14 +2776,14 @@ SubchainResult PolymerBuild::buildSubchain(
                             opt_ctrl["opt"]["printOutput"] = false;
                             opt_ctrl["opt"]["writeXYZ"] = m_config.get<bool>("write_intermediates", false);
 
-                            int saved_verbosity2 = CurcumaLogger::get_verbosity();
+                            VerbosityGuard vg2;  // restores verbosity even if the optimizer throws
                             CurcumaLogger::set_verbosity(0);
                             EnergyCalculator energy_calc(opt_method, opt_ctrl["opt"]);
                             Optimization::OptimizerType opt_type = Optimization::parseOptimizerType(
                                 opt_ctrl["opt"].value("optimizer", "auto"));
                             auto ljlm_result = Optimization::OptimizationDispatcher::optimizeStructure(
                                 &polymer_opt, opt_type, &energy_calc, opt_ctrl["opt"]);
-                            CurcumaLogger::set_verbosity(saved_verbosity2);
+                            CurcumaLogger::set_verbosity(vg2.saved);
 
                             Geometry result_geom;
                             if (ljlm_result.success)
@@ -2859,14 +2896,14 @@ SubchainResult PolymerBuild::buildSubchain(
                         cold_md_ctrl["simplemd"]["restart"] = false;
                         cold_md_ctrl["simplemd"]["print_frequency"] = 1000;
 
-                        int sv = CurcumaLogger::get_verbosity();
+                        VerbosityGuard vg_md;  // SimpleMD may mutate global verbosity; restore even on throw
                         Molecule polymer_before_md = polymer;
 
                         SimpleMD cold_md(cold_md_ctrl, true);
                         cold_md.setMolecule(md_mol);
                         cold_md.Initialise();
                         cold_md.start();
-                        CurcumaLogger::set_verbosity(sv);
+                        CurcumaLogger::set_verbosity(vg_md.saved);
 
                         bool md_was_stable = cold_md.wasStable();
                         Geometry result_geom = cold_md.CurrentMolecule().Coords();
@@ -2924,12 +2961,12 @@ SubchainResult PolymerBuild::buildSubchain(
             // Save current good structure before regular MD
             Molecule polymer_before_md = polymer;
 
-            int sv = CurcumaLogger::get_verbosity();
+            VerbosityGuard vg_md;  // SimpleMD may mutate global verbosity; restore even on throw
             SimpleMD md(md_ctrl, true);
             md.setMolecule(md_mol);
             md.Initialise();
             md.start();
-            CurcumaLogger::set_verbosity(sv);
+            CurcumaLogger::set_verbosity(vg_md.saved);
 
             // Check if MD completed without instability — Claude Generated
             bool md_was_stable = md.wasStable();
@@ -2959,7 +2996,7 @@ SubchainResult PolymerBuild::buildSubchain(
             debug_mol.LoadMolecule(debug_info);
             std::string step_file = outputPath(fmt::format("{}_step_{:03d}.xyz", polymer.Name(), i));
             debug_mol.writeXYZFile(step_file);
-            CurcumaLogger::info(fmt::format("Wrote intermediate (Xx→H): {}", step_file));
+            CurcumaLogger::info(fmt::format("Wrote intermediate (Xx->H): {}", step_file));
         }
 
         // Claude Generated 2026: Save building block with Xx atoms preserved
@@ -3036,6 +3073,12 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
             saveBuildingBlock(subchains.back().molecule, subchains.back().tracked_xx, static_cast<int>(1000 + sc));
         }
 
+        // Abort if the first sub-chain failed to build (e.g. missing fragment file) — Claude Generated 2026
+        if (subchains.empty() || subchains[0].molecule.AtomCount() == 0) {
+            CurcumaLogger::error("Polymer assembly failed: first sub-chain is empty (check fragment files/sequence)");
+            return;
+        }
+
         // Phase 2: Connect sub-chains sequentially
         CurcumaLogger::info("=== Connecting sub-chains ===");
         Molecule polymer = subchains[0].molecule;
@@ -3100,7 +3143,7 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
             // Sanity check: atom_monomer_id size must match polymer atom count — Claude Generated
             if ((int)atom_monomer_id.size() != polymer.AtomCount()) {
                 CurcumaLogger::error(fmt::format(
-                    "subchain-join {:02d}: atom_monomer_id size mismatch: {} vs {} atoms — topology may be incorrect",
+                    "subchain-join {:02d}: atom_monomer_id size mismatch: {} vs {} atoms - topology may be incorrect",
                     sc, atom_monomer_id.size(), polymer.AtomCount()));
             }
 
@@ -3140,7 +3183,7 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
             polymer_opt.setCharge(0);
 
             CurcumaLogger::info(fmt::format("Running {} optimization after sub-chain join...", opt_method));
-            int saved_verbosity = CurcumaLogger::get_verbosity();
+            VerbosityGuard vg;  // restores verbosity even if the optimizer throws
             int opt_max_iter = m_config.get<int>("opt_max_iter", 0);
             json opt_ctrl;
             opt_ctrl["opt"]["method"] = opt_method;
@@ -3155,13 +3198,13 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
                 opt_ctrl["opt"].value("optimizer", "auto"));
             auto scjoin_result = Optimization::OptimizationDispatcher::optimizeStructure(
                 &polymer_opt, opt_type, &energy_calc, opt_ctrl["opt"]);
-            CurcumaLogger::set_verbosity(saved_verbosity);
+            CurcumaLogger::set_verbosity(vg.saved);
             if (scjoin_result.success) {
                 Geometry result_geom = scjoin_result.final_molecule.Coords();
                 if (!containsNaN(result_geom))
                     polymer.setGeometry(result_geom);
                 else
-                    CurcumaLogger::warn("Sub-chain join optimization returned NaN — keeping pre-opt geometry");
+                    CurcumaLogger::warn("Sub-chain join optimization returned NaN - keeping pre-opt geometry");
             }
 
             checkDistances(polymer,
@@ -3184,6 +3227,11 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
         // ====== Sequential assembly (original behavior) ======
         SubchainResult result = buildSubchain(sequence, 0, 0);
         Molecule polymer = result.molecule;
+        // Abort on empty result (e.g. missing first fragment) — Claude Generated 2026
+        if (polymer.AtomCount() == 0) {
+            CurcumaLogger::error("Polymer assembly failed: result is empty (check fragment files/sequence)");
+            return;
+        }
         polymer.setName("polymer_A");
         applyCapping(polymer);
         polymer.writeXYZFile(outputPath(polymer.Name() + "_final.xyz"));
@@ -3256,7 +3304,7 @@ void PolymerBuild::saveBuildingBlock(const Molecule& mol,
             std::string active_elem = (active_idx >= 0 && active_idx < mol.AtomCount())
                 ? Elements::ElementAbbr[mol.Atom(active_idx).first]
                 : "?";
-            CurcumaLogger::info(fmt::format("  Xx at atom {} → bonded to {} ({})",
+            CurcumaLogger::info(fmt::format("  Xx at atom {} -> bonded to {} ({})",
                 xx_idx, active_idx, active_elem));
         }
     }
