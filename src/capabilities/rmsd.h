@@ -391,7 +391,7 @@ private:
     PARAM(no_reorder, Bool, false, "Disable all reordering logic.", "General", {"noreorder"})
 
     // --- Alignment Method ---
-    PARAM(method, String, "incr", "Alignment method: hungarian|incr|template|hybrid|subspace|inertia|molalign|dtemplate|predefined.", "Method", {"RMSDmethod", "rmsdmethod"})
+    PARAM(method, String, "subspace", "Alignment method: subspace (default, recommended)|inertia (recommended)|template|dtemplate|incr (legacy)|molalign (external)|hungarian|predefined.", "Method", {"RMSDmethod", "rmsdmethod"})
     PARAM(limit, Int, 0, "Limit for subspace and dtemplate methods.", "Method", {})
     PARAM(element, String, "7", "Element(s) for template methods (e.g., \"7,8\").", "Method", {"Element"})
     PARAM(order_file, String, "", "Path to a file with a predefined atom order.", "Method", {"order"})

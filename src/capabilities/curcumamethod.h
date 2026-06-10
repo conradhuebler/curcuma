@@ -22,6 +22,7 @@
 #include "src/tools/general.h"
 
 #include <string>
+#include <vector>
 
 #include "json.hpp"
 
@@ -67,9 +68,19 @@ public:
 
     std::string Basename() const { return m_basename; }
     std::string Filename() const { return m_filename; }
+    std::string OutputDir() const { return m_output_dir; }
+    std::string BMTDir() const { return m_bmt_dir; }
+    void setOutputDir(const std::string& dir);
+    std::string outputPath(const std::string& filename) const;
+    void ensureOutputDir() const;
     void getBasename(const std::string& filename);
     void overrideBasename(const std::string& basename) { m_basename = basename; }
     virtual void setFile(const std::string& filename);
+
+    // Claude Generated 2026: BMT directory system - Basename.Keyword.Timestamp
+    void createBMTDir(const std::string& cli_keyword);
+    void addBakFile(const std::string& filename);
+    void processBakFiles() const;
 
 protected:
     void checkHelp();
@@ -130,4 +141,7 @@ private:
 
     std::string m_basename;
     std::string m_filename;
+    std::string m_output_dir;
+    std::string m_bmt_dir;                    // Claude Generated 2026: BMT directory path
+    std::vector<std::string> m_bak_files;    // Claude Generated 2026: Files to copy back to CWD
 };

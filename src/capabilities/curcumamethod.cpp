@@ -22,7 +22,10 @@
 #include "src/global_config.h"
 
 #include "src/tools/general.h"
+#include "src/tools/bmt_utils.h"
 
+#include <chrono>
+#include <ctime>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -148,7 +151,8 @@ CurcumaMethod::~CurcumaMethod()
 // Claude Generated 2025: Enhanced restart writing with automatic checksum and version
 void CurcumaMethod::TriggerWriteRestart()
 {
-    std::ofstream restart_file("curcuma_restart.json");
+    ensureOutputDir();
+    std::ofstream restart_file(outputPath("curcuma_restart.json"));
     nlohmann::json restart;
     try {
         nlohmann::json state = WriteRestartInformation();
@@ -188,18 +192,30 @@ StringList CurcumaMethod::RestartFiles() const
 {
     StringList file_list;
 
+    // Search in CWD (backward compatibility) and output_dir if set
+    std::vector<std::string> search_dirs = {"."};
+    if (!m_output_dir.empty())
+        search_dirs.push_back(m_output_dir);
+
 #ifdef C17
 #ifndef _WIN32
-    for (auto& p : fs::directory_iterator(".")) {
-        std::string file(p.path());
-        if (file.find("curcuma_restart") != std::string::npos)
-            file_list.push_back(file);
+    for (const auto& dir : search_dirs) {
+        if (!fs::exists(dir))
+            continue;
+        for (auto& p : fs::directory_iterator(dir)) {
+            std::string file(p.path());
+            if (file.find("curcuma_restart") != std::string::npos)
+                file_list.push_back(file);
+        }
     }
 #endif
 #else
-    std::ifstream test_file("curcuma_restart.json");
-    if (test_file.is_open())
-        file_list.push_back("curcuma_restart.json");
+    for (const auto& dir : search_dirs) {
+        std::string path = std::string(dir) + "/curcuma_restart.json";
+        std::ifstream test_file(path);
+        if (test_file.is_open())
+            file_list.push_back(path);
+    }
 #endif
 
     return file_list;
@@ -264,16 +280,62 @@ bool CurcumaMethod::CheckStop() const
 
 void CurcumaMethod::getBasename(const std::string& filename)
 {
-    std::string name = std::string(filename);
-    for (int i = 0; i < 4; ++i)
-        name.pop_back();
-    m_basename = name;
+    // Claude Generated 2026: Use proper extension stripping instead of crude 4-char removal
+    // This correctly handles .xyz, .mol2, .sdf, .pdb, .trj, etc.
+    // Note: strips directory path so that a BMT-routed full path does not leak into m_basename.
+#ifdef C17
+#ifndef _WIN32
+    std::filesystem::path p(filename);
+    m_basename = p.stem().string();
+#else
+    std::string base = filename;
+    size_t slash = base.find_last_of("/\\");
+    if (slash != std::string::npos)
+        base = base.substr(slash + 1);
+    size_t pos = base.find_last_of('.');
+    m_basename = (pos != std::string::npos) ? base.substr(0, pos) : base;
+#endif
+#else
+    std::string base = filename;
+    size_t slash = base.find_last_of("/\\");
+    if (slash != std::string::npos)
+        base = base.substr(slash + 1);
+    size_t pos = base.find_last_of('.');
+    m_basename = (pos != std::string::npos) ? base.substr(0, pos) : base;
+#endif
 }
 
 void CurcumaMethod::setFile(const std::string& filename)
 {
     m_filename = filename;
     getBasename(filename);
+}
+
+// Claude Generated: Set output directory and ensure it exists
+void CurcumaMethod::setOutputDir(const std::string& dir)
+{
+    m_output_dir = dir;
+    ensureOutputDir();
+}
+
+// Claude Generated: Build full output path from filename
+std::string CurcumaMethod::outputPath(const std::string& filename) const
+{
+    if (m_output_dir.empty())
+        return filename;
+    return m_output_dir + "/" + filename;
+}
+
+// Claude Generated: Create output directory if it doesn't exist
+void CurcumaMethod::ensureOutputDir() const
+{
+    if (m_output_dir.empty())
+        return;
+#ifdef C17
+#ifndef _WIN32
+    std::filesystem::create_directories(m_output_dir);
+#endif
+#endif
 }
 
 // Claude Generated 2025: Compute checksum over specified fields for restart validation
@@ -369,4 +431,24 @@ RestartValidationResult CurcumaMethod::validateRestartData(
     }
 
     return {true, ""};
+}
+
+// Claude Generated 2026: Create BMT output directory (Basename.Keyword.Timestamp)
+void CurcumaMethod::createBMTDir(const std::string& cli_keyword)
+{
+    m_bmt_dir = BMTUtils::createBMTDir(Basename(), cli_keyword);
+    setOutputDir(m_bmt_dir);
+    BMTUtils::writeMetadata(m_bmt_dir, Basename(), cli_keyword, Filename());
+}
+
+// Claude Generated 2026: Register a file for backup copy to CWD
+void CurcumaMethod::addBakFile(const std::string& filename)
+{
+    m_bak_files.push_back(filename);
+}
+
+// Claude Generated 2026: Copy registered files from BMT directory back to CWD
+void CurcumaMethod::processBakFiles() const
+{
+    BMTUtils::processBakFiles(m_bmt_dir, m_bak_files);
 }

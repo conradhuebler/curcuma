@@ -92,11 +92,13 @@ bool RMSDTraj::Initialise()
     }
 
     // Modern C++ way to remove file extension - more robust than pop_back()
-    m_outfile = Filename();
-    size_t last_dot = m_outfile.find_last_of('.');
+    // Claude Generated 2026: Route output through BMT directory
+    std::string raw_outfile = Filename();
+    size_t last_dot = raw_outfile.find_last_of('.');
     if (last_dot != std::string::npos) {
-        m_outfile = m_outfile.substr(0, last_dot);
+        raw_outfile = raw_outfile.substr(0, last_dot);
     }
+    m_outfile = outputPath(raw_outfile);
 
     // Initialize output files with user feedback
     if (m_writeRMSD) {

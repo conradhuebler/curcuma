@@ -23,6 +23,7 @@
 #include <limits>
 #include <thread>
 #include <future>
+#include <mutex>  // Claude Generated (Jun 2026): std::call_once guard for shared global D4 tables
 #include <omp.h>  // Claude Generated (February 2026): Phase 3 - OpenMP parallelization
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
@@ -51,13 +52,19 @@ D4ParameterGenerator::D4ParameterGenerator(const ConfigManager& config)
 
     initializeReferenceData();
 
-    // Initialize complete alphaiw data (Dec 25, 2025 - Phase 2.3)
-    // 269 reference states with frequency-dependent polarizabilities
-    initialize_d4_alphaiw();
-
-    // Initialize correction factors (Dec 25, 2025 - Phase 2.4)
-    // ascale, sscale, secaiw, refsys for accurate polarizability corrections
-    initialize_d4_corrections();
+    // Initialize the shared global polarizability/correction tables exactly once for the
+    // whole process. initialize_d4_alphaiw()/initialize_d4_corrections() populate MUTABLE
+    // process-global containers (d4_alphaiw_data, d4_ascale_data, ...) by .resize()+assign.
+    // Constructing several D4ParameterGenerators concurrently (e.g. parallel ConfSearch
+    // OptThreads, each spinning up GFN-FF) otherwise races a resize/realloc against a read
+    // in computeC6Reference -> SIGSEGV. The data is constant, so once-init is equivalent to
+    // the previous per-construction re-init (and cheaper). call_once blocks late constructors
+    // until the first finishes populating. (Claude Generated, Jun 2026)
+    static std::once_flag d4_global_tables_once;
+    std::call_once(d4_global_tables_once, []() {
+        initialize_d4_alphaiw();      // 269 reference states, frequency-dependent polarizabilities
+        initialize_d4_corrections();  // ascale, sscale, secaiw, refsys correction factors
+    });
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success("D4: Complete data loaded (alphaiw + corrections)");

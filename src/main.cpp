@@ -30,6 +30,8 @@
 #include "src/capabilities/confscan.h"
 #include "src/capabilities/confsearch.h"
 #include "src/capabilities/confstat.h"
+#include "src/capabilities/curcumamethod.h"
+#include "src/tools/bmt_utils.h"
 // Modern optimizer system - Claude Generated (simplified)
 #include "src/capabilities/docking.h"
 #include "src/capabilities/hessian.h"
@@ -62,6 +64,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -679,7 +682,8 @@ json CLI2Json(int argc, char** argv)
     std::set<std::string> global_params = {
         "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
         "export_run", "export-run", // Export current run configuration
-        "import_config", "import-config" // Import custom configuration
+        "import_config", "import-config", // Import custom configuration
+        "bak"  // Files to copy back from BMT output directory to CWD
     };
 
     // Claude Generated (October 2025): CLI keyword to module name mapping
@@ -759,7 +763,16 @@ json CLI2Json(int argc, char** argv)
             }
 
             if ((i + 1) >= argc || argv[i + 1][0] == '-' || argv[i + 1] == std::string("true") || argv[i + 1] == std::string("+")) {
-                setNestedJsonValue(key, current, true);
+                // Claude Generated (May 2026): Multi-value accumulation for -bak flag
+                if (current == "bak" && key.contains("bak")) {
+                    if (key["bak"].is_array()) {
+                        key["bak"].push_back(true);
+                    } else {
+                        key["bak"] = json::array({key["bak"], true});
+                    }
+                } else {
+                    setNestedJsonValue(key, current, true);
+                }
             } else if (argv[i + 1] == std::string("false")) {
                 setNestedJsonValue(key, current, false);
                 ++i;
@@ -787,12 +800,37 @@ json CLI2Json(int argc, char** argv)
                 // std::cout << "isNumber: " << isNumber << std::endl
                 //             << "isVector: " << isVector << std::endl;
                 if (isNumber) {
-                    setNestedJsonValue(key, current, std::stod(next));
+                    // Claude Generated (May 2026): Multi-value accumulation for -bak
+                    if (current == "bak" && key.contains("bak")) {
+                        if (key["bak"].is_array()) {
+                            key["bak"].push_back(std::stod(next));
+                        } else {
+                            key["bak"] = json::array({key["bak"], std::stod(next)});
+                        }
+                    } else {
+                        setNestedJsonValue(key, current, std::stod(next));
+                    }
                 } else if (isVector) {
                     //        std::cout << next << std::endl;
-                    setNestedJsonValue(key, current, next);
+                    if (current == "bak" && key.contains("bak")) {
+                        if (key["bak"].is_array()) {
+                            key["bak"].push_back(next);
+                        } else {
+                            key["bak"] = json::array({key["bak"], next});
+                        }
+                    } else {
+                        setNestedJsonValue(key, current, next);
+                    }
                 } else {
-                    setNestedJsonValue(key, current, next);
+                    if (current == "bak" && key.contains("bak")) {
+                        if (key["bak"].is_array()) {
+                            key["bak"].push_back(next);
+                        } else {
+                            key["bak"] = json::array({key["bak"], next});
+                        }
+                    } else {
+                        setNestedJsonValue(key, current, next);
+                    }
                 }
                 ++i;
             }
@@ -943,6 +981,28 @@ json CLI2Json(int argc, char** argv)
         controller["global"][param] = value;  // Explicit global namespace
     }
     return controller;
+}
+
+// Claude Generated (May 2026): Helper to initialize BMT directory for CurcumaMethod-based capabilities
+// Sets basename, creates BMT output directory, and registers -bak files from controller
+void initializeBMT(CurcumaMethod* method, const std::string& filename,
+                   const std::string& cli_keyword, const json& controller)
+{
+    method->setFile(filename);
+    method->createBMTDir(cli_keyword);
+
+    // Register -bak files for post-computation copy to CWD
+    if (controller.contains("bak")) {
+        if (controller["bak"].is_string()) {
+            method->addBakFile(controller["bak"].get<std::string>());
+        } else if (controller["bak"].is_array()) {
+            for (const auto& f : controller["bak"]) {
+                if (f.is_string()) {
+                    method->addBakFile(f.get<std::string>());
+                }
+            }
+        }
+    }
 }
 
 // Structured Command Dispatch System - Claude Generated
@@ -1115,10 +1175,13 @@ int executeHessian(const json& controller, int argc, char** argv) {
         std::cerr << "Please use curcuma to analyse hessians:\ncurcuma -hessian molecule.xyz" << std::endl;
         return 1;
     }
+    std::string method = controller.value("method", "gfnff");
+    Hessian hessian(method, controller.value("hessian", json::object()));
+    initializeBMT(&hessian, argv[2], "hessian", controller);
     Molecule mol1 = Files::LoadFile(argv[2]);
-    Hessian hessian(controller.value("hessian", json::object()));
     hessian.setMolecule(mol1);
     hessian.start();
+    hessian.processBakFiles();
     return 0;
 }
 
@@ -1127,10 +1190,12 @@ int executeQMDFFFit(const json& controller, int argc, char** argv) {
         std::cerr << "Please use curcuma for QMDFF fitting:\ncurcuma -qmdfffit molecule.xyz" << std::endl;
         return 1;
     }
-    Molecule mol1 = Files::LoadFile(argv[2]);
     QMDFFFit qmdfffit(controller.value("qmdfffit", json::object()));
+    initializeBMT(&qmdfffit, argv[2], "qmdfffit", controller);
+    Molecule mol1 = Files::LoadFile(argv[2]);
     qmdfffit.setMolecule(mol1);
     qmdfffit.start();
+    qmdfffit.processBakFiles();
     return 0;
 }
 
@@ -1316,8 +1381,9 @@ int executeConfSearch(const json& controller, int argc, char** argv) {
         return 0;
     }
     ConfSearch search(controller, false);
-    search.setFile(argv[2]);
+    initializeBMT(&search, argv[2], "confsearch", controller);
     search.start();
+    search.processBakFiles();
     return 0;
 }
 
@@ -1426,9 +1492,21 @@ int executeAnalysis(const json& controller, int argc, char** argv) {
     // Extract analysis-specific configuration - Claude Generated
     json analysis_config = controller.contains("analysis") ? controller["analysis"] : controller;
 
+    // Claude Generated 2026: BMT output directory for analysis command
+    std::string analysis_filename(argv[2]);
+    std::string analysis_basename = BMTUtils::stripExtension(analysis_filename);
+    std::string analysis_bmt_dir = BMTUtils::createBMTDir(analysis_basename, "analysis");
+    BMTUtils::writeMetadata(analysis_bmt_dir, analysis_basename, "analysis", analysis_filename);
+
     auto* analysis = new UnifiedAnalysis(analysis_config, false);
     analysis->setFileName(argv[2]);
+    analysis->setOutputDirectory(analysis_bmt_dir);
     analysis->start();
+
+    // Process -bak files
+    std::vector<std::string> analysis_bak_files = BMTUtils::collectBakFiles(controller);
+    BMTUtils::processBakFiles(analysis_bmt_dir, analysis_bak_files);
+
     delete analysis;
     return 0;
 }
@@ -1467,15 +1545,44 @@ int executeRMSD(const json& controller, int argc, char** argv) {
 
     json rmsd_config = controller.value("rmsd", json::object());
     auto* driver = new RMSDDriver(rmsd_config, false);
+    // Claude Generated 2026: Initialize BMT before start() so MolAlign temp files
+    // and all internal outputPath() calls land in the BMT directory.
+    initializeBMT(driver, std::string(argv[2]), "rmsd", controller);
     driver->setReference(molecule1);
     driver->setTarget(molecule2);
     driver->start();
     std::cout << "RMSD for two molecules " << driver->RMSD() << std::endl;
 
-    driver->ReferenceAligned().writeXYZFile(reffile + ".centered.xyz");
-    driver->TargetAligned().writeXYZFile(tarfile + ".centered.xyz");
-    driver->TargetReorderd().writeXYZFile(tarfile + ".reordered.xyz");
+    driver->ReferenceAligned().writeXYZFile(driver->outputPath(reffile + ".centered.xyz"));
+    driver->TargetAligned().writeXYZFile(driver->outputPath(tarfile + ".centered.xyz"));
+    driver->TargetReorderd().writeXYZFile(driver->outputPath(tarfile + ".reordered.xyz"));
 
+    // Write RMSD results as JSON
+    {
+        json rmsd_result;
+        rmsd_result["rmsd"] = driver->RMSD();
+        rmsd_result["rmsd_raw"] = driver->RMSDRaw();
+
+        // Permutation vector: identity if no reordering was performed
+        std::vector<int> permutation = driver->ReorderRules();
+        if (permutation.empty()) {
+            permutation.resize(driver->ReferenceAligned().AtomCount());
+            std::iota(permutation.begin(), permutation.end(), 0);
+        }
+        rmsd_result["permutation"] = permutation;
+        rmsd_result["reference_xyz"] = driver->ReferenceAligned().XYZString();
+        // Use TargetAligned as fallback when reordering was skipped (TargetReorderd is empty)
+        rmsd_result["reorder_xyz"] = (driver->TargetReorderd().AtomCount() > 0)
+            ? driver->TargetReorderd().XYZString()
+            : driver->TargetAligned().XYZString();
+        rmsd_result["reference_file"] = reffile;
+        rmsd_result["target_file"] = tarfile;
+
+        std::ofstream rmsd_out(driver->outputPath(tarfile + ".rmsd.json"));
+        rmsd_out << rmsd_result.dump(2) << std::endl;
+    }
+
+    driver->processBakFiles();
     delete driver;
     return 0;
 }
@@ -1593,12 +1700,11 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         // Note: setMolecule() is called inside OptimizerDriver::InitializeOptimization()
         // Do NOT call it here — double-init crashes GFN-FF (generateDispersionPairsNative)
 
+        // Claude Generated 2026: BMT output directory for opt command
         std::string filename(argv[2]);
-        std::string basename = filename.size() >= 4 ?
-            filename.substr(0, filename.size() - 4) : filename;
-        std::string output_file = opt_config.value("output", basename + ".opt.xyz");
-        CurcumaLogger::result(fmt::format("Input structure: {}", filename));
-        CurcumaLogger::result(fmt::format("Output structure: {}", output_file));
+        std::string basename = BMTUtils::stripExtension(filename);
+        std::string bmt_dir = BMTUtils::createBMTDir(basename, "opt");
+        BMTUtils::writeMetadata(bmt_dir, basename, "opt", filename);
 
         // Enable iterative mode + warm-start for native GFN so SCF iterations are
         // suppressed at verbosity 1 and converged charges are reused across steps.
@@ -1611,15 +1717,12 @@ int executeOptimization(const json& controller, int argc, char** argv) {
             molecule.get(), opt_type, &energy_calc, opt_config);
 
         if (result.success) {
+            std::string output_file = BMTUtils::outputPath(bmt_dir, basename + ".opt.xyz");
             molecule->writeXYZFile(output_file);
-
-            // End summary — always visible, independent of global verbosity
-            fmt::print("\n");
-            fmt::print("Files written:\n");
-            fmt::print("  Optimized structure: {}\n", output_file);
-            if (!result.trajectory_filename.empty()) {
-                fmt::print("  Trajectory:          {}\n", result.trajectory_filename);
-            }
+            CurcumaLogger::success_fmt("Optimized structure written to: {}", output_file);
+            // Process -bak files
+            std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
+            BMTUtils::processBakFiles(bmt_dir, bak_files);
             return 0;
         } else {
             CurcumaLogger::warn_fmt("{} optimizer failed: {}", optimizer_method, result.error_message);
@@ -1658,8 +1761,9 @@ int executeConfScan(const json& controller, int argc, char** argv) {
     scan_controller["geometry_file"] = std::string(argv[2]);
 
     auto* scan = new ConfScan(scan_controller, false);  // Claude Generated: Explicit false for default verbosity level 1
-    scan->setFileName(argv[2]);
+    initializeBMT(scan, argv[2], "confscan", controller);
     scan->start();
+    scan->processBakFiles();
     int accepted = scan->AcceptedCount();
     int reorder_success = scan->ReorderSuccessfull();
     int reuse_count = scan->ReuseCount();
@@ -1680,8 +1784,9 @@ int executeConfStat(const json& controller, int argc, char** argv) {
     stat_controller["geometry_file"] = std::string(argv[2]);
 
     auto* stat = new ConfStat(stat_controller, false);  // Claude Generated: Explicit false for default verbosity level 1
-    stat->setFileName(argv[2]);
+    initializeBMT(stat, argv[2], "confstat", controller);
     stat->start();
+    stat->processBakFiles();
     delete stat;
     return 0;
 }
@@ -1693,12 +1798,24 @@ int executeDocking(const json& controller, int argc, char** argv) {
     }
 
     auto* docking = new Docking(controller, false);
+
+    // Claude Generated (May 2026): Extract host filename for BMT directory naming
+    std::string dock_basename;
+    if (controller.contains("dock") && controller["dock"].contains("host")) {
+        dock_basename = controller["dock"]["host"].get<std::string>();
+    }
+    if (!dock_basename.empty()) {
+        initializeBMT(docking, dock_basename, "dock", controller);
+    }
+
     if (!docking->Initialise()) {
         docking->printError();
         delete docking;
         return 1;
     }
     docking->start();
+    if (!dock_basename.empty())
+        docking->processBakFiles();
     delete docking;
     return 0;
 }
@@ -1729,10 +1846,11 @@ int executeSimpleMD(const json& controller, int argc, char** argv) {
     md_controller["geometry_file"] = std::string(argv[2]);
 
     auto* md = new SimpleMD(md_controller, false);
-    md->setFile(argv[2]);  // Claude Generated (October 2025): Set basename for trajectory file naming
+    initializeBMT(md, argv[2], "md", controller);
     md->setMolecule(mol);
     md->Initialise();
     md->start();
+    md->processBakFiles();
     delete md;
     return 0;
 }

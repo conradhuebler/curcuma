@@ -12,7 +12,8 @@ tools/
 ├── geometry.h        # Geometric calculations and transformations
 ├── general.h         # General utility functions and constants
 ├── info.h            # Information and metadata handling
-└── trajectory_writer.h/cpp  # ✅ TrajectoryWriter - Unified trajectory output system
+├── trajectory_writer.h/cpp  # ✅ TrajectoryWriter - Unified trajectory output system
+└── bmt_utils.h/cpp   # 🤖 BMT output directory utilities (Basename.Method.Timestamp)
 ```
 
 ## Key Components
@@ -54,6 +55,19 @@ tools/
 - **Multiple format support**: single and multi-frame trajectory output
 - **Custom configuration**: JSON-based format and precision settings
 - **Educational focus**: Clean separation of data formatting logic
+
+### 🤖 BMT Output Directory System (`bmt_utils.h/cpp`)
+- **Default behavior**: All commands create a `Basename.Keyword.YYYYMMDD_HHMMSS` directory for output files
+- **`createBMTDir(basename, keyword)`**: Creates the timestamped directory, logs the path
+- **`writeMetadata(bmt_dir, basename, method, input_file)`**: Writes `metadata.txt` with calculation info
+- **`processBakFiles(bmt_dir, bak_files)`**: Copies listed files from BMT dir back to CWD; warns if BMT is empty
+- **`outputPath(bmt_dir, filename)`**: Returns `bmt_dir/filename` or just `filename` when BMT is disabled
+- **`stripExtension(filename)`**: Removes file extension (multi-dot safe, uses `std::filesystem::path::stem`)
+- **`collectBakFiles(controller)`**: Extracts `-bak` filenames from JSON controller (string or array form)
+- **`-bak` flag**: Specify files to copy back to CWD after calculation (e.g. `-bak result.xyz traj.xyz`)
+- **`-no_bmt` / `-bmt false`**: Disables BMT directory, output goes to CWD (legacy behavior)
+- **Requires C++17 + non-Windows**: Uses `std::filesystem::create_directories`; falls back to no-op otherwise
+- **Status**: AI-generated, machine-tested — human production testing pending
 
 ### General Utilities (`general.h`)
 - **Constants**: Physical constants, conversion factors

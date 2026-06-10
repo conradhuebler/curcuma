@@ -842,8 +842,18 @@ AlignmentResult DistanceTemplateStrategy::align(RMSDDriver* driver, const Alignm
         auto ref_end = m_distance_reference.cend();
         auto tar_end = m_distance_target.cend();
 
-        // Select template atoms based on largest distances
-        while (reference_indicies.size() < config.limit) {
+        // Claude Generated: cap the requested template size to the number of atoms
+        // actually available, so config.limit (default 10) cannot exceed the molecule.
+        const std::size_t limit = std::min<std::size_t>(config.limit,
+            std::min(driver->m_reference.AtomCount(), driver->m_target.AtomCount()));
+
+        // Select template atoms based on largest distances.
+        // Guard the iterators against underflowing past cbegin(): on small molecules
+        // (fewer than `limit` matchable template atoms) decrementing past begin() is
+        // undefined behaviour and crashes. Stop once either distance map is exhausted.
+        while (reference_indicies.size() < limit
+            && ref_end != m_distance_reference.cbegin()
+            && tar_end != m_distance_target.cbegin()) {
             ref_end--;
             tar_end--;
             std::pair<int, Position> atom_r1 = driver->m_reference.Atom(ref_end->second.first);
@@ -865,6 +875,16 @@ AlignmentResult DistanceTemplateStrategy::align(RMSDDriver* driver, const Alignm
                 target_indicies.push_back(tar_end->second.second);
             }
             ++i;
+        }
+
+        // Claude Generated: if no common template atoms could be selected (e.g. the
+        // structures share no element pairing), the incremental step below would run
+        // on empty molecules. Fail cleanly instead.
+        if (reference_indicies.empty()) {
+            result.success = false;
+            result.error_message = "Distance template: no common template atoms found";
+            CURCUMA_ERROR(result.error_message);
+            return result;
         }
 
         // Cache original molecules

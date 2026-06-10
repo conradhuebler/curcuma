@@ -21,6 +21,7 @@
 #include "citation_registry.h"
 #include <algorithm>
 #include <cstdlib> // for getenv
+#include <mutex> // Claude Generated (Jun 2026): thread-safe citation registry (parallel ConfSearch)
 #include <set>
 #include <unistd.h> // for isatty
 
@@ -31,6 +32,16 @@ CurcumaLogger::OutputFormat CurcumaLogger::m_format = CurcumaLogger::OutputForma
 std::chrono::high_resolution_clock::time_point CurcumaLogger::m_start_time;
 std::unordered_map<std::string, std::string> CurcumaLogger::m_citation_registry;
 std::set<std::string> CurcumaLogger::m_used_citations;
+
+// Claude Generated (Jun 2026): the citation statics above are process-global and are touched
+// concurrently when ConfSearch runs MD/opt on a CxxThreadPool (every CurcumaMethod ctor inits
+// the registry, every method addCitation()s into m_used_citations). Without serialisation the
+// concurrent reassign/rehash corrupts the containers -> bad_alloc / SIGSEGV. The registry text
+// is constant, so build it exactly once; guard the used-set inserts/reads with a mutex.
+namespace {
+std::once_flag g_citation_registry_once;
+std::mutex g_citation_mutex;
+}
 
 // Unit conversion functions (from global_config.h constants)
 inline double hartree_to_kjmol(double eh) { return eh * 2625.4996394798; }
@@ -116,6 +127,11 @@ void CurcumaLogger::citation(const std::string& key)
 // Claude Generated (April 2026): Citation key registry
 void CurcumaLogger::initCitationRegistry()
 {
+    // Populate the constant registry exactly once for the whole process. call_once blocks any
+    // concurrent CurcumaMethod ctor until the first finishes, so workers never read a half-built
+    // (rehashing) map. m_used_citations is cleared here too -> it accumulates across the run and
+    // every method cited in any phase is printed at the end.
+    std::call_once(g_citation_registry_once, []() {
     m_citation_registry = {
         {"gfnff",   "GFN-FF: Spicher & Grimme, Angew. Chem. Int. Ed. 59, 15665 (2020) — doi:10.1002/anie.202004239"},
         {"d4",      "D4: Caldeweyher et al., J. Chem. Phys. 150, 154122 (2019) — doi:10.1063/1.5090222"},
@@ -131,30 +147,41 @@ void CurcumaLogger::initCitationRegistry()
         {"curcuma", "Curcuma: doi:10.5281/zenodo.4302722"},
     };
     m_used_citations.clear();
+    });
 }
 
 void CurcumaLogger::addCitation(const std::string& key, const std::string& full_text)
 {
-    // Deduplicate: only register each key once
-    if (m_used_citations.count(key)) return;
-    m_used_citations.insert(key);
+    std::string display;
+    bool emit = false;
+    {
+        // Serialise all access to the shared citation containers (called from MD/opt workers).
+        std::lock_guard<std::mutex> lock(g_citation_mutex);
 
-    // If full_text is provided and key is not in registry, store it directly
-    if (!full_text.empty() && m_citation_registry.find(key) == m_citation_registry.end()) {
-        m_citation_registry[key] = full_text;
+        // Deduplicate: only register each key once
+        if (m_used_citations.count(key)) return;
+        m_used_citations.insert(key);
+
+        // If full_text is provided and key is not in registry, store it directly
+        if (!full_text.empty() && m_citation_registry.find(key) == m_citation_registry.end()) {
+            m_citation_registry[key] = full_text;
+        }
+
+        if (m_verbosity >= 2) {
+            auto it = m_citation_registry.find(key);
+            display = (it != m_citation_registry.end()) ? it->second : full_text;
+            if (display.empty()) display = key;
+            emit = true;
+        }
     }
-
-    // Immediate feedback at verbosity >= 2
-    if (m_verbosity >= 2) {
-        auto it = m_citation_registry.find(key);
-        std::string display = (it != m_citation_registry.end()) ? it->second : full_text;
-        if (display.empty()) display = key;
+    // Immediate feedback at verbosity >= 2 (outside the lock: I/O only, no shared state).
+    if (emit)
         log_colored(fmt::color::green, "[CITE]  ", display);
-    }
 }
 
 void CurcumaLogger::printCitations()
 {
+    std::lock_guard<std::mutex> lock(g_citation_mutex);
     if (m_used_citations.empty()) return;
 
     fmt::print("\n");

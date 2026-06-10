@@ -176,7 +176,7 @@ void ConfSearch::start()
 
     // Dump all MD parameters to file for debugging
     {
-        std::ofstream debug_file(p + "_md_params.json");
+        std::ofstream debug_file(outputPath(p + "_md_params.json"));
         debug_file << md.dump(2) << std::endl;
         debug_file.close();
         CurcumaLogger::result_fmt("ConfSearch: Full MD parameters written to {}_md_params.json", p);
@@ -204,8 +204,8 @@ void ConfSearch::start()
     {
         bool first = true;
         for (auto* mol : m_in_stack) {
-            if (first) { mol->writeXYZFile(p + ".input.xyz"); first = false; }
-            else          mol->appendXYZFile(p + ".input.xyz");
+            if (first) { mol->writeXYZFile(outputPath(p + ".input.xyz")); first = false; }
+            else          mol->appendXYZFile(outputPath(p + ".input.xyz"));
         }
         nlohmann::json opt_init;
         opt_init["method"] = m_method;
@@ -216,7 +216,7 @@ void ConfSearch::start()
 
         for (auto* mol : m_in_stack) delete mol;
         m_in_stack.clear();
-        FileIterator opt_in(p + ".input.opt.xyz");
+        FileIterator opt_in(outputPath(p + ".input.opt.xyz"));
         while (!opt_in.AtEnd()) {
             Molecule mol = opt_in.Next();
             if (mol.AtomCount() > 0)
@@ -238,7 +238,7 @@ void ConfSearch::start()
     // Cumulative output: all accepted conformers across all temperature cycles.
     // The structures are already optimised, so the file is named ".cumulative.opt.xyz"
     // to match PerformFilter's "<f>.opt.xyz" convention for the final ConfScan below.
-    const std::string cumulative_file = p + ".cumulative.opt.xyz";
+    const std::string cumulative_file = outputPath(p + ".cumulative.opt.xyz");
     std::ofstream(cumulative_file).close();
 
     // Energy reference: cycle 1's best sets the baseline; best_energy tracks the running minimum.
@@ -349,7 +349,7 @@ void ConfSearch::start()
             PerformOptimisation(p + ".bias", opt);
             int opt_count = 0;
             {
-                FileIterator opt_file(p + ".bias.opt.xyz");
+                FileIterator opt_file(outputPath(p + ".bias.opt.xyz"));
                 while (!opt_file.AtEnd()) { opt_file.Next(); opt_count++; }
             }
             CurcumaLogger::result_fmt("ConfSearch: Optimisation complete. {} bias structures optimised.", opt_count);
@@ -371,7 +371,7 @@ void ConfSearch::start()
                 scan["gpu"] = md["gpu"];
             PerformFilter(p + ".bias", scan);
             {
-                FileIterator rmsd_file(p + ".bias.opt.accepted.xyz");
+                FileIterator rmsd_file(outputPath(p + ".bias.opt.accepted.xyz"));
                 while (!rmsd_file.AtEnd()) { rmsd_file.Next(); rmsd_count++; }
             }
             CurcumaLogger::result_fmt("ConfSearch: RMSD filtering complete. {} structures accepted.", rmsd_count);
@@ -391,7 +391,7 @@ void ConfSearch::start()
         int accepted = 0, rejected_topo = 0, rejected_energy = 0;
         std::vector<Molecule*> candidates;
         if (!no_new_bias_structures) {
-            FileIterator file(p + ".bias.opt.accepted.xyz");
+            FileIterator file(outputPath(p + ".bias.opt.accepted.xyz"));
             while (!file.AtEnd()) {
                 Molecule* mol = new Molecule(file.Next());
                 // Topology check: compare bond connectivity (0/1 matrix) against reference.
@@ -570,7 +570,7 @@ void ConfSearch::start()
         CurcumaLogger::warn("ConfSearch: Check the topo-reject diagnostics above. Common causes: reactive conditions (high T + strong bias),");
         CurcumaLogger::warn("ConfSearch: GFN-FF bond-length sensitivity near covalent-radii cutoffs, or mismatched input topology.");
         // Write an empty accepted file so downstream tools don't crash on a missing path.
-        std::ofstream(p + ".cumulative.opt.accepted.xyz").close();
+        std::ofstream(outputPath(p + ".cumulative.opt.accepted.xyz")).close();
         CurcumaLogger::warn_fmt("ConfSearch: Empty result written to {}.cumulative.opt.accepted.xyz", p);
     } else {
         nlohmann::json final_scan = ConfSearchJson;
@@ -581,6 +581,45 @@ void ConfSearch::start()
         final_scan["max_energy"] = m_energy_window;
         PerformFilter(p + ".cumulative", final_scan);
         CurcumaLogger::success_fmt("ConfSearch: Final result in {}.cumulative.opt.accepted.xyz", p);
+
+        // Claude Generated (Jun 2026): Final energy statistics over the deduplicated conformer set.
+        // Read the accepted conformers back, collect their energies, and report the spread relative
+        // to the lowest-energy conformer (= the deepest minimum found across all temperature cycles).
+        std::vector<double> energies;
+        {
+            FileIterator af(outputPath(p + ".cumulative.opt.accepted.xyz"));
+            while (!af.AtEnd()) {
+                Molecule m = af.Next();
+                energies.push_back(m.Energy());
+            }
+        }
+        if (!energies.empty()) {
+            std::sort(energies.begin(), energies.end());
+            const double e_min = energies.front();
+            const double e_max = energies.back();
+            const double span_kj = (e_max - e_min) * 2625.5;
+            CurcumaLogger::header("=== ConfSearch: Final Energy Statistics ===");
+            CurcumaLogger::result_fmt("ConfSearch: {} unique conformer(s); global minimum {:.6f} Eh",
+                static_cast<int>(energies.size()), e_min);
+            CurcumaLogger::result_fmt("ConfSearch: energy span {:.2f} kJ/mol (lowest {:.6f} Eh, highest kept {:.6f} Eh)",
+                span_kj, e_min, e_max);
+            if (initial_energy < std::numeric_limits<double>::infinity()) {
+                const double gain_kj = (initial_energy - e_min) * 2625.5;
+                if (gain_kj > 1e-3)
+                    CurcumaLogger::success_fmt("ConfSearch: search lowered the energy by {:.2f} kJ/mol vs. the initial structure ({:.6f} -> {:.6f} Eh)",
+                        gain_kj, initial_energy, e_min);
+                else
+                    CurcumaLogger::result_fmt("ConfSearch: initial structure remains the global minimum ({:.6f} Eh)", e_min);
+            }
+            // Relative energies of the lowest few conformers, for a quick conformer-landscape readout.
+            const int n_show = std::min(static_cast<int>(energies.size()), 10);
+            for (int i = 0; i < n_show; ++i)
+                CurcumaLogger::result_fmt("ConfSearch:   conformer {:>3}: {:.6f} Eh  (+{:.2f} kJ/mol)",
+                    i + 1, energies[i], (energies[i] - e_min) * 2625.5);
+            if (static_cast<int>(energies.size()) > n_show)
+                CurcumaLogger::result_fmt("ConfSearch:   ... and {} more within the energy window",
+                    static_cast<int>(energies.size()) - n_show);
+        }
     }
 
     // Claude Generated (Apr 2026): Clean up shared bias pool
@@ -598,7 +637,7 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
         for (size_t i = 0; i < molecules.size(); ++i) {
             MDThread* thread = new MDThread(parameter);
             thread->setThreadId(index++);
-            thread->setBasename(Basename() + ".r" + std::to_string(repeat));
+            thread->setBasename(outputPath(Basename() + ".r" + std::to_string(repeat)));
             thread->setMolecule(molecules[i]);
             thread->setSharedBiasPool(m_bias_pool);
             pool->addThread(thread);
@@ -609,6 +648,11 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
 
     CurcumaLogger::result_fmt("ConfSearch: {} MD runs finished. Bias pool: {} structures.",
         index, m_bias_pool ? m_bias_pool->biasStructureCount() : 0);
+
+    std::string file = outputPath("confsearch.unique.xyz");
+    std::ofstream result_file;
+    result_file.open(file);
+    result_file.close();
 
     // Export bias pool structures to confsearch.bias.xyz (primary conformer source).
     // Only raw MD snapshots (persistent=false) are exported for optimization — persistent
@@ -625,8 +669,8 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
             Molecule mol(ref_mol);
             mol.setGeometry(bs.geometry);
             mol.setName("bias_" + std::to_string(bs.index) + " t=" + std::to_string(static_cast<int>(bs.time)));
-            if (first) { mol.writeXYZFile(Basename() + ".mtd.xyz"); first = false; }
-            else          mol.appendXYZFile(Basename() + ".mtd.xyz");
+            if (first) { mol.writeXYZFile(outputPath(Basename() + ".mtd.xyz")); first = false; }
+            else          mol.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
         }
 
         // .bias.xyz: only new MD snapshots, not already-optimized persistent minima
@@ -643,8 +687,8 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
             Molecule mol(ref_mol);
             mol.setGeometry(new_snapshots[i].geometry);
             mol.setName("bias_" + std::to_string(new_snapshots[i].index));
-            if (first) { mol.writeXYZFile(Basename() + ".bias.xyz"); first = false; }
-            else          mol.appendXYZFile(Basename() + ".bias.xyz");
+            if (first) { mol.writeXYZFile(outputPath(Basename() + ".bias.xyz")); first = false; }
+            else          mol.appendXYZFile(outputPath(Basename() + ".bias.xyz"));
             exported++;
         }
         CurcumaLogger::result_fmt("ConfSearch: {} new MD snapshots (of {} total pool, {} persistent skipped, stride={}) written to {}.bias.xyz",
@@ -664,8 +708,8 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
 std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann::json& parameter)
 {
     std::string basename = f;
-    std::string input_file = basename + ".xyz";
-    std::string output_file = basename + ".opt.xyz";
+    std::string input_file = outputPath(basename + ".xyz");
+    std::string output_file = outputPath(basename + ".opt.xyz");
 
     // Suppress per-step output and trajectory for batch intermediate optimizations
     json local_param = parameter;
@@ -749,7 +793,7 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
 std::string ConfSearch::PerformFilter(const std::string& f, const nlohmann::json& parameter)
 {
     ConfScan* scan = new ConfScan(parameter, false);
-    scan->setFileName(f + ".opt.xyz");
+    scan->setFileName(outputPath(f + ".opt.xyz"));
     scan->start();
     // Claude Generated (Jun 2026): harvest the symmetry/atom-permutation rules ConfScan found
     // (Hungarian reorder after inertia prealignment) and accumulate the distinct, non-identity
@@ -815,9 +859,9 @@ void ConfSearch::CalibrateBias(const std::string& p, nlohmann::json& md)
         while (!f.AtEnd()) { Molecule m = f.Next(); if (m.AtomCount() > 0) v.push_back(m); }
         return v;
     };
-    std::vector<Molecule> pre = load(p + ".bias.xyz");           // pre-optimisation MD snapshots
-    std::vector<Molecule> post = load(p + ".bias.opt.xyz");      // optimised (index-aligned with pre)
-    std::vector<Molecule> minima = load(p + ".bias.opt.accepted.xyz"); // distinct minima (deduped)
+    std::vector<Molecule> pre = load(outputPath(p + ".bias.xyz"));           // pre-optimisation MD snapshots
+    std::vector<Molecule> post = load(outputPath(p + ".bias.opt.xyz"));      // optimised (index-aligned with pre)
+    std::vector<Molecule> minima = load(outputPath(p + ".bias.opt.accepted.xyz")); // distinct minima (deduped)
     if (minima.empty() || post.empty()) {
         CurcumaLogger::warn("ConfSearch: bias calibration skipped (no clusters available this cycle)");
         return;

@@ -42,7 +42,7 @@ TrajectoryAnalysis::TrajectoryAnalysis(const ConfigManager& config, bool silent)
     // Extract analysis parameters
     m_properties = Json2KeyWord<std::string>(m_config, "properties");
     m_output_format = Json2KeyWord<std::string>(m_config, "output_format");
-    m_output_file = Json2KeyWord<std::string>(m_config, "output_file");
+    m_output_file = outputPath(Json2KeyWord<std::string>(m_config, "output_file"));
     m_stride = Json2KeyWord<int>(m_config, "stride");
     m_start_frame = Json2KeyWord<int>(m_config, "start_frame");
     m_end_frame = Json2KeyWord<int>(m_config, "end_frame");

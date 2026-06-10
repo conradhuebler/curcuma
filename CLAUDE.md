@@ -103,6 +103,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - Implement timing analysis for complex functions
 - Keep track of significant improvements in AIChangelog.md, one line per fact
 - **Complex Architecture Documentation**: Factory patterns, dispatchers, and multi-step workflows require comprehensive inline documentation following ARCHITECTURE_DOCUMENTATION.md standards
+- **BMT output compatibility (MANDATORY)**: Every capability that writes output files MUST route them through `outputPath()` (CurcumaMethod subclasses) or `BMTUtils::outputPath()` (standalone handlers). Hardcoded CWD paths are not permitted. Verify with `-no_bmt` (legacy) and default BMT mode before merging.
 - **No UTF symbols in terminal output**: Do not use Unicode box-drawing characters, emoji, arrows (->), checkmarks, or any non-ASCII symbols in fmt::print/std::cout output. Use plain ASCII only. Reason: breaks output in many terminal emulators, log files, and remote shells. CurcumaLogger colored output is exempt (uses ANSI codes, not Unicode).
 
 #### Parameter Definition Standards (MANDATORY for new capabilities)
@@ -188,9 +189,15 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - **SimpleMD** - Basic molecular dynamics simulation
 - **NEB Docking** - Nudged elastic band for transition states
 - **Trajectory Analysis** - Analysis of MD trajectories
+- **PLUMED Metadynamics** - Enhanced sampling via PLUMED2 plugin (`-mtd` flag) — see [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md)
 
 ### 8. Analysis Tools
 - **✅ Parallel Analysis** - Frame-level parallelization with CxxThreadPool (3-8x speedup, January 2026)
+
+### 8. Output Directory System
+- **🤖 BMT (Basename.Method.Timestamp)** - Default output directory for all commands — see `src/tools/CLAUDE.md`
+- **`-bak` flag** - Copy specified files from BMT directory back to CWD
+- **`-no_bmt`** - Disable BMT, write output to CWD (legacy behavior)
 - **✅ TrajectoryWriter** - Unified output system for Human/CSV/JSON/DAT formats
 - **✅ Scattering Analysis** - P(q)/S(q) with logarithmic q-spacing and automatic gnuplot visualization (2026)
 - **RMSD Calculations** - Root-mean-square deviation analysis
