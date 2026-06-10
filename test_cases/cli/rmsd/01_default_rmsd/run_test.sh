@@ -55,8 +55,9 @@ validate_results() {
 
     assert_scientific_value "$expected_rmsd" "$rmsd_value" "$tolerance" "RMSD with reordering (AAA-bGal)"
 
-    # Verify JSON output was created
-    assert_file_exists "target.rmsd.json" "RMSD JSON output file"
+    # Verify JSON output was created (BMT-aware: search in CWD or BMT directory)
+    local json_file=$(find_output_file "target.rmsd.json")
+    assert_file_exists "$json_file" "RMSD JSON output file"
 
     return 0
 }

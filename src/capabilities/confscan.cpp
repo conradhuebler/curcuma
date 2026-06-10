@@ -1659,8 +1659,8 @@ void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, do
     result_file.close();
 
     if (m_write && rule.size()) {
-        mol1->writeXYZFile("A" + std::to_string(m_rejected) + ".xyz");
-        mol2->writeXYZFile("B" + std::to_string(m_rejected) + ".xyz");
+        mol1->writeXYZFile(outputPath("A" + std::to_string(m_rejected) + ".xyz"));
+        mol2->writeXYZFile(outputPath("B" + std::to_string(m_rejected) + ".xyz"));
     }
     m_nodes_list.push_back(mol1->Name());
 }

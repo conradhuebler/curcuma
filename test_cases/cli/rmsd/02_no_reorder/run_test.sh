@@ -61,8 +61,9 @@ validate_results() {
     TESTS_RUN=$((TESTS_RUN + 1))
     TESTS_PASSED=$((TESTS_PASSED + 1))
 
-    # Verify JSON output was created even without reordering
-    assert_file_exists "target.rmsd.json" "RMSD JSON output file (no-reorder mode)"
+    # Verify JSON output was created even without reordering (BMT-aware)
+    local json_file=$(find_output_file "target.rmsd.json")
+    assert_file_exists "$json_file" "RMSD JSON output file (no-reorder mode)"
 
     return 0
 }

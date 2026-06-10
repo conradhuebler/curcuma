@@ -1541,23 +1541,17 @@ int executeRMSD(const json& controller, int argc, char** argv) {
 
     json rmsd_config = controller.value("rmsd", json::object());
     auto* driver = new RMSDDriver(rmsd_config, false);
+    // Claude Generated 2026: Initialize BMT before start() so MolAlign temp files
+    // and all internal outputPath() calls land in the BMT directory.
+    initializeBMT(driver, std::string(argv[2]), "rmsd", controller);
     driver->setReference(molecule1);
     driver->setTarget(molecule2);
     driver->start();
     std::cout << "RMSD for two molecules " << driver->RMSD() << std::endl;
 
-    // Claude Generated 2026: BMT output directory for rmsd command
-    std::string rmsd_basename = reffile;
-    std::string rmsd_bmt_dir = BMTUtils::createBMTDir(rmsd_basename, "rmsd");
-    BMTUtils::writeMetadata(rmsd_bmt_dir, rmsd_basename, "rmsd", std::string(argv[2]));
-
-    driver->ReferenceAligned().writeXYZFile(BMTUtils::outputPath(rmsd_bmt_dir, reffile + ".centered.xyz"));
-    driver->TargetAligned().writeXYZFile(BMTUtils::outputPath(rmsd_bmt_dir, tarfile + ".centered.xyz"));
-    driver->TargetReorderd().writeXYZFile(BMTUtils::outputPath(rmsd_bmt_dir, tarfile + ".reordered.xyz"));
-
-    // Process -bak files
-    std::vector<std::string> rmsd_bak_files = BMTUtils::collectBakFiles(controller);
-    BMTUtils::processBakFiles(rmsd_bmt_dir, rmsd_bak_files);
+    driver->ReferenceAligned().writeXYZFile(driver->outputPath(reffile + ".centered.xyz"));
+    driver->TargetAligned().writeXYZFile(driver->outputPath(tarfile + ".centered.xyz"));
+    driver->TargetReorderd().writeXYZFile(driver->outputPath(tarfile + ".reordered.xyz"));
 
     // Write RMSD results as JSON
     {
@@ -1580,10 +1574,11 @@ int executeRMSD(const json& controller, int argc, char** argv) {
         rmsd_result["reference_file"] = reffile;
         rmsd_result["target_file"] = tarfile;
 
-        std::ofstream rmsd_out(tarfile + ".rmsd.json");
+        std::ofstream rmsd_out(driver->outputPath(tarfile + ".rmsd.json"));
         rmsd_out << rmsd_result.dump(2) << std::endl;
     }
 
+    driver->processBakFiles();
     delete driver;
     return 0;
 }

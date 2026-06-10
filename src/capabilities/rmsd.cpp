@@ -1612,11 +1612,13 @@ std::pair<Matrix, Position> RMSDDriver::GetOperateVectors(const Molecule& refere
 
 bool RMSDDriver::MolAlignLib()
 {
-    m_reference.writeXYZFile("molaign_ref.xyz");
-    m_target.writeXYZFile("molalign_tar.xyz");
+    std::string ref_tmp = outputPath("molaign_ref.xyz");
+    std::string tar_tmp = outputPath("molalign_tar.xyz");
+    m_reference.writeXYZFile(ref_tmp);
+    m_target.writeXYZFile(tar_tmp);
 
     FILE* FileOpen;
-    std::string command = m_molalign + m_molalignarg + " molaign_ref.xyz   molalign_tar.xyz " + " 2>&1";
+    std::string command = m_molalign + m_molalignarg + " " + ref_tmp + "   " + tar_tmp + " 2>&1";
     if (m_verbosity >= 3)
         CurcumaLogger::info_fmt("MolAlign command: {}", command);
     FileOpen = popen(command.c_str(), "r");
@@ -1636,15 +1638,16 @@ bool RMSDDriver::MolAlignLib()
     }
     pclose(FileOpen);
 
-    if (std::filesystem::exists("aligned.xyz") and !rndm) {
+    std::string aligned_tmp = outputPath("aligned.xyz");
+    if (std::filesystem::exists(aligned_tmp) and !rndm) {
         CurcumaLogger::citation("molalign");
-        FileIterator file("aligned.xyz", true);
+        FileIterator file(aligned_tmp, true);
         m_reference_centered = file.Next();
         m_target_reordered = file.Next();
         m_target_aligned = m_target_reordered;
         m_target = m_target_reordered;
         m_rmsd = CalculateRMSD();
-        std::filesystem::remove("aligned.xyz");
+        std::filesystem::remove(aligned_tmp);
     } else {
         if (!rndm && !error) {
             CurcumaLogger::error("Molalign was not found. Consider getting it from https://github.com/qcuaeh/molalignlib or use -molalignbin /yourpath/molalign");
