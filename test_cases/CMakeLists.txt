@@ -212,6 +212,37 @@ endif()
 add_test(NAME test_eeq_two_phase
          COMMAND test_eeq_two_phase)
 
+# Claude Generated: PolymerBuild sequence parser tests (prime notation)
+add_executable(test_polymerbuild_sequence
+        test_polymerbuild_sequence.cpp)
+
+target_link_libraries(test_polymerbuild_sequence curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_polymerbuild_sequence REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_polymerbuild_sequence
+         COMMAND test_polymerbuild_sequence)
+
+# Claude Generated: PolymerBuild structural tests (Xx selection, geometry comparison)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/polymerbuild/fragment_2xx.xyz
+     DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/polymerbuild)
+
+add_executable(test_polymerbuild_structure
+        test_polymerbuild_structure.cpp)
+
+target_link_libraries(test_polymerbuild_structure curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_polymerbuild_structure REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_polymerbuild_structure
+         COMMAND test_polymerbuild_structure
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(test_polymerbuild_structure PROPERTIES TIMEOUT 120)
+
 # Claude Generated (April 2026): CPU GFN-FF analytical vs numerical gradient test
 # Tests gradient correctness for all built-in molecules (H2O, CH4, CH3OH, CH3OCH3)
 # Use --fixed-charges flag to isolate formula bugs from missing dq/dx terms

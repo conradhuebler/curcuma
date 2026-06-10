@@ -363,10 +363,21 @@ public:
     /**
      * @brief Get internal interface pointer (legacy support)
      * @return ComputationalMethod pointer (replaces old QMInterface)
-     * 
+     *
      * @deprecated Use direct EnergyCalculator methods instead
      */
     ComputationalMethod* Interface() const { return m_method.get(); }
+
+    /**
+     * @brief Get coordination numbers from last calculate() call.
+     *
+     * Delegates to the underlying method's getCN(). Only GFN-FF returns meaningful
+     * values; all other methods return an empty vector.
+     *
+     * Claude Generated 2026 — used by PolymerBuild CN diagnostics
+     * @return Per-atom GFN-FF CN vector, or empty vector if not supported
+     */
+    Vector getCN() const { return m_method ? m_method->getCN() : Vector(); }
     
     /**
      * @brief Print available methods

@@ -2474,6 +2474,8 @@ private:
     mutable std::optional<bool> m_external_topology_decision; ///< GPU displacement check result
     mutable std::optional<std::vector<std::pair<int,int>>> m_cached_bond_list;
 
+    std::vector<std::pair<int,int>> m_forced_bonds; ///< External bonds merged with geometric detection
+
     // Topology caching mode: "auto" (two-tier caching) or "constant" (never recalculate)
     std::string m_topology_mode = "auto";
 

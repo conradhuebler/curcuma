@@ -46,7 +46,7 @@
 #include "src/capabilities/simplemd.h"
 #include "src/capabilities/trajectory_statistics.h"
 #include "src/capabilities/trajectoryanalysis.h"
-
+#include "src/capabilities/polymerbuild.h"
 #include "src/tools/trajectory_writer.h"
 
 #include "src/tools/general.h"
@@ -1913,6 +1913,22 @@ int executeRMSDTraj(const json& controller, int argc, char** argv) {
     return 0;
 }
 
+int executePolymerBuild(const json& controller, int argc, char** argv)
+{
+    if (argc < 2) {
+        std::cerr << "Please use curcuma for polymer build as follows:\ncurcuma -polymerbuild -sequence \"(A)10-B\" -fragments '{\"A\": \"a.xyz\", \"B\": \"b.xyz\"}'" << std::endl;
+        PolymerBuild help(json::object(), true);
+        help.printHelp();
+        return 0;
+    }
+
+    PolymerBuild builder(controller, false);
+    initializeBMT(&builder, "polymer", "polymerbuild", controller);
+    builder.start();
+    builder.processBakFiles();
+    return 0;
+}
+
 // Capability registry - Claude Generated
 const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
     {"analysis", {"Unified molecular analysis (all formats, all properties)", "analysis",
@@ -1929,6 +1945,8 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ", "MOL2", "SDF"}, executeConfStat}},
     {"dock", {"Molecular docking calculations", "docking",
               {"XYZ", "MOL2", "SDF"}, executeDocking}},
+    {"polymerbuild", {"Iterative polymer assembly from fragments", "assembly",
+                  {"XYZ"}, executePolymerBuild}},
     {"md", {"Molecular dynamics simulation", "dynamics",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSimpleMD}},
     {"casino", {"Casino Monte Carlo simulation with enhanced sampling", "dynamics",

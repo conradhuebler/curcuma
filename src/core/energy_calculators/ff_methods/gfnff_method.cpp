@@ -716,6 +716,11 @@ bool GFNFF::InitialiseMolecule(const Mol& molecule)
     m_atoms = molecule.m_atoms;
     m_gradient = Matrix::Zero(m_atomcount, 3);
 
+    // Store forced bonds from molecule (e.g. interface bonds from polymerbuild)
+    m_forced_bonds = molecule.m_bonds;
+    if (!m_forced_bonds.empty() && CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("GFNFF: {} forced bonds from molecule", m_forced_bonds.size()));
+    }
     // Claude Generated (April 2026): Extract PBC from Mol
     m_has_pbc = molecule.m_has_pbc;
     if (m_has_pbc)
@@ -938,34 +943,40 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
             CurcumaLogger::info(fmt::format("Calculating bond list for {} atoms", m_atomcount));
         }
 
-        // Populate bond list using same detection logic as generateGFNFFBonds but without parameters
         std::vector<std::pair<int,int>> bonds;
-        double bond_threshold = 1.3;
 
-        // Detailed debug output only at verbosity 3
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("=== Bond Detection Debug ===");
-            CurcumaLogger::info(fmt::format("Atom count: {}", m_atomcount));
-            CurcumaLogger::info(fmt::format("Geometry rows: {}, cols: {}", m_geometry_bohr.rows(), m_geometry_bohr.cols()));
-        }
+        if (!m_forced_bonds.empty()) {
+            // Use externally provided bond list exclusively (e.g. from polymerbuild topology)
+            // This prevents spurious inter-monomer bonds from geometric detection — Claude Generated
+            for (const auto& fb : m_forced_bonds) {
+                auto canonical = fb.first < fb.second ? fb : std::make_pair(fb.second, fb.first);
+                if (canonical.first < m_atomcount && canonical.second < m_atomcount)
+                    bonds.push_back(canonical);
+            }
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info(fmt::format("GFNFF: Using {} bonds from external topology (geometric detection skipped)", bonds.size()));
+        } else {
+            // Default: geometric bond detection
+            double bond_threshold = 1.3;
 
-        // Claude Generated (March 2026): Pre-cache per-atom covalent radii and fat factors
-        std::vector<double> rcov(m_atomcount);
-        std::vector<double> fat_val(m_atomcount);
-        for (int i = 0; i < m_atomcount; ++i) {
-            rcov[i] = getCovalentRadius(m_atoms[i]);
-            fat_val[i] = fat[m_atoms[i]];
-        }
+            // Claude Generated (March 2026): Pre-cache per-atom covalent radii and fat factors
+            std::vector<double> rcov(m_atomcount);
+            std::vector<double> fat_val(m_atomcount);
+            for (int i = 0; i < m_atomcount; ++i) {
+                rcov[i] = getCovalentRadius(m_atoms[i]);
+                fat_val[i] = fat[m_atoms[i]];
+            }
 
-        for (int i = 0; i < m_atomcount; ++i) {
-            for (int j = i + 1; j < m_atomcount; ++j) {
-                double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+            for (int i = 0; i < m_atomcount; ++i) {
+                for (int j = i + 1; j < m_atomcount; ++j) {
+                    double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
 
-                // Phase 3: Apply element-specific fat scaling factors (Claude Generated Jan 2026)
-                double threshold = bond_threshold * (rcov[i] + rcov[j]) * fat_val[i] * fat_val[j];
+                    // Phase 3: Apply element-specific fat scaling factors (Claude Generated Jan 2026)
+                    double threshold = bond_threshold * (rcov[i] + rcov[j]) * fat_val[i] * fat_val[j];
 
                 if (distance < threshold) {
                     bonds.emplace_back(i, j);
+                }
                 }
             }
         }
