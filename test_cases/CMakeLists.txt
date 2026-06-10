@@ -74,6 +74,31 @@ if(USE_PCH)
         target_precompile_headers(test_energy_methods REUSE_FROM curcuma_core)
 endif()
 
+# Claude Generated 2026: BMT Utils unit test suite
+add_executable(test_bmt_utils
+        test_bmt_utils.cpp)
+
+target_link_libraries(test_bmt_utils curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_bmt_utils REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_bmt_utils COMMAND test_bmt_utils)
+set_tests_properties(test_bmt_utils PROPERTIES TIMEOUT 10 LABELS "bmt;unit")
+
+# Claude Generated 2026: PLUMED init unit test suite (only built with USE_Plumed)
+if(USE_Plumed)
+    add_executable(test_plumed_init
+            test_plumed_init.cpp)
+    target_link_libraries(test_plumed_init curcuma_core)
+    if(USE_PCH)
+        target_precompile_headers(test_plumed_init REUSE_FROM curcuma_core)
+    endif()
+    add_test(NAME test_plumed_init COMMAND test_plumed_init)
+    set_tests_properties(test_plumed_init PROPERTIES TIMEOUT 10 LABELS "plumed;unit")
+endif()
+
 # Claude Generated: CG Potentials unit test suite
 add_executable(test_cg_potentials
         test_cg_potentials.cpp)

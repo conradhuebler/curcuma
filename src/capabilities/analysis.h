@@ -64,6 +64,9 @@ public:
     /*! \brief Set input filename (any supported format) */
     inline void setFileName(const std::string& filename) { m_filename = filename; }
 
+    /*! \brief Set output directory for BMT support (Claude Generated 2026) */
+    inline void setOutputDirectory(const std::string& dir) { m_output_dir = dir; }
+
     /*! \brief Print help for analysis options */
     void printHelp() const override;
 
@@ -212,6 +215,7 @@ public:  // Configuration class needs to be public for AnalysisOutputDispatcher 
 
 private:  // Private member variables - Claude Generated 2026
     std::string m_filename;
+    std::string m_output_dir;  // BMT output directory
     ConfigManager m_config;       // Claude Generated 2025: Modern configuration manager
     json m_config_legacy;         // Claude Generated 2025: Legacy JSON for TDAEngine compatibility
     bool m_silent;

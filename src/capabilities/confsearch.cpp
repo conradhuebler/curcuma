@@ -142,7 +142,7 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
         pool->setActiveThreadCount(m_threads);
     pool->StartAndWait();
 
-    std::string file = "confsearch.unique.xyz";
+    std::string file = outputPath("confsearch.unique.xyz");
     std::ofstream result_file;
     result_file.open(file);
     result_file.close();
@@ -164,8 +164,8 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
 {
     // Claude Generated (Apr 2026): Use unified optimizer instead of legacy CurcumaOpt
     std::string basename = "confsearch.unique";
-    std::string input_file = basename + ".xyz";
-    std::string output_file = basename + ".opt.xyz";
+    std::string input_file = outputPath(basename + ".xyz");
+    std::string output_file = outputPath(basename + ".opt.xyz");
 
     // Clear output file
     std::ofstream(output_file).close();
@@ -193,7 +193,7 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
 std::string ConfSearch::PerformFilter(const std::string& f, const nlohmann::json& parameter)
 {
     ConfScan* scan = new ConfScan(parameter, false);
-    scan->setFileName("confsearch.unique.opt.xyz");
+    scan->setFileName(outputPath("confsearch.unique.opt.xyz"));
     scan->start();
     return std::string("fff");
 }

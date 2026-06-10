@@ -276,6 +276,13 @@ private:
 
     void PrintStatus(const std::string& info = "");
 
+    /* Claude Generated: Print a pass-level status line at verbosity >= 1.
+       The global CurcumaLogger verbosity is lowered to 0 by the RMSD machinery
+       during a scan, so success()/info() calls get swallowed even though the
+       local m_verbosity is >= 1. This helper temporarily syncs the global logger
+       verbosity to m_verbosity (same workaround as AcceptMolecule/RejectMolecule). */
+    void logPass(const std::string& msg, bool neutral = false);
+
     std::map<std::string, std::vector<std::string>> m_filtered;
     bool m_ok;
     std::size_t m_fail = 0, m_start = 0, m_end;
@@ -309,7 +316,7 @@ private:
     PARAM(restart, Bool, true, "Enable restarting from previous scan", "General", {})
     PARAM(noname, Bool, true, "Auto-generate structure names", "General", {})
     PARAM(threads, Int, 1, "Number of parallel threads for ensemble processing", "Performance", {})
-    PARAM(method, String, "subspace", "RMSD alignment method for structure comparison: incr|template|hybrid|subspace|inertia|molalign|dtemplate|hungarian|predefined", "General", {})
+    PARAM(method, String, "subspace", "RMSD alignment method: subspace (default, recommended)|inertia (recommended)|template|dtemplate|incr (legacy, internal component of subspace)|molalign (external)", "General", {})
 
     // --- Filtering & Thresholds ---
     PARAM(rmsd, Double, 0.9, "RMSD threshold for accepting conformer", "Filtering", {})

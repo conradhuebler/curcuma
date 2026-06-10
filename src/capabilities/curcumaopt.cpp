@@ -122,9 +122,9 @@ int OptThread::execute()
     curcuma::SuppressIntraParallel intra_guard;
     Vector charges;
     if (m_optimethod == 0)
-        m_final = m_curcumaOpt->LBFGSOptimise(&m_molecule, m_result, &m_intermediate, charges, getThreadId(), Basename() + ".opt.trj");
+        m_final = m_curcumaOpt->LBFGSOptimise(&m_molecule, m_result, &m_intermediate, charges, getThreadId(), outputPath(Basename() + ".opt.trj"));
     else
-        m_final = m_curcumaOpt->GPTLBFGS(&m_molecule, m_result, &m_intermediate, charges, getThreadId(), Basename() + ".opt.trj");
+        m_final = m_curcumaOpt->GPTLBFGS(&m_molecule, m_result, &m_intermediate, charges, getThreadId(), outputPath(Basename() + ".opt.trj"));
 
     m_scf["e0"] = m_final.Energy();
     if (charges.size())
@@ -456,7 +456,7 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, Vec
 
 void CurcumaOpt::WriteMO(int n, int m)
 {
-    std::ofstream file(Basename() + ".inc");
+    std::ofstream file(outputPath(Basename() + ".inc"));
     std::ostream& out = std::cout;
     double spacing = 0.1;
     auto write_tikz = [&](std::ostream& os) {

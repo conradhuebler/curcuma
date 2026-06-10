@@ -25,13 +25,14 @@ MD_MAXTIME=10000
 MD_SEED=42
 MD_THREADS=1
 MD_PRINT=1000
-TRJ_FILE="input.trj.xyz"
+TRJ_FILE=""  # resolved after curcuma run via find_output_file
 MIN_FRAMES=8
 ENERGY_DRIFT_TOL=0.10
 
 run_test() {
     cd "$TEST_DIR"
-    rm -f "$TRJ_FILE" input.opt.xyz input.restart stdout.log stderr.log
+    rm -f input.trj.xyz input.opt.xyz input.restart stdout.log stderr.log
+    cleanup_bmt_dirs
 
     # Skip if xtb-gfnff is not available (no USE_GFNFF / USE_XTB compiled in)
     local probe
@@ -54,6 +55,10 @@ run_test() {
         -md.print_frequency $MD_PRINT \
         > stdout.log 2> stderr.log
     local exit_code=$?
+
+    # BMT-aware: resolve trajectory file after run
+    TRJ_FILE=$(find_output_file "input.trj.xyz")
+
     echo "Exit code: $exit_code"
     return $exit_code
 }

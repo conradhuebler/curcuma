@@ -227,6 +227,11 @@ void UnifiedAnalysis::start()
         return;
     }
 
+    // Claude Generated 2026: Override scattering output directory with BMT directory when set
+    if (!m_output_dir.empty() && m_analysis_config.scattering_output_directory == ".") {
+        m_analysis_config.scattering_output_directory = m_output_dir;
+    }
+
     if (!m_silent) {
         CurcumaLogger::info_fmt("Starting unified molecular analysis of: {}", m_filename);
     }
@@ -1230,6 +1235,7 @@ void UnifiedAnalysis::outputResults(const json& results)
     std::string output_file = m_config.get<std::string>("output_file");
 
     // Phase 4: ALWAYS write files (derive basename from output_file OR input filename)
+    // Claude Generated 2026: Prepend BMT output directory when set
     std::string basename;
     if (!output_file.empty()) {
         // Use explicit output_file as basename
@@ -1241,6 +1247,9 @@ void UnifiedAnalysis::outputResults(const json& results)
         if (last_dot != std::string::npos) {
             basename = basename.substr(0, last_dot);
         }
+    }
+    if (!m_output_dir.empty()) {
+        basename = m_output_dir + "/" + basename;
     }
 
     // ALWAYS dispatch to file handlers (write specialized files)

@@ -153,6 +153,26 @@ For Windows: you need to tell the CMD which compiler to use to avoid errors if u
 cmake .. -DCMAKE_BUILD_TYPE=Release -G "MinGW Makefiles"
 ```
 
+### Windows with OpenMP support (w64devkit)
+
+Standard MinGW does not ship with OpenMP. To enable OpenMP on Windows, use [w64devkit](https://github.com/skeeto/w64devkit), which provides a GCC toolchain with OpenMP support out of the box.
+
+1. Install [MinGW](https://sourceforge.net/projects/mingw/) and [CMake](https://cmake.org/download/), and add their `bin` directories to the System environment variables (`PATH`).
+2. Download and extract [w64devkit](https://github.com/skeeto/w64devkit/releases).
+3. Open the w64devkit terminal from the extracted folder (run `w64devkit.exe`).
+4. Inside that terminal, build Curcuma:
+
+```sh
+git clone --recursive https://github.com/conradhuebler/curcuma
+cd curcuma
+mkdir build
+cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -G "MinGW Makefiles"
+mingw32-make
+```
+
+The w64devkit environment provides the correct `libgomp` runtime, so `-DUSE_OpenMP=ON` will be picked up automatically by CMake.
+
 ## Modern Parameter System (October 2025)
 
 Curcuma features an **automated parameter registry system** for all molecular modeling capabilities:
@@ -663,8 +683,36 @@ curcuma -md input.xyz -mtd
 ``` 
 a metadynamics simulation can be performed using plumed. It is a ***plumed.dat*** expected, or can be set with
 ```sh
-curcuma -md input.xyz -mtd -plumed input.plumed
-``` 
+curcuma -md input.xyz -mtd -plumed plumed.dat
+```
+
+See [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md) for the full PLUMED integration guide (unit conversions, output files, available CVs, thermal equilibration gate, internal RMSD-MTD).
+
+## Output Directory System (BMT)
+
+By default, all curcuma commands create a **Basename.Method.Timestamp** directory for their output files. For example:
+
+```sh
+curcuma -md water.xyz -method gfnff
+# Output goes to: water.md.20260609_143052/
+```
+
+The BMT directory contains all trajectory files, restart data, and a `metadata.txt` file with calculation details. This keeps the working directory clean and makes it easy to compare runs.
+
+To copy specific files back to the working directory after the calculation finishes, use the `-bak` flag:
+
+```sh
+curcuma -opt water.xyz -method gfnff -bak water.opt.xyz
+# water.opt.xyz is copied from the BMT directory to the working directory
+```
+
+Multiple files can be specified: `-bak water.opt.xyz -bak water.trj.xyz`.
+
+To disable BMT and write output to the working directory (legacy behavior):
+
+```sh
+curcuma -md input.xyz -method uff -no_bmt
+```
 
 # Funding
 The development of curcuma is funded by:

@@ -344,7 +344,7 @@ cleanup_test_artifacts() {
     # Remove common Curcuma output files
     rm -f *.opt.xyz *.trj.xyz *.restart.json *.vtf
     rm -f *.accepted.xyz *.rejected.xyz *.thresh.xyz *.initial.xyz
-    rm -f *.reorder.*.xyz *.centered.xyz *.reordered.xyz
+    rm -f *.reorder.*.xyz *.centered.xyz *.reordered.xyz *.rmsd.json
     rm -f *.log *.dat *.pairs
     rm -f stdout.log stderr.log
 }

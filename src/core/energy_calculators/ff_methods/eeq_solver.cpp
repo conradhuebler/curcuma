@@ -27,8 +27,10 @@
 
 // Claude Generated (March 2026): Enable BLAS-accelerated Eigen for EEQ linear solves
 // Defined per-file to avoid Eigen 3.4 complex-type conflicts in other TUs (e.g., lbfgs.cpp)
+#ifdef HAVE_BLAS
 #ifndef EIGEN_USE_BLAS
 #define EIGEN_USE_BLAS
+#endif
 #endif
 
 #include "eeq_solver.h"

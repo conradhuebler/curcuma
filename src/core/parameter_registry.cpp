@@ -171,7 +171,7 @@ void ParameterRegistry::printAllModules() const
 // Claude Generated: Generate default JSON for a module
 json ParameterRegistry::getDefaultJson(const std::string& module) const
 {
-    json result;
+    json result = json::object();  // Initialize as empty object, not null — null causes type_error.306 when .value() is called on it
 
     auto it = registry.find(module);
     if (it == registry.end()) {

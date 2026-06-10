@@ -85,7 +85,7 @@ void QMDFFFit::start()
         scfjson["e0"] = e0;
         scfjson["charges"] = charges;
 
-        std::ofstream scffile("scf.json");
+        std::ofstream scffile(outputPath("scf.json"));
         scffile << scfjson;
     }
     m_molecule.setPartialCharges(charges);
@@ -116,7 +116,7 @@ void QMDFFFit::start()
         json hjson;
         hjson["atoms"] = m_atom_types.size();
         hjson["hessian"] = hessian_string;
-        std::ofstream hess_file("hessian.json");
+        std::ofstream hess_file(outputPath("hessian.json"));
         hess_file << hjson;
     }
     // hessian.PrintVibrations();
@@ -138,7 +138,7 @@ void QMDFFFit::start()
     parameter["e0"] = e0;
     // parameter["bonds"] = Bonds();
     // parameter["angles"] = Angles();
-    std::ofstream parameterfile_init("qmdff_init_param.json");
+    std::ofstream parameterfile_init(outputPath("qmdff_init_param.json"));
     parameterfile_init << parameter;
     // std::cout << parameter << std::endl;
     parameterfile_init.close();
@@ -186,7 +186,7 @@ void QMDFFFit::start()
         // std::cout << bonds << std::endl;
         parameter["bonds"] = bonds;
         parameter["angles"] = angles;
-        std::ofstream parameterfile_init("qmdff_" + std::to_string(start) + "_param.json");
+        std::ofstream parameterfile_init(outputPath("qmdff_" + std::to_string(start) + "_param.json"));
         parameterfile_init << parameter;
         // std::cout << parameter << std::endl;
         parameterfile_init.close();
@@ -274,7 +274,7 @@ void QMDFFFit::start()
     std::cout << he2.Frequencies().transpose() << std::endl;
 
     // std::cout << parameter << std::endl;
-    std::ofstream parameterfile("qmdff_param.json");
+    std::ofstream parameterfile(outputPath("qmdff_param.json"));
     parameterfile << parameter;
 }
 
