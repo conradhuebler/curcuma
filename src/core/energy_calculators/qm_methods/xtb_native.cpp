@@ -37,6 +37,7 @@
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"  // D3 CN gradient (May 2026)
 #include "src/core/energy_calculators/ff_methods/alpb_solvation.h"  // implicit solvation (June 2026)
+#include "src/core/solvation/cpcm_solvation.h"  // CPCM (ddCOSMO) solvation (June 2026)
 #include "diis_accelerator.h"
 #include "broyden_mixer.h"
 
@@ -124,6 +125,7 @@ bool XTB::InitialiseMolecule()
         const int model = (m_solvent_model > 0) ? m_solvent_model : 3;
         if (model == 3) CitationRegistry::cite("alpb", meth);
         else if (model == 2) { CitationRegistry::cite("alpb", meth); CitationRegistry::cite("still_gb", meth); }
+        else if (model == 1) { CitationRegistry::cite("cpcm", meth); CitationRegistry::cite("lebedev", meth); }
     }
     CitationRegistry::cite("diis", meth);         // SCF convergence (DIIS/Broyden)
 
@@ -138,8 +140,9 @@ bool XTB::InitialiseMolecule()
     // ── Implicit solvation (Claude Generated, June 2026) ──
     // Build the self-consistent reaction-field model when a solvent is requested.
     // Created here (atoms known); update() refreshes the geometry-dependent state
-    // each Calculation(). solvent_model: 3=ALPB, 2=GBSA (both wired); 1=CPCM is a
-    // later WP. GBSA = ALPB with the shape term off (see ALPBSolvation::setUseAlpb).
+    // each Calculation(). solvent_model: 3=ALPB, 2=GBSA, 1=CPCM (ddCOSMO). GBSA =
+    // ALPB with the shape term off (see ALPBSolvation::setUseAlpb); CPCM is a
+    // purely-electrostatic continuum model (CpcmSolvation, faithful tblite port).
     m_solvation.reset();
     m_E_solvation = 0.0;
     if (m_solvent != "none" && !m_solvent.empty()) {
@@ -157,10 +160,18 @@ bool XTB::InitialiseMolecule()
                                     + " parameters for solvent '" + m_solvent + "' ("
                                     + meth + "); running gas phase");
             }
+        } else if (model == 1) {
+            auto solv = std::make_unique<Curcuma::Solvation::CpcmSolvation>();
+            solv->setEpsilon(m_solvent_epsilon);
+            if (solv->init(m_atoms, m_solvent, meth)) {
+                m_solvation = std::move(solv);
+            } else {
+                CurcumaLogger::warn(std::string("Native solvation: CPCM init failed for "
+                                    "solvent '") + m_solvent + "' (" + meth
+                                    + "); running gas phase");
+            }
         } else {
-            CurcumaLogger::warn("Native solvation: only solvent_model alpb and gbsa "
-                                "are implemented for native GFN (cpcm pending); "
-                                "running gas phase");
+            CurcumaLogger::warn("Native solvation: unknown solvent_model; running gas phase");
         }
     }
     return true;

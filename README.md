@@ -108,6 +108,7 @@ The native `gfnff` implementation is **AI-implemented and machine-tested** — h
 - CUDA acceleration: topology caching, async CPU/GPU overlap, shared-memory reduction
 - Geometry optimization and MD using gradients
 - **GFN-FF ALPB solvation**: self-consistent Born reaction field coupled into EEQ (`A_eeq += B`); validated against xtb 6.7.1 (`--gfnff --alpb`) to ≤1e-8 Eh (7 molecules × 4 solvents, `ctest -L gfnff_solvation`; June 2026). Gradient FD-validated at frozen solvated charges (same approximation as the Fortran reference). `-gfnff.solvent_model gbsa` maps to ALPB (GFN-FF has no separate GBSA model; warns at runtime). See [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md).
+- **Native CPCM (ddCOSMO) solvation** for GFN1/GFN2/GFN-FF (June 2026): faithful port of tblite's CPCM (`-xtb.solvent_model cpcm` / `-gfnff.solvent_model cpcm`), purely electrostatic, assembled as an effective reaction matrix so it reuses the in-SCF / EEQ / GPU paths. Reproduces tblite ~1e-9 on small molecules and ~1e-6 on large polar ones (charge-driven residual amplified by the grid-sensitive ddCOSMO response, not a port bug; `ctest -L _cpcm` 56/56, FD gradient exact for gfn1). GFN-FF CPCM has no external reference (xtb GFN-FF uses ALPB) → self-consistency-validated only. 🤖 AI-generated, machine-tested.
 
 **Not validated / not implemented:**
 - **Periodic boundary conditions**: Not implemented

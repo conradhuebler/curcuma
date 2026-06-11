@@ -23,8 +23,25 @@
 
 #include "src/core/global.h"
 
+#include <Eigen/Dense>
 #include <string>
 #include <vector>
+
+/**
+ * @brief Decomposed solvation free energy (Eh).
+ *
+ * Defined here (rather than in alpb_solvation.h) so it is part of the common
+ * @ref ImplicitSolvationModel interface and can be returned by any model
+ * (ALPB/GBSA fill all four terms; CPCM is purely electrostatic -> gborn only).
+ */
+struct ALPBEnergyParts {
+    double gborn = 0.0;   ///< Born / reaction-field electrostatic solvation energy (Eh)
+    double ghb = 0.0;     ///< Hydrogen bonding correction (Eh)
+    double gsasa = 0.0;   ///< Non-polar SASA energy (Eh)
+    double gshift = 0.0;  ///< Free energy state shift (Eh)
+
+    double total() const { return gborn + ghb + gsasa + gshift; }
+};
 
 /**
  * @brief Abstract interface for implicit (continuum) solvation models.
@@ -102,6 +119,23 @@ public:
                              const Matrix& xyz_bohr,
                              const Vector& q_at,
                              Matrix& gradient) = 0;
+
+    /**
+     * @brief The symmetric nat×nat reaction matrix B with v = B·q, E = ½ qᵀ B q.
+     *
+     * For Born/GB/ALPB this is the Born interaction matrix; for CPCM it is the
+     * effective reaction matrix obtained by eliminating the surface charges
+     * (linear in q). Used for the self-consistent GFN-FF coupling (`A_eeq += B`,
+     * mirroring the reference gfnff gbsa%bornMat) and as the GPU device matrix.
+     * Valid after @ref update.
+     */
+    virtual const Eigen::MatrixXd& reactionMatrix() const = 0;
+
+    /**
+     * @brief Decomposed solvation free energy for the given charges.
+     *        ALPB/GBSA fill all four terms; CPCM fills gborn only.
+     */
+    virtual ALPBEnergyParts energyParts(const Vector& q_at) const = 0;
 
     /**
      * @brief Device (GPU) hook: the symmetric Born matrix B for v_at += B·q_at.

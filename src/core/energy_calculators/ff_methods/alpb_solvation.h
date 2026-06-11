@@ -36,17 +36,8 @@
 #include <vector>
 #include <memory>
 
-/**
- * @brief ALPB solvation energy components
- */
-struct ALPBEnergyParts {
-    double gborn = 0.0;   ///< Born electrostatic solvation energy (Eh)
-    double ghb = 0.0;     ///< Hydrogen bonding correction (Eh)
-    double gsasa = 0.0;   ///< Non-polar SASA energy (Eh)
-    double gshift = 0.0;  ///< Free energy state shift (Eh)
-
-    double total() const { return gborn + ghb + gsasa + gshift; }
-};
+// ALPBEnergyParts is defined in implicit_solvation.h (shared by all solvation
+// models) and made available through the include above.
 
 /**
  * @brief ALPB Solvation Model
@@ -187,6 +178,12 @@ public:
      * update(). Claude Generated (June 2026).
      */
     const Eigen::MatrixXd& bornMatrix() const { return m_born_mat; }
+
+    /// @copydoc ImplicitSolvationModel::reactionMatrix
+    const Eigen::MatrixXd& reactionMatrix() const override { return m_born_mat; }
+
+    /// @copydoc ImplicitSolvationModel::energyParts
+    ALPBEnergyParts energyParts(const Vector& q_at) const override { return getEnergyParts(q_at); }
 
     /**
      * @brief Get Born radii (for diagnostics)

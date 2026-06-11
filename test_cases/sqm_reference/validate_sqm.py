@@ -45,16 +45,20 @@ _COMP_RE = {
 }
 
 
-def run_curcuma(curcuma, xyz, method, quiet, gpu=None, solvent=None, solvent_model="alpb"):
+def run_curcuma(curcuma, xyz, method, quiet, gpu=None, solvent=None, solvent_model="alpb",
+                solvent_epsilon=None):
     # -verbosity 2 surfaces the per-container decomposition; the
     # "Single Point Energy = ..." line is printed unconditionally, so the total
     # gate is unaffected by the verbosity bump.
     cmd = [curcuma, "-sp", xyz, "-method", method, "-verbosity", "2"]
     if solvent:
         # Native implicit solvation. Dotted form because the flat -solvent flag is
-        # ambiguous across providers. solvent_model is a descriptive name ("alpb"/"gbsa")
-        # taken straight from the reference.
+        # ambiguous across providers. solvent_model is a descriptive name
+        # ("alpb"/"gbsa"/"cpcm") taken straight from the reference.
         cmd += ["-xtb.solvent", solvent, "-xtb.solvent_model", solvent_model]
+        # CPCM: pin the exact dielectric the tblite reference used, so keps matches.
+        if solvent_epsilon is not None:
+            cmd += ["-xtb.solvent_epsilon", str(solvent_epsilon)]
     if gpu:
         # GPU path (Claude Generated, GPU port): -gpu cuda routes gfn1/gfn2 to the
         # native xTB GPU backend. With no CUDA device the wrapper falls back to CPU,
@@ -111,12 +115,14 @@ def main():
     e_ref = ref["total_energy"]
     nat = ref["molecule"]["natoms"]
     solvent = ref.get("solvent")                # present => solvated reference
-    solvent_model = ref.get("solvent_model", "alpb")  # "alpb" | "gbsa"
+    solvent_model = ref.get("solvent_model", "alpb")  # "alpb" | "gbsa" | "cpcm"
+    solvent_epsilon = ref.get("solvent_epsilon")      # present for cpcm only
 
     # Size-scaled default tolerance: 1e-4 Eh floor, +1e-5 Eh/atom for accumulation.
     tol = args.tol_energy if args.tol_energy is not None else max(1e-4, nat * 1e-5)
 
-    res = run_curcuma(args.curcuma, args.xyz, native, args.quiet, args.gpu, solvent, solvent_model)
+    res = run_curcuma(args.curcuma, args.xyz, native, args.quiet, args.gpu, solvent,
+                      solvent_model, solvent_epsilon)
     name = ref["molecule"]["name"]
     if res is None:
         print(f"FAIL {name:20s} {native}: native run produced no energy")

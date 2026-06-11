@@ -8,9 +8,10 @@ Curcuma supports implicit solvation models for quantum chemistry calculations:
 
 - **TBLite Interface**: CPCM, GB (Generalized Born), ALPB for GFN methods
 - **Ulysses Interface**: GBSA (Generalized Born) for GFN and MNDO methods
-- **Native GFN1/GFN2**: ⚠️ self-consistent **ALPB** and **GBSA** (June 2026) —
-  AI-implemented, machine-tested vs tblite (≤1e-8 Eh on the validation set), human
-  production testing pending. CPCM not yet implemented natively. See below.
+- **Native GFN1/GFN2**: ⚠️ self-consistent **ALPB**, **GBSA** and **CPCM** (June 2026) —
+  AI-implemented, machine-tested vs tblite. ALPB/GBSA ≤1e-8 Eh; CPCM (faithful ddCOSMO
+  port) reproduces tblite to ~1e-9 for small molecules and ~1e-6 for large polar ones
+  (charge-driven residual, not a CPCM bug). Human production testing pending. See below.
 - **Native GFN-FF**: ⚠️ self-consistent **ALPB** (June 2026, WP5) — the Born reaction
   field couples into the EEQ charge solve (`A_eeq += B`), so the EEQ charges polarize in
   the solvent. Matches **xtb 6.7.1** (`--gfnff --alpb`) to ≤1e-8 Eh (7 mol × 4 solvents,
@@ -33,12 +34,22 @@ classical Still kernel (exactly tblite's ALPB=11/12 vs GBSA=21/22 distinction).
 # Dotted form required (the flat -solvent is ambiguous across providers):
 curcuma -sp mol.xyz -method gfn2 -xtb.solvent water -xtb.solvent_model alpb
 curcuma -sp mol.xyz -method gfn2 -xtb.solvent water -xtb.solvent_model gbsa
+curcuma -sp mol.xyz -method gfn2 -xtb.solvent water -xtb.solvent_model cpcm   # ddCOSMO
+curcuma -sp mol.xyz -method gfn2 -xtb.solvent_model cpcm -xtb.solvent_epsilon 78.36  # explicit eps
 curcuma -opt mol.xyz -method gfn1 -xtb.solvent dmso                          # defaults to alpb
 ```
 
 - `-xtb.solvent <name>`: water, dmso, acetone, chloroform, methanol, … (tblite set)
-- `-xtb.solvent_model`: `alpb` (default when a solvent is given), `gbsa`, `cpcm` (not yet native), `none`.
+- `-xtb.solvent_model`: `alpb` (default when a solvent is given), `gbsa`, `cpcm`, `none`.
   Legacy numeric codes (3=alpb, 2=gbsa, 1=cpcm, 0=none) are still accepted.
+  **CPCM** is a faithful domain-decomposition **ddCOSMO** port of tblite's CPCM
+  (purely electrostatic, no CDS/shift); ε is taken from the named solvent or from an
+  explicit `-xtb.solvent_epsilon`. Validated `ctest -L _cpcm` (56 refs); it matches
+  tblite to ~1e-9 for small molecules and up to ~3e-6 for large polar ones — the
+  residual is charge-driven (native-GFN charges vs tblite), amplified by the
+  grid-sensitive ddCOSMO response, not a CPCM-machinery error. GFN-FF CPCM
+  (`-gfnff.solvent_model cpcm`) couples M into the EEQ solve but has no external
+  reference (xtb GFN-FF uses ALPB) → self-consistency-validated only.
 
 **Validation (machine-tested):** native total energy matches tblite to ≤1e-8 Eh for
 7 molecules × {water, dmso, acetone, chloroform} × {gfn1, gfn2} — for **both** models

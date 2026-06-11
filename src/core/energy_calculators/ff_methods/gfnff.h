@@ -270,9 +270,10 @@ PARAM(solvent, String, "none",
       "post-hoc add-on (the EEQ charges do not yet feel the solvent). Use the dotted "
       "-gfnff.solvent (the flat -solvent is ambiguous across providers).", "Solvation", {})
 PARAM(solvent_model, String, "alpb",
-      "GFN-FF implicit solvation model: 'alpb' (default, P16 Born kernel) or 'gbsa' "
-      "(Still kernel, no shape term). CPCM is not implemented natively. Legacy numeric "
-      "codes (2=gbsa, 3=alpb) are also accepted.", "Solvation", {})
+      "GFN-FF implicit solvation model: 'alpb' (default, P16 Born kernel), 'gbsa' "
+      "(maps to ALPB for GFN-FF) or 'cpcm' (ddCOSMO, electrostatic; no external "
+      "reference, self-consistency-validated only). Legacy numeric codes "
+      "(1=cpcm, 2=gbsa, 3=alpb) are also accepted.", "Solvation", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -2361,12 +2362,14 @@ private:
     // Reference: Fortran gfnff_gdisp0.f90:382-395 - dc6dcn needed for dispersion CN gradient
     mutable std::unique_ptr<D4ParameterGenerator> m_d4_generator;
 
-    // Claude Generated (Mar 2026): ALPB solvation model
-    // Reference: Fortran external/gfnff/src/gbsa/gbsa.f90
-    // Initialized when solvent != "none", called in Calculation() after EEQ charges
-    std::unique_ptr<ALPBSolvation> m_solvation;
+    // Claude Generated (Mar 2026): implicit solvation model (ALPB or CPCM)
+    // Reference: Fortran external/gfnff/src/gbsa/gbsa.f90 (ALPB), tblite cpcm.f90 (CPCM)
+    // Initialized when solvent != "none", called in Calculation() after EEQ charges.
+    // Polymorphic base so GFN-FF can hold either ALPBSolvation or CpcmSolvation;
+    // the self-consistent EEQ coupling uses reactionMatrix() (== Born/CPCM matrix).
+    std::unique_ptr<ImplicitSolvationModel> m_solvation;
     std::string m_solvent = "none";  ///< Solvent name ("none" = gas phase)
-    std::string m_solvent_model_label = "ALPB";  ///< "ALPB" | "GBSA" for logging (WP5)
+    std::string m_solvent_model_label = "ALPB";  ///< "ALPB" | "GBSA" | "CPCM" for logging (WP5)
 
     /**
      * @brief HB/XB dynamic update support for MD simulations

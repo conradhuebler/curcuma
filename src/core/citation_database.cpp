@@ -506,6 +506,21 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        { "cpcm", {
+            "Domain-decomposition COSMO / CPCM continuum solvation (Cances, Maday, Stamm 2013; Lipparini et al. 2013)",
+            "Cances, E.; Maday, Y.; Stamm, B. J. Chem. Phys. 2013, 139, 054111 (DOI: 10.1063/1.4816767)",
+            "cances2013ddcosmo",
+            "@article{cances2013ddcosmo,\n"
+            "  author = {Cances, Eric and Maday, Yvon and Stamm, Benjamin},\n"
+            "  title = {Domain decomposition for implicit solvation models},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2013},\n"
+            "  volume = {139},\n"
+            "  pages = {054111},\n"
+            "  doi = {10.1063/1.4816767}\n"
+            "}"
+        }},
+
         { "lebedev", {
             "Angular Quadrature Grid (Lebedev & Laikov 1999)",
             "Lebedev, V. I.; Laikov, D. N. Doklady Mathematics 1999, 59, 477–481",

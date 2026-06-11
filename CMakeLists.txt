@@ -446,6 +446,8 @@ set(curcuma_core_SRC
         src/core/energy_calculators/ff_methods/ff_workspace_gfnff.cpp
         src/core/energy_calculators/ff_methods/ff_workspace_uff.cpp
         src/core/energy_calculators/ff_methods/alpb_solvation.cpp
+        src/core/solvation/cpcm_dd.cpp
+        src/core/solvation/cpcm_solvation.cpp
         src/core/energy_calculators/ff_methods/eeq_solver.cpp
         src/core/energy_calculators/ff_methods/huckel_solver.cpp
         src/core/energy_calculators/qm_methods/qm_driver.cpp

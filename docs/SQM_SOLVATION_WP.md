@@ -81,7 +81,8 @@
 >   the reference is xtb 6.7.1 (`--gfnff --alpb`), the self-consistent EEQ coupling
 >   (A_eeq += B, what WP5a called "WP5b") is implemented, and the ALPB energy matches
 >   xtb to ≤1e-8 Eh. GBSA remains approximate (params not extracted).
-> - **Remaining**: CPCM (WP3); GPU-solvation test coverage. (GFN-FF GBSA resolved — see below:
+> - **Remaining**: ~~CPCM (WP3)~~ DONE 2026-06-11 (faithful ddCOSMO, see WP3 section);
+   GPU-solvation test coverage. (GFN-FF GBSA resolved — see below:
 >   GFN-FF has no separate GBSA, the request maps to ALPB per the reference.)
 >   Wrapper `tblite-gfn2 -tblite.solvent_model 3` segfaults (pre-existing TBLiteInterface
 >   bug, unrelated; native path unaffected).
@@ -261,18 +262,56 @@ passes; regression ctest green.
 
 ---
 
-## WP3 — Native CPCM (new)
+## ✅ DONE (2026-06-11): WP3 — Native CPCM (ddCOSMO) in GFN1/GFN2/GFN-FF
+> ⚙️ Machine-tested, **not** human production tested. Faithful port, NOT the
+> simplified surface-matrix sketch below (the operator chose the faithful ddCOSMO).
 
-- New `src/core/solvation/cpcm.{h,cpp}` implementing `ImplicitSolvationModel`, ported
-  from `external/tblite/src/tblite/solvation/cpcm.f90` + `cpcm_dd.f90` + `surface.f90`.
-- Molecular surface from the existing Lebedev/SASA machinery (`lebedev_grid.h`,
-  ALPB SASA). Build the surface interaction matrix S; solve `S·q_surf = −f(ε)·V_solute(grid)`;
-  the reaction-field potential at the atoms is the in-SCF `v_at` (self-consistent).
-- Selected via `solvent_model = 1`; only ε needed (`solvent_epsilon`, or auto from name).
-- **Validation:** vs tblite CPCM (WP0.4). CPCM tol may be looser if surface
-  discretization differs.
+- **Faithful ddCOSMO port** (tblite's "CPCM" is domain-decomposition ddCOSMO, not a
+  one-shot surface solve): `src/core/solvation/cpcm_dd.{h,cpp}` is a one-to-one C++
+  port of `external/tblite/src/tblite/solvation/cpcm_dd.f90` (per-atom Lebedev grid,
+  spherical-harmonic basis lmax=6, switch-function cavity, Jacobi/DIIS forward+adjoint
+  solver, `get_deriv` gradient). `src/core/solvation/cpcm_solvation.{h,cpp}`
+  (`CpcmSolvation : ImplicitSolvationModel`) wraps it; Lebedev grids 6..110 added to
+  `lebedev_grid.h`, COSMO radii in `cosmo_radii.h`.
+- **Linear-operator trick → reuse everything:** the ddCOSMO reaction field is LINEAR
+  in the atomic charges, so `update()` assembles the effective symmetric reaction
+  matrix **M** (nat×nat) once per geometry by running the faithful forward+adjoint solve
+  per unit charge (`M(:,j) = tblite get_potential(e_j)`). Then `addPotential` = `M·q`,
+  `reactionMatrix()` = M (GFN-FF couples it into the EEQ solve `A_eeq += M`, exactly
+  like the Born matrix), `deviceBornMatrix()` = M (GPU host path). `energy()` mirrors
+  tblite `get_energy` exactly (forward-only contraction `keps·√4π·Σ σ(0,i)·q_i`); the
+  nuclear gradient ports `get_gradient` (`get_deriv` + the two `efld` contractions).
+- **Selection:** `-xtb.solvent_model cpcm` (or `1`); `-method gfnff -gfnff.solvent_model
+  cpcm`. CPCM is purely electrostatic (no CDS/shift). ε from the named solvent
+  (`get_solvent_data`, water 78.36 / dmso 46.826 / acetone 20.493 / chloroform 4.7113)
+  or explicit `-xtb.solvent_epsilon`. keps = `−0.5(1/ε−1)/(1+0.571412)` (cpcm.f90:139).
+- **Reference harness (WP0.4):** `dump_tblite_reference --model cpcm --epsilon EPS`
+  (tblite C-API `tblite_new_cpcm_solvation_epsilon`); records `solvent_epsilon`;
+  `validate_sqm.py` passes the identical `-xtb.solvent_epsilon` so keps matches
+  bit-for-bit. 56 CPCM refs committed (`<mol>_<meth>_<solv>_cpcm.ref.json`,
+  7 mol × 4 solvents × gfn1/gfn2).
+- **Validation (`ctest -L _cpcm`, 56/56 green at the 1e-5 gate; FD gradient in
+  `test_xtb_solvation_numgrad` + `test_gfnff_numgrad --solvent-model cpcm`):**
+  - **Machinery is correct:** at tblite's 74-point grid the port reproduces tblite to
+    **~1e-9..1e-10 for small molecules** (CH4, NH3). FD gradient is **exact for GFN1
+    (~1e-8)** for all of ALPB/GBSA/CPCM; GFN-FF CPCM FD 6/6.
+  - **Residual is CHARGE-DRIVEN, not a CPCM bug:** GFN1 and GFN2 give DIFFERENT
+    residuals for the same molecule/geometry/ε (caffeine GFN1 2.3e-7 vs GFN2 3.0e-6),
+    so it is inherited from the native-GFN-vs-tblite Mulliken-charge agreement,
+    amplified by the steep (grid-sensitive) ddCOSMO response. Measured: 16/56 ≤1e-8,
+    42/56 ≤1e-7, 54/56 ≤1e-6, 56/56 ≤3e-6.
+  - **Grid-sensitivity is inherent to ddCOSMO at nang=74** (74→110 moves H2O by ~1e-4
+    Eh); this is why a single grid choice cannot give analytic-ALPB-grade 1e-8 on big
+    polar systems. The 1e-5 gate catches gross regressions (sign/factor errors ≫1e-5).
+  - GFN2 FD gradient carries the documented ~1e-4..5e-4 D4-Mulliken-response floor
+    (gas-phase, unrelated to solvation; GFN1 proves the solvation kernel is exact).
+- **NOT tested:** other solvents/ions/metals; large systems (>caffeine); long MD/opt
+  stability; GFN-FF CPCM has **no external reference** (xtb GFN-FF uses ALPB) → it is
+  self-consistency- + FD-gradient-validated only. Human production testing pending.
 
-**Acceptance:** converges; ΔG within agreed tol of tblite CPCM; FD gradient passes.
+### Original sketch (superseded — kept for context)
+> The WP3 spec proposed a lighter one-shot surface-charge solve. The operator chose
+> the faithful ddCOSMO port instead, which matches tblite's actual CPCM implementation.
 
 ---
 

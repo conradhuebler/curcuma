@@ -132,22 +132,28 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "usage: %s <gfn1|gfn2> <in.xyz> [out.json] [--solvent NAME] [--model alpb|gbsa]\n", argv[0]);
         return 1;
     }
-    // Collect positionals + the optional --solvent / --model flags (parse-anywhere).
+    // Collect positionals + the optional --solvent / --model / --epsilon flags.
     std::string solvent;          // empty -> gas phase
-    std::string solv_model = "alpb";  // alpb (default) | gbsa; selects tblite version
+    std::string solv_model = "alpb";  // alpb (default) | gbsa | cpcm; selects the container
+    double cpcm_eps = -1.0;       // dielectric for --model cpcm (required for cpcm)
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--solvent" && i + 1 < argc) { solvent = argv[++i]; }
         else if (a == "--model" && i + 1 < argc) { solv_model = argv[++i]; }
+        else if (a == "--epsilon" && i + 1 < argc) { cpcm_eps = std::atof(argv[++i]); }
         else pos.push_back(a);
     }
     if (pos.size() < 2) {
-        std::fprintf(stderr, "usage: %s <gfn1|gfn2> <in.xyz> [out.json] [--solvent NAME] [--model alpb|gbsa]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <gfn1|gfn2> <in.xyz> [out.json] [--solvent NAME] [--model alpb|gbsa|cpcm] [--epsilon EPS]\n", argv[0]);
         return 1;
     }
-    if (solv_model != "alpb" && solv_model != "gbsa") {
-        std::fprintf(stderr, "error: --model must be 'alpb' or 'gbsa' (got '%s')\n", solv_model.c_str());
+    if (solv_model != "alpb" && solv_model != "gbsa" && solv_model != "cpcm") {
+        std::fprintf(stderr, "error: --model must be 'alpb', 'gbsa' or 'cpcm' (got '%s')\n", solv_model.c_str());
+        return 1;
+    }
+    if (solv_model == "cpcm" && cpcm_eps <= 0.0) {
+        std::fprintf(stderr, "error: --model cpcm requires --epsilon EPS (the solvent dielectric)\n");
         return 1;
     }
     const std::string method_s = pos[0];
@@ -193,15 +199,21 @@ int main(int argc, char** argv)
     // model+method (ALPB(GFN1)=11, ALPB(GFN2)=12, GBSA(GFN1)=21, GBSA(GFN2)=22).
     // refstate: gsolv=1 -> total_shift = gshift only, matching the native target.
     if (!solvent.empty()) {
-        const bool is_gbsa = (solv_model == "gbsa");
-        int version;
-        if (method_s == "gfn1") version = is_gbsa ? 21 : 11;
-        else                    version = is_gbsa ? 22 : 12;
-        const int refstate = 1;  // gsolv
-        std::vector<char> sbuf(solvent.begin(), solvent.end());
-        sbuf.push_back('\0');
-        tblite_container cont =
-            tblite_new_alpb_solvation_solvent(err, mol, sbuf.data(), version, refstate);
+        tblite_container cont = nullptr;
+        if (solv_model == "cpcm") {
+            // CPCM (ddCOSMO): the C-API takes the dielectric directly. Purely
+            // electrostatic (no CDS/shift), so no refstate is involved.
+            cont = tblite_new_cpcm_solvation_epsilon(err, mol, cpcm_eps);
+        } else {
+            const bool is_gbsa = (solv_model == "gbsa");
+            int version;
+            if (method_s == "gfn1") version = is_gbsa ? 21 : 11;
+            else                    version = is_gbsa ? 22 : 12;
+            const int refstate = 1;  // gsolv
+            std::vector<char> sbuf(solvent.begin(), solvent.end());
+            sbuf.push_back('\0');
+            cont = tblite_new_alpb_solvation_solvent(err, mol, sbuf.data(), version, refstate);
+        }
         if (tblite_check_error(err)) {
             std::fprintf(stderr, "tblite %s setup failed for solvent '%s'\n",
                          solv_model.c_str(), solvent.c_str());
@@ -272,6 +284,8 @@ int main(int argc, char** argv)
     if (!solvent.empty()) {
         out["solvent"] = solvent;
         out["solvent_model"] = solv_model;
+        if (solv_model == "cpcm")
+            out["solvent_epsilon"] = cpcm_eps;  // native side reuses the identical eps
     }
 
     json m;

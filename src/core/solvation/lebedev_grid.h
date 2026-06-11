@@ -221,6 +221,155 @@ private:
     }
 };
 
+// ============================================================================
+// tblite-faithful Lebedev-Laikov grid API (Claude Generated, June 2026)
+//
+// Ported one-to-one from external/tblite/src/tblite/mesh/lebedev.f90 for the
+// native CPCM (ddCOSMO) solvation model, which builds a per-atom angular grid.
+// Kept separate from the LebedevGrid class above (used by ALPB/GBSA SASA) so
+// those callers are unaffected. Weights are the raw Lebedev weights (sum = 1),
+// exactly as tblite hands them to new_domain_decomposition.
+// ============================================================================
+
+/// Available Lebedev grid point counts (tblite grid_size, 32 entries).
+inline constexpr int kLebedevGridSize[32] = {
+    6, 14, 26, 38, 50, 74, 86, 110,
+    146, 170, 194, 230, 266, 302, 350, 434,
+    590, 770, 974, 1202, 1454, 1730, 2030, 2354,
+    2702, 3074, 3470, 3890, 4334, 4802, 5294, 5810
+};
+
+namespace lebedev_detail {
+
+// Octahedral point generators (tblite gen_oh1..gen_oh6, exact ordering).
+inline void genOh1(std::vector<LebedevPoint>& g, double v)
+{
+    const double a = 1.0;
+    g.push_back({ a, 0, 0, v}); g.push_back({-a, 0, 0, v});
+    g.push_back({ 0, a, 0, v}); g.push_back({ 0, -a, 0, v});
+    g.push_back({ 0, 0, a, v}); g.push_back({ 0, 0, -a, v});
+}
+inline void genOh2(std::vector<LebedevPoint>& g, double v)
+{
+    const double a = std::sqrt(0.5);
+    g.push_back({0, a, a, v}); g.push_back({0, -a, a, v}); g.push_back({0, a, -a, v}); g.push_back({0, -a, -a, v});
+    g.push_back({a, 0, a, v}); g.push_back({-a, 0, a, v}); g.push_back({a, 0, -a, v}); g.push_back({-a, 0, -a, v});
+    g.push_back({a, a, 0, v}); g.push_back({-a, a, 0, v}); g.push_back({a, -a, 0, v}); g.push_back({-a, -a, 0, v});
+}
+inline void genOh3(std::vector<LebedevPoint>& g, double v)
+{
+    const double a = std::sqrt(1.0 / 3.0);
+    g.push_back({a, a, a, v}); g.push_back({-a, a, a, v}); g.push_back({a, -a, a, v}); g.push_back({-a, -a, a, v});
+    g.push_back({a, a, -a, v}); g.push_back({-a, a, -a, v}); g.push_back({a, -a, -a, v}); g.push_back({-a, -a, -a, v});
+}
+inline void genOh4(std::vector<LebedevPoint>& g, double a, double v)
+{
+    const double b = std::sqrt(1.0 - 2.0 * a * a);
+    g.push_back({a, a, b, v}); g.push_back({-a, a, b, v}); g.push_back({a, -a, b, v}); g.push_back({-a, -a, b, v});
+    g.push_back({a, a, -b, v}); g.push_back({-a, a, -b, v}); g.push_back({a, -a, -b, v}); g.push_back({-a, -a, -b, v});
+    g.push_back({a, b, a, v}); g.push_back({-a, b, a, v}); g.push_back({a, -b, a, v}); g.push_back({-a, -b, a, v});
+    g.push_back({a, b, -a, v}); g.push_back({-a, b, -a, v}); g.push_back({a, -b, -a, v}); g.push_back({-a, -b, -a, v});
+    g.push_back({b, a, a, v}); g.push_back({-b, a, a, v}); g.push_back({b, -a, a, v}); g.push_back({-b, -a, a, v});
+    g.push_back({b, a, -a, v}); g.push_back({-b, a, -a, v}); g.push_back({b, -a, -a, v}); g.push_back({-b, -a, -a, v});
+}
+inline void genOh5(std::vector<LebedevPoint>& g, double a, double v)
+{
+    const double b = std::sqrt(1.0 - a * a);
+    g.push_back({a, b, 0, v}); g.push_back({-a, b, 0, v}); g.push_back({a, -b, 0, v}); g.push_back({-a, -b, 0, v});
+    g.push_back({b, a, 0, v}); g.push_back({-b, a, 0, v}); g.push_back({b, -a, 0, v}); g.push_back({-b, -a, 0, v});
+    g.push_back({a, 0, b, v}); g.push_back({-a, 0, b, v}); g.push_back({a, 0, -b, v}); g.push_back({-a, 0, -b, v});
+    g.push_back({b, 0, a, v}); g.push_back({-b, 0, a, v}); g.push_back({b, 0, -a, v}); g.push_back({-b, 0, -a, v});
+    g.push_back({0, a, b, v}); g.push_back({0, -a, b, v}); g.push_back({0, a, -b, v}); g.push_back({0, -a, -b, v});
+    g.push_back({0, b, a, v}); g.push_back({0, -b, a, v}); g.push_back({0, b, -a, v}); g.push_back({0, -b, -a, v});
+}
+
+} // namespace lebedev_detail
+
+/**
+ * @brief Locate the grid index pos with grid_size[pos] <= val < grid_size[pos+1].
+ *        1-based to match tblite list_bisection. Clamps to [1, 32].
+ */
+inline int lebedevListBisection(int val)
+{
+    const int n = 32;
+    if (val <= kLebedevGridSize[0]) return 1;
+    if (val >= kLebedevGridSize[n - 1]) return n;
+    int lower = 0, current = n + 1;
+    while ((current - lower) > 1) {
+        const int upper = (current + lower) / 2;       // 1-based midpoint
+        if (val >= kLebedevGridSize[upper - 1])
+            lower = upper;
+        else
+            current = upper;
+    }
+    return lower;
+}
+
+/**
+ * @brief Generate the Lebedev grid for the 1-based size index nang_index.
+ *        Implements indices 1..8 (6..110 points), which covers the CPCM default
+ *        (grid_size(6) = 74). Returns an empty grid for unsupported indices.
+ * @param nang_index 1-based index into kLebedevGridSize.
+ * @param ok         [out, optional] set to false if the index is unsupported.
+ */
+inline std::vector<LebedevPoint> lebedevAngularGrid(int nang_index, bool* ok = nullptr)
+{
+    using namespace lebedev_detail;
+    std::vector<LebedevPoint> g;
+    if (ok) *ok = true;
+    switch (nang_index) {
+    case 1: // ld0006
+        genOh1(g, 0.1666666666666667e+0);
+        break;
+    case 2: // ld0014
+        genOh1(g, 0.6666666666666667e-1);
+        genOh3(g, 0.7500000000000000e-1);
+        break;
+    case 3: // ld0026
+        genOh1(g, 0.4761904761904762e-1);
+        genOh2(g, 0.3809523809523810e-1);
+        genOh3(g, 0.3214285714285714e-1);
+        break;
+    case 4: // ld0038
+        genOh1(g, 0.9523809523809524e-2);
+        genOh3(g, 0.3214285714285714e-1);
+        genOh5(g, 0.4597008433809831e+0, 0.2857142857142857e-1);
+        break;
+    case 5: // ld0050
+        genOh1(g, 0.1269841269841270e-1);
+        genOh2(g, 0.2257495590828924e-1);
+        genOh3(g, 0.2109375000000000e-1);
+        genOh4(g, 0.3015113445777636e+0, 0.2017333553791887e-1);
+        break;
+    case 6: // ld0074
+        genOh1(g, 0.5130671797338464e-3);
+        genOh2(g, 0.1660406956574204e-1);
+        genOh3(g, -0.2958603896103896e-1);
+        genOh4(g, 0.4803844614152614e+0, 0.2657620708215946e-1);
+        genOh5(g, 0.3207726489807764e+0, 0.1652217099371571e-1);
+        break;
+    case 7: // ld0086
+        genOh1(g, 0.1154401154401154e-1);
+        genOh3(g, 0.1194390908585628e-1);
+        genOh4(g, 0.3696028464541502e+0, 0.1111055571060340e-1);
+        genOh4(g, 0.6943540066026664e+0, 0.1187650129453714e-1);
+        genOh5(g, 0.3742430390903412e+0, 0.1181230374690448e-1);
+        break;
+    case 8: // ld0110
+        genOh1(g, 0.3828270494937162e-2);
+        genOh3(g, 0.9793737512487512e-2);
+        genOh4(g, 0.1851156353447362e+0, 0.8211737283191111e-2);
+        genOh4(g, 0.6904210483822922e+0, 0.9942814891178103e-2);
+        genOh4(g, 0.3956894730559419e+0, 0.9595471336070963e-2);
+        genOh5(g, 0.4783690288121502e+0, 0.9694996361663028e-2);
+        break;
+    default:
+        if (ok) *ok = false;
+        break;
+    }
+    return g;
+}
+
 } // namespace Solvation
 } // namespace Curcuma
 

@@ -164,11 +164,16 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 ### 3. Solvation Models (Implicit Solvent)
 - ✅ **TBLite Solvation** - CPCM, GB (Generalized Born), ALPB for GFN methods
 - ✅ **Ulysses Solvation** - GBSA (Generalized Born + SA) for GFN/MNDO methods
-- ⚠️ **Native GFN1/GFN2 ALPB + GBSA** (June 2026, AI/machine-tested) - self-consistent
+- ⚠️ **Native GFN1/GFN2 ALPB + GBSA + CPCM** (June 2026, AI/machine-tested) - self-consistent
   ALPB (`-xtb.solvent_model alpb`, P16 kernel) and GBSA (`-xtb.solvent_model gbsa`, Still kernel)
   in the native xTB SCF, matching tblite total ΔG (Born + CDS + shift; CM5 for gfn1) to
   ≤1e-8 Eh on the validation set (CPU + GPU); `-method gfn2 -xtb.solvent water -xtb.solvent_model gbsa`
-  (legacy numeric codes 3/2 still accepted). CPCM native solvation still pending.
+  (legacy numeric codes 3/2/1 still accepted). **CPCM** (`-xtb.solvent_model cpcm`) is a faithful
+  domain-decomposition **ddCOSMO** port of tblite's CPCM (purely electrostatic; assembled once per
+  geometry as an effective reaction matrix M so it reuses the in-SCF potential / GFN-FF-EEQ / GPU
+  paths) — matches tblite ~1e-9 on small molecules, ~1e-6 on large polar ones (charge-driven
+  residual, not a port bug; `ctest -L _cpcm` 56/56, FD gradient exact for gfn1); also wired into
+  native GFN-FF (`-gfnff.solvent_model cpcm`, self-consistency-validated only).
   See [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md)
 - ⚠️ **Native GFN-FF ALPB** (June 2026, AI/machine-tested) - self-consistent: the Born
   reaction field couples into the EEQ solve (`A_eeq += B`), so charges polarize in the solvent.

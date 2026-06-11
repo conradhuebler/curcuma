@@ -310,6 +310,42 @@ if(Python3_Interpreter_FOUND)
         endforeach()
     endforeach()
 
+    # ── Native CPCM (ddCOSMO) solvation validation (Claude Generated, WP3, June 2026) ──
+    # Faithful port of tblite's CPCM (cpcm.f90 + cpcm_dd.f90) into the native GFN1/GFN2
+    # SCF. References reference_data/<mol>_<meth>_<solv>_cpcm.ref.json (dump_tblite_reference
+    # --model cpcm --epsilon EPS; the eps is recorded as "solvent_epsilon" and validate_sqm.py
+    # passes the identical -xtb.solvent_epsilon so keps matches bit-for-bit). Labels:
+    # gfn{1,2}_cpcm (run via `ctest -L _cpcm`).
+    #
+    # HONEST GATE (1e-5 Eh): unlike the analytic ALPB/GBSA (<=1e-8), CPCM is an ITERATIVE
+    # surface-charge model and is strongly grid-sensitive at the tblite-default 74-point
+    # Lebedev grid (74->110 moves H2O by ~1e-4 Eh). At the SAME grid the port reproduces
+    # tblite to ~1e-9..1e-10 for small molecules (CH4, NH3), confirming the machinery. The
+    # residual GROWS with polarity/size (GFN2 caffeine ~3e-6) and is CHARGE-DRIVEN, not a
+    # CPCM bug: GFN1 and GFN2 give DIFFERENT residuals for the same molecule/geometry/eps
+    # (caffeine GFN1 2.3e-7 vs GFN2 3.0e-6), so it is inherited from the native-GFN-vs-tblite
+    # Mulliken-charge agreement amplified by the steep ddCOSMO response. Measured 2026-06-11:
+    # 16/56 <=1e-8, 42/56 <=1e-7, 54/56 <=1e-6, 56/56 <=3e-6. The 1e-5 gate catches gross
+    # regressions (sign/factor errors are >>1e-5); the per-molecule residuals are the real
+    # accuracy. See docs/SQM_SOLVATION_WP.md (WP3).
+    set(_SQM_CPCM_TOL 1e-5)
+    foreach(_meth gfn1 gfn2)
+        foreach(_mol ${_SQM_SOLV_MOLS})
+            foreach(_solv ${_SQM_SOLV_SOLVENTS})
+                set(_ref ${_SQM_VAL_REF}/${_mol}_${_meth}_${_solv}_cpcm.ref.json)
+                if(EXISTS ${_ref})
+                    add_test(NAME sqm_cpcm_${_mol}_${_meth}_${_solv}
+                        COMMAND ${Python3_EXECUTABLE} ${_SQM_VAL_PY}
+                            --curcuma $<TARGET_FILE:curcuma> --quiet --tol-energy ${_SQM_CPCM_TOL}
+                            --ref ${_ref}
+                            --xyz ${_SQM_VAL_MOL}/${_mol}.xyz)
+                    set_tests_properties(sqm_cpcm_${_mol}_${_meth}_${_solv}
+                        PROPERTIES TIMEOUT 120 LABELS "${_meth}_cpcm")
+                endif()
+            endforeach()
+        endforeach()
+    endforeach()
+
     # ── GFN-FF self-consistent ALPB solvation validation (Claude Generated, WP5, June 2026) ──
     # The self-consistent EEQ<->ALPB coupling (A_eeq += Born matrix, gfnff_engrad.F90:1346-1350)
     # makes native GFN-FF + ALPB match xtb 6.7.1 (--gfnff --alpb SOLVENT) to <=1e-8 Eh.
