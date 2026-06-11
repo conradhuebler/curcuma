@@ -73,6 +73,15 @@ bool ConfSearch::Initialise()
 void ConfSearch::start()
 {
     const std::string p = Basename();
+
+    // Claude Generated (Jun 2026): resolve the restart flag. "restart" is a registered PARAM of the
+    // confscan module, and ConfSearch is static-JSON (not in the registry), so the flat -restart flag
+    // is auto-routed to controller["confscan"]. Honor it from there (and -confsearch.restart via
+    // m_defaults, already read in LoadControlJson) so plain -restart enables ConfSearch checkpoints.
+    if (m_controller.contains("confscan") && m_controller["confscan"].is_object()
+        && m_controller["confscan"].contains("restart") && !m_controller["confscan"]["restart"].is_null())
+        m_do_restart = m_controller["confscan"].value("restart", m_do_restart);
+
     nlohmann::json md = ParameterRegistry::getInstance().getDefaultJson("simplemd");
 
     // Forward user-specified parameters from the ConfSearch controller to the MD config.
@@ -103,7 +112,7 @@ void ConfSearch::start()
     }
 
     md["unique"] = true;
-    md["method"] = m_method;
+    md["method"] = m_md_method; // MD exploration runs at the (cheap) md_method
     md["rmsd"] = m_rmsd;
     // When ConfSearch itself runs multiple cycles in parallel (m_threads > 1),
     // each individual MD simulation should run single-threaded to avoid nested
@@ -144,7 +153,7 @@ void ConfSearch::start()
         md["rmsd_mtd"] = true;
 
     // Log ConfSearch configuration (visible at verbosity >= 1)
-    CurcumaLogger::result_fmt("ConfSearch: Method={}, Thermostat={}, Threads={}", m_method, m_thermostat, m_threads);
+    CurcumaLogger::result_fmt("ConfSearch: MD method={}, Opt method={}, Thermostat={}, Threads={}", m_md_method, m_opt_method, m_thermostat, m_threads);
     CurcumaLogger::result_fmt("ConfSearch: Temperature={}K -> {}K, step={}K", m_startT, m_endT, m_deltaT);
     CurcumaLogger::result_fmt("ConfSearch: Repetitions={}, RMSD threshold={} A, Energy window={} kJ/mol, Seed rank={}", m_repeat, m_rmsd, m_energy_window, m_seed_rank);
     // Debug: log full MD parameter set for diagnosing dynamics issues
@@ -197,18 +206,43 @@ void ConfSearch::start()
         CurcumaLogger::result("ConfSearch: RMSD-MTD Disabled");
     }
 
-    // Optimise all input structures before any MD run.
+    // Claude Generated (Jun 2026): restart. Try to resume from a checkpoint in the start directory.
+    // On a successful resume we restore the search state and SKIP the pre-optimisation below.
+    bool resumed = false;
+    int pending_entry = 0; // entry phase for the FIRST resumed cycle (0=md, 1=post_md); reset to 0 after
+    if (m_do_restart && loadCheckpoint()) {
+        resumed = true;
+        pending_entry = (m_restart.entry_phase >= 1) ? 1 : 0; // v1: only md / post_md resume granularity
+        m_elements = m_restart.elements;
+        m_topo_ref = m_restart.topo_ref;
+        m_topo_matrix = m_topo_ref.DistanceMatrix().second;
+        m_global_min = m_restart.global_min;
+        m_initial_energy = m_restart.initial_energy;
+        m_best_energy = m_restart.best_energy;
+        m_permutation_cache = m_restart.permutations;
+        for (auto* mol : m_in_stack) delete mol;
+        m_in_stack.clear();
+        for (const auto& mm : m_restart.seeds)
+            m_in_stack.push_back(new Molecule(mm));
+        CurcumaLogger::header("=== ConfSearch: RESUMING from checkpoint ===");
+        CurcumaLogger::result_fmt("ConfSearch: resume T={}K, {} cycles done, {} bias structures, {} seeds, {} cumulative conformers",
+            static_cast<int>(m_restart.next_T), m_restart.temperature_cycle,
+            static_cast<int>(m_restart.bias.size()), static_cast<int>(m_in_stack.size()),
+            static_cast<int>(m_restart.cumulative.size()));
+    }
+
+    // Optimise all input structures before any MD run (skipped on resume).
     // m_topo_matrix is updated from the first optimised structure so Phase 4
     // topology checks compare against the relaxed geometry, not the raw input.
-    CurcumaLogger::header("=== ConfSearch: Initial Geometry Optimisation ===");
-    {
+    if (!resumed) {
+        CurcumaLogger::header("=== ConfSearch: Initial Geometry Optimisation ===");
         bool first = true;
         for (auto* mol : m_in_stack) {
             if (first) { mol->writeXYZFile(outputPath(p + ".input.xyz")); first = false; }
             else          mol->appendXYZFile(outputPath(p + ".input.xyz"));
         }
         nlohmann::json opt_init;
-        opt_init["method"] = m_method;
+        opt_init["method"] = m_md_method; // pre-optimization at md_method ("die md-methode macht die voroptimierung")
         opt_init["threads"] = m_threads;
         if (md.contains("gpu") && !md["gpu"].is_null())
             opt_init["gpu"] = md["gpu"];
@@ -222,8 +256,11 @@ void ConfSearch::start()
             if (mol.AtomCount() > 0)
                 m_in_stack.push_back(new Molecule(mol));
         }
-        if (!m_in_stack.empty())
+        if (!m_in_stack.empty()) {
             m_topo_matrix = m_in_stack[0]->DistanceMatrix().second;
+            m_topo_ref = *m_in_stack[0];           // reference structure for restart topology
+            m_elements = m_in_stack[0]->Atoms();   // shared atomic-number list for checkpoint frames
+        }
         CurcumaLogger::result_fmt("ConfSearch: {} input structures optimised", m_in_stack.size());
     }
 
@@ -232,18 +269,27 @@ void ConfSearch::start()
     bool use_shared_pool = md.value("rmsd_mtd", false);
     if (use_shared_pool) {
         m_bias_pool = new SharedBiasPool();
+        if (resumed && !m_restart.bias.empty()) {
+            m_bias_pool->restoreStructures(m_restart.bias); // preserves index/counter exactly
+            CurcumaLogger::result_fmt("ConfSearch: restored {} bias structures into the shared pool", m_bias_pool->biasStructureCount());
+        }
         CurcumaLogger::success("Shared bias pool: Active (cross-worker bias sharing enabled)");
     }
 
     // Cumulative output: all accepted conformers across all temperature cycles.
     // The structures are already optimised, so the file is named ".cumulative.opt.xyz"
     // to match PerformFilter's "<f>.opt.xyz" convention for the final ConfScan below.
-    const std::string cumulative_file = outputPath(p + ".cumulative.opt.xyz");
-    std::ofstream(cumulative_file).close();
+    m_cumulative_file = outputPath(p + ".cumulative.opt.xyz");
+    const std::string& cumulative_file = m_cumulative_file; // alias for the existing in-loop appends
+    if (resumed)
+        writeMolVectorToFile(m_restart.cumulative, m_cumulative_file); // rebuild in the new BMT dir
+    else
+        std::ofstream(m_cumulative_file).close();
 
     // Energy reference: cycle 1's best sets the baseline; best_energy tracks the running minimum.
-    double initial_energy = std::numeric_limits<double>::infinity();
-    double best_energy = std::numeric_limits<double>::infinity();
+    // Bound to members so writeCheckpoint() can persist them (restored above on resume).
+    double& initial_energy = m_initial_energy;
+    double& best_energy = m_best_energy;
 
     // Claude Generated (Jun 2026): baseline RATTLE setting (whatever the user/registry chose).
     // Hot cycles override it with rattle_hot_mode; cooler cycles restore this baseline.
@@ -257,9 +303,14 @@ void ConfSearch::start()
     for (auto* mol : m_in_stack)
         initial_seeds.push_back(new Molecule(*mol));
 
-    int temperature_cycle = 0;
-    for (m_currentT = m_startT; m_currentT >= m_endT; m_currentT -= m_deltaT) {
+    // On resume, continue the temperature schedule from the checkpoint; otherwise start at startT.
+    int temperature_cycle = resumed ? m_restart.temperature_cycle : 0;
+    const double loop_start_T = resumed ? m_restart.next_T : m_startT;
+    bool stop_requested = false; // set when a 'stop' file is seen at a checkpoint boundary
+    for (m_currentT = loop_start_T; m_currentT >= m_endT; m_currentT -= m_deltaT) {
         temperature_cycle++;
+        const int entry = pending_entry; // 0 = run MD; 1 = MD already done (resume), skip it
+        pending_entry = 0;               // only the first resumed cycle re-enters mid-way
         // Verbosity is scoped by the CurcumaMethod base (ctor captures, dtor restores), so each
         // sub-phase below (Opt/MD/ConfScan) restores this level on its own — no re-assert needed.
         CurcumaLogger::header("=== ConfSearch Temperature Cycle " + std::to_string(temperature_cycle)
@@ -293,53 +344,86 @@ void ConfSearch::start()
         // Cross-temperature: log pool statistics before MD phase
         const bool in_stack_empty_before_md = m_in_stack.empty();
         const std::size_t bias_pool_size_before_md = m_bias_pool ? m_bias_pool->biasStructureCount() : 0;
-        if (m_bias_pool) {
-            CurcumaLogger::result_fmt("ConfSearch: Bias pool has {} structures before T={}K cycle",
-                bias_pool_size_before_md, m_currentT);
-        }
+        bool no_new_bias_structures = false;
+        if (entry <= 0) {
+            if (m_bias_pool) {
+                CurcumaLogger::result_fmt("ConfSearch: Bias pool has {} structures before T={}K cycle",
+                    bias_pool_size_before_md, m_currentT);
+            }
 
 #ifdef CURCUMA_DEBUG
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("MD Parameters:");
-            CurcumaLogger::param_table(md, "Molecular Dynamics Settings");
-        }
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info("MD Parameters:");
+                CurcumaLogger::param_table(md, "Molecular Dynamics Settings");
+            }
 #endif
-        // std::vector<Molecule*> uniques;
-        // Claude Generated (Jun 2026): expose the accumulated symmetry permutations to the MTD
-        // bias for this cycle (empty until the first ConfScan -> identity-only, unchanged).
-        if (m_bias_pool && m_mtd_permutation && !m_permutation_cache.empty()) {
-            m_bias_pool->setPermutations(m_permutation_cache);
-            CurcumaLogger::result_fmt("ConfSearch: {} symmetry permutation(s) active in RMSD-MTD bias (smooth sum-over-images)",
-                static_cast<int>(m_permutation_cache.size()));
-        }
-        PerformMolecularDynamics(m_in_stack, md);
+            // Claude Generated (Jun 2026): expose the accumulated symmetry permutations to the MTD
+            // bias for this cycle (empty until the first ConfScan -> identity-only, unchanged).
+            if (m_bias_pool && m_mtd_permutation && !m_permutation_cache.empty()) {
+                m_bias_pool->setPermutations(m_permutation_cache);
+                CurcumaLogger::result_fmt("ConfSearch: {} symmetry permutation(s) active in RMSD-MTD bias (smooth sum-over-images)",
+                    static_cast<int>(m_permutation_cache.size()));
+            }
+            PerformMolecularDynamics(m_in_stack, md);
 
-        // Cross-temperature: log pool statistics after MD phase and prune
-        if (m_bias_pool) {
-            CurcumaLogger::result_fmt("ConfSearch: Bias pool has {} structures after T={}K MD",
-                m_bias_pool->biasStructureCount(), m_currentT);
-            // Prune structures with very low counter (rarely visited regions)
-            // Keep at least 2 structures to maintain bias coverage
-            if (m_bias_pool->biasStructureCount() > 2) {
-                m_bias_pool->pruneByCounter(1);
-                CurcumaLogger::result_fmt("ConfSearch: Bias pool pruned to {} structures",
-                    m_bias_pool->biasStructureCount());
+            // Cross-temperature: log pool statistics after MD phase and prune
+            if (m_bias_pool) {
+                CurcumaLogger::result_fmt("ConfSearch: Bias pool has {} structures after T={}K MD",
+                    m_bias_pool->biasStructureCount(), m_currentT);
+                // Prune structures with very low counter (rarely visited regions)
+                // Keep at least 2 structures to maintain bias coverage
+                if (m_bias_pool->biasStructureCount() > 2) {
+                    m_bias_pool->pruneByCounter(1);
+                    CurcumaLogger::result_fmt("ConfSearch: Bias pool pruned to {} structures",
+                        m_bias_pool->biasStructureCount());
+                }
+            }
+            const std::size_t bias_pool_size_after_md = m_bias_pool ? m_bias_pool->biasStructureCount() : 0;
+            no_new_bias_structures = in_stack_empty_before_md
+                && (bias_pool_size_after_md == bias_pool_size_before_md);
+
+            // Within-cycle checkpoint (Claude Generated, Jun 2026): the MD exploration + grown bias
+            // pool are now persisted, so an interrupt during the optimisation phases below does not
+            // lose them. next_T = current T, so a resume re-enters THIS cycle at the post-MD phase.
+            writeCheckpoint("post_md", m_currentT, temperature_cycle - 1);
+            if (CheckStop()) {
+                CurcumaLogger::warn("ConfSearch: 'stop' file detected after MD -- checkpoint written, halting.");
+                stop_requested = true;
+                break;
+            }
+        } else {
+            // RESUME (post_md): the MD for this cycle already ran in the interrupted session and the
+            // grown bias pool was restored above. Re-export its raw MD snapshots so Phase 2 finds its
+            // input file in the new BMT dir, then fall through to the optimisation phases.
+            CurcumaLogger::result_fmt("ConfSearch: resume -- skipping MD for T={}K (bias pool restored: {} structures)",
+                m_currentT, m_bias_pool ? m_bias_pool->biasStructureCount() : 0);
+            if (m_bias_pool && !m_in_stack.empty()) {
+                auto snapshot = m_bias_pool->snapshot();
+                const Molecule& ref_mol = *m_in_stack[0];
+                const std::string bias_path = outputPath(p + ".bias.xyz");
+                bool first = true;
+                for (const auto& bs : snapshot) {
+                    if (bs.persistent)
+                        continue; // only raw MD snapshots are optimised in Phase 2 (matches PerformMolecularDynamics)
+                    Molecule mol(ref_mol);
+                    mol.setGeometry(bs.geometry);
+                    mol.setName("bias_" + std::to_string(bs.index));
+                    if (first) { mol.writeXYZFile(bias_path); first = false; }
+                    else          mol.appendXYZFile(bias_path);
+                }
+                if (first)
+                    std::ofstream(bias_path).close(); // no raw snapshots -> empty input
             }
         }
 
         CurcumaLogger::result("ConfSearch: === Phase 2: Geometry Optimisation of Bias Structures ===");
-        // Skip Phase 2 when no new MD ran (empty in_stack going in) and the bias pool
-        // did not grow. Re-optimising the same stale bias structures would produce the
-        // same topo/energy rejections and waste the entire remaining temperature schedule.
-        const std::size_t bias_pool_size_after_md = m_bias_pool ? m_bias_pool->biasStructureCount() : 0;
-        const bool no_new_bias_structures = in_stack_empty_before_md
-            && (bias_pool_size_after_md == bias_pool_size_before_md);
+        // Skip Phase 2 when no new MD ran (empty in_stack going in) and the bias pool did not grow.
         if (no_new_bias_structures) {
             CurcumaLogger::warn_fmt("ConfSearch: T={}K -- no new MD runs and bias pool unchanged -- skipping Phase 2/3.",
                 m_currentT);
         } else {
             nlohmann::json opt;
-            opt["method"] = m_method;
+            opt["method"] = m_md_method; // fast per-cycle optimization at md_method
             // Single-threaded per optimization when ConfSearch parallelizes externally
             opt["threads"] = (m_threads > 1) ? 1 : m_threads;
             if (md.contains("gpu") && !md["gpu"].is_null())
@@ -365,7 +449,7 @@ void ConfSearch::start()
             scan["fewerFile"] = true;
             // Single-threaded per ConfScan when ConfSearch parallelizes externally
             scan["threads"] = (m_threads > 1) ? 1 : m_threads;
-            scan["energy_method"] = m_method;
+            scan["energy_method"] = m_md_method; // "filter between": dedup at md level before the accurate re-opt
             scan["max_energy"] = m_energy_window;
             if (md.contains("gpu") && !md["gpu"].is_null())
                 scan["gpu"] = md["gpu"];
@@ -384,14 +468,47 @@ void ConfSearch::start()
             CalibrateBias(p, md);
         }
 
+        // Phase 3b (Claude Generated, Jun 2026): high-level re-optimization at opt_method.
+        // The md-level optimize+filter above ("filter between both optimisations") has reduced
+        // the per-cycle set, so the accurate method only runs on the deduplicated survivors.
+        // Skipped when opt_method == md_method, so a single-method run is unchanged and pays no
+        // extra optimization. The output (".bias.opt.accepted.opt.xyz") is consumed by the
+        // REFINEMENT side of Phase 4 (cumulative pool + bias); the EXPLORATION side keeps using
+        // the md_method file -- the two PES are never mixed (see Phase 4).
+        if (!no_new_bias_structures && m_opt_method != m_md_method) {
+            CurcumaLogger::result("ConfSearch: === Phase 3b: High-Level Re-Optimisation (" + m_opt_method + ") ===");
+            nlohmann::json opt_hi;
+            opt_hi["method"] = m_opt_method;
+            opt_hi["threads"] = (m_threads > 1) ? 1 : m_threads;
+            if (md.contains("gpu") && !md["gpu"].is_null())
+                opt_hi["gpu"] = md["gpu"];
+            // PerformOptimisation reads "<f>.xyz" and writes "<f>.opt.xyz".
+            PerformOptimisation(p + ".bias.opt.accepted", opt_hi);
+            int hi_count = 0;
+            {
+                FileIterator hi_file(outputPath(p + ".bias.opt.accepted.opt.xyz"));
+                while (!hi_file.AtEnd()) { hi_file.Next(); hi_count++; }
+            }
+            CurcumaLogger::result_fmt("ConfSearch: High-level re-optimisation complete. {} structures re-optimised at {}.",
+                hi_count, m_opt_method);
+        }
+
         CurcumaLogger::result("ConfSearch: === Phase 4: Energy Window and Topology Filter ===");
         for (auto* m : m_in_stack) delete m;
         m_in_stack.clear();
-        double lowest_energy = std::numeric_limits<double>::infinity();
+        // EXPLORATION side stays strictly on the md_method (gfnff) PES: seed selection, the
+        // exploration global minimum and the bias all read the md_method minima. A region
+        // explored by gfnff must never be discarded because opt_method (a different PES, e.g.
+        // r2scan) ranks it higher. The opt_method structures are handled in the refinement step
+        // below and only feed the FINAL ranking + an extra bias geometry -- their energies are
+        // never compared to md_method energies.
+        const bool dual_method = (m_opt_method != m_md_method);
+        const std::string md_accepted = outputPath(p + ".bias.opt.accepted.xyz");
+        double lowest_energy = std::numeric_limits<double>::infinity(); // md_method (exploration)
         int accepted = 0, rejected_topo = 0, rejected_energy = 0;
         std::vector<Molecule*> candidates;
         if (!no_new_bias_structures) {
-            FileIterator file(outputPath(p + ".bias.opt.accepted.xyz"));
+            FileIterator file(md_accepted);
             while (!file.AtEnd()) {
                 Molecule* mol = new Molecule(file.Next());
                 // Topology check: compare bond connectivity (0/1 matrix) against reference.
@@ -456,13 +573,17 @@ void ConfSearch::start()
         std::vector<Molecule*> window_seeds;
         std::vector<BiasStructure> feedback;
         for (auto* mol : candidates) {
-            if ((mol->Energy() - lowest_energy) * 2625.5 < m_energy_window)
+            // Cumulative output only when single-method: then md_method IS the ranking level.
+            // In dual mode the cumulative pool is filled with the opt_method structures below,
+            // so the final ranking never mixes the two PES.
+            if (!dual_method && (mol->Energy() - lowest_energy) * 2625.5 < m_energy_window)
                 mol->appendXYZFile(cumulative_file);
 
+            // md_method minimum -> bias pool (drives the gfnff MD next cycle).
             if (m_opt_feedback_bias && m_bias_pool) {
                 BiasStructure bs;
                 bs.geometry = mol->getGeometry();  // full-atom, Angstrom (same units as the pool)
-                bs.energy = mol->Energy();
+                bs.energy = mol->Energy();          // md_method energy (metadata only, never in the force)
                 bs.counter = m_opt_feedback_height;  // hill height W = k*counter
                 bs.temperature = m_currentT;
                 bs.persistent = true;                // never pruned: represents a real basin
@@ -499,6 +620,50 @@ void ConfSearch::start()
             m_in_stack.push_back(mol);
             accepted++;
         }
+
+        // REFINEMENT side (dual-method only): the opt_method (e.g. gfn2/r2scan) re-optimised
+        // structures fill the cumulative pool for the FINAL ranking and add their geometry to the
+        // bias pool as a second, independent minimum. Their energies live on the opt_method PES
+        // and are NEVER compared to md_method energies -- the cumulative window here is relative
+        // to THIS cycle's lowest opt_method energy (same PES), and the next-cycle seeds were
+        // already chosen above purely from md_method energies. So a gfnff-explored basin is kept
+        // even if opt_method finds it less stable.
+        if (dual_method && !no_new_bias_structures) {
+            std::vector<Molecule*> opt_candidates;
+            double opt_lowest = std::numeric_limits<double>::infinity();
+            int opt_rejected_topo = 0;
+            FileIterator ofile(outputPath(p + ".bias.opt.accepted.opt.xyz"));
+            while (!ofile.AtEnd()) {
+                Molecule* mol = new Molecule(ofile.Next());
+                auto topo_cur = mol->DistanceMatrix().second;
+                if ((m_topo_matrix - topo_cur).cwiseAbs().sum() > 1e-4) {
+                    opt_rejected_topo++;
+                    delete mol;
+                    continue;
+                }
+                opt_candidates.push_back(mol);
+                opt_lowest = std::min(opt_lowest, mol->Energy());
+            }
+            for (auto* mol : opt_candidates) {
+                if ((mol->Energy() - opt_lowest) * 2625.5 < m_energy_window)
+                    mol->appendXYZFile(cumulative_file);
+                if (m_opt_feedback_bias && m_bias_pool) {
+                    BiasStructure bs;
+                    bs.geometry = mol->getGeometry();
+                    bs.energy = mol->Energy();   // opt_method energy (metadata only, never in the force)
+                    bs.counter = m_opt_feedback_height;
+                    bs.temperature = m_currentT;
+                    bs.persistent = true;
+                    feedback.push_back(std::move(bs));
+                }
+                delete mol;
+            }
+            CurcumaLogger::result_fmt("ConfSearch: opt_method ({}) refinement: {} structures -> cumulative + bias, {} rejected (topo). Energies on the {} PES (not compared to {}).",
+                m_opt_method, static_cast<int>(opt_candidates.size()), opt_rejected_topo, m_opt_method, m_md_method);
+            if (opt_lowest < std::numeric_limits<double>::infinity())
+                CurcumaLogger::result_fmt("ConfSearch: cycle lowest {} energy = {:.6f} Eh", m_opt_method, opt_lowest);
+        }
+
         if (!feedback.empty()) {
             m_bias_pool->depositBatch(feedback);
             if (m_opt_feedback_prune_snapshots) {
@@ -520,20 +685,22 @@ void ConfSearch::start()
                 eff_seed_window, m_global_min);
 
         // Energy tracking: cycle 1 sets the initial reference; subsequent cycles compare against both.
+        // This is the EXPLORATION (md_method) energy progression -- it narrates the gfnff search and
+        // is intentionally NOT the opt_method ranking (logged separately above / in the final stats).
         if (temperature_cycle == 1) {
             initial_energy = lowest_energy;
             best_energy = lowest_energy;
-            CurcumaLogger::result_fmt("ConfSearch: Initial best energy: {:.6f} Eh", initial_energy);
+            CurcumaLogger::result_fmt("ConfSearch: Initial best ({}) energy: {:.6f} Eh", m_md_method, initial_energy);
         } else if (lowest_energy < std::numeric_limits<double>::infinity()) {
             double delta_best = (best_energy - lowest_energy) * 2625.5;    // >0 = improvement vs. last best
             double delta_initial = (initial_energy - lowest_energy) * 2625.5; // >0 = improvement vs. start
             if (lowest_energy < best_energy) {
-                CurcumaLogger::success_fmt("ConfSearch: New best! {:.6f} Eh (+{:.2f} kJ/mol vs. prev best {:.6f} Eh, +{:.2f} kJ/mol vs. initial {:.6f} Eh)",
-                    lowest_energy, delta_best, best_energy, delta_initial, initial_energy);
+                CurcumaLogger::success_fmt("ConfSearch: New best ({})! {:.6f} Eh (+{:.2f} kJ/mol vs. prev best {:.6f} Eh, +{:.2f} kJ/mol vs. initial {:.6f} Eh)",
+                    m_md_method, lowest_energy, delta_best, best_energy, delta_initial, initial_energy);
                 best_energy = lowest_energy;
             } else {
-                CurcumaLogger::result_fmt("ConfSearch: No new best this cycle: lowest {:.6f} Eh (best still {:.6f} Eh, {:.2f} kJ/mol vs. initial {:.6f} Eh)",
-                    lowest_energy, best_energy, delta_initial, initial_energy);
+                CurcumaLogger::result_fmt("ConfSearch: No new best this cycle ({}): lowest {:.6f} Eh (best still {:.6f} Eh, {:.2f} kJ/mol vs. initial {:.6f} Eh)",
+                    m_md_method, lowest_energy, best_energy, delta_initial, initial_energy);
             }
         }
 
@@ -551,11 +718,32 @@ void ConfSearch::start()
                 m_in_stack.push_back(new Molecule(*mol));
         }
 
+        // End-of-cycle checkpoint (Claude Generated, Jun 2026): the cycle is complete -- cumulative
+        // pool, seeds, energies and the bias pool are all final for this T. next_T points at the
+        // next (lower) temperature, so a resume starts the following cycle fresh.
+        writeCheckpoint("post_cycle", m_currentT - m_deltaT, temperature_cycle);
+        if (CheckStop()) {
+            CurcumaLogger::warn("ConfSearch: 'stop' file detected after cycle -- checkpoint written, halting.");
+            stop_requested = true;
+            break;
+        }
+
         CurcumaLogger::header("=== End Temperature Cycle T = " + std::to_string(static_cast<int>(m_currentT)) + " K ===");
     }  // end temperature loop
 
     for (auto* mol : initial_seeds) delete mol;
     initial_seeds.clear();
+
+    // Graceful stop: a 'stop' file was seen at a checkpoint boundary. The full state is in the
+    // restart file (start dir + BMT dir); resume with -restart. Skip the final dedup (the search
+    // is incomplete) and return cleanly.
+    if (stop_requested) {
+        CurcumaLogger::success_fmt("ConfSearch: halted by 'stop' file -- resume with: curcuma -confsearch <input> -restart  (state in {})",
+            restartFileName());
+        for (auto* mol : m_in_stack) delete mol;
+        m_in_stack.clear();
+        return;
+    }
 
     // Final deduplication pass over all conformers collected across all temperature cycles.
     CurcumaLogger::header("=== ConfSearch: Final Deduplication Pass ===");
@@ -577,7 +765,7 @@ void ConfSearch::start()
         final_scan["rmsdmethod"] = "inertia";
         final_scan["fewerFile"] = true;
         final_scan["threads"] = m_threads;
-        final_scan["energy_method"] = m_method;
+        final_scan["energy_method"] = m_opt_method; // final ranking at the accurate level
         final_scan["max_energy"] = m_energy_window;
         PerformFilter(p + ".cumulative", final_scan);
         CurcumaLogger::success_fmt("ConfSearch: Final result in {}.cumulative.opt.accepted.xyz", p);
@@ -993,15 +1181,239 @@ void ConfSearch::CalibrateBias(const std::string& p, nlohmann::json& md)
     }
 }
 
+// ===================================================================================
+// Claude Generated (Jun 2026): ConfSearch restart / checkpoint serialization layer.
+// The whole search state is stored self-contained in "<basename>.confsearch.restart.json"
+// (written into the BMT dir and copied back to the start directory). All frames share one
+// atomic-number list, so each structure is just a flat "x|y|z|..." geometry string + energy.
+// ===================================================================================
+
+std::string ConfSearch::restartFileName() const
+{
+    return Basename() + ".confsearch.restart.json";
+}
+
+nlohmann::json ConfSearch::molToJson(const Molecule& mol) const
+{
+    nlohmann::json j;
+    j["geometry"] = Tools::Geometry2String(mol.getGeometry());
+    j["energy"] = mol.Energy();
+    j["name"] = mol.Name();
+    return j;
+}
+
+nlohmann::json ConfSearch::molVectorToJson(const std::vector<Molecule>& mols) const
+{
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& m : mols)
+        arr.push_back(molToJson(m));
+    return arr;
+}
+
+nlohmann::json ConfSearch::molPtrVectorToJson(const std::vector<Molecule*>& mols) const
+{
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto* m : mols)
+        if (m)
+            arr.push_back(molToJson(*m));
+    return arr;
+}
+
+nlohmann::json ConfSearch::fileFramesToJson(const std::string& path) const
+{
+    nlohmann::json arr = nlohmann::json::array();
+    std::ifstream test(path);
+    if (!test.good())
+        return arr; // missing/empty -> empty set (e.g. a phase that never produced this file)
+    test.close();
+    FileIterator it(path, true);
+    while (!it.AtEnd()) {
+        Molecule m = it.Next();
+        if (m.AtomCount() > 0)
+            arr.push_back(molToJson(m));
+    }
+    return arr;
+}
+
+Molecule ConfSearch::jsonToMol(const std::vector<int>& elements, const nlohmann::json& entry) const
+{
+    const int natoms = static_cast<int>(elements.size());
+    Geometry g(natoms, 3);
+    Tools::String2Geometry(g, entry.value("geometry", std::string("")));
+    Molecule m; // build atom-by-atom so element types are correct (no coordinate duplication)
+    for (int i = 0; i < natoms; ++i)
+        m.addPair({ elements[i], Position(g(i, 0), g(i, 1), g(i, 2)) });
+    m.setEnergy(entry.value("energy", 0.0));
+    m.setName(entry.value("name", std::string("")));
+    return m;
+}
+
+std::vector<Molecule> ConfSearch::jsonToMolVector(const std::vector<int>& elements, const nlohmann::json& arr) const
+{
+    std::vector<Molecule> out;
+    if (!arr.is_array())
+        return out;
+    out.reserve(arr.size());
+    for (const auto& entry : arr)
+        out.push_back(jsonToMol(elements, entry));
+    return out;
+}
+
+void ConfSearch::writeMolVectorToFile(const std::vector<Molecule>& mols, const std::string& path) const
+{
+    std::ofstream(path).close(); // truncate so an empty set yields an empty file
+    bool first = true;
+    for (const auto& m : mols) {
+        if (first) { m.writeXYZFile(path); first = false; }
+        else          m.appendXYZFile(path);
+    }
+}
+
+void ConfSearch::writeCheckpoint(const std::string& phase, double next_T, int temperature_cycle)
+{
+    if (!m_do_restart)
+        return;
+
+    nlohmann::json state;
+    state["format"] = "confsearch-restart-1";
+    state["phase"] = phase; // post_md | post_filter | post_refine | post_cycle
+    state["next_T"] = next_T;
+    state["temperature_cycle"] = temperature_cycle;
+    state["md_method"] = m_md_method;
+    state["opt_method"] = m_opt_method;
+    state["natoms"] = static_cast<int>(m_elements.size());
+    state["elements"] = m_elements;
+    state["global_min"] = m_global_min;
+    state["best_energy"] = m_best_energy;
+    state["initial_energy"] = m_initial_energy;
+
+    // Full bias pool: geometry + all metadata (counter/index preserved exactly).
+    nlohmann::json bias = nlohmann::json::array();
+    if (m_bias_pool) {
+        for (const auto& bs : m_bias_pool->snapshot()) {
+            nlohmann::json b;
+            b["geometry"] = Tools::Geometry2String(bs.geometry);
+            b["time"] = bs.time;
+            b["rmsd_reference"] = bs.rmsd_reference;
+            b["energy"] = bs.energy;
+            b["factor"] = bs.factor;
+            b["index"] = bs.index;
+            b["counter"] = bs.counter;
+            b["temperature"] = bs.temperature;
+            b["persistent"] = bs.persistent;
+            bias.push_back(std::move(b));
+        }
+    }
+    state["bias"] = std::move(bias);
+
+    state["seeds"] = molPtrVectorToJson(m_in_stack);
+    state["cumulative"] = fileFramesToJson(m_cumulative_file);
+    state["topo_ref"] = molToJson(m_topo_ref);
+    state["permutations"] = m_permutation_cache;
+
+    // Intermediate accepted sets, only needed to resume mid-cycle without redoing the opts.
+    if (phase == "post_filter" || phase == "post_refine")
+        state["accepted_md"] = fileFramesToJson(outputPath(Basename() + ".bias.opt.accepted.xyz"));
+    if (phase == "post_refine")
+        state["accepted_opt"] = fileFramesToJson(outputPath(Basename() + ".bias.opt.accepted.opt.xyz"));
+
+    nlohmann::json root;
+    root[MethodName()[0]] = state;
+    const std::string dump = root.dump();
+
+    try {
+        std::ofstream bmt(outputPath(restartFileName()));
+        bmt << dump << std::endl;
+        bmt.close();
+        std::ofstream cwd(restartFileName()); // copy back to the start directory (stable name)
+        cwd << dump << std::endl;
+        cwd.close();
+    } catch (...) {
+        CurcumaLogger::warn("ConfSearch: failed to write restart checkpoint.");
+        return;
+    }
+    CurcumaLogger::result_fmt("ConfSearch: checkpoint (phase={}, next_T={}K, cycles_done={}, bias={}) -> {}",
+        phase, static_cast<int>(next_T), temperature_cycle,
+        m_bias_pool ? m_bias_pool->biasStructureCount() : 0, restartFileName());
+}
+
+bool ConfSearch::loadCheckpoint()
+{
+    std::ifstream f(restartFileName());
+    if (!f.good())
+        return false;
+    nlohmann::json root;
+    try {
+        f >> root;
+    } catch (...) {
+        CurcumaLogger::warn_fmt("ConfSearch: restart file {} is not valid JSON; starting fresh.", restartFileName());
+        return false;
+    }
+    if (!root.contains(MethodName()[0]))
+        return false;
+    const nlohmann::json s = root[MethodName()[0]];
+
+    RestartState st;
+    st.md_method = s.value("md_method", std::string(""));
+    st.opt_method = s.value("opt_method", std::string(""));
+    if (st.md_method != m_md_method || st.opt_method != m_opt_method) {
+        CurcumaLogger::warn_fmt("ConfSearch: restart method mismatch (file {}/{} vs run {}/{}); starting fresh.",
+            st.md_method, st.opt_method, m_md_method, m_opt_method);
+        return false;
+    }
+    st.natoms = s.value("natoms", 0);
+    st.elements = s.value("elements", std::vector<int>{});
+
+    const std::string phase = s.value("phase", std::string("post_cycle"));
+    st.entry_phase = (phase == "post_md") ? 1 : (phase == "post_filter") ? 2
+        : (phase == "post_refine")                                       ? 3
+                                                                         : 0; // post_cycle -> next cycle from MD
+    st.next_T = s.value("next_T", m_startT);
+    st.temperature_cycle = s.value("temperature_cycle", 0);
+    st.global_min = s.value("global_min", std::numeric_limits<double>::infinity());
+    st.best_energy = s.value("best_energy", std::numeric_limits<double>::infinity());
+    st.initial_energy = s.value("initial_energy", std::numeric_limits<double>::infinity());
+
+    if (s.contains("bias") && s["bias"].is_array()) {
+        for (const auto& b : s["bias"]) {
+            BiasStructure bs;
+            Geometry g(st.natoms, 3);
+            Tools::String2Geometry(g, b.value("geometry", std::string("")));
+            bs.geometry = g;
+            bs.time = b.value("time", 0.0);
+            bs.rmsd_reference = b.value("rmsd_reference", 0.0);
+            bs.energy = b.value("energy", 0.0);
+            bs.factor = b.value("factor", 1.0);
+            bs.index = b.value("index", 0);
+            bs.counter = b.value("counter", 0);
+            bs.temperature = b.value("temperature", 0.0);
+            bs.persistent = b.value("persistent", false);
+            st.bias.push_back(std::move(bs));
+        }
+    }
+    st.seeds = jsonToMolVector(st.elements, s.value("seeds", nlohmann::json::array()));
+    st.cumulative = jsonToMolVector(st.elements, s.value("cumulative", nlohmann::json::array()));
+    st.accepted_md = jsonToMolVector(st.elements, s.value("accepted_md", nlohmann::json::array()));
+    st.accepted_opt = jsonToMolVector(st.elements, s.value("accepted_opt", nlohmann::json::array()));
+    if (s.contains("topo_ref"))
+        st.topo_ref = jsonToMol(st.elements, s["topo_ref"]);
+    st.permutations = s.value("permutations", std::vector<std::vector<int>>{});
+
+    st.valid = true;
+    m_restart = std::move(st);
+    return true;
+}
+
 nlohmann::json ConfSearch::WriteRestartInformation()
 {
-    nlohmann::json restart;
-    return restart;
+    // ConfSearch manages its own self-contained checkpoint via writeCheckpoint() (BMT + start dir).
+    // The base TriggerWriteRestart() path is unused here; return an empty object.
+    return nlohmann::json::object();
 }
 
 bool ConfSearch::LoadRestartInformation()
 {
-    return true;
+    return loadCheckpoint();
 }
 
 void ConfSearch::ReadControlFile()
@@ -1011,6 +1423,14 @@ void ConfSearch::ReadControlFile()
 void ConfSearch::LoadControlJson()
 {
     m_method = Json2KeyWord<std::string>(m_defaults, "method");
+    // Claude Generated (Jun 2026): dual-method exploration/refinement. Empty values
+    // fall back to "method", so a single -method run is unchanged.
+    m_md_method = Json2KeyWord<std::string>(m_defaults, "md_method");
+    if (m_md_method.empty())
+        m_md_method = m_method;
+    m_opt_method = Json2KeyWord<std::string>(m_defaults, "opt_method");
+    if (m_opt_method.empty())
+        m_opt_method = m_method;
     m_thermostat = Json2KeyWord<std::string>(m_defaults, "thermostat");
     m_rattle = Json2KeyWord<bool>(m_defaults, "rattle");
     m_spin = Json2KeyWord<int>(m_defaults, "spin");
@@ -1050,4 +1470,5 @@ void ConfSearch::LoadControlJson()
     m_bias_couple_factor = Json2KeyWord<double>(m_defaults, "bias_couple_factor");
     m_bias_scale_mode = Json2KeyWord<std::string>(m_defaults, "bias_scale_mode");
     m_bias_energy_tol = Json2KeyWord<double>(m_defaults, "bias_energy_tol");
+    m_do_restart = Json2KeyWord<bool>(m_defaults, "restart");
 }

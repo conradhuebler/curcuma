@@ -39,6 +39,16 @@
 using namespace curcuma;
 static const nlohmann::json ConfSearchJson{
     { "method", "gfnff" },
+    // Claude Generated (Jun 2026): separate exploration / refinement methods.
+    // Empty -> fall back to "method". md_method drives MD + pre-optimization;
+    // opt_method drives the accurate per-cycle re-optimization + final ranking.
+    { "md_method", "" },
+    { "opt_method", "" },
+    // Claude Generated (Jun 2026): opt-in restart. When true, ConfSearch writes a self-contained
+    // checkpoint (bias pool + cumulative + seeds + energies + cycle progress) after every sub-phase
+    // and, on the next invocation with -restart, resumes from it. The checkpoint is written into the
+    // BMT dir AND copied back to the start directory as "<basename>.confsearch.restart.json".
+    { "restart", false },
     { "startT", 600 },
     { "endT", 300 },
     { "deltaT", 50 },
@@ -205,6 +215,42 @@ private:
     /* Lets have this for all modules */
     virtual bool LoadRestartInformation() override;
 
+    // Claude Generated (Jun 2026): ConfSearch restart/checkpoint.
+    // Self-contained checkpoint of the whole search state (bias pool, cumulative pool, seeds,
+    // energy progress, cycle/phase, symmetry permutations, topology reference). See
+    // docs/CONFSEARCH_DUAL_METHOD.md / CONFSEARCH_RESTART.md.
+    struct RestartState {
+        bool valid = false;
+        int entry_phase = 0; // where to re-enter the resumed cycle: 0=md,1=post_md,2=post_filter,3=post_refine
+        double next_T = 0;   // temperature of the cycle to (re)start
+        int temperature_cycle = 0; // number of cycles already completed
+        int natoms = 0;
+        std::string md_method, opt_method;
+        double global_min = 0, best_energy = 0, initial_energy = 0;
+        std::vector<int> elements; // atomic numbers (shared by all frames)
+        std::vector<BiasStructure> bias; // full bias pool (geometry + metadata)
+        std::vector<Molecule> seeds; // m_in_stack for the resumed cycle
+        std::vector<Molecule> cumulative; // accepted conformers from completed cycles
+        std::vector<Molecule> accepted_md; // gfnff-filtered set (post_filter/post_refine)
+        std::vector<Molecule> accepted_opt; // opt_method-reoptimised set (post_refine)
+        Molecule topo_ref; // reference structure -> m_topo_matrix
+        std::vector<std::vector<int>> permutations; // m_permutation_cache
+    };
+    // Serialise one molecule (geometry + energy + name) given the shared element list is stored once.
+    nlohmann::json molToJson(const Molecule& mol) const;
+    nlohmann::json molVectorToJson(const std::vector<Molecule>& mols) const;
+    nlohmann::json molPtrVectorToJson(const std::vector<Molecule*>& mols) const;
+    nlohmann::json fileFramesToJson(const std::string& path) const; // read an xyz file into the geometry-only json form
+    Molecule jsonToMol(const std::vector<int>& elements, const nlohmann::json& entry) const;
+    std::vector<Molecule> jsonToMolVector(const std::vector<int>& elements, const nlohmann::json& arr) const;
+    void writeMolVectorToFile(const std::vector<Molecule>& mols, const std::string& path) const; // first writes, rest append
+    // Build the full checkpoint json (uses the m_ckpt_* staging members), write it to the BMT dir
+    // and copy it back to the start directory (CWD) under the stable name.
+    void writeCheckpoint(const std::string& phase, double next_T, int temperature_cycle);
+    // Read + restore the CWD checkpoint into m_restart; returns true on a valid, matching checkpoint.
+    bool loadCheckpoint();
+    std::string restartFileName() const; // "<basename>.confsearch.restart.json"
+
     virtual StringList MethodName() const override
     {
         return { "ConfSearch" };
@@ -217,7 +263,7 @@ private:
     virtual void LoadControlJson() override;
 
     StringList m_error_list;
-    std::string m_method, m_thermostat;
+    std::string m_method, m_md_method, m_opt_method, m_thermostat;
     bool m_silent = true, m_rattle = true;
     double m_dT = 4;
     std::vector<Molecule*> m_in_stack, m_final_stack;
@@ -241,4 +287,12 @@ private:
     std::vector<std::vector<int>> m_permutation_cache; // Claude Generated (Jun 2026): symmetry reorder rules from ConfScan, fed into MTD
     Matrix m_topo_matrix;
     SharedBiasPool* m_bias_pool = nullptr;  // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
+    // Claude Generated (Jun 2026): restart/checkpoint state.
+    bool m_do_restart = false;                  // -restart: enable checkpoint write + resume
+    RestartState m_restart;                     // populated by loadCheckpoint() on resume
+    double m_best_energy = std::numeric_limits<double>::infinity();    // exploration best (md_method), persisted
+    double m_initial_energy = std::numeric_limits<double>::infinity(); // cycle-1 exploration reference, persisted
+    std::string m_cumulative_file;              // path to the cumulative output (set in start())
+    std::vector<int> m_elements;                // atomic numbers of the system (set after pre-opt / on resume)
+    Molecule m_topo_ref;                        // reference structure defining m_topo_matrix (persisted)
 };

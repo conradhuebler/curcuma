@@ -675,6 +675,18 @@ curcuma -md input.xyz -mtd -plumed plumed.dat
 
 See [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md) for the full PLUMED integration guide (unit conversions, output files, available CVs, thermal equilibration gate, internal RMSD-MTD).
 
+## Conformational Search (dual-method)
+
+The MD-driven conformational search (`-confsearch`) can explore with a cheap method and refine/rank the discovered conformers with a more accurate one:
+
+```sh
+curcuma -confsearch input.xyz -md_method gfnff -opt_method gfn2
+```
+
+`-md_method` runs the MD exploration and the pre-optimization; `-opt_method` runs the per-cycle accurate re-optimization and the final ranking. Both fall back to `-method` when unset, so `curcuma -confsearch input.xyz -method gfnff` keeps the single-method behaviour. See [docs/CONFSEARCH_DUAL_METHOD.md](docs/CONFSEARCH_DUAL_METHOD.md).
+
+The search is **restartable** with `-restart`: a self-contained checkpoint (bias pool, cumulative conformers, seeds, energies, schedule position) is written after every MD phase and every temperature cycle, into the BMT dir and copied back to the start directory. Re-running the same command with `-restart` resumes from it (kill the process to interrupt; the checkpoint persists). See [docs/CONFSEARCH_RESTART.md](docs/CONFSEARCH_RESTART.md).
+
 ## Output Directory System (BMT)
 
 By default, all curcuma commands create a **Basename.Method.Timestamp** directory for their output files. For example:

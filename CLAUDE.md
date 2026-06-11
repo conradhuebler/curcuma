@@ -179,7 +179,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - **Constrained Optimization** - Distance, angle, and dihedral constraints
 
 ### 6. Conformational Analysis ✅ REFACTORED 2025
-- **ConfSearch** - Systematic conformational searching (unified trajectory framework)
+- **ConfSearch** - Systematic conformational searching (unified trajectory framework); supports **dual-method** runs (`-md_method` explore + pre-opt, `-opt_method` refine + rank; both fall back to `-method`) — see [docs/CONFSEARCH_DUAL_METHOD.md](docs/CONFSEARCH_DUAL_METHOD.md); **restartable** via `-restart` (self-contained checkpoint: bias pool + cumulative + seeds + schedule, written to CWD + BMT) — see [docs/CONFSEARCH_RESTART.md](docs/CONFSEARCH_RESTART.md)
 - **ConfScan** - Conformational scanning along reaction coordinates
 - **RMSD Analysis** - Structure comparison and alignment
 - **Energy-based Filtering** - Automatic conformer ranking

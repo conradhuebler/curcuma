@@ -187,3 +187,13 @@ void SharedBiasPool::deserializeGeometry(const std::string& xyz_data)
     // For cross-temperature propagation, geometries are passed via BiasStructure
     // objects directly, not through string serialization.
 }
+
+void SharedBiasPool::restoreStructures(const std::vector<BiasStructure>& structures)
+{
+    // Claude Generated (Jun 2026): one-shot full-state restore for ConfSearch restart.
+    // The caller has already rebuilt complete BiasStructure objects (geometry + counter +
+    // energy + index + persistent flag) from the checkpoint, so we just take them verbatim.
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    m_structures = structures;
+    m_global_count.store(static_cast<int>(m_structures.size()), std::memory_order_release);
+}

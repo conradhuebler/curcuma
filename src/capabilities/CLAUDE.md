@@ -27,6 +27,8 @@ capabilities/
 ### Conformational Analysis
 - **ConfScan**: Systematic scanning of conformational space along defined coordinates
 - **ConfSearch**: Automated conformational searching with energy filtering
+  - Dual-method (Jun 2026): `md_method` (explore + pre-opt) vs `opt_method` (per-cycle Phase 3b re-opt + final ranking); both empty -> `method`. Phase 3b skipped when equal. See [docs/CONFSEARCH_DUAL_METHOD.md](../../docs/CONFSEARCH_DUAL_METHOD.md)
+  - Restart (Jun 2026): `-restart` writes a self-contained checkpoint (bias pool + cumulative + seeds + energies + schedule) after every MD/cycle to CWD + BMT; resume skips pre-opt, restores bias pool (`SharedBiasPool::restoreStructures`), continues from `next_T`. `-restart` routes via the confscan module (it owns the PARAM). See [docs/CONFSEARCH_RESTART.md](../../docs/CONFSEARCH_RESTART.md)
 - **RMSD Analysis**: Structure comparison, alignment, and trajectory analysis
   - JSON output: `<target>.rmsd.json` with rmsd, rmsd_raw, permutation, reference_xyz, reorder_xyz, file provenance (always generated, even no-reorder mode)
 

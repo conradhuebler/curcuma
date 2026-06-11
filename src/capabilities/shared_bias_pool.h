@@ -90,6 +90,14 @@ public:
      *  or when resetting between temperature cycles. */
     void clear();
 
+    /** Claude Generated (Jun 2026): full-state restore for ConfSearch restart.
+     *  Replaces the pool contents with the given structures (metadata AND geometry),
+     *  preserving each BiasStructure::index and counter exactly. Used when resuming a
+     *  ConfSearch run from a checkpoint. Unlike deserializeMetadata()/deserializeGeometry()
+     *  (which split the two and leave geometry as a placeholder), this restores ready-to-use
+     *  bias structures in one call. */
+    void restoreStructures(const std::vector<BiasStructure>& structures);
+
     /** Serialize metadata (counter, energy, factor, index, temperature)
      *  to JSON. Matches existing restart format for backward compatibility. */
     nlohmann::json serializeMetadata() const;
