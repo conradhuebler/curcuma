@@ -1,48 +1,59 @@
 #!/bin/bash
-export PROJECT_ROOT='/home/conrad/src/claude_curcuma/curcuma/test_cases/cli/../..'
-
-# Test: ConfScan with Invalid RMSD Method
-# Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+# Test: confscan - 03: Unknown RMSD method falls back gracefully
+# Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
 # Claude Generated
+#
+# An unrecognized -rmsd.method must not crash or hang: it warns and falls back
+# to the recommended default (subspace), producing the same result as the
+# default scan (01). Regression guard for the silent-no-output bug too.
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../test_utils.sh"
 
+TEST_NAME="confscan - 03: Unknown RMSD method fallback"
 TEST_DIR="$SCRIPT_DIR"
+
+EXP_ACCEPTED=14
+EXP_REJECTED=30
+EXP_SUMMARY="14 5 1 237"   # identical to the subspace default it falls back to
 
 run_test() {
     cd "$TEST_DIR"
-    # Try ConfScan with non-existent RMSD method - should fail or fall back
-    timeout 10 $CURCUMA -confscan conformers.xyz \
-        -rmsd.method non_existent \
+    set +e
+    $CURCUMA -confscan conformers.xyz \
+        -rmsd.method non_existent_method \
         -confscan.threads 1 \
         -confscan.restart false \
-        > stdout.log 2> stderr.log || true
-
+        > stdout.log 2> stderr.log
     local exit_code=$?
+    set -e
 
-    # Accept either: error exit OR successful fallback to default
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [ $exit_code -ne 0 ]; then
-        echo -e "${GREEN}✓ PASS${NC}: Invalid method rejected (exit: $exit_code)"
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-    else
-        echo -e "${GREEN}✓ PASS${NC}: Invalid method fell back gracefully"
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-    fi
-
+    assert_exit_code $exit_code 0 "Unknown method should still exit 0 (graceful fallback)"
+    # Must not hang or no-op: the ensemble is read and a valid scan runs.
+    assert_string_in_file "of 44 total" stdout.log "All 44 input structures were read"
+    assert_file_not_empty "$(find_output_file 'conformers.accepted.xyz')" "Accepted conformers file non-empty"
     return 0
 }
 
-cleanup_before() { cd "$TEST_DIR"; cleanup_test_artifacts; }
+validate_results() {
+    local accepted=$(count_xyz_structures "$(find_output_file 'conformers.accepted.xyz')")
+    local rejected=$(count_xyz_structures "$(find_output_file 'conformers.rejected.xyz')")
+    assert_numeric_match $EXP_ACCEPTED "$accepted" 0 "Accepted conformer count (fallback)"
+    assert_numeric_match $EXP_REJECTED "$rejected" 0 "Rejected conformer count (fallback)"
+    local summary=$(extract_confscan_summary stdout.log)
+    assert_equals "$EXP_SUMMARY" "$summary" "Fallback result matches subspace default"
+    return 0
+}
+
+cleanup_before() { cd "$TEST_DIR"; clean_dir_keep conformers.xyz run_test.sh; }
 
 main() {
-    test_header "ConfScan Invalid Method"
+    test_header "$TEST_NAME"
     cleanup_before
-    run_test
+    run_test && validate_results
     print_test_summary
-    exit 0  # Always pass - we're testing error handling
+    [ $TESTS_FAILED -gt 0 ] && exit 1 || exit 0
 }
 
 if [ "${BASH_SOURCE[0]}" == "${0}" ]; then main "$@"; fi

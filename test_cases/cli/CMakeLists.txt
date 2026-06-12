@@ -105,6 +105,20 @@ add_cli_test(confscan 05_hybrid_rmsd_elements)
 add_cli_test(confscan 06_heavy_only)
 add_cli_test(confscan 07_restart_scan)
 
+# Claude Generated (June 2026): ConfScan scenarios run a real multi-pass scan over 44
+# conformers (04 runs three reorder passes; 07 runs the scan twice). The 120 s macro
+# default is tight on a loaded machine - give them headroom so a busy host doesn't cause
+# spurious timeouts.
+set_tests_properties(
+    cli_confscan_01_default_scan
+    cli_confscan_02_get_rmsd
+    cli_confscan_03_invalid_rmsd_method
+    cli_confscan_04_slx_logic
+    cli_confscan_05_hybrid_rmsd_elements
+    cli_confscan_06_heavy_only
+    cli_confscan_07_restart_scan
+    PROPERTIES TIMEOUT 300)
+
 # =============================================================================
 # SimpleMD Tests (7 scenarios)
 # =============================================================================

@@ -30,41 +30,46 @@ Diese Datei enthält die wissenschaftlichen Referenzwerte für alle CLI-Tests.
 
 ---
 
-## ConfScan Tests (✅ Mit wissenschaftlicher Validierung: 7/7)
+## ConfScan Tests (⚙️ Maschinell validiert: 7/7)
 
-### cli_confscan_01: Default ConfScan
-- **Molekül**: 114-atom organisches Zucker-Protein
-- **Methode**: Subspace RMSD reordering
-- **Erwartete Outputs**:
-  - **14 accepted conformers** (±0 tolerance - exakt)
-  - **30 rejected conformers** (±0 tolerance - exakt)
-  - **Total: 44 input structures**
-- **Status**: ✅ BESTANDEN mit numerischer Validierung
+Eingabe für alle Szenarien: `conformers.xyz` (= `test_cases/confscan/input.xyz`,
+44 Konformere, 114 Atome). Jedes Szenario nutzt EIGENE, gemessene Goldwerte und
+prüft zusätzlich den vollständigen Result-Fingerprint aus stdout:
+`<accepted> <reorder> <reuse> <skipped>`. Goldwerte gemessen Juni 2026
+(release-Build). Status: ⚙️ maschinell getestet — NICHT human-getestet.
 
-### cli_confscan_02: Get RMSD with Dynamic Threshold
-- **Methode**: ConfScan with dynamic RMSD threshold
-- **Erwartete Werte**: 14 accepted, 30 rejected
-- **Status**: ✅ BESTANDEN mit numerischer Validierung
+### cli_confscan_01: Default Scan (subspace)
+- **Flags**: `-rmsd.method subspace`
+- **Gold**: 14 accepted, 30 rejected, Fingerprint `14 5 1 237`
 
-### cli_confscan_04: sLX Logic
-- **Methode**: sLX (some Logic X) multiple thresholds conformer filtering
-- **Erwartete Werte**: 14 accepted, 30 rejected
-- **Status**: ✅ BESTANDEN mit numerischer Validierung
+### cli_confscan_02: Dynamic RMSD threshold (get_rmsd)
+- **Flags**: `-rmsd.method subspace -confscan.get_rmsd true`
+- **Gold**: 1 accepted, 43 rejected, Fingerprint `1 0 0 112`
 
-### cli_confscan_05: Hybrid Elements
-- **Methode**: Hybrid reordering with element templates
-- **Erwartete Werte**: 14 accepted, 30 rejected
-- **Status**: ✅ BESTANDEN mit numerischer Validierung
+### cli_confscan_03: Unknown RMSD method (graceful fallback)
+- **Flags**: `-rmsd.method non_existent_method` → fällt auf `subspace` zurück
+- **Gold**: 14 accepted, 30 rejected, Fingerprint `14 5 1 237` (= wie 01)
 
-### cli_confscan_06: Heavy Only
-- **Methode**: Heavy atom only comparison (ignores H)
-- **Erwartete Werte**: 14 accepted, 30 rejected
-- **Status**: ✅ BESTANDEN mit numerischer Validierung
+### cli_confscan_04: sLX threshold logic
+- **Flags**: `-rmsd.method subspace -confscan.slx 1.0,2.0,3.0` (3 Reorder-Pässe)
+- **Gold**: 14 accepted, 30 rejected, Fingerprint `14 5 0 282`
+  (Fingerprint unterscheidet sich von 01 → beweist die Extra-Pass-Logik)
 
-### cli_confscan_07: Restart Scan
-- **Methode**: Restart from previous checkpoint
-- **Erwartete Werte**: 14 accepted, 30 rejected
-- **Status**: ✅ BESTANDEN mit numerischer Validierung
+### cli_confscan_05: Element-template RMSD (template, N+O)
+- **Flags**: `-rmsd.method template -rmsd.element 7,8`
+- **Gold**: 15 accepted, 29 rejected, Fingerprint `15 4 1 246`
+
+### cli_confscan_06: Heavy-atom-only RMSD
+- **Flags**: `-rmsd.method subspace -rmsd.protons false -confscan.threads 1`
+- **Gold**: 14 accepted, 30 rejected, Fingerprint `14 4 0 114`
+- **Hinweis**: single-threaded — heavy-only + threads>1 kann unter Last hängen
+  (bekanntes Concurrency-Problem, siehe AIChangelog).
+
+### cli_confscan_07: Restart / resume
+- **Ablauf**: 2× Lauf im selben Verzeichnis (`-no_bmt`); Lauf 1 schreibt
+  `curcuma_restart.json`, Lauf 2 liest es und resümiert.
+- **Gold**: 14 accepted, 30 rejected; Lauf 1 `14 5 1 237`, Lauf 2 `14 0 1 237`
+  (Reorder-Regeln wiederverwendet → 0 neue Reorders)
 
 ---
 

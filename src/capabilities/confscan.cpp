@@ -647,8 +647,10 @@ void ConfScan::SetUp()
     m_start = 0;
     m_end = m_ordered_list.size();
 
-    m_result_basename = Filename();
-    m_result_basename.erase(m_result_basename.end() - 4, m_result_basename.end());
+    // Claude Generated (June 2026): Use the path-stripped, extension-stripped basename instead
+    // of Filename() minus 4 chars. The old form kept a leading "./" (e.g. "./input.xyz" ->
+    // "./input") and assumed a 4-char extension, producing names like "<bmt>/./input.accepted.xyz".
+    m_result_basename = Basename();
 
     // Claude Generated 2026: Route all output files through BMT directory
     m_accepted_filename = outputPath(m_result_basename + ".accepted.xyz");
@@ -791,6 +793,13 @@ void ConfScan::start()
         // Claude Generated 2025: Use ConfigManager export for comparison table
         CurcumaLogger::param_comparison_table(m_config.exportConfig(), m_controller, "ConfScan Configuration");
     }
+
+    // Claude Generated (June 2026): Defensive backstop - openFile() loads the ensemble into
+    // m_molecules and is normally triggered by setFileName(). If a caller set the filename via
+    // setFile()/BMT only, m_molecules would be empty and the scan a silent no-op. Load here if
+    // needed (guarded so the setFileName() path, e.g. the C++ tests, does not double-load).
+    if (m_molecules.empty() && !Filename().empty())
+        openFile();
 
     SetUp();
     RunTimer timer(false);

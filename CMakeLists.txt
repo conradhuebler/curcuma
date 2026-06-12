@@ -1114,7 +1114,15 @@ add_test(NAME confscan_subspace COMMAND confscan_test subspace WORKING_DIRECTORY
 add_test(NAME confscan_free COMMAND confscan_test free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME confscan_dtemplate COMMAND confscan_test dtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME confscan_template COMMAND confscan_test template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME confscan_molalign COMMAND confscan_test molalign WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+# Claude Generated (June 2026): The molalign scenario shells out to the external
+# 'molalign' binary. Only register it when that binary is found, otherwise the
+# test fails on machines without the optional dependency (false negative).
+find_program(MOLALIGN_BIN molalign)
+if(MOLALIGN_BIN)
+    add_test(NAME confscan_molalign COMMAND confscan_test molalign WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+else()
+    message(STATUS "molalign binary not found - skipping confscan_molalign test")
+endif()
 add_test(NAME confscan_sLX1 COMMAND confscan_test sLX1 WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME confscan_sLX2 COMMAND confscan_test sLX2 WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME confscan_sLX2Reset COMMAND confscan_test sLX2Reset WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)

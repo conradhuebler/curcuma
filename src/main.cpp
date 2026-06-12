@@ -1774,8 +1774,29 @@ int executeConfScan(const json& controller, int argc, char** argv) {
 
     auto* scan = new ConfScan(scan_controller, false);  // Claude Generated: Explicit false for default verbosity level 1
     initializeBMT(scan, argv[2], "confscan", controller);
+    // Claude Generated (June 2026): initializeBMT only calls setFile() (basename + BMT dir);
+    // it does NOT load the ensemble. setFileName() triggers openFile(), which reads the
+    // structures into m_molecules. Without this the scan reads 0 molecules and produces no
+    // output (regression from commit 4529895, which replaced the former setFileName call).
+    scan->setFileName(argv[2]);
+    // Copy the primary results back to the CWD so a plain `curcuma -confscan file.xyz`
+    // run is never silent (the rest stays in the BMT output directory).
+    scan->addBakFile(scan->Basename() + ".accepted.xyz");
+    scan->addBakFile(scan->Basename() + ".rejected.xyz");
+    // Claude Generated (June 2026): Capture the user's verbosity before the scan; the RMSD
+    // machinery lowers the global logger level to 0 mid-scan and leaves it there.
+    int announce_verbosity = CurcumaLogger::get_verbosity();
     scan->start();
     scan->processBakFiles();
+    // Tell the user where the output went. createBMTDir only logs the directory at verbosity
+    // >= 2; surface it (and the files copied back to the CWD) at the default verbosity 1 so a
+    // plain run is never silent about its results.
+    if (announce_verbosity >= 1 && !scan->OutputDir().empty()) {
+        CurcumaLogger::set_verbosity(announce_verbosity);
+        CurcumaLogger::success_fmt("ConfScan output written to: {}", scan->OutputDir());
+        CurcumaLogger::result_fmt("Copied to current directory: {}.accepted.xyz, {}.rejected.xyz",
+            scan->Basename(), scan->Basename());
+    }
     int accepted = scan->AcceptedCount();
     int reorder_success = scan->ReorderSuccessfull();
     int reuse_count = scan->ReuseCount();
