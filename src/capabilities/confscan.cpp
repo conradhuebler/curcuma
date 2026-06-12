@@ -1474,15 +1474,19 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                         }
                         writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
                         mol1->ApplyReorderRule(t->ReorderRule());
-                    }
-                    // Claude Generated (June 2026): at verbosity 3, report the reference structure
-                    // a reordering match was rejected against and the deciding RMSD.
-                    if (m_verbosity >= 3) {
-                        int old_v = CurcumaLogger::get_verbosity();
-                        CurcumaLogger::set_verbosity(m_verbosity);
-                        CurcumaLogger::info_fmt("    {} rejected - matches {} after reorder (RMSD {:.4f} A)",
-                            mol1->Name(), t->Reference()->Name(), t->RMSD());
-                        CurcumaLogger::set_verbosity(old_v);
+                        // Claude Generated (June 2026): at verbosity 3, report the reference
+                        // structure the rejection matched and the deciding RMSD. Inside the
+                        // keep_molecule guard so it fires ONLY for the deciding (first) match -
+                        // the result loop intentionally does not break after the first match (to
+                        // keep per-comparison counters accurate), so a structure may match several
+                        // references; only the deciding one is reported.
+                        if (m_verbosity >= 3) {
+                            int old_v = CurcumaLogger::get_verbosity();
+                            CurcumaLogger::set_verbosity(m_verbosity);
+                            CurcumaLogger::info_fmt("    {} rejected - matches {} after reorder (RMSD {:.4f} A)",
+                                mol1->Name(), t->Reference()->Name(), t->RMSD());
+                            CurcumaLogger::set_verbosity(old_v);
+                        }
                     }
                     keep_molecule = false;
 
