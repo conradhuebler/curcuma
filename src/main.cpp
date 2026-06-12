@@ -681,8 +681,8 @@ json CLI2Json(int argc, char** argv)
     // Claude Generated (March 2026): Added "gpu" for GPU acceleration control
     std::set<std::string> global_params = {
         "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
-        "export_run", "export-run", // Export current run configuration
-        "import_config", "import-config", // Import custom configuration
+        "export_run", // Export current run configuration
+        "import_config", // Import custom configuration
         "bak"  // Files to copy back from BMT output directory to CWD
     };
 
@@ -711,6 +711,9 @@ json CLI2Json(int argc, char** argv)
 
         if (sub == "-") {
             current.erase(0, 1);
+            // Claude Generated (Jun 2026): canonicalize hyphens to underscores in CLI
+            // parameter names so "-opt-method" matches the JSON key "opt_method".
+            std::replace(current.begin(), current.end(), '-', '_');
 
             // Handle special verbosity shortcuts - Claude Generated
             if (current == "silent" || current == "quiet") {

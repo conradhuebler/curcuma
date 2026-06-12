@@ -188,9 +188,12 @@ inline T Json2KeyWord(const json& controller, std::string name)
     T temp;
     bool found = false;
     transform(name.begin(), name.end(), name.begin(), ::tolower);
+    // Claude Generated (Jun 2026): canonicalize hyphens to underscores for key matching
+    name.erase(std::remove(name.begin(), name.end(), '-'), name.end());
     for (auto& el : controller.items()) {
         std::string key = el.key();
         transform(key.begin(), key.end(), key.begin(), ::tolower);
+        key.erase(std::remove(key.begin(), key.end(), '-'), key.end());
         if (key.compare(name) == 0) {
             temp = el.value();
             found = true;
@@ -209,9 +212,11 @@ inline json MergeJson(const json& reference, const json& patch)
         bool found = false;
         std::string outer = object.key();
         transform(outer.begin(), outer.end(), outer.begin(), ::tolower);
+        outer.erase(std::remove(outer.begin(), outer.end(), '-'), outer.end());
         for (const auto& local : reference.items()) {
             std::string inner = local.key();
             transform(inner.begin(), inner.end(), inner.begin(), ::tolower);
+            inner.erase(std::remove(inner.begin(), inner.end(), '-'), inner.end());
             if (outer.compare(inner) == 0) {
                 result[local.key()] = object.value();
                 found = true;
