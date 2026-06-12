@@ -277,6 +277,8 @@ private:
     // Claude Generated (Jun 2026): temperature runaway abort + cross-run bias-height freeze.
     // ON by default for ConfSearch (bias-heating safety net + best conformer yield); see ConfSearchJson.
     bool m_temp_abort = true, m_freeze_inherited = true;
+    // Claude Generated (Jun 2026): initial energy at opt_method (dual-mode only)
+    double m_initial_energy_opt = std::numeric_limits<double>::infinity();
     double m_temp_abort_factor = 1.5, m_temp_abort_delta = 300;
     int m_rmsd_mtd_max_height = 0;
     std::string m_seed_window_schedule = "static";

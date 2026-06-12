@@ -154,6 +154,14 @@ void ConfSearch::start()
 
     // Log ConfSearch configuration (visible at verbosity >= 1)
     CurcumaLogger::result_fmt("ConfSearch: MD method={}, Opt method={}, Thermostat={}, Threads={}", m_md_method, m_opt_method, m_thermostat, m_threads);
+    // Claude Generated (Jun 2026): explicit phase-method mapping so the user can verify their choices took effect
+    if (m_opt_method != m_md_method) {
+        CurcumaLogger::result_fmt("ConfSearch: Dual-method mode (explore={}, refine={})", m_md_method, m_opt_method);
+        CurcumaLogger::result_fmt("ConfSearch: Phase methods: explore={}, pre-opt={}, refine={}, final rank={}",
+            m_md_method, m_md_method, m_opt_method, m_opt_method);
+    } else {
+        CurcumaLogger::result("ConfSearch: Single-method mode (Phase 3b skipped)");
+    }
     CurcumaLogger::result_fmt("ConfSearch: Temperature={}K -> {}K, step={}K", m_startT, m_endT, m_deltaT);
     CurcumaLogger::result_fmt("ConfSearch: Repetitions={}, RMSD threshold={} A, Energy window={} kJ/mol, Seed rank={}", m_repeat, m_rmsd, m_energy_window, m_seed_rank);
     // Debug: log full MD parameter set for diagnosing dynamics issues
@@ -262,6 +270,43 @@ void ConfSearch::start()
             m_elements = m_in_stack[0]->Atoms();   // shared atomic-number list for checkpoint frames
         }
         CurcumaLogger::result_fmt("ConfSearch: {} input structures optimised", m_in_stack.size());
+
+        // Claude Generated (Jun 2026): dual initial optimization -- in dual-method mode,
+        // also optimise the md_method-minimised structures at opt_method so we can track
+        // the energy gain on both PES from the very start. The opt_method structures are
+        // for reporting only; m_in_stack keeps the md_method structures (they feed the MD loop).
+        if (m_opt_method != m_md_method) {
+            CurcumaLogger::header("=== ConfSearch: Initial Geometry Optimisation (" + m_opt_method + ") ===");
+            bool first_opt = true;
+            for (auto* mol : m_in_stack) {
+                if (first_opt) { mol->writeXYZFile(outputPath(p + ".input_mdopt.xyz")); first_opt = false; }
+                else              mol->appendXYZFile(outputPath(p + ".input_mdopt.xyz"));
+            }
+            nlohmann::json opt_hi;
+            opt_hi["method"] = m_opt_method;
+            opt_hi["threads"] = m_threads;
+            if (md.contains("gpu") && !md["gpu"].is_null())
+                opt_hi["gpu"] = md["gpu"];
+            PerformOptimisation(p + ".input_mdopt", opt_hi);
+
+            // Read back opt_method-optimized structures for energy reporting
+            std::vector<Molecule*> opt_init_stack;
+            FileIterator opt_hi_in(outputPath(p + ".input_mdopt.opt.xyz"));
+            while (!opt_hi_in.AtEnd()) {
+                Molecule mol = opt_hi_in.Next();
+                if (mol.AtomCount() > 0)
+                    opt_init_stack.push_back(new Molecule(mol));
+            }
+            // Report both initial energies
+            if (!m_in_stack.empty() && !opt_init_stack.empty()) {
+                double md_e = m_in_stack[0]->Energy();
+                double opt_e = opt_init_stack[0]->Energy();
+                CurcumaLogger::result_fmt("ConfSearch: Initial energies: {}={:.6f} Eh, {}={:.6f} Eh (delta={:.2f} kJ/mol)",
+                    m_md_method, md_e, m_opt_method, opt_e, (md_e - opt_e) * 2625.5);
+                m_initial_energy_opt = opt_e;
+            }
+            for (auto* mol : opt_init_stack) delete mol;
+        }
     }
 
     // Create shared bias pool for parallel ConfSearch.
@@ -290,6 +335,8 @@ void ConfSearch::start()
     // Bound to members so writeCheckpoint() can persist them (restored above on resume).
     double& initial_energy = m_initial_energy;
     double& best_energy = m_best_energy;
+    // Claude Generated (Jun 2026): dual-method opt_method energy tracking (local, not checkpointed)
+    double best_energy_opt = m_initial_energy_opt;
 
     // Claude Generated (Jun 2026): baseline RATTLE setting (whatever the user/registry chose).
     // Hot cycles override it with rattle_hot_mode; cooler cycles restore this baseline.
@@ -309,6 +356,8 @@ void ConfSearch::start()
     bool stop_requested = false; // set when a 'stop' file is seen at a checkpoint boundary
     for (m_currentT = loop_start_T; m_currentT >= m_endT; m_currentT -= m_deltaT) {
         temperature_cycle++;
+        // Claude Generated (Jun 2026): per-cycle wall-clock timing
+        RunTimer cycle_timer;
         const int entry = pending_entry; // 0 = run MD; 1 = MD already done (resume), skip it
         pending_entry = 0;               // only the first resumed cycle re-enters mid-way
         // Verbosity is scoped by the CurcumaMethod base (ctor captures, dtor restores), so each
@@ -368,15 +417,16 @@ void ConfSearch::start()
 
             // Cross-temperature: log pool statistics after MD phase and prune
             if (m_bias_pool) {
-                CurcumaLogger::result_fmt("ConfSearch: Bias pool has {} structures after T={}K MD",
-                    m_bias_pool->biasStructureCount(), m_currentT);
+                const std::size_t post_md = m_bias_pool->biasStructureCount();
                 // Prune structures with very low counter (rarely visited regions)
                 // Keep at least 2 structures to maintain bias coverage
-                if (m_bias_pool->biasStructureCount() > 2) {
+                if (post_md > 2) {
                     m_bias_pool->pruneByCounter(1);
-                    CurcumaLogger::result_fmt("ConfSearch: Bias pool pruned to {} structures",
-                        m_bias_pool->biasStructureCount());
                 }
+                const std::size_t post_prune = m_bias_pool->biasStructureCount();
+                // Claude Generated (Jun 2026): compact bias pool delta instead of separate before/after lines
+                CurcumaLogger::result_fmt("ConfSearch: Bias pool: {} -> {} after MD, {} after prune (+{} new deposits)",
+                    bias_pool_size_before_md, post_md, post_prune, post_prune > bias_pool_size_before_md ? post_prune - bias_pool_size_before_md : 0);
             }
             const std::size_t bias_pool_size_after_md = m_bias_pool ? m_bias_pool->biasStructureCount() : 0;
             no_new_bias_structures = in_stack_empty_before_md
@@ -386,6 +436,8 @@ void ConfSearch::start()
             // pool are now persisted, so an interrupt during the optimisation phases below does not
             // lose them. next_T = current T, so a resume re-enters THIS cycle at the post-MD phase.
             writeCheckpoint("post_md", m_currentT, temperature_cycle - 1);
+            // Claude Generated (Jun 2026): MD phase timing
+            CurcumaLogger::result_fmt("ConfSearch: MD phase took {:.1f} s", cycle_timer.Elapsed() / 1000.0);
             if (CheckStop()) {
                 CurcumaLogger::warn("ConfSearch: 'stop' file detected after MD -- checkpoint written, halting.");
                 stop_requested = true;
@@ -438,6 +490,8 @@ void ConfSearch::start()
             }
             CurcumaLogger::result_fmt("ConfSearch: Optimisation complete. {} bias structures optimised.", opt_count);
         }
+        // Claude Generated (Jun 2026): Phase 2 timing
+        CurcumaLogger::result_fmt("ConfSearch: Opt phase took {:.1f} s", cycle_timer.Elapsed() / 1000.0);
 
         CurcumaLogger::result("ConfSearch: === Phase 3: RMSD-Based Conformer Filtering ===");
         int rmsd_count = 0;
@@ -491,6 +545,11 @@ void ConfSearch::start()
             }
             CurcumaLogger::result_fmt("ConfSearch: High-level re-optimisation complete. {} structures re-optimised at {}.",
                 hi_count, m_opt_method);
+        } else if (m_opt_method == m_md_method) {
+            // Claude Generated (Jun 2026): explicit skip notice at result level
+            CurcumaLogger::result("ConfSearch: Phase 3b skipped (single-method mode)");
+        } else if (no_new_bias_structures) {
+            CurcumaLogger::result("ConfSearch: Phase 3b skipped (no new bias structures this cycle)");
         }
 
         CurcumaLogger::result("ConfSearch: === Phase 4: Energy Window and Topology Filter ===");
@@ -660,8 +719,11 @@ void ConfSearch::start()
             }
             CurcumaLogger::result_fmt("ConfSearch: opt_method ({}) refinement: {} structures -> cumulative + bias, {} rejected (topo). Energies on the {} PES (not compared to {}).",
                 m_opt_method, static_cast<int>(opt_candidates.size()), opt_rejected_topo, m_opt_method, m_md_method);
-            if (opt_lowest < std::numeric_limits<double>::infinity())
+            if (opt_lowest < std::numeric_limits<double>::infinity()) {
                 CurcumaLogger::result_fmt("ConfSearch: cycle lowest {} energy = {:.6f} Eh", m_opt_method, opt_lowest);
+                // Claude Generated (Jun 2026): track opt_method best across cycles
+                best_energy_opt = std::min(best_energy_opt, opt_lowest);
+            }
         }
 
         if (!feedback.empty()) {
@@ -691,6 +753,9 @@ void ConfSearch::start()
             initial_energy = lowest_energy;
             best_energy = lowest_energy;
             CurcumaLogger::result_fmt("ConfSearch: Initial best ({}) energy: {:.6f} Eh", m_md_method, initial_energy);
+            // Claude Generated (Jun 2026): report initial opt_method energy in dual mode
+            if (m_opt_method != m_md_method && m_initial_energy_opt < std::numeric_limits<double>::infinity())
+                CurcumaLogger::result_fmt("ConfSearch: Initial best ({}) energy: {:.6f} Eh", m_opt_method, m_initial_energy_opt);
         } else if (lowest_energy < std::numeric_limits<double>::infinity()) {
             double delta_best = (best_energy - lowest_energy) * 2625.5;    // >0 = improvement vs. last best
             double delta_initial = (initial_energy - lowest_energy) * 2625.5; // >0 = improvement vs. start
@@ -702,10 +767,25 @@ void ConfSearch::start()
                 CurcumaLogger::result_fmt("ConfSearch: No new best this cycle ({}): lowest {:.6f} Eh (best still {:.6f} Eh, {:.2f} kJ/mol vs. initial {:.6f} Eh)",
                     m_md_method, lowest_energy, best_energy, delta_initial, initial_energy);
             }
+            // Claude Generated (Jun 2026): report opt_method best alongside md_method in dual mode
+            if (m_opt_method != m_md_method && best_energy_opt < std::numeric_limits<double>::infinity()) {
+                double opt_delta_initial = (m_initial_energy_opt - best_energy_opt) * 2625.5;
+                CurcumaLogger::result_fmt("ConfSearch: {} best: {:.6f} Eh ({:+.2f} kJ/mol vs. initial {:.6f} Eh)",
+                    m_opt_method, best_energy_opt, opt_delta_initial, m_initial_energy_opt);
+            }
         }
 
         CurcumaLogger::result_fmt("ConfSearch: T={}K cycle complete -- {} accepted, {} rejected (topo), {} rejected (energy), {} in next cycle",
             m_currentT, accepted, rejected_topo, rejected_energy, static_cast<int>(m_in_stack.size()));
+        // Claude Generated (Jun 2026): report cumulative conformer count so the user can track progress
+        {
+            int cumulative_count = 0;
+            FileIterator cf(cumulative_file);
+            while (!cf.AtEnd()) { cf.Next(); cumulative_count++; }
+            CurcumaLogger::result_fmt("ConfSearch: Cumulative conformers: {} (after T={}K cycle)", cumulative_count, static_cast<int>(m_currentT));
+        }
+        // Claude Generated (Jun 2026): cycle timing summary
+        CurcumaLogger::result_fmt("ConfSearch: T={}K cycle took {:.1f} s", static_cast<int>(m_currentT), cycle_timer.Elapsed() / 1000.0);
 
         // Fallback: if Phase 4 left m_in_stack empty, restore the initial optimised seeds.
         // Without this, all remaining temperature cycles run 0 MD steps and repeatedly
@@ -794,10 +874,20 @@ void ConfSearch::start()
             if (initial_energy < std::numeric_limits<double>::infinity()) {
                 const double gain_kj = (initial_energy - e_min) * 2625.5;
                 if (gain_kj > 1e-3)
-                    CurcumaLogger::success_fmt("ConfSearch: search lowered the energy by {:.2f} kJ/mol vs. the initial structure ({:.6f} -> {:.6f} Eh)",
-                        gain_kj, initial_energy, e_min);
+                    CurcumaLogger::success_fmt("ConfSearch: search lowered the energy by {:.2f} kJ/mol vs. the initial structure ({}: {:.6f} -> {:.6f} Eh)",
+                        gain_kj, m_md_method, initial_energy, e_min);
                 else
                     CurcumaLogger::result_fmt("ConfSearch: initial structure remains the global minimum ({:.6f} Eh)", e_min);
+            }
+            // Claude Generated (Jun 2026): dual-method -- also report opt_method energy gain
+            if (m_opt_method != m_md_method && m_initial_energy_opt < std::numeric_limits<double>::infinity()) {
+                const double opt_gain_kj = (m_initial_energy_opt - e_min) * 2625.5;
+                if (opt_gain_kj > 1e-3)
+                    CurcumaLogger::success_fmt("ConfSearch: search lowered the energy by {:.2f} kJ/mol vs. the initial structure ({}: {:.6f} -> {:.6f} Eh)",
+                        opt_gain_kj, m_opt_method, m_initial_energy_opt, e_min);
+                else
+                    CurcumaLogger::result_fmt("ConfSearch: initial structure remains the global minimum ({}: {:.6f} Eh)",
+                        m_opt_method, e_min);
             }
             // Relative energies of the lowest few conformers, for a quick conformer-landscape readout.
             const int n_show = std::min(static_cast<int>(energies.size()), 10);
@@ -921,6 +1011,9 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
 
     int total = static_cast<int>(molecules.size());
 
+    // Claude Generated (Jun 2026): include method name in optimization output
+    const std::string opt_method_name = parameter.value("method", std::string("?"));
+
     // Write criterion: accept the final geometry whenever it has atoms,
     // regardless of convergence. For conformational search, a partially
     // optimised structure is still useful as input for the next MD cycle.
@@ -931,8 +1024,8 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
         double dE_kjmol = (e_end - e_start) * 2625.5;  // Eh -> kJ/mol
         if (res.final_molecule.AtomCount() > 0) {
             res.final_molecule.appendXYZFile(output_file);
-            CurcumaLogger::result_fmt("  Struct {:2d}: {:4d} steps, E = {:+.6f} Eh, dE = {:+.2f} kJ/mol{}",
-                idx + 1, res.iterations_performed, e_end, dE_kjmol,
+            CurcumaLogger::result_fmt("  Struct {:2d} [{}]: {:4d} steps, E = {:+.6f} Eh, dE = {:+.2f} kJ/mol{}",
+                idx + 1, opt_method_name, res.iterations_performed, e_end, dE_kjmol,
                 res.success ? "" : "  (not converged)");
             ++written;
         } else if (fallback.AtomCount() > 0) {
@@ -957,7 +1050,7 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
         threads.push_back(t);
     }
 
-    CurcumaLogger::result_fmt("Optimizing {} structures using {} thread(s)", total, m_threads);
+    CurcumaLogger::result_fmt("Optimizing {} structures using {} thread(s) [{}]", total, m_threads, opt_method_name);
     pool.StartAndWait();
 
     int failed = 0;
@@ -968,10 +1061,10 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
     }
 
     if (failed > 0)
-        CurcumaLogger::result_fmt("Optimization batch complete: {}/{} structures written ({} failed: zero step / gradient failure)",
-            written, total, failed);
+        CurcumaLogger::result_fmt("Optimization batch complete [{}]: {}/{} structures written ({} failed: zero step / gradient failure)",
+            opt_method_name, written, total, failed);
     else
-        CurcumaLogger::result_fmt("Optimization batch complete: {}/{} structures written to {}", written, total, output_file);
+        CurcumaLogger::result_fmt("Optimization batch complete [{}]: {}/{} structures written to {}", opt_method_name, written, total, output_file);
     // Thread-pool boundary: restore the orchestrator's verbosity (workers leave the shared-static
     // CurcumaLogger level unreliable). See the matching note in PerformMolecularDynamics.
     CurcumaLogger::set_verbosity(m_verbosity);
