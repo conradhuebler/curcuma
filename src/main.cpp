@@ -684,7 +684,8 @@ json CLI2Json(int argc, char** argv)
         "export_run", "export-run", // Export current run configuration
         "import_config", "import-config", // Import custom configuration
         "bak",   // Files to copy back from BMT output directory to CWD
-        "no_bmt" // Disable BMT output directory (legacy: write to CWD)
+        "no_bmt", // Disable BMT output directory (legacy: write to CWD)
+        "noprogress" // Disable live progress bars globally (e.g. when redirecting to a file)
     };
 
     // Claude Generated (October 2025): CLI keyword to module name mapping
@@ -2498,6 +2499,17 @@ int main(int argc, char **argv) {
         outfile.close();
 
         std::cout << "Exported current run configuration to: " << export_file << std::endl;
+    }
+
+    // Claude Generated (June 2026): Global progress-bar switch. Disabled when -noprogress is
+    // given or when stdout is not a TTY, so redirected output / tests carry no carriage-return
+    // noise. Set once here, before dispatch, for every command.
+    {
+        bool show_progress = !controller.value("noprogress", false);
+#ifndef _WIN32
+        show_progress = show_progress && isatty(fileno(stdout));
+#endif
+        CurcumaLogger::set_progress_enabled(show_progress);
     }
 
     // Try structured dispatch first - Claude Generated

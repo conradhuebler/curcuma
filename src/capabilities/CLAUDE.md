@@ -121,7 +121,7 @@ capabilities/
 
 ### Known Issues
 - Memory optimization needed for large systems (>1000 atoms)
-- ConfScan verbosity: Accept/Reject messages not visible at default level
+- ConfScan output: at verbosity 1 each pass shows a live progress bar (on by default; `-confscan.progress false` / global `-noprogress` / non-TTY disable it) and a clean per-pass summary; per-structure `Accept/Reject` detail is at verbosity >=2.
 - **ConfScan reorder geometry truncation (⚠️ open, found June 2026)**: `ConfScan::Reorder` calls `mol1->ApplyReorderRule(t->ReorderRule())` (`confscan.cpp:1439`) with a rule sized to the *compared* atom set. Heavy-only (`-rmsd.protons false`) → reordered structures written with heavy-atom count (e.g. 55 vs 114); `get_rmsd` → empty rule → reordered/rejected structures written with 0 atoms. Filtering counts are correct; only the written geometry of reordered structures is reduced. Fix: rule must map all atoms, or `ApplyReorderRule` must preserve unmapped atoms. CLI tests 02/06 surfaced this.
 - **ConfScan threaded reorder stall (⚠️ open, found June 2026)**: the reorder path with `threads>1` can intermittently deadlock/stall (observed: heavy-only `-rmsd.protons false`, and restart-resume double-run; at high and low load). CLI tests 06 (heavy) and 07 (restart) pin `threads=1`.
 - SimpleMD wall potential: Boundary logic and force calculation accuracy issues (TODO)

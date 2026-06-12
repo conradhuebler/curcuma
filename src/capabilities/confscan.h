@@ -281,6 +281,8 @@ private:
     std::vector<std::vector<int>> m_reorder_rules;
 
     void PrintStatus(const std::string& info = "");
+    void PrintPassSummary(const std::string& label); // Claude Generated: clean per-pass summary
+    void updateProgress(); // Claude Generated: per-structure progress (bar at v1, detail at v2+)
 
     /* Claude Generated: Print a pass-level status line at verbosity >= 1.
        The global CurcumaLogger verbosity is lowered to 0 by the RMSD machinery
@@ -373,6 +375,7 @@ private:
     // --- Output Control ---
     PARAM(write_xyz, Bool, false, "Write XYZ files for accepted structures", "Output", {"writeXYZ"})
     PARAM(write_files, Bool, false, "Write additional output files", "Output", {"writefiles"})
+    PARAM(progress, Bool, true, "Show a live progress bar during each pass (disable globally with -noprogress)", "Output", {})
     PARAM(all_xyz, Bool, false, "Write all structures to XYZ", "Output", {"allxyz"})
     PARAM(fewer_file, Bool, false, "Reduce number of output files", "Output", {"fewerFile"})
 
@@ -416,6 +419,8 @@ private:
     bool m_heavy = false;
     bool m_noname = false;
     bool m_writeFiles = true;
+    bool m_show_progress = true; // Claude Generated: live progress bar during passes
+    std::string m_pass_label; // Claude Generated: label shown on the progress bar / pass summary
     bool m_useRestart = false;
     bool m_internal_parametrised = false;
     bool m_parameter_loaded = false;

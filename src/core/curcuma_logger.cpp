@@ -28,6 +28,7 @@
 // Static member definitions - Claude Generated
 int CurcumaLogger::m_verbosity = 1;
 bool CurcumaLogger::m_use_colors = true;
+bool CurcumaLogger::m_progress_enabled = true; // Claude Generated: global progress-bar switch
 CurcumaLogger::OutputFormat CurcumaLogger::m_format = CurcumaLogger::OutputFormat::TERMINAL;
 std::chrono::high_resolution_clock::time_point CurcumaLogger::m_start_time;
 std::unordered_map<std::string, std::string> CurcumaLogger::m_citation_registry;
@@ -264,66 +265,68 @@ void CurcumaLogger::param_table(const json& parameters, const std::string& title
 
 void CurcumaLogger::param_comparison_table(const json& defaults, const json& controller, const std::string& title)
 {
-    if (m_verbosity >= 1) {
-        log_colored(fmt::color::cyan, "[TABLE] ", title);
-        std::string separator(title.length() + 8, '-');
-        log_plain("        " + separator);
+    if (m_verbosity < 1)
+        return;
 
-        // Collect all unique keys from both JSONs
-        std::set<std::string> all_keys;
-        for (const auto& item : defaults.items()) {
-            all_keys.insert(item.key());
-        }
-        for (const auto& item : controller.items()) {
-            all_keys.insert(item.key());
-        }
+    log_colored(fmt::color::cyan, "[TABLE] ", title);
+    std::string separator(title.length() + 8, '-');
+    log_plain("        " + separator);
 
-        if (all_keys.empty()) {
-            log_plain("        No parameters found");
-            log_plain("");
-            return;
-        }
+    // Claude Generated (June 2026): Build the rows up front so the key column can be aligned.
+    // Iterate only the keys of `defaults` (the module's registered parameters) and read the
+    // effective value from `controller`. This keeps the table restricted to registered params -
+    // controller-only entries (the input filename, global flags, nested module/"global"/"rmsd"
+    // sub-config objects that rendered as ugly "{N keys}") are no longer shown. Object/array
+    // values are skipped defensively.
+    struct Row {
+        std::string key;
+        std::string value;
+        bool changed;
+    };
+    std::set<std::string> all_keys;
+    for (const auto& item : defaults.items())
+        all_keys.insert(item.key());
 
-        // Sort keys for consistent output
-        std::vector<std::string> sorted_keys(all_keys.begin(), all_keys.end());
-        std::sort(sorted_keys.begin(), sorted_keys.end());
+    std::vector<Row> rows;
+    size_t key_width = 0;
+    bool any_changed = false;
+    for (const auto& key : all_keys) { // std::set iterates in sorted order
+        const json* eff = nullptr;
+        if (controller.contains(key))
+            eff = &controller.at(key);
+        else if (defaults.contains(key))
+            eff = &defaults.at(key);
+        if (eff == nullptr || eff->is_object() || eff->is_array())
+            continue; // skip nested sub-configs / non-scalar meta entries
 
-        // Simple list format for cleaner implementation
-        for (const auto& key : sorted_keys) {
-            std::string display_value;
-            bool is_changed = false;
-
-            // Determine current value and check if changed
-            if (controller.contains(key)) {
-                const auto& ctrl_val = controller[key];
-                display_value = format_json_value(ctrl_val);
-
-                // Check if different from default
-                if (defaults.contains(key) && defaults[key] != ctrl_val) {
-                    is_changed = true;
-                }
-            } else if (defaults.contains(key)) {
-                display_value = format_json_value(defaults[key]);
-            } else {
-                display_value = "N/A";
-            }
-
-            std::string param_line = "        " + key + " : " + display_value;
-            if (is_changed) {
-                param_line += "*";
-                log_colored(fmt::color::yellow, "", param_line);
-            } else {
-                log_colored(fmt::color::cornflower_blue, "", param_line);
-            }
-        }
-
-        if (std::any_of(sorted_keys.begin(), sorted_keys.end(), [&](const auto& key) {
-                return controller.contains(key) && defaults.contains(key) && defaults[key] != controller[key];
-            })) {
-            log_colored(fmt::color::white, "        ", "Legend: * = modified from default");
-        }
-        log_plain("");
+        bool changed = controller.contains(key) && defaults.contains(key)
+            && defaults.at(key) != controller.at(key);
+        any_changed = any_changed || changed;
+        rows.push_back({ key, format_json_value(*eff), changed });
+        key_width = std::max(key_width, key.size());
     }
+
+    if (rows.empty()) {
+        log_plain("        No parameters found");
+        log_plain("");
+        return;
+    }
+
+    for (const auto& r : rows) {
+        std::string padded_key = r.key;
+        padded_key.resize(key_width, ' '); // align the ' : ' separators
+        std::string line = "        " + padded_key + " : " + r.value;
+        if (r.changed) {
+            line += "  *";
+            log_colored(fmt::color::yellow, "", line);
+        } else {
+            log_colored(fmt::color::cornflower_blue, "", line);
+        }
+    }
+
+    if (any_changed)
+        log_colored(fmt::color::white, "        ", "Legend: * = modified from default");
+    log_plain("");
 }
 
 void CurcumaLogger::result_raw(const std::string& data)
@@ -349,6 +352,40 @@ void CurcumaLogger::progress(int current, int total, const std::string& msg)
         log_colored(fmt::color::yellow, "[PROG]  ",
             fmt::format("{} [{:3.0f}%] {}/{}", msg, percent, current, total));
     }
+}
+
+// Claude Generated: live in-place ASCII progress bar. Updated via carriage-return on stdout.
+// No-op when the global switch is off. ASCII only (terminal-safe). NOTE: gated only on the
+// global switch, not on logger verbosity (which sub-objects lower mid-task) - the caller is
+// responsible for any verbosity gating.
+void CurcumaLogger::progress_bar(int current, int total, const std::string& label)
+{
+    if (!m_progress_enabled || total <= 0)
+        return;
+    if (current > total)
+        current = total;
+    if (current < 0)
+        current = 0;
+    const int width = 24;
+    double frac = static_cast<double>(current) / total;
+    int filled = static_cast<int>(frac * width + 0.5);
+    if (filled > width)
+        filled = width;
+    std::string bar(filled, '#');
+    bar.append(width - filled, '-');
+    // Trailing spaces overwrite any leftover characters from a previous, longer line.
+    fmt::print("\r  {} [{}] {:3.0f}% {}/{}    ", label, bar, frac * 100.0, current, total);
+    std::fflush(stdout);
+}
+
+// Claude Generated: close the progress-bar line with a newline so following output is clean.
+// Gated only on the global switch (the caller decides when a bar was actually shown).
+void CurcumaLogger::progress_done()
+{
+    if (!m_progress_enabled)
+        return;
+    fmt::print("\n");
+    std::fflush(stdout);
 }
 
 void CurcumaLogger::energy_rel(double value_eh, const std::string& label)
