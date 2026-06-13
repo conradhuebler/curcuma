@@ -29,6 +29,18 @@ static const uint32_t row_spv[] =
 static const uint32_t vec_spv[] =
 #include "vec.spv.inc"
 ;
+static const uint32_t gemm_spv[] =
+#include "gemm.spv.inc"
+;
+static const uint32_t scale_cols_spv[] =
+#include "scale_cols.spv.inc"
+;
+static const uint32_t fock_spv[] =
+#include "fock.spv.inc"
+;
+static const uint32_t popband_spv[] =
+#include "popband.spv.inc"
+;
 
 } // namespace shaders
 } // namespace vk

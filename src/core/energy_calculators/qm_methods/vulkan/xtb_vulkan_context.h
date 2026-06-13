@@ -58,6 +58,31 @@ public:
     /// Claude Generated (Stage 1, validated on AMD 890M / RADV vs Eigen).
     bool solveSymmetric(const double* A_colmajor, int n, double* eps_out, double* V_colmajor);
 
+    // ---- Device-resident GFN1 SCF (Stage 2) ---------------------------------
+    // Keeps H0/S (and the per-iteration density + MO coefficients) RESIDENT on the
+    // device for one geometry, so only length-n vectors cross the bus per iteration.
+    // The generalized problem F C = S C ε is reduced via the Löwdin transform
+    // X = S⁻¹ᐟ² (built once on the device by residentBegin), not the host Cholesky L
+    // — XᵀFX is two GEMMs, avoiding a GPU triangular solve. All matrices n×n
+    // column-major; H0/S/P symmetric. Any false → caller falls back to the CPU.
+    // Claude Generated (Stage 2a, GFN1 isotropic).
+
+    /// Upload the geometry-constant H0, overlap S; build the resident X = S⁻¹ᐟ²;
+    /// allocate the resident F/Ã/C/P work buffers. Once per geometry, before the loop.
+    bool residentBegin(const double* H0_colmajor, const double* S_colmajor, int n);
+
+    /// One SCF step: F = H0 − ½·S·(v_ao⊕v_ao), Ã = X·F·X, eigensolve, C = X·C̃
+    /// (resident). Writes the ascending eigenvalues to eps_out (length n).
+    bool residentSolve(const double* v_ao, double* eps_out);
+
+    /// Build the density P = C·diag(occ)·Cᵀ over the leading ncol (ascending-eps)
+    /// columns from the resident C; return Mulliken AO populations pop_ao(μ) =
+    /// Σ_ν P_μν·S_μν (length n) and band = Σ_μν P_μν·H0_μν. P stays resident.
+    bool residentDensity(const double* occ, int ncol, double* pop_ao, double* band);
+
+    /// Download the converged density P and MO coefficients C (n×n column-major).
+    bool residentFinalize(double* P_colmajor, double* C_colmajor);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;

@@ -21,7 +21,54 @@
 namespace {
 using curcuma::xtb::MethodType;
 using curcuma::xtb::gpu::XtbVulkanContext;
-}
+
+/**
+ * @brief Device-resident GFN1 SCF backend (Stage 2) over an XtbVulkanContext.
+ *
+ * Adapts the column-major resident kernels to the project-typed GpuScfBackend the core
+ * XTB calls. supportsMultipole() stays false, so GFN2 falls back to the Stage-1
+ * ExternalEigensolver path instead of this isotropic loop. H0/S are symmetric, so the
+ * Eigen column-major copy preserves values. Claude Generated (Stage 2a).
+ */
+class VulkanScfBackend : public curcuma::xtb::GpuScfBackend {
+public:
+    explicit VulkanScfBackend(XtbVulkanContext* ctx) : m_ctx(ctx) {}
+
+    bool begin(const Matrix& H0, const Matrix& S, const Eigen::MatrixXd& L) override
+    {
+        const int n = static_cast<int>(H0.rows());
+        if (!m_ctx || n <= 0 || S.rows() != n) return false;
+        (void)L;  // Löwdin S^-1/2 built on-device from S instead of the host Cholesky
+        m_n = n;
+        Eigen::MatrixXd Hcm = H0, Scm = S;  // column-major copies (H0/S symmetric)
+        return m_ctx->residentBegin(Hcm.data(), Scm.data(), n);
+    }
+    bool solve(const Eigen::VectorXd& v_ao, Vector& eps, bool fp32 = false, int n_eig = 0) override
+    {
+        (void)fp32; (void)n_eig;  // always full FP64 spectrum
+        if (!m_ctx || static_cast<int>(v_ao.size()) != m_n) return false;
+        eps.resize(m_n);
+        return m_ctx->residentSolve(v_ao.data(), eps.data());
+    }
+    bool density(const Eigen::VectorXd& occ, int ncol, Eigen::VectorXd& pop_ao, double& band) override
+    {
+        if (!m_ctx || ncol < 0 || ncol > m_n) return false;
+        pop_ao.resize(m_n); band = 0.0;
+        return m_ctx->residentDensity(occ.data(), ncol, pop_ao.data(), &band);
+    }
+    bool finalize(Matrix& P, Matrix& C) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        Eigen::MatrixXd Pcm(m_n, m_n), Ccm(m_n, m_n);
+        if (!m_ctx->residentFinalize(Pcm.data(), Ccm.data())) return false;
+        P = Pcm; C = Ccm;
+        return true;
+    }
+private:
+    XtbVulkanContext* m_ctx = nullptr;
+    int               m_n   = 0;
+};
+}  // namespace
 
 XtbVulkanComputationalMethod::XtbVulkanComputationalMethod(MethodType method, const json& config)
     : m_method(method)
@@ -65,10 +112,20 @@ XtbVulkanComputationalMethod::XtbVulkanComputationalMethod(MethodType method, co
                     C = L.transpose().triangularView<Eigen::Upper>().solve(Ctil);
                     return true;
                 });
+            // Stage 2: install the device-resident GFN1 SCF backend. Under the default
+            // Broyden mixing, XTB::Calculation keeps H0/S (and the per-iteration density
+            // and MO coefficients) resident on the device for the whole SCF — only
+            // length-nao vectors cross the bus per iteration. GFN1 runs the isotropic
+            // loop; GFN2 (supportsMultipole()==false here) falls back to the Stage-1
+            // eigensolver hook above.
+            m_scf_backend = std::make_unique<VulkanScfBackend>(ctx);
+            xtb->setGpuScfBackend(m_scf_backend.get());
+
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::info(fmt::format(
-                    "{}: Vulkan GPU eigensolver active (FP64 Jacobi); "
-                    "SCF/integrals/gradient on CPU (Stage 1)", getMethodName()));
+                    "{}: Vulkan GPU eigensolver + device-resident GFN1 SCF active "
+                    "(FP64 Jacobi / Lowdin); integrals/gradient on CPU (Stage 2)",
+                    getMethodName()));
         }
     } else {
         CurcumaLogger::warn(fmt::format(

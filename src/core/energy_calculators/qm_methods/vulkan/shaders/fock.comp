@@ -1,0 +1,19 @@
+#version 450
+// FP64 GFN1 isotropic Fock build (n×n column-major):
+//   F[i,j] = H0[i,j] − ½·S[i,j]·(v[i] + v[j])
+// where v = v_ao is the per-iteration AO shift potential. H0/S are resident.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, binding = 0) readonly  buffer H0b { double H0[]; };
+layout(std430, binding = 1) readonly  buffer Sb  { double S[]; };
+layout(std430, binding = 2) readonly  buffer Vb  { double v[]; };
+layout(std430, binding = 3) writeonly buffer Fb  { double F[]; };
+layout(push_constant) uniform PC { uint n; } pc;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    uint j = gl_GlobalInvocationID.y;
+    if (i >= pc.n || j >= pc.n) return;
+    uint idx = i + j * pc.n;
+    F[idx] = H0[idx] - 0.5lf * S[idx] * (v[i] + v[j]);
+}
