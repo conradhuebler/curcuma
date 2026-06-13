@@ -210,14 +210,27 @@ bool EnergyCalculator::createMethod(const std::string& method_name, const json& 
         
         ClearError();
 
-#ifndef USE_CUDA
-        // Track GPU fallback: user requested -gpu cuda but CUDA unavailable
-        std::string gpu_req = config.value("gpu", "none");
-        std::transform(gpu_req.begin(), gpu_req.end(), gpu_req.begin(), ::tolower);
-        if (gpu_req == "cuda") {
-            m_gpu_fallback = true;
-        }
+        // Track GPU fallback: user explicitly requested a GPU backend (cuda/rocm/
+        // vulkan) that this build was not compiled with. "auto" is best-effort and
+        // never warns. Claude Generated (June 2026): generalised from CUDA-only.
+        {
+            std::string gpu_req = config.value("gpu", "none");
+            std::transform(gpu_req.begin(), gpu_req.end(), gpu_req.begin(), ::tolower);
+            bool explicit_gpu = (gpu_req == "cuda" || gpu_req == "rocm" || gpu_req == "vulkan");
+            bool have_backend = false;
+#if defined(USE_CUDA)
+            if (gpu_req == "cuda") have_backend = true;
 #endif
+#if defined(USE_ROCM)
+            if (gpu_req == "rocm") have_backend = true;
+#endif
+#if defined(USE_VULKAN)
+            if (gpu_req == "vulkan") have_backend = true;
+#endif
+            if (explicit_gpu && !have_backend) {
+                m_gpu_fallback = true;
+            }
+        }
 
         return true;
         
@@ -452,7 +465,8 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
 
         // Final warning if GPU was requested but fell back to CPU
         if (m_gpu_fallback && !m_gpu_fallback_warned) {
-            CurcumaLogger::warn("Calculation completed on CPU. The requested -gpu cuda was not used.");
+            CurcumaLogger::warn("Calculation completed on CPU. The requested -gpu backend "
+                                "was not compiled into this build.");
             m_gpu_fallback_warned = true;
         }
 

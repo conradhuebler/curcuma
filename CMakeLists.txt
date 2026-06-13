@@ -82,6 +82,24 @@ option(USE_CUDA
 option(USE_CUDA_XTB
     "Enable CUDA-accelerated native xTB SCF/integrals/gradient (gfn1/gfn2 -gpu cuda)" ${USE_CUDA})
 
+# Claude Generated (June 2026): ROCm/HIP-accelerated GFN-FF + native xTB (-gpu rocm).
+# Requires the ROCm toolkit (hipcc, hipBLAS, rocSOLVER). Separate HIP source tree
+# under .../rocm/ mirrors the CUDA .../cuda/ kernels; runtime code gates on USE_ROCM
+# (gfnff) / USE_ROCM_XTB (native xTB), exactly like the CUDA flags.
+option(USE_ROCM
+    "Enable ROCm/HIP-accelerated GPU (gfnff/gfn1/gfn2 -gpu rocm, requires ROCm toolkit)" OFF)
+option(USE_ROCM_XTB
+    "Enable ROCm/HIP-accelerated native xTB SCF/integrals/gradient (gfn1/gfn2 -gpu rocm)" ${USE_ROCM})
+
+# Claude Generated (June 2026): Vulkan-compute-accelerated GFN-FF + native xTB
+# (-gpu vulkan). Hand-written SPIR-V compute shaders (no BLAS/LAPACK on Vulkan).
+# Requires the Vulkan SDK (loader + headers + glslc/glslangValidator). Runtime code
+# gates on USE_VULKAN (gfnff) / USE_VULKAN_XTB (native xTB).
+option(USE_VULKAN
+    "Enable Vulkan-compute-accelerated GPU (gfnff/gfn1/gfn2 -gpu vulkan, requires Vulkan SDK)" OFF)
+option(USE_VULKAN_XTB
+    "Enable Vulkan-compute-accelerated native xTB SCF/integrals/gradient (gfn1/gfn2 -gpu vulkan)" ${USE_VULKAN})
+
 # WP-D Stage B (May 2026): hand-rolled AVX2 exp(-x^2) for GFN-FF dcn step 3 hot loop.
 # Opt-in. Default OFF keeps the build bit-identical to pre-WP. Requires AVX2 (set
 # USE_AVX2 or USE_MARCH_NATIVE alongside); CMake errors out if AVX2 cannot be enabled.
@@ -965,6 +983,75 @@ if(USE_CUDA)
 
     message(STATUS "CUDA support enabled: gfnff -gpu cuda available")
     message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+endif()
+
+# Claude Generated (June 2026): ROCm/HIP backend (gfnff/gfn1/gfn2 -gpu rocm).
+# Build: cmake -DUSE_ROCM=ON -DUSE_ROCM_XTB=ON -DCMAKE_HIP_ARCHITECTURES=gfx1100 && make -j4
+# Stage 0 wires only the native-xTB HIP context (device handshake + CPU pass-through);
+# the GFN-FF HIP kernels (rocm/ mirror of the CUDA gfnff kernels) land in a later stage,
+# so no GFN-FF HIP source is referenced here yet.
+if(USE_ROCM)
+    enable_language(HIP)
+    find_package(hip REQUIRED)
+    find_package(hipblas REQUIRED)
+    find_package(rocsolver REQUIRED)
+    if(NOT DEFINED CMAKE_HIP_ARCHITECTURES)
+        set(CMAKE_HIP_ARCHITECTURES "gfx906;gfx908;gfx90a;gfx1030;gfx1100" CACHE STRING "HIP architectures")
+    endif()
+
+    # HIP-compiled device sources (mirror of the CUDA .cu kernels, hipified).
+    set(ROCM_HIP_SOURCES "")
+    if(USE_ROCM_XTB)
+        list(APPEND ROCM_HIP_SOURCES
+            src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.hip)
+    endif()
+    if(ROCM_HIP_SOURCES)
+        set_source_files_properties(${ROCM_HIP_SOURCES} PROPERTIES LANGUAGE HIP)
+        target_sources(curcuma_core PRIVATE ${ROCM_HIP_SOURCES})
+        set_target_properties(curcuma_core PROPERTIES HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}")
+    endif()
+
+    target_include_directories(curcuma_core PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(curcuma_core hip::device roc::hipblas roc::rocsolver)
+    target_compile_definitions(curcuma_core PUBLIC USE_ROCM)
+
+    if(USE_ROCM_XTB)
+        # Host-compiled wrapper (no device code) — the HIP kernels live in the .hip TU.
+        target_sources(curcuma_core PRIVATE
+            src/core/energy_calculators/qm_methods/xtb_hip_method.cpp)
+        target_compile_definitions(curcuma_core PUBLIC USE_ROCM_XTB)
+        message(STATUS "ROCm native xTB enabled: gfn1/gfn2 -gpu rocm available")
+    endif()
+    message(STATUS "ROCm support enabled: -gpu rocm available")
+    message(STATUS "HIP architectures: ${CMAKE_HIP_ARCHITECTURES}")
+endif()
+
+# Claude Generated (June 2026): Vulkan compute backend (gfnff/gfn1/gfn2 -gpu vulkan).
+# Build: cmake -DUSE_VULKAN=ON -DUSE_VULKAN_XTB=ON && make -j4
+# Stage 0 wires the host Vulkan context (instance/device/queue handshake) + native-xTB
+# pass-through wrapper. The hand-written SPIR-V compute shaders under vulkan/shaders/
+# are compiled+embedded starting at Stage 1 (the eigensolver path); not referenced here.
+if(USE_VULKAN)
+    find_package(Vulkan REQUIRED)
+
+    set(VULKAN_SOURCES
+        src/core/energy_calculators/qm_methods/vulkan/vk_context.cpp)
+    if(USE_VULKAN_XTB)
+        list(APPEND VULKAN_SOURCES
+            src/core/energy_calculators/qm_methods/vulkan/xtb_vulkan_context.cpp
+            src/core/energy_calculators/qm_methods/xtb_vulkan_method.cpp)
+    endif()
+
+    target_sources(curcuma_core PRIVATE ${VULKAN_SOURCES})
+    target_include_directories(curcuma_core PRIVATE ${PROJECT_SOURCE_DIR} ${Vulkan_INCLUDE_DIRS})
+    target_link_libraries(curcuma_core Vulkan::Vulkan)
+    target_compile_definitions(curcuma_core PUBLIC USE_VULKAN)
+
+    if(USE_VULKAN_XTB)
+        target_compile_definitions(curcuma_core PUBLIC USE_VULKAN_XTB)
+        message(STATUS "Vulkan native xTB enabled: gfn1/gfn2 -gpu vulkan available")
+    endif()
+    message(STATUS "Vulkan support enabled: -gpu vulkan available (Stage 0)")
 endif()
 
 target_link_libraries(curcuma_core pthread fmt::fmt-header-only )
