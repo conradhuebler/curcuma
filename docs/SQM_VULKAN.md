@@ -108,6 +108,9 @@ but is chosen for correctness first.
 4. On-device nuclear gradient — pending (CPU); GFN2 multipole resident SCF (Stage 2b)
    — pending.
 
+The remaining stages (gradient, GFN2 multipole stack, GFN-FF, device solvation) are broken
+into work packages in [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md) (Vulkan = `V-AP*`).
+
 ## What was tested
 
 On an **AMD Radeon 890M (RADV, integrated, shaderFloat64)**, build `release_vulkan/`

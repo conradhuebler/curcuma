@@ -121,6 +121,9 @@ to `ld.lld` and drop GNU OpenMP / `libgomp`). No `enable_language(HIP)` is used.
    dispersion gradient + CN chain-rule stay on the host. GFN2 multipole gradient + GFN-FF
    ROCm still pending.
 
+The remaining work (GFN2 multipole integrals/SCF/gradient, GFN-FF, device solvation) is
+broken into work packages in [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md) (ROCm = `R-AP*`).
+
 ## What was tested
 
 On an **AMD Radeon 890M (gfx1150)**, build `release_rocm/` (`-DUSE_ROCM_XTB=ON`, rocSOLVER):
