@@ -1,17 +1,20 @@
 # Native GFN1/GFN2/GFN-FF on AMD GPUs (ROCm/HIP)
 
-> Status: 🤖 AI-generated, **Stage 0 (build + dispatch scaffold)**. NOT yet functional
-> on-device, NOT human production tested. The ROCm path currently performs the device
-> handshake and then runs the validated CPU pipeline; the HIP kernels (hipified from the
-> CUDA stack) land in later stages.
+> Status: 🤖 AI-generated, ⚙️ machine-tested, **Stage 1 (GPU eigensolver)**. NOT human
+> production tested. `-gpu rocm` runs the native GFN1/GFN2 SCF with the per-iteration
+> generalized symmetric eigensolve on the GPU via **rocSOLVER `dsygvd`** (`F C = S C ε`
+> solved directly on the device); integrals, Fock build, density and the nuclear gradient
+> stay on the CPU. Works for both GFN1 and GFN2 (the host hands rocSOLVER the complete
+> Fock). Energies match the CPU path bit-for-bit on the validation runs (AMD 890M).
 
 ## What it is
 
 `-gpu rocm` selects the ROCm/HIP backend for the native methods, mirroring the existing
-CUDA path (`-gpu cuda`). It is the AMD sibling of [docs/SQM_GPU.md](SQM_GPU.md):
-cuSOLVER/cuBLAS map to rocSOLVER/hipBLAS, and the CUDA `.cu` kernels are hipified into a
-separate `rocm/` source tree (the operator chose separate HIP files over shared-via-hipify
-so the CUDA and ROCm builds evolve independently).
+CUDA path (`-gpu cuda`). It is the AMD sibling of [docs/SQM_GPU.md](SQM_GPU.md): the
+per-iteration eigensolve uses **rocSOLVER** (Stage 1, live); later stages port the CUDA
+`.cu` integral/SCF/gradient kernels into a separate `rocm/` source tree with `hipcc`
+(separate HIP files, not shared-via-hipify, so the CUDA and ROCm builds evolve
+independently).
 
 ```
 ./curcuma -sp mol.xyz -method gfn2 -gpu rocm    # explicit ROCm
@@ -73,31 +76,36 @@ as CUDA, correct at every step:
 
 | File | Role |
 |------|------|
-| `qm_methods/rocm/xtb_hip_context.{h,hip}` | HIP device engine (hipBLAS/rocSOLVER + stream); mirrors `XtbGpuContext` |
-| `qm_methods/xtb_hip_method.{h,cpp}` | `ComputationalMethod` wrapper; owns the context + the CPU `NativeXtbMethod` |
+| `qm_methods/rocm/xtb_hip_context.{h,cpp}` | HIP context: device handshake + `solveGeneralized` (rocSOLVER `dsygvd`). Host-callable — device memory via `hipMalloc`/`hipMemcpy`, no device kernels yet, so it compiles as plain C++ |
+| `qm_methods/xtb_hip_method.{h,cpp}` | `ComputationalMethod` wrapper; owns the context + the CPU `NativeXtbMethod`; installs the `ExternalEigensolver` hook |
 | `ff_methods/rocm/` | (later stage) hipified GFN-FF kernels + workspace |
 
 Dispatch: `method_factory.cpp` `resolveNativeXtbGpuMode()` returns `"rocm"` when
 `-gpu rocm` and `USE_ROCM_XTB` are set, then constructs `XtbHipComputationalMethod`.
 
-## Stages (mirroring the CUDA port)
+Unlike the Vulkan path (which hand-writes a Jacobi eigensolver + Löwdin reduction),
+rocSOLVER provides the **generalized** symmetric-definite solver directly, so the host
+reduction/back-transform is unnecessary and the same hook serves GFN1 and GFN2.
 
-0. **Build + dispatch + device handshake** — done (this commit). `-gpu rocm` builds,
-   selects the backend, probes the device, runs CPU.
-1. GPU eigensolver (`rocsolver_dsygst` + `rocsolver_dsyevd`) via `ExternalEigensolver`.
-2. Device-resident SCF (GFN1 isotropic; GFN2 multipole).
-3. On-device integral build (CN/S/H0/L/γ/multipole).
-4. On-device nuclear gradient (`-opt`/`-md` device-resident).
-   GFN-FF HIP kernels are ported alongside stages 2-4.
+## Stages
 
-## Validation plan
-
-Reuse the CUDA harness relabelled `rocm_*`: elementwise match vs the CPU path
-(integrals ~1e-15, gradient ~1e-15 Eh/A) and the 12-molecule SQM set ≤1e-8 Eh vs tblite.
+0. **Build + dispatch + device handshake** — done.
+1. **GPU eigensolver via rocSOLVER `dsygvd`** — done. The per-iteration `F C = S C ε` is
+   solved on the device (`ExternalEigensolver` hook: host builds `S = L·Lᵀ`, rocSOLVER
+   returns `C`/`ε`). Host-callable, no HIP-language compilation.
+2-4. Device-resident SCF, on-device integral build, nuclear gradient — pending (these need
+   real HIP device kernels compiled with `hipcc`; the integrals/Fock/density/gradient run
+   on the CPU until then). GFN-FF ROCm is also pending.
 
 ## What was tested
 
-- Stage 0 only: factory dispatch (`-gpu rocm|auto`, fallback warnings) verified on the CPU
-  build; the `xtb_hip_method.cpp` host wrapper compiles against the project flags. The
-  `.hip` device TU is compile-pending a full `hipcc` toolchain.
-- NOT tested: any on-device numerics (no functional ROCm kernels yet).
+On an **AMD Radeon 890M (gfx1150)**, build `release_rocm/` (`-DUSE_ROCM_XTB=ON`, rocSOLVER):
+
+- **gfn1 / gfn2 single point** `-gpu rocm` vs `-gpu none`: H2O and benzoic acid (15 atoms)
+  energies bit-identical at 8 decimals (|dE| = 0).
+- **gfn1 / gfn2 `-opt`**: converge to the same minima as the CPU (H2O -5.768775 / -5.070544).
+- Stage 0 (no rocSOLVER): device handshake + CPU fallback, energies bit-identical.
+- Default non-ROCm `release/` build stays green.
+
+What was **NOT** tested: large systems (iGPU FP64 is slow — correctness milestone, not
+performance), discrete/CDNA GPUs, MD, on-device integrals/gradient (still CPU), GFN-FF.

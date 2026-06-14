@@ -37,12 +37,41 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
             CurcumaLogger::success(fmt::format(
                 "{}: ROCm context ready on device {} ({})",
                 getMethodName(), m_gpu->deviceId(), m_gpu->deviceName()));
-        // Stage 1+: install the GPU eigensolver hook + device-resident SCF backend
-        // (XtbHipContext implements the same GpuScfBackend contract as XtbGpuContext).
+
+#ifdef HAVE_ROCSOLVER
+        // Stage 1: install the GPU eigensolver. solveEigen() delegates the per-iteration
+        // generalized eigenproblem (F, S = L·Lᵀ) → (C, eps) to rocSOLVER (dsygvd) on the
+        // device; everything else (integrals, Fock, density, gradient) stays on the CPU.
+        // rocSOLVER solves the generalized problem directly, so this works for both GFN1
+        // and GFN2 (the host hands it the complete Fock).
+        if (curcuma::xtb::XTB* xtb = m_cpu->solver()) {
+            curcuma::xtb::gpu::XtbHipContext* ctx = m_gpu.get();
+            xtb->setExternalEigensolver(
+                [ctx](const Matrix& F, const Eigen::MatrixXd& L,
+                      Matrix& C, Vector& eps) -> bool {
+                    const int n = static_cast<int>(F.rows());
+                    if (n <= 0 || L.rows() != n || L.cols() != n) return false;
+                    Eigen::MatrixXd Fcm = F;                                   // column-major
+                    Eigen::MatrixXd Ll  = L.triangularView<Eigen::Lower>();    // lower Cholesky
+                    Eigen::MatrixXd Scm = Ll * Ll.transpose();                 // S = L·Lᵀ
+                    eps.resize(n);
+                    Eigen::MatrixXd Ccm(n, n);
+                    if (!ctx->solveGeneralized(Fcm.data(), Scm.data(), n, eps.data(), Ccm.data()))
+                        return false;
+                    C = Ccm;
+                    return true;
+                });
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info(fmt::format(
+                    "{}: ROCm GPU eigensolver active (rocSOLVER dsygvd, FP64); "
+                    "SCF/integrals/gradient on CPU (Stage 1)", getMethodName()));
+        }
+#else
         if (CurcumaLogger::get_verbosity() >= 2)
             CurcumaLogger::info(fmt::format(
-                "{}: ROCm Stage 0 (device handshake); SCF/integrals/gradient on CPU",
-                getMethodName()));
+                "{}: ROCm Stage 0 (device handshake); SCF/integrals/gradient on CPU "
+                "(build without rocSOLVER)", getMethodName()));
+#endif
     } else {
         CurcumaLogger::warn(fmt::format(
             "{}: no usable ROCm/HIP device; running CPU path", getMethodName()));

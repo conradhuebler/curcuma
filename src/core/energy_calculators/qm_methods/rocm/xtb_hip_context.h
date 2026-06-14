@@ -56,11 +56,20 @@ public:
     /// True if at least one HIP device is visible (static probe, no allocation).
     static bool deviceAvailable();
 
-    // ---- Stage 1+ (hipified from XtbGpuContext) -----------------------------
-    // The resident SCF / integral / gradient API mirrors XtbGpuContext exactly
-    // (residentBegin/Solve/Density/Finalize, beginBasis/computeIntegrals,
-    // computeGradient, the Stage-5/6 hooks). Added with the kernel port so the
-    // shared GpuScfBackend adapter forwards to either context unchanged.
+    /// Solve the generalized symmetric-definite eigenproblem F C = S C ε on the GPU via
+    /// rocSOLVER (rocsolver_dsygvd). F_colmajor / S_colmajor are n×n symmetric
+    /// (column-major; symmetric so the storage order is irrelevant). On success eps_out
+    /// (length n) holds the ASCENDING eigenvalues and C_colmajor the generalized
+    /// eigenvectors (CᵀSC = I, column j ↔ eps_out[j]). Returns false on any HIP/rocSOLVER
+    /// error, or always when built without rocSOLVER (HAVE_ROCSOLVER) — the caller then
+    /// falls back to the CPU eigensolver. Device buffers + the rocBLAS handle are cached
+    /// across calls. Host-callable (no device kernels). Claude Generated (Stage 1).
+    bool solveGeneralized(const double* F_colmajor, const double* S_colmajor, int n,
+                          double* eps_out, double* C_colmajor);
+
+    // ---- Stage 2+ (resident SCF, hipified from XtbGpuContext) ----------------
+    // residentBegin/Solve/Density/Finalize etc. mirror XtbGpuContext so the shared
+    // GpuScfBackend adapter forwards to either context unchanged.
 
 private:
     struct Impl;

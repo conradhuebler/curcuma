@@ -1001,19 +1001,43 @@ if(USE_ROCM)
 
     target_compile_definitions(curcuma_core PUBLIC USE_ROCM)
     if(USE_ROCM_XTB)
-        # Host-compiled HIP runtime calls (no device code yet) — plain C++ in curcuma_core.
-        set_source_files_properties(
-            src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.cpp
-            PROPERTIES COMPILE_DEFINITIONS "__HIP_PLATFORM_AMD__")
+        # Host-compiled HIP runtime calls — plain C++ in curcuma_core. With rocSOLVER the
+        # same TU calls rocsolver_dsygvd (host API, device memory via hipMalloc/hipMemcpy),
+        # still no device kernels / HIP-language compilation.
         target_sources(curcuma_core PRIVATE
             src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.cpp
             src/core/energy_calculators/qm_methods/xtb_hip_method.cpp)
         target_include_directories(curcuma_core PRIVATE /opt/rocm/include)
         target_link_libraries(curcuma_core ${ROCM_HIP_RT})
         target_compile_definitions(curcuma_core PUBLIC USE_ROCM_XTB)
-        message(STATUS "ROCm native xTB enabled: gfn1/gfn2 -gpu rocm available (Stage 0, host runtime)")
+
+        # Stage 1: rocSOLVER eigensolver (needs rocSOLVER + rocBLAS; host-callable libs).
+        # HAVE_ROCSOLVER is set PER-SOURCE on the two ROCm TUs (not a PUBLIC target define)
+        # so enabling it does not recompile all of curcuma_core.
+        set(_rocm_ctx_defs "__HIP_PLATFORM_AMD__")
+        set(_rocm_wrap_defs "")
+        if(rocsolver_FOUND AND rocblas_FOUND)
+            find_library(ROCM_ROCSOLVER rocsolver REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64)
+            find_library(ROCM_ROCBLAS   rocblas   REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64)
+            target_link_libraries(curcuma_core ${ROCM_ROCSOLVER} ${ROCM_ROCBLAS})
+            list(APPEND _rocm_ctx_defs  "HAVE_ROCSOLVER" "HAVE_ROCBLAS")
+            list(APPEND _rocm_wrap_defs "HAVE_ROCSOLVER")
+            message(STATUS "ROCm Stage 1 eigensolver enabled (rocSOLVER dsygvd)")
+        else()
+            message(STATUS "ROCm Stage 0 only: install rocsolver + rocblas for the GPU eigensolver")
+        endif()
+        set_source_files_properties(
+            src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.cpp
+            PROPERTIES COMPILE_DEFINITIONS "${_rocm_ctx_defs}")
+        if(_rocm_wrap_defs)
+            set_source_files_properties(
+                src/core/energy_calculators/qm_methods/xtb_hip_method.cpp
+                PROPERTIES COMPILE_DEFINITIONS "${_rocm_wrap_defs}")
+        endif()
+
+        message(STATUS "ROCm native xTB enabled: gfn1/gfn2 -gpu rocm available")
     endif()
-    message(STATUS "ROCm: rocBLAS=${rocblas_FOUND} rocSOLVER=${rocsolver_FOUND} (both needed for the Stage-1 GPU eigensolver)")
+    message(STATUS "ROCm: rocBLAS=${rocblas_FOUND} rocSOLVER=${rocsolver_FOUND}")
 endif()
 
 # Claude Generated (June 2026): Vulkan compute backend (gfnff/gfn1/gfn2 -gpu vulkan).

@@ -17,6 +17,10 @@
 #include "xtb_hip_context.h"
 
 #include <hip/hip_runtime_api.h>
+#ifdef HAVE_ROCSOLVER
+#include <rocblas/rocblas.h>
+#include <rocsolver/rocsolver.h>
+#endif
 
 #include <memory>
 #include <string>
@@ -30,7 +34,40 @@ struct XtbHipContext::Impl {
     int         device = -1;
     std::string name;
     hipStream_t stream = nullptr;
-    // Stage 1+: hipblasHandle_t blas; rocblas_handle solver; (rocSOLVER reuses rocBLAS)
+
+#ifdef HAVE_ROCSOLVER
+    rocblas_handle handle = nullptr;   // rocSOLVER reuses the rocBLAS handle
+    bool    handle_ok = false;
+    int     solver_n  = 0;             // cached device-buffer size
+    double* dF   = nullptr;            // F → eigenvectors (n×n)
+    double* dS   = nullptr;            // S (overwritten by its Cholesky factor)
+    double* dEps = nullptr;            // eigenvalues (n)
+    double* dE   = nullptr;            // rocSOLVER workspace (n)
+    rocblas_int* dInfo = nullptr;      // convergence flag
+
+    bool ensureSolver(int n) {
+        if (!handle_ok) {
+            if (rocblas_create_handle(&handle) != rocblas_status_success) return false;
+            rocblas_set_stream(handle, stream);
+            handle_ok = true;
+        }
+        if (n == solver_n && dF) return true;
+        freeSolver();
+        const size_t nn = static_cast<size_t>(n) * n;
+        if (hipMalloc(&dF, nn * sizeof(double)) != hipSuccess) return false;
+        if (hipMalloc(&dS, nn * sizeof(double)) != hipSuccess) return false;
+        if (hipMalloc(&dEps, n * sizeof(double)) != hipSuccess) return false;
+        if (hipMalloc(&dE, n * sizeof(double)) != hipSuccess) return false;
+        if (hipMalloc(&dInfo, sizeof(rocblas_int)) != hipSuccess) return false;
+        solver_n = n;
+        return true;
+    }
+    void freeSolver() {
+        for (void* p : { (void*)dF, (void*)dS, (void*)dEps, (void*)dE, (void*)dInfo })
+            if (p) hipFree(p);
+        dF = dS = dEps = dE = nullptr; dInfo = nullptr; solver_n = 0;
+    }
+#endif // HAVE_ROCSOLVER
 };
 
 XtbHipContext::XtbHipContext()
@@ -55,7 +92,12 @@ XtbHipContext::XtbHipContext()
 
 XtbHipContext::~XtbHipContext()
 {
-    if (m_impl && m_impl->stream)
+    if (!m_impl) return;
+#ifdef HAVE_ROCSOLVER
+    m_impl->freeSolver();
+    if (m_impl->handle_ok) rocblas_destroy_handle(m_impl->handle);
+#endif
+    if (m_impl->stream)
         hipStreamDestroy(m_impl->stream);
 }
 
@@ -72,6 +114,40 @@ bool XtbHipContext::deviceAvailable()
 {
     int count = 0;
     return hipGetDeviceCount(&count) == hipSuccess && count > 0;
+}
+
+bool XtbHipContext::solveGeneralized(const double* F, const double* S, int n,
+                                     double* eps_out, double* C_colmajor)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)F; (void)S; (void)n; (void)eps_out; (void)C_colmajor;
+    return false;   // built without rocSOLVER → caller uses the CPU eigensolver
+#else
+    if (!m_impl || !m_impl->ok || n <= 0 || !F || !S || !eps_out || !C_colmajor)
+        return false;
+    Impl& d = *m_impl;
+    if (!d.ensureSolver(n)) return false;
+    const size_t nn = static_cast<size_t>(n) * n;
+
+    // F C = S C ε  (itype = AX), eigenvectors of the ORIGINAL problem (CᵀSC = I).
+    // dF is overwritten with the eigenvectors, dS with its Cholesky factor.
+    if (hipMemcpy(d.dF, F, nn * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+    if (hipMemcpy(d.dS, S, nn * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+
+    const rocblas_status st = rocsolver_dsygvd(
+        d.handle, rocblas_eform_ax, rocblas_evect_original, rocblas_fill_lower,
+        n, d.dF, n, d.dS, n, d.dEps, d.dE, d.dInfo);
+    if (st != rocblas_status_success) return false;
+    if (hipDeviceSynchronize() != hipSuccess) return false;
+
+    rocblas_int info = 0;
+    if (hipMemcpy(&info, d.dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
+    if (info != 0) return false;   // S not positive-definite or no convergence
+
+    if (hipMemcpy(C_colmajor, d.dF, nn * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+    if (hipMemcpy(eps_out, d.dEps, n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+    return true;
+#endif
 }
 
 } // namespace gpu
