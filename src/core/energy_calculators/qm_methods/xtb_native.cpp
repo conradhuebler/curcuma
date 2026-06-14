@@ -411,6 +411,9 @@ double XTB::Calculation(bool gradient)
                 m_X     = Lcm;   // m_X is column-major Eigen::MatrixXd → direct
                 m_gamma = Gcm;
                 integrals_from_device = true;
+                if (verb >= 2)
+                    CurcumaLogger::info("SCF: integrals built on GPU device "
+                                        "(S/H0/Lowdin/gamma downloaded; host build skipped)");
             }
         }
     }

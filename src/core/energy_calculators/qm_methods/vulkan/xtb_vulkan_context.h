@@ -28,6 +28,29 @@ namespace curcuma {
 namespace xtb {
 namespace gpu {
 
+/// Molecule-constant flattened basis + H0 parameters for the device integral build
+/// (Stage 3). POD of raw host pointers (copied during beginBasis) so this header stays
+/// project-type-free; the GpuScfBackend adapter fills it from GpuBasisFlat. Mirrors the
+/// GFN1/GFN2-isotropic subset (s/p). Claude Generated.
+struct XtbVulkanBasisData {
+    int nat = 0, nsh = 0, nao = 0, is_gfn2 = 0, nprim_total = 0;
+    const int*    z = nullptr;            // nat
+    const int*    sh2at = nullptr;        // nsh
+    const int*    ang_sh = nullptr;       // nsh
+    const int*    iao_sh = nullptr;       // nsh
+    const int*    nao_sh = nullptr;       // nsh
+    const int*    sh_nprim = nullptr;     // nsh
+    const int*    sh_prim_off = nullptr;  // nsh
+    const double* prim_alpha = nullptr;   // nprim_total
+    const double* prim_coeff = nullptr;   // nprim_total
+    const double* sh_zeta = nullptr;      // nsh
+    const double* selfenergy = nullptr;   // nsh
+    const double* kcn = nullptr;          // nsh
+    const double* shpoly = nullptr;       // nsh
+    const int*    valence = nullptr;      // nsh
+    const double* shell_hardness = nullptr; // nsh
+};
+
 class XtbVulkanContext {
 public:
     XtbVulkanContext();
@@ -82,6 +105,19 @@ public:
 
     /// Download the converged density P and MO coefficients C (n×n column-major).
     bool residentFinalize(double* P_colmajor, double* C_colmajor);
+
+    // ---- Device-side integral build (Stage 3) -------------------------------
+    // beginBasis uploads the molecule-constant flattened basis + element tables once;
+    // beginComputed (per geometry) runs CN → self-energy → S/H0 (SPIR-V kernels) → the
+    // Löwdin X = S⁻¹ᐟ² → Coulomb γ on the device, writing S/H0 into the resident buffers
+    // the SCF consumes. download* fetch S/H0/γ so the host can skip its integral build.
+    // The Cholesky factor L (for the host m_X) is derived host-side from S by the adapter.
+    // Claude Generated (Stage 3).
+    bool beginBasis(const XtbVulkanBasisData& basis);
+    bool beginComputed(const double* xyz_bohr);
+    bool downloadOverlap(double* S_colmajor);
+    bool downloadH0(double* H0_colmajor);
+    bool downloadGamma(double* gamma_colmajor);
 
 private:
     struct Impl;

@@ -1,12 +1,15 @@
 # Native GFN1/GFN2/GFN-FF on Vulkan compute
 
 > Status: 🤖 AI-generated, ⚙️ machine-tested. NOT human production tested.
-> **GFN1 = Stage 2 (device-resident SCF):** Fock build, Löwdin S⁻¹ᐟ² reduction, the
-> symmetric eigensolve, density, Mulliken populations and the band energy all run on the
-> GPU; H0/S stay resident and only `v_ao` (up) + eigenvalues/populations (down) cross the
-> bus per iteration. **GFN2 = Stage 1 (GPU eigensolver only):** the per-iteration
-> eigensolve is on the GPU, the rest on the CPU. Integrals and the nuclear gradient are
-> on the CPU for both. Energies match the CPU path bit-for-bit on the validation runs.
+> **Stage 3 (on-device integral build):** the CN, overlap S, bare Hamiltonian H0, the
+> Löwdin X = S⁻¹ᐟ² and the Coulomb γ are built by SPIR-V kernels on the device and consumed
+> in place (no per-geometry nao² upload). **GFN1 = device-resident SCF (Stage 2):** Fock
+> build, the symmetric eigensolve, density, Mulliken populations and the band energy all run
+> on the GPU; only `v_ao` (up) + eigenvalues/populations (down) cross the bus per iteration.
+> **GFN2 = device integrals + GPU eigensolver (Stage 1):** the per-iteration eigensolve is
+> on the GPU; the multipole integrals and the rest of the potential are on the CPU. The
+> nuclear gradient is on the CPU for both (Stage 4 pending). Energies match the CPU path
+> bit-for-bit on the validation runs.
 
 ## What it is
 
@@ -96,8 +99,12 @@ but is chosen for correctness first.
    (`gemm`); `density` forms P = C·diag(occ)·Cᵀ + Mulliken populations + band
    (`scale_cols`/`gemm`/`popband`). Only `v_ao`/`occ` up and `eps`/`pop`/`band` down
    per iteration. GFN2 (no multipole here) falls back to stage 1.
-3. On-device integral build (CN/S/H0/γ + GFN2 multipole) — pending (built on CPU,
-   uploaded once per geometry in `begin`).
+3. **On-device integral build (CN/S/H0/L/γ)** — done. `beginBasis` uploads the
+   molecule-constant flattened basis + element tables once; `beginComputed` (per geometry)
+   runs `cn` → `self_energy` → `overlap_h0` → `gamma` SPIR-V kernels, then builds the Löwdin
+   X from the device S. `xtb_native.cpp` downloads S/H0/γ (and derives L = chol(S) host-side
+   via Eigen LLT — no device triangular solve) in place of the host build. Active for both
+   GFN1 and GFN2 (the s/p subset); GFN2 multipole integrals (dp/qp) are still CPU.
 4. On-device nuclear gradient — pending (CPU); GFN2 multipole resident SCF (Stage 2b)
    — pending.
 
@@ -109,13 +116,16 @@ On an **AMD Radeon 890M (RADV, integrated, shaderFloat64)**, build `release_vulk
 - **Eigensolver vs Eigen** (standalone, `prototype/`): random symmetric n=4..128, eigenvalues
   to ~1e-13, reconstruction / orthogonality to ~1e-14. Generalized solve (Löwdin S⁻¹ᐟ²
   chain) vs Eigen GeneralizedSelfAdjointEigenSolver: residual ~1e-14.
-- **gfn1 single point + opt** (Stage-2 device-resident path) `-gpu vulkan` vs `-gpu none`:
-  H2O and benzoic acid (C6H5COOH, 15 atoms) bit-identical at 8 decimals (|dE| = 0); H2O
-  opt converges to the same minimum (-5.768775 Eh).
-- **gfn2 single point + opt** (Stage-1 eigensolver path): H2O / benzoic acid bit-identical;
-  opt to -5.070544 Eh.
+- **Stage-3 device integral build active** (confirmed at `-verbosity 2`): both methods log
+  "SCF: integrals built on GPU device (S/H0/Lowdin/gamma downloaded; host build skipped)";
+  GFN1 additionally logs "device-resident GFN1 path (CN/S/H0/L built on GPU; no nao^2 upload)".
+- **gfn1 + gfn2 single point** `-gpu vulkan` vs `-gpu none` over the full 12-molecule
+  `test_cases/sqm_reference` set (H2, He2, LiH, H2O, NH3, CH4, HCN, C6H6, triose, caffeine,
+  acetic_acid_dimer, and the 231-atom `complex`): all 24 bit-identical at 8 decimals (|dE| = 0).
+- **gfn1 + gfn2 opt** (H2O): converges to the CPU minimum (gfn1 -5.768775, gfn2 -5.070544 Eh).
 - Default non-Vulkan `release/` build stays green (cli_curcumaopt_*/cli_rmsd_* 11/11).
 
 What was **NOT** tested: large systems (>~100 nao; the iGPU FP64 Jacobi is slow — this is a
-correctness milestone, not a performance one), discrete GPUs, NVIDIA/Intel devices, MD,
-and the on-device integral/Fock/gradient stages (still CPU). Human production testing pending.
+correctness milestone, not a performance one), discrete GPUs, NVIDIA/Intel devices, MD, the
+GFN2 multipole integrals + multipole resident SCF, and the on-device nuclear gradient (still
+CPU, Stage 4). Human production testing pending.

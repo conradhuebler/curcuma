@@ -23,6 +23,7 @@
 #include "xtb_vulkan_context.h"
 #include "vk_context.h"
 #include "shaders/spirv_kernels.h"
+#include "../parameters/xtb_params_extra.hpp"   // covalent_rad_d3_au / pauling_en / atomic_rad_au
 
 #include <vulkan/vulkan.h>
 
@@ -61,6 +62,11 @@ struct XtbVulkanContext::Impl {
                      ploF = VK_NULL_HANDLE, ploPB = VK_NULL_HANDLE;
     VkShaderModule mAng{}, mCol{}, mRow{}, mVec{}, mGemm{}, mScale{}, mFock{}, mPB{};
     VkPipeline pAng{}, pCol{}, pRow{}, pVec{}, pGemm{}, pScale{}, pFock{}, pPB{};
+    // Stage 3 integral pipelines.
+    VkDescriptorSetLayout dsl5 = VK_NULL_HANDLE, dsl18 = VK_NULL_HANDLE;
+    VkPipelineLayout ploI4 = VK_NULL_HANDLE, ploI5 = VK_NULL_HANDLE, ploI18 = VK_NULL_HANDLE;
+    VkShaderModule mCN{}, mSE{}, mOV{}, mGM{};
+    VkPipeline pCN{}, pSE{}, pOV{}, pGM{};
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
 
@@ -76,6 +82,15 @@ struct XtbVulkanContext::Impl {
     VkDescriptorPool rPool = VK_NULL_HANDLE;
     VkDescriptorSet sSdA{}, sSdV{}, sMc{}, sXg{}, sFk{}, sTg{}, sAtg{}, sAtA{}, sCtV{}, sCg{}, sCwS{}, sPg{}, sPBs{};
     std::vector<int> ridx;   // ascending-eps permutation from the last residentSolve
+
+    // Stage 3 integral build: molecule-constant basis + per-geometry scratch + sets.
+    bool basis_ready = false;
+    int  bnat = 0, bnsh = 0, bnao = 0, bnprim = 0, bis_gfn2 = 0;
+    Buf bZ, bSh2at, bAng, bIao, bNao, bShNprim, bShPrimOff, bPrimA, bPrimC, bShZeta, bShpoly,
+        bSelfE, bKcn, bGhard, bValence, bCovrad, bPauling, bArad;   // molecule-constant
+    Buf bXyz, bCN, bSE, bGamma;                                     // per-geometry / scratch
+    VkDescriptorPool iPool = VK_NULL_HANDLE;
+    VkDescriptorSet  setCN{}, setSE{}, setOV{}, setGM{};
 
     explicit Impl() {
         if (!vkc.ok()) return;
@@ -156,6 +171,15 @@ struct XtbVulkanContext::Impl {
         pAng = pipe(mAng, ploJ); pCol = pipe(mCol, ploJ); pRow = pipe(mRow, ploJ); pVec = pipe(mVec, ploJ);
         pGemm = pipe(mGemm, ploG); pScale = pipe(mScale, ploS); pFock = pipe(mFock, ploF); pPB = pipe(mPB, ploPB);
         if (!pAng || !pCol || !pRow || !pVec || !pGemm || !pScale || !pFock || !pPB) return false;
+        // Stage 3 integral kernels: cn/gamma use 4 SSBO + 8B push (shared layout), self_energy
+        // 5 SSBO + 4B, overlap_h0 18 SSBO + 12B.
+        dsl5 = makeDsl(5); dsl18 = makeDsl(18);
+        ploI4 = makePl(dsl4, 8); ploI5 = makePl(dsl5, 4); ploI18 = makePl(dsl18, 12);
+        if (!dsl5 || !dsl18 || !ploI4 || !ploI5 || !ploI18) return false;
+        mCN = mod(cn_spv, sizeof(cn_spv)); mSE = mod(self_energy_spv, sizeof(self_energy_spv));
+        mOV = mod(overlap_h0_spv, sizeof(overlap_h0_spv)); mGM = mod(gamma_spv, sizeof(gamma_spv));
+        pCN = pipe(mCN, ploI4); pSE = pipe(mSE, ploI5); pOV = pipe(mOV, ploI18); pGM = pipe(mGM, ploI4);
+        if (!pCN || !pSE || !pOV || !pGM) return false;
         VkCommandBufferAllocateInfo cbi{}; cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO; cbi.commandPool = pool; cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbi.commandBufferCount = 1;
         if (vkAllocateCommandBuffers(dev, &cbi, &cmd) != VK_SUCCESS) return false;
         VkFenceCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -286,18 +310,101 @@ struct XtbVulkanContext::Impl {
         return true;
     }
 
-    bool residentBegin(const double* H0, const double* S, int n) {
-        if (!ensurePipes() || !allocResident(n)) return false;
-        std::memcpy(rH0.ptr, H0, sizeof(double) * (size_t)n * n);
-        std::memcpy(rS.ptr,  S,  sizeof(double) * (size_t)n * n);
-        // X = S^{-1/2}: eigendecompose S (rAtil holds S), then X = U diag(λ^{-1/2}) Uᵀ.
-        std::memcpy(rAtil.ptr, S, sizeof(double) * (size_t)n * n); identity(rU, n);
+    // Löwdin X = S⁻¹ᐟ² from the resident overlap rS (eigendecompose, X = U·diag(λ⁻¹ᐟ²)·Uᵀ).
+    // Shared by residentBegin (host-uploaded S) and beginComputed (device-built S).
+    bool buildLowdinX(int n) {
+        std::memcpy(rAtil.ptr, rS.ptr, sizeof(double) * (size_t)n * n);
+        identity(rU, n);
         if (!jacobiDevice(n, rrounds, rnpairs, sSdA, sSdV)) return false;
         const double* Ad = (const double*)rAtil.ptr; double* d = (double*)rd.ptr;
         for (int i = 0; i < n; ++i) { double lam = Ad[i + (size_t)i * n]; d[i] = (lam > 0.0) ? 1.0 / std::sqrt(lam) : 0.0; }
         if (!scaleDev(n, sMc)) return false;          // M = U diag(dinv)
-        if (!gemmDev(n, sXg, 1)) return false;         // X = M Uᵀ
+        return gemmDev(n, sXg, 1);                     // X = M Uᵀ
+    }
+    bool residentBegin(const double* H0, const double* S, int n) {
+        if (!ensurePipes() || !allocResident(n)) return false;
+        std::memcpy(rH0.ptr, H0, sizeof(double) * (size_t)n * n);
+        std::memcpy(rS.ptr,  S,  sizeof(double) * (size_t)n * n);
+        return buildLowdinX(n);
+    }
+
+    // ----- Stage 3: device integral build ---------------------------------
+    template <class T> bool upB(Buf& b, const T* host, size_t count) {
+        if (b.buf) freeBuf(b);
+        b = makeBuf(sizeof(T) * count);
+        if (!b.buf) return false;
+        std::memcpy(b.ptr, host, sizeof(T) * count);
         return true;
+    }
+    bool dispatch1(VkPipeline p, VkPipelineLayout plo, VkDescriptorSet set,
+                   const void* pc, uint32_t pcBytes, uint32_t gx, uint32_t gy) {
+        if (!beginCmd()) return false;
+        vkCmdPushConstants(cmd, plo, VK_SHADER_STAGE_COMPUTE_BIT, 0, pcBytes, pc);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, plo, 0, 1, &set, 0, nullptr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+        vkCmdDispatch(cmd, gx, gy, 1);
+        return submit();
+    }
+    bool begBasis(const XtbVulkanBasisData& bd) {
+        if (!ensurePipes() || bd.nao <= 0 || !allocResident(bd.nao)) return false;
+        bnat = bd.nat; bnsh = bd.nsh; bnao = bd.nao; bnprim = bd.nprim_total; bis_gfn2 = bd.is_gfn2;
+        bool g = true;
+        g &= upB(bZ, bd.z, bnat);
+        g &= upB(bSh2at, bd.sh2at, bnsh);     g &= upB(bAng, bd.ang_sh, bnsh);
+        g &= upB(bIao, bd.iao_sh, bnsh);      g &= upB(bNao, bd.nao_sh, bnsh);
+        g &= upB(bShNprim, bd.sh_nprim, bnsh); g &= upB(bShPrimOff, bd.sh_prim_off, bnsh);
+        g &= upB(bPrimA, bd.prim_alpha, bnprim); g &= upB(bPrimC, bd.prim_coeff, bnprim);
+        g &= upB(bShZeta, bd.sh_zeta, bnsh);  g &= upB(bShpoly, bd.shpoly, bnsh);
+        g &= upB(bSelfE, bd.selfenergy, bnsh); g &= upB(bKcn, bd.kcn, bnsh);
+        g &= upB(bGhard, bd.shell_hardness, bnsh);
+        { std::vector<int> val(bnsh, 1); g &= upB(bValence, bd.valence ? bd.valence : val.data(), bnsh); }
+        { std::vector<double> cov(86), pau(86), ar(86);
+          for (int z = 1; z <= 86; ++z) { cov[z-1]=curcuma::xtb::covalent_rad_d3_au(z); pau[z-1]=curcuma::xtb::pauling_en[z-1]; ar[z-1]=curcuma::xtb::atomic_rad_au(z); }
+          g &= upB(bCovrad, cov.data(), 86); g &= upB(bPauling, pau.data(), 86); g &= upB(bArad, ar.data(), 86); }
+        if (bXyz.buf) freeBuf(bXyz); bXyz = makeBuf(sizeof(double) * 3 * (size_t)bnat);
+        if (bCN.buf) freeBuf(bCN);   bCN  = makeBuf(sizeof(double) * (size_t)bnat);
+        if (bSE.buf) freeBuf(bSE);   bSE  = makeBuf(sizeof(double) * (size_t)bnsh);
+        if (bGamma.buf) freeBuf(bGamma); bGamma = makeBuf(sizeof(double) * (size_t)bnsh * bnsh);
+        g &= bXyz.buf && bCN.buf && bSE.buf && bGamma.buf;
+        if (!g) return false;
+        if (iPool) vkDestroyDescriptorPool(dev, iPool, nullptr);
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 + 5 + 18 + 4 };
+        VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpi.maxSets = 4; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
+        if (vkCreateDescriptorPool(dev, &dpi, nullptr, &iPool) != VK_SUCCESS) return false;
+        setCN = allocSet(iPool, dsl4); setSE = allocSet(iPool, dsl5); setOV = allocSet(iPool, dsl18); setGM = allocSet(iPool, dsl4);
+        bindSet(setCN, { &bXyz, &bZ, &bCovrad, &bCN });
+        bindSet(setSE, { &bSelfE, &bKcn, &bSh2at, &bCN, &bSE });
+        bindSet(setOV, { &bSh2at, &bAng, &bIao, &bNao, &bShNprim, &bShPrimOff, &bPrimA, &bPrimC,
+                         &bShZeta, &bShpoly, &bSE, &bZ, &bValence, &bXyz, &bArad, &bPauling, &rS, &rH0 });
+        bindSet(setGM, { &bSh2at, &bGhard, &bXyz, &bGamma });
+        basis_ready = true;
+        return true;
+    }
+    bool computeIntegrals(const double* xyz) {
+        if (!basis_ready || bnao <= 0) return false;
+        std::memcpy(bXyz.ptr, xyz, sizeof(double) * 3 * (size_t)bnat);
+        const uint32_t g1n = (bnsh + 7) / 8;
+        uint32_t pcCN[2] = { (uint32_t)bnat, (uint32_t)bis_gfn2 };
+        uint32_t pcSE[1] = { (uint32_t)bnsh };
+        uint32_t pcOV[3] = { (uint32_t)bnsh, (uint32_t)bnao, (uint32_t)bis_gfn2 };
+        uint32_t pcGM[2] = { (uint32_t)bnsh, (uint32_t)bis_gfn2 };
+        if (!dispatch1(pCN, ploI4, setCN, pcCN, 8, (bnat + 63) / 64, 1)) return false;
+        if (!dispatch1(pSE, ploI5, setSE, pcSE, 4, (bnsh + 63) / 64, 1)) return false;
+        if (!dispatch1(pOV, ploI18, setOV, pcOV, 12, g1n, g1n)) return false;   // → rS, rH0
+        if (!dispatch1(pGM, ploI4, setGM, pcGM, 8, g1n, g1n)) return false;     // → bGamma
+        return buildLowdinX(bnao);
+    }
+    bool dlMat(double* out, const Buf& src, size_t count) {
+        if (!src.ptr) return false;
+        std::memcpy(out, src.ptr, sizeof(double) * count);
+        return true;
+    }
+    void freeBasis() {
+        for (Buf* b : { &bZ,&bSh2at,&bAng,&bIao,&bNao,&bShNprim,&bShPrimOff,&bPrimA,&bPrimC,&bShZeta,
+                        &bShpoly,&bSelfE,&bKcn,&bGhard,&bValence,&bCovrad,&bPauling,&bArad,
+                        &bXyz,&bCN,&bSE,&bGamma }) freeBuf(*b);
+        if (iPool) { vkDestroyDescriptorPool(dev, iPool, nullptr); iPool = VK_NULL_HANDLE; }
+        basis_ready = false;
     }
 
     bool residentSolve(const double* v_ao, double* eps_out) {
@@ -342,13 +449,13 @@ struct XtbVulkanContext::Impl {
         if (!dev) return;
         if (sPool) vkDestroyDescriptorPool(dev, sPool, nullptr);
         if (rPool) vkDestroyDescriptorPool(dev, rPool, nullptr);
+        freeBasis();
         for (Buf* b : { &sA,&sV,&sP,&sC,&rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs }) freeBuf(*b);
         if (fence) vkDestroyFence(dev, fence, nullptr);
-        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB }) if (p) vkDestroyPipeline(dev, p, nullptr);
-        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB }) if (m) vkDestroyShaderModule(dev, m, nullptr);
-        for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
-        if (dsl3) vkDestroyDescriptorSetLayout(dev, dsl3, nullptr);
-        if (dsl4) vkDestroyDescriptorSetLayout(dev, dsl4, nullptr);
+        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM }) if (p) vkDestroyPipeline(dev, p, nullptr);
+        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM }) if (m) vkDestroyShaderModule(dev, m, nullptr);
+        for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB,ploI4,ploI5,ploI18 }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
+        for (VkDescriptorSetLayout d : { dsl3,dsl4,dsl5,dsl18 }) if (d) vkDestroyDescriptorSetLayout(dev, d, nullptr);
         sPool = rPool = VK_NULL_HANDLE; fence = VK_NULL_HANDLE; pipes_ready = false;
     }
 };
@@ -385,6 +492,30 @@ bool XtbVulkanContext::residentFinalize(double* Pcm, double* Ccm)
 {
     if (!m_impl || !m_impl->vkc.ok() || !Pcm || !Ccm) return false;
     return m_impl->residentFinalize(Pcm, Ccm);
+}
+
+bool XtbVulkanContext::beginBasis(const XtbVulkanBasisData& basis)
+{
+    return m_impl && m_impl->vkc.ok() && m_impl->begBasis(basis);
+}
+bool XtbVulkanContext::beginComputed(const double* xyz_bohr)
+{
+    return m_impl && m_impl->vkc.ok() && xyz_bohr && m_impl->computeIntegrals(xyz_bohr);
+}
+bool XtbVulkanContext::downloadOverlap(double* S_colmajor)
+{
+    return m_impl && m_impl->vkc.ok() && S_colmajor && m_impl->basis_ready
+        && m_impl->dlMat(S_colmajor, m_impl->rS, static_cast<size_t>(m_impl->bnao) * m_impl->bnao);
+}
+bool XtbVulkanContext::downloadH0(double* H0_colmajor)
+{
+    return m_impl && m_impl->vkc.ok() && H0_colmajor && m_impl->basis_ready
+        && m_impl->dlMat(H0_colmajor, m_impl->rH0, static_cast<size_t>(m_impl->bnao) * m_impl->bnao);
+}
+bool XtbVulkanContext::downloadGamma(double* gamma_colmajor)
+{
+    return m_impl && m_impl->vkc.ok() && gamma_colmajor && m_impl->basis_ready
+        && m_impl->dlMat(gamma_colmajor, m_impl->bGamma, static_cast<size_t>(m_impl->bnsh) * m_impl->bnsh);
 }
 
 } // namespace gpu

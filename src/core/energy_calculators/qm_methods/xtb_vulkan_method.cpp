@@ -64,9 +64,64 @@ public:
         P = Pcm; C = Ccm;
         return true;
     }
+
+    // ---- Stage 3: device integral build -----------------------------------
+    bool beginBasis(const curcuma::xtb::GpuBasisFlat& bf,
+                    const curcuma::xtb::GpuH0Flat& hf) override
+    {
+        if (!m_ctx || bf.nao <= 0) return false;
+        m_n = bf.nao; m_nsh = bf.nsh;
+        curcuma::xtb::gpu::XtbVulkanBasisData bd;
+        bd.nat = bf.nat; bd.nsh = bf.nsh; bd.nao = bf.nao; bd.is_gfn2 = bf.is_gfn2;
+        bd.nprim_total = static_cast<int>(bf.prim_alpha.size());
+        bd.z = bf.z.data(); bd.sh2at = bf.sh2at.data(); bd.ang_sh = bf.ang_sh.data();
+        bd.iao_sh = bf.iao_sh.data(); bd.nao_sh = bf.nao_sh.data();
+        bd.sh_nprim = bf.sh_nprim.data(); bd.sh_prim_off = bf.sh_prim_off.data();
+        bd.prim_alpha = bf.prim_alpha.data(); bd.prim_coeff = bf.prim_coeff.data();
+        bd.sh_zeta = bf.sh_zeta.data();
+        bd.valence = bf.valence.empty() ? nullptr : bf.valence.data();
+        bd.shell_hardness = bf.shell_hardness.data();
+        bd.selfenergy = hf.selfenergy.data(); bd.kcn = hf.kcn.data(); bd.shpoly = hf.shpoly.data();
+        return m_ctx->beginBasis(bd);
+    }
+    bool beginComputed(const std::vector<double>& xyz_bohr) override
+    {
+        return m_ctx && m_ctx->beginComputed(xyz_bohr.data());
+    }
+    bool downloadOverlap(Eigen::MatrixXd& S_out) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        S_out.resize(m_n, m_n);
+        return m_ctx->downloadOverlap(S_out.data());
+    }
+    bool downloadH0(Eigen::MatrixXd& H0_out) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        H0_out.resize(m_n, m_n);
+        return m_ctx->downloadH0(H0_out.data());
+    }
+    bool downloadCholesky(Eigen::MatrixXd& L_out) override
+    {
+        // The device builds S; the lower Cholesky L = chol(S) is cheap host-side (Eigen LLT)
+        // — no device Cholesky shader needed. Matches the host m_X (orthonormalizer).
+        if (!m_ctx || m_n <= 0) return false;
+        Eigen::MatrixXd S(m_n, m_n);
+        if (!m_ctx->downloadOverlap(S.data())) return false;
+        Eigen::LLT<Eigen::MatrixXd> llt(S);
+        if (llt.info() != Eigen::Success) return false;
+        L_out = llt.matrixL();
+        return true;
+    }
+    bool downloadGamma(Eigen::MatrixXd& gamma_out) override
+    {
+        if (!m_ctx || m_nsh <= 0) return false;
+        gamma_out.resize(m_nsh, m_nsh);
+        return m_ctx->downloadGamma(gamma_out.data());
+    }
 private:
     XtbVulkanContext* m_ctx = nullptr;
     int               m_n   = 0;
+    int               m_nsh = 0;
 };
 }  // namespace
 
@@ -121,11 +176,15 @@ XtbVulkanComputationalMethod::XtbVulkanComputationalMethod(MethodType method, co
             m_scf_backend = std::make_unique<VulkanScfBackend>(ctx);
             xtb->setGpuScfBackend(m_scf_backend.get());
 
-            if (CurcumaLogger::get_verbosity() >= 2)
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                const bool gfn1 = getMethodName() == "gfn1";
                 CurcumaLogger::info(fmt::format(
-                    "{}: Vulkan GPU eigensolver + device-resident GFN1 SCF active "
-                    "(FP64 Jacobi / Lowdin); integrals/gradient on CPU (Stage 2)",
-                    getMethodName()));
+                    "{}: Vulkan on-device integral build (CN/S/H0/L/gamma) + GPU FP64 "
+                    "Jacobi/Lowdin eigensolve; {} (Stage 3). Gradient on CPU.",
+                    getMethodName(),
+                    gfn1 ? "device-resident isotropic SCF loop"
+                         : "GPU eigensolve per iteration, multipole on CPU"));
+            }
         }
     } else {
         CurcumaLogger::warn(fmt::format(
