@@ -987,13 +987,13 @@ endif()
 
 # Claude Generated (June 2026): ROCm/HIP backend (gfnff/gfn1/gfn2 -gpu rocm).
 # Build: cmake -DUSE_ROCM=ON -DUSE_ROCM_XTB=ON -DCMAKE_PREFIX_PATH=/opt/rocm && make -j4
-# Stage 0 wires only the native-xTB HIP context, which calls ONLY the host-side HIP runtime
-# API (device query + stream). It therefore compiles as plain C++ against
-# <hip/hip_runtime_api.h> and links libamdhip64 — no HIP-language compilation, no amdclang,
-# no --offload-arch, no linker-language flip (which would drop GNU OpenMP/libgomp). The
-# Stage-1 device kernels (hipified from cuda/) introduce real HIP compilation in their own
-# unit at that point. rocBLAS/rocSOLVER are detected here (HAVE_ROCBLAS/HAVE_ROCSOLVER) and
-# linked once the Stage-1 kernels need them; rocSOLVER is required for the GPU eigensolver.
+# The HIP context (device handshake + rocSOLVER eigensolver + the Stage-2 resident-SCF
+# __global__ kernels) is compiled by hipcc into a plain relocatable object via a custom
+# command, then linked into curcuma_core as an EXTERNAL_OBJECT with g++. This builds the
+# device kernels while keeping the HIP-only --offload-arch / --hip-link flags off the GNU
+# link of curcuma_core + the executables (which otherwise flips the link to ld.lld and
+# drops the GNU OpenMP runtime libgomp). curcuma_core links libamdhip64 (+ rocSOLVER /
+# rocBLAS when present); no enable_language(HIP) / CMake HIP machinery is used.
 if(USE_ROCM)
     find_library(ROCM_HIP_RT amdhip64 REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64)
     find_package(rocblas QUIET)
@@ -1001,34 +1001,50 @@ if(USE_ROCM)
 
     target_compile_definitions(curcuma_core PUBLIC USE_ROCM)
     if(USE_ROCM_XTB)
-        # Host-compiled HIP runtime calls — plain C++ in curcuma_core. With rocSOLVER the
-        # same TU calls rocsolver_dsygvd (host API, device memory via hipMalloc/hipMemcpy),
-        # still no device kernels / HIP-language compilation.
-        target_sources(curcuma_core PRIVATE
-            src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.cpp
-            src/core/energy_calculators/qm_methods/xtb_hip_method.cpp)
-        target_include_directories(curcuma_core PRIVATE /opt/rocm/include)
-        target_link_libraries(curcuma_core ${ROCM_HIP_RT})
-        target_compile_definitions(curcuma_core PUBLIC USE_ROCM_XTB)
+        find_program(HIPCC_EXECUTABLE hipcc REQUIRED PATHS /opt/rocm/bin)
+        if(NOT DEFINED ROCM_GPU_ARCH)
+            set(ROCM_GPU_ARCH "gfx1150" CACHE STRING "HIP offload arch (rocminfo | grep gfx)")
+        endif()
 
-        # Stage 1: rocSOLVER eigensolver (needs rocSOLVER + rocBLAS; host-callable libs).
-        # HAVE_ROCSOLVER is set PER-SOURCE on the two ROCm TUs (not a PUBLIC target define)
-        # so enabling it does not recompile all of curcuma_core.
-        set(_rocm_ctx_defs "__HIP_PLATFORM_AMD__")
+        # hipcc compile flags + defines. HAVE_ROCSOLVER gates the eigensolver/resident code.
+        set(_hipcc_defs -DUSE_ROCM_XTB -D__HIP_PLATFORM_AMD__)
         set(_rocm_wrap_defs "")
         if(rocsolver_FOUND AND rocblas_FOUND)
             find_library(ROCM_ROCSOLVER rocsolver REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64)
             find_library(ROCM_ROCBLAS   rocblas   REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64)
-            target_link_libraries(curcuma_core ${ROCM_ROCSOLVER} ${ROCM_ROCBLAS})
-            list(APPEND _rocm_ctx_defs  "HAVE_ROCSOLVER" "HAVE_ROCBLAS")
+            list(APPEND _hipcc_defs -DHAVE_ROCSOLVER -DHAVE_ROCBLAS)
             list(APPEND _rocm_wrap_defs "HAVE_ROCSOLVER")
-            message(STATUS "ROCm Stage 1 eigensolver enabled (rocSOLVER dsygvd)")
+            message(STATUS "ROCm Stage 1/2 enabled (rocSOLVER dsygvd + HIP kernels)")
         else()
             message(STATUS "ROCm Stage 0 only: install rocsolver + rocblas for the GPU eigensolver")
         endif()
-        set_source_files_properties(
-            src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.cpp
-            PROPERTIES COMPILE_DEFINITIONS "${_rocm_ctx_defs}")
+
+        # hipcc -c <ctx>.hip -> .o  (host + device code in one relocatable object).
+        set(_hip_ctx_src ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.hip)
+        set(_hip_ctx_hdr ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.h)
+        set(_hip_ctx_obj ${CMAKE_CURRENT_BINARY_DIR}/xtb_hip_context.hip.o)
+        add_custom_command(
+            OUTPUT  ${_hip_ctx_obj}
+            COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
+                    ${_hipcc_defs} -I${PROJECT_SOURCE_DIR} -I/opt/rocm/include
+                    ${_hip_ctx_src} -o ${_hip_ctx_obj}
+            DEPENDS ${_hip_ctx_src} ${_hip_ctx_hdr}
+            COMMENT "Compiling HIP xTB context with hipcc (arch ${ROCM_GPU_ARCH})"
+            VERBATIM)
+        add_custom_target(curcuma_hip_ctx DEPENDS ${_hip_ctx_obj})
+        set_source_files_properties(${_hip_ctx_obj} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+
+        # Host wrapper (g++) + the prebuilt HIP object, both into curcuma_core.
+        target_sources(curcuma_core PRIVATE
+            src/core/energy_calculators/qm_methods/xtb_hip_method.cpp
+            ${_hip_ctx_obj})
+        add_dependencies(curcuma_core curcuma_hip_ctx)
+        target_include_directories(curcuma_core PRIVATE /opt/rocm/include)
+        target_link_libraries(curcuma_core ${ROCM_HIP_RT})
+        target_compile_definitions(curcuma_core PUBLIC USE_ROCM_XTB)
+        if(rocsolver_FOUND AND rocblas_FOUND)
+            target_link_libraries(curcuma_core ${ROCM_ROCSOLVER} ${ROCM_ROCBLAS})
+        endif()
         if(_rocm_wrap_defs)
             set_source_files_properties(
                 src/core/energy_calculators/qm_methods/xtb_hip_method.cpp

@@ -4,19 +4,23 @@
  *
  * This program is free software under GPL-3.0.
  *
- * Claude Generated (2026-06): Stage-0 device handshake for the native GFN1/GFN2
- * ROCm path. Stage 0 calls ONLY the host-side HIP runtime API (device query + stream),
- * so it is compiled as plain C++ against <hip/hip_runtime_api.h> and linked against
- * libamdhip64 — no HIP-language compilation / amdclang / --offload-arch is needed yet.
- * The numerical kernels (hipified from cuda/xtb_gpu_context.cu) arrive in later stages;
- * the file is then split so the device kernels build with hipcc.
+ * Claude Generated (2026-06): native GFN1/GFN2 ROCm device engine.
+ *   Stage 0: device handshake (query + stream).
+ *   Stage 1: solveGeneralized — the per-iteration F C = S C ε via rocSOLVER dsygvd.
+ *   Stage 2: device-resident GFN1 SCF (residentBegin/Solve/Density/Finalize) — Fock
+ *            build + populations via the __global__ kernels below, density via rocBLAS,
+ *            eigensolve via rocSOLVER; H0/S stay resident.
+ * Compiled by hipcc into a plain object (CMake add_custom_command), then linked into
+ * curcuma_core with g++ — so the device kernels build, but the HIP-only --offload-arch /
+ * --hip-link flags never reach the GNU link (which would drop libgomp). Links libamdhip64
+ * + librocsolver + librocblas.
  */
 
 #ifdef USE_ROCM_XTB
 
 #include "xtb_hip_context.h"
 
-#include <hip/hip_runtime_api.h>
+#include <hip/hip_runtime.h>
 #ifdef HAVE_ROCSOLVER
 #include <rocblas/rocblas.h>
 #include <rocsolver/rocsolver.h>
