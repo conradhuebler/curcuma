@@ -106,6 +106,71 @@ __device__ __forceinline__ double d_cgto_overlap(
     return S;
 }
 
+// ---- Overlap derivative dS/dA (Stage 4) -----------------------------------
+// Verbatim port of CGTO::cgto_overlap_grad (Obara-Saika dS/dA_k for s/p; dS/dB = −dS/dA).
+// The crux primitive of the H0/Pulay nuclear-gradient term.
+__device__ __forceinline__ void d_cgto_overlap_grad(
+    const double* alpha_a, const double* coeff_a, int npa,
+    const double* alpha_b, const double* coeff_b, int npb,
+    double xa, double ya, double za, double xb, double yb, double zb,
+    int type_a, int type_b, double grad[3])
+{
+    grad[0] = grad[1] = grad[2] = 0.0;
+    if (type_a > 3 || type_b > 3) return;
+    const double dx = xb - xa, dy = yb - ya, dz = zb - za;
+    const double R2 = dx*dx + dy*dy + dz*dz;
+    const int nk[3] = { (type_a == 1) ? 1 : 0, (type_a == 2) ? 1 : 0, (type_a == 3) ? 1 : 0 };
+
+    for (int ip = 0; ip < npa; ++ip) {
+        const double ai = alpha_a[ip], ci = coeff_a[ip];
+        for (int jp = 0; jp < npb; ++jp) {
+            const double aj = alpha_b[jp], cj = coeff_b[jp];
+            const double fac = ci * cj;
+            const double g = ai + aj, invg = 1.0 / g;
+            const double Px = (ai*xa + aj*xb) * invg;
+            const double Py = (ai*ya + aj*yb) * invg;
+            const double Pz = (ai*za + aj*zb) * invg;
+            const double PAx = Px - xa, PAy = Py - ya, PAz = Pz - za;
+            const double PBx = Px - xb, PBy = Py - yb, PBz = Pz - zb;
+            const double S00 = pow(d_pi() * invg, 1.5) * exp(-ai*aj * invg * R2);
+            const double h = 0.5 * invg;
+            double Sr[3];
+
+            if (type_a == 0) {
+                if (type_b == 0)      { Sr[0] = PAx*S00; Sr[1] = PAy*S00; Sr[2] = PAz*S00; }
+                else if (type_b == 1) { Sr[0] = (PAx*PBx+h)*S00; Sr[1] = PAy*PBx*S00; Sr[2] = PAz*PBx*S00; }
+                else if (type_b == 2) { Sr[0] = PAx*PBy*S00; Sr[1] = (PAy*PBy+h)*S00; Sr[2] = PAz*PBy*S00; }
+                else                  { Sr[0] = PAx*PBz*S00; Sr[1] = PAy*PBz*S00; Sr[2] = (PAz*PBz+h)*S00; }
+            } else if (type_a == 1) {
+                if (type_b == 0)      { Sr[0] = (PAx*PAx+h)*S00; Sr[1] = PAx*PAy*S00; Sr[2] = PAx*PAz*S00; }
+                else if (type_b == 1) { Sr[0] = (PAx*PAx*PBx + PAx*invg + PBx*h)*S00; Sr[1] = PAy*(PAx*PBx+h)*S00; Sr[2] = PAz*(PAx*PBx+h)*S00; }
+                else if (type_b == 2) { Sr[0] = (PAx*PAx+h)*PBy*S00; Sr[1] = PAx*(PAy*PBy+h)*S00; Sr[2] = PAz*PAx*PBy*S00; }
+                else                  { Sr[0] = (PAx*PAx+h)*PBz*S00; Sr[1] = PAy*PAx*PBz*S00; Sr[2] = PAx*(PAz*PBz+h)*S00; }
+            } else if (type_a == 2) {
+                if (type_b == 0)      { Sr[0] = PAy*PAx*S00; Sr[1] = (PAy*PAy+h)*S00; Sr[2] = PAy*PAz*S00; }
+                else if (type_b == 1) { Sr[0] = PAy*(PAx*PBx+h)*S00; Sr[1] = (PAy*PAy+h)*PBx*S00; Sr[2] = PAz*PAy*PBx*S00; }
+                else if (type_b == 2) { Sr[0] = PAx*(PAy*PBy+h)*S00; Sr[1] = (PAy*PAy*PBy + PAy*invg + PBy*h)*S00; Sr[2] = PAz*(PAy*PBy+h)*S00; }
+                else                  { Sr[0] = PAx*PAy*PBz*S00; Sr[1] = (PAy*PAy+h)*PBz*S00; Sr[2] = PAy*(PAz*PBz+h)*S00; }
+            } else { // type_a == 3
+                if (type_b == 0)      { Sr[0] = PAz*PAx*S00; Sr[1] = PAz*PAy*S00; Sr[2] = (PAz*PAz+h)*S00; }
+                else if (type_b == 1) { Sr[0] = PAz*(PAx*PBx+h)*S00; Sr[1] = PAy*PAz*PBx*S00; Sr[2] = (PAz*PAz+h)*PBx*S00; }
+                else if (type_b == 2) { Sr[0] = PAx*PAz*PBy*S00; Sr[1] = PAz*(PAy*PBy+h)*S00; Sr[2] = (PAz*PAz+h)*PBy*S00; }
+                else                  { Sr[0] = PAx*(PAz*PBz+h)*S00; Sr[1] = PAy*(PAz*PBz+h)*S00; Sr[2] = (PAz*PAz*PBz + PAz*invg + PBz*h)*S00; }
+            }
+
+            double S_s_b = 0.0;
+            if (type_a >= 1) {
+                if      (type_b == 0) S_s_b = S00;
+                else if (type_b == 1) S_s_b = PBx * S00;
+                else if (type_b == 2) S_s_b = PBy * S00;
+                else                  S_s_b = PBz * S00;
+            }
+            for (int k = 0; k < 3; ++k)
+                grad[k] += fac * (2.0 * ai * Sr[k] - nk[k] * S_s_b);
+        }
+    }
+}
+
 // ---- H0 shell-pair scaling helpers ----------------------------------------
 __device__ __forceinline__ double d_kshell_gfn1(int il, int jl)
 {

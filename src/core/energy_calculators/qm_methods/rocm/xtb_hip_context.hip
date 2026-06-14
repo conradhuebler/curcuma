@@ -215,6 +215,155 @@ __global__ void k_gamma(int nsh, int is_gfn2, const int* __restrict__ sh2at,
     }
     gamma[static_cast<size_t>(is) + static_cast<size_t>(js) * nsh] = val;
 }
+
+// ---- Stage 4 nuclear-gradient kernels (GFN1; grad layout [3*i+k], Eh/Bohr) ---
+
+// Section 1: repulsion gradient. One thread per atom i, inner loop j<i.
+__global__ void k_grad_repulsion(int nat, int is_gfn2, const int* __restrict__ z,
+                                 const double* __restrict__ xyz, const double* __restrict__ rep_alpha,
+                                 const double* __restrict__ rep_zeff, double kexp, double rexp,
+                                 double kexp_light, double* __restrict__ grad)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const int zi = z[i];
+    const double alfi = rep_alpha[i], zeffi = rep_zeff[i];
+    const double xi = xyz[3*i+0], yi = xyz[3*i+1], zit = xyz[3*i+2];
+    for (int j = 0; j < i; ++j) {
+        const double dx = xi - xyz[3*j+0], dy = yi - xyz[3*j+1], dz = zit - xyz[3*j+2];
+        const double r2 = dx*dx + dy*dy + dz*dz;
+        if (r2 < 1.0e-12) continue;
+        const double r = sqrt(r2);
+        const double alpha_pair = sqrt(alfi * rep_alpha[j]);
+        double kexp_pair = kexp;
+        if (is_gfn2 && zi <= 2 && z[j] <= 2) kexp_pair = kexp_light;
+        const double r_kexp = pow(r, kexp_pair);
+        const double E_pair = zeffi * rep_zeff[j] / pow(r, rexp) * exp(-alpha_pair * r_kexp);
+        const double dEdr = -(rexp / r + alpha_pair * kexp_pair * pow(r, kexp_pair - 1.0)) * E_pair;
+        const double fx = dEdr*dx/r, fy = dEdr*dy/r, fz = dEdr*dz/r;
+        atomicAdd(&grad[3*i+0], fx); atomicAdd(&grad[3*j+0], -fx);
+        atomicAdd(&grad[3*i+1], fy); atomicAdd(&grad[3*j+1], -fy);
+        atomicAdd(&grad[3*i+2], fz); atomicAdd(&grad[3*j+2], -fz);
+    }
+}
+
+// Section 2a: on-site CN coupling dEdcn[iat] += −kcn[ish]·P(μ,μ). One thread per AO μ.
+__global__ void k_grad_cn_onsite(int nao, const double* __restrict__ P,
+                                 const double* __restrict__ kcn, const int* __restrict__ ao2sh,
+                                 const int* __restrict__ ao2at, double* __restrict__ dEdcn)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= nao) return;
+    const double Pmm = P[static_cast<size_t>(mu) + static_cast<size_t>(mu) * nao];
+    atomicAdd(&dEdcn[ao2at[mu]], (-kcn[ao2sh[mu]]) * Pmm);
+}
+
+// Section 2b: H0/Pulay off-site gradient (GFN1 isotropic; no multipole). One thread
+// per AO pair (μ,ν) with iat<jat.
+__global__ void k_grad_h0_pulay(
+    int nao, int is_gfn2,
+    const int* __restrict__ ao2sh, const int* __restrict__ ao2at, const int* __restrict__ ang,
+    const int* __restrict__ iao_sh, const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ sh_zeta, const double* __restrict__ shpoly, const double* __restrict__ kcn,
+    const int* __restrict__ valence, const int* __restrict__ z, const double* __restrict__ se,
+    const double* __restrict__ xyz, const double* __restrict__ P, const double* __restrict__ S,
+    const double* __restrict__ H0, const double* __restrict__ W, const double* __restrict__ v_ao,
+    const double* __restrict__ atomic_rad, const double* __restrict__ pauling,
+    double* __restrict__ grad, double* __restrict__ dEdcn)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    const int nu = blockIdx.y * blockDim.y + threadIdx.y;
+    if (mu >= nao || nu >= nao) return;
+    const int iat = ao2at[mu], jat = ao2at[nu];
+    if (iat >= jat) return;
+
+    const int isha = ao2sh[mu], ishb = ao2sh[nu];
+    const int la = ang[isha], lb = ang[ishb];
+    const int ta = d_ao_to_type(la, mu - iao_sh[isha]);
+    const int tb = d_ao_to_type(lb, nu - iao_sh[ishb]);
+    if (ta < 0 || tb < 0) return;
+
+    const double xa = xyz[3*iat+0], ya = xyz[3*iat+1], za = xyz[3*iat+2];
+    const double xb = xyz[3*jat+0], yb = xyz[3*jat+1], zb = xyz[3*jat+2];
+    const double dxij = xa - xb, dyij = ya - yb, dzij = za - zb;
+    const double r2 = dxij*dxij + dyij*dyij + dzij*dzij;
+    if (r2 < 1.0e-12) return;
+    const double r = sqrt(r2);
+    const int zi = z[iat], zj = z[jat];
+    const double rad_sum = atomic_rad[zi-1] + atomic_rad[zj-1];
+    const double rr = sqrt(r / rad_sum);
+    const double pi_a = 1.0 + shpoly[isha] * rr, pi_b = 1.0 + shpoly[ishb] * rr;
+
+    double hs;
+    if (is_gfn2 == 0) {
+        const bool vi = valence[isha] != 0, vj = valence[ishb] != 0;
+        if (vi && vj) {
+            double den = pauling[zi-1] - pauling[zj-1]; den *= den;
+            hs = d_kpair_gfn1(zi, zj) * d_kshell_gfn1(la, lb) * (1.0 + (-7.0e-3) * den);
+        } else if (vi && !vj) hs = 0.5 * (d_kshell_gfn1(la, la) + 2.85);
+        else if (!vi && vj)   hs = 0.5 * (d_kshell_gfn1(lb, lb) + 2.85);
+        else                  hs = 2.85;
+    } else {
+        double den = pauling[zi-1] - pauling[zj-1]; den *= den;
+        const double enp = 1.0 + 2.0e-2 * den;
+        const double km = d_kshell_gfn2(la, lb) * enp;
+        const double za_ = sh_zeta[isha], zb_ = sh_zeta[ishb];
+        hs = pow(2.0 * sqrt(za_ * zb_) / (za_ + zb_), 0.5) * km;
+    }
+    const double h_factor = hs * pi_a * pi_b;
+    const double h_av = 0.5 * (se[isha] + se[ishb]) * h_factor;
+    const double dlog_pi_dr_r = (shpoly[isha] / pi_a + shpoly[ishb] / pi_b) * rr / (2.0 * r2);
+
+    const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
+    const double Pmn = P[mn], Smn = S[mn], H0mn = H0[mn], Wmn = W[mn];
+    double dS[3];
+    d_cgto_overlap_grad(
+        prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+        prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+        xa, ya, za, xb, yb, zb, ta, tb, dS);
+
+    const double sval = 2.0*Pmn*h_av - 2.0*Wmn - Pmn*(v_ao[mu] + v_ao[nu]);
+    const double shp  = 2.0*Pmn*H0mn*dlog_pi_dr_r;
+    const double Gx = sval*dS[0] + shp*dxij;
+    const double Gy = sval*dS[1] + shp*dyij;
+    const double Gz = sval*dS[2] + shp*dzij;
+
+    atomicAdd(&grad[3*iat+0], Gx); atomicAdd(&grad[3*jat+0], -Gx);
+    atomicAdd(&grad[3*iat+1], Gy); atomicAdd(&grad[3*jat+1], -Gy);
+    atomicAdd(&grad[3*iat+2], Gz); atomicAdd(&grad[3*jat+2], -Gz);
+
+    const double cn_c = h_factor * Pmn * Smn;
+    atomicAdd(&dEdcn[iat], (-kcn[isha]) * cn_c);
+    atomicAdd(&dEdcn[jat], (-kcn[ishb]) * cn_c);
+}
+
+// Section 3: isotropic Coulomb gradient. One thread per shell is, inner js<is.
+__global__ void k_grad_coulomb(int nsh, int is_gfn2, const int* __restrict__ sh2at,
+                               const double* __restrict__ g, const double* __restrict__ q_sh,
+                               const double* __restrict__ xyz, double gexp, double* __restrict__ grad)
+{
+    const int is = blockIdx.x * blockDim.x + threadIdx.x;
+    if (is >= nsh) return;
+    const int iat = sh2at[is];
+    for (int js = 0; js < is; ++js) {
+        const int jat = sh2at[js];
+        if (iat == jat) continue;
+        const double dx = xyz[3*iat+0] - xyz[3*jat+0];
+        const double dy = xyz[3*iat+1] - xyz[3*jat+1];
+        const double dz = xyz[3*iat+2] - xyz[3*jat+2];
+        const double r2 = dx*dx + dy*dy + dz*dz;
+        if (r2 < 1.0e-12) continue;
+        const double r1 = sqrt(r2);
+        const double gam_bar = d_coulomb_average(g[is], g[js], is_gfn2 != 0);
+        const double gamma = pow(pow(r1, gexp) + pow(gam_bar, -gexp), -1.0 / gexp);
+        const double dgamma_dr = -pow(r1, gexp - 2.0) * pow(gamma, gexp + 1.0);
+        const double force = q_sh[is] * q_sh[js] * dgamma_dr;
+        atomicAdd(&grad[3*iat+0], force*dx); atomicAdd(&grad[3*jat+0], -force*dx);
+        atomicAdd(&grad[3*iat+1], force*dy); atomicAdd(&grad[3*jat+1], -force*dy);
+        atomicAdd(&grad[3*iat+2], force*dz); atomicAdd(&grad[3*jat+2], -force*dz);
+    }
+}
 } // namespace
 #endif // HAVE_ROCSOLVER
 
@@ -353,6 +502,11 @@ struct XtbHipContext::Impl {
     double* dselfenergy = nullptr; double* dkcn = nullptr; double* dshpoly = nullptr; double* dghard = nullptr;
     double* dcovrad = nullptr; double* dpauling = nullptr; double* darad = nullptr;   // element tables (86)
     double* dxyz = nullptr; double* dcn = nullptr; double* dse = nullptr; double* dgamma = nullptr; double* dL = nullptr;
+    // Stage 4 (gradient) buffers:
+    int*    dao2sh = nullptr; int* dao2at = nullptr;
+    double* drep_alpha = nullptr; double* drep_zeff = nullptr;
+    double* dW = nullptr; double* dVao = nullptr; double* dQsh = nullptr;
+    double* dGrad = nullptr; double* dEdcn_buf = nullptr;
 
     template <class T> bool up(T*& dptr, const T* host, size_t count) {
         if (dptr) hipFree(dptr);
@@ -382,18 +536,66 @@ struct XtbHipContext::Impl {
             arad[z - 1]    = curcuma::xtb::atomic_rad_au(z);
         }
         g &= up(dcovrad, covrad, 86); g &= up(dpauling, pauling, 86); g &= up(darad, arad, 86);
+        // Stage 4 gradient basis arrays (skip gracefully if not provided).
+        if (bd.ao2sh) g &= up(dao2sh, bd.ao2sh, bnao);
+        if (bd.ao2at) g &= up(dao2at, bd.ao2at, bnao);
+        if (bd.rep_alpha) g &= up(drep_alpha, bd.rep_alpha, bnat);
+        if (bd.rep_zeff)  g &= up(drep_zeff, bd.rep_zeff, bnat);
         if (bnat != bgeom_nat || !dgamma) {
-            for (void* p : { (void*)dxyz, (void*)dcn, (void*)dse, (void*)dgamma, (void*)dL }) if (p) hipFree(p);
-            dxyz = dcn = dse = dgamma = dL = nullptr;
+            for (void* p : { (void*)dxyz, (void*)dcn, (void*)dse, (void*)dgamma, (void*)dL,
+                             (void*)dW, (void*)dVao, (void*)dQsh, (void*)dGrad, (void*)dEdcn_buf }) if (p) hipFree(p);
+            dxyz = dcn = dse = dgamma = dL = dW = dVao = dQsh = dGrad = dEdcn_buf = nullptr;
             g &= hipMalloc(&dxyz, 3 * static_cast<size_t>(bnat) * sizeof(double)) == hipSuccess;
             g &= hipMalloc(&dcn, static_cast<size_t>(bnat) * sizeof(double)) == hipSuccess;
             g &= hipMalloc(&dse, static_cast<size_t>(bnsh) * sizeof(double)) == hipSuccess;
             g &= hipMalloc(&dgamma, static_cast<size_t>(bnsh) * bnsh * sizeof(double)) == hipSuccess;
             g &= hipMalloc(&dL, static_cast<size_t>(bnao) * bnao * sizeof(double)) == hipSuccess;
+            g &= hipMalloc(&dW, static_cast<size_t>(bnao) * bnao * sizeof(double)) == hipSuccess;
+            g &= hipMalloc(&dVao, static_cast<size_t>(bnao) * sizeof(double)) == hipSuccess;
+            g &= hipMalloc(&dQsh, static_cast<size_t>(bnsh) * sizeof(double)) == hipSuccess;
+            g &= hipMalloc(&dGrad, 3 * static_cast<size_t>(bnat) * sizeof(double)) == hipSuccess;
+            g &= hipMalloc(&dEdcn_buf, static_cast<size_t>(bnat) * sizeof(double)) == hipSuccess;
             bgeom_nat = bnat;
         }
         basis_ready = g;
         return g;
+    }
+
+    bool gradient(const double* eps, int nocc_orbs, const double* v_ao, const double* q_sh,
+                  double* grad_out, double* dEdcn_out) {
+        if (!basis_ready || bnao <= 0 || !dP) return false;
+        const int nao = bnao, nat = bnat, nsh = bnsh;
+        if (hipMemcpy(dVao, v_ao, nao * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        if (hipMemcpy(dQsh, q_sh, nsh * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        // Energy-weighted density W = C·diag(2·ε_occ)·Cᵀ (reuse dOcc/dCw; dF = C resident).
+        std::vector<double> occ2(nao, 0.0);
+        for (int k = 0; k < nocc_orbs && k < nao; ++k) occ2[k] = 2.0 * eps[k];
+        if (hipMemcpy(dOcc, occ2.data(), nao * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        { dim3 b(16, 16), gr((nao + 15) / 16, (nao + 15) / 16);
+          hipLaunchKernelGGL(k_scale_cols, gr, b, 0, stream, dF, dOcc, dCw, nao); }
+        const double one = 1.0, zero = 0.0;
+        if (rocblas_dgemm(handle, rocblas_operation_none, rocblas_operation_transpose,
+                          nao, nao, nao, &one, dCw, nao, dF, nao, &zero, dW, nao) != rocblas_status_success) return false;
+        if (hipMemsetAsync(dGrad, 0, 3 * nat * sizeof(double), stream) != hipSuccess) return false;
+        if (hipMemsetAsync(dEdcn_buf, 0, nat * sizeof(double), stream) != hipSuccess) return false;
+        const double kexp = 1.5, rexp = 1.0, kexp_light = bis_gfn2 ? 1.0 : 1.5;
+        { dim3 b(128), gr((nat + 127) / 128);
+          hipLaunchKernelGGL(k_grad_repulsion, gr, b, 0, stream, nat, bis_gfn2, dz, dxyz,
+                             drep_alpha, drep_zeff, kexp, rexp, kexp_light, dGrad); }
+        { dim3 b(128), gr((nao + 127) / 128);
+          hipLaunchKernelGGL(k_grad_cn_onsite, gr, b, 0, stream, nao, dP, dkcn, dao2sh, dao2at, dEdcn_buf); }
+        { dim3 b(16, 16), gr((nao + 15) / 16, (nao + 15) / 16);
+          hipLaunchKernelGGL(k_grad_h0_pulay, gr, b, 0, stream, nao, bis_gfn2,
+                             dao2sh, dao2at, dang_sh, diao_sh, dsh_nprim, dsh_prim_off,
+                             dprim_alpha, dprim_coeff, dsh_zeta, dshpoly, dkcn, dvalence, dz, dse,
+                             dxyz, dP, dS0, dH0, dW, dVao, darad, dpauling, dGrad, dEdcn_buf); }
+        { dim3 b(128), gr((nsh + 127) / 128);
+          hipLaunchKernelGGL(k_grad_coulomb, gr, b, 0, stream, nsh, bis_gfn2, dsh2at, dghard,
+                             dQsh, dxyz, 2.0, dGrad); }
+        if (hipStreamSynchronize(stream) != hipSuccess) return false;
+        if (hipMemcpy(grad_out, dGrad, 3 * nat * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        if (hipMemcpy(dEdcn_out, dEdcn_buf, nat * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        return true;
     }
 
     bool computeIntegrals(const double* xyz) {
@@ -430,11 +632,15 @@ struct XtbHipContext::Impl {
                          (void*)dsh_nprim,(void*)dsh_prim_off,(void*)dvalence,(void*)dprim_alpha,
                          (void*)dprim_coeff,(void*)dsh_zeta,(void*)dselfenergy,(void*)dkcn,
                          (void*)dshpoly,(void*)dghard,(void*)dcovrad,(void*)dpauling,(void*)darad,
-                         (void*)dxyz,(void*)dcn,(void*)dse,(void*)dgamma,(void*)dL })
+                         (void*)dxyz,(void*)dcn,(void*)dse,(void*)dgamma,(void*)dL,
+                         (void*)dao2sh,(void*)dao2at,(void*)drep_alpha,(void*)drep_zeff,
+                         (void*)dW,(void*)dVao,(void*)dQsh,(void*)dGrad,(void*)dEdcn_buf })
             if (p) hipFree(p);
         dz = dsh2at = dang_sh = diao_sh = dnao_sh = dsh_nprim = dsh_prim_off = dvalence = nullptr;
         dprim_alpha = dprim_coeff = dsh_zeta = dselfenergy = dkcn = dshpoly = dghard = nullptr;
         dcovrad = dpauling = darad = dxyz = dcn = dse = dgamma = dL = nullptr;
+        dao2sh = dao2at = nullptr; drep_alpha = drep_zeff = nullptr;
+        dW = dVao = dQsh = dGrad = dEdcn_buf = nullptr;
         basis_ready = false; bgeom_nat = 0;
     }
 #endif // HAVE_ROCSOLVER
@@ -605,6 +811,16 @@ bool XtbHipContext::downloadGamma(double* gamma_colmajor)
 #else
     return m_impl && m_impl->ok && gamma_colmajor && m_impl->basis_ready
         && m_impl->dlMat(gamma_colmajor, m_impl->dgamma, static_cast<size_t>(m_impl->bnsh) * m_impl->bnsh);
+#endif
+}
+bool XtbHipContext::gradient(const double* eps, int nocc_orbs, const double* v_ao,
+                             const double* q_sh, double* grad_out, double* dEdcn_out)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)eps; (void)nocc_orbs; (void)v_ao; (void)q_sh; (void)grad_out; (void)dEdcn_out; return false;
+#else
+    return m_impl && m_impl->ok && eps && v_ao && q_sh && grad_out && dEdcn_out
+        && m_impl->gradient(eps, nocc_orbs, v_ao, q_sh, grad_out, dEdcn_out);
 #endif
 }
 

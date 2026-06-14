@@ -56,6 +56,11 @@ struct XtbHipBasisData {
     const double* shpoly = nullptr;       // nsh
     const int*    valence = nullptr;      // nsh
     const double* shell_hardness = nullptr; // nsh (Coulomb hardness g)
+    // Stage 4 (gradient) extras:
+    const int*    ao2at = nullptr;        // nao (AO → atom)
+    const int*    ao2sh = nullptr;        // nao (AO → shell)
+    const double* rep_alpha = nullptr;    // nat (repulsion)
+    const double* rep_zeff = nullptr;     // nat (repulsion)
 };
 
 class XtbHipContext {
@@ -134,6 +139,17 @@ public:
     bool downloadH0(double* H0_colmajor);
     bool downloadCholesky(double* L_colmajor);
     bool downloadGamma(double* gamma_colmajor);
+
+    // ---- Device nuclear gradient (Stage 4, GFN1 isotropic) ------------------
+    // The repulsion + on-site CN + H0/Pulay + isotropic Coulomb gradient (sections
+    // 1/2/3 of XTB::calculateGradient) on the device, from the resident SCF state
+    // (density dP, MO coefficients dC, eigenvalues eps, AO potential v_ao, shell
+    // charges q_sh). The energy-weighted density W = C·diag(2·ε_occ)·Cᵀ is built on
+    // device. Outputs grad_out (3·nat, layout [3*i+k], Eh/Bohr) and dEdcn_out (nat,
+    // the H0/Pulay CN coupling); the host adds the dispersion gradient + CN chain-rule.
+    /// Requires a prior beginComputed (S/H0/basis resident) and the resident density.
+    bool gradient(const double* eps, int nocc_orbs, const double* v_ao, const double* q_sh,
+                  double* grad_out, double* dEdcn_out);
 
 private:
     struct Impl;

@@ -1,13 +1,14 @@
 # Native GFN1/GFN2/GFN-FF on AMD GPUs (ROCm/HIP)
 
 > Status: 🤖 AI-generated, ⚙️ machine-tested. NOT human production tested.
-> **GFN1 = Stage 3 (on-device integral build + device-resident SCF):** CN, overlap S, bare
-> Hamiltonian H0, Cholesky L and Coulomb γ are built on the device by HIP `__global__`
-> kernels (so the host skips its integral build / no nao² upload); the Fock build +
-> Mulliken populations are HIP kernels, the density a rocBLAS GEMM, the eigensolve rocSOLVER
-> `dsygvd`. **GFN2:** uses the same device integral build (S/H0/γ), then the Stage-1
-> rocSOLVER eigensolver per iteration (multipole Fock on the host). Only the nuclear
-> gradient stays on the CPU. Energies match the CPU path bit-for-bit (AMD 890M / gfx1150).
+> **GFN1 = Stage 4 (fully device-resident):** the integral build (CN, overlap S, bare
+> Hamiltonian H0, Cholesky L, Coulomb γ), the SCF (Fock/density/populations/eigensolve) and
+> the nuclear gradient (repulsion + on-site CN + H0/Pulay + Coulomb) all run on the GPU via
+> HIP `__global__` kernels + rocBLAS + rocSOLVER; only the dispersion gradient + CN
+> chain-rule stay on the host. `-opt`/`-md` need no host integral or gradient build.
+> **GFN2:** uses the same device integral build (S/H0/γ), then the Stage-1 rocSOLVER
+> eigensolver per iteration; its gradient stays on the host. Energies (and the full `-opt`
+> trajectory) match the CPU bit-for-bit (AMD 890M / gfx1150).
 
 ## What it is
 
@@ -112,7 +113,13 @@ to `ld.lld` and drop GNU OpenMP / `libgomp`). No `enable_language(HIP)` is used.
    host skips its integral build (`downloadOverlap`/`H0`/`Cholesky`/`Gamma` for its
    bookkeeping). The device math is a verbatim port of the proven CUDA kernels
    (`rocm/xtb_hip_integrals.hiph`). Used by both GFN1 and GFN2.
-4. On-device nuclear gradient — pending (still CPU). GFN-FF ROCm pending.
+4. **On-device nuclear gradient via `GpuScfBackend::gradient`** — done (GFN1). Kernels
+   `k_grad_repulsion` (section 1), `k_grad_cn_onsite` (2a, dEdcn diagonal), `k_grad_h0_pulay`
+   (2b, the overlap-derivative Pulay term using the energy-weighted density W = C·diag(2ε)·Cᵀ,
+   built via `k_scale_cols` + rocBLAS), `k_grad_coulomb` (3, γ-derivative). The overlap
+   derivative `d_cgto_overlap_grad` (Obara-Saika, s/p) is in `xtb_hip_integrals.hiph`. The
+   dispersion gradient + CN chain-rule stay on the host. GFN2 multipole gradient + GFN-FF
+   ROCm still pending.
 
 ## What was tested
 
@@ -122,11 +129,14 @@ On an **AMD Radeon 890M (gfx1150)**, build `release_rocm/` (`-DUSE_ROCM_XTB=ON`,
   SCF log "CN/S/H0/L built on GPU; no nao^2 upload"): H2O and benzoic acid (15 atoms)
   energies bit-identical at 8 decimals (|dE| = 0) — confirms the device overlap/H0/γ are
   correct (any integral error would shift the energy).
-- **gfn1 / gfn2 `-opt`**: converge to the same minima as the CPU (H2O -5.768775 / -5.070544),
-  exercising the device integral build + resident kernels across SCF iterations and opt steps.
+- **gfn1 `-opt` with the device gradient**: the *entire* trajectory matches the CPU
+  step-by-step — identical energies AND gradient norms at every step (H2O 8 steps to
+  -5.768775; benzoic acid to -27.417443). A wrong gradient would diverge immediately, so
+  this confirms the device repulsion/Pulay/Coulomb gradient is correct.
+- **gfn2 `-opt`**: device integrals + Stage-1 eigensolver; bit-identical to the CPU.
 - Stage 0 (no rocSOLVER): device handshake + CPU fallback, energies bit-identical.
 - Default non-ROCm `release/` build stays green (cli_curcumaopt_*/cli_rmsd_* 11/11).
 
 What was **NOT** tested: large systems (iGPU FP64 is slow — correctness milestone, not
-performance), discrete/CDNA GPUs, MD, the nuclear gradient (still CPU), GFN-FF; the overlap
-covers s/p only (H/C/N/O...), no d shells (same as the CPU native path).
+performance), discrete/CDNA GPUs, MD, the GFN2 multipole gradient (GFN2 gradient on host),
+GFN-FF; the overlap/gradient cover s/p only (H/C/N/O...), no d shells (as the CPU native path).

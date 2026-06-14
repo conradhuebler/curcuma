@@ -71,7 +71,7 @@ public:
                     const curcuma::xtb::GpuH0Flat& hf) override
     {
         if (!m_ctx || bf.nao <= 0) return false;
-        m_n = bf.nao; m_nsh = bf.nsh;
+        m_n = bf.nao; m_nsh = bf.nsh; m_nat = bf.nat;
         curcuma::xtb::gpu::XtbHipBasisData bd;
         bd.nat = bf.nat; bd.nsh = bf.nsh; bd.nao = bf.nao; bd.is_gfn2 = bf.is_gfn2;
         bd.nprim_total = static_cast<int>(bf.prim_alpha.size());
@@ -90,6 +90,10 @@ public:
         bd.selfenergy  = hf.selfenergy.data();
         bd.kcn         = hf.kcn.data();
         bd.shpoly      = hf.shpoly.data();
+        bd.ao2at       = bf.ao2at.empty() ? nullptr : bf.ao2at.data();   // Stage 4
+        bd.ao2sh       = bf.ao2sh.empty() ? nullptr : bf.ao2sh.data();
+        bd.rep_alpha   = bf.rep_alpha.empty() ? nullptr : bf.rep_alpha.data();
+        bd.rep_zeff    = bf.rep_zeff.empty() ? nullptr : bf.rep_zeff.data();
         return m_ctx->beginBasis(bd);
     }
     bool beginComputed(const std::vector<double>& xyz_bohr) override
@@ -120,10 +124,36 @@ public:
         gamma_out.resize(m_nsh, m_nsh);
         return m_ctx->downloadGamma(gamma_out.data());
     }
+
+    // ---- Stage 4: device nuclear gradient (GFN1) --------------------------
+    bool supportsGradient() const override { return true; }
+    bool gradient(const Matrix& P, const Eigen::MatrixXd& C, const Vector& eps,
+                  int nocc_orbs, const Vector& v_ao, const Vector& q_sh,
+                  const Eigen::MatrixXd& v_dp, const Eigen::MatrixXd& v_qp,
+                  Matrix& grad_out, Vector& dEdcn_out, bool pc_resident) override
+    {
+        // GFN1 isotropic: density/MO coefficients are resident (pc_resident), no multipole.
+        (void)P; (void)C; (void)v_dp; (void)v_qp; (void)pc_resident;
+        if (!m_ctx || m_nat <= 0) return false;
+        std::vector<double> grad(3 * static_cast<size_t>(m_nat), 0.0), dEdcn(m_nat, 0.0);
+        if (!m_ctx->gradient(eps.data(), nocc_orbs, v_ao.data(), q_sh.data(),
+                             grad.data(), dEdcn.data()))
+            return false;
+        grad_out.resize(m_nat, 3);
+        for (int i = 0; i < m_nat; ++i) {
+            grad_out(i, 0) = grad[3*i+0];
+            grad_out(i, 1) = grad[3*i+1];
+            grad_out(i, 2) = grad[3*i+2];
+        }
+        dEdcn_out.resize(m_nat);
+        for (int i = 0; i < m_nat; ++i) dEdcn_out(i) = dEdcn[i];
+        return true;
+    }
 private:
     XtbHipContext* m_ctx = nullptr;
     int            m_n   = 0;
     int            m_nsh = 0;
+    int            m_nat = 0;
 };
 #endif // HAVE_ROCSOLVER
 }  // namespace
@@ -176,9 +206,9 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
 
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::info(fmt::format(
-                    "{}: ROCm GPU eigensolver + device-resident GFN1 SCF + on-device integral "
-                    "build active (rocSOLVER + HIP kernels: CN/S/H0/L/gamma); nuclear gradient "
-                    "on CPU (Stage 3)", getMethodName()));
+                    "{}: ROCm fully device-resident GFN1 (rocSOLVER + HIP kernels): integral "
+                    "build (CN/S/H0/L/gamma) + SCF + nuclear gradient on the GPU; only the "
+                    "dispersion gradient + CN chain-rule on CPU (Stage 4)", getMethodName()));
         }
 #else
         if (CurcumaLogger::get_verbosity() >= 2)
