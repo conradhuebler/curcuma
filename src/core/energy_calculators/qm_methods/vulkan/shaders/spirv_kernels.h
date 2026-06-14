@@ -41,6 +41,19 @@ static const uint32_t fock_spv[] =
 static const uint32_t popband_spv[] =
 #include "popband.spv.inc"
 ;
+// Stage 3: on-device integral build (CN / self-energy / overlap+H0 / Coulomb gamma).
+static const uint32_t cn_spv[] =
+#include "cn.spv.inc"
+;
+static const uint32_t self_energy_spv[] =
+#include "self_energy.spv.inc"
+;
+static const uint32_t overlap_h0_spv[] =
+#include "overlap_h0.spv.inc"
+;
+static const uint32_t gamma_spv[] =
+#include "gamma.spv.inc"
+;
 
 } // namespace shaders
 } // namespace vk

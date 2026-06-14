@@ -1,0 +1,34 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+#extension GL_GOOGLE_include_directive : enable
+#include "vk_integrals.glsl"
+// Coulomb γ matrix: one thread per shell-pair (gexp=2; per-shell hardness g host-built).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, binding = 0) readonly  buffer S2b { int    sh2at[]; };
+layout(std430, binding = 1) readonly  buffer Ghb { double g[]; };
+layout(std430, binding = 2) readonly  buffer Xb  { double xyz[]; };
+layout(std430, binding = 3) writeonly buffer Gmb { double gamma[]; };
+layout(push_constant) uniform PC { uint nsh; uint is_gfn2; } pc;
+
+void main()
+{
+    uint is = gl_GlobalInvocationID.x;
+    uint js = gl_GlobalInvocationID.y;
+    if (is >= pc.nsh || js >= pc.nsh) return;
+    uint n = pc.nsh;
+    int iat = sh2at[is], jat = sh2at[js];
+    double val;
+    if (is == js) {
+        val = g[is];
+    } else if (iat == jat) {
+        val = coulomb_average(g[is], g[js], pc.is_gfn2 != 0u);
+    } else {
+        double dx = xyz[3*iat+0] - xyz[3*jat+0];
+        double dy = xyz[3*iat+1] - xyz[3*jat+1];
+        double dz = xyz[3*iat+2] - xyz[3*jat+2];
+        double r1g = dx*dx + dy*dy + dz*dz;                       // gexp=2 → R²
+        double gam = coulomb_average(g[is], g[js], pc.is_gfn2 != 0u);
+        val = 1.0lf / sqrt(r1g + 1.0lf / (gam * gam));            // (R² + γ̄⁻²)^(−1/2)
+    }
+    gamma[is + js * n] = val;
+}
