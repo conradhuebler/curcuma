@@ -36,6 +36,7 @@
 
 namespace curcuma {
 namespace xtb {
+struct GpuScfBackend;
 namespace gpu {
 class XtbHipContext;
 }
@@ -87,8 +88,11 @@ public:
 
 private:
     curcuma::xtb::MethodType                          m_method;
-    std::unique_ptr<curcuma::xtb::gpu::XtbHipContext> m_gpu;  ///< device handles
-    std::unique_ptr<NativeXtbMethod>                  m_cpu;  ///< validated CPU pipeline
+    // m_gpu/m_scf_backend before m_cpu: the owned XTB holds the eigensolver hook +
+    // resident-SCF backend pointer, so it must be destroyed (in m_cpu) first.
+    std::unique_ptr<curcuma::xtb::gpu::XtbHipContext> m_gpu;          ///< device handles
+    std::unique_ptr<curcuma::xtb::GpuScfBackend>      m_scf_backend;  ///< Stage-2 resident SCF (GFN1)
+    std::unique_ptr<NativeXtbMethod>                  m_cpu;          ///< validated CPU pipeline
 };
 
 #endif // USE_ROCM_XTB

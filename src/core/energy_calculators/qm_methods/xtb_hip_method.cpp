@@ -21,7 +21,56 @@
 namespace {
 using curcuma::xtb::MethodType;
 using curcuma::xtb::gpu::XtbHipContext;
-}
+
+#ifdef HAVE_ROCSOLVER
+/**
+ * @brief Device-resident GFN1 SCF backend (Stage 2) over an XtbHipContext.
+ *
+ * Adapts the column-major resident kernels to the project-typed GpuScfBackend the core
+ * XTB calls. supportsMultipole() stays false, so GFN2 falls back to the Stage-1
+ * ExternalEigensolver path. H0/S are symmetric, so the Eigen column-major copy preserves
+ * values. Claude Generated (Stage 2).
+ */
+class HipScfBackend : public curcuma::xtb::GpuScfBackend {
+public:
+    explicit HipScfBackend(XtbHipContext* ctx) : m_ctx(ctx) {}
+
+    bool begin(const Matrix& H0, const Matrix& S, const Eigen::MatrixXd& L) override
+    {
+        const int n = static_cast<int>(H0.rows());
+        if (!m_ctx || n <= 0 || S.rows() != n) return false;
+        (void)L;  // rocSOLVER dsygvd takes S directly (no host Cholesky needed)
+        m_n = n;
+        Eigen::MatrixXd Hcm = H0, Scm = S;  // column-major copies (H0/S symmetric)
+        return m_ctx->residentBegin(Hcm.data(), Scm.data(), n);
+    }
+    bool solve(const Eigen::VectorXd& v_ao, Vector& eps, bool fp32 = false, int n_eig = 0) override
+    {
+        (void)fp32; (void)n_eig;  // always full FP64 spectrum
+        if (!m_ctx || static_cast<int>(v_ao.size()) != m_n) return false;
+        eps.resize(m_n);
+        return m_ctx->residentSolve(v_ao.data(), eps.data());
+    }
+    bool density(const Eigen::VectorXd& occ, int ncol, Eigen::VectorXd& pop_ao, double& band) override
+    {
+        if (!m_ctx || ncol < 0 || ncol > m_n) return false;
+        pop_ao.resize(m_n); band = 0.0;
+        return m_ctx->residentDensity(occ.data(), ncol, pop_ao.data(), &band);
+    }
+    bool finalize(Matrix& P, Matrix& C) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        Eigen::MatrixXd Pcm(m_n, m_n), Ccm(m_n, m_n);
+        if (!m_ctx->residentFinalize(Pcm.data(), Ccm.data())) return false;
+        P = Pcm; C = Ccm;
+        return true;
+    }
+private:
+    XtbHipContext* m_ctx = nullptr;
+    int            m_n   = 0;
+};
+#endif // HAVE_ROCSOLVER
+}  // namespace
 
 XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const json& config)
     : m_method(method)
@@ -61,10 +110,19 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
                     C = Ccm;
                     return true;
                 });
+            // Stage 2: install the device-resident GFN1 SCF backend. Under the default
+            // Broyden mixing, XTB::Calculation keeps H0/S (and the per-iteration density
+            // and MO coefficients) resident on the device — the Fock build + populations
+            // are HIP kernels, the density a rocBLAS GEMM, the eigensolve rocSOLVER. GFN2
+            // (supportsMultipole()==false here) uses the Stage-1 eigensolver hook above.
+            m_scf_backend = std::make_unique<HipScfBackend>(ctx);
+            xtb->setGpuScfBackend(m_scf_backend.get());
+
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::info(fmt::format(
-                    "{}: ROCm GPU eigensolver active (rocSOLVER dsygvd, FP64); "
-                    "SCF/integrals/gradient on CPU (Stage 1)", getMethodName()));
+                    "{}: ROCm GPU eigensolver + device-resident GFN1 SCF active "
+                    "(rocSOLVER dsygvd + HIP kernels); integrals/gradient on CPU (Stage 2)",
+                    getMethodName()));
         }
 #else
         if (CurcumaLogger::get_verbosity() >= 2)

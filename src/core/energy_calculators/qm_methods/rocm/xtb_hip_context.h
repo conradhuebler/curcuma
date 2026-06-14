@@ -67,9 +67,28 @@ public:
     bool solveGeneralized(const double* F_colmajor, const double* S_colmajor, int n,
                           double* eps_out, double* C_colmajor);
 
-    // ---- Stage 2+ (resident SCF, hipified from XtbGpuContext) ----------------
-    // residentBegin/Solve/Density/Finalize etc. mirror XtbGpuContext so the shared
-    // GpuScfBackend adapter forwards to either context unchanged.
+    // ---- Device-resident GFN1 SCF (Stage 2) ---------------------------------
+    // Keeps H0/S (and the per-iteration density + MO coefficients) RESIDENT on the
+    // device for one geometry; only length-n vectors cross the bus per iteration. The
+    // Fock build + Mulliken populations are HIP __global__ kernels (hipcc), the density
+    // is a rocBLAS GEMM, and the generalized eigensolve is rocSOLVER dsygvd (which
+    // returns ascending eigenpairs directly — no host reduction / sort). All matrices
+    // n×n column-major; H0/S/P symmetric. Any false → caller falls back to the CPU.
+    // Claude Generated (Stage 2, GFN1 isotropic).
+
+    /// Upload the geometry-constant H0, overlap S; allocate the resident work buffers.
+    bool residentBegin(const double* H0_colmajor, const double* S_colmajor, int n);
+
+    /// One SCF step: F = H0 − ½·S·(v_ao⊕v_ao) (kernel), solve F C = S C ε on the device
+    /// (rocSOLVER), keep C resident. Writes the ascending eigenvalues to eps_out (n).
+    bool residentSolve(const double* v_ao, double* eps_out);
+
+    /// Density P = C·diag(occ)·Cᵀ over the leading ncol (ascending-eps) columns from the
+    /// resident C (rocBLAS); return pop_ao(μ)=Σ_ν P_μν·S_μν and band = Σ_μν P_μν·H0_μν.
+    bool residentDensity(const double* occ, int ncol, double* pop_ao, double* band);
+
+    /// Download the converged density P and MO coefficients C (n×n column-major).
+    bool residentFinalize(double* P_colmajor, double* C_colmajor);
 
 private:
     struct Impl;
