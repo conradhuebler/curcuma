@@ -1,0 +1,175 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+#extension GL_GOOGLE_include_directive : enable
+#include "vk_integrals.glsl"
+// H0/Pulay nuclear gradient + CN coupling (Stage 4, sections 2a on-site & 2b off-site).
+// One thread per atom A: GATHER over (mu∈A, nu∉A) AO pairs, so grad[A] and dEdcn[A]
+// are summed with NO FP64 atomics (Vulkan has none). The overlap derivative is
+// evaluated with A's shell as the first argument (dS/dR_A) and dxij = x_A - x_foreign,
+// which reproduces the antisymmetric scatter of rocm k_grad_h0_pulay/k_grad_cn_onsite
+// exactly (every scalar h-term is symmetric; only dS and dxij carry the sign). s/p only.
+// Claude Generated (V-AP1).
+layout(local_size_x = 64) in;
+layout(std430, binding = 0)  readonly buffer B0  { int    ao2sh[]; };
+layout(std430, binding = 1)  readonly buffer B1  { int    ao2at[]; };
+layout(std430, binding = 2)  readonly buffer B2  { int    ang[]; };
+layout(std430, binding = 3)  readonly buffer B3  { int    iao_sh[]; };
+layout(std430, binding = 4)  readonly buffer B4  { int    sh_nprim[]; };
+layout(std430, binding = 5)  readonly buffer B5  { int    sh_prim_off[]; };
+layout(std430, binding = 6)  readonly buffer B6  { double prim_alpha[]; };
+layout(std430, binding = 7)  readonly buffer B7  { double prim_coeff[]; };
+layout(std430, binding = 8)  readonly buffer B8  { double sh_zeta[]; };
+layout(std430, binding = 9)  readonly buffer B9  { double shpoly[]; };
+layout(std430, binding = 10) readonly buffer B10 { double kcn[]; };
+layout(std430, binding = 11) readonly buffer B11 { int    valence[]; };
+layout(std430, binding = 12) readonly buffer B12 { int    z[]; };
+layout(std430, binding = 13) readonly buffer B13 { double se[]; };
+layout(std430, binding = 14) readonly buffer B14 { double xyz[]; };
+layout(std430, binding = 15) readonly buffer B15 { double P[]; };
+layout(std430, binding = 16) readonly buffer B16 { double S[]; };
+layout(std430, binding = 17) readonly buffer B17 { double H0[]; };
+layout(std430, binding = 18) readonly buffer B18 { double W[]; };
+layout(std430, binding = 19) readonly buffer B19 { double v_ao[]; };
+layout(std430, binding = 20) readonly buffer B20 { double atomic_rad[]; };
+layout(std430, binding = 21) readonly buffer B21 { double pauling[]; };
+layout(std430, binding = 22)          buffer B22 { double grad[]; };
+layout(std430, binding = 23)          buffer B23 { double dEdcn[]; };
+layout(push_constant) uniform PC { uint nat; uint nao; uint is_gfn2; } pc;
+
+// Obara-Saika dS/dR_a for s/p contracted GTOs (verbatim port of d_cgto_overlap_grad /
+// CGTO::cgto_overlap_grad). type 0=s, 1=px, 2=py, 3=pz. dS/dR_b = -dS/dR_a.
+void cgto_overlap_grad(int offa, int npa, int offb, int npb,
+                       double xa, double ya, double za, double xb, double yb, double zb,
+                       int ta, int tb, out double g0, out double g1, out double g2)
+{
+    g0 = 0.0lf; g1 = 0.0lf; g2 = 0.0lf;
+    if (ta > 3 || tb > 3) return;
+    double dx = xb - xa, dy = yb - ya, dz = zb - za;
+    double R2 = dx*dx + dy*dy + dz*dz;
+    int nk0 = (ta == 1) ? 1 : 0, nk1 = (ta == 2) ? 1 : 0, nk2 = (ta == 3) ? 1 : 0;
+    for (int ip = 0; ip < npa; ++ip) {
+        double ai = prim_alpha[offa + ip], ci = prim_coeff[offa + ip];
+        for (int jp = 0; jp < npb; ++jp) {
+            double aj = prim_alpha[offb + jp], cj = prim_coeff[offb + jp];
+            double fac = ci * cj;
+            double g = ai + aj, invg = 1.0lf / g;
+            double Px = (ai*xa + aj*xb) * invg, Py = (ai*ya + aj*yb) * invg, Pz = (ai*za + aj*zb) * invg;
+            double PAx = Px - xa, PAy = Py - ya, PAz = Pz - za;
+            double PBx = Px - xb, PBy = Py - yb, PBz = Pz - zb;
+            double S00 = pow15(VK_PI * invg) * dexp(-ai*aj * invg * R2);
+            double h = 0.5lf * invg;
+            double Sr0, Sr1, Sr2;
+            if (ta == 0) {
+                if      (tb == 0) { Sr0 = PAx*S00;        Sr1 = PAy*S00;        Sr2 = PAz*S00; }
+                else if (tb == 1) { Sr0 = (PAx*PBx+h)*S00; Sr1 = PAy*PBx*S00;    Sr2 = PAz*PBx*S00; }
+                else if (tb == 2) { Sr0 = PAx*PBy*S00;    Sr1 = (PAy*PBy+h)*S00; Sr2 = PAz*PBy*S00; }
+                else              { Sr0 = PAx*PBz*S00;    Sr1 = PAy*PBz*S00;    Sr2 = (PAz*PBz+h)*S00; }
+            } else if (ta == 1) {
+                if      (tb == 0) { Sr0 = (PAx*PAx+h)*S00; Sr1 = PAx*PAy*S00;    Sr2 = PAx*PAz*S00; }
+                else if (tb == 1) { Sr0 = (PAx*PAx*PBx + PAx*invg + PBx*h)*S00; Sr1 = PAy*(PAx*PBx+h)*S00; Sr2 = PAz*(PAx*PBx+h)*S00; }
+                else if (tb == 2) { Sr0 = (PAx*PAx+h)*PBy*S00; Sr1 = PAx*(PAy*PBy+h)*S00; Sr2 = PAz*PAx*PBy*S00; }
+                else              { Sr0 = (PAx*PAx+h)*PBz*S00; Sr1 = PAy*PAx*PBz*S00; Sr2 = PAx*(PAz*PBz+h)*S00; }
+            } else if (ta == 2) {
+                if      (tb == 0) { Sr0 = PAy*PAx*S00;    Sr1 = (PAy*PAy+h)*S00; Sr2 = PAy*PAz*S00; }
+                else if (tb == 1) { Sr0 = PAy*(PAx*PBx+h)*S00; Sr1 = (PAy*PAy+h)*PBx*S00; Sr2 = PAz*PAy*PBx*S00; }
+                else if (tb == 2) { Sr0 = PAx*(PAy*PBy+h)*S00; Sr1 = (PAy*PAy*PBy + PAy*invg + PBy*h)*S00; Sr2 = PAz*(PAy*PBy+h)*S00; }
+                else              { Sr0 = PAx*PAy*PBz*S00; Sr1 = (PAy*PAy+h)*PBz*S00; Sr2 = PAy*(PAz*PBz+h)*S00; }
+            } else { // ta == 3
+                if      (tb == 0) { Sr0 = PAz*PAx*S00;    Sr1 = PAz*PAy*S00;    Sr2 = (PAz*PAz+h)*S00; }
+                else if (tb == 1) { Sr0 = PAz*(PAx*PBx+h)*S00; Sr1 = PAy*PAz*PBx*S00; Sr2 = (PAz*PAz+h)*PBx*S00; }
+                else if (tb == 2) { Sr0 = PAx*PAz*PBy*S00; Sr1 = PAz*(PAy*PBy+h)*S00; Sr2 = (PAz*PAz+h)*PBy*S00; }
+                else              { Sr0 = PAx*(PAz*PBz+h)*S00; Sr1 = PAy*(PAz*PBz+h)*S00; Sr2 = (PAz*PAz*PBz + PAz*invg + PBz*h)*S00; }
+            }
+            double S_s_b = 0.0lf;
+            if (ta >= 1) {
+                if      (tb == 0) S_s_b = S00;
+                else if (tb == 1) S_s_b = PBx * S00;
+                else if (tb == 2) S_s_b = PBy * S00;
+                else              S_s_b = PBz * S00;
+            }
+            g0 += fac * (2.0lf*ai*Sr0 - double(nk0)*S_s_b);
+            g1 += fac * (2.0lf*ai*Sr1 - double(nk1)*S_s_b);
+            g2 += fac * (2.0lf*ai*Sr2 - double(nk2)*S_s_b);
+        }
+    }
+}
+
+void main()
+{
+    uint A = gl_GlobalInvocationID.x;
+    if (A >= pc.nat) return;
+    uint nao = pc.nao;
+    int  zi  = z[A];
+    double xA = xyz[3*A+0], yA = xyz[3*A+1], zA = xyz[3*A+2];
+    double dEdcnA = 0.0lf;
+    double gAx = grad[3*A+0], gAy = grad[3*A+1], gAz = grad[3*A+2];  // accumulate on rep+coulomb
+
+    for (uint mu = 0u; mu < nao; ++mu) {
+        if (uint(ao2at[mu]) != A) continue;
+        int isha = ao2sh[mu];
+        // section 2a: on-site CN coupling (diagonal density).
+        dEdcnA += (-kcn[isha]) * P[mu + mu * nao];
+        int la = ang[isha];
+        int ta = ao_to_type(la, int(mu) - iao_sh[isha]);
+        if (ta < 0) continue;
+        int offa = sh_prim_off[isha], npa = sh_nprim[isha];
+        double shp_a = shpoly[isha], se_a = se[isha], zeta_a = sh_zeta[isha];
+        double kcn_a = kcn[isha];
+
+        for (uint nu = 0u; nu < nao; ++nu) {
+            int jat = ao2at[nu];
+            if (uint(jat) == A) continue;            // foreign AO only
+            int ishb = ao2sh[nu];
+            int lb = ang[ishb];
+            int tb = ao_to_type(lb, int(nu) - iao_sh[ishb]);
+            if (tb < 0) continue;
+
+            double xb = xyz[3*jat+0], yb = xyz[3*jat+1], zb = xyz[3*jat+2];
+            double dxij = xA - xb, dyij = yA - yb, dzij = zA - zb;
+            double r2 = dxij*dxij + dyij*dyij + dzij*dzij;
+            if (r2 < 1.0e-12lf) continue;
+            double r = sqrt(r2);
+            int zj = z[jat];
+            double rad_sum = atomic_rad[zi-1] + atomic_rad[zj-1];
+            double rr = sqrt(r / rad_sum);
+            double shp_b = shpoly[ishb];
+            double pi_a = 1.0lf + shp_a * rr, pi_b = 1.0lf + shp_b * rr;
+
+            double hs;
+            if (pc.is_gfn2 == 0u) {
+                bool vi = valence[isha] != 0, vj = valence[ishb] != 0;
+                if (vi && vj) {
+                    double den = pauling[zi-1] - pauling[zj-1]; den *= den;
+                    hs = kpair_gfn1(zi, zj) * kshell_gfn1(la, lb) * (1.0lf + (-7.0e-3lf) * den);
+                } else if (vi && !vj) hs = 0.5lf * (kshell_gfn1(la, la) + 2.85lf);
+                else if (!vi && vj)   hs = 0.5lf * (kshell_gfn1(lb, lb) + 2.85lf);
+                else                  hs = 2.85lf;
+            } else {
+                double den = pauling[zi-1] - pauling[zj-1]; den *= den;
+                double enp = 1.0lf + 2.0e-2lf * den;
+                double km = kshell_gfn2(la, lb) * enp;
+                double zb_ = sh_zeta[ishb];
+                hs = sqrt(2.0lf * sqrt(zeta_a * zb_) / (zeta_a + zb_)) * km;
+            }
+            double h_factor = hs * pi_a * pi_b;
+            double h_av = 0.5lf * (se_a + se[ishb]) * h_factor;
+            double dlog_pi_dr_r = (shp_a / pi_a + shp_b / pi_b) * rr / (2.0lf * r2);
+
+            uint mn = mu + nu * nao;
+            double Pmn = P[mn], Smn = S[mn], H0mn = H0[mn], Wmn = W[mn];
+            double dS0, dS1, dS2;
+            cgto_overlap_grad(offa, npa, sh_prim_off[ishb], sh_nprim[ishb],
+                              xA, yA, zA, xb, yb, zb, ta, tb, dS0, dS1, dS2);
+
+            double sval = 2.0lf*Pmn*h_av - 2.0lf*Wmn - Pmn*(v_ao[mu] + v_ao[nu]);
+            double shp  = 2.0lf*Pmn*H0mn*dlog_pi_dr_r;
+            gAx += sval*dS0 + shp*dxij;
+            gAy += sval*dS1 + shp*dyij;
+            gAz += sval*dS2 + shp*dzij;
+
+            dEdcnA += (-kcn_a) * (h_factor * Pmn * Smn);
+        }
+    }
+    grad[3*A+0] = gAx; grad[3*A+1] = gAy; grad[3*A+2] = gAz;
+    dEdcn[A] = dEdcnA;
+}

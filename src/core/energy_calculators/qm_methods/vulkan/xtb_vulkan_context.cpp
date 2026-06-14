@@ -67,6 +67,11 @@ struct XtbVulkanContext::Impl {
     VkPipelineLayout ploI4 = VK_NULL_HANDLE, ploI5 = VK_NULL_HANDLE, ploI18 = VK_NULL_HANDLE;
     VkShaderModule mCN{}, mSE{}, mOV{}, mGM{};
     VkPipeline pCN{}, pSE{}, pOV{}, pGM{};
+    // Stage 4 gradient pipelines (per-atom gather; no FP64 atomics).
+    VkDescriptorSetLayout dsl24 = VK_NULL_HANDLE;
+    VkPipelineLayout ploGrad5 = VK_NULL_HANDLE, ploGradP = VK_NULL_HANDLE;
+    VkShaderModule mGRep{}, mGCoul{}, mGPul{};
+    VkPipeline pGRep{}, pGCoul{}, pGPul{};
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
 
@@ -91,6 +96,13 @@ struct XtbVulkanContext::Impl {
     Buf bXyz, bCN, bSE, bGamma;                                     // per-geometry / scratch
     VkDescriptorPool iPool = VK_NULL_HANDLE;
     VkDescriptorSet  setCN{}, setSE{}, setOV{}, setGM{};
+
+    // Stage 4 gradient: molecule-constant arrays + per-call scratch/output + sets.
+    Buf bAo2at, bAo2sh, bRepAlpha, bRepZeff;                        // molecule-constant
+    Buf gW, gVao, gQsh, gGrad, gEdcn;                               // W (nao²) + per-call
+    VkDescriptorPool gPool = VK_NULL_HANDLE;
+    VkDescriptorSet  gSetRep{}, gSetCoul{}, gSetPul{}, gSetW{};
+    bool grad_ready = false;
 
     explicit Impl() {
         if (!vkc.ok()) return;
@@ -180,6 +192,15 @@ struct XtbVulkanContext::Impl {
         mOV = mod(overlap_h0_spv, sizeof(overlap_h0_spv)); mGM = mod(gamma_spv, sizeof(gamma_spv));
         pCN = pipe(mCN, ploI4); pSE = pipe(mSE, ploI5); pOV = pipe(mOV, ploI18); pGM = pipe(mGM, ploI4);
         if (!pCN || !pSE || !pOV || !pGM) return false;
+        // Stage 4 gradient kernels: rep/coulomb 5 SSBO + 12B push, pulay 24 SSBO + 12B.
+        dsl24 = makeDsl(24);
+        ploGrad5 = makePl(dsl5, 12); ploGradP = makePl(dsl24, 12);
+        if (!dsl24 || !ploGrad5 || !ploGradP) return false;
+        mGRep = mod(grad_rep_spv, sizeof(grad_rep_spv));
+        mGCoul = mod(grad_coulomb_spv, sizeof(grad_coulomb_spv));
+        mGPul = mod(grad_pulay_spv, sizeof(grad_pulay_spv));
+        pGRep = pipe(mGRep, ploGrad5); pGCoul = pipe(mGCoul, ploGrad5); pGPul = pipe(mGPul, ploGradP);
+        if (!pGRep || !pGCoul || !pGPul) return false;
         VkCommandBufferAllocateInfo cbi{}; cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO; cbi.commandPool = pool; cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbi.commandBufferCount = 1;
         if (vkAllocateCommandBuffers(dev, &cbi, &cmd) != VK_SUCCESS) return false;
         VkFenceCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -377,6 +398,39 @@ struct XtbVulkanContext::Impl {
         bindSet(setOV, { &bSh2at, &bAng, &bIao, &bNao, &bShNprim, &bShPrimOff, &bPrimA, &bPrimC,
                          &bShZeta, &bShpoly, &bSE, &bZ, &bValence, &bXyz, &bArad, &bPauling, &rS, &rH0 });
         bindSet(setGM, { &bSh2at, &bGhard, &bXyz, &bGamma });
+
+        // Stage 4 gradient setup (optional; needs ao2at/ao2sh/rep_alpha/rep_zeff). The
+        // resident rP/rC/rCw/rS/rH0 already exist (allocResident above). gW is the
+        // energy-weighted density built per gradient() call.
+        grad_ready = false;
+        if (bd.ao2at && bd.ao2sh && bd.rep_alpha && bd.rep_zeff) {
+            bool gg = true;
+            gg &= upB(bAo2at, bd.ao2at, bnao);   gg &= upB(bAo2sh, bd.ao2sh, bnao);
+            gg &= upB(bRepAlpha, bd.rep_alpha, bnat); gg &= upB(bRepZeff, bd.rep_zeff, bnat);
+            if (gW.buf) freeBuf(gW);       gW    = makeBuf(sizeof(double) * (size_t)bnao * bnao);
+            if (gVao.buf) freeBuf(gVao);   gVao  = makeBuf(sizeof(double) * (size_t)bnao);
+            if (gQsh.buf) freeBuf(gQsh);   gQsh  = makeBuf(sizeof(double) * (size_t)bnsh);
+            if (gGrad.buf) freeBuf(gGrad); gGrad = makeBuf(sizeof(double) * 3 * (size_t)bnat);
+            if (gEdcn.buf) freeBuf(gEdcn); gEdcn = makeBuf(sizeof(double) * (size_t)bnat);
+            gg &= gW.buf && gVao.buf && gQsh.buf && gGrad.buf && gEdcn.buf;
+            if (gg) {
+                if (gPool) vkDestroyDescriptorPool(dev, gPool, nullptr);
+                VkDescriptorPoolSize ps2{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 + 5 + 24 + 3 };
+                VkDescriptorPoolCreateInfo dpi2{}; dpi2.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpi2.maxSets = 4; dpi2.poolSizeCount = 1; dpi2.pPoolSizes = &ps2;
+                if (vkCreateDescriptorPool(dev, &dpi2, nullptr, &gPool) == VK_SUCCESS) {
+                    gSetRep = allocSet(gPool, dsl5); gSetCoul = allocSet(gPool, dsl5);
+                    gSetPul = allocSet(gPool, dsl24); gSetW = allocSet(gPool, dsl3);
+                    bindSet(gSetRep,  { &bZ, &bXyz, &bRepAlpha, &bRepZeff, &gGrad });
+                    bindSet(gSetCoul, { &bSh2at, &bGhard, &gQsh, &bXyz, &gGrad });
+                    bindSet(gSetPul,  { &bAo2sh, &bAo2at, &bAng, &bIao, &bShNprim, &bShPrimOff,
+                                        &bPrimA, &bPrimC, &bShZeta, &bShpoly, &bKcn, &bValence,
+                                        &bZ, &bSE, &bXyz, &rP, &rS, &rH0, &gW, &gVao, &bArad,
+                                        &bPauling, &gGrad, &gEdcn });
+                    bindSet(gSetW,    { &rCw, &rC, &gW });   // W = Cw·Cᵀ via gemm (transB=1)
+                    grad_ready = true;
+                }
+            }
+        }
         basis_ready = true;
         return true;
     }
@@ -402,8 +456,11 @@ struct XtbVulkanContext::Impl {
     void freeBasis() {
         for (Buf* b : { &bZ,&bSh2at,&bAng,&bIao,&bNao,&bShNprim,&bShPrimOff,&bPrimA,&bPrimC,&bShZeta,
                         &bShpoly,&bSelfE,&bKcn,&bGhard,&bValence,&bCovrad,&bPauling,&bArad,
-                        &bXyz,&bCN,&bSE,&bGamma }) freeBuf(*b);
+                        &bXyz,&bCN,&bSE,&bGamma,
+                        &bAo2at,&bAo2sh,&bRepAlpha,&bRepZeff,&gW,&gVao,&gQsh,&gGrad,&gEdcn }) freeBuf(*b);
         if (iPool) { vkDestroyDescriptorPool(dev, iPool, nullptr); iPool = VK_NULL_HANDLE; }
+        if (gPool) { vkDestroyDescriptorPool(dev, gPool, nullptr); gPool = VK_NULL_HANDLE; }
+        grad_ready = false;
         basis_ready = false;
     }
 
@@ -445,6 +502,37 @@ struct XtbVulkanContext::Impl {
         return true;
     }
 
+    // ----- Stage 4: device nuclear gradient (GFN1 isotropic) --------------
+    bool gradient(const double* eps, int nocc_orbs, const double* v_ao, const double* q_sh,
+                  double* grad_out, double* dEdcn_out) {
+        if (!grad_ready || bnao <= 0 || (int)ridx.size() != bnao) return false;
+        const int nao = bnao, nat = bnat, nsh = bnsh;
+        // Energy-weighted density W = C·diag(2·ε_occ)·Cᵀ from the resident rC (in its
+        // Jacobi column order). rd[ridx[k]] = 2·eps[k] pairs the weight with the k-th
+        // ascending eigenvector column; W is a column-sum, so order-invariant.
+        double* d = (double*)rd.ptr;
+        std::fill(d, d + nao, 0.0);
+        for (int k = 0; k < nocc_orbs && k < nao; ++k) d[ridx[k]] = 2.0 * eps[k];
+        if (!scaleDev(nao, sCwS)) return false;     // rCw = rC·diag(2ε_occ)
+        if (!gemmDev(nao, gSetW, 1)) return false;  // gW  = rCw·rCᵀ = W
+
+        std::memcpy(gVao.ptr, v_ao, sizeof(double) * (size_t)nao);
+        std::memcpy(gQsh.ptr, q_sh, sizeof(double) * (size_t)nsh);
+        std::memset(gGrad.ptr, 0, sizeof(double) * 3 * (size_t)nat);   // accumulated by the 3 kernels
+        std::memset(gEdcn.ptr, 0, sizeof(double) * (size_t)nat);
+
+        const uint32_t gxa = (nat + 63) / 64;
+        uint32_t pcRC[3] = { (uint32_t)nat, (uint32_t)nsh, (uint32_t)bis_gfn2 };
+        uint32_t pcP[3]  = { (uint32_t)nat, (uint32_t)nao, (uint32_t)bis_gfn2 };
+        if (!dispatch1(pGRep,  ploGrad5, gSetRep,  pcRC, 12, gxa, 1)) return false;   // section 1
+        if (!dispatch1(pGCoul, ploGrad5, gSetCoul, pcRC, 12, gxa, 1)) return false;   // section 3
+        if (!dispatch1(pGPul,  ploGradP, gSetPul,  pcP,  12, gxa, 1)) return false;   // sections 2a+2b
+
+        std::memcpy(grad_out, gGrad.ptr, sizeof(double) * 3 * (size_t)nat);
+        std::memcpy(dEdcn_out, gEdcn.ptr, sizeof(double) * (size_t)nat);
+        return true;
+    }
+
     void destroy() {
         if (!dev) return;
         if (sPool) vkDestroyDescriptorPool(dev, sPool, nullptr);
@@ -452,10 +540,10 @@ struct XtbVulkanContext::Impl {
         freeBasis();
         for (Buf* b : { &sA,&sV,&sP,&sC,&rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs }) freeBuf(*b);
         if (fence) vkDestroyFence(dev, fence, nullptr);
-        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM }) if (p) vkDestroyPipeline(dev, p, nullptr);
-        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM }) if (m) vkDestroyShaderModule(dev, m, nullptr);
-        for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB,ploI4,ploI5,ploI18 }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
-        for (VkDescriptorSetLayout d : { dsl3,dsl4,dsl5,dsl18 }) if (d) vkDestroyDescriptorSetLayout(dev, d, nullptr);
+        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul }) if (p) vkDestroyPipeline(dev, p, nullptr);
+        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul }) if (m) vkDestroyShaderModule(dev, m, nullptr);
+        for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB,ploI4,ploI5,ploI18,ploGrad5,ploGradP }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
+        for (VkDescriptorSetLayout d : { dsl3,dsl4,dsl5,dsl18,dsl24 }) if (d) vkDestroyDescriptorSetLayout(dev, d, nullptr);
         sPool = rPool = VK_NULL_HANDLE; fence = VK_NULL_HANDLE; pipes_ready = false;
     }
 };
@@ -516,6 +604,13 @@ bool XtbVulkanContext::downloadGamma(double* gamma_colmajor)
 {
     return m_impl && m_impl->vkc.ok() && gamma_colmajor && m_impl->basis_ready
         && m_impl->dlMat(gamma_colmajor, m_impl->bGamma, static_cast<size_t>(m_impl->bnsh) * m_impl->bnsh);
+}
+bool XtbVulkanContext::gradient(const double* eps, int nocc_orbs, const double* v_ao,
+                                const double* q_sh, double* grad_out, double* dEdcn_out)
+{
+    if (!m_impl || !m_impl->vkc.ok() || !eps || !v_ao || !q_sh || !grad_out || !dEdcn_out)
+        return false;
+    return m_impl->gradient(eps, nocc_orbs, v_ao, q_sh, grad_out, dEdcn_out);
 }
 
 } // namespace gpu

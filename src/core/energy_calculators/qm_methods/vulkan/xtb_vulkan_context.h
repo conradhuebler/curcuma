@@ -49,6 +49,11 @@ struct XtbVulkanBasisData {
     const double* shpoly = nullptr;       // nsh
     const int*    valence = nullptr;      // nsh
     const double* shell_hardness = nullptr; // nsh
+    // Stage 4 (gradient) extras:
+    const int*    ao2at = nullptr;        // nao (AO → atom)
+    const int*    ao2sh = nullptr;        // nao (AO → shell)
+    const double* rep_alpha = nullptr;    // nat (repulsion)
+    const double* rep_zeff = nullptr;     // nat (repulsion)
 };
 
 class XtbVulkanContext {
@@ -118,6 +123,19 @@ public:
     bool downloadOverlap(double* S_colmajor);
     bool downloadH0(double* H0_colmajor);
     bool downloadGamma(double* gamma_colmajor);
+
+    // ---- Device nuclear gradient (Stage 4, GFN1 isotropic) ------------------
+    // The repulsion + on-site CN + H0/Pulay + isotropic Coulomb gradient (sections
+    // 1/2/3 of XTB::calculateGradient) on the device, from the resident SCF state
+    // (density rP, MO coefficients rC, eigenvalues eps, AO potential v_ao, shell
+    // charges q_sh). The energy-weighted density W = C·diag(2·ε_occ)·Cᵀ is built on
+    // device (scale_cols + gemm) from the resident rC in its Jacobi order. Outputs
+    // grad_out (3·nat, layout [3*i+k], Eh/Bohr) and dEdcn_out (nat, the H0/Pulay CN
+    // coupling); the host adds the dispersion gradient + CN chain-rule. Per-atom
+    // GATHER kernels — no FP64 atomics. Requires a prior beginComputed + resident
+    // density. Claude Generated (V-AP1).
+    bool gradient(const double* eps, int nocc_orbs, const double* v_ao, const double* q_sh,
+                  double* grad_out, double* dEdcn_out);
 
 private:
     struct Impl;

@@ -18,7 +18,7 @@ and is correct at every step. Stage numbers below match the CUDA stages in
 | 1 GPU eigensolver (per-iteration `F C = S C ε`) | ✅ | ✅ (rocSOLVER `dsygvd`) | ✅ (FP64 Jacobi) |
 | 2a GFN1 device-resident SCF | ✅ | ✅ | ✅ |
 | 3 integrals on device — isotropic (CN/S/H0/L/γ) | ✅ | ✅ | ✅ |
-| 4 nuclear gradient on device — GFN1 | ✅ | ✅ | ❌ **V-AP1** |
+| 4 nuclear gradient on device — GFN1 | ✅ | ✅ | ✅ (V-AP1, gather kernels) |
 | 3m integrals on device — GFN2 multipole (dp/qp) | ✅ | ❌ **R-AP1** | ❌ **V-AP2** |
 | 2b GFN2 device-resident multipole SCF | ✅ | ❌ **R-AP2** | ❌ **V-AP3** |
 | 4m nuclear gradient on device — GFN2 multipole | ✅ | ❌ **R-AP3** | ❌ **V-AP4** |
@@ -26,10 +26,20 @@ and is correct at every step. Stage numbers below match the CUDA stages in
 | GFN-FF on the GPU | partial | ❌ **R-AP5 / V-AP6** | ❌ |
 | in-SCF solvation (ALPB/GBSA) on device | ✅ | ❌ **X-AP1** | ❌ **X-AP1** |
 
-**Summary:** Vulkan trails ROCm by exactly one stage (no on-device gradient yet — GFN1
-`-opt`/`-md` still build the gradient on the CPU). Both backends trail CUDA on the entire
-GFN2 anisotropic (dipole/quadrupole) stack, GFN-FF, and device solvation. The s/p-only
-limit (H/C/N/O…, no d shells) of the CPU native path applies to all GPU ports.
+**Summary:** Vulkan now matches ROCm/CUDA on the full GFN1 stack — integrals, resident
+SCF **and** the on-device nuclear gradient (V-AP1 done), so GFN1 `-opt`/`-md` are fully
+device-resident. Both backends still trail CUDA on the entire GFN2 anisotropic
+(dipole/quadrupole) stack, GFN-FF, and device solvation. The s/p-only limit (H/C/N/O…,
+no d shells) of the CPU native path applies to all GPU ports.
+
+> **Vulkan note (no FP64 atomics):** Vulkan/GLSL has no `atomicAdd(double)` (unlike
+> CUDA/ROCm), so the four scatter kernels are restructured as **per-atom GATHER** (one
+> thread owns atom A's gradient slot and sums over all partners). The pair forces are
+> antisymmetric (`f_ij = −f_ji`) and every H0-Pulay scalar term is pair-symmetric, so the
+> gather reproduces the scatter exactly; the overlap derivative is evaluated with A's
+> shell as the first argument (`dS/dR_A`) and `dxij = x_A − x_foreign`, carrying the sign.
+> Cost is ~2× the overlap-gradient evaluations (each unordered AO pair seen from both
+> atoms) — acceptable on an iGPU where this is a residency/correctness milestone.
 
 ## Port mechanics (shared)
 
@@ -59,18 +69,24 @@ limit (H/C/N/O…, no d shells) of the CPU native path applies to all GPU ports.
 
 ## Vulkan work packages
 
-### V-AP1 — On-device nuclear gradient, GFN1 (Stage 4) — *highest priority*
+### V-AP1 — On-device nuclear gradient, GFN1 (Stage 4) — ✅ DONE (2026-06)
 - **Goal**: bring Vulkan to ROCm/CUDA parity for GFN1; make GFN1 `-opt`/`-md`
   fully device-resident (only xyz up, gradient+energy down per step).
-- **Port from**: ROCm Stage 4 (`k_grad_repulsion`, `k_grad_cn_onsite`, `k_grad_h0_pulay`
-  with the energy-weighted density `W = C·diag(2ε)·Cᵀ`, `k_grad_coulomb`) and the
-  Obara-Saika overlap-derivative `d_cgto_overlap_grad` — both already exist in HIP/CUDA.
-- **New/changed**: SPIR-V shaders `grad_repulsion`/`grad_cn_onsite`/`grad_h0_pulay`/
-  `grad_coulomb` + an overlap-gradient device routine; implement
-  `VulkanScfBackend::{supportsGradient→true, gradient(...)}` over the resident dP/dC (no
-  upload). Dispersion gradient + CN chain-rule stay on the host (as CUDA/ROCm).
-- **Unlocks**: closes the single biggest Vulkan gap; reuses the resident density already on
-  the device from Stage 2a.
+- **Done**: three SPIR-V gather kernels — `grad_rep` (section 1), `grad_coulomb`
+  (section 3), `grad_pulay` (sections 2a on-site CN + 2b H0/Pulay off-site, with the
+  inline Obara-Saika `cgto_overlap_grad` ported into the shader). The energy-weighted
+  density `W = C·diag(2ε)·Cᵀ` is built on device via the existing `scale_cols`+`gemm`
+  from the resident `rC` (Jacobi order; `rd[ridx[k]] = 2ε[k]`). `XtbVulkanContext::gradient`
+  + `VulkanScfBackend::{supportsGradient→true, gradient(...)}` over the resident
+  density/MO coefficients (`pc_resident`, no P/C upload). Dispersion gradient + CN
+  chain-rule stay on the host (as CUDA/ROCm). No FP64 atomics (see Vulkan note above).
+- **Validated** (AMD 890M / RADV): `-sp` GFN1 energy + gradient norm bit-identical to CPU
+  over the full 12-molecule `sqm_reference` set incl. 231-atom `complex`; `-opt` caffeine
+  35 steps step-by-step identical in energy AND gradient norm. ctest
+  `cli_gpu_gradient_01_vulkan_gfn1_gradient` (labels `gpu_gradient;gpu;vulkan;cli`).
+- **Unlocks**: closed the single biggest Vulkan gap; reuses the resident density from
+  Stage 2a. GFN2 still falls back to the CPU gradient (host SCF — `use_gpu_resident` is
+  false for GFN2 on Vulkan, so the device gradient is only ever taken for GFN1).
 
 ### V-AP2 — GFN2 multipole integrals on device (Stage 3m)
 - **Goal**: build `dp_int`/`qp_int` (AO dipole/quadrupole) on the GPU so GFN2 stops
@@ -168,7 +184,8 @@ rocBLAS/rocSOLVER cover the dense linear algebra and the isotropic `.hiph` alrea
 
 ## Suggested order
 
-1. **V-AP1** (Vulkan GFN1 gradient) — closes the only Vulkan↔ROCm asymmetry; self-contained.
+1. ~~**V-AP1** (Vulkan GFN1 gradient) — closes the only Vulkan↔ROCm asymmetry.~~ ✅ DONE
+   (2026-06). **Next up:** step 2.
 2. **R-AP1 + V-AP2** (GFN2 multipole integrals, both backends) — shared port, independent.
 3. **R-AP2 + V-AP3** (resident multipole SCF) → **R-AP3 + V-AP4** (GFN2 gradient).
 4. **X-AP1** (device solvation, interim host-`v_ao` form is cheap) alongside step 3.

@@ -17,6 +17,7 @@
 #include "src/core/curcuma_logger.h"
 
 #include <fmt/format.h>
+#include <vector>
 
 namespace {
 using curcuma::xtb::MethodType;
@@ -70,7 +71,7 @@ public:
                     const curcuma::xtb::GpuH0Flat& hf) override
     {
         if (!m_ctx || bf.nao <= 0) return false;
-        m_n = bf.nao; m_nsh = bf.nsh;
+        m_n = bf.nao; m_nsh = bf.nsh; m_nat = bf.nat;
         curcuma::xtb::gpu::XtbVulkanBasisData bd;
         bd.nat = bf.nat; bd.nsh = bf.nsh; bd.nao = bf.nao; bd.is_gfn2 = bf.is_gfn2;
         bd.nprim_total = static_cast<int>(bf.prim_alpha.size());
@@ -82,6 +83,10 @@ public:
         bd.valence = bf.valence.empty() ? nullptr : bf.valence.data();
         bd.shell_hardness = bf.shell_hardness.data();
         bd.selfenergy = hf.selfenergy.data(); bd.kcn = hf.kcn.data(); bd.shpoly = hf.shpoly.data();
+        bd.ao2at     = bf.ao2at.empty() ? nullptr : bf.ao2at.data();   // Stage 4 (gradient)
+        bd.ao2sh     = bf.ao2sh.empty() ? nullptr : bf.ao2sh.data();
+        bd.rep_alpha = bf.rep_alpha.empty() ? nullptr : bf.rep_alpha.data();
+        bd.rep_zeff  = bf.rep_zeff.empty() ? nullptr : bf.rep_zeff.data();
         return m_ctx->beginBasis(bd);
     }
     bool beginComputed(const std::vector<double>& xyz_bohr) override
@@ -118,10 +123,37 @@ public:
         gamma_out.resize(m_nsh, m_nsh);
         return m_ctx->downloadGamma(gamma_out.data());
     }
+
+    // ---- Stage 4: device nuclear gradient (GFN1) --------------------------
+    // Only reached on the device-resident GFN1 path (XTB gates calculateGradientGpu on
+    // use_gpu_resident); GFN2 on Vulkan runs the host SCF (Stage-1 eigensolver) so the
+    // CPU gradient is used. Density/MO coefficients are resident (pc_resident), so P/C
+    // are empty and v_dp/v_qp unused (GFN1 isotropic).
+    bool supportsGradient() const override { return true; }
+    bool gradient(const Matrix& P, const Eigen::MatrixXd& C, const Vector& eps,
+                  int nocc_orbs, const Vector& v_ao, const Vector& q_sh,
+                  const Eigen::MatrixXd& v_dp, const Eigen::MatrixXd& v_qp,
+                  Matrix& grad_out, Vector& dEdcn_out, bool pc_resident) override
+    {
+        (void)P; (void)C; (void)v_dp; (void)v_qp; (void)pc_resident;
+        if (!m_ctx || m_nat <= 0) return false;
+        std::vector<double> grad(3 * static_cast<size_t>(m_nat), 0.0), dEdcn(m_nat, 0.0);
+        if (!m_ctx->gradient(eps.data(), nocc_orbs, v_ao.data(), q_sh.data(),
+                             grad.data(), dEdcn.data()))
+            return false;
+        grad_out.resize(m_nat, 3);
+        for (int i = 0; i < m_nat; ++i) {
+            grad_out(i, 0) = grad[3*i+0]; grad_out(i, 1) = grad[3*i+1]; grad_out(i, 2) = grad[3*i+2];
+        }
+        dEdcn_out.resize(m_nat);
+        for (int i = 0; i < m_nat; ++i) dEdcn_out(i) = dEdcn[i];
+        return true;
+    }
 private:
     XtbVulkanContext* m_ctx = nullptr;
     int               m_n   = 0;
     int               m_nsh = 0;
+    int               m_nat = 0;
 };
 }  // namespace
 
@@ -180,10 +212,11 @@ XtbVulkanComputationalMethod::XtbVulkanComputationalMethod(MethodType method, co
                 const bool gfn1 = getMethodName() == "gfn1";
                 CurcumaLogger::info(fmt::format(
                     "{}: Vulkan on-device integral build (CN/S/H0/L/gamma) + GPU FP64 "
-                    "Jacobi/Lowdin eigensolve; {} (Stage 3). Gradient on CPU.",
+                    "Jacobi/Lowdin eigensolve; {}",
                     getMethodName(),
-                    gfn1 ? "device-resident isotropic SCF loop"
-                         : "GPU eigensolve per iteration, multipole on CPU"));
+                    gfn1 ? "device-resident isotropic SCF loop + nuclear gradient (Stage 4; "
+                           "dispersion + CN chain-rule on CPU)"
+                         : "GPU eigensolve per iteration, multipole + gradient on CPU (Stage 3)"));
             }
         }
     } else {

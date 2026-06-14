@@ -54,6 +54,17 @@ static const uint32_t overlap_h0_spv[] =
 static const uint32_t gamma_spv[] =
 #include "gamma.spv.inc"
 ;
+// Stage 4: on-device GFN1 nuclear gradient (repulsion / Coulomb / H0-Pulay+CN).
+// Per-atom GATHER kernels — no FP64 atomics (Vulkan has none). Claude Generated (V-AP1).
+static const uint32_t grad_rep_spv[] =
+#include "grad_rep.spv.inc"
+;
+static const uint32_t grad_coulomb_spv[] =
+#include "grad_coulomb.spv.inc"
+;
+static const uint32_t grad_pulay_spv[] =
+#include "grad_pulay.spv.inc"
+;
 
 } // namespace shaders
 } // namespace vk

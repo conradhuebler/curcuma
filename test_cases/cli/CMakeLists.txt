@@ -83,6 +83,16 @@ if(USE_CUDA)
 endif()
 
 # =============================================================================
+# Vulkan native-xTB nuclear gradient (V-AP1) — only when USE_VULKAN_XTB=ON.
+# Self-skips at runtime if no FP64 Vulkan device is present.
+# =============================================================================
+if(USE_VULKAN_XTB)
+    add_cli_test(gpu_gradient 01_vulkan_gfn1_gradient)
+    set_tests_properties(cli_gpu_gradient_01_vulkan_gfn1_gradient
+        PROPERTIES TIMEOUT 120 LABELS "gpu_gradient;gpu;vulkan;cli")
+endif()
+
+# =============================================================================
 # RMSD Tests (6 scenarios)
 # =============================================================================
 

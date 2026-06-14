@@ -7,9 +7,13 @@
 > build, the symmetric eigensolve, density, Mulliken populations and the band energy all run
 > on the GPU; only `v_ao` (up) + eigenvalues/populations (down) cross the bus per iteration.
 > **GFN2 = device integrals + GPU eigensolver (Stage 1):** the per-iteration eigensolve is
-> on the GPU; the multipole integrals and the rest of the potential are on the CPU. The
-> nuclear gradient is on the CPU for both (Stage 4 pending). Energies match the CPU path
-> bit-for-bit on the validation runs.
+> on the GPU; the multipole integrals and the rest of the potential are on the CPU.
+> **GFN1 nuclear gradient = on device (Stage 4, V-AP1):** repulsion / Coulomb /
+> H0-Pulay+CN built by three FP64 SPIR-V **gather** kernels (Vulkan has no `atomicAdd`
+> on doubles, so each thread owns one atom and sums over all partners — exact because the
+> pair forces are antisymmetric), so GFN1 `-opt`/`-md` are fully device-resident. The GFN2
+> gradient stays on the CPU (its SCF is not device-resident on Vulkan). Energies and
+> gradients match the CPU path bit-for-bit on the validation runs.
 
 ## What it is
 
@@ -105,11 +109,21 @@ but is chosen for correctness first.
    X from the device S. `xtb_native.cpp` downloads S/H0/γ (and derives L = chol(S) host-side
    via Eigen LLT — no device triangular solve) in place of the host build. Active for both
    GFN1 and GFN2 (the s/p subset); GFN2 multipole integrals (dp/qp) are still CPU.
-4. On-device nuclear gradient — pending (CPU); GFN2 multipole resident SCF (Stage 2b)
-   — pending.
+4. **On-device GFN1 nuclear gradient (V-AP1)** — done. `gradient` builds the
+   energy-weighted density W = C·diag(2ε)·Cᵀ on device (`scale_cols`+`gemm` over the
+   resident rC, Jacobi order) then dispatches three FP64 **gather** kernels:
+   `grad_rep` (repulsion, section 1), `grad_coulomb` (isotropic Coulomb, section 3) and
+   `grad_pulay` (on-site CN section 2a + H0/Pulay off-site section 2b, with the inline
+   Obara-Saika `cgto_overlap_grad`). One thread per atom A sums all its pair contributions
+   — no FP64 atomics (Vulkan has none); exact because the pair forces are antisymmetric and
+   the H0-Pulay scalar terms are pair-symmetric, with `dS/dR_A` and `dxij = x_A − x_foreign`
+   carrying the sign. Only the dispersion gradient + CN chain-rule run on the host. GFN2's
+   gradient stays on the CPU (its SCF is not device-resident on Vulkan, so the device
+   gradient path is only ever taken for GFN1). GFN2 multipole resident SCF (Stage 2b) —
+   pending.
 
-The remaining stages (gradient, GFN2 multipole stack, GFN-FF, device solvation) are broken
-into work packages in [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md) (Vulkan = `V-AP*`).
+The remaining stages (GFN2 multipole stack, GFN-FF, device solvation) are broken into work
+packages in [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md) (Vulkan = `V-AP*`).
 
 ## What was tested
 
@@ -126,6 +140,19 @@ On an **AMD Radeon 890M (RADV, integrated, shaderFloat64)**, build `release_vulk
   `test_cases/sqm_reference` set (H2, He2, LiH, H2O, NH3, CH4, HCN, C6H6, triose, caffeine,
   acetic_acid_dimer, and the 231-atom `complex`): all 24 bit-identical at 8 decimals (|dE| = 0).
 - **gfn1 + gfn2 opt** (H2O): converges to the CPU minimum (gfn1 -5.768775, gfn2 -5.070544 Eh).
+- **GFN1 device nuclear gradient (V-AP1)**: `-sp` gradient norm matches CPU to printed
+  precision (7 sig figs) over the full 12-molecule set incl. 231-atom `complex` (gather
+  kernels); `-opt` caffeine 35 steps step-by-step identical in energy AND gradient norm
+  (the decisive gradient check — a wrong gradient diverges immediately). ctest
+  `cli_gpu_gradient_01_vulkan_gfn1_gradient` (labels `gpu_gradient;gpu;vulkan;cli`).
+  **Honest caveat:** the gather kernels are not bit-identical to the CPU at machine epsilon
+  — they sum in a different order and use the shader `dexp()` (vs `std::exp`), so the
+  gradient agrees to ~1e-12, not 1e-15. On normal/short opts this is invisible (caffeine 35
+  steps exact); on a pathological 309-step *flat* opt (triose) the ~1e-12 per-step
+  difference, together with the non-MKL Jacobi eigensolver (~1e-13/solve), accumulates in
+  the LBFGS history to a non-systematic ~1e-6 trajectory drift after ~50 steps. This is
+  FP non-reproducibility of the GPU path, not a gradient defect (a wrong gradient diverges,
+  not tracks to 1e-6), and would occur from the eigensolver alone with the gradient on CPU.
 - Default non-Vulkan `release/` build stays green (cli_curcumaopt_*/cli_rmsd_* 11/11).
 
 What was **NOT** tested: large systems (>~100 nao; the iGPU FP64 Jacobi is slow — this is a
