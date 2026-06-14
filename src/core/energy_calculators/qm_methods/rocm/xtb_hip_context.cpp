@@ -5,15 +5,18 @@
  * This program is free software under GPL-3.0.
  *
  * Claude Generated (2026-06): Stage-0 device handshake for the native GFN1/GFN2
- * ROCm path. Compiled by hipcc (LANGUAGE HIP). The numerical kernels are hipified
- * from cuda/xtb_gpu_context.cu in later stages onto this same object.
+ * ROCm path. Stage 0 calls ONLY the host-side HIP runtime API (device query + stream),
+ * so it is compiled as plain C++ against <hip/hip_runtime_api.h> and linked against
+ * libamdhip64 — no HIP-language compilation / amdclang / --offload-arch is needed yet.
+ * The numerical kernels (hipified from cuda/xtb_gpu_context.cu) arrive in later stages;
+ * the file is then split so the device kernels build with hipcc.
  */
 
 #ifdef USE_ROCM_XTB
 
 #include "xtb_hip_context.h"
 
-#include <hip/hip_runtime.h>
+#include <hip/hip_runtime_api.h>
 
 #include <memory>
 #include <string>

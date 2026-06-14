@@ -23,6 +23,23 @@ Additionally, [nlohmann/json](https://github.com/nlohmann/json) is obtained via 
 
 A C++/Eigen implementation of the Munkres Algorithmus (Hungarian Method) based on [the workshop here](https://brc2.com/the-algorithm-workshop/) is included.
 
+### GPU acceleration (optional)
+
+The GPU backends for `gfn1`/`gfn2`/`gfnff` are **off by default** and each needs extra
+system dependencies (one backend per build dir: `release_cuda/`, `release_rocm/`,
+`release_vulkan/`). The default `release/` build needs none of these.
+
+- **CUDA** (`-gpu cuda`, `-DUSE_CUDA=ON -DUSE_CUDA_XTB=ON`): NVIDIA CUDA toolkit — `nvcc`,
+  cuSOLVER, cuBLAS, cudart (Arch: `cuda`). See [docs/SQM_GPU.md](docs/SQM_GPU.md).
+- **ROCm / HIP** (`-gpu rocm`, `-DUSE_ROCM=ON -DUSE_ROCM_XTB=ON -DCMAKE_PREFIX_PATH=/opt/rocm`):
+  `hip-runtime-amd`, `rocm-llvm`, `rocm-device-libs`, `rocminfo`; **`rocblas` + `rocsolver`**
+  for the GPU eigensolver (Stage 1). Set `-DCMAKE_HIP_ARCHITECTURES` to your GPU's `gfx`
+  (e.g. `gfx1150`; `rocminfo | grep gfx`). See [docs/SQM_ROCM.md](docs/SQM_ROCM.md).
+- **Vulkan** (`-gpu vulkan`, `-DUSE_VULKAN=ON -DUSE_VULKAN_XTB=ON`): `vulkan-icd-loader` +
+  `vulkan-headers` + an FP64-capable driver (AMD `vulkan-radeon`/RADV — **no ROCm needed**,
+  NVIDIA `nvidia-utils`, Intel `vulkan-intel`); `shaderc`/`glslang` only to regenerate the
+  (committed) SPIR-V. Needs a device with `shaderFloat64`. See [docs/SQM_VULKAN.md](docs/SQM_VULKAN.md).
+
 ## Validation Status Labels
 
 Curcuma contains a mix of production-tested and AI-generated code. The following labels appear throughout this README and the internal `CLAUDE.md` documentation to indicate the confidence level of each feature:

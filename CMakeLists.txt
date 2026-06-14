@@ -986,44 +986,34 @@ if(USE_CUDA)
 endif()
 
 # Claude Generated (June 2026): ROCm/HIP backend (gfnff/gfn1/gfn2 -gpu rocm).
-# Build: cmake -DUSE_ROCM=ON -DUSE_ROCM_XTB=ON -DCMAKE_HIP_ARCHITECTURES=gfx1100 && make -j4
-# Stage 0 wires only the native-xTB HIP context (device handshake + CPU pass-through);
-# the GFN-FF HIP kernels (rocm/ mirror of the CUDA gfnff kernels) land in a later stage,
-# so no GFN-FF HIP source is referenced here yet.
+# Build: cmake -DUSE_ROCM=ON -DUSE_ROCM_XTB=ON -DCMAKE_PREFIX_PATH=/opt/rocm && make -j4
+# Stage 0 wires only the native-xTB HIP context, which calls ONLY the host-side HIP runtime
+# API (device query + stream). It therefore compiles as plain C++ against
+# <hip/hip_runtime_api.h> and links libamdhip64 — no HIP-language compilation, no amdclang,
+# no --offload-arch, no linker-language flip (which would drop GNU OpenMP/libgomp). The
+# Stage-1 device kernels (hipified from cuda/) introduce real HIP compilation in their own
+# unit at that point. rocBLAS/rocSOLVER are detected here (HAVE_ROCBLAS/HAVE_ROCSOLVER) and
+# linked once the Stage-1 kernels need them; rocSOLVER is required for the GPU eigensolver.
 if(USE_ROCM)
-    enable_language(HIP)
-    find_package(hip REQUIRED)
-    find_package(hipblas REQUIRED)
-    find_package(rocsolver REQUIRED)
-    if(NOT DEFINED CMAKE_HIP_ARCHITECTURES)
-        set(CMAKE_HIP_ARCHITECTURES "gfx906;gfx908;gfx90a;gfx1030;gfx1100" CACHE STRING "HIP architectures")
-    endif()
+    find_library(ROCM_HIP_RT amdhip64 REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64)
+    find_package(rocblas QUIET)
+    find_package(rocsolver QUIET)
 
-    # HIP-compiled device sources (mirror of the CUDA .cu kernels, hipified).
-    set(ROCM_HIP_SOURCES "")
-    if(USE_ROCM_XTB)
-        list(APPEND ROCM_HIP_SOURCES
-            src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.hip)
-    endif()
-    if(ROCM_HIP_SOURCES)
-        set_source_files_properties(${ROCM_HIP_SOURCES} PROPERTIES LANGUAGE HIP)
-        target_sources(curcuma_core PRIVATE ${ROCM_HIP_SOURCES})
-        set_target_properties(curcuma_core PROPERTIES HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}")
-    endif()
-
-    target_include_directories(curcuma_core PRIVATE ${PROJECT_SOURCE_DIR})
-    target_link_libraries(curcuma_core hip::device roc::hipblas roc::rocsolver)
     target_compile_definitions(curcuma_core PUBLIC USE_ROCM)
-
     if(USE_ROCM_XTB)
-        # Host-compiled wrapper (no device code) — the HIP kernels live in the .hip TU.
+        # Host-compiled HIP runtime calls (no device code yet) — plain C++ in curcuma_core.
+        set_source_files_properties(
+            src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.cpp
+            PROPERTIES COMPILE_DEFINITIONS "__HIP_PLATFORM_AMD__")
         target_sources(curcuma_core PRIVATE
+            src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.cpp
             src/core/energy_calculators/qm_methods/xtb_hip_method.cpp)
+        target_include_directories(curcuma_core PRIVATE /opt/rocm/include)
+        target_link_libraries(curcuma_core ${ROCM_HIP_RT})
         target_compile_definitions(curcuma_core PUBLIC USE_ROCM_XTB)
-        message(STATUS "ROCm native xTB enabled: gfn1/gfn2 -gpu rocm available")
+        message(STATUS "ROCm native xTB enabled: gfn1/gfn2 -gpu rocm available (Stage 0, host runtime)")
     endif()
-    message(STATUS "ROCm support enabled: -gpu rocm available")
-    message(STATUS "HIP architectures: ${CMAKE_HIP_ARCHITECTURES}")
+    message(STATUS "ROCm: rocBLAS=${rocblas_FOUND} rocSOLVER=${rocsolver_FOUND} (both needed for the Stage-1 GPU eigensolver)")
 endif()
 
 # Claude Generated (June 2026): Vulkan compute backend (gfnff/gfn1/gfn2 -gpu vulkan).

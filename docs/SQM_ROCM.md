@@ -21,17 +21,48 @@ so the CUDA and ROCm builds evolve independently).
 
 `-gpu rocm` on a build without ROCm warns and falls back to the CPU.
 
+## Dependencies
+
+ROCm is **not** pulled in by the default build; it is only needed for `-DUSE_ROCM=ON`.
+All ROCm pieces live under `/opt/rocm`, so pass `-DCMAKE_PREFIX_PATH=/opt/rocm`.
+
+| Component | Purpose | Arch/Manjaro package | CMake / flag |
+|-----------|---------|----------------------|--------------|
+| HIP runtime + `hipcc` + headers | compile/run HIP, `libamdhip64` | `hip-runtime-amd` | `find_package(hip)` → `hip::host`, `hip::device` |
+| HIP/Clang compiler (`amdclang++`) | the HIP language compiler | `rocm-llvm` | auto-detected by `enable_language(HIP)` |
+| ROCm core + device bitcode | gfx device libs, base | `rocm-core`, `rocm-device-libs` | — |
+| Device query | resolve your `gfx` arch | `rocminfo` | `rocminfo \| grep gfx` |
+| **rocBLAS** | GEMM / TRSM (Stage 1+) | `rocblas` | `find_package(rocblas)` → `HAVE_ROCBLAS` |
+| **rocSOLVER** | symmetric eigensolver (Stage 1) | `rocsolver` | `find_package(rocsolver)` → `HAVE_ROCSOLVER` |
+| hipBLAS (optional) | portable BLAS wrapper over rocBLAS | `hipblas` | not required (rocBLAS used directly) |
+| hipify (optional) | seed HIP from the CUDA `.cu` kernels | `hipify-clang` | dev-time only |
+| GPU + kernel driver | a ROCm-capable AMD GPU | `amdgpu` (kernel) | set `CMAKE_HIP_ARCHITECTURES` to your `gfx` |
+
+- **Stage 0** (current — device handshake + CPU fallback) calls only the *host-side* HIP
+  runtime API (device query + stream), so it is compiled as **plain C++** against
+  `<hip/hip_runtime_api.h>` and linked against **`libamdhip64`** — no HIP-language
+  compilation, no `amdclang`, no `--offload-arch`. It needs only `hip-runtime-amd`
+  (the runtime + headers). rocBLAS/rocSOLVER are detected (`find_package(... QUIET)`,
+  `HAVE_ROCBLAS`/`HAVE_ROCSOLVER`) but not yet linked.
+- **Stage 1** (GPU eigensolver) **requires `rocsolver`** (and `rocblas`), and introduces
+  real HIP-language device kernels. Those build in a dedicated unit with `hipcc`/`amdclang`;
+  the HIP-only `--offload-arch`/`--hip-link` flags must be kept off the GNU/`g++` link of
+  `curcuma_core` and the executables (otherwise the link flips to `ld.lld` and drops the
+  GNU OpenMP runtime, `libgomp`).
+
 ## Build
 
 ```
 cmake -S . -B release_rocm -DCMAKE_BUILD_TYPE=Release \
       -DUSE_ROCM=ON -DUSE_ROCM_XTB=ON \
-      -DCMAKE_HIP_ARCHITECTURES=gfx1100      # match your GPU (gfx906/908/90a/1030/1100)
+      -DCMAKE_PREFIX_PATH=/opt/rocm \
+      -DCMAKE_HIP_ARCHITECTURES=gfx1150     # match your GPU: rocminfo | grep gfx
 cmake --build release_rocm -j4
 ```
 
-Requires the ROCm toolkit: `hipcc`, `hip` / `hipblas` / `rocsolver` CMake packages.
-One GPU backend per build dir (like `release_cuda/`); the default `release/` is unchanged.
+`gfx1150` = AMD Radeon 880M/890M (RDNA 3.5); use e.g. `gfx1100` (RX 7900), `gfx1030`
+(RX 6800/6900), `gfx90a` (MI200). One GPU backend per build dir (like `release_cuda/`);
+the default `release/` is unchanged.
 
 ## Architecture
 

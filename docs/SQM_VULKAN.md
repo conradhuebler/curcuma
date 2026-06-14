@@ -25,6 +25,28 @@ hand-written SPIR-V compute shader.
 back to the CPU. **FP64 (`shaderFloat64`) is required** — the SCF numerics are double
 precision, and `VkContext` rejects devices without it.
 
+## Dependencies
+
+Vulkan is **not** pulled in by the default build; it is only needed for `-DUSE_VULKAN=ON`.
+It is much lighter than ROCm — just the loader, headers and an FP64-capable driver. No
+vendor SDK is required.
+
+| Component | Purpose | Arch/Manjaro package | CMake / flag |
+|-----------|---------|----------------------|--------------|
+| Vulkan loader | `libvulkan.so` (runtime) | `vulkan-icd-loader` | `find_package(Vulkan)` → `Vulkan::Vulkan` |
+| Vulkan headers | `vulkan/vulkan.h` (build) | `vulkan-headers` | `find_package(Vulkan)` |
+| Driver / ICD (FP64) | the actual GPU backend | AMD `vulkan-radeon` (RADV, **no ROCm needed**) or `amdvlk`; NVIDIA `nvidia-utils`; Intel `vulkan-intel` | — |
+| `glslc` / `glslangValidator` | recompile shaders → SPIR-V | `shaderc` / `glslang` | **dev-time only** — the `.spv.inc` are committed |
+| `vulkaninfo` (optional) | check the device + `shaderFloat64` | `vulkan-tools` | — |
+
+- The build itself needs only `vulkan-icd-loader` + `vulkan-headers` (the SPIR-V is
+  committed as `shaders/*.spv.inc`, embedded by `spirv_kernels.h`). `glslc`/`glslangValidator`
+  are needed only to regenerate them (`shaders/compile_shaders.sh`).
+- **Runtime requirement: a device with `shaderFloat64`** (FP64 in compute shaders). Check
+  with `vulkaninfo | grep shaderFloat64`. `VkContext` rejects devices without it (→ CPU).
+- AMD users get Vulkan via the open Mesa **RADV** driver — `-gpu vulkan` therefore works
+  on AMD **without** installing the ROCm stack.
+
 ## Build
 
 ```
@@ -33,8 +55,7 @@ cmake -S . -B release_vulkan -DCMAKE_BUILD_TYPE=Release \
 cmake --build release_vulkan -j4
 ```
 
-Requires the Vulkan SDK (loader + headers + `glslc`/`glslangValidator`). One GPU backend
-per build dir; the default `release/` is unchanged.
+One GPU backend per build dir; the default `release/` is unchanged.
 
 ## Architecture
 
