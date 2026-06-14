@@ -1,0 +1,161 @@
+/*
+ * <Native xTB ROCm/HIP integral device helpers (Stage 3)>
+ * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * This program is free software under GPL-3.0.
+ *
+ * Claude Generated (2026-06, Stage 3): __device__ ports of the native xTB integral
+ * primitives — coordination number, contracted s/p Gaussian overlap, the GFN1/GFN2
+ * H0 shell-pair scaling, and the Coulomb hardness average. These are verbatim copies
+ * of cuda/xtb_gpu_integrals_device.cuh (the math is compiler-agnostic; __device__
+ * __forceinline__ compiles unchanged under hipcc). s/p only (no d), matching the CPU.
+ * Only the GFN1/GFN2-isotropic subset needed for CN/S/H0/gamma is ported (no multipole,
+ * no gradient). Element parameter tables (covrad/pauling/atomic_rad) are passed to the
+ * kernels as device arrays rather than __constant__ symbols.
+ */
+
+#pragma once
+
+#ifdef USE_ROCM_XTB
+
+#include <hip/hip_runtime.h>
+
+namespace curcuma {
+namespace xtb {
+namespace gpu {
+
+// ---- coordination number --------------------------------------------------
+__device__ __forceinline__ double d_gcount(double k, double r, double r0)
+{
+    return 1.0 / (1.0 + exp(-k * (r0 / r - 1.0)));
+}
+__device__ __forceinline__ double d_cn_pair(double r, double rc, bool is_gfn2)
+{
+    if (is_gfn2)
+        return d_gcount(10.0, r, rc) * d_gcount(20.0, r, rc + 2.0);
+    return d_gcount(16.0, r, rc);
+}
+
+// ---- contracted s/p Gaussian overlap --------------------------------------
+__device__ __forceinline__ double d_pi() { return 3.14159265358979323846; }
+
+/// AO type for a local AO index in a shell: s→0, p→{py=2,pz=3,px=1} (tblite order).
+__device__ __forceinline__ int d_ao_to_type(int ang, int local_ao)
+{
+    if (ang == 0) return 0;
+    if (ang == 1) { const int p_map[3] = {2, 3, 1}; return p_map[local_ao]; }
+    return -1;
+}
+__device__ __forceinline__ double d_primitive_ss_overlap(double aa, double ab, double R2)
+{
+    const double g = aa + ab;
+    return pow(d_pi() / g, 1.5) * exp(-aa * ab / g * R2);
+}
+__device__ __forceinline__ double d_primitive_sp_overlap(double as, double ap, double R2,
+                                                         double PB_component)
+{
+    const double g = as + ap;
+    const double S00 = pow(d_pi() / g, 1.5) * exp(-as * ap / g * R2);
+    return S00 * PB_component;
+}
+__device__ __forceinline__ double d_primitive_pp_overlap(double aa, double ab, double R2,
+                                                        double PA, double PB, bool same_axis)
+{
+    const double g = aa + ab;
+    const double S00 = pow(d_pi() / g, 1.5) * exp(-aa * ab / g * R2);
+    return same_axis ? S00 * (PA * PB + 0.5 / g) : S00 * PA * PB;
+}
+/// Contracted GTO overlap on flattened primitive arrays. type 0=s, 1=px, 2=py, 3=pz.
+__device__ __forceinline__ double d_cgto_overlap(
+    const double* alpha_a, const double* coeff_a, int npa,
+    const double* alpha_b, const double* coeff_b, int npb,
+    double xa, double ya, double za, double xb, double yb, double zb,
+    int type_a, int type_b)
+{
+    const double dx = xb - xa, dy = yb - ya, dz = zb - za;
+    const double R2 = dx * dx + dy * dy + dz * dz;
+    double S = 0.0;
+    for (int i = 0; i < npa; ++i) {
+        const double ai = alpha_a[i], ci = coeff_a[i];
+        for (int j = 0; j < npb; ++j) {
+            const double aj = alpha_b[j], cj = coeff_b[j];
+            const double g = ai + aj;
+            const double Px = (ai * xa + aj * xb) / g;
+            const double Py = (ai * ya + aj * yb) / g;
+            const double Pz = (ai * za + aj * zb) / g;
+            if (type_a == 0 && type_b == 0) {
+                S += ci * cj * d_primitive_ss_overlap(ai, aj, R2);
+            } else if (type_a == 0 && type_b >= 1 && type_b <= 3) {
+                double PB = (type_b == 1) ? Px - xb : (type_b == 2) ? Py - yb : Pz - zb;
+                S += ci * cj * d_primitive_sp_overlap(ai, aj, R2, PB);
+            } else if (type_a >= 1 && type_a <= 3 && type_b == 0) {
+                double PA = (type_a == 1) ? Px - xa : (type_a == 2) ? Py - ya : Pz - za;
+                S += ci * cj * d_primitive_sp_overlap(aj, ai, R2, PA);
+            } else if (type_a >= 1 && type_a <= 3 && type_b >= 1 && type_b <= 3) {
+                double PA, PB; int axis_a, axis_b;
+                if (type_a == 1) { PA = Px - xa; axis_a = 0; }
+                else if (type_a == 2) { PA = Py - ya; axis_a = 1; }
+                else { PA = Pz - za; axis_a = 2; }
+                if (type_b == 1) { PB = Px - xb; axis_b = 0; }
+                else if (type_b == 2) { PB = Py - yb; axis_b = 1; }
+                else { PB = Pz - zb; axis_b = 2; }
+                S += ci * cj * d_primitive_pp_overlap(ai, aj, R2, PA, PB, axis_a == axis_b);
+            }
+        }
+    }
+    return S;
+}
+
+// ---- H0 shell-pair scaling helpers ----------------------------------------
+__device__ __forceinline__ double d_kshell_gfn1(int il, int jl)
+{
+    const double kdiag[5] = {1.85, 2.25, 2.00, 2.00, 2.00};
+    const bool sp = (il == 0 && jl == 1) || (il == 1 && jl == 0);
+    return sp ? 2.08 : 0.5 * (kdiag[il] + kdiag[jl]);
+}
+__device__ __forceinline__ double d_kshell_gfn2(int il, int jl)
+{
+    const double kdiag[5] = {1.85, 2.23, 2.23, 2.23, 2.23};
+    const bool sd = (jl == 2 && (il == 0 || il == 1)) || (il == 2 && (jl == 0 || jl == 1));
+    return sd ? 2.0 : 0.5 * (kdiag[il] + kdiag[jl]);
+}
+__device__ __forceinline__ int d_dblock_row(int z)
+{
+    if (z > 20 && z < 30) return 1;
+    if (z > 38 && z < 48) return 2;
+    if (z > 56 && z < 80) return 3;
+    return 0;
+}
+__device__ __forceinline__ double d_kpair_gfn1(int izp, int jzp)
+{
+    if (izp == 1 && jzp == 1) return 0.96;
+    const int lo = izp < jzp ? izp : jzp;
+    const int hi = izp < jzp ? jzp : izp;
+    if (lo == 1 && hi == 5)  return 0.95;
+    if (lo == 1 && hi == 7)  return 1.04;
+    if (lo == 1 && hi == 28) return 0.90;
+    if (lo == 1 && hi == 75) return 0.80;
+    if (lo == 1 && hi == 78) return 0.80;
+    if (lo == 5 && hi == 15) return 0.97;
+    if (lo == 7 && hi == 14) return 1.01;
+    const int itr = d_dblock_row(izp), jtr = d_dblock_row(jzp);
+    if (itr > 0 && jtr > 0) {
+        const double kp[3] = {1.1, 1.2, 1.2};
+        return 0.5 * (kp[itr - 1] + kp[jtr - 1]);
+    }
+    return 1.0;
+}
+
+// ---- Coulomb hardness average ---------------------------------------------
+__device__ __forceinline__ double d_coulomb_average(double gi, double gj, bool is_gfn2)
+{
+    if (is_gfn2) return 0.5 * (gi + gj);
+    if (gi == 0.0 || gj == 0.0) return 0.0;
+    return 2.0 / (1.0 / gi + 1.0 / gj);
+}
+
+} // namespace gpu
+} // namespace xtb
+} // namespace curcuma
+
+#endif // USE_ROCM_XTB

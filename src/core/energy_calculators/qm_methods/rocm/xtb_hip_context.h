@@ -35,6 +35,29 @@ namespace gpu {
  * non-throwing: if no usable HIP device is present, ok() returns false and the
  * caller falls back to the CPU path. Claude Generated.
  */
+/// Molecule-constant flattened basis + H0 parameters for the device integral build
+/// (Stage 3). POD of raw host pointers (copied during beginBasis) so this header stays
+/// free of the project basis types — the GpuScfBackend adapter fills it from GpuBasisFlat.
+/// Mirrors the GFN1/GFN2-isotropic subset of the CUDA XtbGpuBasisData. Claude Generated.
+struct XtbHipBasisData {
+    int nat = 0, nsh = 0, nao = 0, is_gfn2 = 0, nprim_total = 0;
+    const int*    z = nullptr;            // nat
+    const int*    sh2at = nullptr;        // nsh
+    const int*    ang_sh = nullptr;       // nsh
+    const int*    iao_sh = nullptr;       // nsh
+    const int*    nao_sh = nullptr;       // nsh
+    const int*    sh_nprim = nullptr;     // nsh
+    const int*    sh_prim_off = nullptr;  // nsh
+    const double* prim_alpha = nullptr;   // nprim_total
+    const double* prim_coeff = nullptr;   // nprim_total
+    const double* sh_zeta = nullptr;      // nsh
+    const double* selfenergy = nullptr;   // nsh
+    const double* kcn = nullptr;          // nsh
+    const double* shpoly = nullptr;       // nsh
+    const int*    valence = nullptr;      // nsh
+    const double* shell_hardness = nullptr; // nsh (Coulomb hardness g)
+};
+
 class XtbHipContext {
 public:
     XtbHipContext();
@@ -89,6 +112,28 @@ public:
 
     /// Download the converged density P and MO coefficients C (n×n column-major).
     bool residentFinalize(double* P_colmajor, double* C_colmajor);
+
+    // ---- Device-side integral build (Stage 3) -------------------------------
+    // Instead of begin()/residentBegin uploading the host-built H0/S, the device builds
+    // them from the geometry: beginBasis uploads the molecule-constant flattened basis +
+    // the element parameter tables once; beginComputed (per geometry) runs CN → self-
+    // energy → S/H0 → L = chol(S) → Coulomb γ on the device, writing S/H0 into the same
+    // resident buffers the SCF consumes (so no begin() upload is needed). download* fetch
+    // S/H0/L/γ so the host can skip its own integral build. Returns false on any error
+    // (caller falls back to the host build). Claude Generated (Stage 3).
+
+    /// Upload the molecule-constant flattened basis + element tables. Once per molecule.
+    bool beginBasis(const XtbHipBasisData& basis);
+    /// Per geometry: CN → self-energy → S/H0 → Cholesky L → γ on the device. The S/H0 land
+    /// in the resident buffers, and the resident SCF is set up to use them. Requires a
+    /// prior beginBasis.
+    bool beginComputed(const double* xyz_bohr);
+    /// Fetch the device-built overlap S / bare Hamiltonian H0 / lower Cholesky L
+    /// (nao×nao column-major) and Coulomb γ (nsh×nsh) after beginComputed.
+    bool downloadOverlap(double* S_colmajor);
+    bool downloadH0(double* H0_colmajor);
+    bool downloadCholesky(double* L_colmajor);
+    bool downloadGamma(double* gamma_colmajor);
 
 private:
     struct Impl;

@@ -1,12 +1,13 @@
 # Native GFN1/GFN2/GFN-FF on AMD GPUs (ROCm/HIP)
 
 > Status: 🤖 AI-generated, ⚙️ machine-tested. NOT human production tested.
-> **GFN1 = Stage 2 (device-resident SCF):** the Fock build and Mulliken populations are
-> HIP `__global__` kernels (compiled by `hipcc`), the density is a rocBLAS GEMM, and the
-> generalized eigensolve is rocSOLVER `dsygvd`; H0/S stay resident, only `v_ao`/`occ` up
-> and `eps`/`pop`/`band` down per iteration. **GFN2 = Stage 1 (GPU eigensolver only):**
-> rocSOLVER `dsygvd` per iteration, the rest on the CPU. Integrals and the nuclear gradient
-> are on the CPU for both. Energies match the CPU path bit-for-bit (AMD 890M / gfx1150).
+> **GFN1 = Stage 3 (on-device integral build + device-resident SCF):** CN, overlap S, bare
+> Hamiltonian H0, Cholesky L and Coulomb γ are built on the device by HIP `__global__`
+> kernels (so the host skips its integral build / no nao² upload); the Fock build +
+> Mulliken populations are HIP kernels, the density a rocBLAS GEMM, the eigensolve rocSOLVER
+> `dsygvd`. **GFN2:** uses the same device integral build (S/H0/γ), then the Stage-1
+> rocSOLVER eigensolver per iteration (multipole Fock on the host). Only the nuclear
+> gradient stays on the CPU. Energies match the CPU path bit-for-bit (AMD 890M / gfx1150).
 
 ## What it is
 
@@ -100,23 +101,32 @@ to `ld.lld` and drop GNU OpenMP / `libgomp`). No `enable_language(HIP)` is used.
 1. **GPU eigensolver via rocSOLVER `dsygvd`** — done (used by GFN2). The per-iteration
    `F C = S C ε` is solved on the device (`ExternalEigensolver` hook: host builds
    `S = L·Lᵀ`, rocSOLVER returns `C`/`ε`).
-2. **Device-resident GFN1 SCF via `GpuScfBackend`** — done. `begin` uploads H0/S; `solve`
-   builds the Fock (`k_fock` HIP kernel) and calls rocSOLVER `dsygvd` (C kept resident,
-   ascending — no host sort); `density` forms P = C·diag(occ)·Cᵀ (`k_scale_cols` + rocBLAS
-   `dgemm`) + Mulliken populations / band (`k_popband`). Only `v_ao`/`occ` up and
-   `eps`/`pop`/`band` down per iteration. GFN2 (no multipole here) falls back to stage 1.
-3-4. On-device integral build + nuclear gradient — pending (still CPU). GFN-FF ROCm pending.
+2. **Device-resident GFN1 SCF via `GpuScfBackend`** — done. `solve` builds the Fock
+   (`k_fock`) and calls rocSOLVER `dsygvd` (C kept resident, ascending — no host sort);
+   `density` forms P = C·diag(occ)·Cᵀ (`k_scale_cols` + rocBLAS `dgemm`) + Mulliken
+   populations / band (`k_popband`). Only `v_ao`/`occ`/`eps`/`pop`/`band` cross per iteration.
+3. **On-device integral build via `beginBasis`/`beginComputed`** — done. `beginBasis` uploads
+   the flattened basis + element tables once; `beginComputed` runs `k_cn` → `k_self_energy`
+   → `k_overlap_h0` (s/p contracted Gaussian overlap + the GFN1/GFN2 H0 scaling) →
+   `rocsolver_dpotrf` (Cholesky) → `k_gamma`, writing S/H0 into the resident buffers, so the
+   host skips its integral build (`downloadOverlap`/`H0`/`Cholesky`/`Gamma` for its
+   bookkeeping). The device math is a verbatim port of the proven CUDA kernels
+   (`rocm/xtb_hip_integrals.hiph`). Used by both GFN1 and GFN2.
+4. On-device nuclear gradient — pending (still CPU). GFN-FF ROCm pending.
 
 ## What was tested
 
 On an **AMD Radeon 890M (gfx1150)**, build `release_rocm/` (`-DUSE_ROCM_XTB=ON`, rocSOLVER):
 
-- **gfn1 (Stage-2 resident) / gfn2 (Stage-1) single point** `-gpu rocm` vs `-gpu none`:
-  H2O and benzoic acid (15 atoms) energies bit-identical at 8 decimals (|dE| = 0).
+- **gfn1 / gfn2 single point** `-gpu rocm` vs `-gpu none` (CN/S/H0/L/γ built on the GPU,
+  SCF log "CN/S/H0/L built on GPU; no nao^2 upload"): H2O and benzoic acid (15 atoms)
+  energies bit-identical at 8 decimals (|dE| = 0) — confirms the device overlap/H0/γ are
+  correct (any integral error would shift the energy).
 - **gfn1 / gfn2 `-opt`**: converge to the same minima as the CPU (H2O -5.768775 / -5.070544),
-  exercising the resident HIP kernels across SCF iterations and opt steps.
+  exercising the device integral build + resident kernels across SCF iterations and opt steps.
 - Stage 0 (no rocSOLVER): device handshake + CPU fallback, energies bit-identical.
 - Default non-ROCm `release/` build stays green (cli_curcumaopt_*/cli_rmsd_* 11/11).
 
 What was **NOT** tested: large systems (iGPU FP64 is slow — correctness milestone, not
-performance), discrete/CDNA GPUs, MD, on-device integrals/gradient (still CPU), GFN-FF.
+performance), discrete/CDNA GPUs, MD, the nuclear gradient (still CPU), GFN-FF; the overlap
+covers s/p only (H/C/N/O...), no d shells (same as the CPU native path).

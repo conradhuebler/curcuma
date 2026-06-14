@@ -65,9 +65,65 @@ public:
         P = Pcm; C = Ccm;
         return true;
     }
+
+    // ---- Stage 3: device integral build -----------------------------------
+    bool beginBasis(const curcuma::xtb::GpuBasisFlat& bf,
+                    const curcuma::xtb::GpuH0Flat& hf) override
+    {
+        if (!m_ctx || bf.nao <= 0) return false;
+        m_n = bf.nao; m_nsh = bf.nsh;
+        curcuma::xtb::gpu::XtbHipBasisData bd;
+        bd.nat = bf.nat; bd.nsh = bf.nsh; bd.nao = bf.nao; bd.is_gfn2 = bf.is_gfn2;
+        bd.nprim_total = static_cast<int>(bf.prim_alpha.size());
+        bd.z           = bf.z.data();
+        bd.sh2at       = bf.sh2at.data();
+        bd.ang_sh      = bf.ang_sh.data();
+        bd.iao_sh      = bf.iao_sh.data();
+        bd.nao_sh      = bf.nao_sh.data();
+        bd.sh_nprim    = bf.sh_nprim.data();
+        bd.sh_prim_off = bf.sh_prim_off.data();
+        bd.prim_alpha  = bf.prim_alpha.data();
+        bd.prim_coeff  = bf.prim_coeff.data();
+        bd.sh_zeta     = bf.sh_zeta.data();
+        bd.valence     = bf.valence.empty() ? nullptr : bf.valence.data();
+        bd.shell_hardness = bf.shell_hardness.data();
+        bd.selfenergy  = hf.selfenergy.data();
+        bd.kcn         = hf.kcn.data();
+        bd.shpoly      = hf.shpoly.data();
+        return m_ctx->beginBasis(bd);
+    }
+    bool beginComputed(const std::vector<double>& xyz_bohr) override
+    {
+        return m_ctx && m_ctx->beginComputed(xyz_bohr.data());
+    }
+    bool downloadOverlap(Eigen::MatrixXd& S_out) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        S_out.resize(m_n, m_n);
+        return m_ctx->downloadOverlap(S_out.data());
+    }
+    bool downloadH0(Eigen::MatrixXd& H0_out) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        H0_out.resize(m_n, m_n);
+        return m_ctx->downloadH0(H0_out.data());
+    }
+    bool downloadCholesky(Eigen::MatrixXd& L_out) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        L_out.resize(m_n, m_n);
+        return m_ctx->downloadCholesky(L_out.data());
+    }
+    bool downloadGamma(Eigen::MatrixXd& gamma_out) override
+    {
+        if (!m_ctx || m_nsh <= 0) return false;
+        gamma_out.resize(m_nsh, m_nsh);
+        return m_ctx->downloadGamma(gamma_out.data());
+    }
 private:
     XtbHipContext* m_ctx = nullptr;
     int            m_n   = 0;
+    int            m_nsh = 0;
 };
 #endif // HAVE_ROCSOLVER
 }  // namespace
@@ -120,9 +176,9 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
 
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::info(fmt::format(
-                    "{}: ROCm GPU eigensolver + device-resident GFN1 SCF active "
-                    "(rocSOLVER dsygvd + HIP kernels); integrals/gradient on CPU (Stage 2)",
-                    getMethodName()));
+                    "{}: ROCm GPU eigensolver + device-resident GFN1 SCF + on-device integral "
+                    "build active (rocSOLVER + HIP kernels: CN/S/H0/L/gamma); nuclear gradient "
+                    "on CPU (Stage 3)", getMethodName()));
         }
 #else
         if (CurcumaLogger::get_verbosity() >= 2)
