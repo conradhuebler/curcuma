@@ -19,7 +19,7 @@ and is correct at every step. Stage numbers below match the CUDA stages in
 | 2a GFN1 device-resident SCF | ✅ | ✅ | ✅ |
 | 3 integrals on device — isotropic (CN/S/H0/L/γ) | ✅ | ✅ | ✅ |
 | 4 nuclear gradient on device — GFN1 | ✅ | ✅ | ✅ (V-AP1, gather kernels) |
-| 3m integrals on device — GFN2 multipole (dp/qp) | ✅ | ❌ **R-AP1** | ❌ **V-AP2** |
+| 3m integrals on device — GFN2 multipole (dp/qp) | ✅ | ✅ (R-AP1) | ✅ (V-AP2) |
 | 2b GFN2 device-resident multipole SCF | ✅ | ❌ **R-AP2** | ❌ **V-AP3** |
 | 4m nuclear gradient on device — GFN2 multipole | ✅ | ❌ **R-AP3** | ❌ **V-AP4** |
 | 5/6 device GFN2 potential + fully resident loop | ✅ | ❌ **R-AP4** (opt) | ❌ **V-AP5** (opt) |
@@ -28,9 +28,11 @@ and is correct at every step. Stage numbers below match the CUDA stages in
 
 **Summary:** Vulkan now matches ROCm/CUDA on the full GFN1 stack — integrals, resident
 SCF **and** the on-device nuclear gradient (V-AP1 done), so GFN1 `-opt`/`-md` are fully
-device-resident. Both backends still trail CUDA on the entire GFN2 anisotropic
-(dipole/quadrupole) stack, GFN-FF, and device solvation. The s/p-only limit (H/C/N/O…,
-no d shells) of the CPU native path applies to all GPU ports.
+device-resident. Both backends now also build the **GFN2 multipole integrals
+(dp_int/qp_int) on the device** (R-AP1 / V-AP2 done) and download them so the host GFN2
+SCF skips its O(nao²) integral loop. They still trail CUDA on the GFN2 **resident**
+multipole SCF + multipole gradient, GFN-FF, and device solvation. The s/p-only limit
+(H/C/N/O…, no d shells) of the CPU native path applies to all GPU ports.
 
 > **Vulkan note (no FP64 atomics):** Vulkan/GLSL has no `atomicAdd(double)` (unlike
 > CUDA/ROCm), so the four scatter kernels are restructured as **per-atom GATHER** (one
@@ -88,14 +90,23 @@ no d shells) of the CPU native path applies to all GPU ports.
   Stage 2a. GFN2 still falls back to the CPU gradient (host SCF — `use_gpu_resident` is
   false for GFN2 on Vulkan, so the device gradient is only ever taken for GFN1).
 
-### V-AP2 — GFN2 multipole integrals on device (Stage 3m)
-- **Goal**: build `dp_int`/`qp_int` (AO dipole/quadrupole) on the GPU so GFN2 stops
-  uploading the 9 nao² matrices per geometry.
-- **Port from**: `cgto_multipole` (`xtb_gpu_integrals_device.cuh`) + `k_multipole_ints`.
-- **New/changed**: SPIR-V `multipole_ints` shader; `XtbVulkanContext::beginMultipoleComputed()`
-  + a `downloadMultipole`/resident-buffer path; extend `XtbVulkanBasisData` with the
-  multipole basis fields.
-- **Depends on**: nothing (independent of V-AP1).
+### V-AP2 — GFN2 multipole integrals on device (Stage 3m) — ✅ DONE (2026-06)
+- **Goal**: build `dp_int`/`qp_int` (AO dipole/quadrupole) on the GPU so the host GFN2 SCF
+  skips its O(nao²) `setupMultipole` integral loop.
+- **Done**: SPIR-V `multipole_ints` shader (one thread per AO pair: global-origin
+  `cgto_multipole` then the per-column origin shift + traceless transform using the
+  resident overlap `rS`). `XtbVulkanContext::{beginMultipoleComputed, downloadMultipole}`
+  + `gDpInt`(3·nao²)/`gQpInt`(6·nao²) buffers; no new basis fields (Stage 3/4 already
+  upload ao2sh/ao2at/iao_sh/ang_sh/prim_*). Host: `GpuScfBackend::downloadMultipoleInts`
+  hook + `setupMultipole(bool integrals_on_device)` skips steps 1-2; wired in
+  `xtb_native.cpp` for `!supportsMultipole()` backends (CUDA's resident loop excluded).
+  Since Vulkan GFN2 runs the host SCF, the device integrals feed the host Fock — bit-
+  identical GFN2 energy proves them.
+- **Validated** (AMD 890M / RADV): gfn2 `-sp` energy bit-identical to CPU (8 dp) over the
+  full 12-molecule `sqm_reference` set incl. 231-atom `complex`; gfn2 `-opt` (NH3) identical
+  trajectory (integrals rebuilt each geometry). ctest
+  `cli_gpu_multipole_01_vulkan_gfn2_multipole`.
+- **Depends on**: nothing (independent of V-AP1). Next: V-AP3 (resident multipole SCF).
 
 ### V-AP3 — GFN2 device-resident multipole SCF (Stage 2b)
 - **Goal**: flip `supportsMultipole()→true` so GFN2 enters the resident loop instead of
@@ -138,12 +149,18 @@ ROCm already has GFN1 fully device-resident (Stage 4). The remaining gap is the 
 anisotropic stack** (then GFN-FF). The HIP ports are lower-risk than Vulkan because
 rocBLAS/rocSOLVER cover the dense linear algebra and the isotropic `.hiph` already exists.
 
-### R-AP1 — GFN2 multipole integrals on device (Stage 3m)
-- **Goal**: build `dp_int`/`qp_int` on the GPU (`xtb_hip_integrals.hiph` currently states
-  "no multipole").
-- **Port from**: `cgto_multipole` + `k_multipole_ints` (CUDA) → HIP `__device__`/`k_`
-  equivalents in `xtb_hip_integrals.hiph`; extend `XtbHipBasisData` + `beginComputed`.
-- **Depends on**: nothing.
+### R-AP1 — GFN2 multipole integrals on device (Stage 3m) — ✅ DONE (2026-06)
+- **Goal**: build `dp_int`/`qp_int` on the GPU so the host GFN2 SCF skips its integral loop.
+- **Done**: `d_moment1d`/`d_type_to_cart`/`d_primitive_multipole`/`d_cgto_multipole` ported
+  verbatim from the CUDA `.cuh` into `xtb_hip_integrals.hiph` (the `__device__` math
+  compiles unchanged under hipcc) + the `k_multipole_ints` kernel (origin shift + traceless
+  transform with the resident `dS0`) in `xtb_hip_context.hip`. `dDpInt`/`dQpInt` buffers +
+  `XtbHipContext::{beginMultipoleComputed, downloadMultipoleInts}`; no new `XtbHipBasisData`
+  fields (Stage 4 already uploads ao2sh/ao2at). Shared host plumbing with V-AP2.
+- **Validated** (Radeon 890M/gfx1150): gfn2 `-sp` energy bit-identical to CPU (8 dp) over
+  the full 12-molecule `sqm_reference` set incl. 231-atom `complex`; gfn2 `-opt` (NH3)
+  identical trajectory. (CLI-validated like the other ROCm stages; no ctest harness.)
+- **Depends on**: nothing. Next: R-AP2 (resident multipole SCF).
 
 ### R-AP2 — GFN2 device-resident multipole SCF (Stage 2b)
 - **Goal**: GFN2 enters a device-resident loop (today it uses device integrals + the
@@ -184,9 +201,9 @@ rocBLAS/rocSOLVER cover the dense linear algebra and the isotropic `.hiph` alrea
 
 ## Suggested order
 
-1. ~~**V-AP1** (Vulkan GFN1 gradient) — closes the only Vulkan↔ROCm asymmetry.~~ ✅ DONE
-   (2026-06). **Next up:** step 2.
-2. **R-AP1 + V-AP2** (GFN2 multipole integrals, both backends) — shared port, independent.
+1. ~~**V-AP1** (Vulkan GFN1 gradient) — closes the only Vulkan↔ROCm asymmetry.~~ ✅ DONE (2026-06).
+2. ~~**R-AP1 + V-AP2** (GFN2 multipole integrals, both backends) — shared port.~~ ✅ DONE
+   (2026-06). **Next up:** step 3.
 3. **R-AP2 + V-AP3** (resident multipole SCF) → **R-AP3 + V-AP4** (GFN2 gradient).
 4. **X-AP1** (device solvation, interim host-`v_ao` form is cheap) alongside step 3.
 5. **GFN-FF** (R-AP5 / V-AP6) and the **Stage 5/6** APs last (largest / lowest measured ROI).

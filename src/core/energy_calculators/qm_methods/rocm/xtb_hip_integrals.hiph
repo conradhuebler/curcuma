@@ -219,6 +219,102 @@ __device__ __forceinline__ double d_coulomb_average(double gi, double gj, bool i
     return 2.0 / (1.0 / gi + 1.0 / gj);
 }
 
+// ---- GFN2 multipole integrals (Stage 3m, R-AP1) ---------------------------
+// Verbatim ports of cuda/xtb_gpu_integrals_device.cuh d_moment1d / d_type_to_cart /
+// d_primitive_multipole / d_cgto_multipole (= xtb_multipole.cpp setupMultipole steps
+// 1-2). s/p only; quadrupole order xx,xy,yy,xz,yz,zz; global origin (the per-column
+// origin shift + traceless transform are applied in the kernel, mirroring setupMultipole).
+__device__ __forceinline__ double d_moment1d(int la, int lb, int n,
+                                            double PA, double PB, double P, double gamma)
+{
+    const double a0 = (la == 0) ? 1.0 : PA;
+    const double a1 = (la == 0) ? 0.0 : 1.0;
+    const double b0 = (lb == 0) ? 1.0 : PB;
+    const double b1 = (lb == 0) ? 0.0 : 1.0;
+    double p0, p1, p2;
+    if (n == 0)      { p0 = 1.0;   p1 = 0.0;   p2 = 0.0; }
+    else if (n == 1) { p0 = P;     p1 = 1.0;   p2 = 0.0; }
+    else             { p0 = P * P; p1 = 2.0*P; p2 = 1.0; }
+    const double ab0 = a0 * b0;
+    const double ab1 = a0 * b1 + a1 * b0;
+    const double ab2 = a1 * b1;
+    const double c0 = ab0 * p0;
+    const double c2 = ab0 * p2 + ab1 * p1 + ab2 * p0;
+    const double c4 = ab2 * p2;
+    const double M0 = sqrt(d_pi() / gamma);
+    const double M2 = M0 / (2.0 * gamma);
+    const double M4 = 3.0 * M0 / (4.0 * gamma * gamma);
+    return c0 * M0 + c2 * M2 + c4 * M4;
+}
+__device__ __forceinline__ void d_type_to_cart(int type, int& lx, int& ly, int& lz)
+{
+    switch (type) {
+    case 1: lx = 1; ly = 0; lz = 0; break;
+    case 2: lx = 0; ly = 1; lz = 0; break;
+    case 3: lx = 0; ly = 0; lz = 1; break;
+    default: lx = 0; ly = 0; lz = 0; break;
+    }
+}
+__device__ __forceinline__ void d_primitive_multipole(
+    double aa, double ab, double Ax, double Ay, double Az,
+    double Bx, double By, double Bz, int type_a, int type_b,
+    double& S, double D[3], double Q[6])
+{
+    int lxa, lya, lza, lxb, lyb, lzb;
+    d_type_to_cart(type_a, lxa, lya, lza);
+    d_type_to_cart(type_b, lxb, lyb, lzb);
+    const double gamma = aa + ab;
+    const double Px = (aa * Ax + ab * Bx) / gamma;
+    const double Py = (aa * Ay + ab * By) / gamma;
+    const double Pz = (aa * Az + ab * Bz) / gamma;
+    const double dx = Ax - Bx, dy = Ay - By, dz = Az - Bz;
+    const double R2 = dx*dx + dy*dy + dz*dz;
+    const double K = exp(-aa * ab / gamma * R2);
+    const double PAx = Px - Ax, PAy = Py - Ay, PAz = Pz - Az;
+    const double PBx = Px - Bx, PBy = Py - By, PBz = Pz - Bz;
+    const double Sx0 = d_moment1d(lxa, lxb, 0, PAx, PBx, Px, gamma);
+    const double Sy0 = d_moment1d(lya, lyb, 0, PAy, PBy, Py, gamma);
+    const double Sz0 = d_moment1d(lza, lzb, 0, PAz, PBz, Pz, gamma);
+    const double Sx1 = d_moment1d(lxa, lxb, 1, PAx, PBx, Px, gamma);
+    const double Sy1 = d_moment1d(lya, lyb, 1, PAy, PBy, Py, gamma);
+    const double Sz1 = d_moment1d(lza, lzb, 1, PAz, PBz, Pz, gamma);
+    const double Sx2 = d_moment1d(lxa, lxb, 2, PAx, PBx, Px, gamma);
+    const double Sy2 = d_moment1d(lya, lyb, 2, PAy, PBy, Py, gamma);
+    const double Sz2 = d_moment1d(lza, lzb, 2, PAz, PBz, Pz, gamma);
+    S    = K * Sx0 * Sy0 * Sz0;
+    D[0] = K * Sx1 * Sy0 * Sz0;
+    D[1] = K * Sx0 * Sy1 * Sz0;
+    D[2] = K * Sx0 * Sy0 * Sz1;
+    Q[0] = K * Sx2 * Sy0 * Sz0;  // xx
+    Q[1] = K * Sx1 * Sy1 * Sz0;  // xy
+    Q[2] = K * Sx0 * Sy2 * Sz0;  // yy
+    Q[3] = K * Sx1 * Sy0 * Sz1;  // xz
+    Q[4] = K * Sx0 * Sy1 * Sz1;  // yz
+    Q[5] = K * Sx0 * Sy0 * Sz2;  // zz
+}
+__device__ __forceinline__ void d_cgto_multipole(
+    const double* alpha_a, const double* coeff_a, int npa,
+    const double* alpha_b, const double* coeff_b, int npb,
+    double xa, double ya, double za, double xb, double yb, double zb,
+    int type_a, int type_b, double& S, double D[3], double Q[6])
+{
+    S = 0.0;
+    for (int k = 0; k < 3; ++k) D[k] = 0.0;
+    for (int k = 0; k < 6; ++k) Q[k] = 0.0;
+    for (int i = 0; i < npa; ++i) {
+        const double ai = alpha_a[i], ci = coeff_a[i];
+        for (int j = 0; j < npb; ++j) {
+            const double aj = alpha_b[j], cj = coeff_b[j];
+            double s, d[3], q[6];
+            d_primitive_multipole(ai, aj, xa, ya, za, xb, yb, zb, type_a, type_b, s, d, q);
+            const double cc = ci * cj;
+            S += cc * s;
+            D[0] += cc * d[0]; D[1] += cc * d[1]; D[2] += cc * d[2];
+            for (int k = 0; k < 6; ++k) Q[k] += cc * q[k];
+        }
+    }
+}
+
 } // namespace gpu
 } // namespace xtb
 } // namespace curcuma

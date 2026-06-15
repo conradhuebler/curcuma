@@ -17,6 +17,9 @@
 #include "src/core/curcuma_logger.h"
 
 #include <fmt/format.h>
+#include <array>
+#include <cstring>
+#include <vector>
 
 namespace {
 using curcuma::xtb::MethodType;
@@ -147,6 +150,33 @@ public:
         }
         dEdcn_out.resize(m_nat);
         for (int i = 0; i < m_nat; ++i) dEdcn_out(i) = dEdcn[i];
+        return true;
+    }
+
+    // ---- Stage 3m (R-AP1): GFN2 multipole integrals on device --------------
+    // supportsMultipole() stays false (ROCm GFN2 runs the host SCF with the rocSOLVER
+    // per-iteration eigensolver), so these are reached only via the non-resident host-
+    // download path in xtb_native.cpp: build dp_int/qp_int on the device, download so the
+    // CPU setupMultipole integral loop is skipped.
+    bool beginMultipoleComputed() override
+    {
+        return m_ctx && m_ctx->beginMultipoleComputed();
+    }
+    bool downloadMultipoleInts(std::array<Eigen::MatrixXd, 3>& dp_int,
+                               std::array<Eigen::MatrixXd, 6>& qp_int) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        const size_t nn = static_cast<size_t>(m_n) * m_n;
+        std::vector<double> dp(3 * nn), qp(6 * nn);   // contiguous 3·nn / 6·nn, col-major
+        if (!m_ctx->downloadMultipoleInts(dp.data(), qp.data())) return false;
+        for (int k = 0; k < 3; ++k) {                 // Eigen MatrixXd column-major →
+            dp_int[k].resize(m_n, m_n);               // (mu,nu) at mu+nu*nao matches device
+            std::memcpy(dp_int[k].data(), dp.data() + static_cast<size_t>(k) * nn, sizeof(double) * nn);
+        }
+        for (int k = 0; k < 6; ++k) {
+            qp_int[k].resize(m_n, m_n);
+            std::memcpy(qp_int[k].data(), qp.data() + static_cast<size_t>(k) * nn, sizeof(double) * nn);
+        }
         return true;
     }
 private:

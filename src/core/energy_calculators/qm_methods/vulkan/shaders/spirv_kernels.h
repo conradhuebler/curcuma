@@ -65,6 +65,10 @@ static const uint32_t grad_coulomb_spv[] =
 static const uint32_t grad_pulay_spv[] =
 #include "grad_pulay.spv.inc"
 ;
+// Stage 3m: GFN2 AO multipole integrals (dp_int/qp_int) on device. Claude Generated (V-AP2).
+static const uint32_t multipole_ints_spv[] =
+#include "multipole_ints.spv.inc"
+;
 
 } // namespace shaders
 } // namespace vk

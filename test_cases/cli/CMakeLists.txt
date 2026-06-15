@@ -90,6 +90,10 @@ if(USE_VULKAN_XTB)
     add_cli_test(gpu_gradient 01_vulkan_gfn1_gradient)
     set_tests_properties(cli_gpu_gradient_01_vulkan_gfn1_gradient
         PROPERTIES TIMEOUT 120 LABELS "gpu_gradient;gpu;vulkan;cli")
+    # V-AP2: GFN2 AO multipole integrals on the device.
+    add_cli_test(gpu_multipole 01_vulkan_gfn2_multipole)
+    set_tests_properties(cli_gpu_multipole_01_vulkan_gfn2_multipole
+        PROPERTIES TIMEOUT 120 LABELS "gpu_multipole;gpu;vulkan;cli")
 endif()
 
 # =============================================================================

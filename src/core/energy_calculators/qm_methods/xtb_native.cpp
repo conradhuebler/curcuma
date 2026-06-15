@@ -431,10 +431,21 @@ double XTB::Calculation(bool gradient)
     const auto t_gamma = clock::now();   // S/H0/L/gamma fused above (AP4 device path)
 
     // 5. Multipole setup (GFN2 only) — fills m_dp_int, m_qp_int, interaction matrices.
-    // Always on the host: the AP4 device path uploads dp_int/qp_int, it does not build
-    // the AO multipole integrals.
+    // Stage 3m (Claude Generated): on the non-resident device GFN2 path (Vulkan/ROCm),
+    // build dp_int/qp_int ON the device and download them, skipping the host O(nao²)
+    // integral loop. CUDA's resident multipole loop (supportsMultipole) builds AND
+    // consumes them on-device, so it is excluded here and keeps the full host build.
     if (m_method == MethodType::GFN2) {
-        setupMultipole();
+        bool mp_on_device = false;
+        if (integrals_from_device && m_gpu_scf && !m_gpu_scf->supportsMultipole()
+            && m_gpu_scf->beginMultipoleComputed()
+            && m_gpu_scf->downloadMultipoleInts(m_dp_int, m_qp_int)) {
+            mp_on_device = true;
+            if (verb >= 2)
+                CurcumaLogger::info("SCF: GFN2 multipole integrals built on GPU device "
+                                    "(dp_int/qp_int downloaded; host build skipped)");
+        }
+        setupMultipole(mp_on_device);
     }
 
     // Implicit solvation: refresh the geometry-dependent state (Born radii, SASA,

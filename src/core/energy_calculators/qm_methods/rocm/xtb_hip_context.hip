@@ -364,6 +364,62 @@ __global__ void k_grad_coulomb(int nsh, int is_gfn2, const int* __restrict__ sh2
         atomicAdd(&grad[3*iat+2], force*dz); atomicAdd(&grad[3*jat+2], -force*dz);
     }
 }
+
+// Stage 3m (R-AP1): GFN2 AO multipole integrals dp_int(3)/qp_int(6). One thread per AO
+// pair (mu,nu): global-origin dipole/quadrupole (d_cgto_multipole), then the per-column
+// origin shift (origin = atom of column AO nu) + traceless transform with the resident S.
+// Verbatim port of CUDA k_multipole_ints. dp_int 3·nn, qp_int 6·nn, column-major (mu,nu)
+// at mu+nu*nao; NOT symmetric.
+__global__ void k_multipole_ints(
+    int nao, const int* __restrict__ ao2sh, const int* __restrict__ ao2at,
+    const int* __restrict__ iao_sh, const int* __restrict__ ang_sh,
+    const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ xyz, const double* __restrict__ S,
+    double* __restrict__ dp_int, double* __restrict__ qp_int)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    const int nu = blockIdx.y * blockDim.y + threadIdx.y;
+    if (mu >= nao || nu >= nao) return;
+    const size_t nn = static_cast<size_t>(nao) * static_cast<size_t>(nao);
+    const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
+
+    for (int k = 0; k < 3; ++k) dp_int[static_cast<size_t>(k) * nn + mn] = 0.0;
+    for (int k = 0; k < 6; ++k) qp_int[static_cast<size_t>(k) * nn + mn] = 0.0;
+
+    const int isha = ao2sh[mu], iat = ao2at[mu];
+    const int ishb = ao2sh[nu], jat = ao2at[nu];
+    const int ta = d_ao_to_type(ang_sh[isha], mu - iao_sh[isha]);
+    const int tb = d_ao_to_type(ang_sh[ishb], nu - iao_sh[ishb]);
+    if (ta < 0 || tb < 0) return;
+
+    double Sx, D[3], Q[6];
+    d_cgto_multipole(prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+                     prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+                     xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                     xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], ta, tb, Sx, D, Q);
+
+    const double Rx = xyz[3*jat+0], Ry = xyz[3*jat+1], Rz = xyz[3*jat+2];
+    const double Smn = S[mn];
+    const double dx = D[0], dy = D[1], dz = D[2];
+    dp_int[0*nn + mn] = dx - Rx * Smn;
+    dp_int[1*nn + mn] = dy - Ry * Smn;
+    dp_int[2*nn + mn] = dz - Rz * Smn;
+
+    const double qxx = Q[0] - 2*Rx*dx + Rx*Rx*Smn;
+    const double qxy = Q[1] - Rx*dy - Ry*dx + Rx*Ry*Smn;
+    const double qyy = Q[2] - 2*Ry*dy + Ry*Ry*Smn;
+    const double qxz = Q[3] - Rx*dz - Rz*dx + Rx*Rz*Smn;
+    const double qyz = Q[4] - Ry*dz - Rz*dy + Ry*Rz*Smn;
+    const double qzz = Q[5] - 2*Rz*dz + Rz*Rz*Smn;
+    const double tr = 0.5 * (qxx + qyy + qzz);
+    qp_int[0*nn + mn] = 1.5 * qxx - tr;
+    qp_int[1*nn + mn] = 1.5 * qxy;
+    qp_int[2*nn + mn] = 1.5 * qyy - tr;
+    qp_int[3*nn + mn] = 1.5 * qxz;
+    qp_int[4*nn + mn] = 1.5 * qyz;
+    qp_int[5*nn + mn] = 1.5 * qzz - tr;
+}
 } // namespace
 #endif // HAVE_ROCSOLVER
 
@@ -507,6 +563,9 @@ struct XtbHipContext::Impl {
     double* drep_alpha = nullptr; double* drep_zeff = nullptr;
     double* dW = nullptr; double* dVao = nullptr; double* dQsh = nullptr;
     double* dGrad = nullptr; double* dEdcn_buf = nullptr;
+    // Stage 3m (GFN2 multipole integrals): dp_int 3·nn / qp_int 6·nn.
+    double* dDpInt = nullptr; double* dQpInt = nullptr;
+    bool    mp_computed = false;
 
     template <class T> bool up(T*& dptr, const T* host, size_t count) {
         if (dptr) hipFree(dptr);
@@ -556,6 +615,15 @@ struct XtbHipContext::Impl {
             g &= hipMalloc(&dGrad, 3 * static_cast<size_t>(bnat) * sizeof(double)) == hipSuccess;
             g &= hipMalloc(&dEdcn_buf, static_cast<size_t>(bnat) * sizeof(double)) == hipSuccess;
             bgeom_nat = bnat;
+        }
+        // Stage 3m: GFN2 multipole-integral buffers (only when GFN2).
+        if (dDpInt) { hipFree(dDpInt); dDpInt = nullptr; }
+        if (dQpInt) { hipFree(dQpInt); dQpInt = nullptr; }
+        mp_computed = false;
+        if (bis_gfn2) {
+            const size_t nn = static_cast<size_t>(bnao) * bnao;
+            g &= hipMalloc(&dDpInt, 3 * nn * sizeof(double)) == hipSuccess;
+            g &= hipMalloc(&dQpInt, 6 * nn * sizeof(double)) == hipSuccess;
         }
         basis_ready = g;
         return g;
@@ -627,6 +695,25 @@ struct XtbHipContext::Impl {
         return hipMemcpy(out, src, count * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess;
     }
 
+    // Stage 3m: GFN2 AO multipole integrals on device (needs dS0 = device overlap).
+    bool computeMultipole() {
+        if (!basis_ready || !bis_gfn2 || bnao <= 0 || !dDpInt || !dQpInt) return false;
+        dim3 b(16, 16), gr((bnao + 15) / 16, (bnao + 15) / 16);
+        hipLaunchKernelGGL(k_multipole_ints, gr, b, 0, stream, bnao,
+                           dao2sh, dao2at, diao_sh, dang_sh, dsh_nprim, dsh_prim_off,
+                           dprim_alpha, dprim_coeff, dxyz, dS0, dDpInt, dQpInt);
+        if (hipStreamSynchronize(stream) != hipSuccess) return false;
+        mp_computed = true;
+        return true;
+    }
+    bool downloadMP(double* dp3, double* qp6) {
+        if (!mp_computed || !dDpInt || !dQpInt) return false;
+        const size_t nn = static_cast<size_t>(bnao) * bnao;
+        if (hipMemcpy(dp3, dDpInt, 3 * nn * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        if (hipMemcpy(qp6, dQpInt, 6 * nn * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        return true;
+    }
+
     void freeBasis() {
         for (void* p : { (void*)dz,(void*)dsh2at,(void*)dang_sh,(void*)diao_sh,(void*)dnao_sh,
                          (void*)dsh_nprim,(void*)dsh_prim_off,(void*)dvalence,(void*)dprim_alpha,
@@ -634,13 +721,15 @@ struct XtbHipContext::Impl {
                          (void*)dshpoly,(void*)dghard,(void*)dcovrad,(void*)dpauling,(void*)darad,
                          (void*)dxyz,(void*)dcn,(void*)dse,(void*)dgamma,(void*)dL,
                          (void*)dao2sh,(void*)dao2at,(void*)drep_alpha,(void*)drep_zeff,
-                         (void*)dW,(void*)dVao,(void*)dQsh,(void*)dGrad,(void*)dEdcn_buf })
+                         (void*)dW,(void*)dVao,(void*)dQsh,(void*)dGrad,(void*)dEdcn_buf,
+                         (void*)dDpInt,(void*)dQpInt })
             if (p) hipFree(p);
         dz = dsh2at = dang_sh = diao_sh = dnao_sh = dsh_nprim = dsh_prim_off = dvalence = nullptr;
         dprim_alpha = dprim_coeff = dsh_zeta = dselfenergy = dkcn = dshpoly = dghard = nullptr;
         dcovrad = dpauling = darad = dxyz = dcn = dse = dgamma = dL = nullptr;
         dao2sh = dao2at = nullptr; drep_alpha = drep_zeff = nullptr;
         dW = dVao = dQsh = dGrad = dEdcn_buf = nullptr;
+        dDpInt = dQpInt = nullptr; mp_computed = false;
         basis_ready = false; bgeom_nat = 0;
     }
 #endif // HAVE_ROCSOLVER
@@ -821,6 +910,22 @@ bool XtbHipContext::gradient(const double* eps, int nocc_orbs, const double* v_a
 #else
     return m_impl && m_impl->ok && eps && v_ao && q_sh && grad_out && dEdcn_out
         && m_impl->gradient(eps, nocc_orbs, v_ao, q_sh, grad_out, dEdcn_out);
+#endif
+}
+bool XtbHipContext::beginMultipoleComputed()
+{
+#ifndef HAVE_ROCSOLVER
+    return false;
+#else
+    return m_impl && m_impl->ok && m_impl->computeMultipole();
+#endif
+}
+bool XtbHipContext::downloadMultipoleInts(double* dp_int3, double* qp_int6)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)dp_int3; (void)qp_int6; return false;
+#else
+    return m_impl && m_impl->ok && dp_int3 && qp_int6 && m_impl->downloadMP(dp_int3, qp_int6);
 #endif
 }
 

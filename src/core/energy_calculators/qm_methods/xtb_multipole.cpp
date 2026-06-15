@@ -65,10 +65,9 @@ static CGTO::Shell as_cgto_shell(const CGTOShell& cg)
  *  2. CN-dependent damping radii mrad                                *
  *  3. Interaction matrices amat_sd, amat_dd, amat_sq                 *
  * ------------------------------------------------------------------ */
-void XTB::setupMultipole()
+void XTB::setupMultipole(bool integrals_on_device)
 {
     const int nat = m_atomcount;
-    const int nsh = m_basis.nsh;
     const int nao = m_basis.nao;
 
     if (nat == 0 || nao == 0) return;
@@ -81,6 +80,11 @@ void XTB::setupMultipole()
         xyz_bohr[3 * i + 2] = m_geometry(i, 2) * AA_TO_AU;
     }
 
+    // Steps 1-2 (the O(nao²) AO dipole/quadrupole integral build → m_dp_int/m_qp_int)
+    // are skipped when the GPU backend already filled them via downloadMultipoleInts
+    // (Stage 3m). The CN-damping radii + atom-pair interaction matrices (step 3+) are
+    // O(nat²) and always run on the host. Claude Generated.
+    if (!integrals_on_device) {
     // ---- 1. Global-origin raw dipole + raw-Cartesian quadrupole ----
     std::array<Eigen::MatrixXd, 3> dp_global;
     std::array<Eigen::MatrixXd, 6> qp_global_raw;
@@ -157,6 +161,7 @@ void XTB::setupMultipole()
         }
     }
     });  // parallelStripes over mu
+    }  // if (!integrals_on_device) — steps 1-2 (AO multipole integral build)
 
     // ---- 3. Coordination numbers (GFN2 double-exp form) ----
     std::vector<double> cn = cn_gfn(std::vector<int>(m_atoms.begin(), m_atoms.end()), xyz_bohr);

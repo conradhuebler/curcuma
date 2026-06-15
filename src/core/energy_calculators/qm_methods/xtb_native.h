@@ -384,6 +384,14 @@ struct GpuScfBackend {
     /// dp_int/qp_int (no upload of the 9 nao² matrices). Returns false → caller
     /// falls back to beginMultipole (upload). Claude Generated (Stage 3d).
     virtual bool beginMultipoleComputed() { return false; }
+    /// Fetch the device-built AO multipole integrals dp_int (3) / qp_int (6), each
+    /// nao×nao column-major, after beginMultipoleComputed — so the HOST GFN2 SCF (the
+    /// non-resident Vulkan/ROCm path) consumes the device integrals and skips its own
+    /// O(nao²) setupMultipole integral loop. Returns false if unavailable (caller keeps
+    /// the CPU build). Claude Generated (Stage 3m / R-AP1 / V-AP2).
+    virtual bool downloadMultipoleInts(std::array<Eigen::MatrixXd, 3>& dp_int,
+                                       std::array<Eigen::MatrixXd, 6>& qp_int)
+    { (void)dp_int; (void)qp_int; return false; }
     virtual bool solveMultipole(const Eigen::VectorXd& v_ao,
                                 const Eigen::MatrixXd& v_dp,
                                 const Eigen::MatrixXd& v_qp,
@@ -873,7 +881,10 @@ private:
     void buildBasis();                                   // xtb_native.cpp
     void buildH0Data();                                  // xtb_h0.cpp
     void buildGammaMatrix();                             // xtb_coulomb.cpp
-    void setupMultipole();                               // xtb_multipole.cpp (GFN2)
+    // integrals_on_device=true: skip the O(nao²) CPU dp_int/qp_int integral build
+    // (already filled by GpuScfBackend::downloadMultipoleInts); only the CN-damping
+    // radii + atom-pair interaction matrices are computed. Claude Generated (Stage 3m).
+    void setupMultipole(bool integrals_on_device = false);   // xtb_multipole.cpp (GFN2)
     Vector computeCoordinationNumbers() const;           // xtb_native.cpp
     void buildReferenceOccupations();                    // xtb_native.cpp
 

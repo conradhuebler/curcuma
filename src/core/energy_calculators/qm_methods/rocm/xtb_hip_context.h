@@ -151,6 +151,14 @@ public:
     bool gradient(const double* eps, int nocc_orbs, const double* v_ao, const double* q_sh,
                   double* grad_out, double* dEdcn_out);
 
+    // ---- Device GFN2 multipole integrals (Stage 3m / R-AP1) -----------------
+    // beginMultipoleComputed builds dp_int(3)/qp_int(6) on the device from the resident
+    // overlap + basis (k_multipole_ints); downloadMultipoleInts fetches them (3·nao² /
+    // 6·nao², column-major (mu,nu) at mu+nu*nao) so the host GFN2 SCF skips its O(nao²)
+    // setupMultipole integral loop. Requires a prior beginComputed (GFN2 basis). Claude Generated.
+    bool beginMultipoleComputed();
+    bool downloadMultipoleInts(double* dp_int3, double* qp_int6);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;

@@ -6,8 +6,10 @@
 > in place (no per-geometry nao² upload). **GFN1 = device-resident SCF (Stage 2):** Fock
 > build, the symmetric eigensolve, density, Mulliken populations and the band energy all run
 > on the GPU; only `v_ao` (up) + eigenvalues/populations (down) cross the bus per iteration.
-> **GFN2 = device integrals + GPU eigensolver (Stage 1):** the per-iteration eigensolve is
-> on the GPU; the multipole integrals and the rest of the potential are on the CPU.
+> **GFN2 = device integrals (incl. the dp/qp multipole integrals, Stage 3m/V-AP2) + GPU
+> eigensolver (Stage 1):** the per-iteration eigensolve is on the GPU and the AO multipole
+> integrals are now built on the device and downloaded; the rest of the potential + the
+> multipole Fock/gradient are on the CPU (host SCF).
 > **GFN1 nuclear gradient = on device (Stage 4, V-AP1):** repulsion / Coulomb /
 > H0-Pulay+CN built by three FP64 SPIR-V **gather** kernels (Vulkan has no `atomicAdd`
 > on doubles, so each thread owns one atom and sums over all partners — exact because the
@@ -108,7 +110,15 @@ but is chosen for correctness first.
    runs `cn` → `self_energy` → `overlap_h0` → `gamma` SPIR-V kernels, then builds the Löwdin
    X from the device S. `xtb_native.cpp` downloads S/H0/γ (and derives L = chol(S) host-side
    via Eigen LLT — no device triangular solve) in place of the host build. Active for both
-   GFN1 and GFN2 (the s/p subset); GFN2 multipole integrals (dp/qp) are still CPU.
+   GFN1 and GFN2 (the s/p subset).
+3m. **On-device GFN2 multipole integrals (V-AP2)** — done. `beginMultipoleComputed`
+   dispatches the `multipole_ints` SPIR-V kernel (one thread per AO pair: global-origin
+   `cgto_multipole` then the per-column origin shift + traceless transform with the
+   resident overlap), and `downloadMultipole` fetches `dp_int`(3·nao²)/`qp_int`(6·nao²) so
+   the host GFN2 SCF skips its O(nao²) `setupMultipole` integral loop. GFN2 on Vulkan runs
+   the host SCF (Stage-1 eigensolver), so the device integrals feed the host Fock — bit-
+   identical GFN2 energy proves them. The GFN2 resident multipole SCF (Stage 2b) + multipole
+   gradient stay pending.
 4. **On-device GFN1 nuclear gradient (V-AP1)** — done. `gradient` builds the
    energy-weighted density W = C·diag(2ε)·Cᵀ on device (`scale_cols`+`gemm` over the
    resident rC, Jacobi order) then dispatches three FP64 **gather** kernels:
@@ -140,6 +150,11 @@ On an **AMD Radeon 890M (RADV, integrated, shaderFloat64)**, build `release_vulk
   `test_cases/sqm_reference` set (H2, He2, LiH, H2O, NH3, CH4, HCN, C6H6, triose, caffeine,
   acetic_acid_dimer, and the 231-atom `complex`): all 24 bit-identical at 8 decimals (|dE| = 0).
 - **gfn1 + gfn2 opt** (H2O): converges to the CPU minimum (gfn1 -5.768775, gfn2 -5.070544 Eh).
+- **GFN2 device multipole integrals (V-AP2)**: with `multipole_ints` building dp_int/qp_int
+  on the device (log "GFN2 multipole integrals built on GPU device"), gfn2 `-sp` energy
+  bit-identical to CPU (8 dp) over the full 12-molecule set incl. 231-atom `complex`; gfn2
+  `-opt` (NH3) identical trajectory (integrals rebuilt each geometry, feeding the host Fock
+  AND the host multipole gradient). ctest `cli_gpu_multipole_01_vulkan_gfn2_multipole`.
 - **GFN1 device nuclear gradient (V-AP1)**: `-sp` gradient norm matches CPU to printed
   precision (7 sig figs) over the full 12-molecule set incl. 231-atom `complex` (gather
   kernels); `-opt` caffeine 35 steps step-by-step identical in energy AND gradient norm

@@ -6,9 +6,10 @@
 > the nuclear gradient (repulsion + on-site CN + H0/Pulay + Coulomb) all run on the GPU via
 > HIP `__global__` kernels + rocBLAS + rocSOLVER; only the dispersion gradient + CN
 > chain-rule stay on the host. `-opt`/`-md` need no host integral or gradient build.
-> **GFN2:** uses the same device integral build (S/H0/γ), then the Stage-1 rocSOLVER
-> eigensolver per iteration; its gradient stays on the host. Energies (and the full `-opt`
-> trajectory) match the CPU bit-for-bit (AMD 890M / gfx1150).
+> **GFN2:** uses the same device integral build (S/H0/γ **and now the dp/qp AO multipole
+> integrals, Stage 3m/R-AP1**), then the Stage-1 rocSOLVER eigensolver per iteration; the
+> multipole Fock + gradient stay on the host. Energies (and the full `-opt` trajectory)
+> match the CPU bit-for-bit (AMD 890M / gfx1150).
 
 ## What it is
 
@@ -113,6 +114,15 @@ to `ld.lld` and drop GNU OpenMP / `libgomp`). No `enable_language(HIP)` is used.
    host skips its integral build (`downloadOverlap`/`H0`/`Cholesky`/`Gamma` for its
    bookkeeping). The device math is a verbatim port of the proven CUDA kernels
    (`rocm/xtb_hip_integrals.hiph`). Used by both GFN1 and GFN2.
+3m. **On-device GFN2 multipole integrals (R-AP1)** — done. `beginMultipoleComputed` runs
+   `k_multipole_ints` (one thread per AO pair: global-origin `d_cgto_multipole` then the
+   per-column origin shift + traceless transform with the resident overlap `dS0`);
+   `downloadMultipoleInts` fetches dp_int(3·nao²)/qp_int(6·nao²) so the host GFN2 SCF skips
+   its O(nao²) `setupMultipole` integral loop. `d_moment1d`/`d_type_to_cart`/
+   `d_primitive_multipole`/`d_cgto_multipole` are verbatim ports of the CUDA `.cuh` into
+   `xtb_hip_integrals.hiph`. GFN2 runs the host SCF (rocSOLVER eigensolver), so the device
+   integrals feed the host Fock — bit-identical GFN2 energy proves them. The GFN2 resident
+   multipole SCF (Stage 2b) + multipole gradient stay pending.
 4. **On-device nuclear gradient via `GpuScfBackend::gradient`** — done (GFN1). Kernels
    `k_grad_repulsion` (section 1), `k_grad_cn_onsite` (2a, dEdcn diagonal), `k_grad_h0_pulay`
    (2b, the overlap-derivative Pulay term using the energy-weighted density W = C·diag(2ε)·Cᵀ,
@@ -121,7 +131,7 @@ to `ld.lld` and drop GNU OpenMP / `libgomp`). No `enable_language(HIP)` is used.
    dispersion gradient + CN chain-rule stay on the host. GFN2 multipole gradient + GFN-FF
    ROCm still pending.
 
-The remaining work (GFN2 multipole integrals/SCF/gradient, GFN-FF, device solvation) is
+The remaining work (GFN2 resident multipole SCF + multipole gradient, GFN-FF, device solvation) is
 broken into work packages in [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md) (ROCm = `R-AP*`).
 
 ## What was tested
@@ -136,6 +146,11 @@ On an **AMD Radeon 890M (gfx1150)**, build `release_rocm/` (`-DUSE_ROCM_XTB=ON`,
   step-by-step — identical energies AND gradient norms at every step (H2O 8 steps to
   -5.768775; benzoic acid to -27.417443). A wrong gradient would diverge immediately, so
   this confirms the device repulsion/Pulay/Coulomb gradient is correct.
+- **gfn2 device multipole integrals (R-AP1)**: with `k_multipole_ints` building dp_int/qp_int
+  on the device (SCF log "GFN2 multipole integrals built on GPU device"), gfn2 `-sp` energy
+  bit-identical to CPU (8 dp) over the full 12-molecule `sqm_reference` set incl. the
+  231-atom `complex`; gfn2 `-opt` (NH3) identical trajectory (integrals rebuilt each geometry,
+  feeding the host Fock AND the host multipole gradient).
 - **gfn2 `-opt`**: device integrals + Stage-1 eigensolver; bit-identical to the CPU.
 - Stage 0 (no rocSOLVER): device handshake + CPU fallback, energies bit-identical.
 - Default non-ROCm `release/` build stays green (cli_curcumaopt_*/cli_rmsd_* 11/11).
