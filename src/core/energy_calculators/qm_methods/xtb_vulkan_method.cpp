@@ -18,6 +18,7 @@
 
 #include <fmt/format.h>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -139,14 +140,21 @@ public:
     {
         (void)P; (void)C; (void)pc_resident;
         if (!m_ctx || m_nat <= 0) return false;
-        // GFN1 isotropic only: the device kernels do NOT compute the GFN2 multipole-integral
-        // Pulay term (V-AP4 pending). For GFN2 (non-empty v_dp/v_qp) return false so the
-        // caller falls back to the full host gradient. Without this, the resident GFN2 path
-        // (V-AP3, use_gpu_resident=true) would silently use the isotropic-only gradient.
-        if (v_dp.size() > 0 || v_qp.size() > 0) return false;
+        // GFN1: v_dp/v_qp empty (isotropic) — runs on the device (Stage 4).
+        // GFN2 (V-AP4 WIP): the on-device multipole-integral Pulay term (grad_pulay) is
+        // correct but the per-atom gather + Obara-Saika derivative is far slower than the
+        // host gradient on this iGPU (231-atom complex: ~28 s device vs ~0.7 s host vs
+        // ~0.04 s ROCm), so — matching ROCm, which keeps the GFN2 gradient on the host —
+        // the device GFN2 gradient is opt-in (CURCUMA_VK_GFN2_GPUGRAD=1) and OFF by default;
+        // returning false routes GFN2 to the validated host gradient. Claude Generated.
+        const bool is_gfn2 = v_dp.size() > 0;
+        static const bool gfn2_gpu_grad = std::getenv("CURCUMA_VK_GFN2_GPUGRAD") != nullptr;
+        if (is_gfn2 && !gfn2_gpu_grad) return false;
+        const double* vdp = v_dp.size() > 0 ? v_dp.data() : nullptr;
+        const double* vqp = v_qp.size() > 0 ? v_qp.data() : nullptr;
         std::vector<double> grad(3 * static_cast<size_t>(m_nat), 0.0), dEdcn(m_nat, 0.0);
         if (!m_ctx->gradient(eps.data(), nocc_orbs, v_ao.data(), q_sh.data(),
-                             grad.data(), dEdcn.data()))
+                             vdp, vqp, grad.data(), dEdcn.data()))
             return false;
         grad_out.resize(m_nat, 3);
         for (int i = 0; i < m_nat; ++i) {

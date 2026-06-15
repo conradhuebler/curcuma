@@ -34,7 +34,14 @@ layout(std430, binding = 20) readonly buffer B20 { double atomic_rad[]; };
 layout(std430, binding = 21) readonly buffer B21 { double pauling[]; };
 layout(std430, binding = 22)          buffer B22 { double grad[]; };
 layout(std430, binding = 23)          buffer B23 { double dEdcn[]; };
-layout(push_constant) uniform PC { uint nat; uint nao; uint is_gfn2; } pc;
+layout(std430, binding = 24) readonly buffer B24 { double v_dp[]; };   // GFN2 (V-AP4), 3·nat col-major
+layout(std430, binding = 25) readonly buffer B25 { double v_qp[]; };   // GFN2 (V-AP4), 6·nat col-major
+// [base, end) is the atom range this dispatch handles: the host splits the GFN2
+// gradient over several short dispatches (atom chunks) so no single dispatch exceeds
+// the GPU's command-timeout (the multipole-integral Pulay loop is O(nao²·nprim²) per
+// atom and a one-shot dispatch over a medium molecule is killed mid-flight). Threads
+// past `end` exit so chunks stay disjoint (each atom written exactly once). (V-AP4)
+layout(push_constant) uniform PC { uint nat; uint nao; uint is_gfn2; uint base; uint end; } pc;
 
 // Obara-Saika dS/dR_a for s/p contracted GTOs (verbatim port of d_cgto_overlap_grad /
 // CGTO::cgto_overlap_grad). type 0=s, 1=px, 2=py, 3=pz. dS/dR_b = -dS/dR_a.
@@ -94,10 +101,164 @@ void cgto_overlap_grad(int offa, int npa, int offb, int npb,
     }
 }
 
+// ---- GFN2 multipole-integral gradient helpers (V-AP4) ---------------------
+// GLSL port of the CUDA device helpers (cuda/xtb_gpu_integrals_device.cuh:352-484):
+// d/dA of the transformed (origin-at-B, traceless) dipole/quadrupole integrals — the
+// multipole-integral Pulay term of the GFN2 gradient. type 0=s,1=px,2=py,3=pz;
+// quadrupole order xx,xy,yy,xz,yz,zz. Mirrors the non-gradient helpers in multipole_ints.comp.
+void mpt_type_to_cart(int t, out int lx, out int ly, out int lz) {
+    lx = 0; ly = 0; lz = 0;
+    if (t == 1) lx = 1; else if (t == 2) ly = 1; else if (t == 3) lz = 1;
+}
+double mpt_moment1d(int la, int lb, int n, double PA, double PB, double P, double gamma) {
+    double a0 = (la == 0) ? 1.0lf : PA;
+    double a1 = (la == 0) ? 0.0lf : 1.0lf;
+    double b0 = (lb == 0) ? 1.0lf : PB;
+    double b1 = (lb == 0) ? 0.0lf : 1.0lf;
+    double p0, p1, p2;
+    if (n == 0)      { p0 = 1.0lf;  p1 = 0.0lf;     p2 = 0.0lf; }
+    else if (n == 1) { p0 = P;      p1 = 1.0lf;     p2 = 0.0lf; }
+    else             { p0 = P * P;  p1 = 2.0lf * P; p2 = 1.0lf; }
+    double ab0 = a0 * b0;
+    double ab1 = a0 * b1 + a1 * b0;
+    double ab2 = a1 * b1;
+    double c0 = ab0 * p0;
+    double c2 = ab0 * p2 + ab1 * p1 + ab2 * p0;
+    double c4 = ab2 * p2;
+    double M0 = sqrt(VK_PI / gamma);
+    double M2 = M0 / (2.0lf * gamma);
+    double M4 = 3.0lf * M0 / (4.0lf * gamma * gamma);
+    return c0 * M0 + c2 * M2 + c4 * M4;
+}
+// d/dA_l of K·Ix[nx]·Iy[ny]·Iz[nz].
+double mpg_dGdA(int nx, int ny, int nz, int l,
+                double Ix[3], double Iy[3], double Iz[3],
+                double IxAlo[3], double IyAlo[3], double IzAlo[3],
+                double IxBlo[3], double IyBlo[3], double IzBlo[3],
+                double K, double kfA[3], double aa, double ab, double gamma,
+                int lxa, int lya, int lza, int lxb, int lyb, int lzb)
+{
+    double base = Ix[nx] * Iy[ny] * Iz[nz];
+    double r = K * kfA[l] * base;
+    if (l == 0) {
+        double t = (lxa > 0 ? double(lxa) * (-ab/gamma) * IxAlo[nx] : 0.0lf)
+                 + (lxb > 0 ? double(lxb) * ( aa/gamma) * IxBlo[nx] : 0.0lf)
+                 + (nx  > 0 ? double(nx)  * ( aa/gamma) *   Ix[nx-1] : 0.0lf);
+        r += K * t * Iy[ny] * Iz[nz];
+    } else if (l == 1) {
+        double t = (lya > 0 ? double(lya) * (-ab/gamma) * IyAlo[ny] : 0.0lf)
+                 + (lyb > 0 ? double(lyb) * ( aa/gamma) * IyBlo[ny] : 0.0lf)
+                 + (ny  > 0 ? double(ny)  * ( aa/gamma) *   Iy[ny-1] : 0.0lf);
+        r += K * Ix[nx] * t * Iz[nz];
+    } else {
+        double t = (lza > 0 ? double(lza) * (-ab/gamma) * IzAlo[nz] : 0.0lf)
+                 + (lzb > 0 ? double(lzb) * ( aa/gamma) * IzBlo[nz] : 0.0lf)
+                 + (nz  > 0 ? double(nz)  * ( aa/gamma) *   Iz[nz-1] : 0.0lf);
+        r += K * Ix[nx] * Iy[ny] * t;
+    }
+    return r;
+}
+// Primitive global-origin S, D[3] + their A-derivatives dS_dA[3], dD_dA[3][3] (flat l*3+k),
+// dQ_dA[3][6] (flat l*6+q). Q values are unused downstream and not returned.
+void primitive_multipole_grad(double aa, double ab,
+    double Ax, double Ay, double Az, double Bx, double By, double Bz, int ta, int tb,
+    out double S, out double D[3], out double dS_dA[3], out double dD_dA[9], out double dQ_dA[18])
+{
+    int lxa, lya, lza, lxb, lyb, lzb;
+    mpt_type_to_cart(ta, lxa, lya, lza);
+    mpt_type_to_cart(tb, lxb, lyb, lzb);
+    double gamma = aa + ab;
+    double Px = (aa*Ax + ab*Bx) / gamma;
+    double Py = (aa*Ay + ab*By) / gamma;
+    double Pz = (aa*Az + ab*Bz) / gamma;
+    double PAx = Px-Ax, PAy = Py-Ay, PAz = Pz-Az;
+    double PBx = Px-Bx, PBy = Py-By, PBz = Pz-Bz;
+    double Rx = Ax-Bx, Ry = Ay-By, Rz = Az-Bz;
+    double K = dexp(-aa*ab/gamma*(Rx*Rx+Ry*Ry+Rz*Rz));
+    double Ix[3], Iy[3], Iz[3];
+    for (int n = 0; n <= 2; ++n) {
+        Ix[n] = mpt_moment1d(lxa, lxb, n, PAx, PBx, Px, gamma);
+        Iy[n] = mpt_moment1d(lya, lyb, n, PAy, PBy, Py, gamma);
+        Iz[n] = mpt_moment1d(lza, lzb, n, PAz, PBz, Pz, gamma);
+    }
+    double IxAlo[3] = double[3](0.0lf,0.0lf,0.0lf), IyAlo[3] = double[3](0.0lf,0.0lf,0.0lf), IzAlo[3] = double[3](0.0lf,0.0lf,0.0lf);
+    double IxBlo[3] = double[3](0.0lf,0.0lf,0.0lf), IyBlo[3] = double[3](0.0lf,0.0lf,0.0lf), IzBlo[3] = double[3](0.0lf,0.0lf,0.0lf);
+    if (lxa > 0) for (int n=0;n<=2;++n) IxAlo[n] = mpt_moment1d(lxa-1,lxb,n,PAx,PBx,Px,gamma);
+    if (lya > 0) for (int n=0;n<=2;++n) IyAlo[n] = mpt_moment1d(lya-1,lyb,n,PAy,PBy,Py,gamma);
+    if (lza > 0) for (int n=0;n<=2;++n) IzAlo[n] = mpt_moment1d(lza-1,lzb,n,PAz,PBz,Pz,gamma);
+    if (lxb > 0) for (int n=0;n<=2;++n) IxBlo[n] = mpt_moment1d(lxa,lxb-1,n,PAx,PBx,Px,gamma);
+    if (lyb > 0) for (int n=0;n<=2;++n) IyBlo[n] = mpt_moment1d(lya,lyb-1,n,PAy,PBy,Py,gamma);
+    if (lzb > 0) for (int n=0;n<=2;++n) IzBlo[n] = mpt_moment1d(lza,lzb-1,n,PAz,PBz,Pz,gamma);
+
+    S    = K * Ix[0]*Iy[0]*Iz[0];
+    D[0] = K * Ix[1]*Iy[0]*Iz[0]; D[1] = K * Ix[0]*Iy[1]*Iz[0]; D[2] = K * Ix[0]*Iy[0]*Iz[1];
+
+    double kfA[3];
+    kfA[0] = -2.0lf*aa*ab/gamma*Rx; kfA[1] = -2.0lf*aa*ab/gamma*Ry; kfA[2] = -2.0lf*aa*ab/gamma*Rz;
+    int qnx[6] = int[6](2,1,0,1,0,0), qny[6] = int[6](0,1,2,0,1,0), qnz[6] = int[6](0,0,0,1,1,2);
+    for (int l = 0; l < 3; ++l) {
+        dS_dA[l] = mpg_dGdA(0,0,0,l, Ix,Iy,Iz, IxAlo,IyAlo,IzAlo, IxBlo,IyBlo,IzBlo,
+                            K, kfA, aa, ab, gamma, lxa,lya,lza,lxb,lyb,lzb);
+        for (int k = 0; k < 3; ++k) {
+            int dnx = (k==0)?1:0, dny = (k==1)?1:0, dnz = (k==2)?1:0;
+            dD_dA[l*3+k] = mpg_dGdA(dnx,dny,dnz,l, Ix,Iy,Iz, IxAlo,IyAlo,IzAlo, IxBlo,IyBlo,IzBlo,
+                                    K, kfA, aa, ab, gamma, lxa,lya,lza,lxb,lyb,lzb);
+        }
+        for (int q = 0; q < 6; ++q)
+            dQ_dA[l*6+q] = mpg_dGdA(qnx[q],qny[q],qnz[q],l, Ix,Iy,Iz, IxAlo,IyAlo,IzAlo,
+                                    IxBlo,IyBlo,IzBlo, K, kfA, aa, ab, gamma, lxa,lya,lza,lxb,lyb,lzb);
+    }
+}
+// Contracted transformed (origin-at-B=jat, traceless) dipole D_out[3] + d(dp_int)/dA_l
+// (dD_dA, flat l*3+k) + d(qp_int)/dA_l (dQ_dA, flat l*6+q). A=iat (row/bra), B=jat (col/ket).
+void cgto_multipole_grad_transformed(int offa, int npa, int offb, int npb,
+    double Ax, double Ay, double Az, double Bx, double By, double Bz, int ta, int tb,
+    out double D_out[3], out double dD_dA[9], out double dQ_dA[18])
+{
+    double S_raw = 0.0lf;
+    double D_raw[3] = double[3](0.0lf,0.0lf,0.0lf);
+    double dSa[3]   = double[3](0.0lf,0.0lf,0.0lf);
+    double dDg[9];  for (int i=0;i<9;++i)  dDg[i] = 0.0lf;
+    double dQg[18]; for (int i=0;i<18;++i) dQg[i] = 0.0lf;
+    for (int i = 0; i < npa; ++i) {
+        double ai = prim_alpha[offa + i], ci = prim_coeff[offa + i];
+        for (int j = 0; j < npb; ++j) {
+            double aj = prim_alpha[offb + j], cc = ci * prim_coeff[offb + j];
+            double S_p; double D_p[3]; double dS_A[3]; double dD_A[9]; double dQ_A[18];
+            primitive_multipole_grad(ai, aj, Ax, Ay, Az, Bx, By, Bz, ta, tb, S_p, D_p, dS_A, dD_A, dQ_A);
+            S_raw += cc * S_p;
+            for (int k=0;k<3;++k) D_raw[k] += cc * D_p[k];
+            for (int l=0;l<3;++l) {
+                dSa[l] += cc * dS_A[l];
+                for (int k=0;k<3;++k) dDg[l*3+k] += cc * dD_A[l*3+k];
+                for (int q=0;q<6;++q) dQg[l*6+q] += cc * dQ_A[l*6+q];
+            }
+        }
+    }
+    double Bv[3] = double[3](Bx, By, Bz);
+    for (int k=0;k<3;++k) D_out[k] = D_raw[k] - Bv[k]*S_raw;
+    for (int l=0;l<3;++l) for (int k=0;k<3;++k) dD_dA[l*3+k] = dDg[l*3+k] - Bv[k]*dSa[l];
+    int qa[6] = int[6](0,0,1,0,1,2), qb[6] = int[6](0,1,1,2,2,2);
+    for (int l=0;l<3;++l) {
+        double dqr[6];
+        for (int q=0;q<6;++q) {
+            int a = qa[q], b = qb[q];
+            dqr[q] = dQg[l*6+q] - Bv[a]*dDg[l*3+b] - Bv[b]*dDg[l*3+a] + Bv[a]*Bv[b]*dSa[l];
+        }
+        double dtr = 0.5lf*(dqr[0] + dqr[2] + dqr[5]);
+        dQ_dA[l*6+0] = 1.5lf*dqr[0] - dtr;
+        dQ_dA[l*6+1] = 1.5lf*dqr[1];
+        dQ_dA[l*6+2] = 1.5lf*dqr[2] - dtr;
+        dQ_dA[l*6+3] = 1.5lf*dqr[3];
+        dQ_dA[l*6+4] = 1.5lf*dqr[4];
+        dQ_dA[l*6+5] = 1.5lf*dqr[5] - dtr;
+    }
+}
+
 void main()
 {
-    uint A = gl_GlobalInvocationID.x;
-    if (A >= pc.nat) return;
+    uint A = pc.base + gl_GlobalInvocationID.x;
+    if (A >= pc.end) return;   // pc.end = min(nat, base+chunk); keeps chunks disjoint
     uint nao = pc.nao;
     int  zi  = z[A];
     double xA = xyz[3*A+0], yA = xyz[3*A+1], zA = xyz[3*A+2];
@@ -166,6 +327,58 @@ void main()
             gAx += sval*dS0 + shp*dxij;
             gAy += sval*dS1 + shp*dyij;
             gAz += sval*dS2 + shp*dzij;
+
+            // GFN2 multipole-integral Pulay term (V-AP4). No FP64 atomics: reproduce the
+            // CUDA-canonical ordered pair (bra = lower-index atom = iat, ket = higher = jat;
+            // dp_int origin = ket atom) and add A's antisymmetric share (+ if A==iat else -).
+            // Verbatim contraction from cuda k_grad_h0_pulay :636-659.
+            if (pc.is_gfn2 != 0u) {
+                double D_mp[3]; double dDdA[9]; double dQdA[18]; double dScan[3]; double dRk[3];
+                double sgn; int viat; int vjat;
+                if (A < uint(jat)) {            // A = iat (bra), foreign jat = ket
+                    cgto_multipole_grad_transformed(offa, npa, sh_prim_off[ishb], sh_nprim[ishb],
+                        xA, yA, zA, xb, yb, zb, ta, tb, D_mp, dDdA, dQdA);
+                    dScan[0]=dS0; dScan[1]=dS1; dScan[2]=dS2;       // dS/dR_iat = dS/dR_A
+                    dRk[0]=xb-xA; dRk[1]=yb-yA; dRk[2]=zb-zA;        // R_jat - R_iat
+                    sgn = 1.0lf; viat = int(A); vjat = jat;
+                } else {                        // A = jat (ket), foreign jat-var = iat (bra)
+                    cgto_multipole_grad_transformed(sh_prim_off[ishb], sh_nprim[ishb], offa, npa,
+                        xb, yb, zb, xA, yA, zA, tb, ta, D_mp, dDdA, dQdA);
+                    cgto_overlap_grad(sh_prim_off[ishb], sh_nprim[ishb], offa, npa,
+                        xb, yb, zb, xA, yA, zA, tb, ta, dScan[0], dScan[1], dScan[2]); // dS/dR_iat=dS/dR_foreign
+                    dRk[0]=xA-xb; dRk[1]=yA-yb; dRk[2]=zA-zb;        // R_jat - R_iat
+                    sgn = -1.0lf; viat = jat; vjat = int(A);
+                }
+                int qa6[6] = int[6](0,0,1,0,1,2), qb6[6] = int[6](0,1,1,2,2,2);
+                double termv[3];
+                for (int l = 0; l < 3; ++l) {
+                    double t = 0.0lf;
+                    for (int k = 0; k < 3; ++k) {
+                        t += dDdA[l*3+k] * v_dp[k + vjat*3];
+                        double dDiat = dDdA[l*3+k] + dRk[k]*dScan[l] - ((k==l) ? Smn : 0.0lf);
+                        t += dDiat * v_dp[k + viat*3];
+                    }
+                    double dqr[6];
+                    for (int q = 0; q < 6; ++q) {
+                        int a = qa6[q], b = qb6[q];
+                        dqr[q] = -((b==l) ? D_mp[a] : 0.0lf) + dRk[b]*dDdA[l*3+a]
+                               -  ((a==l) ? D_mp[b] : 0.0lf) + dRk[a]*dDdA[l*3+b]
+                               + (-((a==l) ? dRk[b] : 0.0lf) - ((b==l) ? dRk[a] : 0.0lf))*Smn
+                               + dRk[a]*dRk[b]*dScan[l];
+                    }
+                    double dtr_c = 0.5lf*(dqr[0] + dqr[2] + dqr[5]);
+                    for (int q = 0; q < 6; ++q) {
+                        bool is_diag = (qa6[q] == qb6[q]);
+                        t += dQdA[l*6+q] * v_qp[q + vjat*6];
+                        double dQiat = dQdA[l*6+q] + 1.5lf*dqr[q] - (is_diag ? dtr_c : 0.0lf);
+                        t += dQiat * v_qp[q + viat*6];
+                    }
+                    termv[l] = t;
+                }
+                gAx += sgn * (-Pmn * termv[0]);
+                gAy += sgn * (-Pmn * termv[1]);
+                gAz += sgn * (-Pmn * termv[2]);
+            }
 
             dEdcnA += (-kcn_a) * (h_factor * Pmn * Smn);
         }

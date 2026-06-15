@@ -1,0 +1,22 @@
+#version 450
+// Back-transform: apply Householder reflector H_k = I − β_k·v_k·v_kᵀ to the eigenvector
+// matrix Z (rows k+1:n), accumulating C = Q·Z = H_0·H_1·…·H_{n-3}·Z. Called for
+// k = n-3 … 0 (reverse order). Per column j:  y = v_kᵀ·Z[k+1:,j];  Z[k+1:,j] -= β·v_k·y.
+// Pure GPU (v/β resident), so the whole back-transform batches into chunked submits.
+// Column-major n×n. One thread per Z column. Claude Generated.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0)          buffer Zb { double Z[]; };
+layout(std430, binding = 1) readonly buffer Vb { double V[]; };      // Householder vectors (col k)
+layout(std430, binding = 2) readonly buffer Bb { double beta[]; };   // β_k per step
+layout(push_constant) uniform PC { uint n; uint k; uint m; } pc;
+
+void main()
+{
+    uint j = gl_GlobalInvocationID.x;
+    if (j >= pc.n) return;
+    uint n = pc.n, base = pc.k + 1u, vc = pc.k * n, col = j * n;
+    double y = 0.0lf;
+    for (uint i = 0u; i < pc.m; ++i) y += V[vc + i] * Z[(base + i) + col];
+    double by = beta[pc.k] * y;
+    for (uint i = 0u; i < pc.m; ++i) Z[(base + i) + col] -= V[vc + i] * by;
+}

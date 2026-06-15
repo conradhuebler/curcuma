@@ -89,6 +89,17 @@ static const uint32_t row_f32_spv[] =
 static const uint32_t vec_f32_spv[] =
 #include "vec_f32.spv.inc"
 ;
+// GPU Householder tridiagonalization eigensolver (replaces the cyclic Jacobi):
+// matvec + symmetric rank-2 trailing-block update + reflector back-transform.
+static const uint32_t tri_matvec_spv[] =
+#include "tri_matvec.spv.inc"
+;
+static const uint32_t tri_rank2_spv[] =
+#include "tri_rank2.spv.inc"
+;
+static const uint32_t tri_applyl_spv[] =
+#include "tri_applyl.spv.inc"
+;
 
 } // namespace shaders
 } // namespace vk

@@ -134,7 +134,10 @@ public:
     // coupling); the host adds the dispersion gradient + CN chain-rule. Per-atom
     // GATHER kernels — no FP64 atomics. Requires a prior beginComputed + resident
     // density. Claude Generated (V-AP1).
+    // V-AP4: for GFN2, v_dp/v_qp (converged multipole potentials, column-major 3×nat /
+    // 6×nat) drive the on-device multipole-integral Pulay term; pass nullptr for GFN1.
     bool gradient(const double* eps, int nocc_orbs, const double* v_ao, const double* q_sh,
+                  const double* v_dp, const double* v_qp,
                   double* grad_out, double* dEdcn_out);
 
     // ---- Device GFN2 multipole integrals (Stage 3m / V-AP2) -----------------

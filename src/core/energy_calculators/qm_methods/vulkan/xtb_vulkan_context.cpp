@@ -29,9 +29,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <numeric>
+#include <string>
 #include <vector>
 
 namespace curcuma {
@@ -45,6 +49,66 @@ struct Buf {
     void*          ptr  = nullptr;
     VkDeviceSize   size = 0;
 };
+
+inline double triPythag(double a, double b) {
+    double aa = std::fabs(a), ab = std::fabs(b);
+    if (aa > ab) { double r = ab / aa; return aa * std::sqrt(1.0 + r * r); }
+    if (ab == 0.0) return 0.0;
+    double r = aa / ab; return ab * std::sqrt(1.0 + r * r);
+}
+inline double triSign(double a, double b) { return (b >= 0.0) ? std::fabs(a) : -std::fabs(a); }
+
+// Symmetric tridiagonal eigensolve (EISPACK tql2, implicit-shift QL) on raw column-major
+// arrays — the CPU half of the GPU Householder eigensolver. diag[n], off[n-1] (off[k]
+// connects rows k,k+1). On success eval[n] is ascending and Zcol[n*n] (column-major) holds
+// the matching tridiagonal eigenvectors. Robust to degeneracies (full rotation accumulation),
+// so no inverse-iteration clustering pitfalls. Ported from native_eigensolver.cpp. Claude Generated.
+inline bool cpuTriEig(int n, const double* diag, const double* off, double* eval, double* Zcol) {
+    std::vector<double> d(diag, diag + n), e(n, 0.0), z((size_t)n * n, 0.0);
+    for (int k = 0; k < n - 1; ++k) e[k + 1] = off[k];
+    for (int i = 0; i < n; ++i) z[i + (size_t)i * n] = 1.0;   // Z = I (column-major)
+    for (int i = 1; i < n; ++i) e[i - 1] = e[i];
+    e[n - 1] = 0.0;
+    for (int l = 0; l < n; ++l) {
+        int iter = 0, m = 0;
+        do {
+            for (m = l; m < n - 1; ++m) {
+                double dd = std::fabs(d[m]) + std::fabs(d[m + 1]);
+                if (std::fabs(e[m]) <= std::numeric_limits<double>::epsilon() * dd) break;
+            }
+            if (m != l) {
+                if (iter++ == 50) return false;
+                double g = (d[l + 1] - d[l]) / (2.0 * e[l]);
+                double r = triPythag(g, 1.0);
+                g = d[m] - d[l] + e[l] / (g + triSign(r, g));
+                double s = 1.0, c = 1.0, p = 0.0;
+                int i = m - 1;
+                for (; i >= l; --i) {
+                    double f = s * e[i], b = c * e[i];
+                    r = triPythag(f, g); e[i + 1] = r;
+                    if (r == 0.0) { d[i + 1] -= p; e[m] = 0.0; break; }
+                    s = f / r; c = g / r; g = d[i + 1] - p;
+                    r = (d[i] - g) * s + 2.0 * c * b; p = s * r; d[i + 1] = g + p; g = c * r - b;
+                    for (int k = 0; k < n; ++k) {
+                        f = z[k + (size_t)(i + 1) * n];
+                        z[k + (size_t)(i + 1) * n] = s * z[k + (size_t)i * n] + c * f;
+                        z[k + (size_t)i * n]       = c * z[k + (size_t)i * n] - s * f;
+                    }
+                }
+                if (r == 0.0 && i >= l) continue;
+                d[l] -= p; e[l] = g; e[m] = 0.0;
+            }
+        } while (m != l);
+    }
+    std::vector<int> idx(n);
+    for (int i = 0; i < n; ++i) idx[i] = i;
+    std::sort(idx.begin(), idx.end(), [&](int a, int b) { return d[a] < d[b]; });
+    for (int j = 0; j < n; ++j) {
+        eval[j] = d[idx[j]];
+        std::memcpy(Zcol + (size_t)j * n, z.data() + (size_t)idx[j] * n, sizeof(double) * n);
+    }
+    return true;
+}
 } // namespace
 
 struct XtbVulkanContext::Impl {
@@ -65,13 +129,22 @@ struct XtbVulkanContext::Impl {
     // X-AP3: FP32 Jacobi (same dsl3 + 12B push as the FP64 Jacobi, so they reuse ploJ).
     VkShaderModule mAng32{}, mCol32{}, mRow32{}, mVec32{};
     VkPipeline pAng32{}, pCol32{}, pRow32{}, pVec32{};
+    // GPU Householder-tridiagonalization eigensolver (replaces the Jacobi). All three
+    // shaders are 3-SSBO + 12B push, so they reuse ploJ. Self-contained buffers + sets.
+    VkShaderModule mTMV{}, mTR2{}, mTAL{};
+    VkPipeline pTMV{}, pTR2{}, pTAL{};
+    int tn = 0;
+    Buf tA, tV, tBeta, tP, tW, tZ;                 // working matrix / Householder vecs / β / praw / w / eigenvectors
+    VkDescriptorPool tPool = VK_NULL_HANDLE;
+    VkDescriptorSet tMV{}, tR2{}, tAL{};
+    bool m_use_tridiag = true;                     // GPU eigensolver: tridiag (default) vs cyclic Jacobi (CURCUMA_VK_EIGEN=jacobi)
     // Stage 3 integral pipelines.
     VkDescriptorSetLayout dsl5 = VK_NULL_HANDLE, dsl18 = VK_NULL_HANDLE;
     VkPipelineLayout ploI4 = VK_NULL_HANDLE, ploI5 = VK_NULL_HANDLE, ploI18 = VK_NULL_HANDLE;
     VkShaderModule mCN{}, mSE{}, mOV{}, mGM{};
     VkPipeline pCN{}, pSE{}, pOV{}, pGM{};
     // Stage 4 gradient pipelines (per-atom gather; no FP64 atomics).
-    VkDescriptorSetLayout dsl24 = VK_NULL_HANDLE;
+    VkDescriptorSetLayout dsl26 = VK_NULL_HANDLE;
     VkPipelineLayout ploGrad5 = VK_NULL_HANDLE, ploGradP = VK_NULL_HANDLE;
     VkShaderModule mGRep{}, mGCoul{}, mGPul{};
     VkPipeline pGRep{}, pGCoul{}, pGPul{};
@@ -140,6 +213,8 @@ struct XtbVulkanContext::Impl {
             auto fl = mp.memoryTypes[i].propertyFlags;
             if ((fl & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && (fl & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) { hostMemType = i; break; }
         }
+        if (const char* em = std::getenv("CURCUMA_VK_EIGEN")) m_use_tridiag = (std::string(em) != "jacobi");
+        if (std::getenv("CURCUMA_VK_TEST_TRIDIAG")) selfTestTridiag();
     }
     ~Impl() { destroy(); }
 
@@ -212,6 +287,11 @@ struct XtbVulkanContext::Impl {
         mRow32 = mod(row_f32_spv, sizeof(row_f32_spv));       mVec32 = mod(vec_f32_spv, sizeof(vec_f32_spv));
         pAng32 = pipe(mAng32, ploJ); pCol32 = pipe(mCol32, ploJ); pRow32 = pipe(mRow32, ploJ); pVec32 = pipe(mVec32, ploJ);
         if (!pAng32 || !pCol32 || !pRow32 || !pVec32) return false;
+        // GPU tridiagonalization eigensolver kernels (reuse ploJ — 3 SSBO + 12B push).
+        mTMV = mod(tri_matvec_spv, sizeof(tri_matvec_spv)); mTR2 = mod(tri_rank2_spv, sizeof(tri_rank2_spv));
+        mTAL = mod(tri_applyl_spv, sizeof(tri_applyl_spv));
+        pTMV = pipe(mTMV, ploJ); pTR2 = pipe(mTR2, ploJ); pTAL = pipe(mTAL, ploJ);
+        if (!pTMV || !pTR2 || !pTAL) return false;
         if (!pAng || !pCol || !pRow || !pVec || !pGemm || !pScale || !pFock || !pPB) return false;
         // Stage 3 integral kernels: cn/gamma use 4 SSBO + 8B push (shared layout), self_energy
         // 5 SSBO + 4B, overlap_h0 18 SSBO + 12B.
@@ -222,10 +302,11 @@ struct XtbVulkanContext::Impl {
         mOV = mod(overlap_h0_spv, sizeof(overlap_h0_spv)); mGM = mod(gamma_spv, sizeof(gamma_spv));
         pCN = pipe(mCN, ploI4); pSE = pipe(mSE, ploI5); pOV = pipe(mOV, ploI18); pGM = pipe(mGM, ploI4);
         if (!pCN || !pSE || !pOV || !pGM) return false;
-        // Stage 4 gradient kernels: rep/coulomb 5 SSBO + 12B push, pulay 24 SSBO + 12B.
-        dsl24 = makeDsl(24);
-        ploGrad5 = makePl(dsl5, 12); ploGradP = makePl(dsl24, 12);
-        if (!dsl24 || !ploGrad5 || !ploGradP) return false;
+        // Stage 4 gradient kernels: rep/coulomb 5 SSBO + 12B push, pulay 26 SSBO + 12B
+        // (24 + v_dp/v_qp at bindings 24/25 for the GFN2 multipole-integral Pulay term, V-AP4).
+        dsl26 = makeDsl(26);
+        ploGrad5 = makePl(dsl5, 12); ploGradP = makePl(dsl26, 20);  // grad_pulay: +base/end (chunked dispatch)
+        if (!dsl26 || !ploGrad5 || !ploGradP) return false;
         mGRep = mod(grad_rep_spv, sizeof(grad_rep_spv));
         mGCoul = mod(grad_coulomb_spv, sizeof(grad_coulomb_spv));
         mGPul = mod(grad_pulay_spv, sizeof(grad_pulay_spv));
@@ -265,6 +346,12 @@ struct XtbVulkanContext::Impl {
     // host n² casts (cheap on shared iGPU memory) and is ~FP32× faster in the sweeps.
     bool solveAtilJacobi(int n, bool fp32, std::vector<double>& mu) {
         mu.resize(n);
+        // GPU Householder tridiagonalization (default): O(n³) reduction in place of the
+        // O(sweeps·n³) cyclic Jacobi. Eigenvectors → rCtil, eigenvalues → mu (ascending;
+        // the resident solve re-sorts via ridx, so any order is fine). FP32 mixed precision
+        // keeps the Jacobi path (the tridiag solve is FP64-only).
+        if (m_use_tridiag && !fp32)
+            return solveSymTridiag((double*)rAtil.ptr, n, mu.data(), (double*)rCtil.ptr);
         const size_t nn = static_cast<size_t>(n) * n;
         if (fp32) {
             const double* Ad = (const double*)rAtil.ptr; float* A32 = (float*)rAtil32.ptr;
@@ -284,11 +371,28 @@ struct XtbVulkanContext::Impl {
         return true;
     }
 
+    // Rounds recorded per command-buffer submission. The whole sweep schedule is
+    // sweeps·rounds ≈ (log2 n + 10)·n rounds, each round costing ~1.5·n² thread
+    // invocations (col/row/vec over the n×npairs grid). Recording ALL of them into a
+    // single command buffer trips the GPU command timeout for large n — a 558-AO
+    // overlap eigensolve is ~44k dispatches and the driver kills it with
+    // VK_ERROR_DEVICE_LOST, which silently dropped GFN1/GFN2 back to the CPU SCF
+    // (the real reason Vulkan was ~8× slower than ROCm on 231-atom `complex`).
+    // Cap the per-submit work to a fixed invocation budget so each submit stays well
+    // under the timeout; the resident A/V/cs buffers persist across submits and each
+    // submit() fully drains the queue, so chunking at round boundaries is exact.
+    // Calibrated against the known-good n=200 single-submit solve (~1.4e8). Claude Generated.
+    int jacobiRoundsPerSubmit(int n) const {
+        const long budget = 60000000L;                 // ~n²·rounds invocation budget / submit
+        return std::max(1, static_cast<int>(budget / (static_cast<long>(n) * n)));
+    }
     bool jacobiDevice(int n, int rounds, int npairs, VkDescriptorSet setA, VkDescriptorSet setV) {
         const int sweeps = static_cast<int>(std::ceil(std::log2(static_cast<double>(std::max(2, n))))) + 10;
-        if (!beginCmd()) return false;
         const uint32_t gx1 = (npairs + 63) / 64, gxn = (n + 7) / 8, gyk = (npairs + 7) / 8;
+        const int rps = jacobiRoundsPerSubmit(n);
+        int since = 0; bool open = false;
         for (int s = 0; s < sweeps; ++s) for (int r = 0; r < rounds; ++r) {
+            if (!open) { if (!beginCmd()) return false; open = true; since = 0; }
             uint32_t pc[3] = { (uint32_t)n, (uint32_t)npairs, (uint32_t)r };
             vkCmdPushConstants(cmd, ploJ, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &setA, 0, nullptr);
@@ -297,16 +401,19 @@ struct XtbVulkanContext::Impl {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pRow); vkCmdDispatch(cmd, gxn, gyk, 1); barrier();
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &setV, 0, nullptr);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pVec); vkCmdDispatch(cmd, gxn, gyk, 1); barrier();
+            if (++since >= rps) { if (!submit()) return false; open = false; }
         }
-        return submit();
+        return open ? submit() : true;
     }
     // X-AP3: identical sweep schedule to jacobiDevice but the FP32 pipelines on FP32
     // buffers (setA = {rAtil32,rPairs,rCs32}, setV = {rCtil32,rPairs,rCs32}).
     bool jacobiDevice32(int n, int rounds, int npairs, VkDescriptorSet setA, VkDescriptorSet setV) {
         const int sweeps = static_cast<int>(std::ceil(std::log2(static_cast<double>(std::max(2, n))))) + 10;
-        if (!beginCmd()) return false;
         const uint32_t gx1 = (npairs + 63) / 64, gxn = (n + 7) / 8, gyk = (npairs + 7) / 8;
+        const int rps = jacobiRoundsPerSubmit(n);
+        int since = 0; bool open = false;
         for (int s = 0; s < sweeps; ++s) for (int r = 0; r < rounds; ++r) {
+            if (!open) { if (!beginCmd()) return false; open = true; since = 0; }
             uint32_t pc[3] = { (uint32_t)n, (uint32_t)npairs, (uint32_t)r };
             vkCmdPushConstants(cmd, ploJ, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &setA, 0, nullptr);
@@ -315,11 +422,121 @@ struct XtbVulkanContext::Impl {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pRow32); vkCmdDispatch(cmd, gxn, gyk, 1); barrier();
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &setV, 0, nullptr);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pVec32); vkCmdDispatch(cmd, gxn, gyk, 1); barrier();
+            if (++since >= rps) { if (!submit()) return false; open = false; }
         }
-        return submit();
+        return open ? submit() : true;
+    }
+
+    // ===== GPU Householder-tridiagonalization symmetric eigensolver =========
+    // Replaces the O(sweeps·n³) cyclic Jacobi with a single O(n³) reduction: the GPU
+    // does the trailing-block matvec (p = A·v) and symmetric rank-2 update per column
+    // (the host computes the length-n Householder vector + reductions directly on the
+    // mapped buffers), the host tql2 solves the n×n tridiagonal, then the GPU applies
+    // the stored reflectors to the tridiagonal eigenvectors (batched). Claude Generated.
+    bool ensureTri(int n) {
+        if (n == tn && tA.buf) return true;
+        if (tPool) { vkDestroyDescriptorPool(dev, tPool, nullptr); tPool = VK_NULL_HANDLE; }
+        for (Buf* b : { &tA, &tV, &tBeta, &tP, &tW, &tZ }) freeBuf(*b);
+        tn = n;
+        const VkDeviceSize NN = sizeof(double) * (size_t)n * n;
+        tA = makeBuf(NN); tV = makeBuf(NN); tZ = makeBuf(NN);
+        tBeta = makeBuf(sizeof(double) * n); tP = makeBuf(sizeof(double) * n); tW = makeBuf(sizeof(double) * n);
+        for (Buf* b : { &tA, &tV, &tBeta, &tP, &tW, &tZ }) if (!b->buf) return false;
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 9 };
+        VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpi.maxSets = 3; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
+        if (vkCreateDescriptorPool(dev, &dpi, nullptr, &tPool) != VK_SUCCESS) return false;
+        tMV = allocSet(tPool, dsl3); tR2 = allocSet(tPool, dsl3); tAL = allocSet(tPool, dsl3);
+        bindSet(tMV, { &tA, &tV, &tP });      // tri_matvec : praw = A_sub·v
+        bindSet(tR2, { &tA, &tV, &tW });      // tri_rank2  : A_sub -= v wᵀ + w vᵀ
+        bindSet(tAL, { &tZ, &tV, &tBeta });   // tri_applyl : Z -= β v (vᵀZ)
+        return true;
+    }
+    // Standard symmetric eigensolve: Ain (column-major n×n) → eps_out ascending, Vout columns.
+    bool solveSymTridiag(const double* Ain, int n, double* eps_out, double* Vout) {
+        if (!ensurePipes() || n <= 0 || !ensureTri(n)) return false;
+        double* A = (double*)tA.ptr;
+        std::memcpy(A, Ain, sizeof(double) * (size_t)n * n);
+        if (n == 1) { eps_out[0] = A[0]; Vout[0] = 1.0; return true; }
+        double* V = (double*)tV.ptr; double* betas = (double*)tBeta.ptr;
+        double* praw = (double*)tP.ptr; double* w = (double*)tW.ptr;
+        std::vector<double> diag(n, 0.0), off(std::max(1, n - 1), 0.0);
+        // Householder reduction: zero column k below the subdiagonal, k = 0 … n-3.
+        for (int k = 0; k < n - 2; ++k) {
+            const int m = n - k - 1;
+            diag[k] = A[k + (size_t)k * n];
+            double* vcol = V + (size_t)k * n;
+            double xnorm2 = 0.0;
+            for (int i = 0; i < m; ++i) { double xi = A[(k + 1 + i) + (size_t)k * n]; vcol[i] = xi; xnorm2 += xi * xi; }
+            const double x0 = vcol[0], xnorm = std::sqrt(xnorm2);
+            if (xnorm == 0.0) { off[k] = 0.0; betas[k] = 0.0; continue; }   // H_k = I
+            const double alpha = (x0 >= 0.0) ? -xnorm : xnorm;
+            off[k] = alpha;
+            vcol[0] = x0 - alpha;
+            const double vtv = xnorm2 - x0 * x0 + vcol[0] * vcol[0];
+            const double beta = (vtv > 0.0) ? 2.0 / vtv : 0.0;
+            betas[k] = beta;
+            uint32_t pc[3] = { (uint32_t)n, (uint32_t)k, (uint32_t)m };
+            if (!dispatch1(pTMV, ploJ, tMV, pc, 12, (uint32_t)(m + 63) / 64, 1)) return false;  // praw = A_sub·v
+            double pdotv = 0.0; for (int i = 0; i < m; ++i) pdotv += praw[i] * vcol[i];
+            const double K = beta * beta * pdotv * 0.5;
+            for (int i = 0; i < m; ++i) w[i] = beta * praw[i] - K * vcol[i];
+            const uint32_t gm = (uint32_t)(m + 7) / 8;
+            if (!dispatch1(pTR2, ploJ, tR2, pc, 12, gm, gm)) return false;                       // A_sub -= v wᵀ + w vᵀ
+        }
+        diag[n - 2] = A[(n - 2) + (size_t)(n - 2) * n];
+        off[n - 2]  = A[(n - 1) + (size_t)(n - 2) * n];
+        diag[n - 1] = A[(n - 1) + (size_t)(n - 1) * n];
+        double* Z = (double*)tZ.ptr;
+        if (!cpuTriEig(n, diag.data(), off.data(), eps_out, Z)) return false;   // tql2 → eps + Z (resident)
+        // Back-transform C = Q·Z = H_0·…·H_{n-3}·Z: apply reflectors k = n-3 … 0, batched
+        // (timeout-safe chunks) since v/β are resident and the dispatches are pure-GPU.
+        const int rps = jacobiRoundsPerSubmit(n);
+        int since = 0; bool open = false;
+        for (int k = n - 3; k >= 0; --k) {
+            if (betas[k] == 0.0) continue;            // H_k = I (degenerate column)
+            const int m = n - k - 1;
+            if (!open) { if (!beginCmd()) return false; open = true; since = 0; }
+            uint32_t pc[3] = { (uint32_t)n, (uint32_t)k, (uint32_t)m };
+            vkCmdPushConstants(cmd, ploJ, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &tAL, 0, nullptr);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pTAL);
+            vkCmdDispatch(cmd, (uint32_t)(n + 63) / 64, 1, 1); barrier();
+            if (++since >= rps) { if (!submit()) return false; open = false; }
+        }
+        if (open && !submit()) return false;
+        std::memcpy(Vout, Z, sizeof(double) * (size_t)n * n);
+        return true;
+    }
+    // Standalone correctness check of solveSymTridiag vs the validated Jacobi (solveSym)
+    // on deterministic random symmetric matrices. Gated by env CURCUMA_VK_TEST_TRIDIAG.
+    void selfTestTridiag() {
+        for (int n : { 4, 17, 64, 128, 558 }) {
+            std::vector<double> A((size_t)n * n);
+            unsigned s = 2463534242u;
+            auto rnd = [&]() { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return ((double)s / 4294967296.0) * 2.0 - 1.0; };
+            for (int j = 0; j < n; ++j) for (int i = j; i < n; ++i) { double v = rnd(); A[i + (size_t)j * n] = v; A[j + (size_t)i * n] = v; }
+            std::vector<double> e1(n), V1((size_t)n * n), e2(n), V2((size_t)n * n);
+            bool ok1 = solveSymTridiag(A.data(), n, e1.data(), V1.data());
+            bool ok2 = solveSym(A.data(), n, e2.data(), V2.data());
+            double maxde = 0.0, maxres = 0.0, maxortho = 0.0;
+            for (int i = 0; i < n && ok1 && ok2; ++i) maxde = std::max(maxde, std::fabs(e1[i] - e2[i]));
+            for (int j = 0; j < n && ok1; ++j)
+                for (int i = 0; i < n; ++i) {
+                    double av = 0.0; for (int k = 0; k < n; ++k) av += A[i + (size_t)k * n] * V1[k + (size_t)j * n];
+                    maxres = std::max(maxres, std::fabs(av - e1[j] * V1[i + (size_t)j * n]));
+                }
+            const int st = std::max(1, n / 8);
+            for (int a = 0; a < n && ok1; a += st) for (int b = 0; b < n; b += st) {
+                double dot = 0.0; for (int k = 0; k < n; ++k) dot += V1[k + (size_t)a * n] * V1[k + (size_t)b * n];
+                maxortho = std::max(maxortho, std::fabs(dot - (a == b ? 1.0 : 0.0)));
+            }
+            fprintf(stderr, "[TRIDIAG-TEST] n=%4d tri_ok=%d jac_ok=%d  max|de|=%.3e  resid=%.3e  ortho=%.3e\n",
+                    n, (int)ok1, (int)ok2, maxde, maxres, maxortho);
+        }
     }
     bool gemmDev(int n, VkDescriptorSet set, uint32_t transB) {
-        if (!beginCmd()) return false; uint32_t pc[2] = { (uint32_t)n, transB }; uint32_t g = (n + 7) / 8;
+        if (!beginCmd()) return false; uint32_t pc[2] = { (uint32_t)n, transB }; uint32_t g = (n + 15) / 16; // 16×16 tiled gemm.comp
         vkCmdPushConstants(cmd, ploG, VK_SHADER_STAGE_COMPUTE_BIT, 0, 8, pc);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploG, 0, 1, &set, 0, nullptr);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm); vkCmdDispatch(cmd, g, g, 1); return submit();
@@ -427,11 +644,21 @@ struct XtbVulkanContext::Impl {
     // Löwdin X = S⁻¹ᐟ² from the resident overlap rS (eigendecompose, X = U·diag(λ⁻¹ᐟ²)·Uᵀ).
     // Shared by residentBegin (host-uploaded S) and beginComputed (device-built S).
     bool buildLowdinX(int n) {
-        std::memcpy(rAtil.ptr, rS.ptr, sizeof(double) * (size_t)n * n);
-        identity(rU, n);
-        if (!jacobiDevice(n, rrounds, rnpairs, sSdA, sSdV)) return false;
-        const double* Ad = (const double*)rAtil.ptr; double* d = (double*)rd.ptr;
-        for (int i = 0; i < n; ++i) { double lam = Ad[i + (size_t)i * n]; d[i] = (lam > 0.0) ? 1.0 / std::sqrt(lam) : 0.0; }
+        double* d = (double*)rd.ptr;
+        if (m_use_tridiag) {
+            // Eigendecompose the resident overlap S (rS) on the GPU via Householder
+            // tridiagonalization; eigenvectors → rU, eigenvalues → rd (order-invariant
+            // for X = U·Λ⁻¹ᐟ²·Uᵀ). Reuse rd as the eigenvalue scratch before squashing.
+            std::vector<double> ev(n);
+            if (!solveSymTridiag((double*)rS.ptr, n, ev.data(), (double*)rU.ptr)) return false;
+            for (int i = 0; i < n; ++i) { double lam = ev[i]; d[i] = (lam > 0.0) ? 1.0 / std::sqrt(lam) : 0.0; }
+        } else {
+            std::memcpy(rAtil.ptr, rS.ptr, sizeof(double) * (size_t)n * n);
+            identity(rU, n);
+            if (!jacobiDevice(n, rrounds, rnpairs, sSdA, sSdV)) return false;
+            const double* Ad = (const double*)rAtil.ptr;
+            for (int i = 0; i < n; ++i) { double lam = Ad[i + (size_t)i * n]; d[i] = (lam > 0.0) ? 1.0 / std::sqrt(lam) : 0.0; }
+        }
         if (!scaleDev(n, sMc)) return false;          // M = U diag(dinv)
         return gemmDev(n, sXg, 1);                     // X = M Uᵀ
     }
@@ -505,20 +732,25 @@ struct XtbVulkanContext::Impl {
             if (gQsh.buf) freeBuf(gQsh);   gQsh  = makeBuf(sizeof(double) * (size_t)bnsh);
             if (gGrad.buf) freeBuf(gGrad); gGrad = makeBuf(sizeof(double) * 3 * (size_t)bnat);
             if (gEdcn.buf) freeBuf(gEdcn); gEdcn = makeBuf(sizeof(double) * (size_t)bnat);
-            gg &= gW.buf && gVao.buf && gQsh.buf && gGrad.buf && gEdcn.buf;
+            // V-AP4: GFN2 multipole potentials for the on-device multipole-integral Pulay term
+            // (grad_pulay bindings 24/25). Allocated for all methods so gSetPul is always valid;
+            // GFN1 never reads them (is_gfn2==0 guard). Reused by the GFN2 multipole SCF below.
+            if (gVdp.buf) freeBuf(gVdp);   gVdp  = makeBuf(sizeof(double) * 3 * (size_t)bnat);
+            if (gVqp.buf) freeBuf(gVqp);   gVqp  = makeBuf(sizeof(double) * 6 * (size_t)bnat);
+            gg &= gW.buf && gVao.buf && gQsh.buf && gGrad.buf && gEdcn.buf && gVdp.buf && gVqp.buf;
             if (gg) {
                 if (gPool) vkDestroyDescriptorPool(dev, gPool, nullptr);
-                VkDescriptorPoolSize ps2{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 + 5 + 24 + 3 };
+                VkDescriptorPoolSize ps2{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 + 5 + 26 + 3 };
                 VkDescriptorPoolCreateInfo dpi2{}; dpi2.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpi2.maxSets = 4; dpi2.poolSizeCount = 1; dpi2.pPoolSizes = &ps2;
                 if (vkCreateDescriptorPool(dev, &dpi2, nullptr, &gPool) == VK_SUCCESS) {
                     gSetRep = allocSet(gPool, dsl5); gSetCoul = allocSet(gPool, dsl5);
-                    gSetPul = allocSet(gPool, dsl24); gSetW = allocSet(gPool, dsl3);
+                    gSetPul = allocSet(gPool, dsl26); gSetW = allocSet(gPool, dsl3);
                     bindSet(gSetRep,  { &bZ, &bXyz, &bRepAlpha, &bRepZeff, &gGrad });
                     bindSet(gSetCoul, { &bSh2at, &bGhard, &gQsh, &bXyz, &gGrad });
                     bindSet(gSetPul,  { &bAo2sh, &bAo2at, &bAng, &bIao, &bShNprim, &bShPrimOff,
                                         &bPrimA, &bPrimC, &bShZeta, &bShpoly, &bKcn, &bValence,
                                         &bZ, &bSE, &bXyz, &rP, &rS, &rH0, &gW, &gVao, &bArad,
-                                        &bPauling, &gGrad, &gEdcn });
+                                        &bPauling, &gGrad, &gEdcn, &gVdp, &gVqp });
                     bindSet(gSetW,    { &rCw, &rC, &gW });   // W = Cw·Cᵀ via gemm (transB=1)
                     grad_ready = true;
                 }
@@ -533,8 +765,10 @@ struct XtbVulkanContext::Impl {
         if (bis_gfn2 && bAo2sh.buf && bAo2at.buf) {
             if (gDpInt.buf) freeBuf(gDpInt); gDpInt = makeBuf(sizeof(double) * 3 * (size_t)bnao * bnao);
             if (gQpInt.buf) freeBuf(gQpInt); gQpInt = makeBuf(sizeof(double) * 6 * (size_t)bnao * bnao);
-            if (gVdp.buf) freeBuf(gVdp);   gVdp  = makeBuf(sizeof(double) * 3 * (size_t)bnat);
-            if (gVqp.buf) freeBuf(gVqp);   gVqp  = makeBuf(sizeof(double) * 6 * (size_t)bnat);
+            // gVdp/gVqp are allocated in the gradient block above (shared with grad_pulay's
+            // multipole-integral Pulay term); allocate here only as a fallback if it was skipped.
+            if (!gVdp.buf) gVdp = makeBuf(sizeof(double) * 3 * (size_t)bnat);
+            if (!gVqp.buf) gVqp = makeBuf(sizeof(double) * 6 * (size_t)bnat);
             if (gDpAt.buf) freeBuf(gDpAt); gDpAt = makeBuf(sizeof(double) * 3 * (size_t)bnat);
             if (gQpAt.buf) freeBuf(gQpAt); gQpAt = makeBuf(sizeof(double) * 6 * (size_t)bnat);
             if (gDpInt.buf && gQpInt.buf && gVdp.buf && gVqp.buf && gDpAt.buf && gQpAt.buf) {
@@ -636,6 +870,7 @@ struct XtbVulkanContext::Impl {
 
     // ----- Stage 4: device nuclear gradient (GFN1 isotropic) --------------
     bool gradient(const double* eps, int nocc_orbs, const double* v_ao, const double* q_sh,
+                  const double* v_dp, const double* v_qp,
                   double* grad_out, double* dEdcn_out) {
         if (!grad_ready || bnao <= 0 || (int)ridx.size() != bnao) return false;
         const int nao = bnao, nat = bnat, nsh = bnsh;
@@ -652,13 +887,34 @@ struct XtbVulkanContext::Impl {
         std::memcpy(gQsh.ptr, q_sh, sizeof(double) * (size_t)nsh);
         std::memset(gGrad.ptr, 0, sizeof(double) * 3 * (size_t)nat);   // accumulated by the 3 kernels
         std::memset(gEdcn.ptr, 0, sizeof(double) * (size_t)nat);
+        // V-AP4: GFN2 multipole potentials drive the multipole-integral Pulay term in grad_pulay
+        // (bindings 24/25). For GFN1 (v_dp/v_qp null) the buffers stay 0 and the shader ignores them.
+        if (bis_gfn2 && v_dp && v_qp && gVdp.ptr && gVqp.ptr) {
+            std::memcpy(gVdp.ptr, v_dp, sizeof(double) * 3 * (size_t)nat);
+            std::memcpy(gVqp.ptr, v_qp, sizeof(double) * 6 * (size_t)nat);
+        }
 
         const uint32_t gxa = (nat + 63) / 64;
         uint32_t pcRC[3] = { (uint32_t)nat, (uint32_t)nsh, (uint32_t)bis_gfn2 };
-        uint32_t pcP[3]  = { (uint32_t)nat, (uint32_t)nao, (uint32_t)bis_gfn2 };
         if (!dispatch1(pGRep,  ploGrad5, gSetRep,  pcRC, 12, gxa, 1)) return false;   // section 1
         if (!dispatch1(pGCoul, ploGrad5, gSetCoul, pcRC, 12, gxa, 1)) return false;   // section 3
-        if (!dispatch1(pGPul,  ploGradP, gSetPul,  pcP,  12, gxa, 1)) return false;   // sections 2a+2b
+        // sections 2a+2b (H0/Pulay + GFN2 multipole-integral Pulay + CN), split into atom
+        // chunks. A one-shot dispatch over a medium molecule exceeds the GPU command-timeout
+        // (~2 s) and is killed mid-flight, yet the fence still signals VK_SUCCESS, so the
+        // gradient comes back silently truncated (rep+coulomb only). Observed on 66-atom
+        // triose: GFN2 always (2.0 s, |grad| error ~0.1) and GFN1 intermittently (nao=200).
+        // The heaviest atom costs ≈4·nao·c (4 AO rows × all foreign AOs); bound chunk·nao so
+        // the worst-case (all-heavy) chunk stays well under the timeout even when the GPU is
+        // throttled / busy (e.g. the extra per-iteration logging at -verbosity 2 pushes a
+        // larger chunk over the edge). 700/nao gives ≈0.2 s/chunk on a Radeon 890M with a
+        // generous margin; clamped to [1, nat]. Chunks are disjoint (each atom written
+        // exactly once), so the result is bit-identical to a single dispatch.
+        const uint32_t chunk = std::max(1u, std::min((uint32_t)nat, 700u / (uint32_t)std::max(1, nao)));
+        for (uint32_t b = 0; b < (uint32_t)nat; b += chunk) {
+            const uint32_t end = std::min(b + chunk, (uint32_t)nat);
+            uint32_t pcP[5] = { (uint32_t)nat, (uint32_t)nao, (uint32_t)bis_gfn2, b, end };
+            if (!dispatch1(pGPul, ploGradP, gSetPul, pcP, 20, (end - b + 63) / 64, 1)) return false;
+        }
 
         std::memcpy(grad_out, gGrad.ptr, sizeof(double) * 3 * (size_t)nat);
         std::memcpy(dEdcn_out, gEdcn.ptr, sizeof(double) * (size_t)nat);
@@ -713,14 +969,15 @@ struct XtbVulkanContext::Impl {
         if (!dev) return;
         if (sPool) vkDestroyDescriptorPool(dev, sPool, nullptr);
         if (rPool) vkDestroyDescriptorPool(dev, rPool, nullptr);
+        if (tPool) vkDestroyDescriptorPool(dev, tPool, nullptr);
         freeBasis();
-        for (Buf* b : { &sA,&sV,&sP,&sC,&rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs,&rAtil32,&rCtil32,&rCs32 }) freeBuf(*b);
+        for (Buf* b : { &sA,&sV,&sP,&sC,&rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs,&rAtil32,&rCtil32,&rCs32,&tA,&tV,&tBeta,&tP,&tW,&tZ }) freeBuf(*b);
         if (fence) vkDestroyFence(dev, fence, nullptr);
-        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul,pMP,pFMP,pMM,pAng32,pCol32,pRow32,pVec32 }) if (p) vkDestroyPipeline(dev, p, nullptr);
-        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul,mMP,mFMP,mMM,mAng32,mCol32,mRow32,mVec32 }) if (m) vkDestroyShaderModule(dev, m, nullptr);
+        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul,pMP,pFMP,pMM,pAng32,pCol32,pRow32,pVec32,pTMV,pTR2,pTAL }) if (p) vkDestroyPipeline(dev, p, nullptr);
+        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul,mMP,mFMP,mMM,mAng32,mCol32,mRow32,mVec32,mTMV,mTR2,mTAL }) if (m) vkDestroyShaderModule(dev, m, nullptr);
         for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB,ploI4,ploI5,ploI18,ploGrad5,ploGradP,ploMP,ploFMP,ploMM }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
-        for (VkDescriptorSetLayout d : { dsl3,dsl4,dsl5,dsl18,dsl24,dsl12,dsl6 }) if (d) vkDestroyDescriptorSetLayout(dev, d, nullptr);
-        sPool = rPool = VK_NULL_HANDLE; fence = VK_NULL_HANDLE; pipes_ready = false;
+        for (VkDescriptorSetLayout d : { dsl3,dsl4,dsl5,dsl18,dsl26,dsl12,dsl6 }) if (d) vkDestroyDescriptorSetLayout(dev, d, nullptr);
+        sPool = rPool = tPool = VK_NULL_HANDLE; fence = VK_NULL_HANDLE; pipes_ready = false;
     }
 };
 
@@ -782,11 +1039,12 @@ bool XtbVulkanContext::downloadGamma(double* gamma_colmajor)
         && m_impl->dlMat(gamma_colmajor, m_impl->bGamma, static_cast<size_t>(m_impl->bnsh) * m_impl->bnsh);
 }
 bool XtbVulkanContext::gradient(const double* eps, int nocc_orbs, const double* v_ao,
-                                const double* q_sh, double* grad_out, double* dEdcn_out)
+                                const double* q_sh, const double* v_dp, const double* v_qp,
+                                double* grad_out, double* dEdcn_out)
 {
     if (!m_impl || !m_impl->vkc.ok() || !eps || !v_ao || !q_sh || !grad_out || !dEdcn_out)
         return false;
-    return m_impl->gradient(eps, nocc_orbs, v_ao, q_sh, grad_out, dEdcn_out);
+    return m_impl->gradient(eps, nocc_orbs, v_ao, q_sh, v_dp, v_qp, grad_out, dEdcn_out);
 }
 bool XtbVulkanContext::beginMultipoleComputed()
 {
