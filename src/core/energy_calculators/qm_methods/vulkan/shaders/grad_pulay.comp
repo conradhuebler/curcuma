@@ -255,21 +255,27 @@ void cgto_multipole_grad_transformed(int offa, int npa, int offb, int npb,
     }
 }
 
+// One WORKGROUP per atom A: the 64 lanes split the inner (foreign-AO nu) loop and a
+// shared-memory reduction sums each atom's force/dEdcn, written once by lane 0 — full
+// GPU occupancy without FP64 atomics (which RADV lacks). Replaces the former
+// one-thread-per-atom gather (1 active lane/dispatch → ~78 ms/atom serial on 558 AOs).
+shared double sgx[64], sgy[64], sgz[64], scn[64];
 void main()
 {
-    uint A = pc.base + gl_GlobalInvocationID.x;
-    if (A >= pc.end) return;   // pc.end = min(nat, base+chunk); keeps chunks disjoint
+    uint A    = pc.base + gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationID.x;           // 0..63
+    if (A >= pc.end) return;   // pc.end = min(nat, base+chunk); A uniform per workgroup
     uint nao = pc.nao;
     int  zi  = z[A];
     double xA = xyz[3*A+0], yA = xyz[3*A+1], zA = xyz[3*A+2];
     double dEdcnA = 0.0lf;
-    double gAx = grad[3*A+0], gAy = grad[3*A+1], gAz = grad[3*A+2];  // accumulate on rep+coulomb
+    double gAx = 0.0lf, gAy = 0.0lf, gAz = 0.0lf;   // per-lane partials (Pulay only)
 
     for (uint mu = 0u; mu < nao; ++mu) {
         if (uint(ao2at[mu]) != A) continue;
         int isha = ao2sh[mu];
-        // section 2a: on-site CN coupling (diagonal density).
-        dEdcnA += (-kcn[isha]) * P[mu + mu * nao];
+        // section 2a: on-site CN coupling (diagonal density) — per-mu, so lane 0 only.
+        if (lane == 0u) dEdcnA += (-kcn[isha]) * P[mu + mu * nao];
         int la = ang[isha];
         int ta = ao_to_type(la, int(mu) - iao_sh[isha]);
         if (ta < 0) continue;
@@ -277,7 +283,7 @@ void main()
         double shp_a = shpoly[isha], se_a = se[isha], zeta_a = sh_zeta[isha];
         double kcn_a = kcn[isha];
 
-        for (uint nu = 0u; nu < nao; ++nu) {
+        for (uint nu = lane; nu < nao; nu += 64u) {
             int jat = ao2at[nu];
             if (uint(jat) == A) continue;            // foreign AO only
             int ishb = ao2sh[nu];
@@ -383,6 +389,20 @@ void main()
             dEdcnA += (-kcn_a) * (h_factor * Pmn * Smn);
         }
     }
-    grad[3*A+0] = gAx; grad[3*A+1] = gAy; grad[3*A+2] = gAz;
-    dEdcn[A] = dEdcnA;
+    // Reduce the 64 per-lane partials, then lane 0 writes once. grad[] already holds the
+    // rep+coulomb contribution (separate dispatches), so the Pulay sum is ADDED; dEdcn[]
+    // is owned solely by this kernel, so it is overwritten.
+    sgx[lane] = gAx; sgy[lane] = gAy; sgz[lane] = gAz; scn[lane] = dEdcnA;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1u) {
+        if (lane < s) {
+            sgx[lane] += sgx[lane + s]; sgy[lane] += sgy[lane + s];
+            sgz[lane] += sgz[lane + s]; scn[lane] += scn[lane + s];
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        grad[3*A+0] += sgx[0]; grad[3*A+1] += sgy[0]; grad[3*A+2] += sgz[0];
+        dEdcn[A] = scn[0];
+    }
 }

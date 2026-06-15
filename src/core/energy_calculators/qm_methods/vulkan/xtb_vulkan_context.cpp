@@ -898,22 +898,20 @@ struct XtbVulkanContext::Impl {
         uint32_t pcRC[3] = { (uint32_t)nat, (uint32_t)nsh, (uint32_t)bis_gfn2 };
         if (!dispatch1(pGRep,  ploGrad5, gSetRep,  pcRC, 12, gxa, 1)) return false;   // section 1
         if (!dispatch1(pGCoul, ploGrad5, gSetCoul, pcRC, 12, gxa, 1)) return false;   // section 3
-        // sections 2a+2b (H0/Pulay + GFN2 multipole-integral Pulay + CN), split into atom
-        // chunks. A one-shot dispatch over a medium molecule exceeds the GPU command-timeout
-        // (~2 s) and is killed mid-flight, yet the fence still signals VK_SUCCESS, so the
-        // gradient comes back silently truncated (rep+coulomb only). Observed on 66-atom
-        // triose: GFN2 always (2.0 s, |grad| error ~0.1) and GFN1 intermittently (nao=200).
-        // The heaviest atom costs ≈4·nao·c (4 AO rows × all foreign AOs); bound chunk·nao so
-        // the worst-case (all-heavy) chunk stays well under the timeout even when the GPU is
-        // throttled / busy (e.g. the extra per-iteration logging at -verbosity 2 pushes a
-        // larger chunk over the edge). 700/nao gives ≈0.2 s/chunk on a Radeon 890M with a
-        // generous margin; clamped to [1, nat]. Chunks are disjoint (each atom written
-        // exactly once), so the result is bit-identical to a single dispatch.
-        const uint32_t chunk = std::max(1u, std::min((uint32_t)nat, 700u / (uint32_t)std::max(1, nao)));
+        // sections 2a+2b (H0/Pulay + GFN2 multipole-integral Pulay + CN): grad_pulay runs
+        // ONE WORKGROUP (64 lanes) per atom, so the dispatch is `end-base` workgroups (not
+        // /64) and each atom's heavy O(nao·nprim²) inner loop is 64-way parallel + reduced.
+        // Still chunked for the GPU command-timeout (~2 s): a one-shot dispatch over a large
+        // molecule is killed mid-flight yet the fence still signals VK_SUCCESS → silently
+        // truncated gradient. With the 64× lane parallelism the per-atom cost dropped ~64×,
+        // so the chunk·nao budget grows accordingly (≈32000 vs the old 700, ≈0.2 s/chunk on
+        // a Radeon 890M with margin). Chunks are disjoint (each atom written once), so the
+        // result is identical to a single dispatch.
+        const uint32_t chunk = std::max(1u, std::min((uint32_t)nat, 32000u / (uint32_t)std::max(1, nao)));
         for (uint32_t b = 0; b < (uint32_t)nat; b += chunk) {
             const uint32_t end = std::min(b + chunk, (uint32_t)nat);
             uint32_t pcP[5] = { (uint32_t)nat, (uint32_t)nao, (uint32_t)bis_gfn2, b, end };
-            if (!dispatch1(pGPul, ploGradP, gSetPul, pcP, 20, (end - b + 63) / 64, 1)) return false;
+            if (!dispatch1(pGPul, ploGradP, gSetPul, pcP, 20, end - b, 1)) return false;
         }
 
         std::memcpy(grad_out, gGrad.ptr, sizeof(double) * 3 * (size_t)nat);

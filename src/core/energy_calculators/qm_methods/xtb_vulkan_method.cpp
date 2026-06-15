@@ -140,16 +140,14 @@ public:
     {
         (void)P; (void)C; (void)pc_resident;
         if (!m_ctx || m_nat <= 0) return false;
-        // GFN1: v_dp/v_qp empty (isotropic) — runs on the device (Stage 4).
-        // GFN2 (V-AP4 WIP): the on-device multipole-integral Pulay term (grad_pulay) is
-        // correct but the per-atom gather + Obara-Saika derivative is far slower than the
-        // host gradient on this iGPU (231-atom complex: ~28 s device vs ~0.7 s host vs
-        // ~0.04 s ROCm), so — matching ROCm, which keeps the GFN2 gradient on the host —
-        // the device GFN2 gradient is opt-in (CURCUMA_VK_GFN2_GPUGRAD=1) and OFF by default;
-        // returning false routes GFN2 to the validated host gradient. Claude Generated.
+        // GFN1: v_dp/v_qp empty (isotropic). GFN2: non-empty v_dp/v_qp drive the on-device
+        // multipole-integral Pulay term (grad_pulay). Both run on the device by default —
+        // the workgroup-per-atom grad_pulay (V-AP6) made it fast (231-atom complex: GFN2
+        // 28 s → 81 ms, GFN1 18 s → 98 ms), so it now beats the host gradient. Escape hatch
+        // CURCUMA_VK_GFN2_CPUGRAD=1 forces the validated host gradient for GFN2. Claude Generated.
         const bool is_gfn2 = v_dp.size() > 0;
-        static const bool gfn2_gpu_grad = std::getenv("CURCUMA_VK_GFN2_GPUGRAD") != nullptr;
-        if (is_gfn2 && !gfn2_gpu_grad) return false;
+        static const bool gfn2_cpu_grad = std::getenv("CURCUMA_VK_GFN2_CPUGRAD") != nullptr;
+        if (is_gfn2 && gfn2_cpu_grad) return false;
         const double* vdp = v_dp.size() > 0 ? v_dp.data() : nullptr;
         const double* vqp = v_qp.size() > 0 ? v_qp.data() : nullptr;
         std::vector<double> grad(3 * static_cast<size_t>(m_nat), 0.0), dEdcn(m_nat, 0.0);
