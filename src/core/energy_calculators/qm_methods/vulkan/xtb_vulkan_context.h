@@ -101,7 +101,7 @@ public:
 
     /// One SCF step: F = H0 − ½·S·(v_ao⊕v_ao), Ã = X·F·X, eigensolve, C = X·C̃
     /// (resident). Writes the ascending eigenvalues to eps_out (length n).
-    bool residentSolve(const double* v_ao, double* eps_out);
+    bool residentSolve(const double* v_ao, double* eps_out, bool fp32 = false);
 
     /// Build the density P = C·diag(occ)·Cᵀ over the leading ncol (ascending-eps)
     /// columns from the resident C; return Mulliken AO populations pop_ao(μ) =
@@ -152,7 +152,7 @@ public:
     // Löwdin reduction + Jacobi eigensolve as the GFN1 resident solve. Only v_ao (nao) +
     // v_dp (3·nat) / v_qp (6·nat) cross up; eps (nao) down. multipoleMoments: atomic
     // dp_at (3·nat) / qp_at (6·nat) from the resident density. Requires beginMultipoleComputed.
-    bool solveMultipole(const double* v_ao, const double* v_dp, const double* v_qp, double* eps_out);
+    bool solveMultipole(const double* v_ao, const double* v_dp, const double* v_qp, double* eps_out, bool fp32 = false);
     bool multipoleMoments(double* dp_at, double* qp_at);
 
 private:

@@ -180,9 +180,17 @@ On an **AMD Radeon 890M (RADV, integrated, shaderFloat64)**, build `release_vulk
   on the 231-atom `complex` (gfn2 16.0 s vs 12.4 s SCF; gfn1 20.2 s vs 15.4 s) — the FP64
   two-sided Jacobi eigensolve dominates and the iGPU runs FP64 at ~1/16 of FP32. The removed
   per-iteration transfers are cheap shared-memory copies on an iGPU (not PCIe), so residency
-  is a correctness/architecture milestone here, not a speed-up. The speed lever is an **FP32
-  mixed-precision eigensolve** (`-scf_mixed_precision` is already plumbed; the Vulkan `fp32`
-  path is the missing piece — see SQM_GPU_ROADMAP.md X-AP3).
+  is a correctness/architecture milestone here, not a speed-up.
+- **FP32 mixed precision (X-AP3) — implemented, opt-in, but does NOT help Vulkan**: FP32
+  variants of the Jacobi shaders (`angles_f32`/`col_f32`/`row_f32`/`vec_f32`) + FP32 work
+  buffers exist and are correct (energy matches CPU), but measured **net-neutral to
+  net-negative** on the 890M: the cyclic Jacobi is dispatch/barrier/bandwidth-bound, not
+  FP64-arithmetic-bound, so FP32 is ~equal per iteration (`complex` GFN2: FP32 828 vs FP64
+  844 ms/iter) and the perturbed early iterations can cost an extra SCF cycle (GFN1 14→15),
+  making it slower. So mixed precision is **NOT defaulted on for `-gpu vulkan`** (unlike
+  ROCm/CUDA); the FP32 path is a documented opt-in (`-scf_mixed_precision true`). The real
+  Vulkan lever is a faster **eigensolve algorithm** (blocked/one-sided Jacobi or a
+  divide-and-conquer port), not precision. See SQM_GPU_ROADMAP.md X-AP3.
 - Default non-Vulkan `release/` build stays green (cli_curcumaopt_*/cli_rmsd_* 11/11).
 
 What was **NOT** tested: large systems (>~100 nao; the iGPU FP64 Jacobi is slow — this is a

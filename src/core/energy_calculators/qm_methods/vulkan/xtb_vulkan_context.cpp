@@ -62,6 +62,9 @@ struct XtbVulkanContext::Impl {
                      ploF = VK_NULL_HANDLE, ploPB = VK_NULL_HANDLE;
     VkShaderModule mAng{}, mCol{}, mRow{}, mVec{}, mGemm{}, mScale{}, mFock{}, mPB{};
     VkPipeline pAng{}, pCol{}, pRow{}, pVec{}, pGemm{}, pScale{}, pFock{}, pPB{};
+    // X-AP3: FP32 Jacobi (same dsl3 + 12B push as the FP64 Jacobi, so they reuse ploJ).
+    VkShaderModule mAng32{}, mCol32{}, mRow32{}, mVec32{};
+    VkPipeline pAng32{}, pCol32{}, pRow32{}, pVec32{};
     // Stage 3 integral pipelines.
     VkDescriptorSetLayout dsl5 = VK_NULL_HANDLE, dsl18 = VK_NULL_HANDLE;
     VkPipelineLayout ploI4 = VK_NULL_HANDLE, ploI5 = VK_NULL_HANDLE, ploI18 = VK_NULL_HANDLE;
@@ -95,8 +98,11 @@ struct XtbVulkanContext::Impl {
     // Resident SCF (Stage 2) cache.
     int rn = 0, rrounds = 0, rnpairs = 0;
     Buf rH0, rS, rX, rF, rT, rAtil, rU, rM, rCtil, rC, rCw, rP, rd, rv, rPB, rPairs, rCs;
+    // X-AP3: FP32 Jacobi work buffers (Ã / eigenvectors / cos-sin); pairs reuse rPairs.
+    Buf rAtil32, rCtil32, rCs32;
     VkDescriptorPool rPool = VK_NULL_HANDLE;
     VkDescriptorSet sSdA{}, sSdV{}, sMc{}, sXg{}, sFk{}, sTg{}, sAtg{}, sAtA{}, sCtV{}, sCg{}, sCwS{}, sPg{}, sPBs{};
+    VkDescriptorSet sAtA32{}, sCtV32{};   // FP32 Jacobi: {rAtil32,rPairs,rCs32} / {rCtil32,rPairs,rCs32}
     std::vector<int> ridx;   // ascending-eps permutation from the last residentSolve
 
     // Stage 3 integral build: molecule-constant basis + per-geometry scratch + sets.
@@ -201,6 +207,11 @@ struct XtbVulkanContext::Impl {
         mFock = mod(fock_spv, sizeof(fock_spv));     mPB = mod(popband_spv, sizeof(popband_spv));
         pAng = pipe(mAng, ploJ); pCol = pipe(mCol, ploJ); pRow = pipe(mRow, ploJ); pVec = pipe(mVec, ploJ);
         pGemm = pipe(mGemm, ploG); pScale = pipe(mScale, ploS); pFock = pipe(mFock, ploF); pPB = pipe(mPB, ploPB);
+        // X-AP3 FP32 Jacobi (reuse ploJ — same dsl3 + 12B push).
+        mAng32 = mod(angles_f32_spv, sizeof(angles_f32_spv)); mCol32 = mod(col_f32_spv, sizeof(col_f32_spv));
+        mRow32 = mod(row_f32_spv, sizeof(row_f32_spv));       mVec32 = mod(vec_f32_spv, sizeof(vec_f32_spv));
+        pAng32 = pipe(mAng32, ploJ); pCol32 = pipe(mCol32, ploJ); pRow32 = pipe(mRow32, ploJ); pVec32 = pipe(mVec32, ploJ);
+        if (!pAng32 || !pCol32 || !pRow32 || !pVec32) return false;
         if (!pAng || !pCol || !pRow || !pVec || !pGemm || !pScale || !pFock || !pPB) return false;
         // Stage 3 integral kernels: cn/gamma use 4 SSBO + 8B push (shared layout), self_energy
         // 5 SSBO + 4B, overlap_h0 18 SSBO + 12B.
@@ -246,6 +257,32 @@ struct XtbVulkanContext::Impl {
     bool submit() { if (vkEndCommandBuffer(cmd) != VK_SUCCESS) return false; vkResetFences(dev, 1, &fence); VkSubmitInfo si{}; si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO; si.commandBufferCount = 1; si.pCommandBuffers = &cmd; if (vkQueueSubmit(queue, 1, &si, fence) != VK_SUCCESS) return false; return vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS; }
 
     void identity(Buf& b, int n) { std::memset(b.ptr, 0, sizeof(double) * static_cast<size_t>(n) * n); double* d = static_cast<double*>(b.ptr); for (int i = 0; i < n; ++i) d[i + static_cast<size_t>(i) * n] = 1.0; }
+    void identity32(Buf& b, int n) { std::memset(b.ptr, 0, sizeof(float) * static_cast<size_t>(n) * n); float* d = static_cast<float*>(b.ptr); for (int i = 0; i < n; ++i) d[i + static_cast<size_t>(i) * n] = 1.0f; }
+
+    // X-AP3: eigensolve the resident Ã (in rAtil, FP64) — in FP64 (jacobiDevice) or, when
+    // fp32, in FP32 (jacobiDevice32 on rAtil32). Either way the eigenvectors C̃ end up in
+    // rCtil (FP64, for the C = X·C̃ gemm) and mu holds the eigenvalues. The FP32 path adds two
+    // host n² casts (cheap on shared iGPU memory) and is ~FP32× faster in the sweeps.
+    bool solveAtilJacobi(int n, bool fp32, std::vector<double>& mu) {
+        mu.resize(n);
+        const size_t nn = static_cast<size_t>(n) * n;
+        if (fp32) {
+            const double* Ad = (const double*)rAtil.ptr; float* A32 = (float*)rAtil32.ptr;
+            for (size_t i = 0; i < nn; ++i) A32[i] = static_cast<float>(Ad[i]);   // Ã → FP32
+            identity32(rCtil32, n);
+            if (!jacobiDevice32(n, rrounds, rnpairs, sAtA32, sCtV32)) return false;
+            const float* C32 = (const float*)rCtil32.ptr; double* Cd = (double*)rCtil.ptr;
+            for (size_t i = 0; i < nn; ++i) Cd[i] = static_cast<double>(C32[i]);   // C̃ → FP64
+            const float* A32d = (const float*)rAtil32.ptr;
+            for (int i = 0; i < n; ++i) mu[i] = static_cast<double>(A32d[i + (size_t)i * n]);
+        } else {
+            identity(rCtil, n);
+            if (!jacobiDevice(n, rrounds, rnpairs, sAtA, sCtV)) return false;
+            const double* Ad = (const double*)rAtil.ptr;
+            for (int i = 0; i < n; ++i) mu[i] = Ad[i + (size_t)i * n];
+        }
+        return true;
+    }
 
     bool jacobiDevice(int n, int rounds, int npairs, VkDescriptorSet setA, VkDescriptorSet setV) {
         const int sweeps = static_cast<int>(std::ceil(std::log2(static_cast<double>(std::max(2, n))))) + 10;
@@ -260,6 +297,24 @@ struct XtbVulkanContext::Impl {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pRow); vkCmdDispatch(cmd, gxn, gyk, 1); barrier();
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &setV, 0, nullptr);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pVec); vkCmdDispatch(cmd, gxn, gyk, 1); barrier();
+        }
+        return submit();
+    }
+    // X-AP3: identical sweep schedule to jacobiDevice but the FP32 pipelines on FP32
+    // buffers (setA = {rAtil32,rPairs,rCs32}, setV = {rCtil32,rPairs,rCs32}).
+    bool jacobiDevice32(int n, int rounds, int npairs, VkDescriptorSet setA, VkDescriptorSet setV) {
+        const int sweeps = static_cast<int>(std::ceil(std::log2(static_cast<double>(std::max(2, n))))) + 10;
+        if (!beginCmd()) return false;
+        const uint32_t gx1 = (npairs + 63) / 64, gxn = (n + 7) / 8, gyk = (npairs + 7) / 8;
+        for (int s = 0; s < sweeps; ++s) for (int r = 0; r < rounds; ++r) {
+            uint32_t pc[3] = { (uint32_t)n, (uint32_t)npairs, (uint32_t)r };
+            vkCmdPushConstants(cmd, ploJ, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &setA, 0, nullptr);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pAng32); vkCmdDispatch(cmd, gx1, 1, 1); barrier();
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pCol32); vkCmdDispatch(cmd, gxn, gyk, 1); barrier();
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pRow32); vkCmdDispatch(cmd, gxn, gyk, 1); barrier();
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &setV, 0, nullptr);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pVec32); vkCmdDispatch(cmd, gxn, gyk, 1); barrier();
         }
         return submit();
     }
@@ -331,7 +386,7 @@ struct XtbVulkanContext::Impl {
     bool allocResident(int n) {
         if (n == rn && rH0.buf) return true;
         if (rPool) { vkDestroyDescriptorPool(dev, rPool, nullptr); rPool = VK_NULL_HANDLE; }
-        for (Buf* b : { &rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs }) freeBuf(*b);
+        for (Buf* b : { &rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs,&rAtil32,&rCtil32,&rCs32 }) freeBuf(*b);
         rn = n; std::vector<int> sched; buildSchedule(n, rrounds, rnpairs, sched);
         const VkDeviceSize NN = sizeof(double) * (size_t)n * n;
         rH0 = makeBuf(NN); rS = makeBuf(NN); rX = makeBuf(NN); rF = makeBuf(NN); rT = makeBuf(NN);
@@ -339,10 +394,12 @@ struct XtbVulkanContext::Impl {
         rCw = makeBuf(NN); rP = makeBuf(NN);
         rd = makeBuf(sizeof(double) * n); rv = makeBuf(sizeof(double) * n); rPB = makeBuf(sizeof(double) * 2 * n);
         rPairs = makeBuf(sizeof(int) * sched.size()); rCs = makeBuf(sizeof(double) * (size_t)rnpairs * 2);
-        for (Buf* b : { &rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs }) if (!b->buf) return false;
+        rAtil32 = makeBuf(sizeof(float) * (size_t)n * n); rCtil32 = makeBuf(sizeof(float) * (size_t)n * n);
+        rCs32 = makeBuf(sizeof(float) * (size_t)rnpairs * 2);
+        for (Buf* b : { &rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs,&rAtil32,&rCtil32,&rCs32 }) if (!b->buf) return false;
         std::memcpy(rPairs.ptr, sched.data(), sizeof(int) * sched.size());
-        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 64 };
-        VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpi.maxSets = 16; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 80 };
+        VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpi.maxSets = 18; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
         if (vkCreateDescriptorPool(dev, &dpi, nullptr, &rPool) != VK_SUCCESS) return false;
         sSdA = allocSet(rPool, dsl3); sSdV = allocSet(rPool, dsl3); sMc = allocSet(rPool, dsl3); sXg = allocSet(rPool, dsl3);
         sFk = allocSet(rPool, dsl4); sTg = allocSet(rPool, dsl3); sAtg = allocSet(rPool, dsl3); sAtA = allocSet(rPool, dsl3);
@@ -360,6 +417,10 @@ struct XtbVulkanContext::Impl {
         bindSet(sCwS, { &rC, &rd, &rCw });           // Cw = C diag(occ)
         bindSet(sPg,  { &rCw, &rC, &rP });           // P = Cw Cᵀ
         bindSet(sPBs, { &rP, &rS, &rH0, &rPB });     // pop/band
+        // X-AP3 FP32 Jacobi sets (eigensolve of Ã in FP32; pairs shared with FP64).
+        sAtA32 = allocSet(rPool, dsl3); sCtV32 = allocSet(rPool, dsl3);
+        bindSet(sAtA32, { &rAtil32, &rPairs, &rCs32 });
+        bindSet(sCtV32, { &rCtil32, &rPairs, &rCs32 });
         return true;
     }
 
@@ -537,17 +598,15 @@ struct XtbVulkanContext::Impl {
         basis_ready = false;
     }
 
-    bool residentSolve(const double* v_ao, double* eps_out) {
+    bool residentSolve(const double* v_ao, double* eps_out, bool fp32) {
         const int n = rn; if (n <= 0) return false;
         std::memcpy(rv.ptr, v_ao, sizeof(double) * n);
         if (!fockDev(n, sFk)) return false;            // F = H0 - ½ S (v⊕v)
         if (!gemmDev(n, sTg, 0)) return false;         // T = X F
         if (!gemmDev(n, sAtg, 0)) return false;        // Ã = T X
-        identity(rCtil, n);
-        if (!jacobiDevice(n, rrounds, rnpairs, sAtA, sCtV)) return false;  // eigensolve Ã
+        std::vector<double> mu;
+        if (!solveAtilJacobi(n, fp32, mu)) return false;  // eigensolve Ã → C̃ in rCtil, mu
         if (!gemmDev(n, sCg, 0)) return false;         // C = X C̃ (resident, Jacobi order)
-        const double* Ad = (const double*)rAtil.ptr; std::vector<double> mu(n);
-        for (int i = 0; i < n; ++i) mu[i] = Ad[i + (size_t)i * n];
         ridx.resize(n); std::iota(ridx.begin(), ridx.end(), 0);
         std::sort(ridx.begin(), ridx.end(), [&](int a, int b) { return mu[a] < mu[b]; });
         for (int r = 0; r < n; ++r) eps_out[r] = mu[ridx[r]];
@@ -622,7 +681,7 @@ struct XtbVulkanContext::Impl {
 
     // One resident SCF step with the GFN2 anisotropic Fock term: F = H0 − ½S(v⊕v), then
     // F −= ½·multipole(v_dp,v_qp); Ã = X·F·X; Jacobi; C = X·C̃. Same shape as residentSolve.
-    bool residentSolveMP(const double* v_ao, const double* v_dp, const double* v_qp, double* eps_out) {
+    bool residentSolveMP(const double* v_ao, const double* v_dp, const double* v_qp, double* eps_out, bool fp32) {
         const int n = rn; if (n <= 0 || !beginResidentMP()) return false;
         std::memcpy(rv.ptr,   v_ao, sizeof(double) * n);
         std::memcpy(gVdp.ptr, v_dp, sizeof(double) * 3 * (size_t)bnat);
@@ -632,11 +691,9 @@ struct XtbVulkanContext::Impl {
         if (!dispatch1(pFMP, ploFMP, gSetFMP, pcF, 4, g, g)) return false;     // rF −= ½ multipole
         if (!gemmDev(n, sTg, 0)) return false;                                 // T = X F
         if (!gemmDev(n, sAtg, 0)) return false;                                // Ã = T X
-        identity(rCtil, n);
-        if (!jacobiDevice(n, rrounds, rnpairs, sAtA, sCtV)) return false;      // eigensolve Ã
+        std::vector<double> mu;
+        if (!solveAtilJacobi(n, fp32, mu)) return false;                       // eigensolve Ã → rCtil, mu
         if (!gemmDev(n, sCg, 0)) return false;                                 // C = X C̃
-        const double* Ad = (const double*)rAtil.ptr; std::vector<double> mu(n);
-        for (int i = 0; i < n; ++i) mu[i] = Ad[i + (size_t)i * n];
         ridx.resize(n); std::iota(ridx.begin(), ridx.end(), 0);
         std::sort(ridx.begin(), ridx.end(), [&](int a, int b) { return mu[a] < mu[b]; });
         for (int r = 0; r < n; ++r) eps_out[r] = mu[ridx[r]];
@@ -657,10 +714,10 @@ struct XtbVulkanContext::Impl {
         if (sPool) vkDestroyDescriptorPool(dev, sPool, nullptr);
         if (rPool) vkDestroyDescriptorPool(dev, rPool, nullptr);
         freeBasis();
-        for (Buf* b : { &sA,&sV,&sP,&sC,&rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs }) freeBuf(*b);
+        for (Buf* b : { &sA,&sV,&sP,&sC,&rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs,&rAtil32,&rCtil32,&rCs32 }) freeBuf(*b);
         if (fence) vkDestroyFence(dev, fence, nullptr);
-        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul,pMP,pFMP,pMM }) if (p) vkDestroyPipeline(dev, p, nullptr);
-        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul,mMP,mFMP,mMM }) if (m) vkDestroyShaderModule(dev, m, nullptr);
+        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul,pMP,pFMP,pMM,pAng32,pCol32,pRow32,pVec32 }) if (p) vkDestroyPipeline(dev, p, nullptr);
+        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul,mMP,mFMP,mMM,mAng32,mCol32,mRow32,mVec32 }) if (m) vkDestroyShaderModule(dev, m, nullptr);
         for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB,ploI4,ploI5,ploI18,ploGrad5,ploGradP,ploMP,ploFMP,ploMM }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
         for (VkDescriptorSetLayout d : { dsl3,dsl4,dsl5,dsl18,dsl24,dsl12,dsl6 }) if (d) vkDestroyDescriptorSetLayout(dev, d, nullptr);
         sPool = rPool = VK_NULL_HANDLE; fence = VK_NULL_HANDLE; pipes_ready = false;
@@ -685,10 +742,10 @@ bool XtbVulkanContext::residentBegin(const double* H0, const double* S, int n)
     if (!m_impl || !m_impl->vkc.ok() || n <= 0 || !H0 || !S) return false;
     return m_impl->residentBegin(H0, S, n);
 }
-bool XtbVulkanContext::residentSolve(const double* v_ao, double* eps_out)
+bool XtbVulkanContext::residentSolve(const double* v_ao, double* eps_out, bool fp32)
 {
     if (!m_impl || !m_impl->vkc.ok() || !v_ao || !eps_out) return false;
-    return m_impl->residentSolve(v_ao, eps_out);
+    return m_impl->residentSolve(v_ao, eps_out, fp32);
 }
 bool XtbVulkanContext::residentDensity(const double* occ, int ncol, double* pop_ao, double* band)
 {
@@ -741,10 +798,10 @@ bool XtbVulkanContext::downloadMultipole(double* dp_int3, double* qp_int6)
     return m_impl->downloadMP(dp_int3, qp_int6);
 }
 bool XtbVulkanContext::solveMultipole(const double* v_ao, const double* v_dp,
-                                      const double* v_qp, double* eps_out)
+                                      const double* v_qp, double* eps_out, bool fp32)
 {
     if (!m_impl || !m_impl->vkc.ok() || !v_ao || !v_dp || !v_qp || !eps_out) return false;
-    return m_impl->residentSolveMP(v_ao, v_dp, v_qp, eps_out);
+    return m_impl->residentSolveMP(v_ao, v_dp, v_qp, eps_out, fp32);
 }
 bool XtbVulkanContext::multipoleMoments(double* dp_at, double* qp_at)
 {

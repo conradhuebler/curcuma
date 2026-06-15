@@ -10,9 +10,14 @@
 > anisotropic dp/qp term via `k_add_fock_multipole`), the rocSOLVER eigensolve, density and
 > the atomic multipole moments (`k_multipole_moments`) run on the device; only `v_dp`/`v_qp`
 > up + eps/moments down per iteration. The potential + GFN2 gradient stay on the host.
-> Energies + gradient + the `-opt` trajectory match the CPU (AMD 890M / gfx1150). **Honest:
-> not a speed-up on this iGPU** — the FP64 eigensolve dominates (FP32 mixed precision is the
-> lever; see SQM_GPU_ROADMAP.md X-AP3).
+> Energies + gradient + the `-opt` trajectory match the CPU (AMD 890M / gfx1150).
+> **FP32 mixed precision (X-AP3) is ON by default for `-gpu rocm`** and is a real win:
+> far-from-convergence iterations use `rocsolver_ssygvd` (FP32), reverting to FP64 near
+> convergence. On `complex` (231 atoms) the resident path is already ~6-8× the CPU
+> (rocSOLVER is mature), and FP32 adds **GFN1 1.44× (1844→1281 ms), GFN2 1.27× (1924→1510
+> ms)** on top. Energies bit-identical; the gradient at the loose default `scf_threshold`
+> (1e-5) differs ~1e-7 from CPU (use `-scf_threshold 1e-8` for bit-identical gradients, or
+> `-scf_mixed_precision false` to disable). See SQM_GPU_ROADMAP.md X-AP3.
 
 ## What it is
 

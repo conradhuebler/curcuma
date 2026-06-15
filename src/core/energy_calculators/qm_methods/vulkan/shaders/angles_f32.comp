@@ -1,0 +1,34 @@
+#version 450
+// Two-sided Jacobi: compute (c,s) for each pair (p,q) of the current round.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Abuf  { float A[]; };
+layout(std430, binding = 1) readonly  buffer Pbuf  { int    pairs[]; };
+layout(std430, binding = 2) writeonly buffer CSbuf { float cs[]; };
+layout(push_constant) uniform PC { uint n; uint npairs; uint round; } pc;
+
+void main()
+{
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= pc.npairs) return;
+
+    uint base = (pc.round * pc.npairs + k) * 2u;
+    int p = pairs[base];
+    int q = pairs[base + 1u];
+
+    float c = 1.0, s = 0.0;
+    if (p >= 0 && q >= 0 && p < int(pc.n) && q < int(pc.n)) {
+        uint n = pc.n;
+        float apq = A[uint(p) + uint(q) * n];
+        if (apq != 0.0) {
+            float app = A[uint(p) + uint(p) * n];
+            float aqq = A[uint(q) + uint(q) * n];
+            float tau = (aqq - app) / (2.0 * apq);
+            float r   = sqrt(1.0 + tau * tau);
+            float t   = (tau >= 0.0) ? 1.0 / (tau + r) : -1.0 / (-tau + r);
+            c = 1.0 / sqrt(1.0 + t * t);
+            s = t * c;
+        }
+    }
+    cs[k * 2u]      = c;
+    cs[k * 2u + 1u] = s;
+}

@@ -48,10 +48,10 @@ public:
     }
     bool solve(const Eigen::VectorXd& v_ao, Vector& eps, bool fp32 = false, int n_eig = 0) override
     {
-        (void)fp32; (void)n_eig;  // always full FP64 spectrum
+        (void)n_eig;  // full spectrum; fp32 → FP32 Jacobi (X-AP3 mixed precision)
         if (!m_ctx || static_cast<int>(v_ao.size()) != m_n) return false;
         eps.resize(m_n);
-        return m_ctx->residentSolve(v_ao.data(), eps.data());
+        return m_ctx->residentSolve(v_ao.data(), eps.data(), fp32);
     }
     bool density(const Eigen::VectorXd& occ, int ncol, Eigen::VectorXd& pop_ao, double& band) override
     {
@@ -183,12 +183,12 @@ public:
                         const Eigen::MatrixXd& v_qp, Vector& eps, bool fp32 = false,
                         int n_eig = 0) override
     {
-        (void)fp32; (void)n_eig;   // always full FP64 spectrum (like the GFN1 resident solve)
+        (void)n_eig;   // full spectrum; fp32 → FP32 Jacobi (X-AP3 mixed precision)
         if (!m_ctx || static_cast<int>(v_ao.size()) != m_n
             || v_dp.rows() != 3 || v_dp.cols() != m_nat
             || v_qp.rows() != 6 || v_qp.cols() != m_nat) return false;
         eps.resize(m_n);
-        return m_ctx->solveMultipole(v_ao.data(), v_dp.data(), v_qp.data(), eps.data());
+        return m_ctx->solveMultipole(v_ao.data(), v_dp.data(), v_qp.data(), eps.data(), fp32);
     }
     bool multipoleMoments(Eigen::MatrixXd& dp_at, Eigen::MatrixXd& qp_at) override
     {
@@ -272,6 +272,14 @@ XtbVulkanComputationalMethod::XtbVulkanComputationalMethod(MethodType method, co
             // eigensolver hook above.
             m_scf_backend = std::make_unique<VulkanScfBackend>(ctx);
             xtb->setGpuScfBackend(m_scf_backend.get());
+            // NOTE: mixed precision is deliberately NOT defaulted on for Vulkan (unlike
+            // CUDA/ROCm). The FP32 Jacobi path exists (opt-in -scf_mixed_precision) and is
+            // correct, but measured net-negative on this iGPU: the hand-written two-sided
+            // cyclic Jacobi is dispatch/barrier-bound, not FP64-arithmetic-bound, so FP32
+            // is ~equal per iteration (complex/231: FP32 828 vs FP64 844 ms/iter) and the
+            // perturbed early iterations occasionally cost an extra SCF cycle (GFN1 14->15),
+            // making it slower overall. The real Vulkan lever is the eigensolve algorithm,
+            // not its precision. See docs/SQM_GPU_ROADMAP.md X-AP3. Claude Generated.
 
             if (CurcumaLogger::get_verbosity() >= 2) {
                 const bool gfn1 = getMethodName() == "gfn1";

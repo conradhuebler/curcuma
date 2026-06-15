@@ -49,10 +49,10 @@ public:
     }
     bool solve(const Eigen::VectorXd& v_ao, Vector& eps, bool fp32 = false, int n_eig = 0) override
     {
-        (void)fp32; (void)n_eig;  // always full FP64 spectrum
+        (void)n_eig;  // full spectrum; fp32 → rocsolver_ssygvd (X-AP3 mixed precision)
         if (!m_ctx || static_cast<int>(v_ao.size()) != m_n) return false;
         eps.resize(m_n);
-        return m_ctx->residentSolve(v_ao.data(), eps.data());
+        return m_ctx->residentSolve(v_ao.data(), eps.data(), fp32);
     }
     bool density(const Eigen::VectorXd& occ, int ncol, Eigen::VectorXd& pop_ao, double& band) override
     {
@@ -181,12 +181,12 @@ public:
                         const Eigen::MatrixXd& v_qp, Vector& eps, bool fp32 = false,
                         int n_eig = 0) override
     {
-        (void)fp32; (void)n_eig;   // full FP64 spectrum (rocSOLVER dsygvd)
+        (void)n_eig;   // full spectrum; fp32 → rocsolver_ssygvd (X-AP3 mixed precision)
         if (!m_ctx || static_cast<int>(v_ao.size()) != m_n
             || v_dp.rows() != 3 || v_dp.cols() != m_nat
             || v_qp.rows() != 6 || v_qp.cols() != m_nat) return false;
         eps.resize(m_n);
-        return m_ctx->solveMultipole(v_ao.data(), v_dp.data(), v_qp.data(), eps.data());
+        return m_ctx->solveMultipole(v_ao.data(), v_dp.data(), v_qp.data(), eps.data(), fp32);
     }
     bool multipoleMoments(Eigen::MatrixXd& dp_at, Eigen::MatrixXd& qp_at) override
     {
@@ -266,6 +266,12 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
             // (supportsMultipole()==false here) uses the Stage-1 eigensolver hook above.
             m_scf_backend = std::make_unique<HipScfBackend>(ctx);
             xtb->setGpuScfBackend(m_scf_backend.get());
+            // FP64 is ~1/16 of FP32 on this iGPU and the per-iteration eigensolve
+            // dominates the resident SCF, so default mixed precision ON for the GPU
+            // path: far-from-convergence iterations solve in FP32 (rocsolver_ssygvd),
+            // reverting to FP64 once max|dq| < scf_fp32_threshold so the converged
+            // fixed point and energy stay FP64. Matches the CUDA backend (X-AP3).
+            xtb->setMixedPrecision(true);
 
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::info(fmt::format(

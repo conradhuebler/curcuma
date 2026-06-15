@@ -109,7 +109,7 @@ public:
 
     /// One SCF step: F = H0 − ½·S·(v_ao⊕v_ao) (kernel), solve F C = S C ε on the device
     /// (rocSOLVER), keep C resident. Writes the ascending eigenvalues to eps_out (n).
-    bool residentSolve(const double* v_ao, double* eps_out);
+    bool residentSolve(const double* v_ao, double* eps_out, bool fp32 = false);
 
     /// Density P = C·diag(occ)·Cᵀ over the leading ncol (ascending-eps) columns from the
     /// resident C (rocBLAS); return pop_ao(μ)=Σ_ν P_μν·S_μν and band = Σ_μν P_μν·H0_μν.
@@ -164,7 +164,7 @@ public:
     // (k_add_fock_multipole) added to the isotropic Fock before the rocSOLVER eigensolve;
     // only v_ao + v_dp/v_qp cross up, eps down. multipoleMoments: atomic dp_at/qp_at from
     // the resident density (k_multipole_moments). Requires beginMultipoleComputed. Claude Generated.
-    bool solveMultipole(const double* v_ao, const double* v_dp, const double* v_qp, double* eps_out);
+    bool solveMultipole(const double* v_ao, const double* v_dp, const double* v_qp, double* eps_out, bool fp32 = false);
     bool multipoleMoments(double* dp_at, double* qp_at);
 
 private:

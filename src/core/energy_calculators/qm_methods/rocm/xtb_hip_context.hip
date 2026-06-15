@@ -476,6 +476,13 @@ __global__ void k_multipole_moments(double* dp_at, double* qp_at,
         }
     }
 }
+
+// FP32 mixed-precision (X-AP3): element-wise FP64<->FP32 conversion for the optional
+// rocsolver_ssygvd eigensolve path (far-from-convergence iterations of -scf_mixed_precision).
+__global__ void k_d2f(const double* __restrict__ src, float* __restrict__ dst, size_t n)
+{ size_t i = blockIdx.x * blockDim.x + threadIdx.x; if (i < n) dst[i] = static_cast<float>(src[i]); }
+__global__ void k_f2d(const float* __restrict__ src, double* __restrict__ dst, size_t n)
+{ size_t i = blockIdx.x * blockDim.x + threadIdx.x; if (i < n) dst[i] = static_cast<double>(src[i]); }
 } // namespace
 #endif // HAVE_ROCSOLVER
 
@@ -494,6 +501,41 @@ struct XtbHipContext::Impl {
     double* dEps = nullptr;            // eigenvalues (n)
     double* dE   = nullptr;            // rocSOLVER workspace (n)
     rocblas_int* dInfo = nullptr;      // convergence flag
+    // FP32 mixed-precision (X-AP3): allocated lazily on the first fp32 solve.
+    float*  dF32 = nullptr; float* dS32 = nullptr; float* dEps32 = nullptr; float* dE32 = nullptr;
+    int     fp32_n = 0;
+
+    bool ensureFp32(int n) {
+        if (n == fp32_n && dF32) return true;
+        for (void* p : { (void*)dF32, (void*)dS32, (void*)dEps32, (void*)dE32 }) if (p) hipFree(p);
+        dF32 = dS32 = dEps32 = dE32 = nullptr; fp32_n = 0;
+        const size_t nn = static_cast<size_t>(n) * n;
+        if (hipMalloc(&dF32, nn * sizeof(float)) != hipSuccess) return false;
+        if (hipMalloc(&dS32, nn * sizeof(float)) != hipSuccess) return false;
+        if (hipMalloc(&dEps32, n * sizeof(float)) != hipSuccess) return false;
+        if (hipMalloc(&dE32, n * sizeof(float)) != hipSuccess) return false;
+        fp32_n = n;
+        return true;
+    }
+    // FP32 generalized eigensolve: dF/dS0 (FP64) → ssygvd → dF (C, FP64) + dEps (FP64).
+    // dS0 stays intact (resident overlap). Returns false on any error → caller can retry FP64.
+    bool eigensolveFp32(int n) {
+        if (!ensureFp32(n)) return false;
+        const size_t nn = static_cast<size_t>(n) * n;
+        const int blk = 256; const int g = static_cast<int>((nn + blk - 1) / blk);
+        hipLaunchKernelGGL(k_d2f, dim3(g), dim3(blk), 0, stream, dF, dF32, nn);    // F → FP32
+        hipLaunchKernelGGL(k_d2f, dim3(g), dim3(blk), 0, stream, dS0, dS32, nn);   // S → FP32 (work)
+        if (rocsolver_ssygvd(handle, rocblas_eform_ax, rocblas_evect_original, rocblas_fill_lower,
+                             n, dF32, n, dS32, n, dEps32, dE32, dInfo) != rocblas_status_success) return false;
+        if (hipDeviceSynchronize() != hipSuccess) return false;
+        rocblas_int info = 0;
+        if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        if (info != 0) return false;
+        const int gn = static_cast<int>((nn + blk - 1) / blk), gn1 = (n + blk - 1) / blk;
+        hipLaunchKernelGGL(k_f2d, dim3(gn), dim3(blk), 0, stream, dF32, dF, nn);   // C → FP64 (dF)
+        hipLaunchKernelGGL(k_f2d, dim3(gn1), dim3(blk), 0, stream, dEps32, dEps, n); // eps → FP64
+        return hipStreamSynchronize(stream) == hipSuccess;
+    }
 
     bool ensureSolver(int n) {
         if (!handle_ok) {
@@ -516,6 +558,8 @@ struct XtbHipContext::Impl {
         for (void* p : { (void*)dF, (void*)dS, (void*)dEps, (void*)dE, (void*)dInfo })
             if (p) hipFree(p);
         dF = dS = dEps = dE = nullptr; dInfo = nullptr; solver_n = 0;
+        for (void* p : { (void*)dF32, (void*)dS32, (void*)dEps32, (void*)dE32 }) if (p) hipFree(p);
+        dF32 = dS32 = dEps32 = dE32 = nullptr; fp32_n = 0;
     }
 
     // ----- resident GFN1 SCF (Stage 2) ------------------------------------
@@ -558,21 +602,27 @@ struct XtbHipContext::Impl {
         if (hipMemcpy(dS0, S,  nn * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         return true;
     }
-    bool resSolve(const double* v_ao, double* eps_out) {
+    // fp32=true (X-AP3): solve this step with rocsolver_ssygvd (FP32) — far-from-convergence
+    // -scf_mixed_precision iterations. dF holds C (FP64) + dEps the eigenvalues either way.
+    bool resSolve(const double* v_ao, double* eps_out, bool fp32) {
         const int n = res_n; if (n <= 0) return false;
         const size_t nn = static_cast<size_t>(n) * n;
         if (hipMemcpy(dvao, v_ao, n * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         dim3 blk(16, 16), grd((n + 15) / 16, (n + 15) / 16);
         hipLaunchKernelGGL(k_fock, grd, blk, 0, stream, dH0, dS0, dvao, dF, n);   // F → dF
-        if (hipMemcpyAsync(dS, dS0, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return false;
-        if (hipStreamSynchronize(stream) != hipSuccess) return false;
-        // F C = S C ε on the device; dF ← eigenvectors (ascending), dS destroyed.
-        if (rocsolver_dsygvd(handle, rocblas_eform_ax, rocblas_evect_original, rocblas_fill_lower,
-                             n, dF, n, dS, n, dEps, dE, dInfo) != rocblas_status_success) return false;
-        if (hipDeviceSynchronize() != hipSuccess) return false;
-        rocblas_int info = 0;
-        if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
-        if (info != 0) return false;
+        if (fp32) {
+            if (!eigensolveFp32(n)) return false;   // dF ← C (FP64), dEps ← eps (FP64)
+        } else {
+            if (hipMemcpyAsync(dS, dS0, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return false;
+            if (hipStreamSynchronize(stream) != hipSuccess) return false;
+            // F C = S C ε on the device; dF ← eigenvectors (ascending), dS destroyed.
+            if (rocsolver_dsygvd(handle, rocblas_eform_ax, rocblas_evect_original, rocblas_fill_lower,
+                                 n, dF, n, dS, n, dEps, dE, dInfo) != rocblas_status_success) return false;
+            if (hipDeviceSynchronize() != hipSuccess) return false;
+            rocblas_int info = 0;
+            if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
+            if (info != 0) return false;
+        }
         if (hipMemcpy(eps_out, dEps, n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
         return true;   // dF holds C resident, ascending order
     }
@@ -785,7 +835,7 @@ struct XtbHipContext::Impl {
     bool beginResidentMP() { return basis_ready && bis_gfn2 && mp_computed && dF && dP; }
     // One resident SCF step with the GFN2 anisotropic Fock term: F = H0 − ½S(v⊕v) (dF),
     // then F −= ½·multipole(v_dp,v_qp); solve F C = S C ε via rocSOLVER (dF ← C resident).
-    bool resSolveMP(const double* v_ao, const double* v_dp, const double* v_qp, double* eps_out) {
+    bool resSolveMP(const double* v_ao, const double* v_dp, const double* v_qp, double* eps_out, bool fp32) {
         const int n = res_n; if (n <= 0 || !beginResidentMP()) return false;
         const size_t nn = static_cast<size_t>(n) * n;
         if (hipMemcpy(dvao, v_ao, n * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
@@ -795,14 +845,18 @@ struct XtbHipContext::Impl {
         hipLaunchKernelGGL(k_fock, grd, blk, 0, stream, dH0, dS0, dvao, dF, n);              // F → dF
         hipLaunchKernelGGL(k_add_fock_multipole, grd, blk, 0, stream, dF, dDpInt, dQpInt,
                            dVdp, dVqp, dao2at, n);                                            // F −= ½ multipole
-        if (hipMemcpyAsync(dS, dS0, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return false;
-        if (hipStreamSynchronize(stream) != hipSuccess) return false;
-        if (rocsolver_dsygvd(handle, rocblas_eform_ax, rocblas_evect_original, rocblas_fill_lower,
-                             n, dF, n, dS, n, dEps, dE, dInfo) != rocblas_status_success) return false;
-        if (hipDeviceSynchronize() != hipSuccess) return false;
-        rocblas_int info = 0;
-        if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
-        if (info != 0) return false;
+        if (fp32) {
+            if (!eigensolveFp32(n)) return false;   // dF ← C (FP64), dEps ← eps (FP64)
+        } else {
+            if (hipMemcpyAsync(dS, dS0, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return false;
+            if (hipStreamSynchronize(stream) != hipSuccess) return false;
+            if (rocsolver_dsygvd(handle, rocblas_eform_ax, rocblas_evect_original, rocblas_fill_lower,
+                                 n, dF, n, dS, n, dEps, dE, dInfo) != rocblas_status_success) return false;
+            if (hipDeviceSynchronize() != hipSuccess) return false;
+            rocblas_int info = 0;
+            if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
+            if (info != 0) return false;
+        }
         return hipMemcpy(eps_out, dEps, n * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess;
     }
     // Atomic dp_at(3×nat)/qp_at(6×nat) from the resident density dP (k_multipole_moments).
@@ -928,12 +982,12 @@ bool XtbHipContext::residentBegin(const double* H0, const double* S, int n)
     return m_impl && m_impl->ok && H0 && S && n > 0 && m_impl->resBegin(H0, S, n);
 #endif
 }
-bool XtbHipContext::residentSolve(const double* v_ao, double* eps_out)
+bool XtbHipContext::residentSolve(const double* v_ao, double* eps_out, bool fp32)
 {
 #ifndef HAVE_ROCSOLVER
-    (void)v_ao; (void)eps_out; return false;
+    (void)v_ao; (void)eps_out; (void)fp32; return false;
 #else
-    return m_impl && m_impl->ok && v_ao && eps_out && m_impl->resSolve(v_ao, eps_out);
+    return m_impl && m_impl->ok && v_ao && eps_out && m_impl->resSolve(v_ao, eps_out, fp32);
 #endif
 }
 bool XtbHipContext::residentDensity(const double* occ, int ncol, double* pop_ao, double* band)
@@ -1032,13 +1086,13 @@ bool XtbHipContext::downloadMultipoleInts(double* dp_int3, double* qp_int6)
 #endif
 }
 bool XtbHipContext::solveMultipole(const double* v_ao, const double* v_dp,
-                                   const double* v_qp, double* eps_out)
+                                   const double* v_qp, double* eps_out, bool fp32)
 {
 #ifndef HAVE_ROCSOLVER
-    (void)v_ao; (void)v_dp; (void)v_qp; (void)eps_out; return false;
+    (void)v_ao; (void)v_dp; (void)v_qp; (void)eps_out; (void)fp32; return false;
 #else
     return m_impl && m_impl->ok && v_ao && v_dp && v_qp && eps_out
-        && m_impl->resSolveMP(v_ao, v_dp, v_qp, eps_out);
+        && m_impl->resSolveMP(v_ao, v_dp, v_qp, eps_out, fp32);
 #endif
 }
 bool XtbHipContext::multipoleMoments(double* dp_at, double* qp_at)

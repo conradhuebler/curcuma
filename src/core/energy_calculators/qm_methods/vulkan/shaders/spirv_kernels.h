@@ -76,6 +76,19 @@ static const uint32_t fock_multipole_spv[] =
 static const uint32_t multipole_moments_spv[] =
 #include "multipole_moments.spv.inc"
 ;
+// X-AP3: FP32 two-sided Jacobi (opt-in -scf_mixed_precision; FP32 is ~16× FP64 on an iGPU).
+static const uint32_t angles_f32_spv[] =
+#include "angles_f32.spv.inc"
+;
+static const uint32_t col_f32_spv[] =
+#include "col_f32.spv.inc"
+;
+static const uint32_t row_f32_spv[] =
+#include "row_f32.spv.inc"
+;
+static const uint32_t vec_f32_spv[] =
+#include "vec_f32.spv.inc"
+;
 
 } // namespace shaders
 } // namespace vk

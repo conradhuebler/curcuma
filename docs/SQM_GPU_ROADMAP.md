@@ -218,22 +218,38 @@ rocBLAS/rocSOLVER cover the dense linear algebra and the isotropic `.hiph` alrea
   (device-vs-CPU elementwise). Run `compute-sanitizer`-equivalent (`rocgdb`/RADV
   validation layers) where available.
 
-### X-AP3 — FP32 mixed-precision eigensolve (the iGPU speed lever) — *highest ROI for speed*
+### X-AP3 — FP32 mixed-precision eigensolve (the iGPU speed lever) — ✅ DONE (2026-06)
 - **Why**: residency (V-AP3/R-AP2) is correct but does **not** beat the CPU on the AMD 890M
-  because the **FP64** Jacobi eigensolve dominates (GFN1, fully resident, is also ~1.3× the
-  CPU on `complex`). Consumer/iGPU FP64 runs at ~1/16 of FP32, so an FP32 eigensolve far
-  from convergence (FP64 only for the final iterations) is the real speed-up — potentially
-  >10× on the eigensolve, which is most of the SCF.
-- **Already plumbed**: `-scf_mixed_precision` (+ `-scf_fp32_threshold`) sets `m_eig_fp32`
-  per iteration; the SCF loop already passes it into `solve()`/`solveMultipole()`. **CUDA
-  honors it** (FP32 cusolver early). The **Vulkan/ROCm adapters currently ignore the `fp32`
-  flag** (`(void)fp32`) — that is the only gap.
-- **Vulkan**: FP32 variants of the resident-SCF shaders — at minimum the two-sided Jacobi
-  (`angles`/`col`/`row`/`vec`), ideally also `fock`/`gemm`/`scale_cols`/`fock_multipole` —
-  with an FP32 work buffer; convert Ã (FP64→FP32) before the FP32 Jacobi, eps/C̃ back to
-  FP64. **ROCm**: trivial — call `rocsolver_ssygvd` (FP32) with an FP32 copy of F/S when
-  `fp32`. Opt-in; the converged energy matches FP64 within `scf_threshold` (NOT bit-
-  identical, since the early FP32 iterations differ — same contract as the CUDA FP32 path).
+  because the **FP64** eigensolve dominates. Consumer/iGPU FP64 runs at ~1/16 of FP32, so
+  an FP32 eigensolve far from convergence (FP64 only for the final iterations) was the
+  hypothesised speed-up.
+- **Plumbing**: `-scf_mixed_precision` (+ `-scf_fp32_threshold`) sets `m_eig_fp32` per
+  iteration; the SCF loop passes it into `solve()`/`solveMultipole()`; the wrappers forward
+  it to the backend contexts. Convergence is never accepted on an FP32 step, so the final
+  density is FP64 and the energy matches FP64 within `scf_threshold`.
+- **ROCm — real win, default ON**: `rocsolver_ssygvd` (FP32) on FP32 copies of F/S, the
+  eigenvectors/eigenvalues cast back to FP64 (`k_d2f`/`k_f2d`); `dS0` (resident overlap)
+  stays intact. Measured on a Radeon 890M, `complex` (231 atoms): **GFN1 1844→1281 ms
+  (1.44×), GFN2 1924→1510 ms (1.27×)** over the resident FP64 path (which is already ~6-8×
+  the CPU because rocSOLVER is a mature kernel). Energies bit-identical to CPU. Mixed
+  precision is **defaulted ON for `-gpu rocm`** (matches CUDA). Caveat: at the loose default
+  `scf_threshold` (1e-5) the FP32 path reaches a slightly different fixed point, so the
+  **gradient norm differs ~1e-7 from CPU** (immaterial to `-opt` convergence, but not
+  bit-identical); `-scf_threshold 1e-8` restores bit-identical gradients. Opt-out:
+  `-scf_mixed_precision false`.
+- **Vulkan — no win, opt-in only**: FP32 variants of the two-sided Jacobi shaders
+  (`angles_f32`/`col_f32`/`row_f32`/`vec_f32`) + FP32 work buffers (`rAtil32`/`rCtil32`/
+  `rCs32`); Ã cast FP64→FP32 before the FP32 Jacobi, C̃ back to FP64. **Measured net-neutral
+  to net-negative**: the hand-written cyclic Jacobi is dispatch/barrier/bandwidth-bound, not
+  FP64-arithmetic-bound, so FP32 is ~equal per iteration (`complex` GFN2: FP32 828 vs FP64
+  844 ms/iter) and the perturbed early iterations occasionally cost an extra SCF cycle
+  (GFN1 14→15), making it slower overall. The real Vulkan lever is the **eigensolve
+  algorithm** (the naive Jacobi), not its precision. So mixed precision is **NOT defaulted on
+  for `-gpu vulkan`** — the FP32 path stays as a correct, documented opt-in
+  (`-scf_mixed_precision true`). Energies still match CPU.
+- **Lesson**: the iGPU bottleneck is backend-specific. ROCm's rocSOLVER benefits from lower
+  precision; Vulkan's bottleneck is the algorithm, which precision cannot fix. A faster
+  Vulkan eigensolve (blocked/one-sided Jacobi, or a divide-and-conquer port) is the open lever.
 - **Depends on**: nothing (orthogonal to the GFN2 stack). Independent per backend.
 
 ## Suggested order
@@ -241,7 +257,8 @@ rocBLAS/rocSOLVER cover the dense linear algebra and the isotropic `.hiph` alrea
 1. ~~**V-AP1** (Vulkan GFN1 gradient) — closes the only Vulkan↔ROCm asymmetry.~~ ✅ DONE (2026-06).
 2. ~~**R-AP1 + V-AP2** (GFN2 multipole integrals, both backends) — shared port.~~ ✅ DONE (2026-06).
 3. ~~**R-AP2 + V-AP3** (resident multipole SCF) — correct but iGPU-eigensolve-bound.~~ ✅ DONE (2026-06).
-4. **X-AP3** (FP32 mixed-precision eigensolve) — the actual iGPU speed lever; plumbing already
-   exists, only the backend `fp32` path is missing. **Recommended next** if speed is the goal.
+4. ~~**X-AP3** (FP32 mixed-precision eigensolve) — the actual iGPU speed lever.~~ ✅ DONE (2026-06):
+   real 1.27-1.44× on ROCm (rocsolver_ssygvd, default ON); net-neutral on Vulkan (Jacobi is
+   dispatch-bound, not FP64-bound — opt-in only). Vulkan eigensolve algorithm is the open lever.
 5. **R-AP3 + V-AP4** (GFN2 device gradient) → device-resident GFN2 `-opt`/`-md`.
 6. **X-AP1** (device solvation), **GFN-FF** (R-AP5 / V-AP6), **Stage 5/6** last.
