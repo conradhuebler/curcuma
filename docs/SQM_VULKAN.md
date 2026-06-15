@@ -6,10 +6,12 @@
 > in place (no per-geometry nao² upload). **GFN1 = device-resident SCF (Stage 2):** Fock
 > build, the symmetric eigensolve, density, Mulliken populations and the band energy all run
 > on the GPU; only `v_ao` (up) + eigenvalues/populations (down) cross the bus per iteration.
-> **GFN2 = device integrals (incl. the dp/qp multipole integrals, Stage 3m/V-AP2) + GPU
-> eigensolver (Stage 1):** the per-iteration eigensolve is on the GPU and the AO multipole
-> integrals are now built on the device and downloaded; the rest of the potential + the
-> multipole Fock/gradient are on the CPU (host SCF).
+> **GFN2 = device-resident multipole SCF (Stage 2b/V-AP3):** the Fock build (incl. the
+> anisotropic dp/qp term), the eigensolve, density, populations AND the atomic multipole
+> moments all run on the device; only `v_dp`/`v_qp` (up) + eps/pop/`dp_at`/`qp_at` (down)
+> cross per iteration (no nao² eigensolver transfer). The isotropic+multipole **potential**
+> and the GFN2 **gradient** stay on the host. (Bit-identical to CPU; **not** a speed-up on
+> this iGPU — the FP64 eigensolve dominates, see "Performance" / FP32 below.)
 > **GFN1 nuclear gradient = on device (Stage 4, V-AP1):** repulsion / Coulomb /
 > H0-Pulay+CN built by three FP64 SPIR-V **gather** kernels (Vulkan has no `atomicAdd`
 > on doubles, so each thread owns one atom and sums over all partners — exact because the
@@ -168,6 +170,19 @@ On an **AMD Radeon 890M (RADV, integrated, shaderFloat64)**, build `release_vulk
   the LBFGS history to a non-systematic ~1e-6 trajectory drift after ~50 steps. This is
   FP non-reproducibility of the GPU path, not a gradient defect (a wrong gradient diverges,
   not tracks to 1e-6), and would occur from the eigensolver alone with the gradient on CPU.
+- **GFN2 device-resident multipole SCF (V-AP3)**: with `fock_multipole` + `multipole_moments`
+  (log "device-resident GFN2 path"), gfn2 `-sp` energy bit-identical (8 dp) over the
+  12-molecule set incl. `complex`, `-sp` gradient norm matches CPU, `-opt` (NH3) step-by-step
+  identical. The GFN2 gradient stays on the host (the device `gradient()` returns false for
+  GFN2 → host `calculateGradient`; without that, the resident path silently used the
+  GFN1-isotropic-only device gradient — fixed).
+- **Performance (honest)**: device-resident GFN1 *and* GFN2 are ~1.3× **slower** than the CPU
+  on the 231-atom `complex` (gfn2 16.0 s vs 12.4 s SCF; gfn1 20.2 s vs 15.4 s) — the FP64
+  two-sided Jacobi eigensolve dominates and the iGPU runs FP64 at ~1/16 of FP32. The removed
+  per-iteration transfers are cheap shared-memory copies on an iGPU (not PCIe), so residency
+  is a correctness/architecture milestone here, not a speed-up. The speed lever is an **FP32
+  mixed-precision eigensolve** (`-scf_mixed_precision` is already plumbed; the Vulkan `fp32`
+  path is the missing piece — see SQM_GPU_ROADMAP.md X-AP3).
 - Default non-Vulkan `release/` build stays green (cli_curcumaopt_*/cli_rmsd_* 11/11).
 
 What was **NOT** tested: large systems (>~100 nao; the iGPU FP64 Jacobi is slow — this is a

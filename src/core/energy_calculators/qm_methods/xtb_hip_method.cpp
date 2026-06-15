@@ -136,8 +136,12 @@ public:
                   Matrix& grad_out, Vector& dEdcn_out, bool pc_resident) override
     {
         // GFN1 isotropic: density/MO coefficients are resident (pc_resident), no multipole.
-        (void)P; (void)C; (void)v_dp; (void)v_qp; (void)pc_resident;
+        (void)P; (void)C; (void)pc_resident;
         if (!m_ctx || m_nat <= 0) return false;
+        // GFN1 only: the device kernels omit the GFN2 multipole-integral Pulay term (R-AP3
+        // pending). For GFN2 (non-empty v_dp/v_qp) return false so the caller falls back to
+        // the full host gradient (the resident GFN2 path made use_gpu_resident=true).
+        if (v_dp.size() > 0 || v_qp.size() > 0) return false;
         std::vector<double> grad(3 * static_cast<size_t>(m_nat), 0.0), dEdcn(m_nat, 0.0);
         if (!m_ctx->gradient(eps.data(), nocc_orbs, v_ao.data(), q_sh.data(),
                              grad.data(), dEdcn.data()))
@@ -158,9 +162,38 @@ public:
     // per-iteration eigensolver), so these are reached only via the non-resident host-
     // download path in xtb_native.cpp: build dp_int/qp_int on the device, download so the
     // CPU setupMultipole integral loop is skipped.
+    // R-AP2: device-resident GFN2 multipole SCF. supportsMultipole()→true makes
+    // XTB::Calculation enter the resident multipole loop (solveMultipole + density +
+    // multipoleMoments) instead of the Stage-1 host SCF. dp_int/qp_int are built on the
+    // device (computeIntegrals); beginMultipoleComputed confirms readiness. The CPU-
+    // integral UPLOAD path (beginMultipole) is unsupported — when the device integral
+    // build is unavailable the loop falls back to the host SCF (use_gpu_resident=false).
+    bool supportsMultipole() const override { return true; }
+    bool beginMultipole(const std::array<Eigen::MatrixXd, 3>& dp_int,
+                        const std::array<Eigen::MatrixXd, 6>& qp_int,
+                        const std::vector<int>& ao2at) override
+    { (void)dp_int; (void)qp_int; (void)ao2at; return false; }
     bool beginMultipoleComputed() override
     {
         return m_ctx && m_ctx->beginMultipoleComputed();
+    }
+    bool solveMultipole(const Eigen::VectorXd& v_ao, const Eigen::MatrixXd& v_dp,
+                        const Eigen::MatrixXd& v_qp, Vector& eps, bool fp32 = false,
+                        int n_eig = 0) override
+    {
+        (void)fp32; (void)n_eig;   // full FP64 spectrum (rocSOLVER dsygvd)
+        if (!m_ctx || static_cast<int>(v_ao.size()) != m_n
+            || v_dp.rows() != 3 || v_dp.cols() != m_nat
+            || v_qp.rows() != 6 || v_qp.cols() != m_nat) return false;
+        eps.resize(m_n);
+        return m_ctx->solveMultipole(v_ao.data(), v_dp.data(), v_qp.data(), eps.data());
+    }
+    bool multipoleMoments(Eigen::MatrixXd& dp_at, Eigen::MatrixXd& qp_at) override
+    {
+        if (!m_ctx || m_nat <= 0) return false;
+        dp_at.resize(3, m_nat);
+        qp_at.resize(6, m_nat);
+        return m_ctx->multipoleMoments(dp_at.data(), qp_at.data());
     }
     bool downloadMultipoleInts(std::array<Eigen::MatrixXd, 3>& dp_int,
                                std::array<Eigen::MatrixXd, 6>& qp_int) override

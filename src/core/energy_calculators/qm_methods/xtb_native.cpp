@@ -437,8 +437,13 @@ double XTB::Calculation(bool gradient)
     // consumes them on-device, so it is excluded here and keeps the full host build.
     if (m_method == MethodType::GFN2) {
         bool mp_on_device = false;
-        if (integrals_from_device && m_gpu_scf && !m_gpu_scf->supportsMultipole()
-            && m_gpu_scf->beginMultipoleComputed()
+        // The device built dp_int/qp_int during the integral build (computeIntegrals);
+        // download them for the host GFN2 gradient (multipole Pulay term) and skip the
+        // host O(nao²) integral loop. Independent of whether the SCF runs the resident
+        // multipole loop (Stage 2b) — that is set up in the SCF block below. CUDA's
+        // adapter does not override downloadMultipoleInts (its gradient is on-device), so
+        // this is a no-op there and CUDA keeps its full host build (unchanged).
+        if (integrals_from_device && m_gpu_scf
             && m_gpu_scf->downloadMultipoleInts(m_dp_int, m_qp_int)) {
             mp_on_device = true;
             if (verb >= 2)

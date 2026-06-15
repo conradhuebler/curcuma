@@ -7,7 +7,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 for s in angles col row vec gemm scale_cols fock popband \
          cn self_energy overlap_h0 gamma \
-         grad_rep grad_coulomb grad_pulay multipole_ints; do
+         grad_rep grad_coulomb grad_pulay multipole_ints \
+         fock_multipole multipole_moments; do
     glslc --target-env=vulkan1.1 -mfmt=c -fshader-stage=compute "$s.comp" -o "$s.spv.inc"
     echo "compiled $s.comp -> $s.spv.inc"
 done

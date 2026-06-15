@@ -159,6 +159,14 @@ public:
     bool beginMultipoleComputed();
     bool downloadMultipoleInts(double* dp_int3, double* qp_int6);
 
+    // ---- Device-resident GFN2 multipole SCF (Stage 2b / R-AP2) --------------
+    // solveMultipole: one resident SCF step with the GFN2 anisotropic Fock term
+    // (k_add_fock_multipole) added to the isotropic Fock before the rocSOLVER eigensolve;
+    // only v_ao + v_dp/v_qp cross up, eps down. multipoleMoments: atomic dp_at/qp_at from
+    // the resident density (k_multipole_moments). Requires beginMultipoleComputed. Claude Generated.
+    bool solveMultipole(const double* v_ao, const double* v_dp, const double* v_qp, double* eps_out);
+    bool multipoleMoments(double* dp_at, double* qp_at);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;

@@ -137,8 +137,13 @@ public:
                   const Eigen::MatrixXd& v_dp, const Eigen::MatrixXd& v_qp,
                   Matrix& grad_out, Vector& dEdcn_out, bool pc_resident) override
     {
-        (void)P; (void)C; (void)v_dp; (void)v_qp; (void)pc_resident;
+        (void)P; (void)C; (void)pc_resident;
         if (!m_ctx || m_nat <= 0) return false;
+        // GFN1 isotropic only: the device kernels do NOT compute the GFN2 multipole-integral
+        // Pulay term (V-AP4 pending). For GFN2 (non-empty v_dp/v_qp) return false so the
+        // caller falls back to the full host gradient. Without this, the resident GFN2 path
+        // (V-AP3, use_gpu_resident=true) would silently use the isotropic-only gradient.
+        if (v_dp.size() > 0 || v_qp.size() > 0) return false;
         std::vector<double> grad(3 * static_cast<size_t>(m_nat), 0.0), dEdcn(m_nat, 0.0);
         if (!m_ctx->gradient(eps.data(), nocc_orbs, v_ao.data(), q_sh.data(),
                              grad.data(), dEdcn.data()))
@@ -157,9 +162,40 @@ public:
     // eigensolver), so these are reached only via the non-resident host-download path
     // in xtb_native.cpp: build dp_int/qp_int on the device, download to the host so the
     // CPU setupMultipole integral loop is skipped.
+    // V-AP3: device-resident GFN2 multipole SCF. supportsMultipole()→true makes
+    // XTB::Calculation enter the resident multipole loop (solveMultipole + density +
+    // multipoleMoments) instead of the Stage-1 host SCF, eliminating the per-iteration
+    // nao² eigensolver transfer. dp_int/qp_int are built on the device (computeIntegrals);
+    // the resident buffers/sets are set up in beginBasis, so beginMultipoleComputed only
+    // confirms readiness. beginMultipole (the CPU-integral UPLOAD path) is unsupported on
+    // Vulkan — when the device integral build is unavailable the resident loop falls back
+    // to the host SCF (use_gpu_resident stays false), which is correct.
+    bool supportsMultipole() const override { return true; }
+    bool beginMultipole(const std::array<Eigen::MatrixXd, 3>& dp_int,
+                        const std::array<Eigen::MatrixXd, 6>& qp_int,
+                        const std::vector<int>& ao2at) override
+    { (void)dp_int; (void)qp_int; (void)ao2at; return false; }
     bool beginMultipoleComputed() override
     {
         return m_ctx && m_ctx->beginMultipoleComputed();
+    }
+    bool solveMultipole(const Eigen::VectorXd& v_ao, const Eigen::MatrixXd& v_dp,
+                        const Eigen::MatrixXd& v_qp, Vector& eps, bool fp32 = false,
+                        int n_eig = 0) override
+    {
+        (void)fp32; (void)n_eig;   // always full FP64 spectrum (like the GFN1 resident solve)
+        if (!m_ctx || static_cast<int>(v_ao.size()) != m_n
+            || v_dp.rows() != 3 || v_dp.cols() != m_nat
+            || v_qp.rows() != 6 || v_qp.cols() != m_nat) return false;
+        eps.resize(m_n);
+        return m_ctx->solveMultipole(v_ao.data(), v_dp.data(), v_qp.data(), eps.data());
+    }
+    bool multipoleMoments(Eigen::MatrixXd& dp_at, Eigen::MatrixXd& qp_at) override
+    {
+        if (!m_ctx || m_nat <= 0) return false;
+        dp_at.resize(3, m_nat);
+        qp_at.resize(6, m_nat);
+        return m_ctx->multipoleMoments(dp_at.data(), qp_at.data());
     }
     bool downloadMultipoleInts(std::array<Eigen::MatrixXd, 3>& dp_int,
                                std::array<Eigen::MatrixXd, 6>& qp_int) override
@@ -245,7 +281,8 @@ XtbVulkanComputationalMethod::XtbVulkanComputationalMethod(MethodType method, co
                     getMethodName(),
                     gfn1 ? "device-resident isotropic SCF loop + nuclear gradient (Stage 4; "
                            "dispersion + CN chain-rule on CPU)"
-                         : "GPU eigensolve per iteration, multipole + gradient on CPU (Stage 3)"));
+                         : "device-resident multipole SCF loop (Stage 2b; Fock+moments on GPU, "
+                           "gradient on CPU)"));
             }
         }
     } else {

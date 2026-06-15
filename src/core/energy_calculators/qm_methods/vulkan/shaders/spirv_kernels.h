@@ -69,6 +69,13 @@ static const uint32_t grad_pulay_spv[] =
 static const uint32_t multipole_ints_spv[] =
 #include "multipole_ints.spv.inc"
 ;
+// Stage 2b: GFN2 device-resident multipole SCF — anisotropic Fock term + atomic moments.
+static const uint32_t fock_multipole_spv[] =
+#include "fock_multipole.spv.inc"
+;
+static const uint32_t multipole_moments_spv[] =
+#include "multipole_moments.spv.inc"
+;
 
 } // namespace shaders
 } // namespace vk

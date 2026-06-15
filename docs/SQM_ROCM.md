@@ -6,10 +6,13 @@
 > the nuclear gradient (repulsion + on-site CN + H0/Pulay + Coulomb) all run on the GPU via
 > HIP `__global__` kernels + rocBLAS + rocSOLVER; only the dispersion gradient + CN
 > chain-rule stay on the host. `-opt`/`-md` need no host integral or gradient build.
-> **GFN2:** uses the same device integral build (S/H0/γ **and now the dp/qp AO multipole
-> integrals, Stage 3m/R-AP1**), then the Stage-1 rocSOLVER eigensolver per iteration; the
-> multipole Fock + gradient stay on the host. Energies (and the full `-opt` trajectory)
-> match the CPU bit-for-bit (AMD 890M / gfx1150).
+> **GFN2 = device-resident multipole SCF (Stage 2b/R-AP2):** the Fock build (incl. the
+> anisotropic dp/qp term via `k_add_fock_multipole`), the rocSOLVER eigensolve, density and
+> the atomic multipole moments (`k_multipole_moments`) run on the device; only `v_dp`/`v_qp`
+> up + eps/moments down per iteration. The potential + GFN2 gradient stay on the host.
+> Energies + gradient + the `-opt` trajectory match the CPU (AMD 890M / gfx1150). **Honest:
+> not a speed-up on this iGPU** — the FP64 eigensolve dominates (FP32 mixed precision is the
+> lever; see SQM_GPU_ROADMAP.md X-AP3).
 
 ## What it is
 
@@ -151,7 +154,10 @@ On an **AMD Radeon 890M (gfx1150)**, build `release_rocm/` (`-DUSE_ROCM_XTB=ON`,
   bit-identical to CPU (8 dp) over the full 12-molecule `sqm_reference` set incl. the
   231-atom `complex`; gfn2 `-opt` (NH3) identical trajectory (integrals rebuilt each geometry,
   feeding the host Fock AND the host multipole gradient).
-- **gfn2 `-opt`**: device integrals + Stage-1 eigensolver; bit-identical to the CPU.
+- **gfn2 device-resident multipole SCF (R-AP2)**: `k_add_fock_multipole` + `k_multipole_moments`
+  (log "device-resident GFN2 path"), gfn2 `-sp` energy bit-identical + gradient norm matches
+  CPU, gfn2 `-opt` (NH3) step-by-step identical. GFN2 gradient on the host (device `gradient()`
+  returns false for GFN2). NOT faster than CPU on the iGPU (FP64 eigensolve-bound).
 - Stage 0 (no rocSOLVER): device handshake + CPU fallback, energies bit-identical.
 - Default non-ROCm `release/` build stays green (cli_curcumaopt_*/cli_rmsd_* 11/11).
 

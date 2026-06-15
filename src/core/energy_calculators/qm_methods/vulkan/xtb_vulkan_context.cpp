@@ -77,6 +77,12 @@ struct XtbVulkanContext::Impl {
     VkPipelineLayout ploMP = VK_NULL_HANDLE;
     VkShaderModule mMP{};
     VkPipeline pMP{};
+    // Stage 2b GFN2 device-resident multipole SCF: fock_multipole + multipole_moments
+    // (both 6 SSBO; fock 4B push, moments 8B push).
+    VkDescriptorSetLayout dsl6 = VK_NULL_HANDLE;
+    VkPipelineLayout ploFMP = VK_NULL_HANDLE, ploMM = VK_NULL_HANDLE;
+    VkShaderModule mFMP{}, mMM{};
+    VkPipeline pFMP{}, pMM{};
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
 
@@ -111,8 +117,10 @@ struct XtbVulkanContext::Impl {
 
     // Stage 3m GFN2 multipole integrals: dp_int (3·nao²) + qp_int (6·nao²) device buffers.
     Buf gDpInt, gQpInt;
+    // Stage 2b per-iteration multipole potentials (up) / atomic moments (down), nat-sized.
+    Buf gVdp, gVqp, gDpAt, gQpAt;
     VkDescriptorPool mpPool = VK_NULL_HANDLE;
-    VkDescriptorSet  gSetMP{};
+    VkDescriptorSet  gSetMP{}, gSetFMP{}, gSetMM{};
     bool mp_ready = false, mp_computed = false;
 
     explicit Impl() {
@@ -218,6 +226,13 @@ struct XtbVulkanContext::Impl {
         mMP = mod(multipole_ints_spv, sizeof(multipole_ints_spv));
         pMP = pipe(mMP, ploMP);
         if (!pMP) return false;
+        // Stage 2b: resident multipole SCF (fock_multipole 6 SSBO + 4B, multipole_moments 6 + 8B).
+        dsl6 = makeDsl(6); ploFMP = makePl(dsl6, 4); ploMM = makePl(dsl6, 8);
+        if (!dsl6 || !ploFMP || !ploMM) return false;
+        mFMP = mod(fock_multipole_spv, sizeof(fock_multipole_spv));
+        mMM = mod(multipole_moments_spv, sizeof(multipole_moments_spv));
+        pFMP = pipe(mFMP, ploFMP); pMM = pipe(mMM, ploMM);
+        if (!pFMP || !pMM) return false;
         VkCommandBufferAllocateInfo cbi{}; cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO; cbi.commandPool = pool; cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbi.commandBufferCount = 1;
         if (vkAllocateCommandBuffers(dev, &cbi, &cmd) != VK_SUCCESS) return false;
         VkFenceCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -449,20 +464,30 @@ struct XtbVulkanContext::Impl {
             }
         }
 
-        // Stage 3m (V-AP2): GFN2 multipole-integral buffers + descriptor set. Needs the
-        // ao2sh/ao2at uploaded by the gradient block above + the resident overlap rS.
+        // Stage 3m (V-AP2) + 2b (V-AP3): GFN2 multipole-integral buffers (dp_int/qp_int,
+        // built per geometry in computeIntegrals) + per-iteration v_dp/v_qp/dp_at/qp_at +
+        // the three descriptor sets (multipole_ints build, resident fock add, moments).
+        // Needs the ao2sh/ao2at uploaded by the gradient block above + the resident rS/rF/rP.
         mp_ready = false; mp_computed = false;
         if (bis_gfn2 && bAo2sh.buf && bAo2at.buf) {
             if (gDpInt.buf) freeBuf(gDpInt); gDpInt = makeBuf(sizeof(double) * 3 * (size_t)bnao * bnao);
             if (gQpInt.buf) freeBuf(gQpInt); gQpInt = makeBuf(sizeof(double) * 6 * (size_t)bnao * bnao);
-            if (gDpInt.buf && gQpInt.buf) {
+            if (gVdp.buf) freeBuf(gVdp);   gVdp  = makeBuf(sizeof(double) * 3 * (size_t)bnat);
+            if (gVqp.buf) freeBuf(gVqp);   gVqp  = makeBuf(sizeof(double) * 6 * (size_t)bnat);
+            if (gDpAt.buf) freeBuf(gDpAt); gDpAt = makeBuf(sizeof(double) * 3 * (size_t)bnat);
+            if (gQpAt.buf) freeBuf(gQpAt); gQpAt = makeBuf(sizeof(double) * 6 * (size_t)bnat);
+            if (gDpInt.buf && gQpInt.buf && gVdp.buf && gVqp.buf && gDpAt.buf && gQpAt.buf) {
                 if (mpPool) vkDestroyDescriptorPool(dev, mpPool, nullptr);
-                VkDescriptorPoolSize ps3{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 12 };
-                VkDescriptorPoolCreateInfo dpi3{}; dpi3.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpi3.maxSets = 1; dpi3.poolSizeCount = 1; dpi3.pPoolSizes = &ps3;
+                VkDescriptorPoolSize ps3{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 12 + 6 + 6 };
+                VkDescriptorPoolCreateInfo dpi3{}; dpi3.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpi3.maxSets = 3; dpi3.poolSizeCount = 1; dpi3.pPoolSizes = &ps3;
                 if (vkCreateDescriptorPool(dev, &dpi3, nullptr, &mpPool) == VK_SUCCESS) {
                     gSetMP = allocSet(mpPool, dsl12);
+                    gSetFMP = allocSet(mpPool, dsl6);
+                    gSetMM = allocSet(mpPool, dsl6);
                     bindSet(gSetMP, { &bAo2sh, &bAo2at, &bIao, &bAng, &bShNprim, &bShPrimOff,
                                       &bPrimA, &bPrimC, &bXyz, &rS, &gDpInt, &gQpInt });
+                    bindSet(gSetFMP, { &gDpInt, &gQpInt, &gVdp, &gVqp, &bAo2at, &rF });   // F -= mp term
+                    bindSet(gSetMM,  { &rP, &gDpInt, &gQpInt, &bAo2at, &gDpAt, &gQpAt }); // atomic moments
                     mp_ready = true;
                 }
             }
@@ -482,7 +507,17 @@ struct XtbVulkanContext::Impl {
         if (!dispatch1(pSE, ploI5, setSE, pcSE, 4, (bnsh + 63) / 64, 1)) return false;
         if (!dispatch1(pOV, ploI18, setOV, pcOV, 12, g1n, g1n)) return false;   // → rS, rH0
         if (!dispatch1(pGM, ploI4, setGM, pcGM, 8, g1n, g1n)) return false;     // → bGamma
-        return buildLowdinX(bnao);
+        if (!buildLowdinX(bnao)) return false;
+        // GFN2: build dp_int/qp_int on the device too (needs the resident rS just built),
+        // so they are resident for the multipole Fock/moments + downloadable for the host
+        // gradient. mp_computed gates downloadMultipole / the resident multipole loop.
+        if (bis_gfn2 && mp_ready) {
+            const uint32_t gn = (bnao + 7) / 8;
+            uint32_t pcM[1] = { (uint32_t)bnao };
+            if (!dispatch1(pMP, ploMP, gSetMP, pcM, 4, gn, gn)) return false;   // → gDpInt, gQpInt
+            mp_computed = true;
+        }
+        return true;
     }
     bool dlMat(double* out, const Buf& src, size_t count) {
         if (!src.ptr) return false;
@@ -494,7 +529,7 @@ struct XtbVulkanContext::Impl {
                         &bShpoly,&bSelfE,&bKcn,&bGhard,&bValence,&bCovrad,&bPauling,&bArad,
                         &bXyz,&bCN,&bSE,&bGamma,
                         &bAo2at,&bAo2sh,&bRepAlpha,&bRepZeff,&gW,&gVao,&gQsh,&gGrad,&gEdcn,
-                        &gDpInt,&gQpInt }) freeBuf(*b);
+                        &gDpInt,&gQpInt,&gVdp,&gVqp,&gDpAt,&gQpAt }) freeBuf(*b);
         if (iPool) { vkDestroyDescriptorPool(dev, iPool, nullptr); iPool = VK_NULL_HANDLE; }
         if (gPool) { vkDestroyDescriptorPool(dev, gPool, nullptr); gPool = VK_NULL_HANDLE; }
         if (mpPool) { vkDestroyDescriptorPool(dev, mpPool, nullptr); mpPool = VK_NULL_HANDLE; }
@@ -571,20 +606,49 @@ struct XtbVulkanContext::Impl {
         return true;
     }
 
-    // ----- Stage 3m: GFN2 AO multipole integrals on device -----------------
-    bool computeMultipole() {
-        if (!mp_ready || bnao <= 0) return false;     // needs rS (built by computeIntegrals)
-        const uint32_t g1n = (bnao + 7) / 8;
-        uint32_t pc[1] = { (uint32_t)bnao };
-        if (!dispatch1(pMP, ploMP, gSetMP, pc, 4, g1n, g1n)) return false;
-        mp_computed = true;
-        return true;
-    }
+    // ----- Stage 3m: GFN2 AO multipole integrals download (host gradient) --
     bool downloadMP(double* dp3, double* qp6) {
         if (!mp_ready || !mp_computed || !gDpInt.ptr || !gQpInt.ptr) return false;
         const size_t nn = static_cast<size_t>(bnao) * bnao;
         std::memcpy(dp3, gDpInt.ptr, sizeof(double) * 3 * nn);
         std::memcpy(qp6, gQpInt.ptr, sizeof(double) * 6 * nn);
+        return true;
+    }
+
+    // ----- Stage 2b: device-resident GFN2 multipole SCF --------------------
+    // dp_int/qp_int built per geometry in computeIntegrals; resident buffers + sets in
+    // begBasis. Just confirm the resident path is ready (cf. CUDA residentBeginMultipoleComputed).
+    bool beginResidentMP() { return mp_ready && mp_computed && rF.buf && rP.buf; }
+
+    // One resident SCF step with the GFN2 anisotropic Fock term: F = H0 − ½S(v⊕v), then
+    // F −= ½·multipole(v_dp,v_qp); Ã = X·F·X; Jacobi; C = X·C̃. Same shape as residentSolve.
+    bool residentSolveMP(const double* v_ao, const double* v_dp, const double* v_qp, double* eps_out) {
+        const int n = rn; if (n <= 0 || !beginResidentMP()) return false;
+        std::memcpy(rv.ptr,   v_ao, sizeof(double) * n);
+        std::memcpy(gVdp.ptr, v_dp, sizeof(double) * 3 * (size_t)bnat);
+        std::memcpy(gVqp.ptr, v_qp, sizeof(double) * 6 * (size_t)bnat);
+        if (!fockDev(n, sFk)) return false;                                    // rF = H0 − ½S(v⊕v)
+        const uint32_t g = (n + 7) / 8; uint32_t pcF[1] = { (uint32_t)n };
+        if (!dispatch1(pFMP, ploFMP, gSetFMP, pcF, 4, g, g)) return false;     // rF −= ½ multipole
+        if (!gemmDev(n, sTg, 0)) return false;                                 // T = X F
+        if (!gemmDev(n, sAtg, 0)) return false;                                // Ã = T X
+        identity(rCtil, n);
+        if (!jacobiDevice(n, rrounds, rnpairs, sAtA, sCtV)) return false;      // eigensolve Ã
+        if (!gemmDev(n, sCg, 0)) return false;                                 // C = X C̃
+        const double* Ad = (const double*)rAtil.ptr; std::vector<double> mu(n);
+        for (int i = 0; i < n; ++i) mu[i] = Ad[i + (size_t)i * n];
+        ridx.resize(n); std::iota(ridx.begin(), ridx.end(), 0);
+        std::sort(ridx.begin(), ridx.end(), [&](int a, int b) { return mu[a] < mu[b]; });
+        for (int r = 0; r < n; ++r) eps_out[r] = mu[ridx[r]];
+        return true;
+    }
+    // Atomic dp_at(3×nat)/qp_at(6×nat) from the resident density (multipole_moments).
+    bool multipoleMomentsImpl(double* dp_at, double* qp_at) {
+        if (!beginResidentMP() || bnat <= 0) return false;
+        uint32_t pc[2] = { (uint32_t)bnao, (uint32_t)bnat };
+        if (!dispatch1(pMM, ploMM, gSetMM, pc, 8, (bnat + 63) / 64, 1)) return false;
+        std::memcpy(dp_at, gDpAt.ptr, sizeof(double) * 3 * (size_t)bnat);
+        std::memcpy(qp_at, gQpAt.ptr, sizeof(double) * 6 * (size_t)bnat);
         return true;
     }
 
@@ -595,10 +659,10 @@ struct XtbVulkanContext::Impl {
         freeBasis();
         for (Buf* b : { &sA,&sV,&sP,&sC,&rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs }) freeBuf(*b);
         if (fence) vkDestroyFence(dev, fence, nullptr);
-        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul,pMP }) if (p) vkDestroyPipeline(dev, p, nullptr);
-        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul,mMP }) if (m) vkDestroyShaderModule(dev, m, nullptr);
-        for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB,ploI4,ploI5,ploI18,ploGrad5,ploGradP,ploMP }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
-        for (VkDescriptorSetLayout d : { dsl3,dsl4,dsl5,dsl18,dsl24,dsl12 }) if (d) vkDestroyDescriptorSetLayout(dev, d, nullptr);
+        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul,pMP,pFMP,pMM }) if (p) vkDestroyPipeline(dev, p, nullptr);
+        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul,mMP,mFMP,mMM }) if (m) vkDestroyShaderModule(dev, m, nullptr);
+        for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB,ploI4,ploI5,ploI18,ploGrad5,ploGradP,ploMP,ploFMP,ploMM }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
+        for (VkDescriptorSetLayout d : { dsl3,dsl4,dsl5,dsl18,dsl24,dsl12,dsl6 }) if (d) vkDestroyDescriptorSetLayout(dev, d, nullptr);
         sPool = rPool = VK_NULL_HANDLE; fence = VK_NULL_HANDLE; pipes_ready = false;
     }
 };
@@ -669,12 +733,23 @@ bool XtbVulkanContext::gradient(const double* eps, int nocc_orbs, const double* 
 }
 bool XtbVulkanContext::beginMultipoleComputed()
 {
-    return m_impl && m_impl->vkc.ok() && m_impl->computeMultipole();
+    return m_impl && m_impl->vkc.ok() && m_impl->beginResidentMP();
 }
 bool XtbVulkanContext::downloadMultipole(double* dp_int3, double* qp_int6)
 {
     if (!m_impl || !m_impl->vkc.ok() || !dp_int3 || !qp_int6) return false;
     return m_impl->downloadMP(dp_int3, qp_int6);
+}
+bool XtbVulkanContext::solveMultipole(const double* v_ao, const double* v_dp,
+                                      const double* v_qp, double* eps_out)
+{
+    if (!m_impl || !m_impl->vkc.ok() || !v_ao || !v_dp || !v_qp || !eps_out) return false;
+    return m_impl->residentSolveMP(v_ao, v_dp, v_qp, eps_out);
+}
+bool XtbVulkanContext::multipoleMoments(double* dp_at, double* qp_at)
+{
+    if (!m_impl || !m_impl->vkc.ok() || !dp_at || !qp_at) return false;
+    return m_impl->multipoleMomentsImpl(dp_at, qp_at);
 }
 
 } // namespace gpu

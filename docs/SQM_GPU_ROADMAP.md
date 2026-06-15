@@ -20,7 +20,7 @@ and is correct at every step. Stage numbers below match the CUDA stages in
 | 3 integrals on device — isotropic (CN/S/H0/L/γ) | ✅ | ✅ | ✅ |
 | 4 nuclear gradient on device — GFN1 | ✅ | ✅ | ✅ (V-AP1, gather kernels) |
 | 3m integrals on device — GFN2 multipole (dp/qp) | ✅ | ✅ (R-AP1) | ✅ (V-AP2) |
-| 2b GFN2 device-resident multipole SCF | ✅ | ❌ **R-AP2** | ❌ **V-AP3** |
+| 2b GFN2 device-resident multipole SCF | ✅ | ✅ (R-AP2) | ✅ (V-AP3) |
 | 4m nuclear gradient on device — GFN2 multipole | ✅ | ❌ **R-AP3** | ❌ **V-AP4** |
 | 5/6 device GFN2 potential + fully resident loop | ✅ | ❌ **R-AP4** (opt) | ❌ **V-AP5** (opt) |
 | GFN-FF on the GPU | partial | ❌ **R-AP5 / V-AP6** | ❌ |
@@ -108,16 +108,29 @@ multipole SCF + multipole gradient, GFN-FF, and device solvation. The s/p-only l
   `cli_gpu_multipole_01_vulkan_gfn2_multipole`.
 - **Depends on**: nothing (independent of V-AP1). Next: V-AP3 (resident multipole SCF).
 
-### V-AP3 — GFN2 device-resident multipole SCF (Stage 2b)
+### V-AP3 — GFN2 device-resident multipole SCF (Stage 2b) — ✅ DONE (2026-06)
 - **Goal**: flip `supportsMultipole()→true` so GFN2 enters the resident loop instead of
   falling back to the Stage-1 eigensolver; keep the anisotropic channel on the device.
-- **Port from**: CUDA `solveMultipole` (isotropic Fock **+** `F −= ½·Σ_k(dp_int[k]·v_dp +
-  qp_int[k]·v_qp)`) and `multipoleMoments` (atomic dp/qp moments via per-AO `atomicAdd`
-  scatter). The multipole *potential* (`v_dp`/`v_qp` from the moments) stays on the host as
-  in CUDA — only `v_dp`(3·nat)/`v_qp`(6·nat) up, `dp_at`/`qp_at`(9·nat) down per iteration.
-- **New/changed**: SPIR-V `fock_multipole` + `multipole_moments` shaders;
-  `beginMultiple`/`beginMultipoleComputed` resident hooks in `VulkanScfBackend`.
-- **Depends on**: V-AP2 (needs the resident `dp_int`/`qp_int`).
+- **Done**: SPIR-V `fock_multipole` (adds `F −= ½·Σ_k(dp_int[k]·v_dp + qp_int[k]·v_qp)` to
+  the resident isotropic Fock, one thread per AO pair) + `multipole_moments` (atomic
+  dp_at/qp_at — per-atom GATHER, no FP64 atomics). `XtbVulkanContext::{solveMultipole,
+  multipoleMoments, beginMultipoleComputed}` reuse the GFN1 resident Löwdin+Jacobi solve
+  with the extra Fock term; v_dp/v_qp/dp_at/qp_at buffers + sets in begBasis. The SCF loop
+  in `xtb_native.cpp` is method-agnostic (already drove the CUDA resident multipole path),
+  so no loop change. Only `v_dp`(3·nat)/`v_qp`(6·nat) up, `dp_at`/`qp_at` + eps down per
+  iteration (no nao² eigensolver transfer).
+- **Gradient gotcha (fixed)**: making GFN2 resident sets `use_gpu_resident=true`, which
+  routed GFN2 through `calculateGradientGpu` → the GFN1-only device `gradient()` (missing
+  the multipole-integral Pulay). Fix: the device `gradient()` returns false for GFN2
+  (non-empty v_dp/v_qp) → falls back to the full **host** `calculateGradient` (V-AP4 pending).
+- **Validated** (AMD 890M / RADV): gfn2 `-sp` energy bit-identical (8 dp) over the
+  12-molecule set incl. 231-atom `complex`; gfn2 `-sp` gradient norm matches CPU; gfn2
+  `-opt` (NH3) step-by-step identical. **Honest: NOT a speed-up on this iGPU** — the FP64
+  Jacobi eigensolve dominates (GFN1, already resident, is also ~1.3× the CPU on `complex`);
+  the removed per-iteration transfers are cheap shared-memory copies on an iGPU, not PCIe.
+  V-AP3 is the correct architecture + the prerequisite for V-AP4 and the discrete-GPU win;
+  the iGPU speed lever is an **FP32 eigensolve** (see "FP32 mixed precision" below).
+- **Depends on**: V-AP2 (resident `dp_int`/`qp_int`). Next: V-AP4 (GFN2 device gradient).
 
 ### V-AP4 — GFN2 nuclear gradient incl. multipole (Stage 4m)
 - **Goal**: device-resident GFN2 `-opt`/`-md`.
@@ -162,11 +175,17 @@ rocBLAS/rocSOLVER cover the dense linear algebra and the isotropic `.hiph` alrea
   identical trajectory. (CLI-validated like the other ROCm stages; no ctest harness.)
 - **Depends on**: nothing. Next: R-AP2 (resident multipole SCF).
 
-### R-AP2 — GFN2 device-resident multipole SCF (Stage 2b)
-- **Goal**: GFN2 enters a device-resident loop (today it uses device integrals + the
-  Stage-1 rocSOLVER eigensolver per iteration with the host assembling the multipole Fock).
-- **Port from**: CUDA `solveMultipole` + `multipoleMoments` (HIP kernels + rocBLAS).
-- **Depends on**: R-AP1.
+### R-AP2 — GFN2 device-resident multipole SCF (Stage 2b) — ✅ DONE (2026-06)
+- **Goal**: GFN2 enters a device-resident loop instead of the Stage-1 eigensolver.
+- **Done**: `k_add_fock_multipole` + `k_multipole_moments` (verbatim CUDA ports — HIP has
+  `atomicAdd(double)`, so the moment scatter is direct) added to `xtb_hip_context.hip`;
+  `XtbHipContext::{solveMultipole, multipoleMoments, beginMultipoleComputed}` reuse the
+  GFN1 resident `k_fock` + rocSOLVER `dsygvd` with the extra Fock term. Same shared host
+  plumbing + gradient fix as V-AP3 (GFN2 gradient stays on the host; the device `gradient()`
+  returns false for GFN2). Validated on gfx1150: gfn2 `-sp` energy bit-identical + gradient
+  norm matches CPU; gfn2 `-opt` (NH3) step-by-step identical. Same iGPU honest note as V-AP3
+  (eigensolve-bound, not a speed-up; FP32 is the lever).
+- **Depends on**: R-AP1. Next: R-AP3 (GFN2 device gradient).
 
 ### R-AP3 — GFN2 nuclear gradient incl. multipole (Stage 4m)
 - **Goal**: device-resident GFN2 `-opt`/`-md` (GFN2 gradient is on the host today).
@@ -199,11 +218,30 @@ rocBLAS/rocSOLVER cover the dense linear algebra and the isotropic `.hiph` alrea
   (device-vs-CPU elementwise). Run `compute-sanitizer`-equivalent (`rocgdb`/RADV
   validation layers) where available.
 
+### X-AP3 — FP32 mixed-precision eigensolve (the iGPU speed lever) — *highest ROI for speed*
+- **Why**: residency (V-AP3/R-AP2) is correct but does **not** beat the CPU on the AMD 890M
+  because the **FP64** Jacobi eigensolve dominates (GFN1, fully resident, is also ~1.3× the
+  CPU on `complex`). Consumer/iGPU FP64 runs at ~1/16 of FP32, so an FP32 eigensolve far
+  from convergence (FP64 only for the final iterations) is the real speed-up — potentially
+  >10× on the eigensolve, which is most of the SCF.
+- **Already plumbed**: `-scf_mixed_precision` (+ `-scf_fp32_threshold`) sets `m_eig_fp32`
+  per iteration; the SCF loop already passes it into `solve()`/`solveMultipole()`. **CUDA
+  honors it** (FP32 cusolver early). The **Vulkan/ROCm adapters currently ignore the `fp32`
+  flag** (`(void)fp32`) — that is the only gap.
+- **Vulkan**: FP32 variants of the resident-SCF shaders — at minimum the two-sided Jacobi
+  (`angles`/`col`/`row`/`vec`), ideally also `fock`/`gemm`/`scale_cols`/`fock_multipole` —
+  with an FP32 work buffer; convert Ã (FP64→FP32) before the FP32 Jacobi, eps/C̃ back to
+  FP64. **ROCm**: trivial — call `rocsolver_ssygvd` (FP32) with an FP32 copy of F/S when
+  `fp32`. Opt-in; the converged energy matches FP64 within `scf_threshold` (NOT bit-
+  identical, since the early FP32 iterations differ — same contract as the CUDA FP32 path).
+- **Depends on**: nothing (orthogonal to the GFN2 stack). Independent per backend.
+
 ## Suggested order
 
 1. ~~**V-AP1** (Vulkan GFN1 gradient) — closes the only Vulkan↔ROCm asymmetry.~~ ✅ DONE (2026-06).
-2. ~~**R-AP1 + V-AP2** (GFN2 multipole integrals, both backends) — shared port.~~ ✅ DONE
-   (2026-06). **Next up:** step 3.
-3. **R-AP2 + V-AP3** (resident multipole SCF) → **R-AP3 + V-AP4** (GFN2 gradient).
-4. **X-AP1** (device solvation, interim host-`v_ao` form is cheap) alongside step 3.
-5. **GFN-FF** (R-AP5 / V-AP6) and the **Stage 5/6** APs last (largest / lowest measured ROI).
+2. ~~**R-AP1 + V-AP2** (GFN2 multipole integrals, both backends) — shared port.~~ ✅ DONE (2026-06).
+3. ~~**R-AP2 + V-AP3** (resident multipole SCF) — correct but iGPU-eigensolve-bound.~~ ✅ DONE (2026-06).
+4. **X-AP3** (FP32 mixed-precision eigensolve) — the actual iGPU speed lever; plumbing already
+   exists, only the backend `fp32` path is missing. **Recommended next** if speed is the goal.
+5. **R-AP3 + V-AP4** (GFN2 device gradient) → device-resident GFN2 `-opt`/`-md`.
+6. **X-AP1** (device solvation), **GFN-FF** (R-AP5 / V-AP6), **Stage 5/6** last.
