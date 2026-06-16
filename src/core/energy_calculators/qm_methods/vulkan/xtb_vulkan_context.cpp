@@ -28,6 +28,7 @@
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -63,6 +64,13 @@ inline double triSign(double a, double b) { return (b >= 0.0) ? std::fabs(a) : -
 // connects rows k,k+1). On success eval[n] is ascending and Zcol[n*n] (column-major) holds
 // the matching tridiagonal eigenvectors. Robust to degeneracies (full rotation accumulation),
 // so no inverse-iteration clustering pitfalls. Ported from native_eigensolver.cpp. Claude Generated.
+//
+// This O(n³) eigenvector accumulation is the remaining serial phase of the GPU eigensolver
+// (~75 ms/iter on `complex`/558 after the GPU tridiag + back-transform; EIG-1/EIG-2A). It is
+// memory-bandwidth-bound (Givens z-update arithmetic intensity ~0.2 flop/byte), so host
+// threading it gives only ~1.3× even at 16 threads on the shared-DDR iGPU and no net
+// eigensolve win — a GPU divide-and-conquer eigenvector solve is the real (high-effort)
+// lever (WP EIG-3b). Kept single-threaded and pedagogically clear. Claude Generated.
 inline bool cpuTriEig(int n, const double* diag, const double* off, double* eval, double* Zcol) {
     std::vector<double> d(diag, diag + n), e(n, 0.0), z((size_t)n * n, 0.0);
     for (int k = 0; k < n - 1; ++k) e[k + 1] = off[k];
@@ -129,14 +137,18 @@ struct XtbVulkanContext::Impl {
     // X-AP3: FP32 Jacobi (same dsl3 + 12B push as the FP64 Jacobi, so they reuse ploJ).
     VkShaderModule mAng32{}, mCol32{}, mRow32{}, mVec32{};
     VkPipeline pAng32{}, pCol32{}, pRow32{}, pVec32{};
-    // GPU Householder-tridiagonalization eigensolver (replaces the Jacobi). All three
-    // shaders are 3-SSBO + 12B push, so they reuse ploJ. Self-contained buffers + sets.
-    VkShaderModule mTMV{}, mTR2{}, mTAL{};
-    VkPipeline pTMV{}, pTR2{}, pTAL{};
+    // GPU Householder-tridiagonalization eigensolver (replaces the Jacobi). tri_house/
+    // tri_matvec/tri_rank2/tri_applyl are 3-SSBO + 12B push (reuse ploJ); tri_kw is 4-SSBO
+    // + 12B push (ploT4). EIG-1 puts the whole per-column reduction on the GPU (tri_house +
+    // tri_kw fold the former host ‖x‖/pᵀv reductions in), so no per-step fence sync.
+    VkShaderModule mTMV{}, mTR2{}, mTAL{}, mTHou{}, mTKW{};
+    VkPipeline pTMV{}, pTR2{}, pTAL{}, pTHou{}, pTKW{};
+    VkPipelineLayout ploT4 = VK_NULL_HANDLE;        // dsl4 + 12B push (tri_kw)
     int tn = 0;
-    Buf tA, tV, tBeta, tP, tW, tZ;                 // working matrix / Householder vecs / β / praw / w / eigenvectors
+    // scal holds diag[0,n) / off[n,2n) (subdiagonal α) / β[2n,3n) for the reduction.
+    Buf tA, tV, tScal, tP, tW, tZ;                 // working matrix / Householder vecs / diag+off+β / praw / w / eigenvectors
     VkDescriptorPool tPool = VK_NULL_HANDLE;
-    VkDescriptorSet tMV{}, tR2{}, tAL{};
+    VkDescriptorSet tHou{}, tMV{}, tKW{}, tR2{}, tAL{};
     bool m_use_tridiag = true;                     // GPU eigensolver: tridiag (default) vs cyclic Jacobi (CURCUMA_VK_EIGEN=jacobi)
     // Stage 3 integral pipelines.
     VkDescriptorSetLayout dsl5 = VK_NULL_HANDLE, dsl18 = VK_NULL_HANDLE;
@@ -287,11 +299,16 @@ struct XtbVulkanContext::Impl {
         mRow32 = mod(row_f32_spv, sizeof(row_f32_spv));       mVec32 = mod(vec_f32_spv, sizeof(vec_f32_spv));
         pAng32 = pipe(mAng32, ploJ); pCol32 = pipe(mCol32, ploJ); pRow32 = pipe(mRow32, ploJ); pVec32 = pipe(mVec32, ploJ);
         if (!pAng32 || !pCol32 || !pRow32 || !pVec32) return false;
-        // GPU tridiagonalization eigensolver kernels (reuse ploJ — 3 SSBO + 12B push).
+        // GPU tridiagonalization eigensolver kernels. tri_matvec/rank2/applyl/house reuse
+        // ploJ (3 SSBO + 12B push); tri_kw needs ploT4 (4 SSBO + 12B push).
+        ploT4 = makePl(dsl4, 12);
+        if (!ploT4) return false;
         mTMV = mod(tri_matvec_spv, sizeof(tri_matvec_spv)); mTR2 = mod(tri_rank2_spv, sizeof(tri_rank2_spv));
         mTAL = mod(tri_applyl_spv, sizeof(tri_applyl_spv));
+        mTHou = mod(tri_house_spv, sizeof(tri_house_spv)); mTKW = mod(tri_kw_spv, sizeof(tri_kw_spv));
         pTMV = pipe(mTMV, ploJ); pTR2 = pipe(mTR2, ploJ); pTAL = pipe(mTAL, ploJ);
-        if (!pTMV || !pTR2 || !pTAL) return false;
+        pTHou = pipe(mTHou, ploJ); pTKW = pipe(mTKW, ploT4);
+        if (!pTMV || !pTR2 || !pTAL || !pTHou || !pTKW) return false;
         if (!pAng || !pCol || !pRow || !pVec || !pGemm || !pScale || !pFock || !pPB) return false;
         // Stage 3 integral kernels: cn/gamma use 4 SSBO + 8B push (shared layout), self_energy
         // 5 SSBO + 4B, overlap_h0 18 SSBO + 12B.
@@ -436,20 +453,24 @@ struct XtbVulkanContext::Impl {
     bool ensureTri(int n) {
         if (n == tn && tA.buf) return true;
         if (tPool) { vkDestroyDescriptorPool(dev, tPool, nullptr); tPool = VK_NULL_HANDLE; }
-        for (Buf* b : { &tA, &tV, &tBeta, &tP, &tW, &tZ }) freeBuf(*b);
+        for (Buf* b : { &tA, &tV, &tScal, &tP, &tW, &tZ }) freeBuf(*b);
         tn = n;
         const VkDeviceSize NN = sizeof(double) * (size_t)n * n;
         tA = makeBuf(NN); tV = makeBuf(NN); tZ = makeBuf(NN);
-        tBeta = makeBuf(sizeof(double) * n); tP = makeBuf(sizeof(double) * n); tW = makeBuf(sizeof(double) * n);
-        for (Buf* b : { &tA, &tV, &tBeta, &tP, &tW, &tZ }) if (!b->buf) return false;
-        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 9 };
+        tScal = makeBuf(sizeof(double) * 3 * (size_t)n);   // diag / off / β
+        tP = makeBuf(sizeof(double) * n); tW = makeBuf(sizeof(double) * n);
+        for (Buf* b : { &tA, &tV, &tScal, &tP, &tW, &tZ }) if (!b->buf) return false;
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 20 };
         VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        dpi.maxSets = 3; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
+        dpi.maxSets = 6; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
         if (vkCreateDescriptorPool(dev, &dpi, nullptr, &tPool) != VK_SUCCESS) return false;
-        tMV = allocSet(tPool, dsl3); tR2 = allocSet(tPool, dsl3); tAL = allocSet(tPool, dsl3);
-        bindSet(tMV, { &tA, &tV, &tP });      // tri_matvec : praw = A_sub·v
-        bindSet(tR2, { &tA, &tV, &tW });      // tri_rank2  : A_sub -= v wᵀ + w vᵀ
-        bindSet(tAL, { &tZ, &tV, &tBeta });   // tri_applyl : Z -= β v (vᵀZ)
+        tHou = allocSet(tPool, dsl3); tMV = allocSet(tPool, dsl3); tKW = allocSet(tPool, dsl4);
+        tR2 = allocSet(tPool, dsl3);  tAL = allocSet(tPool, dsl3);
+        bindSet(tHou, { &tA, &tV, &tScal });        // tri_house  : v + diag[k]/off[k]/β[k]
+        bindSet(tMV,  { &tA, &tV, &tP });            // tri_matvec : praw = A_sub·v
+        bindSet(tKW,  { &tP, &tV, &tScal, &tW });    // tri_kw     : w = β·praw − K·v
+        bindSet(tR2,  { &tA, &tV, &tW });            // tri_rank2  : A_sub -= v wᵀ + w vᵀ
+        bindSet(tAL,  { &tZ, &tV, &tScal });         // tri_applyl : Z -= β v (vᵀZ)
         return true;
     }
     // Standard symmetric eigensolve: Ain (column-major n×n) → eps_out ascending, Vout columns.
@@ -458,53 +479,71 @@ struct XtbVulkanContext::Impl {
         double* A = (double*)tA.ptr;
         std::memcpy(A, Ain, sizeof(double) * (size_t)n * n);
         if (n == 1) { eps_out[0] = A[0]; Vout[0] = 1.0; return true; }
-        double* V = (double*)tV.ptr; double* betas = (double*)tBeta.ptr;
-        double* praw = (double*)tP.ptr; double* w = (double*)tW.ptr;
+        double* scal = (double*)tScal.ptr;
         std::vector<double> diag(n, 0.0), off(std::max(1, n - 1), 0.0);
-        // Householder reduction: zero column k below the subdiagonal, k = 0 … n-3.
+        // Phase profiling (CURCUMA_VK_EIG_PROFILE) for the eigensolver WP.
+        static const bool prof = std::getenv("CURCUMA_VK_EIG_PROFILE") != nullptr;
+        using pclk = std::chrono::steady_clock;
+        auto pms = [](pclk::time_point a, pclk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        const auto tp0 = pclk::now();
+        // EIG-1: fully-GPU Householder reduction. Each column k records tri_house (build v,
+        // diag[k], off[k]=α, β[k]) → tri_matvec (praw = A_sub·v) → tri_kw (w = β·praw − K·v)
+        // → tri_rank2 (A_sub -= v wᵀ + w vᵀ); all scalars stay in tScal so the host is out of
+        // the loop. Recorded into timeout-safe chunks (jacobiRoundsPerSubmit budget) instead
+        // of the former 2·(n-2) blocking submits. Claude Generated.
+        const int rps = jacobiRoundsPerSubmit(n);
+        int nsub_tri = 0, since = 0; bool open = false;
         for (int k = 0; k < n - 2; ++k) {
             const int m = n - k - 1;
-            diag[k] = A[k + (size_t)k * n];
-            double* vcol = V + (size_t)k * n;
-            double xnorm2 = 0.0;
-            for (int i = 0; i < m; ++i) { double xi = A[(k + 1 + i) + (size_t)k * n]; vcol[i] = xi; xnorm2 += xi * xi; }
-            const double x0 = vcol[0], xnorm = std::sqrt(xnorm2);
-            if (xnorm == 0.0) { off[k] = 0.0; betas[k] = 0.0; continue; }   // H_k = I
-            const double alpha = (x0 >= 0.0) ? -xnorm : xnorm;
-            off[k] = alpha;
-            vcol[0] = x0 - alpha;
-            const double vtv = xnorm2 - x0 * x0 + vcol[0] * vcol[0];
-            const double beta = (vtv > 0.0) ? 2.0 / vtv : 0.0;
-            betas[k] = beta;
+            if (!open) { if (!beginCmd()) return false; open = true; since = 0; }
             uint32_t pc[3] = { (uint32_t)n, (uint32_t)k, (uint32_t)m };
-            if (!dispatch1(pTMV, ploJ, tMV, pc, 12, (uint32_t)(m + 63) / 64, 1)) return false;  // praw = A_sub·v
-            double pdotv = 0.0; for (int i = 0; i < m; ++i) pdotv += praw[i] * vcol[i];
-            const double K = beta * beta * pdotv * 0.5;
-            for (int i = 0; i < m; ++i) w[i] = beta * praw[i] - K * vcol[i];
+            vkCmdPushConstants(cmd, ploJ, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &tHou, 0, nullptr);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pTHou); vkCmdDispatch(cmd, 1, 1, 1); barrier();
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &tMV, 0, nullptr);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pTMV); vkCmdDispatch(cmd, (uint32_t)(m + 63) / 64, 1, 1); barrier();
+            vkCmdPushConstants(cmd, ploT4, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploT4, 0, 1, &tKW, 0, nullptr);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pTKW); vkCmdDispatch(cmd, 1, 1, 1); barrier();
+            vkCmdPushConstants(cmd, ploJ, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &tR2, 0, nullptr);
             const uint32_t gm = (uint32_t)(m + 7) / 8;
-            if (!dispatch1(pTR2, ploJ, tR2, pc, 12, gm, gm)) return false;                       // A_sub -= v wᵀ + w vᵀ
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pTR2); vkCmdDispatch(cmd, gm, gm, 1); barrier();
+            if (++since >= rps) { if (!submit()) return false; open = false; ++nsub_tri; }
         }
+        if (open) { if (!submit()) return false; ++nsub_tri; }
+        // diag/off built on the GPU; read them back (one shot, no per-step sync). The trailing
+        // 2×2 block lives in A (untouched by the reflectors after step n-3).
+        for (int i = 0; i < n - 2; ++i) { diag[i] = scal[i]; off[i] = scal[n + i]; }
         diag[n - 2] = A[(n - 2) + (size_t)(n - 2) * n];
         off[n - 2]  = A[(n - 1) + (size_t)(n - 2) * n];
         diag[n - 1] = A[(n - 1) + (size_t)(n - 1) * n];
+        const auto tp1 = pclk::now();
         double* Z = (double*)tZ.ptr;
         if (!cpuTriEig(n, diag.data(), off.data(), eps_out, Z)) return false;   // tql2 → eps + Z (resident)
+        const auto tp2 = pclk::now();
         // Back-transform C = Q·Z = H_0·…·H_{n-3}·Z: apply reflectors k = n-3 … 0, batched
-        // (timeout-safe chunks) since v/β are resident and the dispatches are pure-GPU.
-        const int rps = jacobiRoundsPerSubmit(n);
-        int since = 0; bool open = false;
+        // (timeout-safe chunks) since v/β are resident and the dispatches are pure-GPU. EIG-2A:
+        // one workgroup per Z column (dispatch n workgroups, shared-memory vᵀZ reduction +
+        // parallel rank-1 update) instead of one thread per column. β read from tScal[2n+k].
+        int nsub_back = 0; since = 0; open = false;
         for (int k = n - 3; k >= 0; --k) {
-            if (betas[k] == 0.0) continue;            // H_k = I (degenerate column)
+            if (scal[2u * (size_t)n + k] == 0.0) continue;   // β_k == 0 → H_k = I (degenerate column)
             const int m = n - k - 1;
             if (!open) { if (!beginCmd()) return false; open = true; since = 0; }
             uint32_t pc[3] = { (uint32_t)n, (uint32_t)k, (uint32_t)m };
             vkCmdPushConstants(cmd, ploJ, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &tAL, 0, nullptr);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pTAL);
-            vkCmdDispatch(cmd, (uint32_t)(n + 63) / 64, 1, 1); barrier();
-            if (++since >= rps) { if (!submit()) return false; open = false; }
+            vkCmdDispatch(cmd, (uint32_t)n, 1, 1); barrier();
+            if (++since >= rps) { if (!submit()) return false; open = false; ++nsub_back; }
         }
-        if (open && !submit()) return false;
+        if (open) { if (!submit()) return false; ++nsub_back; }
+        if (prof) {
+            const auto tp3 = pclk::now();
+            fprintf(stderr, "[EIGPROF] n=%d tridiag=%.1f (submits=%d) tql2=%.1f back=%.1f (submits=%d) total=%.1f ms\n",
+                    n, pms(tp0, tp1), nsub_tri, pms(tp1, tp2), pms(tp2, tp3), nsub_back, pms(tp0, tp3));
+        }
         std::memcpy(Vout, Z, sizeof(double) * (size_t)n * n);
         return true;
     }
@@ -969,11 +1008,11 @@ struct XtbVulkanContext::Impl {
         if (rPool) vkDestroyDescriptorPool(dev, rPool, nullptr);
         if (tPool) vkDestroyDescriptorPool(dev, tPool, nullptr);
         freeBasis();
-        for (Buf* b : { &sA,&sV,&sP,&sC,&rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs,&rAtil32,&rCtil32,&rCs32,&tA,&tV,&tBeta,&tP,&tW,&tZ }) freeBuf(*b);
+        for (Buf* b : { &sA,&sV,&sP,&sC,&rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs,&rAtil32,&rCtil32,&rCs32,&tA,&tV,&tScal,&tP,&tW,&tZ }) freeBuf(*b);
         if (fence) vkDestroyFence(dev, fence, nullptr);
-        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul,pMP,pFMP,pMM,pAng32,pCol32,pRow32,pVec32,pTMV,pTR2,pTAL }) if (p) vkDestroyPipeline(dev, p, nullptr);
-        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul,mMP,mFMP,mMM,mAng32,mCol32,mRow32,mVec32,mTMV,mTR2,mTAL }) if (m) vkDestroyShaderModule(dev, m, nullptr);
-        for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB,ploI4,ploI5,ploI18,ploGrad5,ploGradP,ploMP,ploFMP,ploMM }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
+        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul,pMP,pFMP,pMM,pAng32,pCol32,pRow32,pVec32,pTMV,pTR2,pTAL,pTHou,pTKW }) if (p) vkDestroyPipeline(dev, p, nullptr);
+        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul,mMP,mFMP,mMM,mAng32,mCol32,mRow32,mVec32,mTMV,mTR2,mTAL,mTHou,mTKW }) if (m) vkDestroyShaderModule(dev, m, nullptr);
+        for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB,ploI4,ploI5,ploI18,ploGrad5,ploGradP,ploMP,ploFMP,ploMM,ploT4 }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
         for (VkDescriptorSetLayout d : { dsl3,dsl4,dsl5,dsl18,dsl26,dsl12,dsl6 }) if (d) vkDestroyDescriptorSetLayout(dev, d, nullptr);
         sPool = rPool = tPool = VK_NULL_HANDLE; fence = VK_NULL_HANDLE; pipes_ready = false;
     }

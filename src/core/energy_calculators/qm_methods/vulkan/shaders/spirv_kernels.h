@@ -100,6 +100,14 @@ static const uint32_t tri_rank2_spv[] =
 static const uint32_t tri_applyl_spv[] =
 #include "tri_applyl.spv.inc"
 ;
+// EIG-1: fully-GPU reduction — per-column reflector build (tri_house) + w-vector build
+// (tri_kw), so the host stays out of the per-column loop (no per-step fence sync).
+static const uint32_t tri_house_spv[] =
+#include "tri_house.spv.inc"
+;
+static const uint32_t tri_kw_spv[] =
+#include "tri_kw.spv.inc"
+;
 
 } // namespace shaders
 } // namespace vk
