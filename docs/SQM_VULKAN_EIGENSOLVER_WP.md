@@ -10,10 +10,30 @@ FP32-mixed).
 
 > 🤖 AI-generated plan. Items are proposals with estimated gains; numbers are measured on a
 > Radeon 890M (RADV) unless noted. Only ✅ TESTED/APPROVED by the operator are validated.
+> ⚠️ The CPU/GPU clocks were raised mid-development and the box runs other jobs — **only
+> trust fresh, same-session, back-to-back numbers**; cross-session ms are not comparable.
 
 ---
 
-## 0. Measured baseline (EIG-0 — DONE)
+## Progress (2026-06-16)
+
+| item | status | note |
+|------|--------|------|
+| EIG-0 profiling hook | ✅ | `CURCUMA_VK_EIG_PROFILE=1` |
+| EIG-1 fully-GPU tridiagonalization | ✅ DONE | `tri_house`+`tri_kw` fold the host ‖x‖/pᵀv reductions onto the GPU; tridiag fence syncs **1112 → 3** for n=558 |
+| EIG-2A workgroup-per-column back-transform | ✅ DONE | `tri_applyl` 256-lane shared reduction; submits → 3 |
+| EIG-3 tql2 | open | sequential host O(n³); not a clean win (see below) |
+| EIG-4 FP32 mixed precision | open | the real remaining lever; gain uncertain on this iGPU |
+
+**Fresh same-clock (`complex`/231 GFN2 `-sp`, shared box ⇒ ±noise), eigensolve/iter & total:**
+cyclic Jacobi 3016 ms / 61 s → tridiag (EIG-1+2A) **161 ms / 4.35 s** (18.7×) → ROCm 66 ms / 1.67 s.
+Per-phase (`EIGPROF`, fresh): tridiag **69 ms**, host tql2 **29 ms**, back-transform **30 ms**
+(= 128 ms standard eigensolve; the `solve eigen` timer's extra ~33 ms is the X·F·X / X·C̃ GEMMs).
+**Remaining gap to ROCm is ~2.4×, now algorithmic (FP32 + tql2), not a bug.**
+
+---
+
+## 0. Original baseline (EIG-0 — DONE; numbers below predate the clock bump)
 
 Per-phase timing is wired behind `CURCUMA_VK_EIG_PROFILE=1` (prints one `[EIGPROF]` line
 per `solveSymTridiag` call). `complex`/231, GFN2 `-sp`, n=558, steady-state SCF iteration:
@@ -33,7 +53,12 @@ back-transform is **occupancy-bound**; tql2 is **single-core-bound**.
 
 ## 1. Work items
 
-### EIG-1 — Fully-GPU tridiagonalization (kill the 1112 fence syncs) — biggest win
+### EIG-1 — Fully-GPU tridiagonalization (kill the 1112 fence syncs) — ✅ DONE (2026-06-16)
+Implemented as designed: `tri_house` + `tri_kw` (one-workgroup shared-memory reductions)
+fold the host ‖x‖/pᵀv reductions onto the GPU; scalars live in the combined `tScal`
+buffer `[diag|off|β]`; `tri_house→tri_matvec→tri_kw→tri_rank2` record into chunked
+submits. Fence syncs **1112 → 3** (n=558). Correctness unchanged (residual 3.2e-14).
+
 **Problem:** the hybrid does the O(n) reductions on the host (via the mapped coherent
 buffers), so each Householder step needs the GPU result back before the host can build `w`,
 forcing 2 blocking submits/step.
@@ -53,7 +78,11 @@ Jacobi):
 **Effort:** medium (2 small reduction kernels + reorchestration). **Risk:** low — FP64
 reduction order changes ~1e-13; validate with `CURCUMA_VK_TEST_TRIDIAG`.
 
-### EIG-2 — Parallelize the reflector back-transform — second win
+### EIG-2A — Parallelize the reflector back-transform — ✅ DONE (2026-06-16)
+Option A implemented: `tri_applyl` is now one workgroup (256 lanes) per Z column with a
+shared-memory tree reduction of `vᵀZ` + parallel rank-1 update; submits batch to 3.
+(Option B / WY-blocked GEMM back-transform remains a possible future refinement.)
+
 **Problem:** `tri_applyl` is one-thread-per-column with a serial length-m inner loop (same
 underutilization the gradient had before V-AP6).
 
@@ -82,6 +111,12 @@ underutilization the gradient had before V-AP6).
 **Expected: 73 → ~30 ms (a) / ~20 ms (b).** **Effort:** (a) low / (b) high. **Risk:** (a)
 low / (b) medium-high (correctness on clustered eigenvalues).
 
+> **Re-scope (2026-06-16):** fresh-measured tql2 is now only **~29 ms** (the smallest of the
+> three phases). Option (a) threads a per-QL-iteration O(n) Givens loop — fine-grained, so the
+> pool overhead likely eats the gain; (b) is high-effort/high-risk. **Defer EIG-3** unless EIG-4
+> lands and tql2 becomes the critical path. The biggest remaining lever is the **GPU** work
+> (tridiag 69 + back 30 = 99 ms) → **EIG-4**.
+
 ### EIG-4 — FP32 mixed precision (parallels ROCm's lever) — do after EIG-1/2
 Once the GPU phases are batched, add FP32 variants of `tri_house`/`tri_matvec`/`tri_rank2`/
 `tri_applyl` (+ FP32 tql2) used while `max|dq| > scf_fp32_threshold`, reverting to FP64 near
@@ -97,18 +132,22 @@ near convergence, energy stays FP64).
 
 ## 2. Suggested order & target
 
-1. **EIG-1** (166→~30 ms) — biggest, and a prerequisite for EIG-4.
-2. **EIG-2A** (100→~35 ms) — quick, reuses the V-AP6 reduction pattern.
-3. **EIG-4** (FP32) — multiplies the EIG-1/2 gains.
-4. **EIG-3a** (73→~30 ms) — only if tql2 is still on the critical path.
+1. ~~**EIG-1**~~ ✅ — biggest, prerequisite for EIG-4.
+2. ~~**EIG-2A**~~ ✅ — reused the V-AP6 reduction pattern.
+3. **EIG-4** (FP32) — the remaining lever (targets the 99 ms of GPU phases).
+4. **EIG-3** — deferred (tql2 now only ~29 ms; see re-scope).
 
-| | now | after EIG-1+2 | + EIG-4 | ROCm |
+Fresh same-clock (`complex` GFN2 `-sp`, shared box):
+
+| | Jacobi (old) | EIG-1+2A (now) | + EIG-4 (est.) | ROCm |
 |--|----|--------------|---------|------|
-| eigensolve / iter | 337 ms | ~110–140 ms | **~70–90 ms** | 70 ms |
-| `complex` GFN2 `-sp` | 8.7 s | ~5–6 s | ~4–5 s | 2.0 s |
+| eigensolve / iter | 3016 ms | **161 ms** | ~100–120 ms | 66 ms |
+| `complex` GFN2 `-sp` | 61 s | **4.35 s** | ~3.5–4 s | 1.67 s |
 
-(The residual gap to ROCm's 2.0 s total beyond the eigensolve is the host integral build /
-γ / D4 — separate, see `docs/SQM_PERF_OPT_WP.md`.)
+(The residual gap to ROCm beyond the eigensolve is the host integral build / γ / D4 —
+separate, see `docs/SQM_PERF_OPT_WP.md`. EIG-4's gain is genuinely uncertain on this iGPU —
+the X-AP3 FP32 Jacobi was net-neutral because it was dispatch-bound; the tridiag is
+memory/ALU-bound so FP32 *should* help, but **validate on a quiet box** before trusting ms.)
 
 ---
 
