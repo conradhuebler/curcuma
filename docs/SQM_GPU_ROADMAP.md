@@ -181,17 +181,30 @@ rocBLAS/rocSOLVER cover the dense linear algebra and the isotropic `.hiph` alrea
   `atomicAdd(double)`, so the moment scatter is direct) added to `xtb_hip_context.hip`;
   `XtbHipContext::{solveMultipole, multipoleMoments, beginMultipoleComputed}` reuse the
   GFN1 resident `k_fock` + rocSOLVER `dsygvd` with the extra Fock term. Same shared host
-  plumbing + gradient fix as V-AP3 (GFN2 gradient stays on the host; the device `gradient()`
-  returns false for GFN2). Validated on gfx1150: gfn2 `-sp` energy bit-identical + gradient
+  plumbing + gradient fix as V-AP3 (GFN2 gradient stayed on the host at R-AP2; R-AP3 below
+  moves it onto the device). Validated on gfx1150: gfn2 `-sp` energy bit-identical + gradient
   norm matches CPU; gfn2 `-opt` (NH3) step-by-step identical. Same iGPU honest note as V-AP3
   (eigensolve-bound, not a speed-up; FP32 is the lever).
 - **Depends on**: R-AP1. Next: R-AP3 (GFN2 device gradient).
 
-### R-AP3 — GFN2 nuclear gradient incl. multipole (Stage 4m)
-- **Goal**: device-resident GFN2 `-opt`/`-md` (GFN2 gradient is on the host today).
-- **Port from**: `d_cgto_multipole_grad_transformed` + SD/DD/SQ direct gradient → HIP, reusing
-  the existing `k_grad_*` skeleton.
-- **Depends on**: R-AP1 (the resident `dp_int`/`qp_int`).
+### R-AP3 — GFN2 nuclear gradient incl. multipole-integral Pulay (Stage 4m) — ✅ DONE (2026-06-16)
+- **Goal**: move the GFN2 multipole-integral Pulay term onto the device so the GFN2 nuclear
+  gradient is device-resident (it joins the GFN1 repulsion/Pulay/Coulomb kernels).
+- **Done**: `d_cgto_multipole_grad_transformed` + helpers (`d_mpg_dGdA`,
+  `d_primitive_multipole_grad`) ported verbatim from the CUDA `.cuh` into
+  `xtb_hip_integrals.hiph`; `k_grad_h0_pulay` extended with the dp/qp-integral derivative term
+  contracted against the converged `v_dp`/`v_qp` (uploaded once per gradient to `dVdp`/`dVqp`);
+  `XtbHipContext::gradient` + `HipScfBackend` thread `v_dp`/`v_qp` through, and the GFN2 dispatch
+  in `xtb_hip_method.cpp` now runs the device gradient (was: return false → host fallback). The
+  multipole SD/DD/SQ **interaction** gradient (§5) + dispersion + CN chain-rule stay on the host.
+- **Validated** (Radeon 890M/gfx1150): with `-scf_mixed_precision false` gfn2 `-sp` gradient norm
+  bit-identical to CPU over `sqm_reference` incl. 231-atom `complex` (reldiff = 0); the
+  ROCm-routed FD gradient check (`test_xtb_gradient`) is byte-identical to the CPU path per
+  molecule (proving device analytic == FD-validated CPU AP5 gradient); gfn2 `-opt` (triose)
+  tracks CPU then diverges in the LBFGS tail exactly like the known-good GFN1 control
+  (eigensolver-backend noise, not R-AP3). `ctest -L native_xtb` 10/10. At the default FP32-mixed
+  path the gradient differs ~1e-7 (the X-AP3 lever).
+- **Depends on**: R-AP1/R-AP2 (the resident `dp_int`/`qp_int` + `v_dp`/`v_qp`).
 
 ### R-AP4 — (optional) device GFN2 potential + fully resident loop (Stage 5/6)
 - Same correctness-not-speed caveat as V-AP5. Defer.

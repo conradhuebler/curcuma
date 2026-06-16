@@ -135,16 +135,16 @@ public:
                   const Eigen::MatrixXd& v_dp, const Eigen::MatrixXd& v_qp,
                   Matrix& grad_out, Vector& dEdcn_out, bool pc_resident) override
     {
-        // GFN1 isotropic: density/MO coefficients are resident (pc_resident), no multipole.
+        // Density/MO coefficients are resident (pc_resident). GFN1: v_dp/v_qp empty (isotropic).
+        // GFN2 (R-AP3): non-empty v_dp/v_qp drive the on-device multipole-integral Pulay term, so
+        // the device gradient is complete for GFN2 too (host then adds §5 SD/DD/SQ + §4 CN + D4).
         (void)P; (void)C; (void)pc_resident;
         if (!m_ctx || m_nat <= 0) return false;
-        // GFN1 only: the device kernels omit the GFN2 multipole-integral Pulay term (R-AP3
-        // pending). For GFN2 (non-empty v_dp/v_qp) return false so the caller falls back to
-        // the full host gradient (the resident GFN2 path made use_gpu_resident=true).
-        if (v_dp.size() > 0 || v_qp.size() > 0) return false;
+        const double* vdp = v_dp.size() > 0 ? v_dp.data() : nullptr;
+        const double* vqp = v_qp.size() > 0 ? v_qp.data() : nullptr;
         std::vector<double> grad(3 * static_cast<size_t>(m_nat), 0.0), dEdcn(m_nat, 0.0);
         if (!m_ctx->gradient(eps.data(), nocc_orbs, v_ao.data(), q_sh.data(),
-                             grad.data(), dEdcn.data()))
+                             vdp, vqp, grad.data(), dEdcn.data()))
             return false;
         grad_out.resize(m_nat, 3);
         for (int i = 0; i < m_nat; ++i) {
@@ -273,11 +273,20 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
             // fixed point and energy stay FP64. Matches the CUDA backend (X-AP3).
             xtb->setMixedPrecision(true);
 
-            if (CurcumaLogger::get_verbosity() >= 2)
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                const bool gfn2 = getMethodName() == "gfn2";
                 CurcumaLogger::info(fmt::format(
-                    "{}: ROCm fully device-resident GFN1 (rocSOLVER + HIP kernels): integral "
-                    "build (CN/S/H0/L/gamma) + SCF + nuclear gradient on the GPU; only the "
-                    "dispersion gradient + CN chain-rule on CPU (Stage 4)", getMethodName()));
+                    gfn2
+                        ? "{}: ROCm fully device-resident (rocSOLVER + HIP kernels): integral "
+                          "build (CN/S/H0/L/gamma + dp/qp multipole) + multipole SCF + nuclear "
+                          "gradient incl. multipole-integral Pulay on the GPU (Stage 4 / R-AP3); "
+                          "only the multipole SD/DD/SQ interaction gradient + dispersion + CN "
+                          "chain-rule on CPU"
+                        : "{}: ROCm fully device-resident (rocSOLVER + HIP kernels): integral "
+                          "build (CN/S/H0/L/gamma) + SCF + nuclear gradient on the GPU; only the "
+                          "dispersion gradient + CN chain-rule on CPU (Stage 4)",
+                    getMethodName()));
+            }
         }
 #else
         if (CurcumaLogger::get_verbosity() >= 2)

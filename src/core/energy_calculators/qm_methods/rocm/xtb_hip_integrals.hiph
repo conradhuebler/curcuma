@@ -315,6 +315,148 @@ __device__ __forceinline__ void d_cgto_multipole(
     }
 }
 
+// ---- GFN2 multipole-integral gradient (Stage 4b, R-AP3) -------------------
+// d/dA of the transformed (origin-at-B, traceless) dipole/quadrupole integrals,
+// the multipole-integral Pulay term of the GFN2 gradient. Verbatim port of the CUDA
+// device helpers (cuda/xtb_gpu_integrals_device.cuh:352-484), restricted to the
+// A-derivatives the kernel needs (B-derivatives are unused: the H0/Pulay loop only
+// takes the iat=A side, dS/dB=-dS/dA).
+
+/// d/dA_l of K·Ix[nx]·Iy[ny]·Iz[nz] (helper for d_primitive_multipole_grad).
+__device__ __forceinline__ double d_mpg_dGdA(
+    int nx, int ny, int nz, int l,
+    const double Ix[3], const double Iy[3], const double Iz[3],
+    const double IxAlo[3], const double IyAlo[3], const double IzAlo[3],
+    const double IxBlo[3], const double IyBlo[3], const double IzBlo[3],
+    double K, const double kfA[3], double aa, double ab, double gamma,
+    int lxa, int lya, int lza, int lxb, int lyb, int lzb)
+{
+    const double base = Ix[nx] * Iy[ny] * Iz[nz];
+    double r = K * kfA[l] * base;
+    if (l == 0) {
+        double t = (lxa > 0 ? lxa * (-ab/gamma) * IxAlo[nx] : 0.0)
+                 + (lxb > 0 ? lxb * ( aa/gamma) * IxBlo[nx] : 0.0)
+                 + (nx  > 0 ? nx  * ( aa/gamma) *   Ix[nx-1] : 0.0);
+        r += K * t * Iy[ny] * Iz[nz];
+    } else if (l == 1) {
+        double t = (lya > 0 ? lya * (-ab/gamma) * IyAlo[ny] : 0.0)
+                 + (lyb > 0 ? lyb * ( aa/gamma) * IyBlo[ny] : 0.0)
+                 + (ny  > 0 ? ny  * ( aa/gamma) *   Iy[ny-1] : 0.0);
+        r += K * Ix[nx] * t * Iz[nz];
+    } else {
+        double t = (lza > 0 ? lza * (-ab/gamma) * IzAlo[nz] : 0.0)
+                 + (lzb > 0 ? lzb * ( aa/gamma) * IzBlo[nz] : 0.0)
+                 + (nz  > 0 ? nz  * ( aa/gamma) *   Iz[nz-1] : 0.0);
+        r += K * Ix[nx] * Iy[ny] * t;
+    }
+    return r;
+}
+
+/// Primitive S, D[3], Q[6] (global origin) + their A-derivatives.
+__device__ __forceinline__ void d_primitive_multipole_grad(
+    double aa, double ab, double Ax, double Ay, double Az,
+    double Bx, double By, double Bz, int type_a, int type_b,
+    double& S, double D[3], double Q[6],
+    double dS_dA[3], double dD_dA[3][3], double dQ_dA[3][6])
+{
+    int lxa, lya, lza, lxb, lyb, lzb;
+    d_type_to_cart(type_a, lxa, lya, lza);
+    d_type_to_cart(type_b, lxb, lyb, lzb);
+    const double gamma = aa + ab;
+    const double Px = (aa*Ax + ab*Bx) / gamma;
+    const double Py = (aa*Ay + ab*By) / gamma;
+    const double Pz = (aa*Az + ab*Bz) / gamma;
+    const double PAx = Px-Ax, PAy = Py-Ay, PAz = Pz-Az;
+    const double PBx = Px-Bx, PBy = Py-By, PBz = Pz-Bz;
+    const double Rx = Ax-Bx, Ry = Ay-By, Rz = Az-Bz;
+    const double K = exp(-aa*ab/gamma*(Rx*Rx+Ry*Ry+Rz*Rz));
+
+    double Ix[3], Iy[3], Iz[3];
+    for (int n = 0; n <= 2; ++n) {
+        Ix[n] = d_moment1d(lxa, lxb, n, PAx, PBx, Px, gamma);
+        Iy[n] = d_moment1d(lya, lyb, n, PAy, PBy, Py, gamma);
+        Iz[n] = d_moment1d(lza, lzb, n, PAz, PBz, Pz, gamma);
+    }
+    double IxAlo[3] = {0,0,0}, IyAlo[3] = {0,0,0}, IzAlo[3] = {0,0,0};
+    double IxBlo[3] = {0,0,0}, IyBlo[3] = {0,0,0}, IzBlo[3] = {0,0,0};
+    if (lxa > 0) for (int n=0;n<=2;++n) IxAlo[n] = d_moment1d(lxa-1,lxb,n,PAx,PBx,Px,gamma);
+    if (lya > 0) for (int n=0;n<=2;++n) IyAlo[n] = d_moment1d(lya-1,lyb,n,PAy,PBy,Py,gamma);
+    if (lza > 0) for (int n=0;n<=2;++n) IzAlo[n] = d_moment1d(lza-1,lzb,n,PAz,PBz,Pz,gamma);
+    if (lxb > 0) for (int n=0;n<=2;++n) IxBlo[n] = d_moment1d(lxa,lxb-1,n,PAx,PBx,Px,gamma);
+    if (lyb > 0) for (int n=0;n<=2;++n) IyBlo[n] = d_moment1d(lya,lyb-1,n,PAy,PBy,Py,gamma);
+    if (lzb > 0) for (int n=0;n<=2;++n) IzBlo[n] = d_moment1d(lza,lzb-1,n,PAz,PBz,Pz,gamma);
+
+    S    = K * Ix[0]*Iy[0]*Iz[0];
+    D[0] = K * Ix[1]*Iy[0]*Iz[0]; D[1] = K * Ix[0]*Iy[1]*Iz[0]; D[2] = K * Ix[0]*Iy[0]*Iz[1];
+    Q[0] = K * Ix[2]*Iy[0]*Iz[0]; Q[1] = K * Ix[1]*Iy[1]*Iz[0]; Q[2] = K * Ix[0]*Iy[2]*Iz[0];
+    Q[3] = K * Ix[1]*Iy[0]*Iz[1]; Q[4] = K * Ix[0]*Iy[1]*Iz[1]; Q[5] = K * Ix[0]*Iy[0]*Iz[2];
+
+    const double kfA[3] = { -2.0*aa*ab/gamma*Rx, -2.0*aa*ab/gamma*Ry, -2.0*aa*ab/gamma*Rz };
+    const int qnx[6] = {2,1,0,1,0,0}, qny[6] = {0,1,2,0,1,0}, qnz[6] = {0,0,0,1,1,2};
+    for (int l = 0; l < 3; ++l) {
+        dS_dA[l] = d_mpg_dGdA(0,0,0,l, Ix,Iy,Iz, IxAlo,IyAlo,IzAlo, IxBlo,IyBlo,IzBlo,
+                              K, kfA, aa, ab, gamma, lxa,lya,lza,lxb,lyb,lzb);
+        for (int k = 0; k < 3; ++k) {
+            const int dnx = (k==0), dny = (k==1), dnz = (k==2);
+            dD_dA[l][k] = d_mpg_dGdA(dnx,dny,dnz,l, Ix,Iy,Iz, IxAlo,IyAlo,IzAlo, IxBlo,IyBlo,IzBlo,
+                                     K, kfA, aa, ab, gamma, lxa,lya,lza,lxb,lyb,lzb);
+        }
+        for (int q = 0; q < 6; ++q)
+            dQ_dA[l][q] = d_mpg_dGdA(qnx[q],qny[q],qnz[q],l, Ix,Iy,Iz, IxAlo,IyAlo,IzAlo,
+                                     IxBlo,IyBlo,IzBlo, K, kfA, aa, ab, gamma, lxa,lya,lza,lxb,lyb,lzb);
+    }
+}
+
+/// Contracted transformed (origin-at-B=jat, traceless) dipole D_out[3] +
+/// d(dp_int)/dA_l (dD_dA) + d(qp_int)/dA_l (dQ_dA). A=iat (row), B=jat (col).
+__device__ __forceinline__ void d_cgto_multipole_grad_transformed(
+    const double* alpha_a, const double* coeff_a, int npa,
+    const double* alpha_b, const double* coeff_b, int npb,
+    double Ax, double Ay, double Az, double Bx, double By, double Bz,
+    int type_a, int type_b,
+    double D_out[3], double dD_dA[3][3], double dQ_dA[3][6])
+{
+    double S_raw = 0.0, D_raw[3] = {0,0,0}, Q_raw[6] = {0,0,0,0,0,0};
+    double dS_dA[3] = {0,0,0}, dDg_dA[3][3] = {{0}}, dQg_dA[3][6] = {{0}};
+    for (int i = 0; i < npa; ++i) {
+        const double ai = alpha_a[i], ci = coeff_a[i];
+        for (int j = 0; j < npb; ++j) {
+            const double aj = alpha_b[j], cc = ci * coeff_b[j];
+            double S_p, D_p[3], Q_p[6], dS_A[3], dD_A[3][3], dQ_A[3][6];
+            d_primitive_multipole_grad(ai, aj, Ax, Ay, Az, Bx, By, Bz, type_a, type_b,
+                                       S_p, D_p, Q_p, dS_A, dD_A, dQ_A);
+            S_raw += cc * S_p;
+            for (int k=0;k<3;++k) D_raw[k] += cc * D_p[k];
+            for (int q=0;q<6;++q) Q_raw[q] += cc * Q_p[q];
+            for (int l=0;l<3;++l) {
+                dS_dA[l] += cc * dS_A[l];
+                for (int k=0;k<3;++k) dDg_dA[l][k] += cc * dD_A[l][k];
+                for (int q=0;q<6;++q) dQg_dA[l][q] += cc * dQ_A[l][q];
+            }
+        }
+    }
+    const double B[3] = {Bx, By, Bz};
+    for (int k=0;k<3;++k) D_out[k] = D_raw[k] - B[k]*S_raw;
+    for (int l=0;l<3;++l)
+        for (int k=0;k<3;++k) dD_dA[l][k] = dDg_dA[l][k] - B[k]*dS_dA[l];
+
+    const int qa[6] = {0,0,1,0,1,2}, qb[6] = {0,1,1,2,2,2};
+    for (int l=0;l<3;++l) {
+        double dqraw_A[6];
+        for (int q=0;q<6;++q) {
+            const int a = qa[q], b = qb[q];
+            dqraw_A[q] = dQg_dA[l][q] - B[a]*dDg_dA[l][b] - B[b]*dDg_dA[l][a] + B[a]*B[b]*dS_dA[l];
+        }
+        const double dtr_A = 0.5*(dqraw_A[0] + dqraw_A[2] + dqraw_A[5]);
+        dQ_dA[l][0] = 1.5*dqraw_A[0] - dtr_A;
+        dQ_dA[l][1] = 1.5*dqraw_A[1];
+        dQ_dA[l][2] = 1.5*dqraw_A[2] - dtr_A;
+        dQ_dA[l][3] = 1.5*dqraw_A[3];
+        dQ_dA[l][4] = 1.5*dqraw_A[4];
+        dQ_dA[l][5] = 1.5*dqraw_A[5] - dtr_A;
+    }
+}
+
 } // namespace gpu
 } // namespace xtb
 } // namespace curcuma

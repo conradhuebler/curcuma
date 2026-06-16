@@ -147,8 +147,11 @@ public:
     // charges q_sh). The energy-weighted density W = C·diag(2·ε_occ)·Cᵀ is built on
     // device. Outputs grad_out (3·nat, layout [3*i+k], Eh/Bohr) and dEdcn_out (nat,
     // the H0/Pulay CN coupling); the host adds the dispersion gradient + CN chain-rule.
+    // R-AP3: for GFN2, v_dp/v_qp (the converged multipole potentials, column-major 3×nat /
+    // 6×nat) drive the on-device multipole-integral Pulay term; pass nullptr for GFN1.
     /// Requires a prior beginComputed (S/H0/basis resident) and the resident density.
     bool gradient(const double* eps, int nocc_orbs, const double* v_ao, const double* q_sh,
+                  const double* v_dp, const double* v_qp,
                   double* grad_out, double* dEdcn_out);
 
     // ---- Device GFN2 multipole integrals (Stage 3m / R-AP1) -----------------

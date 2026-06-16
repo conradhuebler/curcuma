@@ -269,6 +269,7 @@ __global__ void k_grad_h0_pulay(
     const int* __restrict__ valence, const int* __restrict__ z, const double* __restrict__ se,
     const double* __restrict__ xyz, const double* __restrict__ P, const double* __restrict__ S,
     const double* __restrict__ H0, const double* __restrict__ W, const double* __restrict__ v_ao,
+    const double* __restrict__ v_dp, const double* __restrict__ v_qp,
     const double* __restrict__ atomic_rad, const double* __restrict__ pauling,
     double* __restrict__ grad, double* __restrict__ dEdcn)
 {
@@ -325,9 +326,51 @@ __global__ void k_grad_h0_pulay(
 
     const double sval = 2.0*Pmn*h_av - 2.0*Wmn - Pmn*(v_ao[mu] + v_ao[nu]);
     const double shp  = 2.0*Pmn*H0mn*dlog_pi_dr_r;
-    const double Gx = sval*dS[0] + shp*dxij;
-    const double Gy = sval*dS[1] + shp*dyij;
-    const double Gz = sval*dS[2] + shp*dzij;
+    double Gx = sval*dS[0] + shp*dxij;
+    double Gy = sval*dS[1] + shp*dyij;
+    double Gz = sval*dS[2] + shp*dzij;
+
+    // GFN2 multipole-integral Pulay term (R-AP3; verbatim port of cuda k_grad_h0_pulay
+    // :623-663). The transformed dp_int/qp_int derivatives are contracted with the
+    // converged multipole potential v_dp/v_qp; G[l] -= Pmn·term[l]. dp_int origin is the
+    // column atom jat, so dR = R_jat - R_iat.
+    if (is_gfn2 && v_dp) {
+        double D_mp[3], dD_dA[3][3], dQ_dA[3][6];
+        d_cgto_multipole_grad_transformed(
+            prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+            prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+            xa, ya, za, xb, yb, zb, ta, tb, D_mp, dD_dA, dQ_dA);
+        const double dR[3] = { xb - xa, yb - ya, zb - za };
+        const int qa6[6] = {0,0,1,0,1,2}, qb6[6] = {0,1,1,2,2,2};
+        double term[3];
+        for (int l = 0; l < 3; ++l) {
+            double t = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                t += dD_dA[l][k] * v_dp[k + jat*3];
+                const double dDiat = dD_dA[l][k] + dR[k]*dS[l] - (k==l ? Smn : 0.0);
+                t += dDiat * v_dp[k + iat*3];
+            }
+            double dqr[6];
+            for (int q = 0; q < 6; ++q) {
+                const int a = qa6[q], b = qb6[q];
+                dqr[q] = -(b==l ? D_mp[a] : 0.0) + dR[b]*dD_dA[l][a]
+                       -  (a==l ? D_mp[b] : 0.0) + dR[a]*dD_dA[l][b]
+                       + (-(a==l ? dR[b] : 0.0) - (b==l ? dR[a] : 0.0))*Smn
+                       + dR[a]*dR[b]*dS[l];
+            }
+            const double dtr_c = 0.5*(dqr[0] + dqr[2] + dqr[5]);
+            for (int q = 0; q < 6; ++q) {
+                const bool is_diag = (qa6[q] == qb6[q]);
+                t += dQ_dA[l][q] * v_qp[q + jat*6];
+                const double dQiat = dQ_dA[l][q] + 1.5*dqr[q] - (is_diag ? dtr_c : 0.0);
+                t += dQiat * v_qp[q + iat*6];
+            }
+            term[l] = t;
+        }
+        Gx -= Pmn * term[0];
+        Gy -= Pmn * term[1];
+        Gz -= Pmn * term[2];
+    }
 
     atomicAdd(&grad[3*iat+0], Gx); atomicAdd(&grad[3*jat+0], -Gx);
     atomicAdd(&grad[3*iat+1], Gy); atomicAdd(&grad[3*jat+1], -Gy);
@@ -743,11 +786,19 @@ struct XtbHipContext::Impl {
     }
 
     bool gradient(const double* eps, int nocc_orbs, const double* v_ao, const double* q_sh,
+                  const double* v_dp, const double* v_qp,
                   double* grad_out, double* dEdcn_out) {
         if (!basis_ready || bnao <= 0 || !dP) return false;
         const int nao = bnao, nat = bnat, nsh = bnsh;
         if (hipMemcpy(dVao, v_ao, nao * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         if (hipMemcpy(dQsh, q_sh, nsh * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        // GFN2 (R-AP3): upload the converged multipole potentials for the multipole-integral
+        // Pulay term inside k_grad_h0_pulay (column-major 3×nat / 6×nat, matching v_dp[k+iat*3]).
+        const bool mp_grad = bis_gfn2 && v_dp && v_qp && dVdp && dVqp;
+        if (mp_grad) {
+            if (hipMemcpy(dVdp, v_dp, 3 * static_cast<size_t>(nat) * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+            if (hipMemcpy(dVqp, v_qp, 6 * static_cast<size_t>(nat) * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        }
         // Energy-weighted density W = C·diag(2·ε_occ)·Cᵀ (reuse dOcc/dCw; dF = C resident).
         std::vector<double> occ2(nao, 0.0);
         for (int k = 0; k < nocc_orbs && k < nao; ++k) occ2[k] = 2.0 * eps[k];
@@ -769,7 +820,9 @@ struct XtbHipContext::Impl {
           hipLaunchKernelGGL(k_grad_h0_pulay, gr, b, 0, stream, nao, bis_gfn2,
                              dao2sh, dao2at, dang_sh, diao_sh, dsh_nprim, dsh_prim_off,
                              dprim_alpha, dprim_coeff, dsh_zeta, dshpoly, dkcn, dvalence, dz, dse,
-                             dxyz, dP, dS0, dH0, dW, dVao, darad, dpauling, dGrad, dEdcn_buf); }
+                             dxyz, dP, dS0, dH0, dW, dVao,
+                             mp_grad ? dVdp : nullptr, mp_grad ? dVqp : nullptr,
+                             darad, dpauling, dGrad, dEdcn_buf); }
         { dim3 b(128), gr((nsh + 127) / 128);
           hipLaunchKernelGGL(k_grad_coulomb, gr, b, 0, stream, nsh, bis_gfn2, dsh2at, dghard,
                              dQsh, dxyz, 2.0, dGrad); }
@@ -1060,13 +1113,15 @@ bool XtbHipContext::downloadGamma(double* gamma_colmajor)
 #endif
 }
 bool XtbHipContext::gradient(const double* eps, int nocc_orbs, const double* v_ao,
-                             const double* q_sh, double* grad_out, double* dEdcn_out)
+                             const double* q_sh, const double* v_dp, const double* v_qp,
+                             double* grad_out, double* dEdcn_out)
 {
 #ifndef HAVE_ROCSOLVER
-    (void)eps; (void)nocc_orbs; (void)v_ao; (void)q_sh; (void)grad_out; (void)dEdcn_out; return false;
+    (void)eps; (void)nocc_orbs; (void)v_ao; (void)q_sh; (void)v_dp; (void)v_qp;
+    (void)grad_out; (void)dEdcn_out; return false;
 #else
     return m_impl && m_impl->ok && eps && v_ao && q_sh && grad_out && dEdcn_out
-        && m_impl->gradient(eps, nocc_orbs, v_ao, q_sh, grad_out, dEdcn_out);
+        && m_impl->gradient(eps, nocc_orbs, v_ao, q_sh, v_dp, v_qp, grad_out, dEdcn_out);
 #endif
 }
 bool XtbHipContext::beginMultipoleComputed()

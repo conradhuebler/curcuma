@@ -9,7 +9,9 @@
 > **GFN2 = device-resident multipole SCF (Stage 2b/R-AP2):** the Fock build (incl. the
 > anisotropic dp/qp term via `k_add_fock_multipole`), the rocSOLVER eigensolve, density and
 > the atomic multipole moments (`k_multipole_moments`) run on the device; only `v_dp`/`v_qp`
-> up + eps/moments down per iteration. The potential + GFN2 gradient stay on the host.
+> up + eps/moments down per iteration. The potential stays on the host. **The nuclear gradient
+> incl. the multipole-integral Pulay term now runs on the device too (Stage 4 / R-AP3); only
+> the multipole SD/DD/SQ interaction gradient + dispersion + CN chain-rule stay on the host.**
 > Energies + gradient + the `-opt` trajectory match the CPU (AMD 890M / gfx1150).
 > **FP32 mixed precision (X-AP3) is ON by default for `-gpu rocm`** and is a real win:
 > far-from-convergence iterations use `rocsolver_ssygvd` (FP32), reverting to FP64 near
@@ -129,18 +131,21 @@ to `ld.lld` and drop GNU OpenMP / `libgomp`). No `enable_language(HIP)` is used.
    its O(nao²) `setupMultipole` integral loop. `d_moment1d`/`d_type_to_cart`/
    `d_primitive_multipole`/`d_cgto_multipole` are verbatim ports of the CUDA `.cuh` into
    `xtb_hip_integrals.hiph`. GFN2 runs the host SCF (rocSOLVER eigensolver), so the device
-   integrals feed the host Fock — bit-identical GFN2 energy proves them. The GFN2 resident
-   multipole SCF (Stage 2b) + multipole gradient stay pending.
+   integrals feed the host Fock — bit-identical GFN2 energy proves them. (The GFN2 resident
+   multipole SCF later landed as Stage 2b/R-AP2 and the multipole-integral gradient as R-AP3.)
 4. **On-device nuclear gradient via `GpuScfBackend::gradient`** — done (GFN1). Kernels
    `k_grad_repulsion` (section 1), `k_grad_cn_onsite` (2a, dEdcn diagonal), `k_grad_h0_pulay`
    (2b, the overlap-derivative Pulay term using the energy-weighted density W = C·diag(2ε)·Cᵀ,
    built via `k_scale_cols` + rocBLAS), `k_grad_coulomb` (3, γ-derivative). The overlap
    derivative `d_cgto_overlap_grad` (Obara-Saika, s/p) is in `xtb_hip_integrals.hiph`. The
-   dispersion gradient + CN chain-rule stay on the host. GFN2 multipole gradient + GFN-FF
-   ROCm still pending.
+   dispersion gradient + CN chain-rule stay on the host. **GFN2 multipole-integral Pulay
+   gradient done (R-AP3):** `k_grad_h0_pulay` adds the dp/qp-integral derivative term
+   (`d_cgto_multipole_grad_transformed`) contracted with the converged `v_dp`/`v_qp`, so the
+   GFN2 nuclear gradient is device-resident too; only the multipole SD/DD/SQ interaction
+   gradient (§5) stays on the host. GFN-FF ROCm still pending.
 
-The remaining work (GFN2 resident multipole SCF + multipole gradient, GFN-FF, device solvation) is
-broken into work packages in [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md) (ROCm = `R-AP*`).
+The remaining work (GFN-FF, device solvation) is broken into work packages in
+[SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md) (ROCm = `R-AP*`).
 
 ## What was tested
 
@@ -161,11 +166,22 @@ On an **AMD Radeon 890M (gfx1150)**, build `release_rocm/` (`-DUSE_ROCM_XTB=ON`,
   feeding the host Fock AND the host multipole gradient).
 - **gfn2 device-resident multipole SCF (R-AP2)**: `k_add_fock_multipole` + `k_multipole_moments`
   (log "device-resident GFN2 path"), gfn2 `-sp` energy bit-identical + gradient norm matches
-  CPU, gfn2 `-opt` (NH3) step-by-step identical. GFN2 gradient on the host (device `gradient()`
-  returns false for GFN2). NOT faster than CPU on the iGPU (FP64 eigensolve-bound).
+  CPU, gfn2 `-opt` (NH3) step-by-step identical. NOT faster than CPU on the iGPU (FP64
+  eigensolve-bound).
+- **gfn2 device nuclear gradient incl. multipole-integral Pulay (R-AP3)**: `k_grad_h0_pulay`
+  with the dp/qp-integral derivative term (`d_cgto_multipole_grad_transformed` ← verbatim CUDA
+  port), `v_dp`/`v_qp` uploaded once per gradient. With `-scf_mixed_precision false` (FP64),
+  gfn2 `-sp` gradient norm bit-identical to CPU over the `sqm_reference` set incl. the 231-atom
+  `complex` (reldiff = 0). The ROCm-routed finite-difference gradient check
+  (`test_xtb_gradient`) is byte-identical to the CPU path (same MaxErr/RMSErr per molecule),
+  proving the device analytic gradient equals the FD-validated CPU AP5 gradient. gfn2 `-opt`
+  (triose) tracks the CPU step-by-step then diverges in the LBFGS tail exactly like the
+  known-good GFN1 device gradient (rocSOLVER vs Eigen eigenvectors ~1e-13, amplified by LBFGS
+  — not an R-AP3 error). At the default mixed-precision path the gradient differs ~1e-7 (the
+  documented FP32 lever; use `-scf_threshold 1e-8` or `-scf_mixed_precision false`).
 - Stage 0 (no rocSOLVER): device handshake + CPU fallback, energies bit-identical.
 - Default non-ROCm `release/` build stays green (cli_curcumaopt_*/cli_rmsd_* 11/11).
 
 What was **NOT** tested: large systems (iGPU FP64 is slow — correctness milestone, not
-performance), discrete/CDNA GPUs, MD, the GFN2 multipole gradient (GFN2 gradient on host),
-GFN-FF; the overlap/gradient cover s/p only (H/C/N/O...), no d shells (as the CPU native path).
+performance), discrete/CDNA GPUs, MD, GFN-FF on ROCm; the overlap/gradient cover s/p only
+(H/C/N/O...), no d shells (as the CPU native path).
