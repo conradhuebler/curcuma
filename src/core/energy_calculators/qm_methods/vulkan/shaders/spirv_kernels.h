@@ -108,6 +108,23 @@ static const uint32_t tri_house_spv[] =
 static const uint32_t tri_kw_spv[] =
 #include "tri_kw.spv.inc"
 ;
+// EIG-4: FP32 mixed-precision variants of the tridiagonalization eigensolver kernels
+// (used far from SCF convergence; FP64 corrector near it keeps the converged energy FP64).
+static const uint32_t tri_house_f32_spv[] =
+#include "tri_house_f32.spv.inc"
+;
+static const uint32_t tri_matvec_f32_spv[] =
+#include "tri_matvec_f32.spv.inc"
+;
+static const uint32_t tri_kw_f32_spv[] =
+#include "tri_kw_f32.spv.inc"
+;
+static const uint32_t tri_rank2_f32_spv[] =
+#include "tri_rank2_f32.spv.inc"
+;
+static const uint32_t tri_applyl_f32_spv[] =
+#include "tri_applyl_f32.spv.inc"
+;
 
 } // namespace shaders
 } // namespace vk

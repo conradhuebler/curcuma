@@ -22,8 +22,8 @@ FP32-mixed).
 | EIG-0 profiling hook | ✅ | `CURCUMA_VK_EIG_PROFILE=1` |
 | EIG-1 fully-GPU tridiagonalization | ✅ DONE | `tri_house`+`tri_kw` fold the host ‖x‖/pᵀv reductions onto the GPU; tridiag fence syncs **1112 → 3** for n=558 |
 | EIG-2A workgroup-per-column back-transform | ✅ DONE | `tri_applyl` 256-lane shared reduction; submits → 3 |
-| EIG-3 tql2 | open | sequential host O(n³); not a clean win (see below) |
-| EIG-4 FP32 mixed precision | open | the real remaining lever; gain uncertain on this iGPU |
+| EIG-3 tql2 | deferred | sequential host O(n³), now ~29 ms; not a clean win (see below) |
+| EIG-4 FP32 mixed precision | ✅ DONE (opt-in) | helps the tridiagonalization (1.5×) only — back-transform/tql2 don't; net ~5%, kept opt-in |
 
 **Fresh same-clock (`complex`/231 GFN2 `-sp`, shared box ⇒ ±noise), eigensolve/iter & total:**
 cyclic Jacobi 3016 ms / 61 s → tridiag (EIG-1+2A) **161 ms / 4.35 s** (18.7×) → ROCm 66 ms / 1.67 s.
@@ -117,16 +117,20 @@ low / (b) medium-high (correctness on clustered eigenvalues).
 > lands and tql2 becomes the critical path. The biggest remaining lever is the **GPU** work
 > (tridiag 69 + back 30 = 99 ms) → **EIG-4**.
 
-### EIG-4 — FP32 mixed precision (parallels ROCm's lever) — do after EIG-1/2
-Once the GPU phases are batched, add FP32 variants of `tri_house`/`tri_matvec`/`tri_rank2`/
-`tri_applyl` (+ FP32 tql2) used while `max|dq| > scf_fp32_threshold`, reverting to FP64 near
-convergence (the `-scf_mixed_precision` plumbing + `m_eig_fp32` flag already exist; the
-X-AP3 note found FP32 did **not** help the *Jacobi* because it was dispatch-bound — but the
-tridiagonalization is arithmetic/bandwidth-bound, so FP32 should pay here).
+### EIG-4 — FP32 mixed precision (parallels ROCm's lever) — ✅ DONE (opt-in, 2026-06-16)
+Implemented `solveSymTridiag32`: cast Ã→FP32, FP32 `tri_*_f32` tridiagonalization +
+back-transform on FP32 mirror buffers (`tA32`…`tZ32`), FP64 `tql2` on the cast-to-double
+tridiagonal (host), cast eps/vectors back. Routed via `solveAtilJacobi`'s `fp32` branch
+(`-scf_mixed_precision true`; FP64 corrector once `max|dq| < scf_fp32_threshold` → energy FP64).
 
-**Expected: ~1.5–2× on the GPU phases.** **Effort:** low-medium (FP32 shader variants reuse
-ploJ). **Risk:** FP32 Householder accuracy far from convergence (bounded — FP64 corrector
-near convergence, energy stays FP64).
+**Result (fresh, `complex` GFN2 `-sp`, shared box):** only the tridiagonalization benefits —
+**76→51 ms/it (1.5×)**, arithmetic/bandwidth-bound as predicted; the **back-transform
+(28→26 ms) and host tql2 do NOT** (latency/host-bound — the *same* lesson as the X-AP3 FP32
+Jacobi). Net SCF ~3700→~3560 ms (**~5%**), energy bit-identical (10/10 sqm). **Kept opt-in**
+(not defaulted): modest gain + the FP32 fixpoint shifts the gradient ~1e-7 at the loose
+default `scf_threshold`. A future EIG-2B (FP32 *and* WY-blocked GEMM back-transform) could
+extend the win to the back-transform, but the back-transform isn't FP64-arithmetic-bound, so
+the lever there is occupancy/algorithm, not precision.
 
 ---
 

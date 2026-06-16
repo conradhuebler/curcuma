@@ -144,11 +144,16 @@ struct XtbVulkanContext::Impl {
     VkShaderModule mTMV{}, mTR2{}, mTAL{}, mTHou{}, mTKW{};
     VkPipeline pTMV{}, pTR2{}, pTAL{}, pTHou{}, pTKW{};
     VkPipelineLayout ploT4 = VK_NULL_HANDLE;        // dsl4 + 12B push (tri_kw)
+    // EIG-4: FP32 mixed-precision tridiag eigensolver (same layouts, FP32 buffers).
+    VkShaderModule mTMV32{}, mTR2_32{}, mTAL32{}, mTHou32{}, mTKW32{};
+    VkPipeline pTMV32{}, pTR2_32{}, pTAL32{}, pTHou32{}, pTKW32{};
     int tn = 0;
     // scal holds diag[0,n) / off[n,2n) (subdiagonal α) / β[2n,3n) for the reduction.
     Buf tA, tV, tScal, tP, tW, tZ;                 // working matrix / Householder vecs / diag+off+β / praw / w / eigenvectors
+    Buf tA32, tV32, tScal32, tP32, tW32, tZ32;     // EIG-4: FP32 mirrors
     VkDescriptorPool tPool = VK_NULL_HANDLE;
     VkDescriptorSet tHou{}, tMV{}, tKW{}, tR2{}, tAL{};
+    VkDescriptorSet tHou32{}, tMV32{}, tKW32{}, tR2_32{}, tAL32{};
     bool m_use_tridiag = true;                     // GPU eigensolver: tridiag (default) vs cyclic Jacobi (CURCUMA_VK_EIGEN=jacobi)
     // Stage 3 integral pipelines.
     VkDescriptorSetLayout dsl5 = VK_NULL_HANDLE, dsl18 = VK_NULL_HANDLE;
@@ -309,6 +314,13 @@ struct XtbVulkanContext::Impl {
         pTMV = pipe(mTMV, ploJ); pTR2 = pipe(mTR2, ploJ); pTAL = pipe(mTAL, ploJ);
         pTHou = pipe(mTHou, ploJ); pTKW = pipe(mTKW, ploT4);
         if (!pTMV || !pTR2 || !pTAL || !pTHou || !pTKW) return false;
+        // EIG-4 FP32 variants (same ploJ / ploT4 layouts; FP32 descriptor sets/buffers).
+        mTMV32 = mod(tri_matvec_f32_spv, sizeof(tri_matvec_f32_spv)); mTR2_32 = mod(tri_rank2_f32_spv, sizeof(tri_rank2_f32_spv));
+        mTAL32 = mod(tri_applyl_f32_spv, sizeof(tri_applyl_f32_spv));
+        mTHou32 = mod(tri_house_f32_spv, sizeof(tri_house_f32_spv)); mTKW32 = mod(tri_kw_f32_spv, sizeof(tri_kw_f32_spv));
+        pTMV32 = pipe(mTMV32, ploJ); pTR2_32 = pipe(mTR2_32, ploJ); pTAL32 = pipe(mTAL32, ploJ);
+        pTHou32 = pipe(mTHou32, ploJ); pTKW32 = pipe(mTKW32, ploT4);
+        if (!pTMV32 || !pTR2_32 || !pTAL32 || !pTHou32 || !pTKW32) return false;
         if (!pAng || !pCol || !pRow || !pVec || !pGemm || !pScale || !pFock || !pPB) return false;
         // Stage 3 integral kernels: cn/gamma use 4 SSBO + 8B push (shared layout), self_energy
         // 5 SSBO + 4B, overlap_h0 18 SSBO + 12B.
@@ -365,10 +377,11 @@ struct XtbVulkanContext::Impl {
         mu.resize(n);
         // GPU Householder tridiagonalization (default): O(n³) reduction in place of the
         // O(sweeps·n³) cyclic Jacobi. Eigenvectors → rCtil, eigenvalues → mu (ascending;
-        // the resident solve re-sorts via ridx, so any order is fine). FP32 mixed precision
-        // keeps the Jacobi path (the tridiag solve is FP64-only).
-        if (m_use_tridiag && !fp32)
-            return solveSymTridiag((double*)rAtil.ptr, n, mu.data(), (double*)rCtil.ptr);
+        // the resident solve re-sorts via ridx, so any order is fine). EIG-4: the FP32
+        // mixed-precision path uses solveSymTridiag32 (FP32 tridiag + back-transform).
+        if (m_use_tridiag)
+            return fp32 ? solveSymTridiag32((double*)rAtil.ptr, n, mu.data(), (double*)rCtil.ptr)
+                        : solveSymTridiag((double*)rAtil.ptr, n, mu.data(), (double*)rCtil.ptr);
         const size_t nn = static_cast<size_t>(n) * n;
         if (fp32) {
             const double* Ad = (const double*)rAtil.ptr; float* A32 = (float*)rAtil32.ptr;
@@ -453,16 +466,20 @@ struct XtbVulkanContext::Impl {
     bool ensureTri(int n) {
         if (n == tn && tA.buf) return true;
         if (tPool) { vkDestroyDescriptorPool(dev, tPool, nullptr); tPool = VK_NULL_HANDLE; }
-        for (Buf* b : { &tA, &tV, &tScal, &tP, &tW, &tZ }) freeBuf(*b);
+        for (Buf* b : { &tA, &tV, &tScal, &tP, &tW, &tZ, &tA32, &tV32, &tScal32, &tP32, &tW32, &tZ32 }) freeBuf(*b);
         tn = n;
         const VkDeviceSize NN = sizeof(double) * (size_t)n * n;
         tA = makeBuf(NN); tV = makeBuf(NN); tZ = makeBuf(NN);
         tScal = makeBuf(sizeof(double) * 3 * (size_t)n);   // diag / off / β
         tP = makeBuf(sizeof(double) * n); tW = makeBuf(sizeof(double) * n);
-        for (Buf* b : { &tA, &tV, &tScal, &tP, &tW, &tZ }) if (!b->buf) return false;
-        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 20 };
+        const VkDeviceSize NN32 = sizeof(float) * (size_t)n * n;            // EIG-4 FP32 mirrors
+        tA32 = makeBuf(NN32); tV32 = makeBuf(NN32); tZ32 = makeBuf(NN32);
+        tScal32 = makeBuf(sizeof(float) * 3 * (size_t)n);
+        tP32 = makeBuf(sizeof(float) * n); tW32 = makeBuf(sizeof(float) * n);
+        for (Buf* b : { &tA, &tV, &tScal, &tP, &tW, &tZ, &tA32, &tV32, &tScal32, &tP32, &tW32, &tZ32 }) if (!b->buf) return false;
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 32 };
         VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        dpi.maxSets = 6; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
+        dpi.maxSets = 10; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
         if (vkCreateDescriptorPool(dev, &dpi, nullptr, &tPool) != VK_SUCCESS) return false;
         tHou = allocSet(tPool, dsl3); tMV = allocSet(tPool, dsl3); tKW = allocSet(tPool, dsl4);
         tR2 = allocSet(tPool, dsl3);  tAL = allocSet(tPool, dsl3);
@@ -471,6 +488,13 @@ struct XtbVulkanContext::Impl {
         bindSet(tKW,  { &tP, &tV, &tScal, &tW });    // tri_kw     : w = β·praw − K·v
         bindSet(tR2,  { &tA, &tV, &tW });            // tri_rank2  : A_sub -= v wᵀ + w vᵀ
         bindSet(tAL,  { &tZ, &tV, &tScal });         // tri_applyl : Z -= β v (vᵀZ)
+        tHou32 = allocSet(tPool, dsl3); tMV32 = allocSet(tPool, dsl3); tKW32 = allocSet(tPool, dsl4);
+        tR2_32 = allocSet(tPool, dsl3); tAL32 = allocSet(tPool, dsl3);
+        bindSet(tHou32, { &tA32, &tV32, &tScal32 });
+        bindSet(tMV32,  { &tA32, &tV32, &tP32 });
+        bindSet(tKW32,  { &tP32, &tV32, &tScal32, &tW32 });
+        bindSet(tR2_32, { &tA32, &tV32, &tW32 });
+        bindSet(tAL32,  { &tZ32, &tV32, &tScal32 });
         return true;
     }
     // Standard symmetric eigensolve: Ain (column-major n×n) → eps_out ascending, Vout columns.
@@ -545,6 +569,74 @@ struct XtbVulkanContext::Impl {
                     n, pms(tp0, tp1), nsub_tri, pms(tp1, tp2), pms(tp2, tp3), nsub_back, pms(tp0, tp3));
         }
         std::memcpy(Vout, Z, sizeof(double) * (size_t)n * n);
+        return true;
+    }
+    // EIG-4: FP32 mixed-precision eigensolve. Cast Ã → FP32, run the Householder
+    // tridiagonalization + reflector back-transform in FP32 (the heavy GPU phases); the
+    // tql2 stays FP64 on the cast-to-double tridiagonal (host, cheap). Eigenvectors/values
+    // cast back to FP64. Used far from SCF convergence (the SCF reverts to the FP64
+    // solveSymTridiag once max|dq| < scf_fp32_threshold, so the converged energy is FP64).
+    bool solveSymTridiag32(const double* Ain, int n, double* eps_out, double* Vout) {
+        if (!ensurePipes() || n <= 0 || !ensureTri(n)) return false;
+        if (n == 1) { eps_out[0] = Ain[0]; Vout[0] = 1.0; return true; }
+        float* A = (float*)tA32.ptr;
+        for (size_t i = 0; i < (size_t)n * n; ++i) A[i] = (float)Ain[i];           // FP64 → FP32
+        float* scal = (float*)tScal32.ptr;
+        static const bool prof = std::getenv("CURCUMA_VK_EIG_PROFILE") != nullptr;
+        using pclk = std::chrono::steady_clock;
+        auto pms = [](pclk::time_point a, pclk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        const auto tp0 = pclk::now();
+        const int rps = jacobiRoundsPerSubmit(n);
+        int since = 0; bool open = false;
+        for (int k = 0; k < n - 2; ++k) {
+            const int m = n - k - 1;
+            if (!open) { if (!beginCmd()) return false; open = true; since = 0; }
+            uint32_t pc[3] = { (uint32_t)n, (uint32_t)k, (uint32_t)m };
+            vkCmdPushConstants(cmd, ploJ, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &tHou32, 0, nullptr);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pTHou32); vkCmdDispatch(cmd, 1, 1, 1); barrier();
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &tMV32, 0, nullptr);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pTMV32); vkCmdDispatch(cmd, (uint32_t)(m + 63) / 64, 1, 1); barrier();
+            vkCmdPushConstants(cmd, ploT4, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploT4, 0, 1, &tKW32, 0, nullptr);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pTKW32); vkCmdDispatch(cmd, 1, 1, 1); barrier();
+            vkCmdPushConstants(cmd, ploJ, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &tR2_32, 0, nullptr);
+            const uint32_t gm = (uint32_t)(m + 7) / 8;
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pTR2_32); vkCmdDispatch(cmd, gm, gm, 1); barrier();
+            if (++since >= rps) { if (!submit()) return false; open = false; }
+        }
+        if (open) { if (!submit()) return false; }
+        std::vector<double> diag(n, 0.0), off(std::max(1, n - 1), 0.0);
+        for (int i = 0; i < n - 2; ++i) { diag[i] = scal[i]; off[i] = scal[n + i]; }
+        diag[n - 2] = A[(n - 2) + (size_t)(n - 2) * n];
+        off[n - 2]  = A[(n - 1) + (size_t)(n - 2) * n];
+        diag[n - 1] = A[(n - 1) + (size_t)(n - 1) * n];
+        const auto tp1 = pclk::now();
+        double* Zd = (double*)tZ.ptr;                                              // reuse FP64 tZ for tql2
+        if (!cpuTriEig(n, diag.data(), off.data(), eps_out, Zd)) return false;
+        const auto tp2 = pclk::now();
+        float* Z = (float*)tZ32.ptr;
+        for (size_t i = 0; i < (size_t)n * n; ++i) Z[i] = (float)Zd[i];            // FP64 Z → FP32
+        since = 0; open = false;
+        for (int k = n - 3; k >= 0; --k) {
+            if (scal[2u * (size_t)n + k] == 0.0f) continue;
+            const int m = n - k - 1;
+            if (!open) { if (!beginCmd()) return false; open = true; since = 0; }
+            uint32_t pc[3] = { (uint32_t)n, (uint32_t)k, (uint32_t)m };
+            vkCmdPushConstants(cmd, ploJ, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &tAL32, 0, nullptr);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pTAL32);
+            vkCmdDispatch(cmd, (uint32_t)n, 1, 1); barrier();
+            if (++since >= rps) { if (!submit()) return false; open = false; }
+        }
+        if (open) { if (!submit()) return false; }
+        for (size_t i = 0; i < (size_t)n * n; ++i) Vout[i] = (double)Z[i];         // FP32 → FP64
+        if (prof) {
+            const auto tp3 = pclk::now();
+            fprintf(stderr, "[EIGPROF-FP32] n=%d tridiag=%.1f tql2=%.1f back=%.1f total=%.1f ms\n",
+                    n, pms(tp0, tp1), pms(tp1, tp2), pms(tp2, tp3), pms(tp0, tp3));
+        }
         return true;
     }
     // Standalone correctness check of solveSymTridiag vs the validated Jacobi (solveSym)
@@ -1008,10 +1100,10 @@ struct XtbVulkanContext::Impl {
         if (rPool) vkDestroyDescriptorPool(dev, rPool, nullptr);
         if (tPool) vkDestroyDescriptorPool(dev, tPool, nullptr);
         freeBasis();
-        for (Buf* b : { &sA,&sV,&sP,&sC,&rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs,&rAtil32,&rCtil32,&rCs32,&tA,&tV,&tScal,&tP,&tW,&tZ }) freeBuf(*b);
+        for (Buf* b : { &sA,&sV,&sP,&sC,&rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs,&rAtil32,&rCtil32,&rCs32,&tA,&tV,&tScal,&tP,&tW,&tZ,&tA32,&tV32,&tScal32,&tP32,&tW32,&tZ32 }) freeBuf(*b);
         if (fence) vkDestroyFence(dev, fence, nullptr);
-        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul,pMP,pFMP,pMM,pAng32,pCol32,pRow32,pVec32,pTMV,pTR2,pTAL,pTHou,pTKW }) if (p) vkDestroyPipeline(dev, p, nullptr);
-        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul,mMP,mFMP,mMM,mAng32,mCol32,mRow32,mVec32,mTMV,mTR2,mTAL,mTHou,mTKW }) if (m) vkDestroyShaderModule(dev, m, nullptr);
+        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul,pMP,pFMP,pMM,pAng32,pCol32,pRow32,pVec32,pTMV,pTR2,pTAL,pTHou,pTKW,pTMV32,pTR2_32,pTAL32,pTHou32,pTKW32 }) if (p) vkDestroyPipeline(dev, p, nullptr);
+        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul,mMP,mFMP,mMM,mAng32,mCol32,mRow32,mVec32,mTMV,mTR2,mTAL,mTHou,mTKW,mTMV32,mTR2_32,mTAL32,mTHou32,mTKW32 }) if (m) vkDestroyShaderModule(dev, m, nullptr);
         for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB,ploI4,ploI5,ploI18,ploGrad5,ploGradP,ploMP,ploFMP,ploMM,ploT4 }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
         for (VkDescriptorSetLayout d : { dsl3,dsl4,dsl5,dsl18,dsl26,dsl12,dsl6 }) if (d) vkDestroyDescriptorSetLayout(dev, d, nullptr);
         sPool = rPool = tPool = VK_NULL_HANDLE; fence = VK_NULL_HANDLE; pipes_ready = false;
