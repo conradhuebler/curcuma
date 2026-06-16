@@ -125,6 +125,18 @@ static const uint32_t tri_rank2_f32_spv[] =
 static const uint32_t tri_applyl_f32_spv[] =
 #include "tri_applyl_f32.spv.inc"
 ;
+// EIG-2B: WY-blocked eigenvector back-transform — scatter the compact panel reflectors
+// to full layout (tri_vfull), build the b×b compact-WY factor T (wy_buildt), and apply
+// the panel as three rectangular FP64 GEMMs (gemm_g) instead of n−3 per-reflector passes.
+static const uint32_t gemm_g_spv[] =
+#include "gemm_g.spv.inc"
+;
+static const uint32_t tri_vfull_spv[] =
+#include "tri_vfull.spv.inc"
+;
+static const uint32_t wy_buildt_spv[] =
+#include "wy_buildt.spv.inc"
+;
 
 } // namespace shaders
 } // namespace vk

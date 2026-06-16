@@ -3,11 +3,12 @@
 **Status (2026-06-16): COMPLETE for the planned items.** V-AP5 replaced the cyclic Jacobi
 with a Householder tridiagonalization eigensolver (`solveSymTridiag` in
 `src/core/energy_calculators/qm_methods/vulkan/xtb_vulkan_context.cpp`); this WP then made it
-fully GPU-resident (EIG-1), parallelised the back-transform (EIG-2A), and added an opt-in FP32
-mixed-precision path (EIG-4). The eigensolve is **no longer the overwhelming bottleneck** it
-was — it is now ~2× ROCm rather than ~40×, and the residual Vulkan↔ROCm gap is spread across
-the eigensolve tail (tql2 + back-transform) and the non-eigensolve SCF/setup. EIG-3 (host
-tql2) is deferred as a diminishing return.
+fully GPU-resident (EIG-1), parallelised the back-transform (EIG-2A), blocked it into BLAS-3
+GEMMs via compact-WY (EIG-2B), and added an opt-in FP32 mixed-precision path (EIG-4). The
+eigensolve is **no longer the overwhelming bottleneck** it was — it is now ~2× ROCm rather than
+~40×, and the residual Vulkan↔ROCm gap is spread across the eigensolve tail (tql2 +
+back-transform) and the non-eigensolve SCF/setup. EIG-3 (host tql2) is deferred as a
+diminishing return.
 
 > 🤖 AI-generated. Done items are ⚙️ machine-tested (correctness validated); open items are
 > proposals. Numbers are on a Radeon 890M (RADV). Only ✅ TESTED/APPROVED by the operator are
@@ -23,6 +24,7 @@ tql2) is deferred as a diminishing return.
 | EIG-0 profiling hook | ✅ | `CURCUMA_VK_EIG_PROFILE=1` (+ `-FP32` line); committed |
 | EIG-1 fully-GPU tridiagonalization | ✅ | `tri_house`+`tri_kw` fold the host ‖x‖/pᵀv reductions onto the GPU; tridiag fence syncs **1112 → 3** (n=558) |
 | EIG-2A workgroup-per-column back-transform | ✅ | `tri_applyl` 256-lane shared reduction; submits → 3 |
+| EIG-2B WY-blocked GEMM back-transform | ✅ | `tri_vfull`+`wy_buildt`+`gemm_g` (compact-WY panels, b=32); back-transform **27.7 → ~20 ms (1.4×)**, bit-identical |
 | EIG-3 host tql2 | deferred | sequential host O(n³), now ~29 ms (smallest phase); not a clean win — see re-scope |
 | EIG-4 FP32 mixed precision | ✅ opt-in | `solveSymTridiag32`; helps the tridiagonalization (1.5×) only — back-transform/tql2 don't; net ~5%, `-scf_mixed_precision true` |
 
@@ -35,9 +37,9 @@ tql2) is deferred as a diminishing return.
 | tridiag FP32 mixed (EIG-4, opt-in) | ~106 ms | ~4.0 s | 1.6× / 2.4× |
 | ROCm `dsygvd`/`ssygvd` | 66 ms | 1.67 s | 1.0× |
 
-Per-phase (`EIGPROF`, fresh): FP64 tridiag **69**, tql2 **29**, back-transform **30** ms;
-FP32 tridiag **51**, tql2 **29** (host FP64), back **26** ms. **The remaining ~2× to ROCm is
-now algorithmic (tql2 + back-transform tail) and spread into the rest of the SCF — not a bug.**
+Per-phase (`EIGPROF`, fresh): FP64 tridiag **~66**, tql2 **~30**, back-transform **~20** ms
+(EIG-2B WY; was 30 with EIG-2A). **The remaining ~2× to ROCm is now algorithmic (tridiag +
+tql2 + back-transform tail) and spread into the rest of the SCF — not a bug.**
 
 ---
 
@@ -89,7 +91,25 @@ reduction order changes ~1e-13; validate with `CURCUMA_VK_TEST_TRIDIAG`.
 ### EIG-2A — Parallelize the reflector back-transform — ✅ DONE (2026-06-16)
 Option A implemented: `tri_applyl` is now one workgroup (256 lanes) per Z column with a
 shared-memory tree reduction of `vᵀZ` + parallel rank-1 update; submits batch to 3.
-(Option B / WY-blocked GEMM back-transform remains a possible future refinement.)
+(Option B / WY-blocked GEMM back-transform later landed as **EIG-2B** below.)
+
+### EIG-2B — WY-blocked GEMM back-transform — ✅ DONE (2026-06-16)
+Option B implemented. The n−3 per-reflector passes over Z are grouped into panels of b=32
+reflectors; each panel's product H_{k0}·…·H_{k0+b-1} is the compact-WY form `Q = I − V·T·Vᵀ`
+and applied as three rectangular FP64 GEMMs: `Y = Vᵀ·Z` (b×n), `Y2 = T·Y` (b×n), `Z −= V·Y2`
+(n×n) — cutting Z memory passes from ~n to ~3·(n/b) and reusing V tiles across all columns.
+New shaders: **`tri_vfull`** (scatter the compact panel reflectors to a full n×b layout,
+β=0 columns zeroed so degenerate reflectors drop out), **`wy_buildt`** (build the b×b T from
+Gram(Vfull)+β by the LAPACK forward/columnwise recurrence, one workgroup), **`gemm_g`** (a
+general rectangular M×N×K tiled GEMM with transA + subtract-accumulate — the existing
+`gemm.comp` is square-only, so WY needs this). All panels record into one chunked submit (no
+host readback between them). **Result (fresh `complex`/231 GFN2 `-sp`): back-transform
+27.7 → ~20 ms (~1.4×), energies bit-identical** to EIG-2A/CPU (gfn1+gfn2 over the sqm set
+incl. the 231-atom `complex`, dE = 0; standalone eigensolver resid 3.4e-14 / ortho 8.2e-15 to
+n=558; gfn2 `-opt` identical; `ctest -L gpu` 2/2). The win is modest (the b=32 tall-skinny
+GEMMs are still occupancy-limited on the iGPU, and tql2 noise swamps the *total*), but it is a
+real, isolated back-transform speed-up with no downside, so WY is the default
+(`CURCUMA_VK_BACKXF=reflector` reverts to EIG-2A).
 
 **Problem:** `tri_applyl` is one-thread-per-column with a serial length-m inner loop (same
 underutilization the gradient had before V-AP6).
@@ -174,11 +194,12 @@ tracked separately in `docs/SQM_PERF_OPT_WP.md`.
 - **Done & committed:** `be159a1` (V-AP5 eigensolver + device-lost fix), `b67834d`
   (EIG-1 + EIG-2A), `b0e5161` (EIG-4 FP32). The `CURCUMA_VK_EIG_PROFILE` hook (EIG-0) and the
   `CURCUMA_VK_TEST_TRIDIAG` standalone check are committed.
+- **EIG-2B done (2026-06-16):** WY-blocked GEMM back-transform — `tri_vfull`+`wy_buildt`+
+  `gemm_g`, back-transform 27.7 → ~20 ms (~1.4×), bit-identical. Default ON
+  (`CURCUMA_VK_BACKXF=reflector` reverts to EIG-2A).
 - **Deferred (diminishing returns, do on a quiet box where the small gains are measurable):**
   - **EIG-3** — host tql2 (~29 ms): GPU Cuppen divide-and-conquer (`tridiagDC`/`rank1Eigen`
     in `native_eigensolver.cpp` is a portable reference) or threaded Givens. High effort / risk.
-  - **EIG-2B** — WY-blocked GEMM back-transform (the back-transform ~30 ms is occupancy-bound,
-    not precision-bound, so FP32 didn't help it; blocking it into BLAS-3 GEMMs would).
 - **Beyond the eigensolve:** the rest of the Vulkan↔ROCm gap is the host integral build / γ /
   D4 and setup — tracked separately in `docs/SQM_PERF_OPT_WP.md`.
 - **Naming collision (open):** the perf commits used `V-AP5`/`V-AP6`, which clash with

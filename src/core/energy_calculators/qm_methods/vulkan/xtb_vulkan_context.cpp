@@ -155,6 +155,17 @@ struct XtbVulkanContext::Impl {
     VkDescriptorSet tHou{}, tMV{}, tKW{}, tR2{}, tAL{};
     VkDescriptorSet tHou32{}, tMV32{}, tKW32{}, tR2_32{}, tAL32{};
     bool m_use_tridiag = true;                     // GPU eigensolver: tridiag (default) vs cyclic Jacobi (CURCUMA_VK_EIGEN=jacobi)
+    // EIG-2B: WY-blocked eigenvector back-transform. gemm_g is a rectangular FP64 GEMM
+    // (dsl3 + 32B push → ploGG); tri_vfull + wy_buildt reuse dsl3 + 12B push (ploJ). Panel
+    // temporaries: tVfull (n×B full reflectors, ld=n), tT (B×B WY factor, ld=b), tY/tY2
+    // (B×n, ld=b). Block size kWyB = MAXB in wy_buildt.comp.
+    static constexpr int kWyB = 32;
+    VkPipelineLayout ploGG = VK_NULL_HANDLE;       // dsl3 + 32B push (gemm_g)
+    VkShaderModule mGG{}, mVF{}, mBT{};
+    VkPipeline pGG{}, pVF{}, pBT{};
+    Buf tVfull, tT, tY, tY2;
+    VkDescriptorSet tVFs{}, tBTs{}, tG1{}, tG2{}, tG3{};
+    bool m_use_wy = true;                          // WY back-transform (default) vs EIG-2A per-reflector (CURCUMA_VK_BACKXF=reflector)
     // Stage 3 integral pipelines.
     VkDescriptorSetLayout dsl5 = VK_NULL_HANDLE, dsl18 = VK_NULL_HANDLE;
     VkPipelineLayout ploI4 = VK_NULL_HANDLE, ploI5 = VK_NULL_HANDLE, ploI18 = VK_NULL_HANDLE;
@@ -231,6 +242,7 @@ struct XtbVulkanContext::Impl {
             if ((fl & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && (fl & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) { hostMemType = i; break; }
         }
         if (const char* em = std::getenv("CURCUMA_VK_EIGEN")) m_use_tridiag = (std::string(em) != "jacobi");
+        if (const char* bx = std::getenv("CURCUMA_VK_BACKXF")) m_use_wy = (std::string(bx) != "reflector");
         if (std::getenv("CURCUMA_VK_TEST_TRIDIAG")) selfTestTridiag();
     }
     ~Impl() { destroy(); }
@@ -314,6 +326,14 @@ struct XtbVulkanContext::Impl {
         pTMV = pipe(mTMV, ploJ); pTR2 = pipe(mTR2, ploJ); pTAL = pipe(mTAL, ploJ);
         pTHou = pipe(mTHou, ploJ); pTKW = pipe(mTKW, ploT4);
         if (!pTMV || !pTR2 || !pTAL || !pTHou || !pTKW) return false;
+        // EIG-2B WY back-transform: gemm_g (dsl3 + 32B push), tri_vfull + wy_buildt (dsl3 + 12B, ploJ).
+        ploGG = makePl(dsl3, 32);
+        if (!ploGG) return false;
+        mGG = mod(gemm_g_spv, sizeof(gemm_g_spv));
+        mVF = mod(tri_vfull_spv, sizeof(tri_vfull_spv));
+        mBT = mod(wy_buildt_spv, sizeof(wy_buildt_spv));
+        pGG = pipe(mGG, ploGG); pVF = pipe(mVF, ploJ); pBT = pipe(mBT, ploJ);
+        if (!pGG || !pVF || !pBT) return false;
         // EIG-4 FP32 variants (same ploJ / ploT4 layouts; FP32 descriptor sets/buffers).
         mTMV32 = mod(tri_matvec_f32_spv, sizeof(tri_matvec_f32_spv)); mTR2_32 = mod(tri_rank2_f32_spv, sizeof(tri_rank2_f32_spv));
         mTAL32 = mod(tri_applyl_f32_spv, sizeof(tri_applyl_f32_spv));
@@ -466,7 +486,8 @@ struct XtbVulkanContext::Impl {
     bool ensureTri(int n) {
         if (n == tn && tA.buf) return true;
         if (tPool) { vkDestroyDescriptorPool(dev, tPool, nullptr); tPool = VK_NULL_HANDLE; }
-        for (Buf* b : { &tA, &tV, &tScal, &tP, &tW, &tZ, &tA32, &tV32, &tScal32, &tP32, &tW32, &tZ32 }) freeBuf(*b);
+        for (Buf* b : { &tA, &tV, &tScal, &tP, &tW, &tZ, &tA32, &tV32, &tScal32, &tP32, &tW32, &tZ32,
+                        &tVfull, &tT, &tY, &tY2 }) freeBuf(*b);
         tn = n;
         const VkDeviceSize NN = sizeof(double) * (size_t)n * n;
         tA = makeBuf(NN); tV = makeBuf(NN); tZ = makeBuf(NN);
@@ -476,10 +497,16 @@ struct XtbVulkanContext::Impl {
         tA32 = makeBuf(NN32); tV32 = makeBuf(NN32); tZ32 = makeBuf(NN32);
         tScal32 = makeBuf(sizeof(float) * 3 * (size_t)n);
         tP32 = makeBuf(sizeof(float) * n); tW32 = makeBuf(sizeof(float) * n);
-        for (Buf* b : { &tA, &tV, &tScal, &tP, &tW, &tZ, &tA32, &tV32, &tScal32, &tP32, &tW32, &tZ32 }) if (!b->buf) return false;
-        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 32 };
+        // EIG-2B WY back-transform panel temporaries (block kWyB).
+        tVfull = makeBuf(sizeof(double) * (size_t)n * kWyB);   // n×B full reflectors (ld=n)
+        tT     = makeBuf(sizeof(double) * (size_t)kWyB * kWyB);// B×B WY factor (ld=b)
+        tY     = makeBuf(sizeof(double) * (size_t)kWyB * n);   // B×n  Vᵀ·Z   (ld=b)
+        tY2    = makeBuf(sizeof(double) * (size_t)kWyB * n);   // B×n  T·Y    (ld=b)
+        for (Buf* b : { &tA, &tV, &tScal, &tP, &tW, &tZ, &tA32, &tV32, &tScal32, &tP32, &tW32, &tZ32,
+                        &tVfull, &tT, &tY, &tY2 }) if (!b->buf) return false;
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 64 };
         VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        dpi.maxSets = 10; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
+        dpi.maxSets = 16; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
         if (vkCreateDescriptorPool(dev, &dpi, nullptr, &tPool) != VK_SUCCESS) return false;
         tHou = allocSet(tPool, dsl3); tMV = allocSet(tPool, dsl3); tKW = allocSet(tPool, dsl4);
         tR2 = allocSet(tPool, dsl3);  tAL = allocSet(tPool, dsl3);
@@ -495,6 +522,14 @@ struct XtbVulkanContext::Impl {
         bindSet(tKW32,  { &tP32, &tV32, &tScal32, &tW32 });
         bindSet(tR2_32, { &tA32, &tV32, &tW32 });
         bindSet(tAL32,  { &tZ32, &tV32, &tScal32 });
+        // EIG-2B WY back-transform sets.
+        tVFs = allocSet(tPool, dsl3); tBTs = allocSet(tPool, dsl3);
+        tG1 = allocSet(tPool, dsl3); tG2 = allocSet(tPool, dsl3); tG3 = allocSet(tPool, dsl3);
+        bindSet(tVFs, { &tV, &tVfull, &tScal });     // tri_vfull : compact V → full panel (β-gated)
+        bindSet(tBTs, { &tVfull, &tScal, &tT });     // wy_buildt : T = WY factor from Gram(Vfull)+β
+        bindSet(tG1,  { &tVfull, &tZ, &tY });        // gemm_g #1 : Y  = Vfullᵀ·Z
+        bindSet(tG2,  { &tT, &tY, &tY2 });           // gemm_g #2 : Y2 = T·Y
+        bindSet(tG3,  { &tVfull, &tY2, &tZ });       // gemm_g #3 : Z -= Vfull·Y2
         return true;
     }
     // Standard symmetric eigensolve: Ain (column-major n×n) → eps_out ascending, Vout columns.
@@ -546,23 +581,67 @@ struct XtbVulkanContext::Impl {
         double* Z = (double*)tZ.ptr;
         if (!cpuTriEig(n, diag.data(), off.data(), eps_out, Z)) return false;   // tql2 → eps + Z (resident)
         const auto tp2 = pclk::now();
-        // Back-transform C = Q·Z = H_0·…·H_{n-3}·Z: apply reflectors k = n-3 … 0, batched
-        // (timeout-safe chunks) since v/β are resident and the dispatches are pure-GPU. EIG-2A:
-        // one workgroup per Z column (dispatch n workgroups, shared-memory vᵀZ reduction +
-        // parallel rank-1 update) instead of one thread per column. β read from tScal[2n+k].
+        // Back-transform C = Q·Z = H_0·…·H_{n-3}·Z.
         int nsub_back = 0; since = 0; open = false;
-        for (int k = n - 3; k >= 0; --k) {
-            if (scal[2u * (size_t)n + k] == 0.0) continue;   // β_k == 0 → H_k = I (degenerate column)
-            const int m = n - k - 1;
-            if (!open) { if (!beginCmd()) return false; open = true; since = 0; }
-            uint32_t pc[3] = { (uint32_t)n, (uint32_t)k, (uint32_t)m };
-            vkCmdPushConstants(cmd, ploJ, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &tAL, 0, nullptr);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pTAL);
-            vkCmdDispatch(cmd, (uint32_t)n, 1, 1); barrier();
-            if (++since >= rps) { if (!submit()) return false; open = false; ++nsub_back; }
+        if (m_use_wy) {
+            // EIG-2B: WY-blocked. Reflectors 0..n-3 (R = n-2) grouped into panels of ≤ kWyB,
+            // innermost panel (highest k0) first so C = W_0·(W_1·(…·(W_{P-1}·Z))). Per panel:
+            // scatter compact V → full Vfull (tri_vfull), build the b×b compact-WY factor T
+            // (wy_buildt), then Z = (I − Vfull·T·Vfullᵀ)·Z via three rectangular GEMMs:
+            //   Y = Vfullᵀ·Z (b×n), Y2 = T·Y (b×n), Z -= Vfull·Y2 (n×n). One submit/panel.
+            const int R = n - 2;
+            const int P = (R + kWyB - 1) / kWyB;
+            auto gemm = [&](VkDescriptorSet set, uint32_t M, uint32_t N, uint32_t K, uint32_t lda,
+                            uint32_t ldb, uint32_t ldc, uint32_t transA, uint32_t mode, uint32_t gx, uint32_t gy) {
+                uint32_t pc[8] = { M, N, K, lda, ldb, ldc, transA, mode };
+                vkCmdPushConstants(cmd, ploGG, VK_SHADER_STAGE_COMPUTE_BIT, 0, 32, pc);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploGG, 0, 1, &set, 0, nullptr);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pGG);
+                vkCmdDispatch(cmd, gx, gy, 1); barrier();
+            };
+            const uint32_t un = (uint32_t)n, gnn = (un + 15u) / 16u;
+            // Panels carry a Z-dependency but no host readback, so all of them record into one
+            // command buffer (barriers serialize); chunk only to stay timeout-safe (5 dispatches
+            // /panel ≪ the device-lost ceiling, so the chunk is generous).
+            const int panelsPerSubmit = 64;
+            int pcount = 0;
+            if (P > 0) { if (!beginCmd()) return false; open = true; }
+            for (int p = P - 1; p >= 0; --p) {
+                const uint32_t k0 = (uint32_t)(p * kWyB);
+                const int      bi = (R - p * kWyB < kWyB) ? (R - p * kWyB) : kWyB;
+                const uint32_t b  = (uint32_t)bi, gb = (b + 15u) / 16u;
+                uint32_t pcv[3] = { un, k0, b };
+                vkCmdPushConstants(cmd, ploJ, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pcv);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &tVFs, 0, nullptr);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pVF);
+                vkCmdDispatch(cmd, gnn, gb, 1); barrier();                     // tri_vfull (n×b)
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &tBTs, 0, nullptr);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pBT);
+                vkCmdDispatch(cmd, 1, 1, 1); barrier();                        // wy_buildt (b×b, 1 WG)
+                gemm(tG1, b,  un, un, un, un, b,  1u, 0u, gb,  gnn);           // Y  = Vfullᵀ·Z
+                gemm(tG2, b,  un, b,  b,  b,  b,  0u, 0u, gb,  gnn);           // Y2 = T·Y
+                gemm(tG3, un, un, b,  un, b,  un, 0u, 1u, gnn, gnn);           // Z -= Vfull·Y2
+                if (++pcount >= panelsPerSubmit) {
+                    if (!submit()) return false; ++nsub_back; pcount = 0;
+                    if (p > 0) { if (!beginCmd()) return false; } else open = false;
+                }
+            }
+            if (open) { if (!submit()) return false; ++nsub_back; }
+        } else {
+            // EIG-2A: per-reflector, one workgroup per Z column, batched into timeout-safe chunks.
+            for (int k = n - 3; k >= 0; --k) {
+                if (scal[2u * (size_t)n + k] == 0.0) continue;   // β_k == 0 → H_k = I (degenerate column)
+                const int m = n - k - 1;
+                if (!open) { if (!beginCmd()) return false; open = true; since = 0; }
+                uint32_t pc[3] = { (uint32_t)n, (uint32_t)k, (uint32_t)m };
+                vkCmdPushConstants(cmd, ploJ, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploJ, 0, 1, &tAL, 0, nullptr);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pTAL);
+                vkCmdDispatch(cmd, (uint32_t)n, 1, 1); barrier();
+                if (++since >= rps) { if (!submit()) return false; open = false; ++nsub_back; }
+            }
+            if (open) { if (!submit()) return false; ++nsub_back; }
         }
-        if (open) { if (!submit()) return false; ++nsub_back; }
         if (prof) {
             const auto tp3 = pclk::now();
             fprintf(stderr, "[EIGPROF] n=%d tridiag=%.1f (submits=%d) tql2=%.1f back=%.1f (submits=%d) total=%.1f ms\n",
@@ -1102,9 +1181,9 @@ struct XtbVulkanContext::Impl {
         freeBasis();
         for (Buf* b : { &sA,&sV,&sP,&sC,&rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs,&rAtil32,&rCtil32,&rCs32,&tA,&tV,&tScal,&tP,&tW,&tZ,&tA32,&tV32,&tScal32,&tP32,&tW32,&tZ32 }) freeBuf(*b);
         if (fence) vkDestroyFence(dev, fence, nullptr);
-        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul,pMP,pFMP,pMM,pAng32,pCol32,pRow32,pVec32,pTMV,pTR2,pTAL,pTHou,pTKW,pTMV32,pTR2_32,pTAL32,pTHou32,pTKW32 }) if (p) vkDestroyPipeline(dev, p, nullptr);
-        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul,mMP,mFMP,mMM,mAng32,mCol32,mRow32,mVec32,mTMV,mTR2,mTAL,mTHou,mTKW,mTMV32,mTR2_32,mTAL32,mTHou32,mTKW32 }) if (m) vkDestroyShaderModule(dev, m, nullptr);
-        for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB,ploI4,ploI5,ploI18,ploGrad5,ploGradP,ploMP,ploFMP,ploMM,ploT4 }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
+        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul,pMP,pFMP,pMM,pAng32,pCol32,pRow32,pVec32,pTMV,pTR2,pTAL,pTHou,pTKW,pTMV32,pTR2_32,pTAL32,pTHou32,pTKW32,pGG,pVF,pBT }) if (p) vkDestroyPipeline(dev, p, nullptr);
+        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul,mMP,mFMP,mMM,mAng32,mCol32,mRow32,mVec32,mTMV,mTR2,mTAL,mTHou,mTKW,mTMV32,mTR2_32,mTAL32,mTHou32,mTKW32,mGG,mVF,mBT }) if (m) vkDestroyShaderModule(dev, m, nullptr);
+        for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB,ploI4,ploI5,ploI18,ploGrad5,ploGradP,ploMP,ploFMP,ploMM,ploT4,ploGG }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
         for (VkDescriptorSetLayout d : { dsl3,dsl4,dsl5,dsl18,dsl26,dsl12,dsl6 }) if (d) vkDestroyDescriptorSetLayout(dev, d, nullptr);
         sPool = rPool = tPool = VK_NULL_HANDLE; fence = VK_NULL_HANDLE; pipes_ready = false;
     }

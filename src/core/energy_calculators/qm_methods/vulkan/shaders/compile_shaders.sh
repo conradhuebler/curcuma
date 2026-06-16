@@ -11,7 +11,8 @@ for s in angles col row vec gemm scale_cols fock popband \
          fock_multipole multipole_moments \
          angles_f32 col_f32 row_f32 vec_f32 \
          tri_matvec tri_rank2 tri_applyl tri_house tri_kw \
-         tri_house_f32 tri_matvec_f32 tri_kw_f32 tri_rank2_f32 tri_applyl_f32; do
+         tri_house_f32 tri_matvec_f32 tri_kw_f32 tri_rank2_f32 tri_applyl_f32 \
+         gemm_g tri_vfull wy_buildt; do
     glslc --target-env=vulkan1.1 -mfmt=c -fshader-stage=compute "$s.comp" -o "$s.spv.inc"
     echo "compiled $s.comp -> $s.spv.inc"
 done
