@@ -417,6 +417,15 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             // Update common state
             m_current_energy = new_energy;
             m_current_gradient = new_gradient;
+
+            // Claude Generated 2026 - Apply external force bias from interactive
+            // simulation (mouse grab). The bias is added to the gradient once
+            // per step and then cleared, mirroring SimpleMD's pattern.
+            if (m_external_forces_pending) {
+                m_current_gradient += m_external_forces;
+                m_external_forces.setZero(m_external_forces.size());
+                m_external_forces_pending = false;
+            }
             gradient_norm = new_gradient.norm();
             if (m_context.write_trajectory)
                 updateTrajectory(m_molecule, new_energy);
@@ -730,6 +739,19 @@ void OptimizerDriver::setBasename(const std::string& basename)
     if (!basename.empty()) {
         m_context.trajectory_filename = basename + ".trj.xyz";
     }
+}
+
+// Claude Generated 2026 - External force injection for interactive simulation.
+void OptimizerDriver::setExternalForces(const Vector& forces)
+{
+    m_external_forces = forces;
+    m_external_forces_pending = true;
+}
+
+void OptimizerDriver::clearExternalForces()
+{
+    m_external_forces.setZero(m_external_forces.size());
+    m_external_forces_pending = false;
 }
 
 } // namespace Optimization

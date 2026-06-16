@@ -124,6 +124,12 @@ protected:
     using StepCallback = std::function<bool(int, const Molecule&, double)>;
     StepCallback m_step_callback;
 
+    // Claude Generated 2026 - External force injection for interactive simulation.
+    // Additive per-atom force bias applied to the gradient each step, then cleared.
+    // Mirrors SimpleMD's m_external_forces / m_external_forces_pending pattern.
+    Vector m_external_forces;
+    bool m_external_forces_pending = false;
+
     // Pure virtual methods for derived classes (Template Method Pattern)
     virtual bool InitializeOptimizerInternal() = 0;
     virtual Vector CalculateOptimizationStep(const Vector& current_coordinates,
@@ -183,6 +189,12 @@ public:
     void setConvergenceCriteria(double energy_thresh, double rmsd_thresh, double grad_thresh);
     void setTrajectoryFile(const std::string& filename);
     void setBasename(const std::string& basename);
+
+    // Claude Generated 2026 - External force injection for interactive simulation.
+    // Adds a per-atom force bias (in Eh/Bohr, flat 3N vector) that is applied to
+    // the gradient at each optimization step and then cleared automatically.
+    void setExternalForces(const Vector& forces);
+    void clearExternalForces();
 
     // Method identification — implemented by each concrete optimizer
     virtual std::string getName() const = 0;
