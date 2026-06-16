@@ -1,6 +1,7 @@
 # Work Package: Vulkan GPU eigensolver — closing the gap to rocSOLVER
 
-**Status (2026-06-16): COMPLETE for the planned items.** V-AP5 replaced the cyclic Jacobi
+**Status (2026-06-16): COMPLETE for the planned items.** V-PERF-1 (the Householder
+eigensolver, commit `be159a1`, committed as `V-AP5`) replaced the cyclic Jacobi
 with a Householder tridiagonalization eigensolver (`solveSymTridiag` in
 `src/core/energy_calculators/qm_methods/vulkan/xtb_vulkan_context.cpp`); this WP then made it
 fully GPU-resident (EIG-1), parallelised the back-transform (EIG-2A), blocked it into BLAS-3
@@ -112,11 +113,11 @@ real, isolated back-transform speed-up with no downside, so WY is the default
 (`CURCUMA_VK_BACKXF=reflector` reverts to EIG-2A).
 
 **Problem:** `tri_applyl` is one-thread-per-column with a serial length-m inner loop (same
-underutilization the gradient had before V-AP6).
+underutilization the gradient had before V-PERF-2).
 
 **Approach (pick one):**
 - **A (low-risk):** one **workgroup per Z column** with a shared-memory reduction of `vᵀZ`,
-  then a parallel rank-1 update — the V-AP6 pattern applied to the back-transform.
+  then a parallel rank-1 update — the V-PERF-2 pattern applied to the back-transform.
 - **B (faster, more work):** block the reflectors via the **compact WY representation**
   (`Q = I − V·T·Vᵀ` for a panel of `b` reflectors) and apply them as **two GEMMs** using the
   already-tiled `gemm.comp`. Turns the back-transform into BLAS-3 the iGPU runs efficiently.
@@ -191,7 +192,7 @@ tracked separately in `docs/SQM_PERF_OPT_WP.md`.
 ---
 
 ## 4. Closing notes / what's left
-- **Done & committed:** `be159a1` (V-AP5 eigensolver + device-lost fix), `b67834d`
+- **Done & committed:** `be159a1` (V-PERF-1 eigensolver + device-lost fix, committed as `V-AP5`), `b67834d`
   (EIG-1 + EIG-2A), `b0e5161` (EIG-4 FP32). The `CURCUMA_VK_EIG_PROFILE` hook (EIG-0) and the
   `CURCUMA_VK_TEST_TRIDIAG` standalone check are committed.
 - **EIG-2B done (2026-06-16):** WY-blocked GEMM back-transform — `tri_vfull`+`wy_buildt`+
@@ -202,6 +203,10 @@ tracked separately in `docs/SQM_PERF_OPT_WP.md`.
     in `native_eigensolver.cpp` is a portable reference) or threaded Givens. High effort / risk.
 - **Beyond the eigensolve:** the rest of the Vulkan↔ROCm gap is the host integral build / γ /
   D4 and setup — tracked separately in `docs/SQM_PERF_OPT_WP.md`.
-- **Naming collision (open):** the perf commits used `V-AP5`/`V-AP6`, which clash with
-  `docs/SQM_GPU_ROADMAP.md`'s planned `V-AP5` (device potential build) / `V-AP6` (GFN-FF).
-  Reconcile — renumber the roadmap stages or retag the perf line `V-PERF-*`.
+- **Naming collision (resolved 2026-06-16):** the perf commits `be159a1`/`61994ce` were
+  committed as `V-AP5`/`V-AP6`, clashing with `docs/SQM_GPU_ROADMAP.md`'s staging `V-AP5`
+  (device potential build) / `V-AP6` (GFN-FF). Performance work is not a staging milestone, so
+  the docs/comments now tag the perf line **`V-PERF-*`**: `V-PERF-1` = Householder eigensolver
+  (ex-`V-AP5`, `be159a1`), `V-PERF-2` = one-workgroup-per-atom nuclear gradient (ex-`V-AP6`,
+  `61994ce`). The `V-AP*` numbers are reserved for the roadmap staging sequence (V-AP1…V-AP6);
+  the two commit *messages* keep their historical tags (history is not rewritten).

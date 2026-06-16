@@ -142,7 +142,7 @@ public:
         if (!m_ctx || m_nat <= 0) return false;
         // GFN1: v_dp/v_qp empty (isotropic). GFN2: non-empty v_dp/v_qp drive the on-device
         // multipole-integral Pulay term (grad_pulay). Both run on the device by default —
-        // the workgroup-per-atom grad_pulay (V-AP6) made it fast (231-atom complex: GFN2
+        // the workgroup-per-atom grad_pulay (V-PERF-2) made it fast (231-atom complex: GFN2
         // 28 s → 81 ms, GFN1 18 s → 98 ms), so it now beats the host gradient. Escape hatch
         // CURCUMA_VK_GFN2_CPUGRAD=1 forces the validated host gradient for GFN2. Claude Generated.
         const bool is_gfn2 = v_dp.size() > 0;

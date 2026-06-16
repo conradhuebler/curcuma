@@ -71,6 +71,13 @@ multipole SCF + multipole gradient, GFN-FF, and device solvation. The s/p-only l
 
 ## Vulkan work packages
 
+> **Tag note:** `V-AP*` here is the **staging sequence** (mirrors the CUDA/ROCm stages). The
+> Vulkan *performance* work — the Householder eigensolver and the workgroup-per-atom gradient —
+> is a separate track tagged **`V-PERF-*`** (`V-PERF-1`/`V-PERF-2`), even though their commits
+> `be159a1`/`61994ce` were authored as `V-AP5`/`V-AP6` before the retag. The `V-AP5`/`V-AP6`
+> below are the planned device-potential-build / GFN-FF stages, unrelated to those commits. See
+> `docs/SQM_VULKAN_EIGENSOLVER_WP.md`.
+
 ### V-AP1 — On-device nuclear gradient, GFN1 (Stage 4) — ✅ DONE (2026-06)
 - **Goal**: bring Vulkan to ROCm/CUDA parity for GFN1; make GFN1 `-opt`/`-md`
   fully device-resident (only xyz up, gradient+energy down per step).
