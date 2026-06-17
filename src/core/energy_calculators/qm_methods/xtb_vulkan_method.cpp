@@ -220,6 +220,41 @@ public:
         }
         return true;
     }
+
+    // ---- In-SCF GFN2 D4 atom-potential (Stage 5, Part B2) -----------------
+    // supportsDeviceDispersion()→true routes XTB::addDispersionPotential's per-iteration
+    // dE_D4/dq to the device (xtb_native.cpp use_device_disp path), so the host O(N²) D4
+    // contraction drops out of the GFN2 SCF loop. Mirrors the CUDA/ROCm backends.
+    bool supportsDeviceDispersion() const override { return true; }
+    bool beginDispersion(int nat, const int* Z, const double* sqrtZr4r2,
+                         const int* nref, const double* xyz_bohr,
+                         const double* c6_flat, int c6_flat_len,
+                         double s6, double s8, double a1, double a2, double cutoff) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->beginDispersion(nat, Z, sqrtZr4r2, nref, xyz_bohr,
+                                      c6_flat, c6_flat_len, s6, s8, a1, a2, cutoff);
+    }
+    bool dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->dispersionDedq(nat, W, dWq, dEdq_out);
+    }
+    bool dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
+                            double* e_atom_out, double* grad_out,
+                            double* dEdcn_out, double* dEdq_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->dispersionGradient(nat, W, dWq, dWc, e_atom_out, grad_out, dEdcn_out, dEdq_out);
+    }
+    bool dispersionATM(int nat, const double* c6, const double* dc6dcn,
+                       double s9, double a1, double a2, double alp, double cutoff,
+                       double* e_atom_out, double* grad_out, double* dEdcn_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->dispersionATM(nat, c6, dc6dcn, s9, a1, a2, alp, cutoff,
+                                    e_atom_out, grad_out, dEdcn_out);
+    }
 private:
     XtbVulkanContext* m_ctx = nullptr;
     int               m_n   = 0;

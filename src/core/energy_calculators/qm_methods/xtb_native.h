@@ -487,6 +487,29 @@ struct GpuScfBackend {
     /// Per iteration: host-built W/∂W/∂q (each nat·7) → device dE_D4/dq (nat).
     virtual bool dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out)
     { (void)nat; (void)W; (void)dWq; (void)dEdq_out; return false; }
+    /// Post-SCF: the whole 2-body D4 (energy + nuclear gradient + dE/dCN + dE/dq) on the
+    /// device in one gather, reusing the geometry-fixed reference data from beginDispersion.
+    /// Inputs W/dWq/dWc each nat·7 (the converged-charge reference weights + their q/CN
+    /// derivatives). Outputs: e_atom (nat; total 2-body E = ½·Σ e_atom — each pair counted
+    /// twice by the gather), grad (3·nat, [3*i+k], Eh/Bohr), dEdcn (nat), dEdq (nat). The
+    /// host adds ATM + the CN-distribution + the q-response on top. Default false → host
+    /// D4Evaluator. Claude Generated.
+    virtual bool dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
+                                    double* e_atom_out, double* grad_out,
+                                    double* dEdcn_out, double* dEdq_out)
+    { (void)nat; (void)W; (void)dWq; (void)dWc; (void)e_atom_out; (void)grad_out;
+      (void)dEdcn_out; (void)dEdq_out; return false; }
+    /// Post-SCF: the D4 ATM 3-body (energy + nuclear gradient + dE/dCN) on the device in a
+    /// per-atom gather over pairs, reusing the resident geometry + √r4r2 from beginDispersion.
+    /// c6 / dc6dcn are the q=0 reference C6 + ∂C6/∂CN matrices (nat·nat, from buildAtmC6Flat).
+    /// Outputs: e_atom (nat; total ATM E = ⅓·Σ — each triple counted by its 3 members), grad
+    /// (3·nat, [3*i+k], accumulated on top of the 2-body), dEdcn (nat). s9/a1/a2/alp/cutoff are
+    /// the D4 ATM params (GFN2: 5.0/0.52/5.0/16.0/25.0). Default false → host computeATM.
+    virtual bool dispersionATM(int nat, const double* c6, const double* dc6dcn,
+                               double s9, double a1, double a2, double alp, double cutoff,
+                               double* e_atom_out, double* grad_out, double* dEdcn_out)
+    { (void)nat; (void)c6; (void)dc6dcn; (void)s9; (void)a1; (void)a2; (void)alp; (void)cutoff;
+      (void)e_atom_out; (void)grad_out; (void)dEdcn_out; return false; }
     /// Stage 6 (S6.2b): upload the q-independent D4 reference tables once per
     /// geometry so the fused resident loop rebuilds W/dWq on the device from the
     /// resident SCF charges (no host buildRefWFlat per iteration). Arrays are

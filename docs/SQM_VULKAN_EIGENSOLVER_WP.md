@@ -8,8 +8,10 @@ fully GPU-resident (EIG-1), parallelised the back-transform (EIG-2A), blocked it
 GEMMs via compact-WY (EIG-2B), and added an opt-in FP32 mixed-precision path (EIG-4). The
 eigensolve is **no longer the overwhelming bottleneck** it was — it is now ~2× ROCm rather than
 ~40×, and the residual Vulkan↔ROCm gap is spread across the eigensolve tail (tql2 +
-back-transform) and the non-eigensolve SCF/setup. EIG-3 (host tql2) is deferred as a
-diminishing return.
+back-transform) and the non-eigensolve SCF/setup. EIG-3 (GPU divide-and-conquer) was
+**implemented and validated bit-identical** but measures ~13× *slower* than host tql2 on this
+iGPU (single-workgroup sort/deflation + per-merge fence latency dominate), confirming the WP's
+"diminishing returns" call — it ships **opt-in** (`CURCUMA_VK_TRIDIAG_SOLVE=dc`), default off.
 
 > 🤖 AI-generated. Done items are ⚙️ machine-tested (correctness validated); open items are
 > proposals. Numbers are on a Radeon 890M (RADV). Only ✅ TESTED/APPROVED by the operator are
@@ -26,7 +28,7 @@ diminishing return.
 | EIG-1 fully-GPU tridiagonalization | ✅ | `tri_house`+`tri_kw` fold the host ‖x‖/pᵀv reductions onto the GPU; tridiag fence syncs **1112 → 3** (n=558) |
 | EIG-2A workgroup-per-column back-transform | ✅ | `tri_applyl` 256-lane shared reduction; submits → 3 |
 | EIG-2B WY-blocked GEMM back-transform | ✅ | `tri_vfull`+`wy_buildt`+`gemm_g` (compact-WY panels, b=32); back-transform **27.7 → ~20 ms (1.4×)**, bit-identical |
-| EIG-3 host tql2 | deferred | sequential host O(n³), now ~29 ms (smallest phase); not a clean win — see re-scope |
+| EIG-3 GPU divide-and-conquer | ✅ opt-in | full-residency Cuppen D&C (`dc_leaf_jacobi`+`dc_merge_rank1`, GPU leaves+deflation+secular); bit-identical to host tql2 incl. `complex`, but **~382 ms vs ~29 ms tql2 — slower on this iGPU**, so opt-in only (`CURCUMA_VK_TRIDIAG_SOLVE=dc`) |
 | EIG-4 FP32 mixed precision | ✅ opt-in | `solveSymTridiag32`; helps the tridiagonalization (1.5×) only — back-transform/tql2 don't; net ~5%, `-scf_mixed_precision true` |
 
 **Fresh same-clock (`complex`/231 GFN2 `-sp`, shared box ⇒ ±noise):**
@@ -145,6 +147,28 @@ low / (b) medium-high (correctness on clustered eigenvalues).
 > pool overhead likely eats the gain; (b) is high-effort/high-risk. **Defer EIG-3** unless EIG-4
 > lands and tql2 becomes the critical path. The biggest remaining lever is the **GPU** work
 > (tridiag 69 + back 30 = 99 ms) → **EIG-4**.
+>
+> **Implemented anyway (2026-06-17, opt-in), per operator request.** Option (b), full GPU
+> residency: `dc_leaf_jacobi.comp` (base-case cyclic-Jacobi leaf eigensolve, one workgroup/leaf,
+> algebraic rotation — no FP64 trig in GLSL) + `dc_merge_rank1.comp` (the **entire** `rank1Eigen`
+> per merge node on one workgroup: deflation Givens scan, secular root bisection, Löwner weights,
+> eigenvector columns, assembly). `dcRecursive` dispatches GPU leaves + GPU merges; the
+> blockdiag(V1,V2)·Wm back-transform reuses the EIG-2B `gemm_g`. A `CURCUMA_VK_DC_HOST=1` debug
+> flag keeps host `rank1Eigen`/tql2 for reference.
+>
+> **Correctness (validated):** standalone `CURCUMA_VK_TEST_TRIDIAGDC=1` across all spectral
+> classes (well-separated / clustered / exact-multiplicity / near-diagonal) to n=558 — residual
+> ≤1.03e-12, orthonormality ≤8.4e-15, incl. the `dupdiag` deflation path; SCF **bit-identical**
+> to host tql2 on 7 mol × {GFN1,GFN2} + 231-atom `complex` (16/16, 8 dp); NH3 GFN2 `-opt`
+> identical trajectory; `ctest -L gpu_vulkan_dc` 20/20.
+>
+> **Honest performance (the predicted risk, measured):** `complex` GFN2 Phase-2 **~382 ms vs
+> ~29 ms host tql2 (~13×)** — and the host-deflation hybrid (`CURCUMA_VK_DC_HOST=1`, GPU secular
+> only) is ~130 ms (~4.5×). The single-workgroup sort/deflation bookkeeping + the bottom-up
+> merge tree's sequential per-node fence latency dominate; the iGPU's FP64 throughput can't
+> overcome the submit overhead vs a zero-submit host tql2. **Ships opt-in only**
+> (`CURCUMA_VK_TRIDIAG_SOLVE=dc`, default host tql2). This is the WP's "diminishing returns"
+> conclusion, now backed by measurement.
 
 ### EIG-4 — FP32 mixed precision (parallels ROCm's lever) — ✅ DONE (opt-in, 2026-06-16)
 Implemented `solveSymTridiag32`: cast Ã→FP32, FP32 `tri_*_f32` tridiagonalization +
@@ -198,9 +222,12 @@ tracked separately in `docs/SQM_PERF_OPT_WP.md`.
 - **EIG-2B done (2026-06-16):** WY-blocked GEMM back-transform — `tri_vfull`+`wy_buildt`+
   `gemm_g`, back-transform 27.7 → ~20 ms (~1.4×), bit-identical. Default ON
   (`CURCUMA_VK_BACKXF=reflector` reverts to EIG-2A).
-- **Deferred (diminishing returns, do on a quiet box where the small gains are measurable):**
-  - **EIG-3** — host tql2 (~29 ms): GPU Cuppen divide-and-conquer (`tridiagDC`/`rank1Eigen`
-    in `native_eigensolver.cpp` is a portable reference) or threaded Givens. High effort / risk.
+- **EIG-3 done (2026-06-17, opt-in):** full-residency GPU Cuppen divide-and-conquer —
+  `dc_leaf_jacobi`+`dc_merge_rank1` (GPU leaves + deflation + secular + assembly), back-transform
+  via EIG-2B `gemm_g`. Bit-identical to host tql2 incl. `complex` (`ctest -L gpu_vulkan_dc`
+  20/20), but **~382 ms vs ~29 ms tql2 (~13×) on the 890M** — submit/deflation-bound, so
+  default off, enable with `CURCUMA_VK_TRIDIAG_SOLVE=dc` (`CURCUMA_VK_DC_HOST=1` = host-deflation
+  hybrid reference). Confirms the "diminishing returns" call by measurement.
 - **Beyond the eigensolve:** the rest of the Vulkan↔ROCm gap is the host integral build / γ /
   D4 and setup — tracked separately in `docs/SQM_PERF_OPT_WP.md`.
 - **Naming collision (resolved 2026-06-16):** the perf commits `be159a1`/`61994ce` were

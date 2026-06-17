@@ -170,6 +170,46 @@ public:
     bool solveMultipole(const double* v_ao, const double* v_dp, const double* v_qp, double* eps_out, bool fp32 = false);
     bool multipoleMoments(double* dp_at, double* qp_at);
 
+    // ---- In-SCF GFN2 D4 atom-potential dE_D4/dq (Stage 5, Part B2) -----------
+    // Port of XTB::addDispersionPotential's per-reference dE_D4/dq onto the device, so
+    // the host O(N²) D4 contraction drops out of the GFN2 SCF loop. beginDispersion uploads
+    // the geometry-fixed reference data once per geometry (c6_flat = element data, uploaded
+    // once per process); dispersionDedq runs the per-iteration O(N²) 7×7 contraction + BJ
+    // disp_sum from the host-built reference weights W/dWq (nat·7). Claude Generated.
+    bool beginDispersion(int nat, const int* Z, const double* sqrtZr4r2,
+                         const int* nref, const double* xyz_bohr,
+                         const double* c6_flat, int c6_flat_len,
+                         double s6, double s8, double a1, double a2, double cutoff);
+    bool dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out);
+
+    /// Post-SCF: the whole 2-body D4 (energy + nuclear gradient + dE/dCN + dE/dq) in one
+    /// device gather, reusing the geometry-fixed reference data from beginDispersion. W/dWq/dWc
+    /// are the converged-charge reference weights + their q/CN derivatives (each nat·7); outputs
+    /// e_atom (nat; total 2-body E = ½·Σ), grad (3·nat, [3*i+k]), dEdcn (nat), dEdq (nat). The
+    /// host adds ATM + the CN-distribution + the q-response on top. Claude Generated.
+    bool dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
+                            double* e_atom_out, double* grad_out,
+                            double* dEdcn_out, double* dEdq_out);
+
+    /// Post-SCF: the D4 ATM 3-body (energy + nuclear gradient + dE/dCN) on the device in a
+    /// per-atom gather, reusing the resident geometry + √r4r2 from beginDispersion. c6/dc6dcn are
+    /// the q=0 reference C6 + ∂C6/∂CN (nat·nat). Outputs e_atom (nat; total ATM E = ⅓·Σ), grad
+    /// (3·nat, accumulated on top of the 2-body), dEdcn (nat). Claude Generated.
+    bool dispersionATM(int nat, const double* c6, const double* dc6dcn,
+                       double s9, double a1, double a2, double alp, double cutoff,
+                       double* e_atom_out, double* grad_out, double* dEdcn_out);
+
+    // ---- Single-shot D4 EEQ charge model (Stage 5, Part A) ------------------
+    // Build the (N+1) augmented EEQ system on the device, LU-factor it (rocSOLVER), solve for
+    // the charges; the factor is kept so eeqChargeResponseGradient reuses it for the adjoint
+    // ∂q/∂x solve. Inputs are the length-N host arrays from D4ChargeModel::resolveParams. The
+    // host then folds Σ dEdq·∂q/∂R into its dispersion gradient. Claude Generated.
+    bool eeqCharges(int N, const double* xyz_bohr,
+                    const double* chi, const double* gam, const double* alpha_sq,
+                    const double* cnf, const double* rcov_bohr,
+                    double total_charge, double* q_out);
+    bool eeqChargeResponseGradient(int N, const double* dEdq, double* grad_add);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;

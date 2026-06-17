@@ -189,8 +189,12 @@ On an **AMD Radeon 890M (RADV, integrated, shaderFloat64)**, build `release_vulk
   844 ms/iter) and the perturbed early iterations can cost an extra SCF cycle (GFN1 14→15),
   making it slower. So mixed precision is **NOT defaulted on for `-gpu vulkan`** (unlike
   ROCm/CUDA); the FP32 path is a documented opt-in (`-scf_mixed_precision true`). The real
-  Vulkan lever is a faster **eigensolve algorithm** (blocked/one-sided Jacobi or a
-  divide-and-conquer port), not precision. See SQM_GPU_ROADMAP.md X-AP3.
+  Vulkan lever is a faster **eigensolve algorithm**, not precision. See SQM_GPU_ROADMAP.md
+  X-AP3. (Two algorithmic alternatives were since built and benchmarked, both opt-in via
+  `CURCUMA_VK_TRIDIAG_SOLVE`: a fully-GPU **Householder** eigensolver (default) and a
+  full-residency **Cuppen divide-and-conquer** (`=dc`, EIG-3) — the D&C is bit-identical but
+  ~13× *slower* than host tql2 on this iGPU (submit/deflation-bound), so it ships opt-in only.
+  See [SQM_VULKAN_EIGENSOLVER_WP.md](SQM_VULKAN_EIGENSOLVER_WP.md).)
 - Default non-Vulkan `release/` build stays green (cli_curcumaopt_*/cli_rmsd_* 11/11).
 
 What was **NOT** tested: large systems (>~100 nao; the iGPU FP64 Jacobi is slow — this is a

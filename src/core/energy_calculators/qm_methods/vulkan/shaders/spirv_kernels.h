@@ -69,6 +69,19 @@ static const uint32_t grad_pulay_spv[] =
 static const uint32_t multipole_ints_spv[] =
 #include "multipole_ints.spv.inc"
 ;
+// Stage 5 (Part B2): in-SCF GFN2 D4 atom-potential dE_D4/dq. Per-atom GATHER (no FP64
+// atomics). Removes the per-iteration host D4 from the GFN2 SCF. Claude Generated.
+static const uint32_t d4_dedq_spv[] =
+#include "d4_dedq.spv.inc"
+;
+// Stage 5 (Part B2): post-SCF 2-body D4 gradient (energy + grad + dE/dCN + dE/dq) gather.
+static const uint32_t d4_grad_spv[] =
+#include "d4_grad.spv.inc"
+;
+// Stage 5 (Part B2): D4 ATM 3-body gradient (energy + grad + dE/dCN) per-atom gather.
+static const uint32_t d4_atm_spv[] =
+#include "d4_atm.spv.inc"
+;
 // Stage 2b: GFN2 device-resident multipole SCF — anisotropic Fock term + atomic moments.
 static const uint32_t fock_multipole_spv[] =
 #include "fock_multipole.spv.inc"
@@ -136,6 +149,26 @@ static const uint32_t tri_vfull_spv[] =
 ;
 static const uint32_t wy_buildt_spv[] =
 #include "wy_buildt.spv.inc"
+;
+// EIG-3: GPU Cuppen divide-and-conquer tridiagonal eigensolver — per-merge secular solve
+// (rank-1 update diag(D)+rho·z·zᵀ): root bisection (dc_secular_root), Löwner reconstructed
+// weights (dc_lowner), normalized eigenvector columns (dc_evec_cols). Claude Generated.
+static const uint32_t dc_secular_root_spv[] =
+#include "dc_secular_root.spv.inc"
+;
+static const uint32_t dc_lowner_spv[] =
+#include "dc_lowner.spv.inc"
+;
+static const uint32_t dc_evec_cols_spv[] =
+#include "dc_evec_cols.spv.inc"
+;
+// EIG-3 full residency: one-workgroup-per-node merge (entire rank1Eigen incl. GPU deflation)
+// and batched GPU leaf eigensolve (cyclic Jacobi on the small base-case tridiagonals).
+static const uint32_t dc_merge_rank1_spv[] =
+#include "dc_merge_rank1.spv.inc"
+;
+static const uint32_t dc_leaf_jacobi_spv[] =
+#include "dc_leaf_jacobi.spv.inc"
 ;
 
 } // namespace shaders
