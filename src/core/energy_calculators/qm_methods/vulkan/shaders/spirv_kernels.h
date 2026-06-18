@@ -82,6 +82,20 @@ static const uint32_t d4_grad_spv[] =
 static const uint32_t d4_atm_spv[] =
 #include "d4_atm.spv.inc"
 ;
+// Stage 5 (Part A): D4 EEQ q-response — raw CN, augmented matrix build, dense (N+1) LU solve
+// (single workgroup, no pivot), and the ∂q/∂x response gather. Device dense solve for Vulkan.
+static const uint32_t d4eeq_cn_spv[] =
+#include "d4eeq_cn.spv.inc"
+;
+static const uint32_t d4eeq_build_spv[] =
+#include "d4eeq_build.spv.inc"
+;
+static const uint32_t d4eeq_solve_spv[] =
+#include "d4eeq_solve.spv.inc"
+;
+static const uint32_t d4eeq_resp_spv[] =
+#include "d4eeq_resp.spv.inc"
+;
 // Stage 2b: GFN2 device-resident multipole SCF — anisotropic Fock term + atomic moments.
 static const uint32_t fock_multipole_spv[] =
 #include "fock_multipole.spv.inc"

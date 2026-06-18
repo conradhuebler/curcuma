@@ -282,6 +282,19 @@ struct XtbVulkanContext::Impl {
     Buf d4c6, d4dc6, d4AParams;
     VkDescriptorPool d4APool = VK_NULL_HANDLE;
     VkDescriptorSet  d4ASet{};
+    // D4 EEQ q-response (Stage 5, Part A): raw-CN / matrix-build / single-workgroup LU solve /
+    // ∂q/∂x response gather. cn=dsl3+4B (reuse ploS); build=dsl4+4B (reuse ploF); solve=dsl2;
+    // resp=dsl7. The O(N) log-compression / RHS / u-weight are done host-side on the mapped
+    // buffers. Claude Generated.
+    VkDescriptorSetLayout dsl2 = VK_NULL_HANDLE, dsl7 = VK_NULL_HANDLE;
+    VkPipelineLayout ploEqSolve = VK_NULL_HANDLE, ploEqResp = VK_NULL_HANDLE;
+    VkShaderModule mEqCn{}, mEqBuild{}, mEqSolve{}, mEqResp{};
+    VkPipeline pEqCn{}, pEqBuild{}, pEqSolve{}, pEqResp{};
+    Buf eqXyz, eqAlp, eqGam, eqRcov, eqCnf, eqCnRaw, eqM, eqMwork, eqRhs, eqQ, eqU, eqGrad;
+    VkDescriptorPool eqPool = VK_NULL_HANDLE;
+    VkDescriptorSet  eqCnSet{}, eqBuildSet{}, eqSolveSet{}, eqRespSet{};
+    int  eq_n = 0;
+    bool eq_valid = false;
 
     explicit Impl() {
         if (!vkc.ok()) return;
@@ -465,6 +478,17 @@ struct XtbVulkanContext::Impl {
         mD4A = mod(d4_atm_spv, sizeof(d4_atm_spv));
         pD4A = pipe(mD4A, ploD4A);
         if (!pD4A) return false;
+        // D4 EEQ q-response: cn (dsl3+4B → ploS), build (dsl4+4B → ploF), solve (dsl2), resp (dsl7).
+        dsl2 = makeDsl(2); dsl7 = makeDsl(7);
+        ploEqSolve = makePl(dsl2, 4); ploEqResp = makePl(dsl7, 4);
+        if (!dsl2 || !dsl7 || !ploEqSolve || !ploEqResp) return false;
+        mEqCn = mod(d4eeq_cn_spv, sizeof(d4eeq_cn_spv));
+        mEqBuild = mod(d4eeq_build_spv, sizeof(d4eeq_build_spv));
+        mEqSolve = mod(d4eeq_solve_spv, sizeof(d4eeq_solve_spv));
+        mEqResp = mod(d4eeq_resp_spv, sizeof(d4eeq_resp_spv));
+        pEqCn = pipe(mEqCn, ploS); pEqBuild = pipe(mEqBuild, ploF);
+        pEqSolve = pipe(mEqSolve, ploEqSolve); pEqResp = pipe(mEqResp, ploEqResp);
+        if (!pEqCn || !pEqBuild || !pEqSolve || !pEqResp) return false;
         VkCommandBufferAllocateInfo cbi{}; cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO; cbi.commandPool = pool; cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbi.commandBufferCount = 1;
         if (vkAllocateCommandBuffers(dev, &cbi, &cmd) != VK_SUCCESS) return false;
         VkFenceCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -1734,6 +1758,109 @@ struct XtbVulkanContext::Impl {
         d4_nat = d4_c6_len = 0; d4_c6_uploaded = false; d4_ready = false;
     }
 
+    // ----- D4 EEQ q-response: charges + ∂q/∂x (device dense solve) ---------
+    void freeEeq() {
+        for (Buf* b : { &eqXyz,&eqAlp,&eqGam,&eqRcov,&eqCnf,&eqCnRaw,&eqM,&eqMwork,&eqRhs,&eqQ,&eqU,&eqGrad })
+            freeBuf(*b);
+        if (eqPool) { vkDestroyDescriptorPool(dev, eqPool, nullptr); eqPool = VK_NULL_HANDLE; }
+        eq_n = 0; eq_valid = false;
+    }
+    // CN log-compression (host; GLSL fp64 has no log): cn = log(1+e^CNMAX) − log(1+e^(CNMAX−raw)).
+    static double eqCompressCn(double raw) {
+        const double CNMAX = 4.4;
+        static const double l = std::log(1.0 + std::exp(CNMAX));
+        return l - std::log(1.0 + std::exp(CNMAX - raw));
+    }
+    bool eqEnsure(int N) {
+        if (N == eq_n && eqM.buf) return true;
+        freeEeq();
+        const size_t m = static_cast<size_t>(N) + 1;
+        eqXyz = makeBuf(sizeof(double) * 3 * (size_t)N);
+        eqAlp = makeBuf(sizeof(double) * (size_t)N);
+        eqGam = makeBuf(sizeof(double) * (size_t)N);
+        eqRcov = makeBuf(sizeof(double) * (size_t)N);
+        eqCnf = makeBuf(sizeof(double) * (size_t)N);
+        eqCnRaw = makeBuf(sizeof(double) * (size_t)N);
+        eqM = makeBuf(sizeof(double) * m * m);
+        eqMwork = makeBuf(sizeof(double) * m * m);
+        eqRhs = makeBuf(sizeof(double) * m);
+        eqQ = makeBuf(sizeof(double) * (size_t)N);
+        eqU = makeBuf(sizeof(double) * (size_t)N);
+        eqGrad = makeBuf(sizeof(double) * 3 * (size_t)N);
+        for (Buf* b : { &eqXyz,&eqAlp,&eqGam,&eqRcov,&eqCnf,&eqCnRaw,&eqM,&eqMwork,&eqRhs,&eqQ,&eqU,&eqGrad })
+            if (!b->buf) { freeEeq(); return false; }
+        if (eqPool) vkDestroyDescriptorPool(dev, eqPool, nullptr);
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 + 4 + 2 + 7 };
+        VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpi.maxSets = 4; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
+        if (vkCreateDescriptorPool(dev, &dpi, nullptr, &eqPool) != VK_SUCCESS) { freeEeq(); return false; }
+        eqCnSet = allocSet(eqPool, dsl3);
+        eqBuildSet = allocSet(eqPool, dsl4);
+        eqSolveSet = allocSet(eqPool, dsl2);
+        eqRespSet = allocSet(eqPool, dsl7);
+        bindSet(eqCnSet,    { &eqXyz, &eqRcov, &eqCnRaw });
+        bindSet(eqBuildSet, { &eqXyz, &eqAlp, &eqGam, &eqM });
+        bindSet(eqSolveSet, { &eqMwork, &eqRhs });
+        bindSet(eqRespSet,  { &eqXyz, &eqAlp, &eqRcov, &eqQ, &eqRhs, &eqU, &eqGrad });
+        eq_n = N;
+        return true;
+    }
+    // Build the EEQ system, solve for the charges (device LU), keep M for the adjoint.
+    bool eqCharges(int N, const double* xyz, const double* chi, const double* gam,
+                   const double* alpha_sq, const double* cnf, const double* rcov,
+                   double total_charge, double* q_out) {
+        if (!ensurePipes() || N <= 0 || !eqEnsure(N)) return false;
+        const int m = N + 1;
+        std::memcpy(eqXyz.ptr, xyz, sizeof(double) * 3 * (size_t)N);
+        std::memcpy(eqAlp.ptr, alpha_sq, sizeof(double) * (size_t)N);
+        std::memcpy(eqGam.ptr, gam, sizeof(double) * (size_t)N);
+        std::memcpy(eqRcov.ptr, rcov, sizeof(double) * (size_t)N);
+        std::memcpy(eqCnf.ptr, cnf, sizeof(double) * (size_t)N);
+        uint32_t pcN = (uint32_t)N;
+        if (!dispatch1(pEqCn, ploS, eqCnSet, &pcN, 4, (N + 63) / 64, 1)) return false;
+        const uint32_t gm = (uint32_t)(m + 15) / 16;
+        if (!dispatch1(pEqBuild, ploF, eqBuildSet, &pcN, 4, gm, gm)) return false;
+        const double* raw = (const double*)eqCnRaw.ptr;
+        double* rhs = (double*)eqRhs.ptr;
+        for (int i = 0; i < N; ++i)
+            rhs[i] = -chi[i] + cnf[i] * std::sqrt(std::max(eqCompressCn(raw[i]), 0.0));
+        rhs[N] = total_charge;
+        std::memcpy(eqMwork.ptr, eqM.ptr, sizeof(double) * (size_t)m * m);
+        uint32_t pcm = (uint32_t)m;
+        if (!dispatch1(pEqSolve, ploEqSolve, eqSolveSet, &pcm, 4, 1, 1)) return false;
+        std::memcpy(eqQ.ptr, eqRhs.ptr, sizeof(double) * (size_t)N);
+        std::memcpy(q_out, eqRhs.ptr, sizeof(double) * (size_t)N);
+        eq_valid = true;
+        return true;
+    }
+    // ∂q/∂x response: adjoint solve M·z = [dEdq;0] (reuse M), host u-weight, response gather.
+    bool eqResp(int N, const double* dEdq, double* grad_add) {
+        if (!eq_valid || N != eq_n || !eqM.buf) return false;
+        const int m = N + 1;
+        if (N <= 1) { for (int i = 0; i < 3 * N; ++i) grad_add[i] = 0.0; return true; }
+        double* rhs = (double*)eqRhs.ptr;
+        for (int i = 0; i < N; ++i) rhs[i] = dEdq[i];
+        rhs[N] = 0.0;
+        std::memcpy(eqMwork.ptr, eqM.ptr, sizeof(double) * (size_t)m * m);
+        uint32_t pcm = (uint32_t)m;
+        if (!dispatch1(pEqSolve, ploEqSolve, eqSolveSet, &pcm, 4, 1, 1)) return false;
+        const double CN_EPS = 1.0e-10, CNMAX = 4.4;
+        const double* raw = (const double*)eqCnRaw.ptr;
+        const double* cnf = (const double*)eqCnf.ptr;
+        const double* z = (const double*)eqRhs.ptr;
+        double* u = (double*)eqU.ptr;
+        for (int i = 0; i < N; ++i) {
+            const double cn_i = eqCompressCn(raw[i]);
+            if (cn_i <= CN_EPS || cnf[i] == 0.0) { u[i] = 0.0; continue; }
+            const double g = 1.0 / (1.0 + std::exp(raw[i] - CNMAX));
+            u[i] = z[i] * cnf[i] / (2.0 * std::sqrt(cn_i)) * g;
+        }
+        uint32_t pcN = (uint32_t)N;
+        if (!dispatch1(pEqResp, ploEqResp, eqRespSet, &pcN, 4, (N + 63) / 64, 1)) return false;
+        std::memcpy(grad_add, eqGrad.ptr, sizeof(double) * 3 * (size_t)N);
+        return true;
+    }
+
     void destroy() {
         if (!dev) return;
         if (sPool) vkDestroyDescriptorPool(dev, sPool, nullptr);
@@ -1867,6 +1994,24 @@ bool XtbVulkanContext::dispersionATM(int nat, const double* c6, const double* dc
     if (!m_impl || !m_impl->vkc.ok() || !c6 || !dc6dcn || !e_atom_out || !grad_out || !dEdcn_out)
         return false;
     return m_impl->dispATM(nat, c6, dc6dcn, s9, a1, a2, alp, cutoff, e_atom_out, grad_out, dEdcn_out);
+}
+
+bool XtbVulkanContext::eeqCharges(int N, const double* xyz_bohr,
+                                  const double* chi, const double* gam, const double* alpha_sq,
+                                  const double* cnf, const double* rcov_bohr,
+                                  double total_charge, double* q_out)
+{
+    if (!m_impl || !m_impl->vkc.ok() || !xyz_bohr || !chi || !gam || !alpha_sq
+        || !cnf || !rcov_bohr || !q_out)
+        return false;
+    return m_impl->eqCharges(N, xyz_bohr, chi, gam, alpha_sq, cnf, rcov_bohr, total_charge, q_out);
+}
+
+bool XtbVulkanContext::eeqChargeResponseGradient(int N, const double* dEdq, double* grad_add)
+{
+    if (!m_impl || !m_impl->vkc.ok() || !dEdq || !grad_add)
+        return false;
+    return m_impl->eqResp(N, dEdq, grad_add);
 }
 
 } // namespace gpu

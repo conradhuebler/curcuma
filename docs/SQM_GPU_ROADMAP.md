@@ -320,9 +320,22 @@ rocBLAS/rocSOLVER cover the dense linear algebra and the isotropic `.hiph` alrea
   device. Validated: GFN2 `-opt` (triose) FP64 bit-identical to CPU (every column), `-sp` energy
   8-dp + same SCF iters, trace-confirmed active, `ctest` 34/34. **ROCm now does the WHOLE GFN2 D4
   gradient on device** (in-SCF dEdq + 2-body + ATM + q-response).
-- **Vulkan q-response — still host**: needs a device dense (N+1) solve, which Vulkan lacks (no
-  rocSOLVER/cuSOLVER equivalent; the hand-written eigensolver does not cover general LU). A
-  hand-written device LU or keeping it host are the options; deferred (once/geometry, no speed-up).
+- **EEQ q-response ∂q/∂x — DONE on Vulkan (2026-06-18) → fully device-resident Vulkan GFN2 D4
+  gradient**: the missing device dense (N+1) solve is a hand-written single-workgroup FP64
+  **Gaussian elimination without pivoting** (`d4eeq_solve.comp`) — the screened-Coulomb hardness
+  block + the charge-constraint border is non-singular without row swaps, so the no-pivot factor
+  agrees with the host/ROCm partial-pivoted LU to rounding. The other three kernels (`d4eeq_cn`
+  raw CN, `d4eeq_build` augmented matrix, `d4eeq_resp` ∂q/∂x gather) port the CUDA/HIP math
+  verbatim; GLSL-fp64 has no `erf`, so a Numerical-Recipes `derf` (erfcc, ~1.2e-7) was added to
+  `vk_integrals.glsl` (ample — q-response is a small gradient term). The O(N) log-compression /
+  RHS / u-weight stay on the host (mapped buffers), as ROCm does on the device. `eeqCharges`/
+  `eeqChargeResponseGradient` on the context + the `supportsDeviceEeq()→true` wrapper override
+  reuse the existing CUDA-shared `GpuScfBackend` seam + host integration; `scf_guess=eeq` also
+  routes through the device. Validated (AMD 890M/RADV): GFN2 `-sp` E+gradnorm match CPU (H2O/HCN/
+  NH3, 7 dp); device EEQ charges = host model exactly; per-iter SCF trace bit-identical from iter 1,
+  final E identical, iter-0 ±1e-10 (the `derf` signature confirms the device path runs, not a
+  silent host fallback); GFN2 `-opt` (HCN) trajectory bit-identical to CPU; `ctest -L vulkan`
+  22/22. **Vulkan now does the WHOLE GFN2 D4 gradient on device, on par with ROCm.**
 - **CUDA — TODO, now the laggard for the D4 nuclear gradient (inversion)**: the 2-body + ATM
   D4-gradient kernels (`k_d4_grad`/`d4_grad.comp`, `k_d4_atm`/`d4_atm.comp`) + the
   `dispersionGradient`/`dispersionATM` seam are **net-new for ROCm/Vulkan — they do NOT exist in
@@ -332,8 +345,8 @@ rocBLAS/rocSOLVER cover the dense linear algebra and the isotropic `.hiph` alrea
   `-opt`/`-md`" story now has a D4-gradient host hold-out that **ROCm does not**. To catch up, port
   `k_d4_grad`/`k_d4_atm` into `cuda/xtb_gpu_context.cu` + override `dispersionGradient`/
   `dispersionATM` in `xtb_gpu_method.cpp` (straight port of the HIP kernels). **D4-gradient
-  residency by backend:** ROCm = full (dedq+2body+ATM+q-response); Vulkan = all but q-response;
-  CUDA = only dedq + q-response (2-body + ATM still host).
+  residency by backend:** ROCm = full (dedq+2body+ATM+q-response); Vulkan = full
+  (dedq+2body+ATM+q-response, since 2026-06-18); CUDA = only dedq + q-response (2-body + ATM still host).
 - **Depends on**: nothing (orthogonal). Independent per backend.
 
 ## Suggested order

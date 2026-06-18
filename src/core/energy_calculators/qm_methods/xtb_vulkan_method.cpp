@@ -255,6 +255,27 @@ public:
         return m_ctx->dispersionATM(nat, c6, dc6dcn, s9, a1, a2, alp, cutoff,
                                     e_atom_out, grad_out, dEdcn_out);
     }
+
+    // ---- Single-shot D4 EEQ charge model (Stage 5, Part A) ----------------
+    // supportsDeviceEeq()→true routes the EEQ initial guess (scf_guess=eeq) and the D4
+    // q-response (∂q/∂x in calcDispersionEnergy) onto the GPU, completing the GFN2 D4
+    // gradient on Vulkan — the last host-resident piece. Mirrors the ROCm/CUDA backends;
+    // the device dense solve is the hand-written single-workgroup d4eeq_solve shader.
+    bool supportsDeviceEeq() const override { return true; }
+    bool eeqCharges(int N, const double* xyz_bohr,
+                    const double* chi, const double* gam, const double* alpha_sq,
+                    const double* cnf, const double* rcov_bohr,
+                    double total_charge, double* q_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->eeqCharges(N, xyz_bohr, chi, gam, alpha_sq, cnf, rcov_bohr,
+                                 total_charge, q_out);
+    }
+    bool eeqChargeResponse(int N, const double* dEdq, double* grad_add) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->eeqChargeResponseGradient(N, dEdq, grad_add);
+    }
 private:
     XtbVulkanContext* m_ctx = nullptr;
     int               m_n   = 0;

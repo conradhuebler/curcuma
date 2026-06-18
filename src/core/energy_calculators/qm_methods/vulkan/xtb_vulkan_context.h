@@ -187,6 +187,20 @@ public:
                        double s9, double a1, double a2, double alp, double cutoff,
                        double* e_atom_out, double* grad_out, double* dEdcn_out);
 
+    // ---- Single-shot D4 EEQ charge model (Stage 5, Part A) ------------------
+    // Build the (N+1) augmented EEQ system on the device, solve for the charges with a
+    // single-workgroup FP64 Gaussian elimination (no pivot — the screened-Coulomb hardness
+    // block plus the charge-constraint border is non-singular without row swaps); the matrix
+    // is kept so eeqChargeResponseGradient reuses it for the adjoint ∂q/∂x solve. Inputs are
+    // the length-N host arrays from D4ChargeModel::resolveParams. The host then folds
+    // Σ dEdq·∂q/∂R into its dispersion gradient. Mirrors the ROCm/CUDA device EEQ; Vulkan has
+    // no rocSOLVER so the dense solve is the hand-written d4eeq_solve shader. Claude Generated.
+    bool eeqCharges(int N, const double* xyz_bohr,
+                    const double* chi, const double* gam, const double* alpha_sq,
+                    const double* cnf, const double* rcov_bohr,
+                    double total_charge, double* q_out);
+    bool eeqChargeResponseGradient(int N, const double* dEdq, double* grad_add);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
