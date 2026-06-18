@@ -92,6 +92,20 @@ double LBFGSppObjectiveFunction::operator()(const Vector& x, Vector& grad)
             }
         }
 
+        // Claude Generated 2026 - Interactive force injection (mouse grab): add
+        // the external bias to the gradient LBFGSpp actually uses for its line
+        // search. Same units/layout as the analytical gradient (Eh/Bohr,
+        // atom-major). Respect constraints so fixed atoms stay fixed.
+        if (m_external_forces && m_external_forces->size() == grad.size()) {
+            for (int i = 0; i < m_atom_count && i < m_constraints.size(); ++i) {
+                if (m_constraints[i] != 0) {
+                    grad[3 * i] += (*m_external_forces)[3 * i];
+                    grad[3 * i + 1] += (*m_external_forces)[3 * i + 1];
+                    grad[3 * i + 2] += (*m_external_forces)[3 * i + 2];
+                }
+            }
+        }
+
         m_last_energy = energy;
         m_last_parameters = x;
 
@@ -130,6 +144,9 @@ bool LBFGSppOptimizer::InitializeOptimizerInternal()
         m_objective = std::make_unique<LBFGSppObjectiveFunction>(
             m_context.energy_calculator, &m_molecule, m_context.atom_constraints,
             m_context.use_numerical_gradient, m_context.numerical_gradient_step);
+        // Claude Generated 2026 - Route the driver's interactive grab bias into
+        // the objective so it reaches LBFGSpp's internal gradient evaluations.
+        m_objective->bindExternalForces(&m_external_forces);
 
         // Initialize coordinate vector and LBFGSpp single-step workspace
         m_current_coordinates = MoleculeToCoordinates(m_molecule);

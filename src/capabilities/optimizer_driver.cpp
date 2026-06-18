@@ -732,4 +732,17 @@ void OptimizerDriver::setBasename(const std::string& basename)
     }
 }
 
+// Claude Generated 2026 - External force injection for interactive simulation.
+void OptimizerDriver::setExternalForces(const Vector& forces)
+{
+    m_external_forces = forces;
+    m_external_forces_pending = true;
+}
+
+void OptimizerDriver::clearExternalForces()
+{
+    m_external_forces.setZero(m_external_forces.size());
+    m_external_forces_pending = false;
+}
+
 } // namespace Optimization

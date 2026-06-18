@@ -124,6 +124,15 @@ protected:
     using StepCallback = std::function<bool(int, const Molecule&, double)>;
     StepCallback m_step_callback;
 
+    // Claude Generated 2026 - External force injection for interactive simulation.
+    // Additive per-atom Cartesian bias (Eh/Bohr, flat 3N vector) injected into the
+    // gradient at each optimizer's own gradient-evaluation site (LBFGSpp objective,
+    // native LBFGS::getEnergyGradient, ANCOpt transform), NOT in the base loop —
+    // every optimizer pre-evaluates its own gradient. Set by setExternalForces and
+    // zeroed by clearExternalForces; persists across line-search evaluations.
+    Vector m_external_forces;
+    bool m_external_forces_pending = false;
+
     // Pure virtual methods for derived classes (Template Method Pattern)
     virtual bool InitializeOptimizerInternal() = 0;
     virtual Vector CalculateOptimizationStep(const Vector& current_coordinates,
@@ -183,6 +192,12 @@ public:
     void setConvergenceCriteria(double energy_thresh, double rmsd_thresh, double grad_thresh);
     void setTrajectoryFile(const std::string& filename);
     void setBasename(const std::string& basename);
+
+    // Claude Generated 2026 - External force injection for interactive simulation.
+    // Adds a per-atom force bias (Eh/Bohr, flat 3N vector) applied to the gradient
+    // at each optimization step; persists until clearExternalForces() zeroes it.
+    void setExternalForces(const Vector& forces);
+    void clearExternalForces();
 
     // Method identification — implemented by each concrete optimizer
     virtual std::string getName() const = 0;
