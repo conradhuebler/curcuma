@@ -46,12 +46,19 @@ public:
     bool hasError() const { return m_error; }
     void clearError() { m_error = false; }
 
+    // Claude Generated 2026 - Bind the driver's external-force bias (interactive
+    // mouse grab, Cartesian Eh/Bohr, atom-major). The bias is added to the
+    // gradient the LBFGSpp line search actually uses. Pointer stays valid for
+    // the optimizer's lifetime; a zeroed/empty bias is a no-op.
+    void bindExternalForces(const Vector* forces) { m_external_forces = forces; }
+
 private:
     EnergyCalculator* m_energy_calculator;
     Molecule* m_molecule;
     std::vector<int> m_constraints;
     bool m_use_numerical_gradient = false;
     double m_numerical_gradient_step = 1e-5;
+    const Vector* m_external_forces = nullptr;  // Claude Generated 2026 - interactive grab bias
 
     double m_last_energy = 0.0;
     Vector m_last_parameters;
