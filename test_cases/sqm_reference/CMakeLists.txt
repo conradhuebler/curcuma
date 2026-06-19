@@ -391,6 +391,38 @@ if(Python3_Interpreter_FOUND)
             endforeach()
         endforeach()
     endif()
+
+    # EIG-3 Vulkan GPU divide-and-conquer tridiagonal eigensolve (opt-in, Claude Generated):
+    # re-run the 1e-8 validation with -gpu vulkan and CURCUMA_VK_TRIDIAG_SOLVE=dc so the
+    # tridiagonal eigensolve (Phase 2) runs as the device Cuppen D&C (leaves + deflation +
+    # secular on the GPU). The D&C matches the host tql2 to <1e-8, so the SAME xfail set
+    # applies; without a Vulkan device the wrapper falls back to CPU (env ignored) so these
+    # never false-fail off-GPU. Small molecules only (the full-GPU D&C is intentionally slow;
+    # complex/triose are validated manually). Label: gpu_vulkan_dc.
+    if(USE_VULKAN_XTB)
+        set(_DC_MOLS H2 He2 LiH H2O CH4 NH3 C6H6 HCN acetic_acid_dimer caffeine)
+        foreach(_meth gfn1 gfn2)
+            if(_meth STREQUAL gfn1)
+                set(_xfail ${_GFN1_XFAIL})
+            else()
+                set(_xfail ${_GFN2_XFAIL})
+            endif()
+            foreach(_mol ${_DC_MOLS})
+                add_test(NAME sqm_val_vkdc_${_mol}_${_meth}
+                    COMMAND ${Python3_EXECUTABLE} ${_SQM_VAL_PY}
+                        --curcuma $<TARGET_FILE:curcuma> --quiet --tol-energy ${_SQM_VAL_TOL}
+                        --gpu vulkan
+                        --ref ${_SQM_VAL_REF}/${_mol}_${_meth}.ref.json
+                        --xyz ${_SQM_VAL_MOL}/${_mol}.xyz)
+                set_tests_properties(sqm_val_vkdc_${_mol}_${_meth}
+                    PROPERTIES TIMEOUT 180 LABELS "gpu_vulkan_dc"
+                    ENVIRONMENT "CURCUMA_VK_TRIDIAG_SOLVE=dc")
+                if(${_mol} IN_LIST _xfail)
+                    set_tests_properties(sqm_val_vkdc_${_mol}_${_meth} PROPERTIES WILL_FAIL TRUE)
+                endif()
+            endforeach()
+        endforeach()
+    endif()
 endif()
 
 # === Stage 3 GPU integral component tests (Claude Generated, GPU port) ======

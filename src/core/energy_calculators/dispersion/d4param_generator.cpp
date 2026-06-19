@@ -1447,6 +1447,52 @@ void D4ParameterGenerator::buildRefWFlat(const std::vector<int>& atoms, const Ve
     }
 }
 
+// Overload that also emits dWc = ∂W/∂CN (for the device 2-body D4 gradient kernel).
+void D4ParameterGenerator::buildRefWFlat(const std::vector<int>& atoms, const Vector& q,
+                                         std::vector<double>& W_out,
+                                         std::vector<double>& dWq_out,
+                                         std::vector<double>& dWc_out) const
+{
+    const int nat = static_cast<int>(atoms.size());
+    W_out.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    dWq_out.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    dWc_out.assign(static_cast<size_t>(nat) * MAX_REF, 0.0);
+    for (int a = 0; a < nat; ++a) {
+        const double qa = (a < q.size()) ? q(a) : 0.0;
+        const RefW r = buildAtomRefW(atoms[a], static_cast<size_t>(a), qa, true, false);
+        const int nr = (r.nref < MAX_REF) ? r.nref : MAX_REF;
+        for (int ref = 0; ref < nr; ++ref) {
+            const size_t idx = static_cast<size_t>(a) * MAX_REF + ref;
+            W_out[idx]   = r.W[ref];
+            dWq_out[idx] = r.dWq[ref];
+            dWc_out[idx] = r.dWc[ref];
+        }
+    }
+}
+
+// q=0 reference C6 (+ ∂C6/∂CN) matrices for the device ATM kernel. Mirrors the c6/dc6dcn
+// build at the top of D4Evaluator::computeATM (buildAtomRefW at q=0 + contractC6Gfn2).
+void D4ParameterGenerator::buildAtmC6Flat(const std::vector<int>& atoms,
+                                          std::vector<double>& c6_out,
+                                          std::vector<double>& dc6dcn_out) const
+{
+    const int nat = static_cast<int>(atoms.size());
+    c6_out.assign(static_cast<size_t>(nat) * nat, 0.0);
+    dc6dcn_out.assign(static_cast<size_t>(nat) * nat, 0.0);
+    std::vector<RefW> refw0(nat);
+    for (int a = 0; a < nat; ++a)
+        refw0[a] = buildAtomRefW(atoms[a], static_cast<size_t>(a), /*q=*/0.0, true, false);
+    for (int a = 0; a < nat; ++a) {
+        for (int b = 0; b <= a; ++b) {
+            const C6Gfn2 g = contractC6Gfn2(refw0[a], refw0[b], atoms[a], atoms[b], true, false);
+            c6_out[static_cast<size_t>(a) * nat + b] = g.c6;
+            c6_out[static_cast<size_t>(b) * nat + a] = g.c6;
+            dc6dcn_out[static_cast<size_t>(a) * nat + b] = g.dc6dcni;   // ∂C6(a,b)/∂CN_a
+            dc6dcn_out[static_cast<size_t>(b) * nat + a] = g.dc6dcnj;   // ∂C6(a,b)/∂CN_b
+        }
+    }
+}
+
 // Stage 6 (S6.2b, Claude Generated 2026-06): export the q-independent per-atom
 // reference data for the device W/dWq rebuild (k_d4_build_refw). Mirrors the
 // per-atom setup at the top of buildAtomRefW (gc=2 → gi=eta·gc; the refcovcn

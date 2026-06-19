@@ -1933,12 +1933,46 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         return std::chrono::duration<double, std::milli>(b - a).count();
     };
     const auto td0 = d4clk::now();
-    // WP2-ext: let the D4 pair loop fan out over the same gated intra-thread budget.
-    m_d4_evaluator->setThreads(effectiveIntraThreads(m_atomcount));
-    double E = m_d4_evaluator->computeEnergyAndGradient(
-        m_atoms, geom_bohr,
-        /*with_gradient=*/true,
-        m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, want_dEdq);
+    double E = 0.0;
+    bool disp_grad_device = false;
+    // Stage 5 (Part B2): the whole 2-body D4 (energy + gradient + dE/dCN + dE/dq) on the
+    // device in one gather, reusing the geometry-fixed reference data uploaded during the SCF
+    // (beginDispersion). The host then adds ATM + the CN-distribution + the q-response on top,
+    // exactly as for the host evaluator. buildRefWFlat uses the same converged charges
+    // (m_wfn.q_at == getZetaCharges, set above) and CN (m_cn_values) the host path uses, so the
+    // result matches the host D4Evaluator to FP-reassociation (~1e-12 energy, gradient FD-grade).
+    // Returns false → host fallback (CUDA, or if the device reference was not uploaded).
+    if (m_gpu_scf && m_gpu_scf->supportsDeviceDispersion()) {
+        const int nat = m_atomcount;
+        std::vector<double> W, dWq, dWc;
+        m_d4_generator->buildRefWFlat(m_atoms, m_wfn.q_at, W, dWq, dWc);
+        std::vector<double> e_atom(nat, 0.0), gflat(3 * nat, 0.0), dcn(nat, 0.0), dq(nat, 0.0);
+        if (m_gpu_scf->dispersionGradient(nat, W.data(), dWq.data(), dWc.data(),
+                                          e_atom.data(), gflat.data(), dcn.data(), dq.data())) {
+            m_disp_gradient = Matrix::Zero(nat, 3);
+            m_disp_dEdcn = Vector::Zero(nat);
+            m_disp_dEdq = Vector::Zero(nat);
+            double Esum = 0.0;
+            for (int a = 0; a < nat; ++a) {
+                Esum += e_atom[a];                       // total 2-body E = ½·Σ (gather double-counts)
+                m_disp_gradient(a, 0) = gflat[3 * a + 0];
+                m_disp_gradient(a, 1) = gflat[3 * a + 1];
+                m_disp_gradient(a, 2) = gflat[3 * a + 2];
+                m_disp_dEdcn(a) = dcn[a];
+                m_disp_dEdq(a)  = dq[a];
+            }
+            E = 0.5 * Esum;
+            disp_grad_device = true;
+        }
+    }
+    if (!disp_grad_device) {
+        // WP2-ext: let the D4 pair loop fan out over the same gated intra-thread budget.
+        m_d4_evaluator->setThreads(effectiveIntraThreads(m_atomcount));
+        E = m_d4_evaluator->computeEnergyAndGradient(
+            m_atoms, geom_bohr,
+            /*with_gradient=*/true,
+            m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, want_dEdq);
+    }
     const auto td1 = d4clk::now();
 
     // ATM three-body term (GFN2 s9=5.0). Charge-independent (dftd4 evaluates it at
@@ -1946,8 +1980,36 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     // ACCUMULATES into m_disp_gradient and m_disp_dEdcn (the latter folded together
     // with the 2-body dEdcn via the D4 covalent CN below). Closes the triose C-path
     // remainder (see docs/GFN2_D4_STATUS.md). Claude Generated 2026-05-29.
-    E += m_d4_evaluator->computeATM(
-        m_atoms, geom_bohr, /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn);
+    // ATM 3-body: device when the 2-body went to the device (so beginDispersion's geometry +
+    // √r4r2 are resident) and the backend implements it; else the host evaluator. The device
+    // gather sums each unique triple once per member → total ATM E = ⅓·Σ e_atom; grad/dEdcn
+    // accumulate on top of the 2-body. Params mirror the D4Params block above (GFN2: s9=5.0,
+    // a1=0.52, a2=5.0, alpha=16.0; computeATM cutoff default 25.0 Bohr). Returns false → host.
+    bool atm_device = false;
+    if (disp_grad_device && m_gpu_scf) {
+        const int nat = m_atomcount;
+        std::vector<double> c6f, dc6f;
+        m_d4_generator->buildAtmC6Flat(m_atoms, c6f, dc6f);
+        std::vector<double> e_at(nat, 0.0), g_at(3 * nat, 0.0), dcn_at(nat, 0.0);
+        if (m_gpu_scf->dispersionATM(nat, c6f.data(), dc6f.data(),
+                                     /*s9=*/5.0, /*a1=*/0.52, /*a2=*/5.0, /*alp=*/16.0,
+                                     /*cutoff=*/25.0, e_at.data(), g_at.data(), dcn_at.data())) {
+            double esum = 0.0;
+            for (int a = 0; a < nat; ++a) {
+                esum += e_at[a];
+                m_disp_gradient(a, 0) += g_at[3 * a + 0];
+                m_disp_gradient(a, 1) += g_at[3 * a + 1];
+                m_disp_gradient(a, 2) += g_at[3 * a + 2];
+                m_disp_dEdcn(a) += dcn_at[a];
+            }
+            E += esum / 3.0;   // each triple counted by its 3 members
+            atm_device = true;
+        }
+    }
+    if (!atm_device) {
+        E += m_d4_evaluator->computeATM(
+            m_atoms, geom_bohr, /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn);
+    }
     const auto td2 = d4clk::now();
 
     // CN chain rule: fold Σ_A dE_D4/dCN_A · ∂CN_A/∂R into the cached gradient using

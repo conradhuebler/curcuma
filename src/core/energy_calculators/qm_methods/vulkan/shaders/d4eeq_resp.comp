@@ -1,0 +1,55 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+#extension GL_GOOGLE_include_directive : enable
+#include "vk_integrals.glsl"
+// D4 EEQ charge-response gradient Σ_A dEdq(A)·∂q_A/∂R, one invocation per atom a (no atomics):
+// the pair coeff is symmetric and û flips sign, so the full b≠a loop per atom reproduces both
+// halves. grad [3a+k], Eh/Bohr. Verbatim port of CUDA k_d4eeq_response. Claude Generated.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer B0 { double xyz[]; };       // 3N
+layout(std430, binding = 1) readonly buffer B1 { double alpha_sq[]; };  // N
+layout(std430, binding = 2) readonly buffer B2 { double rcov[]; };      // N
+layout(std430, binding = 3) readonly buffer B3 { double q[]; };         // N (EEQ charges)
+layout(std430, binding = 4) readonly buffer B4 { double zq[]; };        // N (adjoint solution head)
+layout(std430, binding = 5) readonly buffer B5 { double u[]; };         // N (CN-response weight)
+layout(std430, binding = 6)          buffer B6 { double grad[]; };      // 3N (out)
+layout(push_constant) uniform PC { uint N; } pc;
+
+const double TWO_OVER_SQRTPI = 1.1283791670955126lf;   // 2/sqrt(π)
+const double KN = -7.5lf;
+
+void main()
+{
+    uint a = gl_GlobalInvocationID.x;
+    if (a >= pc.N) return;
+    double xa = xyz[3u*a+0u], ya = xyz[3u*a+1u], za = xyz[3u*a+2u];
+    double alp_a = alpha_sq[a], rc_a = rcov[a];
+    double gx = 0.0lf, gy = 0.0lf, gz = 0.0lf;
+    for (uint b = 0u; b < pc.N; ++b) {
+        if (b == a) continue;
+        double dx = xa - xyz[3u*b+0u], dy = ya - xyz[3u*b+1u], dz = za - xyz[3u*b+2u];
+        double r = sqrt(dx*dx + dy*dy + dz*dz);
+        if (r < 1.0e-10lf) continue;
+        double inv_r = 1.0lf / r;
+        double gammij = 1.0lf / sqrt(alp_a + alpha_sq[b]);
+        double gr = gammij * r;
+        double Aprime = gammij * TWO_OVER_SQRTPI * dexp(-gr * gr) * inv_r
+                      - derf(gr) * inv_r * inv_r;
+        double c_ab = zq[a] * q[b] + zq[b] * q[a];
+        double Draw = 0.0lf;
+        double rc_b = rcov[b];
+        if (rc_a > 0.0lf && rc_b > 0.0lf) {
+            double rcij = rc_a + rc_b;
+            double dr = (r - rcij) / rcij;
+            double earg = KN * dr;
+            Draw = 0.5lf * TWO_OVER_SQRTPI * dexp(-earg * earg) * KN / rcij;
+        }
+        double coeff = (u[a] + u[b]) * Draw - c_ab * Aprime;
+        gx += coeff * dx * inv_r;
+        gy += coeff * dy * inv_r;
+        gz += coeff * dz * inv_r;
+    }
+    grad[3u*a+0u] = gx;
+    grad[3u*a+1u] = gy;
+    grad[3u*a+2u] = gz;
+}

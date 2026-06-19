@@ -33,6 +33,20 @@ double dexp(double x) {
 
 double pow15(double x) { return x * sqrt(x); }  // x^1.5 (the only double power needed)
 
+// Double erf via the Numerical-Recipes erfcc rational×exp approximation (fractional error
+// < 1.2e-7 everywhere). Used by the D4 EEQ kernels (screened-Coulomb erf(γr)/r); the q-response
+// is a small gradient term so this accuracy is ample (the EEQ matrix / charges drive it, not the
+// energy). dexp supplies the FP64 exponential. Claude Generated.
+double derf(double x) {
+    double z = (x < 0.0lf) ? -x : x;
+    double t = 1.0lf / (1.0lf + 0.5lf * z);
+    double ans = t * dexp(-z * z - 1.26551223lf + t * (1.00002368lf + t * (0.37409196lf
+               + t * (0.09678418lf + t * (-0.18628806lf + t * (0.27886807lf + t * (-1.13520398lf
+               + t * (1.48851587lf + t * (-0.82215223lf + t * 0.17087277lf)))))))));
+    // ans = erfc(z); erf(x) = 1 - erfc(|x|) for x>=0, = erfc(|x|) - 1 for x<0.
+    return (x >= 0.0lf) ? (1.0lf - ans) : (ans - 1.0lf);
+}
+
 // ---- coordination number --------------------------------------------------
 double gcount(double k, double r, double r0) { return 1.0lf / (1.0lf + dexp(-k * (r0 / r - 1.0lf))); }
 double cn_pair(double r, double rc, bool is_gfn2) {

@@ -272,6 +272,83 @@ rocBLAS/rocSOLVER cover the dense linear algebra and the isotropic `.hiph` alrea
   Vulkan eigensolve (blocked/one-sided Jacobi, or a divide-and-conquer port) is the open lever.
 - **Depends on**: nothing (orthogonal to the GFN2 stack). Independent per backend.
 
+### X-AP4 — In-SCF GFN2 D4 dE_D4/dq on device — ✅ DONE (2026-06, both backends)
+- **Why**: with `supportsDevicePotential()` still false on ROCm/Vulkan, the GFN2 SCF runs the
+  host potential build every iteration, dominated by the O(N²) D4 dE_D4/dq
+  (`XTB::addDispersionPotential` → `computeD4PotentialDedq`). CUDA alone routed this to the
+  device (`supportsDeviceDispersion()`); this WP ports that one hook to the other two backends.
+- **Done**: `supportsDeviceDispersion()`→true + `beginDispersion`/`dispersionDedq` on both
+  `HipScfBackend`/`XtbHipContext` (HIP `k_d4_dedq`, verbatim CUDA port) and
+  `VulkanScfBackend`/`XtbVulkanContext` (FP64 SPIR-V `d4_dedq.comp`, 9 SSBO + `uint nat` push,
+  per-atom GATHER, no atomics). The host plumbing (`xtb_native.cpp` `use_device_disp`:
+  geometry-fixed reference upload once + per-iteration `buildRefWFlat` → `dispersionDedq`) was
+  already present, so only the three overrides + the kernel were added. Element C6 block
+  uploaded once/process; Z/nref/√r4r2/xyz per geometry; W/dWq per iteration.
+- **Validated** (Radeon 890M / RADV + gfx1150): GFN2 `-sp` energy bit-identical to CPU over
+  `sqm_reference` incl. 231-atom `complex`; GFN2 `-opt` (NH3) same minimum; device path
+  confirmed active by per-iteration invocation trace (not a silent host fallback); GFN1 + CPU
+  byte-unchanged; Vulkan `ctest -L gpu` 22/22.
+- **Honest**: **not a per-iteration speed-up at tested sizes** — the threaded host D4 evaluator
+  is ~3.2 ms/it on `complex`/231 and the device round-trip (W/dWq up + kernel + dEdq down,
+  sync/submit-bound on the iGPU) is ~4.0 ms/it on both backends. The benefit scales with N
+  (O(N²) host cost) and only lands fully when fused into a device-resident potential/loop
+  (V-AP5/R-AP4, Stage 5/6) so dEdq never round-trips.
+- **2-body D4 nuclear gradient — DONE (2026-06, ROCm + Vulkan)**: the post-SCF 2-body D4
+  (energy + grad + dE/dCN + dE/dq) runs on the device in one gather (`k_d4_grad` HIP /
+  `d4_grad.comp` SPIR-V, a superset of the dEdq kernel reusing beginDispersion's resident
+  reference data). Seam `GpuScfBackend::dispersionGradient`; `calcDispersionEnergy` calls it
+  behind `supportsDeviceDispersion()`, then **ATM + the CN-distribution + the q-response stay
+  host** and sum on top. Validated: GFN2 `-opt` (triose) Vulkan-FP64 trajectory bit-identical
+  to CPU (every column incl. Energy-Change + gradient norm); ROCm 6-dp (FP32-SCF delta only);
+  device path confirmed active (trace). **Still not a speed-up** (once/geometry) — pure
+  architectural residency, the prerequisite for a fully device-resident GFN2 `-opt`/`-md`.
+- **ATM 3-body D4 gradient — DONE (2026-06, ROCm + Vulkan)**: the post-SCF ATM (energy + grad +
+  dE/dCN) runs on the device in a per-atom gather over pairs (`k_d4_atm` HIP / `d4_atm.comp`
+  SPIR-V). The triple-edge force is antisymmetric (dG_ba=-dG_ab, dang symmetric in the edge
+  endpoints) → no atomics, each triple's energy counted once per member (E=⅓·Σ). The host does the
+  cheap O(N²) q=0 reference C6/∂C6∂CN build (`buildAtmC6Flat`) + uploads the nat² matrices; the
+  device does the O(N³) triple loop reusing the resident geometry+√r4r2. Vulkan computes the
+  non-integer damping power `(r0/r1)^(alp/3)` as `cbrt(b^alp)` via Newton (no `dlog`). Seam
+  `GpuScfBackend::dispersionATM`. Validated: GFN2 `-opt` (triose) Vulkan-FP64 bit-identical to CPU
+  (every column); ROCm 6-dp; energy 8-dp; device path confirmed (trace). Still no speed-up
+  (once/geometry).
+- **EEQ q-response ∂q/∂x — DONE on ROCm (2026-06) → fully device-resident ROCm GFN2 D4 gradient**:
+  the 6 `k_d4eeq_*` kernels (CN / augmented matrix / RHS / adjoint / response gather) ported from
+  CUDA + the (N+1) LU via rocSOLVER `dgetrf`/`dgetrs` (factor reused for the adjoint). The
+  `GpuScfBackend::eeqCharges/eeqChargeResponse` seam + host integration already existed; only the
+  ROCm backend was added. `supportsDeviceEeq()`→true also routes the scf_guess=eeq through the
+  device. Validated: GFN2 `-opt` (triose) FP64 bit-identical to CPU (every column), `-sp` energy
+  8-dp + same SCF iters, trace-confirmed active, `ctest` 34/34. **ROCm now does the WHOLE GFN2 D4
+  gradient on device** (in-SCF dEdq + 2-body + ATM + q-response).
+- **EEQ q-response ∂q/∂x — DONE on Vulkan (2026-06-18) → fully device-resident Vulkan GFN2 D4
+  gradient**: the missing device dense (N+1) solve is a hand-written single-workgroup FP64
+  **Gaussian elimination without pivoting** (`d4eeq_solve.comp`) — the screened-Coulomb hardness
+  block + the charge-constraint border is non-singular without row swaps, so the no-pivot factor
+  agrees with the host/ROCm partial-pivoted LU to rounding. The other three kernels (`d4eeq_cn`
+  raw CN, `d4eeq_build` augmented matrix, `d4eeq_resp` ∂q/∂x gather) port the CUDA/HIP math
+  verbatim; GLSL-fp64 has no `erf`, so a Numerical-Recipes `derf` (erfcc, ~1.2e-7) was added to
+  `vk_integrals.glsl` (ample — q-response is a small gradient term). The O(N) log-compression /
+  RHS / u-weight stay on the host (mapped buffers), as ROCm does on the device. `eeqCharges`/
+  `eeqChargeResponseGradient` on the context + the `supportsDeviceEeq()→true` wrapper override
+  reuse the existing CUDA-shared `GpuScfBackend` seam + host integration; `scf_guess=eeq` also
+  routes through the device. Validated (AMD 890M/RADV): GFN2 `-sp` E+gradnorm match CPU (H2O/HCN/
+  NH3, 7 dp); device EEQ charges = host model exactly; per-iter SCF trace bit-identical from iter 1,
+  final E identical, iter-0 ±1e-10 (the `derf` signature confirms the device path runs, not a
+  silent host fallback); GFN2 `-opt` (HCN) trajectory bit-identical to CPU; `ctest -L vulkan`
+  22/22. **Vulkan now does the WHOLE GFN2 D4 gradient on device, on par with ROCm.**
+- **CUDA — TODO, now the laggard for the D4 nuclear gradient (inversion)**: the 2-body + ATM
+  D4-gradient kernels (`k_d4_grad`/`d4_grad.comp`, `k_d4_atm`/`d4_atm.comp`) + the
+  `dispersionGradient`/`dispersionATM` seam are **net-new for ROCm/Vulkan — they do NOT exist in
+  the CUDA `.cu`** (CUDA only has the in-SCF `dispersionDedq` + the EEQ `eeqChargeResponse`). So
+  CUDA still computes the **2-body + ATM D4 gradient on the host** (`disp_grad_device=false` →
+  host `computeEnergyAndGradient`+`computeATM`). Result correct, but CUDA's "fully device-resident
+  `-opt`/`-md`" story now has a D4-gradient host hold-out that **ROCm does not**. To catch up, port
+  `k_d4_grad`/`k_d4_atm` into `cuda/xtb_gpu_context.cu` + override `dispersionGradient`/
+  `dispersionATM` in `xtb_gpu_method.cpp` (straight port of the HIP kernels). **D4-gradient
+  residency by backend:** ROCm = full (dedq+2body+ATM+q-response); Vulkan = full
+  (dedq+2body+ATM+q-response, since 2026-06-18); CUDA = only dedq + q-response (2-body + ATM still host).
+- **Depends on**: nothing (orthogonal). Independent per backend.
+
 ## Suggested order
 
 1. ~~**V-AP1** (Vulkan GFN1 gradient) — closes the only Vulkan↔ROCm asymmetry.~~ ✅ DONE (2026-06).

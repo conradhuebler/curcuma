@@ -15,9 +15,14 @@
 > **GFN1 nuclear gradient = on device (Stage 4, V-AP1):** repulsion / Coulomb /
 > H0-Pulay+CN built by three FP64 SPIR-V **gather** kernels (Vulkan has no `atomicAdd`
 > on doubles, so each thread owns one atom and sums over all partners — exact because the
-> pair forces are antisymmetric), so GFN1 `-opt`/`-md` are fully device-resident. The GFN2
-> gradient stays on the CPU (its SCF is not device-resident on Vulkan). Energies and
-> gradients match the CPU path bit-for-bit on the validation runs.
+> pair forces are antisymmetric), so GFN1 `-opt`/`-md` are fully device-resident.
+> **GFN2 nuclear + D4 gradient = on device (V-PERF-2 + X-AP4):** the multipole-integral
+> Pulay term (`grad_pulay`, one workgroup per atom) and the full D4 dispersion gradient —
+> in-SCF dE/dq, 2-body, ATM 3-body, AND the **D4 EEQ charge-response ∂q/∂x** — all run on the
+> GPU; the q-response (the last host hold-out) uses a hand-written single-workgroup FP64
+> no-pivot solve for the (N+1) EEQ system (`d4eeq_*` kernels, `derf` erfcc). So GFN2
+> `-opt`/`-md` are device-resident too, on par with ROCm. Energies and gradients match the
+> CPU path bit-for-bit on the validation runs.
 
 ## What it is
 
@@ -176,6 +181,20 @@ On an **AMD Radeon 890M (RADV, integrated, shaderFloat64)**, build `release_vulk
   identical. The GFN2 gradient stays on the host (the device `gradient()` returns false for
   GFN2 → host `calculateGradient`; without that, the resident path silently used the
   GFN1-isotropic-only device gradient — fixed).
+- **GFN2 D4 EEQ q-response on device (X-AP4, 2026-06-18)** — the last host piece of the GFN2
+  D4 gradient. The EEQ charges + the adjoint ∂q/∂x solve now run on the GPU: `d4eeq_cn`
+  (raw CN), `d4eeq_build` (augmented (N+1) matrix), `d4eeq_solve` (**single-workgroup FP64
+  Gaussian elimination without pivoting** — the hardness+constraint matrix is non-singular
+  without row swaps, so it agrees with the host/ROCm partial-pivoted LU to rounding), and
+  `d4eeq_resp` (∂q/∂x gather). GLSL-fp64 has no `erf`, so a Numerical-Recipes `derf` (erfcc,
+  ~1.2e-7) backs the screened-Coulomb terms (ample — q-response is a small gradient term).
+  `supportsDeviceEeq()→true` also routes the `scf_guess=eeq` initial guess through the device.
+  Validated: GFN2 `-sp` E+gradnorm match CPU on H2O/HCN/NH3 (7 dp); the device EEQ guess
+  charges equal the host model exactly (O=−0.643500 on H2O); the per-iteration SCF trace is
+  bit-identical from iteration 1 with the final energy identical, and iteration 0 differs by
+  only ~1e-10 (the `derf` signature — which confirms the device path actually runs rather than
+  silently falling back to host); GFN2 `-opt` (HCN) trajectory bit-identical to CPU. ctest
+  `cli_gpu_gradient_02_vulkan_gfn2_qresponse`.
 - **Performance (honest)**: device-resident GFN1 *and* GFN2 are ~1.3× **slower** than the CPU
   on the 231-atom `complex` (gfn2 16.0 s vs 12.4 s SCF; gfn1 20.2 s vs 15.4 s) — the FP64
   two-sided Jacobi eigensolve dominates and the iGPU runs FP64 at ~1/16 of FP32. The removed
@@ -189,8 +208,12 @@ On an **AMD Radeon 890M (RADV, integrated, shaderFloat64)**, build `release_vulk
   844 ms/iter) and the perturbed early iterations can cost an extra SCF cycle (GFN1 14→15),
   making it slower. So mixed precision is **NOT defaulted on for `-gpu vulkan`** (unlike
   ROCm/CUDA); the FP32 path is a documented opt-in (`-scf_mixed_precision true`). The real
-  Vulkan lever is a faster **eigensolve algorithm** (blocked/one-sided Jacobi or a
-  divide-and-conquer port), not precision. See SQM_GPU_ROADMAP.md X-AP3.
+  Vulkan lever is a faster **eigensolve algorithm**, not precision. See SQM_GPU_ROADMAP.md
+  X-AP3. (Two algorithmic alternatives were since built and benchmarked, both opt-in via
+  `CURCUMA_VK_TRIDIAG_SOLVE`: a fully-GPU **Householder** eigensolver (default) and a
+  full-residency **Cuppen divide-and-conquer** (`=dc`, EIG-3) — the D&C is bit-identical but
+  ~13× *slower* than host tql2 on this iGPU (submit/deflation-bound), so it ships opt-in only.
+  See [SQM_VULKAN_EIGENSOLVER_WP.md](SQM_VULKAN_EIGENSOLVER_WP.md).)
 - Default non-Vulkan `release/` build stays green (cli_curcumaopt_*/cli_rmsd_* 11/11).
 
 What was **NOT** tested: large systems (>~100 nao; the iGPU FP64 Jacobi is slow — this is a

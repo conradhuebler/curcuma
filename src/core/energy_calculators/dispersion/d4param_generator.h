@@ -170,6 +170,23 @@ public:
     void buildRefWFlat(const std::vector<int>& atoms, const Vector& q,
                        std::vector<double>& W_out, std::vector<double>& dWq_out) const;
 
+    // Stage 5 (Part B2, Claude Generated 2026-06): same as buildRefWFlat but also emits
+    // dWc_out[a·MAX_REF+ref] = ∂W/∂CN — the extra per-atom weight derivative the device
+    // 2-body D4 *gradient* kernel needs for the CN chain (dc6dcn = Σ dWc_i·W_j·c6ref).
+    // The CN-Gaussian + zeta build stays on the validated CPU (buildAtomRefW); the device
+    // does only the O(N²) 7×7 contraction + BJ damping. All outputs sized nat·MAX_REF.
+    void buildRefWFlat(const std::vector<int>& atoms, const Vector& q,
+                       std::vector<double>& W_out, std::vector<double>& dWq_out,
+                       std::vector<double>& dWc_out) const;
+
+    // Stage 5 (Part B2, Claude Generated 2026-06): the q=0 reference C6 (+ dC6/dCN) matrices
+    // the device ATM 3-body kernel consumes (matches D4Evaluator::computeATM's c6/dc6dcn build
+    // at qat=0). c6_out[a·nat+b] = C6(a,b) (symmetric); dc6dcn_out[a·nat+b] = ∂C6(a,b)/∂CN_a
+    // (NOT symmetric). Both sized nat·nat. The host does the cheap O(N²·49) contraction; the
+    // device does the O(N³) triple loop. Requires a prior GenerateParameters (m_cn_values).
+    void buildAtmC6Flat(const std::vector<int>& atoms,
+                        std::vector<double>& c6_out, std::vector<double>& dc6dcn_out) const;
+
     // Stage 6 (S6.2b, Claude Generated 2026-06): the q-INDEPENDENT per-atom
     // reference data the GPU needs to rebuild W/dWq on the device from the
     // resident SCF charges (k_d4_build_refw), so the in-SCF D4 weights need not be

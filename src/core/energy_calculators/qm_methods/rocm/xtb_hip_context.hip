@@ -526,6 +526,369 @@ __global__ void k_d2f(const double* __restrict__ src, float* __restrict__ dst, s
 { size_t i = blockIdx.x * blockDim.x + threadIdx.x; if (i < n) dst[i] = static_cast<float>(src[i]); }
 __global__ void k_f2d(const float* __restrict__ src, double* __restrict__ dst, size_t n)
 { size_t i = blockIdx.x * blockDim.x + threadIdx.x; if (i < n) dst[i] = static_cast<double>(src[i]); }
+
+// Stage 5 (Part B2): in-SCF GFN2 D4 atom-potential dE_D4/dq, one thread per atom
+// i (no atomicAdd — each atom sums its own half of the symmetric pair contributions).
+// Verbatim port of the CUDA k_d4_dedq (cuda/xtb_gpu_context.cu). For every j≠i within
+// the cutoff:
+//   r4r2ij = 3·sqrtZr4r2_i·sqrtZr4r2_j ; R0 = a1·√r4r2ij + a2
+//   disp_sum = s6/(r⁶+R0⁶) + s8·r4r2ij/(r⁸+R0⁸)              (BJ, geometry-fixed)
+//   dc6/dq_i = ΣΣ dWq_i[a]·W_j[b]·c6ref(ei,ej,a,b)            (7×7 contraction)
+//   dEdq(i) += −dc6/dq_i · disp_sum
+// Mirrors D4Evaluator::computeEnergyAndGradient's per-reference path + contractC6Gfn2.
+// MAX_ELEM=118, MAX_REF=7. Claude Generated.
+__global__ void k_d4_dedq(int nat, int max_elem, int max_ref,
+                          const int* __restrict__ Z, const int* __restrict__ nref,
+                          const double* __restrict__ sqrtZr4r2, const double* __restrict__ xyz,
+                          const double* __restrict__ c6_flat,
+                          const double* __restrict__ W, const double* __restrict__ dWq,
+                          double s6, double s8, double a1, double a2, double cut2,
+                          double* __restrict__ dEdq)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const int ei = Z[i] - 1;
+    const int nri = nref[i];
+    if (ei < 0 || ei >= max_elem || nri <= 0) { dEdq[i] = 0.0; return; }
+    const double xi = xyz[3 * i + 0], yi = xyz[3 * i + 1], zi = xyz[3 * i + 2];
+    const double sq_i = sqrtZr4r2[i];
+    const double* dWqi = dWq + static_cast<size_t>(i) * max_ref;
+
+    double acc = 0.0;
+    for (int j = 0; j < nat; ++j) {
+        if (j == i) continue;
+        const double dx = xi - xyz[3 * j + 0];
+        const double dy = yi - xyz[3 * j + 1];
+        const double dz = zi - xyz[3 * j + 2];
+        const double r2 = dx * dx + dy * dy + dz * dz;
+        if (r2 > cut2 || r2 < 1.0e-20) continue;
+        const int ej = Z[j] - 1;
+        const int nrj = nref[j];
+        if (ej < 0 || ej >= max_elem || nrj <= 0) continue;
+
+        const double r4r2ij = 3.0 * sq_i * sqrtZr4r2[j];
+        const double r0 = a1 * sqrt(r4r2ij) + a2;
+        const double r0_2 = r0 * r0;
+        const double r0_6 = r0_2 * r0_2 * r0_2;
+        const double r0_8 = r0_6 * r0_2;
+        const double r6 = r2 * r2 * r2;
+        const double r8 = r6 * r2;
+        const double t6 = 1.0 / (r6 + r0_6);
+        const double t8 = 1.0 / (r8 + r0_8);
+        const double disp_sum = s6 * t6 + s8 * r4r2ij * t8;
+
+        const double* Wj = W + static_cast<size_t>(j) * max_ref;
+        const size_t base = (static_cast<size_t>(ei) * max_elem + ej)
+                          * static_cast<size_t>(max_ref) * max_ref;
+        double dc6dqi = 0.0;
+        for (int a = 0; a < nri; ++a) {
+            const double dwa = dWqi[a];
+            if (dwa == 0.0) continue;
+            const size_t basea = base + static_cast<size_t>(a) * max_ref;
+            double s = 0.0;
+            for (int b = 0; b < nrj; ++b) s += Wj[b] * c6_flat[basea + b];
+            dc6dqi += dwa * s;
+        }
+        acc += -dc6dqi * disp_sum;
+    }
+    dEdq[i] = acc;
+}
+
+// Post-SCF: the whole 2-body D4 (energy + nuclear gradient + dE/dCN + dE/dq) in one per-atom
+// GATHER — a superset of k_d4_dedq. No atomics: the pair force is antisymmetric (atom j's own
+// thread accumulates the mirror term) and the energy is per-atom (host halves Σ e_atom). Port of
+// D4Evaluator::computeEnergyAndGradient's per-reference 2-body path: the direct radial gradient is
+// dE_dr = -C6·ddisp_dr2·(R_i-R_j) with ddisp_dr2 = s6·(-6r⁴t6²) + s8·r4r2·(-8r⁶t8²) (the C6·ζc6
+// rescale cancels in the per-reference path), dEdcn_i = -dc6dcn_i·disp_sum, dEdq_i = -dc6dq_i·disp_sum.
+// Claude Generated.
+__global__ void k_d4_grad(int nat, int max_elem, int max_ref,
+                          const int* __restrict__ Z, const int* __restrict__ nref,
+                          const double* __restrict__ sqrtZr4r2, const double* __restrict__ xyz,
+                          const double* __restrict__ c6_flat,
+                          const double* __restrict__ W, const double* __restrict__ dWq,
+                          const double* __restrict__ dWc,
+                          double s6, double s8, double a1, double a2, double cut2,
+                          double* __restrict__ e_atom, double* __restrict__ grad,
+                          double* __restrict__ dEdcn, double* __restrict__ dEdq)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const int ei = Z[i] - 1;
+    const int nri = nref[i];
+    if (ei < 0 || ei >= max_elem || nri <= 0) {
+        e_atom[i] = 0.0; grad[3*i+0] = grad[3*i+1] = grad[3*i+2] = 0.0; dEdcn[i] = 0.0; dEdq[i] = 0.0;
+        return;
+    }
+    const double xi = xyz[3 * i + 0], yi = xyz[3 * i + 1], zi = xyz[3 * i + 2];
+    const double sq_i = sqrtZr4r2[i];
+    const double* Wi   = W   + static_cast<size_t>(i) * max_ref;
+    const double* dWqi = dWq + static_cast<size_t>(i) * max_ref;
+    const double* dWci = dWc + static_cast<size_t>(i) * max_ref;
+
+    double eacc = 0.0, gx = 0.0, gy = 0.0, gz = 0.0, cnacc = 0.0, qacc = 0.0;
+    for (int j = 0; j < nat; ++j) {
+        if (j == i) continue;
+        const double dx = xi - xyz[3 * j + 0];
+        const double dy = yi - xyz[3 * j + 1];
+        const double dz = zi - xyz[3 * j + 2];
+        const double r2 = dx * dx + dy * dy + dz * dz;
+        if (r2 > cut2 || r2 < 1.0e-20) continue;
+        const int ej = Z[j] - 1;
+        const int nrj = nref[j];
+        if (ej < 0 || ej >= max_elem || nrj <= 0) continue;
+
+        const double r4r2ij = 3.0 * sq_i * sqrtZr4r2[j];
+        const double r0 = a1 * sqrt(r4r2ij) + a2;
+        const double r0_2 = r0 * r0;
+        const double r0_6 = r0_2 * r0_2 * r0_2;
+        const double r0_8 = r0_6 * r0_2;
+        const double r6 = r2 * r2 * r2;
+        const double r8 = r6 * r2;
+        const double t6 = 1.0 / (r6 + r0_6);
+        const double t8 = 1.0 / (r8 + r0_8);
+        const double disp_sum = s6 * t6 + s8 * r4r2ij * t8;
+        const double d6 = -6.0 * r2 * r2 * t6 * t6;            // -6·r⁴·t6²
+        const double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;       // -8·r⁶·t8²
+        const double ddisp_dr2 = s6 * d6 + s8 * r4r2ij * d8;
+
+        const double* Wj = W + static_cast<size_t>(j) * max_ref;
+        const size_t base = (static_cast<size_t>(ei) * max_elem + ej)
+                          * static_cast<size_t>(max_ref) * max_ref;
+        double C6 = 0.0, dc6dcni = 0.0, dc6dqi = 0.0;
+        for (int a = 0; a < nri; ++a) {
+            const size_t basea = base + static_cast<size_t>(a) * max_ref;
+            double sW = 0.0;
+            for (int b = 0; b < nrj; ++b) sW += Wj[b] * c6_flat[basea + b];
+            C6      += Wi[a]   * sW;
+            dc6dcni += dWci[a] * sW;
+            dc6dqi  += dWqi[a] * sW;
+        }
+        eacc  += -C6 * disp_sum;                 // per-atom energy (host: E = ½·Σ e_atom)
+        const double f = -C6 * ddisp_dr2;        // dE_dr = f·(R_i-R_j)
+        gx += f * dx; gy += f * dy; gz += f * dz;
+        cnacc += -dc6dcni * disp_sum;            // CN chain (host distributes via ∂CN/∂R)
+        qacc  += -dc6dqi  * disp_sum;            // q-response first half (host folds ∂q/∂R)
+    }
+    e_atom[i] = eacc;
+    grad[3 * i + 0] = gx; grad[3 * i + 1] = gy; grad[3 * i + 2] = gz;
+    dEdcn[i] = cnacc;
+    dEdq[i]  = qacc;
+}
+
+// D4 ATM 3-body (energy + nuclear gradient + dE/dCN) — per-atom GATHER over unordered pairs
+// {x,y} (the triple {a,x,y}). The triple-edge force is antisymmetric (dG_ba = -dG_ab; the dftd4
+// dang is symmetric in the edge endpoints), so atom `a` accumulates only ITS member's force from
+// each triple → no atomics, each triple's energy counted once per member (host: E = ⅓·Σ e_atom).
+// Verbatim port of D4Evaluator::computeATM (dftd4 atm.f90). q=0 reference C6/dC6dCN supplied as
+// nat² matrices (c6 symmetric; dc6dcn[a·nat+b] = ∂C6(a,b)/∂CN_a). Claude Generated.
+__global__ void k_d4_atm(int nat, const double* __restrict__ xyz, const double* __restrict__ r4r2,
+                         const double* __restrict__ c6, const double* __restrict__ dc6dcn,
+                         double s9, double a1, double a2, double alp, double cut2,
+                         double* __restrict__ e_atom, double* __restrict__ grad,
+                         double* __restrict__ dEdcn)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= nat) return;
+    const double eps = 2.220446049250313e-16;   // std::numeric_limits<double>::epsilon()
+    const double xa = xyz[3*a+0], ya = xyz[3*a+1], za = xyz[3*a+2];
+    const double r4r2a = r4r2[a];
+    double eacc = 0.0, gx = 0.0, gy = 0.0, gz = 0.0, cnacc = 0.0;
+    for (int x = 0; x < nat; ++x) {
+        if (x == a) continue;
+        const double vaxx = xyz[3*x+0]-xa, vaxy = xyz[3*x+1]-ya, vaxz = xyz[3*x+2]-za;  // v_ax = r_x-r_a
+        const double r2ax = vaxx*vaxx + vaxy*vaxy + vaxz*vaxz;
+        if (r2ax > cut2 || r2ax < eps) continue;
+        const double c6ax = c6[(size_t)a*nat + x];
+        const double r0ax = a1*sqrt(3.0*r4r2a*r4r2[x]) + a2;
+        for (int y = 0; y < x; ++y) {
+            if (y == a) continue;
+            const double vayx = xyz[3*y+0]-xa, vayy = xyz[3*y+1]-ya, vayz = xyz[3*y+2]-za;  // v_ay = r_y-r_a
+            const double r2ay = vayx*vayx + vayy*vayy + vayz*vayz;
+            if (r2ay > cut2 || r2ay < eps) continue;
+            const double dxyx = xyz[3*y+0]-xyz[3*x+0], dxyy = xyz[3*y+1]-xyz[3*x+1], dxyz_ = xyz[3*y+2]-xyz[3*x+2];
+            const double r2xy = dxyx*dxyx + dxyy*dxyy + dxyz_*dxyz_;
+            if (r2xy > cut2 || r2xy < eps) continue;
+
+            const double c6ay = c6[(size_t)a*nat + y];
+            const double c6xy = c6[(size_t)x*nat + y];
+            const double c9 = -s9 * sqrt(fabs(c6ax*c6ay*c6xy));
+            const double r0ay = a1*sqrt(3.0*r4r2a*r4r2[y]) + a2;
+            const double r0xy = a1*sqrt(3.0*r4r2[x]*r4r2[y]) + a2;
+            const double r0 = r0ax*r0ay*r0xy;
+            const double r2 = r2ax*r2ay*r2xy;
+            const double r1 = sqrt(r2);
+            const double r3 = r2*r1;
+            const double r5 = r3*r2;
+            const double pw = pow(r0/r1, alp/3.0);
+            const double fdmp = 1.0/(1.0 + 6.0*pw);
+            // ang symmetric; (r2ij,r2jk,r2ik) = (r2ax, r2xy, r2ay)  [i=a,j=x,k=y]
+            const double ang = 0.375*(r2ax + r2xy - r2ay)*(r2ax - r2xy + r2ay)*(-r2ax + r2xy + r2ay)/r5 + 1.0/r3;
+            const double dE = ang*fdmp*c9;       // triple = 1 (distinct atoms)
+            eacc += -dE;
+
+            const double dfdmp = -2.0*alp*pw*fdmp*fdmp;
+            // edge a-x (third y): dang(r2ax; {r2xy,r2ay})
+            const double dang_ax = -0.375*(r2ax*r2ax*r2ax + r2ax*r2ax*(r2xy+r2ay)
+                          + r2ax*(3.0*r2xy*r2xy + 2.0*r2xy*r2ay + 3.0*r2ay*r2ay)
+                          - 5.0*(r2xy-r2ay)*(r2xy-r2ay)*(r2xy+r2ay))/r5;
+            const double gcax = c9*(-dang_ax*fdmp + ang*dfdmp)/r2ax;   // dG_ax = gcax·v_ax
+            gx += -gcax*vaxx; gy += -gcax*vaxy; gz += -gcax*vaxz;        // a's force = -dG_ax
+            // edge a-y (third x): dang(r2ay; {r2xy,r2ax})
+            const double dang_ay = -0.375*(r2ay*r2ay*r2ay + r2ay*r2ay*(r2xy+r2ax)
+                          + r2ay*(3.0*r2xy*r2xy + 2.0*r2xy*r2ax + 3.0*r2ax*r2ax)
+                          - 5.0*(r2xy-r2ax)*(r2xy-r2ax)*(r2xy+r2ax))/r5;
+            const double gcay = c9*(-dang_ay*fdmp + ang*dfdmp)/r2ay;
+            gx += -gcay*vayx; gy += -gcay*vayy; gz += -gcay*vayz;
+            // CN chain for a: -dE·0.5·(dc6dcn(a,x)/c6ax + dc6dcn(a,y)/c6ay)
+            cnacc += -dE*0.5*(dc6dcn[(size_t)a*nat+x]/c6ax + dc6dcn[(size_t)a*nat+y]/c6ay);
+        }
+    }
+    e_atom[a] = eacc;
+    grad[3*a+0] = gx; grad[3*a+1] = gy; grad[3*a+2] = gz;
+    dEdcn[a] = cnacc;
+}
+
+// ===== Single-shot D4 EEQ charge model (Stage 5, Part A) — verbatim port of the CUDA
+// k_d4eeq_* kernels (cuda/xtb_gpu_context.cu). The host D4ChargeModel does one (N+1) augmented
+// LU solve for the charges + an adjoint solve for ∂q/∂x; here the matrix build / RHS / CN / the
+// adjoint response are HIP kernels and the LU is rocSOLVER (dgetrf/dgetrs). Claude Generated.
+constexpr double D4EEQ_TSQRT2PI        = 0.797884560802866;   // sqrt(2/π)
+constexpr double D4EEQ_TWO_OVER_SQRTPI = 1.1283791670955126;  // 2/sqrt(π)
+constexpr double D4EEQ_KN     = -7.5;       // GFN-FF erf-CN steepness
+constexpr double D4EEQ_CNMAX  = 4.4;        // CN log-compression cap
+constexpr double D4EEQ_CN_EPS = 1.0e-10;    // guard for 1/sqrt(CN)
+
+__global__ void k_d4eeq_cn(int N, const double* __restrict__ xyz,
+                           const double* __restrict__ rcov_bohr,
+                           double* __restrict__ cn, double* __restrict__ cn_raw)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    const double rci = rcov_bohr[i];
+    if (rci == 0.0) { cn[i] = 0.0; cn_raw[i] = 0.0; return; }
+    const double xi = xyz[3 * i + 0], yi = xyz[3 * i + 1], zi = xyz[3 * i + 2];
+    double raw = 0.0;
+    for (int j = 0; j < N; ++j) {
+        if (j == i) continue;
+        const double rcj = rcov_bohr[j];
+        if (rcj == 0.0) continue;
+        const double dx = xi - xyz[3 * j + 0];
+        const double dy = yi - xyz[3 * j + 1];
+        const double dz = zi - xyz[3 * j + 2];
+        const double r = sqrt(dx * dx + dy * dy + dz * dz);
+        const double rcij = rci + rcj;
+        const double dr = (r - rcij) / rcij;
+        raw += 0.5 * (1.0 + erf(D4EEQ_KN * dr));
+    }
+    cn_raw[i] = raw;
+    const double log1p_ecnmax = log(1.0 + exp(D4EEQ_CNMAX));
+    cn[i] = log1p_ecnmax - log(1.0 + exp(D4EEQ_CNMAX - raw));
+}
+
+// Augmented EEQ matrix M = [[A,1],[1ᵀ,0]], column-major (N+1)×(N+1).
+__global__ void k_d4eeq_build(int N, const double* __restrict__ xyz,
+                              const double* __restrict__ alpha_sq,
+                              const double* __restrict__ gam,
+                              double* __restrict__ M)
+{
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    const int c = blockIdx.y * blockDim.y + threadIdx.y;
+    const int m = N + 1;
+    if (r >= m || c >= m) return;
+    double val;
+    if (r == N && c == N) {
+        val = 0.0;
+    } else if (r == N || c == N) {
+        val = 1.0;
+    } else if (r == c) {
+        val = gam[r] + D4EEQ_TSQRT2PI / sqrt(alpha_sq[r]);
+    } else {
+        const double dx = xyz[3 * r + 0] - xyz[3 * c + 0];
+        const double dy = xyz[3 * r + 1] - xyz[3 * c + 1];
+        const double dz = xyz[3 * r + 2] - xyz[3 * c + 2];
+        const double rr = sqrt(dx * dx + dy * dy + dz * dz);
+        const double gammij = 1.0 / sqrt(alpha_sq[r] + alpha_sq[c]);
+        val = erf(gammij * rr) / rr;
+    }
+    M[static_cast<size_t>(r) + static_cast<size_t>(c) * m] = val;
+}
+
+// RHS c = [b; Q], length N+1. b_i = -χ_i + κ_i·√max(CN_i,0); c(N)=total_charge.
+__global__ void k_d4eeq_rhs(int N, const double* __restrict__ chi,
+                            const double* __restrict__ cnf, const double* __restrict__ cn,
+                            double total_charge, double* __restrict__ c_out)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i > N) return;
+    if (i == N) { c_out[N] = total_charge; return; }
+    c_out[i] = -chi[i] + cnf[i] * sqrt(fmax(cn[i], 0.0));
+}
+
+// Adjoint RHS [dEdq; 0], length N+1 (for M·z = [dEdq;0]).
+__global__ void k_d4eeq_adjoint_rhs(int N, const double* __restrict__ dEdq,
+                                    double* __restrict__ rhs)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i > N) return;
+    rhs[i] = (i < N) ? dEdq[i] : 0.0;
+}
+
+// Per-atom b-term response weight u_i = z_q(i)·κ_i/(2√CN_i)·g_i.
+__global__ void k_d4eeq_u(int N, const double* __restrict__ zq, const double* __restrict__ cnf,
+                          const double* __restrict__ cn, const double* __restrict__ cn_raw,
+                          double* __restrict__ u)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    const double cni = cn[i];
+    if (cni <= D4EEQ_CN_EPS || cnf[i] == 0.0) { u[i] = 0.0; return; }
+    const double g = 1.0 / (1.0 + exp(cn_raw[i] - D4EEQ_CNMAX));
+    u[i] = zq[i] * cnf[i] / (2.0 * sqrt(cni)) * g;
+}
+
+// Charge-response gradient, one thread per atom a (no atomicAdd): the pair coeff is symmetric
+// and û flips sign, so the full b≠a loop per atom reproduces both halves. grad [3a+k], Eh/Bohr.
+__global__ void k_d4eeq_response(int N, const double* __restrict__ xyz,
+                                 const double* __restrict__ alpha_sq,
+                                 const double* __restrict__ rcov_bohr,
+                                 const double* __restrict__ q, const double* __restrict__ zq,
+                                 const double* __restrict__ u, double* __restrict__ grad)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= N) return;
+    const double xa = xyz[3 * a + 0], ya = xyz[3 * a + 1], za = xyz[3 * a + 2];
+    const double alp_a = alpha_sq[a], rc_a = rcov_bohr[a];
+    double gx = 0.0, gy = 0.0, gz = 0.0;
+    for (int b = 0; b < N; ++b) {
+        if (b == a) continue;
+        const double dx = xa - xyz[3 * b + 0];
+        const double dy = ya - xyz[3 * b + 1];
+        const double dz = za - xyz[3 * b + 2];
+        const double r = sqrt(dx * dx + dy * dy + dz * dz);
+        if (r < 1.0e-10) continue;
+        const double inv_r = 1.0 / r;
+        const double gammij = 1.0 / sqrt(alp_a + alpha_sq[b]);
+        const double gr = gammij * r;
+        const double Aprime = gammij * D4EEQ_TWO_OVER_SQRTPI * exp(-gr * gr) * inv_r
+                              - erf(gr) * inv_r * inv_r;
+        const double c_ab = zq[a] * q[b] + zq[b] * q[a];
+        double Draw = 0.0;
+        const double rc_b = rcov_bohr[b];
+        if (rc_a > 0.0 && rc_b > 0.0) {
+            const double rcij = rc_a + rc_b;
+            const double dr = (r - rcij) / rcij;
+            const double earg = D4EEQ_KN * dr;
+            Draw = 0.5 * D4EEQ_TWO_OVER_SQRTPI * exp(-earg * earg) * D4EEQ_KN / rcij;
+        }
+        const double coeff = (u[a] + u[b]) * Draw - c_ab * Aprime;
+        gx += coeff * dx * inv_r;
+        gy += coeff * dy * inv_r;
+        gz += coeff * dz * inv_r;
+    }
+    grad[3 * a + 0] = gx;
+    grad[3 * a + 1] = gy;
+    grad[3 * a + 2] = gz;
+}
 } // namespace
 #endif // HAVE_ROCSOLVER
 
@@ -717,6 +1080,50 @@ struct XtbHipContext::Impl {
     bool    mp_computed = false;
     // Stage 2b (resident multipole SCF): per-iteration v_dp/v_qp (up) / dp_at/qp_at (down).
     double* dVdp = nullptr; double* dVqp = nullptr; double* dDpAt = nullptr; double* dQpAt = nullptr;
+
+    // ----- Stage 5 (Part B2): in-SCF GFN2 D4 dE_D4/dq on device ------------
+    // Reference data uploaded once per geometry (begDispersion); the element C6 block
+    // (geometry- and molecule-independent) only once per process (d4_c6_uploaded).
+    // dispDedq then runs the per-iteration O(N²) contraction + BJ disp_sum.
+    static constexpr int D4_MAX_REF = 7;
+    int     d4_nat = 0, d4_c6_len = 0;
+    double  d4_s6 = 0.0, d4_s8 = 0.0, d4_a1 = 0.0, d4_a2 = 0.0, d4_cut = 0.0;
+    bool    d4_c6_uploaded = false;
+    int*    dD4Z = nullptr;     // nat
+    int*    dD4Nref = nullptr;  // nat
+    double* dD4Sqrt = nullptr;  // nat (√(½·Z·⟨r⁴⟩/⟨r²⟩))
+    double* dD4Xyz = nullptr;   // 3·nat (Bohr)
+    double* dD4W = nullptr;     // nat·D4_MAX_REF (per-atom reference weights)
+    double* dD4dWq = nullptr;   // nat·D4_MAX_REF (∂W/∂q)
+    double* dD4Dedq = nullptr;  // nat (output)
+    double* dD4C6 = nullptr;    // c6_flat (118²·7² element references)
+    // 2-body D4 gradient (dispDispGrad): the extra ∂W/∂CN weights + the gather outputs.
+    double* dD4dWc = nullptr;   // nat·D4_MAX_REF (∂W/∂CN)
+    double* dD4Eat = nullptr;   // nat (per-atom energy; host halves+sums)
+    double* dD4Grad = nullptr;  // 3·nat (nuclear gradient, [3*i+k])
+    double* dD4Dcn = nullptr;   // nat (dE/dCN)
+    // ATM 3-body (dispATM): the q=0 reference C6 / ∂C6/∂CN matrices (reuses dD4Eat/Grad/Dcn out).
+    double* dD4c6 = nullptr;    // nat·nat (C6, symmetric)
+    double* dD4dc6 = nullptr;   // nat·nat (∂C6(a,b)/∂CN_a)
+
+    // ----- Single-shot D4 EEQ (Stage 5, Part A): charges + ∂q/∂x response -----
+    int     eeq_n = 0;          // cached N (LU valid for the response when ==N)
+    double* dEeqXyz = nullptr;     // 3N
+    double* dEeqChi = nullptr;     // N
+    double* dEeqGam = nullptr;     // N
+    double* dEeqAlp = nullptr;     // N
+    double* dEeqCnf = nullptr;     // N
+    double* dEeqRcov = nullptr;    // N
+    double* dEeqCn = nullptr;      // N
+    double* dEeqCnRaw = nullptr;   // N
+    double* dEeqM = nullptr;       // m·m (LU factor, reused by the adjoint)
+    double* dEeqRhs = nullptr;     // m
+    double* dEeqQ = nullptr;       // N (EEQ charges)
+    rocblas_int* dEeqIpiv = nullptr; // m (LU pivots)
+    double* dEeqDedq = nullptr;    // N
+    double* dEeqAdjRhs = nullptr;  // m
+    double* dEeqU = nullptr;       // N
+    double* dEeqGrad = nullptr;    // 3N
 
     template <class T> bool up(T*& dptr, const T* host, size_t count) {
         if (dptr) hipFree(dptr);
@@ -924,6 +1331,200 @@ struct XtbHipContext::Impl {
         return hipMemcpy(qp_at, dQpAt, 6 * static_cast<size_t>(bnat) * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess;
     }
 
+    // ----- Stage 5 (Part B2): in-SCF GFN2 D4 dE_D4/dq ---------------------
+    // begDispersion uploads the geometry-fixed reference data once per geometry; the
+    // element C6 block (c6_flat) is uploaded only on the first call (process lifetime).
+    bool begDispersion(int nat, const int* Z, const double* sqrtZr4r2, const int* nref,
+                       const double* xyz, const double* c6_flat, int c6_len,
+                       double s6, double s8, double a1, double a2, double cutoff) {
+        if (!ok || nat <= 0 || c6_len <= 0) return false;
+        if (nat != d4_nat) {   // atom count changed (new molecule) → drop the nat-sized buffers
+            for (void* p : { (void*)dD4W, (void*)dD4dWq, (void*)dD4Dedq,
+                             (void*)dD4dWc, (void*)dD4Eat, (void*)dD4Grad, (void*)dD4Dcn,
+                             (void*)dD4c6, (void*)dD4dc6 }) if (p) hipFree(p);
+            dD4W = dD4dWq = dD4Dedq = nullptr;
+            dD4dWc = dD4Eat = dD4Grad = dD4Dcn = nullptr;
+            dD4c6 = dD4dc6 = nullptr;
+        }
+        bool g = true;
+        g &= up(dD4Z, Z, static_cast<size_t>(nat));
+        g &= up(dD4Nref, nref, static_cast<size_t>(nat));
+        g &= up(dD4Sqrt, sqrtZr4r2, static_cast<size_t>(nat));
+        g &= up(dD4Xyz, xyz, 3 * static_cast<size_t>(nat));
+        if (!dD4W)    g &= hipMalloc(&dD4W,    static_cast<size_t>(nat) * D4_MAX_REF * sizeof(double)) == hipSuccess;
+        if (!dD4dWq)  g &= hipMalloc(&dD4dWq,  static_cast<size_t>(nat) * D4_MAX_REF * sizeof(double)) == hipSuccess;
+        if (!dD4Dedq) g &= hipMalloc(&dD4Dedq, static_cast<size_t>(nat) * sizeof(double)) == hipSuccess;
+        // The reference C6 block is element data (geometry- AND molecule-independent):
+        // upload it only once per process.
+        if (!d4_c6_uploaded || d4_c6_len < c6_len) {
+            if (dD4C6) hipFree(dD4C6);
+            dD4C6 = nullptr;
+            g &= hipMalloc(&dD4C6, static_cast<size_t>(c6_len) * sizeof(double)) == hipSuccess;
+            if (g) g &= hipMemcpy(dD4C6, c6_flat, static_cast<size_t>(c6_len) * sizeof(double),
+                                  hipMemcpyHostToDevice) == hipSuccess;
+            d4_c6_uploaded = g;
+            d4_c6_len = c6_len;
+        }
+        d4_nat = nat;
+        d4_s6 = s6; d4_s8 = s8; d4_a1 = a1; d4_a2 = a2; d4_cut = cutoff;
+        return g && hipStreamSynchronize(stream) == hipSuccess;
+    }
+    // Per SCF iteration: upload W/dWq (the q-dependent reference weights), run the O(N²)
+    // contraction + BJ disp_sum kernel, download dEdq. Mirrors XTB::addDispersionPotential.
+    bool dispDedq(int nat, const double* W, const double* dWq, double* dEdq_out) {
+        if (!ok || nat <= 0 || nat != d4_nat || !dD4C6) return false;
+        const size_t wlen = static_cast<size_t>(nat) * D4_MAX_REF;
+        if (hipMemcpy(dD4W,   W,   wlen * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        if (hipMemcpy(dD4dWq, dWq, wlen * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        const double cut2 = d4_cut * d4_cut;
+        dim3 b(128), gr((nat + 127) / 128);
+        hipLaunchKernelGGL(k_d4_dedq, gr, b, 0, stream, nat, 118, D4_MAX_REF,
+                           dD4Z, dD4Nref, dD4Sqrt, dD4Xyz, dD4C6, dD4W, dD4dWq,
+                           d4_s6, d4_s8, d4_a1, d4_a2, cut2, dD4Dedq);
+        if (hipGetLastError() != hipSuccess) return false;
+        if (hipMemcpy(dEdq_out, dD4Dedq, static_cast<size_t>(nat) * sizeof(double),
+                      hipMemcpyDeviceToHost) != hipSuccess) return false;
+        return hipStreamSynchronize(stream) == hipSuccess;
+    }
+    // Post-SCF: the whole 2-body D4 (energy + gradient + dE/dCN + dE/dq) in one gather.
+    bool dispDispGrad(int nat, const double* W, const double* dWq, const double* dWc,
+                      double* e_atom, double* grad, double* dEdcn, double* dEdq_out) {
+        if (!ok || nat <= 0 || nat != d4_nat || !dD4C6) return false;
+        const size_t wlen = static_cast<size_t>(nat) * D4_MAX_REF;
+        if (!dD4dWc  && hipMalloc(&dD4dWc,  wlen * sizeof(double)) != hipSuccess) return false;
+        if (!dD4Eat  && hipMalloc(&dD4Eat,  static_cast<size_t>(nat) * sizeof(double)) != hipSuccess) return false;
+        if (!dD4Grad && hipMalloc(&dD4Grad, 3 * static_cast<size_t>(nat) * sizeof(double)) != hipSuccess) return false;
+        if (!dD4Dcn  && hipMalloc(&dD4Dcn,  static_cast<size_t>(nat) * sizeof(double)) != hipSuccess) return false;
+        if (hipMemcpy(dD4W,   W,   wlen * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        if (hipMemcpy(dD4dWq, dWq, wlen * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        if (hipMemcpy(dD4dWc, dWc, wlen * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        const double cut2 = d4_cut * d4_cut;
+        dim3 b(128), gr((nat + 127) / 128);
+        hipLaunchKernelGGL(k_d4_grad, gr, b, 0, stream, nat, 118, D4_MAX_REF,
+                           dD4Z, dD4Nref, dD4Sqrt, dD4Xyz, dD4C6, dD4W, dD4dWq, dD4dWc,
+                           d4_s6, d4_s8, d4_a1, d4_a2, cut2,
+                           dD4Eat, dD4Grad, dD4Dcn, dD4Dedq);
+        if (hipGetLastError() != hipSuccess) return false;
+        if (hipMemcpy(e_atom, dD4Eat, static_cast<size_t>(nat) * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        if (hipMemcpy(grad, dD4Grad, 3 * static_cast<size_t>(nat) * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        if (hipMemcpy(dEdcn, dD4Dcn, static_cast<size_t>(nat) * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        if (hipMemcpy(dEdq_out, dD4Dedq, static_cast<size_t>(nat) * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        return hipStreamSynchronize(stream) == hipSuccess;
+    }
+    // Post-SCF: the D4 ATM 3-body (energy + gradient + dE/dCN) in one gather, reusing the
+    // resident geometry + √r4r2. c6/dc6dcn are nat² (q=0 reference). Outputs reuse dD4Eat/Grad/Dcn.
+    bool dispATM(int nat, const double* c6, const double* dc6dcn,
+                 double s9, double a1, double a2, double alp, double cutoff,
+                 double* e_atom, double* grad, double* dEdcn) {
+        if (!ok || nat <= 0 || nat != d4_nat || !dD4Xyz || !dD4Sqrt) return false;
+        const size_t nn = static_cast<size_t>(nat) * nat;
+        // nat² matrices: (re)allocate when the size changes (begDispersion resets d4_nat).
+        if (!dD4c6  && hipMalloc(&dD4c6,  nn * sizeof(double)) != hipSuccess) return false;
+        if (!dD4dc6 && hipMalloc(&dD4dc6, nn * sizeof(double)) != hipSuccess) return false;
+        if (!dD4Eat  && hipMalloc(&dD4Eat,  static_cast<size_t>(nat) * sizeof(double)) != hipSuccess) return false;
+        if (!dD4Grad && hipMalloc(&dD4Grad, 3 * static_cast<size_t>(nat) * sizeof(double)) != hipSuccess) return false;
+        if (!dD4Dcn  && hipMalloc(&dD4Dcn,  static_cast<size_t>(nat) * sizeof(double)) != hipSuccess) return false;
+        if (hipMemcpy(dD4c6,  c6,      nn * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        if (hipMemcpy(dD4dc6, dc6dcn,  nn * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        const double cut2 = cutoff * cutoff;
+        dim3 b(128), gr((nat + 127) / 128);
+        hipLaunchKernelGGL(k_d4_atm, gr, b, 0, stream, nat, dD4Xyz, dD4Sqrt, dD4c6, dD4dc6,
+                           s9, a1, a2, alp, cut2, dD4Eat, dD4Grad, dD4Dcn);
+        if (hipGetLastError() != hipSuccess) return false;
+        if (hipMemcpy(e_atom, dD4Eat, static_cast<size_t>(nat) * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        if (hipMemcpy(grad, dD4Grad, 3 * static_cast<size_t>(nat) * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        if (hipMemcpy(dEdcn, dD4Dcn, static_cast<size_t>(nat) * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        return hipStreamSynchronize(stream) == hipSuccess;
+    }
+    void freeDispersion() {
+        for (void* p : { (void*)dD4Z, (void*)dD4Nref, (void*)dD4Sqrt, (void*)dD4Xyz,
+                         (void*)dD4W, (void*)dD4dWq, (void*)dD4Dedq, (void*)dD4C6,
+                         (void*)dD4dWc, (void*)dD4Eat, (void*)dD4Grad, (void*)dD4Dcn,
+                         (void*)dD4c6, (void*)dD4dc6 })
+            if (p) hipFree(p);
+        dD4Z = dD4Nref = nullptr; dD4Sqrt = dD4Xyz = dD4W = dD4dWq = dD4Dedq = dD4C6 = nullptr;
+        dD4dWc = dD4Eat = dD4Grad = dD4Dcn = nullptr;
+        dD4c6 = dD4dc6 = nullptr;
+        d4_nat = d4_c6_len = 0; d4_c6_uploaded = false;
+    }
+
+    // ----- Single-shot D4 EEQ: charges + ∂q/∂x response -------------------
+    int eeq_alloc_n = 0;
+    void freeEeq() {
+        for (void* p : { (void*)dEeqXyz,(void*)dEeqChi,(void*)dEeqGam,(void*)dEeqAlp,(void*)dEeqCnf,
+                         (void*)dEeqRcov,(void*)dEeqCn,(void*)dEeqCnRaw,(void*)dEeqM,(void*)dEeqRhs,
+                         (void*)dEeqQ,(void*)dEeqIpiv,(void*)dEeqDedq,(void*)dEeqAdjRhs,(void*)dEeqU,
+                         (void*)dEeqGrad }) if (p) hipFree(p);
+        dEeqXyz = dEeqChi = dEeqGam = dEeqAlp = dEeqCnf = dEeqRcov = dEeqCn = dEeqCnRaw = nullptr;
+        dEeqM = dEeqRhs = dEeqQ = dEeqDedq = dEeqAdjRhs = dEeqU = dEeqGrad = nullptr;
+        dEeqIpiv = nullptr; eeq_alloc_n = 0; eeq_n = 0;
+    }
+    bool ensureEeq(int N) {
+        if (!handle_ok) {
+            if (rocblas_create_handle(&handle) != rocblas_status_success) return false;
+            rocblas_set_stream(handle, stream); handle_ok = true;
+        }
+        if (!dInfo && hipMalloc(&dInfo, sizeof(rocblas_int)) != hipSuccess) return false;
+        if (N == eeq_alloc_n && dEeqM) return true;
+        freeEeq();
+        const size_t m = static_cast<size_t>(N) + 1;
+        bool g = true;
+        g &= hipMalloc(&dEeqXyz, 3 * static_cast<size_t>(N) * sizeof(double)) == hipSuccess;
+        for (double** p : { &dEeqChi,&dEeqGam,&dEeqAlp,&dEeqCnf,&dEeqRcov,&dEeqCn,&dEeqCnRaw,
+                            &dEeqQ,&dEeqDedq,&dEeqU })
+            g &= hipMalloc(p, static_cast<size_t>(N) * sizeof(double)) == hipSuccess;
+        g &= hipMalloc(&dEeqM, m * m * sizeof(double)) == hipSuccess;
+        g &= hipMalloc(&dEeqRhs, m * sizeof(double)) == hipSuccess;
+        g &= hipMalloc(&dEeqAdjRhs, m * sizeof(double)) == hipSuccess;
+        g &= hipMalloc(&dEeqGrad, 3 * static_cast<size_t>(N) * sizeof(double)) == hipSuccess;
+        g &= hipMalloc(&dEeqIpiv, m * sizeof(rocblas_int)) == hipSuccess;
+        if (!g) { freeEeq(); return false; }
+        eeq_alloc_n = N;
+        return true;
+    }
+    // Build the augmented EEQ matrix, LU-factor it (kept for the adjoint), solve for the charges.
+    bool eeqChargesImpl(int N, const double* xyz, const double* chi, const double* gam,
+                        const double* alpha_sq, const double* cnf, const double* rcov,
+                        double total_charge, double* q_out) {
+        if (!ok || N <= 0 || !ensureEeq(N)) return false;
+        const int m = N + 1;
+        if (hipMemcpy(dEeqXyz, xyz, 3 * static_cast<size_t>(N) * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        if (hipMemcpy(dEeqChi, chi, N * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        if (hipMemcpy(dEeqGam, gam, N * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        if (hipMemcpy(dEeqAlp, alpha_sq, N * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        if (hipMemcpy(dEeqCnf, cnf, N * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        if (hipMemcpy(dEeqRcov, rcov, N * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        hipLaunchKernelGGL(k_d4eeq_cn, dim3((N + 127) / 128), dim3(128), 0, stream, N, dEeqXyz, dEeqRcov, dEeqCn, dEeqCnRaw);
+        dim3 blk(16, 16), grd((m + 15) / 16, (m + 15) / 16);
+        hipLaunchKernelGGL(k_d4eeq_build, grd, blk, 0, stream, N, dEeqXyz, dEeqAlp, dEeqGam, dEeqM);
+        hipLaunchKernelGGL(k_d4eeq_rhs, dim3((m + 127) / 128), dim3(128), 0, stream, N, dEeqChi, dEeqCnf, dEeqCn, total_charge, dEeqRhs);
+        if (hipGetLastError() != hipSuccess) return false;
+        if (rocsolver_dgetrf(handle, m, m, dEeqM, m, dEeqIpiv, dInfo) != rocblas_status_success) return false;
+        if (rocsolver_dgetrs(handle, rocblas_operation_none, m, 1, dEeqM, m, dEeqIpiv, dEeqRhs, m) != rocblas_status_success) return false;
+        if (hipMemcpyAsync(dEeqQ, dEeqRhs, N * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return false;
+        rocblas_int info = 1;
+        if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        if (hipMemcpy(q_out, dEeqQ, N * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        if (hipStreamSynchronize(stream) != hipSuccess) return false;
+        eeq_n = (info == 0) ? N : 0;
+        return info == 0;
+    }
+    // ∂q/∂x response: adjoint solve M·z = [dEdq;0] (reuse the LU), then the pairwise gradient.
+    bool eeqRespImpl(int N, const double* dEdq, double* grad_add) {
+        if (!ok || N <= 0 || N != eeq_n || !dEeqM) return false;
+        const int m = N + 1;
+        if (N <= 1) { for (int i = 0; i < 3 * N; ++i) grad_add[i] = 0.0; return true; }
+        if (hipMemcpy(dEeqDedq, dEdq, N * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        hipLaunchKernelGGL(k_d4eeq_adjoint_rhs, dim3((m + 127) / 128), dim3(128), 0, stream, N, dEeqDedq, dEeqAdjRhs);
+        if (hipGetLastError() != hipSuccess) return false;
+        if (rocsolver_dgetrs(handle, rocblas_operation_none, m, 1, dEeqM, m, dEeqIpiv, dEeqAdjRhs, m) != rocblas_status_success) return false;
+        hipLaunchKernelGGL(k_d4eeq_u, dim3((N + 127) / 128), dim3(128), 0, stream, N, dEeqAdjRhs, dEeqCnf, dEeqCn, dEeqCnRaw, dEeqU);
+        hipLaunchKernelGGL(k_d4eeq_response, dim3((N + 127) / 128), dim3(128), 0, stream, N, dEeqXyz, dEeqAlp, dEeqRcov, dEeqQ, dEeqAdjRhs, dEeqU, dEeqGrad);
+        if (hipGetLastError() != hipSuccess) return false;
+        if (hipMemcpy(grad_add, dEeqGrad, 3 * static_cast<size_t>(N) * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        return hipStreamSynchronize(stream) == hipSuccess;
+    }
+
     void freeBasis() {
         for (void* p : { (void*)dz,(void*)dsh2at,(void*)dang_sh,(void*)diao_sh,(void*)dnao_sh,
                          (void*)dsh_nprim,(void*)dsh_prim_off,(void*)dvalence,(void*)dprim_alpha,
@@ -969,6 +1570,8 @@ XtbHipContext::~XtbHipContext()
 {
     if (!m_impl) return;
 #ifdef HAVE_ROCSOLVER
+    m_impl->freeEeq();
+    m_impl->freeDispersion();
     m_impl->freeBasis();
     m_impl->freeResident();
     m_impl->freeSolver();
@@ -1156,6 +1759,72 @@ bool XtbHipContext::multipoleMoments(double* dp_at, double* qp_at)
     (void)dp_at; (void)qp_at; return false;
 #else
     return m_impl && m_impl->ok && dp_at && qp_at && m_impl->multipoleMomentsImpl(dp_at, qp_at);
+#endif
+}
+bool XtbHipContext::beginDispersion(int nat, const int* Z, const double* sqrtZr4r2,
+                                    const int* nref, const double* xyz_bohr,
+                                    const double* c6_flat, int c6_flat_len,
+                                    double s6, double s8, double a1, double a2, double cutoff)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)nat; (void)Z; (void)sqrtZr4r2; (void)nref; (void)xyz_bohr; (void)c6_flat;
+    (void)c6_flat_len; (void)s6; (void)s8; (void)a1; (void)a2; (void)cutoff; return false;
+#else
+    return m_impl && m_impl->ok && Z && sqrtZr4r2 && nref && xyz_bohr && c6_flat
+        && m_impl->begDispersion(nat, Z, sqrtZr4r2, nref, xyz_bohr, c6_flat, c6_flat_len,
+                                 s6, s8, a1, a2, cutoff);
+#endif
+}
+bool XtbHipContext::dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)nat; (void)W; (void)dWq; (void)dEdq_out; return false;
+#else
+    return m_impl && m_impl->ok && W && dWq && dEdq_out && m_impl->dispDedq(nat, W, dWq, dEdq_out);
+#endif
+}
+bool XtbHipContext::dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
+                                       double* e_atom_out, double* grad_out,
+                                       double* dEdcn_out, double* dEdq_out)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)nat; (void)W; (void)dWq; (void)dWc; (void)e_atom_out; (void)grad_out;
+    (void)dEdcn_out; (void)dEdq_out; return false;
+#else
+    return m_impl && m_impl->ok && W && dWq && dWc && e_atom_out && grad_out && dEdcn_out && dEdq_out
+        && m_impl->dispDispGrad(nat, W, dWq, dWc, e_atom_out, grad_out, dEdcn_out, dEdq_out);
+#endif
+}
+bool XtbHipContext::dispersionATM(int nat, const double* c6, const double* dc6dcn,
+                                  double s9, double a1, double a2, double alp, double cutoff,
+                                  double* e_atom_out, double* grad_out, double* dEdcn_out)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)nat; (void)c6; (void)dc6dcn; (void)s9; (void)a1; (void)a2; (void)alp; (void)cutoff;
+    (void)e_atom_out; (void)grad_out; (void)dEdcn_out; return false;
+#else
+    return m_impl && m_impl->ok && c6 && dc6dcn && e_atom_out && grad_out && dEdcn_out
+        && m_impl->dispATM(nat, c6, dc6dcn, s9, a1, a2, alp, cutoff, e_atom_out, grad_out, dEdcn_out);
+#endif
+}
+bool XtbHipContext::eeqCharges(int N, const double* xyz_bohr, const double* chi, const double* gam,
+                              const double* alpha_sq, const double* cnf, const double* rcov_bohr,
+                              double total_charge, double* q_out)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)N; (void)xyz_bohr; (void)chi; (void)gam; (void)alpha_sq; (void)cnf; (void)rcov_bohr;
+    (void)total_charge; (void)q_out; return false;
+#else
+    return m_impl && m_impl->ok && xyz_bohr && chi && gam && alpha_sq && cnf && rcov_bohr && q_out
+        && m_impl->eeqChargesImpl(N, xyz_bohr, chi, gam, alpha_sq, cnf, rcov_bohr, total_charge, q_out);
+#endif
+}
+bool XtbHipContext::eeqChargeResponseGradient(int N, const double* dEdq, double* grad_add)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)N; (void)dEdq; (void)grad_add; return false;
+#else
+    return m_impl && m_impl->ok && dEdq && grad_add && m_impl->eeqRespImpl(N, dEdq, grad_add);
 #endif
 }
 

@@ -1,0 +1,51 @@
+#version 450
+// EIG-3 Cuppen divide-and-conquer base case: dense symmetric eigensolve of one small leaf
+// tridiagonal (n ≤ MAXLEAF) by the classic cyclic Jacobi method. ONE WORKGROUP per leaf;
+// lane 0 runs the sweeps in shared memory (the leaf is tiny, so the parallelism is ACROSS
+// leaves when many are dispatched together). Output eval[n] (unsorted — the D&C merge sorts)
+// and V[n×n] column-major (eigenvector j ↔ eval[j]). Replaces the host tql2 leaf. Jacobi is
+// unconditionally convergent and degeneracy-robust. Claude Generated (EIG-3, full residency).
+const uint MAXLEAF = 32u;
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Dgb { double diag[]; };   // [n]
+layout(std430, binding = 1) readonly  buffer Ofb { double off[]; };    // [n-1]
+layout(std430, binding = 2) writeonly buffer Evb { double eval[]; };   // [n]
+layout(std430, binding = 3) writeonly buffer Vob { double Vout[]; };   // [n×n] col-major
+layout(push_constant) uniform PC { uint n; } pc;
+
+shared double A[MAXLEAF][MAXLEAF];
+shared double V[MAXLEAF][MAXLEAF];
+
+void main()
+{
+    uint n = pc.n;
+    if (gl_LocalInvocationID.x != 0u) return;   // lane 0 does the (tiny) leaf serially
+
+    for (uint i = 0u; i < n; ++i) for (uint j = 0u; j < n; ++j) { A[i][j] = 0.0lf; V[i][j] = (i == j) ? 1.0lf : 0.0lf; }
+    for (uint i = 0u; i < n; ++i) A[i][i] = diag[i];
+    for (uint i = 0u; i + 1u < n; ++i) { A[i][i + 1u] = off[i]; A[i + 1u][i] = off[i]; }
+
+    double frob2 = 0.0lf;
+    for (uint i = 0u; i < n; ++i) for (uint j = 0u; j < n; ++j) frob2 += A[i][j] * A[i][j];
+    double tol2 = 1.0e-32lf * (frob2 + 1.0e-300lf);
+
+    for (int sweep = 0; sweep < 100; ++sweep) {
+        double off2 = 0.0lf;
+        for (uint p = 0u; p < n; ++p) for (uint q = p + 1u; q < n; ++q) off2 += 2.0lf * A[p][q] * A[p][q];
+        if (off2 <= tol2) break;
+        for (uint p = 0u; p < n; ++p) for (uint q = p + 1u; q < n; ++q) {
+            double apq = A[p][q];
+            if (apq == 0.0lf) continue;
+            // Algebraic Jacobi rotation (Golub & Van Loan 8.4.1) — no FP64 trig in GLSL:
+            //   θ=(aqq−app)/(2apq), t=sign(θ)/(|θ|+√(θ²+1)), c=1/√(1+t²), s=t·c.
+            double theta = (A[q][q] - A[p][p]) / (2.0lf * apq);
+            double t = ((theta >= 0.0lf) ? 1.0lf : -1.0lf) / (abs(theta) + sqrt(theta * theta + 1.0lf));
+            double c = 1.0lf / sqrt(t * t + 1.0lf), s = t * c;
+            for (uint k = 0u; k < n; ++k) { double akp = A[k][p], akq = A[k][q]; A[k][p] = c * akp - s * akq; A[k][q] = s * akp + c * akq; }
+            for (uint k = 0u; k < n; ++k) { double apk = A[p][k], aqk = A[q][k]; A[p][k] = c * apk - s * aqk; A[q][k] = s * apk + c * aqk; }
+            for (uint k = 0u; k < n; ++k) { double vkp = V[k][p], vkq = V[k][q]; V[k][p] = c * vkp - s * vkq; V[k][q] = s * vkp + c * vkq; }
+        }
+    }
+    for (uint i = 0u; i < n; ++i) eval[i] = A[i][i];
+    for (uint j = 0u; j < n; ++j) for (uint i = 0u; i < n; ++i) Vout[i + j * n] = V[i][j];
+}

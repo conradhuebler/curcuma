@@ -125,8 +125,11 @@ protected:
     StepCallback m_step_callback;
 
     // Claude Generated 2026 - External force injection for interactive simulation.
-    // Additive per-atom force bias applied to the gradient each step, then cleared.
-    // Mirrors SimpleMD's m_external_forces / m_external_forces_pending pattern.
+    // Additive per-atom Cartesian bias (Eh/Bohr, flat 3N vector) injected into the
+    // gradient at each optimizer's own gradient-evaluation site (LBFGSpp objective,
+    // native LBFGS::getEnergyGradient, ANCOpt transform), NOT in the base loop —
+    // every optimizer pre-evaluates its own gradient. Set by setExternalForces and
+    // zeroed by clearExternalForces; persists across line-search evaluations.
     Vector m_external_forces;
     bool m_external_forces_pending = false;
 
@@ -201,8 +204,8 @@ public:
     void setBasename(const std::string& basename);
 
     // Claude Generated 2026 - External force injection for interactive simulation.
-    // Adds a per-atom force bias (in Eh/Bohr, flat 3N vector) that is applied to
-    // the gradient at each optimization step and then cleared automatically.
+    // Adds a per-atom force bias (Eh/Bohr, flat 3N vector) applied to the gradient
+    // at each optimization step; persists until clearExternalForces() zeroes it.
     void setExternalForces(const Vector& forces);
     void clearExternalForces();
 

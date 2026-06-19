@@ -166,6 +166,28 @@ struct XtbVulkanContext::Impl {
     Buf tVfull, tT, tY, tY2;
     VkDescriptorSet tVFs{}, tBTs{}, tG1{}, tG2{}, tG3{};
     bool m_use_wy = true;                          // WY back-transform (default) vs EIG-2A per-reflector (CURCUMA_VK_BACKXF=reflector)
+    // EIG-3: GPU Cuppen divide-and-conquer tridiagonal solve (CURCUMA_VK_TRIDIAG_SOLVE=dc;
+    // default OFF — host tql2 stays canonical until operator-validated). The per-merge secular
+    // solve (rank-1 update diag(D)+rho·z·zᵀ) runs as three one-thread-per-index kernels:
+    // dc_secular_root (dsl5 + 4B push → ploDC5), dc_lowner (dsl4 + 4B → reuse ploF),
+    // dc_evec_cols (dsl3 + 4B → reuse ploS). Buffers sized to the worst-case merge (nn=n).
+    bool m_tridiag_dc = false;
+    bool m_dc_host = false;                          // CURCUMA_VK_DC_HOST: host rank1Eigen + tql2 leaves (debug/reference)
+    VkPipelineLayout ploDC5 = VK_NULL_HANDLE;       // dsl5 + 4B push (dc_secular_root)
+    VkShaderModule mDCsec{}, mDClow{}, mDCevec{};
+    VkPipeline pDCsec{}, pDClow{}, pDCevec{};
+    // Full-residency kernels: dc_merge_rank1 (whole rank1Eigen incl. GPU deflation, 10 SSBO +
+    // 4B push → ploDC10), dc_leaf_jacobi (GPU base-case eigensolve, 4 SSBO + 4B → reuse ploF).
+    VkDescriptorSetLayout dsl10 = VK_NULL_HANDLE;
+    VkPipelineLayout ploDC10 = VK_NULL_HANDLE;
+    VkShaderModule mDCmerge{}, mDCleaf{};
+    VkPipeline pDCmerge{}, pDCleaf{};
+    int dcn = 0;
+    Buf dcD, dcZ, dcRho, dcLam, dcDml, dcZt, dcWsec;   // delta / zeta / [rho,‖z‖²] / roots / (D_i−λ_j) / Löwner / W_sec
+    Buf dcBD, dcWmBuf, dcVp;                           // per-merge back-transform: blockdiag(V1,V2) / Wm / V_parent
+    Buf dcAux, dcIdx;                                  // dc_merge_rank1 scratch: 7·n doubles / 6·n ints
+    VkDescriptorPool dcPool = VK_NULL_HANDLE;
+    VkDescriptorSet dcSetSec{}, dcSetLow{}, dcSetEvec{}, dcSetGemm{}, dcSetMerge{}, dcSetLeaf{};
     // Stage 3 integral pipelines.
     VkDescriptorSetLayout dsl5 = VK_NULL_HANDLE, dsl18 = VK_NULL_HANDLE;
     VkPipelineLayout ploI4 = VK_NULL_HANDLE, ploI5 = VK_NULL_HANDLE, ploI18 = VK_NULL_HANDLE;
@@ -230,6 +252,50 @@ struct XtbVulkanContext::Impl {
     VkDescriptorSet  gSetMP{}, gSetFMP{}, gSetMM{};
     bool mp_ready = false, mp_computed = false;
 
+    // Stage 5 (Part B2): in-SCF GFN2 D4 dE_D4/dq. 9 SSBO + 4B push (uint nat). The element
+    // C6 block (d4C6) is uploaded once per process; Z/nref/sqrt/xyz per geometry (begDispersion);
+    // W/dWq per SCF iteration (dispDedq). Claude Generated.
+    VkDescriptorSetLayout dsl9 = VK_NULL_HANDLE;
+    VkPipelineLayout ploD4 = VK_NULL_HANDLE;
+    VkShaderModule mD4{};
+    VkPipeline pD4{};
+    Buf d4Z, d4Nref, d4Sqrt, d4Xyz, d4C6, d4W, d4dWq, d4Params, d4Dedq;
+    VkDescriptorPool d4Pool = VK_NULL_HANDLE;
+    VkDescriptorSet  d4Set{};
+    int  d4_nat = 0, d4_c6_len = 0;
+    bool d4_c6_uploaded = false, d4_ready = false;
+    // Post-SCF 2-body D4 gradient (d4_grad.comp, 13 SSBO + 4B push): the extra ∂W/∂CN weights
+    // + the gather outputs. Reuses the d4* reference buffers above. Claude Generated.
+    VkDescriptorSetLayout dsl13 = VK_NULL_HANDLE;
+    VkPipelineLayout ploD4G = VK_NULL_HANDLE;
+    VkShaderModule mD4G{};
+    VkPipeline pD4G{};
+    Buf d4dWc, d4Eat, d4Grad, d4Dcn;
+    VkDescriptorPool d4GPool = VK_NULL_HANDLE;
+    VkDescriptorSet  d4GSet{};
+    // D4 ATM 3-body gradient (d4_atm.comp, 8 SSBO + 4B push): q=0 c6/dc6dcn nat² + params;
+    // reuses the resident d4Xyz/d4Sqrt + the d4Eat/d4Grad/d4Dcn outputs. Claude Generated.
+    VkDescriptorSetLayout dsl8 = VK_NULL_HANDLE;
+    VkPipelineLayout ploD4A = VK_NULL_HANDLE;
+    VkShaderModule mD4A{};
+    VkPipeline pD4A{};
+    Buf d4c6, d4dc6, d4AParams;
+    VkDescriptorPool d4APool = VK_NULL_HANDLE;
+    VkDescriptorSet  d4ASet{};
+    // D4 EEQ q-response (Stage 5, Part A): raw-CN / matrix-build / single-workgroup LU solve /
+    // ∂q/∂x response gather. cn=dsl3+4B (reuse ploS); build=dsl4+4B (reuse ploF); solve=dsl2;
+    // resp=dsl7. The O(N) log-compression / RHS / u-weight are done host-side on the mapped
+    // buffers. Claude Generated.
+    VkDescriptorSetLayout dsl2 = VK_NULL_HANDLE, dsl7 = VK_NULL_HANDLE;
+    VkPipelineLayout ploEqSolve = VK_NULL_HANDLE, ploEqResp = VK_NULL_HANDLE;
+    VkShaderModule mEqCn{}, mEqBuild{}, mEqSolve{}, mEqResp{};
+    VkPipeline pEqCn{}, pEqBuild{}, pEqSolve{}, pEqResp{};
+    Buf eqXyz, eqAlp, eqGam, eqRcov, eqCnf, eqCnRaw, eqM, eqMwork, eqRhs, eqQ, eqU, eqGrad;
+    VkDescriptorPool eqPool = VK_NULL_HANDLE;
+    VkDescriptorSet  eqCnSet{}, eqBuildSet{}, eqSolveSet{}, eqRespSet{};
+    int  eq_n = 0;
+    bool eq_valid = false;
+
     explicit Impl() {
         if (!vkc.ok()) return;
         dev   = static_cast<VkDevice>(vkc.device());
@@ -243,7 +309,11 @@ struct XtbVulkanContext::Impl {
         }
         if (const char* em = std::getenv("CURCUMA_VK_EIGEN")) m_use_tridiag = (std::string(em) != "jacobi");
         if (const char* bx = std::getenv("CURCUMA_VK_BACKXF")) m_use_wy = (std::string(bx) != "reflector");
+        if (const char* ts = std::getenv("CURCUMA_VK_TRIDIAG_SOLVE")) m_tridiag_dc = (std::string(ts) == "dc");
+        if (std::getenv("CURCUMA_VK_DC_HOST")) m_dc_host = true;
         if (std::getenv("CURCUMA_VK_TEST_TRIDIAG")) selfTestTridiag();
+        if (std::getenv("CURCUMA_VK_TEST_SECULAR")) selfTestSecular();
+        if (std::getenv("CURCUMA_VK_TEST_TRIDIAGDC")) selfTestTridiagDC();
     }
     ~Impl() { destroy(); }
 
@@ -374,6 +444,51 @@ struct XtbVulkanContext::Impl {
         mMM = mod(multipole_moments_spv, sizeof(multipole_moments_spv));
         pFMP = pipe(mFMP, ploFMP); pMM = pipe(mMM, ploMM);
         if (!pFMP || !pMM) return false;
+        // EIG-3: GPU D&C secular-solve kernels. dc_secular_root needs dsl5 + 4B push (ploDC5);
+        // dc_lowner reuses ploF (dsl4 + 4B), dc_evec_cols reuses ploS (dsl3 + 4B).
+        ploDC5 = makePl(dsl5, 4);
+        if (!ploDC5) return false;
+        mDCsec = mod(dc_secular_root_spv, sizeof(dc_secular_root_spv));
+        mDClow = mod(dc_lowner_spv, sizeof(dc_lowner_spv));
+        mDCevec = mod(dc_evec_cols_spv, sizeof(dc_evec_cols_spv));
+        pDCsec = pipe(mDCsec, ploDC5); pDClow = pipe(mDClow, ploF); pDCevec = pipe(mDCevec, ploS);
+        if (!pDCsec || !pDClow || !pDCevec) return false;
+        // Full-residency: dc_merge_rank1 (10 SSBO + 4B push) + dc_leaf_jacobi (4 SSBO + 4B → ploF).
+        dsl10 = makeDsl(10); ploDC10 = makePl(dsl10, 4);
+        if (!dsl10 || !ploDC10) return false;
+        mDCmerge = mod(dc_merge_rank1_spv, sizeof(dc_merge_rank1_spv));
+        mDCleaf = mod(dc_leaf_jacobi_spv, sizeof(dc_leaf_jacobi_spv));
+        pDCmerge = pipe(mDCmerge, ploDC10); pDCleaf = pipe(mDCleaf, ploF);
+        if (!pDCmerge || !pDCleaf) return false;
+        // Stage 5 (Part B2): in-SCF GFN2 D4 dE_D4/dq (9 SSBO + 4B push: uint nat).
+        dsl9 = makeDsl(9); ploD4 = makePl(dsl9, 4);
+        if (!dsl9 || !ploD4) return false;
+        mD4 = mod(d4_dedq_spv, sizeof(d4_dedq_spv));
+        pD4 = pipe(mD4, ploD4);
+        if (!pD4) return false;
+        // 2-body D4 gradient (13 SSBO + 4B push).
+        dsl13 = makeDsl(13); ploD4G = makePl(dsl13, 4);
+        if (!dsl13 || !ploD4G) return false;
+        mD4G = mod(d4_grad_spv, sizeof(d4_grad_spv));
+        pD4G = pipe(mD4G, ploD4G);
+        if (!pD4G) return false;
+        // ATM 3-body gradient (8 SSBO + 4B push).
+        dsl8 = makeDsl(8); ploD4A = makePl(dsl8, 4);
+        if (!dsl8 || !ploD4A) return false;
+        mD4A = mod(d4_atm_spv, sizeof(d4_atm_spv));
+        pD4A = pipe(mD4A, ploD4A);
+        if (!pD4A) return false;
+        // D4 EEQ q-response: cn (dsl3+4B → ploS), build (dsl4+4B → ploF), solve (dsl2), resp (dsl7).
+        dsl2 = makeDsl(2); dsl7 = makeDsl(7);
+        ploEqSolve = makePl(dsl2, 4); ploEqResp = makePl(dsl7, 4);
+        if (!dsl2 || !dsl7 || !ploEqSolve || !ploEqResp) return false;
+        mEqCn = mod(d4eeq_cn_spv, sizeof(d4eeq_cn_spv));
+        mEqBuild = mod(d4eeq_build_spv, sizeof(d4eeq_build_spv));
+        mEqSolve = mod(d4eeq_solve_spv, sizeof(d4eeq_solve_spv));
+        mEqResp = mod(d4eeq_resp_spv, sizeof(d4eeq_resp_spv));
+        pEqCn = pipe(mEqCn, ploS); pEqBuild = pipe(mEqBuild, ploF);
+        pEqSolve = pipe(mEqSolve, ploEqSolve); pEqResp = pipe(mEqResp, ploEqResp);
+        if (!pEqCn || !pEqBuild || !pEqSolve || !pEqResp) return false;
         VkCommandBufferAllocateInfo cbi{}; cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO; cbi.commandPool = pool; cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbi.commandBufferCount = 1;
         if (vkAllocateCommandBuffers(dev, &cbi, &cmd) != VK_SUCCESS) return false;
         VkFenceCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -579,7 +694,13 @@ struct XtbVulkanContext::Impl {
         diag[n - 1] = A[(n - 1) + (size_t)(n - 1) * n];
         const auto tp1 = pclk::now();
         double* Z = (double*)tZ.ptr;
-        if (!cpuTriEig(n, diag.data(), off.data(), eps_out, Z)) return false;   // tql2 → eps + Z (resident)
+        // Phase 2: tridiagonal eigensolve. EIG-3 routes to the GPU Cuppen divide-and-conquer
+        // (CURCUMA_VK_TRIDIAG_SOLVE=dc) — eps + Z resident in tZ; the host tql2 is the default
+        // and the hard fallback if the D&C fails.
+        if (m_tridiag_dc) {
+            if (!solveTridiagDC(n, diag.data(), off.data(), eps_out, Z))
+                if (!cpuTriEig(n, diag.data(), off.data(), eps_out, Z)) return false;
+        } else if (!cpuTriEig(n, diag.data(), off.data(), eps_out, Z)) return false;
         const auto tp2 = pclk::now();
         // Back-transform C = Q·Z = H_0·…·H_{n-3}·Z.
         int nsub_back = 0; since = 0; open = false;
@@ -745,6 +866,338 @@ struct XtbVulkanContext::Impl {
                     n, (int)ok1, (int)ok2, maxde, maxres, maxortho);
         }
     }
+    // ===== EIG-3: GPU Cuppen divide-and-conquer tridiagonal eigensolver ======
+    // Allocate the per-merge secular-solve buffers, sized to the worst-case merge (nn=n).
+    // Indexed with stride ksz (≤ n) at run time, so one allocation covers every merge node.
+    bool ensureDC(int n) {
+        if (n <= dcn && dcD.buf) return true;
+        if (dcPool) { vkDestroyDescriptorPool(dev, dcPool, nullptr); dcPool = VK_NULL_HANDLE; }
+        for (Buf* b : { &dcD, &dcZ, &dcRho, &dcLam, &dcDml, &dcZt, &dcWsec, &dcBD, &dcWmBuf, &dcVp, &dcAux, &dcIdx }) freeBuf(*b);
+        dcn = n;
+        const VkDeviceSize NN = sizeof(double) * (size_t)n * n;
+        dcD = makeBuf(sizeof(double) * n); dcZ = makeBuf(sizeof(double) * n);
+        dcRho = makeBuf(sizeof(double) * 4);
+        dcLam = makeBuf(sizeof(double) * n); dcZt = makeBuf(sizeof(double) * n);
+        dcDml = makeBuf(NN); dcWsec = makeBuf(NN);
+        dcBD = makeBuf(NN); dcWmBuf = makeBuf(NN); dcVp = makeBuf(NN);
+        dcAux = makeBuf(sizeof(double) * 7 * (size_t)n); dcIdx = makeBuf(sizeof(int) * 6 * (size_t)n);
+        for (Buf* b : { &dcD, &dcZ, &dcRho, &dcLam, &dcDml, &dcZt, &dcWsec, &dcBD, &dcWmBuf, &dcVp, &dcAux, &dcIdx }) if (!b->buf) return false;
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 64 };
+        VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpi.maxSets = 8; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
+        if (vkCreateDescriptorPool(dev, &dpi, nullptr, &dcPool) != VK_SUCCESS) return false;
+        dcSetSec = allocSet(dcPool, dsl5); dcSetLow = allocSet(dcPool, dsl4); dcSetEvec = allocSet(dcPool, dsl3);
+        dcSetGemm = allocSet(dcPool, dsl3); dcSetMerge = allocSet(dcPool, dsl10); dcSetLeaf = allocSet(dcPool, dsl4);
+        bindSet(dcSetSec,  { &dcD, &dcZ, &dcRho, &dcLam, &dcDml });   // dc_secular_root
+        bindSet(dcSetLow,  { &dcD, &dcZ, &dcDml, &dcZt });            // dc_lowner
+        bindSet(dcSetEvec, { &dcZt, &dcDml, &dcWsec });               // dc_evec_cols
+        bindSet(dcSetGemm, { &dcBD, &dcWmBuf, &dcVp });               // gemm_g: V_parent = BD · Wm
+        bindSet(dcSetMerge, { &dcD, &dcZ, &dcRho, &dcLam, &dcZt, &dcDml, &dcWsec, &dcWmBuf, &dcAux, &dcIdx });  // dc_merge_rank1
+        bindSet(dcSetLeaf,  { &dcD, &dcZ, &dcLam, &dcWmBuf });        // dc_leaf_jacobi: diag/off → eval/V
+        return true;
+    }
+
+    // GPU secular solve for diag(D)+rho·z·zᵀ (D strictly ascending, rho>0; the deflated
+    // secular set). On return lam[ksz] holds the ascending roots and Wsec[ksz×ksz]
+    // (column-major, stride ksz) the secular eigenvectors. The device half of secularSolve
+    // (native_eigensolver.cpp): three one-thread-per-index kernels in one submit. The caller
+    // must have sized the buffers via ensureDC(n>=ksz). Claude Generated (EIG-3).
+    bool secularSolveDev(const double* D, const double* z, int ksz, double rho,
+                         double* lam, double* Wsec) {
+        if (ksz <= 0 || dcn < ksz || !dcD.buf) return false;
+        std::memcpy(dcD.ptr, D, sizeof(double) * (size_t)ksz);
+        std::memcpy(dcZ.ptr, z, sizeof(double) * (size_t)ksz);
+        double znorm2 = 0.0; for (int i = 0; i < ksz; ++i) znorm2 += z[i] * z[i];
+        ((double*)dcRho.ptr)[0] = rho; ((double*)dcRho.ptr)[1] = znorm2;
+        if (!beginCmd()) return false;
+        const uint32_t k = (uint32_t)ksz, g = (k + 63u) / 64u;
+        vkCmdPushConstants(cmd, ploDC5, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &k);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploDC5, 0, 1, &dcSetSec, 0, nullptr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pDCsec); vkCmdDispatch(cmd, g, 1, 1); barrier();
+        vkCmdPushConstants(cmd, ploF, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &k);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploF, 0, 1, &dcSetLow, 0, nullptr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pDClow); vkCmdDispatch(cmd, g, 1, 1); barrier();
+        vkCmdPushConstants(cmd, ploS, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &k);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploS, 0, 1, &dcSetEvec, 0, nullptr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pDCevec); vkCmdDispatch(cmd, g, 1, 1); barrier();
+        if (!submit()) return false;
+        std::memcpy(lam, dcLam.ptr, sizeof(double) * (size_t)ksz);
+        std::memcpy(Wsec, dcWsec.ptr, sizeof(double) * (size_t)ksz * ksz);
+        return true;
+    }
+
+    // Per-merge eigenvector back-transform on the device: dcVp = dcBD · dcWmBuf, where dcBD
+    // holds blockdiag(V1,V2) and dcWmBuf the merged eigenvectors Wm (both packed n×n, stride
+    // n). One rectangular FP64 GEMM (gemm_g) — the dominant O(n³) merge cost moved off the
+    // host single core. Claude Generated (EIG-3).
+    bool dcBackTransform(int n) {
+        if (!beginCmd()) return false;
+        const uint32_t un = (uint32_t)n, g = (un + 15u) / 16u;
+        uint32_t pc[8] = { un, un, un, un, un, un, 0u, 0u };   // M,N,K,lda,ldb,ldc,transA=0,mode=0
+        vkCmdPushConstants(cmd, ploGG, VK_SHADER_STAGE_COMPUTE_BIT, 0, 32, pc);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploGG, 0, 1, &dcSetGemm, 0, nullptr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pGG);
+        vkCmdDispatch(cmd, g, g, 1);
+        return submit();
+    }
+
+    // GPU rank1Eigen (full residency): the WHOLE deflation + secular + assembly for one merge
+    // node on the device (dc_merge_rank1, one workgroup). D/z uploaded; Wm written into dcWmBuf
+    // (consumed by the back-transform GEMM); eigenvalues read back from dcAux's evalp slot (slot
+    // order — the parent merge / final sort reorders). Claude Generated (EIG-3, full residency).
+    bool rank1EigenGpu(const double* D, const double* z, int nn, double rho, double* eval) {
+        if (nn <= 0 || dcn < nn) return false;
+        std::memcpy(dcD.ptr, D, sizeof(double) * (size_t)nn);
+        std::memcpy(dcZ.ptr, z, sizeof(double) * (size_t)nn);
+        ((double*)dcRho.ptr)[0] = rho;
+        if (!beginCmd()) return false;
+        uint32_t k = (uint32_t)nn;
+        vkCmdPushConstants(cmd, ploDC10, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &k);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploDC10, 0, 1, &dcSetMerge, 0, nullptr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pDCmerge);
+        vkCmdDispatch(cmd, 1, 1, 1);
+        if (!submit()) return false;
+        std::memcpy(eval, (const double*)dcAux.ptr + 4 * (size_t)nn, sizeof(double) * (size_t)nn);   // EVALP slot
+        return true;
+    }
+
+    // GPU base-case leaf eigensolve (dc_leaf_jacobi, one workgroup). diag[nn]/off[nn-1] →
+    // eval[nn] + V[nn×nn] (column-major). nn ≤ MAXLEAF (=32). Claude Generated (EIG-3, full residency).
+    bool leafSolveGpu(int nn, const double* diag, const double* off, double* eval, double* V) {
+        if (nn <= 0 || dcn < nn) return false;
+        std::memcpy(dcD.ptr, diag, sizeof(double) * (size_t)nn);
+        if (nn > 1) std::memcpy(dcZ.ptr, off, sizeof(double) * (size_t)(nn - 1));
+        if (!beginCmd()) return false;
+        uint32_t k = (uint32_t)nn;
+        vkCmdPushConstants(cmd, ploF, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &k);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ploF, 0, 1, &dcSetLeaf, 0, nullptr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pDCleaf);
+        vkCmdDispatch(cmd, 1, 1, 1);
+        if (!submit()) return false;
+        std::memcpy(eval, dcLam.ptr, sizeof(double) * (size_t)nn);              // eval → dcLam
+        std::memcpy(V, dcWmBuf.ptr, sizeof(double) * (size_t)nn * nn);          // V → dcWmBuf
+        return true;
+    }
+
+    // Eigenproblem of diag(D)+rho·z·zᵀ with deflation, via the GPU secular solve. Returns
+    // eval[n] and W[n×n] (column-major, original input basis), eval(j) ↔ W.col(j). The host
+    // does the rank1Eigen bookkeeping (z-normalize, sign-fold, sort, deflation Givens,
+    // assembly, scatter-back); the heavy secular solve runs on the GPU (secularSolveDev). A
+    // faithful port of rank1Eigen (native_eigensolver.cpp); the deflation moves onto the GPU
+    // in Step C. Claude Generated (EIG-3).
+    bool rank1EigenDev(const double* D_in, const double* z_in, int n, double rho_in,
+                       double* eval, double* W) {
+        std::fill(W, W + (size_t)n * n, 0.0);
+        double zn = 0.0; for (int i = 0; i < n; ++i) zn += z_in[i] * z_in[i];
+        zn = std::sqrt(zn);
+        if (zn < std::numeric_limits<double>::min()) {                       // no coupling
+            for (int i = 0; i < n; ++i) { eval[i] = D_in[i]; W[i + (size_t)i * n] = 1.0; }
+            return true;
+        }
+        std::vector<double> z(n); for (int i = 0; i < n; ++i) z[i] = z_in[i] / zn;
+        double rho = rho_in * zn * zn; const bool flip = (rho < 0.0);
+        std::vector<double> D(n); for (int i = 0; i < n; ++i) D[i] = flip ? -D_in[i] : D_in[i];
+        if (flip) rho = -rho;
+        std::vector<int> perm(n); for (int i = 0; i < n; ++i) perm[i] = i;
+        std::sort(perm.begin(), perm.end(), [&](int a, int b) { return D[a] < D[b]; });
+        std::vector<double> Ds(n), zs(n);
+        for (int i = 0; i < n; ++i) { Ds[i] = D[perm[i]]; zs[i] = z[perm[i]]; }
+        double maxabs = 0.0; for (int i = 0; i < n; ++i) maxabs = std::max(maxabs, std::fabs(Ds[i]));
+        const double tol = 8.0 * std::numeric_limits<double>::epsilon() * (maxabs + std::fabs(rho));
+        // Deflation: Givens (plane jprev,i) for degenerate-D runs (anchor accumulates the
+        // weight), then negligible-weight indices. Mirrors rank1Eigen lines 326-342.
+        struct Giv { int p, i; double c, s; };
+        std::vector<Giv> giv; std::vector<char> deflated(n, 0);
+        int jprev = -1;
+        for (int i = 0; i < n; ++i) {
+            if (jprev < 0) { jprev = i; continue; }
+            if (std::fabs(Ds[i] - Ds[jprev]) <= tol) {
+                const double r = triPythag(zs[jprev], zs[i]);
+                const double c = (r > 0.0) ? zs[jprev] / r : 1.0;
+                const double s = (r > 0.0) ? zs[i] / r : 0.0;
+                giv.push_back({ jprev, i, c, s }); zs[jprev] = r; zs[i] = 0.0; deflated[i] = 1;
+            } else jprev = i;
+        }
+        for (int i = 0; i < n; ++i) if (!deflated[i] && std::fabs(zs[i]) <= tol) deflated[i] = 1;
+        std::vector<int> sec; for (int i = 0; i < n; ++i) if (!deflated[i]) sec.push_back(i);
+        const int ksz = (int)sec.size();
+        std::vector<double> lam_sec(std::max(1, ksz)), Wsec((size_t)std::max(1, ksz) * std::max(1, ksz));
+        if (ksz > 0) {
+            std::vector<double> delta(ksz), zeta(ksz);
+            for (int t = 0; t < ksz; ++t) { delta[t] = Ds[sec[t]]; zeta[t] = zs[sec[t]]; }
+            if (!secularSolveDev(delta.data(), zeta.data(), ksz, rho, lam_sec.data(), Wsec.data())) return false;
+        }
+        // Assemble in the rotated sorted basis: deflated → e_i, secular → W_sec.
+        std::vector<double> Wp((size_t)n * n, 0.0), evalp(n);
+        int slot = 0;
+        for (int i = 0; i < n; ++i) if (deflated[i]) { Wp[i + (size_t)slot * n] = 1.0; evalp[slot] = Ds[i]; ++slot; }
+        for (int t = 0; t < ksz; ++t) {
+            for (int u = 0; u < ksz; ++u) Wp[sec[u] + (size_t)slot * n] = Wsec[u + (size_t)t * ksz];
+            evalp[slot] = lam_sec[t]; ++slot;
+        }
+        // Undo the Givens (apply Gᵀ in reverse) → eigenvectors in the sorted basis.
+        for (int g = (int)giv.size() - 1; g >= 0; --g) {
+            const Giv& G = giv[g];
+            for (int col = 0; col < n; ++col) {
+                const double a = Wp[G.p + (size_t)col * n], b = Wp[G.i + (size_t)col * n];
+                Wp[G.p + (size_t)col * n] = G.c * a - G.s * b;
+                Wp[G.i + (size_t)col * n] = G.s * a + G.c * b;
+            }
+        }
+        // Scatter to original basis (row perm[i] ← sorted row i) and unflip eigenvalues.
+        for (int i = 0; i < n; ++i)
+            for (int col = 0; col < n; ++col) W[perm[i] + (size_t)col * n] = Wp[i + (size_t)col * n];
+        for (int i = 0; i < n; ++i) eval[i] = flip ? -evalp[i] : evalp[i];
+        return true;
+    }
+
+    // Recursive Cuppen D&C on the tridiagonal (diag d, off-diagonal e). Leaves (n≤kCutoff)
+    // via the host tql2 (cpuTriEig); merges via rank1EigenDev (GPU secular). The per-merge
+    // block back-transform evec = blockdiag(V1,V2)·Wm is a host matmul for Step B (moves to
+    // the device gemm_g in Step C). Mirrors tridiagDC (native_eigensolver.cpp). Claude Generated.
+    bool dcRecursive(const std::vector<double>& d, const std::vector<double>& e,
+                     std::vector<double>& eval, std::vector<double>& evec) {
+        const int n = (int)d.size();
+        eval.resize(n); evec.assign((size_t)n * n, 0.0);
+        if (n == 1) { eval[0] = d[0]; evec[0] = 1.0; return true; }
+        constexpr int kCutoff = 32;
+        if (n <= kCutoff)
+            return m_dc_host ? cpuTriEig(n, d.data(), e.data(), eval.data(), evec.data())
+                             : leafSolveGpu(n, d.data(), e.data(), eval.data(), evec.data());
+        const int m = n / 2;
+        const double rho = e[m - 1];                                          // tearing off-diagonal
+        std::vector<double> d1(d.begin(), d.begin() + m);          d1[m - 1] -= rho;
+        std::vector<double> d2(d.begin() + m, d.end());            d2[0]     -= rho;
+        std::vector<double> e1(e.begin(), e.begin() + (m - 1));
+        std::vector<double> e2(e.begin() + m, e.end());
+        std::vector<double> ev1, ev2, V1, V2;
+        if (!dcRecursive(d1, e1, ev1, V1)) return false;
+        if (!dcRecursive(d2, e2, ev2, V2)) return false;
+        // Merge: M = diag([ev1; ev2]) + rho·z·zᵀ, z = [last row of V1; first row of V2].
+        std::vector<double> D(n), z(n);
+        for (int i = 0; i < m; ++i)     D[i] = ev1[i];
+        for (int i = 0; i < n - m; ++i) D[m + i] = ev2[i];
+        for (int i = 0; i < m; ++i)     z[i] = V1[(m - 1) + (size_t)i * m];          // V1 m×m, row m-1
+        for (int i = 0; i < n - m; ++i) z[m + i] = V2[0 + (size_t)i * (n - m)];      // V2 (n-m)², row 0
+        // Merged eigenvectors Wm written straight into the device GEMM input (dcWmBuf, stride n).
+        std::vector<double> lam(n);
+        if (m_dc_host) { if (!rank1EigenDev(D.data(), z.data(), n, rho, lam.data(), (double*)dcWmBuf.ptr)) return false; }
+        else           { if (!rank1EigenGpu(D.data(), z.data(), n, rho, lam.data())) return false; }
+        eval = lam;
+        // evec = blockdiag(V1,V2)·Wm via gemm_g: pack BD on the host, GEMM on the device.
+        double* bd = (double*)dcBD.ptr;
+        std::fill(bd, bd + (size_t)n * n, 0.0);
+        for (int j = 0; j < m; ++j)     for (int i = 0; i < m; ++i)     bd[i + (size_t)j * n]           = V1[i + (size_t)j * m];
+        for (int j = 0; j < n - m; ++j) for (int i = 0; i < n - m; ++i) bd[(m + i) + (size_t)(m + j) * n] = V2[i + (size_t)j * (n - m)];
+        if (!dcBackTransform(n)) return false;
+        std::memcpy(evec.data(), dcVp.ptr, sizeof(double) * (size_t)n * n);
+        return true;
+    }
+
+    // EIG-3 entry: GPU Cuppen D&C standard tridiagonal eigensolve. diag[n]/off[n-1] →
+    // eps_out ascending + Z (column-major n×n tridiagonal eigenvectors, resident in tZ for
+    // the Phase-3 reflector back-transform). Mirrors solveSymmetric's sort tail. Claude Generated.
+    bool solveTridiagDC(int n, const double* diag, const double* off, double* eps_out, double* Z) {
+        if (!ensurePipes() || !ensureDC(n) || n <= 0) return false;
+        if (n == 1) { eps_out[0] = diag[0]; Z[0] = 1.0; return true; }
+        std::vector<double> d(diag, diag + n), e(std::max(0, n - 1));
+        for (int i = 0; i < n - 1; ++i) e[i] = off[i];
+        std::vector<double> ev, V;
+        if (!dcRecursive(d, e, ev, V)) return false;
+        std::vector<int> idx(n); for (int i = 0; i < n; ++i) idx[i] = i;
+        std::sort(idx.begin(), idx.end(), [&](int a, int b) { return ev[a] < ev[b]; });
+        for (int j = 0; j < n; ++j) {
+            eps_out[j] = ev[idx[j]];
+            std::memcpy(Z + (size_t)j * n, V.data() + (size_t)idx[j] * n, sizeof(double) * n);
+        }
+        return true;
+    }
+
+    // Standalone check of the GPU secular solve vs a dense reference eigensolve of
+    // M = diag(D)+rho·z·zᵀ (the validated Jacobi solveSym). Gated by CURCUMA_VK_TEST_SECULAR.
+    void selfTestSecular() {
+        for (int k : { 4, 17, 64, 200, 558 }) {
+            if (!ensurePipes() || !ensureDC(k)) { fprintf(stderr, "[SECULAR-TEST] setup failed k=%d\n", k); continue; }
+            unsigned s = 12345u + (unsigned)k;
+            auto rnd = [&]() { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return (double)s / 4294967296.0; };
+            std::vector<double> D(k), z(k);
+            double acc = 0.0;
+            for (int i = 0; i < k; ++i) { acc += 0.5 + rnd(); D[i] = acc; }            // strictly ascending
+            double zn = 0.0; for (int i = 0; i < k; ++i) { z[i] = rnd() - 0.5; zn += z[i] * z[i]; }
+            zn = std::sqrt(zn); for (int i = 0; i < k; ++i) z[i] /= zn;                  // ‖z‖ = 1
+            const double rho = 0.7 + rnd();
+            std::vector<double> lam(k), W((size_t)k * k);
+            bool ok = secularSolveDev(D.data(), z.data(), k, rho, lam.data(), W.data());
+            std::vector<double> M((size_t)k * k, 0.0), eref(k), Vref((size_t)k * k);
+            for (int j = 0; j < k; ++j) for (int i = 0; i < k; ++i)
+                M[i + (size_t)j * k] = (i == j ? D[i] : 0.0) + rho * z[i] * z[j];
+            bool okr = solveSym(M.data(), k, eref.data(), Vref.data());
+            double maxde = 0.0, maxres = 0.0, maxortho = 0.0;
+            for (int i = 0; i < k && ok && okr; ++i) maxde = std::max(maxde, std::fabs(lam[i] - eref[i]));
+            for (int j = 0; j < k && ok; ++j)
+                for (int i = 0; i < k; ++i) {
+                    double mv = 0.0; for (int t = 0; t < k; ++t) mv += M[i + (size_t)t * k] * W[t + (size_t)j * k];
+                    maxres = std::max(maxres, std::fabs(mv - lam[j] * W[i + (size_t)j * k]));
+                }
+            const int st = std::max(1, k / 8);
+            for (int a = 0; a < k && ok; a += st) for (int b = 0; b < k; b += st) {
+                double dot = 0.0; for (int t = 0; t < k; ++t) dot += W[t + (size_t)a * k] * W[t + (size_t)b * k];
+                maxortho = std::max(maxortho, std::fabs(dot - (a == b ? 1.0 : 0.0)));
+            }
+            fprintf(stderr, "[SECULAR-TEST] k=%4d ok=%d ref=%d  max|de|=%.3e  resid=%.3e  ortho=%.3e\n",
+                    k, (int)ok, (int)okr, maxde, maxres, maxortho);
+        }
+    }
+    // Standalone check of the GPU D&C tridiagonal eigensolve (solveTridiagDC) vs the dense
+    // Jacobi oracle (solveSym) on the full symmetric tridiagonal. Spectral classes:
+    // well-separated, tight diagonal clusters, exact diagonal multiplicities, near-diagonal
+    // (tiny off-diagonal). Gated by CURCUMA_VK_TEST_TRIDIAGDC. Claude Generated (EIG-3).
+    void selfTestTridiagDC() {
+        auto run = [&](const char* tag, int n, const std::vector<double>& d, const std::vector<double>& e) {
+            if (!ensurePipes() || !ensureDC(n)) { fprintf(stderr, "[TRIDIAGDC-TEST] setup failed %s n=%d\n", tag, n); return; }
+            std::vector<double> eps(n), Z((size_t)n * n);
+            bool ok = solveTridiagDC(n, d.data(), e.data(), eps.data(), Z.data());
+            std::vector<double> T((size_t)n * n, 0.0), eref(n), Vref((size_t)n * n);
+            for (int i = 0; i < n; ++i) T[i + (size_t)i * n] = d[i];
+            for (int i = 0; i < n - 1; ++i) { T[(i + 1) + (size_t)i * n] = e[i]; T[i + (size_t)(i + 1) * n] = e[i]; }
+            bool okr = solveSym(T.data(), n, eref.data(), Vref.data());
+            double maxde = 0.0, maxres = 0.0, maxortho = 0.0;
+            for (int i = 0; i < n && ok && okr; ++i) maxde = std::max(maxde, std::fabs(eps[i] - eref[i]));
+            for (int j = 0; j < n && ok; ++j)
+                for (int i = 0; i < n; ++i) {
+                    double tv = 0.0;
+                    if (i > 0)     tv += e[i - 1] * Z[(i - 1) + (size_t)j * n];
+                    tv += d[i] * Z[i + (size_t)j * n];
+                    if (i < n - 1) tv += e[i] * Z[(i + 1) + (size_t)j * n];
+                    maxres = std::max(maxres, std::fabs(tv - eps[j] * Z[i + (size_t)j * n]));
+                }
+            const int st = std::max(1, n / 8);
+            for (int a = 0; a < n && ok; a += st) for (int b = 0; b < n; b += st) {
+                double dot = 0.0; for (int t = 0; t < n; ++t) dot += Z[t + (size_t)a * n] * Z[t + (size_t)b * n];
+                maxortho = std::max(maxortho, std::fabs(dot - (a == b ? 1.0 : 0.0)));
+            }
+            fprintf(stderr, "[TRIDIAGDC-TEST] %-8s n=%4d ok=%d ref=%d  max|de|=%.3e  resid=%.3e  ortho=%.3e\n",
+                    tag, n, (int)ok, (int)okr, maxde, maxres, maxortho);
+        };
+        for (int n : { 17, 33, 64, 128, 558 }) {
+            unsigned s = 777u + (unsigned)n;
+            auto rnd = [&]() { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return (double)s / 4294967296.0 * 2.0 - 1.0; };
+            std::vector<double> d(n), e(std::max(1, n - 1));
+            for (int i = 0; i < n; ++i) d[i] = 5.0 * rnd();
+            for (int i = 0; i < n - 1; ++i) e[i] = 2.0 * rnd();
+            run("wellsep", n, d, e);                                          // generic spectrum
+            for (int i = 0; i < n; ++i) d[i] = (double)(i / 2) + (i & 1) * 1e-11;  // tight diagonal pairs
+            for (int i = 0; i < n - 1; ++i) e[i] = 0.3 + 0.2 * rnd();
+            run("cluster", n, d, e);
+            for (int i = 0; i < n; ++i) d[i] = (double)(i / 3);               // exact diagonal triples
+            for (int i = 0; i < n - 1; ++i) e[i] = 0.5;
+            run("dupdiag", n, d, e);
+            for (int i = 0; i < n; ++i) d[i] = 5.0 * rnd();                   // near-diagonal (tiny off)
+            for (int i = 0; i < n - 1; ++i) e[i] = 1e-9;
+            run("smalloff", n, d, e);
+        }
+    }
+
     bool gemmDev(int n, VkDescriptorSet set, uint32_t transB) {
         if (!beginCmd()) return false; uint32_t pc[2] = { (uint32_t)n, transB }; uint32_t g = (n + 15) / 16; // 16×16 tiled gemm.comp
         vkCmdPushConstants(cmd, ploG, VK_SHADER_STAGE_COMPUTE_BIT, 0, 8, pc);
@@ -1173,19 +1626,256 @@ struct XtbVulkanContext::Impl {
         return true;
     }
 
+    // ----- Stage 5 (Part B2): in-SCF GFN2 D4 dE_D4/dq ----------------------
+    // begDispersion uploads the geometry-fixed reference data once per geometry (the element
+    // C6 block d4C6 only on the first call); dispDedq runs the per-iteration O(N²) contraction.
+    bool begDispersion(int nat, const int* Z, const double* sqrtZr4r2, const int* nref,
+                       const double* xyz, const double* c6_flat, int c6_len,
+                       double s6, double s8, double a1, double a2, double cutoff) {
+        if (!ensurePipes() || nat <= 0 || c6_len <= 0) return false;
+        bool g = true;
+        g &= upB(d4Z, Z, (size_t)nat);          g &= upB(d4Nref, nref, (size_t)nat);
+        g &= upB(d4Sqrt, sqrtZr4r2, (size_t)nat);
+        g &= upB(d4Xyz, xyz, 3 * (size_t)nat);
+        // The reference C6 block is element data (geometry- AND molecule-independent): upload once.
+        if (!d4_c6_uploaded || d4_c6_len < c6_len) {
+            if (d4C6.buf) freeBuf(d4C6);
+            d4C6 = makeBuf(sizeof(double) * (size_t)c6_len);
+            if (!d4C6.buf) return false;
+            std::memcpy(d4C6.ptr, c6_flat, sizeof(double) * (size_t)c6_len);
+            d4_c6_uploaded = true; d4_c6_len = c6_len;
+        }
+        if (nat != d4_nat) {   // atom count changed → drop the nat-sized work buffers
+            if (d4W.buf) freeBuf(d4W);       d4W    = makeBuf(sizeof(double) * (size_t)nat * 7);
+            if (d4dWq.buf) freeBuf(d4dWq);   d4dWq  = makeBuf(sizeof(double) * (size_t)nat * 7);
+            if (d4Dedq.buf) freeBuf(d4Dedq); d4Dedq = makeBuf(sizeof(double) * (size_t)nat);
+            // gradient/ATM-only buffers (lazily reallocated in dispGrad/dispATM on the new nat)
+            if (d4dWc.buf) freeBuf(d4dWc);
+            if (d4Eat.buf) freeBuf(d4Eat);
+            if (d4Grad.buf) freeBuf(d4Grad);
+            if (d4Dcn.buf) freeBuf(d4Dcn);
+            if (d4c6.buf) freeBuf(d4c6);
+            if (d4dc6.buf) freeBuf(d4dc6);
+        }
+        if (!d4Params.buf) d4Params = makeBuf(sizeof(double) * 5);
+        g &= d4W.buf && d4dWq.buf && d4Dedq.buf && d4Params.buf;
+        if (!g) return false;
+        const double params[5] = { s6, s8, a1, a2, cutoff * cutoff };
+        std::memcpy(d4Params.ptr, params, sizeof(params));
+        // (Re)create the descriptor pool + set and bind — the per-geometry buffers above were
+        // recreated (freeBuf+makeBuf), so the set must be rebound. begDispersion is per geometry.
+        if (d4Pool) vkDestroyDescriptorPool(dev, d4Pool, nullptr);
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 9 };
+        VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpi.maxSets = 1; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
+        if (vkCreateDescriptorPool(dev, &dpi, nullptr, &d4Pool) != VK_SUCCESS) return false;
+        d4Set = allocSet(d4Pool, dsl9);
+        bindSet(d4Set, { &d4Z, &d4Nref, &d4Sqrt, &d4Xyz, &d4C6, &d4W, &d4dWq, &d4Params, &d4Dedq });
+        d4_nat = nat;
+        d4_ready = true;
+        return true;
+    }
+    // Per SCF iteration: upload the q-dependent reference weights W/dWq (nat·7), dispatch the
+    // gather kernel, read back dEdq (nat). Mirrors XTB::addDispersionPotential.
+    bool dispDedq(int nat, const double* W, const double* dWq, double* dEdq_out) {
+        if (!d4_ready || nat != d4_nat || !d4W.buf) return false;
+        std::memcpy(d4W.ptr,   W,   sizeof(double) * (size_t)nat * 7);
+        std::memcpy(d4dWq.ptr, dWq, sizeof(double) * (size_t)nat * 7);
+        uint32_t pc = (uint32_t)nat;
+        if (!dispatch1(pD4, ploD4, d4Set, &pc, 4, (nat + 63) / 64, 1)) return false;
+        std::memcpy(dEdq_out, d4Dedq.ptr, sizeof(double) * (size_t)nat);
+        return true;
+    }
+    // Post-SCF: the whole 2-body D4 (energy + gradient + dE/dCN + dE/dq) in one gather,
+    // reusing the reference buffers from begDispersion. The gradient buffers + descriptor set
+    // are (re)created here (begDispersion may have recreated the reference buffers). Once/geometry.
+    bool dispGrad(int nat, const double* W, const double* dWq, const double* dWc,
+                  double* e_atom, double* grad, double* dEdcn, double* dEdq_out) {
+        if (!d4_ready || nat != d4_nat || !d4C6.buf) return false;
+        if (!d4dWc.buf)  d4dWc  = makeBuf(sizeof(double) * (size_t)nat * 7);
+        if (!d4Eat.buf)  d4Eat  = makeBuf(sizeof(double) * (size_t)nat);
+        if (!d4Grad.buf) d4Grad = makeBuf(sizeof(double) * 3 * (size_t)nat);
+        if (!d4Dcn.buf)  d4Dcn  = makeBuf(sizeof(double) * (size_t)nat);
+        if (!d4dWc.buf || !d4Eat.buf || !d4Grad.buf || !d4Dcn.buf) return false;
+        std::memcpy(d4W.ptr,   W,   sizeof(double) * (size_t)nat * 7);
+        std::memcpy(d4dWq.ptr, dWq, sizeof(double) * (size_t)nat * 7);
+        std::memcpy(d4dWc.ptr, dWc, sizeof(double) * (size_t)nat * 7);
+        if (d4GPool) vkDestroyDescriptorPool(dev, d4GPool, nullptr);
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 13 };
+        VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpi.maxSets = 1; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
+        if (vkCreateDescriptorPool(dev, &dpi, nullptr, &d4GPool) != VK_SUCCESS) return false;
+        d4GSet = allocSet(d4GPool, dsl13);
+        bindSet(d4GSet, { &d4Z, &d4Nref, &d4Sqrt, &d4Xyz, &d4C6, &d4W, &d4dWq, &d4dWc, &d4Params,
+                          &d4Eat, &d4Grad, &d4Dcn, &d4Dedq });
+        uint32_t pc = (uint32_t)nat;
+        if (!dispatch1(pD4G, ploD4G, d4GSet, &pc, 4, (nat + 63) / 64, 1)) return false;
+        std::memcpy(e_atom,   d4Eat.ptr,  sizeof(double) * (size_t)nat);
+        std::memcpy(grad,     d4Grad.ptr, sizeof(double) * 3 * (size_t)nat);
+        std::memcpy(dEdcn,    d4Dcn.ptr,  sizeof(double) * (size_t)nat);
+        std::memcpy(dEdq_out, d4Dedq.ptr, sizeof(double) * (size_t)nat);
+        return true;
+    }
+    // Post-SCF: the D4 ATM 3-body (energy + gradient + dE/dCN) in one gather, reusing the
+    // resident d4Xyz/d4Sqrt. c6/dc6dcn are nat² (q=0 reference). Once/geometry.
+    bool dispATM(int nat, const double* c6, const double* dc6dcn,
+                 double s9, double a1, double a2, double alp, double cutoff,
+                 double* e_atom, double* grad, double* dEdcn) {
+        if (!d4_ready || nat != d4_nat || !d4Xyz.buf || !d4Sqrt.buf) return false;
+        const size_t nn = static_cast<size_t>(nat) * nat;
+        if (!d4c6.buf)  d4c6  = makeBuf(sizeof(double) * nn);
+        if (!d4dc6.buf) d4dc6 = makeBuf(sizeof(double) * nn);
+        if (!d4Eat.buf)  d4Eat  = makeBuf(sizeof(double) * (size_t)nat);
+        if (!d4Grad.buf) d4Grad = makeBuf(sizeof(double) * 3 * (size_t)nat);
+        if (!d4Dcn.buf)  d4Dcn  = makeBuf(sizeof(double) * (size_t)nat);
+        if (!d4AParams.buf) d4AParams = makeBuf(sizeof(double) * 5);
+        if (!d4c6.buf || !d4dc6.buf || !d4Eat.buf || !d4Grad.buf || !d4Dcn.buf || !d4AParams.buf) return false;
+        std::memcpy(d4c6.ptr,  c6,     sizeof(double) * nn);
+        std::memcpy(d4dc6.ptr, dc6dcn, sizeof(double) * nn);
+        const double prm[5] = { s9, a1, a2, alp, cutoff * cutoff };
+        std::memcpy(d4AParams.ptr, prm, sizeof(prm));
+        if (d4APool) vkDestroyDescriptorPool(dev, d4APool, nullptr);
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8 };
+        VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpi.maxSets = 1; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
+        if (vkCreateDescriptorPool(dev, &dpi, nullptr, &d4APool) != VK_SUCCESS) return false;
+        d4ASet = allocSet(d4APool, dsl8);
+        bindSet(d4ASet, { &d4Xyz, &d4Sqrt, &d4c6, &d4dc6, &d4AParams, &d4Eat, &d4Grad, &d4Dcn });
+        uint32_t pc = (uint32_t)nat;
+        if (!dispatch1(pD4A, ploD4A, d4ASet, &pc, 4, (nat + 63) / 64, 1)) return false;
+        std::memcpy(e_atom, d4Eat.ptr,  sizeof(double) * (size_t)nat);
+        std::memcpy(grad,   d4Grad.ptr, sizeof(double) * 3 * (size_t)nat);
+        std::memcpy(dEdcn,  d4Dcn.ptr,  sizeof(double) * (size_t)nat);
+        return true;
+    }
+    void freeDispersion() {
+        for (Buf* b : { &d4Z, &d4Nref, &d4Sqrt, &d4Xyz, &d4C6, &d4W, &d4dWq, &d4Params, &d4Dedq,
+                        &d4dWc, &d4Eat, &d4Grad, &d4Dcn, &d4c6, &d4dc6, &d4AParams })
+            freeBuf(*b);
+        if (d4Pool) { vkDestroyDescriptorPool(dev, d4Pool, nullptr); d4Pool = VK_NULL_HANDLE; }
+        if (d4GPool) { vkDestroyDescriptorPool(dev, d4GPool, nullptr); d4GPool = VK_NULL_HANDLE; }
+        if (d4APool) { vkDestroyDescriptorPool(dev, d4APool, nullptr); d4APool = VK_NULL_HANDLE; }
+        d4_nat = d4_c6_len = 0; d4_c6_uploaded = false; d4_ready = false;
+    }
+
+    // ----- D4 EEQ q-response: charges + ∂q/∂x (device dense solve) ---------
+    void freeEeq() {
+        for (Buf* b : { &eqXyz,&eqAlp,&eqGam,&eqRcov,&eqCnf,&eqCnRaw,&eqM,&eqMwork,&eqRhs,&eqQ,&eqU,&eqGrad })
+            freeBuf(*b);
+        if (eqPool) { vkDestroyDescriptorPool(dev, eqPool, nullptr); eqPool = VK_NULL_HANDLE; }
+        eq_n = 0; eq_valid = false;
+    }
+    // CN log-compression (host; GLSL fp64 has no log): cn = log(1+e^CNMAX) − log(1+e^(CNMAX−raw)).
+    static double eqCompressCn(double raw) {
+        const double CNMAX = 4.4;
+        static const double l = std::log(1.0 + std::exp(CNMAX));
+        return l - std::log(1.0 + std::exp(CNMAX - raw));
+    }
+    bool eqEnsure(int N) {
+        if (N == eq_n && eqM.buf) return true;
+        freeEeq();
+        const size_t m = static_cast<size_t>(N) + 1;
+        eqXyz = makeBuf(sizeof(double) * 3 * (size_t)N);
+        eqAlp = makeBuf(sizeof(double) * (size_t)N);
+        eqGam = makeBuf(sizeof(double) * (size_t)N);
+        eqRcov = makeBuf(sizeof(double) * (size_t)N);
+        eqCnf = makeBuf(sizeof(double) * (size_t)N);
+        eqCnRaw = makeBuf(sizeof(double) * (size_t)N);
+        eqM = makeBuf(sizeof(double) * m * m);
+        eqMwork = makeBuf(sizeof(double) * m * m);
+        eqRhs = makeBuf(sizeof(double) * m);
+        eqQ = makeBuf(sizeof(double) * (size_t)N);
+        eqU = makeBuf(sizeof(double) * (size_t)N);
+        eqGrad = makeBuf(sizeof(double) * 3 * (size_t)N);
+        for (Buf* b : { &eqXyz,&eqAlp,&eqGam,&eqRcov,&eqCnf,&eqCnRaw,&eqM,&eqMwork,&eqRhs,&eqQ,&eqU,&eqGrad })
+            if (!b->buf) { freeEeq(); return false; }
+        if (eqPool) vkDestroyDescriptorPool(dev, eqPool, nullptr);
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 + 4 + 2 + 7 };
+        VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpi.maxSets = 4; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
+        if (vkCreateDescriptorPool(dev, &dpi, nullptr, &eqPool) != VK_SUCCESS) { freeEeq(); return false; }
+        eqCnSet = allocSet(eqPool, dsl3);
+        eqBuildSet = allocSet(eqPool, dsl4);
+        eqSolveSet = allocSet(eqPool, dsl2);
+        eqRespSet = allocSet(eqPool, dsl7);
+        bindSet(eqCnSet,    { &eqXyz, &eqRcov, &eqCnRaw });
+        bindSet(eqBuildSet, { &eqXyz, &eqAlp, &eqGam, &eqM });
+        bindSet(eqSolveSet, { &eqMwork, &eqRhs });
+        bindSet(eqRespSet,  { &eqXyz, &eqAlp, &eqRcov, &eqQ, &eqRhs, &eqU, &eqGrad });
+        eq_n = N;
+        return true;
+    }
+    // Build the EEQ system, solve for the charges (device LU), keep M for the adjoint.
+    bool eqCharges(int N, const double* xyz, const double* chi, const double* gam,
+                   const double* alpha_sq, const double* cnf, const double* rcov,
+                   double total_charge, double* q_out) {
+        if (!ensurePipes() || N <= 0 || !eqEnsure(N)) return false;
+        const int m = N + 1;
+        std::memcpy(eqXyz.ptr, xyz, sizeof(double) * 3 * (size_t)N);
+        std::memcpy(eqAlp.ptr, alpha_sq, sizeof(double) * (size_t)N);
+        std::memcpy(eqGam.ptr, gam, sizeof(double) * (size_t)N);
+        std::memcpy(eqRcov.ptr, rcov, sizeof(double) * (size_t)N);
+        std::memcpy(eqCnf.ptr, cnf, sizeof(double) * (size_t)N);
+        uint32_t pcN = (uint32_t)N;
+        if (!dispatch1(pEqCn, ploS, eqCnSet, &pcN, 4, (N + 63) / 64, 1)) return false;
+        const uint32_t gm = (uint32_t)(m + 15) / 16;
+        if (!dispatch1(pEqBuild, ploF, eqBuildSet, &pcN, 4, gm, gm)) return false;
+        const double* raw = (const double*)eqCnRaw.ptr;
+        double* rhs = (double*)eqRhs.ptr;
+        for (int i = 0; i < N; ++i)
+            rhs[i] = -chi[i] + cnf[i] * std::sqrt(std::max(eqCompressCn(raw[i]), 0.0));
+        rhs[N] = total_charge;
+        std::memcpy(eqMwork.ptr, eqM.ptr, sizeof(double) * (size_t)m * m);
+        uint32_t pcm = (uint32_t)m;
+        if (!dispatch1(pEqSolve, ploEqSolve, eqSolveSet, &pcm, 4, 1, 1)) return false;
+        std::memcpy(eqQ.ptr, eqRhs.ptr, sizeof(double) * (size_t)N);
+        std::memcpy(q_out, eqRhs.ptr, sizeof(double) * (size_t)N);
+        eq_valid = true;
+        return true;
+    }
+    // ∂q/∂x response: adjoint solve M·z = [dEdq;0] (reuse M), host u-weight, response gather.
+    bool eqResp(int N, const double* dEdq, double* grad_add) {
+        if (!eq_valid || N != eq_n || !eqM.buf) return false;
+        const int m = N + 1;
+        if (N <= 1) { for (int i = 0; i < 3 * N; ++i) grad_add[i] = 0.0; return true; }
+        double* rhs = (double*)eqRhs.ptr;
+        for (int i = 0; i < N; ++i) rhs[i] = dEdq[i];
+        rhs[N] = 0.0;
+        std::memcpy(eqMwork.ptr, eqM.ptr, sizeof(double) * (size_t)m * m);
+        uint32_t pcm = (uint32_t)m;
+        if (!dispatch1(pEqSolve, ploEqSolve, eqSolveSet, &pcm, 4, 1, 1)) return false;
+        const double CN_EPS = 1.0e-10, CNMAX = 4.4;
+        const double* raw = (const double*)eqCnRaw.ptr;
+        const double* cnf = (const double*)eqCnf.ptr;
+        const double* z = (const double*)eqRhs.ptr;
+        double* u = (double*)eqU.ptr;
+        for (int i = 0; i < N; ++i) {
+            const double cn_i = eqCompressCn(raw[i]);
+            if (cn_i <= CN_EPS || cnf[i] == 0.0) { u[i] = 0.0; continue; }
+            const double g = 1.0 / (1.0 + std::exp(raw[i] - CNMAX));
+            u[i] = z[i] * cnf[i] / (2.0 * std::sqrt(cn_i)) * g;
+        }
+        uint32_t pcN = (uint32_t)N;
+        if (!dispatch1(pEqResp, ploEqResp, eqRespSet, &pcN, 4, (N + 63) / 64, 1)) return false;
+        std::memcpy(grad_add, eqGrad.ptr, sizeof(double) * 3 * (size_t)N);
+        return true;
+    }
+
     void destroy() {
         if (!dev) return;
         if (sPool) vkDestroyDescriptorPool(dev, sPool, nullptr);
         if (rPool) vkDestroyDescriptorPool(dev, rPool, nullptr);
         if (tPool) vkDestroyDescriptorPool(dev, tPool, nullptr);
+        if (dcPool) vkDestroyDescriptorPool(dev, dcPool, nullptr);
+        freeDispersion();
         freeBasis();
-        for (Buf* b : { &sA,&sV,&sP,&sC,&rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs,&rAtil32,&rCtil32,&rCs32,&tA,&tV,&tScal,&tP,&tW,&tZ,&tA32,&tV32,&tScal32,&tP32,&tW32,&tZ32 }) freeBuf(*b);
+        for (Buf* b : { &sA,&sV,&sP,&sC,&rH0,&rS,&rX,&rF,&rT,&rAtil,&rU,&rM,&rCtil,&rC,&rCw,&rP,&rd,&rv,&rPB,&rPairs,&rCs,&rAtil32,&rCtil32,&rCs32,&tA,&tV,&tScal,&tP,&tW,&tZ,&tA32,&tV32,&tScal32,&tP32,&tW32,&tZ32,&dcD,&dcZ,&dcRho,&dcLam,&dcDml,&dcZt,&dcWsec,&dcBD,&dcWmBuf,&dcVp,&dcAux,&dcIdx }) freeBuf(*b);
         if (fence) vkDestroyFence(dev, fence, nullptr);
-        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul,pMP,pFMP,pMM,pAng32,pCol32,pRow32,pVec32,pTMV,pTR2,pTAL,pTHou,pTKW,pTMV32,pTR2_32,pTAL32,pTHou32,pTKW32,pGG,pVF,pBT }) if (p) vkDestroyPipeline(dev, p, nullptr);
-        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul,mMP,mFMP,mMM,mAng32,mCol32,mRow32,mVec32,mTMV,mTR2,mTAL,mTHou,mTKW,mTMV32,mTR2_32,mTAL32,mTHou32,mTKW32,mGG,mVF,mBT }) if (m) vkDestroyShaderModule(dev, m, nullptr);
-        for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB,ploI4,ploI5,ploI18,ploGrad5,ploGradP,ploMP,ploFMP,ploMM,ploT4,ploGG }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
-        for (VkDescriptorSetLayout d : { dsl3,dsl4,dsl5,dsl18,dsl26,dsl12,dsl6 }) if (d) vkDestroyDescriptorSetLayout(dev, d, nullptr);
-        sPool = rPool = tPool = VK_NULL_HANDLE; fence = VK_NULL_HANDLE; pipes_ready = false;
+        for (VkPipeline p : { pAng,pCol,pRow,pVec,pGemm,pScale,pFock,pPB,pCN,pSE,pOV,pGM,pGRep,pGCoul,pGPul,pMP,pFMP,pMM,pAng32,pCol32,pRow32,pVec32,pTMV,pTR2,pTAL,pTHou,pTKW,pTMV32,pTR2_32,pTAL32,pTHou32,pTKW32,pGG,pVF,pBT,pDCsec,pDClow,pDCevec,pDCmerge,pDCleaf,pD4,pD4G,pD4A }) if (p) vkDestroyPipeline(dev, p, nullptr);
+        for (VkShaderModule m : { mAng,mCol,mRow,mVec,mGemm,mScale,mFock,mPB,mCN,mSE,mOV,mGM,mGRep,mGCoul,mGPul,mMP,mFMP,mMM,mAng32,mCol32,mRow32,mVec32,mTMV,mTR2,mTAL,mTHou,mTKW,mTMV32,mTR2_32,mTAL32,mTHou32,mTKW32,mGG,mVF,mBT,mDCsec,mDClow,mDCevec,mDCmerge,mDCleaf,mD4,mD4G,mD4A }) if (m) vkDestroyShaderModule(dev, m, nullptr);
+        for (VkPipelineLayout p : { ploJ,ploG,ploS,ploF,ploPB,ploI4,ploI5,ploI18,ploGrad5,ploGradP,ploMP,ploFMP,ploMM,ploT4,ploGG,ploDC5,ploDC10,ploD4,ploD4G,ploD4A }) if (p) vkDestroyPipelineLayout(dev, p, nullptr);
+        for (VkDescriptorSetLayout d : { dsl3,dsl4,dsl5,dsl18,dsl26,dsl12,dsl6,dsl10,dsl9,dsl13,dsl8 }) if (d) vkDestroyDescriptorSetLayout(dev, d, nullptr);
+        sPool = rPool = tPool = dcPool = VK_NULL_HANDLE; fence = VK_NULL_HANDLE; pipes_ready = false;
     }
 };
 
@@ -1273,6 +1963,55 @@ bool XtbVulkanContext::multipoleMoments(double* dp_at, double* qp_at)
 {
     if (!m_impl || !m_impl->vkc.ok() || !dp_at || !qp_at) return false;
     return m_impl->multipoleMomentsImpl(dp_at, qp_at);
+}
+bool XtbVulkanContext::beginDispersion(int nat, const int* Z, const double* sqrtZr4r2,
+                                       const int* nref, const double* xyz_bohr,
+                                       const double* c6_flat, int c6_flat_len,
+                                       double s6, double s8, double a1, double a2, double cutoff)
+{
+    if (!m_impl || !m_impl->vkc.ok() || !Z || !sqrtZr4r2 || !nref || !xyz_bohr || !c6_flat)
+        return false;
+    return m_impl->begDispersion(nat, Z, sqrtZr4r2, nref, xyz_bohr, c6_flat, c6_flat_len,
+                                 s6, s8, a1, a2, cutoff);
+}
+bool XtbVulkanContext::dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out)
+{
+    if (!m_impl || !m_impl->vkc.ok() || !W || !dWq || !dEdq_out) return false;
+    return m_impl->dispDedq(nat, W, dWq, dEdq_out);
+}
+bool XtbVulkanContext::dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
+                                          double* e_atom_out, double* grad_out,
+                                          double* dEdcn_out, double* dEdq_out)
+{
+    if (!m_impl || !m_impl->vkc.ok() || !W || !dWq || !dWc || !e_atom_out || !grad_out
+        || !dEdcn_out || !dEdq_out) return false;
+    return m_impl->dispGrad(nat, W, dWq, dWc, e_atom_out, grad_out, dEdcn_out, dEdq_out);
+}
+bool XtbVulkanContext::dispersionATM(int nat, const double* c6, const double* dc6dcn,
+                                     double s9, double a1, double a2, double alp, double cutoff,
+                                     double* e_atom_out, double* grad_out, double* dEdcn_out)
+{
+    if (!m_impl || !m_impl->vkc.ok() || !c6 || !dc6dcn || !e_atom_out || !grad_out || !dEdcn_out)
+        return false;
+    return m_impl->dispATM(nat, c6, dc6dcn, s9, a1, a2, alp, cutoff, e_atom_out, grad_out, dEdcn_out);
+}
+
+bool XtbVulkanContext::eeqCharges(int N, const double* xyz_bohr,
+                                  const double* chi, const double* gam, const double* alpha_sq,
+                                  const double* cnf, const double* rcov_bohr,
+                                  double total_charge, double* q_out)
+{
+    if (!m_impl || !m_impl->vkc.ok() || !xyz_bohr || !chi || !gam || !alpha_sq
+        || !cnf || !rcov_bohr || !q_out)
+        return false;
+    return m_impl->eqCharges(N, xyz_bohr, chi, gam, alpha_sq, cnf, rcov_bohr, total_charge, q_out);
+}
+
+bool XtbVulkanContext::eeqChargeResponseGradient(int N, const double* dEdq, double* grad_add)
+{
+    if (!m_impl || !m_impl->vkc.ok() || !dEdq || !grad_add)
+        return false;
+    return m_impl->eqResp(N, dEdq, grad_add);
 }
 
 } // namespace gpu

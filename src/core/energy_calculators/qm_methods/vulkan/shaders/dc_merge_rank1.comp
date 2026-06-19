@@ -1,0 +1,197 @@
+#version 450
+// EIG-3 Cuppen divide-and-conquer, FULL merge eigenproblem on the GPU: diag(D)+rho·z·zᵀ with
+// deflation, secular solve, Löwner weights, eigenvector columns and assembly — the device port
+// of rank1Eigen (native_eigensolver.cpp). ONE WORKGROUP solves ONE merge node: lane 0 runs the
+// sequential bookkeeping (sort, deflation Givens scan, slot assignment); all lanes run the
+// parallel math (norm/maxabs reductions, secular root bisection, Löwner products, eigenvector
+// columns, Givens-undo, perm scatter). Buffers carry ONE node (sized to the worst-case nn).
+//
+// In:  dcD[nn]=D (=[ev1;ev2]), dcZ[nn]=z (=[V1 last row; V2 first row]), dcRho[0]=rho_in.
+// Out: dcWmBuf[nn×nn]=Wm (original child basis), dcAux evalp slot=eval (slot order, flipped).
+// Scratch: dcDml (secular Dml stride nsec, then reused as Wp stride nn), dcWsec, dcLam, dcZt,
+//          dcAux (7 doubles/elem), dcIdx (6 ints/elem). All packed with stride nn (push).
+// Verbatim algorithmic port of rank1Eigen + secularSolve. Claude Generated (EIG-3, full residency).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0)          buffer Db  { double D[]; };       // [nn] D (folded in place)
+layout(std430, binding = 1)          buffer Zb  { double z[]; };       // [nn] z (normalized in place)
+layout(std430, binding = 2) readonly buffer Rb  { double rpar[]; };    // [0]=rho_in
+layout(std430, binding = 3)          buffer Lb  { double lam[]; };     // [nn] secular roots
+layout(std430, binding = 4)          buffer Tb  { double zt[]; };      // [nn] Löwner weights
+layout(std430, binding = 5)          buffer Mb  { double dml[]; };     // [nn²] Dml (nsec) then Wp (nn)
+layout(std430, binding = 6)          buffer Wsb { double Wsec[]; };    // [nn²] secular eigenvectors (nsec)
+layout(std430, binding = 7)          buffer Wmb { double Wm[]; };      // [nn²] output (nn)
+layout(std430, binding = 8)          buffer Axb { double aux[]; };     // 7·nn: Ds,zs,delta,zeta,evalp,givC,givS
+layout(std430, binding = 9)          buffer Ixb { int    ix[]; };      // 6·nn: perm,sec,defl,slot,givP,givI
+layout(push_constant) uniform PC { uint nn; } pc;
+
+const double EPS = 2.2204460492503131e-16lf;
+shared double red[256];
+shared double red2[256];
+shared double s_zn, s_rho, s_tol;
+shared int    s_flip, s_nsec, s_ndefl, s_ngiv, s_nocoup;
+
+double pyth(double a, double b) {
+    double aa = abs(a), ab = abs(b);
+    if (aa > ab) { double r = ab / aa; return aa * sqrt(1.0lf + r * r); }
+    if (ab == 0.0lf) return 0.0lf;
+    double r = aa / ab; return ab * sqrt(1.0lf + r * r);
+}
+
+void main()
+{
+    uint lane = gl_LocalInvocationID.x;
+    uint nn = pc.nn;
+    // aux array a (0..6) element i at aux[a*nn + i]; ix array a (0..5) at ix[a*nn + i].
+    #define DS(i)    aux[0u*nn + (i)]
+    #define ZS(i)    aux[1u*nn + (i)]
+    #define DELTA(i) aux[2u*nn + (i)]
+    #define ZETA(i)  aux[3u*nn + (i)]
+    #define EVALP(i) aux[4u*nn + (i)]
+    #define GIVC(i)  aux[5u*nn + (i)]
+    #define GIVS(i)  aux[6u*nn + (i)]
+    #define PERM(i)  ix[0u*nn + (i)]
+    #define SEC(i)   ix[1u*nn + (i)]
+    #define DEFL(i)  ix[2u*nn + (i)]
+    #define SLOT(i)  ix[3u*nn + (i)]
+    #define GIVP(i)  ix[4u*nn + (i)]
+    #define GIVI(i)  ix[5u*nn + (i)]
+
+    // ---- Phase A: ‖z‖² and max|D| reductions ----
+    double zl = 0.0lf, ml = 0.0lf;
+    for (uint i = lane; i < nn; i += 256u) { double zv = z[i]; zl += zv * zv; ml = max(ml, abs(D[i])); }
+    red[lane] = zl; red2[lane] = ml; barrier();
+    for (uint t = 128u; t > 0u; t >>= 1u) { if (lane < t) { red[lane] += red[lane + t]; red2[lane] = max(red2[lane], red2[lane + t]); } barrier(); }
+    if (lane == 0u) {
+        double zn = sqrt(red[0]);
+        s_nocoup = (zn < 1e-300lf) ? 1 : 0;
+        double rho = rpar[0] * zn * zn;
+        s_flip = (rho < 0.0lf) ? 1 : 0;
+        if (s_flip == 1) rho = -rho;
+        s_zn = zn; s_rho = rho;
+        s_tol = 8.0lf * EPS * (red2[0] + abs(rho));
+    }
+    barrier();
+
+    // ---- no coupling: eval = D, Wm = I ----
+    if (s_nocoup == 1) {
+        for (uint idx = lane; idx < nn * nn; idx += 256u) Wm[idx] = 0.0lf;
+        barrier();
+        for (uint i = lane; i < nn; i += 256u) { Wm[i + i * nn] = 1.0lf; EVALP(i) = D[i]; }
+        return;
+    }
+
+    // ---- Phase B: normalize z, fold sign of D (flip → −D) ----
+    double zn = s_zn; int flip = s_flip;
+    for (uint i = lane; i < nn; i += 256u) { z[i] = z[i] / zn; D[i] = (flip == 1) ? -D[i] : D[i]; }
+    barrier();
+
+    // ---- Phase C: sort D ascending (lane 0) → perm, then reorder Ds/zs ----
+    if (lane == 0u) {
+        for (uint i = 0u; i < nn; ++i) PERM(i) = int(i);
+        for (uint i = 1u; i < nn; ++i) {           // insertion sort on D via perm
+            int key = PERM(i); double dk = D[key]; int j = int(i) - 1;
+            while (j >= 0 && D[PERM(j)] > dk) { PERM(j + 1) = PERM(j); --j; }
+            PERM(j + 1) = key;
+        }
+    }
+    barrier();
+    for (uint i = lane; i < nn; i += 256u) { int p = PERM(i); DS(i) = D[p]; ZS(i) = z[p]; }
+    barrier();
+
+    // ---- Phase D: deflation (lane 0, sequential) + slot/sec/delta/zeta assembly ----
+    if (lane == 0u) {
+        double tol = s_tol;
+        for (uint i = 0u; i < nn; ++i) DEFL(i) = 0;
+        int ngiv = 0, jprev = -1;
+        for (uint i = 0u; i < nn; ++i) {
+            if (jprev < 0) { jprev = int(i); continue; }
+            if (abs(DS(i) - DS(uint(jprev))) <= tol) {       // degenerate diagonal → rotate weight into anchor
+                double r = pyth(ZS(uint(jprev)), ZS(i));
+                double c = (r > 0.0lf) ? ZS(uint(jprev)) / r : 1.0lf;
+                double s = (r > 0.0lf) ? ZS(i) / r : 0.0lf;
+                GIVP(uint(ngiv)) = jprev; GIVI(uint(ngiv)) = int(i); GIVC(uint(ngiv)) = c; GIVS(uint(ngiv)) = s; ++ngiv;
+                ZS(uint(jprev)) = r; ZS(i) = 0.0lf; DEFL(i) = 1;
+            } else jprev = int(i);
+        }
+        for (uint i = 0u; i < nn; ++i) if (DEFL(i) == 0 && abs(ZS(i)) <= tol) DEFL(i) = 1;  // negligible weight
+        // Slot order: deflated (index order) then secular (index order).
+        int ndefl = 0; for (uint i = 0u; i < nn; ++i) if (DEFL(i) == 1) ++ndefl;
+        int ds = 0, ss = ndefl, nsec = 0;
+        for (uint i = 0u; i < nn; ++i) {
+            if (DEFL(i) == 1) { SLOT(i) = ds; EVALP(uint(ds)) = DS(i); ++ds; }
+            else { SLOT(i) = ss; SEC(uint(nsec)) = int(i); DELTA(uint(nsec)) = DS(i); ZETA(uint(nsec)) = ZS(i); ++nsec; ++ss; }
+        }
+        s_nsec = nsec; s_ndefl = ndefl; s_ngiv = ngiv;
+    }
+    barrier();
+    int nsec = s_nsec, ndefl = s_ndefl, ngiv = s_ngiv;
+    double rho = s_rho;
+
+    // ---- Phase E: secular root bisection (lane per root j<nsec) ----
+    double znorm2 = 0.0lf; for (int i = 0; i < nsec; ++i) znorm2 += ZETA(uint(i)) * ZETA(uint(i));
+    for (uint jj = lane; jj < uint(nsec); jj += 256u) {
+        int j = int(jj);
+        double left  = DELTA(uint(j));
+        double right = (j < nsec - 1) ? DELTA(uint(j + 1)) : (DELTA(uint(nsec - 1)) + rho * znorm2);
+        double mid = 0.5lf * (left + right);
+        double fmid = 1.0lf; for (int i = 0; i < nsec; ++i) fmid += rho * ZETA(uint(i)) * ZETA(uint(i)) / (DELTA(uint(i)) - mid);
+        double origin = (j < nsec - 1 && fmid < 0.0lf) ? DELTA(uint(j + 1)) : DELTA(uint(j));
+        double a = left - origin, b = right - origin, tau = 0.5lf * (a + b);
+        for (int it = 0; it < 200; ++it) {
+            double t = 0.5lf * (a + b);
+            if (t <= a || t >= b) break;
+            double h = 1.0lf; for (int i = 0; i < nsec; ++i) h += rho * ZETA(uint(i)) * ZETA(uint(i)) / ((DELTA(uint(i)) - origin) - t);
+            if (h < 0.0lf) a = t; else b = t;
+            tau = t;
+        }
+        lam[j] = origin + tau;
+        for (int i = 0; i < nsec; ++i) dml[i + j * nsec] = (DELTA(uint(i)) - origin) - tau;
+    }
+    barrier();
+
+    // ---- Phase F: Löwner reconstructed weights (lane per i<nsec) ----
+    for (uint ii = lane; ii < uint(nsec); ii += 256u) {
+        int i = int(ii);
+        double prod = -dml[i + i * nsec];
+        for (int j = 0; j < nsec; ++j) if (j != i) prod *= (-dml[i + j * nsec]) / (DELTA(uint(j)) - DELTA(uint(i)));
+        zt[i] = sqrt(max(prod, 0.0lf)) * ((ZETA(uint(i)) >= 0.0lf) ? 1.0lf : -1.0lf);
+    }
+    barrier();
+
+    // ---- Phase G: secular eigenvector columns, normalized (lane per col j<nsec) ----
+    for (uint jj = lane; jj < uint(nsec); jj += 256u) {
+        int j = int(jj); double nrm = 0.0lf;
+        for (int i = 0; i < nsec; ++i) { double w = zt[i] / dml[i + j * nsec]; Wsec[i + j * nsec] = w; nrm += w * w; }
+        nrm = sqrt(nrm);
+        if (nrm > 0.0lf) for (int i = 0; i < nsec; ++i) Wsec[i + j * nsec] /= nrm;
+    }
+    barrier();
+
+    // ---- Phase H: assemble Wp (= reuse dml, stride nn), Givens-undo, perm-scatter → Wm ----
+    for (uint idx = lane; idx < nn * nn; idx += 256u) dml[idx] = 0.0lf;   // Wp = 0
+    barrier();
+    for (uint i = lane; i < nn; i += 256u) if (DEFL(i) == 1) dml[i + uint(SLOT(i)) * nn] = 1.0lf;   // deflated → e_i
+    for (uint idx = lane; idx < uint(nsec) * uint(nsec); idx += 256u) {                              // secular block
+        int u = int(idx % uint(nsec)), t = int(idx / uint(nsec));
+        dml[uint(SEC(uint(u))) + uint(ndefl + t) * nn] = Wsec[u + t * nsec];
+    }
+    for (uint tt = lane; tt < uint(nsec); tt += 256u) EVALP(uint(ndefl) + tt) = lam[int(tt)];
+    barrier();
+    // Undo Givens (reverse order); each rotates rows (p,i) over all columns.
+    for (int g = ngiv - 1; g >= 0; --g) {
+        int p = GIVP(uint(g)), iq = GIVI(uint(g)); double c = GIVC(uint(g)), s = GIVS(uint(g));
+        for (uint col = lane; col < nn; col += 256u) {
+            double a = dml[uint(p) + col * nn], b = dml[uint(iq) + col * nn];
+            dml[uint(p) + col * nn] = c * a - s * b;
+            dml[uint(iq) + col * nn] = s * a + c * b;
+        }
+        barrier();
+    }
+    // Scatter to original basis: Wm.row(perm[i]) = Wp.row(i).
+    for (uint idx = lane; idx < nn * nn; idx += 256u) {
+        uint i = idx % nn, col = idx / nn;
+        Wm[uint(PERM(i)) + col * nn] = dml[i + col * nn];
+    }
+    // Unflip eigenvalues.
+    if (flip == 1) for (uint i = lane; i < nn; i += 256u) EVALP(i) = -EVALP(i);
+}
