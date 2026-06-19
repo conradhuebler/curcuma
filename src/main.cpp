@@ -1696,12 +1696,27 @@ int executeOptimization(const json& controller, int argc, char** argv) {
     json opt_config = MergeJson(opt_defaults, controller.contains("opt") ? controller["opt"] : json{});
 
     try {
-        auto molecule = std::make_unique<Molecule>(argv[2]);
-        // Apply charge/spin from CLI controller to the molecule before optimization
-        if (controller.contains("charge"))
-            molecule->setCharge(controller["charge"].get<int>());
-        if (controller.contains("spin"))
-            molecule->setSpin(controller["spin"].get<int>());
+        // Claude Generated (Jun 2026): Load all structures from input file. Multi-XYZ
+        // trajectories are now optimised frame-by-frame instead of only the first frame.
+        FileIterator file(argv[2]);
+        std::vector<Molecule> molecules;
+        while (!file.AtEnd()) {
+            Molecule mol = file.Next();
+            if (mol.AtomCount() == 0)
+                continue;
+            // Apply charge/spin from CLI controller to every frame
+            if (controller.contains("charge"))
+                mol.setCharge(controller["charge"].get<int>());
+            if (controller.contains("spin"))
+                mol.setSpin(controller["spin"].get<int>());
+            molecules.push_back(mol);
+        }
+
+        if (molecules.empty()) {
+            CurcumaLogger::error("No valid molecules loaded from input file");
+            return 1;
+        }
+
         std::string method = controller.value("method", "gfnff");
         json energy_controller = controller;
         energy_controller["geometry_file"] = std::string(argv[2]);
@@ -1725,27 +1740,63 @@ int executeOptimization(const json& controller, int argc, char** argv) {
             energy_calc.setWarmStart(true);
 
         Optimization::OptimizerType opt_type = Optimization::parseOptimizerType(optimizer_method);
-        auto result = Optimization::OptimizationDispatcher::optimizeStructure(
-            molecule.get(), opt_type, &energy_calc, opt_config);
+        std::string output_file = BMTUtils::outputPath(bmt_dir, basename + ".opt.xyz");
 
-        if (result.success) {
-            std::string output_file = BMTUtils::outputPath(bmt_dir, basename + ".opt.xyz");
-            molecule->writeXYZFile(output_file);
-            CurcumaLogger::success_fmt("Optimized structure written to: {}", output_file);
-            // Process -bak files
-            std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
-            BMTUtils::processBakFiles(bmt_dir, bak_files);
-            return 0;
+        if (molecules.size() == 1) {
+            // Single-structure path: preserve exact existing behavior
+            auto result = Optimization::OptimizationDispatcher::optimizeStructure(
+                &molecules[0], opt_type, &energy_calc, opt_config);
+
+            if (result.success) {
+                molecules[0].writeXYZFile(output_file);
+                CurcumaLogger::success_fmt("Optimized structure written to: {}", output_file);
+                // Process -bak files
+                std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
+                BMTUtils::processBakFiles(bmt_dir, bak_files);
+                return 0;
+            } else {
+                CurcumaLogger::warn_fmt("{} optimizer failed: {}", optimizer_method, result.error_message);
+            }
         } else {
-            CurcumaLogger::warn_fmt("{} optimizer failed: {}", optimizer_method, result.error_message);
-            CurcumaLogger::info("Falling back to legacy CurcumaOpt optimizer");
+            // Multi-structure path: optimise each frame and collect final geometries.
+            // Non-converged optimisations still produce a final geometry and are written
+            // out, matching the legacy CurcumaOpt behaviour for multi-XYZ inputs.
+            CurcumaLogger::info_fmt("Optimising {} structures from input file", molecules.size());
+            auto results = Optimization::OptimizationDispatcher::optimizeBatch(
+                molecules, opt_type, &energy_calc, opt_config);
+
+            int written = 0;
+            int failed = 0;
+            { std::ofstream clear_file(output_file); } // truncate output file once
+            for (size_t i = 0; i < results.size(); ++i) {
+                if (results[i].final_molecule.AtomCount() > 0) {
+                    results[i].final_molecule.appendXYZFile(output_file);
+                    ++written;
+                    if (!results[i].success) {
+                        CurcumaLogger::info_fmt("Structure {} written (not converged): {}",
+                            i + 1, results[i].error_message);
+                    }
+                } else {
+                    CurcumaLogger::warn_fmt("Structure {} optimisation failed: {}",
+                        i + 1, results[i].error_message);
+                    ++failed;
+                }
+            }
+
+            if (written > 0) {
+                CurcumaLogger::success_fmt("{} optimized structures written to: {}", written, output_file);
+                // Process -bak files
+                std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
+                BMTUtils::processBakFiles(bmt_dir, bak_files);
+                return 0;
+            } else {
+                CurcumaLogger::error("All structure optimisations failed");
+            }
         }
     } catch (const std::exception& e) {
         CurcumaLogger::warn_fmt("{} optimizer threw exception: {}", optimizer_method, e.what());
-        CurcumaLogger::info("Falling back to legacy CurcumaOpt optimizer");
     }
 
-    // No legacy fallback — all optimization goes through OptimizerFactory
     return 1;
 }
 

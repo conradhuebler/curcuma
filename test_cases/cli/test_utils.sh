@@ -209,6 +209,14 @@ extract_energy_from_xyz() {
     grep -oP 'Energy\s*=\s*\K[-0-9.]+' "$xyzfile" | head -1
 }
 
+# Helper: Extract the n-th energy value from a multi-frame XYZ file
+extract_nth_energy_from_xyz() {
+    local xyzfile=$1
+    local n=${2:-1}
+    # Curcuma format: "** Energy =   0.000000 Eh **" in each frame's comment line (line 2)
+    grep -oP 'Energy\s*=\s*\K[-0-9.]+' "$xyzfile" | sed -n "${n}p"
+}
+
 # Helper: Extract RMSD value from stdout
 extract_rmsd_from_output() {
     local file=$1

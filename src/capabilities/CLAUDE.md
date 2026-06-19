@@ -35,6 +35,7 @@ capabilities/
 > **All non-external optimizers below are 🤖 AI-generated. None are ✅ TESTED or ✅ APPROVED.**
 
 - **CurcumaOpt**: Geometry optimization dispatcher — legacy system, human-tested
+- **`-opt` multi-XYZ** (`main.cpp`): ⚙️ Machine-tested — all frames are now optimised and written to `.opt.xyz` (previously only the first frame was processed)
 - **LBFGSpp**: Wrapper around external LBFGSpp library — external code, wrapper is AI-generated
 - **ANCOPT** (`ancopt_optimizer.cpp/h`): 🤖 AI-generated port of XTB's AncOpt (Grimme)
   - ⚙️ Machine-tested: CH4/UFF converges (4 steps); Tier L path runs on 1410-atom polymer+UFF
