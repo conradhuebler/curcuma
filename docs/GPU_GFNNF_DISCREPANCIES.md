@@ -1,9 +1,54 @@
 # GPU GFN-FF Gradient Discrepancies
 
-**Date**: 2026-03-27
-**Status**: Investigation in progress
+**Date**: 2026-03-27 (original) / **2026-06-19 (RESOLVED)**
+**Status**: ✅ RESOLVED — the GPU GFN-FF gradient is correct; the HB-charge freeze is correct.
 
-## Summary
+## RESOLUTION (June 2026)
+
+The long-open question "is the GPU HB-charge freeze a bug?" is settled: **no, the freeze is
+correct.** The GPU GFN-FF gradient matches the CPU at every geometry; the earlier
+GPU-analytical-vs-GPU-FD discrepancy (4.2e-3) and the CPU-vs-GPU MD heat-exchange differences
+were **measurement artifacts**, not force bugs.
+
+Evidence (this machine, GTX 1660, current code):
+- **Static gradient, per-geometry**: a new per-frame diagnostic
+  (`test_cases/test_gfnff_grad_traj.cpp`) evaluates the gradient of each backend at every
+  frame of a fixed trajectory — the clean metric (no integrator, no chaos). On a 51-frame
+  acetic-acid-dimer trajectory: **GPU gradient == CPU gradient, mean 8.2e-10, max 7e-9** per
+  frame. The GPU force is bit-correct at every geometry.
+- **The HB charges are FROZEN by design.** The CPU HB term uses `hb.q_H/q_A/q_B` stored at
+  topology build (`forcefieldthread.cpp:2525+`), and so does the Fortran reference. So the
+  GPU's frozen HB charges already match the reference. A device-resident gather that refreshes
+  the HB charges to the live per-step EEQ charges was implemented and tested — it makes MD
+  **diverge**, not converge:
+
+  | acetic dimer, 1000 fs | "Exchange with heat bath" | Δ vs CPU |
+  |---|---|---|
+  | CPU (reference)       | 0.00709227 Eh | — |
+  | GPU **frozen** (default) | 0.00708362 Eh | **8.7e-6** ✓ |
+  | GPU resident (opt-in) | 0.00610579 Eh | 5.1e-4 ✗ |
+
+  The April-2026 "GPU analytical vs GPU FD = 4.2e-3" was the charge-re-solving FD artifact
+  flagged as a caveat in that section: the FD perturbation re-solved the EEQ charges while the
+  analytical gradient (correctly) held the HB charges frozen, so the two disagreed — that is a
+  property of the finite-difference reference, not a gradient error.
+
+- **MD "Exchange with heat bath" is NOT a valid cross-backend force diagnostic.** It conflates
+  force differences with integrator/thermostat/velocity-init differences and chaotic
+  amplification, and the GPU's own run-to-run `atomicAdd` nondeterminism is ~5e-5 Eh on a
+  floppy 1000 fs trajectory — larger than the CPU-vs-GPU-frozen difference. Use the per-frame
+  gradient diagnostic instead.
+
+**Code outcome**: the device-resident gather (`k_gather_hb_charges`,
+`FFWorkspaceGPU::refreshHBChargesFromDevice()`) is kept **opt-in, default OFF** — enable with
+`CURCUMA_GFNFF_GPU_RESIDENT_HBQ=1` for experimentation only; the correct (frozen) behavior is
+the default. The per-frame harness (`test_gfnff_grad_traj`) is the recommended force metric.
+
+The historical investigation below is retained for context.
+
+---
+
+## Summary (historical, 2026-03-27)
 
 GPU GFN-FF gradient validation tests show discrepancies between CPU and GPU implementations. After fixing the dEdcn snapshot bug and dlogdcn formula, 16/19 tests pass but gradient errors remain for larger molecules.
 

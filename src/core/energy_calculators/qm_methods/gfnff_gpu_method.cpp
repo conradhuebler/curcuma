@@ -971,6 +971,13 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // === Finish: Coulomb + postprocess + download ===
     // Note: setEEQCharges / setEEQDeviceCharges already called above per path.
     m_last_energy = m_gpu_workspace->launchChargeDependentAndFinish(gradient);
+
+    // Claude Generated (June 2026): OPT-IN device-resident HB charges (default OFF).
+    // The reference (Fortran) and CPU both freeze the H-bond charges at topology build,
+    // so the GPU's frozen HB charges already match; refreshing to live charges makes MD
+    // diverge (verified). No-op unless CURCUMA_GFNFF_GPU_RESIDENT_HBQ=1. See
+    // FFWorkspaceGPU::refreshHBChargesFromDevice().
+    m_gpu_workspace->refreshHBChargesFromDevice();
     auto t4 = std::chrono::high_resolution_clock::now();
 
     ++m_calc_count;

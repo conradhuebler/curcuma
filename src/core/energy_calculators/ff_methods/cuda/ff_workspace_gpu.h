@@ -414,6 +414,14 @@ public:
      */
     double launchChargeDependentAndFinish(bool gradient);
 
+    /// Claude Generated (June 2026): OPT-IN device-resident HB charges (default OFF —
+    /// enable with CURCUMA_GFNFF_GPU_RESIDENT_HBQ=1). Gathers the live per-atom EEQ charges
+    /// into the HB SoA q arrays for the NEXT step's HB term. Default-off because the
+    /// reference + CPU freeze the HB charges at topology build, so the GPU's frozen HB
+    /// charges already match and live charges make MD diverge (verified). Call post-step
+    /// (impl.stream idle, d_charges final) → no graph/stream hazard.
+    void refreshHBChargesFromDevice();
+
     // =========================================================================
     // Results
     // =========================================================================
