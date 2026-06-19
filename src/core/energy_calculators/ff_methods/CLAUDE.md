@@ -257,8 +257,11 @@ ctest -R test_gfnff_gradients --verbose
 - [ ] **fijk refinement** (Phase 2b) - angl2 topology logic for neighbor type corrections
 
 **Torsion Corrections**:
-- [ ] **Ring torsions** - Different phase angles and barriers for cyclic vs acyclic
-- [ ] **Conjugation detection** - Increase barriers for π-conjugated systems
+- [x] **Ring torsions** ✅ (Jun 20, 2026, commit 7bfa859) - aromatic/conjugated ring torsions
+  were getting the acyclic pi-sp3 rule (n=3/φ0=180, f1=0.5). Fixed by gating the pi-sp3
+  periodicity override (`gfnff_torsions.cpp:~1174/1186`) AND the pi-sp3 barrier `f1=0.5`
+  (`:~785`) on `!in_ring` (both are acyclic-only in Fortran, `else` of `if(lring)`). S30L
+  host A torsion now bit-identical to Fortran; validation set 18/18, no regression.
 - [ ] **Hyperconjugation** - Subtle barrier modulation (documented but not implemented)
 - [ ] **Extra torsion calibration** - Current ff=-2.00 (O) factor overcompensates
 
