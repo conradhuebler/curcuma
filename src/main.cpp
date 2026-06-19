@@ -51,6 +51,7 @@
 
 #include "src/tools/general.h"
 #include "src/tools/info.h"
+#include "src/core/units.h"
 
 // Claude Generated: Parameter registry system
 #include "generated/parameter_registry.h"
@@ -58,6 +59,7 @@
 
 #include "src/capabilities/optimiser/OptimiseDipoleScaling.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -698,6 +700,7 @@ json CLI2Json(int argc, char** argv)
         {"md", "simplemd"},
         {"opt", "opt"},
         {"sp", "opt"},  // single point also uses opt module
+        {"interaction", "interaction"},
         {"confscan", "confscan"},
         {"rmsd", "rmsd"},
         {"analysis", "analysis"},
@@ -1967,6 +1970,235 @@ int executePolymerBuild(const json& controller, int argc, char** argv)
     return 0;
 }
 
+// ============================================================================
+// Interaction (association) energy capability: -interaction  — Claude Generated 2026
+// ----------------------------------------------------------------------------
+// dE_int = E(AB) - E(A) - E(B), computed with any curcuma energy method.
+// Built for the S30L host-guest benchmark (Sure & Grimme, J. Chem. Theory
+// Comput. 2015, 11, 3785; doi:10.1021/acs.jctc.5b00296): each complex is a
+// directory with A/ B/ AB/ subfolders holding Turbomole `coord` files (atomic
+// units, read via Coord2Mol -> Bohr converted to Angstrom) and an optional
+// `.CHRG` integer-charge file.
+//
+//   curcuma -interaction <s30l_root> [-reference reference_s30l]  batch dirs 1..N
+//   curcuma -interaction <complex_dir>                            single A/B/AB dir
+//   curcuma -interaction AB.xyz -fragA A.xyz -fragB B.xyz         explicit fragments
+//   curcuma -interaction AB.xyz                                   auto-split 2 fragments
+// ============================================================================
+namespace InteractionEnergy {
+
+// Read an integer charge from <dir>/.CHRG (S30L convention, e.g. "+2"); 0 if absent.
+inline int readCharge(const std::string& dir)
+{
+    std::filesystem::path p = std::filesystem::path(dir) / ".CHRG";
+    if (!std::filesystem::exists(p))
+        return 0;
+    std::ifstream in(p.string());
+    int q = 0;
+    in >> q;
+    return q;
+}
+
+// Locate the coordinate file in a fragment directory: prefer Turbomole `coord`,
+// else the first .xyz found.
+inline std::string structureFile(const std::string& dir)
+{
+    std::filesystem::path coord = std::filesystem::path(dir) / "coord";
+    if (std::filesystem::exists(coord))
+        return coord.string();
+    for (const auto& e : std::filesystem::directory_iterator(dir)) {
+        const std::string s = e.path().string();
+        if (s.find(".xyz") != std::string::npos)
+            return s;
+    }
+    return "";
+}
+
+// Single-point energy [Hartree] for one structure file at a given total charge.
+inline double pointEnergy(const std::string& method, const json& controller,
+    const std::string& file, int charge)
+{
+    Molecule mol(file);
+    mol.setCharge(charge);
+    EnergyCalculator calc(method, controller);
+    calc.setMolecule(mol.getMolInfo());
+    return calc.CalculateEnergy(false);
+}
+
+// dE_int [Hartree] from three fragment directories (each: coord/xyz + optional .CHRG).
+inline bool fromDirs(const std::string& method, const json& controller,
+    const std::string& aDir, const std::string& bDir, const std::string& abDir, double& dE)
+{
+    const std::string fa = structureFile(aDir), fb = structureFile(bDir), fab = structureFile(abDir);
+    if (fa.empty() || fb.empty() || fab.empty())
+        return false;
+    const double eA = pointEnergy(method, controller, fa, readCharge(aDir));
+    const double eB = pointEnergy(method, controller, fb, readCharge(bDir));
+    const double eAB = pointEnergy(method, controller, fab, readCharge(abDir));
+    dE = eAB - eA - eB;
+    return true;
+}
+
+inline bool hasABDirs(const std::string& d)
+{
+    namespace fs = std::filesystem;
+    return fs::is_directory(fs::path(d) / "A") && fs::is_directory(fs::path(d) / "B")
+        && fs::is_directory(fs::path(d) / "AB");
+}
+
+inline bool isNumeric(const std::string& s)
+{
+    return !s.empty() && s.find_first_not_of("0123456789") == std::string::npos;
+}
+
+} // namespace InteractionEnergy
+
+int executeInteraction(const json& controller, int argc, char** argv)
+{
+    using namespace InteractionEnergy;
+    namespace fs = std::filesystem;
+
+    if (argc < 3) {
+        std::cerr << "Interaction (association) energy:  dE = E(AB) - E(A) - E(B)\n"
+                  << "Usage:\n"
+                  << "  curcuma -interaction <s30l_root> [-reference reference_s30l]   batch over dirs 1..N\n"
+                  << "  curcuma -interaction <complex_dir>                             single A/B/AB directory\n"
+                  << "  curcuma -interaction AB.xyz -fragA A.xyz -fragB B.xyz          explicit fragment files\n"
+                  << "  curcuma -interaction AB.xyz                                    auto-split into 2 fragments\n";
+        return 1;
+    }
+
+    const std::string method = controller.value("method", "gfnff");
+    const double H2KCAL = CurcumaUnit::Energy::HARTREE_TO_KCALMOL;
+
+    std::string fragA, fragB, reference;
+    for (int i = 3; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "-fragA" && i + 1 < argc)
+            fragA = argv[++i];
+        else if (a == "-fragB" && i + 1 < argc)
+            fragB = argv[++i];
+        else if (a == "-reference" && i + 1 < argc)
+            reference = argv[++i];
+    }
+
+    const std::string input = argv[2];
+
+    // ---- Mode A: explicit fragment files (AB given as argv[2]) ----
+    if (!fragA.empty() && !fragB.empty()) {
+        const double eAB = pointEnergy(method, controller, input, 0);
+        const double eA = pointEnergy(method, controller, fragA, 0);
+        const double eB = pointEnergy(method, controller, fragB, 0);
+        const double dE = eAB - eA - eB;
+        fmt::print("\nMethod: {}\n", method);
+        fmt::print("E(AB) = {:>16.8f} Eh\nE(A)  = {:>16.8f} Eh\nE(B)  = {:>16.8f} Eh\n", eAB, eA, eB);
+        fmt::print("dE_int = {:.8f} Eh = {:.4f} kcal/mol\n", dE, dE * H2KCAL);
+        return 0;
+    }
+
+    if (fs::is_directory(input)) {
+        // ---- Mode B: single complex directory (has A/ B/ AB/) ----
+        if (hasABDirs(input)) {
+            double dE = 0.0;
+            if (!fromDirs(method, controller, (fs::path(input) / "A").string(),
+                    (fs::path(input) / "B").string(), (fs::path(input) / "AB").string(), dE)) {
+                std::cerr << "Could not read A/B/AB structures in " << input << std::endl;
+                return 1;
+            }
+            fmt::print("\nMethod: {}\nComplex: {}\n", method, input);
+            fmt::print("dE_int = {:.8f} Eh = {:.4f} kcal/mol\n", dE, dE * H2KCAL);
+            return 0;
+        }
+
+        // ---- Mode C: batch root (numbered subdirs, each with A/B/AB) ----
+        if (reference.empty()) {
+            fs::path defref = fs::path(input) / "reference_s30l";
+            if (fs::exists(defref))
+                reference = defref.string();
+        }
+        std::vector<double> refvals;
+        if (!reference.empty()) {
+            std::ifstream rin(reference);
+            double v;
+            while (rin >> v)
+                refvals.push_back(v);
+        }
+
+        std::vector<std::pair<int, std::string>> complexes;
+        for (const auto& e : fs::directory_iterator(input)) {
+            if (!e.is_directory())
+                continue;
+            const std::string name = e.path().filename().string();
+            if (!isNumeric(name) || !hasABDirs(e.path().string()))
+                continue;
+            complexes.emplace_back(std::stoi(name), e.path().string());
+        }
+        std::sort(complexes.begin(), complexes.end());
+        if (complexes.empty()) {
+            std::cerr << "No numbered A/B/AB complex directories found under " << input << std::endl;
+            return 1;
+        }
+
+        CurcumaLogger::set_verbosity(0); // quiet per-structure setup; print only the table
+        fmt::print("\nS30L-style interaction energies   method = {}\n", method);
+        fmt::print("{:>4}  {:>14}  {:>14}  {:>12}\n", "idx", "dE [kcal/mol]", "ref [kcal/mol]", "error");
+        fmt::print("------------------------------------------------------------\n");
+
+        double sum_abs = 0.0, sum_sq = 0.0;
+        int n_ref = 0;
+        for (const auto& [idx, dir] : complexes) {
+            double dE = 0.0;
+            if (!fromDirs(method, controller, (fs::path(dir) / "A").string(),
+                    (fs::path(dir) / "B").string(), (fs::path(dir) / "AB").string(), dE)) {
+                fmt::print("{:>4}  read failed\n", idx);
+                continue;
+            }
+            const double dE_kcal = dE * H2KCAL;
+            if (idx - 1 < static_cast<int>(refvals.size())) {
+                const double ref = refvals[idx - 1];
+                const double err = dE_kcal - ref;
+                sum_abs += std::abs(err);
+                sum_sq += err * err;
+                ++n_ref;
+                fmt::print("{:>4}  {:>14.4f}  {:>14.4f}  {:>12.4f}\n", idx, dE_kcal, ref, err);
+            } else {
+                fmt::print("{:>4}  {:>14.4f}  {:>14}  {:>12}\n", idx, dE_kcal, "-", "-");
+            }
+        }
+        if (n_ref > 0) {
+            fmt::print("------------------------------------------------------------\n");
+            fmt::print("MAD  = {:.4f} kcal/mol   RMSD = {:.4f} kcal/mol   (N={})\n",
+                sum_abs / n_ref, std::sqrt(sum_sq / n_ref), n_ref);
+        }
+        return 0;
+    }
+
+    // ---- Mode D: single AB file, auto-split into exactly two fragments ----
+    Molecule ab(input);
+    auto frags = ab.GetFragments();
+    if (frags.size() != 2) {
+        std::cerr << "Auto-split needs exactly 2 fragments, found " << frags.size()
+                  << ". Use -fragA/-fragB to specify them explicitly." << std::endl;
+        return 1;
+    }
+    Molecule a = ab.getFragmentMolecule(frags[0]);
+    Molecule b = ab.getFragmentMolecule(frags[1]);
+    EnergyCalculator cAB(method, controller);
+    cAB.setMolecule(ab.getMolInfo());
+    EnergyCalculator cA(method, controller);
+    cA.setMolecule(a.getMolInfo());
+    EnergyCalculator cB(method, controller);
+    cB.setMolecule(b.getMolInfo());
+    const double eAB = cAB.CalculateEnergy(false);
+    const double eA = cA.CalculateEnergy(false);
+    const double eB = cB.CalculateEnergy(false);
+    const double dE = eAB - eA - eB;
+    fmt::print("\nMethod: {}\nFragments: {} + {} atoms\n", method, static_cast<int>(frags[0].size()),
+        static_cast<int>(frags[1].size()));
+    fmt::print("dE_int = {:.8f} Eh = {:.4f} kcal/mol\n", dE, dE * H2KCAL);
+    return 0;
+}
+
 // Capability registry - Claude Generated
 const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
     {"analysis", {"Unified molecular analysis (all formats, all properties)", "analysis",
@@ -1975,6 +2207,8 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
               {"XYZ", "VTF", "MOL2", "SDF"}, executeRMSD}},
     {"sp", {"Single point energy calculation", "calculation",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSinglePoint}},
+    {"interaction", {"Supramolecular interaction energy E(AB)-E(A)-E(B), incl. S30L batch", "calculation",
+            {"XYZ", "coord", "DIR"}, executeInteraction}},
     {"opt", {"Geometry optimization with various algorithms", "optimization",
              {"XYZ", "VTF", "MOL2", "SDF"}, executeOptimization}},
     {"confscan", {"Conformational scanning along reaction coordinates", "conformational",
