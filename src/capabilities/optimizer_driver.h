@@ -165,6 +165,16 @@ public:
     bool InitializeOptimization(const Molecule* molecule);
     bool InitializeOptimization(const double* coordinates, int atom_count);
 
+    /** @brief Re-initialise the optimiser (fresh solver state) for the SAME system
+     *  WITHOUT rebuilding the energy calculator. Claude Generated 2026.
+     *  The calculator must already be initialised by a prior InitializeOptimization;
+     *  this path keeps the existing force-field parameters/topology and only moves
+     *  the atoms (via updateGeometry inside the gradient eval). Intended for
+     *  interactive optimization restarts: rebuilding e.g. GFN-FF from a heavily
+     *  grab-distorted geometry is expensive, changes the potential mid-drag, and can
+     *  crash. Returns false if the calculator/context is not ready. */
+    bool ReinitializeKeepCalculator(const Molecule& molecule);
+
     // Geometry update
     bool UpdateGeometry(const Molecule& molecule);
     bool UpdateGeometry(const double* coordinates);

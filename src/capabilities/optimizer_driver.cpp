@@ -269,6 +269,55 @@ bool OptimizerDriver::InitializeOptimization(const Molecule* molecule)
     return true;
 }
 
+bool OptimizerDriver::ReinitializeKeepCalculator(const Molecule& molecule)
+{
+    // Claude Generated 2026 - Re-init solver state for the SAME system without
+    // rebuilding the energy calculator. Mirrors InitializeOptimization(const
+    // Molecule*) but deliberately OMITS energy_calculator->setMolecule(), so the
+    // existing force-field parameters/topology are kept and only the coordinates
+    // move (evaluateEnergyAndGradient uses updateGeometry()). Keeps interactive
+    // grab restarts cheap and crash-free even when the geometry is badly distorted.
+    m_molecule = molecule;
+
+    if (!m_context.isValid()) {
+        CurcumaLogger::error_fmt("Invalid optimization context: {}", m_context.getValidationErrors());
+        return false;
+    }
+    if (!m_context.energy_calculator) {
+        CurcumaLogger::error("Energy calculator not configured");
+        return false;
+    }
+    // NOTE: no energy_calculator->setMolecule() — keep existing FF parameters/topology.
+
+    json rmsd_config = {
+        { "reorder", false },
+        { "check", false },
+        { "heavy", false },
+        { "silent", true },
+        { "threads", 1 }
+    };
+    m_context.rmsd_driver = std::make_unique<RMSDDriver>(rmsd_config);
+
+    m_trajectory.clear();
+    m_energy_trajectory.clear();
+    m_current_iteration = 0;
+    m_converged = false;
+
+    Vector coordinates = MoleculeToCoordinates(m_molecule);
+    if (!evaluateEnergyAndGradient(coordinates, m_current_energy, m_current_gradient)) {
+        CurcumaLogger::error("Failed to calculate initial energy and gradient (keep-calculator reinit)");
+        return false;
+    }
+    m_initial_energy = m_current_energy;
+    updateTrajectory(m_molecule, m_current_energy);
+
+    if (!InitializeOptimizerInternal()) {
+        CurcumaLogger::error("Method-specific initialization failed (keep-calculator reinit)");
+        return false;
+    }
+    return true;
+}
+
 bool OptimizerDriver::InitializeOptimization(const double* coordinates, int atom_count)
 {
     // Create molecule from coordinate array
@@ -418,14 +467,14 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             m_current_energy = new_energy;
             m_current_gradient = new_gradient;
 
-            // Claude Generated 2026 - Apply external force bias from interactive
-            // simulation (mouse grab). The bias is added to the gradient once
-            // per step and then cleared, mirroring SimpleMD's pattern.
-            if (m_external_forces_pending) {
-                m_current_gradient += m_external_forces;
-                m_external_forces.setZero(m_external_forces.size());
-                m_external_forces_pending = false;
-            }
+            // Claude Generated 2026 - External-force bias (interactive mouse grab)
+            // is NOT applied here: every optimizer pre-evaluates its own gradient
+            // (LBFGSpp objective, native LBFGS::getEnergyGradient, ANCOpt internal
+            // transform) and never reads m_current_gradient for its step, so a
+            // bias added here is inert. The bias is injected directly at each
+            // optimizer's Cartesian-gradient evaluation site instead. The bias
+            // persists (set by setExternalForces, zeroed by clearExternalForces)
+            // so it survives the multiple gradient evaluations of a line search.
             gradient_norm = new_gradient.norm();
             if (m_context.write_trajectory)
                 updateTrajectory(m_molecule, new_energy);
