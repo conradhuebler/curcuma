@@ -263,9 +263,59 @@ The CPU vs GPU gradient discrepancies documented above (e.g. 3.7e-3 Eh/Bohr on a
 - Whether the GPU advantage holds for all molecule classes (only polymer/complex tested)
 - Whether the GPU `atomicAdd` ordering is deterministic across runs
 
+## Performance/Accuracy Tuning Knobs (Task #10 / #11, June 2026)
+
+The GPU CN-derivative pair list and the HB list are now controllable via `gfnff` PARAMs.
+**All defaults reproduce the previous validated / Fortran-parity behaviour bit-for-bit**
+(`log10(0.1)==-1.0` → `hbthr1=250`, `hbthr2=450`; regen-on-topology is energy-neutral for
+`-sp`). Use the dotted form (`-gfnff.<param>`); flat `-<param>` also routes via the registry.
+
+### Task #10 — GPU CN-derivative pair list (`gfnff_gpu_method.cpp`, `cuda/ff_workspace_gpu.cu`)
+
+The list feeds the device CN chain-rule kernel. It was previously built once and latched
+(`m_cn_pairs_generated`), going stale during `-opt`/MD; the cutoff (`2.5·rcov`) was hardcoded.
+
+| PARAM | Default | Effect |
+|-------|---------|--------|
+| `gpu_cn_pair_regen` | `true` | Rebuild the list when the 0.5 Bohr topology-displacement check fires. `false` = legacy latch-once. |
+| `gpu_cn_pair_regen_every` | `0` | Force rebuild every N gradient steps (MD safety net for slow drift). 0 = topology-triggered only. |
+| `gpu_cn_pair_cutoff_factor` | `2.5` | Cutoff = `factor·(rcov_i+rcov_j)`. Larger → toward the CPU 40 Bohr reach, slower; smaller → faster, more truncation. |
+
+The widening knob has ~0 effect in practice: the erf-CN derivative ∝ `exp(-kn²·dr²)`
+(`kn=-7.5`) is `≈exp(-126)≈0` past `2.5·rcov`, so omitted pairs contribute essentially
+nothing. Regen-on-topology is a correctness fix (no measured result change).
+
+### Task #11 — HB list (`gfnff_method.cpp`)
+
+| PARAM | Default | Effect |
+|-------|---------|--------|
+| `hb_accuracy` | `0.1` | Drives `hbthr1=200-log10(acc)·50`, `hbthr2=400-log10(acc)·50` (Bohr²; `gfnff_param.f90:553`). Smaller → larger cutoffs, more HB pairs, more accurate, slower. |
+| `hb_thr1_bohr2` | `0.0` | Direct override of `hbthr1` (0 = derive from `hb_accuracy`). |
+| `hb_thr2_bohr2` | `0.0` | Direct override of `hbthr2` (0 = derive from `hb_accuracy`). |
+| `hb_update_rmsd_bohr` | `0.3` | Per-atom RMSD that triggers an HB/XB rebuild (`gfnff_ini2.f90:717`). Smaller → rebuild more often, less near-threshold MD staleness, slower. |
+| `hb_update_force_every` | `0` | Force an HB/XB rebuild every N gradient steps (continuous-MD near-threshold re-classification). |
+
+### Validation (June 20, 2026 — 🤖 machine-tested, no ✅ TESTED)
+
+- `gfnff_val_*` 18/18; `gfnff_gpu_vs_cpu_*` 19/20 (the 1 failure is a pre-existing missing
+  input file `external/gfnff/test/h2.xyz`, not a code issue).
+- Per-frame GPU-vs-CPU gradient (`test_gfnff_grad_traj`, regen ON) on a 42-frame
+  acetic-acid-dimer MD trajectory: **mean 2.5e-9, max 7.1e-9** — GPU == CPU at every frame.
+- HB knob functional: `hb_thr1_bohr2=20` drops the acetic-dimer HB count 48→16 and shifts
+  the energy −2.47120432 → −2.46441994 Eh.
+- GPU `gpu_cn_pair_regen` on/off and `gpu_cn_pair_cutoff_factor` are energy-neutral for `-sp`
+  and self-consistent for `-opt` (all → −2.543673 on the acetic dimer).
+- **Not addressed (pre-existing, confirmed by git-stashing the changes and re-running):** the
+  CPU-vs-GPU `-opt` divergence (CPU −2.4712 vs GPU −2.5437, likely the documented CPU LBFGS
+  line-search issue) and the `gfnff_numgrad_fixed_charges` H2O_dimer FD failure (identical
+  3.872e-2 with and without these changes). These knobs neither cause nor claim to fix them;
+  aligning the actual per-pair HB list element-wise vs Fortran (not just nhb counts) remains
+  the open Task #11 follow-up.
+
 ## Next Steps
 
 1. **Direct comparison against XTB numerical gradient** — Run `xtb --grad` on test molecules, compare both native CPU and GPU against this reference, not against each other.
 2. **Per-term CPU gradient audit** — Isolate which gradient term diverges in the CPU path relative to XTB (HB most likely candidate based on April isolation tests).
 3. **Confirm GPU stability on more systems** — Repeat MD heat-exchange test on acetic acid dimer and caffeine.
+4. **Element-wise HB-list diff vs Fortran** — On a near-threshold case, dump curcuma's per-pair HB list (`-verbosity 3`) and the Fortran list (`-method xtb-gfnff`) and diff pair-by-pair; tune `hb_accuracy`/`hb_update_rmsd_bohr` to align (Task #11 follow-up).
 4. **HB SoA data verification** — Confirm GPU H-bond pair/parameter arrays match CPU data (still relevant to understand the source of divergence).

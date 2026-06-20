@@ -216,6 +216,25 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
         if (gfnff_cfg.contains("gpu_block_size"))
             m_gpu_workspace->setBlockSize(gfnff_cfg.value("gpu_block_size", 0));
 
+        // Task #10 (Jun 2026): CN-derivative pair-list regen + cutoff knobs.
+        // Prefer the nested gfnff-scoped value, fall back to top-level m_parameters.
+        auto cfg_get_bool = [&](const char* k, bool d) {
+            if (gfnff_cfg.contains(k)) return gfnff_cfg.value(k, d);
+            return m_parameters.value(k, d);
+        };
+        auto cfg_get_int = [&](const char* k, int d) {
+            if (gfnff_cfg.contains(k)) return gfnff_cfg.value(k, d);
+            return m_parameters.value(k, d);
+        };
+        auto cfg_get_dbl = [&](const char* k, double d) {
+            if (gfnff_cfg.contains(k)) return gfnff_cfg.value(k, d);
+            return m_parameters.value(k, d);
+        };
+        m_cn_pair_regen         = cfg_get_bool("gpu_cn_pair_regen", true);
+        m_cn_pair_regen_every   = cfg_get_int("gpu_cn_pair_regen_every", 0);
+        m_cn_pair_cutoff_factor = cfg_get_dbl("gpu_cn_pair_cutoff_factor", 2.5);
+        m_gpu_workspace->setCNPairCutoffFactor(m_cn_pair_cutoff_factor);
+
         // Phase 2: Upload C6 reference table for GPU dc6dcn per-pair computation
         D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
         if (d4 && !d4->getC6FlatCache().empty()) {
@@ -347,6 +366,11 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         if (needs_topo_update) {
             // Reference geometry updated after topology recalculation (triggered inside prepareCNAndEEQ)
             // — updateReferenceGeometry() called below after prepareCNAndEEQ.
+            // Task #10 (Jun 2026): the CN-derivative pair list is built from the current
+            // geometry; when atoms have moved past the displacement threshold it is stale,
+            // so drop the latch to force a rebuild in the gradient block below.
+            if (m_cn_pair_regen)
+                m_cn_pairs_generated = false;
         }
     }
 
@@ -368,6 +392,12 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // G-P1: dlogdcn is already on GPU from k_dlogdcn; setDlogDCN() removed (redundant).
     // d_dlogdcn is used directly by k_cn_chainrule via the main stream ordering.
     if (gradient) {
+        // Task #10 (Jun 2026): optional periodic forced regen as an MD safety net for
+        // slow drift that never trips the 0.5 Bohr displacement check above.
+        if (m_cn_pair_regen_every > 0 && (m_cn_pair_grad_steps % m_cn_pair_regen_every == 0))
+            m_cn_pairs_generated = false;
+        ++m_cn_pair_grad_steps;
+
         if (!m_cn_pairs_generated) {
             m_gpu_workspace->generateCNPairListOnGPU();
             m_cn_pairs_generated = true;
@@ -1261,7 +1291,8 @@ void GFNFFGPUComputationalMethod::generateCNPairList(const Matrix& geom_bohr)
     constexpr double rcov_scale = 4.0 / 3.0;
 
     // Cutoff: where exp(-kn^2 * dr^2) < 1e-12 (kn=-7.5) → |dr| > 1.2 → r > 2.2 * rcov_sum
-    constexpr double cutoff_factor = 2.5;
+    // Task #10 (Jun 2026): tunable; mirrors the GPU pair-list factor for CPU-fallback parity.
+    const double cutoff_factor = m_cn_pair_cutoff_factor;
 
     m_cn_pair_i.clear();
     m_cn_pair_j.clear();

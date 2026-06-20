@@ -147,6 +147,12 @@ private:
     std::vector<double> m_cn_pair_rcov;     ///< scaled cov. radius sum (Bohr)
     bool                m_cn_pairs_generated = false;
 
+    // Task #10 (Jun 2026): CN-derivative pair-list regen controls (from PARAMs)
+    bool                m_cn_pair_regen = true;       ///< regen on topology displacement
+    int                 m_cn_pair_regen_every = 0;    ///< force regen every N grad steps (0=off)
+    double              m_cn_pair_cutoff_factor = 2.5;///< cutoff = factor*(rcov_i+rcov_j)
+    long                m_cn_pair_grad_steps = 0;     ///< gradient-step counter for regen_every
+
     // GPU CN result (always used — GPU CN is the default path)
     Vector              m_gpu_cn_final;        ///< Cached GPU CN result
 

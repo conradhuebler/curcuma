@@ -1482,7 +1482,7 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
         N,
         impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
-        2.5,  // cutoff_factor
+        m_cn_pair_cutoff_factor,  // cutoff_factor (Task #10: tunable)
         impl.d_cn_pair_counter.ptr);
     checkCuda(cudaStreamSynchronize(impl.stream), "k_generate_cn_pairs_count sync");
 
@@ -1512,7 +1512,7 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
         N,
         impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
-        2.5,  // cutoff_factor
+        m_cn_pair_cutoff_factor,  // cutoff_factor (Task #10: tunable)
         impl.d_cn_pair_counter.ptr,
         impl.d_cn_idx_i.ptr,
         impl.d_cn_idx_j.ptr,

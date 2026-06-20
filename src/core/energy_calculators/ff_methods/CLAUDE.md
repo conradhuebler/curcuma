@@ -622,6 +622,12 @@ std::string method = "d4";  // Matches Fortran reference
 - **MD speedup**: ~15x for topology phase when topology is constant (typical MD)
 - **Implementation**: `getCachedTopology()` in `gfnff_method.cpp`, `needsFullTopologyUpdate()` checks displacement
 
+### ✅ Tuning knobs — GPU CN pair list + HB list (Task #10/#11, Jun 2026)
+- 8 `gfnff` PARAMs trade perf/accuracy; defaults bit-identical to Fortran-parity. See [docs/GPU_GFNNF_DISCREPANCIES.md](../../../../docs/GPU_GFNNF_DISCREPANCIES.md#performanceaccuracy-tuning-knobs-task-10--11-june-2026)
+- Task #10: `gpu_cn_pair_regen` (default ON) rebuilds the stale-prone CN-deriv pair list on topology change; `gpu_cn_pair_cutoff_factor` widens it (`ff_workspace_gpu.cu`)
+- Task #11: `hb_accuracy`/`hb_thr{1,2}_bohr2` set hbthr1/hbthr2; `hb_update_rmsd_bohr`/`hb_update_force_every` control rebuild timing (`gfnff_method.cpp`)
+- **Caveat**: registry PARAMs MUST be single-line — `param_parser` drops multi-line PARAMs whose help text contains `)`
+
 ### ⚠️ Known Issues
 - gfnff GPU validation tests (test_gfnff_gpu) fail with JSON null error — pre-existing, unrelated to pipeline
 - k_dispersion cannot overlap with EEQ in gradient mode (dc6dcn dependency)
