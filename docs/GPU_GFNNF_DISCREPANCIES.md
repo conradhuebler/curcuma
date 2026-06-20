@@ -329,11 +329,34 @@ relevant pairs:
   between 7.0–7.5), acc=0.1→8.37 Å, acc=0.001→9.90 Å — the crossing moves exactly to
   `sqrt(200-log10(acc)*50)` Bohr.
 
-**Conclusion**: curcuma's HB-list *construction* matches Fortran on static geometries; the MD
-"39 vs 48" divergence Agent A reported is trajectory chaos (different integrators drift the
-geometries apart), not a systematic list-construction bug. `hb_update_rmsd_bohr` /
-`hb_update_force_every` let a user rebuild more aggressively in continuous MD if a specific
-near-threshold pair matters, at a perf cost.
+**Literal nhb1/nhb2 count diff (vs the Fortran analyzer's `nhb1=`/`nhb2=` lines, June 20):**
+the curcuma side now prints `HB split: nhb1 = .. , nhb2 = ..` at `-verbosity 3`.
+
+| molecule | curcuma nhb1/nhb2 | Fortran nhb1/nhb2 | Δnhb1 | ΔE |
+|---|---|---|---|---|
+| acetic_acid_dimer | 42 / 6 | 42 / 6 | 0 | — |
+| triose | 1495 / 107 | 1495 / 107 | 0 | — |
+| water-dimer scan (all O–O) | matches | matches | 0 | ~1e-8 |
+| caffeine | 352 / 6 | **354** / 6 | −2 | 1e-7 |
+| complex (231) | 8827 / 515 | **8843** / 515 | −16 | 4e-8 |
+
+The residual difference is **only in `nhb1`** (the A···H···B shared-H case; `nhb2` is exact
+everywhere) and is **0.1–0.2 % of the count with zero energy effect**. Root cause: both codes
+apply the same A–B candidate strength pre-filter (curcuma mirrors Fortran `gfnff_ini.f90:833`,
+`hbpi(1)*hbpj(2) < 1e-6 .and. hbpi(2)*hbpj(1) < 1e-6` → curcuma `basicity*acidity < 1e-6`), but
+curcuma's `current_basicity`/`current_acidity` values differ very slightly from Fortran's
+`hbonds()` `hbpi`/`hbpj` for a handful of pairs sitting **right at the 1e-6 strength threshold**,
+so they fall on opposite sides of the cut. Those pairs are maximally weak by definition →
+energetically negligible (confirmed: ΔE ≤ 1e-7 even on caffeine/complex). Disabling the filter
+entirely is *not* Fortran parity — Fortran has it too (the unfiltered count is ~5× larger).
+
+**Conclusion**: curcuma's HB-list *construction* matches Fortran on static geometries to within
+a sub-0.2 % near-threshold-strength tail with zero energy impact; the MD "39 vs 48" divergence
+Agent A reported is trajectory chaos (different integrators drift the geometries apart), not a
+systematic list-construction bug. Closing the last 2/16-pair gap would require matching curcuma's
+HB acidity/basicity parameters to Fortran's `hbonds()` bit-for-bit — zero energy payoff, not
+pursued. `hb_update_rmsd_bohr` / `hb_update_force_every` let a user rebuild more aggressively in
+continuous MD if a specific near-threshold pair matters, at a perf cost.
 
 ## Next Steps
 

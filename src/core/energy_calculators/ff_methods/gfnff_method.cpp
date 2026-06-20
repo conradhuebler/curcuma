@@ -8025,7 +8025,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             if (m_atoms[j] > 10) q_thresh_j += 0.2;
             if (charges[j] > q_thresh_j) return;
 
-            // HB strength criterion (check both directions)
+            // HB strength criterion (check both directions) — mirrors Fortran gfnff_ini.f90:833
             double strength1 = current_basicity[i] * current_acidity[j];
             double strength2 = current_basicity[j] * current_acidity[i];
             if (strength1 < 1e-6 && strength2 < 1e-6) return;
@@ -8285,6 +8285,11 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("Detected {} hydrogen bonds", hbonds.size()));
+    }
+    // Task #11 diagnostic: nhb1 (case 1) / nhb2 (case 2+3+4) split — compare to the
+    // Fortran analyzer's "nhb1 = / nhb2 =" lines for an element-class-wise HB-list check.
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("  HB split: nhb1 = {}, nhb2 = {}", nhb1_count, nhb2_count));
     }
 
     // Claude Generated (February 2026): Report timing at verbosity 1+
