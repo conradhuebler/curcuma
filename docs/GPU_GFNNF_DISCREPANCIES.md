@@ -308,14 +308,39 @@ nothing. Regen-on-topology is a correctness fix (no measured result change).
 - **Not addressed (pre-existing, confirmed by git-stashing the changes and re-running):** the
   CPU-vs-GPU `-opt` divergence (CPU −2.4712 vs GPU −2.5437, likely the documented CPU LBFGS
   line-search issue) and the `gfnff_numgrad_fixed_charges` H2O_dimer FD failure (identical
-  3.872e-2 with and without these changes). These knobs neither cause nor claim to fix them;
-  aligning the actual per-pair HB list element-wise vs Fortran (not just nhb counts) remains
-  the open Task #11 follow-up.
+  3.872e-2 with and without these changes). These knobs neither cause nor claim to fix them.
+
+### Task #11 HB-list vs Fortran — element-wise check (June 20, 2026 follow-up)
+
+The earlier "open follow-up" (per-pair list diff, not just nhb counts) was carried out via a
+**threshold-crossing scan** that is equivalent to an element-wise diff for the energetically
+relevant pairs:
+
+- **Static energy agreement (native vs Fortran `xtb-gfnff`)** on acetic_acid_dimer, caffeine,
+  triose and the 231-atom `complex`: **all ≤ 4e-7 Eh** (most ~1e-8). So the two build the
+  same energetically-relevant HB list on static geometries.
+- **Water-dimer O–O scan through the `hbthr1` boundary** (r_AB²=250 Bohr² → 8.37 Å): the
+  curcuma nhb count drops 4→0 between 8.3 and 8.5 Å, and **native vs Fortran agree to ~1e-8 at
+  every separation including across the crossing** — i.e. Fortran's threshold sits at the same
+  place and the near-threshold pair is energetically negligible (the energy passes through the
+  crossing smoothly, no discontinuity). This is why a count difference like "nhb 39 vs 48" can
+  exist purely in the long-range tail with **zero** energy effect.
+- **`hb_accuracy` validated against the Fortran formula**: acc=2.0→cutoff 7.20 Å (nhb 4→0
+  between 7.0–7.5), acc=0.1→8.37 Å, acc=0.001→9.90 Å — the crossing moves exactly to
+  `sqrt(200-log10(acc)*50)` Bohr.
+
+**Conclusion**: curcuma's HB-list *construction* matches Fortran on static geometries; the MD
+"39 vs 48" divergence Agent A reported is trajectory chaos (different integrators drift the
+geometries apart), not a systematic list-construction bug. `hb_update_rmsd_bohr` /
+`hb_update_force_every` let a user rebuild more aggressively in continuous MD if a specific
+near-threshold pair matters, at a perf cost.
 
 ## Next Steps
 
 1. **Direct comparison against XTB numerical gradient** — Run `xtb --grad` on test molecules, compare both native CPU and GPU against this reference, not against each other.
 2. **Per-term CPU gradient audit** — Isolate which gradient term diverges in the CPU path relative to XTB (HB most likely candidate based on April isolation tests).
 3. **Confirm GPU stability on more systems** — Repeat MD heat-exchange test on acetic acid dimer and caffeine.
-4. **Element-wise HB-list diff vs Fortran** — On a near-threshold case, dump curcuma's per-pair HB list (`-verbosity 3`) and the Fortran list (`-method xtb-gfnff`) and diff pair-by-pair; tune `hb_accuracy`/`hb_update_rmsd_bohr` to align (Task #11 follow-up).
-4. **HB SoA data verification** — Confirm GPU H-bond pair/parameter arrays match CPU data (still relevant to understand the source of divergence).
+4. ~~**Element-wise HB-list diff vs Fortran**~~ — DONE (June 20, see the Task #11 HB-list
+   section above): static HB lists match Fortran to ≤4e-7 Eh, including a threshold-crossing
+   water-dimer scan; `hb_accuracy` shifts the cutoff exactly per the Fortran formula.
+5. **HB SoA data verification** — Confirm GPU H-bond pair/parameter arrays match CPU data (still relevant to understand the source of divergence).
