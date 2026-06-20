@@ -1822,6 +1822,23 @@ __global__ GFNFF_KERNEL_BOUNDS void k_xbonds_mixed(
 // This kernel computes all 4 cases including neighbor effects.
 // ============================================================================
 
+// Claude Generated (June 2026): device-resident HB charge refresh (proto in .cuh).
+// One thread per HB triplet: copy the live per-atom EEQ charges into the HB SoA q
+// arrays by donor(A=idx_i)/H(idx_j)/acceptor(B=idx_k) index.
+__global__ void k_gather_hb_charges(
+    int n,
+    const int* __restrict__ idx_i, const int* __restrict__ idx_j, const int* __restrict__ idx_k,
+    const double* __restrict__ q_atom,
+    double* __restrict__ q_A, double* __restrict__ q_H, double* __restrict__ q_B)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < n) {
+        q_A[tid] = q_atom[idx_i[tid]]; // donor A
+        q_H[tid] = q_atom[idx_j[tid]]; // hydrogen H
+        q_B[tid] = q_atom[idx_k[tid]]; // acceptor B
+    }
+}
+
 __global__ void k_hbonds(
     int n,
     const int*    __restrict__ idx_i,

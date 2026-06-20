@@ -23,6 +23,8 @@
 #include "../forcefieldthread.h"   // Bond, Angle, Dihedral, Inversion structs
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"  // covalent_rad_d3
 
+#include <cstdlib>  // std::getenv (CURCUMA_GFNFF_GPU_FREEZE_HBQ opt-out)
+
 #include "src/core/curcuma_logger.h"
 
 #include <Eigen/Dense>
@@ -1480,7 +1482,7 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
         N,
         impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
-        2.5,  // cutoff_factor
+        m_cn_pair_cutoff_factor,  // cutoff_factor (Task #10: tunable)
         impl.d_cn_pair_counter.ptr);
     checkCuda(cudaStreamSynchronize(impl.stream), "k_generate_cn_pairs_count sync");
 
@@ -1510,7 +1512,7 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
         N,
         impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
-        2.5,  // cutoff_factor
+        m_cn_pair_cutoff_factor,  // cutoff_factor (Task #10: tunable)
         impl.d_cn_pair_counter.ptr,
         impl.d_cn_idx_i.ptr,
         impl.d_cn_idx_j.ptr,
@@ -2158,6 +2160,35 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         if (impl.m_graph_phase1) { cudaGraphDestroy(impl.m_graph_phase1); impl.m_graph_phase1 = nullptr; }
     }
     // Returns immediately — charge-independent kernels run asynchronously on GPU
+}
+
+// Claude Generated (June 2026): OPT-IN device-resident HB charge refresh.
+// IMPORTANT — default is OFF. The GFN-FF reference (Fortran) and the curcuma CPU path
+// both evaluate the H-bond term with the charges FROZEN at topology build (CPU uses the
+// stored hb.q_H/q_A/q_B, forcefieldthread.cpp:2525+), NOT live per-step EEQ charges. The
+// GPU's frozen HB charges therefore MATCH the reference; refreshing them to live charges
+// makes MD diverge from CPU/Fortran (verified: acetic-dimer 1000 fs heat-exchange CPU
+// 0.00709227 / GPU-frozen 0.00707467 / GPU-resident 0.00658143). This path is kept only
+// as an opt-in experiment — enable with CURCUMA_GFNFF_GPU_RESIDENT_HBQ=1.
+// Called by the orchestrator AFTER launchChargeDependentAndFinish() returns (impl.stream
+// idle, d_charges final) → no stream hazard with the captured graphs.
+void FFWorkspaceGPU::refreshHBChargesFromDevice()
+{
+    static const bool resident = (std::getenv("CURCUMA_GFNFF_GPU_RESIDENT_HBQ") != nullptr);
+    if (!resident || !m_hbond_enabled)
+        return;
+    auto& impl = *m_impl;
+    if (impl.hbonds.n <= 0)
+        return;
+    LaunchConfig cfg = getLaunchConfig(impl.hbonds.n, m_block_size);
+    k_gather_hb_charges<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        impl.hbonds.n,
+        impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr,
+        impl.d_charges.ptr,
+        impl.hbonds.q_A.ptr, impl.hbonds.q_H.ptr, impl.hbonds.q_B.ptr);
+    checkCuda(cudaGetLastError(), "k_gather_hb_charges launch");
+    // Ensure the q arrays are fully written before the next step's HB (Phase 1) reads them.
+    cudaStreamSynchronize(impl.stream);
 }
 
 double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)

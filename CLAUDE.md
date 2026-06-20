@@ -343,6 +343,9 @@ curcuma/
 ✅ **GFN-FF Full Implementation** (2025-2026) - All energy terms, gradients, EEQ charges, D4 dispersion; sub-mEh accuracy on most molecules - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
 ✅ **Scattering Analysis Enhancements** (January 2026) - Logarithmic q-spacing (default), automatic gnuplot script generation with 4-panel plots
 ✅ **Analysis Parallelization** (January 2026) - Frame-level parallelization with CxxThreadPool, 3-8x speedup for trajectory analysis
+✅ **`-interaction` capability** (June 2026) - supramolecular interaction energy `E(AB)−E(A)−E(B)` for the S30L host-guest set; modes: S30L A/B/AB dir (+`.CHRG`), batch vs `reference_s30l` (MAD/RMSD), explicit `-fragA/-fragB`, single-AB auto-split
+✅ **GFN-FF aromatic ring torsions fixed** (June 2026) - acyclic-only pi-sp3 rules were wrongly applied to ring torsions; gated on `!in_ring`; S30L host A now bit-identical to Fortran, validation 18/18 — see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
+✅ **GFN-FF GPU HB-freeze resolved + per-frame gradient diagnostic** (June 2026) - the GPU HB-charge freeze is correct (matches CPU+Fortran); `test_gfnff_grad_traj` is the clean force metric (MD heat-exchange is not) — see [docs/GPU_GFNNF_DISCREPANCIES.md](docs/GPU_GFNNF_DISCREPANCIES.md)
 
 ## Build and Test Commands
 

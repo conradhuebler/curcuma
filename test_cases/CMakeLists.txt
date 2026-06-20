@@ -123,6 +123,15 @@ if(USE_PCH)
         target_precompile_headers(test_gfnff_validation REUSE_FROM curcuma_core)
 endif()
 
+# Claude Generated (June 2026): per-frame CPU-vs-GPU gradient diagnostic on a fixed
+# trajectory — the clean force-backend metric (replaces the misleading MD heat-exchange).
+# Builds unconditionally; the gpu config falls back to CPU when CUDA is not compiled in.
+add_executable(test_gfnff_grad_traj test_gfnff_grad_traj.cpp)
+target_link_libraries(test_gfnff_grad_traj curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_grad_traj REUSE_FROM curcuma_core)
+endif()
+
 # Copy reference data to build tree so tests can find them
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})

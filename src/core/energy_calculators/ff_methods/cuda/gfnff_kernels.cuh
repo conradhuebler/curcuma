@@ -335,6 +335,15 @@ __global__ GFNFF_KERNEL_BOUNDS void k_xbonds(
     double*                    energy
 );
 
+/// Claude Generated (June 2026): device-resident HB charge refresh. Gathers the live
+/// per-atom EEQ charges (q_atom) into the HB SoA arrays by donor/H/acceptor index, so the
+/// next step's k_hbonds uses current charges instead of values frozen at topology build.
+__global__ void k_gather_hb_charges(
+    int n,
+    const int* __restrict__ idx_i, const int* __restrict__ idx_j, const int* __restrict__ idx_k,
+    const double* __restrict__ q_atom,
+    double* __restrict__ q_A, double* __restrict__ q_H, double* __restrict__ q_B);
+
 /// Hydrogen bonds (3-body A-H...B): multi-case with neighbor damping
 /// Reference: ff_workspace_gfnff.cpp:calcHydrogenBonds, Fortran abhgfnff_eg*
 __global__ GFNFF_KERNEL_BOUNDS void k_hbonds(

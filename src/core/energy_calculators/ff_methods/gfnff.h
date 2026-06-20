@@ -259,6 +259,17 @@ PARAM(eeq_refactor_force_every, Int, 0,
       "WP-EEQ-Cache: Force EEQ Cholesky refactorization every N steps. "
       "0 = geometry-triggered only. Recommended: 100 for long MD. "
       "Forwarded to eeq_solver.eeq_refactor_force_every.", "Performance", {})
+// NOTE: each PARAM is kept on a SINGLE line on purpose. The param_parser clears its
+// buffer on the first ')' it sees, so a multi-line PARAM whose help text contains '(...)'
+// is silently dropped from the registry (see eeq_refactor_* above). Single-line is safe.
+PARAM(gpu_cn_pair_regen, Bool, true, "Task 10: regenerate the GPU CN-derivative pair list when the topology-displacement check fires (atoms moved past 0.5 Bohr). true keeps the list fresh during opt/MD; false reverts to the legacy build-once-and-latch behaviour.", "Performance", {})
+PARAM(gpu_cn_pair_regen_every, Int, 0, "Task 10: force GPU CN-derivative pair-list regeneration every N gradient steps (0 = topology-triggered only). MD safety net for slow drift below the displacement threshold.", "Performance", {})
+PARAM(gpu_cn_pair_cutoff_factor, Double, 2.5, "Task 10: GPU CN-derivative pair-list cutoff = factor*(rcov_i+rcov_j). Default 2.5 (erf-CN derivative ~exp(-126) beyond this). Larger = more pairs toward the CPU 40 Bohr reach and slower; smaller = faster with more truncation error.", "Performance", {})
+PARAM(hb_accuracy, Double, 0.1, "Task 11: HB-list accuracy driving the Fortran thresholds hbthr1 = 200 - log10(acc)*50, hbthr2 = 400 - log10(acc)*50 (Bohr^2). Smaller = larger cutoffs = more HB pairs = more accurate but slower. 0.1 reproduces the gfnff reference.", "Performance", {})
+PARAM(hb_thr1_bohr2, Double, 0.0, "Task 11: direct override of hbthr1, the A-B distance-squared cutoff for nhb2 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
+PARAM(hb_thr2_bohr2, Double, 0.0, "Task 11: direct override of hbthr2, the A-H-B sum-of-squares cutoff for nhb1 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
+PARAM(hb_update_rmsd_bohr, Double, 0.3, "Task 11: per-atom RMSD (Bohr) that triggers an HB/XB list rebuild. 0.3 reproduces the gfnff reference (gfnff_ini2.f90:717). Smaller = rebuild more often = less near-threshold staleness in MD but slower.", "Performance", {})
+PARAM(hb_update_force_every, Int, 0, "Task 11: force an HB/XB list rebuild every N gradient steps (0 = RMSD-triggered only). Use for continuous MD where near-threshold pairs must be re-classified promptly.", "Performance", {})
 // Implicit solvation (WP5, Claude Generated June 2026). Registering these here is
 // what makes -gfnff.solvent reach GFNFF::InitialiseMolecule (the value was silently
 // ignored before, since the gfnff module declared no solvent PARAM). Use the dotted
@@ -2506,6 +2517,7 @@ private:
     std::vector<GFNFFHalogenBond> m_last_xbonds;
     bool m_hbxb_updated = false;  ///< True if updateHBXBIfNeeded() ran since last check
     bool m_hbxb_fresh = false;    ///< True if HB/XB lists were freshly built during init and geometry is unchanged
+    long m_hbxb_update_calls = 0; ///< Task #11: call counter for hb_update_force_every periodic rebuild
 
     // Claude Generated (March 2026): State from last prepareCNAndEEQ() call
     Vector m_last_cn;    ///< Coordination numbers

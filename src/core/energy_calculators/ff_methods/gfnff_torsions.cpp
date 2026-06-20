@@ -781,8 +781,12 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
             }
         }
     }
-    // Pi-sp3 mixed (lines 1843-1854)
-    else if ((eff_hyb_j == 2 && eff_hyb_k == 3) || (eff_hyb_j == 3 && eff_hyb_k == 2)) {
+    // Pi-sp3 mixed (lines 1843-1854) — ACYCLIC ONLY (Fortran gfnff_ini.f90:1733-1744
+    // is in the `else` of `if (lring)`). For a RING torsion this f1=0.5 must NOT apply:
+    // the ring case keeps f1=torsf_single (1.0) which is then scaled by the pi-system 0.55,
+    // matching Fortran's f1=1.0*0.55=0.55 (native f1=0.5*0.55=0.275 was exactly half).
+    // Claude Generated (June 2026).
+    else if (!in_ring && ((eff_hyb_j == 2 && eff_hyb_k == 3) || (eff_hyb_j == 3 && eff_hyb_k == 2))) {
         f1 = 0.5;
         if (z_j == 7 || z_k == 7) f1 = 0.2;  // Nitrogen lowers barrier
     }
@@ -1139,8 +1143,12 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     bool k_in_pi = (k_atom_idx >= 0 && k_atom_idx < static_cast<int>(topo.pi_fragments.size())
                     && topo.pi_fragments[k_atom_idx] > 0);
 
-    // Check: j in pi-system AND k is sp3 NOT in pi-system
-    if (j_in_pi && !k_in_pi && hyb_k == 3) {
+    // Claude Generated (June 2026): the pi-sp3 rule is ACYCLIC-only in Fortran
+    // (gfnff_ini.f90:1733-1744 lives in the `else` of `if (lring)`). Applying it to a
+    // ring torsion wrongly overrode the ring case (n=1/phi0=0) with acyclic n=3/phi0=180
+    // — the host-A 16.8 mEh torsion error (an sp3 CH2 bridging into an aromatic ring).
+    // Gate on !in_ring so ring torsions keep the ring-case periodicity/phase computed above.
+    if (!in_ring && j_in_pi && !k_in_pi && hyb_k == 3) {
         f1 = 0.5;
         if (z_j == 7) f1 = 0.2;  // Nitrogen in pi-system: weaker barrier
         params.phase_shift = M_PI;  // phi0 = 180° (acyclic trans)
@@ -1152,7 +1160,7 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
         }
     }
     // Check: k in pi-system AND j is sp3 NOT in pi-system
-    else if (k_in_pi && !j_in_pi && hyb_j == 3) {
+    else if (!in_ring && k_in_pi && !j_in_pi && hyb_j == 3) {
         f1 = 0.5;
         if (z_k == 7) f1 = 0.2;  // Nitrogen in pi-system: weaker barrier
         params.phase_shift = M_PI;  // phi0 = 180° (acyclic trans)

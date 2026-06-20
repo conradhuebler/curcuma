@@ -333,6 +333,12 @@ public:
     void setBlockSize(int block_size) { m_block_size = block_size; }
     int getBlockSize() const { return m_block_size; }
 
+    /// Task #10 (Jun 2026): cutoff factor for the CN-derivative pair list
+    /// (cutoff = factor * (rcov_i + rcov_j)). Default 2.5; larger widens toward the
+    /// CPU 40 Bohr reach. Read from the gpu_cn_pair_cutoff_factor PARAM.
+    void setCNPairCutoffFactor(double f) { m_cn_pair_cutoff_factor = f; }
+    double getCNPairCutoffFactor() const { return m_cn_pair_cutoff_factor; }
+
     // =========================================================================
     // GPU Topology Displacement Check (Claude Generated March 2026)
     // =========================================================================
@@ -413,6 +419,14 @@ public:
      * @return Total GFN-FF energy in Hartree
      */
     double launchChargeDependentAndFinish(bool gradient);
+
+    /// Claude Generated (June 2026): OPT-IN device-resident HB charges (default OFF —
+    /// enable with CURCUMA_GFNFF_GPU_RESIDENT_HBQ=1). Gathers the live per-atom EEQ charges
+    /// into the HB SoA q arrays for the NEXT step's HB term. Default-off because the
+    /// reference + CPU freeze the HB charges at topology build, so the GPU's frozen HB
+    /// charges already match and live charges make MD diverge (verified). Call post-step
+    /// (impl.stream idle, d_charges final) → no graph/stream hazard.
+    void refreshHBChargesFromDevice();
 
     // =========================================================================
     // Results
@@ -571,6 +585,9 @@ private:
 
     // G3a (Apr 2026): GPU kernel block size override (0 = adaptive default)
     int  m_block_size         = 0;
+
+    // Task #10 (Jun 2026): CN-derivative pair-list cutoff factor (× rcov sum)
+    double m_cn_pair_cutoff_factor = 2.5;
 
     // Pre-allocated pinned staging buffers for async DMA transfers.
     // Claude Generated (March 2026): Pinned memory enables true async H2D/D2H via

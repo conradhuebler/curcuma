@@ -1,8 +1,26 @@
 # GFN-FF Implementation Status
 
-**Last Updated**: 2026-05-10
+**Last Updated**: 2026-06-20
 **Implementation**: AI-generated, machine-tested — **human production testing pending**
 **Location**: `src/core/energy_calculators/ff_methods/`
+
+## Latest: Aromatic ring torsions fixed (Jun 20, 2026) ✅
+
+Native gave aromatic/conjugated **ring** torsions the *acyclic* rule (n=3, φ0=180°, half
+barrier) instead of the ring case (n=1, φ0=0°, full barrier). Two Fortran rules that are
+**acyclic-only** (they live in the `else` of `if(lring)`, `gfnff_ini.f90:1733-1744`) were
+applied to ring torsions in `gfnff_torsions.cpp` — the pi-sp3 periodicity override (→n=3/180)
+and the pi-sp3 barrier `f1=0.5` (which, with the pi-system ×0.55, gave exactly half). Fix:
+gate **both** on `!in_ring`. Ring perception was NOT the issue (rings detected fine;
+`MAX_RING_SIZE=6` matches Fortran's `getring36`).
+
+The validation set hid this — it's small/neutral and the worst case (polymer) is pure sp3.
+The bug appears on aromatic hosts (an sp3 CH2 bridging into an aromatic ring). Verified on the
+**S30L host A** (cross-checked with the `-interaction` capability + per-frame gradient
+harness): torsion `0.03500803 → 0.05178688` (exact Fortran), total **−16.8 mEh → +0.13 µEh
+(PASSED)**, full validation set **18/18, no regression**. Affects all aromatic/conjugated ring
+systems. **Caveat:** this is native↔Fortran *fidelity*, not gfnff-vs-benchmark accuracy — in
+neutral S30L interaction energies the per-structure offset cancels (host in both AB and A).
 
 > **Note**: Gradient documentation previously in `GFNFF_GRADIENTS.md` has been consolidated here. See archive for historical details.
 > **Note**: Physics audit details previously in `GFNFF_PHYSICS_AUDIT.md` and dispersion fix details from `GFNFF_DISPERSION_FIX.md` have been consolidated here.

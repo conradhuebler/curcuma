@@ -1590,13 +1590,21 @@ GFNFF::EEQGPUParams GFNFF::prepareEEQParametersForGPU(const Vector& cn) const
 
 void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
 {
-    // Claude Generated (Apr 2026): If lists were freshly built during init and geometry
-    // has not changed, skip redundant re-detection. This saves ~8s on large single-points.
-    if (m_hbxb_fresh && !shouldUpdateHBXB(m_geometry_bohr))
-        return;
+    // Task #11 (Jun 2026): optional periodic forced rebuild for continuous MD where
+    // near-threshold pairs must be re-classified faster than the RMSD trigger fires.
+    const int force_every = m_parameters.value("hb_update_force_every", 0);
+    const bool force_update = (force_every > 0) && (m_hbxb_update_calls % force_every == 0);
+    ++m_hbxb_update_calls;
 
-    if (!shouldUpdateHBXB(m_geometry_bohr))
-        return;
+    if (!force_update) {
+        // Claude Generated (Apr 2026): If lists were freshly built during init and geometry
+        // has not changed, skip redundant re-detection. This saves ~8s on large single-points.
+        if (m_hbxb_fresh && !shouldUpdateHBXB(m_geometry_bohr))
+            return;
+
+        if (!shouldUpdateHBXB(m_geometry_bohr))
+            return;
+    }
 
     // Store old counts for verbose output
     int old_hb_count = m_hb_reference ? m_hb_reference->nhb_count : 0;
@@ -2228,9 +2236,11 @@ bool GFNFF::shouldUpdateHBXB(const Eigen::MatrixXd& current_geometry) const
 
     // Update if geometry changed significantly
     // Reference: gfnff_ini2.f90:717 - "if (rmsd .lt. 1.d-6.or.rmsd .gt. 0.3d0)"
-    if (rmsd > 0.3) {
+    // Task #11 (Jun 2026): threshold tunable via hb_update_rmsd_bohr (default 0.3 = Fortran).
+    const double rmsd_threshold = m_parameters.value("hb_update_rmsd_bohr", 0.3);
+    if (rmsd > rmsd_threshold) {
         if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info(fmt::format("HB/XB update triggered: RMSD = {:.4f} Bohr (threshold: 0.3)", rmsd));
+            CurcumaLogger::info(fmt::format("HB/XB update triggered: RMSD = {:.4f} Bohr (threshold: {:.4f})", rmsd, rmsd_threshold));
         }
         return true;
     }
@@ -7967,8 +7977,16 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     // Step 2 & 3: Identify potential acceptor-donor pairs (A-B) and actual HB contacts
     // Claude Generated (Feb 25, 2026): Rewritten to match Fortran gfnff_ini2.f90:700-748
     // Fortran uses accuracy=0.1 → hbthr1=250, hbthr2=450 (squared Bohr)
-    const double hbthr1 = 250.0;  // nhb2 detection: r_AB² < hbthr1 (Bohr²)
-    const double hbthr2 = 450.0;  // nhb1 detection: r_AB² + r_AH² + r_BH² < hbthr2 (Bohr²)
+    // Task #11 (Jun 2026): thresholds are now tunable. Default hb_accuracy=0.1 reproduces
+    // the Fortran formula (gfnff_param.f90:553-554). Direct overrides (>0) win.
+    double hbthr1, hbthr2;
+    {
+        const double hb_acc = m_parameters.value("hb_accuracy", 0.1);
+        const double thr1_override = m_parameters.value("hb_thr1_bohr2", 0.0);
+        const double thr2_override = m_parameters.value("hb_thr2_bohr2", 0.0);
+        hbthr1 = (thr1_override > 0.0) ? thr1_override : (200.0 - std::log10(hb_acc) * 50.0);
+        hbthr2 = (thr2_override > 0.0) ? thr2_override : (400.0 - std::log10(hb_acc) * 50.0);
+    }
 
     // Pre-build bond lookup set for O(1) bonding checks
     std::set<std::pair<int,int>> bond_set;
@@ -8007,7 +8025,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             if (m_atoms[j] > 10) q_thresh_j += 0.2;
             if (charges[j] > q_thresh_j) return;
 
-            // HB strength criterion (check both directions)
+            // HB strength criterion (check both directions) — mirrors Fortran gfnff_ini.f90:833
             double strength1 = current_basicity[i] * current_acidity[j];
             double strength2 = current_basicity[j] * current_acidity[i];
             if (strength1 < 1e-6 && strength2 < 1e-6) return;
@@ -8267,6 +8285,11 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("Detected {} hydrogen bonds", hbonds.size()));
+    }
+    // Task #11 diagnostic: nhb1 (case 1) / nhb2 (case 2+3+4) split — compare to the
+    // Fortran analyzer's "nhb1 = / nhb2 =" lines for an element-class-wise HB-list check.
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("  HB split: nhb1 = {}, nhb2 = {}", nhb1_count, nhb2_count));
     }
 
     // Claude Generated (February 2026): Report timing at verbosity 1+
