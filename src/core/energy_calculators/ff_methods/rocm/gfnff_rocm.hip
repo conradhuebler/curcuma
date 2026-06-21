@@ -6039,7 +6039,14 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
         // (== the source of the precomputed gamma_ij) to recompute gamma on the fly. If the EEQ
         // topology alpha is not resident, fall back to the CSR gather (still atomic-light).
         const int coul_block = 128;
-        if (impl.eeq_topo.valid && impl.eeq_topo.d_alpha_corrected.ptr) {
+        // The dense kernel loops ALL j with a uniform runtime cutoff, so it is only equivalent to
+        // the pair list when that list IS all-pairs (default eeq_distance_cutoff=0). When a spatial
+        // EEQ cutoff is active the list is a FIXED param-gen-geometry subset, and a runtime all-j
+        // loop would diverge from CPU during MD/opt (newly-close pairs) — fall back to the gather
+        // (exact CSR list) there. csr_N*(csr_N-1)/2 == n iff the list is the full upper triangle.
+        const long all_pairs = static_cast<long>(impl.coulomb.csr_N) * (impl.coulomb.csr_N - 1) / 2;
+        const bool coulomb_all_pairs = (static_cast<long>(impl.coulomb.n) == all_pairs);
+        if (impl.eeq_topo.valid && impl.eeq_topo.d_alpha_corrected.ptr && coulomb_all_pairs) {
             int grid = (impl.coulomb.csr_N + coul_block - 1) / coul_block;
             k_coulomb_dense<<<grid, coul_block, 0, impl.stream_pairwise>>>(
                 impl.coulomb.csr_N,
