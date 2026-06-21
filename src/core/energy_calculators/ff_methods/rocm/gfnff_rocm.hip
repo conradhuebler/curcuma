@@ -240,6 +240,81 @@ __global__ void k_dispersion(
     blockReduceAddEnergy(local_E, energy);
 }
 
+// Claude Generated (June 2026): per-atom GATHER variant of k_dispersion for ROCm/RDNA. In
+// gradient mode the deferred pair k_dispersion is the dominant MD cost (~113 ms on polymer):
+// ~6M grad + ~2M dEdcn FP64 atomicAdd over 943k pairs. One thread owns atom a, sweeps a's CSR
+// edges, accumulates force (force on a = fac*(ra-rp), fac pair-symmetric), half-energy and the
+// dEdcn term locally, then writes grad[a] (3 atomicAdd) + dEdcn[a] (1 atomicAdd). The dynamic
+// per-pair dc6dcn stays pair-indexed (read via csr_pairidx; csr_is_i picks ij vs ji), so it is
+// bit-identical to k_dispersion and needs no per-step CSR rebuild.
+__global__ void k_dispersion_gather(
+    int N,
+    const int*    __restrict__ csr_off,
+    const int*    __restrict__ csr_partner,
+    const int*    __restrict__ csr_pairidx,
+    const int*    __restrict__ csr_is_i,
+    const double* __restrict__ C6,
+    const double* __restrict__ r4r2ij,
+    const double* __restrict__ r0_sq,
+    const double* __restrict__ zetac6,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ dc6dcn_ij,
+    const double* __restrict__ dc6dcn_ji,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    dEdcn,
+    double*                    grad,
+    double*                    energy)
+{
+    int a = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+
+    if (a < N) {
+        const double xa = cx[a], ya = cy[a], za = cz[a];
+        double gx = 0.0, gy = 0.0, gz = 0.0, dEdcn_a = 0.0;
+        const bool has_dcn = (dc6dcn_ij != nullptr && dEdcn != nullptr);
+        const int s = csr_off[a], e = csr_off[a + 1];
+        for (int t = s; t < e; ++t) {
+            const int p   = csr_partner[t];
+            const int tid = csr_pairidx[t];
+            double dx = xa - cx[p];
+            double dy = ya - cy[p];
+            double dz = za - cz[p];
+            applyMIC(dx, dy, dz);
+            double r2  = dx*dx + dy*dy + dz*dz;
+            double rij = sqrt(r2);
+            if (rij <= r_cut[tid] && rij >= 1e-10) {
+                double r4   = r2 * r2;
+                double r6   = r4 * r2;
+                double r0s  = r0_sq[tid];
+                double r0_6 = r0s * r0s * r0s;
+                double t6   = 1.0 / (r6 + r0_6);
+                double r8   = r6 * r2;
+                double r0_8 = r0_6 * r0s;
+                double t8   = 1.0 / (r8 + r0_8);
+                double rr   = r4r2ij[tid];
+                double disp_sum = t6 + 2.0 * rr * t8;
+                local_E += 0.5 * (-C6[tid] * disp_sum * zetac6[tid]);
+                double d6   = -6.0 * r4 * t6 * t6;
+                double d8   = -8.0 * r4 * r2 * t8 * t8;
+                double dEdr = -C6[tid] * zetac6[tid] * (d6 + 2.0 * rr * d8) * rij;
+                double fac  = dEdr / rij;          // force on a = fac*(ra - rp)
+                gx += fac*dx; gy += fac*dy; gz += fac*dz;
+                if (has_dcn) {
+                    double disp_value = disp_sum * zetac6[tid];
+                    double dcn_a = csr_is_i[t] ? dc6dcn_ij[tid] : dc6dcn_ji[tid];
+                    dEdcn_a += -dcn_a * disp_value;
+                }
+            }
+        }
+        add_grad(grad, a, gx, gy, gz);
+        if (has_dcn) atomicAdd(&dEdcn[a], dEdcn_a);
+    }
+
+    blockReduceAddEnergy(local_E, energy);
+}
+
 // ============================================================================
 // Kernel 2: Repulsion (bonded AND non-bonded, same formula)
 // E = repab * exp(-alpha * r^1.5) / r
@@ -3749,7 +3824,7 @@ static void checkCuda(hipError_t err, const char* msg) {
 // ============================================================================
 
 // ---------------------------------------------------------------------------
-void DispersionSoA::upload(const std::vector<GFNFFDispersion>& v, hipStream_t stream)
+void DispersionSoA::upload(const std::vector<GFNFFDispersion>& v, int natoms, hipStream_t stream)
 {
     n = static_cast<int>(v.size());
     if (n == 0) return;
@@ -3774,6 +3849,27 @@ void DispersionSoA::upload(const std::vector<GFNFFDispersion>& v, hipStream_t st
     r0_sq.upload(h_r0sq, stream);
     zetac6.upload(h_zeta, stream);
     r_cut.upload(h_rcut, stream);
+
+    // Build per-atom CSR adjacency for k_dispersion_gather. Each pair t = (i,j) becomes two
+    // directed edges carrying the pair index t and an is_i flag (so the gather picks
+    // dc6dcn_ij vs dc6dcn_ji for the owning atom). The dynamic dc6dcn arrays stay pair-indexed.
+    csr_N = natoms;
+    std::vector<int> deg(natoms, 0);
+    for (int k = 0; k < n; ++k) { ++deg[h_i[k]]; ++deg[h_j[k]]; }
+    std::vector<int> off(natoms + 1, 0);
+    for (int a = 0; a < natoms; ++a) off[a + 1] = off[a] + deg[a];
+    const int tot = off[natoms];                       // == 2*n
+    std::vector<int> h_part(tot), h_pidx(tot), h_isi(tot);
+    std::vector<int> cur(off.begin(), off.end() - 1);
+    for (int k = 0; k < n; ++k) {
+        const int i = h_i[k], j = h_j[k];
+        int pi = cur[i]++; h_part[pi] = j; h_pidx[pi] = k; h_isi[pi] = 1;
+        int pj = cur[j]++; h_part[pj] = i; h_pidx[pj] = k; h_isi[pj] = 0;
+    }
+    csr_off.upload(off, stream);
+    csr_partner.upload(h_part, stream);
+    csr_pairidx.upload(h_pidx, stream);
+    csr_is_i.upload(h_isi, stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -4593,7 +4689,7 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
     }
 
     // --- Upload static SoA interaction lists ---
-    m_impl->disp.upload(params.dispersions, stream);
+    m_impl->disp.upload(params.dispersions, natoms, stream);
     m_impl->bonded_rep.upload(params.bonded_repulsions, stream);
     m_impl->nonbonded_rep.upload(params.nonbonded_repulsions, stream);
     m_impl->coulomb.upload(params.coulombs, natoms, stream);
@@ -5884,10 +5980,15 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     // and runs on the main stream. The event_upload fence above ensures stream_pairwise
     // sees the completed dc6dcn values before k_dispersion launches.
     if (m_dispersion_enabled && gradient) {
-        LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
-        k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
-            impl.disp.n,
-            impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
+        // ROCm: per-atom gather (grad + dEdcn accumulated locally) instead of the pair kernel —
+        // the deferred gradient-mode k_dispersion's ~8M FP64 atomicAdd was the dominant MD cost.
+        // Dynamic dc6dcn stays pair-indexed (read via csr_pairidx); bit-identical to k_dispersion.
+        const int disp_block = 128;
+        int grid = (impl.disp.csr_N + disp_block - 1) / disp_block;
+        k_dispersion_gather<<<grid, disp_block, 0, impl.stream_pairwise>>>(
+            impl.disp.csr_N,
+            impl.disp.csr_off.ptr, impl.disp.csr_partner.ptr,
+            impl.disp.csr_pairidx.ptr, impl.disp.csr_is_i.ptr,
             impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
             impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
             impl.disp.r_cut.ptr,
@@ -5899,7 +6000,7 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
             impl.d_dEdcn.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_DISP]);
-        checkCuda(hipGetLastError(), "k_dispersion launch");
+        checkCuda(hipGetLastError(), "k_dispersion_gather launch");
     }
 
     // k_coulomb (needs EEQ charges)

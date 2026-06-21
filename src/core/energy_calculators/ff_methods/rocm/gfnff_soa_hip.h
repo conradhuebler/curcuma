@@ -125,7 +125,18 @@ struct DispersionSoA {
     CudaBuffer<double> dc6dcn_ji;  ///< [n] dC6(i,j)/dCN(j) per pair (updated per step)
     int n = 0;
 
-    void upload(const std::vector<GFNFFDispersion>& v, hipStream_t stream = nullptr);
+    // ROCm gather path (Claude Generated June 2026): the deferred gradient-mode k_dispersion is
+    // the dominant MD cost (~113 ms on polymer) — grad + dEdcn FP64 atomicAdd over ~943k pairs.
+    // k_dispersion_gather sums per atom (no in-loop atomics). The dynamic per-pair data (dc6dcn,
+    // updated every step) stays pair-indexed and is read via csr_pairidx; csr_is_i selects
+    // dc6dcn_ij vs dc6dcn_ji for this atom. Static per-pair data is read via the same index.
+    CudaBuffer<int>    csr_off;      ///< [N+1] row offsets
+    CudaBuffer<int>    csr_partner;  ///< [2*n] partner atom per directed edge
+    CudaBuffer<int>    csr_pairidx;  ///< [2*n] original pair index t per directed edge
+    CudaBuffer<int>    csr_is_i;     ///< [2*n] 1 if this atom is idx_i[t], else 0
+    int csr_N = 0;
+
+    void upload(const std::vector<GFNFFDispersion>& v, int natoms, hipStream_t stream = nullptr);
 };
 
 // ============================================================================
