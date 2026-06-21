@@ -64,3 +64,42 @@ The standalone external D4 (`dftd4interface` / `curcuma_d4`, which `USE_D4` buil
 LAPACKE) is **not used by GFN-FF** at all — GFN-FF has its own self-contained `D4ParameterGenerator`.
 The `USE_D4` CMake block / the standalone `-d4` method are the only consumers. If the standalone `-d4`
 path is itself legacy, the LAPACKE dependency could be dropped entirely.
+
+## EEQ for many fragments (solvent) — Schur / batched / PCG analysis
+
+Fragments = connected components of the bond graph (BFS, `gfnff_method.cpp:8583`), so each solvent
+molecule is one fragment → nfrag large, N large. The charge constraint is one bordered row/column
+per fragment: `A_aug = [[Coulomb (N×N), Cᵀ];[C, 0]]`, C = nfrag×N fragment indicator. Current state:
+
+| Path | CPU | CUDA | ROCm |
+|---|---|---|---|
+| Full direct (exact) | Cholesky/LU on (N+nfrag) | cuSOLVER potrf/getrf | rocSOLVER potrf/getrf |
+| Constraint | bordered solve | GPU-Schur (WP5-A/WP7-A) | **host CPU-Schur** |
+| Batched per-fragment (drops cross-fragment Coulomb, **approximate**) | ✅ auto (nfrag≥16 & nfrag/N>20%) | ✅ WP7-B | ❌ |
+| PCG iterative (**exact**, full matvec) | ✅ **block-Jacobi PC + multi-step MD warm-start** | ✅ but **plain diagonal Jacobi PC** | ❌ |
+
+**Cost for many small fragments (e.g. N=6200, nfrag=1400):** full N×N Cholesky is O(N³) ≈ prohibitive;
+batched is O(Σ N_f³) ≈ free but drops inter-molecular Coulomb (no inter-fragment charge polarization
+— an approximation vs the Fortran-exact full solve); PCG+block-Jacobi is O(k·N²) with small k for
+well-separated fragments and, warm-started, ≈ 1–2 iters/MD step — **exact AND fast** (the best option).
+
+### Findings / WPs
+- **ROCm — biggest gap (no advanced path).** Every nfrag>1 step does the full N×N rocSOLVER Cholesky
+  (the batched/PCG/general device variants are stubbed). Two fixes: (a) route highly-fragmented EEQ to
+  the CPU's `EEQSolveMethod::PCG` (block-Jacobi + warm-start, exact) or `Batched` path and upload the
+  charges — reuses validated code, near-free, and **matches whatever the CPU auto-selects** (today CPU
+  silently auto-batches at nfrag≥16 while ROCm does the exact full solve → the two DIVERGE for solvent;
+  this also means the "ROCm==CPU" validation does not cover many-fragment systems); (b) port PCG +
+  block-Jacobi to HIP (rocBLAS `dsymv` matvec + per-fragment Cholesky preconditioner). (a) first.
+- **CUDA — under-preconditioned PCG.** `solveWithDeviceRHSAndGPUPCG` uses a plain diagonal Jacobi PC
+  (`d_pcg_M_inv = 1/A[i,i]`), which converges slowly for many fragments. Port the CPU's **block-Jacobi**
+  (per-fragment) preconditioner → far fewer iters, exact. Also the CUDA batched (WP7-B) drops
+  cross-fragment Coulomb (approximate) — PCG+block-Jacobi is the exact replacement.
+- **CPU — already advanced** (batched + PCG/block-Jacobi/warm-start). Remaining "more advanced": an
+  FMM/treecode matvec to make PCG's cross-fragment Coulomb O(N log N) instead of O(N²) for very large
+  solvent boxes (big effort, niche); and preferring the **exact** PCG+block-Jacobi over the auto-batched
+  **approximation** by default when fragments are in contact (accuracy), since batched silently omits
+  inter-molecular charge coupling.
+- **Cannot validate here** — no many-fragment solvent test molecule in-tree (water8_cluster is nfrag=8,
+  below the batched/PCG thresholds). Needs a solvent box (e.g. the referenced mixture.xyz N=6200,
+  nfrag=1400) to benchmark + verify exact-vs-batched accuracy.
