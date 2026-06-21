@@ -1174,9 +1174,13 @@ private:
      * @return JSON array of dispersion pair parameters
      *
      * Claude Generated (December 2025): D3/D4 integration
-     * - Calls D4ParameterGenerator if USE_D4 defined (preferred)
-     * - Falls back to D3ParameterGenerator if USE_D3 defined
-     * - Final fallback to generateFreeAtomDispersion()
+     * - Default (`gfnff`): ALWAYS uses the self-contained D4ParameterGenerator
+     *   (Casimir-Polder C6, `dispersion/d4param_generator`, compiled unconditionally into
+     *   curcuma_core). It is NOT gated by USE_D4 and does NOT use the external dftd4interface
+     *   / curcuma_d4 / LAPACKE lib — that flag only controls the standalone `-d4` method.
+     * - `gfnff-d3` selects the native D3ParameterGenerator instead.
+     * - generateFreeAtomDispersion() is a last-resort fallback, reached only if D4
+     *   construction throws (its "compile with USE_D4" hint does not apply to GFN-FF).
      */
     json generateGFNFFDispersionPairs() const;
 

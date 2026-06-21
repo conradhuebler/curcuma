@@ -234,10 +234,15 @@ Separate from the native xTB ROCm path above; mirrors the CUDA GFN-FF GPU pipeli
   `timeout` clean up instead. Only `kill -9` (SIGKILL) can't be caught — avoid it on in-flight GPU
   runs, and do not run multiple GPU jobs concurrently on one iGPU. Validated: a polymer MD killed
   with SIGTERM mid-run no longer wedges the GPU.
-- **NOT done / honest**: built with `USE_D4=OFF` (this box lacks LAPACKE; the external
-  `curcuma_d4`/`dftd4interface` lib hard-links `lapacke`). GFN-FF therefore used its free-atom
-  dispersion fallback on **both** CPU and GPU, so the GPU==CPU parity is real but the energies
-  are not yet true-D4 GFN-FF. GFN-FF's own D4 (`dispersion/d4param_generator`, self-contained,
-  cpp-d4 headers only) is the intended path; decoupling it from the legacy external D4 lib so
-  `USE_D4=ON` needs no LAPACKE is the open item. Also untested: MD, multi-fragment charge
-  systems beyond the small set, discrete/CDNA GPUs, performance (residency only).
+- **D4 is real, not a fallback** (corrected): the build is `USE_D4=OFF`, but GFN-FF's dispersion
+  does NOT depend on that flag. `generateGFNFFDispersionPairs()` (gfnff_method.cpp:9726) always
+  runs the **self-contained** `D4ParameterGenerator` (Casimir-Polder C6, `dispersion/d4param_generator`,
+  compiled unconditionally), which has no `#ifdef USE_D4` gate and never calls the external
+  `dftd4interface`/`curcuma_d4`/LAPACKE lib (that lib backs only the standalone `-d4` method).
+  Verified at runtime: the "D4 C6 Reference Matrix Pre-computation … Casimir-Polder" path executes
+  on the `USE_D4=OFF` build. So the ROCm GFN-FF runs **true-D4 GFN-FF** and matches the CPU (same
+  generator). The earlier "free-atom fallback / not-true-D4" note was wrong — `generateFreeAtomDispersion()`
+  is only reached if D4 construction throws.
+- **NOT done / honest**: untested — MD long-run stability, multi-fragment charge systems beyond
+  the small set, discrete/CDNA GPUs (the warp reduction is wave32-only — see roadmap), and the
+  device-resident EEQ Schur (CUDA has it; ROCm uses rocSOLVER + host Schur by design).
