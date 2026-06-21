@@ -38,17 +38,16 @@ if [ -z "$CURCUMA" ]; then
         fi
     fi
 
-    # Try release first (faster for CLI tests), then debug, then build
-    export CURCUMA="$PROJECT_ROOT/release/curcuma"
-    if [ ! -f "$CURCUMA" ]; then
-        export CURCUMA="$PROJECT_ROOT/debug/curcuma"
-    fi
-    if [ ! -f "$CURCUMA" ]; then
-        export CURCUMA="$PROJECT_ROOT/build/curcuma"
-    fi
-    if [ ! -f "$CURCUMA" ]; then
+    # Try release first (faster for CLI tests), then debug, build, and the GPU build dirs.
+    for _bd in release debug build release_rocm release_cuda release_vulkan build_rocm; do
+        if [ -f "$PROJECT_ROOT/$_bd/curcuma" ]; then
+            export CURCUMA="$PROJECT_ROOT/$_bd/curcuma"
+            break
+        fi
+    done
+    if [ -z "$CURCUMA" ] || [ ! -f "$CURCUMA" ]; then
         echo -e "${RED}ERROR: curcuma binary not found!${NC}"
-        echo "Expected at: $PROJECT_ROOT/debug/curcuma, $PROJECT_ROOT/release/curcuma, or $PROJECT_ROOT/build/curcuma"
+        echo "Expected at: $PROJECT_ROOT/{release,debug,build,release_rocm,release_cuda,release_vulkan}/curcuma"
         exit 1
     fi
     echo -e "${BLUE}Using curcuma:${NC} $CURCUMA"

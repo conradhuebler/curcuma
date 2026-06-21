@@ -1,0 +1,326 @@
+/* Claude Generated (June 2026): EEQSolverHip — rocSOLVER/rocBLAS port (M2).
+ *
+ * Focused, correct device-EEQ for the GFN-FF ROCm path. Ports the workhorse paths of
+ * cuda/eeq_solver_gpu.cu:
+ *   - solve()              (host alpha/gam/rhs)
+ *   - solveWithDeviceRHS() (device alpha/gam/rhs, WP2)
+ * Both build the N x N EEQ Coulomb matrix on device (k_eeq_build_matrix_hip), factor it
+ * with rocSOLVER Cholesky (rocsolver_dpotrf) — falling back to LU (rocsolver_dgetrf) for
+ * indefinite matrices like the reference does — and solve [b | C^T] (nfrag+1 columns) with
+ * rocsolver_dpotrs/dgetrs, returning z1/Z2 to the host.
+ *
+ * The device-resident GPU-Schur / PCG / batched variants return false: the host wrapper
+ * (gfnff_hip_method.cpp) then applies its own exact CPU Schur complement to z1/Z2 (works for
+ * nfrag==1 AND nfrag>1), so the final charges match the CPU EEQ within FP. This keeps the
+ * port small while giving full opt/MD parity.
+ *
+ * Included once into gfnff_rocm.hip (single TU). CudaBuffer<T>/hip helpers come from
+ * gfnff_soa_hip.h (already included by the master before this file). */
+
+#include "eeq_solver_hip.h"
+#include <rocblas/rocblas.h>
+#include <rocsolver/rocsolver.h>
+#include <cstring>
+#include <vector>
+
+// sqrt(2/pi) — EEQ self-energy diagonal (matches cuda/eeq_solver_gpu.cu TSQRT2PI_GPU)
+__device__ constexpr double TSQRT2PI_HIP = 0.797884560802866;
+
+// Build N x N EEQ Coulomb matrix on device (column-major, both triangles).
+// Verbatim port of cuda/eeq_solver_gpu.cu::k_eeq_build_matrix (file-local, distinct name
+// to avoid clashing with the gfnff_kernels_hip.h k_eeq_* declarations).
+__global__ __launch_bounds__(256, 4)
+void k_eeq_build_matrix_hip(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ alpha,
+    const double* __restrict__ gam,
+    double* __restrict__ A,
+    double cutoff_sq)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int n_lower = N * (N + 1) / 2;
+    if (tid >= n_lower) return;
+
+    int i = static_cast<int>((-1.0 + sqrt(1.0 + 8.0 * static_cast<double>(tid))) * 0.5);
+    while (i * (i + 1) / 2 > tid) --i;
+    while ((i + 1) * (i + 2) / 2 <= tid) ++i;
+    int j = tid - i * (i + 1) / 2;
+
+    if (i == j) {
+        A[i * N + i] = gam[i] + TSQRT2PI_HIP / sqrt(alpha[i]);
+    } else {
+        double dx = cx[i] - cx[j];
+        double dy = cy[i] - cy[j];
+        double dz = cz[i] - cz[j];
+        double r_sq = dx * dx + dy * dy + dz * dz;
+        if (cutoff_sq > 0.0 && r_sq > cutoff_sq) {
+            A[j * N + i] = 0.0;
+            A[i * N + j] = 0.0;
+        } else {
+            double r = sqrt(r_sq);
+            double gamma_ij = 1.0 / sqrt(alpha[i] + alpha[j]);
+            double val = erf(gamma_ij * r) / r;
+            A[j * N + i] = val;
+            A[i * N + j] = val;
+        }
+    }
+}
+
+struct EEQSolverHipImpl {
+    rocblas_handle handle = nullptr;     // rocSOLVER reuses the rocBLAS handle
+    hipStream_t    stream = nullptr;
+
+    CudaBuffer<double> d_alpha;          // [N]
+    CudaBuffer<double> d_gam;            // [N]
+    CudaBuffer<double> d_A;              // [N*N] Coulomb matrix / factor
+    CudaBuffer<double> d_rhs;            // [N*(nfrag+1)] column-major RHS / solution
+    CudaBuffer<int>    d_info;           // [1] rocSOLVER info (rocblas_int == int)
+    CudaBuffer<int>    d_lu_pivots;      // [N] LU pivots
+
+    double* h_result = nullptr;          // pinned [N*(nfrag+1)]
+    int     h_result_size = 0;
+    int*    h_info = nullptr;            // pinned [1]
+
+    std::vector<double> m_h_rhs_cache;
+    bool m_has_cached_factor = false;
+    bool m_using_lu = false;
+    int  m_last_chol_info = 0;
+
+    // Fragment topology (so the wrapper marks nfrag>1 GPU-applicable, then takes the
+    // solveWithDeviceRHS + CPU-Schur path since the GPU-Schur variants return false).
+    bool                m_frag_topo_valid = false;
+    std::vector<int>    m_fraglist;
+    double              m_min_frag_dist_sq = -1.0;
+};
+
+static void ensureHResultHip(EEQSolverHipImpl& impl, int needed) {
+    if (needed <= impl.h_result_size) return;
+    if (impl.h_result) hipHostFree(impl.h_result);
+    if (hipHostMalloc(&impl.h_result, needed * sizeof(double)) != hipSuccess)
+        throw std::runtime_error("EEQSolverHip: hipHostMalloc h_result failed");
+    impl.h_result_size = needed;
+}
+
+EEQSolverHip::EEQSolverHip(int max_natoms)
+    : m_max_natoms(max_natoms)
+{
+    m_impl = std::make_unique<EEQSolverHipImpl>();
+    if (rocblas_create_handle(&m_impl->handle) != rocblas_status_success)
+        throw std::runtime_error("EEQSolverHip: rocblas_create_handle failed");
+    if (hipStreamCreate(&m_impl->stream) != hipSuccess)
+        throw std::runtime_error("EEQSolverHip: hipStreamCreate failed");
+    rocblas_set_stream(m_impl->handle, m_impl->stream);
+
+    m_impl->d_alpha.alloc(max_natoms);
+    m_impl->d_gam.alloc(max_natoms);
+    m_impl->d_A.alloc(static_cast<size_t>(max_natoms) * max_natoms);
+    m_impl->d_info.alloc(1);
+    m_impl->d_lu_pivots.alloc(max_natoms);
+
+    constexpr int MAX_NFRAG = 8;
+    m_impl->d_rhs.alloc(static_cast<size_t>(max_natoms) * (MAX_NFRAG + 1));
+    const int initial = max_natoms * (MAX_NFRAG + 1);
+    if (hipHostMalloc(&m_impl->h_result, initial * sizeof(double)) != hipSuccess)
+        throw std::runtime_error("EEQSolverHip: hipHostMalloc h_result failed");
+    m_impl->h_result_size = initial;
+    if (hipHostMalloc(&m_impl->h_info, sizeof(int)) != hipSuccess)
+        throw std::runtime_error("EEQSolverHip: hipHostMalloc h_info failed");
+}
+
+EEQSolverHip::~EEQSolverHip()
+{
+    if (m_impl) {
+        if (m_impl->h_result) hipHostFree(m_impl->h_result);
+        if (m_impl->h_info)   hipHostFree(m_impl->h_info);
+        if (m_impl->handle)   rocblas_destroy_handle(m_impl->handle);
+        if (m_impl->stream)   hipStreamDestroy(m_impl->stream);
+    }
+}
+
+// Shared core: build A from device alpha/gam, Cholesky (LU fallback), build RHS, solve,
+// download z1/Z2. rhs0_host XOR rhs0_dev provides column 0 (atom electronegativity RHS).
+static bool eeqBuildFactorSolve(
+    EEQSolverHipImpl& impl, int& last_N, int N, int nfrag,
+    const double* cx, const double* cy, const double* cz,
+    const double* d_alpha, const double* d_gam,
+    const double* rhs0_host, const double* rhs0_dev,
+    const std::vector<int>& fraglist,
+    double* out_z1, double* out_Z2,
+    double cutoff_sq, bool force_refactor)
+{
+    const int nrhs = nfrag + 1;
+    const bool do_refactor = force_refactor || !impl.m_has_cached_factor || (N != last_N);
+
+    auto buildMatrix = [&]() {
+        int n_lower = N * (N + 1) / 2;
+        int block = 256, grid = (n_lower + block - 1) / block;
+        k_eeq_build_matrix_hip<<<grid, block, 0, impl.stream>>>(
+            N, cx, cy, cz, d_alpha, d_gam, impl.d_A.ptr, cutoff_sq);
+    };
+
+    if (do_refactor) {
+        buildMatrix();
+        // Cholesky
+        if (rocsolver_dpotrf(impl.handle, rocblas_fill_lower, N, impl.d_A.ptr, N,
+                             impl.d_info.ptr) != rocblas_status_success) return false;
+        if (hipMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int),
+                           hipMemcpyDeviceToHost, impl.stream) != hipSuccess) return false;
+        if (hipStreamSynchronize(impl.stream) != hipSuccess) return false;
+
+        if (*impl.h_info != 0) {
+            // Indefinite -> LU with partial pivoting (potrf corrupted A, rebuild first)
+            impl.m_last_chol_info = *impl.h_info;
+            buildMatrix();
+            if (rocsolver_dgetrf(impl.handle, N, N, impl.d_A.ptr, N, impl.d_lu_pivots.ptr,
+                                 impl.d_info.ptr) != rocblas_status_success) return false;
+            if (hipMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int),
+                               hipMemcpyDeviceToHost, impl.stream) != hipSuccess) return false;
+            if (hipStreamSynchronize(impl.stream) != hipSuccess) return false;
+            if (*impl.h_info != 0) { impl.m_has_cached_factor = false; return false; }
+            impl.m_using_lu = true;
+        } else {
+            impl.m_using_lu = false;
+            impl.m_last_chol_info = 0;
+        }
+        impl.m_has_cached_factor = true;
+        last_N = N;
+    }
+
+    // Build RHS columns
+    const int rhs_size = N * nrhs;
+    if (impl.d_rhs.n < rhs_size) impl.d_rhs.alloc(rhs_size);
+    if (rhs0_dev) {
+        if (hipMemcpy(impl.d_rhs.ptr, rhs0_dev, N * sizeof(double),
+                      hipMemcpyDeviceToDevice) != hipSuccess) return false;
+    } else {
+        if (hipMemcpy(impl.d_rhs.ptr, rhs0_host, N * sizeof(double),
+                      hipMemcpyHostToDevice) != hipSuccess) return false;
+    }
+    if (nfrag > 0) {
+        impl.m_h_rhs_cache.assign(N * nfrag, 0.0);
+        for (int f = 0; f < nfrag; ++f) {
+            double* col = impl.m_h_rhs_cache.data() + f * N;
+            if (fraglist.empty()) {
+                if (f == 0) for (int j = 0; j < N; ++j) col[j] = 1.0;
+            } else {
+                for (int j = 0; j < N; ++j) if (fraglist[j] == f + 1) col[j] = 1.0;
+            }
+        }
+        if (hipMemcpy(impl.d_rhs.ptr + N, impl.m_h_rhs_cache.data(),
+                      N * nfrag * sizeof(double), hipMemcpyHostToDevice) != hipSuccess)
+            return false;
+    }
+
+    // Solve
+    rocblas_status st = impl.m_using_lu
+        ? rocsolver_dgetrs(impl.handle, rocblas_operation_none, N, nrhs,
+                           impl.d_A.ptr, N, impl.d_lu_pivots.ptr, impl.d_rhs.ptr, N)
+        : rocsolver_dpotrs(impl.handle, rocblas_fill_lower, N, nrhs,
+                           impl.d_A.ptr, N, impl.d_rhs.ptr, N);
+    if (st != rocblas_status_success) return false;
+
+    ensureHResultHip(impl, rhs_size);
+    if (hipMemcpyAsync(impl.h_result, impl.d_rhs.ptr, rhs_size * sizeof(double),
+                       hipMemcpyDeviceToHost, impl.stream) != hipSuccess) return false;
+    if (hipStreamSynchronize(impl.stream) != hipSuccess) return false;
+
+    std::memcpy(out_z1, impl.h_result, N * sizeof(double));
+    if (nfrag > 0) std::memcpy(out_Z2, impl.h_result + N, N * nfrag * sizeof(double));
+    return true;
+}
+
+bool EEQSolverHip::solve(
+    int natoms, int nfrag,
+    const double* cx, const double* cy, const double* cz,
+    const double* alpha_corrected, const double* gam_corrected,
+    const std::vector<int>& fraglist,
+    const double* rhs_atoms, const double* /*rhs_constraints*/,
+    double* out_z1, double* out_Z2, double cutoff_sq, bool force_refactor)
+{
+    const int N = natoms;
+    m_impl->d_alpha.upload(alpha_corrected, N);
+    m_impl->d_gam.upload(gam_corrected, N);
+    return eeqBuildFactorSolve(*m_impl, m_last_N, N, nfrag, cx, cy, cz,
+                               m_impl->d_alpha.ptr, m_impl->d_gam.ptr,
+                               rhs_atoms, nullptr, fraglist, out_z1, out_Z2,
+                               cutoff_sq, force_refactor);
+}
+
+bool EEQSolverHip::solveWithDeviceRHS(
+    int natoms, int nfrag,
+    const double* cx, const double* cy, const double* cz,
+    const double* d_alpha_corrected, const double* d_gam_corrected,
+    const double* d_rhs_atoms, const double* /*d_rhs_constraints*/,
+    const std::vector<int>& fraglist,
+    double* out_z1, double* out_Z2, double cutoff_sq, bool force_refactor)
+{
+    return eeqBuildFactorSolve(*m_impl, m_last_N, natoms, nfrag, cx, cy, cz,
+                               d_alpha_corrected, d_gam_corrected,
+                               nullptr, d_rhs_atoms, fraglist, out_z1, out_Z2,
+                               cutoff_sq, force_refactor);
+}
+
+bool EEQSolverHip::solveAndComputeCharges(int, int, const double*, const double*, const double*,
+                                          const double*, const double*, const std::vector<int>&,
+                                          const double*, const double*, double*, double) {
+    return false;  // not used in production (CUDA marks it deprecated too)
+}
+
+// Device-resident GPU-Schur / PCG / batched variants: not ported. Returning false routes
+// the host wrapper to solveWithDeviceRHS()/solve() + its own exact CPU Schur complement.
+double* EEQSolverHip::getDeviceChargesPtr() { return nullptr; }
+bool    EEQSolverHip::isUsingLUFallback() const { return m_impl->m_using_lu; }
+int     EEQSolverHip::getLastCholInfo() const { return m_impl->m_last_chol_info; }
+
+bool EEQSolverHip::solveWithDeviceRHSAndGPUSchur(int, int, const double*, const double*, const double*,
+                                                 const double*, const double*, const double*,
+                                                 const std::vector<int>&, double, double, bool) {
+    return false;
+}
+
+bool EEQSolverHip::solveWithDeviceRHSAndGPUSchurGeneral(int, int, const double*, const double*, const double*,
+                                                        const double*, const double*, const double*,
+                                                        const std::vector<int>&, const std::vector<double>&,
+                                                        double, bool) {
+    return false;
+}
+
+bool EEQSolverHip::solveWithDeviceRHSAndGPUPCG(int, int, const double*, const double*, const double*,
+                                               const double*, const double*, const double*,
+                                               const std::vector<int>&, const std::vector<double>&,
+                                               int, double, double, bool) {
+    return false;
+}
+
+bool EEQSolverHip::solveWithDeviceRHSAndGPUSchurBatched(int, int, const double*, const double*, const double*,
+                                                        const double*, const double*, const double*,
+                                                        const std::vector<double>&, double, bool) {
+    return false;
+}
+
+void EEQSolverHip::uploadFragmentTopology(int /*nfrag*/, const std::vector<int>& fraglist, int /*natoms*/) {
+    m_impl->m_fraglist = fraglist;
+    m_impl->m_frag_topo_valid = true;  // marks nfrag>1 GPU-applicable -> solveWithDeviceRHS + CPU Schur
+}
+bool   EEQSolverHip::isFragmentTopoValid() const { return m_impl->m_frag_topo_valid; }
+double EEQSolverHip::getMinFragmentDistanceSq() const { return m_impl->m_min_frag_dist_sq; }
+
+void EEQSolverHip::updateMinFragmentDistance(const double* hx, const double* hy, const double* hz, int natoms) {
+    double mind = -1.0;
+    const std::vector<int>& fl = m_impl->m_fraglist;
+    if (!fl.empty() && static_cast<int>(fl.size()) == natoms) {
+        mind = 1e300;
+        for (int i = 0; i < natoms; ++i)
+            for (int j = i + 1; j < natoms; ++j)
+                if (fl[i] != fl[j]) {
+                    double dx = hx[i]-hx[j], dy = hy[i]-hy[j], dz = hz[i]-hz[j];
+                    double d2 = dx*dx + dy*dy + dz*dz;
+                    if (d2 < mind) mind = d2;
+                }
+        if (mind == 1e300) mind = -1.0;
+    }
+    m_impl->m_min_frag_dist_sq = mind;
+}

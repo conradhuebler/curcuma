@@ -90,6 +90,8 @@ option(USE_ROCM
     "Enable ROCm/HIP-accelerated GPU (gfnff/gfn1/gfn2 -gpu rocm, requires ROCm toolkit)" OFF)
 option(USE_ROCM_XTB
     "Enable ROCm/HIP-accelerated native xTB SCF/integrals/gradient (gfn1/gfn2 -gpu rocm)" ${USE_ROCM})
+option(USE_ROCM_GFNFF
+    "Enable ROCm/HIP-accelerated GFN-FF energy/gradient (gfnff -gpu rocm)" ${USE_ROCM})
 
 # Claude Generated (June 2026): Vulkan-compute-accelerated GFN-FF + native xTB
 # (-gpu vulkan). Hand-written SPIR-V compute shaders (no BLAS/LAPACK on Vulkan).
@@ -1053,6 +1055,77 @@ if(USE_ROCM)
 
         message(STATUS "ROCm native xTB enabled: gfn1/gfn2 -gpu rocm available")
     endif()
+
+    # ---- ROCm GFN-FF (gfnff -gpu rocm) -------------------------------------
+    # Single-TU HIP port of cuda/{gfnff_kernels,ff_workspace_gpu,eeq_solver_gpu,gpu_utils}.
+    # Same EXTERNAL_OBJECT pattern as the xTB block: hipcc -c -> one .o, g++ links it.
+    # USE_D3/USE_D4 are NOT passed here — the .hip pulls them from this build's generated
+    # global_config.h (-I${PROJECT_BINARY_DIR}), so the device TU and curcuma_core never
+    # disagree on the dispersion backend. GFN-FF uses its own D4 (dispersion/), so configure
+    # with -DUSE_D4=ON -DUSE_D3=OFF.
+    if(USE_ROCM_GFNFF)
+        if(NOT HIPCC_EXECUTABLE)
+            find_program(HIPCC_EXECUTABLE hipcc REQUIRED PATHS /opt/rocm/bin)
+        endif()
+        if(NOT DEFINED ROCM_GPU_ARCH)
+            set(ROCM_GPU_ARCH "gfx1150" CACHE STRING "HIP offload arch (rocminfo | grep gfx)")
+        endif()
+
+        # FMT_HEADER_ONLY: curcuma_core links fmt::fmt-header-only (INTERFACE define), but the
+        # hipcc custom command does not inherit that target's compile defs, so set it here too —
+        # otherwise the device TU references the non-inline fmt::vprint and the g++ link fails.
+        set(_hip_ff_defs -DUSE_ROCM_GFNFF -D__HIP_PLATFORM_AMD__ -DFMT_HEADER_ONLY)
+        if(rocsolver_FOUND AND rocblas_FOUND)
+            if(NOT ROCM_ROCSOLVER)
+                find_library(ROCM_ROCSOLVER rocsolver REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64)
+                find_library(ROCM_ROCBLAS   rocblas   REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64)
+            endif()
+            list(APPEND _hip_ff_defs -DHAVE_ROCSOLVER -DHAVE_ROCBLAS)
+        endif()
+
+        set(_hip_ff_src ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/gfnff_rocm.hip)
+        set(_hip_ff_obj ${CMAKE_CURRENT_BINARY_DIR}/gfnff_rocm.hip.o)
+        add_custom_command(
+            OUTPUT  ${_hip_ff_obj}
+            COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
+                    ${_hip_ff_defs}
+                    -I${PROJECT_SOURCE_DIR} -I${PROJECT_BINARY_DIR}
+                    -I${PROJECT_SOURCE_DIR}/external
+                    -I${PROJECT_SOURCE_DIR}/external/fmt/include
+                    -I${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
+                    -I${PROJECT_SOURCE_DIR}/external/cpp-d4/include
+                    -I${PROJECT_SOURCE_DIR}/external/LBFGSpp/include
+                    -I${PROJECT_SOURCE_DIR}/external/ripser
+                    -I/opt/rocm/include
+                    ${_hip_ff_src} -o ${_hip_ff_obj}
+            DEPENDS ${_hip_ff_src}
+            COMMENT "Compiling HIP GFN-FF kernels with hipcc (arch ${ROCM_GPU_ARCH})"
+            VERBATIM)
+        add_custom_target(curcuma_hip_gfnff DEPENDS ${_hip_ff_obj})
+        set_source_files_properties(${_hip_ff_obj} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+
+        target_sources(curcuma_core PRIVATE
+            src/core/energy_calculators/qm_methods/gfnff_hip_method.cpp
+            ${_hip_ff_obj})
+        add_dependencies(curcuma_core curcuma_hip_gfnff)
+        target_include_directories(curcuma_core PRIVATE /opt/rocm/include)
+        target_link_libraries(curcuma_core ${ROCM_HIP_RT})
+        if(rocsolver_FOUND AND rocblas_FOUND)
+            target_link_libraries(curcuma_core ${ROCM_ROCSOLVER} ${ROCM_ROCBLAS})
+        endif()
+        target_compile_definitions(curcuma_core PUBLIC USE_ROCM_GFNFF)
+        # The g++-compiled host wrapper needs the HIP platform macro for <hip/hip_runtime.h>
+        # (single host-side hipMemcpy for the GPU-Schur charge download).
+        set(_ff_wrap_defs "__HIP_PLATFORM_AMD__")
+        if(rocsolver_FOUND AND rocblas_FOUND)
+            list(APPEND _ff_wrap_defs "HAVE_ROCSOLVER")
+        endif()
+        set_source_files_properties(
+            src/core/energy_calculators/qm_methods/gfnff_hip_method.cpp
+            PROPERTIES COMPILE_DEFINITIONS "${_ff_wrap_defs}")
+        message(STATUS "ROCm GFN-FF enabled: gfnff -gpu rocm available")
+    endif()
+
     message(STATUS "ROCm: rocBLAS=${rocblas_FOUND} rocSOLVER=${rocsolver_FOUND}")
 endif()
 

@@ -182,6 +182,41 @@ On an **AMD Radeon 890M (gfx1150)**, build `release_rocm/` (`-DUSE_ROCM_XTB=ON`,
 - Stage 0 (no rocSOLVER): device handshake + CPU fallback, energies bit-identical.
 - Default non-ROCm `release/` build stays green (cli_curcumaopt_*/cli_rmsd_* 11/11).
 
-What was **NOT** tested: large systems (iGPU FP64 is slow — correctness milestone, not
-performance), discrete/CDNA GPUs, MD, GFN-FF on ROCm; the overlap/gradient cover s/p only
+What was **NOT** tested (native xTB): large systems (iGPU FP64 is slow — correctness
+milestone, not performance), discrete/CDNA GPUs, MD; the overlap/gradient cover s/p only
 (H/C/N/O...), no d shells (as the CPU native path).
+
+## GFN-FF on ROCm (`-gpu rocm`, `USE_ROCM_GFNFF`, June 2026) — 🤖 machine-tested
+
+Separate from the native xTB ROCm path above; mirrors the CUDA GFN-FF GPU pipeline.
+
+- **Build**: `cmake -DUSE_ROCM=ON -DUSE_ROCM_GFNFF=ON -DUSE_D4=OFF -DUSE_D3=OFF
+  -DROCM_GPU_ARCH=gfx1150 -DCMAKE_PREFIX_PATH=/opt/rocm` (a dedicated `release_rocm/` dir, not
+  the canonical CPU `release/`). Needs `rocsolver` + `rocblas`.
+- **Device code** (`ff_methods/rocm/`): `gfnff_rocm.hip` is a **single** hipcc TU (the
+  single-TU rule avoids cross-TU device linking so the final g++ link stays libgomp-safe, same
+  reason as `xtb_hip_context.hip`). It bundles the hipified kernels (`gfnff_kernels_hip.h`),
+  SoA helpers (`gfnff_soa_hip.h`), the workspace impl (port of `cuda/ff_workspace_gpu.cu` —
+  3 streams + hipGraph), gpu-utils, and the EEQ solver (`eeq_solver_hip.hiph`). Distinct class
+  names `FFWorkspaceHip`/`EEQSolverHip` ⇒ **zero change to the CUDA path**, both backends can
+  coexist. Host wrapper `qm_methods/gfnff_hip_method.cpp` (g++) is a rename-copy of the CUDA
+  wrapper; factory routes `-gpu rocm` → `GFNFFHipComputationalMethod`.
+- **Warp reduction**: HIP 7.x requires a 64-bit `__shfl_down_sync` mask (AMD wavefronts can be
+  64 lanes). gfx11xx/RDNA HIP compute is wave32, so the 32-lane indexing stays correct;
+  `warpReduceSum` now passes `0xFFFFFFFFFFFFFFFFull`.
+- **EEQ**: `solveWithDeviceRHS`/`solve` build the N×N Coulomb matrix on device and factor it
+  with rocSOLVER `dpotrf` (LU `dgetrf` fallback for indefinite matrices), solving `[b | Cᵀ]`
+  with `dpotrs`/`dgetrs` → z1/Z2. The host wrapper's **exact CPU Schur complement** applies the
+  charge constraint (works for nfrag=1 and nfrag>1). The device-resident GPU-Schur/PCG/batched
+  variants are intentionally not ported (they return false → CPU-Schur path).
+- **Validated** (Radeon 890M/gfx1150): single-point **energy and gradient norm** match CPU
+  ≤1e-7 Eh / Eh·Bohr⁻¹ on water, CH4, caffeine, 231-atom `complex` (FP reduction-order only);
+  `-opt` trajectories track CPU (small FP accumulation over steps). `ctest -R
+  cli_gfnff_gpu_02_rocm_singlepoint` (caffeine, label `rocm`).
+- **NOT done / honest**: built with `USE_D4=OFF` (this box lacks LAPACKE; the external
+  `curcuma_d4`/`dftd4interface` lib hard-links `lapacke`). GFN-FF therefore used its free-atom
+  dispersion fallback on **both** CPU and GPU, so the GPU==CPU parity is real but the energies
+  are not yet true-D4 GFN-FF. GFN-FF's own D4 (`dispersion/d4param_generator`, self-contained,
+  cpp-d4 headers only) is the intended path; decoupling it from the legacy external D4 lib so
+  `USE_D4=ON` needs no LAPACKE is the open item. Also untested: MD, multi-fragment charge
+  systems beyond the small set, discrete/CDNA GPUs, performance (residency only).

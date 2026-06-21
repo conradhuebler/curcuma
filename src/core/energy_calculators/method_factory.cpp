@@ -34,6 +34,9 @@
 #ifdef USE_CUDA
 #include "qm_methods/gfnff_gpu_method.h"
 #endif
+#ifdef USE_ROCM_GFNFF
+#include "qm_methods/gfnff_hip_method.h"
+#endif
 #if defined(USE_CUDA) && defined(USE_CUDA_XTB)
 #include "qm_methods/xtb_gpu_method.h"
 #endif
@@ -481,9 +484,14 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
             CurcumaLogger::warn("To enable CUDA, recompile with: cmake -DUSE_CUDA=ON");
 #endif
         } else if (gpu_mode == "rocm") {
-            // Stage 0: the GFN-FF HIP kernels (rocm/ mirror of the CUDA gfnff kernels)
-            // are not yet ported; native xTB (gfn1/gfn2) -gpu rocm is the live path.
-            CurcumaLogger::warn("GFN-FF -gpu rocm: HIP kernels not yet ported; using CPU.");
+#ifdef USE_ROCM_GFNFF
+            CurcumaLogger::info("GFN-FF: using GPU acceleration (ROCm/HIP)");
+            return std::make_unique<GFNFFHipComputationalMethod>("gfnff", config);
+#else
+            CurcumaLogger::warn("GPU acceleration requested (-gpu rocm) but Curcuma was compiled "
+                "without ROCm GFN-FF support. Falling back to CPU.");
+            CurcumaLogger::warn("To enable ROCm GFN-FF, recompile with: cmake -DUSE_ROCM=ON -DUSE_ROCM_GFNFF=ON");
+#endif
         } else if (gpu_mode == "vulkan") {
             CurcumaLogger::warn("GFN-FF -gpu vulkan: compute shaders not yet ported; using CPU.");
         } else if (gpu_mode != "none" && gpu_mode != "cpu" && !gpu_mode.empty()) {

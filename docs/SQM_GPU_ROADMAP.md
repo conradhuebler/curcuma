@@ -23,7 +23,7 @@ and is correct at every step. Stage numbers below match the CUDA stages in
 | 2b GFN2 device-resident multipole SCF | ✅ | ✅ (R-AP2) | ✅ (V-AP3) |
 | 4m nuclear gradient on device — GFN2 multipole | ✅ | ❌ **R-AP3** | ❌ **V-AP4** |
 | 5/6 device GFN2 potential + fully resident loop | ✅ | ❌ **R-AP4** (opt) | ❌ **V-AP5** (opt) |
-| GFN-FF on the GPU | partial | ❌ **R-AP5 / V-AP6** | ❌ |
+| GFN-FF on the GPU | ✅ (full) | ✅ energy+grad (June 2026); EEQ = rocSOLVER `dpotrf`/`dgetrf` + host CPU-Schur (device GPU-Schur/PCG not ported) | ❌ **V-AP6** |
 | in-SCF solvation (ALPB/GBSA) on device | ✅ | ❌ **X-AP1** | ❌ **X-AP1** |
 
 **Summary:** Vulkan now matches ROCm/CUDA on the full GFN1 stack — integrals, resident
