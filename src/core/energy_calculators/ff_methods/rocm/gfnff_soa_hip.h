@@ -155,7 +155,8 @@ struct CoulombSoA {
     CudaBuffer<int>    csr_partner;  ///< [2*n] partner atom per directed edge
     CudaBuffer<double> csr_gamma;    ///< [2*n] gamma_ij per directed edge
     CudaBuffer<double> csr_rcut;     ///< [2*n] r_cut per directed edge
-    int csr_N = 0;
+    int    csr_N = 0;
+    double r_cut_scalar = 0.0;       ///< uniform per-pair cutoff (for the dense N-body kernel)
 
     void upload(const std::vector<GFNFFCoulomb>& v, int natoms, hipStream_t stream = nullptr);
 };

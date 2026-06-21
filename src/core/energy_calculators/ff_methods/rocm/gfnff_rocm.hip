@@ -469,6 +469,77 @@ __global__ void k_coulomb_gather(
     blockReduceAddEnergy(local_E, energy);
 }
 
+// Claude Generated (June 2026): dense, coalesced, shared-memory-tiled N-body Coulomb for ROCm.
+// The CSR gather (k_coulomb_gather) removed the FP64-atomic contention but stayed memory-bound
+// (random cx[partner] reads). For the all-pairs GFN-FF Coulomb the partner set is "every other
+// atom", so a classic N-body tile — block-cooperatively stage a tile of (x,y,z,q,alpha) into
+// shared memory, every thread sweeps the tile for its own atom — turns the scattered reads into
+// coalesced ones and reuses each loaded atom blockDim times. gamma_ij = 1/sqrt(alpha_i+alpha_j)
+// is recomputed on the fly from the per-atom charge-corrected EEQ alpha (the exact value the CPU
+// baked into gamma_ij), so the result is bit-identical to k_coulomb. One thread owns atom a's
+// output (3 atomicAdd/atom, safe vs cross-stream grad writers). TILE == blockDim.x (<=256).
+__global__ void k_coulomb_dense(
+    int N,
+    const double* __restrict__ alpha,    // per-atom charge-corrected EEQ alpha (== gamma source)
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ charges,
+    double r_cut,
+    double*                    grad,
+    double*                    energy)
+{
+    __shared__ double sx[256], sy[256], sz[256], sq[256], sa[256];
+    const int tid = threadIdx.x;
+    const int a   = blockIdx.x * blockDim.x + tid;
+
+    const bool active = (a < N) && !isnan(charges[a]);
+    double xa = 0, ya = 0, za = 0, qa = 0, aa = 0;
+    if (a < N) { xa = cx[a]; ya = cy[a]; za = cz[a]; qa = charges[a]; aa = alpha[a]; }
+
+    double gx = 0.0, gy = 0.0, gz = 0.0, local_E = 0.0;
+    const double inv_sqrt_pi = 0.5641895835477563;
+
+    for (int tile = 0; tile < N; tile += blockDim.x) {
+        const int j = tile + tid;
+        if (j < N) { sx[tid] = cx[j]; sy[tid] = cy[j]; sz[tid] = cz[j];
+                     sq[tid] = charges[j]; sa[tid] = alpha[j]; }
+        __syncthreads();
+
+        if (active) {
+            const int jmax = min((int)blockDim.x, N - tile);
+            for (int t = 0; t < jmax; ++t) {
+                const int jg = tile + t;
+                if (jg == a) continue;
+                double dx = xa - sx[t];
+                double dy = ya - sy[t];
+                double dz = za - sz[t];
+                applyMIC(dx, dy, dz);
+                double r2  = dx*dx + dy*dy + dz*dz;
+                double rij = sqrt(r2);
+                if (rij <= r_cut && rij >= 1e-10) {
+                    double qj = sq[t];
+                    if (!isnan(qj)) {
+                        double g       = 1.0 / sqrt(aa + sa[t]);
+                        double gamma_r = g * rij;
+                        double erf_v   = erf(gamma_r);
+                        local_E += 0.5 * qa * qj * erf_v / rij;
+                        double exp_v = exp(-gamma_r * gamma_r);
+                        double derf  = g * exp_v * (2.0 * inv_sqrt_pi);
+                        double dEdr  = qa * qj * (derf / rij - erf_v / (rij * rij));
+                        double fac   = dEdr / rij;          // force on a = fac*(ra - rp)
+                        gx += fac*dx; gy += fac*dy; gz += fac*dz;
+                    }
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    if (active) add_grad(grad, a, gx, gy, gz);
+    blockReduceAddEnergy(local_E, energy);
+}
+
 // ============================================================================
 // Kernel 4: Bond Stretching
 // r0 = (r0_base_i + cnfak_i*cn[i] + r0_base_j + cnfak_j*cn[j] + rabshift) * ff
@@ -3749,6 +3820,7 @@ void CoulombSoA::upload(const std::vector<GFNFFCoulomb>& v, int natoms, hipStrea
     idx_j.upload(h_j, stream);
     gamma_ij.upload(h_gamma, stream);
     r_cut.upload(h_rcut, stream);
+    r_cut_scalar = h_rcut[0];   // uniform across pairs (global coulomb_pair_r_cut / eeq cutoff)
 
     // Build per-atom CSR adjacency for the gather kernel (k_coulomb_gather). Each undirected
     // pair (i,j) becomes two directed edges (i->j, j->i) carrying the same gamma_ij / r_cut.
@@ -5832,21 +5904,35 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
 
     // k_coulomb (needs EEQ charges)
     if (m_coulomb_enabled && impl.coulomb.n > 0) {
-        // ROCm: per-atom gather (one WORKGROUP per atom) instead of the pair kernel — RDNA FP64
-        // atomic contention on grad made the pair k_coulomb the dominant MD cost. Bit-identical.
-        // grid = N atoms, block = 128 lanes split each atom's partner loop (<=256 for shared).
+        // ROCm: the pair k_coulomb's ~6M FP64 atomicAdd dominated the MD step. Preferred path is
+        // the dense, coalesced, shared-mem-tiled N-body kernel (k_coulomb_dense) which also fixes
+        // the gather's random-memory bottleneck; it needs the per-atom charge-corrected EEQ alpha
+        // (== the source of the precomputed gamma_ij) to recompute gamma on the fly. If the EEQ
+        // topology alpha is not resident, fall back to the CSR gather (still atomic-light).
         const int coul_block = 128;
-        k_coulomb_gather<<<impl.coulomb.csr_N, coul_block, 0, impl.stream_pairwise>>>(
-            impl.coulomb.csr_N,
-            impl.coulomb.csr_off.ptr, impl.coulomb.csr_partner.ptr,
-            impl.coulomb.csr_gamma.ptr, impl.coulomb.csr_rcut.ptr,
-            impl.coords.d_x.ptr,
-            impl.coords.d_y.ptr,
-            impl.coords.d_z.ptr,
-            impl.d_charges.ptr,
-            impl.d_grad.ptr,
-            &impl.d_energies.ptr[impl.E_COUL]);
-        checkCuda(hipGetLastError(), "k_coulomb_gather launch");
+        if (impl.eeq_topo.valid && impl.eeq_topo.d_alpha_corrected.ptr) {
+            int grid = (impl.coulomb.csr_N + coul_block - 1) / coul_block;
+            k_coulomb_dense<<<grid, coul_block, 0, impl.stream_pairwise>>>(
+                impl.coulomb.csr_N,
+                impl.eeq_topo.d_alpha_corrected.ptr,
+                impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                impl.d_charges.ptr, impl.coulomb.r_cut_scalar,
+                impl.d_grad.ptr,
+                &impl.d_energies.ptr[impl.E_COUL]);
+            checkCuda(hipGetLastError(), "k_coulomb_dense launch");
+        } else {
+            k_coulomb_gather<<<impl.coulomb.csr_N, coul_block, 0, impl.stream_pairwise>>>(
+                impl.coulomb.csr_N,
+                impl.coulomb.csr_off.ptr, impl.coulomb.csr_partner.ptr,
+                impl.coulomb.csr_gamma.ptr, impl.coulomb.csr_rcut.ptr,
+                impl.coords.d_x.ptr,
+                impl.coords.d_y.ptr,
+                impl.coords.d_z.ptr,
+                impl.d_charges.ptr,
+                impl.d_grad.ptr,
+                &impl.d_energies.ptr[impl.E_COUL]);
+            checkCuda(hipGetLastError(), "k_coulomb_gather launch");
+        }
     }
     // Re-record pairwise event to include k_coulomb completion.
     // WP4: event_p2_pairwise — phase-2-dedicated, never aliased with phase-1 graph.
