@@ -10,6 +10,31 @@
 #include "ff_workspace_hip.h"
 #include "eeq_solver_hip.h"
 
+#include <csignal>
+// Claude Generated (June 2026): GPU-wedge hardening. SIGKILL (kill -9) can't be caught, but
+// SIGINT (Ctrl-C), SIGTERM (kill / `timeout`) and SIGABRT CAN — and if the process dies while a
+// HIP kernel is in flight without tearing down the device, the RDNA compute queue can wedge
+// (every later submission then hangs at init until a GPU reset/reboot). We install a one-shot
+// handler that best-effort resets the device, restores the default disposition, and re-raises,
+// so an interrupted run cleans up the GPU instead of leaving it hung. (hipDeviceReset from a
+// handler is not strictly async-signal-safe, but a clean GPU on abort beats a wedged one; the
+// only true non-recoverable case is kill -9, which the operator must simply avoid.)
+namespace {
+volatile std::sig_atomic_t g_hip_sig_installed = 0;
+void hipCleanupSignalHandler(int sig) {
+    hipDeviceReset();
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
+}
+void installHipSignalHandlers() {
+    if (g_hip_sig_installed) return;
+    g_hip_sig_installed = 1;
+    std::signal(SIGINT,  hipCleanupSignalHandler);
+    std::signal(SIGTERM, hipCleanupSignalHandler);
+    std::signal(SIGABRT, hipCleanupSignalHandler);
+}
+} // namespace
+
 // ===================== kernels (cuda/gfnff_kernels.cu) =====================
 #include "hip/hip_runtime.h"
 /*
@@ -4504,6 +4529,9 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
                                 const std::vector<int>& atom_types)
     : m_natoms(natoms)
 {
+    // GPU-wedge hardening: reset the device on Ctrl-C / kill / abort (see top of file).
+    installHipSignalHandlers();
+
     // Verify CUDA device
     int dev_count = 0;
     checkCuda(hipGetDeviceCount(&dev_count), "hipGetDeviceCount");
