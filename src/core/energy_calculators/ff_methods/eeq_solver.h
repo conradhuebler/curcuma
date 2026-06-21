@@ -925,6 +925,14 @@ private:
     // WP7-B (May 2026): warn-once flag for CPU "batched" → cholesky fallback
     mutable bool m_batched_cpu_warned = false;
 
+    // WP7-D (Jun 2026): contact-aware dispatch. Minimum inter-fragment atom distance
+    // (Bohr) at the current geometry, computed in calculateFinalCharges from the packed
+    // distances + topology->fraglist and read by dispatchSolve. -1 = not computed
+    // (single fragment, or no topology) → treated as "in contact" so the safe exact
+    // path is chosen. The approximate batched solver drops cross-fragment Coulomb, so it
+    // is auto-selected only when fragments are well-separated (>= eeq_batched_min_distance).
+    mutable double m_contact_min_dist = -1.0;
+
     // Convergence statistics — accumulate across calls, print summary instead of per-call spam
     // Claude Generated (April 2026)
     mutable int m_pcg_total_calls = 0;       ///< Total PCG solve calls
@@ -1045,8 +1053,9 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "EEQ linear solve algorithm: cholesky | batched | pcg | auto | lu (legacy). "
           "GPU paths: cholesky → WP5-A/WP7-A (exact, full N×N Cholesky); "
           "batched → WP7-B (per-fragment Cholesky, ignores cross-fragment Coulomb — "
-          "use only for well-separated fragments, see eeq_batched_min_distance). "
-          "CPU 'batched' logs a warning and falls back to cholesky. "
+          "use only for well-separated fragments, see eeq_batched_min_distance; "
+          "auto/pcg no longer auto-select it for in-contact fragments, see "
+          "eeq_contact_prefer_exact). "
           "Legacy alias 'schur_cholesky' maps to 'cholesky'.",
           "Algorithm", {})
     PARAM(max_pcg_iterations, Int, 200,
@@ -1074,9 +1083,16 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Distance cutoff in Bohr for Coulomb matrix sparsification (0 = no cutoff, matches Fortran goed_gfnff). Non-zero values violate Hellmann-Feynman vs. the full Coulomb energy and degrade MD energy conservation.", "Advanced", {})
     PARAM(eeq_batched_min_distance, Double, 15.0,
           "Minimum atom-atom distance between different fragments (Bohr) below which "
-          "the batched EEQ solver logs a warning. Batched still runs — the warning "
-          "alerts the user that cross-fragment Coulomb (which batched ignores) may be "
-          "non-negligible. 0 = no warning. Default 15 Bohr ≈ 8 Å.",
+          "fragments are considered in contact. Used both to warn for an explicit batched "
+          "solve and (with eeq_contact_prefer_exact) to auto-route in-contact systems to "
+          "the exact solver. 0 = disable the check. Default 15 Bohr ~ 8 Angstrom.",
+          "Advanced", {})
+    PARAM(eeq_contact_prefer_exact, Bool, true,
+          "Auto/PCG dispatch: when a highly fragmented system has fragments in contact "
+          "(min inter-fragment distance below eeq_batched_min_distance, or unknown), prefer "
+          "the exact solver (SchurCholesky/PCG+block-Jacobi, cross-fragment Coulomb retained) "
+          "over the approximate batched per-fragment solve. Set false to keep the old "
+          "density-only batched auto-selection.",
           "Advanced", {})
     PARAM(dump_charges, Bool, false,
           "Save Phase 1 and Phase 2 charges to charges_dump_N<size>.json for analysis", "Advanced", {})

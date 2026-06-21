@@ -3224,6 +3224,66 @@ __global__ void k_pcg_dir_update(
 }
 
 // ============================================================================
+// WP7-D: GPU block-Jacobi preconditioner (Jun 2026, Claude Generated)
+// ============================================================================
+
+// Mirror the lower triangle of each per-fragment block into the upper triangle.
+// Column-major: element (row, col) at col*Nf + row; potri(LOWER) fills row >= col.
+__global__ void k_eeq_symmetrize_blocks(
+    int           nfrag,
+    double*       __restrict__ d_A_blocks,
+    const int*    __restrict__ frag_sizes,
+    const int*    __restrict__ frag_offsets_A)
+{
+    int f = blockIdx.x;
+    if (f >= nfrag) return;
+    int Nf = frag_sizes[f];
+    if (Nf <= 0) return;
+    double* A = d_A_blocks + frag_offsets_A[f];
+    for (int idx = threadIdx.x; idx < Nf * Nf; idx += blockDim.x) {
+        int col = idx / Nf;
+        int row = idx % Nf;
+        if (row < col)                       // upper entry (garbage after potri LOWER)
+            A[col * Nf + row] = A[row * Nf + col];  // = lower partner (col,row)
+    }
+}
+
+// z = blockdiag(A_ff^-1)·r. One thread-block per fragment; gather/scatter via the
+// fragment-sorted atom map so r/z stay in global atom order (matches the CPU
+// BlockJacobiPC::apply contract). Dynamic shared mem stages r_f (max_frag_N doubles).
+__global__ void k_eeq_block_jacobi_apply(
+    int           nfrag,
+    const double* __restrict__ d_Ainv_blocks,
+    const int*    __restrict__ frag_sizes,
+    const int*    __restrict__ frag_offsets_A,
+    const int*    __restrict__ frag_atom_offsets,
+    const int*    __restrict__ frag_atom_map,
+    const double* __restrict__ d_r,
+    double*       __restrict__ d_z)
+{
+    extern __shared__ double s_rf[];   // [Nf] staged residual for this fragment
+    int f = blockIdx.x;
+    if (f >= nfrag) return;
+    int Nf = frag_sizes[f];
+    if (Nf <= 0) return;
+    int atom_start    = frag_atom_offsets[f];
+    const double* Ainv = d_Ainv_blocks + frag_offsets_A[f];
+
+    // Stage r_f into shared memory (gather global → local).
+    for (int li = threadIdx.x; li < Nf; li += blockDim.x)
+        s_rf[li] = d_r[frag_atom_map[atom_start + li]];
+    __syncthreads();
+
+    // z_f = Ainv_f · r_f  (symmetric, column-major: Ainv[(col)*Nf + row]).
+    for (int li = threadIdx.x; li < Nf; li += blockDim.x) {
+        double acc = 0.0;
+        for (int lj = 0; lj < Nf; ++lj)
+            acc += Ainv[lj * Nf + li] * s_rf[lj];
+        d_z[frag_atom_map[atom_start + li]] = acc;   // scatter local → global
+    }
+}
+
+// ============================================================================
 // WP2: k_build_eeq_rhs — GPU-side EEQ RHS construction
 // Claude Generated (May 2026): Eliminates CPU sync for EEQ RHS per MD step.
 // chi_corr and cnf are topology-constant (uploaded once by uploadEEQTopologyParams).

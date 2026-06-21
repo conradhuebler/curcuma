@@ -715,6 +715,37 @@ __global__ void k_pcg_dir_update(
     double*       __restrict__ d_p_out);
 
 // ============================================================================
+// WP7-D: GPU block-Jacobi preconditioner for the PCG (Jun 2026)
+// Port of the CPU EEQSolver::BlockJacobiPC (per-fragment exact inverse). Replaces
+// the diagonal Jacobi z = M_inv⊙r with z = blockdiag(A_ff^-1)·r for nfrag>=2,
+// cutting PCG iterations from ~30-100 to ~2-5 on many-fragment (solvent) systems.
+// Reference: eeq_solver.cpp BlockJacobiPC::apply / buildBlockJacobi.
+// ============================================================================
+
+/// Symmetrize each per-fragment block in place (mirror lower → upper triangle).
+/// cusolverDnDpotri(LOWER) leaves the upper triangle untouched; the block-Jacobi
+/// apply does a full GEMV, so the upper triangle must be filled. One block / fragment.
+__global__ void k_eeq_symmetrize_blocks(
+    int           nfrag,
+    double*       __restrict__ d_A_blocks,    ///< [sum N_f²] explicit inverses, column-major per block
+    const int*    __restrict__ frag_sizes,    ///< [nfrag] N_f
+    const int*    __restrict__ frag_offsets_A);///< [nfrag] start of fragment f's N_f² block
+
+/// Apply the block-Jacobi preconditioner: z = blockdiag(A_ff^-1)·r.
+/// One thread-block per fragment; r/z stay in global atom order, gather/scatter via
+/// frag_atom_map. d_Ainv_blocks holds the (symmetric) per-fragment inverse blocks.
+/// Dynamic shared memory: m_max_frag_N doubles (staged r_f).
+__global__ void k_eeq_block_jacobi_apply(
+    int           nfrag,
+    const double* __restrict__ d_Ainv_blocks, ///< [sum N_f²] symmetric inverses, column-major per block
+    const int*    __restrict__ frag_sizes,    ///< [nfrag] N_f
+    const int*    __restrict__ frag_offsets_A,///< [nfrag] start of fragment f's N_f² block
+    const int*    __restrict__ frag_atom_offsets,///< [nfrag+1] sorted-position start per fragment
+    const int*    __restrict__ frag_atom_map, ///< [N] sorted-position → global atom index
+    const double* __restrict__ d_r,           ///< [N] residual (global order)
+    double*       __restrict__ d_z);          ///< [N] preconditioned residual (global order)
+
+// ============================================================================
 // WP2: GPU-side EEQ RHS construction
 // ============================================================================
 

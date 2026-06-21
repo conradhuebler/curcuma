@@ -140,6 +140,11 @@ struct EEQSolverGPUImpl {
     CudaBuffer<double>  d_Z2_persistent;       ///< [N·nfrag] last Z2 columns
     bool                m_pcg_warm_valid = false;
     bool                m_pcg_M_inv_valid = false;  ///< Jacobi precond cache (re-extract on refactor)
+    // WP7-D (Jun 2026): block-Jacobi preconditioner. When valid, the PCG applies
+    // z = blockdiag(A_ff^-1)·r (exact per-fragment inverse, stored in d_A_blocks) instead
+    // of the diagonal Jacobi — far fewer iterations for many-fragment systems. Falls back
+    // to the diagonal (always extracted) when a fragment block is not SPD or too large.
+    bool                m_pcg_block_jacobi_valid = false;
     // Per-call scratch (size N — re-allocated when N grows):
     CudaBuffer<double>  d_pcg_M_inv;           ///< [N] 1/A[i,i]
     CudaBuffer<double>  d_pcg_r;               ///< [N] residual
@@ -1228,6 +1233,109 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurGeneral(
 //
 // Uses cuBLAS with POINTER_MODE_DEVICE for inner products; one D2H per iter for
 // |r|² convergence check. All work is on impl.stream — no extra sync until exit.
+// WP7-D (Jun 2026, Claude Generated): largest fragment a GPU block-Jacobi block may have.
+// Bounds the dynamic shared memory (max_frag_N doubles staged per block) and the O(N_f²)
+// per-thread inner GEMV. Larger fragments fall back to the diagonal Jacobi.
+static constexpr int GPU_BLOCK_JACOBI_MAX_NF = 2048;
+
+// Build the per-fragment block-Jacobi inverse blocks into impl.d_A_blocks (port of the CPU
+// EEQSolver::buildBlockJacobi). Builds each fragment's Coulomb block, Cholesky-factorizes it
+// (potrf), inverts it (potri), and symmetrizes. Sets impl.m_pcg_block_jacobi_valid. On any
+// non-SPD block or a too-large fragment, marks the PC invalid and the caller keeps the
+// (always-extracted) diagonal Jacobi. Runs only at PCG refactor; amortized across MD steps.
+static void buildBlockJacobiFactors(EEQSolverGPUImpl& impl, int nfrag,
+                                     const double* cx, const double* cy, const double* cz,
+                                     const double* d_alpha, const double* d_gam,
+                                     double cutoff_sq)
+{
+    impl.m_pcg_block_jacobi_valid = false;
+    if (nfrag < 2 || !impl.m_frag_topo_valid) return;
+    if (impl.m_max_frag_N <= 0 || impl.m_max_frag_N > GPU_BLOCK_JACOBI_MAX_NF) return;
+
+    const int total_pairs = impl.h_frag_offsets_pair[nfrag];
+    if (total_pairs <= 0) return;
+
+    // 1. Build per-fragment Coulomb blocks (column-major) into d_A_blocks.
+    //    Overwrites the WP6 batched factor cache → invalidate it.
+    impl.m_frag_refactored = false;
+    {
+        int block = 256;
+        int grid  = (total_pairs + block - 1) / block;
+        k_eeq_build_fragment_matrices<<<grid, block, 0, impl.stream>>>(
+            total_pairs, cx, cy, cz, d_alpha, d_gam,
+            impl.d_frag_sizes.ptr, impl.d_frag_offsets_A.ptr,
+            impl.d_frag_offsets_pair.ptr, impl.d_frag_atom_offsets.ptr,
+            impl.d_frag_atom_map.ptr, impl.d_A_blocks.ptr, nfrag, cutoff_sq);
+    }
+
+    // 2. Ensure workspace covers both potrf and potri for the largest fragment.
+    {
+        int lw_tri = 0, lw_inv = 0;
+        checkCusolverEEQ(
+            cusolverDnDpotrf_bufferSize(impl.cusolver_handle, CUBLAS_FILL_MODE_LOWER,
+                                        impl.m_max_frag_N, impl.d_A_blocks.ptr,
+                                        impl.m_max_frag_N, &lw_tri),
+            "bj potrf_bufferSize");
+        checkCusolverEEQ(
+            cusolverDnDpotri_bufferSize(impl.cusolver_handle, CUBLAS_FILL_MODE_LOWER,
+                                        impl.m_max_frag_N, impl.d_A_blocks.ptr,
+                                        impl.m_max_frag_N, &lw_inv),
+            "bj potri_bufferSize");
+        int lw = (lw_tri > lw_inv) ? lw_tri : lw_inv;
+        if (impl.d_frag_workspace.n < lw) { impl.d_frag_workspace.alloc(lw); impl.m_frag_ws_size = lw; }
+        else if (impl.m_frag_ws_size < lw) impl.m_frag_ws_size = lw;
+    }
+
+    // 3. Per-fragment potrf + potri → explicit inverse in the lower triangle.
+    for (int f = 0; f < nfrag; ++f) {
+        int     Nf    = impl.h_frag_sizes[f];
+        if (Nf <= 0) continue;
+        double* d_Af  = impl.d_A_blocks.ptr + impl.h_frag_offsets_A[f];
+
+        checkCusolverEEQ(
+            cusolverDnDpotrf(impl.cusolver_handle, CUBLAS_FILL_MODE_LOWER, Nf,
+                             d_Af, Nf, impl.d_frag_workspace.ptr, impl.m_frag_ws_size,
+                             impl.d_frag_info.ptr),
+            "bj potrf");
+        checkCudaEEQ(cudaMemcpyAsync(impl.h_info, impl.d_frag_info.ptr, sizeof(int),
+                                      cudaMemcpyDeviceToHost, impl.stream), "bj D2H info potrf");
+        checkCudaEEQ(cudaStreamSynchronize(impl.stream), "bj sync potrf");
+        if (*impl.h_info != 0) return;   // not SPD → keep diagonal Jacobi
+
+        checkCusolverEEQ(
+            cusolverDnDpotri(impl.cusolver_handle, CUBLAS_FILL_MODE_LOWER, Nf,
+                             d_Af, Nf, impl.d_frag_workspace.ptr, impl.m_frag_ws_size,
+                             impl.d_frag_info.ptr),
+            "bj potri");
+        checkCudaEEQ(cudaMemcpyAsync(impl.h_info, impl.d_frag_info.ptr, sizeof(int),
+                                      cudaMemcpyDeviceToHost, impl.stream), "bj D2H info potri");
+        checkCudaEEQ(cudaStreamSynchronize(impl.stream), "bj sync potri");
+        if (*impl.h_info != 0) return;   // singular → keep diagonal Jacobi
+    }
+
+    // 4. Mirror lower → upper so the apply can do a full symmetric GEMV.
+    k_eeq_symmetrize_blocks<<<nfrag, 256, 0, impl.stream>>>(
+        nfrag, impl.d_A_blocks.ptr, impl.d_frag_sizes.ptr, impl.d_frag_offsets_A.ptr);
+
+    impl.m_pcg_block_jacobi_valid = true;
+}
+
+// WP7-D: apply the PCG preconditioner — block-Jacobi when valid, else diagonal Jacobi.
+static inline void applyPrecondPCG(EEQSolverGPUImpl& impl, int N,
+                                    const double* d_r, double* d_z)
+{
+    if (impl.m_pcg_block_jacobi_valid) {
+        size_t shmem = (size_t)impl.m_max_frag_N * sizeof(double);
+        k_eeq_block_jacobi_apply<<<impl.m_nfrag_batched, 256, shmem, impl.stream>>>(
+            impl.m_nfrag_batched, impl.d_A_blocks.ptr,
+            impl.d_frag_sizes.ptr, impl.d_frag_offsets_A.ptr,
+            impl.d_frag_atom_offsets.ptr, impl.d_frag_atom_map.ptr, d_r, d_z);
+    } else {
+        int blk = 256, grd = (N + blk - 1) / blk;
+        k_pcg_apply_precond<<<grd, blk, 0, impl.stream>>>(N, impl.d_pcg_M_inv.ptr, d_r, d_z);
+    }
+}
+
 static bool runSinglePCG(EEQSolverGPUImpl& impl, int N,
                           const double* d_b, double* d_x,
                           int max_iter, double tol)
@@ -1256,8 +1364,7 @@ static bool runSinglePCG(EEQSolverGPUImpl& impl, int N,
     {
         int blk = 256, grd = (N + blk - 1) / blk;
         k_pcg_init_residual<<<grd, blk, 0, s>>>(N, d_b, impl.d_pcg_Ap.ptr, impl.d_pcg_r.ptr);
-        k_pcg_apply_precond<<<grd, blk, 0, s>>>(N, impl.d_pcg_M_inv.ptr,
-                                                 impl.d_pcg_r.ptr, impl.d_pcg_z.ptr);
+        applyPrecondPCG(impl, N, impl.d_pcg_r.ptr, impl.d_pcg_z.ptr);  // WP7-D: block-Jacobi or diagonal
         // Initial p ← z (use cublasDcopy for simplicity).
         checkCublasEEQ(cublasDcopy(blas, N, impl.d_pcg_z.ptr, 1, impl.d_pcg_p.ptr, 1),
                        "cublasDcopy p=z");
@@ -1327,12 +1434,8 @@ static bool runSinglePCG(EEQSolverGPUImpl& impl, int N,
 
         if (h_rnorm_sq < tol * tol) { converged = true; break; }
 
-        // z_new = M_inv · r ; rz_new = r · z_new
-        {
-            int blk = 256, grd = (N + blk - 1) / blk;
-            k_pcg_apply_precond<<<grd, blk, 0, s>>>(N, impl.d_pcg_M_inv.ptr,
-                                                      impl.d_pcg_r.ptr, impl.d_pcg_z.ptr);
-        }
+        // z_new = M_inv · r ; rz_new = r · z_new   (WP7-D: block-Jacobi or diagonal)
+        applyPrecondPCG(impl, N, impl.d_pcg_r.ptr, impl.d_pcg_z.ptr);
         checkCublasEEQ(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_DEVICE), "ptr dev");
         checkCublasEEQ(cublasDdot(blas, N, impl.d_pcg_r.ptr, 1, impl.d_pcg_z.ptr, 1,
                                   impl.d_pcg_dot_scratch.ptr /*[0]=rz_new*/),
@@ -1404,6 +1507,14 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUPCG(
                 N, impl.d_A.ptr, impl.d_pcg_M_inv.ptr);
         }
         impl.m_pcg_M_inv_valid = true;
+        // WP7-D (Jun 2026): build the per-fragment block-Jacobi inverse (nfrag>=2). On
+        // success the PCG applies the exact per-fragment inverse instead of the diagonal
+        // Jacobi (sets m_pcg_block_jacobi_valid); on failure the diagonal above is kept.
+        buildBlockJacobiFactors(impl, nfrag, cx, cy, cz,
+                                d_alpha_corrected, d_gam_corrected, cutoff_sq);
+        if (impl.m_pcg_block_jacobi_valid) {
+            CurcumaLogger::info("EEQ GPU PCG: block-Jacobi preconditioner active");
+        }
         // Note: do NOT touch m_last_N here — it is owned by the cuSOLVER paths
         // (WP5-A / WP7-A) and tracks their workspace allocation. PCG bypasses
         // cuSOLVER entirely, so writing m_last_N here would falsely tell the
@@ -1524,6 +1635,7 @@ void EEQSolverGPU::uploadFragmentTopology(int nfrag,
     impl.m_min_frag_distance_sq  = -1.0;  // WP7-B: invalidate on topology change
     impl.m_pcg_warm_valid        = false; // WP7-C: warm-start invalid after topology change
     impl.m_pcg_M_inv_valid       = false; // WP7-C: re-extract M_inv on next solve
+    impl.m_pcg_block_jacobi_valid = false; // WP7-D: rebuild block-Jacobi after topology change
     impl.m_nfrag_batched         = nfrag;
 
     // --- 1. Count atoms per fragment ---
@@ -1746,6 +1858,9 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurBatched(
 
     // --- 1. Build per-fragment Coulomb blocks (if refactorizing) ---
     if (do_refactor && total_pairs > 0) {
+        // WP7-D: the batched path overwrites d_A_blocks with Cholesky factors, so any
+        // cached PCG block-Jacobi inverse (also in d_A_blocks) is now stale.
+        impl.m_pcg_block_jacobi_valid = false;
         int block = 256;
         int grid  = (total_pairs + block - 1) / block;
         k_eeq_build_fragment_matrices<<<grid, block, 0, impl.stream>>>(

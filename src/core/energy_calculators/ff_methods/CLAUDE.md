@@ -628,6 +628,11 @@ std::string method = "d4";  // Matches Fortran reference
 - Task #11: `hb_accuracy`/`hb_thr{1,2}_bohr2` set hbthr1/hbthr2; `hb_update_rmsd_bohr`/`hb_update_force_every` control rebuild timing (`gfnff_method.cpp`)
 - **Caveat**: registry PARAMs MUST be single-line — `param_parser` drops multi-line PARAMs whose help text contains `)`
 
+### ✅ EEQ WP7-D — block-Jacobi PCG (GPU) + contact-aware dispatch (CPU, Jun 2026)
+- GPU-PCG now uses the per-fragment **block-Jacobi** preconditioner (port of CPU `buildBlockJacobi`) instead of diagonal Jacobi → far fewer iters for many fragments, exact (`k_eeq_block_jacobi_apply`/`buildBlockJacobiFactors` in `cuda/eeq_solver_gpu.cu`; verified == GPU SchurCholesky ≤1e-8)
+- CPU auto-select no longer routes in-contact fragments to the approximate Batched solver (drops cross-fragment Coulomb); `m_contact_min_dist` + PARAM `eeq_contact_prefer_exact` (default true) prefer the exact solver. See [docs/GPU_WP7_EEQ_LARGE_SYSTEMS.md](../../../../docs/GPU_WP7_EEQ_LARGE_SYSTEMS.md#wp7-d-block-jacobi-präkonditionierer--kontaktbewusste-auswahl-jun-2026)
+- Open: FMM matvec (O(N log N)) + ROCm block-Jacobi mirror
+
 ### ⚠️ Known Issues
 - gfnff GPU validation tests (test_gfnff_gpu) fail with JSON null error — pre-existing, unrelated to pipeline
 - k_dispersion cannot overlap with EEQ in gradient mode (dc6dcn dependency)

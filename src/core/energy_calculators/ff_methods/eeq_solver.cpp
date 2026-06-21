@@ -1309,14 +1309,43 @@ Vector EEQSolver::dispatchSolve(
     // van-der-Waals complexes), where the global EEQ matrix is poorly conditioned and
     // inter-fragment Coulomb is small compared to intra-fragment hardness. Threshold:
     // nfrag/N > 20% AND nfrag >= 16 (avoids tripping on small molecules with few atoms).
+    //
+    // WP7-D (Jun 2026, Claude Generated): contact-aware. The batched solver DROPS
+    // cross-fragment Coulomb, so it is only correct for well-separated fragments. When
+    // fragments are in contact (m_contact_min_dist < eeq_batched_min_distance, or unknown),
+    // prefer the exact path instead: for explicit -solve_method pcg force PCG (block-Jacobi,
+    // built below for nfrag>=2); for Auto fall through to the exact auto-selector (which
+    // picks SchurCholesky/PCG, both retaining cross-fragment Coulomb).
     if ((m_solve_method == EEQSolveMethod::Auto || m_solve_method == EEQSolveMethod::PCG) &&
         method_to_use != EEQSolveMethod::Batched &&
         nfrag >= 16 && nfrag * 5 > natoms) {
-        method_to_use = EEQSolveMethod::Batched;
-        if (m_verbosity >= 1) {
-            CurcumaLogger::info(fmt::format(
-                "EEQ: highly fragmented system (nfrag={}, N={}, density={}%); using batched per-fragment solve",
-                nfrag, natoms, (100 * nfrag) / natoms));
+        const bool   prefer_exact = m_config.get<bool>("eeq_contact_prefer_exact", true);
+        const double contact_thr  = m_config.get<double>("eeq_batched_min_distance", 15.0);
+        const bool   in_contact   = (m_contact_min_dist < 0.0)  // unknown → be safe
+                                 || (contact_thr > 0.0 && m_contact_min_dist < contact_thr);
+        const std::string dist_str = (m_contact_min_dist < 0.0)
+                                         ? std::string("unknown")
+                                         : fmt::format("{:.2f}", m_contact_min_dist);
+        if (prefer_exact && in_contact) {
+            // Keep the exact solver. Explicit PCG → PCG+block-Jacobi; Auto → leave
+            // method_to_use for the exact auto-selector below.
+            if (m_solve_method == EEQSolveMethod::PCG)
+                method_to_use = EEQSolveMethod::PCG;
+            if (m_verbosity >= 1) {
+                CurcumaLogger::info(fmt::format(
+                    "EEQ: fragmented system (nfrag={}, N={}) with fragments in contact "
+                    "(min inter-fragment distance {} Bohr < {}); using exact solver "
+                    "(cross-fragment Coulomb retained) instead of approximate batched",
+                    nfrag, natoms, dist_str, contact_thr));
+            }
+        } else {
+            method_to_use = EEQSolveMethod::Batched;
+            if (m_verbosity >= 1) {
+                CurcumaLogger::info(fmt::format(
+                    "EEQ: highly fragmented system (nfrag={}, N={}, density={}%, "
+                    "min inter-fragment distance {} Bohr); using batched per-fragment solve",
+                    nfrag, natoms, (100 * nfrag) / natoms, dist_str));
+            }
         }
     }
 
@@ -3147,6 +3176,30 @@ Vector EEQSolver::calculateFinalCharges(
     auto dist = [&](int i, int j) -> double {
         return m_phase2_distances[i * (i + 1) / 2 + j];
     };
+
+    // WP7-D (Jun 2026, Claude Generated): contact metric for the dispatcher. The approximate
+    // batched solver (per-fragment Cholesky) drops cross-fragment Coulomb, so it is only valid
+    // for well-separated fragments. Compute the minimum inter-fragment atom distance from the
+    // packed distances just built (fragment membership from topology->fraglist, 1-indexed) so
+    // dispatchSolve can prefer the exact path when fragments are in contact. O(N^2), same order
+    // as the distance build it piggybacks on. -1 = unknown (no multi-fragment topology).
+    m_contact_min_dist = -1.0;
+    if (nfrag >= 2 && topology.has_value()
+        && static_cast<int>(topology->fraglist.size()) >= natoms) {
+        const auto& fraglist = topology->fraglist;
+        double min_d = -1.0;
+        for (int i = 1; i < natoms; ++i) {
+            const int fi = fraglist[i];
+            const int ii = i * (i + 1) / 2;
+            for (int j = 0; j < i; ++j) {
+                if (fraglist[j] != fi) {
+                    const double r = m_phase2_distances[ii + j];
+                    if (min_d < 0.0 || r < min_d) min_d = r;
+                }
+            }
+        }
+        m_contact_min_dist = min_d;  // -1 only if every atom shares one fragment id
+    }
 
     if (m_verbosity >= 3) {
         CurcumaLogger::info("EEQ Phase 2: Using geometric distances from xyz coordinates (matches Fortran goed_gfnff)");

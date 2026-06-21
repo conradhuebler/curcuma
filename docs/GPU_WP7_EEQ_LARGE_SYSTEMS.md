@@ -424,3 +424,68 @@ Für jede neue Strategie muss gelten:
 | `gfnff_gpu_method.cpp` | Dispatch-Logik, `m_eeq_solver_strategy` Member |
 | `eeq_solver.h` | PARAM `eeq_solver_strategy` + `eeq_pcg_max_iter` etc. |
 | `eeq_solver.cpp` | Fragment-Projektion in PCG, OpenMP MATVEC |
+
+---
+
+## WP7-D: Block-Jacobi-Präkonditionierer + kontaktbewusste Auswahl (Jun 2026) ✅
+
+**Status**: ⚙️ AI-implementiert, maschinell getestet (CPU + CUDA)
+
+Zwei Schwächen im Viel-Fragment-Regime (Solvensboxen, Wirt-Gast, vdW-Komplexe)
+geschlossen:
+
+### 1. GPU-PCG: Block-Jacobi statt diagonalem Jacobi
+
+Der GPU-PCG (Strategie C) nutzte nur einen **diagonalen** Jacobi-Präkonditionierer
+(`d_pcg_M_inv = 1/A[i,i]`) → langsame Konvergenz bei vielen Fragmenten. Portiert
+wurde der **per-Fragment Block-Jacobi** der CPU (`EEQSolver::buildBlockJacobi`):
+`M⁻¹ = blockdiag(A_ff⁻¹)`. Senkt die PCG-Iterationen von ~30–100 auf ~2–5, **exakt**.
+
+- `buildBlockJacobiFactors()` (`eeq_solver_gpu.cu`): baut die per-Fragment-Blöcke
+  (`k_eeq_build_fragment_matrices` → `d_A_blocks`), faktorisiert (`cusolverDnDpotrf`)
+  und invertiert (`cusolverDnDpotri`) je Block, symmetrisiert (`k_eeq_symmetrize_blocks`).
+  Nicht-SPD oder zu großer Block (N_f > 2048) ⇒ Rückfall auf diagonalen Jacobi.
+- Apply (`k_eeq_block_jacobi_apply`, 1 Block/Fragment): `z = blockdiag(A_ff⁻¹)·r` als
+  symmetrisches GEMV, Gather/Scatter über `frag_atom_map`; r/z bleiben in globaler
+  Atomreihenfolge (wie CPU `BlockJacobiPC::apply`). Nur beim Refaktorisieren gebaut,
+  über MD-Schritte amortisiert. Wiederverwendet die WP6-Fragmenttopologie.
+- Verifiziert: GPU-PCG+Block-Jacobi == GPU-SchurCholesky bit-identisch (≤1e-8,
+  27-Wasser-Cluster, `-opt`, Schritt-für-Schritt). `m_pcg_block_jacobi_valid` wird bei
+  Topologiewechsel und im (d_A_blocks überschreibenden) Batched-Pfad invalidiert.
+
+### 2. Kontaktbewusste Auswahl (CPU): exakt statt Batched bei Kontakt
+
+Der CPU-Dispatcher wählte Batched (Strategie B, **lässt cross-fragment Coulomb still
+weg**) allein anhand der Fragmentdichte (`nfrag/N`), unabhängig davon, ob Fragmente
+in Kontakt sind. Neu: `m_contact_min_dist` (minimaler Inter-Fragment-Atomabstand,
+aus den bereits gebauten gepackten Distanzen + `fraglist`, O(N²) auf der Distanzphase).
+Bei Kontakt (`< eeq_batched_min_distance`, Default 15 Bohr) oder unbekannt wählt
+Auto/PCG den **exakten** Löser (SchurCholesky bzw. PCG+Block-Jacobi). Neuer Schalter
+`eeq_contact_prefer_exact` (Default `true`); `false` stellt die alte dichte-basierte
+Batched-Auswahl wieder her. Batched bleibt als explizite Option (`-solve_method
+batched`) für gut getrennte Fragmente erhalten.
+
+- Verifiziert (27-Wasser-Cluster, in Kontakt, 3.19 Bohr): Default-Auto wählt jetzt
+  „exact solver", E = −8.77203498 Eh (== SchurCholesky == PCG+Block-Jacobi); Batched
+  weicht um 3.58 mEh ab (cross-fragment Coulomb fehlt).
+
+**GPU-Dispatch:** Auf der GPU wählt `Auto` ohnehin nie Batched (nur PCG bzw.
+SchurCholesky, beide exakt); Batched läuft nur bei explizitem `-gfnff.solve_method
+batched` (mit bestehender Kontakt-Warnung). Daher genügt GPU-seitig der bessere
+PCG-Präkonditionierer; keine Dispatch-Änderung nötig.
+
+### Offen / nicht umgesetzt
+
+- **FMM/Treecode** für das cross-fragment Coulomb-Matvec (O(N log N) statt O(N²)) —
+  großer Aufwand, Nische; das PCG-Matvec bleibt dicht O(N²).
+- **ROCm-Spiegelung** des Block-Jacobi-Applys (`rocm/eeq_solver_hip`) — naheliegender
+  Hipify-Folgeschritt, hier (CUDA-Scope) nicht umgesetzt.
+
+### Geänderte Dateien (WP7-D)
+
+| Datei | Änderungen |
+|-------|-----------|
+| `gfnff_kernels.cu/.cuh` | `k_eeq_block_jacobi_apply`, `k_eeq_symmetrize_blocks` |
+| `eeq_solver_gpu.cu` | `buildBlockJacobiFactors()`, `applyPrecondPCG()`, `m_pcg_block_jacobi_valid`, PCG-Verdrahtung |
+| `eeq_solver.h` | PARAM `eeq_contact_prefer_exact`, Member `m_contact_min_dist` |
+| `eeq_solver.cpp` | Kontaktmetrik in `calculateFinalCharges`, kontaktbewusste Batched-Auswahl in `dispatchSolve` |
