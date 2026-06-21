@@ -213,6 +213,27 @@ Separate from the native xTB ROCm path above; mirrors the CUDA GFN-FF GPU pipeli
   ≤1e-7 Eh / Eh·Bohr⁻¹ on water, CH4, caffeine, 231-atom `complex` (FP reduction-order only);
   `-opt` trajectories track CPU (small FP accumulation over steps). `ctest -R
   cli_gfnff_gpu_02_rocm_singlepoint` (caffeine, label `rocm`).
+- **Performance — per-atom gather (the real MD win)**: profiling the phase-2 kernels (polymer/1410,
+  gradient mode) showed the pairwise **Coulomb** (~993k pairs, no cutoff) and the deferred
+  **dispersion gradient** (~943k pairs, grad + dEdcn atomics) dominated — ~6M+ FP64 `atomicAdd` on
+  RDNA. Both were rewritten as **per-atom GATHER** kernels (`k_coulomb_gather` / `k_dispersion_gather`,
+  built from a per-atom CSR adjacency; the dynamic dc6dcn stays pair-indexed and is read via a
+  CSR pair-index + is_i flag → no per-step rebuild; Coulomb additionally has a dense, coalesced,
+  shared-mem-tiled `k_coulomb_dense` that recomputes gamma from the per-atom EEQ alpha). Each atom
+  accumulates locally and writes grad with 3 (+1 for dEdcn) atomicAdd, bit-identical to the pair
+  kernels. Result on polymer/1410: phase-2 (Coulomb+Disp+DMA) **122 → 15 ms**, full energy+gradient
+  eval **~150 → ~26 ms**, and the **MD went from slower-than-CPU to ~2.3× faster** (30 fs:
+  10.1 s CPU-powersave vs 4.4 s ROCm, back-to-back). Note: the gfn2 ROCm path is efficient because
+  its O(N²)/O(N³) work is rocSOLVER/rocBLAS on small systems; GFN-FF's O(N²) FP64-erf Coulomb has no
+  BLAS analog, so the gather (not BLAS) is the lever. FP64 atomics themselves are fine on RDNA
+  (gfn2 uses them) — the issue was *contention* at ~1M pairs, which the gather removes.
+- **GPU-wedge hardening**: `FFWorkspaceHip` installs a SIGINT/SIGTERM/SIGABRT handler that
+  best-effort `hipDeviceReset()`s, restores the default disposition and re-raises. Killing a process
+  with a HIP kernel in flight *without* device teardown wedges the RDNA compute queue (every later
+  submission then hangs at init until a GPU reset/reboot); the handler makes Ctrl-C / `kill` /
+  `timeout` clean up instead. Only `kill -9` (SIGKILL) can't be caught — avoid it on in-flight GPU
+  runs, and do not run multiple GPU jobs concurrently on one iGPU. Validated: a polymer MD killed
+  with SIGTERM mid-run no longer wedges the GPU.
 - **NOT done / honest**: built with `USE_D4=OFF` (this box lacks LAPACKE; the external
   `curcuma_d4`/`dftd4interface` lib hard-links `lapacke`). GFN-FF therefore used its free-atom
   dispersion fallback on **both** CPU and GPU, so the GPU==CPU parity is real but the energies
