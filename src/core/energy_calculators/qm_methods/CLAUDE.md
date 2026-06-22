@@ -234,6 +234,11 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - Efficient integral calculation algorithms
 - Memory-optimized basis set handling
 - **Silent Mode**: Zero-overhead Level 0 for iterative calculations
+- **BLAS-threading + mixed-precision WPs (Jun 2026)**: OpenMP-OpenBLAS thread starvation fix
+  (EEQ + xTB eigensolve, committed), `scf_fp32_threshold` per-card tuning, GFN-FF EEQ
+  mixed-precision iterative refinement, per-card auto-default, tensor-core/multi-GPU ideas +
+  polymer CPU/GPU benchmark + FP64 hardware matrix — see
+  [docs/SQM_PRECISION_THREADING_WP.md](../../../../docs/SQM_PRECISION_THREADING_WP.md)
 
 ### ORCA Interface Notes (Jun 2026)
 - **🤖 AI-generated** — pending human production test (no ✅ TESTED label).
