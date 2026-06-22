@@ -55,7 +55,97 @@
 #include <omp.h>
 #endif
 
+#include "src/core/blas_threads.h"  // ScopedBlasThreads — give threaded LAPACK the EnergyCalculator budget
+
 using namespace GFNFFParameters;  // Access to chi_eeq, gam_eeq, alpha_eeq, cnf_eeq
+
+// ===== Threaded Cholesky for the EEQ Schur solve (Claude Generated, Jun 2026) =====
+//
+// The EEQ Schur-Cholesky solve (factorize A_nn once, back-substitute the nfrag+1
+// RHS columns) dominated the cost on large many-fragment systems (mixture: 6200
+// atoms / 1400 fragments → ~4.4 s, serial). Eigen's LLT runs single-threaded here
+// (EIGEN_USE_BLAS does not route the dense Cholesky; EIGEN_USE_LAPACKE is off),
+// and OpenBLAS thread count had no effect. Route the factorization AND the
+// multi-RHS back-substitution through the threaded LAPACK (dpotrf/dpotrs) that
+// the already-linked BLAS/LAPACK (OpenBLAS/MKL) provides — portable to any
+// BLAS/LAPACK, not tied to the lapacke C interface. Falls back to Eigen LLT when
+// built without BLAS.
+//
+// LAPACK is column-major; curcuma's `Matrix` is row-major, so the LAPACK path uses
+// column-major Eigen::MatrixXd (`ColMatrix`) and converts at the boundaries (O(N²),
+// negligible vs the O(N³) factorization).
+namespace {
+#ifdef USE_BLAS
+extern "C" {
+    void dpotrf_(const char* uplo, const int* n, double* a, const int* lda, int* info);
+    void dpotrs_(const char* uplo, const int* n, const int* nrhs, const double* a,
+                 const int* lda, double* b, const int* ldb, int* info);
+}
+#endif
+using ColMatrix = Eigen::MatrixXd;  // column-major (LAPACK layout)
+
+/// Cholesky-factorize SPD A (column-major) in place → lower factor. true on success.
+inline bool eeqCholeskyFactorize(ColMatrix& A)
+{
+#ifdef USE_BLAS
+    const char uplo = 'L';
+    int n = static_cast<int>(A.rows()), lda = n, info = 0;
+    dpotrf_(&uplo, &n, A.data(), &lda, &info);
+    return info == 0;
+#else
+    Eigen::LLT<ColMatrix> llt(A);
+    if (llt.info() != Eigen::Success) return false;
+    A = llt.matrixL();   // store L in the lower triangle (fallback path)
+    return true;
+#endif
+}
+
+/// Solve A·X = B in place (B column-major, overwritten with X) using the factor
+/// produced by eeqCholeskyFactorize().
+inline void eeqCholeskySolve(const ColMatrix& Afac, ColMatrix& B)
+{
+#ifdef USE_BLAS
+    const char uplo = 'L';
+    int n = static_cast<int>(Afac.rows()), nrhs = static_cast<int>(B.cols()),
+        lda = n, ldb = n, info = 0;
+    dpotrs_(&uplo, &n, &nrhs, Afac.data(), &lda, B.data(), &ldb, &info);
+#else
+    B = Afac.triangularView<Eigen::Lower>().solve(B);
+    B = Afac.triangularView<Eigen::Lower>().adjoint().solve(B);
+#endif
+}
+
+/// Vector RHS overload (single column).
+inline void eeqCholeskySolve(const ColMatrix& Afac, Eigen::VectorXd& b)
+{
+#ifdef USE_BLAS
+    const char uplo = 'L';
+    int n = static_cast<int>(Afac.rows()), nrhs = 1, lda = n, ldb = n, info = 0;
+    dpotrs_(&uplo, &n, &nrhs, Afac.data(), &lda, b.data(), &ldb, &info);
+#else
+    b = Afac.triangularView<Eigen::Lower>().solve(b);
+    b = Afac.triangularView<Eigen::Lower>().adjoint().solve(b);
+#endif
+}
+
+/// Schur complement S = C·Z2 exploiting that the constraint matrix C is a per-fragment
+/// membership matrix (one nonzero per atom column). S(f,g) = Σ_i C(f,i)·Z2(i,g) reduces
+/// to a per-fragment row accumulation: O(N·nfrag) instead of the dense product's
+/// O(nfrag²·N). For many-fragment systems (mixture: 6200 atoms / 1400 fragments) the dense
+/// C·Z2 (~1.2e13 flops, ~2.4 s serial) was the dominant EEQ-solve cost; this makes it
+/// negligible. Mirrors the GPU path (k_eeq_reduce_fragment_sums). Claude Generated (Jun 2026).
+inline Matrix schurComplementCZ(const Matrix& C, const Matrix& Z2, int natoms, int nfrag)
+{
+    Matrix S = Matrix::Zero(nfrag, nfrag);
+    for (int f = 0; f < nfrag; ++f) {
+        for (int i = 0; i < natoms; ++i) {
+            const double c = C(f, i);
+            if (c != 0.0) S.row(f).noalias() += c * Z2.row(i);
+        }
+    }
+    return S;
+}
+}  // namespace
 
 // ===== Element Group Classification (XTB Compatible) =====
 // Based on XTB param%group classification in gfnff_ini2.f90
@@ -1933,8 +2023,13 @@ Vector EEQSolver::solveWithSchurCholesky(
         need_refactor = true;
 
     if (need_refactor) {
-        Eigen::LLT<Matrix> llt(A_nn);
-        if (llt.info() != Eigen::Success) {
+        // Threaded LAPACK Cholesky (column-major copy of the row-major A_nn). The
+        // factorization and the nfrag+1 RHS back-substitutions run on the linked
+        // BLAS/LAPACK (OpenBLAS/MKL); see the eeqCholesky* helpers above. The BLAS
+        // thread count for this region is set by the ScopedBlasThreads guard in
+        // calculateFinalCharges (driven by the EnergyCalculator budget).
+        ColMatrix chol = A_nn;  // row-major → column-major copy (symmetric: same values)
+        if (!eeqCholeskyFactorize(chol)) {
             if (m_verbosity >= 1)
                 CurcumaLogger::warn("EEQ Schur-Cholesky: A matrix not SPD, falling back to LU");
             m_chol_cache.reset();
@@ -1950,9 +2045,11 @@ Vector EEQSolver::solveWithSchurCholesky(
             && (m_pending_cn.size()       == natoms);
 
         if (can_persist) {
-            m_chol_cache.llt              = std::move(llt);
-            m_chol_cache.Z2               = m_chol_cache.llt.solve(C.transpose());
-            m_chol_cache.S                = C * m_chol_cache.Z2;
+            m_chol_cache.chol_factor      = std::move(chol);
+            ColMatrix Z2cm                = C.transpose();   // col-major N×nfrag RHS
+            eeqCholeskySolve(m_chol_cache.chol_factor, Z2cm); // Z2 = A_nn^{-1}·C^T
+            m_chol_cache.Z2               = Z2cm;            // store as row-major Matrix
+            m_chol_cache.S                = schurComplementCZ(C, m_chol_cache.Z2, natoms, nfrag);
             m_chol_cache.last_geometry    = m_pending_geometry;
             m_chol_cache.last_cn          = m_pending_cn;
             m_chol_cache.cached_natoms    = natoms;
@@ -1968,9 +2065,12 @@ Vector EEQSolver::solveWithSchurCholesky(
             if (m_verbosity >= 3)
                 fmt::print(stderr, "[EEQ-Cache] Local solve (Phase 1 or cache off, N={})\n",
                            natoms);
-            Vector z1_local = llt.solve(rhs_atoms);
-            Matrix Z2_local = llt.solve(C.transpose());
-            Matrix S_local  = C * Z2_local;
+            Vector z1_local = rhs_atoms;
+            eeqCholeskySolve(chol, z1_local);
+            ColMatrix Z2cm_local = C.transpose();
+            eeqCholeskySolve(chol, Z2cm_local);
+            Matrix Z2_local = Z2cm_local;   // col-major → row-major
+            Matrix S_local  = schurComplementCZ(C, Z2_local, natoms, nfrag);
             Vector schur_rhs_local = C * z1_local - rhs_constraints;
             Vector lambda_local;
             if (nfrag == 1) {
@@ -1988,7 +2088,8 @@ Vector EEQSolver::solveWithSchurCholesky(
 
     // Cache-hit path: factor was either freshly persisted above OR carried over.
     // O(N^2) triangular solve with cached factorization.
-    Vector z1 = m_chol_cache.llt.solve(rhs_atoms);
+    Vector z1 = rhs_atoms;
+    eeqCholeskySolve(m_chol_cache.chol_factor, z1);
     ++m_chol_cache.steps_since_refactor;
 
     // Schur complement with cached Z2 and S (both constant when A is cached)
@@ -3562,6 +3663,14 @@ Vector EEQSolver::calculateFinalCharges(
         // 6. Solve system — unified dispatch (March 2026)
         // Claude Generated (WP2, May 2026): forward pool/num_threads to dispatchSolve so the
         // Stage-4 batched per-fragment LU loop (eeq_solver.cpp:1294-1387) runs in parallel.
+        //
+        // Threaded-LAPACK lever (Jun 2026): the SchurCholesky dpotrf/dpotrs (and any BLAS-backed
+        // solve) scale ~4-5x with the BLAS thread count, but curcuma pins OMP/MKL to 1 globally
+        // (CxxThreadPool, main.cpp). Give the BLAS the EnergyCalculator's intra-molecule budget
+        // (num_threads) for the duration of the solve; restored on scope exit. The parallel
+        // matrix build above has already joined, so there is no thread nesting. See
+        // src/core/blas_threads.h.
+        curcuma::ScopedBlasThreads _blas_threads(num_threads > 0 ? num_threads : 1);
         Vector new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads);
 
         // Empty return from dispatchSolve signals all solvers failed.

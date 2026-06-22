@@ -964,7 +964,7 @@ private:
     // WP-EEQ-Cache (May 2026): Cholesky factor cache across MD/opt steps.
     // Avoids O(N^3/6) refactorization when geometry displacement < m_refactor_eps.
     struct EEQCholeskyCache {
-        Eigen::LLT<Matrix> llt;    ///< Cached LLT factorization of A_nn
+        Eigen::MatrixXd chol_factor;  ///< Cached Cholesky factor of A_nn (column-major, threaded LAPACK dpotrf; see eeq_solver.cpp)
         Matrix Z2;                 ///< A_nn^{-1}·C^T  (N x nfrag) — reused across steps
         Matrix S;                  ///< Schur complement C·Z2 (nfrag x nfrag)
         Matrix last_geometry;      ///< Geometry (N x 3) at factorization time
