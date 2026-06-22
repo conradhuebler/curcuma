@@ -22,6 +22,13 @@
 #include "lbfgspp_optimizer.h"
 #include "native_optimizer_adapters.h"
 
+#include "src/core/curcuma_logger.h"
+#include "src/core/energycalculator.h"
+#include "src/core/intra_parallel_context.h"
+#include "src/core/molecule.h"
+
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
+
 namespace Optimization {
 
 // Claude Generated (Apr 2026) - Factory registry with all optimizer types
@@ -307,37 +314,179 @@ OptimizationResult OptimizationDispatcher::optimizeStructure(
     }
 }
 
+// Claude Generated (Jun 2026): Worker that optimises one frame of a batch.
+// Each worker owns its own EnergyCalculator so that the stateful GFN-FF/
+// xTB backends are not shared across threads. The intra-molecule parallelism
+// is suppressed because the CxxThreadPool already owns molecule-level
+// concurrency.
+class OptimizationBatchThread : public CxxThread {
+public:
+    OptimizationBatchThread(
+        size_t index,
+        const curcuma::Molecule& molecule,
+        OptimizerType optimizer_type,
+        const std::string& method,
+        const json& energy_controller,
+        const json& config)
+        : m_index(index)
+        , m_molecule(molecule)
+        , m_optimizer_type(optimizer_type)
+        , m_method(method)
+        , m_energy_controller(energy_controller)
+        , m_config(config)
+    {
+        // Suppress per-worker output during the parallel phase so that step tables
+        // from concurrent optimizations do not interleave on stdout. The main thread
+        // prints an ordered summary once all workers are finished. Trajectory files
+        // are also disabled because all workers would otherwise write to the same
+        // basename simultaneously.
+        m_config["verbosity"] = 0;
+        m_config["write_trajectory"] = false;
+    }
+
+    int execute() override
+    {
+        curcuma::SuppressIntraParallel intra_guard;
+
+        EnergyCalculator energy_calc(m_method, m_energy_controller);
+        energy_calc.setIterativeMode(true);
+        if (m_method == "gfn1" || m_method == "gfn2")
+            energy_calc.setWarmStart(true);
+
+        m_result = OptimizationDispatcher::optimizeStructure(
+            &m_molecule, m_optimizer_type, &energy_calc, m_config);
+
+        // optimizeStructure only updates the molecule on success; keep the
+        // final geometry available for the dispatcher in every case.
+        if (m_result.final_molecule.AtomCount() == 0 && m_molecule.AtomCount() > 0)
+            m_result.final_molecule = m_molecule;
+
+        return 0;
+    }
+
+    size_t index() const { return m_index; }
+    const OptimizationResult& result() const { return m_result; }
+
+private:
+    size_t m_index;
+    curcuma::Molecule m_molecule;
+    OptimizerType m_optimizer_type;
+    std::string m_method;
+    json m_energy_controller;
+    json m_config;
+    OptimizationResult m_result;
+};
+
 std::vector<OptimizationResult> OptimizationDispatcher::optimizeBatch(
     const std::vector<curcuma::Molecule>& molecules,
     OptimizerType optimizer_type,
     EnergyCalculator* energy_calculator,
-    const json& config)
+    const json& config,
+    int threads,
+    const json& energy_controller)
 {
 
     std::vector<OptimizationResult> results;
-    results.reserve(molecules.size());
+    results.resize(molecules.size());
 
-    CurcumaLogger::info_fmt("Starting batch optimization of {} structures", molecules.size());
+    if (threads <= 1 || molecules.size() <= 1) {
+        // Sequential path: no thread pool, no progress bar, identical behaviour
+        // to the original implementation.
+        CurcumaLogger::info_fmt("Starting batch optimization of {} structures", molecules.size());
 
-    for (size_t i = 0; i < molecules.size(); ++i) {
-        CurcumaLogger::info_fmt("Optimizing structure {} of {}", i + 1, molecules.size());
-
-        curcuma::Molecule mol_copy = molecules[i];
-        OptimizationResult result = optimizeStructure(&mol_copy, optimizer_type,
-            energy_calculator, config);
-        results.push_back(result);
-
-        if (!result.success) {
-            CurcumaLogger::warn_fmt("Structure {} optimization failed: {}",
-                i + 1, result.error_message);
+        for (size_t i = 0; i < molecules.size(); ++i) {
+            curcuma::Molecule mol_copy = molecules[i];
+            OptimizationResult result = optimizeStructure(
+                &mol_copy, optimizer_type, energy_calculator, config);
+            results[i] = result;
         }
+
+        int successful = std::count_if(results.begin(), results.end(),
+            [](const OptimizationResult& r) { return r.success; });
+
+        CurcumaLogger::success_fmt("Batch optimization completed: {}/{} successful",
+            successful, molecules.size());
+
+        CurcumaLogger::info("Batch optimization summary:");
+        for (size_t i = 0; i < results.size(); ++i) {
+            const auto& r = results[i];
+            std::string status = r.success ? "converged" : "not converged";
+            CurcumaLogger::result_fmt("  Frame {:3}: {} after {:4} iterations, final energy = {:.8f} Eh",
+                i + 1, status, r.iterations_performed, r.final_energy);
+            if (!r.success && !r.error_message.empty())
+                CurcumaLogger::warn_fmt("    Reason: {}", r.error_message);
+        }
+
+        return results;
     }
 
-    int successful = std::count_if(results.begin(), results.end(),
-        [](const OptimizationResult& r) { return r.success; });
+    // Parallel path: one CxxThreadPool worker per molecule. Each worker builds
+    // its own EnergyCalculator so the stateful backends stay thread-local.
+    CurcumaLogger::info_fmt("Starting parallel batch optimization of {} structures using {} threads",
+        molecules.size(), threads);
+
+    const int worker_count = static_cast<int>(std::min(
+        static_cast<size_t>(threads), molecules.size()));
+
+    CxxThreadPool pool;
+    pool.setProgressBar(CxxThreadPool::ProgressBarType::Continously);
+    pool.setActiveThreadCount(worker_count);
+
+    // Recover the method and full energy controller needed to recreate an
+    // EnergyCalculator per worker. The supplied calculator is only used as a
+    // template; it is not shared across threads.
+    // per_worker_controller must be resolved first because method lives in
+    // energy_controller (the full top-level controller), not in config
+    // (the optimizer-only JSON that lacks the "method" key).
+    json per_worker_controller = energy_controller.empty() ? config : energy_controller;
+    std::string method = per_worker_controller.value("method", std::string("gfnff"));
+
+    std::vector<OptimizationBatchThread*> workers;
+    workers.reserve(molecules.size());
+    for (size_t i = 0; i < molecules.size(); ++i) {
+        auto* th = new OptimizationBatchThread(
+            i, molecules[i], optimizer_type, method, per_worker_controller, config);
+        workers.push_back(th);
+        pool.addThread(th);
+    }
+
+    // Suppress all CurcumaLogger output during the parallel phase. Because the
+    // logger verbosity is a single global static, concurrent workers would
+    // otherwise produce interleaved initialization / step messages. The
+    // original level is restored immediately after the pool finishes so the
+    // ordered final summary can be printed at the user's requested verbosity.
+    int saved_global_verbosity = CurcumaLogger::get_verbosity();
+    CurcumaLogger::set_verbosity(0);
+
+    pool.StartAndWait();
+
+    CurcumaLogger::set_verbosity(saved_global_verbosity);
+
+    // Collect results in original molecular order, not pool finish order.
+    // The CxxThreadPool owns the workers (auto-delete enabled by default),
+    // so we must not delete them ourselves.
+    int successful = 0;
+    for (auto* th : workers) {
+        results[th->index()] = th->result();
+        if (th->result().success)
+            ++successful;
+    }
 
     CurcumaLogger::success_fmt("Batch optimization completed: {}/{} successful",
         successful, molecules.size());
+
+    // Print an input-order summary so the user gets clean, sequential output
+    // instead of interleaved per-worker step tables.
+    CurcumaLogger::info("Batch optimization summary:");
+    for (size_t i = 0; i < results.size(); ++i) {
+        const auto& r = results[i];
+        std::string status = r.success ? "converged" : "not converged";
+        CurcumaLogger::result_fmt("  Frame {:3}: {} after {:4} iterations, final energy = {:.8f} Eh",
+            i + 1, status, r.iterations_performed, r.final_energy);
+        if (!r.success && !r.error_message.empty()) {
+            CurcumaLogger::warn_fmt("    Reason: {}", r.error_message);
+        }
+    }
 
     return results;
 }

@@ -210,6 +210,9 @@ void SimpleMD::LoadControlJson()
     m_dT = m_config.get<double>("time_step");
     m_maxtime = m_config.get<double>("max_time");
     m_T0 = m_config.get<double>("temperature");
+    m_T_init = m_config.get<double>("initial_temperature");
+    if (m_T_init < 0) m_T_init = m_T0;
+    if (m_T_init <= 0) m_T_init = m_T0; // defensive: reject non-positive explicit values
     m_rmrottrans = m_config.get<int>("remove_com_mode");
     m_nocenter = m_config.get<bool>("no_center");
     m_COM = m_config.get<bool>("use_com");
@@ -897,25 +900,43 @@ void SimpleMD::InitConstrainedBonds()
             }
     }
 
-    // Subtract constrained DOF: each bond/angle constraint removes 1 degree of freedom
+    // Step 1: subtract RATTLE constraints (each bond/angle constraint = 1 DOF)
     int n_constraints = static_cast<int>(m_bond_constrained.size() + m_bond_13_constrained.size());
-    const int total_dof = m_dof; // 3N before removing constraints
+    const int total_dof = m_dof; // 3N before any correction
     m_dof -= n_constraints;
-    if (m_dof < 1)
-        m_dof = 1;
+    if (m_dof < 1) m_dof = 1;
+    const int dof_after_rattle = m_dof;
 
-    // Claude Generated (Jun 2026): clean RATTLE constraint report. The per-bond list the user asked
-    // for is element-labelled (e.g. C5-H12) with the constrained distance, wrapped 5 per line, and a
-    // one-line summary gives constrained/total bonds, angles, and the DOF before -> after (delta).
-    //
-    // Verbosity is now scoped (CurcumaMethod base RAII + thread-pool boundary restores), and the
-    // energy-method setup (gfnff param-gen) restores the level after itself, so the global level is
-    // correct here again — this report uses CurcumaLogger. The summary shows at verbosity >= 1; the
-    // element-labelled per-bond/angle lists are gated at verbosity >= 3. Claude Generated (Jun 2026).
+    // Step 2: subtract frozen COM/rotation modes. Both RemoveRotation() and
+    // RemoveRotations() zero translation AND rotation simultaneously (the
+    // mode labels in remove_com_mode are misleading — all non-zero modes
+    // remove both). Frozen DOF must be subtracted so that
+    //   T = 2*Ekin / (kB * m_dof)
+    // reflects only the active internal modes, otherwise the thermostat
+    // overdrives kinetic energy and the reported temperature is wrong.
+    // Non-linear assumption for 3+ atoms (linear-check is too expensive here).
+    int dof_com_removed = 0;
+    if (m_rmrottrans > 0) {
+        auto dof_for_fragment = [](size_t n) -> int {
+            if (n == 1) return 3;  // translation only (no rotational DOF)
+            if (n == 2) return 5;  // 3 trans + 2 rot (linear diatomic)
+            return 6;              // 3 trans + 3 rot (non-linear)
+        };
+        if (m_rmrottrans == 1) {
+            dof_com_removed = dof_for_fragment(static_cast<size_t>(m_natoms));
+        } else {
+            for (const auto& frag : m_molecule.GetFragments())
+                dof_com_removed += dof_for_fragment(frag.size());
+        }
+        m_dof -= dof_com_removed;
+        if (m_dof < 1) m_dof = 1;
+    }
+
+    // Report
     if (m_rattle) {
         CurcumaLogger::result_fmt("RATTLE: {} constraints | {} of {} 1-2 bonds{} + {} 1-3 angles | DOF {} -> {} ({:+d})",
             n_constraints, m_bond_constrained.size(), total_bonds, m_rattle == 2 ? " (X-H only)" : "",
-            m_bond_13_constrained.size(), total_dof, m_dof, m_dof - total_dof);
+            m_bond_13_constrained.size(), total_dof, dof_after_rattle, dof_after_rattle - total_dof);
         if (CurcumaLogger::get_verbosity() >= 3) {
             if (!m_bond_constrained.empty()) {
                 std::string line = "  1-2:";
@@ -941,29 +962,62 @@ void SimpleMD::InitConstrainedBonds()
                 CurcumaLogger::result(line);
             }
         }
-    } else {
-        CurcumaLogger::result_fmt("{} degrees of freedom (no constraints)", m_dof);
     }
+    if (dof_com_removed > 0)
+        CurcumaLogger::result_fmt("COM/rot removal (mode {}): -{} DOF | effective DOF = {}",
+            m_rmrottrans, dof_com_removed, m_dof);
+    else if (!m_rattle)
+        CurcumaLogger::result_fmt("{} degrees of freedom (no constraints)", m_dof);
 }
 
 void SimpleMD::InitVelocities(double scaling)
 {
     static std::default_random_engine generator;
     for (size_t i = 0; i < m_natoms; ++i) {
-        std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_eigen_inv_masses.data()[3 * i]));
+        // Claude Generated (Jun 2026): sample from m_T_init (initial
+        // temperature) rather than m_T0 (thermostat target) so callers can
+        // anneal into the target temperature or start cold/warm without
+        // touching the thermostat target. m_T_init defaults to m_T0 when
+        // -initial_temperature is not set (backward compatible).
+        std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T_init * m_eigen_inv_masses.data()[3 * i]));
         m_eigen_velocities.data()[3 * i + 0] = distribution(generator);
         m_eigen_velocities.data()[3 * i + 1] = distribution(generator);
         m_eigen_velocities.data()[3 * i + 2] = distribution(generator);
     }
 
-    RemoveRotation();
+    // Match per-step removal logic exactly so initial velocities are
+    // consistent with what the integrator loop enforces each step.
+    if (m_rmrottrans == 1)
+        RemoveRotation();
+    else if (m_rmrottrans == 2)
+        RemoveRotations();
+    else if (m_rmrottrans == 3) {
+        RemoveRotations();
+        RemoveRotation();
+    }
     EKin();
-    double coupling = m_coupling;
-    m_coupling = m_dT;
-    Berendson();
-    Berendson();
-    EKin();
-    m_coupling = coupling;
+    // Normalize initial velocities to the requested sampling temperature.
+    // When T_init == T0 (default): use two tight Berendson steps to remove
+    // statistical fluctuations from the MB draw (original behavior).
+    // When T_init != T0: simple velocity rescaling to exactly T_init — the
+    // thermostat will then drive toward T0 during the run. Calling Berendson
+    // here (which targets m_T0) would immediately destroy the T_init setting.
+    if (m_T_init == m_T0) {
+        double coupling = m_coupling;
+        m_coupling = m_dT;
+        Berendson();
+        Berendson();
+        EKin();
+        m_coupling = coupling;
+    } else if (m_T > 0.0) {
+        double scale = std::sqrt(m_T_init / m_T);
+        for (int i = 0; i < m_natoms; ++i) {
+            m_eigen_velocities.data()[3 * i + 0] *= scale;
+            m_eigen_velocities.data()[3 * i + 1] *= scale;
+            m_eigen_velocities.data()[3 * i + 2] *= scale;
+        }
+        EKin();
+    }
 
     // If RATTLE is active, project velocities onto constraint manifold
     // and rescale to target temperature using reduced DOF.
@@ -3257,13 +3311,15 @@ void SimpleMD::RemoveRotations()
      * https://github.com/grimme-lab/xtb/blob/main/src/rmrottr.f90
      * Special thanks to the developers
      */
-    double mass = 0;
-    Position pos = { 0, 0, 0 }, angom{ 0, 0, 0 };
     Geometry geom(m_natoms, 3);
 
     std::vector<std::vector<int>> fragments = m_molecule.GetFragments();
-    // std::cout << fragments.size() << std::endl;
     for (auto & fragment : fragments) {
+        // Reset per-fragment accumulators so each fragment's COM and angular
+        // momentum are computed independently (pre-existing bug: these were
+        // declared outside the loop and accumulated across fragments).
+        double mass = 0;
+        Position pos = { 0, 0, 0 }, angom{ 0, 0, 0 };
         for (const int i : fragment) {
             const double m = m_eigen_masses.data()[3 * i];
             mass += m;
@@ -3306,7 +3362,27 @@ void SimpleMD::RemoveRotations()
         matrix(2, 0) = matrix(0, 2);
         matrix(2, 1) = matrix(1, 2);
 
-        Position omega = matrix.inverse() * angom;
+        // Robust solve for singular/near-singular inertia tensors (linear
+        // molecules, single atoms). A naive matrix.inverse() returns NaN/Inf
+        // when one or more principal moments of inertia vanish, which is
+        // exactly the case for 2-atom systems (rotation about the bond axis
+        // has zero moment). Use a JacobiSVD and clamp small singular values
+        // so that the corresponding rotational DOF is correctly frozen
+        // instead of producing NaN velocities.
+        // Guard checks fragment size, not total atom count: a single-atom
+        // fragment inside a larger system must also be skipped.
+        Position omega = { 0, 0, 0 };
+        if (fragment.size() > 1) {
+            Eigen::JacobiSVD<Geometry> svd(matrix, Eigen::ComputeFullU | Eigen::ComputeFullV);
+            const double sv0 = svd.singularValues()(0);
+            const double sv_tol = 1e-12 * std::max(sv0, 1e-300);
+            Eigen::Vector3d inv_sv = Eigen::Vector3d::Zero();
+            for (int k = 0; k < 3; ++k) {
+                const double sv = svd.singularValues()(k);
+                inv_sv(k) = (sv > sv_tol) ? 1.0 / sv : 0.0;
+            }
+            omega = svd.matrixU() * inv_sv.asDiagonal() * svd.matrixV().transpose() * angom;
+        }
 
         Position rlm = { 0, 0, 0 }, ram = { 0, 0, 0 };
         for (const int i : fragment) {
@@ -3380,7 +3456,22 @@ void SimpleMD::RemoveRotation()
     matrix(2, 0) = matrix(0, 2);
     matrix(2, 1) = matrix(1, 2);
 
-    Position omega = matrix.inverse() * angom;
+    // Robust solve for singular/near-singular inertia tensors (linear
+    // molecules, single atoms). See SimpleMD::RemoveRotations above for the
+    // rationale. Required so that 2-atom systems do not get NaN velocities
+    // at step 0 and crash the integrator with "NaN/Inf velocity".
+    Position omega = { 0, 0, 0 };
+    if (m_natoms > 1) {
+        Eigen::JacobiSVD<Geometry> svd(matrix, Eigen::ComputeFullU | Eigen::ComputeFullV);
+        const double sv0 = svd.singularValues()(0);
+        const double sv_tol = 1e-12 * std::max(sv0, 1e-300);
+        Eigen::Vector3d inv_sv = Eigen::Vector3d::Zero();
+        for (int k = 0; k < 3; ++k) {
+            const double sv = svd.singularValues()(k);
+            inv_sv(k) = (sv > sv_tol) ? 1.0 / sv : 0.0;
+        }
+        omega = svd.matrixU() * inv_sv.asDiagonal() * svd.matrixV().transpose() * angom;
+    }
 
     Position rlm = { 0, 0, 0 }, ram = { 0, 0, 0 };
     for (int i = 0; i < m_natoms; ++i) {
@@ -3586,7 +3677,15 @@ void SimpleMD::CSVR()
     static std::default_random_engine rd{};
     static std::mt19937 gen{ rd() };
     static std::normal_distribution<> d{ 0, 1 };
-    static std::chi_squared_distribution<float> dchi{ static_cast<float>(m_dof) };
+    // Lazy-reinit when m_dof changes (e.g. after RATTLE constraint setup or
+    // first call with a different molecule). A stale static distribution with
+    // the wrong DOF produces wrong fluctuation widths in the CSVR rescaling.
+    static int csvr_last_dof = -1;
+    static std::chi_squared_distribution<float> dchi{ 1.0f };
+    if (m_dof != csvr_last_dof) {
+        dchi = std::chi_squared_distribution<float>(static_cast<float>(m_dof));
+        csvr_last_dof = m_dof;
+    }
     double R = d(gen);
     double SNf = dchi(gen);
     double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));

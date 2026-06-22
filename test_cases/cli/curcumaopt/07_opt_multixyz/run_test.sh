@@ -26,6 +26,22 @@ run_test() {
     return 0
 }
 
+run_test_parallel() {
+    cd "$TEST_DIR"
+
+    # Second pass: same optimisation with 4 molecule-level workers. This
+    # validates that the parallel dispatch produces the same minima as the
+    # sequential path and writes the output in input order.
+    cleanup_test_artifacts
+    $CURCUMA -opt helicen.xyz -method gfnff -threads 4 -no_bmt > stdout_threads4.log 2> stderr_threads4.log
+    local exit_code=$?
+
+    local output_file=$(find_output_file "helicen.opt.xyz")
+    assert_file_exists "$output_file" "gfnff multi-XYZ parallel optimisation produced output file"
+
+    return 0
+}
+
 validate_results() {
     local output_file=$(find_output_file "helicen.opt.xyz")
 
@@ -119,6 +135,12 @@ main() {
 
     if run_test; then
         validate_results
+    fi
+
+    if [ $TESTS_FAILED -eq 0 ]; then
+        if run_test_parallel; then
+            validate_results
+        fi
     fi
 
     print_test_summary

@@ -1761,9 +1761,11 @@ int executeOptimization(const json& controller, int argc, char** argv) {
             // Multi-structure path: optimise each frame and collect final geometries.
             // Non-converged optimisations still produce a final geometry and are written
             // out, matching the legacy CurcumaOpt behaviour for multi-XYZ inputs.
-            CurcumaLogger::info_fmt("Optimising {} structures from input file", molecules.size());
+            int opt_threads = controller.value("threads", 1);
+            CurcumaLogger::info_fmt("Optimising {} structures from input file (threads={})",
+                molecules.size(), opt_threads);
             auto results = Optimization::OptimizationDispatcher::optimizeBatch(
-                molecules, opt_type, &energy_calc, opt_config);
+                molecules, opt_type, &energy_calc, opt_config, opt_threads, energy_controller);
 
             int written = 0;
             int failed = 0;
@@ -1772,10 +1774,6 @@ int executeOptimization(const json& controller, int argc, char** argv) {
                 if (results[i].final_molecule.AtomCount() > 0) {
                     results[i].final_molecule.appendXYZFile(output_file);
                     ++written;
-                    if (!results[i].success) {
-                        CurcumaLogger::info_fmt("Structure {} written (not converged): {}",
-                            i + 1, results[i].error_message);
-                    }
                 } else {
                     CurcumaLogger::warn_fmt("Structure {} optimisation failed: {}",
                         i + 1, results[i].error_message);

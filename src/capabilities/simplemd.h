@@ -331,6 +331,11 @@ private:
     double m_dT = 0.5, m_currentStep = 0, m_maxtime = 1000;
     int m_spin = 0, m_charge = 0, m_print = 100;
     double m_T0 = 298.15, m_aver_Temp = 0, m_aver_rattle_Temp = 0, m_rmsd = 1.5;
+    // Claude Generated (Jun 2026): initial velocity sampling temperature. Set to
+    // -1 in the constructor and resolved against m_T0 in performMolecularDynamics
+    // so the thermostat target (m_T0) and the MB-sampling temperature can be
+    // controlled independently. -1 means "same as target temperature".
+    double m_T_init = -1.0;
     double m_x0 = 0, m_y0 = 0, m_z0 = 0;
     double m_Ekin_exchange = 0.0;
 //    std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass, m_virial, m_gradient_bias, m_scaling_vector_linear, m_scaling_vector_nonlinear, m_rt_geom_1, m_rt_geom_2, m_rt_velo;
@@ -493,6 +498,7 @@ private:
     // --- Basic Simulation Parameters ---
     PARAM(method, String, "uff", "Energy calculation method (e.g., uff, gfn2).", "Basic", {})
     PARAM(temperature, Double, 298.15, "Target temperature in Kelvin.", "Basic", {"T"})
+    PARAM(initial_temperature, Double, -1.0, "Initial temperature for velocity sampling (K). -1: same as 'temperature'. Use this to anneal into the target or to start cold/warm; the thermostat still drives toward 'temperature'. Ignored on restart (velocities come from the restart file).", "Basic", {"T_init", "T0", "initT"})
     PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"})
     PARAM(max_time, Double, 1000.0, "Maximum simulation time in femtoseconds.", "Basic", {"MaxTime"})
     PARAM(charge, Int, 0, "Total charge of the system.", "Basic", {})
@@ -508,7 +514,7 @@ private:
 
     // --- System Control ---
     PARAM(remove_com_motion, Double, 100.0, "Remove translation/rotation every N fs.", "System", {"rm_COM"})
-    PARAM(remove_com_mode, Int, 3, "Removal mode (0:none, 1:trans, 2:rot, 3:both).", "System", {"rmrottrans"})
+    PARAM(remove_com_mode, Int, 1, "Removal mode (0:none, 1:trans only, 2:rot only, 3:both). Rotation removal is opt-in (use 2 or 3).", "System", {"rmrottrans"})
     PARAM(no_center, Bool, false, "Disable centering of the molecule at the origin.", "System", {"nocenter"})
     PARAM(use_com, Bool, false, "Use center of mass (otherwise geometric center).", "System", {"COM"})
     PARAM(hydrogen_mass, Int, 1, "Hydrogen mass scaling factor for HMR.", "System", {"hmass"})

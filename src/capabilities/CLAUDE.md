@@ -35,7 +35,11 @@ capabilities/
 > **All non-external optimizers below are 🤖 AI-generated. None are ✅ TESTED or ✅ APPROVED.**
 
 - **CurcumaOpt**: Geometry optimization dispatcher — legacy system, human-tested
-- **`-opt` multi-XYZ** (`main.cpp`): ⚙️ Machine-tested — all frames are now optimised and written to `.opt.xyz` (previously only the first frame was processed)
+- **`-opt` multi-XYZ** (`main.cpp`/`optimizer_factory.cpp`):
+  - ⚙️ Machine-tested — all frames are optimised and written to `.opt.xyz` in input order.
+  - Parallel dispatch with `-threads N`; workers are independent, but step-table output is suppressed during the batch to avoid interleaved stdout.
+  - After the batch finishes, an ordered per-frame summary is printed (index, status, iterations, final energy).
+  - Live `CxxThreadPool` progress bar for parallel batches is pending an update of `external/CxxThreadPool` (see `docs/OPT_MULTIXYZ_PARALLELISM_WP.md`).
 - **LBFGSpp**: Wrapper around external LBFGSpp library — external code, wrapper is AI-generated
 - **ANCOPT** (`ancopt_optimizer.cpp/h`): 🤖 AI-generated port of XTB's AncOpt (Grimme)
   - ⚙️ Machine-tested: CH4/UFF converges (4 steps); Tier L path runs on 1410-atom polymer+UFF
