@@ -41,6 +41,10 @@
 #include <string>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 // Forward declarations — the D3/D4 stack only lives in xtb_native.cpp /
 // xtb_gradient.cpp, so we keep this header free of the dispersion include.
 class D4ParameterGenerator;
@@ -68,22 +72,49 @@ namespace curcuma::xtb {
  *  is the per-iteration generalized eigensolve (dsygst/dsyevd/dtrsm), so we bump
  *  MKL up only around solveEigen for a single large molecule.
  *
- *  MklThreadScope(n) sets the thread-local MKL count to n and restores the
- *  previous value on scope exit (nesting-safe: an inner scope restores the outer
- *  count). It only affects the calling thread, so running many calculations in
- *  parallel through CxxThreadPool keeps each one independent. No-op without MKL.
+ *  MklThreadScope(n) sets the thread-local BLAS/LAPACK thread count to n and
+ *  restores the previous value on scope exit (nesting-safe: an inner scope restores
+ *  the outer count). It only affects the calling thread, so running many calculations
+ *  in parallel through CxxThreadPool keeps each one independent.
+ *
+ *  Covers BOTH backends (Jun 2026): MKL via the thread-local MKL_Set_Num_Threads_Local,
+ *  AND OpenMP-threaded OpenBLAS via omp_set_num_threads (per-thread). The latter is the
+ *  ONLY knob the OpenMP OpenBLAS build honours (openblas_set_num_threads is a no-op there),
+ *  and curcuma's global OMP=1 pin (CxxThreadPool/main.cpp) otherwise starves the eigensolve.
+ *  See src/core/blas_threads.h for the standalone (non-per-thread) version.
  * ------------------------------------------------------------------------- */
 #ifdef USE_MKL
 extern "C" int MKL_Set_Num_Threads_Local(int nt);
-struct MklThreadScope {
-    int prev;
-    explicit MklThreadScope(int n) : prev(MKL_Set_Num_Threads_Local(n < 1 ? 1 : n)) {}
-    ~MklThreadScope() { MKL_Set_Num_Threads_Local(prev); }
-};
-#else
-struct MklThreadScope { explicit MklThreadScope(int) {} };
 #endif
-// Back-compat alias: pin MKL to one thread for the enclosing scope.
+struct MklThreadScope {
+#ifdef USE_MKL
+    int prev_mkl;
+#endif
+#ifdef _OPENMP
+    int  prev_omp = 1;
+    bool omp_active = false;
+#endif
+    explicit MklThreadScope(int n)
+#ifdef USE_MKL
+        : prev_mkl(MKL_Set_Num_Threads_Local(n < 1 ? 1 : n))
+#endif
+    {
+        if (n < 1) n = 1;
+#ifdef _OPENMP
+        prev_omp = omp_get_max_threads();
+        if (n != prev_omp) { omp_set_num_threads(n); omp_active = true; }
+#endif
+    }
+    ~MklThreadScope() {
+#ifdef USE_MKL
+        MKL_Set_Num_Threads_Local(prev_mkl);
+#endif
+#ifdef _OPENMP
+        if (omp_active) omp_set_num_threads(prev_omp);
+#endif
+    }
+};
+// Back-compat alias: pin BLAS/LAPACK to one thread for the enclosing scope.
 struct MklSerialScope { MklThreadScope s{1}; };
 
 /* ------------------------------------------------------------------------- *
