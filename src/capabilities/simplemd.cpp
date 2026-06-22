@@ -3035,16 +3035,20 @@ double SimpleMD::ApplySphericLogFermiWalls()
         double curr_pot = kbT * log(1 + exp_expr);
         // counter += distance > m_wall_radius;
         // std::cout << m_wall_beta*m_eigen_geometry.data()[3 * i + 0]*exp_expr/(distance*(1-exp_expr)) << " ";
-        // Claude Generated: Fix log-Fermi forces - correct denominator (1 + exp) for derivative of log(1 + e^x)
+        // Claude Generated 2026: fx/fy/fz are dV/dr (the gradient of V = kbT·log(1+exp(β(s-R)))
+        // projected radially: dV/dx = kbT·β·exp/(1+exp)·(x/s)). m_eigen_gradient holds dE/dr
+        // (force = -gradient), so the wall gradient must be ADDED. The previous `gradient -= fx`
+        // subtracted it — flipping the wall force outward (atoms outside the sphere were expelled
+        // instead of confined). Mirrors ApplyRectLogFermiWalls, which already adds dV/dr.
         // Add numerical stability check for distance = 0
         if (distance > 1e-10) {
             double fx = kbT * m_wall_beta * m_eigen_geometry.data()[3 * i + 0] * exp_expr / (distance * (1 + exp_expr));
             double fy = kbT * m_wall_beta * m_eigen_geometry.data()[3 * i + 1] * exp_expr / (distance * (1 + exp_expr));
             double fz = kbT * m_wall_beta * m_eigen_geometry.data()[3 * i + 2] * exp_expr / (distance * (1 + exp_expr));
 
-            m_eigen_gradient.data()[3 * i + 0] -= fx;
-            m_eigen_gradient.data()[3 * i + 1] -= fy;
-            m_eigen_gradient.data()[3 * i + 2] -= fz;
+            m_eigen_gradient.data()[3 * i + 0] += fx;
+            m_eigen_gradient.data()[3 * i + 1] += fy;
+            m_eigen_gradient.data()[3 * i + 2] += fz;
 
             // Track wall force magnitude
             sum_grad += std::sqrt(fx * fx + fy * fy + fz * fz);
@@ -3213,16 +3217,23 @@ double SimpleMD::ApplyRectHarmonicWalls()
 
         // std::cout << i << " " << counter << std::endl;
 
-        // Claude Generated: Fix harmonic wall forces - remove std::abs() for correct force direction
-        // Force = -k * displacement, where displacement is signed distance from boundary
-        double dx = k * ((m_eigen_geometry.data()[3 * i + 0] - m_wall_x_min) * (m_eigen_geometry.data()[3 * i + 0] < m_wall_x_min) - (m_eigen_geometry.data()[3 * i + 0] - m_wall_x_max) * (m_eigen_geometry.data()[3 * i + 0] > m_wall_x_max));
-
-        double dy = k * ((m_eigen_geometry.data()[3 * i + 1] - m_wall_y_min) * (m_eigen_geometry.data()[3 * i + 1] < m_wall_y_min) - (m_eigen_geometry.data()[3 * i + 1] - m_wall_y_max) * (m_eigen_geometry.data()[3 * i + 1] > m_wall_y_max));
-
-        double dz = k * ((m_eigen_geometry.data()[3 * i + 2] - m_wall_z_min) * (m_eigen_geometry.data()[3 * i + 2] < m_wall_z_min) - (m_eigen_geometry.data()[3 * i + 2] - m_wall_z_max) * (m_eigen_geometry.data()[3 * i + 2] > m_wall_z_max));
-        m_eigen_gradient.data()[3 * i + 0] -= dx;
-        m_eigen_gradient.data()[3 * i + 1] -= dy;
-        m_eigen_gradient.data()[3 * i + 2] -= dz;
+        // Claude Generated 2026: Correct harmonic wall gradient.
+        // m_eigen_gradient holds dE/dr (the integrator does v -= ½·dT·grad/m,
+        // i.e. force = -gradient). The wall adds V = ½k·d² to the energy, so its
+        // gradient contribution dV/dr = k·((r-r_min)·(r<r_min) + (r-r_max)·(r>r_max))
+        // must be ADDED. The previous form used `gradient -= dx` with a minus between
+        // the min/max terms: that added the max-wall gradient (correct) but SUBTRACTED
+        // the min-wall gradient (sign error — atoms below r_min were pushed further out
+        // instead of back in). Symmetric `+` with `gradient +=` fixes both walls.
+        double gx = m_eigen_geometry.data()[3 * i + 0];
+        double gy = m_eigen_geometry.data()[3 * i + 1];
+        double gz = m_eigen_geometry.data()[3 * i + 2];
+        double dx = k * ((gx - m_wall_x_min) * (gx < m_wall_x_min) + (gx - m_wall_x_max) * (gx > m_wall_x_max));
+        double dy = k * ((gy - m_wall_y_min) * (gy < m_wall_y_min) + (gy - m_wall_y_max) * (gy > m_wall_y_max));
+        double dz = k * ((gz - m_wall_z_min) * (gz < m_wall_z_min) + (gz - m_wall_z_max) * (gz > m_wall_z_max));
+        m_eigen_gradient.data()[3 * i + 0] += dx;
+        m_eigen_gradient.data()[3 * i + 1] += dy;
+        m_eigen_gradient.data()[3 * i + 2] += dz;
         /* if(out)
          {
              std::cout << m_eigen_geometry.data()[3 * i + 0]  << " " << m_eigen_geometry.data()[3 * i + 1]  << " " << m_eigen_geometry.data()[3 * i + 2] << std::endl;
