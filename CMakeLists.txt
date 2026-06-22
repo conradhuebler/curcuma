@@ -1028,7 +1028,7 @@ if(USE_ROCM)
         add_custom_command(
             OUTPUT  ${_hip_ctx_obj}
             COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
-                    ${_hipcc_defs} -I${PROJECT_SOURCE_DIR} -I/opt/rocm/include
+                    ${_hipcc_defs} -I${CMAKE_SOURCE_DIR} -I${PROJECT_SOURCE_DIR} -I/opt/rocm/include
                     ${_hip_ctx_src} -o ${_hip_ctx_obj}
             DEPENDS ${_hip_ctx_src} ${_hip_ctx_hdr}
             COMMENT "Compiling HIP xTB context with hipcc (arch ${ROCM_GPU_ARCH})"
@@ -1089,7 +1089,7 @@ if(USE_ROCM)
             OUTPUT  ${_hip_ff_obj}
             COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
                     ${_hip_ff_defs}
-                    -I${PROJECT_SOURCE_DIR} -I${PROJECT_BINARY_DIR}
+                    -I${CMAKE_SOURCE_DIR} -I${PROJECT_SOURCE_DIR} -I${PROJECT_BINARY_DIR}
                     -I${PROJECT_SOURCE_DIR}/external
                     -I${PROJECT_SOURCE_DIR}/external/fmt/include
                     -I${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
