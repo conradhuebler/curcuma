@@ -4,6 +4,8 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+- **GFN-FF HB-CN data race fixed (Jun 22, 2026)**: `FFWorkspace::computeHBCoordinationNumbers` ran inside partition 0's `executeGFNFF` and wrote the SHARED `m_bonds[].hb_cn_H` + `m_hb_grad_entries`, but there was NO barrier before partitions 1..N ran `calcBonds()` — they read a half-written `hb_cn_H` (wrong bond exponent) and raced on the `m_hb_grad_entries` push_back. Result: run-to-run non-deterministic BOND energy (~0.2 Eh drift on the 6200-atom/1400-fragment mixture; only the Bond term drifted, all others bit-identical) and thread-count-dependent totals. Fixed by computing HB-CN once on the main thread in `calculate()` before the parallel dispatch (`ff_workspace.cpp`); partitions now only read it. Energy now deterministic and thread-count-independent.
+
 - **EEQ Schur solve: thread the LAPACK (Jun 22, 2026)**: system OpenBLAS is the OpenMP build, so curcuma's global OMP/MKL=1 pin (CxxThreadPool, main.cpp) starved the GFN-FF EEQ dpotrf/dpotrs to 1 thread; added `src/core/blas_threads.h` `ScopedBlasThreads` RAII (driven by the EnergyCalculator/`num_threads` budget) around the solve — factorize ~4.3x, Z2 back-substitution ~4.6x at 8 threads (mixture2 6200 atoms/1400 frag: solve ~3.4s->~0.75s), energy bit-identical, 23/23 gfnff+eeq tests pass. Also: `schurComplementCZ` exploits the fragment-membership constraint matrix (O(N*nfrag) vs dense O(nfrag^2*N)). Open: native-QM `xtb_scf` dsyevd + opt Hessian eigensolves have the same starvation (not yet wired); `-threads>1` energy drift is a separate pre-existing non-determinism.
 
 ## June 2026

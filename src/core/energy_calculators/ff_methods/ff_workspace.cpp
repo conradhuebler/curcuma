@@ -218,6 +218,16 @@ double FFWorkspace::calculate(bool gradient)
             executeGFNFF(t);
     };
 
+    // Thread-safety fix (Jun 2026): GFN-FF HB coordination numbers write the SHARED
+    // m_bonds[].hb_cn_H and m_hb_grad_entries, which calcBonds() then reads. Previously
+    // computeHBCoordinationNumbers(0) ran inside partition 0's executeGFNFF with NO barrier
+    // before partitions 1..N ran calcBonds — so the other threads read a half-written
+    // hb_cn_H (wrong bond exponent -> non-deterministic bond energy, ~0.2 Eh drift on
+    // many-fragment systems) and raced on the m_hb_grad_entries push_back. Compute it ONCE
+    // here on the main thread, before the parallel dispatch; partitions now only read it.
+    if (m_method_type == FFMethodType::GFN_FF)
+        computeHBCoordinationNumbers(0);
+
     auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (m_num_threads == 1) {
         // T=1: Direct call, zero pool overhead
@@ -305,8 +315,9 @@ void FFWorkspace::executeGFNFF(int p)
             std::chrono::high_resolution_clock::now() - t0).count();
     };
 
-    // HB coordination numbers must be computed before bond energy
-    computeHBCoordinationNumbers(p);
+    // HB coordination numbers are computed once on the main thread in calculate()
+    // BEFORE the parallel dispatch (they write shared m_bonds[].hb_cn_H / m_hb_grad_entries
+    // that every partition's calcBonds reads) — see the thread-safety note there.
 
     // Bonded terms
     auto t = tic(); calcBonds(p);          timings.bonds      = toc(t);
