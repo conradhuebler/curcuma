@@ -228,6 +228,19 @@ public:
     double currentTime() const { return m_currentStep; }
     const Molecule& currentMolecule() const { return m_molecule; }
 
+    /** Claude Generated (2026): set the thermostat target temperature live (Kelvin).
+     *  Safe to call between step() calls from the driving thread. Setting it marks the
+     *  run as manually overridden, so any active temperature ramp stops touching m_T0
+     *  for the rest of the run (manual control wins). */
+    void setTargetTemperature(double T)
+    {
+        m_T0 = T;
+        m_global_ramp.overridden = true;
+    }
+    /** Claude Generated (2026): current thermostat target temperature (Kelvin). Reflects
+     *  the live setpoint, including the value driven by an active temperature ramp. */
+    double targetTemperature() const { return m_T0; }
+
     // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
     void setSharedBiasPool(SharedBiasPool* pool) { m_shared_pool = pool; }
 
@@ -294,6 +307,39 @@ private:
     void None();
     void Anderson();
     void NoseHover();
+
+    // Claude Generated (2026): runtime temperature control / multi-stage ramp / regions.
+    struct RampSegment {
+        double target;                     ///< segment target temperature [K]
+        enum Mode { Steps, Reach } mode;   ///< Steps: ramp over N steps; Reach: hold until <T> reached
+        double value;                      ///< Steps: number of steps; Reach: tolerance [K]
+    };
+    /// One temperature schedule (global or per region) plus its running position.
+    struct RampState {
+        bool enabled = false;              ///< schedule active
+        bool overridden = false;           ///< a live setTargetTemperature() cancelled it (global only)
+        std::vector<RampSegment> schedule;
+        int idx = 0;                       ///< active segment
+        int seg_start_step = 0;            ///< m_step when the active segment began
+        double seg_start_T = 298.15;       ///< setpoint at the start of the active segment
+    };
+    /// A subset of atoms thermostatted to their own (optionally ramped) target temperature.
+    struct ThermalRegion {
+        std::string atoms_spec;            ///< selection string (FragString2Indicies grammar)
+        std::vector<int> atoms;            ///< resolved 0-based indices (set in prepareRun)
+        double T0 = 298.15;                ///< current setpoint (driven by ramp)
+        int dof = 0;                       ///< 3 * atoms.size()
+        RampState ramp;
+    };
+
+    bool ParseSchedule(const std::string& spec, std::vector<RampSegment>& out, const std::string& ctx);  ///< parse 'T:mode:val;...'
+    void StepRamp(RampState& rs, double& T0, double measuredT);  ///< advance one schedule by one step
+    void UpdateTemperatureRamp();                                ///< drive global + region setpoints (called each step)
+    void ParseThermalRegions();                                  ///< read temp_regions specs from the controller
+    void ResolveThermalRegions();                                ///< resolve atom indices + default complement (needs molecule)
+    double RegionTemperature(const std::vector<int>& atoms, int dof) const;  ///< instantaneous T of an atom subset
+    void ApplyThermostat();                                      ///< per-region dispatch (or legacy global path)
+    void ApplyThermostatRegion(const std::vector<int>& atoms, double T0, int dof, ThermostatType type);
 
     void InitialiseWalls();
 
@@ -372,6 +418,18 @@ private:
     bool m_temp_abort = false;           // abort when running-mean temperature runs away from target
     double m_temp_abort_factor = 1.5;    // abort if <T> > factor * T0 (<= 0 disables)
     double m_temp_abort_delta = 300.0;   // abort if <T> > T0 + delta [K] (<= 0 disables)
+
+    // Claude Generated (2026): runtime temperature control + multi-stage ramp + regions.
+    // m_T0 is the global thermostat setpoint, read every step by the thermostats. The global
+    // ramp (m_global_ramp) drives m_T0 across its segments; a live setTargetTemperature() sets
+    // m_global_ramp.overridden, after which it leaves m_T0 alone for the rest of the run.
+    // Each ThermalRegion thermostats its own atom subset to its own (optionally ramped) target;
+    // atoms in no region (m_default_region_atoms) follow the global setpoint.
+    bool m_temp_ramp = false;                       // global ramp enable (PARAM temp_ramp)
+    RampState m_global_ramp;                         // global schedule state
+    std::vector<ThermalRegion> m_thermal_regions;    // optional per-atom-subset thermostats
+    std::vector<int> m_default_region_atoms;         // atoms in no region (complement; resolved in prepareRun)
+    int m_default_region_dof = 0;                    // 3 * m_default_region_atoms.size()
 
     std::vector<Geometry> m_bias_structures;
     std::vector<BiasStructure> m_biased_structures;
@@ -578,6 +636,10 @@ private:
     PARAM(temp_abort, Bool, false, "Abort the MD run when the running-mean temperature runs away from the target (catches bias-driven heating). Uses temp_abort_factor and/or temp_abort_delta.", "ConfSearch", {})
     PARAM(temp_abort_factor, Double, 1.5, "Abort when <T> exceeds temp_abort_factor * target T. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
     PARAM(temp_abort_delta, Double, 300.0, "Abort when <T> exceeds (target T + temp_abort_delta) Kelvin. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
+
+    // --- Temperature Ramp (Jun 2026, Claude Generated) ---
+    PARAM(temp_ramp, Bool, false, "Enable a multi-stage temperature ramp schedule (see temp_schedule). A live GUI slider / setTargetTemperature() overrides it for the rest of the run.", "Temperature Ramp", {})
+    PARAM(temp_schedule, String, "", "Ramp schedule 'target:mode:value;...'. mode=steps ramps the setpoint linearly from the previous target to <target> over <value> integration steps; mode=reach jumps the setpoint to <target> and advances once |<T>-target| < value Kelvin. Example: '500:steps:5000;500:steps:2000;300:reach:10'.", "Temperature Ramp", {})
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^

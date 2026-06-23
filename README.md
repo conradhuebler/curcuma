@@ -699,6 +699,12 @@ curcuma -md input.xyz -rattle -dt 4
 
 The MD implementation integrates well into curcuma, hence calculation can be stopped with Ctrl-C (or a "stop" file) and will be resumed (velocities and geometries are stored) if a restart file is found.
 
+The thermostat target temperature can follow a multi-stage **ramp** and individual atom subsets can be thermostatted as separate **regions**:
+```sh
+curcuma -md input.xyz -method gfnff -temperature 300 -temp_ramp true -temp_schedule "600:steps:5000;300:reach:10"
+```
+See [docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md) for the schedule grammar (`steps`/`reach`), the `temp_regions` JSON array, live temperature control, and per-thermostat support.
+
 With
 ```sh
 curcuma -md input.xyz -mtd
