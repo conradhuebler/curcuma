@@ -236,6 +236,15 @@ ctest -R test_gfnff_gradients --verbose
 - **dgam corrections**: Intentionally disabled — validated as no improvement (<0.001% energy impact)
 - **Element hybridization**: Complete XTB element-specific rules (gfnff_ini2.f90:217-332)
 - See `docs/DGAM_VALIDATION_REPORT.md` for dgam analysis
+- **Jun 2026 — solve_method**: default cleanly `cholesky` (ctor/PARAM unified); `A_nn` is SPD by
+  construction even when Gershgorin<0, so the LU/`ldlt` paths are rarely reached — see
+  [[gfnff-eeq-ann-spd]]. New explicit `-eeq_solver.solve_method ldlt` (Bunch-Kaufman, == cholesky
+  for SPD; NOT an auto-fallback — augmented LU stays the robust indefinite path).
+- **Jun 2026 — polarization + cache fixes**: `m_phase2_historically_implausible` made transient
+  (was a permanent freeze to Phase-1 charges); fixing it exposed a SchurCholesky factor-cache
+  staleness bug under ALPB solvation (cache keyed on geometry+CN, not the reaction field B) — now
+  bypassed via `!m_reaction_field`. `gfnff_solv_*` 28/28 pass, gas-phase bit-identical. See
+  `docs/GFNFF_POLARIZATION_AUDIT.md`, `docs/GFNFF_PERFORMANCE_LEVERS.md`, `docs/GFNFF_FAST_WP.md`.
 
 ### ✅ Parameter Management (Phase 2 - December 2025)
 - **ConfigManager Integration**: Type-safe parameter access with validation
@@ -296,6 +305,15 @@ ctest -R test_gfnff_gradients --verbose
 - 1 thread: 0.320s
 - 4 threads: 0.120s
 - Speedup: 2.67x ✅
+
+**Jun 2026 — large-system GFN-FF speedups** (see `docs/GFNFF_PERFORMANCE_LEVERS.md`):
+- **HB candidate generation (Lever 1)**: cell-list nhb2 (`hyd_on[]`) + nhb1
+  (`forEachNeighbor(i, hbthr2)`) replacing the per-pair full-hydrogen scan. EXACT (energies
+  bit-identical), ~1.5x on mixture2 SP (6200 atoms). Gated to the cell-list path; small systems
+  unchanged. The single-point bottleneck was the HB list (~33%), NOT the EEQ solve (~8%).
+- **`-method gfnff-fast`** (`docs/GFNFF_FAST_WP.md`): opt-in NON-POLARIZING fast preset
+  (`static_charges`+`static_cn` — EEQ charges + CN/D4 frozen after geometry 1). SP == gfnff;
+  MD ~15% faster (more on large many-fragment systems). Equilibrium dynamics only; warns at start.
 
 ## D3 Implementation Status
 

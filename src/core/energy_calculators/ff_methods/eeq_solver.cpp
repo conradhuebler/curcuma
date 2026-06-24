@@ -80,6 +80,12 @@ extern "C" {
     void dpotrf_(const char* uplo, const int* n, double* a, const int* lda, int* info);
     void dpotrs_(const char* uplo, const int* n, const int* nrhs, const double* a,
                  const int* lda, double* b, const int* ldb, int* info);
+    // Bunch-Kaufman LDL^T for symmetric-INDEFINITE A_nn (fallback when the SPD Cholesky
+    // fails; physical GFN-FF A_nn is SPD so this is rarely reached). Claude Generated (Jun 2026).
+    void dsytrf_(const char* uplo, const int* n, double* a, const int* lda, int* ipiv,
+                 double* work, const int* lwork, int* info);
+    void dsytrs_(const char* uplo, const int* n, const int* nrhs, const double* a,
+                 const int* lda, const int* ipiv, double* b, const int* ldb, int* info);
 }
 #endif
 using ColMatrix = Eigen::MatrixXd;  // column-major (LAPACK layout)
@@ -128,6 +134,41 @@ inline void eeqCholeskySolve(const ColMatrix& Afac, Eigen::VectorXd& b)
 #endif
 }
 
+#ifdef USE_BLAS
+/// Bunch-Kaufman LDL^T factorize symmetric-INDEFINITE A (column-major) in place; ipiv (size n)
+/// receives the pivots. true on success. Claude Generated (Jun 2026).
+inline bool eeqLDLTFactorize(ColMatrix& A, std::vector<int>& ipiv)
+{
+    const char uplo = 'L';
+    int n = static_cast<int>(A.rows()), lda = n, info = 0;
+    ipiv.assign(n, 0);
+    double wkopt = 0.0; int lwork = -1;
+    dsytrf_(&uplo, &n, A.data(), &lda, ipiv.data(), &wkopt, &lwork, &info);  // workspace query
+    if (info != 0) return false;
+    lwork = std::max(1, static_cast<int>(wkopt));
+    std::vector<double> work(lwork);
+    dsytrf_(&uplo, &n, A.data(), &lda, ipiv.data(), work.data(), &lwork, &info);
+    return info == 0;
+}
+
+/// Solve A·X = B in place using the LDL^T factor from eeqLDLTFactorize().
+inline void eeqLDLTSolve(const ColMatrix& Afac, const std::vector<int>& ipiv, ColMatrix& B)
+{
+    const char uplo = 'L';
+    int n = static_cast<int>(Afac.rows()), nrhs = static_cast<int>(B.cols()),
+        lda = n, ldb = n, info = 0;
+    dsytrs_(&uplo, &n, &nrhs, Afac.data(), &lda, ipiv.data(), B.data(), &ldb, &info);
+}
+
+/// Vector RHS overload.
+inline void eeqLDLTSolve(const ColMatrix& Afac, const std::vector<int>& ipiv, Eigen::VectorXd& b)
+{
+    const char uplo = 'L';
+    int n = static_cast<int>(Afac.rows()), nrhs = 1, lda = n, ldb = n, info = 0;
+    dsytrs_(&uplo, &n, &nrhs, Afac.data(), &lda, ipiv.data(), b.data(), &ldb, &info);
+}
+#endif  // USE_BLAS
+
 /// Schur complement S = C·Z2 exploiting that the constraint matrix C is a per-fragment
 /// membership matrix (one nonzero per atom column). S(f,g) = Σ_i C(f,i)·Z2(i,g) reduces
 /// to a per-fragment row accumulation: O(N·nfrag) instead of the dense product's
@@ -144,6 +185,44 @@ inline Matrix schurComplementCZ(const Matrix& C, const Matrix& Z2, int natoms, i
         }
     }
     return S;
+}
+
+/// Symmetric-indefinite Schur solve of the constrained EEQ system: factor the N×N A_nn block
+/// with LDL^T (Bunch-Kaufman, USE_BLAS) or a PartialPivLU (no BLAS) — both handle an indefinite
+/// A_nn, unlike the SPD Cholesky — then apply the per-fragment charge constraint via the
+/// nfrag×nfrag Schur complement (identical structure to solveWithSchurCholesky). Empty on
+/// failure. Used as the LLT-failure fallback and via -eeq_solver.solve_method ldlt.
+/// Claude Generated (Jun 2026).
+inline Vector solveSchurLDLT(const Matrix& A_nn, const Vector& rhs_atoms,
+                             const Matrix& C, const Vector& rhs_constraints,
+                             int natoms, int nfrag)
+{
+    Vector z1;
+    Matrix Z2;
+#ifdef USE_BLAS
+    ColMatrix Afac = A_nn;                 // row-major → column-major (symmetric: same values)
+    std::vector<int> ipiv;
+    if (!eeqLDLTFactorize(Afac, ipiv)) return Vector();
+    z1 = rhs_atoms;
+    eeqLDLTSolve(Afac, ipiv, z1);          // z1 = A_nn^{-1}·b
+    ColMatrix Z2cm = C.transpose();        // N×nfrag RHS
+    eeqLDLTSolve(Afac, ipiv, Z2cm);        // Z2 = A_nn^{-1}·C^T
+    Z2 = Z2cm;
+#else
+    Eigen::PartialPivLU<ColMatrix> lu((ColMatrix(A_nn)));
+    z1 = lu.solve(Eigen::VectorXd(rhs_atoms));
+    Z2 = lu.solve(ColMatrix(C.transpose()));
+#endif
+    Matrix S = schurComplementCZ(C, Z2, natoms, nfrag);
+    Vector schur_rhs = C * z1 - rhs_constraints;
+    Vector lambda;
+    if (nfrag == 1)
+        lambda = Vector::Constant(1, schur_rhs(0) / S(0, 0));
+    else
+        lambda = S.partialPivLu().solve(schur_rhs);
+    Vector q = z1 - Z2 * lambda;
+    if (!q.allFinite()) return Vector();
+    return q;
 }
 }  // namespace
 
@@ -797,6 +876,7 @@ static void testElementSpecificHybridizationLogic() {
 // Claude Generated - March 2026
 EEQSolveMethod EEQSolver::parseSolveMethod(const std::string& method_str) {
     if (method_str == "lu") return EEQSolveMethod::LU;
+    if (method_str == "ldlt") return EEQSolveMethod::LDLT;
     if (method_str == "pcg") return EEQSolveMethod::PCG;
     if (method_str == "batched") return EEQSolveMethod::Batched;
     // "cholesky" (canonical) and "schur_cholesky" (legacy) both map to SchurCholesky
@@ -815,7 +895,7 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_calculate_cn = m_config.get<bool>("calculate_cn", true);
     m_allow_unconverged = m_config.get<bool>("allow_unconverged_charges", false);
     m_skip_phase2 = m_config.get<bool>("skip_phase2", false);
-    m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "pcg"));
+    m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "cholesky"));
     m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.05);
     m_refactor_force_every = m_config.get<int>("eeq_refactor_force_every", 0);
     m_matrix_rebuild_eps   = m_config.get<double>("eeq_matrix_rebuild_eps_bohr", 0.0);
@@ -832,7 +912,7 @@ EEQSolver::EEQSolver(const ConfigManager& config)
         CurcumaLogger::param("verbosity", std::to_string(m_verbosity));
         CurcumaLogger::param("calculate_cn", m_calculate_cn ? "true" : "false");
         CurcumaLogger::param("allow_unconverged_charges", m_allow_unconverged ? "true" : "false");
-        CurcumaLogger::param("solve_method", m_config.get<std::string>("solve_method", "pcg"));
+        CurcumaLogger::param("solve_method", m_config.get<std::string>("solve_method", "cholesky"));
     }
 }
 
@@ -988,14 +1068,13 @@ Vector EEQSolver::calculateCharges(
         return topology_charges;
     }
 
-    // Claude Generated (Apr 2026): If Phase 2 was historically implausible for this system
-    // size, skip it forever (until atom count changes, indicating a new molecule).
-    if (m_phase2_historically_implausible && m_phase2_implausible_natoms == natoms) {
-        if (m_verbosity >= 2) {
-            CurcumaLogger::info("EEQSolver: Phase 2 was historically implausible for this system — skipping, using Phase 1 topology charges");
-        }
-        return topology_charges;
-    }
+    // Claude Generated (Jun 2026): a previously-implausible Phase-2 result no longer
+    // permanently freezes the charges. We always re-attempt Phase-2 so a single transient
+    // bad geometry (a close contact during a hot MD or aggressive opt step) does not demote
+    // the run to fixed Phase-1 charges forever — the force field stays polarizing. A bad
+    // individual step still falls back to Phase-1 via the per-step plausibility guard, and
+    // m_phase2_historically_implausible is reset on the next plausible solve.
+    // See docs/GFNFF_POLARIZATION_AUDIT.md.
 
     // Initialize cache with Phase 1 charges if not yet set.
     // Without this, m_last_successful_charges starts empty (size 0), so Tier 1/2
@@ -1533,12 +1612,33 @@ Vector EEQSolver::dispatchSolve(
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         const char* method_name = (method_to_use == EEQSolveMethod::PCG) ? "PCG"
-            : (method_to_use == EEQSolveMethod::SchurCholesky) ? "SchurCholesky" : "LU";
+            : (method_to_use == EEQSolveMethod::SchurCholesky) ? "SchurCholesky"
+            : (method_to_use == EEQSolveMethod::LDLT) ? "LDL^T" : "LU";
         const char* mode_str = (m_solve_method == EEQSolveMethod::Auto) ? " (auto)" : "";
         CurcumaLogger::info(fmt::format("[EEQ] dispatchSolve: Using {} solver{} (N={})", method_name, mode_str, natoms));
     }
 
     Vector charges;
+
+    // Explicit symmetric-indefinite LDL^T (Bunch-Kaufman) Schur solve. Selectable via
+    // -eeq_solver.solve_method ldlt — mainly to exercise/validate the path, since physical
+    // A_nn is SPD so SchurCholesky handles it; LDL^T is otherwise the auto-fallback inside
+    // solveWithSchurCholesky when the SPD factorization fails. Claude Generated (Jun 2026).
+    if (method_to_use == EEQSolveMethod::LDLT) {
+        Matrix A_nn = A.topLeftCorner(natoms, natoms);
+        Vector rhs_atoms = x.head(natoms);
+        Matrix C = Matrix::Zero(nfrag, natoms);
+        for (int f = 0; f < nfrag; ++f)
+            for (int j = 0; j < natoms; ++j)
+                C(f, j) = A(natoms + f, j);
+        Vector rhs_constraints = x.tail(nfrag);
+        charges = solveSchurLDLT(A_nn, rhs_atoms, C, rhs_constraints, natoms, nfrag);
+        if (charges.size() == natoms)
+            goto end_dispatch;
+        if (m_verbosity >= 1)
+            CurcumaLogger::warn("EEQ: explicit LDL^T solve failed/unavailable, falling back to LU");
+        goto lu_solve;
+    }
 
     // Claude Generated (June 2026): EEQSolveMethod::LU must be in this guard too —
     // otherwise an explicit `-eeq_solver.solve_method lu` makes this whole block fall
@@ -2000,7 +2100,14 @@ Vector EEQSolver::solveWithSchurCholesky(
     // m_refactor_eps <= 0 disables the cache entirely (every call refactors —
     // bit-identical to pre-WP behavior).
 
+    // BUGFIX (Jun 2026): the cache key is geometry + CN only, but the factorized matrix is
+    // A_nn(geometry,CN) + B(reaction field). With implicit solvation B changes (self-consistent
+    // reaction field) while geometry/CN do not, so a geometry-keyed cache hit reuses a STALE
+    // factor → wrong solvated charges (~3 mEh on gfnff+ALPB). The freeze that used to mask this
+    // is gone (transient now), so bypass the cache whenever a reaction field is active. Solvation
+    // is not the perf-critical large-system path. !m_reaction_field == gas phase (B==0).
     const bool cache_size_ok = (m_refactor_eps > 0.0)
+        && !m_reaction_field
         && m_chol_cache.valid
         && m_chol_cache.cached_natoms == natoms
         && m_chol_cache.cached_nfrag  == nfrag
@@ -2030,10 +2137,22 @@ Vector EEQSolver::solveWithSchurCholesky(
         // calculateFinalCharges (driven by the EnergyCalculator budget).
         ColMatrix chol = A_nn;  // row-major → column-major copy (symmetric: same values)
         if (!eeqCholeskyFactorize(chol)) {
+            // A_nn not SPD. In practice this only happens with the implicit-solvation
+            // reaction field (A_nn += Born matrix B can be indefinite); gas-phase A_nn is SPD
+            // by construction. Fall back to the augmented-system LU (PartialPivLU on the full
+            // (N+nfrag) saddle-point KKT), the numerically robust, xtb-validated path for the
+            // constrained indefinite solve.
+            //
+            // NOTE (Jun 2026): a Schur-on-A_nn LDL^T (Bunch-Kaufman) was tried here, but it
+            // gives a different (~3 mEh-off) constrained solution when A_nn is indefinite —
+            // forming the Schur complement requires inverting the indefinite N×N block, which
+            // is ill-conditioned — and it broke gfnff+ALPB validation vs xtb. So LDL^T must
+            // NOT replace the augmented LU here; it remains available only as the explicit
+            // -eeq_solver.solve_method ldlt (intended for SPD A_nn, where it equals cholesky).
             if (m_verbosity >= 1)
-                CurcumaLogger::warn("EEQ Schur-Cholesky: A matrix not SPD, falling back to LU");
+                CurcumaLogger::warn("EEQ Schur-Cholesky: A_nn not SPD, falling back to augmented LU");
             m_chol_cache.reset();
-            return Vector();  // Empty = signal to fall back
+            return Vector();  // Empty = signal to fall back to LU
         }
 
         // Persist into cache ONLY when (a) the cache is enabled (eps > 0) and
@@ -2041,6 +2160,7 @@ Vector EEQSolver::solveWithSchurCholesky(
         // Phase 1 has empty m_pending_geometry — local-solve path keeps the cache
         // clean so the next Phase 2 call sees valid=false and refactors normally.
         const bool can_persist = (m_refactor_eps > 0.0)
+            && !m_reaction_field   // do not store a solvated factor (would poison a later gas-phase solve)
             && (m_pending_geometry.rows() == natoms)
             && (m_pending_cn.size()       == natoms);
 
@@ -3098,14 +3218,13 @@ Vector EEQSolver::calculateFinalCharges(
         return topology_charges;
     }
 
-    // Claude Generated (Apr 2026): If Phase 2 was historically implausible for this system
-    // size, skip it forever (until atom count changes, indicating a new molecule).
-    if (m_phase2_historically_implausible && m_phase2_implausible_natoms == natoms) {
-        if (m_verbosity >= 2) {
-            CurcumaLogger::info("EEQSolver: Phase 2 was historically implausible for this system — skipping, using Phase 1 topology charges");
-        }
-        return topology_charges;
-    }
+    // Claude Generated (Jun 2026): a previously-implausible Phase-2 result no longer
+    // permanently freezes the charges. We always re-attempt Phase-2 so a single transient
+    // bad geometry (a close contact during a hot MD or aggressive opt step) does not demote
+    // the run to fixed Phase-1 charges forever — the force field stays polarizing. A bad
+    // individual step still falls back to Phase-1 via the per-step plausibility guard, and
+    // m_phase2_historically_implausible is reset on the next plausible solve.
+    // See docs/GFNFF_POLARIZATION_AUDIT.md.
 
     if (m_verbosity >= 2) {
         fmt::print(stderr, "[EEQ] Phase 2: preparing corrections (dxi, dgam, pi/amide detection)...\n");
@@ -3790,9 +3909,8 @@ Vector EEQSolver::calculateFinalCharges(
                 // Do NOT overwrite m_last_successful_charges — the Phase 2 result was
                 // garbage, but the cache still holds a good result from a previous step.
                 // Phase 1 topology_charges are used for THIS step but must not poison
-                // the cache for future steps.
-                // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this
-                // system size so we can skip the expensive solve on all future calls.
+                // the cache for future steps. Transient hint only (reset on the next plausible
+                // solve); no longer a permanent freeze (Claude Generated, Jun 2026).
                 m_phase2_historically_implausible = true;
                 m_phase2_implausible_natoms = natoms;
                 break;
@@ -3805,13 +3923,17 @@ Vector EEQSolver::calculateFinalCharges(
                     "EEQ Phase 2: Coulomb energy ratio {:.1f} (P2={:.2e}, P1={:.2e}), using Phase 1",
                     e_diff_ratio, e_coul_p2, e_coul_p1));
                 current_charges = topology_charges;
-                // Same as above — keep the cache intact.
-                // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this
-                // system size so we can skip the expensive solve on all future calls.
+                // Per-step fallback only; keep the cache intact. The flag is a transient hint
+                // (drives the Auto many-fragment Batched route) and is reset on the next
+                // plausible solve — it no longer permanently freezes Phase-2 (Jun 2026).
                 m_phase2_historically_implausible = true;
                 m_phase2_implausible_natoms = natoms;
                 break;
             }
+
+            // Plausible Phase-2 this step → clear the transient implausible flag so a single
+            // bad geometry never permanently demotes the run (Claude Generated, Jun 2026).
+            m_phase2_historically_implausible = false;
         }
 
         // Check convergence for iterative case

@@ -8005,13 +8005,21 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     // Claude Generated (Apr 2026): Use spatial cell list for O(N) AB-pair generation.
     // The double loop is O(N²); with a cell list only atom pairs within the HB cutoff
     // (~15.8 Bohr) are considered.  Threshold configurable via nb_cell_list_min_atoms.
+    // Lever 1 (Jun 2026): build the cell list with the LARGER nhb1 cutoff sqrt(hbthr2) and
+    // hoist it out of this branch so the inner HB loop can reuse it (forEachNeighbor) and
+    // avoid the O(ab_pairs * n_hydrogens) full hydrogen scan. ab_pairs keep the sqrt(hbthr1)
+    // distance filter (now applied explicitly on r2 since the cell cutoff is larger).
     const double ab_cutoff = std::sqrt(hbthr1);  // ~15.81 Bohr
+    (void)ab_cutoff;
     const int hb_cell_threshold = m_parameters.value("nb_cell_list_min_atoms",
         m_parameters.value("hb_cell_list_min_atoms", 800));
+    SpatialCellList cell_list;
+    bool have_cell_list = false;
     if (hb_cell_threshold == 0 || m_atomcount >= hb_cell_threshold) {
-        SpatialCellList cell_list;
-        cell_list.build(m_geometry_bohr, ab_cutoff);
-        cell_list.forEachPair([&](int i, int j, double /*r2*/) {
+        cell_list.build(m_geometry_bohr, std::sqrt(hbthr2));
+        have_cell_list = true;
+        cell_list.forEachPair([&](int i, int j, double r2) {
+            if (r2 > hbthr1) return;  // ab_pairs only within sqrt(hbthr1)
             // Fortran gfnff_ini.f90:882: if(at(i)==6 .and. piadr2(i)==0) cycle
             if (m_atoms[i] == 6 && topo_info.pi_fragments[i] == 0) return;
             if (m_atoms[j] == 6 && topo_info.pi_fragments[j] == 0) return;
@@ -8106,6 +8114,127 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
 
     int nhb1_count = 0, nhb2_count = 0;
 
+    if (have_cell_list) {
+        // ===== Lever 1 (Jun 2026): cell-list HB candidate generation =====
+        // Replaces the O(n_ab_pairs * n_hydrogens) inner scan (the dominant single-point
+        // cost on dense H-bonding liquids, ~33% of wall) with an EXACT, pruned generation:
+        //   - nhb2 (H bonded to a donor): iterate the donor's bonded HB-hydrogens directly
+        //     via hyd_on[] (no full scan).
+        //   - nhb1 (H near both, bonded to neither): the criterion
+        //     r_AB^2 + r_iH^2 + r_jH^2 < hbthr2 implies r_iH^2 < hbthr2, so a hydrogen query
+        //     around atom i (forEachNeighbor(i, hbthr2)) captures every candidate H.
+        // Same HB set as the full scan; only the order differs (already order-tolerant: the
+        // legacy path also reorders under threading). See docs/GFNFF_PERFORMANCE_LEVERS.md.
+        std::vector<char> is_hb_hyd(m_atomcount, 0);
+        for (int H : hb_hydrogens) is_hb_hyd[H] = 1;
+        // Hydrogens bonded to each atom, restricted to HB-active hydrogens and built from the
+        // same `bonds` list as is_bonded()/bond_set, so nhb2 needs no full-hydrogen scan.
+        std::vector<std::vector<int>> hyd_on(m_atomcount);
+        for (const auto& bond : bonds) {
+            const int a = bond.first, b = bond.second;
+            if (is_hb_hyd[a]) hyd_on[b].push_back(a);
+            if (is_hb_hyd[b]) hyd_on[a].push_back(b);
+        }
+
+        auto make_nhb2 = [&](int donor_A, int H, int acceptor_B,
+                             std::vector<GFNFFHydrogenBond>& out) {
+            if (is_bonded(donor_A, acceptor_B)) return;
+            int case_type = 2;
+            int acceptor_parent = -1;
+            if (m_atoms[acceptor_B] == 8 && topo_info.neighbor_lists[acceptor_B].size() == 1) {
+                int parent = topo_info.neighbor_lists[acceptor_B][0];
+                if (m_atoms[parent] == 6 || m_atoms[parent] == 7) {
+                    case_type = 3;
+                    acceptor_parent = parent;
+                }
+            } else if (m_atoms[acceptor_B] == 7 && topo_info.neighbor_lists[acceptor_B].size() == 2) {
+                case_type = 4;
+            }
+            GFNFFHydrogenBond hb;
+            hb.i = donor_A; hb.j = H; hb.k = acceptor_B;
+            hb.basicity_A = current_basicity[donor_A];
+            hb.basicity_B = current_basicity[acceptor_B];
+            hb.acidity_A = current_acidity[donor_A];
+            hb.acidity_B = current_acidity[acceptor_B];
+            hb.q_H = charges[H]; hb.q_A = charges[donor_A]; hb.q_B = charges[acceptor_B];
+            hb.r_cut = 50.0;
+            hb.case_type = case_type;
+            for (int nb : topo_info.neighbor_lists[donor_A])
+                if (nb != H) hb.neighbors_A.push_back(nb);
+            hb.neighbors_B = topo_info.neighbor_lists[acceptor_B];
+            if (case_type == 3) {
+                hb.acceptor_parent_index = acceptor_parent;
+                for (int nb : topo_info.neighbor_lists[acceptor_parent])
+                    if (nb != acceptor_B) hb.neighbors_C.push_back(nb);
+            }
+            out.push_back(hb);
+        };
+
+        auto process_pair = [&](int i, int j, std::vector<GFNFFHydrogenBond>& out) {
+            const Vector r_i = m_geometry_bohr.row(i);
+            const Vector r_j = m_geometry_bohr.row(j);
+            const double r_AB_sq = (r_i - r_j).squaredNorm();
+            if (r_AB_sq > hbthr1) return;
+            const bool ij_nonbond = !is_bonded(i, j);
+            if (ij_nonbond) {
+                for (int H : hyd_on[i]) make_nhb2(i, H, j, out);
+                for (int H : hyd_on[j]) {
+                    if (is_bonded(i, H)) continue;  // bonded-to-i takes precedence (legacy if/else-if)
+                    make_nhb2(j, H, i, out);
+                }
+            }
+            cell_list.forEachNeighbor(i, hbthr2, [&](int H, double r_iH_sq) {
+                if (!is_hb_hyd[H]) return;
+                if (is_bonded(i, H) || is_bonded(j, H)) return;  // bonded to neither
+                const Vector r_H = m_geometry_bohr.row(H);
+                const double r_jH_sq = (r_j - r_H).squaredNorm();
+                if (r_AB_sq + r_iH_sq + r_jH_sq < hbthr2) {
+                    GFNFFHydrogenBond hb;
+                    hb.case_type = 1;
+                    hb.i = i; hb.j = H; hb.k = j;
+                    hb.basicity_A = current_basicity[i];
+                    hb.basicity_B = current_basicity[j];
+                    hb.acidity_A = current_acidity[i];
+                    hb.acidity_B = current_acidity[j];
+                    hb.q_H = charges[H]; hb.q_A = charges[i]; hb.q_B = charges[j];
+                    hb.r_cut = 50.0;
+                    out.push_back(hb);
+                }
+            });
+        };
+
+        CxxThreadPool* opt_pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+        const int opt_par_threshold = m_parameters.value("hb_parallel_min_pairs", 500);
+        const bool opt_parallel = (opt_pool != nullptr && opt_par_threshold >= 0
+                                   && static_cast<int>(ab_pairs.size()) > opt_par_threshold);
+        if (opt_parallel) {
+            int n_threads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+            std::vector<std::future<std::vector<GFNFFHydrogenBond>>> futures;
+            futures.reserve(n_threads);
+            size_t chunk = std::max<size_t>(1, ab_pairs.size() / n_threads);
+            for (int t = 0; t < n_threads; ++t) {
+                size_t start = static_cast<size_t>(t) * chunk;
+                size_t end = (t == n_threads - 1) ? ab_pairs.size() : start + chunk;
+                if (start >= ab_pairs.size()) break;
+                futures.push_back(opt_pool->enqueue([&, start, end]() {
+                    std::vector<GFNFFHydrogenBond> local;
+                    for (size_t idx = start; idx < end; ++idx)
+                        process_pair(ab_pairs[idx].i, ab_pairs[idx].j, local);
+                    return local;
+                }));
+            }
+            for (auto& f : futures) {
+                auto local = f.get();
+                for (const auto& hb : local) { if (hb.case_type == 1) nhb1_count++; else nhb2_count++; }
+                hbonds.insert(hbonds.end(), local.begin(), local.end());
+            }
+        } else {
+            std::vector<GFNFFHydrogenBond> local;
+            for (const auto& ab : ab_pairs) process_pair(ab.i, ab.j, local);
+            for (const auto& hb : local) { if (hb.case_type == 1) nhb1_count++; else nhb2_count++; }
+            hbonds.insert(hbonds.end(), local.begin(), local.end());
+        }
+    } else {
     // Claude Generated (Apr 2026): Parallelise main HB detection loop via CxxThreadPool.
     // The AB-pair outer loop is embarrassingly parallel; each thread collects into
     // its own local vector, merged after the barrier.  No locking in the hot path.
@@ -8282,6 +8411,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             }
         }
     }
+    }  // end Lever 1 branch: if (have_cell_list) { optimized } else { legacy full scan }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("Detected {} hydrogen bonds", hbonds.size()));

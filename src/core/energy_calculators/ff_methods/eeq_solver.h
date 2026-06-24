@@ -76,6 +76,7 @@ enum class EEQDistanceMode {
 enum class EEQSolveMethod {
     LU,             ///< PartialPivLU on full augmented system (baseline)
     SchurCholesky,  ///< Cholesky on NxN SPD block + Schur complement for constraints
+    LDLT,           ///< Bunch-Kaufman LDL^T on NxN block (indefinite-capable) + Schur; LLT-fail fallback
     Batched,        ///< Per-fragment Cholesky (GPU only); CPU falls back to SchurCholesky
     PCG,            ///< Preconditioned Conjugate Gradient with warm start
     Auto            ///< Auto-select via first-call benchmark (SchurCholesky vs PCG)
@@ -1050,13 +1051,17 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
     PARAM(use_iterative_refinement, Bool, false,
           "Use iterative refinement for EEQ Phase 2", "Algorithm", {})
     PARAM(solve_method, String, "cholesky",
-          "EEQ linear solve algorithm: cholesky | batched | pcg | auto | lu (legacy). "
+          "EEQ linear solve algorithm: cholesky | ldlt | batched | pcg | auto | lu (legacy). "
           "GPU paths: cholesky → WP5-A/WP7-A (exact, full N×N Cholesky); "
           "batched → WP7-B (per-fragment Cholesky, ignores cross-fragment Coulomb — "
           "use only for well-separated fragments, see eeq_batched_min_distance; "
           "auto/pcg no longer auto-select it for in-contact fragments, see "
           "eeq_contact_prefer_exact). "
-          "Legacy alias 'schur_cholesky' maps to 'cholesky'.",
+          "Legacy alias 'schur_cholesky' maps to 'cholesky'. "
+          "ldlt = Bunch-Kaufman LDL^T on A_nn + Schur; equals cholesky for SPD A_nn (all "
+          "gas-phase systems). NOT an automatic fallback: for an indefinite A_nn (e.g. the "
+          "implicit-solvation reaction field) the robust path is cholesky's augmented-LU "
+          "fallback, which ldlt does not reproduce.",
           "Algorithm", {})
     PARAM(max_pcg_iterations, Int, 200,
           "Maximum PCG iterations for EEQ solve", "Algorithm", {})

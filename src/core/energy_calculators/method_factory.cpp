@@ -64,7 +64,7 @@ using namespace std;
 // =================================================================================
 
 const std::vector<std::string> MethodFactory::m_ff_methods = {
-    "uff", "uff-d3", "d3", "qmdff", "gfnff"
+    "uff", "uff-d3", "d3", "qmdff", "gfnff", "gfnff-fast"
 };
 
 const std::vector<std::string> MethodFactory::m_tblite_methods = {
@@ -457,8 +457,21 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
 
     // Native GFN-FF (always available, Curcuma's own implementation)
     // GPU acceleration via -gpu cuda|rocm|vulkan (auto picks the compiled backend).
-    if (method == "gfnff") {
-        std::string gpu_mode = config.value("gpu", "none");
+    if (method == "gfnff" || method == "gfnff-fast") {
+        // gfnff-fast (Jun 2026): opt-in NON-POLARIZING fast preset — freeze the EEQ charges
+        // and CN/D4 after the first geometry (drops the per-step self-consistent polarization
+        // response for speed). Reuses the existing static_charges/static_cn machinery; routes
+        // through the normal native GFN-FF path otherwise. See docs/GFNFF_FAST_WP.md.
+        json gfnff_config = config;
+        if (method == "gfnff-fast") {
+            gfnff_config["static_charges"] = true;
+            gfnff_config["static_cn"] = true;
+            CurcumaLogger::warn("Method 'gfnff-fast': NON-POLARIZING fast GFN-FF — EEQ charges and "
+                "CN/D4 are frozen after the first geometry for speed. Valid for equilibrium dynamics "
+                "/ relaxation of pre-equilibrated systems only; NOT for charge transfer, ionic "
+                "dynamics, large conformational change, or reactions. See docs/GFNFF_FAST_WP.md.");
+        }
+        std::string gpu_mode = gfnff_config.value("gpu", "none");
         std::transform(gpu_mode.begin(), gpu_mode.end(), gpu_mode.begin(), ::tolower);
 
         // Auto-detect: pick the first compiled GFN-FF GPU backend (cuda > rocm > vulkan).
@@ -477,7 +490,7 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         if (gpu_mode == "cuda") {
 #ifdef USE_CUDA
             CurcumaLogger::info("GFN-FF: using GPU acceleration (CUDA)");
-            return std::make_unique<GFNFFGPUComputationalMethod>("gfnff", config);
+            return std::make_unique<GFNFFGPUComputationalMethod>("gfnff", gfnff_config);
 #else
             CurcumaLogger::warn("GPU acceleration requested (-gpu cuda) but Curcuma was compiled "
                 "without CUDA support. Falling back to CPU.");
@@ -486,7 +499,7 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         } else if (gpu_mode == "rocm") {
 #ifdef USE_ROCM_GFNFF
             CurcumaLogger::info("GFN-FF: using GPU acceleration (ROCm/HIP)");
-            return std::make_unique<GFNFFHipComputationalMethod>("gfnff", config);
+            return std::make_unique<GFNFFHipComputationalMethod>("gfnff", gfnff_config);
 #else
             CurcumaLogger::warn("GPU acceleration requested (-gpu rocm) but Curcuma was compiled "
                 "without ROCm GFN-FF support. Falling back to CPU.");
@@ -500,7 +513,7 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         }
 
         CurcumaLogger::info("GFN-FF: using CPU implementation");
-        return std::make_unique<GFNFFComputationalMethod>("gfnff", config);
+        return std::make_unique<GFNFFComputationalMethod>("gfnff", gfnff_config);
     }
 
     // Force field methods (always available)
@@ -596,7 +609,7 @@ std::vector<std::string> MethodFactory::getAvailableMethods() {
     // Always available: native methods, force fields, and native xTB (gfn1/gfn2)
     available.insert(available.end(), {"eht", "pm3", "mndo", "am1", "pm6",
                                        "gfn1", "gfn2",
-                                       "gfnff", "uff", "uff-d3", "qmdff"});
+                                       "gfnff", "gfnff-fast", "uff", "uff-d3", "qmdff"});
 
     if (hasTBLite()) {
         available.push_back("ipea1");
