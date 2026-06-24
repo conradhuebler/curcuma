@@ -105,7 +105,21 @@ S = hours, M = day, L = multi-day.
 > EXACT — identical HB set, energies bit-identical (mixed_3007/water_1002/urea_1000/mixture2
 > all match to the last digit). Measured ~1.5x on mixture2 SP (clean A/B same machine/load:
 > ~35.7 s -> ~23.2 s @4thr). Gated to the large-system cell-list path; small systems
-> (validation suite) keep the unchanged path. Lever 2 (GPU native D4 list) remains open.
+> (validation suite) keep the unchanged path.
+>
+> **Lever 2 (GPU native D4 list) — two parts:**
+> - *Original framing* (route the GPU off the uncapped 13.7M-pair JSON onto the capped
+>   native list): **already done** before this audit — the GPU consumes the 60-Bohr-capped
+>   `GFNFFDispersion` structs from `generateGFNFFParameterSet`, not the JSON. The note above
+>   predated that migration.
+> - *On-device pair build* (CUDA, Jun 2026, opt-in `-gfnff.gpu_disp_pairs_on_device`):
+>   `k_disp_pairs_count`/`k_disp_pairs_build` (two-pass enumeration + per-pair C6 contraction,
+>   reusing the host O(N) Gaussian weights) replace the host O(N²) `GenerateDispersionPairsNative`
+>   loop, which `setSkipPairLoop` then skips. **Energy + MD gradient bit-identical** to the host
+>   list (complex/water_1002/mixed_3007 |dE|=0; pair count exact). **Honest: NO measured speedup**
+>   — mixed_3007 SP wall is 5.99 s host == 5.99 s device; D4 generation is not on the critical
+>   path (Lever 1 / HB list dominates). It is a GPU-residency/correctness milestone (avoids the
+>   host roundtrip on MD topology rebuilds), default OFF. The ROCm mirror is pending.
 
 **Lever 1 (HB candidate generation).** It is ~33 % of single-point wall on a dense
 H-bonding liquid, it is the same cost every MD step (HB list is rebuilt on geometry

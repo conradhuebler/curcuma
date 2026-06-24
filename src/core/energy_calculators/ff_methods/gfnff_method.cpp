@@ -9702,6 +9702,10 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
             m_d4_generator->setTopologyCharges(topo_info.topology_charges);
         }
 
+        // WP-A: when the GPU builds the pair list on device, keep only the CN + gw
+        // (the device reuses them) and skip the host O(N^2) pair loop + host dc6dcn.
+        m_d4_generator->setSkipPairLoop(m_skip_host_disp_pairs);
+
         dispersions = m_d4_generator->GenerateDispersionPairsNative(m_atoms, m_geometry_bohr);
 
         // WP-Disp (Mai 2026): optional distance cutoff on D4 pair list.

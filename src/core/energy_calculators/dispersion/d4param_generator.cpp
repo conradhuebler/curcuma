@@ -1813,6 +1813,13 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     if (!m_c6_reference_cached) precomputeC6ReferenceMatrix();
     precomputeGaussianWeights();
 
+    // WP-A (Jun 2026): with gpu_disp_pairs_on_device the GPU builds the pair list +
+    // dc6dcn on the device, reusing only the CN + Gaussian weights computed above.
+    // Skip the host O(N²) pair loop and the host dc6dcn entirely; return empty.
+    if (m_skip_pair_loop) {
+        return {};
+    }
+
     // Step 4: Generate pairs as native structs (no JSON!)
     double a1 = m_config.get<double>("d4_a1", 0.58);
     double a2 = m_config.get<double>("d4_a2", 4.80);

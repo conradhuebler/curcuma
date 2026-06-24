@@ -272,6 +272,7 @@ PARAM(hb_update_rmsd_bohr, Double, 0.3, "Task 11: per-atom RMSD (Bohr) that trig
 PARAM(hb_update_force_every, Int, 0, "Task 11: force an HB/XB list rebuild every N gradient steps (0 = RMSD-triggered only). Use for continuous MD where near-threshold pairs must be re-classified promptly.", "Performance", {})
 PARAM(eeq_mixed_precision, Bool, false, "WP-B GPU only: factor the EEQ Coulomb matrix in FP32 then refine the solution with the FP64 residual, dsposv-style, for full FP64 accuracy at a fraction of the FP64-factor cost on FP64-weak GPUs. Opt-in on CUDA, default ON on ROCm. Applies to the factor-dominated few-fragment solve paths; the many-fragment general path stays FP64.", "Performance", {})
 PARAM(eeq_mixed_precision_iters, Int, 2, "WP-B GPU only: number of FP64-residual / FP32-correction refinement steps for eeq_mixed_precision. Minimum 1. Two steps reach FP64 accuracy on the validation set.", "Performance", {})
+PARAM(gpu_disp_pairs_on_device, Bool, false, "WP-A GPU only: build the D4 dispersion pair list on the device via a two-pass enumeration plus per-pair C6 contraction, replacing the host O(N^2) GenerateDispersionPairsNative loop and the per-build H2D upload. Default OFF keeps the proven host build. Bit-identical to the host list up to the FP order of the device Gaussian weights.", "Performance", {})
 // Implicit solvation (WP5, Claude Generated June 2026). Registering these here is
 // what makes -gfnff.solvent reach GFNFF::InitialiseMolecule (the value was silently
 // ignored before, since the gfnff module declared no solvent PARAM). Use the dotted
@@ -653,6 +654,12 @@ public:
      * Provided for validation and testing purposes.
      */
     const TopologyInfo& getTopologyInfo() const { return getCachedTopology(); }
+
+    /// WP-A (Jun 2026): set by the GPU method when gpu_disp_pairs_on_device is on, so
+    /// the host D4 generator computes only CN + Gaussian weights and skips its O(N^2)
+    /// pair loop (the GPU builds the pair list on device). Must be set before
+    /// InitialiseMolecule. No effect on the CPU path.
+    void setSkipHostDispPairs(bool v) { m_skip_host_disp_pairs = v; }
 
     /**
      * @brief Export topology information for restart/topology I/O
@@ -2498,6 +2505,7 @@ private:
 
     // Claude Generated (March 2026): Topology persistence in param.json
     bool m_cache_topology = true;   ///< Cache Phase-1 EEQ topology in param.json (opt-out)
+    bool m_skip_host_disp_pairs = false;  ///< WP-A: GPU builds D4 pairs; skip host O(N^2) loop
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1
 
     // Claude Generated (April 2026): Timing for consolidated summary

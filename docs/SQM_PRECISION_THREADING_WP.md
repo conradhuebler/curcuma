@@ -74,14 +74,23 @@ GPU idle — that was a broken build, not representative. The 30 s figure is the
   1/32–1/64 (consumer/workstation) → mixed precision on + lower threshold; 1/2 (DC/MI300) →
   FP64 default. Removes manual per-card tuning. CPU path unchanged.
 
-### WP-4 🟡 OPEN — GFN-FF mixed-precision iterative refinement (EEQ solve)
+### WP-4 🟢 IMPLEMENTED (CUDA, Jun 2026) — GFN-FF mixed-precision iterative refinement (EEQ solve)
 - GFN-FF has NO SCF/eigensolve, so the "FP32 early-iter" pattern does not map. The structural
-  analog is the **EEQ linear solve** (dpotrf/dpotrs, ~75% of EEQ cost on mixture). Apply
-  classic mixed-precision **iterative refinement** (LAPACK dsgesv pattern): factor A in FP32
-  (cheap on FP64-weak GPUs), solve, compute residual `b − A·x` in FP64, correct in 1–2 FP64
-  steps → full FP64 accuracy. GPU-only, large many-fragment systems. The GPU EEQ
-  (rocSOLVER/cuSOLVER) is currently FP64-only — this is new. Pairwise FF energy/gradient terms
-  are a poorer candidate (FP32 risks the 1e-6 Eh goal; keep FP64 or FP64-accumulate).
+  analog is the **EEQ linear solve** (dpotrf/dpotrs). Applied classic mixed-precision
+  **iterative refinement** (LAPACK dsposv pattern): factor A in FP32 (cusolverDnSpotrf on an
+  FP32 copy, d_A kept as the FP64 matrix), FP32 spotrs, then refine with the FP64 residual
+  `b − A·x` (cublasDsymm) + an FP32 correction, 1–2 steps → full FP64 accuracy. Opt-in
+  `-gfnff.eeq_mixed_precision` (+ `eeq_mixed_precision_iters`), default OFF on CUDA.
+  `EEQSolverGPU::setMixedPrecision` / `mixedFactor` / `mixedSolveRefine` in
+  `eeq_solver_gpu.cu`; wired into the factor-dominated paths (solve / solveWithDeviceRHS /
+  GPU-Schur nfrag=1) with auto-fallback to FP64 dpotrf/LU when the FP32 factor is not SPD; the
+  nfrag>1 general path stays FP64 (nrhs≈N makes the FP64 residual GEMM as costly as the solve).
+  **Validated (GTX 1660, 1/32 FP64): triose nfrag=1 SPD 41-step MD bit-identical to FP64.**
+  Honest: the factor-dominated wall-time win needs a LARGE nfrag=1 SPD system (the available GPU
+  GFN-FF set lacks one: triose tiny, polymer indefinite→LU, mixtures multi-frag); win expected
+  but not yet measured. **ROCm mirror pending** (no hipcc here; use rocsolver Spotrf/Spotrs +
+  rocblas_dsymm, same hand-rolled SPD IR). Pairwise FF energy/gradient terms remain a poorer
+  candidate (FP32 risks the 1e-6 Eh goal).
 
 ### WP-5 🟢 IDEAS — bigger GPU levers (newer cards / HPC)
 - **Tensor-core GEMM (TF32/FP16)** for the non-eigensolve BLAS (Fock build, density C·Cᵀ,

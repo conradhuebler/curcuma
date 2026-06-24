@@ -651,6 +651,25 @@ std::string method = "d4";  // Matches Fortran reference
 - CPU auto-select no longer routes in-contact fragments to the approximate Batched solver (drops cross-fragment Coulomb); `m_contact_min_dist` + PARAM `eeq_contact_prefer_exact` (default true) prefer the exact solver. See [docs/GPU_WP7_EEQ_LARGE_SYSTEMS.md](../../../../docs/GPU_WP7_EEQ_LARGE_SYSTEMS.md#wp7-d-block-jacobi-präkonditionierer--kontaktbewusste-auswahl-jun-2026)
 - Open: FMM matvec (O(N log N)) + ROCm block-Jacobi mirror
 
+### ✅ WP-B — EEQ FP32-factor + FP64-refine mixed precision (CUDA, Jun 2026)
+- Opt-in `-gfnff.eeq_mixed_precision` (+ `eeq_mixed_precision_iters`, default 2): LAPACK
+  dsposv pattern — `cusolverDnSpotrf` on an FP32 copy (d_A kept as the FP64 matrix), FP32
+  `Spotrs`, then FP64 residual (`cublasDsymm`) + FP32 correction, 1–2 steps → full FP64
+  accuracy. `EEQSolverGPU::setMixedPrecision`/`mixedFactor`/`mixedSolveRefine`
+  (`cuda/eeq_solver_gpu.cu`); wired into the factor-dominated paths (solve / solveWithDeviceRHS
+  / GPU-Schur nfrag=1), auto-falls back to FP64 dpotrf/LU when the FP32 factor is not SPD;
+  nfrag>1 general path stays FP64. Validated GTX 1660: triose nfrag=1 SPD 41-step MD
+  bit-identical to FP64. Win needs a large nfrag=1 SPD system (unmeasured). ROCm mirror pending.
+
+### ✅ WP-A — on-device D4 dispersion pair build (CUDA, Jun 2026)
+- Opt-in `-gfnff.gpu_disp_pairs_on_device` (default OFF): `k_disp_pairs_count`/`k_disp_pairs_build`
+  (`cuda/gfnff_kernels.cu`) do the two-pass enumeration + per-pair C6 contraction (reusing the
+  host O(N) Gaussian weights) on the device, and `D4ParameterGenerator::setSkipPairLoop` skips
+  the host O(N²) `GenerateDispersionPairsNative` loop. Energy + MD gradient bit-identical to the
+  host list (complex/water_1002/mixed_3007 |dE|=0). **Honest: no measured speedup** (mixed_3007 SP
+  5.99 s host == device — D4 gen is not the bottleneck, Lever 1/HB list is); a residency/correctness
+  milestone. See [docs/GFNFF_PERFORMANCE_LEVERS.md](../../../../docs/GFNFF_PERFORMANCE_LEVERS.md). ROCm mirror pending.
+
 ### ⚠️ Known Issues
 - gfnff GPU validation tests (test_gfnff_gpu) fail with JSON null error — pre-existing, unrelated to pipeline
 - k_dispersion cannot overlap with EEQ in gradient mode (dc6dcn dependency)

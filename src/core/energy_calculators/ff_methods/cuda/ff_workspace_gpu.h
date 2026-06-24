@@ -307,6 +307,33 @@ public:
      */
     void computeGaussianWeightsOnGPU(bool use_cn_final = false);
 
+    /**
+     * @brief WP-A (Jun 2026): build the D4 dispersion pair list on the device.
+     *
+     * Two-pass (count + build) replacement for the host
+     * D4ParameterGenerator::GenerateDispersionPairsNative O(N²) loop and the
+     * per-build H2D upload of the pair arrays. Enumerates i<j within
+     * cutoff_bohr, then fills the DispersionSoA (idx + C6 contraction + r4r2ij
+     * + R0² + zetac6 + r_cut) entirely on the GPU. Requires CN + gw already on
+     * the device (the caller runs computeCN + computeGaussianWeightsOnGPU first)
+     * and the C6 reference table uploaded (uploadC6ReferenceTable).
+     *
+     * Opt-in (gated by -gfnff.gpu_disp_pairs_on_device); the host build path
+     * stays the default. Bit-identical to the host list up to the FP-order of
+     * the device gw vs host gw (~1e-14 per pair).
+     *
+     * @param gw_flat      [N*D4_MAX_REF] host Gaussian weights (D4ParameterGenerator::
+     *                     getGaussianWeights, flattened atom*MAX_REF+ref, zero-padded)
+     * @param sqrtzr4r2    [118] sqrt(Z·r4/r2) per element (D4ParameterGenerator::getSqrtZr4r2)
+     * @param topo_charges [N]   Phase-1 topology charges (for zetac6)
+     * @param a1,a2        GFN-FF D4 BJ damping params (0.58 / 4.80)
+     * @param cutoff_bohr  pair distance cutoff (60.0, matching the host)
+     */
+    void generateDispersionPairListOnGPU(const std::vector<double>& gw_flat,
+                                         const std::vector<double>& sqrtzr4r2,
+                                         const std::vector<double>& topo_charges,
+                                         double a1, double a2, double cutoff_bohr);
+
     // =========================================================================
     // Term enable flags (match FFWorkspace API)
     // =========================================================================

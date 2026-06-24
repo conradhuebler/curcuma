@@ -99,6 +99,16 @@ bool GFNFFGPUComputationalMethod::setMolecule(const Mol& mol)
 
     auto t_init_start = std::chrono::high_resolution_clock::now();
 
+    // WP-A (Jun 2026): if the GPU builds the D4 pair list on device, tell the host
+    // generator to skip its O(N^2) pair loop (keep only CN + gw the device reuses).
+    // Must be set before InitialiseMolecule triggers host parameter generation.
+    {
+        bool disp_dev = m_parameters.value("gpu_disp_pairs_on_device", false);
+        if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+            disp_dev = disp_dev || m_parameters["gfnff"].value("gpu_disp_pairs_on_device", false);
+        m_gfnff->setSkipHostDispPairs(disp_dev);
+    }
+
     // CPU topology + parameter generation (same as CPU gfnff)
     if (!m_gfnff->InitialiseMolecule(mol)) {
         m_has_error = true;
@@ -241,6 +251,30 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
             m_gpu_workspace->uploadC6ReferenceTable(d4->getC6FlatCache(), d4->getRefN());
             // Phase 6: Upload reference CN values for GPU Gaussian weight kernel
             m_gpu_workspace->uploadRefCN(d4->getRefCN());
+
+            // WP-A (Jun 2026): opt-in on-device D4 dispersion pair-list build. Replaces
+            // the host GenerateDispersionPairsNative O(N^2) loop + the per-build H2D
+            // upload of the pair arrays (the host-uploaded SoA from the ctor is
+            // overwritten here). Needs CN + gw on the device first. Default OFF: the
+            // proven host build stays the reference. See docs/GFNFF_PERFORMANCE_LEVERS.md.
+            if (cfg_get_bool("gpu_disp_pairs_on_device", false)) {
+                const int Nd = static_cast<int>(m_atom_types.size());
+                // Host Gaussian weights (same as getChargeWeightedC6 uses) -> flat [N*MAX_REF].
+                const auto& hgw = d4->getGaussianWeights();
+                std::vector<double> gw_flat(static_cast<size_t>(Nd) * D4ParameterGenerator::MAX_REF, 0.0);
+                for (int a = 0; a < Nd && a < static_cast<int>(hgw.size()); ++a) {
+                    int nref = std::min<int>(static_cast<int>(hgw[a].size()), D4ParameterGenerator::MAX_REF);
+                    for (int r = 0; r < nref; ++r) gw_flat[static_cast<size_t>(a) * D4ParameterGenerator::MAX_REF + r] = hgw[a][r];
+                }
+                std::vector<double> sqrtzr4r2(118, 0.0);
+                for (int z = 1; z <= 118; ++z) sqrtzr4r2[z - 1] = d4->getSqrtZr4r2(z);
+                const Vector& tc = m_gfnff->getTopologyInfo().topology_charges;
+                std::vector<double> topo_q(tc.data(), tc.data() + tc.size());
+                // GFN-FF D4: a1=0.58, a2=4.80, 60 Bohr cutoff (matches the host generator).
+                m_gpu_workspace->generateDispersionPairListOnGPU(gw_flat, sqrtzr4r2, topo_q, 0.58, 4.80, 60.0);
+                if (CurcumaLogger::get_verbosity() >= 1)
+                    CurcumaLogger::info("GFN-FF GPU: D4 dispersion pair list built on device (gpu_disp_pairs_on_device)");
+            }
         }
 
         // Claude Generated (March 2026): GPU EEQ solver (cuSOLVER Cholesky)

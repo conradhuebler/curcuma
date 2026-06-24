@@ -602,6 +602,55 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
     double*       rcov_sum);
 
 // ============================================================================
+// WP-A (Jun 2026): on-device D4 dispersion pair-list build.
+// Two-pass enumeration (count + build) mirroring the CN pair list, plus the
+// per-pair static data (C6 contraction + r4r2ij + R0² + zetac6) so the host
+// O(N²) GenerateDispersionPairsNative loop + the per-build H2D upload are not
+// needed when -gfnff.gpu_disp_pairs_on_device is on. Reference (bit-identical
+// target): d4param_generator.cpp:GenerateDispersionPairsNative (line 1789).
+// ============================================================================
+
+/// Pass 1: count i<j pairs with r² ≤ cutoff_sq and valid elements (1..118).
+__global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_count(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_sq,
+    int*          d_count);
+
+/// Pass 2: write idx_i/idx_j + per-pair static data for each surviving pair.
+/// C6 = Σ_{ri,rj} gw_i·gw_j·c6ref (CN-only weighting, == getChargeWeightedC6);
+/// r4r2ij = 3·sqrtZr4r2_i·sqrtZr4r2_j; r0_sq = (a1·√r4r2ij + a2)²;
+/// zetac6 = zetaChargeScale(Zi,q_i)·zetaChargeScale(Zj,q_j); r_cut = 50.
+__global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_sq,
+    const double* __restrict__ gw,          ///< [N*MAX_REF] device Gaussian weights
+    const double* __restrict__ c6_flat,     ///< C6 reference table
+    const double* __restrict__ sqrtzr4r2,   ///< [118] sqrt(Z·r4/r2) per element
+    const double* __restrict__ topo_q,      ///< [N] Phase-1 topology charges
+    const double* __restrict__ zeta_zeff,   ///< [86] zeta zeff per element
+    const double* __restrict__ zeta_c,      ///< [86] zeta c per element
+    double        a1,
+    double        a2,
+    int*          d_counter,
+    int*          out_i,
+    int*          out_j,
+    double*       out_C6,
+    double*       out_r4r2,
+    double*       out_r0sq,
+    double*       out_zeta,
+    double*       out_rcut
+    // refn read from d_refn_const (constant memory)
+);
+
+// ============================================================================
 // GPU HB CN per-bond computation (Apr 2026)
 // Replaces CPU HB CN loop in gfnff_gpu_method.cpp.
 // ============================================================================

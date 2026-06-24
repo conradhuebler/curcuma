@@ -90,6 +90,12 @@ public:
     // which are calculated with INTEGER neighbor counts, NOT fractional CN from geometry.
     void setTopologyCharges(const Vector& charges) { m_topology_charges = charges; }
 
+    // WP-A (Jun 2026): when the GPU builds the D4 pair list on device
+    // (gpu_disp_pairs_on_device), GenerateDispersionPairsNative computes only the
+    // O(N) CN + Gaussian weights the device reuses and skips the O(N^2) pair loop
+    // + host dc6dcn (the GPU recomputes dc6dcn on device). Returns an empty list.
+    void setSkipPairLoop(bool v) { m_skip_pair_loop = v; }
+
     // Claude Generated (Feb 15, 2026): dc6dcn computation for dispersion CN gradient
     // Reference: Fortran gfnff_gdisp0.f90:174-210, 262-305
     // @param skip_dc6dcn  If true, skip O(N²) dc6dcn matrix (GPU computes per-pair)
@@ -316,6 +322,7 @@ private:
     // Reference: Fortran gfnff_ini.f90:789 - f1 = zeta(ati, topo%qa(i))
     // GFN-FF uses topology-based charges (topo%qa) for zetac6 scaling, NOT geometry-dependent EEQ
     Vector m_topology_charges;  // Phase 1 topology charges from GFNFF::TopologyInfo
+    bool m_skip_pair_loop = false;  // WP-A: GPU builds the pair list; skip the host O(N^2) loop
 
     // Molecular CN calculation (December 2025 Phase 2 - CN+Charge weighting)
     std::vector<double> m_cn_values;  // Cached GFNFFCN values for current geometry
