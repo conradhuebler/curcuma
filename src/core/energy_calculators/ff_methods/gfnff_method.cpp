@@ -9572,66 +9572,87 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
     // ===== NON-BONDED REPULSION =====
     const TopologyInfo& topo_info = getCachedTopology();
 
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
-            if (bonded_set.count({i, j}) > 0) continue;
+    // Lever 5 (Jun 2026): the non-bonded repulsion energy + gradient hard-cut at r_cut
+    // (NB_REP_RCUT, forcefieldthread.cpp:2207/2266), so a pair beyond r_cut contributes
+    // EXACTLY 0. Build the non-bonded pair list with a spatial cell list at the r_cut
+    // radius instead of the uncapped O(N²) double loop — same in-cutoff pair set, energy
+    // bit-identical, but it culls the ~N² long-range pairs on a large system. Gated on
+    // nb_cell_list_min_atoms (same knob as the HB list); small systems keep the O(N²)
+    // path bit-identical.
+    constexpr double NB_REP_RCUT = 20.0;
 
-            int zi = m_atoms[i] - 1;
-            int zj = m_atoms[j] - 1;
+    auto make_nb_rep = [&](int ii, int jj) {
+        int i = std::min(ii, jj);
+        int j = std::max(ii, jj);
+        if (i == j) return;
+        if (bonded_set.count({i, j}) > 0) return;
 
-            bool valid = (zi >= 0 && zi < static_cast<int>(repan_angewChem2020.size()) &&
-                          zj >= 0 && zj < static_cast<int>(repan_angewChem2020.size()));
-            if (!valid) continue;
+        int zi = m_atoms[i] - 1;
+        int zj = m_atoms[j] - 1;
 
-            double repz_i = (zi >= 0 && zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
-            double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
+        bool valid = (zi >= 0 && zi < static_cast<int>(repan_angewChem2020.size()) &&
+                      zj >= 0 && zj < static_cast<int>(repan_angewChem2020.size()));
+        if (!valid) return;
 
-            double qa_i = (i < topo_info.topology_charges.size()) ? topo_info.topology_charges[i] : 0.0;
-            double qa_j = (j < topo_info.topology_charges.size()) ? topo_info.topology_charges[j] : 0.0;
-            double cn_i = (i < topo_info.neighbor_counts.size()) ? topo_info.neighbor_counts[i] : 0.0;
-            double cn_j = (j < topo_info.neighbor_counts.size()) ? topo_info.neighbor_counts[j] : 0.0;
+        double repz_i = (zi >= 0 && zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
+        double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
 
-            double fn_i = 1.0 + NREPSCAL / (1.0 + cn_i * cn_i);
-            double fn_j = 1.0 + NREPSCAL / (1.0 + cn_j * cn_j);
-            double dum1 = repan_angewChem2020[zi] * (1.0 + qa_i * QREPSCAL) * fn_i;
-            double dum2 = repan_angewChem2020[zj] * (1.0 + qa_j * QREPSCAL) * fn_j;
+        double qa_i = (i < topo_info.topology_charges.size()) ? topo_info.topology_charges[i] : 0.0;
+        double qa_j = (j < topo_info.topology_charges.size()) ? topo_info.topology_charges[j] : 0.0;
+        double cn_i = (i < topo_info.neighbor_counts.size()) ? topo_info.neighbor_counts[i] : 0.0;
+        double cn_j = (j < topo_info.neighbor_counts.size()) ? topo_info.neighbor_counts[j] : 0.0;
 
-            double ff = 1.0;
-            int Z_i = m_atoms[i];
-            int Z_j = m_atoms[j];
+        double fn_i = 1.0 + NREPSCAL / (1.0 + cn_i * cn_i);
+        double fn_j = 1.0 + NREPSCAL / (1.0 + cn_j * cn_j);
+        double dum1 = repan_angewChem2020[zi] * (1.0 + qa_i * QREPSCAL) * fn_i;
+        double dum2 = repan_angewChem2020[zj] * (1.0 + qa_j * QREPSCAL) * fn_j;
 
-            if (Z_i == 1 && Z_j == 1) {
-                ff = HHFAC;
-                int topo_dist = topo_info.topo_distances[i][j];
-                if (topo_dist == 2) ff *= HH13REP;
-                else if (topo_dist == 3) ff *= HH14REP;
-            }
-            else if ((Z_i == 1 && PeriodicTable::getMetalType(Z_j) > 0) ||
-                     (Z_j == 1 && PeriodicTable::getMetalType(Z_i) > 0)) {
-                ff = 0.85;
-            }
-            else if ((Z_i == 1 && Z_j == 6) || (Z_j == 1 && Z_i == 6)) {
-                ff = 0.91;
-            }
-            else if ((Z_i == 1 && Z_j == 8) || (Z_j == 1 && Z_i == 8)) {
-                ff = 1.04;
-            }
+        double ff = 1.0;
+        int Z_i = m_atoms[i];
+        int Z_j = m_atoms[j];
 
-            GFNFFRepulsion r;
-            r.i = i;
-            r.j = j;
-            r.alpha = std::sqrt(dum1 * dum2) * ff;
-            r.repab = repz_i * repz_j * REPSCALN;
-            r.r_cut = 20.0;
-
-            nonbonded_reps.push_back(r);
-
-            if (m_rep_diag) {
-                int topo_dist = topo_info.topo_distances[i][j];
-                fmt::print(stderr, "nb_rep {:3d}-{:3d} alpha={:.10f} repab={:.10f} qa_i={:.10f} qa_j={:.10f} cn_i={:.0f} cn_j={:.0f} ff={:.4f} bpair={}\n",
-                    i+1, j+1, r.alpha, r.repab, qa_i, qa_j, cn_i, cn_j, ff, topo_dist);
-            }
+        if (Z_i == 1 && Z_j == 1) {
+            ff = HHFAC;
+            int topo_dist = topo_info.topo_distances[i][j];
+            if (topo_dist == 2) ff *= HH13REP;
+            else if (topo_dist == 3) ff *= HH14REP;
         }
+        else if ((Z_i == 1 && PeriodicTable::getMetalType(Z_j) > 0) ||
+                 (Z_j == 1 && PeriodicTable::getMetalType(Z_i) > 0)) {
+            ff = 0.85;
+        }
+        else if ((Z_i == 1 && Z_j == 6) || (Z_j == 1 && Z_i == 6)) {
+            ff = 0.91;
+        }
+        else if ((Z_i == 1 && Z_j == 8) || (Z_j == 1 && Z_i == 8)) {
+            ff = 1.04;
+        }
+
+        GFNFFRepulsion r;
+        r.i = i;
+        r.j = j;
+        r.alpha = std::sqrt(dum1 * dum2) * ff;
+        r.repab = repz_i * repz_j * REPSCALN;
+        r.r_cut = NB_REP_RCUT;
+
+        nonbonded_reps.push_back(r);
+
+        if (m_rep_diag) {
+            int topo_dist = topo_info.topo_distances[i][j];
+            fmt::print(stderr, "nb_rep {:3d}-{:3d} alpha={:.10f} repab={:.10f} qa_i={:.10f} qa_j={:.10f} cn_i={:.0f} cn_j={:.0f} ff={:.4f} bpair={}\n",
+                i+1, j+1, r.alpha, r.repab, qa_i, qa_j, cn_i, cn_j, ff, topo_dist);
+        }
+    };
+
+    const int nb_rep_cell_threshold = m_parameters.value("nb_cell_list_min_atoms", 800);
+    if (nb_rep_cell_threshold == 0 || m_atomcount >= nb_rep_cell_threshold) {
+        SpatialCellList rep_cells;
+        rep_cells.build(m_geometry_bohr, NB_REP_RCUT);
+        rep_cells.forEachPair([&](int i, int j, double /*r2*/) { make_nb_rep(i, j); });
+    } else {
+        for (int i = 0; i < m_atomcount; ++i)
+            for (int j = i + 1; j < m_atomcount; ++j)
+                make_nb_rep(i, j);
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
