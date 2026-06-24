@@ -270,6 +270,8 @@ PARAM(hb_thr1_bohr2, Double, 0.0, "Task 11: direct override of hbthr1, the A-B d
 PARAM(hb_thr2_bohr2, Double, 0.0, "Task 11: direct override of hbthr2, the A-H-B sum-of-squares cutoff for nhb1 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
 PARAM(hb_update_rmsd_bohr, Double, 0.3, "Task 11: per-atom RMSD (Bohr) that triggers an HB/XB list rebuild. 0.3 reproduces the gfnff reference (gfnff_ini2.f90:717). Smaller = rebuild more often = less near-threshold staleness in MD but slower.", "Performance", {})
 PARAM(hb_update_force_every, Int, 0, "Task 11: force an HB/XB list rebuild every N gradient steps (0 = RMSD-triggered only). Use for continuous MD where near-threshold pairs must be re-classified promptly.", "Performance", {})
+PARAM(eeq_mixed_precision, Bool, false, "WP-B GPU only: factor the EEQ Coulomb matrix in FP32 then refine the solution with the FP64 residual, dsposv-style, for full FP64 accuracy at a fraction of the FP64-factor cost on FP64-weak GPUs. Opt-in on CUDA, default ON on ROCm. Applies to the factor-dominated few-fragment solve paths; the many-fragment general path stays FP64.", "Performance", {})
+PARAM(eeq_mixed_precision_iters, Int, 2, "WP-B GPU only: number of FP64-residual / FP32-correction refinement steps for eeq_mixed_precision. Minimum 1. Two steps reach FP64 accuracy on the validation set.", "Performance", {})
 // Implicit solvation (WP5, Claude Generated June 2026). Registering these here is
 // what makes -gfnff.solvent reach GFNFF::InitialiseMolecule (the value was silently
 // ignored before, since the gfnff module declared no solvent PARAM). Use the dotted

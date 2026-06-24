@@ -248,6 +248,23 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
         // Lazy refactorization is RMSD-based: force_refactor flag passed per solve() call.
         m_eeq_gpu = std::make_unique<EEQSolverGPU>(natoms);
 
+        // WP-B (Jun 2026): FP32-factor + FP64 iterative-refinement EEQ solve. Opt-in on
+        // CUDA (default off until per-card tuned, mirroring the xTB scf_mixed_precision
+        // X-AP3 default-off-on-CUDA policy). Reads gfnff.eeq_mixed_precision, falling back
+        // to the global scf_mixed_precision intent; refine steps via
+        // eeq_mixed_precision_iters (default 2, min 1). Targets the factor-dominated
+        // few-fragment paths; the nfrag>1 general path stays FP64 (see eeq_solver_gpu.cu).
+        {
+            bool mp = cfg_get_bool("eeq_mixed_precision",
+                                   cfg_get_bool("scf_mixed_precision", false));
+            int  mp_iters = cfg_get_int("eeq_mixed_precision_iters", 2);
+            m_eeq_gpu->setMixedPrecision(mp, mp_iters);
+            if (mp && CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::info(fmt::format(
+                    "GFN-FF GPU EEQ: FP32 factor + FP64 iterative refinement ({} step(s))",
+                    (mp_iters < 1 ? 1 : mp_iters)));
+        }
+
         // WP2: Upload topology-constant EEQ parameters to GPU.
         // cn=Zero because chi_corrected_static and cnf are CN-independent.
         {

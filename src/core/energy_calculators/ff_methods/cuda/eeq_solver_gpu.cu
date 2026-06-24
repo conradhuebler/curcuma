@@ -98,6 +98,23 @@ struct EEQSolverGPUImpl {
     bool m_using_lu        = false;       ///< true: cached factor is LU, use dgetrs
     int  m_last_chol_info  = 0;           ///< first failed leading minor (for diagnostics)
 
+    // ── WP-B (Jun 2026): FP32-factor + FP64-refine (mixed-precision dsposv) ──────
+    // When m_mixed_precision is on, d_A keeps the FP64 *matrix* (not factored in
+    // place); d_A_f32 holds the FP32 Cholesky factor. The per-step solve does an
+    // FP32 substitution + FP64 residual refinement → full FP64 accuracy at a
+    // fraction of the FP64-factor cost on FP64-weak cards. m_cached_factor_mixed
+    // records the cached-factor kind so lazy (non-refactor) solves dispatch right.
+    bool   m_mixed_precision      = false;
+    int    m_refine_iters         = 2;     ///< max FP64-residual / FP32-correction steps (>=1)
+    bool   m_cached_factor_mixed  = false; ///< cached factor lives in d_A_f32 (FP32)
+    CudaBuffer<float>  d_A_f32;            ///< [N*N] FP32 Cholesky factor
+    CudaBuffer<float>  d_ws_f32;           ///< cuSOLVER spotrf workspace (FP32)
+    int    ws_f32_size            = 0;
+    CudaBuffer<float>  d_rhs_f32;          ///< [N*nrhs] FP32 solve scratch
+    CudaBuffer<double> d_x_ref;            ///< [N*nrhs] FP64 running solution
+    CudaBuffer<double> d_b_ref;            ///< [N*nrhs] preserved FP64 RHS
+    CudaBuffer<double> d_r_ref;            ///< [N*nrhs] FP64 residual
+
     // ── WP6: Batched per-fragment Cholesky (nfrag > 1) ──────────────────────
     // Fragment layout (topology-constant, uploaded once per topology build):
     //   d_frag_sizes[f]        = N_f
@@ -269,6 +286,29 @@ void k_eeq_build_matrix(
 }
 
 // ============================================================================
+// WP-B (Jun 2026): mixed-precision cast/axpy helpers (FP32 factor + FP64 refine)
+// ============================================================================
+
+__global__ void k_cast_d2f(const double* __restrict__ in, float* __restrict__ out, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = static_cast<float>(in[i]);
+}
+
+__global__ void k_cast_f2d(const float* __restrict__ in, double* __restrict__ out, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = static_cast<double>(in[i]);
+}
+
+// x += (double)dx — accumulate the FP32 correction into the FP64 running solution.
+__global__ void k_axpy_f2d(double* __restrict__ x, const float* __restrict__ dx, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] += static_cast<double>(dx[i]);
+}
+
+// ============================================================================
 // EEQSolverGPU Implementation
 // ============================================================================
 
@@ -319,6 +359,100 @@ EEQSolverGPU::~EEQSolverGPU()
     }
 }
 
+// ============================================================================
+// WP-B (Jun 2026): mixed-precision FP32-factor + FP64-refine solve (dsposv-style)
+// ============================================================================
+
+void EEQSolverGPU::setMixedPrecision(bool enabled, int refine_iters)
+{
+    m_impl->m_mixed_precision = enabled;
+    m_impl->m_refine_iters    = (refine_iters < 1) ? 1 : refine_iters;
+}
+
+// FP32 Cholesky of the FP64 matrix currently in d_A. d_A is left intact (the
+// residual refinement needs the unfactored matrix); the FP32 factor lands in
+// d_A_f32. Returns the cuSOLVER info (0 = SPD success). On failure the caller
+// falls back to the FP64 dpotrf/LU path, which sees the still-intact d_A.
+int EEQSolverGPU::mixedFactor(int N)
+{
+    const int n2 = N * N;
+    if (m_impl->d_A_f32.n < n2) m_impl->d_A_f32.alloc(n2);
+
+    int block = 256;
+    int grid  = (n2 + block - 1) / block;
+    k_cast_d2f<<<grid, block, 0, m_impl->stream>>>(m_impl->d_A.ptr, m_impl->d_A_f32.ptr, n2);
+
+    int lwork = 0;
+    checkCusolverEEQ(
+        cusolverDnSpotrf_bufferSize(m_impl->cusolver_handle, CUBLAS_FILL_MODE_LOWER,
+                                    N, m_impl->d_A_f32.ptr, N, &lwork),
+        "Spotrf_bufferSize");
+    if (m_impl->d_ws_f32.n < lwork) m_impl->d_ws_f32.alloc(lwork);
+    m_impl->ws_f32_size = lwork;
+
+    checkCusolverEEQ(
+        cusolverDnSpotrf(m_impl->cusolver_handle, CUBLAS_FILL_MODE_LOWER,
+                         N, m_impl->d_A_f32.ptr, N,
+                         m_impl->d_ws_f32.ptr, m_impl->ws_f32_size, m_impl->d_info.ptr),
+        "cusolverDnSpotrf");
+    checkCudaEEQ(cudaMemcpyAsync(m_impl->h_info, m_impl->d_info.ptr, sizeof(int),
+                                 cudaMemcpyDeviceToHost, m_impl->stream),
+                 "download Spotrf info");
+    checkCudaEEQ(cudaStreamSynchronize(m_impl->stream), "sync after Spotrf");
+    return *m_impl->h_info;
+}
+
+// Solve A·X = B (B in d_rhs, nrhs columns) using the FP32 factor in d_A_f32 plus
+// FP64 iterative refinement against the FP64 matrix in d_A. The FP64 solution is
+// written back into d_rhs, matching the dpotrs contract the callers expect.
+void EEQSolverGPU::mixedSolveRefine(int N, int nrhs)
+{
+    const int sz = N * nrhs;
+    if (m_impl->d_rhs_f32.n < sz) m_impl->d_rhs_f32.alloc(sz);
+    if (m_impl->d_x_ref.n   < sz) m_impl->d_x_ref.alloc(sz);
+    if (m_impl->d_b_ref.n   < sz) m_impl->d_b_ref.alloc(sz);
+    if (m_impl->d_r_ref.n   < sz) m_impl->d_r_ref.alloc(sz);
+
+    const int block = 256;
+    const int grid  = (sz + block - 1) / block;
+
+    // Preserve the FP64 RHS B (d_rhs is overwritten with x at the end).
+    checkCudaEEQ(cudaMemcpyAsync(m_impl->d_b_ref.ptr, m_impl->d_rhs.ptr, sz * sizeof(double),
+                                 cudaMemcpyDeviceToDevice, m_impl->stream), "copy B");
+
+    // x0 = spotrs(L_f32, (float)B)
+    k_cast_d2f<<<grid, block, 0, m_impl->stream>>>(m_impl->d_b_ref.ptr, m_impl->d_rhs_f32.ptr, sz);
+    checkCusolverEEQ(
+        cusolverDnSpotrs(m_impl->cusolver_handle, CUBLAS_FILL_MODE_LOWER, N, nrhs,
+                         m_impl->d_A_f32.ptr, N, m_impl->d_rhs_f32.ptr, N, m_impl->d_info.ptr),
+        "cusolverDnSpotrs x0");
+    k_cast_f2d<<<grid, block, 0, m_impl->stream>>>(m_impl->d_rhs_f32.ptr, m_impl->d_x_ref.ptr, sz);
+
+    // Iterative refinement: r = b − A·x (FP64), dx = A⁻¹·r (FP32), x += dx.
+    const double done = 1.0, dnegone = -1.0;
+    const int iters = (m_impl->m_refine_iters < 1) ? 1 : m_impl->m_refine_iters;
+    for (int it = 0; it < iters; ++it) {
+        checkCudaEEQ(cudaMemcpyAsync(m_impl->d_r_ref.ptr, m_impl->d_b_ref.ptr, sz * sizeof(double),
+                                     cudaMemcpyDeviceToDevice, m_impl->stream), "copy B->R");
+        // R = -A·x + R  (A symmetric, lower triangle; column-major)
+        checkCublasEEQ(
+            cublasDsymm(m_impl->cublas_handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
+                        N, nrhs, &dnegone, m_impl->d_A.ptr, N, m_impl->d_x_ref.ptr, N,
+                        &done, m_impl->d_r_ref.ptr, N),
+            "cublasDsymm residual");
+        k_cast_d2f<<<grid, block, 0, m_impl->stream>>>(m_impl->d_r_ref.ptr, m_impl->d_rhs_f32.ptr, sz);
+        checkCusolverEEQ(
+            cusolverDnSpotrs(m_impl->cusolver_handle, CUBLAS_FILL_MODE_LOWER, N, nrhs,
+                             m_impl->d_A_f32.ptr, N, m_impl->d_rhs_f32.ptr, N, m_impl->d_info.ptr),
+            "cusolverDnSpotrs refine");
+        k_axpy_f2d<<<grid, block, 0, m_impl->stream>>>(m_impl->d_x_ref.ptr, m_impl->d_rhs_f32.ptr, sz);
+    }
+
+    // Solution back into d_rhs (callers read z1/Z2 from d_rhs).
+    checkCudaEEQ(cudaMemcpyAsync(m_impl->d_rhs.ptr, m_impl->d_x_ref.ptr, sz * sizeof(double),
+                                 cudaMemcpyDeviceToDevice, m_impl->stream), "copy x->d_rhs");
+}
+
 bool EEQSolverGPU::solve(
     int natoms, int nfrag,
     const double* cx, const double* cy, const double* cz,
@@ -355,42 +489,56 @@ bool EEQSolverGPU::solve(
                 N, cx, cy, cz, m_impl->d_alpha.ptr, m_impl->d_gam.ptr, m_impl->d_A.ptr, cutoff_sq);
         }
 
-        // --- 3. cuSOLVER workspace query (cached for same N) ---
-        if (N != m_last_N) {
-            int lwork = 0;
+        // --- 3+4. Factor: FP32 mixed-precision (WP-B) first, else FP64 Cholesky ---
+        bool mixed_done = false;
+        if (m_impl->m_mixed_precision) {
+            if (mixedFactor(N) == 0) {  // FP32 Cholesky SPD; d_A kept as the FP64 matrix
+                mixed_done = true;
+                m_impl->m_cached_factor_mixed = true;
+                m_impl->m_has_cached_factor   = true;
+                m_last_N = N;
+            }
+            // else: FP32 factor not SPD → FP64 path below (mixedFactor left d_A intact)
+        }
+
+        if (!mixed_done) {
+            m_impl->m_cached_factor_mixed = false;
+            // cuSOLVER FP64 workspace query (cached for same N)
+            if (N != m_last_N) {
+                int lwork = 0;
+                checkCusolverEEQ(
+                    cusolverDnDpotrf_bufferSize(m_impl->cusolver_handle,
+                                                 CUBLAS_FILL_MODE_LOWER,
+                                                 N, m_impl->d_A.ptr, N, &lwork),
+                    "potrf_bufferSize");
+                m_impl->workspace_size = lwork;
+                if (m_impl->d_workspace.n < lwork)
+                    m_impl->d_workspace.alloc(lwork);
+                m_last_N = N;
+            }
+
+            // Cholesky factorization: A = L·L^T (overwrites d_A with L)
             checkCusolverEEQ(
-                cusolverDnDpotrf_bufferSize(m_impl->cusolver_handle,
-                                             CUBLAS_FILL_MODE_LOWER,
-                                             N, m_impl->d_A.ptr, N, &lwork),
-                "potrf_bufferSize");
-            m_impl->workspace_size = lwork;
-            if (m_impl->d_workspace.n < lwork)
-                m_impl->d_workspace.alloc(lwork);
-            m_last_N = N;
+                cusolverDnDpotrf(m_impl->cusolver_handle,
+                                  CUBLAS_FILL_MODE_LOWER,
+                                  N, m_impl->d_A.ptr, N,
+                                  m_impl->d_workspace.ptr, m_impl->workspace_size,
+                                  m_impl->d_info.ptr),
+                "cusolverDnDpotrf");
+
+            checkCudaEEQ(cudaMemcpyAsync(m_impl->h_info, m_impl->d_info.ptr, sizeof(int),
+                                          cudaMemcpyDeviceToHost, m_impl->stream),
+                         "download d_info");
+            checkCudaEEQ(cudaStreamSynchronize(m_impl->stream), "sync after potrf");
+
+            if (*m_impl->h_info != 0) {
+                // Cholesky failed (matrix not SPD) → caller falls back to CPU
+                m_impl->m_has_cached_factor = false;
+                return false;
+            }
+
+            m_impl->m_has_cached_factor = true;
         }
-
-        // --- 4. Cholesky factorization: A = L·L^T (overwrites d_A with L) ---
-        checkCusolverEEQ(
-            cusolverDnDpotrf(m_impl->cusolver_handle,
-                              CUBLAS_FILL_MODE_LOWER,
-                              N, m_impl->d_A.ptr, N,
-                              m_impl->d_workspace.ptr, m_impl->workspace_size,
-                              m_impl->d_info.ptr),
-            "cusolverDnDpotrf");
-
-        // --- 5. Check factorization success ---
-        checkCudaEEQ(cudaMemcpyAsync(m_impl->h_info, m_impl->d_info.ptr, sizeof(int),
-                                      cudaMemcpyDeviceToHost, m_impl->stream),
-                     "download d_info");
-        checkCudaEEQ(cudaStreamSynchronize(m_impl->stream), "sync after potrf");
-
-        if (*m_impl->h_info != 0) {
-            // Cholesky failed (matrix not SPD) → caller falls back to CPU
-            m_impl->m_has_cached_factor = false;
-            return false;
-        }
-
-        m_impl->m_has_cached_factor = true;
     } else {
         // Non-refactor step: reuse cached L from d_A, skip matrix build + dpotrf
     }
@@ -428,15 +576,19 @@ bool EEQSolverGPU::solve(
         m_impl->d_rhs.upload(h_rhs, rhs_size);
     }
 
-    // --- 7. Triangular solve: L·L^T · X = B (in-place, overwrites d_rhs) ---
-    checkCusolverEEQ(
-        cusolverDnDpotrs(m_impl->cusolver_handle,
-                          CUBLAS_FILL_MODE_LOWER,
-                          N, nrhs,
-                          m_impl->d_A.ptr, N,
-                          m_impl->d_rhs.ptr, N,
-                          m_impl->d_info.ptr),
-        "cusolverDnDpotrs");
+    // --- 7. Triangular solve: mixed (FP32 factor + FP64 refine) or FP64 dpotrs ---
+    if (m_impl->m_cached_factor_mixed) {
+        mixedSolveRefine(N, nrhs);
+    } else {
+        checkCusolverEEQ(
+            cusolverDnDpotrs(m_impl->cusolver_handle,
+                              CUBLAS_FILL_MODE_LOWER,
+                              N, nrhs,
+                              m_impl->d_A.ptr, N,
+                              m_impl->d_rhs.ptr, N,
+                              m_impl->d_info.ptr),
+            "cusolverDnDpotrs");
+    }
 
     // --- 8. Download solution columns (z1 and Z2) ---
     const int result_size = N * nrhs;
@@ -492,37 +644,51 @@ bool EEQSolverGPU::solveWithDeviceRHS(
                 N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, m_impl->d_A.ptr, cutoff_sq);
         }
 
-        if (N != m_last_N) {
-            int lwork = 0;
+        // Factor: FP32 mixed-precision (WP-B) first, else FP64 Cholesky.
+        bool mixed_done = false;
+        if (m_impl->m_mixed_precision) {
+            if (mixedFactor(N) == 0) {  // FP32 Cholesky SPD; d_A kept as the FP64 matrix
+                mixed_done = true;
+                m_impl->m_cached_factor_mixed = true;
+                m_impl->m_has_cached_factor   = true;
+                m_last_N = N;
+            }
+        }
+
+        if (!mixed_done) {
+            m_impl->m_cached_factor_mixed = false;
+            if (N != m_last_N) {
+                int lwork = 0;
+                checkCusolverEEQ(
+                    cusolverDnDpotrf_bufferSize(m_impl->cusolver_handle,
+                                                 CUBLAS_FILL_MODE_LOWER,
+                                                 N, m_impl->d_A.ptr, N, &lwork),
+                    "potrf_bufferSize");
+                m_impl->workspace_size = lwork;
+                if (m_impl->d_workspace.n < lwork)
+                    m_impl->d_workspace.alloc(lwork);
+                m_last_N = N;
+            }
+
             checkCusolverEEQ(
-                cusolverDnDpotrf_bufferSize(m_impl->cusolver_handle,
-                                             CUBLAS_FILL_MODE_LOWER,
-                                             N, m_impl->d_A.ptr, N, &lwork),
-                "potrf_bufferSize");
-            m_impl->workspace_size = lwork;
-            if (m_impl->d_workspace.n < lwork)
-                m_impl->d_workspace.alloc(lwork);
-            m_last_N = N;
+                cusolverDnDpotrf(m_impl->cusolver_handle,
+                                  CUBLAS_FILL_MODE_LOWER,
+                                  N, m_impl->d_A.ptr, N,
+                                  m_impl->d_workspace.ptr, m_impl->workspace_size,
+                                  m_impl->d_info.ptr),
+                "cusolverDnDpotrf");
+
+            checkCudaEEQ(cudaMemcpyAsync(m_impl->h_info, m_impl->d_info.ptr, sizeof(int),
+                                          cudaMemcpyDeviceToHost, m_impl->stream),
+                         "download d_info");
+            checkCudaEEQ(cudaStreamSynchronize(m_impl->stream), "sync after potrf");
+
+            if (*m_impl->h_info != 0) {
+                m_impl->m_has_cached_factor = false;
+                return false;
+            }
+            m_impl->m_has_cached_factor = true;
         }
-
-        checkCusolverEEQ(
-            cusolverDnDpotrf(m_impl->cusolver_handle,
-                              CUBLAS_FILL_MODE_LOWER,
-                              N, m_impl->d_A.ptr, N,
-                              m_impl->d_workspace.ptr, m_impl->workspace_size,
-                              m_impl->d_info.ptr),
-            "cusolverDnDpotrf");
-
-        checkCudaEEQ(cudaMemcpyAsync(m_impl->h_info, m_impl->d_info.ptr, sizeof(int),
-                                      cudaMemcpyDeviceToHost, m_impl->stream),
-                     "download d_info");
-        checkCudaEEQ(cudaStreamSynchronize(m_impl->stream), "sync after potrf");
-
-        if (*m_impl->h_info != 0) {
-            m_impl->m_has_cached_factor = false;
-            return false;
-        }
-        m_impl->m_has_cached_factor = true;
     }
 
     // Build RHS matrix:
@@ -557,14 +723,18 @@ bool EEQSolverGPU::solveWithDeviceRHS(
         }
     }
 
-    checkCusolverEEQ(
-        cusolverDnDpotrs(m_impl->cusolver_handle,
-                          CUBLAS_FILL_MODE_LOWER,
-                          N, nrhs,
-                          m_impl->d_A.ptr, N,
-                          m_impl->d_rhs.ptr, N,
-                          m_impl->d_info.ptr),
-        "cusolverDnDpotrs");
+    if (m_impl->m_cached_factor_mixed) {
+        mixedSolveRefine(N, nrhs);
+    } else {
+        checkCusolverEEQ(
+            cusolverDnDpotrs(m_impl->cusolver_handle,
+                              CUBLAS_FILL_MODE_LOWER,
+                              N, nrhs,
+                              m_impl->d_A.ptr, N,
+                              m_impl->d_rhs.ptr, N,
+                              m_impl->d_info.ptr),
+            "cusolverDnDpotrs");
+    }
 
     const int result_size = N * nrhs;
     ensureHResult(*m_impl, result_size);
@@ -762,6 +932,21 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchur(
                 N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, m_impl->d_A.ptr, cutoff_sq);
         }
 
+        // Factor: FP32 mixed-precision (WP-B) first, else FP64 Cholesky (+ LU fallback).
+        bool mixed_done = false;
+        if (m_impl->m_mixed_precision) {
+            if (mixedFactor(N) == 0) {  // FP32 Cholesky SPD; d_A kept as the FP64 matrix
+                mixed_done = true;
+                m_impl->m_cached_factor_mixed = true;
+                m_impl->m_has_cached_factor   = true;
+                m_impl->m_using_lu            = false;
+                m_last_N = N;
+            }
+            // else: FP32 not SPD → FP64 dpotrf/LU below (mixedFactor left d_A intact)
+        }
+
+        if (!mixed_done) {
+        m_impl->m_cached_factor_mixed = false;
         if (N != m_last_N) {
             int lwork = 0;
             checkCusolverEEQ(
@@ -843,6 +1028,7 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchur(
             m_impl->m_has_cached_factor = true;
             m_impl->m_using_lu = false;
         }
+        }  // end if (!mixed_done)
     }
 
     // Build RHS: col0 = d_rhs_atoms (D2D), col1 = fragment indicator (H2D, topology-constant)
@@ -872,10 +1058,12 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchur(
                      "H2D constraint col1");
     }
 
-    // Triangular solve: L·L^T · X = B (Cholesky) or P·L·U · X = B (LU fallback).
-    // Cached factor type drives dispatch; m_using_lu persists with m_has_cached_factor
-    // so lazy-solve calls (do_refactor==false) consistently pick the right routine.
-    if (m_impl->m_using_lu) {
+    // Triangular solve: mixed (FP32 factor + FP64 refine), or FP64 Cholesky / LU.
+    // Cached factor type drives dispatch; m_using_lu / m_cached_factor_mixed persist
+    // with m_has_cached_factor so lazy-solve calls pick the right routine.
+    if (m_impl->m_cached_factor_mixed) {
+        mixedSolveRefine(N, nrhs);
+    } else if (m_impl->m_using_lu) {
         checkCusolverEEQ(
             cusolverDnDgetrs(m_impl->cusolver_handle,
                               CUBLAS_OP_N, N, nrhs,
@@ -1033,6 +1221,13 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurGeneral(
                           || (N != m_last_N);
 
     if (do_refactor) {
+        // WP-B (Jun 2026): the nfrag>1 general path keeps the FP64 Cholesky/LU. With
+        // nrhs = nfrag+1 ≈ N for many fragments, the FP64 residual GEMM of the mixed-
+        // precision refinement costs as much as the solve itself (the FP32-factor win
+        // only pays off when the O(N³) factor dominates, i.e. few RHS), and it doubles
+        // the N×nrhs scratch. Mixed precision is applied only to the factor-dominated
+        // few-fragment paths (solve / solveWithDeviceRHS / GPU-Schur nfrag=1).
+        impl.m_cached_factor_mixed = false;
         // Build full N×N Coulomb matrix (lower-triangle threads) — same as WP5-A.
         {
             int n_lower = N * (N + 1) / 2;
