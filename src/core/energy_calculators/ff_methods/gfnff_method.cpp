@@ -9714,6 +9714,8 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
         d4_input["d4_s8"] = 2.00;
         d4_input["d4_s6"] = 1.00;
         d4_input["d4_s9"] = 1.00;
+        // Lever 3 Opt B: plumb the user-facing gfnff flag down to the generator.
+        d4_input["d4_disp_half_contraction"] = m_parameters.value("disp_half_contraction", true);
 
         ConfigManager d4_config("d4param", d4_input);
         m_d4_generator = std::make_unique<D4ParameterGenerator>(d4_config);
@@ -9894,6 +9896,8 @@ json GFNFF::generateGFNFFDispersionPairs() const
             d4_input["d4_s8"] = 2.00;
             d4_input["d4_s6"] = 1.00;
             d4_input["d4_s9"] = 1.00;
+            // Lever 3 Opt B: plumb the user-facing gfnff flag down to the generator.
+            d4_input["d4_disp_half_contraction"] = m_parameters.value("disp_half_contraction", true);
 
             ConfigManager d4_config("d4param", d4_input);
             // Claude Generated (Feb 15, 2026): Store D4ParameterGenerator for runtime dc6dcn access

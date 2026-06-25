@@ -30,6 +30,8 @@
 
 #include <Eigen/Dense>
 #include <memory>
+#include <array>
+#include <utility>
 
 #include "json.hpp"
 using json = nlohmann::json;
@@ -363,6 +365,40 @@ private:
     // dc6dcn(i,j) = dC6(i,j)/dCN(i) - asymmetric matrix
     Matrix m_dc6dcn;
     bool m_dc6dcn_computed = false;
+
+    // Claude Generated (Lever 3 Opt A, Jun 2026): in-cutoff dispersion pair list.
+    // computeDC6DCN historically built the full dense N×N matrix with NO distance
+    // cutoff, but the only consumer (ForceFieldThread) reads dc6dcn(i,j)/(j,i) only
+    // for pairs in the dispersion list (within the 60 Bohr cutoff, strictly i<j).
+    // Storing the in-cutoff pairs lets computeDC6DCN skip the unread beyond-cutoff
+    // (and diagonal) cells — exactly bit-identical for every consumed entry.
+    // Populated by GenerateDispersionPairsNative; reused by updateCNValuesForGradient
+    // (which has no geometry). When invalid, computeDC6DCN falls back to full N².
+    std::vector<std::pair<int, int>> m_dc6dcn_pairs;  // (i,j), i<j, |r_ij|<=cutoff
+    bool m_dc6dcn_pairs_valid = false;
+
+    // Claude Generated (Lever 3 Opt B, Jun 2026): per-atom half-contraction of the
+    // C6 reference block over the FIRST ref index, keyed by PARTNER element.
+    //   g_i[e][b]  = Σ_a w_i[a]·c6ref[Zi][e][a][b]    (from m_gaussian_weights[i])
+    //   dg_i[e][b] = Σ_a dw_i[a]·c6ref[Zi][e][a][b]   (from m_gaussian_weight_derivatives[i])
+    // Then per pair: c6(i,j)=Σ_b g_i[Zj][b]·w_j[b]; dc6_di=Σ_b dg_i[Zj][b]·w_j[b];
+    // dc6_dj=Σ_b g_i[Zj][b]·dw_j[b]. Cuts the inner 7×7=49 FMA to 7 in both the
+    // energy loop (getChargeWeightedC6) and computeDC6DCN. Reassociates the FP sum
+    // (~1e-16) vs the flat loop, so it is gated behind disp_half_contraction (default
+    // on); false reproduces the exact flat-loop path. Cost O(N·K·49), K = #present elems.
+    bool m_use_half_contraction = true;               // from PARAM disp_half_contraction
+    std::vector<int> m_present_elems;                 // distinct Z present (1-based), size K
+    std::array<int, MAX_ELEM + 1> m_elem_slot{};      // Z -> slot in m_present_elems, else -1
+    int m_c6_half_K = 0;                              // == m_present_elems.size()
+    int m_c6_half_natoms = 0;                         // rows actually built
+    std::vector<double> m_c6_half_g;                  // [ (i*K + slot)*MAX_REF + b ]
+    std::vector<double> m_c6_half_dg;                 // [ (i*K + slot)*MAX_REF + b ]
+    bool m_c6_half_valid = false;
+    inline size_t c6HalfIndex(int atom_i, int slot) const {
+        return (static_cast<size_t>(atom_i) * m_c6_half_K + slot) * MAX_REF;
+    }
+    void buildPresentElementMap();   // fills m_present_elems / m_elem_slot / m_c6_half_K
+    void precomputeC6HalfContraction(CxxThreadPool* pool = nullptr, int num_threads = 1);
 
     // Claude Generated (Apr 2026): P1a — CN-change threshold cache for Gaussian weights
     // Skip recomputation of gw/dgw/dc6dcn when CN changes < threshold (MD optimization)

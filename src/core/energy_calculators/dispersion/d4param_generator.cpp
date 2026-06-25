@@ -50,6 +50,11 @@ D4ParameterGenerator::D4ParameterGenerator(const ConfigManager& config)
     ConfigManager eeq_config("eeq_solver", config.exportConfig());
     m_eeq_solver = std::make_unique<EEQSolver>(eeq_config);
 
+    // Lever 3 Opt B (Jun 2026): per-atom half-contraction fast path for C6/dc6dcn.
+    // Plumbed down from the gfnff PARAM disp_half_contraction (default true).
+    m_use_half_contraction = m_config.get<bool>("d4_disp_half_contraction", true);
+    m_elem_slot.fill(-1);
+
     initializeReferenceData();
 
     // Initialize the shared global polarizability/correction tables exactly once for the
@@ -1200,6 +1205,99 @@ void D4ParameterGenerator::precomputeGaussianWeights(CxxThreadPool* pool, int nu
     }
 }
 
+// Claude Generated (Lever 3 Opt B, Jun 2026): collect the distinct elements present
+// in m_atoms and map Z -> compact slot. Used to size the per-atom × partner-element
+// half-contraction tables. K = number of distinct elements (small in practice).
+void D4ParameterGenerator::buildPresentElementMap()
+{
+    m_elem_slot.fill(-1);
+    m_present_elems.clear();
+    for (int Z : m_atoms) {
+        if (Z < 1 || Z > MAX_ELEM) continue;
+        if (m_elem_slot[Z] < 0) {
+            m_elem_slot[Z] = static_cast<int>(m_present_elems.size());
+            m_present_elems.push_back(Z);
+        }
+    }
+    m_c6_half_K = static_cast<int>(m_present_elems.size());
+}
+
+// Claude Generated (Lever 3 Opt B, Jun 2026): per-atom half-contraction of the C6
+// reference block over the FIRST ref index, for every partner element present.
+//   g_i[e][b]  = Σ_a w_i[a]·c6ref[Zi][e][a][b]      (from m_gaussian_weights)
+//   dg_i[e][b] = Σ_a dw_i[a]·c6ref[Zi][e][a][b]     (from m_gaussian_weight_derivatives)
+// Requires both weight arrays. O(N·K·49) — ~1% of the O(N²·49) it removes from the
+// energy loop and computeDC6DCN. Disabled (m_c6_half_valid=false) when the flag is off.
+void D4ParameterGenerator::precomputeC6HalfContraction(CxxThreadPool* pool, int num_threads)
+{
+    m_c6_half_valid = false;
+    if (!m_use_half_contraction) return;
+
+    buildPresentElementMap();
+    const int N = static_cast<int>(m_atoms.size());
+    const int K = m_c6_half_K;
+    if (N == 0 || K == 0) return;
+
+    m_c6_half_g.assign(static_cast<size_t>(N) * K * MAX_REF, 0.0);
+    m_c6_half_dg.assign(static_cast<size_t>(N) * K * MAX_REF, 0.0);
+    m_c6_half_natoms = N;
+
+    auto worker = [&](int t_id, int T) {
+        for (int i = t_id; i < N; i += T) {
+            int Zi = m_atoms[i];
+            int elem_i = Zi - 1;
+            if (elem_i < 0 || elem_i >= MAX_ELEM) continue;
+            if (i >= static_cast<int>(m_gaussian_weights.size())) continue;
+            const auto& wi  = m_gaussian_weights[i];
+            const auto& dwi = m_gaussian_weight_derivatives[i];
+            if (wi.empty() || dwi.empty()) continue;
+            const int nref_i = std::min<int>(wi.size(), MAX_REF);
+
+            for (int s = 0; s < K; ++s) {
+                int elem_e = m_present_elems[s] - 1;
+                const size_t base = static_cast<size_t>(elem_i) * MAX_ELEM * MAX_REF * MAX_REF
+                                  + static_cast<size_t>(elem_e) * MAX_REF * MAX_REF;
+                const int nref_e = std::min<int>(
+                    (elem_e < static_cast<int>(m_refn.size())) ? m_refn[elem_e] : 0, MAX_REF);
+                double* gout  = &m_c6_half_g [c6HalfIndex(i, s)];
+                double* dgout = &m_c6_half_dg[c6HalfIndex(i, s)];
+                for (int b = 0; b < nref_e; ++b) {
+                    double gv = 0.0, dgv = 0.0;
+                    for (int a = 0; a < nref_i; ++a) {
+                        double c6ref = m_c6_flat_cache[base + static_cast<size_t>(a) * MAX_REF + b];
+                        gv  += wi[a]  * c6ref;
+                        dgv += dwi[a] * c6ref;
+                    }
+                    gout[b] = gv;
+                    dgout[b] = dgv;
+                }
+            }
+        }
+    };
+
+    if (num_threads > 1 && N > 64) {
+        int T = std::min(num_threads, N);
+        if (pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(pool->enqueue(worker, t, T));
+            worker(0, T);
+            for (auto& f : futures) f.get();
+        } else {
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t)
+                threads[t - 1] = std::thread(worker, t, T);
+            worker(0, T);
+            for (auto& th : threads) th.join();
+        }
+    } else {
+        worker(0, 1);
+    }
+
+    m_c6_half_valid = true;
+}
+
 /**
  * @brief Calculate charge-weighted C6 coefficient using Gaussian charge-state weighting
  *
@@ -1234,6 +1332,23 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
     // Validate (rare path)
     if (elem_i < 0 || elem_i >= MAX_ELEM || elem_j < 0 || elem_j >= MAX_ELEM) {
         return 0.0;
+    }
+
+    // Lever 3 Opt B fast path: c6(i,j) = Σ_b g_i[Zj][b]·w_j[b] using the per-atom
+    // half-contraction (7 FMA instead of up to 49). Reassociates the FP sum vs the
+    // flat loop below (~1e-16). Skipped at verbosity>=3 so the per-term debug print
+    // in the flat path still works. Falls through to the exact path otherwise.
+    if (m_c6_half_valid && CurcumaLogger::get_verbosity() < 3
+        && static_cast<int>(atom_i) < m_c6_half_natoms) {
+        const int slot_j = m_elem_slot[Zj];
+        if (slot_j >= 0 && atom_j < m_gaussian_weights.size()) {
+            const auto& wj = m_gaussian_weights[atom_j];
+            const double* g = &m_c6_half_g[c6HalfIndex(static_cast<int>(atom_i), slot_j)];
+            const int nb = std::min<int>(wj.size(), MAX_REF);
+            double c6 = 0.0;
+            for (int b = 0; b < nb; ++b) c6 += g[b] * wj[b];
+            return c6;
+        }
     }
 
     const auto& weights_i = m_gaussian_weights[atom_i];
@@ -1654,40 +1769,45 @@ void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
     int natoms = static_cast<int>(m_atoms.size());
     m_dc6dcn = Matrix::Zero(natoms, natoms);
 
-    // Thread safety proof: Each (i,j) pair with j >= i is processed by exactly the thread
-    // owning row i. Writes: m_dc6dcn(i,j) = dc6_di (row i, thread's own row) and
-    // m_dc6dcn(j,i) = dc6_dj (row j, column i). No other thread writes to (j,i) because
-    // the pair (i,j) is only processed once by the thread owning row i.
-    // Therefore direct writes to m_dc6dcn are safe without buffering.
-    auto dc6_worker = [&](int t_id, int T) {
-    for (int i = t_id; i < natoms; i += T) {
+    // Per-pair dc6/dCN kernel. For i<j writes (i,j)=dC6(i,j)/dCN(i) and
+    // (j,i)=dC6(i,j)/dCN(j); for i==j (full-N² fallback only) writes the diagonal
+    // sum. Each unordered pair is the sole writer of its two cells, so any
+    // partition over pairs/rows is race-free without buffering.
+    auto pair_kernel = [&](int i, int j) {
         int Zi = m_atoms[i];
         int elem_i = Zi - 1;
-        if (elem_i < 0 || elem_i >= MAX_ELEM) continue;
-
+        if (elem_i < 0 || elem_i >= MAX_ELEM) return;
         const auto& gw_i = m_gaussian_weights[i];
         const auto& dgw_i = m_gaussian_weight_derivatives[i];
-        if (gw_i.empty() || dgw_i.empty()) continue;
-
+        if (gw_i.empty() || dgw_i.empty()) return;
         int nref_i = static_cast<int>(gw_i.size());
 
-        for (int j = i; j < natoms; ++j) {
-            int Zj = m_atoms[j];
-            int elem_j = Zj - 1;
-            if (elem_j < 0 || elem_j >= MAX_ELEM) continue;
+        int Zj = m_atoms[j];
+        int elem_j = Zj - 1;
+        if (elem_j < 0 || elem_j >= MAX_ELEM) return;
+        const auto& gw_j = m_gaussian_weights[j];
+        const auto& dgw_j = m_gaussian_weight_derivatives[j];
+        if (gw_j.empty() || dgw_j.empty()) return;
+        int nref_j = static_cast<int>(gw_j.size());
 
-            const auto& gw_j = m_gaussian_weights[j];
-            const auto& dgw_j = m_gaussian_weight_derivatives[j];
-            if (gw_j.empty() || dgw_j.empty()) continue;
+        double dc6_di = 0.0;
+        double dc6_dj = 0.0;
 
-            int nref_j = static_cast<int>(gw_j.size());
-
+        const int slot_j = m_c6_half_valid ? m_elem_slot[Zj] : -1;
+        if (slot_j >= 0 && i < m_c6_half_natoms) {
+            // Lever 3 Opt B half-contraction: 7 FMA instead of up to 49.
+            //   dc6_di = Σ_b dg_i[Zj][b]·w_j[b];  dc6_dj = Σ_b g_i[Zj][b]·dw_j[b]
+            const double* g  = &m_c6_half_g [c6HalfIndex(i, slot_j)];
+            const double* dg = &m_c6_half_dg[c6HalfIndex(i, slot_j)];
+            const int nb = std::min<int>(nref_j, MAX_REF);
+            for (int b = 0; b < nb; ++b) {
+                dc6_di += dg[b] * gw_j[b];
+                dc6_dj += g[b]  * dgw_j[b];
+            }
+        } else {
+            // Exact flat path (also the disp_half_contraction=false reproduction).
             const size_t base_ij = static_cast<size_t>(elem_i) * MAX_ELEM * MAX_REF * MAX_REF
                                  + static_cast<size_t>(elem_j) * MAX_REF * MAX_REF;
-
-            double dc6_di = 0.0;
-            double dc6_dj = 0.0;
-
             for (int ri = 0; ri < nref_i && ri < MAX_REF; ++ri) {
                 size_t base_ri = base_ij + static_cast<size_t>(ri) * MAX_REF;
                 for (int rj = 0; rj < nref_j && rj < MAX_REF; ++rj) {
@@ -1698,16 +1818,59 @@ void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
                     dc6_dj += gw_i[ri] * dgw_j[rj] * c6ref;
                 }
             }
-
-            if (i == j) {
-                m_dc6dcn(i, i) = dc6_di + dc6_dj;
-            } else {
-                m_dc6dcn(i, j) = dc6_di;  // dC6(i,j)/dCN(i)
-                m_dc6dcn(j, i) = dc6_dj;  // dC6(i,j)/dCN(j) — safe, unique writer
-            }
         }
+
+        if (i == j) {
+            m_dc6dcn(i, i) = dc6_di + dc6_dj;
+        } else {
+            m_dc6dcn(i, j) = dc6_di;  // dC6(i,j)/dCN(i)
+            m_dc6dcn(j, i) = dc6_dj;  // dC6(i,j)/dCN(j) — unique writer
+        }
+    };
+
+    // Lever 3 Opt A: iterate only the in-cutoff pair list — exactly the dc6dcn
+    // entries the gradient consumer reads. Beyond-cutoff cells and the diagonal
+    // stay 0 (never read). Bit-identical for every consumed entry. Falls back to
+    // the full-N² double loop when the list is unavailable (GPU skip / first call).
+    if (m_dc6dcn_pairs_valid) {
+        const int P = static_cast<int>(m_dc6dcn_pairs.size());
+        auto pl_worker = [&](int t_id, int T) {
+            for (int p = t_id; p < P; p += T)
+                pair_kernel(m_dc6dcn_pairs[p].first, m_dc6dcn_pairs[p].second);
+        };
+        if (num_threads > 1 && P > 64) {
+            int T = std::min(num_threads, P);
+            if (pool) {
+                std::vector<std::future<void>> futures;
+                futures.reserve(T - 1);
+                for (int t = 1; t < T; ++t)
+                    futures.push_back(pool->enqueue(pl_worker, t, T));
+                pl_worker(0, T);
+                for (auto& f : futures) f.get();
+            } else {
+                std::vector<std::thread> threads(T - 1);
+                for (int t = 1; t < T; ++t)
+                    threads[t - 1] = std::thread(pl_worker, t, T);
+                pl_worker(0, T);
+                for (auto& th : threads) th.join();
+            }
+        } else {
+            pl_worker(0, 1);
+        }
+        m_dc6dcn_computed = true;
+        return;
     }
-    };  // end dc6_worker lambda
+
+    // Fallback: original full-N² row-partitioned loop. Each thread owns row i and
+    // iterates j >= i, so it is the sole writer of cells (i,j) and (j,i).
+    auto dc6_worker = [&](int t_id, int T) {
+        for (int i = t_id; i < natoms; i += T) {
+            int elem_i = m_atoms[i] - 1;
+            if (elem_i < 0 || elem_i >= MAX_ELEM) continue;
+            if (m_gaussian_weights[i].empty() || m_gaussian_weight_derivatives[i].empty()) continue;
+            for (int j = i; j < natoms; ++j) pair_kernel(i, j);
+        }
+    };
 
     if (num_threads > 1 && natoms > 64) {
         int T = std::min(num_threads, natoms);
@@ -1754,6 +1917,9 @@ void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& 
     // Claude Generated (March 2026): Phase 2 GPU dc6dcn — skip O(N²) matrix when
     // GPU will compute dc6dcn per dispersion pair directly.
     if (!skip_dc6dcn) {
+        // Lever 3 Opt B: rebuild the half-contraction (CN changed → weights changed)
+        // before computeDC6DCN. Reuses m_dc6dcn_pairs from the last pair-list build.
+        precomputeC6HalfContraction(pool, num_threads);
         computeDC6DCN(pool, num_threads);
     }
 
@@ -1817,8 +1983,17 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     // dc6dcn on the device, reusing only the CN + Gaussian weights computed above.
     // Skip the host O(N²) pair loop and the host dc6dcn entirely; return empty.
     if (m_skip_pair_loop) {
+        m_dc6dcn_pairs_valid = false;  // GPU owns dc6dcn; keep host fallback exact (full N²)
+        m_c6_half_valid = false;       // GPU path: no host half-contraction
         return {};
     }
+
+    // Lever 3 Opt B: derivatives + half-contraction BEFORE the energy loop, because
+    // both the energy loop's getChargeWeightedC6 fast path and computeDC6DCN consume
+    // the per-atom half-contraction. computeGaussianWeightDerivatives moved up from
+    // after the loop (it depends only on CN, always ran unconditionally).
+    computeGaussianWeightDerivatives();
+    precomputeC6HalfContraction();
 
     // Step 4: Generate pairs as native structs (no JSON!)
     double a1 = m_config.get<double>("d4_a1", 0.58);
@@ -1892,8 +2067,15 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
         }
     }
 
-    // Also compute dc6dcn for gradient computation
-    computeGaussianWeightDerivatives();
+    // Lever 3 Opt A (Jun 2026): capture the in-cutoff pair list. computeDC6DCN only
+    // needs entries the gradient consumer reads — exactly the dispersion pairs (i<j,
+    // within the 60 Bohr cutoff) collected above. updateCNValuesForGradient reuses it.
+    m_dc6dcn_pairs.clear();
+    m_dc6dcn_pairs.reserve(all_pairs.size());
+    for (const auto& d : all_pairs) m_dc6dcn_pairs.emplace_back(d.i, d.j);
+    m_dc6dcn_pairs_valid = true;
+
+    // dc6dcn for the gradient (derivatives + half-contraction already built above).
     computeDC6DCN();
 
     if (CurcumaLogger::get_verbosity() >= 3) {
