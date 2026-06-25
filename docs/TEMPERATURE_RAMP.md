@@ -82,7 +82,7 @@ converges to the DOF-weighted mix of the region targets.
 |--------------|------------------|
 | Berendsen    | yes |
 | CSVR         | yes |
-| Anderson     | yes (naturally per-atom) |
+| Andersen     | yes (naturally per-atom) |
 | Nosé-Hoover  | no — the global chain is applied to all atoms (region targets ignored, warned) |
 | none         | no thermostatting |
 

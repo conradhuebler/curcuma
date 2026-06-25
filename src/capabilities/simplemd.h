@@ -145,7 +145,7 @@ private:
 // Claude Generated 2025: Type-safe thermostat selection
 enum class ThermostatType {
     Berendsen,
-    Anderson,
+    Andersen,
     NoseHover,
     CSVR,
     None
@@ -241,6 +241,12 @@ public:
      *  the live setpoint, including the value driven by an active temperature ramp. */
     double targetTemperature() const { return m_T0; }
 
+    /** Claude Generated (2026): live-set the wall potential energy/temperature scale (K).
+     *  Applied before the next MD step without restarting. */
+    void setWallTemp(double T) { m_wall_temp = T; }
+    /** Claude Generated (2026): live-set the wall potential steepness parameter (β). */
+    void setWallBeta(double beta) { m_wall_beta = beta; }
+
     // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
     void setSharedBiasPool(SharedBiasPool* pool) { m_shared_pool = pool; }
 
@@ -305,7 +311,7 @@ private:
     void Berendson();
     void CSVR();
     void None();
-    void Anderson();
+    void Andersen();
     void NoseHover();
 
     // Claude Generated (2026): runtime temperature control / multi-stage ramp / regions.
@@ -520,7 +526,7 @@ private:
 
     int m_chain_length = 3; // Länge der Thermostatkette
 
-    double m_anderson = 0.01;
+    double m_andersen = 0.01;
 
     std::vector<std::pair<double, double>> m_rattle_tol_temp;
 
@@ -559,9 +565,9 @@ private:
     PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {})
 
     // --- Thermostat ---
-    PARAM(thermostat, String, "csvr", "Thermostat type: berendsen|anderson|nosehover|csvr|none.", "Thermostat", {})
+    PARAM(thermostat, String, "csvr", "Thermostat type: berendsen|andersen|nosehover|csvr|none.", "Thermostat", {})
     PARAM(coupling, Double, 10.0, "Thermostat coupling time in fs.", "Thermostat", {})
-    PARAM(anderson_probability, Double, 0.001, "Anderson thermostat collision probability.", "Thermostat", {"anderson"})
+    PARAM(andersen_probability, Double, 0.001, "Andersen thermostat collision probability.", "Thermostat", {})
     PARAM(chain_length, Int, 3, "Chain length for Nosé-Hoover thermostat.", "Thermostat", {"chainlength"})
 
     // --- System Control ---

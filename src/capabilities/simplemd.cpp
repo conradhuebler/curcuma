@@ -182,7 +182,7 @@ SimpleMD::~SimpleMD()
 static const std::map<std::string, ThermostatType> thermostat_map = {
     {"berendsen", ThermostatType::Berendsen},
     {"berendson", ThermostatType::Berendsen},  // Legacy typo support
-    {"anderson", ThermostatType::Anderson},
+    {"andersen", ThermostatType::Andersen},
     {"nosehover", ThermostatType::NoseHover},
     {"csvr", ThermostatType::CSVR},
     {"none", ThermostatType::None}
@@ -233,7 +233,7 @@ void SimpleMD::LoadControlJson()
     m_rescue = m_config.get<bool>("rescue", false);  // Not in PARAM block - legacy
     m_wall_render = m_config.get<bool>("wall_render", false);  // Not in PARAM block - legacy
     m_coupling = m_config.get<double>("coupling");
-    m_anderson = m_config.get<double>("anderson_probability");
+    m_andersen = m_config.get<double>("andersen_probability");
 
     if (m_coupling < m_dT)
         m_coupling = m_dT;
@@ -1716,9 +1716,9 @@ void SimpleMD::prepareRun()
             CitationRegistry::cite("berendsen");
             ThermostatFunction = [this] { Berendson(); };
             break;
-        case ThermostatType::Anderson:
-            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Anderson Thermostat\n ... \n\n");
-            ThermostatFunction = [this] { Anderson(); };
+        case ThermostatType::Andersen:
+            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Andersen Thermostat\n ... \n\n");
+            ThermostatFunction = [this] { Andersen(); };
             break;
         case ThermostatType::NoseHover:
             fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Nosé-Hoover-Chain Thermostat\n ... \n\n");
@@ -2076,9 +2076,9 @@ void SimpleMD::ApplyThermostat()
         ApplyThermostatRegion(m_default_region_atoms, m_T0, m_default_region_dof, type);
 }
 
-/* Claude Generated 2026 - Apply Berendsen / CSVR / Anderson to a single atom subset using its own
+/* Claude Generated 2026 - Apply Berendsen / CSVR / Andersen to a single atom subset using its own
  * target temperature `T0` and `dof`. Velocity-only updates on the subset's entries; identical math
- * to the global thermostats (Berendson()/CSVR()/Anderson()) restricted to `atoms`. */
+ * to the global thermostats (Berendson()/CSVR()/Andersen()) restricted to `atoms`. */
 void SimpleMD::ApplyThermostatRegion(const std::vector<int>& atoms, double T0, int dof, ThermostatType type)
 {
     if (atoms.empty() || dof <= 0)
@@ -2121,9 +2121,9 @@ void SimpleMD::ApplyThermostatRegion(const std::vector<int>& atoms, double T0, i
             m_eigen_velocities.data()[3 * i + 1] *= alpha;
             m_eigen_velocities.data()[3 * i + 2] *= alpha;
         }
-    } else if (type == ThermostatType::Anderson) {
+    } else if (type == ThermostatType::Andersen) {
         static std::default_random_engine generator;
-        const double probability = m_anderson * m_dT;
+        const double probability = m_andersen * m_dT;
         std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
         for (int i : atoms) {
             if (uniform_dist(generator) < probability) {
@@ -3906,10 +3906,10 @@ void SimpleMD::CSVR()
     m_seed++;
 }
 
-void SimpleMD::Anderson()
+void SimpleMD::Andersen()
 {
     static std::default_random_engine generator;
-    double probability = m_anderson * m_dT;
+    double probability = m_andersen * m_dT;
     std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
     for (size_t i = 0; i < m_natoms; ++i) {
         if (uniform_dist(generator) < probability) {
