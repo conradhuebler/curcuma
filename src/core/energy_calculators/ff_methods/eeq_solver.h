@@ -916,6 +916,13 @@ public:
     /// (0 when eeq_extrapolation=none or before the history is long enough). Test hook.
     long pcgExtrapolationCount() const { return m_pcg_extrap_count; }
 
+    /// Fail-loud status (F-Q4, Claude Generated): true iff the most recent solve fell
+    /// back to uniform/placeholder charges (generateFallbackCharges). The caller must
+    /// clearSolveStatus() before a solve and check lastSolveFailed() after, so a wrong
+    /// charge set is never silently propagated into the Coulomb energy/gradient.
+    bool lastSolveFailed() const { return m_last_solve_failed; }
+    void clearSolveStatus() const { m_last_solve_failed = false; }
+
 private:
 
     // Auto-solver benchmark state
@@ -925,6 +932,10 @@ private:
 
     // WP7-B (May 2026): warn-once flag for CPU "batched" → cholesky fallback
     mutable bool m_batched_cpu_warned = false;
+
+    // F-Q4 (Claude Generated): set by generateFallbackCharges when a solve degrades to
+    // uniform/placeholder charges; read via lastSolveFailed(), reset via clearSolveStatus().
+    mutable bool m_last_solve_failed = false;
 
     // WP7-D (Jun 2026): contact-aware dispatch. Minimum inter-fragment atom distance
     // (Bohr) at the current geometry, computed in calculateFinalCharges from the packed

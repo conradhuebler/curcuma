@@ -732,6 +732,12 @@ bool GFNFF::InitialiseMolecule(const Mol& molecule)
 
 bool GFNFF::InitialiseMolecule()
 {
+    // F-Q4 (Claude Generated): fresh molecule -> clear the EEQ fail-loud state. The
+    // solver is (re)created and exercised below; calculateTopologyInfo() sets the flag
+    // if it falls back to placeholder charges.
+    m_eeq_solve_failed = false;
+    if (m_eeq_solver) m_eeq_solver->clearSolveStatus();
+
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== GFNFF::InitialiseMolecule() START ===");
         CurcumaLogger::param("atom_count", std::to_string(m_atomcount));
@@ -1687,6 +1693,10 @@ double GFNFF::Calculation(bool gradient)
 {
     // Claude Generated (February 2026): Start total calculation timer for verbosity 1+
     auto calc_start = std::chrono::high_resolution_clock::now();
+
+    // F-Q4 (Claude Generated): reset the per-step EEQ fail-loud flag so eeqSolveFailed()
+    // reflects this step's solve (sticky init failures persist via m_eeq_solve_failed).
+    if (m_eeq_solver) m_eeq_solver->clearSolveStatus();
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== GFNFF::Calculation() START ===");
@@ -8995,7 +9005,11 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         if (topo_info.topology_charges.size() != m_atomcount) {
             CurcumaLogger::warn("calculateTopologyInfo: Phase 1 topology charges failed - using uniform fallback");
             topo_info.topology_charges = Vector::Constant(m_atomcount, static_cast<double>(m_charge) / m_atomcount);
+            m_eeq_solve_failed = true;  // F-Q4: placeholder charges -> wrapper must refuse
         }
+        // F-Q4: the solver's own uniform fallback returns a correctly-sized vector, so
+        // the size check above misses it — pick up its status flag explicitly.
+        if (m_eeq_solver->lastSolveFailed()) m_eeq_solve_failed = true;
 
         {
             auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
@@ -9085,7 +9099,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         if (topo_info.eeq_charges.size() != m_atomcount) {
             CurcumaLogger::warn("calculateTopologyInfo: Phase 2 energy charges failed - using Phase 1 charges as fallback");
             topo_info.eeq_charges = topo_info.topology_charges;
+            m_eeq_solve_failed = true;  // F-Q4: placeholder charges -> wrapper must refuse
         }
+        if (m_eeq_solver->lastSolveFailed()) m_eeq_solve_failed = true;  // F-Q4 (see Phase 1)
 
         // Validate charge conservation for both charge systems
         double total_charge_qa = topo_info.topology_charges.sum();

@@ -106,6 +106,13 @@ void XTB::parallelStripes(int n_threads,
 
 bool XTB::InitialiseMolecule()
 {
+    // Reset hard-error state for the new molecule (Claude Generated): the B0
+    // d-shell guard below sets it, so a stale flag must not leak from a previous
+    // (rejected) system into a later valid one.
+    m_has_error = false;
+    m_error_message.clear();
+    m_cn_cache_valid = false;  // X-I3: invalidate CN cache for the new system
+
     if (m_atomcount <= 0) {
         CurcumaLogger::error("XTB::InitialiseMolecule: no atoms set");
         return false;
@@ -128,6 +135,27 @@ bool XTB::InitialiseMolecule()
     CitationRegistry::cite("diis", meth);         // SCF convergence (DIIS/Broyden)
 
     buildBasis();
+
+    // B0 safety scaffold (Claude Generated, X-I1): the native integral kernels are
+    // s/p-only (STO_CGTO cgto_overlap, multipole ints, gradients), but the GFN1/GFN2
+    // parameter tables emit d shells for Na, Mg, Al..Ar and every transition metal.
+    // Those d AOs would otherwise become zero rows in S -> singular overlap ->
+    // eigensolver failure silently returning E=0. Refuse loudly until the d-shell
+    // integrals (workstream B) are implemented and validated. Remove this block once
+    // d shells are supported.
+    for (int sh = 0; sh < m_basis.nsh; ++sh) {
+        if (m_basis.ang_sh[sh] > 1) {
+            const int at = m_basis.sh2at[sh];
+            const int z  = (at >= 0 && at < m_atomcount) ? m_atoms[at] : 0;
+            setHardError(fmt::format(
+                "native {} does not yet support d-shell basis functions "
+                "(element Z={}); use -method tblite-{} or xtb-{} for "
+                "S/P/Cl/Si/Al/Mg/Na/transition-metal systems",
+                meth, z, meth, meth));
+            return false;
+        }
+    }
+
     buildH0Data();
     buildReferenceOccupations();
     // A fresh molecule invalidates any SCC-extrapolation history from a previous
@@ -341,8 +369,21 @@ bool XTB::xlbomdCoefficients(int K, double& kappa, double& alpha, std::vector<do
     }
 }
 
+void XTB::setHardError(const std::string& msg)
+{
+    m_has_error = true;
+    if (m_error_message.empty())
+        m_error_message = msg;
+    CurcumaLogger::error("XTB engine: " + msg);
+}
+
 double XTB::Calculation(bool gradient)
 {
+    // Reset the hard-error state for this evaluation (Claude Generated): genuine
+    // solve breakdowns below set it so the wrapper refuses to return E=0 silently.
+    m_has_error = false;
+    m_error_message.clear();
+
     // Pin MKL to one thread for the whole native SCF (see MklSerialScope in
     // xtb_native.h): the serial iteration over small/medium matrices is faster
     // without MKL's per-call thread team up to at least 231 atoms.
@@ -879,7 +920,9 @@ double XTB::Calculation(bool gradient)
             if (!m_gpu_scf->residentScfStep(m_eig_fp32, dq, eb, ecoul, ethird, emp)) {
                 CurcumaLogger::warn("XTB::Calculation: GPU resident SCF step failed at iteration "
                                     + std::to_string(iter));
-                m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
+                m_scf_converged = false; m_scf_iterations = iter;
+                setHardError("native GPU-resident SCF solve failed (see warning above) at iteration " + std::to_string(iter));
+                return m_E_total;
             }
             m_E_electronic = eb; m_E_coulomb_shell = ecoul;
             m_E_third_order = ethird; m_E_multipole = emp;
@@ -991,7 +1034,9 @@ double XTB::Calculation(bool gradient)
             if (!solve_ok) {
                 CurcumaLogger::warn("XTB::Calculation: GPU resident solve failed at iteration "
                                     + std::to_string(iter));
-                m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
+                m_scf_converged = false; m_scf_iterations = iter;
+                setHardError("native GPU-resident SCF solve failed (see warning above) at iteration " + std::to_string(iter));
+                return m_E_total;
             }
             // Occupations on the host (shared Fermi/integer logic with the CPU path).
             Eigen::VectorXd occ; int ncol = 0;
@@ -1012,7 +1057,9 @@ double XTB::Calculation(bool gradient)
                 if (!re_ok) {
                     CurcumaLogger::warn("XTB::Calculation: GPU resident full re-solve failed at "
                                         "iteration " + std::to_string(iter));
-                    m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
+                    m_scf_converged = false; m_scf_iterations = iter;
+                setHardError("native GPU-resident SCF solve failed (see warning above) at iteration " + std::to_string(iter));
+                return m_E_total;
                 }
                 occupationsFromEps(m_wfn.eps, occ, ncol);
             }
@@ -1021,7 +1068,9 @@ double XTB::Calculation(bool gradient)
             if (!m_gpu_scf->density(occ, ncol, pop_ao, gpu_band)) {
                 CurcumaLogger::warn("XTB::Calculation: GPU resident density failed at iteration "
                                     + std::to_string(iter));
-                m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
+                m_scf_converged = false; m_scf_iterations = iter;
+                setHardError("native GPU-resident SCF solve failed (see warning above) at iteration " + std::to_string(iter));
+                return m_E_total;
             }
             t_solve = clock::now();
             // Broyden never mixes the density, so there is no P damping here.
@@ -1032,7 +1081,9 @@ double XTB::Calculation(bool gradient)
             if (gpu_multipole && !m_gpu_scf->multipoleMoments(m_wfn.dp_at, m_wfn.qp_at)) {
                 CurcumaLogger::warn("XTB::Calculation: GPU resident multipole moments failed at iteration "
                                     + std::to_string(iter));
-                m_scf_converged = false; m_scf_iterations = iter; return m_E_total;
+                m_scf_converged = false; m_scf_iterations = iter;
+                setHardError("native GPU-resident SCF solve failed (see warning above) at iteration " + std::to_string(iter));
+                return m_E_total;
             }
             q_sh_new = m_wfn.q_sh;
             t_mull = clock::now();
@@ -1093,6 +1144,8 @@ double XTB::Calculation(bool gradient)
                 CurcumaLogger::warn("XTB::Calculation: eigen solve failed at iteration " + std::to_string(iter));
                 m_scf_converged = false;
                 m_scf_iterations = iter;
+                setHardError("native SCF eigensolver failed at iteration " + std::to_string(iter)
+                             + " (often a singular overlap, e.g. an unsupported basis shell)");
                 return m_E_total;
             }
             t_solve = clock::now();
@@ -1676,6 +1729,9 @@ bool XTB::UpdateMolecule(const Matrix& geometry)
 
     // 4. Gamma matrix depends on interatomic distances (Klopman-Ohno R_AB)
     m_gamma.resize(0, 0);
+
+    // X-I3: coordination numbers depend on the geometry — drop the memoised CN.
+    m_cn_cache_valid = false;
 
     // 5. Multipole interaction matrices depend on distances and damping radii
     m_mp_initialized = false;

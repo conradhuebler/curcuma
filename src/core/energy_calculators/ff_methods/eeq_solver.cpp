@@ -919,6 +919,10 @@ EEQSolver::EEQSolver(const ConfigManager& config)
 // Claude Generated (March 2026): Fallback charges for graceful degradation
 Vector EEQSolver::generateFallbackCharges(int natoms, int total_charge, const std::string& context) const
 {
+    // F-Q4 (Claude Generated): flag the degradation so callers (GFN-FF) can refuse to
+    // return an energy/gradient built on these placeholder charges instead of silently
+    // propagating a wrong charge set into the Coulomb term.
+    m_last_solve_failed = true;
     CurcumaLogger::warn(fmt::format("EEQ solver failed ({}): using uniform fallback charges q_i = {:.4f}",
                                     context, static_cast<double>(total_charge) / natoms));
     return Vector::Constant(natoms, static_cast<double>(total_charge) / natoms);

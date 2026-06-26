@@ -95,7 +95,21 @@ void XTB::calculateGradient()
     Matrix W;
     if (m_wfn.W_valid && m_wfn.W.rows() == nao && m_wfn.W.cols() == nao) {
         W = m_wfn.W;
+    } else if (m_wfn.focc.size() == nao && m_wfn.C.cols() == nao) {
+        // X-G3 (Claude Generated): occupation-consistent W = Σ_i f_i·ε_i·C_i·C_iᵀ using the
+        // same per-MO occupations that built the density. At electronic_temperature > 0 these
+        // are fractional (Fermi) so the Pulay term matches the fractional density; at T = 0
+        // f_i ∈ {2,0}, so W is bit-identical to the previous integer build. Restrict to the
+        // leading columns with non-negligible occupation (eigenvalues ascending).
+        int ncol = 0;
+        for (int i = 0; i < nao; ++i)
+            if (m_wfn.focc(i) > 1.0e-12) ncol = i + 1;
+        const auto Cocc = m_wfn.C.leftCols(ncol);
+        const Eigen::VectorXd we =
+            (m_wfn.focc.head(ncol).array() * m_wfn.eps.head(ncol).array()).matrix();
+        W = (Cocc * we.asDiagonal()) * Cocc.transpose();
     } else {
+        // Fallback when focc was not populated (e.g. a device density path): integer occupation.
         const auto Cocc = m_wfn.C.leftCols(nocc_orbs);
         const Eigen::VectorXd w2 = 2.0 * m_wfn.eps.head(nocc_orbs);
         W = (Cocc * w2.asDiagonal()) * Cocc.transpose();

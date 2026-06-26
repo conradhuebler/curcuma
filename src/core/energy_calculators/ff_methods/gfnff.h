@@ -868,6 +868,15 @@ public:
     // Getters for CN/EEQ results (valid after prepareCNAndEEQ)
     const Vector& getLastCN() const { return m_last_cn; }
     const Vector& getLastCharges() const { return m_charges; }
+
+    // F-Q4 (Claude Generated): true iff the most recent InitialiseMolecule/Calculation
+    // had the EEQ solver fall back to uniform/placeholder charges. The wrapper refuses
+    // the result instead of returning a Coulomb energy built on wrong charges.
+    // m_eeq_solve_failed is the sticky init-time flag (cleared per molecule); the live
+    // solver flag catches per-step (opt/MD) fallbacks (cleared at each Calculation).
+    bool eeqSolveFailed() const {
+        return m_eeq_solve_failed || (m_eeq_solver && m_eeq_solver->lastSolveFailed());
+    }
     // WP-G fix (May 2026): m_geometry_bohr is GeoGradMatrix (RowMajor). Returning
     // `const Matrix&` was creating a dangling reference to a temporary produced by
     // Eigen's implicit storage-order conversion — segfaulted in the GPU path
@@ -2376,6 +2385,7 @@ private:
 
     // EEQ charge calculation (Dec 2025 - Phase 3: Extraction and delegation)
     std::unique_ptr<EEQSolver> m_eeq_solver; ///< Standalone EEQ solver (replaces embedded EEQ code)
+    mutable bool m_eeq_solve_failed = false; ///< F-Q4: EEQ fell back to placeholder charges (fail-loud)
 
     // Hückel solver for π-bond orders (Jan 2026 - Phase 1: Full Hückel implementation)
     std::unique_ptr<HuckelSolver> m_huckel_solver; ///< Full iterative Hückel solver

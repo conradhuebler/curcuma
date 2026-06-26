@@ -599,6 +599,13 @@ bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, doubl
         if (m_context.use_numerical_gradient) {
             // Calculate energy without analytical gradient (faster)
             energy = m_context.energy_calculator->CalculateEnergy(false);
+            if (m_context.energy_calculator->Error()) {
+                // Fail-loud (D-2/A1, Claude Generated): a method error (e.g. SCF/eigensolver
+                // breakdown, EEQ fallback, unsupported element) must abort the optimisation
+                // instead of letting it "converge" on a bogus E=0 / zero gradient.
+                CurcumaLogger::error("Optimisation aborted: " + m_context.energy_calculator->ErrorMessage());
+                return false;
+            }
             if (std::isnan(energy) || std::isinf(energy)) {
                 return false;
             }
@@ -614,6 +621,11 @@ bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, doubl
         } else {
             // Normal mode: calculate energy with analytical gradient
             energy = m_context.energy_calculator->CalculateEnergy(true);
+            if (m_context.energy_calculator->Error()) {
+                // Fail-loud (D-2/A1, Claude Generated): see numerical branch above.
+                CurcumaLogger::error("Optimisation aborted: " + m_context.energy_calculator->ErrorMessage());
+                return false;
+            }
             if (std::isnan(energy) || std::isinf(energy)) {
                 CurcumaLogger::error_fmt(
                     "evaluateEnergyAndGradient: energy is NaN/Inf ({:.6e})", energy);

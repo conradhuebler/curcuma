@@ -1621,17 +1621,43 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         CurcumaLogger::set_verbosity(verbosity);
     }
 
+    // -sp is energy-only by default (Claude Generated, June 2026): the gradient is
+    // computed only when the user asks for it with -gradient. This avoids the cost of
+    // an unused gradient and lets energy-only large-system modes (dc/sparse) serve a
+    // single-point energy without tripping the gradient-unavailable hard error (X-L4).
+    auto read_bool = [](const json& j, const char* k) -> bool {
+        if (!j.is_object() || !j.contains(k)) return false;
+        const auto& v = j[k];
+        if (v.is_boolean()) return v.get<bool>();
+        if (v.is_number())  return v.get<double>() != 0.0;
+        if (v.is_string())  { auto s = v.get<std::string>(); return s == "true" || s == "1" || s == "yes"; }
+        return false;
+    };
+    const bool want_gradient = read_bool(controller, "gradient")
+        || (controller.contains("opt") && read_bool(controller["opt"], "gradient"));
+
     Molecule molecule(argv[2]);
     EnergyCalculator energy_calc(method, energy_controller);
     energy_calc.setMolecule(molecule.getMolInfo());
-    double energy = energy_calc.CalculateEnergy(true);
+    double energy = energy_calc.CalculateEnergy(want_gradient);
+
+    // Fail-loud (D-2/A1/A2, Claude Generated): refuse to report a result when the
+    // method reported an error (e.g. unsupported d-shell element, SCF/eigensolver
+    // breakdown, EEQ fallback). Returning a non-zero exit avoids scripts treating a
+    // bogus 0.0 Eh as a valid single-point energy.
+    if (energy_calc.Error()) {
+        CurcumaLogger::error("Single-point calculation failed: " + energy_calc.ErrorMessage());
+        return 1;
+    }
 
     fmt::print("\nCharge {} Spin {}\n", molecule.Charge(), molecule.Spin());
     fmt::print("Single Point Energy = {:.8f} Eh\n", energy);
 
-    Geometry gradient = energy_calc.Gradient();
-    double grad_norm = Eigen::Map<Eigen::VectorXd>(gradient.data(), gradient.size()).norm();
-    CurcumaLogger::param("Gradient norm", fmt::format("{:.6e} Eh/Bohr", grad_norm));
+    if (want_gradient) {
+        Geometry gradient = energy_calc.Gradient();
+        double grad_norm = Eigen::Map<Eigen::VectorXd>(gradient.data(), gradient.size()).norm();
+        CurcumaLogger::param("Gradient norm", fmt::format("{:.6e} Eh/Bohr", grad_norm));
+    }
 
     return 0;
 }

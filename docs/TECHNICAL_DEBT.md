@@ -17,6 +17,45 @@ upstream guard not shown in the snippet.
 
 ---
 
+## Resolved (2026-06-26) — fail-loud batch
+
+The highest-priority *silent-wrong-result* items were fixed and verified (build green,
+gfn1/gfn2 s/p energies bit-identical, native-GFN + large-system + gfnff suites green).
+See `AIChangelog.md` for the full entry.
+
+| ID | Status | Fix |
+|----|--------|-----|
+| **X-I1** | **partially resolved** | B0 guard: native GFN1/GFN2 now *refuses* d-shell elements (Na/Mg/Al..Ar + transition metals) with a clear error instead of a singular overlap → silent 0 Eh. **Full d-shell integrals still open** (the s/p-only kernels are unchanged). |
+| **F-Q4** | resolved | EEQ uniform-charge fallback sets `lastSolveFailed()`; GFN-FF propagates `eeqSolveFailed()`; wrapper refuses the result (`eeq_solver.*`, `gfnff*`). |
+| native xTB fail-loud | resolved | `XTB` engine hard-error flag set at eigensolver/density/multipole breakdown; wrapper checks `hasError()` (root of the H2S silent-zero, with X-I1). |
+| **X-L4** | resolved | `large_system_mode=dc\|sparse` hard-error on a requested gradient instead of a zero gradient (`xtb_fragment_scf.cpp`). |
+| **D-1** | resolved | method sub-scopes re-merged before the single `createMethod` — no more double build (`energycalculator.*`). |
+| **D-2** | resolved (consumer-check) | `-sp` + optimizer driver check `EnergyCalculator::Error()` and exit non-zero (MD already did). The constructor-throw variant was *not* taken (main()'s dispatch has no top-level catch and ~30 sites incl. threaded batch loops would risk `std::terminate`); the consumer-check delivers the same fail-loud guarantee with less risk. |
+| **D-4** | resolved | deleted dead `energycalculator_enums.h`. |
+| **X-S2** | resolved | deleted dead strict-threshold `checkConvergence` in `xtb_scf.cpp`. |
+| **X-G3** | resolved | gradient `W = Σ_i f_i·ε_i·C_iC_iᵀ` uses the density's per-MO occupations (`Wavefunction::focc`); occupation-consistent at T>0, bit-identical for gapped systems. |
+| **X-I3** | resolved | `computeCoordinationNumbers()` memoised (geometry-keyed, invalidated on UpdateMolecule/InitialiseMolecule); bit-identical. |
+| **X-S6** | not applicable (stale) | current code rebuilds the post-SCF potential for `m_F` only on the device path, and the gradient rebuild excludes dispersion — no double D4 eval on the CPU path. The audit described older code. No change. |
+
+Also: **`-sp` is now energy-only by default** with an opt-in `-gradient` flag (avoids an
+unused gradient; lets energy-only large-system modes serve a single point).
+
+**Two pre-existing ctests fixed (2026-06-26):** `scf_extrapolation_caffeine` (generated the
+missing `caffeine.opt.xyz` fixture + gitignore exception); `gfnff_numgrad_fixed_charges`
+retired — its premise (analytical gradient = frozen-charge approximation) is obsolete since
+the Feb-2026 Coulomb Term-1b/dynamic-charge work made the analytical the TOTAL derivative
+(validated by `gfnff_numgrad_builtin`); comparing it to the fixed-charge PARTIAL derivative is
+invalid (H2O: total −1.2e-2 vs partial +2.9e-2 Eh/Bohr). The `--fixed-charges` flag stays for
+manual diagnostics.
+
+**Still open from the ranked list:** **X-I1 full d-shell integrals** — the large, validated
+capability WP, scoped for a dedicated clean session in
+[docs/SQM_DSHELL_WP.md](SQM_DSHELL_WP.md) (B1–B7: spherical-d transform, overlap/H0/multipole/
+gradient, GPU gating, tblite validation, then remove the B0 guard). B0 makes d-shell systems
+safe meanwhile.
+
+---
+
 ## 1. GFN-FF (`src/core/energy_calculators/ff_methods/`)
 
 ### God files / structure

@@ -295,6 +295,15 @@ struct Wavefunction {
     Matrix  C;        // MO coefficients, nao × nao
     Vector  eps;      // MO energies, length nao
 
+    // Per-MO occupation numbers used to build P (length nao). X-G3 (Claude Generated):
+    // at electronic_temperature > 0 these are the fractional Fermi occupations, so the
+    // gradient's energy-weighted density W = Σ_i f_i·ε_i·C_i·C_iᵀ matches the fractional
+    // density (the old integer W mismatched the Pulay term for small-gap systems). At
+    // T = 0 they are exactly {2,…,2,0,…} so W is bit-identical to the old integer build.
+    // Empty when the density came from a path that did not set it (gradient then falls
+    // back to the integer build).
+    Vector  focc;
+
     // Energy-weighted density matrix (AO basis): W_μν = 2·Σ_occ ε_i C_μi C_νi. Normally the
     // gradient rebuilds this from C/eps; the purification density path (eigensolver="purify",
     // no eigenpairs) instead stores it here as W = 2·L⁻ᵀ·(P̃·Ã·P̃)·L⁻¹ and sets W_valid so the
@@ -730,6 +739,13 @@ public:
     bool isConverged() const { return m_scf_converged; }
     int  scfIterations() const { return m_scf_iterations; }
 
+    // Hard-error state (Claude Generated): set on genuine solve failures
+    // (eigensolver/Cholesky breakdown, singular overlap, NaN/Inf) — distinct from a
+    // benign max-iteration non-convergence, which still yields a usable energy. A
+    // caller must refuse to consume the energy/gradient when hasError() is true.
+    bool hasError() const { return m_has_error; }
+    const std::string& errorMessage() const { return m_error_message; }
+
     // D4 charge-response source: "eeq" (single-shot dftd4 EEQ, default) or
     // "mulliken" (GFN2 SCF charges + CPSCF response). Set by the wrapper.
     void setD4ChargeSource(const std::string& s) { m_d4_charge_source = s; }
@@ -1130,6 +1146,18 @@ private:
     double m_electronic_temp = 300.0;  // K; 0 → integer occupation
     bool   m_scf_converged   = false;
     int    m_scf_iterations  = 0;
+
+    // X-I3 (Claude Generated): geometry-keyed cache for computeCoordinationNumbers()
+    // (called up to 3× per Calculation). Invalidated in UpdateMolecule/InitialiseMolecule.
+    mutable Vector m_cn_cache;
+    mutable bool   m_cn_cache_valid = false;
+
+    // Hard-error state (Claude Generated). Reset at the top of Calculation(), set by
+    // setHardError() at genuine solve breakdowns so the wrapper / EnergyCalculator can
+    // refuse the result instead of silently returning E=0.
+    bool        m_has_error = false;
+    std::string m_error_message;
+    void setHardError(const std::string& msg);
 
     // Intra-SCF eigensolve timing buckets (ms), summed over iterations by
     // solveEigen() and printed at verbosity >= 3. Reset in Calculation().

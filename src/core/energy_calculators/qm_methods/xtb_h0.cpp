@@ -55,6 +55,14 @@ static inline int ao_to_type(int ang, int local_ao)
 Vector XTB::computeCoordinationNumbers() const
 {
     const int nat = m_atomcount;
+    // X-I3 (Claude Generated): the H0/D4 coordination numbers depend only on the
+    // current geometry but are requested up to 3× per Calculation (pre-SCF
+    // self-energies, the GFN2 CPSCF gradient response, evaluateComponentsAtFixedDensity).
+    // Memoise; the cache is invalidated on every geometry change (UpdateMolecule /
+    // InitialiseMolecule), so the returned CN is bit-identical to recomputing.
+    if (m_cn_cache_valid && m_cn_cache.size() == nat)
+        return m_cn_cache;
+
     std::vector<double> xyz_bohr(3 * nat);
     for (int i = 0; i < nat; ++i) {
         xyz_bohr[3 * i + 0] = m_geometry(i, 0) * AA_TO_AU;
@@ -71,6 +79,8 @@ Vector XTB::computeCoordinationNumbers() const
 
     Vector cn(nat);
     for (int i = 0; i < nat; ++i) cn(i) = cn_vec[i];
+    m_cn_cache = cn;            // X-I3: memoise for the rest of this geometry
+    m_cn_cache_valid = true;
     return cn;
 }
 
