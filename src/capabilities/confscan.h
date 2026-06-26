@@ -113,10 +113,11 @@ public:
     }
     void setEarlyBreak(int earlybreak) { m_earlybreak = earlybreak; }
     void setVerbose(bool verbose) { m_verbose = verbose; }
+    void setRefineReuse(bool v) { m_refine_reuse = v; }
     int getKuhnMunkresIterations() { return m_driver->getKuhnMunkresIterations(); }
 
 private:
-    bool m_keep_molecule = true, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false;
+    bool m_keep_molecule = true, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false, m_refine_reuse = false;
     Molecule m_reference, m_target;
     double m_rmsd = 0, m_old_rmsd = 0, m_rmsd_threshold = 1, m_energy = 0;
     int m_MaxHTopoDiff;
@@ -196,10 +197,16 @@ public:
     ConfScan(const json& controller = json{}, bool silent = true);  // Claude Generated 2025: Default to empty JSON
     virtual ~ConfScan();
 
+    // Override base class setFile() so initializeBMT() triggers file loading
+    void setFile(const std::string& filename) override
+    {
+        CurcumaMethod::setFile(filename);
+        openFile();
+    }
+
     void setFileName(const std::string& filename)
     {
-        setFile(filename); // Claude Generated: Set basename for parameter caching
-        openFile();
+        setFile(filename);
     }
 
     // void setMolecules(const std::map<double, Molecule*>& molecules);
@@ -366,6 +373,7 @@ private:
     // --- Analysis & Debug ---
     PARAM(reset, Bool, false, "Reset state before processing", "Advanced", {})
     PARAM(analyse, Bool, false, "Enable analysis mode", "Advanced", {})
+    PARAM(refine_reuse, Bool, false, "After reuse hit, run full permutation search to obtain accurate RMSD* (slower, for diagnostic/logging purposes)", "Advanced", {})
     PARAM(mapped, Bool, false, "Use mapped structure comparison", "Advanced", {})
     PARAM(split, Bool, false, "Split output into separate files", "Output", {})
     PARAM(update, Bool, false, "Update existing results", "Advanced", {})
@@ -410,6 +418,7 @@ private:
     int m_cycles = -1;
     int m_reorder_count = 0, m_reorder_successfull_count = 0, m_skipped_count = 0, m_kuhn_munkres_iterations = 0;
     int m_earlybreak = 0;
+    bool m_refine_reuse = false;
     bool m_writeXYZ = false;
     bool m_check_connections = false;
     bool m_force_reorder = false, m_prevent_reorder = false;

@@ -102,9 +102,22 @@ int ConfScanThread::execute()
             m_break_pool = (m_earlybreak & 1) == 0;
             m_reused_worked = true;
             m_rmsd = tmp_rmsd;
+            m_reorder_rule = m_reorder_rules[i];
+
+            /* Opt-in: Rules2RMSD uses a stored rule on the pre-rotated target (after
+               BestFitRMSD), giving a valid upper bound for rejection but not the globally
+               optimal RMSD*. With refine_reuse=true a full search is run to obtain the
+               accurate value for logging and to update the stored rule. */
+            if (m_refine_reuse) {
+                m_driver->start();
+                double opt_rmsd = m_driver->RMSD();
+                if (opt_rmsd < tmp_rmsd) {
+                    m_rmsd = opt_rmsd;
+                    m_reorder_rule = m_driver->ReorderRules();
+                }
+            }
 
             m_input.rmsd = m_rmsd;
-            m_reorder_rule = m_reorder_rules[i];
             if (m_verbosity >= 1) {
                 if (m_earlybreak)
                     CurcumaLogger::success_fmt("Reuse: {} {} {:.6f} Early break", m_reference.Name(), m_target.Name(), m_rmsd);
@@ -353,6 +366,7 @@ void ConfScan::LoadControlJson()
     m_looseThresh = m_config.get<int>("loose_thresh");
     m_tightThresh = m_config.get<int>("tight_thresh");
     m_earlybreak = m_config.get<int>("early_break");
+    m_refine_reuse = m_config.get<bool>("refine_reuse");
 
     // Early break flags logging
     if ((m_earlybreak & 1) == 0)
@@ -777,6 +791,7 @@ void ConfScan::WriteDotFile(const std::string& filename, const std::string& cont
     std::ofstream result_file;
     result_file.open(filename);
     result_file << "digraph graphname \n {\n";
+    result_file << "graph [layout=dot];\n";
     result_file << content << std::endl;
     result_file << "}";
 }
@@ -1051,6 +1066,7 @@ void ConfScan::start()
         std::ofstream dotfile;
         dotfile.open(outputPath(m_result_basename + ".dot"));
         dotfile << "digraph graphname \n {\n";
+        dotfile << "graph [layout=dot];\n";
         dotfile << m_collective_content;
         dotfile << "}";
     }
@@ -1507,6 +1523,7 @@ ConfScanThread* ConfScan::addThread(const Molecule* reference, const json& confi
     thread->setReference(*reference);
     thread->setEarlyBreak(m_earlybreak);
     thread->setVerbose(m_analyse);
+    thread->setRefineReuse(m_refine_reuse);
     m_energies.push_back(reference->Energy());
 
     // thread->setVerbose(false);
