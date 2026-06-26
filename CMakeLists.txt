@@ -74,7 +74,7 @@ option(USE_PCH
     "Enable Precompiled Headers for faster compilation" ON)
 
 option(USE_CUDA
-    "Enable CUDA-accelerated GFN-FF (gfnff -gpu cuda, requires CUDA toolkit)" OFF)
+    "Enable CUDA-accelerated GPU (gfnff + gfn1/gfn2 -gpu cuda, requires CUDA toolkit)" OFF)
 
 # Claude Generated (2026-06): CUDA-accelerated native xTB (gfn1/gfn2 -gpu cuda).
 # Defaults to USE_CUDA. Controls only which xTB GPU sources are added; the runtime
@@ -101,6 +101,27 @@ option(USE_VULKAN
     "Enable Vulkan-compute-accelerated GPU (gfnff/gfn1/gfn2 -gpu vulkan, requires Vulkan SDK)" OFF)
 option(USE_VULKAN_XTB
     "Enable Vulkan-compute-accelerated native xTB SCF/integrals/gradient (gfn1/gfn2 -gpu vulkan)" ${USE_VULKAN})
+
+# ---------------------------------------------------------------------------
+# Unified GPU backend switches (Jun 2026)
+# ---------------------------------------------------------------------------
+# Dissolve the per-method sub-flags: the umbrella USE_CUDA / USE_ROCM / USE_VULKAN is the
+# single switch — turning one on enables BOTH the native-xTB (gfn1/gfn2) AND the GFN-FF GPU
+# path for that backend. The per-method sub-flags are kept only for the source-gating logic
+# below (and explicit/legacy `-DUSE_*_XTB=...` invocation) and are forced to follow their
+# umbrella here so the two can never diverge — previously a sub-flag only DEFAULTED to the
+# umbrella on the FIRST configure and silently stuck afterwards. (Plain set() shadows the
+# cache for this configure and propagates to the GPU blocks + test subdirectory below.)
+if(USE_CUDA)
+    set(USE_CUDA_XTB ON)    # CUDA GFN-FF is gated directly by USE_CUDA (no separate flag)
+endif()
+if(USE_ROCM)
+    set(USE_ROCM_XTB   ON)
+    set(USE_ROCM_GFNFF ON)
+endif()
+if(USE_VULKAN)
+    set(USE_VULKAN_XTB ON)  # + USE_VULKAN_GFNFF once the Vulkan GFN-FF stack (V-AP6) lands
+endif()
 
 # WP-D Stage B (May 2026): hand-rolled AVX2 exp(-x^2) for GFN-FF dcn step 3 hot loop.
 # Opt-in. Default OFF keeps the build bit-identical to pre-WP. Requires AVX2 (set
