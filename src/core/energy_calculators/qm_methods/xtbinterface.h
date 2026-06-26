@@ -124,8 +124,8 @@ public:
 
 private:
     double m_thr = 1.0e-10;
-    double* m_coord;
-    int* m_attyp;
+    double* m_coord = nullptr;
+    int* m_attyp = nullptr;
     int m_accuracy = 1, m_SCFmaxiter = 100;
     double m_Tele = 298;
     xtb_TEnvironment m_env = NULL;
