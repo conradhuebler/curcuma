@@ -537,10 +537,9 @@ bool ConfScan::openFile()
     m_timing_rot = calcI;
     m_timing_ripser = calcH;
 
-    if (m_verbosity >= 2) {
-        CurcumaLogger::info("Time for calculating descriptors:");
-        CurcumaLogger::info_fmt("Rotational constants: {:.3f} seconds", m_timing_rot / 1000.0);
-        CurcumaLogger::info_fmt("Ripser bar code: {:.3f} seconds", m_timing_ripser / 1000.0);
+    if (m_verbosity >= 1) {
+        CurcumaLogger::result_fmt("Descriptor timing:  rotational {:.3f} s  |  ripser {:.3f} s  |  total {:.3f} s",
+            m_timing_rot / 1000.0, m_timing_ripser / 1000.0, (m_timing_rot + m_timing_ripser) / 1000.0);
     }
 
     return true;
