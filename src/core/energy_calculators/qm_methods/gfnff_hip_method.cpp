@@ -1186,22 +1186,14 @@ double GFNFFHipComputationalMethod::calculateEnergy(bool gradient)
         rep.t_param_gen        = m_gfnff->getParamGenTimeMs();
         rep.t_gpu_upload       = m_gpu_upload_time_ms;
 
-        // Gradient
+        // Gradient. The gradient Matrix is allocated in the hipcc TU; its Eigen allocator is
+        // pinned to EIGEN_MAX_ALIGN_BYTES=64 (CMakeLists) to match this g++ AVX-512 build, so
+        // the aligned packet loads in .norm() are safe (previously a 16-vs-64 alignment ABI
+        // mismatch crashed here on heap addresses that were only 16-byte aligned).
         if (gradient && m_gpu_workspace) {
             const Matrix& gpu_grad = m_gpu_workspace->gradient();
             if (gpu_grad.size() > 0) {
-                // ALIGNMENT NOTE (Jun 2026): the gradient Matrix is allocated in the hipcc
-                // TU (clang, no -march → Eigen 16-byte alignment), but this file is built by
-                // g++ with -march=native (Zen4 AVX-512 → Eigen 64-byte alignment + aligned
-                // packet loads). Calling gpu_grad.norm() here would emit a 64-byte-aligned
-                // vmovapd on a 16-byte-aligned buffer and SIGSEGV whenever the heap address
-                // is not 64-aligned (molecule-dependent — caused the multi-fragment v>=2 crash).
-                // Compute the norm alignment-agnostically from the raw data instead.
-                const double* gd = gpu_grad.data();
-                const Eigen::Index ng = gpu_grad.size();
-                double gnorm_sq = 0.0;
-                for (Eigen::Index k = 0; k < ng; ++k) gnorm_sq += gd[k] * gd[k];
-                rep.gradient_norm = std::sqrt(gnorm_sq);
+                rep.gradient_norm = gpu_grad.norm();
                 rep.t_gradient.gpu = kt.coulomb;  // gradient mostly computed in Phase 2
             }
         }

@@ -336,6 +336,25 @@ elseif(USE_AVX2)
     endif()
 endif()
 
+# Eigen ABI alignment (Jun 2026): pin EIGEN_MAX_ALIGN_BYTES to ONE value derived from the
+# active CPU-vectorization switch, applied IDENTICALLY to the g++ build (here) and the
+# hipcc/nvcc-compiled GPU TUs below. A mismatch (e.g. g++ AVX-512 → 64 vs hipcc clang
+# default → 16) gives Eigen objects a different allocator alignment AND a different sizeof
+# for over-aligned fixed-size types across the TU boundary → aligned-load SIGSEGV / silent
+# corruption (this was the GFN-FF gradient-norm crash on multi-fragment systems). Both sides
+# reference ${CURCUMA_EIGEN_ALIGN}, so they can never diverge. 0 = leave Eigen's default (16)
+# on both sides (no override) — only set it when a vectorization switch is actually on.
+set(CURCUMA_EIGEN_ALIGN 0)
+if(USE_MARCH_NATIVE OR USE_AVX512)
+    set(CURCUMA_EIGEN_ALIGN 64)
+elseif(USE_AVX2)
+    set(CURCUMA_EIGEN_ALIGN 32)
+endif()
+if(NOT CURCUMA_EIGEN_ALIGN EQUAL 0)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DEIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN}")
+    message(STATUS "Eigen: EIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN} (pinned for g++/GPU-TU ABI parity)")
+endif()
+
 # WP-D Stage B (May 2026): USE_GFNFF_FAST_EXP requires AVX2. Either USE_AVX2 or
 # USE_MARCH_NATIVE (or USE_AVX512) must be set so __AVX2__ is defined.
 if(USE_GFNFF_FAST_EXP)
@@ -1010,6 +1029,11 @@ if(USE_ROCM)
 
         # hipcc compile flags + defines. HAVE_ROCSOLVER gates the eigensolver/resident code.
         set(_hipcc_defs -DUSE_ROCM_XTB -D__HIP_PLATFORM_AMD__)
+        # Match the g++ build's Eigen alignment (CURCUMA_EIGEN_ALIGN, set with the march/AVX
+        # switch above) so Eigen objects crossing this hipcc TU <-> g++ boundary share one ABI.
+        if(NOT CURCUMA_EIGEN_ALIGN EQUAL 0)
+            list(APPEND _hipcc_defs -DEIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN})
+        endif()
         set(_rocm_wrap_defs "")
         if(rocsolver_FOUND AND rocblas_FOUND)
             find_library(ROCM_ROCSOLVER rocsolver REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64)
@@ -1075,6 +1099,11 @@ if(USE_ROCM)
         # hipcc custom command does not inherit that target's compile defs, so set it here too —
         # otherwise the device TU references the non-inline fmt::vprint and the g++ link fails.
         set(_hip_ff_defs -DUSE_ROCM_GFNFF -D__HIP_PLATFORM_AMD__ -DFMT_HEADER_ONLY)
+        # Match the g++ Eigen alignment (see the xTB block / the march-derived CURCUMA_EIGEN_ALIGN)
+        # so workspace matrices read in the g++ wrapper (e.g. the gradient norm) share one ABI.
+        if(NOT CURCUMA_EIGEN_ALIGN EQUAL 0)
+            list(APPEND _hip_ff_defs -DEIGEN_MAX_ALIGN_BYTES=${CURCUMA_EIGEN_ALIGN})
+        endif()
         if(rocsolver_FOUND AND rocblas_FOUND)
             if(NOT ROCM_ROCSOLVER)
                 find_library(ROCM_ROCSOLVER rocsolver REQUIRED PATHS /opt/rocm/lib /opt/rocm/lib64)
