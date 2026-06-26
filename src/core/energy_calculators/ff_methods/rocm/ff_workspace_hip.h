@@ -297,6 +297,23 @@ public:
     void uploadRefCN(const std::vector<std::vector<double>>& refcn);
 
     /**
+     * @brief WP-A (Jun 2026): build the D4 dispersion pair list on the device.
+     * Two-pass enumeration (count -> alloc -> build) + per-pair C6 contraction,
+     * replacing the host O(N^2) GenerateDispersionPairsNative loop and its H2D upload.
+     * Rebuilds the per-atom CSR adjacency (k_dispersion_gather) from the device list.
+     * Requires uploadC6ReferenceTable()/uploadRefCN() first (dc6dcn_gpu_ready).
+     * @param gw_flat        Host Gaussian weights [N*D4_MAX_REF], zero-padded (bit-identical C6)
+     * @param sqrtzr4r2      Per-element sqrt(Z*r4/r2) [118]
+     * @param topo_charges   Phase-1 topology charges [N] (for the zetac6 scaling)
+     * @param a1, a2         GFN-FF D4 damping params (0.58, 4.80)
+     * @param cutoff_bohr    Pair-list distance cutoff (60 Bohr, matches the host generator)
+     */
+    void generateDispersionPairListOnGPU(const std::vector<double>& gw_flat,
+                                         const std::vector<double>& sqrtzr4r2,
+                                         const std::vector<double>& topo_charges,
+                                         double a1, double a2, double cutoff_bohr);
+
+    /**
      * @brief Compute Gaussian weights + dc6dcn entirely on GPU (Phase 6).
      * Replaces: CPU precomputeGaussianWeights() + computeGaussianWeightDerivatives()
      * + computeDC6DCNOnGPU(). CN values must be on GPU (from computeCN() or setD3CN()).

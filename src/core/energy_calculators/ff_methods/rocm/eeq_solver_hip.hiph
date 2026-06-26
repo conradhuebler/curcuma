@@ -69,6 +69,28 @@ void k_eeq_build_matrix_hip(
     }
 }
 
+// WP-B (Jun 2026): mixed-precision cast/axpy helpers (FP32 factor + FP64 refine).
+// Verbatim ports of cuda/eeq_solver_gpu.cu::k_cast_d2f / k_cast_f2d / k_axpy_f2d
+// (file-local _hip names to avoid clashing with the gfnff_kernels_hip.h declarations).
+__global__ void k_cast_d2f_hip(const double* __restrict__ in, float* __restrict__ out, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = static_cast<float>(in[i]);
+}
+
+__global__ void k_cast_f2d_hip(const float* __restrict__ in, double* __restrict__ out, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = static_cast<double>(in[i]);
+}
+
+// x += (double)dx — accumulate the FP32 correction into the FP64 running solution.
+__global__ void k_axpy_f2d_hip(double* __restrict__ x, const float* __restrict__ dx, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] += static_cast<double>(dx[i]);
+}
+
 struct EEQSolverHipImpl {
     rocblas_handle handle = nullptr;     // rocSOLVER reuses the rocBLAS handle
     hipStream_t    stream = nullptr;
@@ -88,6 +110,19 @@ struct EEQSolverHipImpl {
     bool m_has_cached_factor = false;
     bool m_using_lu = false;
     int  m_last_chol_info = 0;
+
+    // WP-B (Jun 2026): FP32-factor + FP64-refine mixed precision (opt-in). When on and
+    // the FP32 Cholesky is SPD, d_A keeps the FP64 *matrix* (not factored in place) for
+    // the residual, while d_A_f32 holds the FP32 factor. m_cached_factor_mixed drives the
+    // solve-time dispatch (mixedSolveRefine vs dpotrs), persisting across lazy solves.
+    bool               m_mixed_precision     = false;
+    int                m_refine_iters        = 2;     ///< FP64-residual / FP32-correction steps (>=1)
+    bool               m_cached_factor_mixed = false; ///< cached factor lives in d_A_f32 (FP32)
+    CudaBuffer<float>  d_A_f32;            ///< [N*N] FP32 Cholesky factor
+    CudaBuffer<float>  d_rhs_f32;          ///< [N*nrhs] FP32 solve scratch
+    CudaBuffer<double> d_x_ref;            ///< [N*nrhs] FP64 running solution
+    CudaBuffer<double> d_b_ref;            ///< [N*nrhs] preserved FP64 RHS
+    CudaBuffer<double> d_r_ref;            ///< [N*nrhs] FP64 residual
 
     // Fragment topology (so the wrapper marks nfrag>1 GPU-applicable, then takes the
     // solveWithDeviceRHS + CPU-Schur path since the GPU-Schur variants return false).
@@ -140,6 +175,78 @@ EEQSolverHip::~EEQSolverHip()
     }
 }
 
+void EEQSolverHip::setMixedPrecision(bool enabled, int refine_iters)
+{
+    m_impl->m_mixed_precision = enabled;
+    m_impl->m_refine_iters    = (refine_iters < 1) ? 1 : refine_iters;
+}
+
+// WP-B: FP32 Cholesky of the FP64 matrix currently in impl.d_A. d_A is left intact (the
+// residual refinement needs the unfactored matrix); the FP32 factor lands in d_A_f32.
+// Returns the rocSOLVER info (0 = SPD success), or -1 on a launch/transfer failure. On a
+// non-zero return the caller falls back to the FP64 dpotrf/LU path against the intact d_A.
+static int mixedFactorHip(EEQSolverHipImpl& impl, int N)
+{
+    const int n2 = N * N;
+    if (impl.d_A_f32.n < n2) impl.d_A_f32.alloc(n2);
+
+    int block = 256, grid = (n2 + block - 1) / block;
+    k_cast_d2f_hip<<<grid, block, 0, impl.stream>>>(impl.d_A.ptr, impl.d_A_f32.ptr, n2);
+
+    // rocSOLVER manages the spotrf workspace internally (no buffer-size query, unlike cuSOLVER).
+    if (rocsolver_spotrf(impl.handle, rocblas_fill_lower, N, impl.d_A_f32.ptr, N,
+                         impl.d_info.ptr) != rocblas_status_success)
+        return -1;
+    if (hipMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int),
+                       hipMemcpyDeviceToHost, impl.stream) != hipSuccess) return -1;
+    if (hipStreamSynchronize(impl.stream) != hipSuccess) return -1;
+    return *impl.h_info;
+}
+
+// WP-B: solve A·X = B (B in impl.d_rhs, nrhs columns) using the FP32 factor in d_A_f32 plus
+// FP64 iterative refinement against the FP64 matrix in d_A. The FP64 solution is written back
+// into d_rhs, matching the dpotrs contract the caller expects.
+static void mixedSolveRefineHip(EEQSolverHipImpl& impl, int N, int nrhs)
+{
+    const int sz = N * nrhs;
+    if (impl.d_rhs_f32.n < sz) impl.d_rhs_f32.alloc(sz);
+    if (impl.d_x_ref.n   < sz) impl.d_x_ref.alloc(sz);
+    if (impl.d_b_ref.n   < sz) impl.d_b_ref.alloc(sz);
+    if (impl.d_r_ref.n   < sz) impl.d_r_ref.alloc(sz);
+
+    const int block = 256, grid = (sz + block - 1) / block;
+
+    // Preserve the FP64 RHS B (d_rhs is overwritten with x at the end).
+    hipMemcpyAsync(impl.d_b_ref.ptr, impl.d_rhs.ptr, sz * sizeof(double),
+                   hipMemcpyDeviceToDevice, impl.stream);
+
+    // x0 = spotrs(L_f32, (float)B)   (rocsolver_?potrs takes no info argument)
+    k_cast_d2f_hip<<<grid, block, 0, impl.stream>>>(impl.d_b_ref.ptr, impl.d_rhs_f32.ptr, sz);
+    rocsolver_spotrs(impl.handle, rocblas_fill_lower, N, nrhs,
+                     impl.d_A_f32.ptr, N, impl.d_rhs_f32.ptr, N);
+    k_cast_f2d_hip<<<grid, block, 0, impl.stream>>>(impl.d_rhs_f32.ptr, impl.d_x_ref.ptr, sz);
+
+    // Iterative refinement: r = b − A·x (FP64), dx = A⁻¹·r (FP32), x += dx.
+    const double done = 1.0, dnegone = -1.0;
+    const int iters = (impl.m_refine_iters < 1) ? 1 : impl.m_refine_iters;
+    for (int it = 0; it < iters; ++it) {
+        hipMemcpyAsync(impl.d_r_ref.ptr, impl.d_b_ref.ptr, sz * sizeof(double),
+                       hipMemcpyDeviceToDevice, impl.stream);
+        // R = -A·x + R  (A symmetric, lower triangle; column-major). Host scalar pointers.
+        rocblas_dsymm(impl.handle, rocblas_side_left, rocblas_fill_lower, N, nrhs,
+                      &dnegone, impl.d_A.ptr, N, impl.d_x_ref.ptr, N,
+                      &done, impl.d_r_ref.ptr, N);
+        k_cast_d2f_hip<<<grid, block, 0, impl.stream>>>(impl.d_r_ref.ptr, impl.d_rhs_f32.ptr, sz);
+        rocsolver_spotrs(impl.handle, rocblas_fill_lower, N, nrhs,
+                         impl.d_A_f32.ptr, N, impl.d_rhs_f32.ptr, N);
+        k_axpy_f2d_hip<<<grid, block, 0, impl.stream>>>(impl.d_x_ref.ptr, impl.d_rhs_f32.ptr, sz);
+    }
+
+    // Solution back into d_rhs (callers read z1/Z2 from d_rhs).
+    hipMemcpyAsync(impl.d_rhs.ptr, impl.d_x_ref.ptr, sz * sizeof(double),
+                   hipMemcpyDeviceToDevice, impl.stream);
+}
+
 // Shared core: build A from device alpha/gam, Cholesky (LU fallback), build RHS, solve,
 // download z1/Z2. rhs0_host XOR rhs0_dev provides column 0 (atom electronegativity RHS).
 static bool eeqBuildFactorSolve(
@@ -154,6 +261,11 @@ static bool eeqBuildFactorSolve(
     const int nrhs = nfrag + 1;
     const bool do_refactor = force_refactor || !impl.m_has_cached_factor || (N != last_N);
 
+    // WP-B: mixed precision only on the factor-dominated few-fragment path (nfrag<=1, nrhs<=2).
+    // For large nfrag (solvent) nrhs ~ N makes the FP64 residual GEMM as costly as the FP64
+    // factor, so there is no win — and that regime is routed to the exact CPU PCG anyway.
+    const bool use_mixed = impl.m_mixed_precision && nfrag <= 1;
+
     auto buildMatrix = [&]() {
         int n_lower = N * (N + 1) / 2;
         int block = 256, grid = (n_lower + block - 1) / block;
@@ -163,27 +275,44 @@ static bool eeqBuildFactorSolve(
 
     if (do_refactor) {
         buildMatrix();
-        // Cholesky
-        if (rocsolver_dpotrf(impl.handle, rocblas_fill_lower, N, impl.d_A.ptr, N,
-                             impl.d_info.ptr) != rocblas_status_success) return false;
-        if (hipMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int),
-                           hipMemcpyDeviceToHost, impl.stream) != hipSuccess) return false;
-        if (hipStreamSynchronize(impl.stream) != hipSuccess) return false;
 
-        if (*impl.h_info != 0) {
-            // Indefinite -> LU with partial pivoting (potrf corrupted A, rebuild first)
-            impl.m_last_chol_info = *impl.h_info;
-            buildMatrix();
-            if (rocsolver_dgetrf(impl.handle, N, N, impl.d_A.ptr, N, impl.d_lu_pivots.ptr,
+        // WP-B: try the FP32 Cholesky first. On SPD success d_A stays the FP64 matrix and
+        // the factor lives in d_A_f32; on non-SPD we fall through to the FP64 dpotrf/LU path
+        // below, which sees the still-intact d_A.
+        bool mixed_done = false;
+        if (use_mixed) {
+            if (mixedFactorHip(impl, N) == 0) {
+                impl.m_cached_factor_mixed = true;
+                impl.m_using_lu = false;
+                impl.m_last_chol_info = 0;
+                mixed_done = true;
+            }
+        }
+
+        if (!mixed_done) {
+            impl.m_cached_factor_mixed = false;
+            // Cholesky
+            if (rocsolver_dpotrf(impl.handle, rocblas_fill_lower, N, impl.d_A.ptr, N,
                                  impl.d_info.ptr) != rocblas_status_success) return false;
             if (hipMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int),
                                hipMemcpyDeviceToHost, impl.stream) != hipSuccess) return false;
             if (hipStreamSynchronize(impl.stream) != hipSuccess) return false;
-            if (*impl.h_info != 0) { impl.m_has_cached_factor = false; return false; }
-            impl.m_using_lu = true;
-        } else {
-            impl.m_using_lu = false;
-            impl.m_last_chol_info = 0;
+
+            if (*impl.h_info != 0) {
+                // Indefinite -> LU with partial pivoting (potrf corrupted A, rebuild first)
+                impl.m_last_chol_info = *impl.h_info;
+                buildMatrix();
+                if (rocsolver_dgetrf(impl.handle, N, N, impl.d_A.ptr, N, impl.d_lu_pivots.ptr,
+                                     impl.d_info.ptr) != rocblas_status_success) return false;
+                if (hipMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int),
+                                   hipMemcpyDeviceToHost, impl.stream) != hipSuccess) return false;
+                if (hipStreamSynchronize(impl.stream) != hipSuccess) return false;
+                if (*impl.h_info != 0) { impl.m_has_cached_factor = false; return false; }
+                impl.m_using_lu = true;
+            } else {
+                impl.m_using_lu = false;
+                impl.m_last_chol_info = 0;
+            }
         }
         impl.m_has_cached_factor = true;
         last_N = N;
@@ -214,13 +343,18 @@ static bool eeqBuildFactorSolve(
             return false;
     }
 
-    // Solve
-    rocblas_status st = impl.m_using_lu
-        ? rocsolver_dgetrs(impl.handle, rocblas_operation_none, N, nrhs,
-                           impl.d_A.ptr, N, impl.d_lu_pivots.ptr, impl.d_rhs.ptr, N)
-        : rocsolver_dpotrs(impl.handle, rocblas_fill_lower, N, nrhs,
-                           impl.d_A.ptr, N, impl.d_rhs.ptr, N);
-    if (st != rocblas_status_success) return false;
+    // Solve. WP-B: a cached FP32 factor uses FP32 substitution + FP64 iterative refinement;
+    // otherwise the FP64 Cholesky/LU factor in d_A.
+    if (impl.m_cached_factor_mixed) {
+        mixedSolveRefineHip(impl, N, nrhs);
+    } else {
+        rocblas_status st = impl.m_using_lu
+            ? rocsolver_dgetrs(impl.handle, rocblas_operation_none, N, nrhs,
+                               impl.d_A.ptr, N, impl.d_lu_pivots.ptr, impl.d_rhs.ptr, N)
+            : rocsolver_dpotrs(impl.handle, rocblas_fill_lower, N, nrhs,
+                               impl.d_A.ptr, N, impl.d_rhs.ptr, N);
+        if (st != rocblas_status_success) return false;
+    }
 
     ensureHResultHip(impl, rhs_size);
     if (hipMemcpyAsync(impl.h_result, impl.d_rhs.ptr, rhs_size * sizeof(double),

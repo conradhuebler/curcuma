@@ -101,6 +101,16 @@ bool GFNFFHipComputationalMethod::setMolecule(const Mol& mol)
 
     auto t_init_start = std::chrono::high_resolution_clock::now();
 
+    // WP-A (Jun 2026): if the GPU builds the D4 pair list on device, tell the host
+    // generator to skip its O(N^2) pair loop (keep only CN + gw the device reuses).
+    // Must be set before InitialiseMolecule triggers host parameter generation.
+    {
+        bool disp_dev = m_parameters.value("gpu_disp_pairs_on_device", false);
+        if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+            disp_dev = disp_dev || m_parameters["gfnff"].value("gpu_disp_pairs_on_device", false);
+        m_gfnff->setSkipHostDispPairs(disp_dev);
+    }
+
     // CPU topology + parameter generation (same as CPU gfnff)
     if (!m_gfnff->InitialiseMolecule(mol)) {
         m_has_error = true;
@@ -237,18 +247,61 @@ bool GFNFFHipComputationalMethod::initGPUWorkspace()
         m_cn_pair_cutoff_factor = cfg_get_dbl("gpu_cn_pair_cutoff_factor", 2.5);
         m_gpu_workspace->setCNPairCutoffFactor(m_cn_pair_cutoff_factor);
 
+        // Deliverable 3 (Jun 2026): route high-fragment EEQ to the exact CPU PCG.
+        m_eeq_cpu_fragment_threshold = cfg_get_int("eeq_rocm_cpu_fragment_threshold", 16);
+
         // Phase 2: Upload C6 reference table for GPU dc6dcn per-pair computation
         D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
         if (d4 && !d4->getC6FlatCache().empty()) {
             m_gpu_workspace->uploadC6ReferenceTable(d4->getC6FlatCache(), d4->getRefN());
             // Phase 6: Upload reference CN values for GPU Gaussian weight kernel
             m_gpu_workspace->uploadRefCN(d4->getRefCN());
+
+            // WP-A (Jun 2026): opt-in on-device D4 dispersion pair-list build. Replaces the
+            // host GenerateDispersionPairsNative O(N^2) loop + the per-build H2D upload (the
+            // host-uploaded SoA from the ctor is overwritten here). Needs CN + gw on the
+            // device first. Default OFF: the proven host build stays the reference. Mirrors
+            // gfnff_gpu_method.cpp; the ROCm method additionally rebuilds the gather CSR.
+            if (cfg_get_bool("gpu_disp_pairs_on_device", false)) {
+                const int Nd = static_cast<int>(m_atom_types.size());
+                const auto& hgw = d4->getGaussianWeights();
+                std::vector<double> gw_flat(static_cast<size_t>(Nd) * D4ParameterGenerator::MAX_REF, 0.0);
+                for (int a = 0; a < Nd && a < static_cast<int>(hgw.size()); ++a) {
+                    int nref = std::min<int>(static_cast<int>(hgw[a].size()), D4ParameterGenerator::MAX_REF);
+                    for (int r = 0; r < nref; ++r)
+                        gw_flat[static_cast<size_t>(a) * D4ParameterGenerator::MAX_REF + r] = hgw[a][r];
+                }
+                std::vector<double> sqrtzr4r2(118, 0.0);
+                for (int z = 1; z <= 118; ++z) sqrtzr4r2[z - 1] = d4->getSqrtZr4r2(z);
+                const Vector& tc = m_gfnff->getTopologyInfo().topology_charges;
+                std::vector<double> topo_q(tc.data(), tc.data() + tc.size());
+                // GFN-FF D4: a1=0.58, a2=4.80, 60 Bohr cutoff (matches the host generator).
+                m_gpu_workspace->generateDispersionPairListOnGPU(gw_flat, sqrtzr4r2, topo_q, 0.58, 4.80, 60.0);
+                if (CurcumaLogger::get_verbosity() >= 1)
+                    CurcumaLogger::info("GFN-FF GPU: D4 dispersion pair list built on device (gpu_disp_pairs_on_device)");
+            }
         }
 
-        // Claude Generated (March 2026): GPU EEQ solver (cuSOLVER Cholesky)
-        // EEQ staging buffers pre-allocated above (before CUDA init). Create solver here.
+        // Claude Generated (March 2026): GPU EEQ solver (rocSOLVER Cholesky)
+        // EEQ staging buffers pre-allocated above (before HIP init). Create solver here.
         // Lazy refactorization is RMSD-based: force_refactor flag passed per solve() call.
         m_eeq_gpu = std::make_unique<EEQSolverHip>(natoms);
+
+        // WP-B (Jun 2026): opt-in FP32-factor + FP64 iterative-refinement EEQ solve. Mirrors
+        // the CUDA wiring (gfnff_gpu_method.cpp); default OFF on ROCm too (enable per card via
+        // -gfnff.eeq_mixed_precision, falling back to the global scf_mixed_precision intent).
+        // Targets the factor-dominated few-fragment path; the many-fragment path is routed to
+        // the exact CPU PCG (see the EEQ dispatch), so this only affects nfrag<=1.
+        {
+            bool mp = cfg_get_bool("eeq_mixed_precision",
+                                   cfg_get_bool("scf_mixed_precision", false));
+            int  mp_iters = cfg_get_int("eeq_mixed_precision_iters", 2);
+            m_eeq_gpu->setMixedPrecision(mp, mp_iters);
+            if (mp && CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::info(fmt::format(
+                    "GFN-FF GPU EEQ: FP32 factor + FP64 iterative refinement ({} step(s))",
+                    (mp_iters < 1 ? 1 : mp_iters)));
+        }
 
         // WP2: Upload topology-constant EEQ parameters to GPU.
         // cn=Zero because chi_corrected_static and cnf are CN-independent.
@@ -589,6 +642,26 @@ double GFNFFHipComputationalMethod::calculateEnergy(bool gradient)
             CurcumaLogger::info(
                 "EEQ GPU Phase 2: reusing cached CPU charges (geometry unchanged)");
         }
+        charges = m_gfnff->getLastCharges();
+        m_gpu_workspace->setEEQCharges(charges);
+    } else if (m_eeq_cpu_fragment_threshold > 0
+               && m_eeq_nfrag >= m_eeq_cpu_fragment_threshold) {
+        // Deliverable 3 (Jun 2026): high fragment count (solvent box). The device EEQ does a
+        // dense N x N Cholesky for nfrag>1 — O(N^3), intractable here — and the device PCG/
+        // batched/general-Schur variants are not ported on ROCm (return false). Route to the
+        // exact CPU PCG + block-Jacobi + warm-start solver (O(N^2 k)), which keeps ROCm
+        // charges identical to the CPU path. prepareCNAndEEQ runs the CPU EEQ with its
+        // configured exact solver (eeq_contact_prefer_exact default true).
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info(fmt::format(
+                "EEQ GPU Phase 2: nfrag={} >= {} — routing to exact CPU PCG (device dense Cholesky avoided)",
+                m_eeq_nfrag, m_eeq_cpu_fragment_threshold));
+        }
+        // The normal device path leaves CN GPU-resident (WP5-D), so m_gpu_cn_final is stale
+        // here. Sync the current-geometry CN to the CPU before the CPU EEQ solve (mirrors the
+        // pre-dispatch finalize at the top of this function for the other CPU-EEQ branches).
+        m_gpu_workspace->finalizeCNForCPU(m_gpu_cn_final);
+        m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/false);
         charges = m_gfnff->getLastCharges();
         m_gpu_workspace->setEEQCharges(charges);
     } else {

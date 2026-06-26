@@ -182,6 +182,12 @@ private:
     double m_eeq_pcg_tolerance  = 1e-10;   ///< convergence tolerance on |r|
     int    m_eeq_pcg_threshold  = 500;     ///< Auto strategy: PCG for N>=this (else cholesky)
 
+    // Deliverable 3 (Jun 2026): fragment count at/above which the device EEQ solve is
+    // replaced by the exact CPU PCG/block-Jacobi solver. The device path does a dense
+    // N x N Cholesky for nfrag>1 (O(N^3), intractable for solvent boxes); the CPU PCG is
+    // O(N^2 k) and exact. 0 = always use the device solve. From eeq_rocm_cpu_fragment_threshold.
+    int    m_eeq_cpu_fragment_threshold = 16;
+
     int  m_calc_count = 0;  ///< counts calculateEnergy() calls; first 5 always print timing
 
     /**

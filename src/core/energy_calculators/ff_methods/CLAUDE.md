@@ -659,7 +659,13 @@ std::string method = "d4";  // Matches Fortran reference
   (`cuda/eeq_solver_gpu.cu`); wired into the factor-dominated paths (solve / solveWithDeviceRHS
   / GPU-Schur nfrag=1), auto-falls back to FP64 dpotrf/LU when the FP32 factor is not SPD;
   nfrag>1 general path stays FP64. Validated GTX 1660: triose nfrag=1 SPD 41-step MD
-  bit-identical to FP64. Win needs a large nfrag=1 SPD system (unmeasured). ROCm mirror pending.
+  bit-identical to FP64. Win needs a large nfrag=1 SPD system (unmeasured).
+- **ROCm mirror DONE (Jun 2026, opt-in default OFF)**: `mixedFactorHip`/`mixedSolveRefineHip` +
+  `k_cast_d2f_hip`/`k_cast_f2d_hip`/`k_axpy_f2d_hip` in `rocm/eeq_solver_hip.hiph` (rocSOLVER
+  `spotrf`/`spotrs` + rocBLAS `dsymm`), gated to nfrag<=1 in `eeqBuildFactorSolve`, auto-falls
+  back to FP64 dpotrf/LU when the FP32 factor is not SPD. Wired in `gfnff_hip_method.cpp`.
+  Validated Radeon 890M: caffeine + 231-atom `complex` single-point energy and caffeine
+  8-step opt trajectory bit-identical to the FP64 ROCm path.
 
 ### ✅ WP-A — on-device D4 dispersion pair build (CUDA, Jun 2026)
 - Opt-in `-gfnff.gpu_disp_pairs_on_device` (default OFF): `k_disp_pairs_count`/`k_disp_pairs_build`
@@ -668,7 +674,22 @@ std::string method = "d4";  // Matches Fortran reference
   the host O(N²) `GenerateDispersionPairsNative` loop. Energy + MD gradient bit-identical to the
   host list (complex/water_1002/mixed_3007 |dE|=0). **Honest: no measured speedup** (mixed_3007 SP
   5.99 s host == device — D4 gen is not the bottleneck, Lever 1/HB list is); a residency/correctness
-  milestone. See [docs/GFNFF_PERFORMANCE_LEVERS.md](../../../../docs/GFNFF_PERFORMANCE_LEVERS.md). ROCm mirror pending.
+  milestone. See [docs/GFNFF_PERFORMANCE_LEVERS.md](../../../../docs/GFNFF_PERFORMANCE_LEVERS.md).
+- **ROCm mirror DONE (Jun 2026, opt-in default OFF)**: `k_disp_pairs_count`/`k_disp_pairs_build`
+  + `FFWorkspaceHip::generateDispersionPairListOnGPU` in `gfnff_rocm.hip`; ROCm additionally
+  **rebuilds the per-atom CSR adjacency** (`k_dispersion_gather`) from the device-built pair
+  list (no CUDA precedent). `setSkipHostDispPairs` + the device build wired in
+  `gfnff_hip_method.cpp`. Validated Radeon 890M: caffeine + 231-atom `complex` energy and
+  caffeine 8-step opt trajectory bit-identical to the host-built ROCm path.
+
+### ✅ EEQ many-fragment routing — exact CPU PCG (ROCm, Jun 2026)
+- For `nfrag >= eeq_rocm_cpu_fragment_threshold` (PARAM, default 16) the ROCm EEQ dispatch
+  routes to the **exact CPU PCG + block-Jacobi + warm-start** solver (`prepareCNAndEEQ` after
+  `finalizeCNForCPU`), instead of the dense N×N device Cholesky (O(N^3), intractable for
+  solvent boxes; the device PCG/batched/general-Schur variants are stubbed on ROCm). Closes
+  the device-vs-CPU divergence for many-fragment systems. Validated: water8_cluster (nfrag=8,
+  threshold lowered to 4) opt trajectory matches the pure-CPU `-gpu none` reference (the device
+  path is the divergent one). Device-resident HIP PCG/block-Jacobi remains the open follow-up.
 
 ### ⚠️ Known Issues
 - gfnff GPU validation tests (test_gfnff_gpu) fail with JSON null error — pre-existing, unrelated to pipeline

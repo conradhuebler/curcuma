@@ -243,6 +243,28 @@ Separate from the native xTB ROCm path above; mirrors the CUDA GFN-FF GPU pipeli
   on the `USE_D4=OFF` build. So the ROCm GFN-FF runs **true-D4 GFN-FF** and matches the CPU (same
   generator). The earlier "free-atom fallback / not-true-D4" note was wrong — `generateFreeAtomDispersion()`
   is only reached if D4 construction throws.
-- **NOT done / honest**: untested — MD long-run stability, multi-fragment charge systems beyond
-  the small set, discrete/CDNA GPUs (the warp reduction is wave32-only — see roadmap), and the
-  device-resident EEQ Schur (CUDA has it; ROCm uses rocSOLVER + host Schur by design).
+- **Opt-in GPU flags mirrored from CUDA (Jun 2026, default OFF)**:
+  - `-gfnff.eeq_mixed_precision` (**WP-B**): FP32 `rocsolver_spotrf` factor + FP64 iterative
+    refinement (FP64 residual via `rocblas_dsymm`, FP32 `spotrs` correction, dsposv pattern) for
+    full FP64 accuracy at a fraction of the FP64-factor cost on FP64-weak RDNA. `mixedFactorHip`/
+    `mixedSolveRefineHip` + `k_cast_d2f_hip`/`k_cast_f2d_hip`/`k_axpy_f2d_hip` in
+    `eeq_solver_hip.hiph`; gated to nfrag<=1 in `eeqBuildFactorSolve`, auto-falls back to FP64
+    dpotrf/LU when the FP32 factor is not SPD. `eeq_mixed_precision_iters` (default 2).
+  - `-gfnff.gpu_disp_pairs_on_device` (**WP-A**): two-pass on-device D4 dispersion pair build
+    (`k_disp_pairs_count`/`k_disp_pairs_build` + `generateDispersionPairListOnGPU`) replacing the
+    host O(N²) loop + upload; ROCm additionally **rebuilds the per-atom CSR adjacency** for
+    `k_dispersion_gather` from the device list (no CUDA precedent). Both bit-identical to the host/
+    FP64 ROCm path on caffeine + 231-atom `complex` (energy + opt). Neither is a measured SP
+    speedup (residency/correctness milestones — same as CUDA).
+- **Many-fragment EEQ → exact CPU PCG** (`-gfnff.eeq_rocm_cpu_fragment_threshold`, default 16):
+  for `nfrag >= threshold` (solvent boxes) the dispatch routes to the exact CPU PCG+block-Jacobi
+  +warm-start solver (`finalizeCNForCPU` then `prepareCNAndEEQ`) instead of the dense N×N device
+  Cholesky (O(N³), intractable; the device PCG/batched/general-Schur variants are stubbed). This
+  also fixes the device-vs-CPU charge divergence for multi-fragment systems: water8_cluster
+  (threshold 4) opt now tracks the pure-CPU `-gpu none` reference (the device path was the
+  divergent one). Set 0 to force the device solve.
+- **NOT done / honest**: untested — MD long-run stability, very large solvent boxes (no such
+  molecule in the test tree; only correctness CPU==ROCm is CI-checkable), discrete/CDNA GPUs (the
+  warp reduction is wave32-only — see roadmap), and the **device-resident HIP EEQ PCG/block-Jacobi**
+  (CUDA has WP7-D; ROCm uses the exact CPU PCG routing above — the device-resident port is the open
+  follow-up).

@@ -88,9 +88,13 @@ GPU idle — that was a broken build, not representative. The 30 s figure is the
   **Validated (GTX 1660, 1/32 FP64): triose nfrag=1 SPD 41-step MD bit-identical to FP64.**
   Honest: the factor-dominated wall-time win needs a LARGE nfrag=1 SPD system (the available GPU
   GFN-FF set lacks one: triose tiny, polymer indefinite→LU, mixtures multi-frag); win expected
-  but not yet measured. **ROCm mirror pending** (no hipcc here; use rocsolver Spotrf/Spotrs +
-  rocblas_dsymm, same hand-rolled SPD IR). Pairwise FF energy/gradient terms remain a poorer
-  candidate (FP32 risks the 1e-6 Eh goal).
+  but not yet measured. **ROCm mirror DONE (Jun 2026)**: `mixedFactorHip`/`mixedSolveRefineHip`
+  + `k_cast_d2f_hip`/`k_cast_f2d_hip`/`k_axpy_f2d_hip` in `rocm/eeq_solver_hip.hiph` (rocSOLVER
+  `spotrf`/`spotrs` + rocBLAS `dsymm`, same hand-rolled SPD iterative refinement), gated to
+  nfrag<=1 in `eeqBuildFactorSolve`, opt-in via `-gfnff.eeq_mixed_precision` (default OFF on ROCm
+  too); Radeon 890M caffeine + 231-atom `complex` energy and caffeine opt bit-identical to the
+  FP64 ROCm path. Pairwise FF energy/gradient terms remain a poorer candidate (FP32 risks the
+  1e-6 Eh goal).
 
 ### WP-5 🟢 IDEAS — bigger GPU levers (newer cards / HPC)
 - **Tensor-core GEMM (TF32/FP16)** for the non-eigensolve BLAS (Fock build, density C·Cᵀ,

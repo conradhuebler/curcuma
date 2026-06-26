@@ -3111,6 +3111,144 @@ __global__ void k_dc6dcn_per_pair(
 }
 
 // ============================================================================
+// WP-A (Jun 2026): on-device D4 dispersion pair-list build (HIP port of
+// cuda/gfnff_kernels.cu k_disp_pairs_count / k_disp_pairs_build). Reference target
+// (bit-identical up to FP order of the host Gaussian weights):
+//   d4param_generator.cpp:GenerateDispersionPairsNative + getChargeWeightedC6
+//   GFNFFParameters::zetaChargeScale (gfnff_par.h)
+// ============================================================================
+
+/// Device port of GFNFFParameters::zetaChargeScale. Caller passes per-element zeff/c;
+/// Z out of [1,86] -> 1.0 at the call site.
+__device__ inline double zetaChargeScaleDev(double zeff, double c, double q)
+{
+    double qmod = zeff + q;
+    if (qmod < 0.0) return exp(3.0);            // highly anionic -> max zeta
+    return exp(3.0 * (1.0 - exp(c * (1.0 - zeff / qmod))));
+}
+
+/// Map a linear upper-triangle index tid -> (i,j), i<j.
+__device__ inline void dispPairFromTid(int tid, int N, int& i, int& j)
+{
+    i = static_cast<int>((2.0 * N - 1.0 - sqrt((2.0 * N - 1.0) * (2.0 * N - 1.0) - 8.0 * tid)) * 0.5);
+    while (i > 0 && i * (2 * N - i - 1) / 2 > tid) --i;
+    while (i + 1 < N && (i + 1) * (2 * N - (i + 1) - 1) / 2 <= tid) ++i;
+    j = tid - i * (2 * N - i - 1) / 2 + i + 1;
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_count(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_sq,
+    int*          d_count)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int n_total = N * (N - 1) / 2;
+    if (tid >= n_total) return;
+
+    int i, j;
+    dispPairFromTid(tid, N, i, j);
+    if (j >= N) return;
+
+    int zi = atom_types[i];
+    int zj = atom_types[j];
+    if (zi < 1 || zi > D4_MAX_ELEM || zj < 1 || zj > D4_MAX_ELEM) return;
+
+    double dx = cx[i] - cx[j];
+    double dy = cy[i] - cy[j];
+    double dz = cz[i] - cz[j];
+    double r2 = dx * dx + dy * dy + dz * dz;
+    if (r2 > cutoff_sq) return;
+
+    atomicAdd(d_count, 1);
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_sq,
+    const double* __restrict__ gw,
+    const double* __restrict__ c6_flat,
+    const double* __restrict__ sqrtzr4r2,
+    const double* __restrict__ topo_q,
+    const double* __restrict__ zeta_zeff,
+    const double* __restrict__ zeta_c,
+    double        a1,
+    double        a2,
+    int*          d_counter,
+    int*          out_i,
+    int*          out_j,
+    double*       out_C6,
+    double*       out_r4r2,
+    double*       out_r0sq,
+    double*       out_zeta,
+    double*       out_rcut)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int n_total = N * (N - 1) / 2;
+    if (tid >= n_total) return;
+
+    int i, j;
+    dispPairFromTid(tid, N, i, j);
+    if (j >= N) return;
+
+    int zi = atom_types[i];
+    int zj = atom_types[j];
+    if (zi < 1 || zi > D4_MAX_ELEM || zj < 1 || zj > D4_MAX_ELEM) return;
+
+    double dx = cx[i] - cx[j];
+    double dy = cy[i] - cy[j];
+    double dz = cz[i] - cz[j];
+    double r2 = dx * dx + dy * dy + dz * dz;
+    if (r2 > cutoff_sq) return;
+
+    // C6 = Σ_{ri,rj} gw_i[ri]·gw_j[rj]·c6ref  (== getChargeWeightedC6, CN-only weighting)
+    int ei = zi - 1, ej = zj - 1;
+    int nri = d_refn_const[ei];
+    int nrj = d_refn_const[ej];
+    size_t c6_base = (size_t)ei * D4_MAX_ELEM * D4_MAX_REF * D4_MAX_REF
+                   + (size_t)ej * D4_MAX_REF * D4_MAX_REF;
+    int gi = i * D4_MAX_REF;
+    int gj = j * D4_MAX_REF;
+    double c6 = 0.0;
+    for (int ri = 0; ri < nri; ++ri) {
+        double wi = gw[gi + ri];
+        size_t b = c6_base + (size_t)ri * D4_MAX_REF;
+        for (int rj = 0; rj < nrj; ++rj) {
+            double c6ref = c6_flat[b + rj];
+            if (fabs(c6ref) < 1e-20) continue;
+            c6 += wi * gw[gj + rj] * c6ref;
+        }
+    }
+
+    double si = sqrtzr4r2[ei];
+    double sj = sqrtzr4r2[ej];
+    double r4r2ij = 3.0 * si * sj;
+    double t = a1 * sqrt(r4r2ij) + a2;
+    double r0_sq = t * t;
+
+    double qi = topo_q[i];
+    double qj = topo_q[j];
+    double zsi = (zi >= 1 && zi <= 86) ? zetaChargeScaleDev(zeta_zeff[zi - 1], zeta_c[zi - 1], qi) : 1.0;
+    double zsj = (zj >= 1 && zj <= 86) ? zetaChargeScaleDev(zeta_zeff[zj - 1], zeta_c[zj - 1], qj) : 1.0;
+
+    int slot = atomicAdd(d_counter, 1);
+    out_i[slot]    = i;
+    out_j[slot]    = j;
+    out_C6[slot]   = c6;
+    out_r4r2[slot] = r4r2ij;
+    out_r0sq[slot] = r0_sq;
+    out_zeta[slot] = zsi * zsj;
+    out_rcut[slot] = 50.0;  // D4 pair-energy cutoff (struct default, matches host)
+}
+
+// ============================================================================
 // Utility: zero device array
 // ============================================================================
 
@@ -4441,6 +4579,14 @@ struct FFWorkspaceHipImpl {
     // Uploaded via upload_refn_const() / upload_refcn_const() at init
     bool               dc6dcn_gpu_ready = false; ///< true after C6 table + refn uploaded
 
+    // WP-A (Jun 2026): on-device D4 dispersion pair-list build buffers
+    CudaBuffer<double> d_sqrtzr4r2;        ///< [118] sqrt(Z·r4/r2) per element
+    CudaBuffer<double> d_topo_q;           ///< [N] Phase-1 topology charges (for zetac6)
+    CudaBuffer<double> d_zeta_zeff;        ///< [86] zeta zeff per element
+    CudaBuffer<double> d_zeta_c;           ///< [86] zeta c per element
+    CudaBuffer<int>    d_disp_pair_counter; ///< [1] atomic counter for the two-pass build
+    bool               disp_built_on_gpu = false; ///< true when disp SoA was device-built
+
     // Diagnostic snapshot buffers (GPU-side, no pipeline stall)
     // Claude Generated (March 2026): Device-to-device copy instead of sync+download
     CudaBuffer<double> d_dEdcn_snapshot;   ///< [N] copy of dEdcn before qtmp
@@ -5387,6 +5533,141 @@ void FFWorkspaceHip::uploadRefCN(const std::vector<std::vector<double>>& refcn)
 
     // Upload to constant memory (Phase 8: L1-broadcast instead of global memory load)
     upload_refcn_const(refcn_flat.data(), flat_size);
+}
+
+// ============================================================================
+// WP-A (Jun 2026): on-device D4 dispersion pair-list build. HIP mirror of
+// FFWorkspaceGPU::generateDispersionPairListOnGPU (cuda/ff_workspace_gpu.cu).
+// Replaces the host O(N^2) GenerateDispersionPairsNative loop + the per-build H2D
+// upload of the pair SoA. ROCm-specific extra step: rebuild the per-atom CSR
+// adjacency (k_dispersion_gather) from the device-built pair list.
+// ============================================================================
+
+void FFWorkspaceHip::generateDispersionPairListOnGPU(
+    const std::vector<double>& gw_flat,
+    const std::vector<double>& sqrtzr4r2,
+    const std::vector<double>& topo_charges,
+    double a1, double a2, double cutoff_bohr)
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    if (N <= 0) return;
+    if (!impl.dc6dcn_gpu_ready) {
+        if (CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::warn("GPU disp pair build skipped: C6 reference table not uploaded");
+        return;
+    }
+
+    // Use the HOST Gaussian weights (the same m_gaussian_weights getChargeWeightedC6
+    // uses) for the C6 contraction so the result is bit-identical to the host list.
+    // gw_flat is laid out [atom*D4_MAX_REF + ref], zero-padded to D4_MAX_REF.
+    if (static_cast<int>(gw_flat.size()) >= N * D4_MAX_REF)
+        impl.d_gw.upload(gw_flat.data(), N * D4_MAX_REF);
+
+    // Upload the element/atom tables the build kernel needs.
+    impl.d_sqrtzr4r2.upload(sqrtzr4r2.data(), static_cast<int>(sqrtzr4r2.size()));
+    impl.d_zeta_zeff.upload(GFNFFParameters::zeta_zeff.data(),
+                            static_cast<int>(GFNFFParameters::zeta_zeff.size()));
+    impl.d_zeta_c.upload(GFNFFParameters::zeta_c.data(),
+                         static_cast<int>(GFNFFParameters::zeta_c.size()));
+    {
+        std::vector<double> q(N, 0.0);
+        for (int i = 0; i < N && i < static_cast<int>(topo_charges.size()); ++i)
+            q[i] = topo_charges[i];
+        impl.d_topo_q.upload(q.data(), N);
+    }
+
+    if (!impl.d_disp_pair_counter.ptr) impl.d_disp_pair_counter.alloc(1);
+
+    const double cutoff_sq = cutoff_bohr * cutoff_bohr;
+    const int n_total = N * (N - 1) / 2;
+    LaunchConfig cfg = getLaunchConfig(n_total, m_block_size);
+
+    // Pass 1: count surviving pairs.
+    int h_count = 0;
+    impl.d_disp_pair_counter.upload(&h_count, 1);
+    k_disp_pairs_count<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.d_atom_types.ptr, cutoff_sq, impl.d_disp_pair_counter.ptr);
+    checkCuda(hipStreamSynchronize(impl.stream), "k_disp_pairs_count sync");
+    impl.d_disp_pair_counter.download(&h_count, 1);
+    checkCuda(hipStreamSynchronize(impl.stream), "download disp pair count");
+
+    // (Re)allocate the DispersionSoA to the device-counted pair count.
+    impl.disp.n = h_count;
+    impl.disp.idx_i.alloc(h_count);
+    impl.disp.idx_j.alloc(h_count);
+    impl.disp.C6.alloc(h_count);
+    impl.disp.r4r2ij.alloc(h_count);
+    impl.disp.r0_sq.alloc(h_count);
+    impl.disp.zetac6.alloc(h_count);
+    impl.disp.r_cut.alloc(h_count);
+    impl.disp.dc6dcn_ij.alloc(h_count);
+    impl.disp.dc6dcn_ji.alloc(h_count);
+
+    if (h_count == 0) {
+        impl.disp_built_on_gpu = true;
+        m_disp_idx_i_host.clear();
+        m_disp_idx_j_host.clear();
+        impl.disp.csr_N = N;
+        return;
+    }
+
+    // Pass 2: write idx + per-pair static data (C6 contraction, r4r2ij, R0², zetac6).
+    int h_zero = 0;
+    impl.d_disp_pair_counter.upload(&h_zero, 1);
+    k_disp_pairs_build<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.d_atom_types.ptr, cutoff_sq,
+        impl.d_gw.ptr, impl.d_c6_flat.ptr,
+        impl.d_sqrtzr4r2.ptr, impl.d_topo_q.ptr,
+        impl.d_zeta_zeff.ptr, impl.d_zeta_c.ptr,
+        a1, a2,
+        impl.d_disp_pair_counter.ptr,
+        impl.disp.idx_i.ptr, impl.disp.idx_j.ptr,
+        impl.disp.C6.ptr, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr,
+        impl.disp.zetac6.ptr, impl.disp.r_cut.ptr);
+    checkCuda(hipStreamSynchronize(impl.stream), "k_disp_pairs_build sync");
+
+    // Keep the host idx mirror consistent (CPU dc6dcn fallback / displacement consumers
+    // AND the CSR rebuild below). One download per build (topology-change frequency).
+    m_disp_idx_i_host.resize(h_count);
+    m_disp_idx_j_host.resize(h_count);
+    impl.disp.idx_i.download(m_disp_idx_i_host.data(), h_count);
+    impl.disp.idx_j.download(m_disp_idx_j_host.data(), h_count);
+    checkCuda(hipStreamSynchronize(impl.stream), "download disp idx mirror");
+
+    // ROCm-specific: rebuild the per-atom CSR adjacency for k_dispersion_gather from the
+    // device-built pair list — identical arithmetic to DispersionSoA::upload. The dynamic
+    // dc6dcn arrays stay pair-indexed; csr_pairidx/csr_is_i index them per directed edge.
+    {
+        const int n = h_count;
+        const std::vector<int>& hi = m_disp_idx_i_host;
+        const std::vector<int>& hj = m_disp_idx_j_host;
+        impl.disp.csr_N = N;
+        std::vector<int> deg(N, 0);
+        for (int k = 0; k < n; ++k) { ++deg[hi[k]]; ++deg[hj[k]]; }
+        std::vector<int> off(N + 1, 0);
+        for (int a = 0; a < N; ++a) off[a + 1] = off[a] + deg[a];
+        const int tot = off[N];                            // == 2*n
+        std::vector<int> h_part(tot), h_pidx(tot), h_isi(tot);
+        std::vector<int> cur(off.begin(), off.end() - 1);
+        for (int k = 0; k < n; ++k) {
+            const int i = hi[k], j = hj[k];
+            int pi = cur[i]++; h_part[pi] = j; h_pidx[pi] = k; h_isi[pi] = 1;
+            int pj = cur[j]++; h_part[pj] = i; h_pidx[pj] = k; h_isi[pj] = 0;
+        }
+        impl.disp.csr_off.upload(off, impl.stream);
+        impl.disp.csr_partner.upload(h_part, impl.stream);
+        impl.disp.csr_pairidx.upload(h_pidx, impl.stream);
+        impl.disp.csr_is_i.upload(h_isi, impl.stream);
+    }
+
+    impl.disp_built_on_gpu = true;
+
+    if (CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::info(fmt::format(
+            "  GPU D4 dispersion pair list: {} pairs built on GPU + CSR rebuilt for gather", h_count));
 }
 
 // ============================================================================

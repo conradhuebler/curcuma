@@ -119,7 +119,13 @@ S = hours, M = day, L = multi-day.
 >   list (complex/water_1002/mixed_3007 |dE|=0; pair count exact). **Honest: NO measured speedup**
 >   — mixed_3007 SP wall is 5.99 s host == 5.99 s device; D4 generation is not on the critical
 >   path (Lever 1 / HB list dominates). It is a GPU-residency/correctness milestone (avoids the
->   host roundtrip on MD topology rebuilds), default OFF. The ROCm mirror is pending.
+>   host roundtrip on MD topology rebuilds), default OFF. **ROCm mirror DONE (Jun 2026)**:
+>   `generateDispersionPairListOnGPU` in `gfnff_rocm.hip` + a ROCm-only rebuild of the
+>   `k_dispersion_gather` per-atom CSR from the device-built pair list; bit-identical to the
+>   host-built ROCm path on caffeine + 231-atom `complex` (energy + opt). The `-gfnff.eeq_mixed_precision`
+>   (WP-B) ROCm mirror is also done (rocSOLVER `spotrf`/`spotrs` + rocBLAS `dsymm`, opt-in default
+>   OFF). Separately, ROCm routes `nfrag >= -gfnff.eeq_rocm_cpu_fragment_threshold` (default 16,
+>   solvent boxes) to the exact CPU PCG instead of the intractable dense N×N device Cholesky.
 
 **Lever 1 (HB candidate generation).** It is ~33 % of single-point wall on a dense
 H-bonding liquid, it is the same cost every MD step (HB list is rebuilt on geometry

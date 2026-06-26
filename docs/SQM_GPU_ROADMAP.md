@@ -23,7 +23,7 @@ and is correct at every step. Stage numbers below match the CUDA stages in
 | 2b GFN2 device-resident multipole SCF | ✅ | ✅ (R-AP2) | ✅ (V-AP3) |
 | 4m nuclear gradient on device — GFN2 multipole | ✅ | ❌ **R-AP3** | ❌ **V-AP4** |
 | 5/6 device GFN2 potential + fully resident loop | ✅ | ❌ **R-AP4** (opt) | ❌ **V-AP5** (opt) |
-| GFN-FF on the GPU | ✅ (full) | ✅ energy+grad (June 2026); EEQ = rocSOLVER `dpotrf`/`dgetrf` + host CPU-Schur (device GPU-Schur/PCG not ported) | ❌ **V-AP6** |
+| GFN-FF on the GPU | ✅ (full) | ✅ energy+grad (June 2026); EEQ = rocSOLVER `dpotrf`/`dgetrf` + host CPU-Schur; +WP-A/WP-B mirrors + many-frag→CPU-PCG routing (June 26); device PCG/block-Jacobi not ported | ❌ **V-AP6** |
 | in-SCF solvation (ALPB/GBSA) on device | ✅ | ❌ **X-AP1** | ❌ **X-AP1** |
 
 **Summary:** Vulkan now matches ROCm/CUDA on the full GFN1 stack — integrals, resident
@@ -216,8 +216,17 @@ rocBLAS/rocSOLVER cover the dense linear algebra and the isotropic `.hiph` alrea
 ### R-AP4 — (optional) device GFN2 potential + fully resident loop (Stage 5/6)
 - Same correctness-not-speed caveat as V-AP5. Defer.
 
-### R-AP5 — GFN-FF on ROCm
-- Same scope as V-AP6; the HIP route can reuse rocBLAS for the dense pieces.
+### R-AP5 — GFN-FF on ROCm — ✅ core DONE (energy+grad June 2026; WP-A/WP-B/many-frag June 26)
+- Energy + nuclear gradient + EEQ (rocSOLVER `dpotrf`/`dgetrf` + host CPU-Schur) shipped June 2026.
+- **WP-B mirror** (`-gfnff.eeq_mixed_precision`, opt-in default OFF): FP32 `rocsolver_spotrf` +
+  FP64 iterative refinement (`rocblas_dsymm` residual), `mixedFactorHip`/`mixedSolveRefineHip` in
+  `eeq_solver_hip.hiph`, gated to nfrag<=1.
+- **WP-A mirror** (`-gfnff.gpu_disp_pairs_on_device`, opt-in default OFF): on-device two-pass D4
+  pair build + a ROCm-only `k_dispersion_gather` CSR rebuild from the device list.
+- **Many-fragment EEQ** (`-gfnff.eeq_rocm_cpu_fragment_threshold`, default 16): routes solvent-box
+  nfrag to the exact CPU PCG+block-Jacobi (the device path was O(N³) and CPU-divergent).
+- **Open follow-up**: device-resident HIP EEQ PCG/block-Jacobi (CUDA WP7-D) so high-fragment EEQ
+  stays on the GPU instead of the CPU-PCG routing.
 
 ---
 

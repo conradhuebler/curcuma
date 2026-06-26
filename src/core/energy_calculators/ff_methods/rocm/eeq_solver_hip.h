@@ -42,6 +42,21 @@ public:
     EEQSolverHip& operator=(const EEQSolverHip&) = delete;
 
     /**
+     * @brief WP-B (Jun 2026): opt-in FP32-factor + FP64-refine mixed-precision solve.
+     *
+     * dsposv pattern: rocsolver_spotrf on an FP32 copy of the EEQ Coulomb matrix
+     * (the FP64 d_A is kept intact for the residual), FP32 rocsolver_spotrs, then
+     * FP64 residual (rocblas_dsymm) + FP32 correction, refine_iters steps → full FP64
+     * accuracy at a fraction of the FP64-factor cost on FP64-weak (RDNA) cards.
+     * Applies only to the factor-dominated few-fragment solve (nfrag<=1); the FP32
+     * factor auto-falls back to FP64 dpotrf/LU when the matrix is not SPD.
+     *
+     * @param enabled       Turn the mixed-precision path on/off.
+     * @param refine_iters  FP64-residual / FP32-correction steps (clamped to >=1, default 2).
+     */
+    void setMixedPrecision(bool enabled, int refine_iters = 2);
+
+    /**
      * @brief Build N×N Coulomb matrix on GPU + Cholesky solve via cuSOLVER.
      *
      * @param natoms           Number of atoms N
