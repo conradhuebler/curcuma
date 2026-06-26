@@ -61,6 +61,7 @@ upstream guard not shown in the snippet.
 | F-G2 | `gfnff_method.cpp` repulsion grad | medium | `ff_methods/CLAUDE.md` table marks bonded repulsion gradient "⚠️ Partial" but `Calculation()` returns a gradient including repulsion with no runtime guard. `-opt` users get a knowingly-incomplete gradient silently. Finish or one-time-warn. |
 | F-E9 | `gfnff_method.cpp:4761,4776,5025` | low | `static bool/int` debug counters shared across instances/threads. Race under molecule-level CxxThreadPool parallelism. Remove / promote to members. |
 | F-Q5 | `gfnff_method.cpp:9136–9141` | medium | `std::ofstream("gfnff_diag_charges.json")` to CWD at verbosity 3 — BMT/outputPath violation (CLAUDE.md mandate). Route through `BMTUtils::outputPath()`. |
+| F-Q9 | `GFNFFGPUComputationalMethod` / `GFNFFHipComputationalMethod` `m_gpu_params_leaked` | medium | Intentional one-time leak (~100 KB) of `GFNFFParameterSet*` — freeing it corrupts adjacent CUDA heap metadata (`FFWorkspaceGPU` allocations). Root cause (CUDA driver heap corruption) uninvestigated. Same class of workaround as D-26 `copyGradientTo`. Fix the heap issue at source, then free properly. (Merged from the energy-system architecture audit.) |
 
 ---
 
@@ -164,6 +165,8 @@ upstream guard not shown in the snippet.
 | X-M6 | `xtb_method.cpp:88` | low | `isThreadSafe()==true` unsubstantiated (libxtb may have module globals). Verify/cite or return false. |
 | X-M7 | `native_xtb_method.cpp:197` | low | Explicit `QMInterface::` scope bypasses virtual dispatch. Comment why. |
 | X-M8 | `xtb_fragment_scf.cpp:35–42,54–58`, `native_xtb_method.cpp:113–134` | medium | Scoped-config fallback pattern hand-written 5×. Expose `getScoped(key, fallback)`. |
+| X-P1 | `XtbGpuComputationalMethod` / `XtbHipComputationalMethod` / `XtbVulkanComputationalMethod` | medium | GPU wrappers for native GFN-xTB are **Stage-0 pass-throughs**: they own a GPU context but forward every call to the wrapped CPU `NativeXtbMethod`. `-gpu cuda/rocm/vulkan` for native GFN-xTB therefore does **not** accelerate the hot path (device-resident SCF not wired). Document to users or complete. (Merged from the energy-system architecture audit.) |
+| X-P2 | `xtb_gradient.cpp:16` (AP5 TODO) | medium | GFN2 analytical gradient has an unimplemented **integral Pulay term** (multipole integral derivatives × v_dp/v_qp). Gradient may be incomplete until added and FD-validated; impact on GFN2 force accuracy unquantified. (Merged from the energy-system architecture audit.) |
 
 ---
 
@@ -242,6 +245,7 @@ upstream guard not shown in the snippet.
 | Q-56 | all wrappers | medium | `#ifdef USE_*` `#else` branches return zeros/false — a build without the dep silently returns zero energies rather than failing at MethodFactory. Mixed responsibility. |
 | Q-57 | all interfaces | low | Every interface stores `mutable ConfigManager m_config;` mutated in const getters — smell; mutability works around const-correctness gaps in `ConfigManager::get`. |
 | Q-58 | interfaces | medium | Verbosity plumbing inconsistent: XTB sets in `Calculation`, TBLite in ctor+`Calculation` (redundant), Ulysses passes a binary `>=3` bool (loses levels 1/2), EHT uses CurcumaLogger directly, ORCA passes the int. No single pattern. |
+| Q-59 | `nddo_method.cpp` | medium | `NDDOMethod` is a thin incomplete wrapper: `setParameters()` no-op, `getParameters()` returns empty JSON, `hasError()` always `false`, `setThreadCount()` no-op. Parameter registry and error reporting not wired through. (Merged from the energy-system architecture audit.) |
 
 ---
 
@@ -316,6 +320,7 @@ upstream guard not shown in the snippet.
 | D-43 | `method_factory.cpp:56,58` | low | `#include <iostream>` unused after fmt migration. |
 | D-44 | multiple | low | "Claude Generated: Big-Bang refactoring" tag in `energycalculator.h:18`, `computational_method.h:41`, `method_factory.h:41`, `method_factory.cpp:391`. Drop "Big-Bang" prefix, keep "Claude Generated". |
 | D-45 | `method_factory.cpp:393–397` | low | ADR comment still says "Priority for GFN2: TBLite > Ulysses > XTB > Native" — AP3 made native canonical. Update the ADR. |
+| D-46 | `energycalculator.cpp` `Gradient()` | low | `Gradient()` returns `const Matrix&` (not a copy) explicitly to avoid the CUDA heap-allocation corruption — callers must not hold the ref past the next calculation. API constrained by the same GPU heap issue as D-26 / F-Q9. Fix at source. (Merged from the energy-system architecture audit.) |
 
 ---
 
@@ -340,6 +345,14 @@ Implication for the debt items above: correctness bugs in the legacy interfaces
 Q-11 Ulysses HOMO) are worth fixing only insofar as they keep the **verification
 harness** working — they are not user-facing production paths. TBLite is the
 exception: treat its interface as maintained.
+
+**Build-flag naming trap (merged from the energy-system audit):** `USE_GFNFF`
+controls the **external** C/Fortran GFN-FF interface (`ExternalGFNFFMethod`),
+*not* the native `gfnff` (which is always available). The flag name suggests
+it enables GFN-FF in general — a common confusion. Likewise the GPU flag
+matrix (`USE_CUDA`/`USE_CUDA_XTB`, `USE_ROCM`/`USE_ROCM_XTB`/`USE_ROCM_GFNFF`,
+`USE_VULKAN`/`USE_VULKAN_XTB`) lets you enable a GPU framework without the
+matching method backend → silent CPU fallback at runtime (cf. D-11, X-P1).
 
 ---
 
@@ -388,3 +401,4 @@ Correctness / crash / UB first, then maintainability. "v" = spot-verified by re-
 - Every finding cites a `file:line`; the 11 marked **verified** were re-read directly before being recorded as fact, per the project's "show proof, don't assert" rule.
 - Native xTB and GFN-FF GPU-kernel internals were deliberately **not** audited (out of scope); only CPU-path / `#ifdef`-leak / non-GPU debt there.
 - This is documentation only — no fixes applied. Each row's "suggested fix" is a one-line pointer, not a reviewed patch.
+- **2026-06-26 merge:** the separate architecture audit `TECHNICAL_DEBT_ENERGY_SYSTEM.md` was folded in here — its new findings became F-Q9, X-P1, X-P2, Q-59, D-46, and the section-5 build-flag note; everything else it raised was already covered above (Q-38 include path, D-26 copyGradientTo, D-24 interface bloat, D-18/D-19/D-20, D-2/D-3/D-15, F-W1, X-M5). That file was deleted after the merge.
