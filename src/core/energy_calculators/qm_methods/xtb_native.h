@@ -495,6 +495,11 @@ struct GpuScfBackend {
      * converged charges once at the end (finalize() still downloads P/C). Default
      * false → the per-iteration host-driven loop. GFN2 device-potential path. */
     virtual bool supportsResidentLoop() const { return false; }
+    /* X-I1: true if the backend's device integral/SCF/gradient kernels handle d
+     * shells. Default false -> the XTB engine routes d systems to the CPU path
+     * (m_has_dshell gate). The CUDA backend overrides to true; ROCm/Vulkan keep
+     * the CPU fallback until their kernels are ported. Claude Generated. */
+    virtual bool supportsDshell() const { return false; }
     virtual bool beginResidentLoop(const Vector& q_sh0, const Eigen::MatrixXd& dp_at0,
                                    const Eigen::MatrixXd& qp_at0, const Vector& q_at0,
                                    const Vector& n0_sh, const Vector& n0_at,

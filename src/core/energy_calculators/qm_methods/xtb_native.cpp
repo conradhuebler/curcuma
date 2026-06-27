@@ -420,17 +420,20 @@ double XTB::Calculation(bool gradient)
     Matrix S, H0;
     bool gpu_computed = false;        // device integral build succeeded (reused below)
     bool integrals_from_device = false;
-    if (m_gpu_scf && m_has_dshell) {
-        // X-I1: the device integral/SCF/gradient kernels are s/p-only. Fall back to
-        // the validated CPU integral path for d systems (one-time notice).
+    // X-I1: device d kernels are backend-gated. CUDA supports them; ROCm/Vulkan
+    // do not yet, so for those d systems use the validated CPU integral/SCF/gradient
+    // path (atom-based D4/EEQ stay on device).
+    const bool gpu_d_ok = (m_gpu_scf && m_gpu_scf->supportsDshell());
+    if (m_gpu_scf && m_has_dshell && !gpu_d_ok) {
         static bool warned = false;
         if (!warned && verb >= 1) {
             warned = true;
             CurcumaLogger::warn("native xTB: d-shell system - integrals/SCF/gradient "
-                                "run on CPU (device d kernels pending); D4/EEQ stay on device");
+                                "run on CPU (device d kernels pending for this backend); "
+                                "D4/EEQ stay on device");
         }
     }
-    if (m_gpu_scf && m_scf_mode == ScfMode::Broyden && !m_has_dshell) {
+    if (m_gpu_scf && m_scf_mode == ScfMode::Broyden && (!m_has_dshell || gpu_d_ok)) {
         GpuBasisFlat gbf;
         GpuH0Flat    gh0;
         exportGpuBasis(gbf, gh0);
@@ -738,7 +741,7 @@ double XTB::Calculation(bool gradient)
     // GPU eigensolver hook (Stage 1) instead.
     bool use_gpu_resident = false;
     bool gpu_multipole    = false;
-    if (m_gpu_scf && mode == ScfMode::Broyden && !m_has_dshell
+    if (m_gpu_scf && mode == ScfMode::Broyden && (!m_has_dshell || m_gpu_scf->supportsDshell())
         && m_X.rows() == m_basis.nao && m_X.cols() == m_basis.nao) {
         // Stage 3: the device-computed integral build (beginBasis once + beginComputed
         // per geometry: CN/S/H0/L on the device, no nao² upload) was hoisted into the

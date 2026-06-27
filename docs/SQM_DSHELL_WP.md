@@ -22,11 +22,20 @@ NOT ✅ TESTED.
 - **B7** B0 guard removed (`xtb_native.cpp`); d molecules added to the `sqm_val_*` ctest
   suite (1e-8 gate); docs updated.
 
-## What is NOT tested / NOT done
-- **GPU device d kernels (B6).** The device integral/SCF/gradient kernels are still
-  s/p-only; `XTB::m_has_dshell` (set in `buildBasis`) routes d systems to the **CPU**
-  integral/SCF/gradient path (atom-based D4/EEQ stay on device). `-gpu` on a d molecule is
-  correct but CPU-speed. Device d kernels (CUDA/ROCm/Vulkan) remain a follow-up.
+## GPU device d kernels (B6)
+- **CUDA: implemented + validated (2026-06-27).** The device integral (overlap/H0/multipole)
+  + SCF + gradient kernels handle d via the same dtrafo (per-spherical-AO-element device
+  functions in `cuda/xtb_gpu_integrals_device.cuh`; 4 kernels in `xtb_gpu_context.cu`
+  branched on `la>=2||lb>=2`). Gated by `GpuScfBackend::supportsDshell()` (CUDA overrides
+  true). **Validated on a GTX 1660:** `-gpu cuda` energy **bit-identical to CPU** (H2S/PH3/
+  SiH4/HCl, gfn1+gfn2), device gradient vs CPU **~1e-16** (`test_xtb_cuda_gradient`), `-opt`
+  converges, s/p `gpu_gfn{1,2}_validation` 32/32 unchanged.
+- **ROCm/Vulkan: CPU fallback (device d kernels pending).** `supportsDshell()` stays false
+  for the HIP/Vulkan backends, so d systems use the validated CPU integral/SCF/gradient path
+  (atom-based D4/EEQ stay on device). Porting the device d kernels there is a mechanical
+  mirror of the CUDA ones (the HIP `.hiph` is a near-verbatim copy of the CUDA `.cuh`;
+  Vulkan needs GLSL shader work), but there is no AMD/Vulkan hardware+toolchain in this
+  environment to compile/validate them — deferred until that is available.
 - **Transition metals.** Enabled (guard removed) but **NOT validated** — no TM reference
   set; only main-group d (S/P/Cl/Si) was checked. Open-d SCF convergence is untested.
 - Precision floor: the validate_sqm gate parses the 8-dp printed energy (~1e-8 resolution),

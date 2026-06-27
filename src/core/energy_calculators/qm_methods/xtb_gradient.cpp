@@ -806,8 +806,9 @@ void XTB::calculateGradient()
  * ============================================================================ */
 bool XTB::calculateGradientGpu()
 {
-    // X-I1: s/p-only device gradient kernels -> CPU gradient for d systems.
-    if (!m_gpu_scf || !m_gpu_scf->supportsGradient() || m_has_dshell) return false;
+    // X-I1: d device gradient is backend-gated (CUDA yes; ROCm/Vulkan -> CPU).
+    if (!m_gpu_scf || !m_gpu_scf->supportsGradient()
+        || (m_has_dshell && !m_gpu_scf->supportsDshell())) return false;
     const int nat = m_atomcount;
     const int nao = m_basis.nao;
 
