@@ -1577,10 +1577,9 @@ int executeRMSD(const json& controller, int argc, char** argv) {
         }
         rmsd_result["permutation"] = permutation;
         rmsd_result["reference_xyz"] = driver->ReferenceAligned().XYZString();
-        // Use TargetAligned as fallback when reordering was skipped (TargetReorderd is empty)
-        rmsd_result["reorder_xyz"] = (driver->TargetReorderd().AtomCount() > 0)
-            ? driver->TargetReorderd().XYZString()
-            : driver->TargetAligned().XYZString();
+        // Geometry whose deviation equals RMSD() (reordered+aligned, or plain best-fit when
+        // no reorder ran). Same result as the old TargetReorderd()/TargetAligned() fallback.
+        rmsd_result["reorder_xyz"] = driver->TargetForRMSD().XYZString();
         rmsd_result["reference_file"] = reffile;
         rmsd_result["target_file"] = tarfile;
 

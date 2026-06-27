@@ -167,6 +167,16 @@ public:
      *  reordering ran. Claude doc-fix (was wrongly "remaining at the original position"). */
     inline Molecule TargetReorderd() const { return m_target_reordered; }
 
+    /*! \brief The target geometry whose deviation from ReferenceAligned() equals RMSD():
+     *  the reordered + aligned target when reordering ran, otherwise the plain best-fit
+     *  target. Prefer this for overlay/visualisation/output instead of hand-rolling the
+     *  TargetReorderd()/TargetAligned() fallback (the source of a GUI overlay bug; see
+     *  docs/TECHNICAL_DEBT.md R-1). Claude Generated. */
+    inline Molecule TargetForRMSD() const
+    {
+        return m_target_reordered.AtomCount() > 0 ? m_target_reordered : m_target_aligned;
+    }
+
     /*! \brief Best-fit RMSD after reordering (the permutation RMSD); equals the plain value
      *  when no reordering ran. */
     inline double RMSD() const { return m_rmsd; }
