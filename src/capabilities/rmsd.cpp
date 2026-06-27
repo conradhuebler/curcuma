@@ -538,7 +538,10 @@ void RMSDDriver::start()
     m_reference_aligned.LoadMolecule(m_reference);
     if (m_reference.Atoms() != m_target.Atoms() || m_force_reorder) {
         if (!m_noreorder || m_method == 10) {
-            // std::cout << "Reordering Atoms" << std::endl;
+            /* Capture plain Kabsch RMSD (original atom order) before permutation so that
+               RMSDRaw() / rmsd_raw in JSON shows the cost of the unpermuted ordering. */
+            if (m_reference.Atoms() == m_target.Atoms())
+                m_rmsd_raw = CalculateRMSD(m_reference, m_target, nullptr, nullptr);
             ReorderMolecule();
             rmsd_calculated = true;
         }
@@ -1033,14 +1036,22 @@ void RMSDDriver::ReorderMolecule()
     if (method != AlignmentMethod::MOLALIGN && method != AlignmentMethod::PREDEFINED_ORDER) {
         FinaliseTemplate();
 
-        m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
         m_target_aligned = m_target;
         m_reorder_rules = m_results.begin()->second;
         m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
+        /* Apply Kabsch alignment so that reorder_xyz in the JSON output is in the same
+           coordinate frame as reference_xyz and can be overlaid directly in viewers. */
+        Molecule aligned_reordered;
+        CalculateRMSD(m_reference, m_target_reordered, nullptr, &aligned_reordered);
+        m_target_reordered = aligned_reordered;
         m_target = m_target_reordered;
         m_rmsd = m_results.begin()->first;
     } else if (method == AlignmentMethod::PREDEFINED_ORDER) {
         m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
+        /* Apply Kabsch alignment for consistent reorder_xyz output. */
+        Molecule aligned_reordered;
+        CalculateRMSD(m_reference, m_target_reordered, nullptr, &aligned_reordered);
+        m_target_reordered = aligned_reordered;
         m_rmsd = Rules2RMSD(m_reorder_rules);
         if (m_verbosity >= 2)
             CurcumaLogger::info_fmt("Final RMSD: {:.6f}", m_rmsd);
