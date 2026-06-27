@@ -153,19 +153,27 @@ public:
     /*! \brief Return the reference molecule centered */
     inline const Molecule* ReferenceAlignedReference() const { return &m_reference_aligned; }
 
-    /*! \brief Return the target molecule centered and aligned to the reference molecule */
+    /*! \brief Target in the ORIGINAL atom order, centered. Best-fit rotated to the reference
+     *  only when no reordering ran; on the reorder path it is left centered/un-reordered (the
+     *  reordered + aligned geometry is TargetReorderd()). So when reordering was requested,
+     *  this does NOT correspond to RMSD() — use TargetReorderd() for that. Claude doc-fix. */
     inline Molecule TargetAligned() const { return m_target_aligned; }
 
-    /*! \brief Return the target molecule centered and aligned to the reference molecule */
+    /*! \brief Pointer twin of TargetAligned() — same caveat (un-reordered on the reorder path). */
     inline const Molecule* TargetAlignedReference() const { return &m_target_aligned; }
 
-    /*! \brief Return the target molecule reorderd but remaining at the original position */
+    /*! \brief Target reordered to the reference atom mapping AND Kabsch-aligned to the
+     *  reference frame (this is the geometry whose deviation is RMSD()). Empty when no
+     *  reordering ran. Claude doc-fix (was wrongly "remaining at the original position"). */
     inline Molecule TargetReorderd() const { return m_target_reordered; }
 
-    /*! \brief Return best-fit reordered RMSD */
+    /*! \brief Best-fit RMSD after reordering (the permutation RMSD); equals the plain value
+     *  when no reordering ran. */
     inline double RMSD() const { return m_rmsd; }
 
-    /*! \brief Return best-fit RMSD with reordering */
+    /*! \brief Plain best-fit RMSD in the original atom order, WITHOUT reordering. Only
+     *  populated on the reorder path (matching atom multisets); 0 otherwise. Claude doc-fix
+     *  (was wrongly "with reordering"). */
     inline double RMSDRaw() const { return m_rmsd_raw; }
 
     /*! \brief Force Reordering, even the sequence of elements are equal */
