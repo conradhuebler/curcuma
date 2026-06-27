@@ -371,6 +371,11 @@ AlignmentResult HeavyTemplateStrategy::align(RMSDDriver* driver, const Alignment
         driver->m_reference = reference;
         driver->m_target = target;
         driver->m_init_count = driver->m_heavy_init;
+        // The incremental strategy below reads m_reference.ConnectedMass(i); these template
+        // subset molecules are built fresh, so their connected-mass cache is empty (start()
+        // fills it only for the full molecules) — initialise it here or ConnectedMass() reads
+        // out of bounds (debug abort / release UB). (TECHNICAL_DEBT R-5)
+        driver->m_reference.InitialiseConnectedMass(1.5, driver->m_protons);
 
         // Use incremental strategy for heavy atoms only
         auto incremental_strategy = AlignmentStrategyFactory::createStrategy(1);
@@ -477,6 +482,11 @@ AlignmentResult AtomTemplateStrategy::align(RMSDDriver* driver, const AlignmentC
         driver->m_reference = reference;
         driver->m_target = target;
         driver->m_init_count = driver->m_heavy_init;
+        // The incremental strategy below reads m_reference.ConnectedMass(i); these template
+        // subset molecules are built fresh, so their connected-mass cache is empty (start()
+        // fills it only for the full molecules) — initialise it here or ConnectedMass() reads
+        // out of bounds (debug abort / release UB). (TECHNICAL_DEBT R-5)
+        driver->m_reference.InitialiseConnectedMass(1.5, driver->m_protons);
 
         // Use incremental strategy for template atoms only
         auto incremental_strategy = AlignmentStrategyFactory::createStrategy(1);
@@ -895,6 +905,11 @@ AlignmentResult DistanceTemplateStrategy::align(RMSDDriver* driver, const Alignm
         driver->m_reference = reference;
         driver->m_target = target;
         driver->m_init_count = driver->m_heavy_init;
+        // The incremental strategy below reads m_reference.ConnectedMass(i); these template
+        // subset molecules are built fresh, so their connected-mass cache is empty (start()
+        // fills it only for the full molecules) — initialise it here or ConnectedMass() reads
+        // out of bounds (debug abort / release UB). (TECHNICAL_DEBT R-5)
+        driver->m_reference.InitialiseConnectedMass(1.5, driver->m_protons);
 
         // Use incremental strategy for template alignment
         auto incremental_strategy = AlignmentStrategyFactory::createStrategy(1);
