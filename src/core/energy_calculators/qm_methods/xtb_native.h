@@ -1185,6 +1185,12 @@ private:
     // Optional device-resident SCF backend (GPU port Stage 2); non-owning, set by
     // the GPU wrapper, default null → CPU SCF unchanged. Claude Generated.
     GpuScfBackend* m_gpu_scf = nullptr;
+    // X-I1: true when the basis contains a d shell. The device integral / SCF /
+    // gradient kernels are s/p-only, so for d-containing systems those device
+    // paths fall back to the (validated) CPU path; the atom-based D4/EEQ device
+    // paths stay (d-independent). Set in buildBasis. Device d kernels are a
+    // follow-up (see docs/SQM_DSHELL_WP.md B6). Claude Generated.
+    bool m_has_dshell = false;
     // GPU: the molecule-constant flattened basis is uploaded to the device only
     // when the basis is (re)built (set in buildBasis), not every geometry — so
     // MD/opt steps re-upload only xyz and recompute the integrals. Claude Generated.

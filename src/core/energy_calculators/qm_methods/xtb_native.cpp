@@ -136,25 +136,13 @@ bool XTB::InitialiseMolecule()
 
     buildBasis();
 
-    // B0 safety scaffold (Claude Generated, X-I1): the native integral kernels are
-    // s/p-only (STO_CGTO cgto_overlap, multipole ints, gradients), but the GFN1/GFN2
-    // parameter tables emit d shells for Na, Mg, Al..Ar and every transition metal.
-    // Those d AOs would otherwise become zero rows in S -> singular overlap ->
-    // eigensolver failure silently returning E=0. Refuse loudly until the d-shell
-    // integrals (workstream B) are implemented and validated. Remove this block once
-    // d shells are supported.
-    for (int sh = 0; sh < m_basis.nsh; ++sh) {
-        if (m_basis.ang_sh[sh] > 1) {
-            const int at = m_basis.sh2at[sh];
-            const int z  = (at >= 0 && at < m_atomcount) ? m_atoms[at] : 0;
-            setHardError(fmt::format(
-                "native {} does not yet support d-shell basis functions "
-                "(element Z={}); use -method tblite-{} or xtb-{} for "
-                "S/P/Cl/Si/Al/Mg/Na/transition-metal systems",
-                meth, z, meth, meth));
-            return false;
-        }
-    }
+    // X-I1 (Claude Generated): d-shell basis functions are now supported on the CPU
+    // path (cartesian->spherical dtrafo overlap/H0/multipole + gradients, validated to
+    // <=1e-8 Eh vs tblite on H2S/PH3/HCl/SiH4). The former B0 loud-error guard was
+    // removed here once d was implemented. Main-group d (S/P/Cl/Si/...) is validated;
+    // transition metals are enabled but NOT validated (no reference set) -- see
+    // docs/SQM_DSHELL_WP.md. GPU device d kernels are pending; d systems fall back to
+    // the CPU integral/SCF/gradient path (m_has_dshell gate in buildBasis).
 
     buildH0Data();
     buildReferenceOccupations();
@@ -432,7 +420,17 @@ double XTB::Calculation(bool gradient)
     Matrix S, H0;
     bool gpu_computed = false;        // device integral build succeeded (reused below)
     bool integrals_from_device = false;
-    if (m_gpu_scf && m_scf_mode == ScfMode::Broyden) {
+    if (m_gpu_scf && m_has_dshell) {
+        // X-I1: the device integral/SCF/gradient kernels are s/p-only. Fall back to
+        // the validated CPU integral path for d systems (one-time notice).
+        static bool warned = false;
+        if (!warned && verb >= 1) {
+            warned = true;
+            CurcumaLogger::warn("native xTB: d-shell system - integrals/SCF/gradient "
+                                "run on CPU (device d kernels pending); D4/EEQ stay on device");
+        }
+    }
+    if (m_gpu_scf && m_scf_mode == ScfMode::Broyden && !m_has_dshell) {
         GpuBasisFlat gbf;
         GpuH0Flat    gh0;
         exportGpuBasis(gbf, gh0);
@@ -740,7 +738,7 @@ double XTB::Calculation(bool gradient)
     // GPU eigensolver hook (Stage 1) instead.
     bool use_gpu_resident = false;
     bool gpu_multipole    = false;
-    if (m_gpu_scf && mode == ScfMode::Broyden
+    if (m_gpu_scf && mode == ScfMode::Broyden && !m_has_dshell
         && m_X.rows() == m_basis.nao && m_X.cols() == m_basis.nao) {
         // Stage 3: the device-computed integral build (beginBasis once + beginComputed
         // per geometry: CN/S/H0/L on the device, no nao² upload) was hoisted into the
@@ -1626,6 +1624,12 @@ void XTB::buildBasis()
     m_basis.nsh = shell_cursor;
     m_basis.nao = ao_cursor;
     m_gpu_basis_dirty = true;   // basis changed → re-upload to the device once
+
+    // X-I1: detect d shells. The device integral/SCF/gradient kernels are s/p-only,
+    // so d systems use the CPU integral path (gated below). Claude Generated.
+    m_has_dshell = false;
+    for (int s = 0; s < m_basis.nsh; ++s)
+        if (m_basis.ang_sh[s] > 1) { m_has_dshell = true; break; }
 }
 
 void XTB::buildH0Data()

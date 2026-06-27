@@ -72,6 +72,8 @@ Native GFN methods (no external dependency required, canonical backends since AP
 
 > Native GFN1/GFN2 are validated against tblite to a 1e-8 Eh target — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md). For explicit tblite or xtb backends use `tblite-gfn1`/`tblite-gfn2` or `xtb-gfn1`/`xtb-gfn2`.
 
+> **d-shell elements (X-I1, June 2026):** native GFN1/GFN2 now handle d-shell basis functions (S, P, Cl, Si and other main-group d elements), matching tblite to ≤1e-8 Eh; analytic gradients FD-validated. CPU only — on `-gpu` a d-shell system falls back to the CPU integral/SCF path. Transition metals are enabled but not yet validated. See [docs/SQM_DSHELL_WP.md](docs/SQM_DSHELL_WP.md).
+
 > Native GFN1/GFN2 can use multiple cores **within one calculation** of a single large molecule: pass `-threads N` to a `-sp`/`-opt`/MD run (default is serial and bit-identical). Integral setup, gradient and Fock build scale ~3–5×; see [docs/SQM_THREADING.md](docs/SQM_THREADING.md).
 
 > Opt-in **MKL-free / GPU-portable eigensolve kernels** are available for the native GFN SCF (MKL stays the default): `-eigensolver native` (own Householder + Cuppen divide-and-conquer), `-eigensolver purify` (0 K density-matrix purification, GEMM-only, no diagonalization), `-eigensolver lobpcg` (seeded block LOBPCG, experimental), and `CURCUMA_EIG_TRED2=blocked` (BLAS-3 blocked tridiagonalization). See [docs/SQM_EIGENSOLVE_GPU.md](docs/SQM_EIGENSOLVE_GPU.md).

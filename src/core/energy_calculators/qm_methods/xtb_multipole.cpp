@@ -16,6 +16,7 @@
 
 #include "xtb_native.h"
 #include "xtb_multipole_ints.hpp"
+#include "xtb_ao_utils.hpp"
 #include "parameters/gfn2_params.hpp"
 #include "parameters/xtb_params_extra.hpp"
 
@@ -26,32 +27,7 @@
 namespace curcuma::xtb {
 namespace MI = multipole_ints;
 
-/* ------------------------------------------------------------------ *
- *  AO type encoding (same as xtb_h0.cpp):                            *
- *    s → 0,  p → [py=2, pz=3, px=1]                                 *
- * ------------------------------------------------------------------ */
-static inline int ao_to_type(int ang, int local_ao)
-{
-    if (ang == 0) return 0;
-    if (ang == 1) {
-        static const int p_map[3] = {2, 3, 1};
-        return p_map[local_ao];
-    }
-    return -1;
-}
-
-/* ------------------------------------------------------------------ *
- *  Convert internal CGTOShell → CGTO::Shell for integrals            *
- * ------------------------------------------------------------------ */
-static CGTO::Shell as_cgto_shell(const CGTOShell& cg)
-{
-    CGTO::Shell s;
-    s.ang   = cg.ang;
-    s.nprim = static_cast<int>(cg.alpha.size());
-    s.alpha = cg.alpha;
-    s.coeff = cg.coeff;
-    return s;
-}
+/* ao_to_type() and as_cgto_shell() now live in xtb_ao_utils.hpp (X-I5). */
 
 /* ------------------------------------------------------------------ *
  *  setupMultipole()                                                  *
@@ -120,6 +96,37 @@ void XTB::setupMultipole(bool integrals_on_device)
         }
     }
     });  // parallelStripes over mu
+
+    // ---- 1b. X-I1: d-touching shell pairs (cartesian multipole block + dtrafo).
+    // The per-AO loop above skips d (ao_to_type < 0); fill those AO cells here.
+    // Origin shift + traceless transform (step 2 below) then run uniformly. ----
+    const int nsh_mp = m_basis.nsh;
+    for (int ish_a = 0; ish_a < nsh_mp; ++ish_a) {
+        const int ang_a = m_basis.ang_sh[ish_a];
+        const int iat   = m_basis.sh2at[ish_a];
+        const int ia0   = m_basis.iao_sh[ish_a];
+        const CGTO::Shell sh_a = as_cgto_shell(m_basis.cgto[ish_a]);
+        for (int ish_b = 0; ish_b < nsh_mp; ++ish_b) {
+            const int ang_b = m_basis.ang_sh[ish_b];
+            if (ang_a < 2 && ang_b < 2) continue;  // s/p handled by the loop above
+            const int jat = m_basis.sh2at[ish_b];
+            const int jb0 = m_basis.iao_sh[ish_b];
+            const CGTO::Shell sh_b = as_cgto_shell(m_basis.cgto[ish_b]);
+            double Db[5 * 5 * 3], Qb[5 * 5 * 6];
+            sphericalMultipoleBlock(sh_a, ang_a, sh_b, ang_b,
+                xyz_bohr[3*iat+0], xyz_bohr[3*iat+1], xyz_bohr[3*iat+2],
+                xyz_bohr[3*jat+0], xyz_bohr[3*jat+1], xyz_bohr[3*jat+2],
+                Db, Qb, 5);
+            const int nsa = 2 * ang_a + 1, nsb = 2 * ang_b + 1;
+            for (int ia = 0; ia < nsa; ++ia)
+                for (int jb = 0; jb < nsb; ++jb) {
+                    const int mu = ia0 + ia, nu = jb0 + jb;
+                    const int o  = ia * 5 + jb;
+                    for (int k = 0; k < 3; ++k) dp_global[k](mu, nu)     = Db[o*3+k];
+                    for (int k = 0; k < 6; ++k) qp_global_raw[k](mu, nu) = Qb[o*6+k];
+                }
+        }
+    }
 
     // ---- 2. Shift to "origin at atom(column)" (tblite convention) ----
     //       and traceless quadrupole transform.

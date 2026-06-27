@@ -15,39 +15,14 @@
 #include "parameters/gfn2_params.hpp"
 #include "parameters/xtb_params_extra.hpp"
 #include "STO_CGTO.hpp"
+#include "xtb_ao_utils.hpp"
 #include "xtb_coulomb.hpp"
 
 #include "src/core/curcuma_logger.h"
 
 namespace curcuma::xtb {
 
-/* ------------------------------------------------------------------ *
- *  Helper: convert internal CGTOShell → CGTO::Shell for integrals   *
- * ------------------------------------------------------------------ */
-static CGTO::Shell as_cgto_shell(const CGTOShell& cg)
-{
-    CGTO::Shell s;
-    s.ang   = cg.ang;
-    s.nprim = static_cast<int>(cg.alpha.size());
-    s.alpha = cg.alpha;
-    s.coeff = cg.coeff;
-    return s;
-}
-
-/* ------------------------------------------------------------------ *
- *  AO type encoding (tblite ordering):                               *
- *    s  → 0                                                          *
- *    p  → [py=2, pz=3, px=1]  (matching STO_CGTO type convention)   *
- * ------------------------------------------------------------------ */
-static inline int ao_to_type(int ang, int local_ao)
-{
-    if (ang == 0) return 0;                     // s
-    if (ang == 1) {                              // p: tblite ordering
-        static const int p_map[3] = {2, 3, 1};  // py, pz, px
-        return p_map[local_ao];
-    }
-    return -1;  // d not handled
-}
+/* as_cgto_shell() and ao_to_type() now live in xtb_ao_utils.hpp (X-I5). */
 
 /* ------------------------------------------------------------------ *
  *  Coordination numbers                                              *
@@ -311,31 +286,60 @@ void XTB::getHamiltonianH0(const Vector& se,
                 h_factor = hs * pi_ij;
             }
 
-            // Compute per-AO-pair overlap (directional for p-orbitals)
-            for (int ia = 0; ia < ia_nao; ++ia) {
-                const int mu = ia_start + ia;
-                const int t_a = ao_to_type(m_basis.ang_sh[ish_a], ia);
-                if (t_a < 0) continue;
+            const int ang_a = m_basis.ang_sh[ish_a];
+            const int ang_b = m_basis.ang_sh[ish_b];
 
-                for (int jb = 0; jb < jb_nao; ++jb) {
-                    const int nu = jb_start + jb;
-                    const int t_b = ao_to_type(m_basis.ang_sh[ish_b], jb);
-                    if (t_b < 0) continue;
+            if (ang_a < 2 && ang_b < 2) {
+                // ---- s/p scalar path (byte-identical to the pre-X-I1 code) ----
+                for (int ia = 0; ia < ia_nao; ++ia) {
+                    const int mu = ia_start + ia;
+                    const int t_a = ao_to_type(ang_a, ia);
+                    if (t_a < 0) continue;
 
-                    // CGTO overlap depends on AO types (px, py, pz, etc.)
-                    const double s_ab = (iat == jat && ish_a == ish_b && t_a == t_b)
-                        ? 1.0  // on-atom same-orbital → identity
-                        : CGTO::cgto_overlap(sh_a, sh_b,
-                                             xyz_bohr[3 * iat + 0],
-                                             xyz_bohr[3 * iat + 1],
-                                             xyz_bohr[3 * iat + 2],
-                                             xyz_bohr[3 * jat + 0],
-                                             xyz_bohr[3 * jat + 1],
-                                             xyz_bohr[3 * jat + 2],
-                                             t_a, t_b);
+                    for (int jb = 0; jb < jb_nao; ++jb) {
+                        const int nu = jb_start + jb;
+                        const int t_b = ao_to_type(ang_b, jb);
+                        if (t_b < 0) continue;
 
-                    S(mu, nu) = s_ab;
-                    H0(mu, nu) = avg_eps * h_factor * s_ab;
+                        // CGTO overlap depends on AO types (px, py, pz, etc.)
+                        const double s_ab = (iat == jat && ish_a == ish_b && t_a == t_b)
+                            ? 1.0  // on-atom same-orbital → identity
+                            : CGTO::cgto_overlap(sh_a, sh_b,
+                                                 xyz_bohr[3 * iat + 0],
+                                                 xyz_bohr[3 * iat + 1],
+                                                 xyz_bohr[3 * iat + 2],
+                                                 xyz_bohr[3 * jat + 0],
+                                                 xyz_bohr[3 * jat + 1],
+                                                 xyz_bohr[3 * jat + 2],
+                                                 t_a, t_b);
+
+                        S(mu, nu) = s_ab;
+                        H0(mu, nu) = avg_eps * h_factor * s_ab;
+                    }
+                }
+            } else {
+                // ---- X-I1: d-touching shell pair — cartesian(6)->spherical(5)
+                // block via dtrafo. Local AO index maps to spherical m (tblite
+                // order [-l..+l]), matching the s/p ordering above.
+                double blk[6 * 6];
+                sphericalOverlapBlock(sh_a, ang_a, sh_b, ang_b,
+                                      xyz_bohr[3 * iat + 0],
+                                      xyz_bohr[3 * iat + 1],
+                                      xyz_bohr[3 * iat + 2],
+                                      xyz_bohr[3 * jat + 0],
+                                      xyz_bohr[3 * jat + 1],
+                                      xyz_bohr[3 * jat + 2],
+                                      blk, 6);
+                for (int ia = 0; ia < ia_nao; ++ia) {
+                    const int mu = ia_start + ia;
+                    for (int jb = 0; jb < jb_nao; ++jb) {
+                        const int nu = jb_start + jb;
+                        double s_ab = blk[ia * 6 + jb];
+                        if (iat == jat && ish_a == ish_b && ia == jb)
+                            s_ab = 1.0;  // exact on-atom diagonal (orthonormal AOs)
+                        S(mu, nu) = s_ab;
+                        H0(mu, nu) = avg_eps * h_factor * s_ab;
+                    }
                 }
             }
         }

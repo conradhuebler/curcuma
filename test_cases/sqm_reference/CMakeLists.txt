@@ -226,7 +226,9 @@ if(Python3_Interpreter_FOUND)
     set(_SQM_VAL_REF  ${CMAKE_CURRENT_SOURCE_DIR}/reference_data)
     set(_SQM_VAL_MOL  ${CMAKE_CURRENT_SOURCE_DIR}/molecules)
     set(_SQM_VAL_TOL  1e-8)
-    set(_SQM_MOLS H2 He2 LiH H2O CH4 NH3 C6H6 HCN acetic_acid_dimer caffeine triose complex)
+    set(_SQM_MOLS H2 He2 LiH H2O CH4 NH3 C6H6 HCN acetic_acid_dimer caffeine triose complex
+        # X-I1 d-shell main-group set (S/P/Cl/Si), all <= 1e-8 vs tblite.
+        H2S PH3 SiH4 HCl)
 
     # Molecules NOT yet at 1e-8 -> tracked expected-failures (WILL_FAIL). Measured
     # |dE| = |E_native - E_tblite| (Eh), 2026-05-31 (after the GFN1 third-order

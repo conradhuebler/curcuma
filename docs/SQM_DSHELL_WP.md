@@ -1,8 +1,40 @@
 # WP: native GFN1/GFN2 d-shell integrals (X-I1)
 
-Status: **not started** — only the **B0 safety guard** is in place (native GFN1/GFN2 refuse
-d-shell elements with a clear error instead of returning a silent 0 Eh). This document is a
-self-contained brief so the implementation can be done in one clean session.
+Status: **CPU implemented + machine-validated (2026-06-27)** — B1–B5 done, B0 guard removed.
+B6 = CPU fallback on the GPU path (device d kernels pending). 🤖 AI/machine-tested only,
+NOT ✅ TESTED.
+
+## What was done / tested (2026-06-27, Claude Generated)
+- **B1** `xtb_ao_utils.hpp` (new): single source of truth for `as_cgto_shell`/`ao_to_type`
+  (X-I5 resolved) + the cartesian(6)->spherical(5) `dtrafo` (verbatim from
+  tblite `integral/trafo.f90`), general `cartMoment1d` (la,lb<=3) and the d overlap /
+  multipole / gradient blocks. **Per-shell-pair rule:** only d-touching pairs use the
+  transform path; pure s/p pairs keep the existing scalar kernels -> s/p molecules stay
+  **bit-identical** (verified: H2O/CH4/NH3/C6H6/HCN/caffeine dE = 0 vs tblite).
+- **B2** d overlap: `max|ΔS|` vs tblite **1.5e-10** on H2S/PH3/SiH4/HCl (gfn1+gfn2),
+  `test_xtb_overlap` extended to the d block.
+- **B3** d in H0 (GFN1): energy vs tblite **<=1e-8 Eh** (4/4 d molecules).
+- **B4** GFN2 d multipole integrals (`setupMultipole` step 1b): energy vs tblite
+  **<=1e-8 Eh** (4/4 d molecules).
+- **B5** d gradients: `test_xtb_gradient` FD — GFN1 ~1e-6, GFN2 ~1-4e-4 Eh/Å (the same
+  SCF/FD floor as the s/p GFN2 baseline H2O 1.7e-4 / NH3 5.0e-4), all PASS @5e-4;
+  `-opt` on H2S converges.
+- **B7** B0 guard removed (`xtb_native.cpp`); d molecules added to the `sqm_val_*` ctest
+  suite (1e-8 gate); docs updated.
+
+## What is NOT tested / NOT done
+- **GPU device d kernels (B6).** The device integral/SCF/gradient kernels are still
+  s/p-only; `XTB::m_has_dshell` (set in `buildBasis`) routes d systems to the **CPU**
+  integral/SCF/gradient path (atom-based D4/EEQ stay on device). `-gpu` on a d molecule is
+  correct but CPU-speed. Device d kernels (CUDA/ROCm/Vulkan) remain a follow-up.
+- **Transition metals.** Enabled (guard removed) but **NOT validated** — no TM reference
+  set; only main-group d (S/P/Cl/Si) was checked. Open-d SCF convergence is untested.
+- Precision floor: the validate_sqm gate parses the 8-dp printed energy (~1e-8 resolution),
+  same as the s/p suite.
+
+---
+
+## Original brief (for reference)
 
 🤖 AI-authored brief, machine-context only. Nothing here is ✅ TESTED.
 
