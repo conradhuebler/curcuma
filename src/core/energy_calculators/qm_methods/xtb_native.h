@@ -41,6 +41,10 @@
 #include <string>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 // Forward declarations — the D3/D4 stack only lives in xtb_native.cpp /
 // xtb_gradient.cpp, so we keep this header free of the dispersion include.
 class D4ParameterGenerator;
@@ -68,22 +72,49 @@ namespace curcuma::xtb {
  *  is the per-iteration generalized eigensolve (dsygst/dsyevd/dtrsm), so we bump
  *  MKL up only around solveEigen for a single large molecule.
  *
- *  MklThreadScope(n) sets the thread-local MKL count to n and restores the
- *  previous value on scope exit (nesting-safe: an inner scope restores the outer
- *  count). It only affects the calling thread, so running many calculations in
- *  parallel through CxxThreadPool keeps each one independent. No-op without MKL.
+ *  MklThreadScope(n) sets the thread-local BLAS/LAPACK thread count to n and
+ *  restores the previous value on scope exit (nesting-safe: an inner scope restores
+ *  the outer count). It only affects the calling thread, so running many calculations
+ *  in parallel through CxxThreadPool keeps each one independent.
+ *
+ *  Covers BOTH backends (Jun 2026): MKL via the thread-local MKL_Set_Num_Threads_Local,
+ *  AND OpenMP-threaded OpenBLAS via omp_set_num_threads (per-thread). The latter is the
+ *  ONLY knob the OpenMP OpenBLAS build honours (openblas_set_num_threads is a no-op there),
+ *  and curcuma's global OMP=1 pin (CxxThreadPool/main.cpp) otherwise starves the eigensolve.
+ *  See src/core/blas_threads.h for the standalone (non-per-thread) version.
  * ------------------------------------------------------------------------- */
 #ifdef USE_MKL
 extern "C" int MKL_Set_Num_Threads_Local(int nt);
-struct MklThreadScope {
-    int prev;
-    explicit MklThreadScope(int n) : prev(MKL_Set_Num_Threads_Local(n < 1 ? 1 : n)) {}
-    ~MklThreadScope() { MKL_Set_Num_Threads_Local(prev); }
-};
-#else
-struct MklThreadScope { explicit MklThreadScope(int) {} };
 #endif
-// Back-compat alias: pin MKL to one thread for the enclosing scope.
+struct MklThreadScope {
+#ifdef USE_MKL
+    int prev_mkl;
+#endif
+#ifdef _OPENMP
+    int  prev_omp = 1;
+    bool omp_active = false;
+#endif
+    explicit MklThreadScope(int n)
+#ifdef USE_MKL
+        : prev_mkl(MKL_Set_Num_Threads_Local(n < 1 ? 1 : n))
+#endif
+    {
+        if (n < 1) n = 1;
+#ifdef _OPENMP
+        prev_omp = omp_get_max_threads();
+        if (n != prev_omp) { omp_set_num_threads(n); omp_active = true; }
+#endif
+    }
+    ~MklThreadScope() {
+#ifdef USE_MKL
+        MKL_Set_Num_Threads_Local(prev_mkl);
+#endif
+#ifdef _OPENMP
+        if (omp_active) omp_set_num_threads(prev_omp);
+#endif
+    }
+};
+// Back-compat alias: pin BLAS/LAPACK to one thread for the enclosing scope.
 struct MklSerialScope { MklThreadScope s{1}; };
 
 /* ------------------------------------------------------------------------- *
@@ -264,6 +295,15 @@ struct Wavefunction {
     Matrix  C;        // MO coefficients, nao × nao
     Vector  eps;      // MO energies, length nao
 
+    // Per-MO occupation numbers used to build P (length nao). X-G3 (Claude Generated):
+    // at electronic_temperature > 0 these are the fractional Fermi occupations, so the
+    // gradient's energy-weighted density W = Σ_i f_i·ε_i·C_i·C_iᵀ matches the fractional
+    // density (the old integer W mismatched the Pulay term for small-gap systems). At
+    // T = 0 they are exactly {2,…,2,0,…} so W is bit-identical to the old integer build.
+    // Empty when the density came from a path that did not set it (gradient then falls
+    // back to the integer build).
+    Vector  focc;
+
     // Energy-weighted density matrix (AO basis): W_μν = 2·Σ_occ ε_i C_μi C_νi. Normally the
     // gradient rebuilds this from C/eps; the purification density path (eigensolver="purify",
     // no eigenpairs) instead stores it here as W = 2·L⁻ᵀ·(P̃·Ã·P̃)·L⁻¹ and sets W_valid so the
@@ -384,6 +424,14 @@ struct GpuScfBackend {
     /// dp_int/qp_int (no upload of the 9 nao² matrices). Returns false → caller
     /// falls back to beginMultipole (upload). Claude Generated (Stage 3d).
     virtual bool beginMultipoleComputed() { return false; }
+    /// Fetch the device-built AO multipole integrals dp_int (3) / qp_int (6), each
+    /// nao×nao column-major, after beginMultipoleComputed — so the HOST GFN2 SCF (the
+    /// non-resident Vulkan/ROCm path) consumes the device integrals and skips its own
+    /// O(nao²) setupMultipole integral loop. Returns false if unavailable (caller keeps
+    /// the CPU build). Claude Generated (Stage 3m / R-AP1 / V-AP2).
+    virtual bool downloadMultipoleInts(std::array<Eigen::MatrixXd, 3>& dp_int,
+                                       std::array<Eigen::MatrixXd, 6>& qp_int)
+    { (void)dp_int; (void)qp_int; return false; }
     virtual bool solveMultipole(const Eigen::VectorXd& v_ao,
                                 const Eigen::MatrixXd& v_dp,
                                 const Eigen::MatrixXd& v_qp,
@@ -447,6 +495,11 @@ struct GpuScfBackend {
      * converged charges once at the end (finalize() still downloads P/C). Default
      * false → the per-iteration host-driven loop. GFN2 device-potential path. */
     virtual bool supportsResidentLoop() const { return false; }
+    /* X-I1: true if the backend's device integral/SCF/gradient kernels handle d
+     * shells. Default false -> the XTB engine routes d systems to the CPU path
+     * (m_has_dshell gate). The CUDA backend overrides to true; ROCm/Vulkan keep
+     * the CPU fallback until their kernels are ported. Claude Generated. */
+    virtual bool supportsDshell() const { return false; }
     virtual bool beginResidentLoop(const Vector& q_sh0, const Eigen::MatrixXd& dp_at0,
                                    const Eigen::MatrixXd& qp_at0, const Vector& q_at0,
                                    const Vector& n0_sh, const Vector& n0_at,
@@ -479,6 +532,29 @@ struct GpuScfBackend {
     /// Per iteration: host-built W/∂W/∂q (each nat·7) → device dE_D4/dq (nat).
     virtual bool dispersionDedq(int nat, const double* W, const double* dWq, double* dEdq_out)
     { (void)nat; (void)W; (void)dWq; (void)dEdq_out; return false; }
+    /// Post-SCF: the whole 2-body D4 (energy + nuclear gradient + dE/dCN + dE/dq) on the
+    /// device in one gather, reusing the geometry-fixed reference data from beginDispersion.
+    /// Inputs W/dWq/dWc each nat·7 (the converged-charge reference weights + their q/CN
+    /// derivatives). Outputs: e_atom (nat; total 2-body E = ½·Σ e_atom — each pair counted
+    /// twice by the gather), grad (3·nat, [3*i+k], Eh/Bohr), dEdcn (nat), dEdq (nat). The
+    /// host adds ATM + the CN-distribution + the q-response on top. Default false → host
+    /// D4Evaluator. Claude Generated.
+    virtual bool dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
+                                    double* e_atom_out, double* grad_out,
+                                    double* dEdcn_out, double* dEdq_out)
+    { (void)nat; (void)W; (void)dWq; (void)dWc; (void)e_atom_out; (void)grad_out;
+      (void)dEdcn_out; (void)dEdq_out; return false; }
+    /// Post-SCF: the D4 ATM 3-body (energy + nuclear gradient + dE/dCN) on the device in a
+    /// per-atom gather over pairs, reusing the resident geometry + √r4r2 from beginDispersion.
+    /// c6 / dc6dcn are the q=0 reference C6 + ∂C6/∂CN matrices (nat·nat, from buildAtmC6Flat).
+    /// Outputs: e_atom (nat; total ATM E = ⅓·Σ — each triple counted by its 3 members), grad
+    /// (3·nat, [3*i+k], accumulated on top of the 2-body), dEdcn (nat). s9/a1/a2/alp/cutoff are
+    /// the D4 ATM params (GFN2: 5.0/0.52/5.0/16.0/25.0). Default false → host computeATM.
+    virtual bool dispersionATM(int nat, const double* c6, const double* dc6dcn,
+                               double s9, double a1, double a2, double alp, double cutoff,
+                               double* e_atom_out, double* grad_out, double* dEdcn_out)
+    { (void)nat; (void)c6; (void)dc6dcn; (void)s9; (void)a1; (void)a2; (void)alp; (void)cutoff;
+      (void)e_atom_out; (void)grad_out; (void)dEdcn_out; return false; }
     /// Stage 6 (S6.2b): upload the q-independent D4 reference tables once per
     /// geometry so the fused resident loop rebuilds W/dWq on the device from the
     /// resident SCF charges (no host buildRefWFlat per iteration). Arrays are
@@ -667,6 +743,13 @@ public:
     // Convergence
     bool isConverged() const { return m_scf_converged; }
     int  scfIterations() const { return m_scf_iterations; }
+
+    // Hard-error state (Claude Generated): set on genuine solve failures
+    // (eigensolver/Cholesky breakdown, singular overlap, NaN/Inf) — distinct from a
+    // benign max-iteration non-convergence, which still yields a usable energy. A
+    // caller must refuse to consume the energy/gradient when hasError() is true.
+    bool hasError() const { return m_has_error; }
+    const std::string& errorMessage() const { return m_error_message; }
 
     // D4 charge-response source: "eeq" (single-shot dftd4 EEQ, default) or
     // "mulliken" (GFN2 SCF charges + CPSCF response). Set by the wrapper.
@@ -873,7 +956,10 @@ private:
     void buildBasis();                                   // xtb_native.cpp
     void buildH0Data();                                  // xtb_h0.cpp
     void buildGammaMatrix();                             // xtb_coulomb.cpp
-    void setupMultipole();                               // xtb_multipole.cpp (GFN2)
+    // integrals_on_device=true: skip the O(nao²) CPU dp_int/qp_int integral build
+    // (already filled by GpuScfBackend::downloadMultipoleInts); only the CN-damping
+    // radii + atom-pair interaction matrices are computed. Claude Generated (Stage 3m).
+    void setupMultipole(bool integrals_on_device = false);   // xtb_multipole.cpp (GFN2)
     Vector computeCoordinationNumbers() const;           // xtb_native.cpp
     void buildReferenceOccupations();                    // xtb_native.cpp
 
@@ -1066,6 +1152,18 @@ private:
     bool   m_scf_converged   = false;
     int    m_scf_iterations  = 0;
 
+    // X-I3 (Claude Generated): geometry-keyed cache for computeCoordinationNumbers()
+    // (called up to 3× per Calculation). Invalidated in UpdateMolecule/InitialiseMolecule.
+    mutable Vector m_cn_cache;
+    mutable bool   m_cn_cache_valid = false;
+
+    // Hard-error state (Claude Generated). Reset at the top of Calculation(), set by
+    // setHardError() at genuine solve breakdowns so the wrapper / EnergyCalculator can
+    // refuse the result instead of silently returning E=0.
+    bool        m_has_error = false;
+    std::string m_error_message;
+    void setHardError(const std::string& msg);
+
     // Intra-SCF eigensolve timing buckets (ms), summed over iterations by
     // solveEigen() and printed at verbosity >= 3. Reset in Calculation().
     // Claude Generated 2026-06 (SCF profiling).
@@ -1092,6 +1190,12 @@ private:
     // Optional device-resident SCF backend (GPU port Stage 2); non-owning, set by
     // the GPU wrapper, default null → CPU SCF unchanged. Claude Generated.
     GpuScfBackend* m_gpu_scf = nullptr;
+    // X-I1: true when the basis contains a d shell. The device integral / SCF /
+    // gradient kernels are s/p-only, so for d-containing systems those device
+    // paths fall back to the (validated) CPU path; the atom-based D4/EEQ device
+    // paths stay (d-independent). Set in buildBasis. Device d kernels are a
+    // follow-up (see docs/SQM_DSHELL_WP.md B6). Claude Generated.
+    bool m_has_dshell = false;
     // GPU: the molecule-constant flattened basis is uploaded to the device only
     // when the basis is (re)built (set in buildBasis), not every geometry — so
     // MD/opt steps re-upload only xyz and recompute the integrals. Claude Generated.

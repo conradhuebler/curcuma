@@ -476,20 +476,13 @@ private:
      * Claude Generated: Phase 3C - Native ConfigManager support
      * @param config ConfigManager configuration
      */
-    void initializeCommonFromConfig(const ConfigManager& config);
+    void initializeCommonFromConfig(const ConfigManager& config, const json* raw_controller = nullptr);
 
     /**
      * @brief Initialize EnergyCalculator with JSON settings (backward compatible)
      * @param controller Configuration JSON
      */
     void initializeCommon(const json& controller);
-
-    /**
-     * @brief Re-attach method-specific sub-scopes (gfnff, eeq_solver, …) onto
-     * m_controller after ConfigManager initialization, then rebuild the method
-     * if any new scope was carried over. Claude Generated (WP6, May 2026).
-     */
-    void reattachMethodScopes(const json& controller);
 
     /**
      * @brief Create computational method using factory

@@ -17,6 +17,46 @@ upstream guard not shown in the snippet.
 
 ---
 
+## Resolved (2026-06-26) — fail-loud batch
+
+The highest-priority *silent-wrong-result* items were fixed and verified (build green,
+gfn1/gfn2 s/p energies bit-identical, native-GFN + large-system + gfnff suites green).
+See `AIChangelog.md` for the full entry.
+
+| ID | Status | Fix |
+|----|--------|-----|
+| **X-I1** | **resolved (CPU, 2026-06-27)** | d-shell integrals implemented: cartesian(6)→spherical(5) `dtrafo` (tblite `integral/trafo.f90`) in `xtb_ao_utils.hpp`, wired into overlap/H0/multipole + gradients. Validated ≤1e-8 Eh vs tblite (H2S/PH3/HCl/SiH4, gfn1+gfn2); FD gradients pass; s/p bit-identical. B0 guard removed. **GPU device d kernels still pending** → d systems fall back to CPU (`m_has_dshell` gate). **Transition metals enabled but unvalidated** (main-group d only). See [docs/SQM_DSHELL_WP.md](SQM_DSHELL_WP.md). 🤖 machine-tested. |
+| **F-Q4** | resolved | EEQ uniform-charge fallback sets `lastSolveFailed()`; GFN-FF propagates `eeqSolveFailed()`; wrapper refuses the result (`eeq_solver.*`, `gfnff*`). |
+| native xTB fail-loud | resolved | `XTB` engine hard-error flag set at eigensolver/density/multipole breakdown; wrapper checks `hasError()` (root of the H2S silent-zero, with X-I1). |
+| **X-L4** | resolved | `large_system_mode=dc\|sparse` hard-error on a requested gradient instead of a zero gradient (`xtb_fragment_scf.cpp`). |
+| **D-1** | resolved | method sub-scopes re-merged before the single `createMethod` — no more double build (`energycalculator.*`). |
+| **D-2** | resolved (consumer-check) | `-sp` + optimizer driver check `EnergyCalculator::Error()` and exit non-zero (MD already did). The constructor-throw variant was *not* taken (main()'s dispatch has no top-level catch and ~30 sites incl. threaded batch loops would risk `std::terminate`); the consumer-check delivers the same fail-loud guarantee with less risk. |
+| **D-4** | resolved | deleted dead `energycalculator_enums.h`. |
+| **X-S2** | resolved | deleted dead strict-threshold `checkConvergence` in `xtb_scf.cpp`. |
+| **X-G3** | resolved | gradient `W = Σ_i f_i·ε_i·C_iC_iᵀ` uses the density's per-MO occupations (`Wavefunction::focc`); occupation-consistent at T>0, bit-identical for gapped systems. |
+| **X-I3** | resolved | `computeCoordinationNumbers()` memoised (geometry-keyed, invalidated on UpdateMolecule/InitialiseMolecule); bit-identical. |
+| **X-S6** | not applicable (stale) | current code rebuilds the post-SCF potential for `m_F` only on the device path, and the gradient rebuild excludes dispersion — no double D4 eval on the CPU path. The audit described older code. No change. |
+
+Also: **`-sp` is now energy-only by default** with an opt-in `-gradient` flag (avoids an
+unused gradient; lets energy-only large-system modes serve a single point).
+
+**Two pre-existing ctests fixed (2026-06-26):** `scf_extrapolation_caffeine` (generated the
+missing `caffeine.opt.xyz` fixture + gitignore exception); `gfnff_numgrad_fixed_charges`
+retired — its premise (analytical gradient = frozen-charge approximation) is obsolete since
+the Feb-2026 Coulomb Term-1b/dynamic-charge work made the analytical the TOTAL derivative
+(validated by `gfnff_numgrad_builtin`); comparing it to the fixed-charge PARTIAL derivative is
+invalid (H2O: total −1.2e-2 vs partial +2.9e-2 Eh/Bohr). The `--fixed-charges` flag stays for
+manual diagnostics.
+
+**X-I1 d-shell integrals: resolved on CPU (2026-06-27)** — spherical-d transform +
+overlap/H0/multipole/gradient implemented and validated ≤1e-8 Eh vs tblite (main-group
+S/P/Cl/Si), B0 guard removed; see [docs/SQM_DSHELL_WP.md](SQM_DSHELL_WP.md). Remaining:
+**GPU device d kernels** (d falls back to CPU meanwhile) and **transition-metal validation**
+(enabled but unchecked).
+
+---
+
+
 ## 1. GFN-FF (`src/core/energy_calculators/ff_methods/`)
 
 ### God files / structure
@@ -85,7 +125,7 @@ upstream guard not shown in the snippet.
 
 | ID | Location | Sev | Finding |
 |----|----------|-----|---------|
-| X-I1 | `xtb_h0.cpp:42–50` (`ao_to_type` returns -1 for ang==2), `308–313` (`if (t_a < 0) continue`) | high | d-shell AO pairs silently skipped → zeroed in S/H0. GFN2 param tables include d shells for some elements (S, Cl, metals); the H/C/N/O test set does not exercise it. CLAUDE.md doesn't document the limit. **Confirm whether the basis emits d shells**; if yes implement, if no assert + document. | — |
+| X-I1 | RESOLVED (CPU) `xtb_ao_utils.hpp` (dtrafo + d blocks), `xtb_h0.cpp`/`xtb_multipole.cpp`/`xtb_gradient.cpp` (d-pair branch) | — | d overlap/H0/multipole + gradients implemented via the spherical transform; ≤1e-8 Eh vs tblite on main-group d. Remaining: GPU device d kernels (CPU fallback in place) + TM validation. See [docs/SQM_DSHELL_WP.md](SQM_DSHELL_WP.md). | — |
 | X-I2 | `xtb_h0.cpp:410–416` | medium | GFN1 halogen-bond `calcHalogenBondEnergy()` returns 0.0 ("to be implemented if accuracy requires it") yet `m_E_halogen_bond` is added to the total (`xtb_native.cpp:1278`) as silent zero. Implement or document as not-implemented. |
 | X-I3 | `xtb_native.cpp:375`, `xtb_multipole.cpp:167`, `xtb_response.cpp:353` | medium | Coordination numbers recomputed 3× per `Calculation`. Cache as a member after first compute; fix sequencing. |
 | X-I4 | `xtb_h0.cpp:280–301` & `xtb_response.cpp:410–432` | medium | GFN1/GFN2 H0 hscale logic duplicated verbatim between H0 build and response. Factor `hscale(...)`. |
@@ -373,6 +413,7 @@ scope here (tracked in the RMSD/permutations paper work).
 
 ---
 
+
 ## Master priority list (cross-cutting)
 
 Correctness / crash / UB first, then maintainability. "v" = spot-verified by re-reading cited lines.
@@ -392,7 +433,7 @@ Correctness / crash / UB first, then maintainability. "v" = spot-verified by re-
 | ~~11~~ | ~~F-Q6~~ | GFN-FF | ~~`gfnff_torsions_NEW.cpp` dead duplicate file~~ — **deleted 2026-06-26** | — |
 | 12 | Q-8 | TBLite | Re-init with different natoms overflows `m_coord`/`m_attyp` (no realloc) | — |
 | 13 | Q-9 | XTB | `xtb_newMolecule` error check commented out — failure silently `m_initialised=true` | — |
-| 14 | X-I1 | native xTB | d-shell AOs silently zeroed in S/H0 — undocumented element-range limit | — |
+| 14 | X-I1 | native xTB | RESOLVED (CPU 2026-06-27): d-shell integrals implemented + validated ≤1e-8 vs tblite; GPU device d kernels + TM validation pending | — |
 | 15 | D-2 | dispatch | Silent failure cascade: bad method → `E=0`/zero properties, no exception | — |
 | 16 | F-Q7 | GFN-FF | External `GFNFFInterface::Charges()` always returns zeros | — |
 | 17 | D-1 | dispatch | `reattachMethodScopes` builds every method **twice** (ConfigManager scope-stripping workaround) | v |

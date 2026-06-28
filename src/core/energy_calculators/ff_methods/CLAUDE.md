@@ -236,6 +236,15 @@ ctest -R test_gfnff_gradients --verbose
 - **dgam corrections**: Intentionally disabled — validated as no improvement (<0.001% energy impact)
 - **Element hybridization**: Complete XTB element-specific rules (gfnff_ini2.f90:217-332)
 - See `docs/DGAM_VALIDATION_REPORT.md` for dgam analysis
+- **Jun 2026 — solve_method**: default cleanly `cholesky` (ctor/PARAM unified); `A_nn` is SPD by
+  construction even when Gershgorin<0, so the LU/`ldlt` paths are rarely reached — see
+  [[gfnff-eeq-ann-spd]]. New explicit `-eeq_solver.solve_method ldlt` (Bunch-Kaufman, == cholesky
+  for SPD; NOT an auto-fallback — augmented LU stays the robust indefinite path).
+- **Jun 2026 — polarization + cache fixes**: `m_phase2_historically_implausible` made transient
+  (was a permanent freeze to Phase-1 charges); fixing it exposed a SchurCholesky factor-cache
+  staleness bug under ALPB solvation (cache keyed on geometry+CN, not the reaction field B) — now
+  bypassed via `!m_reaction_field`. `gfnff_solv_*` 28/28 pass, gas-phase bit-identical. See
+  `docs/GFNFF_POLARIZATION_AUDIT.md`, `docs/GFNFF_PERFORMANCE_LEVERS.md`, `docs/GFNFF_FAST_WP.md`.
 
 ### ✅ Parameter Management (Phase 2 - December 2025)
 - **ConfigManager Integration**: Type-safe parameter access with validation
@@ -257,8 +266,11 @@ ctest -R test_gfnff_gradients --verbose
 - [ ] **fijk refinement** (Phase 2b) - angl2 topology logic for neighbor type corrections
 
 **Torsion Corrections**:
-- [ ] **Ring torsions** - Different phase angles and barriers for cyclic vs acyclic
-- [ ] **Conjugation detection** - Increase barriers for π-conjugated systems
+- [x] **Ring torsions** ✅ (Jun 20, 2026, commit 7bfa859) - aromatic/conjugated ring torsions
+  were getting the acyclic pi-sp3 rule (n=3/φ0=180, f1=0.5). Fixed by gating the pi-sp3
+  periodicity override (`gfnff_torsions.cpp:~1174/1186`) AND the pi-sp3 barrier `f1=0.5`
+  (`:~785`) on `!in_ring` (both are acyclic-only in Fortran, `else` of `if(lring)`). S30L
+  host A torsion now bit-identical to Fortran; validation set 18/18, no regression.
 - [ ] **Hyperconjugation** - Subtle barrier modulation (documented but not implemented)
 - [ ] **Extra torsion calibration** - Current ff=-2.00 (O) factor overcompensates
 
@@ -293,6 +305,15 @@ ctest -R test_gfnff_gradients --verbose
 - 1 thread: 0.320s
 - 4 threads: 0.120s
 - Speedup: 2.67x ✅
+
+**Jun 2026 — large-system GFN-FF speedups** (see `docs/GFNFF_PERFORMANCE_LEVERS.md`):
+- **HB candidate generation (Lever 1)**: cell-list nhb2 (`hyd_on[]`) + nhb1
+  (`forEachNeighbor(i, hbthr2)`) replacing the per-pair full-hydrogen scan. EXACT (energies
+  bit-identical), ~1.5x on mixture2 SP (6200 atoms). Gated to the cell-list path; small systems
+  unchanged. The single-point bottleneck was the HB list (~33%), NOT the EEQ solve (~8%).
+- **`-method gfnff-fast`** (`docs/GFNFF_FAST_WP.md`): opt-in NON-POLARIZING fast preset
+  (`static_charges`+`static_cn` — EEQ charges + CN/D4 frozen after geometry 1). SP == gfnff;
+  MD ~15% faster (more on large many-fragment systems). Equilibrium dynamics only; warns at start.
 
 ## D3 Implementation Status
 
@@ -618,6 +639,57 @@ std::string method = "d4";  // Matches Fortran reference
 - **Dynamic state only**: CN and distance matrices updated each step (O(N²) vs O(N³) for full topology)
 - **MD speedup**: ~15x for topology phase when topology is constant (typical MD)
 - **Implementation**: `getCachedTopology()` in `gfnff_method.cpp`, `needsFullTopologyUpdate()` checks displacement
+
+### ✅ Tuning knobs — GPU CN pair list + HB list (Task #10/#11, Jun 2026)
+- 8 `gfnff` PARAMs trade perf/accuracy; defaults bit-identical to Fortran-parity. See [docs/GPU_GFNNF_DISCREPANCIES.md](../../../../docs/GPU_GFNNF_DISCREPANCIES.md#performanceaccuracy-tuning-knobs-task-10--11-june-2026)
+- Task #10: `gpu_cn_pair_regen` (default ON) rebuilds the stale-prone CN-deriv pair list on topology change; `gpu_cn_pair_cutoff_factor` widens it (`ff_workspace_gpu.cu`)
+- Task #11: `hb_accuracy`/`hb_thr{1,2}_bohr2` set hbthr1/hbthr2; `hb_update_rmsd_bohr`/`hb_update_force_every` control rebuild timing (`gfnff_method.cpp`)
+- **Caveat**: registry PARAMs MUST be single-line — `param_parser` drops multi-line PARAMs whose help text contains `)`
+
+### ✅ EEQ WP7-D — block-Jacobi PCG (GPU) + contact-aware dispatch (CPU, Jun 2026)
+- GPU-PCG now uses the per-fragment **block-Jacobi** preconditioner (port of CPU `buildBlockJacobi`) instead of diagonal Jacobi → far fewer iters for many fragments, exact (`k_eeq_block_jacobi_apply`/`buildBlockJacobiFactors` in `cuda/eeq_solver_gpu.cu`; verified == GPU SchurCholesky ≤1e-8)
+- CPU auto-select no longer routes in-contact fragments to the approximate Batched solver (drops cross-fragment Coulomb); `m_contact_min_dist` + PARAM `eeq_contact_prefer_exact` (default true) prefer the exact solver. See [docs/GPU_WP7_EEQ_LARGE_SYSTEMS.md](../../../../docs/GPU_WP7_EEQ_LARGE_SYSTEMS.md#wp7-d-block-jacobi-präkonditionierer--kontaktbewusste-auswahl-jun-2026)
+- Open: FMM matvec (O(N log N)) + ROCm block-Jacobi mirror
+
+### ✅ WP-B — EEQ FP32-factor + FP64-refine mixed precision (CUDA, Jun 2026)
+- Opt-in `-gfnff.eeq_mixed_precision` (+ `eeq_mixed_precision_iters`, default 2): LAPACK
+  dsposv pattern — `cusolverDnSpotrf` on an FP32 copy (d_A kept as the FP64 matrix), FP32
+  `Spotrs`, then FP64 residual (`cublasDsymm`) + FP32 correction, 1–2 steps → full FP64
+  accuracy. `EEQSolverGPU::setMixedPrecision`/`mixedFactor`/`mixedSolveRefine`
+  (`cuda/eeq_solver_gpu.cu`); wired into the factor-dominated paths (solve / solveWithDeviceRHS
+  / GPU-Schur nfrag=1), auto-falls back to FP64 dpotrf/LU when the FP32 factor is not SPD;
+  nfrag>1 general path stays FP64. Validated GTX 1660: triose nfrag=1 SPD 41-step MD
+  bit-identical to FP64. Win needs a large nfrag=1 SPD system (unmeasured).
+- **ROCm mirror DONE (Jun 2026, opt-in default OFF)**: `mixedFactorHip`/`mixedSolveRefineHip` +
+  `k_cast_d2f_hip`/`k_cast_f2d_hip`/`k_axpy_f2d_hip` in `rocm/eeq_solver_hip.hiph` (rocSOLVER
+  `spotrf`/`spotrs` + rocBLAS `dsymm`), gated to nfrag<=1 in `eeqBuildFactorSolve`, auto-falls
+  back to FP64 dpotrf/LU when the FP32 factor is not SPD. Wired in `gfnff_hip_method.cpp`.
+  Validated Radeon 890M: caffeine + 231-atom `complex` single-point energy and caffeine
+  8-step opt trajectory bit-identical to the FP64 ROCm path.
+
+### ✅ WP-A — on-device D4 dispersion pair build (CUDA, Jun 2026)
+- Opt-in `-gfnff.gpu_disp_pairs_on_device` (default OFF): `k_disp_pairs_count`/`k_disp_pairs_build`
+  (`cuda/gfnff_kernels.cu`) do the two-pass enumeration + per-pair C6 contraction (reusing the
+  host O(N) Gaussian weights) on the device, and `D4ParameterGenerator::setSkipPairLoop` skips
+  the host O(N²) `GenerateDispersionPairsNative` loop. Energy + MD gradient bit-identical to the
+  host list (complex/water_1002/mixed_3007 |dE|=0). **Honest: no measured speedup** (mixed_3007 SP
+  5.99 s host == device — D4 gen is not the bottleneck, Lever 1/HB list is); a residency/correctness
+  milestone. See [docs/GFNFF_PERFORMANCE_LEVERS.md](../../../../docs/GFNFF_PERFORMANCE_LEVERS.md).
+- **ROCm mirror DONE (Jun 2026, opt-in default OFF)**: `k_disp_pairs_count`/`k_disp_pairs_build`
+  + `FFWorkspaceHip::generateDispersionPairListOnGPU` in `gfnff_rocm.hip`; ROCm additionally
+  **rebuilds the per-atom CSR adjacency** (`k_dispersion_gather`) from the device-built pair
+  list (no CUDA precedent). `setSkipHostDispPairs` + the device build wired in
+  `gfnff_hip_method.cpp`. Validated Radeon 890M: caffeine + 231-atom `complex` energy and
+  caffeine 8-step opt trajectory bit-identical to the host-built ROCm path.
+
+### ✅ EEQ many-fragment routing — exact CPU PCG (ROCm, Jun 2026)
+- For `nfrag >= eeq_rocm_cpu_fragment_threshold` (PARAM, default 16) the ROCm EEQ dispatch
+  routes to the **exact CPU PCG + block-Jacobi + warm-start** solver (`prepareCNAndEEQ` after
+  `finalizeCNForCPU`), instead of the dense N×N device Cholesky (O(N^3), intractable for
+  solvent boxes; the device PCG/batched/general-Schur variants are stubbed on ROCm). Closes
+  the device-vs-CPU divergence for many-fragment systems. Validated: water8_cluster (nfrag=8,
+  threshold lowered to 4) opt trajectory matches the pure-CPU `-gpu none` reference (the device
+  path is the divergent one). Device-resident HIP PCG/block-Jacobi remains the open follow-up.
 
 ### ⚠️ Known Issues
 - gfnff GPU validation tests (test_gfnff_gpu) fail with JSON null error — pre-existing, unrelated to pipeline

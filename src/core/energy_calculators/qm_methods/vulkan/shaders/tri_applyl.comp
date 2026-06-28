@@ -1,0 +1,29 @@
+#version 450
+// Back-transform: apply Householder reflector H_k = I − β_k·v_k·v_kᵀ to the eigenvector
+// matrix Z (rows k+1:n), accumulating C = Q·Z = H_0·H_1·…·H_{n-3}·Z. Called for
+// k = n-3 … 0 (reverse order). Per column j:  y = v_kᵀ·Z[k+1:,j];  Z[k+1:,j] -= β·v_k·y.
+// EIG-2A: ONE WORKGROUP per Z column — the 256 lanes split the length-m reduction (shared-
+// memory tree) and the rank-1 update, replacing the former one-thread-per-column serial
+// loop. Pure GPU (v/β resident), so the whole back-transform batches into chunked submits.
+// β read from scal[2n+k]. Column-major n×n. Claude Generated (EIG-2A).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0)          buffer Zb { double Z[]; };
+layout(std430, binding = 1) readonly buffer Vb { double V[]; };     // Householder vectors (col k)
+layout(std430, binding = 2) readonly buffer Sb { double scal[]; };  // β at [2n+k]
+layout(push_constant) uniform PC { uint n; uint k; uint m; } pc;
+
+shared double red[256];
+
+void main()
+{
+    uint n = pc.n, k = pc.k, m = pc.m, base = k + 1u, vc = k * n;
+    uint j = gl_WorkGroupID.x;           // one workgroup per Z column
+    uint lane = gl_LocalInvocationID.x;
+    uint col = j * n;
+    double s = 0.0lf;
+    for (uint i = lane; i < m; i += 256u) s += V[vc + i] * Z[(base + i) + col];
+    red[lane] = s; barrier();
+    for (uint t = 128u; t > 0u; t >>= 1u) { if (lane < t) red[lane] += red[lane + t]; barrier(); }
+    double by = scal[2u * n + k] * red[0];
+    for (uint i = lane; i < m; i += 256u) Z[(base + i) + col] -= V[vc + i] * by;
+}

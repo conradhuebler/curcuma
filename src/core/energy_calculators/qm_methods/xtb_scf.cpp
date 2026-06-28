@@ -465,12 +465,18 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         const auto Cocc = m_wfn.C.leftCols(ncol);
         const Matrix Cw = Cocc * occ.head(ncol).asDiagonal();
         m_wfn.P.noalias() = Cw * Cocc.transpose();
+        // X-G3: keep the fractional occupations so the gradient builds an
+        // occupation-consistent energy-weighted density W (matches this P).
+        m_wfn.focc = occ;
     } else {
         // Integer occupation: closed-shell, 2 electrons per occupied orbital
         const int nocc = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
         if (nocc < 0 || nocc > nao) return false;
         m_wfn.P.noalias() =
             2.0 * m_wfn.C.leftCols(nocc) * m_wfn.C.leftCols(nocc).transpose();
+        // X-G3: integer occupations {2,…,2,0,…} for the gradient's W build.
+        m_wfn.focc = Eigen::VectorXd::Zero(nao);
+        m_wfn.focc.head(nocc).setConstant(2.0);
     }
     m_t_dens += std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t_dens0).count();
@@ -657,19 +663,11 @@ void XTB::updatePopulationsFromPopAo(const Eigen::VectorXd& pop_ao)
         m_wfn.q_at(i) = m_wfn.n0_at(i) - m_wfn.n_at(i);
 }
 
-/* ------------------------------------------------------------------ *
- *  SCF convergence check.                                            *
- *  Returns true when max |Δq| < threshold and |ΔE| < threshold.      *
- * ------------------------------------------------------------------ */
-static bool checkConvergence(const Vector& q_sh_old,
-                             const Vector& q_sh_new,
-                             double e_old, double e_new,
-                             double threshold)
-{
-    const double dq = (q_sh_new - q_sh_old).cwiseAbs().maxCoeff();
-    const double de = std::fabs(e_new - e_old);
-    return (dq < threshold && de < threshold);
-}
+/* X-S2 (Claude Generated): the dead `static bool checkConvergence(...)` with the
+ * strict `de < threshold` criterion was removed here. The live SCF loop uses
+ * XTB::checkConvergence_impl (xtb_native.cpp) with `de < thresh*100` — keeping the
+ * unused strict variant around was a wiring hazard (a 100x convergence change if
+ * someone called the wrong one). */
 
 /* ------------------------------------------------------------------ *
  *  buildFockFromPotential()                                          *

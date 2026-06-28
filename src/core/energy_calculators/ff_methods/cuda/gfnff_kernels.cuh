@@ -335,6 +335,15 @@ __global__ GFNFF_KERNEL_BOUNDS void k_xbonds(
     double*                    energy
 );
 
+/// Claude Generated (June 2026): device-resident HB charge refresh. Gathers the live
+/// per-atom EEQ charges (q_atom) into the HB SoA arrays by donor/H/acceptor index, so the
+/// next step's k_hbonds uses current charges instead of values frozen at topology build.
+__global__ void k_gather_hb_charges(
+    int n,
+    const int* __restrict__ idx_i, const int* __restrict__ idx_j, const int* __restrict__ idx_k,
+    const double* __restrict__ q_atom,
+    double* __restrict__ q_A, double* __restrict__ q_H, double* __restrict__ q_B);
+
 /// Hydrogen bonds (3-body A-H...B): multi-case with neighbor damping
 /// Reference: ff_workspace_gfnff.cpp:calcHydrogenBonds, Fortran abhgfnff_eg*
 __global__ GFNFF_KERNEL_BOUNDS void k_hbonds(
@@ -593,6 +602,55 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
     double*       rcov_sum);
 
 // ============================================================================
+// WP-A (Jun 2026): on-device D4 dispersion pair-list build.
+// Two-pass enumeration (count + build) mirroring the CN pair list, plus the
+// per-pair static data (C6 contraction + r4r2ij + R0² + zetac6) so the host
+// O(N²) GenerateDispersionPairsNative loop + the per-build H2D upload are not
+// needed when -gfnff.gpu_disp_pairs_on_device is on. Reference (bit-identical
+// target): d4param_generator.cpp:GenerateDispersionPairsNative (line 1789).
+// ============================================================================
+
+/// Pass 1: count i<j pairs with r² ≤ cutoff_sq and valid elements (1..118).
+__global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_count(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_sq,
+    int*          d_count);
+
+/// Pass 2: write idx_i/idx_j + per-pair static data for each surviving pair.
+/// C6 = Σ_{ri,rj} gw_i·gw_j·c6ref (CN-only weighting, == getChargeWeightedC6);
+/// r4r2ij = 3·sqrtZr4r2_i·sqrtZr4r2_j; r0_sq = (a1·√r4r2ij + a2)²;
+/// zetac6 = zetaChargeScale(Zi,q_i)·zetaChargeScale(Zj,q_j); r_cut = 50.
+__global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_sq,
+    const double* __restrict__ gw,          ///< [N*MAX_REF] device Gaussian weights
+    const double* __restrict__ c6_flat,     ///< C6 reference table
+    const double* __restrict__ sqrtzr4r2,   ///< [118] sqrt(Z·r4/r2) per element
+    const double* __restrict__ topo_q,      ///< [N] Phase-1 topology charges
+    const double* __restrict__ zeta_zeff,   ///< [86] zeta zeff per element
+    const double* __restrict__ zeta_c,      ///< [86] zeta c per element
+    double        a1,
+    double        a2,
+    int*          d_counter,
+    int*          out_i,
+    int*          out_j,
+    double*       out_C6,
+    double*       out_r4r2,
+    double*       out_r0sq,
+    double*       out_zeta,
+    double*       out_rcut
+    // refn read from d_refn_const (constant memory)
+);
+
+// ============================================================================
 // GPU HB CN per-bond computation (Apr 2026)
 // Replaces CPU HB CN loop in gfnff_gpu_method.cpp.
 // ============================================================================
@@ -704,6 +762,37 @@ __global__ void k_pcg_dir_update(
     double        beta,
     const double* __restrict__ d_p_in,
     double*       __restrict__ d_p_out);
+
+// ============================================================================
+// WP7-D: GPU block-Jacobi preconditioner for the PCG (Jun 2026)
+// Port of the CPU EEQSolver::BlockJacobiPC (per-fragment exact inverse). Replaces
+// the diagonal Jacobi z = M_inv⊙r with z = blockdiag(A_ff^-1)·r for nfrag>=2,
+// cutting PCG iterations from ~30-100 to ~2-5 on many-fragment (solvent) systems.
+// Reference: eeq_solver.cpp BlockJacobiPC::apply / buildBlockJacobi.
+// ============================================================================
+
+/// Symmetrize each per-fragment block in place (mirror lower → upper triangle).
+/// cusolverDnDpotri(LOWER) leaves the upper triangle untouched; the block-Jacobi
+/// apply does a full GEMV, so the upper triangle must be filled. One block / fragment.
+__global__ void k_eeq_symmetrize_blocks(
+    int           nfrag,
+    double*       __restrict__ d_A_blocks,    ///< [sum N_f²] explicit inverses, column-major per block
+    const int*    __restrict__ frag_sizes,    ///< [nfrag] N_f
+    const int*    __restrict__ frag_offsets_A);///< [nfrag] start of fragment f's N_f² block
+
+/// Apply the block-Jacobi preconditioner: z = blockdiag(A_ff^-1)·r.
+/// One thread-block per fragment; r/z stay in global atom order, gather/scatter via
+/// frag_atom_map. d_Ainv_blocks holds the (symmetric) per-fragment inverse blocks.
+/// Dynamic shared memory: m_max_frag_N doubles (staged r_f).
+__global__ void k_eeq_block_jacobi_apply(
+    int           nfrag,
+    const double* __restrict__ d_Ainv_blocks, ///< [sum N_f²] symmetric inverses, column-major per block
+    const int*    __restrict__ frag_sizes,    ///< [nfrag] N_f
+    const int*    __restrict__ frag_offsets_A,///< [nfrag] start of fragment f's N_f² block
+    const int*    __restrict__ frag_atom_offsets,///< [nfrag+1] sorted-position start per fragment
+    const int*    __restrict__ frag_atom_map, ///< [N] sorted-position → global atom index
+    const double* __restrict__ d_r,           ///< [N] residual (global order)
+    double*       __restrict__ d_z);          ///< [N] preconditioned residual (global order)
 
 // ============================================================================
 // WP2: GPU-side EEQ RHS construction

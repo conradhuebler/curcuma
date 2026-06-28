@@ -103,7 +103,7 @@ bool DFTD4Interface::InitialiseMolecule(const Mol& mol, double factor)
     m_mol.GetMemory(mol.m_number_atoms);
     for (int i = 0; i < mol.m_number_atoms; ++i) {
         int element = mol.m_atoms[i];
-        m_mol.UpdateAtom(i, mol.m_geometry(i, 0) * factor, mol.m_geometry(i, 1) * factor, mol.m_geometry(i, 2), element);
+        m_mol.UpdateAtom(i, mol.m_geometry(i, 0) * factor, mol.m_geometry(i, 1) * factor, mol.m_geometry(i, 2) * factor, element);
     }
     return true;
 }

@@ -1,0 +1,17 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+// CN-shifted shell self-energies: se[s] = selfenergy[s] − kcn[s]·CN[sh2at[s]].
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer SEb { double selfenergy[]; };
+layout(std430, binding = 1) readonly  buffer Kcb { double kcn[]; };
+layout(std430, binding = 2) readonly  buffer S2b { int    sh2at[]; };
+layout(std430, binding = 3) readonly  buffer Cnb { double cn[]; };
+layout(std430, binding = 4) writeonly buffer Seb { double se[]; };
+layout(push_constant) uniform PC { uint nsh; } pc;
+
+void main()
+{
+    uint s = gl_GlobalInvocationID.x;
+    if (s >= pc.nsh) return;
+    se[s] = selfenergy[s] - kcn[s] * cn[sh2at[s]];
+}

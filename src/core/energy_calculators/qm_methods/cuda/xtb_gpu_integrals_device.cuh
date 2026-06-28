@@ -483,6 +483,281 @@ __device__ __forceinline__ void d_cgto_multipole_grad_transformed(
     }
 }
 
+// ===========================================================================
+// X-I1 GPU: d-shell support. Per-spherical-AO-element device functions that
+// mirror xtb_ao_utils.hpp (cartesian(6)->spherical(5) dtrafo from tblite
+// integral/trafo.f90). Used by the kernels only for d-touching shell pairs; the
+// s/p path above stays byte-identical. cart d order: xx,yy,zz,xy,xz,yz; sph m=-2..+2.
+// ===========================================================================
+
+__device__ __forceinline__ int d_cart_count(int ang) { return ang == 0 ? 1 : (ang == 1 ? 3 : 6); }
+
+__device__ __forceinline__ void d_cart_pow(int ang, int ic, int& lx, int& ly, int& lz)
+{
+    if (ang == 0) { lx = 0; ly = 0; lz = 0; return; }
+    if (ang == 1) { lx = (ic == 0); ly = (ic == 1); lz = (ic == 2); return; }
+    const int L[6][3] = {{2,0,0},{0,2,0},{0,0,2},{1,1,0},{1,0,1},{0,1,1}};
+    lx = L[ic][0]; ly = L[ic][1]; lz = L[ic][2];
+}
+
+__device__ __forceinline__ double d_sph_cart_coeff(int ang, int isph, int icart)
+{
+    if (ang == 0) return 1.0;
+    if (ang == 1) { const int pc[3] = {1, 2, 0}; return pc[isph] == icart ? 1.0 : 0.0; }
+    const double s3 = 1.7320508075688772935, s3_4 = 0.8660254037844386468;
+    const double T[5][6] = {
+        {0,0,0,s3,0,0}, {0,0,0,0,0,s3}, {-0.5,-0.5,1,0,0,0}, {0,0,0,0,s3,0}, {s3_4,-s3_4,0,0,0,0}
+    };
+    return T[isph][icart];
+}
+
+/// General 1-D moment, la,lb in {0,1,2,3}, n in {0,1,2} (la=3 needed for the
+/// gradient raise/lower). Mirrors xtb_ao_utils.hpp cartMoment1d.
+__device__ __forceinline__ double d_cartMoment1d(int la, int lb, int n,
+                                                 double PA, double PB, double P, double g)
+{
+    const int Bn[4][4] = {{1,0,0,0},{1,1,0,0},{1,2,1,0},{1,3,3,1}};
+    double a[4] = {0,0,0,0}, b[4] = {0,0,0,0}, p[4] = {0,0,0,0};
+    const double pa[4] = {1.0, PA, PA*PA, PA*PA*PA};
+    const double pb[4] = {1.0, PB, PB*PB, PB*PB*PB};
+    const double pp[4] = {1.0, P,  P*P,   P*P*P};
+    for (int k = 0; k <= la; ++k) a[k] = Bn[la][k] * pa[la-k];
+    for (int k = 0; k <= lb; ++k) b[k] = Bn[lb][k] * pb[lb-k];
+    for (int k = 0; k <= n;  ++k) p[k] = Bn[n][k]  * pp[n-k];
+    double ab[7] = {0,0,0,0,0,0,0};
+    for (int i = 0; i <= la; ++i) for (int j = 0; j <= lb; ++j) ab[i+j] += a[i]*b[j];
+    double c[10] = {0,0,0,0,0,0,0,0,0,0};
+    for (int i = 0; i <= la+lb; ++i) for (int j = 0; j <= n; ++j) c[i+j] += ab[i]*p[j];
+    const double M0 = sqrt(d_pi()/g), w = 1.0/(2.0*g);
+    const double dfac[5] = {1.0,1.0,3.0,15.0,105.0};
+    double sum = 0.0, wk = 1.0;
+    for (int k = 0; k <= 4; ++k) { sum += c[2*k]*(M0*dfac[k]*wk); wk *= w; }
+    return sum;
+}
+
+/// Contracted cartesian overlap for explicit powers.
+__device__ __forceinline__ double d_cart_overlap(
+    const double* aa, const double* ca, int npa, const double* ab, const double* cb, int npb,
+    double xa, double ya, double za, double xb, double yb, double zb,
+    int lxa, int lya, int lza, int lxb, int lyb, int lzb)
+{
+    const double dx = xb-xa, dy = yb-ya, dz = zb-za; const double R2 = dx*dx+dy*dy+dz*dz;
+    double S = 0.0;
+    for (int i = 0; i < npa; ++i) { const double ai = aa[i], cci = ca[i];
+        for (int j = 0; j < npb; ++j) { const double aj = ab[j], ccj = cb[j];
+            const double g = ai+aj;
+            const double Px = (ai*xa+aj*xb)/g, Py = (ai*ya+aj*yb)/g, Pz = (ai*za+aj*zb)/g;
+            const double K = exp(-ai*aj/g*R2);
+            const double Mx = d_cartMoment1d(lxa,lxb,0,Px-xa,Px-xb,Px,g);
+            const double My = d_cartMoment1d(lya,lyb,0,Py-ya,Py-yb,Py,g);
+            const double Mz = d_cartMoment1d(lza,lzb,0,Pz-za,Pz-zb,Pz,g);
+            S += cci*ccj*K*Mx*My*Mz;
+        }
+    }
+    return S;
+}
+
+/// Single spherical overlap element S(sa,sb) via dtrafo.
+__device__ __forceinline__ double d_overlap_elem(
+    int ang_a, int sa, int ang_b, int sb,
+    const double* aa, const double* ca, int npa, const double* ab, const double* cb, int npb,
+    double xa, double ya, double za, double xb, double yb, double zb)
+{
+    const int nca = d_cart_count(ang_a), ncb = d_cart_count(ang_b);
+    double S = 0.0;
+    for (int pa = 0; pa < nca; ++pa) { const double ta = d_sph_cart_coeff(ang_a, sa, pa);
+        if (ta == 0.0) continue; int lxa, lya, lza; d_cart_pow(ang_a, pa, lxa, lya, lza);
+        for (int pb = 0; pb < ncb; ++pb) { const double tb = d_sph_cart_coeff(ang_b, sb, pb);
+            if (tb == 0.0) continue; int lxb, lyb, lzb; d_cart_pow(ang_b, pb, lxb, lyb, lzb);
+            S += ta*tb*d_cart_overlap(aa,ca,npa,ab,cb,npb,xa,ya,za,xb,yb,zb,
+                                      lxa,lya,lza,lxb,lyb,lzb);
+        }
+    }
+    return S;
+}
+
+/// Single spherical global-origin multipole element: S, D[3], Q[6] (raw cart quad).
+__device__ __forceinline__ void d_multipole_elem(
+    int ang_a, int sa, int ang_b, int sb,
+    const double* aa, const double* ca, int npa, const double* ab, const double* cb, int npb,
+    double xa, double ya, double za, double xb, double yb, double zb,
+    double& S, double D[3], double Q[6])
+{
+    S = 0.0; for (int k=0;k<3;++k) D[k]=0.0; for (int k=0;k<6;++k) Q[k]=0.0;
+    const int nca = d_cart_count(ang_a), ncb = d_cart_count(ang_b);
+    for (int pa = 0; pa < nca; ++pa) { const double ta = d_sph_cart_coeff(ang_a, sa, pa);
+        if (ta == 0.0) continue; int lxa, lya, lza; d_cart_pow(ang_a, pa, lxa, lya, lza);
+        for (int pb = 0; pb < ncb; ++pb) { const double tb = d_sph_cart_coeff(ang_b, sb, pb);
+            if (tb == 0.0) continue; int lxb, lyb, lzb; d_cart_pow(ang_b, pb, lxb, lyb, lzb);
+            const double w = ta*tb;
+            for (int i = 0; i < npa; ++i) { const double ai = aa[i], cci = ca[i];
+                for (int j = 0; j < npb; ++j) { const double aj = ab[j], cc = cci*cb[j];
+                    const double g = ai+aj;
+                    const double Px = (ai*xa+aj*xb)/g, Py = (ai*ya+aj*yb)/g, Pz = (ai*za+aj*zb)/g;
+                    const double dx = xa-xb, dy = ya-yb, dz = za-zb;
+                    const double K = exp(-ai*aj/g*(dx*dx+dy*dy+dz*dz));
+                    const double Mx0 = d_cartMoment1d(lxa,lxb,0,Px-xa,Px-xb,Px,g);
+                    const double My0 = d_cartMoment1d(lya,lyb,0,Py-ya,Py-yb,Py,g);
+                    const double Mz0 = d_cartMoment1d(lza,lzb,0,Pz-za,Pz-zb,Pz,g);
+                    const double Mx1 = d_cartMoment1d(lxa,lxb,1,Px-xa,Px-xb,Px,g);
+                    const double My1 = d_cartMoment1d(lya,lyb,1,Py-ya,Py-yb,Py,g);
+                    const double Mz1 = d_cartMoment1d(lza,lzb,1,Pz-za,Pz-zb,Pz,g);
+                    const double Mx2 = d_cartMoment1d(lxa,lxb,2,Px-xa,Px-xb,Px,g);
+                    const double My2 = d_cartMoment1d(lya,lyb,2,Py-ya,Py-yb,Py,g);
+                    const double Mz2 = d_cartMoment1d(lza,lzb,2,Pz-za,Pz-zb,Pz,g);
+                    const double kc = cc*K*w;
+                    S    += kc*Mx0*My0*Mz0;
+                    D[0] += kc*Mx1*My0*Mz0; D[1] += kc*Mx0*My1*Mz0; D[2] += kc*Mx0*My0*Mz1;
+                    Q[0] += kc*Mx2*My0*Mz0; Q[1] += kc*Mx1*My1*Mz0; Q[2] += kc*Mx0*My2*Mz0;
+                    Q[3] += kc*Mx1*My0*Mz1; Q[4] += kc*Mx0*My1*Mz1; Q[5] += kc*Mx0*My0*Mz2;
+                }
+            }
+        }
+    }
+}
+
+/// Contracted cartesian overlap gradient dS/dA[3] for explicit powers.
+__device__ __forceinline__ void d_cart_overlap_grad(
+    const double* aa, const double* ca, int npa, const double* ab, const double* cb, int npb,
+    double xa, double ya, double za, double xb, double yb, double zb,
+    int lxa, int lya, int lza, int lxb, int lyb, int lzb, double gA[3])
+{
+    gA[0]=gA[1]=gA[2]=0.0;
+    const double dx = xb-xa, dy = yb-ya, dz = zb-za; const double R2 = dx*dx+dy*dy+dz*dz;
+    for (int i = 0; i < npa; ++i) { const double ai = aa[i], cci = ca[i];
+        for (int j = 0; j < npb; ++j) { const double aj = ab[j], cc = cci*cb[j];
+            const double g = ai+aj;
+            const double Px = (ai*xa+aj*xb)/g, Py = (ai*ya+aj*yb)/g, Pz = (ai*za+aj*zb)/g;
+            const double K = exp(-ai*aj/g*R2);
+            const double Mx = d_cartMoment1d(lxa,lxb,0,Px-xa,Px-xb,Px,g);
+            const double My = d_cartMoment1d(lya,lyb,0,Py-ya,Py-yb,Py,g);
+            const double Mz = d_cartMoment1d(lza,lzb,0,Pz-za,Pz-zb,Pz,g);
+            const double Mxp = d_cartMoment1d(lxa+1,lxb,0,Px-xa,Px-xb,Px,g);
+            const double Myp = d_cartMoment1d(lya+1,lyb,0,Py-ya,Py-yb,Py,g);
+            const double Mzp = d_cartMoment1d(lza+1,lzb,0,Pz-za,Pz-zb,Pz,g);
+            const double Mxm = (lxa>0)?d_cartMoment1d(lxa-1,lxb,0,Px-xa,Px-xb,Px,g):0.0;
+            const double Mym = (lya>0)?d_cartMoment1d(lya-1,lyb,0,Py-ya,Py-yb,Py,g):0.0;
+            const double Mzm = (lza>0)?d_cartMoment1d(lza-1,lzb,0,Pz-za,Pz-zb,Pz,g):0.0;
+            gA[0] += cc*K*My*Mz*(2.0*ai*Mxp - lxa*Mxm);
+            gA[1] += cc*K*Mx*Mz*(2.0*ai*Myp - lya*Mym);
+            gA[2] += cc*K*Mx*My*(2.0*ai*Mzp - lza*Mzm);
+        }
+    }
+}
+
+/// Single spherical overlap gradient element dS/dA[3].
+__device__ __forceinline__ void d_overlap_grad_elem(
+    int ang_a, int sa, int ang_b, int sb,
+    const double* aa, const double* ca, int npa, const double* ab, const double* cb, int npb,
+    double xa, double ya, double za, double xb, double yb, double zb, double gA[3])
+{
+    gA[0]=gA[1]=gA[2]=0.0;
+    const int nca = d_cart_count(ang_a), ncb = d_cart_count(ang_b);
+    for (int pa = 0; pa < nca; ++pa) { const double ta = d_sph_cart_coeff(ang_a, sa, pa);
+        if (ta == 0.0) continue; int lxa, lya, lza; d_cart_pow(ang_a, pa, lxa, lya, lza);
+        for (int pb = 0; pb < ncb; ++pb) { const double tb = d_sph_cart_coeff(ang_b, sb, pb);
+            if (tb == 0.0) continue; int lxb, lyb, lzb; d_cart_pow(ang_b, pb, lxb, lyb, lzb);
+            double gc[3];
+            d_cart_overlap_grad(aa,ca,npa,ab,cb,npb,xa,ya,za,xb,yb,zb,
+                                lxa,lya,lza,lxb,lyb,lzb,gc);
+            const double w = ta*tb;
+            gA[0] += w*gc[0]; gA[1] += w*gc[1]; gA[2] += w*gc[2];
+        }
+    }
+}
+
+/// Contracted cartesian global multipole + A-gradient for explicit powers
+/// (reuses d_mpg_dGdA, which is general in the powers).
+__device__ __forceinline__ void d_cart_multipole_grad_global(
+    const double* aa, const double* ca, int npa, const double* ab, const double* cb, int npb,
+    double Ax, double Ay, double Az, double Bx, double By, double Bz,
+    int lxa, int lya, int lza, int lxb, int lyb, int lzb,
+    double& S, double D[3], double dS_dA[3], double dDg_dA[3][3], double dQg_dA[3][6])
+{
+    S = 0.0; for (int k=0;k<3;++k){ D[k]=0.0; dS_dA[k]=0.0; }
+    for (int l=0;l<3;++l){ for (int k=0;k<3;++k) dDg_dA[l][k]=0.0; for (int q=0;q<6;++q) dQg_dA[l][q]=0.0; }
+    const int qnx[6] = {2,1,0,1,0,0}, qny[6] = {0,1,2,0,1,0}, qnz[6] = {0,0,0,1,1,2};
+    for (int ip = 0; ip < npa; ++ip) { const double ai = aa[ip], cci = ca[ip];
+        for (int jp = 0; jp < npb; ++jp) { const double aj = ab[jp], cc = cci*cb[jp];
+            const double g = ai+aj;
+            const double Px = (ai*Ax+aj*Bx)/g, Py = (ai*Ay+aj*By)/g, Pz = (ai*Az+aj*Bz)/g;
+            const double PAx = Px-Ax, PBx = Px-Bx, PAy = Py-Ay, PBy = Py-By, PAz = Pz-Az, PBz = Pz-Bz;
+            const double Rx = Ax-Bx, Ry = Ay-By, Rz = Az-Bz;
+            const double K = exp(-ai*aj/g*(Rx*Rx+Ry*Ry+Rz*Rz));
+            double Ix[3], Iy[3], Iz[3];
+            double IxAlo[3]={0,0,0},IyAlo[3]={0,0,0},IzAlo[3]={0,0,0};
+            double IxBlo[3]={0,0,0},IyBlo[3]={0,0,0},IzBlo[3]={0,0,0};
+            for (int n=0;n<=2;++n) {
+                Ix[n] = d_cartMoment1d(lxa,lxb,n,PAx,PBx,Px,g);
+                Iy[n] = d_cartMoment1d(lya,lyb,n,PAy,PBy,Py,g);
+                Iz[n] = d_cartMoment1d(lza,lzb,n,PAz,PBz,Pz,g);
+            }
+            if (lxa>0) for (int n=0;n<=2;++n) IxAlo[n]=d_cartMoment1d(lxa-1,lxb,n,PAx,PBx,Px,g);
+            if (lya>0) for (int n=0;n<=2;++n) IyAlo[n]=d_cartMoment1d(lya-1,lyb,n,PAy,PBy,Py,g);
+            if (lza>0) for (int n=0;n<=2;++n) IzAlo[n]=d_cartMoment1d(lza-1,lzb,n,PAz,PBz,Pz,g);
+            if (lxb>0) for (int n=0;n<=2;++n) IxBlo[n]=d_cartMoment1d(lxa,lxb-1,n,PAx,PBx,Px,g);
+            if (lyb>0) for (int n=0;n<=2;++n) IyBlo[n]=d_cartMoment1d(lya,lyb-1,n,PAy,PBy,Py,g);
+            if (lzb>0) for (int n=0;n<=2;++n) IzBlo[n]=d_cartMoment1d(lza,lzb-1,n,PAz,PBz,Pz,g);
+
+            S    += cc*K*Ix[0]*Iy[0]*Iz[0];
+            D[0] += cc*K*Ix[1]*Iy[0]*Iz[0]; D[1] += cc*K*Ix[0]*Iy[1]*Iz[0]; D[2] += cc*K*Ix[0]*Iy[0]*Iz[1];
+
+            const double kfA[3] = { -2.0*ai*aj/g*Rx, -2.0*ai*aj/g*Ry, -2.0*ai*aj/g*Rz };
+            for (int l=0;l<3;++l) {
+                dS_dA[l] += cc*d_mpg_dGdA(0,0,0,l, Ix,Iy,Iz, IxAlo,IyAlo,IzAlo, IxBlo,IyBlo,IzBlo,
+                                          K,kfA,ai,aj,g, lxa,lya,lza,lxb,lyb,lzb);
+                for (int k=0;k<3;++k) {
+                    const int dnx=(k==0),dny=(k==1),dnz=(k==2);
+                    dDg_dA[l][k] += cc*d_mpg_dGdA(dnx,dny,dnz,l, Ix,Iy,Iz, IxAlo,IyAlo,IzAlo, IxBlo,IyBlo,IzBlo,
+                                                  K,kfA,ai,aj,g, lxa,lya,lza,lxb,lyb,lzb);
+                }
+                for (int q=0;q<6;++q)
+                    dQg_dA[l][q] += cc*d_mpg_dGdA(qnx[q],qny[q],qnz[q],l, Ix,Iy,Iz, IxAlo,IyAlo,IzAlo,
+                                                  IxBlo,IyBlo,IzBlo, K,kfA,ai,aj,g, lxa,lya,lza,lxb,lyb,lzb);
+            }
+        }
+    }
+}
+
+/// Single spherical transformed (origin-at-B, traceless) multipole gradient:
+/// D_out[3] + dD_dA[3][3] + dQ_dA[3][6]. Matches d_cgto_multipole_grad_transformed.
+__device__ __forceinline__ void d_multipole_grad_elem(
+    int ang_a, int sa, int ang_b, int sb,
+    const double* aa, const double* ca, int npa, const double* ab, const double* cb, int npb,
+    double Ax, double Ay, double Az, double Bx, double By, double Bz,
+    double D_out[3], double dD_dA[3][3], double dQ_dA[3][6])
+{
+    double S_raw = 0.0, D_raw[3] = {0,0,0}, dS_dA[3] = {0,0,0};
+    double dDg_dA[3][3] = {{0}}, dQg_dA[3][6] = {{0}};
+    const int nca = d_cart_count(ang_a), ncb = d_cart_count(ang_b);
+    for (int pa = 0; pa < nca; ++pa) { const double ta = d_sph_cart_coeff(ang_a, sa, pa);
+        if (ta == 0.0) continue; int lxa, lya, lza; d_cart_pow(ang_a, pa, lxa, lya, lza);
+        for (int pb = 0; pb < ncb; ++pb) { const double tb = d_sph_cart_coeff(ang_b, sb, pb);
+            if (tb == 0.0) continue; int lxb, lyb, lzb; d_cart_pow(ang_b, pb, lxb, lyb, lzb);
+            double Sc, Dc[3], dSc[3], dDgc[3][3], dQgc[3][6];
+            d_cart_multipole_grad_global(aa,ca,npa,ab,cb,npb, Ax,Ay,Az,Bx,By,Bz,
+                                         lxa,lya,lza,lxb,lyb,lzb, Sc,Dc,dSc,dDgc,dQgc);
+            const double w = ta*tb;
+            S_raw += w*Sc;
+            for (int k=0;k<3;++k){ D_raw[k] += w*Dc[k]; dS_dA[k] += w*dSc[k];
+                for (int l=0;l<3;++l) dDg_dA[l][k] += w*dDgc[l][k]; }
+            for (int l=0;l<3;++l) for (int q=0;q<6;++q) dQg_dA[l][q] += w*dQgc[l][q];
+        }
+    }
+    const double B[3] = {Bx, By, Bz};
+    for (int k=0;k<3;++k) D_out[k] = D_raw[k] - B[k]*S_raw;
+    for (int l=0;l<3;++l) for (int k=0;k<3;++k) dD_dA[l][k] = dDg_dA[l][k] - B[k]*dS_dA[l];
+    const int qa[6] = {0,0,1,0,1,2}, qb[6] = {0,1,1,2,2,2};
+    for (int l=0;l<3;++l) {
+        double dqr[6];
+        for (int q=0;q<6;++q){ const int a=qa[q], b=qb[q];
+            dqr[q] = dQg_dA[l][q] - B[a]*dDg_dA[l][b] - B[b]*dDg_dA[l][a] + B[a]*B[b]*dS_dA[l]; }
+        const double dtr = 0.5*(dqr[0]+dqr[2]+dqr[5]);
+        dQ_dA[l][0]=1.5*dqr[0]-dtr; dQ_dA[l][1]=1.5*dqr[1]; dQ_dA[l][2]=1.5*dqr[2]-dtr;
+        dQ_dA[l][3]=1.5*dqr[3]; dQ_dA[l][4]=1.5*dqr[4]; dQ_dA[l][5]=1.5*dqr[5]-dtr;
+    }
+}
+
 // ---- Coulomb gamma matrix (Stage 3c) --------------------------------------
 // Klopman–Ohno kernel (xtb_coulomb.hpp:98). gexp=2 for both methods. The
 // per-shell hardness g is precomputed on the host (molecule-constant) and

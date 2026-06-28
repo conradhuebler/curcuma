@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Regenerate the embedded SPIR-V (*.spv.inc) from the GLSL compute shaders.
+# Run after editing any *.comp. Requires glslc (Vulkan SDK / shaderc).
+# The committed *.spv.inc are #included by spirv_kernels.h, so the curcuma build
+# itself does NOT need glslc.
+set -euo pipefail
+cd "$(dirname "$0")"
+for s in angles col row vec gemm scale_cols fock popband \
+         cn self_energy overlap_h0 gamma \
+         grad_rep grad_coulomb grad_pulay multipole_ints \
+         fock_multipole multipole_moments \
+         angles_f32 col_f32 row_f32 vec_f32 \
+         tri_matvec tri_rank2 tri_applyl tri_house tri_kw \
+         tri_house_f32 tri_matvec_f32 tri_kw_f32 tri_rank2_f32 tri_applyl_f32 \
+         gemm_g tri_vfull wy_buildt \
+         d4_dedq d4_grad d4_atm \
+         d4eeq_cn d4eeq_build d4eeq_solve d4eeq_resp \
+         dc_secular_root dc_lowner dc_evec_cols dc_merge_rank1 dc_leaf_jacobi; do
+    glslc --target-env=vulkan1.1 -mfmt=c -fshader-stage=compute "$s.comp" -o "$s.spv.inc"
+    echo "compiled $s.comp -> $s.spv.inc"
+done
+echo "done. Rebuild curcuma to pick up the new SPIR-V."

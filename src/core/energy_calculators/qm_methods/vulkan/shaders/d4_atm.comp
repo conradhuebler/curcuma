@@ -1,0 +1,100 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+// D4 ATM 3-body (energy + nuclear gradient + dE/dCN) — per-atom GATHER over unordered pairs
+// {x,y} (the triple {a,x,y}). The triple-edge force is antisymmetric (dG_ba = -dG_ab; the dftd4
+// dang is symmetric in the edge endpoints) so atom `a` accumulates only ITS member's force from
+// each triple → no FP64 atomics (RADV lacks them), each triple's energy counted once per member
+// (host: E = ⅓·Σ e_atom). Verbatim port of D4Evaluator::computeATM (dftd4 atm.f90). q=0 reference
+// C6/∂C6/∂CN supplied as nat² matrices (c6 symmetric; dc6dcn[a·nat+b] = ∂C6(a,b)/∂CN_a).
+// GLSL fp64 has no pow/log, so (r0/r1)^(alp/3) = cbrt(b^alp) via Newton (alp integer = 16).
+// Claude Generated.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer B0 { double xyz[]; };       // 3·nat (resident, Bohr)
+layout(std430, binding = 1) readonly buffer B1 { double r4r2[]; };      // nat   (resident √Zr4r2)
+layout(std430, binding = 2) readonly buffer B2 { double c6[]; };        // nat·nat (q=0 ref C6)
+layout(std430, binding = 3) readonly buffer B3 { double dc6dcn[]; };    // nat·nat (∂C6/∂CN_a)
+layout(std430, binding = 4) readonly buffer B4 { double params[]; };    // s9,a1,a2,alp,cut2
+layout(std430, binding = 5)          buffer B5 { double e_atom[]; };    // nat (out)
+layout(std430, binding = 6)          buffer B6 { double grad[]; };      // 3·nat (out)
+layout(std430, binding = 7)          buffer B7 { double dEdcn[]; };     // nat (out)
+layout(push_constant) uniform PC { uint nat; } pc;
+
+// cbrt(x) for x>0, FP64: Newton from a float seed (quadratic convergence → ~1e-15 in 3 iters).
+double cbrt_d(double x) {
+    if (x <= 0.0lf) return 0.0lf;
+    double s = double(pow(float(x), 0.3333333333333333));
+    s = (2.0lf*s + x/(s*s)) / 3.0lf;
+    s = (2.0lf*s + x/(s*s)) / 3.0lf;
+    s = (2.0lf*s + x/(s*s)) / 3.0lf;
+    return s;
+}
+// b^(alp/3) = (b^alp)^(1/3), alp an integer (16 for GFN2). b = r0/r1 > 0.
+double pow_alp3(double b, double alp) {
+    int n = int(alp + 0.5lf);
+    double bn = 1.0lf;
+    for (int k = 0; k < n; ++k) bn *= b;
+    return cbrt_d(bn);
+}
+
+void main()
+{
+    uint a = gl_GlobalInvocationID.x;
+    if (a >= pc.nat) return;
+    uint nat = pc.nat;
+    double s9 = params[0], a1 = params[1], a2 = params[2], alp = params[3], cut2 = params[4];
+    const double eps = 2.220446049250313e-16lf;
+    double xa = xyz[3u*a+0u], ya = xyz[3u*a+1u], za = xyz[3u*a+2u];
+    double r4r2a = r4r2[a];
+
+    double eacc = 0.0lf, gx = 0.0lf, gy = 0.0lf, gz = 0.0lf, cnacc = 0.0lf;
+    for (uint x = 0u; x < nat; ++x) {
+        if (x == a) continue;
+        double vaxx = xyz[3u*x+0u]-xa, vaxy = xyz[3u*x+1u]-ya, vaxz = xyz[3u*x+2u]-za;  // v_ax = r_x-r_a
+        double r2ax = vaxx*vaxx + vaxy*vaxy + vaxz*vaxz;
+        if (r2ax > cut2 || r2ax < eps) continue;
+        double c6ax = c6[a*nat + x];
+        double r0ax = a1*sqrt(3.0lf*r4r2a*r4r2[x]) + a2;
+        for (uint y = 0u; y < x; ++y) {
+            if (y == a) continue;
+            double vayx = xyz[3u*y+0u]-xa, vayy = xyz[3u*y+1u]-ya, vayz = xyz[3u*y+2u]-za;  // v_ay = r_y-r_a
+            double r2ay = vayx*vayx + vayy*vayy + vayz*vayz;
+            if (r2ay > cut2 || r2ay < eps) continue;
+            double dxyx = xyz[3u*y+0u]-xyz[3u*x+0u], dxyy = xyz[3u*y+1u]-xyz[3u*x+1u], dxyz_ = xyz[3u*y+2u]-xyz[3u*x+2u];
+            double r2xy = dxyx*dxyx + dxyy*dxyy + dxyz_*dxyz_;
+            if (r2xy > cut2 || r2xy < eps) continue;
+
+            double c6ay = c6[a*nat + y];
+            double c6xy = c6[x*nat + y];
+            double prod = c6ax*c6ay*c6xy;
+            double c9 = -s9 * sqrt(prod < 0.0lf ? -prod : prod);
+            double r0ay = a1*sqrt(3.0lf*r4r2a*r4r2[y]) + a2;
+            double r0xy = a1*sqrt(3.0lf*r4r2[x]*r4r2[y]) + a2;
+            double r0 = r0ax*r0ay*r0xy;
+            double r2 = r2ax*r2ay*r2xy;
+            double r1 = sqrt(r2);
+            double r3 = r2*r1;
+            double r5 = r3*r2;
+            double pw = pow_alp3(r0/r1, alp);
+            double fdmp = 1.0lf/(1.0lf + 6.0lf*pw);
+            double ang = 0.375lf*(r2ax + r2xy - r2ay)*(r2ax - r2xy + r2ay)*(-r2ax + r2xy + r2ay)/r5 + 1.0lf/r3;
+            double dE = ang*fdmp*c9;
+            eacc += -dE;
+
+            double dfdmp = -2.0lf*alp*pw*fdmp*fdmp;
+            double dang_ax = -0.375lf*(r2ax*r2ax*r2ax + r2ax*r2ax*(r2xy+r2ay)
+                          + r2ax*(3.0lf*r2xy*r2xy + 2.0lf*r2xy*r2ay + 3.0lf*r2ay*r2ay)
+                          - 5.0lf*(r2xy-r2ay)*(r2xy-r2ay)*(r2xy+r2ay))/r5;
+            double gcax = c9*(-dang_ax*fdmp + ang*dfdmp)/r2ax;
+            gx += -gcax*vaxx; gy += -gcax*vaxy; gz += -gcax*vaxz;
+            double dang_ay = -0.375lf*(r2ay*r2ay*r2ay + r2ay*r2ay*(r2xy+r2ax)
+                          + r2ay*(3.0lf*r2xy*r2xy + 2.0lf*r2xy*r2ax + 3.0lf*r2ax*r2ax)
+                          - 5.0lf*(r2xy-r2ax)*(r2xy-r2ax)*(r2xy+r2ax))/r5;
+            double gcay = c9*(-dang_ay*fdmp + ang*dfdmp)/r2ay;
+            gx += -gcay*vayx; gy += -gcay*vayy; gz += -gcay*vayz;
+            cnacc += -dE*0.5lf*(dc6dcn[a*nat+x]/c6ax + dc6dcn[a*nat+y]/c6ay);
+        }
+    }
+    e_atom[a] = eacc;
+    grad[3u*a+0u] = gx; grad[3u*a+1u] = gy; grad[3u*a+2u] = gz;
+    dEdcn[a] = cnacc;
+}

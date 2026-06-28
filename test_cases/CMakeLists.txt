@@ -123,6 +123,15 @@ if(USE_PCH)
         target_precompile_headers(test_gfnff_validation REUSE_FROM curcuma_core)
 endif()
 
+# Claude Generated (June 2026): per-frame CPU-vs-GPU gradient diagnostic on a fixed
+# trajectory — the clean force-backend metric (replaces the misleading MD heat-exchange).
+# Builds unconditionally; the gpu config falls back to CPU when CUDA is not compiled in.
+add_executable(test_gfnff_grad_traj test_gfnff_grad_traj.cpp)
+target_link_libraries(test_gfnff_grad_traj curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_grad_traj REUSE_FROM curcuma_core)
+endif()
+
 # Copy reference data to build tree so tests can find them
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
@@ -244,8 +253,10 @@ add_test(NAME test_polymerbuild_structure
 set_tests_properties(test_polymerbuild_structure PROPERTIES TIMEOUT 120)
 
 # Claude Generated (April 2026): CPU GFN-FF analytical vs numerical gradient test
-# Tests gradient correctness for all built-in molecules (H2O, CH4, CH3OH, CH3OCH3)
-# Use --fixed-charges flag to isolate formula bugs from missing dq/dx terms
+# Tests gradient correctness for all built-in molecules (H2O, CH4, CH3OH, CH3OCH3).
+# gfnff_numgrad_builtin compares the analytical Gradient() against the FULL finite
+# difference (NumGrad, EEQ + CN recomputed each step) — the physically meaningful
+# total derivative an optimiser/MD consumes.
 add_executable(test_gfnff_numgrad test_gfnff_numgrad.cpp)
 target_link_libraries(test_gfnff_numgrad curcuma_core test_molecule_registry)
 
@@ -259,11 +270,16 @@ add_test(NAME gfnff_numgrad_builtin
 set_tests_properties(gfnff_numgrad_builtin
     PROPERTIES TIMEOUT 120 LABELS "gfnff;gradient;cpu")
 
-add_test(NAME gfnff_numgrad_fixed_charges
-         COMMAND test_gfnff_numgrad --fixed-charges
-         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-set_tests_properties(gfnff_numgrad_fixed_charges
-    PROPERTIES TIMEOUT 120 LABELS "gfnff;gradient;cpu")
+# NOTE (Claude Generated, June 2026): the former gfnff_numgrad_fixed_charges ctest was
+# removed. It compared the analytical gradient against the FIXED-charge finite difference
+# (--fixed-charges, EEQ frozen) on the premise that the analytical gradient was a
+# frozen-charge approximation (no dq/dx). That premise is obsolete: since the Feb-2026
+# Coulomb Term-1b / dynamic-charge gradient work the analytical Gradient() is the TOTAL
+# derivative (it includes the charge response), so it correctly disagrees with the
+# fixed-charge partial derivative — for polar molecules the charge-response term is large
+# and opposes the partial geometry term (H2O: total -1.2e-2 vs partial +2.9e-2 Eh/Bohr).
+# The full-EEQ gfnff_numgrad_builtin validates the gradient; the --fixed-charges flag is
+# retained on the binary for manual formula diagnostics only (not a pass/fail gate).
 
 # Claude Generated (WP5, June 2026): GFN-FF self-consistent ALPB solvation gradient.
 # Analytical Gradient() vs NumGrad() (full FD incl. solvated EEQ re-solve) in water.

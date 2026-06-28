@@ -256,8 +256,11 @@ void RMSDDriver::LoadAlignmentMethodParameters()
     if (it != method_map.end()) {
         m_method = static_cast<int>(it->second);
     } else {
-        CurcumaLogger::warn_fmt("Unknown alignment method '{}', defaulting to 'incr'", method);
-        m_method = static_cast<int>(AlignmentMethod::INCREMENTAL);
+        // Claude Generated (June 2026): Fall back to the recommended default 'subspace'
+        // (ATOM_TEMPLATE) instead of the legacy 'incr', which is so slow on larger ensembles
+        // that an unknown method looked like a hang. subspace gives a sane, fast result.
+        CurcumaLogger::warn_fmt("Unknown alignment method '{}', defaulting to 'subspace'", method);
+        m_method = static_cast<int>(AlignmentMethod::ATOM_TEMPLATE);
     }
 
     // Set limit for atom_template and dtemplate; 0 means use class default (m_limit = 10)

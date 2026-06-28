@@ -144,7 +144,7 @@ public:
 protected:
     bool m_initialised = false;
     Matrix m_geometry, m_gradient;
-    double m_charge, m_spin = 0, m_muli = 1;
+    double m_charge = 0.0, m_spin = 0, m_muli = 1;
     std::vector<int> m_atoms;
 
     std::string m_method = "none";

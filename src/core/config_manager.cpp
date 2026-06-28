@@ -160,8 +160,11 @@ ConfigManager::ConfigManager(const std::vector<std::string>& modules, const json
         std::cerr << "[ConfigManager] Module '" << module << "': " << module_defaults.size() << " default params" << std::endl;
         #endif
 
-        // DEBUG: Print actual defaults loaded
+        // DEBUG: Print actual defaults loaded (Claude Generated June 2026: was leaking the full
+        // defaults JSON to stderr on every run; gate it like every other ConfigManager trace).
+        #ifdef DEBUG_CONFIG_MANAGER
         std::cerr << "[ConfigManager] Defaults for '" << module << "': " << module_defaults.dump() << std::endl;
+        #endif
 
         // Extract user input for this module - Claude Generated 2025: Fixed nested/flat separation
         json module_user_input;

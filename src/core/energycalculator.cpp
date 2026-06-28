@@ -44,24 +44,16 @@ static const char* const kEnergyCalcMethodScopes[] = {
     "d3", "d4", "uff", "qmdff", "eht", "orca"
 };
 
-void EnergyCalculator::reattachMethodScopes(const json& controller) {
-    bool needs_recreate = false;
-    for (const char* scope : kEnergyCalcMethodScopes) {
-        if (controller.contains(scope) && !m_controller.contains(scope)) {
-            m_controller[scope] = controller[scope];
-            needs_recreate = true;
-        }
-    }
-    if (needs_recreate) createMethod(m_method_name, m_controller);
-}
 
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
     : m_method_name(method)
     , m_basename("")
     , m_energy(0.0)
 {
-    initializeCommonFromConfig(ConfigManager("energycalculator", controller));
-    reattachMethodScopes(controller);
+    // D-1 (Claude Generated): pass the raw controller so method sub-scopes that
+    // ConfigManager would strip are re-merged BEFORE the single createMethod —
+    // the previous reattachMethodScopes() path built the method a second time.
+    initializeCommonFromConfig(ConfigManager("energycalculator", controller), &controller);
 }
 
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller, const std::string& basename)
@@ -69,8 +61,7 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
     , m_basename(basename)
     , m_energy(0.0)
 {
-    initializeCommonFromConfig(ConfigManager("energycalculator", controller));
-    reattachMethodScopes(controller);
+    initializeCommonFromConfig(ConfigManager("energycalculator", controller), &controller);
 }
 
 // ConfigManager-based constructors (new, preferred) - Claude Generated: Phase 3C
@@ -96,7 +87,7 @@ EnergyCalculator::~EnergyCalculator() {
 }
 
 // Claude Generated: Phase 3C - ConfigManager-based initialization
-void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config) {
+void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config, const json* raw_controller) {
     // Only show initialization info if verbosity is high enough
     if (getEffectiveVerbosity() >= 2) {
         CurcumaLogger::info("Initializing EnergyCalculator (ConfigManager)");
@@ -112,6 +103,17 @@ void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config) {
 
     // Store configuration
     m_controller = config.exportConfig();  // Export for compatibility with existing code
+
+    // D-1 (Claude Generated): re-attach method sub-scopes that the "energycalculator"
+    // ConfigManager strips (gfnff, xtb, eeq_solver, …) so createMethod below sees them
+    // on the first (and only) build. Previously this was a post-construction
+    // reattachMethodScopes() that rebuilt the whole method a second time.
+    if (raw_controller && raw_controller->is_object()) {
+        for (const char* scope : kEnergyCalcMethodScopes) {
+            if (raw_controller->contains(scope) && !m_controller.contains(scope))
+                m_controller[scope] = (*raw_controller)[scope];
+        }
+    }
 
     if (getEffectiveVerbosity() >= 3) {
         CurcumaLogger::param_table(m_controller, "EnergyCalculator Configuration");
@@ -163,8 +165,7 @@ void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config) {
 
 // Backward compatible wrapper - delegates to ConfigManager version
 void EnergyCalculator::initializeCommon(const json& controller) {
-    initializeCommonFromConfig(ConfigManager("energycalculator", controller));
-    reattachMethodScopes(controller);
+    initializeCommonFromConfig(ConfigManager("energycalculator", controller), &controller);
 }
 
 bool EnergyCalculator::createMethod(const std::string& method_name, const json& config) {
@@ -210,14 +211,27 @@ bool EnergyCalculator::createMethod(const std::string& method_name, const json& 
         
         ClearError();
 
-#ifndef USE_CUDA
-        // Track GPU fallback: user requested -gpu cuda but CUDA unavailable
-        std::string gpu_req = config.value("gpu", "none");
-        std::transform(gpu_req.begin(), gpu_req.end(), gpu_req.begin(), ::tolower);
-        if (gpu_req == "cuda") {
-            m_gpu_fallback = true;
-        }
+        // Track GPU fallback: user explicitly requested a GPU backend (cuda/rocm/
+        // vulkan) that this build was not compiled with. "auto" is best-effort and
+        // never warns. Claude Generated (June 2026): generalised from CUDA-only.
+        {
+            std::string gpu_req = config.value("gpu", "none");
+            std::transform(gpu_req.begin(), gpu_req.end(), gpu_req.begin(), ::tolower);
+            bool explicit_gpu = (gpu_req == "cuda" || gpu_req == "rocm" || gpu_req == "vulkan");
+            bool have_backend = false;
+#if defined(USE_CUDA)
+            if (gpu_req == "cuda") have_backend = true;
 #endif
+#if defined(USE_ROCM)
+            if (gpu_req == "rocm") have_backend = true;
+#endif
+#if defined(USE_VULKAN)
+            if (gpu_req == "vulkan") have_backend = true;
+#endif
+            if (explicit_gpu && !have_backend) {
+                m_gpu_fallback = true;
+            }
+        }
 
         return true;
         
@@ -452,7 +466,8 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
 
         // Final warning if GPU was requested but fell back to CPU
         if (m_gpu_fallback && !m_gpu_fallback_warned) {
-            CurcumaLogger::warn("Calculation completed on CPU. The requested -gpu cuda was not used.");
+            CurcumaLogger::warn("Calculation completed on CPU. The requested -gpu backend "
+                                "was not compiled into this build.");
             m_gpu_fallback_warned = true;
         }
 

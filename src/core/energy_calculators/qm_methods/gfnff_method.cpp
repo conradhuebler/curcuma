@@ -42,6 +42,16 @@ bool GFNFFComputationalMethod::setMolecule(const Mol& mol) {
         return false;
     }
 
+    // F-Q4 (Claude Generated): refuse a topology built on EEQ placeholder charges
+    // instead of letting a wrong Coulomb energy/gradient propagate silently.
+    if (m_gfnff->eeqSolveFailed()) {
+        m_has_error = true;
+        m_error_message = "GFN-FF EEQ solver fell back to placeholder charges during "
+                          "topology setup; refusing to return an energy built on wrong charges";
+        CurcumaLogger::error(m_error_message);
+        return false;
+    }
+
     return true;
 }
 
@@ -69,6 +79,16 @@ double GFNFFComputationalMethod::calculateEnergy(bool gradient) {
     }
 
     m_last_energy = m_gfnff->Calculation(gradient);
+
+    // F-Q4 (Claude Generated): a per-step EEQ fallback (opt/MD) means the charges — and
+    // hence the Coulomb energy/gradient — are wrong. Flag it so EnergyCalculator refuses
+    // the result instead of feeding E to an optimiser/integrator.
+    if (m_gfnff->eeqSolveFailed()) {
+        m_has_error = true;
+        m_error_message = "GFN-FF EEQ solver fell back to placeholder charges; the Coulomb "
+                          "energy/gradient is unreliable";
+        CurcumaLogger::error(m_error_message);
+    }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("GFNFFComputationalMethod::calculateEnergy complete");

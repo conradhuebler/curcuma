@@ -1,0 +1,29 @@
+#version 450
+// B = A * J : rotate columns p,q (all rows i). Column-major: A[i + col*n].
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, binding = 0) buffer Abuf  { double A[]; };
+layout(std430, binding = 1) readonly buffer Pbuf  { int    pairs[]; };
+layout(std430, binding = 2) readonly buffer CSbuf { double cs[]; };
+layout(push_constant) uniform PC { uint n; uint npairs; uint round; } pc;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;  // row
+    uint k = gl_GlobalInvocationID.y;  // pair
+    if (i >= pc.n || k >= pc.npairs) return;
+
+    uint base = (pc.round * pc.npairs + k) * 2u;
+    int p = pairs[base];
+    int q = pairs[base + 1u];
+    if (p < 0 || q < 0 || p >= int(pc.n) || q >= int(pc.n)) return;
+
+    double c = cs[k * 2u];
+    double s = cs[k * 2u + 1u];
+    uint n = pc.n;
+    uint ip = i + uint(p) * n;
+    uint iq = i + uint(q) * n;
+    double aip = A[ip];
+    double aiq = A[iq];
+    A[ip] = c * aip - s * aiq;
+    A[iq] = s * aip + c * aiq;
+}

@@ -226,7 +226,9 @@ if(Python3_Interpreter_FOUND)
     set(_SQM_VAL_REF  ${CMAKE_CURRENT_SOURCE_DIR}/reference_data)
     set(_SQM_VAL_MOL  ${CMAKE_CURRENT_SOURCE_DIR}/molecules)
     set(_SQM_VAL_TOL  1e-8)
-    set(_SQM_MOLS H2 He2 LiH H2O CH4 NH3 C6H6 HCN acetic_acid_dimer caffeine triose complex)
+    set(_SQM_MOLS H2 He2 LiH H2O CH4 NH3 C6H6 HCN acetic_acid_dimer caffeine triose complex
+        # X-I1 d-shell main-group set (S/P/Cl/Si), all <= 1e-8 vs tblite.
+        H2S PH3 SiH4 HCl)
 
     # Molecules NOT yet at 1e-8 -> tracked expected-failures (WILL_FAIL). Measured
     # |dE| = |E_native - E_tblite| (Eh), 2026-05-31 (after the GFN1 third-order
@@ -387,6 +389,70 @@ if(Python3_Interpreter_FOUND)
                             --gpu cuda --ref ${_gref} --xyz ${_SQM_VAL_MOL}/${_mol}.xyz)
                     set_tests_properties(sqm_gbsa_gpu_${_mol}_${_meth}_water
                         PROPERTIES TIMEOUT 120 LABELS "gpu_${_meth}_gbsa")
+                endif()
+            endforeach()
+        endforeach()
+    endif()
+
+    # ROCm native xTB validation (Claude Generated, X-I1 B6 d-shell port): identical
+    # 1e-8 energy gate vs the committed tblite references, but with -gpu rocm so the
+    # integral build + SCF + gradient run on the AMD device, including the d-shell
+    # molecules (H2S/PH3/SiH4/HCl) now that the HIP kernels carry the cartesian->
+    # spherical dtrafo. ROCm defaults FP32 mixed-precision eigensolve ON, but the
+    # energies are bit-identical to CPU (only the gradient at the loose default
+    # scf_threshold differs ~1e-7, which this energy-only validator does not probe).
+    # Without an AMD device the wrapper falls back to CPU, so these never false-fail
+    # off-GPU. Labels: gpu_gfn1_validation_rocm / gpu_gfn2_validation_rocm.
+    if(USE_ROCM_XTB)
+        foreach(_meth gfn1 gfn2)
+            if(_meth STREQUAL gfn1)
+                set(_xfail ${_GFN1_XFAIL})
+            else()
+                set(_xfail ${_GFN2_XFAIL})
+            endif()
+            foreach(_mol ${_SQM_MOLS})
+                add_test(NAME sqm_val_rocm_${_mol}_${_meth}
+                    COMMAND ${Python3_EXECUTABLE} ${_SQM_VAL_PY}
+                        --curcuma $<TARGET_FILE:curcuma> --quiet --tol-energy ${_SQM_VAL_TOL}
+                        --gpu rocm
+                        --ref ${_SQM_VAL_REF}/${_mol}_${_meth}.ref.json
+                        --xyz ${_SQM_VAL_MOL}/${_mol}.xyz)
+                set_tests_properties(sqm_val_rocm_${_mol}_${_meth}
+                    PROPERTIES TIMEOUT 180 LABELS "gpu_${_meth}_validation_rocm")
+                if(${_mol} IN_LIST _xfail)
+                    set_tests_properties(sqm_val_rocm_${_mol}_${_meth} PROPERTIES WILL_FAIL TRUE)
+                endif()
+            endforeach()
+        endforeach()
+    endif()
+
+    # EIG-3 Vulkan GPU divide-and-conquer tridiagonal eigensolve (opt-in, Claude Generated):
+    # re-run the 1e-8 validation with -gpu vulkan and CURCUMA_VK_TRIDIAG_SOLVE=dc so the
+    # tridiagonal eigensolve (Phase 2) runs as the device Cuppen D&C (leaves + deflation +
+    # secular on the GPU). The D&C matches the host tql2 to <1e-8, so the SAME xfail set
+    # applies; without a Vulkan device the wrapper falls back to CPU (env ignored) so these
+    # never false-fail off-GPU. Small molecules only (the full-GPU D&C is intentionally slow;
+    # complex/triose are validated manually). Label: gpu_vulkan_dc.
+    if(USE_VULKAN_XTB)
+        set(_DC_MOLS H2 He2 LiH H2O CH4 NH3 C6H6 HCN acetic_acid_dimer caffeine)
+        foreach(_meth gfn1 gfn2)
+            if(_meth STREQUAL gfn1)
+                set(_xfail ${_GFN1_XFAIL})
+            else()
+                set(_xfail ${_GFN2_XFAIL})
+            endif()
+            foreach(_mol ${_DC_MOLS})
+                add_test(NAME sqm_val_vkdc_${_mol}_${_meth}
+                    COMMAND ${Python3_EXECUTABLE} ${_SQM_VAL_PY}
+                        --curcuma $<TARGET_FILE:curcuma> --quiet --tol-energy ${_SQM_VAL_TOL}
+                        --gpu vulkan
+                        --ref ${_SQM_VAL_REF}/${_mol}_${_meth}.ref.json
+                        --xyz ${_SQM_VAL_MOL}/${_mol}.xyz)
+                set_tests_properties(sqm_val_vkdc_${_mol}_${_meth}
+                    PROPERTIES TIMEOUT 180 LABELS "gpu_vulkan_dc"
+                    ENVIRONMENT "CURCUMA_VK_TRIDIAG_SOLVE=dc")
+                if(${_mol} IN_LIST _xfail)
+                    set_tests_properties(sqm_val_vkdc_${_mol}_${_meth} PROPERTIES WILL_FAIL TRUE)
                 endif()
             endforeach()
         endforeach()

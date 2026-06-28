@@ -20,6 +20,7 @@
 #include "lbfgspp_optimizer.h"
 #include "src/core/citation_registry.h"
 #include "src/tools/general.h"
+#include <cmath>
 #include <stdexcept>
 
 namespace Optimization {
@@ -92,18 +93,29 @@ double LBFGSppObjectiveFunction::operator()(const Vector& x, Vector& grad)
             }
         }
 
-        // Claude Generated 2026 - Interactive force injection (mouse grab): add
-        // the external bias to the gradient LBFGSpp actually uses for its line
-        // search. Same units/layout as the analytical gradient (Eh/Bohr,
-        // atom-major). Respect constraints so fixed atoms stay fixed.
+        // Claude Generated 2026 - Interactive force injection (mouse grab).
+        // CRITICAL: LBFGSpp's backtracking line search only accepts a step that
+        // sufficiently decreases the RETURNED ENERGY. So the grab cannot be a
+        // gradient-only bias — that would be fought by the line search and the
+        // atom would barely move. Instead add a consistent linear bias POTENTIAL
+        //     E_bias = sum_i f_ext[i] * x[i]
+        // whose gradient is exactly f_ext (the term we add to grad below). Then
+        // energy and gradient agree, the line search accepts the motion, and the
+        // atom settles at the displaced equilibrium where the restoring force
+        // balances the pull. Same units/layout as the analytical gradient
+        // (Eh/Bohr, atom-major). Respect constraints so fixed atoms stay fixed.
         if (m_external_forces && m_external_forces->size() == grad.size()) {
+            double bias_energy = 0.0;
             for (int i = 0; i < m_atom_count && i < m_constraints.size(); ++i) {
                 if (m_constraints[i] != 0) {
-                    grad[3 * i] += (*m_external_forces)[3 * i];
-                    grad[3 * i + 1] += (*m_external_forces)[3 * i + 1];
-                    grad[3 * i + 2] += (*m_external_forces)[3 * i + 2];
+                    for (int c = 0; c < 3; ++c) {
+                        const double f = (*m_external_forces)[3 * i + c];
+                        grad[3 * i + c] += f;
+                        bias_energy += f * x[3 * i + c];
+                    }
                 }
             }
+            energy += bias_energy;  // keep energy consistent with the biased gradient
         }
 
         m_last_energy = energy;

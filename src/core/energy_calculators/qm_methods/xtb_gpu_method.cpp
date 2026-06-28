@@ -209,6 +209,9 @@ public:
 
     // ---- Device nuclear gradient (Stage 4) --------------------------------
     bool supportsGradient() const override { return true; }
+    // X-I1: the CUDA integral/SCF/gradient kernels handle d shells (cartesian->
+    // spherical dtrafo in xtb_gpu_integrals_device.cuh). Claude Generated.
+    bool supportsDshell() const override { return true; }
 
     bool gradient(const Matrix& P, const Eigen::MatrixXd& C, const Vector& eps,
                   int nocc_orbs, const Vector& v_ao, const Vector& q_sh,

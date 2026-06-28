@@ -732,6 +732,12 @@ bool GFNFF::InitialiseMolecule(const Mol& molecule)
 
 bool GFNFF::InitialiseMolecule()
 {
+    // F-Q4 (Claude Generated): fresh molecule -> clear the EEQ fail-loud state. The
+    // solver is (re)created and exercised below; calculateTopologyInfo() sets the flag
+    // if it falls back to placeholder charges.
+    m_eeq_solve_failed = false;
+    if (m_eeq_solver) m_eeq_solver->clearSolveStatus();
+
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== GFNFF::InitialiseMolecule() START ===");
         CurcumaLogger::param("atom_count", std::to_string(m_atomcount));
@@ -1590,13 +1596,21 @@ GFNFF::EEQGPUParams GFNFF::prepareEEQParametersForGPU(const Vector& cn) const
 
 void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
 {
-    // Claude Generated (Apr 2026): If lists were freshly built during init and geometry
-    // has not changed, skip redundant re-detection. This saves ~8s on large single-points.
-    if (m_hbxb_fresh && !shouldUpdateHBXB(m_geometry_bohr))
-        return;
+    // Task #11 (Jun 2026): optional periodic forced rebuild for continuous MD where
+    // near-threshold pairs must be re-classified faster than the RMSD trigger fires.
+    const int force_every = m_parameters.value("hb_update_force_every", 0);
+    const bool force_update = (force_every > 0) && (m_hbxb_update_calls % force_every == 0);
+    ++m_hbxb_update_calls;
 
-    if (!shouldUpdateHBXB(m_geometry_bohr))
-        return;
+    if (!force_update) {
+        // Claude Generated (Apr 2026): If lists were freshly built during init and geometry
+        // has not changed, skip redundant re-detection. This saves ~8s on large single-points.
+        if (m_hbxb_fresh && !shouldUpdateHBXB(m_geometry_bohr))
+            return;
+
+        if (!shouldUpdateHBXB(m_geometry_bohr))
+            return;
+    }
 
     // Store old counts for verbose output
     int old_hb_count = m_hb_reference ? m_hb_reference->nhb_count : 0;
@@ -1679,6 +1693,10 @@ double GFNFF::Calculation(bool gradient)
 {
     // Claude Generated (February 2026): Start total calculation timer for verbosity 1+
     auto calc_start = std::chrono::high_resolution_clock::now();
+
+    // F-Q4 (Claude Generated): reset the per-step EEQ fail-loud flag so eeqSolveFailed()
+    // reflects this step's solve (sticky init failures persist via m_eeq_solve_failed).
+    if (m_eeq_solver) m_eeq_solver->clearSolveStatus();
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== GFNFF::Calculation() START ===");
@@ -2228,9 +2246,11 @@ bool GFNFF::shouldUpdateHBXB(const Eigen::MatrixXd& current_geometry) const
 
     // Update if geometry changed significantly
     // Reference: gfnff_ini2.f90:717 - "if (rmsd .lt. 1.d-6.or.rmsd .gt. 0.3d0)"
-    if (rmsd > 0.3) {
+    // Task #11 (Jun 2026): threshold tunable via hb_update_rmsd_bohr (default 0.3 = Fortran).
+    const double rmsd_threshold = m_parameters.value("hb_update_rmsd_bohr", 0.3);
+    if (rmsd > rmsd_threshold) {
         if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info(fmt::format("HB/XB update triggered: RMSD = {:.4f} Bohr (threshold: 0.3)", rmsd));
+            CurcumaLogger::info(fmt::format("HB/XB update triggered: RMSD = {:.4f} Bohr (threshold: {:.4f})", rmsd, rmsd_threshold));
         }
         return true;
     }
@@ -7967,8 +7987,16 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     // Step 2 & 3: Identify potential acceptor-donor pairs (A-B) and actual HB contacts
     // Claude Generated (Feb 25, 2026): Rewritten to match Fortran gfnff_ini2.f90:700-748
     // Fortran uses accuracy=0.1 → hbthr1=250, hbthr2=450 (squared Bohr)
-    const double hbthr1 = 250.0;  // nhb2 detection: r_AB² < hbthr1 (Bohr²)
-    const double hbthr2 = 450.0;  // nhb1 detection: r_AB² + r_AH² + r_BH² < hbthr2 (Bohr²)
+    // Task #11 (Jun 2026): thresholds are now tunable. Default hb_accuracy=0.1 reproduces
+    // the Fortran formula (gfnff_param.f90:553-554). Direct overrides (>0) win.
+    double hbthr1, hbthr2;
+    {
+        const double hb_acc = m_parameters.value("hb_accuracy", 0.1);
+        const double thr1_override = m_parameters.value("hb_thr1_bohr2", 0.0);
+        const double thr2_override = m_parameters.value("hb_thr2_bohr2", 0.0);
+        hbthr1 = (thr1_override > 0.0) ? thr1_override : (200.0 - std::log10(hb_acc) * 50.0);
+        hbthr2 = (thr2_override > 0.0) ? thr2_override : (400.0 - std::log10(hb_acc) * 50.0);
+    }
 
     // Pre-build bond lookup set for O(1) bonding checks
     std::set<std::pair<int,int>> bond_set;
@@ -7987,13 +8015,21 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     // Claude Generated (Apr 2026): Use spatial cell list for O(N) AB-pair generation.
     // The double loop is O(N²); with a cell list only atom pairs within the HB cutoff
     // (~15.8 Bohr) are considered.  Threshold configurable via nb_cell_list_min_atoms.
+    // Lever 1 (Jun 2026): build the cell list with the LARGER nhb1 cutoff sqrt(hbthr2) and
+    // hoist it out of this branch so the inner HB loop can reuse it (forEachNeighbor) and
+    // avoid the O(ab_pairs * n_hydrogens) full hydrogen scan. ab_pairs keep the sqrt(hbthr1)
+    // distance filter (now applied explicitly on r2 since the cell cutoff is larger).
     const double ab_cutoff = std::sqrt(hbthr1);  // ~15.81 Bohr
+    (void)ab_cutoff;
     const int hb_cell_threshold = m_parameters.value("nb_cell_list_min_atoms",
         m_parameters.value("hb_cell_list_min_atoms", 800));
+    SpatialCellList cell_list;
+    bool have_cell_list = false;
     if (hb_cell_threshold == 0 || m_atomcount >= hb_cell_threshold) {
-        SpatialCellList cell_list;
-        cell_list.build(m_geometry_bohr, ab_cutoff);
-        cell_list.forEachPair([&](int i, int j, double /*r2*/) {
+        cell_list.build(m_geometry_bohr, std::sqrt(hbthr2));
+        have_cell_list = true;
+        cell_list.forEachPair([&](int i, int j, double r2) {
+            if (r2 > hbthr1) return;  // ab_pairs only within sqrt(hbthr1)
             // Fortran gfnff_ini.f90:882: if(at(i)==6 .and. piadr2(i)==0) cycle
             if (m_atoms[i] == 6 && topo_info.pi_fragments[i] == 0) return;
             if (m_atoms[j] == 6 && topo_info.pi_fragments[j] == 0) return;
@@ -8007,7 +8043,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             if (m_atoms[j] > 10) q_thresh_j += 0.2;
             if (charges[j] > q_thresh_j) return;
 
-            // HB strength criterion (check both directions)
+            // HB strength criterion (check both directions) — mirrors Fortran gfnff_ini.f90:833
             double strength1 = current_basicity[i] * current_acidity[j];
             double strength2 = current_basicity[j] * current_acidity[i];
             if (strength1 < 1e-6 && strength2 < 1e-6) return;
@@ -8088,6 +8124,127 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
 
     int nhb1_count = 0, nhb2_count = 0;
 
+    if (have_cell_list) {
+        // ===== Lever 1 (Jun 2026): cell-list HB candidate generation =====
+        // Replaces the O(n_ab_pairs * n_hydrogens) inner scan (the dominant single-point
+        // cost on dense H-bonding liquids, ~33% of wall) with an EXACT, pruned generation:
+        //   - nhb2 (H bonded to a donor): iterate the donor's bonded HB-hydrogens directly
+        //     via hyd_on[] (no full scan).
+        //   - nhb1 (H near both, bonded to neither): the criterion
+        //     r_AB^2 + r_iH^2 + r_jH^2 < hbthr2 implies r_iH^2 < hbthr2, so a hydrogen query
+        //     around atom i (forEachNeighbor(i, hbthr2)) captures every candidate H.
+        // Same HB set as the full scan; only the order differs (already order-tolerant: the
+        // legacy path also reorders under threading). See docs/GFNFF_PERFORMANCE_LEVERS.md.
+        std::vector<char> is_hb_hyd(m_atomcount, 0);
+        for (int H : hb_hydrogens) is_hb_hyd[H] = 1;
+        // Hydrogens bonded to each atom, restricted to HB-active hydrogens and built from the
+        // same `bonds` list as is_bonded()/bond_set, so nhb2 needs no full-hydrogen scan.
+        std::vector<std::vector<int>> hyd_on(m_atomcount);
+        for (const auto& bond : bonds) {
+            const int a = bond.first, b = bond.second;
+            if (is_hb_hyd[a]) hyd_on[b].push_back(a);
+            if (is_hb_hyd[b]) hyd_on[a].push_back(b);
+        }
+
+        auto make_nhb2 = [&](int donor_A, int H, int acceptor_B,
+                             std::vector<GFNFFHydrogenBond>& out) {
+            if (is_bonded(donor_A, acceptor_B)) return;
+            int case_type = 2;
+            int acceptor_parent = -1;
+            if (m_atoms[acceptor_B] == 8 && topo_info.neighbor_lists[acceptor_B].size() == 1) {
+                int parent = topo_info.neighbor_lists[acceptor_B][0];
+                if (m_atoms[parent] == 6 || m_atoms[parent] == 7) {
+                    case_type = 3;
+                    acceptor_parent = parent;
+                }
+            } else if (m_atoms[acceptor_B] == 7 && topo_info.neighbor_lists[acceptor_B].size() == 2) {
+                case_type = 4;
+            }
+            GFNFFHydrogenBond hb;
+            hb.i = donor_A; hb.j = H; hb.k = acceptor_B;
+            hb.basicity_A = current_basicity[donor_A];
+            hb.basicity_B = current_basicity[acceptor_B];
+            hb.acidity_A = current_acidity[donor_A];
+            hb.acidity_B = current_acidity[acceptor_B];
+            hb.q_H = charges[H]; hb.q_A = charges[donor_A]; hb.q_B = charges[acceptor_B];
+            hb.r_cut = 50.0;
+            hb.case_type = case_type;
+            for (int nb : topo_info.neighbor_lists[donor_A])
+                if (nb != H) hb.neighbors_A.push_back(nb);
+            hb.neighbors_B = topo_info.neighbor_lists[acceptor_B];
+            if (case_type == 3) {
+                hb.acceptor_parent_index = acceptor_parent;
+                for (int nb : topo_info.neighbor_lists[acceptor_parent])
+                    if (nb != acceptor_B) hb.neighbors_C.push_back(nb);
+            }
+            out.push_back(hb);
+        };
+
+        auto process_pair = [&](int i, int j, std::vector<GFNFFHydrogenBond>& out) {
+            const Vector r_i = m_geometry_bohr.row(i);
+            const Vector r_j = m_geometry_bohr.row(j);
+            const double r_AB_sq = (r_i - r_j).squaredNorm();
+            if (r_AB_sq > hbthr1) return;
+            const bool ij_nonbond = !is_bonded(i, j);
+            if (ij_nonbond) {
+                for (int H : hyd_on[i]) make_nhb2(i, H, j, out);
+                for (int H : hyd_on[j]) {
+                    if (is_bonded(i, H)) continue;  // bonded-to-i takes precedence (legacy if/else-if)
+                    make_nhb2(j, H, i, out);
+                }
+            }
+            cell_list.forEachNeighbor(i, hbthr2, [&](int H, double r_iH_sq) {
+                if (!is_hb_hyd[H]) return;
+                if (is_bonded(i, H) || is_bonded(j, H)) return;  // bonded to neither
+                const Vector r_H = m_geometry_bohr.row(H);
+                const double r_jH_sq = (r_j - r_H).squaredNorm();
+                if (r_AB_sq + r_iH_sq + r_jH_sq < hbthr2) {
+                    GFNFFHydrogenBond hb;
+                    hb.case_type = 1;
+                    hb.i = i; hb.j = H; hb.k = j;
+                    hb.basicity_A = current_basicity[i];
+                    hb.basicity_B = current_basicity[j];
+                    hb.acidity_A = current_acidity[i];
+                    hb.acidity_B = current_acidity[j];
+                    hb.q_H = charges[H]; hb.q_A = charges[i]; hb.q_B = charges[j];
+                    hb.r_cut = 50.0;
+                    out.push_back(hb);
+                }
+            });
+        };
+
+        CxxThreadPool* opt_pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+        const int opt_par_threshold = m_parameters.value("hb_parallel_min_pairs", 500);
+        const bool opt_parallel = (opt_pool != nullptr && opt_par_threshold >= 0
+                                   && static_cast<int>(ab_pairs.size()) > opt_par_threshold);
+        if (opt_parallel) {
+            int n_threads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+            std::vector<std::future<std::vector<GFNFFHydrogenBond>>> futures;
+            futures.reserve(n_threads);
+            size_t chunk = std::max<size_t>(1, ab_pairs.size() / n_threads);
+            for (int t = 0; t < n_threads; ++t) {
+                size_t start = static_cast<size_t>(t) * chunk;
+                size_t end = (t == n_threads - 1) ? ab_pairs.size() : start + chunk;
+                if (start >= ab_pairs.size()) break;
+                futures.push_back(opt_pool->enqueue([&, start, end]() {
+                    std::vector<GFNFFHydrogenBond> local;
+                    for (size_t idx = start; idx < end; ++idx)
+                        process_pair(ab_pairs[idx].i, ab_pairs[idx].j, local);
+                    return local;
+                }));
+            }
+            for (auto& f : futures) {
+                auto local = f.get();
+                for (const auto& hb : local) { if (hb.case_type == 1) nhb1_count++; else nhb2_count++; }
+                hbonds.insert(hbonds.end(), local.begin(), local.end());
+            }
+        } else {
+            std::vector<GFNFFHydrogenBond> local;
+            for (const auto& ab : ab_pairs) process_pair(ab.i, ab.j, local);
+            for (const auto& hb : local) { if (hb.case_type == 1) nhb1_count++; else nhb2_count++; }
+            hbonds.insert(hbonds.end(), local.begin(), local.end());
+        }
+    } else {
     // Claude Generated (Apr 2026): Parallelise main HB detection loop via CxxThreadPool.
     // The AB-pair outer loop is embarrassingly parallel; each thread collects into
     // its own local vector, merged after the barrier.  No locking in the hot path.
@@ -8264,9 +8421,15 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             }
         }
     }
+    }  // end Lever 1 branch: if (have_cell_list) { optimized } else { legacy full scan }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("Detected {} hydrogen bonds", hbonds.size()));
+    }
+    // Task #11 diagnostic: nhb1 (case 1) / nhb2 (case 2+3+4) split — compare to the
+    // Fortran analyzer's "nhb1 = / nhb2 =" lines for an element-class-wise HB-list check.
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("  HB split: nhb1 = {}, nhb2 = {}", nhb1_count, nhb2_count));
     }
 
     // Claude Generated (February 2026): Report timing at verbosity 1+
@@ -8842,7 +9005,11 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         if (topo_info.topology_charges.size() != m_atomcount) {
             CurcumaLogger::warn("calculateTopologyInfo: Phase 1 topology charges failed - using uniform fallback");
             topo_info.topology_charges = Vector::Constant(m_atomcount, static_cast<double>(m_charge) / m_atomcount);
+            m_eeq_solve_failed = true;  // F-Q4: placeholder charges -> wrapper must refuse
         }
+        // F-Q4: the solver's own uniform fallback returns a correctly-sized vector, so
+        // the size check above misses it — pick up its status flag explicitly.
+        if (m_eeq_solver->lastSolveFailed()) m_eeq_solve_failed = true;
 
         {
             auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
@@ -8932,7 +9099,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         if (topo_info.eeq_charges.size() != m_atomcount) {
             CurcumaLogger::warn("calculateTopologyInfo: Phase 2 energy charges failed - using Phase 1 charges as fallback");
             topo_info.eeq_charges = topo_info.topology_charges;
+            m_eeq_solve_failed = true;  // F-Q4: placeholder charges -> wrapper must refuse
         }
+        if (m_eeq_solver->lastSolveFailed()) m_eeq_solve_failed = true;  // F-Q4 (see Phase 1)
 
         // Validate charge conservation for both charge systems
         double total_charge_qa = topo_info.topology_charges.sum();
@@ -9419,66 +9588,87 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
     // ===== NON-BONDED REPULSION =====
     const TopologyInfo& topo_info = getCachedTopology();
 
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
-            if (bonded_set.count({i, j}) > 0) continue;
+    // Lever 5 (Jun 2026): the non-bonded repulsion energy + gradient hard-cut at r_cut
+    // (NB_REP_RCUT, forcefieldthread.cpp:2207/2266), so a pair beyond r_cut contributes
+    // EXACTLY 0. Build the non-bonded pair list with a spatial cell list at the r_cut
+    // radius instead of the uncapped O(N²) double loop — same in-cutoff pair set, energy
+    // bit-identical, but it culls the ~N² long-range pairs on a large system. Gated on
+    // nb_cell_list_min_atoms (same knob as the HB list); small systems keep the O(N²)
+    // path bit-identical.
+    constexpr double NB_REP_RCUT = 20.0;
 
-            int zi = m_atoms[i] - 1;
-            int zj = m_atoms[j] - 1;
+    auto make_nb_rep = [&](int ii, int jj) {
+        int i = std::min(ii, jj);
+        int j = std::max(ii, jj);
+        if (i == j) return;
+        if (bonded_set.count({i, j}) > 0) return;
 
-            bool valid = (zi >= 0 && zi < static_cast<int>(repan_angewChem2020.size()) &&
-                          zj >= 0 && zj < static_cast<int>(repan_angewChem2020.size()));
-            if (!valid) continue;
+        int zi = m_atoms[i] - 1;
+        int zj = m_atoms[j] - 1;
 
-            double repz_i = (zi >= 0 && zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
-            double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
+        bool valid = (zi >= 0 && zi < static_cast<int>(repan_angewChem2020.size()) &&
+                      zj >= 0 && zj < static_cast<int>(repan_angewChem2020.size()));
+        if (!valid) return;
 
-            double qa_i = (i < topo_info.topology_charges.size()) ? topo_info.topology_charges[i] : 0.0;
-            double qa_j = (j < topo_info.topology_charges.size()) ? topo_info.topology_charges[j] : 0.0;
-            double cn_i = (i < topo_info.neighbor_counts.size()) ? topo_info.neighbor_counts[i] : 0.0;
-            double cn_j = (j < topo_info.neighbor_counts.size()) ? topo_info.neighbor_counts[j] : 0.0;
+        double repz_i = (zi >= 0 && zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
+        double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
 
-            double fn_i = 1.0 + NREPSCAL / (1.0 + cn_i * cn_i);
-            double fn_j = 1.0 + NREPSCAL / (1.0 + cn_j * cn_j);
-            double dum1 = repan_angewChem2020[zi] * (1.0 + qa_i * QREPSCAL) * fn_i;
-            double dum2 = repan_angewChem2020[zj] * (1.0 + qa_j * QREPSCAL) * fn_j;
+        double qa_i = (i < topo_info.topology_charges.size()) ? topo_info.topology_charges[i] : 0.0;
+        double qa_j = (j < topo_info.topology_charges.size()) ? topo_info.topology_charges[j] : 0.0;
+        double cn_i = (i < topo_info.neighbor_counts.size()) ? topo_info.neighbor_counts[i] : 0.0;
+        double cn_j = (j < topo_info.neighbor_counts.size()) ? topo_info.neighbor_counts[j] : 0.0;
 
-            double ff = 1.0;
-            int Z_i = m_atoms[i];
-            int Z_j = m_atoms[j];
+        double fn_i = 1.0 + NREPSCAL / (1.0 + cn_i * cn_i);
+        double fn_j = 1.0 + NREPSCAL / (1.0 + cn_j * cn_j);
+        double dum1 = repan_angewChem2020[zi] * (1.0 + qa_i * QREPSCAL) * fn_i;
+        double dum2 = repan_angewChem2020[zj] * (1.0 + qa_j * QREPSCAL) * fn_j;
 
-            if (Z_i == 1 && Z_j == 1) {
-                ff = HHFAC;
-                int topo_dist = topo_info.topo_distances[i][j];
-                if (topo_dist == 2) ff *= HH13REP;
-                else if (topo_dist == 3) ff *= HH14REP;
-            }
-            else if ((Z_i == 1 && PeriodicTable::getMetalType(Z_j) > 0) ||
-                     (Z_j == 1 && PeriodicTable::getMetalType(Z_i) > 0)) {
-                ff = 0.85;
-            }
-            else if ((Z_i == 1 && Z_j == 6) || (Z_j == 1 && Z_i == 6)) {
-                ff = 0.91;
-            }
-            else if ((Z_i == 1 && Z_j == 8) || (Z_j == 1 && Z_i == 8)) {
-                ff = 1.04;
-            }
+        double ff = 1.0;
+        int Z_i = m_atoms[i];
+        int Z_j = m_atoms[j];
 
-            GFNFFRepulsion r;
-            r.i = i;
-            r.j = j;
-            r.alpha = std::sqrt(dum1 * dum2) * ff;
-            r.repab = repz_i * repz_j * REPSCALN;
-            r.r_cut = 20.0;
-
-            nonbonded_reps.push_back(r);
-
-            if (m_rep_diag) {
-                int topo_dist = topo_info.topo_distances[i][j];
-                fmt::print(stderr, "nb_rep {:3d}-{:3d} alpha={:.10f} repab={:.10f} qa_i={:.10f} qa_j={:.10f} cn_i={:.0f} cn_j={:.0f} ff={:.4f} bpair={}\n",
-                    i+1, j+1, r.alpha, r.repab, qa_i, qa_j, cn_i, cn_j, ff, topo_dist);
-            }
+        if (Z_i == 1 && Z_j == 1) {
+            ff = HHFAC;
+            int topo_dist = topo_info.topo_distances[i][j];
+            if (topo_dist == 2) ff *= HH13REP;
+            else if (topo_dist == 3) ff *= HH14REP;
         }
+        else if ((Z_i == 1 && PeriodicTable::getMetalType(Z_j) > 0) ||
+                 (Z_j == 1 && PeriodicTable::getMetalType(Z_i) > 0)) {
+            ff = 0.85;
+        }
+        else if ((Z_i == 1 && Z_j == 6) || (Z_j == 1 && Z_i == 6)) {
+            ff = 0.91;
+        }
+        else if ((Z_i == 1 && Z_j == 8) || (Z_j == 1 && Z_i == 8)) {
+            ff = 1.04;
+        }
+
+        GFNFFRepulsion r;
+        r.i = i;
+        r.j = j;
+        r.alpha = std::sqrt(dum1 * dum2) * ff;
+        r.repab = repz_i * repz_j * REPSCALN;
+        r.r_cut = NB_REP_RCUT;
+
+        nonbonded_reps.push_back(r);
+
+        if (m_rep_diag) {
+            int topo_dist = topo_info.topo_distances[i][j];
+            fmt::print(stderr, "nb_rep {:3d}-{:3d} alpha={:.10f} repab={:.10f} qa_i={:.10f} qa_j={:.10f} cn_i={:.0f} cn_j={:.0f} ff={:.4f} bpair={}\n",
+                i+1, j+1, r.alpha, r.repab, qa_i, qa_j, cn_i, cn_j, ff, topo_dist);
+        }
+    };
+
+    const int nb_rep_cell_threshold = m_parameters.value("nb_cell_list_min_atoms", 800);
+    if (nb_rep_cell_threshold == 0 || m_atomcount >= nb_rep_cell_threshold) {
+        SpatialCellList rep_cells;
+        rep_cells.build(m_geometry_bohr, NB_REP_RCUT);
+        rep_cells.forEachPair([&](int i, int j, double /*r2*/) { make_nb_rep(i, j); });
+    } else {
+        for (int i = 0; i < m_atomcount; ++i)
+            for (int j = i + 1; j < m_atomcount; ++j)
+                make_nb_rep(i, j);
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -9540,6 +9730,8 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
         d4_input["d4_s8"] = 2.00;
         d4_input["d4_s6"] = 1.00;
         d4_input["d4_s9"] = 1.00;
+        // Lever 3 Opt B: plumb the user-facing gfnff flag down to the generator.
+        d4_input["d4_disp_half_contraction"] = m_parameters.value("disp_half_contraction", true);
 
         ConfigManager d4_config("d4param", d4_input);
         m_d4_generator = std::make_unique<D4ParameterGenerator>(d4_config);
@@ -9548,6 +9740,10 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
         if (topo_info.topology_charges.size() > 0) {
             m_d4_generator->setTopologyCharges(topo_info.topology_charges);
         }
+
+        // WP-A: when the GPU builds the pair list on device, keep only the CN + gw
+        // (the device reuses them) and skip the host O(N^2) pair loop + host dc6dcn.
+        m_d4_generator->setSkipPairLoop(m_skip_host_disp_pairs);
 
         dispersions = m_d4_generator->GenerateDispersionPairsNative(m_atoms, m_geometry_bohr);
 
@@ -9716,6 +9912,8 @@ json GFNFF::generateGFNFFDispersionPairs() const
             d4_input["d4_s8"] = 2.00;
             d4_input["d4_s6"] = 1.00;
             d4_input["d4_s9"] = 1.00;
+            // Lever 3 Opt B: plumb the user-facing gfnff flag down to the generator.
+            d4_input["d4_disp_half_contraction"] = m_parameters.value("disp_half_contraction", true);
 
             ConfigManager d4_config("d4param", d4_input);
             // Claude Generated (Feb 15, 2026): Store D4ParameterGenerator for runtime dc6dcn access

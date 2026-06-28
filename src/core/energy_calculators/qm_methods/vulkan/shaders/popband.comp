@@ -1,0 +1,26 @@
+#version 450
+// FP64 Mulliken populations + band-energy partials from the resident density P
+// (n×n column-major, symmetric). One invocation per AO i:
+//   out[i]   = Σ_j P[i,j]·S[i,j]    (Mulliken AO population)
+//   out[n+i] = Σ_j P[i,j]·H0[i,j]   (band-energy partial; host sums to band = Σ P⊙H0)
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Pb  { double P[]; };
+layout(std430, binding = 1) readonly  buffer Sb  { double S[]; };
+layout(std430, binding = 2) readonly  buffer H0b { double H0[]; };
+layout(std430, binding = 3) writeonly buffer Ob  { double outp[]; };
+layout(push_constant) uniform PC { uint n; } pc;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+    uint n = pc.n;
+    double pop = 0.0lf, bnd = 0.0lf;
+    for (uint j = 0u; j < n; ++j) {
+        double p = P[i + j * n];
+        pop += p * S[i + j * n];
+        bnd += p * H0[i + j * n];
+    }
+    outp[i]     = pop;
+    outp[n + i] = bnd;
+}

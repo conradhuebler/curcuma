@@ -1,0 +1,92 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+// Post-SCF: the whole 2-body D4 (energy + nuclear gradient + dE/dCN + dE/dq) in one per-atom
+// GATHER — a superset of d4_dedq.comp. No FP64 atomics (RADV lacks them): the pair force is
+// antisymmetric (atom j's own invocation accumulates the mirror term) and the energy is
+// per-atom (host halves Σ e_atom). Port of D4Evaluator::computeEnergyAndGradient's per-reference
+// 2-body path: dE_dr = -C6·ddisp_dr2·(R_i-R_j) with ddisp_dr2 = s6·(-6r⁴t6²) + s8·r4r2·(-8r⁶t8²)
+// (the C6·ζc6 rescale cancels in the per-reference path), dEdcn_i = -dc6dcn_i·disp_sum,
+// dEdq_i = -dc6dq_i·disp_sum. Claude Generated.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0)  readonly buffer B0  { int    Zelem[]; };     // nat
+layout(std430, binding = 1)  readonly buffer B1  { int    nref[]; };      // nat
+layout(std430, binding = 2)  readonly buffer B2  { double sqrtZr4r2[]; }; // nat
+layout(std430, binding = 3)  readonly buffer B3  { double xyz[]; };       // 3·nat (Bohr)
+layout(std430, binding = 4)  readonly buffer B4  { double c6[]; };        // 118²·7²
+layout(std430, binding = 5)  readonly buffer B5  { double W[]; };         // nat·7
+layout(std430, binding = 6)  readonly buffer B6  { double dWq[]; };       // nat·7
+layout(std430, binding = 7)  readonly buffer B7  { double dWc[]; };       // nat·7 (∂W/∂CN)
+layout(std430, binding = 8)  readonly buffer B8  { double params[]; };    // s6,s8,a1,a2,cut2
+layout(std430, binding = 9)           buffer B9  { double e_atom[]; };    // nat (out)
+layout(std430, binding = 10)          buffer B10 { double grad[]; };      // 3·nat (out)
+layout(std430, binding = 11)          buffer B11 { double dEdcn[]; };     // nat (out)
+layout(std430, binding = 12)          buffer B12 { double dEdq[]; };      // nat (out)
+layout(push_constant) uniform PC { uint nat; } pc;
+
+const int MAX_ELEM = 118;
+const int MAX_REF  = 7;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.nat) return;
+    int ei  = Zelem[i] - 1;
+    int nri = nref[i];
+    if (ei < 0 || ei >= MAX_ELEM || nri <= 0) {
+        e_atom[i] = 0.0lf; grad[3u*i+0u] = 0.0lf; grad[3u*i+1u] = 0.0lf; grad[3u*i+2u] = 0.0lf;
+        dEdcn[i] = 0.0lf; dEdq[i] = 0.0lf;
+        return;
+    }
+    double s6 = params[0], s8 = params[1], a1 = params[2], a2 = params[3], cut2 = params[4];
+    double xi = xyz[3u*i+0u], yi = xyz[3u*i+1u], zi = xyz[3u*i+2u];
+    double sq_i = sqrtZr4r2[i];
+    uint wi = i * uint(MAX_REF);
+
+    double eacc = 0.0lf, gx = 0.0lf, gy = 0.0lf, gz = 0.0lf, cnacc = 0.0lf, qacc = 0.0lf;
+    for (uint j = 0u; j < pc.nat; ++j) {
+        if (j == i) continue;
+        double dx = xi - xyz[3u*j+0u];
+        double dy = yi - xyz[3u*j+1u];
+        double dz = zi - xyz[3u*j+2u];
+        double r2 = dx*dx + dy*dy + dz*dz;
+        if (r2 > cut2 || r2 < 1.0e-20lf) continue;
+        int ej  = Zelem[j] - 1;
+        int nrj = nref[j];
+        if (ej < 0 || ej >= MAX_ELEM || nrj <= 0) continue;
+
+        double r4r2ij = 3.0lf * sq_i * sqrtZr4r2[j];
+        double r0   = a1 * sqrt(r4r2ij) + a2;
+        double r0_2 = r0 * r0;
+        double r0_6 = r0_2 * r0_2 * r0_2;
+        double r0_8 = r0_6 * r0_2;
+        double r6 = r2 * r2 * r2;
+        double r8 = r6 * r2;
+        double t6 = 1.0lf / (r6 + r0_6);
+        double t8 = 1.0lf / (r8 + r0_8);
+        double disp_sum = s6 * t6 + s8 * r4r2ij * t8;
+        double d6 = -6.0lf * r2 * r2 * t6 * t6;          // -6·r⁴·t6²
+        double d8 = -8.0lf * r2 * r2 * r2 * t8 * t8;     // -8·r⁶·t8²
+        double ddisp_dr2 = s6 * d6 + s8 * r4r2ij * d8;
+
+        uint wj   = j * uint(MAX_REF);
+        uint base = (uint(ei) * uint(MAX_ELEM) + uint(ej)) * uint(MAX_REF) * uint(MAX_REF);
+        double C6 = 0.0lf, dc6dcni = 0.0lf, dc6dqi = 0.0lf;
+        for (int a = 0; a < nri; ++a) {
+            uint basea = base + uint(a) * uint(MAX_REF);
+            double sW = 0.0lf;
+            for (int b = 0; b < nrj; ++b) sW += W[wj + uint(b)] * c6[basea + uint(b)];
+            C6      += W[wi + uint(a)]   * sW;
+            dc6dcni += dWc[wi + uint(a)] * sW;
+            dc6dqi  += dWq[wi + uint(a)] * sW;
+        }
+        eacc += -C6 * disp_sum;
+        double f = -C6 * ddisp_dr2;
+        gx += f * dx; gy += f * dy; gz += f * dz;
+        cnacc += -dc6dcni * disp_sum;
+        qacc  += -dc6dqi  * disp_sum;
+    }
+    e_atom[i] = eacc;
+    grad[3u*i+0u] = gx; grad[3u*i+1u] = gy; grad[3u*i+2u] = gz;
+    dEdcn[i] = cnacc;
+    dEdq[i]  = qacc;
+}

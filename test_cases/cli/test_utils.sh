@@ -38,17 +38,16 @@ if [ -z "$CURCUMA" ]; then
         fi
     fi
 
-    # Try release first (faster for CLI tests), then debug, then build
-    export CURCUMA="$PROJECT_ROOT/release/curcuma"
-    if [ ! -f "$CURCUMA" ]; then
-        export CURCUMA="$PROJECT_ROOT/debug/curcuma"
-    fi
-    if [ ! -f "$CURCUMA" ]; then
-        export CURCUMA="$PROJECT_ROOT/build/curcuma"
-    fi
-    if [ ! -f "$CURCUMA" ]; then
+    # Try release first (faster for CLI tests), then debug, build, and the GPU build dirs.
+    for _bd in release debug build release_rocm release_cuda release_vulkan build_rocm; do
+        if [ -f "$PROJECT_ROOT/$_bd/curcuma" ]; then
+            export CURCUMA="$PROJECT_ROOT/$_bd/curcuma"
+            break
+        fi
+    done
+    if [ -z "$CURCUMA" ] || [ ! -f "$CURCUMA" ]; then
         echo -e "${RED}ERROR: curcuma binary not found!${NC}"
-        echo "Expected at: $PROJECT_ROOT/debug/curcuma, $PROJECT_ROOT/release/curcuma, or $PROJECT_ROOT/build/curcuma"
+        echo "Expected at: $PROJECT_ROOT/{release,debug,build,release_rocm,release_cuda,release_vulkan}/curcuma"
         exit 1
     fi
     echo -e "${BLUE}Using curcuma:${NC} $CURCUMA"
@@ -170,6 +169,42 @@ assert_string_not_in_file() {
     fi
 }
 
+# Helper: Assert file exists and is non-empty (Claude Generated, June 2026)
+assert_file_not_empty() {
+    local filepath=$1
+    local msg=${2:-"File non-empty: $filepath"}
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ -s "$filepath" ]; then
+        echo -e "${GREEN}✓ PASS${NC}: $msg"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        return 0
+    else
+        echo -e "${RED}✗ FAIL${NC}: $msg (missing or empty: '$filepath')"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        return 1
+    fi
+}
+
+# Helper: Assert exact string equality (Claude Generated, June 2026)
+# Used to pin the ConfScan result fingerprint "<accepted> <reorder> <reuse> <skipped>".
+assert_equals() {
+    local expected=$1
+    local actual=$2
+    local msg=${3:-"Value equals"}
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ "$expected" == "$actual" ]; then
+        echo -e "${GREEN}✓ PASS${NC}: $msg (got: '$actual')"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        return 0
+    else
+        echo -e "${RED}✗ FAIL${NC}: $msg (expected: '$expected', got: '$actual')"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        return 1
+    fi
+}
+
 # Helper: Compare numerical value with tolerance
 assert_numeric_match() {
     local expected=$1
@@ -232,11 +267,20 @@ count_xyz_structures() {
         return
     fi
 
-    # Count how many times we see the start of a new structure
-    # Each structure starts with: <number_of_atoms>\n<comment>\n<coordinates>
-    awk 'NR % (natoms + 2) == 1 && NR == 1 {natoms = $1}
-         NR % (natoms + 2) == 1 && NR > 1 {count++}
-         END {print count + (NR > 0 ? 1 : 0)}' "$xyzfile"
+    # Count frames by reading each frame's own atom-count header (Claude Generated, June 2026).
+    # The previous version assumed a CONSTANT atom count across frames (NR % (natoms+2)); a
+    # multi-XYZ with mixed atom counts was miscounted. This walks frame-by-frame from the first
+    # header: read header -> skip comment + natoms coordinate lines -> next header. It counts
+    # every logical conformer entry, including degenerate 0-atom frames (so the "number of
+    # filtered structures" is reported correctly even when a writer emits reduced geometries).
+    awk '{
+        natoms = $1 + 0
+        count++
+        for (i = 0; i < natoms + 1; i++) {
+            if ((getline) <= 0) break
+        }
+    }
+    END { print count + 0 }' "$xyzfile"
 }
 
 # Helper: Compare floating point with tolerance (scientific validation)
@@ -373,6 +417,25 @@ find_output_file() {
     fi
     # Search in BMT directories (basename.keyword.YYYYMMDD_HHMMSS/filename)
     find . -maxdepth 2 -name "$filename" -type f 2>/dev/null | head -1
+}
+
+# Remove everything in the CWD except the named keep-files (Claude Generated, June 2026).
+# Tests run from build-tree dirs that accumulate stale output across runs; a partial
+# cleanup lets find_output_file match stale data and produces false pass/fail. This
+# guarantees a clean slate so each run is deterministic.
+# Usage: clean_dir_keep conformers.xyz run_test.sh
+clean_dir_keep() {
+    local prune=()
+    local f
+    for f in "$@"; do prune+=( ! -name "$f" ); done
+    find . -mindepth 1 -maxdepth 1 "${prune[@]}" -exec rm -rf {} + 2>/dev/null || true
+}
+
+# Extract the ConfScan result fingerprint "<accepted> <reorder> <reuse> <skipped>"
+# from a log file, tolerating ANSI color codes that may prefix the line (the line is
+# printed via std::cout right after colored CurcumaLogger output). Claude Generated.
+extract_confscan_summary() {
+    sed 's/\x1b\[[0-9;]*m//g' "$1" 2>/dev/null | grep -E '^[0-9]+ [0-9]+ [0-9]+ [0-9]+$' | tail -1
 }
 
 # Remove BMT output directories in current directory

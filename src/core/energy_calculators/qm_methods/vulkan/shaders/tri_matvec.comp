@@ -1,0 +1,20 @@
+#version 450
+// Householder tridiagonalization, step k: matvec over the trailing m×m block.
+//   praw[i] = Σ_j A_sub[i,j]·v[j],   A_sub = A[k+1:n, k+1:n],   v = V[:,k] (length m)
+// Column-major n×n: A[r + c·n]. One thread per trailing row i. Claude Generated.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Ab { double A[]; };
+layout(std430, binding = 1) readonly  buffer Vb { double V[]; };   // Householder vectors (col k)
+layout(std430, binding = 2) writeonly buffer Pb { double praw[]; };
+layout(push_constant) uniform PC { uint n; uint k; uint m; } pc;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.m) return;
+    uint n = pc.n, base = pc.k + 1u, vc = pc.k * n;
+    double acc = 0.0lf;
+    uint row = base + i;
+    for (uint j = 0u; j < pc.m; ++j) acc += A[row + (base + j) * n] * V[vc + j];
+    praw[i] = acc;
+}
