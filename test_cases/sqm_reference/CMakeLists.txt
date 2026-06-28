@@ -394,6 +394,38 @@ if(Python3_Interpreter_FOUND)
         endforeach()
     endif()
 
+    # ROCm native xTB validation (Claude Generated, X-I1 B6 d-shell port): identical
+    # 1e-8 energy gate vs the committed tblite references, but with -gpu rocm so the
+    # integral build + SCF + gradient run on the AMD device, including the d-shell
+    # molecules (H2S/PH3/SiH4/HCl) now that the HIP kernels carry the cartesian->
+    # spherical dtrafo. ROCm defaults FP32 mixed-precision eigensolve ON, but the
+    # energies are bit-identical to CPU (only the gradient at the loose default
+    # scf_threshold differs ~1e-7, which this energy-only validator does not probe).
+    # Without an AMD device the wrapper falls back to CPU, so these never false-fail
+    # off-GPU. Labels: gpu_gfn1_validation_rocm / gpu_gfn2_validation_rocm.
+    if(USE_ROCM_XTB)
+        foreach(_meth gfn1 gfn2)
+            if(_meth STREQUAL gfn1)
+                set(_xfail ${_GFN1_XFAIL})
+            else()
+                set(_xfail ${_GFN2_XFAIL})
+            endif()
+            foreach(_mol ${_SQM_MOLS})
+                add_test(NAME sqm_val_rocm_${_mol}_${_meth}
+                    COMMAND ${Python3_EXECUTABLE} ${_SQM_VAL_PY}
+                        --curcuma $<TARGET_FILE:curcuma> --quiet --tol-energy ${_SQM_VAL_TOL}
+                        --gpu rocm
+                        --ref ${_SQM_VAL_REF}/${_mol}_${_meth}.ref.json
+                        --xyz ${_SQM_VAL_MOL}/${_mol}.xyz)
+                set_tests_properties(sqm_val_rocm_${_mol}_${_meth}
+                    PROPERTIES TIMEOUT 180 LABELS "gpu_${_meth}_validation_rocm")
+                if(${_mol} IN_LIST _xfail)
+                    set_tests_properties(sqm_val_rocm_${_mol}_${_meth} PROPERTIES WILL_FAIL TRUE)
+                endif()
+            endforeach()
+        endforeach()
+    endif()
+
     # EIG-3 Vulkan GPU divide-and-conquer tridiagonal eigensolve (opt-in, Claude Generated):
     # re-run the 1e-8 validation with -gpu vulkan and CURCUMA_VK_TRIDIAG_SOLVE=dc so the
     # tridiagonal eigensolve (Phase 2) runs as the device Cuppen D&C (leaves + deflation +

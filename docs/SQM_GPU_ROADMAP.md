@@ -31,8 +31,10 @@ SCF **and** the on-device nuclear gradient (V-AP1 done), so GFN1 `-opt`/`-md` ar
 device-resident. Both backends now also build the **GFN2 multipole integrals
 (dp_int/qp_int) on the device** (R-AP1 / V-AP2 done) and download them so the host GFN2
 SCF skips its O(nao²) integral loop. They still trail CUDA on the GFN2 **resident**
-multipole SCF + multipole gradient, GFN-FF, and device solvation. The s/p-only limit
-(H/C/N/O…, no d shells) of the CPU native path applies to all GPU ports.
+multipole SCF + multipole gradient, GFN-FF, and device solvation. **d shells** (main-group
+S/P/Cl/Si/…) are now device-resident on **CUDA and ROCm** (X-I1 B6; ROCm validated on a
+Radeon 890M, energy bit-identical to CPU, `-opt` tracks the CPU trajectory); **Vulkan d still
+falls back to CPU** (needs GLSL/SPIR-V shaders).
 
 > **Vulkan note (no FP64 atomics):** Vulkan/GLSL has no `atomicAdd(double)` (unlike
 > CUDA/ROCm), so the four scatter kernels are restructured as **per-atom GATHER** (one

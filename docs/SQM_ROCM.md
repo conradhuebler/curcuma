@@ -182,9 +182,14 @@ On an **AMD Radeon 890M (gfx1150)**, build `release_rocm/` (`-DUSE_ROCM_XTB=ON`,
 - Stage 0 (no rocSOLVER): device handshake + CPU fallback, energies bit-identical.
 - Default non-ROCm `release/` build stays green (cli_curcumaopt_*/cli_rmsd_* 11/11).
 
+d shells (main-group S/P/Cl/Si/…) are now device-resident on ROCm (X-I1 B6 port,
+2026-06-28): the HIP integral/SCF/gradient kernels carry the cartesian->spherical dtrafo, so
+`-gpu rocm` energy is bit-identical to CPU at 8 dp on H2S/PH3/SiH4/HCl (gfn1+gfn2) and `-opt`
+tracks the CPU trajectory. See [SQM_DSHELL_WP.md](SQM_DSHELL_WP.md) B6.
+
 What was **NOT** tested (native xTB): large systems (iGPU FP64 is slow — correctness
-milestone, not performance), discrete/CDNA GPUs, MD; the overlap/gradient cover s/p only
-(H/C/N/O...), no d shells (as the CPU native path).
+milestone, not performance), discrete/CDNA GPUs, MD; transition-metal d (enabled but
+unvalidated — only main-group d checked, same as the CPU/CUDA paths).
 
 ## GFN-FF on ROCm (`-gpu rocm`, `USE_ROCM_GFNFF`, June 2026) — 🤖 machine-tested
 

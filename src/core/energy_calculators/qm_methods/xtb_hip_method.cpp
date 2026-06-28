@@ -130,6 +130,10 @@ public:
 
     // ---- Stage 4: device nuclear gradient (GFN1) --------------------------
     bool supportsGradient() const override { return true; }
+    // X-I1 B6: the HIP integral/SCF/gradient kernels now handle d shells
+    // (cartesian->spherical dtrafo in rocm/xtb_hip_integrals.hiph + the dpair
+    // branch in k_overlap_h0/k_multipole_ints/k_grad_h0_pulay). Claude Generated.
+    bool supportsDshell() const override { return true; }
     bool gradient(const Matrix& P, const Eigen::MatrixXd& C, const Vector& eps,
                   int nocc_orbs, const Vector& v_ao, const Vector& q_sh,
                   const Eigen::MatrixXd& v_dp, const Eigen::MatrixXd& v_qp,

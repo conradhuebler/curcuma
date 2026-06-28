@@ -1,7 +1,7 @@
 # WP: native GFN1/GFN2 d-shell integrals (X-I1)
 
 Status: **CPU implemented + machine-validated (2026-06-27)** — B1–B5 done, B0 guard removed.
-B6 = CPU fallback on the GPU path (device d kernels pending). 🤖 AI/machine-tested only,
+B6 = GPU device d kernels: **CUDA + ROCm done**, Vulkan pending. 🤖 AI/machine-tested only,
 NOT ✅ TESTED.
 
 ## What was done / tested (2026-06-27, Claude Generated)
@@ -30,12 +30,19 @@ NOT ✅ TESTED.
   true). **Validated on a GTX 1660:** `-gpu cuda` energy **bit-identical to CPU** (H2S/PH3/
   SiH4/HCl, gfn1+gfn2), device gradient vs CPU **~1e-16** (`test_xtb_cuda_gradient`), `-opt`
   converges, s/p `gpu_gfn{1,2}_validation` 32/32 unchanged.
-- **ROCm/Vulkan: CPU fallback (device d kernels pending).** `supportsDshell()` stays false
-  for the HIP/Vulkan backends, so d systems use the validated CPU integral/SCF/gradient path
-  (atom-based D4/EEQ stay on device). Porting the device d kernels there is a mechanical
-  mirror of the CUDA ones (the HIP `.hiph` is a near-verbatim copy of the CUDA `.cuh`;
-  Vulkan needs GLSL shader work), but there is no AMD/Vulkan hardware+toolchain in this
-  environment to compile/validate them — deferred until that is available.
+- **ROCm: implemented + validated (2026-06-28, B6 port).** The d-shell device helpers were
+  mirrored verbatim from `cuda/xtb_gpu_integrals_device.cuh` into
+  `rocm/xtb_hip_integrals.hiph`, and the same `la>=2||lb>=2` branch added to the three HIP
+  kernels (`k_overlap_h0`/`k_multipole_ints`/`k_grad_h0_pulay` in `xtb_hip_context.hip`);
+  `HipScfBackend::supportsDshell()` now returns true, so d systems run fully device-resident.
+  **Validated on an AMD Radeon 890M (gfx1150):** `-gpu rocm` energy **bit-identical to CPU at
+  8 dp** (H2S/PH3/SiH4/HCl, gfn1+gfn2; `sqm_val_rocm_*` 32/32 incl. s/p non-regression), and
+  `-opt` on H2S (gfn2) tracks the CPU trajectory step-by-step in energy and gradient norm
+  (gradient floor ~1e-6 from the default FP32 mixed-precision eigensolve; `-scf_threshold 1e-8`
+  or `-scf_mixed_precision false` for tighter). s/p path byte-unchanged (the `!dpair` branch).
+- **Vulkan: CPU fallback (device d kernels pending).** `supportsDshell()` stays false for the
+  Vulkan backend; d systems use the validated CPU path. Porting needs GLSL/SPIR-V shader work
+  (the HIP/CUDA `__device__` helpers do not carry over verbatim) — deferred.
 - **Transition metals.** Enabled (guard removed) but **NOT validated** — no TM reference
   set; only main-group d (S/P/Cl/Si) was checked. Open-d SCF convergence is untested.
 - Precision floor: the validate_sqm gate parses the 8-dp printed energy (~1e-8 resolution),

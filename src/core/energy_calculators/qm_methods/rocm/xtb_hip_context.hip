@@ -172,18 +172,27 @@ __global__ void k_overlap_h0(
     const double* pb_coeff = prim_coeff + sh_prim_off[b];
     const int npb = sh_nprim[b];
 
+    // X-I1: d-touching shell pairs use the cartesian->spherical element function;
+    // pure s/p pairs keep the scalar d_cgto_overlap path (byte-identical).
+    const bool dpair = (la >= 2 || lb >= 2);
     for (int ia = 0; ia < ia_nao; ++ia) {
         const int mu = ia_start + ia;
-        const int ta = d_ao_to_type(la, ia);
-        if (ta < 0) continue;
         for (int jb = 0; jb < jb_nao; ++jb) {
             const int nu = jb_start + jb;
-            const int tb = d_ao_to_type(lb, jb);
-            if (tb < 0) continue;
-            const double s_ab = (iat == jat && a == b && ta == tb)
-                ? 1.0
-                : d_cgto_overlap(pa_alpha, pa_coeff, npa, pb_alpha, pb_coeff, npb,
-                                 xa, ya, za, xb, yb, zb, ta, tb);
+            double s_ab;
+            if (!dpair) {
+                const int ta = d_ao_to_type(la, ia);
+                const int tb = d_ao_to_type(lb, jb);
+                if (ta < 0 || tb < 0) continue;
+                s_ab = (iat == jat && a == b && ta == tb)
+                    ? 1.0
+                    : d_cgto_overlap(pa_alpha, pa_coeff, npa, pb_alpha, pb_coeff, npb,
+                                     xa, ya, za, xb, yb, zb, ta, tb);
+            } else {
+                s_ab = d_overlap_elem(la, ia, lb, jb, pa_alpha, pa_coeff, npa,
+                                      pb_alpha, pb_coeff, npb, xa, ya, za, xb, yb, zb);
+                if (iat == jat && a == b && ia == jb) s_ab = 1.0;
+            }
             const size_t idx = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
             S[idx]  = s_ab;
             H0[idx] = avg_eps * h_factor * s_ab;
@@ -281,9 +290,14 @@ __global__ void k_grad_h0_pulay(
 
     const int isha = ao2sh[mu], ishb = ao2sh[nu];
     const int la = ang[isha], lb = ang[ishb];
-    const int ta = d_ao_to_type(la, mu - iao_sh[isha]);
-    const int tb = d_ao_to_type(lb, nu - iao_sh[ishb]);
-    if (ta < 0 || tb < 0) return;
+    const int sa = mu - iao_sh[isha], sb = nu - iao_sh[ishb];
+    const bool dpair = (la >= 2 || lb >= 2);   // X-I1
+    int ta = -1, tb = -1;
+    if (!dpair) {
+        ta = d_ao_to_type(la, sa);
+        tb = d_ao_to_type(lb, sb);
+        if (ta < 0 || tb < 0) return;
+    }
 
     const double xa = xyz[3*iat+0], ya = xyz[3*iat+1], za = xyz[3*iat+2];
     const double xb = xyz[3*jat+0], yb = xyz[3*jat+1], zb = xyz[3*jat+2];
@@ -319,10 +333,17 @@ __global__ void k_grad_h0_pulay(
     const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
     const double Pmn = P[mn], Smn = S[mn], H0mn = H0[mn], Wmn = W[mn];
     double dS[3];
-    d_cgto_overlap_grad(
-        prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
-        prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
-        xa, ya, za, xb, yb, zb, ta, tb, dS);
+    if (dpair) {
+        d_overlap_grad_elem(la, sa, lb, sb,
+            prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+            prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+            xa, ya, za, xb, yb, zb, dS);
+    } else {
+        d_cgto_overlap_grad(
+            prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+            prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+            xa, ya, za, xb, yb, zb, ta, tb, dS);
+    }
 
     const double sval = 2.0*Pmn*h_av - 2.0*Wmn - Pmn*(v_ao[mu] + v_ao[nu]);
     const double shp  = 2.0*Pmn*H0mn*dlog_pi_dr_r;
@@ -336,10 +357,17 @@ __global__ void k_grad_h0_pulay(
     // column atom jat, so dR = R_jat - R_iat.
     if (is_gfn2 && v_dp) {
         double D_mp[3], dD_dA[3][3], dQ_dA[3][6];
-        d_cgto_multipole_grad_transformed(
-            prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
-            prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
-            xa, ya, za, xb, yb, zb, ta, tb, D_mp, dD_dA, dQ_dA);
+        if (dpair) {
+            d_multipole_grad_elem(la, sa, lb, sb,
+                prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+                prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+                xa, ya, za, xb, yb, zb, D_mp, dD_dA, dQ_dA);
+        } else {
+            d_cgto_multipole_grad_transformed(
+                prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+                prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+                xa, ya, za, xb, yb, zb, ta, tb, D_mp, dD_dA, dQ_dA);
+        }
         const double dR[3] = { xb - xa, yb - ya, zb - za };
         const int qa6[6] = {0,0,1,0,1,2}, qb6[6] = {0,1,1,2,2,2};
         double term[3];
@@ -432,15 +460,30 @@ __global__ void k_multipole_ints(
 
     const int isha = ao2sh[mu], iat = ao2at[mu];
     const int ishb = ao2sh[nu], jat = ao2at[nu];
-    const int ta = d_ao_to_type(ang_sh[isha], mu - iao_sh[isha]);
-    const int tb = d_ao_to_type(ang_sh[ishb], nu - iao_sh[ishb]);
-    if (ta < 0 || tb < 0) return;
+    const int la = ang_sh[isha], lb = ang_sh[ishb];
+    const int sa = mu - iao_sh[isha], sb = nu - iao_sh[ishb];
+    const bool dpair = (la >= 2 || lb >= 2);   // X-I1
+
+    const double* aA = prim_alpha + sh_prim_off[isha];
+    const double* cA = prim_coeff + sh_prim_off[isha];
+    const int npa = sh_nprim[isha];
+    const double* aB = prim_alpha + sh_prim_off[ishb];
+    const double* cB = prim_coeff + sh_prim_off[ishb];
+    const int npb = sh_nprim[ishb];
 
     double Sx, D[3], Q[6];
-    d_cgto_multipole(prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
-                     prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
-                     xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
-                     xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], ta, tb, Sx, D, Q);
+    if (!dpair) {
+        const int ta = d_ao_to_type(la, sa);
+        const int tb = d_ao_to_type(lb, sb);
+        if (ta < 0 || tb < 0) return;
+        d_cgto_multipole(aA, cA, npa, aB, cB, npb,
+                         xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                         xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], ta, tb, Sx, D, Q);
+    } else {
+        d_multipole_elem(la, sa, lb, sb, aA, cA, npa, aB, cB, npb,
+                         xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                         xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], Sx, D, Q);
+    }
 
     const double Rx = xyz[3*jat+0], Ry = xyz[3*jat+1], Rz = xyz[3*jat+2];
     const double Smn = S[mn];
