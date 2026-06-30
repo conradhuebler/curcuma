@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.18)
 project(curcuma)
 
+# Claude Generated 2026 - MSVC doesn't define M_PI (and friends) from <cmath>
+# unless _USE_MATH_DEFINES is set before the first include; 20+ files across
+# the codebase use M_PI directly (gcc/clang define it unconditionally), so
+# set this project-wide instead of patching every translation unit.
+if(MSVC)
+    add_compile_definitions(_USE_MATH_DEFINES)
+endif()
+
 option (USE_XTB
     "Compile XTB and use as library" OFF)
 
