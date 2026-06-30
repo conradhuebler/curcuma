@@ -23,7 +23,15 @@
 #include <cstdlib> // for getenv
 #include <mutex> // Claude Generated (Jun 2026): thread-safe citation registry (parallel ConfSearch)
 #include <set>
+#ifdef _WIN32
+#include <io.h> // for _isatty, _fileno
+#define curcuma_isatty _isatty
+#define curcuma_fileno _fileno
+#else
 #include <unistd.h> // for isatty
+#define curcuma_isatty isatty
+#define curcuma_fileno fileno
+#endif
 
 // Static member definitions - Claude Generated
 int CurcumaLogger::m_verbosity = 1;
@@ -68,7 +76,7 @@ void CurcumaLogger::initialize(int verbosity, bool auto_detect_colors)
     }
 
     // Check if we're outputting to a terminal for color auto-detection
-    if (use_colors && !isatty(fileno(stdout))) {
+    if (use_colors && !curcuma_isatty(curcuma_fileno(stdout))) {
         use_colors = false; // Disable colors when piping to file
     }
 
