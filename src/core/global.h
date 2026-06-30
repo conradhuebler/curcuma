@@ -270,7 +270,6 @@ inline double angstrom_to_bohr(double ang) { return ang / CURCUMA_BOHR_TO_ANGSTR
 #include <chrono>
 #include <fmt/color.h>
 #include <fmt/format.h>
-#include <unistd.h>
 
 /**
  * @brief Curcuma Logging System - Claude Generated
