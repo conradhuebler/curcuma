@@ -665,12 +665,20 @@ if(USE_PCH)
     endif()
 endif()
 
+# Claude Generated 2026 - km (Kuhn-Munkres/Hungarian assignment, c_code/hungarian.c)
+# is dead code: nothing in the codebase includes its public interface.c::assign()
+# outside c_code/ itself (RMSD reordering uses the header-only Eigen Munkres in
+# rmsd/munkres.h instead). It also relies on C99 VLAs throughout (Boolean col_covered[m],
+# a flexible array member, etc.), which MSVC's cl.exe has never supported. Skip it
+# entirely on MSVC rather than porting a vendored library nothing calls.
+if(NOT MSVC)
     set(km_SRC
-    src/capabilities/c_code/hungarian.c
-    src/capabilities/c_code/interface.c
-)
-add_library(km ${km_SRC})
-target_link_libraries(curcuma_core km)
+        src/capabilities/c_code/hungarian.c
+        src/capabilities/c_code/interface.c
+    )
+    add_library(km ${km_SRC})
+    target_link_libraries(curcuma_core km)
+endif()
 
 if(USE_ULYSSES)
     add_library(ulysses_lib
@@ -690,7 +698,7 @@ if(USE_ULYSSES)
     )
     target_link_libraries(ulysses_helper PUBLIC ulysses_lib curcuma_core)
 
-    target_link_libraries(curcuma_core km ulysses_lib)
+    target_link_libraries(curcuma_core ulysses_lib)
 endif()
 
 add_executable(curcuma
