@@ -1451,5 +1451,13 @@ target_include_directories(curcuma_core SYSTEM BEFORE PUBLIC ${CMAKE_CURRENT_BIN
 
 # --- End of Auto-generated Parameter Registry ---
 
-install(TARGETS curcuma RUNTIME DESTINATION bin)
-install(TARGETS curcuma_helper RUNTIME DESTINATION bin)
+# Claude Generated 2026 - only install curcuma's own standalone executables when
+# curcuma is the top-level project (its own release/ build), not when it's
+# consumed as a FetchContent dependency (e.g. by qurcuma, which excludes both
+# targets from the default build via EXCLUDE_FROM_ALL). Otherwise the consuming
+# project's own `install`/`cpack` aggregates this rule and fails trying to
+# install a curcuma_helper binary that was never built.
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+    install(TARGETS curcuma RUNTIME DESTINATION bin)
+    install(TARGETS curcuma_helper RUNTIME DESTINATION bin)
+endif()
