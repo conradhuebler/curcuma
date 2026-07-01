@@ -12,28 +12,30 @@
 #include <omp.h>
 #endif
 
-// Weak thread-count setters for whichever BLAS/LAPACK is linked. Present at runtime only
-// if the symbol exists; the weak attribute lets us call them unconditionally.
-// Claude Generated 2026 - plain __attribute__((weak)) means "tolerate ODR/multiple
-// definitions" on ELF (Linux) but does NOT mean "may be entirely undefined at link
-// time"; MKL/OpenBLAS aren't linked in this build, so the ELF-style weak attribute
-// alone links fine on Linux (undefined weak resolves to null) but fails to link on
-// Mach-O (macOS) with "symbol(s) not found". Apple's equivalent for "may not exist
-// anywhere in the link, resolve to null" is __attribute__((weak_import)).
-#if defined(__APPLE__)
-#define CURCUMA_WEAK_SYMBOL __attribute__((weak_import))
-#else
-#define CURCUMA_WEAK_SYMBOL __attribute__((weak))
+// Claude Generated 2026 - MKL/OpenBLAS's thread-count setters are looked up at
+// runtime instead of declared as weak externs: __attribute__((weak)) means
+// "tolerate ODR/multiple definitions" on ELF (Linux), where an undefined weak
+// symbol simply resolves to null -- it does NOT mean "may be entirely absent
+// from the link". That made the weak declarations link fine on Linux but fail
+// on Mach-O (macOS, "symbol(s) not found"); __attribute__((weak_import)),
+// Apple's documented equivalent, still failed to link the same way against a
+// static archive with the Xcode 26 toolchain. dlsym(RTLD_DEFAULT, ...) is the
+// portable, linker-independent way to call a symbol "if it happens to be
+// loaded" and behaves identically on Linux and macOS.
+#ifndef _MSC_VER
+#include <dlfcn.h>
 #endif
-extern "C" {
-    void mkl_set_num_threads(int) CURCUMA_WEAK_SYMBOL;
-    void MKL_Set_Num_Threads(int) CURCUMA_WEAK_SYMBOL;
-    void openblas_set_num_threads(int) CURCUMA_WEAK_SYMBOL;
-    int  openblas_get_num_threads(void) CURCUMA_WEAK_SYMBOL;
-}
-#undef CURCUMA_WEAK_SYMBOL
 
 namespace curcuma {
+namespace detail {
+#ifndef _MSC_VER
+    using BlasSetThreadsFn = void (*)(int);
+    inline BlasSetThreadsFn resolveBlasSetThreads(const char* symbol)
+    {
+        return reinterpret_cast<BlasSetThreadsFn>(dlsym(RTLD_DEFAULT, symbol));
+    }
+#endif
+}
 
 /**
  * @brief RAII override of the BLAS/LAPACK thread count for a heavy dense-linear-algebra region.
@@ -65,9 +67,7 @@ public:
         }
 #endif
         // Mirror to MKL / OpenBLAS counters (harmless if the OpenMP path ignores them).
-        if (mkl_set_num_threads) mkl_set_num_threads(n);
-        else if (MKL_Set_Num_Threads) MKL_Set_Num_Threads(n);
-        if (openblas_set_num_threads) openblas_set_num_threads(n);
+        setBlasThreads(n);
     }
 
     ~ScopedBlasThreads()
@@ -75,17 +75,27 @@ public:
 #ifdef _OPENMP
         if (m_active) omp_set_num_threads(m_saved_omp);
 #endif
-        if (m_active) {
-            if (mkl_set_num_threads) mkl_set_num_threads(m_saved_omp);
-            else if (MKL_Set_Num_Threads) MKL_Set_Num_Threads(m_saved_omp);
-            if (openblas_set_num_threads) openblas_set_num_threads(m_saved_omp);
-        }
+        if (m_active) setBlasThreads(m_saved_omp);
     }
 
     ScopedBlasThreads(const ScopedBlasThreads&) = delete;
     ScopedBlasThreads& operator=(const ScopedBlasThreads&) = delete;
 
 private:
+    static void setBlasThreads(int n)
+    {
+#ifndef _MSC_VER
+        static auto mkl_set_lower = detail::resolveBlasSetThreads("mkl_set_num_threads");
+        static auto mkl_set_upper = detail::resolveBlasSetThreads("MKL_Set_Num_Threads");
+        static auto openblas_set = detail::resolveBlasSetThreads("openblas_set_num_threads");
+        if (mkl_set_lower) mkl_set_lower(n);
+        else if (mkl_set_upper) mkl_set_upper(n);
+        if (openblas_set) openblas_set(n);
+#else
+        (void)n;
+#endif
+    }
+
     int  m_saved_omp = 1;
     bool m_active = false;
 };
