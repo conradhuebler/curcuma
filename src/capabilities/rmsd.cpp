@@ -1659,7 +1659,11 @@ bool RMSDDriver::MolAlignLib()
     std::string command = m_molalign + m_molalignarg + " " + ref_tmp + "   " + tar_tmp + " 2>&1";
     if (m_verbosity >= 3)
         CurcumaLogger::info_fmt("MolAlign command: {}", command);
+#ifdef _WIN32
+    FileOpen = _popen(command.c_str(), "r");
+#else
     FileOpen = popen(command.c_str(), "r");
+#endif
     bool ok = true;
     bool rndm = false;
     bool error = false;
@@ -1674,10 +1678,14 @@ bool RMSDDriver::MolAlignLib()
             CurcumaLogger::debug(2, fmt::format("MolAlign output: {}", std::string(line).substr(0, std::string(line).find('\n'))));
 #endif
     }
+#ifdef _WIN32
+    _pclose(FileOpen);
+#else
     pclose(FileOpen);
+#endif
 
     std::string aligned_tmp = outputPath("aligned.xyz");
-    if (std::filesystem::exists(aligned_tmp) and !rndm) {
+    if (std::filesystem::exists(aligned_tmp) && !rndm) {
         CurcumaLogger::citation("molalign");
         FileIterator file(aligned_tmp, true);
         m_reference_centered = file.Next();

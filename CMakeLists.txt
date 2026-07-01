@@ -7,6 +7,12 @@ project(curcuma)
 # set this project-wide instead of patching every translation unit.
 if(MSVC)
     add_compile_definitions(_USE_MATH_DEFINES)
+    # Claude Generated 2026 - the codebase uses non-ASCII UTF-8 characters in a few
+    # identifiers/comments (e.g. "double Δqraw[6];" in xtb_gradient.cpp). Without
+    # /utf-8, MSVC falls back to the system codepage to interpret the source file,
+    # misreading the multi-byte UTF-8 sequence as unrelated characters (observed:
+    # "error C3872: 'U+201d' is not allowed in an identifier" for what is actually Δ).
+    add_compile_options(/utf-8)
 endif()
 
 option (USE_XTB

@@ -434,9 +434,11 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
         // NOTE: Cannot use collapse(2) with triangular loops (j = i + 1)
         // Parallelize outer loop only, still provides good speedup
+        // Claude Generated 2026 - MSVC's OpenMP (2.0 semantics) requires a signed
+        // loop index; GCC/Clang accept size_t fine, so this was never caught before.
         #pragma omp for schedule(dynamic, 10)
-        for (size_t i = 0; i < m_atoms.size(); ++i) {
-            for (size_t j = i + 1; j < m_atoms.size(); ++j) {
+        for (int i = 0; i < static_cast<int>(m_atoms.size()); ++i) {
+            for (int j = i + 1; j < static_cast<int>(m_atoms.size()); ++j) {
             int atom_i = m_atoms[i];
             int atom_j = m_atoms[j];
 
@@ -747,8 +749,10 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         {
             std::vector<json> local_triples;
 
+            // Claude Generated 2026 - MSVC's OpenMP (2.0 semantics) requires a signed
+            // loop index; GCC/Clang accept size_t fine, so this was never caught before.
             #pragma omp for schedule(dynamic, 10)
-            for (size_t idx = 0; idx < triplet_vec.size(); ++idx) {
+            for (int idx = 0; idx < static_cast<int>(triplet_vec.size()); ++idx) {
                 int i = std::get<0>(triplet_vec[idx]);
                 int j = std::get<1>(triplet_vec[idx]);
                 int k = std::get<2>(triplet_vec[idx]);
@@ -2018,9 +2022,11 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     {
         std::vector<GFNFFDispersion> local_pairs;
 
+        // Claude Generated 2026 - MSVC's OpenMP (2.0 semantics) requires a signed
+        // loop index; GCC/Clang accept size_t fine, so this was never caught before.
         #pragma omp for schedule(dynamic, 10)
-        for (size_t i = 0; i < m_atoms.size(); ++i) {
-            for (size_t j = i + 1; j < m_atoms.size(); ++j) {
+        for (int i = 0; i < static_cast<int>(m_atoms.size()); ++i) {
+            for (int j = i + 1; j < static_cast<int>(m_atoms.size()); ++j) {
                 double r2 = (geometry_bohr.row(i) - geometry_bohr.row(j)).squaredNorm();
                 if (r2 > disp_cutoff_sq) continue;
 
