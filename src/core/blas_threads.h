@@ -14,12 +14,24 @@
 
 // Weak thread-count setters for whichever BLAS/LAPACK is linked. Present at runtime only
 // if the symbol exists; the weak attribute lets us call them unconditionally.
+// Claude Generated 2026 - plain __attribute__((weak)) means "tolerate ODR/multiple
+// definitions" on ELF (Linux) but does NOT mean "may be entirely undefined at link
+// time"; MKL/OpenBLAS aren't linked in this build, so the ELF-style weak attribute
+// alone links fine on Linux (undefined weak resolves to null) but fails to link on
+// Mach-O (macOS) with "symbol(s) not found". Apple's equivalent for "may not exist
+// anywhere in the link, resolve to null" is __attribute__((weak_import)).
+#if defined(__APPLE__)
+#define CURCUMA_WEAK_SYMBOL __attribute__((weak_import))
+#else
+#define CURCUMA_WEAK_SYMBOL __attribute__((weak))
+#endif
 extern "C" {
-    void mkl_set_num_threads(int) __attribute__((weak));
-    void MKL_Set_Num_Threads(int) __attribute__((weak));
-    void openblas_set_num_threads(int) __attribute__((weak));
-    int  openblas_get_num_threads(void) __attribute__((weak));
+    void mkl_set_num_threads(int) CURCUMA_WEAK_SYMBOL;
+    void MKL_Set_Num_Threads(int) CURCUMA_WEAK_SYMBOL;
+    void openblas_set_num_threads(int) CURCUMA_WEAK_SYMBOL;
+    int  openblas_get_num_threads(void) CURCUMA_WEAK_SYMBOL;
 }
+#undef CURCUMA_WEAK_SYMBOL
 
 namespace curcuma {
 
