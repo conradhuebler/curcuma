@@ -311,6 +311,13 @@ if (OPENMP_FOUND)
     set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
     set (openMP ON)
+    # Claude Generated 2026 - OpenMP_CXX_FLAGS is only the compiler flag (e.g. Apple
+    # Clang's "-Xclang -fopenmp"); it does NOT carry omp.h's include path. On Linux/
+    # GCC omp.h ships with the compiler itself so this was never missed, but Apple
+    # Clang has no OpenMP runtime at all -- Homebrew's libomp is keg-only, and without
+    # this, any TU that includes omp.h (directly, or via Eigen's OpenMP integration)
+    # fails with "fatal error: 'omp.h' file not found".
+    include_directories(${OpenMP_CXX_INCLUDE_DIRS})
 endif()
 
 IF(CMAKE_COMPILER_IS_GNUCXX)
