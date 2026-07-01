@@ -324,6 +324,14 @@ if (OPENMP_FOUND)
     # this, any TU that includes omp.h (directly, or via Eigen's OpenMP integration)
     # fails with "fatal error: 'omp.h' file not found".
     include_directories(${OpenMP_CXX_INCLUDE_DIRS})
+    # Claude Generated 2026 - similarly, OpenMP_EXE_LINKER_FLAGS alone is not enough
+    # to actually link the OpenMP runtime on Apple Clang: on GCC, -fopenmp at link
+    # time makes the driver pull in libgomp itself, but Apple Clang's "-Xclang
+    # -fopenmp" carries no such magic -- the actual "-lomp" comes from
+    # OpenMP_CXX_LIBRARIES, which the old flags-only approach here never added.
+    # Without it, every executable failed at link with "symbol(s) not found for
+    # architecture arm64" (_omp_get_thread_num, _omp_set_num_threads, ...).
+    link_libraries(${OpenMP_CXX_LIBRARIES})
 endif()
 
 IF(CMAKE_COMPILER_IS_GNUCXX)
