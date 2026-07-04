@@ -685,8 +685,12 @@ json CLI2Json(int argc, char** argv)
     //   "auto" picks the first compiled GPU backend (cuda > rocm > vulkan), else CPU.
     //   Applies to gfn1/gfn2 (USE_*_XTB builds) and gfnff (USE_* builds); an explicit
     //   backend not compiled in warns and falls back to CPU.
+    // Claude Generated (Jul 2026): Added "charge","spin" — molecular charge/spin must reach
+    // top-level controller["charge"] so -sp/-opt can apply them to the molecule
+    // (setCharge reads controller["charge"], not the command-module namespace).
     std::set<std::string> global_params = {
         "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
+        "charge", "spin",  // molecular charge/spin (top-level, not module-scoped)
         "export_run", "export-run", // Export current run configuration
         "import_config", "import-config", // Import custom configuration
         "bak",   // Files to copy back from BMT output directory to CWD
@@ -713,6 +717,21 @@ json CLI2Json(int argc, char** argv)
     if (keyword_to_module.count(keyword) > 0) {
         module_name = keyword_to_module[keyword];
     }
+
+    // Claude Generated (Jul 2026, F2): a token starting with '-' followed by a digit or '.'
+    // is a negative NUMBER value (e.g. "-charge -1", "-threshold -1e-6"), not a flag. The
+    // value-consume logic below treats any '-'-prefixed next arg as a flag, which silently
+    // drops negative numeric values (charge became boolean true -> get<int>()=1, breaking
+    // all negatively-charged species). isFlag() returns false for negative numbers so they
+    // flow into the stod() value branch instead.
+    auto isFlag = [](const std::string& s) -> bool {
+        if (s.empty() || s[0] != '-') return false;
+        if (s.size() < 2) return true;             // lone "-"
+        char c = s[1];
+        // "-3", "-1.5", "-.5", "-1e-6" are numbers, not flags
+        if (std::isdigit(static_cast<unsigned char>(c)) || c == '.') return false;
+        return true;
+    };
 
     for (int i = 2; i < argc; ++i) {
         std::string current = argv[i];
@@ -771,7 +790,7 @@ json CLI2Json(int argc, char** argv)
                 }
             }
 
-            if ((i + 1) >= argc || argv[i + 1][0] == '-' || argv[i + 1] == std::string("true") || argv[i + 1] == std::string("+")) {
+            if ((i + 1) >= argc || isFlag(argv[i + 1]) || argv[i + 1] == std::string("true") || argv[i + 1] == std::string("+")) {
                 // Claude Generated (May 2026): Multi-value accumulation for -bak flag
                 if (current == "bak" && key.contains("bak")) {
                     if (key["bak"].is_array()) {
@@ -1636,6 +1655,14 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         || (controller.contains("opt") && read_bool(controller["opt"], "gradient"));
 
     Molecule molecule(argv[2]);
+    // Claude Generated (Jul 2026): Apply charge/spin from CLI controller to the molecule
+    // before the energy calculation. Mirrors the -opt path (see below). Without this,
+    // GFN-FF reads m_charge=0 from the file-parsed molecule (XYZ/Coord set no charge),
+    // giving wrong EEQ charges and energies for charged species (S30L systems 23-30).
+    if (controller.contains("charge"))
+        molecule.setCharge(controller["charge"].get<int>());
+    if (controller.contains("spin"))
+        molecule.setSpin(controller["spin"].get<int>());
     EnergyCalculator energy_calc(method, energy_controller);
     energy_calc.setMolecule(molecule.getMolInfo());
     double energy = energy_calc.CalculateEnergy(want_gradient);

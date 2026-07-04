@@ -47,20 +47,41 @@ inline double BondStretching(const Vector& i, const Vector& j, Matrix& derivate,
 inline double AngleBending(const Vector& i, const Vector& j, const Vector& k, Matrix& derivate, bool gradient)
 {
     Eigen::Vector3d rij = i - j;
-    auto nij = rij / rij.norm();
     Eigen::Vector3d rkj = k - j;
-    auto nkj = rkj / rkj.norm();
-    double costheta = (rij.dot(rkj) / (sqrt(rij.dot(rij) * rkj.dot(rkj))));
+    double rij_norm = rij.norm();
+    double rkj_norm = rkj.norm();
+
+    // Claude Generated (Jul 2026, F1): guard the singularities that produced NaN
+    // gradients (1/sin(theta), 1/|rij|, 1/|rkj|, acos out-of-range). Mirrors the
+    // guards already present in calculateDihedralAngle (gfnff_geometry.h:89-96,140-143).
+    // Without this, a near-collinear angle (current geometry collinear, theta0 not)
+    // underflowed sin(theta) to 0 -> 1/0 = Inf -> 0*Inf = NaN in derivate, which
+    // propagated to every downstream per-term gradient and forced the energy to 0.0.
+    if (rij_norm < 1e-10 || rkj_norm < 1e-10) {
+        if (gradient) derivate = Matrix::Zero(3, 3);
+        return 1.0;  // degenerate: treat as 0 angle (cos=1)
+    }
+    Eigen::Vector3d nij = rij / rij_norm;
+    Eigen::Vector3d nkj = rkj / rkj_norm;
+    double costheta = rij.dot(rkj) / (rij_norm * rkj_norm);
+    // clamp before acos (round-off can push |costheta| past 1)
+    costheta = std::max(-1.0, std::min(1.0, costheta));
 
     if (!gradient)
         return costheta;
     derivate = Matrix::Zero(3, 3);
 
-    double sintheta = sin(acos(costheta));
-    double dThetadCosTheta = 1 / sintheta;
-    derivate = Matrix::Zero(3, 3);
-    derivate.row(0) = -dThetadCosTheta * (nkj - nij * costheta) / (rij.norm());
-    derivate.row(2) = -dThetadCosTheta * (nij - nkj * costheta) / (rkj.norm());
+    double sintheta = std::sqrt(std::max(0.0, 1.0 - costheta * costheta));
+    if (sintheta < 1e-14) {
+        // collinear: the 1/sin(theta) factor is singular. The caller multiplies
+        // derivate by sin(theta) (dedtheta = 2k sin(theta)(cos0-cos)), so the
+        // product is 0 * Inf = NaN. Return a zero derivate; the angle-term energy
+        // is still finite via the clamped costheta, only its gradient is undefined.
+        return costheta;
+    }
+    double dThetadCosTheta = 1.0 / sintheta;
+    derivate.row(0) = -dThetadCosTheta * (nkj - nij * costheta) / rij_norm;
+    derivate.row(2) = -dThetadCosTheta * (nij - nkj * costheta) / rkj_norm;
     derivate.row(1) = -derivate.row(0) - derivate.row(2);
 
     return costheta;

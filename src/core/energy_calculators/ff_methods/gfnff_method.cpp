@@ -2687,16 +2687,22 @@ bool GFNFF::importTopology(const json& topo_json)
     }
     if (topo_json.contains("qfrag")) {
         topo.qfrag = topo_json["qfrag"].get<std::vector<double>>();
-        // Guard against corrupt cache: qfrag[0] must match the actual molecular charge.
-        // Corrupt values (e.g. 32512, 21974) arise when Phase 1 EEQ fails to converge
-        // and the result is saved as the constraint target. Reset to m_charge if mismatched.
-        if (!topo.qfrag.empty() && std::abs(topo.qfrag[0] - static_cast<double>(m_charge)) > 0.5) {
-            CurcumaLogger::warn(fmt::format(
-                "Topology cache: qfrag[0]={:.1f} mismatches molecule charge={}, resetting",
-                topo.qfrag[0], m_charge));
-            topo.qfrag.assign(topo.nfrag, 0.0);
-            if (topo.nfrag >= 1)
-                topo.qfrag[0] = static_cast<double>(m_charge);
+        // Claude Generated (Jul 2026, F2): guard checks the SUM of qfrag against m_charge,
+        // not qfrag[0] — for nfrag==2 the winning assignment may place the charge on
+        // fragment 1 (qfrag=[0,m_charge]), which is correct but has qfrag[0]=0. The total
+        // is what matters. Corrupt values (e.g. 32512, 21974) arise when Phase 1 EEQ fails
+        // to converge and the result is saved as the constraint target. Reset on total mismatch.
+        if (!topo.qfrag.empty()) {
+            double qsum = 0.0;
+            for (double q : topo.qfrag) qsum += q;
+            if (std::abs(qsum - static_cast<double>(m_charge)) > 0.5) {
+                CurcumaLogger::warn(fmt::format(
+                    "Topology cache: qfrag sum={:.1f} mismatches molecule charge={}, resetting",
+                    qsum, m_charge));
+                topo.qfrag.assign(topo.nfrag, 0.0);
+                if (topo.nfrag >= 1)
+                    topo.qfrag[0] = static_cast<double>(m_charge);
+            }
         }
     }
 
@@ -2939,17 +2945,24 @@ bool GFNFF::initializeForceField()
     if (m_cache_topology && m_cached_topology.has_value() && m_parameters.contains("geometry_file")) {
         const auto& tc  = m_cached_topology->topology_charges;
         const auto& qf  = m_cached_topology->qfrag;
+        // Claude Generated (Jul 2026, F2-cache-fix): validate by the SUM of qfrag, not qfrag[0].
+        // For nfrag==2 the F2 both-assignment trial may correctly place the charge on fragment 1
+        // (qfrag=[0,m_charge]), which has qfrag[0]=0 — the old qf[0]≈m_charge check rejected those
+        // valid caches (e.g. S30L 23/AB, charge on the guest), forcing a fresh recompute every call
+        // and making the cached/fresh paths behave inconsistently. The total is what matters.
+        double qfrag_sum = 0.0;
+        for (double q : qf) qfrag_sum += q;
         bool charges_valid =
             tc.size() == m_atomcount && tc.allFinite() &&
             std::abs(tc.sum() - static_cast<double>(m_charge)) < 1.0 &&
-            (qf.empty() || std::abs(qf[0] - static_cast<double>(m_charge)) < 0.5);
+            (qf.empty() || std::abs(qfrag_sum - static_cast<double>(m_charge)) < 0.5);
 
         if (!charges_valid) {
             CurcumaLogger::warn(fmt::format(
-                "Topology cache write skipped: invalid Phase-1 charges (sum={:.3f}, expected {}, qfrag[0]={:.3f})",
+                "Topology cache write skipped: invalid Phase-1 charges (sum={:.3f}, expected {}, qfrag_sum={:.3f})",
                 tc.allFinite() ? tc.sum() : std::numeric_limits<double>::quiet_NaN(),
                 m_charge,
-                qf.empty() ? std::numeric_limits<double>::quiet_NaN() : qf[0]));
+                qf.empty() ? std::numeric_limits<double>::quiet_NaN() : qfrag_sum));
         } else {
             std::string geom_file = m_parameters["geometry_file"].get<std::string>();
             size_t dot = geom_file.find_last_of('.');
@@ -8942,6 +8955,20 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
                                 auto tc = topo_cache["topology_charges"].get<std::vector<double>>();
                                 topo_info.topology_charges = Eigen::Map<Eigen::VectorXd>(tc.data(), tc.size());
                             }
+                            // Claude Generated (Jul 2026, F2-cache-fix): restore qfrag too.
+                            // The inline cache load below restored topology_charges/dxi/dgam/alpeeq
+                            // but NOT qfrag, so on a cache hit qfrag stayed at the [0,...,0] default
+                            // from line ~8829 — Phase-2 EEQ then enforced total charge 0 and the
+                            // Coulomb term was computed with neutralised charges (wrong by ~Q²γ for
+                            // charged nfrag==2 host-guest complexes, e.g. S30L 25/26/27/28/30 AB
+                            // when the charge is on fragment 0). A fresh run sets qfrag via the F2
+                            // both-assignment trial, but that block is skipped on a cache hit, so the
+                            // cached qfrag MUST be restored here for the cached path to match the
+                            // fresh path.
+                            if (topo_cache.contains("qfrag")) {
+                                topo_info.qfrag = topo_cache["qfrag"].get<std::vector<double>>();
+                                eeq_topology_input.qfrag = topo_info.qfrag;
+                            }
                             if (topo_cache.contains("dxi")) {
                                 auto dxi = topo_cache["dxi"].get<std::vector<double>>();
                                 topo_info.dxi = Eigen::Map<Eigen::VectorXd>(dxi.data(), dxi.size());
@@ -8991,16 +9018,59 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         // Claude Generated (WP2, May 2026): forward pool + thread count to parallelise Stage-4
         auto* pool_setup = m_forcefield ? m_forcefield->threadPool() : nullptr;
         if (pool_setup) pool_setup->setActiveThreadCount(m_threads);
-        topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
-            m_atoms,
-            m_geometry_bohr,
-            m_charge,
-            topo_info.coordination_numbers,
-            eeq_topology_input,
-            true,  // Phase 1 Charge Sync: enable dxi corrections
-            pool_setup,
-            m_threads
-        );
+
+        // Claude Generated (Jul 2026, F2): distribute the molecular charge across fragments.
+        // Previously qfrag was left at [0,...,0] for nfrag>1, so the per-fragment EEQ
+        // constraint forced total charge 0 — broken for charged host-guest complexes
+        // (S30L systems 23-30, error sign/magnitude ~ Q). Mirror xtb 6.6.1
+        // (external/xtb/src/gfnff/gfnff_ini.f90:474-502): for nfrag==2 & m_charge!=0 try
+        // BOTH placements, keep the one with lower EEQ electrostatic energy; for nfrag>2
+        // put the charge on fragment 0; nfrag==1 and neutral keep the existing path.
+        if (topo_info.nfrag == 2 && m_charge != 0) {
+            auto solveWith = [&](std::vector<double> qf) -> Vector {
+                eeq_topology_input.qfrag = qf;
+                m_eeq_solver->clearSolveStatus();
+                m_eeq_solver->invalidateCholeskyCache();
+                m_eeq_solver->invalidateMatrixCache();
+                return m_eeq_solver->calculateTopologyCharges(
+                    m_atoms, m_geometry_bohr, m_charge, topo_info.coordination_numbers,
+                    eeq_topology_input, true, pool_setup, m_threads);
+            };
+            const double qc = static_cast<double>(m_charge);
+            Vector qa = solveWith({qc, 0.0});
+            double E_a = (qa.size() == m_atomcount) ? calculateEEQEnergy(qa, topo_info.coordination_numbers) : 1e300;
+            Vector qb = solveWith({0.0, qc});
+            double E_b = (qb.size() == m_atomcount) ? calculateEEQEnergy(qb, topo_info.coordination_numbers) : 1e300;
+            if (E_a <= E_b) {
+                topo_info.qfrag = {qc, 0.0};
+                topo_info.topology_charges = qa;
+            } else {
+                topo_info.qfrag = {0.0, qc};
+                topo_info.topology_charges = qb;
+            }
+            eeq_topology_input.qfrag = topo_info.qfrag;  // propagate winner to Phase 2
+            m_eeq_solver->clearSolveStatus();
+            m_eeq_solver->invalidateCholeskyCache();
+            m_eeq_solver->invalidateMatrixCache();
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::info(fmt::format(
+                    "F2: nfrag=2 charged (q={}), placement E_a={:.6f} E_b={:.6f} Eh -> charge on fragment {}",
+                    m_charge, E_a, E_b, (E_a <= E_b) ? 0 : 1));
+            }
+        } else if (topo_info.nfrag > 2 && m_charge != 0) {
+            // xtb gfnff_ini.f90:474-476: charge on fragment 0, rest 0
+            topo_info.qfrag.assign(topo_info.nfrag, 0.0);
+            topo_info.qfrag[0] = static_cast<double>(m_charge);
+            eeq_topology_input.qfrag = topo_info.qfrag;
+            topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
+                m_atoms, m_geometry_bohr, m_charge, topo_info.coordination_numbers,
+                eeq_topology_input, true, pool_setup, m_threads);
+        } else {
+            // nfrag==1 (qfrag already [m_charge]) or neutral: original single solve
+            topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
+                m_atoms, m_geometry_bohr, m_charge, topo_info.coordination_numbers,
+                eeq_topology_input, true, pool_setup, m_threads);
+        }
 
         if (topo_info.topology_charges.size() != m_atomcount) {
             CurcumaLogger::warn("calculateTopologyInfo: Phase 1 topology charges failed - using uniform fallback");

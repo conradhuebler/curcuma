@@ -278,6 +278,15 @@ ctest -R test_gfnff_gradients --verbose
 - [ ] Phase 5B: Metal-specific fqq correction (2.5× factor in charge-dependent terms)
 - [ ] Pi-system/amide detection for nitrogen dgam (enhancement, current EEQ already good)
 - ✅ Fragment-constrained EEQ charges (for multi-fragment systems)
+  - **Jul 2026 (F2)**: molecular charge is distributed across fragments per xtb gfnff_ini.f90:474-502
+    (nfrag==2 & charged → try both placements, keep lower EEQ energy; nfrag>2 → fragment 0).
+    Previously qfrag stayed [0,0] for nfrag>1, forcing total charge 0 (S30L charged complexes
+    broken). See [docs/S30L_GFNNF_VALIDATION.md](../../docs/S30L_GFNNF_VALIDATION.md).
+  - **Jul 2026 (F2-cache-fix)**: the inline topology-cache load in `calculateTopologyInfo`
+    (~gfnff_method.cpp:8947) restored topology_charges/dxi/dgam/alpeeq but NOT qfrag, so a cache
+    hit on a charged nfrag==2 complex left qfrag=[0,…,0] (F2 trial is skipped on a cache hit),
+    Phase-2 EEQ forced charge 0 → wrong Coulomb (~Q²γ) on cached re-runs. Now restores qfrag;
+    write guard checks qfrag SUM (not qfrag[0], so [0,m_charge] placements cache too).
 
 **Dispersion Corrections**:
 - [ ] **Metal-specific C6 parameters** - Transition metals may need special handling

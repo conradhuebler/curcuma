@@ -153,7 +153,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
   - **GPU backends** (`-gpu cuda|rocm|vulkan|auto`): all three device-resident through `-opt`/`-md`; ROCm has FP32 mixed-precision ON by default (real win), Vulkan is opt-in only (eigensolve-bound, no speedup). Detail in [docs/SQM_GPU.md](docs/SQM_GPU.md) / [docs/SQM_ROCM.md](docs/SQM_ROCM.md) / [docs/SQM_VULKAN.md](docs/SQM_VULKAN.md); roadmap in [docs/SQM_GPU_ROADMAP.md](docs/SQM_GPU_ROADMAP.md)
 - ⚠️ **GFN1-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn1` backend; `-opt` works; Broyden SCF default; 10/12 sqm_reference @1e-8 vs tblite (He2 + `complex` remain) — [docs/SQM_WP2_gfn1_accuracy.md](docs/SQM_WP2_gfn1_accuracy.md)
 - ⚠️ **PM3/AM1/MNDO (Native NDDO)** - AI-implemented, machine-tested; 21/21 tests vs Ulysses reference (< 4 µEh)
-- ⚠️ **Native GFN-FF** - AI-implemented, machine-tested; see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
+- ⚠️ **Native GFN-FF** - AI-implemented, machine-tested; see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md); S30L vs xtb 6.6.1 (Jul 2026): 22/30 within ~1.5 kcal/mol after F1/F2/CLI fixes (MAD 433→2.7); F3 bond-term offset on sys 11/12/15/16 deferred — see [docs/S30L_GFNNF_VALIDATION.md](docs/S30L_GFNNF_VALIDATION.md)
 
 #### External Interfaces (Production Quality, Requires Compilation)
 - **TBLite Interface** - Tight-binding DFT methods (GFN1, GFN2, iPEA1) + **Solvation** (CPCM, GB, ALPB)
@@ -469,7 +469,7 @@ ctest -R "cli_rmsd_01" --verbose
 
 1. **GFN-FF Limitations**: See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md#known-limitations) for details (D4 dispersion, EEQ integration, metal parameters)
 
-2. **Unit migration**: Some legacy code still uses hardcoded constants instead of CurcumaUnit functions
+2. **GFN-FF S30L validation (Jul 2026, AI/machine-tested)**: see [docs/S30L_GFNNF_VALIDATION.md](docs/S30L_GFNNF_VALIDATION.md) — vs xtb 6.6.1: 22/30 within ~1.5 kcal/mol (MAD 433→2.7). Fixed: (a) charged complexes (23-30) EEQ qfrag=[0,0] → xtb-style both-assignment trial (F2); (b) `-charge -N` parsed as +N → negative-number CLI fix; (c) `AngleBending` 1/sinθ NaN guard + energy-NaN vs gradient-NaN-only (F1); (d) F2 cache bug — inline topo-cache load dropped qfrag, so cached charged nfrag==2 re-runs neutralised the Coulomb (now restores qfrag; write guard checks qfrag SUM). Deferred: sys 11/12/15/16 bond-stretching term ~0.05-0.73 Eh too negative (dispersion/repulsion/BATM exact → perception correct; bond-type/π-bond-order assignment differs) — F3. Residual: sys 23 complex term (-27 = Coulomb −13.8 + Bond −8.7, A/B exact). Pre-existing from merge: `cli_curcumaopt_07_opt_multixyz` golden-value drift.
 
 3. **Verbosity scoping across threads (residual)**: the global `CurcumaLogger` verbosity is now RAII-scoped via `CurcumaMethod` (ctor/dtor save-restore), but it is a shared static and cannot be cleanly scoped across `CxxThreadPool` workers — the pool-owning helpers (`PerformMolecularDynamics`/`PerformOptimisation`) and energy-method setup re-assert the level at their boundaries (kept deliberately); a `thread_local` verbosity (the only full fix) is out of scope. See [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md) #1.
 

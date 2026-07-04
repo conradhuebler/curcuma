@@ -448,15 +448,43 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
             m_method->copyGradientTo(m_gradient);
         }
         
-        // Check for NaN values — always emit error regardless of verbosity, since
-        // silent NaN causes optimizer to see energy=0.0 and fail with no diagnostic.
-        if (checkForNaN(m_energy, gradient ? m_gradient : Matrix{})) {
+        // Check for NaN/Inf values.
+        // Claude Generated (Jul 2026, F1): distinguish energy-NaN (fatal — return 0.0)
+        // from gradient-only-NaN (energy is still valid). Previously ANY NaN in energy OR
+        // gradient returned 0.0, which lied to the caller: a single near-collinear angle
+        // produced a NaN gradient but a finite, correct energy, and the 0.0 substitution
+        // made optimizers/MD converge against a fabricated energy with no diagnostic.
+        // Now: energy-NaN -> return 0.0 + error (unchanged); gradient-NaN-only -> return
+        // the finite m_energy + error log, so the energy is honest and the caller can
+        // detect the invalid gradient via hasError()/m_containsNaN.
+        const bool energy_nan = std::isnan(m_energy) || std::isinf(m_energy);
+        bool grad_nan = false;
+        if (gradient && m_gradient.size() > 0) {
+            for (int i = 0; i < m_gradient.rows() && !grad_nan; ++i)
+                for (int j = 0; j < m_gradient.cols(); ++j)
+                    if (std::isnan(m_gradient(i, j)) || std::isinf(m_gradient(i, j))) {
+                        grad_nan = true;
+                        break;
+                    }
+        }
+        if (energy_nan) {
             m_containsNaN = true;
             CurcumaLogger::error(fmt::format(
-                "NaN/Inf in {} energy or gradient — returning 0.0 (optimizer will fail silently without this message)",
+                "NaN/Inf in {} energy — returning 0.0",
                 m_method_name));
-            handleMethodError("NaN values detected in calculation results");
+            handleMethodError("NaN values detected in energy");
             return 0.0;
+        }
+        if (grad_nan) {
+            m_containsNaN = true;
+            CurcumaLogger::error(fmt::format(
+                "NaN/Inf in {} gradient — energy {:.8f} Eh is finite and returned, "
+                "but the gradient is invalid (optimization/MD should abort or restart)",
+                m_method_name, m_energy));
+            // Do NOT substitute 0.0 for a valid energy. Mark error state so callers
+            // checking hasError()/m_containsNaN can refuse to use the gradient.
+            m_error = true;
+            m_error_message = "NaN/Inf in gradient (energy finite)";
         }
 
         const int energy_min = m_is_iterative ? 2 : 1;
