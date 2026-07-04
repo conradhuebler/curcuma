@@ -311,8 +311,15 @@ Eigen::MatrixXd HuckelSolver::buildHamiltonian(
             int hyb_j = hybridization[jj];
 
             // Get element-specific β values
-            double h_off_i = (Z_i < 18) ? hoffdiag[Z_i] : 1.0;
-            double h_off_j = (Z_j < 18) ? hoffdiag[Z_j] : 1.0;
+            // Claude Generated (Jul 2026, F3 fix): default 0.0 for Z>=18, NOT 1.0. xtb's
+            // gen%hoffdiag is zero for any element not explicitly parameterised (B,C,N,O,
+            // F,S,Cl only — gfnff_param.f90:701-707); the Fortran array is initialised to
+            // 0. Using 1.0 here (the C reference value) wrongly couples heavy halogens
+            // (Br, I) and other Z>=18 atoms into the π-Hückel, giving non-zero pibo on
+            // e.g. C-I bonds where xtb gives 0. This over-stiffened C-I bonds on the
+            // S30L 15/16 hosts (iodine macrocycle). Default 0.0 matches xtb exactly.
+            double h_off_i = (Z_i < 18) ? hoffdiag[Z_i] : 0.0;
+            double h_off_j = (Z_j < 18) ? hoffdiag[Z_j] : 0.0;
 
             // Geometric mean of β values
             double beta = std::sqrt(h_off_i * h_off_j);

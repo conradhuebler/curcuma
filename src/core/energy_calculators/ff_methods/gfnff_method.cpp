@@ -6479,20 +6479,31 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
             hyb[i] = 3; // sp3 (isolated atom)
         } else if (neighbor_count == 1) {
             // Special case for hydrogen and halogens: always sp3
-            if (z == 1 || (z >= 9 && z <= 17)) {  // H or halogens (F, Cl, Br, I)
-                hyb[i] = 0; // sp3 for hydrogen and halogens (matches reference implementation)
-            } else if (z == 8) {
-                // Fortran gfnff_ini2.f90:307-310: Oxygen CN=1
-                // Default: sp2 (carbonyl oxygen in ketones, aldehydes, amides)
-                // Exception: sp if sole neighbor also has CN=1 (CO, OH radical, etc.)
+            // Claude Generated (Jul 2026, F3 fix): exclude O(8)/S(16) from the "halogen"
+            // range (z 9-17 was catching S=16 and forcing hyb=0). True halogens here are
+            // F(9) and Cl(17); Br(35)/I(53) are outside this range anyway. xtb group-16
+            // (O,S) CN=1 -> sp2 (gfnff_ini2.f90:294), sp only if the neighbour also has
+            // CN=1 (CO/CS). Handle O and S explicitly below before the halogen catch-all.
+            if (z == 8 || z == 16) {
+                // Fortran gfnff_ini2.f90:294-298 (group 6: O, S) CN=1
+                // Default: sp2 (carbonyl/thiocarbonyl). Exception: sp if sole neighbour
+                // also has CN=1 (CO, CS, OH/SH radical, etc.)
                 int neighbor_idx = neighbors[0];
                 int neighbor_CN = adjacency_list[neighbor_idx].size();
 
                 if (neighbor_CN == 1) {
-                    hyb[i] = 1; // sp (neighbor also has CN=1)
+                    hyb[i] = 1; // sp (neighbour also CN=1)
                 } else {
-                    hyb[i] = 2; // sp2 (carbonyl oxygen in organic molecules)
+                    hyb[i] = 2; // sp2 (carbonyl/thiocarbonyl)
                 }
+            } else if (z == 1 || z == 9 || z == 17 || z == 35 || z == 53) {
+                // H or halogens (group 17: F, Cl, Br, I, At) CN=1 -> hyb=0
+                // Claude Generated (Jul 2026, F3 audit): xtb gfnff_ini2.f90:300-303 sets
+                // group-7 halogens CN=1 -> hyb=0 (default, no rule fires). curcuma's old
+                // range (z 9-17) missed Br(35)/I(53) which then fell through to hyb=1 (sp)
+                // and wrongly entered the pi-system. Br/I have hoffdiag=0 so they must NOT
+                // be sp (sp atoms are pi-candidates) — hyb=0 keeps them out.
+                hyb[i] = 0; // sp3 for hydrogen and halogens (matches reference implementation)
             } else {
                 hyb[i] = 1; // sp (terminal non-hydrogen/halogen atom)
             }
@@ -6502,8 +6513,19 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
             // Oxygen with CN=2 is ALWAYS sp3 (2 bonds + 2 lone pairs = 4 electron pairs)
             // Examples: H2O, R-O-R (ether), R-OH (alcohol)
             // XTB reference: gfnff_ini2.f90 uses element-specific hybridization
-            if (z == 8) {
-                hyb[i] = 3; // sp3 for oxygen (accounts for lone pairs)
+            // Claude Generated (Jul 2026, F3 fix): extend to sulfur (Z=16). xtb treats
+            // group-16 (O,S) identically (gfnff_ini2.f90:285-298: group==6, CN==2 -> sp3,
+            // unconditionally — no geometry check). curcuma previously applied this only to
+            // O (Z==8) and let S fall into the geometry-based branch (C-S-C bent -> sp2),
+            // which made the macrocyclic C-S bonds sp2 -> bsmat[2][2]=1.24 (too stiff) and
+            // gave S nel=1 in the Hückel (sp2) instead of nel=2 (sp3) -> over-delocalised
+            // pibo on C-S -> bond energy too negative by ~0.7 Eh on S30L 11/12/15/16 hosts.
+            if (z == 8 || z == 16) {
+                hyb[i] = 3; // sp3 for oxygen/sulfur (accounts for lone pairs)
+            } else if (z == 9 || z == 17 || z == 35 || z == 53) {
+                // Claude Generated (Jul 2026, F3 audit): xtb gfnff_ini2.f90:301 — group-7
+                // halogens with CN=2 -> hyb=1 (sp), e.g. bridging F/Cl. Was geometry-based.
+                hyb[i] = 1; // sp
             } else {
                 // For other elements: Check if linear (sp) or bent (sp2)
                 double dot_product = bond_vectors[0].dot(bond_vectors[1]);
@@ -6573,20 +6595,24 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb,
 
     std::vector<int> pi_fragments(m_atomcount, 0); // 0 = not in pi-system
 
-    // Step 1: Identify all potential pi-system members
-    // Robust detection: include sp, sp2, and picon candidates (N/O/F/S with lone pair conjugation)
+    // Step 1: Identify all potential pi-system members.
+    // Claude Generated (Jul 2026, F3 audit): a pi-candidate must be an element with a
+    // non-zero Hückel off-diagonal parameter (hoffdiag>0): B,C,N,O,F,S,Cl
+    // (gfnff_param.f90:701-707). Atoms with hoffdiag=0 (H, He, Li, Be, metals, Br, I,
+    // noble gases, ...) never produce a non-zero pibo in xtb (zero coupling -> piadr=0
+    // after the Hückel), so xtb excludes them from the pi-system. curcuma previously
+    // made ANY sp/sp2 atom a candidate (wrongly pulling in terminal Br/I that got hyb=1)
+    // and missed F/Cl (hyb=0, hoffdiag=0.23/1.0). Restricting to the hoffdiag>0 set
+    // matches xtb: F/Cl enter (bonded to sp/sp2), Br/I stay out.
+    auto hoffdiag_nonzero = [](int z) {
+        return z == 5 || z == 6 || z == 7 || z == 8 || z == 9 || z == 16 || z == 17;
+    };
     std::vector<bool> is_pi_candidate(m_atomcount, false);
     for (int i = 0; i < m_atomcount; ++i) {
-        int z = m_atoms[i];
-        if (hyb[i] == 1 || hyb[i] == 2) {
-            is_pi_candidate[i] = true;
-        }
-        // "Picon" candidates: atoms like N in pyrrole or caffeine ring that are CN=3 (sp3)
-        // locally but their lone pair participates in the ring pi-system.
-        else if (z == 7 || z == 8 || z == 16) {
-            // These atoms will join a pi-system if they have a neighbor that is sp/sp2
-            is_pi_candidate[i] = true;
-        }
+        if (!hoffdiag_nonzero(m_atoms[i])) continue;
+        // sp/sp2 atoms are candidates; N/O/S/F/Cl/B with hyb=0 or 3 are "picon" candidates
+        // (lone-pair / fluorine conjugation) that join if bonded to an sp/sp2 atom (Step 2).
+        is_pi_candidate[i] = true;
     }
 
     // Step 2: Build adjacency for pi-candidates only (PHASE 2: using pre-computed bonds)
@@ -6601,15 +6627,26 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb,
             // Verify bond has pi-character or potential for conjugation
             bool is_pi_bond = false;
 
+            // picon heteroatom: B,N,O,F,S,Cl (NOT C). Used by Case 2.
+            auto is_picon_heteroatom = [](int z) {
+                return (z == 5 || z == 7 || z == 8 || z == 9 || z == 16 || z == 17);
+            };
+
             // Case 1: Both are true pi-atoms (sp/sp2)
             if ((hyb[i] == 1 || hyb[i] == 2) && (hyb[j] == 1 || hyb[j] == 2)) {
                 is_pi_bond = true;
             }
-            // Case 2: One is sp/sp2 and other is N/O/S with lone pair
-            else if ((hyb[i] == 1 || hyb[i] == 2) && (m_atoms[j] == 7 || m_atoms[j] == 8 || m_atoms[j] == 16)) {
+            // Case 2: One is sp/sp2 and other is a picon HETEROatom (B/N/O/F/S/Cl, NOT C)
+            // with a lone pair / conjugation (gfnff_ini2.f90 includes F,Cl in the pi-Hückel).
+            // Claude Generated (Jul 2026, F3 audit): the non-sp/sp2 partner must be a
+            // heteroatom — a sp3 C bonded to an sp2 C (e.g. toluene Me-phenyl) is a pure
+            // sigma bond and xtb keeps the sp3 C OUT of the pi-system (piadr=0). Allowing
+            // sp3 C here pulled 190 sp3 carbons into the pi-system and broke the S30L
+            // clean neutrals. Restrict to z != 6.
+            else if ((hyb[i] == 1 || hyb[i] == 2) && is_picon_heteroatom(m_atoms[j])) {
                 is_pi_bond = true;
             }
-            else if ((hyb[j] == 1 || hyb[j] == 2) && (m_atoms[i] == 7 || m_atoms[i] == 8 || m_atoms[i] == 16)) {
+            else if ((hyb[j] == 1 || hyb[j] == 2) && is_picon_heteroatom(m_atoms[i])) {
                 is_pi_bond = true;
             }
 
@@ -6646,10 +6683,10 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb,
         fragment_id++;
     }
 
-    // DEBUG: Log pi-fragment assignments for first few atoms
+    // DEBUG: Log pi-fragment assignments for ALL atoms (Jul 2026, F3 audit: was first 10)
     if (m_atomcount > 5 && CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Pi-fragment assignments:");
-        for (int i = 0; i < std::min(m_atomcount, 10); ++i) {
+        for (int i = 0; i < m_atomcount; ++i) {
             CurcumaLogger::info(fmt::format("  Atom {} (Z={}, hyb={}): fragment {}",
                               i, m_atoms[i], hyb[i], pi_fragments[i]));
         }
