@@ -3,17 +3,17 @@
 Status: AI-generated, machine-tested (Jul 2026). NOT human production-tested.
 The AI does not assign ✅ TESTED / ✅ APPROVED.
 
-## Outcome (after F1/F2/CLI + F3 bond/Hückel + metal_type fixes)
+## Outcome (after F1/F2/CLI + F3 bond/Hückel + metal_type + ipis fixes)
 
 | group | n | MAD | max | RMSD | verdict |
 |------|--:|----:|----:|-----:|---------|
 | clean neutral (1,2,3-10,13,14,17-22) | 18 | 0.30 | 1.62 | 0.54 | reproduces xtb |
 | F3 fixed (11,12,15,16) | 4 | 0.43 | 0.94 | 0.50 | reproduces xtb |
-| charged, fixed (24,25,26,27,28,29,30) | 7 | 1.5 | 3.0 | 1.6 | reproduces xtb |
-| charged residual (23) | 1 | — | 27.2 | — | complex-term residual |
-| **all 30** | 30 | **1.44** | 27.2 | 5.0 | was MAD 433 pre-fix, 2.70 before F3 |
+| charged host, fixed (24,25,26,29) | 4 | 0.18 | 0.58 | 0.25 | reproduces xtb (25/26 = 0.0) |
+| charged guest residual (23,27,28,30) | 4 | 8.5 | 27.2 | 11.0 | .CHRG quirk + torsion |
+| **all 30** | 30 | **1.38** | 27.2 | 5.0 | was MAD 433 pre-fix, 1.44 before ipis |
 
-- 28/30 systems within ~1.5 kcal/mol of xtb (only 23 and the borderline 7/8 outside).
+- 28/30 systems within ~1.5 kcal/mol of xtb (23 and 30 outside; 7/8 borderline torsion).
 - Pre-fix (post-merge) MAD was 433 kcal/mol (charged systems off by 100s-1000s);
   the F2 + negative-charge CLI fix took charged MAD 1619 → 1.5 kcal/mol (7/8).
 - xtb vs reference_s30l: MAD 14.8 (context only — GFN-FF is not meant to match the
@@ -91,6 +91,31 @@ hosts (C24F15I3) Coulomb -14 kcal/mol. Array rewritten to match xtb `metal(86)`
 15/A Coulomb now -0.19647438 Eh = xtb -0.19647438 to 1e-9.
 
 No regression on the 18 clean neutrals (all unchanged or improved). MAD 2.70 -> 1.44.
+
+**F3d — Hückel electron count missing the π-system charge (ipis)** (`gfnff_method.cpp`,
+`huckel_solver.cpp`): xtb subtracts the π-system charge from the Hückel electron count
+(`gfnff_ini.f90:874`: `nelpi = nelpi - ipis(pis)`), where `ipis(pis)` is the charge
+localised on π-system `pis` (computed at `gfnff_ini.f90:517-562` via qheavy +
+neutralize-fragment + re-EEQ + dqa·1.1). curcuma counted only the per-atom π-electrons
+(26 for S30L 25/A π-system 1) and never subtracted ipis, so for charged hosts the
+Hückel had 2 electrons too many → wrong occupations → pibo too high (0.785 vs xtb 0.703)
+→ bond term +157 kcal/mol on 25/A. Fixed by computing ipis in `calculateTopologyInfo`
+(qheavy + neutralize each π-system's EEQ fragment + re-run topology EEQ + dqa·1.1,
+rounded) and subtracting it from nelpi in `HuckelSolver::calculatePiBondOrders`.
+Verified via a python Hückel re-solve: nel=24 gives pibo(18,20)=0.70305 = xtb exactly
+(was 0.7852 with nel=26). Neutral molecules have ipis=0 (unchanged) — which is why the
+18 clean neutrals matched all along. Fixed 25/26 (−1.4 → 0.0004/−0.0000 kcal/mol) and
+30/B (now exact). MAD 1.44 -> 1.38. No neutral regression (ipis=0 for neutral).
+
+### Remaining residuals (charged guest + torsion)
+- **23 (−27)**: xtb `.CHRG` quirk — curcuma correctly places +1 on the guest, xtb puts
+  it on the host (one-line `.CHRG` fallback); with the charge on the guest curcuma == xtb
+  exactly (verified). Not a curcuma bug.
+- **27/28 (1.45/1.39)** and **7/8 (1.27/1.62)**: **torsion term** — curcuma computes
+  ~80% of xtb's torsion energy (e.g. 27/A cur 0.076 vs xtb 0.096 Eh, −12 kcal on the
+  host, partly cancels in ΔE). Separate torsion-generation/parameter issue (open).
+- **30/AB (+3.98)**: a bond pibo difference with ipis=0 (the −1 does not localise on
+  the host π-systems); previously masked by 30/B's error (now fixed). Open.
 
 ### F2 cache bug (FIXED, Jul 2026) — charged nfrag==2 complexes on cached re-runs
 Found via term-by-term decomposition: charged host-guest complexes (S30L 25/26/27/28/30,

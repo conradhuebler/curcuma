@@ -7353,7 +7353,8 @@ std::vector<double> GFNFF::calculatePiBondOrders(
     const std::vector<int>& hybridization,
     const std::vector<int>& pi_fragments,
     const std::vector<double>& charges,
-    const Eigen::MatrixXd& geometry_bohr) const
+    const Eigen::MatrixXd& geometry_bohr,
+    const std::vector<int>& pi_system_charge) const
 {
     /**
      * Claude Generated (January 14, 2026) - Updated for Phase 1: Full Hückel implementation
@@ -7404,7 +7405,8 @@ std::vector<double> GFNFF::calculatePiBondOrders(
             charges,
             bond_list,
             geometry_bohr,
-            itag
+            itag,
+            pi_system_charge
         );
 
         // Ensure correct size
@@ -9295,12 +9297,88 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     std::vector<double> charges_vec(topo_info.topology_charges.data(),
                                     topo_info.topology_charges.data() + topo_info.topology_charges.size());
 
+    // Claude Generated (Jul 2026, F3): compute ipis (pi-system charge) to subtract from
+    // the Hückel electron count (nelpi). Port from xtb gfnff_ini.f90:517-562 + :874
+    // (nelpi = nelpi - ipis(pis)). For each pi-system: neutralize its EEQ fragment,
+    // re-run the topology EEQ, take dqa = qheavy(charged) - qheavy(neutral) summed over
+    // the pi-system atoms * 1.1, rounded. Neutral molecules -> ipis=0 (unchanged), which
+    // is why the 18 clean neutrals matched; charged hosts (S30L 25/26 etc.) had nelpi too
+    // large by the pi-system charge -> wrong pibo -> bond term off.
+    {
+        auto qheavy = [&](const Vector& q) -> Vector {
+            Vector qh = q;
+            for (int i = 0; i < m_atomcount; ++i) {
+                if (m_atoms[i] != 1) continue;
+                int nn = (i < (int)topo_info.neighbor_lists.size()) ? (int)topo_info.neighbor_lists[i].size() : 0;
+                if (nn == 0) continue;
+                double share = q(i) / static_cast<double>(nn);
+                for (int nb : topo_info.neighbor_lists[i]) qh(nb) += share;
+                qh(i) = 0.0;
+            }
+            return qh;
+        };
+        Vector qah = qheavy(topo_info.topology_charges);  // charged, H-condensed (computed once)
+
+        std::set<int> pi_ids;
+        for (int f : topo_info.pi_fragments) if (f > 0) pi_ids.insert(f);
+        topo_info.pi_system_charge.assign(pi_ids.empty() ? 0 : (*pi_ids.rbegin()) + 1, 0);
+
+        if (!pi_ids.empty() && !topo_info.fraglist.empty() && m_eeq_solver) {
+            // Build a fresh TopologyInput (eeq_topology_input is only in scope on the
+            // non-cache path, so rebuild from topo_info).
+            EEQSolver::TopologyInput ti;
+            ti.neighbor_lists = topo_info.neighbor_lists;
+            ti.nfrag = topo_info.nfrag;
+            ti.fraglist = topo_info.fraglist;
+            ti.qfrag = topo_info.qfrag;
+            ti.covalent_radii.resize(m_atomcount);
+            for (int i = 0; i < m_atomcount; ++i) {
+                int z = m_atoms[i];
+                ti.covalent_radii[i] = (z >= 1 && z <= (int)GFNFFParameters::covalent_radii.size())
+                                      ? GFNFFParameters::covalent_radii[z - 1] : 1.0;
+            }
+            auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+            if (pool) pool->setActiveThreadCount(m_threads);
+
+            std::vector<double> qfrag_save = topo_info.qfrag;
+            for (int pis : pi_ids) {
+                int first_pi_atom = -1;
+                for (int k = 0; k < m_atomcount; ++k)
+                    if (topo_info.pi_fragments[k] == pis) { first_pi_atom = k; break; }
+                if (first_pi_atom < 0) continue;
+                int ifrag = (first_pi_atom < (int)topo_info.fraglist.size()) ? topo_info.fraglist[first_pi_atom] : 1;
+                if (ifrag < 1 || ifrag > (int)topo_info.qfrag.size()) continue;
+                // neutralize this fragment
+                ti.qfrag[ifrag - 1] = 0.0;
+                m_eeq_solver->clearSolveStatus();
+                m_eeq_solver->invalidateCholeskyCache();
+                m_eeq_solver->invalidateMatrixCache();
+                Vector qa_neutral = m_eeq_solver->calculateTopologyCharges(
+                    m_atoms, m_geometry_bohr, 0, topo_info.coordination_numbers,
+                    ti, true, pool, m_threads);
+                ti.qfrag[ifrag - 1] = qfrag_save[ifrag - 1];  // restore
+                Vector qa_neutral_h = qheavy(qa_neutral);
+                double dum = 0.0;
+                for (int k = 0; k < m_atomcount; ++k)
+                    if (topo_info.pi_fragments[k] == pis) dum += (qah(k) - qa_neutral_h(k));
+                dum *= 1.1;
+                topo_info.pi_system_charge[pis] = static_cast<int>(std::round(dum));
+            }
+            // restore solver state for the original qfrag
+            ti.qfrag = qfrag_save;
+            m_eeq_solver->clearSolveStatus();
+            m_eeq_solver->invalidateCholeskyCache();
+            m_eeq_solver->invalidateMatrixCache();
+        }
+    }
+
     topo_info.pi_bond_orders = calculatePiBondOrders(
         bond_list,
         topo_info.hybridization,
         topo_info.pi_fragments,
         charges_vec,
-        m_geometry_bohr  // P2a: Pass geometry instead of distance_matrix
+        m_geometry_bohr,  // P2a: Pass geometry instead of distance_matrix
+        topo_info.pi_system_charge  // ipis per pi-system (Jul 2026, F3)
     );
 
     // Initialize metal and aromatic flags

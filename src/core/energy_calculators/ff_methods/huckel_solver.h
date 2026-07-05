@@ -95,7 +95,8 @@ public:
         const std::vector<double>& charges,
         const std::vector<std::pair<int,int>>& bonds,
         const Eigen::MatrixXd& geometry_bohr,
-        const std::vector<int>& itag = {}
+        const std::vector<int>& itag = {},
+        const std::vector<int>& pi_system_charge = {}
     );
 
     /**

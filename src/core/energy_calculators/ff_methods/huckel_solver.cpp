@@ -37,7 +37,8 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
     const std::vector<double>& charges,
     const std::vector<std::pair<int,int>>& bonds,
     const Eigen::MatrixXd& geometry_bohr,
-    const std::vector<int>& itag)
+    const std::vector<int>& itag,
+    const std::vector<int>& pi_system_charge)
 {
     const int natoms = static_cast<int>(atoms.size());
     const int nbonds = static_cast<int>(bonds.size());
@@ -105,6 +106,16 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
         }
 
         int npi = static_cast<int>(pi_atoms.size());
+
+        // Claude Generated (Jul 2026, F3): subtract the pi-system charge (ipis) from
+        // the electron count. Port from xtb gfnff_ini.f90:874 (nelpi = nelpi - ipis(pis)).
+        // ipis is the charge localised on this pi-system (computed in GFNFF via the
+        // qheavy + neutralize-fragment + re-EEQ + dqa*1.1 path). Neutral molecules have
+        // ipis=0 (unchanged); charged hosts otherwise get nelpi too large by the charge
+        // -> wrong Hückel occupations -> wrong pibo -> wrong bond term.
+        if (!pi_system_charge.empty() && pis >= 0 && pis < static_cast<int>(pi_system_charge.size())) {
+            nelpi -= pi_system_charge[pis];
+        }
 
         // Skip if too small (need at least 2 atoms and 1 electron)
         if (npi < 2 || nelpi < 1) {

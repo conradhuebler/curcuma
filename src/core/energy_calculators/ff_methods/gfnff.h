@@ -314,6 +314,7 @@ public:
         Vector neighbor_counts;                                  // Simple neighbor counts (integer CN)
         std::vector<int> hybridization;                          // 0=sp3, 1=sp, 2=sp2, 3=terminal, 5=hypervalent
         std::vector<int> pi_fragments;                           // Pi fragment assignment per atom
+        std::vector<int> pi_system_charge;                       // ipis: charge per pi-system (subtract from nelpi) - Claude Generated Jul 2026
         std::vector<int> ring_sizes;                             // Smallest ring containing each atom
         std::vector<bool> is_metal;                              // Metal atom flags
         std::vector<bool> is_aromatic;                           // Aromatic atom flags
@@ -1807,7 +1808,8 @@ private:
         const std::vector<int>& hybridization,
         const std::vector<int>& pi_fragments,
         const std::vector<double>& charges = {},
-        const Eigen::MatrixXd& geometry_bohr = Eigen::MatrixXd()) const;
+        const Eigen::MatrixXd& geometry_bohr = Eigen::MatrixXd(),
+        const std::vector<int>& pi_system_charge = {}) const;
 
     /**
      * @brief Calculate EEQ electrostatic energy
