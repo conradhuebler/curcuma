@@ -1244,8 +1244,17 @@ if(USE_VULKAN)
     message(STATUS "Vulkan support enabled: -gpu vulkan available (Stage 0)")
 endif()
 
-target_link_libraries(curcuma_core pthread fmt::fmt-header-only )
-target_link_libraries(curcuma_cap pthread fmt::fmt-header-only )
+# Claude Generated 2026 - MSVC has no pthread (threads come from the CRT); MinGW
+# (winpthreads), Linux and macOS still need -lpthread. Guard the link item so MSVC
+# doesn't try to open a nonexistent pthread.lib (LNK1181) when anything links
+# curcuma_core/curcuma_cap (parallel_scf, qurcuma, ...).
+if(MSVC)
+    set(CURCUMA_PTHREAD "")
+else()
+    set(CURCUMA_PTHREAD pthread)
+endif()
+target_link_libraries(curcuma_core ${CURCUMA_PTHREAD} fmt::fmt-header-only )
+target_link_libraries(curcuma_cap ${CURCUMA_PTHREAD} fmt::fmt-header-only )
 
 # Link BLAS/LAPACK for curcuma_core.
 # EIGEN_USE_BLAS: per-file in eeq_solver.cpp (avoids Eigen 3.4 complex-type conflict).
