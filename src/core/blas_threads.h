@@ -22,13 +22,17 @@
 // static archive with the Xcode 26 toolchain. dlsym(RTLD_DEFAULT, ...) is the
 // portable, linker-independent way to call a symbol "if it happens to be
 // loaded" and behaves identically on Linux and macOS.
-#ifndef _MSC_VER
+//
+// Windows (both MSVC and MinGW/GCC) ships no <dlfcn.h> and needs none here, so the
+// guard is _WIN32 rather than _MSC_VER — MinGW defines __GNUC__ but not _MSC_VER, so
+// a _MSC_VER-only guard let it fall into the dlfcn.h path and fail to compile.
+#ifndef _WIN32
 #include <dlfcn.h>
 #endif
 
 namespace curcuma {
 namespace detail {
-#ifndef _MSC_VER
+#ifndef _WIN32
     using BlasSetThreadsFn = void (*)(int);
     inline BlasSetThreadsFn resolveBlasSetThreads(const char* symbol)
     {
@@ -84,7 +88,7 @@ public:
 private:
     static void setBlasThreads(int n)
     {
-#ifndef _MSC_VER
+#ifndef _WIN32
         static auto mkl_set_lower = detail::resolveBlasSetThreads("mkl_set_num_threads");
         static auto mkl_set_upper = detail::resolveBlasSetThreads("MKL_Set_Num_Threads");
         static auto openblas_set = detail::resolveBlasSetThreads("openblas_set_num_threads");

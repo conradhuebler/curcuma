@@ -23,8 +23,18 @@
 #include "src/core/citation_registry.h"
 #include "src/core/fileiterator.h"
 #include "src/core/global.h"
+#include <cstdio>
 #include <filesystem>
 #include <fmt/core.h>
+
+// Claude Generated 2026 - MSVC spells the POSIX pipe helpers with a leading
+// underscore (_popen/_pclose in <cstdio>); it has no popen/pclose. MinGW, Clang and
+// GCC all provide the unprefixed names natively, so remap only under MSVC. The
+// MolAlignStrategy below shells out to the external molalign binary via popen().
+#ifdef _MSC_VER
+#define popen _popen
+#define pclose _pclose
+#endif
 
 // Claude Generated - Strategy Factory implementation with enum support
 std::unique_ptr<AlignmentStrategy> AlignmentStrategyFactory::createStrategy(AlignmentMethod method)
