@@ -195,7 +195,7 @@ FetchContent_Declare(CxxThreadPool
 # ripser: header-only, no CMakeLists.txt at root — use Populate to avoid add_subdirectory
 FetchContent_Declare(ripser
     GIT_REPOSITORY https://github.com/conradhuebler/ripser
-    GIT_TAG        c2abee3a44ce6d9942824c09b83671b600db8d49
+    GIT_TAG        dcb13c22db2017ef80e68bdf9bed6ec3b77ad70d
     SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/ripser
 )
 # cpp-d4: headers always needed, library only when USE_D4=ON

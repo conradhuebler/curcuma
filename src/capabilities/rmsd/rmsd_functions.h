@@ -1,6 +1,6 @@
 /*
  * <Collection of functions to calculate rmsd. >
- * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -26,11 +26,21 @@
 
 #include <Eigen/Dense>
 
+// Claude Generated 2026 - GCC-only optimization attribute. MSVC has no
+// __attribute__ at all (misparses the declaration -> C3861/C4430), and Clang has
+// no 'optimize' attribute either (warns "unknown attribute ignored"). Guard it so
+// only real GCC emits the attribute; everyone else gets the plain declaration.
+#if defined(__GNUC__) && !defined(__clang__)
+#define CURCUMA_NO_TREE_VECTORIZE __attribute__((optimize("no-tree-vectorize")))
+#else
+#define CURCUMA_NO_TREE_VECTORIZE
+#endif
+
 namespace RMSDFunctions {
 
 /*! \brief Calculate the best fit rotation of two sets of coordinates, both have to be centered already */
 
-__attribute__((optimize("no-tree-vectorize"))) inline Eigen::Matrix3d BestFitRotation(const Geometry& reference, const Geometry& target, int factor = 1)
+CURCUMA_NO_TREE_VECTORIZE inline Eigen::Matrix3d BestFitRotation(const Geometry& reference, const Geometry& target, int factor = 1)
 {
     /* The rmsd kabsch algorithmn was adopted from here:
      * https://github.com/oleg-alexandrov/projects/blob/master/eigen/Kabsch.cpp
@@ -128,7 +138,7 @@ inline Eigen::Vector3d WeightedCentroid(const Geometry& g, const std::vector<dou
     return c;
 }
 
-__attribute__((optimize("no-tree-vectorize"))) inline Eigen::Matrix3d BestFitRotationW(const Geometry& reference, const Geometry& target, const std::vector<double>& w)
+CURCUMA_NO_TREE_VECTORIZE inline Eigen::Matrix3d BestFitRotationW(const Geometry& reference, const Geometry& target, const std::vector<double>& w)
 {
     Eigen::Matrix3d Cov;
     Cov.setZero();
