@@ -6683,10 +6683,10 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb,
         fragment_id++;
     }
 
-    // DEBUG: Log pi-fragment assignments for ALL atoms (Jul 2026, F3 audit: was first 10)
+    // DEBUG: Log pi-fragment assignments for first few atoms
     if (m_atomcount > 5 && CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Pi-fragment assignments:");
-        for (int i = 0; i < m_atomcount; ++i) {
+        for (int i = 0; i < std::min(m_atomcount, 10); ++i) {
             CurcumaLogger::info(fmt::format("  Atom {} (Z={}, hyb={}): fragment {}",
                               i, m_atoms[i], hyb[i], pi_fragments[i]));
         }

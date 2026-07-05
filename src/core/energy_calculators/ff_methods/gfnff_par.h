@@ -359,12 +359,20 @@ static const double bsmat[4][4] = {
 
 // Metal type classification
 // 0=non-metal, 1=main group metal, 2=transition metal
+// Claude Generated (Jul 2026, F3 fix): corrected to match xtb metal(86) EXACTLY
+// (external/xtb/src/gfnff/gfnff_param.f90:318-325). The previous array had only 83
+// entries — the K-Kr row was missing Kr(36)=0 and the Rb-Xe row was missing I(53)=0
+// and Xe(54)=0, plus Ag(47) was 1 instead of 2. The 3-element shortfall shifted
+// every Z>=36 index by 1-3, so I(Z=53) read index 52 (=2, TM) instead of 0. That
+// made calculateDgam use the TM ff=-0.9 for I instead of the halogen ff=-0.07,
+// giving dgam(I)=-0.176 instead of -0.0137, gameeq(I)=-0.136 (negative hardness)
+// and over-polarised iodine by ~0.19 e (S30L 15/16 Coulomb -14 kcal/mol).
 static const int metal_type[86] = {
-    0, 0, // H-He
-    1, 1, 0, 0, 0, 0, 0, 0, // Li-Ne
-    1, 1, 1, 0, 0, 0, 0, 0, // Na-Ar
-    1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, // K-Kr
-    1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 0, 0, 0, 0, // Rb-Xe
+    0, 0,                                                                      // H-He
+    1, 1, 0, 0, 0, 0, 0, 0,                                                    // Li-Ne
+    1, 1, 1, 0, 0, 0, 0, 0,                                                    // Na-Ar
+    1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0,                     // K-Kr   (Kr=0 added)
+    1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 0, 0, 0, 0, 0,                     // Rb-Xe  (Ag=2, I=0, Xe=0 added)
     1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 0, 0 // Cs-Rn
 };
 

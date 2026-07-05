@@ -3,17 +3,17 @@
 Status: AI-generated, machine-tested (Jul 2026). NOT human production-tested.
 The AI does not assign ✅ TESTED / ✅ APPROVED.
 
-## Outcome (after F1/F2/CLI fixes; F3 diagnosed-deferred)
+## Outcome (after F1/F2/CLI + F3 bond/Hückel + metal_type fixes)
 
 | group | n | MAD | max | RMSD | verdict |
 |------|--:|----:|----:|-----:|---------|
 | clean neutral (1,2,3-10,13,14,17-22) | 18 | 0.30 | 1.62 | 0.54 | reproduces xtb |
-| F3 bond-term offset (11,12,15,16) | 4 | 9.7 | 12.6 | 10.2 | diagnosed, deferred |
+| F3 fixed (11,12,15,16) | 4 | 0.43 | 0.94 | 0.50 | reproduces xtb |
 | charged, fixed (24,25,26,27,28,29,30) | 7 | 1.5 | 3.0 | 1.6 | reproduces xtb |
 | charged residual (23) | 1 | — | 27.2 | — | complex-term residual |
-| **all 30** | 30 | **2.70** | 27.2 | 6.3 | was MAD 433 pre-fix |
+| **all 30** | 30 | **1.44** | 27.2 | 5.0 | was MAD 433 pre-fix, 2.70 before F3 |
 
-- 22/30 systems within ~1.5 kcal/mol of xtb.
+- 28/30 systems within ~1.5 kcal/mol of xtb (only 23 and the borderline 7/8 outside).
 - Pre-fix (post-merge) MAD was 433 kcal/mol (charged systems off by 100s-1000s);
   the F2 + negative-charge CLI fix took charged MAD 1619 → 1.5 kcal/mol (7/8).
 - xtb vs reference_s30l: MAD 14.8 (context only — GFN-FF is not meant to match the
@@ -54,20 +54,43 @@ substituting 0.0 (no longer lies to the optimizer). Note: post-merge system 2 no
 triggers the NaN (origin's GFN-FF changes resolved that specific geometry); the guard is
 defense-in-depth for any future near-collinear angle (UFF/QMDFF/GFN-FF).
 
-### F3 — host bond-term offset (DIAGNOSED, DEFERRED)
-Systems 11, 12, 15, 16: host energy ~0.05-0.63 Eh too negative vs xtb, mostly cancels in
-ΔE, residual 4-13 kcal/mol. Term-by-term comparison for hosts 11/A and 15/A vs xtb:
+### F3 — host bond-term + Hückel + Coulomb offsets (FIXED, Jul 2026)
+Systems 11, 12, 15, 16: host energy too negative vs xtb, residual 4-13 kcal/mol.
+Term-by-term (`scripts/s30l_term_decomp.py`, `scripts/s30l_bond_compare.py`) showed:
 - **Dispersion, Repulsion, BATM: EXACT match** (to ~1e-10 Eh) -> the bond graph
   (perception) and non-bonded exclusions are CORRECT, identical to xtb.
-- **Bond stretching term: the discrepancy** (11/A: cur -19.3445 vs xtb -18.6174,
-  -0.727 Eh; 15/A: cur -8.3741 vs xtb -8.2322, -0.142 Eh — curcuma too negative).
-- Angle/Torsion/Coulomb: small secondary diffs.
+- **Bond stretching term: the discrepancy** — driven by the Hückel π-bond-order (pibo)
+  feeding fpi/pi_shift/bstrength. Three root causes, all fixed:
 
-So F3 is NOT a bond-perception bug (porting xtb's `gfnffrab`/`getnb` would be wrong and
-risky — perception already matches). It is a **bond-stretching term parameter / bond-type
-assignment** difference for macrocyclic hosts, most likely in the Hückel π-bond-order ->
-bond-type -> (k, r0, alpha) assignment. Deferred: a targeted bond-term alignment is needed
-and is risky for the 18 clean neutrals where the bond term already matches. Not fixed.
+**F3a — S hybridization** (`gfnff_method.cpp` `determineHybridization`): S(Z=16) with CN=2
+took the geometry-based branch (C-S-C bent -> sp2), but xtb `gfnff_ini2.f90:285-298` sets
+group-16 (O,S) CN=2 -> sp3 unconditionally. sp2 S gave bsmat[2][2]=1.24 (too stiff) and
+nel=1 in the Hückel (sp2) instead of nel=2 (sp3) -> over-delocalised pibo on C-S -> bond
+energy too negative by ~0.7 Eh on the S30L 11/12 hosts (cucurbituril-type). Fixed 11/12
+(-11.8/-12.6 -> -0.33/-0.31 kcal/mol).
+
+**F3b — halogen hybridization + π-system membership** (`gfnff_method.cpp`,
+`huckel_solver.cpp`): (1) Br(35)/I(53) with CN=1 fell through to hyb=1 (sp) because the
+"halogen" range was z 9-17; xtb sets group-7 halogens CN=1 -> hyb=0. sp atoms are
+π-candidates, so I wrongly entered the π-system. (2) `hoffdiag` default for Z>=18 was 1.0
+(the C reference) instead of xtb's 0 (only B,C,N,O,F,S,Cl are parameterised) -> heavy
+halogens wrongly coupled in the Hückel. (3) π-candidate detection included ANY sp/sp2 atom
+and missed F/Cl (hyb=0, hoffdiag>0). Rewrote: π-candidate iff element has hoffdiag>0
+(B,C,N,O,F,S,Cl); Case-2 π-bond only to a heteroatom (not sp3 C); halogens CN=1->hyb=0,
+CN=2->hyb=1. Verified by `scripts/s30l_hyb_audit.py`: 0 π-membership mismatches vs xtb
+across all 30 (was 60 F + 12 I + 190 C mismatches).
+
+**F3c — `metal_type` array misalignment** (`gfnff_par.h`): the array had only 83 entries
+— the K-Kr row missed Kr(36)=0 and the Rb-Xe row missed I(53)=0 and Xe(54)=0 (plus
+Ag(47) was 1 not 2). The 3-element shortfall shifted every Z>=36 index by 1-3, so I(Z=53)
+read index 52 (=2, transition metal) instead of 0. `calculateDgam` then used the TM
+ff=-0.9 for I instead of the halogen ff=-0.07 -> dgam(I)=-0.176 (should be -0.0137) ->
+gameeq(I)=-0.136 (negative hardness) -> iodine over-polarised by ~0.19 e -> S30L 15/16
+hosts (C24F15I3) Coulomb -14 kcal/mol. Array rewritten to match xtb `metal(86)`
+(`gfnff_param.f90:318-325`) exactly. Fixed 15/16 (-9.6/-4.9 -> +0.13/+0.94 kcal/mol);
+15/A Coulomb now -0.19647438 Eh = xtb -0.19647438 to 1e-9.
+
+No regression on the 18 clean neutrals (all unchanged or improved). MAD 2.70 -> 1.44.
 
 ### F2 cache bug (FIXED, Jul 2026) — charged nfrag==2 complexes on cached re-runs
 Found via term-by-term decomposition: charged host-guest complexes (S30L 25/26/27/28/30,
@@ -124,12 +147,9 @@ Outlier ΔE drivers (cur − xtb, kcal/mol), after the F2-cache-fix:
   re-runs — now fixed.)
 - **30 (−3.0)**: small charged residual.
 
-**Common cause for the 4 biggest neutral outliers (11/12/15/16) is the BOND stretching
-term** (F3): the Hückel π-bond-order → bond-type → (k, r0, α) assignment makes curcuma's
-bonds ~0.05-0.73 Eh too stiff for the two macrocyclic hosts. Dispersion, Repulsion,
-Coulomb (neutral), BATM match xtb to ~1e-10 Eh → bond perception/graph is correct; it is
-the bond PARAMETERS. Deferred: a targeted bond-term alignment is needed and is risky for
-the 18 clean neutrals where the bond term already matches. Not fixed.
+**The 4 neutral outliers (11/12/15/16) are FIXED** (F3a/b/c above): bond term now matches
+xtb (pibo to ~1e-4, bond E to ~1e-6 Eh), Coulomb matches for the I-host. The remaining
+outliers are charged (23, 25-28, 30) and the borderline 7/8 (torsion, cancels in ΔE).
 
 ## Setup / reproduce
 
@@ -139,6 +159,8 @@ the 18 clean neutrals where the bond term already matches. Not fixed.
   xtb `.CHRG` file. ΔE = E(AB)-E(A)-E(B) [kcal/mol].
 - Harness: `scripts/s30l_gfnff_compare.py` (subset: `python ... 1 5 25`).
 - Term decomposition: `scripts/s30l_term_decomp.py` (e.g. `python ... 25 AB 23 AB`).
+- Per-bond params: `scripts/s30l_bond_compare.py` (curcuma vs xtb pibo/fc/r0/alpha).
+- Hybridization audit: `scripts/s30l_hyb_audit.py` (per-atom hyb + pi membership vs xtb).
 - Results: `test_cases/s30l_test_set/_run/{results.csv,results.md}` + per-component logs.
 
 ```bash
@@ -155,7 +177,8 @@ mask a fix (the cache guard catches total-charge mismatches but not placement).
 
 - Tested: 30 S30L triples (90 SP x 2 engines), gas phase, default GFN-FF, D4, no solvent.
 - Not tested: solvent, optimisation, MD, gradient correctness vs xtb (energies only),
-  systems outside S30L, F3 bond-term root cause (Hückel π-orders), system 23 complex term.
+  systems outside S30L, F3 bond-term root cause (Hückel π-orders) on non-S30L molecules,
+  system 23 complex term.
 - Pre-existing (from the origin/master merge, NOT these fixes): `cli_curcumaopt_07_opt_multixyz`
   fails (gfnff multi-frame energy tolerance ~0.002 Eh > 1e-5; stale golden values from
   origin's GFN-FF changes). Confirmed failing without these fixes too.
