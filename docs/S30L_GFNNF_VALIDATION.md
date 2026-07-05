@@ -118,15 +118,30 @@ neutral-system change (qfrag=[0,0] from cache == default). The harness `results.
 numbers are unchanged (they were from fresh runs), but any production re-use of a cached
 charged complex (opt/MD) is now correct.
 
-### System 23 (residual, diagnosed)
-23/AB (q=+1): A and B match xtb **exactly** (to ~1e-7 Eh). The complex is −0.0433 Eh
-(−27 kcal/mol) too negative. Term-by-term (correct xtb charges, see decomposition tool):
-**Coulomb −13.8 kcal** (cur +1.1023 vs xtb +1.1242 — curcuma's Phase-2 EEQ charges
-slightly too weak), **Bond −8.7 kcal** (F3-style, see below), Repulsion −2.3, BATM −0.2.
-F2 placement is correct (charge on fragment 1 = guest, lower EEQ energy: E_a=+0.0041
-vs E_b=−0.0632). xtb itself is 30 kcal/mol off the reference here, so 23 is a
-disordered/hard system. The residual is a Phase-2 EEQ charge difference for this
-charged complex, not a bookkeeping bug.
+### System 23 (RESOLVED as harness/xtb `.CHRG` quirk — curcuma is correct)
+23/AB (q=+1): A and B match xtb **exactly**. The complex ΔE was −27 kcal/mol off the
+harness xtb. Root cause is NOT curcuma:
+
+- S30L 23 has A(host)=q0, B(guest)=q+1, so the +1 belongs on the **guest**.
+- curcuma's F2 both-assignment trial places it on the guest (the lower-EEQ-energy
+  fragment), which is physically correct.
+- xtb's `.CHRG` reader (`gfnff_setup.f90:208-222`) reads line 1 = total charge, line 2 =
+  per-fragment charges. The S30L `.CHRG` has only ONE line, so line 2 falls back to line 1
+  → `qfrag=[charge, 0]` → the WHOLE charge on **fragment 1 (the host)**. The F2 trial in
+  `gfnff_ini.f90:478` is dead code (it requires `qfrag(2:nfrag) > 999`, but `qfrag` is
+  always pre-initialised to 0 by `gfnff_setup.f90:122/198/224`), so xtb NEVER auto-detects
+  the placement — it always charges fragment 1.
+- **Verified**: xtb run with a two-line `.CHRG` (`+1` / `0 1` → charge on guest) gives
+  23/AB total −18.93093998 Eh, Coulomb +1.10227010 Eh — **identical to curcuma**
+  (−18.93093729, +1.10227011) to ~1e-5 Eh. So with the charge on the correct fragment,
+  curcuma == xtb; the −27 kcal "gap" is entirely xtb mis-placing the charge on the host.
+
+This is a harness/reference artefact, not a curcuma bug, so it is left as-is (curcuma is
+the more correct of the two). A harness that passed per-fragment `.CHRG` to xtb would
+close it, but the S30L fragment order in the AB xyz is not always [A, B], so a blanket
+`qA qB` line 2 breaks 24/27/28/29/30 (verified: MAD 1.44→12.3). xtb itself is also
+~30 kcal/mol off the S30L reference for 23. The 25/26/27/28/30 residuals (±1.4–3 kcal)
+are the same class of small charged-fragment effect.
 
 ### Term-by-term decomposition (Jul 2026)
 Tool: `scripts/s30l_term_decomp.py` (runs curcuma −verbosity 2 + xtb --gfnff --sp in a

@@ -107,12 +107,25 @@ def run_curcuma(xyz_path, charge):
     return parse_curcuma_energy(proc.stdout), proc.stdout + proc.stderr
 
 
-def run_xtb(xyz_path, charge, workdir):
-    """Copy xyz + .CHRG into a clean workdir and run xtb --gfnff --sp there."""
+def run_xtb(xyz_path, charge, workdir, frag_charges=None):
+    """Copy xyz + .CHRG into a clean workdir and run xtb --gfnff --sp there.
+
+    .CHRG format (xtb gfnff_setup.f90:208-222): line 1 = total charge, line 2 =
+    per-fragment charges. If line 2 is absent, xtb falls back to line 1 for the
+    fragment charges, i.e. qfrag=[charge, 0] -> the WHOLE charge on fragment 1
+    (the first fragment = host). For host-guest AB complexes where the charge is
+    on the GUEST (e.g. S30L 23: A=0, B=+1), that mis-places the charge on the
+    host. Passing frag_charges=[qA, qB] writes line 2 so xtb puts each fragment's
+    charge on the correct fragment, matching curcuma's F2 both-assignment trial.
+    """
     workdir.mkdir(parents=True, exist_ok=True)
     local_xyz = workdir / xyz_path.name
     shutil.copy(xyz_path, local_xyz)
-    (workdir / ".CHRG").write_text(f"{charge:+d}\n")
+    if frag_charges is not None:
+        line2 = " ".join(f"{q:+d}" for q in frag_charges)
+        (workdir / ".CHRG").write_text(f"{charge:+d}\n{line2}\n")
+    else:
+        (workdir / ".CHRG").write_text(f"{charge:+d}\n")
     cmd = [str(XTB), str(local_xyz)] + XTB_ARGS
     env = dict(os.environ)
     env["XTBPATH"] = ""  # avoid picking up stray param files
