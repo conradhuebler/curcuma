@@ -718,31 +718,19 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
 
     // Get effective hybridization (considering pi-system participation)
     const TopologyInfo& topo = getCachedTopology();
-    const auto& bond_list = getCachedBondList();
 
-    auto is_in_pi_fr = [&](int atom_idx, int z_atom) -> bool {
+    // Direct mirror of xtb piadr(atom) > 0: true iff the atom is in a detected
+    // pi-system. Replaces the previous pibo>0.1 + partial picon (N/O/F/S only)
+    // inference, which diverged from piadr for low-pibo pi atoms and for B/Cl
+    // picon atoms (detectPiSystems covers B,C,N,O,F,S,Cl) and so mis-applied the
+    // f2*1.3 heavy-outer boost, the eff_hyb promotion, and the ring notpicon gate.
+    // pi_fragments is 0 for non-pi atoms and >=1 for pi-system atoms
+    // (detectPiSystems, gfnff_method.cpp:6590-6695; gfnff.h:316).
+    // Claude Generated (Jul 2026).
+    auto is_in_pi_fr = [&](int atom_idx, int /*z_atom*/) -> bool {
         if (atom_idx < 0 || atom_idx >= m_atomcount) return false;
-        // Condition 1: Direct bonds with significant pi-character (pibo > 0.1)
-        if (!topo.pi_bond_orders.empty()) {
-            for (int other = 0; other < m_atomcount; other++) {
-                if (other == atom_idx) continue;
-                int pibo_idx = lin(atom_idx, other);
-                if (pibo_idx >= 0 && pibo_idx < static_cast<int>(topo.pi_bond_orders.size())) {
-                    if (topo.pi_bond_orders[pibo_idx] > 0.1) return true;
-                }
-            }
-        }
-        // Condition 2: N/O/F/S (sp3) adjacent to sp or sp2 atoms ("picon" case)
-        if (z_atom == 7 || z_atom == 8 || z_atom == 9 || z_atom == 16) {
-            for (const auto& bond : bond_list) {
-                int neighbor = (bond.first == atom_idx) ? bond.second : (bond.second == atom_idx) ? bond.first : -1;
-                if (neighbor >= 0 && neighbor < static_cast<int>(topo.hybridization.size())) {
-                    int neighbor_hyb = topo.hybridization[neighbor];
-                    if (neighbor_hyb == 1 || neighbor_hyb == 2) return true;
-                }
-            }
-        }
-        return false;
+        if (topo.pi_fragments.empty()) return false;
+        return topo.pi_fragments[atom_idx] > 0;
     };
 
     int eff_hyb_j = hyb_j;
@@ -1774,10 +1762,16 @@ std::pair<std::vector<Dihedral>, std::vector<Dihedral>> GFNFF::generateTorsionsN
                     cn_l_val = topo.neighbor_counts(l);
                 }
 
-                // Get actual topological charges (qa) for fqq correction
-                // CRITICAL FIX (Phase 2 Charge Routing - January 26, 2026):
-                // Torsion barriers (fqq) MUST use topological charges (qa), NOT energy charges (q).
-                // Reference: CHARGE_DATAFLOW.md and gfnff_ini.f90:1790
+                // Get topological charges (qa) for the fqq correction.
+                // fqq = 1 + |qa_j*qa_k|*qfacTOR (gfnff_ini.f90:1602; xtb uses topo%qa).
+                // NOTE (Jul 2026): routed to topology_charges (Phase-1 EEQ). An attempt to use the
+                // final eeq_charges (== Coulomb charges) instead closed the S30L 27/28 charged-host
+                // torsion deficit but REGRESSED the gfnff_val_* tests (caffeine, CH3OCH3, triose,
+                // acetic_acid_dimer, complex, polymer): curcuma's two-phase EEQ (Phase-1
+                // topology_charges vs Phase-2 eeq_charges) is NOT consistently equivalent to xtb's
+                // single topo%qa — for neutral small molecules Phase-1 is closer, for charged
+                // hosts Phase-2 is closer. The correct fix requires resolving the EEQ two-phase
+                // inconsistency vs Fortran's single solve, not just re-routing fqq. Left as-is.
                 double qa_j = 0.0, qa_k = 0.0;
                 if (j < m_atoms.size() && k < m_atoms.size()) {
                     if (topo.topology_charges.rows() > 0) {

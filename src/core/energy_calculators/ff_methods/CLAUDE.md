@@ -273,6 +273,20 @@ ctest -R test_gfnff_gradients --verbose
   host A torsion now bit-identical to Fortran; validation set 18/18, no regression.
 - [ ] **Hyperconjugation** - Subtle barrier modulation (documented but not implemented)
 - [ ] **Extra torsion calibration** - Current ff=-2.00 (O) factor overcompensates
+- [x] **is_in_pi_fr → pi_fragments** (Jul 2026, AI/machine-tested) - the `is_in_pi_fr`
+  lambda in `gfnff_torsions.cpp:~723` was rewritten as a direct `topo.pi_fragments[atom]>0`
+  lookup, the faithful mirror of xtb `piadr>0` (replacing the pibo>0.1 + partial
+  N/O/F/S picon inference, which missed B/Cl). Correctness fix; no ctest regression
+  (52/52 gfnff tests pass). No-op for the S30L aromatic hosts (the `f2*=1.3` heavy-outer
+  boost never fires there) so does NOT close the 27/28+7/8 torsion deficit — see below.
+- [ ] **fqq charge routing / two-phase EEQ** (Jul 2026, OPEN) - the S30L 27/28 torsion
+  deficit root cause: fqq uses Phase-1 `topology_charges` but xtb uses its single
+  `topo%qa` for fqq. Routing fqq to Phase-2 `eeq_charges` closes 27/28 but regresses
+  gfnff_val_* (caffeine et al.) because curcuma's two-phase EEQ is not consistently
+  equivalent to xtb's single solve. Prerequisite: resolve the EEQ two-phase
+  inconsistency. 7/8 are a separate nrot=1/3 f1/fij/fkl deficit. See
+  [docs/S30L_GFNNF_VALIDATION.md](../../../../docs/S30L_GFNNF_VALIDATION.md) + memory
+  `project_gfnff_torsion_fqq_eeq`.
 
 **Charge (EEQ) Corrections**:
 - [ ] Phase 5B: Metal-specific fqq correction (2.5× factor in charge-dependent terms)

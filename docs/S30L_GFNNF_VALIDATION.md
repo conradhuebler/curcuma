@@ -114,6 +114,31 @@ Verified via a python Hückel re-solve: nel=24 gives pibo(18,20)=0.70305 = xtb e
 - **27/28 (1.45/1.39)** and **7/8 (1.27/1.62)**: **torsion term** — curcuma computes
   ~80% of xtb's torsion energy (e.g. 27/A cur 0.076 vs xtb 0.096 Eh, −12 kcal on the
   host, partly cancels in ΔE). Separate torsion-generation/parameter issue (open).
+  - **Root-cause investigation (Jul 2026, AI/machine-tested, NOT fixed).** Per-torsion
+    diagnosis on 27/A: all 438 primary torsions match xtb 1:1 (count + atom quadruplets
+    + nrot); nrot=6 ring-FR barriers match (1.00). The deficit is the **nrot=2 pi-bond
+    barriers at 0.71×** (cur 0.619 vs xtb 0.870) and nrot=1/3 at 0.82/0.76×. For nrot=2,
+    f1, f2, fij, fkl all match xtb; **fqq is too low**. curcuma computes fqq from
+    `topo.topology_charges` (Phase-1 EEQ: base gam + CNF, no dgam), but xtb uses a single
+    array `topo%qa` (full EEQ, gfnff_ini.f90:561) for BOTH Coulomb and torsion fqq.
+    curcuma's `eeq_charges` (Phase-2 final, == `m_charges`) is the array that matches xtb
+    `topo%qa` in the Coulomb term (1e-8 Eh). **The obvious fix — route fqq to
+    `eeq_charges`/`m_charges` — was tried and REVERTED**: it closed 27/28 (→0.04/0.05)
+    but regressed 15 ctest tests (gfnff_val caffeine/CH3OCH3/triose/acetic_acid_dimer/
+    complex/polymer + cli_gfnff_01 + 8 gfnff_solv_*). The gfnff_val `*.ref.json` are
+    Fortran truth (verified: xtb caffeine torsion V=0.516000 == ref 0.515964), so the fix
+    made curcuma match Fortran for charged hosts but DIVERGE for neutral small molecules.
+    **Underlying issue: curcuma's two-phase EEQ (Phase-1 `topology_charges` vs Phase-2
+    `eeq_charges`) is not consistently equivalent to xtb's single `topo%qa`** — for
+    neutral small molecules Phase-1 is closer to Fortran, for charged hosts Phase-2 is.
+    Resolving this (one charge array matching `topo%qa` for all molecules) is the
+    prerequisite to safely fixing fqq. **7/8 are nrot=1/3 (sp3-sp3 / single-bond)
+    dominated and a SEPARATE f1/fij/fkl deficit (ratio ~0.83/0.80) still open** — the
+    fqq fix did not help 8/B (unchanged at −6.87 kcal). The `is_in_pi_fr` lambda in
+    gfnff_torsions.cpp was made a direct `pi_fragments>0` mirror of xtb `piadr`
+    (correctness fix, kept, no regression) but is a no-op for these hosts (the
+    `f2*=1.3` heavy-outer boost never fires — all heavy outer atoms are already in the
+    π-system). See memory `project_gfnff_torsion_fqq_eeq`.
 - **30/AB (+3.98)**: a bond pibo difference with ipis=0 (the −1 does not localise on
   the host π-systems); previously masked by 30/B's error (now fixed). Open.
 
