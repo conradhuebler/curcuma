@@ -322,57 +322,64 @@ void GFNFF::calculateTorsionDamping(int z1, int z2, double r_squared,
  * @param bond_list Bond connectivity
  * @return true if C=O alpha carbon detected
  */
-static bool isAlphaCO(int atom_idx, int other_idx,
-                      const std::vector<int>& atoms,
-                      const std::vector<int>& hybridization,
-                      const std::vector<std::pair<int,int>>& bond_list)
+// Count topological neighbours of an atom (= Fortran nb(20,a)) from the bond list.
+// Claude Generated (Jul 2026)
+static int countBonds(int atom_idx, const std::vector<std::pair<int,int>>& bond_list)
 {
-    // Bounds check
-    if (atom_idx < 0 || atom_idx >= atoms.size() || other_idx < 0 || other_idx >= atoms.size()) {
-        return false;
+    int n = 0;
+    for (const auto& b : bond_list) {
+        if (b.first == atom_idx || b.second == atom_idx) n++;
     }
+    return n;
+}
 
-    // Atom must be carbon with pi system (sp or sp2)
-    if (atoms[atom_idx] != 6 || (hybridization[atom_idx] != 1 && hybridization[atom_idx] != 2)) {
-        return false;
-    }
-
-    // Other atom must be sp3 carbon
-    if (atoms[other_idx] != 6 || hybridization[other_idx] != 3) {
-        return false;
-    }
-
-    // Check if atom_idx has exactly 1 terminal pi-bonded oxygen (C=O)
-    int terminal_oxygen_count = 0;
-
+// Does carbon `c` bear exactly one terminal pi-bonded oxygen (a carbonyl =O)?
+// Mirrors the inner loop of Fortran alphaCO/amide: at(j)==8, pi(j)!=0, nb(20,j)==1.
+// Claude Generated (Jul 2026)
+static bool hasTerminalCarbonylO(int c,
+                                 const std::vector<int>& atoms,
+                                 const std::vector<int>& pi_fragments,
+                                 const std::vector<std::pair<int,int>>& bond_list)
+{
+    int no = 0;
     for (const auto& bond : bond_list) {
-        int neighbor = -1;
-        if (bond.first == atom_idx) neighbor = bond.second;
-        else if (bond.second == atom_idx) neighbor = bond.first;
+        int j = -1;
+        if (bond.first == c) j = bond.second;
+        else if (bond.second == c) j = bond.first;
         else continue;
-
-        // Bounds check for neighbor
-        if (neighbor < 0 || neighbor >= atoms.size()) continue;
-
-        // Check if neighbor is oxygen
-        if (atoms[neighbor] == 8) {
-            // Count coordination number of this oxygen
-            int oxygen_cn = 0;
-            for (const auto& b : bond_list) {
-                if (b.first == neighbor || b.second == neighbor) {
-                    oxygen_cn++;
-                }
-            }
-
-            // Terminal oxygen: CN=1 (only bonded to the carbon)
-            if (oxygen_cn == 1) {
-                terminal_oxygen_count++;
-            }
+        if (j < 0 || j >= static_cast<int>(atoms.size())) continue;
+        if (atoms[j] == 8 && j < static_cast<int>(pi_fragments.size()) && pi_fragments[j] != 0
+            && countBonds(j, bond_list) == 1) {
+            no++;
         }
     }
+    return no == 1;
+}
 
-    // Exactly 1 terminal C=O → alpha carbon
-    return (terminal_oxygen_count == 1);
+// Faithful port of Fortran alphaCO(n,at,hyb,nb,pi,a,b) (gfnff_ini2.f90).
+// Symmetric: true if one central atom is a pi C bearing a terminal =O and the
+// other is an sp3 carbon (peptide/ketone alpha carbon). Uses piadr (pi_fragments),
+// NOT hybridization, for the pi-membership test — matching the reference exactly.
+// Claude Generated (Jul 2026): was hyb-based + missing the pi(=O) check.
+static bool isAlphaCO(int a, int b,
+                      const std::vector<int>& atoms,
+                      const std::vector<int>& hybridization,
+                      const std::vector<int>& pi_fragments,
+                      const std::vector<std::pair<int,int>>& bond_list)
+{
+    const int n = static_cast<int>(atoms.size());
+    if (a < 0 || a >= n || b < 0 || b >= n) return false;
+    auto pi = [&](int x){ return x < static_cast<int>(pi_fragments.size()) && pi_fragments[x] != 0; };
+
+    // branch 1: a is the pi C(=O), b is sp3 C
+    if (pi(a) && hybridization[b] == 3 && atoms[a] == 6 && atoms[b] == 6) {
+        if (hasTerminalCarbonylO(a, atoms, pi_fragments, bond_list)) return true;
+    }
+    // branch 2: b is the pi C(=O), a is sp3 C
+    if (pi(b) && hybridization[a] == 3 && atoms[b] == 6 && atoms[a] == 6) {
+        if (hasTerminalCarbonylO(b, atoms, pi_fragments, bond_list)) return true;
+    }
+    return false;
 }
 
 /**
@@ -408,41 +415,42 @@ static bool isAlphaCO(int atom_idx, int other_idx,
  * @param bond_list Bond connectivity
  * @return true if amide nitrogen detected
  */
+// Faithful port of Fortran amide(n,at,hyb,nb,pi,a) (gfnff_ini2.f90).
+// True iff `a` is an sp3 nitrogen in a pi-system (piadr!=0) bonded to exactly one
+// pi-carbon that itself bears a terminal carbonyl =O. Uses piadr (pi_fragments)
+// and hyb==3 — NOT hyb==2 — matching the reference exactly.
+// Claude Generated (Jul 2026): the old version required hyb==2, checked pi via
+// hybridization, and omitted the carbonyl(=O) test, so it missed real amide N
+// (e.g. glycoluril/cucurbituril), skipping the fij*1.3 and CB7 f1 corrections.
 static bool isAmide(int atom_idx,
                     const std::vector<int>& atoms,
                     const std::vector<int>& hybridization,
+                    const std::vector<int>& pi_fragments,
                     const std::vector<std::pair<int,int>>& bond_list)
 {
-    // Bounds check
-    if (atom_idx < 0 || atom_idx >= atoms.size()) {
-        return false;
-    }
+    const int n = static_cast<int>(atoms.size());
+    if (atom_idx < 0 || atom_idx >= n) return false;
 
-    // Must be sp2 nitrogen
-    if (atoms[atom_idx] != 7 || hybridization[atom_idx] != 2) {
-        return false;
-    }
+    // Fortran: if (pi(a).eq.0 .or. hyb(a).ne.3 .or. at(a).ne.7) return
+    const bool pi_a = atom_idx < static_cast<int>(pi_fragments.size()) && pi_fragments[atom_idx] != 0;
+    if (!pi_a || hybridization[atom_idx] != 3 || atoms[atom_idx] != 7) return false;
 
-    // Count pi-bonded carbons (sp or sp2)
-    int pi_carbon_count = 0;
-
+    // Count pi-carbon neighbours (at==6, pi!=0); remember the single one (ic)
+    int nc = 0, ic = -1;
     for (const auto& bond : bond_list) {
-        int neighbor = -1;
-        if (bond.first == atom_idx) neighbor = bond.second;
-        else if (bond.second == atom_idx) neighbor = bond.first;
+        int j = -1;
+        if (bond.first == atom_idx) j = bond.second;
+        else if (bond.second == atom_idx) j = bond.first;
         else continue;
-
-        // Bounds check for neighbor
-        if (neighbor < 0 || neighbor >= atoms.size()) continue;
-
-        // Check if neighbor is carbon with pi system (sp=1 or sp2=2)
-        if (atoms[neighbor] == 6 && (hybridization[neighbor] == 1 || hybridization[neighbor] == 2)) {
-            pi_carbon_count++;
+        if (j < 0 || j >= n) continue;
+        if (atoms[j] == 6 && j < static_cast<int>(pi_fragments.size()) && pi_fragments[j] != 0) {
+            nc++;
+            ic = j;
         }
     }
 
-    // Exactly 1 pi-bonded carbon → amide
-    return (pi_carbon_count == 1);
+    // Exactly one pi-C, and that carbon bears a terminal pi =O -> amide
+    return (nc == 1 && hasTerminalCarbonylO(ic, atoms, pi_fragments, bond_list));
 }
 
 // =============================================================================
@@ -804,6 +812,7 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // - When pi-system exists, f1 is scaled by 0.55 to balance the large f2 contribution
 
     double f2 = 0.0;  // Default for single bonds (no pi character)
+    double central_pibo = 0.0;  // pi bond order of the central bond (for the CB7 rule)
 
     // Get pi bond order from cached topology
     if (j_atom_idx >= 0 && k_atom_idx >= 0 && j_atom_idx < m_atomcount && k_atom_idx < m_atomcount) {
@@ -814,6 +823,7 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
 
             if (pibo_idx >= 0 && pibo_idx < static_cast<int>(topo.pi_bond_orders.size())) {
                 double pibo = topo.pi_bond_orders[pibo_idx];
+                central_pibo = pibo;
 
                 if (pibo > 0.0) {
                     // Calculate f2 using exponential cutoff formula
@@ -942,39 +952,29 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
             int hyb_j = topo.hybridization[j_atom_idx];
             int hyb_k = topo.hybridization[k_atom_idx];
 
-            // 1. alphaCO correction: C=O alpha carbon (fij *= 1.3)
-            //    Detects C(=O)-C bonds in ketones, esters, peptide backbones
-            if (isAlphaCO(j_atom_idx, k_atom_idx, m_atoms, topo.hybridization, bond_list)) {
-                fij *= 1.3;
-                if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::info("  alphaCO correction: fij *= 1.3 (C=O alpha carbon detected)");
-                }
-            }
-            else if (isAlphaCO(k_atom_idx, j_atom_idx, m_atoms, topo.hybridization, bond_list)) {
+            // 1. alphaCO correction (gfnff_ini.f90:1678): fij *= 1.3
+            //    isAlphaCO is symmetric (checks both central atoms internally).
+            if (isAlphaCO(j_atom_idx, k_atom_idx, m_atoms, topo.hybridization, topo.pi_fragments, bond_list)) {
                 fij *= 1.3;
                 if (CurcumaLogger::get_verbosity() >= 3) {
                     CurcumaLogger::info("  alphaCO correction: fij *= 1.3 (C=O alpha carbon detected)");
                 }
             }
 
-            // 2. Amide corrections: peptide bonds (fij *= 1.3)
-            //    Detects N-C(=O) resonance structures in peptides and amides
-            //
-            // Check if j is amide nitrogen and k is sp3 carbon
-            if (isAmide(j_atom_idx, m_atoms, topo.hybridization, bond_list) &&
+            // 2. Amide corrections (gfnff_ini.f90:1679-1680): fij *= 1.3
+            //    amide(N) with the OTHER central atom an sp3 carbon.
+            if (isAmide(j_atom_idx, m_atoms, topo.hybridization, topo.pi_fragments, bond_list) &&
                 z_k == 6 && hyb_k == 3) {
                 fij *= 1.3;
                 if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::info("  amide correction (j→k): fij *= 1.3 (peptide bond detected)");
+                    CurcumaLogger::info("  amide correction (j->k): fij *= 1.3 (peptide bond detected)");
                 }
             }
-
-            // Check if k is amide nitrogen and j is sp3 carbon
-            if (isAmide(k_atom_idx, m_atoms, topo.hybridization, bond_list) &&
+            if (isAmide(k_atom_idx, m_atoms, topo.hybridization, topo.pi_fragments, bond_list) &&
                 z_j == 6 && hyb_j == 3) {
                 fij *= 1.3;
                 if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::info("  amide correction (k→j): fij *= 1.3 (peptide bond detected)");
+                    CurcumaLogger::info("  amide correction (k->j): fij *= 1.3 (peptide bond detected)");
                 }
             }
         }
@@ -1100,8 +1100,18 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
             f1 = 0.30;
         }
 
-        // CB7 amide case (gfnff_ini.f90:1879-1881) - not yet implemented
-        // if (btyp==2 && rings==5 && at(ii)*at(jj)==42) then if amide → f1=5.0
+        // CB7 amide case (gfnff_ini.f90:1665-1667): pi C-N bond in a 5-ring whose N
+        // is an amide -> stiff barrier f1=5.0. at(ii)*at(jj)==42 == C(6)*N(7).
+        // Claude Generated (Jul 2026). NOTE on ordering: the Fortran applies the pi
+        // scaling f1*=0.55 AFTER this (line 1718), but curcuma already applied it above
+        // (f2 block). Reproduce the reference value by re-applying 0.55 when pibo>0.
+        if (bond_type == 2 && ring_size == 5 && z_j * z_k == 42) {
+            if (isAmide(j_atom_idx, m_atoms, topo.hybridization, topo.pi_fragments, getCachedBondList()) ||
+                isAmide(k_atom_idx, m_atoms, topo.hybridization, topo.pi_fragments, getCachedBondList())) {
+                f1 = 5.0;
+                if (central_pibo > 0.0) f1 *= 0.55;  // mirror the post-ring pi scaling
+            }
+        }
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info(fmt::format(
@@ -1642,11 +1652,11 @@ std::pair<std::vector<Dihedral>, std::vector<Dihedral>> GFNFF::generateTorsionsN
             continue;
         }
 
-        // Special case: Skip if either central atom is sp (linear)
-        // Physical reason: Linear atoms have no torsional barrier
-        if (hybridization[j] == 1 || hybridization[k] == 1) {
-            continue;
-        }
+        // NOTE (Jul 2026): the reference does NOT skip sp central atoms unconditionally.
+        // It relies solely on btyp (below): sp-sp / sp-sp3 stay btyp=3 (skipped), but a
+        // conjugated sp-sp2 bond is promoted to btyp=2 (a real pi bond that DOES have a
+        // torsion, e.g. the buckycatcher alkyne-aryl carbons in S30L 7). The old
+        // `if (hyb==1) continue` here wrongly dropped those. Removed; btyp==3 handles it.
 
         // Claude Generated (Jan 23, 2026): Skip bond types that have no torsion potential
         // Reference: XTB gfnff_ini.f90:1765 "if(btyp(m).eq.3.or.btyp(m).eq.6) cycle"

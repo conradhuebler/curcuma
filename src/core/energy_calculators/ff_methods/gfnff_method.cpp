@@ -9429,6 +9429,24 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         topo_info.bond_types[bond_idx] = classifyBondType(atom_i, atom_j,
                                                             hyb_i, hyb_j,
                                                             is_metal_i, is_metal_j);
+
+        // Claude Generated (Jul 2026): reference btyp re-classification for conjugated
+        // sp centres (gfnff_ini.f90:1168-1178). classifyBondType marks ANY sp bond
+        // (hyb==1) as btyp=3 (torsion-less), but the reference promotes an sp-sp2 bond
+        // with pi bond order > 0.1 back to btyp=2 (a real pi bond). Without this, sp2-sp
+        // conjugated bonds (e.g. the buckycatcher fullerene/aromatic-alkyne carbons in
+        // S30L 7) are wrongly skipped in torsion generation -> missing pi torsions.
+        if (topo_info.bond_types[bond_idx] == 3) {
+            int bb = 3;
+            if (hyb_i == 0 || hyb_j == 0 || hyb_i == 3 || hyb_j == 3) bb = 1;   // sp-sp3
+            else if (hyb_i == 2 || hyb_j == 2) bb = 2;                          // sp-sp2
+            if (bb != 3 && !topo_info.pi_bond_orders.empty()) {
+                int idx = lin(atom_i, atom_j);
+                double pibo_ij = (idx >= 0 && idx < static_cast<int>(topo_info.pi_bond_orders.size()))
+                                     ? topo_info.pi_bond_orders[idx] : 0.0;
+                if (pibo_ij > 0.1) topo_info.bond_types[bond_idx] = 2;
+            }
+        }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {

@@ -279,14 +279,20 @@ ctest -R test_gfnff_gradients --verbose
   N/O/F/S picon inference, which missed B/Cl). Correctness fix; no ctest regression
   (52/52 gfnff tests pass). No-op for the S30L aromatic hosts (the `f2*=1.3` heavy-outer
   boost never fires there) so does NOT close the 27/28+7/8 torsion deficit — see below.
-- [ ] **fqq charge routing / two-phase EEQ** (Jul 2026, OPEN) - the S30L 27/28 torsion
-  deficit root cause: fqq uses Phase-1 `topology_charges` but xtb uses its single
-  `topo%qa` for fqq. Routing fqq to Phase-2 `eeq_charges` closes 27/28 but regresses
-  gfnff_val_* (caffeine et al.) because curcuma's two-phase EEQ is not consistently
-  equivalent to xtb's single solve. Prerequisite: resolve the EEQ two-phase
-  inconsistency. 7/8 are a separate nrot=1/3 f1/fij/fkl deficit. See
+- [x] **S30L 27/28 + 7/8 torsion residuals** ✅ (Jul 2026) - RESOLVED. Root cause was NOT
+  fqq/EEQ (that diagnosis was wrong: `topology_charges` == xtb `topo%qa` to 1e-8; fqq matched
+  the reference exactly). Three torsion-parameter/enumeration fixes, all ground-truthed
+  per-torsion against an instrumented standalone `external/gfnff` build:
+  (1) **CB7 f1=5.0 rule** (`gfnff_ini.f90:1665-1667`, `gfnff_torsions.cpp` ring block) — was
+  "not implemented"; (2) **faithful `isAmide`/`isAlphaCO`** — the old ones used hyb==2 + no
+  carbonyl check (outdated Fortran); reference needs hyb==3 + piadr + a terminal pi =O, so the
+  amide fij*1.3 now fires; (3) **sp-sp2 conjugated torsions** — `classifyBondType` marked any
+  sp atom btyp=3 (skipped); reference promotes sp-sp2 with pibo>0.1 to btyp=2
+  (`gfnff_ini.f90:1168-1178`), AND `generateTorsionsNative` had a curcuma-only `if(hyb==1)
+  continue` central skip — both fixed (buckycatcher S30L 7/8). Results: 27/28 -> ~0.03, 7/8 ->
+  ~0.4 kcal/mol; 5-sys MAD 1.94->0.97; 52/52 gfnff ctests, neutral val byte-identical. See
   [docs/S30L_GFNNF_VALIDATION.md](../../../../docs/S30L_GFNNF_VALIDATION.md) + memory
-  `project_gfnff_torsion_fqq_eeq`.
+  `project_gfnff_torsion_fqq_eeq`. Remaining: sys 30 (bond pibo), sys 23 (xtb .CHRG quirk).
 
 **Charge (EEQ) Corrections**:
 - [ ] Phase 5B: Metal-specific fqq correction (2.5× factor in charge-dependent terms)

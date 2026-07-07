@@ -10,10 +10,12 @@ The AI does not assign ✅ TESTED / ✅ APPROVED.
 | clean neutral (1,2,3-10,13,14,17-22) | 18 | 0.30 | 1.62 | 0.54 | reproduces xtb |
 | F3 fixed (11,12,15,16) | 4 | 0.43 | 0.94 | 0.50 | reproduces xtb |
 | charged host, fixed (24,25,26,29) | 4 | 0.18 | 0.58 | 0.25 | reproduces xtb (25/26 = 0.0) |
-| charged guest residual (23,27,28,30) | 4 | 8.5 | 27.2 | 11.0 | .CHRG quirk + torsion |
-| **all 30** | 30 | **1.38** | 27.2 | 5.0 | was MAD 433 pre-fix, 1.44 before ipis |
+| torsion fixed (7,8,27,28) | 4 | 0.36 | 0.43 | 0.37 | reproduces xtb (Jul 8, 2026) |
+| residual (23,30) | 2 | 15.6 | 27.2 | 19.4 | .CHRG quirk (23) + bond pibo (30) |
+| **all 30** | 30 | **1.20** | 27.2 | 5.0 | was 1.38 (torsion fix took 27/28/7/8 to ~0) |
 
-- 28/30 systems within ~1.5 kcal/mol of xtb (23 and 30 outside; 7/8 borderline torsion).
+- 29/30 systems within ~0.5 kcal/mol of xtb after the torsion fix (only 23 and 30 outside;
+  27/28/7/8 torsion residuals RESOLVED Jul 8, 2026 — see below).
 - Pre-fix (post-merge) MAD was 433 kcal/mol (charged systems off by 100s-1000s);
   the F2 + negative-charge CLI fix took charged MAD 1619 → 1.5 kcal/mol (7/8).
 - xtb vs reference_s30l: MAD 14.8 (context only — GFN-FF is not meant to match the
@@ -111,34 +113,34 @@ Verified via a python Hückel re-solve: nel=24 gives pibo(18,20)=0.70305 = xtb e
 - **23 (−27)**: xtb `.CHRG` quirk — curcuma correctly places +1 on the guest, xtb puts
   it on the host (one-line `.CHRG` fallback); with the charge on the guest curcuma == xtb
   exactly (verified). Not a curcuma bug.
-- **27/28 (1.45/1.39)** and **7/8 (1.27/1.62)**: **torsion term** — curcuma computes
-  ~80% of xtb's torsion energy (e.g. 27/A cur 0.076 vs xtb 0.096 Eh, −12 kcal on the
-  host, partly cancels in ΔE). Separate torsion-generation/parameter issue (open).
-  - **Root-cause investigation (Jul 2026, AI/machine-tested, NOT fixed).** Per-torsion
-    diagnosis on 27/A: all 438 primary torsions match xtb 1:1 (count + atom quadruplets
-    + nrot); nrot=6 ring-FR barriers match (1.00). The deficit is the **nrot=2 pi-bond
-    barriers at 0.71×** (cur 0.619 vs xtb 0.870) and nrot=1/3 at 0.82/0.76×. For nrot=2,
-    f1, f2, fij, fkl all match xtb; **fqq is too low**. curcuma computes fqq from
-    `topo.topology_charges` (Phase-1 EEQ: base gam + CNF, no dgam), but xtb uses a single
-    array `topo%qa` (full EEQ, gfnff_ini.f90:561) for BOTH Coulomb and torsion fqq.
-    curcuma's `eeq_charges` (Phase-2 final, == `m_charges`) is the array that matches xtb
-    `topo%qa` in the Coulomb term (1e-8 Eh). **The obvious fix — route fqq to
-    `eeq_charges`/`m_charges` — was tried and REVERTED**: it closed 27/28 (→0.04/0.05)
-    but regressed 15 ctest tests (gfnff_val caffeine/CH3OCH3/triose/acetic_acid_dimer/
-    complex/polymer + cli_gfnff_01 + 8 gfnff_solv_*). The gfnff_val `*.ref.json` are
-    Fortran truth (verified: xtb caffeine torsion V=0.516000 == ref 0.515964), so the fix
-    made curcuma match Fortran for charged hosts but DIVERGE for neutral small molecules.
-    **Underlying issue: curcuma's two-phase EEQ (Phase-1 `topology_charges` vs Phase-2
-    `eeq_charges`) is not consistently equivalent to xtb's single `topo%qa`** — for
-    neutral small molecules Phase-1 is closer to Fortran, for charged hosts Phase-2 is.
-    Resolving this (one charge array matching `topo%qa` for all molecules) is the
-    prerequisite to safely fixing fqq. **7/8 are nrot=1/3 (sp3-sp3 / single-bond)
-    dominated and a SEPARATE f1/fij/fkl deficit (ratio ~0.83/0.80) still open** — the
-    fqq fix did not help 8/B (unchanged at −6.87 kcal). The `is_in_pi_fr` lambda in
-    gfnff_torsions.cpp was made a direct `pi_fragments>0` mirror of xtb `piadr`
-    (correctness fix, kept, no regression) but is a no-op for these hosts (the
-    `f2*=1.3` heavy-outer boost never fires — all heavy outer atoms are already in the
-    π-system). See memory `project_gfnff_torsion_fqq_eeq`.
+- **27/28 (1.45/1.39) and 7/8 (1.27/1.62): torsion term — ✅ FIXED (Jul 8, 2026).**
+  Now 27: -0.03, 28: -0.03, 7: 0.41, 8: 0.43 kcal/mol. **The earlier "fqq / two-phase
+  EEQ" root cause was WRONG** and is retracted: curcuma `topology_charges` == xtb `topo%qa`
+  to **1e-8** for BOTH neutral 27/A and charged 27/AB (measured by parsing xtb's
+  `gfnff_topo` restart with `scipy.io.FortranFile`), and fqq reads `topology_charges` and
+  matched the reference exactly. The old note compared against xtb's **energy** charges
+  (`gfnff_charges` file), not `topo%qa`. The real bugs were all in the torsion
+  parameter/enumeration code, each ground-truthed per-torsion against an **instrumented
+  standalone `external/gfnff` build** (grimme-lab reference; cmake `-Dbuild_exe=ON`; a
+  one-line `f1/f2/fij/fkl/fqq/fctot` dump added after the torsion print in
+  `src/gfnff_ini.f90`). This reference reproduces xtb 6.6.1's torsion energy to ~1e-7.
+  - **(1) CB7 f1=5.0 rule** (`gfnff_ini.f90:1665-1667`) was `// not yet implemented` — a
+    pi C-N bond in a 5-ring whose N is an amide gets f1=5.0 (×0.55 pi scaling → 2.75). Added
+    to the ring block in `gfnff_torsions.cpp`. Fixes 27/28 (glycoluril/cucurbituril).
+  - **(2) faithful `isAmide` / `isAlphaCO`** — the old ports were from an outdated Fortran
+    amide (required hyb==2, checked pi via hybridization, and **omitted the carbonyl =O
+    check**). The real reference needs hyb==**3** + piadr membership + the single pi-C
+    bearing a terminal pi =O. Rewritten faithfully → the amide `fij*1.3` now fires (288
+    torsions in 27/A were missing it).
+  - **(3) sp-sp2 conjugated torsions** — `classifyBondType` marked ANY sp centre (hyb==1)
+    btyp=3 (torsion-less); the reference promotes an sp-sp2 bond with pibo>0.1 back to
+    btyp=2 (`gfnff_ini.f90:1168-1178`). AND `generateTorsionsNative` had a curcuma-only
+    `if (hyb==1) continue` central-atom skip that dropped them before the btyp check.
+    Both fixed (reclassify btyp 3→2; remove the sp skip, rely on btyp==3). This is the
+    buckycatcher fullerene/aryl-alkyne case in S30L 7/8 (32 missing pi torsions in 7/A).
+  Verification: 27/A all 438 torsions bit-match the reference; 7/A 0.0238 → 0.0389
+  (ref 0.0393); 52/52 gfnff ctests, caffeine/triose/acetic_acid_dimer torsion byte-identical.
+  See memory `project_gfnff_torsion_fqq_eeq`.
 - **30/AB (+3.98)**: a bond pibo difference with ipis=0 (the −1 does not localise on
   the host π-systems); previously masked by 30/B's error (now fixed). Open.
 
