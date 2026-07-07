@@ -1302,6 +1302,19 @@ double XTB::Calculation(bool gradient)
     if (use_gpu_resident && m_gpu_scf)
         m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
 
+    // GPU paths (device eigensolve and the fully-resident loop) keep the
+    // occupations on-device: solveEigen is the only writer of m_wfn.focc and it
+    // is skipped there. Rebuild focc on the host from the downloaded eps so the
+    // electronic free-energy term below AND the gradient's energy-weighted
+    // density W use the fractional Fermi occupations instead of the integer
+    // fallback (xtb_gradient.cpp). occupationsFromEps is bit-faithful to
+    // solveEigen, so this is identical to the CPU path. Claude Generated.
+    if ((use_gpu_resident || use_resident_loop) && m_wfn.eps.size() == m_basis.nao) {
+        Eigen::VectorXd occ; int ncol = 0;
+        occupationsFromEps(m_wfn.eps, occ, ncol);
+        m_wfn.focc = occ;
+    }
+
     // Persist converged Fock matrix for gradient / debug. On the device-potential
     // path (Stage 5 B3/B4) the host m_pot was skipped during the loop, so rebuild
     // it once at the converged charges before forming m_F (the gradient block below
@@ -1320,6 +1333,12 @@ double XTB::Calculation(bool gradient)
     m_E_electronic    = energyCoulombShell() + energyThirdOrder() + energyMultipole();
     // Band energy: Tr(P · H0) for electronic part
     m_E_electronic   += (m_wfn.P.cwiseProduct(m_H0)).sum();
+    // Electronic free-energy (Mermin/Fermi entropy) term g = -T*S. Zero for
+    // gapped systems (occ ∈ {0,2}); only bites on small-gap systems with
+    // fractional occupations. Folded into the electronic container so it matches
+    // tblite/xtb, which report the free energy A = E - T*S. Claude Generated.
+    m_E_entropy       = electronicFreeEnergy();
+    m_E_electronic   += m_E_entropy;
     m_E_repulsion     = calcRepulsionEnergy();
     m_E_halogen_bond  = calcHalogenBondEnergy();
     m_E_dispersion    = calcDispersionEnergy(gradient);
@@ -1339,6 +1358,7 @@ double XTB::Calculation(bool gradient)
         CurcumaLogger::info(fmt::format("  Third-order  = {: .8f} Eh", m_E_third_order));
         if (m_method == MethodType::GFN2)
             CurcumaLogger::info(fmt::format("  Multipole    = {: .8f} Eh", m_E_multipole));
+        CurcumaLogger::info(fmt::format("  Free E (-TS) = {: .8f} Eh (folded into Electronic)", m_E_entropy));
         CurcumaLogger::info(fmt::format("  Repulsion    = {: .8f} Eh", m_E_repulsion));
         if (m_method == MethodType::GFN1)
             CurcumaLogger::info(fmt::format("  Halogen bond = {: .8f} Eh", m_E_halogen_bond));
@@ -1812,6 +1832,7 @@ nlohmann::json XTB::getEnergyDecomposition() const
     j["repulsion"]      = m_E_repulsion;
     j["halogen_bond"]   = m_E_halogen_bond;
     j["dispersion"]     = m_E_dispersion;
+    j["entropy"]        = m_E_entropy;   // -T*S, already included in "electronic"
     j["total"]          = m_E_total;
     j["scf_converged"]  = m_scf_converged;
     j["scf_iterations"] = m_scf_iterations;

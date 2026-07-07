@@ -234,7 +234,24 @@ if(Python3_Interpreter_FOUND)
     # |dE| = |E_native - E_tblite| (Eh), 2026-05-31 (after the GFN1 third-order
     # double-count fix, the D3 C8/C6 exact-form fix, and the D3 CN 25-Bohr cutoff
     # fix that matches tblite):
-    #   GFN2: only complex (6.95e-5). All others <= 1e-8 (bit-identical).
+    #   GFN2: only complex. The electronic free-energy (-T*S / Fermi entropy)
+    #         fix (2026-07) dropped complex from 6.95e-5 -> 7.3e-8 vs tblite
+    #         (the entropy was the documented "electronic floor"; xtb/tblite
+    #         report the Mermin free energy A = E - T*S, curcuma had reported
+    #         only E). All 15 others stay <= 1e-8 (their fractional occupations
+    #         are < thr, so entropy ~ 0 -> byte-unchanged). The residual 7.3e-8
+    #         is the small-gap fixed-point floor. The patched-tblite fixed-
+    #         density audit (diag_curcuma_energy_components on tblite's exact
+    #         converged density, 2026-07) PROVES there is no per-term formula
+    #         bug: repulsion diff 1.4e-14, and the whole disp+elec diff 6.8977e-5
+    #         is EXACTLY tblite's Fermi entropy (= -T*S from the dump's own
+    #         occupations, matched to <1e-8) which the fixed-density path does
+    #         not add but the full SCF now does. Band Tr(P*H0)/Coulomb-ES2/
+    #         3rd-order/multipole/D4 all match tblite to <1e-8 at the same
+    #         density. The 7.3e-8 is therefore purely the different converged
+    #         density (curcuma's own SCF fixed point vs tblite's, gap 0.3177 vs
+    #         0.3185 eV, HOMO/LUMO ~1e-5) -- not closable without bit-identical
+    #         linear algebra. Kept WILL_FAIL (honest 1e-8 gate, not loosened).
     #   GFN1: 10/12 now <= 1e-8. Two remain at the same ~1.5e-8 numerical floor:
     #         He2 (dispersion-only) and complex (231 atoms). complex was 2.6e-7
     #         until the D3 CN cutoff fix removed the dispersion gap (now exact,

@@ -143,6 +143,7 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 | PM6 | not tested | parameters present, untested |
 
 ### Current Development Status
+- **⚙️ Electronic free-energy (Fermi entropy) term (2026-07-07)**: the native GFN1/GFN2 SCF smears at 300 K but had not added the Mermin `-T*S` term that xtb/tblite fold into the total. `electronicFreeEnergy()` (`xtb_scf.cpp`, port of xtb `fermismear`) → `m_E_entropy` folded into the electronic container + total (`xtb_native.cpp`). ~0 for gapped systems (15 sqm molecules byte-identical); `complex` GFN2 **6.95e-5 → 7.3e-8** vs tblite. GPU parity: `m_wfn.focc` rebuilt post-loop from host `eps` via `occupationsFromEps` (CUDA total bit-identical to CPU; also fixes the GPU gradient's integer-occ fallback). The patched-tblite fixed-density audit proved no per-term bug (all containers <1e-8 at tblite's density; the 6.8977e-5 disp+elec diff = tblite's entropy exactly); the 7.3e-8 is the different converged density on the 0.317 eV gap. `complex` kept WILL_FAIL (honest 1e-8 gate). See AIChangelog + docs/SQM_VALIDATION.md.
 - **✅ Universal Verbosity**: All QM methods integrated with CurcumaLogger
 - **✅ ConfigManager Integration**: All QM interfaces accept ConfigManager (Phases 3A-3C)
 - **✅ EHT Implementation**: Functional with orbital analysis and verbosity control

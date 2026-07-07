@@ -705,6 +705,7 @@ public:
     double getMultipoleEnergy() const    { return m_E_multipole; }
     double getHalogenBondEnergy() const  { return m_E_halogen_bond; }
     double getDispersionEnergy() const   { return m_E_dispersion; }
+    double getEntropyEnergy() const      { return m_E_entropy; }
     double getTotalEnergy() const        { return m_E_total; }
 
     nlohmann::json getEnergyDecomposition() const;
@@ -994,6 +995,9 @@ private:
                                const Eigen::MatrixXd& dp_at,
                                const Eigen::MatrixXd& qp_at) const;
     double energyMultipole() const;                                      // xtb_multipole.cpp
+    // Electronic free-energy (Mermin/Fermi entropy) term g = -T*S from the
+    // fractional occupations m_wfn.focc (xtb fermismear, scc_core.f90). Claude Generated.
+    double electronicFreeEnergy() const;                                 // xtb_scf.cpp
 
     // Assemble full Fock matrix: F = H0 + isotropic potential + multipole.
     // Isotropic: F_μν = H0_μν - 0.5·S_μν·(v_ao(μ) + v_ao(ν))
@@ -1143,6 +1147,11 @@ private:
     double m_E_halogen_bond  = 0.0;
     double m_E_dispersion    = 0.0;
     double m_E_total         = 0.0;
+    // Electronic free-energy term -T*S (Mermin/Fermi entropy). Only non-zero when
+    // Fermi smearing produces fractional occupations (small-gap systems). Folded
+    // into the electronic container to match tblite/xtb, which report the free
+    // energy A = E - T*S. Claude Generated.
+    double m_E_entropy       = 0.0;
 
     // SCF config / state
     int    m_scf_max_iter    = 150;
