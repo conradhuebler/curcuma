@@ -7,7 +7,7 @@
  * Claude Generated (2026-06): ComputationalMethod adapter for the ROCm path of
  * native GFN1/GFN2 — the AMD/HIP sibling of XtbGpuComputationalMethod (CUDA).
  * Selected by the factory when `-gpu rocm` (or `-gpu auto` on a ROCm-only build) is
- * given and the build has USE_ROCM_XTB.
+ * given and the build has USE_ROCM.
  *
  * Design (minimal-disruption sibling of NativeXtbMethod, identical to the CUDA wrapper):
  *   - OWNS a NativeXtbMethod (the validated CPU pipeline: config, large-system modes,
@@ -27,7 +27,7 @@
 
 #pragma once
 
-#ifdef USE_ROCM_XTB
+#ifdef USE_ROCM
 
 #include "native_xtb_method.h"   // NativeXtbMethod + curcuma::xtb::MethodType
 
@@ -95,4 +95,4 @@ private:
     std::unique_ptr<NativeXtbMethod>                  m_cpu;          ///< validated CPU pipeline
 };
 
-#endif // USE_ROCM_XTB
+#endif // USE_ROCM

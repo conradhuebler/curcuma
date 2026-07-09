@@ -9,7 +9,7 @@
  * context. Host-compiled (no Vulkan headers — the context is pimpl).
  */
 
-#ifdef USE_VULKAN_XTB
+#ifdef USE_VULKAN
 
 #include "xtb_vulkan_method.h"
 #include "vulkan/xtb_vulkan_context.h"
@@ -396,4 +396,4 @@ void XtbVulkanComputationalMethod::setIterativeMode(bool on) { m_cpu->setIterati
 
 bool XtbVulkanComputationalMethod::gpuActive() const { return m_gpu && m_gpu->ok(); }
 
-#endif // USE_VULKAN_XTB
+#endif // USE_VULKAN

@@ -27,7 +27,7 @@ run_test() {
     echo "Executing: $CURCUMA -sp H2O.xyz -method gfn2 -gpu vulkan -verbosity 2"
     $CURCUMA -sp H2O.xyz -method gfn2 -gpu vulkan -verbosity 2 -no_bmt > vk.log 2>&1 || true
     if grep -qiE "no usable Vulkan|requires a Vulkan|USE_VULKAN|running CPU path" vk.log 2>/dev/null; then
-        echo -e "${YELLOW}SKIP${NC}: Vulkan native xTB not available (no device or USE_VULKAN_XTB=OFF)"
+        echo -e "${YELLOW}SKIP${NC}: Vulkan native xTB not available (no device or USE_VULKAN=OFF)"
         exit 0
     fi
     # Confirm the device multipole path actually ran (not a silent host fallback).

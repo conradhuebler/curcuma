@@ -24,8 +24,8 @@ run_test() {
     local exit_code=$?
 
     # Graceful skip if ROCm GFN-FF is not compiled in
-    if grep -q "without ROCm GFN-FF\|USE_ROCM_GFNFF\|using CPU implementation" stderr.log stdout.log 2>/dev/null; then
-        echo -e "${YELLOW}SKIP${NC}: gfnff ROCm not available in this build (USE_ROCM_GFNFF=OFF)"
+    if grep -q "without ROCm GFN-FF\|USE_ROCM\|using CPU implementation" stderr.log stdout.log 2>/dev/null; then
+        echo -e "${YELLOW}SKIP${NC}: gfnff ROCm not available in this build (USE_ROCM=OFF)"
         exit 0
     fi
 

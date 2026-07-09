@@ -19,7 +19,7 @@
 
 #pragma once
 
-#ifdef USE_VULKAN_XTB
+#ifdef USE_VULKAN
 
 #include <memory>
 #include <string>
@@ -210,4 +210,4 @@ private:
 } // namespace xtb
 } // namespace curcuma
 
-#endif // USE_VULKAN_XTB
+#endif // USE_VULKAN

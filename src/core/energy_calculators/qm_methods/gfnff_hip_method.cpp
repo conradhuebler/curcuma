@@ -10,7 +10,7 @@
  *   ./curcuma -sp mol.xyz -method gfnff -gpu auto   # GPU if available
  */
 
-#ifdef USE_ROCM_GFNFF
+#ifdef USE_ROCM
 
 #include <hip/hip_runtime.h>  // host-side hipMemcpy for GPU-Schur charge download
 
@@ -1410,4 +1410,4 @@ void GFNFFHipComputationalMethod::generateCNPairList(const Matrix& geom_bohr)
         CurcumaLogger::info(fmt::format("  CN pair list: {} pairs (N={})", m_cn_pair_i.size(), N));
 }
 
-#endif // USE_ROCM_GFNFF
+#endif // USE_ROCM

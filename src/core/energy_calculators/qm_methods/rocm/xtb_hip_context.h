@@ -19,7 +19,7 @@
 
 #pragma once
 
-#ifdef USE_ROCM_XTB
+#ifdef USE_ROCM
 
 #include <memory>
 #include <string>
@@ -219,4 +219,4 @@ private:
 } // namespace xtb
 } // namespace curcuma
 
-#endif // USE_ROCM_XTB
+#endif // USE_ROCM

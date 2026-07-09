@@ -15,7 +15,7 @@
 
 #pragma once
 
-#ifdef USE_ROCM_GFNFF
+#ifdef USE_ROCM
 
 #include <hip/hip_runtime.h>
 #include "gfnff_soa_hip.h"
@@ -832,4 +832,4 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_gather_rhs_fragments(
     int           nfrag
 );
 
-#endif // USE_ROCM_GFNFF
+#endif // USE_ROCM

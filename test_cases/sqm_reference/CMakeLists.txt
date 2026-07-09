@@ -358,8 +358,8 @@ if(Python3_Interpreter_FOUND)
     # in later stages, the whole SCF/gradient) runs on the device. The GPU energies
     # match the CPU path to <1e-8, so the SAME xfail set applies. Without a CUDA
     # device the wrapper falls back to CPU, so these never false-fail off-GPU.
-    # Labels: gpu_gfn1_validation / gpu_gfn2_validation. Only built with USE_CUDA_XTB.
-    if(USE_CUDA_XTB)
+    # Labels: gpu_gfn1_validation / gpu_gfn2_validation. Only built with USE_CUDA.
+    if(USE_CUDA)
         foreach(_meth gfn1 gfn2)
             if(_meth STREQUAL gfn1)
                 set(_xfail ${_GFN1_XFAIL})
@@ -420,7 +420,7 @@ if(Python3_Interpreter_FOUND)
     # scf_threshold differs ~1e-7, which this energy-only validator does not probe).
     # Without an AMD device the wrapper falls back to CPU, so these never false-fail
     # off-GPU. Labels: gpu_gfn1_validation_rocm / gpu_gfn2_validation_rocm.
-    if(USE_ROCM_XTB)
+    if(USE_ROCM)
         foreach(_meth gfn1 gfn2)
             if(_meth STREQUAL gfn1)
                 set(_xfail ${_GFN1_XFAIL})
@@ -450,7 +450,7 @@ if(Python3_Interpreter_FOUND)
     # applies; without a Vulkan device the wrapper falls back to CPU (env ignored) so these
     # never false-fail off-GPU. Small molecules only (the full-GPU D&C is intentionally slow;
     # complex/triose are validated manually). Label: gpu_vulkan_dc.
-    if(USE_VULKAN_XTB)
+    if(USE_VULKAN)
         set(_DC_MOLS H2 He2 LiH H2O CH4 NH3 C6H6 HCN acetic_acid_dimer caffeine)
         foreach(_meth gfn1 gfn2)
             if(_meth STREQUAL gfn1)
@@ -478,10 +478,10 @@ endif()
 
 # === Stage 3 GPU integral component tests (Claude Generated, GPU port) ======
 # Each compares a device integral kernel to its CPU reference elementwise @1e-9.
-# Built only with USE_CUDA_XTB; the exes runtime-skip (exit 0) without a device,
+# Built only with USE_CUDA; the exes runtime-skip (exit 0) without a device,
 # so they never false-fail off-GPU. Linked against curcuma_core (CPU reference
 # + the compiled device kernels).
-if(USE_CUDA_XTB)
+if(USE_CUDA)
     set(_SQM_CUDA_MOL ${CMAKE_CURRENT_SOURCE_DIR}/molecules)
     set(_SQM_CUDA_COMP_MOLS H2O CH4 NH3 C6H6 HCN triose)
 

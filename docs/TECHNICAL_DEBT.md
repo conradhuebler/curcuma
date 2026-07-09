@@ -310,7 +310,7 @@ S/P/Cl/Si), B0 guard removed; see [docs/SQM_DSHELL_WP.md](SQM_DSHELL_WP.md). Rem
 | D-8 | `method_factory.cpp:418–599` | medium | ~180-line flat if/else dispatch; ADR comment (390) cites a "GCC 15 brace-init with std::function issue" as the reason — weak justification. New methods require editing this function. Registry/map. |
 | D-9 | `method_factory.cpp:528–543` | medium | `xtb-gfn1/2` resolve TBLite>XTB; `xtb-gfnff` resolves External>XTB. Two different fallback orders for the same `xtb-*` family. Pick one + document. |
 | D-10 | `method_factory.cpp:530–534,546–563` | medium | `if (hasTBLite())` runtime guard wrapping an `#ifdef USE_TBLITE` block — the runtime check is a constant either way, so one guard is redundant. Keep only `#ifdef`. |
-| D-11 | `method_factory.cpp:493–516` | medium | GPU `#ifdef` matrix inconsistent: CUDA gates on `USE_CUDA` alone; ROCm on `USE_ROCM_GFNFF`; Vulkan is a hard-coded CPU fallback + warning regardless of `USE_VULKAN`. Three conventions in one function. |
+| D-11 | `method_factory.cpp:493–516` | medium | GPU `#ifdef` matrix inconsistent: CUDA gates on `USE_CUDA` alone; ROCm on `USE_ROCM`; Vulkan is a hard-coded CPU fallback + warning regardless of `USE_VULKAN`. Three conventions in one function. |
 | D-12 | `method_factory.cpp:180–228` vs `474–513` | low | `resolveNativeXtbGpuMode` duplicated inline for GFN-FF. Reuse. |
 | D-13 | `method_factory.cpp:685–691` | low | `getMethodInfo` checks phantom `cgfnff` (never produced by `create()`, only in dead `energycalculator_enums.h:32`). Dead branch. |
 | D-14 | `method_factory.cpp:101–158` | low | `checkCompilationFlag` string-dispatch wrapper re-lists the six `has*()` flags; unused outside the file. Delete; callers use `has*()` directly. |
@@ -390,8 +390,8 @@ exception: treat its interface as maintained.
 controls the **external** C/Fortran GFN-FF interface (`ExternalGFNFFMethod`),
 *not* the native `gfnff` (which is always available). The flag name suggests
 it enables GFN-FF in general — a common confusion. Likewise the GPU flag
-matrix (`USE_CUDA`/`USE_CUDA_XTB`, `USE_ROCM`/`USE_ROCM_XTB`/`USE_ROCM_GFNFF`,
-`USE_VULKAN`/`USE_VULKAN_XTB`) lets you enable a GPU framework without the
+matrix (`USE_CUDA`/`USE_CUDA`, `USE_ROCM`/`USE_ROCM`/`USE_ROCM`,
+`USE_VULKAN`/`USE_VULKAN`) lets you enable a GPU framework without the
 matching method backend → silent CPU fallback at runtime (cf. D-11, X-P1).
 
 ---

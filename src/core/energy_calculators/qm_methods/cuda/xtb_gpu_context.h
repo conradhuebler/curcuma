@@ -17,7 +17,7 @@
 
 #pragma once
 
-#ifdef USE_CUDA_XTB
+#ifdef USE_CUDA
 
 #include <memory>
 #include <string>
@@ -428,4 +428,4 @@ private:
 } // namespace xtb
 } // namespace curcuma
 
-#endif // USE_CUDA_XTB
+#endif // USE_CUDA

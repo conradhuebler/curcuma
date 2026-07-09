@@ -1,7 +1,7 @@
 /* Claude Generated (June 2026): ROCm/HIP GFN-FF device TU (single-TU port of
  * cuda/{gfnff_kernels,ff_workspace_gpu,gpu_utils}.cu+cpp). hipcc -> one .o, linked into
  * curcuma_core with g++ (EXTERNAL_OBJECT). M1: energy+gradient; EEQ (rocSOLVER) in M2. */
-#ifdef USE_ROCM_GFNFF
+#ifdef USE_ROCM
 #include <hip/hip_runtime.h>
 
 // Parse the host-facing classes BEFORE gfnff_kernels_hip.h's "#define D4_MAX_REF 7"
@@ -7250,4 +7250,4 @@ void logGPUMemoryStatus(int verbosity) {
 // ===================== EEQ solver (rocSOLVER/rocBLAS port, M2) =================
 #include "eeq_solver_hip.hiph"
 
-#endif // USE_ROCM_GFNFF
+#endif // USE_ROCM

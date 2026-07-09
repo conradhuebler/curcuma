@@ -11,7 +11,7 @@
 
 #pragma once
 
-#ifdef USE_ROCM_GFNFF
+#ifdef USE_ROCM
 
 #include <hip/hip_runtime.h>
 #include <stdexcept>
@@ -380,4 +380,4 @@ struct RefCoordSoA {
     bool empty() const { return N == 0 || d_rx.empty(); }
 };
 
-#endif // USE_ROCM_GFNFF
+#endif // USE_ROCM

@@ -16,7 +16,7 @@
 
 #pragma once
 
-#ifdef USE_ROCM_XTB
+#ifdef USE_ROCM
 
 #include <hip/hip_runtime.h>
 
@@ -738,4 +738,4 @@ __device__ __forceinline__ void d_multipole_grad_elem(
 } // namespace xtb
 } // namespace curcuma
 
-#endif // USE_ROCM_XTB
+#endif // USE_ROCM

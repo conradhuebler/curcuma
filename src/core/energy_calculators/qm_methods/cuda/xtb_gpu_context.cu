@@ -9,7 +9,7 @@
  * wrapper does all user-facing logging based on ok()/deviceName().
  */
 
-#ifdef USE_CUDA_XTB
+#ifdef USE_CUDA
 
 #include "xtb_gpu_context.h"
 
@@ -3237,4 +3237,4 @@ bool XtbGpuContext::residentBeginMultipoleComputed()
 } // namespace xtb
 } // namespace curcuma
 
-#endif // USE_CUDA_XTB
+#endif // USE_CUDA

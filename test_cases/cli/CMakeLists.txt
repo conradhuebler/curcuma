@@ -84,18 +84,18 @@ if(USE_CUDA)
         PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;cli")
 endif()
 
-# ROCm GFN-FF — only when USE_ROCM_GFNFF=ON. Self-skips at runtime if no HIP device.
-if(USE_ROCM_GFNFF)
+# ROCm GFN-FF — only when USE_ROCM=ON. Self-skips at runtime if no HIP device.
+if(USE_ROCM)
     add_cli_test(gfnff_gpu 02_rocm_singlepoint)
     set_tests_properties(cli_gfnff_gpu_02_rocm_singlepoint
         PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;rocm;cli")
 endif()
 
 # =============================================================================
-# Vulkan native-xTB nuclear gradient (V-AP1) — only when USE_VULKAN_XTB=ON.
+# Vulkan native-xTB nuclear gradient (V-AP1) — only when USE_VULKAN=ON.
 # Self-skips at runtime if no FP64 Vulkan device is present.
 # =============================================================================
-if(USE_VULKAN_XTB)
+if(USE_VULKAN)
     add_cli_test(gpu_gradient 01_vulkan_gfn1_gradient)
     set_tests_properties(cli_gpu_gradient_01_vulkan_gfn1_gradient
         PROPERTIES TIMEOUT 120 LABELS "gpu_gradient;gpu;vulkan;cli")
