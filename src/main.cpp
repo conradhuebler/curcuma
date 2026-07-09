@@ -827,6 +827,34 @@ json CLI2Json(int argc, char** argv)
                 }
                 // std::cout << "isNumber: " << isNumber << std::endl
                 //             << "isVector: " << isVector << std::endl;
+
+                // Claude Generated (Jul 2026): a numeric-looking token (e.g. "1.0", "2.0")
+                // must still be stored as a JSON STRING when the target parameter is
+                // declared String (e.g. confscan.slx: "1.0" or "1.0,2.0" per confscan.h).
+                // Otherwise setNestedJsonValue() below stores a JSON number, and the later
+                // ConfigManager::get<std::string>() -> nlohmann from_json<string> merge
+                // throws json::type_error.302 ("type must be string, but is number"),
+                // which is uncaught in ConfigManager::getFromModule() and aborts (signal 6).
+                // Comma/pipe/colon-separated values ("1.0,2.0") already take the string path
+                // via isVector above; this closes the gap for single bare numbers.
+                if (isNumber) {
+                    std::string mod = module_name, param = current;
+                    size_t dot = current.find('.');
+                    if (dot != std::string::npos) {
+                        std::string pfx = current.substr(0, dot);
+                        mod = keyword_to_module.count(pfx) ? keyword_to_module[pfx] : pfx;
+                        param = current.substr(dot + 1);
+                    }
+                    const ParameterDefinition* def = ParameterRegistry::getInstance().findDefinition(mod, param);
+                    if (!def) {
+                        for (const auto& owner : ParameterRegistry::getInstance().findOwnerModules(param)) {
+                            if ((def = ParameterRegistry::getInstance().findDefinition(owner, param)))
+                                break;
+                        }
+                    }
+                    if (def && def->type == ParamType::String)
+                        isNumber = false;
+                }
                 if (isNumber) {
                     // Claude Generated (May 2026): Multi-value accumulation for -bak
                     if (current == "bak" && key.contains("bak")) {
