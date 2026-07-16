@@ -3,39 +3,41 @@
 Status: AI-generated, machine-tested (Jul 2026). NOT human production-tested.
 The AI does not assign ✅ TESTED / ✅ APPROVED.
 
-## Update (Jul 16, 2026): GFN2 transition-metal shell-indexing bug FIXED
+## Update (Jul 16, 2026): native GFN1 + GFN2 transition metals FIXED
 
-The original negative result below was traced to a concrete bug and **GFN2 is now
-fixed for 3d transition metals**. Three GFN2 parameter tables — `reference_occ`,
-`p_kcn`, `p_shpoly` — are indexed by **angular momentum** in tblite
-(`gfn2.f90`: `(0:2, elem)`), but `xtb_native.cpp` read them by **shell index**.
-Main-group is unaffected (shells stored `[s,p,d]`, so `ang_sh==ish`); transition
-metals order shells `[d,s,p]`, so shell-indexing scrambled the d/s/p reference
-occupations and CN/shpoly → wrong `n0`/`dq` → multi-Eh errors. Fix: index those three
-by the shell's angular momentum for GFN2 (`xtb_native.cpp` buildReferenceOccupations +
-H0 setup).
+The original negative result below was traced to concrete bugs; **native GFN1 and GFN2
+now reproduce tblite for transition metals** (residual ~1e-3 Eh, down from up to 15 Eh).
+Three bugs, all in `xtb_native.cpp` / `STO_CGTO.hpp`:
 
-Result (native GFN2 vs tblite-GFN2, identical geometries):
-- **3d metals (Cr, Mn, Fe, Co, Ni): EXACT to tblite (1e-8)** — e.g. Fe(CO)4 was 4.93 Eh
-  off, now 0.0.
-- 4d (Mo, Ru, Rh, Pd): ~1e-3 Eh residual; 5d (W, Ir, Pt): ~0.1–0.5 Eh residual — a
-  separate, unresolved heavy-element band-energy issue (Rh's H0 params match tblite
-  exactly, so it is not another indexing bug).
-- MOR41 reaction energies, native GFN2 vs xtb 6.6.1: **MAD 507 → 4.29 kcal/mol**
-  (max 5735 → 35; the residual is entirely the 4d/5d reactions). curcuma-GFN2 vs DLPNO
-  MAD is now 15.4, comparable to xtb-GFN2's own 11.8.
-- **No regression**: all main-group sqm molecules (incl. d-shell H2S/PH3/SiH4/HCl) stay
-  1e-8 vs tblite for both GFN1 and GFN2; gfn2 ecomp ctests pass.
+1. **Shell-vs-angular indexing** — `reference_occ`, `p_kcn`, `p_shpoly` are indexed by
+   **angular momentum** in tblite (`gfn2.f90` / `gfn1.f90`: `(0:2, elem)`), but were read
+   by **shell index**. Main-group is unaffected (`ang_sh==ish`); transition metals order
+   shells `[d,s,p]`, so shell-indexing scrambled the d/s/p occupations and CN/shpoly →
+   wrong `n0`/`dq` → multi-Eh error. Fix: index by the shell's angular momentum.
+   - GFN2: all three by angular momentum (no shell shares an l).
+   - GFN1: valence-aware — `reference_occ` goes to the **valence** shell of each l
+     (first shell of that l), polarisation shells get 0 (H has two s-shells); `p_shpoly`
+     by angular momentum for all shells; **`p_kcn` stays shell-indexed** (tblite gfn1
+     keeps it `max_shell`).
+2. **6s/6p STO-NG** — the Stewart STO-NG tables in `STO_CGTO.hpp` stopped at n=5, so the
+   6s/6p shells of 5d metals (W/Ir/Pt) used the wrong Gaussians (6s→2p, 6p→3d slots) →
+   ~0.1–0.5 Eh per 5d atom. Added tblite's dedicated 6s/6p STO-6G arrays.
 
-**GFN1 is NOT fixed** and still shows the TM error. GFN1's basis has valence+polarisation
-shells that share an angular momentum (e.g. H = two s-shells with distinct `p_kcn`, and
-tblite `gfn1.f90` keeps `p_kcn` shell-indexed), so the same angular-momentum remap would
-collapse those shells (verified: it breaks even H2O/SiH4). A GFN1 TM fix needs
-valence/polarisation-aware shell mapping and is deferred. GFN-FF TM deviations are a
-separate force-field-parameter matter (also open).
+Result (native vs tblite, identical geometries):
+- **GFN2**: 3d metals (Cr/Mn/Fe/Co/Ni) **exact (1e-8)**; 4d/5d **~1e-3 Eh**. MOR41 reaction
+  MAD native-GFN2-vs-xtb **507 → 0.14 kcal/mol** (max 5735 → 1.24). curcuma-GFN2 vs DLPNO
+  MAD ~15, comparable to xtb-GFN2's own 11.8.
+- **GFN1**: **72/95 structures exact (1e-8), 88/95 < 1e-3 Eh** (were off by 100s of
+  kcal/mol); 5d (Ir PR22) 4e-8 after the 6s/6p fix.
+- **No regression**: all main-group sqm molecules (incl. d-shell H2S/PH3/SiH4/HCl and H)
+  stay 1e-8 vs tblite for both GFN1 and GFN2; gfn2 ecomp ctests pass.
 
-The sections below are the original (pre-fix) diagnostic and remain valid for GFN1 and
-GFN-FF.
+**Remaining**: a uniform **~1e-3 Eh** residual for 4d/5d (both GFN1 and GFN2), present in
+larger heavy-metal complexes and geometry-size-dependent — a separate heavy-element
+(Z≥40) issue in band/multipole/D4, not an indexing bug (Rh's H0 params match tblite
+exactly). GFN-FF transition-metal deviations are a separate force-field-parameter matter.
+
+The sections below are the original (pre-fix) diagnostic and remain valid for GFN-FF.
 
 ## What this is
 
