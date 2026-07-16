@@ -110,6 +110,24 @@ constexpr double pCoeff5[5][15] = {
     {1.935721966e-1, 1.472634893e-1, 3.724364929e-1, 3.294210848e-1, 3.345288361e-1, 1.653444074e-1, 2.242794445e-1, 1.017072253e-1, 6.605423564e-2, 1.463662294e-1, 1.037803318e-1, 1.511340183e-1, 1.463662294e-1, 5.077063693e-2, 6.974153145e-2}
 };
 
+// --- STO-6G for the 6s and 6p shells (principal quantum number n=6), needed for
+//     5d transition metals (W, Ir, Pt: shells 5d/6s/6p). Stewart's main STO-NG
+//     tables above stop at n=5; these dedicated arrays are a verbatim port of
+//     TBLite basis/slater.f90 (pAlpha6s/pCoeff6s/pAlpha6p/pCoeff6p). Only ng=6 is
+//     supported for n=6 (matching tblite's guard n==6 .and. ng==6). Claude Generated.
+constexpr double pAlpha6s[6] = {
+    5.800292686e-1, 2.718262251e-1, 7.938523262e-2,
+    4.975088254e-2, 2.983643556e-2, 1.886067216e-2};
+constexpr double pCoeff6s[6] = {
+    4.554359511e-3, 5.286443143e-2, -7.561016358e-1,
+    -2.269803820e-1, 1.332494651e+0, 3.622518293e-1};
+constexpr double pAlpha6p[6] = {
+    6.696537714e-1, 1.395089793e-1, 8.163894960e-2,
+    4.586329272e-2, 2.961305556e-2, 1.882221321e-2};
+constexpr double pCoeff6p[6] = {
+    2.782723680e-3, -1.282887780e-1, -2.266255943e-1,
+    4.682259383e-1, 6.752048848e-1, 1.091534212e-1};
+
 /**
  * @brief Convert an STO basis function to a contracted GTO (STO-NG expansion)
  *
@@ -130,6 +148,28 @@ inline Shell slater_to_gauss(int n, int l, double zeta, int ng)
     s.nprim = ng;
     s.alpha.resize(ng);
     s.coeff.resize(ng);
+
+    // n=6 (6s/6p) is absent from Stewart's STO-NG tables; use the dedicated
+    // STO-6G arrays (tblite basis/slater.f90 supports n=6 only with ng=6). This
+    // path is reached by 5d transition metals (W/Ir/Pt: shells 5d/6s/6p). Without
+    // it, nlm_to_ityp(6,0)=5 (2p slot) / nlm_to_ityp(6,1)=9 (3d slot) silently used
+    // the wrong Gaussians -> ~0.1-0.5 Eh band error per 5d atom.
+    if (n == 6 && (l == 0 || l == 1)) {
+        const double* a6 = (l == 0) ? pAlpha6s : pAlpha6p;
+        const double* c6 = (l == 0) ? pCoeff6s : pCoeff6p;
+        const double zeta2_6 = zeta * zeta;
+        s.nprim = 6;
+        s.alpha.assign(6, 0.0);
+        s.coeff.assign(6, 0.0);
+        for (int i = 0; i < 6; ++i) {
+            const double a = a6[i] * zeta2_6;
+            s.alpha[i] = a;
+            s.coeff[i] = c6[i] * std::pow(two_over_pi * a, 0.75)
+                              * std::pow(4.0 * a, 0.5 * l)
+                              / std::sqrt(dfactorial[l]);
+        }
+        return s;
+    }
 
     int ityp = nlm_to_ityp(n, l);
     if (ityp < 0 || ityp >= 15) {
