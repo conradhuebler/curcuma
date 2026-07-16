@@ -1670,14 +1670,23 @@ void XTB::buildH0Data()
         const int z = m_basis.z[iat];
         for (int ish = 0; ish < m_basis.nsh_at[iat]; ++ish) {
             const int sh_idx = m_basis.ish_at[iat] + ish;
+            // GFN2 stores p_kcn and p_shpoly indexed by ANGULAR MOMENTUM (tblite
+            // gfn2.f90: p_kcn(0:2), p_shpoly(0:2)); its shells never repeat an
+            // angular momentum, so mapping shell->l reorders the [d,s,p] transition-
+            // metal shells correctly (main-group is unaffected: ang_sh==ish).
+            // GFN1 must NOT do this: its basis has valence+polarisation shells that
+            // share an angular momentum (e.g. H = two s shells with distinct p_kcn),
+            // and tblite gfn1.f90 keeps p_kcn shell-indexed (max_shell); indexing by
+            // l would collapse those shells. GFN1 keeps its historic [ish] indexing.
+            const int l = m_basis.ang_sh[sh_idx];
             if (m_method == MethodType::GFN1) {
                 m_h0.selfenergy[sh_idx] = gfn1_params::p_selfenergy[z - 1][ish];
                 m_h0.kcn       [sh_idx] = gfn1_params::p_kcn       [z - 1][ish];
                 m_h0.shpoly    [sh_idx] = gfn1_params::p_shpoly    [z - 1][ish];
             } else {
                 m_h0.selfenergy[sh_idx] = gfn2_params::p_selfenergy[z - 1][ish];
-                m_h0.kcn       [sh_idx] = gfn2_params::p_kcn       [z - 1][ish];
-                m_h0.shpoly    [sh_idx] = gfn2_params::p_shpoly    [z - 1][ish];
+                m_h0.kcn       [sh_idx] = gfn2_params::p_kcn       [z - 1][l];
+                m_h0.shpoly    [sh_idx] = gfn2_params::p_shpoly    [z - 1][l];
             }
         }
     }
@@ -1698,9 +1707,20 @@ void XTB::buildReferenceOccupations()
         const int z = m_basis.z[iat];
         for (int ish = 0; ish < m_basis.nsh_at[iat]; ++ish) {
             const int sh_idx = m_basis.ish_at[iat] + ish;
+            // reference_occ is indexed by ANGULAR MOMENTUM (s,p,d), not by shell
+            // position (mirrors tblite gfn2.f90:865, refocc = reference_occ(ang)).
+            // For transition metals the shell order is [d,s,p] (ang_shell=[2,0,1]),
+            // so indexing by shell position scrambles the d/p reference occupations
+            // (Fe d gets 1.0 instead of 6.0); main-group [s,p]/[s,p,d] is unaffected
+            // because there ang_shell[ish]==ish. Look up by the shell's angular momentum.
+            // GFN2: reference_occ indexed by angular momentum (see H0-setup note).
+            // GFN1 keeps historic [ish] indexing (valence/polarisation shells share
+            // an angular momentum, e.g. H's two s shells, so l-indexing would
+            // double-count them).
+            const int l = m_basis.ang_sh[sh_idx];
             const double refocc = (m_method == MethodType::GFN1)
                                     ? gfn1_params::reference_occ[z - 1][ish]
-                                    : gfn2_params::reference_occ[z - 1][ish];
+                                    : gfn2_params::reference_occ[z - 1][l];
             m_wfn.n0_sh(sh_idx) += refocc;
             m_wfn.n0_at(iat)    += refocc;
             total               += refocc;
