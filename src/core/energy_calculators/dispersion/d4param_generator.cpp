@@ -140,8 +140,13 @@ void D4ParameterGenerator::initializeReferenceData()
     m_r4_over_r2.resize(MAX_ELEM, 0.0);
     m_sqrt_z_r4_r2.resize(MAX_ELEM, 0.0);
 
-    // GFN-FF Moment Ratios (r4Overr2) from dftd4param.f90:134-157
-    // These are essential for correct damping radii R0 in GFN-FF
+    // D4 Moment Ratios (r4Overr2), full 118-element table from
+    // external/gfnff/src/dftd4param.f90:134-157 (identical to dftd4 / tblite).
+    // These set the C8/C6 ratio and the BJ damping radius R0 for every element.
+    // NOTE (2026-07): previously only H-Kr (Z<=36) were provided and everything
+    // heavier was silently filled with a placeholder 10.0, which made native D4
+    // dispersion wrong for I and all 4d/5d elements (too-large R0 -> underbinding).
+    // The full array below fixes heavy elements without touching Z<=36.
     m_r4_over_r2 = {
         8.0589, 3.4698,  // H-He
         29.0974, 14.8517, 11.8799, 7.8715, 5.5588, 4.7566, 3.8025, 3.1036,  // Li-Ne
@@ -149,7 +154,23 @@ void D4ParameterGenerator::initializeReferenceData()
         29.2012, 22.3934, // K-Ca
         19.0598, 16.8590, 15.4023, 12.5589, 13.4788, // Sc-Mn
         12.2309, 11.2809, 10.5569, 10.1428, 9.4907,  // Fe-Zn
-        13.4606, 10.8544, 8.9386, 8.1350, 7.1251, 6.1971 // Ga-Kr
+        13.4606, 10.8544, 8.9386, 8.1350, 7.1251, 6.1971, // Ga-Kr
+        30.0162, 24.4103, // Rb-Sr
+        20.3537, 17.4780, 13.5528, 11.8451, 11.0355, // Y-Tc
+        10.1997, 9.5414, 9.0061, 8.6417, 8.9975,     // Ru-Cd
+        14.0834, 11.8333, 10.0179, 9.3844, 8.4110, 7.5152, // In-Xe
+        32.7622, 27.5708, // Cs-Ba
+        23.1671, 21.6003, 20.9615, 20.4562, 20.1010, 19.7475, 19.4828, // La-Eu
+        15.6013, 19.2362, 17.4717, 17.8321, 17.4237, 17.1954, 17.1631, // Gd-Yb
+        14.5716, 15.8758, 13.8989, 12.4834, 11.4421, // Lu-Re
+        10.2671, 8.3549, 7.8496, 7.3278, 7.4820,     // Os-Hg
+        13.5124, 11.6554, 10.0959, 9.7340, 8.8584, 8.0125, // Tl-Rn
+        29.8135, 26.3157, // Fr-Ra
+        19.1885, 15.8542, 16.1305, 15.6161, 15.1226, 16.1576, 0.0000, // Ac-Am
+        0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, // Cm-No
+        0.0000, 0.0000, 0.0000, 0.0000, 0.0000, // Lr-Bh
+        0.0000, 0.0000, 0.0000, 0.0000, 5.4929, // Hs-Cn
+        6.7286, 6.5144, 10.9169, 10.3600, 9.4723, 8.6641 // Nh-Og
     };
     if (m_r4_over_r2.size() < MAX_ELEM) m_r4_over_r2.resize(MAX_ELEM, 10.0);
 
