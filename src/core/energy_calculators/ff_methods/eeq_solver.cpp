@@ -2733,6 +2733,25 @@ Vector EEQSolver::calculateTopologyCharges(
         double cnf_term = params_i.cnf * std::sqrt(nb_count);
 
         chi(i) = -params_i.chi + dxi(i) + cnf_term;
+
+        // Metal chi-shift (Phase 1 topology charges ONLY) — Claude Generated (Jul 2026)
+        // Reference: Fortran gfnff_ini.f90:413-418
+        //   if (imetal(i).eq.2) topo%chieeq(i) = topo%chieeq(i) - gen%mchishift
+        //   gen%mchishift = -0.09 (gfnff_param.f90:756), so chieeq += 0.09
+        // Rationale (Fortran comment): the "true" charges of transition metals are small, so the
+        // non-geometry-dependent topology charges use a LESS electronegative metal → more q+ on the
+        // metal, which better reflects the polarity used for guessing bond/angle parameters.
+        // imetal==2 (metal_type==2) are the d-block TMs; all have periodic group <=2 or negative, so
+        // the Fortran line-274 caveat (nb<=4 & group>3 → imetal=0) can never clear a "2", making the
+        // metal_type[z-1]==2 test faithful. Phase 2 overwrites chieeq WITHOUT this shift
+        // (gfnff_ini.f90:715), so this is deliberately Phase-1 only. Missing here caused metal
+        // complexes (e.g. RhCl(CO)2) to put too little topology charge on the metal → wrong fqq bond
+        // factor + Coulomb (ED39 native gfnff 12.9 mEh above xtb --gfnff).
+        if (z_i >= 1 && z_i <= 86 && metal_type[z_i - 1] == 2) {
+            constexpr double MCHISHIFT = -0.09;  // gfnff_param.f90:756
+            chi(i) -= MCHISHIFT;  // effectively += 0.09
+        }
+
         gam(i) = params_i.gam;
         alpha(i) = params_i.alp;  // Already squared
     }
