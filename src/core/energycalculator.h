@@ -363,10 +363,21 @@ public:
     /**
      * @brief Get internal interface pointer (legacy support)
      * @return ComputationalMethod pointer (replaces old QMInterface)
-     * 
+     *
      * @deprecated Use direct EnergyCalculator methods instead
      */
     ComputationalMethod* Interface() const { return m_method.get(); }
+
+    /**
+     * @brief Get coordination numbers from last calculate() call.
+     *
+     * Delegates to the underlying method's getCN(). Only GFN-FF returns meaningful
+     * values; all other methods return an empty vector.
+     *
+     * Claude Generated 2026 — used by PolymerBuild CN diagnostics
+     * @return Per-atom GFN-FF CN vector, or empty vector if not supported
+     */
+    Vector getCN() const { return m_method ? m_method->getCN() : Vector(); }
     
     /**
      * @brief Print available methods
@@ -465,20 +476,13 @@ private:
      * Claude Generated: Phase 3C - Native ConfigManager support
      * @param config ConfigManager configuration
      */
-    void initializeCommonFromConfig(const ConfigManager& config);
+    void initializeCommonFromConfig(const ConfigManager& config, const json* raw_controller = nullptr);
 
     /**
      * @brief Initialize EnergyCalculator with JSON settings (backward compatible)
      * @param controller Configuration JSON
      */
     void initializeCommon(const json& controller);
-
-    /**
-     * @brief Re-attach method-specific sub-scopes (gfnff, eeq_solver, …) onto
-     * m_controller after ConfigManager initialization, then rebuild the method
-     * if any new scope was carried over. Claude Generated (WP6, May 2026).
-     */
-    void reattachMethodScopes(const json& controller);
 
     /**
      * @brief Create computational method using factory

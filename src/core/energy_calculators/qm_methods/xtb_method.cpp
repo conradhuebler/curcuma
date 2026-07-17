@@ -14,6 +14,10 @@ XTBMethod::XTBMethod(const std::string& method_name, const json& config)
     // Claude Generated: Create ConfigManager for XTB interface (Phase 3B)
     ConfigManager xtb_config("xtb", config);
     m_xtb = std::make_unique<XTBInterface>(xtb_config);
+    // CRITICAL: set the method (xtb-gfn0/1/2/gfnff). The XTBInterface ctor does not
+    // read "method" from config, so m_method_switch would default to 0 = GFN0 and
+    // xtb-gfn2/xtb-gfn1 would silently run GFN0-xTB. (Claude Generated fix, 2026-06)
+    m_xtb->setMethod(method_name);
 #endif
     m_parameters = config;
 }

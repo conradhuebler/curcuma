@@ -71,7 +71,7 @@ public:
     /**
      * @brief Auto-select best optimizer for system
      */
-    static OptimizerType selectOptimalOptimizer(const Molecule& molecule,
+    static OptimizerType selectOptimalOptimizer(const curcuma::Molecule& molecule,
         const json& preferences = json{});
 
 private:
@@ -100,7 +100,7 @@ public:
      * @brief Optimize molecule with specified method
      */
     static OptimizationResult optimizeStructure(
-        Molecule* molecule,
+        curcuma::Molecule* molecule,
         OptimizerType optimizer_type,
         EnergyCalculator* energy_calculator,
         const json& config = json{});
@@ -109,25 +109,33 @@ public:
      * @brief Optimize molecule with string method name
      */
     static OptimizationResult optimizeStructure(
-        Molecule* molecule,
+        curcuma::Molecule* molecule,
         const std::string& method_name,
         EnergyCalculator* energy_calculator,
         const json& config = json{});
 
     /**
      * @brief Optimize multiple molecules (batch processing)
+     * @param threads Number of parallel molecule-level workers. Values <= 1 keep
+     *        the original sequential path; values > 1 dispatch frames to a
+     *        CxxThreadPool with progress bar.
+     * @param energy_controller Full controller used to construct per-worker
+     *        EnergyCalculators in parallel mode. When empty, the supplied
+     *        energy_calculator is used directly (sequential path only).
      */
     static std::vector<OptimizationResult> optimizeBatch(
-        const std::vector<Molecule>& molecules,
+        const std::vector<curcuma::Molecule>& molecules,
         OptimizerType optimizer_type,
         EnergyCalculator* energy_calculator,
-        const json& config = json{});
+        const json& config = json{},
+        int threads = 1,
+        const json& energy_controller = json{});
 
     /**
      * @brief Auto-optimize with best method selection
      */
     static OptimizationResult autoOptimize(
-        Molecule* molecule,
+        curcuma::Molecule* molecule,
         EnergyCalculator* energy_calculator,
         const json& preferences = json{});
 

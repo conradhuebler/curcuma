@@ -46,11 +46,12 @@
 #include "src/capabilities/simplemd.h"
 #include "src/capabilities/trajectory_statistics.h"
 #include "src/capabilities/trajectoryanalysis.h"
-
+#include "src/capabilities/polymerbuild.h"
 #include "src/tools/trajectory_writer.h"
 
 #include "src/tools/general.h"
 #include "src/tools/info.h"
+#include "src/core/units.h"
 
 // Claude Generated: Parameter registry system
 #include "generated/parameter_registry.h"
@@ -58,6 +59,7 @@
 
 #include "src/capabilities/optimiser/OptimiseDipoleScaling.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -678,12 +680,22 @@ json CLI2Json(int argc, char** argv)
     // Claude Generated (October 2025): Global parameters that should be accessible
     // both at top level (controller[param]) and module level (controller[module][param])
     // ENHANCED: Added "method" to support global energy method specification
-    // Claude Generated (March 2026): Added "gpu" for GPU acceleration control
+    // Claude Generated (March 2026): Added "gpu" for GPU acceleration control.
+    //   -gpu <backend>: none (default, CPU) | cuda | rocm | vulkan | auto.
+    //   "auto" picks the first compiled GPU backend (cuda > rocm > vulkan), else CPU.
+    //   Applies to gfn1/gfn2 (USE_*_XTB builds) and gfnff (USE_* builds); an explicit
+    //   backend not compiled in warns and falls back to CPU.
+    // Claude Generated (Jul 2026): Added "charge","spin" — molecular charge/spin must reach
+    // top-level controller["charge"] so -sp/-opt can apply them to the molecule
+    // (setCharge reads controller["charge"], not the command-module namespace).
     std::set<std::string> global_params = {
         "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
+        "charge", "spin",  // molecular charge/spin (top-level, not module-scoped)
         "export_run", // Export current run configuration
         "import_config", // Import custom configuration
-        "bak"  // Files to copy back from BMT output directory to CWD
+        "bak",   // Files to copy back from BMT output directory to CWD
+        "no_bmt", // Disable BMT output directory (legacy: write to CWD)
+        "noprogress" // Disable live progress bars globally (e.g. when redirecting to a file)
     };
 
     // Claude Generated (October 2025): CLI keyword to module name mapping
@@ -692,6 +704,7 @@ json CLI2Json(int argc, char** argv)
         {"md", "simplemd"},
         {"opt", "opt"},
         {"sp", "opt"},  // single point also uses opt module
+        {"interaction", "interaction"},
         {"confscan", "confscan"},
         {"rmsd", "rmsd"},
         {"analysis", "analysis"},
@@ -704,6 +717,21 @@ json CLI2Json(int argc, char** argv)
     if (keyword_to_module.count(keyword) > 0) {
         module_name = keyword_to_module[keyword];
     }
+
+    // Claude Generated (Jul 2026, F2): a token starting with '-' followed by a digit or '.'
+    // is a negative NUMBER value (e.g. "-charge -1", "-threshold -1e-6"), not a flag. The
+    // value-consume logic below treats any '-'-prefixed next arg as a flag, which silently
+    // drops negative numeric values (charge became boolean true -> get<int>()=1, breaking
+    // all negatively-charged species). isFlag() returns false for negative numbers so they
+    // flow into the stod() value branch instead.
+    auto isFlag = [](const std::string& s) -> bool {
+        if (s.empty() || s[0] != '-') return false;
+        if (s.size() < 2) return true;             // lone "-"
+        char c = s[1];
+        // "-3", "-1.5", "-.5", "-1e-6" are numbers, not flags
+        if (std::isdigit(static_cast<unsigned char>(c)) || c == '.') return false;
+        return true;
+    };
 
     for (int i = 2; i < argc; ++i) {
         std::string current = argv[i];
@@ -765,7 +793,7 @@ json CLI2Json(int argc, char** argv)
                 }
             }
 
-            if ((i + 1) >= argc || argv[i + 1][0] == '-' || argv[i + 1] == std::string("true") || argv[i + 1] == std::string("+")) {
+            if ((i + 1) >= argc || isFlag(argv[i + 1]) || argv[i + 1] == std::string("true") || argv[i + 1] == std::string("+")) {
                 // Claude Generated (May 2026): Multi-value accumulation for -bak flag
                 if (current == "bak" && key.contains("bak")) {
                     if (key["bak"].is_array()) {
@@ -802,6 +830,34 @@ json CLI2Json(int argc, char** argv)
                 }
                 // std::cout << "isNumber: " << isNumber << std::endl
                 //             << "isVector: " << isVector << std::endl;
+
+                // Claude Generated (Jul 2026): a numeric-looking token (e.g. "1.0", "2.0")
+                // must still be stored as a JSON STRING when the target parameter is
+                // declared String (e.g. confscan.slx: "1.0" or "1.0,2.0" per confscan.h).
+                // Otherwise setNestedJsonValue() below stores a JSON number, and the later
+                // ConfigManager::get<std::string>() -> nlohmann from_json<string> merge
+                // throws json::type_error.302 ("type must be string, but is number"),
+                // which is uncaught in ConfigManager::getFromModule() and aborts (signal 6).
+                // Comma/pipe/colon-separated values ("1.0,2.0") already take the string path
+                // via isVector above; this closes the gap for single bare numbers.
+                if (isNumber) {
+                    std::string mod = module_name, param = current;
+                    size_t dot = current.find('.');
+                    if (dot != std::string::npos) {
+                        std::string pfx = current.substr(0, dot);
+                        mod = keyword_to_module.count(pfx) ? keyword_to_module[pfx] : pfx;
+                        param = current.substr(dot + 1);
+                    }
+                    const ParameterDefinition* def = ParameterRegistry::getInstance().findDefinition(mod, param);
+                    if (!def) {
+                        for (const auto& owner : ParameterRegistry::getInstance().findOwnerModules(param)) {
+                            if ((def = ParameterRegistry::getInstance().findDefinition(owner, param)))
+                                break;
+                        }
+                    }
+                    if (def && def->type == ParamType::String)
+                        isNumber = false;
+                }
                 if (isNumber) {
                     // Claude Generated (May 2026): Multi-value accumulation for -bak
                     if (current == "bak" && key.contains("bak")) {
@@ -992,7 +1048,9 @@ void initializeBMT(CurcumaMethod* method, const std::string& filename,
                    const std::string& cli_keyword, const json& controller)
 {
     method->setFile(filename);
-    method->createBMTDir(cli_keyword);
+    bool no_bmt = controller.value("no_bmt", false);
+    if (!no_bmt)
+        method->createBMTDir(cli_keyword);
 
     // Register -bak files for post-computation copy to CWD
     if (controller.contains("bak")) {
@@ -1498,8 +1556,11 @@ int executeAnalysis(const json& controller, int argc, char** argv) {
     // Claude Generated 2026: BMT output directory for analysis command
     std::string analysis_filename(argv[2]);
     std::string analysis_basename = BMTUtils::stripExtension(analysis_filename);
-    std::string analysis_bmt_dir = BMTUtils::createBMTDir(analysis_basename, "analysis");
-    BMTUtils::writeMetadata(analysis_bmt_dir, analysis_basename, "analysis", analysis_filename);
+    std::string analysis_bmt_dir;
+    if (!controller.value("no_bmt", false)) {
+        analysis_bmt_dir = BMTUtils::createBMTDir(analysis_basename, "analysis");
+        BMTUtils::writeMetadata(analysis_bmt_dir, analysis_basename, "analysis", analysis_filename);
+    }
 
     auto* analysis = new UnifiedAnalysis(analysis_config, false);
     analysis->setFileName(argv[2]);
@@ -1574,15 +1635,17 @@ int executeRMSD(const json& controller, int argc, char** argv) {
         }
         rmsd_result["permutation"] = permutation;
         rmsd_result["reference_xyz"] = driver->ReferenceAligned().XYZString();
-        // Use TargetAligned as fallback when reordering was skipped (TargetReorderd is empty)
-        rmsd_result["reorder_xyz"] = (driver->TargetReorderd().AtomCount() > 0)
-            ? driver->TargetReorderd().XYZString()
-            : driver->TargetAligned().XYZString();
+        // Geometry whose deviation equals RMSD() (reordered+aligned, or plain best-fit when
+        // no reorder ran). Same result as the old TargetReorderd()/TargetAligned() fallback.
+        rmsd_result["reorder_xyz"] = driver->TargetForRMSD().XYZString();
         rmsd_result["reference_file"] = reffile;
         rmsd_result["target_file"] = tarfile;
 
-        std::ofstream rmsd_out(driver->outputPath(tarfile + ".rmsd.json"));
-        rmsd_out << rmsd_result.dump(2) << std::endl;
+        // Write to both BMT directory and CWD for fixed workflows
+        std::ofstream rmsd_out_bmt(driver->outputPath(tarfile + ".rmsd.json"));
+        rmsd_out_bmt << rmsd_result.dump(2) << std::endl;
+        std::ofstream rmsd_out_cwd(tarfile + ".rmsd.json");
+        rmsd_out_cwd << rmsd_result.dump(2) << std::endl;
     }
 
     driver->processBakFiles();
@@ -1607,17 +1670,51 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         CurcumaLogger::set_verbosity(verbosity);
     }
 
+    // -sp is energy-only by default (Claude Generated, June 2026): the gradient is
+    // computed only when the user asks for it with -gradient. This avoids the cost of
+    // an unused gradient and lets energy-only large-system modes (dc/sparse) serve a
+    // single-point energy without tripping the gradient-unavailable hard error (X-L4).
+    auto read_bool = [](const json& j, const char* k) -> bool {
+        if (!j.is_object() || !j.contains(k)) return false;
+        const auto& v = j[k];
+        if (v.is_boolean()) return v.get<bool>();
+        if (v.is_number())  return v.get<double>() != 0.0;
+        if (v.is_string())  { auto s = v.get<std::string>(); return s == "true" || s == "1" || s == "yes"; }
+        return false;
+    };
+    const bool want_gradient = read_bool(controller, "gradient")
+        || (controller.contains("opt") && read_bool(controller["opt"], "gradient"));
+
     Molecule molecule(argv[2]);
+    // Claude Generated (Jul 2026): Apply charge/spin from CLI controller to the molecule
+    // before the energy calculation. Mirrors the -opt path (see below). Without this,
+    // GFN-FF reads m_charge=0 from the file-parsed molecule (XYZ/Coord set no charge),
+    // giving wrong EEQ charges and energies for charged species (S30L systems 23-30).
+    if (controller.contains("charge"))
+        molecule.setCharge(controller["charge"].get<int>());
+    if (controller.contains("spin"))
+        molecule.setSpin(controller["spin"].get<int>());
     EnergyCalculator energy_calc(method, energy_controller);
     energy_calc.setMolecule(molecule.getMolInfo());
-    double energy = energy_calc.CalculateEnergy(true);
+    double energy = energy_calc.CalculateEnergy(want_gradient);
+
+    // Fail-loud (D-2/A1/A2, Claude Generated): refuse to report a result when the
+    // method reported an error (e.g. unsupported d-shell element, SCF/eigensolver
+    // breakdown, EEQ fallback). Returning a non-zero exit avoids scripts treating a
+    // bogus 0.0 Eh as a valid single-point energy.
+    if (energy_calc.Error()) {
+        CurcumaLogger::error("Single-point calculation failed: " + energy_calc.ErrorMessage());
+        return 1;
+    }
 
     fmt::print("\nCharge {} Spin {}\n", molecule.Charge(), molecule.Spin());
     fmt::print("Single Point Energy = {:.8f} Eh\n", energy);
 
-    Geometry gradient = energy_calc.Gradient();
-    double grad_norm = Eigen::Map<Eigen::VectorXd>(gradient.data(), gradient.size()).norm();
-    CurcumaLogger::param("Gradient norm", fmt::format("{:.6e} Eh/Bohr", grad_norm));
+    if (want_gradient) {
+        Geometry gradient = energy_calc.Gradient();
+        double grad_norm = Eigen::Map<Eigen::VectorXd>(gradient.data(), gradient.size()).norm();
+        CurcumaLogger::param("Gradient norm", fmt::format("{:.6e} Eh/Bohr", grad_norm));
+    }
 
     return 0;
 }
@@ -1690,12 +1787,27 @@ int executeOptimization(const json& controller, int argc, char** argv) {
     json opt_config = MergeJson(opt_defaults, controller.contains("opt") ? controller["opt"] : json{});
 
     try {
-        auto molecule = std::make_unique<Molecule>(argv[2]);
-        // Apply charge/spin from CLI controller to the molecule before optimization
-        if (controller.contains("charge"))
-            molecule->setCharge(controller["charge"].get<int>());
-        if (controller.contains("spin"))
-            molecule->setSpin(controller["spin"].get<int>());
+        // Claude Generated (Jun 2026): Load all structures from input file. Multi-XYZ
+        // trajectories are now optimised frame-by-frame instead of only the first frame.
+        FileIterator file(argv[2]);
+        std::vector<Molecule> molecules;
+        while (!file.AtEnd()) {
+            Molecule mol = file.Next();
+            if (mol.AtomCount() == 0)
+                continue;
+            // Apply charge/spin from CLI controller to every frame
+            if (controller.contains("charge"))
+                mol.setCharge(controller["charge"].get<int>());
+            if (controller.contains("spin"))
+                mol.setSpin(controller["spin"].get<int>());
+            molecules.push_back(mol);
+        }
+
+        if (molecules.empty()) {
+            CurcumaLogger::error("No valid molecules loaded from input file");
+            return 1;
+        }
+
         std::string method = controller.value("method", "gfnff");
         json energy_controller = controller;
         energy_controller["geometry_file"] = std::string(argv[2]);
@@ -1706,8 +1818,11 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         // Claude Generated 2026: BMT output directory for opt command
         std::string filename(argv[2]);
         std::string basename = BMTUtils::stripExtension(filename);
-        std::string bmt_dir = BMTUtils::createBMTDir(basename, "opt");
-        BMTUtils::writeMetadata(bmt_dir, basename, "opt", filename);
+        std::string bmt_dir;
+        if (!controller.value("no_bmt", false)) {
+            bmt_dir = BMTUtils::createBMTDir(basename, "opt");
+            BMTUtils::writeMetadata(bmt_dir, basename, "opt", filename);
+        }
 
         // Enable iterative mode + warm-start for native GFN so SCF iterations are
         // suppressed at verbosity 1 and converged charges are reused across steps.
@@ -1716,27 +1831,61 @@ int executeOptimization(const json& controller, int argc, char** argv) {
             energy_calc.setWarmStart(true);
 
         Optimization::OptimizerType opt_type = Optimization::parseOptimizerType(optimizer_method);
-        auto result = Optimization::OptimizationDispatcher::optimizeStructure(
-            molecule.get(), opt_type, &energy_calc, opt_config);
+        std::string output_file = BMTUtils::outputPath(bmt_dir, basename + ".opt.xyz");
 
-        if (result.success) {
-            std::string output_file = BMTUtils::outputPath(bmt_dir, basename + ".opt.xyz");
-            molecule->writeXYZFile(output_file);
-            CurcumaLogger::success_fmt("Optimized structure written to: {}", output_file);
-            // Process -bak files
-            std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
-            BMTUtils::processBakFiles(bmt_dir, bak_files);
-            return 0;
+        if (molecules.size() == 1) {
+            // Single-structure path: preserve exact existing behavior
+            auto result = Optimization::OptimizationDispatcher::optimizeStructure(
+                &molecules[0], opt_type, &energy_calc, opt_config);
+
+            if (result.success) {
+                molecules[0].writeXYZFile(output_file);
+                CurcumaLogger::success_fmt("Optimized structure written to: {}", output_file);
+                // Process -bak files
+                std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
+                BMTUtils::processBakFiles(bmt_dir, bak_files);
+                return 0;
+            } else {
+                CurcumaLogger::warn_fmt("{} optimizer failed: {}", optimizer_method, result.error_message);
+            }
         } else {
-            CurcumaLogger::warn_fmt("{} optimizer failed: {}", optimizer_method, result.error_message);
-            CurcumaLogger::info("Falling back to legacy CurcumaOpt optimizer");
+            // Multi-structure path: optimise each frame and collect final geometries.
+            // Non-converged optimisations still produce a final geometry and are written
+            // out, matching the legacy CurcumaOpt behaviour for multi-XYZ inputs.
+            int opt_threads = controller.value("threads", 1);
+            CurcumaLogger::info_fmt("Optimising {} structures from input file (threads={})",
+                molecules.size(), opt_threads);
+            auto results = Optimization::OptimizationDispatcher::optimizeBatch(
+                molecules, opt_type, &energy_calc, opt_config, opt_threads, energy_controller);
+
+            int written = 0;
+            int failed = 0;
+            { std::ofstream clear_file(output_file); } // truncate output file once
+            for (size_t i = 0; i < results.size(); ++i) {
+                if (results[i].final_molecule.AtomCount() > 0) {
+                    results[i].final_molecule.appendXYZFile(output_file);
+                    ++written;
+                } else {
+                    CurcumaLogger::warn_fmt("Structure {} optimisation failed: {}",
+                        i + 1, results[i].error_message);
+                    ++failed;
+                }
+            }
+
+            if (written > 0) {
+                CurcumaLogger::success_fmt("{} optimized structures written to: {}", written, output_file);
+                // Process -bak files
+                std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
+                BMTUtils::processBakFiles(bmt_dir, bak_files);
+                return 0;
+            } else {
+                CurcumaLogger::error("All structure optimisations failed");
+            }
         }
     } catch (const std::exception& e) {
         CurcumaLogger::warn_fmt("{} optimizer threw exception: {}", optimizer_method, e.what());
-        CurcumaLogger::info("Falling back to legacy CurcumaOpt optimizer");
     }
 
-    // No legacy fallback — all optimization goes through OptimizerFactory
     return 1;
 }
 
@@ -1764,9 +1913,28 @@ int executeConfScan(const json& controller, int argc, char** argv) {
     scan_controller["geometry_file"] = std::string(argv[2]);
 
     auto* scan = new ConfScan(scan_controller, false);  // Claude Generated: Explicit false for default verbosity level 1
+    // initializeBMT calls setFile(), which in ConfScan's override also calls openFile() to
+    // load the ensemble. No separate setFileName() call needed — that would call openFile()
+    // a second time, causing ripser to crash on the already-consumed state.
     initializeBMT(scan, argv[2], "confscan", controller);
+    // Copy the primary results back to the CWD so a plain `curcuma -confscan file.xyz`
+    // run is never silent (the rest stays in the BMT output directory).
+    scan->addBakFile(scan->Basename() + ".accepted.xyz");
+    scan->addBakFile(scan->Basename() + ".rejected.xyz");
+    // Claude Generated (June 2026): Capture the user's verbosity before the scan; the RMSD
+    // machinery lowers the global logger level to 0 mid-scan and leaves it there.
+    int announce_verbosity = CurcumaLogger::get_verbosity();
     scan->start();
     scan->processBakFiles();
+    // Tell the user where the output went. createBMTDir only logs the directory at verbosity
+    // >= 2; surface it (and the files copied back to the CWD) at the default verbosity 1 so a
+    // plain run is never silent about its results.
+    if (announce_verbosity >= 1 && !scan->OutputDir().empty()) {
+        CurcumaLogger::set_verbosity(announce_verbosity);
+        CurcumaLogger::success_fmt("ConfScan output written to: {}", scan->OutputDir());
+        CurcumaLogger::result_fmt("Copied to current directory: {}.accepted.xyz, {}.rejected.xyz",
+            scan->Basename(), scan->Basename());
+    }
     int accepted = scan->AcceptedCount();
     int reorder_success = scan->ReorderSuccessfull();
     int reuse_count = scan->ReuseCount();
@@ -1916,6 +2084,251 @@ int executeRMSDTraj(const json& controller, int argc, char** argv) {
     return 0;
 }
 
+int executePolymerBuild(const json& controller, int argc, char** argv)
+{
+    if (argc < 2) {
+        std::cerr << "Please use curcuma for polymer build as follows:\ncurcuma -polymerbuild -sequence \"(A)10-B\" -fragments '{\"A\": \"a.xyz\", \"B\": \"b.xyz\"}'" << std::endl;
+        PolymerBuild help(json::object(), true);
+        help.printHelp();
+        return 0;
+    }
+
+    PolymerBuild builder(controller, false);
+    initializeBMT(&builder, "polymer", "polymerbuild", controller);
+    builder.start();
+    builder.processBakFiles();
+    return 0;
+}
+
+// ============================================================================
+// Interaction (association) energy capability: -interaction  — Claude Generated 2026
+// ----------------------------------------------------------------------------
+// dE_int = E(AB) - E(A) - E(B), computed with any curcuma energy method.
+// Built for the S30L host-guest benchmark (Sure & Grimme, J. Chem. Theory
+// Comput. 2015, 11, 3785; doi:10.1021/acs.jctc.5b00296): each complex is a
+// directory with A/ B/ AB/ subfolders holding Turbomole `coord` files (atomic
+// units, read via Coord2Mol -> Bohr converted to Angstrom) and an optional
+// `.CHRG` integer-charge file.
+//
+//   curcuma -interaction <s30l_root> [-reference reference_s30l]  batch dirs 1..N
+//   curcuma -interaction <complex_dir>                            single A/B/AB dir
+//   curcuma -interaction AB.xyz -fragA A.xyz -fragB B.xyz         explicit fragments
+//   curcuma -interaction AB.xyz                                   auto-split 2 fragments
+// ============================================================================
+namespace InteractionEnergy {
+
+// Read an integer charge from <dir>/.CHRG (S30L convention, e.g. "+2"); 0 if absent.
+inline int readCharge(const std::string& dir)
+{
+    std::filesystem::path p = std::filesystem::path(dir) / ".CHRG";
+    if (!std::filesystem::exists(p))
+        return 0;
+    std::ifstream in(p.string());
+    int q = 0;
+    in >> q;
+    return q;
+}
+
+// Locate the coordinate file in a fragment directory: prefer Turbomole `coord`,
+// else the first .xyz found.
+inline std::string structureFile(const std::string& dir)
+{
+    std::filesystem::path coord = std::filesystem::path(dir) / "coord";
+    if (std::filesystem::exists(coord))
+        return coord.string();
+    for (const auto& e : std::filesystem::directory_iterator(dir)) {
+        const std::string s = e.path().string();
+        if (s.find(".xyz") != std::string::npos)
+            return s;
+    }
+    return "";
+}
+
+// Single-point energy [Hartree] for one structure file at a given total charge.
+inline double pointEnergy(const std::string& method, const json& controller,
+    const std::string& file, int charge)
+{
+    Molecule mol(file);
+    mol.setCharge(charge);
+    EnergyCalculator calc(method, controller);
+    calc.setMolecule(mol.getMolInfo());
+    return calc.CalculateEnergy(false);
+}
+
+// dE_int [Hartree] from three fragment directories (each: coord/xyz + optional .CHRG).
+inline bool fromDirs(const std::string& method, const json& controller,
+    const std::string& aDir, const std::string& bDir, const std::string& abDir, double& dE)
+{
+    const std::string fa = structureFile(aDir), fb = structureFile(bDir), fab = structureFile(abDir);
+    if (fa.empty() || fb.empty() || fab.empty())
+        return false;
+    const double eA = pointEnergy(method, controller, fa, readCharge(aDir));
+    const double eB = pointEnergy(method, controller, fb, readCharge(bDir));
+    const double eAB = pointEnergy(method, controller, fab, readCharge(abDir));
+    dE = eAB - eA - eB;
+    return true;
+}
+
+inline bool hasABDirs(const std::string& d)
+{
+    namespace fs = std::filesystem;
+    return fs::is_directory(fs::path(d) / "A") && fs::is_directory(fs::path(d) / "B")
+        && fs::is_directory(fs::path(d) / "AB");
+}
+
+inline bool isNumeric(const std::string& s)
+{
+    return !s.empty() && s.find_first_not_of("0123456789") == std::string::npos;
+}
+
+} // namespace InteractionEnergy
+
+int executeInteraction(const json& controller, int argc, char** argv)
+{
+    using namespace InteractionEnergy;
+    namespace fs = std::filesystem;
+
+    if (argc < 3) {
+        std::cerr << "Interaction (association) energy:  dE = E(AB) - E(A) - E(B)\n"
+                  << "Usage:\n"
+                  << "  curcuma -interaction <s30l_root> [-reference reference_s30l]   batch over dirs 1..N\n"
+                  << "  curcuma -interaction <complex_dir>                             single A/B/AB directory\n"
+                  << "  curcuma -interaction AB.xyz -fragA A.xyz -fragB B.xyz          explicit fragment files\n"
+                  << "  curcuma -interaction AB.xyz                                    auto-split into 2 fragments\n";
+        return 1;
+    }
+
+    const std::string method = controller.value("method", "gfnff");
+    const double H2KCAL = CurcumaUnit::Energy::HARTREE_TO_KCALMOL;
+
+    std::string fragA, fragB, reference;
+    for (int i = 3; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "-fragA" && i + 1 < argc)
+            fragA = argv[++i];
+        else if (a == "-fragB" && i + 1 < argc)
+            fragB = argv[++i];
+        else if (a == "-reference" && i + 1 < argc)
+            reference = argv[++i];
+    }
+
+    const std::string input = argv[2];
+
+    // ---- Mode A: explicit fragment files (AB given as argv[2]) ----
+    if (!fragA.empty() && !fragB.empty()) {
+        const double eAB = pointEnergy(method, controller, input, 0);
+        const double eA = pointEnergy(method, controller, fragA, 0);
+        const double eB = pointEnergy(method, controller, fragB, 0);
+        const double dE = eAB - eA - eB;
+        fmt::print("\nMethod: {}\n", method);
+        fmt::print("E(AB) = {:>16.8f} Eh\nE(A)  = {:>16.8f} Eh\nE(B)  = {:>16.8f} Eh\n", eAB, eA, eB);
+        fmt::print("dE_int = {:.8f} Eh = {:.4f} kcal/mol\n", dE, dE * H2KCAL);
+        return 0;
+    }
+
+    if (fs::is_directory(input)) {
+        // ---- Mode B: single complex directory (has A/ B/ AB/) ----
+        if (hasABDirs(input)) {
+            double dE = 0.0;
+            if (!fromDirs(method, controller, (fs::path(input) / "A").string(),
+                    (fs::path(input) / "B").string(), (fs::path(input) / "AB").string(), dE)) {
+                std::cerr << "Could not read A/B/AB structures in " << input << std::endl;
+                return 1;
+            }
+            fmt::print("\nMethod: {}\nComplex: {}\n", method, input);
+            fmt::print("dE_int = {:.8f} Eh = {:.4f} kcal/mol\n", dE, dE * H2KCAL);
+            return 0;
+        }
+
+        // ---- Mode C: batch root (numbered subdirs, each with A/B/AB) ----
+        if (reference.empty()) {
+            fs::path defref = fs::path(input) / "reference_s30l";
+            if (fs::exists(defref))
+                reference = defref.string();
+        }
+        std::vector<double> refvals;
+        if (!reference.empty()) {
+            std::ifstream rin(reference);
+            double v;
+            while (rin >> v)
+                refvals.push_back(v);
+        }
+
+        std::vector<std::pair<int, std::string>> complexes;
+        for (const auto& e : fs::directory_iterator(input)) {
+            if (!e.is_directory())
+                continue;
+            const std::string name = e.path().filename().string();
+            if (!isNumeric(name) || !hasABDirs(e.path().string()))
+                continue;
+            complexes.emplace_back(std::stoi(name), e.path().string());
+        }
+        std::sort(complexes.begin(), complexes.end());
+        if (complexes.empty()) {
+            std::cerr << "No numbered A/B/AB complex directories found under " << input << std::endl;
+            return 1;
+        }
+
+        CurcumaLogger::set_verbosity(0); // quiet per-structure setup; print only the table
+        fmt::print("\nS30L-style interaction energies   method = {}\n", method);
+        fmt::print("{:>4}  {:>14}  {:>14}  {:>12}\n", "idx", "dE [kcal/mol]", "ref [kcal/mol]", "error");
+        fmt::print("------------------------------------------------------------\n");
+
+        double sum_abs = 0.0, sum_sq = 0.0;
+        int n_ref = 0;
+        for (const auto& [idx, dir] : complexes) {
+            double dE = 0.0;
+            if (!fromDirs(method, controller, (fs::path(dir) / "A").string(),
+                    (fs::path(dir) / "B").string(), (fs::path(dir) / "AB").string(), dE)) {
+                fmt::print("{:>4}  read failed\n", idx);
+                continue;
+            }
+            const double dE_kcal = dE * H2KCAL;
+            if (idx - 1 < static_cast<int>(refvals.size())) {
+                const double ref = refvals[idx - 1];
+                const double err = dE_kcal - ref;
+                sum_abs += std::abs(err);
+                sum_sq += err * err;
+                ++n_ref;
+                fmt::print("{:>4}  {:>14.4f}  {:>14.4f}  {:>12.4f}\n", idx, dE_kcal, ref, err);
+            } else {
+                fmt::print("{:>4}  {:>14.4f}  {:>14}  {:>12}\n", idx, dE_kcal, "-", "-");
+            }
+        }
+        if (n_ref > 0) {
+            fmt::print("------------------------------------------------------------\n");
+            fmt::print("MAD  = {:.4f} kcal/mol   RMSD = {:.4f} kcal/mol   (N={})\n",
+                sum_abs / n_ref, std::sqrt(sum_sq / n_ref), n_ref);
+        }
+        return 0;
+    }
+
+    // ---- Mode D: single AB file, auto-split into exactly two fragments ----
+    Molecule ab(input);
+    auto frags = ab.GetFragments();
+    if (frags.size() != 2) {
+        std::cerr << "Auto-split needs exactly 2 fragments, found " << frags.size()
+                  << ". Use -fragA/-fragB to specify them explicitly." << std::endl;
+        return 1;
+    }
+    Molecule a = ab.getFragmentMolecule(frags[0]);
+    Molecule b = ab.getFragmentMolecule(frags[1]);
+    EnergyCalculator cAB(method, controller);
+    cAB.setMolecule(ab.getMolInfo());
+    EnergyCalculator cA(method, controller);
+    cA.setMolecule(a.getMolInfo());
+    EnergyCalculator cB(method, controller);
+    cB.setMolecule(b.getMolInfo());
+    const double eAB = cAB.CalculateEnergy(false);
+    const double eA = cA.CalculateEnergy(false);
+    const double eB = cB.CalculateEnergy(false);
+    const double dE = eAB - eA - eB;
+    fmt::print("\nMethod: {}\nFragments: {} + {} atoms\n", method, static_cast<int>(frags[0].size()),
+        static_cast<int>(frags[1].size()));
+    fmt::print("dE_int = {:.8f} Eh = {:.4f} kcal/mol\n", dE, dE * H2KCAL);
+    return 0;
+}
+
 // Capability registry - Claude Generated
 const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
     {"analysis", {"Unified molecular analysis (all formats, all properties)", "analysis",
@@ -1924,6 +2337,8 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
               {"XYZ", "VTF", "MOL2", "SDF"}, executeRMSD}},
     {"sp", {"Single point energy calculation", "calculation",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSinglePoint}},
+    {"interaction", {"Supramolecular interaction energy E(AB)-E(A)-E(B), incl. S30L batch", "calculation",
+            {"XYZ", "coord", "DIR"}, executeInteraction}},
     {"opt", {"Geometry optimization with various algorithms", "optimization",
              {"XYZ", "VTF", "MOL2", "SDF"}, executeOptimization}},
     {"confscan", {"Conformational scanning along reaction coordinates", "conformational",
@@ -1932,6 +2347,8 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ", "MOL2", "SDF"}, executeConfStat}},
     {"dock", {"Molecular docking calculations", "docking",
               {"XYZ", "MOL2", "SDF"}, executeDocking}},
+    {"polymerbuild", {"Iterative polymer assembly from fragments", "assembly",
+                  {"XYZ"}, executePolymerBuild}},
     {"md", {"Molecular dynamics simulation", "dynamics",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSimpleMD}},
     {"casino", {"Casino Monte Carlo simulation with enhanced sampling", "dynamics",
@@ -2450,6 +2867,17 @@ int main(int argc, char **argv) {
         outfile.close();
 
         std::cout << "Exported current run configuration to: " << export_file << std::endl;
+    }
+
+    // Claude Generated (June 2026): Global progress-bar switch. Disabled when -noprogress is
+    // given or when stdout is not a TTY, so redirected output / tests carry no carriage-return
+    // noise. Set once here, before dispatch, for every command.
+    {
+        bool show_progress = !controller.value("noprogress", false);
+#ifndef _WIN32
+        show_progress = show_progress && isatty(fileno(stdout));
+#endif
+        CurcumaLogger::set_progress_enabled(show_progress);
     }
 
     // Try structured dispatch first - Claude Generated

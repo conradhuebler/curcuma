@@ -1,0 +1,41 @@
+#version 450
+// Householder tridiagonalization, step k: build the reflector for column k entirely on the
+// GPU (EIG-1 — kills the per-step host sync). ONE workgroup: a shared-memory tree reduces
+// ‖x‖² over the m trailing entries of column k while copying x into V[:,k], then lane 0
+// derives v (in place), β, diag[k], off[k]=α. The host stays out of the per-column loop.
+// scal layout: [0,n)=diag, [n,2n)=off (subdiagonal α), [2n,3n)=β. Column-major n×n:
+// A[r + c·n]. Mirrors the host closed form in solveSymTridiag. Claude Generated (EIG-1).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Ab { float A[]; };
+layout(std430, binding = 1)          buffer Vb { float V[]; };     // writes Householder vec col k
+layout(std430, binding = 2)          buffer Sb { float scal[]; };  // diag / off / beta
+layout(push_constant) uniform PC { uint n; uint k; uint m; } pc;
+
+shared float red[256];
+
+void main()
+{
+    uint n = pc.n, k = pc.k, m = pc.m, base = k + 1u, col = k * n;
+    uint lane = gl_LocalInvocationID.x;
+    // Reduce ‖x‖² over the m subdiagonal entries of column k AND copy x → V[:,k].
+    float s = 0.0;
+    for (uint i = lane; i < m; i += 256u) { float xi = A[(base + i) + col]; V[col + i] = xi; s += xi * xi; }
+    red[lane] = s; barrier();
+    for (uint t = 128u; t > 0u; t >>= 1u) { if (lane < t) red[lane] += red[lane + t]; barrier(); }
+    if (lane == 0u) {
+        float xnorm2 = red[0];
+        float x0 = V[col + 0u];                       // lane 0 wrote this (i=0) above
+        float xnorm = sqrt(xnorm2);
+        scal[k] = A[k + col];                          // diag[k] = A[k,k]
+        if (xnorm == 0.0) {                          // H_k = I (degenerate column)
+            scal[n + k] = 0.0; scal[2u * n + k] = 0.0;
+        } else {
+            float alpha = (x0 >= 0.0) ? -xnorm : xnorm;
+            scal[n + k] = alpha;                       // off[k] = α (subdiagonal)
+            float v0 = x0 - alpha;
+            V[col + 0u] = v0;
+            float vtv = xnorm2 - x0 * x0 + v0 * v0;
+            scal[2u * n + k] = (vtv > 0.0) ? 2.0 / vtv : 0.0;   // β
+        }
+    }
+}

@@ -131,6 +131,7 @@ OptimizationResult OptimizationResult::success_result(const Molecule& final_mol,
     result.success = true;
     result.final_molecule = final_mol;
     result.final_molecule.setEnergy(energy);
+    result.final_energy = energy;
     result.iterations_performed = iterations;
     result.optimization_time_seconds = time_s;
     return result;

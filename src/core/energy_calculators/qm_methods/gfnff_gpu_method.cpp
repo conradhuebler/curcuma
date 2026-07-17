@@ -99,6 +99,16 @@ bool GFNFFGPUComputationalMethod::setMolecule(const Mol& mol)
 
     auto t_init_start = std::chrono::high_resolution_clock::now();
 
+    // WP-A (Jun 2026): if the GPU builds the D4 pair list on device, tell the host
+    // generator to skip its O(N^2) pair loop (keep only CN + gw the device reuses).
+    // Must be set before InitialiseMolecule triggers host parameter generation.
+    {
+        bool disp_dev = m_parameters.value("gpu_disp_pairs_on_device", false);
+        if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+            disp_dev = disp_dev || m_parameters["gfnff"].value("gpu_disp_pairs_on_device", false);
+        m_gfnff->setSkipHostDispPairs(disp_dev);
+    }
+
     // CPU topology + parameter generation (same as CPU gfnff)
     if (!m_gfnff->InitialiseMolecule(mol)) {
         m_has_error = true;
@@ -216,18 +226,78 @@ bool GFNFFGPUComputationalMethod::initGPUWorkspace()
         if (gfnff_cfg.contains("gpu_block_size"))
             m_gpu_workspace->setBlockSize(gfnff_cfg.value("gpu_block_size", 0));
 
+        // Task #10 (Jun 2026): CN-derivative pair-list regen + cutoff knobs.
+        // Prefer the nested gfnff-scoped value, fall back to top-level m_parameters.
+        auto cfg_get_bool = [&](const char* k, bool d) {
+            if (gfnff_cfg.contains(k)) return gfnff_cfg.value(k, d);
+            return m_parameters.value(k, d);
+        };
+        auto cfg_get_int = [&](const char* k, int d) {
+            if (gfnff_cfg.contains(k)) return gfnff_cfg.value(k, d);
+            return m_parameters.value(k, d);
+        };
+        auto cfg_get_dbl = [&](const char* k, double d) {
+            if (gfnff_cfg.contains(k)) return gfnff_cfg.value(k, d);
+            return m_parameters.value(k, d);
+        };
+        m_cn_pair_regen         = cfg_get_bool("gpu_cn_pair_regen", true);
+        m_cn_pair_regen_every   = cfg_get_int("gpu_cn_pair_regen_every", 0);
+        m_cn_pair_cutoff_factor = cfg_get_dbl("gpu_cn_pair_cutoff_factor", 2.5);
+        m_gpu_workspace->setCNPairCutoffFactor(m_cn_pair_cutoff_factor);
+
         // Phase 2: Upload C6 reference table for GPU dc6dcn per-pair computation
         D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
         if (d4 && !d4->getC6FlatCache().empty()) {
             m_gpu_workspace->uploadC6ReferenceTable(d4->getC6FlatCache(), d4->getRefN());
             // Phase 6: Upload reference CN values for GPU Gaussian weight kernel
             m_gpu_workspace->uploadRefCN(d4->getRefCN());
+
+            // WP-A (Jun 2026): opt-in on-device D4 dispersion pair-list build. Replaces
+            // the host GenerateDispersionPairsNative O(N^2) loop + the per-build H2D
+            // upload of the pair arrays (the host-uploaded SoA from the ctor is
+            // overwritten here). Needs CN + gw on the device first. Default OFF: the
+            // proven host build stays the reference. See docs/GFNFF_PERFORMANCE_LEVERS.md.
+            if (cfg_get_bool("gpu_disp_pairs_on_device", false)) {
+                const int Nd = static_cast<int>(m_atom_types.size());
+                // Host Gaussian weights (same as getChargeWeightedC6 uses) -> flat [N*MAX_REF].
+                const auto& hgw = d4->getGaussianWeights();
+                std::vector<double> gw_flat(static_cast<size_t>(Nd) * D4ParameterGenerator::MAX_REF, 0.0);
+                for (int a = 0; a < Nd && a < static_cast<int>(hgw.size()); ++a) {
+                    int nref = std::min<int>(static_cast<int>(hgw[a].size()), D4ParameterGenerator::MAX_REF);
+                    for (int r = 0; r < nref; ++r) gw_flat[static_cast<size_t>(a) * D4ParameterGenerator::MAX_REF + r] = hgw[a][r];
+                }
+                std::vector<double> sqrtzr4r2(118, 0.0);
+                for (int z = 1; z <= 118; ++z) sqrtzr4r2[z - 1] = d4->getSqrtZr4r2(z);
+                const Vector& tc = m_gfnff->getTopologyInfo().topology_charges;
+                std::vector<double> topo_q(tc.data(), tc.data() + tc.size());
+                // GFN-FF D4: a1=0.58, a2=4.80, 60 Bohr cutoff (matches the host generator).
+                m_gpu_workspace->generateDispersionPairListOnGPU(gw_flat, sqrtzr4r2, topo_q, 0.58, 4.80, 60.0);
+                if (CurcumaLogger::get_verbosity() >= 1)
+                    CurcumaLogger::info("GFN-FF GPU: D4 dispersion pair list built on device (gpu_disp_pairs_on_device)");
+            }
         }
 
         // Claude Generated (March 2026): GPU EEQ solver (cuSOLVER Cholesky)
         // EEQ staging buffers pre-allocated above (before CUDA init). Create solver here.
         // Lazy refactorization is RMSD-based: force_refactor flag passed per solve() call.
         m_eeq_gpu = std::make_unique<EEQSolverGPU>(natoms);
+
+        // WP-B (Jun 2026): FP32-factor + FP64 iterative-refinement EEQ solve. Opt-in on
+        // CUDA (default off until per-card tuned, mirroring the xTB scf_mixed_precision
+        // X-AP3 default-off-on-CUDA policy). Reads gfnff.eeq_mixed_precision, falling back
+        // to the global scf_mixed_precision intent; refine steps via
+        // eeq_mixed_precision_iters (default 2, min 1). Targets the factor-dominated
+        // few-fragment paths; the nfrag>1 general path stays FP64 (see eeq_solver_gpu.cu).
+        {
+            bool mp = cfg_get_bool("eeq_mixed_precision",
+                                   cfg_get_bool("scf_mixed_precision", false));
+            int  mp_iters = cfg_get_int("eeq_mixed_precision_iters", 2);
+            m_eeq_gpu->setMixedPrecision(mp, mp_iters);
+            if (mp && CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::info(fmt::format(
+                    "GFN-FF GPU EEQ: FP32 factor + FP64 iterative refinement ({} step(s))",
+                    (mp_iters < 1 ? 1 : mp_iters)));
+        }
 
         // WP2: Upload topology-constant EEQ parameters to GPU.
         // cn=Zero because chi_corrected_static and cnf are CN-independent.
@@ -347,6 +417,11 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
         if (needs_topo_update) {
             // Reference geometry updated after topology recalculation (triggered inside prepareCNAndEEQ)
             // — updateReferenceGeometry() called below after prepareCNAndEEQ.
+            // Task #10 (Jun 2026): the CN-derivative pair list is built from the current
+            // geometry; when atoms have moved past the displacement threshold it is stale,
+            // so drop the latch to force a rebuild in the gradient block below.
+            if (m_cn_pair_regen)
+                m_cn_pairs_generated = false;
         }
     }
 
@@ -368,6 +443,12 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // G-P1: dlogdcn is already on GPU from k_dlogdcn; setDlogDCN() removed (redundant).
     // d_dlogdcn is used directly by k_cn_chainrule via the main stream ordering.
     if (gradient) {
+        // Task #10 (Jun 2026): optional periodic forced regen as an MD safety net for
+        // slow drift that never trips the 0.5 Bohr displacement check above.
+        if (m_cn_pair_regen_every > 0 && (m_cn_pair_grad_steps % m_cn_pair_regen_every == 0))
+            m_cn_pairs_generated = false;
+        ++m_cn_pair_grad_steps;
+
         if (!m_cn_pairs_generated) {
             m_gpu_workspace->generateCNPairListOnGPU();
             m_cn_pairs_generated = true;
@@ -971,6 +1052,13 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // === Finish: Coulomb + postprocess + download ===
     // Note: setEEQCharges / setEEQDeviceCharges already called above per path.
     m_last_energy = m_gpu_workspace->launchChargeDependentAndFinish(gradient);
+
+    // Claude Generated (June 2026): OPT-IN device-resident HB charges (default OFF).
+    // The reference (Fortran) and CPU both freeze the H-bond charges at topology build,
+    // so the GPU's frozen HB charges already match; refreshing to live charges makes MD
+    // diverge (verified). No-op unless CURCUMA_GFNFF_GPU_RESIDENT_HBQ=1. See
+    // FFWorkspaceGPU::refreshHBChargesFromDevice().
+    m_gpu_workspace->refreshHBChargesFromDevice();
     auto t4 = std::chrono::high_resolution_clock::now();
 
     ++m_calc_count;
@@ -1254,7 +1342,8 @@ void GFNFFGPUComputationalMethod::generateCNPairList(const Matrix& geom_bohr)
     constexpr double rcov_scale = 4.0 / 3.0;
 
     // Cutoff: where exp(-kn^2 * dr^2) < 1e-12 (kn=-7.5) → |dr| > 1.2 → r > 2.2 * rcov_sum
-    constexpr double cutoff_factor = 2.5;
+    // Task #10 (Jun 2026): tunable; mirrors the GPU pair-list factor for CPU-fallback parity.
+    const double cutoff_factor = m_cn_pair_cutoff_factor;
 
     m_cn_pair_i.clear();
     m_cn_pair_j.clear();

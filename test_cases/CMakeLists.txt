@@ -123,6 +123,15 @@ if(USE_PCH)
         target_precompile_headers(test_gfnff_validation REUSE_FROM curcuma_core)
 endif()
 
+# Claude Generated (June 2026): per-frame CPU-vs-GPU gradient diagnostic on a fixed
+# trajectory — the clean force-backend metric (replaces the misleading MD heat-exchange).
+# Builds unconditionally; the gpu config falls back to CPU when CUDA is not compiled in.
+add_executable(test_gfnff_grad_traj test_gfnff_grad_traj.cpp)
+target_link_libraries(test_gfnff_grad_traj curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_grad_traj REUSE_FROM curcuma_core)
+endif()
+
 # Copy reference data to build tree so tests can find them
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
@@ -212,9 +221,42 @@ endif()
 add_test(NAME test_eeq_two_phase
          COMMAND test_eeq_two_phase)
 
+# Claude Generated: PolymerBuild sequence parser tests (prime notation)
+add_executable(test_polymerbuild_sequence
+        test_polymerbuild_sequence.cpp)
+
+target_link_libraries(test_polymerbuild_sequence curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_polymerbuild_sequence REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_polymerbuild_sequence
+         COMMAND test_polymerbuild_sequence)
+
+# Claude Generated: PolymerBuild structural tests (Xx selection, geometry comparison)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/polymerbuild/fragment_2xx.xyz
+     DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/polymerbuild)
+
+add_executable(test_polymerbuild_structure
+        test_polymerbuild_structure.cpp)
+
+target_link_libraries(test_polymerbuild_structure curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_polymerbuild_structure REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_polymerbuild_structure
+         COMMAND test_polymerbuild_structure
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(test_polymerbuild_structure PROPERTIES TIMEOUT 120)
+
 # Claude Generated (April 2026): CPU GFN-FF analytical vs numerical gradient test
-# Tests gradient correctness for all built-in molecules (H2O, CH4, CH3OH, CH3OCH3)
-# Use --fixed-charges flag to isolate formula bugs from missing dq/dx terms
+# Tests gradient correctness for all built-in molecules (H2O, CH4, CH3OH, CH3OCH3).
+# gfnff_numgrad_builtin compares the analytical Gradient() against the FULL finite
+# difference (NumGrad, EEQ + CN recomputed each step) — the physically meaningful
+# total derivative an optimiser/MD consumes.
 add_executable(test_gfnff_numgrad test_gfnff_numgrad.cpp)
 target_link_libraries(test_gfnff_numgrad curcuma_core test_molecule_registry)
 
@@ -228,11 +270,41 @@ add_test(NAME gfnff_numgrad_builtin
 set_tests_properties(gfnff_numgrad_builtin
     PROPERTIES TIMEOUT 120 LABELS "gfnff;gradient;cpu")
 
-add_test(NAME gfnff_numgrad_fixed_charges
-         COMMAND test_gfnff_numgrad --fixed-charges
+# NOTE (Claude Generated, June 2026): the former gfnff_numgrad_fixed_charges ctest was
+# removed. It compared the analytical gradient against the FIXED-charge finite difference
+# (--fixed-charges, EEQ frozen) on the premise that the analytical gradient was a
+# frozen-charge approximation (no dq/dx). That premise is obsolete: since the Feb-2026
+# Coulomb Term-1b / dynamic-charge gradient work the analytical Gradient() is the TOTAL
+# derivative (it includes the charge response), so it correctly disagrees with the
+# fixed-charge partial derivative — for polar molecules the charge-response term is large
+# and opposes the partial geometry term (H2O: total -1.2e-2 vs partial +2.9e-2 Eh/Bohr).
+# The full-EEQ gfnff_numgrad_builtin validates the gradient; the --fixed-charges flag is
+# retained on the binary for manual formula diagnostics only (not a pass/fail gate).
+
+# Claude Generated (WP5, June 2026): GFN-FF self-consistent ALPB solvation gradient.
+# Analytical Gradient() vs NumGrad() (full FD incl. solvated EEQ re-solve) in water.
+# Same 5e-3 Eh/Bohr full-EEQ tolerance as the gas-phase test (the reference gfnff
+# gradient is itself frozen-charge — see docs/SQM_SOLVATION_WP.md WP5/S5).
+add_test(NAME gfnff_numgrad_alpb_water
+         COMMAND test_gfnff_numgrad --solvent water
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-set_tests_properties(gfnff_numgrad_fixed_charges
-    PROPERTIES TIMEOUT 120 LABELS "gfnff;gradient;cpu")
+set_tests_properties(gfnff_numgrad_alpb_water
+    PROPERTIES TIMEOUT 180 LABELS "gfnff;gradient;solvation;cpu")
+
+# Claude Generated (June 2026): native GFN1/GFN2 ALPB-solvation gradient test.
+# Analytical XTB::Gradient() vs central finite difference of the total energy,
+# GFN1 (CM5) + GFN2 (Mulliken) in water. See docs/SQM_SOLVATION_WP.md (WP1.4).
+add_executable(test_xtb_solvation_numgrad test_xtb_solvation_numgrad.cpp)
+target_link_libraries(test_xtb_solvation_numgrad curcuma_core test_molecule_registry)
+target_include_directories(test_xtb_solvation_numgrad PRIVATE ${CMAKE_SOURCE_DIR})
+if(USE_PCH)
+    target_precompile_headers(test_xtb_solvation_numgrad REUSE_FROM curcuma_core)
+endif()
+add_test(NAME xtb_solvation_numgrad
+         COMMAND test_xtb_solvation_numgrad
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(xtb_solvation_numgrad
+    PROPERTIES TIMEOUT 180 LABELS "sqm;solvation;gradient;cpu")
 
 # Claude Generated (March 2026): GPU GFN-FF Validation Test (gfnff GPU vs CPU)
 # Only built and registered when USE_CUDA=ON

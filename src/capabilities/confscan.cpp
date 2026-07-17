@@ -102,9 +102,22 @@ int ConfScanThread::execute()
             m_break_pool = (m_earlybreak & 1) == 0;
             m_reused_worked = true;
             m_rmsd = tmp_rmsd;
+            m_reorder_rule = m_reorder_rules[i];
+
+            /* Opt-in: Rules2RMSD uses a stored rule on the pre-rotated target (after
+               BestFitRMSD), giving a valid upper bound for rejection but not the globally
+               optimal RMSD*. With refine_reuse=true a full search is run to obtain the
+               accurate value for logging and to update the stored rule. */
+            if (m_refine_reuse) {
+                m_driver->start();
+                double opt_rmsd = m_driver->RMSD();
+                if (opt_rmsd < tmp_rmsd) {
+                    m_rmsd = opt_rmsd;
+                    m_reorder_rule = m_driver->ReorderRules();
+                }
+            }
 
             m_input.rmsd = m_rmsd;
-            m_reorder_rule = m_reorder_rules[i];
             if (m_verbosity >= 1) {
                 if (m_earlybreak)
                     CurcumaLogger::success_fmt("Reuse: {} {} {:.6f} Early break", m_reference.Name(), m_target.Name(), m_rmsd);
@@ -226,6 +239,7 @@ void ConfScan::LoadControlJson()
     }
     m_maxrank = m_config.get<double>("rank");
     m_writeXYZ = m_config.get<bool>("write_xyz");
+    m_show_progress = m_config.get<bool>("progress");
     m_force_reorder = m_config.get<bool>("force_reorder");
     m_check_connections = m_config.get<bool>("check_connections");
     m_energy_cutoff = m_config.get<double>("max_energy");
@@ -234,8 +248,8 @@ void ConfScan::LoadControlJson()
     // sLX can be "default", "1.5", or "1.0,2.0,3.0"
     std::string slx = m_config.get<std::string>("slx");
     if (slx == "default") {
-        if (m_verbosity >= 2)
-            CurcumaLogger::info("Using default values for the steps");
+        if (m_verbosity >= 1)
+            CurcumaLogger::result("Using default values for the steps");
         m_sLE = { 1.0, 2.0 };
         m_sLI = { 1.0, 2.0 };
         m_sLH = { 1.0, 2.0 };
@@ -284,10 +298,10 @@ void ConfScan::LoadControlJson()
         exit(1);
     }
 
-    if (m_verbosity >= 2) {
-        CurcumaLogger::info("Using the following steps for the thresholds:");
+    if (m_verbosity >= 1) {
+        CurcumaLogger::result("Using the following steps for the thresholds:");
         for (std::size_t i = 0; i < m_sLE.size(); ++i) {
-            CurcumaLogger::info_fmt("sLE: {}, sLI: {}, sLH: {}",
+            CurcumaLogger::result_fmt("  sLE: {}, sLI: {}, sLH: {}",
                 to_string_with_precision(m_sLE[i]),
                 to_string_with_precision(m_sLI[i]),
                 to_string_with_precision(m_sLH[i]));
@@ -353,6 +367,7 @@ void ConfScan::LoadControlJson()
     m_looseThresh = m_config.get<int>("loose_thresh");
     m_tightThresh = m_config.get<int>("tight_thresh");
     m_earlybreak = m_config.get<int>("early_break");
+    m_refine_reuse = m_config.get<bool>("refine_reuse");
 
     // Early break flags logging
     if ((m_earlybreak & 1) == 0)
@@ -400,23 +415,23 @@ void ConfScan::LoadControlJson()
     m_prev_accepted = m_config.get<std::string>("accepted");
 
     // RMSD method logging
-    if (m_verbosity >= 2) {
-        CurcumaLogger::info_fmt("Permutation of atomic indices performed according to {}", m_RMSDmethod);
+    if (m_verbosity >= 1) {
+        CurcumaLogger::result_fmt("Permutation of atomic indices performed according to {}", m_RMSDmethod);
     }
 
     if (m_useorders == -1)
         m_useorders = 10;
 
-    if (m_verbosity >= 2) {
-        CurcumaLogger::info("Current Configuration:");
-        CurcumaLogger::param("Threads", m_threads);
-        CurcumaLogger::param("Molalign Tolerance", m_molaligntol);
-        CurcumaLogger::param("Force Reorder", m_force_reorder);
-        CurcumaLogger::param("Verbosity", m_verbosity);
-        CurcumaLogger::param("Write", m_write);
-        CurcumaLogger::param("Update Rotation", m_update_rotation);
-        CurcumaLogger::param("Split", m_split);
-        CurcumaLogger::param("Method", m_method);
+    if (m_verbosity >= 1) {
+        CurcumaLogger::result("Current Configuration:");
+        CurcumaLogger::result_fmt("  Threads:         {}", m_threads);
+        CurcumaLogger::result_fmt("  RMSD method:     {}", m_RMSDmethod);
+        CurcumaLogger::result_fmt("  Force Reorder:   {}", m_force_reorder);
+        CurcumaLogger::result_fmt("  Molalign Tol.:   {}", m_molaligntol);
+        CurcumaLogger::result_fmt("  Write files:     {}", m_write);
+        CurcumaLogger::result_fmt("  Update Rotation: {}", m_update_rotation);
+        CurcumaLogger::result_fmt("  Split:           {}", m_split);
+        CurcumaLogger::result_fmt("  Energy method:   {}", m_method);
     }
 }
 
@@ -434,6 +449,21 @@ bool ConfScan::openFile()
     int calcH = 0;
     int calcI = 0;
     // std::cout << m_looseThresh <<" "<<int((m_looseThresh & 1) == 1) << " " << int((m_looseThresh & 2) == 2) << std::endl;
+
+    // Claude Generated (June 2026): tell the user about the (potentially long) descriptor pass
+    // at verbosity 1 - it runs before the scan and was previously silent. Sync the global logger
+    // level (openFile runs outside start(), where the global level is not guaranteed synced).
+    if (m_verbosity >= 1) {
+        int old_verbosity = CurcumaLogger::get_verbosity();
+        CurcumaLogger::set_verbosity(m_verbosity);
+        std::string what = "energies";
+        if ((m_looseThresh & 1) == 1)
+            what += ", rotational constants";
+        if ((m_looseThresh & 2) == 2)
+            what += ", ripser topology";
+        CurcumaLogger::result_fmt("Reading ensemble and computing descriptors ({}) ...", what);
+        CurcumaLogger::set_verbosity(old_verbosity);
+    }
 
     if (m_verbosity >= 2) {
         CurcumaLogger::info("Calculation of descriptors:");
@@ -522,6 +552,15 @@ bool ConfScan::openFile()
     }
     m_timing_rot = calcI;
     m_timing_ripser = calcH;
+
+    // Claude Generated (June 2026): concise descriptor summary at verbosity 1 (sync global level).
+    if (m_verbosity >= 1) {
+        int old_verbosity = CurcumaLogger::get_verbosity();
+        CurcumaLogger::set_verbosity(m_verbosity);
+        CurcumaLogger::result_fmt("Read {} structures (descriptors: {:.2f} s)",
+            m_molecules.size(), (m_timing_rot + m_timing_ripser) / 1000.0);
+        CurcumaLogger::set_verbosity(old_verbosity);
+    }
 
     if (m_verbosity >= 2) {
         CurcumaLogger::info("Time for calculating descriptors:");
@@ -647,8 +686,10 @@ void ConfScan::SetUp()
     m_start = 0;
     m_end = m_ordered_list.size();
 
-    m_result_basename = Filename();
-    m_result_basename.erase(m_result_basename.end() - 4, m_result_basename.end());
+    // Claude Generated (June 2026): Use the path-stripped, extension-stripped basename instead
+    // of Filename() minus 4 chars. The old form kept a leading "./" (e.g. "./input.xyz" ->
+    // "./input") and assumed a 4-char extension, producing names like "<bmt>/./input.accepted.xyz".
+    m_result_basename = Basename();
 
     // Claude Generated 2026: Route all output files through BMT directory
     m_accepted_filename = outputPath(m_result_basename + ".accepted.xyz");
@@ -732,9 +773,9 @@ void ConfScan::AcceptMolecule(Molecule* molecule)
     if (m_writeFiles && !m_reduced_file && m_current_filename.length()) {
         molecule->appendXYZFile(m_current_filename);
     }
-    // Claude Generated: Show accept info for each structure at verbosity level 1+
-    if (m_verbosity >= 1) {
-        // Ensure logger verbosity matches local verbosity for this message
+    // Claude Generated: Per-structure accept detail at verbosity level 2+ (level 1 shows the
+    // progress bar + per-pass summary instead). Sync the global logger level for this message.
+    if (m_verbosity >= 2) {
         int old_verbosity = CurcumaLogger::get_verbosity();
         CurcumaLogger::set_verbosity(m_verbosity);
         CurcumaLogger::success_fmt("Accept {}", molecule->Name());
@@ -746,9 +787,9 @@ void ConfScan::RejectMolecule(Molecule* molecule)
 {
     m_rejected_structures.push_back(molecule);
     m_rejected++;
-    // Claude Generated: Show reject info for each structure at verbosity level 1+
-    if (m_verbosity >= 1) {
-        // Ensure logger verbosity matches local verbosity for this message
+    // Claude Generated: Per-structure reject detail at verbosity level 2+ (level 1 shows the
+    // progress bar + per-pass summary instead). Sync the global logger level for this message.
+    if (m_verbosity >= 2) {
         int old_verbosity = CurcumaLogger::get_verbosity();
         CurcumaLogger::set_verbosity(m_verbosity);
         CurcumaLogger::result_fmt("Reject {}", molecule->Name());  // Neutral result (not a warning)
@@ -777,26 +818,32 @@ void ConfScan::WriteDotFile(const std::string& filename, const std::string& cont
     std::ofstream result_file;
     result_file.open(filename);
     result_file << "digraph graphname \n {\n";
+    result_file << "graph [layout=dot];\n";
     result_file << content << std::endl;
     result_file << "}";
 }
 
 void ConfScan::start()
 {
-    // Level 1: Display input parameters nicely formatted - Claude Generated
-    if (m_verbosity >= 1) {
-        CurcumaLogger::header("Conformational Scanning");
+    // Claude Generated (June 2026): The configuration is printed at verbosity 1 in
+    // LoadControlJson (constructor), which runs BEFORE openFile()/descriptor computation - so the
+    // user sees the settings before the (potentially long) ripser/rotational-constant pass. The
+    // old param_comparison_table here printed AFTER that computation; removed in favour of the
+    // text block (user choice). The descriptor pass itself reports progress in openFile().
 
-        // Display parameter comparison table showing defaults vs current settings at level 1
-        // Claude Generated 2025: Use ConfigManager export for comparison table
-        CurcumaLogger::param_comparison_table(m_config.exportConfig(), m_controller, "ConfScan Configuration");
-    }
+    // Claude Generated (June 2026): Defensive backstop - openFile() loads the ensemble into
+    // m_molecules and is normally triggered by setFileName(). If a caller set the filename via
+    // setFile()/BMT only, m_molecules would be empty and the scan a silent no-op. Load here if
+    // needed (guarded so the setFileName() path, e.g. the C++ tests, does not double-load).
+    if (m_molecules.empty() && !Filename().empty())
+        openFile();
 
     SetUp();
     RunTimer timer(false);
     std::ofstream result_file;
 
     if (!m_skipinit) {
+        m_pass_label = "Initial Pass";
         logPass("Initial Pass: Performing RMSD calculation without reordering");
         m_current_filename = m_1st_filename;
         if (m_writeFiles && !m_reduced_file) {
@@ -805,7 +852,7 @@ void ConfScan::start()
             result_file.close();
         }
         CheckOnly(m_sLE[0], m_sLI[0], m_sLH[0]);
-        PrintStatus("Result initial pass:");
+        PrintPassSummary("Result of Initial Pass");
         if (m_analyse) {
             WriteDotFile(outputPath(m_result_basename + ".initial.dot"), m_first_content);
         }
@@ -892,6 +939,7 @@ void ConfScan::start()
             }
             if (!CheckStop()) {
                 timer.Reset();
+                m_pass_label = "Reorder Pass " + std::to_string(run + 1);
                 logPass("Reorder Pass: Performing RMSD calculation with reordering");
                 if (m_writeFiles && !m_reduced_file) {
                     result_file.open(m_statistic_filename, std::ios_base::app);
@@ -905,7 +953,7 @@ void ConfScan::start()
                                        << "# " << run << " run" << std::endl;
                 }
                 Reorder(dLE, dLI, dLH, false);
-                PrintStatus("Result Reorder pass:");
+                PrintPassSummary("Result of Reorder Pass");
 
                 logPass(fmt::format("Reorder Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0));
                 timer.Reset();
@@ -955,14 +1003,18 @@ void ConfScan::start()
         if (!CheckStop()) {
             timer.Reset();
             m_current_filename = m_3rd_filename;
+            m_pass_label = "Reuse Pass";
             if (m_reset)
                 logPass("Reuse Pass: Performing RMSD calculation with stored reorder rules using all structures");
             else
                 logPass("Reuse Pass: Performing RMSD calculation with stored reorder rules using previously accepted structures");
 
             if (m_writeFiles && !m_reduced_file) {
+                // Claude Generated (June 2026): write the pass header to the statistic file
+                // (matches the Initial/Reorder passes). The original called PrintStatus here by
+                // mistake, so statistic.log was missing the "Results of Reuse Pass" header.
                 result_file.open(m_statistic_filename, std::ios_base::app);
-                PrintStatus("Result Reuse pass:");
+                result_file << "Results of Reuse Pass" << std::endl;
                 result_file.close();
             }
             m_exclude_list.clear();
@@ -973,7 +1025,7 @@ void ConfScan::start()
                                    << "# reuse run" << std::endl;
             }
             Reorder(-1, -1, -1, true, m_reset);
-            PrintStatus("Result reuse pass:");
+            PrintPassSummary("Result of Reuse Pass");
 
             logPass(fmt::format("Reuse Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0));
             timer.Reset();
@@ -1051,6 +1103,7 @@ void ConfScan::start()
         std::ofstream dotfile;
         dotfile.open(outputPath(m_result_basename + ".dot"));
         dotfile << "digraph graphname \n {\n";
+        dotfile << "graph [layout=dot];\n";
         dotfile << m_collective_content;
         dotfile << "}";
     }
@@ -1090,7 +1143,7 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
         if (mol1->Check() == 1) {
             m_rejected++;
             m_start++;
-            PrintStatus();
+            updateProgress();
             continue;
         }
         if (m_result.size() == 0) {
@@ -1147,6 +1200,15 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
 
                 if (t->KeepMolecule() == false) {
                     keep_molecule = false;
+                    // Claude Generated (June 2026): at verbosity 3, report which reference structure
+                    // a rejection matched and the deciding RMSD (sync global - lowered mid-scan).
+                    if (m_verbosity >= 3) {
+                        int old_v = CurcumaLogger::get_verbosity();
+                        CurcumaLogger::set_verbosity(m_verbosity);
+                        CurcumaLogger::info_fmt("    {} rejected - matches {} (RMSD {:.4f} A, no reorder)",
+                            mol1->Name(), t->Reference()->Name(), t->RMSD());
+                        CurcumaLogger::set_verbosity(old_v);
+                    }
                     writeStatisticFile(t->Reference(), mol1, t->RMSD());
                     if (m_analyse) {
                         if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
@@ -1179,7 +1241,7 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
         if (!m_rmsd_set && min_rmsd < 1e3) {
             m_rmsd_threshold = std::max(min_rmsd, m_rmsd_threshold); // paper: maximal RMSD between structures
         }
-        PrintStatus();
+        updateProgress();
         m_all_structures.push_back(mol1);
     }
     p->clear();
@@ -1213,16 +1275,16 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
 
 void ConfScan::PrintSetUp(double dLE, double dLI, double dLH)
 {
-    // Claude Generated: Convert threshold display to new logging system
-    if (m_verbosity >= 2) {
-        CurcumaLogger::info("```");
-        CurcumaLogger::info("* Thresholds in Delta I (averaged over Ia, Ib and Ic):");
-        CurcumaLogger::info_fmt("  Loose Threshold: {:.2f} MHz \t Tight Threshold: {:.2f} MHz", dLI, m_dTI);
-        CurcumaLogger::info("* Thresholds Delta H:");
-        CurcumaLogger::info_fmt("  Loose Threshold: {:.2f} \t Tight Threshold: {:.2f}", dLH, m_dTH);
-        CurcumaLogger::info("* Thresholds Delta E:");
-        CurcumaLogger::info_fmt("  Loose Threshold: {:.2f} kJ/mol \t Tight Threshold: {:.2f} kJ/mol", dLE, m_dTE);
-        CurcumaLogger::info("```");
+    // Claude Generated (June 2026): show the adjusted (per-pass) thresholds at verbosity 1.
+    // Sync the global logger level since the RMSD machinery lowers it between passes.
+    if (m_verbosity >= 1) {
+        int old_verbosity = CurcumaLogger::get_verbosity();
+        CurcumaLogger::set_verbosity(m_verbosity);
+        CurcumaLogger::result("Adjusted thresholds for this pass (loose / tight):");
+        CurcumaLogger::result_fmt("  Delta I (rot. constants): {:.2f} / {:.2f} MHz", dLI, m_dTI);
+        CurcumaLogger::result_fmt("  Delta H (topology):       {:.2f} / {:.2f}", dLH, m_dTH);
+        CurcumaLogger::result_fmt("  Delta E (energy):         {:.2f} / {:.2f} kJ/mol", dLE, m_dTE);
+        CurcumaLogger::set_verbosity(old_verbosity);
     }
 
     if (dLE > 0 || dLH > 0 || dLI > 0) {
@@ -1428,6 +1490,19 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                         }
                         writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
                         mol1->ApplyReorderRule(t->ReorderRule());
+                        // Claude Generated (June 2026): at verbosity 3, report the reference
+                        // structure the rejection matched and the deciding RMSD. Inside the
+                        // keep_molecule guard so it fires ONLY for the deciding (first) match -
+                        // the result loop intentionally does not break after the first match (to
+                        // keep per-comparison counters accurate), so a structure may match several
+                        // references; only the deciding one is reported.
+                        if (m_verbosity >= 3) {
+                            int old_v = CurcumaLogger::get_verbosity();
+                            CurcumaLogger::set_verbosity(m_verbosity);
+                            CurcumaLogger::info_fmt("    {} rejected - matches {} after reorder (RMSD {:.4f} A)",
+                                mol1->Name(), t->Reference()->Name(), t->RMSD());
+                            CurcumaLogger::set_verbosity(old_v);
+                        }
                     }
                     keep_molecule = false;
 
@@ -1480,7 +1555,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
         } else {
             RejectMolecule(mol1);
         }
-        PrintStatus();
+        updateProgress();
         if (m_result.size() >= m_maxrank)
             break;
     }
@@ -1507,6 +1582,7 @@ ConfScanThread* ConfScan::addThread(const Molecule* reference, const json& confi
     thread->setReference(*reference);
     thread->setEarlyBreak(m_earlybreak);
     thread->setVerbose(m_analyse);
+    thread->setRefineReuse(m_refine_reuse);
     m_energies.push_back(reference->Energy());
 
     // thread->setVerbose(false);
@@ -1641,6 +1717,52 @@ void ConfScan::PrintStatus(const std::string& info)
 
         std::cout << std::endl; // Force immediate flush for real-time feedback
     }
+}
+
+// Claude Generated (June 2026): Per-structure progress feedback during a pass.
+// - verbosity 1: a single live progress bar (replaces the old per-structure status spam),
+//   on by default, off via -confscan.progress false or the global -noprogress / non-TTY.
+// - verbosity >= 2: the detailed PrintStatus() block (power users keep the per-structure detail).
+// Gating uses m_verbosity (the ConfScan member), which - unlike the global logger verbosity -
+// is not lowered by the RMSD machinery mid-scan.
+void ConfScan::updateProgress()
+{
+    if (m_verbosity >= 2) {
+        PrintStatus();
+    } else if (m_verbosity >= 1 && m_show_progress) {
+        CurcumaLogger::progress_bar(static_cast<int>(m_stored_structures.size()) + m_rejected,
+            m_maxmol, m_pass_label);
+    }
+}
+
+// Claude Generated (June 2026): Clean, aligned summary printed once after each pass (replaces
+// the dense per-structure status line as the between-pass report). ASCII only.
+void ConfScan::PrintPassSummary(const std::string& label)
+{
+    // Close the live progress-bar line (only shown at verbosity 1) before the summary.
+    if (m_verbosity == 1 && m_show_progress)
+        CurcumaLogger::progress_done();
+
+    if (m_verbosity < 1)
+        return;
+
+    const int accepted = static_cast<int>(m_stored_structures.size());
+    const int processed = accepted + m_rejected;
+
+    fmt::print("\n");
+    if (!label.empty())
+        fmt::print("        {}\n", label);
+    fmt::print("          Accepted:         {:5}\n", accepted);
+    fmt::print("          Rejected:         {:5}\n", m_rejected);
+    fmt::print("          Reordered:        {:5}   (successful {}, reused {})\n",
+        m_reordered, m_reordered_worked, m_reordered_reused);
+    fmt::print("          Reorder skipped:  {:5}   (rejected directly {})\n",
+        m_skiped, m_rejected_directly);
+    if (m_molalign_count > 0)
+        fmt::print("          MolAlign:         {:5}   (successful {})\n",
+            m_molalign_count, m_molalign_success);
+    fmt::print("          Processed:        {:5} / {}\n", processed, m_maxmol);
+    std::cout << std::endl;
 }
 
 void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason, const std::vector<int>& rule)

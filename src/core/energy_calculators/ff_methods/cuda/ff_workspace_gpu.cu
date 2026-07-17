@@ -23,6 +23,8 @@
 #include "../forcefieldthread.h"   // Bond, Angle, Dihedral, Inversion structs
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"  // covalent_rad_d3
 
+#include <cstdlib>  // std::getenv (CURCUMA_GFNFF_GPU_FREEZE_HBQ opt-out)
+
 #include "src/core/curcuma_logger.h"
 
 #include <Eigen/Dense>
@@ -705,6 +707,14 @@ struct FFWorkspaceGPUImpl {
     // d_refn and d_refcn moved to __constant__ memory (Phase 8: March 2026)
     // Uploaded via upload_refn_const() / upload_refcn_const() at init
     bool               dc6dcn_gpu_ready = false; ///< true after C6 table + refn uploaded
+
+    // WP-A (Jun 2026): on-device D4 dispersion pair-list build buffers.
+    CudaBuffer<double> d_sqrtzr4r2;    ///< [118] sqrt(Z·r4/r2) per element
+    CudaBuffer<double> d_topo_q;       ///< [N] Phase-1 topology charges (for zetac6)
+    CudaBuffer<double> d_zeta_zeff;    ///< [86] zeta zeff per element
+    CudaBuffer<double> d_zeta_c;       ///< [86] zeta c per element
+    CudaBuffer<int>    d_disp_pair_counter; ///< [1] atomic counter for the two-pass build
+    bool               disp_built_on_gpu = false; ///< true when disp SoA was device-built
 
     // Diagnostic snapshot buffers (GPU-side, no pipeline stall)
     // Claude Generated (March 2026): Device-to-device copy instead of sync+download
@@ -1480,7 +1490,7 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
         N,
         impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
-        2.5,  // cutoff_factor
+        m_cn_pair_cutoff_factor,  // cutoff_factor (Task #10: tunable)
         impl.d_cn_pair_counter.ptr);
     checkCuda(cudaStreamSynchronize(impl.stream), "k_generate_cn_pairs_count sync");
 
@@ -1510,7 +1520,7 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
         N,
         impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr,
-        2.5,  // cutoff_factor
+        m_cn_pair_cutoff_factor,  // cutoff_factor (Task #10: tunable)
         impl.d_cn_pair_counter.ptr,
         impl.d_cn_idx_i.ptr,
         impl.d_cn_idx_j.ptr,
@@ -1521,6 +1531,116 @@ void FFWorkspaceGPU::generateCNPairListOnGPU()
 
     if (CurcumaLogger::get_verbosity() >= 3)
         CurcumaLogger::info(fmt::format("  GPU CN pair list: {} pairs generated on GPU", h_count));
+}
+
+// ============================================================================
+// WP-A (Jun 2026): on-device D4 dispersion pair-list build.
+// Two-pass (count + build) device replacement for the host
+// GenerateDispersionPairsNative O(N²) loop + per-build H2D upload. Opt-in.
+// ============================================================================
+void FFWorkspaceGPU::generateDispersionPairListOnGPU(
+    const std::vector<double>& gw_flat,
+    const std::vector<double>& sqrtzr4r2,
+    const std::vector<double>& topo_charges,
+    double a1, double a2, double cutoff_bohr)
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    if (N <= 0) return;
+    if (!impl.dc6dcn_gpu_ready) {
+        if (CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::warn("GPU disp pair build skipped: C6 reference table not uploaded");
+        return;
+    }
+
+    // Use the HOST Gaussian weights (the same m_gaussian_weights getChargeWeightedC6
+    // uses) for the C6 contraction so the result is bit-identical to the host list.
+    // The host CN/gw is O(N) and cheap; only the O(N^2) pair loop is offloaded. The
+    // device gw (computeGaussianWeightsOnGPU) is recomputed later for dc6dcn and may
+    // use a slightly different CN, so we must NOT rely on it here. gw_flat is laid out
+    // [atom*D4_MAX_REF + ref], zero-padded to D4_MAX_REF.
+    if (static_cast<int>(gw_flat.size()) >= N * D4_MAX_REF)
+        impl.d_gw.upload(gw_flat.data(), N * D4_MAX_REF);
+
+    // Upload the element/atom tables the build kernel needs.
+    impl.d_sqrtzr4r2.upload(sqrtzr4r2.data(), static_cast<int>(sqrtzr4r2.size()));
+    impl.d_zeta_zeff.upload(GFNFFParameters::zeta_zeff.data(),
+                            static_cast<int>(GFNFFParameters::zeta_zeff.size()));
+    impl.d_zeta_c.upload(GFNFFParameters::zeta_c.data(),
+                         static_cast<int>(GFNFFParameters::zeta_c.size()));
+    {
+        std::vector<double> q(N, 0.0);
+        for (int i = 0; i < N && i < static_cast<int>(topo_charges.size()); ++i)
+            q[i] = topo_charges[i];
+        impl.d_topo_q.upload(q.data(), N);
+    }
+
+    if (!impl.d_disp_pair_counter.ptr) impl.d_disp_pair_counter.alloc(1);
+
+    const double cutoff_sq = cutoff_bohr * cutoff_bohr;
+    const int n_total = N * (N - 1) / 2;
+    auto cfg = getLaunchConfig(n_total, m_block_size);
+
+    // Pass 1: count surviving pairs.
+    int h_count = 0;
+    impl.d_disp_pair_counter.upload(&h_count, 1);
+    k_disp_pairs_count<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.d_atom_types.ptr, cutoff_sq, impl.d_disp_pair_counter.ptr);
+    checkCuda(cudaStreamSynchronize(impl.stream), "k_disp_pairs_count sync");
+    impl.d_disp_pair_counter.download(&h_count, 1);
+    checkCuda(cudaStreamSynchronize(impl.stream), "download disp pair count");
+
+    // (Re)allocate the DispersionSoA to the device-counted pair count.
+    impl.disp.n = h_count;
+    impl.disp.idx_i.alloc(h_count);
+    impl.disp.idx_j.alloc(h_count);
+    impl.disp.C6.alloc(h_count);
+    impl.disp.r4r2ij.alloc(h_count);
+    impl.disp.r0_sq.alloc(h_count);
+    impl.disp.zetac6.alloc(h_count);
+    impl.disp.r_cut.alloc(h_count);
+    impl.disp.dc6dcn_ij.alloc(h_count);
+    impl.disp.dc6dcn_ji.alloc(h_count);
+
+    if (h_count == 0) {
+        impl.disp_built_on_gpu = true;
+        m_disp_idx_i_host.clear();
+        m_disp_idx_j_host.clear();
+        return;
+    }
+
+    // Pass 2: write idx + per-pair static data (C6 contraction, r4r2ij, R0², zetac6).
+    int h_zero = 0;
+    impl.d_disp_pair_counter.upload(&h_zero, 1);
+    k_disp_pairs_build<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+        impl.d_atom_types.ptr, cutoff_sq,
+        impl.d_gw.ptr, impl.d_c6_flat.ptr,
+        impl.d_sqrtzr4r2.ptr, impl.d_topo_q.ptr,
+        impl.d_zeta_zeff.ptr, impl.d_zeta_c.ptr,
+        a1, a2,
+        impl.d_disp_pair_counter.ptr,
+        impl.disp.idx_i.ptr, impl.disp.idx_j.ptr,
+        impl.disp.C6.ptr, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr,
+        impl.disp.zetac6.ptr, impl.disp.r_cut.ptr);
+    checkCuda(cudaStreamSynchronize(impl.stream), "k_disp_pairs_build sync");
+
+    // Keep the host idx mirror + dc6dcn staging consistent (CPU dc6dcn fallback /
+    // displacement consumers). One download per build (topology-change frequency).
+    m_disp_idx_i_host.resize(h_count);
+    m_disp_idx_j_host.resize(h_count);
+    impl.disp.idx_i.download(m_disp_idx_i_host.data(), h_count);
+    impl.disp.idx_j.download(m_disp_idx_j_host.data(), h_count);
+    checkCuda(cudaStreamSynchronize(impl.stream), "download disp idx mirror");
+    m_h_dc6dcn_ij.assign(h_count, 0.0);
+    m_h_dc6dcn_ji.assign(h_count, 0.0);
+
+    impl.disp_built_on_gpu = true;
+
+    if (CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::info(fmt::format(
+            "  GPU D4 dispersion pair list: {} pairs built on GPU (was host O(N^2) + upload)", h_count));
 }
 
 void FFWorkspaceGPU::updateDispersionDC6DCN(const Matrix& dc6dcn)
@@ -2158,6 +2278,35 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
         if (impl.m_graph_phase1) { cudaGraphDestroy(impl.m_graph_phase1); impl.m_graph_phase1 = nullptr; }
     }
     // Returns immediately — charge-independent kernels run asynchronously on GPU
+}
+
+// Claude Generated (June 2026): OPT-IN device-resident HB charge refresh.
+// IMPORTANT — default is OFF. The GFN-FF reference (Fortran) and the curcuma CPU path
+// both evaluate the H-bond term with the charges FROZEN at topology build (CPU uses the
+// stored hb.q_H/q_A/q_B, forcefieldthread.cpp:2525+), NOT live per-step EEQ charges. The
+// GPU's frozen HB charges therefore MATCH the reference; refreshing them to live charges
+// makes MD diverge from CPU/Fortran (verified: acetic-dimer 1000 fs heat-exchange CPU
+// 0.00709227 / GPU-frozen 0.00707467 / GPU-resident 0.00658143). This path is kept only
+// as an opt-in experiment — enable with CURCUMA_GFNFF_GPU_RESIDENT_HBQ=1.
+// Called by the orchestrator AFTER launchChargeDependentAndFinish() returns (impl.stream
+// idle, d_charges final) → no stream hazard with the captured graphs.
+void FFWorkspaceGPU::refreshHBChargesFromDevice()
+{
+    static const bool resident = (std::getenv("CURCUMA_GFNFF_GPU_RESIDENT_HBQ") != nullptr);
+    if (!resident || !m_hbond_enabled)
+        return;
+    auto& impl = *m_impl;
+    if (impl.hbonds.n <= 0)
+        return;
+    LaunchConfig cfg = getLaunchConfig(impl.hbonds.n, m_block_size);
+    k_gather_hb_charges<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+        impl.hbonds.n,
+        impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr,
+        impl.d_charges.ptr,
+        impl.hbonds.q_A.ptr, impl.hbonds.q_H.ptr, impl.hbonds.q_B.ptr);
+    checkCuda(cudaGetLastError(), "k_gather_hb_charges launch");
+    // Ensure the q arrays are fully written before the next step's HB (Phase 1) reads them.
+    cudaStreamSynchronize(impl.stream);
 }
 
 double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)

@@ -78,28 +78,42 @@ void CitationRegistry::printSummary()
         children.insert(child);
     }
 
-    // Helper: print one entry (description + reference, two lines)
+    // Helper: print one entry (description + reference lines)
     auto printEntry = [](const std::string& prefix, const Citations::CitationData* data) {
         fmt::print(fg(fmt::color::green), "  [CITE]  {}\n", prefix + data->description);
-        fmt::print(fg(fmt::color::green), "          {}\n", data->reference);
+        // Split reference on newlines for multi-reference entries
+        std::string ref = data->reference;
+        std::string indent = "          ";
+        size_t pos = 0;
+        while (pos < ref.size()) {
+            auto nl = ref.find('\n', pos);
+            if (nl == std::string::npos) {
+                fmt::print(fg(fmt::color::green), "{}{}\n", indent, ref.substr(pos));
+                break;
+            }
+            fmt::print(fg(fmt::color::green), "{}{}\n", indent, ref.substr(pos, nl - pos));
+            pos = nl + 1;
+        }
     };
 
-    // Print top-level entries (those that are not children of another)
-    for (const auto& key : m_cited_keys) {
-        if (children.count(key)) continue;
-
+    // Recursive helper: print a key and all its children at increasing indent
+    std::function<void(const std::string&, const std::string&)> printTree;
+    printTree = [&](const std::string& key, const std::string& indent) {
         const Citations::CitationData* data = Citations::lookup(key);
-        if (!data) continue;
+        if (!data) return;
+        printEntry(indent, data);
 
-        printEntry("", data);
-
-        // Print sub-references of this parent (indented, without raw key)
+        // Print sub-references of this key at next indent level
         for (const auto& [child, parent] : m_subrefs) {
             if (parent != key) continue;
-            const Citations::CitationData* child_data = Citations::lookup(child);
-            if (!child_data) continue;
-            printEntry("  -> ", child_data);
+            printTree(child, indent + "  -> ");
         }
+    };
+
+    // Print top-level entries (those that are not children of another), recursively
+    for (const auto& key : m_cited_keys) {
+        if (children.count(key)) continue;
+        printTree(key, "");
     }
 
     fmt::print(fg(fmt::color::green), "===============================================================\n");

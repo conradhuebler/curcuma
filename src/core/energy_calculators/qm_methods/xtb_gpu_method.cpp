@@ -10,7 +10,7 @@
  * .cu translation units.
  */
 
-#ifdef USE_CUDA_XTB
+#ifdef USE_CUDA
 
 #include "xtb_gpu_method.h"
 #include "cuda/xtb_gpu_context.h"
@@ -209,6 +209,9 @@ public:
 
     // ---- Device nuclear gradient (Stage 4) --------------------------------
     bool supportsGradient() const override { return true; }
+    // X-I1: the CUDA integral/SCF/gradient kernels handle d shells (cartesian->
+    // spherical dtrafo in xtb_gpu_integrals_device.cuh). Claude Generated.
+    bool supportsDshell() const override { return true; }
 
     bool gradient(const Matrix& P, const Eigen::MatrixXd& C, const Vector& eps,
                   int nocc_orbs, const Vector& v_ao, const Vector& q_sh,
@@ -374,6 +377,14 @@ public:
                                      dkernel, qkernel, gamma3);
     }
 
+    // WP4b: in-SCF implicit solvation on the device potential path.
+    bool supportsDeviceSolvation() const override { return true; }
+    bool beginSolvation(int nat, const double* born_mat) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->beginSolvation(nat, born_mat);
+    }
+
     bool solvePotential(const Vector& q_sh, const Eigen::MatrixXd& dp_at,
                         const Eigen::MatrixXd& qp_at, const std::vector<double>& W,
                         const std::vector<double>& dWq, Vector& eps,
@@ -535,4 +546,4 @@ void XtbGpuComputationalMethod::setIterativeMode(bool on) { m_cpu->setIterativeM
 
 bool XtbGpuComputationalMethod::gpuActive() const { return m_gpu && m_gpu->ok(); }
 
-#endif // USE_CUDA_XTB
+#endif // USE_CUDA

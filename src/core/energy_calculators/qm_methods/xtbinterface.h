@@ -36,6 +36,12 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     PARAM(electronic_temperature, Double, 300.0, "Electronic temperature in Kelvin for Fermi smearing.", "SCF", {"Tele"})
     PARAM(spin, Double, 0.0, "Total spin of the system (0.0 = singlet).", "Molecular", {})
     PARAM(d4_charge_source, String, "eeq", "Native GFN2 D4 zeta charge source: 'eeq' (single-shot dftd4 EEQ, analytical dq/dx) or 'mulliken' (GFN2 SCF charges + CPSCF response).", "Dispersion", {})
+    // Implicit solvation (Claude Generated, June 2026): self-consistent ALPB coupled
+    // into the native GFN1/GFN2 SCF. Use the dotted form (-xtb.solvent water) because
+    // the flat -solvent flag is ambiguous (also registered by tblite/ulysses/gfnff_external).
+    PARAM(solvent, String, "none", "Implicit solvent for the native GFN1/GFN2 SCF (e.g. 'water', 'dmso', 'acetone', 'chloroform'). 'none' (default) runs gas phase. Self-consistent ALPB matching the tblite parameterization (Born + CDS surface tension/H-bond + state shift); GFN1 uses CM5 charges, GFN2 Mulliken. Set solvent_model=3 (ALPB). Use the dotted -xtb.solvent (the flat -solvent is ambiguous across providers).", "Solvation", {})
+    PARAM(solvent_model, String, "none", "Implicit solvation model for the native GFN SCF: 'none', 'cpcm' (not yet implemented natively), 'gbsa', 'alpb'. Legacy numeric codes (0=none, 1=cpcm, 2=gbsa, 3=alpb) are still accepted. When a solvent is given without a model, ALPB is used by default.", "Solvation", {})
+    PARAM(solvent_epsilon, Double, -1.0, "Explicit solvent dielectric constant (only used by CPCM; ALPB/GBSA take the dielectric from the named-solvent parameter set). -1 = derive from the solvent name.", "Solvation", {})
     // Native GFN1/GFN2 SCF convergence controls (Claude Generated). Default mode
     // is 'broyden' (tblite-style charge mixing); '-scf_mode diis' is the historic path.
     PARAM(scf_mode, String, "broyden", "Native GFN SCF strategy: 'broyden' (modified-Broyden quasi-Newton mixing of the SCC charge vector, the tblite-style mixer; default, most robust), 'diis' (Pulay on Fock, the historic path), 'plain' (damped density mixing only), or 'level-shift' (Saunders-Hillier virtual shift + density mixing).", "SCF", {})
@@ -49,7 +55,7 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     PARAM(keep_diis, Bool, false, "Native GFN SCF: preserve DIIS/Broyden history across geometry steps (experimental). Default false resets history on each new geometry; true may help near-converged MD trajectories or hurt if geometry changes significantly.", "SCF", {})
     PARAM(eigensolver, String, "mkl", "Native GFN SCF symmetric eigensolver backend: 'mkl' (LAPACK dsyevd, default, blocked+threaded), 'native' (self-contained Householder reduction + Cuppen divide-and-conquer, no LAPACK eigensolve dependency; the GPU-portable foundation), 'purify' (0 K density-matrix purification, GEMM/trace only, no diagonalization — the GPU-portable density path; requires -electronic_temperature 0 and a HOMO-LUMO gap, else it warns and falls back to the eigensolver), or 'lobpcg' (seeded block LOBPCG: only the lowest nocc(+buffer) eigenpairs, subspace recycled across SCF iterations; GEMM-based/GPU-portable but EXPERIMENTAL and a net-loss vs dsyevd on a dense GFN basis at ~50% occupancy — it pays only with sparsity; falls back to dsyevd on non-convergence; no mulliken-CPSCF in this mode). 'native'/'purify'/'lobpcg' are opt-in research paths; mkl is fastest on CPU.", "SCF", {})
     PARAM(scf_mixed_precision, Bool, false, "Native GFN SCF mixed precision: solve the eigenproblem in FP32 for the early iterations far from convergence, reverting to FP64 once max|dq| < scf_fp32_threshold so the converged fixed point and energy are FP64 (convergence is never accepted on an FP32 step). Energy bit-identical to FP64 on the validation set. Works on the CPU/MKL eigensolver (~10% faster on complex) AND the GPU resident path, where FP64 is ~1/64 of FP32 so it is the key lever (and is ON by default with -gpu). Default off on CPU (opt-in). Alias: -mixed_precision.", "SCF", {"mixed_precision"})
-    PARAM(scf_fp32_threshold, Double, 1.0e-3, "Native GFN SCF mixed precision: switch the eigensolve from FP32 to FP64 once max|dq_shell| drops below this (only used when scf_mixed_precision=true). Larger = more FP32 iterations (faster, less safe); 1e-3 keeps the last several iterations in FP64. Alias: -fp32_threshold.", "SCF", {"fp32_threshold"})
+    PARAM(scf_fp32_threshold, Double, 1.0e-3, "Native GFN SCF mixed precision: switch the eigensolve from FP32 to FP64 once max|dq_shell| drops below this (only used when scf_mixed_precision=true). SMALLER = stays FP32 longer = MORE FP32 iterations = fewer expensive FP64 polish iterations (faster on FP64-weak GPUs, less safe); larger switches to FP64 earlier (safer). Must stay above scf_threshold so at least one FP64 step converges. Optimal value is card-specific (lower on consumer/workstation cards where FP64 is 1/32-1/64). Alias: -fp32_threshold.", "SCF", {"fp32_threshold"})
     PARAM(scf_gpu_partial_diag, Bool, false, "GPU resident SCF (-gpu): solve only the lowest occupied(+~5% buffer) eigenpairs per SCF iteration (cusolverDnDsyevdx range) instead of the full nao spectrum. The density needs only the occupied columns, so the energy/gradient stay exact (1e-8 vs tblite; auto-widens to the full solve if a tiny-gap system's occupied tail reaches the window). RESEARCH/OPT-IN: measured net-neutral on an RTX 5080 because the tridiagonalization (not the eigenvector count) dominates the dense eigensolve; kept for FP64-bound GPUs / future kernels. Default off (full spectrum). Auto-disabled for d4_charge_source=mulliken and verbosity>=3.", "SCF", {})
     // Multi-step SCC extrapolation (Claude Generated, June 2026): opt-in generalisation
     // of the 1-step warm-start. Predicts the new-geometry SCC vector ([q_sh] for GFN1,
@@ -118,8 +124,8 @@ public:
 
 private:
     double m_thr = 1.0e-10;
-    double* m_coord;
-    int* m_attyp;
+    double* m_coord = nullptr;
+    int* m_attyp = nullptr;
     int m_accuracy = 1, m_SCFmaxiter = 100;
     double m_Tele = 298;
     xtb_TEnvironment m_env = NULL;

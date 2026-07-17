@@ -37,7 +37,8 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
     const std::vector<double>& charges,
     const std::vector<std::pair<int,int>>& bonds,
     const Eigen::MatrixXd& geometry_bohr,
-    const std::vector<int>& itag)
+    const std::vector<int>& itag,
+    const std::vector<int>& pi_system_charge)
 {
     const int natoms = static_cast<int>(atoms.size());
     const int nbonds = static_cast<int>(bonds.size());
@@ -105,6 +106,16 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
         }
 
         int npi = static_cast<int>(pi_atoms.size());
+
+        // Claude Generated (Jul 2026, F3): subtract the pi-system charge (ipis) from
+        // the electron count. Port from xtb gfnff_ini.f90:874 (nelpi = nelpi - ipis(pis)).
+        // ipis is the charge localised on this pi-system (computed in GFNFF via the
+        // qheavy + neutralize-fragment + re-EEQ + dqa*1.1 path). Neutral molecules have
+        // ipis=0 (unchanged); charged hosts otherwise get nelpi too large by the charge
+        // -> wrong Hückel occupations -> wrong pibo -> wrong bond term.
+        if (!pi_system_charge.empty() && pis >= 0 && pis < static_cast<int>(pi_system_charge.size())) {
+            nelpi -= pi_system_charge[pis];
+        }
 
         // Skip if too small (need at least 2 atoms and 1 electron)
         if (npi < 2 || nelpi < 1) {
@@ -311,8 +322,15 @@ Eigen::MatrixXd HuckelSolver::buildHamiltonian(
             int hyb_j = hybridization[jj];
 
             // Get element-specific β values
-            double h_off_i = (Z_i < 18) ? hoffdiag[Z_i] : 1.0;
-            double h_off_j = (Z_j < 18) ? hoffdiag[Z_j] : 1.0;
+            // Claude Generated (Jul 2026, F3 fix): default 0.0 for Z>=18, NOT 1.0. xtb's
+            // gen%hoffdiag is zero for any element not explicitly parameterised (B,C,N,O,
+            // F,S,Cl only — gfnff_param.f90:701-707); the Fortran array is initialised to
+            // 0. Using 1.0 here (the C reference value) wrongly couples heavy halogens
+            // (Br, I) and other Z>=18 atoms into the π-Hückel, giving non-zero pibo on
+            // e.g. C-I bonds where xtb gives 0. This over-stiffened C-I bonds on the
+            // S30L 15/16 hosts (iodine macrocycle). Default 0.0 matches xtb exactly.
+            double h_off_i = (Z_i < 18) ? hoffdiag[Z_i] : 0.0;
+            double h_off_j = (Z_j < 18) ? hoffdiag[Z_j] : 0.0;
 
             // Geometric mean of β values
             double beta = std::sqrt(h_off_i * h_off_j);

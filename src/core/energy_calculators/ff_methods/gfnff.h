@@ -250,6 +250,8 @@ PARAM(static_all, Bool, false,
 PARAM(eeq_distance_cutoff_auto, Bool, false,
       "Auto-enable eeq_distance_cutoff=30 Bohr after Phase-1 when nfrag==1 and max|q|<0.5 e. Saves ~12 ms/step polymer. Falls back to 0.0 for ionic/multi-fragment systems.", "Performance", {})
 PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) for D4 dispersion pair-list. 0 = full O(N^2) (Fortran-parity). Recommended for large systems: 15.0. Energy drift < 1 muEh at 15 Bohr. When active, CN-derivative stencil is extended to cover the cutoff range.", "Performance", {})
+PARAM(disp_half_contraction, Bool, true,
+      "Lever 3 Opt B: per-atom half-contraction fast path for the D4 dispersion C6 and dc6dcn build. About 7x faster inner contraction on large systems; reassociates the FP sum at ~1e-16 so energy matches to ~1e-10 Eh and gradient to ~1e-7. Set false for strictly bit-identical reproductions.", "Performance", {})
 PARAM(eeq_refactor_eps_bohr, Double, 0.05,
       "WP-EEQ-Cache: EEQ Cholesky refactorization threshold (max atom displacement, Bohr). "
       "Skips O(N^3) factorization when geometry change below this. "
@@ -259,6 +261,35 @@ PARAM(eeq_refactor_force_every, Int, 0,
       "WP-EEQ-Cache: Force EEQ Cholesky refactorization every N steps. "
       "0 = geometry-triggered only. Recommended: 100 for long MD. "
       "Forwarded to eeq_solver.eeq_refactor_force_every.", "Performance", {})
+// NOTE: each PARAM is kept on a SINGLE line on purpose. The param_parser clears its
+// buffer on the first ')' it sees, so a multi-line PARAM whose help text contains '(...)'
+// is silently dropped from the registry (see eeq_refactor_* above). Single-line is safe.
+PARAM(gpu_cn_pair_regen, Bool, true, "Task 10: regenerate the GPU CN-derivative pair list when the topology-displacement check fires (atoms moved past 0.5 Bohr). true keeps the list fresh during opt/MD; false reverts to the legacy build-once-and-latch behaviour.", "Performance", {})
+PARAM(gpu_cn_pair_regen_every, Int, 0, "Task 10: force GPU CN-derivative pair-list regeneration every N gradient steps (0 = topology-triggered only). MD safety net for slow drift below the displacement threshold.", "Performance", {})
+PARAM(gpu_cn_pair_cutoff_factor, Double, 2.5, "Task 10: GPU CN-derivative pair-list cutoff = factor*(rcov_i+rcov_j). Default 2.5 (erf-CN derivative ~exp(-126) beyond this). Larger = more pairs toward the CPU 40 Bohr reach and slower; smaller = faster with more truncation error.", "Performance", {})
+PARAM(hb_accuracy, Double, 0.1, "Task 11: HB-list accuracy driving the Fortran thresholds hbthr1 = 200 - log10(acc)*50, hbthr2 = 400 - log10(acc)*50 (Bohr^2). Smaller = larger cutoffs = more HB pairs = more accurate but slower. 0.1 reproduces the gfnff reference.", "Performance", {})
+PARAM(hb_thr1_bohr2, Double, 0.0, "Task 11: direct override of hbthr1, the A-B distance-squared cutoff for nhb2 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
+PARAM(hb_thr2_bohr2, Double, 0.0, "Task 11: direct override of hbthr2, the A-H-B sum-of-squares cutoff for nhb1 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
+PARAM(hb_update_rmsd_bohr, Double, 0.3, "Task 11: per-atom RMSD (Bohr) that triggers an HB/XB list rebuild. 0.3 reproduces the gfnff reference (gfnff_ini2.f90:717). Smaller = rebuild more often = less near-threshold staleness in MD but slower.", "Performance", {})
+PARAM(hb_update_force_every, Int, 0, "Task 11: force an HB/XB list rebuild every N gradient steps (0 = RMSD-triggered only). Use for continuous MD where near-threshold pairs must be re-classified promptly.", "Performance", {})
+PARAM(eeq_mixed_precision, Bool, false, "WP-B GPU only: factor the EEQ Coulomb matrix in FP32 then refine the solution with the FP64 residual, dsposv-style, for full FP64 accuracy at a fraction of the FP64-factor cost on FP64-weak GPUs. Opt-in on CUDA and ROCm (default OFF; enable per card after measuring). Applies to the factor-dominated few-fragment solve paths; the many-fragment general path stays FP64.", "Performance", {})
+PARAM(eeq_mixed_precision_iters, Int, 2, "WP-B GPU only: number of FP64-residual / FP32-correction refinement steps for eeq_mixed_precision. Minimum 1. Two steps reach FP64 accuracy on the validation set.", "Performance", {})
+PARAM(gpu_disp_pairs_on_device, Bool, false, "WP-A GPU only: build the D4 dispersion pair list on the device via a two-pass enumeration plus per-pair C6 contraction, replacing the host O(N^2) GenerateDispersionPairsNative loop and the per-build H2D upload. Default OFF keeps the proven host build. Bit-identical to the host list up to the FP order of the device Gaussian weights.", "Performance", {})
+PARAM(eeq_rocm_cpu_fragment_threshold, Int, 16, "ROCm GFN-FF only: fragment count at or above which the device EEQ solve is replaced by the exact CPU PCG block-Jacobi warm-start solver, whose O(N^2 k) cost beats the device dense N x N Cholesky O(N^3) for solvent boxes and keeps ROCm charges identical to the CPU path. Set 0 to always use the device solve.", "Performance", {})
+// Implicit solvation (WP5, Claude Generated June 2026). Registering these here is
+// what makes -gfnff.solvent reach GFNFF::InitialiseMolecule (the value was silently
+// ignored before, since the gfnff module declared no solvent PARAM). Use the dotted
+// -gfnff.solvent form; the flat -solvent is ambiguous across providers.
+PARAM(solvent, String, "none",
+      "Implicit solvent for the native GFN-FF ALPB/GBSA model (e.g. 'water', 'dmso', "
+      "'acetone', 'chloroform'). 'none' (default) runs gas phase. Born electrostatics "
+      "at the EEQ charges + CDS surface term + state shift; the reaction field is a "
+      "post-hoc add-on (the EEQ charges do not yet feel the solvent). Use the dotted "
+      "-gfnff.solvent (the flat -solvent is ambiguous across providers).", "Solvation", {})
+PARAM(solvent_model, String, "alpb",
+      "GFN-FF implicit solvation model: 'alpb' (default, P16 Born kernel) or 'gbsa' "
+      "(Still kernel, no shape term). CPCM is not implemented natively. Legacy numeric "
+      "codes (2=gbsa, 3=alpb) are also accepted.", "Solvation", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -283,6 +314,7 @@ public:
         Vector neighbor_counts;                                  // Simple neighbor counts (integer CN)
         std::vector<int> hybridization;                          // 0=sp3, 1=sp, 2=sp2, 3=terminal, 5=hypervalent
         std::vector<int> pi_fragments;                           // Pi fragment assignment per atom
+        std::vector<int> pi_system_charge;                       // ipis: charge per pi-system (subtract from nelpi) - Claude Generated Jul 2026
         std::vector<int> ring_sizes;                             // Smallest ring containing each atom
         std::vector<bool> is_metal;                              // Metal atom flags
         std::vector<bool> is_aromatic;                           // Aromatic atom flags
@@ -627,6 +659,12 @@ public:
      */
     const TopologyInfo& getTopologyInfo() const { return getCachedTopology(); }
 
+    /// WP-A (Jun 2026): set by the GPU method when gpu_disp_pairs_on_device is on, so
+    /// the host D4 generator computes only CN + Gaussian weights and skips its O(N^2)
+    /// pair loop (the GPU builds the pair list on device). Must be set before
+    /// InitialiseMolecule. No effect on the CPU path.
+    void setSkipHostDispPairs(bool v) { m_skip_host_disp_pairs = v; }
+
     /**
      * @brief Export topology information for restart/topology I/O
      * @return JSON object with topology data (fragments, charges, hybridization, CN)
@@ -831,6 +869,15 @@ public:
     // Getters for CN/EEQ results (valid after prepareCNAndEEQ)
     const Vector& getLastCN() const { return m_last_cn; }
     const Vector& getLastCharges() const { return m_charges; }
+
+    // F-Q4 (Claude Generated): true iff the most recent InitialiseMolecule/Calculation
+    // had the EEQ solver fall back to uniform/placeholder charges. The wrapper refuses
+    // the result instead of returning a Coulomb energy built on wrong charges.
+    // m_eeq_solve_failed is the sticky init-time flag (cleared per molecule); the live
+    // solver flag catches per-step (opt/MD) fallbacks (cleared at each Calculation).
+    bool eeqSolveFailed() const {
+        return m_eeq_solve_failed || (m_eeq_solver && m_eeq_solver->lastSolveFailed());
+    }
     // WP-G fix (May 2026): m_geometry_bohr is GeoGradMatrix (RowMajor). Returning
     // `const Matrix&` was creating a dangling reference to a temporary produced by
     // Eigen's implicit storage-order conversion — segfaulted in the GPU path
@@ -1149,9 +1196,13 @@ private:
      * @return JSON array of dispersion pair parameters
      *
      * Claude Generated (December 2025): D3/D4 integration
-     * - Calls D4ParameterGenerator if USE_D4 defined (preferred)
-     * - Falls back to D3ParameterGenerator if USE_D3 defined
-     * - Final fallback to generateFreeAtomDispersion()
+     * - Default (`gfnff`): ALWAYS uses the self-contained D4ParameterGenerator
+     *   (Casimir-Polder C6, `dispersion/d4param_generator`, compiled unconditionally into
+     *   curcuma_core). It is NOT gated by USE_D4 and does NOT use the external dftd4interface
+     *   / curcuma_d4 / LAPACKE lib — that flag only controls the standalone `-d4` method.
+     * - `gfnff-d3` selects the native D3ParameterGenerator instead.
+     * - generateFreeAtomDispersion() is a last-resort fallback, reached only if D4
+     *   construction throws (its "compile with USE_D4" hint does not apply to GFN-FF).
      */
     json generateGFNFFDispersionPairs() const;
 
@@ -1757,7 +1808,8 @@ private:
         const std::vector<int>& hybridization,
         const std::vector<int>& pi_fragments,
         const std::vector<double>& charges = {},
-        const Eigen::MatrixXd& geometry_bohr = Eigen::MatrixXd()) const;
+        const Eigen::MatrixXd& geometry_bohr = Eigen::MatrixXd(),
+        const std::vector<int>& pi_system_charge = {}) const;
 
     /**
      * @brief Calculate EEQ electrostatic energy
@@ -2335,6 +2387,7 @@ private:
 
     // EEQ charge calculation (Dec 2025 - Phase 3: Extraction and delegation)
     std::unique_ptr<EEQSolver> m_eeq_solver; ///< Standalone EEQ solver (replaces embedded EEQ code)
+    mutable bool m_eeq_solve_failed = false; ///< F-Q4: EEQ fell back to placeholder charges (fail-loud)
 
     // Hückel solver for π-bond orders (Jan 2026 - Phase 1: Full Hückel implementation)
     std::unique_ptr<HuckelSolver> m_huckel_solver; ///< Full iterative Hückel solver
@@ -2352,6 +2405,7 @@ private:
     // Initialized when solvent != "none", called in Calculation() after EEQ charges
     std::unique_ptr<ALPBSolvation> m_solvation;
     std::string m_solvent = "none";  ///< Solvent name ("none" = gas phase)
+    std::string m_solvent_model_label = "ALPB";  ///< "ALPB" | "GBSA" for logging (WP5)
 
     /**
      * @brief HB/XB dynamic update support for MD simulations
@@ -2459,11 +2513,14 @@ private:
     mutable std::optional<bool> m_external_topology_decision; ///< GPU displacement check result
     mutable std::optional<std::vector<std::pair<int,int>>> m_cached_bond_list;
 
+    std::vector<std::pair<int,int>> m_forced_bonds; ///< External bonds merged with geometric detection
+
     // Topology caching mode: "auto" (two-tier caching) or "constant" (never recalculate)
     std::string m_topology_mode = "auto";
 
     // Claude Generated (March 2026): Topology persistence in param.json
     bool m_cache_topology = true;   ///< Cache Phase-1 EEQ topology in param.json (opt-out)
+    bool m_skip_host_disp_pairs = false;  ///< WP-A: GPU builds D4 pairs; skip host O(N^2) loop
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1
 
     // Claude Generated (April 2026): Timing for consolidated summary
@@ -2489,6 +2546,7 @@ private:
     std::vector<GFNFFHalogenBond> m_last_xbonds;
     bool m_hbxb_updated = false;  ///< True if updateHBXBIfNeeded() ran since last check
     bool m_hbxb_fresh = false;    ///< True if HB/XB lists were freshly built during init and geometry is unchanged
+    long m_hbxb_update_calls = 0; ///< Task #11: call counter for hb_update_force_every periodic rebuild
 
     // Claude Generated (March 2026): State from last prepareCNAndEEQ() call
     Vector m_last_cn;    ///< Coordination numbers

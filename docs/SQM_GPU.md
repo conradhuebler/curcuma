@@ -44,13 +44,13 @@ A dedicated build directory (mirrors `release_tblite/`; **not** the canonical
 cmake -S . -B release_cuda -DCMAKE_BUILD_TYPE=Release -DC17=ON \
   -DUSE_MKL=ON -DUSE_BLAS=ON -DMKL_ROOT=/opt/intel/oneapi/mkl/latest \
   -DUSE_AVX2=ON -DUSE_AVX512=ON -DUSE_MARCH_NATIVE=ON -DUSE_PCH=ON \
-  -DUSE_CUDA=ON -DUSE_CUDA_XTB=ON -DCMAKE_CUDA_ARCHITECTURES=120
+  -DUSE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120
 cmake --build release_cuda -j8
 ```
 
-- `USE_CUDA_XTB` (defaults to `USE_CUDA`) selects which `.cu` sources are
+- `USE_CUDA` (defaults to `USE_CUDA`) selects which `.cu` sources are
   compiled — it lets you build the GFN-FF GPU stack without the xTB kernels.
-  The code gate is the single macro `USE_CUDA`; `USE_CUDA_XTB` is only a
+  The code gate is the single macro `USE_CUDA`; `USE_CUDA` is only a
   feature-availability flag for the factory.
 - `-DCMAKE_CUDA_ARCHITECTURES=120` (Blackwell / RTX 5080) keeps compile fast.
 - Reconfiguring an existing build dir offline: add
@@ -224,6 +224,15 @@ FP32→FP64 decision) — only then does the latency region actually shrink.
 
 ## Notes / limits
 
+- **Implicit solvation (ALPB/GBSA) on GPU (WP4a+WP4b, 2026-06-07)**: `-xtb.solvent`
+  works on `-gpu cuda` for both GFN1 and GFN2, matching the CPU/tblite refs to 1e-8
+  (`ctest -L gpu_*_solvation|gpu_*_gbsa`, 28 tests). GFN1 uses the host-driven loop
+  (the reaction field is folded into the uploaded `v_ao`). GFN2 builds the reaction
+  field `v_at += B·q_at` on the device (WP4b: `beginSolvation` uploads the Born matrix
+  once per geometry, a cuBLAS dgemv adds it to the resident `v_at` each iteration), so
+  the fully device-resident loop is solvent-aware (WP4a was the interim host fallback,
+  now used only for the GFN1 CM5 path which the device build can't reproduce). This is
+  a residency/correctness fix, **not** a measured `-sp` speedup (eigensolve-bound).
 - GeForce FP64 is ~1/64 of FP32, so a pure-FP64 resident GFN1 SCF is **not**
   necessarily faster than the 8-core MKL CPU on small/medium systems; Stage 2a is
   a correctness + residency milestone. Device-resident `-opt`/`-md` (no host

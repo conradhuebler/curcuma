@@ -233,10 +233,11 @@ void CurcumaOpt::LoadControlJson()
     m_mo_homo = m_defaults.value("mo_homo", -1);
     m_mo_lumo = m_defaults.value("mo_lumo", -1);
 
-    if (m_optimethod == 0) {
-        std::cout << "Using external lBFGS module" << std::endl;
-    } else {
-        std::cout << "Using gpt coded optimisation module" << std::endl;
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        if (m_optimethod == 0)
+            CurcumaLogger::info("Using external lBFGS module");
+        else
+            CurcumaLogger::info("Using gpt coded optimisation module");
     }
 
 }
@@ -314,7 +315,7 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
             json hjson;
             hjson["atoms"] = hessian.cols() / 3;
             hjson["hessian"] = hessian_string;
-            std::ofstream hess_file("hessian.json");
+            std::ofstream hess_file(outputPath("hessian.json"));
             hess_file << hjson;
 
             json scfjson;
@@ -323,7 +324,7 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
                 std::string charges = Tools::DoubleVector2String(interface.Charges());
                 scfjson["charges"] = charges;
             }
-            std::ofstream scffile("scf.json");
+            std::ofstream scffile(outputPath("scf.json"));
             scffile << scfjson;
         }
         auto end = std::chrono::system_clock::now();
@@ -399,10 +400,10 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
             json hjson;
             hjson["atoms"] = hessian.cols() / 3;
             hjson["hessian"] = hessian_string;
-            std::ofstream hess_file("hessian.json");
+            std::ofstream hess_file(outputPath("hessian.json"));
             hess_file << hjson;
 
-            std::ofstream scffile("scf.json");
+            std::ofstream scffile(outputPath("scf.json"));
             scffile << thread->SCF();
         }
         if (!m_singlepoint)
@@ -572,7 +573,8 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
     double final_energy = interface.CalculateEnergy(true);
     initial->setEnergy(final_energy);
     initial->writeXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
-    std::cout << "Initial energy " << final_energy << "Eh" << std::endl;
+    if (m_printoutput)
+        CurcumaLogger::result(fmt::format("Initial energy {} Eh", final_energy));
     // Claude Generated (October 2025): Direct access to LBFGS parameters with fallback values
     LBFGSParam<double> param;
     param.m = m_defaults.value("LBFGS_m", 2000);
@@ -874,7 +876,8 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
     double final_energy = interface.CalculateEnergy(true);
     initial->setEnergy(final_energy);
     initial->writeXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
-    std::cout << "Initial energy " << final_energy << "Eh" << std::endl;
+    if (m_printoutput)
+        CurcumaLogger::result(fmt::format("Initial energy {} Eh", final_energy));
     // Claude Generated (October 2025): Direct access to LBFGS parameters with fallback values
     LBFGSParam<double> param;
     param.m = m_defaults.value("LBFGS_m", 2000);
@@ -948,8 +951,8 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
     gptfgs.setLambda(m_lambda);
     gptfgs.setMasses(mass);
     gptfgs.setDIIS(m_diis_hist, m_diis_start);
-    std::cout << m_lambda << std::endl
-              << std::endl;
+    if (m_printoutput)
+        std::cout << m_lambda << std::endl << std::endl;
     if (m_inithess || m_optimethod == 3) {
         Hessian hess(m_method, m_defaults, false);
         hess.setMolecule(*initial);

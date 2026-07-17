@@ -411,9 +411,9 @@ int main(int argc, char* argv[])
 
     std::cout << "\nPassed: " << passed << "/" << (passed + failed) << std::endl;
 
-    // Intentional leak + _exit: CUDA heap corruption makes normal destructors crash.
+    // Intentional leak + _Exit: CUDA heap corruption makes normal destructors crash.
     std::cout.flush();
-    _exit(failed == 0 ? 0 : 1);
+    std::_Exit(failed == 0 ? 0 : 1);
 }
 
 #else

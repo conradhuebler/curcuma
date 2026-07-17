@@ -8,7 +8,44 @@ Curcuma supports implicit solvation models for quantum chemistry calculations:
 
 - **TBLite Interface**: CPCM, GB (Generalized Born), ALPB for GFN methods
 - **Ulysses Interface**: GBSA (Generalized Born) for GFN and MNDO methods
-- **Native GFN**: Solvation support planned for future implementation
+- **Native GFN1/GFN2**: ⚠️ self-consistent **ALPB** and **GBSA** (June 2026) —
+  AI-implemented, machine-tested vs tblite (≤1e-8 Eh on the validation set), human
+  production testing pending. CPCM not yet implemented natively. See below.
+- **Native GFN-FF**: ⚠️ self-consistent **ALPB** (June 2026, WP5) — the Born reaction
+  field couples into the EEQ charge solve (`A_eeq += B`), so the EEQ charges polarize in
+  the solvent. Matches **xtb 6.7.1** (`--gfnff --alpb`) to ≤1e-8 Eh (7 mol × 4 solvents,
+  `ctest -L gfnff_solvation`); analytic gradient FD-validated. GFN-FF has no separate GBSA
+  model (the reference always uses ALPB, `gfnff_alpb.F90:23-24`), so `-gfnff.solvent_model
+  gbsa` maps to ALPB. `-method gfnff -gfnff.solvent water -gfnff.solvent_model alpb`.
+  Machine-tested only.
+
+## Native GFN1/GFN2 ALPB / GBSA (no external dependency)
+
+The native `gfn1`/`gfn2` backends include self-consistent ALPB and GBSA solvation
+models matching the tblite parameterization (Born electrostatics + CDS surface
+tension/H-bond + state shift). GFN1 uses CM5 charges, GFN2 Mulliken charges, as in
+tblite. The solvent reaction field enters the SCF (the wavefunction polarizes), the
+energy is added to the total, and the nuclear gradient is analytic. ALPB uses the
+P16 Born kernel; GBSA is ALPB with the analytical-PB shape term off and the
+classical Still kernel (exactly tblite's ALPB=11/12 vs GBSA=21/22 distinction).
+
+```bash
+# Dotted form required (the flat -solvent is ambiguous across providers):
+curcuma -sp mol.xyz -method gfn2 -xtb.solvent water -xtb.solvent_model alpb
+curcuma -sp mol.xyz -method gfn2 -xtb.solvent water -xtb.solvent_model gbsa
+curcuma -opt mol.xyz -method gfn1 -xtb.solvent dmso                          # defaults to alpb
+```
+
+- `-xtb.solvent <name>`: water, dmso, acetone, chloroform, methanol, … (tblite set)
+- `-xtb.solvent_model`: `alpb` (default when a solvent is given), `gbsa`, `cpcm` (not yet native), `none`.
+  Legacy numeric codes (3=alpb, 2=gbsa, 1=cpcm, 0=none) are still accepted.
+
+**Validation (machine-tested):** native total energy matches tblite to ≤1e-8 Eh for
+7 molecules × {water, dmso, acetone, chloroform} × {gfn1, gfn2} — for **both** models
+(ALPB: `ctest -L _solvation`, 56 tests; GBSA: `ctest -L _gbsa`, 56 tests); analytic
+gradients FD-validated for both (`ctest -R xtb_solvation_numgrad`). **Not tested:**
+other solvents, ions, metals, large systems, long MD/opt stability. See
+[SQM_SOLVATION_WP.md](SQM_SOLVATION_WP.md).
 
 ## Supported Solvents
 

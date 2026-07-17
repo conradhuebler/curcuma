@@ -44,24 +44,16 @@ static const char* const kEnergyCalcMethodScopes[] = {
     "d3", "d4", "uff", "qmdff", "eht", "orca"
 };
 
-void EnergyCalculator::reattachMethodScopes(const json& controller) {
-    bool needs_recreate = false;
-    for (const char* scope : kEnergyCalcMethodScopes) {
-        if (controller.contains(scope) && !m_controller.contains(scope)) {
-            m_controller[scope] = controller[scope];
-            needs_recreate = true;
-        }
-    }
-    if (needs_recreate) createMethod(m_method_name, m_controller);
-}
 
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
     : m_method_name(method)
     , m_basename("")
     , m_energy(0.0)
 {
-    initializeCommonFromConfig(ConfigManager("energycalculator", controller));
-    reattachMethodScopes(controller);
+    // D-1 (Claude Generated): pass the raw controller so method sub-scopes that
+    // ConfigManager would strip are re-merged BEFORE the single createMethod —
+    // the previous reattachMethodScopes() path built the method a second time.
+    initializeCommonFromConfig(ConfigManager("energycalculator", controller), &controller);
 }
 
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller, const std::string& basename)
@@ -69,8 +61,7 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
     , m_basename(basename)
     , m_energy(0.0)
 {
-    initializeCommonFromConfig(ConfigManager("energycalculator", controller));
-    reattachMethodScopes(controller);
+    initializeCommonFromConfig(ConfigManager("energycalculator", controller), &controller);
 }
 
 // ConfigManager-based constructors (new, preferred) - Claude Generated: Phase 3C
@@ -96,7 +87,7 @@ EnergyCalculator::~EnergyCalculator() {
 }
 
 // Claude Generated: Phase 3C - ConfigManager-based initialization
-void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config) {
+void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config, const json* raw_controller) {
     // Only show initialization info if verbosity is high enough
     if (getEffectiveVerbosity() >= 2) {
         CurcumaLogger::info("Initializing EnergyCalculator (ConfigManager)");
@@ -112,6 +103,17 @@ void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config) {
 
     // Store configuration
     m_controller = config.exportConfig();  // Export for compatibility with existing code
+
+    // D-1 (Claude Generated): re-attach method sub-scopes that the "energycalculator"
+    // ConfigManager strips (gfnff, xtb, eeq_solver, …) so createMethod below sees them
+    // on the first (and only) build. Previously this was a post-construction
+    // reattachMethodScopes() that rebuilt the whole method a second time.
+    if (raw_controller && raw_controller->is_object()) {
+        for (const char* scope : kEnergyCalcMethodScopes) {
+            if (raw_controller->contains(scope) && !m_controller.contains(scope))
+                m_controller[scope] = (*raw_controller)[scope];
+        }
+    }
 
     if (getEffectiveVerbosity() >= 3) {
         CurcumaLogger::param_table(m_controller, "EnergyCalculator Configuration");
@@ -163,8 +165,7 @@ void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config) {
 
 // Backward compatible wrapper - delegates to ConfigManager version
 void EnergyCalculator::initializeCommon(const json& controller) {
-    initializeCommonFromConfig(ConfigManager("energycalculator", controller));
-    reattachMethodScopes(controller);
+    initializeCommonFromConfig(ConfigManager("energycalculator", controller), &controller);
 }
 
 bool EnergyCalculator::createMethod(const std::string& method_name, const json& config) {
@@ -210,14 +211,27 @@ bool EnergyCalculator::createMethod(const std::string& method_name, const json& 
         
         ClearError();
 
-#ifndef USE_CUDA
-        // Track GPU fallback: user requested -gpu cuda but CUDA unavailable
-        std::string gpu_req = config.value("gpu", "none");
-        std::transform(gpu_req.begin(), gpu_req.end(), gpu_req.begin(), ::tolower);
-        if (gpu_req == "cuda") {
-            m_gpu_fallback = true;
-        }
+        // Track GPU fallback: user explicitly requested a GPU backend (cuda/rocm/
+        // vulkan) that this build was not compiled with. "auto" is best-effort and
+        // never warns. Claude Generated (June 2026): generalised from CUDA-only.
+        {
+            std::string gpu_req = config.value("gpu", "none");
+            std::transform(gpu_req.begin(), gpu_req.end(), gpu_req.begin(), ::tolower);
+            bool explicit_gpu = (gpu_req == "cuda" || gpu_req == "rocm" || gpu_req == "vulkan");
+            bool have_backend = false;
+#if defined(USE_CUDA)
+            if (gpu_req == "cuda") have_backend = true;
 #endif
+#if defined(USE_ROCM)
+            if (gpu_req == "rocm") have_backend = true;
+#endif
+#if defined(USE_VULKAN)
+            if (gpu_req == "vulkan") have_backend = true;
+#endif
+            if (explicit_gpu && !have_backend) {
+                m_gpu_fallback = true;
+            }
+        }
 
         return true;
         
@@ -434,15 +448,43 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
             m_method->copyGradientTo(m_gradient);
         }
         
-        // Check for NaN values — always emit error regardless of verbosity, since
-        // silent NaN causes optimizer to see energy=0.0 and fail with no diagnostic.
-        if (checkForNaN(m_energy, gradient ? m_gradient : Matrix{})) {
+        // Check for NaN/Inf values.
+        // Claude Generated (Jul 2026, F1): distinguish energy-NaN (fatal — return 0.0)
+        // from gradient-only-NaN (energy is still valid). Previously ANY NaN in energy OR
+        // gradient returned 0.0, which lied to the caller: a single near-collinear angle
+        // produced a NaN gradient but a finite, correct energy, and the 0.0 substitution
+        // made optimizers/MD converge against a fabricated energy with no diagnostic.
+        // Now: energy-NaN -> return 0.0 + error (unchanged); gradient-NaN-only -> return
+        // the finite m_energy + error log, so the energy is honest and the caller can
+        // detect the invalid gradient via hasError()/m_containsNaN.
+        const bool energy_nan = std::isnan(m_energy) || std::isinf(m_energy);
+        bool grad_nan = false;
+        if (gradient && m_gradient.size() > 0) {
+            for (int i = 0; i < m_gradient.rows() && !grad_nan; ++i)
+                for (int j = 0; j < m_gradient.cols(); ++j)
+                    if (std::isnan(m_gradient(i, j)) || std::isinf(m_gradient(i, j))) {
+                        grad_nan = true;
+                        break;
+                    }
+        }
+        if (energy_nan) {
             m_containsNaN = true;
             CurcumaLogger::error(fmt::format(
-                "NaN/Inf in {} energy or gradient — returning 0.0 (optimizer will fail silently without this message)",
+                "NaN/Inf in {} energy — returning 0.0",
                 m_method_name));
-            handleMethodError("NaN values detected in calculation results");
+            handleMethodError("NaN values detected in energy");
             return 0.0;
+        }
+        if (grad_nan) {
+            m_containsNaN = true;
+            CurcumaLogger::error(fmt::format(
+                "NaN/Inf in {} gradient — energy {:.8f} Eh is finite and returned, "
+                "but the gradient is invalid (optimization/MD should abort or restart)",
+                m_method_name, m_energy));
+            // Do NOT substitute 0.0 for a valid energy. Mark error state so callers
+            // checking hasError()/m_containsNaN can refuse to use the gradient.
+            m_error = true;
+            m_error_message = "NaN/Inf in gradient (energy finite)";
         }
 
         const int energy_min = m_is_iterative ? 2 : 1;
@@ -452,7 +494,8 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
 
         // Final warning if GPU was requested but fell back to CPU
         if (m_gpu_fallback && !m_gpu_fallback_warned) {
-            CurcumaLogger::warn("Calculation completed on CPU. The requested -gpu cuda was not used.");
+            CurcumaLogger::warn("Calculation completed on CPU. The requested -gpu backend "
+                                "was not compiled into this build.");
             m_gpu_fallback_warned = true;
         }
 

@@ -76,6 +76,7 @@ enum class EEQDistanceMode {
 enum class EEQSolveMethod {
     LU,             ///< PartialPivLU on full augmented system (baseline)
     SchurCholesky,  ///< Cholesky on NxN SPD block + Schur complement for constraints
+    LDLT,           ///< Bunch-Kaufman LDL^T on NxN block (indefinite-capable) + Schur; LLT-fail fallback
     Batched,        ///< Per-fragment Cholesky (GPU only); CPU falls back to SchurCholesky
     PCG,            ///< Preconditioned Conjugate Gradient with warm start
     Auto            ///< Auto-select via first-call benchmark (SchurCholesky vs PCG)
@@ -357,6 +358,14 @@ public:
     /// When set, calculateFinalCharges skips its own O(N^2) distance loop and
     /// fills m_phase2_distances from this view. Lifetime managed by caller (GFNFF).
     void setExternalDistances(const Eigen::VectorXd* srab) { m_external_srab = srab; }
+
+    /// WP5 (June 2026): self-consistent implicit-solvation reaction field. When set,
+    /// calculateFinalCharges adds this symmetric nat×nat Born matrix B into the
+    /// top-left block of the augmented EEQ matrix before the linear solve, so the
+    /// charges feel the solvent (matches the gfnff reference A_eeq += gbsa%bornMat,
+    /// gfnff_engrad.F90:1346-1350). nullptr = gas phase. Lifetime managed by caller
+    /// (GFNFF holds the ALPBSolvation that owns the matrix). Claude Generated.
+    void setReactionField(const Eigen::MatrixXd* born_matrix) { m_reaction_field = born_matrix; }
 
     /// WP-S3 (May 2026): effective Coulomb-matrix cutoff used by the
     /// sparsification (override wins, otherwise the ConfigManager value).
@@ -907,6 +916,13 @@ public:
     /// (0 when eeq_extrapolation=none or before the history is long enough). Test hook.
     long pcgExtrapolationCount() const { return m_pcg_extrap_count; }
 
+    /// Fail-loud status (F-Q4, Claude Generated): true iff the most recent solve fell
+    /// back to uniform/placeholder charges (generateFallbackCharges). The caller must
+    /// clearSolveStatus() before a solve and check lastSolveFailed() after, so a wrong
+    /// charge set is never silently propagated into the Coulomb energy/gradient.
+    bool lastSolveFailed() const { return m_last_solve_failed; }
+    void clearSolveStatus() const { m_last_solve_failed = false; }
+
 private:
 
     // Auto-solver benchmark state
@@ -916,6 +932,18 @@ private:
 
     // WP7-B (May 2026): warn-once flag for CPU "batched" → cholesky fallback
     mutable bool m_batched_cpu_warned = false;
+
+    // F-Q4 (Claude Generated): set by generateFallbackCharges when a solve degrades to
+    // uniform/placeholder charges; read via lastSolveFailed(), reset via clearSolveStatus().
+    mutable bool m_last_solve_failed = false;
+
+    // WP7-D (Jun 2026): contact-aware dispatch. Minimum inter-fragment atom distance
+    // (Bohr) at the current geometry, computed in calculateFinalCharges from the packed
+    // distances + topology->fraglist and read by dispatchSolve. -1 = not computed
+    // (single fragment, or no topology) → treated as "in contact" so the safe exact
+    // path is chosen. The approximate batched solver drops cross-fragment Coulomb, so it
+    // is auto-selected only when fragments are well-separated (>= eeq_batched_min_distance).
+    mutable double m_contact_min_dist = -1.0;
 
     // Convergence statistics — accumulate across calls, print summary instead of per-call spam
     // Claude Generated (April 2026)
@@ -948,7 +976,7 @@ private:
     // WP-EEQ-Cache (May 2026): Cholesky factor cache across MD/opt steps.
     // Avoids O(N^3/6) refactorization when geometry displacement < m_refactor_eps.
     struct EEQCholeskyCache {
-        Eigen::LLT<Matrix> llt;    ///< Cached LLT factorization of A_nn
+        Eigen::MatrixXd chol_factor;  ///< Cached Cholesky factor of A_nn (column-major, threaded LAPACK dpotrf; see eeq_solver.cpp)
         Matrix Z2;                 ///< A_nn^{-1}·C^T  (N x nfrag) — reused across steps
         Matrix S;                  ///< Schur complement C·Z2 (nfrag x nfrag)
         Matrix last_geometry;      ///< Geometry (N x 3) at factorization time
@@ -979,6 +1007,12 @@ private:
     /// When non-null, calculateFinalCharges fills m_phase2_distances from this instead of
     /// recomputing the O(N^2) sqrt loop.
     const Eigen::VectorXd* m_external_srab = nullptr;
+
+    /// WP5 (June 2026): implicit-solvation reaction-field Born matrix (nat×nat),
+    /// added to the EEQ matrix in calculateFinalCharges. nullptr = gas phase.
+    /// Column-major to match ALPBSolvation::bornMatrix(); symmetric, so the storage
+    /// order vs the row-major augmented EEQ matrix is irrelevant.
+    const Eigen::MatrixXd* m_reaction_field = nullptr;
 
     /// Last truly successful charges (Phase 2 if available, otherwise Phase 1).
     /// Initialized from topology_charges on first call, then overwritten with the Phase 2
@@ -1028,12 +1062,17 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
     PARAM(use_iterative_refinement, Bool, false,
           "Use iterative refinement for EEQ Phase 2", "Algorithm", {})
     PARAM(solve_method, String, "cholesky",
-          "EEQ linear solve algorithm: cholesky | batched | pcg | auto | lu (legacy). "
+          "EEQ linear solve algorithm: cholesky | ldlt | batched | pcg | auto | lu (legacy). "
           "GPU paths: cholesky → WP5-A/WP7-A (exact, full N×N Cholesky); "
           "batched → WP7-B (per-fragment Cholesky, ignores cross-fragment Coulomb — "
-          "use only for well-separated fragments, see eeq_batched_min_distance). "
-          "CPU 'batched' logs a warning and falls back to cholesky. "
-          "Legacy alias 'schur_cholesky' maps to 'cholesky'.",
+          "use only for well-separated fragments, see eeq_batched_min_distance; "
+          "auto/pcg no longer auto-select it for in-contact fragments, see "
+          "eeq_contact_prefer_exact). "
+          "Legacy alias 'schur_cholesky' maps to 'cholesky'. "
+          "ldlt = Bunch-Kaufman LDL^T on A_nn + Schur; equals cholesky for SPD A_nn (all "
+          "gas-phase systems). NOT an automatic fallback: for an indefinite A_nn (e.g. the "
+          "implicit-solvation reaction field) the robust path is cholesky's augmented-LU "
+          "fallback, which ldlt does not reproduce.",
           "Algorithm", {})
     PARAM(max_pcg_iterations, Int, 200,
           "Maximum PCG iterations for EEQ solve", "Algorithm", {})
@@ -1060,9 +1099,16 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Distance cutoff in Bohr for Coulomb matrix sparsification (0 = no cutoff, matches Fortran goed_gfnff). Non-zero values violate Hellmann-Feynman vs. the full Coulomb energy and degrade MD energy conservation.", "Advanced", {})
     PARAM(eeq_batched_min_distance, Double, 15.0,
           "Minimum atom-atom distance between different fragments (Bohr) below which "
-          "the batched EEQ solver logs a warning. Batched still runs — the warning "
-          "alerts the user that cross-fragment Coulomb (which batched ignores) may be "
-          "non-negligible. 0 = no warning. Default 15 Bohr ≈ 8 Å.",
+          "fragments are considered in contact. Used both to warn for an explicit batched "
+          "solve and (with eeq_contact_prefer_exact) to auto-route in-contact systems to "
+          "the exact solver. 0 = disable the check. Default 15 Bohr ~ 8 Angstrom.",
+          "Advanced", {})
+    PARAM(eeq_contact_prefer_exact, Bool, true,
+          "Auto/PCG dispatch: when a highly fragmented system has fragments in contact "
+          "(min inter-fragment distance below eeq_batched_min_distance, or unknown), prefer "
+          "the exact solver (SchurCholesky/PCG+block-Jacobi, cross-fragment Coulomb retained) "
+          "over the approximate batched per-fragment solve. Set false to keep the old "
+          "density-only batched auto-selection.",
           "Advanced", {})
     PARAM(dump_charges, Bool, false,
           "Save Phase 1 and Phase 2 charges to charges_dump_N<size>.json for analysis", "Advanced", {})

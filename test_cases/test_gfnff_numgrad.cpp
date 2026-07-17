@@ -65,7 +65,9 @@ struct GradTestResult {
 
 static GradTestResult runGradTest(const std::string& name,
                                    const curcuma::Molecule& cmol,
-                                   bool fixed_charges, double tol)
+                                   bool fixed_charges, double tol,
+                                   const std::string& solvent = "none",
+                                   const std::string& solvent_model = "alpb")
 {
     GradTestResult res;
     res.name         = name;
@@ -78,6 +80,10 @@ static GradTestResult runGradTest(const std::string& name,
     json config = json::object();
     config["verbosity"] = 0;
     config["threads"]   = 1;
+    if (solvent != "none" && !solvent.empty()) {
+        config["solvent"]       = solvent;        // WP5: GFN-FF implicit solvation
+        config["solvent_model"] = solvent_model;  // alpb | gbsa
+    }
 
     GFNFF gfnff(config);
     if (!gfnff.InitialiseMolecule(mol)) {
@@ -149,19 +155,30 @@ int main(int argc, char* argv[])
 
     bool fixed_charges = false;
     std::string xyz_file;
+    std::string solvent = "none";          // WP5: GFN-FF implicit solvation
+    std::string solvent_model = "alpb";    // alpb | gbsa
 
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
         if (arg == "--fixed-charges" || arg == "-fc")
             fixed_charges = true;
+        else if (arg == "--solvent" && i + 1 < argc)
+            solvent = argv[++i];
+        else if (arg == "--solvent-model" && i + 1 < argc)
+            solvent_model = argv[++i];
         else
             xyz_file = arg;
     }
 
-    // fixed-charges: tests gradient formula correctness → tight tolerance
-    // full EEQ:     analytical gradient uses frozen-charge approximation (no dq/dr),
-    //               numerical gradient fully re-optimises charges → ~1-3 mEh/Bohr gap
-    //               is expected and matches the Fortran GFN-FF reference behaviour.
+    // full EEQ (default, the pass/fail gate): the analytical Gradient() is the TOTAL
+    //   derivative (incl. the Coulomb charge response, Term-1b / dynamic charges added
+    //   Feb 2026); NumGrad() re-solves EEQ + CN each step, so the two agree to a few
+    //   mEh/Bohr. This is the gradient an optimiser/MD actually uses.
+    // fixed-charges (--fixed-charges): DIAGNOSTIC ONLY, not a pass/fail gate. NumGradFixedCharges
+    //   freezes EEQ → a PARTIAL derivative, which the (total) analytical gradient correctly does
+    //   NOT match for polar systems (the charge-response term is large and opposite, e.g. H2O
+    //   total -1.2e-2 vs partial +2.9e-2 Eh/Bohr). The 1e-4 tolerance here is therefore expected
+    //   to "fail" and the corresponding ctest was retired — see test_cases/CMakeLists.txt.
     const double tol = fixed_charges ? 1e-4 : 5e-3; // Eh/Bohr
 
     std::cout << "GFN-FF CPU Gradient Validation (analytical vs numerical)\n"
@@ -191,7 +208,7 @@ int main(int argc, char* argv[])
     std::vector<GradTestResult> results;
     for (auto& [name, cmol] : molecules) {
         std::cout << "\n--- " << name << " (" << cmol.AtomCount() << " atoms) ---\n";
-        auto res = runGradTest(name, cmol, fixed_charges, tol);
+        auto res = runGradTest(name, cmol, fixed_charges, tol, solvent, solvent_model);
         results.push_back(res);
 
         if (!res.nan_detected) {

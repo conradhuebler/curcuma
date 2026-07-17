@@ -1,0 +1,222 @@
+# Native GFN1/GFN2/GFN-FF on Vulkan compute
+
+> Status: 🤖 AI-generated, ⚙️ machine-tested. NOT human production tested.
+> **Stage 3 (on-device integral build):** the CN, overlap S, bare Hamiltonian H0, the
+> Löwdin X = S⁻¹ᐟ² and the Coulomb γ are built by SPIR-V kernels on the device and consumed
+> in place (no per-geometry nao² upload). **GFN1 = device-resident SCF (Stage 2):** Fock
+> build, the symmetric eigensolve, density, Mulliken populations and the band energy all run
+> on the GPU; only `v_ao` (up) + eigenvalues/populations (down) cross the bus per iteration.
+> **GFN2 = device-resident multipole SCF (Stage 2b/V-AP3):** the Fock build (incl. the
+> anisotropic dp/qp term), the eigensolve, density, populations AND the atomic multipole
+> moments all run on the device; only `v_dp`/`v_qp` (up) + eps/pop/`dp_at`/`qp_at` (down)
+> cross per iteration (no nao² eigensolver transfer). The isotropic+multipole **potential**
+> and the GFN2 **gradient** stay on the host. (Bit-identical to CPU; **not** a speed-up on
+> this iGPU — the FP64 eigensolve dominates, see "Performance" / FP32 below.)
+> **GFN1 nuclear gradient = on device (Stage 4, V-AP1):** repulsion / Coulomb /
+> H0-Pulay+CN built by three FP64 SPIR-V **gather** kernels (Vulkan has no `atomicAdd`
+> on doubles, so each thread owns one atom and sums over all partners — exact because the
+> pair forces are antisymmetric), so GFN1 `-opt`/`-md` are fully device-resident.
+> **GFN2 nuclear + D4 gradient = on device (V-PERF-2 + X-AP4):** the multipole-integral
+> Pulay term (`grad_pulay`, one workgroup per atom) and the full D4 dispersion gradient —
+> in-SCF dE/dq, 2-body, ATM 3-body, AND the **D4 EEQ charge-response ∂q/∂x** — all run on the
+> GPU; the q-response (the last host hold-out) uses a hand-written single-workgroup FP64
+> no-pivot solve for the (N+1) EEQ system (`d4eeq_*` kernels, `derf` erfcc). So GFN2
+> `-opt`/`-md` are device-resident too, on par with ROCm. Energies and gradients match the
+> CPU path bit-for-bit on the validation runs.
+
+## What it is
+
+`-gpu vulkan` selects a hand-written Vulkan compute backend for the native methods —
+vendor-neutral GPU acceleration (AMD/NVIDIA/Intel) with no CUDA/ROCm dependency. Unlike
+CUDA/ROCm there is **no BLAS/LAPACK on Vulkan**, so every kernel (GEMM, triangular solve,
+the integral/Fock/density/gradient kernels, and the symmetric eigensolver) is a
+hand-written SPIR-V compute shader.
+
+```
+./curcuma -sp mol.xyz -method gfn2 -gpu vulkan   # explicit Vulkan
+./curcuma -sp mol.xyz -method gfn1 -gpu auto     # GPU if a backend is compiled
+```
+
+`-gpu vulkan` on a build without Vulkan (or with no FP64-capable device) warns and falls
+back to the CPU. **FP64 (`shaderFloat64`) is required** — the SCF numerics are double
+precision, and `VkContext` rejects devices without it.
+
+## Dependencies
+
+Vulkan is **not** pulled in by the default build; it is only needed for `-DUSE_VULKAN=ON`.
+It is much lighter than ROCm — just the loader, headers and an FP64-capable driver. No
+vendor SDK is required.
+
+| Component | Purpose | Arch/Manjaro package | CMake / flag |
+|-----------|---------|----------------------|--------------|
+| Vulkan loader | `libvulkan.so` (runtime) | `vulkan-icd-loader` | `find_package(Vulkan)` → `Vulkan::Vulkan` |
+| Vulkan headers | `vulkan/vulkan.h` (build) | `vulkan-headers` | `find_package(Vulkan)` |
+| Driver / ICD (FP64) | the actual GPU backend | AMD `vulkan-radeon` (RADV, **no ROCm needed**) or `amdvlk`; NVIDIA `nvidia-utils`; Intel `vulkan-intel` | — |
+| `glslc` / `glslangValidator` | recompile shaders → SPIR-V | `shaderc` / `glslang` | **dev-time only** — the `.spv.inc` are committed |
+| `vulkaninfo` (optional) | check the device + `shaderFloat64` | `vulkan-tools` | — |
+
+- The build itself needs only `vulkan-icd-loader` + `vulkan-headers` (the SPIR-V is
+  committed as `shaders/*.spv.inc`, embedded by `spirv_kernels.h`). `glslc`/`glslangValidator`
+  are needed only to regenerate them (`shaders/compile_shaders.sh`).
+- **Runtime requirement: a device with `shaderFloat64`** (FP64 in compute shaders). Check
+  with `vulkaninfo | grep shaderFloat64`. `VkContext` rejects devices without it (→ CPU).
+- AMD users get Vulkan via the open Mesa **RADV** driver — `-gpu vulkan` therefore works
+  on AMD **without** installing the ROCm stack.
+
+## Build
+
+```
+cmake -S . -B release_vulkan -DCMAKE_BUILD_TYPE=Release \
+      -DUSE_VULKAN=ON
+cmake --build release_vulkan -j4
+```
+
+One GPU backend per build dir; the default `release/` is unchanged.
+
+## Architecture
+
+The core `XTB` SCF loop offloads through the abstract `GpuScfBackend` seam
+(`xtb_native.h`); any hook returning `false` falls back to the CPU, so the Vulkan engine is
+brought up stage-by-stage and is correct at every step.
+
+| File | Role |
+|------|------|
+| `qm_methods/vulkan/vk_context.{h,cpp}` | Generic Vulkan compute context: instance / FP64 device / compute queue / command pool |
+| `qm_methods/vulkan/xtb_vulkan_context.{h,cpp}` | xTB device engine over a `VkContext`; mirrors `XtbGpuContext` |
+| `qm_methods/xtb_vulkan_method.{h,cpp}` | `ComputationalMethod` wrapper; owns the context + the CPU `NativeXtbMethod` |
+| `qm_methods/vulkan/shaders/*.comp` | Hand-written FP64 GLSL compute shaders (compiled to SPIR-V) |
+
+Dispatch: `method_factory.cpp` `resolveNativeXtbGpuMode()` returns `"vulkan"` when
+`-gpu vulkan` and `USE_VULKAN` are set, then constructs `XtbVulkanComputationalMethod`.
+
+## Eigensolver choice
+
+The generalized problem `F C = S C ε` reduces via the Cholesky factor `L` (two triangular
+solves + back-transform) to a **standard** symmetric eigenproblem, exactly like the CUDA
+path — so Vulkan needs only GEMM + TRSM + a standard symmetric eigensolver. That solver is
+**cyclic one-sided Jacobi** (`shaders/jacobi_apply_f64.comp` + host pairing): the simplest
+symmetric eigensolver to parallelize correctly in compute shaders, returning the full
+spectrum (required for the Fermi occupation). It costs more flops than divide-and-conquer
+but is chosen for correctness first.
+
+## Stages
+
+0. **Build + dispatch + device handshake** — done. `-gpu vulkan` builds, selects the
+   backend, probes an FP64 device, falls back to CPU when absent.
+1. **GPU symmetric eigensolver via `ExternalEigensolver`** — done (used by GFN2). The
+   cyclic two-sided Jacobi (`shaders/{angles,col,row,vec}.comp`) solves the per-iteration
+   eigenproblem; the host reduces (Cholesky) and back-transforms.
+2. **Device-resident GFN1 SCF via `GpuScfBackend`** — done. `begin` uploads H0/S and
+   builds the resident X = S⁻¹ᐟ² (Jacobi(S) + `scale_cols` + `gemm`, no triangular
+   solve); `solve` does the Fock build (`fock`), Ã = X·F·X (`gemm`), Jacobi, C = X·C̃
+   (`gemm`); `density` forms P = C·diag(occ)·Cᵀ + Mulliken populations + band
+   (`scale_cols`/`gemm`/`popband`). Only `v_ao`/`occ` up and `eps`/`pop`/`band` down
+   per iteration. GFN2 (no multipole here) falls back to stage 1.
+3. **On-device integral build (CN/S/H0/L/γ)** — done. `beginBasis` uploads the
+   molecule-constant flattened basis + element tables once; `beginComputed` (per geometry)
+   runs `cn` → `self_energy` → `overlap_h0` → `gamma` SPIR-V kernels, then builds the Löwdin
+   X from the device S. `xtb_native.cpp` downloads S/H0/γ (and derives L = chol(S) host-side
+   via Eigen LLT — no device triangular solve) in place of the host build. Active for both
+   GFN1 and GFN2 (the s/p subset).
+3m. **On-device GFN2 multipole integrals (V-AP2)** — done. `beginMultipoleComputed`
+   dispatches the `multipole_ints` SPIR-V kernel (one thread per AO pair: global-origin
+   `cgto_multipole` then the per-column origin shift + traceless transform with the
+   resident overlap), and `downloadMultipole` fetches `dp_int`(3·nao²)/`qp_int`(6·nao²) so
+   the host GFN2 SCF skips its O(nao²) `setupMultipole` integral loop. GFN2 on Vulkan runs
+   the host SCF (Stage-1 eigensolver), so the device integrals feed the host Fock — bit-
+   identical GFN2 energy proves them. The GFN2 resident multipole SCF (Stage 2b) + multipole
+   gradient stay pending.
+4. **On-device GFN1 nuclear gradient (V-AP1)** — done. `gradient` builds the
+   energy-weighted density W = C·diag(2ε)·Cᵀ on device (`scale_cols`+`gemm` over the
+   resident rC, Jacobi order) then dispatches three FP64 **gather** kernels:
+   `grad_rep` (repulsion, section 1), `grad_coulomb` (isotropic Coulomb, section 3) and
+   `grad_pulay` (on-site CN section 2a + H0/Pulay off-site section 2b, with the inline
+   Obara-Saika `cgto_overlap_grad`). One thread per atom A sums all its pair contributions
+   — no FP64 atomics (Vulkan has none); exact because the pair forces are antisymmetric and
+   the H0-Pulay scalar terms are pair-symmetric, with `dS/dR_A` and `dxij = x_A − x_foreign`
+   carrying the sign. Only the dispersion gradient + CN chain-rule run on the host. GFN2's
+   gradient stays on the CPU (its SCF is not device-resident on Vulkan, so the device
+   gradient path is only ever taken for GFN1). GFN2 multipole resident SCF (Stage 2b) —
+   pending.
+
+The remaining stages (GFN2 multipole stack, GFN-FF, device solvation) are broken into work
+packages in [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md) (Vulkan = `V-AP*`).
+
+## What was tested
+
+On an **AMD Radeon 890M (RADV, integrated, shaderFloat64)**, build `release_vulkan/`
+(`-DUSE_VULKAN=ON`):
+
+- **Eigensolver vs Eigen** (standalone, `prototype/`): random symmetric n=4..128, eigenvalues
+  to ~1e-13, reconstruction / orthogonality to ~1e-14. Generalized solve (Löwdin S⁻¹ᐟ²
+  chain) vs Eigen GeneralizedSelfAdjointEigenSolver: residual ~1e-14.
+- **Stage-3 device integral build active** (confirmed at `-verbosity 2`): both methods log
+  "SCF: integrals built on GPU device (S/H0/Lowdin/gamma downloaded; host build skipped)";
+  GFN1 additionally logs "device-resident GFN1 path (CN/S/H0/L built on GPU; no nao^2 upload)".
+- **gfn1 + gfn2 single point** `-gpu vulkan` vs `-gpu none` over the full 12-molecule
+  `test_cases/sqm_reference` set (H2, He2, LiH, H2O, NH3, CH4, HCN, C6H6, triose, caffeine,
+  acetic_acid_dimer, and the 231-atom `complex`): all 24 bit-identical at 8 decimals (|dE| = 0).
+- **gfn1 + gfn2 opt** (H2O): converges to the CPU minimum (gfn1 -5.768775, gfn2 -5.070544 Eh).
+- **GFN2 device multipole integrals (V-AP2)**: with `multipole_ints` building dp_int/qp_int
+  on the device (log "GFN2 multipole integrals built on GPU device"), gfn2 `-sp` energy
+  bit-identical to CPU (8 dp) over the full 12-molecule set incl. 231-atom `complex`; gfn2
+  `-opt` (NH3) identical trajectory (integrals rebuilt each geometry, feeding the host Fock
+  AND the host multipole gradient). ctest `cli_gpu_multipole_01_vulkan_gfn2_multipole`.
+- **GFN1 device nuclear gradient (V-AP1)**: `-sp` gradient norm matches CPU to printed
+  precision (7 sig figs) over the full 12-molecule set incl. 231-atom `complex` (gather
+  kernels); `-opt` caffeine 35 steps step-by-step identical in energy AND gradient norm
+  (the decisive gradient check — a wrong gradient diverges immediately). ctest
+  `cli_gpu_gradient_01_vulkan_gfn1_gradient` (labels `gpu_gradient;gpu;vulkan;cli`).
+  **Honest caveat:** the gather kernels are not bit-identical to the CPU at machine epsilon
+  — they sum in a different order and use the shader `dexp()` (vs `std::exp`), so the
+  gradient agrees to ~1e-12, not 1e-15. On normal/short opts this is invisible (caffeine 35
+  steps exact); on a pathological 309-step *flat* opt (triose) the ~1e-12 per-step
+  difference, together with the non-MKL Jacobi eigensolver (~1e-13/solve), accumulates in
+  the LBFGS history to a non-systematic ~1e-6 trajectory drift after ~50 steps. This is
+  FP non-reproducibility of the GPU path, not a gradient defect (a wrong gradient diverges,
+  not tracks to 1e-6), and would occur from the eigensolver alone with the gradient on CPU.
+- **GFN2 device-resident multipole SCF (V-AP3)**: with `fock_multipole` + `multipole_moments`
+  (log "device-resident GFN2 path"), gfn2 `-sp` energy bit-identical (8 dp) over the
+  12-molecule set incl. `complex`, `-sp` gradient norm matches CPU, `-opt` (NH3) step-by-step
+  identical. The GFN2 gradient stays on the host (the device `gradient()` returns false for
+  GFN2 → host `calculateGradient`; without that, the resident path silently used the
+  GFN1-isotropic-only device gradient — fixed).
+- **GFN2 D4 EEQ q-response on device (X-AP4, 2026-06-18)** — the last host piece of the GFN2
+  D4 gradient. The EEQ charges + the adjoint ∂q/∂x solve now run on the GPU: `d4eeq_cn`
+  (raw CN), `d4eeq_build` (augmented (N+1) matrix), `d4eeq_solve` (**single-workgroup FP64
+  Gaussian elimination without pivoting** — the hardness+constraint matrix is non-singular
+  without row swaps, so it agrees with the host/ROCm partial-pivoted LU to rounding), and
+  `d4eeq_resp` (∂q/∂x gather). GLSL-fp64 has no `erf`, so a Numerical-Recipes `derf` (erfcc,
+  ~1.2e-7) backs the screened-Coulomb terms (ample — q-response is a small gradient term).
+  `supportsDeviceEeq()→true` also routes the `scf_guess=eeq` initial guess through the device.
+  Validated: GFN2 `-sp` E+gradnorm match CPU on H2O/HCN/NH3 (7 dp); the device EEQ guess
+  charges equal the host model exactly (O=−0.643500 on H2O); the per-iteration SCF trace is
+  bit-identical from iteration 1 with the final energy identical, and iteration 0 differs by
+  only ~1e-10 (the `derf` signature — which confirms the device path actually runs rather than
+  silently falling back to host); GFN2 `-opt` (HCN) trajectory bit-identical to CPU. ctest
+  `cli_gpu_gradient_02_vulkan_gfn2_qresponse`.
+- **Performance (honest)**: device-resident GFN1 *and* GFN2 are ~1.3× **slower** than the CPU
+  on the 231-atom `complex` (gfn2 16.0 s vs 12.4 s SCF; gfn1 20.2 s vs 15.4 s) — the FP64
+  two-sided Jacobi eigensolve dominates and the iGPU runs FP64 at ~1/16 of FP32. The removed
+  per-iteration transfers are cheap shared-memory copies on an iGPU (not PCIe), so residency
+  is a correctness/architecture milestone here, not a speed-up.
+- **FP32 mixed precision (X-AP3) — implemented, opt-in, but does NOT help Vulkan**: FP32
+  variants of the Jacobi shaders (`angles_f32`/`col_f32`/`row_f32`/`vec_f32`) + FP32 work
+  buffers exist and are correct (energy matches CPU), but measured **net-neutral to
+  net-negative** on the 890M: the cyclic Jacobi is dispatch/barrier/bandwidth-bound, not
+  FP64-arithmetic-bound, so FP32 is ~equal per iteration (`complex` GFN2: FP32 828 vs FP64
+  844 ms/iter) and the perturbed early iterations can cost an extra SCF cycle (GFN1 14→15),
+  making it slower. So mixed precision is **NOT defaulted on for `-gpu vulkan`** (unlike
+  ROCm/CUDA); the FP32 path is a documented opt-in (`-scf_mixed_precision true`). The real
+  Vulkan lever is a faster **eigensolve algorithm**, not precision. See SQM_GPU_ROADMAP.md
+  X-AP3. (Two algorithmic alternatives were since built and benchmarked, both opt-in via
+  `CURCUMA_VK_TRIDIAG_SOLVE`: a fully-GPU **Householder** eigensolver (default) and a
+  full-residency **Cuppen divide-and-conquer** (`=dc`, EIG-3) — the D&C is bit-identical but
+  ~13× *slower* than host tql2 on this iGPU (submit/deflation-bound), so it ships opt-in only.
+  See [SQM_VULKAN_EIGENSOLVER_WP.md](SQM_VULKAN_EIGENSOLVER_WP.md).)
+- Default non-Vulkan `release/` build stays green (cli_curcumaopt_*/cli_rmsd_* 11/11).
+
+What was **NOT** tested: large systems (>~100 nao; the iGPU FP64 Jacobi is slow — this is a
+correctness milestone, not a performance one), discrete GPUs, NVIDIA/Intel devices, MD, the
+GFN2 multipole integrals + multipole resident SCF, and the on-device nuclear gradient (still
+CPU, Stage 4). Human production testing pending.

@@ -30,6 +30,8 @@
 
 #include <Eigen/Dense>
 #include <memory>
+#include <array>
+#include <utility>
 
 #include "json.hpp"
 using json = nlohmann::json;
@@ -89,6 +91,12 @@ public:
     // GFN-FF computes zetac6 ONCE during initialization using topology charges (topo%qa),
     // which are calculated with INTEGER neighbor counts, NOT fractional CN from geometry.
     void setTopologyCharges(const Vector& charges) { m_topology_charges = charges; }
+
+    // WP-A (Jun 2026): when the GPU builds the D4 pair list on device
+    // (gpu_disp_pairs_on_device), GenerateDispersionPairsNative computes only the
+    // O(N) CN + Gaussian weights the device reuses and skips the O(N^2) pair loop
+    // + host dc6dcn (the GPU recomputes dc6dcn on device). Returns an empty list.
+    void setSkipPairLoop(bool v) { m_skip_pair_loop = v; }
 
     // Claude Generated (Feb 15, 2026): dc6dcn computation for dispersion CN gradient
     // Reference: Fortran gfnff_gdisp0.f90:174-210, 262-305
@@ -169,6 +177,23 @@ public:
     // GenerateParameters (m_cn_values). Both outputs are sized nat·MAX_REF.
     void buildRefWFlat(const std::vector<int>& atoms, const Vector& q,
                        std::vector<double>& W_out, std::vector<double>& dWq_out) const;
+
+    // Stage 5 (Part B2, Claude Generated 2026-06): same as buildRefWFlat but also emits
+    // dWc_out[a·MAX_REF+ref] = ∂W/∂CN — the extra per-atom weight derivative the device
+    // 2-body D4 *gradient* kernel needs for the CN chain (dc6dcn = Σ dWc_i·W_j·c6ref).
+    // The CN-Gaussian + zeta build stays on the validated CPU (buildAtomRefW); the device
+    // does only the O(N²) 7×7 contraction + BJ damping. All outputs sized nat·MAX_REF.
+    void buildRefWFlat(const std::vector<int>& atoms, const Vector& q,
+                       std::vector<double>& W_out, std::vector<double>& dWq_out,
+                       std::vector<double>& dWc_out) const;
+
+    // Stage 5 (Part B2, Claude Generated 2026-06): the q=0 reference C6 (+ dC6/dCN) matrices
+    // the device ATM 3-body kernel consumes (matches D4Evaluator::computeATM's c6/dc6dcn build
+    // at qat=0). c6_out[a·nat+b] = C6(a,b) (symmetric); dc6dcn_out[a·nat+b] = ∂C6(a,b)/∂CN_a
+    // (NOT symmetric). Both sized nat·nat. The host does the cheap O(N²·49) contraction; the
+    // device does the O(N³) triple loop. Requires a prior GenerateParameters (m_cn_values).
+    void buildAtmC6Flat(const std::vector<int>& atoms,
+                        std::vector<double>& c6_out, std::vector<double>& dc6dcn_out) const;
 
     // Stage 6 (S6.2b, Claude Generated 2026-06): the q-INDEPENDENT per-atom
     // reference data the GPU needs to rebuild W/dWq on the device from the
@@ -299,6 +324,7 @@ private:
     // Reference: Fortran gfnff_ini.f90:789 - f1 = zeta(ati, topo%qa(i))
     // GFN-FF uses topology-based charges (topo%qa) for zetac6 scaling, NOT geometry-dependent EEQ
     Vector m_topology_charges;  // Phase 1 topology charges from GFNFF::TopologyInfo
+    bool m_skip_pair_loop = false;  // WP-A: GPU builds the pair list; skip the host O(N^2) loop
 
     // Molecular CN calculation (December 2025 Phase 2 - CN+Charge weighting)
     std::vector<double> m_cn_values;  // Cached GFNFFCN values for current geometry
@@ -339,6 +365,40 @@ private:
     // dc6dcn(i,j) = dC6(i,j)/dCN(i) - asymmetric matrix
     Matrix m_dc6dcn;
     bool m_dc6dcn_computed = false;
+
+    // Claude Generated (Lever 3 Opt A, Jun 2026): in-cutoff dispersion pair list.
+    // computeDC6DCN historically built the full dense N×N matrix with NO distance
+    // cutoff, but the only consumer (ForceFieldThread) reads dc6dcn(i,j)/(j,i) only
+    // for pairs in the dispersion list (within the 60 Bohr cutoff, strictly i<j).
+    // Storing the in-cutoff pairs lets computeDC6DCN skip the unread beyond-cutoff
+    // (and diagonal) cells — exactly bit-identical for every consumed entry.
+    // Populated by GenerateDispersionPairsNative; reused by updateCNValuesForGradient
+    // (which has no geometry). When invalid, computeDC6DCN falls back to full N².
+    std::vector<std::pair<int, int>> m_dc6dcn_pairs;  // (i,j), i<j, |r_ij|<=cutoff
+    bool m_dc6dcn_pairs_valid = false;
+
+    // Claude Generated (Lever 3 Opt B, Jun 2026): per-atom half-contraction of the
+    // C6 reference block over the FIRST ref index, keyed by PARTNER element.
+    //   g_i[e][b]  = Σ_a w_i[a]·c6ref[Zi][e][a][b]    (from m_gaussian_weights[i])
+    //   dg_i[e][b] = Σ_a dw_i[a]·c6ref[Zi][e][a][b]   (from m_gaussian_weight_derivatives[i])
+    // Then per pair: c6(i,j)=Σ_b g_i[Zj][b]·w_j[b]; dc6_di=Σ_b dg_i[Zj][b]·w_j[b];
+    // dc6_dj=Σ_b g_i[Zj][b]·dw_j[b]. Cuts the inner 7×7=49 FMA to 7 in both the
+    // energy loop (getChargeWeightedC6) and computeDC6DCN. Reassociates the FP sum
+    // (~1e-16) vs the flat loop, so it is gated behind disp_half_contraction (default
+    // on); false reproduces the exact flat-loop path. Cost O(N·K·49), K = #present elems.
+    bool m_use_half_contraction = true;               // from PARAM disp_half_contraction
+    std::vector<int> m_present_elems;                 // distinct Z present (1-based), size K
+    std::array<int, MAX_ELEM + 1> m_elem_slot{};      // Z -> slot in m_present_elems, else -1
+    int m_c6_half_K = 0;                              // == m_present_elems.size()
+    int m_c6_half_natoms = 0;                         // rows actually built
+    std::vector<double> m_c6_half_g;                  // [ (i*K + slot)*MAX_REF + b ]
+    std::vector<double> m_c6_half_dg;                 // [ (i*K + slot)*MAX_REF + b ]
+    bool m_c6_half_valid = false;
+    inline size_t c6HalfIndex(int atom_i, int slot) const {
+        return (static_cast<size_t>(atom_i) * m_c6_half_K + slot) * MAX_REF;
+    }
+    void buildPresentElementMap();   // fills m_present_elems / m_elem_slot / m_c6_half_K
+    void precomputeC6HalfContraction(CxxThreadPool* pool = nullptr, int num_threads = 1);
 
     // Claude Generated (Apr 2026): P1a — CN-change threshold cache for Gaussian weights
     // Skip recomputation of gw/dgw/dc6dcn when CN changes < threshold (MD optimization)

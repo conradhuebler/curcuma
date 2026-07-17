@@ -235,7 +235,12 @@ bool ParameterRegistry::validateRegistry() const
         }
     }
 
-    // Check for shared parameters across modules (type consistency)
+    // Check for shared parameters across modules (type consistency). Claude Generated (June 2026):
+    // this only prints developer diagnostics (it never affects `valid`) and previously spammed a
+    // block of "Parameter 'X' has different types ..." warnings to stderr on every run. Gate it
+    // behind a debug macro (same pattern as DEBUG_CONFIG_MANAGER) so normal output stays clean;
+    // these same-name/different-type collisions are handled by the flat-flag routing at runtime.
+#ifdef DEBUG_PARAMETER_REGISTRY
     std::map<std::string, std::pair<std::string, ParamType>> first_occurrence;
 
     for (const auto& [module, params] : registry) {
@@ -253,6 +258,7 @@ bool ParameterRegistry::validateRegistry() const
             }
         }
     }
+#endif
 
     return valid;
 }

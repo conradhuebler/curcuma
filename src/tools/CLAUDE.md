@@ -59,7 +59,7 @@ tools/
 ### 🤖 BMT Output Directory System (`bmt_utils.h/cpp`)
 - **Default behavior**: All commands create a `Basename.Keyword.YYYYMMDD_HHMMSS` directory for output files
 - **`createBMTDir(basename, keyword)`**: Creates the timestamped directory, logs the path
-- **`writeMetadata(bmt_dir, basename, method, input_file)`**: Writes `metadata.txt` with calculation info
+- **`writeMetadata(bmt_dir, basename, method, input_file)`**: Writes `metadata.json` with calculation info (JSON format)
 - **`processBakFiles(bmt_dir, bak_files)`**: Copies listed files from BMT dir back to CWD; warns if BMT is empty
 - **`outputPath(bmt_dir, filename)`**: Returns `bmt_dir/filename` or just `filename` when BMT is disabled
 - **`stripExtension(filename)`**: Removes file extension (multi-dot safe, uses `std::filesystem::path::stem`)

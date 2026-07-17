@@ -62,7 +62,8 @@ class SharedBiasPool;  // Claude Generated (Apr 2026): forward declaration
 
 class BiasThread : public CxxThread {
 public:
-    BiasThread(const Molecule& reference, const json& rmsdconfig, bool nocolvarfile, bool nohillsfile);
+    BiasThread(const Molecule& reference, const json& rmsdconfig, bool nocolvarfile, bool nohillsfile,
+               const std::string& colvar_base = "COLVAR");
     ~BiasThread();
 
     virtual int execute() override;
@@ -77,7 +78,7 @@ public:
         m_biased_structures.push_back(str);
         if (m_nocolvarfile == false) {
             std::ofstream colvarfile;
-            colvarfile.open("COLVAR_" + std::to_string(index));
+            colvarfile.open(m_colvar_base + "_" + std::to_string(index));
             colvarfile << "#m_currentStep  rmsd  bias_energy   counter  factor" << std::endl;
             colvarfile.close();
         }
@@ -135,6 +136,7 @@ private:
     double m_current_bias_wt = 0; // well-tempered bias energy (opt-in, output only)
     int m_counter = 0, m_atoms = 0;
     bool m_wtmtd = false, m_nocolvarfile = false, m_nohillsfile = false;
+    std::string m_colvar_base = "COLVAR";
 };
 
 // Claude Generated 2025: CurcumaMDJson removed - replaced by ParameterRegistry + ConfigManager
@@ -143,7 +145,7 @@ private:
 // Claude Generated 2025: Type-safe thermostat selection
 enum class ThermostatType {
     Berendsen,
-    Anderson,
+    Andersen,
     NoseHover,
     CSVR,
     None
@@ -182,6 +184,8 @@ public:
     void start() override;
 
     std::vector<Molecule*> UniqueMolecules() const { return m_unique_structures; }
+    const Molecule& CurrentMolecule() const { return m_molecule; }  ///< Claude Generated: access final MD geometry
+    bool wasStable() const { return !m_unstable; }  ///< Claude Generated: check if MD completed without instability (NaN/Inf)
     void printHelp() const;
 
     /* ============================================================================
@@ -223,6 +227,25 @@ public:
     int stepCount() const { return m_step; }
     double currentTime() const { return m_currentStep; }
     const Molecule& currentMolecule() const { return m_molecule; }
+
+    /** Claude Generated (2026): set the thermostat target temperature live (Kelvin).
+     *  Safe to call between step() calls from the driving thread. Setting it marks the
+     *  run as manually overridden, so any active temperature ramp stops touching m_T0
+     *  for the rest of the run (manual control wins). */
+    void setTargetTemperature(double T)
+    {
+        m_T0 = T;
+        m_global_ramp.overridden = true;
+    }
+    /** Claude Generated (2026): current thermostat target temperature (Kelvin). Reflects
+     *  the live setpoint, including the value driven by an active temperature ramp. */
+    double targetTemperature() const { return m_T0; }
+
+    /** Claude Generated (2026): live-set the wall potential energy/temperature scale (K).
+     *  Applied before the next MD step without restarting. */
+    void setWallTemp(double T) { m_wall_temp = T; }
+    /** Claude Generated (2026): live-set the wall potential steepness parameter (β). */
+    void setWallBeta(double beta) { m_wall_beta = beta; }
 
     // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
     void setSharedBiasPool(SharedBiasPool* pool) { m_shared_pool = pool; }
@@ -288,8 +311,41 @@ private:
     void Berendson();
     void CSVR();
     void None();
-    void Anderson();
+    void Andersen();
     void NoseHover();
+
+    // Claude Generated (2026): runtime temperature control / multi-stage ramp / regions.
+    struct RampSegment {
+        double target;                     ///< segment target temperature [K]
+        enum Mode { Steps, Reach } mode;   ///< Steps: ramp over N steps; Reach: hold until <T> reached
+        double value;                      ///< Steps: number of steps; Reach: tolerance [K]
+    };
+    /// One temperature schedule (global or per region) plus its running position.
+    struct RampState {
+        bool enabled = false;              ///< schedule active
+        bool overridden = false;           ///< a live setTargetTemperature() cancelled it (global only)
+        std::vector<RampSegment> schedule;
+        int idx = 0;                       ///< active segment
+        int seg_start_step = 0;            ///< m_step when the active segment began
+        double seg_start_T = 298.15;       ///< setpoint at the start of the active segment
+    };
+    /// A subset of atoms thermostatted to their own (optionally ramped) target temperature.
+    struct ThermalRegion {
+        std::string atoms_spec;            ///< selection string (FragString2Indicies grammar)
+        std::vector<int> atoms;            ///< resolved 0-based indices (set in prepareRun)
+        double T0 = 298.15;                ///< current setpoint (driven by ramp)
+        int dof = 0;                       ///< 3 * atoms.size()
+        RampState ramp;
+    };
+
+    bool ParseSchedule(const std::string& spec, std::vector<RampSegment>& out, const std::string& ctx);  ///< parse 'T:mode:val;...'
+    void StepRamp(RampState& rs, double& T0, double measuredT);  ///< advance one schedule by one step
+    void UpdateTemperatureRamp();                                ///< drive global + region setpoints (called each step)
+    void ParseThermalRegions();                                  ///< read temp_regions specs from the controller
+    void ResolveThermalRegions();                                ///< resolve atom indices + default complement (needs molecule)
+    double RegionTemperature(const std::vector<int>& atoms, int dof) const;  ///< instantaneous T of an atom subset
+    void ApplyThermostat();                                      ///< per-region dispatch (or legacy global path)
+    void ApplyThermostatRegion(const std::vector<int>& atoms, double T0, int dof, ThermostatType type);
 
     void InitialiseWalls();
 
@@ -327,6 +383,11 @@ private:
     double m_dT = 0.5, m_currentStep = 0, m_maxtime = 1000;
     int m_spin = 0, m_charge = 0, m_print = 100;
     double m_T0 = 298.15, m_aver_Temp = 0, m_aver_rattle_Temp = 0, m_rmsd = 1.5;
+    // Claude Generated (Jun 2026): initial velocity sampling temperature. Set to
+    // -1 in the constructor and resolved against m_T0 in performMolecularDynamics
+    // so the thermostat target (m_T0) and the MB-sampling temperature can be
+    // controlled independently. -1 means "same as target temperature".
+    double m_T_init = -1.0;
     double m_x0 = 0, m_y0 = 0, m_z0 = 0;
     double m_Ekin_exchange = 0.0;
 //    std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass, m_virial, m_gradient_bias, m_scaling_vector_linear, m_scaling_vector_nonlinear, m_rt_geom_1, m_rt_geom_2, m_rt_velo;
@@ -368,6 +429,18 @@ private:
     bool m_temp_abort = false;           // abort when running-mean temperature runs away from target
     double m_temp_abort_factor = 1.5;    // abort if <T> > factor * T0 (<= 0 disables)
     double m_temp_abort_delta = 300.0;   // abort if <T> > T0 + delta [K] (<= 0 disables)
+
+    // Claude Generated (2026): runtime temperature control + multi-stage ramp + regions.
+    // m_T0 is the global thermostat setpoint, read every step by the thermostats. The global
+    // ramp (m_global_ramp) drives m_T0 across its segments; a live setTargetTemperature() sets
+    // m_global_ramp.overridden, after which it leaves m_T0 alone for the rest of the run.
+    // Each ThermalRegion thermostats its own atom subset to its own (optionally ramped) target;
+    // atoms in no region (m_default_region_atoms) follow the global setpoint.
+    bool m_temp_ramp = false;                       // global ramp enable (PARAM temp_ramp)
+    RampState m_global_ramp;                         // global schedule state
+    std::vector<ThermalRegion> m_thermal_regions;    // optional per-atom-subset thermostats
+    std::vector<int> m_default_region_atoms;         // atoms in no region (complement; resolved in prepareRun)
+    int m_default_region_dof = 0;                    // 3 * m_default_region_atoms.size()
 
     std::vector<Geometry> m_bias_structures;
     std::vector<BiasStructure> m_biased_structures;
@@ -458,7 +531,7 @@ private:
 
     int m_chain_length = 3; // Länge der Thermostatkette
 
-    double m_anderson = 0.01;
+    double m_andersen = 0.01;
 
     std::vector<std::pair<double, double>> m_rattle_tol_temp;
 
@@ -489,6 +562,7 @@ private:
     // --- Basic Simulation Parameters ---
     PARAM(method, String, "uff", "Energy calculation method (e.g., uff, gfn2).", "Basic", {})
     PARAM(temperature, Double, 298.15, "Target temperature in Kelvin.", "Basic", {"T"})
+    PARAM(initial_temperature, Double, -1.0, "Initial temperature for velocity sampling (K). -1: same as 'temperature'. Use this to anneal into the target or to start cold/warm; the thermostat still drives toward 'temperature'. Ignored on restart (velocities come from the restart file).", "Basic", {"T_init", "T0", "initT"})
     PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"})
     PARAM(max_time, Double, 1000.0, "Maximum simulation time in femtoseconds.", "Basic", {"MaxTime"})
     PARAM(charge, Int, 0, "Total charge of the system.", "Basic", {})
@@ -497,14 +571,14 @@ private:
     PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {})
 
     // --- Thermostat ---
-    PARAM(thermostat, String, "csvr", "Thermostat type: berendsen|anderson|nosehover|csvr|none.", "Thermostat", {})
+    PARAM(thermostat, String, "csvr", "Thermostat type: berendsen|andersen|nosehover|csvr|none.", "Thermostat", {})
     PARAM(coupling, Double, 10.0, "Thermostat coupling time in fs.", "Thermostat", {})
-    PARAM(anderson_probability, Double, 0.001, "Anderson thermostat collision probability.", "Thermostat", {"anderson"})
+    PARAM(andersen_probability, Double, 0.001, "Andersen thermostat collision probability.", "Thermostat", {})
     PARAM(chain_length, Int, 3, "Chain length for Nosé-Hoover thermostat.", "Thermostat", {"chainlength"})
 
     // --- System Control ---
     PARAM(remove_com_motion, Double, 100.0, "Remove translation/rotation every N fs.", "System", {"rm_COM"})
-    PARAM(remove_com_mode, Int, 3, "Removal mode (0:none, 1:trans, 2:rot, 3:both).", "System", {"rmrottrans"})
+    PARAM(remove_com_mode, Int, 1, "Removal mode (0:none, 1:trans only, 2:rot only, 3:both). Rotation removal is opt-in (use 2 or 3).", "System", {"rmrottrans"})
     PARAM(no_center, Bool, false, "Disable centering of the molecule at the origin.", "System", {"nocenter"})
     PARAM(use_com, Bool, false, "Use center of mass (otherwise geometric center).", "System", {"COM"})
     PARAM(hydrogen_mass, Int, 1, "Hydrogen mass scaling factor for HMR.", "System", {"hmass"})
@@ -574,6 +648,10 @@ private:
     PARAM(temp_abort, Bool, false, "Abort the MD run when the running-mean temperature runs away from the target (catches bias-driven heating). Uses temp_abort_factor and/or temp_abort_delta.", "ConfSearch", {})
     PARAM(temp_abort_factor, Double, 1.5, "Abort when <T> exceeds temp_abort_factor * target T. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
     PARAM(temp_abort_delta, Double, 300.0, "Abort when <T> exceeds (target T + temp_abort_delta) Kelvin. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
+
+    // --- Temperature Ramp (Jun 2026, Claude Generated) ---
+    PARAM(temp_ramp, Bool, false, "Enable a multi-stage temperature ramp schedule (see temp_schedule). A live GUI slider / setTargetTemperature() overrides it for the rest of the run.", "Temperature Ramp", {})
+    PARAM(temp_schedule, String, "", "Ramp schedule 'target:mode:value;...'. mode=steps ramps the setpoint linearly from the previous target to <target> over <value> integration steps; mode=reach jumps the setpoint to <target> and advances once |<T>-target| < value Kelvin. Example: '500:steps:5000;500:steps:2000;300:reach:10'.", "Temperature Ramp", {})
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^

@@ -34,6 +34,7 @@
 #include <iostream>
 #include <math.h>
 #include <stdio.h>
+#include <stdexcept>
 
 #include "tbliteinterface.h"
 
@@ -289,7 +290,10 @@ void TBLiteInterface::ApplySolvation()
             CurcumaLogger::param("gb_kernel", m_solvent_gb_kernel);
         }
         CurcumaLogger::error("GB solvation model not functional");
-        exit(1);
+        // Claude Generated fix, 2026-06: throw instead of exit(1) — a library must not
+        // kill the host process. (The following tblite_new_gb_solvation_epsilon line was
+        // already dead code behind exit(); left unreachable rather than touched.)
+        throw std::runtime_error("TBLite GB solvation model is not functional in this build");
         m_tb_cont = tblite_new_gb_solvation_epsilon(m_error, m_tblite_mol, m_solvent_eps, m_solvent_gb_version, m_solvent_gb_kernel);
         if (tblite_check_context(m_ctx)) {
             tbliteError();

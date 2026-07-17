@@ -1822,6 +1822,23 @@ __global__ GFNFF_KERNEL_BOUNDS void k_xbonds_mixed(
 // This kernel computes all 4 cases including neighbor effects.
 // ============================================================================
 
+// Claude Generated (June 2026): device-resident HB charge refresh (proto in .cuh).
+// One thread per HB triplet: copy the live per-atom EEQ charges into the HB SoA q
+// arrays by donor(A=idx_i)/H(idx_j)/acceptor(B=idx_k) index.
+__global__ void k_gather_hb_charges(
+    int n,
+    const int* __restrict__ idx_i, const int* __restrict__ idx_j, const int* __restrict__ idx_k,
+    const double* __restrict__ q_atom,
+    double* __restrict__ q_A, double* __restrict__ q_H, double* __restrict__ q_B)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < n) {
+        q_A[tid] = q_atom[idx_i[tid]]; // donor A
+        q_H[tid] = q_atom[idx_j[tid]]; // hydrogen H
+        q_B[tid] = q_atom[idx_k[tid]]; // acceptor B
+    }
+}
+
 __global__ void k_hbonds(
     int n,
     const int*    __restrict__ idx_i,
@@ -2989,6 +3006,145 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_logcn(
 }
 
 // ============================================================================
+// WP-A (Jun 2026): on-device D4 dispersion pair-list build
+// Reference (bit-identical target):
+//   d4param_generator.cpp:GenerateDispersionPairsNative (line 1789)
+//   getChargeWeightedC6 (line 1223) — Σ gw_i·gw_j·c6ref (CN-only weighting)
+//   GFNFFParameters::zetaChargeScale (gfnff_par.h:933)
+// ============================================================================
+
+/// Device port of GFNFFParameters::zetaChargeScale (gfnff_par.h:933).
+/// Caller passes the per-element zeff/c; Z out of [1,86] -> 1.0 at the call site.
+__device__ inline double zetaChargeScaleDev(double zeff, double c, double q)
+{
+    double qmod = zeff + q;
+    if (qmod < 0.0) return exp(3.0);            // highly anionic -> max zeta
+    return exp(3.0 * (1.0 - exp(c * (1.0 - zeff / qmod))));
+}
+
+/// Map a linear upper-triangle index tid -> (i,j), i<j (same arithmetic as the
+/// CN pair kernels so the surviving pair *set* matches).
+__device__ inline void dispPairFromTid(int tid, int N, int& i, int& j)
+{
+    i = static_cast<int>((2.0 * N - 1.0 - sqrt((2.0 * N - 1.0) * (2.0 * N - 1.0) - 8.0 * tid)) * 0.5);
+    while (i > 0 && i * (2 * N - i - 1) / 2 > tid) --i;
+    while (i + 1 < N && (i + 1) * (2 * N - (i + 1) - 1) / 2 <= tid) ++i;
+    j = tid - i * (2 * N - i - 1) / 2 + i + 1;
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_count(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_sq,
+    int*          d_count)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int n_total = N * (N - 1) / 2;
+    if (tid >= n_total) return;
+
+    int i, j;
+    dispPairFromTid(tid, N, i, j);
+    if (j >= N) return;
+
+    int zi = atom_types[i];
+    int zj = atom_types[j];
+    if (zi < 1 || zi > D4_MAX_ELEM || zj < 1 || zj > D4_MAX_ELEM) return;
+
+    double dx = cx[i] - cx[j];
+    double dy = cy[i] - cy[j];
+    double dz = cz[i] - cz[j];
+    double r2 = dx * dx + dy * dy + dz * dz;
+    if (r2 > cutoff_sq) return;
+
+    atomicAdd(d_count, 1);
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
+    int N,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ atom_types,
+    double        cutoff_sq,
+    const double* __restrict__ gw,
+    const double* __restrict__ c6_flat,
+    const double* __restrict__ sqrtzr4r2,
+    const double* __restrict__ topo_q,
+    const double* __restrict__ zeta_zeff,
+    const double* __restrict__ zeta_c,
+    double        a1,
+    double        a2,
+    int*          d_counter,
+    int*          out_i,
+    int*          out_j,
+    double*       out_C6,
+    double*       out_r4r2,
+    double*       out_r0sq,
+    double*       out_zeta,
+    double*       out_rcut)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int n_total = N * (N - 1) / 2;
+    if (tid >= n_total) return;
+
+    int i, j;
+    dispPairFromTid(tid, N, i, j);
+    if (j >= N) return;
+
+    int zi = atom_types[i];
+    int zj = atom_types[j];
+    if (zi < 1 || zi > D4_MAX_ELEM || zj < 1 || zj > D4_MAX_ELEM) return;
+
+    double dx = cx[i] - cx[j];
+    double dy = cy[i] - cy[j];
+    double dz = cz[i] - cz[j];
+    double r2 = dx * dx + dy * dy + dz * dz;
+    if (r2 > cutoff_sq) return;
+
+    // C6 = Σ_{ri,rj} gw_i[ri]·gw_j[rj]·c6ref  (== getChargeWeightedC6, CN-only weighting)
+    int ei = zi - 1, ej = zj - 1;
+    int nri = d_refn_const[ei];
+    int nrj = d_refn_const[ej];
+    size_t c6_base = (size_t)ei * D4_MAX_ELEM * D4_MAX_REF * D4_MAX_REF
+                   + (size_t)ej * D4_MAX_REF * D4_MAX_REF;
+    int gi = i * D4_MAX_REF;
+    int gj = j * D4_MAX_REF;
+    double c6 = 0.0;
+    for (int ri = 0; ri < nri; ++ri) {
+        double wi = gw[gi + ri];
+        size_t b = c6_base + (size_t)ri * D4_MAX_REF;
+        for (int rj = 0; rj < nrj; ++rj) {
+            double c6ref = c6_flat[b + rj];
+            if (fabs(c6ref) < 1e-20) continue;
+            c6 += wi * gw[gj + rj] * c6ref;
+        }
+    }
+
+    double si = sqrtzr4r2[ei];
+    double sj = sqrtzr4r2[ej];
+    double r4r2ij = 3.0 * si * sj;
+    double t = a1 * sqrt(r4r2ij) + a2;
+    double r0_sq = t * t;
+
+    double qi = topo_q[i];
+    double qj = topo_q[j];
+    double zsi = (zi >= 1 && zi <= 86) ? zetaChargeScaleDev(zeta_zeff[zi - 1], zeta_c[zi - 1], qi) : 1.0;
+    double zsj = (zj >= 1 && zj <= 86) ? zetaChargeScaleDev(zeta_zeff[zj - 1], zeta_c[zj - 1], qj) : 1.0;
+
+    int slot = atomicAdd(d_counter, 1);
+    out_i[slot]    = i;
+    out_j[slot]    = j;
+    out_C6[slot]   = c6;
+    out_r4r2[slot] = r4r2ij;
+    out_r0sq[slot] = r0_sq;
+    out_zeta[slot] = zsi * zsj;
+    out_rcut[slot] = 50.0;  // D4 pair-energy cutoff (struct default, matches host)
+}
+
+// ============================================================================
 // GPU HB CN per-bond computation (Apr 2026)
 // Replaces CPU HB CN loop in gfnff_gpu_method.cpp.
 // ============================================================================
@@ -3204,6 +3360,66 @@ __global__ void k_pcg_dir_update(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
     d_p_out[i] = d_z[i] + beta * d_p_in[i];
+}
+
+// ============================================================================
+// WP7-D: GPU block-Jacobi preconditioner (Jun 2026, Claude Generated)
+// ============================================================================
+
+// Mirror the lower triangle of each per-fragment block into the upper triangle.
+// Column-major: element (row, col) at col*Nf + row; potri(LOWER) fills row >= col.
+__global__ void k_eeq_symmetrize_blocks(
+    int           nfrag,
+    double*       __restrict__ d_A_blocks,
+    const int*    __restrict__ frag_sizes,
+    const int*    __restrict__ frag_offsets_A)
+{
+    int f = blockIdx.x;
+    if (f >= nfrag) return;
+    int Nf = frag_sizes[f];
+    if (Nf <= 0) return;
+    double* A = d_A_blocks + frag_offsets_A[f];
+    for (int idx = threadIdx.x; idx < Nf * Nf; idx += blockDim.x) {
+        int col = idx / Nf;
+        int row = idx % Nf;
+        if (row < col)                       // upper entry (garbage after potri LOWER)
+            A[col * Nf + row] = A[row * Nf + col];  // = lower partner (col,row)
+    }
+}
+
+// z = blockdiag(A_ff^-1)·r. One thread-block per fragment; gather/scatter via the
+// fragment-sorted atom map so r/z stay in global atom order (matches the CPU
+// BlockJacobiPC::apply contract). Dynamic shared mem stages r_f (max_frag_N doubles).
+__global__ void k_eeq_block_jacobi_apply(
+    int           nfrag,
+    const double* __restrict__ d_Ainv_blocks,
+    const int*    __restrict__ frag_sizes,
+    const int*    __restrict__ frag_offsets_A,
+    const int*    __restrict__ frag_atom_offsets,
+    const int*    __restrict__ frag_atom_map,
+    const double* __restrict__ d_r,
+    double*       __restrict__ d_z)
+{
+    extern __shared__ double s_rf[];   // [Nf] staged residual for this fragment
+    int f = blockIdx.x;
+    if (f >= nfrag) return;
+    int Nf = frag_sizes[f];
+    if (Nf <= 0) return;
+    int atom_start    = frag_atom_offsets[f];
+    const double* Ainv = d_Ainv_blocks + frag_offsets_A[f];
+
+    // Stage r_f into shared memory (gather global → local).
+    for (int li = threadIdx.x; li < Nf; li += blockDim.x)
+        s_rf[li] = d_r[frag_atom_map[atom_start + li]];
+    __syncthreads();
+
+    // z_f = Ainv_f · r_f  (symmetric, column-major: Ainv[(col)*Nf + row]).
+    for (int li = threadIdx.x; li < Nf; li += blockDim.x) {
+        double acc = 0.0;
+        for (int lj = 0; lj < Nf; ++lj)
+            acc += Ainv[lj * Nf + li] * s_rf[lj];
+        d_z[frag_atom_map[atom_start + li]] = acc;   // scatter local → global
+    }
 }
 
 // ============================================================================

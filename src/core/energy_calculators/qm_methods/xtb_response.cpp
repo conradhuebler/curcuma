@@ -17,6 +17,7 @@
 #include "STO_CGTO.hpp"
 #include "xtb_coulomb.hpp"
 #include "xtb_multipole_ints.hpp"
+#include "xtb_ao_utils.hpp"
 
 #include "parameters/gfn1_params.hpp"
 #include "parameters/gfn2_params.hpp"
@@ -29,23 +30,7 @@
 
 namespace curcuma::xtb {
 
-// Local CGTO-shell converter (same as xtb_gradient.cpp / xtb_h0.cpp)
-static CGTO::Shell as_cgto_shell_r(const CGTOShell& cg)
-{
-    CGTO::Shell s;
-    s.ang   = cg.ang;
-    s.nprim = static_cast<int>(cg.alpha.size());
-    s.alpha = cg.alpha;
-    s.coeff = cg.coeff;
-    return s;
-}
-
-static inline int ao_to_type_r(int ang, int local_ao)
-{
-    if (ang == 0) return 0;
-    if (ang == 1) { static const int p_map[3] = {2, 3, 1}; return p_map[local_ao]; }
-    return -1;
-}
+/* as_cgto_shell() and ao_to_type() now live in xtb_ao_utils.hpp (X-I5). */
 
 /* ------------------------------------------------------------------ *
  *  mpPairGrad()  —  bilinear multipole-interaction pair gradient     *
@@ -396,7 +381,7 @@ void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) co
                 const int ia_nao   = m_basis.nao_sh[ish_a];
                 const double pi_a  = 1.0 + m_h0.shpoly[ish_a] * rr;
                 const double zeta_a = m_basis.cgto[ish_a].slater_exp;
-                const CGTO::Shell sh_a = as_cgto_shell_r(m_basis.cgto[ish_a]);
+                const CGTO::Shell sh_a = as_cgto_shell(m_basis.cgto[ish_a]);
 
                 for (int ib = 0; ib < m_basis.nsh_at[jat]; ++ib) {
                     const int ish_b    = m_basis.ish_at[jat] + ib;
@@ -404,7 +389,7 @@ void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) co
                     const int jb_nao   = m_basis.nao_sh[ish_b];
                     const double pi_b  = 1.0 + m_h0.shpoly[ish_b] * rr;
                     const double zeta_b = m_basis.cgto[ish_b].slater_exp;
-                    const CGTO::Shell sh_b = as_cgto_shell_r(m_basis.cgto[ish_b]);
+                    const CGTO::Shell sh_b = as_cgto_shell(m_basis.cgto[ish_b]);
 
                     double hs;
                     if (m_method == MethodType::GFN1) {
@@ -443,9 +428,9 @@ void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) co
                     double cn_sum          = 0.0;
 
                     for (int mu = ia_start; mu < ia_start + ia_nao; ++mu) {
-                        const int t_a = ao_to_type_r(m_basis.ang_sh[ish_a], mu - ia_start);
+                        const int t_a = ao_to_type(m_basis.ang_sh[ish_a], mu - ia_start);
                         for (int nu = jb_start; nu < jb_start + jb_nao; ++nu) {
-                            const int t_b = ao_to_type_r(m_basis.ang_sh[ish_b], nu - jb_start);
+                            const int t_b = ao_to_type(m_basis.ang_sh[ish_b], nu - jb_start);
                             if (t_a < 0 || t_b < 0) continue;
 
                             const double Dmn = D_z(mu, nu);

@@ -256,8 +256,11 @@ void RMSDDriver::LoadAlignmentMethodParameters()
     if (it != method_map.end()) {
         m_method = static_cast<int>(it->second);
     } else {
-        CurcumaLogger::warn_fmt("Unknown alignment method '{}', defaulting to 'incr'", method);
-        m_method = static_cast<int>(AlignmentMethod::INCREMENTAL);
+        // Claude Generated (June 2026): Fall back to the recommended default 'subspace'
+        // (ATOM_TEMPLATE) instead of the legacy 'incr', which is so slow on larger ensembles
+        // that an unknown method looked like a hang. subspace gives a sane, fast result.
+        CurcumaLogger::warn_fmt("Unknown alignment method '{}', defaulting to 'subspace'", method);
+        m_method = static_cast<int>(AlignmentMethod::ATOM_TEMPLATE);
     }
 
     // Set limit for atom_template and dtemplate; 0 means use class default (m_limit = 10)
@@ -538,7 +541,10 @@ void RMSDDriver::start()
     m_reference_aligned.LoadMolecule(m_reference);
     if (m_reference.Atoms() != m_target.Atoms() || m_force_reorder) {
         if (!m_noreorder || m_method == 10) {
-            // std::cout << "Reordering Atoms" << std::endl;
+            /* Capture plain Kabsch RMSD (original atom order) before permutation so that
+               RMSDRaw() / rmsd_raw in JSON shows the cost of the unpermuted ordering. */
+            if (m_reference.Atoms() == m_target.Atoms())
+                m_rmsd_raw = CalculateRMSD(m_reference, m_target, nullptr, nullptr);
             ReorderMolecule();
             rmsd_calculated = true;
         }
@@ -1033,14 +1039,22 @@ void RMSDDriver::ReorderMolecule()
     if (method != AlignmentMethod::MOLALIGN && method != AlignmentMethod::PREDEFINED_ORDER) {
         FinaliseTemplate();
 
-        m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
         m_target_aligned = m_target;
         m_reorder_rules = m_results.begin()->second;
         m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
+        /* Apply Kabsch alignment so that reorder_xyz in the JSON output is in the same
+           coordinate frame as reference_xyz and can be overlaid directly in viewers. */
+        Molecule aligned_reordered;
+        CalculateRMSD(m_reference, m_target_reordered, nullptr, &aligned_reordered);
+        m_target_reordered = aligned_reordered;
         m_target = m_target_reordered;
         m_rmsd = m_results.begin()->first;
     } else if (method == AlignmentMethod::PREDEFINED_ORDER) {
         m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
+        /* Apply Kabsch alignment for consistent reorder_xyz output. */
+        Molecule aligned_reordered;
+        CalculateRMSD(m_reference, m_target_reordered, nullptr, &aligned_reordered);
+        m_target_reordered = aligned_reordered;
         m_rmsd = Rules2RMSD(m_reorder_rules);
         if (m_verbosity >= 2)
             CurcumaLogger::info_fmt("Final RMSD: {:.6f}", m_rmsd);
@@ -1059,7 +1073,7 @@ void RMSDDriver::FinaliseTemplate()
     std::ofstream result_file;
     m_kuhn_munkres_iterations = 0;
     if (m_kmstat)
-        result_file.open("kmstat.dat", std::ios_base::app);
+        result_file.open(outputPath("kmstat.dat"), std::ios_base::app);
     for (auto permutation : m_prepared_cost_matrices) {
 #ifdef CURCUMA_DEBUG
         if (m_verbosity >= 3)
@@ -1645,7 +1659,11 @@ bool RMSDDriver::MolAlignLib()
     std::string command = m_molalign + m_molalignarg + " " + ref_tmp + "   " + tar_tmp + " 2>&1";
     if (m_verbosity >= 3)
         CurcumaLogger::info_fmt("MolAlign command: {}", command);
+#ifdef _WIN32
+    FileOpen = _popen(command.c_str(), "r");
+#else
     FileOpen = popen(command.c_str(), "r");
+#endif
     bool ok = true;
     bool rndm = false;
     bool error = false;
@@ -1660,10 +1678,14 @@ bool RMSDDriver::MolAlignLib()
             CurcumaLogger::debug(2, fmt::format("MolAlign output: {}", std::string(line).substr(0, std::string(line).find('\n'))));
 #endif
     }
+#ifdef _WIN32
+    _pclose(FileOpen);
+#else
     pclose(FileOpen);
+#endif
 
     std::string aligned_tmp = outputPath("aligned.xyz");
-    if (std::filesystem::exists(aligned_tmp) and !rndm) {
+    if (std::filesystem::exists(aligned_tmp) && !rndm) {
         CurcumaLogger::citation("molalign");
         FileIterator file(aligned_tmp, true);
         m_reference_centered = file.Next();

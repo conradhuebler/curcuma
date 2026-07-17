@@ -1,0 +1,50 @@
+#version 450
+// General rectangular FP64 GEMM for the WY-blocked eigenvector back-transform (EIG-2B).
+// Computes  C[M×N] = opA(A) · B[K×N]   (mode 0, overwrite)
+//      or   C[M×N] = C − opA(A) · B[K×N] (mode 1, subtract-accumulate),
+// opA(A) = A (transA=0, A is M×K) or Aᵀ (transA=1, A is K×M). All column-major with
+// explicit leading dimensions: A[i + j·lda], B[i + j·ldb], C[i + j·ldc].
+//
+// Shared-memory tiled (TILE×TILE), same structure as the square gemm.comp: the k-loop
+// walks tiles in order so the per-element accumulation order is the naive k = 0,1,2,…
+// order; out-of-range loads pad with 0.0 so partial tiles are exact. Claude Generated (EIG-2B).
+const uint TILE = 16u;
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) readonly  buffer Ab { double A[]; };
+layout(std430, binding = 1) readonly  buffer Bb { double B[]; };
+layout(std430, binding = 2)           buffer Cb { double C[]; };
+layout(push_constant) uniform PC {
+    uint M; uint N; uint K; uint lda; uint ldb; uint ldc; uint transA; uint mode;
+} pc;
+
+shared double As[TILE][TILE];   // As[i_local][k_local] = opA(A)[i, k]
+shared double Bs[TILE][TILE];   // Bs[k_local][j_local] = B[k, j]
+
+void main()
+{
+    uint tx = gl_LocalInvocationID.x;            // 0..TILE-1
+    uint ty = gl_LocalInvocationID.y;
+    uint i  = gl_WorkGroupID.x * TILE + tx;      // C row    (0..M-1)
+    uint j  = gl_WorkGroupID.y * TILE + ty;      // C column (0..N-1)
+
+    double acc = 0.0lf;
+    uint ntiles = (pc.K + TILE - 1u) / TILE;
+    for (uint t = 0u; t < ntiles; ++t) {
+        uint ka = t * TILE + ty;                 // k for the A load (this thread)
+        if (pc.transA == 0u)
+            As[tx][ty] = (i < pc.M && ka < pc.K) ? A[i + ka * pc.lda] : 0.0lf;   // A[i,k]
+        else
+            As[tx][ty] = (i < pc.M && ka < pc.K) ? A[ka + i * pc.lda] : 0.0lf;   // Aᵀ[i,k] = A[k,i]
+
+        uint kb = t * TILE + tx;                 // k for the B load (this thread)
+        Bs[tx][ty] = (kb < pc.K && j < pc.N) ? B[kb + j * pc.ldb] : 0.0lf;       // B[k,j]
+
+        barrier();
+        for (uint kk = 0u; kk < TILE; ++kk) acc += As[tx][kk] * Bs[kk][ty];
+        barrier();
+    }
+    if (i < pc.M && j < pc.N) {
+        uint idx = i + j * pc.ldc;
+        C[idx] = (pc.mode == 0u) ? acc : C[idx] - acc;
+    }
+}

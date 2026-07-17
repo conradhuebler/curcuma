@@ -37,6 +37,11 @@ capabilities/
 > **All non-external optimizers below are 🤖 AI-generated. None are ✅ TESTED or ✅ APPROVED.**
 
 - **CurcumaOpt**: Geometry optimization dispatcher — legacy system, human-tested
+- **`-opt` multi-XYZ** (`main.cpp`/`optimizer_factory.cpp`):
+  - ⚙️ Machine-tested — all frames are optimised and written to `.opt.xyz` in input order.
+  - Parallel dispatch with `-threads N`; workers are independent, but step-table output is suppressed during the batch to avoid interleaved stdout.
+  - After the batch finishes, an ordered per-frame summary is printed (index, status, iterations, final energy).
+  - Live `CxxThreadPool` progress bar for parallel batches is pending an update of `external/CxxThreadPool` (see `docs/OPT_MULTIXYZ_PARALLELISM_WP.md`).
 - **LBFGSpp**: Wrapper around external LBFGSpp library — external code, wrapper is AI-generated
 - **ANCOPT** (`ancopt_optimizer.cpp/h`): 🤖 AI-generated port of XTB's AncOpt (Grimme)
   - ⚙️ Machine-tested: CH4/UFF converges (4 steps); Tier L path runs on 1410-atom polymer+UFF
@@ -123,8 +128,10 @@ capabilities/
 
 ### Known Issues
 - Memory optimization needed for large systems (>1000 atoms)
-- ConfScan verbosity: Accept/Reject messages not visible at default level
-- SimpleMD wall potential: Boundary logic and force calculation accuracy issues (TODO)
+- ConfScan output: at verbosity 1 each pass shows a live progress bar (on by default; `-confscan.progress false` / global `-noprogress` / non-TTY disable it) and a clean per-pass summary; per-structure `Accept/Reject` detail is at verbosity >=2.
+- **ConfScan reorder geometry truncation (⚠️ open, found June 2026)**: `ConfScan::Reorder` calls `mol1->ApplyReorderRule(t->ReorderRule())` (`confscan.cpp:1439`) with a rule sized to the *compared* atom set. Heavy-only (`-rmsd.protons false`) → reordered structures written with heavy-atom count (e.g. 55 vs 114); `get_rmsd` → empty rule → reordered/rejected structures written with 0 atoms. Filtering counts are correct; only the written geometry of reordered structures is reduced. Fix: rule must map all atoms, or `ApplyReorderRule` must preserve unmapped atoms. CLI tests 02/06 surfaced this.
+- **ConfScan threaded reorder stall (⚠️ open, found June 2026)**: the reorder path with `threads>1` can intermittently deadlock/stall (observed: heavy-only `-rmsd.protons false`, and restart-resume double-run; at high and low load). CLI tests 06 (heavy) and 07 (restart) pin `threads=1`.
+- SimpleMD wall potential: ✅ **Sign errors fixed (June 2026)** — `ApplyRectHarmonicWalls` (min-wall term was subtracted instead of added → atoms below `r_min` pushed further out) and `ApplySphericLogFermiWalls` (`gradient -= dV/dr` flipped the radial force outward). Both now add `+dV/dr` to `m_eigen_gradient` (= dE/dr; force = -gradient), matching `ApplySphericHarmonicWalls` and `ApplyRectLogFermiWalls` which were already correct.
 - **ConfSearch efficiency/robustness (Phase A-C) — roadmap & open TODOs**: see [docs/CONFSEARCH_ROADMAP.md](../../docs/CONFSEARCH_ROADMAP.md). Big items: (1) verbosity-ownership rework (global CurcumaLogger level is leaked/clamped by sub-objects → ConfSearch logs hidden, RATTLE report forced to std::cout — `FIXME` in `SimpleMD::InitConstrainedBonds`); (2) `CitationRegistry::cite` thread race → crash at gfnff `threads>1` (workaround: threads=1); (3) Phase C `cluster`/`weighted` calibration is experimental/unvalidated. Cross-run bias heating bounded by **defaults ON**: `rmsd_mtd_freeze_inherited`+`temp_abort` (`rmsd_mtd_max_height` opt-in); bare `-startT 500` no longer blows up (TODO #4; intra-run wide-hill blow-up still open). Verbosity-ownership (1) is now largely resolved (CurcumaMethod base RAII).
 
 ### Unported Features from Old CurcumaOpt (TODO)

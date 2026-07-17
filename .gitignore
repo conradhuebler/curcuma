@@ -126,6 +126,9 @@ test_cases/**/*.confsearch.restart.json
 *.opt.xyz
 *.trj.xyz
 
+# Test fixture (committed): scf_extrapolation_caffeine interpolation endpoint
+!test_cases/sqm_reference/molecules/caffeine.opt.xyz
+
 # ConfSearch exported MD parameter dump (run artifact) - Claude Generated May 2026
 confsearch_md_params.json
 

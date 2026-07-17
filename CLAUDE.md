@@ -144,10 +144,16 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 > Results should be validated against external references (TBLite, Ulysses, XTB) before use in research.
 
 - ⚠️ **Extended Hückel Theory (EHT)** - AI-implemented, machine-tested
-- ⚠️ **GFN2-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn2` backend; `-opt` works; Broyden SCF default (`-scf_mode diis|plain|level-shift`, `-scf_guess h0|eeq`; 231-atom `complex` converges, see [docs/SCF_MODES.md](docs/SCF_MODES.md)); **vs TBLite: meets the 1e-8 Eh target on 11/12 of the validation set, only `complex` open (6.95e-5)** — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md); native GFN1/GFN2 support **intra-molecule multi-threading** for a single large molecule (`-threads N`: setup 4×, gradient 3.6×; eigensolver MKL-link-bound) — see [docs/SQM_THREADING.md](docs/SQM_THREADING.md); opt-in **MKL-free / GPU-portable eigensolve kernels** (`-eigensolver native\|purify\|lobpcg`, `CURCUMA_EIG_TRED2=blocked`) — MKL stays default — see [docs/SQM_EIGENSOLVE_GPU.md](docs/SQM_EIGENSOLVE_GPU.md); opt-in **approximate large-system modes** (`-large_system_mode fragments\|dc\|sparse`) scale the SCF past ~1000 atoms by locality (default dense unchanged; `-eigensolver` propagates into fragments / sub-blocks; `-eigensolver=purify` requires `-electronic_temperature 0`) — see [docs/SQM_LARGE_SYSTEMS.md](docs/SQM_LARGE_SYSTEMS.md); opt-in **multi-step SCC extrapolation** across geometry steps (`-scf_extrapolation aspc\|gauss`, `-scf_extrapolation_order`) generalises the 1-step warm-start to cut SCF iterations in opt/MD (default `none` unchanged; safe `guess` mode keeps full SCF — caffeine smooth-trajectory SCF iters gfn2 215→90, gfn1 170→79, energy bit-identical; experimental `-scf_extrapolation_apply xlbomd` = extended-Lagrangian MD, time-reversible auxiliary + converged corrector, energy-exact, MD-drift unvalidated; cites Kolafa 2004 / Pulay-Fogarasi 2004 / Niklasson 2008) — see [docs/SQM_SCF_EXTRAPOLATION.md](docs/SQM_SCF_EXTRAPOLATION.md); opt-in **CUDA GPU path** (`-gpu cuda|auto`, build `release_cuda/` with `-DUSE_CUDA_XTB=ON`): staged port (cuSOLVER/cuBLAS), CPU path `#ifdef`-free; **both GFN1 (Stage 2a) and GFN2 (Stage 2b) run a device-resident SCF** under the default Broyden mixing — H0/S/L + density/MO (+ GFN2 multipole integrals) stay on the GPU, only length-nao vectors cross per iteration; the isotropic potential incl. in-SCF D4 stays on the host; **Stage 3 builds the integrals (CN/S/H0/L/γ/multipole) on the device and Stage 4 the nuclear gradient, so `-opt`/`-md` are fully device-resident** (only xyz up, gradient+energy down per step); every device kernel matches the CPU elementwise (S/H0/L ~1e-15, full gradient ~1e-15 Eh/Å), `gpu_gfn{1,2}_validation` 12/12 @1e-8 vs tblite, `ctest -L gpu_integrals|gpu_gradient` green — see [docs/SQM_GPU.md](docs/SQM_GPU.md)
-- ⚠️ **GFN1-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn1` backend; `-opt` works; Broyden SCF default (modes via `-scf_mode`); **vs TBLite: now 10/12 SQM molecules at 1e-8** (fixed 2026-05: double-counted third-order potential + D3 C8/C6 made exact vs s-dftd3); only He2 (~1.5e-8 floor) and complex (~2.6e-7) remain — see [docs/SQM_WP2_gfn1_accuracy.md](docs/SQM_WP2_gfn1_accuracy.md)
+- ⚠️ **GFN2-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn2` backend; `-opt` works; Broyden SCF default (`-scf_mode diis|plain|level-shift`, `-scf_guess h0|eeq`); 11/12 sqm_reference @1e-8 vs tblite (only 231-atom `complex` open) — [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md), [docs/SCF_MODES.md](docs/SCF_MODES.md)
+  - **d-shell support (X-I1, June 2026)**: S/P/Cl/Si/… (main-group d) now compute via the cartesian→spherical transform, ≤1e-8 Eh vs tblite. CPU + **CUDA GPU** (validated on a GTX 1660: energy bit-identical to CPU, gradient ~1e-16) + **ROCm GPU** (B6 port, validated on a Radeon 890M/gfx1150: energy bit-identical to CPU at 8 dp, `-opt` tracks the CPU trajectory); **Vulkan d still falls back to CPU** (GLSL shaders pending). Transition metals enabled but **unvalidated**. See [docs/SQM_DSHELL_WP.md](docs/SQM_DSHELL_WP.md)
+  - **Threading**: intra-molecule `-threads N` (setup 4×, gradient 3.6×) — [docs/SQM_THREADING.md](docs/SQM_THREADING.md)
+  - **Eigensolvers**: opt-in `-eigensolver native|purify|lobpcg`, `CURCUMA_EIG_TRED2=blocked` (MKL-free / GPU-portable) — [docs/SQM_EIGENSOLVE_GPU.md](docs/SQM_EIGENSOLVE_GPU.md)
+  - **Large systems**: `-large_system_mode fragments|dc|sparse` scales SCF past ~1000 atoms — [docs/SQM_LARGE_SYSTEMS.md](docs/SQM_LARGE_SYSTEMS.md)
+  - **SCF extrapolation**: `-scf_extrapolation aspc|gauss` cuts SCF iters in opt/MD (caffeine gfn2 215→90); experimental `xlbomd` = extended-Lagrangian MD — [docs/SQM_SCF_EXTRAPOLATION.md](docs/SQM_SCF_EXTRAPOLATION.md)
+  - **GPU backends** (`-gpu cuda|rocm|vulkan|auto`): all three device-resident through `-opt`/`-md`; ROCm has FP32 mixed-precision ON by default (real win), Vulkan is opt-in only (eigensolve-bound, no speedup). Detail in [docs/SQM_GPU.md](docs/SQM_GPU.md) / [docs/SQM_ROCM.md](docs/SQM_ROCM.md) / [docs/SQM_VULKAN.md](docs/SQM_VULKAN.md); roadmap in [docs/SQM_GPU_ROADMAP.md](docs/SQM_GPU_ROADMAP.md)
+- ⚠️ **GFN1-xTB (Native)** - AI-implemented, machine-tested; canonical `gfn1` backend; `-opt` works; Broyden SCF default; 10/12 sqm_reference @1e-8 vs tblite (He2 + `complex` remain) — [docs/SQM_WP2_gfn1_accuracy.md](docs/SQM_WP2_gfn1_accuracy.md)
 - ⚠️ **PM3/AM1/MNDO (Native NDDO)** - AI-implemented, machine-tested; 21/21 tests vs Ulysses reference (< 4 µEh)
-- ⚠️ **Native GFN-FF** - AI-implemented, machine-tested; see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
+- ⚠️ **Native GFN-FF** - AI-implemented, machine-tested; see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md); S30L vs xtb 6.6.1 (Jul 2026): 28/30 within ~1.5 kcal/mol after F1/F2/CLI/F3/ipis fixes (MAD 433→1.38); residuals: 23 (.CHRG quirk), 27/28+7/8 (torsion), 30/AB (bond) — see [docs/S30L_GFNNF_VALIDATION.md](docs/S30L_GFNNF_VALIDATION.md)
 
 #### External Interfaces (Production Quality, Requires Compilation)
 - **TBLite Interface** - Tight-binding DFT methods (GFN1, GFN2, iPEA1) + **Solvation** (CPCM, GB, ALPB)
@@ -164,6 +170,18 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 ### 3. Solvation Models (Implicit Solvent)
 - ✅ **TBLite Solvation** - CPCM, GB (Generalized Born), ALPB for GFN methods
 - ✅ **Ulysses Solvation** - GBSA (Generalized Born + SA) for GFN/MNDO methods
+- ⚠️ **Native GFN1/GFN2 ALPB + GBSA** (June 2026, AI/machine-tested) - self-consistent
+  ALPB (`-xtb.solvent_model alpb`, P16 kernel) and GBSA (`-xtb.solvent_model gbsa`, Still kernel)
+  in the native xTB SCF, matching tblite total ΔG (Born + CDS + shift; CM5 for gfn1) to
+  ≤1e-8 Eh on the validation set (CPU + GPU); `-method gfn2 -xtb.solvent water -xtb.solvent_model gbsa`
+  (legacy numeric codes 3/2 still accepted). CPCM native solvation still pending.
+  See [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md)
+- ⚠️ **Native GFN-FF ALPB** (June 2026, AI/machine-tested) - self-consistent: the Born
+  reaction field couples into the EEQ solve (`A_eeq += B`), so charges polarize in the solvent.
+  `-method gfnff -gfnff.solvent water -gfnff.solvent_model alpb` matches **xtb 6.7.1** (`--gfnff
+  --alpb`) to **≤1e-8 Eh** (7 mol × 4 solvents); analytic gradient FD-validated. GFN-FF has
+  no separate GBSA (reference uses ALPB), so `-gfnff.solvent_model gbsa` maps to ALPB. See
+  [docs/SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md) WP5
 - **25+ Solvents** - water, methanol, DMSO, acetone, benzene, etc.
 - **Auto-Activation** - Specify `-solvent water` to enable
 - **Documentation** - See [docs/SOLVATION.md](docs/SOLVATION.md) for details
@@ -187,6 +205,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 
 ### 7. Molecular Dynamics
 - **SimpleMD** - Basic molecular dynamics simulation
+- ⚠️ **Temperature ramps / live T / thermal regions** (Jun 2026, AI/machine-tested) - `setTargetTemperature()` live setpoint; multi-stage `temp_ramp`/`temp_schedule` (`steps`/`reach` modes); per-atom-subset `temp_regions` (Berendsen/CSVR/Andersen; NH falls back to global). No-region path byte-identical to legacy. See [docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md)
 - **NEB Docking** - Nudged elastic band for transition states
 - **Trajectory Analysis** - Analysis of MD trajectories
 - **PLUMED Metadynamics** - Enhanced sampling via PLUMED2 plugin (`-mtd` flag) — see [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md)
@@ -194,7 +213,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 ### 8. Analysis Tools
 - **✅ Parallel Analysis** - Frame-level parallelization with CxxThreadPool (3-8x speedup, January 2026)
 
-### 8. Output Directory System
+### 9. Output Directory System
 - **🤖 BMT (Basename.Method.Timestamp)** - Default output directory for all commands — see `src/tools/CLAUDE.md`
 - **`-bak` flag** - Copy specified files from BMT directory back to CWD
 - **`-no_bmt`** - Disable BMT, write output to CWD (legacy behavior)
@@ -205,7 +224,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - **Hessian Analysis** - Second derivative calculations
 - **Orbital Analysis** - Molecular orbital visualization and analysis
 
-### 9. Core Computational Libraries
+### 10. Core Computational Libraries
 - ✅ **MNDO Integrals** - Dewar-Thiel multipole expansion for semi-empirical 2e⁻ integrals, see [docs/MNDO_INTEGRALS.md](docs/MNDO_INTEGRALS.md)
 
 ## Architecture
@@ -310,27 +329,13 @@ curcuma/
 └── CMakeLists.txt           # Build configuration
 ```
 
-## Completed Developments (2025-2026)
+## Completed Developments (2026)
 
-✅ **Platform-Independent External Dependency Discovery** - Phase 2a+2b complete: Plumed2 via find_library(), D4 via find_package(LAPACK), both with fallback support, portable across Linux/macOS/Windows
-✅ **External Dependency Conditional Compilation** - Phase 1b complete: D3/D4 guards in QMDFF/UFF/ForceField, MethodFactory runtime checks, all 14 external libs properly gated
-✅ **Parameter Registry System** - Macro-based parameter definitions, auto-help, type validation
-✅ **ConfigManager Layer** - Type-safe parameter access, hierarchical dot notation
-✅ **EnergyCalculator Refactoring** - Polymorphic interface, priority-based method resolution
-✅ **Universal Verbosity System** - Consistent 4-level output across all methods (0-3)
-✅ **Method Hierarchies** - `gfn2`/`gfn1` → Native xTB canonical (AP3); `ipea1` → TBLite; `ugfn2` → Ulysses
-✅ **Physical Architecture** - QM/MM methods organized under `src/core/energy_calculators/`
-✅ **Topological Data Analysis** - dMatrix legacy functionality integrated as TDAEngine
-✅ **Parameter Routing Fix** - Multi-module parameter hierarchies now work (json null-error fixed)
-✅ **Native GFN2-xTB** (November 2025) - Complete implementation with CN, Hamiltonian, SCF, energies
-✅ **Native GFN1-xTB** (November 2025) - With halogen bond correction, simpler than GFN2
-✅ **Native PM3** (November 2025) - NDDO semi-empirical for H, C, N, O thermochemistry
-✅ **GFN2 Parameter Loader** (November 2025) - Infrastructure for TBLite TOML extraction with real parameters (H, C, N, O)
-✅ **Ulysses Methods Documentation** (November 2025) - Complete guide: 27 semi-empirical methods (AM1, MNDO, PM6, RM1, etc.)
-✅ **MNDO Integrals Library** (November 2025) - Standalone Dewar-Thiel multipole expansion, pedagogically documented, extracted from Ulysses
-✅ **GFN-FF Full Implementation** (2025-2026) - All energy terms, gradients, EEQ charges, D4 dispersion; sub-mEh accuracy on most molecules - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
-✅ **Scattering Analysis Enhancements** (January 2026) - Logarithmic q-spacing (default), automatic gnuplot script generation with 4-panel plots
-✅ **Analysis Parallelization** (January 2026) - Frame-level parallelization with CxxThreadPool, 3-8x speedup for trajectory analysis
+> Older 2025 work (parameter registry, polymorphic EnergyCalculator, native GFN2/GFN1/PM3, MNDO integrals, GFN-FF full implementation, scattering, analysis parallelization, dependency gating) is in `AIChangelog.md` + git history.
+
+✅ **`-interaction` capability** (June 2026) - supramolecular interaction energy `E(AB)−E(A)−E(B)` for the S30L host-guest set; modes: S30L A/B/AB dir (+`.CHRG`), batch vs `reference_s30l` (MAD/RMSD), explicit `-fragA/-fragB`, single-AB auto-split
+✅ **GFN-FF aromatic ring torsions fixed** (June 2026) - acyclic-only pi-sp3 rules were wrongly applied to ring torsions; gated on `!in_ring`; S30L host A now bit-identical to Fortran, validation 18/18 — see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
+✅ **GFN-FF GPU HB-freeze resolved + per-frame gradient diagnostic** (June 2026) - the GPU HB-charge freeze is correct (matches CPU+Fortran); `test_gfnff_grad_traj` is the clean force metric (MD heat-exchange is not) — see [docs/GPU_GFNNF_DISCREPANCIES.md](docs/GPU_GFNNF_DISCREPANCIES.md)
 
 ## Build and Test Commands
 
@@ -366,6 +371,7 @@ ctest -R "cli_rmsd_01" --verbose
 - **Prioritized TODO List**: See [TODO.md](TODO.md)
 - **Module Docs**: Each `src/` subdirectory has CLAUDE.md with specific tasks
 - **GFN-FF Status**: See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md) for implementation details
+- **Technical Debt**: Identified debt in GFN-FF / native xTB / QM interfaces / EnergyCalculator / RMSD-alignment API — [docs/TECHNICAL_DEBT.md](docs/TECHNICAL_DEBT.md)
 
 ## Workflow States
 - **ADD**: Features to be added
@@ -463,11 +469,9 @@ ctest -R "cli_rmsd_01" --verbose
 
 1. **GFN-FF Limitations**: See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md#known-limitations) for details (D4 dispersion, EEQ integration, metal parameters)
 
-2. **Unit migration**: Some legacy code still uses hardcoded constants instead of CurcumaUnit functions
+2. **GFN-FF S30L validation (Jul 2026, AI/machine-tested)**: see [docs/S30L_GFNNF_VALIDATION.md](docs/S30L_GFNNF_VALIDATION.md) — vs xtb 6.6.1: 28/30 within ~1.5 kcal/mol (MAD 433→1.38). Fixed: (a) charged complexes (23-30) EEQ qfrag=[0,0] → xtb-style both-assignment trial (F2); (b) `-charge -N` parsed as +N → negative-number CLI fix; (c) `AngleBending` 1/sinθ NaN guard (F1); (d) F2 cache bug — inline topo-cache load dropped qfrag (cached charged nfrag==2 re-runs neutralised Coulomb; now restores qfrag, write guard checks SUM); (e) F3 bond/Hückel/Coulomb — S CN=2 sp2→sp3 (11/12), halogen hyb + hoffdiag default 0 + π-system membership aligned to xtb (F/Cl in, Br/I out), `metal_type[86]` array had 83 entries (Kr/I/Xe missing → I read as TM → dgam ff=-0.9 not -0.07 → 15/16 Coulomb -14 kcal); array rewritten to xtb metal(86), 15/16 fixed; (f) F3d Hückel ipis — xtb subtracts the π-system charge from nelpi (`nelpi -= ipis`); curcuma didn't → charged hosts had nelpi too large → wrong pibo → bond off; now computes ipis (qheavy + neutralize-fragment + re-EEQ + dqa·1.1) and subtracts; fixed 25/26 (→0.0) and 30/B. Residuals: 23 (.CHRG quirk, curcuma correct), 27/28 + 7/8 (torsion deficit, cur ~80% of xtb), 30/AB (bond pibo, ipis=0). Pre-existing from merge: `cli_curcumaopt_07_opt_multixyz` golden-value drift.
 
-3. **Verbosity ownership rework — LARGELY RESOLVED (Jun 2026)**: scoped the global `CurcumaLogger` verbosity via a RAII save/restore in the `CurcumaMethod` base (ctor captures parent level, dtor restores), removing the 7 ConfSearch per-cycle re-asserts; ConfSearch per-cycle logs + the `InitConstrainedBonds` RATTLE report (now on `CurcumaLogger`, summary ≥1 / per-bond ≥3) are visible again. **Residual:** the verbosity is a shared static and cannot be cleanly scoped across `CxxThreadPool` worker threads, so the pool-owning helpers (`PerformMolecularDynamics`/`PerformOptimisation`) and the energy-method setup re-assert the level at their boundaries (kept deliberately); a `thread_local` verbosity (the only full fix) is out of scope. See [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md) #1.
+3. **Verbosity scoping across threads (residual)**: the global `CurcumaLogger` verbosity is now RAII-scoped via `CurcumaMethod` (ctor/dtor save-restore), but it is a shared static and cannot be cleanly scoped across `CxxThreadPool` workers — the pool-owning helpers (`PerformMolecularDynamics`/`PerformOptimisation`) and energy-method setup re-assert the level at their boundaries (kept deliberately); a `thread_local` verbosity (the only full fix) is out of scope. See [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md) #1.
 
-4. **~~`CitationRegistry::cite` thread race (crash)~~ — RESOLVED (Jun 2026)**: `cite` was already `std::mutex`-guarded + `Citations::database()` is a thread-safe static; added a `thread_local` fast path (skip the lock off the hot path) and per-instance crash-dump filenames. The residual `threads=4 startT 600` crash was the bias-heating runaway (now bounded). Verified: gfnff `threads=4` runs to completion, no crash. See [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md) #2.
-
-5. **ConfSearch Phase A-C**: efficiency/robustness features (RATTLE threshold, topo/Epot abort, seed funnel, opt→bias feedback, permutation-aware + adaptive MTD bias) — roadmap, open TODOs and experimental caveats in [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md). Cross-run bias heating (shared-pool hills `W=k·counter` grow unbounded → `<T>` climbs run-by-run → NaN) is bounded by **defaults ON for ConfSearch**: `rmsd_mtd_freeze_inherited`+`temp_abort` (measured best: 0 blow-ups, best conformer yield; `rmsd_mtd_max_height` is opt-in for tighter T). The bare `-startT 500` run no longer blows up (roadmap TODO #4; intra-run wide-hill blow-up still open).
+4. **ConfSearch Phase A-C**: efficiency/robustness features (RATTLE threshold, topo/Epot abort, seed funnel, opt→bias feedback, permutation-aware + adaptive MTD bias) — roadmap, open TODOs and experimental caveats in [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md). Cross-run bias heating (shared-pool hills `W=k·counter` grow unbounded → `<T>` climbs run-by-run → NaN) is bounded by **defaults ON for ConfSearch**: `rmsd_mtd_freeze_inherited`+`temp_abort` (measured best: 0 blow-ups, best conformer yield; `rmsd_mtd_max_height` is opt-in for tighter T). The bare `-startT 500` run no longer blows up (roadmap TODO #4; intra-run wide-hill blow-up still open).
 

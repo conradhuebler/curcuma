@@ -48,6 +48,16 @@
 using json = nlohmann::json;
 namespace MI = curcuma::xtb::multipole_ints;
 
+// --- Patched-tblite feature gate (Claude Generated 2026-06-07) --------------
+// The full dump relies on extended tblite result C-API getters
+// (tblite_get_result_atomic_dipole/_quadrupole, _dipole_integral,
+// _quadrupole_integral, _potential_vat/_vdp/_vqp, _energy_component_*) that
+// exist only in a patched tblite fork. The bundled upstream tblite
+// (external/tblite) does not export them, so the real tool is compiled only
+// when configured with -DTBLITE_EXT_RESULT_API=ON. Otherwise a stub is built
+// (see bottom of file) so `make all` stays green against upstream tblite.
+#ifdef TBLITE_EXT_RESULT_API
+
 namespace {
 
 constexpr double AA_TO_BOHR = 1.0 / 0.529177210903;
@@ -782,3 +792,25 @@ int main(int argc, char** argv)
     tblite_delete_error(&err);
     return 0;
 }
+
+#else  // !TBLITE_EXT_RESULT_API
+
+// Stub built against the bundled upstream tblite, which lacks the extended
+// result C-API this dumper needs. Keeps `make all` green; explains how to
+// enable the real tool. (Claude Generated 2026-06-07)
+int main()
+{
+    std::fprintf(stderr,
+        "dump_tblite_multipole: disabled.\n"
+        "This forensic dumper needs a patched tblite that exports the extended\n"
+        "result C-API (tblite_get_result_atomic_dipole, _dipole_integral,\n"
+        "_quadrupole_integral, _potential_vat/_vdp/_vqp, _energy_component_*).\n"
+        "The bundled upstream tblite in external/tblite does not provide it.\n"
+        "Rebuild against the patched tblite and re-configure with\n"
+        "-DTBLITE_EXT_RESULT_API=ON to enable this tool.\n"
+        "The committed forensic dumps were generated with that patched build;\n"
+        "the regular ctest suite does not need this tool.\n");
+    return 77;  // conventional 'skipped' exit code
+}
+
+#endif // TBLITE_EXT_RESULT_API

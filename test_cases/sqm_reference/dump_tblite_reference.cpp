@@ -15,7 +15,13 @@
  *     "energy_components":{repulsion,dispersion,electronic,interactions,halogen},
  *     "gradient":{norm, values:[[gx,gy,gz],...]} }
  *
- *   dump_tblite_reference <gfn1|gfn2> <input.xyz> [out.json]
+ *   dump_tblite_reference <gfn1|gfn2> <input.xyz> [out.json] [--solvent NAME]
+ *
+ * With --solvent NAME the ALPB implicit-solvation container is attached
+ * (tblite_new_alpb_solvation_solvent, refstate=gsolv), so total_energy/gradient
+ * become the fully self-consistent solvated values. The solvent name is recorded
+ * under "solvent". This is the reference for the native GFN1/GFN2 ALPB path
+ * (docs/SQM_SOLVATION_WP.md, WP0.4 / WP1.4).
  *
  * The energy_components block requires the curcuma tblite diagnostic patch
  * (patches/tblite/curcuma-tblite.patch); it is omitted gracefully if absent.
@@ -99,8 +105,12 @@ bool readXYZ(const std::string& path, std::vector<Atom>& atoms, std::string& com
     return true;
 }
 
+#ifdef CURCUMA_TBLITE_ECOMP
 // Sum a per-atom energy-component vector to a molecular total. Returns false if
 // the getter raised an error (patch absent or container missing), clearing it.
+// Only available with the curcuma tblite diagnostic patch
+// (patches/tblite/curcuma-tblite.patch); guarded so the dumper builds against a
+// vanilla tblite (energy_components is then simply omitted).
 bool pullComponent(tblite_error err, tblite_result res, int nat,
                    void (*getter)(tblite_error, tblite_result, double*),
                    double& total)
@@ -112,18 +122,37 @@ bool pullComponent(tblite_error err, tblite_result res, int nat,
     for (double x : v) total += x;
     return true;
 }
+#endif  // CURCUMA_TBLITE_ECOMP
 
 }  // namespace
 
 int main(int argc, char** argv)
 {
     if (argc < 3) {
-        std::fprintf(stderr, "usage: %s <gfn1|gfn2> <in.xyz> [out.json]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <gfn1|gfn2> <in.xyz> [out.json] [--solvent NAME] [--model alpb|gbsa]\n", argv[0]);
         return 1;
     }
-    const std::string method_s = argv[1];
-    const std::string xyz_path = argv[2];
-    const std::string out_path = (argc >= 4) ? argv[3] : "reference.json";
+    // Collect positionals + the optional --solvent / --model flags (parse-anywhere).
+    std::string solvent;          // empty -> gas phase
+    std::string solv_model = "alpb";  // alpb (default) | gbsa; selects tblite version
+    std::vector<std::string> pos;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--solvent" && i + 1 < argc) { solvent = argv[++i]; }
+        else if (a == "--model" && i + 1 < argc) { solv_model = argv[++i]; }
+        else pos.push_back(a);
+    }
+    if (pos.size() < 2) {
+        std::fprintf(stderr, "usage: %s <gfn1|gfn2> <in.xyz> [out.json] [--solvent NAME] [--model alpb|gbsa]\n", argv[0]);
+        return 1;
+    }
+    if (solv_model != "alpb" && solv_model != "gbsa") {
+        std::fprintf(stderr, "error: --model must be 'alpb' or 'gbsa' (got '%s')\n", solv_model.c_str());
+        return 1;
+    }
+    const std::string method_s = pos[0];
+    const std::string xyz_path = pos[1];
+    const std::string out_path = (pos.size() >= 3) ? pos[2] : "reference.json";
 
     std::vector<Atom> atoms;
     std::string comment;
@@ -158,6 +187,27 @@ int main(int argc, char** argv)
     else {
         std::fprintf(stderr, "unknown method %s (expected gfn1|gfn2)\n", method_s.c_str());
         return 1;
+    }
+
+    // Attach implicit solvation via the same constructor; the version selects the
+    // model+method (ALPB(GFN1)=11, ALPB(GFN2)=12, GBSA(GFN1)=21, GBSA(GFN2)=22).
+    // refstate: gsolv=1 -> total_shift = gshift only, matching the native target.
+    if (!solvent.empty()) {
+        const bool is_gbsa = (solv_model == "gbsa");
+        int version;
+        if (method_s == "gfn1") version = is_gbsa ? 21 : 11;
+        else                    version = is_gbsa ? 22 : 12;
+        const int refstate = 1;  // gsolv
+        std::vector<char> sbuf(solvent.begin(), solvent.end());
+        sbuf.push_back('\0');
+        tblite_container cont =
+            tblite_new_alpb_solvation_solvent(err, mol, sbuf.data(), version, refstate);
+        if (tblite_check_error(err)) {
+            std::fprintf(stderr, "tblite %s setup failed for solvent '%s'\n",
+                         solv_model.c_str(), solvent.c_str());
+            return 1;
+        }
+        tblite_calculator_push_back(ctx, calc, &cont);
     }
 
     int nao = 0;
@@ -197,17 +247,16 @@ int main(int argc, char** argv)
 
     // Energy components (patch-only). Molecular totals only (tblite distributes
     // some terms across containers; combined disp+electronic is the meaningful
-    // gate, see diag_curcuma_energy_components header).
+    // gate, see diag_curcuma_energy_components header). Requires the curcuma
+    // tblite diagnostic patch; without it the block is simply omitted (the
+    // solvation validation gates on total_energy, not the decomposition).
     json ec;
+#ifdef CURCUMA_TBLITE_ECOMP
     {
         // Capture each component INDEPENDENTLY. A getter that raises -- e.g. the
         // halogen container is legitimately absent for H/C/N/O molecules -- must
-        // only drop its own entry, not the whole block (the previous ok &= ...
-        // logic dropped energy_components entirely whenever any single container
-        // was missing, which is why no committed ref carried it). pullComponent
-        // clears the tblite error on failure, so subsequent getters still work.
-        // An omitted key means "container not applicable"; both
-        // diag_curcuma_energy_components and validate_sqm.py treat it that way.
+        // only drop its own entry, not the whole block. pullComponent clears the
+        // tblite error on failure, so subsequent getters still work.
         double v = 0.0;
         if (pullComponent(err, res, nat, tblite_get_result_energy_component_repulsion,    v)) ec["repulsion"]    = v;
         if (pullComponent(err, res, nat, tblite_get_result_energy_component_dispersion,   v)) ec["dispersion"]   = v;
@@ -215,10 +264,15 @@ int main(int argc, char** argv)
         if (pullComponent(err, res, nat, tblite_get_result_energy_component_interactions, v)) ec["interactions"] = v;
         if (pullComponent(err, res, nat, tblite_get_result_energy_component_halogen,      v)) ec["halogen"]      = v;
     }
+#endif
 
     // ----- assemble compact reference -----
     json out;
     out["method"] = method_s;
+    if (!solvent.empty()) {
+        out["solvent"] = solvent;
+        out["solvent_model"] = solv_model;
+    }
 
     json m;
     {

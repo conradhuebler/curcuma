@@ -33,6 +33,9 @@ bool NativeOptimizerAdapter::InitializeOptimizerInternal()
         m_lbfgs->setOptimizationMethod(m_native_method);
         m_lbfgs->setEnergyCalculator(m_context.energy_calculator);
         m_lbfgs->setVerbosity(0); // Driver handles output, not the LBFGS class
+        // Claude Generated 2026 - Route the driver's interactive grab bias into
+        // the LBFGS class so native L-BFGS/DIIS/RFO respond to mouse drag.
+        m_lbfgs->bindExternalForces(&m_external_forces);
 
         // Translate constraints: OptimizerDriver uses per-atom vector<int> (0=fixed, 1=free)
         // LBFGS class uses per-coordinate Vector (0=fixed, 1=free)

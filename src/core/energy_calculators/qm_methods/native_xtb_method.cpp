@@ -195,7 +195,10 @@ bool NativeXtbMethod::setMolecule(const Mol& mol)
         m_c1_driver.reset();
 
         if (!m_xtb->QMInterface::InitialiseMolecule(mol)) {
-            handleError("molecule initialization");
+            // Surface the engine's specific reason (e.g. unsupported d-shell element)
+            // rather than a generic message. Claude Generated.
+            handleError(m_xtb->hasError() ? m_xtb->errorMessage()
+                                          : std::string("molecule initialization"));
             return false;
         }
         return true;
@@ -269,6 +272,16 @@ double NativeXtbMethod::calculateEnergy(bool gradient)
 
         m_last_energy = m_xtb->Calculation(gradient);
         m_calculation_done = true;
+
+        // Fail-loud (Claude Generated): a genuine solve breakdown (singular overlap,
+        // eigensolver/density failure, NaN) must not be reported as a valid E=0. The
+        // engine sets a hard-error flag distinct from benign max-iter non-convergence;
+        // surface it so EnergyCalculator refuses the result instead of handing E=0 to
+        // an optimiser/MD.
+        if (m_xtb->hasError()) {
+            handleError(m_xtb->errorMessage());
+            return 0.0;
+        }
 
         if (m_parameters.value("print_orbitals", false)
             && CurcumaLogger::get_verbosity() >= 2) {

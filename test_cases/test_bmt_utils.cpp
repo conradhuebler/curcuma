@@ -13,6 +13,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <filesystem>  // Claude Generated 2026 - std::filesystem::exists/remove_all (GCC 16: no transitive include)
 #include <fstream>
 #include <iostream>
 #include <sstream>

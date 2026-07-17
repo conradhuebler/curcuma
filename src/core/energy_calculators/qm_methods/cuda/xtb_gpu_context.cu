@@ -9,7 +9,7 @@
  * wrapper does all user-facing logging based on ok()/deviceName().
  */
 
-#ifdef USE_CUDA_XTB
+#ifdef USE_CUDA
 
 #include "xtb_gpu_context.h"
 
@@ -185,6 +185,13 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dVsh;        // shell potential v_sh, nsh
     CudaBuffer<double> dVat;        // atom potential v_at, nat
 
+    // WP4b (Claude Generated June 2026): in-SCF implicit-solvation reaction field.
+    // dSolvB is the nat×nat Born interaction matrix B (keps-scaled, incl. self-energy
+    // + HB diagonal; symmetric, column-major). When solv_active, the device potential
+    // build adds v_at += B·q_at (GFN2 Mulliken charges) so the SCF feels the solvent.
+    CudaBuffer<double> dSolvB;      // Born matrix B, nat·nat
+    bool               solv_active = false;
+
     // Stage 6 (S6.1): device occupation. k_occupations fills the resident dOcc
     // from the resident dEps (no host round-trip in the loop); dOccMu/dOccNcol
     // carry the converged chemical potential + the occupied-column count for the
@@ -354,18 +361,27 @@ __global__ void k_overlap_h0(
     const double* pb_coeff = prim_coeff + sh_prim_off[b];
     const int npb = sh_nprim[b];
 
+    // X-I1: d-touching shell pairs use the cartesian->spherical element function;
+    // pure s/p pairs keep the scalar d_cgto_overlap path (byte-identical).
+    const bool dpair = (la >= 2 || lb >= 2);
     for (int ia = 0; ia < ia_nao; ++ia) {
         const int mu = ia_start + ia;
-        const int ta = d_ao_to_type(la, ia);
-        if (ta < 0) continue;
         for (int jb = 0; jb < jb_nao; ++jb) {
             const int nu = jb_start + jb;
-            const int tb = d_ao_to_type(lb, jb);
-            if (tb < 0) continue;
-            const double s_ab = (iat == jat && a == b && ta == tb)
-                ? 1.0
-                : d_cgto_overlap(pa_alpha, pa_coeff, npa, pb_alpha, pb_coeff, npb,
-                                 xa, ya, za, xb, yb, zb, ta, tb);
+            double s_ab;
+            if (!dpair) {
+                const int ta = d_ao_to_type(la, ia);
+                const int tb = d_ao_to_type(lb, jb);
+                if (ta < 0 || tb < 0) continue;
+                s_ab = (iat == jat && a == b && ta == tb)
+                    ? 1.0
+                    : d_cgto_overlap(pa_alpha, pa_coeff, npa, pb_alpha, pb_coeff, npb,
+                                     xa, ya, za, xb, yb, zb, ta, tb);
+            } else {
+                s_ab = d_overlap_elem(la, ia, lb, jb, pa_alpha, pa_coeff, npa,
+                                      pb_alpha, pb_coeff, npb, xa, ya, za, xb, yb, zb);
+                if (iat == jat && a == b && ia == jb) s_ab = 1.0;
+            }
             const size_t idx = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
             S[idx]  = s_ab;
             H0[idx] = avg_eps * h_factor * s_ab;
@@ -423,12 +439,12 @@ __global__ void k_multipole_ints(
 
     const int isha = ao2sh[mu], iat = ao2at[mu];
     const int ishb = ao2sh[nu], jat = ao2at[nu];
-    const int ta = d_ao_to_type(ang_sh[isha], mu - iao_sh[isha]);
-    const int tb = d_ao_to_type(ang_sh[ishb], nu - iao_sh[ishb]);
+    const int la = ang_sh[isha], lb = ang_sh[ishb];
+    const int sa = mu - iao_sh[isha], sb = nu - iao_sh[ishb];
+    const bool dpair = (la >= 2 || lb >= 2);   // X-I1
 
     for (int k = 0; k < 3; ++k) dp_int[static_cast<size_t>(k) * nn + mn] = 0.0;
     for (int k = 0; k < 6; ++k) qp_int[static_cast<size_t>(k) * nn + mn] = 0.0;
-    if (ta < 0 || tb < 0) return;
 
     const double* aA = prim_alpha + sh_prim_off[isha];
     const double* cA = prim_coeff + sh_prim_off[isha];
@@ -438,9 +454,18 @@ __global__ void k_multipole_ints(
     const int npb = sh_nprim[ishb];
 
     double Sx, D[3], Q[6];
-    d_cgto_multipole(aA, cA, npa, aB, cB, npb,
-                     xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
-                     xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], ta, tb, Sx, D, Q);
+    if (!dpair) {
+        const int ta = d_ao_to_type(la, sa);
+        const int tb = d_ao_to_type(lb, sb);
+        if (ta < 0 || tb < 0) return;
+        d_cgto_multipole(aA, cA, npa, aB, cB, npb,
+                         xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                         xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], ta, tb, Sx, D, Q);
+    } else {
+        d_multipole_elem(la, sa, lb, sb, aA, cA, npa, aB, cB, npb,
+                         xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                         xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], Sx, D, Q);
+    }
 
     // Origin shift to the column atom (nu) + traceless transform with overlap S.
     const double Rx = xyz[3*jat+0], Ry = xyz[3*jat+1], Rz = xyz[3*jat+2];
@@ -483,16 +508,26 @@ __global__ void k_overlap_grad(
 
     const int isha = ao2sh[mu], iat = ao2at[mu];
     const int ishb = ao2sh[nu], jat = ao2at[nu];
-    const int ta = d_ao_to_type(ang_sh[isha], mu - iao_sh[isha]);
-    const int tb = d_ao_to_type(ang_sh[ishb], nu - iao_sh[ishb]);
+    const int la = ang_sh[isha], lb = ang_sh[ishb];      // X-I1
+    const int sa = mu - iao_sh[isha], sb = nu - iao_sh[ishb];
 
     double g[3] = {0.0, 0.0, 0.0};
-    if (ta >= 0 && tb >= 0) {
-        d_cgto_overlap_grad(
+    if (la >= 2 || lb >= 2) {
+        d_overlap_grad_elem(la, sa, lb, sb,
             prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
             prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
             xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
-            xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], ta, tb, g);
+            xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], g);
+    } else {
+        const int ta = d_ao_to_type(la, sa);
+        const int tb = d_ao_to_type(lb, sb);
+        if (ta >= 0 && tb >= 0) {
+            d_cgto_overlap_grad(
+                prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+                prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+                xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], ta, tb, g);
+        }
     }
     dSdR[0*nn + mn] = g[0];
     dSdR[1*nn + mn] = g[1];
@@ -564,9 +599,14 @@ __global__ void k_grad_h0_pulay(
 
     const int isha = ao2sh[mu], ishb = ao2sh[nu];
     const int la = ang[isha], lb = ang[ishb];
-    const int ta = d_ao_to_type(la, mu - iao_sh[isha]);
-    const int tb = d_ao_to_type(lb, nu - iao_sh[ishb]);
-    if (ta < 0 || tb < 0) return;
+    const int sa = mu - iao_sh[isha], sb = nu - iao_sh[ishb];
+    const bool dpair = (la >= 2 || lb >= 2);   // X-I1
+    int ta = -1, tb = -1;
+    if (!dpair) {
+        ta = d_ao_to_type(la, sa);
+        tb = d_ao_to_type(lb, sb);
+        if (ta < 0 || tb < 0) return;
+    }
 
     const double xa = xyz[3*iat+0], ya = xyz[3*iat+1], za = xyz[3*iat+2];
     const double xb = xyz[3*jat+0], yb = xyz[3*jat+1], zb = xyz[3*jat+2];
@@ -602,10 +642,17 @@ __global__ void k_grad_h0_pulay(
     const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
     const double Pmn = P[mn], Smn = S[mn], H0mn = H0[mn], Wmn = W[mn];
     double dS[3];
-    d_cgto_overlap_grad(
-        prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
-        prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
-        xa, ya, za, xb, yb, zb, ta, tb, dS);
+    if (dpair) {
+        d_overlap_grad_elem(la, sa, lb, sb,
+            prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+            prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+            xa, ya, za, xb, yb, zb, dS);
+    } else {
+        d_cgto_overlap_grad(
+            prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+            prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+            xa, ya, za, xb, yb, zb, ta, tb, dS);
+    }
 
     const double sval = 2.0*Pmn*h_av - 2.0*Wmn - Pmn*(v_ao[mu] + v_ao[nu]);
     const double shp  = 2.0*Pmn*H0mn*dlog_pi_dr_r;
@@ -619,10 +666,17 @@ __global__ void k_grad_h0_pulay(
     // the column atom jat, so dR = R_jat − R_iat.
     if (is_gfn2 && v_dp) {
         double D_mp[3], dD_dA[3][3], dQ_dA[3][6];
-        d_cgto_multipole_grad_transformed(
-            prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
-            prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
-            xa, ya, za, xb, yb, zb, ta, tb, D_mp, dD_dA, dQ_dA);
+        if (dpair) {
+            d_multipole_grad_elem(la, sa, lb, sb,
+                prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+                prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+                xa, ya, za, xb, yb, zb, D_mp, dD_dA, dQ_dA);
+        } else {
+            d_cgto_multipole_grad_transformed(
+                prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+                prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+                xa, ya, za, xb, yb, zb, ta, tb, D_mp, dD_dA, dQ_dA);
+        }
         const double dR[3] = { xb - xa, yb - ya, zb - za };
         const int qa6[6] = {0,0,1,0,1,2}, qb6[6] = {0,1,1,2,2,2};
         double term[3];
@@ -2869,6 +2923,28 @@ bool XtbGpuContext::beginPotential(int nat, int nsh,
     m_impl->dMpQkernel.upload(qkernel, nat, stream);
     m_impl->dGamma3.upload(gamma3, nsh, stream);
     m_impl->pot_nsh = nsh;
+    // WP4b: solvation is opt-in per geometry via beginSolvation() (called after this);
+    // reset here so a solvent-free geometry never re-uses a stale Born matrix.
+    m_impl->solv_active = false;
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+// WP4b (Claude Generated June 2026): upload the nat×nat Born interaction matrix B so
+// the device potential build adds the in-SCF reaction field v_at += B·q_at. Call once
+// per geometry after beginPotential() (GFN2 Mulliken path only). born_mat is the
+// symmetric, keps-scaled m_born_mat (column-major == row-major for a symmetric matrix).
+bool XtbGpuContext::beginSolvation(int nat, const double* born_mat)
+{
+    if (!ok() || nat <= 0 || !born_mat) return false;
+    cudaStream_t stream = m_impl->stream;
+    const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
+    try {
+        m_impl->dSolvB.ensure(static_cast<int>(nn));
+    } catch (...) {
+        return false;
+    }
+    m_impl->dSolvB.upload(born_mat, static_cast<int>(nn), stream);
+    m_impl->solv_active = true;
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
@@ -2941,6 +3017,15 @@ bool XtbGpuContext::buildDevicePotentialAndSolve(int n, bool fp32, int n_eig,
     if (cudaGetLastError() != cudaSuccess) return false;
     k_vat_add_d4<<<(nat + b - 1) / b, b, 0, stream>>>(nat, m_impl->dD4Dedq.ptr, m_impl->dVat.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
+    // WP4b: in-SCF implicit solvation reaction field v_at += B·q_at (GFN2 Mulliken).
+    // B is symmetric so column-major (uploaded) vs row-major is identical; beta=1
+    // accumulates onto the multipole+D4 v_at. dQat is the input-derived atomic charge.
+    if (m_impl->solv_active) {
+        const double one = 1.0;
+        if (cublasDgemv(m_impl->cublas, CUBLAS_OP_N, nat, nat, &one, m_impl->dSolvB.ptr, nat,
+                        m_impl->dQat.ptr, 1, &one, m_impl->dVat.ptr, 1) != CUBLAS_STATUS_SUCCESS)
+            return false;
+    }
     // Expand to AO: v_ao(μ) = v_sh(ao2sh[μ]) + v_at(ao2at[μ]).
     k_expand_vao<<<(n + b - 1) / b, b, 0, stream>>>(n, m_impl->dVsh.ptr, m_impl->dVat.ptr,
                                                     m_impl->dAo2sh.ptr, m_impl->dAo2at.ptr,
@@ -3152,4 +3237,4 @@ bool XtbGpuContext::residentBeginMultipoleComputed()
 } // namespace xtb
 } // namespace curcuma
 
-#endif // USE_CUDA_XTB
+#endif // USE_CUDA
