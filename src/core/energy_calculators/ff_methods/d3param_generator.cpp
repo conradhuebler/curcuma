@@ -636,25 +636,26 @@ void D3ParameterGenerator::precomputeGaussianWeights(
             sum_weights += weights[ref];
         }
 
-        // Normalize weights
-        if (sum_weights > 1e-10) {
-            for (int ref = 0; ref < nref; ++ref) {
-                weights[ref] /= sum_weights;
+        // Normalize weights — faithful port of s-dftd3 weight_references
+        // (model.f90:214-231): always divide by the finite sum (norm = 1/sum is
+        // finite for ANY nonzero sum, e.g. 1/2.3e-18 for a heavy metal whose
+        // reference CNs are far from the actual CN), then guard EACH normalized
+        // weight against NaN/Inf. Only when a normalized weight is exceptional
+        // (true underflow: sum rounded to 0) does the reference with the maximal
+        // CN get weight 1. The previous `sum_weights > 1e-10` guard wrongly
+        // triggered the max-CN fallback for heavy metals with sparse reference
+        // CNs (Ru: 0/1.86/8.89, CN 5.05 -> raw sum 2.3e-18 < 1e-10), collapsing
+        // C6 onto the high-CN reference and under-binding dispersion.
+        double max_cn_ref = getReferenceCN(elem, 0);
+        for (int ref = 1; ref < nref; ++ref)
+            max_cn_ref = std::max(max_cn_ref, getReferenceCN(elem, ref));
+        const double inv_norm = 1.0 / sum_weights;
+        for (int ref = 0; ref < nref; ++ref) {
+            double gwk = weights[ref] * inv_norm;
+            if (!std::isfinite(gwk)) {  // s-dftd3 is_exceptional: NaN or |val|>huge
+                gwk = (getReferenceCN(elem, ref) == max_cn_ref) ? 1.0 : 0.0;
             }
-        } else {
-            // Exceptional case: all weights negligible
-            // Set highest CN reference to 1.0 (matches Fortran behavior)
-            double max_cn_ref = -1.0;
-            int max_ref_idx = 0;
-            for (int ref = 0; ref < nref; ++ref) {
-                double cn_ref = getReferenceCN(elem, ref);
-                if (cn_ref > max_cn_ref) {
-                    max_cn_ref = cn_ref;
-                    max_ref_idx = ref;
-                }
-            }
-            std::fill(weights.begin(), weights.end(), 0.0);
-            weights[max_ref_idx] = 1.0;
+            weights[ref] = gwk;
         }
 
         m_gaussian_weights[i] = std::move(weights);
@@ -1027,15 +1028,17 @@ void D3ParameterGenerator::computeDC6DCN() const
             dnorm += raw_dgw[ref];
         }
 
-        if (norm < 1e-10) {
-            // Exceptional case: all weights negligible -> delta on max CN ref
-            dgw[idx].resize(nref, 0.0);
-            continue;
-        }
-
-        dgw[idx].resize(nref);
+        // s-dftd3 model.f90:184-201: divide by the finite sum and guard each
+        // derivative against NaN/Inf (true underflow), not a coarse magnitude
+        // threshold. Mirrors the energy-weight fix above so the CN chain-rule is
+        // consistent for heavy metals with sparse reference CNs (the old
+        // `norm < 1e-10` zeroed a legitimate finite derivative, e.g. Ru CN 5.05
+        // where norm=2.3e-18 but the normalized dgw is O(0.1)).
+        dgw[idx].resize(nref, 0.0);
         for (int ref = 0; ref < nref; ++ref) {
-            dgw[idx][ref] = (raw_dgw[ref] * norm - raw_gw[ref] * dnorm) / (norm * norm);
+            double dgwk = (raw_dgw[ref] * norm - raw_gw[ref] * dnorm) / (norm * norm);
+            if (!std::isfinite(dgwk)) dgwk = 0.0;
+            dgw[idx][ref] = dgwk;
         }
     }
 

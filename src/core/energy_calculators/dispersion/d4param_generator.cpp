@@ -1148,13 +1148,22 @@ void D4ParameterGenerator::precomputeGaussianWeights(CxxThreadPool* pool, int nu
         w_arr.head(n) = w_arr.head(n).exp();
         const double sum_weights = w_arr.head(n).sum();
 
+        // Normalize by the finite sum — faithful port of s-dftd4 weight_references:
+        // 1/sum is finite for ANY nonzero sum (e.g. 1/2.3e-18 for an atom whose
+        // reference CNs are far from the actual CN), so always divide, then guard
+        // EACH normalized weight against NaN/Inf (true underflow: sum rounded to 0),
+        // in which case the reference with the maximal CN gets weight 1. The old
+        // `sum_weights > 1e-10` guard wrongly took the fallback for atoms with sparse
+        // reference CNs, collapsing C6 onto one reference and biasing dispersion
+        // (e.g. GFN2 Ti in MOR41 PR40 over-bound by ~2e-3 Eh).
+        double max_cn_ref = refcn_row[0];
+        for (int ref = 1; ref < n; ++ref) max_cn_ref = std::max(max_cn_ref, refcn_row[ref]);
         std::vector<double> weights(n, 0.0);
-        if (sum_weights > 1e-10) {
-            const double inv = 1.0 / sum_weights;
-            for (int ref = 0; ref < n; ++ref) weights[ref] = w_arr(ref) * inv;
-        } else {
-            // Exceptional case: set first reference to 1.0 (neutral state fallback)
-            weights[0] = 1.0;
+        const double inv = 1.0 / sum_weights;
+        for (int ref = 0; ref < n; ++ref) {
+            double gwk = w_arr(ref) * inv;
+            if (!std::isfinite(gwk)) gwk = (refcn_row[ref] == max_cn_ref) ? 1.0 : 0.0;
+            weights[ref] = gwk;
         }
 
         m_gaussian_weights[i] = std::move(weights);
@@ -1750,12 +1759,16 @@ void D4ParameterGenerator::computeGaussianWeightDerivatives(CxxThreadPool* pool,
         const double norm = expw.head(n).sum();
         const double dnorm = dexpw.head(n).sum();
 
+        // Divide by the finite norm and guard each derivative against NaN/Inf (true
+        // underflow), mirroring the energy-weight fix above so the CN chain-rule is
+        // consistent for atoms with sparse reference CNs (the old `norm > 1e-10`
+        // zeroed legitimate finite derivatives).
         std::vector<double> dgwdcn(n, 0.0);
-        if (norm > 1e-10) {
-            const double inv_norm2 = 1.0 / (norm * norm);
-            for (int ref = 0; ref < n; ++ref) {
-                dgwdcn[ref] = (dexpw(ref) * norm - expw(ref) * dnorm) * inv_norm2;
-            }
+        const double inv_norm2 = 1.0 / (norm * norm);
+        for (int ref = 0; ref < n; ++ref) {
+            double dgwk = (dexpw(ref) * norm - expw(ref) * dnorm) * inv_norm2;
+            if (!std::isfinite(dgwk)) dgwk = 0.0;
+            dgwdcn[ref] = dgwk;
         }
 
         m_gaussian_weight_derivatives[i] = std::move(dgwdcn);
