@@ -110,6 +110,18 @@ test_cases/molecules/**/*.reorder.*.xyz
 test_cases/molecules/**/*.reuse.xyz
 test_cases/molecules/**/*.thresh.xyz
 
+# ConfSearch run artifacts (MD/opt trajectories, restart checkpoints) - Claude Generated Jul 2026
+test_cases/**/.snapshots/
+test_cases/**/*_step_*.json
+test_cases/**/*.final.json
+test_cases/**/*.bias.xyz
+test_cases/**/*.bias.opt.accepted.xyz
+test_cases/**/*.cumulative.xyz
+test_cases/**/*.cumulative.opt.accepted.xyz
+test_cases/**/*.input.xyz
+test_cases/**/*_md_params.json
+test_cases/**/*.confsearch.restart.json
+
 # Root-level output files (optimization and trajectory outputs)
 *.opt.xyz
 *.trj.xyz
