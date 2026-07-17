@@ -1246,10 +1246,18 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
     }
     p->clear();
     delete p;
+    // Claude Generated (Jul 2026): the per-thread RMSD config sets CurcumaLogger's global
+    // verbosity to 0 for thread silence (rmsd["verbosity"] = 0 above) and nothing restores it
+    // afterwards, so any CurcumaLogger call below this point was silently dropped regardless
+    // of m_verbosity - reassert it, matching the pattern used at the verbosity>=3 rejection
+    // print above.
+    CurcumaLogger::set_verbosity(m_verbosity);
     if (!m_rmsd_set) {
         m_rmsd_threshold *= m_getrmsd_scale; // apply user-defined scale factor (default 1.1)
-        if (m_verbosity >= 2)
-            CurcumaLogger::info_fmt("RMSD threshold set to {:.6f} Å (scale={:.2f})", m_rmsd_threshold, m_getrmsd_scale);
+        CurcumaLogger::result_fmt("RMSD threshold set to {:.6f} Å (scale={:.2f})", m_rmsd_threshold, m_getrmsd_scale);
+        constexpr double kDefaultRMSDThreshold = 0.9; // PARAM(rmsd, Double, 0.9, ...) default, confscan.h
+        if (m_rmsd_threshold > kDefaultRMSDThreshold)
+            CurcumaLogger::warn_fmt("Dynamically determined RMSD threshold ({:.6f} Å) exceeds the default {:.2f} Å - filtering will be looser than usual", m_rmsd_threshold, kDefaultRMSDThreshold);
         for (const auto& i : m_listThresh) {
             if (i.first > m_getrmsd_thresh)
                 break;
