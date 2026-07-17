@@ -32,19 +32,23 @@ Result (native vs tblite, identical geometries):
 - **No regression**: all main-group sqm molecules (incl. d-shell H2S/PH3/SiH4/HCl and H)
   stay 1e-8 vs tblite for both GFN1 and GFN2; gfn2 ecomp ctests pass.
 
-The remaining ~1e-3 Eh residual was then fully localized to **dispersion** (overlap and all
-electronic params are bit-exact vs tblite) and closed by three more fixes: the **5p STO-4G
-transcription error** (period-5 overlap), the **D4 `r4/r2` table truncation at Z≤36**
-(heavy-element D4 under-binding), and the **D3/D4 CN-Gaussian weight-normalization threshold**
-(collapsed C6 for sparse-reference-CN metals → GFN1 D3 under-binding). **Final vs tblite:
-GFN2 87/95 exact (1e-8), 94/95 <1e-6; GFN1 83/95 exact, 95/95 <1e-6; MOR41 gfn2 reaction
-MAD vs xtb 0.03 kcal/mol.**
+The remaining residual was then fully localized to **dispersion** (overlap and all electronic
+params are bit-exact vs tblite) and closed by four more fixes: the **5p STO-4G transcription
+error** (period-5 overlap), the **D4 `r4/r2` table truncation at Z≤36** (heavy-element D4
+under-binding), the **D3/D4 CN-Gaussian weight-normalization threshold** (collapsed C6 for
+sparse-reference-CN metals → GFN1 D3 under-binding), and the **missing D4 `sscale` entry for
+reference-system Na** (refsys=11) which left the 4th high-CN reference of Sc/Ti/V/Zr/Nb/Hf/Ta
+with C6 ~2.4× too large (the gfn2 PR40/Ti over-binding).
 
-**Remaining**: one gfn2 structure — **PR40** (a Ti complex) — over-binds D4 dispersion by
-~2e-3 Eh; it is geometry-specific (ED40a/ED40b, also Ti, are exact) and not the
-weight/ATM/charge/gap paths (all ruled out) — under investigation. GFN-FF transition-metal
-deviations are a separate force-field-parameter matter (metal bond term, see
-[GFNFF_METAL_BOND_ANALYSIS.md](GFNFF_METAL_BOND_ANALYSIS.md)).
+**Final result vs tblite: native GFN1 and GFN2 reproduce the reference for ALL 95 MOR41
+structures to <1e-6 Eh (95/95 both methods; ~85/95 at the 1e-8 print-precision floor).**
+MOR41 gfn2 reaction MAD vs xtb: **507 → 0.03 kcal/mol.** No main-group/3d/GFN-FF regression;
+all energy-validation ctests pass.
+
+The only remaining transition-metal gap is **GFN-FF** (a force field, separate from the GFN1/2
+tight-binding stack): its metal **bond term** is ~1.95× too strong because the Fortran
+metal-bond branch (`btyp>=5`) is not implemented — see
+[GFNFF_METAL_BOND_ANALYSIS.md](GFNFF_METAL_BOND_ANALYSIS.md).
 
 The sections below are the original (pre-fix) diagnostic and remain valid for GFN-FF.
 
