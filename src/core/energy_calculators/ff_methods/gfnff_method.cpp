@@ -4853,6 +4853,78 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     else if (group2 > 2 && imetal2 == 1) mtyp2 = 3;
     else if (imetal2 == 2) mtyp2 = 4;
 
+    // ========================================================================
+    // METAL BOND-STRETCH BRANCH (Claude Generated, Jul 2026)
+    // Reference: Fortran gfnff_ini.f90:1188-1264 (the mutually-exclusive
+    // `else` branch taken for every bond touching a metal, bbtyp>=5).
+    //
+    // For metal bonds the Fortran reference recomputes bstrength from
+    // gen%bstren(bbtyp) (M-X=1.00, eta=0.78, M-M=3.40) instead of the
+    // hybridization bsmat value, and uses metal-specific fqq and fcn.
+    // The fheavy / fpi / metal_shift / fsrb2 add-ons that follow already
+    // mirror that branch; here we override the three remaining pieces
+    // (bstrength, fqq, fcn) that were previously left on the normal-bond
+    // path and caused ~1.95x metal-bond over-binding (see
+    // docs/GFNFF_METAL_BOND_ANALYSIS.md).
+    //
+    // Gated on imetal>0, so metal-free bonds are bit-identical to before.
+    // ========================================================================
+    if (imetal1 > 0 || imetal2 > 0) {
+        // --- Fortran metal bond type (gfnff_ini.f90:1120-1123) ---
+        // btyp 5 = M-X, 6 = M-eta, 7 = TM-TM. eta (6) additionally needs
+        // itag(atom)==-1 && piadr(atom)>0 for the non-metal partner, which
+        // curcuma does not expose here; an eta bond therefore falls back to
+        // M-X (residual, no eta system in the validation targets).
+        int metal_bbtyp = 5; // M-X
+        if (imetal1 == 2 && imetal2 == 2) metal_bbtyp = 7; // TM-TM
+
+        // --- bstrength = bstren(bbtyp) (gfnff_ini.f90:1190-1197) ---
+        bstrength = bstren[metal_bbtyp];
+        if (metal_bbtyp == 7) {
+            // TM-TM row corrections. Fortran uses itabrow6; getPeriodicTableRow
+            // returns row 4 for the 3d block (K-Kr) and >4 for 4d/5d, which is
+            // the classification the reference needs (bstren(8)=bstren(9)=3.40).
+            int trow1 = getPeriodicTableRow(z1);
+            int trow2 = getPeriodicTableRow(z2);
+            if (trow1 > 4 && trow2 > 4) bstrength = bstren[8];        // 4/5d-4/5d
+            else if (trow1 == 4 && trow2 > 4) bstrength = bstren[8];  // 3d-4/5d (bstren(9)==3.40)
+            else if (trow2 == 4 && trow1 > 4) bstrength = bstren[8];
+            // NOTE: the mchar "metallic" scaling (1-min(2*mchar_i+2*mchar_j,0.5))
+            // at gfnff_ini.f90:1195-1197 is omitted (mchar not available in
+            // curcuma); no M-M system in the validation targets exercises this.
+        }
+
+        // --- metal fqq (gfnff_ini.f90:1209-1211) ---
+        // qfacbm: [0]=1.0 (non-metal), [1:2]=-0.2, [3]=0.70, [4]=0.50.
+        // Charge factor 25.0 (not the normal-bond 70.0).
+        static const double qfacbm[5] = { 1.0, -0.2, -0.2, 0.70, 0.50 };
+        double qafac_m = qa1 * qa2 * 25.0;
+        double dum_m = std::exp(-15.0 * qafac_m) / (1.0 + std::exp(-15.0 * qafac_m));
+        fqq = 1.0 + dum_m * (qfacbm[mtyp1] + qfacbm[mtyp2]) * 0.5;
+
+        // --- metal fcn (gfnff_ini.f90:1254-1259) ---
+        // CRITICAL: uses the BONDED-neighbour count nb(20,i), i.e. the bonded
+        // degree, NOT countNeighborsWithin20Bohr() (a distance-sphere count).
+        // curcuma's topo.neighbor_lists[i] is the bonded adjacency == nb(20,i).
+        int nbb1 = (atom1 >= 0 && atom1 < static_cast<int>(topo.neighbor_lists.size()))
+            ? static_cast<int>(topo.neighbor_lists[atom1].size()) : 0;
+        int nbb2 = (atom2 >= 0 && atom2 < static_cast<int>(topo.neighbor_lists.size()))
+            ? static_cast<int>(topo.neighbor_lists[atom2].size()) : 0;
+        fcn = 1.0; // discard the normal-path fcn (metal branch is mutually exclusive)
+        if (mtyp1 > 0 && mtyp1 < 3) fcn /= (1.0 + 0.100 * static_cast<double>(nbb1) * nbb1); // group 1/2
+        if (mtyp2 > 0 && mtyp2 < 3) fcn /= (1.0 + 0.100 * static_cast<double>(nbb2) * nbb2);
+        if (mtyp1 == 3) fcn /= (1.0 + 0.030 * static_cast<double>(nbb1) * nbb1);            // main-group metal
+        if (mtyp2 == 3) fcn /= (1.0 + 0.030 * static_cast<double>(nbb2) * nbb2);
+        if (mtyp1 == 4) fcn /= (1.0 + 0.036 * static_cast<double>(nbb1) * nbb1);            // transition metal
+        if (mtyp2 == 4) fcn /= (1.0 + 0.036 * static_cast<double>(nbb2) * nbb2);
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format(
+                "METAL_BOND: {:3d}-{:3d} bbtyp={} bstr={:.4f} fqq={:.6f} fcn={:.6f} (nb1={}, nb2={}, mtyp1={}, mtyp2={})",
+                atom1, atom2, metal_bbtyp, bstrength, fqq, fcn, nbb1, nbb2, mtyp1, mtyp2));
+        }
+    }
+
     // Phase 7: Metal-ligand corrections (Fortran gfnff_ini.f90:1212-1245)
     if (mtyp1 == 4 || mtyp2 == 4) {  // At least one atom is a transition metal
         // fheavy corrections for TM-ligand bonds
