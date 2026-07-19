@@ -5023,20 +5023,14 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // CRITICAL: Total rabshift must include pi-shift and metal-shift!
     // Fortran: r0 = (ra + rb + shift) * ff
     double total_rabshift = rabshift + pi_shift + metal_shift;
-    if (bond_has_metal) {
-        // Fortran gfnff_ini.f90:1289 — r0 = rtmp + vbond(1). For a metal bond rtmp = (ra+rb)*ff
-        // exactly (pibo=-99, no Goedecker pi-shortening, no SK correction — verified bit-equal
-        // to curcuma's (ra+rb)*ff), and vbond(1) = rabshift + metal_shift is added OUTSIDE the
-        // EN factor ff. Applying the shift inside ff (the organic form below) mis-scales the
-        // large ~-0.4 metal shift by (1-ff)~1.7% -> ~0.6 kcal on Cr(CO)6. pi_shift is 0 for
-        // metal bonds. The organic path keeps the all-inside-ff calibrated form: there native's
-        // rtmp != Fortran's rtmp (the Goedecker rabd folds pi/SK corrections that curcuma
-        // reconstructs via pi_shift inside ff), so moving the shift outside ff breaks organics
-        // (e.g. CO2 by 0.2 kcal).
-        params.equilibrium_distance = (ra + rb) * ff + total_rabshift;
-    } else {
-        params.equilibrium_distance = (ra + rb + total_rabshift) * ff;
-    }
+    // Fortran gfnff_ini.f90:1289 — r0 = rtmp + vbond(1). rtmp is the Goedecker/SK reference
+    // distance (curcuma's (ra+rb)*ff — verified bit-equal to Fortran's rtmp for both metal-C and
+    // the ligand C-O), and vbond(1) = rabshift + shift (+ pi_shift + metal_shift) is added
+    // OUTSIDE the EN factor ff — including the pi shift (Fortran folds the pi-bond-order shift
+    // into vbond(1), NOT into rtmp). curcuma previously multiplied every shift by ff, which only
+    // matched when ff~1 (free light-atom bonds); it mis-scaled by (1-ff) whenever ff departs
+    // from 1 — metal-C bonds (~0.6 kcal), coordinated ligand C-O (~0.1 kcal/CO), and CO2.
+    params.equilibrium_distance = (ra + rb) * ff + total_rabshift;
     params.rabshift = total_rabshift;
 
     // Step 11: Force constant (9 factors)
