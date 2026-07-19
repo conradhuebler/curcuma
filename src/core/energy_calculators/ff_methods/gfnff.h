@@ -314,6 +314,7 @@ public:
         Vector neighbor_counts;                                  // Simple neighbor counts (integer CN)
         std::vector<int> hybridization;                          // 0=sp3, 1=sp, 2=sp2, 3=terminal, 5=hypervalent
         std::vector<int> pi_fragments;                           // Pi fragment assignment per atom
+        std::vector<int> itag;                                   // -1 iff atom is eta-coordinated to a metal (Fortran itag; gfnff_ini2.f90:170-198) - Claude Generated Jul 2026
         std::vector<int> pi_system_charge;                       // ipis: charge per pi-system (subtract from nelpi) - Claude Generated Jul 2026
         std::vector<int> ring_sizes;                             // Smallest ring containing each atom
         std::vector<bool> is_metal;                              // Metal atom flags
@@ -1757,6 +1758,20 @@ private:
      * @return Vector of neighbor lists (one std::vector<int> per atom)
      */
     std::vector<std::vector<int>> buildNeighborLists() const;
+
+    /**
+     * @brief Detect eta(η)-coordinated atoms (metal-alkene/alkyne/Cp side-on bonding)
+     *
+     * Claude Generated (July 2026). Faithful port of the Fortran etacoord logic
+     * (external/gfnff/src/gfnff_ini2.f90:170-198). Sets itag[i] = -1 for genuine
+     * η-coordinated carbons (only ati<=10, in practice C), -1 otherwise 0. Used by
+     * the angle-bending feta metal correction so it fires ONLY for real η ligands
+     * (metal-alkene/alkyne/cyclopentadienyl), NOT σ-bonded π ligands like CO.
+     *
+     * @param neighbor_lists Full bonded adjacency (== Fortran nbf, includes metals)
+     * @return itag vector (size m_atomcount): -1 if η-coordinated, else 0
+     */
+    std::vector<int> computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists) const;
 
     /**
      * @brief Count neighbors within 20 Bohr cutoff (nb20)

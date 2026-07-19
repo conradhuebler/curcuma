@@ -2586,6 +2586,11 @@ json GFNFF::exportTopology() const
         topo_json["pi_fragments"] = topo.pi_fragments;
     }
 
+    // Eta(η)-coordination tags (Claude Generated Jul 2026)
+    if (!topo.itag.empty()) {
+        topo_json["itag"] = topo.itag;
+    }
+
     // Aromatic flags
     if (!topo.is_aromatic.empty()) {
         std::vector<int> aromatic_flags;
@@ -2739,6 +2744,11 @@ bool GFNFF::importTopology(const json& topo_json)
     // Pi fragments
     if (topo_json.contains("pi_fragments")) {
         topo.pi_fragments = topo_json["pi_fragments"].get<std::vector<int>>();
+    }
+
+    // Eta(η)-coordination tags (Claude Generated Jul 2026)
+    if (topo_json.contains("itag")) {
+        topo.itag = topo_json["itag"].get<std::vector<int>>();
     }
 
     // Aromatic flags
@@ -4872,9 +4882,11 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     if (imetal1 > 0 || imetal2 > 0) {
         // --- Fortran metal bond type (gfnff_ini.f90:1120-1123) ---
         // btyp 5 = M-X, 6 = M-eta, 7 = TM-TM. eta (6) additionally needs
-        // itag(atom)==-1 && piadr(atom)>0 for the non-metal partner, which
-        // curcuma does not expose here; an eta bond therefore falls back to
-        // M-X (residual, no eta system in the validation targets).
+        // itag(atom)==-1 && piadr(atom)>0 for the non-metal partner. topo.itag is now
+        // populated (computeEtaCoordination, Jul 2026) so this could be wired here, but
+        // it is deliberately left as M-X for now: promoting to eta changes the metal
+        // bond strength (bstren(6)=0.78) and would need its own validation against the
+        // reference. An eta bond therefore still falls back to M-X (residual).
         int metal_bbtyp = 5; // M-X
         if (imetal1 == 2 && imetal2 == 2) metal_bbtyp = 7; // TM-TM
 
@@ -5318,55 +5330,69 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // But params.equilibrium_angle is only set at line 1894 (110 lines later!)
     // Result: fbsmall was calculated with garbage data, breaking angle force constants
 
-    // Factor 6: feta = metal η-coordination correction
-    // Claude Generated (January 2026): Implement feta correction for transition metals
-    // Reference: Fortran gfnff_ini.f90:1469-1471
+    // Factor 6: feta = metal η(eta)-coordination correction
+    // Claude Generated (January 2026, rewritten July 2026)
+    // Reference: Fortran gfnff_ini.f90:1392-1394
+    //
+    //   feta = 1.0
+    //   if (imetal(center)==2 .and. itag(outer_j)==-1 .and. piadr(outer_j)>0) feta = 0.3
+    //   if (imetal(center)==2 .and. itag(outer_k)==-1 .and. piadr(outer_k)>0) feta = feta*0.3
     //
     // Educational Documentation:
     // ==========================
-    // feta reduces angle force constants when transition metals coordinate to π-systems
-    // (e.g., ferrocene Fe-C₆H₆, metal-alkene complexes, metal-arene sandwich compounds)
+    // feta reduces the angle force constant when a transition metal is η-coordinated
+    // to a π-ligand (metal-alkene/alkyne/cyclopentadienyl), because side-on π-coordination
+    // is angularly softer than a σ-bond. It fires ONLY for genuine η-ligands.
     //
-    // Physical meaning: π-coordination (η bonding) is more flexible than σ-bonding
-    // Metal-π bonds use diffuse orbitals with softer angular potentials
-    //
-    // Formula:
-    //   feta = 1.0  (default: no correction)
-    //   feta = 0.3  (transition metal + one π-bonded neighbor: 70% reduction)
-    //   feta = 0.09 (transition metal + both neighbors π-bonded: 91% reduction)
-    //
-    // π-bonded atoms: sp or sp² hybridization (hyb=1 or 2) capable of π-overlap
+    // CRITICAL (July 2026 fix): the previous code proxied η by sp/sp² hybridization of the
+    // outer atoms. That wrongly softened σ-bonded π-ligands — e.g. a carbonyl C (sp, in a
+    // π-system, but σ-bonded, itag≠-1) — so Rh-C(O)/Rh-Cl angles in RhCl(CO)2 got feta=0.3/0.09
+    // and the angle energy was ~3.5 mEh too low. The Fortran reference gates on true
+    // η-coordination (itag==-1), which CO/Cl do NOT satisfy → feta=1.0. We now use the
+    // ported itag (computeEtaCoordination) AND the π-system membership check (piadr>0),
+    // exactly as Fortran does.
     //
     // Literature: Spicher, S.; Grimme, S. Angew. Chem. Int. Ed. 2020
     // ============================================================================
 
-    double feta = 1.0;  // Default: no metal-π correction
+    double feta = 1.0;  // Default: no metal-η correction
 
     // Check if central atom is a transition metal (metal_type==2)
     // Note: z_center already declared above at line 1689
     bool is_tm_center = (z_center >= 1 && z_center <= 86) && (metal_type[z_center - 1] == 2);
 
     if (is_tm_center) {
-        // Check if neighbors are π-bonded (sp or sp² hybridization)
-        int hyb_i = topo_info.hybridization[atom_i];
-        int hyb_k = topo_info.hybridization[atom_k];
+        // η-coordination of the OUTER atoms (Fortran itag==-1), NOT hybridization.
+        //
+        // Fortran (gfnff_ini.f90:1393) additionally checks piadr(outer)>0. That check is
+        // redundant with itag==-1 in the reference: an η atom is by construction an
+        // alkene/alkyne/Cp carbon in a π-system, so piadr>0 always holds there. We do NOT
+        // add curcuma's pi_fragments>0 here because curcuma derives π-membership from the
+        // FULL neighbor list (including the metal), so metal-side-on alkene carbons are not
+        // tagged π (pi_fragments==0) even though Fortran's piadr — computed from the
+        // metal-REMOVED list for η atoms (gfnff_ini2.f90:199) — is >0. Gating on
+        // pi_fragments would wrongly drop every genuine η carbon back to feta=1.0.
+        auto is_eta = [&](int atom) -> bool {
+            return (!topo_info.itag.empty() && atom < static_cast<int>(topo_info.itag.size())
+                    && topo_info.itag[atom] == -1);
+        };
 
-        bool is_pi_i = (hyb_i == 1 || hyb_i == 2);  // sp or sp² → π-capable
-        bool is_pi_k = (hyb_k == 1 || hyb_k == 2);
+        bool is_eta_i = is_eta(atom_i);
+        bool is_eta_k = is_eta(atom_k);
 
         // Apply η-coordination corrections
-        if (is_pi_i) feta *= 0.3;  // First neighbor π-bonded: 70% reduction
-        if (is_pi_k) feta *= 0.3;  // Second neighbor π-bonded: additional 70% reduction
+        if (is_eta_i) feta *= 0.3;  // First outer atom η-coordinated: 70% reduction
+        if (is_eta_k) feta *= 0.3;  // Second outer atom η-coordinated: additional 70% reduction
 
         // Result:
-        //   Both π-bonded: feta = 1.0 × 0.3 × 0.3 = 0.09 (91% weaker angles)
-        //   One π-bonded:  feta = 1.0 × 0.3 = 0.3 (70% weaker angles)
-        //   None π-bonded: feta = 1.0 (standard angles)
+        //   Both η: feta = 0.3 × 0.3 = 0.09
+        //   One η:  feta = 0.3
+        //   None η: feta = 1.0 (standard angles — e.g. Rh-C(O), Rh-Cl)
 
-        if (CurcumaLogger::get_verbosity() >= 3 && (is_pi_i || is_pi_k)) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info(fmt::format(
-                "  Metal η-coordination: TM atom {} with π-neighbors: i={} (hyb={}), k={} (hyb={}) → feta={:.3f}",
-                atom_j, is_pi_i, hyb_i, is_pi_k, hyb_k, feta));
+                "  feta: TM center {} outer i={} (eta={}) k={} (eta={}) -> feta={:.3f}",
+                atom_j, atom_i, is_eta_i, atom_k, is_eta_k, feta));
         }
     }
 
@@ -5805,6 +5831,31 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
 
     // NOTE: Nitrogen corrections now handled comprehensively in Phase 2C above (lines 2187-2277)
     // No additional nitrogen corrections needed here
+
+    // ===========================================================================================
+    // Metal-center angle equilibrium (Fortran gfnff_ini.f90:1601-1610)
+    // ===========================================================================================
+    // Claude Generated (Jul 2026): when the angle CENTER is a metal (imetal>0), the equilibrium
+    // angle is set purely by the metal center's hybridization, OVERRIDING every element-specific
+    // rule above (this is Fortran's final word before vangl). With the TM hyb rule in
+    // determineHybridization, an octahedral carbonyl center is hyb=0 -> r0=90, f2=1.35 (matching
+    // the 90 deg cis L-M-L angles), and the linear GEODEP override (phi>linthr) flattens the
+    // 180 deg trans angles to r0=180. Without this branch the metal used r0~100/109.5 -> a
+    // spurious +0.02..0.03 Eh angle energy for Cr(CO)6, Mn(CO)5H, etc.
+    int imetal_ctr = (z_center >= 1 && z_center <= 86) ? metal_type[z_center - 1] : 0;
+    // Fortran gfnff_ini.f90:274 — Sn/Pb/Bi (main-group metals) with small CN are non-metals
+    if (imetal_ctr == 1 && group_center > 3 && nn_center <= 4) imetal_ctr = 0;
+    if (imetal_ctr > 0) {
+        if (hyb_center == 0) {
+            r0_deg = 90.0;
+            f2 = 1.35;  // "important difference to other bends, big effect" (Fortran comment)
+        }
+        if (hyb_center == 1) r0_deg = 180.0;
+        if (hyb_center == 2) r0_deg = 120.0;
+        if (hyb_center == 3) r0_deg = 109.5;
+        double current_angle_deg = current_angle * 180.0 / M_PI;
+        if (current_angle_deg > 160.0) r0_deg = 180.0;  // gen%linthr, change to linear (GEODEP)
+    }
 
     // Convert to radians
     params.equilibrium_angle = r0_deg * M_PI / 180.0;
@@ -6652,6 +6703,28 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
                 hyb[i] = 3; // Still mark as sp3 for GFN-FF purposes
             }
         }
+
+        // Claude Generated (Jul 2026): Transition-metal center hybridization.
+        // Reference: gfnff_ini2.f90:319-333 (the "param%group(ati) <= 0" TM branch).
+        // Fortran assigns a TM's hyb from its (H-excluded) coordination, NOT the geometric
+        // sp3 default. This is essential for the angle equilibrium: an octahedral TM
+        // (nni>=6) stays hyb=0 -> r0=90 in the metal angle branch, matching the 90 deg
+        // cis L-M-L angles. Without it the TM fell to hyb=3 -> r0~100 -> spurious angle
+        // energy (Cr(CO)6 / Mn(CO)5H off by +0.02..0.03 Eh). Overrides the geometry rules.
+        if (z >= 1 && z <= 86 && GFNFFParameters::metal_type[z - 1] == 2) {  // transition metal
+            int grp = GFNFFParameters::periodic_group[z - 1];  // negative for TMs (Sc=-3 ... Zn=-12)
+            int nh_metal = 0;
+            for (int j : neighbors) if (m_atoms[j] == 1) nh_metal++;
+            int nni = neighbor_count;
+            if (nh_metal != 0 && nh_metal != nni) nni -= nh_metal;  // don't count H (unless all-H)
+            hyb[i] = 0;  // default "don't know it"
+            if (nni <= 2) hyb[i] = 1;
+            if (nni <= 2 && grp <= -6) hyb[i] = 2;
+            if (nni == 3) hyb[i] = 2;
+            if (nni == 4) hyb[i] = 3;
+            if (nni == 5 && grp == -3) hyb[i] = 3;  // Sc/Y/La CN=5 tetrahedral
+            // nni == 5 (non-Sc) or nni >= 6 -> hyb stays 0 (e.g. octahedral)
+        }
     }
 
     return hyb;
@@ -7387,6 +7460,71 @@ std::vector<std::vector<int>> GFNFF::buildNeighborLists() const
     }
 
     return neighbors;
+}
+
+// Claude Generated (July 2026): Detect eta(η)-coordinated atoms.
+// Faithful port of Fortran external/gfnff/src/gfnff_ini2.f90:170-198.
+// curcuma's neighbor_lists[i] is the FULL bonded adjacency (== Fortran nbf, incl. metals);
+// the metal-removed list (nbm) is obtained here by filtering metal_type==0.
+std::vector<int> GFNFF::computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists) const
+{
+    using GFNFFParameters::metal_type;
+    std::vector<int> itag(m_atomcount, 0);
+
+    auto is_metal = [](int z) -> bool {
+        return (z >= 1 && z <= 86) && (metal_type[z - 1] != 0);
+    };
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        int ati = m_atoms[i];
+        if (ati > 10) continue;  // only light atoms (in practice C) can be η-coordinated
+
+        const std::vector<int>& nbf = neighbor_lists[i];
+        int nbf_count = static_cast<int>(nbf.size());
+        int nbm_count = 0;  // neighbors with metals removed
+        for (int kk : nbf) {
+            if (!is_metal(m_atoms[kk])) nbm_count++;
+        }
+
+        bool etacoord = false;
+        // Cp (cyclopentadienyl): full CN >= 4, metal-removed CN == 3
+        if (ati == 6 && nbf_count >= 4 && nbm_count == 3) etacoord = true;
+        // alkyne/alkene side-on: full CN == 3, metal-removed CN == 2
+        if (ati == 6 && nbf_count == 3 && nbm_count == 2) etacoord = true;
+
+        // Count metals among i's full neighbors; im = a bonded metal index
+        int nm = 0, im = -1;
+        for (int kk : nbf) {
+            if (is_metal(m_atoms[kk])) { nm++; im = kk; }
+        }
+
+        if (nm == 0) {
+            etacoord = false;  // η makes no sense without a metal
+        } else if (nm == 1) {
+            // distinguish M-CR2-R (not η): require at least one non-metal neighbor of i
+            // that is ALSO bonded to the same metal im (ncm>=1 => genuine side-on ring/multi-bond)
+            int ncm = 0;
+            for (int kk : nbf) {
+                if (kk == im) continue;  // all neighbors that are not the metal im
+                for (int l : neighbor_lists[kk]) {
+                    if (l == im) ncm++;  // ncm=1 alkyne, =2 cp
+                }
+            }
+            if (ncm == 0) etacoord = false;
+        }
+        // nm >= 2 keeps etacoord as set by the Cp/alkyne base condition
+
+        if (etacoord) itag[i] = -1;
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        int neta = 0;
+        for (int t : itag) if (t == -1) neta++;
+        if (neta > 0)
+            CurcumaLogger::info(fmt::format("computeEtaCoordination: {} eta-coordinated atom(s)", neta));
+    }
+
+    return itag;
 }
 
 int GFNFF::countNeighborsWithin20Bohr(int atom_index, const Eigen::MatrixXd& geometry_bohr) const
@@ -8967,6 +9105,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     // The overhead is negligible for parameter generation; thread safety is critical.
     topo_info.pi_fragments = detectPiSystems(topo_info.hybridization, topo_info.adjacency_list);
     topo_info.neighbor_lists = buildNeighborLists();
+    // Claude Generated (Jul 2026): η-coordination tags (Fortran itag). Must come after
+    // neighbor_lists is built. Consumed by the angle-bending feta metal correction.
+    topo_info.itag = computeEtaCoordination(topo_info.neighbor_lists);
     topo_info.ring_sizes = findSmallestRings(topo_info.adjacency_list, topo_info);
 
     // Calculate simple neighbor counts for XTB compatibility in torsions
