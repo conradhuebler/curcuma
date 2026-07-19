@@ -4360,24 +4360,36 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     else if (hybi == 2 && hybj == 2) bbtyp = 2; // sp2-sp2
     else if (hybi == 3 && hybj == 2 && (z1 == 7 || z2 == 7)) bbtyp = 2; // N-sp2
 
-    // 1. Bond type specific shifts
-    if (bbtyp == 4) shift = hyper_shift;
-    else if (z1 == 1 || z2 == 1) shift = gen_rabshifth;
+    // Claude Generated (Jul 2026): metal bonds take Fortran's mutually-exclusive metal
+    // branch (gfnff_ini.f90:1129-1206) — the hybridization/bbtyp/F-F base shifts below are
+    // in the NON-metal branch only and must NOT apply to a bond touching a metal. The metal
+    // path starts shift=0 and adds only its own shifts (M-CO -0.45, metal2_shift, ...) plus
+    // gen_rabshift (line 1276) and the heavy-heavy shift (line 1268, kept below). Without
+    // this gate, a metal center with hyb=0 (octahedral TM) wrongly triggers the sp (0,1)
+    // correction (+0.14) — inflating the M-CO equilibrium distance and over-binding.
+    bool bond_has_metal = (z1 >= 1 && z1 <= 86 && metal_type[z1 - 1] > 0)
+                       || (z2 >= 1 && z2 <= 86 && metal_type[z2 - 1] > 0);
 
-    // 2. F-F special shift
-    if (z1 == 9 && z2 == 9) shift += 0.22;
+    if (!bond_has_metal) {
+        // 1. Bond type specific shifts
+        if (bbtyp == 4) shift = hyper_shift;
+        else if (z1 == 1 || z2 == 1) shift = gen_rabshifth;
 
-    // 3. X-sp3 hybridization correction
-    if ((hyb1_value == 3 && hyb2_value == 0) || (hyb1_value == 0 && hyb2_value == 3)) {
-        shift -= 0.022;
+        // 2. F-F special shift
+        if (z1 == 9 && z2 == 9) shift += 0.22;
+
+        // 3. X-sp3 hybridization correction
+        if ((hyb1_value == 3 && hyb2_value == 0) || (hyb1_value == 0 && hyb2_value == 3)) {
+            shift -= 0.022;
+        }
+
+        // 4. X-sp hybridization correction
+        if ((hyb1_value == 1 && hyb2_value == 0) || (hyb1_value == 0 && hyb2_value == 1)) {
+            shift += 0.14;
+        }
     }
 
-    // 4. X-sp hybridization correction
-    if ((hyb1_value == 1 && hyb2_value == 0) || (hyb1_value == 0 && hyb2_value == 1)) {
-        shift += 0.14;
-    }
-
-    // 5. Heavy atom shifts (Z > 10)
+    // 5. Heavy atom shifts (Z > 10) — applies to all bonds incl. metal (Fortran gfnff_ini.f90:1268)
     if (z1 > 10 && z2 > 10) {
         shift += hshift3;
         if (z1 > 18) shift += hshift4;
@@ -5011,7 +5023,20 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // CRITICAL: Total rabshift must include pi-shift and metal-shift!
     // Fortran: r0 = (ra + rb + shift) * ff
     double total_rabshift = rabshift + pi_shift + metal_shift;
-    params.equilibrium_distance = (ra + rb + total_rabshift) * ff;
+    if (bond_has_metal) {
+        // Fortran gfnff_ini.f90:1289 — r0 = rtmp + vbond(1). For a metal bond rtmp = (ra+rb)*ff
+        // exactly (pibo=-99, no Goedecker pi-shortening, no SK correction — verified bit-equal
+        // to curcuma's (ra+rb)*ff), and vbond(1) = rabshift + metal_shift is added OUTSIDE the
+        // EN factor ff. Applying the shift inside ff (the organic form below) mis-scales the
+        // large ~-0.4 metal shift by (1-ff)~1.7% -> ~0.6 kcal on Cr(CO)6. pi_shift is 0 for
+        // metal bonds. The organic path keeps the all-inside-ff calibrated form: there native's
+        // rtmp != Fortran's rtmp (the Goedecker rabd folds pi/SK corrections that curcuma
+        // reconstructs via pi_shift inside ff), so moving the shift outside ff breaks organics
+        // (e.g. CO2 by 0.2 kcal).
+        params.equilibrium_distance = (ra + rb) * ff + total_rabshift;
+    } else {
+        params.equilibrium_distance = (ra + rb + total_rabshift) * ff;
+    }
     params.rabshift = total_rabshift;
 
     // Step 11: Force constant (9 factors)
