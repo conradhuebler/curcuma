@@ -6630,6 +6630,15 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
                 // Fortran gfnff_ini2.f90:294-298 (group 6: O, S) CN=1
                 // Default: sp2 (carbonyl/thiocarbonyl). Exception: sp if sole neighbour
                 // also has CN=1 (CO, CS, OH/SH radical, etc.)
+                // NOTE (Jul 2026): Fortran gates the "CO -> sp" rule on
+                // topo%nb(20, neighbour)==1 using its METAL-REDUCED neighbour lists
+                // (nbf/nbm/nbdum/topo%nb, gfnff_ini2.f90:335). Whether a metal-C bond is
+                // present in that reduced list is metal/coordination dependent, so xtb gives
+                // O hyb=1 for Cr(CO)6 but O hyb=2 for Fe(CO)4. curcuma uses a single
+                // adjacency list and cannot reproduce that distinction here without porting
+                // the full multi-list construction; using the plain neighbour CN below
+                // matches Fe(CO)4/Ni(CO)3/RhCl(CO)2 (O hyb=2) but not Cr(CO)6 (~0.5 kcal on
+                // the C-O pibo). See docs/GFNFF_METAL_BOND_R0_FIX.md.
                 int neighbor_idx = neighbors[0];
                 int neighbor_CN = adjacency_list[neighbor_idx].size();
 

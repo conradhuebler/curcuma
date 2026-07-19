@@ -65,11 +65,22 @@ deficiency than the bond term).
 > comparing builds.
 
 ## Remaining (separate, smaller)
-- **Coordinated-Hückel pibo** (PR01 0.62 / PR05 0.51 kcal): the r0 **formula** is now exact, but
-  the C-O `pibo` fed into it differs (native 0.9952 vs Fortran ~0.9961) because the Hückel
-  pi-bond-order solve in a metal complex diverges slightly (free CO is exact). Propagates through
-  the identical `hueckelp*(bzref-pibo)` shift to ~0.0003 Bohr on C-O r0. A separate Hückel issue
-  (same family as the S30L torsion-pibo residuals), not the bond r0 model.
+- **Coordinated-carbonyl O hybridization → C-O pibo** (PR01 0.62 / PR05 0.51 kcal). Root cause
+  found (Jul 2026): the C-O `pibo` fed into the (now-exact) r0 formula differs — native 0.9952 vs
+  Fortran 0.9961. The Hückel matrix build is bit-identical (diagonal `hdiag+qa*hueckelp3`,
+  off-diagonal `sqrt(hoff_i*hoff_j)-1e-9*rab`, `htriple`), and the topology charges match — the
+  divergence is the **O hybridization**: native gives the carbonyl O `hyb=2`, but xtb gives O
+  `hyb=1` for Cr(CO)₆ (→ `htriple` fires on the O off-diagonal too, raising the pibo). xtb's O
+  rule (`gfnff_ini2.f90:294-298`) gates "CO→sp" on `topo%nb(20,C)==1` computed from its
+  **metal-reduced neighbour lists** (`nbf`/`nbm`/`nbdum`/`topo%nb`, :335). Whether the M-C bond
+  sits in that reduced list is metal/coordination dependent, so xtb itself gives O `hyb=1` for
+  Cr(CO)₆ but O `hyb=2` for Fe(CO)₄/Ni(CO)₃/RhCl(CO)₂ (the latter three are why those match
+  today). curcuma uses a single `adjacency_list`; a blanket "metal-reduced neighbour CN" rule was
+  tried and **reverted** — it fixes Cr(CO)₆ (PR01/PR02/PR05 → exact) but regresses the Fe/Ni/Rh
+  educts (ED02/ED03/ED39 → ~0.3 kcal), because it can't reproduce xtb's per-structure
+  distinction. A faithful fix needs xtb's full multi-list metal-reduced neighbour construction
+  (broad impact on all metal-coordinated ligand hyb); disproportionate to a sub-kcal residual on
+  a method that is not TM-ready overall. Same family as the S30L torsion-pibo residuals.
 - **CO2** (0.20 kcal, pre-existing, no metal): independent organic-model outlier, unchanged by
   this fix.
 - Native gfnff remains **not TM-ready** overall (many MOR41 structures 100s of kcal off from
