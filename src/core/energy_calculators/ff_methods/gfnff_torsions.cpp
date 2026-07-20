@@ -1591,11 +1591,12 @@ std::pair<std::vector<Dihedral>, std::vector<Dihedral>> GFNFF::generateTorsionsN
     // For each atom, store all bonded neighbors.
     // This allows O(1) lookup of "which atoms are bonded to j?"
 
-    std::vector<std::vector<int>> neighbors(m_atomcount);
-    for (const auto& bond : bond_list) {
-        neighbors[bond.first].push_back(bond.second);
-        neighbors[bond.second].push_back(bond.first);
-    }
+    // Claude Generated (Jul 2026): enumerate over the topology adjacency (Fortran topo%nb,
+    // i.e. the eta-aware nbdum mixture) rather than rebuilding from the raw bond list.
+    // Fortran builds its torsion list from topo%nb, where an eta-coordinated carbon has its
+    // metal bond stripped; enumerating on the full bond list invents torsions through the
+    // metal centre that the reference never generates. See docs/GFNFF_NEIGHBOR_LISTS.md.
+    const std::vector<std::vector<int>>& neighbors = topo.adjacency_list;
 
     // Debug: Print neighbor counts
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -2085,12 +2086,9 @@ std::vector<GFNFFSTorsion> GFNFF::generateSTorsionsNative() const
     const std::vector<int>& hybridization = topo.hybridization;
     std::vector<GFNFFSTorsion> storsions;
 
-    // Build neighbor list for efficient lookup
-    std::vector<std::vector<int>> neighbors(m_atomcount);
-    for (const auto& bond : bond_list) {
-        neighbors[bond.first].push_back(bond.second);
-        neighbors[bond.second].push_back(bond.first);
-    }
+    // Claude Generated (Jul 2026): use the topology adjacency (Fortran topo%nb = nbdum
+    // mixture), not a rebuild from the raw bond list. See docs/GFNFF_NEIGHBOR_LISTS.md.
+    const std::vector<std::vector<int>>& neighbors = topo.adjacency_list;
 
     for (int i = 0; i < m_atomcount; ++i) {
         // Carbon with two neighbors (potential sp center)

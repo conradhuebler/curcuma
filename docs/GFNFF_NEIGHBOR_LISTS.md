@@ -98,10 +98,14 @@ thing is one O(N*k) pass.
 
 | metric | before | after |
 |---|---|---|
-| MAD | 57.317 | **16.679** |
+| MAD | 57.317 | **9.146** |
 | max | 457.32 | **113.83** |
-| RMSD | 118.371 | **32.707** |
+| RMSD | 118.371 | **19.391** |
+| MD (bias) | +46.870 | **-3.284** |
 | within 1.0 kcal/mol | 33/95 | **39/95** |
+
+(Intermediate: MAD 16.679 after the topology rewire alone; 9.146 after also pointing the
+torsion generator at the topology adjacency - see "Torsion enumeration" below.)
 
 The seven previously-exact metal complexes (ED02, ED03, ED27, ED28, ED31, ED39, PR03) moved
 by **0.000 kcal/mol**. The original carbonyl targets went to zero: PR01 +0.62 -> -0.00,
@@ -109,6 +113,27 @@ PR02 +0.51 -> -0.00, PR05 +0.51 -> -0.00.
 
 Hybridization changes: 217 atoms across 48 structures. Dominant classes are C sp3->sp2
 (118, Cp/alkene carbons — the eta fix) and O sp2->sp (73, carbonyls — the original target).
+
+## Torsion enumeration
+
+`generateTorsionsNative` and `generateSTorsionsNative` (`gfnff_torsions.cpp`) rebuilt their
+own neighbour table from the raw `getCachedBondList()`, bypassing the topology adjacency
+entirely. Fortran builds its torsion list from `topo%nb` (the nbdum mixture), where an
+eta-coordinated carbon has its metal bond stripped - so enumerating on the full bond list
+invents torsions **through the metal centre** that the reference never generates.
+
+This was by far the largest remaining error after the topology rewire. Per-term decomposition
+against `xtb --gfnff` over the 12 worst structures attributed **61% of all remaining error to
+torsion** (e.g. ED29 Pt(C10H18): native torsion +0.2011 Eh vs xtb +0.0077 Eh, a 26x
+over-count worth +121 kcal/mol). Both generators now consume `topo.adjacency_list`.
+
+Effect: MOR41 MAD 16.679 -> 9.146, RMSD 32.7 -> 19.4, and the bias MD +10.85 -> -3.28.
+Protected set unmoved (0.000), gfnff_val still 18/18.
+
+Remaining error after this, by term (12 worst structures): bond ~27%, angle ~9%, everything
+else <2% each. The bond share is dominated by ED07 and PR40, the two known deviations below;
+the residual metal **bond** term (`btyp>=5`, `docs/GFNFF_METAL_BOND_ANALYSIS.md`) is still
+unimplemented and is the main remaining lever.
 
 ## What was NOT done / known deviations
 
