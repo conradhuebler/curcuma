@@ -326,6 +326,14 @@ public:
         std::vector<std::vector<int>> adjacency_list;            // Per-atom bonded neighbor list
         std::vector<std::vector<int>> topo_distances;            // N×N shortest-path bond counts
 
+        // Fortran multi-list neighbour construction (gfnff_ini2.f90:128-130, 197-202).
+        // Fortran keeps four lists and assigns hybridization from the metal-reduced,
+        // eta-aware mixture rather than from the full connectivity. Claude Generated (Jul 2026).
+        std::vector<std::vector<int>> nb_full;                   // nbf: getnb(icase=1), no filtering
+        std::vector<std::vector<int>> nb_hc;                     // topo%nb DURING the hyb loop: getnb(icase=2), drops all bonds of highly-coordinated atoms
+        std::vector<std::vector<int>> nb_nometal;                // nbm: getnb(icase=3), metals + unusually coordinated heavy atoms removed
+        std::vector<double> metallic_character;                  // mchar (gfnff_ini.f90:249), gates the nbm metal filter
+
         // Functional groups
         std::vector<FunctionalGroupType> functional_groups;      // Per-atom classification
 
@@ -1774,6 +1782,82 @@ private:
     std::vector<int> computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists) const;
 
     /**
+     * @brief Estimate per-atom "metallic character" mchar
+     *
+     * Claude Generated (July 2026). Port of external/gfnff/src/gfnff_ini.f90:243-250:
+     *   mchar(i) = exp(-0.005 * en(Z_i)^8) * dum2 / (cn(i) + 1)
+     * where dum2 = sum_j || d logCN_i / d R_j || over the GFN-FF logistic CN
+     * (gfnff_cn.f90:gfnff_dlogcoord). Used only to gate the metal filter of the
+     * metal-reduced neighbour list nbm (getnb icase=3: mchar > 0.25 => drop).
+     *
+     * The exp(-0.005*en^8) factor is extremely stiff (en=2.0 -> 0.28, en=3.0 -> ~0),
+     * so it acts as a near-hard electronegativity switch around en ~ 2.4.
+     *
+     * NOTE: uses GFNFFParameters::gfnff_en (Fortran param%en), NOT the rab_en table.
+     *
+     * @return mchar per atom (size m_atomcount)
+     */
+    std::vector<double> computeMetallicCharacter() const;
+
+    /**
+     * @brief Build the Fortran four-list neighbour set (nbf / topo%nb / nbm / nbdum)
+     *
+     * Claude Generated (July 2026). Port of external/gfnff/src/gfnff_ini2.f90:128-130
+     * and 197-202. Fortran derives three lists from the same distance criterion and
+     * then assigns hybridization from a per-atom mixture:
+     *   nbf   (icase=1) full connectivity, no filtering
+     *   nb_hc (icase=2) drops ALL bonds of highly-coordinated atoms
+     *                   (hc_crit = 4 if group <= 2 - which includes every transition
+     *                    metal, since periodic_group is negative for the d-block - else 6)
+     *   nbm   (icase=3) drops metals (mchar > 0.25 or metal_type > 0) and heavy atoms
+     *                   above their normal CN (nbf > normcn and Z > 10)
+     *   nbdum          per-atom mixture: nbm for eta-coordinated atoms, else nbf
+     *
+     * Fills topo.nb_full / nb_hc / nb_nometal / metallic_character / itag. The mixture
+     * is what Fortran finally stores as topo%nb (gfnff_ini2.f90:335).
+     *
+     * @param topo Topology to populate (nb_full etc. are overwritten)
+     * @param[out] nbdum The per-atom eta-aware mixture (Fortran's final topo%nb)
+     */
+    void buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<int>>& nbdum) const;
+
+    /**
+     * @brief CN of the nearest non-metal neighbour of an atom
+     *
+     * Claude Generated (July 2026). Port of gfnff_ini2.f90:431-450 (nn_nearest_noM).
+     * Fortran calls this with topo%nb, i.e. the HC-filtered list nb_hc.
+     *
+     * @param ii Atom index
+     * @param nb Neighbour list to search (pass nb_hc for Fortran parity)
+     * @param distance_matrix Interatomic distances
+     * @return CN of the closest non-metal neighbour, or 0 if there is none
+     */
+    int nnNearestNoM(int ii, const std::vector<std::vector<int>>& nb,
+                     const Eigen::MatrixXd& distance_matrix) const;
+
+    /**
+     * @brief Fortran-faithful hybridization assignment
+     *
+     * Claude Generated (July 2026). Transcription of gfnff_ini2.f90:211-333, replacing
+     * the geometry-first heuristic in determineHybridization(). Reads the four-list
+     * neighbour set: nb20i from the nbdum mixture, nbdiff/nbmdiff from nbf vs nb_hc/nbm,
+     * and indexes the NO2/B-N/N-SO2 and CO->sp rules into nb_hc (which is what Fortran's
+     * topo%nb still holds at this point in the initialization).
+     *
+     * Also WRITES itag: sets +1 for carbenes and NO2 nitrogen (consumed by Hueckel/HB),
+     * on top of the -1 eta tags already set by computeEtaCoordination().
+     *
+     * @param topo Topology holding nb_full / nb_hc / nb_nometal / distance_matrix
+     * @param nbdum The eta-aware per-atom mixture
+     * @param itag In/out tag vector (-1 eta in, +1 carbene/NO2 out)
+     * @return Hybridization per atom (0 none/octahedral, 1 sp, 2 sp2, 3 sp3, 5 hypervalent)
+     */
+    std::vector<int> determineHybridizationFortran(const GFNFFTopology& topo,
+                                                   const std::vector<std::vector<int>>& nbdum,
+                                                   const Eigen::MatrixXd& distance_matrix,
+                                                   std::vector<int>& itag) const;
+
+    /**
      * @brief Count neighbors within 20 Bohr cutoff (nb20)
      *
      * Claude Generated (January 14, 2026) - Phase 2: Exact nb20 implementation
@@ -2567,6 +2651,11 @@ private:
     Vector m_last_cn;    ///< Coordination numbers
     Vector m_last_cnf;   ///< CN-dependent EEQ factors per atom
     bool m_gpu_path_preallocated = false; ///< True after preAllocateForGPUPath()
+
+    /// Use the Fortran-faithful hybridization (determineHybridizationFortran) instead of
+    /// the legacy geometry-first heuristic. Set false to fall back to the pre-Jul-2026
+    /// behaviour for bisection. Claude Generated (Jul 2026).
+    bool m_use_fortran_hyb = true;
     CNDerivStore m_last_dcn; ///< CN derivatives (gradient only). Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
 
     // WP-FF-DistMatrix-Sharing (May 2026): shared packed-triangular distance arrays.

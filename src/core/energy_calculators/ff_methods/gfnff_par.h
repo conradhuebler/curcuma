@@ -387,6 +387,37 @@ static const int periodic_group[86] = {
     1, 2, -3, -3, -3, -3, -3, -3, -3, -3, -3, -3, -3, -3, -3, -3, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, 3, 4, 5, 6, 7, 8 // Cs-Rn
 };
 
+// "Normal" coordination number per element, used only by the metal-reduced
+// neighbour list (nbm, getnb icase=3) to drop unusually coordinated heavy atoms.
+// Verbatim port of gfnff_param.f90:425-432 ("only for non metals well defined").
+// Claude Generated (Jul 2026) - metal-reduced neighbour list port
+static const int normcn[86] = {
+    1, 0,                                                                      // H-He
+    4, 4, 4, 4, 4, 2, 1, 0,                                                    // Li-Ne
+    4, 4, 4, 4, 4, 2, 1, 0,                                                    // Na-Ar
+    4, 4, 4, 4, 6, 6, 6, 6, 6, 6, 4, 4, 4, 4, 4, 4, 1, 0,                      // K-Kr
+    4, 4, 4, 4, 6, 6, 6, 6, 6, 6, 4, 4, 4, 4, 4, 4, 1, 0,                      // Rb-Xe
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,                         // Cs-Lu
+    4, 6, 6, 6, 6, 6, 6, 6, 4, 4, 4, 4, 4, 1, 0                                // Hf-Rn
+};
+
+// Pauling-like electronegativity used by GFN-FF for the "metallic character"
+// estimate mchar (gfnff_ini.f90:249). Verbatim port of gfnff_param.f90:315-324.
+// NOTE: this is param%en and is NOT the same array as rab_en (from gfnffrab.f90)
+// used by computeRabEstimate - do not substitute one for the other.
+// Claude Generated (Jul 2026) - metal-reduced neighbour list port
+static const double gfnff_en[86] = {
+    2.200, 3.000, 0.980, 1.570, 2.040, 2.550, 3.040, 3.440, 3.980,             // H-F
+    4.500, 0.930, 1.310, 1.610, 1.900, 2.190, 2.580, 3.160, 3.500,             // Ne-Ar
+    0.820, 1.000, 1.360, 1.540, 1.630, 1.660, 1.550, 1.830, 1.880,             // K-Co
+    1.910, 1.900, 1.650, 1.810, 2.010, 2.180, 2.550, 2.960, 3.000,             // Ni-Kr
+    0.820, 0.950, 1.220, 1.330, 1.600, 2.160, 1.900, 2.200, 2.280,             // Rb-Rh
+    2.200, 1.930, 1.690, 1.780, 1.960, 2.050, 2.100, 2.660, 2.600,             // Pd-Xe
+    0.79, 0.89, 1.10, 1.12, 1.13, 1.14, 1.15, 1.17, 1.18, 1.20, 1.21, 1.22,    // Cs-Dy
+    1.23, 1.24, 1.25, 1.26, 1.27, 1.3, 1.5, 1.7, 1.9, 2.1, 2.2, 2.2, 2.2,      // Ho-Au (W-Au modified)
+    2.00, 1.62, 2.33, 2.02, 2.0, 2.2, 2.2                                      // Hg-Rn
+};
+
 // ============================================================================
 // SECTION 5: Angle Parameters (46 lines)
 // ============================================================================

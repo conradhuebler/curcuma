@@ -2544,7 +2544,7 @@ json GFNFF::exportTopology() const
     const TopologyInfo& topo = *m_cached_topology;
 
     // Version for format compatibility
-    topo_json["version"] = 1;
+    topo_json["version"] = 2;
 
     // Fragment information (for multi-fragment systems)
     topo_json["nfrag"] = topo.nfrag;
@@ -2672,8 +2672,11 @@ bool GFNFF::importTopology(const json& topo_json)
     // This is intentional — topology import happens before m_initialized = true
 
     // Check version compatibility
+    // v2 (Jul 2026): topology now comes from the Fortran four-list neighbour
+    // construction; a v1 cache holds a hybridization from the old full-list heuristic
+    // and an adjacency that is not the nbdum mixture, so it must be rejected.
     int version = topo_json.value("version", 0);
-    if (version < 1) {
+    if (version < 2) {
         CurcumaLogger::warn("GFNFF::importTopology: Unknown topology format version");
         return false;
     }
@@ -6630,15 +6633,12 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
                 // Fortran gfnff_ini2.f90:294-298 (group 6: O, S) CN=1
                 // Default: sp2 (carbonyl/thiocarbonyl). Exception: sp if sole neighbour
                 // also has CN=1 (CO, CS, OH/SH radical, etc.)
-                // NOTE (Jul 2026): Fortran gates the "CO -> sp" rule on
-                // topo%nb(20, neighbour)==1 using its METAL-REDUCED neighbour lists
-                // (nbf/nbm/nbdum/topo%nb, gfnff_ini2.f90:335). Whether a metal-C bond is
-                // present in that reduced list is metal/coordination dependent, so xtb gives
-                // O hyb=1 for Cr(CO)6 but O hyb=2 for Fe(CO)4. curcuma uses a single
-                // adjacency list and cannot reproduce that distinction here without porting
-                // the full multi-list construction; using the plain neighbour CN below
-                // matches Fe(CO)4/Ni(CO)3/RhCl(CO)2 (O hyb=2) but not Cr(CO)6 (~0.5 kcal on
-                // the C-O pibo). See docs/GFNFF_METAL_BOND_R0_FIX.md.
+                // SUPERSEDED (Jul 2026): this function is the LEGACY hybridization path,
+                // kept only for bisection via m_use_fortran_hyb=false. It reads a single
+                // adjacency list and so cannot reproduce Fortran's metal/coordination
+                // dependent CO->sp distinction (O hyb=1 in Cr(CO)6 vs hyb=2 in Fe(CO)4).
+                // The default path is now determineHybridizationFortran(), which reads the
+                // real four-list construction. See docs/GFNFF_NEIGHBOR_LISTS.md.
                 int neighbor_idx = neighbors[0];
                 int neighbor_CN = adjacency_list[neighbor_idx].size();
 
@@ -7553,6 +7553,373 @@ std::vector<int> GFNFF::computeEtaCoordination(const std::vector<std::vector<int
     }
 
     return itag;
+}
+
+int GFNFF::nnNearestNoM(int ii, const std::vector<std::vector<int>>& nb,
+                        const Eigen::MatrixXd& distance_matrix) const
+{
+    /**
+     * Claude Generated (July 2026) - port of gfnff_ini2.f90:431-450 (nn_nearest_noM).
+     * Returns the coordination number of the nearest NON-METAL neighbour of ii, or 0
+     * if ii has no non-metal neighbour. Fortran calls this with topo%nb, i.e. the
+     * HC-filtered list (nb_hc) - NOT the nbdum mixture.
+     */
+    using GFNFFParameters::metal_type;
+
+    double rmin = 1.0e42;
+    int jmin = -1;
+    for (int jj : nb[ii]) {
+        const int z = m_atoms[jj];
+        if (z >= 1 && z <= 86 && metal_type[z - 1] != 0) continue;  // skip metals
+        const double r = distance_matrix(ii, jj);
+        if (r < rmin) {
+            rmin = r;
+            jmin = jj;
+        }
+    }
+    return (jmin >= 0) ? static_cast<int>(nb[jmin].size()) : 0;
+}
+
+std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
+                                                      const std::vector<std::vector<int>>& nbdum,
+                                                      const Eigen::MatrixXd& distance_matrix,
+                                                      std::vector<int>& itag) const
+{
+    /**
+     * Claude Generated (July 2026) - faithful transcription of the Fortran
+     * hybridization loop, external/gfnff/src/gfnff_ini2.f90:211-333.
+     *
+     * THE CRITICAL DETAIL is which list each rule reads. Fortran spells three
+     * different lists "topo%nb"/"nbf"/"nbm"/"nbdum" inside this loop, and topo%nb
+     * here is still the HC-FILTERED list (getnb icase=2) - it is only overwritten
+     * with the nbdum mixture afterwards, at gfnff_ini2.f90:335. So:
+     *   nb20i   = nbdum[i].size()                    the eta-aware mixture
+     *   nbdiff  = nbf[i].size()  - nb_hc[i].size()   how much the HC filter removed
+     *   nbmdiff = nbf[i].size()  - nbm[i].size()     how much the metal filter removed
+     * and the NO2/B-N/N-SO2 rules plus the CO->sp rule index into nb_hc.
+     *
+     * This function also WRITES itag: the eta detection has already set itag=-1 for
+     * eta-coordinated atoms, and the loop additionally sets itag=+1 for carbenes and
+     * for the nitrogen of NO2 (consumed by the Hueckel and HB routines).
+     *
+     * hyb codes: 0 = none/octahedral, 1 = sp, 2 = sp2, 3 = sp3, 5 = hypervalent.
+     */
+    using GFNFFParameters::metal_type;
+    using GFNFFParameters::periodic_group;
+
+    // gen%linthr (gfnff_param.f90:713): "when is an angle close to linear"
+    constexpr double lintr = 160.0;
+
+    auto group_of = [](int z) -> int {
+        return (z >= 1 && z <= 86) ? periodic_group[z - 1] : 0;
+    };
+    auto is_metal = [](int z) -> bool {
+        return (z >= 1 && z <= 86) && (metal_type[z - 1] != 0);
+    };
+    // Angle at vertex j between i and k (gfnff_helpers.f90:587 bangl), in degrees
+    auto bangl_deg = [&](int i, int j, int k) -> double {
+        Eigen::Vector3d a = m_geometry_bohr.row(i) - m_geometry_bohr.row(j);
+        Eigen::Vector3d b = m_geometry_bohr.row(k) - m_geometry_bohr.row(j);
+        const double na = a.norm(), nb2 = b.norm();
+        if (na < 1e-12 || nb2 < 1e-12) return 0.0;
+        double t = a.dot(b) / (na * nb2);
+        t = std::max(-1.0, std::min(1.0, t));
+        return std::acos(t) * 180.0 / M_PI;
+    };
+
+    const auto& nbf = topo.nb_full;
+    const auto& nbhc = topo.nb_hc;
+    const auto& nbm = topo.nb_nometal;
+    const bool have_qa = (topo.topology_charges.size() == m_atomcount);
+
+    std::vector<int> hyb(m_atomcount, 0);
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        const int ati = m_atoms[i];
+        const int grp = group_of(ati);
+        hyb[i] = 0;  // "don't know it"
+
+        const int nbdiff = static_cast<int>(nbf[i].size()) - static_cast<int>(nbhc[i].size());
+        const int nbmdiff = static_cast<int>(nbf[i].size()) - static_cast<int>(nbm[i].size());
+        const int nb20i = static_cast<int>(nbdum[i].size());
+
+        int nh = 0;
+        for (int j : nbdum[i]) {
+            if (m_atoms[j] == 1) nh++;
+        }
+
+        if (grp == 1) {  // H
+            if (nb20i == 2) hyb[i] = 1;   // bridging H
+            if (nb20i > 2) hyb[i] = 3;    // M+ tetra coord
+            if (nb20i > 4) hyb[i] = 0;    // M+ HC
+        } else if (grp == 2) {  // Be
+            if (nb20i == 2) hyb[i] = 1;   // bridging M
+            if (nb20i > 2) hyb[i] = 3;
+            if (nb20i > 4) hyb[i] = 0;
+        } else if (grp == 3) {  // B
+            if (nb20i > 4) hyb[i] = 3;
+            if (nb20i > 4 && ati > 10 && nbdiff == 0) hyb[i] = 5;
+            if (nb20i == 4) hyb[i] = 3;
+            if (nb20i == 3) hyb[i] = 2;
+            if (nb20i == 2) hyb[i] = 1;
+        } else if (grp == 4) {  // C
+            if (nb20i >= 4) hyb[i] = 3;
+            if (nb20i > 4 && ati > 10 && nbdiff == 0) hyb[i] = 5;
+            if (nb20i == 3) hyb[i] = 2;
+            if (nb20i == 2) {
+                const double phi = bangl_deg(nbdum[i][0], i, nbdum[i][1]);
+                if (phi < 150.0) {   // GEODEP: otherwise carbenes are not recognized
+                    hyb[i] = 2;
+                    itag[i] = 1;     // tag for Hueckel and HB routines
+                } else {
+                    hyb[i] = 1;      // linear triple bond etc
+                }
+                if (have_qa && topo.topology_charges(i) < -0.4) {
+                    hyb[i] = 2;
+                    itag[i] = 0;
+                }
+            }
+            if (nb20i == 1) hyb[i] = 1;  // CO
+        } else if (grp == 5) {  // N
+            if (nb20i >= 4) hyb[i] = 3;
+            if (nb20i > 4 && ati > 10 && nbdiff == 0) hyb[i] = 5;
+            if (nb20i == 3) hyb[i] = 3;
+            if (nb20i == 3 && ati == 7) {
+                int kk = 0, ll = 0, nn = 0;
+                for (int j = 0; j < 3; ++j) {
+                    const int jj = nbdum[i][j];
+                    const int nbhc_jj = static_cast<int>(nbhc[jj].size());
+                    if (m_atoms[jj] == 8 && nbhc_jj == 1) kk++;   // NO2 or R2-N=O
+                    if (m_atoms[jj] == 5 && nbhc_jj == 4) ll++;   // B-N, CN(B)=4 -> N loosely bound, sp2
+                    if (m_atoms[jj] == 16 && nbhc_jj == 4) nn++;  // N-SO2-
+                }
+                if (nn == 1 && ll == 0 && kk == 0) hyb[i] = 3;
+                if (ll == 1 && nn == 0) hyb[i] = 2;
+                if (kk >= 1) {
+                    hyb[i] = 2;
+                    itag[i] = 1;  // Hueckel: no electrons for the N in NO2
+                }
+                if (nbmdiff > 0 && nn == 0) hyb[i] = 2;  // pyridine N coord. to heavy atom
+            }
+            if (nb20i == 2) {
+                hyb[i] = 2;
+                const double phi = bangl_deg(nbdum[i][0], i, nbdum[i][1]);
+                const int jj = nbdum[i][0];
+                const int kk = nbdum[i][1];
+                if (nbdum[jj].size() == 1 && m_atoms[jj] == 6) hyb[i] = 1;  // R-N=C
+                if (nbdum[kk].size() == 1 && m_atoms[kk] == 6) hyb[i] = 1;  // R-N=C
+                if (nbdum[jj].size() == 1 && m_atoms[jj] == 7) hyb[i] = 1;  // R-N=N, diazomethane
+                if (nbdum[kk].size() == 1 && m_atoms[kk] == 7) hyb[i] = 1;
+                if (is_metal(m_atoms[jj])) hyb[i] = 1;  // M-NC-R, nitriles
+                if (is_metal(m_atoms[kk])) hyb[i] = 1;
+                if (m_atoms[jj] == 7 && m_atoms[kk] == 7 && nbdum[jj].size() <= 2 && nbdum[kk].size() <= 2)
+                    hyb[i] = 1;  // N=N=N
+                if (phi > lintr) hyb[i] = 1;  // GEODEP
+            }
+            if (nb20i == 1) hyb[i] = 1;
+        } else if (grp == 6) {  // O, S, Se, Te, Po
+            if (nb20i >= 3) hyb[i] = 3;
+            if (nb20i > 3 && ati > 10 && nbdiff == 0) hyb[i] = 5;
+            if (nb20i == 2) hyb[i] = 3;
+            if (nb20i == 2 && nbmdiff > 0) {
+                const int j = nnNearestNoM(i, nbhc, distance_matrix);
+                if (j == 3) hyb[i] = 2;  // M-O-X conjugated
+                if (j == 4) hyb[i] = 3;  // M-O-X non-conjugated
+            }
+            if (nb20i == 1) hyb[i] = 2;
+            if (nb20i == 1 && nbdiff == 0) {
+                // CO: the sole HC-list neighbour must itself have exactly one HC neighbour.
+                // This is the rule that gives O hyb=1 in Cr(CO)6 (where the HC filter strips
+                // the Cr-C bonds so the carbonyl C has nb_hc == 1) but hyb=2 in Fe(CO)4.
+                if (!nbhc[i].empty() && nbhc[nbhc[i][0]].size() == 1) hyb[i] = 1;
+            }
+        } else if (grp == 7) {  // F, Cl, ...
+            if (nb20i == 2) hyb[i] = 1;
+            if (nb20i > 2 && ati > 10) hyb[i] = 5;
+        } else if (grp == 8) {  // Ne, noble gases
+            hyb[i] = 0;
+            if (nb20i > 0 && ati > 2) hyb[i] = 5;
+        } else if (grp <= 0) {  // transition metals
+            int nni = nb20i;
+            if (nh != 0 && nh != nni) nni -= nh;  // don't count Hs
+            if (nni <= 2) hyb[i] = 1;
+            if (nni <= 2 && grp <= -6) hyb[i] = 2;
+            if (nni == 3) hyb[i] = 2;
+            if (nni == 4 && grp > -7) hyb[i] = 3;   // early TM, tetrahedral
+            if (nni == 4 && grp <= -7) hyb[i] = 3;  // late TM, square planar
+            if (nni == 5 && grp == -3) hyb[i] = 3;  // Sc-La are tetrahedral at CN=5
+        }
+    }
+
+    return hyb;
+}
+
+std::vector<double> GFNFF::computeMetallicCharacter() const
+{
+    /**
+     * Claude Generated (July 2026) - port of gfnff_ini.f90:243-250.
+     *
+     *   dum2(i) = sum_j || d logCN_i / d R_j ||        (gfnff_cn.f90:gfnff_dlogcoord)
+     *   mchar(i) = exp(-0.005 * en(Z_i)^8) * dum2(i) / (cn(i) + 1)
+     *
+     * The N x N derivative tensor is never materialised. From gfnff_dlogcoord one gets,
+     * for every neighbour m != i,
+     *     d logCN_i / d R_m = dlogdcn_i * derfCN(i,m) * (x_m - x_i)/r_im
+     * whose norm is simply |dlogdcn_i * derfCN(i,m)|, while the self term collapses to
+     *     d logCN_i / d R_i = dlogdcn_i * sum_m derfCN(i,m) * (x_i - x_m)/r_im.
+     * So the sum of norms needs one O(N*k) pass over the CN neighbour list.
+     *
+     * Radii note: Fortran param%rcov == covalentRadD3 with "* aatoau * 4/3" already
+     * applied in the array literal (gfnff_param.f90:405), which is exactly what
+     * CNCalculator applies (k_scaled * COVALENT_RADII * ANG2BOHR). Same radii.
+     */
+    using GFNFFParameters::gfnff_en;
+
+    constexpr double kn = -7.5;
+    constexpr double cnmax = 4.4;
+    constexpr double sqrtpi = 1.77245385091;
+
+    std::vector<double> mchar(m_atomcount, 0.0);
+
+    // Fortran passes cnthr to gfnff_dlogcoord (gfnff_ini.f90:243), where
+    // cnthr = 100 - log10(accuracy)*50 = 100 at accuracy 1 (gfnff_param.f90:551).
+    // That is a SQUARED threshold (gfnff_cn.f90:73 does thr = sqrt(thr2)), so the
+    // cutoff radius is 10 Bohr - not the 6 Bohr neighbour-list default used elsewhere.
+    // Using 6 here leaves mchar ~1e-4 low; 10 reproduces Fortran mchar exactly.
+    constexpr double mchar_cutoff_bohr = 10.0;
+    auto cn_res = CNCalculator::calculateGFNFFCNWithNeighbors(
+        m_atoms, m_geometry_bohr, mchar_cutoff_bohr, kn, cnmax);
+
+    // Scaled covalent radii in Bohr (must match CNCalculator exactly)
+    const double k_scaled = 4.0 / 3.0;
+    std::vector<double> rcov_bohr(m_atomcount, 0.0);
+    for (int i = 0; i < m_atomcount; ++i) {
+        rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
+    }
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        int zi = m_atoms[i];
+        if (zi < 1 || zi > 86) continue;
+        if (rcov_bohr[i] == 0.0) continue;
+
+        // dlogCN/dCN_i at the raw (pre-log) CN, gfnff_cn.f90:create_dlogCN
+        const double cn_raw_i = cn_res.cn_raw[i];
+        const double dlogdcn_i = std::exp(cnmax) / (std::exp(cnmax) + std::exp(cn_raw_i));
+
+        Eigen::Vector3d self_sum = Eigen::Vector3d::Zero();
+        double offdiag_norm_sum = 0.0;
+
+        for (int m : cn_res.neighbors[i]) {
+            if (m == i || rcov_bohr[m] == 0.0) continue;
+            Eigen::Vector3d d = m_geometry_bohr.row(i) - m_geometry_bohr.row(m);
+            const double r = d.norm();
+            if (r < 1e-12) continue;
+
+            const double r0 = rcov_bohr[i] + rcov_bohr[m];
+            const double dr = (r - r0) / r0;
+            // derfCN/dR, gfnff_cn.f90:create_derfCN
+            const double derf = kn / sqrtpi * std::exp(-kn * kn * dr * dr) / r0;
+
+            self_sum += derf * (d / r);
+            offdiag_norm_sum += std::abs(dlogdcn_i * derf);
+        }
+
+        const double dum2 = (dlogdcn_i * self_sum).norm() + offdiag_norm_sum;
+
+        const double en = gfnff_en[zi - 1];
+        const double en2 = en * en;
+        const double en4 = en2 * en2;
+        const double en8 = en4 * en4;
+        mchar[i] = std::exp(-0.005 * en8) * dum2 / (cn_res.cn_values[i] + 1.0);
+    }
+
+    return mchar;
+}
+
+void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<int>>& nbdum) const
+{
+    /**
+     * Claude Generated (July 2026) - port of gfnff_ini2.f90:128-130 and 197-202.
+     * See the header doc for the meaning of each list.
+     *
+     * Native keeps its own geometric bond criterion as nbf. Verified July 2026 against
+     * an instrumented Fortran build: native nbf reproduces Fortran nbf(20,i) on 94/95
+     * MOR41 structures (the exception, ED07, is an agostic C-H...W contact that native
+     * bonds and Fortran does not; the HC and metal filters below absorb it).
+     */
+    using GFNFFParameters::metal_type;
+    using GFNFFParameters::normcn;
+    using GFNFFParameters::periodic_group;
+
+    auto is_metal = [](int z) -> bool {
+        return (z >= 1 && z <= 86) && (metal_type[z - 1] != 0);
+    };
+    // gfnff_ini2.f90:387-392. periodic_group is NEGATIVE for the d-block, so every
+    // transition metal lands in the "group <= 2" branch and gets hc_crit = 4.
+    auto hc_crit = [](int z) -> int {
+        if (z < 1 || z > 86) return 6;
+        return (periodic_group[z - 1] <= 2) ? 4 : 6;
+    };
+
+    // --- nbf: full connectivity from the cached bond list (icase=1) ---
+    const auto& bond_list = getCachedBondList();
+    topo.nb_full.assign(m_atomcount, {});
+    for (const auto& [a, b] : bond_list) {
+        topo.nb_full[a].push_back(b);
+        topo.nb_full[b].push_back(a);
+    }
+
+    topo.metallic_character = computeMetallicCharacter();
+
+    // --- nb_hc: drop ALL bonds of highly-coordinated atoms (icase=2) ---
+    // Fortran cycles the pair if EITHER endpoint's FULL CN exceeds its cap, so the
+    // bond disappears from both rows.
+    topo.nb_hc.assign(m_atomcount, {});
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (static_cast<int>(topo.nb_full[i].size()) > hc_crit(m_atoms[i])) continue;
+        for (int j : topo.nb_full[i]) {
+            if (static_cast<int>(topo.nb_full[j].size()) > hc_crit(m_atoms[j])) continue;
+            topo.nb_hc[i].push_back(j);
+        }
+    }
+
+    // --- nbm: drop metals and unusually coordinated heavy atoms (icase=3) ---
+    auto nbm_excluded = [&](int a) -> bool {
+        const int z = m_atoms[a];
+        if (topo.metallic_character[a] > 0.25 || is_metal(z)) return true;                 // metal case
+        if (z > 10 && z <= 86 && static_cast<int>(topo.nb_full[a].size()) > normcn[z - 1])
+            return true;                                                                    // HC case
+        return false;
+    };
+    topo.nb_nometal.assign(m_atomcount, {});
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (nbm_excluded(i)) continue;
+        for (int j : topo.nb_full[i]) {
+            if (nbm_excluded(j)) continue;
+            topo.nb_nometal[i].push_back(j);
+        }
+    }
+
+    // --- itag: eta detection needs nbf and nbm (gfnff_ini2.f90:170-195) ---
+    topo.itag = computeEtaCoordination(topo.nb_full);
+
+    // --- nbdum: per-atom mixture (gfnff_ini2.f90:197-202) ---
+    nbdum.assign(m_atomcount, {});
+    for (int i = 0; i < m_atomcount; ++i) {
+        nbdum[i] = (topo.itag[i] == -1) ? topo.nb_nometal[i] : topo.nb_full[i];
+    }
+
+    if (std::getenv("CURCUMA_NBDIAG")) {
+        for (int i = 0; i < m_atomcount; ++i) {
+            fmt::print("NATNB {:5d} {:4d} {:4d} {:4d} {:4d} {:4d} {:12.6f}\n",
+                       i + 1, m_atoms[i],
+                       static_cast<int>(topo.nb_full[i].size()),
+                       static_cast<int>(topo.nb_hc[i].size()),
+                       static_cast<int>(topo.nb_nometal[i].size()),
+                       static_cast<int>(nbdum[i].size()),
+                       topo.metallic_character[i]);
+        }
+    }
 }
 
 int GFNFF::countNeighborsWithin20Bohr(int atom_index, const Eigen::MatrixXd& geometry_bohr) const
@@ -9100,14 +9467,39 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         CurcumaLogger::info("Phase 2.2: Building adjacency list");
     }
     const auto& bond_list = getCachedBondList();
-    topo_info.adjacency_list.resize(m_atomcount);
-    for (const auto& [atom_i, atom_j] : bond_list) {
-        topo_info.adjacency_list[atom_i].push_back(atom_j);
-        topo_info.adjacency_list[atom_j].push_back(atom_i);
+
+    // Fortran four-list neighbour construction (gfnff_ini2.f90:128-130, 197-202).
+    // Fills nb_full / nb_hc / nb_nometal / metallic_character / itag and returns the
+    // eta-aware mixture nbdum, which becomes the working adjacency exactly as Fortran
+    // does at gfnff_ini2.f90:335 (topo%nb = nbdum). Claude Generated (Jul 2026).
+    std::vector<std::vector<int>> nbdum;
+    buildNeighborListSet(topo_info, nbdum);
+    topo_info.adjacency_list = nbdum;
+
+    // Optional diff of the two hybridization assignments (energies unaffected).
+    if (std::getenv("CURCUMA_HYBDIFF")) {
+        std::vector<int> itag_probe = topo_info.itag;
+        std::vector<int> hyb_fortran = determineHybridizationFortran(topo_info, nbdum, topo_info.distance_matrix, itag_probe);
+        std::vector<int> hyb_current = determineHybridization(topo_info.nb_full);
+        int ndiff = 0;
+        for (int i = 0; i < m_atomcount; ++i) {
+            if (hyb_current[i] != hyb_fortran[i]) {
+                ndiff++;
+                fmt::print("HYBDIFF {:5d} Z={:3d} current={} fortran={} nbf={} nbhc={} nbm={} nbdum={}\n",
+                           i + 1, m_atoms[i], hyb_current[i], hyb_fortran[i],
+                           static_cast<int>(topo_info.nb_full[i].size()),
+                           static_cast<int>(topo_info.nb_hc[i].size()),
+                           static_cast<int>(topo_info.nb_nometal[i].size()),
+                           static_cast<int>(nbdum[i].size()));
+            }
+        }
+        fmt::print("HYBDIFF_TOTAL {}\n", ndiff);
     }
 
     // Phase 10: Detect molecular fragments for constrained EEQ (Claude Generated - Jan 31, 2026)
-    auto frag_res = detectMolecularFragments(topo_info.adjacency_list);
+    // Fortran fragments on the FULL list (gfnff_ini.f90:468 mrecgff(...,nbf,...)), so an
+    // eta ligand is never split off into its own fragment (which would corrupt qfrag).
+    auto frag_res = detectMolecularFragments(topo_info.nb_full);
     topo_info.nfrag = frag_res.first;
     topo_info.fraglist = frag_res.second;
     topo_info.qfrag.assign(topo_info.nfrag, 0.0);
@@ -9125,18 +9517,25 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
     topo_info.coordination_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
-    // PHASE 2 OPTIMIZED (Feb 7, 2026): Pass adjacency_list to eliminate redundant O(N²) bond detection
-    topo_info.hybridization = determineHybridization(topo_info.adjacency_list);
+    // Hybridization. The Fortran-faithful path reads all four lists (gfnff_ini2.f90:211-333)
+    // and additionally writes itag (+1 for carbenes / NO2 nitrogen) on top of the -1 eta tags
+    // already set by buildNeighborListSet. Claude Generated (Jul 2026).
+    if (m_use_fortran_hyb) {
+        topo_info.hybridization = determineHybridizationFortran(
+            topo_info, nbdum, topo_info.distance_matrix, topo_info.itag);
+    } else {
+        topo_info.hybridization = determineHybridization(topo_info.adjacency_list);
+    }
 
     // NOTE: Removed std::async parallelization (May 2026) to prevent nested thread
     // creation when GFN-FF is called from an external thread pool (e.g. ConfSearch).
     // The overhead is negligible for parameter generation; thread safety is critical.
     topo_info.pi_fragments = detectPiSystems(topo_info.hybridization, topo_info.adjacency_list);
-    topo_info.neighbor_lists = buildNeighborLists();
-    // Claude Generated (Jul 2026): η-coordination tags (Fortran itag). Must come after
-    // neighbor_lists is built. Consumed by the angle-bending feta metal correction.
-    topo_info.itag = computeEtaCoordination(topo_info.neighbor_lists);
-    topo_info.ring_sizes = findSmallestRings(topo_info.adjacency_list, topo_info);
+    // neighbor_lists is an alias of adjacency_list (== Fortran topo%nb after gfnff_ini2.f90:335).
+    // itag is already set by buildNeighborListSet (eta) and determineHybridizationFortran (carbene/NO2).
+    topo_info.neighbor_lists = topo_info.adjacency_list;
+    // Fortran perceives rings on the metal-free list (gfnff_ini.f90:692 getring36(...,nbm,...)).
+    topo_info.ring_sizes = findSmallestRings(topo_info.nb_nometal, topo_info);
 
     // Calculate simple neighbor counts for XTB compatibility in torsions
     // XTB uses raw neighbor count (topo%nb(20,i)) rather than effective CN for torsion correction

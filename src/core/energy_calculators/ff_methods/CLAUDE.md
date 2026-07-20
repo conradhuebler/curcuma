@@ -260,6 +260,14 @@ ctest -R test_gfnff_gradients --verbose
 
 #### Topology-Specific Corrections (Not Yet Implemented)
 
+**Neighbour lists**:
+- [x] **Fortran four-list metal-reduced construction** ✅ (Jul 20, 2026) - `nb_full`/`nb_hc`/
+  `nb_nometal` + eta-aware mixture replace the single adjacency list; hybridization now via
+  `determineHybridizationFortran()`. Fixes Cp/alkene C (sp3->sp2) and carbonyl O (sp2->sp).
+  MOR41 gfnff MAD 57.3->16.7, within-1.0 33/95->39/95, protected metal set unmoved.
+  Topology cache bumped to v2. Known deviations: ED07 (nbf criterion), PR40 (q-loop) -
+  both out of scope, both documented. See [docs/GFNFF_NEIGHBOR_LISTS.md](../../../../docs/GFNFF_NEIGHBOR_LISTS.md)
+
 **Angle Bending Corrections**:
 - [ ] **Ring strain factors** - Small rings (3-, 4-membered) need reduced force constants
 - [ ] **Metal coordination** - feta metal correction factor (currently =1.0 for all)
