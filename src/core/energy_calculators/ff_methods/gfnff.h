@@ -712,7 +712,14 @@ public:
      * @brief Calculate full topology information for advanced parametrization
      * @return Complete topology information
      */
+    /// Full topology build. Runs calculateTopologyInfoOnce() twice, mirroring Fortran's
+    /// q-loop (gfnff_ini.f90:258-263): pass 1 with qa=0, pass 2 with the pass-1 charges
+    /// shrinking the bond radii. Claude Generated (Jul 2026).
     TopologyInfo calculateTopologyInfo() const;
+
+    /// One pass of the topology build (bond list -> four neighbour lists -> hybridization
+    /// -> rings/pi/EEQ). Uses m_bond_qa for the getnb radius shrink.
+    TopologyInfo calculateTopologyInfoOnce() const;
 
     /**
      * @brief Generate GFN-FF parameters as native C++ structs (no JSON)
@@ -2656,6 +2663,12 @@ private:
     /// the legacy geometry-first heuristic. Set false to fall back to the pre-Jul-2026
     /// behaviour for bisection. Claude Generated (Jul 2026).
     bool m_use_fortran_hyb = true;
+
+    /// Topology charges (Fortran topo%qa) fed back into the getnb bond-radius shrink
+    /// (`rtmp -= qa*fq`, gfnff_ini2.f90:122). Empty on the first pass, which is exactly
+    /// Fortran's pass 1 (gfnff_ini.f90:258 sets qa=0 before the q-loop). Filled by the
+    /// second q-loop pass. Claude Generated (Jul 2026).
+    mutable std::vector<double> m_bond_qa;
     CNDerivStore m_last_dcn; ///< CN derivatives (gradient only). Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
 
     // WP-FF-DistMatrix-Sharing (May 2026): shared packed-triangular distance arrays.

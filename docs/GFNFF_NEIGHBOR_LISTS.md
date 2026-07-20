@@ -98,14 +98,15 @@ thing is one O(N*k) pass.
 
 | metric | before | after |
 |---|---|---|
-| MAD | 57.317 | **9.146** |
-| max | 457.32 | **113.83** |
-| RMSD | 118.371 | **19.391** |
-| MD (bias) | +46.870 | **-3.284** |
+| MAD | 57.317 | **7.295** |
+| max | 457.32 | **37.80** |
+| RMSD | 118.371 | **11.907** |
+| MD (bias) | +46.870 | **-6.012** |
 | within 1.0 kcal/mol | 33/95 | **39/95** |
+| total \|error\| | 5445.2 | **693.1** |
 
-(Intermediate: MAD 16.679 after the topology rewire alone; 9.146 after also pointing the
-torsion generator at the topology adjacency - see "Torsion enumeration" below.)
+Step by step: 57.32 (baseline) -> 16.68 (topology rewire) -> 9.15 (torsion enumeration)
+-> 8.35 (getnb criterion) -> 7.30 (gated q-loop).
 
 The seven previously-exact metal complexes (ED02, ED03, ED27, ED28, ED31, ED39, PR03) moved
 by **0.000 kcal/mol**. The original carbonyl targets went to zero: PR01 +0.62 -> -0.00,
@@ -135,22 +136,55 @@ else <2% each. The bond share is dominated by ED07 and PR40, the two known devia
 the residual metal **bond** term (`btyp>=5`, `docs/GFNFF_METAL_BOND_ANALYSIS.md`) is still
 unimplemented and is the main remaining lever.
 
+## getnb criterion and the q-loop (Jul 2026)
+
+Both originally deferred, both now done.
+
+**getnb criterion.** The bond criterion is now the Fortran one
+(`gfnff_ini2.f90:111-126` + `:361-419`):
+
+```
+rco  = gfnffrab(Z_i, Z_j, normcn_i, normcn_j)   // computeRabEstimate, R0 at "normal" CN
+rco -= qa_i*f1 + qa_j*f2                        // charge shrink, fq=0.23 doubled for metals
+rco *= fat(Z_i)*fat(Z_j)
+bonded if r < fm * 1.25 * rco                   // fm: rthr2=1.00 for TM (no-op), 1.025 for main-group metals
+```
+
+replacing the older `1.3*(rcov_i+rcov_j)*fat_i*fat_j` heuristic. Native `nbf` now reproduces
+Fortran on **95/95** MOR41 structures (was 94/95 - ED07's agostic C-H...W is gone).
+
+**q-loop.** `calculateTopologyInfo()` now runs `calculateTopologyInfoOnce()` up to twice,
+mirroring `gfnff_ini.f90:258-263`. The charges only reach the model *through* the bond list,
+so if the shrink changes no bond, pass 2 is a mathematical no-op - the second pass is
+therefore gated on the bond list actually changing. Measured against Fortran: that happens on
+exactly **1 of 95** MOR41 structures (PR40). The gate is also a safeguard against the
+re-entrancy bug listed below.
+
+Effect: ED07 +113.83 -> **-37.80**, PR40 +103.63 -> **-3.83**; MOR41 MAD 9.146 -> **7.295**,
+max 113.83 -> **37.80**, RMSD 19.4 -> **11.9**. Protected set still 0.000, gfnff_val 18/18.
+
+**ED07's remaining -37.8 kcal is no longer a neighbour-list problem.** Its bond list, angle,
+torsion and dispersion now all match xtb essentially exactly; the entire residual is the
+**bond term** (-0.0600 Eh = -37.7 kcal), i.e. the unimplemented transition-metal bond branch
+(`btyp>=5`, `docs/GFNFF_METAL_BOND_ANALYSIS.md`). ED07 is now the single worst structure in
+the set and is a pure test case for that separate work item.
+
 ## What was NOT done / known deviations
 
-- **The `getnb` distance criterion is NOT ported.** Native keeps its own geometric bond
-  criterion as `nbf`. This is deliberate: `gen%rthr2 = 1.00` (`gfnff_param.f90:720`) makes
-  Fortran's metal radius enlargement an exact no-op for transition metals, and native `nbf`
-  already reproduces Fortran on 94/95 MOR41 structures.
-  - **ED07** is the exception: native bonds an agostic C-H...W contact that Fortran does not
-    (`nbf(W)` 7 vs 5). `nb_hc` and `nb_nometal` absorb this completely, but `nbdum` and
-    `nbdiff` do not. ED07 regressed -21.11 -> +113.83 kcal/mol. Porting the
-    `gfnffrab`/`normcn`/charge-shrink criterion is the fix, tracked as future work.
-- **The two-pass q-loop is NOT ported.** `gfnff_ini.f90:258` sets `qa = 0` before the loop,
-  so pass 1 runs unshrunk and native corresponds to pass 1. Pass 1 differs from pass 2 on
-  exactly **1 of 95** MOR41 structures: **PR40**, which regressed +61.68 -> +103.63 kcal/mol.
-  Implementing the q-loop requires the `getnb` criterion first (a charge-shrink correction to
-  a radius formula that never had one would be worse than nothing), so it is blocked on the
-  item above.
+- ~~The `getnb` distance criterion is not ported~~ - **DONE (Jul 2026)**, see "getnb criterion
+  and the q-loop" above.
+- ~~The two-pass q-loop is not ported~~ - **DONE (Jul 2026)**, gated on the bond list
+  actually changing; see above.
+- **`calculateTopologyInfoOnce()` is not re-entrant.** Calling it twice on unchanged input
+  converges to a slightly different Coulomb energy (H2O: -0.0890528 -> -0.0881507 Eh) and
+  then stays at that fixed point, so some one-shot state transitions on the first call. It is
+  NOT accumulation (a 3rd and 4th call change nothing further) and it is NOT the EEQ Cholesky
+  or A_nn cache (invalidating both changes the wrong value to a different wrong value); a
+  persistent flag such as `m_phase2_historically_implausible` (`eeq_solver.h:958`) is the
+  most likely candidate. This is a **pre-existing latent bug**, exposed rather than caused by
+  the q-loop work. The q-loop sidesteps it by only re-running when the bond list changes, but
+  it should be fixed on its own merits - any future code that rebuilds topology twice will
+  hit it.
 - **Not tested**: periodic systems, lanthanides/actinides, radicals, anything outside MOR41
   and the 18-molecule neutral main-group validation set. The validation set contains **no S
   and no P**, so the hypervalent rules (`nbdiff==0 && Z>10 -> hyb=5`) and the `normcn`

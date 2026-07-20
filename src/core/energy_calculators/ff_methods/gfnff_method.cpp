@@ -962,27 +962,57 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::info(fmt::format("GFNFF: Using {} bonds from external topology (geometric detection skipped)", bonds.size()));
         } else {
-            // Default: geometric bond detection
-            double bond_threshold = 1.3;
+            // Fortran getnb bond criterion (Claude Generated, Jul 2026).
+            // Ports gfnff_ini2.f90:111-126 (rtmp setup) + :361-419 (getnb, icase=1):
+            //
+            //   rtmp(i,j) = gfnffrab(Z_i, Z_j, normcn_i, normcn_j)       ! R0 at "normal" CN
+            //   rtmp     -= qa_i*f1 + qa_j*f2                            ! charge shrink, fq doubled for metals
+            //   rtmp     *= fat(Z_i)*fat(Z_j)                            ! element hacks
+            //   bonded if  r < fm * rthr * rtmp
+            //
+            // This replaces the older heuristic `1.3*(rcov_i+rcov_j)*fat_i*fat_j`, which
+            // agreed with Fortran on 94/95 MOR41 structures but over-bonded agostic
+            // contacts to heavy metals (ED07: an extra C-H...W pair).
+            using GFNFFParameters::metal_type;
+            using GFNFFParameters::normcn;
 
-            // Claude Generated (March 2026): Pre-cache per-atom covalent radii and fat factors
-            std::vector<double> rcov(m_atomcount);
+            constexpr double rthr = 1.25;    // gen%rthr    (gfnff_param.f90:718)
+            constexpr double rthr2 = 1.00;   // gen%rthr2   (gfnff_param.f90:720) - no-op for TMs
+            constexpr double rqshrink = 0.23; // gen%rqshrink (gfnff_param.f90:721)
+
             std::vector<double> fat_val(m_atomcount);
+            std::vector<double> qshift(m_atomcount, 0.0);
+            std::vector<double> fm_atom(m_atomcount, 1.0);
+            const bool have_qa = (static_cast<int>(m_bond_qa.size()) == m_atomcount);
             for (int i = 0; i < m_atomcount; ++i) {
-                rcov[i] = getCovalentRadius(m_atoms[i]);
-                fat_val[i] = fat[m_atoms[i]];
+                const int z = m_atoms[i];
+                fat_val[i] = fat[z];
+                const int mt = (z >= 1 && z <= 86) ? metal_type[z - 1] : 0;
+                // f1 = fq, doubled for metals (gfnff_ini2.f90:115/119)
+                const double f1 = rqshrink * (mt > 0 ? 2.0 : 1.0);
+                qshift[i] = have_qa ? m_bond_qa[i] * f1 : 0.0;
+                // icase=1 metal radius scaling (gfnff_ini2.f90:379-384)
+                if (mt == 2) fm_atom[i] = rthr2;
+                else if (mt == 1) fm_atom[i] = rthr2 + 0.025;
             }
 
             for (int i = 0; i < m_atomcount; ++i) {
+                const int zi = m_atoms[i];
+                const double ncn_i = (zi >= 1 && zi <= 86) ? static_cast<double>(normcn[zi - 1]) : 4.0;
                 for (int j = i + 1; j < m_atomcount; ++j) {
-                    double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+                    const int zj = m_atoms[j];
+                    const double ncn_j = (zj >= 1 && zj <= 86) ? static_cast<double>(normcn[zj - 1]) : 4.0;
 
-                    // Phase 3: Apply element-specific fat scaling factors (Claude Generated Jan 2026)
-                    double threshold = bond_threshold * (rcov[i] + rcov[j]) * fat_val[i] * fat_val[j];
+                    double rco = GFNFFParameters::computeRabEstimate(zi, zj, ncn_i, ncn_j);
+                    rco -= qshift[i] + qshift[j];
+                    rco *= fat_val[i] * fat_val[j];
 
-                if (distance < threshold) {
-                    bonds.emplace_back(i, j);
-                }
+                    const double threshold = fm_atom[i] * fm_atom[j] * rthr * rco;
+                    const double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+
+                    if (distance < threshold) {
+                        bonds.emplace_back(i, j);
+                    }
                 }
             }
         }
@@ -9416,6 +9446,54 @@ std::pair<int, std::vector<int>> GFNFF::detectMolecularFragments(const std::vect
 }
 
 GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
+{
+    /**
+     * Fortran q-loop (external/gfnff/src/gfnff_ini.f90:258-263, closes :632):
+     *
+     *   topo%qa = 0
+     *   do while (qloop_count < 2 .and. gen%rqshrink > 1e-3)
+     *      call gfnff_neigh(...)   ! bond radii shrink by qa (gfnff_ini2.f90:122)
+     *      ... EEQ -> topo%qa ...
+     *   end do
+     *
+     * Pass 1 runs with qa = 0 (gfnff_ini.f90:258), pass 2 re-derives the topology with the
+     * pass-1 charges shrinking the bond radii.
+     *
+     * The charges only ever reach the rest of the model THROUGH the bond list, so if the
+     * shrink does not change a single bond, pass 2 is a mathematical no-op and pass 1 is
+     * already the converged answer. Verified against an instrumented Fortran build: the
+     * bond list changes between passes on exactly 1 of 95 MOR41 structures (PR40). So the
+     * expensive second pass is gated on the bond list actually changing.
+     *
+     * That gate is also a correctness safeguard: calculateTopologyInfoOnce() is NOT
+     * currently re-entrant (a second invocation converges to a slightly different Coulomb
+     * energy - a pre-existing latent bug, see docs/GFNFF_NEIGHBOR_LISTS.md), so running it
+     * twice unconditionally would perturb every molecule.
+     *
+     * Claude Generated (Jul 2026).
+     */
+    m_bond_qa.clear();
+    TopologyInfo topo = calculateTopologyInfoOnce();
+
+    if (topo.topology_charges.size() != m_atomcount) return topo;
+
+    const std::vector<std::pair<int, int>> bonds_pass1 = getCachedBondList();
+
+    m_bond_qa.assign(topo.topology_charges.data(),
+                     topo.topology_charges.data() + m_atomcount);
+    m_cached_bond_list.reset();  // re-detect with charge-shrunk radii
+
+    if (getCachedBondList() == bonds_pass1) {
+        return topo;  // shrink changed nothing - pass 2 would be a no-op
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("GFN-FF q-loop: charge-shrunk radii changed the bond list, running pass 2");
+    }
+    return calculateTopologyInfoOnce();
+}
+
+GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
 {
     // Claude Generated (February 2026): Add timing for topology calculation
     auto topo_start = std::chrono::high_resolution_clock::now();
