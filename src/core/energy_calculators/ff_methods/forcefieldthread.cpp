@@ -34,6 +34,8 @@
 #include <fmt/core.h>
 #include <fmt/format.h>
 
+#include <cstdlib>        // Claude Generated (Jul 2026): getenv for CURCUMA_BOND_CSV_ALL
+#include <limits>         // Claude Generated (Jul 2026): numeric_limits for the uncapped BOND_CSV dump
 #include <unordered_map>  // Claude Generated (Dec 2025): For atom_to_params lookup in Coulomb self-energy
 
 ForceFieldThread::ForceFieldThread(int thread, int threads)
@@ -998,11 +1000,21 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
         m_bond_energy += energy * factor;
 
         // Bond CSV diagnostic (Feb 14, 2026, capped Apr 2026 to first 5 + count)
+        //
+        // The cap keeps -v3 readable, but per-bond comparison against the Fortran
+        // reference (scripts/s30l_bond_compare.py) needs every bond. Set
+        // CURCUMA_BOND_CSV_ALL=1 to lift it. Claude Generated (Jul 2026).
         if (CurcumaLogger::get_verbosity() >= 3) {
+            static const int csv_limit = []() {
+                const char* env = std::getenv("CURCUMA_BOND_CSV_ALL");
+                return (env && std::string(env) != "0") ? std::numeric_limits<int>::max() : 5;
+            }();
             if (index == 0) {
-                CurcumaLogger::info("BOND_CSV (first 5 of N): idx, atom_i, atom_j, Z_i, Z_j, rij, r0, fc, alpha, fqq, energy");
+                CurcumaLogger::info(csv_limit == std::numeric_limits<int>::max()
+                        ? "BOND_CSV (all): idx, atom_i, atom_j, Z_i, Z_j, rij, r0, fc, alpha, fqq, energy"
+                        : "BOND_CSV (first 5 of N; CURCUMA_BOND_CSV_ALL=1 for all): idx, atom_i, atom_j, Z_i, Z_j, rij, r0, fc, alpha, fqq, energy");
             }
-            if (index < 5) {
+            if (index < csv_limit) {
                 CurcumaLogger::info(fmt::format("BOND_CSV: {:3d}, {:3d}, {:3d}, {:2d}, {:2d}, {:.6f}, {:.6f}, {:.9f}, {:.9f}, {:.6f}, {:.12f}",
                                                  index, bond.i, bond.j, bond.z_i, bond.z_j,
                                                  rij, r0_ij, k_b, alpha, bond.fqq, energy * factor));
