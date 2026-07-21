@@ -1,5 +1,22 @@
 # GFN-FF Metal Bond-Stretch Overbinding — Root-Cause Analysis
 
+> **SUPERSEDED (Jul 2026).** This is the **pre-fix** diagnostic. The metal bond branch
+> (`btyp >= 5`) it describes as missing **has since been implemented** — commit `53d6aeb`,
+> refined by `14fc648`, now at `gfnff_method.cpp:4925-4990`. Read this file for the root-cause
+> *analysis* only; its "what curcuma does" statements no longer describe the code.
+>
+> Do not cite "the `btyp>=5` metal branch is unimplemented" from this document. What actually
+> remains open in the metal bond path is narrower:
+> - **`btyp=6` (eta) never fires** — `topo.itag` is populated but the promotion is not wired
+>   (`gfnff_method.cpp:4930-4936`), so eta bonds fall back to M-X (`bstren[5]=1.00` vs
+>   `bstren[6]=0.78`) and the `eta_shift*nb(20)` r0 term (`gfnff_ini.f90:1252-1253`) is absent.
+> - **TM-TM `mchar` attenuation omitted** (`:4949-4951`); `gfnff_ini.f90:1195-1197` applies
+>   `bstrength *= (1 - min(2*mchar_i + 2*mchar_j, 0.5))`. The "mchar not available in curcuma"
+>   comment is stale — `topo.metallic_character` (`gfnff.h:335`) exists since `5afbb02`.
+>
+> Post-fix status: MOR41 GFN-FF per-structure MAD **7.30** kcal/mol, max **37.80** (ED07),
+> 39/95 within 1 kcal/mol. See [MOR41_VALIDATION.md](MOR41_VALIDATION.md).
+
 Status: 🤖 AI-generated diagnostic (2026-07-16). No source code modified.
 Scope: native GFN-FF (`-method gfnff`) bond-stretch term for bonds involving a
 transition metal. Organic/metal-free bonds are unaffected.

@@ -46,9 +46,18 @@ MOR41 gfn2 reaction MAD vs xtb: **507 → 0.03 kcal/mol.** No main-group/3d/GFN-
 all energy-validation ctests pass.
 
 The only remaining transition-metal gap is **GFN-FF** (a force field, separate from the GFN1/2
-tight-binding stack): its metal **bond term** is ~1.95× too strong because the Fortran
-metal-bond branch (`btyp>=5`) is not implemented — see
-[GFNFF_METAL_BOND_ANALYSIS.md](GFNFF_METAL_BOND_ANALYSIS.md).
+tight-binding stack). Its metal **bond term** was ~1.95× too strong because the Fortran
+metal-bond branch (`btyp>=5`) was not implemented; **that branch has since been implemented**
+(`53d6aeb`, refined by `14fc648`) and, together with the four-list neighbour port (`5afbb02`),
+brings MOR41 GFN-FF per-structure MAD to **7.30** kcal/mol (max **37.80** = ED07, 39/95 within
+1 kcal/mol). See [GFNFF_METAL_BOND_ANALYSIS.md](GFNFF_METAL_BOND_ANALYSIS.md) — note that file
+is the **pre-fix** diagnostic and is flagged as superseded.
+
+Still open in the GFN-FF metal path: `btyp=6` (eta) promotion is not wired, and the TM-TM
+`mchar` attenuation is omitted. **ED07** (W(CO)₃(PiPr₃)₂ with an agostic C-H) is the largest
+single residual and is a clean isolated test case — its bond list, angles, torsions and
+dispersion match xtb essentially exactly, and the whole −37.80 kcal/mol sits in the bond term
+(−0.0600 Eh). It has no π-eta ligand, so neither open item above explains it.
 
 The sections below are the original (pre-fix) diagnostic and remain valid for GFN-FF.
 

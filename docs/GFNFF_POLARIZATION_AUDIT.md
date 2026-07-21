@@ -110,6 +110,38 @@ opt-in `CURCUMA_GFNFF_GPU_RESIDENT_HBQ=1` path that refreshes HB charges to live
    added to `cache_size_ok` and `can_persist` so solvation bypasses the cache. Verified:
    `gfnff_solv_*` 28/28 pass, gas-phase bit-identical, `lu`/`pcg`/`ldlt` unaffected.
 
+## Fix applied (July 2026) — same cache, the general case
+
+3. **Phase-1/Phase-2 cache-key collision.** Fix #2 above patched one *symptom* of a deeper
+   defect: `solveWithSchurCholesky` has no explicit notion of which phase called it. It infers
+   "I am Phase 2" from `m_pending_geometry`/`m_pending_cn` being non-empty (`eeq_solver.cpp`
+   `cache_size_ok` ~:2113-2119, `can_persist` ~:2166-2169). Those buffers are written **only**
+   by `calculateFinalCharges` (Phase 2) and were **never cleared**, so the documented contract
+   ("Phase 1 arrives with empty pending buffers") held only for the *first* solve on a given
+   solver instance. From the second topology build onward Phase 1 looked like Phase 2.
+
+   The damaging variant is the one that follows an `invalidateCholeskyCache()` — exactly what
+   `GFNFF::getCachedTopology()` does before every full topology rebuild: the factor is dropped
+   but the *key* survives, so Phase 1 passes `can_persist`, stores its **topological-distance**
+   factor, and Phase 2 of the same call then hits it (`max_dr == 0`) and solves the geometric
+   system with it.
+
+   Fix: clear both buffers at the top of `calculateTopologyCharges()` **and** inside
+   `invalidateCholeskyCache()`, so the factor and its key are always dropped together. This
+   subsumes the `!m_reaction_field` special case in #2 (which is retained).
+
+   Measured on `test_gfnff_topology_reentrancy` (new regression guard): before the fix, a second
+   topology build across a cache invalidation shifted H2O Phase-1 `qa` by **4.5e-2 e**, Phase-2
+   charges by 4.5e-2 e and `dgam` by 6.7e-3 (CH4: 6.6e-3 / 7.6e-3 / 1.8e-3); after, all
+   differences are exactly 0.
+
+   **Scope, honestly stated:** no production-path impact could be demonstrated. Single points,
+   `-opt` and a 300-step caffeine `-md` (154 full topology rebuilds) are **bit-identical**
+   before vs after, because on a rebuild the inline topology cache restores the Phase-1 charges
+   and skips the Phase-1 EEQ solve entirely, so the corrupted path is not reached. The bug is
+   real and reproducible at the API level; the fix removes a latent trap and restores the stated
+   invariant, but it is not known to have changed any published number.
+
 ---
 *Audit by background investigation agent, June 2026. Source-of-truth = the verdict table above;
 re-verify file:line before acting (line numbers drift).*

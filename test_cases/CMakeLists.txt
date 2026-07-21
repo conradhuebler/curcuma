@@ -221,6 +221,22 @@ endif()
 add_test(NAME test_eeq_two_phase
          COMMAND test_eeq_two_phase)
 
+# Claude Generated (Jul 2026): GFN-FF topology re-entrancy regression guard.
+# calculateTopologyInfoOnce() must give identical charges when called twice on
+# identical input, both plainly and across an EEQ cache invalidation (the MD/opt
+# rebuild path). Guards the Phase-1/Phase-2 Cholesky cache collision.
+add_executable(test_gfnff_topology_reentrancy
+        test_gfnff_topology_reentrancy.cpp)
+
+target_link_libraries(test_gfnff_topology_reentrancy curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_topology_reentrancy REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_gfnff_topology_reentrancy
+         COMMAND test_gfnff_topology_reentrancy ${CMAKE_SOURCE_DIR}/test_cases)
+
 # Claude Generated: PolymerBuild sequence parser tests (prime notation)
 add_executable(test_polymerbuild_sequence
         test_polymerbuild_sequence.cpp)

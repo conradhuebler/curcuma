@@ -2694,6 +2694,26 @@ Vector EEQSolver::calculateTopologyCharges(
     const int natoms = atoms.size();
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
 
+    // BUGFIX (Jul 2026): re-arm the Phase-1 contract of solveWithSchurCholesky.
+    // That function has no explicit notion of which phase called it — it infers
+    // "this is Phase 2" from m_pending_geometry/m_pending_cn being non-empty
+    // (see eeq_solver.cpp:2113-2119 cache_size_ok and :2166-2169 can_persist).
+    // Those buffers are written ONLY by calculateFinalCharges (Phase 2) and were
+    // never cleared, so from the second topology build onward Phase 1 looked like
+    // Phase 2 and either consumed the Phase-2 geometric factor or — after an
+    // invalidateCholeskyCache(), which is exactly what GFNFF::getCachedTopology()
+    // does before every full MD/opt topology rebuild — persisted its own
+    // TOPOLOGICAL-distance factor, which Phase 2 of the same call then consumed
+    // (max_dr == 0 => cache hit). Either way Phase 1 qa is wrong, and the error
+    // propagates through dgam/alpeeq/gam_corrected into the Phase-2 charges and
+    // the GFN-FF Coulomb energy.
+    //
+    // Clearing here restores the documented invariant "Phase 1 reaches
+    // solveWithSchurCholesky with empty pending buffers" for EVERY call, not just
+    // the first one on a fresh solver.
+    m_pending_geometry.resize(0, 0);
+    m_pending_cn.resize(0);
+
     // Augmented system size: n atoms + n fragments
     int nfrag = topology.has_value() ? topology->nfrag : 1;
     int m = natoms + nfrag;

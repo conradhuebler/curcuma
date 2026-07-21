@@ -347,7 +347,18 @@ public:
 
     /// WP-EEQ-Cache (May 2026): invalidate cached Cholesky factor.
     /// Call after setMolecule() or topology rebuild to force refactorization on next step.
-    void invalidateCholeskyCache() { m_chol_cache.reset(); }
+    ///
+    /// Also clears the Phase-2 pending buffers (Jul 2026). solveWithSchurCholesky
+    /// treats "pending buffers non-empty" as "I am Phase 2" (:2113-2119, :2166-2169);
+    /// resetting the factor while leaving them populated let the next Phase 1 persist
+    /// its topological factor into the freshly-emptied cache, which Phase 2 then
+    /// consumed. Dropping the factor and its key together keeps the two consistent.
+    void invalidateCholeskyCache()
+    {
+        m_chol_cache.reset();
+        m_pending_geometry.resize(0, 0);
+        m_pending_cn.resize(0);
+    }
 
     /// WP-EEQ-Matrix-Cache (May 2026): invalidate cached A_nn off-diagonal.
     /// Call after topology rebuild to force matrix re-build on next Phase 2.
@@ -952,9 +963,14 @@ private:
     mutable int m_pcg_total_iters = 0;      ///< Total PCG iterations across all calls
     mutable double m_pcg_worst_residual = 0.0; ///< Worst |r| among non-converged calls
 
-    // Claude Generated (Apr 2026): Cache for historically implausible Phase 2 results.
-    // Once Phase 2 has produced garbage charges for a given system size, skip it forever
-    // (until the atom count changes, which indicates a new molecule).
+    // Claude Generated (Apr 2026, corrected Jul 2026): hint that Phase 2 has previously
+    // produced implausible charges for this system size.
+    //
+    // This used to be a permanent freeze to the Phase-1 charges ("skip Phase 2 forever").
+    // That was removed in Jun 2026 (see docs/GFNFF_POLARIZATION_AUDIT.md) — the flag is
+    // now TRANSIENT: it is cleared on the next plausible Phase-2 solve (:3959), and its
+    // only remaining effect is to steer dispatchSolve to the Batched solver, and only for
+    // nfrag >= 8 (:1468-1478). It no longer suppresses Phase 2.
     mutable bool m_phase2_historically_implausible = false;
     mutable int m_phase2_implausible_natoms = 0;
 

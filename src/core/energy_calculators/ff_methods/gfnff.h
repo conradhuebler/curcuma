@@ -300,6 +300,16 @@ public:
         return m_eeq_solver ? m_eeq_solver->pcgExtrapolationCount() : -1;
     }
 
+    /// Test hook: drop the EEQ Cholesky/matrix caches, exactly as getCachedTopology()
+    /// does before a full topology rebuild. Lets the re-entrancy regression test
+    /// reproduce the MD/opt rebuild path in-process. Claude Generated (Jul 2026).
+    void invalidateEEQCachesForTest() {
+        if (m_eeq_solver) {
+            m_eeq_solver->invalidateCholeskyCache();
+            m_eeq_solver->invalidateMatrixCache();
+        }
+    }
+
     /**
      * @brief Static topology data — computed once at initialization, never changes
      *
