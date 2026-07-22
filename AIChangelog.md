@@ -4,6 +4,8 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+- 2026-07-22: Fixed GFN-FF Phase-1 eta topology charges — the sparse Dijkstra topological-distance builder used a DIRECTED adjacency, so eta ligands (asymmetric nbdum: metal lists ligand, ligand omits metal) were disconnected from their metal in the Phase-1 EEQ graph. Symmetrized to match Fortran (gfnff_ini.f90:438-441) and the Floyd-Warshall variant. PR15 topo%qa now bit-matches the analyzer (eta-C -0.070091), eta fqq 1.02->1.75, PR15 +40.18->+0.09. MOR41 gfnff per-reaction MAD 4.07->3.47, per-structure 4.658->4.226, within-1 48->49; non-eta systems byte-identical.
+
 - 2026-07-22: Wired GFN-FF eta (btyp=6, bstren 0.78 + eta_shift r0) and TM-TM mchar attenuation (bstrength*=1-min(2mchar_i+2mchar_j,0.5)) — both verified per-bond vs the Fortran analyzer (eta detection exact 4/4,7/7,9/9; PR22 Ir-Ir prefactor exact). MOR41 gfnff per-structure MAD 5.288->4.658, within-1 45->48, per-reaction MAD 8.17->4.067. Surfaced a separate Phase-1 qa charge error in pi-metal complexes (PR15 eta fqq 1.02 vs 1.75).
 
 - 2026-07-22: Fixed GFN-FF metal-H bonds — hydrogen (group 1) was wrongly excluded from `mtyp=1` (mis-set fqq/fcn on metal-H), and `fsrb2` EN-scaling keyed on `mtyp>0` instead of a metal bond (leaked to organic C-H once mtyp(H) fixed; now gated on `imetal>0`). Ground-truthed per-bond vs the Fortran analyzer (fqq 1.0964, fcn 0.25842). MOR41 gfnff MAD 7.153->5.288, within-1 40->45/95, fixed PR07/PR09/PR08/ED17/PR34/35/33/17/PR06/ED14/PR10; organics byte-identical, zero net-worse.

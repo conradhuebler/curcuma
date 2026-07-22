@@ -72,12 +72,19 @@ PR15 4/4, ED13 7/7, PR13 9/9); TM-TM bonds get `bstrength *= 1-min(2·mchar_i+2�
 (PR22 Ir-Ir prefactor now exact vs Fortran). Per-structure MAD 5.288 → **4.658**, within-1 45 →
 **48/95**; per-reaction MAD → **4.067**.
 
-Now open in the GFN-FF metal path: a **Phase-1 topology-charge (`qa`) error in π-metal complexes**
-— surfaced by eta. On PR15 the eta Ni-C `fqq` is 1.0235 vs the analyzer's 1.7496 because
-curcuma's `qa(Ni)`/`qa(C_eta)` come out same-sign (dum≈0.03) where Fortran has them opposite-sign
-(dum≈1). eta correctly rescales `bstr`/adds the r0 shift, so it amplifies this `qa` gap in a few
-structures (PR15/ED36/PR36, the new per-structure max 40.18). This is an EEQ Phase-1 item, not a
-bond-term one.
+**Phase-1 π-metal `qa` charge fixed (Jul 2026):** the eta `fqq` error (PR15 1.0235 vs analyzer
+1.7496) was a **directed-graph bug** in the sparse topological-distance builder. `neighbor_lists`
+(== Fortran `nbdum`) is asymmetric for eta bonds — the metal lists the eta ligand but the ligand
+omits the metal (`nbm`, gfnff_ini2.f90:199) — and the Dijkstra adjacency was directed, so the eta
+ligand was disconnected from its metal in the Phase-1 graph. Fortran (and this file's
+Floyd-Warshall variant) symmetrize; the sparse variant now does too. PR15 `topo%qa` now matches
+the analyzer bit-for-bit (Ni 0.289140, eta-C −0.070091), eta `fqq` → 1.749625, PR15 +40.18 →
++0.09. Per-structure MAD → **4.226**, within-1 → **49/95**; per-reaction MAD → **3.470**, max
+31.83 → **17.54**. Non-eta systems byte-identical.
+
+Session arc for native GFN-FF on MOR41 (per-reaction MAD): 57 (start) → 8.17 (bond-list) →
+4.07 (metal-H + eta/mchar) → **3.47** (π-metal qa). Remaining residuals are no longer dominated
+by any single mechanism identified so far.
 
 The sections below are the original (pre-fix) diagnostic and remain valid for GFN-FF.
 
