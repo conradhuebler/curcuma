@@ -114,6 +114,34 @@ void ConfSearch::start()
         }
     }
 
+    // Claude Generated (Jul 2026): normalize legacy SimpleMD aliases to their canonical names.
+    // The CLI stores a flat -hmass as "hmass", but SimpleMD reads the canonical "hydrogen_mass"
+    // (simplemd.cpp:229). Layer 1 already inserted the SimpleMD default "hydrogen_mass":1, so
+    // both keys sit in md; the ConfigManager merge resolves "hmass"->"hydrogen_mass" only when
+    // the canonical key is present, but the iteration order lets the default win, so the user
+    // value is silently dropped. (-dt worked only because Layer 6 overwrites md["time_step"].)
+    // Rewriting every legacy alias (hmass, velo, dump, print, writeXYZ, nocenter, rm_COM,
+    // rmrottrans, initfile, writeinit, writerestart, norestart, rattle_maxiter, ...) to its
+    // canonical name here makes the user value reach SimpleMD regardless of merge order.
+    // resolveAlias is module-scoped and returns "" for non-SimpleMD names (startT, opt_method,
+    // ...), which are passed through unchanged. Edge case: setting both -hydrogen_mass and its
+    // alias -hmass lets the alias win here; accepted, that is not a real-world invocation.
+    {
+        auto& reg = ParameterRegistry::getInstance();
+        std::vector<std::pair<std::string, std::string>> remap; // (aliasKey, canonicalKey)
+        for (auto& [key, value] : md.items()) {
+            if (value.is_object())
+                continue;
+            std::string canon = reg.resolveAlias("simplemd", key);
+            if (!canon.empty() && canon != key)
+                remap.emplace_back(key, canon);
+        }
+        for (auto& [alias, canon] : remap)
+            md[canon] = md[alias];
+        for (auto& [alias, canon] : remap)
+            md.erase(alias);
+    }
+
     // Layer 5: system identity + runtime + method sub-scopes, shared with every other child.
     // When ConfSearch parallelises cycles (m_threads > 1) each MD must stay single-threaded to
     // avoid nested CxxThreadPools.
