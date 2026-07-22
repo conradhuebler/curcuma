@@ -43,7 +43,8 @@
 using curcuma::Molecule;
 
 ConfSearch::ConfSearch(const json& controller, bool silent)
-    : CurcumaMethod(ConfSearchJson, controller, silent)
+    : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("confsearch"), controller, silent)
+    , m_config("confsearch", controller)
 {
     UpdateController(controller);
 }
@@ -60,6 +61,13 @@ void ConfSearch::setFile(const std::string& filename)
     FileIterator file(Filename());
     while (!file.AtEnd()) {
         Molecule* mol = new Molecule(file.Next());
+        // Claude Generated (Jul 2026): seed the requested charge/spin onto the molecule. This is
+        // the ONLY channel that reaches a QM method (EnergyCalculator reads Mol::m_charge, never
+        // the controller), and an XYZ file carries no charge unless curcuma itself wrote it.
+        // Matches curcumaopt.cpp / simplemd.cpp / main.cpp -sp. LoadControlJson has already run
+        // (ctor -> UpdateController), so m_charge/m_spin are valid here.
+        mol->setCharge(m_charge);
+        mol->setSpin(m_spin);
         m_in_stack.push_back(mol);
         m_topo_matrix = mol->DistanceMatrix().second;
     }
@@ -74,29 +82,20 @@ void ConfSearch::start()
 {
     const std::string p = Basename();
 
-    // Claude Generated (Jun 2026): resolve the restart flag. "restart" is a registered PARAM of the
-    // confscan module, and ConfSearch is static-JSON (not in the registry), so the flat -restart flag
-    // is auto-routed to controller["confscan"]. Honor it from there (and -confsearch.restart via
-    // m_defaults, already read in LoadControlJson) so plain -restart enables ConfSearch checkpoints.
-    if (m_controller.contains("confscan") && m_controller["confscan"].is_object()
-        && m_controller["confscan"].contains("restart") && !m_controller["confscan"]["restart"].is_null())
-        m_do_restart = m_controller["confscan"].value("restart", m_do_restart);
-
+    // Claude Generated (Jul 2026): the MD configuration is layered, most general first.
+    // ConfSearch now owns its parameter names in the registry, so the flat CLI flags land in
+    // controller["confsearch"] and the old hand-picked rescue from controller["simplemd"] is gone.
+    //
+    // Layer 1: SimpleMD's own registry defaults.
     nlohmann::json md = ParameterRegistry::getInstance().getDefaultJson("simplemd");
 
-    // Forward user-specified parameters from the ConfSearch controller to the MD config.
-    // Only forward parameters that the user explicitly set (present in m_controller),
-    // not ConfSearch-specific defaults from ConfSearchJson (startT, endT, deltaT, etc.)
-    // which would corrupt SimpleMD settings (e.g., rmrottrans:0 disabling COM removal).
-    // Also forward from the global section (e.g., gpu settings for EnergyCalculator).
-    if (m_controller.contains("confsearch") && m_controller["confsearch"].is_object()) {
-        for (auto& [key, value] : m_controller["confsearch"].items()) {
-            if (value.is_object())
-                continue;
-            md[key] = value;
-        }
-    }
-    // Forward from global section (GPU, threads, etc.) — these are always user-specified
+    // Layer 2: everything the user aimed explicitly at the MD engine (-md.x / -simplemd.x).
+    // Merged wholesale now -- previously only 8 hand-listed keys were rescued from here, so
+    // -thermostat / -coupling / -rattle / -wall_* were silently dropped.
+    if (m_controller.contains("simplemd") && m_controller["simplemd"].is_object())
+        md.merge_patch(m_controller["simplemd"]);
+
+    // Layer 3: global section (gpu, threads, charge, spin, verbosity, method).
     if (m_controller.contains("global") && m_controller["global"].is_object()) {
         for (auto& [key, value] : m_controller["global"].items()) {
             if (!value.is_object() && key != "confsearch" && key != "confscan")
@@ -104,52 +103,58 @@ void ConfSearch::start()
         }
     }
 
+    // Layer 4: values the user set on the ConfSearch command itself. Most specific to the active
+    // command, so it wins over Layer 2 ("-md.thermostat berendsen -thermostat csvr" -> csvr).
+    // Nested objects (method sub-scopes) are handled by ChildConfig in Layer 5.
+    if (m_controller.contains("confsearch") && m_controller["confsearch"].is_object()) {
+        for (auto& [key, value] : m_controller["confsearch"].items()) {
+            if (value.is_object())
+                continue;
+            md[key] = value;
+        }
+    }
+
+    // Layer 5: system identity + runtime + method sub-scopes, shared with every other child.
+    // When ConfSearch parallelises cycles (m_threads > 1) each MD must stay single-threaded to
+    // avoid nested CxxThreadPools.
+    md.merge_patch(ChildConfig(m_md_method, (m_threads > 1) ? 1 : m_threads));
+
     // GPU + Multi-Threading Safety: Deactivate GPU when threads > 1 to prevent
     // GPU contention. Multiple MD instances cannot share the GPU simultaneously.
     if (m_threads > 1 && md.contains("gpu") && !md["gpu"].is_null() && md["gpu"] != "none") {
         CurcumaLogger::warn("GPU cannot be used with multiple threads simultaneously. Disabling GPU for this run.");
         md["gpu"] = "none";
+        m_gpu = "none";
     }
 
+    // Layer 6: ConfSearch's non-negotiable overrides.
     md["unique"] = true;
-    md["method"] = m_md_method; // MD exploration runs at the (cheap) md_method
     md["rmsd"] = m_rmsd;
-    // When ConfSearch itself runs multiple cycles in parallel (m_threads > 1),
-    // each individual MD simulation should run single-threaded to avoid nested
-    // thread pools (CxxThreadPool inside CxxThreadPool), which causes crashes.
-    md["threads"] = (m_threads > 1) ? 1 : m_threads;
     md["time_step"] = m_dT;
     md["max_time"] = m_time;
     md["restart"] = false;       // ConfSearch manages its own state, no MD restart
     md["norestart"] = true;
 
-    // Claude Generated (Jun 2026): forward the robustness controls into every MD run.
-    // These checks self-reference inside SimpleMD (start fragment count / start energy /
-    // target T / per-run inherited pool), so only the enable flags and windows need to be
-    // forwarded; no per-seed data required.
-    //
-    // IMPORTANT: these are SimpleMD-owned PARAMs, so a flat CLI flag (e.g. -topo_check,
-    // -temp_abort, -rmsd_mtd_freeze_inherited) is routed by the auto-router to
-    // controller["simplemd"], NOT controller["confsearch"]. ConfSearch does not otherwise
-    // consume controller["simplemd"], so we must read the user value from there (falling back
-    // to the ConfSearch default) -- otherwise the flag is silently ignored. The dotted form
-    // -confsearch.<key> still works via the ConfSearch member default.
-    json sd = (m_controller.contains("simplemd") && m_controller["simplemd"].is_object())
-        ? m_controller["simplemd"] : json::object();
-    md["topo_check"] = sd.value("topo_check", m_topo_check);
-    md["topo_check_interval"] = sd.value("topo_check_interval", m_topo_check_interval);
-    md["epot_abort"] = sd.value("epot_abort", m_epot_abort);
-    md["epot_abort_window"] = sd.value("epot_abort_window", m_epot_abort_window);
-    md["temp_abort"] = sd.value("temp_abort", m_temp_abort);
-    md["temp_abort_factor"] = sd.value("temp_abort_factor", m_temp_abort_factor);
-    md["temp_abort_delta"] = sd.value("temp_abort_delta", m_temp_abort_delta);
-    md["rmsd_mtd_max_height"] = sd.value("rmsd_mtd_max_height", m_rmsd_mtd_max_height);
-    md["rmsd_mtd_freeze_inherited"] = sd.value("rmsd_mtd_freeze_inherited", m_freeze_inherited);
+    // Robustness controls: these self-reference inside SimpleMD (start fragment count / start
+    // energy / target T / per-run inherited pool), so only the enable flags and windows are
+    // forwarded. temp_abort and rmsd_mtd_freeze_inherited default to ON in ConfSearch but OFF in
+    // SimpleMD -- pinned here so the divergence survives every layer above.
+    md["topo_check"] = m_topo_check;
+    md["topo_check_interval"] = m_topo_check_interval;
+    md["epot_abort"] = m_epot_abort;
+    md["epot_abort_window"] = m_epot_abort_window;
+    md["temp_abort"] = m_temp_abort;
+    md["temp_abort_factor"] = m_temp_abort_factor;
+    md["temp_abort_delta"] = m_temp_abort_delta;
+    md["rmsd_mtd_max_height"] = m_rmsd_mtd_max_height;
+    md["rmsd_mtd_freeze_inherited"] = m_freeze_inherited;
 
     // RMSD metadynamics is the default driver for conformational exploration.
     // The SimpleMD default is false, but ConfSearch enables it by default.
     // Only disable if the user explicitly passed -rmsd_mtd false.
-    if (!m_defaults.contains("rmsd_mtd") && !(m_controller.contains("rmsd_mtd")))
+    if (!(m_controller.contains("confsearch") && m_controller["confsearch"].contains("rmsd_mtd"))
+        && !(m_controller.contains("simplemd") && m_controller["simplemd"].contains("rmsd_mtd"))
+        && !m_controller.contains("rmsd_mtd"))
         md["rmsd_mtd"] = true;
 
     // Log ConfSearch configuration (visible at verbosity >= 1)
@@ -197,6 +202,19 @@ void ConfSearch::start()
         debug_file << md.dump(2) << std::endl;
         debug_file.close();
         CurcumaLogger::result_fmt("ConfSearch: Full MD parameters written to {}_md_params.json", p);
+
+        // Claude Generated (Jul 2026): the configs every non-MD child gets. Makes it verifiable
+        // that charge/spin/gpu and the method sub-scopes actually reach the optimisations and
+        // the ConfScan filters, which is exactly what the old ad-hoc {method,threads,gpu} JSONs
+        // silently dropped.
+        nlohmann::json children;
+        children["opt_md"] = ChildConfig(m_md_method, m_threads);
+        children["opt"] = ChildConfig(m_opt_method, m_threads);
+        children["filter"] = FilterConfig(m_opt_method, m_threads);
+        std::ofstream child_file(outputPath(p + "_child_params.json"));
+        child_file << children.dump(2) << std::endl;
+        child_file.close();
+        CurcumaLogger::result_fmt("ConfSearch: Child computation parameters written to {}_child_params.json", p);
     }
 
     if (md.value("rmsd_mtd", false)) {
@@ -249,11 +267,8 @@ void ConfSearch::start()
             if (first) { mol->writeXYZFile(outputPath(p + ".input.xyz")); first = false; }
             else          mol->appendXYZFile(outputPath(p + ".input.xyz"));
         }
-        nlohmann::json opt_init;
-        opt_init["method"] = m_md_method; // pre-optimization at md_method ("die md-methode macht die voroptimierung")
-        opt_init["threads"] = m_threads;
-        if (md.contains("gpu") && !md["gpu"].is_null())
-            opt_init["gpu"] = md["gpu"];
+        // pre-optimization at md_method ("die md-methode macht die voroptimierung")
+        nlohmann::json opt_init = ChildConfig(m_md_method, m_threads);
         PerformOptimisation(p + ".input", opt_init);
 
         for (auto* mol : m_in_stack) delete mol;
@@ -261,6 +276,8 @@ void ConfSearch::start()
         FileIterator opt_in(outputPath(p + ".input.opt.xyz"));
         while (!opt_in.AtEnd()) {
             Molecule mol = opt_in.Next();
+            mol.setCharge(m_charge);
+            mol.setSpin(m_spin);
             if (mol.AtomCount() > 0)
                 m_in_stack.push_back(new Molecule(mol));
         }
@@ -282,11 +299,7 @@ void ConfSearch::start()
                 if (first_opt) { mol->writeXYZFile(outputPath(p + ".input_mdopt.xyz")); first_opt = false; }
                 else              mol->appendXYZFile(outputPath(p + ".input_mdopt.xyz"));
             }
-            nlohmann::json opt_hi;
-            opt_hi["method"] = m_opt_method;
-            opt_hi["threads"] = m_threads;
-            if (md.contains("gpu") && !md["gpu"].is_null())
-                opt_hi["gpu"] = md["gpu"];
+            nlohmann::json opt_hi = ChildConfig(m_opt_method, m_threads);
             PerformOptimisation(p + ".input_mdopt", opt_hi);
 
             // Read back opt_method-optimized structures for energy reporting
@@ -294,6 +307,8 @@ void ConfSearch::start()
             FileIterator opt_hi_in(outputPath(p + ".input_mdopt.opt.xyz"));
             while (!opt_hi_in.AtEnd()) {
                 Molecule mol = opt_hi_in.Next();
+                mol.setCharge(m_charge);
+                mol.setSpin(m_spin);
                 if (mol.AtomCount() > 0)
                     opt_init_stack.push_back(new Molecule(mol));
             }
@@ -474,14 +489,10 @@ void ConfSearch::start()
             CurcumaLogger::warn_fmt("ConfSearch: T={}K -- no new MD runs and bias pool unchanged -- skipping Phase 2/3.",
                 m_currentT);
         } else {
-            nlohmann::json opt;
-            opt["method"] = m_md_method; // fast per-cycle optimization at md_method
-            // Single-threaded per optimization when ConfSearch parallelizes externally
-            opt["threads"] = (m_threads > 1) ? 1 : m_threads;
-            if (md.contains("gpu") && !md["gpu"].is_null())
-                opt["gpu"] = md["gpu"];
+            // Fast per-cycle optimization at md_method.
+            // Single-threaded per optimization when ConfSearch parallelizes externally.
+            nlohmann::json opt = ChildConfig(m_md_method, (m_threads > 1) ? 1 : m_threads);
             // Bias structures are the primary conformers discovered by RMSD-MTD.
-            // MD unique snapshots (confsearch.unique.xyz) are secondary and not used here.
             PerformOptimisation(p + ".bias", opt);
             int opt_count = 0;
             {
@@ -498,15 +509,9 @@ void ConfSearch::start()
         if (no_new_bias_structures) {
             CurcumaLogger::warn_fmt("ConfSearch: T={}K -- skipping Phase 3 (no new structures).", m_currentT);
         } else {
-            nlohmann::json scan = ConfSearchJson;
-            scan["rmsdmethod"] = "inertia";
-            scan["fewerFile"] = true;
-            // Single-threaded per ConfScan when ConfSearch parallelizes externally
-            scan["threads"] = (m_threads > 1) ? 1 : m_threads;
-            scan["energy_method"] = m_md_method; // "filter between": dedup at md level before the accurate re-opt
-            scan["max_energy"] = m_energy_window;
-            if (md.contains("gpu") && !md["gpu"].is_null())
-                scan["gpu"] = md["gpu"];
+            // "filter between": dedup at md level before the accurate re-opt.
+            // Single-threaded per ConfScan when ConfSearch parallelizes externally.
+            nlohmann::json scan = FilterConfig(m_md_method, (m_threads > 1) ? 1 : m_threads);
             PerformFilter(p + ".bias", scan);
             {
                 FileIterator rmsd_file(outputPath(p + ".bias.opt.accepted.xyz"));
@@ -531,11 +536,7 @@ void ConfSearch::start()
         // the md_method file -- the two PES are never mixed (see Phase 4).
         if (!no_new_bias_structures && m_opt_method != m_md_method) {
             CurcumaLogger::result("ConfSearch: === Phase 3b: High-Level Re-Optimisation (" + m_opt_method + ") ===");
-            nlohmann::json opt_hi;
-            opt_hi["method"] = m_opt_method;
-            opt_hi["threads"] = (m_threads > 1) ? 1 : m_threads;
-            if (md.contains("gpu") && !md["gpu"].is_null())
-                opt_hi["gpu"] = md["gpu"];
+            nlohmann::json opt_hi = ChildConfig(m_opt_method, (m_threads > 1) ? 1 : m_threads);
             // PerformOptimisation reads "<f>.xyz" and writes "<f>.opt.xyz".
             PerformOptimisation(p + ".bias.opt.accepted", opt_hi);
             int hi_count = 0;
@@ -570,6 +571,8 @@ void ConfSearch::start()
             FileIterator file(md_accepted);
             while (!file.AtEnd()) {
                 Molecule* mol = new Molecule(file.Next());
+                mol->setCharge(m_charge);
+                mol->setSpin(m_spin);
                 // Topology check: compare bond connectivity (0/1 matrix) against reference.
                 // A broken or formed bond changes >=2 entries by 1.0 -> sum >> 1e-4.
                 // Log the first mismatched pair to help distinguish GFN-FF artefacts from
@@ -694,6 +697,8 @@ void ConfSearch::start()
             FileIterator ofile(outputPath(p + ".bias.opt.accepted.opt.xyz"));
             while (!ofile.AtEnd()) {
                 Molecule* mol = new Molecule(ofile.Next());
+                mol->setCharge(m_charge);
+                mol->setSpin(m_spin);
                 auto topo_cur = mol->DistanceMatrix().second;
                 if ((m_topo_matrix - topo_cur).cwiseAbs().sum() > 1e-4) {
                     opt_rejected_topo++;
@@ -841,12 +846,8 @@ void ConfSearch::start()
         std::ofstream(outputPath(p + ".cumulative.opt.accepted.xyz")).close();
         CurcumaLogger::warn_fmt("ConfSearch: Empty result written to {}.cumulative.opt.accepted.xyz", p);
     } else {
-        nlohmann::json final_scan = ConfSearchJson;
-        final_scan["rmsdmethod"] = "inertia";
-        final_scan["fewerFile"] = true;
-        final_scan["threads"] = m_threads;
-        final_scan["energy_method"] = m_opt_method; // final ranking at the accurate level
-        final_scan["max_energy"] = m_energy_window;
+        // Final ranking at the accurate level (opt_method).
+        nlohmann::json final_scan = FilterConfig(m_opt_method, m_threads);
         PerformFilter(p + ".cumulative", final_scan);
         CurcumaLogger::success_fmt("ConfSearch: Final result in {}.cumulative.opt.accepted.xyz", p);
 
@@ -927,10 +928,9 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
     CurcumaLogger::result_fmt("ConfSearch: {} MD runs finished. Bias pool: {} structures.",
         index, m_bias_pool ? m_bias_pool->biasStructureCount() : 0);
 
-    std::string file = outputPath("confsearch.unique.xyz");
-    std::ofstream result_file;
-    result_file.open(file);
-    result_file.close();
+    // Claude Generated (Jul 2026): removed the empty "confsearch.unique.xyz" stub that was
+    // created here. It hardcoded the basename instead of Basename(), was always written empty
+    // and was never read back -- the bias pool is the only conformer source (see Phase 2).
 
     // Export bias pool structures to confsearch.bias.xyz (primary conformer source).
     // Only raw MD snapshots (persistent=false) are exported for optimization — persistent
@@ -983,6 +983,53 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
     CurcumaLogger::set_verbosity(m_verbosity);
 }
 
+nlohmann::json ConfSearch::ChildConfig(const std::string& method, int threads) const
+{
+    nlohmann::json cfg;
+    cfg["method"] = method;
+    cfg["threads"] = threads;
+    cfg["charge"] = m_charge;
+    cfg["spin"] = m_spin;
+    cfg["verbosity"] = m_verbosity;
+    if (!m_gpu.empty() && m_gpu != "none")
+        cfg["gpu"] = m_gpu;
+
+    // Method sub-scopes that EnergyCalculator re-merges before building the method. Mirrors
+    // kEnergyCalcMethodScopes in src/core/energycalculator.cpp -- without this,
+    // "curcuma -confsearch mol.xyz -method gfn2 -xtb.solvent water" never reached ANY child
+    // calculation: the sub-scope sits at controller["xtb"] and was simply never forwarded.
+    static const char* const scopes[] = { "gfnff", "eeq_solver", "xtb", "tblite", "ulysses",
+        "d3", "d4", "uff", "qmdff", "eht", "orca" };
+    for (const char* s : scopes) {
+        if (m_controller.contains(s) && m_controller[s].is_object())
+            cfg[s] = m_controller[s];
+    }
+    return cfg;
+}
+
+nlohmann::json ConfSearch::FilterConfig(const std::string& energy_method, int threads) const
+{
+    nlohmann::json scan = ParameterRegistry::getInstance().getDefaultJson("confscan");
+    scan.merge_patch(ChildConfig(energy_method, threads)); // deep merge keeps the sub-scopes
+
+    // ConfScan's "method" is the RMSD ALIGNMENT method (default "subspace"), NOT an energy
+    // method -- ChildConfig just wrote the energy method into it, so take it back.
+    scan["method"] = "subspace";
+    scan["energy_method"] = energy_method; // the real energy channel (ConfScan::LoadControlJson)
+    scan["rmsdmethod"] = "inertia";        // cross-module alias -> rmsd.method (see rmsd.h)
+    scan["fewer_file"] = true;
+    scan["rmsd"] = m_rmsd;                 // the user's dedup threshold, not confscan's own 0.9
+    scan["max_energy"] = m_energy_window;
+    // ConfScan's own "restart" default is TRUE. A nested filter must never try to resume a
+    // stale scan; the old code only got this right by accident (it inherited ConfSearch's false).
+    scan["restart"] = false;
+    // The input was just optimised at exactly this energy_method, so recomputing every energy is
+    // pure waste. Safe because the pools handed to PerformFilter are homogeneous in level of
+    // theory -- see the cumulative-append sites in start().
+    scan["reuse_energies"] = true;
+    return scan;
+}
+
 std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann::json& parameter)
 {
     std::string basename = f;
@@ -1002,6 +1049,11 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
     FileIterator file(input_file);
     while (!file.AtEnd()) {
         Molecule mol = file.Next();
+        // Claude Generated (Jul 2026): the single choke point covering ALL four optimisation
+        // sites. OptimizationDispatcher never applies a config charge (its context.charge is
+        // dead storage), so without this every optimisation ran the ion as neutral.
+        mol.setCharge(m_charge);
+        mol.setSpin(m_spin);
         if (mol.AtomCount() > 0)
             molecules.push_back(std::move(mol));
     }
@@ -1074,6 +1126,14 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
 std::string ConfSearch::PerformFilter(const std::string& f, const nlohmann::json& parameter)
 {
     ConfScan* scan = new ConfScan(parameter, false);
+    // Claude Generated (Jul 2026): propagate the BMT output directory to the nested ConfScan
+    // instance. Without this, ConfScan's own outputPath() resolves without the BMT prefix while
+    // ConfSearch reads the accepted file back through its (correctly prefixed) outputPath(),
+    // so the two paths never agree -- ConfScan writes "<basename>.accepted.xyz" into the CWD,
+    // ConfSearch looks for "<bmt_dir>/<basename>.accepted.xyz" and crashes with "File not found"
+    // (uncaught std::runtime_error -> terminate). Only manifests in default BMT mode (-no_bmt
+    // sidesteps it, both sides resolve to the bare filename).
+    scan->setOutputDir(OutputDir());
     scan->setFileName(outputPath(f + ".opt.xyz"));
     scan->start();
     // Claude Generated (Jun 2026): harvest the symmetry/atom-permutation rules ConfScan found
@@ -1338,6 +1398,10 @@ Molecule ConfSearch::jsonToMol(const std::vector<int>& elements, const nlohmann:
         m.addPair({ elements[i], Position(g(i, 0), g(i, 1), g(i, 2)) });
     m.setEnergy(entry.value("energy", 0.0));
     m.setName(entry.value("name", std::string("")));
+    // Claude Generated (Jul 2026): the checkpoint stores geometry + energy only, so a resumed
+    // run would otherwise fall back to charge 0 / spin 0 for every restored structure.
+    m.setCharge(m_charge);
+    m.setSpin(m_spin);
     return m;
 }
 
@@ -1515,53 +1579,58 @@ void ConfSearch::ReadControlFile()
 
 void ConfSearch::LoadControlJson()
 {
-    m_method = Json2KeyWord<std::string>(m_defaults, "method");
+    // Claude Generated (Jul 2026): registry-backed reads via ConfigManager. It resolves the
+    // intra-module aliases declared in the PARAM block (dt -> time_step, velo ->
+    // initial_velocity_scale, Spin -> spin, ...), which Json2KeyWord(m_defaults, ...) cannot do.
+    m_method = m_config.get<std::string>("method");
     // Claude Generated (Jun 2026): dual-method exploration/refinement. Empty values
     // fall back to "method", so a single -method run is unchanged.
-    m_md_method = Json2KeyWord<std::string>(m_defaults, "md_method");
+    m_md_method = m_config.get<std::string>("md_method");
     if (m_md_method.empty())
         m_md_method = m_method;
-    m_opt_method = Json2KeyWord<std::string>(m_defaults, "opt_method");
+    m_opt_method = m_config.get<std::string>("opt_method");
     if (m_opt_method.empty())
         m_opt_method = m_method;
-    m_thermostat = Json2KeyWord<std::string>(m_defaults, "thermostat");
-    m_rattle = Json2KeyWord<bool>(m_defaults, "rattle");
-    m_spin = Json2KeyWord<int>(m_defaults, "spin");
-    m_charge = Json2KeyWord<int>(m_defaults, "charge");
-    //    m_single_step = Json2KeyWord<double>(m_defaults, "dT"); // * fs2amu;
-    m_time = Json2KeyWord<double>(m_defaults, "time");
-    m_startT = Json2KeyWord<double>(m_defaults, "startT");
-    m_endT = Json2KeyWord<double>(m_defaults, "endT");
-    m_deltaT = Json2KeyWord<double>(m_defaults, "deltaT");
-    m_repeat = Json2KeyWord<int>(m_defaults, "repeat");
-    m_rmsd = Json2KeyWord<double>(m_defaults, "rmsd");
-    m_threads = Json2KeyWord<int>(m_defaults, "threads");
-    m_energy_window = Json2KeyWord<double>(m_defaults, "energy_window");
-    m_dT = Json2KeyWord<double>(m_defaults, "dT");
-    m_max_bias_export = Json2KeyWord<int>(m_defaults, "max_bias_export");
+    m_thermostat = m_config.get<std::string>("thermostat");
+    m_spin = m_config.get<int>("spin");
+    m_charge = m_config.get<int>("charge");
+    // Claude Generated (Jul 2026): GPU backend, forwarded to every child computation via
+    // ChildConfig(). "gpu" is a global CLI parameter, so ConfigManager picks it up from the
+    // global section even when it was not given as -confsearch.gpu.
+    m_gpu = m_config.get<std::string>("gpu", std::string("none"));
+    m_time = m_config.get<double>("time");
+    m_startT = m_config.get<double>("startT");
+    m_endT = m_config.get<double>("endT");
+    m_deltaT = m_config.get<double>("deltaT");
+    m_repeat = m_config.get<int>("repeat");
+    m_rmsd = m_config.get<double>("rmsd");
+    m_threads = m_config.get<int>("threads");
+    m_energy_window = m_config.get<double>("energy_window");
+    m_dT = m_config.get<double>("time_step");
+    m_max_bias_export = m_config.get<int>("max_bias_export");
     // Claude Generated (Jun 2026): efficiency/robustness controls
-    m_rattle_threshold_temp = Json2KeyWord<double>(m_defaults, "rattle_threshold_temp");
-    m_rattle_hot_mode = Json2KeyWord<int>(m_defaults, "rattle_hot_mode");
-    m_topo_check = Json2KeyWord<bool>(m_defaults, "topo_check");
-    m_topo_check_interval = Json2KeyWord<int>(m_defaults, "topo_check_interval");
-    m_seed_energy_window = Json2KeyWord<double>(m_defaults, "seed_energy_window");
-    m_seed_rank = Json2KeyWord<int>(m_defaults, "seed_rank");
-    m_seed_window_schedule = Json2KeyWord<std::string>(m_defaults, "seed_window_schedule");
-    m_seed_window_decay = Json2KeyWord<double>(m_defaults, "seed_window_decay");
-    m_epot_abort = Json2KeyWord<bool>(m_defaults, "epot_abort");
-    m_epot_abort_window = Json2KeyWord<double>(m_defaults, "epot_abort_window");
-    m_temp_abort = Json2KeyWord<bool>(m_defaults, "temp_abort");
-    m_temp_abort_factor = Json2KeyWord<double>(m_defaults, "temp_abort_factor");
-    m_temp_abort_delta = Json2KeyWord<double>(m_defaults, "temp_abort_delta");
-    m_rmsd_mtd_max_height = Json2KeyWord<int>(m_defaults, "rmsd_mtd_max_height");
-    m_freeze_inherited = Json2KeyWord<bool>(m_defaults, "rmsd_mtd_freeze_inherited");
-    m_opt_feedback_bias = Json2KeyWord<bool>(m_defaults, "opt_feedback_bias");
-    m_opt_feedback_height = Json2KeyWord<int>(m_defaults, "opt_feedback_height");
-    m_opt_feedback_prune_snapshots = Json2KeyWord<bool>(m_defaults, "opt_feedback_prune_snapshots");
-    m_mtd_permutation = Json2KeyWord<bool>(m_defaults, "mtd_permutation");
-    m_bias_calibration = Json2KeyWord<std::string>(m_defaults, "bias_calibration");
-    m_bias_couple_factor = Json2KeyWord<double>(m_defaults, "bias_couple_factor");
-    m_bias_scale_mode = Json2KeyWord<std::string>(m_defaults, "bias_scale_mode");
-    m_bias_energy_tol = Json2KeyWord<double>(m_defaults, "bias_energy_tol");
-    m_do_restart = Json2KeyWord<bool>(m_defaults, "restart");
+    m_rattle_threshold_temp = m_config.get<double>("rattle_threshold_temp");
+    m_rattle_hot_mode = m_config.get<int>("rattle_hot_mode");
+    m_topo_check = m_config.get<bool>("topo_check");
+    m_topo_check_interval = m_config.get<int>("topo_check_interval");
+    m_seed_energy_window = m_config.get<double>("seed_energy_window");
+    m_seed_rank = m_config.get<int>("seed_rank");
+    m_seed_window_schedule = m_config.get<std::string>("seed_window_schedule");
+    m_seed_window_decay = m_config.get<double>("seed_window_decay");
+    m_epot_abort = m_config.get<bool>("epot_abort");
+    m_epot_abort_window = m_config.get<double>("epot_abort_window");
+    m_temp_abort = m_config.get<bool>("temp_abort");
+    m_temp_abort_factor = m_config.get<double>("temp_abort_factor");
+    m_temp_abort_delta = m_config.get<double>("temp_abort_delta");
+    m_rmsd_mtd_max_height = m_config.get<int>("rmsd_mtd_max_height");
+    m_freeze_inherited = m_config.get<bool>("rmsd_mtd_freeze_inherited");
+    m_opt_feedback_bias = m_config.get<bool>("opt_feedback_bias");
+    m_opt_feedback_height = m_config.get<int>("opt_feedback_height");
+    m_opt_feedback_prune_snapshots = m_config.get<bool>("opt_feedback_prune_snapshots");
+    m_mtd_permutation = m_config.get<bool>("mtd_permutation");
+    m_bias_calibration = m_config.get<std::string>("bias_calibration");
+    m_bias_couple_factor = m_config.get<double>("bias_couple_factor");
+    m_bias_scale_mode = m_config.get<std::string>("bias_scale_mode");
+    m_bias_energy_tol = m_config.get<double>("bias_energy_tol");
+    m_do_restart = m_config.get<bool>("restart");
 }

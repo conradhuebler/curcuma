@@ -36,100 +36,10 @@
 #include "src/capabilities/shared_bias_pool.h"
 #include "src/capabilities/optimizer_factory.h"
 #include "src/core/energycalculator.h"
+#include "src/core/parameter_macros.h"
+#include "src/core/parameter_registry.h"
+#include "src/core/config_manager.h"
 using namespace curcuma;
-static const nlohmann::json ConfSearchJson{
-    { "method", "gfnff" },
-    // Claude Generated (Jun 2026): separate exploration / refinement methods.
-    // Empty -> fall back to "method". md_method drives MD + pre-optimization;
-    // opt_method drives the accurate per-cycle re-optimization + final ranking.
-    { "md_method", "" },
-    { "opt_method", "" },
-    // Claude Generated (Jun 2026): opt-in restart. When true, ConfSearch writes a self-contained
-    // checkpoint (bias pool + cumulative + seeds + energies + cycle progress) after every sub-phase
-    // and, on the next invocation with -restart, resumes from it. The checkpoint is written into the
-    // BMT dir AND copied back to the start directory as "<basename>.confsearch.restart.json".
-    { "restart", false },
-    { "startT", 600 },
-    { "endT", 300 },
-    { "deltaT", 50 },
-    { "repeat", 4 },
-    { "time", 2000 }, // 2 ps
-    { "rmsd", 1.25 },
-    { "threads", 1 },
-    { "energy_window", 100 },
-    { "writeXYZ", true },
-    { "printOutput", true },
-    { "MaxTime", 5000 },
-    { "T", 298.15 },
-    { "dt", 1 }, // single step in fs
-    { "rm_COM", 100 }, // remove translation and rotation every x fs
-    { "charge", 0 },
-    { "Spin", 0 },
-    { "rmrottrans", 0 },
-    { "nocenter", false },
-    { "dump", 50 },
-    { "print", 1000 },
-    { "unique", false },
-    { "rmsd", 1.5 },
-    { "opt", false },
-    { "hmass", 1 },
-    { "velo", 1 },
-    { "rescue", false },
-    { "coupling", 10 },
-    { "MaxTopoDiff", 15 },
-    { "impuls_scaling", 0.75 },
-    { "writeinit", false },
-    { "initfile", "none" },
-    { "norestart", false },
-    { "writerestart", 1000 },
-    { "rattle", false },
-    { "rattle_tolerance", 1e-2 },
-    { "rattle_maxiter", 10 },
-    { "thermostat", "csvr" },
-    { "respa", 1 },
-    { "dipole", false },
-    { "seed", -1 },
-    { "max_bias_export", 1000 },
-    // Claude Generated (Jun 2026): ConfSearch efficiency/robustness controls
-    { "rattle_threshold_temp", 400 }, // K; at/above this cycle temperature RATTLE is auto-enabled
-    { "rattle_hot_mode", 2 }, // RATTLE mode used above the threshold (2 = constrain X-H only)
-    { "topo_check", false }, // opt-in: abort an MD run when the molecule fragments (GetFragments grows)
-    { "topo_check_interval", 0 }, // steps between topology checks (0 -> use the MD dump frequency)
-    { "seed_rank", 1 }, // max lowest-energy seeds per cycle (0 = all in energy window; 1 = only the most stable)
-    { "seed_energy_window", 50 }, // kJ/mol vs. the running global minimum; selects next-cycle MD seeds
-    { "seed_window_schedule", "static" }, // "static" or "exp" (funnel: window shrinks each cycle)
-    { "seed_window_decay", 0.5 }, // per-cycle multiplier for the exp funnel schedule
-    { "epot_abort", false }, // opt-in: abort an MD run when the running-mean potential climbs too high
-    { "epot_abort_window", 250 }, // kJ/mol above the run's starting energy (must exceed thermal baseline)
-    { "temp_abort", true }, // ON by default: abort an MD run when the running-mean temperature runs away (bias-heating safety net)
-    { "temp_abort_factor", 1.5 }, // abort if <T> > factor*T (<= 0 disables this threshold)
-    { "temp_abort_delta", 300 }, // abort if <T> > T + delta [K] (<= 0 disables this threshold)
-    { "opt_feedback_bias", true }, // deposit optimised minima back into the shared bias pool
-    { "opt_feedback_height", 5 }, // hill counter (height = k*counter) assigned to fed-back minima
-    { "opt_feedback_prune_snapshots", false }, // remove raw MD snapshots after feeding back optimised minima (opt-in: cleaner pool but weaker bias -> shallower minima)
-    { "mtd_permutation", true }, // feed ConfScan's symmetry reorder rules into the RMSD-MTD bias (smooth, sum-over-images)
-    { "bias_calibration", "off" }, // adaptive MTD width: off | couple | cluster; experimental
-    { "bias_couple_factor", 1.0 }, // couple: hill half-max at factor*rmsd -> alpha = ln2/(factor*rmsd)^2
-    { "bias_scale_mode", "global" }, // global | weighted (flexibility/RMSF-weighted RMSD in the MTD bias); experimental
-    { "bias_energy_tol", 4.0 }, // kJ/mol: |dE| tolerance when assigning optimised structures to the same minimum
-    { "rmsd_mtd_max_height", 0 }, // cap on the per-structure hill counter in the bias force (0 = unbounded); opt-in tighter temperature control
-    { "rmsd_mtd_freeze_inherited", true }, // ON by default: freeze inherited bias heights each run (only new deposits grow) -> bounds cross-run heating, best conformer yield
-    { "cleanenergy", false },
-    { "wall", "none" }, // can be spheric or rect
-    { "wall_type", "logfermi" }, // can be logfermi or harmonic
-    { "wall_spheric_radius", 0 },
-    { "wall_xl", 0 },
-    { "wall_yl", 0 },
-    { "wall_zl", 0 },
-    { "wall_x_min", 0 },
-    { "wall_x_max", 0 },
-    { "wall_y_min", 0 },
-    { "wall_y_max", 0 },
-    { "wall_z_min", 0 },
-    { "wall_z_max", 0 },
-    { "wall_temp", 298.15 },
-    { "wall_beta", 6 }
-};
 
 // Claude Generated (Apr 2026): Thread class for parallel geometry optimization
 class OptThread : public CxxThread {
@@ -184,10 +94,7 @@ public:
     virtual void printHelp() const override
     {
         std::cout << "Usage: curcuma -confsearch input.xyz [parameters]\n\n";
-        std::cout << "Conformational Search Parameters (from ConfSearchJson):\n";
-        for (auto& el : ConfSearchJson.items()) {
-            std::cout << "  -" << el.key() << "  (default: " << el.value() << ")\n";
-        }
+        ParameterRegistry::getInstance().printHelp("confsearch");
         std::cout << "\nRMSD-MTD is enabled by default. Use -rmsd_mtd false to disable.\n";
     }
 
@@ -197,6 +104,19 @@ private:
     std::string PerformOptimisation(const std::string& filename, const nlohmann::json& parameter);
 
     std::string PerformFilter(const std::string& filename, const nlohmann::json& parameter);
+
+    /* Claude Generated (Jul 2026): single source of truth for every child computation.
+     * Every MD run, every optimisation batch and every nested ConfScan draws its config from
+     * here, so the system identity (charge/spin), the runtime settings (threads/gpu/verbosity)
+     * and the method sub-scopes (gfnff/xtb/tblite/...) can never silently differ between phases.
+     * Replaces the ad-hoc {method, threads, gpu} JSONs that dropped charge, spin and solvation. */
+    nlohmann::json ChildConfig(const std::string& method, int threads) const;
+
+    /* Claude Generated (Jul 2026): config for a nested ConfScan filter pass. Built from the
+     * confscan registry defaults plus explicit, intentional overrides -- NOT from ConfSearch's
+     * own defaults, which used to leak "method":"gfnff" into ConfScan's RMSD-alignment parameter
+     * and pinned the dedup threshold to a ConfSearch default instead of the user's -rmsd. */
+    nlohmann::json FilterConfig(const std::string& energy_method, int threads) const;
 
     /* Claude Generated (Jun 2026): experimental adaptive bias calibration (Phase C). Clusters the
      * cycle's optimised structures onto the accepted distinct minima (best-fit RMSD + cached
@@ -262,20 +182,26 @@ private:
     /* Read Controller has to be implemented for all */
     virtual void LoadControlJson() override;
 
+    // Claude Generated (Jul 2026): registry-backed parameter access. ConfigManager resolves
+    // intra-module aliases (config_manager.cpp:95), which plain Json2KeyWord(m_defaults, ...)
+    // does not -- without it "-dt", "-velo", "-dump" etc. would silently stop working after
+    // the canonical names were aligned with SimpleMD.
+    ConfigManager m_config;
+
     StringList m_error_list;
     std::string m_method, m_md_method, m_opt_method, m_thermostat;
-    bool m_silent = true, m_rattle = true;
+    bool m_silent = true;
     double m_dT = 4;
     std::vector<Molecule*> m_in_stack, m_final_stack;
     int m_spin = 0, m_charge = 0, m_repeat = 5, m_threads = 1, m_max_bias_export = 1000;
     double m_time = 1e4, m_startT = 500, m_endT = 300, m_deltaT = 50, m_currentT = 0, m_rmsd = 1.25, m_energy_window = 100;
-    // Claude Generated (Jun 2026): efficiency/robustness controls (see ConfSearchJson for meaning)
+    // Claude Generated (Jun 2026): efficiency/robustness controls (see the PARAM block below for meaning)
     double m_rattle_threshold_temp = 400, m_seed_energy_window = 50, m_seed_window_decay = 0.5, m_epot_abort_window = 250;
     int m_seed_rank = 1; // max lowest-energy seeds per cycle (0 = all in window; 1 = only most stable)
     int m_rattle_hot_mode = 2, m_topo_check_interval = 0, m_opt_feedback_height = 5;
     bool m_topo_check = false, m_epot_abort = false, m_opt_feedback_bias = true, m_opt_feedback_prune_snapshots = false, m_mtd_permutation = true;
     // Claude Generated (Jun 2026): temperature runaway abort + cross-run bias-height freeze.
-    // ON by default for ConfSearch (bias-heating safety net + best conformer yield); see ConfSearchJson.
+    // ON by default for ConfSearch (bias-heating safety net + best conformer yield); see the PARAM block below.
     bool m_temp_abort = true, m_freeze_inherited = true;
     // Claude Generated (Jun 2026): initial energy at opt_method (dual-mode only)
     double m_initial_energy_opt = std::numeric_limits<double>::infinity();
@@ -297,4 +223,114 @@ private:
     std::string m_cumulative_file;              // path to the cumulative output (set in start())
     std::vector<int> m_elements;                // atomic numbers of the system (set after pre-opt / on resume)
     Molecule m_topo_ref;                        // reference structure defining m_topo_matrix (persisted)
+    std::string m_gpu = "none";                 // Claude Generated (Jul 2026): GPU backend, forwarded to every child
+
+    // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
+    // Claude Generated (Jul 2026): ConfSearch migrated off the static ConfSearchJson literal.
+    // Owning these names is what stops main.cpp's auto-router from moving -opt_method into
+    // polymerbuild, -thermostat/-coupling/-rattle/-wall_* into simplemd and -restart into
+    // confscan. See docs/CONFSEARCH_DUAL_METHOD.md.
+    //
+    // DELIBERATELY NOT REGISTERED (they are registered by NO module today; claiming them here
+    // would steal them from "-md", where SimpleMD does consume them):
+    //   unique, rescue, respa, dipole, cleanenergy, MaxTopoDiff, impuls_scaling,
+    //   rattle_tolerance, printOutput, wall_xl/yl/zl
+    // They still work as unregistered flat flags and are forwarded to the md json as before.
+    //
+    // Every Double MUST carry a decimal-point literal: the generator emits the token verbatim,
+    // an integer literal makes std::any hold int, getDefaultJson's any_cast<double> throws and
+    // the key is SILENTLY dropped from the defaults -> Json2KeyWord then throws an uncaught -1.
+    BEGIN_PARAMETER_DEFINITION(confsearch)
+
+    // --- Methods ---
+    PARAM(method, String, "gfnff", "Energy method used for both phases unless md_method or opt_method override it.", "Methods", {})
+    PARAM(md_method, String, "", "Cheap method driving MD exploration and pre-optimisation. Empty falls back to method.", "Methods", {})
+    PARAM(opt_method, String, "", "Accurate method for the per-cycle re-optimisation and the final ranking. Empty falls back to method.", "Methods", {})
+
+    // --- System ---
+    PARAM(charge, Int, 0, "Total charge of the system. Applied to every MD run, every optimisation and every ConfScan energy.", "System", {})
+    PARAM(spin, Int, 0, "Total spin of the system.", "System", {"Spin"})
+    PARAM(threads, Int, 1, "Number of ConfSearch cycles run in parallel. Each child MD or optimisation then runs single-threaded.", "System", {})
+
+    // --- Search Schedule ---
+    PARAM(startT, Double, 600.0, "Temperature of the first exploration cycle in Kelvin.", "Schedule", {})
+    PARAM(endT, Double, 300.0, "Temperature of the last exploration cycle in Kelvin.", "Schedule", {})
+    PARAM(deltaT, Double, 50.0, "Temperature decrement between cycles in Kelvin.", "Schedule", {})
+    PARAM(repeat, Int, 4, "Independent MD runs started from every seed structure per cycle.", "Schedule", {})
+    PARAM(time, Double, 2000.0, "Length of each MD run in femtoseconds.", "Schedule", {"max_time", "MaxTime"})
+
+    // --- Filtering ---
+    PARAM(rmsd, Double, 1.25, "RMSD threshold in Angstrom used to deduplicate conformers and to size the MTD hills.", "Filtering", {})
+    PARAM(energy_window, Double, 100.0, "Energy window in kJ/mol above the running minimum for keeping conformers.", "Filtering", {})
+    PARAM(seed_rank, Int, 1, "Maximum number of lowest-energy seeds carried into the next cycle. 0 keeps every structure inside seed_energy_window.", "Filtering", {})
+    PARAM(seed_energy_window, Double, 50.0, "Energy window in kJ/mol versus the running global minimum for selecting next-cycle MD seeds.", "Filtering", {})
+    PARAM(seed_window_schedule, String, "static", "Seed window schedule: static or exp. exp shrinks the window each cycle by seed_window_decay.", "Filtering", {})
+    PARAM(seed_window_decay, Double, 0.5, "Per-cycle multiplier applied to seed_energy_window in the exp schedule.", "Filtering", {})
+
+    // --- Molecular Dynamics (canonical SimpleMD names, forwarded to the md json) ---
+    PARAM(time_step, Double, 1.0, "MD integration time step in femtoseconds.", "MD", {"dt"})
+    PARAM(thermostat, String, "csvr", "Thermostat: berendsen, andersen, nosehover, csvr or none.", "MD", {})
+    PARAM(coupling, Double, 10.0, "Thermostat coupling time in femtoseconds.", "MD", {})
+    PARAM(seed, Int, -1, "Random seed for the MD runs. -1 uses the clock.", "MD", {})
+    PARAM(remove_com_motion, Double, 100.0, "Remove translation and rotation every N femtoseconds.", "MD", {"rm_COM"})
+    PARAM(remove_com_mode, Int, 1, "Removal mode: 0 none, 1 translation, 2 rotation, 3 both.", "MD", {"rmrottrans"})
+    PARAM(no_center, Bool, false, "Disable centering of the molecule at the origin.", "MD", {"nocenter"})
+    PARAM(hydrogen_mass, Int, 1, "Hydrogen mass repartitioning factor.", "MD", {"hmass"})
+    PARAM(initial_velocity_scale, Double, 1.0, "Scaling factor applied to the initial velocities.", "MD", {"velo"})
+
+    // --- RATTLE ---
+    PARAM(rattle, Int, 0, "RATTLE constraints in the baseline cycles: 0 off, 1 all bonds, 2 X-H only.", "RATTLE", {})
+    PARAM(rattle_max_iterations, Int, 100, "Maximum RATTLE iterations per step.", "RATTLE", {"rattle_maxiter"})
+    PARAM(rattle_threshold_temp, Double, 400.0, "Cycle temperature in Kelvin at or above which RATTLE is switched on automatically.", "RATTLE", {})
+    PARAM(rattle_hot_mode, Int, 2, "RATTLE mode used above rattle_threshold_temp. 2 constrains X-H bonds only.", "RATTLE", {})
+
+    // --- MD Output ---
+    PARAM(dump_frequency, Int, 50, "Save MD coordinates every N steps.", "MD Output", {"dump"})
+    PARAM(print_frequency, Int, 1000, "Print MD status every N steps.", "MD Output", {"print"})
+    PARAM(write_xyz, Bool, true, "Write MD trajectories to XYZ files.", "MD Output", {"writeXYZ"})
+    PARAM(write_initial_state, Bool, false, "Write the MD initial conditions to a .init.json file.", "MD Output", {"writeinit"})
+    PARAM(restart_file, String, "none", "SimpleMD restart file used to seed the MD runs.", "MD Output", {"initfile"})
+    PARAM(write_restart_frequency, Int, 1000, "Write the SimpleMD restart file every N steps.", "MD Output", {"writerestart"})
+    PARAM(no_restart, Bool, false, "Disable automatic SimpleMD restart loading. ConfSearch manages its own checkpoint and forces this on regardless of the value here.", "MD Output", {"norestart"})
+
+    // --- Robustness Gates ---
+    PARAM(topo_check, Bool, false, "Abort an MD run when the molecule fragments.", "Robustness", {})
+    PARAM(topo_check_interval, Int, 0, "Steps between topology checks. 0 uses the MD dump frequency.", "Robustness", {})
+    PARAM(epot_abort, Bool, false, "Abort an MD run when the running-mean potential climbs past epot_abort_window.", "Robustness", {})
+    PARAM(epot_abort_window, Double, 250.0, "Energy window in kJ/mol above the run start energy for epot_abort.", "Robustness", {})
+    PARAM(temp_abort, Bool, true, "Abort an MD run when the running-mean temperature runs away. On by default as a bias-heating safety net.", "Robustness", {})
+    PARAM(temp_abort_factor, Double, 1.5, "Abort when the mean temperature exceeds this factor times the target. Values at or below 0 disable the check.", "Robustness", {})
+    PARAM(temp_abort_delta, Double, 300.0, "Abort when the mean temperature exceeds the target plus this many Kelvin. Values at or below 0 disable the check.", "Robustness", {})
+
+    // --- Metadynamics Bias ---
+    PARAM(max_bias_export, Int, 1000, "Maximum number of bias structures written out per cycle.", "Bias", {})
+    PARAM(rmsd_mtd_max_height, Int, 0, "Cap on the per-structure hill counter in the bias force. 0 is unbounded.", "Bias", {})
+    PARAM(rmsd_mtd_freeze_inherited, Bool, true, "Freeze inherited bias heights each run so only new deposits grow. On by default to bound cross-run heating.", "Bias", {})
+    PARAM(opt_feedback_bias, Bool, true, "Deposit optimised minima back into the shared bias pool.", "Bias", {})
+    PARAM(opt_feedback_height, Int, 5, "Hill counter assigned to fed-back optimised minima.", "Bias", {})
+    PARAM(opt_feedback_prune_snapshots, Bool, false, "Remove raw MD snapshots after feeding back optimised minima.", "Bias", {})
+    PARAM(mtd_permutation, Bool, true, "Feed the symmetry reorder rules found by ConfScan into the RMSD-MTD bias.", "Bias", {})
+    PARAM(bias_calibration, String, "off", "Adaptive MTD hill width: off, couple or cluster. Experimental.", "Bias", {})
+    PARAM(bias_couple_factor, Double, 1.0, "couple mode: place the hill half-max at this factor times rmsd.", "Bias", {})
+    PARAM(bias_scale_mode, String, "global", "MTD RMSD scaling: global or weighted. Experimental.", "Bias", {})
+    PARAM(bias_energy_tol, Double, 4.0, "Energy tolerance in kJ/mol when assigning optimised structures to the same minimum.", "Bias", {})
+
+    // --- Wall Potentials (canonical SimpleMD semantics: wall_type is the GEOMETRY) ---
+    PARAM(wall_type, String, "none", "Wall geometry: none, spheric or rect.", "Walls", {"wall"})
+    PARAM(wall_potential, String, "harmonic", "Wall potential function: logfermi or harmonic.", "Walls", {})
+    PARAM(wall_radius, Double, 0.0, "Radius of the spherical wall in Angstrom. Auto-sized when 0.", "Walls", {"wall_spheric_radius"})
+    PARAM(wall_temp, Double, 298.15, "Wall strength expressed as a temperature in Kelvin.", "Walls", {})
+    PARAM(wall_beta, Double, 6.0, "Steepness parameter of the wall potential.", "Walls", {})
+    PARAM(wall_x_min, Double, 0.0, "Lower x boundary of the rectangular wall in Angstrom.", "Walls", {})
+    PARAM(wall_x_max, Double, 0.0, "Upper x boundary of the rectangular wall in Angstrom.", "Walls", {})
+    PARAM(wall_y_min, Double, 0.0, "Lower y boundary of the rectangular wall in Angstrom.", "Walls", {})
+    PARAM(wall_y_max, Double, 0.0, "Upper y boundary of the rectangular wall in Angstrom.", "Walls", {})
+    PARAM(wall_z_min, Double, 0.0, "Lower z boundary of the rectangular wall in Angstrom.", "Walls", {})
+    PARAM(wall_z_max, Double, 0.0, "Upper z boundary of the rectangular wall in Angstrom.", "Walls", {})
+
+    // --- Restart ---
+    PARAM(restart, Bool, false, "Write a self-contained checkpoint after every sub-phase and resume from it on the next invocation.", "Restart", {})
+
+    END_PARAMETER_DEFINITION
+    // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
 };
