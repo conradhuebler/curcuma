@@ -4932,16 +4932,24 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     //
     // Gated on imetal>0, so metal-free bonds are bit-identical to before.
     // ========================================================================
+    int metal_bbtyp = 0;  // 0 = not a metal bond; 5/6/7 set inside the branch below
     if (imetal1 > 0 || imetal2 > 0) {
         // --- Fortran metal bond type (gfnff_ini.f90:1120-1123) ---
-        // btyp 5 = M-X, 6 = M-eta, 7 = TM-TM. eta (6) additionally needs
-        // itag(atom)==-1 && piadr(atom)>0 for the non-metal partner. topo.itag is now
-        // populated (computeEtaCoordination, Jul 2026) so this could be wired here, but
-        // it is deliberately left as M-X for now: promoting to eta changes the metal
-        // bond strength (bstren(6)=0.78) and would need its own validation against the
-        // reference. An eta bond therefore still falls back to M-X (residual).
-        int metal_bbtyp = 5; // M-X
+        // btyp 5 = M-X, 6 = M-eta, 7 = TM-TM, assigned in that order so eta (6)
+        // overrides TM-TM (7) when it fires (mutually exclusive in practice — an
+        // eta partner is a non-metal pi ligand). eta needs one TM (imetal==2) and
+        // the OTHER atom eta-coordinated (itag==-1) and in a pi system (piadr>0).
+        // itag/pi_fragments are populated (computeEtaCoordination / Hueckel, Jul 2026).
+        const int nat_t = static_cast<int>(topo.itag.size());
+        auto is_eta_ligand = [&](int a) -> bool {
+            return a >= 0 && a < nat_t && topo.itag[a] == -1
+                && a < static_cast<int>(topo.pi_fragments.size()) && topo.pi_fragments[a] > 0;
+        };
+        metal_bbtyp = 5; // M-X
         if (imetal1 == 2 && imetal2 == 2) metal_bbtyp = 7; // TM-TM
+        if ((imetal2 == 2 && is_eta_ligand(atom1))         // atom2 TM, atom1 eta ligand
+            || (imetal1 == 2 && is_eta_ligand(atom2)))     // atom1 TM, atom2 eta ligand
+            metal_bbtyp = 6;                               // eta (gfnff_ini.f90:1122-1123)
 
         // --- bstrength = bstren(bbtyp) (gfnff_ini.f90:1190-1197) ---
         bstrength = bstren[metal_bbtyp];
@@ -4954,9 +4962,14 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
             if (trow1 > 4 && trow2 > 4) bstrength = bstren[8];        // 4/5d-4/5d
             else if (trow1 == 4 && trow2 > 4) bstrength = bstren[8];  // 3d-4/5d (bstren(9)==3.40)
             else if (trow2 == 4 && trow1 > 4) bstrength = bstren[8];
-            // NOTE: the mchar "metallic" scaling (1-min(2*mchar_i+2*mchar_j,0.5))
-            // at gfnff_ini.f90:1195-1197 is omitted (mchar not available in
-            // curcuma); no M-M system in the validation targets exercises this.
+            // "metallic" scaling (gfnff_ini.f90:1195-1197): weaken M-M by the metallic
+            // character of the two atoms, capped at 0.5. topo.metallic_character == mchar.
+            const auto& mchar = topo.metallic_character;
+            if (atom1 < static_cast<int>(mchar.size()) && atom2 < static_cast<int>(mchar.size())) {
+                double dum = 2.0 * mchar[atom1] + 2.0 * mchar[atom2];
+                dum = std::min(dum, 0.5);
+                bstrength *= (1.0 - dum);
+            }
         }
 
         // --- metal fqq (gfnff_ini.f90:1209-1211) ---
@@ -5059,6 +5072,15 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     if (mtyp1 == 3) metal_shift += METAL3_SHIFT;  // Main group metal (Al, Ga, In, Sn, Pb)
     if (mtyp2 == 3) metal_shift += METAL3_SHIFT;
+
+    // eta-coordination r0 shift (Fortran gfnff_ini.f90:1252-1253): for an eta bond,
+    // lengthen r0 by ETA_SHIFT * nb(20, metal) for whichever atom is the TM (metal==2).
+    if (metal_bbtyp == 6) {
+        if (imetal1 == 2 && atom1 < static_cast<int>(topo.neighbor_lists.size()))
+            metal_shift += ETA_SHIFT * static_cast<double>(topo.neighbor_lists[atom1].size());
+        if (imetal2 == 2 && atom2 < static_cast<int>(topo.neighbor_lists.size()))
+            metal_shift += ETA_SHIFT * static_cast<double>(topo.neighbor_lists[atom2].size());
+    }
 
     // Step 10: Final Consolidation of Shifts and Equilibrium Distance
     // CRITICAL: Total rabshift must include pi-shift and metal-shift!
