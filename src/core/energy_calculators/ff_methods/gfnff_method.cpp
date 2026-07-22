@@ -4895,14 +4895,24 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     int mtyp1 = 0;  // 0=non-metal, 1=Group1, 2=Group2, 3=main group metal, 4=TM
     int mtyp2 = 0;
 
-    // Hydrogen is explicitly non-metal (Z=1 → mtyp=0)
-    if (z1 > 1 && group1 == 1) mtyp1 = 1;  // Li, Na, K, Rb, Cs (NOT hydrogen!)
-    else if (z1 > 1 && group1 == 2) mtyp1 = 2;  // Be, Mg, Ca, Sr, Ba
+    // mtyp classification, Fortran gfnff_ini.f90:1201-1208. It is purely group-based
+    // for groups 1/2 and imetal-based for 3/4 — NO hydrogen exception. H is group 1,
+    // so Fortran gives H mtyp=1, and this feeds two metal-branch factors of a metal-H
+    // bond: qfacbm[1]=-0.2 in fqq, and the mtyp<3 divisor `fcn /= 1+0.1*nb(20,H)^2`.
+    // BUGFIX (Jul 2026): the old `z1 > 1 &&` guard excluded H from mtyp=1 (mis-reading
+    // Fortran as relying on imetal(H)=0). It does not — mtyp only matters inside the
+    // metal branch, so this changed only metal-H bonds, and made them too strong. On
+    // PR07 (Kubas W-H2) it inflated W-H kbond to -0.0585 vs xtb -0.032 (1.83x). With
+    // the fix, fqq 1.4177->1.0835 and fcn 0.3618->0.2584 (both == the Fortran analyzer
+    // to the qa-charge floor). Non-metal H bonds never enter the metal branch, so they
+    // are unaffected.
+    if (group1 == 1) mtyp1 = 1;  // H, Li, Na, K, Rb, Cs
+    else if (group1 == 2) mtyp1 = 2;  // Be, Mg, Ca, Sr, Ba
     else if (group1 > 2 && imetal1 == 1) mtyp1 = 3;  // Al, Ga, In, Sn, Pb, Bi, Po
     else if (imetal1 == 2) mtyp1 = 4;  // Transition metals
 
-    if (z2 > 1 && group2 == 1) mtyp2 = 1;  // Li, Na, K, Rb, Cs (NOT hydrogen!)
-    else if (z2 > 1 && group2 == 2) mtyp2 = 2;
+    if (group2 == 1) mtyp2 = 1;
+    else if (group2 == 2) mtyp2 = 2;
     else if (group2 > 2 && imetal2 == 1) mtyp2 = 3;
     else if (imetal2 == 2) mtyp2 = 4;
 
@@ -5086,17 +5096,20 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // NOTE: CH4 alpha shows 2% discrepancy with XTB 6.6.1 - may be due to different
     // parameter set used in XTB 6.6.1 (commit 8d0f1dd) vs current Fortran source
 
-    // EN-dependence scaling with metal-specific SIGN FLIP (Fortran gfnff_ini.f90:1227-1234)
-    double fsrb2;
-    if (mtyp1 == 4 || mtyp2 == 4) {
-        // Transition metals: INVERSE EN dependence (negative sign!)
-        fsrb2 = -srb2 * 0.22;  // Fortran: -gen.srb2*0.22
-    } else if (mtyp1 > 0 || mtyp2 > 0) {
-        // Other metals: normal but scaled EN dependence
-        fsrb2 = srb2 * 0.28;   // Fortran: gen.srb2*0.28
-    } else {
-        // Non-metals: standard EN dependence (Fortran gfnff_ini.f90:1233)
-        fsrb2 = srb2;  // Just srb2 directly
+    // EN-dependence scaling with metal-specific SIGN FLIP (Fortran gfnff_ini.f90:1260-1264).
+    // In Fortran fsrb2 is initialised to gen%srb2 (:1102) and reassigned ONLY inside the
+    // metal branch (bbtyp>=5, i.e. a bond with at least one metal atom). A non-metal bond
+    // keeps the srb2 default. This MUST be gated on the bond being a metal bond, not on
+    // mtyp>0: mtyp==1 is also true for hydrogen (group 1), so keying on mtyp>0 wrongly put
+    // every C-H/O-H/N-H bond on the srb2*0.28 path once H was correctly classified mtyp=1
+    // (Jul 2026) — shifting every organic molecule by ~1-3 mEh. The metal branch is the
+    // right gate.
+    double fsrb2 = srb2;  // non-metal default (Fortran :1102)
+    if (imetal1 > 0 || imetal2 > 0) {         // metal bond (bbtyp>=5)
+        if (mtyp1 == 4 || mtyp2 == 4)
+            fsrb2 = -srb2 * 0.22;  // TM: inverse EN dependence (Fortran :1261)
+        else
+            fsrb2 = srb2 * 0.28;   // other metal (Fortran :1263)
     }
 
     // Alpha calculation with high precision debug
