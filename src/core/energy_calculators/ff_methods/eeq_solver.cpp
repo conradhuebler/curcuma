@@ -3149,7 +3149,16 @@ Matrix EEQSolver::computeTopologicalDistancesSparse(
         float rad_i = static_cast<float>(topology.covalent_radii[i]);
         for (int j : topology.neighbor_lists[i]) {
             float bond = rad_i + static_cast<float>(topology.covalent_radii[j]);
+            // BUGFIX (Jul 2026): symmetrize the graph, matching Fortran
+            // (gfnff_ini.f90:438-441 sets BOTH rabd(k,i) and rabd(i,k)) and the
+            // Floyd-Warshall variant of this function. neighbor_lists (== Fortran
+            // nbdum/topo%nb) is ASYMMETRIC for eta bonds: the metal lists the eta
+            // ligand (nbf) but the eta ligand omits the metal (nbm, gfnff_ini2.f90:199).
+            // A directed adjacency therefore left the eta ligand disconnected from the
+            // metal in the topological graph, so its Phase-1 topology charge (qa) — and
+            // hence the metal-bond fqq — was wrong (e.g. PR15 eta C: +0.030 vs -0.070).
             adj[i].push_back({j, bond});
+            adj[j].push_back({i, bond});
         }
     }
 
