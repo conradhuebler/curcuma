@@ -216,6 +216,9 @@ void ConfScan::LoadControlJson()
     if (m_controller.contains("energy_method") && m_controller["energy_method"].is_string())
         m_method = m_controller["energy_method"].get<std::string>();
 
+    // Claude Generated (Jul 2026): opt-in reuse of file energies (see m_reuse_energies)
+    m_reuse_energies = m_config.get<bool>("reuse_energies");
+
     // ConfScan-specific parameters
     m_noname = m_config.get<bool>("noname");
     m_restart = m_config.get<bool>("restart");
@@ -473,10 +476,17 @@ bool ConfScan::openFile()
             CurcumaLogger::info("  - ripser barcodes");
         CurcumaLogger::info("required");
     }
+    // Claude Generated (Jul 2026): energy provenance accounting for the reuse_energies path
+    int reused_energies = 0, computed_energies = 0;
     while (!file.AtEnd()) {
         Molecule* mol = new Molecule(file.Next());
         double energy = mol->Energy();
-        if (std::abs(energy) < 1e-5 || m_method.compare("") != 0) {
+        // Claude Generated (Jul 2026): recompute only when there is no usable stored energy, or
+        // when an energy method was requested AND reuse was not enabled. Previously the mere
+        // presence of an energy_method forced a full recompute of an already-optimised ensemble.
+        const bool has_stored_energy = std::abs(energy) >= 1e-5;
+        if (!has_stored_energy || (m_method.compare("") != 0 && !m_reuse_energies)) {
+            ++computed_energies;
             // XTBInterface interface; // As long as xtb leaks, we have to put it heare
             if (m_method == "")
                 m_method = "gfnff";
@@ -486,6 +496,8 @@ bool ConfScan::openFile()
 
             interface.setMolecule(mol->getMolInfo());
             energy = interface.CalculateEnergy(false);
+        } else {
+            ++reused_energies;
         }
         m_ordered_list.insert(std::pair<double, int>(energy, molecule));
         molecule++;
@@ -507,6 +519,19 @@ bool ConfScan::openFile()
         m_molecules.push_back(pair);
     }
 
+    // Claude Generated (Jul 2026): make the energy provenance visible -- silently recomputing a
+    // whole ensemble is the single most expensive thing ConfScan can do.
+    if (m_verbosity >= 1 && (reused_energies + computed_energies) > 0) {
+        // openFile() runs outside start(), where the global logger level is not guaranteed to be
+        // synced (the RMSD machinery lowers it to 0) -- same workaround as the descriptor notice
+        // above and logPass().
+        int old_verbosity = CurcumaLogger::get_verbosity();
+        CurcumaLogger::set_verbosity(m_verbosity);
+        CurcumaLogger::result_fmt("ConfScan: {} energies reused from file, {} computed at {}",
+            reused_energies, computed_energies, m_method.empty() ? std::string("-") : m_method);
+        CurcumaLogger::set_verbosity(old_verbosity);
+    }
+
     if (m_prev_accepted != "") {
         double min_energy = 0;
         bool xyzfile = std::string(m_prev_accepted).find(".xyz") != std::string::npos || std::string(m_prev_accepted).find(".trj") != std::string::npos;
@@ -520,7 +545,11 @@ bool ConfScan::openFile()
         while (!file.AtEnd()) {
             Molecule* mol = new Molecule(file.Next());
             double energy = mol->Energy();
-            if (std::abs(energy) < 1e-5 || m_method.compare("") != 0) {
+            // Claude Generated (Jul 2026): same reuse rule as the main ensemble loop above.
+            // NOTE: the no-method fallback here is "gfn2" while the loop above uses "gfnff" --
+            // pre-existing inconsistency, left untouched deliberately.
+            const bool has_stored_energy = std::abs(energy) >= 1e-5;
+            if (!has_stored_energy || (m_method.compare("") != 0 && !m_reuse_energies)) {
                 // XTBInterface interface; // As long as xtb leaks, we have to put it heare
                 if (m_method == "")
                     m_method = "gfn2";

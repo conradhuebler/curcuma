@@ -341,6 +341,7 @@ private:
     PARAM(max_energy, Double, -1.0, "Maximum energy difference from lowest (kJ/mol, -1=disabled)", "Filtering", {"maxenergy"})
     PARAM(rank, Double, -1.0, "Keep only N lowest energy conformers (-1=all)", "Filtering", {})
     PARAM(last_de, Double, -1.0, "Final energy difference threshold (-1=disabled)", "Filtering", {"lastdE"})
+    PARAM(reuse_energies, Bool, false, "Reuse the energy stored in the input file instead of recomputing it with the energy method. Only correct when every structure in the file was produced at the same level of theory, e.g. an ensemble written by ConfSearch right after optimisation. Structures without a stored energy are always computed.", "Filtering", {})
 
     // --- Descriptor Thresholds (Loose) ---
     PARAM(slx, String, "default", "Default multiplier for all loose thresholds: 'default' or '1.0,2.0' or '1.5'", "Thresholds", {"sLX"})
@@ -398,6 +399,10 @@ private:
     std::string m_first_content, m_second_content, m_third_content, m_4th_content, m_collective_content;
     std::string m_rmsd_element_templates;
     std::string m_method = "";
+    // Claude Generated (Jul 2026): reuse energies already stored in the input file. Default false
+    // keeps the historical behaviour for standalone ConfScan; ConfSearch enables it because its
+    // input was just optimised at exactly this energy_method (see ConfSearch::FilterConfig).
+    bool m_reuse_energies = false;
     std::string m_molalign = "molalign";
     std::multimap<double, double> m_listH, m_listI, m_listE;
     std::multimap<double, std::vector<double>> m_listThresh;
