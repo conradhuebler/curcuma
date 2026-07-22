@@ -4,6 +4,9 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+- 2026-07-22: Fixed GFN-FF ED07 (-37.80 -> +6.34 kcal/mol) — the bond-term generators re-derived a 70-bond list from an old `1.3*rcov` heuristic while the ported getnb criterion (and xtb) said 68; both `generateGFNFFBonds`/`generateBondsNative` now consume `getCachedBondList()`. MOR41 gfnff MAD 7.295 -> 7.153, max 37.80 -> 35.08. Exposed a metal bond-parameter error (PR07 W-H kbond 1.83x too strong), tracked separately.
+- 2026-07-22: `scripts/s30l_bond_compare.py` gains `--xyz PATH [CHARGE]` + element/bond-class bucketing and fixes two unit bugs (xtb `alp` is per-Bohr^2, curcuma alpha already per-Bohr^2); `CURCUMA_BOND_CSV_ALL=1` lifts the 5-row BOND_CSV -v3 cap.
+
 - 2026-07-22: Fixed EEQ Phase-1/Phase-2 Cholesky cache-key collision — `m_pending_geometry`/`m_pending_cn` (written only by Phase 2) were never cleared, so from the 2nd topology build on Phase 1 was mistaken for Phase 2 and persisted/consumed the wrong factor; now cleared in `calculateTopologyCharges()` and `invalidateCholeskyCache()`. New regression guard `test_gfnff_topology_reentrancy` (failed before, passes after). SP/opt/MD bit-identical — no demonstrated production impact.
 - 2026-07-22: Corrected stale "GFN-FF `btyp>=5` metal bond branch unimplemented" claim in `CLAUDE.md`, `docs/MOR41_VALIDATION.md` and `docs/GFNFF_METAL_BOND_ANALYSIS.md` (implemented in `53d6aeb`/`14fc648`); recorded current MOR41 GFN-FF MAD 7.30 kcal/mol and the remaining eta/`mchar`/ED07 gaps.
 

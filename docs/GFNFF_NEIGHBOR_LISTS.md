@@ -150,8 +150,18 @@ rco *= fat(Z_i)*fat(Z_j)
 bonded if r < fm * 1.25 * rco                   // fm: rthr2=1.00 for TM (no-op), 1.025 for main-group metals
 ```
 
-replacing the older `1.3*(rcov_i+rcov_j)*fat_i*fat_j` heuristic. Native `nbf` now reproduces
-Fortran on **95/95** MOR41 structures (was 94/95 - ED07's agostic C-H...W is gone).
+replacing the older `1.3*(rcov_i+rcov_j)*fat_i*fat_j` heuristic. Native `nbf` (the getnb
+`icase=1` list, `getCachedBondList()`) now reproduces Fortran on **95/95** MOR41 structures:
+on ED07 it gives 68 bonds, exactly xtb's `#bonds: 68`, with the agostic C-H...W / C...W pairs
+correctly excluded.
+
+**Bond-term wiring fix (Jul 2026).** Getting `nbf` right was necessary but not sufficient: the
+bond-term generators (`generateGFNFFBonds`, `generateBondsNative`) did **not** consume it. They
+each re-derived the bond list from an independent `1.3*(rcov_i+rcov_j)*fat*fat` rule, so the
+authoritative getnb list and the list actually feeding the bond energy could disagree. On ED07
+they did (getnb 68, heuristic 70), reintroducing the two spurious metal contacts getnb had just
+removed -- worth -0.0704 Eh. Both generators now enumerate `getCachedBondList()` directly.
+Effect: ED07 -37.80 -> +6.34 kcal/mol; set MAD 7.295 -> 7.153, max 37.80 -> 35.08.
 
 **q-loop.** `calculateTopologyInfo()` now runs `calculateTopologyInfoOnce()` up to twice,
 mirroring `gfnff_ini.f90:258-263`. The charges only reach the model *through* the bond list,
@@ -163,11 +173,17 @@ re-entrancy bug listed below.
 Effect: ED07 +113.83 -> **-37.80**, PR40 +103.63 -> **-3.83**; MOR41 MAD 9.146 -> **7.295**,
 max 113.83 -> **37.80**, RMSD 19.4 -> **11.9**. Protected set still 0.000, gfnff_val 18/18.
 
-**ED07's remaining -37.8 kcal is no longer a neighbour-list problem.** Its bond list, angle,
-torsion and dispersion now all match xtb essentially exactly; the entire residual is the
-**bond term** (-0.0600 Eh = -37.7 kcal), i.e. the unimplemented transition-metal bond branch
-(`btyp>=5`, `docs/GFNFF_METAL_BOND_ANALYSIS.md`). ED07 is now the single worst structure in
-the set and is a pure test case for that separate work item.
+**ED07 was a neighbour-list problem after all** (corrected Jul 2026). The earlier reading --
+"the -37.8 kcal is the bond term, i.e. the unimplemented `btyp>=5` branch" -- was wrong on both
+counts. The `btyp>=5` metal branch is implemented (`53d6aeb`/`14fc648`), and per-bond comparison
+(`scripts/s30l_bond_compare.py --xyz`) showed the residual was two **extra bonds** (W...C 2.92 A,
+W...H 2.23 A) that xtb does not have, not a per-bond parameter error -- the bond term was reading
+a 70-bond list while getnb said 68. Fixed by the bond-term wiring change above (ED07 -> +6.34).
+
+The fix exposed a genuine metal bond-**parameter** error, previously masked: **PR07** (Kubas
+ED07+H2) regresses +6.19 -> -27.05 because its W-H bonds now use the correct list but get
+`kbond -0.0585` where xtb has `-0.032` (1.83x too strong; r0/alpha agree). That is the metal
+bond-strength/fqq item, tracked in [GFNFF_METAL_BOND_ANALYSIS.md](GFNFF_METAL_BOND_ANALYSIS.md).
 
 ## What was NOT done / known deviations
 

@@ -53,11 +53,16 @@ brings MOR41 GFN-FF per-structure MAD to **7.30** kcal/mol (max **37.80** = ED07
 1 kcal/mol). See [GFNFF_METAL_BOND_ANALYSIS.md](GFNFF_METAL_BOND_ANALYSIS.md) — note that file
 is the **pre-fix** diagnostic and is flagged as superseded.
 
-Still open in the GFN-FF metal path: `btyp=6` (eta) promotion is not wired, and the TM-TM
-`mchar` attenuation is omitted. **ED07** (W(CO)₃(PiPr₃)₂ with an agostic C-H) is the largest
-single residual and is a clean isolated test case — its bond list, angles, torsions and
-dispersion match xtb essentially exactly, and the whole −37.80 kcal/mol sits in the bond term
-(−0.0600 Eh). It has no π-eta ligand, so neither open item above explains it.
+**ED07 fixed (Jul 2026):** its −37.80 kcal/mol residual was a bond-list bug, not the metal
+bond term — the bond-term generators re-derived a 70-bond list from an old distance heuristic
+while the ported getnb criterion (and xtb) said 68. Both generators now consume the getnb list;
+ED07 → +6.34 kcal/mol, set MAD 7.295 → **7.153**, max 37.80 → **35.08**, within-1 39 → **40/95**.
+See [GFNFF_NEIGHBOR_LISTS.md](GFNFF_NEIGHBOR_LISTS.md).
+
+Still open in the GFN-FF metal path: (a) a metal bond-**parameter** error the ED07 fix exposed
+— **PR07** (Kubas ED07+H₂) W-H `kbond` is 1.83× too strong (−0.0585 vs xtb −0.032), regressing
+it to −27.05; (b) `btyp=6` (eta) promotion is not wired; (c) TM-TM `mchar` attenuation is
+omitted.
 
 The sections below are the original (pre-fix) diagnostic and remain valid for GFN-FF.
 
