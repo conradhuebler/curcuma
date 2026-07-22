@@ -66,8 +66,18 @@ is the **pre-fix** diagnostic and is flagged as superseded.
    also required gating `fsrb2` on `imetal>0` to keep organic C-H/O-H bonds unchanged. Both
    ground-truthed per-bond against the in-tree Fortran analyzer.
 
-Still open in the GFN-FF metal path: `btyp=6` (eta) promotion is not wired, and the TM-TM
-`mchar` attenuation is omitted. Neither is exercised by the largest remaining residuals.
+**eta (`btyp=6`) + TM-TM `mchar` wired (Jul 2026):** eta bonds now promote to `bstren[6]=0.78`
++ the `eta_shift*nb(20,metal)` r0 term (detection matches the Fortran analyzer bond-for-bond:
+PR15 4/4, ED13 7/7, PR13 9/9); TM-TM bonds get `bstrength *= 1-min(2·mchar_i+2·mchar_j, 0.5)`
+(PR22 Ir-Ir prefactor now exact vs Fortran). Per-structure MAD 5.288 → **4.658**, within-1 45 →
+**48/95**; per-reaction MAD → **4.067**.
+
+Now open in the GFN-FF metal path: a **Phase-1 topology-charge (`qa`) error in π-metal complexes**
+— surfaced by eta. On PR15 the eta Ni-C `fqq` is 1.0235 vs the analyzer's 1.7496 because
+curcuma's `qa(Ni)`/`qa(C_eta)` come out same-sign (dum≈0.03) where Fortran has them opposite-sign
+(dum≈1). eta correctly rescales `bstr`/adds the r0 shift, so it amplifies this `qa` gap in a few
+structures (PR15/ED36/PR36, the new per-structure max 40.18). This is an EEQ Phase-1 item, not a
+bond-term one.
 
 The sections below are the original (pre-fix) diagnostic and remain valid for GFN-FF.
 

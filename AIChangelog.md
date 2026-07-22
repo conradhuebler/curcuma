@@ -4,6 +4,8 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+- 2026-07-22: Wired GFN-FF eta (btyp=6, bstren 0.78 + eta_shift r0) and TM-TM mchar attenuation (bstrength*=1-min(2mchar_i+2mchar_j,0.5)) — both verified per-bond vs the Fortran analyzer (eta detection exact 4/4,7/7,9/9; PR22 Ir-Ir prefactor exact). MOR41 gfnff per-structure MAD 5.288->4.658, within-1 45->48, per-reaction MAD 8.17->4.067. Surfaced a separate Phase-1 qa charge error in pi-metal complexes (PR15 eta fqq 1.02 vs 1.75).
+
 - 2026-07-22: Fixed GFN-FF metal-H bonds — hydrogen (group 1) was wrongly excluded from `mtyp=1` (mis-set fqq/fcn on metal-H), and `fsrb2` EN-scaling keyed on `mtyp>0` instead of a metal bond (leaked to organic C-H once mtyp(H) fixed; now gated on `imetal>0`). Ground-truthed per-bond vs the Fortran analyzer (fqq 1.0964, fcn 0.25842). MOR41 gfnff MAD 7.153->5.288, within-1 40->45/95, fixed PR07/PR09/PR08/ED17/PR34/35/33/17/PR06/ED14/PR10; organics byte-identical, zero net-worse.
 
 - 2026-07-22: Fixed GFN-FF ED07 (-37.80 -> +6.34 kcal/mol) — the bond-term generators re-derived a 70-bond list from an old `1.3*rcov` heuristic while the ported getnb criterion (and xtb) said 68; both `generateGFNFFBonds`/`generateBondsNative` now consume `getCachedBondList()`. MOR41 gfnff MAD 7.295 -> 7.153, max 37.80 -> 35.08. Exposed a metal bond-parameter error (PR07 W-H kbond 1.83x too strong), tracked separately.
