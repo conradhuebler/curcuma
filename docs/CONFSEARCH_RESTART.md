@@ -76,7 +76,10 @@ All frames share one atomic-number list, so each structure is stored as a flat
 
 ## Flag routing note
 
-`restart` is a registered parameter of the **confscan** module, and ConfSearch
-uses the legacy static-JSON parameter set (it is not in the registry). The flat
-`-restart` flag is therefore auto-routed to `controller["confscan"]`; ConfSearch
-reads it from there (and honours `-confsearch.restart` via its own defaults).
+Since July 2026 ConfSearch registers its own parameters (including `restart`) in
+the ParameterRegistry, so the flat `-restart` flag stays in
+`controller["confsearch"]` and is read directly. `-confsearch.restart` works too.
+
+Before that migration ConfSearch used a static JSON parameter set and owned no
+names, so `-restart` was silently auto-routed to `controller["confscan"]` (the
+only module registering the name) and had to be read back from there.

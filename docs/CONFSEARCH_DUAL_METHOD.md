@@ -18,6 +18,14 @@ Both new flags fall back to `-method` when left empty, so an existing
 `-method gfnff` run is **byte-for-byte unchanged**. Flat (`-md_method ...`) and
 dotted (`-confsearch.md_method ...`) forms both work.
 
+> **Fixed July 2026.** Until ConfSearch was migrated into the ParameterRegistry,
+> `md_method`/`opt_method` were registered only by the **polymerbuild** module, so
+> the CLI auto-router silently moved both flags to `controller["polymerbuild"]` and
+> ConfSearch never saw them — it fell back to `method` and logged
+> `Single-method mode`. The dotted form did not help either (the `confsearch.`
+> prefix is stripped before the router runs), which left `-import_config` as the
+> only working route. ConfSearch now owns these names and both forms work.
+
 ## Per-cycle pipeline
 
 ```
