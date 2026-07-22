@@ -3835,29 +3835,27 @@ json GFNFF::generateGFNFFBonds() const
     // Use cached topology information to avoid redundant calculations
     const TopologyInfo& topo_info = getCachedTopology();
 
-    // GFN-FF bond detection with connectivity threshold
-    double bond_threshold = 1.3; // Factor for covalent radii sum
-
+    // BUGFIX (Jul 2026): enumerate the AUTHORITATIVE bond list instead of re-deriving
+    // it here. This function used to apply its own `1.3*(rcov_i+rcov_j)*fat_i*fat_j`
+    // heuristic, independent of getCachedBondList(), which since the Jul 2026 getnb port
+    // implements the Fortran criterion (gfnff_ini2.f90:111-126 + :361-419). The two
+    // disagreed: on MOR41 ED07 getnb gives 68 bonds (== xtb `#bonds: 68`) while this
+    // heuristic gave 70, inventing an agostic W...C and W...H pair that xtb does not
+    // have. Those two bonds carried -0.0704 Eh of spurious binding and were the whole
+    // of ED07's -37.8 kcal/mol error. Fortran likewise builds `blist` from a neighbour
+    // list (gfnff_ini.f90:281-305), never from a second independent distance rule.
     if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info(fmt::format("GFN-FF bond detection: {} atoms, base threshold {:.2f}", m_atomcount, bond_threshold));
-        }
+        CurcumaLogger::info(fmt::format("GFN-FF bond generation: {} atoms, {} bonds from getnb list",
+                                        m_atomcount, getCachedBondList().size()));
+    }
 
-        for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
+    {
+        for (const auto& [i, j] : getCachedBondList()) {
             Vector ri = m_geometry_bohr.row(i);
             Vector rj = m_geometry_bohr.row(j);
             double distance = (ri - rj).norm();
 
-            // Get covalent radii for atoms i and j
-            double rcov_i = getCovalentRadius(m_atoms[i]);
-            double rcov_j = getCovalentRadius(m_atoms[j]);
-
-            // Phase 3: Apply element-specific fat scaling factors (Claude Generated Jan 2026)
-            // Reference: gfnff_ini2.f90:76-97
-            double threshold = bond_threshold * (rcov_i + rcov_j) * fat[m_atoms[i]] * fat[m_atoms[j]];
-
-            if (distance < threshold) {
-                // This is a bond - generate GFN-FF parameters
+            {
                 json bond;
                 bond["type"] = 3; // GFN-FF type
                 bond["i"] = i;
@@ -8194,18 +8192,19 @@ std::vector<Bond> GFNFF::generateBondsNative(const TopologyInfo& topo_info) cons
     auto start_time = std::chrono::high_resolution_clock::now();
 
     std::vector<Bond> bonds;
-    double bond_threshold = 1.3;
 
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
+    // BUGFIX (Jul 2026): enumerate the authoritative getnb bond list rather than a
+    // second, independent `1.3*(rcov_i+rcov_j)` rule. See the matching comment in
+    // generateGFNFFBonds(). Note this variant did not even apply the `fat` element
+    // factors that the JSON path did, so the two generators could disagree with each
+    // other as well as with getCachedBondList().
+    {
+        for (const auto& [i, j] : getCachedBondList()) {
             Vector ri = m_geometry_bohr.row(i);
             Vector rj = m_geometry_bohr.row(j);
             double distance = (ri - rj).norm();
 
-            double rcov_i = getCovalentRadius(m_atoms[i]);
-            double rcov_j = getCovalentRadius(m_atoms[j]);
-
-            if (distance < bond_threshold * (rcov_i + rcov_j)) {
+            {
                 auto bond_params = getGFNFFBondParameters(i, j, m_atoms[i], m_atoms[j], distance, topo_info);
 
                 Bond b;
