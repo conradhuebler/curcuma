@@ -698,6 +698,19 @@ json CLI2Json(int argc, char** argv)
         "noprogress" // Disable live progress bars globally (e.g. when redirecting to a file)
     };
 
+    // Claude Generated (Jul 2026): modules that are sub-scopes of a calculation rather than
+    // commands in their own right. Auto-routing a flat flag into one of these is the intended,
+    // everyday behaviour ("-sp mol.xyz -cn_cutoff_bohr 5.5" -> controller["gfnff"]), so it is
+    // only reported at info level. Moving a flag into another CAPABILITY module means the user
+    // almost certainly aimed it at the active command and it silently went elsewhere -> warn.
+    // This is the safety net for the class of bug where ConfSearch (unregistered) lost
+    // -opt_method to polymerbuild and -thermostat to simplemd without any diagnostic.
+    std::set<std::string> scope_modules = {
+        "gfnff", "eeq_solver", "xtb", "tblite", "ulysses", "d3", "d4", "uff", "qmdff",
+        "eht", "orca", "forcefield", "ripser", "rmsd", "ancopt", "modern_optimizer",
+        "gfnff_external", "native_lbfgs", "d3param", "d4param"
+    };
+
     // Claude Generated (October 2025): CLI keyword to module name mapping
     // Maps command-line keywords (e.g., -md) to actual module names (e.g., simplemd)
     std::map<std::string, std::string> keyword_to_module = {
@@ -939,6 +952,17 @@ json CLI2Json(int argc, char** argv)
                 continue;
             }
 
+            // Claude Generated (Jul 2026): announce the move. Silent rerouting hid the fact that
+            // -opt_method / -thermostat / -restart never reached ConfSearch for months.
+            {
+                const std::string msg = "CLI flag -" + pname + " is not a parameter of the active"
+                    " command's module \"" + module_name + "\"; it is owned by \"" + owners[0]
+                    + "\" and was routed to -" + owners[0] + "." + pname + ".";
+                if (scope_modules.count(owners[0]) > 0)
+                    CurcumaLogger::info(msg);
+                else
+                    CurcumaLogger::warn(msg + " Use the dotted form if that is not what you meant.");
+            }
             reroute_targets[owners[0]][pname] = it.value();
             reroute_remove.push_back(pname);
         }
@@ -996,7 +1020,21 @@ json CLI2Json(int argc, char** argv)
         } else if (is_nested_object && param_name != keyword) {
             // Handle nested structure for OTHER modules (not this command's keyword)
             // param_name = "rmsd", param_value = {"method": "subspace"}
-            module_params[param_name] = param_value;
+            //
+            // Claude Generated (Jul 2026): map CLI keywords to module names here too. Because
+            // setNestedJsonValue() already split "md.rmsd_mtd" into key["md"]["rmsd_mtd"], this
+            // branch (not the flat-dotted one above) is what handles "-md.x" issued from another
+            // command -- and it used to store it verbatim under controller["md"], which no module
+            // reads. So "curcuma -confsearch mol.xyz -md.rmsd_mtd false" was silently ignored.
+            std::string target_module = param_name;
+            if (keyword_to_module.count(param_name) > 0)
+                target_module = keyword_to_module[param_name];
+            if (module_params.contains(target_module) && module_params[target_module].is_object()) {
+                for (auto& [k, v] : param_value.items())
+                    module_params[target_module][k] = v; // merge, do not clobber a sibling block
+            } else {
+                module_params[target_module] = param_value;
+            }
             keys_to_remove.push_back(param_name);
         }
         // NOTE: We KEEP nested structures where param_name == keyword!
