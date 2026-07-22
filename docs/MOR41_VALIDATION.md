@@ -53,16 +53,21 @@ brings MOR41 GFN-FF per-structure MAD to **7.30** kcal/mol (max **37.80** = ED07
 1 kcal/mol). See [GFNFF_METAL_BOND_ANALYSIS.md](GFNFF_METAL_BOND_ANALYSIS.md) — note that file
 is the **pre-fix** diagnostic and is flagged as superseded.
 
-**ED07 fixed (Jul 2026):** its −37.80 kcal/mol residual was a bond-list bug, not the metal
-bond term — the bond-term generators re-derived a 70-bond list from an old distance heuristic
-while the ported getnb criterion (and xtb) said 68. Both generators now consume the getnb list;
-ED07 → +6.34 kcal/mol, set MAD 7.295 → **7.153**, max 37.80 → **35.08**, within-1 39 → **40/95**.
-See [GFNFF_NEIGHBOR_LISTS.md](GFNFF_NEIGHBOR_LISTS.md).
+**Two GFN-FF metal fixes (Jul 2026)** took the per-structure MAD from 7.295 to **5.288**
+(max 37.80 → **35.08**, within-1 39 → **45/95**), with **zero structures net worse**:
 
-Still open in the GFN-FF metal path: (a) a metal bond-**parameter** error the ED07 fix exposed
-— **PR07** (Kubas ED07+H₂) W-H `kbond` is 1.83× too strong (−0.0585 vs xtb −0.032), regressing
-it to −27.05; (b) `btyp=6` (eta) promotion is not wired; (c) TM-TM `mchar` attenuation is
-omitted.
+1. **ED07 bond-list bug** (−37.80 → +6.34): the bond-term generators re-derived a 70-bond list
+   from an old distance heuristic while the ported getnb criterion (and xtb) said 68. Both
+   generators now consume the getnb list. See [GFNFF_NEIGHBOR_LISTS.md](GFNFF_NEIGHBOR_LISTS.md).
+2. **Metal-H `mtyp` + `fsrb2`** (fixed a whole class of hydride complexes: PR07 −27→+3.5,
+   PR09 −33→−2.1, PR08 −24→−0.9, ED17, PR34/35/33/17, PR06, ED14, PR10): hydrogen was wrongly
+   excluded from `mtyp=1` (it is group 1), which mis-set `fqq`/`fcn` on metal-H bonds; and the
+   `fsrb2` EN-scaling was keyed on `mtyp>0` instead of an actual metal bond, so fixing `mtyp(H)`
+   also required gating `fsrb2` on `imetal>0` to keep organic C-H/O-H bonds unchanged. Both
+   ground-truthed per-bond against the in-tree Fortran analyzer.
+
+Still open in the GFN-FF metal path: `btyp=6` (eta) promotion is not wired, and the TM-TM
+`mchar` attenuation is omitted. Neither is exercised by the largest remaining residuals.
 
 The sections below are the original (pre-fix) diagnostic and remain valid for GFN-FF.
 

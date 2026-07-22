@@ -181,9 +181,14 @@ W...H 2.23 A) that xtb does not have, not a per-bond parameter error -- the bond
 a 70-bond list while getnb said 68. Fixed by the bond-term wiring change above (ED07 -> +6.34).
 
 The fix exposed a genuine metal bond-**parameter** error, previously masked: **PR07** (Kubas
-ED07+H2) regresses +6.19 -> -27.05 because its W-H bonds now use the correct list but get
-`kbond -0.0585` where xtb has `-0.032` (1.83x too strong; r0/alpha agree). That is the metal
-bond-strength/fqq item, tracked in [GFNFF_METAL_BOND_ANALYSIS.md](GFNFF_METAL_BOND_ANALYSIS.md).
+ED07+H2) transiently regressed to -27.05 because its W-H bonds now used the correct list but got
+`kbond -0.0585` where xtb has `-0.032` (1.83x). Root cause (fixed the same session): hydrogen
+(group 1) was wrongly excluded from `mtyp=1`, mis-setting `fqq`/`fcn` on metal-H bonds, and the
+`fsrb2` EN-scaling was keyed on `mtyp>0` rather than an actual metal bond. Fixing both -- against
+the Fortran analyzer's per-bond fqq=1.0964 / fcn=0.25842 -- brought PR07 to +3.53 and a whole
+class of hydride complexes (PR09, PR08, ED17, PR34/35/33/17, PR06, ED14, PR10) to within a few
+kcal, with organic ligands byte-identical. Net MOR41 gfnff MAD 7.295 -> 5.288, within-1 39 ->
+45/95, zero structures worse.
 
 ## What was NOT done / known deviations
 
