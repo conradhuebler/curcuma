@@ -187,6 +187,7 @@ set_tests_properties(cli_analysis_01_parallel_equivalence PROPERTIES TIMEOUT 120
 
 add_cli_test(routing 01_flat_param_routing)
 add_cli_test(routing 02_roundtrip_replay)
+add_cli_test(routing 03_confsearch_param_routing)   # ConfSearch registry migration guard
 
 # =============================================================================
 # Error Handling Tests (6 scenarios) - Phase 1-2 Implementation
