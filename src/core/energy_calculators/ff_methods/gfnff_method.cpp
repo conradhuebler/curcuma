@@ -10340,6 +10340,39 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // bpair is same as topo_distances (topological distance matrix)
     topo_info.bpair = topo_info.topo_distances;
 
+    // eta-aware bpair for the BATM 1,4-pair test. Claude Generated (Jul 24, 2026):
+    // same root cause as the X-bond bpair fix (detectHalogenBondsNative). The Fortran
+    // topo%bpair (nbondmat/pairsbond, gfnff_ini2.f90) only records a distance when
+    // reachability is SYMMETRIC, and eta bonds are stored asymmetrically (the metal
+    // lists the eta-C, the eta-C omits the metal), so an eta bond never bridges a
+    // >=2-bond path. curcuma's topo_distances is a plain BFS that DOES bridge through
+    // the eta Ru-C bond, wrongly shortcutting pairs to bpair==3 and generating hundreds
+    // of spurious BATM triples (PR28 1085 vs the reference 656) -> BATM over-binding
+    // (~1 kcal on PR26/PR28/PR27/ED33, entirely in the bonded-ATM term). Rebuild the
+    // distance on an adjacency with the eta bonds (metal <-> itag==-1 ligand) removed;
+    // normal metal bonds (Ru-P/Ru-Cl) are kept. Only built when eta atoms exist.
+    const bool has_eta = std::any_of(topo_info.itag.begin(), topo_info.itag.end(),
+                                     [](int t) { return t == -1; });
+    std::vector<std::vector<int>> eta_free_dist;
+    if (has_eta && !topo_info.neighbor_lists.empty()) {
+        auto is_metal_atom = [&](int a) {
+            int z = (a >= 0 && a < m_atomcount) ? m_atoms[a] : 0;
+            return z >= 1 && z <= 86 && GFNFFParameters::metal_type[z - 1] > 0;
+        };
+        auto is_eta = [&](int a) {
+            return a >= 0 && a < static_cast<int>(topo_info.itag.size()) && topo_info.itag[a] == -1;
+        };
+        std::vector<std::vector<int>> eta_free_adj = topo_info.neighbor_lists;
+        for (int i = 0; i < static_cast<int>(eta_free_adj.size()); ++i) {
+            auto& nbrs = eta_free_adj[i];
+            nbrs.erase(std::remove_if(nbrs.begin(), nbrs.end(), [&](int j) {
+                return (is_metal_atom(i) && is_eta(j)) || (is_metal_atom(j) && is_eta(i));
+            }), nbrs.end());
+        }
+        eta_free_dist = calculateTopologyDistances(eta_free_adj);
+    }
+    const std::vector<std::vector<int>>& batm_bpair = has_eta ? eta_free_dist : topo_info.bpair;
+
     // Generate b3list for batm calculation
     topo_info.b3list.clear();
     topo_info.nbatm = 0;
@@ -10347,8 +10380,8 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // Loop over all atom pairs
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = 0; j < i; ++j) {
-            // Check if i-j is a 1,4-pair (bpair[i][j] == 3)
-            if (topo_info.bpair[i][j] == 3) {
+            // Check if i-j is a 1,4-pair (bpair[i][j] == 3), eta-free distance
+            if (batm_bpair[i][j] == 3) {
                 // Add all neighbors of j as batm triples (i, j, k)
                 for (int k : topo_info.adjacency_list[j]) {
                     topo_info.b3list.push_back({i, j, k});
