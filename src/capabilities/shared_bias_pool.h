@@ -69,6 +69,14 @@ public:
      *  geometries and the pool stays clean for the next MD cycle. */
     void pruneNonPersistent();
 
+    /** Claude Generated (Jul 2026): bound the pool to at most max_size structures by dropping the
+     *  lowest-counter non-persistent snapshots (rarely-visited regions). Persistent optimised minima
+     *  are always kept, even if their count alone exceeds max_size. Re-indexes afterwards. Called
+     *  between temperature cycles (no concurrent MD access); max_size <= 0 is a no-op. This is the
+     *  enforcement of rmsd_mtd_max_gaussians and, with the per-step Gaussian screen, keeps the bias
+     *  evaluation cost bounded as the search accumulates structures. Returns the number removed. */
+    int capToSize(int max_size);
+
     /** Claude Generated (Jun 2026): set the symmetry/atom-permutation set (full-atom reorder
      *  rules discovered by ConfScan). Set between temperature cycles; read every MD step.
      *  Empty (default) -> the RMSD-MTD bias uses the identity only (unpermuted, bit-identical). */

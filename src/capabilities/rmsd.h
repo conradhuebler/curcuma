@@ -251,6 +251,13 @@ public:
 
     double BestFitRMSD();
 
+    /** Claude Generated (Jul 2026): best-fit RMSD assuming reference AND target geometries are
+     *  ALREADY geometric-centered (same convention as CenterMolecule). Skips the two re-centering
+     *  passes of BestFitRMSD -- used by the RMSD-MTD screen fast path, where the walker is centered
+     *  once per step and hills are pre-centered/cached. Leaves the (centered) reference untouched and
+     *  stores the rotated target so Gradient() stays valid. Ignores per-atom weights. */
+    double BestFitRMSDCentered();
+
     double CustomRotation();
 
     double PartialRMSD(const Molecule& ref, const Molecule& tar);

@@ -1157,6 +1157,12 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
 
     CxxThreadPool* p = new CxxThreadPool;
     p->setActiveThreadCount(m_threads);
+    // Claude Generated (Jul 2026): the per-batch CxxThreadPool bar (stderr, library default
+    // Continously) is per-permutation detail -- show it only at verbosity 3. Lower levels keep
+    // the single overall progress bar (updateProgress, verbosity 1). Gated on m_verbosity (the
+    // stable ConfScan member), not the global logger level which the RMSD machinery lowers.
+    p->setProgressBar(m_verbosity >= 3 ? CxxThreadPool::ProgressBarType::Continously
+                                       : CxxThreadPool::ProgressBarType::None);
 
     for (auto& i : m_ordered_list) {
 
@@ -1375,6 +1381,10 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     std::vector<std::vector<int>> rules;
     CxxThreadPool* p = new CxxThreadPool;
     p->setActiveThreadCount(m_threads);
+    // Claude Generated (Jul 2026): per-permutation reorder bar (stderr, library default
+    // Continously) shown only at verbosity 3; see the matching note in CheckOnly().
+    p->setProgressBar(m_verbosity >= 3 ? CxxThreadPool::ProgressBarType::Continously
+                                       : CxxThreadPool::ProgressBarType::None);
 
     std::ofstream parameters_success;
     if (m_analyse) {

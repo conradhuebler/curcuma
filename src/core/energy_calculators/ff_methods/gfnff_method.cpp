@@ -9028,8 +9028,11 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
                             }
 
                             topology_from_cache = (topo_info.topology_charges.size() == m_atomcount);
-                            if (topology_from_cache && CurcumaLogger::get_verbosity() >= 1) {
-                                CurcumaLogger::success(fmt::format("Topology cache hit — skipping Phase 1 EEQ ({})", topo_file));
+                            // Claude Generated (Jul 2026): routine cache-hit report is verbosity-2+ detail.
+                            // ConfSearch reuses the topology cache on every child MD/opt, so at verbosity 1
+                            // this flooded stdout with one [OK] line per reused structure. Demoted to info.
+                            if (topology_from_cache && CurcumaLogger::get_verbosity() >= 2) {
+                                CurcumaLogger::info(fmt::format("Topology cache hit — skipping Phase 1 EEQ ({})", topo_file));
                             }
                         } else if (CurcumaLogger::get_verbosity() >= 2) {
                             CurcumaLogger::warn("Topology cache fingerprint mismatch — recalculating");

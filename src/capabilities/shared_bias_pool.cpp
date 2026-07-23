@@ -89,6 +89,49 @@ void SharedBiasPool::pruneNonPersistent()
     m_global_count.store(static_cast<int>(m_structures.size()), std::memory_order_release);
 }
 
+int SharedBiasPool::capToSize(int max_size)
+{
+    // Claude Generated (Jul 2026): enforce rmsd_mtd_max_gaussians. Keep every persistent (fed-back
+    // optimised) minimum plus the highest-counter non-persistent snapshots up to max_size total.
+    if (max_size <= 0)
+        return 0;
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    const int n = static_cast<int>(m_structures.size());
+    if (n <= max_size)
+        return 0;
+
+    std::vector<int> nonpersistent;
+    int persistent_count = 0;
+    for (int i = 0; i < n; ++i) {
+        if (m_structures[i].persistent)
+            ++persistent_count;
+        else
+            nonpersistent.push_back(i);
+    }
+    int keep_np = max_size - persistent_count; // how many non-persistent snapshots we may keep
+    if (keep_np < 0)
+        keep_np = 0;                            // persistent minima alone already fill (or exceed) the cap
+
+    // Highest-counter (most-visited) non-persistent snapshots first; drop the tail.
+    std::sort(nonpersistent.begin(), nonpersistent.end(),
+        [this](int a, int b) { return m_structures[a].counter > m_structures[b].counter; });
+    std::vector<char> drop(n, 0);
+    for (int k = keep_np; k < static_cast<int>(nonpersistent.size()); ++k)
+        drop[nonpersistent[k]] = 1;
+
+    std::vector<BiasStructure> kept;
+    kept.reserve(n);
+    for (int i = 0; i < n; ++i)
+        if (!drop[i])
+            kept.push_back(m_structures[i]);
+    const int removed = n - static_cast<int>(kept.size());
+    m_structures = std::move(kept);
+    for (int i = 0; i < static_cast<int>(m_structures.size()); ++i)
+        m_structures[i].index = i; // re-index (safe between cycles; each MD run re-Initialises)
+    m_global_count.store(static_cast<int>(m_structures.size()), std::memory_order_release);
+    return removed;
+}
+
 void SharedBiasPool::setPermutations(const std::vector<std::vector<int>>& permutations)
 {
     std::unique_lock<std::shared_mutex> lock(m_mutex);

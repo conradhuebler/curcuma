@@ -122,7 +122,14 @@ public:
 
     inline void setEnergyConv(double rmsd_econv) { m_rmsd_econv = rmsd_econv; }
     inline void setWTMTD(bool wtmtd) { m_wtmtd = wtmtd; }
+    // Claude Generated (Jul 2026): Gaussian-cutoff screen controls (see SimpleMD::m_rmsd_mtd_screen).
+    inline void setScreen(bool screen) { m_screen = screen; }
+    inline void setCutoffTol(double tol) { m_cutoff_tol = tol; }
+    inline void setScreenMargin(double margin) { m_screen_margin = margin; }
     inline int Counter() const { return m_counter; }
+    // Claude Generated (Jul 2026): hills screened/evaluated in the last execute() call.
+    inline int LastScreened() const { return m_last_screened; }
+    inline int LastEvaluated() const { return m_last_evaluated; }
     std::vector<BiasStructure> getBiasStructure() const { return m_biased_structures; }
     std::vector<json> getBias() const;
 
@@ -135,6 +142,14 @@ private:
     double m_k, m_alpha, m_DT, m_currentStep, m_rmsd_reference, m_current_bias, m_rmsd_econv;
     double m_current_bias_wt = 0; // well-tempered bias energy (opt-in, output only)
     int m_counter = 0, m_atoms = 0;
+    // Claude Generated (Jul 2026): Gaussian-cutoff screen (see SimpleMD::m_rmsd_mtd_screen).
+    bool m_screen = true;
+    double m_cutoff_tol = 1.0e-8;
+    double m_screen_margin = 0.0;
+    std::vector<Eigen::Vector3d> m_sigma_cache;   // per-hill principal radii of gyration (sorted desc)
+    std::vector<Geometry> m_centered_cache;       // per-hill geometric-centered subset coords
+    std::vector<char> m_desc_ok;                  // filled flag per hill
+    int m_last_screened = 0, m_last_evaluated = 0; // hills skipped/computed in the last execute()
     bool m_wtmtd = false, m_nocolvarfile = false, m_nohillsfile = false;
     std::string m_colvar_base = "COLVAR";
 };
@@ -474,6 +489,17 @@ private:
     int m_rmsd_mtd_max_height = 0;       // Claude Generated (Jun 2026): cap on counter used in W_i (0 = unbounded)
     bool m_freeze_inherited = false;     // Claude Generated (Jun 2026): freeze heights of structures inherited at run start
     std::unordered_map<int, int> m_frozen_height; // index -> frozen counter for inherited bias structures
+    // Claude Generated (Jul 2026): RMSD-MTD Gaussian-cutoff screen. Skip a bias hill before its
+    // Kabsch/gradient when a rigorous, rotation/translation-invariant RMSD lower bound (principal
+    // radii of gyration of the RMSD subset; Mirsky's inequality) proves its Gaussian is negligible.
+    bool m_rmsd_mtd_screen = true;
+    double m_rmsd_mtd_cutoff_tol = 1.0e-8;   // Gaussian value below which a hill is treated as zero
+    double m_rmsd_mtd_screen_margin = 0.0;   // extra safety radius added to the cutoff (RMSD length units)
+    // Per-walker lazy descriptor cache, keyed by BiasStructure::index (stable within one MD run:
+    // deposits only append; pruning re-indexes only between runs -> invalidated at Initialise()).
+    std::vector<Eigen::Vector3d> m_hill_sigma;   // principal radii of gyration (sorted desc) of the subset
+    std::vector<Geometry> m_hill_centered;       // geometric-centered RMSD-subset coordinates
+    std::vector<char> m_hill_desc_ok;            // filled flag per hill index
     int m_mtd_steps = 10;
     int m_rattle = 0;
     int m_colvar_incr = 0;
@@ -522,6 +548,8 @@ private:
     int m_time_step = 0;
     int m_dof = 0;
     int m_mtd_time = 0, m_loop_time = 0;
+    // Claude Generated (Jul 2026): RMSD-MTD screen accounting (Kabsch fits done vs skipped over the run).
+    long long m_bias_hills_evaluated = 0, m_bias_hills_screened = 0;
 
     std::vector<std::vector<double>> m_atom_temp;
     std::vector<double> m_zeta; // Thermostatische Variablen
@@ -629,6 +657,9 @@ private:
     PARAM(rmsd_mtd_dt, Double, 2000.0, "Well-tempered bias temperature Delta_T (K). Only used when wtmtd=true, and only for the reported well-tempered energy -- it never affects the force or the exploration.", "RMSD-MTD", {"rmsd_DT"})
     PARAM(rmsd_mtd_max_height, Int, 0, "Cap the per-structure hill counter used in the bias force: W_i = k * min(counter_i, cap). 0 = unbounded (legacy). Stops the shared bias pool from heating the dynamics over many runs (counter_i grows on every visit).", "RMSD-MTD", {})
     PARAM(rmsd_mtd_freeze_inherited, Bool, false, "Freeze the hill heights of bias structures already present at this MD run's start; only structures deposited during this run gain height. Bounds the cumulative bias force across successive shared-pool runs (geometry sharing is preserved).", "RMSD-MTD", {})
+    PARAM(rmsd_mtd_screen, Bool, true, "Skip bias hills whose Gaussian contribution is provably negligible, using a rotation/translation-invariant RMSD lower bound (principal radii of gyration of the RMSD subset) plus a Gaussian cutoff. Physics-preserving: energy, force and the visited set are unaffected. false = evaluate every hill (legacy).", "RMSD-MTD", {})
+    PARAM(rmsd_mtd_cutoff_tol, Double, 1.0e-8, "Gaussian tolerance for rmsd_mtd_screen: a hill is skipped when its lower-bound exp(-alpha*RMSD^2) falls below this (further tightened to global_count/rmsd_econv so the deposition/visited bookkeeping is preserved). Smaller = more conservative (closer to legacy).", "RMSD-MTD", {})
+    PARAM(rmsd_mtd_screen_margin, Double, 0.0, "Extra safety radius (RMSD length units) added to the screen cutoff. 0 relies on the rigorous lower bound; increase only when experimenting with heuristic descriptors.", "RMSD-MTD", {})
 
     // --- Coarse Graining (CG) Parameters --- Claude Generated (Nov 2025)
     PARAM(cg_write_vtf, Bool, true, "Write VTF trajectory for CG systems.", "CG", {"write_vtf"})
@@ -683,18 +714,27 @@ public:
     // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
     void setSharedBiasPool(SharedBiasPool* pool) { m_shared_pool = pool; }
 
+    // Claude Generated (Jul 2026): completion hook for the ConfSearch verbosity-1 run counter.
+    // Invoked from the worker thread once the MD finishes, with the run wall-time in seconds.
+    // Formatting/serialisation lives in the caller (ConfSearch) so it can bypass the global
+    // logger level, which is unreliable across pool workers.
+    void setOnComplete(std::function<void(double)> cb) { m_on_complete = std::move(cb); }
+
     virtual int execute() override
     {
         // One MD run among many under a molecule-level pool: keep intra-molecule
         // fan-out suppressed so methods that honor the flag stay serial.
         curcuma::SuppressIntraParallel intra_guard;
 
+        const auto t0 = std::chrono::steady_clock::now();
         m_mddriver = new SimpleMD(m_controller, false);
         m_mddriver->setMolecule(m_molecule);
         m_mddriver->overrideBasename(m_basename + ".t" + std::to_string(getThreadId()));
         m_mddriver->setSharedBiasPool(m_shared_pool);
         m_mddriver->Initialise();
         m_mddriver->start();
+        if (m_on_complete)
+            m_on_complete(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         return 0;
     }
 
@@ -705,4 +745,5 @@ protected:
     json m_controller;
     SimpleMD* m_mddriver;
     SharedBiasPool* m_shared_pool = nullptr;  // Claude Generated (Apr 2026)
+    std::function<void(double)> m_on_complete; // Claude Generated (Jul 2026): run-completion hook
 };

@@ -31,7 +31,12 @@
 #include "src/capabilities/rmsd/rmsd_functions.h"  // Claude Generated (Jun 2026): Kabsch helpers for bias calibration
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <mutex>
+
+#include <fmt/core.h>
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
@@ -176,6 +181,11 @@ void ConfSearch::start()
     md["temp_abort_delta"] = m_temp_abort_delta;
     md["rmsd_mtd_max_height"] = m_rmsd_mtd_max_height;
     md["rmsd_mtd_freeze_inherited"] = m_freeze_inherited;
+    // Claude Generated (Jul 2026): forward the bias-evaluation speedup controls to each MD run.
+    md["rmsd_mtd_max_gaussians"] = m_rmsd_mtd_max_gaussians;
+    md["rmsd_mtd_screen"] = m_rmsd_mtd_screen;
+    md["rmsd_mtd_cutoff_tol"] = m_rmsd_mtd_cutoff_tol;
+    md["rmsd_mtd_screen_margin"] = m_rmsd_mtd_screen_margin;
 
     // RMSD metadynamics is the default driver for conformational exploration.
     // The SimpleMD default is false, but ConfSearch enables it by default.
@@ -465,6 +475,14 @@ void ConfSearch::start()
                 // Keep at least 2 structures to maintain bias coverage
                 if (post_md > 2) {
                     m_bias_pool->pruneByCounter(1);
+                }
+                // Claude Generated (Jul 2026): enforce the pool-size cap (rmsd_mtd_max_gaussians) so
+                // the per-step bias cost stays bounded as structures accumulate across cycles.
+                if (m_rmsd_mtd_max_gaussians > 0) {
+                    int removed = m_bias_pool->capToSize(m_rmsd_mtd_max_gaussians);
+                    if (removed > 0)
+                        CurcumaLogger::result_fmt("ConfSearch: Bias pool capped to {} (rmsd_mtd_max_gaussians), dropped {} low-counter snapshot(s)",
+                            m_rmsd_mtd_max_gaussians, removed);
                 }
                 const std::size_t post_prune = m_bias_pool->biasStructureCount();
                 // Claude Generated (Jun 2026): compact bias pool delta instead of separate before/after lines
@@ -936,25 +954,59 @@ void ConfSearch::start()
 
 void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecules, const nlohmann::json& parameter)
 {
+    // Claude Generated (Jul 2026): MD-module output is verbosity-2+. At verbosity 1 each parallel
+    // MD run is silenced (its per-step tables would interleave across threads anyway) and replaced
+    // by a compact "X/N runs done" counter with per-run + cumulative timing, emitted from a run-
+    // completion hook. Uses fmt::print (not CurcumaLogger) because the global logger level is 0
+    // inside the workers, which would swallow result()/result_fmt.
+    const int total_runs = m_repeat * static_cast<int>(molecules.size());
+    const bool report_counter = (m_verbosity == 1);
+    nlohmann::json md_param = parameter;
+    md_param["verbosity"] = (m_verbosity >= 2) ? m_verbosity : 0;
+
+    std::atomic<int> done_runs{ 0 };
+    std::mutex counter_mtx;
+    const auto phase_start = std::chrono::steady_clock::now();
+
     CxxThreadPool* pool = new CxxThreadPool;
     int index = 0;
     CurcumaLogger::result_fmt("ConfSearch MD: Starting {} independent runs ({} repeats x {} structures), {} threads in parallel",
-        m_repeat * static_cast<int>(molecules.size()), m_repeat, static_cast<int>(molecules.size()), m_threads);
+        total_runs, m_repeat, static_cast<int>(molecules.size()), m_threads);
     for (int repeat = 0; repeat < m_repeat; ++repeat) {
         for (size_t i = 0; i < molecules.size(); ++i) {
-            MDThread* thread = new MDThread(parameter);
+            MDThread* thread = new MDThread(md_param);
             thread->setThreadId(index++);
             thread->setBasename(outputPath(Basename() + ".r" + std::to_string(repeat)));
             thread->setMolecule(molecules[i]);
             thread->setSharedBiasPool(m_bias_pool);
+            if (report_counter) {
+                thread->setOnComplete([&](double run_seconds) {
+                    const int d = ++done_runs;
+                    const double elapsed = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - phase_start)
+                                               .count();
+                    const int running = std::max(0, std::min(m_threads, total_runs - d));
+                    std::lock_guard<std::mutex> lock(counter_mtx);
+                    fmt::print("  MD runs: {}/{} done | ~{} running | last {:.2f} s | elapsed {:.1f} s\n",
+                        d, total_runs, running, run_seconds, elapsed);
+                    fflush(stdout);
+                });
+            }
             pool->addThread(thread);
         }
     }
     pool->setActiveThreadCount(m_threads);
+    // Claude Generated (Jul 2026): the CxxThreadPool stderr bar is per-run detail -- keep only at
+    // verbosity 3. The phase lines here + the verbosity-1 run counter above give progress otherwise.
+    pool->setProgressBar(m_verbosity >= 3 ? CxxThreadPool::ProgressBarType::Continously
+                                          : CxxThreadPool::ProgressBarType::None);
     pool->StartAndWait();
 
-    CurcumaLogger::result_fmt("ConfSearch: {} MD runs finished. Bias pool: {} structures.",
-        index, m_bias_pool ? m_bias_pool->biasStructureCount() : 0);
+    const double total_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - phase_start)
+                                     .count();
+    CurcumaLogger::result_fmt("ConfSearch: {} MD runs finished in {:.1f} s. Bias pool: {} structures.",
+        index, total_seconds, m_bias_pool ? m_bias_pool->biasStructureCount() : 0);
 
     // Claude Generated (Jul 2026): removed the empty "confsearch.unique.xyz" stub that was
     // created here. It hardcoded the basename instead of Basename(), was always written empty
@@ -1121,6 +1173,10 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
     // in its destructor — we own and delete them here.
     CxxThreadPool pool;
     pool.setActiveThreadCount(m_threads);
+    // Claude Generated (Jul 2026): per-batch optimisation bar (stderr) only at verbosity 3; the
+    // per-struct result_fmt lines + batch summary below cover progress at verbosity 1.
+    pool.setProgressBar(m_verbosity >= 3 ? CxxThreadPool::ProgressBarType::Continously
+                                         : CxxThreadPool::ProgressBarType::None);
 
     std::vector<OptThread*> threads;
     threads.reserve(total);
@@ -1652,6 +1708,10 @@ void ConfSearch::LoadControlJson()
     m_temp_abort_delta = m_config.get<double>("temp_abort_delta");
     m_rmsd_mtd_max_height = m_config.get<int>("rmsd_mtd_max_height");
     m_freeze_inherited = m_config.get<bool>("rmsd_mtd_freeze_inherited");
+    m_rmsd_mtd_max_gaussians = m_config.get<int>("rmsd_mtd_max_gaussians");  // Claude Generated (Jul 2026)
+    m_rmsd_mtd_screen = m_config.get<bool>("rmsd_mtd_screen");
+    m_rmsd_mtd_cutoff_tol = m_config.get<double>("rmsd_mtd_cutoff_tol");
+    m_rmsd_mtd_screen_margin = m_config.get<double>("rmsd_mtd_screen_margin");
     m_opt_feedback_bias = m_config.get<bool>("opt_feedback_bias");
     m_opt_feedback_height = m_config.get<int>("opt_feedback_height");
     m_opt_feedback_prune_snapshots = m_config.get<bool>("opt_feedback_prune_snapshots");
