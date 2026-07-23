@@ -1925,7 +1925,8 @@ private:
         const std::vector<int>& pi_fragments,
         const std::vector<double>& charges = {},
         const Eigen::MatrixXd& geometry_bohr = Eigen::MatrixXd(),
-        const std::vector<int>& pi_system_charge = {}) const;
+        const std::vector<int>& pi_system_charge = {},
+        const std::vector<int>& itag = {}) const;
 
     /**
      * @brief Calculate EEQ electrostatic energy

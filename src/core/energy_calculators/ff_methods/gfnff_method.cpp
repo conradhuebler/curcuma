@@ -5942,6 +5942,19 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         if (current_angle_deg > 160.0) r0_deg = 180.0;  // gen%linthr, change to linear (GEODEP)
     }
 
+    // Carbene angle equilibrium (Fortran gfnff_ini.f90:1573-1577). A 2-coordinate
+    // group-4 center tagged as a carbene (itag==1) uses a bent equilibrium — 145 deg
+    // for C, 90 deg for heavier group-4 — overriding every hyb/ring rule above (it is
+    // Fortran's carbene branch, applied just before the metal branch). Without it the
+    // central 2-coordinate amidine/carbene C (e.g. ED16b's N-C-N, itag=1) kept the
+    // 5-ring carbon theta0=109 deg, giving ~8.6 kcal too little angle strain vs the
+    // pprcht/gfnff reference. fbsmall (and thus the force constant) is recomputed from
+    // this theta0 below, so both track the reference. Claude Generated (Jul 2026).
+    if (group_center == 4 && nn_center == 2
+        && atom_j < static_cast<int>(topo_info.itag.size()) && topo_info.itag[atom_j] == 1) {
+        r0_deg = (z_center == 6) ? 145.0 : 90.0;
+    }
+
     // Convert to radians
     params.equilibrium_angle = r0_deg * M_PI / 180.0;
 
@@ -8022,7 +8035,8 @@ std::vector<double> GFNFF::calculatePiBondOrders(
     const std::vector<int>& pi_fragments,
     const std::vector<double>& charges,
     const Eigen::MatrixXd& geometry_bohr,
-    const std::vector<int>& pi_system_charge) const
+    const std::vector<int>& pi_system_charge,
+    const std::vector<int>& itag_in) const
 {
     /**
      * Claude Generated (January 14, 2026) - Updated for Phase 1: Full Hückel implementation
@@ -8062,8 +8076,16 @@ std::vector<double> GFNFF::calculatePiBondOrders(
             CurcumaLogger::info("Using full iterative Hückel calculation for π-bond orders");
         }
 
-        // Create itag vector (empty for now - can be extended for carbene/NO2 detection)
-        std::vector<int> itag(m_atomcount, 0);
+        // itag drives the FT-HMO π-electron count (carbene C=itag 1 → 0 electrons,
+        // NO2 N=itag 1, eta atoms=itag -1). Use the topology-derived itag from
+        // determineHybridizationFortran/buildNeighborListSet; only fall back to
+        // all-zeros if the caller passed nothing. Claude Generated (Jul 2026):
+        // previously this was hard-coded to zeros, so 2-coordinate carbene carbons
+        // (e.g. the central amidine C of ED16b) were wrongly counted as +1 π-electron
+        // → nelpi off by one → wrong pibo and a spurious pisip>0.40 fallback.
+        std::vector<int> itag = (static_cast<int>(itag_in.size()) == m_atomcount)
+                                    ? itag_in
+                                    : std::vector<int>(m_atomcount, 0);
 
         // Call the HuckelSolver
         std::vector<double> pi_bond_orders = m_huckel_solver->calculatePiBondOrders(
@@ -9285,13 +9307,23 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
                 if (charges[B] > 0.05) return;
             }
 
-            bool x_bonded_to_b = false;
-            for (const auto& bond : bonds) {
-                if ((bond.first == X && bond.second == B) || (bond.first == B && bond.second == X)) {
-                    x_bonded_to_b = true; break;
+            // Fortran gfnff_ini.f90:872: `if (bpair(lin(j,ix)) .le. 3) cycle` — B must be
+            // topologically A...B, NOT X-B, i.e. MORE than 3 bonds from the X donor. curcuma
+            // previously only excluded B directly bonded to X (topological distance 1), so B
+            // atoms 2-3 bonds from X (e.g. the phosphine P and ring C reachable through the
+            // Ru center from an S donor in PR34) were wrongly admitted -> ~11x too many
+            // X-bonds (-0.0201 vs the reference -0.0018 Eh). bpair==999 is "unconnected/beyond
+            // BFS depth", correctly > 3 so distant B stay valid. Claude Generated (Jul 2026).
+            if (X < static_cast<int>(topo_info.bpair.size())
+                && B < static_cast<int>(topo_info.bpair[X].size())) {
+                if (topo_info.bpair[X][B] <= 3) return;
+            } else {
+                // Fallback if bpair is unavailable: keep the old direct-bond exclusion.
+                for (const auto& bond : bonds) {
+                    if ((bond.first == X && bond.second == B) || (bond.first == B && bond.second == X))
+                        return;
                 }
             }
-            if (x_bonded_to_b) return;
 
             GFNFFHalogenBond xb;
             xb.i = A;
@@ -10130,7 +10162,8 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         topo_info.pi_fragments,
         charges_vec,
         m_geometry_bohr,  // P2a: Pass geometry instead of distance_matrix
-        topo_info.pi_system_charge  // ipis per pi-system (Jul 2026, F3)
+        topo_info.pi_system_charge,  // ipis per pi-system (Jul 2026, F3)
+        topo_info.itag  // carbene(+1)/NO2(+1)/eta(-1) tags for the FT-HMO electron count
     );
 
     // Initialize metal and aromatic flags

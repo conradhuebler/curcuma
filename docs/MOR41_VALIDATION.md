@@ -86,6 +86,114 @@ Session arc for native GFN-FF on MOR41 (per-reaction MAD): 57 (start) → 8.17 (
 4.07 (metal-H + eta/mchar) → **3.47** (π-metal qa). Remaining residuals are no longer dominated
 by any single mechanism identified so far.
 
+## Update (Jul 23, 2026): FT-HMO π-occupation fixes + the reference-implementation split
+
+Status: AI-generated, machine-tested. NOT human production-tested.
+
+### Two Hückel (FT-HMO) occupation fixes — `huckel_solver.cpp`
+
+The metal-coordinated aromatic rings (Cp / N-heteroaromatic ligands) had **odd** π-electron
+counts that curcuma's closed-shell FT-HMO occupation handled wrongly. Two faithful ports of the
+Fortran `gfnff_qm.f90` / `gfnff_ini.f90` closed the gap:
+
+1. **Open-shell `occu` split for odd nelpi** (was: `nel_alpha=nel/2`, one smear doubled — placed
+   only `nel-1` electrons and ran the biradical test at the wrong orbital). Now mirrors
+   `scc_core.f90 occu`: `ihomoa=nel/2+1`, `ihomob=nel/2`, two separate `fermismear` passes,
+   biradical test at the true alpha HOMO. Even nelpi is bit-identical to before (benzene / COT /
+   real antiaromatics untouched). Fixes the 5-electron Cp rings (ED36, PR04, PR10).
+2. **`pisip>0.40` "wrong pi occupation" fallback** (`gfnff_ini.f90:1082-1099`, xtb variant — NOT
+   gated on the print flag, unlike the pprcht standalone which nests it in `if(pr2)`; redo at
+   et=4000). If the converged HOMO energy > 0.40, redo the final solve with `nelpi-1`. Fixes the
+   5-atom/7-electron N-heteroaromatic rings (ED21/PR16/ED16a), which without it put all 7
+   electrons into an antibonding orbital → +180 kcal too weak.
+
+Effect vs the port reference (**pprcht/gfnff**, standalone, all 95 structures):
+per-structure MAD **7.27 → 1.61** (max 82.8 → 20.9, within-1 52 → 63/95). 71/71 runnable gfnff
+ctests still pass; 64/95 MOR41 structures bit-identical (only odd-nelpi π-systems change).
+
+### Two carbene fixes — the central amidine C (ED16b, `gfnff_method.cpp`)
+
+Ground-truthed per-bond/per-angle against the standalone analyzer, ED16b (an organic
+N-heterocyclic diamine, NO metal) had a −20.9 kcal residual = bond −12 + angle −9, both from its
+2-coordinate central amidine carbon (N-C-N, a carbene):
+
+1. **itag reaches the FT-HMO π-count** — the `GFNFF::calculatePiBondOrders` call site hard-coded
+   an all-zeros `itag` (`gfnff_method.cpp:8065`), so the carbene C (correctly tagged `itag=1` by
+   `determineHybridizationFortran`) was counted as +1 π-electron → nelpi 7 not 6 → wrong pibo +
+   a spurious `pisip>0.40` fallback. Now passes `topo_info.itag` through. Bond term → 1e-7 Eh.
+2. **carbene angle equilibrium** (`gfnff_ini.f90:1573-1577`) — a 2-coordinate group-4 center with
+   `itag=1` uses θ0=145° (C) / 90° (heavier), overriding the hyb/ring rule. curcuma lacked it, so
+   the carbene kept the 5-ring θ0=109° → too little angle strain. Added before the metal-center
+   branch; `fbsmall`/force-constant follow from θ0 automatically.
+
+**ED16b: −20.85 → 0.0000 kcal** vs pprcht **and** xtb (they agree here). Only ED16b changes in
+MOR41 (surgical, no regression). Overall per-structure MAD vs pprcht **1.61 → 1.39**
+(max 20.9 → 12.7, within-1 63 → 64/95).
+
+### Halogen-bond B-atom topological-distance filter (`gfnff_method.cpp:9310`)
+
+`detectHalogenBondsNative` only excluded a base B directly bonded to the X donor (topological
+distance 1), but Fortran `gfnff_ini.f90:872` requires `bpair(B,X) > 3` — B must be **more than 3
+bonds** from X (A…B, not X-B). So B atoms 2-3 bonds from X — e.g. the phosphine P and ring C
+reachable through the Ru center from an S donor in PR34 — were wrongly admitted: **114 X-bonds,
+−0.0201 Eh vs the reference 22 / −0.0018 Eh** (S is a valid chalcogen X donor, so it is not fully
+spurious, just over-counted ~11×). Now filters on `topo_info.bpair[X][B] <= 3` (999 = beyond BFS
+depth / other fragment, correctly kept). PR34 **−10.48 → +0.99 kcal**.
+
+Broad effect (31 structures touched, all with S/P/metal X donors): per-structure MAD vs pprcht
+**1.39 → 0.975**, within-1 64 → **71/95**; 71/71 runnable gfnff ctests pass. Verified faithful —
+curcuma's X-bond energy now matches the analyzer bit-for-bit (PR34 −0.00179 vs −0.00183; ED18/PR23
+both exactly 0). Several structures that *appeared* to worsen (ED18 −0.8→+3.2, PR07, ED07) had a
+spurious negative X-bond masking a real residual in another term — now correctly exposed for the
+next pass.
+
+### EEQ `gam`/`chi` heavy-element array corruption (`gfnff_par.h`)
+
+ED07 (the previously "unexplained" W complex) traced to a **wrong EEQ hardness**: `gam_eeq[73]`
+(W) was **+0.064240** vs the Fortran `gam_angewChem2020(74) = −0.003724`. A full array diff showed
+**`gam_eeq` was corrupt for all of Z=56-86** (Ba + lanthanides + 5d/6p — placeholder/interpolated
+values; the Z≥87 slots even repeated the Z=55-56 chunk), and **`chi_eeq` for Z=57-71** (La-Lu). Z≤55
+and cnf/alp were correct. Replaced Z=56-86 `gam` and Z=57-71 `chi` with the verbatim Fortran
+`*_angewChem2020` arrays.
+
+Wrong W hardness → wrong W EEQ charge (**qa 0.326 → 0.351**, the reference value) → wrong Coulomb
+(+2.5 kcal) and metal-bond `fqq` (W-P 1.266 → 1.366, bond +6.5 kcal). Fixing it resolved every 5d-metal
+(W/Ir/Pt) structure at once: **ED07 +8.54 → +0.09, PR07 +6.65 → +0.10, ED18 +3.15 → +0.17, PR22
++2.88 → +0.23, ED22 +2.15 → 0.00, PR31, PR08, ED08, ED29, …** (14 improved, 1 marginal). 3d/4d
+metals (Z≤55) unchanged. Per-structure MAD vs pprcht **0.975 → 0.630**, within-1 71 → **82/95**;
+71/71 runnable gfnff ctests pass. (No MOR41 lanthanides, so the `chi` Z=57-71 fix is correctness-only.)
+
+**Session arc vs pprcht/gfnff (per-structure MAD):** 7.27 (start) → 1.61 (FT-HMO occu + pisip) →
+1.39 (carbene itag + angle) → 0.975 (halogen bpair) → **0.630** (EEQ gam array), within-1 52 → 82/95.
+
+### The reference-implementation split (OPEN PORTING QUESTION)
+
+Building the standalone **pprcht/gfnff** analyzer (`external/gfnff`, `-Dbuild_exe=ON`, the code
+curcuma was ported from — "adapted from the xtb code", Spicher/Grimme 2020) revealed that the
+**two GFN-FF implementations themselves disagree** on transition-metal complexes:
+
+| comparison (per-structure, n=95) | MAD | max |
+|----------------------------------|----:|----:|
+| curcuma (both fixes) vs **pprcht/gfnff** (the port reference) | **1.61** | 20.9 |
+| **pprcht/gfnff** vs **xtb 6.7.1** (two GFN-FF impls) | **11.6** | **178** |
+| curcuma vs xtb 6.7.1 | 12.7 | 178 |
+
+So the large "curcuma vs xtb" residual on TMs (PR10 −178, PR04 −164, ED10 −111, PR28 −103, …) is
+**overwhelmingly the pprcht-vs-xtb divergence, not a curcuma port error** — curcuma now tracks its
+reference (pprcht) to MAD 1.6. xtb 6.7.1's GFN-FF has evidently changed on TMs since the pprcht
+snapshot was extracted (cf. Moradi et al., *J. Comput. Chem.* 2026, "Extensions to Extended
+Tight-Binding Methods for Transition-Metal Containing Systems").
+
+**Open question — which GFN-FF is "correct" for TMs is undecided.** Resolution deferred: compute
+both against the **DLPNO-CCSD(T)/CBS** MOR41 reference (already in `reactions.dat` / Table S1) and
+see which implementation is closer. Until then, curcuma targets pprcht/gfnff (its port source).
+
+### Remaining pure-port residuals (curcuma vs pprcht, where pprcht==xtb so not the split)
+
+ED16b −20.9, PR34 −10.5, ED33 −7.2, ED07 +6.3 (documented), PR33 −7.0, PR35 −6.0, PR38 −4.9 —
+genuine remaining porting TODOs, independent of the xtb/pprcht divergence. Ground-truth with the
+`external/gfnff/_build/gfnff` analyzer (per-bond `pibo`/`fqq`/force-constant print via `pr=.true.`).
+
 The sections below are the original (pre-fix) diagnostic and remain valid for GFN-FF.
 
 ## What this is

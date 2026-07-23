@@ -230,9 +230,13 @@ private:
      *
      * @param H Hamiltonian matrix (input), density matrix (output)
      * @param nel Number of electrons
+     * @param pisip_out Optional: receives the HOMO orbital energy (eV, scaled),
+     *        i.e. the eps of the highest orbital with occupation > 0.5. Used by
+     *        the caller for the pisip>0.40 "wrong pi occupation" fallback
+     *        (gfnff_ini.f90:1082). Pass nullptr if not needed.
      * @return Electronic energy (for convergence check)
      */
-    double solveAndBuildDensity(Eigen::MatrixXd& H, int nel) const;
+    double solveAndBuildDensity(Eigen::MatrixXd& H, int nel, double* pisip_out = nullptr) const;
 
     /**
      * @brief Compute Fermi-Dirac occupations at given temperature
