@@ -29,6 +29,11 @@ speed optimisation and none of the changes here touch it.
 The work splits into two phases with a shared engine. **Phase 1 is implemented first and stands on
 its own**; Phase 2 builds on its machinery.
 
+> Status (Jul 2026): **Phase 1 is implemented** — M1 (strided deposition + soft counter + provenance
+> + restart guard) and M2 (held + smoothstep-interpolated force + gap guard, the speedup) both landed,
+> `strided` is the default, `legacy` is bit-identical for A/B, ConfSearch safeguards flipped OFF (5.7).
+> Verified on butane/gfnff; regression 20/20. Phase 2 (Section 8) is not started.
+
 - **Phase 1 — robust + fast ConfSearch** (Sections 4-7). Replace the counter/`econv` scheme with the
   *strided scheme*: decoupled force/deposition cadences (held + smoothed force), an interpretable
   deposition spacing `r_dep`, a soft residence-weighted counter (deletes the runaway-causing gate),
@@ -353,9 +358,10 @@ points:
 - **Restart format**: the checkpoint changes (`counter` int -> double; `deposit_stride`/`r_dep`
   stored; `econv`/`mtd_steps` dropped). Bump the checkpoint version and refuse an old counter-scheme
   restart with a clear message rather than misinterpret it.
-- **ConfSearch safeguards**: `temp_abort`, `rmsd_mtd_freeze_inherited`, `rmsd_mtd_max_height` were
-  defaults-ON to contain the old runaway. Once check 5 confirms the runaway is gone by construction,
-  revisit those defaults (expected: OFF) and update the ConfSearch docs.
+- **ConfSearch safeguards**: `temp_abort` and `rmsd_mtd_freeze_inherited` were defaults-ON to contain
+  the old runaway. DONE (Jul 2026): both flipped to OFF — butane ConfSearch (gfnff, 600->400 K, 3
+  cycles) completes cleanly with both off, controlled pool growth, no instability. Both remain one
+  flag away for the legacy bound. `rmsd_mtd_max_height` stays 0 (opt-in) in both schemes.
 - **`legacy` switch**: retained only for the Section 6 A/B comparison, removed after sign-off.
 
 ## 6. Phase 1 validation plan
