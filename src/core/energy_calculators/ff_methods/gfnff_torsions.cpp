@@ -560,13 +560,23 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
         params.periodicity = 3;     // nrot = 3
         params.phase_shift = M_PI;  // phi0 = 180° (keeps acyclic default)
     }
-    // sp²-sp²: Twofold for pi bonds (gfnff_ini.f90:1842)
-    else if (hyb_j == 2 && hyb_k == 2) {
+    // sp²-sp²: Twofold ONLY for a real pi central bond (gfnff_ini.f90:1732 `btyp(m)==2`).
+    // CRITICAL (Jul 24, 2026): the Fortran nrot=2 is keyed on the BOND type btyp==2, not
+    // on both atoms being sp2. A metal M-C bond with a locally-sp2 carbon (hyb=2) is
+    // btyp=5 (metal), not 2, so it keeps nrot=1 — the Ti-C4 torsion of ED40a/ED14 was
+    // wrongly getting nrot=2. Gate on bond_type==2 (btyp of the central bond).
+    else if (hyb_j == 2 && hyb_k == 2 && bond_type == 2) {
         params.periodicity = 2;     // nrot = 2
         params.phase_shift = M_PI;  // phi0 = 180° (planar trans)
     }
-    // Pi-sp³ mixed (gfnff_ini.f90:1843-1854)
-    else if ((hyb_j == 2 && hyb_k == 3) || (hyb_j == 3 && hyb_k == 2)) {
+    // Pi-sp³ mixed (gfnff_ini.f90:1733-1744). CRITICAL (Jul 24, 2026): the Fortran
+    // nrot=3 for sp2-sp3 fires ONLY via the pi-sp3 path, which requires the sp2 atom
+    // to be in a pi system (piadr>0). A NON-pi sp2 atom — e.g. a transition metal with
+    // 3 neighbours (hyb=2 from gfnff_ini2.f90:241, but piadr=0) — keeps the acyclic
+    // default nrot=1 (and f1=torsf(1), not the pi-sp3 0.5). Without the pi gate, the
+    // metal-C torsions of ED40a/PR41/ED14 got nrot=3 AND f1=0.5 (half FC), ~0.4-0.56
+    // kcal too low in the torsion term. Gate on the sp2 atom being pi.
+    else if ((hyb_j == 2 && hyb_k == 3 && j_is_pi) || (hyb_j == 3 && hyb_k == 2 && k_is_pi)) {
         params.periodicity = 3;     // nrot = 3
         params.phase_shift = M_PI;  // phi0 = 180°
     }
@@ -782,7 +792,11 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // the ring case keeps f1=torsf_single (1.0) which is then scaled by the pi-system 0.55,
     // matching Fortran's f1=1.0*0.55=0.55 (native f1=0.5*0.55=0.275 was exactly half).
     // Claude Generated (June 2026).
-    else if (!in_ring && ((eff_hyb_j == 2 && eff_hyb_k == 3) || (eff_hyb_j == 3 && eff_hyb_k == 2))) {
+    // pi gate (Jul 24, 2026): matches the periodicity gate above — the Fortran pi-sp3
+    // f1=0.5 requires the sp2 atom to be in a pi system (piadr>0). A non-pi sp2 atom
+    // (transition metal, hyb=2 but piadr=0) keeps the default f1=torsf_single=1.0.
+    else if (!in_ring && ((eff_hyb_j == 2 && eff_hyb_k == 3 && j_is_pi)
+                          || (eff_hyb_j == 3 && eff_hyb_k == 2 && k_is_pi))) {
         f1 = 0.5;
         if (z_j == 7 || z_k == 7) f1 = 0.2;  // Nitrogen lowers barrier
     }

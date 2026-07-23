@@ -1373,6 +1373,12 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         double et = V * (1.0 + cos(c1));
         double energy = et * damp;
 
+        if (std::getenv("CURCUMA_TORS_DUMP")) {
+            fmt::print("TORS {:3d} {:3d} {:3d} {:3d}  n={:.1f} phi0={:7.2f} phi={:7.2f} V={:.6f} damp={:.5f} E={:.9f}\n",
+                       dihedral.i+1, dihedral.j+1, dihedral.k+1, dihedral.l+1,
+                       n, phi0*180.0/M_PI, phi*180.0/M_PI, V, damp, energy*m_dihedral_scaling);
+        }
+
         primary_torsion_energy += energy * m_dihedral_scaling;  // Claude Generated (Jan 2, 2026): Accumulate primary
 
         // Torsion geometry analysis (Dec 2025, capped Apr 2026) — log first 5
