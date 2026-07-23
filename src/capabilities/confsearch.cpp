@@ -1057,7 +1057,7 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
             exported, static_cast<int>(snapshot.size()), static_cast<int>(snapshot.size()) - bias_count, stride, Basename());
     }
 
-    delete pool;
+    delete pool; // MDThread sets autoDelete=true, so the pool frees the threads here (no leak)
 
     // Thread-pool boundary (Claude Generated, Jun 2026): the MD workers run and are destroyed on
     // CxxThreadPool worker threads, where the global CurcumaLogger verbosity (a shared static) is
@@ -1127,6 +1127,17 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
 
     // Clear output file
     std::ofstream(output_file).close();
+
+    // Claude Generated (Jul 2026): a cycle can produce no structures to optimise (e.g. -rmsd_mtd
+    // false, or an MD phase that deposited nothing), so the input file may not exist. FileIterator
+    // would throw an uncaught std::runtime_error ("File not found") -> terminate. Skip gracefully.
+    {
+        std::ifstream check(input_file);
+        if (!check.good()) {
+            CurcumaLogger::warn("PerformOptimisation: no input file (nothing to optimise), skipping: " + input_file);
+            return basename;
+        }
+    }
 
     // Load molecules from file
     std::vector<Molecule> molecules;
