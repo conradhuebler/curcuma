@@ -14,6 +14,7 @@
 
 #include <shared_mutex>
 #include <atomic>
+#include <tuple>
 #include <vector>
 
 #include "src/capabilities/simplemd.h"  // BiasStructure
@@ -55,8 +56,9 @@ public:
      *  well-tempered OUTPUT weight; pass 0 when well-tempering is off, so the force
      *  and deposition are never affected). One unique_lock per batch -- called at most
      *  once per MD step, so it does not defeat the read-heavy snapshot() design.
-     *  updates: (structure index, well-tempered weight increment) pairs. */
-    void registerVisits(const std::vector<std::pair<int, double>>& updates);
+     *  updates: (structure index, counter increment [1.0 legacy / expr strided], well-tempered
+     *  weight increment) tuples. */
+    void registerVisits(const std::vector<std::tuple<int, double, double>>& updates);
 
     /** Prune structures whose counter is below threshold.
      *  Called between temperature cycles (no concurrent access).

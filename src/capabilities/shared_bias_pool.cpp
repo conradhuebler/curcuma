@@ -48,15 +48,15 @@ int SharedBiasPool::depositBatch(const std::vector<BiasStructure>& structures)
     return first_index;
 }
 
-void SharedBiasPool::registerVisits(const std::vector<std::pair<int, double>>& updates)
+void SharedBiasPool::registerVisits(const std::vector<std::tuple<int, double, double>>& updates)
 {
     if (updates.empty())
         return;
     std::unique_lock<std::shared_mutex> lock(m_mutex);
-    for (const auto& [idx, wt_weight] : updates) {
+    for (const auto& [idx, counter_inc, wt_weight] : updates) {
         if (idx >= 0 && idx < static_cast<int>(m_structures.size())) {
-            m_structures[idx].counter++;          // exploration: hill height W = k*counter
-            m_structures[idx].factor += wt_weight; // opt-in well-tempered output weight
+            m_structures[idx].counter += counter_inc; // exploration: +1 (legacy) or += expr (strided)
+            m_structures[idx].factor += wt_weight;     // opt-in well-tempered output weight
         }
     }
 }
@@ -214,7 +214,7 @@ void SharedBiasPool::deserializeMetadata(const nlohmann::json& metadata)
         bs.energy = entry.value("energy", 0.0);
         bs.factor = entry.value("factor", 1.0);
         bs.index = entry.value("index", 0);
-        bs.counter = entry.value("counter", 0);
+        bs.counter = entry.value("counter", 0.0);
         bs.temperature = entry.value("temperature", 0.0);
         bs.persistent = entry.value("persistent", false);
         m_structures.push_back(std::move(bs));

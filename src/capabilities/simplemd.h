@@ -53,7 +53,7 @@ struct BiasStructure {
     double energy = 0;
     double factor = 1;
     int index = 0;
-    int counter = 0;
+    double counter = 0; // Claude Generated (Jul 2026): soft residence-weighted height (strided scheme); was int visit count
     double temperature = 0;  // Claude Generated (Apr 2026): deposition temperature for cross-T propagation
     bool persistent = false; // Claude Generated (Jun 2026): fed-back optimised minimum; exempt from counter pruning
 };
@@ -126,7 +126,11 @@ public:
     inline void setScreen(bool screen) { m_screen = screen; }
     inline void setCutoffTol(double tol) { m_cutoff_tol = tol; }
     inline void setScreenMargin(double margin) { m_screen_margin = margin; }
-    inline int Counter() const { return m_counter; }
+    // Claude Generated (Jul 2026): strided scheme. soft = residence-weighted counter (delete gate);
+    // grow = whether this call is a deposit-stride step (counter grows only then).
+    inline void setSoftCounter(bool soft) { m_soft_counter = soft; }
+    inline void setGrowCounter(bool grow) { m_grow_counter = grow; }
+    inline double Counter() const { return m_counter; }
     // Claude Generated (Jul 2026): hills screened/evaluated in the last execute() call.
     inline int LastScreened() const { return m_last_screened; }
     inline int LastEvaluated() const { return m_last_evaluated; }
@@ -141,7 +145,8 @@ private:
     Geometry m_gradient;
     double m_k, m_alpha, m_DT, m_currentStep, m_rmsd_reference, m_current_bias, m_rmsd_econv;
     double m_current_bias_wt = 0; // well-tempered bias energy (opt-in, output only)
-    int m_counter = 0, m_atoms = 0;
+    double m_counter = 0; // reported soft-counter sum (diagnostic only)
+    int m_atoms = 0;
     // Claude Generated (Jul 2026): Gaussian-cutoff screen (see SimpleMD::m_rmsd_mtd_screen).
     bool m_screen = true;
     double m_cutoff_tol = 1.0e-8;
@@ -151,6 +156,8 @@ private:
     std::vector<char> m_desc_ok;                  // filled flag per hill
     int m_last_screened = 0, m_last_evaluated = 0; // hills skipped/computed in the last execute()
     bool m_wtmtd = false, m_nocolvarfile = false, m_nohillsfile = false;
+    bool m_soft_counter = false; // Claude Generated (Jul 2026): strided scheme -> counter += expr (gate deleted)
+    bool m_grow_counter = true;  // this call is a deposit-stride step
     std::string m_colvar_base = "COLVAR";
 };
 
@@ -488,7 +495,7 @@ private:
     int m_max_rmsd_N = -1;
     int m_rmsd_mtd_max_height = 0;       // Claude Generated (Jun 2026): cap on counter used in W_i (0 = unbounded)
     bool m_freeze_inherited = false;     // Claude Generated (Jun 2026): freeze heights of structures inherited at run start
-    std::unordered_map<int, int> m_frozen_height; // index -> frozen counter for inherited bias structures
+    std::unordered_map<int, double> m_frozen_height; // index -> frozen counter for inherited bias structures
     // Claude Generated (Jul 2026): RMSD-MTD Gaussian-cutoff screen. Skip a bias hill before its
     // Kabsch/gradient when a rigorous, rotation/translation-invariant RMSD lower bound (principal
     // radii of gyration of the RMSD subset; Mirsky's inequality) proves its Gaussian is negligible.
@@ -500,6 +507,19 @@ private:
     std::vector<Eigen::Vector3d> m_hill_sigma;   // principal radii of gyration (sorted desc) of the subset
     std::vector<Geometry> m_hill_centered;       // geometric-centered RMSD-subset coordinates
     std::vector<char> m_hill_desc_ok;            // filled flag per hill index
+    // Claude Generated (Jul 2026): strided scheme (replaces counter/econv). docs/RMSD_MTD_TEXTBOOK.md.
+    std::string m_rmsd_mtd_scheme = "strided";
+    double m_r_dep = -1.0;                // hill spacing (Angstrom); <0 -> auto FWHM(alpha)
+    double m_vmin = 0.0;                  // deposition floor k*exp(-alpha*r_dep^2)
+    double m_transition_fraction = 1.0;   // Milestone 2 force-ramp length (fraction of stride)
+    int m_deposit_stride_steps = 1;       // deposit_stride_fs / time_step, >= 1
+    int m_last_deposit_eval_step = -1;    // last step the deposition/counter test ran
+    bool m_gap_guard = true;              // Milestone 2 displacement trigger
+    bool m_rmsd_mtd_diag = true;          // write provenance CSV + gnuplot
+    // Held-force buffers: bias-force CONTRIBUTION only (natoms x 3), not serialized. M1 uses weight 1.
+    Geometry m_bias_force_old, m_bias_force_target;
+    double m_bias_energy_target = 0.0;    // exact V(x) at the last evaluation
+    int m_bias_ramp_start_step = -1;      // step of the last F_target recompute
     int m_mtd_steps = 10;
     int m_rattle = 0;
     int m_colvar_incr = 0;
@@ -650,7 +670,7 @@ private:
     PARAM(rmsd_mtd, Bool, false, "Enable internal RMSD-based metadynamics.", "RMSD-MTD", {})
     PARAM(rmsd_mtd_k, Double, 0.01, "Hill-height constant: bias height W_i = k * counter_i (Eh). The force is the exact gradient of the bias, so k is ~100x smaller than the pre-2026 value.", "RMSD-MTD", {"k_rmsd"})
     PARAM(rmsd_mtd_alpha, Double, 10.0, "Width parameter for RMSD Gaussians.", "RMSD-MTD", {"alpha_rmsd"})
-    PARAM(rmsd_mtd_pace, Int, 1, "Unused in the counter-based scheme (kept for compatibility); deposition is gated by the bias level, not a fixed pace.", "RMSD-MTD", {"mtd_steps"})
+    PARAM(rmsd_mtd_pace, Int, 1, "DEPRECATED and ignored under the strided scheme (use rmsd_mtd_deposit_stride). Only honoured by rmsd_mtd_scheme=legacy.", "RMSD-MTD", {"mtd_steps"})
     PARAM(rmsd_mtd_max_gaussians, Int, -1, "Maximum number of stored bias structures.", "RMSD-MTD", {"max_rmsd_N"})
     PARAM(rmsd_mtd_ref_file, String, "none", "File with reference structures for RMSD-MTD.", "RMSD-MTD", {"rmsd_ref_file"})
     PARAM(rmsd_mtd_atoms, String, "-1", "Atom indices to use for RMSD calculation.", "RMSD-MTD", {"rmsd_atoms"})
@@ -660,6 +680,13 @@ private:
     PARAM(rmsd_mtd_screen, Bool, true, "Skip bias hills whose Gaussian contribution is provably negligible, using a rotation/translation-invariant RMSD lower bound (principal radii of gyration of the RMSD subset) plus a Gaussian cutoff. Physics-preserving: energy, force and the visited set are unaffected. false = evaluate every hill (legacy).", "RMSD-MTD", {})
     PARAM(rmsd_mtd_cutoff_tol, Double, 1.0e-8, "Gaussian tolerance for rmsd_mtd_screen: a hill is skipped when its lower-bound exp(-alpha*RMSD^2) falls below this (further tightened to global_count/rmsd_econv so the deposition/visited bookkeeping is preserved). Smaller = more conservative (closer to legacy).", "RMSD-MTD", {})
     PARAM(rmsd_mtd_screen_margin, Double, 0.0, "Extra safety radius (RMSD length units) added to the screen cutoff. 0 relies on the rigorous lower bound; increase only when experimenting with heuristic descriptors.", "RMSD-MTD", {})
+    // --- Strided scheme (Jul 2026, replaces counter/econv). See docs/RMSD_MTD_TEXTBOOK.md ---
+    PARAM(rmsd_mtd_scheme, String, "strided", "RMSD-MTD deposition scheme: 'strided' (interpretable V_min spacing, soft residence counter, deposition on a fs cadence) or 'legacy' (pre-2026 counter/econv scheme, kept transiently for A/B validation).", "RMSD-MTD", {})
+    PARAM(rmsd_mtd_deposit_stride, Double, 10.0, "Strided scheme: deposition / counter-growth cadence in fs (converted to steps via time_step). The bias force still acts every step. Structures change slowly, so 10-20 fs is enough.", "RMSD-MTD", {})
+    PARAM(rmsd_mtd_transition_fraction, Double, 1.0, "Strided scheme (Milestone 2): force-ramp length as a fraction of deposit_stride, in (0,1]. 1.0 glides continuously. Unused while the force is evaluated every step.", "RMSD-MTD", {})
+    PARAM(rmsd_mtd_r_dep, Double, -1.0, "Strided scheme: hill spacing in RMSD space (Angstrom) setting V_min = k*exp(-alpha*r_dep^2). -1 = auto FWHM(alpha) = 2.3548/sqrt(2*alpha) (0.5 A at alpha=10).", "RMSD-MTD", {})
+    PARAM(rmsd_mtd_gap_guard, Bool, true, "Strided scheme (Milestone 2): force an early deposition test when the walker moves > r_dep from the last deposited hill within a stride (closes coverage gaps). Inert while the force is evaluated every step.", "RMSD-MTD", {})
+    PARAM(rmsd_mtd_diag, Bool, true, "Write RMSD-MTD provenance diagnostics (basename.mtd_hills / mtd_coverage CSV + gnuplot scripts) via the BMT output path at verbosity>=1. false = COLVAR only.", "RMSD-MTD", {})
 
     // --- Coarse Graining (CG) Parameters --- Claude Generated (Nov 2025)
     PARAM(cg_write_vtf, Bool, true, "Write VTF trajectory for CG systems.", "CG", {"write_vtf"})

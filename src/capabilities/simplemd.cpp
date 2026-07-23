@@ -40,6 +40,7 @@
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 #include "src/capabilities/shared_bias_pool.h"  // Claude Generated (Apr 2026)
+#include "src/capabilities/rmsd_mtd_core.h"      // Claude Generated (Jul 2026): strided-scheme decision helpers
 
 #include "src/core/elements.h"
 #include "src/core/energycalculator.h"
@@ -125,6 +126,7 @@ int BiasThread::execute()
     //   V(x) = Sum_i W_i * exp(-alpha * RMSD(x, x_i)^2)
     // and the force below is its EXACT negative gradient. Claude Generated (Jun 2026).
     std::vector<int> visited;
+    std::vector<std::pair<int, double>> soft_visits; // strided: (hill index, Gaussian weight expr)
 
     // Claude Generated (Jul 2026): Gaussian-cutoff screen setup (see SimpleMD::m_rmsd_mtd_screen).
     // Center the walker once per step and cache each hill's centered subset + principal radii so far
@@ -201,20 +203,33 @@ int BiasThread::execute()
             colvarfile.close();
         }
 
-        // Visited if the walker sits inside this Gaussian (heuristic deposition gate).
-        if (expr * m_rmsd_econv > static_cast<double>(m_biased_structures.size()))
+        // Strided scheme: soft residence-weighted growth for every evaluated hill (gate deleted).
+        // Legacy: binary visited gate.
+        if (m_soft_counter)
+            soft_visits.emplace_back(i, expr);
+        else if (expr * m_rmsd_econv > static_cast<double>(m_biased_structures.size()))
             visited.push_back(i);
 
         m_counter += m_biased_structures[i].counter;
     }
 
-    // Phase 2: update visited references. Exploration (counter) is ALWAYS undamped so
-    // well-tempering never slows the search. WT (opt-in) only feeds the separate output
-    // weight 'factor' with the standard W*exp(-V/(kB*Delta_T)) damping.
-    for (int i : visited) {
-        m_biased_structures[i].counter++;
-        if (m_wtmtd)
-            m_biased_structures[i].factor += exp(-m_current_bias / (kb_Eh * m_DT));
+    // Phase 2: grow hill heights. Legacy: hard +1 per visited hill, every call. Strided: soft
+    // += expr per evaluated hill, only on a deposit-stride step (m_grow_counter). WT (opt-in) only
+    // feeds the separate output weight 'factor'.
+    if (m_soft_counter) {
+        if (m_grow_counter) {
+            for (const auto& [i, e] : soft_visits) {
+                m_biased_structures[i].counter += e;
+                if (m_wtmtd)
+                    m_biased_structures[i].factor += exp(-m_current_bias / (kb_Eh * m_DT));
+            }
+        }
+    } else {
+        for (int i : visited) {
+            m_biased_structures[i].counter++;
+            if (m_wtmtd)
+                m_biased_structures[i].factor += exp(-m_current_bias / (kb_Eh * m_DT));
+        }
     }
     return 1;
 }
@@ -330,6 +345,26 @@ void SimpleMD::LoadControlJson()
     m_rmsd_mtd_screen = m_config.get<bool>("rmsd_mtd_screen", true);            // Claude Generated (Jul 2026): Gaussian-cutoff screen
     m_rmsd_mtd_cutoff_tol = m_config.get<double>("rmsd_mtd_cutoff_tol", 1.0e-8);
     m_rmsd_mtd_screen_margin = m_config.get<double>("rmsd_mtd_screen_margin", 0.0);
+    // Claude Generated (Jul 2026): strided scheme resolution. See docs/RMSD_MTD_TEXTBOOK.md.
+    m_rmsd_mtd_scheme = m_config.get<std::string>("rmsd_mtd_scheme");
+    double rmsd_mtd_deposit_stride_fs = m_config.get<double>("rmsd_mtd_deposit_stride");
+    m_transition_fraction = m_config.get<double>("rmsd_mtd_transition_fraction");
+    m_r_dep = m_config.get<double>("rmsd_mtd_r_dep");
+    m_gap_guard = m_config.get<bool>("rmsd_mtd_gap_guard");
+    m_rmsd_mtd_diag = m_config.get<bool>("rmsd_mtd_diag");
+    if (m_r_dep < 0.0)
+        m_r_dep = RMSDMTD::autoRdep(m_alpha_rmsd);
+    m_vmin = RMSDMTD::vMin(m_k_rmsd, m_alpha_rmsd, m_r_dep);
+    // Note: uses the pre-CG-scaling time step (m_dT here); CG timestep scaling + rmsd_mtd is not a target.
+    m_deposit_stride_steps = std::max(1, static_cast<int>(std::llround(rmsd_mtd_deposit_stride_fs / m_dT)));
+    if (m_rmsd_mtd_scheme != "legacy")
+        m_mtd_steps = 1; // strided: evaluate the bias force every step; deposition is gated internally
+    if (m_rmsd_mtd_scheme != "legacy") {
+        if (m_config.has("rmsd_econv") || m_config.has("econv"))
+            CurcumaLogger::warn("econv is deprecated and ignored under rmsd_mtd_scheme=strided; hill spacing is set by rmsd_mtd_r_dep (V_min).");
+        if (m_config.has("rmsd_mtd_pace") || m_config.has("mtd_steps"))
+            CurcumaLogger::warn("rmsd_mtd_pace/mtd_steps is deprecated and ignored under rmsd_mtd_scheme=strided; use rmsd_mtd_deposit_stride.");
+    }
     m_wtmtd = m_config.get<bool>("wtmtd", false);  // Not in PARAM block - legacy
     m_rmsd_ref_file = m_config.get<std::string>("rmsd_mtd_ref_file");
     m_rmsd_fix_structure = m_config.get<bool>("rmsd_fix_structure", false);  // Not in PARAM block - legacy
@@ -930,6 +965,7 @@ bool SimpleMD::Initialise()
             thread->setScreen(m_rmsd_mtd_screen);         // Claude Generated (Jul 2026)
             thread->setCutoffTol(m_rmsd_mtd_cutoff_tol);
             thread->setScreenMargin(m_rmsd_mtd_screen_margin);
+            thread->setSoftCounter(m_rmsd_mtd_scheme != "legacy");  // Claude Generated (Jul 2026)
             m_bias_threads.push_back(thread);
             m_bias_pool->addThread(thread);
         }
@@ -3163,6 +3199,14 @@ void SimpleMD::ApplyRMSDMTD()
     double current_bias_wt = 0; // optional well-tempered energy (opt-in, COLVAR output only)
     double rmsd_reference = 0;
 
+    // Claude Generated (Jul 2026): strided scheme. The bias force is evaluated every step (m_mtd_steps
+    // is forced to 1 for strided); counter growth + deposition happen only every deposit_stride.
+    const bool strided = (m_rmsd_mtd_scheme != "legacy");
+    bool do_deposit = !strided || m_last_deposit_eval_step < 0
+        || (m_step - m_last_deposit_eval_step) >= m_deposit_stride_steps;
+    if (do_deposit)
+        m_last_deposit_eval_step = m_step;
+
     // Claude Generated (Apr 2026): Shared bias pool path for parallel ConfSearch
     // When a shared pool is set, read bias structures from the pool and evaluate locally.
     // Deposit new structures back to the shared pool when the deposition criterion is met.
@@ -3211,6 +3255,7 @@ void SimpleMD::ApplyRMSDMTD()
 
         // Visited references to bump after the loop (the WT weight needs the full V).
         std::vector<int> visited;
+        std::vector<std::pair<int, double>> soft_visits; // strided: (index, summed Gaussian weight)
 
         // Symmetry/atom-permutation set discovered by ConfScan (full-atom reorder rules), set
         // on the shared pool between cycles. Empty -> identity only -> bit-identical to before.
@@ -3285,14 +3330,14 @@ void SimpleMD::ApplyRMSDMTD()
             // Effective hill counter: frozen if inherited at run start (only this run's deposits
             // grow), then capped by rmsd_mtd_max_height. Both default-off -> eff = bs.counter
             // (legacy W_i = k * counter_i). Claude Generated (Jun 2026).
-            int eff_counter = bs.counter;
+            double eff_counter = bs.counter;
             if (m_freeze_inherited) {
                 auto it = m_frozen_height.find(bs.index);
                 if (it != m_frozen_height.end())
                     eff_counter = it->second;
             }
             if (m_rmsd_mtd_max_height > 0)
-                eff_counter = std::min(eff_counter, m_rmsd_mtd_max_height);
+                eff_counter = std::min(eff_counter, static_cast<double>(m_rmsd_mtd_max_height));
             const double height = m_k_rmsd * eff_counter; // W_i = k * counter_i
             double expr_sum = 0.0;      // Sum over images: drives deposition/visited bookkeeping
             double rmsd_identity = 0.0; // identity-image RMSD for COLVAR / rmsd_reference
@@ -3378,7 +3423,9 @@ void SimpleMD::ApplyRMSDMTD()
                 }
             }
 
-            if (expr_sum * m_rmsd_econv > static_cast<double>(global_count))
+            if (strided)
+                soft_visits.emplace_back(bs.index, expr_sum);
+            else if (expr_sum * m_rmsd_econv > static_cast<double>(global_count))
                 visited.push_back(bs.index);
 
             if (bs.index == 0)
@@ -3387,16 +3434,23 @@ void SimpleMD::ApplyRMSDMTD()
 
         // Phase 2: bump the visited references in the shared pool. counter++ always (drives
         // exploration); the well-tempered weight 'factor' grows only when opt-in (output-only).
-        {
-            std::vector<std::pair<int, double>> visit_updates;
-            visit_updates.reserve(visited.size());
+        if (do_deposit) {
+            std::vector<std::tuple<int, double, double>> visit_updates; // (index, counter_inc, wt_inc)
             double wt_inc = m_wtmtd ? exp(-current_bias / (kb_Eh * m_rmsd_DT)) : 0.0;
-            for (int idx : visited) {
-                // When freezing inherited heights, do not bump structures this run inherited:
-                // their height stays fixed so the run's cumulative bias does not escalate.
-                if (m_freeze_inherited && m_frozen_height.count(idx))
-                    continue;
-                visit_updates.emplace_back(idx, wt_inc);
+            if (strided) {
+                visit_updates.reserve(soft_visits.size());
+                for (const auto& [idx, e] : soft_visits) {
+                    if (m_freeze_inherited && m_frozen_height.count(idx))
+                        continue;
+                    visit_updates.emplace_back(idx, e, wt_inc);
+                }
+            } else {
+                visit_updates.reserve(visited.size());
+                for (int idx : visited) {
+                    if (m_freeze_inherited && m_frozen_height.count(idx))
+                        continue;
+                    visit_updates.emplace_back(idx, 1.0, wt_inc);
+                }
             }
             m_shared_pool->registerVisits(visit_updates);
         }
@@ -3425,7 +3479,8 @@ void SimpleMD::ApplyRMSDMTD()
         // First structure (pool empty) is always accepted.
         int pool_count = m_shared_pool->biasStructureCount();
         bool deposit = !m_rmsd_fix_structure
-            && (pool_count == 0 || current_bias * m_rmsd_econv < static_cast<double>(pool_count));
+            && (strided ? (do_deposit && RMSDMTD::shouldDeposit(current_bias, m_vmin, pool_count))
+                        : (pool_count == 0 || current_bias * m_rmsd_econv < static_cast<double>(pool_count)));
         // Claude Generated (Jun 2026): never deposit a fragmented structure into the shared
         // pool (only relevant when topo_check is on; the run aborts shortly after anyway).
         if (deposit && m_topo_check) {
@@ -3471,6 +3526,7 @@ void SimpleMD::ApplyRMSDMTD()
     if (m_threads == 1 || m_bias_structure_count == 1) {
         for (auto & m_bias_thread : m_bias_threads) {
             m_bias_thread->setCurrentGeometry(current_geometry, m_currentStep);
+            m_bias_thread->setGrowCounter(do_deposit);
             m_bias_thread->start();
             current_bias += m_bias_thread->BiasEnergy();
             current_bias_wt += m_bias_thread->BiasEnergyWT();
@@ -3488,10 +3544,12 @@ void SimpleMD::ApplyRMSDMTD()
         if (m_bias_structure_count < m_threads) {
             for (int i = 0; i < m_bias_structure_count; ++i) {
                 m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
+                m_bias_threads[i]->setGrowCounter(do_deposit);
             }
         } else {
             for (auto & m_bias_thread : m_bias_threads) {
                 m_bias_thread->setCurrentGeometry(current_geometry, m_currentStep);
+                m_bias_thread->setGrowCounter(do_deposit);
             }
         }
 
@@ -3539,7 +3597,10 @@ void SimpleMD::ApplyRMSDMTD()
     m_bias_energy += current_bias;
 
     // Deposition uses the exploration bias only (well-tempering never gates the search).
-    if (current_bias * m_rmsd_econv < m_bias_structure_count && m_rmsd_fix_structure == false) {
+    bool local_deposit = (m_rmsd_fix_structure == false)
+        && (strided ? (do_deposit && RMSDMTD::shouldDeposit(current_bias, m_vmin, m_bias_structure_count))
+                    : (current_bias * m_rmsd_econv < m_bias_structure_count));
+    if (local_deposit) {
         int thread_index = m_bias_structure_count % m_bias_threads.size();
         m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentStep, m_bias_structure_count);
         m_bias_structure_count++;

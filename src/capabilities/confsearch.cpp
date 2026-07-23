@@ -186,6 +186,10 @@ void ConfSearch::start()
     md["rmsd_mtd_screen"] = m_rmsd_mtd_screen;
     md["rmsd_mtd_cutoff_tol"] = m_rmsd_mtd_cutoff_tol;
     md["rmsd_mtd_screen_margin"] = m_rmsd_mtd_screen_margin;
+    // Claude Generated (Jul 2026): strided scheme is inherited from the SimpleMD defaults (Layer 1).
+    // Suppress per-child provenance diagnostics in ConfSearch (many MD children would each dump files);
+    // provenance is meant for pure -md -rmsd_mtd runs.
+    md["rmsd_mtd_diag"] = false;
 
     // RMSD metadynamics is the default driver for conformational exploration.
     // The SimpleMD default is false, but ConfSearch enables it by default.
@@ -1626,7 +1630,7 @@ bool ConfSearch::loadCheckpoint()
             bs.energy = b.value("energy", 0.0);
             bs.factor = b.value("factor", 1.0);
             bs.index = b.value("index", 0);
-            bs.counter = b.value("counter", 0);
+            bs.counter = b.value("counter", 0.0);
             bs.temperature = b.value("temperature", 0.0);
             bs.persistent = b.value("persistent", false);
             st.bias.push_back(std::move(bs));
