@@ -748,7 +748,7 @@ static const std::vector<double> hb_basicity = {
     3.5,    // P (15)
     2.0,    // S (16)
     1.5,    // Cl (17)
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Ar-As (18-32)
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Ar-Ge (18-32) FIX Jul24: was 17 zeros, misaligned Br/I/Sb
     3.5,    // As (33) = param%xhbas(15)
     2.0,    // Se (34) = param%xhbas(16)
     1.5,    // Br (35)
@@ -776,7 +776,7 @@ static const std::vector<double> hb_acidity = {
     XHACI_GLOB,                                         // P (15) = 1.50
     XHACI_GLOB,                                         // S (16) = 1.50
     XHACI_GLOB + 1.0,                                   // Cl (17) = 2.50
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Ar-As (18-32)
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Ar-Ge (18-32) FIX Jul24: was 17 zeros, misaligned Br/I/Sb
     XHACI_GLOB,                                         // As (33) = 1.50 (via pattern)
     XHACI_GLOB,                                         // Se (34) = 1.50
     XHACI_GLOB + 1.0,                                   // Br (35) = 2.50

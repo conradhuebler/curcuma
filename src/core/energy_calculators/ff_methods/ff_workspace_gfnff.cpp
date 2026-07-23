@@ -1148,6 +1148,11 @@ void FFWorkspace::calcHydrogenBonds(int p)
         }
         acc.energy.hbond += E_HB;
 
+        if (std::getenv("CURCUMA_HB_DUMP") && std::abs(E_HB) > 1e-13) {
+            fmt::print("HBTRIP A={:3d} H={:3d} B={:3d} case={} E={:.12f}\n",
+                       hb.i+1, hb.j+1, hb.k+1, hb.case_type, E_HB);
+        }
+
         // Claude Generated (May 2026, HB-investigation): per-case split for Fortran comparison
         switch (hb.case_type) {
             case 1: acc.energy.hbond_case1 += E_HB; ++acc.energy.hbond_case1_count; break;
