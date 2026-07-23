@@ -316,7 +316,9 @@ private:
     void applyPeriodicBoundaryConditions();  // Claude Generated (Oct 2025): PBC wrapping
     void Verlet();
     void Rattle();
-    void ApplyRMSDMTD();
+    void EvaluateBias(bool do_deposit); // Claude Generated (Jul 2026): bias force -> m_bias_force_target
+    void ApplyHeldBias();               // apply held + smoothstep-interpolated bias force every step
+    bool gapGuardTriggered();           // Milestone 2: walker moved > r_dep since the last force eval
 
     void Rattle_Verlet_First(double* coord, double* grad);
     void Rattle_Constrain_First(double* coord, double* grad);
@@ -521,6 +523,9 @@ private:
     Geometry m_bias_force_old, m_bias_force_target;
     double m_bias_energy_target = 0.0;    // exact V(x) at the last evaluation
     int m_bias_ramp_start_step = -1;      // step of the last F_target recompute
+    Geometry m_last_eval_subset;          // RMSD-subset geometry at the last force eval (gap guard)
+    RMSDDriver m_gap_driver;              // Milestone 2 gap guard: one Kabsch/step to the last-eval geom
+    Molecule m_gap_ref, m_gap_tgt;
     // Claude Generated (Jul 2026): provenance log, one record per deposited hill (writeMtdProvenance).
     struct MtdDepositRecord {
         int index = 0;

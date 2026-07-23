@@ -2910,7 +2910,7 @@ void SimpleMD::Verlet()
     m_Epot = Energy();
     if (m_rmsd_mtd) {
         if (m_step % m_mtd_steps == 0) {
-            ApplyRMSDMTD();
+            ApplyHeldBias();
         }
     }
 #ifdef USE_Plumed
@@ -3156,7 +3156,7 @@ void SimpleMD::Rattle()
 
     if (m_rmsd_mtd) {
         if (m_step % m_mtd_steps == 0) {
-            ApplyRMSDMTD();
+            ApplyHeldBias();
         }
     }
 #ifdef USE_Plumed
@@ -3302,7 +3302,73 @@ void SimpleMD::Rattle()
     applyPeriodicBoundaryConditions();
 }
 
-void SimpleMD::ApplyRMSDMTD()
+// Claude Generated (Jul 2026): Milestone 2 held-force wrapper, called every step. The expensive bias
+// evaluation (EvaluateBias -- the Kabsch fleet) runs only on a deposit_stride step or when the gap
+// guard fires; between evaluations the bias force is held and smoothstep-interpolated from the previous
+// target to the current one, so it acts every step without recomputing every step. Legacy: evaluate +
+// apply every call (w=1, bit-identical to the pre-M2 direct path). See docs/RMSD_MTD_TEXTBOOK.md 5.1.
+void SimpleMD::ApplyHeldBias()
+{
+    if (m_rmsd_mtd_scheme == "legacy") {
+        // Legacy: evaluate + apply directly every call. EvaluateBias adds the bias force straight into
+        // m_eigen_gradient (same FP order as the pre-M2 path), so this branch is bit-identical.
+        EvaluateBias(true);
+        return;
+    }
+
+    // Strided: run the expensive fleet (EvaluateBias) only on a deposit_stride step or when the gap
+    // guard fires; hold + smoothstep-interpolate the bias force in between so it acts every step.
+    if (m_bias_force_target.rows() != m_natoms)
+        m_bias_force_target = Geometry::Zero(m_natoms, 3);
+    if (m_bias_force_old.rows() != m_natoms)
+        m_bias_force_old = Geometry::Zero(m_natoms, 3);
+
+    bool stride_elapsed = m_last_deposit_eval_step < 0
+        || (m_step - m_last_deposit_eval_step) >= m_deposit_stride_steps;
+    bool gap = m_gap_guard && gapGuardTriggered();
+    if (stride_elapsed || gap) {
+        m_bias_force_old = m_bias_force_target; // glide from the previous target to the new one
+        EvaluateBias(true);                     // do_deposit = true on an eval step
+        m_bias_ramp_start_step = m_step;
+        m_last_deposit_eval_step = m_step;
+    }
+
+    double denom = std::max(1.0, m_transition_fraction * static_cast<double>(m_deposit_stride_steps));
+    double lambda = (m_bias_ramp_start_step < 0) ? 1.0
+        : static_cast<double>(m_step - m_bias_ramp_start_step) / denom;
+    double w = RMSDMTD::smoothstep(lambda);
+    for (int k = 0; k < 3 * m_natoms; ++k)
+        m_eigen_gradient.data()[k] += m_bias_force_old.data()[k]
+            + w * (m_bias_force_target.data()[k] - m_bias_force_old.data()[k]);
+}
+
+// Claude Generated (Jul 2026): Milestone 2 gap guard. True when the walker has moved more than r_dep
+// (best-fit RMSD over the RMSD subset) from the geometry at the last force evaluation -- one Kabsch per
+// step, O(1) vs the O(N_hills) fleet. Bounds held-force staleness and closes coverage gaps when the
+// walker moves fast, without shortening deposit_stride.
+bool SimpleMD::gapGuardTriggered()
+{
+    const int nsub = static_cast<int>(m_rmsd_indicies.size());
+    if (nsub == 0 || m_last_eval_subset.rows() != nsub)
+        return false;
+    Geometry walker(nsub, 3);
+    for (int i = 0; i < nsub; ++i) {
+        walker(i, 0) = m_eigen_geometry.data()[3 * m_rmsd_indicies[i] + 0];
+        walker(i, 1) = m_eigen_geometry.data()[3 * m_rmsd_indicies[i] + 1];
+        walker(i, 2) = m_eigen_geometry.data()[3 * m_rmsd_indicies[i] + 2];
+    }
+    if (m_gap_ref.AtomCount() != nsub)
+        m_gap_ref = m_rmsd_mtd_molecule;
+    if (m_gap_tgt.AtomCount() != nsub)
+        m_gap_tgt = m_rmsd_mtd_molecule;
+    m_gap_ref.setGeometry(walker);
+    m_gap_tgt.setGeometry(m_last_eval_subset);
+    m_gap_driver.setReference(m_gap_ref);
+    m_gap_driver.setTarget(m_gap_tgt);
+    return m_gap_driver.BestFitRMSD() > m_r_dep;
+}
+
+void SimpleMD::EvaluateBias(bool do_deposit)
 {
     std::chrono::time_point<std::chrono::system_clock> m_start, m_end;
     m_start = std::chrono::system_clock::now();
@@ -3328,13 +3394,19 @@ void SimpleMD::ApplyRMSDMTD()
     double current_bias_wt = 0; // optional well-tempered energy (opt-in, COLVAR output only)
     double rmsd_reference = 0;
 
-    // Claude Generated (Jul 2026): strided scheme. The bias force is evaluated every step (m_mtd_steps
-    // is forced to 1 for strided); counter growth + deposition happen only every deposit_stride.
+    // Claude Generated (Jul 2026): strided routes the bias force through m_bias_force_target, which
+    // ApplyHeldBias applies every step (held + smoothstep-interpolated). Legacy adds it straight into
+    // m_eigen_gradient (same FP accumulation order -> bit-identical to the pre-M2 path). counter growth
+    // + deposition run only when do_deposit (the deposit_stride / gap-guard cadence).
     const bool strided = (m_rmsd_mtd_scheme != "legacy");
-    bool do_deposit = !strided || m_last_deposit_eval_step < 0
-        || (m_step - m_last_deposit_eval_step) >= m_deposit_stride_steps;
-    if (do_deposit)
-        m_last_deposit_eval_step = m_step;
+    double* bias_accum;
+    if (strided) {
+        m_bias_force_target = Geometry::Zero(m_natoms, 3);
+        m_last_eval_subset = current_geometry; // gap guard: geometry at this force evaluation
+        bias_accum = m_bias_force_target.data();
+    } else {
+        bias_accum = m_eigen_gradient.data();
+    }
 
     // Claude Generated (Apr 2026): Shared bias pool path for parallel ConfSearch
     // When a shared pool is set, read bias structures from the pool and evaluate locally.
@@ -3488,9 +3560,9 @@ void SimpleMD::ApplyRMSDMTD()
                 double dEdR = -2.0 * m_alpha_rmsd * height * rmsd * expr;
                 Geometry grad = m_shared_pool_driver.Gradient();
                 for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
-                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += dEdR * grad(j, 0);
-                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 1] += dEdR * grad(j, 1);
-                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 2] += dEdR * grad(j, 2);
+                    bias_accum[3 * m_rmsd_indicies[j] +0] += dEdR * grad(j, 0);
+                    bias_accum[3 * m_rmsd_indicies[j] +1] += dEdR * grad(j, 1);
+                    bias_accum[3 * m_rmsd_indicies[j] +2] += dEdR * grad(j, 2);
                 }
                 expr_sum += expr;
                 if (is_identity)
@@ -3663,9 +3735,9 @@ void SimpleMD::ApplyRMSDMTD()
             current_bias += m_bias_thread->BiasEnergy();
             current_bias_wt += m_bias_thread->BiasEnergyWT();
             for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
-                m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += m_bias_thread->Gradient()(j, 0);
-                m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 1] += m_bias_thread->Gradient()(j, 1);
-                m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 2] += m_bias_thread->Gradient()(j, 2);
+                bias_accum[3 * m_rmsd_indicies[j] +0] += m_bias_thread->Gradient()(j, 0);
+                bias_accum[3 * m_rmsd_indicies[j] +1] += m_bias_thread->Gradient()(j, 1);
+                bias_accum[3 * m_rmsd_indicies[j] +2] += m_bias_thread->Gradient()(j, 2);
             }
             m_colvar_incr += m_bias_thread->Counter();
             m_bias_hills_evaluated += m_bias_thread->LastEvaluated();
@@ -3696,9 +3768,9 @@ void SimpleMD::ApplyRMSDMTD()
                 current_bias += m_bias_thread->BiasEnergy();
                 current_bias_wt += m_bias_thread->BiasEnergyWT();
                 for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
-                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 0] += m_bias_thread->Gradient()(j, 0);
-                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 1] += m_bias_thread->Gradient()(j, 1);
-                    m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 2] += m_bias_thread->Gradient()(j, 2);
+                    bias_accum[3 * m_rmsd_indicies[j] +0] += m_bias_thread->Gradient()(j, 0);
+                    bias_accum[3 * m_rmsd_indicies[j] +1] += m_bias_thread->Gradient()(j, 1);
+                    bias_accum[3 * m_rmsd_indicies[j] +2] += m_bias_thread->Gradient()(j, 2);
                 }
                 m_colvar_incr += m_bias_thread->Counter();
                 m_bias_hills_evaluated += m_bias_thread->LastEvaluated();
