@@ -202,7 +202,7 @@ private:
     bool m_topo_check = false, m_epot_abort = false, m_opt_feedback_bias = true, m_opt_feedback_prune_snapshots = false, m_mtd_permutation = true;
     // Claude Generated (Jun 2026): temperature runaway abort + cross-run bias-height freeze.
     // ON by default for ConfSearch (bias-heating safety net + best conformer yield); see the PARAM block below.
-    bool m_temp_abort = true, m_freeze_inherited = true;
+    bool m_temp_abort = false, m_freeze_inherited = false;
     // Claude Generated (Jun 2026): initial energy at opt_method (dual-mode only)
     double m_initial_energy_opt = std::numeric_limits<double>::infinity();
     double m_temp_abort_factor = 1.5, m_temp_abort_delta = 300;
@@ -302,14 +302,14 @@ private:
     PARAM(topo_check_interval, Int, 0, "Steps between topology checks. 0 uses the MD dump frequency.", "Robustness", {})
     PARAM(epot_abort, Bool, false, "Abort an MD run when the running-mean potential climbs past epot_abort_window.", "Robustness", {})
     PARAM(epot_abort_window, Double, 250.0, "Energy window in kJ/mol above the run start energy for epot_abort.", "Robustness", {})
-    PARAM(temp_abort, Bool, true, "Abort an MD run when the running-mean temperature runs away. On by default as a bias-heating safety net.", "Robustness", {})
+    PARAM(temp_abort, Bool, false, "Abort an MD run when the running-mean temperature runs away. Off by default since the strided RMSD-MTD scheme (soft residence counter) removes the unbounded bias-height growth that caused cross-cycle heating; set true to re-enable the safety net.", "Robustness", {})
     PARAM(temp_abort_factor, Double, 1.5, "Abort when the mean temperature exceeds this factor times the target. Values at or below 0 disable the check.", "Robustness", {})
     PARAM(temp_abort_delta, Double, 300.0, "Abort when the mean temperature exceeds the target plus this many Kelvin. Values at or below 0 disable the check.", "Robustness", {})
 
     // --- Metadynamics Bias ---
     PARAM(max_bias_export, Int, 1000, "Maximum number of bias structures written out per cycle.", "Bias", {})
     PARAM(rmsd_mtd_max_height, Int, 0, "Cap on the per-structure hill counter in the bias force. 0 is unbounded.", "Bias", {})
-    PARAM(rmsd_mtd_freeze_inherited, Bool, true, "Freeze inherited bias heights each run so only new deposits grow. On by default to bound cross-run heating.", "Bias", {})
+    PARAM(rmsd_mtd_freeze_inherited, Bool, false, "Freeze inherited bias heights each run so only new deposits grow. Off by default under the strided scheme (the soft counter bounds cross-run growth without freezing, which also keeps exploring inherited basins); set true for the legacy cross-run heating bound.", "Bias", {})
     PARAM(rmsd_mtd_max_gaussians, Int, -1, "Cap the shared bias pool to at most this many structures (dropping the lowest-counter non-persistent snapshots between cycles; optimised minima are always kept). -1 = unbounded. Bounds the per-step bias cost as the search accumulates structures.", "Bias", {"max_rmsd_N"})
     PARAM(rmsd_mtd_screen, Bool, true, "Skip bias hills whose Gaussian contribution is provably negligible (rotation-invariant RMSD lower bound + cutoff). Physics-preserving speedup for large pools; false = evaluate every hill.", "Bias", {})
     PARAM(rmsd_mtd_cutoff_tol, Double, 1.0e-8, "Gaussian tolerance for rmsd_mtd_screen: a hill is skipped when its lower-bound Gaussian falls below this. Smaller = more conservative.", "Bias", {})
