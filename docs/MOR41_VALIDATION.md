@@ -164,8 +164,23 @@ metals (Z≤55) unchanged. Per-structure MAD vs pprcht **0.975 → 0.630**, with
 71/71 runnable gfnff ctests pass. (No MOR41 lanthanides, so the `chi` Z=57-71 fix is correctness-only.)
 
 **Session arc vs pprcht/gfnff (per-structure MAD):** 7.27 (start) → 1.61 (FT-HMO occu + pisip) →
-1.39 (carbene itag + angle) → 0.975 (halogen bpair) → 0.630 (EEQ gam array) → **0.543**
-(eta-aware X-bond bpair), within-1 52 → 83/95.
+1.39 (carbene itag + angle) → 0.975 (halogen bpair) → 0.630 (EEQ gam array) → 0.543
+(eta-aware X-bond bpair) → **0.469** (SP3-specials torsion order), within-1 52 → 85/95.
+
+### SP3-specials torsion order — ED30/PR30 (`gfnff_torsions.cpp`)
+
+ED30 (an organic aminophosphine, no metal) and PR30 (its Pt complex) had a ~−3.5 kcal residual
+entirely in the torsion term (curcuma ~half the reference). The aminophosphine P-N torsions got
+curcuma's phi0=180/f1~0.006 default instead of the reference phi0=60/f1=3.0. Root cause: the
+Fortran **SP3-specials** block (`gfnff_ini.f90:1746`) — a bond between two RAW-sp3 group-5 atoms
+(N-N, P-P, N-P) → nrot=3, phi0=60, f1=3.0, using the raw hyb — sits AFTER the pi-sp3 case (:1733)
+and **overrides** it. curcuma applied its equivalent SP3-specials BEFORE its pi-sp3 override (which
+was relocated to the end of `getGFNFFTorsionParameters`), so for a P-N bond with the ring N in a
+pi-system the pi-sp3 override (`!in_ring && k_in_pi && !j_in_pi && hyb_j==3`) reset it back to
+phi0=180/f1=0.2. Moved the raw-hyb SP3-specials override to just before the force-constant assembly
+(after the pi-sp3 block), matching the Fortran order; the pi f2 0.55 scaling is re-applied for the
+rare conjugated (pibo>0) case. **ED30 −3.44 → +0.00, PR30 −3.72 → +0.08** (only these two change).
+Per-structure MAD **0.543 → 0.469**, within-1 83 → **85/95**; 71/71 runnable gfnff ctests pass.
 
 ### Eta-aware X-bond bpair — ED33 (`detectHalogenBondsNative`)
 

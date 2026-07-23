@@ -793,6 +793,7 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
         f1 = torsf_single;  // 1.0
     }
 
+
     // ---------------------------------------------------------------------------
     // (D) Pi system contribution: f2 (IMPLEMENTED Jan 18, 2026)
     // ---------------------------------------------------------------------------
@@ -1178,6 +1179,39 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // Now using actual EEQ charges passed as parameters!
     const double qfacTOR = 12.0;  // From gfnff_param.f90:742
     double fqq = 1.0 + std::abs(qa_j * qa_k) * qfacTOR;
+
+    // SP3 specials (Fortran gfnff_ini.f90:1746-1768). Placed here — after the pi-sp3
+    // override above — because in the Fortran the SP3-specials block (:1746) comes AFTER
+    // the pi-sp3 case (:1733) and OVERRIDES it; curcuma moved its pi-sp3 handling to the
+    // end (~line 1150), so the SP3-specials must come after it too. Uses the RAW hyb, so a
+    // bond between two sp3 group-5 atoms (N-N, P-P, N-P) gets nrot=3, phi0=60, f1=3.0 even
+    // when one end is in a pi-system (raw hyb stays 3) — the aminophosphine P-N bonds of
+    // ED30/PR30, which the pi-sp3 override otherwise forced to phi0=180/f1=0.2. Mirror the
+    // Fortran pi f2 f1-scaling (0.55) for the rare conjugated (pibo>0) case.
+    // Claude Generated (Jul 2026).
+    if (hyb_j == 3 && hyb_k == 3) {
+        int g_j = (z_j == 7 || z_j == 15) ? 5 : (z_j == 8 || z_j == 16) ? 6 : 0;
+        int g_k = (z_k == 7 || z_k == 15) ? 5 : (z_k == 8 || z_k == 16) ? 6 : 0;
+        bool sp3_special = true;
+        if (g_j == 5 && g_k == 5) {                                     // N-N, P-P, N-P
+            f1 = 3.0;
+            params.periodicity = 3;
+            params.phase_shift = 60.0 * M_PI / 180.0;
+        } else if ((g_j == 5 && g_k == 6) || (g_j == 6 && g_k == 5)) {  // N-O / P-S ...
+            f1 = 1.0;
+            params.periodicity = 2;
+            params.phase_shift = 90.0 * M_PI / 180.0;
+            if (z_j >= 15 && z_k >= 15) f1 = 20.0;                      // P-S
+        } else if (g_j == 6 && g_k == 6) {                             // O-O, S-S
+            f1 = 5.0;
+            params.periodicity = 2;
+            params.phase_shift = 90.0 * M_PI / 180.0;
+            if (z_j >= 16 && z_k >= 16) f1 = 25.0;                      // S-S
+        } else {
+            sp3_special = false;
+        }
+        if (sp3_special && central_pibo > 0.0) f1 *= 0.55;             // pi f2 scaling (gfnff_ini.f90:1904)
+    }
 
     // ---------------------------------------------------------------------------
     // (F) Final force constant calculation
