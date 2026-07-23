@@ -167,13 +167,14 @@ metals (Z≤55) unchanged. Per-structure MAD vs pprcht **0.975 → 0.630**, with
 1.39 (carbene itag + angle) → 0.975 (halogen bpair) → 0.630 (EEQ gam array) → 0.543
 (eta-aware X-bond bpair) → 0.469 (SP3-specials torsion order) → 0.29 (bond fcn neighbour
 count, PR27) → 0.16 (FT-HMO π-occupation redo temperature, N-heteroaromatic cluster) →
-0.077 (CN neighbour-list cutoff 6→10 Bohr, metal complexes) → **0.023** (BATM 1,4-pair test
-eta-aware, eta metal complexes), within-1 52 → **95/95** (all structures).
-**Reaction-level MAD vs pprcht: 0.050 kcal/mol** (max 0.59). The last four fixes are genuine
+0.077 (CN neighbour-list cutoff 6→10 Bohr, metal complexes) → 0.023 (BATM 1,4-pair test
+eta-aware, eta metal complexes) → **0.007** (torsion periodicity for metal central bonds),
+within-1 52 → 95/95, **all 95 within 0.2 kcal**.
+**Reaction-level MAD vs pprcht: 0.013 kcal/mol** (max 0.17). The last five fixes are genuine
 **per-structure** correctness, not reaction-level error cancellation — each localized residual was
-traced to a real parameter/occupation/CN/topology bug and closed at the term level. Where removing
-one error briefly un-masked a smaller separate residual (ED33/PR26/PR27), the next fix closed that
-too; no residual was left to compensation.
+traced to a real parameter/occupation/CN/topology/torsion bug and closed at the term level. Where
+removing one error briefly un-masked a smaller separate residual, the next fix closed that too; no
+residual was left to compensation.
 
 ### SP3-specials torsion order — ED30/PR30 (`gfnff_torsions.cpp`)
 
@@ -265,6 +266,30 @@ converged at 6 Bohr; only heavy/metal atoms move). The handful that move slightl
 the correct CN exposes it — the intended anti-compensation outcome. **Lesson for the remaining
 residuals: compare against the energy-time `egbond` r0, never the printed setup r0.**
 
+### Torsion periodicity for metal central bonds — PR41/ED40a/ED14 (`gfnff_torsions.cpp`)
+
+The last residuals (PR41 −0.56, ED40a −0.48, ED14 −0.37 — Ru/Ti/Ni complexes) localized cleanly to
+the **torsion** term via the decomposition (curcuma's torsion is labelled "Dihedral"). Per-torsion
+dump (`CURCUMA_TORS_DUMP=1`) against the analyzer's torsion table showed curcuma using nrot=3 and
+nrot=2 for torsions around the metal–C bonds where the analyzer uses **nrot=1**, plus half the force
+constant (f1=0.5 vs 1.0).
+
+Root cause: the Fortran nrot (`gfnff_ini.f90:1730-1744`) is keyed on the central **bond type** and
+**pi membership**, not the raw atom hybridizations — `nrot=1` default, `=3` if both central atoms
+hyb==3 (Me case), `=2` if `btyp(m)==2` (a real pi central bond), `=3` if pi-sp3 (the sp2 atom has
+`piadr>0`). curcuma inferred nrot from `hyb_j`/`hyb_k` alone. A transition metal with 3 neighbours is
+hyb=2 (`gfnff_ini2.f90:241`), so its M-C(sp3) torsion took curcuma's sp2-sp3 branch (nrot=3 + the
+pi-sp3 f1=0.5) and its M-C(sp2) torsion took the sp2-sp2 branch (nrot=2). But a metal atom has
+piadr=0 and a metal bond is btyp=5 (not 2), so the reference keeps nrot=1 and f1=1.0.
+
+Fix: (a) gate the sp2-sp2 → nrot=2 branch on `bond_type==2` (the btyp is already passed into
+`getGFNFFTorsionParameters`); (b) gate the sp2-sp3 → nrot=3 periodicity AND the pi-sp3 f1=0.5 on the
+sp2 atom being in a pi system (`j_is_pi`/`k_is_pi`, mirroring `piadr>0`). Non-pi sp2 (metals) fall
+back to nrot=1, f1=1.0. **The three match the analyzer to <0.001 kcal.** Per-structure MAD **0.023 →
+0.007**, all 95 within **0.2 kcal**; reaction MAD **0.050 → 0.013**. 4 improved (PR41/ED40a/ED14/
+ED40b); ED09 shifts +0.07 (its torsion is now exact to 0.009 kcal — a different sub-residual
+un-masked). 52/52 non-GPU gfnff ctests pass, golden values unchanged.
+
 ### BATM 1,4-pair test eta-aware — PR26/PR28/PR27/ED33 (`calculateTopologyInfoOnce`)
 
 After the CN-cutoff fix (k) un-masked them, the four worst residuals (PR26 −1.21, PR28 −1.06,
@@ -348,11 +373,12 @@ that was not a correctness advantage. The GFN-FF-vs-QM gap is the method's, not 
 
 ### Remaining pure-port residuals (curcuma vs pprcht, where pprcht==xtb so not the split)
 
-After the fcn (i), FT-HMO et (j), CN-cutoff (k) and BATM eta-aware (l) fixes, **all 95 structures are
-within 1 kcal** (per-structure MAD 0.023, reaction MAD 0.050). The worst residuals are now
-**PR41 −0.56, ED40a −0.48, ED14 −0.37** — all sub-0.6 kcal and not yet decomposed to root cause.
-Ground-truth with the `external/gfnff/_build/gfnff` analyzer (per-bond `pibo`/`fqq`/force-constant
-print via `pr=.true.`).
+After the fcn (i), FT-HMO et (j), CN-cutoff (k), BATM eta-aware (l) and metal-torsion (m) fixes,
+**all 95 structures are within 0.2 kcal** (per-structure MAD 0.007, reaction MAD 0.013). The worst
+residual is **ED11 −0.17**; everything else is <0.1 kcal. These are residual fine-precision, not
+root-caused. Ground-truth with the `external/gfnff/_build/gfnff` analyzer (per-bond
+`pibo`/`fqq`/force-constant print via `pr=.true.`; `CURCUMA_TORS_DUMP`/`CURCUMA_PIBO_DUMP`/
+`CURCUMA_BOND_CSV_ALL` for per-term dumps).
 **Critical method note:** for sub-mEh per-bond work, compare against the *energy-time* r0 — raise the
 bond-table `6f8.3` format to `6f14.8` AND instrument `egbond` in `gfnff_engrad.F90` to print `rij`
 (the `gfnffdrab` energy r0). The printed *setup* r0 (`gfnffrab`) differs by ~0.005-0.01 Å and looks
