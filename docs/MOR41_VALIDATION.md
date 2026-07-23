@@ -166,11 +166,13 @@ metals (Z≤55) unchanged. Per-structure MAD vs pprcht **0.975 → 0.630**, with
 **Session arc vs pprcht/gfnff (per-structure MAD):** 7.27 (start) → 1.61 (FT-HMO occu + pisip) →
 1.39 (carbene itag + angle) → 0.975 (halogen bpair) → 0.630 (EEQ gam array) → 0.543
 (eta-aware X-bond bpair) → 0.469 (SP3-specials torsion order) → 0.29 (bond fcn neighbour
-count, PR27) → **0.16** (FT-HMO π-occupation redo temperature, N-heteroaromatic cluster),
-within-1 52 → 92/95. **Reaction-level MAD vs pprcht: 0.233 kcal/mol** (max 1.46 = rxn 23, the
-`.CHRG` quirk where curcuma is correct). Note the last two fixes are genuine **per-structure**
-correctness, not reaction-level error cancellation — the localized per-structure residuals were
-traced to real parameter/occupation bugs and closed at the bond level.
+count, PR27) → 0.16 (FT-HMO π-occupation redo temperature, N-heteroaromatic cluster) →
+**0.077** (CN neighbour-list cutoff 6→10 Bohr, metal complexes), within-1 52 → 93/95.
+**Reaction-level MAD vs pprcht: 0.170 kcal/mol** (max 0.83). The last three fixes are genuine
+**per-structure** correctness, not reaction-level error cancellation — each localized residual was
+traced to a real parameter/occupation/CN bug and closed at the bond level. Where removing one
+error un-masked a smaller separate residual (ED33/PR26/PR27 ~1 kcal), that is the correct
+outcome (no error compensation), not a regression.
 
 ### SP3-specials torsion order — ED30/PR30 (`gfnff_torsions.cpp`)
 
@@ -234,6 +236,34 @@ PR21 +2.51→+0.55** — exactly the 6 fallback-firing structures, zero regressi
 **0.29 → 0.16**, within-1 86 → **92/95**; 71/71 runnable gfnff ctests pass, 35/35 golden values
 unchanged. Diagnostic: `CURCUMA_PIBO_DUMP=1` prints per-bond π-bond orders.
 
+### CN neighbour-list cutoff too tight — PR23/PR35 and the metal complexes (`gfnff.h`, `cn_cutoff_bohr`)
+
+The last "irreducible metal-bond fine-precision" residuals (PR23 +1.63, PR35 +1.42) turned out NOT
+to be irreducible — and not in the bond parameters at all. The trap: comparing curcuma's dynamic r0
+against the analyzer's *printed setup* r0 (from `gfnffrab`) shows a ~0.008 Å metal-bond difference
+that looks like fine precision. But the energy uses a *different* r0 — the `gfnffdrab` r0 recomputed
+at energy time with the D3 CN. Instrumenting the Fortran `egbond` (`gfnff_engrad.F90`) to print its
+actual energy-time r0 and per-bond energy showed the entire PR23 bond gap (−4.139309 vs −4.141908,
++1.63 kcal) was a **systematic r0 shift on every bond**, driven by a **CN difference**: curcuma's
+FFWorkspace CN for the P atom was 3.491 vs the correct 3.621.
+
+Root cause: curcuma has two CN paths. The legacy per-bond thread (a v3 diagnostic) uses the full
+O(N²) `calculateGFNFFCN` (threshold 1600 Bohr²) and was always correct — bit-identical to the
+analyzer. The **FFWorkspace energy path** (the one that actually produces the SP energy) uses
+`calculateGFNFFCNWithNeighbors` with `cn_cutoff_bohr=6.0`. The reference `cnthr`
+(`gfnff_param.f90:551`, accuracy=1) is **100 Bohr² = 10 Bohr**; 6.0 Bohr is TIGHTER, and heavy/metal
+atoms (large covalent radii) have real erf-CN contributions past 6 Bohr that got truncated. At
+`cn_cutoff_bohr=10` the CN is converged (10==20==40 Bohr) and PR23 total −4.083676 → −4.086275
+(analyzer −4.086276, **0.0003 kcal**). Raised the default to 10.0.
+
+Per-structure MAD **0.16 → 0.077**, within-1 92 → **93/95**; reaction MAD **0.233 → 0.170**
+(max 1.46 → 0.83). PR23 +1.63→+0.00, PR35 +1.42→+0.05, PR34/PR33/PR18/PR21/PR19/... all →~0.
+71/71 runnable gfnff ctests pass, 35/35 golden values byte-identical (small-molecule CNs are already
+converged at 6 Bohr; only heavy/metal atoms move). The handful that move slightly more negative
+(ED33, PR26, PR27 ~1 kcal) had a separate residual the tight-cutoff CN error had been compensating;
+the correct CN exposes it — the intended anti-compensation outcome. **Lesson for the remaining
+residuals: compare against the energy-time `egbond` r0, never the printed setup r0.**
+
 ### Eta-aware X-bond bpair — ED33 (`detectHalogenBondsNative`)
 
 ED33's residual was the halogen filter dropping a valid X-bond (curcuma X-bond 0 vs the reference
@@ -294,14 +324,17 @@ that was not a correctness advantage. The GFN-FF-vs-QM gap is the method's, not 
 
 ### Remaining pure-port residuals (curcuma vs pprcht, where pprcht==xtb so not the split)
 
-After the PR27 fcn (i) and FT-HMO et (j) fixes the worst per-structure residuals are **PR23 +1.63
-and PR35 +1.42** — both metal-bond fine-precision (sub-0.01 Å CN-dependent `gfnffrab` r0 on the
-Ir/Ru metal bonds, scattered across element pairs, no single-parameter smoking gun; verified to the
-analyzer print floor). Everything else is within ~1 kcal (92/95). These two are the genuine
-irreducible-precision residuals. Ground-truth with the `external/gfnff/_build/gfnff` analyzer
-(per-bond `pibo`/`fqq`/force-constant print via `pr=.true.`; for sub-mEh work temporarily raise the
-bond-table `6f8.3` format to `6f14.8` and instrument `egbond` in `gfnff_engrad.F90` to print the
-energy-time dynamic r0, which differs from the printed setup r0).
+After the fcn (i), FT-HMO et (j) and CN-cutoff (k) fixes the worst per-structure residuals are
+**PR26 −1.21, PR28 −1.06, PR27 −0.95, ED33 −0.78** (per-structure MAD 0.077, reaction MAD 0.170).
+These are NOT the metal-bond term (proven bit-identical by the energy-time `egbond` decomposition)
+— they are separate small residuals that the old tight-cutoff CN error had been compensating, now
+exposed by the correct CN. They have not yet been decomposed to root cause. Ground-truth with the
+`external/gfnff/_build/gfnff` analyzer (per-bond `pibo`/`fqq`/force-constant print via `pr=.true.`).
+**Critical method note:** for sub-mEh per-bond work, compare against the *energy-time* r0 — raise the
+bond-table `6f8.3` format to `6f14.8` AND instrument `egbond` in `gfnff_engrad.F90` to print `rij`
+(the `gfnffdrab` energy r0). The printed *setup* r0 (`gfnffrab`) differs by ~0.005-0.01 Å and looks
+like fine precision but is not what the energy uses — that trap masked the CN bug (k) for a whole
+session.
 
 The sections below are the original (pre-fix) diagnostic and remain valid for GFN-FF.
 
