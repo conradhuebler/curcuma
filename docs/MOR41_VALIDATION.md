@@ -168,13 +168,14 @@ metals (Z≤55) unchanged. Per-structure MAD vs pprcht **0.975 → 0.630**, with
 (eta-aware X-bond bpair) → 0.469 (SP3-specials torsion order) → 0.29 (bond fcn neighbour
 count, PR27) → 0.16 (FT-HMO π-occupation redo temperature, N-heteroaromatic cluster) →
 0.077 (CN neighbour-list cutoff 6→10 Bohr, metal complexes) → 0.023 (BATM 1,4-pair test
-eta-aware, eta metal complexes) → **0.007** (torsion periodicity for metal central bonds),
-within-1 52 → 95/95, **all 95 within 0.2 kcal**.
-**Reaction-level MAD vs pprcht: 0.013 kcal/mol** (max 0.17). The last five fixes are genuine
+eta-aware, eta metal complexes) → 0.007 (torsion periodicity for metal central bonds) →
+**0.004** (misaligned HB basicity/acidity arrays, halide/chalcogen acceptors),
+within-1 52 → 95/95, **all 95 within 0.1 kcal**.
+**Reaction-level MAD vs pprcht: 0.008 kcal/mol** (max 0.07). The six fixes below are genuine
 **per-structure** correctness, not reaction-level error cancellation — each localized residual was
-traced to a real parameter/occupation/CN/topology/torsion bug and closed at the term level. Where
+traced to a real parameter/occupation/CN/topology/torsion/HB bug and closed at the term level. Where
 removing one error briefly un-masked a smaller separate residual, the next fix closed that too; no
-residual was left to compensation.
+residual was left to compensation. **Every MOR41 GFN-FF residual >0.1 kcal is now root-caused.**
 
 ### SP3-specials torsion order — ED30/PR30 (`gfnff_torsions.cpp`)
 
@@ -265,6 +266,26 @@ converged at 6 Bohr; only heavy/metal atoms move). The handful that move slightl
 (ED33, PR26, PR27 ~1 kcal) had a separate residual the tight-cutoff CN error had been compensating;
 the correct CN exposes it — the intended anti-compensation outcome. **Lesson for the remaining
 residuals: compare against the energy-time `egbond` r0, never the printed setup r0.**
+
+### Misaligned HB basicity/acidity arrays — ED11 (`gfnff_par.h`)
+
+ED11 (a Pd/I complex) had a −0.17 kcal residual entirely in the **HB** term, dominated by the
+**C–H···I⁻** (iodide-acceptor) hydrogen bond. Instrumenting the analyzer's `abhgfnff_eg1` (case-1
+HB energy) and dumping per-triple components showed `rdamp` and `qhoutl` matched but `bas`/`aci`
+did not — and those trace to the per-atom HB basicity (`hbbas`=xhbas) and acidity (`hbaci`=xhaci).
+The iodine values were wrong: curcuma used `hbbas(I)=3.5, hbaci(I)=1.5` vs the reference
+`1.9, 2.50`. All charges, damping constants, HB radii (`param%rad`) and the energy formula matched
+— only these two element parameters were off.
+
+Root cause: the `hb_basicity` and `hb_acidity` tables had **17 zeros instead of 15** on the Ar-Ge
+(Z=18-32) filler row, shifting every subsequent entry by two. So As/Se/Br/Sb/Te/I all read the
+value two slots earlier (I got Sb's 3.5 / the glob acidity). Light elements (H/C/N/O, Z≤17) were
+before the misalignment, so organic H-bonds — and the S30L HB validation — were unaffected, which
+is why it went unnoticed. Removed the 2 extra zeros from each row.
+
+**ED11 −0.174 → −0.001 kcal; PR35 (has Se) +0.053 → +0.014.** Per-structure MAD **0.007 → 0.004**,
+**all 95 within 0.1 kcal**; reaction MAD **0.013 → 0.008**. Zero regressions (organic HB unchanged);
+52/52 non-GPU gfnff ctests pass. Diagnostic: `CURCUMA_HB_DUMP=1` prints per-triple HB energies.
 
 ### Torsion periodicity for metal central bonds — PR41/ED40a/ED14 (`gfnff_torsions.cpp`)
 
@@ -373,12 +394,12 @@ that was not a correctness advantage. The GFN-FF-vs-QM gap is the method's, not 
 
 ### Remaining pure-port residuals (curcuma vs pprcht, where pprcht==xtb so not the split)
 
-After the fcn (i), FT-HMO et (j), CN-cutoff (k), BATM eta-aware (l) and metal-torsion (m) fixes,
-**all 95 structures are within 0.2 kcal** (per-structure MAD 0.007, reaction MAD 0.013). The worst
-residual is **ED11 −0.17**; everything else is <0.1 kcal. These are residual fine-precision, not
-root-caused. Ground-truth with the `external/gfnff/_build/gfnff` analyzer (per-bond
-`pibo`/`fqq`/force-constant print via `pr=.true.`; `CURCUMA_TORS_DUMP`/`CURCUMA_PIBO_DUMP`/
-`CURCUMA_BOND_CSV_ALL` for per-term dumps).
+After fixes (i)-(n), **all 95 structures are within 0.1 kcal** (per-structure MAD 0.004, reaction MAD
+0.008). The worst residuals are **PR30/PR31 ~0.07 kcal**; everything else is smaller. **Every MOR41
+GFN-FF residual above 0.1 kcal has been traced to a specific bug and fixed** — what remains is
+genuine sub-0.1-kcal fine-precision. Ground-truth with the `external/gfnff/_build/gfnff` analyzer
+(per-bond `pibo`/`fqq`/force-constant print via `pr=.true.`; `CURCUMA_TORS_DUMP`/`CURCUMA_PIBO_DUMP`/
+`CURCUMA_BOND_CSV_ALL`/`CURCUMA_HB_DUMP` for per-term dumps).
 **Critical method note:** for sub-mEh per-bond work, compare against the *energy-time* r0 — raise the
 bond-table `6f8.3` format to `6f14.8` AND instrument `egbond` in `gfnff_engrad.F90` to print `rij`
 (the `gfnffdrab` energy r0). The printed *setup* r0 (`gfnffrab`) differs by ~0.005-0.01 Å and looks
