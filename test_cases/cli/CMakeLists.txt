@@ -165,6 +165,17 @@ add_cli_test(simplemd 11_diagnostics_dump)
 set_tests_properties(cli_simplemd_11_diagnostics_dump PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;diagnostics")
 add_cli_test(simplemd 12_eeq_cutoff_auto)
 set_tests_properties(cli_simplemd_12_eeq_cutoff_auto PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;eeq_cutoff")
+# Claude Generated (Jul 2026): RMSD-MTD strided-scheme regression tests (docs/RMSD_MTD_TEXTBOOK.md 6)
+add_cli_test(simplemd 13_rmsd_mtd_legacy_ab)
+set_tests_properties(cli_simplemd_13_rmsd_mtd_legacy_ab PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;rmsd_mtd")
+add_cli_test(simplemd 14_rmsd_mtd_coverage)
+set_tests_properties(cli_simplemd_14_rmsd_mtd_coverage PROPERTIES TIMEOUT 200 LABELS "simplemd;gfnff;rmsd_mtd")
+
+# =============================================================================
+# ConfSearch Tests (Claude Generated, Jul 2026)
+# =============================================================================
+add_cli_test(confsearch 01_gfnff_smoke)
+set_tests_properties(cli_confsearch_01_gfnff_smoke PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;rmsd_mtd")
 
 # =============================================================================
 # CG (Coarse Graining) Tests — disabled: -vtf command not implemented in main.cpp
