@@ -1171,34 +1171,41 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
         }
     };
 
-    // Unified path: CxxThreadPool runs the optimizations inline on the calling
-    // thread when m_threads == 1 (no worker spawned) and in parallel otherwise.
-    // OptThread uses autoDelete=false, so the pool never touches these pointers
-    // in its destructor — we own and delete them here.
-    CxxThreadPool pool;
-    pool.setActiveThreadCount(m_threads);
-    // Claude Generated (Jul 2026): per-batch optimisation bar (stderr) only at verbosity 3; the
-    // per-struct result_fmt lines + batch summary below cover progress at verbosity 1.
-    pool.setProgressBar(m_verbosity >= 3 ? CxxThreadPool::ProgressBarType::Continously
-                                         : CxxThreadPool::ProgressBarType::None);
-
+    // Unified path: CxxThreadPool runs the optimizations inline on the calling thread when
+    // m_threads == 1 (no worker spawned) and in parallel otherwise.
+    //
+    // Claude Generated (Jul 2026): use-after-free fix. The CxxThreadPool destructor iterates its
+    // internal thread queues and reads each thread's m_autodelete (CxxThreadPool.h ~185). OptThread
+    // sets autoDelete=false so the pool must not free them -- but deleting the threads while the pool
+    // still references them makes that destructor read freed memory: a garbage (non-zero) m_autodelete
+    // makes it call the virtual destructor through a corrupted vtable -> SIGSEGV (observed as a crash
+    // in ConfSearch::PerformOptimisation). So the pool must be destroyed FIRST, while the threads are
+    // still alive (AutoDelete()==false is read correctly, nothing is freed), and only then are the
+    // threads deleted here. Scope the pool to enforce that order.
     std::vector<OptThread*> threads;
     threads.reserve(total);
-    for (int i = 0; i < total; ++i) {
-        OptThread* t = new OptThread(molecules[i], local_param);
-        pool.addThread(t);
-        threads.push_back(t);
-    }
-
-    CurcumaLogger::result_fmt("Optimizing {} structures using {} thread(s) [{}]", total, m_threads, opt_method_name);
-    pool.StartAndWait();
-
     int failed = 0;
-    for (int i = 0; i < static_cast<int>(threads.size()); ++i) {
-        if (!threads[i]->result().success) ++failed;
-        write_result(threads[i]->result(), molecules[i], i);
-        delete threads[i];
-    }
+    {
+        CxxThreadPool pool;
+        pool.setActiveThreadCount(m_threads);
+        // per-batch optimisation bar (stderr) only at verbosity 3; the per-struct result_fmt lines +
+        // batch summary below cover progress at verbosity 1.
+        pool.setProgressBar(m_verbosity >= 3 ? CxxThreadPool::ProgressBarType::Continously
+                                             : CxxThreadPool::ProgressBarType::None);
+        for (int i = 0; i < total; ++i) {
+            OptThread* t = new OptThread(molecules[i], local_param);
+            pool.addThread(t);
+            threads.push_back(t);
+        }
+        CurcumaLogger::result_fmt("Optimizing {} structures using {} thread(s) [{}]", total, m_threads, opt_method_name);
+        pool.StartAndWait();
+        for (int i = 0; i < static_cast<int>(threads.size()); ++i) {
+            if (!threads[i]->result().success) ++failed;
+            write_result(threads[i]->result(), molecules[i], i);
+        }
+    } // pool destroyed here while the threads are still alive -> no use-after-free
+    for (auto* t : threads)
+        delete t;
 
     if (failed > 0)
         CurcumaLogger::result_fmt("Optimization batch complete [{}]: {}/{} structures written ({} failed: zero step / gradient failure)",
