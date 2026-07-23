@@ -1077,7 +1077,7 @@ void GFNFF::updateDynamicState(TopologyInfo& topo) const {
     topo.distance_matrix.resize(0, 0);  // No per-step distance matrix
 
     // P2b (Apr 2026): Configurable CN cutoff — neighbor list, accuracy-based, or full O(N²)
-    double cn_cutoff_bohr = m_parameters.value("cn_cutoff_bohr", 6.0);
+    double cn_cutoff_bohr = m_parameters.value("cn_cutoff_bohr", 10.0);
     double cn_accuracy = m_parameters.value("cn_accuracy", 1.0);
     auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_cutoff_bohr, cn_accuracy, -7.5, 4.4);
     topo.coordination_numbers = Eigen::Map<const Eigen::VectorXd>(cn_vec.data(), cn_vec.size());
@@ -1195,7 +1195,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         } else {
             // WP-D Stage A (May 2026): capture cn_raw for dcn step-1 skip.
             // WP-D Stage C (May 2026): neighbor-list mode also returns the list for dcn step-3.
-            double cn_cutoff_bohr = m_parameters.value("cn_cutoff_bohr", 6.0);
+            double cn_cutoff_bohr = m_parameters.value("cn_cutoff_bohr", 10.0);
 #ifdef GFNFF_CN_DCN_FUSION
             // WP-D Stage D (May 2026): fused CN+DCN path — single pair loop computes both.
             // Only active when gradient is needed on CPU (gpu_only=false) with neighbor-list
@@ -1325,7 +1325,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         // Claude Generated (WP4, May 2026): CNDerivStore replaces std::vector<SpMatrix>.
         // WP-C (May 2026): explicit 40.0 Bohr cutoff (squared) — consistent with the
         // topology-init CN cutoff in lines 3440 / 6766 / 6892. CN derivatives need a
-        // larger range than the per-step CN (cn_cutoff_bohr=6.0) because the gradient
+        // larger range than the per-step CN (cn_cutoff_bohr=10.0) because the gradient
         // of erf-CN extends further than the value itself. This 40 Bohr matches the
         // "standard GFN-FF" topology threshold and is independent from cn_cutoff_bohr.
         // WP6/G2c Phase C (May 2026): if eeq_distance_cutoff > 40, extend the dcn
@@ -2888,7 +2888,7 @@ bool GFNFF::initializeForceField()
     // digging through code. Mirrors docs/wp4/cutoff-inventory.md.
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("GFN-FF cutoff configuration:");
-        const double cn_cut = m_parameters.value("cn_cutoff_bohr", 6.0);
+        const double cn_cut = m_parameters.value("cn_cutoff_bohr", 10.0);
         const double cn_acc = m_parameters.value("cn_accuracy", 1.0);
         const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
         CurcumaLogger::param("  cn_cutoff_bohr",

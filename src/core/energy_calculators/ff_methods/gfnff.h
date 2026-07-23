@@ -213,14 +213,21 @@ void printGFNFFParamGenReport(const GFNFFParamGenReport& r);
 
 // P2b (Apr 2026): CN cutoff parameters — configurable via CLI
 // Three modes:
-//   cn_cutoff_bohr > 0: Neighbor-list mode (default 6.0 Bohr, fast O(N*k))
+//   cn_cutoff_bohr > 0: Neighbor-list mode (default 10.0 Bohr, fast O(N*k))
 //   cn_cutoff_bohr = 0, cn_accuracy > 0: Fortran accuracy-based threshold (cnthr = 100 - log10(acc)*50)
 //   cn_cutoff_bohr = 0, cn_accuracy = 0: Full O(N²) reference mode (no cutoff)
+// FIX (Jul 23, 2026): default raised 6.0 -> 10.0 Bohr. The reference cnthr
+// (gfnff_param.f90:551, accuracy=1) is 100 Bohr^2 = 10 Bohr; the old 6.0 Bohr was
+// TIGHTER than the reference and truncated erf-CN contributions for heavy/metal atoms
+// (large covalent radii push the erf transition past 6 Bohr). That gave a wrong
+// dynamic-bond-r0 CN in the FFWorkspace energy path — e.g. PR23 (Ir complex) bond
+// energy +1.63 kcal. At 10 Bohr the CN is converged and matches the reference; the SP
+// bond energy is bit-identical to the legacy per-bond path (which used the full CN).
 BEGIN_PARAMETER_DEFINITION(gfnff)
 PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. Maps to EEQ and CN parameters.", "Basic", {})
 PARAM(allow_unconverged_charges, Bool, false, "Allow calculation to continue with unconverged EEQ charges (warn instead of abort).", "Advanced", {})
 PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 topology charges directly. Faster but less accurate.", "Advanced", {})
-PARAM(cn_cutoff_bohr, Double, 6.0, "CN neighbor list cutoff radius in Bohr. 0 = use accuracy-based threshold instead.", "Advanced", {})
+PARAM(cn_cutoff_bohr, Double, 10.0, "CN neighbor list cutoff radius in Bohr (reference cnthr=100 Bohr^2=10 Bohr). 0 = use accuracy-based threshold instead.", "Advanced", {})
 PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
 PARAM(solve, String, "auto",
       "EEQ solver method: lu, schur_cholesky, pcg, auto. Passed to eeq_solver.", "Algorithm", {})
