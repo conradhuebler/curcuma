@@ -215,9 +215,30 @@ reference (pprcht) to MAD 1.6. xtb 6.7.1's GFN-FF has evidently changed on TMs s
 snapshot was extracted (cf. Moradi et al., *J. Comput. Chem.* 2026, "Extensions to Extended
 Tight-Binding Methods for Transition-Metal Containing Systems").
 
-**Open question — which GFN-FF is "correct" for TMs is undecided.** Resolution deferred: compute
-both against the **DLPNO-CCSD(T)/CBS** MOR41 reference (already in `reactions.dat` / Table S1) and
-see which implementation is closer. Until then, curcuma targets pprcht/gfnff (its port source).
+**RESOLVED against DLPNO-CCSD(T) (Jul 23, 2026).** The 41 reaction energies were assembled for all
+three engines and compared to the DLPNO-CCSD(T)/CBS reference (`reactions.dat` col 2, Table S1;
+`scripts`-style driver in the session scratchpad):
+
+| engine (reaction dE vs DLPNO, n=41) | MAD | RMSD | max | MD |
+|-------------------------------------|----:|-----:|----:|----:|
+| **pprcht/gfnff** | **62.6** | 80.7 | 279 | +56.4 |
+| curcuma native (all fixes) | 63.1 | 81.0 | 279 | +56.9 |
+| xtb 6.7.1 `--gfnff` | 71.7 | 99.9 | 419 | +61.4 |
+
+Two conclusions:
+1. **GFN-FF is fundamentally unsuitable for MOR41 reaction thermochemistry** — all three impls are
+   ~60–70 kcal/mol from DLPNO (systematic +56 MD: they underestimate the exothermicity of the
+   metal-ligand bond formation/breaking these reactions involve). This is a **force-field
+   limitation, not a port bug** — a FF has no electronic bond-dissociation energy. (Tight-binding
+   GFN2 reaches ~12 MAD on the same set; GFN-FF is not built for this property.)
+2. **pprcht is closer to the true QM than xtb** (MAD 62.6 vs 71.7; RMSD 81 vs 100), and on the 8
+   reactions where pprcht and xtb diverge most it is closer in **6/8** (only R30/R31 favour xtb).
+   So curcuma tracking pprcht (its port source) follows the marginally better reference — there is
+   **no QM justification to re-target xtb.**
+
+Caveat: the session fixes made curcuma *faithful to pprcht* (MAD 0.47), the correct port goal; a
+pre-fix curcuma happened to sit ~53 vs DLPNO because some of its bugs pointed toward QM by luck —
+that was not a correctness advantage. The GFN-FF-vs-QM gap is the method's, not the port's.
 
 ### Remaining pure-port residuals (curcuma vs pprcht, where pprcht==xtb so not the split)
 
