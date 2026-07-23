@@ -167,12 +167,13 @@ metals (Z≤55) unchanged. Per-structure MAD vs pprcht **0.975 → 0.630**, with
 1.39 (carbene itag + angle) → 0.975 (halogen bpair) → 0.630 (EEQ gam array) → 0.543
 (eta-aware X-bond bpair) → 0.469 (SP3-specials torsion order) → 0.29 (bond fcn neighbour
 count, PR27) → 0.16 (FT-HMO π-occupation redo temperature, N-heteroaromatic cluster) →
-**0.077** (CN neighbour-list cutoff 6→10 Bohr, metal complexes), within-1 52 → 93/95.
-**Reaction-level MAD vs pprcht: 0.170 kcal/mol** (max 0.83). The last three fixes are genuine
+0.077 (CN neighbour-list cutoff 6→10 Bohr, metal complexes) → **0.023** (BATM 1,4-pair test
+eta-aware, eta metal complexes), within-1 52 → **95/95** (all structures).
+**Reaction-level MAD vs pprcht: 0.050 kcal/mol** (max 0.59). The last four fixes are genuine
 **per-structure** correctness, not reaction-level error cancellation — each localized residual was
-traced to a real parameter/occupation/CN bug and closed at the bond level. Where removing one
-error un-masked a smaller separate residual (ED33/PR26/PR27 ~1 kcal), that is the correct
-outcome (no error compensation), not a regression.
+traced to a real parameter/occupation/CN/topology bug and closed at the term level. Where removing
+one error briefly un-masked a smaller separate residual (ED33/PR26/PR27), the next fix closed that
+too; no residual was left to compensation.
 
 ### SP3-specials torsion order — ED30/PR30 (`gfnff_torsions.cpp`)
 
@@ -264,6 +265,29 @@ converged at 6 Bohr; only heavy/metal atoms move). The handful that move slightl
 the correct CN exposes it — the intended anti-compensation outcome. **Lesson for the remaining
 residuals: compare against the energy-time `egbond` r0, never the printed setup r0.**
 
+### BATM 1,4-pair test eta-aware — PR26/PR28/PR27/ED33 (`calculateTopologyInfoOnce`)
+
+After the CN-cutoff fix (k) un-masked them, the four worst residuals (PR26 −1.21, PR28 −1.06,
+PR27 −0.95, ED33 −0.78 — all Ru/phosphine complexes with eta ligands) localized cleanly with the
+term-by-term decomposition: **entirely in the BATM** (bonded three-body ATM dispersion) term.
+curcuma's BATM was 2−6× the analyzer's (ED33 −0.004794 vs −0.003547). Cause: curcuma generated far
+too many BATM triples (PR28 1085 vs the reference 656).
+
+The BATM triple list is `{(i,j,k)}` for every 1,4 pair (i,j) (`bpair==3`) plus every neighbour k of
+i and of j (`gfnff_ini.f90:708-728`). curcuma tested `bpair` against the plain-BFS `topo_distances`,
+which bridges through the eta Ru-C bonds — the SAME asymmetric-eta issue as the X-bond bpair fix
+above. The Fortran `topo%bpair` (nbondmat/pairsbond) records a distance only under symmetric
+reachability, and eta bonds are stored asymmetrically (metal lists the eta-C, eta-C omits the
+metal), so eta never bridges a ≥2-bond path. The BFS shortcut created hundreds of spurious 1,4
+pairs → spurious triples → BATM over-binding.
+
+Fix: rebuild the distance on an eta-free adjacency (metal↔`itag==−1` edges removed; normal Ru-P/Ru-Cl
+kept) for the `bpair==3` test, mirroring `detectHalogenBondsNative`. Guarded on `has_eta`, so non-eta
+systems are byte-identical. **BATM triple counts now match the reference exactly (650/656/645/908),
+and PR26/PR28/PR27/ED33 totals match the analyzer to <0.002 kcal.** Per-structure MAD **0.077 →
+0.023**, within-1 93 → **95/95**; reaction MAD **0.170 → 0.050**. 9 structures improved (the 4 targets
++ ED26/PR36/ED10/PR10/PR15, all eta complexes), zero regressions; 52/52 non-GPU gfnff ctests pass.
+
 ### Eta-aware X-bond bpair — ED33 (`detectHalogenBondsNative`)
 
 ED33's residual was the halogen filter dropping a valid X-bond (curcuma X-bond 0 vs the reference
@@ -324,12 +348,11 @@ that was not a correctness advantage. The GFN-FF-vs-QM gap is the method's, not 
 
 ### Remaining pure-port residuals (curcuma vs pprcht, where pprcht==xtb so not the split)
 
-After the fcn (i), FT-HMO et (j) and CN-cutoff (k) fixes the worst per-structure residuals are
-**PR26 −1.21, PR28 −1.06, PR27 −0.95, ED33 −0.78** (per-structure MAD 0.077, reaction MAD 0.170).
-These are NOT the metal-bond term (proven bit-identical by the energy-time `egbond` decomposition)
-— they are separate small residuals that the old tight-cutoff CN error had been compensating, now
-exposed by the correct CN. They have not yet been decomposed to root cause. Ground-truth with the
-`external/gfnff/_build/gfnff` analyzer (per-bond `pibo`/`fqq`/force-constant print via `pr=.true.`).
+After the fcn (i), FT-HMO et (j), CN-cutoff (k) and BATM eta-aware (l) fixes, **all 95 structures are
+within 1 kcal** (per-structure MAD 0.023, reaction MAD 0.050). The worst residuals are now
+**PR41 −0.56, ED40a −0.48, ED14 −0.37** — all sub-0.6 kcal and not yet decomposed to root cause.
+Ground-truth with the `external/gfnff/_build/gfnff` analyzer (per-bond `pibo`/`fqq`/force-constant
+print via `pr=.true.`).
 **Critical method note:** for sub-mEh per-bond work, compare against the *energy-time* r0 — raise the
 bond-table `6f8.3` format to `6f14.8` AND instrument `egbond` in `gfnff_engrad.F90` to print `rij`
 (the `gfnffdrab` energy r0). The printed *setup* r0 (`gfnffrab`) differs by ~0.005-0.01 Å and looks
