@@ -165,7 +165,10 @@ metals (Z≤55) unchanged. Per-structure MAD vs pprcht **0.975 → 0.630**, with
 
 **Session arc vs pprcht/gfnff (per-structure MAD):** 7.27 (start) → 1.61 (FT-HMO occu + pisip) →
 1.39 (carbene itag + angle) → 0.975 (halogen bpair) → 0.630 (EEQ gam array) → 0.543
-(eta-aware X-bond bpair) → **0.469** (SP3-specials torsion order), within-1 52 → 85/95.
+(eta-aware X-bond bpair) → 0.469 (SP3-specials torsion order) → **0.29** (bond fcn neighbour
+count, PR27), within-1 52 → 86/95. **Reaction-level MAD vs pprcht: 0.255 kcal/mol** (max 1.46 =
+rxn 23, the `.CHRG` quirk where curcuma is correct) — the per-structure residuals largely cancel
+in the reaction energies, so the port reproduces its reference at the level that matters.
 
 ### SP3-specials torsion order — ED30/PR30 (`gfnff_torsions.cpp`)
 
@@ -181,6 +184,28 @@ phi0=180/f1=0.2. Moved the raw-hyb SP3-specials override to just before the forc
 (after the pi-sp3 block), matching the Fortran order; the pi f2 0.55 scaling is re-applied for the
 rare conjugated (pibo>0) case. **ED30 −3.44 → +0.00, PR30 −3.72 → +0.08** (only these two change).
 Per-structure MAD **0.543 → 0.469**, within-1 83 → **85/95**; 71/71 runnable gfnff ctests pass.
+
+### Bond fcn neighbour count — PR27 (`getGFNFFBondParameters`, `gfnff_method.cpp:~4754`)
+
+PR27 (a CpRu(PR3)2Cl complex) had a **+17.7 kcal** per-structure residual, an order of magnitude
+above everything else and NOT a metal-bond fine-precision case (`vs_ppr != vs_xtb`). Term-by-term
+against the analyzer, the entire gap was in **one bond**: the spurious cis P…P bond (R=2.645 Å,
+both phosphines on the Ru) had curcuma `fc=-0.0002` vs reference `-0.046`, losing **−18.5 kcal**.
+
+Root cause: the heavy-heavy bond weakener `fcn = 1/(1+0.007·nb(20,i)²)/(1+0.007·nb(20,j)²)`
+(`gfnff_ini.f90:1181-1183`) uses `topo%nb(20,i)` — the **bonded-neighbour COUNT** (slot 20 of the
+`nb` array holds the degree, a Fortran convention; `nb(1:19,i)` are the neighbour indices). curcuma
+called `countNeighborsWithin20Bohr()`, a literal 20-Bohr distance sphere (~40 atoms in a compact
+48-atom complex), collapsing fcn to ~0.007 and nuking every **non-metal** heavy-heavy bond (P-P,
+P-S, S-S, …). Metal bonds were unaffected — the metal branch (`gfnff_ini.f90:1254-1259`) already
+used the bonded degree via `topo.neighbor_lists`. Now the normal path uses the same
+`topo.neighbor_lists[atom].size()`.
+
+**PR27 +17.67 → −0.76**, P-P bond E −0.00015 → −0.02961 Eh (ref −0.02963). Only PR27 changes in
+MOR41 (sole non-metal heavy-heavy bond); 35/35 golden-value gfnff ctests byte-identical, 71/71
+runnable gfnff ctests pass. Per-structure MAD **0.469 → 0.29**, within-1 85 → **86/95**. Note this
+is a general correctness fix — it affects any molecule with a non-metal heavy-heavy bond (disulfides,
+phosphine pairs, P-S, …), not just PR27.
 
 ### Eta-aware X-bond bpair — ED33 (`detectHalogenBondsNative`)
 
@@ -242,9 +267,15 @@ that was not a correctness advantage. The GFN-FF-vs-QM gap is the method's, not 
 
 ### Remaining pure-port residuals (curcuma vs pprcht, where pprcht==xtb so not the split)
 
-ED16b −20.9, PR34 −10.5, ED33 −7.2, ED07 +6.3 (documented), PR33 −7.0, PR35 −6.0, PR38 −4.9 —
-genuine remaining porting TODOs, independent of the xtb/pprcht divergence. Ground-truth with the
-`external/gfnff/_build/gfnff` analyzer (per-bond `pibo`/`fqq`/force-constant print via `pr=.true.`).
+After the PR27 fcn fix the worst per-structure residuals are PR25 +2.87, ED25 +2.77, PR21 +2.51,
+ED21 +2.27, PR16 +1.95, PR23 +1.63, PR35 +1.42 — all in the **fine-precision** class and all
+verified (high-precision analyzer print, `6f14.8`) to have **no single-parameter smoking gun**:
+the mismatches are sub-0.0016 in the bond force constant (from 3rd-decimal FT-HMO π-bond-order
+differences on conjugated C=C/C=N bonds) and sub-0.01 Å in the metal-bond equilibrium r0 (the
+CN-dependent `gfnffrab` quantity, scattered across element pairs). These correlated reactant/product
+residuals **cancel at the reaction level** (reaction MAD 0.255). Irreducible fine-precision, not a
+bug. Ground-truth with the `external/gfnff/_build/gfnff` analyzer (per-bond `pibo`/`fqq`/force-constant
+print via `pr=.true.`; temporarily raise the `6f8.3` bond format for sub-mEh comparison).
 
 The sections below are the original (pre-fix) diagnostic and remain valid for GFN-FF.
 
