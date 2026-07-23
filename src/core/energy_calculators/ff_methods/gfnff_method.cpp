@@ -4749,10 +4749,18 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     double fcn = 1.0;  // Default: no CN correction
 
-    // Phase 2 (January 14, 2026): Use exact nb20 (neighbors within 20 Bohr cutoff)
-    // P2a (April 2026): Use on-the-fly distance computation instead of N×N matrix
-    int nb20_1 = countNeighborsWithin20Bohr(atom1, m_geometry_bohr);
-    int nb20_2 = countNeighborsWithin20Bohr(atom2, m_geometry_bohr);
+    // CRITICAL FIX (Jul 23, 2026): Fortran `topo%nb(20,ii)` is the BONDED-neighbour
+    // COUNT (slot 20 of the nb array holds the degree), NOT a 20-Bohr distance
+    // sphere. The old countNeighborsWithin20Bohr() counted every atom within 20 Bohr
+    // (~40 in a compact complex), collapsing fcn to ~0.007 and nuking non-metal
+    // heavy-heavy bonds (P-P, P-S, S-S, ...). For PR27 the spurious cis P...P bond
+    // lost -18.5 kcal (fc -0.046 -> -0.0002) — the entire +17.7 kcal MOR41 residual.
+    // The metal branch (gfnff_ini.f90:1254-1259) already uses this bonded degree via
+    // topo.neighbor_lists; this makes the normal path (gfnff_ini.f90:1181-1184) match.
+    int nb20_1 = (atom1 >= 0 && atom1 < static_cast<int>(topo.neighbor_lists.size()))
+        ? static_cast<int>(topo.neighbor_lists[atom1].size()) : 0;
+    int nb20_2 = (atom2 >= 0 && atom2 < static_cast<int>(topo.neighbor_lists.size()))
+        ? static_cast<int>(topo.neighbor_lists[atom2].size()) : 0;
 
     // Only apply to heavy atoms (Z > 10, i.e., beyond neon)
     // Fortran gfnff_ini.f90:1181-1184
