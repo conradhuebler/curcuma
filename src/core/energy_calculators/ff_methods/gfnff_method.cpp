@@ -9225,6 +9225,39 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     const TopologyInfo& topo_info = getCachedTopology();
     const auto& bonds = getCachedBondList();
 
+    // eta-free topological distance for the X-bond B-filter (bpair(B,X)>3 test below).
+    // Claude Generated (Jul 2026): the Fortran bpair (nbondmat/pairsbond, gfnff_ini2.f90)
+    // only records a distance when reachability is SYMMETRIC (dai .and. daj), and eta
+    // bonds are stored asymmetrically (the metal lists the eta-C, the eta-C omits the
+    // metal, gfnff_ini2.f90:199), so an eta bond never bridges a >=2-bond path in the
+    // reference bpair. curcuma's bpair is a plain BFS that DOES bridge through the eta
+    // Ru-C bond, wrongly shortcutting X...B (ED33: P-Ru-C_eta = 2 vs the reference 5) and
+    // dropping the valid far X-bond. Rebuild the distance matrix on an adjacency with the
+    // eta bonds (metal <-> itag==-1 ligand) removed so they no longer bridge. Normal metal
+    // bonds (Ru-P/Ru-S) are kept, so the S-donor filter of PR34 is unchanged. Only built
+    // when the topology actually has eta atoms; otherwise the normal bpair is used.
+    const bool has_eta = std::any_of(topo_info.itag.begin(), topo_info.itag.end(),
+                                     [](int t) { return t == -1; });
+    std::vector<std::vector<int>> eta_free_dist;
+    if (has_eta && !topo_info.neighbor_lists.empty()) {
+        auto is_metal_atom = [&](int a) {
+            int z = (a >= 0 && a < m_atomcount) ? m_atoms[a] : 0;
+            return z >= 1 && z <= 86 && GFNFFParameters::metal_type[z - 1] > 0;
+        };
+        auto is_eta = [&](int a) {
+            return a >= 0 && a < static_cast<int>(topo_info.itag.size()) && topo_info.itag[a] == -1;
+        };
+        std::vector<std::vector<int>> eta_free_adj = topo_info.neighbor_lists;
+        for (int i = 0; i < static_cast<int>(eta_free_adj.size()); ++i) {
+            auto& nbrs = eta_free_adj[i];
+            nbrs.erase(std::remove_if(nbrs.begin(), nbrs.end(), [&](int j) {
+                return (is_metal_atom(i) && is_eta(j)) || (is_metal_atom(j) && is_eta(i));
+            }), nbrs.end());
+        }
+        eta_free_dist = calculateTopologyDistances(eta_free_adj);
+    }
+    const std::vector<std::vector<int>>& xb_bpair = has_eta ? eta_free_dist : topo_info.bpair;
+
     // Pre-calculate atom-specific basicity with overrides
     std::vector<double> current_basicity(m_atomcount);
 
@@ -9314,9 +9347,9 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
             // Ru center from an S donor in PR34) were wrongly admitted -> ~11x too many
             // X-bonds (-0.0201 vs the reference -0.0018 Eh). bpair==999 is "unconnected/beyond
             // BFS depth", correctly > 3 so distant B stay valid. Claude Generated (Jul 2026).
-            if (X < static_cast<int>(topo_info.bpair.size())
-                && B < static_cast<int>(topo_info.bpair[X].size())) {
-                if (topo_info.bpair[X][B] <= 3) return;
+            if (X < static_cast<int>(xb_bpair.size())
+                && B < static_cast<int>(xb_bpair[X].size())) {
+                if (xb_bpair[X][B] <= 3) return;
             } else {
                 // Fallback if bpair is unavailable: keep the old direct-bond exclusion.
                 for (const auto& bond : bonds) {

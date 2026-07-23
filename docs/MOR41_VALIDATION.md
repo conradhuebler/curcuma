@@ -164,7 +164,23 @@ metals (Z≤55) unchanged. Per-structure MAD vs pprcht **0.975 → 0.630**, with
 71/71 runnable gfnff ctests pass. (No MOR41 lanthanides, so the `chi` Z=57-71 fix is correctness-only.)
 
 **Session arc vs pprcht/gfnff (per-structure MAD):** 7.27 (start) → 1.61 (FT-HMO occu + pisip) →
-1.39 (carbene itag + angle) → 0.975 (halogen bpair) → **0.630** (EEQ gam array), within-1 52 → 82/95.
+1.39 (carbene itag + angle) → 0.975 (halogen bpair) → 0.630 (EEQ gam array) → **0.543**
+(eta-aware X-bond bpair), within-1 52 → 83/95.
+
+### Eta-aware X-bond bpair — ED33 (`detectHalogenBondsNative`)
+
+ED33's residual was the halogen filter dropping a valid X-bond (curcuma X-bond 0 vs the reference
+−0.0101 Eh). Root cause via the instrumented analyzer: the reference accepts A=Ru, X=P, B=eta-C at
+`bpair=5`, but curcuma computes `bpair(P,C)=2`. The two ring carbons are **eta-coordinated** to Ru;
+the Fortran `bpair` (nbondmat/pairsbond) records a distance only for **symmetric** reachability
+(`dai .and. daj`), and eta bonds are stored asymmetrically (the metal lists the eta-C, the eta-C
+omits the metal — `gfnff_ini2.f90:199`), so an eta bond can never bridge a ≥2-bond path. curcuma's
+`bpair` is a plain BFS that bridges through the eta Ru-C, wrongly shortcutting P…C_eta to 2. The
+X-bond filter now rebuilds the distance on an **eta-free adjacency** (metal↔`itag=−1` edges removed;
+normal Ru-P/Ru-S kept), so eta bonds no longer bridge. **ED33 +6.76 → +0.45** (the residual is now a
+smaller bond/BATM term); **PR34 unchanged** (S donor, no eta); other eta structures (ED36/PR13/PR15)
+byte-identical. Per-structure MAD **0.630 → 0.543**, within-1 82 → **83/95**; 71/71 runnable gfnff
+ctests pass.
 
 ### The reference-implementation split (OPEN PORTING QUESTION)
 
