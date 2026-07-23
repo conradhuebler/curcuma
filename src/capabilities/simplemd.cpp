@@ -1521,6 +1521,8 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["Q"] = Tools::DoubleVector2String(m_Q);
 
     if (m_rmsd_mtd) {
+        restart["rmsd_mtd_scheme_version"] = 2;  // Claude Generated (Jul 2026): strided soft-counter format
+        restart["rmsd_mtd_scheme"] = m_rmsd_mtd_scheme;
         restart["k_rmsd"] = m_k_rmsd;
         restart["alpha_rmsd"] = m_alpha_rmsd;
         restart["mtd_steps"] = m_mtd_steps;
@@ -1769,6 +1771,16 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     try {
         m_rmsd_mtd = state["rmsd_mtd"];
         if (m_rmsd_mtd) {
+            // Claude Generated (Jul 2026): reject a legacy (v1) bias when running the strided scheme --
+            // old integer visit counters are not comparable to the strided soft counter, so drop the
+            // old bias pool (the trajectory restart above still applies) rather than misinterpret it.
+            int mtd_ver = state.value("rmsd_mtd_scheme_version", 1);
+            if (m_rmsd_mtd_scheme != "legacy" && mtd_ver < 2) {
+                CurcumaLogger::error("Restart holds a legacy (v1) counter-scheme RMSD-MTD bias, "
+                    "incompatible with the strided soft counter; the old bias pool was NOT loaded. "
+                    "Re-run with -rmsd_mtd_scheme legacy to reuse it, or continue with a fresh bias.");
+                return false;
+            }
             m_k_rmsd = state["k_rmsd"];
             m_alpha_rmsd = state["alpha_rmsd"];
             m_mtd_steps = state["mtd_steps"];
@@ -2660,6 +2672,7 @@ void SimpleMD::finalizeRun()
             std::cout << fmt::format(
                 "RMSD-MTD screen: {} hills computed, {} screened ({:.1f}% Kabsch fits skipped); MTD wall time {} ms",
                 m_bias_hills_evaluated, m_bias_hills_screened, screen_pct, m_mtd_time) << std::endl;
+        writeMtdProvenance();
     }
     // Per-instance filename so concurrent MD workers don't overwrite each other's final dump.
     std::ofstream restart_file(snapshotPath(Basename() + ".final.json"));
@@ -2670,6 +2683,122 @@ void SimpleMD::finalizeRun()
         std::remove(snapshotPath("curcuma_restart.json").c_str());
 
     m_run_prepared = false;
+}
+
+// Claude Generated (Jul 2026): RMSD-MTD provenance diagnostics. Writes, via the BMT output path,
+// <base>.mtd_hills.csv (one row per deposited hill: where/why it was born + final height),
+// <base>.mtd_coverage.csv (+ _statistics) with the nearest-neighbour RMSD spacing, and gnuplot
+// scripts (deposition map + coverage histogram). Mirrors the scattering .csv/.gnu pattern and does
+// NOT invoke gnuplot. See docs/RMSD_MTD_TEXTBOOK.md section 7.
+void SimpleMD::writeMtdProvenance()
+{
+    if (!m_rmsd_mtd || !m_rmsd_mtd_diag || m_verbosity < 1 || m_mtd_deposits.empty())
+        return;
+
+    // Final hill set (index, counter, geometry) from whichever path was active this run.
+    std::vector<BiasStructure> final_hills;
+    if (m_shared_pool) {
+        final_hills = m_shared_pool->snapshot();
+    } else {
+        for (auto* t : m_bias_threads) {
+            auto s = t->getBiasStructure();
+            final_hills.insert(final_hills.end(), s.begin(), s.end());
+        }
+    }
+    std::unordered_map<int, double> final_counter;
+    for (const auto& h : final_hills)
+        final_counter[h.index] = h.counter;
+
+    const std::string base = Basename();
+
+    // 1. Provenance table: one row per deposited hill.
+    {
+        std::ofstream f(outputPath(base + ".mtd_hills.csv"));
+        f << "# index,step,time_fs,energy_Eh,rmsd_ref,trigger,counter_final,cycle,persistent\n";
+        for (const auto& d : m_mtd_deposits) {
+            auto it = final_counter.find(d.index);
+            double cf = (it != final_counter.end()) ? it->second : 0.0;
+            const char* trig = d.trigger == 'I' ? "initial"
+                : (d.trigger == 'D' ? "displacement" : "bias_below_vmin");
+            f << d.index << ',' << static_cast<long long>(d.step) << ',' << d.time_fs << ','
+              << d.energy << ',' << d.rmsd_ref << ',' << trig << ',' << cf << ','
+              << d.cycle << ',' << (d.persistent ? 1 : 0) << '\n';
+        }
+    }
+
+    // 2. Coverage: nearest-neighbour best-fit RMSD among the final hills (doubles as a spacing check).
+    std::vector<double> nn;
+    if (final_hills.size() >= 2) {
+        RMSDDriver driver;
+        Molecule a(m_molecule), b(m_molecule);
+        std::ofstream f(outputPath(base + ".mtd_coverage.csv"));
+        f << "# index,nn_rmsd\n";
+        for (size_t i = 0; i < final_hills.size(); ++i) {
+            a.setGeometry(final_hills[i].geometry);
+            driver.setReference(a);
+            double best = -1.0;
+            for (size_t j = 0; j < final_hills.size(); ++j) {
+                if (i == j)
+                    continue;
+                b.setGeometry(final_hills[j].geometry);
+                driver.setTarget(b);
+                double r = driver.BestFitRMSD();
+                if (best < 0 || r < best)
+                    best = r;
+            }
+            if (best >= 0) {
+                nn.push_back(best);
+                f << final_hills[i].index << ',' << best << '\n';
+            }
+        }
+    }
+    if (!nn.empty()) {
+        double mn = nn[0], mx = nn[0], sum = 0.0;
+        int above = 0;
+        for (double v : nn) {
+            mn = std::min(mn, v);
+            mx = std::max(mx, v);
+            sum += v;
+            if (v > m_r_dep)
+                ++above;
+        }
+        std::ofstream f(outputPath(base + ".mtd_coverage_statistics.csv"));
+        f << "# n,min,mean,max,r_dep,count_above_r_dep\n";
+        f << nn.size() << ',' << mn << ',' << (sum / static_cast<double>(nn.size())) << ',' << mx
+          << ',' << m_r_dep << ',' << above << '\n';
+    }
+
+    // 3. gnuplot scripts (leave .gnu + .csv; do not invoke gnuplot, like the scattering handler).
+    {
+        std::ofstream g(outputPath(base + ".mtd_hills.gnu"));
+        g << "set terminal pngcairo size 1000,700\n";
+        g << "set output '" << base << ".mtd_hills_plot.png'\n";
+        g << "set datafile separator ','\n";
+        g << "set title 'RMSD-MTD deposition map: origin of stored structures'\n";
+        g << "set xlabel 'MD step'\n";
+        g << "set ylabel 'RMSD to reference (A)'\n";
+        g << "set cblabel 'final counter (hill height / k)'\n";
+        g << "plot '" << base << ".mtd_hills.csv' using 2:5:7 with points pt 7 ps 1.2 palette title 'hills'\n";
+    }
+    if (!nn.empty()) {
+        std::ofstream g(outputPath(base + ".mtd_coverage.gnu"));
+        g << "set terminal pngcairo size 900,600\n";
+        g << "set output '" << base << ".mtd_coverage_plot.png'\n";
+        g << "set datafile separator ','\n";
+        g << "binw=0.05\n";
+        g << "bin(x)=binw*floor(x/binw)\n";
+        g << "set title 'Nearest-neighbour hill spacing (target r_dep=" << m_r_dep << " A)'\n";
+        g << "set xlabel 'nearest-neighbour RMSD (A)'\n";
+        g << "set ylabel 'count'\n";
+        g << "set boxwidth binw\n";
+        g << "set style fill solid 0.5\n";
+        g << "set arrow from " << m_r_dep << ", graph 0 to " << m_r_dep << ", graph 1 nohead lc rgb 'red' lw 2\n";
+        g << "plot '" << base << ".mtd_coverage.csv' using (bin($2)):(1.0) smooth freq with boxes title 'nn RMSD'\n";
+    }
+
+    if (m_verbosity >= 1)
+        std::cout << "RMSD-MTD provenance: " << m_mtd_deposits.size() << " deposits written to "
+                  << base << ".mtd_hills.csv (+ coverage, gnuplot)" << std::endl;
 }
 
 /* Claude Generated 2026 - Queue external per-atom force contribution for the
@@ -3223,6 +3352,7 @@ void SimpleMD::ApplyRMSDMTD()
             initial.index = 0;
             initial.temperature = m_T0;
             int deposited = m_shared_pool->depositBiasStructure(initial);
+            m_mtd_deposits.push_back({deposited, double(m_step), m_step * m_dT, m_Epot, 0.0, 'I', 0, false});
             m_bias_structure_count++;
             CurcumaLogger::result_fmt("RMSD-MTD: Initial bias structure {} deposited (pool total: {})",
                 deposited, m_shared_pool->biasStructureCount());
@@ -3496,6 +3626,7 @@ void SimpleMD::ApplyRMSDMTD()
             new_bs.counter = 1;
             new_bs.temperature = m_T0;
             int new_count = m_shared_pool->depositBiasStructure(new_bs);
+            m_mtd_deposits.push_back({new_count, double(m_step), m_step * m_dT, m_Epot, rmsd_reference, 'B', 0, false});
             m_bias_structure_count++;
             // Write full molecule to per-thread .mtd.xyz
             Molecule out_mol(m_molecule);
@@ -3515,6 +3646,7 @@ void SimpleMD::ApplyRMSDMTD()
     // Original local-only bias path (unchanged)
     if (m_bias_structure_count == 0) {
         m_bias_threads[0]->addGeometry(current_geometry, 0, m_currentStep, 0);
+        m_mtd_deposits.push_back({0, double(m_step), m_step * m_dT, m_Epot, 0.0, 'I', 0, false});
         m_bias_structure_count++;
         m_rmsd_mtd_molecule.writeXYZFile(outputPath(Basename() + ".mtd.xyz"));
         if (m_nocolvarfile == false) {
@@ -3603,6 +3735,7 @@ void SimpleMD::ApplyRMSDMTD()
     if (local_deposit) {
         int thread_index = m_bias_structure_count % m_bias_threads.size();
         m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentStep, m_bias_structure_count);
+        m_mtd_deposits.push_back({m_bias_structure_count, double(m_step), m_step * m_dT, m_Epot, rmsd_reference, 'B', 0, false});
         m_bias_structure_count++;
         m_rmsd_mtd_molecule.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
         if (m_verbosity >= 1)

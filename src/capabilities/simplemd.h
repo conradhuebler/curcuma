@@ -285,6 +285,7 @@ private:
 
     /* Lets have this for all modules */
     virtual nlohmann::json WriteRestartInformation() override;
+    void writeMtdProvenance(); // Claude Generated (Jul 2026): mtd_hills/mtd_coverage CSV + gnuplot scripts
 
     /* Lets have this for all modules */
     virtual bool LoadRestartInformation() override;
@@ -520,6 +521,15 @@ private:
     Geometry m_bias_force_old, m_bias_force_target;
     double m_bias_energy_target = 0.0;    // exact V(x) at the last evaluation
     int m_bias_ramp_start_step = -1;      // step of the last F_target recompute
+    // Claude Generated (Jul 2026): provenance log, one record per deposited hill (writeMtdProvenance).
+    struct MtdDepositRecord {
+        int index = 0;
+        double step = 0, time_fs = 0, energy = 0, rmsd_ref = 0;
+        char trigger = 'B'; // 'I' initial, 'B' bias<V_min, 'D' displacement (Milestone 2)
+        int cycle = 0;
+        bool persistent = false;
+    };
+    std::vector<MtdDepositRecord> m_mtd_deposits;
     int m_mtd_steps = 10;
     int m_rattle = 0;
     int m_colvar_incr = 0;
