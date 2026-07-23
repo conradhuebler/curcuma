@@ -180,19 +180,28 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
         // This fires for the odd-nelpi=7 metal-coordinated N-heteroaromatic rings
         // (ED21/PR16/ED16a): without it, all 7 electrons occupy an antibonding
         // orbital (HOMO eps ~2.3) -> too-weak rings (+180 kcal vs the reference);
-        // with it, nelpi -> 6 reproduces xtb / the reference GFN-FF bit-for-bit.
-        // The redo uses the same et=4000 as xtb (the standalone's et=300 is not
-        // authoritative). Neutral even-nelpi and no-fallback odd systems (ED36
-        // nelpi=5, pisip=-1.545) are unaffected.
+        // with it, nelpi -> 6 reproduces the reference GFN-FF.
+        //
+        // et FIX (Jul 23, 2026): the redo uses et=300, NOT the main solve's et=4000.
+        // The pprcht/gfnff reference (our port source, gfnff_ini.f90:993) re-solves
+        // the reduced-electron Hamiltonian at 300 K (`gfnffqmsolve(...,300.0d0,...)`),
+        // a deliberately colder temperature that sharpens the occupation; only the
+        // FIRST solve uses 4000. Using 4000 for the redo (the xtb variant) left a
+        // systematic ~0.005-0.008 piBO offset on these fragments (PR25/ED25/PR21/
+        // ED21/PR16 +2-3 kcal, all in the bond term). We DO keep the fallback always
+        // firing (xtb-like), NOT print-gated like the pprcht standalone (`if(pr2)`) —
+        // print-gating would make the energy depend on the verbosity flag.
+        // Neutral even-nelpi and no-fallback odd systems (ED36 nelpi=5,
+        // pisip=-1.545) never enter this branch and are unaffected.
         // ====================================================================
         if (pisip > 0.40 && nelpi > 1 && H_converged.rows() == npi) {
             if (m_verbosity >= 3) {
                 CurcumaLogger::info(fmt::format(
-                    "  Wrong pi occupation (HOMO eps={:.4f} > 0.40): second attempt with Nel={}",
+                    "  Wrong pi occupation (HOMO eps={:.4f} > 0.40): second attempt with Nel={} at et=300",
                     pisip, nelpi - 1));
             }
             Eigen::MatrixXd H_redo = H_converged;
-            solveAndBuildDensity(H_redo, nelpi - 1, &pisip);  // H_redo -> density with nelpi-1
+            solveAndBuildDensity(H_redo, nelpi - 1, &pisip, 300.0);  // pprcht redo at 300 K
             P_old = H_redo;
         }
 
@@ -395,7 +404,7 @@ Eigen::MatrixXd HuckelSolver::buildHamiltonian(
 // Eigenvalue Solver and Density Matrix
 // ============================================================================
 
-double HuckelSolver::solveAndBuildDensity(Eigen::MatrixXd& H, int nel, double* pisip_out) const
+double HuckelSolver::solveAndBuildDensity(Eigen::MatrixXd& H, int nel, double* pisip_out, double et) const
 {
     // Port from gfnff_qm.f90:39-154
     //
@@ -456,11 +465,11 @@ double HuckelSolver::solveAndBuildDensity(Eigen::MatrixXd& H, int nel, double* p
 
     std::vector<double> occ(ndim, 0.0);
     if (ihomoa > 0 && ihomoa <= ndim) {
-        std::vector<double> focca = fermiSmear(eigenvalues, ihomoa, fermi_temp);
+        std::vector<double> focca = fermiSmear(eigenvalues, ihomoa, et);
         for (int i = 0; i < ndim; i++) occ[i] += focca[i];
     }
     if (ihomob > 0 && ihomob <= ndim) {
-        std::vector<double> foccb = fermiSmear(eigenvalues, ihomob, fermi_temp);
+        std::vector<double> foccb = fermiSmear(eigenvalues, ihomob, et);
         for (int i = 0; i < ndim; i++) occ[i] += foccb[i];
     }
 

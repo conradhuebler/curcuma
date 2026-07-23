@@ -236,7 +236,8 @@ private:
      *        (gfnff_ini.f90:1082). Pass nullptr if not needed.
      * @return Electronic energy (for convergence check)
      */
-    double solveAndBuildDensity(Eigen::MatrixXd& H, int nel, double* pisip_out = nullptr) const;
+    double solveAndBuildDensity(Eigen::MatrixXd& H, int nel, double* pisip_out = nullptr,
+                                double et = fermi_temp) const;
 
     /**
      * @brief Compute Fermi-Dirac occupations at given temperature

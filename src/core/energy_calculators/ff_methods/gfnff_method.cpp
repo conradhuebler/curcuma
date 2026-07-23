@@ -4856,6 +4856,10 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         if (pibo_idx >= 0 && pibo_idx < static_cast<int>(topo.pi_bond_orders.size())) {
             pibo = topo.pi_bond_orders[pibo_idx];
 
+            if (std::getenv("CURCUMA_PIBO_DUMP")) {
+                fmt::print("PIBO {:4d} {:4d} {:12.8f}\n", atom1, atom2, pibo);
+            }
+
             // DEBUG: Show pibo values for first few bonds with pi-character
             static int debug_count = 0;
             if (debug_count < 5 && CurcumaLogger::get_verbosity() >= 3 && pibo > 1e-6) {
