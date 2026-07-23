@@ -165,10 +165,12 @@ metals (Z≤55) unchanged. Per-structure MAD vs pprcht **0.975 → 0.630**, with
 
 **Session arc vs pprcht/gfnff (per-structure MAD):** 7.27 (start) → 1.61 (FT-HMO occu + pisip) →
 1.39 (carbene itag + angle) → 0.975 (halogen bpair) → 0.630 (EEQ gam array) → 0.543
-(eta-aware X-bond bpair) → 0.469 (SP3-specials torsion order) → **0.29** (bond fcn neighbour
-count, PR27), within-1 52 → 86/95. **Reaction-level MAD vs pprcht: 0.255 kcal/mol** (max 1.46 =
-rxn 23, the `.CHRG` quirk where curcuma is correct) — the per-structure residuals largely cancel
-in the reaction energies, so the port reproduces its reference at the level that matters.
+(eta-aware X-bond bpair) → 0.469 (SP3-specials torsion order) → 0.29 (bond fcn neighbour
+count, PR27) → **0.16** (FT-HMO π-occupation redo temperature, N-heteroaromatic cluster),
+within-1 52 → 92/95. **Reaction-level MAD vs pprcht: 0.233 kcal/mol** (max 1.46 = rxn 23, the
+`.CHRG` quirk where curcuma is correct). Note the last two fixes are genuine **per-structure**
+correctness, not reaction-level error cancellation — the localized per-structure residuals were
+traced to real parameter/occupation bugs and closed at the bond level.
 
 ### SP3-specials torsion order — ED30/PR30 (`gfnff_torsions.cpp`)
 
@@ -206,6 +208,31 @@ MOR41 (sole non-metal heavy-heavy bond); 35/35 golden-value gfnff ctests byte-id
 runnable gfnff ctests pass. Per-structure MAD **0.469 → 0.29**, within-1 85 → **86/95**. Note this
 is a general correctness fix — it affects any molecule with a non-metal heavy-heavy bond (disulfides,
 phosphine pairs, P-S, …), not just PR27.
+
+### FT-HMO π-occupation redo temperature — PR25/ED25/PR21/ED21/PR16 (`huckel_solver.cpp`)
+
+The N-heteroaromatic cluster (PR25 +2.87, ED25 +2.77, PR21 +2.51, ED21 +2.27, PR16 +1.95) is the
+one place the "reaction-level cancellation is not correctness" point bites: the per-structure
+residuals were **real**, all in the bond term, and had to be closed at the bond level rather than
+left to cancel. Apples-to-apples per-bond decomposition (instrumenting the Fortran `egbond` to print
+its energy-time dynamic r0 and per-bond energy, since the printed *setup* r0 differs from the
+`gfnffdrab` energy r0) localized the entire +2.33 kcal PR25 gap to the conjugated C=C/C=N bonds of
+**one** π-fragment — the other π-ring matched to 1e-7. Both r0 (via the pi bond shift) and fc (via
+`fpi`) scale with the π-bond order, and curcuma's piBO on that fragment was 0.005−0.008 low.
+
+Root cause: that fragment is the one that trips the `pisip>0.40` "probably wrong pi occupation →
+redo with Nel−1" fallback (`gfnff_ini.f90:987`). curcuma re-solved the reduced Hamiltonian at
+**et=4000** (the xtb variant, chosen earlier); the pprcht reference re-solves at **et=300**
+(`gfnff_ini.f90:993`, `gfnffqmsolve(...,300.0d0,...)`) — a deliberately colder temperature, only
+the FIRST solve uses 4000. Threading an `et` argument through `solveAndBuildDensity` and passing
+300 for the redo makes the piBO **bit-identical (<1e-6)** to the reference across all bonds. The
+fallback still always fires (xtb-like), NOT gated on the print flag as in the pprcht standalone
+(`if(pr2)` — a quirk that would make the energy depend on verbosity).
+
+**PR25 +2.87→+0.10, ED25 +2.77→+0.03, PR16 +1.95→−0.00, ED16a +1.02→+0.04, ED21 +2.27→+0.30,
+PR21 +2.51→+0.55** — exactly the 6 fallback-firing structures, zero regressions. Per-structure MAD
+**0.29 → 0.16**, within-1 86 → **92/95**; 71/71 runnable gfnff ctests pass, 35/35 golden values
+unchanged. Diagnostic: `CURCUMA_PIBO_DUMP=1` prints per-bond π-bond orders.
 
 ### Eta-aware X-bond bpair — ED33 (`detectHalogenBondsNative`)
 
@@ -267,15 +294,14 @@ that was not a correctness advantage. The GFN-FF-vs-QM gap is the method's, not 
 
 ### Remaining pure-port residuals (curcuma vs pprcht, where pprcht==xtb so not the split)
 
-After the PR27 fcn fix the worst per-structure residuals are PR25 +2.87, ED25 +2.77, PR21 +2.51,
-ED21 +2.27, PR16 +1.95, PR23 +1.63, PR35 +1.42 — all in the **fine-precision** class and all
-verified (high-precision analyzer print, `6f14.8`) to have **no single-parameter smoking gun**:
-the mismatches are sub-0.0016 in the bond force constant (from 3rd-decimal FT-HMO π-bond-order
-differences on conjugated C=C/C=N bonds) and sub-0.01 Å in the metal-bond equilibrium r0 (the
-CN-dependent `gfnffrab` quantity, scattered across element pairs). These correlated reactant/product
-residuals **cancel at the reaction level** (reaction MAD 0.255). Irreducible fine-precision, not a
-bug. Ground-truth with the `external/gfnff/_build/gfnff` analyzer (per-bond `pibo`/`fqq`/force-constant
-print via `pr=.true.`; temporarily raise the `6f8.3` bond format for sub-mEh comparison).
+After the PR27 fcn (i) and FT-HMO et (j) fixes the worst per-structure residuals are **PR23 +1.63
+and PR35 +1.42** — both metal-bond fine-precision (sub-0.01 Å CN-dependent `gfnffrab` r0 on the
+Ir/Ru metal bonds, scattered across element pairs, no single-parameter smoking gun; verified to the
+analyzer print floor). Everything else is within ~1 kcal (92/95). These two are the genuine
+irreducible-precision residuals. Ground-truth with the `external/gfnff/_build/gfnff` analyzer
+(per-bond `pibo`/`fqq`/force-constant print via `pr=.true.`; for sub-mEh work temporarily raise the
+bond-table `6f8.3` format to `6f14.8` and instrument `egbond` in `gfnff_engrad.F90` to print the
+energy-time dynamic r0, which differs from the printed setup r0).
 
 The sections below are the original (pre-fix) diagnostic and remain valid for GFN-FF.
 
