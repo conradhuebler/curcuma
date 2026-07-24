@@ -724,9 +724,20 @@ double XTB::Calculation(bool gradient)
     // (dsygst/dsyevd/dtrsm) is the one region handed to MKL rather than the
     // CxxThreadPool; effectiveIntraThreads() gates it (serial under molecule-level
     // parallelism or for small bases). nao is constant over the SCF. Claude Generated.
-    const int eig_threads = effectiveIntraThreads(m_basis.nao);
+    //
+    // The D&C eigensolve is memory-bandwidth-bound and plateaus / REGRESSES past ~8
+    // threads (measured complex/231: dsyevd 215 ms @8 vs 290 ms @16 on a 16-core Ryzen),
+    // so a -threads 16/32 run would slow the eigensolve while still helping the
+    // hand-threaded regions (Fock/gradient/setup). Cap the eigensolve at a memory-safe
+    // count while the rest keeps all threads. Override with CURCUMA_EIG_MAX_THREADS.
+    int eig_cap = 8;
+    if (const char* env = std::getenv("CURCUMA_EIG_MAX_THREADS")) {
+        const int v = std::atoi(env);
+        if (v > 0) eig_cap = v;
+    }
+    const int eig_threads = std::min(effectiveIntraThreads(m_basis.nao), eig_cap);
     if (verb >= 3 && eig_threads > 1)
-        CurcumaLogger::info_fmt("Eigensolve MKL threads: {}", eig_threads);
+        CurcumaLogger::info_fmt("Eigensolve MKL threads: {} (cap {})", eig_threads, eig_cap);
 
     // Device-resident SCF (Claude Generated, GPU port Stage 2). Enabled with the
     // default Broyden charge mixing and an available lower Cholesky factor L
