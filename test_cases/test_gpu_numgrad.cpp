@@ -12,6 +12,8 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
+#include <unistd.h>
 #include <iomanip>
 #include <iostream>
 
