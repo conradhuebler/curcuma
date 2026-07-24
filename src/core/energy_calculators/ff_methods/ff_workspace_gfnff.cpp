@@ -1555,9 +1555,10 @@ void FFWorkspace::calcATM(int p)
         double c9 = triple.s9 * std::sqrt(std::fabs(triple.C6_ij * triple.C6_ik * triple.C6_jk));
 
         int zi = m_atom_types[triple.i], zj = m_atom_types[triple.j], zk = m_atom_types[triple.k];
-        // Claude Generated (May 2026, GPU/CPU 8.9 µEh fix): D3 covalent radii (matches GPU's
-        // s_rcov_d3_bohr exactly). Earlier rcov_bohr (= r0_gfnff) was a GFN-FF-specific bond-r0
-        // table, not the D3-theory covalent radii ATM expects. Drove the polymer ATM mismatch.
+        // Claude Generated (May 2026, GPU/CPU 8.9 µEh fix): GFN-FF covalent radii
+        // (covalent_rad_d3). Earlier rcov_bohr (= r0_gfnff) was a GFN-FF-specific bond-r0
+        // table, not the covalent radii ATM expects. Drove the polymer ATM mismatch.
+        // (Jul 2026) The GPU uploads its rcov from this same covalent_rad_d3 array now.
         double r_cov_i = (zi > 0 && zi <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zi - 1] : 1.0;
         double r_cov_j = (zj > 0 && zj <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zj - 1] : 1.0;
         double r_cov_k = (zk > 0 && zk <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zk - 1] : 1.0;

@@ -3599,10 +3599,12 @@ void ForceFieldThread::CalculateATMContribution()
         //
         // Claude Generated (May 2026, GPU-vs-CPU 8.9 µEh investigation): ATM is a D3/D4
         // dispersion theory. The CPU previously read rcov_bohr (= r0_gfnff, the GFN-FF
-        // bond-r0 array — values like 0.557 Bohr for H, 0.983 for C) instead of D3
-        // covalent radii (covalent_rad_d3 — 0.605 Bohr for H, 1.417 for C, matches GPU's
-        // s_rcov_d3_bohr exactly). Caused the polymer ATM mismatch CPU=+16.74 µEh vs
-        // GPU=+7.52 µEh that drove the gfnff_gpu_vs_cpu_polymer test failure.
+        // bond-r0 array — values like 0.557 Bohr for H, 0.983 for C) instead of the GFN-FF
+        // covalent radii (covalent_rad_d3 — 0.605 Bohr for H, 1.417 for C). Caused the
+        // polymer ATM mismatch CPU=+16.74 µEh vs GPU=+7.52 µEh that drove the
+        // gfnff_gpu_vs_cpu_polymer test failure. (Jul 2026) The GPU now uploads its rcov
+        // directly from covalent_rad_d3 too (was a hand-copied table that had drifted to
+        // the Grimme D3 radii for metals), so both sides share this exact array.
         double r_cov_i = (zi > 0 && zi <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zi - 1] : 1.0;
         double r_cov_j = (zj > 0 && zj <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zj - 1] : 1.0;
         double r_cov_k = (zk > 0 && zk <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zk - 1] : 1.0;
