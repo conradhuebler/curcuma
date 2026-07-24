@@ -913,6 +913,16 @@ public:
         const Eigen::MatrixXd& dp_at,
         const Eigen::MatrixXd& qp_at);
 
+    // Debug (Jul 2026): audit the GFN2 multipole (AES) analytic gradient against a
+    // frozen-density finite difference. Must be called on a converged GFN2 state
+    // (after Calculation(gradient=true)). Isolates the analytic multipole gradient
+    // as g(full)-g(mp_off) [Eh/Bohr], then FDs the multipole energy at R±h with the
+    // density matrix P frozen (moments RECOMPUTED from P via updatePopulations, so
+    // the FD carries both the §5 interaction and the AP5b integral-Pulay response).
+    // Prints a per-term analytic-vs-FD table (multipole/AES, ES2 Coulomb, D4).
+    // GFN2 only; no effect on results.
+    void auditGfn2GradientTerms();
+
     // --- large_system_mode=dc divide-and-conquer DC-SCF (Claude Generated, June 2026) -
     // Energy-only large-system SCF that exploits locality: each outer iteration
     // builds the GLOBAL potential + Fock from the current density (so severed
@@ -1137,6 +1147,28 @@ private:
     std::vector<double> m_mp_dkernel;
     std::vector<double> m_mp_qkernel;
     bool m_mp_initialized = false;
+    // Debug (Jul 2026): when true, calculateGradient() skips the GFN2 multipole
+    // (AES) gradient (§5 direct interaction + mrad/CN chain + AP5b integral Pulay).
+    // Used by auditMultipoleGradient() to isolate the analytic multipole gradient
+    // as g(full) - g(mp_off) and FD-check it against the frozen-density multipole
+    // energy. Zero effect on the default path.
+    bool m_mp_grad_off = false;
+    bool m_coulomb_grad_off = false;   // debug: skip the ES2 Coulomb gradient (section 3)
+    bool m_d4_grad_off = false;        // debug: skip the D4 dispersion gradient (section 3b)
+    bool m_repulsion_grad_off = false; // debug: skip the repulsion gradient (section 1)
+    bool m_sval_h0_only = false;       // debug: sval = 2·P·h_av (drop −2W and the charge-Pulay)
+                                       //   -> with all potential terms gated off, the gradient
+                                       //      becomes exactly Tr(P·dH0/dR) (the band term).
+    bool m_cnchain_off = false;        // debug: skip section 4 (the CN chain-rule that
+                                       //   distributes dEdcn into forces). With m_sval_h0_only
+                                       //   this isolates the band term's overlap+shpoly part
+                                       //   (2·P·h_av·dS + G_shpoly) from its H0/CN chain part.
+    bool m_d4_variational_qresp = false;  // F5: handle the GFN2 self-consistent-D4 q-response
+                                       //   variationally (dE_D4/dq in the gradient v_at → charge-Pulay
+                                       //   + W, exactly like tblite) instead of the separate eeq/cpscf
+                                       //   response. Default ON for d4_charge_source="mulliken" (set in
+                                       //   Calculation before calcDispersionEnergy). CURCUMA_D4_NONVARIATIONAL
+                                       //   forces the legacy separate-response path for A/B validation.
 
     // Energy components
     double m_E_electronic    = 0.0;
@@ -1242,7 +1274,7 @@ private:
     // D4 charge-response source: "eeq" (dftd4-conform, default) or "mulliken"
     // (CPSCF response on the GFN2 SCF). Empty disables the q-response term
     // (static-prefactor mode). Set from config in the constructor.
-    std::string m_d4_charge_source = "eeq";
+    std::string m_d4_charge_source = "mulliken";
 
     // ── Implicit solvation (Claude Generated, June 2026) ──
     // Self-consistent ALPB (later GBSA/CPCM) coupled into the SCF. The model is

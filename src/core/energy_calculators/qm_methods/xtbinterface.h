@@ -35,7 +35,7 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     PARAM(max_iterations, Int, 100, "Maximum number of SCF iterations.", "SCF", {"SCFmaxiter"})
     PARAM(electronic_temperature, Double, 300.0, "Electronic temperature in Kelvin for Fermi smearing.", "SCF", {"Tele"})
     PARAM(spin, Double, 0.0, "Total spin of the system (0.0 = singlet).", "Molecular", {})
-    PARAM(d4_charge_source, String, "eeq", "Native GFN2 D4 zeta charge source: 'eeq' (single-shot dftd4 EEQ, analytical dq/dx) or 'mulliken' (GFN2 SCF charges + CPSCF response).", "Dispersion", {})
+    PARAM(d4_charge_source, String, "mulliken", "Native GFN2 self-consistent-D4 q-response for the gradient: 'mulliken' (default, exact — dE_D4/dq folded into the gradient v_at so the charge-Pulay+W reproduce the Mulliken response variationally, matching tblite), 'eeq' (single-shot dftd4 EEQ, ~1% residual on TM complexes), 'cpscf' (explicit Z-vector solve, exact but ~100x slower). Energy is Mulliken-self-consistent in all cases.", "Dispersion", {})
     // Implicit solvation (Claude Generated, June 2026): self-consistent ALPB coupled
     // into the native GFN1/GFN2 SCF. Use the dotted form (-xtb.solvent water) because
     // the flat -solvent flag is ambiguous (also registered by tblite/ulysses/gfnff_external).

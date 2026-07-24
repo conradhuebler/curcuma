@@ -77,7 +77,7 @@ json NativeXtbMethod::getDefaultConfig(MethodType method)
         cfg["dispersion"] = "d3";        // GFN1: D3(BJ)
     } else {
         cfg["dispersion"] = "d4";        // GFN2: D4
-        cfg["d4_charge_source"] = "eeq"; // D4 zeta charges: "eeq" | "mulliken"
+        cfg["d4_charge_source"] = "mulliken"; // D4 q-response: "mulliken"(variational, exact) | "eeq" | "cpscf"
         cfg["save_orbitals"] = false;
     }
     return cfg;
@@ -87,15 +87,16 @@ void NativeXtbMethod::applyConfig()
 {
     if (!m_xtb) return;
 
-    // D4 charge-response source ("eeq" default, or "mulliken" via CPSCF). The CLI
-    // flag -d4_charge_source auto-routes to the "xtb" scope; fall back to a
-    // top-level key, then the default. No-op for GFN1 (D3 ignores it).
-    std::string d4src = "eeq";
+    // D4 charge-response source (default "mulliken" = variational charge-Pulay, exact;
+    // "eeq" = single-shot EEQ, approximate; "cpscf" = explicit Z-vector solve). The CLI
+    // flag -d4_charge_source auto-routes to the "xtb" scope; fall back to a top-level
+    // key, then the default. No-op for GFN1 (D3 ignores it).
+    std::string d4src = "mulliken";
     if (m_parameters.contains("xtb") && m_parameters["xtb"].is_object()
         && m_parameters["xtb"].contains("d4_charge_source"))
         d4src = m_parameters["xtb"]["d4_charge_source"].get<std::string>();
     else
-        d4src = m_parameters.value("d4_charge_source", std::string("eeq"));
+        d4src = m_parameters.value("d4_charge_source", std::string("mulliken"));
     m_xtb->setD4ChargeSource(d4src);
 
     // SCF-convergence settings (mode, guess, damping, DIIS, level shift) from the

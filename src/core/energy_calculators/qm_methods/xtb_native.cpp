@@ -885,15 +885,16 @@ double XTB::Calculation(bool gradient)
     // nao spectrum. OPT-IN (m_gpu_partial_diag, -gpu_partial_diag): measured
     // net-neutral on an RTX 5080 (the tridiagonalization, not the eigenvector count,
     // dominates the dense eigensolve), so the default GPU path stays the full solve.
-    // Disabled when virtuals are genuinely required: the Mulliken-CPSCF D4 charge
-    // response (d4_charge_source=mulliken) and the verbosity>=3 orbital listing both
-    // read virtual orbitals. The buffer covers the LUMO plus a few-kT Fermi tail; if
-    // the occupied tail ever reaches the window edge (tiny-gap/metallic), the loop
-    // widens to the full solve once so the 1e-8 energy is never at risk. Disabled on
-    // the device-potential path (its re-solve would need the host D4 weights again).
+    // Disabled when virtuals are genuinely required: the explicit Mulliken-CPSCF D4
+    // charge response (d4_charge_source=cpscf) and the verbosity>=3 orbital listing both
+    // read virtual orbitals. (The default variational D4 q-response needs no virtuals.)
+    // The buffer covers the LUMO plus a few-kT Fermi tail; if the occupied tail ever
+    // reaches the window edge (tiny-gap/metallic), the loop widens to the full solve once
+    // so the 1e-8 energy is never at risk. Disabled on the device-potential path (its
+    // re-solve would need the host D4 weights again).
     int gpu_n_eig = 0;  // 0 = full spectrum
     bool gpu_partial_diag = m_gpu_partial_diag && use_gpu_resident && !use_device_potential
-        && (m_d4_charge_source != "mulliken") && (verb < 3);
+        && (m_d4_charge_source != "cpscf") && (verb < 3);
     if (gpu_partial_diag) {
         const int nocc_orbs = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
         const int buffer = std::max(8, (m_basis.nao + 19) / 20);  // ~5% of nao, >= 8
@@ -1341,6 +1342,16 @@ double XTB::Calculation(bool gradient)
     m_E_electronic   += m_E_entropy;
     m_E_repulsion     = calcRepulsionEnergy();
     m_E_halogen_bond  = calcHalogenBondEnergy();
+    // Exact GFN2 self-consistent-D4 q-response (F5): d4_charge_source="mulliken" (default)
+    // handles dE_D4/dq·dq/dR variationally through the gradient charge-Pulay + W — dE_D4/dq
+    // is folded into the gradient v_at (as tblite does in dispersion%get_potential), so the
+    // −P·(v_a+v_b)·dS overlap-Pulay plus W = Σf·ε·ccᵀ (ε already carry the in-SCF D4 potential)
+    // reproduce the full Mulliken charge response with no separate solve. "eeq"/"cpscf" fall
+    // back to the explicit single-shot-EEQ / Z-vector response. Set BEFORE calcDispersionEnergy
+    // (so its q-response branch is skipped) and BEFORE the gradient m_pot rebuild.
+    m_d4_variational_qresp = (m_method == MethodType::GFN2)
+        && (m_d4_charge_source == "mulliken")
+        && !std::getenv("CURCUMA_D4_NONVARIATIONAL");
     m_E_dispersion    = calcDispersionEnergy(gradient);
     // Implicit solvation free energy (Born + CDS + shift). Added separately to the
     // total — NOT into Tr(P·H0) — mirroring the Coulomb ES2 handling, so there is no
@@ -1388,6 +1399,13 @@ double XTB::Calculation(bool gradient)
         addCoulombShellPotential(m_pot);
         addThirdOrderPotential(m_pot);
         if (m_method == MethodType::GFN2) addMultipolePotential(m_pot);
+        // Exact GFN2 self-consistent-D4 q-response (F5): tblite folds dE_D4/dq into
+        // pot%vat (dispersion%get_potential) so the charge-Pulay -P·(v_a+v_b)·dS + the
+        // W = Σf·ε·ccᵀ term (ε already carry the in-SCF D4 potential) reproduce the full
+        // dE_D4/dq·dq/dR variationally — no separate CPSCF/EEQ response. Mirror it here
+        // (m_d4_variational_qresp set above, before calcDispersionEnergy).
+        if (m_method == MethodType::GFN2 && m_d4_variational_qresp)
+            addDispersionPotential(m_pot);
         // Solvation v_at must be in m_pot here too: calculateGradient's overlap-
         // derivative (Pulay) term uses -P·(v_ao(μ)+v_ao(ν))·dS/dR with the FULL
         // converged potential, and W is built from the solvation-polarized orbital
@@ -1412,6 +1430,11 @@ double XTB::Calculation(bool gradient)
         // i.e. in the SAME space as calculateGradient, BEFORE the unit conversion.
         if (m_solvation)
             m_solvation->addGradient(m_atoms, m_geometry * AA_TO_AU, m_wfn.q_at, m_gradient);
+
+        // Debug (Jul 2026, F5): env-gated GFN2 multipole-gradient audit. Runs in
+        // Eh/Bohr (before the unit conversion), restores m_gradient on exit.
+        if (m_method == MethodType::GFN2 && std::getenv("CURCUMA_MP_GRAD_AUDIT"))
+            auditGfn2GradientTerms();
 
         m_gradient /= au;          // Eh/Bohr → Eh/Å: 1 Eh/Bohr = (1/au) Eh/Å
     }
@@ -1547,6 +1570,180 @@ bool XTB::evaluateComponentsAtFixedDensity(
               + m_E_halogen_bond + m_E_dispersion;
 
     return true;
+}
+
+/* ------------------------------------------------------------------------- *
+ *  auditGfn2GradientTerms() — Claude Generated (Jul 2026, F5 diagnosis)
+ *
+ *  Isolate each gfn2-specific analytic gradient term (multipole/AES, ES2 Coulomb,
+ *  D4 dispersion) via the per-term gates and FD-check it against a frozen-DENSITY
+ *  numerical derivative. The FD freezes the density matrix P and holds the atomic
+ *  CHARGES q FIXED at q0 — the charge response ∂E/∂q·∂q/∂R belongs to the global
+ *  energy-weighted-density term, not the per-term gradient — while recomputing the
+ *  multipole MOMENTS from P0 (so the multipole FD carries §5 + AP5b + mrad/CN).
+ *  A term whose ratio ≠ 1.000 carries the ~1.3% gfn2 metal gradient residual.
+ *  Debug only; leaves m_gradient and the geometry restored on exit.
+ * ------------------------------------------------------------------------- */
+void XTB::auditGfn2GradientTerms()
+{
+    if (m_method != MethodType::GFN2 || !m_mp_initialized) {
+        CurcumaLogger::warn("auditGfn2GradientTerms: needs a converged GFN2 + multipole state");
+        return;
+    }
+    const int nat = m_atomcount;
+
+    // Consistency probe (Jul 2026, F5): the −Tr(W·dS) gradient term uses W = Cᵒᶜᶜ·diag(f·ε)·Cᵒᶜᶜᵀ,
+    // which cancels the density response ONLY if the stored density P equals Cᵒᶜᶜ·diag(f)·Cᵒᶜᶜᵀ.
+    // A mismatch (e.g. a Broyden/device density not rebuilt from the final C) breaks that
+    // cancellation and would show up exactly as the ~1.3% electronic-response residual.
+    if (m_wfn.C.rows() == m_wfn.P.rows() && m_wfn.focc.size() == m_wfn.C.cols()) {
+        const int nao_ = m_wfn.P.rows();
+        int ncol = 0; for (int i = 0; i < nao_; ++i) if (m_wfn.focc(i) > 1e-12) ncol = i + 1;
+        Matrix Prec = m_wfn.C.leftCols(ncol)
+                    * m_wfn.focc.head(ncol).asDiagonal()
+                    * m_wfn.C.leftCols(ncol).transpose();
+        CurcumaLogger::result(fmt::format(
+            "  [consistency] ||P - C·f·Cᵀ|| = {:.3e}  (||P||={:.3e})  ncol={}",
+            (m_wfn.P - Prec).norm(), m_wfn.P.norm(), ncol));
+    }
+    // Generalized-eigenproblem residual: do the stored eps/C satisfy F·C = S·C·diag(eps)
+    // for the FINAL full Fock m_F? W = C·(f·eps)·Cᵀ is only the correct energy-weighted
+    // density (so −Tr(W·dS) cancels the response) if they do. A nonzero residual means the
+    // eps used for W are inconsistent with the converged Fock — the −Tr(W·dS) bug.
+    if (m_F.rows() == m_wfn.C.rows() && m_S.rows() == m_wfn.C.rows()
+        && m_wfn.eps.size() == m_wfn.C.cols()) {
+        Matrix lhs = m_F * m_wfn.C;
+        Matrix rhs = m_S * m_wfn.C * m_wfn.eps.asDiagonal();
+        CurcumaLogger::result(fmt::format(
+            "  [consistency] ||F·C - S·C·ε|| = {:.3e}  (||F·C||={:.3e})",
+            (lhs - rhs).norm(), lhs.norm()));
+    }
+
+    const Matrix geom0   = m_geometry;   // Angstrom
+    const Matrix P0      = m_wfn.P;
+    const Vector q0      = m_wfn.q_at;    // converged charges — FIXED in the FD
+    const Vector qsh0    = m_wfn.q_sh;
+    const Eigen::MatrixXd dp0 = m_wfn.dp_at;
+    const Eigen::MatrixXd qp0 = m_wfn.qp_at;
+    const Matrix g_saved = m_gradient;   // caller's gradient — restored on exit
+
+    // --- analytic per-term gradients (Eh/Bohr) via the per-term gates ---
+    auto grad_with = [&](bool mp, bool coul, bool d4, bool rep, bool h0only,
+                         bool cnoff = false) -> Matrix {
+        m_mp_grad_off = mp; m_coulomb_grad_off = coul; m_d4_grad_off = d4;
+        m_repulsion_grad_off = rep; m_sval_h0_only = h0only; m_cnchain_off = cnoff;
+        calculateGradient();
+        m_mp_grad_off = m_coulomb_grad_off = m_d4_grad_off = false;
+        m_repulsion_grad_off = m_sval_h0_only = m_cnchain_off = false;
+        return m_gradient;
+    };
+    const Matrix g_full = grad_with(false, false, false, false, false);
+    const Matrix g_mp   = g_full - grad_with(true , false, false, false, false);
+    const Matrix g_coul = g_full - grad_with(false, true , false, false, false);
+    const Matrix g_d4   = g_full - grad_with(false, false, true , false, false);
+    // Band term Tr(P·dH0/dR): all potential terms off + sval reduced to 2·P·h_av
+    // (drops −2W and the charge-Pulay), leaving 2·P·h_av·dS + G_shpoly + H0/CN chain.
+    const Matrix g_band = grad_with(true, true, true, true, true);
+    // Band decomposition (Jul 2026, F5): the CN chain (section 4) OFF isolates the
+    // direct band part 2·P·h_av·dS + G_shpoly (frozen-CN); the remainder is the
+    // H0/CN chain that flows through dEdcn → section 4.
+    const Matrix g_band_nocn = grad_with(true, true, true, true, true, /*cnoff=*/true);
+    const Matrix g_band_cn   = g_band - g_band_nocn;
+
+    // --- frozen-P, fixed-q component energies at a geometry ---
+    auto e_mp = [&](const Matrix& geom) -> double {          // §5 + AP5b + mrad/CN
+        m_geometry = geom;
+        Vector cn = computeCoordinationNumbers(); Vector se; getSelfEnergies(cn, se);
+        Matrix S, H0; getHamiltonianH0(se, S, H0); m_S = S; m_H0 = H0; m_coordination_numbers = cn;
+        buildGammaMatrix(); setupMultipole();
+        m_wfn.P = P0; updatePopulations(m_S);                // recompute moments from P0
+        m_wfn.q_at = q0; m_wfn.q_sh = qsh0;                  // freeze charges
+        return energyMultipole();
+    };
+    // evaluateComponentsAtFixedDensity injects (P0, q0, moments0) and rebuilds at the
+    // current geometry; E_coulomb_shell = explicit ES2 (fixed q), E_dispersion = D4
+    // direct+CN (audit mode, no q-response). Moments do not enter either energy.
+    auto e_coul = [&](const Matrix& geom) -> double {
+        m_geometry = geom; evaluateComponentsAtFixedDensity(P0, q0, qsh0, dp0, qp0);
+        return m_E_coulomb_shell;
+    };
+    auto e_d4 = [&](const Matrix& geom) -> double {
+        m_geometry = geom; evaluateComponentsAtFixedDensity(P0, q0, qsh0, dp0, qp0);
+        return m_E_dispersion;
+    };
+    // Band energy Tr(P0·H0(R)) at the frozen density: evaluateComponentsAtFixedDensity
+    // rebuilds m_H0 at R and injects m_wfn.P = P0, so this is exactly the band term.
+    auto e_band = [&](const Matrix& geom) -> double {
+        m_geometry = geom; evaluateComponentsAtFixedDensity(P0, q0, qsh0, dp0, qp0);
+        return (m_wfn.P.cwiseProduct(m_H0)).sum();
+    };
+    // Band energy with the self-energies FROZEN at the R0 coordination number
+    // (se0 = getSelfEnergies(cn0)). H0(R) still carries the geometry-dependence of
+    // S and the shpoly factor pi_ij, but NOT the CN-dependence of avg_eps. Its FD
+    // is therefore the direct band part (2·P·h_av·dS + G_shpoly), matching the
+    // analytic g_band_nocn. FD(e_band) − FD(e_band_fixedcn) = the H0/CN chain part.
+    m_geometry = geom0;                              // (already geom0 here; explicit)
+    const Vector cn0 = computeCoordinationNumbers();
+    Vector se0; getSelfEnergies(cn0, se0);
+    auto e_band_fixedcn = [&](const Matrix& geom) -> double {
+        m_geometry = geom;
+        Matrix S, H0; getHamiltonianH0(se0, S, H0);
+        return (P0.cwiseProduct(H0)).sum();
+    };
+
+    const double h = 1.0e-4;   // Angstrom
+    // CRITICAL (Jul 2026, F5): computeCoordinationNumbers() memoises on m_cn_cache,
+    // invalidated only by UpdateMolecule/InitialiseMolecule. The FD sets m_geometry
+    // DIRECTLY, so the cache must be force-invalidated before each evaluation or the
+    // FD silently freezes CN at geom0 (dropping the H0/CN chain from every component).
+    auto fd = [&](auto efn) -> Matrix {
+        Matrix g = Matrix::Zero(nat, 3);
+        for (int i = 0; i < nat; ++i)
+            for (int j = 0; j < 3; ++j) {
+                Matrix gp = geom0, gm = geom0; gp(i, j) += h; gm(i, j) -= h;
+                m_cn_cache_valid = false; const double ep = efn(gp);
+                m_cn_cache_valid = false; const double em = efn(gm);
+                g(i, j) = (ep - em) / (2.0 * h) / AA_TO_AU;   // Eh/Ang -> Eh/Bohr
+            }
+        return g;
+    };
+    const Matrix fd_mp   = fd(e_mp);
+    const Matrix fd_coul = fd(e_coul);
+    const Matrix fd_d4   = fd(e_d4);
+    const Matrix fd_band = fd(e_band);
+    const Matrix fd_band_nocn = fd(e_band_fixedcn);     // direct (overlap+shpoly) only
+    const Matrix fd_band_cn   = fd_band - fd_band_nocn; // H0/CN chain only
+
+    // NOTE: a frozen-P TOTAL-energy FD is deliberately NOT reported. ∂E_total/∂R|_P omits
+    // the −Tr(W·dS) orthonormality term (from the C†SC=I constraint, not from ∂E/∂R|_P), so
+    // it does not equal the true gradient and cannot audit the band/charge-response terms.
+    // The per-component energies above are free of that constraint, so their FDs are valid.
+
+    // --- restore consistent geom0 state + caller's gradient ---
+    m_geometry = geom0;
+    m_cn_cache_valid = false;   // FD left a perturbed-geom CN cached; force recompute
+    { Vector cn = computeCoordinationNumbers(); Vector se; getSelfEnergies(cn, se);
+      Matrix S, H0; getHamiltonianH0(se, S, H0); m_S = S; m_H0 = H0; m_coordination_numbers = cn;
+      buildGammaMatrix(); setupMultipole(); m_wfn.P = P0; updatePopulations(m_S);
+      m_wfn.q_at = q0; m_wfn.q_sh = qsh0; m_wfn.dp_at = dp0; m_wfn.qp_at = qp0; }
+    m_gradient = g_saved;
+
+    auto report = [&](const char* name, const Matrix& a, const Matrix& f) {
+        double num = 0.0, maxa = 0.0;
+        for (int i = 0; i < nat; ++i) for (int j = 0; j < 3; ++j) {
+            const double d = a(i,j) - f(i,j); num += d*d; maxa = std::max(maxa, std::fabs(d)); }
+        CurcumaLogger::result(fmt::format(
+            "  {:<11} RMS(ana-FD)={:.3e}  max={:.3e}  |ana|={:.3e}  |FD|={:.3e}  ratio={:.5f}",
+            name, std::sqrt(num / (3.0 * nat)), maxa, a.norm(), f.norm(),
+            std::sqrt(a.squaredNorm() / std::max(1e-30, f.squaredNorm()))));
+    };
+    CurcumaLogger::result("GFN2 per-term gradient audit [Eh/Bohr]  analytic vs frozen-density(fixed-q) FD   ratio 1.000 = exact");
+    report("multipole",   g_mp,   fd_mp);
+    report("coulomb-ES2", g_coul, fd_coul);
+    report("d4(dir+CN)",  g_d4,   fd_d4);
+    report("band Tr(PdH0)", g_band, fd_band);
+    report("band:ovlp+shp", g_band_nocn, fd_band_nocn);
+    report("band:H0-CN",    g_band_cn,   fd_band_cn);
 }
 
 /* ------------------------------------------------------------------------- *
@@ -2136,18 +2333,21 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     // gradient. The per-reference path is Mulliken-self-consistent, so ∂q/∂x comes
     // from the GFN2 CPSCF/Z-vector response. Skipped in audit mode (no MO state).
     const auto td3 = d4clk::now();
-    if (m_disp_dEdq.size() == m_atomcount && !m_disp_audit_mode) {
-        // q-response source (m_d4_charge_source, default "eeq"):
-        //   "eeq"      — analytic ∂q/∂x from the single-shot dftd4 EEQ model
-        //                (one LU solve + adjoint contraction, ~ms). dftd4-conform
-        //                and the validated default. ~100x cheaper than the CPSCF.
-        //   "mulliken" — exact ∂q_Mulliken/∂x via the GFN2 CPSCF/Z-vector solve
-        //                (computeMullikenChargeResponse). Self-consistent with the
-        //                Mulliken-charge D4 energy but expensive (dominates the
-        //                post-SCF time on large systems: ~88% of D4 on complex).
-        // The energy weighting stays on the SCF Mulliken charges either way, so
-        // this choice only affects the gradient, never the energy.
-        if (m_d4_charge_source == "mulliken") {
+    // When m_d4_variational_qresp is set (exact GFN2, F5), the dE_D4/dq·dq/dR term is
+    // handled by the gradient charge-Pulay + W (dE_D4/dq folded into m_pot.v_at), so the
+    // separate eeq/CPSCF response here is skipped to avoid double-counting.
+    if (m_disp_dEdq.size() == m_atomcount && !m_disp_audit_mode && !m_d4_variational_qresp) {
+        // q-response source (m_d4_charge_source) — reached only when NOT variational:
+        //   "eeq"   — analytic ∂q/∂x from the single-shot dftd4 EEQ model (one LU solve
+        //             + adjoint contraction, ~ms). dftd4-conform, approximate (uses EEQ
+        //             not Mulliken charges): ~1% gradient residual on TM complexes.
+        //   "cpscf" — explicit ∂q_Mulliken/∂x via the GFN2 CPSCF/Z-vector solve
+        //             (computeMullikenChargeResponse). Exact but expensive (~88% of D4
+        //             on complex). Superseded by the default variational path, which
+        //             gets the same Mulliken response for free through the charge-Pulay.
+        // The energy weighting stays on the SCF Mulliken charges in all cases, so this
+        // choice only affects the gradient, never the energy.
+        if (m_d4_charge_source == "cpscf") {
             computeMullikenChargeResponse(m_disp_dEdq, m_disp_gradient);
         } else if (m_gpu_scf && m_gpu_scf->supportsDeviceEeq()) {
             // Stage 5 (Part A): device EEQ charges + adjoint dq/dx response. The
