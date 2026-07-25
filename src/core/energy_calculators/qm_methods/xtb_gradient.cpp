@@ -276,6 +276,17 @@ void XTB::calculateGradient()
                                 xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], dDblk, dQblk, 5);
                     }
 
+                    // B8 (Jul 2026): the s/p overlap-gradient kernel used to redo
+                    // the whole primitive loop -- including its pow() and exp() --
+                    // once per AO COMPONENT pair. Those scalars depend only on the
+                    // primitive pair, so build them once per shell pair here.
+                    CGTO::OverlapPrimPair pp[CGTO::kMaxPrimPairs];
+                    int npp = 0;
+                    if (!dpair)
+                        npp = CGTO::buildOverlapPrimPairs(sh_a, sh_b,
+                            xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                            xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], pp);
+
                     // ── hscale hs ────────────────────────────────────────────
                     double hs;
                     if (m_method == MethodType::GFN1) {
@@ -344,7 +355,10 @@ void XTB::calculateGradient()
                             if (dpair) {
                                 const int o = (iao*5 + jao) * 3;
                                 dS[0] = dSblk[o]; dS[1] = dSblk[o+1]; dS[2] = dSblk[o+2];
+                            } else if (npp >= 0) {
+                                CGTO::cgto_overlap_grad_pre(pp, npp, t_a, t_b, dS);
                             } else {
+                                // Shell pair exceeded the pair-table capacity.
                                 CGTO::cgto_overlap_grad(sh_a, sh_b,
                                                         xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
                                                         xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2],

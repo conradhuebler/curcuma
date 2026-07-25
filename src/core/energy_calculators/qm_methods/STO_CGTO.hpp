@@ -478,6 +478,228 @@ inline void orthogonalize(const Shell& shell_a, Shell& shell_b)
     }
 }
 
+
+/**
+ * @brief Per-primitive-pair scalars shared by every AO component of a shell pair
+ *
+ * B8 (Jul 2026). cgto_overlap_grad() is called once per AO-COMPONENT pair, so a
+ * p-p shell pair re-ran the nprim_a x nprim_b primitive loop nine times and with
+ * it the libm pow() + exp() in S00 -- even though none of these scalars depend on
+ * type_a/type_b. Build them once per shell pair and pass them in.
+ *
+ * NOTE the deliberate asymmetry with cgto_overlap_block(): this kernel forms the
+ * product centre as (ai*xa + aj*xb) * invg, i.e. multiply-by-reciprocal, whereas
+ * the energy kernel divides by gamma. Those round differently, so the two are
+ * kept separate on purpose - do not "unify" them.
+ */
+struct OverlapPrimPair {
+    double ai;      // exponent on centre A (needed by the Obara-Saika 2*alpha term)
+    double fac;     // ci * cj
+    double invg;    // 1 / (ai + aj)
+    double Px, Py, Pz;
+    double PAx, PAy, PAz;
+    double PBx, PBy, PBz;
+    double S00;     // pow(pi*invg, 1.5) * exp(-ai*aj*invg*R2)
+    double h;       // 0.5 * invg
+};
+
+/// Upper bound on nprim for one shell. STO-NG gives at most 6, but
+/// orthogonalize() APPENDS the partner shell's primitives when an atom carries
+/// two shells of the same angular momentum (GFN1 hydrogen: 1s + 2s), so a
+/// contracted shell can reach 12. Pair capacity is therefore 12*12.
+inline constexpr int kMaxPrimPerShell = 12;
+inline constexpr int kMaxPrimPairs    = kMaxPrimPerShell * kMaxPrimPerShell;
+
+/// Fill `out` (capacity >= kMaxPrimPairs) and return the count, or -1 if the
+/// shell pair exceeds the capacity (caller must fall back to cgto_overlap_grad).
+inline int buildOverlapPrimPairs(const Shell& shell_a, const Shell& shell_b,
+                                 double xa, double ya, double za,
+                                 double xb, double yb, double zb,
+                                 OverlapPrimPair* out)
+{
+    if (shell_a.nprim * shell_b.nprim > kMaxPrimPairs) return -1;
+    const double dx = xb - xa, dy = yb - ya, dz = zb - za;
+    const double R2 = dx*dx + dy*dy + dz*dz;
+
+    int n = 0;
+    for (int ip = 0; ip < shell_a.nprim; ++ip) {
+        const double ai = shell_a.alpha[ip];
+        const double ci = shell_a.coeff[ip];
+        for (int jp = 0; jp < shell_b.nprim; ++jp) {
+            const double aj = shell_b.alpha[jp];
+            const double cj = shell_b.coeff[jp];
+            OverlapPrimPair& q = out[n++];
+            q.ai   = ai;
+            q.fac  = ci * cj;
+            const double g = ai + aj;
+            q.invg = 1.0 / g;
+            q.Px   = (ai*xa + aj*xb) * q.invg;
+            q.Py   = (ai*ya + aj*yb) * q.invg;
+            q.Pz   = (ai*za + aj*zb) * q.invg;
+            q.PAx  = q.Px - xa; q.PAy = q.Py - ya; q.PAz = q.Pz - za;
+            q.PBx  = q.Px - xb; q.PBy = q.Py - yb; q.PBz = q.Pz - zb;
+            q.S00  = std::pow(M_PI * q.invg, 1.5) * std::exp(-ai*aj * q.invg * R2);
+            q.h    = 0.5 * q.invg;
+        }
+    }
+    return n;
+}
+
+/**
+ * @brief Overlap gradient dS/dA for one AO component, from precomputed pair data
+ *
+ * Body is the primitive-loop interior of cgto_overlap_grad() verbatim; only the
+ * per-pair setup is replaced by reads from `pp`.
+ */
+inline void cgto_overlap_grad_pre(const OverlapPrimPair* pp, int npp,
+                                  int type_a, int type_b,
+                                  double grad[3])
+{
+    grad[0] = grad[1] = grad[2] = 0.0;
+    if (type_a > 3 || type_b > 3) return;   // d-type or higher: gradient = 0
+
+    const int nk[3] = { (type_a == 1) ? 1 : 0,
+                        (type_a == 2) ? 1 : 0,
+                        (type_a == 3) ? 1 : 0 };
+
+    for (int k_pp = 0; k_pp < npp; ++k_pp) {
+        const double ai   = pp[k_pp].ai;
+        const double fac  = pp[k_pp].fac;
+        const double invg = pp[k_pp].invg;
+        const double PAx = pp[k_pp].PAx, PAy = pp[k_pp].PAy, PAz = pp[k_pp].PAz;
+        const double PBx = pp[k_pp].PBx, PBy = pp[k_pp].PBy, PBz = pp[k_pp].PBz;
+        const double S00 = pp[k_pp].S00;
+        const double h   = pp[k_pp].h;
+
+        // Raised primitive overlaps: (type_a_raised_k | type_b) for k=x,y,z
+        double Sr[3];
+
+        // -------- type_a = 0 (s on A) ---------
+        if (type_a == 0) {
+            // raise s→p_k;  (p_k | type_b)
+            if (type_b == 0) {
+                Sr[0] = PAx * S00;
+                Sr[1] = PAy * S00;
+                Sr[2] = PAz * S00;
+            } else if (type_b == 1) {   // px
+                Sr[0] = (PAx*PBx + h) * S00;
+                Sr[1] = PAy * PBx * S00;
+                Sr[2] = PAz * PBx * S00;
+            } else if (type_b == 2) {   // py
+                Sr[0] = PAx * PBy * S00;
+                Sr[1] = (PAy*PBy + h) * S00;
+                Sr[2] = PAz * PBy * S00;
+            } else {                    // pz
+                Sr[0] = PAx * PBz * S00;
+                Sr[1] = PAy * PBz * S00;
+                Sr[2] = (PAz*PBz + h) * S00;
+            }
+        }
+        // -------- type_a = 1 (px on A) ---------
+        else if (type_a == 1) {
+            if (type_b == 0) {
+                // raise x: (d_xx|s);  raise y: (d_xy|s);  raise z: (d_xz|s)
+                Sr[0] = (PAx*PAx + h) * S00;
+                Sr[1] = PAx * PAy * S00;
+                Sr[2] = PAx * PAz * S00;
+            } else if (type_b == 1) {   // px
+                // raise x: (d_xx|px) — N_x^a=1,N_x^b=1
+                // = PAx*(PAx*PBx+h)*S00 + h*(PBx+PAx)*S00
+                Sr[0] = (PAx*PAx*PBx + PAx*invg + PBx*h) * S00;
+                // raise y: (d_xy|px) — N_y^a=0,N_y^b=0
+                Sr[1] = PAy * (PAx*PBx + h) * S00;
+                // raise z: (d_xz|px) — N_z^a=0,N_z^b=0
+                Sr[2] = PAz * (PAx*PBx + h) * S00;
+            } else if (type_b == 2) {   // py
+                // raise x: (d_xx|py) — N_x^a=1,N_x^b=0
+                Sr[0] = (PAx*PAx + h) * PBy * S00;
+                // raise y: (d_xy|py) — N_y^a=0,N_y^b=1
+                Sr[1] = PAx * (PAy*PBy + h) * S00;
+                // raise z: (d_xz|py) — N_z^a=0,N_z^b=0
+                Sr[2] = PAz * PAx * PBy * S00;
+            } else {                    // pz
+                // raise x: (d_xx|pz) — N_x^a=1,N_x^b=0
+                Sr[0] = (PAx*PAx + h) * PBz * S00;
+                // raise y: (d_xy|pz) — N_y^a=0,N_y^b=0
+                Sr[1] = PAy * PAx * PBz * S00;
+                // raise z: (d_xz|pz) — N_z^a=0,N_z^b=1
+                Sr[2] = PAx * (PAz*PBz + h) * S00;
+            }
+        }
+        // -------- type_a = 2 (py on A) ---------
+        else if (type_a == 2) {
+            if (type_b == 0) {
+                Sr[0] = PAy * PAx * S00;
+                Sr[1] = (PAy*PAy + h) * S00;
+                Sr[2] = PAy * PAz * S00;
+            } else if (type_b == 1) {   // px
+                // raise x: (d_xy|px) — N_x^a=0,N_x^b=1
+                Sr[0] = PAy * (PAx*PBx + h) * S00;
+                // raise y: (d_yy|px) — N_y^a=1,N_y^b=0
+                Sr[1] = (PAy*PAy + h) * PBx * S00;
+                // raise z: (d_yz|px) — N_z^a=0,N_z^b=0
+                Sr[2] = PAz * PAy * PBx * S00;
+            } else if (type_b == 2) {   // py
+                // raise x: (d_xy|py) — N_x^a=0,N_x^b=0
+                Sr[0] = PAx * (PAy*PBy + h) * S00;
+                // raise y: (d_yy|py) — N_y^a=1,N_y^b=1
+                Sr[1] = (PAy*PAy*PBy + PAy*invg + PBy*h) * S00;
+                // raise z: (d_yz|py) — N_z^a=0,N_z^b=0
+                Sr[2] = PAz * (PAy*PBy + h) * S00;
+            } else {                    // pz
+                // raise x: (d_xy|pz) — N_x^a=0,N_x^b=0
+                Sr[0] = PAx * PAy * PBz * S00;
+                // raise y: (d_yy|pz) — N_y^a=1,N_y^b=0
+                Sr[1] = (PAy*PAy + h) * PBz * S00;
+                // raise z: (d_yz|pz) — N_z^a=0,N_z^b=1
+                Sr[2] = PAy * (PAz*PBz + h) * S00;
+            }
+        }
+        // -------- type_a = 3 (pz on A) ---------
+        else {   // type_a == 3
+            if (type_b == 0) {
+                Sr[0] = PAz * PAx * S00;
+                Sr[1] = PAz * PAy * S00;
+                Sr[2] = (PAz*PAz + h) * S00;
+            } else if (type_b == 1) {   // px
+                // raise x: (d_xz|px) — N_x^a=0,N_x^b=1
+                Sr[0] = PAz * (PAx*PBx + h) * S00;
+                // raise y: (d_yz|px) — N_y^a=0,N_y^b=0
+                Sr[1] = PAy * PAz * PBx * S00;
+                // raise z: (d_zz|px) — N_z^a=1,N_z^b=0
+                Sr[2] = (PAz*PAz + h) * PBx * S00;
+            } else if (type_b == 2) {   // py
+                // raise x: (d_xz|py) — N_x^a=0,N_x^b=0
+                Sr[0] = PAx * PAz * PBy * S00;
+                // raise y: (d_yz|py) — N_y^a=0,N_y^b=1
+                Sr[1] = PAz * (PAy*PBy + h) * S00;
+                // raise z: (d_zz|py) — N_z^a=1,N_z^b=0
+                Sr[2] = (PAz*PAz + h) * PBy * S00;
+            } else {                    // pz
+                // raise x: (d_xz|pz) — N_x^a=0,N_x^b=0
+                Sr[0] = PAx * (PAz*PBz + h) * S00;
+                // raise y: (d_yz|pz) — N_y^a=0,N_y^b=0
+                Sr[1] = PAy * (PAz*PBz + h) * S00;
+                // raise z: (d_zz|pz) — N_z^a=1,N_z^b=1
+                Sr[2] = (PAz*PAz*PBz + PAz*invg + PBz*h) * S00;
+            }
+        }
+
+        // Lowered primitive overlap: (s | type_b) — non-zero only when n_k > 0
+        double S_s_b = 0.0;
+        if (type_a >= 1) {   // p-type: lower gives s
+            if      (type_b == 0) S_s_b = S00;
+            else if (type_b == 1) S_s_b = PBx * S00;
+            else if (type_b == 2) S_s_b = PBy * S00;
+            else                  S_s_b = PBz * S00;
+        }
+
+        // Obara-Saika:  dS/dA_k = 2α * S_raised_k - n_k * S_lower_k
+        for (int k = 0; k < 3; ++k)
+            grad[k] += fac * (2.0 * ai * Sr[k] - nk[k] * S_s_b);
+    }
+}
+
 /**
  * @brief Gradient of CGTO overlap dS_μν/dA_k wrt center A (where φ_μ lives).
  *
