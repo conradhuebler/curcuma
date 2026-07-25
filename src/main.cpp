@@ -29,6 +29,7 @@
 #include "src/capabilities/analysis.h"
 #include "src/capabilities/confscan.h"
 #include "src/capabilities/confsearch.h"
+#include "src/capabilities/confgen.h"
 #include "src/capabilities/confstat.h"
 #include "src/capabilities/curcumamethod.h"
 #include "src/tools/bmt_utils.h"
@@ -2000,6 +2001,28 @@ int executeConfStat(const json& controller, int argc, char** argv) {
     return 0;
 }
 
+// Claude Generated (Jul 2026): ensemble analysis + conformer proposals from the energy decomposition
+int executeConfGen(const json& controller, int argc, char** argv) {
+    if (argc < 3) {
+        std::cerr << "Please use curcuma for conformer proposals as follows:\n"
+                     "curcuma -confgen ensemble.xyz -method gfnff\n"
+                     "  (ensemble.xyz = multi-structure XYZ of optimised conformers, e.g.\n"
+                     "   <basename>.cumulative.opt.accepted.xyz from a ConfSearch run)"
+                  << std::endl;
+        return 1;
+    }
+
+    json gen_controller = controller;
+    gen_controller["geometry_file"] = std::string(argv[2]); // enables GFN-FF parameter/topology caching
+
+    auto* gen = new ConfGen(gen_controller, false);
+    initializeBMT(gen, argv[2], "confgen", controller);
+    gen->start();
+    gen->processBakFiles();
+    delete gen;
+    return 0;
+}
+
 int executeDocking(const json& controller, int argc, char** argv) {
     if (argc < 4) {
         std::cerr << "Please use curcuma for docking as follows:\ncurcuma -dock -host A.xyz -guest B.xyz -Step_x 10 -Step_y 10 -Step_z 10" << std::endl;
@@ -2383,6 +2406,8 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ", "MOL2", "SDF"}, executeConfScan}},
     {"confstat", {"Conformational statistics and analysis", "conformational",
                   {"XYZ", "MOL2", "SDF"}, executeConfStat}},
+    {"confgen", {"Torsion/energy-decomposition analysis of a conformer ensemble", "conformational",
+                  {"XYZ", "MOL2", "SDF"}, executeConfGen}},
     {"dock", {"Molecular docking calculations", "docking",
               {"XYZ", "MOL2", "SDF"}, executeDocking}},
     {"polymerbuild", {"Iterative polymer assembly from fragments", "assembly",

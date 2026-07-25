@@ -151,6 +151,35 @@ namespace TestMolecules {
             }
         },
         {
+            // Claude Generated (Jul 2026): canonical torsion test molecule. Same geometry as
+            // test_cases/validation/butane.xyz (anti conformation) -- exactly one rotatable torsion
+            // (the central C-C), the two terminal C-C bonds only spin methyl groups.
+            "butane", {
+                .name = "butane",
+                .description = "n-Butane, anti conformation (from validation/butane.xyz)",
+                .category = "larger",
+                .atoms = {
+                    {6, Eigen::Vector3d(0.000000, 0.000000, 0.000000)},   // C0
+                    {1, Eigen::Vector3d(1.094000, 0.000000, 0.000000)},
+                    {1, Eigen::Vector3d(-0.364667, 1.031415, 0.000000)},
+                    {1, Eigen::Vector3d(-0.364667, -0.515707, 0.893354)},
+                    {6, Eigen::Vector3d(-0.512822, -0.774708, -1.248827)}, // C4
+                    {1, Eigen::Vector3d(-0.148154, -0.259001, -2.142181)},
+                    {1, Eigen::Vector3d(-0.148154, -1.806123, -1.248827)},
+                    {6, Eigen::Vector3d(-2.042822, -0.774708, -1.248827)}, // C7
+                    {1, Eigen::Vector3d(-2.407489, -1.806123, -1.248827)},
+                    {1, Eigen::Vector3d(-2.407489, -0.259001, -0.355473)},
+                    {6, Eigen::Vector3d(-2.555644, 0.000000, -2.497654)},  // C10
+                    {1, Eigen::Vector3d(-3.649644, 0.000000, -2.497654)},
+                    {1, Eigen::Vector3d(-2.190977, -0.515707, -3.391008)},
+                    {1, Eigen::Vector3d(-2.190977, 1.031415, -2.497654)}
+                },
+                .reference_energies = {},
+                .tolerances = {},
+                .atom_count = 14
+            }
+        },
+        {
             "HCN", {
                 .name = "HCN",
                 .description = "Hydrogen cyanide from trimers/HCN.xyz",

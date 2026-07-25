@@ -728,6 +728,8 @@ curcuma -confsearch input.xyz -md_method gfnff -opt_method gfn2
 
 The search is **restartable** with `-restart`: a self-contained checkpoint (bias pool, cumulative conformers, seeds, energies, schedule position) is written after every MD phase and every temperature cycle, into the BMT dir and copied back to the start directory. Re-running the same command with `-restart` resumes from it (kill the process to interrupt; the checkpoint persists). See [docs/CONFSEARCH_RESTART.md](docs/CONFSEARCH_RESTART.md).
 
+`curcuma -confgen ensemble.xyz -method gfnff` analyses an existing conformer ensemble in torsion space: it lists the rotatable torsions with their rotamer states and populations, and measures what a single state change contributes **per energy term** (dispersion, H-bond, torsion, repulsion, …) from ensemble pairs that differ in exactly one torsion. It also reports whether those contributions are additive at all. See [docs/CONFSEARCH_PROPOSALS.md](docs/CONFSEARCH_PROPOSALS.md).
+
 The seeds for the next temperature cycle are picked by energy **and** structural spacing: `-seed_selection diverse` (default) keeps the most stable structure and then only structures at least `-seed_min_rmsd` (default `2 x -rmsd`) away from every seed already chosen, so `-seed_rank 4` does not start four MD runs in the same basin. `-seed_selection energy` restores pure energy ranking. See [docs/CONFSEARCH_SEEDING.md](docs/CONFSEARCH_SEEDING.md).
 
 ## Output Directory System (BMT)

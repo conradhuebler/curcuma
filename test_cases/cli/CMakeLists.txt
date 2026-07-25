@@ -175,6 +175,12 @@ add_cli_test(simplemd 15_rattle_mtd_fragments)
 set_tests_properties(cli_simplemd_15_rattle_mtd_fragments PROPERTIES TIMEOUT 250 LABELS "simplemd;gfnff;rmsd_mtd;rattle")
 
 # =============================================================================
+# ConfGen Tests (Claude Generated, Jul 2026): torsion/energy-decomposition ensemble analysis
+# =============================================================================
+add_cli_test(confgen 01_matched_pairs)
+set_tests_properties(cli_confgen_01_matched_pairs PROPERTIES TIMEOUT 250 LABELS "confgen;gfnff;conformer")
+
+# =============================================================================
 # ConfSearch Tests (Claude Generated, Jul 2026)
 # =============================================================================
 add_cli_test(confsearch 01_gfnff_smoke)

@@ -87,6 +87,19 @@ endif()
 add_test(NAME test_bmt_utils COMMAND test_bmt_utils)
 set_tests_properties(test_bmt_utils PROPERTIES TIMEOUT 10 LABELS "bmt;unit")
 
+# Claude Generated (Jul 2026): torsion-space reduction (rotatable bonds, rotamer states, setDihedral)
+add_executable(test_torsion_space
+        test_torsion_space.cpp)
+
+target_link_libraries(test_torsion_space curcuma_core test_molecule_registry)
+
+if(USE_PCH)
+        target_precompile_headers(test_torsion_space REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_torsion_space COMMAND test_torsion_space)
+set_tests_properties(test_torsion_space PROPERTIES TIMEOUT 20 LABELS "conformer;unit")
+
 # Claude Generated 2026: PLUMED init unit test suite (only built with USE_Plumed)
 if(USE_Plumed)
     add_executable(test_plumed_init

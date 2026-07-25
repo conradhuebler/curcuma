@@ -681,6 +681,12 @@ json ForceFieldMethod::getEnergyDecomposition() const {
     energy_json["Inversion"] = m_forcefield->InversionEnergy();
     energy_json["Dispersion"] = m_forcefield->DispersionEnergy();
     energy_json["Coulomb"] = m_forcefield->CoulombEnergy();
+    // Claude Generated (Jul 2026): Repulsion and VdW were missing although both accessors exist.
+    // For GFN-FF the repulsion term is one of the LARGEST contributions, so the decomposition did
+    // not even approximately sum to the total energy -- which breaks any analysis that attributes
+    // energy differences to structural features (see ConfGen).
+    energy_json["Repulsion"] = m_forcefield->RepulsionEnergy();
+    energy_json["VdW"] = m_forcefield->VdWEnergy();
     energy_json["HBond"] = m_forcefield->HydrogenBondEnergy();
     energy_json["XBond"] = m_forcefield->HalogenBondEnergy();
     energy_json["ATM"] = m_forcefield->ATMEnergy();

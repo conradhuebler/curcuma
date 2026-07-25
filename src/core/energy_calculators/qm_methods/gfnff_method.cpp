@@ -176,6 +176,12 @@ json GFNFFComputationalMethod::getEnergyDecomposition() const {
     energy_json["Inversion"] = m_gfnff->InversionEnergy();
     energy_json["Dispersion"] = m_gfnff->DispersionEnergy();
     energy_json["Coulomb"] = m_gfnff->CoulombEnergy();
+    // Claude Generated (Jul 2026): the repulsion term was missing from the decomposition although
+    // the accessor exists. For GFN-FF it is one of the largest contributions (+1.06 Eh = 2781 kJ/mol
+    // on a 90-atom test molecule), so the components did not even approximately sum to the total
+    // energy -- fatal for any analysis that attributes energy differences to structural features
+    // (ConfGen). Reported as one term; BondedRepulsionEnergy()/NonbondedRepulsionEnergy() split it.
+    energy_json["Repulsion"] = m_gfnff->RepulsionEnergy();
     energy_json["HBond"] = m_gfnff->HydrogenBondEnergy();
     energy_json["XBond"] = m_gfnff->HalogenBondEnergy();
     energy_json["ATM"] = m_gfnff->ATMEnergy();

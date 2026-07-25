@@ -462,6 +462,8 @@ set(curcuma_core_SRC
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
         src/capabilities/shared_bias_pool.cpp
+        src/capabilities/torsion_space.cpp
+        src/capabilities/confgen.cpp
         src/capabilities/confstat.cpp
         src/capabilities/docking.cpp
         src/capabilities/analysenciplot.cpp
@@ -573,6 +575,8 @@ set(curcuma_cap_SRC
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
         src/capabilities/shared_bias_pool.cpp
+        src/capabilities/torsion_space.cpp
+        src/capabilities/confgen.cpp
         src/capabilities/confstat.cpp
         src/capabilities/docking.cpp
         src/capabilities/analysenciplot.cpp
