@@ -283,27 +283,57 @@ Caveat on gfnff: at ~36 ms total the run is dominated by process start plus
 one-time setup, so the ratio is sensitive to noise and to whether the
 `.topo.json` cache is present.
 
-## GPU is currently SLOWER than the CPU (2026-07)
+## CPU vs GPU is a question of SIZE, not of method quality (2026-07)
 
-Measured on an idle machine, RTX 5080, complex/231, energy+gradient, best of 3,
-against the CPU at `-threads 16`:
+Measured on an idle machine, RTX 5080, energy+gradient, against the CPU at
+`-threads 16`. Energies identical in every pair.
 
-| method | CPU t16 | CUDA | GPU vs CPU |
+**complex, 231 atoms (nao 558) — the GPU loses:**
+
+| method | CPU t16 | CUDA | |
 |---|---:|---:|---|
-| gfn1 | 349 ms | 621 ms | **1.8x slower** |
-| gfn2 | 519 ms | 718 ms | **1.4x slower** |
-| gfnff | 38 ms (t1) | 298 ms | **7.8x slower** |
+| gfn1 | 349 ms | 621 ms | 1.8x slower |
+| gfn2 | 519 ms | 718 ms | 1.4x slower |
+| gfnff | 38 ms (t1) | 298 ms | 7.8x slower |
 
-Energies are identical. This is consistent with the honest note in
-[SQM_GPU.md](SQM_GPU.md) — the device-resident SCF was a residency/correctness
-milestone, **not** a measured `-sp` speed-up — and the gap has *widened* because
-the 2026-07 CPU work (blocked integrals + mixed-precision eigensolve) benefited
-the CPU path only.
+**polymer, 1410 atoms (nao 3222) — gfn2 on the GPU wins decisively:**
 
-Note also that the Fortran references have **no GPU path at all**, so there is no
-"we are ahead on GPU" comparison to be made against them. The GPU is currently
-the weakest configuration for a single-point, and its value remains what the GPU
-docs claim: large-system reach and device residency, not raw `-sp` throughput.
+| phase | CPU t16 | CUDA | |
+|---|---:|---:|---|
+| setup | 1198 ms | 1050 ms | 1.14x |
+| **SCF (11 it)** | 11999 ms | **3407 ms** | **3.5x** |
+| post-SCF | 706 ms | 915 ms | 0.77x (GPU slower) |
+| **gradient** | 1374 ms | **363 ms** | **3.8x** |
+| **TOTAL** | **15368 ms** | **5922 ms** | **2.6x faster** |
+
+(E = -2088.25340678 on both.)
+
+So there is a **crossover between 231 and 1410 atoms for gfn2**, and it lands
+exactly where the hardware argument predicts: the GPU wins the O(nao³) eigensolve
+(SCF 3.5x) and the gradient (3.8x), while setup and post-SCF — small, serial,
+transfer-bound — stay flat or regress.
+
+**gfnff does not cross over.** At 1410 atoms it is still 820 ms on the GPU vs
+497 ms on the CPU (1.65x slower). That is consistent: a force field has no dense
+O(N³) kernel to offload, so there is nothing for the device to amortise its
+transfers against.
+
+Practical guidance: use `-gpu cuda` for **gfn1/gfn2 on large systems**; keep the
+CPU for small ones and for gfnff. The earlier revision of this section claimed
+flatly that "the GPU is slower than the CPU" — that was measured only at 231
+atoms and does not generalise.
+
+Note the Fortran references have **no GPU path at all**, so the GPU is not a
+comparison against them; it is a comparison against curcuma's own CPU path.
+
+> Aside, observed while collecting this: a cold gfnff single point on
+> `mixture.xyz` (6200 atoms, **1400 fragments**) did not finish within 7 minutes,
+> against ~21 s documented in
+> [GFNFF_PERFORMANCE_LEVERS.md](GFNFF_PERFORMANCE_LEVERS.md). The many-fragment
+> EEQ dispatch is known not to be tuned yet (operator confirmed); the exact
+> solver is preferred by default for fragments in contact
+> (`eeq_contact_prefer_exact`), which for 1400 fragments means a dense
+> (natoms+nfrag)² factorisation. Not investigated further here.
 
 ## What did NOT help / not pursued
 
