@@ -33,13 +33,15 @@ scripts/sqm_bench.sh [N_REPEATS=3] [caffeine triose complex]
 
 ## Headline result (complex, 231 atoms, single core, energy+gradient)
 
-| method | curcuma (orig) | curcuma (now) | tblite | xtb (cold) |
-|--------|---------------:|--------------:|-------:|-----------:|
-| gfn1   | 2982 ms        | **1221 ms**   | 2562   | 1367       |
-| gfn2   | 2944 ms        | **1364 ms**   | 1567   | 979        |
+| method | curcuma (orig) | curcuma (2026-06) | curcuma (2026-07) | tblite | xtb (cold) |
+|--------|---------------:|------------------:|------------------:|-------:|-----------:|
+| gfn1   | 2982 ms        | 1221 ms           | **1017 ms**       | 2562   | 1367       |
+| gfn2   | 2944 ms        | 1364 ms           | **1083 ms**       | 1567   | 979        |
 
-- **gfn1: −59%. Now beats both tblite and xtb.**
-- **gfn2: −54%. Now beats tblite; 1.39× xtb (was ~3×).**
+- **gfn1: −66%. Beats both tblite and xtb.**
+- **gfn2: −63%. Beats tblite; 1.11× xtb (was ~3×, then 1.39×).**
+- The 2026-07 column is the shell-pair-blocked integral kernels — see
+  [Integral setup (2026-07)](#integral-setup-2026-07) below.
 - Same on the smaller systems: triose gfn1 67 ms (tblite 74, xtb 97);
   triose gfn2 88 ms; caffeine in the 15–30 ms range (setup/one-time-init bound).
 
@@ -102,6 +104,106 @@ back ~5.4, density ~3.6); potential/Fock/populations < 0.3 ms/it.
 gfn2 (nao 558): `dsyevd` ~22 ms/it; reduce ~3.9, back ~3.4, density ~2.5;
 potential build ~10 ms/it (multipole + D4 dE/dq), Fock ~2 ms/it.
 
+## Integral setup (2026-07)
+
+Everything above targeted the SCF. The integral kernels had never been touched,
+and they held a straightforward ~2.9x redundancy.
+
+### The defect
+
+`getHamiltonianH0()` already looped shell pairs, but called `cgto_overlap()`
+**once per AO-COMPONENT pair**. The GFN2 multipole build looped AO pairs
+outright, and the gradient called `cgto_overlap_grad()` /
+`cgto_multipole_grad_transformed()` per component too. So for a p-p shell pair
+the full `nprim_a x nprim_b` primitive loop ran nine times, and each leaf
+recomputed the Gaussian product centre, `gamma`, and
+`S00 = pow(pi/gamma,1.5)*exp(-ai*aj/gamma*R2)` — a libm `pow` **per primitive
+pair per component**. None of that depends on the cartesian powers; only the
+1-D moments do, and they need just `(la, lb)` per axis.
+
+The stale comment above the overlap loop already claimed the integral was
+"computed once and broadcast to all AO pairs". Now it actually is.
+
+### Sizing (complex/231, GFN2: nao 558, nsh 340)
+
+Primitive-pair evaluations, `(sum over AO of nprim)^2` vs
+`(sum over shells of nprim)^2`:
+
+| granularity | evaluations |
+|---|---:|
+| per AO component (before) | `(122*3 + 436*4)^2 = 2110^2 = 4.45e6` |
+| per shell pair (after)    | `(122*3 + 109*8)^2 = 1238^2 = 1.53e6` |
+
+**2.90x** — the ceiling for the primitive-setup part of each bucket.
+
+### Measured (complex/231, single core)
+
+| bucket | before | after |
+|---|---:|---:|
+| overlap + H0 | 82.1 ms | **28.0 ms** |
+| multipole setup | 119.7 ms | **56.3 ms** |
+| — AO dipole/quadrupole integrals | 109.4 ms | **42.7 ms** |
+| — origin shift + traceless | 8.6 ms | 11.3 ms |
+| setup total | 209 ms | **91 ms** |
+| gradient (gfn1) | 132 ms | **73 ms** |
+| gradient (gfn2) | 195 ms | 175 ms |
+
+gfn2 total 1199 -> 1083 ms; gfn1 total 1142 -> 1017 ms.
+
+The gfn2 gradient improves less because only its overlap half is blocked;
+`cgto_multipole_grad_transformed()` is still per-component (~63 ms) — the
+clearest remaining lever.
+
+### Numerics: why this is NOT bit-identical, and why that is acceptable
+
+The blocked kernels are **algebraically exact**. Compiled with
+`-ffp-contract=off` they agree with the per-component path to **exactly
+0.000e+00** (verified by a temporary per-element cross-check over all AO pairs
+of triose). The deviation comes solely from GCC contracting `a*b+c` into FMA
+differently in the restructured code — the build enables `-mfma` and GCC
+defaults to `-ffp-contract=fast`.
+
+Measured effect on every reference molecule: **energies bit-identical to all 12
+printed digits**; gradients differ by at most **1.7e-14 Eh/Bohr** (2.7e-11
+relative), against the project's 1e-8 validation gate.
+
+Forcing `-ffp-contract=off` in these headers was **tried and rejected**: it makes
+the kernels exactly reproducible, but the same code serves the gradient, whose
+time then goes 190 -> 272 ms. That costs more than the optimisation gains.
+
+Worth knowing when reading any "bit-identical" claim in this project: with
+`-mfma` + `-ffp-contract=fast` the golden values are already specific to this
+compiler and CPU, not a portable property.
+
+### Design rules for anyone touching these kernels
+
+- The **primitive contraction order is part of the numerical contract**. Keep the
+  accumulation i-major/j-minor.
+- Keep `pow(M_PI/gamma, 1.5)` verbatim; `t*sqrt(t)` rounds differently.
+- `cgto_overlap` forms the product centre as `(ai*xa + aj*xb) / gamma`;
+  `cgto_overlap_grad` uses `* invg`. These round differently and are kept
+  separate **on purpose** — do not unify them.
+- **Triangular S/H0 + mirror is not bit-identical** and was rejected: `S(mu,nu)`
+  and `S(nu,mu)` are computed independently today, and the transposed call sums
+  the same terms in transposed order. IEEE addition is not associative, so
+  mirroring moves the last ulp. (The individual factors *are* swap-invariant:
+  `gamma = ai+aj` and `ai*aj` are exact under commutativity.) A bit-identical
+  variant exists — emit both blocks from one primitive pass — but after the
+  blocking above the only remaining transcendental is `exp`, so it is worth
+  ~15-20 ms while breaking the disjoint-row striping invariant. Documented
+  headroom, not implemented.
+
+### Remaining headroom
+
+- `cgto_multipole_grad_transformed()` per-component (~63 ms of the gfn2 gradient).
+- Memoizing the primitive-pair invariants across shell pairs by shell *type*
+  (all atoms of an element yield byte-equal `alpha`/`coeff`), which would remove
+  the remaining `pow` entirely rather than just de-duplicating it per shell pair.
+- The `origin shift` pass grew slightly (8.6 -> 11.3 ms) and is memory-bound: 9
+  `nao x nao` temporaries, ~67 MB of traffic. Fusing it into the blocked kernel
+  must keep reading `m_S(mu,nu)` (not the kernel's own `S`, a different
+  expression tree).
+
 ## What did NOT help / not pursued
 
 - **Forcing MKL instruction set on AMD** (`MKL_ENABLE_INSTRUCTIONS=AVX2/AVX512`):
@@ -115,25 +217,33 @@ potential build ~10 ms/it (multipole + D4 dE/dq), Fock ~2 ms/it.
   analysis. Earlier measurements (and this occupancy) suggest a net loss; left as
   documented headroom.
 
-## Residual gap to xtb (gfn2 complex, 1364 vs 979 ms)
+## Residual gap to xtb (gfn2 complex, 1083 vs 979 ms)
 
 xtb runs the same MKL, so its per-iteration eigensolve is comparable; its
 advantage is (a) **fewer SCF iterations** (15 vs 19 — partly because xtb's
 default convergence is looser than curcuma's even after the 1e-5 change), and
-(b) it folds the gradient into the SCC step whereas curcuma's setup (179 ms,
-incl. 107 ms multipole-integral build) and gradient (224 ms) are separate. gfn1
-already beats xtb because its larger basis makes the eigensolve dominate, where
-curcuma's leaner setup/gradient wins. Closing the gfn2 gap further would need
-either a looser convergence (`-scf_threshold 5e-5` → 16 it, energy-identical) or
-setup/gradient work — both lower-value than the wins above.
+(b) it folds the gradient into the SCC step whereas curcuma's setup and gradient
+are separate passes. gfn1 already beats xtb because its larger basis makes the
+eigensolve dominate, where curcuma's leaner setup/gradient wins.
+
+After the 2026-07 integral work the setup is 91 ms and the gradient 175 ms, so
+**the SCF is now 70% of the gfn2 runtime** (762 of 1083 ms) and the iteration
+count is the dominant remaining lever — not the integrals. A looser convergence
+(`-scf_threshold 5e-5` → 16 it, energy-identical) closes most of what is left.
 
 ## Verification
 
 ```bash
 cd release && make -j16 curcuma
 ctest -R "sqm_val_|ecomp_|d4_diag|d4_dedq|xtb_gradient|xtb_cpscf|gfn1_align|gfn2_align"
-# 45/45 pass; energies bit-stable (e.g. gfn2 H2O = -5.07036982 Eh,
-# gfn2 complex = -329.52707823 Eh, gfn1 complex = -343.17980352 Eh)
+# 45/45 pass; energies bit-stable. Current values (2026-07):
+#   gfn2 H2O     = -5.070369821862 Eh
+#   gfn2 complex = -329.527147840995 Eh
+#   gfn1 complex = -343.179803543151 Eh
+# NOTE the older -329.52707823 / -343.17980352 in earlier revisions of this doc
+# predate the electronic free-energy (Fermi entropy) term and the F5 variational
+# D4 fix. Use `-dump_gradient` (12-dp energy, 14-digit gradient) as the gate;
+# the 8-dp "Single Point Energy" print is far too coarse at -329 Eh.
 scripts/sqm_bench.sh 3
 ```
 

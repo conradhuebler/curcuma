@@ -343,6 +343,37 @@ ctest -R test_gfnff_gradients --verbose
 - 4 threads: 0.120s
 - Speedup: 2.67x ✅
 
+**Jul 2026 — topology setup (A0/A1)**: the verbosity-2 report's
+"Pi-bond orders + bond types" row bracketed three unrelated pieces of work and
+truncated to whole ms. Split into `t_pi_charges_eeq` / `t_huckel` /
+`t_bond_types` with sub-ms resolution + a pi-system count. **This refuted the
+standing premise that the FT-HMO solve is the setup bottleneck: it is 0.13 ms,
+not 11 ms** (so parallelising it cannot pay for the thread dispatch), and the
+"EEQ Phase 2 = 6 ms" figure was actually Phase 1 under truncation (Phase 2 is
+~1 ms). The real cost was the **ipis block**, which ran one full
+`calculateTopologyCharges` — Dijkstra + N×N erf fill + solve — *per pi-system*.
+Since the Phase-1 matrix does not depend on `qfrag` (it enters only the
+constraint RHS), `EEQSolver::calculateTopologyChargesMultiRHS()` now builds the
+system once and solves it per distinct fragment; pi-systems sharing a fragment
+share a solve. complex/231 cold: ipis EEQ **9.3-10.8 → ~1.2 ms**, topology total
+**17.8-18.9 → 9.9-10.4 ms**. Bit-identical (incl. acetic_acid_dimer at charge
+0/±1/+2, which genuinely exercises the multi-variant path).
+
+**Jul 2026 — EEQ iterative refinement (A4, `eeq_refine_iters`, default 1)**:
+when the Phase-2 solve reuses a cached Cholesky factor the charges solve the OLD
+system, so the gradient is inconsistent and MD drifts (the Hellmann-Feynman
+hazard in `docs/wp4/WP-EEQ-Cholesky-Cache.md`). The cached solve already
+satisfies the constraint row exactly for any factor, so only the A-residual needs
+correcting — O(N²). polymer N=1410 / 100 fs: at `refactor_eps=0.50` the drift vs
+the tight reference is **−43.0 mEh (30 µEh/atom) without refinement, −0.041 mEh
+(0.03 µEh/atom) with one step**, −0.009 mEh with three. **Defaults deliberately
+NOT loosened**: (a) there is no speed to gain — the whole cache mechanism is ~6%
+of MD wall time, comparable to noise, since the threaded LAPACK `dpotrf` path
+landed after the WP was written; (b) `eeq_matrix_rebuild_eps_bohr>0` makes
+`A_nn` itself stale, so refinement cannot rescue it (identical Etot at refine
+0/1/3) — it stays disabled. At the default threshold refinement is a numerical
+no-op, so single points are unaffected.
+
 **Jun 2026 — large-system GFN-FF speedups** (see `docs/GFNFF_PERFORMANCE_LEVERS.md`):
 - **HB candidate generation (Lever 1)**: cell-list nhb2 (`hyd_on[]`) + nhb1
   (`forEachNeighbor(i, hbthr2)`) replacing the per-pair full-hydrogen scan. EXACT (energies
@@ -362,6 +393,16 @@ ctest -R test_gfnff_gradients --verbose
 > damping params / code paths, no authoritative s-dftd3 reference. The "<1%"
 > table below is historical and does NOT establish correctness (its references
 > were never tied to s-dftd3); treat it as 🤖 AI-generated, not validated.
+
+### Reference tables live in `.rodata` (2026-07-25)
+
+`d3_reference_c6.cpp` / `d3_reference_cn.cpp` held their 262 444 C6 + 824 CN
+values in global `std::vector`s, so every process start heap-allocated and copied
+them under dynamic initialisation. They are now `const std::array`; only
+`.size()`/`operator[]` were ever used, so all callers are unchanged.
+**Honest caveat**: the startup improvement was below measurement noise — this is
+a correctness/cleanup change (no dynamic init, no static-init-order exposure),
+not a measured speedup. gfn1 energy bit-identical.
 
 ### C8/C6 ratio — exact s-dftd3 form (2026-05-31)
 

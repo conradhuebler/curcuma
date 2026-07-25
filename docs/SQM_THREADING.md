@@ -51,17 +51,34 @@ The gate lives in tracked curcuma code, not the vendored `CxxThreadPool` header.
 | GFN2 multipole integrals | `xtb_multipole.cpp` `setupMultipole` | stripe over AOs / source atoms |
 | Gradient (dominant: overlap & multipole integral derivatives) | `xtb_gradient.cpp` | stripe over atoms, thread-local grad/dEdcn + reduce |
 | Fock build | `xtb_scf.cpp` `buildFock` | stripe over AO rows (disjoint) |
-| Eigensolve (dsygst/dsyevd/dtrsm) | `xtb_scf.cpp` `solveEigen` | MKL threads (`MklThreadScope`), not the pool |
+| Eigensolve (dsygst/dsyevd/dtrsm) | `xtb_scf.cpp` `solveEigen` | MKL threads (`MklThreadScope`), not the pool — **capped at 8**, see below |
 
 `buildFock`–`solveEigen` are the *only* regions threaded inside the SCF loop (others
 are too small to amortise a per-iteration dispatch). The pool is persistent (workers
 reused across iterations and geometry steps).
 
+## Eigensolve thread cap (2026-07)
+
+The per-iteration MKL eigensolve is capped at `min(intra_threads, 8)`. The D&C
+`dsyevd` is memory-bandwidth-bound and **regresses** past ~8 threads (complex/231:
+215 ms @8 vs 290 ms @16 on a 16-core Ryzen), while the hand-threaded
+Fock/gradient/setup regions still use the full `-threads N`. Override with
+`CURCUMA_EIG_MAX_THREADS`. Runs at ≤8 threads are byte-unchanged; at
+`-threads 16` vs gxtb cold-start the ratio went gfn1 1.18→0.86×, gfn2 1.75→1.54×.
+
 ## Performance (complex, 231 atoms, nao=558, single-point E+grad)
 
-Per-phase, gfn2, min-representative (`-verbosity 3`):
+> ⚠️ **The per-phase table below is from 2026-06 and its t1 column is now stale.**
+> The 2026-07 shell-pair-blocked integral kernels cut the single-core setup from
+> 209 to 91 ms and the gfn1 gradient from 132 to 73 ms
+> ([docs/SQM_PERFORMANCE.md](SQM_PERFORMANCE.md#integral-setup-2026-07)), so the
+> t1 numbers here — and therefore the speedup ratios, which had more serial work
+> to amortise — no longer apply. **Re-measure before quoting.** The t8 numbers
+> and the qualitative picture (eigensolve-bound) still hold.
 
-| Phase | t1 | t8 | speedup |
+Per-phase, gfn2, min-representative (`-verbosity 3`), **as measured 2026-06**:
+
+| Phase | t1 (2026-06) | t8 | speedup |
 |---|---|---|---|
 | overlap + H0 | 88 ms | 17 ms | 5.2× |
 | multipole setup | 116 ms | 30 ms | 3.8× |
@@ -70,6 +87,9 @@ Per-phase, gfn2, min-representative (`-verbosity 3`):
 | solve eigen | 614 ms | 215 ms | **2.85×** (after WP1) |
 | gradient | 218 ms | 59 ms | 3.7× |
 | **TOTAL** | **1550 ms** | **679 ms** | **2.3×** (after WP1) |
+
+Current single-core reference for the same buckets: overlap+H0 28 ms, multipole
+setup 56 ms, setup total 91 ms, gradient 175 ms (gfn2) / 73 ms (gfn1).
 
 Total min-of-5 scaling, complex/231 (after WP1+WP2+WP2b — threaded MKL + D4 cache/threading):
 

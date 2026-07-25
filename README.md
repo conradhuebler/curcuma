@@ -72,6 +72,8 @@ Native GFN methods (no external dependency required, canonical backends since AP
 
 > Native GFN1/GFN2 are validated against tblite to a 1e-8 Eh target — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md). For explicit tblite or xtb backends use `tblite-gfn1`/`tblite-gfn2` or `xtb-gfn1`/`xtb-gfn2`.
 
+> **Speed:** on a 231-atom complex (single core, energy+gradient) native `gfn1` runs in ~1.02 s and `gfn2` in ~1.08 s, versus xtb 6.7.1 at 1.37 s / 0.98 s — i.e. gfn1 is faster than xtb and gfn2 within ~11%. See [docs/SQM_PERFORMANCE.md](docs/SQM_PERFORMANCE.md) for the single-core record and [docs/SQM_THREADING.md](docs/SQM_THREADING.md) for `-threads N` scaling.
+
 > **d-shell elements (X-I1, June 2026):** native GFN1/GFN2 now handle d-shell basis functions (S, P, Cl, Si and other main-group d elements), matching tblite to ≤1e-8 Eh; analytic gradients FD-validated. CPU only — on `-gpu` a d-shell system falls back to the CPU integral/SCF path. Transition metals: after the Jul 2026 fixes (shell-vs-angular parameter indexing + 6s/6p STO-6G expansion), **native GFN1 and GFN2 reproduce tblite for transition metals** — GFN2 3d exact (1e-8), GFN1 72/95 MOR41 structures exact; both leave a small **~1e-3 Eh** residual for 4d/5d (heavy-element band/multipole/D4, still open). **GFN-FF transition metals are not yet validated.** See [docs/SQM_DSHELL_WP.md](docs/SQM_DSHELL_WP.md) and [docs/MOR41_VALIDATION.md](docs/MOR41_VALIDATION.md).
 
 > Native GFN1/GFN2 can use multiple cores **within one calculation** of a single large molecule: pass `-threads N` to a `-sp`/`-opt`/MD run (default is serial and bit-identical). Integral setup, gradient and Fock build scale ~3–5×; see [docs/SQM_THREADING.md](docs/SQM_THREADING.md).
