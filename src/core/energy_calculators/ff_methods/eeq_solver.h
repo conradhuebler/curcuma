@@ -213,6 +213,36 @@ public:
     );
 
     /**
+     * @brief Phase-1 topology charges for several fragment-charge assignments (A1, Jul 2026)
+     *
+     * The augmented Phase-1 matrix A depends on dxi, chi/gam/alpha, the topological
+     * distances and `fraglist` — but NOT on `qfrag`, which enters only the constraint
+     * RHS `x(natoms+f)`. The GFN-FF ipis block (gfnff_method.cpp) re-solves Phase 1
+     * once per pi-system with a different qfrag each time, so it was rebuilding a
+     * bit-identical matrix (Dijkstra + N x N erf fill) for every solve.
+     *
+     * This builds the system once and then solves it for each supplied qfrag,
+     * patching only the constraint rows of the RHS. Each solve calls the same
+     * dispatchSolve() with the same A and the same x as the per-call path, so the
+     * returned charges are bit-identical to calling calculateTopologyCharges() in a
+     * loop.
+     *
+     * @param qfrag_variants One qfrag vector per desired solve (size nfrag each).
+     * @return One charge vector per variant, in order.
+     */
+    std::vector<Vector> calculateTopologyChargesMultiRHS(
+        const std::vector<int>& atoms,
+        const Matrix& geometry_bohr,
+        int total_charge,
+        const Vector& cn,
+        const std::optional<TopologyInput>& topology,
+        const std::vector<std::vector<double>>& qfrag_variants,
+        bool use_corrections = false,
+        CxxThreadPool* pool = nullptr,
+        int num_threads = 1
+    );
+
+    /**
      * @brief Phase 2: Calculate final EEQ charges with environmental corrections
      *
      * Single linear solve (matches XTB gfnff_ini.f90:699-706) with corrected parameters:

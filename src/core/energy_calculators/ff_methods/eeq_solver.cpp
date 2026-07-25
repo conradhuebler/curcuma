@@ -2681,6 +2681,7 @@ Vector EEQSolver::solveEEQ(
 
 // ===== Phase 1: Topology Charges ===== (DEPRECATED - use single-solve instead)
 
+// A1 (Jul 2026): thin wrapper — one solve with the topology's own qfrag.
 Vector EEQSolver::calculateTopologyCharges(
     const std::vector<int>& atoms,
     const Matrix& geometry_bohr,
@@ -2691,7 +2692,26 @@ Vector EEQSolver::calculateTopologyCharges(
     CxxThreadPool* pool,
     int num_threads)
 {
+    auto res = calculateTopologyChargesMultiRHS(atoms, geometry_bohr, total_charge, cn,
+                                                topology, {}, use_corrections, pool, num_threads);
+    return res.empty() ? Vector() : res.front();
+}
+
+std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
+    const std::vector<int>& atoms,
+    const Matrix& geometry_bohr,
+    int total_charge,
+    const Vector& cn,
+    const std::optional<TopologyInput>& topology,
+    const std::vector<std::vector<double>>& qfrag_variants,
+    bool use_corrections,
+    CxxThreadPool* pool,
+    int num_threads)
+{
     const int natoms = atoms.size();
+    // An empty variant list means "one solve, using topology->qfrag as-is" — the
+    // historical single-solve behaviour.
+    const int n_variants = qfrag_variants.empty() ? 1 : static_cast<int>(qfrag_variants.size());
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
 
     // BUGFIX (Jul 2026): re-arm the Phase-1 contract of solveWithSchurCholesky.
@@ -2881,7 +2901,8 @@ Vector EEQSolver::calculateTopologyCharges(
 
                 if (r < 1e-10) {
                     CurcumaLogger::error("EEQSolver::calculateTopologyCharges: Zero distance between atoms");
-                    return generateFallbackCharges(natoms, total_charge, "zero distance in Phase 1");
+                    return std::vector<Vector>(
+                        n_variants, generateFallbackCharges(natoms, total_charge, "zero distance in Phase 1"));
                 }
 
                 // Store distance for both Coulomb matrix and cache
@@ -2904,6 +2925,9 @@ Vector EEQSolver::calculateTopologyCharges(
     }
 
     // 3. Setup fragment charge constraints
+    // A1 (Jul 2026): the constraint PATTERN depends on fraglist/nfrag only. The
+    // qfrag-dependent part is the RHS entry x(natoms+f), which is (re)written per
+    // variant in the solve loop below — that is what makes multi-RHS reuse exact.
     for (int f = 0; f < nfrag; ++f) {
         int row = natoms + f;
         double q_target = (topology.has_value() && f < static_cast<int>(topology->qfrag.size()))
@@ -2980,6 +3004,21 @@ Vector EEQSolver::calculateTopologyCharges(
         std::cerr << "==================================================" << std::endl;
     }
 
+    // A1 (Jul 2026): solve the SAME system for each fragment-charge assignment.
+    // Only the constraint rows of the RHS differ between variants.
+    std::vector<Vector> results;
+    results.reserve(n_variants);
+
+    for (int v = 0; v < n_variants; ++v) {
+    if (!qfrag_variants.empty()) {
+        const std::vector<double>& qf = qfrag_variants[v];
+        for (int f = 0; f < nfrag; ++f) {
+            x(natoms + f) = (f < static_cast<int>(qf.size()))
+                                ? qf[f]
+                                : (f == 0 ? static_cast<double>(total_charge) : 0.0);
+        }
+    }
+
     // Claude Generated (March 2026): Use configurable solver dispatch instead of hardcoded LU
     // This allows the user to select solve_method (lu, schur_cholesky, pcg, auto) for Phase 1 too
     // Claude Generated (WP2, May 2026): forward pool/num_threads so Stage-4 batched LU runs in parallel
@@ -3002,10 +3041,12 @@ Vector EEQSolver::calculateTopologyCharges(
         } else {
             CurcumaLogger::error(fmt::format("Phase 1 EEQ: solver failed for N={}", natoms));
         }
-        return generateFallbackCharges(natoms, total_charge, "Phase 1 solver failure");
+        results.push_back(generateFallbackCharges(natoms, total_charge, "Phase 1 solver failure"));
+        continue;
     }
 
     // Check for NaN/Inf - fallback to uniform charges instead of hard fail
+    bool invalid_charge = false;
     for (int i = 0; i < natoms; ++i) {
         if (std::isnan(topology_charges[i]) || std::isinf(topology_charges[i])) {
             if (m_allow_unconverged) {
@@ -3015,8 +3056,14 @@ Vector EEQSolver::calculateTopologyCharges(
                 CurcumaLogger::error(fmt::format("Phase 1 EEQ: Invalid charge[{}] = {} (Z={})",
                                                  i, topology_charges[i], atoms[i]));
             }
-            return generateFallbackCharges(natoms, total_charge, "NaN/Inf in Phase 1 solution");
+            topology_charges = generateFallbackCharges(natoms, total_charge, "NaN/Inf in Phase 1 solution");
+            invalid_charge = true;
+            break;
         }
+    }
+    if (invalid_charge) {
+        results.push_back(topology_charges);
+        continue;
     }
 
     // Phase 1 charge diagnostic output (Claude Generated February 2026)
@@ -3036,7 +3083,10 @@ Vector EEQSolver::calculateTopologyCharges(
         CurcumaLogger::info(fmt::format("EEQ_PHASE1_CHARGES: sum = {:.6f}", sum_q));
     }
 
-    return topology_charges;
+    results.push_back(std::move(topology_charges));
+    }  // end variant loop (A1)
+
+    return results;
 }
 
 // ===== Floyd-Warshall Topological Distances =====

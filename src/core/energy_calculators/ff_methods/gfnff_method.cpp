@@ -10180,6 +10180,18 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
             if (pool) pool->setActiveThreadCount(m_threads);
 
             std::vector<double> qfrag_save = topo_info.qfrag;
+
+            // A1 (Jul 2026): the Phase-1 matrix does not depend on qfrag (it enters
+            // only the constraint RHS), so the old "one full calculateTopologyCharges
+            // per pi-system" loop rebuilt a bit-identical matrix (Dijkstra + N x N erf
+            // fill) every time. Collect the fragment each pi-system neutralises, then
+            // solve the shared system once per DISTINCT assignment.
+            //
+            // Two pi-systems on the same fragment produce the same qfrag and therefore
+            // the same charges, so they share a solve. For a single-fragment molecule
+            // (the common case) all pi-systems collapse to one solve.
+            std::vector<int> pis_list;            // pi-system id, in pi_ids order
+            std::vector<int> pis_ifrag;           // fragment it neutralises (1-based)
             for (int pis : pi_ids) {
                 int first_pi_atom = -1;
                 for (int k = 0; k < m_atomcount; ++k)
@@ -10187,21 +10199,51 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
                 if (first_pi_atom < 0) continue;
                 int ifrag = (first_pi_atom < (int)topo_info.fraglist.size()) ? topo_info.fraglist[first_pi_atom] : 1;
                 if (ifrag < 1 || ifrag > (int)topo_info.qfrag.size()) continue;
-                // neutralize this fragment
-                ti.qfrag[ifrag - 1] = 0.0;
+                pis_list.push_back(pis);
+                pis_ifrag.push_back(ifrag);
+            }
+
+            // Distinct neutralised fragments, first-seen order.
+            std::vector<int> uniq_ifrag;
+            std::vector<int> variant_of;  // index into uniq_ifrag, per pis_list entry
+            variant_of.reserve(pis_list.size());
+            for (int ifrag : pis_ifrag) {
+                auto it = std::find(uniq_ifrag.begin(), uniq_ifrag.end(), ifrag);
+                if (it == uniq_ifrag.end()) {
+                    variant_of.push_back(static_cast<int>(uniq_ifrag.size()));
+                    uniq_ifrag.push_back(ifrag);
+                } else {
+                    variant_of.push_back(static_cast<int>(std::distance(uniq_ifrag.begin(), it)));
+                }
+            }
+
+            std::vector<Vector> qa_neutral_per_variant;
+            if (!uniq_ifrag.empty()) {
+                std::vector<std::vector<double>> qfrag_variants;
+                qfrag_variants.reserve(uniq_ifrag.size());
+                for (int ifrag : uniq_ifrag) {
+                    std::vector<double> qf = qfrag_save;
+                    qf[ifrag - 1] = 0.0;  // neutralize this fragment
+                    qfrag_variants.push_back(std::move(qf));
+                }
+
                 m_eeq_solver->clearSolveStatus();
                 m_eeq_solver->invalidateCholeskyCache();
                 m_eeq_solver->invalidateMatrixCache();
-                Vector qa_neutral = m_eeq_solver->calculateTopologyCharges(
+                qa_neutral_per_variant = m_eeq_solver->calculateTopologyChargesMultiRHS(
                     m_atoms, m_geometry_bohr, 0, topo_info.coordination_numbers,
-                    ti, true, pool, m_threads);
-                ti.qfrag[ifrag - 1] = qfrag_save[ifrag - 1];  // restore
-                Vector qa_neutral_h = qheavy(qa_neutral);
+                    ti, qfrag_variants, true, pool, m_threads);
+            }
+
+            for (size_t n = 0; n < pis_list.size(); ++n) {
+                int vi = variant_of[n];
+                if (vi >= (int)qa_neutral_per_variant.size()) continue;
+                Vector qa_neutral_h = qheavy(qa_neutral_per_variant[vi]);
                 double dum = 0.0;
                 for (int k = 0; k < m_atomcount; ++k)
-                    if (topo_info.pi_fragments[k] == pis) dum += (qah(k) - qa_neutral_h(k));
+                    if (topo_info.pi_fragments[k] == pis_list[n]) dum += (qah(k) - qa_neutral_h(k));
                 dum *= 1.1;
-                topo_info.pi_system_charge[pis] = static_cast<int>(std::round(dum));
+                topo_info.pi_system_charge[pis_list[n]] = static_cast<int>(std::round(dum));
             }
             // restore solver state for the original qfrag
             ti.qfrag = qfrag_save;
