@@ -222,13 +222,20 @@ void XTB::getHamiltonianH0(const Vector& se,
     // only its own AO rows of S/H0, so the stripes touch disjoint matrix blocks —
     // no locking, bit-identical to the serial result. effectiveIntraThreads() keeps
     // this serial unless a single large molecule was granted a thread budget.
+    // B1 (Jul 2026): as_cgto_shell() copies two std::vectors; called in the inner
+    // ish_b loop it ran nsh^2 = 116k times on complex/231. Shells are
+    // geometry-independent, so convert once and index (identical values).
+    std::vector<CGTO::Shell> shells(nsh);
+    for (int ish = 0; ish < nsh; ++ish)
+        shells[ish] = as_cgto_shell(m_basis.cgto[ish]);
+
     const int n_threads = effectiveIntraThreads(nsh);
     parallelStripes(n_threads, [&](int tid, int nth) {
     for (int ish_a = tid; ish_a < nsh; ish_a += nth) {
         const int iat  = m_basis.sh2at[ish_a];
         const int ia_start = m_basis.iao_sh[ish_a];
         const int ia_nao   = m_basis.nao_sh[ish_a];
-        const CGTO::Shell sh_a = as_cgto_shell(m_basis.cgto[ish_a]);
+        const CGTO::Shell& sh_a = shells[ish_a];
 
         // Local shell index within atom (for parameter lookup)
         const int local_a = ish_a - m_basis.ish_at[iat];
@@ -238,7 +245,7 @@ void XTB::getHamiltonianH0(const Vector& se,
             const int jat  = m_basis.sh2at[ish_b];
             const int jb_start = m_basis.iao_sh[ish_b];
             const int jb_nao   = m_basis.nao_sh[ish_b];
-            const CGTO::Shell sh_b = as_cgto_shell(m_basis.cgto[ish_b]);
+            const CGTO::Shell& sh_b = shells[ish_b];
 
             const int local_b = ish_b - m_basis.ish_at[jat];
 

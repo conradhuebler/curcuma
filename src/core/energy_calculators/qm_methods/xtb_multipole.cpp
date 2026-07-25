@@ -67,6 +67,14 @@ void XTB::setupMultipole(bool integrals_on_device)
     auto tmp_ao = tmp0, tmp_d = tmp0, tmp_shift = tmp0, tmp_cn = tmp0;
 
     if (!integrals_on_device) {
+    // B1 (Jul 2026): as_cgto_shell() copies two std::vectors, and it used to be
+    // called once per (mu,nu) AO pair -> ~nao^2 = 311k conversions (622k heap
+    // allocations) on complex/231. The shells are geometry-independent, so build
+    // them once here and index; the kernels see identical values.
+    std::vector<CGTO::Shell> shells(m_basis.nsh);
+    for (int ish = 0; ish < m_basis.nsh; ++ish)
+        shells[ish] = as_cgto_shell(m_basis.cgto[ish]);
+
     // ---- 1. Global-origin raw dipole + raw-Cartesian quadrupole ----
     std::array<Eigen::MatrixXd, 3> dp_global;
     std::array<Eigen::MatrixXd, 6> qp_global_raw;
@@ -82,7 +90,7 @@ void XTB::setupMultipole(bool integrals_on_device)
         const int iat   = m_basis.ao2at[mu];
         const int local_a = mu - m_basis.iao_sh[ish_a];
         const int t_a = ao_to_type(m_basis.ang_sh[ish_a], local_a);
-        const CGTO::Shell sh_a = as_cgto_shell(m_basis.cgto[ish_a]);
+        const CGTO::Shell& sh_a = shells[ish_a];
 
         for (int nu = 0; nu < nao; ++nu) {
             const int ish_b = m_basis.ao2sh[nu];
@@ -90,7 +98,7 @@ void XTB::setupMultipole(bool integrals_on_device)
             const int local_b = nu - m_basis.iao_sh[ish_b];
             const int t_b = ao_to_type(m_basis.ang_sh[ish_b], local_b);
             if (t_a < 0 || t_b < 0) continue;
-            const CGTO::Shell sh_b = as_cgto_shell(m_basis.cgto[ish_b]);
+            const CGTO::Shell& sh_b = shells[ish_b];
 
             double Sx, D[3], Q[6];
             MI::cgto_multipole(sh_a, sh_b,
@@ -112,13 +120,13 @@ void XTB::setupMultipole(bool integrals_on_device)
         const int ang_a = m_basis.ang_sh[ish_a];
         const int iat   = m_basis.sh2at[ish_a];
         const int ia0   = m_basis.iao_sh[ish_a];
-        const CGTO::Shell sh_a = as_cgto_shell(m_basis.cgto[ish_a]);
+        const CGTO::Shell& sh_a = shells[ish_a];
         for (int ish_b = 0; ish_b < nsh_mp; ++ish_b) {
             const int ang_b = m_basis.ang_sh[ish_b];
             if (ang_a < 2 && ang_b < 2) continue;  // s/p handled by the loop above
             const int jat = m_basis.sh2at[ish_b];
             const int jb0 = m_basis.iao_sh[ish_b];
-            const CGTO::Shell sh_b = as_cgto_shell(m_basis.cgto[ish_b]);
+            const CGTO::Shell& sh_b = shells[ish_b];
             double Db[5 * 5 * 3], Qb[5 * 5 * 6];
             sphericalMultipoleBlock(sh_a, ang_a, sh_b, ang_b,
                 xyz_bohr[3*iat+0], xyz_bohr[3*iat+1], xyz_bohr[3*iat+2],
