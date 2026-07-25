@@ -185,9 +185,16 @@ struct GFNFFParamGenReport {
     double t_eeq_phase1         = -1;
     double t_eeq_phase1_corr    = -1;
     double t_eeq_phase2         = -1;
-    double t_pi_bond_orders     = -1;
+    // A0 (Jul 2026): the old single `t_pi_bond_orders` bucket bracketed three
+    // unrelated pieces of work, which made it useless for guiding optimisation.
+    // Split into the ipis per-pi-system EEQ re-solves, the FT-HMO solve itself,
+    // and the bond-type classification loop.
+    double t_pi_charges_eeq     = -1;
+    double t_huckel             = -1;
+    double t_bond_types         = -1;
     double t_topo_distances     = -1;
     double t_topology_total     = -1;
+    int    n_pi_systems         = -1;  // number of pi-systems (drives the two above)
 
     // Parameter generation phases — all measured in generateGFNFFParameterSet
     double t_bonds       = -1;

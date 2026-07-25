@@ -200,10 +200,12 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
 // =============================================================================
 void printGFNFFParamGenReport(const GFNFFParamGenReport& r)
 {
+    // A0 (Jul 2026): 2 decimals — the topology phases are sub-ms on small systems
+    // and whole-ms truncation made them unusable for profiling.
     auto fmt_t = [](double t) -> std::string {
-        return (t < 0.0) ? std::string("    --") : fmt::format("{:>6.1f}", t);
+        return (t < 0.0) ? std::string("     --") : fmt::format("{:>7.2f}", t);
     };
-    auto row = [&](const char* name, double t) {
+    auto row = [&](const std::string& name, double t) {
         CurcumaLogger::result(fmt::format("  {:<32}  {} ms", name, fmt_t(t)));
     };
 
@@ -226,7 +228,14 @@ void printGFNFFParamGenReport(const GFNFFParamGenReport& r)
     row("EEQ Phase 1 (topo charges)",   r.t_eeq_phase1);
     row("EEQ Phase 1 corrections",      r.t_eeq_phase1_corr);
     row("EEQ Phase 2 (refinement)",     r.t_eeq_phase2);
-    row("Pi-bond orders + bond types",  r.t_pi_bond_orders);
+    // A0 (Jul 2026): was one "Pi-bond orders + bond types" row; split so the
+    // ipis EEQ re-solves are visible separately from the FT-HMO solve.
+    row(r.n_pi_systems >= 0
+            ? fmt::format("Pi charges: ipis EEQ ({} pi-sys)", r.n_pi_systems)
+            : std::string("Pi charges: ipis EEQ"),
+        r.t_pi_charges_eeq);
+    row("Pi-bond orders (FT-HMO)",      r.t_huckel);
+    row("Bond-type classification",     r.t_bond_types);
     row("Topo distances + BATM list",   r.t_topo_distances);
     row("Topology total",               r.t_topology_total);
     CurcumaLogger::result("  Parameter generation:");
@@ -9645,7 +9654,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     }
 
     {
-        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
         m_param_gen_report.t_distance_matrix = static_cast<double>(dt.count());
         phase_timer = std::chrono::high_resolution_clock::now();
     }
@@ -9735,7 +9744,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     topo_info.neighbor_counts = Eigen::Map<Vector>(neighbor_counts.data(), neighbor_counts.size());
 
     {
-        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
         m_param_gen_report.t_cn_hyb_pi_rings = static_cast<double>(dt.count());
         phase_timer = std::chrono::high_resolution_clock::now();
     }
@@ -9950,7 +9959,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         if (m_eeq_solver->lastSolveFailed()) m_eeq_solve_failed = true;
 
         {
-            auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+            std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
             m_param_gen_report.t_eeq_phase1 = static_cast<double>(dt.count());
             phase_timer = std::chrono::high_resolution_clock::now();
         }
@@ -10004,7 +10013,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         }
 
         {
-            auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+            std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
             m_param_gen_report.t_eeq_phase1_corr = static_cast<double>(dt.count());
             phase_timer = std::chrono::high_resolution_clock::now();
         }
@@ -10109,8 +10118,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     }
 
     {
-        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
-        m_param_gen_report.t_eeq_phase2 = static_cast<double>(dt.count());
+        // A0 (Jul 2026): sub-ms resolution, matching the per-step PrepTiming idiom.
+        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
+        m_param_gen_report.t_eeq_phase2 = dt.count();
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -10199,6 +10209,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
             m_eeq_solver->invalidateCholeskyCache();
             m_eeq_solver->invalidateMatrixCache();
         }
+        m_param_gen_report.n_pi_systems = static_cast<int>(pi_ids.size());
+    }
+
+    {
+        // A0: ipis per-pi-system EEQ re-solves (one full topology-charge solve each)
+        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
+        m_param_gen_report.t_pi_charges_eeq = dt.count();
+        phase_timer = std::chrono::high_resolution_clock::now();
     }
 
     topo_info.pi_bond_orders = calculatePiBondOrders(
@@ -10210,6 +10228,13 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         topo_info.pi_system_charge,  // ipis per pi-system (Jul 2026, F3)
         topo_info.itag  // carbene(+1)/NO2(+1)/eta(-1) tags for the FT-HMO electron count
     );
+
+    {
+        // A0: the FT-HMO (Hueckel) solve itself
+        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
+        m_param_gen_report.t_huckel = dt.count();
+        phase_timer = std::chrono::high_resolution_clock::now();
+    }
 
     // Initialize metal and aromatic flags
     topo_info.is_metal.resize(m_atomcount, false);
@@ -10296,8 +10321,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     }
 
     {
-        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
-        m_param_gen_report.t_pi_bond_orders = static_cast<double>(dt.count());
+        // A0: bond-type classification loop (is_metal/is_aromatic + classifyBondType)
+        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
+        m_param_gen_report.t_bond_types = dt.count();
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -10402,14 +10428,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     }
 
     {
-        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
         m_param_gen_report.t_topo_distances = static_cast<double>(dt.count());
     }
 
     // Claude Generated (March 2026): Timing summary
     auto topo_end = std::chrono::high_resolution_clock::now();
-    auto topo_duration = std::chrono::duration_cast<std::chrono::milliseconds>(topo_end - topo_start);
-    m_topology_time_ms = static_cast<double>(topo_duration.count());
+    std::chrono::duration<double, std::milli> topo_duration = topo_end - topo_start;  // A0: sub-ms
+    m_topology_time_ms = topo_duration.count();
     m_param_gen_report.t_topology_total = m_topology_time_ms;
     m_param_gen_report.n_atoms = m_atomcount;
 
