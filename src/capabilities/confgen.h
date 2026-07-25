@@ -173,6 +173,66 @@ private:
     /// Torsions with at least two populated states -- the only ones that carry information.
     std::vector<int> informativeTorsions() const;
 
+    /// One generated candidate: a state vector that does not occur in the ensemble.
+    struct Proposal {
+        std::vector<int> states;   ///< target state vector
+        int template_frame = -1;   ///< ensemble member the geometry was built from
+        int distance = 0;          ///< Hamming distance to that template
+        double predicted = 0.0;    ///< additive-model estimate, kJ/mol (ORDERING ONLY, see below)
+        Molecule geometry;         ///< built structure (before optimisation)
+        // filled after the optimisation
+        bool optimised = false;
+        double energy = 0.0;              ///< Hartree
+        std::vector<int> states_after;    ///< state vector of the optimised structure
+        double min_rmsd_to_ensemble = 0.0;///< Angstrom, best-fit RMSD to the closest input structure
+        bool topology_ok = false;         ///< optimised structure still has the reference bond topology
+        bool is_new = false;              ///< survived the topology AND novelty checks
+    };
+
+    /**
+     * @brief Enumerate state vectors that the ensemble does NOT contain, build them, optimise them
+     *        and check whether they are new conformers.
+     *
+     * The cross-validated model comparison showed that a torsion-state energy model explains only
+     * ~15 % of the energy variation, so the model is used for ONE thing only: deciding which untried
+     * combinations to build first. The force field decides everything else -- every proposal is
+     * optimised and compared against the input ensemble, so a bad proposal costs one optimisation and
+     * can never produce a wrong result. That asymmetry is what makes generation worthwhile even
+     * though the model is weak.
+     */
+    std::vector<Proposal> generateProposals() const;
+    void optimiseProposals(std::vector<Proposal>& proposals) const;
+
+    /**
+     * @brief Re-optimise the template structures to get a comparable energy reference.
+     *
+     * Proposals are optimised; the input ensemble may not be (it can come from another method, or
+     * another optimiser setting). Comparing the two directly makes the optimisation gain look like a
+     * discovery -- measured: a proposal appeared "106 kJ/mol below the ensemble minimum" purely
+     * because the input structures had never been optimised with this method. Re-optimising the
+     * templates costs a handful of optimisations and makes the comparison like-for-like; a large gain
+     * is reported as the warning it is.
+     */
+    double referenceEnergyOptimised(double& worst_gain_kJ) const;
+    void reportProposals(const std::vector<Proposal>& proposals, const std::string& base) const;
+
+    /// Additive-model coefficients (intercept + per torsion state), kJ/mol. Ordering heuristic only.
+    std::vector<std::vector<double>> additiveCoefficients() const;
+
+    /// Cheapest possible sanity filter on a built geometry: any atom pair far below bonding distance.
+    bool hasClash(const Molecule& mol, double factor) const;
+
+    /**
+     * @brief Sorted list of bonded atom pairs, with an EXPLICIT covalent-radius factor.
+     *
+     * Deliberately not Molecule::DistanceMatrix(): its default scaling of 1.5 is generous enough to
+     * call a compressed 1-3 contact a bond. Measured on a 114-atom ensemble: at 1.5 it flagged 45 of
+     * 46 optimised proposals as "topology changed" while an independent check at 1.3 found 44 of them
+     * bit-identical to the reference -- i.e. the test, not the structures, was wrong. The factor is
+     * exposed as -topology_factor so the criterion is visible rather than hidden in a default.
+     */
+    std::vector<std::pair<int, int>> topologyFingerprint(const Molecule& mol, double factor) const;
+
     StringList MethodName() const override { return { "ConfGen" }; }
     void ReadControlFile() override { }
     void LoadControlJson() override;
@@ -188,6 +248,9 @@ private:
     double m_report_threshold = 1.0;
     int m_cv_folds = 5;
     bool m_couplings = true;
+    bool m_generate = false;
+    int m_max_proposals = 50, m_proposal_templates = 5, m_proposal_depth = 2;
+    double m_clash_factor = 1.2, m_new_rmsd = 1.0, m_topology_factor = 1.3;
 
     std::vector<TorsionSpace::Torsion> m_torsions;
     std::vector<std::vector<double>> m_state_centres; ///< per torsion
@@ -207,6 +270,13 @@ private:
     PARAM(state_tolerance, Double, 40.0, "Angular tolerance in degrees for grouping observed torsion values into rotamer states. Larger values merge neighbouring basins, smaller values split noisy ones.", "Analysis", {})
     PARAM(temperature, Double, 298.15, "Temperature in Kelvin for the Boltzmann-weighted state statistics.", "Analysis", {})
     PARAM(min_pairs, Int, 1, "Minimum number of matched pairs required before a state transition is reported.", "Analysis", {})
+    PARAM(generate, Bool, false, "Generate new conformer proposals: enumerate state vectors that the ensemble does not contain, build them, optimise them and report which ones are genuinely new. Off by default because it runs one geometry optimisation per proposal.", "Generation", {})
+    PARAM(max_proposals, Int, 50, "Maximum number of proposals built and optimised, ordered by the additive-model estimate.", "Generation", {})
+    PARAM(proposal_templates, Int, 5, "Number of lowest-energy ensemble members used as geometric templates.", "Generation", {})
+    PARAM(proposal_depth, Int, 2, "Maximum number of torsions changed simultaneously relative to a template (Hamming distance).", "Generation", {})
+    PARAM(clash_factor, Double, 1.2, "A built structure is rejected when a non-bonded atom pair comes closer than this factor times the sum of their covalent radii. The default is deliberately close to the BOND-DETECTION criterion (~1.3): a built structure that puts two atoms inside bonding distance makes the force field derive a new bond, and the optimisation then relaxes into a different molecule, not a conformer.", "Generation", {})
+    PARAM(topology_factor, Double, 1.3, "Covalent-radius factor for the topology check of optimised proposals. A proposal whose bond list differs from the reference is a reaction product, not a conformer, and is rejected. Lower than Molecule's default 1.5, which counts compressed 1-3 contacts as bonds.", "Generation", {})
+    PARAM(new_rmsd, Double, 1.0, "Best-fit RMSD in Angstrom above which an optimised proposal counts as a new conformer.", "Generation", {})
     PARAM(cv_folds, Int, 5, "Number of cross-validation folds for the model comparison (additive vs. additive+couplings). Values below 2 disable the comparison.", "Analysis", {})
     PARAM(couplings, Bool, true, "Measure torsion-torsion couplings from double-mutant cycles (four ensemble members forming a rectangle in state space) and run the model comparison.", "Analysis", {})
     PARAM(report_threshold, Double, 1.0, "Only transitions whose mean total energy difference exceeds this many kJ/mol are printed in the summary. All of them are written to the CSV.", "Analysis", {})

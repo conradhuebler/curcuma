@@ -23,11 +23,15 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
 #include "src/core/fileiterator.h"
+#include "src/capabilities/optimizer_factory.h"
+#include "src/capabilities/rmsd/rmsd_functions.h"
+#include "src/core/elements.h"
 
 #include <algorithm>
 #include <cmath>
 #include <fmt/core.h>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <map>
 #include <numeric>
@@ -64,6 +68,13 @@ void ConfGen::LoadControlJson()
     m_report_threshold = m_config.get<double>("report_threshold");
     m_cv_folds = m_config.get<int>("cv_folds");
     m_couplings = m_config.get<bool>("couplings");
+    m_generate = m_config.get<bool>("generate");
+    m_max_proposals = m_config.get<int>("max_proposals");
+    m_proposal_templates = m_config.get<int>("proposal_templates");
+    m_proposal_depth = m_config.get<int>("proposal_depth");
+    m_clash_factor = m_config.get<double>("clash_factor");
+    m_new_rmsd = m_config.get<double>("new_rmsd");
+    m_topology_factor = m_config.get<double>("topology_factor");
 }
 
 bool ConfGen::analyseEnsemble()
@@ -591,6 +602,340 @@ void ConfGen::reportModelComparison(const std::vector<ModelFit>& fits) const
                             "varied, are needed before recombination can be expected to work.");
 }
 
+namespace {
+/// Best-fit (Kabsch) RMSD in Angstrom between two geometries in the same atom order.
+/// Twin of the lambda in ConfSearch::PermRMSD (confsearch.cpp) -- kept local and permutation-free
+/// because ConfGen compares structures of one molecule in a fixed order.
+double bestFitRMSD(const Geometry& reference, const Geometry& target)
+{
+    const int n = reference.rows();
+    if (n == 0 || target.rows() != n)
+        return std::numeric_limits<double>::infinity();
+    Geometry r = reference, t = target;
+    Eigen::Vector3d cr = Eigen::Vector3d::Zero(), ct = Eigen::Vector3d::Zero();
+    for (int i = 0; i < n; ++i) {
+        cr += r.row(i).transpose();
+        ct += t.row(i).transpose();
+    }
+    cr /= n;
+    ct /= n;
+    for (int i = 0; i < n; ++i) {
+        r.row(i) -= cr.transpose();
+        t.row(i) -= ct.transpose();
+    }
+    const Eigen::Matrix3d rot = RMSDFunctions::BestFitRotation(r, t, 1);
+    return RMSDFunctions::getRMSD(r, RMSDFunctions::applyRotation(t, rot));
+}
+}
+
+std::vector<std::vector<double>> ConfGen::additiveCoefficients() const
+{
+    // Same design as fitModel(level=1) but returning the coefficients instead of a score. Used ONLY
+    // to order the proposals -- the model explains ~15 % of the energy variation, which is enough to
+    // decide what to try first and far too little to decide what is good.
+    const std::vector<int> informative = informativeTorsions();
+    std::vector<std::pair<int, int>> columns; // (torsion, state)
+    for (int t : informative)
+        for (std::size_t st = 1; st < m_state_centres[t].size(); ++st)
+            columns.emplace_back(t, static_cast<int>(st));
+
+    std::vector<std::vector<double>> coefficients(m_torsions.size());
+    for (std::size_t t = 0; t < m_torsions.size(); ++t)
+        coefficients[t].assign(m_state_centres[t].size(), 0.0);
+    if (columns.empty())
+        return coefficients;
+
+    const int n = static_cast<int>(m_frames.size());
+    const int p = static_cast<int>(columns.size()) + 1;
+    Eigen::MatrixXd X = Eigen::MatrixXd::Zero(n, p);
+    Eigen::VectorXd y(n);
+    for (int i = 0; i < n; ++i) {
+        X(i, 0) = 1.0;
+        for (int c = 0; c < static_cast<int>(columns.size()); ++c)
+            X(i, c + 1) = (m_frames[i].states[columns[c].first] == columns[c].second) ? 1.0 : 0.0;
+        y(i) = (m_frames[i].energy - m_reference_energy) * kEh2kJ;
+    }
+    Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> cod(X);
+    cod.setThreshold(1e-10);
+    const Eigen::VectorXd beta = cod.solve(y);
+    for (int c = 0; c < static_cast<int>(columns.size()); ++c)
+        coefficients[columns[c].first][columns[c].second] = beta(c + 1);
+    return coefficients;
+}
+
+std::vector<std::pair<int, int>> ConfGen::topologyFingerprint(const Molecule& mol, double factor) const
+{
+    std::vector<std::pair<int, int>> bonds;
+    const Geometry geom = mol.getGeometry();
+    for (int i = 0; i < mol.AtomCount(); ++i)
+        for (int j = i + 1; j < mol.AtomCount(); ++j) {
+            const double cutoff = factor
+                * (Elements::CovalentRadius[mol.Atom(i).first] + Elements::CovalentRadius[mol.Atom(j).first]);
+            if ((Eigen::Vector3d(geom.row(i)) - Eigen::Vector3d(geom.row(j))).norm() <= cutoff)
+                bonds.emplace_back(i, j);
+        }
+    return bonds; // already sorted by construction
+}
+
+bool ConfGen::hasClash(const Molecule& mol, double factor) const
+{
+    const Matrix bonds = m_frames.front().molecule.DistanceMatrix().second;
+    const Geometry geom = mol.getGeometry();
+    for (int i = 0; i < mol.AtomCount(); ++i) {
+        for (int j = i + 1; j < mol.AtomCount(); ++j) {
+            if (bonds(i, j) > 0.5)
+                continue; // bonded pairs are supposed to be close
+            const double limit = factor
+                * (Elements::CovalentRadius[mol.Atom(i).first] + Elements::CovalentRadius[mol.Atom(j).first]);
+            if ((Eigen::Vector3d(geom.row(i)) - Eigen::Vector3d(geom.row(j))).norm() < limit)
+                return true;
+        }
+    }
+    return false;
+}
+
+std::vector<ConfGen::Proposal> ConfGen::generateProposals() const
+{
+    std::vector<Proposal> proposals;
+    const std::vector<int> informative = informativeTorsions();
+    if (informative.empty()) {
+        CurcumaLogger::warn("ConfGen: no torsion has more than one populated state -- there is nothing "
+                            "to recombine. The search never varied these torsions.");
+        return proposals;
+    }
+
+    // Everything the ensemble already contains; proposals must be outside this set.
+    std::set<std::vector<int>> known;
+    for (const Frame& f : m_frames)
+        known.insert(f.states);
+
+    // Templates: the lowest-energy members (their geometry is the starting point).
+    std::vector<int> order(m_frames.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [this](int a, int b) { return m_frames[a].energy < m_frames[b].energy; });
+    const int n_templates = std::min<int>(std::max(1, m_proposal_templates), static_cast<int>(order.size()));
+
+    const std::vector<std::vector<double>> coefficients = additiveCoefficients();
+    std::set<std::vector<int>> proposed;
+
+    // Enumerate mutations up to the requested Hamming depth around each template.
+    std::function<void(int, std::vector<int>&, int, int)> mutate =
+        [&](int template_frame, std::vector<int>& states, int start, int depth) {
+            if (depth > 0 && !known.count(states) && !proposed.count(states)) {
+                Proposal p;
+                p.states = states;
+                p.template_frame = template_frame;
+                p.distance = depth;
+                for (std::size_t t = 0; t < states.size(); ++t)
+                    if (states[t] >= 0 && states[t] < static_cast<int>(coefficients[t].size()))
+                        p.predicted += coefficients[t][states[t]];
+                proposed.insert(states);
+                proposals.push_back(std::move(p));
+            }
+            if (depth >= m_proposal_depth)
+                return;
+            for (std::size_t idx = start; idx < informative.size(); ++idx) {
+                const int t = informative[idx];
+                const int original = states[t];
+                for (int st = 0; st < static_cast<int>(m_state_centres[t].size()); ++st) {
+                    if (st == original)
+                        continue;
+                    states[t] = st;
+                    mutate(template_frame, states, idx + 1, depth + 1);
+                }
+                states[t] = original;
+            }
+        };
+
+    for (int i = 0; i < n_templates; ++i) {
+        std::vector<int> states = m_frames[order[i]].states;
+        mutate(order[i], states, 0, 0);
+    }
+
+    // Order by the model estimate and keep the requested number.
+    std::sort(proposals.begin(), proposals.end(),
+        [](const Proposal& a, const Proposal& b) { return a.predicted < b.predicted; });
+    if (static_cast<int>(proposals.size()) > m_max_proposals)
+        proposals.resize(m_max_proposals);
+    return proposals;
+}
+
+void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
+{
+    json calc_config;
+    calc_config["method"] = m_method;
+    calc_config["threads"] = m_threads;
+    calc_config["charge"] = m_charge;
+    calc_config["spin"] = m_spin;
+
+    json opt_config = calc_config;
+    opt_config["verbosity"] = 0;
+    opt_config["write_trajectory"] = false;
+
+    EnergyCalculator calculator(m_method, calc_config);
+    calculator.setMolecule(m_frames.front().molecule.getMolInfo());
+    const std::vector<std::pair<int, int>> reference_bonds
+        = topologyFingerprint(m_frames.front().molecule, m_topology_factor);
+
+    for (Proposal& p : proposals) {
+        if (p.geometry.AtomCount() == 0)
+            continue; // rejected by the clash filter, never built
+        Molecule mol = p.geometry;
+        auto result = Optimization::OptimizationDispatcher::optimizeStructure(
+            &mol, Optimization::OptimizerType::LBFGSPP, &calculator, opt_config);
+        if (!result.success)
+            continue;
+        p.optimised = true;
+        p.geometry = result.final_molecule;
+        p.energy = result.final_energy;
+        p.states_after = TorsionSpace::stateVector(p.geometry.getGeometry(), m_torsions, m_state_centres);
+
+        // MANDATORY topology check. A built structure that brings two atoms close makes the force
+        // field derive a NEW BOND; the optimisation then relaxes into a different molecule whose
+        // energy is far below any conformer (measured: 2649 kJ/mol "below the minimum", with 3-6
+        // changed bonds). Without this check the generator reports reactions as brilliant conformers.
+        p.topology_ok = (topologyFingerprint(p.geometry, m_topology_factor) == reference_bonds);
+
+        // Novelty: closest input structure by best-fit RMSD. The force field, not the model, decides.
+        p.min_rmsd_to_ensemble = std::numeric_limits<double>::infinity();
+        for (const Frame& f : m_frames)
+            p.min_rmsd_to_ensemble = std::min(p.min_rmsd_to_ensemble,
+                bestFitRMSD(f.molecule.getGeometry(), p.geometry.getGeometry()));
+        p.is_new = p.topology_ok && p.min_rmsd_to_ensemble > m_new_rmsd;
+    }
+}
+
+double ConfGen::referenceEnergyOptimised(double& worst_gain_kJ) const
+{
+    json calc_config;
+    calc_config["method"] = m_method;
+    calc_config["threads"] = m_threads;
+    calc_config["charge"] = m_charge;
+    calc_config["spin"] = m_spin;
+    json opt_config = calc_config;
+    opt_config["verbosity"] = 0;
+    opt_config["write_trajectory"] = false;
+
+    EnergyCalculator calculator(m_method, calc_config);
+    calculator.setMolecule(m_frames.front().molecule.getMolInfo());
+
+    std::vector<int> order(m_frames.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [this](int a, int b) { return m_frames[a].energy < m_frames[b].energy; });
+    const int n = std::min<int>(std::max(1, m_proposal_templates), static_cast<int>(order.size()));
+
+    double best = std::numeric_limits<double>::infinity();
+    worst_gain_kJ = 0.0;
+    for (int i = 0; i < n; ++i) {
+        Molecule mol = m_frames[order[i]].molecule;
+        auto result = Optimization::OptimizationDispatcher::optimizeStructure(
+            &mol, Optimization::OptimizerType::LBFGSPP, &calculator, opt_config);
+        if (!result.success)
+            continue;
+        best = std::min(best, result.final_energy);
+        worst_gain_kJ = std::max(worst_gain_kJ, (m_frames[order[i]].energy - result.final_energy) * kEh2kJ);
+    }
+    return best;
+}
+
+void ConfGen::reportProposals(const std::vector<Proposal>& proposals, const std::string& base) const
+{
+    CurcumaLogger::header("=== ConfGen: proposals (recombined state vectors) ===");
+    if (proposals.empty()) {
+        CurcumaLogger::warn("ConfGen: no proposal could be generated -- every reachable state "
+                            "combination is already in the ensemble, or no torsion has a second state.");
+        return;
+    }
+
+    // Like-for-like energy reference: the templates optimised with exactly the settings the proposals
+    // were optimised with.
+    double template_gain_kJ = 0.0;
+    const double reference_opt = referenceEnergyOptimised(template_gain_kJ);
+
+    int built = 0, optimised = 0, kept_states = 0, collapsed = 0, novel = 0, reacted = 0;
+    double best_new = std::numeric_limits<double>::infinity();
+    for (const Proposal& p : proposals) {
+        if (p.geometry.AtomCount() > 0)
+            built++;
+        if (!p.optimised)
+            continue;
+        optimised++;
+        if (!p.topology_ok) {
+            reacted++;
+            continue;
+        }
+        if (p.states_after == p.states)
+            kept_states++;
+        if (p.states_after == m_frames[p.template_frame].states)
+            collapsed++;
+        if (p.is_new) {
+            novel++;
+            best_new = std::min(best_new, p.energy);
+        }
+    }
+
+    CurcumaLogger::result_fmt("ConfGen: {} state vector(s) proposed, {} built (rest rejected by the "
+                              "clash filter), {} optimised successfully",
+        static_cast<int>(proposals.size()), built, optimised);
+    CurcumaLogger::result_fmt("ConfGen: {} optimised proposal(s) changed their bond topology and are NOT "
+                              "conformers (a bond formed or broke -- rejected)",
+        reacted);
+    CurcumaLogger::result_fmt("ConfGen: of the {} chemically valid ones, {} kept their target states, {} "
+                              "fell back into their template's state vector",
+        optimised - reacted, kept_states, collapsed);
+    CurcumaLogger::result_fmt("ConfGen: {} of {} chemically valid proposals are NEW conformers "
+                              "(best-fit RMSD > {:.2f} A to every input structure)",
+        novel, optimised - reacted, m_new_rmsd);
+
+    if (template_gain_kJ > 5.0)
+        CurcumaLogger::warn_fmt("ConfGen: re-optimising the input structures lowers them by up to {:.1f} "
+                                "kJ/mol -- the ensemble is NOT at the minimum of '{}' (different method or "
+                                "convergence). Energies below are therefore compared against re-optimised "
+                                "templates, not against the file's own values.",
+            template_gain_kJ, m_method);
+
+    if (novel > 0) {
+        const double delta = (best_new - reference_opt) * kEh2kJ;
+        if (delta < 0.0)
+            CurcumaLogger::success_fmt("ConfGen: the best new conformer is {:.2f} kJ/mol BELOW the "
+                                       "re-optimised ensemble minimum ({:.6f} Eh) -- the search had "
+                                       "missed it",
+                -delta, best_new);
+        else
+            CurcumaLogger::result_fmt("ConfGen: the best new conformer sits {:.2f} kJ/mol above the "
+                                      "re-optimised ensemble minimum",
+                delta);
+        CurcumaLogger::result_fmt("ConfGen: new structures written to {}.proposals.new.xyz", base);
+    } else if (optimised > 0) {
+        CurcumaLogger::warn("ConfGen: every optimised proposal fell back onto a structure that is "
+                            "already in the ensemble. Recombination found nothing new here -- either "
+                            "the ensemble is already complete in this torsion space, or the built "
+                            "geometries relax straight back (a restrained pre-optimisation would be "
+                            "the next lever).");
+    }
+
+    // How good was the ordering heuristic? Correlation between predicted and optimised energy.
+    std::vector<std::pair<double, double>> pairs;
+    for (const Proposal& p : proposals)
+        if (p.optimised && p.topology_ok)
+            pairs.emplace_back(p.predicted, (p.energy - m_reference_energy) * kEh2kJ);
+    if (pairs.size() >= 3) {
+        double mx = 0, my = 0;
+        for (const auto& [x, y] : pairs) { mx += x; my += y; }
+        mx /= pairs.size(); my /= pairs.size();
+        double sxy = 0, sxx = 0, syy = 0;
+        for (const auto& [x, y] : pairs) {
+            sxy += (x - mx) * (y - my);
+            sxx += (x - mx) * (x - mx);
+            syy += (y - my) * (y - my);
+        }
+        const double r = (sxx > 0 && syy > 0) ? sxy / std::sqrt(sxx * syy) : 0.0;
+        CurcumaLogger::result_fmt("ConfGen: ordering heuristic vs. optimised energy: correlation r = {:.2f} "
+                                  "over {} proposals (this is the only claim the weak model makes)",
+            r, static_cast<int>(pairs.size()));
+    }
+}
+
 void ConfGen::writeFrameTable(const std::string& path) const
 {
     std::ofstream out(path);
@@ -783,6 +1128,55 @@ void ConfGen::start()
                 fits.push_back(fitModel(level));
             reportModelComparison(fits);
         }
+    }
+
+    if (m_generate) {
+        std::vector<Proposal> proposals = generateProposals();
+
+        // Build the geometries: start from the template and set every torsion whose state differs.
+        int clashes = 0;
+        for (Proposal& p : proposals) {
+            Geometry geom = m_frames[p.template_frame].molecule.getGeometry();
+            for (std::size_t t = 0; t < m_torsions.size(); ++t)
+                if (p.states[t] != m_frames[p.template_frame].states[t] && p.states[t] >= 0)
+                    geom = TorsionSpace::setDihedral(geom, m_torsions[t], m_state_centres[t][p.states[t]]);
+            Molecule mol = m_frames[p.template_frame].molecule;
+            mol.setGeometry(geom);
+            mol.setName(fmt::format("proposal_from_{}_d{}", p.template_frame + 1, p.distance));
+            if (hasClash(mol, m_clash_factor)) {
+                clashes++;
+                continue; // leave p.geometry empty -> counted as "not built"
+            }
+            p.geometry = mol;
+        }
+        if (clashes > 0)
+            CurcumaLogger::result_fmt("ConfGen: {} built structure(s) rejected by the clash filter", clashes);
+
+        // Write what was built, then optimise and write the survivors.
+        bool first = true;
+        for (const Proposal& p : proposals) {
+            if (p.geometry.AtomCount() == 0)
+                continue;
+            if (first) { p.geometry.writeXYZFile(outputPath(base + ".proposals.xyz")); first = false; }
+            else          p.geometry.appendXYZFile(outputPath(base + ".proposals.xyz"));
+        }
+
+        optimiseProposals(proposals);
+
+        bool first_opt = true, first_new = true;
+        for (const Proposal& p : proposals) {
+            if (!p.optimised)
+                continue;
+            Molecule out = p.geometry;
+            out.setEnergy(p.energy);
+            if (first_opt) { out.writeXYZFile(outputPath(base + ".proposals.opt.xyz")); first_opt = false; }
+            else             out.appendXYZFile(outputPath(base + ".proposals.opt.xyz"));
+            if (p.is_new) {
+                if (first_new) { out.writeXYZFile(outputPath(base + ".proposals.new.xyz")); first_new = false; }
+                else             out.appendXYZFile(outputPath(base + ".proposals.new.xyz"));
+            }
+        }
+        reportProposals(proposals, base);
     }
 
     CurcumaLogger::success_fmt("ConfGen: wrote {}.torsions.csv (per structure), {}.torsion_states.csv "

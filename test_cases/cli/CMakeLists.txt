@@ -179,6 +179,8 @@ set_tests_properties(cli_simplemd_15_rattle_mtd_fragments PROPERTIES TIMEOUT 250
 # =============================================================================
 add_cli_test(confgen 01_matched_pairs)
 set_tests_properties(cli_confgen_01_matched_pairs PROPERTIES TIMEOUT 250 LABELS "confgen;gfnff;conformer")
+add_cli_test(confgen 02_generate)
+set_tests_properties(cli_confgen_02_generate PROPERTIES TIMEOUT 300 LABELS "confgen;gfnff;conformer")
 
 # =============================================================================
 # ConfSearch Tests (Claude Generated, Jul 2026)

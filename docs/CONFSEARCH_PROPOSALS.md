@@ -131,6 +131,57 @@ Not a discretisation artefact: scanning `-state_tolerance` over 10/20/30/40/60 d
   drives a given state change (on both test molecules: dispersion and repulsion, not the torsion
   term), and that is chemically informative regardless of how well the total energy is modelled.
 
+## Generation (`-generate true`): build, optimise, let the force field judge
+
+The model explains ~15 % of the energy variation — too little to *rank* anything, enough to decide
+what to *try*. That asymmetry is the whole justification: a proposal is optimised and checked with the
+real force field afterwards, so a wrong proposal costs one optimisation and can never produce a wrong
+result.
+
+Pipeline: enumerate state vectors that the ensemble does **not** contain (single and double mutations
+around the lowest-energy templates) → order them by the additive model → set the torsions on the
+template geometry (`TorsionSpace::setDihedral`) → clash filter → optimise → **topology check** →
+novelty check by best-fit RMSD against every input structure.
+
+### Two traps this stage fell into (both now guarded and pinned by a test)
+
+**1. Recombination makes reaction products.** Setting torsions rigidly can push two atoms inside
+bonding distance; the force field then derives a new bond and the optimisation relaxes into a
+different molecule. First run: *"the best new conformer is 2649 kJ/mol BELOW the ensemble minimum"* —
+with 3–6 changed bonds. Fixed by a mandatory topology check after optimisation, plus a clash filter
+whose default (`-clash_factor 1.2`) sits close to the bond-detection criterion instead of well below it.
+
+**2. The topology check itself was too coarse.** `Molecule::DistanceMatrix()` uses a covalent-radius
+scaling of 1.5, generous enough to call a compressed 1-3 contact a bond: it flagged **45 of 46**
+optimised proposals as "topology changed" while an independent check at 1.3 found 44 of them
+bit-identical to the reference. ConfGen therefore computes its own bond list with an explicit,
+user-visible factor (`-topology_factor`, default 1.3).
+
+**3. Energies were compared across optimisation states.** Proposals are optimised, the input ensemble
+may not be (it can come from another method). That made the optimisation gain look like a discovery:
+*"106 kJ/mol below the ensemble minimum"* on an ensemble that had never seen GFN-FF. Now the
+templates are re-optimised with the same settings to give a like-for-like reference, and a large gain
+is reported as the warning it is:
+
+```
+[WARN] re-optimising the input structures lowers them by up to 114.7 kJ/mol -- the ensemble is NOT at
+       the minimum of 'gfnff' ... energies are compared against re-optimised templates
+```
+
+### What it produces
+
+| ensemble | proposed | built | reacted | valid | **new conformers** | best new |
+|---|---|---|---|---|---|---|
+| 108 conf. / 90 atoms (ConfSearch, gfnff-optimised) | 50 | 14 | 6 | 8 | **7** | +16.5 kJ/mol |
+| 44 conf. / 114 atoms (ConfScan set, not gfnff-optimised) | 50 | 46 | 2 | 44 | **34** | +0.05 kJ/mol |
+
+The 7 new conformers of the first ensemble are mutually distinct (closest pair 1.11 Å) and sit
+22–36 kJ/mol above its minimum — genuinely new structures, but no better minimum. Note the cost
+structure: on the first ensemble 36 of 50 proposals died in the clash filter, i.e. rigidly setting
+torsions on a compact molecule mostly produces collisions. That is the strongest argument for the
+restrained pre-optimisation (P0) — build the clashing structure anyway, restrain the target torsions,
+let the optimiser relieve the clash, then release.
+
 ## Bug found by the consistency check
 
 The analysis verifies that the components sum to the total energy. They did not:
@@ -184,11 +235,10 @@ Output (all through the BMT directory):
 
 ## Roadmap
 
-- **P0 dihedral restraint** in the optimizer (one helper called from all four E/G sites) — needed to
-  *enforce* recombined torsion values before free re-optimisation.
-- **P3 recombination stage A**: consensus state vector + single/double mutations → build via
-  `TorsionSpace::setDihedral` → restrained then free optimisation with fixed topology (`.topo.json`)
-  → dedup through the existing ConfScan pipeline.
+- **P0 dihedral restraint** in the optimizer (one helper called from all four E/G sites). Now
+  motivated by measurement: 72 % of the proposals on the compact test molecule are lost to the clash
+  filter because the torsions are set rigidly.
+- ~~**P3 recombination stage A**~~ — done (`-generate true`), see above.
 - ~~**P4 pairwise couplings**~~ — done (see above). Result: couplings are measurable but do not make
   the model predictive; DEE/A\* enumeration over such a weak model is not worth building yet.
 - **P5 relaxed torsion scans** as an add-on for torsions/states the ensemble does not cover
