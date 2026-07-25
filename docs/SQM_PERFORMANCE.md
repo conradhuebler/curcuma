@@ -35,11 +35,12 @@ scripts/sqm_bench.sh [N_REPEATS=3] [caffeine triose complex]
 
 | method | curcuma (orig) | curcuma (2026-06) | curcuma (2026-07) | tblite | xtb (cold) |
 |--------|---------------:|------------------:|------------------:|-------:|-----------:|
-| gfn1   | 2982 ms        | 1221 ms           | **793 ms**        | 2562   | 1367       |
-| gfn2   | 2944 ms        | 1364 ms           | **937 ms**        | 1567   | 979        |
+| gfn1   | 2982 ms        | 1221 ms           | **791 ms**        | 2562   | 1297       |
+| gfn2   | 2944 ms        | 1364 ms           | **998 ms**        | 1567   | 938        |
 
 - **gfn1: −73%. 1.6× faster than xtb.**
-- **gfn2: −68%. Now at parity with xtb (0.96×; was ~3×, then 1.39×).**
+- **gfn2: −66%. At parity with xtb (1.06×; was ~3×, then 1.39×).**
+- Idle-machine medians of 7, same run as the cur/gx table below.
 - The 2026-07 column combines the [shell-pair-blocked integral
   kernels](#integral-setup-2026-07) with the [FP32 mixed-precision
   eigensolve](#fp32-mixed-precision-eigensolve--now-on-by-default-2026-07),
@@ -253,22 +254,56 @@ scripts/bench_vs_gxtb.py test_cases/sqm_reference/molecules/complex.xyz \
 complex/231, energy+gradient, median of 5, gxtb 6.7.1 cold-start.
 **`cur/gx < 1.0` means curcuma is faster.**
 
+Median of **7**, measured on an **idle** machine (load 0.24):
+
 | method | curcuma K=1 | gxtb K=1 | cur/gx K=1 | curcuma K=16 | gxtb K=16 | cur/gx K=16 |
 |---|---:|---:|---:|---:|---:|---:|
-| gfnff | 43 ms | 33 ms | 1.27 | 37 ms | 27 ms | 1.37 |
-| gfn1  | 987 ms | 1269 ms | **0.78** | 341 ms | 382 ms | **0.89** |
-| gfn2  | 1122 ms | 932 ms | 1.20 | 412 ms | 302 ms | 1.36 |
+| gfnff | 36 ms | 34 ms | **1.05** | 35 ms | 29 ms | 1.19 |
+| gfn1  | 791 ms | 1297 ms | **0.61** | 326 ms | 379 ms | **0.86** |
+| gfn2  | 998 ms | 938 ms | **1.06** | 406 ms | 301 ms | 1.35 |
 
 Before this round the same table read gfnff 1.26/1.59, gfn1 0.89/0.91,
 gfn2 1.32/1.38.
 
+**Single core: gfn1 is 1.6x faster than gxtb; gfn2 and gfnff are at parity
+(within 6%). At 16 threads gfn1 stays ahead but gfn2 and gfnff fall behind** —
+gxtb scales better, and the remaining limit is analysed in
+[SQM_THREADING.md](SQM_THREADING.md#where-the-scaling-limit-actually-is-2026-07).
+
 > ⚠️ This table is **invalidated by any change to the integral, SCF or setup
 > path**. Re-measure and record the commit hash when quoting it. Measured at
-> commit `17def9ff`, single socket, MKL, `-mfma`.
+> commit `c42e2feb`, single socket, MKL, `-mfma`.
 
-Caveat on gfnff: at 43 ms total the run is dominated by process start plus
-one-time setup, so the ratio is sensitive to measurement noise and to the
-`.topo.json` cache being present or absent.
+> ⚠️ **Measure on an idle machine.** An earlier revision of this table
+> (gfnff 1.27/1.37, gfn1 0.78/0.89, gfn2 1.20/1.36) was taken while an unrelated
+> 4-5 core job was running and overstated every ratio; gfnff was worst hit
+> (1.27 vs the true 1.05). Check `uptime` first.
+
+Caveat on gfnff: at ~36 ms total the run is dominated by process start plus
+one-time setup, so the ratio is sensitive to noise and to whether the
+`.topo.json` cache is present.
+
+## GPU is currently SLOWER than the CPU (2026-07)
+
+Measured on an idle machine, RTX 5080, complex/231, energy+gradient, best of 3,
+against the CPU at `-threads 16`:
+
+| method | CPU t16 | CUDA | GPU vs CPU |
+|---|---:|---:|---|
+| gfn1 | 349 ms | 621 ms | **1.8x slower** |
+| gfn2 | 519 ms | 718 ms | **1.4x slower** |
+| gfnff | 38 ms (t1) | 298 ms | **7.8x slower** |
+
+Energies are identical. This is consistent with the honest note in
+[SQM_GPU.md](SQM_GPU.md) — the device-resident SCF was a residency/correctness
+milestone, **not** a measured `-sp` speed-up — and the gap has *widened* because
+the 2026-07 CPU work (blocked integrals + mixed-precision eigensolve) benefited
+the CPU path only.
+
+Note also that the Fortran references have **no GPU path at all**, so there is no
+"we are ahead on GPU" comparison to be made against them. The GPU is currently
+the weakest configuration for a single-point, and its value remains what the GPU
+docs claim: large-system reach and device residency, not raw `-sp` throughput.
 
 ## What did NOT help / not pursued
 
