@@ -40,17 +40,20 @@ scripts/sqm_bench.sh [N_REPEATS=3] [caffeine triose complex]
 
 - **gfn1: −73%. 1.6× faster than xtb.**
 - **gfn2: −68%. Now at parity with xtb (0.96×; was ~3×, then 1.39×).**
-- The 2026-07 column combines the blocked integral kernels with the
-  FP32 mixed-precision eigensolve, which is now on by default.
-- The 2026-07 column is the shell-pair-blocked integral kernels — see
-  [Integral setup (2026-07)](#integral-setup-2026-07) below.
+- The 2026-07 column combines the [shell-pair-blocked integral
+  kernels](#integral-setup-2026-07) with the [FP32 mixed-precision
+  eigensolve](#fp32-mixed-precision-eigensolve--now-on-by-default-2026-07),
+  which is now on by default.
 - Same on the smaller systems: triose gfn1 67 ms (tblite 74, xtb 97);
   triose gfn2 88 ms; caffeine in the 15–30 ms range (setup/one-time-init bound).
 
-All energies bit-identical to the pre-optimization values and to the tblite
-reference within tolerance — full native-GFN suite 45/45 green
-(`sqm_val_*`, `ecomp_*`, `d4_diag_*`, `d4_dedq`, `xtb_gradient_*`, `xtb_cpscf`,
-`gfn{1,2}_align`).
+Energies are **not** bit-identical to the pre-2026-07 values any more, by
+construction: the blocked kernels shift the last ulp via FMA contraction and the
+mixed-precision eigensolve moves 3 of 14 reference energies in the 12th decimal.
+Both are quantified in their sections below and stay 10000x inside the 1e-8
+tblite gate; the native-GFN suite is green
+(`sqm_val_*`, `xtb_gradient_*`, `xtb_cpscf`, `gfn{1,2}_align`, 143/143 with
+large-system, numgrad, solvation and extrapolation included).
 
 ## What was found (deep timing analysis)
 
