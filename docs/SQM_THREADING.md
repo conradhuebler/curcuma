@@ -91,6 +91,96 @@ Per-phase, gfn2, min-representative (`-verbosity 3`), **as measured 2026-06**:
 Current single-core reference for the same buckets: overlap+H0 28 ms, multipole
 setup 56 ms, setup total 91 ms, gradient 175 ms (gfn2) / 73 ms (gfn1).
 
+## Where the scaling limit actually is (2026-07)
+
+Re-measured after the blocked integrals and with mixed precision on, gfn2
+complex/231, `-verbosity 3`, speedup t1 -> t16:
+
+| phase | t1 | t16 | speedup |
+|---|---:|---:|---|
+| gradient | 168 ms | 31 ms | **5.4x** |
+| eigensolve back-transform (`dtrsm`) | 65 ms | 12 ms | 5.4x |
+| density P | 48 ms | 12 ms | 4.0x |
+| setup | 115 ms | 30 ms | 3.8x |
+| build Fock | 78 ms | 21 ms | 3.6x |
+| **eigensolve reduce (`dsygst`)** | 68 ms | **56 ms** | **1.22x** |
+| **potential build** | 38 ms | **30 ms** | **1.25x** |
+| **energy / mixing** | 29 ms | **26 ms** | **1.13x** |
+| **populations** | 29 ms | **28 ms** | **1.05x** |
+| TOTAL | 1012 ms | 396 ms | 2.6x |
+
+Everything that was parallelised scales. The four blocks at the bottom are
+~139 ms of the 396 ms at t16 — that is the whole remaining scaling limit. Three
+attacks on it were implemented and measured; **all three lost**, and the reasons
+generalise, so they are recorded here rather than retried.
+
+### 1. Raising the eigensolve thread cap — no
+
+The cap is `min(intra, 8)`. Re-tested at `-threads 16` **with** mixed precision
+(the FP32 `ssyevd` could in principle scale differently from `dsyevd`):
+
+| cap | eigensolve | TOTAL |
+|---|---:|---:|
+| 4 | 210 ms | 420 ms |
+| **8** | **181 ms** | **382 ms** |
+| 12 | 224 ms | 426 ms |
+| 16 | 249 ms | 436 ms |
+
+8 remains optimal. The D&C eigensolver is memory-bandwidth-bound; more threads
+make it slower, not faster.
+
+### 2. Replacing `dsygst` with two `dtrsm` calls — no
+
+`dsygst` is the worst-scaling block (1.22x), while the back-transform right next
+to it — plain `dtrsm` — scales 5.4x. So express the same reduction
+`A = L^-1 F L^-T` as two triangular solves, the routine that demonstrably
+parallelises. Implemented and measured:
+
+| variant | reduce t1 (pinned) | reduce t16 | TOTAL t16 |
+|---|---:|---:|---:|
+| `dsygst` | **70 ms** | 49 ms | **413 ms** |
+| two `dtrsm` | 90 ms | 47 ms | 437 ms |
+
+At t16 the two land within noise of each other: `dtrsm`'s better scaling buys
+back exactly the extra flops it costs, and nothing more. Single-core it is 29%
+worse. **Poor scaling is not the same as waste** — `dsygst` does ~3x fewer flops,
+and the alternative that parallelises well is slower in absolute terms at every
+thread count. Reverted.
+
+### 3. Parallelising `updatePopulations` — no
+
+The comment in `xtb_scf.cpp` calls it "too small to amortise a per-iteration pool
+dispatch". That was written for GFN1; GFN2 adds a 9 x nao^2 multipole
+contraction, so it was worth re-testing. Both loops stripe over disjoint output
+slots (own `n_sh(s)`, own atom column — AOs are ordered by atom) and keep the
+original summation order, so the threaded version is race-free and bit-identical.
+A/B in the same binary at `-threads 16`, best of 5:
+
+| | populations | TOTAL |
+|---|---:|---:|
+| serial | **20 ms** | **434 ms** |
+| striped | 31 ms | 440 ms |
+
+Slower. The arithmetic explains it: 1.45 ms/iteration spread over 14 stripes is
+~0.1 ms of work per thread, below the pool's dispatch-and-join cost. The original
+comment holds for GFN2 too. Reverted.
+
+### What would actually move it
+
+The remaining non-scaling blocks are all **small per call and dispatch-bound**,
+not compute-bound — which is why striping them loses. The lever is not more
+parallelism but fewer, larger units of work: fusing `populations`, `energy/mix`
+and `potential build` into a single per-iteration parallel region (one dispatch
+instead of three or four) would amortise the overhead across ~85 ms of t16 work
+instead of ~30 ms each. That is a restructuring of the SCF loop body, not a
+kernel change, and it is untested.
+
+> **Measurement note.** These numbers need an otherwise idle machine. Multi-thread
+> wall times on this box moved by 20-30% under an unrelated 4-5 core job, which is
+> larger than every effect in this section. Check `uptime` before trusting a
+> scaling measurement, and prefer A/B inside one binary (an env switch) over
+> comparing two builds.
+
 Total min-of-5 scaling, complex/231 (after WP1+WP2+WP2b — threaded MKL + D4 cache/threading):
 
 | method | t1 | t2 | t4 | t8 |
