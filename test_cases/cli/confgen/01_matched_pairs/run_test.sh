@@ -26,7 +26,7 @@ SUM_TOL=1e-6          # Hartree, term sum vs total energy
 run_test() {
     cd "$TEST_DIR"
     cleanup_bmt_dirs
-    rm -f stdout.log stderr.log ensemble.torsions.csv ensemble.torsion_states.csv ensemble.matched_pairs.csv
+    rm -f stdout.log stderr.log ensemble.torsions.csv ensemble.torsion_states.csv ensemble.matched_pairs.csv ensemble.couplings.csv
     timeout 200 "$CURCUMA" -confgen ensemble.xyz -method gfnff -threads 1 -no_bmt \
         > stdout.log 2> stderr.log
     RUN_EXIT=$?
@@ -104,7 +104,43 @@ validate_results() {
         TESTS_FAILED=$((TESTS_FAILED + 1)); failed=1
     fi
 
-    # 5. the additivity check is reported (it is the decision criterion for the recombination stage)
+    # 5. couplings + cross-validated model comparison are reported. The model comparison is the
+    #    decision criterion for the recombination stage, so its absence must fail the test.
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if grep -q "explain .* of the energy variation out of sample" stdout.log; then
+        echo -e "${GREEN}\xe2\x9c\x93 PASS${NC}: cross-validated model comparison reported"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        grep -oE "torsion states explain.*" stdout.log | head -1 | sed 's/^/  /'
+    else
+        echo -e "${RED}\xe2\x9c\x97 FAIL${NC}: model comparison (R2_cv) missing from the report"
+        TESTS_FAILED=$((TESTS_FAILED + 1)); failed=1
+    fi
+
+    # 6. out-of-sample scoring must be honest: the constant model is the reference, so its R2 is 0
+    #    and no model may claim a better in-sample than out-of-sample story silently.
+    TESTS_RUN=$((TESTS_RUN + 1))
+    # (the log carries ANSI colour codes, so match on the model names, not on line anchors)
+    if grep -q "constant" stdout.log && grep -q "additive (marginals)" stdout.log \
+        && grep -q "additive + pair couplings" stdout.log; then
+        echo -e "${GREEN}\xe2\x9c\x93 PASS${NC}: all three model levels scored (constant / additive / +couplings)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}\xe2\x9c\x97 FAIL${NC}: model comparison table incomplete"
+        TESTS_FAILED=$((TESTS_FAILED + 1)); failed=1
+    fi
+
+    # 7. the couplings table is written (may legitimately contain no rows if the ensemble has no
+    #    double-mutant cycle -- the file must exist either way)
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ -n "$(find_output_file ensemble.couplings.csv)" ]; then
+        echo -e "${GREEN}\xe2\x9c\x93 PASS${NC}: couplings table written"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}\xe2\x9c\x97 FAIL${NC}: ensemble.couplings.csv missing"
+        TESTS_FAILED=$((TESTS_FAILED + 1)); failed=1
+    fi
+
+    # 8. the additivity check is reported (matched-pair scatter vs effect)
     TESTS_RUN=$((TESTS_RUN + 1))
     if grep -q "additivity check" stdout.log; then
         echo -e "${GREEN}\xe2\x9c\x93 PASS${NC}: additivity check reported"

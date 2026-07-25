@@ -113,11 +113,65 @@ private:
     /* All Hamming-1 pairs -> per-transition term statistics. */
     std::vector<Transition> matchedPairs() const;
 
+    /**
+     * @brief One measured coupling between two torsions (double-mutant cycle).
+     *
+     * Four ensemble members that form a RECTANGLE in state space -- (a,c), (b,c), (a,d), (b,d) with
+     * every other torsion identical -- give the coupling without any model fit:
+     *
+     *     J = [E(b,d) - E(a,d)] - [E(b,c) - E(a,c)]
+     *
+     * J = 0 means the two state changes are independent (their effects simply add); J != 0 is exactly
+     * the non-additivity. This is the double-mutant cycle of protein biochemistry (Carter/Fersht/
+     * Horovitz 1984/1990), applied to torsions instead of side chains.
+     */
+    struct Coupling {
+        int torsion_a = -1, torsion_b = -1;
+        int a_from = -1, a_to = -1, b_from = -1, b_to = -1;
+        int cycles = 0;             ///< number of independent rectangles found
+        double j_mean = 0.0;        ///< Hartree
+        double j_sd = 0.0;          ///< Hartree
+        std::map<std::string, double> j_terms_mean; ///< per-term coupling, Hartree
+    };
+
+    /* Search the ensemble for double-mutant cycles and average their coupling. */
+    std::vector<Coupling> doubleMutantCycles() const;
+
+    /// Result of one cross-validated model fit.
+    struct ModelFit {
+        std::string name;
+        int columns = 0;      ///< design-matrix columns offered
+        int rank = 0;         ///< linearly independent ones (what the ensemble can actually resolve)
+        double rmse_cv = 0.0; ///< kJ/mol, out-of-sample
+        double mae_cv = 0.0;  ///< kJ/mol, out-of-sample median absolute error (outlier-robust)
+        double rmse_in = 0.0; ///< kJ/mol, in-sample (for reference only -- always improves)
+        double r2_cv = 0.0;   ///< fraction of the energy variance explained out of sample
+    };
+
+    /**
+     * @brief Fit E(s) with indicator variables and score it OUT OF SAMPLE.
+     *
+     * level 0: constant only (the null model -- its error IS the energy spread)
+     * level 1: + one coefficient per torsion state    E ~ c + sum_i h_i(s_i)
+     * level 2: + one per state pair of two torsions   E ~ ... + sum_ij J_ij(s_i,s_j)
+     *
+     * k-fold cross-validation is not optional here: level 2 has many more parameters and would win
+     * any in-sample comparison by construction. Only a better prediction on data the fit has not seen
+     * shows that the couplings carry real information.
+     */
+    ModelFit fitModel(int level) const;
+
     /* Per torsion and state: population, lowest relative energy, Boltzmann-weighted mean. */
     void writeStateStatistics(const std::string& path) const;
     void writeFrameTable(const std::string& path) const;
     void writeTransitionTable(const std::string& path, const std::vector<Transition>& transitions) const;
     void reportTransitions(const std::vector<Transition>& transitions) const;
+    void reportCouplings(const std::vector<Coupling>& couplings) const;
+    void reportModelComparison(const std::vector<ModelFit>& fits) const;
+    void writeCouplingTable(const std::string& path, const std::vector<Coupling>& couplings) const;
+
+    /// Torsions with at least two populated states -- the only ones that carry information.
+    std::vector<int> informativeTorsions() const;
 
     StringList MethodName() const override { return { "ConfGen" }; }
     void ReadControlFile() override { }
@@ -132,6 +186,8 @@ private:
     double m_temperature = 298.15;
     int m_min_pairs = 1;
     double m_report_threshold = 1.0;
+    int m_cv_folds = 5;
+    bool m_couplings = true;
 
     std::vector<TorsionSpace::Torsion> m_torsions;
     std::vector<std::vector<double>> m_state_centres; ///< per torsion
@@ -151,6 +207,8 @@ private:
     PARAM(state_tolerance, Double, 40.0, "Angular tolerance in degrees for grouping observed torsion values into rotamer states. Larger values merge neighbouring basins, smaller values split noisy ones.", "Analysis", {})
     PARAM(temperature, Double, 298.15, "Temperature in Kelvin for the Boltzmann-weighted state statistics.", "Analysis", {})
     PARAM(min_pairs, Int, 1, "Minimum number of matched pairs required before a state transition is reported.", "Analysis", {})
+    PARAM(cv_folds, Int, 5, "Number of cross-validation folds for the model comparison (additive vs. additive+couplings). Values below 2 disable the comparison.", "Analysis", {})
+    PARAM(couplings, Bool, true, "Measure torsion-torsion couplings from double-mutant cycles (four ensemble members forming a rectangle in state space) and run the model comparison.", "Analysis", {})
     PARAM(report_threshold, Double, 1.0, "Only transitions whose mean total energy difference exceeds this many kJ/mol are printed in the summary. All of them are written to the CSV.", "Analysis", {})
 
     END_PARAMETER_DEFINITION

@@ -62,6 +62,8 @@ void ConfGen::LoadControlJson()
     m_temperature = m_config.get<double>("temperature");
     m_min_pairs = m_config.get<int>("min_pairs");
     m_report_threshold = m_config.get<double>("report_threshold");
+    m_cv_folds = m_config.get<int>("cv_folds");
+    m_couplings = m_config.get<bool>("couplings");
 }
 
 bool ConfGen::analyseEnsemble()
@@ -268,6 +270,327 @@ std::vector<ConfGen::Transition> ConfGen::matchedPairs() const
     return transitions;
 }
 
+std::vector<int> ConfGen::informativeTorsions() const
+{
+    std::vector<int> out;
+    for (std::size_t t = 0; t < m_torsions.size(); ++t) {
+        std::set<int> populated;
+        for (const Frame& f : m_frames)
+            if (f.states[t] >= 0)
+                populated.insert(f.states[t]);
+        if (populated.size() >= 2)
+            out.push_back(static_cast<int>(t));
+    }
+    return out;
+}
+
+std::vector<ConfGen::Coupling> ConfGen::doubleMutantCycles() const
+{
+    // A cycle needs four members that agree in every torsion except two, and cover all four
+    // combinations of those two state changes. Index by "everything else" so the rectangles can be
+    // found without an O(N^4) scan: for each torsion pair, group the frames by the remaining states.
+    const std::vector<int> informative = informativeTorsions();
+    std::map<std::tuple<int, int, int, int, int, int>, std::vector<double>> j_total;
+    std::map<std::tuple<int, int, int, int, int, int>, std::vector<std::map<std::string, double>>> j_terms;
+
+    for (std::size_t ia = 0; ia < informative.size(); ++ia) {
+        for (std::size_t ib = ia + 1; ib < informative.size(); ++ib) {
+            const int ta = informative[ia], tb = informative[ib];
+            // group frames by the state of all OTHER torsions
+            std::map<std::vector<int>, std::map<std::pair<int, int>, int>> groups; // context -> (sa,sb) -> frame
+            for (std::size_t f = 0; f < m_frames.size(); ++f) {
+                std::vector<int> context;
+                context.reserve(m_frames[f].states.size());
+                for (std::size_t t = 0; t < m_frames[f].states.size(); ++t)
+                    if (static_cast<int>(t) != ta && static_cast<int>(t) != tb)
+                        context.push_back(m_frames[f].states[t]);
+                const std::pair<int, int> key{ m_frames[f].states[ta], m_frames[f].states[tb] };
+                // keep the lowest-energy representative if a combination occurs twice
+                auto& slot = groups[context];
+                auto it = slot.find(key);
+                if (it == slot.end() || m_frames[f].energy < m_frames[it->second].energy)
+                    slot[key] = static_cast<int>(f);
+            }
+
+            for (const auto& [context, combos] : groups) {
+                if (combos.size() < 4)
+                    continue;
+                // every rectangle (a_from,a_to) x (b_from,b_to) present in this context
+                std::set<int> states_a, states_b;
+                for (const auto& [key, frame] : combos) {
+                    states_a.insert(key.first);
+                    states_b.insert(key.second);
+                }
+                for (auto a_it = states_a.begin(); a_it != states_a.end(); ++a_it)
+                    for (auto a2 = std::next(a_it); a2 != states_a.end(); ++a2)
+                        for (auto b_it = states_b.begin(); b_it != states_b.end(); ++b_it)
+                            for (auto b2 = std::next(b_it); b2 != states_b.end(); ++b2) {
+                                const std::pair<int, int> ac{ *a_it, *b_it }, bc{ *a2, *b_it },
+                                    ad{ *a_it, *b2 }, bd{ *a2, *b2 };
+                                if (!combos.count(ac) || !combos.count(bc) || !combos.count(ad) || !combos.count(bd))
+                                    continue;
+                                const Frame& f_ac = m_frames[combos.at(ac)];
+                                const Frame& f_bc = m_frames[combos.at(bc)];
+                                const Frame& f_ad = m_frames[combos.at(ad)];
+                                const Frame& f_bd = m_frames[combos.at(bd)];
+                                const double j = (f_bd.energy - f_ad.energy) - (f_bc.energy - f_ac.energy);
+                                const auto key = std::make_tuple(ta, tb, *a_it, *a2, *b_it, *b2);
+                                j_total[key].push_back(j);
+                                std::map<std::string, double> terms;
+                                for (const auto& name : m_term_names)
+                                    terms[name] = (f_bd.terms.at(name) - f_ad.terms.at(name))
+                                        - (f_bc.terms.at(name) - f_ac.terms.at(name));
+                                j_terms[key].push_back(std::move(terms));
+                            }
+            }
+        }
+    }
+
+    std::vector<Coupling> couplings;
+    for (const auto& [key, values] : j_total) {
+        Coupling c;
+        std::tie(c.torsion_a, c.torsion_b, c.a_from, c.a_to, c.b_from, c.b_to) = key;
+        c.cycles = static_cast<int>(values.size());
+        c.j_mean = std::accumulate(values.begin(), values.end(), 0.0) / static_cast<double>(c.cycles);
+        if (c.cycles > 1) {
+            double sq = 0.0;
+            for (double v : values)
+                sq += (v - c.j_mean) * (v - c.j_mean);
+            c.j_sd = std::sqrt(sq / static_cast<double>(c.cycles - 1));
+        }
+        for (const auto& terms : j_terms.at(key))
+            for (const auto& [name, value] : terms)
+                c.j_terms_mean[name] += value / static_cast<double>(c.cycles);
+        couplings.push_back(std::move(c));
+    }
+    std::sort(couplings.begin(), couplings.end(), [](const Coupling& x, const Coupling& y) {
+        return std::abs(x.j_mean) > std::abs(y.j_mean);
+    });
+    return couplings;
+}
+
+ConfGen::ModelFit ConfGen::fitModel(int level) const
+{
+    ModelFit fit;
+    fit.name = (level == 0) ? "constant" : (level == 1) ? "additive (marginals)" : "additive + pair couplings";
+
+    const std::vector<int> informative = informativeTorsions();
+    // Column layout: [intercept][per torsion: states 1..k-1][per torsion pair: (a,b) with a,b >= 1]
+    // State 0 is the reference level, so the columns stay linearly independent by construction.
+    struct Column {
+        int torsion_a = -1, state_a = -1, torsion_b = -1, state_b = -1;
+    };
+    std::vector<Column> columns;
+    if (level >= 1)
+        for (int t : informative)
+            for (std::size_t s = 1; s < m_state_centres[t].size(); ++s)
+                columns.push_back({ t, static_cast<int>(s), -1, -1 });
+    if (level >= 2)
+        for (std::size_t ia = 0; ia < informative.size(); ++ia)
+            for (std::size_t ib = ia + 1; ib < informative.size(); ++ib)
+                for (std::size_t sa = 1; sa < m_state_centres[informative[ia]].size(); ++sa)
+                    for (std::size_t sb = 1; sb < m_state_centres[informative[ib]].size(); ++sb)
+                        columns.push_back({ informative[ia], static_cast<int>(sa),
+                            informative[ib], static_cast<int>(sb) });
+
+    const int n = static_cast<int>(m_frames.size());
+    const int p = static_cast<int>(columns.size()) + 1; // + intercept
+    fit.columns = p;
+
+    auto buildRow = [&](const Frame& f, Eigen::VectorXd& row) {
+        row.setZero(p);
+        row(0) = 1.0;
+        for (int c = 0; c < static_cast<int>(columns.size()); ++c) {
+            const Column& col = columns[c];
+            const bool a_on = (f.states[col.torsion_a] == col.state_a);
+            const bool on = (col.torsion_b < 0) ? a_on : (a_on && f.states[col.torsion_b] == col.state_b);
+            row(c + 1) = on ? 1.0 : 0.0;
+        }
+    };
+
+    Eigen::MatrixXd X(n, p);
+    Eigen::VectorXd y(n);
+    Eigen::VectorXd row(p);
+    for (int i = 0; i < n; ++i) {
+        buildRow(m_frames[i], row);
+        X.row(i) = row.transpose();
+        y(i) = (m_frames[i].energy - m_reference_energy) * kEh2kJ;
+    }
+
+    // Complete orthogonal decomposition: the design matrix IS rank deficient whenever a state
+    // combination never occurs in the ensemble (an empty column) -- COD gives the minimum-norm
+    // solution instead of exploding, and its rank tells us how much the ensemble can actually resolve.
+    Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> cod(X);
+    cod.setThreshold(1e-10);
+    fit.rank = static_cast<int>(cod.rank());
+    const Eigen::VectorXd beta_in = cod.solve(y);
+    fit.rmse_in = std::sqrt((X * beta_in - y).squaredNorm() / static_cast<double>(n));
+
+    // k-fold cross-validation, deterministic split (fold = index % k). The ensemble is usually
+    // energy-sorted, so modulo assignment stratifies over the energy range automatically.
+    const int folds = std::max(2, m_cv_folds);
+    std::vector<double> residuals;
+    residuals.reserve(n);
+    for (int k = 0; k < folds; ++k) {
+        std::vector<int> train, test;
+        for (int i = 0; i < n; ++i)
+            ((i % folds) == k ? test : train).push_back(i);
+        if (train.size() < static_cast<std::size_t>(p) || test.empty())
+            continue;
+        Eigen::MatrixXd Xtr(train.size(), p);
+        Eigen::VectorXd ytr(train.size());
+        for (std::size_t r = 0; r < train.size(); ++r) {
+            Xtr.row(r) = X.row(train[r]);
+            ytr(r) = y(train[r]);
+        }
+        Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> cod_tr(Xtr);
+        cod_tr.setThreshold(1e-10);
+        const Eigen::VectorXd beta = cod_tr.solve(ytr);
+        for (int i : test)
+            residuals.push_back(X.row(i) * beta - y(i));
+    }
+    if (!residuals.empty()) {
+        double sq = 0.0;
+        for (double r : residuals)
+            sq += r * r;
+        fit.rmse_cv = std::sqrt(sq / static_cast<double>(residuals.size()));
+        std::vector<double> abs_res;
+        abs_res.reserve(residuals.size());
+        for (double r : residuals)
+            abs_res.push_back(std::abs(r));
+        std::sort(abs_res.begin(), abs_res.end());
+        fit.mae_cv = abs_res[abs_res.size() / 2];
+    }
+    return fit;
+}
+
+void ConfGen::writeCouplingTable(const std::string& path, const std::vector<Coupling>& couplings) const
+{
+    std::ofstream out(path);
+    out << "# torsion_a,bond_a,a_from,a_to,torsion_b,bond_b,b_from,b_to,cycles,J_mean_kJ,J_sd_kJ";
+    for (const auto& name : m_term_names)
+        out << ",J_" << name << "_kJ";
+    out << "\n";
+    for (const auto& c : couplings) {
+        out << c.torsion_a << "," << m_torsions[c.torsion_a].label(m_frames.front().molecule) << ","
+            << c.a_from << "," << c.a_to << "," << c.torsion_b << ","
+            << m_torsions[c.torsion_b].label(m_frames.front().molecule) << "," << c.b_from << ","
+            << c.b_to << "," << c.cycles << "," << fmt::format("{:.3f}", c.j_mean * kEh2kJ) << ","
+            << fmt::format("{:.3f}", c.j_sd * kEh2kJ);
+        for (const auto& name : m_term_names)
+            out << "," << fmt::format("{:.3f}", c.j_terms_mean.at(name) * kEh2kJ);
+        out << "\n";
+    }
+}
+
+void ConfGen::reportCouplings(const std::vector<Coupling>& couplings) const
+{
+    CurcumaLogger::header("=== ConfGen: torsion-torsion couplings (double-mutant cycles) ===");
+    if (couplings.empty()) {
+        CurcumaLogger::warn("ConfGen: no double-mutant cycle in the ensemble -- no four structures form a "
+                            "rectangle in state space (two torsions changed, everything else identical). "
+                            "Couplings can then only be estimated by the regression below, not measured.");
+        return;
+    }
+    int shown = 0;
+    for (const auto& c : couplings) {
+        const double j_kj = c.j_mean * kEh2kJ;
+        if (std::abs(j_kj) < m_report_threshold || shown >= 10)
+            continue;
+        std::vector<std::pair<std::string, double>> parts;
+        for (const auto& [name, value] : c.j_terms_mean)
+            if (std::abs(value * kEh2kJ) >= 0.5)
+                parts.emplace_back(name, value * kEh2kJ);
+        std::sort(parts.begin(), parts.end(), [](const auto& x, const auto& y) {
+            return std::abs(x.second) > std::abs(y.second);
+        });
+        std::string breakdown;
+        for (const auto& [name, value] : parts)
+            breakdown += fmt::format("{}{:+.1f} {}", breakdown.empty() ? "" : ", ", value, name);
+
+        CurcumaLogger::result_fmt("  {:<10} ({}->{}) x {:<10} ({}->{}): J = {:+.2f} kJ/mol"
+                                  "{}  [{}]  from {} cycle(s)",
+            m_torsions[c.torsion_a].label(m_frames.front().molecule), c.a_from, c.a_to,
+            m_torsions[c.torsion_b].label(m_frames.front().molecule), c.b_from, c.b_to,
+            j_kj, c.cycles > 1 ? fmt::format(" +- {:.2f}", c.j_sd * kEh2kJ)
+                               : std::string(" (single cycle, no error estimate)"),
+            breakdown.empty() ? "no single term above 0.5 kJ/mol" : breakdown, c.cycles);
+        shown++;
+    }
+    CurcumaLogger::info("J is the non-additivity: J = 0 means the two state changes are independent and "
+                        "their effects simply add. |J| of the size of the effects themselves means the "
+                        "torsions must be chosen together, not one at a time.");
+}
+
+void ConfGen::reportModelComparison(const std::vector<ModelFit>& fits) const
+{
+    CurcumaLogger::header("=== ConfGen: can the ensemble energies be modelled at all? ===");
+    CurcumaLogger::result_fmt("  {:<28} {:>7} {:>7} {:>12} {:>12} {:>10} {:>12}",
+        "model", "params", "rank", "RMSE_cv", "medAE_cv", "R2_cv", "RMSE_in");
+    const double null_rmse = fits.empty() ? 0.0 : fits.front().rmse_cv;
+    for (const auto& f : fits) {
+        // R2_cv against the constant model: the fraction of the energy variation that the model
+        // predicts on data it has not seen. This is the number that decides whether the torsion-state
+        // picture describes this ensemble at all.
+        const double r2 = (null_rmse > 0.0) ? 1.0 - (f.rmse_cv * f.rmse_cv) / (null_rmse * null_rmse) : 0.0;
+        CurcumaLogger::result_fmt("  {:<28} {:>7} {:>7} {:>9.2f} kJ {:>9.2f} kJ {:>9.0f} % {:>9.2f} kJ",
+            f.name, f.columns, f.rank, f.rmse_cv, f.mae_cv, r2 * 100.0, f.rmse_in);
+    }
+    CurcumaLogger::info("RMSE_cv/medAE_cv are out-of-sample (k-fold). RMSE_in always improves with more "
+                        "parameters and is shown for reference only.");
+
+    if (fits.size() < 3)
+        return;
+    const double null_err = fits[0].rmse_cv, add_err = fits[1].rmse_cv, pair_err = fits[2].rmse_cv;
+    const double add_gain = (null_err > 0.0) ? (1.0 - add_err / null_err) * 100.0 : 0.0;
+    const double pair_gain = (add_err > 0.0) ? (1.0 - pair_err / add_err) * 100.0 : 0.0;
+
+    const double r2_add = (null_err > 0.0) ? 1.0 - (add_err * add_err) / (null_err * null_err) : 0.0;
+    const double r2_pair = (null_err > 0.0) ? 1.0 - (pair_err * pair_err) / (null_err * null_err) : 0.0;
+
+    // Verdict. Two guards against reading noise as signal:
+    //   - a few percent of RMSE is within the fold-to-fold scatter of a k-fold CV, so a minimum
+    //     improvement is required before anything is called informative;
+    //   - RMSE reacts to outliers. If the MEDIAN error moves the other way, the "improvement" is a
+    //     handful of structures, not a better description of the ensemble.
+    constexpr double kMinRelGain = 0.05; // 5 % of the RMSE
+    const bool add_useful = (add_err < null_err * (1.0 - kMinRelGain)) && (fits[1].mae_cv <= fits[0].mae_cv);
+    const bool pair_useful = (pair_err < add_err * (1.0 - kMinRelGain)) && (fits[2].mae_cv <= fits[1].mae_cv);
+
+    CurcumaLogger::result_fmt("ConfGen: torsion states explain {:.0f}% of the energy variation out of "
+                              "sample, adding pair couplings takes it to {:.0f}%",
+        r2_add * 100.0, r2_pair * 100.0);
+
+    if (!add_useful)
+        CurcumaLogger::warn_fmt("ConfGen: the additive model is NOT a useful description of this ensemble "
+                                "(RMSE {:.2f} -> {:.2f} kJ/mol = {:.0f}%, median error {:.2f} -> {:.2f}). "
+                                "Most of the energy differences come from degrees of freedom the torsion "
+                                "states do not capture, so proposals ranked by these marginals would be "
+                                "little better than guessing.",
+            null_err, add_err, add_gain, fits[0].mae_cv, fits[1].mae_cv);
+    else
+        CurcumaLogger::success_fmt("ConfGen: the additive model removes {:.0f}% of the energy scatter "
+                                   "({:.2f} -> {:.2f} kJ/mol out of sample)",
+            add_gain, null_err, add_err);
+
+    if (!pair_useful)
+        CurcumaLogger::warn_fmt("ConfGen: pair couplings give NO reliable improvement (RMSE {:.2f} -> "
+                                "{:.2f} kJ/mol = {:.0f}%, median error {:.2f} -> {:.2f}; {} of {} columns "
+                                "resolvable). Either the ensemble is too small to fit them, or the "
+                                "non-additivity is not of pairwise form.",
+            add_err, pair_err, pair_gain, fits[1].mae_cv, fits[2].mae_cv, fits[2].rank, fits[2].columns);
+    else
+        CurcumaLogger::success_fmt("ConfGen: pair couplings improve the out-of-sample prediction by a "
+                                   "further {:.0f}% ({:.2f} -> {:.2f} kJ/mol) -- the state vector must be "
+                                   "optimised as a whole, not torsion by torsion.",
+            pair_gain, add_err, pair_err);
+
+    if (!add_useful && !pair_useful)
+        CurcumaLogger::warn("ConfGen: on this ensemble the torsion-state model does not support "
+                            "generating proposals. More conformers, or torsions that the search actually "
+                            "varied, are needed before recombination can be expected to work.");
+}
+
 void ConfGen::writeFrameTable(const std::string& path) const
 {
     std::ofstream out(path);
@@ -448,6 +771,19 @@ void ConfGen::start()
     writeTransitionTable(outputPath(base + ".matched_pairs.csv"), transitions);
 
     reportTransitions(transitions);
+
+    if (m_couplings) {
+        const std::vector<Coupling> couplings = doubleMutantCycles();
+        writeCouplingTable(outputPath(base + ".couplings.csv"), couplings);
+        reportCouplings(couplings);
+
+        if (m_cv_folds >= 2) {
+            std::vector<ModelFit> fits;
+            for (int level = 0; level <= 2; ++level)
+                fits.push_back(fitModel(level));
+            reportModelComparison(fits);
+        }
+    }
 
     CurcumaLogger::success_fmt("ConfGen: wrote {}.torsions.csv (per structure), {}.torsion_states.csv "
                                "(states + populations), {}.matched_pairs.csv ({} transition(s))",

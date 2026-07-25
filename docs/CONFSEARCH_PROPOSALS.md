@@ -1,8 +1,9 @@
 # Targeted conformer proposals from the GFN-FF energy decomposition (`-confgen`)
 
 Status: 🤖 AI-generated, ⚙️ machine-tested (Jul 2026). Not ✅ TESTED/APPROVED.
-Implemented so far: the **torsion space** (P1) and the **matched-pair analysis** (P2). The
-recombination/proposal stages are not implemented yet — see "Roadmap" at the end.
+Implemented: the **torsion space** (P1), the **matched-pair analysis** (P2) and the **coupling
+measurement + cross-validated model comparison** (P4, pulled forward). The proposal generator is not
+implemented — deliberately, see the measured result below.
 
 ## Why
 
@@ -70,6 +71,66 @@ one-dimensional marginals alone is unreliable for these molecules, and the pairw
 required rather than optional. This is a result of the analysis, not an assumption behind it — and it
 is exactly why the analysis was built before the generator.
 
+## Couplings: measured (double-mutant cycles) and fitted (cross-validated)
+
+**Measurement.** Four ensemble members forming a *rectangle* in state space — (a,c), (b,c), (a,d),
+(b,d) with every other torsion identical — give the coupling of two torsions without any fit:
+
+    J = [E(b,d) - E(a,d)] - [E(b,c) - E(a,c)]
+
+`J = 0` means the two state changes are independent and their effects simply add; `J != 0` IS the
+non-additivity. This is the **double-mutant cycle** of protein biochemistry (Carter/Fersht/Horovitz),
+applied to torsions instead of side chains. Exact rectangles are rare in a deduplicated ensemble, so
+most couplings rest on a single cycle — flagged as `(single cycle, no error estimate)` in the report.
+
+**Model comparison.** The decision question — *does a torsion-state model describe this ensemble at
+all?* — is answered by fitting
+
+| level | model |
+|-------|-------|
+| 0 | `E ~ c` (constant; its error is the energy spread itself) |
+| 1 | `E ~ c + Σ_i h_i(s_i)` (additive marginals) |
+| 2 | `E ~ ... + Σ_ij J_ij(s_i,s_j)` (pair couplings) |
+
+with indicator variables, and scoring them by **k-fold cross-validation**. This is not optional:
+level 2 has many more parameters and wins any in-sample comparison by construction. The design matrix
+is rank-deficient whenever a state combination never occurs, so it is solved by a complete orthogonal
+decomposition and the reported *rank* says how much the ensemble can actually resolve.
+
+Two guards keep noise from being read as signal: an improvement must exceed 5 % of the RMSE, **and**
+the median absolute error must not move the other way (RMSE alone reacts to a handful of outliers).
+
+### Measured result — and it is a negative one
+
+| ensemble | model | params / rank | RMSE_cv | medAE_cv | R²_cv |
+|---|---|---|---|---|---|
+| 108 conf. / 90 atoms | constant | 1 / 1 | 9.49 | 6.16 | 0 % |
+| | additive | 9 / 9 | 8.68 | 6.21 | **16 %** |
+| | + couplings | 36 / 20 | 8.38 | 6.38 | **22 %** |
+| 44 conf. / 114 atoms | constant | 1 / 1 | 10.86 | 8.60 | 0 % |
+| | additive | 8 / 8 | 10.03 | 5.21 | **15 %** |
+| | + couplings | 28 / 18 | 14.01 | 1.90 | **−66 %** |
+
+(kJ/mol. The second ensemble's coupling model is a textbook overfit: in-sample 5.09, out-of-sample
+14.01 with 18 resolvable columns on 44 structures.)
+
+**A torsion-state model explains only ~15 % of the out-of-sample energy variation on both ensembles.**
+Not a discretisation artefact: scanning `-state_tolerance` over 10/20/30/40/60 degrees gives R²_cv of
+17/5/15/16/4 % and 34/−4/19/15/13 % — no trend, just noise. At 10 degrees the in-sample error drops to
+3.96 kJ/mol while out-of-sample stays at 8.66: pure overfitting.
+
+### What that does and does not rule out
+
+- **Ruled out:** using the model to *rank* proposals, to *predict* energies, or to skip the
+  optimisation. Ranking recombined structures by these marginals would be close to guessing.
+- **Not ruled out:** using it to *enumerate which combinations to try*. Every proposal is optimised
+  and deduplicated with the real force field afterwards, so a wrong proposal costs one optimisation,
+  never a wrong result. A model that is merely better than random at suggesting untried combinations
+  is still useful — it just must not be trusted with the answer.
+- The per-term attribution from matched pairs stands independently of this: it says *which physics*
+  drives a given state change (on both test molecules: dispersion and repulsion, not the torsion
+  term), and that is chemically informative regardless of how well the total energy is modelled.
+
 ## Bug found by the consistency check
 
 The analysis verifies that the components sum to the total energy. They did not:
@@ -94,6 +155,8 @@ curcuma -confgen ensemble.xyz -method gfnff
 | `-temperature` | `298.15` | K, for the Boltzmann-weighted state statistics |
 | `-min_pairs` | `1` | minimum matched pairs before a transition is reported |
 | `-report_threshold` | `1.0` | kJ/mol; smaller transitions go to the CSV only |
+| `-couplings` | `true` | measure double-mutant cycles and run the model comparison |
+| `-cv_folds` | `5` | cross-validation folds; below 2 disables the model comparison |
 | `-charge` / `-spin` / `-threads` | `0` / `0` / `1` | passed to the energy method |
 
 Output (all through the BMT directory):
@@ -103,6 +166,7 @@ Output (all through the BMT directory):
   Boltzmann-weighted relative energy
 - `<base>.matched_pairs.csv` — per transition: pair count, distinct structures per side, mean/sd/
   min/max ΔE and the mean ΔE of every term
+- `<base>.couplings.csv` — per torsion pair and state change: number of cycles, J ± sd, J per term
 
 ## Honest scope
 
@@ -125,8 +189,8 @@ Output (all through the BMT directory):
 - **P3 recombination stage A**: consensus state vector + single/double mutations → build via
   `TorsionSpace::setDihedral` → restrained then free optimisation with fixed topology (`.topo.json`)
   → dedup through the existing ConfScan pipeline.
-- **P4 pairwise couplings** `E_ij` + DEE pruning + K-best enumeration (dynamic programming / A\*).
-  Given the measured ratio of 1.8 this is the stage that decides whether the approach works.
+- ~~**P4 pairwise couplings**~~ — done (see above). Result: couplings are measurable but do not make
+  the model predictive; DEE/A\* enumeration over such a weak model is not worth building yet.
 - **P5 relaxed torsion scans** as an add-on for torsions/states the ensemble does not cover
   (the only route to *extrapolation*).
 - **P6** call the same routines as a ConfSearch phase and feed survivors into the shared bias pool.
