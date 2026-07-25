@@ -75,10 +75,10 @@ D4ParameterGenerator::D4ParameterGenerator(const ConfigManager& config)
         CurcumaLogger::success("D4: Complete data loaded (alphaiw + corrections)");
     }
 
-    // Claude Generated (Dec 27, 2025): Pre-compute C6 reference matrix
-    // This is done ONCE at initialization, independent of molecular geometry
-    // Expected to eliminate ~98% of D4 parameter generation time for large molecules
-    precomputeC6ReferenceMatrix();
+    // Claude Generated (Jul 2026): the C6 reference matrix is NO LONGER precomputed here.
+    // At construction the molecule (m_atoms) is unknown, which forced a full 118-element sweep
+    // (~9.7 ms fixed). It is now built lazily from GenerateParameters — restricted to the
+    // elements actually present — via the c6CacheCoversAtoms() guard.
 }
 
 void D4ParameterGenerator::initializeReferenceData()
@@ -393,7 +393,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     // the source of the CH4/triose C-path residual (see docs/GFN2_D4_STATUS.md,
     // diag_curcuma_d4_c6). GFN-FF (flag off) is unaffected: computeC6Reference's
     // zeta correction is gated by m_use_d4_covalent_cn.
-    if (!m_c6_reference_cached) precomputeC6ReferenceMatrix();
+    if (!c6CacheCoversAtoms()) precomputeC6ReferenceMatrix();
 
     // Claude Generated (Dec 27, 2025): Pre-compute Gaussian weights ONCE for all atoms
     // This eliminates redundant exp() calls in getChargeWeightedC6()
@@ -899,6 +899,24 @@ double D4ParameterGenerator::getAtomicPolarizability(int atom, int frequency_ind
     return 1.0; // Default value
 }
 
+// Claude Generated (Jul 2026): true iff the C6 reference cache already covers every element in
+// the current molecule. Returns false (→ rebuild) when the cache is empty or a molecule with a
+// new element is seen, so restricting the precompute to present elements stays correct even when
+// the same generator instance is reused across molecules with different element sets.
+bool D4ParameterGenerator::c6CacheCoversAtoms() const
+{
+    if (!m_c6_reference_cached)
+        return false;
+    for (int z : m_atoms) {
+        const int e = z - 1;
+        if (e < 0 || e >= MAX_ELEM)
+            continue;
+        if (!std::binary_search(m_c6_present_signature.begin(), m_c6_present_signature.end(), e))
+            return false;
+    }
+    return true;
+}
+
 void D4ParameterGenerator::precomputeC6ReferenceMatrix()
 {
     // Claude Generated (Dec 27, 2025): Pre-compute C6 reference values via Casimir-Polder integration
@@ -931,12 +949,33 @@ void D4ParameterGenerator::precomputeC6ReferenceMatrix()
     const size_t flat_size = static_cast<size_t>(MAX_ELEM) * MAX_ELEM * MAX_REF * MAX_REF;
     m_c6_flat_cache.assign(flat_size, 0.0);
 
-    // Pre-compute C6 for all element-pair combinations that have alphaiw data
-    for (int elem_i = 0; elem_i < MAX_ELEM && elem_i < static_cast<int>(d4_alphaiw_data.size()); ++elem_i) {
+    // Claude Generated (Jul 2026): only compute C6 references for the elements PRESENT in the
+    // molecule. The full 118-element sweep was a fixed ~9.7 ms per geometry (36k Casimir-Polder
+    // integrations) regardless of size; a typical molecule has ~5 element types → ~25× fewer
+    // combinations, sub-ms. Callers only ever look up C6 for atoms in the molecule (present
+    // elements), so absent-element entries staying 0 is safe; c6CacheCoversAtoms() rebuilds if a
+    // later molecule adds a new element. m_atoms is empty at construction (the ctor no longer
+    // precomputes) — the real build runs lazily from GenerateParameters once m_atoms is set.
+    std::vector<int> present;
+    present.reserve(16);
+    {
+        std::vector<char> seen(MAX_ELEM, 0);
+        for (int z : m_atoms) {
+            const int e = z - 1;
+            if (e >= 0 && e < MAX_ELEM && !seen[e]) { seen[e] = 1; present.push_back(e); }
+        }
+    }
+    std::sort(present.begin(), present.end());
+    m_c6_present_signature = present;
+
+    // Pre-compute C6 for present element-pair combinations that have alphaiw data
+    for (size_t ii = 0; ii < present.size(); ++ii) {
+        const int elem_i = present[ii];
         int nref_i = (elem_i < static_cast<int>(m_refn.size())) ? m_refn[elem_i] : 0;
         if (nref_i == 0 || elem_i >= static_cast<int>(d4_alphaiw_data.size())) continue;
 
-        for (int elem_j = 0; elem_j <= elem_i; ++elem_j) {  // Symmetric, only compute lower triangle
+        for (size_t jj = 0; jj <= ii; ++jj) {  // present sorted → elem_j <= elem_i (lower triangle)
+            const int elem_j = present[jj];
             int nref_j = (elem_j < static_cast<int>(m_refn.size())) ? m_refn[elem_j] : 0;
             if (nref_j == 0 || elem_j >= static_cast<int>(d4_alphaiw_data.size())) continue;
 
@@ -2014,7 +2053,7 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
 
     // Step 3: Pre-compute Gaussian weights and C6 reference matrix
     if (!m_data_initialized) initializeReferenceData();
-    if (!m_c6_reference_cached) precomputeC6ReferenceMatrix();
+    if (!c6CacheCoversAtoms()) precomputeC6ReferenceMatrix();
     precomputeGaussianWeights();
 
     // WP-A (Jun 2026): with gpu_disp_pairs_on_device the GPU builds the pair list +
