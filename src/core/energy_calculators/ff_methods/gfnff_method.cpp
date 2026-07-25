@@ -10191,6 +10191,22 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
             // Two pi-systems on the same fragment produce the same qfrag and therefore
             // the same charges, so they share a solve. For a single-fragment molecule
             // (the common case) all pi-systems collapse to one solve.
+            // A1b (Jul 2026): skip pi-systems whose fragment is ALREADY neutral.
+            //
+            // The block asks "how much charge sits on this pi-system" by re-solving
+            // Phase 1 with the pi-system's fragment neutralised and differencing
+            // against the base charges. If qfrag[ifrag-1] is already 0, the variant
+            // RHS is bit-identical to the base one, so the solve reproduces
+            // topology_charges exactly and dum is exactly 0 — the whole solve is a
+            // no-op computing a known zero. Skipping it is EXACT, not an
+            // approximation.
+            //
+            // This matters enormously for many-fragment systems: mixture.xyz
+            // (6200 atoms, 1400 fragments, all neutral) was issuing one dense
+            // (natoms+nfrag)^2 Cholesky per fragment at ~3 s each — a single point
+            // did not finish in 7 minutes. It now issues zero. Neutral molecules of
+            // any size skip the block entirely; only genuinely charged fragments
+            // still solve.
             std::vector<int> pis_list;            // pi-system id, in pi_ids order
             std::vector<int> pis_ifrag;           // fragment it neutralises (1-based)
             for (int pis : pi_ids) {
@@ -10200,6 +10216,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
                 if (first_pi_atom < 0) continue;
                 int ifrag = (first_pi_atom < (int)topo_info.fraglist.size()) ? topo_info.fraglist[first_pi_atom] : 1;
                 if (ifrag < 1 || ifrag > (int)topo_info.qfrag.size()) continue;
+                // Already-neutral fragment => variant RHS == base RHS => dum == 0.
+                // pi_system_charge was zero-initialised above, so just skip.
+                if (qfrag_save[ifrag - 1] == 0.0) continue;
                 pis_list.push_back(pis);
                 pis_ifrag.push_back(ifrag);
             }
