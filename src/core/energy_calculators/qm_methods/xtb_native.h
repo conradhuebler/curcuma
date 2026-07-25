@@ -1230,7 +1230,13 @@ private:
     double      m_level_shift   = 0.2;   // virtual-orbital shift magnitude (Eh), LevelShift mode
     std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare)
     std::string m_eigensolver   = "mkl"; // eigensolve backend: "mkl" (dsyevd) | "native"/"dnc"
-    bool        m_scf_mixed_precision = false;   // opt-in FP32 early-iteration eigensolve (MKL path)
+    // FP32 early-iteration eigensolve (MKL path), ON by default since Jul 2026.
+    // The eigensolve is ~58% of native-GFN runtime after the shell-pair-blocked
+    // integrals, so this is the largest single CPU lever: complex/231 single core
+    // gfn2 1077 -> 916 ms, gfn1 1027 -> 787 ms. Convergence is never accepted on an
+    // FP32 step, so the fixed point stays FP64. NOTE the Vulkan wrapper explicitly
+    // turns this back OFF — it is measured net-negative there (see xtb_vulkan_method.cpp).
+    bool        m_scf_mixed_precision = true;
     double      m_scf_fp32_threshold  = 1.0e-3;  // switch FP32→FP64 once max|dq| < this
     bool        m_gpu_partial_diag    = false;   // opt-in GPU partial diagonalisation (AP1; net-neutral, see PARAM)
     // Optional GPU eigensolver; default unset → CPU path unchanged. Claude Generated.
