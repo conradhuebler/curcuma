@@ -19,6 +19,7 @@
 
 #include "src/global_config.h"
 
+#include "src/capabilities/confgen.h"
 #include "src/capabilities/confscan.h"
 #include "src/capabilities/optimizer_factory.h"
 #include "src/capabilities/simplemd.h"
@@ -569,6 +570,26 @@ void ConfSearch::start()
                 while (!rmsd_file.AtEnd()) { rmsd_file.Next(); rmsd_count++; }
             }
             CurcumaLogger::result_fmt("ConfSearch: RMSD filtering complete. {} structures accepted.", rmsd_count);
+        }
+
+        // Claude Generated (Jul 2026): Phase 3c -- recombine the torsion states of this cycle's
+        // minima. Placed after the dedup (so it works on distinct minima) and before Phase 3b (so its
+        // structures go through the accurate re-optimisation and the Phase 4 filters like any other).
+        if (m_confgen_phase && !no_new_bias_structures && rmsd_count >= 2) {
+            CurcumaLogger::result("ConfSearch: === Phase 3c: Torsion Recombination (ConfGen) ===");
+            const int added = PerformConfGen(p + ".bias.opt.accepted", m_md_method);
+            if (added > 0) {
+                rmsd_count += added;
+                CurcumaLogger::success_fmt("ConfSearch: Phase 3c added {} new conformer(s) that the "
+                                           "metadynamics had not found ({} structures now in this cycle)",
+                    added, rmsd_count);
+            } else {
+                CurcumaLogger::result("ConfSearch: Phase 3c found no new conformer this cycle");
+            }
+        } else if (m_confgen_phase && rmsd_count < 2 && !no_new_bias_structures) {
+            CurcumaLogger::result_fmt("ConfSearch: Phase 3c skipped -- {} distinct minimum/minima this "
+                                      "cycle, recombination needs at least 2",
+                rmsd_count);
         }
 
         // Claude Generated (Jun 2026): experimental adaptive calibration (Phase C). Learns the MTD
@@ -1266,6 +1287,63 @@ std::string ConfSearch::PerformFilter(const std::string& f, const nlohmann::json
     return f;
 }
 
+int ConfSearch::PerformConfGen(const std::string& f, const std::string& method)
+{
+    const std::string input_file = outputPath(f + ".xyz");
+    {
+        std::ifstream check(input_file);
+        if (!check.good()) {
+            CurcumaLogger::warn("ConfSearch: Phase 3c skipped, no input file: " + input_file);
+            return 0;
+        }
+    }
+
+    // ConfGen's own defaults plus this phase's overrides. The couplings/model comparison are the
+    // analysis half of ConfGen and are not needed here -- Phase 3c only wants the structures, and the
+    // per-cycle ensembles are far too small for that statistic anyway.
+    nlohmann::json cfg = ParameterRegistry::getInstance().getDefaultJson("confgen");
+    cfg.merge_patch(ChildConfig(method, (m_threads > 1) ? 1 : m_threads));
+    cfg["generate"] = true;
+    cfg["couplings"] = false;
+    cfg["max_proposals"] = m_confgen_max_proposals;
+    cfg["proposal_templates"] = m_confgen_templates;
+    cfg["proposal_depth"] = m_confgen_depth;
+    cfg["new_rmsd"] = m_rmsd;   // "new" means the same thing here as everywhere else in the search
+    cfg["verbosity"] = (m_verbosity >= 2) ? m_verbosity : 0;
+    // Claude Generated (Jul 2026): the standalone -confgen path sets this (main.cpp), and GFN-FF keys
+    // its topology/parameter cache on it. Without it the key is empty, so a cache written for ANOTHER
+    // basename can be picked up -- which is how this phase first crashed inside the GFN-FF parameter
+    // generation. Give the child its own, unambiguous cache identity.
+    cfg["geometry_file"] = input_file;
+
+    int added = 0;
+    {
+        ConfGen gen(cfg, false);
+        gen.setOutputDir(OutputDir()); // same BMT directory as the rest of the run
+        gen.setFile(input_file);
+        gen.start();
+    }
+
+    // Append what survived ConfGen's own topology and novelty checks. From here on these structures
+    // are indistinguishable from metadynamics hits: Phase 3b re-optimises them, Phase 4 topology- and
+    // energy-filters them, feeds them into the bias pool and lets them compete as seeds.
+    const std::string new_file = outputPath(f + ".proposals.new.xyz");
+    std::ifstream check_new(new_file);
+    if (!check_new.good())
+        return 0;
+    FileIterator it(new_file);
+    while (!it.AtEnd()) {
+        Molecule mol = it.Next();
+        if (mol.AtomCount() == 0)
+            continue;
+        mol.setCharge(m_charge);
+        mol.setSpin(m_spin);
+        mol.appendXYZFile(input_file);
+        added++;
+    }
+    return added;
+}
+
 // Claude Generated (Jun 2026): permutation-aware best-fit (Kabsch) RMSD in Angstrom. Centres both
 // geometries by their centroid, computes the optimal rotation, and returns the minimum RMSD over
 // the identity plus every cached symmetry permutation (applied to the target). Both geometries must
@@ -1842,4 +1920,9 @@ void ConfSearch::LoadControlJson()
     m_bias_scale_mode = m_config.get<std::string>("bias_scale_mode");
     m_bias_energy_tol = m_config.get<double>("bias_energy_tol");
     m_do_restart = m_config.get<bool>("restart");
+    // Claude Generated (Jul 2026): torsion-recombination phase
+    m_confgen_phase = m_config.get<bool>("confgen_phase");
+    m_confgen_max_proposals = m_config.get<int>("confgen_max_proposals");
+    m_confgen_templates = m_config.get<int>("confgen_templates");
+    m_confgen_depth = m_config.get<int>("confgen_depth");
 }

@@ -119,7 +119,8 @@ bool ConfGen::analyseEnsemble()
     calc_config["threads"] = m_threads;
     calc_config["charge"] = m_charge;
     calc_config["spin"] = m_spin;
-    EnergyCalculator calculator(m_method, calc_config);
+    m_calculator = std::make_unique<EnergyCalculator>(m_method, calc_config);
+    EnergyCalculator& calculator = *m_calculator;
     calculator.setMolecule(input.front().getMolInfo());
 
     const Matrix reference_topology = input.front().DistanceMatrix().second;
@@ -772,8 +773,9 @@ void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
     opt_config["verbosity"] = 0;
     opt_config["write_trajectory"] = false;
 
-    EnergyCalculator calculator(m_method, calc_config);
-    calculator.setMolecule(m_frames.front().molecule.getMolInfo());
+    if (!m_calculator)
+        return; // analyseEnsemble must have run first
+    EnergyCalculator& calculator = *m_calculator;
     const std::vector<std::pair<int, int>> reference_bonds
         = topologyFingerprint(m_frames.front().molecule, m_topology_factor);
 
@@ -816,8 +818,9 @@ double ConfGen::referenceEnergyOptimised(double& worst_gain_kJ) const
     opt_config["verbosity"] = 0;
     opt_config["write_trajectory"] = false;
 
-    EnergyCalculator calculator(m_method, calc_config);
-    calculator.setMolecule(m_frames.front().molecule.getMolInfo());
+    if (!m_calculator)
+        return std::numeric_limits<double>::infinity();
+    EnergyCalculator& calculator = *m_calculator;
 
     std::vector<int> order(m_frames.size());
     std::iota(order.begin(), order.end(), 0);
@@ -1134,6 +1137,8 @@ void ConfGen::start()
         std::vector<Proposal> proposals = generateProposals();
 
         // Build the geometries: start from the template and set every torsion whose state differs.
+        const std::vector<std::pair<int, int>> reference_bonds
+            = topologyFingerprint(m_frames.front().molecule, m_topology_factor);
         int clashes = 0;
         for (Proposal& p : proposals) {
             Geometry geom = m_frames[p.template_frame].molecule.getGeometry();
@@ -1143,14 +1148,24 @@ void ConfGen::start()
             Molecule mol = m_frames[p.template_frame].molecule;
             mol.setGeometry(geom);
             mol.setName(fmt::format("proposal_from_{}_d{}", p.template_frame + 1, p.distance));
-            if (hasClash(mol, m_clash_factor)) {
+            // Two gates before a built structure is handed to the force field:
+            //   (a) no non-bonded contact inside clash_factor x covalent radii, and
+            //   (b) the bond topology must ALREADY match the reference.
+            // (b) is the strict one: a rigidly set torsion that creates a bond can never become a
+            // conformer anyway, so optimising it is wasted work -- and it is exactly the kind of
+            // pathological input that has been observed to crash the GFN-FF parameter generation
+            // (wild pointer in getGFNFFBondParameters, intermittent). Screening here keeps such
+            // geometries out of the force field entirely instead of relying on it to cope.
+            if (hasClash(mol, m_clash_factor)
+                || topologyFingerprint(mol, m_topology_factor) != reference_bonds) {
                 clashes++;
                 continue; // leave p.geometry empty -> counted as "not built"
             }
             p.geometry = mol;
         }
         if (clashes > 0)
-            CurcumaLogger::result_fmt("ConfGen: {} built structure(s) rejected by the clash filter", clashes);
+            CurcumaLogger::result_fmt("ConfGen: {} built structure(s) rejected before optimisation "
+                                      "(clash or changed bond topology)", clashes);
 
         // Write what was built, then optimise and write the survivors.
         bool first = true;

@@ -182,6 +182,70 @@ torsions on a compact molecule mostly produces collisions. That is the strongest
 restrained pre-optimisation (P0) — build the clashing structure anyway, restrain the target torsions,
 let the optimiser relieve the clash, then release.
 
+## Inside ConfSearch: Phase 3c
+
+`-confgen_phase true` runs the generation as a phase of the conformer search, right after the
+per-cycle dedup and before the accurate re-optimisation:
+
+```
+Phase 1  MD (RMSD-MTD) from the seeds
+Phase 2  optimise the bias structures        (md_method)
+Phase 3  ConfScan dedup                      -> <base>.bias.opt.accepted.xyz
+Phase 3c TORSION RECOMBINATION (ConfGen)     -> appends its new conformers to that same file
+Phase 3b re-optimisation                     (opt_method, dual-method runs only)
+Phase 4  energy window + topology filter, bias feedback, seed selection
+```
+
+The integration is deliberately a single append: a proposal that survives ConfGen's topology and
+novelty checks is written into the cycle's accepted file, and from there it is **indistinguishable
+from a structure the metadynamics found**. Phase 4 topology-checks it, puts it into the cumulative
+pool, deposits it in the shared bias pool (so the next MD does not re-explore it) and lets it compete
+for a seed slot. No special case anywhere downstream.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `-confgen_phase` | `false` | run the recombination phase (costs one optimisation per proposal) |
+| `-confgen_max_proposals` | `20` | structures built and optimised per cycle |
+| `-confgen_templates` | `3` | lowest-energy minima of the cycle used as templates |
+| `-confgen_depth` | `2` | torsions changed simultaneously |
+
+### Measured (90-atom molecule, 500 K -> 400 K, 2 cycles, identical settings)
+
+| | conformers found | global minimum |
+|---|---|---|
+| ConfSearch alone | 21 | -16.307305 Eh |
+| + Phase 3c | **44** | **-16.308338 Eh** (2.7 kJ/mol lower) |
+
+The phase added 5 conformers in the first cycle and 15 in the second, at the cost of ~20 geometry
+optimisations per cycle. Both numbers come from the same MD trajectories -- the metadynamics part is
+deterministic, so the difference is entirely the recombination.
+
+### A GFN-FF crash this uncovered (worth knowing about)
+
+Building the phase reproduced an intermittent segfault inside `GFNFF::getGFNFFBondParameters` (wild
+pointer during the parameter generation) whenever a **second** GFN-FF instance was initialised for the
+same molecule in one process. ConfGen now shares a single `EnergyCalculator` across analysis,
+optimisation and reference -- which is the right design anyway (identical topology, parameters and
+charge model for every energy it reports) and made 6 of 6 stress runs clean where 6 of 6 had crashed.
+
+Two real defects were fixed on the way, both in the GFN-FF topology path:
+- `importTopology()` restored `rings` but never rebuilt `atom_to_rings`, so after a `.topo.json` cache
+  hit the ring membership was either silently lost or stale from an earlier molecule -- in the latter
+  case its ring ids indexed past the imported ring list (out-of-bounds read).
+- `areAtomsInSameRing()`/`smallestRingContainingAll()` re-fetched `getCachedTopology()` although their
+  callers already hold a `TopologyInfo&`; that call can reassign the cache and dangle the caller's
+  reference mid-loop. Both now have an overload taking the topology explicitly, and the bond-parameter
+  path uses it.
+
+**Not fully root-caused:** the underlying uninitialised access in the GFN-FF bond-parameter generation
+is only avoided, not explained. It remains reachable by pathological geometries, which is why ConfGen
+also screens every built structure against the reference bond topology *before* handing it to the
+force field.
+
+The phase is skipped when a cycle produced fewer than two distinct minima — recombination needs
+something to recombine. The coupling/model half of ConfGen is switched off inside the phase: per-cycle
+ensembles are far too small for that statistic, and the phase only wants structures.
+
 ## Bug found by the consistency check
 
 The analysis verifies that the components sum to the total energy. They did not:

@@ -21,6 +21,7 @@
 #pragma once
 
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,7 @@
 #include "src/capabilities/curcumamethod.h"
 #include "src/capabilities/torsion_space.h"
 #include "src/core/config_manager.h"
+#include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
 #include "src/core/parameter_macros.h"
 #include "src/core/parameter_registry.h"
@@ -251,6 +253,15 @@ private:
     bool m_generate = false;
     int m_max_proposals = 50, m_proposal_templates = 5, m_proposal_depth = 2;
     double m_clash_factor = 1.2, m_new_rmsd = 1.0, m_topology_factor = 1.3;
+
+    /**
+     * ONE calculator for the whole run: analysis single points, proposal optimisations and the
+     * reference re-optimisation. Beyond the physics argument (identical topology, parameters and
+     * charge model, so every energy is comparable) this is also a robustness requirement -- creating
+     * a second GFN-FF instance for the same molecule in one process reproducibly crashed inside
+     * GFNFF::getGFNFFBondParameters (wild pointer in the parameter generation, Jul 2026).
+     */
+    mutable std::unique_ptr<EnergyCalculator> m_calculator;
 
     std::vector<TorsionSpace::Torsion> m_torsions;
     std::vector<std::vector<double>> m_state_centres; ///< per torsion

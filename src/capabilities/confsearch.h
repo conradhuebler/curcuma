@@ -105,6 +105,15 @@ private:
 
     std::string PerformFilter(const std::string& filename, const nlohmann::json& parameter);
 
+    /* Claude Generated (Jul 2026): Phase 3c -- torsion recombination on this cycle's deduplicated
+     * minima. Runs ConfGen on "<f>.xyz", which enumerates torsion-state vectors the ensemble does
+     * NOT contain, builds them, optimises them at `method` and keeps the chemically valid, genuinely
+     * new ones. Those are appended to "<f>.xyz", so everything downstream (Phase 3b re-optimisation,
+     * the energy/topology filter, the bias feedback and the seed selection in Phase 4) treats them
+     * exactly like a structure the metadynamics had found -- no special case anywhere.
+     * @return number of new conformers appended */
+    int PerformConfGen(const std::string& filename, const std::string& method);
+
     /* Claude Generated (Jul 2026): single source of truth for every child computation.
      * Every MD run, every optimisation batch and every nested ConfScan draws its config from
      * here, so the system identity (charge/spin), the runtime settings (threads/gpu/verbosity)
@@ -208,6 +217,8 @@ private:
     double m_rattle_threshold_temp = 400, m_seed_energy_window = 50, m_seed_window_decay = 0.5, m_epot_abort_window = 250;
     int m_seed_rank = 1; // max lowest-energy seeds per cycle (0 = all in window; 1 = only most stable)
     int m_rattle_hot_mode = 2, m_topo_check_interval = 0, m_opt_feedback_height = 5;
+    bool m_confgen_phase = false;
+    int m_confgen_max_proposals = 20, m_confgen_templates = 3, m_confgen_depth = 2;
     bool m_topo_check = false, m_epot_abort = false, m_opt_feedback_bias = true, m_opt_feedback_prune_snapshots = false, m_mtd_permutation = true;
     // Claude Generated (Jun 2026): temperature runaway abort + cross-run bias-height freeze.
     // ON by default for ConfSearch (bias-heating safety net + best conformer yield); see the PARAM block below.
@@ -322,6 +333,10 @@ private:
     PARAM(temp_abort_delta, Double, 300.0, "Abort when the mean temperature exceeds the target plus this many Kelvin. Values at or below 0 disable the check.", "Robustness", {})
 
     // --- Metadynamics Bias ---
+    PARAM(confgen_phase, Bool, false, "Run the torsion-recombination phase (ConfGen) after the per-cycle dedup: build torsion-state combinations the cycle's minima do not contain, optimise them and add the genuinely new conformers to the cycle. Off by default -- it costs one geometry optimisation per proposal.", "Proposals", {})
+    PARAM(confgen_max_proposals, Int, 20, "Maximum number of recombined structures built and optimised per cycle.", "Proposals", {})
+    PARAM(confgen_templates, Int, 3, "Number of lowest-energy minima of the cycle used as geometric templates for the recombination.", "Proposals", {})
+    PARAM(confgen_depth, Int, 2, "Maximum number of torsions changed simultaneously relative to a template.", "Proposals", {})
     PARAM(max_bias_export, Int, 1000, "Maximum number of bias structures written out per cycle.", "Bias", {})
     PARAM(rmsd_mtd_max_height, Int, 0, "Cap on the per-structure hill counter in the bias force. 0 is unbounded.", "Bias", {})
     PARAM(rmsd_mtd_freeze_inherited, Bool, false, "Freeze inherited bias heights each run so only new deposits grow. Off by default under the strided scheme (the soft counter bounds cross-run growth without freezing, which also keeps exploring inherited basins); set true for the legacy cross-run heating bound.", "Bias", {})

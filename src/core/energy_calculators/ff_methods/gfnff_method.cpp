@@ -2765,6 +2765,17 @@ bool GFNFF::importTopology(const json& topo_json)
         for (const auto& ring_json : topo_json["rings"]) {
             topo.rings.push_back(ring_json.get<std::vector<int>>());
         }
+        // Claude Generated (Jul 2026): rebuild the atom -> ring-id index from the imported rings.
+        // It used to be left untouched, so after a .topo.json cache hit atom_to_rings was either
+        // EMPTY (ring membership silently lost -> ring bonds parameterised as acyclic) or STALE from
+        // an earlier molecule in the same process, in which case its ring ids indexed past the newly
+        // imported `rings` -- an out-of-bounds read in areAtomsInSameRing()/smallestRingContainingAll()
+        // that segfaulted intermittently (seen when ConfSearch runs GFN-FF instances back to back).
+        topo.atom_to_rings.assign(m_atomcount, {});
+        for (std::size_t r = 0; r < topo.rings.size(); ++r)
+            for (int atom : topo.rings[r])
+                if (atom >= 0 && atom < m_atomcount)
+                    topo.atom_to_rings[atom].push_back(static_cast<int>(r));
     }
 
     // EEQ parameters
@@ -4607,7 +4618,9 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Formula: ringf = 1 + fringbo * (6 - ring_size)²
     // Only applied if the bond itself is part of a ring.
     int ring_size = 0;
-    if (areAtomsInSameRing(atom1, atom2, ring_size)) {
+    // Use the topology the caller passed in -- NOT getCachedTopology(), which can reassign the cache
+    // and dangle this very reference (see the overload's documentation in gfnff.h).
+    if (areAtomsInSameRing(atom1, atom2, ring_size, topo)) {
         // Fortran gfnff_ini.f90:1323
         double fringbo = 0.020;  // Fortran gfnff_param.f90:800
         ringf = 1.0 + fringbo * std::pow(6.0 - ring_size, 2);
@@ -6797,11 +6810,14 @@ std::vector<int> GFNFF::findSmallestRings(const std::vector<std::vector<int>>& a
 
 bool GFNFF::areAtomsInSameRing(int i, int j, int& ring_size) const
 {
+    return areAtomsInSameRing(i, j, ring_size, getCachedTopology());
+}
+
+bool GFNFF::areAtomsInSameRing(int i, int j, int& ring_size, const TopologyInfo& topo) const
+{
     // Claude Generated (Feb 9, 2026): O(1) ring membership lookup
     // Uses pre-computed rings and atom_to_rings from findSmallestRings()
     // Reference: Fortran ringsbond() uses pre-computed ring membership arrays
-
-    const TopologyInfo& topo = getCachedTopology();
 
     if (i < 0 || i >= m_atomcount || j < 0 || j >= m_atomcount) {
         ring_size = 0;
@@ -6819,6 +6835,10 @@ bool GFNFF::areAtomsInSameRing(int i, int j, int& ring_size) const
     // Find smallest shared ring
     int smallest = 0;
     for (int rid : topo.atom_to_rings[i]) {
+        // Bounds check: atom_to_rings and rings must agree. They can disagree when a topology was
+        // restored from cache (see importTopology) -- skip instead of reading out of bounds.
+        if (rid < 0 || static_cast<std::size_t>(rid) >= topo.rings.size())
+            continue;
         const auto& ring = topo.rings[rid];
         // Check if j is in this ring
         for (int atom : ring) {
@@ -6838,11 +6858,14 @@ bool GFNFF::areAtomsInSameRing(int i, int j, int& ring_size) const
 
 int GFNFF::smallestRingContainingAll(int i, int j, int k, int l) const
 {
+    return smallestRingContainingAll(i, j, k, l, getCachedTopology());
+}
+
+int GFNFF::smallestRingContainingAll(int i, int j, int k, int l, const TopologyInfo& topo) const
+{
     // Claude Generated (Feb 9, 2026): Find smallest ring containing all 4 torsion atoms
     // Equivalent to Fortran ringstors(ii,jj,kk,ll,...) → rings4
     // Reference: gfnff_ini.f90:1846
-
-    const TopologyInfo& topo = getCachedTopology();
 
     if (topo.atom_to_rings.empty()) return 0;
     if (static_cast<size_t>(j) >= topo.atom_to_rings.size()) return 0;
@@ -6850,6 +6873,8 @@ int GFNFF::smallestRingContainingAll(int i, int j, int k, int l) const
     int smallest = 0;
     // Start from central atom j (likely in fewer rings than terminal atoms)
     for (int rid : topo.atom_to_rings[j]) {
+        if (rid < 0 || static_cast<std::size_t>(rid) >= topo.rings.size())
+            continue; // see areAtomsInSameRing
         const auto& ring = topo.rings[rid];
         bool has_i = false, has_k = false, has_l = false;
         for (int atom : ring) {
@@ -6906,6 +6931,8 @@ int GFNFF::smallestRingContainingBend(int i, int j, int k) const
 
     // Check rings of atom j for both i and k
     for (int rid : topo.atom_to_rings[j]) {
+        if (rid < 0 || static_cast<std::size_t>(rid) >= topo.rings.size())
+            continue; // see areAtomsInSameRing
         const auto& ring = topo.rings[rid];
         bool has_i = false, has_k = false;
         for (int atom : ring) {
@@ -6947,6 +6974,8 @@ int GFNFF::largestRingContainingAll(int i, int j, int k, int l) const
 
     int largest = 0;
     for (int rid : topo.atom_to_rings[j]) {
+        if (rid < 0 || static_cast<std::size_t>(rid) >= topo.rings.size())
+            continue; // see areAtomsInSameRing
         const auto& ring = topo.rings[rid];
         bool has_i = false, has_k = false, has_l = false;
         for (int atom : ring) {

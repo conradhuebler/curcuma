@@ -1653,6 +1653,17 @@ private:
      * instead of broken ad-hoc path-finding. O(1) lookup via atom_to_rings.
      */
     bool areAtomsInSameRing(int i, int j, int& ring_size) const;
+    /**
+     * @brief Ring-membership lookup on an EXPLICIT topology.
+     *
+     * Claude Generated (Jul 2026). The no-topology overload calls getCachedTopology(), which may
+     * decide the geometry changed and REASSIGN m_cached_topology -- invalidating any reference a
+     * caller still holds. generateBondsNative()/getGFNFFBondParameters() iterate over exactly such a
+     * reference, so the re-fetch could pull the topology out from under them mid-loop (intermittent
+     * segfault in areAtomsInSameRing, seen when a second GFN-FF instance is initialised in the same
+     * process). Call sites that already have a TopologyInfo must use this overload.
+     */
+    bool areAtomsInSameRing(int i, int j, int& ring_size, const TopologyInfo& topo) const;
 
     /**
      * @brief Find smallest ring containing all four atoms of a torsion quartet
@@ -1666,6 +1677,8 @@ private:
      * Reference: gfnff_ini.f90:1846 (rings4 = ringstors(ii,jj,kk,ll,...))
      */
     int smallestRingContainingAll(int i, int j, int k, int l) const;
+    /// Same, on an explicit topology (see areAtomsInSameRing overload).
+    int smallestRingContainingAll(int i, int j, int k, int l, const TopologyInfo& topo) const;
 
     /**
      * @brief Find smallest ring containing all three atoms of an angle bend

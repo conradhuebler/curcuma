@@ -187,6 +187,8 @@ set_tests_properties(cli_confgen_02_generate PROPERTIES TIMEOUT 300 LABELS "conf
 # =============================================================================
 add_cli_test(confsearch 01_gfnff_smoke)
 set_tests_properties(cli_confsearch_01_gfnff_smoke PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;rmsd_mtd")
+add_cli_test(confsearch 02_confgen_phase)
+set_tests_properties(cli_confsearch_02_confgen_phase PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;confgen")
 
 # =============================================================================
 # CG (Coarse Graining) Tests — disabled: -vtf command not implemented in main.cpp
