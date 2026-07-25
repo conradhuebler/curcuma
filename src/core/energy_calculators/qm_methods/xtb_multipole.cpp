@@ -60,6 +60,12 @@ void XTB::setupMultipole(bool integrals_on_device)
     // are skipped when the GPU backend already filled them via downloadMultipoleInts
     // (Stage 3m). The CN-damping radii + atom-pair interaction matrices (step 3+) are
     // O(nat²) and always run on the host. Claude Generated.
+    // B0 (Jul 2026): sub-phase timers so the "multipole setup" bucket can be
+    // attributed. Reported by Calculation() at verbosity >= 3.
+    using mp_clock = std::chrono::steady_clock;
+    const auto tmp0 = mp_clock::now();
+    auto tmp_ao = tmp0, tmp_d = tmp0, tmp_shift = tmp0, tmp_cn = tmp0;
+
     if (!integrals_on_device) {
     // ---- 1. Global-origin raw dipole + raw-Cartesian quadrupole ----
     std::array<Eigen::MatrixXd, 3> dp_global;
@@ -96,6 +102,7 @@ void XTB::setupMultipole(bool integrals_on_device)
         }
     }
     });  // parallelStripes over mu
+    tmp_ao = mp_clock::now();
 
     // ---- 1b. X-I1: d-touching shell pairs (cartesian multipole block + dtrafo).
     // The per-AO loop above skips d (ao_to_type < 0); fill those AO cells here.
@@ -127,6 +134,8 @@ void XTB::setupMultipole(bool integrals_on_device)
                 }
         }
     }
+
+    tmp_d = mp_clock::now();
 
     // ---- 2. Shift to "origin at atom(column)" (tblite convention) ----
     //       and traceless quadrupole transform.
@@ -169,6 +178,7 @@ void XTB::setupMultipole(bool integrals_on_device)
     }
     });  // parallelStripes over mu
     }  // if (!integrals_on_device) — steps 1-2 (AO multipole integral build)
+    tmp_shift = mp_clock::now();
 
     // ---- 3. Coordination numbers (GFN2 double-exp form) ----
     std::vector<double> cn = cn_gfn(std::vector<int>(m_atoms.begin(), m_atoms.end()), xyz_bohr);
@@ -189,6 +199,8 @@ void XTB::setupMultipole(bool integrals_on_device)
         m_mp_dkernel[i]  = p_dkernel[z - 1];
         m_mp_qkernel[i]  = p_qkernel[z - 1];
     }
+
+    tmp_cn = mp_clock::now();
 
     // ---- 5. Interaction matrices ----
     for (int k = 0; k < 3; ++k) m_mp_amat_sd[k] = Eigen::MatrixXd::Zero(nat, nat);
@@ -241,6 +253,19 @@ void XTB::setupMultipole(bool integrals_on_device)
         }
     }
     });  // parallelStripes over i
+
+    // B0: publish the sub-phase split for the verbosity-3 setup report.
+    {
+        auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        const auto tmp_end = mp_clock::now();
+        m_mp_t_ao_ints  = ms(tmp0, tmp_ao);
+        m_mp_t_d_block  = ms(tmp_ao, tmp_d);
+        m_mp_t_shift    = ms(tmp_d, tmp_shift);
+        m_mp_t_cn_mrad  = ms(tmp_shift, tmp_cn);
+        m_mp_t_amat     = ms(tmp_cn, tmp_end);
+    }
 
     m_mp_initialized = true;
 }

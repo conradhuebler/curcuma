@@ -459,18 +459,29 @@ double XTB::Calculation(bool gradient)
             }
         }
     }
+    // B0 (Jul 2026): time the three host build steps separately. They used to share
+    // one stamp (t_h0 == t_gamma), so "overlap + H0" silently also contained
+    // buildOrthonormalizer() + buildGammaMatrix() and "Coulomb gamma" always read
+    // 0.00 ms — which hid how much of the bucket the integral kernel actually owns.
+    auto t_h0 = t_cn;
+    auto t_ortho = t_cn;
+    auto t_gamma = t_cn;
     if (!integrals_from_device) {
         // Full host integral build (CPU path, or device build unavailable).
         getHamiltonianH0(se, S, H0);
         m_S  = S;
         m_H0 = H0;
+        t_h0 = clock::now();
         // Orthonormalizer X = S^{-1/2}, built once here so every SCF iteration solves
         // the cheap standard eigenproblem instead of re-factorizing the constant S.
         buildOrthonormalizer();
+        t_ortho = clock::now();
         buildGammaMatrix();   // Coulomb gamma (once per geometry)
+        t_gamma = clock::now();
+    } else {
+        // Device path: S/H0/Lowdin/gamma were fused in the device build above.
+        t_h0 = t_ortho = t_gamma = clock::now();
     }
-    const auto t_h0 = clock::now();
-    const auto t_gamma = clock::now();   // S/H0/L/gamma fused above (AP4 device path)
 
     // 5. Multipole setup (GFN2 only) — fills m_dp_int, m_qp_int, interaction matrices.
     // Stage 3m (Claude Generated): on the non-resident device GFN2 path (Vulkan/ROCm),
@@ -506,9 +517,17 @@ double XTB::Calculation(bool gradient)
         CurcumaLogger::info("Setup timing:");
         CurcumaLogger::info_fmt("  coordination numbers : {:8.2f} ms", ms(t0, t_cn));
         CurcumaLogger::info_fmt("  overlap + H0         : {:8.2f} ms", ms(t_cn, t_h0));
-        CurcumaLogger::info_fmt("  Coulomb gamma matrix : {:8.2f} ms", ms(t_h0, t_gamma));
-        if (m_method == MethodType::GFN2)
+        CurcumaLogger::info_fmt("  orthonormalizer      : {:8.2f} ms", ms(t_h0, t_ortho));
+        CurcumaLogger::info_fmt("  Coulomb gamma matrix : {:8.2f} ms", ms(t_ortho, t_gamma));
+        if (m_method == MethodType::GFN2) {
             CurcumaLogger::info_fmt("  multipole setup      : {:8.2f} ms", ms(t_gamma, t_setup));
+            // B0: attribute the multipole bucket to its five sub-phases.
+            CurcumaLogger::info_fmt("    AO dp/qp integrals : {:8.2f} ms", m_mp_t_ao_ints);
+            CurcumaLogger::info_fmt("    d-shell block      : {:8.2f} ms", m_mp_t_d_block);
+            CurcumaLogger::info_fmt("    origin shift       : {:8.2f} ms", m_mp_t_shift);
+            CurcumaLogger::info_fmt("    CN + mrad          : {:8.2f} ms", m_mp_t_cn_mrad);
+            CurcumaLogger::info_fmt("    interaction mats   : {:8.2f} ms", m_mp_t_amat);
+        }
     }
 
     // 6. SCF loop with DIIS acceleration (Pulay 1980/1982)

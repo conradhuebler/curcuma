@@ -1147,6 +1147,14 @@ private:
     std::vector<double> m_mp_dkernel;
     std::vector<double> m_mp_qkernel;
     bool m_mp_initialized = false;
+
+    // B0 (Jul 2026): setupMultipole() sub-phase timings (ms), for the verbosity-3
+    // setup report. The single "multipole setup" bucket could not be attributed.
+    double m_mp_t_ao_ints = 0.0;   ///< pass 1: O(nao^2) AO dipole/quadrupole integrals
+    double m_mp_t_d_block = 0.0;   ///< pass 1b: d-touching shell pairs (serial)
+    double m_mp_t_shift   = 0.0;   ///< pass 2: origin shift + traceless transform
+    double m_mp_t_cn_mrad = 0.0;   ///< steps 3-4: CN + damping radii
+    double m_mp_t_amat    = 0.0;   ///< step 5: O(nat^2) interaction matrices
     // Debug (Jul 2026): when true, calculateGradient() skips the GFN2 multipole
     // (AES) gradient (§5 direct interaction + mrad/CN chain + AP5b integral Pulay).
     // Used by auditMultipoleGradient() to isolate the analytic multipole gradient
