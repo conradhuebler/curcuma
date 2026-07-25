@@ -9904,19 +9904,18 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         // BOTH placements, keep the one with lower EEQ electrostatic energy; for nfrag>2
         // put the charge on fragment 0; nfrag==1 and neutral keep the existing path.
         if (topo_info.nfrag == 2 && m_charge != 0) {
-            auto solveWith = [&](std::vector<double> qf) -> Vector {
-                eeq_topology_input.qfrag = qf;
-                m_eeq_solver->clearSolveStatus();
-                m_eeq_solver->invalidateCholeskyCache();
-                m_eeq_solver->invalidateMatrixCache();
-                return m_eeq_solver->calculateTopologyCharges(
-                    m_atoms, m_geometry_bohr, m_charge, topo_info.coordination_numbers,
-                    eeq_topology_input, true, pool_setup, m_threads);
-            };
+            // A1 (Jul 2026): both placements share the same Phase-1 matrix (qfrag
+            // enters only the constraint RHS), so build it once and solve both RHS.
             const double qc = static_cast<double>(m_charge);
-            Vector qa = solveWith({qc, 0.0});
+            m_eeq_solver->clearSolveStatus();
+            m_eeq_solver->invalidateCholeskyCache();
+            m_eeq_solver->invalidateMatrixCache();
+            auto trials = m_eeq_solver->calculateTopologyChargesMultiRHS(
+                m_atoms, m_geometry_bohr, m_charge, topo_info.coordination_numbers,
+                eeq_topology_input, {{qc, 0.0}, {0.0, qc}}, true, pool_setup, m_threads);
+            Vector qa = trials.size() > 0 ? trials[0] : Vector();
+            Vector qb = trials.size() > 1 ? trials[1] : Vector();
             double E_a = (qa.size() == m_atomcount) ? calculateEEQEnergy(qa, topo_info.coordination_numbers) : 1e300;
-            Vector qb = solveWith({0.0, qc});
             double E_b = (qb.size() == m_atomcount) ? calculateEEQEnergy(qb, topo_info.coordination_numbers) : 1e300;
             if (E_a <= E_b) {
                 topo_info.qfrag = {qc, 0.0};
