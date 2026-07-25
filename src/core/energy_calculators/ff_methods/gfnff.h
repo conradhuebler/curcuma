@@ -275,6 +275,7 @@ PARAM(eeq_refactor_force_every, Int, 0,
       "WP-EEQ-Cache: Force EEQ Cholesky refactorization every N steps. "
       "0 = geometry-triggered only. Recommended: 100 for long MD. "
       "Forwarded to eeq_solver.eeq_refactor_force_every.", "Performance", {})
+PARAM(eeq_refine_iters, Int, 1, "A4: iterative-refinement steps when the EEQ solve reuses a cached Cholesky factor. Keeps charges exact for the current geometry at O(N^2) cost, so a loose refactor threshold does not corrupt the gradient. 0 disables. Forwarded to eeq_solver.eeq_refine_iters.", "Performance", {})
 // NOTE: each PARAM is kept on a SINGLE line on purpose. The param_parser clears its
 // buffer on the first ')' it sees, so a multi-line PARAM whose help text contains '(...)'
 // is silently dropped from the registry (see eeq_refactor_* above). Single-line is safe.

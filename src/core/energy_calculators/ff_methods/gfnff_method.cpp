@@ -651,6 +651,8 @@ void GFNFF::forwardEEQSolverParams(json& eeq_params) {
         eeq["eeq_refactor_eps_bohr"] = m_parameters["eeq_refactor_eps_bohr"];
     if (m_parameters.contains("eeq_refactor_force_every") && !eeq.contains("eeq_refactor_force_every"))
         eeq["eeq_refactor_force_every"] = m_parameters["eeq_refactor_force_every"];
+    if (m_parameters.contains("eeq_refine_iters") && !eeq.contains("eeq_refine_iters"))
+        eeq["eeq_refine_iters"] = m_parameters["eeq_refine_iters"];
 }
 
 double GFNFF::getEEQDistanceCutoff() const {

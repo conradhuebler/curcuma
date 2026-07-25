@@ -898,6 +898,7 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "cholesky"));
     m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.05);
     m_refactor_force_every = m_config.get<int>("eeq_refactor_force_every", 0);
+    m_refine_iters         = m_config.get<int>("eeq_refine_iters", 1);
     m_matrix_rebuild_eps   = m_config.get<double>("eeq_matrix_rebuild_eps_bohr", 0.0);
     m_eeq_extrapolation    = m_config.get<std::string>("eeq_extrapolation", "none");
     m_eeq_extrap_order     = m_config.get<int>("eeq_extrapolation_order", 3);
@@ -2224,7 +2225,41 @@ Vector EEQSolver::solveWithSchurCholesky(
     } else {
         lambda = m_chol_cache.S.partialPivLu().solve(schur_rhs);
     }
-    return z1 - m_chol_cache.Z2 * lambda;
+    Vector q = z1 - m_chol_cache.Z2 * lambda;
+
+    // A4 (Jul 2026): iterative refinement against the FRESH matrix.
+    //
+    // On a cache hit the factor describes A_old but the RHS and A_nn are current,
+    // so q solves the OLD system exactly, not the new one. That is the
+    // Hellmann-Feynman hazard flagged in docs/wp4/WP-EEQ-Cholesky-Cache.md: q is
+    // not the exact EEQ charge for this geometry, so dE/dR is inconsistent and MD
+    // drifts. Refinement removes the error while keeping the O(N^2) cost.
+    //
+    // The augmented system is  A q + C^T lambda = b ,  C q = c.
+    // The cached solve satisfies the SECOND row exactly (C q = C z1 - S lambda =
+    // C z1 - schur_rhs = c holds for any factor), so the constraint residual is
+    // identically zero and only the first row needs correcting:
+    //     r = b - A_new q - C^T lambda      (= (A_old - A_new) q )
+    // Solving the same augmented system for the correction with the cached factor
+    // reuses Z2 and S unchanged.
+    if (m_refine_iters > 0 && m_chol_cache.valid) {
+        for (int it = 0; it < m_refine_iters; ++it) {
+            Vector r = rhs_atoms - A_nn * q - C.transpose() * lambda;
+            Vector dz = r;
+            eeqCholeskySolve(m_chol_cache.chol_factor, dz);
+            Vector dschur = C * dz;                      // constraint residual is 0
+            Vector dlambda;
+            if (nfrag == 1) {
+                dlambda = Vector::Constant(1, dschur(0) / m_chol_cache.S(0, 0));
+            } else {
+                dlambda = m_chol_cache.S.partialPivLu().solve(dschur);
+            }
+            q      += dz - m_chol_cache.Z2 * dlambda;
+            lambda += dlambda;
+        }
+    }
+
+    return q;
 }
 
 // ===== Block-Jacobi Preconditioner =====

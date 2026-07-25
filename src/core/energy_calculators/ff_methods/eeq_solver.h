@@ -885,6 +885,7 @@ private:
     double m_eeq_distance_cutoff_override = -1.0;  ///< WP-S3: post-init cutoff override (-1 = use config)
     double m_refactor_eps = 0.05;       ///< WP-EEQ-Cache: max displacement (Bohr) before re-factorizing
     int    m_refactor_force_every = 0;  ///< WP-EEQ-Cache: force refactorization every N steps (0 = disabled)
+    int    m_refine_iters = 1;          ///< A4: iterative-refinement steps on a cached-factor solve (0 = off)
     double m_matrix_rebuild_eps = 0.0;  ///< WP-EEQ-Matrix-Cache: max displacement before A_nn off-diag rebuild (0 = disabled)
 
     // ===== Cached Data for Energy Calculation =====
@@ -1166,6 +1167,7 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
     PARAM(eeq_refactor_force_every, Int, 0,
           "WP-EEQ-Cache: Force Cholesky refactorization every N steps regardless of geometry. "
           "0 = never force (only geometry-triggered). Recommended: 100 for long MD runs.", "Algorithm", {})
+    PARAM(eeq_refine_iters, Int, 1, "A4: iterative-refinement steps applied when the EEQ solve reuses a cached Cholesky factor. Each step costs O(N^2) and removes the stale-factor error, so charges stay exact for the current geometry and the gradient stays consistent. 0 disables refinement.", "Algorithm", {})
     PARAM(eeq_matrix_rebuild_eps_bohr, Double, 0.0,
           "WP-EEQ-Matrix-Cache: max atom displacement (Bohr) before A_nn Coulomb off-diagonal is "
           "rebuilt from scratch. When below this AND CN drift < 0.05, the cached off-diagonal is "
