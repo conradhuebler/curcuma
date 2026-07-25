@@ -110,8 +110,8 @@ complex/231, `-verbosity 3`, speedup t1 -> t16:
 | TOTAL | 1012 ms | 396 ms | 2.6x |
 
 Everything that was parallelised scales. The four blocks at the bottom are
-~139 ms of the 396 ms at t16 — that is the whole remaining scaling limit. Three
-attacks on it were implemented and measured; **all three lost**, and the reasons
+~139 ms of the 396 ms at t16 — that is the whole remaining scaling limit. Four
+attacks on it were implemented and measured; **all lost**, and the reasons
 generalise, so they are recorded here rather than retried.
 
 ### 1. Raising the eigensolve thread cap — no
@@ -161,19 +161,72 @@ A/B in the same binary at `-threads 16`, best of 5:
 | serial | **20 ms** | **434 ms** |
 | striped | 31 ms | 440 ms |
 
-Slower. The arithmetic explains it: 1.45 ms/iteration spread over 14 stripes is
-~0.1 ms of work per thread, below the pool's dispatch-and-join cost. The original
-comment holds for GFN2 too. Reverted.
+Slower, so the original comment holds for GFN2 too. Reverted.
 
-### What would actually move it
+Note the *reason* is not what it looks like: the dispatch is only 18 µs
+(measured, see 4 below), so overhead cannot account for the 11 ms. The phase
+streams ~25 MB of nao² arrays per iteration and is L3-bandwidth-bound, so extra
+threads add contention without adding usable bandwidth.
 
-The remaining non-scaling blocks are all **small per call and dispatch-bound**,
-not compute-bound — which is why striping them loses. The lever is not more
-parallelism but fewer, larger units of work: fusing `populations`, `energy/mix`
-and `potential build` into a single per-iteration parallel region (one dispatch
-instead of three or four) would amortise the overhead across ~85 ms of t16 work
-instead of ~30 ms each. That is a restructuring of the SCF loop body, not a
-kernel change, and it is untested.
+### 4. Fusing the serial phases into one parallel region — the premise was false
+
+The three experiments above were explained as "dispatch-bound", and the proposed
+fix was to fuse `populations`, `energy/mix` and `potential build` into a single
+per-iteration parallel region so one dispatch is amortised over ~85 ms of work.
+**Both halves of that reasoning turned out to be wrong when measured.**
+
+**The dispatch is cheap.** An empty `parallelStripes` costs:
+
+| threads | 2 | 4 | 8 | 14 | 16 |
+|---|---:|---:|---:|---:|---:|
+| µs per call | 5.0 | 3.8 | 8.7 | 17.8 | 20.1 |
+
+**18 µs**, not the ~0.8 ms that had been inferred from the t1/t16 deltas. Three
+extra dispatches over 19 SCF iterations cost **1 ms total** — irrelevant. So
+dispatch overhead cannot explain why striping `populations` lost, and fusing
+regions cannot recover anything.
+
+**There is also nothing to fuse.** The whole SCF loop body contains exactly ONE
+pool dispatch (`buildFock`); the other phases are plain serial code, not
+separately dispatched regions.
+
+The next hypothesis — that those phases are memory-bound with a bad access
+pattern — was also tested and **also refuted**, but it produced the useful
+finding below.
+
+### Matrix storage orders are MIXED — check before "fixing" a loop
+
+`updatePopulations` contracts P against the multipole integrals as `X(nu, mu)`
+with `nu` in the inner loop, which looks like a column-wise sweep of a row-major
+matrix. It is not, because the arrays do not share a layout:
+
+| array | type | order |
+|---|---|---|
+| `m_dp_int` / `m_qp_int` | `Eigen::MatrixXd` | **column-major** (Eigen default) |
+| `m_wfn.P`, `m_S`, `m_H0`, `F` | project `Matrix` | **row-major** (`global.h`) |
+
+With `nu` innermost, `X(nu, mu)` is **contiguous** for the nine column-major
+multipole arrays and strided only for the single row-major `P`. The existing loop
+order is therefore already the cache-optimal one for the dominant nine arrays.
+
+Swapping the loops (to make `P` contiguous) was implemented and **broke the
+energy by 7.8 mEh on triose/gfn2** — `&m_dp_int[k](nu, 0)` is not a row start in a
+column-major matrix, so the inner loop read the wrong elements. Caught
+immediately by the `-dump_gradient` gate. Reverted.
+
+Lesson for anyone tuning these loops: `Matrix` (row-major) and `Eigen::MatrixXd`
+(column-major) are both used in the SCF, sometimes in the same expression. Verify
+the declared type before reasoning about strides.
+
+### Where this leaves it
+
+`min(intra, 8)` for the eigensolve, `dsygst` for the reduction, and serial
+`populations` / `energy/mix` / `potential build` are all measured-optimal for this
+code on this machine. The remaining ~139 ms of poorly-scaling t16 work is L3-
+bandwidth-bound streaming over the nao² arrays with already-contiguous access —
+not dispatch overhead, not a bad access pattern, and not something more threads
+fix. Further gains would need to reduce the *traffic* (fewer nao² sweeps per
+iteration, or fewer iterations), not redistribute it.
 
 > **Measurement note.** These numbers need an otherwise idle machine. Multi-thread
 > wall times on this box moved by 20-30% under an unrelated 4-5 core job, which is
