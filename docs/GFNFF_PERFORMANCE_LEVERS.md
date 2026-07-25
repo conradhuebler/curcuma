@@ -65,6 +65,38 @@ existing knob trades accuracy too coarsely.
 
 ---
 
+## xtb 6.7.1 `--gfnff` segfaults above ~700-800 atoms (2026-07)
+
+Measured while looking for a reference to validate the large-system numbers
+against. `xtb --gfnff --norestart`, truncated polymer chains:
+
+| atoms | xtb `--gfnff` | curcuma `gfnff` |
+|---|---|---|
+| 400 | runs | runs |
+| 700 | runs | runs |
+| **800** | **SIGSEGV** | runs |
+| 900 / 1000 / 1200 | SIGSEGV | runs |
+| 1410 (polymer) | SIGSEGV | 497 ms |
+| 6200 (mixture) | SIGSEGV | 12.3 s |
+
+`forrtl: severe (174): SIGSEGV` inside `xtb_gfnff_neighbor` (`neighbor.f90`,
+line 121 or 417 depending on size), during "generating topology and atomic info
+file" — i.e. in GFN-FF setup, before any energy evaluation. It fails in ~0.1-2 s,
+so it is a hard crash, not a resource limit.
+
+**Consequence for validation, stated plainly:** at the sizes where curcuma's
+large-system work matters there is **no reference to check against**. The largest
+size at which curcuma's gfnff energy has been compared to xtb is 231 atoms, where
+they agree to ~4e-4 - 1.2e-3 Eh (the documented pprcht-vs-xtb divergence; curcuma
+tracks pprcht). Above ~700 atoms "curcuma handles it" means it runs and is
+self-consistent, **not** that the energy has been verified.
+
+> Do not use truncated chains to compare the two codes. Cutting a polymer leaves
+> open valences, and the two topology detections diverge strongly there: the
+> 400/700-atom truncations above differ by 7.6/9.5 Eh between the codes, four
+> orders of magnitude more than the ~1e-3 Eh seen on intact molecules. That is a
+> truncation artefact, not a code discrepancy.
+
 ## Per-step cost on conformer-search-sized molecules (2026-07)
 
 Everything above profiles *large* systems (3000-6200 atoms). Conformer search and
