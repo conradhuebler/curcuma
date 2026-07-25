@@ -81,36 +81,51 @@ void XTB::setupMultipole(bool integrals_on_device)
     for (int k = 0; k < 3; ++k) dp_global[k]     = Eigen::MatrixXd::Zero(nao, nao);
     for (int k = 0; k < 6; ++k) qp_global_raw[k] = Eigen::MatrixXd::Zero(nao, nao);
 
-    // Parallel over the row AO mu (Claude Generated): disjoint rows of dp_global /
-    // qp_global_raw, so the stripes are independent and bit-identical to serial.
-    const int mp_threads = effectiveIntraThreads(nao);
+    // B3 (Jul 2026): iterate SHELL pairs, not AO pairs. The primitive-pair work
+    // (gamma, product centre, K, PA/PB, 1-D moment table) is shared by every
+    // component of the pair, so this runs it once instead of up to 9 times.
+    // Striping moves from mu to ish_a: each ish_a owns the disjoint AO row range
+    // [iao_sh, iao_sh + nao_sh), so writes stay disjoint and every element is
+    // still written exactly once with a decomposition-independent value.
+    const int nsh_ao = m_basis.nsh;
+    const int mp_threads = effectiveIntraThreads(nsh_ao);
     parallelStripes(mp_threads, [&](int tid, int nth) {
-    for (int mu = tid; mu < nao; mu += nth) {
-        const int ish_a = m_basis.ao2sh[mu];
-        const int iat   = m_basis.ao2at[mu];
-        const int local_a = mu - m_basis.iao_sh[ish_a];
-        const int t_a = ao_to_type(m_basis.ang_sh[ish_a], local_a);
+    for (int ish_a = tid; ish_a < nsh_ao; ish_a += nth) {
+        const int ang_a = m_basis.ang_sh[ish_a];
+        if (ang_a >= 2) continue;   // d-touching pairs: handled by the block below
+        const int iat = m_basis.sh2at[ish_a];
+        const int ia0 = m_basis.iao_sh[ish_a];
+        const int nca = m_basis.nao_sh[ish_a];
         const CGTO::Shell& sh_a = shells[ish_a];
 
-        for (int nu = 0; nu < nao; ++nu) {
-            const int ish_b = m_basis.ao2sh[nu];
-            const int jat   = m_basis.ao2at[nu];
-            const int local_b = nu - m_basis.iao_sh[ish_b];
-            const int t_b = ao_to_type(m_basis.ang_sh[ish_b], local_b);
-            if (t_a < 0 || t_b < 0) continue;
+        for (int ish_b = 0; ish_b < nsh_ao; ++ish_b) {
+            const int ang_b = m_basis.ang_sh[ish_b];
+            if (ang_b >= 2) continue;
+            const int jat = m_basis.sh2at[ish_b];
+            const int jb0 = m_basis.iao_sh[ish_b];
+            const int ncb = m_basis.nao_sh[ish_b];
             const CGTO::Shell& sh_b = shells[ish_b];
 
-            double Sx, D[3], Q[6];
-            MI::cgto_multipole(sh_a, sh_b,
-                               xyz_bohr[3*iat+0], xyz_bohr[3*iat+1], xyz_bohr[3*iat+2],
-                               xyz_bohr[3*jat+0], xyz_bohr[3*jat+1], xyz_bohr[3*jat+2],
-                               t_a, t_b, Sx, D, Q);
-            for (int k = 0; k < 3; ++k) dp_global[k](mu, nu)     = D[k];
-            for (int k = 0; k < 6; ++k) qp_global_raw[k](mu, nu) = Q[k];
+            double bS[9], bD[9 * 3], bQ[9 * 6];
+            MI::cgto_multipole_block(sh_a, ang_a, sh_b, ang_b,
+                                     xyz_bohr[3*iat+0], xyz_bohr[3*iat+1], xyz_bohr[3*iat+2],
+                                     xyz_bohr[3*jat+0], xyz_bohr[3*jat+1], xyz_bohr[3*jat+2],
+                                     bS, bD, bQ);
+
+            for (int ia = 0; ia < nca; ++ia) {
+                const int mu = ia0 + ia;
+                for (int jb = 0; jb < ncb; ++jb) {
+                    const int nu = jb0 + jb;
+                    const int c  = ia * ncb + jb;
+                    for (int k = 0; k < 3; ++k) dp_global[k](mu, nu)     = bD[c * 3 + k];
+                    for (int k = 0; k < 6; ++k) qp_global_raw[k](mu, nu) = bQ[c * 6 + k];
+                }
+            }
         }
     }
-    });  // parallelStripes over mu
+    });  // parallelStripes over ish_a
     tmp_ao = mp_clock::now();
+
 
     // ---- 1b. X-I1: d-touching shell pairs (cartesian multipole block + dtrafo).
     // The per-AO loop above skips d (ao_to_type < 0); fill those AO cells here.
