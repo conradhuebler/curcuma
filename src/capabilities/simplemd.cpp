@@ -3488,6 +3488,7 @@ void SimpleMD::EvaluateBias(bool do_deposit)
             initial.time = m_currentStep;
             initial.rmsd_reference = 0;
             initial.counter = 1;
+            initial.energy = m_Epot; // see the deposit path below
             initial.index = 0;
             initial.temperature = m_T0;
             int deposited = m_shared_pool->depositBiasStructure(initial);
@@ -3765,6 +3766,11 @@ void SimpleMD::EvaluateBias(bool do_deposit)
             new_bs.rmsd_reference = rmsd_reference;
             new_bs.time = m_currentStep;
             new_bs.counter = 1;
+            // Claude Generated (Jul 2026): record the snapshot's own potential energy. It was left at
+            // 0, and ConfSearch writes bias structures as copies of a reference molecule -- so every
+            // exported snapshot carried the REFERENCE's energy in its xyz comment, a plausible-looking
+            // number belonging to a different geometry.
+            new_bs.energy = m_Epot;
             new_bs.temperature = m_T0;
             int new_count = m_shared_pool->depositBiasStructure(new_bs);
             m_mtd_deposits.push_back({new_count, double(m_step), m_step * m_dT, m_Epot, rmsd_reference, 'B', 0, false});

@@ -466,6 +466,15 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             // Update common state
             m_current_energy = new_energy;
             m_current_gradient = new_gradient;
+            // Claude Generated (Jul 2026): remember the geometry this energy belongs to. The LBFGSpp
+            // objective functor writes every LINE-SEARCH TRIAL point into m_molecule
+            // (LBFGSppObjectiveFunction::operator() -> CoordinatesToMolecule(x, *m_molecule)), so
+            // after a step that ends the loop (zero step / exhausted line search) m_molecule holds a
+            // trial geometry while m_current_energy is the last ACCEPTED one. Writing that pair out
+            // produced structures whose stored energy did not belong to their coordinates -- measured
+            // on a penta-alanine snapshot: file said -9.168083 Eh, the written geometry is worth
+            // -8.668213 Eh (1312 kJ/mol), and it poisoned the whole ConfSearch energy ranking.
+            m_accepted_coordinates = new_coords;
 
             // Claude Generated 2026 - External-force bias (interactive mouse grab)
             // is NOT applied here: every optimizer pre-evaluates its own gradient
@@ -553,6 +562,11 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
                 trj_file << mol.XYZString();
             }
         }
+
+        // Restore the geometry belonging to m_current_energy before anything is reported or written
+        // (see m_accepted_coordinates above).
+        if (m_accepted_coordinates.size() == 3 * m_molecule.AtomCount())
+            CoordinatesToMolecule(m_accepted_coordinates, m_molecule);
 
         // Create result
         m_molecule.setEnergy(m_current_energy);

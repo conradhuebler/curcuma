@@ -102,7 +102,10 @@ protected:
     std::vector<Molecule> m_trajectory; // Optimization trajectory
     std::vector<double> m_energy_trajectory; // Energy at each step
     Vector m_current_gradient; // Current gradient
-    double m_current_energy = 0.0; // Current energy
+    double m_current_energy = 0.0;
+    /// Coordinates belonging to m_current_energy. The objective functor overwrites m_molecule with
+    /// line-search trial points, so the two can otherwise diverge (Claude Generated, Jul 2026).
+    Vector m_accepted_coordinates; // Current energy
     double m_initial_energy = 0.0; // Starting energy
 
     // Configuration and context

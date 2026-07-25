@@ -1414,9 +1414,22 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
         m_current_energy = mol1->Energy();
         m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
         if (m_dE > m_energy_cutoff && m_energy_cutoff != -1) {
+            // Claude Generated (Jul 2026): SKIP this structure, do not abort the pass.
+            //
+            // This used to `break`, which is only valid on an energy-sorted list -- and ConfScan
+            // sorts nowhere: structures are processed in file order. One structure above the cutoff
+            // therefore silently discarded every structure after it. Measured on a penta-alanine
+            // ConfSearch pool: the reorder pass reported "Processed: 1 / 200" and the run ended with
+            // "1 unique conformer(s)" out of 482 -- 199 distinct conformers lost without a trace,
+            // because the message ("skipping") was verbosity-gated and the pass looked successful.
+            // The identical criterion at the write-out site (WriteAcceptedStructures) has always
+            // used `continue`; this brings the two in line.
             if (m_verbosity >= 1)
-                CurcumaLogger::warn_fmt("Energy of {} is {:.2f} kJ/mol, above cutoff of {:.2f} kJ/mol, skipping", mol1->Name(), m_current_energy, m_energy_cutoff);
-            break;
+                CurcumaLogger::warn_fmt("Energy of {} is {:.2f} kJ/mol above the lowest structure, "
+                                        "cutoff is {:.2f} kJ/mol -- structure skipped",
+                    mol1->Name(), m_dE, m_energy_cutoff);
+            m_rejected++;
+            continue;
         }
         bool keep_molecule = true;
         bool reorder = false;

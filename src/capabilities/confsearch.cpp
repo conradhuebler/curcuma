@@ -535,6 +535,7 @@ void ConfSearch::start()
                         continue; // only raw MD snapshots are optimised in Phase 2 (matches PerformMolecularDynamics)
                     Molecule mol(ref_mol);
                     mol.setGeometry(bs.geometry);
+                    mol.setEnergy(bs.energy);
                     mol.setName("bias_" + std::to_string(bs.index));
                     if (first) { mol.writeXYZFile(bias_path); first = false; }
                     else          mol.appendXYZFile(bias_path);
@@ -1066,6 +1067,11 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
         for (const auto& bs : snapshot) {
             Molecule mol(ref_mol);
             mol.setGeometry(bs.geometry);
+            // Claude Generated (Jul 2026): the copy inherits ref_mol's ENERGY together with its atom
+            // list. Without this the exported snapshots all carried the first seed's energy -- a
+            // wrong but plausible number attached to a different geometry (measured: a snapshot
+            // labelled -8.985207 Eh is really worth -8.840638 Eh).
+            mol.setEnergy(bs.energy);
             mol.setName("bias_" + std::to_string(bs.index) + " t=" + std::to_string(static_cast<int>(bs.time)));
             if (first) { mol.writeXYZFile(outputPath(Basename() + ".mtd.xyz")); first = false; }
             else          mol.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
@@ -1084,6 +1090,7 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
         for (int i = 0; i < bias_count; i += stride) {
             Molecule mol(ref_mol);
             mol.setGeometry(new_snapshots[i].geometry);
+            mol.setEnergy(new_snapshots[i].energy); // see the .mtd.xyz export above
             mol.setName("bias_" + std::to_string(new_snapshots[i].index));
             if (first) { mol.writeXYZFile(outputPath(Basename() + ".bias.xyz")); first = false; }
             else          mol.appendXYZFile(outputPath(Basename() + ".bias.xyz"));
@@ -1124,6 +1131,23 @@ nlohmann::json ConfSearch::ChildConfig(const std::string& method, int threads) c
         if (m_controller.contains(s) && m_controller[s].is_object())
             cfg[s] = m_controller[s];
     }
+
+    // Claude Generated (Jul 2026): freeze the GFN-FF topology for every child computation.
+    //
+    // A conformational search explores ONE molecule: if the bonding topology changes, the structure
+    // is a reaction product and is rejected downstream anyway. The default "auto" mode re-derives the
+    // topology mid-run whenever an atom moved more than 0.26 Bohr, and every re-derivation shifts the
+    // energy SCALE (new topology charges / coordination numbers). During a long optimisation of a hot
+    // MD snapshot the optimiser then follows those jumps instead of the physics: measured on a
+    // penta-alanine snapshot, an optimisation "converged" to -9.168083 Eh while its final geometry is
+    // really worth -8.668213 Eh (1312 kJ/mol apart, identical bond topology). One such structure in
+    // the pool becomes the energy reference and pushes every real conformer out of the energy window
+    // -- the run then reports "1 unique conformer" out of 482. With a frozen topology the same
+    // optimisation lands on -8.945487 Eh, matching an independent optimisation of the same basin to
+    // 0.1 kJ/mol. An explicit -gfnff.topology_mode still wins.
+    if (!(cfg.contains("gfnff") && cfg["gfnff"].is_object() && cfg["gfnff"].contains("topology_mode")))
+        cfg["gfnff"]["topology_mode"] = "constant";
+
     return cfg;
 }
 
