@@ -204,6 +204,39 @@ compiler and CPU, not a portable property.
   must keep reading `m_S(mu,nu)` (not the kernel's own `S`, a different
   expression tree).
 
+## curcuma vs gxtb (cross-method, 2026-07-25)
+
+Produced by `scripts/bench_vs_gxtb.py`, which is the only harness that measures
+all three native methods against the same reference binary. It gives gxtb a
+fresh temp dir and `--norestart` per run (reusing `xtbrestart` warm-starts gxtb
+to ~3 iterations and understates its time), and pins curcuma with `-threads K`
+plus `OMP/MKL_NUM_THREADS=K`.
+
+```
+scripts/bench_vs_gxtb.py test_cases/sqm_reference/molecules/complex.xyz \
+    gfnff,gfn1,gfn2 1,16 5 1
+```
+
+complex/231, energy+gradient, median of 5, gxtb 6.7.1 cold-start.
+**`cur/gx < 1.0` means curcuma is faster.**
+
+| method | curcuma K=1 | gxtb K=1 | cur/gx K=1 | curcuma K=16 | gxtb K=16 | cur/gx K=16 |
+|---|---:|---:|---:|---:|---:|---:|
+| gfnff | 43 ms | 33 ms | 1.27 | 37 ms | 27 ms | 1.37 |
+| gfn1  | 987 ms | 1269 ms | **0.78** | 341 ms | 382 ms | **0.89** |
+| gfn2  | 1122 ms | 932 ms | 1.20 | 412 ms | 302 ms | 1.36 |
+
+Before this round the same table read gfnff 1.26/1.59, gfn1 0.89/0.91,
+gfn2 1.32/1.38.
+
+> ⚠️ This table is **invalidated by any change to the integral, SCF or setup
+> path**. Re-measure and record the commit hash when quoting it. Measured at
+> commit `17def9ff`, single socket, MKL, `-mfma`.
+
+Caveat on gfnff: at 43 ms total the run is dominated by process start plus
+one-time setup, so the ratio is sensitive to measurement noise and to the
+`.topo.json` cache being present or absent.
+
 ## What did NOT help / not pursued
 
 - **Forcing MKL instruction set on AMD** (`MKL_ENABLE_INSTRUCTIONS=AVX2/AVX512`):
