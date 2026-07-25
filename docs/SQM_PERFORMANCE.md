@@ -35,11 +35,13 @@ scripts/sqm_bench.sh [N_REPEATS=3] [caffeine triose complex]
 
 | method | curcuma (orig) | curcuma (2026-06) | curcuma (2026-07) | tblite | xtb (cold) |
 |--------|---------------:|------------------:|------------------:|-------:|-----------:|
-| gfn1   | 2982 ms        | 1221 ms           | **1017 ms**       | 2562   | 1367       |
-| gfn2   | 2944 ms        | 1364 ms           | **1083 ms**       | 1567   | 979        |
+| gfn1   | 2982 ms        | 1221 ms           | **793 ms**        | 2562   | 1367       |
+| gfn2   | 2944 ms        | 1364 ms           | **937 ms**        | 1567   | 979        |
 
-- **gfn1: −66%. Beats both tblite and xtb.**
-- **gfn2: −63%. Beats tblite; 1.11× xtb (was ~3×, then 1.39×).**
+- **gfn1: −73%. 1.6× faster than xtb.**
+- **gfn2: −68%. Now at parity with xtb (0.96×; was ~3×, then 1.39×).**
+- The 2026-07 column combines the blocked integral kernels with the
+  FP32 mixed-precision eigensolve, which is now on by default.
 - The 2026-07 column is the shell-pair-blocked integral kernels — see
   [Integral setup (2026-07)](#integral-setup-2026-07) below.
 - Same on the smaller systems: triose gfn1 67 ms (tblite 74, xtb 97);
@@ -193,9 +195,37 @@ compiler and CPU, not a portable property.
   ~15-20 ms while breaking the disjoint-row striping invariant. Documented
   headroom, not implemented.
 
+### Blocking the multipole GRADIENT: tried, measured, reverted
+
+The same treatment was applied to `cgto_multipole_grad_transformed()` (the last
+per-component kernel, ~100 ms of the gfn2 gradient). It is **slower** and was
+reverted. Two measurements, both on complex/231:
+
+| variant | gfn2 gradient |
+|---|---:|
+| per-component (kept) | **173 ms** |
+| blocked, full 2x2x3 moment table | 239 ms |
+| blocked, table bounded by angular momentum | 202 ms |
+
+Why it loses, where the overlap kernels win:
+
+1. **s-heavy pairs dominate by count.** Building the full moment table costs 36
+   `moment1d` calls per primitive pair, but an s-s pair only ever needs 9. Bounding
+   the table by `ang` recovers part of that (239 -> 202 ms) but not enough.
+2. **The hoisted work is cheap here.** The overlap kernels hoist a libm `pow`;
+   this one hoists `moment1d`, whose transcendental is a `sqrt`. Meanwhile the
+   per-component assembly is ~95 lines, so the moments are a small share of the
+   kernel — there is little to amortise.
+3. **The per-pair state is large.** `MpGradPair` is 44 doubles vs 13 for
+   `OverlapPrimPair`, so the table must be written to memory and re-read per
+   component instead of staying in registers.
+
+Conclusion: the remaining gfn2 gradient cost is the **assembly**, not the moment
+evaluation. Blocking is the wrong tool for it; a cheaper assembly (or fewer
+components via symmetry) would be the lever.
+
 ### Remaining headroom
 
-- `cgto_multipole_grad_transformed()` per-component (~63 ms of the gfn2 gradient).
 - Memoizing the primitive-pair invariants across shell pairs by shell *type*
   (all atoms of an element yield byte-equal `alpha`/`coeff`), which would remove
   the remaining `pow` entirely rather than just de-duplicating it per shell pair.
@@ -249,6 +279,54 @@ one-time setup, so the ratio is sensitive to measurement noise and to the
   and a truncated `m_wfn.C` breaks the `mulliken` CPSCF path and orbital
   analysis. Earlier measurements (and this occupancy) suggest a net loss; left as
   documented headroom.
+
+## FP32 mixed-precision eigensolve — now ON by default (2026-07)
+
+Ported from the ROCm work, where FP64 is 1/32-1/64 of FP32. The CPU/MKL
+implementation (`ssygst` + `ssyevd`, `xtb_scf.cpp`) had existed since then but was
+opt-in, documented as "~10% faster". That figure was measured when setup+gradient
+were ~40% of runtime; after the blocked integrals the eigensolve is **58%**
+(631 of 1080 ms for gfn2), so the same trick is worth much more:
+
+| complex/231, 1 core | FP64 | mixed | eigensolve |
+|---|---:|---:|---|
+| gfn1 | 1027 ms | **793 ms** | 771 -> 561 ms |
+| gfn2 | 1077 ms | **937 ms** | 630 -> 490 ms |
+
+Convergence is never accepted on an FP32 step, so the fixed point is reached in
+FP64. Cost over the 14-molecule reference set: energies agree to **1e-12 Eh**
+(11/14 bit-identical, 3 move in the 12th decimal), gradients to **6e-7 Eh/Bohr**.
+For scale, the 1e-8 tblite gate is 10000x looser than the energy shift, and the
+default `scf_threshold=1e-5` already costs 1.1e-6 Eh/Bohr on its own — four times
+more. Use `-scf_mixed_precision false` when maximum gradient precision matters.
+
+## The iteration-count gap is a criterion artifact, not slower iterations
+
+gxtb converges `complex` in **15** iterations, curcuma in **19** — but per
+iteration curcuma is already the faster of the two:
+
+| | iterations | SCF time | per iteration |
+|---|---:|---:|---:|
+| gxtb 6.7.1 | 15 | 0.595 s | 39.7 ms |
+| curcuma | 19 | 0.733 s | **38.6 ms** |
+
+The difference is what "converged" means. curcuma tests `max|dq_sh|`
+(`xtb_native.cpp`, `.cwiseAbs().maxCoeff()`); xtb tests **RMSdq**. Over 340 shells
+a max-norm is systematically stricter at the same numeric threshold, so at
+`scf_threshold=1e-5` curcuma converges *further* than xtb does — which the
+gradient data confirms (1.1e-6 Eh/Bohr vs fully-converged).
+
+Comparing at equal convergence instead of equal threshold:
+
+| `-scf_threshold` | iterations | total | dE vs 1e-8 | max\|dgrad\| |
+|---|---:|---:|---:|---:|
+| 1e-5 (default) | 19 | 1077 ms | 2.8e-11 | 1.1e-06 |
+| 5e-5 | 16 | **935 ms** | 1.2e-09 | 9.8e-06 |
+| 1e-4 | 15 | 898 ms | 8.4e-09 | 2.3e-05 |
+
+At 5e-5 — roughly xtb's effective convergence level — curcuma matches gxtb's
+932 ms. The default is deliberately NOT loosened: the energy stays excellent but
+the gradient degrades an order of magnitude, which matters for `-opt`/MD.
 
 ## Residual gap to xtb (gfn2 complex, 1083 vs 979 ms)
 
