@@ -102,8 +102,8 @@ void D3ParameterGenerator::initializeReferenceData()
     // Using complete s-dftd3 reference data to fix 1.48x energy error
     m_reference_cn = std::vector<std::vector<double>>(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
 
-    // Load complete CN reference data from s-dftd3 (103×7=721 values)
-    extern std::vector<double> reference_cn_data_complete;
+    // Load complete CN reference data from s-dftd3 (103×7=721 values).
+    // Declared in d3_reference_data.h (const std::array, .rodata — no static-init cost).
 
     if (reference_cn_data_complete.size() < 721) {  // Need 103 elements × 7 references = 721
         CurcumaLogger::error("Reference CN data insufficient: expected ≥721, got " +
@@ -150,7 +150,7 @@ void D3ParameterGenerator::copyReferenceData()
     // Import complete s-dftd3 C6 reference data (262,444 values)
     // Data source: reference_c6_data_complete extracted from s-dftd3/refrence.f90
     // Structure: 7×7×(103+1)×103/2 = 262,444 values
-    extern std::vector<double> reference_c6_data_complete;
+    // Declared in d3_reference_data.h (const std::array, .rodata — no static-init cost).
 
     if (reference_c6_data_complete.size() != 262444) {
         CurcumaLogger::error("C6 reference data size mismatch: expected 262444, got " +

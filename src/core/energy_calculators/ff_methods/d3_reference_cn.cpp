@@ -15,10 +15,13 @@
  * was scrambled, corrupting D3 C6 interpolation -- carbon worst, ~+61% on C-C).
  */
 
-#include <vector>
+#include <array>
 
 // Coordination number reference data (721 values), one element per line.
-std::vector<double> reference_cn_data_complete = {
+// Claude Generated (Jul 2026): const std::array (constant-initialized into .rodata) instead
+// of a global std::vector (which ran a heap-alloc + copy at every process start). See
+// d3_reference_data.h. Size 824 = literal count.
+extern const std::array<double, 824> reference_cn_data_complete = {
     +0.9118000, +0.0000000, -1.0000000, -1.0000000, -1.0000000, -1.0000000, -1.0000000,  //   1 H
     +0.0000000, -1.0000000, -1.0000000, -1.0000000, -1.0000000, -1.0000000, -1.0000000,  //   2 He
     +0.0000000, +0.9865000, -1.0000000, -1.0000000, -1.0000000, -1.0000000, -1.0000000,  //   3 Li
