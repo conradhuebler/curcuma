@@ -297,7 +297,18 @@ void XTB::getHamiltonianH0(const Vector& se,
             const int ang_b = m_basis.ang_sh[ish_b];
 
             if (ang_a < 2 && ang_b < 2) {
-                // ---- s/p scalar path (byte-identical to the pre-X-I1 code) ----
+                // ---- s/p path: B2 (Jul 2026) computes the whole component block
+                // from one pass over primitive pairs instead of re-running the
+                // primitive loop (and its pow/exp) once per AO component. ----
+                double blk_s[9];
+                CGTO::cgto_overlap_block(sh_a, ang_a, sh_b, ang_b,
+                                         xyz_bohr[3 * iat + 0],
+                                         xyz_bohr[3 * iat + 1],
+                                         xyz_bohr[3 * iat + 2],
+                                         xyz_bohr[3 * jat + 0],
+                                         xyz_bohr[3 * jat + 1],
+                                         xyz_bohr[3 * jat + 2],
+                                         blk_s);
                 for (int ia = 0; ia < ia_nao; ++ia) {
                     const int mu = ia_start + ia;
                     const int t_a = ao_to_type(ang_a, ia);
@@ -308,17 +319,9 @@ void XTB::getHamiltonianH0(const Vector& se,
                         const int t_b = ao_to_type(ang_b, jb);
                         if (t_b < 0) continue;
 
-                        // CGTO overlap depends on AO types (px, py, pz, etc.)
                         const double s_ab = (iat == jat && ish_a == ish_b && t_a == t_b)
                             ? 1.0  // on-atom same-orbital → identity
-                            : CGTO::cgto_overlap(sh_a, sh_b,
-                                                 xyz_bohr[3 * iat + 0],
-                                                 xyz_bohr[3 * iat + 1],
-                                                 xyz_bohr[3 * iat + 2],
-                                                 xyz_bohr[3 * jat + 0],
-                                                 xyz_bohr[3 * jat + 1],
-                                                 xyz_bohr[3 * jat + 2],
-                                                 t_a, t_b);
+                            : blk_s[ia * jb_nao + jb];
 
                         S(mu, nu) = s_ab;
                         H0(mu, nu) = avg_eps * h_factor * s_ab;

@@ -338,6 +338,92 @@ inline double cgto_overlap(const Shell& shell_a, const Shell& shell_b,
 }
 
 /**
+ * @brief Shell-pair-blocked contracted overlap (B2, Jul 2026)
+ *
+ * cgto_overlap() above is called once per AO-COMPONENT pair, so a p-p shell pair
+ * runs the whole nprim_a x nprim_b primitive loop nine times, and each leaf
+ * (primitive_ss/sp/pp_overlap) recomputes gamma and
+ * S00 = pow(pi/gamma, 1.5) * exp(-ai*aj/gamma * R2) from scratch -- even though
+ * S00 depends only on the primitive pair, not on the cartesian powers. The
+ * pow() is the expensive part (a libm call per primitive pair per component).
+ *
+ * This emits the whole component block from a single pass over primitive pairs:
+ * gamma, the product centre and S00 are computed once per pair, then every
+ * component is assembled from them.
+ *
+ * Bit-identity notes (why the emitted values match the per-component path):
+ *   - gamma = ai + aj and the exponent -ai*aj/gamma*R2 are invariant under
+ *     swapping the two primitives (IEEE + and * are commutative), so the single
+ *     S00 also serves the transposed p-s branch, which passed (aj, ai).
+ *   - pow(M_PI/gamma, 1.5) is kept verbatim; rewriting it as t*sqrt(t) would
+ *     round differently.
+ *   - Px = (ai*xa + aj*xb) / gamma stays a division (cgto_overlap_grad uses
+ *     * invg instead -- a DIFFERENT rounding; do not unify the two kernels).
+ *   - ci * cj * prim already parses as (ci*cj) * prim, so hoisting cc = ci*cj
+ *     is exact, and accumulation stays i-major/j-minor.
+ * The residual difference versus the per-component path is GCC's FMA
+ * contraction, which the -mfma build enables; see the B3 commit message.
+ *
+ * Layout: component (ia, jb) at c = ia*ncb + jb, ncb = 2*ang_b + 1.
+ * s/p only (ang <= 1); d-touching pairs go through sphericalOverlapBlock().
+ */
+inline void cgto_overlap_block(const Shell& shell_a, int ang_a,
+                               const Shell& shell_b, int ang_b,
+                               double xa, double ya, double za,
+                               double xb, double yb, double zb,
+                               double* out_S)
+{
+    const int nca = 2 * ang_a + 1;
+    const int ncb = 2 * ang_b + 1;
+    for (int c = 0; c < nca * ncb; ++c) out_S[c] = 0.0;
+
+    // Local AO index -> cartesian axis, tblite p ordering [py, pz, px].
+    // axis < 0 marks an s function.
+    static const int p_axis[3] = {1, 2, 0};
+    int axa[3], axb[3];
+    for (int ia = 0; ia < nca; ++ia) axa[ia] = (ang_a == 0) ? -1 : p_axis[ia];
+    for (int jb = 0; jb < ncb; ++jb) axb[jb] = (ang_b == 0) ? -1 : p_axis[jb];
+
+    const double dx = xb - xa, dy = yb - ya, dz = zb - za;   // as in cgto_overlap
+    const double R2 = dx * dx + dy * dy + dz * dz;
+
+    for (int i = 0; i < shell_a.nprim; ++i) {
+        const double ai = shell_a.alpha[i];
+        const double ci = shell_a.coeff[i];
+        for (int j = 0; j < shell_b.nprim; ++j) {
+            const double aj = shell_b.alpha[j];
+            const double cj = shell_b.coeff[j];
+
+            const double gamma = ai + aj;
+            const double Px = (ai * xa + aj * xb) / gamma;
+            const double Py = (ai * ya + aj * yb) / gamma;
+            const double Pz = (ai * za + aj * zb) / gamma;
+            const double S00 = std::pow(M_PI / gamma, 1.5)
+                             * std::exp(-ai * aj / gamma * R2);
+
+            const double PA[3] = {Px - xa, Py - ya, Pz - za};
+            const double PB[3] = {Px - xb, Py - yb, Pz - zb};
+            const double half_inv_g = 0.5 / gamma;
+            const double cc = ci * cj;
+
+            for (int ia = 0; ia < nca; ++ia) {
+                const int aa = axa[ia];
+                for (int jb = 0; jb < ncb; ++jb) {
+                    const int ab = axb[jb];
+                    double v;
+                    if (aa < 0 && ab < 0)        v = S00;                       // s-s
+                    else if (aa < 0)             v = S00 * PB[ab];              // s-p
+                    else if (ab < 0)             v = S00 * PA[aa];              // p-s
+                    else if (aa == ab)           v = S00 * (PA[aa] * PB[ab] + half_inv_g);
+                    else                         v = S00 * PA[aa] * PB[ab];
+                    out_S[ia * ncb + jb] += cc * v;
+                }
+            }
+        }
+    }
+}
+
+/**
  * @brief Gram-Schmidt orthogonalize shell_b to shell_a (same angular momentum)
  *
  * TBLite basis/ortho.f90: When an atom has two shells with the same angular momentum
