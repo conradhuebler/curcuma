@@ -969,29 +969,72 @@ bool SimpleMD::Initialise()
             m_bias_threads.push_back(thread);
             m_bias_pool->addThread(thread);
         }
+        // Claude Generated (Jul 2026): resolve the hills file before touching FileIterator, which
+        // THROWS on a missing file -- an uncaught std::runtime_error here aborted the whole MD run.
+        // A restart written before Jul 2026 (or copied to another directory) records a bare
+        // "<basename>.mtd.xyz" while the file sits in the BMT directory, so try the recorded path
+        // first, then the two canonical locations. An unresolvable file is a warning, not a crash:
+        // the run continues with an empty bias pool, which is exactly what a fresh run does.
+        auto resolveBiasFile = [this](const std::string& recorded) -> std::string {
+            std::vector<std::string> candidates;
+            if (!recorded.empty() && recorded != "none")
+                candidates.push_back(recorded);
+            candidates.push_back(outputPath(Basename() + ".mtd.xyz"));
+            candidates.push_back(Basename() + ".mtd.xyz");
+            for (const auto& c : candidates) {
+                std::ifstream test(c);
+                if (test.good())
+                    return c;
+            }
+            return "";
+        };
+
         if (m_restart) {
-            if (m_verbosity >= 1) {
-                std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
-                for (const auto& i : m_bias_json)
-                    std::cout << i << std::endl;
-            }
-            FileIterator file(m_rmsd_ref_file);
-            int index = 0;
-            while (!file.AtEnd()) {
-                Molecule mol = file.Next();
+            const std::string bias_file = resolveBiasFile(m_rmsd_ref_file);
+            if (bias_file.empty()) {
+                // fmt::print (not CurcumaLogger) for the same reason as the neighbouring cout: the
+                // global logger level is still clamped to 0 by the energy-method setup at this point,
+                // so a warn_fmt here would be swallowed. Gated on m_verbosity to honour silent mode.
                 if (m_verbosity >= 1)
-                    std::cout << m_bias_json[index] << std::endl;
-                int thread_index = index % m_bias_threads.size();
-                m_bias_threads[thread_index]->addGeometry(mol.getGeometry(), m_bias_json[index]);
-                ++index;
+                    fmt::print("[WARNING] RMSD-MTD restart: hills file '{}' not found -- continuing with an empty bias pool\n",
+                        m_rmsd_ref_file.empty() ? std::string("none") : m_rmsd_ref_file);
+            } else {
+                if (m_verbosity >= 1) {
+                    std::cout << "Reading structure files from " << bias_file << std::endl;
+                    for (const auto& i : m_bias_json)
+                        std::cout << i << std::endl;
+                }
+                FileIterator file(bias_file);
+                int index = 0;
+                while (!file.AtEnd()) {
+                    Molecule mol = file.Next();
+                    // The bias metadata (counter/index/...) and the geometry file are two separate
+                    // artefacts; a truncated or mismatched pair must not read out of bounds.
+                    if (index >= static_cast<int>(m_bias_json.size())) {
+                        if (m_verbosity >= 1)
+                            fmt::print("[WARNING] RMSD-MTD restart: {} holds more structures than the restart metadata ({}) -- ignoring the surplus\n",
+                                bias_file, static_cast<int>(m_bias_json.size()));
+                        break;
+                    }
+                    if (m_verbosity >= 1)
+                        std::cout << m_bias_json[index] << std::endl;
+                    int thread_index = index % m_bias_threads.size();
+                    m_bias_threads[thread_index]->addGeometry(mol.getGeometry(), m_bias_json[index]);
+                    ++index;
+                }
+                m_bias_structure_count = index;
             }
-            m_bias_structure_count = index;
-        } else {
-            if (m_rmsd_ref_file != "none") {
+        } else if (m_rmsd_ref_file != "none") {
+            // User-supplied reference structures (-rmsd_mtd_ref_file): a missing file IS a user
+            // error, so it stays loud -- but reported instead of an uncaught exception.
+            std::ifstream test(m_rmsd_ref_file);
+            if (!test.good()) {
+                fmt::print("[ERROR] RMSD-MTD: reference file '{}' (-rmsd_mtd_ref_file) not found -- starting without preloaded hills\n",
+                    m_rmsd_ref_file);
+            } else {
                 if (m_verbosity >= 1)
                     std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
                 int index = 0;
-
                 FileIterator file(m_rmsd_ref_file);
                 while (!file.AtEnd()) {
                     Molecule mol = file.Next();
@@ -1529,7 +1572,12 @@ nlohmann::json SimpleMD::WriteRestartInformation()
         restart["rmsd_econv"] = m_rmsd_econv;
         restart["wtmtd"] = m_wtmtd;
         restart["rmsd_DT"] = m_rmsd_DT;
-        restart["rmsd_ref_file"] = Basename() + ".mtd.xyz";
+        // Claude Generated (Jul 2026): record the path the hills file was ACTUALLY written to.
+        // Every writer of ".mtd.xyz" goes through outputPath(), so under BMT the file lives in
+        // "<basename>.<keyword>.<timestamp>/". Storing the bare name here made every restart point
+        // at a non-existent CWD path -> the reload in Initialise() threw an uncaught
+        // std::runtime_error ("File not found") and the whole run aborted with exit 1.
+        restart["rmsd_ref_file"] = outputPath(Basename() + ".mtd.xyz");
         restart["counter"] = m_bias_structure_count;
         restart["rmsd_atoms"] = m_rmsd_atoms;
         std::vector<json> bias(m_bias_structure_count);
@@ -2648,6 +2696,13 @@ void SimpleMD::finalizeRun()
     if (m_rmsd_mtd) {
         if (m_verbosity >= 1)
             std::cout << "Sum of Energy of COLVARs:" << std::endl;
+        // Claude Generated (Jul 2026): the final hills dump must TRUNCATE on its first structure and
+        // append afterwards. The old condition "i == j && i == 0" only truncates when bias thread 0
+        // owns a structure at position 0 -- with an empty thread 0 (round-robin distribution) every
+        // structure was appended, so a stale .mtd.xyz (e.g. from an earlier run sharing the same BMT
+        // directory) silently got this run's hills appended to it and the restart reload then read a
+        // mixture of two runs.
+        bool first_hill_dump = true;
         for (int i = 0; i < m_bias_threads.size(); ++i) {
             auto structures = m_bias_threads[i]->getBiasStructure();
             for (int j = 0; j < structures.size(); ++j) {
@@ -2657,9 +2712,10 @@ void SimpleMD::finalizeRun()
                 m_rmsd_mtd_molecule.setGeometry(structures[j].geometry);
                 m_rmsd_mtd_molecule.setEnergy(structures[j].energy);
                 m_rmsd_mtd_molecule.setName(std::to_string(structures[j].index) + " " + std::to_string(structures[j].rmsd_reference));
-                if (i == j && i == 0)
+                if (first_hill_dump) {
                     m_rmsd_mtd_molecule.writeXYZFile(outputPath(Basename() + ".mtd.xyz"));
-                else
+                    first_hill_dump = false;
+                } else
                     m_rmsd_mtd_molecule.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
             }
         }
@@ -3283,8 +3339,19 @@ void SimpleMD::Rattle()
     if (max_err_12 > m_rattle_max_err_12) m_rattle_max_err_12 = max_err_12;
     if (max_err_13 > m_rattle_max_err_13) m_rattle_max_err_13 = max_err_13;
 
-    if (move)
-        RemoveRotations();
+    // Claude Generated (Jul 2026): the unconditional per-fragment RemoveRotations() that used to sit
+    // here is gone. It zeroed EVERY fragment's linear and angular momentum on EVERY constrained step,
+    // which silently disabled all inter-fragment motion: an RMSD-MTD bias (or any collective force)
+    // accelerates two fragments apart, and the removal threw that momentum away again in the same
+    // step. Measured A/B on the acetic-acid dimer (3 ps, gfnff, rmsd_mtd, T=500 K, seed 42, rattle 2):
+    // with the call the fragment-COM distance spanned 0.43 A and 44 hills were deposited, without it
+    // 2.17 A and 127 hills -- i.e. "the bias does not grip" under RATTLE. Pinned by
+    // test_cases/cli/simplemd/15_rattle_mtd_fragments.
+    // It also removed 6*nfrag DOF while the DOF bookkeeping in InitConstrainedBonds only accounts for
+    // the configured remove_com_mode, so the reported temperature was too low (thermostat overheats).
+    // COM/rotation removal is the main loop's job (m_rm_COM_step + remove_com_mode, applied before the
+    // integrator for Verlet AND Rattle), so this path now behaves like the unconstrained one.
+    (void)move;
 
     delete[] coord;
     for (int i = 0; i < m_natoms; ++i) {
@@ -3432,7 +3499,9 @@ void SimpleMD::EvaluateBias(bool do_deposit)
             Molecule out_mol(m_molecule);
             out_mol.setGeometry(full_geometry);
             out_mol.setName(std::to_string(m_currentStep));
-            out_mol.writeXYZFile(Basename() + ".mtd.xyz");
+            // Claude Generated (Jul 2026): route through outputPath() like every other .mtd.xyz
+            // writer (BMT rule) -- the shared-pool path was the only one dropping it into the CWD.
+            out_mol.writeXYZFile(outputPath(Basename() + ".mtd.xyz"));
             if (m_nocolvarfile == false) {
                 std::ofstream colvarfile;
                 colvarfile.open(outputPath("COLVAR"));
@@ -3704,7 +3773,7 @@ void SimpleMD::EvaluateBias(bool do_deposit)
             Molecule out_mol(m_molecule);
             out_mol.setGeometry(full_geometry);
             out_mol.setName(std::to_string(m_currentStep));
-            out_mol.appendXYZFile(Basename() + ".mtd.xyz");
+            out_mol.appendXYZFile(outputPath(Basename() + ".mtd.xyz")); // BMT, see the write above
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::result_fmt("RMSD-MTD: Deposited bias structure {} (pool total: {})",
                     new_count, m_shared_pool->biasStructureCount());

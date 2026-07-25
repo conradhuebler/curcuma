@@ -170,6 +170,9 @@ add_cli_test(simplemd 13_rmsd_mtd_legacy_ab)
 set_tests_properties(cli_simplemd_13_rmsd_mtd_legacy_ab PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;rmsd_mtd")
 add_cli_test(simplemd 14_rmsd_mtd_coverage)
 set_tests_properties(cli_simplemd_14_rmsd_mtd_coverage PROPERTIES TIMEOUT 200 LABELS "simplemd;gfnff;rmsd_mtd")
+# Claude Generated (Jul 2026): RATTLE must not freeze inter-fragment motion (bias-under-constraints)
+add_cli_test(simplemd 15_rattle_mtd_fragments)
+set_tests_properties(cli_simplemd_15_rattle_mtd_fragments PROPERTIES TIMEOUT 250 LABELS "simplemd;gfnff;rmsd_mtd;rattle")
 
 # =============================================================================
 # ConfSearch Tests (Claude Generated, Jul 2026)
