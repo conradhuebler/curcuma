@@ -44,7 +44,22 @@ std::string createBMTDir(const std::string& basename, const std::string& keyword
 
 #ifdef C17
 #ifndef _WIN32
-    std::filesystem::create_directories(bmt_dir);
+    // Claude Generated (Jul 2026): never hand out a directory that already exists. The timestamp has
+    // one-second resolution, so two short runs started in the same second used to SHARE one output
+    // directory: they overwrote each other's trajectory/COLVAR/hills files, and -- worse -- the
+    // second run found the first run's curcuma_restart.json there (RestartFiles() searches the output
+    // directory) and silently "resumed" a foreign run instead of starting fresh. Suffix on collision.
+    if (fs::exists(bmt_dir)) {
+        const std::string base_dir = bmt_dir;
+        for (int suffix = 2; suffix < 1000; ++suffix) {
+            std::string candidate = base_dir + "_" + std::to_string(suffix);
+            if (!fs::exists(candidate)) {
+                bmt_dir = candidate;
+                break;
+            }
+        }
+    }
+    fs::create_directories(bmt_dir);
 #endif
 #endif
 

@@ -58,7 +58,7 @@ tools/
 
 ### 🤖 BMT Output Directory System (`bmt_utils.h/cpp`)
 - **Default behavior**: All commands create a `Basename.Keyword.YYYYMMDD_HHMMSS` directory for output files
-- **`createBMTDir(basename, keyword)`**: Creates the timestamped directory, logs the path
+- **`createBMTDir(basename, keyword)`**: Creates the timestamped directory, logs the path. **Collision-safe since Jul 2026**: the timestamp has 1-second resolution, so an existing directory gets a `_2`, `_3`, … suffix — two runs started in the same second used to share one directory, overwriting each other's output and letting the second run silently resume the first via its `curcuma_restart.json`
 - **`writeMetadata(bmt_dir, basename, method, input_file)`**: Writes `metadata.json` with calculation info (JSON format)
 - **`processBakFiles(bmt_dir, bak_files)`**: Copies listed files from BMT dir back to CWD; warns if BMT is empty
 - **`outputPath(bmt_dir, filename)`**: Returns `bmt_dir/filename` or just `filename` when BMT is disabled

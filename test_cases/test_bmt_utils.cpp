@@ -110,8 +110,21 @@ void test_createBMTDir()
 #endif
 #endif
 
+    // Claude Generated (Jul 2026): a second call in the same second must NOT return the same
+    // directory. Two runs sharing one output directory overwrite each other's files, and the second
+    // one picks up the first's curcuma_restart.json (RestartFiles() searches the output dir) and
+    // silently resumes a foreign run instead of starting fresh.
+    std::string bmt_dir2 = BMTUtils::createBMTDir("test_mol", "opt");
+    TEST_ASSERT(bmt_dir2 != bmt_dir, "second createBMTDir in the same second returns a different directory");
+#ifdef C17
+#ifndef _WIN32
+    TEST_ASSERT(std::filesystem::exists(bmt_dir2), "second BMT directory exists on disk");
+#endif
+#endif
+
     // Cleanup
     cleanup_dir(bmt_dir);
+    cleanup_dir(bmt_dir2);
 }
 
 void test_writeMetadata()
@@ -121,22 +134,25 @@ void test_writeMetadata()
     std::string bmt_dir = BMTUtils::createBMTDir("test_meta", "md");
     BMTUtils::writeMetadata(bmt_dir, "test_meta", "md", "test_meta.xyz");
 
-    // Read metadata file and verify contents
-    std::string meta_path = bmt_dir + "/metadata.txt";
+    // Read metadata file and verify contents. Claude Generated (Jul 2026): the test still looked for
+    // the historical plain-text "metadata.txt" with "key: value" lines; writeMetadata() has been
+    // writing JSON ("metadata.json") for a while, so this assertion had been failing independently
+    // of what it is meant to guard.
+    std::string meta_path = bmt_dir + "/metadata.json";
     std::ifstream meta(meta_path);
-    TEST_ASSERT(meta.is_open(), "metadata.txt file exists and is readable");
+    TEST_ASSERT(meta.is_open(), "metadata.json file exists and is readable");
 
     if (meta.is_open()) {
         std::string line;
         bool found_basename = false, found_method = false, found_input = false;
         while (std::getline(meta, line)) {
-            if (line.find("basename: test_meta") != std::string::npos) found_basename = true;
-            if (line.find("method: md") != std::string::npos) found_method = true;
-            if (line.find("input_file: test_meta.xyz") != std::string::npos) found_input = true;
+            if (line.find("\"basename\": \"test_meta\"") != std::string::npos) found_basename = true;
+            if (line.find("\"method\": \"md\"") != std::string::npos) found_method = true;
+            if (line.find("\"input_file\": \"test_meta.xyz\"") != std::string::npos) found_input = true;
         }
-        TEST_ASSERT(found_basename, "metadata.txt contains basename");
-        TEST_ASSERT(found_method, "metadata.txt contains method");
-        TEST_ASSERT(found_input, "metadata.txt contains input_file");
+        TEST_ASSERT(found_basename, "metadata.json contains basename");
+        TEST_ASSERT(found_method, "metadata.json contains method");
+        TEST_ASSERT(found_input, "metadata.json contains input_file");
     }
 
     // Cleanup
