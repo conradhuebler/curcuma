@@ -64,6 +64,19 @@ ConfSearch keeps the two energy worlds strictly separate:
   bias force is purely geometry-based (`W = k·counter`); the stored `energy` is
   metadata only and never enters the force, so no cross-PES comparison occurs.
 
+- **The final statistics report each PES against itself** (fixed Jul 2026). The
+  accepted conformers are ranked on `opt_method`, so the closing "search lowered
+  the energy by X kJ/mol" line uses the **`opt_method`** energy of the input
+  structure. The `md_method` progression is reported separately as
+  `exploration (<md_method>) lowered its own minimum by ... -- separate PES`,
+  comparing the `md_method` initial energy to the `md_method` running best.
+  Before the fix the `md_method` initial energy was subtracted from the
+  `opt_method` global minimum, which produced absurd numbers
+  (`gfnff: -9.005 -> -85.017 Eh`, "lowered by 199567 kJ/mol"). The `opt_method`
+  reference energy is part of the checkpoint (`initial_energy_opt`), so a
+  `-restart` resume keeps the ranking-PES comparison; checkpoints written before
+  Jul 2026 simply omit that line.
+
 **Skip rule:** when `opt_method == md_method` (the default single-method case)
 Phase 3b and the separate refinement step are skipped entirely — Phase 4 runs
 its single-PES path and one minimum per conformer is fed back, exactly as before.

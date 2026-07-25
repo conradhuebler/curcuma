@@ -20,6 +20,17 @@ All features below are 🤖 AI-generated, ⚙️ machine-tested only — **human
   plain Verlet with 0 constraints despite being documented and handled by `InitConstrainedBonds`.
   Now `rattle == 1 || rattle == 2`. Cleaned up the constraint printout (summary + element-labelled
   per-bond list).
+- **RATTLE inter-fragment freeze fix (Jul 2026)**: `SimpleMD::Rattle()` ran an unconditional
+  per-fragment `RemoveRotations()` at the end of every constrained step, zeroing each fragment's
+  linear + angular momentum. Since Phase A switches RATTLE on for every cycle at
+  `T >= rattle_threshold_temp`, the RMSD-MTD bias could not separate/rearrange fragments in any
+  multi-fragment system — it accelerated them and the removal threw that momentum away in the same
+  step. Removed (COM/rotation removal belongs to the main loop, `remove_com_motion`/`remove_com_mode`).
+  A/B acetic-acid dimer, 3 ps, `-rattle 2`: fragment-COM span 0.43 → 2.17 A, 44 → 127 hills;
+  single-fragment runs unchanged. Test: `cli_simplemd_15_rattle_mtd_fragments`.
+- **RMSD-aware seeding (Jul 2026)**: `seed_selection=diverse` (default) requires `seed_min_rmsd`
+  spacing between the seeds of a cycle instead of taking the `seed_rank` lowest energies; relaxes
+  the spacing when too few distinct basins exist. See [CONFSEARCH_SEEDING.md](CONFSEARCH_SEEDING.md).
 
 ## Open TODOs / Roadmap
 
@@ -126,6 +137,20 @@ the swallowed `warn_fmt`.
 (coupling `k`↔`alpha`, total-force capping, or a true well-tempered force damping) is not yet
 addressed — the caps/abort above bound the cross-run heating and provide a safety net, but a
 single run with an over-wide hill can still spike. 🤖 AI-generated, ⚙️ machine-tested only.
+
+### 5. Genetic structure crossing (GC) — NOT IMPLEMENTED
+ConfSearch is MTD-only: every new structure comes from a biased MD trajectory. CREST's default
+workflow (iMTD-**GC**) adds a purely geometric, energy-free step after the MTD phase: pairs of
+conformers from the current ensemble are "crossed" by exchanging their internal coordinates
+(dihedrals of the rotatable bonds / Z-matrix entries), the offspring are optimised and the unique
+survivors enter the ensemble. It combines local changes that were found independently (conformer A
+has the good ring pucker, conformer B the good side-chain rotation → the child has both) at the cost
+of a geometry optimisation, without any MD time. curcuma has **no equivalent**; there is no genetic,
+crossover or mating step anywhere in the codebase. A port would fit as a phase between the ConfScan
+dedup and the cumulative pool: enumerate rotatable bonds (topology is available), build offspring
+dihedral sets from the accepted conformers, optimise at `md_method`, and feed survivors into the
+ConfScan filter + the shared bias pool. Open questions: pair-selection policy, how many offspring per
+pair, and whether the crossing should respect the symmetry permutations already cached.
 
 ## Verification anchors
 - Bit-identity of the Phase-B MTD refactor (perms off): byte-identical `.mtd.xyz`/`.bias.xyz` vs the

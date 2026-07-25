@@ -129,6 +129,14 @@ private:
      * permutations applied to the target. Both geometries must share the canonical atom order. */
     double PermRMSD(const Geometry& reference, const Geometry& target) const;
 
+    /* Claude Generated (Jul 2026): pick the seeds for the next temperature cycle out of the
+     * structures that already passed the seed energy window. "energy" keeps the seed_rank lowest
+     * ones; "diverse" walks the same energy ranking but skips a candidate that sits closer than
+     * seed_min_rmsd (permutation-aware best-fit RMSD) to a seed already chosen, so MD time is not
+     * spent four times on the same basin. Sorts the vector in place, deletes the rejected
+     * molecules and shrinks the vector to the kept seeds. Returns the number of rejects. */
+    int SelectSeeds(std::vector<Molecule*>& window_seeds) const;
+
     /* Lets have this for all modules */
     virtual nlohmann::json WriteRestartInformation() override;
 
@@ -147,6 +155,7 @@ private:
         int natoms = 0;
         std::string md_method, opt_method;
         double global_min = 0, best_energy = 0, initial_energy = 0;
+        double initial_energy_opt = 0; // opt_method energy of the input structure (dual-method runs)
         std::vector<int> elements; // atomic numbers (shared by all frames)
         std::vector<BiasStructure> bias; // full bias pool (geometry + metadata)
         std::vector<Molecule> seeds; // m_in_stack for the resumed cycle
@@ -212,6 +221,9 @@ private:
     bool m_rmsd_mtd_screen = true;
     double m_rmsd_mtd_cutoff_tol = 1.0e-8, m_rmsd_mtd_screen_margin = 0.0;
     std::string m_seed_window_schedule = "static";
+    // Claude Generated (Jul 2026): RMSD-aware seed selection (see SelectSeeds).
+    std::string m_seed_selection = "diverse";
+    double m_seed_min_rmsd = 0.0, m_seed_diversity_factor = 2.0;
     std::string m_bias_calibration = "off"; // adaptive MTD width mode: off | couple | cluster
     std::string m_bias_scale_mode = "global"; // global | weighted (RMSF-weighted RMSD)
     double m_bias_couple_factor = 1.0, m_bias_energy_tol = 4.0;
@@ -268,6 +280,9 @@ private:
     PARAM(energy_window, Double, 100.0, "Energy window in kJ/mol above the running minimum for keeping conformers.", "Filtering", {})
     PARAM(seed_rank, Int, 1, "Maximum number of lowest-energy seeds carried into the next cycle. 0 keeps every structure inside seed_energy_window.", "Filtering", {})
     PARAM(seed_energy_window, Double, 50.0, "Energy window in kJ/mol versus the running global minimum for selecting next-cycle MD seeds.", "Filtering", {})
+    PARAM(seed_selection, String, "diverse", "How the next-cycle seeds are picked from the structures inside seed_energy_window: energy = strictly the seed_rank lowest-energy ones; diverse = lowest-energy first, then only structures at least seed_min_rmsd away (permutation-aware best-fit RMSD) from every seed already chosen.", "Filtering", {})
+    PARAM(seed_min_rmsd, Double, 0.0, "Minimum RMSD in Angstrom between two seeds in the diverse selection. 0 derives it as seed_diversity_factor * rmsd.", "Filtering", {})
+    PARAM(seed_diversity_factor, Double, 2.0, "Multiplier applied to rmsd when seed_min_rmsd is 0. Values around 2 keep the seeds one dedup radius apart from each other.", "Filtering", {})
     PARAM(seed_window_schedule, String, "static", "Seed window schedule: static or exp. exp shrinks the window each cycle by seed_window_decay.", "Filtering", {})
     PARAM(seed_window_decay, Double, 0.5, "Per-cycle multiplier applied to seed_energy_window in the exp schedule.", "Filtering", {})
 

@@ -286,6 +286,7 @@ void ConfSearch::start()
         m_topo_matrix = m_topo_ref.DistanceMatrix().second;
         m_global_min = m_restart.global_min;
         m_initial_energy = m_restart.initial_energy;
+        m_initial_energy_opt = m_restart.initial_energy_opt; // opt-PES anchor for the final statistics
         m_best_energy = m_restart.best_energy;
         m_permutation_cache = m_restart.permutations;
         for (auto* mol : m_in_stack) delete mol;
@@ -710,24 +711,9 @@ void ConfSearch::start()
             }
         }
 
-        // seed_rank trimming: keep only the N lowest-energy seeds.
-        if (m_seed_rank > 0 && static_cast<int>(window_seeds.size()) > m_seed_rank) {
-            int rejected_by_rank = static_cast<int>(window_seeds.size()) - m_seed_rank;
-            std::partial_sort(window_seeds.begin(),
-                               window_seeds.begin() + m_seed_rank,
-                               window_seeds.end(),
-                               [](const Molecule* a, const Molecule* b) {
-                                   return a->Energy() < b->Energy();
-                               });
-            // Delete the excess seeds.
-            for (int i = m_seed_rank; i < static_cast<int>(window_seeds.size()); ++i) {
-                delete window_seeds[i];
-            }
-            window_seeds.resize(m_seed_rank);
-            rejected_energy += rejected_by_rank;
-            CurcumaLogger::result_fmt("ConfSearch: seed_rank={}: keeping {} lowest-energy seeds ({} rejected by rank)",
-                m_seed_rank, m_seed_rank, rejected_by_rank);
-        }
+        // Seed selection: energy ranking (seed_rank) plus, in "diverse" mode, an RMSD spacing
+        // requirement so the seeds do not all sit in the same basin. Deletes what it rejects.
+        rejected_energy += SelectSeeds(window_seeds);
         for (auto* mol : window_seeds) {
             m_in_stack.push_back(mol);
             accepted++;
@@ -922,23 +908,41 @@ void ConfSearch::start()
                 static_cast<int>(energies.size()), e_min);
             CurcumaLogger::result_fmt("ConfSearch: energy span {:.2f} kJ/mol (lowest {:.6f} Eh, highest kept {:.6f} Eh)",
                 span_kj, e_min, e_max);
-            if (initial_energy < std::numeric_limits<double>::infinity()) {
-                const double gain_kj = (initial_energy - e_min) * 2625.5;
-                if (gain_kj > 1e-3)
-                    CurcumaLogger::success_fmt("ConfSearch: search lowered the energy by {:.2f} kJ/mol vs. the initial structure ({}: {:.6f} -> {:.6f} Eh)",
-                        gain_kj, m_md_method, initial_energy, e_min);
-                else
-                    CurcumaLogger::result_fmt("ConfSearch: initial structure remains the global minimum ({:.6f} Eh)", e_min);
-            }
-            // Claude Generated (Jun 2026): dual-method -- also report opt_method energy gain
-            if (m_opt_method != m_md_method && m_initial_energy_opt < std::numeric_limits<double>::infinity()) {
-                const double opt_gain_kj = (m_initial_energy_opt - e_min) * 2625.5;
-                if (opt_gain_kj > 1e-3)
-                    CurcumaLogger::success_fmt("ConfSearch: search lowered the energy by {:.2f} kJ/mol vs. the initial structure ({}: {:.6f} -> {:.6f} Eh)",
-                        opt_gain_kj, m_opt_method, m_initial_energy_opt, e_min);
-                else
-                    CurcumaLogger::result_fmt("ConfSearch: initial structure remains the global minimum ({}: {:.6f} Eh)",
-                        m_opt_method, e_min);
+            // Claude Generated (Jul 2026): e_min is the lowest energy of the ACCEPTED pool, and that
+            // pool is filled on the opt_method PES in dual mode (Phase 4 refinement side) and on the
+            // md_method PES otherwise. Absolute energies of two different methods are not comparable
+            // -- the old code always subtracted the md_method initial energy from e_min, so a dual
+            // run reported nonsense like "lowered the energy by 199567 kJ/mol (gfnff: -9.005 ->
+            // -85.017 Eh)". Each PES is now only ever compared against itself.
+            const bool dual_run = (m_opt_method != m_md_method);
+            if (!dual_run) {
+                if (initial_energy < std::numeric_limits<double>::infinity()) {
+                    const double gain_kj = (initial_energy - e_min) * 2625.5;
+                    if (gain_kj > 1e-3)
+                        CurcumaLogger::success_fmt("ConfSearch: search lowered the energy by {:.2f} kJ/mol vs. the initial structure ({}: {:.6f} -> {:.6f} Eh)",
+                            gain_kj, m_md_method, initial_energy, e_min);
+                    else
+                        CurcumaLogger::result_fmt("ConfSearch: initial structure remains the global minimum ({:.6f} Eh)", e_min);
+                }
+            } else {
+                // Exploration side: md_method initial -> md_method running best (both on the md PES).
+                // This narrates the gfnff search; it is NOT the ranking and must not touch e_min.
+                if (initial_energy < std::numeric_limits<double>::infinity()
+                    && best_energy < std::numeric_limits<double>::infinity()) {
+                    const double explore_gain_kj = (initial_energy - best_energy) * 2625.5;
+                    CurcumaLogger::result_fmt("ConfSearch: exploration ({}) lowered its own minimum by {:.2f} kJ/mol ({:.6f} -> {:.6f} Eh) -- separate PES, not comparable to the {} ranking",
+                        m_md_method, explore_gain_kj, initial_energy, best_energy, m_opt_method);
+                }
+                // Ranking side: opt_method initial -> opt_method global minimum (both on the opt PES).
+                if (m_initial_energy_opt < std::numeric_limits<double>::infinity()) {
+                    const double opt_gain_kj = (m_initial_energy_opt - e_min) * 2625.5;
+                    if (opt_gain_kj > 1e-3)
+                        CurcumaLogger::success_fmt("ConfSearch: search lowered the energy by {:.2f} kJ/mol vs. the initial structure ({}: {:.6f} -> {:.6f} Eh)",
+                            opt_gain_kj, m_opt_method, m_initial_energy_opt, e_min);
+                    else
+                        CurcumaLogger::result_fmt("ConfSearch: initial structure remains the global minimum ({}: {:.6f} Eh)",
+                            m_opt_method, e_min);
+                }
             }
             // Relative energies of the lowest few conformers, for a quick conformer-landscape readout.
             const int n_show = std::min(static_cast<int>(energies.size()), 10);
@@ -1298,6 +1302,86 @@ double ConfSearch::PermRMSD(const Geometry& reference, const Geometry& target) c
     return best;
 }
 
+// Claude Generated (Jul 2026): seed selection for the next temperature cycle.
+//
+// The old rule was purely energetic: sort the survivors of the seed energy window by energy and
+// keep the seed_rank lowest ones. That is degenerate whenever the deepest minima are variations of
+// the SAME basin -- three seeds 0.4 A apart start three MD runs that all explore the same region,
+// while a genuinely different conformer 4 A away 2 kJ/mol higher is thrown away.
+//
+// "diverse" walks the same energy ranking (so the global minimum is always seed #1) but only
+// accepts a candidate whose permutation-aware best-fit RMSD to EVERY already chosen seed is at
+// least r_min. If that leaves fewer seeds than requested, the spacing is relaxed (r_min/2, r_min/4)
+// and finally dropped altogether, so the MD phase is never starved -- the fallback is exactly the
+// old energy ranking. Cost: O(kept * candidates) Kabsch fits on a handful of structures, i.e.
+// nothing next to one MD step.
+int ConfSearch::SelectSeeds(std::vector<Molecule*>& window_seeds) const
+{
+    const int n = static_cast<int>(window_seeds.size());
+    if (n <= 1)
+        return 0;
+
+    // Energy ranking is the backbone of both strategies.
+    std::sort(window_seeds.begin(), window_seeds.end(),
+        [](const Molecule* a, const Molecule* b) { return a->Energy() < b->Energy(); });
+    const double e_ref = window_seeds[0]->Energy();
+    const int limit = (m_seed_rank > 0) ? std::min(m_seed_rank, n) : n;
+
+    std::vector<Molecule*> keep;
+    if (m_seed_selection != "diverse") {
+        keep.assign(window_seeds.begin(), window_seeds.begin() + limit);
+        if (limit < n)
+            CurcumaLogger::result_fmt("ConfSearch: seed selection (energy): keeping the {} lowest-energy seed(s) of {} ({} rejected by rank)",
+                limit, n, n - limit);
+    } else {
+        const double r_min = (m_seed_min_rmsd > 0.0) ? m_seed_min_rmsd
+                                                     : m_seed_diversity_factor * m_rmsd;
+        std::vector<char> taken(n, 0);
+        keep.push_back(window_seeds[0]); // the most stable structure is always a seed
+        taken[0] = 1;
+        // Distance of each accepted seed to the seeds accepted before it (diagnostics).
+        std::vector<double> spacing(1, 0.0);
+        double r = r_min;
+        bool relaxed = false;
+        while (static_cast<int>(keep.size()) < limit && r > 1e-3) {
+            for (int i = 1; i < n && static_cast<int>(keep.size()) < limit; ++i) {
+                if (taken[i])
+                    continue;
+                double dmin = std::numeric_limits<double>::infinity();
+                for (const Molecule* s : keep)
+                    dmin = std::min(dmin, PermRMSD(s->getGeometry(), window_seeds[i]->getGeometry()));
+                if (dmin >= r) {
+                    keep.push_back(window_seeds[i]);
+                    spacing.push_back(dmin);
+                    taken[i] = 1;
+                }
+            }
+            if (static_cast<int>(keep.size()) < limit) {
+                r *= 0.5; // not enough distinct basins available -> relax the spacing
+                relaxed = true;
+            }
+        }
+        CurcumaLogger::result_fmt("ConfSearch: seed selection (diverse): {} of {} structure(s) kept, spacing >= {:.2f} A{}",
+            static_cast<int>(keep.size()), n, r_min,
+            relaxed ? fmt::format(" (relaxed to {:.2f} A -- not enough distinct basins)", r) : "");
+        for (int i = 0; i < static_cast<int>(keep.size()); ++i)
+            CurcumaLogger::result_fmt("ConfSearch:   seed {:>2}: dE = {:+7.2f} kJ/mol, RMSD to closest previous seed = {}",
+                i + 1, (keep[i]->Energy() - e_ref) * 2625.5,
+                i == 0 ? std::string("--") : fmt::format("{:.2f} A", spacing[i]));
+    }
+
+    // Everything not kept is dropped (and owned here, so deleted).
+    int rejected = 0;
+    for (Molecule* mol : window_seeds) {
+        if (std::find(keep.begin(), keep.end(), mol) == keep.end()) {
+            delete mol;
+            rejected++;
+        }
+    }
+    window_seeds = std::move(keep);
+    return rejected;
+}
+
 void ConfSearch::CalibrateBias(const std::string& p, nlohmann::json& md)
 {
     auto load = [](const std::string& file) {
@@ -1549,6 +1633,11 @@ void ConfSearch::writeCheckpoint(const std::string& phase, double next_T, int te
     state["global_min"] = m_global_min;
     state["best_energy"] = m_best_energy;
     state["initial_energy"] = m_initial_energy;
+    // Claude Generated (Jul 2026): the opt_method reference energy of the input structure. Without it
+    // a resumed dual-method run had no opt-PES anchor left (m_initial_energy_opt = inf after the
+    // resume skips the initial optimisation), so the final "search lowered the energy by X kJ/mol
+    // (opt_method: ...)" line -- the only one on the ranking PES -- silently disappeared.
+    state["initial_energy_opt"] = m_initial_energy_opt;
 
     // Full bias pool: geometry + all metadata (counter/index preserved exactly).
     nlohmann::json bias = nlohmann::json::array();
@@ -1636,6 +1725,8 @@ bool ConfSearch::loadCheckpoint()
     st.global_min = s.value("global_min", std::numeric_limits<double>::infinity());
     st.best_energy = s.value("best_energy", std::numeric_limits<double>::infinity());
     st.initial_energy = s.value("initial_energy", std::numeric_limits<double>::infinity());
+    // Missing in checkpoints written before Jul 2026 -> stays infinity, i.e. the old behaviour.
+    st.initial_energy_opt = s.value("initial_energy_opt", std::numeric_limits<double>::infinity());
 
     if (s.contains("bias") && s["bias"].is_array()) {
         for (const auto& b : s["bias"]) {
@@ -1721,6 +1812,14 @@ void ConfSearch::LoadControlJson()
     m_topo_check_interval = m_config.get<int>("topo_check_interval");
     m_seed_energy_window = m_config.get<double>("seed_energy_window");
     m_seed_rank = m_config.get<int>("seed_rank");
+    // Claude Generated (Jul 2026): RMSD-aware seed selection
+    m_seed_selection = m_config.get<std::string>("seed_selection");
+    m_seed_min_rmsd = m_config.get<double>("seed_min_rmsd");
+    m_seed_diversity_factor = m_config.get<double>("seed_diversity_factor");
+    if (m_seed_selection != "diverse" && m_seed_selection != "energy") {
+        CurcumaLogger::warn_fmt("ConfSearch: seed_selection='{}' unknown -- falling back to 'energy'", m_seed_selection);
+        m_seed_selection = "energy";
+    }
     m_seed_window_schedule = m_config.get<std::string>("seed_window_schedule");
     m_seed_window_decay = m_config.get<double>("seed_window_decay");
     m_epot_abort = m_config.get<bool>("epot_abort");
