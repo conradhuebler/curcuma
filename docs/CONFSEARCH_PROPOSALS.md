@@ -205,6 +205,21 @@ for a seed slot. No special case anywhere downstream.
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `-confgen_phase` | `false` | run the recombination phase (costs one optimisation per proposal) |
+
+The phase is **opt-in**, and every run states which way it is set (next to the other ConfSearch
+configuration lines), so an absent Phase 3c line is never ambiguous:
+
+```
+ConfSearch: Phase 3c (torsion recombination) OFF -- enable with -confgen_phase true
+ConfSearch: Phase 3c (torsion recombination) ON -- up to 20 proposals per cycle from 3 template(s), depth 2
+```
+
+**Which method optimises what.** ConfGen optimises its own proposals -- at `md_method`, the same level
+the cycle's minima are on, because the novelty check compares against them. The survivors are appended
+to the md-level accepted file and then go through Phase 3b at `opt_method` like every other structure.
+So in a dual-method run a proposal is optimised twice (md_method inside ConfGen, opt_method in Phase
+3b) -- exactly the same treatment a metadynamics hit gets (Phase 2, then Phase 3b). The two PES are
+never mixed.
 | `-confgen_max_proposals` | `20` | structures built and optimised per cycle |
 | `-confgen_templates` | `3` | lowest-energy minima of the cycle used as templates |
 | `-confgen_depth` | `2` | torsions changed simultaneously |

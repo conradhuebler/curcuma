@@ -212,6 +212,15 @@ void ConfSearch::start()
     }
     CurcumaLogger::result_fmt("ConfSearch: Temperature={}K -> {}K, step={}K", m_startT, m_endT, m_deltaT);
     CurcumaLogger::result_fmt("ConfSearch: Repetitions={}, RMSD threshold={} A, Energy window={} kJ/mol, Seed rank={}", m_repeat, m_rmsd, m_energy_window, m_seed_rank);
+    // Claude Generated (Jul 2026): say whether the recombination phase is armed. It used to be
+    // silent when off, so a run simply had no Phase 3c line and there was no way to tell whether the
+    // phase had been skipped, had found nothing, or was never enabled.
+    if (m_confgen_phase)
+        CurcumaLogger::result_fmt("ConfSearch: Phase 3c (torsion recombination) ON -- up to {} proposals "
+                                  "per cycle from {} template(s), depth {}",
+            m_confgen_max_proposals, m_confgen_templates, m_confgen_depth);
+    else
+        CurcumaLogger::result("ConfSearch: Phase 3c (torsion recombination) OFF -- enable with -confgen_phase true");
     // Debug: log full MD parameter set for diagnosing dynamics issues
     CurcumaLogger::result_fmt("ConfSearch MD config: temperature={}, T={}, impuls={}, time_step={}, max_time={}, rmsd_mtd={}",
         md.value("temperature", -1.0), md.value("T", -1.0), md.value("impuls", -1.0),
@@ -586,7 +595,9 @@ void ConfSearch::start()
             } else {
                 CurcumaLogger::result("ConfSearch: Phase 3c found no new conformer this cycle");
             }
-        } else if (m_confgen_phase && rmsd_count < 2 && !no_new_bias_structures) {
+        } else if (m_confgen_phase && no_new_bias_structures) {
+            CurcumaLogger::result("ConfSearch: Phase 3c skipped -- no new structures this cycle");
+        } else if (m_confgen_phase) {
             CurcumaLogger::result_fmt("ConfSearch: Phase 3c skipped -- {} distinct minimum/minima this "
                                       "cycle, recombination needs at least 2",
                 rmsd_count);
