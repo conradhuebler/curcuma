@@ -313,15 +313,38 @@ exactly where the hardware argument predicts: the GPU wins the O(nao³) eigensol
 (SCF 3.5x) and the gradient (3.8x), while setup and post-SCF — small, serial,
 transfer-bound — stay flat or regress.
 
-**gfnff does not cross over.** At 1410 atoms it is still 820 ms on the GPU vs
-497 ms on the CPU (1.65x slower). That is consistent: a force field has no dense
-O(N³) kernel to offload, so there is nothing for the device to amortise its
-transfers against.
+### For gfnff, a single point is the WRONG benchmark
 
-Practical guidance: use `-gpu cuda` for **gfn1/gfn2 on large systems**; keep the
-CPU for small ones and for gfnff. The earlier revision of this section claimed
-flatly that "the GPU is slower than the CPU" — that was measured only at 231
-atoms and does not generalise.
+A gfnff single point pays the full topology build and parameter generation for
+*one* energy evaluation — the worst possible case for a device whose pipeline
+targets the per-step path. Measured that way, gfnff/polymer looks like a 1.65x
+GPU **loss** (820 ms vs 497 ms).
+
+Measured as MD, which is what gfnff is actually used for, the verdict inverts.
+polymer/1410, `-threads 16`, two step counts so the slope separates setup from
+per-step cost:
+
+| | 50 fs | 200 fs | **per step** | setup (intercept) |
+|---|---:|---:|---:|---:|
+| CPU t16 | 2475 ms | 8375 ms | **39.33 ms** | ~508 ms |
+| CUDA | 1279 ms | 2103 ms | **5.49 ms** | ~1004 ms |
+
+**7.2x faster per MD step.** Trajectory identical (Epot -203.361820,
+Etot -201.406573 on both).
+
+The GPU setup is ~2x the CPU's, which is exactly why the single point misleads:
+the two lines cross at **~15 MD steps**, and everything beyond that is GPU
+territory.
+
+Practical guidance:
+- **gfn1/gfn2, large systems** → `-gpu cuda` (2.6x at 1410 atoms).
+- **gfnff, any MD or optimisation past ~15 steps** → `-gpu cuda` (7.2x per step).
+- **Single points, and anything small** → CPU.
+
+Two earlier revisions of this section were wrong and are corrected above: first
+"the GPU is slower than the CPU" (generalised from 231 atoms only), then "gfnff
+does not cross over" (generalised from a single point). Both errors came from
+benchmarking a workload that does not represent how the method is used.
 
 Note the Fortran references have **no GPU path at all**, so the GPU is not a
 comparison against them; it is a comparison against curcuma's own CPU path.
