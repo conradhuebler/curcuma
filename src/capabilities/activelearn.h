@@ -90,6 +90,37 @@ PARAM(seed, Int, 42,
     "Seed for the train/test split and sampling heuristics, fixed so runs are reproducible.",
     "Algorithm", {})
 
+PARAM(al_cycles, Int, 5,
+    "Active-learning cycles in 'learn' mode. Each cycle samples on the currently corrected "
+    "surface, picks the least familiar structures, computes references for them and refits.",
+    "ActiveLearning", {})
+PARAM(al_temperature, Double, 500.0,
+    "Sampling temperature [K]. Deliberately above the temperature of interest: sampling "
+    "happens on the surface being learned, so cycle 0 only ever visits what the base method "
+    "considers relevant. Heat and metadynamics mitigate that bias, they do not remove it.",
+    "ActiveLearning", {})
+PARAM(al_md_time, Double, 2000.0,
+    "Simulated time per sampling run [fs].", "ActiveLearning", {})
+PARAM(al_md_runs, Int, 4,
+    "Independent sampling runs per cycle, started from different structures. Several short "
+    "runs cover more of the surface than one long one.",
+    "ActiveLearning", {})
+PARAM(al_dump_frequency, Int, 50,
+    "Keep every Nth molecular-dynamics frame as a candidate.", "ActiveLearning", {})
+PARAM(al_candidates, Int, 15,
+    "Reference calculations per cycle, i.e. how many candidates are labelled.",
+    "ActiveLearning", {})
+PARAM(al_uncertainty, Double, 0.5,
+    "Convergence threshold on the extrapolation indicator 1 - max_m k(x,z_m). The cycle "
+    "stops once no sampled structure exceeds it. Mind the scale: with a Gaussian kernel the "
+    "indicator saturates quickly, since a nearest centre at distance d gives "
+    "1 - exp(-d^2/2 sigma^2), so 0.5 corresponds to d = 1.18 sigma and 0.9 already to "
+    "d = 2.1 sigma. Values below about 0.2 are effectively unreachable. And it measures "
+    "descriptor-space distance, not error: it certifies coverage, never accuracy.",
+    "ActiveLearning", {})
+PARAM(al_initial, Int, 15,
+    "Structures labelled in cycle 0, before any model exists.", "ActiveLearning", {})
+
 PARAM(center_sweep, String, "",
     "Comma-separated list of M values to fit and report in one run, e.g. '200,500,1000,2000'. "
     "Produces the accuracy-over-cost curve that decides how sparse the model can be.",
@@ -136,6 +167,31 @@ private:
 
     void runTrain();
     void runTest();
+    void runLearn();
+
+    /**
+     * @brief Sample candidate structures with molecular dynamics.
+     * @param md_method method driving the dynamics: the base method in cycle 0, the
+     *        corrected surface afterwards
+     * @param seeds structures the runs start from
+     * @param cycle current cycle, used for output naming and seeding
+     */
+    std::vector<Molecule> sampleStructures(
+        const std::string& md_method, const std::vector<Molecule>& seeds, int cycle);
+
+    /**
+     * @brief Pick the structures worth spending reference calculations on.
+     *
+     * Least-familiar-first, but with a diversity term: maximising the uncertainty alone
+     * piles every pick onto one pathological region, which buys almost no new information
+     * for the same cost. Selection is greedy farthest-point in descriptor space among the
+     * candidates that exceed the uncertainty threshold.
+     *
+     * @param max_uncertainty out, largest indicator seen; the convergence signal
+     */
+    std::vector<Molecule> selectCandidates(const std::vector<Molecule>& candidates,
+        const curcuma::ml::DeltaMLModel& model, bool have_model, int wanted,
+        double& max_uncertainty);
 
     /*! \brief Fit one model and log its held-out performance. */
     bool fitAndReport(const curcuma::ml::MLDataset& train, const curcuma::ml::MLDataset& test,
@@ -169,6 +225,15 @@ private:
     bool m_use_forces = true;
     unsigned m_seed = 42;
     bool m_write_dataset = true;
+
+    int m_al_cycles = 5;
+    double m_al_temperature = 500.0;
+    double m_al_md_time = 2000.0;
+    int m_al_md_runs = 4;
+    int m_al_dump_frequency = 50;
+    int m_al_candidates = 15;
+    double m_al_uncertainty = 0.05;
+    int m_al_initial = 15;
 
     /* Anchor structure that fixes the topology for every calculator in this run. */
     Molecule m_anchor;

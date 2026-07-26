@@ -44,8 +44,12 @@ fixed topology, but it is the honest remainder.
 ## Usage
 
 ```bash
-# 1. Fit a model against an existing conformer set or trajectory
+# 1a. Fit a model against an existing conformer set or trajectory
 curcuma -activelearn conf.xyz -method gfnff -ref_method gfn2 -threads 8
+
+# 1b. Or let it generate its own structures (see the caveats below)
+curcuma -activelearn mol.xyz -al_mode learn -method gfnff -ref_method gfn2 \
+        -al_cycles 6 -al_temperature 500 -threads 8
 
 # 2. Use it anywhere a method is accepted
 curcuma -sp        mol.xyz -method deltaml:conf.deltaml.json
@@ -97,10 +101,36 @@ and gradients are required for optimisation and dynamics anyway.
 so `Delta` and its gradient both go to zero and the model falls back continuously to the bare
 base method. A directly-learned force field has no such safety net.
 
+## Active learning (`-al_mode learn`)
+
+Each cycle runs molecular dynamics at `al_temperature` on the currently corrected surface,
+picks the least familiar sampled structures, computes references for them, and refits.
+Selection is greedy farthest-point in descriptor space among the candidates above the
+uncertainty threshold: maximising uncertainty alone piles every pick onto one pathological
+region and buys almost no new information for the same reference cost.
+
+**The known weakness is structural.** Sampling happens on the surface being learned, so
+cycle 0 only visits what the base method considers relevant. If the reference surface has a
+minimum elsewhere, that region is never sampled and never learned, and the model confirms
+itself. Elevated temperature and metadynamics mitigate this; they do not remove it. The
+alternative — triggering a reference calculation the moment the uncertainty rises during
+the dynamics, rather than in batches afterwards — is more robust and not implemented here.
+
+**Status: the loop runs, its benefit is not demonstrated.** On a 9-atom test system it
+completed its cycles, grew the dataset and refitted each time, but with only a handful of
+held-out structures the error estimates are noise. The offline path (above) is the one with
+measured results.
+
 ## Uncertainty
 
 The reported indicator is `max_i (1 - max_m k(x_i, z_m))`: zero when every atomic environment
 sits on a kernel centre, one when the structure is entirely outside the covered region.
+
+Mind the scale. With a Gaussian kernel a nearest centre at distance `d` gives
+`1 - exp(-d^2/2 sigma^2)`, so the indicator saturates fast: `d = 1.18 sigma` already reads
+0.5, and `d = 2.1 sigma` reads 0.9. Thresholds below roughly 0.2 are effectively unreachable.
+The log therefore also prints the corresponding distance in units of the kernel width, which
+stays informative where the bounded indicator has flattened out.
 
 It measures **distance in descriptor space, not error**. It answers "have I been here
 before", never "am I right here". Adequate for steering active learning and for flagging
@@ -202,6 +232,5 @@ and any DFT reference. Treat results as provisional until tested on real problem
 - Fixed topology only, one molecule per model
 - Training cost grows as M^2; centres are capped at 12000 with an explicit error
 - Model files store all centre descriptors as JSON and grow with M (a few MB at M = 1000)
-- Active learning (`-al_mode learn`) is not implemented yet; fitting uses an existing
-  structure set
+- Active learning runs but its benefit is unproven; the offline path is the validated one
 - No GPU path for the kernel or descriptor evaluation yet

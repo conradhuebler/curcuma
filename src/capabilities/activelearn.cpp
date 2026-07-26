@@ -26,10 +26,15 @@
 #include "src/core/parameter_registry.h"
 #include "src/core/units.h"
 
+#include "simplemd.h"
+
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 using curcuma::ml::DeltaMLErrors;
@@ -167,6 +172,14 @@ void ActiveLearn::LoadControlJson()
     m_use_forces = Json2KeyWord<bool>(m_defaults, "use_forces");
     m_seed = static_cast<unsigned>(Json2KeyWord<int>(m_defaults, "seed"));
     m_write_dataset = Json2KeyWord<bool>(m_defaults, "write_dataset");
+    m_al_cycles = Json2KeyWord<int>(m_defaults, "al_cycles");
+    m_al_temperature = Json2KeyWord<double>(m_defaults, "al_temperature");
+    m_al_md_time = Json2KeyWord<double>(m_defaults, "al_md_time");
+    m_al_md_runs = Json2KeyWord<int>(m_defaults, "al_md_runs");
+    m_al_dump_frequency = Json2KeyWord<int>(m_defaults, "al_dump_frequency");
+    m_al_candidates = Json2KeyWord<int>(m_defaults, "al_candidates");
+    m_al_uncertainty = Json2KeyWord<double>(m_defaults, "al_uncertainty");
+    m_al_initial = Json2KeyWord<int>(m_defaults, "al_initial");
     m_center_sweep = parseIntList(Json2KeyWord<std::string>(m_defaults, "center_sweep"));
 
     // The base method is the global -method setting; that keeps the CLI consistent with
@@ -414,6 +427,292 @@ void ActiveLearn::runTest()
     logErrors("test set", model.evaluate(data));
 }
 
+// =================================================================================
+// Active learning
+// =================================================================================
+
+std::vector<Molecule> ActiveLearn::sampleStructures(
+    const std::string& md_method, const std::vector<Molecule>& seeds, int cycle)
+{
+    std::vector<Molecule> frames;
+    if (seeds.empty())
+        return frames;
+
+    json md = m_controller;
+    md["method"] = md_method;
+    md["temperature"] = m_al_temperature;
+    md["initial_temperature"] = m_al_temperature;
+    md["max_time"] = m_al_md_time;
+    md["dump_frequency"] = m_al_dump_frequency;
+    md["print_frequency"] = 1000000;
+    md["write_xyz"] = true;
+    md["threads"] = 1;
+    md["verbosity"] = 0;
+
+    // SimpleMD redirects its whole output into "<basename>.snapshots" and then builds file
+    // paths as outputDir + "/" + basename. A basename containing a directory separator
+    // therefore points into a nested directory that nobody creates, and the trajectory is
+    // dropped without an error. So the run tag stays a plain name and the files are
+    // collected from the working directory afterwards.
+    std::string tag = Basename() + "_al" + std::to_string(cycle);
+    std::replace(tag.begin(), tag.end(), '/', '_');
+
+    std::vector<MDThread*> threads;
+    CxxThreadPool* pool = new CxxThreadPool;
+    for (int r = 0; r < m_al_md_runs; ++r) {
+        json cfg = md;
+        // Distinct seeds, otherwise every run reproduces the same trajectory.
+        cfg["seed"] = static_cast<int>(m_seed) + 1000 * cycle + r;
+        MDThread* t = new MDThread(cfg);
+        t->setAutoDelete(false);
+        t->setThreadId(r);
+        t->setBasename(tag);
+        t->setMolecule(seeds[r % seeds.size()]);
+        threads.push_back(t);
+        pool->addThread(t);
+    }
+    pool->setActiveThreadCount(std::max(1, m_threads));
+
+    const int saved_verbosity = CurcumaLogger::get_verbosity();
+    CurcumaLogger::set_verbosity(0);
+    pool->StartAndWait();
+
+    delete pool;
+    for (auto* t : threads)
+        delete t;
+    // Restore only after the threads are gone: each MDThread owns a SimpleMD, and the
+    // CurcumaMethod destructor restores the global logger level it captured at
+    // construction -- which is the silenced one. Restoring earlier gets clobbered.
+    CurcumaLogger::set_verbosity(saved_verbosity);
+
+    // Collect the trajectories, then remove the scratch the dynamics left behind.
+    std::vector<std::filesystem::path> scratch;
+    for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::current_path())) {
+        const std::string name = entry.path().filename().string();
+        if (name.rfind(tag + ".t", 0) != 0)
+            continue;
+        scratch.push_back(entry.path());
+        if (!entry.is_directory())
+            continue;
+        for (const auto& f : std::filesystem::directory_iterator(entry.path())) {
+            const std::string p = f.path().string();
+            if (p.size() < 8 || p.substr(p.size() - 8) != ".trj.xyz")
+                continue;
+            FileIterator iter(p, true);
+            while (!iter.AtEnd())
+                frames.push_back(iter.Next());
+        }
+    }
+    for (const auto& p : scratch) {
+        std::error_code ec;
+        std::filesystem::remove_all(p, ec);
+    }
+
+    return frames;
+}
+
+std::vector<Molecule> ActiveLearn::selectCandidates(const std::vector<Molecule>& candidates,
+    const DeltaMLModel& model, bool have_model, int wanted, double& max_uncertainty)
+{
+    max_uncertainty = 0.0;
+    std::vector<Molecule> picked;
+    if (candidates.empty() || wanted <= 0)
+        return picked;
+
+    // Filter by unfamiliarity first.
+    std::vector<std::size_t> pool;
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        double u = 1.0;
+        if (have_model)
+            u = model.uncertainty(candidates[i].Atoms(), candidates[i].getGeometry());
+        max_uncertainty = std::max(max_uncertainty, u);
+        if (!have_model || u > m_al_uncertainty)
+            pool.push_back(i);
+    }
+    if (pool.empty())
+        return picked;
+
+    // Structure-level fingerprint: the mean atomic descriptor. Cheap, and it is the same
+    // space the model measures similarity in.
+    const std::vector<int> species = m_anchor.Atoms();
+    curcuma::ml::ACSFConfig cfg = have_model
+        ? model.descriptorConfig()
+        : curcuma::ml::ACSFConfig::defaultFor(species);
+    const curcuma::ml::ACSFDescriptor desc(cfg);
+
+    Matrix fingerprints(static_cast<int>(pool.size()), cfg.featureCount());
+    for (std::size_t k = 0; k < pool.size(); ++k) {
+        Matrix X;
+        desc.compute(candidates[pool[k]].Atoms(), candidates[pool[k]].getGeometry(), X, nullptr);
+        fingerprints.row(static_cast<int>(k)) = X.colwise().mean();
+    }
+
+    // Greedy farthest point, started from the most unfamiliar structure.
+    const int n = static_cast<int>(pool.size());
+    std::vector<char> taken(n, 0);
+    int current = 0;
+    if (have_model) {
+        double worst = -1.0;
+        for (int k = 0; k < n; ++k) {
+            const double u
+                = model.uncertainty(candidates[pool[k]].Atoms(), candidates[pool[k]].getGeometry());
+            if (u > worst) {
+                worst = u;
+                current = k;
+            }
+        }
+    }
+
+    Vector mind = Vector::Constant(n, std::numeric_limits<double>::max());
+    const int take = std::min(wanted, n);
+    for (int p = 0; p < take; ++p) {
+        taken[current] = 1;
+        picked.push_back(candidates[pool[current]]);
+        for (int k = 0; k < n; ++k) {
+            if (taken[k])
+                continue;
+            const double d = (fingerprints.row(k) - fingerprints.row(current)).squaredNorm();
+            if (d < mind(k))
+                mind(k) = d;
+        }
+        double far = -1.0;
+        int next = -1;
+        for (int k = 0; k < n; ++k)
+            if (!taken[k] && mind(k) > far) {
+                far = mind(k);
+                next = k;
+            }
+        if (next < 0)
+            break;
+        current = next;
+    }
+
+    return picked;
+}
+
+void ActiveLearn::runLearn()
+{
+    std::vector<Molecule> seeds;
+    if (!loadStructures(seeds))
+        return;
+
+    CurcumaLogger::result_fmt(
+        "activelearn: {} cycles, base = {}, reference = {}, sampling at {:.0f} K",
+        m_al_cycles, m_base_method, m_ref_method, m_al_temperature);
+    CurcumaLogger::warn("activelearn: sampling runs on the surface being learned, so the "
+                        "first cycle only sees what the base method considers relevant. "
+                        "Elevated temperature mitigates this bias but does not remove it.");
+
+    MLDataset data;
+    DeltaMLModel model;
+    bool have_model = false;
+
+    const std::string model_path = outputPath(
+        m_model_path.empty() ? (Basename() + ".deltaml.json") : m_model_path);
+    const std::string curve_path = outputPath(Basename() + ".deltaml.learning_curve.dat");
+    std::ofstream curve(curve_path);
+    curve << "# cycle  n_train  E_MAE_kcal  F_RMSE_Eh_A  spearman  max_uncertainty\n";
+
+    for (int cycle = 0; cycle < m_al_cycles; ++cycle) {
+        CurcumaLogger::result_fmt("activelearn: --- cycle {} of {} ---", cycle + 1, m_al_cycles);
+
+        const std::string md_method = have_model ? ("deltaml:" + model_path) : m_base_method;
+        std::vector<Molecule> pool_seeds = seeds;
+        if (!data.empty()) {
+            // Restart the dynamics from structures already in the set, so later cycles
+            // explore outward from what has been visited rather than from the input again.
+            pool_seeds.clear();
+            for (int r = 0; r < m_al_md_runs; ++r) {
+                const std::size_t idx = (static_cast<std::size_t>(r) * 7 + cycle) % data.size();
+                // Reuse the input molecule for its element list and metadata, swapping in
+                // the stored geometry.
+                pool_seeds.push_back(seeds[0]);
+                pool_seeds.back().setGeometry(data[idx].geometry);
+            }
+        }
+
+        const std::vector<Molecule> frames = sampleStructures(md_method, pool_seeds, cycle);
+        if (frames.empty()) {
+            CurcumaLogger::warn("activelearn: sampling produced no frames; stopping");
+            break;
+        }
+
+        double max_unc = 0.0;
+        const int wanted = (cycle == 0) ? m_al_initial : m_al_candidates;
+        const std::vector<Molecule> picked
+            = selectCandidates(frames, model, have_model, wanted, max_unc);
+
+        // Report the indicator together with the descriptor-space distance it corresponds
+        // to, in units of the kernel width. The bounded indicator alone saturates near one
+        // and then says nothing about how much further out a structure actually is.
+        const double d_over_sigma
+            = (max_unc >= 1.0) ? std::numeric_limits<double>::infinity()
+                               : std::sqrt(std::max(0.0, -2.0 * std::log(1.0 - max_unc)));
+        CurcumaLogger::result_fmt(
+            "activelearn: {} frames sampled, largest extrapolation indicator {:.4f} "
+            "(nearest centre at {:.2f} sigma), {} selected for reference calculation",
+            frames.size(), max_unc, d_over_sigma, picked.size());
+
+        if (have_model && max_unc <= m_al_uncertainty) {
+            CurcumaLogger::success_fmt(
+                "activelearn: converged -- no sampled structure exceeds the indicator "
+                "threshold {:.4f}. Note this certifies coverage of the sampled region, "
+                "not accuracy.",
+                m_al_uncertainty);
+            break;
+        }
+        if (picked.empty()) {
+            CurcumaLogger::warn("activelearn: nothing selected; stopping");
+            break;
+        }
+
+        MLDataset fresh;
+        if (!labelStructures(picked, fresh))
+            break;
+        for (std::size_t i = 0; i < fresh.size(); ++i) {
+            MLStructure s = fresh[i];
+            s.cycle = cycle;
+            data.add(s);
+        }
+
+        MLDataset train, test;
+        data.split(m_test_fraction, m_seed, train, test);
+        if (train.empty()) {
+            CurcumaLogger::warn("activelearn: training split empty, collecting more data");
+            continue;
+        }
+
+        DeltaMLModel candidate_model;
+        if (!fitAndReport(train, test, m_n_centers, candidate_model, true))
+            break;
+        model = candidate_model;
+        have_model = true;
+        model.save(model_path);
+
+        const DeltaMLErrors e = test.empty() ? DeltaMLErrors{} : model.evaluate(test);
+        curve << cycle << "  " << data.size() << "  " << e.energy_mae_centered * 627.5094740631
+              << "  " << e.force_rmse << "  " << e.spearman << "  " << max_unc << "\n";
+        curve.flush();
+    }
+
+    if (!have_model) {
+        CurcumaLogger::error("activelearn: no model was produced");
+        return;
+    }
+
+    if (m_write_dataset) {
+        data.save(outputPath(Basename() + ".deltaml.dataset.json"));
+        data.writeXYZ(outputPath(Basename() + ".deltaml.dataset.xyz"));
+    }
+    CurcumaLogger::success_fmt("activelearn: model written to {} ({} labelled structures)",
+        model_path, data.size());
+    CurcumaLogger::result_fmt("activelearn: learning curve in {}", curve_path);
+    CurcumaLogger::result_fmt("activelearn: use it with  -method deltaml:{}", model_path);
+    CurcumaLogger::warn("activelearn: before trusting the model in dynamics, check energy "
+                        "conservation in an NVE run -- a slightly rippled learned surface is "
+                        "invisible in the energy error and still ruins a trajectory.");
+}
+
 void ActiveLearn::start()
 {
     if (Filename().empty()) {
@@ -426,8 +725,7 @@ void ActiveLearn::start()
     } else if (m_mode == "test") {
         runTest();
     } else if (m_mode == "learn") {
-        CurcumaLogger::error("activelearn: -al_mode learn is not implemented yet; "
-                             "use 'train' with an existing structure set");
+        runLearn();
     } else {
         CurcumaLogger::error_fmt("activelearn: unknown mode '{}' (train | test | learn)", m_mode);
     }
@@ -441,10 +739,12 @@ void ActiveLearn::printHelp() const
     std::cout << "reference, so conformer search and pre-optimisation run at base-method cost.\n\n";
     std::cout << "Modes:\n";
     std::cout << "  -al_mode train   fit a model to the given structures (default)\n";
+    std::cout << "  -al_mode learn   generate structures by dynamics, label and refit in cycles\n";
     std::cout << "  -al_mode test    evaluate an existing -model against fresh references\n\n";
     std::cout << "Examples:\n";
     std::cout << "  curcuma -activelearn conf.xyz -method gfnff -ref_method gfn2 -threads 8\n";
     std::cout << "  curcuma -activelearn conf.xyz -center_sweep 200,500,1000,2000\n";
+    std::cout << "  curcuma -activelearn mol.xyz -al_mode learn -al_cycles 6 -threads 8\n";
     std::cout << "  curcuma -opt mol.xyz -method deltaml:conf.deltaml.json\n\n";
     std::cout << "The reference must carry the same dispersion treatment as the base method,\n";
     std::cout << "otherwise the long-range dispersion term ends up in the learned difference\n";
