@@ -549,6 +549,10 @@ set(curcuma_core_SRC
         src/core/curcuma_logger.cpp
         src/core/citation_database.cpp
         src/core/citation_registry.cpp
+        # Delta-ML: descriptor, dataset and sparse kernel-ridge regression
+        src/core/ml/descriptor.cpp
+        src/core/ml/ml_dataset.cpp
+        src/core/ml/krr_model.cpp
         src/tools/formats.h
         src/tools/geometry.h
         src/tools/general.h
