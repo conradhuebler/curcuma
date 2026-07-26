@@ -734,6 +734,8 @@ The search is **restartable** with `-restart`: a self-contained checkpoint (bias
 
 The seeds for the next temperature cycle are picked by energy **and** structural spacing: `-seed_selection diverse` (default) keeps the most stable structure and then only structures at least `-seed_min_rmsd` (default `2 x -rmsd`) away from every seed already chosen, so `-seed_rank 4` does not start four MD runs in the same basin. `-seed_selection energy` restores pure energy ranking. See [docs/CONFSEARCH_SEEDING.md](docs/CONFSEARCH_SEEDING.md).
 
+Every temperature cycle writes its own ensemble and its most stable structure, on **both** levels of theory: `<base>.cycleNN_TxxxK.<method>.xyz` (energy-sorted) and `<base>.best_per_cycle.<method>.xyz` (one frame per cycle). Reference energies are taken from the optimised input structure and reported per method — never as a difference between two methods, which is not a physical quantity. The expensive accurate re-optimisation can run in two stages with `-phase3b_two_stage true`: crude relaxation of everything, dedup at that level, accurate optimisation of the survivors only. See [docs/CONFSEARCH_REPORTING.md](docs/CONFSEARCH_REPORTING.md).
+
 ## Output Directory System (BMT)
 
 By default, all curcuma commands create a **Basename.Method.Timestamp** directory for their output files. For example:

@@ -353,6 +353,29 @@ void CurcumaLogger::header(const std::string& title)
     }
 }
 
+// Claude Generated (Jul 2026): verbosity-1 section banner (see the declaration for the rationale).
+void CurcumaLogger::section(const std::string& title, bool major)
+{
+    if (m_verbosity < 1)
+        return;
+    fmt::print("\n");
+    if (major) {
+        const std::size_t width = std::max<std::size_t>(title.length() + 4, 72);
+        std::string rule(width, '=');
+        log_colored(fmt::color::cyan, "", rule);
+        log_colored(fmt::color::cyan, "", "  " + title);
+        log_colored(fmt::color::cyan, "", rule);
+    } else {
+        log_colored(fmt::color::cyan, "", "--- " + title + " ---");
+    }
+}
+
+void CurcumaLogger::blank_line()
+{
+    if (m_verbosity >= 1)
+        fmt::print("\n");
+}
+
 void CurcumaLogger::progress(int current, int total, const std::string& msg)
 {
     if (m_verbosity >= 2) {

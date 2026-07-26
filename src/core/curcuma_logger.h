@@ -105,6 +105,18 @@ public:
     static void progress_done();
     static void header(const std::string& title);
 
+    /* Claude Generated (Jul 2026): section banner that is visible at verbosity >= 1.
+     * header() is gated at verbosity >= 2, so at the default level a long-running driver
+     * (ConfSearch) printed one undifferentiated stream of [RESULT] lines with no visible
+     * block structure. section() emits a blank line plus a framed title:
+     *   major=false -> "--- <title> ---"
+     *   major=true  -> a full-width '=' rule above and below the title
+     * ASCII only (project rule: no box-drawing characters). */
+    static void section(const std::string& title, bool major = false);
+
+    /* Blank separator line at verbosity >= 1 (no prefix, no color). */
+    static void blank_line();
+
     // Unit-aware output functions
     static void energy_rel(double value_eh, const std::string& label);
     static void energy_abs(double value_eh, const std::string& label);

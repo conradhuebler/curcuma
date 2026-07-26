@@ -390,11 +390,18 @@ std::vector<OptimizationResult> OptimizationDispatcher::optimizeBatch(
     results.resize(molecules.size());
 
     if (threads <= 1 || molecules.size() <= 1) {
-        // Sequential path: no thread pool, no progress bar, identical behaviour
-        // to the original implementation.
+        // Sequential path: no thread pool, identical behaviour to the original implementation.
         CurcumaLogger::info_fmt("Starting batch optimization of {} structures", molecules.size());
 
+        // Claude Generated (Jul 2026): say which structure is being optimised. The per-iteration
+        // optimiser table prints at verbosity >= 1, so a multi-frame input produced hundreds of
+        // unlabelled numeric rows with no way to tell where one structure ended and the next began.
+        // A live progress bar cannot be used here for the same reason (the table would shred it), so
+        // this is a plain header line per frame.
         for (size_t i = 0; i < molecules.size(); ++i) {
+            if (molecules.size() > 1)
+                CurcumaLogger::result_fmt("--- Structure {}/{} ({} atoms) ---",
+                    i + 1, molecules.size(), molecules[i].AtomCount());
             curcuma::Molecule mol_copy = molecules[i];
             OptimizationResult result = optimizeStructure(
                 &mol_copy, optimizer_type, energy_calculator, config);

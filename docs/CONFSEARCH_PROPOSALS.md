@@ -387,8 +387,12 @@ Full suite: 20/502 failing, all pre-existing categories (`ecomp_*`, `d4_diag_*`,
    Reuse `GFNFF_Geometry::calculateDihedralAngle` (returns φ and dφ/dx).
 5. **`cli_curcumaopt_07_opt_multixyz`, frame 02** (5 kJ/mol drift): suspected to be the same topology
    artefact. Unverified.
-6. **ConfScan has no `std::sort`** but assumes energy order in places (`m_lowest_energy` from the
-   first molecule of a pass). The fatal case is fixed (`break` → `continue`), the assumption remains.
+6. ~~**ConfScan has no `std::sort`** but assumes energy order~~ — RESOLVED (Jul 26, 2026). It does
+   not need one: `m_ordered_list` is a `std::multimap<double,int>` keyed on the energy, and every
+   pass inherits that order. Verified by shuffling a 44-conformer ensemble — the accepted file comes
+   out strictly ascending and identical to the unshuffled run. `Reorder` and the accepted write-out
+   now re-establish the order locally so the assumption is checkable. See
+   [CONFSEARCH_REPORTING.md](CONFSEARCH_REPORTING.md) §5.
 7. **`test_cases/validation/butane.xyz` is mislabelled** -- comment claims "Anti conformation", the
    backbone dihedral is 116°. Left untouched (other tests hold golden values on it).
 8. **P5 relaxed scans** for torsions the ensemble covers in only one state (6 of 12 on the 90-atom

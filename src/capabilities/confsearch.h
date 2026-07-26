@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <chrono>
+#include <functional>
 #include <limits>
 #include <string>
 #include <vector>
@@ -50,8 +52,20 @@ public:
         setAutoDelete(false);
     }
 
+    /* Claude Generated (Jul 2026): completion hook for the live batch progress display.
+     * Invoked from the worker thread when this structure is done, with its wall-time and its
+     * result. Formatting lives in the caller (ConfSearch::PerformOptimisation) because the global
+     * logger level is unreliable inside pool workers -- the same reason MDThread has this hook.
+     * Without it the batch was completely silent between "Optimizing N structures" and the final
+     * table, so a long batch gave no sign of which structure it was on. */
+    void setOnComplete(std::function<void(double, const Optimization::OptimizationResult&)> cb)
+    {
+        m_on_complete = std::move(cb);
+    }
+
     virtual int execute() override
     {
+        const auto t0 = std::chrono::steady_clock::now();
         // This OptThread runs as one task among many under a molecule-level pool.
         // Suppress intra-molecule fan-out so methods that honor the flag (native
         // gfn1/gfn2) stay serial and the cores are not oversubscribed.
@@ -66,6 +80,8 @@ public:
         EnergyCalculator energy_calc(method, m_parameter);
         m_result = Optimization::OptimizationDispatcher::optimizeStructure(
             &m_molecule, Optimization::OptimizerType::LBFGSPP, &energy_calc, m_parameter);
+        if (m_on_complete)
+            m_on_complete(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), m_result);
         return m_result.success ? 0 : 1;
     }
 
@@ -75,6 +91,7 @@ private:
     Molecule m_molecule;
     json m_parameter;
     Optimization::OptimizationResult m_result;
+    std::function<void(double, const Optimization::OptimizationResult&)> m_on_complete;
 };
 
 // Claude Generated (May 2026, ICX-build): forward decl must be inside the namespace.
@@ -126,6 +143,31 @@ private:
      * own defaults, which used to leak "method":"gfnff" into ConfScan's RMSD-alignment parameter
      * and pinned the dedup threshold to a ConfSearch default instead of the user's -rmsd. */
     nlohmann::json FilterConfig(const std::string& energy_method, int threads) const;
+
+    /* Claude Generated (Jul 2026): Phase 3b -- re-optimisation of the cycle's deduplicated minima at
+     * opt_method. Single-stage by default (one accurate optimisation per structure). With
+     * phase3b_two_stage the work is split: a crude optimisation of EVERY structure first, then a
+     * ConfScan dedup at that level (structures that collapse onto the same minimum during the crude
+     * relaxation are removed before they are paid for), then the accurate optimisation of the
+     * survivors only.
+     * @return path of the file holding the opt_method ensemble (empty when nothing was produced) */
+    std::string PerformHighLevelOptimisation(const std::string& basename);
+
+    /* Claude Generated (Jul 2026): energy summary of an XYZ ensemble on disk. Returns the energies
+     * in ascending order (empty when the file is missing or holds no structures). */
+    std::vector<double> EnsembleEnergies(const std::string& path) const;
+
+    /* Claude Generated (Jul 2026): log "<label> [<method>]: N structures, min ... span ..." plus the
+     * lowest `ensemble_report` conformers. Reads the file, so it always reports what is actually on
+     * disk rather than what the phase believes it wrote. */
+    void ReportEnsemble(const std::string& label, const std::string& method, const std::string& path) const;
+
+    /* Claude Generated (Jul 2026): per-cycle ensemble output on one level of theory. Writes the
+     * structures energy-sorted to "<base>.<cycle_tag>.<method>.xyz", appends the most stable one to
+     * the "<base>.best_per_cycle.<method>.xyz" trajectory and reports both. Ordering is done by a
+     * std::multimap keyed on the energy -- the container sorts, no explicit sort call. */
+    void WriteCycleEnsemble(const std::string& cycle_tag, const std::string& method,
+        const std::vector<Molecule*>& molecules) const;
 
     /* Claude Generated (Jun 2026): experimental adaptive bias calibration (Phase C). Clusters the
      * cycle's optimised structures onto the accepted distinct minima (best-fit RMSD + cached
@@ -219,6 +261,11 @@ private:
     int m_rattle_hot_mode = 2, m_topo_check_interval = 0, m_opt_feedback_height = 5;
     bool m_confgen_phase = false;
     int m_confgen_max_proposals = 20, m_confgen_templates = 3, m_confgen_depth = 2;
+    // Claude Generated (Jul 2026): two-stage Phase 3b (crude opt -> dedup -> accurate opt) and the
+    // per-cycle ensemble/energy reporting.
+    bool m_phase3b_two_stage = false, m_phase3b_filter = true, m_cycle_output = true;
+    std::string m_phase3b_preopt_preset = "loose", m_phase3b_preset = "normal";
+    int m_phase3b_preopt_max_iter = 0, m_ensemble_report = 3;
     bool m_topo_check = false, m_epot_abort = false, m_opt_feedback_bias = true, m_opt_feedback_prune_snapshots = false, m_mtd_permutation = true;
     // Claude Generated (Jun 2026): temperature runaway abort + cross-run bias-height freeze.
     // ON by default for ConfSearch (bias-heating safety net + best conformer yield); see the PARAM block below.
@@ -331,6 +378,17 @@ private:
     PARAM(temp_abort, Bool, false, "Abort an MD run when the running-mean temperature runs away. Off by default since the strided RMSD-MTD scheme (soft residence counter) removes the unbounded bias-height growth that caused cross-cycle heating; set true to re-enable the safety net.", "Robustness", {})
     PARAM(temp_abort_factor, Double, 1.5, "Abort when the mean temperature exceeds this factor times the target. Values at or below 0 disable the check.", "Robustness", {})
     PARAM(temp_abort_delta, Double, 300.0, "Abort when the mean temperature exceeds the target plus this many Kelvin. Values at or below 0 disable the check.", "Robustness", {})
+
+    // --- High-Level Re-Optimisation (Phase 3b) ---
+    PARAM(phase3b_two_stage, Bool, false, "Split the high-level re-optimisation into a crude pre-optimisation of every structure, a dedup filter at that level and an accurate optimisation of the survivors only. Off by default (one accurate optimisation per structure). Pays off when the crude stage collapses several structures onto the same minimum.", "Optimisation", {})
+    PARAM(phase3b_preopt_preset, String, "loose", "Convergence preset of the crude stage in the two-stage mode: loose, normal, tight or verytight.", "Optimisation", {})
+    PARAM(phase3b_preopt_max_iter, Int, 0, "Maximum optimisation steps in the crude stage. 0 keeps the preset value.", "Optimisation", {})
+    PARAM(phase3b_preset, String, "normal", "Convergence preset of the accurate stage (and of the single-stage Phase 3b).", "Optimisation", {})
+    PARAM(phase3b_filter, Bool, true, "Run the ConfScan dedup between the two stages. False chains the two optimisations directly.", "Optimisation", {})
+
+    // --- Per-Cycle Output ---
+    PARAM(cycle_output, Bool, true, "Write the ensemble and the most stable structure of every temperature cycle, on both levels of theory: <base>.cycleNN_TxxxK.<method>.xyz plus the <base>.best_per_cycle.<method>.xyz trajectory.", "Output", {})
+    PARAM(ensemble_report, Int, 3, "Number of lowest conformers listed in the per-phase energy summaries. 0 prints the summary line only.", "Output", {})
 
     // --- Metadynamics Bias ---
     PARAM(confgen_phase, Bool, false, "Run the torsion-recombination phase (ConfGen) after the per-cycle dedup: build torsion-state combinations the cycle's minima do not contain, optimise them and add the genuinely new conformers to the cycle. Off by default -- it costs one geometry optimisation per proposal.", "Proposals", {})
