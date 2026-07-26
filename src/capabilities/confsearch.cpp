@@ -1708,6 +1708,11 @@ bool ConfSearch::RepairSnapshot(Molecule& mol, EnergyCalculator& calculator) con
     Molecule repaired = stage2.final_molecule;
     repaired.setCharge(m_charge);
     repaired.setSpin(m_spin);
+    // Claude Generated (Jul 2026): validate BEFORE the topology comparison. A NaN coordinate makes
+    // the difference NaN, and `NaN > 1e-4` is FALSE -- a diverged repair would be accepted as
+    // "topology restored" and handed to the next optimisation, where every GFN-FF term returns NaN.
+    if (!repaired.getGeometry().allFinite() || !std::isfinite(stage2.final_energy))
+        return false;
     if ((repaired.DistanceMatrix().second - m_topo_matrix).cwiseAbs().sum() > 1e-4)
         return false; // still not this molecule -- the break was real chemistry, not an artefact
 
@@ -1733,6 +1738,14 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
             if (mol.AtomCount() == 0)
                 continue;
             total++;
+            // Claude Generated (Jul 2026): a geometry with NaN/Inf coordinates would SILENTLY PASS
+            // the topology test -- every comparison with NaN is false, so the loop below finds "no
+            // difference" and keeps the structure. It then reaches GFN-FF, whose energy and every
+            // gradient term come back NaN. Screen it here.
+            if (!mol.getGeometry().allFinite()) {
+                rejected_broken++;
+                continue;
+            }
             const Matrix topo = mol.DistanceMatrix().second;
             if (topo.rows() != m_topo_matrix.rows()) {
                 rejected_broken++;
@@ -1794,6 +1807,9 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
         // structure, and a second GFN-FF instance for the same molecule in one process has crashed
         // before (see ConfGen).
         nlohmann::json calc_cfg = ChildConfig(m_md_method, 1);
+        calc_cfg["verbosity"] = 0; // otherwise every repair logs "Molecule set: N atoms" + timings
+        const int saved_verbosity = CurcumaLogger::get_verbosity();
+        CurcumaLogger::set_verbosity(0);
         EnergyCalculator calculator(m_md_method, calc_cfg);
         for (const auto& entry : by_energy) {
             if (repair_attempts >= m_repair_max)
@@ -1805,6 +1821,7 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
                 repaired++;
             }
         }
+        CurcumaLogger::set_verbosity(saved_verbosity);
         CurcumaLogger::result_fmt("ConfSearch: topology repair: {} of {} attempted snapshot(s) pulled back to the "
                                   "reference topology (restrained, then released; {} candidate(s) had at most {} "
                                   "changed bond(s))",
@@ -1820,12 +1837,14 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
     if (first)
         std::ofstream(path).close(); // nothing survived -> empty input, Phase 2 skips it
 
-    CurcumaLogger::result_fmt("ConfSearch: topology gate: {} of {} MD snapshots kept ({} rejected: {} with a formed "
-                              "bond (collision), {} with a broken bond{}) -- the rejected ones are not conformers "
-                              "of this molecule",
-        static_cast<int>(keep.size()), total, rejected_formed + rejected_broken - repaired,
-        rejected_formed, rejected_broken,
-        repaired > 0 ? fmt::format("; {} repaired and kept", repaired) : "");
+    // Report the chain, not two numbers that do not add up: N failed the check, R of them were
+    // repaired and kept, N-R are gone.
+    CurcumaLogger::result_fmt("ConfSearch: topology gate: {} of {} MD snapshots failed the check ({} formed a bond "
+                              "(collision), {} broke one){} -- {} snapshots go into the optimisation",
+        rejected_formed + rejected_broken, total, rejected_formed, rejected_broken,
+        repaired > 0 ? fmt::format(", {} of them repaired and kept", repaired)
+                     : std::string(", none repaired"),
+        static_cast<int>(keep.size()));
     return static_cast<int>(keep.size());
 }
 

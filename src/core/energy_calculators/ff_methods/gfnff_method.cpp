@@ -1899,7 +1899,22 @@ double GFNFF::Calculation(bool gradient)
         // to a specific energy term. This is the diagnostic path for opt failures
         // on large systems (e.g. 1410-atom polymer) where SP/MD succeed.
         if (!m_gradient.allFinite()) {
-            CurcumaLogger::error("GFN-FF: combined gradient contains NaN/Inf — scanning per-term contributions");
+            // Claude Generated (Jul 2026): the per-term scan is a DIAGNOSTIC, and a line search
+            // walks into the same pathological geometry up to max_line_search times -- so one bad
+            // structure in a batch printed ~20 nine-line blocks, and a ConfSearch cycle drowned in
+            // them. Print the full scan for the first occurrence of this instance and once every
+            // 100 afterwards; the rest is summarised. Raise the verbosity to see every one.
+            ++m_nan_gradient_reports;
+            const bool verbose_scan = (CurcumaLogger::get_verbosity() >= 2)
+                || m_nan_gradient_reports == 1 || (m_nan_gradient_reports % 100) == 0;
+            if (!verbose_scan && m_nan_gradient_reports == 2)
+                CurcumaLogger::warn("GFN-FF: further NaN/Inf gradients on this molecule are counted, not scanned "
+                                    "per term (raise -verbosity to 2 for every one)");
+            if (verbose_scan)
+                CurcumaLogger::error_fmt("GFN-FF: combined gradient contains NaN/Inf (occurrence {}) — scanning "
+                                         "per-term contributions",
+                    m_nan_gradient_reports);
+            if (verbose_scan) {
             if (!m_charges.allFinite()) {
                 CurcumaLogger::error("GFN-FF: m_charges (EEQ Phase-2) contains NaN/Inf");
             }
@@ -1938,6 +1953,7 @@ double GFNFF::Calculation(bool gradient)
                 scanComp(m_forcefield->GradientBATM(),       "batm");
                 scanComp(m_forcefield->GradientATM(),        "atm");
             }
+            } // verbose_scan
         }
 
         // Claude Generated (Feb 21, 2026): Gradient invariance diagnostics

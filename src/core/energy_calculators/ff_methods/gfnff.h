@@ -2515,6 +2515,11 @@ public:
 private:
     // Molecular structure (formerly from QMInterface base class)
     int m_atomcount = 0; ///< Number of atoms
+    /* Claude Generated (Jul 2026): how often this instance produced a non-finite gradient. The
+     * per-term NaN scan is a diagnostic and a line search re-enters the same pathological geometry
+     * up to max_line_search times, so one bad structure in a batch printed ~20 nine-line blocks.
+     * The full scan is printed for the first occurrence and every 100th; verbosity >= 2 prints all. */
+    int m_nan_gradient_reports = 0;
     GeoGradMatrix m_geometry; ///< Molecular geometry in Angström — WP-G: RowMajor
     GeoGradMatrix m_gradient; ///< Gradient in Hartree/Bohr — WP-G: RowMajor
     std::vector<int> m_atoms; ///< Atomic numbers (Z values)

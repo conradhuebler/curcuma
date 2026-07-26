@@ -217,12 +217,15 @@ Those same geometries are the ones GFN-FF cannot differentiate:
 ```
 
 `hb` and the three-body `atm`/`batm` terms carry 1/r factors, so two atoms on top of each other give
-a finite energy with an infinite derivative. The snapshots are therefore screened against the
+a finite energy with an infinite derivative. (The per-term scan is a diagnostic and a line search
+re-enters the same geometry up to `max_line_search` times, so one bad structure produced ~20 of these
+nine-line blocks. GFN-FF now prints the full scan for the first occurrence and every 100th; raise
+`-verbosity` to 2 for all of them.) The snapshots are therefore screened against the
 reference topology *before* Phase 2:
 
 ```
-ConfSearch: topology gate: 15 of 974 MD snapshots kept (959 rejected: 42 with a formed bond
-            (collision), 917 with a broken bond) -- not optimised, they are not conformers of this molecule
+ConfSearch: topology gate: 959 of 974 MD snapshots failed the check (42 formed a bond (collision),
+            917 broke one), none repaired -- 15 snapshots go into the optimisation
 ```
 
 (butane at 3000 K, deliberately destructive — 959 optimisations saved in one cycle). Formed and
