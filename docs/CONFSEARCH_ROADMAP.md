@@ -152,6 +152,14 @@ dihedral sets from the accepted conformers, optimise at `md_method`, and feed su
 ConfScan filter + the shared bias pool. Open questions: pair-selection policy, how many offspring per
 pair, and whether the crossing should respect the symmetry permutations already cached.
 
+### 6. Open bugs found Jul 26, 2026 (see docs/CONFSEARCH_PROPOSALS.md handover for detail)
+- **`topology_mode=auto` global default**: reproduces a 1312 kJ/mol energy/geometry mismatch in plain
+  `-opt`; only ConfSearch children were switched to `constant`.
+- **Uninitialised access in `GFNFF::getGFNFFBondParameters`**: avoided, not explained (ASAN pending).
+- **`ecomp_*` tests**: must be checked against the pre-`24c9b8d` state (the `Repulsion` term was added
+  to the decomposition they compare).
+- **P0 dihedral restraint** is the pending lever for the recombination phase (72 % clash loss).
+
 ## Verification anchors
 - Bit-identity of the Phase-B MTD refactor (perms off): byte-identical `.mtd.xyz`/`.bias.xyz` vs the
   pre-B8 build on a fixed-seed ConfSearch (`-seed 42 -threads 1`).

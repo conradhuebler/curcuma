@@ -323,3 +323,94 @@ Output (all through the BMT directory):
 - **P5 relaxed torsion scans** as an add-on for torsions/states the ensemble does not cover
   (the only route to *extrapolation*).
 - **P6** call the same routines as a ConfSearch phase and feed survivors into the shared bias pool.
+
+
+---
+
+# Handover: state, measured results, open items (end of the Jul 25/26 2026 session)
+
+Read this first when continuing. Everything below is machine-tested only -- nothing is ✅ TESTED.
+
+## What exists (commits on branch `confsearch`)
+
+| Commit | Content |
+|---|---|
+| `b1671e9` | RATTLE no longer freezes inter-fragment motion; legacy RMSD-MTD restart abort fixed |
+| `13a44d1` | BMT output directories are collision-safe (`_2` suffix) |
+| `e6641d7` | ConfSearch: RMSD-aware seeding (`-seed_selection diverse`), cross-PES statistics fixed |
+| `24c9b8d` | `torsion_space.{h,cpp}` + `-confgen` matched-pair analysis; missing `Repulsion` term added to the GFN-FF energy decomposition |
+| `31de7c0` | Double-mutant-cycle couplings + cross-validated model comparison |
+| `8fb8507` | `-confgen -generate true`: build/optimise/judge proposals |
+| `a86640d` | ConfSearch Phase 3c (`-confgen_phase true`) |
+| `95d4ab6` | Phase 3c state is reported instead of silent |
+| `3b5858a` | Three pre-existing bugs: topology-cache energy drift, ConfScan `break`, bias energies |
+
+Tests added: `test_torsion_space` (32 assertions), `cli_confgen_01_matched_pairs`,
+`cli_confgen_02_generate`, `cli_confsearch_02_confgen_phase`, `cli_simplemd_15_rattle_mtd_fragments`.
+Full suite: 20/502 failing, all pre-existing categories (`ecomp_*`, `d4_diag_*`, `cli_sqm_11`,
+`cli_curcumaopt_07`, `test_orca_interface`, `confscan_dtemplate`); baseline in CLAUDE.md was 21/493.
+
+## The numbers that decide the direction
+
+- **Torsion-state model explains only ~15 % of the out-of-sample energy variance** (R²_cv, two
+  independent ensembles: 108 conf./90 atoms and 44 conf./114 atoms). Pair couplings do not fix it
+  (22 % / −66 %). Not a discretisation artefact (`-state_tolerance` 10…60° → no trend).
+  => The model may pick WHAT TO TRY, never what is good.
+- **Proposal generation works**: 90-atom ensemble → 7 new, mutually distinct conformers (closest pair
+  1.11 Å), 22–36 kJ/mol above the minimum. 72 % of proposals die in the clash filter.
+- **Phase 3c inside ConfSearch**: 90-atom molecule 21 → 44 conformers, minimum 2.7 kJ/mol lower.
+  Penta-alanine (dual gfnff/gfn2, 3 cycles): 133 → 153 conformers (+15 %), **identical** minimum
+  (−85.021670 vs −85.021671), +7…20 % wall time. Phase-3c yield per cycle collapses on the peptide
+  (9 → 1 → 1) but grows on the 90-atom molecule (5 → 15).
+
+## Open items, most consequential first
+
+1. **`topology_mode=auto` is still the global default.** Only `ConfSearch::ChildConfig()` was switched
+   to `constant`. A plain `curcuma -opt <MD snapshot> -method gfnff` still reproduces the artefact:
+   the optimisation "converges" to −9.168083 Eh while its written geometry is worth −8.668213 Eh
+   (1312 kJ/mol, identical 52-bond topology). Decide whether `auto` is ever the right default.
+   Reproducer: any hot MD snapshot; compare `-gfnff.topology_mode auto|constant` and recompute the
+   written geometry with `-sp`.
+2. **Verify I did not break the `ecomp_*` tests.** They compare energy *components*, and `24c9b8d`
+   added the missing `Repulsion` term to that decomposition. They fail now (11 of the 20), and they
+   were in the documented pre-existing set -- but I never ran them before the change.
+   Check: `git stash`-free comparison via `git worktree add /tmp/pre 24c9b8d~1` + build + `ctest -R ecomp`.
+3. **Uninitialised access in `GFNFF::getGFNFFBondParameters`** -- avoided (ConfGen shares one
+   `EnergyCalculator`), not explained. Reproduced 6/6 as an intermittent segfault when a SECOND GFN-FF
+   instance is initialised for the same molecule in one process. Next step: ASAN build of
+   `gfnff_method.cpp`.
+4. **P0 dihedral restraint** -- the biggest lever for ConfGen: 72 % of proposals are lost to the clash
+   filter because torsions are set rigidly. Plan: build anyway, restrain the target torsions, let the
+   optimiser relieve the clash, then release. One helper called from all four E/G sites
+   (`optimizer_driver.cpp:587`, `lbfgspp_optimizer.cpp:157/248`, `native_optimizer_adapters.cpp:42/100`).
+   Units: geometry in **Angstrom**, gradient in **Eh/Bohr** (factor 0.529177, FD-verified).
+   Reuse `GFNFF_Geometry::calculateDihedralAngle` (returns φ and dφ/dx).
+5. **`cli_curcumaopt_07_opt_multixyz`, frame 02** (5 kJ/mol drift): suspected to be the same topology
+   artefact. Unverified.
+6. **ConfScan has no `std::sort`** but assumes energy order in places (`m_lowest_energy` from the
+   first molecule of a pass). The fatal case is fixed (`break` → `continue`), the assumption remains.
+7. **`test_cases/validation/butane.xyz` is mislabelled** -- comment claims "Anti conformation", the
+   backbone dihedral is 116°. Left untouched (other tests hold golden values on it).
+8. **P5 relaxed scans** for torsions the ensemble covers in only one state (6 of 12 on the 90-atom
+   molecule) -- the only route to extrapolation instead of recombination.
+9. **No criterion when Phase 3c pays.** The ConfGen report already shows how many torsions have >1
+   state; wiring that into an automatic decision is open.
+
+## Methodological traps (cost me hours -- do not repeat)
+
+- **`-threads > 1` is not reproducible.** Two identical ConfSearch runs differed by 2.3 kJ/mol after
+  the *initial* optimisation alone. Differences below ~5 kJ/mol cannot be attributed to a feature.
+  Use `-threads 1` for A/B, or find the source (see `docs/wp4/WP1-threading-audit.md`).
+- **Always recompute a written energy against its geometry** before believing any ranking. One
+  artefact structure in a pool becomes the energy reference and pushes every real conformer out of the
+  window -- that is how "1 unique conformer of 482" happened.
+- **Verify that CLI flags actually arrived** (the banner prints method/temperature/seed rank). An
+  earlier A/B silently ran single-method to 300 K because several flags did not apply in that build.
+- A/B runs on penta-alanine need > 3 h for 4 cycles (cycle 3 alone ~6000 s); do not use a 3 h timeout.
+
+## Where things live
+
+`src/capabilities/torsion_space.{h,cpp}` (reduction), `src/capabilities/confgen.{h,cpp}` (analysis +
+generation), `ConfSearch::PerformConfGen` (Phase 3c), `docs/CONFSEARCH_SEEDING.md` (seeding),
+this file (proposals). Scratch data of the session was under
+`/tmp/claude-1000/.../scratchpad/{ala2_on,ala2_off,cg,cg2,repro}` -- not persistent.
