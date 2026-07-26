@@ -1071,7 +1071,7 @@ private:
     /**
      * @brief Retrieve cached bond list, computing it once if needed
      */
-    const std::vector<std::pair<int,int>>& getCachedBondList() const;
+    // moved to the public section below
 
     /**
      * @brief Calculate topological distances (bond counts) between all atom pairs using BFS
@@ -2646,6 +2646,18 @@ private:
     mutable std::optional<std::vector<std::pair<int,int>>> m_cached_bond_list;
 
     std::vector<std::pair<int,int>> m_forced_bonds; ///< External bonds merged with geometric detection
+
+public:
+    /**
+     * @brief The bond graph currently in use.
+     *
+     * Public so a caller can capture the graph once and hand it back through Mol::m_bonds
+     * for later structures, pinning the topology WITHOUT pinning anything geometry
+     * dependent. Claude Generated (July 2026).
+     */
+    const std::vector<std::pair<int,int>>& getCachedBondList() const;
+
+private:
 
     // Topology caching mode: "auto" (two-tier caching) or "constant" (never recalculate)
     std::string m_topology_mode = "auto";

@@ -29,6 +29,8 @@
 
 #include "simplemd.h"
 
+#include "src/core/energy_calculators/ff_methods/gfnff.h"
+
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <algorithm>
@@ -58,11 +60,12 @@ namespace {
 class LabelThread : public CxxThread {
 public:
     LabelThread(const std::string& base_method, const std::string& ref_method, const json& controller,
-        const Molecule& anchor)
+        const Molecule& anchor, const std::vector<std::pair<int, int>>& anchor_bonds)
         : m_base_method(base_method)
         , m_ref_method(ref_method)
         , m_controller(controller)
         , m_anchor(anchor)
+        , m_anchor_bonds(anchor_bonds)
     {
         setAutoDelete(false);
     }
@@ -84,10 +87,13 @@ public:
         cfg["verbosity"] = 0;
 
         try {
+            // Each structure gets its own set-up, with only the bond graph carried over --
+            // the same treatment the trained model applies later. Initialising once at the
+            // anchor and merely moving the coordinates pins the force-field parameters to
+            // the anchor geometry, which makes energy and gradient disagree; labels built
+            // that way would teach the model a surface nobody can reproduce.
             EnergyCalculator base(m_base_method, cfg);
             EnergyCalculator ref(m_ref_method, cfg);
-            base.setMolecule(m_anchor.getMolInfo());
-            ref.setMolecule(m_anchor.getMolInfo());
 
             for (std::size_t k = 0; k < m_molecules.size(); ++k) {
                 const Molecule& mol = m_molecules[k];
@@ -98,13 +104,22 @@ public:
                 s.charge = mol.Charge();
                 s.spin = mol.Spin();
 
-                base.updateGeometry(s.geometry);
-                s.energy_base = base.CalculateEnergy(true);
-                s.gradient_base = base.Gradient();
+                Mol pinned = mol.getMolInfo();
+                if (!m_anchor_bonds.empty())
+                    pinned.m_bonds = m_anchor_bonds;
 
-                ref.updateGeometry(s.geometry);
+                base.setMolecule(pinned);
+                s.energy_base = base.CalculateEnergy(true);
+                // EnergyCalculator hands out Eh/Bohr; the descriptor and therefore the whole
+                // model work in Eh/Angstrom. Converting here keeps one unit convention for
+                // everything the model ever sees.
+                s.gradient_base = base.Gradient() * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
+
+                // The reference has no frozen topology of its own, so it only needs the
+                // geometry; re-setting it per structure keeps both sides symmetric.
+                ref.setMolecule(pinned);
                 s.energy_ref = ref.CalculateEnergy(true);
-                s.gradient_ref = ref.Gradient();
+                s.gradient_ref = ref.Gradient() * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
                 s.has_gradients = true;
 
                 m_results.push_back(s);
@@ -124,6 +139,7 @@ private:
     std::string m_ref_method;
     json m_controller;
     Molecule m_anchor;
+    std::vector<std::pair<int, int>> m_anchor_bonds;
     std::vector<Molecule> m_molecules;
     std::vector<std::size_t> m_indices;
     std::vector<MLStructure> m_results;
@@ -223,7 +239,34 @@ bool ActiveLearn::loadStructures(std::vector<Molecule>& molecules)
     }
 
     m_anchor = molecules[0];
+    captureAnchorBonds();
     return true;
+}
+
+void ActiveLearn::captureAnchorBonds()
+{
+    m_anchor_bonds.clear();
+    // Only GFN-FF-style methods carry a frozen graph worth pinning; for anything else the
+    // empty list simply means "detect as usual".
+    if (m_base_method.rfind("gfnff", 0) != 0)
+        return;
+
+    const int saved = CurcumaLogger::get_verbosity();
+    CurcumaLogger::set_verbosity(0);
+    GFNFF probe(m_controller);
+    const bool ok = probe.InitialiseMolecule(m_anchor.getMolInfo());
+    if (ok)
+        m_anchor_bonds = probe.getCachedBondList();
+    CurcumaLogger::set_verbosity(saved);
+
+    if (m_anchor_bonds.empty())
+        CurcumaLogger::warn("activelearn: could not capture a bond graph from the anchor; "
+                            "topology will be redetected for every structure");
+    else
+        CurcumaLogger::result_fmt(
+            "activelearn: anchor bond graph captured ({} bonds); it is pinned for every "
+            "structure while coordination numbers and parameters follow each geometry",
+            m_anchor_bonds.size());
 }
 
 bool ActiveLearn::labelStructures(const std::vector<Molecule>& molecules, MLDataset& data)
@@ -238,7 +281,8 @@ bool ActiveLearn::labelStructures(const std::vector<Molecule>& molecules, MLData
     std::vector<LabelThread*> threads;
     threads.reserve(n_threads);
     for (int t = 0; t < n_threads; ++t)
-        threads.push_back(new LabelThread(m_base_method, m_ref_method, m_controller, m_anchor));
+        threads.push_back(
+            new LabelThread(m_base_method, m_ref_method, m_controller, m_anchor, m_anchor_bonds));
     for (std::size_t i = 0; i < molecules.size(); ++i)
         threads[i % n_threads]->addStructure(molecules[i], i);
 
@@ -334,7 +378,7 @@ bool ActiveLearn::fitAndReport(const MLDataset& train, const MLDataset& test, in
 
     model.setBaseMethod(m_base_method);
     model.setReferenceMethod(m_ref_method);
-    model.setAnchor(m_anchor.Atoms(), m_anchor.getGeometry());
+    model.setAnchor(m_anchor.Atoms(), m_anchor.getGeometry(), m_anchor_bonds);
 
     if (log_details) {
         CurcumaLogger::result_fmt(

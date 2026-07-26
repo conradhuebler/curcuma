@@ -196,8 +196,19 @@ public:
     void setReferenceMethod(const std::string& m) { m_ref_method = m; }
     const std::string& referenceMethod() const { return m_ref_method; }
 
-    /*! \brief Anchor geometry, stored so every consumer can freeze an identical topology. */
-    void setAnchor(const std::vector<int>& elements, const Geometry& geometry);
+    /**
+     * @brief Anchor state: the bond graph every consumer must reuse.
+     *
+     * Only the graph is pinned. Everything geometry dependent -- coordination numbers, the
+     * force-field parameters derived from them, charges -- has to be recomputed at the
+     * structure actually being evaluated. Pinning those as well produces a potential whose
+     * gradient no longer matches its own energy, measured at 4.7e-3 Eh/Angstrom against
+     * 3.5e-5 for the unpinned method.
+     *
+     * The geometry is kept for provenance and as a fallback when no graph was captured.
+     */
+    void setAnchor(const std::vector<int>& elements, const Geometry& geometry,
+        const std::vector<std::pair<int, int>>& bonds = {});
 
     /**
      * @brief Move prediction onto a GPU backend ("cuda", ...). Empty returns to the CPU.
@@ -209,6 +220,7 @@ public:
     bool hasAnchor() const { return m_anchor_geometry.rows() > 0; }
     const std::vector<int>& anchorElements() const { return m_anchor_elements; }
     const Geometry& anchorGeometry() const { return m_anchor_geometry; }
+    const std::vector<std::pair<int, int>>& anchorBonds() const { return m_anchor_bonds; }
 
 private:
     /*! \brief Apply the stored feature standardisation in place. */
@@ -246,6 +258,7 @@ private:
 
     std::vector<int> m_anchor_elements;
     Geometry m_anchor_geometry;
+    std::vector<std::pair<int, int>> m_anchor_bonds;
 
     /// Prediction is const, so the device context is mutable state of an otherwise pure call.
     mutable std::shared_ptr<class GpuInference> m_gpu_infer;

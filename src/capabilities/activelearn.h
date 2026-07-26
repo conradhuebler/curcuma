@@ -250,6 +250,12 @@ private:
     double m_al_uncertainty = 0.05;
     int m_al_initial = 15;
 
-    /* Anchor structure that fixes the topology for every calculator in this run. */
+    /* Anchor structure and, more importantly, the bond graph taken from it. Only the graph
+       is pinned for later structures; everything geometry dependent is recomputed where it
+       is needed. */
     Molecule m_anchor;
+    std::vector<std::pair<int, int>> m_anchor_bonds;
+
+    /*! \brief Determine the bond graph of the anchor once, with the base method itself. */
+    void captureAnchorBonds();
 };

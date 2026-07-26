@@ -24,6 +24,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
 #include "src/core/energy_calculators/method_factory.h"
+#include "src/core/units.h"
 
 #include <algorithm>
 #include <cmath>
@@ -173,22 +174,26 @@ bool DeltaMLMethod::initialiseBase(const Mol& mol)
         return false;
     }
 
-    // Topology anchor: initialise the base method from the geometry the model was trained
-    // around, then move to the actual structure. For a method that freezes its topology at
-    // setup (GFN-FF) this guarantees every evaluation, in every thread and every run, uses
-    // the same bond list -- otherwise Delta picks up setup noise that cannot be learned away.
-    bool anchored = false;
-    if (m_model.hasAnchor() && m_model.anchorElements() == mol.m_atoms) {
-        Mol anchor = mol;
-        anchor.m_geometry = m_model.anchorGeometry();
-        if (m_base->setMolecule(anchor)) {
-            anchored = m_base->updateGeometry(mol.m_geometry);
-            if (!anchored)
-                CurcumaLogger::warn("deltaml: could not move base method off the anchor "
-                                    "geometry, falling back to direct setup");
-        }
-    }
-    if (!anchored && !m_base->setMolecule(mol)) {
+    // Topology anchor: hand the base method the bond graph captured when the model was
+    // fitted, and let it set itself up at the structure actually being evaluated. GFN-FF
+    // takes Mol::m_bonds as an external graph and skips its own geometric detection, so
+    // the connectivity is pinned while coordination numbers, the parameters derived from
+    // them and the charges are all computed where they belong.
+    //
+    // The earlier construction -- initialise at the anchor geometry, then move -- pinned
+    // far more than the graph: the force-field parameters stayed at the anchor while the
+    // topology was rebuilt at the real geometry, and the mixture depended on how far the
+    // structure had travelled. The result was a potential whose analytic gradient missed
+    // its own finite differences by 4.7e-3 Eh/Angstrom, against 3.5e-5 for the same method
+    // set up normally. Optimisation and dynamics on such a surface are meaningless.
+    Mol anchored = mol;
+    if (!m_model.anchorBonds().empty() && m_model.anchorElements() == mol.m_atoms)
+        anchored.m_bonds = m_model.anchorBonds();
+    else if (m_model.hasAnchor() && m_model.anchorElements() == mol.m_atoms)
+        CurcumaLogger::warn("deltaml: model carries no bond graph (fitted before the anchor "
+                            "was narrowed); topology is redetected per structure");
+
+    if (!m_base->setMolecule(anchored)) {
         m_has_error = true;
         m_error_message = "deltaml: base method rejected the molecule";
         return false;
@@ -252,7 +257,11 @@ double DeltaMLMethod::calculateEnergy(bool gradient)
             Matrix dgrad;
             m_last_correction
                 = m_model.predictEnergyAndGradient(m_elements, m_geometry, dgrad, &indicator);
-            m_gradient += dgrad;
+            // The model differentiates with respect to Angstrom, the base method reports
+            // Eh/Bohr. Adding the two without this factor inflates the learned force by
+            // 1/0.5292 = 1.89 -- an error invisible in the energy, and one that quietly
+            // corrupts every optimisation and trajectory.
+            m_gradient += dgrad * CurcumaUnit::Length::BOHR_TO_ANGSTROM;
         } else {
             m_last_correction = m_model.predictEnergy(m_elements, m_geometry, &indicator);
         }

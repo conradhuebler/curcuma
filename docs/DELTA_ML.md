@@ -2,6 +2,16 @@
 
 **Status**: 🤖 AI-generated, ⚙️ machine-tested. Human production testing pending.
 
+> **The performance numbers below the fold are being re-measured.** Two defects found on
+> 2026-07-26 (an over-broad topology anchor and a unit mismatch between the learned gradient
+> and the base method) corrupted every force this feature produced. Both are fixed and the
+> total gradient now matches finite differences at the same level as the bare base method,
+> but the accuracy, geometry and dynamics figures obtained beforehand no longer hold. What
+> is currently established: gradients are consistent, NVE drift matches GFN-FF at the
+> default regularisation, and **the model no longer improves the optimised geometry** on the
+> one system measured so far (0.68 A from the reference minimum against GFN-FF's 0.38 A).
+> Treat the method as unvalidated until it has been re-measured.
+
 Learns the difference between a cheap base method and an expensive reference:
 
 ```

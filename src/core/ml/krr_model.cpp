@@ -135,10 +135,12 @@ void DeltaMLModel::setInferenceBackend(const std::string& backend)
             "delta-ML: backend '{}' unavailable for prediction; evaluating on the CPU", backend);
 }
 
-void DeltaMLModel::setAnchor(const std::vector<int>& elements, const Geometry& geometry)
+void DeltaMLModel::setAnchor(const std::vector<int>& elements, const Geometry& geometry,
+    const std::vector<std::pair<int, int>>& bonds)
 {
     m_anchor_elements = elements;
     m_anchor_geometry = geometry;
+    m_anchor_bonds = bonds;
 }
 
 // =================================================================================
@@ -828,6 +830,13 @@ json DeltaMLModel::toJson() const
                 ag.push_back(m_anchor_geometry(i, g));
         j["anchor_elements"] = m_anchor_elements;
         j["anchor_geometry"] = ag;
+        std::vector<int> flat_bonds;
+        flat_bonds.reserve(m_anchor_bonds.size() * 2);
+        for (const auto& b : m_anchor_bonds) {
+            flat_bonds.push_back(b.first);
+            flat_bonds.push_back(b.second);
+        }
+        j["anchor_bonds"] = flat_bonds;
     }
 
     return j;
@@ -903,6 +912,12 @@ bool DeltaMLModel::fromJson(const json& j)
 
     m_anchor_elements.clear();
     m_anchor_geometry = Geometry();
+    m_anchor_bonds.clear();
+    if (j.contains("anchor_bonds")) {
+        const auto flat = j["anchor_bonds"].get<std::vector<int>>();
+        for (std::size_t i = 0; i + 1 < flat.size(); i += 2)
+            m_anchor_bonds.emplace_back(flat[i], flat[i + 1]);
+    }
     if (j.contains("anchor_elements") && j.contains("anchor_geometry")) {
         m_anchor_elements = j["anchor_elements"].get<std::vector<int>>();
         const auto ag = j["anchor_geometry"].get<std::vector<double>>();
