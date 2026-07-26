@@ -84,6 +84,16 @@ double LBFGSppObjectiveFunction::operator()(const Vector& x, Vector& grad)
             grad = Vector::Map(gradient_geom.data(), gradient_geom.size());
         }
 
+        // Claude Generated (Jul 2026): a NON-FINITE GRADIENT is an error too. Only the ENERGY was
+        // checked here, so a method that returns a finite energy with a NaN gradient (GFN-FF does
+        // exactly that for pathological geometries: "energy is finite and returned, but the
+        // gradient is invalid") fed NaN straight into LBFGSpp's line search. hasError() makes the
+        // driver take a zero step and stop on this structure instead of following garbage.
+        if (!grad.allFinite()) {
+            m_error = true;
+            return 0.0;
+        }
+
         // Claude Generated (Jul 2026): harmonic dihedral restraints, E += 1/2 k (phi - phi_0)^2.
         // Added here, inside the objective, so LBFGSpp's own line-search evaluations see the same
         // biased surface (see bindDihedralRestraints). Energy and gradient are updated together --

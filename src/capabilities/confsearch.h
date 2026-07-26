@@ -174,6 +174,26 @@ private:
         return Basename() + "." + m_cycle_tag + "." + purpose + "." + method;
     }
 
+    /* Claude Generated (Jul 2026): drop MD snapshots whose bond topology differs from the reference,
+     * BEFORE they are optimised.
+     *
+     * A conformer search explores one molecule; a snapshot that formed or broke a bond is not a
+     * conformer of it and is rejected by the Phase 4 topology filter anyway -- after a full
+     * optimisation has been paid for it. Worse, those geometries are the ones that make GFN-FF
+     * return "energy is finite but the gradient contains NaN" (overlapping atoms in the 1/r hb and
+     * three-body terms), which floods the log and wastes the optimiser's iterations.
+     *
+     * Rewrites the file in place with the surviving frames and reports what was dropped, split into
+     * formed vs broken bonds (the two failure modes have different causes: a collision vs a
+     * fragmentation).
+     *
+     * The criterion is the same covalent-radius rule as Phase 4 (factor 1.5), which is generous
+     * enough that thermal bond stretching at the temperatures used here does not trip it -- a C-C
+     * bond has to exceed 2.28 A to count as broken.
+     *
+     * @return number of frames kept */
+    int FilterSnapshotsByTopology(const std::string& path) const;
+
     /* Copy every frame of an XYZ file to another name. Used where a stage has to start from the
      * previous stage's OUTPUT: the copy is what lets the new stage own a file whose name states its
      * purpose and method instead of inheriting a chain of suffixes. Returns the frame count. */
@@ -293,6 +313,7 @@ private:
     bool m_phase3b_two_stage = false, m_phase3b_filter = true, m_cycle_output = true;
     std::string m_phase3b_preopt_preset = "loose", m_phase3b_preset = "normal";
     int m_phase3b_preopt_max_iter = 0, m_ensemble_report = 3;
+    bool m_snapshot_topology_gate = true; // Claude Generated (Jul 2026): pre-Phase-2 topology gate
     bool m_topo_check = false, m_epot_abort = false, m_opt_feedback_bias = true, m_opt_feedback_prune_snapshots = false, m_mtd_permutation = true;
     // Claude Generated (Jun 2026): temperature runaway abort + cross-run bias-height freeze.
     // ON by default for ConfSearch (bias-heating safety net + best conformer yield); see the PARAM block below.
@@ -410,6 +431,7 @@ private:
     PARAM(no_restart, Bool, false, "Disable automatic SimpleMD restart loading. ConfSearch manages its own checkpoint and forces this on regardless of the value here.", "MD Output", {"norestart"})
 
     // --- Robustness Gates ---
+    PARAM(snapshot_topology_gate, Bool, true, "Drop MD snapshots whose bond topology differs from the reference structure BEFORE they are optimised. Such structures are not conformers of this molecule and are rejected by the Phase 4 filter anyway, after a full optimisation has been paid for them; they are also the geometries for which GFN-FF returns a finite energy together with a NaN gradient. Set false to optimise every snapshot as before.", "Robustness", {})
     PARAM(topo_check, Bool, false, "Abort an MD run when the molecule fragments.", "Robustness", {})
     PARAM(topo_check_interval, Int, 0, "Steps between topology checks. 0 uses the MD dump frequency.", "Robustness", {})
     PARAM(epot_abort, Bool, false, "Abort an MD run when the running-mean potential climbs past epot_abort_window.", "Robustness", {})

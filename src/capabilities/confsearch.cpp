@@ -637,6 +637,23 @@ void ConfSearch::start()
             CurcumaLogger::warn_fmt("ConfSearch: T={}K -- no new MD runs and bias pool unchanged -- skipping Phase 2/3.",
                 m_currentT);
         } else {
+            // Claude Generated (Jul 2026): enforce the reference topology BEFORE optimising.
+            // A snapshot that formed or broke a bond is not a conformer of this molecule and is
+            // rejected by the Phase 4 filter anyway -- but only after a full optimisation was spent
+            // on it, and those are exactly the geometries for which GFN-FF returns a finite energy
+            // with a NaN gradient (overlapping atoms in the 1/r hb and three-body terms).
+            if (m_snapshot_topology_gate && FilterSnapshotsByTopology(outputPath(explore + ".xyz")) == 0) {
+                // Nothing survived: the MD produced only broken structures this cycle. Treat it like
+                // a cycle without new bias structures instead of running the phases on an empty
+                // file (ConfScan on an empty ensemble is not a path worth relying on).
+                CurcumaLogger::warn_fmt("ConfSearch: T={}K -- every MD snapshot changed its topology; "
+                                        "skipping Phase 2/3 for this cycle. The dynamics is destroying the "
+                                        "molecule -- lower the temperature, or set -topo_check true to abort "
+                                        "such MD runs early.",
+                    m_currentT);
+                no_new_bias_structures = true;
+            }
+
             // Fast per-cycle optimization at md_method.
             // Single-threaded per optimization when ConfSearch parallelizes externally.
             nlohmann::json opt = ChildConfig(m_md_method, (m_threads > 1) ? 1 : m_threads);
@@ -1627,6 +1644,83 @@ std::string ConfSearch::PerformHighLevelOptimisation(const std::string& f)
     return out;
 }
 
+// Claude Generated (Jul 2026): pre-optimisation topology gate -- see the header for the rationale.
+int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
+{
+    std::ifstream check(path);
+    if (!check.good() || m_topo_matrix.rows() == 0)
+        return 0;
+
+    std::vector<Molecule> keep;
+    int total = 0, rejected_formed = 0, rejected_broken = 0;
+    bool reported = false;
+    {
+        FileIterator it(path);
+        while (!it.AtEnd()) {
+            Molecule mol = it.Next();
+            if (mol.AtomCount() == 0)
+                continue;
+            total++;
+            const Matrix topo = mol.DistanceMatrix().second;
+            if (topo.rows() != m_topo_matrix.rows()) {
+                rejected_broken++;
+                continue;
+            }
+            // Count the two failure modes separately: an EXTRA bond means two atoms collided (this
+            // is what produces the NaN in the 1/r terms), a MISSING one means the molecule came
+            // apart. Both disqualify the structure, but they say different things about the run.
+            int formed = 0, broken = 0;
+            int first_i = -1, first_j = -1;
+            for (int i = 0; i < mol.AtomCount(); ++i) {
+                for (int j = i + 1; j < mol.AtomCount(); ++j) {
+                    const double d = topo(i, j) - m_topo_matrix(i, j);
+                    if (std::abs(d) < 0.5)
+                        continue;
+                    if (d > 0)
+                        formed++;
+                    else
+                        broken++;
+                    if (first_i < 0) { first_i = i; first_j = j; }
+                }
+            }
+            if (formed == 0 && broken == 0) {
+                keep.push_back(std::move(mol));
+                continue;
+            }
+            if (formed > 0)
+                rejected_formed++;
+            else
+                rejected_broken++;
+            if (!reported) {
+                CurcumaLogger::warn_fmt("ConfSearch: topology gate (first reject): atoms {}-{}, {} bond(s) formed, "
+                                        "{} broken (structure energy {:.6f} Eh)",
+                    first_i, first_j, formed, broken, mol.Energy());
+                reported = true;
+            }
+        }
+    }
+
+    if (rejected_formed + rejected_broken == 0) {
+        CurcumaLogger::result_fmt("ConfSearch: topology gate: all {} MD snapshots keep the reference topology", total);
+        return total;
+    }
+
+    // Rewrite the file with the survivors only.
+    bool first = true;
+    for (const Molecule& mol : keep) {
+        if (first) { mol.writeXYZFile(path); first = false; }
+        else          mol.appendXYZFile(path);
+    }
+    if (first)
+        std::ofstream(path).close(); // nothing survived -> empty input, Phase 2 skips it
+
+    CurcumaLogger::result_fmt("ConfSearch: topology gate: {} of {} MD snapshots kept ({} rejected: {} with a formed "
+                              "bond (collision), {} with a broken bond) -- not optimised, they are not conformers "
+                              "of this molecule",
+        static_cast<int>(keep.size()), total, rejected_formed + rejected_broken, rejected_formed, rejected_broken);
+    return static_cast<int>(keep.size());
+}
+
 // Claude Generated (Jul 2026): copy every frame of an XYZ file (see the header for why a stage
 // starts from a copy rather than chaining another suffix onto the previous stage's output).
 int ConfSearch::CopyFrames(const std::string& source, const std::string& destination) const
@@ -2339,6 +2433,7 @@ void ConfSearch::LoadControlJson()
     // Claude Generated (Jun 2026): efficiency/robustness controls
     m_rattle_threshold_temp = m_config.get<double>("rattle_threshold_temp");
     m_rattle_hot_mode = m_config.get<int>("rattle_hot_mode");
+    m_snapshot_topology_gate = m_config.get<bool>("snapshot_topology_gate"); // Claude Generated (Jul 2026)
     m_topo_check = m_config.get<bool>("topo_check");
     m_topo_check_interval = m_config.get<int>("topo_check_interval");
     m_seed_energy_window = m_config.get<double>("seed_energy_window");

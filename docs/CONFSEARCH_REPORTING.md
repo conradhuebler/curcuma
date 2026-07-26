@@ -202,7 +202,47 @@ possible — not only crashes. ConfScan's own test set is unchanged by the fix (
 `confscan_hybrid`, `confscan_molalign`, all `cli_confscan_*` pass; `confscan_dtemplate` fails before
 and after — a pre-existing, thread-count dependent golden-value test).
 
-## 7. Live progress for the optimisation and MD batches
+## 7. Topology gate before the optimisation (`-snapshot_topology_gate`, default ON)
+
+A conformer search explores ONE molecule. A snapshot that formed or broke a bond is not a conformer
+of it, and the Phase 4 filter rejects it — but only *after* a full optimisation has been paid for it.
+Those same geometries are the ones GFN-FF cannot differentiate:
+
+```
+[ERROR] GFN-FF: combined gradient contains NaN/Inf - scanning per-term contributions
+[ERROR]   [NaN] term=hb first_atom=8 axis=0
+[ERROR]   [NaN] term=batm first_atom=8 axis=0
+[ERROR] NaN/Inf in gfnff gradient - energy -2.13026119 Eh is finite and returned, but the gradient
+        is invalid (optimization/MD should abort or restart)
+```
+
+`hb` and the three-body `atm`/`batm` terms carry 1/r factors, so two atoms on top of each other give
+a finite energy with an infinite derivative. The snapshots are therefore screened against the
+reference topology *before* Phase 2:
+
+```
+ConfSearch: topology gate: 15 of 974 MD snapshots kept (959 rejected: 42 with a formed bond
+            (collision), 917 with a broken bond) -- not optimised, they are not conformers of this molecule
+```
+
+(butane at 3000 K, deliberately destructive — 959 optimisations saved in one cycle). Formed and
+broken bonds are counted separately because they mean different things: a formed bond is a collision
+(the NaN source), a broken one is fragmentation.
+
+The criterion is the same covalent-radius rule as Phase 4 (factor 1.5), which is generous enough that
+thermal stretching does not trip it: a C-C bond must exceed 2.28 Å to count as broken. Measured at
+800 K on butane, *all* snapshots pass, so a normal run is unaffected. When nothing survives at all,
+the cycle is skipped with an explicit warning rather than running the phases on an empty file.
+
+Two related knobs: `-snapshot_topology_gate false` restores the old behaviour (optimise everything),
+and `-topo_check true` makes the MD itself abort as soon as the molecule fragments — the gate stops
+you paying for broken structures, `topo_check` stops the dynamics from producing them.
+
+**Independently fixed:** the LBFGSpp objective only checked the ENERGY for NaN, so a finite energy
+with a NaN gradient went straight into the line search. A non-finite gradient is now an error, which
+makes the driver take a zero step and stop on that structure instead of following garbage.
+
+## 8. Live progress for the optimisation and MD batches
 
 Two different mechanisms exist, and mixing them up is what caused the silence:
 
