@@ -31,14 +31,11 @@
 #include "qm_methods/native_xtb_method.h"
 #include "qm_methods/gfnff_method.h"
 #include "qm_methods/nddo_method.h"
-#ifdef USE_CUDA
-#include "qm_methods/gfnff_gpu_method.h"
-#endif
+// CUDA GPU methods are loaded at runtime from libcurcuma_cuda.so via gpu_plugin (so the
+// cuBLAS/cuSOLVER runtime never touches the CPU startup path). No CUDA headers here.
+#include "gpu_plugin.h"
 #ifdef USE_ROCM
 #include "qm_methods/gfnff_hip_method.h"
-#endif
-#if defined(USE_CUDA)
-#include "qm_methods/xtb_gpu_method.h"
 #endif
 #if defined(USE_ROCM)
 #include "qm_methods/xtb_hip_method.h"
@@ -233,7 +230,9 @@ std::unique_ptr<ComputationalMethod> MethodFactory::createGFN2(const json& confi
 #if defined(USE_CUDA)
     if (gpu == "cuda") {
         CurcumaLogger::info("GFN2: using native xTB on GPU (CUDA)");
-        return std::make_unique<XtbGpuComputationalMethod>(curcuma::xtb::MethodType::GFN2, config);
+        if (auto m = gpu_plugin::createNativeXtb("cuda",
+                static_cast<int>(curcuma::xtb::MethodType::GFN2), config))
+            return m;   // else the plugin was unavailable -> fall through to CPU below
     }
 #endif
 #if defined(USE_ROCM)
@@ -260,7 +259,9 @@ std::unique_ptr<ComputationalMethod> MethodFactory::createGFN1(const json& confi
 #if defined(USE_CUDA)
     if (gpu == "cuda") {
         CurcumaLogger::info("GFN1: using native xTB on GPU (CUDA)");
-        return std::make_unique<XtbGpuComputationalMethod>(curcuma::xtb::MethodType::GFN1, config);
+        if (auto m = gpu_plugin::createNativeXtb("cuda",
+                static_cast<int>(curcuma::xtb::MethodType::GFN1), config))
+            return m;   // else the plugin was unavailable -> fall through to CPU below
     }
 #endif
 #if defined(USE_ROCM)
@@ -490,7 +491,8 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         if (gpu_mode == "cuda") {
 #ifdef USE_CUDA
             CurcumaLogger::info("GFN-FF: using GPU acceleration (CUDA)");
-            return std::make_unique<GFNFFGPUComputationalMethod>("gfnff", gfnff_config);
+            if (auto m = gpu_plugin::createGfnff("cuda", gfnff_config))
+                return m;   // else the plugin was unavailable -> fall through to CPU below
 #else
             CurcumaLogger::warn("GPU acceleration requested (-gpu cuda) but Curcuma was compiled "
                 "without CUDA support. Falling back to CPU.");

@@ -65,6 +65,96 @@ existing knob trades accuracy too coarsely.
 
 ---
 
+## xtb 6.7.1 `--gfnff` segfaults above ~700-800 atoms (2026-07)
+
+Measured while looking for a reference to validate the large-system numbers
+against. `xtb --gfnff --norestart`, truncated polymer chains:
+
+| atoms | xtb `--gfnff` | curcuma `gfnff` |
+|---|---|---|
+| 400 | runs | runs |
+| 700 | runs | runs |
+| **800** | **SIGSEGV** | runs |
+| 900 / 1000 / 1200 | SIGSEGV | runs |
+| 1410 (polymer) | SIGSEGV | 497 ms |
+| 6200 (mixture) | SIGSEGV | 12.3 s |
+
+`forrtl: severe (174): SIGSEGV` inside `xtb_gfnff_neighbor` (`neighbor.f90`,
+line 121 or 417 depending on size), during "generating topology and atomic info
+file" — i.e. in GFN-FF setup, before any energy evaluation. It fails in ~0.1-2 s,
+so it is a hard crash, not a resource limit.
+
+**Consequence for validation, stated plainly:** at the sizes where curcuma's
+large-system work matters there is **no reference to check against**. The largest
+size at which curcuma's gfnff energy has been compared to xtb is 231 atoms, where
+they agree to ~4e-4 - 1.2e-3 Eh (the documented pprcht-vs-xtb divergence; curcuma
+tracks pprcht). Above ~700 atoms "curcuma handles it" means it runs and is
+self-consistent, **not** that the energy has been verified.
+
+> Do not use truncated chains to compare the two codes. Cutting a polymer leaves
+> open valences, and the two topology detections diverge strongly there: the
+> 400/700-atom truncations above differ by 7.6/9.5 Eh between the codes, four
+> orders of magnitude more than the ~1e-3 Eh seen on intact molecules. That is a
+> truncation artefact, not a code discrepancy.
+
+## Per-step cost on conformer-search-sized molecules (2026-07)
+
+Everything above profiles *large* systems (3000-6200 atoms). Conformer search and
+MD on drug-like molecules is a different regime, and it is the one that decides
+`-confsearch` throughput, so it was profiled separately.
+
+**The MD loop is essentially pure energy evaluation.** caffeine, 1000 steps,
+2 threads: 219 ms wall, i.e. **0.22 ms/step**, against 0.23 ms for one
+energy+gradient call. There is no meaningful integrator/bookkeeping overhead to
+remove — per-step cost *is* the gfnff evaluation.
+
+Where that evaluation goes, `-verbosity 2`:
+
+| | caffeine (24 at) | triose (66 at) |
+|---|---:|---:|
+| `prepareCNAndEEQ` | 51% | 27% |
+| Force-field terms | 46% | **69%** |
+| total per call | 0.23 ms | 0.54 ms |
+
+Term-level for triose (the `CPU ms` column of the energy decomposition):
+
+| term | ms |
+|---|---:|
+| **H-bonds** | **0.21** |
+| **BATM** | **0.16** |
+| Coulomb | 0.06 |
+| Dihedral | 0.06 |
+| Angle | 0.04 |
+| Dispersion / Repulsion(nb) / ATM | 0.03 each |
+| Bond / Inversion / X-bonds | ~0.01 |
+
+**H-bonds + BATM are 0.37 of the 0.4 ms of force-field time** — at this size they
+are the gfnff per-step cost, and everything else is rounding. Note this is a
+different bottleneck from both the large-system regime (HB *list* generation) and
+from the setup regime (EEQ/topology, see A0/A1 in `ff_methods/CLAUDE.md`).
+
+### The H-bond pair set is heavily unbalanced
+
+triose reports 1495 `case 1 (unbound)` pairs contributing **-0.0014 Eh** against
+107 `case 2 (bound)` pairs contributing **-0.0108 Eh**. So ~93% of the pairs carry
+~12% of the H-bond energy.
+
+The existing `hb_accuracy` PARAM already trades this off (it drives the Fortran
+`hbthr1/hbthr2` cutoffs). Measured on triose MD, 500 steps, best of 3:
+
+| `hb_accuracy` | wall | final Epot | ΔE vs default |
+|---|---:|---:|---:|
+| 0.1 (default) | 348 ms | -9.914550 | — |
+| 1.0 | 336 ms | -9.914547 | 3e-6 Eh |
+| 10.0 | 320 ms | -9.914509 | 4.1e-5 Eh |
+
+**8% for 0.026 kcal/mol.** Real but modest, and at the edge of the ±11% run-to-run
+noise measured on this box under load. The default stays at Fortran parity.
+
+> Caveat on picking a test molecule: caffeine has **no H-bond donors** (no N-H,
+> no O-H), so `hb_accuracy` is a no-op there and all settings give bit-identical
+> energies. Use a molecule with OH/NH (triose) when testing H-bond code.
+
 ## Ranked levers
 
 | # | Lever | file:line | est. impact | effort |

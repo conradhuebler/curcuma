@@ -898,6 +898,7 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_solve_method = parseSolveMethod(m_config.get<std::string>("solve_method", "cholesky"));
     m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.05);
     m_refactor_force_every = m_config.get<int>("eeq_refactor_force_every", 0);
+    m_refine_iters         = m_config.get<int>("eeq_refine_iters", 1);
     m_matrix_rebuild_eps   = m_config.get<double>("eeq_matrix_rebuild_eps_bohr", 0.0);
     m_eeq_extrapolation    = m_config.get<std::string>("eeq_extrapolation", "none");
     m_eeq_extrap_order     = m_config.get<int>("eeq_extrapolation_order", 3);
@@ -2224,7 +2225,41 @@ Vector EEQSolver::solveWithSchurCholesky(
     } else {
         lambda = m_chol_cache.S.partialPivLu().solve(schur_rhs);
     }
-    return z1 - m_chol_cache.Z2 * lambda;
+    Vector q = z1 - m_chol_cache.Z2 * lambda;
+
+    // A4 (Jul 2026): iterative refinement against the FRESH matrix.
+    //
+    // On a cache hit the factor describes A_old but the RHS and A_nn are current,
+    // so q solves the OLD system exactly, not the new one. That is the
+    // Hellmann-Feynman hazard flagged in docs/wp4/WP-EEQ-Cholesky-Cache.md: q is
+    // not the exact EEQ charge for this geometry, so dE/dR is inconsistent and MD
+    // drifts. Refinement removes the error while keeping the O(N^2) cost.
+    //
+    // The augmented system is  A q + C^T lambda = b ,  C q = c.
+    // The cached solve satisfies the SECOND row exactly (C q = C z1 - S lambda =
+    // C z1 - schur_rhs = c holds for any factor), so the constraint residual is
+    // identically zero and only the first row needs correcting:
+    //     r = b - A_new q - C^T lambda      (= (A_old - A_new) q )
+    // Solving the same augmented system for the correction with the cached factor
+    // reuses Z2 and S unchanged.
+    if (m_refine_iters > 0 && m_chol_cache.valid) {
+        for (int it = 0; it < m_refine_iters; ++it) {
+            Vector r = rhs_atoms - A_nn * q - C.transpose() * lambda;
+            Vector dz = r;
+            eeqCholeskySolve(m_chol_cache.chol_factor, dz);
+            Vector dschur = C * dz;                      // constraint residual is 0
+            Vector dlambda;
+            if (nfrag == 1) {
+                dlambda = Vector::Constant(1, dschur(0) / m_chol_cache.S(0, 0));
+            } else {
+                dlambda = m_chol_cache.S.partialPivLu().solve(dschur);
+            }
+            q      += dz - m_chol_cache.Z2 * dlambda;
+            lambda += dlambda;
+        }
+    }
+
+    return q;
 }
 
 // ===== Block-Jacobi Preconditioner =====
@@ -2681,6 +2716,7 @@ Vector EEQSolver::solveEEQ(
 
 // ===== Phase 1: Topology Charges ===== (DEPRECATED - use single-solve instead)
 
+// A1 (Jul 2026): thin wrapper — one solve with the topology's own qfrag.
 Vector EEQSolver::calculateTopologyCharges(
     const std::vector<int>& atoms,
     const Matrix& geometry_bohr,
@@ -2691,8 +2727,47 @@ Vector EEQSolver::calculateTopologyCharges(
     CxxThreadPool* pool,
     int num_threads)
 {
+    auto res = calculateTopologyChargesMultiRHS(atoms, geometry_bohr, total_charge, cn,
+                                                topology, {}, use_corrections, pool, num_threads);
+    return res.empty() ? Vector() : res.front();
+}
+
+std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
+    const std::vector<int>& atoms,
+    const Matrix& geometry_bohr,
+    int total_charge,
+    const Vector& cn,
+    const std::optional<TopologyInput>& topology,
+    const std::vector<std::vector<double>>& qfrag_variants,
+    bool use_corrections,
+    CxxThreadPool* pool,
+    int num_threads)
+{
     const int natoms = atoms.size();
+    // An empty variant list means "one solve, using topology->qfrag as-is" — the
+    // historical single-solve behaviour.
+    const int n_variants = qfrag_variants.empty() ? 1 : static_cast<int>(qfrag_variants.size());
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
+
+    // BUGFIX (Jul 2026): re-arm the Phase-1 contract of solveWithSchurCholesky.
+    // That function has no explicit notion of which phase called it — it infers
+    // "this is Phase 2" from m_pending_geometry/m_pending_cn being non-empty
+    // (see eeq_solver.cpp:2113-2119 cache_size_ok and :2166-2169 can_persist).
+    // Those buffers are written ONLY by calculateFinalCharges (Phase 2) and were
+    // never cleared, so from the second topology build onward Phase 1 looked like
+    // Phase 2 and either consumed the Phase-2 geometric factor or — after an
+    // invalidateCholeskyCache(), which is exactly what GFNFF::getCachedTopology()
+    // does before every full MD/opt topology rebuild — persisted its own
+    // TOPOLOGICAL-distance factor, which Phase 2 of the same call then consumed
+    // (max_dr == 0 => cache hit). Either way Phase 1 qa is wrong, and the error
+    // propagates through dgam/alpeeq/gam_corrected into the Phase-2 charges and
+    // the GFN-FF Coulomb energy.
+    //
+    // Clearing here restores the documented invariant "Phase 1 reaches
+    // solveWithSchurCholesky with empty pending buffers" for EVERY call, not just
+    // the first one on a fresh solver.
+    m_pending_geometry.resize(0, 0);
+    m_pending_cn.resize(0);
 
     // Augmented system size: n atoms + n fragments
     int nfrag = topology.has_value() ? topology->nfrag : 1;
@@ -2733,6 +2808,25 @@ Vector EEQSolver::calculateTopologyCharges(
         double cnf_term = params_i.cnf * std::sqrt(nb_count);
 
         chi(i) = -params_i.chi + dxi(i) + cnf_term;
+
+        // Metal chi-shift (Phase 1 topology charges ONLY) — Claude Generated (Jul 2026)
+        // Reference: Fortran gfnff_ini.f90:413-418
+        //   if (imetal(i).eq.2) topo%chieeq(i) = topo%chieeq(i) - gen%mchishift
+        //   gen%mchishift = -0.09 (gfnff_param.f90:756), so chieeq += 0.09
+        // Rationale (Fortran comment): the "true" charges of transition metals are small, so the
+        // non-geometry-dependent topology charges use a LESS electronegative metal → more q+ on the
+        // metal, which better reflects the polarity used for guessing bond/angle parameters.
+        // imetal==2 (metal_type==2) are the d-block TMs; all have periodic group <=2 or negative, so
+        // the Fortran line-274 caveat (nb<=4 & group>3 → imetal=0) can never clear a "2", making the
+        // metal_type[z-1]==2 test faithful. Phase 2 overwrites chieeq WITHOUT this shift
+        // (gfnff_ini.f90:715), so this is deliberately Phase-1 only. Missing here caused metal
+        // complexes (e.g. RhCl(CO)2) to put too little topology charge on the metal → wrong fqq bond
+        // factor + Coulomb (ED39 native gfnff 12.9 mEh above xtb --gfnff).
+        if (z_i >= 1 && z_i <= 86 && metal_type[z_i - 1] == 2) {
+            constexpr double MCHISHIFT = -0.09;  // gfnff_param.f90:756
+            chi(i) -= MCHISHIFT;  // effectively += 0.09
+        }
+
         gam(i) = params_i.gam;
         alpha(i) = params_i.alp;  // Already squared
     }
@@ -2842,7 +2936,8 @@ Vector EEQSolver::calculateTopologyCharges(
 
                 if (r < 1e-10) {
                     CurcumaLogger::error("EEQSolver::calculateTopologyCharges: Zero distance between atoms");
-                    return generateFallbackCharges(natoms, total_charge, "zero distance in Phase 1");
+                    return std::vector<Vector>(
+                        n_variants, generateFallbackCharges(natoms, total_charge, "zero distance in Phase 1"));
                 }
 
                 // Store distance for both Coulomb matrix and cache
@@ -2865,6 +2960,9 @@ Vector EEQSolver::calculateTopologyCharges(
     }
 
     // 3. Setup fragment charge constraints
+    // A1 (Jul 2026): the constraint PATTERN depends on fraglist/nfrag only. The
+    // qfrag-dependent part is the RHS entry x(natoms+f), which is (re)written per
+    // variant in the solve loop below — that is what makes multi-RHS reuse exact.
     for (int f = 0; f < nfrag; ++f) {
         int row = natoms + f;
         double q_target = (topology.has_value() && f < static_cast<int>(topology->qfrag.size()))
@@ -2941,6 +3039,21 @@ Vector EEQSolver::calculateTopologyCharges(
         std::cerr << "==================================================" << std::endl;
     }
 
+    // A1 (Jul 2026): solve the SAME system for each fragment-charge assignment.
+    // Only the constraint rows of the RHS differ between variants.
+    std::vector<Vector> results;
+    results.reserve(n_variants);
+
+    for (int v = 0; v < n_variants; ++v) {
+    if (!qfrag_variants.empty()) {
+        const std::vector<double>& qf = qfrag_variants[v];
+        for (int f = 0; f < nfrag; ++f) {
+            x(natoms + f) = (f < static_cast<int>(qf.size()))
+                                ? qf[f]
+                                : (f == 0 ? static_cast<double>(total_charge) : 0.0);
+        }
+    }
+
     // Claude Generated (March 2026): Use configurable solver dispatch instead of hardcoded LU
     // This allows the user to select solve_method (lu, schur_cholesky, pcg, auto) for Phase 1 too
     // Claude Generated (WP2, May 2026): forward pool/num_threads so Stage-4 batched LU runs in parallel
@@ -2963,10 +3076,12 @@ Vector EEQSolver::calculateTopologyCharges(
         } else {
             CurcumaLogger::error(fmt::format("Phase 1 EEQ: solver failed for N={}", natoms));
         }
-        return generateFallbackCharges(natoms, total_charge, "Phase 1 solver failure");
+        results.push_back(generateFallbackCharges(natoms, total_charge, "Phase 1 solver failure"));
+        continue;
     }
 
     // Check for NaN/Inf - fallback to uniform charges instead of hard fail
+    bool invalid_charge = false;
     for (int i = 0; i < natoms; ++i) {
         if (std::isnan(topology_charges[i]) || std::isinf(topology_charges[i])) {
             if (m_allow_unconverged) {
@@ -2976,8 +3091,14 @@ Vector EEQSolver::calculateTopologyCharges(
                 CurcumaLogger::error(fmt::format("Phase 1 EEQ: Invalid charge[{}] = {} (Z={})",
                                                  i, topology_charges[i], atoms[i]));
             }
-            return generateFallbackCharges(natoms, total_charge, "NaN/Inf in Phase 1 solution");
+            topology_charges = generateFallbackCharges(natoms, total_charge, "NaN/Inf in Phase 1 solution");
+            invalid_charge = true;
+            break;
         }
+    }
+    if (invalid_charge) {
+        results.push_back(topology_charges);
+        continue;
     }
 
     // Phase 1 charge diagnostic output (Claude Generated February 2026)
@@ -2997,7 +3118,10 @@ Vector EEQSolver::calculateTopologyCharges(
         CurcumaLogger::info(fmt::format("EEQ_PHASE1_CHARGES: sum = {:.6f}", sum_q));
     }
 
-    return topology_charges;
+    results.push_back(std::move(topology_charges));
+    }  // end variant loop (A1)
+
+    return results;
 }
 
 // ===== Floyd-Warshall Topological Distances =====
@@ -3110,7 +3234,16 @@ Matrix EEQSolver::computeTopologicalDistancesSparse(
         float rad_i = static_cast<float>(topology.covalent_radii[i]);
         for (int j : topology.neighbor_lists[i]) {
             float bond = rad_i + static_cast<float>(topology.covalent_radii[j]);
+            // BUGFIX (Jul 2026): symmetrize the graph, matching Fortran
+            // (gfnff_ini.f90:438-441 sets BOTH rabd(k,i) and rabd(i,k)) and the
+            // Floyd-Warshall variant of this function. neighbor_lists (== Fortran
+            // nbdum/topo%nb) is ASYMMETRIC for eta bonds: the metal lists the eta
+            // ligand (nbf) but the eta ligand omits the metal (nbm, gfnff_ini2.f90:199).
+            // A directed adjacency therefore left the eta ligand disconnected from the
+            // metal in the topological graph, so its Phase-1 topology charge (qa) — and
+            // hence the metal-bond fqq — was wrong (e.g. PR15 eta C: +0.030 vs -0.070).
             adj[i].push_back({j, bond});
+            adj[j].push_back({i, bond});
         }
     }
 

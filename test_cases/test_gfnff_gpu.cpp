@@ -22,6 +22,8 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
+#include <unistd.h>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
