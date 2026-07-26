@@ -100,18 +100,18 @@ endif()
 add_test(NAME test_torsion_space COMMAND test_torsion_space)
 set_tests_properties(test_torsion_space PROPERTIES TIMEOUT 20 LABELS "conformer;unit")
 
-# Claude Generated (Jul 2026): harmonic dihedral restraint (energy, wrap-around, FD gradient check)
-add_executable(test_dihedral_restraint
-        test_dihedral_restraint.cpp)
+# Claude Generated (Jul 2026): harmonic geometry restraints (dihedral + distance; FD gradient checks)
+add_executable(test_geometry_restraints
+        test_geometry_restraints.cpp)
 
-target_link_libraries(test_dihedral_restraint curcuma_core)
+target_link_libraries(test_geometry_restraints curcuma_core)
 
 if(USE_PCH)
-        target_precompile_headers(test_dihedral_restraint REUSE_FROM curcuma_core)
+        target_precompile_headers(test_geometry_restraints REUSE_FROM curcuma_core)
 endif()
 
-add_test(NAME test_dihedral_restraint COMMAND test_dihedral_restraint)
-set_tests_properties(test_dihedral_restraint PROPERTIES TIMEOUT 20 LABELS "conformer;optimiser;unit")
+add_test(NAME test_geometry_restraints COMMAND test_geometry_restraints)
+set_tests_properties(test_geometry_restraints PROPERTIES TIMEOUT 20 LABELS "conformer;optimiser;unit")
 
 # Claude Generated 2026: PLUMED init unit test suite (only built with USE_Plumed)
 if(USE_Plumed)

@@ -194,6 +194,24 @@ private:
      * @return number of frames kept */
     int FilterSnapshotsByTopology(const std::string& path) const;
 
+    /* Claude Generated (Jul 2026): try to REPAIR a snapshot instead of discarding it.
+     *
+     * A snapshot that broke a bond is not a conformer -- but its CONFORMATION may still be one, and
+     * with GFN-FF a "broken" bond is often the force field losing a contact near its cutoff rather
+     * than real chemistry. Instead of throwing the structure away, the offending atom pairs are
+     * restrained back to a sane distance (a missing bond to the reference bond length, a spurious
+     * contact to just outside bonding range), the structure is optimised under those restraints,
+     * they are RELEASED, and it is optimised freely. It is kept only if the topology then matches --
+     * the restraint is a way to reach the structure, never a licence to skip the check.
+     *
+     * Same mechanism as polymerbuild's interface-bond penalty (polymerbuild.cpp:181), as an energy.
+     *
+     * @param mol         snapshot, replaced by the repaired geometry on success
+     * @param calculator  shared calculator (one instance for the whole batch -- creating a second
+     *                    GFN-FF instance for the same molecule in one process has crashed before)
+     * @return true when the repaired structure carries the reference topology */
+    bool RepairSnapshot(Molecule& mol, EnergyCalculator& calculator) const;
+
     /* Copy every frame of an XYZ file to another name. Used where a stage has to start from the
      * previous stage's OUTPUT: the copy is what lets the new stage own a file whose name states its
      * purpose and method instead of inheriting a chain of suffixes. Returns the frame count. */
@@ -314,6 +332,10 @@ private:
     std::string m_phase3b_preopt_preset = "loose", m_phase3b_preset = "normal";
     int m_phase3b_preopt_max_iter = 0, m_ensemble_report = 3;
     bool m_snapshot_topology_gate = true; // Claude Generated (Jul 2026): pre-Phase-2 topology gate
+    // Claude Generated (Jul 2026): restrained repair of near-miss snapshots (see RepairSnapshot)
+    bool m_repair_snapshots = false;
+    int m_repair_max = 20, m_repair_max_bonds = 2, m_repair_max_iterations = 300;
+    double m_repair_force = 2.0;
     bool m_topo_check = false, m_epot_abort = false, m_opt_feedback_bias = true, m_opt_feedback_prune_snapshots = false, m_mtd_permutation = true;
     // Claude Generated (Jun 2026): temperature runaway abort + cross-run bias-height freeze.
     // ON by default for ConfSearch (bias-heating safety net + best conformer yield); see the PARAM block below.
@@ -432,6 +454,11 @@ private:
 
     // --- Robustness Gates ---
     PARAM(snapshot_topology_gate, Bool, true, "Drop MD snapshots whose bond topology differs from the reference structure BEFORE they are optimised. Such structures are not conformers of this molecule and are rejected by the Phase 4 filter anyway, after a full optimisation has been paid for them; they are also the geometries for which GFN-FF returns a finite energy together with a NaN gradient. Set false to optimise every snapshot as before.", "Robustness", {})
+    PARAM(repair_snapshots, Bool, false, "Instead of discarding a snapshot whose topology changed, restrain the offending atom pairs back to a sane distance (missing bond -> its reference length, spurious contact -> outside bonding range), optimise, RELEASE the restraints and optimise freely; keep it only if the topology then matches. With GFN-FF a broken bond is often the force field losing a contact near its cutoff rather than real chemistry, and the conformation of such a snapshot can still be worth keeping. Costs two optimisations per attempt.", "Robustness", {})
+    PARAM(repair_max, Int, 20, "Maximum repair attempts per cycle, lowest-energy candidates first.", "Robustness", {})
+    PARAM(repair_max_bonds, Int, 2, "Only snapshots with at most this many changed bonds are repaired. More changed bonds means a different molecule, not a conformer with an artefact.", "Robustness", {})
+    PARAM(repair_force, Double, 2.0, "Force constant of the distance restraints during a repair, in Eh/Angstrom^2.", "Robustness", {})
+    PARAM(repair_max_iterations, Int, 300, "Maximum optimisation steps of the restrained repair stage.", "Robustness", {})
     PARAM(topo_check, Bool, false, "Abort an MD run when the molecule fragments.", "Robustness", {})
     PARAM(topo_check_interval, Int, 0, "Steps between topology checks. 0 uses the MD dump frequency.", "Robustness", {})
     PARAM(epot_abort, Bool, false, "Abort an MD run when the running-mean potential climbs past epot_abort_window.", "Robustness", {})

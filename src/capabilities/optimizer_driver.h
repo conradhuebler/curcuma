@@ -20,7 +20,7 @@
 #pragma once
 
 #include "optimizer_interface.h"
-#include "src/capabilities/optimisation/dihedral_restraint.h"
+#include "src/capabilities/optimisation/geometry_restraints.h"
 #include "src/capabilities/rmsd.h"
 #include <chrono>
 #include <functional>
@@ -75,7 +75,7 @@ public:
      * it lets a torsion be rotated to a target while the rest of the molecule relaxes out of the
      * way, which is what conformer recombination needs (docs/CONFSEARCH_PROPOSALS.md, P0). Read
      * from config["dihedral_restraints"]; empty by default, so every existing run is unchanged. */
-    Optimization::DihedralRestraints dihedral_restraints;
+    Optimization::GeometryRestraints restraints;
     bool use_hessian = false;
     bool use_numerical_gradient = false; // Use numerical gradient instead of analytical (for debugging)
     double numerical_gradient_step = 1e-5; // Step size for numerical gradient (Bohr)

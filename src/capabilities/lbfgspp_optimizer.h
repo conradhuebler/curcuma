@@ -56,13 +56,13 @@ public:
      * LBFGSpp's INTERNAL line-search evaluations -- the same reason bindExternalForces exists.
      * Restraining outside the objective would let the line search undo the restraint. Pointer must
      * outlive the optimizer; nullptr / empty is a no-op. */
-    void bindDihedralRestraints(const DihedralRestraints* restraints) { m_dihedral_restraints = restraints; }
+    void bindRestraints(const GeometryRestraints* restraints) { m_restraints = restraints; }
 
 private:
     EnergyCalculator* m_energy_calculator;
     Molecule* m_molecule;
     std::vector<int> m_constraints;
-    const DihedralRestraints* m_dihedral_restraints = nullptr;
+    const GeometryRestraints* m_restraints = nullptr;
     bool m_use_numerical_gradient = false;
     double m_numerical_gradient_step = 1e-5;
     const Vector* m_external_forces = nullptr;  // Claude Generated 2026 - interactive grab bias

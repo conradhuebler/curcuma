@@ -152,7 +152,7 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
         context.max_energy_rise = config["max_energy_rise"].get<double>();
 
     // Claude Generated (Jul 2026): harmonic dihedral restraints (empty unless requested).
-    context.dihedral_restraints = Optimization::DihedralRestraints::fromJson(config);
+    context.restraints = Optimization::GeometryRestraints::fromJson(config);
 
     // Claude Generated (Feb 21, 2026): Numerical gradient option for debugging
     if (config.contains("numgrad"))
@@ -670,8 +670,8 @@ bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, doubl
         // constraints so a frozen atom stays frozen even if a restraint pulls on it, and added to
         // the ENERGY as well -- a line search accepts a step by the returned energy, so a
         // gradient-only bias would be fought rather than followed.
-        if (!m_context.dihedral_restraints.empty())
-            energy += m_context.dihedral_restraints.apply(m_molecule.getGeometry(), gradient);
+        if (!m_context.restraints.empty())
+            energy += m_context.restraints.apply(m_molecule.getGeometry(), gradient);
 
         // Apply constraints if specified
         if (m_context.use_constraints && !m_context.atom_constraints.empty()) {

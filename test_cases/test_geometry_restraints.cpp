@@ -1,5 +1,5 @@
 /*
- * test_dihedral_restraint.cpp - Unit tests for the harmonic dihedral restraint
+ * test_geometry_restraints.cpp - Unit tests for the harmonic geometry restraints
  * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * The restraint is what lets a torsion be DRIVEN to a target while the rest of the molecule relaxes
@@ -12,11 +12,14 @@
  *   3. ANALYTIC GRADIENT vs FINITE DIFFERENCES, including the Angstrom -> Bohr conversion
  *   4. an empty restraint set is an exact no-op
  *   5. json round trip (degrees in the file, radians internally)
+ *   6. DISTANCE restraint: energy, analytic gradient vs finite differences, action=reaction,
+ *      json round trip (used to pull a snapshot with a broken/formed bond back to the reference
+ *      topology -- same idea as polymerbuild's interface-bond penalty)
  *
  * Claude Generated (Jul 2026)
  */
 
-#include "src/capabilities/optimisation/dihedral_restraint.h"
+#include "src/capabilities/optimisation/geometry_restraints.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/molecule.h"
 
@@ -74,7 +77,7 @@ int main()
 
     // --- 1. energy at / away from the target -----------------------------------------------------
     {
-        DihedralRestraints at_target;
+        GeometryRestraints at_target;
         at_target.add({ 0, 1, 2, 3, phi_deg * M_PI / 180.0, 0.5 });
         Vector grad = Vector::Zero(15);
         const double e0 = at_target.apply(geom, grad);
@@ -82,7 +85,7 @@ int main()
         TEST_ASSERT(grad.norm() < 1e-12, "gradient vanishes at the target");
 
         // 30 degrees off, k = 0.5 Eh/rad^2 -> E = 0.5 * 0.5 * (pi/6)^2
-        DihedralRestraints off;
+        GeometryRestraints off;
         off.add({ 0, 1, 2, 3, (phi_deg - 30.0) * M_PI / 180.0, 0.5 });
         Vector g2 = Vector::Zero(15);
         const double e1 = off.apply(geom, g2);
@@ -96,7 +99,7 @@ int main()
     {
         // Restrain to a target 350 deg "away" the long way = 10 deg the short way.
         double target = phi_deg + 350.0;
-        DihedralRestraints wrapped;
+        GeometryRestraints wrapped;
         wrapped.add({ 0, 1, 2, 3, target * M_PI / 180.0, 1.0 });
         Vector grad = Vector::Zero(15);
         const double e = wrapped.apply(geom, grad);
@@ -107,7 +110,7 @@ int main()
 
     // --- 3. analytic gradient vs finite differences ----------------------------------------------
     {
-        DihedralRestraints r;
+        GeometryRestraints r;
         r.add({ 0, 1, 2, 3, (phi_deg - 47.0) * M_PI / 180.0, 0.37 }); // arbitrary, nothing special
         Vector analytic = Vector::Zero(15);
         r.apply(geom, analytic);
@@ -145,7 +148,7 @@ int main()
 
     // --- 4. empty set is a no-op -----------------------------------------------------------------
     {
-        DihedralRestraints none;
+        GeometryRestraints none;
         Vector grad = Vector::Zero(15);
         const double e = none.apply(geom, grad);
         TEST_ASSERT(none.empty() && e == 0.0 && grad.norm() == 0.0,
@@ -156,11 +159,11 @@ int main()
     {
         std::vector<DihedralRestraint> in = { { 0, 1, 2, 3, 45.0 * M_PI / 180.0, 0.25 } };
         nlohmann::json config;
-        config["dihedral_restraints"] = DihedralRestraints::toJson(in);
-        DihedralRestraints out = DihedralRestraints::fromJson(config);
+        config["dihedral_restraints"] = GeometryRestraints::toJson(in);
+        GeometryRestraints out = GeometryRestraints::fromJson(config);
         TEST_ASSERT(out.size() == 1, "json round trip keeps the restraint");
         if (out.size() == 1) {
-            const DihedralRestraint& r = out.restraints().front();
+            const DihedralRestraint& r = out.dihedrals().front();
             TEST_ASSERT(r.i == 0 && r.j == 1 && r.k == 2 && r.l == 3, "indices survive the round trip");
             TEST_ASSERT(std::abs(r.target - 45.0 * M_PI / 180.0) < 1e-12,
                 "target survives the degree/radian conversion");
@@ -169,7 +172,57 @@ int main()
         // A malformed entry must be dropped, not crash.
         nlohmann::json bad;
         bad["dihedral_restraints"] = nlohmann::json::array({ nlohmann::json::object() });
-        TEST_ASSERT(DihedralRestraints::fromJson(bad).empty(), "entries without indices are dropped");
+        TEST_ASSERT(GeometryRestraints::fromJson(bad).empty(), "entries without indices are dropped");
+    }
+
+    // --- 6. distance restraints ------------------------------------------------------------------
+    {
+        const double target = 1.10, k = 2.0; // the 0-1 pair sits at 1.52 A
+        GeometryRestraints r;
+        r.add(DistanceRestraint{ 0, 1, target, k });
+        Vector analytic = Vector::Zero(15);
+        const double e = r.apply(geom, analytic);
+        const double dist = (Eigen::Vector3d(geom.row(0)) - Eigen::Vector3d(geom.row(1))).norm();
+        const double expected = 0.5 * k * std::pow(dist - target, 2);
+        TEST_ASSERT(std::abs(e - expected) < 1e-12,
+            "distance restraint energy is 1/2 k (r - r0)^2 (" + std::to_string(e) + ")");
+
+        const double kAngstromPerBohr = 0.52917721067;
+        const double h = 1e-6;
+        double max_error = 0.0;
+        for (int atom = 0; atom < 5; ++atom) {
+            for (int c = 0; c < 3; ++c) {
+                Geometry plus = geom, minus = geom;
+                plus(atom, c) += h;
+                minus(atom, c) -= h;
+                Vector dp = Vector::Zero(15), dm = Vector::Zero(15);
+                const double numeric = (r.apply(plus, dp) - r.apply(minus, dm)) / (2.0 * h) * kAngstromPerBohr;
+                max_error = std::max(max_error, std::abs(numeric - analytic[3 * atom + c]));
+            }
+        }
+        std::cout << "  distance restraint: max |analytic - numerical| = " << max_error << " Eh/Bohr" << std::endl;
+        TEST_ASSERT(max_error < 1e-7, "distance gradient matches finite differences (< 1e-7 Eh/Bohr)");
+
+        double sum = 0.0;
+        for (int c = 0; c < 3; ++c)
+            sum += std::abs(analytic[c] + analytic[3 + c]);
+        TEST_ASSERT(sum < 1e-14, "the pair's gradient contributions cancel (equal and opposite)");
+        double others = 0.0;
+        for (int idx = 6; idx < 15; ++idx)
+            others += std::abs(analytic[idx]);
+        TEST_ASSERT(others < 1e-14, "atoms outside the pair get no restraint gradient");
+
+        std::vector<DistanceRestraint> in = { { 2, 3, 1.45, 3.5 } };
+        nlohmann::json config;
+        config["distance_restraints"] = GeometryRestraints::toJson(in);
+        GeometryRestraints out = GeometryRestraints::fromJson(config);
+        TEST_ASSERT(out.size() == 1 && !out.distances().empty(), "distance json round trip keeps the restraint");
+        if (!out.distances().empty()) {
+            const DistanceRestraint& d = out.distances().front();
+            TEST_ASSERT(d.i == 2 && d.j == 3 && std::abs(d.target - 1.45) < 1e-12
+                    && std::abs(d.force - 3.5) < 1e-12,
+                "distance restraint survives the round trip unchanged");
+        }
     }
 
     std::cout << "\n=== Summary: " << tests_passed << "/" << tests_run << " passed, "

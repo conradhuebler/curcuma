@@ -96,11 +96,11 @@ double LBFGSppObjectiveFunction::operator()(const Vector& x, Vector& grad)
 
         // Claude Generated (Jul 2026): harmonic dihedral restraints, E += 1/2 k (phi - phi_0)^2.
         // Added here, inside the objective, so LBFGSpp's own line-search evaluations see the same
-        // biased surface (see bindDihedralRestraints). Energy and gradient are updated together --
+        // biased surface (see bindRestraints). Energy and gradient are updated together --
         // the line search accepts a step by the returned energy, so a gradient-only bias would be
         // fought by it (the identical lesson as the interactive-grab bias below).
-        if (m_dihedral_restraints && !m_dihedral_restraints->empty())
-            energy += m_dihedral_restraints->apply(m_molecule->getGeometry(), grad);
+        if (m_restraints && !m_restraints->empty())
+            energy += m_restraints->apply(m_molecule->getGeometry(), grad);
 
         // Apply constraints to gradient
         for (int i = 0; i < m_atom_count && i < m_constraints.size(); ++i) {
@@ -179,7 +179,7 @@ bool LBFGSppOptimizer::InitializeOptimizerInternal()
         m_objective->bindExternalForces(&m_external_forces);
         // Claude Generated (Jul 2026): same routing for the dihedral restraints -- they must be
         // visible to LBFGSpp's internal evaluations, not only to the driver's.
-        m_objective->bindDihedralRestraints(&m_context.dihedral_restraints);
+        m_objective->bindRestraints(&m_context.restraints);
 
         // Initialize coordinate vector and LBFGSpp single-step workspace
         m_current_coordinates = MoleculeToCoordinates(m_molecule);

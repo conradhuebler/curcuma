@@ -29,6 +29,7 @@
 
 #include "src/tools/general.h"
 #include "src/core/parameter_registry.h"
+#include "src/core/elements.h"
 #include "src/capabilities/rmsd/rmsd_functions.h"  // Claude Generated (Jun 2026): Kabsch helpers for bias calibration
 
 #include <algorithm>
@@ -1644,6 +1645,76 @@ std::string ConfSearch::PerformHighLevelOptimisation(const std::string& f)
     return out;
 }
 
+// Claude Generated (Jul 2026): restrained repair of a snapshot -- see the header for the rationale.
+bool ConfSearch::RepairSnapshot(Molecule& mol, EnergyCalculator& calculator) const
+{
+    const Matrix topo = mol.DistanceMatrix().second;
+    if (topo.rows() != m_topo_matrix.rows())
+        return false;
+
+    // One restraint per offending pair. A MISSING bond is pulled back to the length it has in the
+    // reference structure; a SPURIOUS bond is pushed just outside bonding range (the covalent sum
+    // times the same 1.5 factor the bond criterion uses, plus a margin) so the contact opens up.
+    std::vector<Optimization::DistanceRestraint> restraints;
+    const Geometry ref_geom = m_topo_ref.getGeometry();
+    const bool have_reference_geometry = (ref_geom.rows() == mol.AtomCount());
+    for (int i = 0; i < mol.AtomCount(); ++i) {
+        for (int j = i + 1; j < mol.AtomCount(); ++j) {
+            const double d = topo(i, j) - m_topo_matrix(i, j);
+            if (std::abs(d) < 0.5)
+                continue;
+            Optimization::DistanceRestraint r;
+            r.i = i;
+            r.j = j;
+            r.force = m_repair_force;
+            const double covalent_sum = Elements::CovalentRadius[mol.Atom(i).first]
+                + Elements::CovalentRadius[mol.Atom(j).first];
+            if (d < 0) {
+                // bond missing -> target = its length in the reference structure
+                r.target = have_reference_geometry
+                    ? (Eigen::Vector3d(ref_geom.row(i)) - Eigen::Vector3d(ref_geom.row(j))).norm()
+                    : covalent_sum;
+            } else {
+                // bond formed -> target just beyond the bond criterion (1.5 * covalent sum)
+                r.target = 1.5 * covalent_sum * 1.15;
+            }
+            restraints.push_back(r);
+        }
+    }
+    if (restraints.empty() || static_cast<int>(restraints.size()) > m_repair_max_bonds)
+        return false; // nothing to do, or too broken to be a conformer of this molecule
+
+    nlohmann::json cfg = ChildConfig(m_md_method, 1);
+    cfg["verbosity"] = 0;
+    cfg["write_trajectory"] = false;
+
+    // Stage 1: restrained -- pull the offending pairs back while the rest of the molecule follows.
+    nlohmann::json restrained = cfg;
+    restrained["max_iterations"] = m_repair_max_iterations;
+    restrained["distance_restraints"] = Optimization::GeometryRestraints::toJson(restraints);
+    Molecule work = mol;
+    auto stage1 = Optimization::OptimizationDispatcher::optimizeStructure(
+        &work, Optimization::OptimizerType::LBFGSPP, &calculator, restrained);
+    if (stage1.final_molecule.AtomCount() == 0)
+        return false;
+
+    // Stage 2: RELEASED -- the reported structure must be a minimum of the plain force field.
+    Molecule free_mol = stage1.final_molecule;
+    auto stage2 = Optimization::OptimizationDispatcher::optimizeStructure(
+        &free_mol, Optimization::OptimizerType::LBFGSPP, &calculator, cfg);
+    if (stage2.final_molecule.AtomCount() == 0)
+        return false;
+
+    Molecule repaired = stage2.final_molecule;
+    repaired.setCharge(m_charge);
+    repaired.setSpin(m_spin);
+    if ((repaired.DistanceMatrix().second - m_topo_matrix).cwiseAbs().sum() > 1e-4)
+        return false; // still not this molecule -- the break was real chemistry, not an artefact
+
+    mol = repaired;
+    return true;
+}
+
 // Claude Generated (Jul 2026): pre-optimisation topology gate -- see the header for the rationale.
 int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
 {
@@ -1652,6 +1723,7 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
         return 0;
 
     std::vector<Molecule> keep;
+    std::vector<Molecule> broken; // candidates for the restrained repair (m_repair_snapshots)
     int total = 0, rejected_formed = 0, rejected_broken = 0;
     bool reported = false;
     {
@@ -1669,7 +1741,7 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
             // Count the two failure modes separately: an EXTRA bond means two atoms collided (this
             // is what produces the NaN in the 1/r terms), a MISSING one means the molecule came
             // apart. Both disqualify the structure, but they say different things about the run.
-            int formed = 0, broken = 0;
+            int formed = 0, broken_count = 0;
             int first_i = -1, first_j = -1;
             for (int i = 0; i < mol.AtomCount(); ++i) {
                 for (int j = i + 1; j < mol.AtomCount(); ++j) {
@@ -1679,11 +1751,11 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
                     if (d > 0)
                         formed++;
                     else
-                        broken++;
+                        broken_count++;
                     if (first_i < 0) { first_i = i; first_j = j; }
                 }
             }
-            if (formed == 0 && broken == 0) {
+            if (formed == 0 && broken_count == 0) {
                 keep.push_back(std::move(mol));
                 continue;
             }
@@ -1691,10 +1763,14 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
                 rejected_formed++;
             else
                 rejected_broken++;
+            // Only near-misses are worth repairing; a structure with many changed bonds is a
+            // different molecule, not a conformer with a force-field artefact.
+            if (m_repair_snapshots && formed + broken_count <= m_repair_max_bonds)
+                broken.push_back(mol);
             if (!reported) {
                 CurcumaLogger::warn_fmt("ConfSearch: topology gate (first reject): atoms {}-{}, {} bond(s) formed, "
                                         "{} broken (structure energy {:.6f} Eh)",
-                    first_i, first_j, formed, broken, mol.Energy());
+                    first_i, first_j, formed, broken_count, mol.Energy());
                 reported = true;
             }
         }
@@ -1703,6 +1779,36 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
     if (rejected_formed + rejected_broken == 0) {
         CurcumaLogger::result_fmt("ConfSearch: topology gate: all {} MD snapshots keep the reference topology", total);
         return total;
+    }
+
+    // Claude Generated (Jul 2026): restrained repair instead of discarding (opt-in). Candidates are
+    // taken lowest-energy first -- a structure 500 kJ/mol up will not become the conformer that
+    // matters, and each repair costs two optimisations.
+    int repaired = 0, repair_attempts = 0;
+    if (m_repair_snapshots && !broken.empty()) {
+        std::multimap<double, const Molecule*> by_energy; // the container sorts
+        for (const Molecule& mol : broken)
+            by_energy.insert(std::pair<double, const Molecule*>(mol.Energy(), &mol));
+
+        // ONE calculator for the whole repair batch: identical topology/parameters for every
+        // structure, and a second GFN-FF instance for the same molecule in one process has crashed
+        // before (see ConfGen).
+        nlohmann::json calc_cfg = ChildConfig(m_md_method, 1);
+        EnergyCalculator calculator(m_md_method, calc_cfg);
+        for (const auto& entry : by_energy) {
+            if (repair_attempts >= m_repair_max)
+                break;
+            repair_attempts++;
+            Molecule candidate = *entry.second;
+            if (RepairSnapshot(candidate, calculator)) {
+                keep.push_back(candidate);
+                repaired++;
+            }
+        }
+        CurcumaLogger::result_fmt("ConfSearch: topology repair: {} of {} attempted snapshot(s) pulled back to the "
+                                  "reference topology (restrained, then released; {} candidate(s) had at most {} "
+                                  "changed bond(s))",
+            repaired, repair_attempts, static_cast<int>(broken.size()), m_repair_max_bonds);
     }
 
     // Rewrite the file with the survivors only.
@@ -1715,9 +1821,11 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
         std::ofstream(path).close(); // nothing survived -> empty input, Phase 2 skips it
 
     CurcumaLogger::result_fmt("ConfSearch: topology gate: {} of {} MD snapshots kept ({} rejected: {} with a formed "
-                              "bond (collision), {} with a broken bond) -- not optimised, they are not conformers "
+                              "bond (collision), {} with a broken bond{}) -- the rejected ones are not conformers "
                               "of this molecule",
-        static_cast<int>(keep.size()), total, rejected_formed + rejected_broken, rejected_formed, rejected_broken);
+        static_cast<int>(keep.size()), total, rejected_formed + rejected_broken - repaired,
+        rejected_formed, rejected_broken,
+        repaired > 0 ? fmt::format("; {} repaired and kept", repaired) : "");
     return static_cast<int>(keep.size());
 }
 
@@ -2434,6 +2542,11 @@ void ConfSearch::LoadControlJson()
     m_rattle_threshold_temp = m_config.get<double>("rattle_threshold_temp");
     m_rattle_hot_mode = m_config.get<int>("rattle_hot_mode");
     m_snapshot_topology_gate = m_config.get<bool>("snapshot_topology_gate"); // Claude Generated (Jul 2026)
+    m_repair_snapshots = m_config.get<bool>("repair_snapshots");
+    m_repair_max = m_config.get<int>("repair_max");
+    m_repair_max_bonds = m_config.get<int>("repair_max_bonds");
+    m_repair_force = m_config.get<double>("repair_force");
+    m_repair_max_iterations = m_config.get<int>("repair_max_iterations");
     m_topo_check = m_config.get<bool>("topo_check");
     m_topo_check_interval = m_config.get<int>("topo_check_interval");
     m_seed_energy_window = m_config.get<double>("seed_energy_window");

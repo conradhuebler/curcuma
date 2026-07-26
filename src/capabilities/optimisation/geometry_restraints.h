@@ -1,5 +1,5 @@
 /*
- * <Harmonic dihedral restraints for geometry optimisation>
+ * <Harmonic geometry restraints (dihedral + distance) for geometry optimisation>
  * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -55,8 +55,28 @@ struct DihedralRestraint {
     double force = 0.1;                 ///< force constant in Eh/rad^2
 };
 
+
 /**
- * @brief A set of dihedral restraints, applied to an energy/gradient pair.
+ * @brief One harmonic restraint on the distance between two atoms.
+ *
+ *     E_restraint = 1/2 * k * (r - r_target)^2
+ *
+ * Same idea as polymerbuild's interface-bond penalty (`fvec = sqrt(k_bond) * |d - d0|`,
+ * polymerbuild.cpp:181), expressed as an energy so it can be added to any optimisation.
+ *
+ * Why it exists: an MD snapshot that broke a bond or collapsed two atoms onto each other is not a
+ * conformer of the molecule -- but its CONFORMATION may still be useful. Restraining the offending
+ * pairs back to a sane distance repairs the chemistry while keeping the conformation, instead of
+ * discarding the structure. See docs/CONFSEARCH_REPORTING.md.
+ */
+struct DistanceRestraint {
+    int i = -1, j = -1;   ///< atom indices (0-based)
+    double target = 0.0;  ///< target distance in ANGSTROM
+    double force = 1.0;   ///< force constant in Eh/Angstrom^2
+};
+
+/**
+ * @brief A set of restraints (dihedral and/or distance), applied to an energy/gradient pair.
  *
  * UNITS -- the single most error-prone part, so it is stated explicitly:
  *  - the geometry passed in is in ANGSTROM (curcuma's Molecule geometry),
@@ -68,31 +88,47 @@ struct DihedralRestraint {
  *    fought by the line search instead of followed (the same lesson as the interactive-grab bias in
  *    LBFGSppObjectiveFunction).
  */
-class DihedralRestraints {
+class GeometryRestraints {
 public:
-    DihedralRestraints() = default;
+    GeometryRestraints() = default;
 
-    /** Parse from an optimiser config: config["dihedral_restraints"] = [ {i,j,k,l,target,force}, ... ]
-     *  "target" is read in DEGREES (that is what a user or a torsion-space state centre speaks),
-     *  "force" in Eh/rad^2. Malformed entries are skipped. */
-    static DihedralRestraints fromJson(const nlohmann::json& config)
+    /** Parse from an optimiser config:
+     *    config["dihedral_restraints"] = [ {i,j,k,l,target,force}, ... ]  target in DEGREES, k in Eh/rad^2
+     *    config["distance_restraints"] = [ {i,j,target,force}, ... ]      target in ANGSTROM, k in Eh/A^2
+     *  Degrees and Angstrom because that is what a user, a torsion-state centre and a bond length
+     *  speak; the class converts. Malformed entries are skipped. */
+    static GeometryRestraints fromJson(const nlohmann::json& config)
     {
-        DihedralRestraints out;
-        if (!config.contains("dihedral_restraints") || !config["dihedral_restraints"].is_array())
-            return out;
-        for (const auto& entry : config["dihedral_restraints"]) {
-            if (!entry.is_object())
-                continue;
-            DihedralRestraint r;
-            r.i = entry.value("i", -1);
-            r.j = entry.value("j", -1);
-            r.k = entry.value("k", -1);
-            r.l = entry.value("l", -1);
-            r.target = entry.value("target", 0.0) * M_PI / 180.0;
-            r.force = entry.value("force", 0.1);
-            if (r.i < 0 || r.j < 0 || r.k < 0 || r.l < 0)
-                continue;
-            out.m_restraints.push_back(r);
+        GeometryRestraints out;
+        if (config.contains("dihedral_restraints") && config["dihedral_restraints"].is_array()) {
+            for (const auto& entry : config["dihedral_restraints"]) {
+                if (!entry.is_object())
+                    continue;
+                DihedralRestraint r;
+                r.i = entry.value("i", -1);
+                r.j = entry.value("j", -1);
+                r.k = entry.value("k", -1);
+                r.l = entry.value("l", -1);
+                r.target = entry.value("target", 0.0) * M_PI / 180.0;
+                r.force = entry.value("force", 0.1);
+                if (r.i < 0 || r.j < 0 || r.k < 0 || r.l < 0)
+                    continue;
+                out.m_dihedrals.push_back(r);
+            }
+        }
+        if (config.contains("distance_restraints") && config["distance_restraints"].is_array()) {
+            for (const auto& entry : config["distance_restraints"]) {
+                if (!entry.is_object())
+                    continue;
+                DistanceRestraint r;
+                r.i = entry.value("i", -1);
+                r.j = entry.value("j", -1);
+                r.target = entry.value("target", 0.0);
+                r.force = entry.value("force", 1.0);
+                if (r.i < 0 || r.j < 0 || r.target <= 0.0)
+                    continue;
+                out.m_distances.push_back(r);
+            }
         }
         return out;
     }
@@ -114,10 +150,27 @@ public:
         return arr;
     }
 
-    bool empty() const { return m_restraints.empty(); }
-    std::size_t size() const { return m_restraints.size(); }
-    const std::vector<DihedralRestraint>& restraints() const { return m_restraints; }
-    void add(const DihedralRestraint& r) { m_restraints.push_back(r); }
+    /** Serialise distance restraints into the json form fromJson() reads (target in Angstrom). */
+    static nlohmann::json toJson(const std::vector<DistanceRestraint>& restraints)
+    {
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& r : restraints) {
+            nlohmann::json e;
+            e["i"] = r.i;
+            e["j"] = r.j;
+            e["target"] = r.target;
+            e["force"] = r.force;
+            arr.push_back(e);
+        }
+        return arr;
+    }
+
+    bool empty() const { return m_dihedrals.empty() && m_distances.empty(); }
+    std::size_t size() const { return m_dihedrals.size() + m_distances.size(); }
+    const std::vector<DihedralRestraint>& dihedrals() const { return m_dihedrals; }
+    const std::vector<DistanceRestraint>& distances() const { return m_distances; }
+    void add(const DihedralRestraint& r) { m_dihedrals.push_back(r); }
+    void add(const DistanceRestraint& r) { m_distances.push_back(r); }
 
     /**
      * @brief Add the restraint energy and gradient.
@@ -127,12 +180,32 @@ public:
      */
     double apply(const Geometry& geometry, Vector& gradient) const
     {
-        if (m_restraints.empty())
+        if (empty())
             return 0.0;
         const int natoms = static_cast<int>(geometry.rows());
         double energy = 0.0;
+
+        // --- distance restraints: E = 1/2 k (r - r0)^2, dE/dx_i = k (r - r0) * (x_i - x_j)/r ---
+        for (const DistanceRestraint& r : m_distances) {
+            if (r.i >= natoms || r.j >= natoms || r.i == r.j)
+                continue;
+            const Eigen::Vector3d d = Eigen::Vector3d(geometry.row(r.i)) - Eigen::Vector3d(geometry.row(r.j));
+            const double dist = d.norm();
+            if (dist < 1e-8)
+                continue; // coincident atoms: the direction is undefined, leave it to the method
+            const double delta = dist - r.target;
+            energy += 0.5 * r.force * delta * delta;
+            // Eh/Angstrom -> Eh/Bohr, same conversion as the dihedral part below.
+            const Eigen::Vector3d grad_i = (r.force * delta * kAngstromPerBohr / dist) * d;
+            for (int c = 0; c < 3; ++c) {
+                gradient[3 * r.i + c] += grad_i(c);
+                gradient[3 * r.j + c] -= grad_i(c);
+            }
+        }
+
+        // --- dihedral restraints ---
         Matrix dphi(4, 3);
-        for (const DihedralRestraint& r : m_restraints) {
+        for (const DihedralRestraint& r : m_dihedrals) {
             if (r.i >= natoms || r.j >= natoms || r.k >= natoms || r.l >= natoms)
                 continue;
             const Eigen::Vector3d ri = geometry.row(r.i);
@@ -166,7 +239,7 @@ public:
         double worst = 0.0;
         Matrix dphi(4, 3);
         const int natoms = static_cast<int>(geometry.rows());
-        for (const DihedralRestraint& r : m_restraints) {
+        for (const DihedralRestraint& r : m_dihedrals) {
             if (r.i >= natoms || r.j >= natoms || r.k >= natoms || r.l >= natoms)
                 continue;
             const double phi = GFNFF_Geometry::calculateDihedralAngle(
@@ -187,7 +260,8 @@ private:
     // usable from the optimiser without pulling in the unit system).
     static constexpr double kAngstromPerBohr = 0.52917721067;
 
-    std::vector<DihedralRestraint> m_restraints;
+    std::vector<DihedralRestraint> m_dihedrals;
+    std::vector<DistanceRestraint> m_distances;
 };
 
 } // namespace Optimization

@@ -23,7 +23,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
 #include "src/core/fileiterator.h"
-#include "src/capabilities/optimisation/dihedral_restraint.h"
+#include "src/capabilities/optimisation/geometry_restraints.h"
 #include "src/capabilities/optimizer_factory.h"
 #include "src/capabilities/rmsd/rmsd_functions.h"
 #include "src/core/elements.h"
@@ -733,7 +733,7 @@ bool ConfGen::restrainedBuild(const Proposal& p, Molecule& driven) const
     opt_config["verbosity"] = 0;
     opt_config["write_trajectory"] = false;
     opt_config["max_iterations"] = m_restraint_max_iterations;
-    opt_config["dihedral_restraints"] = Optimization::DihedralRestraints::toJson(restraints);
+    opt_config["dihedral_restraints"] = Optimization::GeometryRestraints::toJson(restraints);
 
     // Start from the TEMPLATE geometry -- clash-free and with the correct topology. The restrained
     // optimisation itself performs the rotation.
@@ -747,7 +747,7 @@ bool ConfGen::restrainedBuild(const Proposal& p, Molecule& driven) const
     // is sterically impossible ends up somewhere else -- and then this is not the proposed state
     // vector at all and must not be reported as one. 30 degrees is the tolerance: it is well inside
     // the default state_tolerance of 40 degrees used to assign states.
-    Optimization::DihedralRestraints check;
+    Optimization::GeometryRestraints check;
     for (const auto& r : restraints)
         check.add(r);
     const double worst = check.maxDeviationDegrees(result.final_molecule.getGeometry());
