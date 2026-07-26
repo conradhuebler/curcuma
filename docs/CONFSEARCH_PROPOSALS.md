@@ -168,6 +168,60 @@ is reported as the warning it is:
        the minimum of 'gfnff' ... energies are compared against re-optimised templates
 ```
 
+### Restrained build (P0, `-restrained_build`, default ON)
+
+Setting a torsion rigidly rotates a whole fragment on a frozen template and drops it wherever the
+template happens to have atoms. That is what the clash filter catches — and on a compact molecule it
+caught 72 % of all proposals. The restraint turns that around: the clash is **never created**.
+
+```
+rigid build succeeds        -> use it (unchanged, no extra cost)
+rigid build clashes         -> restrained build:
+                                 start from the clash-free TEMPLATE,
+                                 hold each target torsion with E = 1/2 k (phi - phi_target)^2,
+                                 optimise (the molecule relaxes out of the way while the torsions turn),
+                                 release -> the normal free optimisation runs on the result
+```
+
+The restraint is a way to *reach* a geometry, never a licence to skip a check: the driven structure
+passes exactly the same clash and topology gates as a rigidly built one, and the energy that is
+finally reported comes from the free optimisation, never from a restrained one. A proposal whose
+torsions do not arrive within 30° of their targets (sterically impossible state) is dropped rather
+than reported under a state vector it does not have.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `-restrained_build` | `true` | use the restrained build when the rigid one clashes |
+| `-restraint_force` | `0.5` | force constant in Eh/rad² |
+| `-restraint_max_iterations` | `500` | step cap of the restrained stage |
+
+**Implementation.** `src/capabilities/optimisation/dihedral_restraint.h` — one helper, applied at the
+two energy/gradient choke points (`LBFGSppObjectiveFunction::operator()` and
+`OptimizerDriver::evaluateEnergyAndGradient`). Two things it must get right, both pinned by
+`test_dihedral_restraint`:
+
+- **The energy is added, not only the gradient.** A line search accepts a step by the returned
+  energy, so a gradient-only bias would be fought by it instead of followed (the same lesson as the
+  interactive-grab bias next to it).
+- **Units.** Geometry in Å, gradient in Eh/Bohr, so `dφ/dr` (rad/Å) is converted with 0.529177.
+  Verified against finite differences: max deviation **7.9e-12 Eh/Bohr**.
+
+The deviation is wrapped into (−π, π], so restraining a torsion at −175° to +170° moves it 15° the
+short way, not 345° the long way.
+
+**Measured** (44-conformer / 114-atom ConfScan ensemble, 30 proposals, gfnff):
+
+| | rigid only | with restrained build |
+|---|---|---|
+| rejected before optimisation | 3 | **1** (2 of 3 recovered) |
+| chemically valid | 27 | **29** |
+| new conformers | 21 | **22** |
+
+This ensemble is an extended molecule that loses few proposals to clashes, so the gain is small; a
+depth-4 run on it produced *identical* results with and without the restraint, which is the other
+thing worth knowing — the restrained path is a strict no-op whenever the rigid build works. The
+72 %-loss case (a compact 90-atom molecule) has not been re-measured with the restraint.
+
 ### What it produces
 
 | ensemble | proposed | built | reacted | valid | **new conformers** | best new |
@@ -314,9 +368,7 @@ Output (all through the BMT directory):
 
 ## Roadmap
 
-- **P0 dihedral restraint** in the optimizer (one helper called from all four E/G sites). Now
-  motivated by measurement: 72 % of the proposals on the compact test molecule are lost to the clash
-  filter because the torsions are set rigidly.
+- ~~**P0 dihedral restraint**~~ — done (Jul 26, 2026), see "Restrained build" below.
 - ~~**P3 recombination stage A**~~ — done (`-generate true`), see above.
 - ~~**P4 pairwise couplings**~~ — done (see above). Result: couplings are measurable but do not make
   the model predictive; DEE/A\* enumeration over such a weak model is not worth building yet.
@@ -379,12 +431,12 @@ Full suite: 20/502 failing, all pre-existing categories (`ecomp_*`, `d4_diag_*`,
    `EnergyCalculator`), not explained. Reproduced 6/6 as an intermittent segfault when a SECOND GFN-FF
    instance is initialised for the same molecule in one process. Next step: ASAN build of
    `gfnff_method.cpp`.
-4. **P0 dihedral restraint** -- the biggest lever for ConfGen: 72 % of proposals are lost to the clash
-   filter because torsions are set rigidly. Plan: build anyway, restrain the target torsions, let the
-   optimiser relieve the clash, then release. One helper called from all four E/G sites
-   (`optimizer_driver.cpp:587`, `lbfgspp_optimizer.cpp:157/248`, `native_optimizer_adapters.cpp:42/100`).
-   Units: geometry in **Angstrom**, gradient in **Eh/Bohr** (factor 0.529177, FD-verified).
-   Reuse `GFNFF_Geometry::calculateDihedralAngle` (returns φ and dφ/dx).
+4. ~~**P0 dihedral restraint**~~ -- DONE (Jul 26, 2026). `src/capabilities/optimisation/dihedral_restraint.h`,
+   applied in `LBFGSppObjectiveFunction::operator()` and `OptimizerDriver::evaluateEnergyAndGradient`
+   (the two actual E/G choke points -- the four line numbers listed here before were stale).
+   FD-verified to 7.9e-12 Eh/Bohr by `test_dihedral_restraint`. See "Restrained build" above.
+   Open: the 72 %-loss case was never re-measured with it; the available test ensemble loses only
+   3 of 30 proposals to the rigid build (2 of those 3 recovered).
 5. **`cli_curcumaopt_07_opt_multixyz`, frame 02** (5 kJ/mol drift): suspected to be the same topology
    artefact. Unverified.
 6. ~~**ConfScan has no `std::sort`** but assumes energy order~~ — RESOLVED (Jul 26, 2026). It does

@@ -182,6 +182,7 @@ private:
         int distance = 0;          ///< Hamming distance to that template
         double predicted = 0.0;    ///< additive-model estimate, kJ/mol (ORDERING ONLY, see below)
         Molecule geometry;         ///< built structure (before optimisation)
+        bool restrained_build = false; ///< rigid build clashed; geometry came from the restrained build
         // filled after the optimisation
         bool optimised = false;
         double energy = 0.0;              ///< Hartree
@@ -225,6 +226,23 @@ private:
     bool hasClash(const Molecule& mol, double factor) const;
 
     /**
+     * @brief Build a proposal by DRIVING its torsions instead of setting them rigidly (P0).
+     *
+     * Rigidly setting a torsion rotates a whole fragment on a frozen template and drops it wherever
+     * the template happens to have atoms -- on a compact molecule that destroyed 72 % of all
+     * proposals. Here the clash is never created: the optimisation starts from the clash-free
+     * template and each target torsion carries a harmonic restraint towards its target state
+     * (restraint_force, Eh/rad^2), so the torsions turn while the rest of the molecule relaxes out of
+     * the way. The restraints are released afterwards -- optimiseProposals() runs the normal, free
+     * optimisation on the result, so the reported energy is never a restrained one.
+     *
+     * @param p      proposal (target state vector + template)
+     * @param driven output geometry, valid only when the function returns true
+     * @return false when the restrained optimisation failed or left a torsion far from its target
+     */
+    bool restrainedBuild(const Proposal& p, Molecule& driven) const;
+
+    /**
      * @brief Sorted list of bonded atom pairs, with an EXPLICIT covalent-radius factor.
      *
      * Deliberately not Molecule::DistanceMatrix(): its default scaling of 1.5 is generous enough to
@@ -253,6 +271,10 @@ private:
     bool m_generate = false;
     int m_max_proposals = 50, m_proposal_templates = 5, m_proposal_depth = 2;
     double m_clash_factor = 1.2, m_new_rmsd = 1.0, m_topology_factor = 1.3;
+    // Claude Generated (Jul 2026): restrained build (P0). See buildProposalGeometry().
+    bool m_restrained_build = true;
+    double m_restraint_force = 0.5;
+    int m_restraint_max_iterations = 500;
 
     /**
      * ONE calculator for the whole run: analysis single points, proposal optimisations and the
@@ -288,6 +310,9 @@ private:
     PARAM(clash_factor, Double, 1.2, "A built structure is rejected when a non-bonded atom pair comes closer than this factor times the sum of their covalent radii. The default is deliberately close to the BOND-DETECTION criterion (~1.3): a built structure that puts two atoms inside bonding distance makes the force field derive a new bond, and the optimisation then relaxes into a different molecule, not a conformer.", "Generation", {})
     PARAM(topology_factor, Double, 1.3, "Covalent-radius factor for the topology check of optimised proposals. A proposal whose bond list differs from the reference is a reaction product, not a conformer, and is rejected. Lower than Molecule's default 1.5, which counts compressed 1-3 contacts as bonds.", "Generation", {})
     PARAM(new_rmsd, Double, 1.0, "Best-fit RMSD in Angstrom above which an optimised proposal counts as a new conformer.", "Generation", {})
+    PARAM(restrained_build, Bool, true, "When rigidly setting the torsions produces a clash or a changed bond topology, build the structure by a RESTRAINED optimisation instead: start from the clash-free template, hold the target torsions with a harmonic restraint and let the rest of the molecule relax out of the way, then release. Recovers proposals that the rigid build throws away (measured: 72 percent of them on a compact molecule). False = rigid build only.", "Generation", {})
+    PARAM(restraint_force, Double, 0.5, "Force constant of the dihedral restraint in Eh/rad^2 during the restrained build. Larger holds the torsion closer to its target and pushes harder against the clash.", "Generation", {})
+    PARAM(restraint_max_iterations, Int, 500, "Maximum optimisation steps of the restrained build stage.", "Generation", {})
     PARAM(cv_folds, Int, 5, "Number of cross-validation folds for the model comparison (additive vs. additive+couplings). Values below 2 disable the comparison.", "Analysis", {})
     PARAM(couplings, Bool, true, "Measure torsion-torsion couplings from double-mutant cycles (four ensemble members forming a rectangle in state space) and run the model comparison.", "Analysis", {})
     PARAM(report_threshold, Double, 1.0, "Only transitions whose mean total energy difference exceeds this many kJ/mol are printed in the summary. All of them are written to the CSV.", "Analysis", {})

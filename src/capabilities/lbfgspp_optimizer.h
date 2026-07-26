@@ -52,10 +52,17 @@ public:
     // the optimizer's lifetime; a zeroed/empty bias is a no-op.
     void bindExternalForces(const Vector* forces) { m_external_forces = forces; }
 
+    /* Claude Generated (Jul 2026): bind the context's harmonic dihedral restraints so they reach
+     * LBFGSpp's INTERNAL line-search evaluations -- the same reason bindExternalForces exists.
+     * Restraining outside the objective would let the line search undo the restraint. Pointer must
+     * outlive the optimizer; nullptr / empty is a no-op. */
+    void bindDihedralRestraints(const DihedralRestraints* restraints) { m_dihedral_restraints = restraints; }
+
 private:
     EnergyCalculator* m_energy_calculator;
     Molecule* m_molecule;
     std::vector<int> m_constraints;
+    const DihedralRestraints* m_dihedral_restraints = nullptr;
     bool m_use_numerical_gradient = false;
     double m_numerical_gradient_step = 1e-5;
     const Vector* m_external_forces = nullptr;  // Claude Generated 2026 - interactive grab bias

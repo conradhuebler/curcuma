@@ -23,6 +23,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
 #include "src/core/fileiterator.h"
+#include "src/capabilities/optimisation/dihedral_restraint.h"
 #include "src/capabilities/optimizer_factory.h"
 #include "src/capabilities/rmsd/rmsd_functions.h"
 #include "src/core/elements.h"
@@ -75,6 +76,10 @@ void ConfGen::LoadControlJson()
     m_clash_factor = m_config.get<double>("clash_factor");
     m_new_rmsd = m_config.get<double>("new_rmsd");
     m_topology_factor = m_config.get<double>("topology_factor");
+    // Claude Generated (Jul 2026): restrained build (P0)
+    m_restrained_build = m_config.get<bool>("restrained_build");
+    m_restraint_force = m_config.get<double>("restraint_force");
+    m_restraint_max_iterations = m_config.get<int>("restraint_max_iterations");
 }
 
 bool ConfGen::analyseEnsemble()
@@ -695,6 +700,64 @@ bool ConfGen::hasClash(const Molecule& mol, double factor) const
     return false;
 }
 
+// Claude Generated (Jul 2026, roadmap item P0): restrained build -- see the header for the why.
+bool ConfGen::restrainedBuild(const Proposal& p, Molecule& driven) const
+{
+    if (!m_calculator)
+        return false;
+
+    // One restraint per torsion whose state differs from the template's.
+    std::vector<Optimization::DihedralRestraint> restraints;
+    for (std::size_t t = 0; t < m_torsions.size(); ++t) {
+        if (p.states[t] == m_frames[p.template_frame].states[t] || p.states[t] < 0)
+            continue;
+        if (p.states[t] >= static_cast<int>(m_state_centres[t].size()))
+            continue;
+        Optimization::DihedralRestraint r;
+        r.i = m_torsions[t].i;
+        r.j = m_torsions[t].j;
+        r.k = m_torsions[t].k;
+        r.l = m_torsions[t].l;
+        r.target = m_state_centres[t][p.states[t]] * M_PI / 180.0; // state centres are in degrees
+        r.force = m_restraint_force;
+        restraints.push_back(r);
+    }
+    if (restraints.empty())
+        return false;
+
+    json opt_config;
+    opt_config["method"] = m_method;
+    opt_config["threads"] = m_threads;
+    opt_config["charge"] = m_charge;
+    opt_config["spin"] = m_spin;
+    opt_config["verbosity"] = 0;
+    opt_config["write_trajectory"] = false;
+    opt_config["max_iterations"] = m_restraint_max_iterations;
+    opt_config["dihedral_restraints"] = Optimization::DihedralRestraints::toJson(restraints);
+
+    // Start from the TEMPLATE geometry -- clash-free and with the correct topology. The restrained
+    // optimisation itself performs the rotation.
+    Molecule mol = m_frames[p.template_frame].molecule;
+    auto result = Optimization::OptimizationDispatcher::optimizeStructure(
+        &mol, Optimization::OptimizerType::LBFGSPP, m_calculator.get(), opt_config);
+    if (result.final_molecule.AtomCount() == 0)
+        return false; // hard failure; a non-converged but finite geometry is still usable below
+
+    // Did the torsions actually arrive? A restraint competes with the force field, so a target that
+    // is sterically impossible ends up somewhere else -- and then this is not the proposed state
+    // vector at all and must not be reported as one. 30 degrees is the tolerance: it is well inside
+    // the default state_tolerance of 40 degrees used to assign states.
+    Optimization::DihedralRestraints check;
+    for (const auto& r : restraints)
+        check.add(r);
+    const double worst = check.maxDeviationDegrees(result.final_molecule.getGeometry());
+    if (worst > 30.0)
+        return false;
+
+    driven = result.final_molecule;
+    return true;
+}
+
 std::vector<ConfGen::Proposal> ConfGen::generateProposals() const
 {
     std::vector<Proposal> proposals;
@@ -1139,7 +1202,7 @@ void ConfGen::start()
         // Build the geometries: start from the template and set every torsion whose state differs.
         const std::vector<std::pair<int, int>> reference_bonds
             = topologyFingerprint(m_frames.front().molecule, m_topology_factor);
-        int clashes = 0;
+        int clashes = 0, restrained = 0, restrained_ok = 0;
         for (Proposal& p : proposals) {
             Geometry geom = m_frames[p.template_frame].molecule.getGeometry();
             for (std::size_t t = 0; t < m_torsions.size(); ++t)
@@ -1158,11 +1221,41 @@ void ConfGen::start()
             // geometries out of the force field entirely instead of relying on it to cope.
             if (hasClash(mol, m_clash_factor)
                 || topologyFingerprint(mol, m_topology_factor) != reference_bonds) {
-                clashes++;
-                continue; // leave p.geometry empty -> counted as "not built"
+                // Claude Generated (Jul 2026, P0): the rigid build failed -- try the restrained one.
+                // Rigidly rotating a torsion on a fixed template moves a whole fragment into whatever
+                // happens to be there; on a compact molecule that lost 72 % of all proposals. The
+                // restrained build never creates that geometry in the first place: it starts from the
+                // clash-free TEMPLATE and drives the torsions to their targets with a harmonic
+                // restraint, so the rest of the molecule relaxes out of the way while they turn.
+                if (!m_restrained_build) {
+                    clashes++;
+                    continue; // leave p.geometry empty -> counted as "not built"
+                }
+                restrained++;
+                Molecule driven;
+                if (!restrainedBuild(p, driven)) {
+                    clashes++;
+                    continue;
+                }
+                // The driven structure has to pass exactly the same gates -- the restraint is a way
+                // to REACH the geometry, never a licence to skip the chemistry check.
+                if (hasClash(driven, m_clash_factor)
+                    || topologyFingerprint(driven, m_topology_factor) != reference_bonds) {
+                    clashes++;
+                    continue;
+                }
+                driven.setName(fmt::format("proposal_from_{}_d{}_restrained", p.template_frame + 1, p.distance));
+                p.geometry = driven;
+                p.restrained_build = true;
+                restrained_ok++;
+                continue;
             }
             p.geometry = mol;
         }
+        if (restrained > 0)
+            CurcumaLogger::result_fmt("ConfGen: rigid build failed for {} proposal(s) -- restrained build "
+                                      "recovered {} of them (k = {} Eh/rad^2)",
+                restrained, restrained_ok, m_restraint_force);
         if (clashes > 0)
             CurcumaLogger::result_fmt("ConfGen: {} built structure(s) rejected before optimisation "
                                       "(clash or changed bond topology)", clashes);

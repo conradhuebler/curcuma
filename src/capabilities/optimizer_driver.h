@@ -20,6 +20,7 @@
 #pragma once
 
 #include "optimizer_interface.h"
+#include "src/capabilities/optimisation/dihedral_restraint.h"
 #include "src/capabilities/rmsd.h"
 #include <chrono>
 #include <functional>
@@ -69,6 +70,12 @@ public:
     // Constraints and advanced features
     std::vector<int> atom_constraints; // 0 = fixed, 1 = mobile
     bool use_constraints = false;
+    /* Claude Generated (Jul 2026): harmonic dihedral restraints, E += 1/2 k (phi - phi_0)^2.
+     * Unlike atom_constraints (which zeroes gradient components) a restraint DRIVES a coordinate:
+     * it lets a torsion be rotated to a target while the rest of the molecule relaxes out of the
+     * way, which is what conformer recombination needs (docs/CONFSEARCH_PROPOSALS.md, P0). Read
+     * from config["dihedral_restraints"]; empty by default, so every existing run is unchanged. */
+    Optimization::DihedralRestraints dihedral_restraints;
     bool use_hessian = false;
     bool use_numerical_gradient = false; // Use numerical gradient instead of analytical (for debugging)
     double numerical_gradient_step = 1e-5; // Step size for numerical gradient (Bohr)
