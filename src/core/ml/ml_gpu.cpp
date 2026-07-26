@@ -97,5 +97,49 @@ bool GpuAccumulator::fetch(Matrix& A, Vector& b)
     return true;
 }
 
+GpuInference::GpuInference(const std::string& backend, const Matrix& centers, const Vector& beta,
+    const Vector& inv_scale, double sigma)
+    : m_F(static_cast<int>(centers.cols()))
+{
+    const int M = static_cast<int>(centers.rows());
+    if (M <= 0 || m_F <= 0)
+        return;
+
+    const std::string prefix = "curcuma_" + backend + "_ml_infer_";
+    m_create = reinterpret_cast<void* (*)(int, int, const double*, const double*, const double*, double)>(
+        gpu_plugin::resolveEntryPoint(backend, prefix + "create"));
+    m_run = reinterpret_cast<int (*)(void*, int, const double*, const int*, const int*, double*,
+        double*, double*)>(gpu_plugin::resolveEntryPoint(backend, prefix + "run"));
+    m_destroy = reinterpret_cast<void (*)(void*)>(
+        gpu_plugin::resolveEntryPoint(backend, prefix + "destroy"));
+
+    if (!m_create || !m_run || !m_destroy)
+        return;
+
+    // centers is row-major (Matrix is a RowMajor typedef), which is what the device expects.
+    m_ctx = m_create(M, m_F, centers.data(), beta.data(), inv_scale.data(), sigma);
+}
+
+GpuInference::~GpuInference()
+{
+    if (m_ctx && m_destroy)
+        m_destroy(m_ctx);
+}
+
+bool GpuInference::run(const Matrix& X, const std::vector<int>& start,
+    const std::vector<int>& count, double& energy, Matrix& W, double& uncertainty)
+{
+    if (!m_ctx)
+        return false;
+    const int natoms = static_cast<int>(X.rows());
+    if (natoms == 0 || static_cast<int>(start.size()) != natoms)
+        return false;
+
+    W = Matrix::Zero(natoms, m_F);
+    return m_run(m_ctx, natoms, X.data(), start.data(), count.data(), &energy, W.data(),
+               &uncertainty)
+        == 0;
+}
+
 } // namespace ml
 } // namespace curcuma

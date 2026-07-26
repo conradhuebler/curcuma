@@ -35,6 +35,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 namespace {
 
@@ -182,6 +183,250 @@ void curcuma_cuda_ml_accum_destroy(void* handle)
     if (ctx->blas)
         cublasDestroy(ctx->blas);
     delete ctx;
+}
+
+} // extern "C"
+
+// =================================================================================
+// Inference
+// =================================================================================
+//
+// The prediction is a different shape of problem from the fit: only ~22 MFlop for 90 atoms
+// at M = 2000, but repeated every dynamics step. What decides whether the GPU helps is
+// therefore traffic, not arithmetic.
+//
+// So the centres, weights and feature scaling stay RESIDENT on the device (about 1 MB, set
+// up once when the model is loaded), and the compact Jacobian blocks -- roughly 5 MB per
+// step, by far the largest object -- never cross the bus at all: the device returns the
+// per-atom adjoint in feature space (90 x 60, some 43 KB) and the host contracts it with
+// the Jacobian it already holds. Traffic per step is thus two small buffers instead of
+// megabytes.
+
+namespace {
+
+struct MLInferContext {
+    int M = 0;
+    int F = 0;
+    double sigma = 1.0;
+    double* d_centers = nullptr;   ///< M x F, row major, standardised
+    double* d_beta = nullptr;      ///< M
+    double* d_inv_scale = nullptr; ///< F
+    double* d_X = nullptr;         ///< natoms x F (capacity)
+    double* d_k = nullptr;         ///< natoms x M (capacity)
+    double* d_s = nullptr;         ///< natoms
+    double* d_kmax = nullptr;      ///< natoms
+    double* d_W = nullptr;         ///< natoms x F (capacity)
+    int* d_start = nullptr;
+    int* d_count = nullptr;
+    int capacity_atoms = 0;
+};
+
+/*! \brief k[i,m] = exp(-|x_i - z_m|^2 / 2 sigma^2) inside atom i's element block, else 0. */
+__global__ void kernelK(int natoms, int M, int F, double inv_two_sigma2, const double* __restrict__ X,
+    const double* __restrict__ Z, const int* __restrict__ start, const int* __restrict__ count,
+    double* __restrict__ k)
+{
+    const int m = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = blockIdx.y;
+    if (i >= natoms || m >= M)
+        return;
+
+    const int s0 = start[i];
+    const int c0 = count[i];
+    if (c0 <= 0 || m < s0 || m >= s0 + c0) {
+        k[static_cast<size_t>(i) * M + m] = 0.0;
+        return;
+    }
+
+    double d2 = 0.0;
+    for (int f = 0; f < F; ++f) {
+        const double diff = X[static_cast<size_t>(i) * F + f] - Z[static_cast<size_t>(m) * F + f];
+        d2 += diff * diff;
+    }
+    k[static_cast<size_t>(i) * M + m] = exp(-d2 * inv_two_sigma2);
+}
+
+/*! \brief Per atom: s_i = sum_m beta_m k_im and the largest k, which is the indicator. */
+__global__ void kernelReduce(int natoms, int M, const double* __restrict__ k,
+    const double* __restrict__ beta, double* __restrict__ s, double* __restrict__ kmax)
+{
+    extern __shared__ double shared[];
+    double* sh_s = shared;
+    double* sh_m = shared + blockDim.x;
+
+    const int i = blockIdx.x;
+    double acc = 0.0;
+    double best = 0.0;
+    for (int m = threadIdx.x; m < M; m += blockDim.x) {
+        const double kv = k[static_cast<size_t>(i) * M + m];
+        acc += beta[m] * kv;
+        best = fmax(best, kv);
+    }
+    sh_s[threadIdx.x] = acc;
+    sh_m[threadIdx.x] = best;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            sh_s[threadIdx.x] += sh_s[threadIdx.x + stride];
+            sh_m[threadIdx.x] = fmax(sh_m[threadIdx.x], sh_m[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        s[i] = sh_s[0];
+        kmax[i] = sh_m[0];
+    }
+}
+
+/*! \brief Adjoint in raw descriptor space: W_if = (s_i x_if - sum_m beta_m k_im z_mf) * (-1/sigma^2) / scale_f. */
+__global__ void kernelW(int natoms, int M, int F, double neg_inv_sigma2,
+    const double* __restrict__ X, const double* __restrict__ Z, const double* __restrict__ k,
+    const double* __restrict__ beta, const double* __restrict__ s,
+    const double* __restrict__ inv_scale, const int* __restrict__ start,
+    const int* __restrict__ count, double* __restrict__ W)
+{
+    const int f = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = blockIdx.y;
+    if (i >= natoms || f >= F)
+        return;
+
+    const int s0 = start[i];
+    const int c0 = count[i];
+    double dot = 0.0;
+    for (int m = s0; m < s0 + c0; ++m)
+        dot += beta[m] * k[static_cast<size_t>(i) * M + m] * Z[static_cast<size_t>(m) * F + f];
+
+    const double v = s[i] * X[static_cast<size_t>(i) * F + f] - dot;
+    W[static_cast<size_t>(i) * F + f] = v * neg_inv_sigma2 * inv_scale[f];
+}
+
+bool ensureInferCapacity(MLInferContext* c, int natoms)
+{
+    if (natoms <= c->capacity_atoms)
+        return true;
+    if (c->d_X) cudaFree(c->d_X);
+    if (c->d_k) cudaFree(c->d_k);
+    if (c->d_s) cudaFree(c->d_s);
+    if (c->d_kmax) cudaFree(c->d_kmax);
+    if (c->d_W) cudaFree(c->d_W);
+    if (c->d_start) cudaFree(c->d_start);
+    if (c->d_count) cudaFree(c->d_count);
+    c->d_X = c->d_k = c->d_s = c->d_kmax = c->d_W = nullptr;
+    c->d_start = c->d_count = nullptr;
+
+    const size_t n = static_cast<size_t>(natoms);
+    if (cudaMalloc(&c->d_X, n * c->F * sizeof(double)) != cudaSuccess) return false;
+    if (cudaMalloc(&c->d_k, n * c->M * sizeof(double)) != cudaSuccess) return false;
+    if (cudaMalloc(&c->d_s, n * sizeof(double)) != cudaSuccess) return false;
+    if (cudaMalloc(&c->d_kmax, n * sizeof(double)) != cudaSuccess) return false;
+    if (cudaMalloc(&c->d_W, n * c->F * sizeof(double)) != cudaSuccess) return false;
+    if (cudaMalloc(&c->d_start, n * sizeof(int)) != cudaSuccess) return false;
+    if (cudaMalloc(&c->d_count, n * sizeof(int)) != cudaSuccess) return false;
+    c->capacity_atoms = natoms;
+    return true;
+}
+
+} // namespace
+
+extern "C" {
+
+void curcuma_cuda_ml_infer_destroy(void* handle);
+
+void* curcuma_cuda_ml_infer_create(int M, int F, const double* centers, const double* beta,
+    const double* inv_scale, double sigma)
+{
+    if (M <= 0 || F <= 0 || !centers || !beta || !inv_scale)
+        return nullptr;
+    MLInferContext* c = new MLInferContext();
+    c->M = M;
+    c->F = F;
+    c->sigma = sigma;
+
+    const size_t zb = static_cast<size_t>(M) * F * sizeof(double);
+    if (cudaMalloc(&c->d_centers, zb) != cudaSuccess
+        || cudaMalloc(&c->d_beta, static_cast<size_t>(M) * sizeof(double)) != cudaSuccess
+        || cudaMalloc(&c->d_inv_scale, static_cast<size_t>(F) * sizeof(double)) != cudaSuccess) {
+        curcuma_cuda_ml_infer_destroy(c);
+        return nullptr;
+    }
+    cudaMemcpy(c->d_centers, centers, zb, cudaMemcpyHostToDevice);
+    cudaMemcpy(c->d_beta, beta, static_cast<size_t>(M) * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(c->d_inv_scale, inv_scale, static_cast<size_t>(F) * sizeof(double), cudaMemcpyHostToDevice);
+    return c;
+}
+
+/**
+ * @brief One prediction pass.
+ * @param X       natoms x F, row major, already standardised
+ * @param start   per atom, first centre of its element block
+ * @param count   per atom, number of centres (0 for an element the model does not know)
+ * @param energy  out, the summed kernel contribution (no element baseline)
+ * @param W       out, natoms x F adjoint in raw descriptor space
+ * @param uncertainty out, max over atoms of 1 - max_m k
+ */
+int curcuma_cuda_ml_infer_run(void* handle, int natoms, const double* X, const int* start,
+    const int* count, double* energy, double* W, double* uncertainty)
+{
+    MLInferContext* c = static_cast<MLInferContext*>(handle);
+    if (!c || natoms <= 0 || !X || !start || !count || !energy || !W)
+        return 1;
+    if (!ensureInferCapacity(c, natoms))
+        return 2;
+
+    const size_t n = static_cast<size_t>(natoms);
+    cudaMemcpy(c->d_X, X, n * c->F * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(c->d_start, start, n * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(c->d_count, count, n * sizeof(int), cudaMemcpyHostToDevice);
+
+    const double inv_two_sigma2 = 1.0 / (2.0 * c->sigma * c->sigma);
+    dim3 blockK(128), gridK((c->M + 127) / 128, natoms);
+    kernelK<<<gridK, blockK>>>(natoms, c->M, c->F, inv_two_sigma2, c->d_X, c->d_centers,
+        c->d_start, c->d_count, c->d_k);
+
+    const int red_threads = 256;
+    kernelReduce<<<natoms, red_threads, 2 * red_threads * sizeof(double)>>>(
+        natoms, c->M, c->d_k, c->d_beta, c->d_s, c->d_kmax);
+
+    dim3 blockW(64), gridW((c->F + 63) / 64, natoms);
+    kernelW<<<gridW, blockW>>>(natoms, c->M, c->F, -1.0 / (c->sigma * c->sigma), c->d_X,
+        c->d_centers, c->d_k, c->d_beta, c->d_s, c->d_inv_scale, c->d_start, c->d_count, c->d_W);
+
+    if (cudaDeviceSynchronize() != cudaSuccess)
+        return 3;
+
+    std::vector<double> s_host(n), kmax_host(n);
+    cudaMemcpy(s_host.data(), c->d_s, n * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(kmax_host.data(), c->d_kmax, n * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(W, c->d_W, n * c->F * sizeof(double), cudaMemcpyDeviceToHost);
+
+    double e = 0.0, worst = 0.0;
+    for (int i = 0; i < natoms; ++i) {
+        e += s_host[i];
+        worst = fmax(worst, (count[i] > 0) ? 1.0 - kmax_host[i] : 1.0);
+    }
+    *energy = e;
+    if (uncertainty)
+        *uncertainty = worst;
+    return 0;
+}
+
+void curcuma_cuda_ml_infer_destroy(void* handle)
+{
+    MLInferContext* c = static_cast<MLInferContext*>(handle);
+    if (!c)
+        return;
+    if (c->d_centers) cudaFree(c->d_centers);
+    if (c->d_beta) cudaFree(c->d_beta);
+    if (c->d_inv_scale) cudaFree(c->d_inv_scale);
+    if (c->d_X) cudaFree(c->d_X);
+    if (c->d_k) cudaFree(c->d_k);
+    if (c->d_s) cudaFree(c->d_s);
+    if (c->d_kmax) cudaFree(c->d_kmax);
+    if (c->d_W) cudaFree(c->d_W);
+    if (c->d_start) cudaFree(c->d_start);
+    if (c->d_count) cudaFree(c->d_count);
+    delete c;
 }
 
 } // extern "C"

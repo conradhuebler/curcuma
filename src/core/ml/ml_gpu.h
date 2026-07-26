@@ -23,6 +23,7 @@
 #include "src/core/global.h"
 
 #include <string>
+#include <vector>
 
 namespace curcuma {
 namespace ml {
@@ -70,6 +71,46 @@ private:
     void* (*m_create)(int) = nullptr;
     int (*m_add)(void*, int, const double*, const double*, double) = nullptr;
     int (*m_fetch)(void*, double*, double*) = nullptr;
+    void (*m_destroy)(void*) = nullptr;
+};
+
+/**
+ * @brief Device-resident evaluation of the learned correction.
+ *
+ * Centres, weights and feature scaling are uploaded once; each call transfers only the
+ * standardised descriptor in and the feature-space adjoint out, both a few tens of
+ * kilobytes. The compact Jacobian blocks -- the largest object by an order of magnitude --
+ * stay on the host, which is where they are contracted. That choice is what decides
+ * whether the GPU helps at all here: the arithmetic is small, the traffic is not.
+ */
+class GpuInference {
+public:
+    GpuInference(const std::string& backend, const Matrix& centers, const Vector& beta,
+        const Vector& inv_scale, double sigma);
+    ~GpuInference();
+
+    GpuInference(const GpuInference&) = delete;
+    GpuInference& operator=(const GpuInference&) = delete;
+
+    bool valid() const { return m_ctx != nullptr; }
+
+    /**
+     * @brief Evaluate the kernel part of the correction and its feature-space adjoint.
+     * @param X      natoms x F, standardised
+     * @param start  per atom, first centre of its element block
+     * @param count  per atom, size of that block (0 for an unknown element)
+     * @param W      out, natoms x F adjoint in raw descriptor space
+     */
+    bool run(const Matrix& X, const std::vector<int>& start, const std::vector<int>& count,
+        double& energy, Matrix& W, double& uncertainty);
+
+private:
+    void* m_ctx = nullptr;
+    int m_F = 0;
+
+    void* (*m_create)(int, int, const double*, const double*, const double*, double) = nullptr;
+    int (*m_run)(void*, int, const double*, const int*, const int*, double*, double*, double*)
+        = nullptr;
     void (*m_destroy)(void*) = nullptr;
 };
 

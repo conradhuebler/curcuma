@@ -138,6 +138,11 @@ DeltaMLMethod::DeltaMLMethod(const json& config)
         return;
     }
 
+    // The global -gpu setting drives the correction as well, not just the base method.
+    const std::string gpu = config.value("gpu", std::string());
+    if (!gpu.empty())
+        m_model.setInferenceBackend(gpu);
+
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::param("deltaml_model", m_model_path);
         CurcumaLogger::param("deltaml_base", m_base_method);

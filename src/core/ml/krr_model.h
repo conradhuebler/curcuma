@@ -27,6 +27,7 @@
 #include "json.hpp"
 
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -197,6 +198,14 @@ public:
 
     /*! \brief Anchor geometry, stored so every consumer can freeze an identical topology. */
     void setAnchor(const std::vector<int>& elements, const Geometry& geometry);
+
+    /**
+     * @brief Move prediction onto a GPU backend ("cuda", ...). Empty returns to the CPU.
+     *
+     * Uploads centres, weights and scaling once. Falls back silently when the plugin or the
+     * device is unavailable, so callers need no capability check.
+     */
+    void setInferenceBackend(const std::string& backend);
     bool hasAnchor() const { return m_anchor_geometry.rows() > 0; }
     const std::vector<int>& anchorElements() const { return m_anchor_elements; }
     const Geometry& anchorGeometry() const { return m_anchor_geometry; }
@@ -237,6 +246,9 @@ private:
 
     std::vector<int> m_anchor_elements;
     Geometry m_anchor_geometry;
+
+    /// Prediction is const, so the device context is mutable state of an otherwise pure call.
+    mutable std::shared_ptr<class GpuInference> m_gpu_infer;
 };
 
 } // namespace ml

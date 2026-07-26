@@ -121,6 +121,20 @@ Vector DeltaMLModel::kernelRow(const Vector& x, int element, int& start, int& co
     return (d2 * (-1.0 / (2.0 * m_sigma * m_sigma))).array().exp();
 }
 
+void DeltaMLModel::setInferenceBackend(const std::string& backend)
+{
+    m_gpu_infer.reset();
+    if (backend.empty() || backend == "none" || backend == "cpu" || !m_trained)
+        return;
+    auto ctx = std::make_shared<GpuInference>(
+        backend, m_centers, m_beta, m_feature_scale.cwiseInverse(), m_sigma);
+    if (ctx->valid())
+        m_gpu_infer = ctx;
+    else
+        CurcumaLogger::warn_fmt(
+            "delta-ML: backend '{}' unavailable for prediction; evaluating on the CPU", backend);
+}
+
 void DeltaMLModel::setAnchor(const std::vector<int>& elements, const Geometry& geometry)
 {
     m_anchor_elements = elements;
@@ -590,6 +604,39 @@ double DeltaMLModel::predictEnergyAndGradient(const std::vector<int>& elements,
 
     double energy = baselineEnergy(elements);
     double worst = 0.0;
+
+    if (m_gpu_infer) {
+        // Device path: it returns the kernel part of the energy and the feature-space
+        // adjoint; the Jacobian contraction stays here, where the blocks already live.
+        std::vector<int> blk_start(natoms, 0), blk_count(natoms, 0);
+        for (int i = 0; i < natoms; ++i) {
+            const auto it = m_element_block.find(elements[i]);
+            if (it != m_element_block.end()) {
+                blk_start[i] = it->second.first;
+                blk_count[i] = it->second.second;
+            }
+        }
+        double e_kernel = 0.0, unc = 0.0;
+        Matrix W;
+        if (m_gpu_infer->run(Xs, blk_start, blk_count, e_kernel, W, unc)) {
+            energy += e_kernel;
+            for (int i = 0; i < natoms; ++i) {
+                if (blk_count[i] <= 0)
+                    continue;
+                const Vector contrib = jac[i].d * W.row(i).transpose();
+                for (std::size_t p = 0; p < jac[i].partners.size(); ++p) {
+                    const int atom = jac[i].partners[p];
+                    for (int g = 0; g < 3; ++g)
+                        gradient(atom, g) += contrib(3 * static_cast<int>(p) + g);
+                }
+            }
+            if (uncertainty)
+                *uncertainty = unc;
+            return energy;
+        }
+        // A failed device call must not silently return a half-built gradient.
+        gradient.setZero();
+    }
 
     for (int i = 0; i < natoms; ++i) {
         const auto it = m_element_block.find(elements[i]);

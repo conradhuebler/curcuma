@@ -273,7 +273,45 @@ The row-major design block is handed to cuBLAS unchanged: read with leading dime
 is already the column-major transpose the call wants, so the two storage conventions cancel
 and nothing is repacked.
 
-Inference is still CPU-only.
+Prediction moves too: centres, weights and scaling are uploaded once, and each step
+exchanges only the standardised descriptor in and the feature-space adjoint out -- a few
+tens of kilobytes, against the ~5 MB the compact Jacobian blocks would cost. Those stay on
+the host and are contracted there. 90 atoms, M = 2000, per dynamics step:
+
+| | CPU | CUDA |
+|---|---|---|
+| GFN-FF alone | 0.31 ms | 0.68 ms |
+| Delta-ML total | 5.74 ms | 3.16 ms |
+| correction alone | 5.43 ms | **2.48 ms** |
+
+The correction is 2.2x faster; the correction value itself is identical to all ten printed
+digits. Note GFN-FF is *slower* on the GPU at this size, which eats part of the gain --
+`-gpu` is a single global switch, so the best placement per component is not expressible.
+
+## Open: the anchor freezes more than it should
+
+The topology anchor exists to guarantee that GFN-FF uses one identical bond graph
+everywhere. Measurement says it currently freezes more than that, and only on the CPU.
+
+Same structure, same model, base method only:
+
+| | anchor == input | anchor != input |
+|---|---|---|
+| pure GFN-FF, CPU | -16.28842478 | -16.29445505 |
+| pure GFN-FF, CUDA | -16.28842476 | -16.29445503 |
+| Delta-ML base, CPU | -16.28842478 | **-16.29389806** |
+| Delta-ML base, CUDA | -16.28842476 | -16.29444061 |
+
+With the anchor equal to the input all four agree to 2e-8. As soon as the structure moves
+away from the anchor, the CPU path departs by 5.6e-4 Eh (0.35 kcal/mol) while the GPU stays
+within 1.4e-5 of the geometry-consistent value. The GPU refreshes the coordination numbers
+and the lists derived from them; the CPU keeps them pinned at the anchor.
+
+The GPU is the correct behaviour here. A coordination number is a smooth function of the
+coordinates and belongs to the dynamic state by design; pinning it makes the energy wrong
+for the actual geometry and, worse, inconsistent with the gradient -- which is exactly the
+signature of the NVE drift reported above. Fixing the anchor to freeze the bond graph only
+is the obvious next step, and the drift numbers should be remeasured afterwards.
 
 ## A numerical trap worth knowing about
 
