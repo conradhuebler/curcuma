@@ -65,9 +65,15 @@ PARAM(kernel_sigma, Double, 0.0,
     "Gaussian kernel width in standardised descriptor space (0 = median heuristic). Strong "
     "lever: too narrow and the model cannot interpolate, too wide and it oversmooths.",
     "Algorithm", {})
-PARAM(lambda, Double, 1e-8,
-    "Weight of the RKHS regulariser. Too small interpolates label noise into a rippled "
-    "surface, which is invisible in the energy error but destroys molecular dynamics.",
+PARAM(lambda, Double, 1e-4,
+    "RKHS regulariser strength relative to the data term: the solved system is "
+    "(Phi^T W Phi + lambda*s*K_MM) beta = Phi^T W y with s the mean diagonal of the data "
+    "block. lambda = 1 regularises as strongly as the data constrains, small values approach "
+    "interpolation. Too small gives a rippled surface that is invisible in the energy error "
+    "and does not conserve energy in dynamics -- raise it if an NVE run drifts. Use the "
+    "dotted form -activelearn.lambda; the flat -lambda does not route. Measured on a "
+    "90-atom conformer set: 1e-8 gives the best energies but an NVE drift 3.7x the base "
+    "method, 1e-2 matches the base drift but loses most of the accuracy, 1e-4 sits between.",
     "Algorithm", {})
 PARAM(jitter_relative, Double, 1e-8,
     "Ridge added to the normal equations relative to their diagonal scale. Accumulating "

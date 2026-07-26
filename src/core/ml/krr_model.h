@@ -48,7 +48,19 @@ namespace ml {
 struct DeltaMLTrainingOptions {
     int n_centers = 1000;       ///< kernel centres M; <= 0 uses every training environment
     double kernel_sigma = 0.0;  ///< kernel width; <= 0 selects the median-distance heuristic
-    double lambda = 1e-8;       ///< weight of the RKHS regulariser beta^T K_MM beta
+    /**
+     * @brief RKHS regulariser strength, relative to the data term.
+     *
+     * The system solved is (Phi^T W Phi + lambda * s * K_MM) beta = Phi^T W y, where s is
+     * the mean diagonal of the data block. Referring lambda to the data scale is what makes
+     * it a usable dial: as an absolute weight it is swamped by ten orders of magnitude, and
+     * rescaling W uniformly cancels out of the solution entirely.
+     *
+     * lambda = 1 regularises as strongly as the data constrains; small values approach
+     * interpolation. Too small produces a rippled surface that is invisible in the energy
+     * error and fails to conserve energy in dynamics -- raise it if an NVE run drifts.
+     */
+    double lambda = 1e-4;
     double jitter_relative = 1e-8; ///< ridge added to the normal equations, relative to their
                                    ///< diagonal scale; guards the factorisation at large M
     double sigma_energy = 1e-4; ///< assumed energy noise [Eh], sets the energy row weight

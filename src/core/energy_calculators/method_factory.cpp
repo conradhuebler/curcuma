@@ -432,7 +432,10 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
     if (method == "deltaml" || method.rfind("deltaml:", 0) == 0) {
         CurcumaLogger::success("Method 'deltaml' resolved to delta-ML corrected method");
         json ml_config = config;
-        ml_config["method"] = method; // keep the possible ':<path>' suffix reachable
+        // Pass the ORIGINAL spelling: the lowercased copy is only for dispatch, and the
+        // ':<path>' suffix is a file name. Case-folding it breaks every model whose file
+        // name contains an upper-case letter on a case-sensitive filesystem.
+        ml_config["method"] = method_name;
         auto ml = std::make_unique<DeltaMLMethod>(ml_config);
         if (ml->hasError()) {
             throw MethodCreationException(ml->getErrorMessage());

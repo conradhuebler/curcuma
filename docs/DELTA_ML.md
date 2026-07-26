@@ -146,7 +146,7 @@ arguments prints the summary; the full list comes from the parameter registry.
 | `-ref_method` | `gfn2` | the level being learned; must match the base method's dispersion treatment |
 | `-n_centers` | 1000 | kernel centres M; the accuracy/cost lever |
 | `-kernel_sigma` | 0 (auto) | Gaussian width; strong lever, too narrow cannot interpolate, too wide oversmooths |
-| `-lambda` | 1e-8 | regulariser; too small interpolates label noise into a rippled surface |
+| `-activelearn.lambda` | 1e-4 | regulariser relative to the data term; raise to 1e-2 if NVE drifts. The flat `-lambda` does not route -- use the dotted form |
 | `-jitter_relative` | 1e-8 | conditioning ridge on the normal equations; see below |
 | `-use_forces` | true | train on gradients as well as energies |
 | `-test_fraction` | 0.2 | held-out share, split randomly because neighbouring frames are correlated |
@@ -188,6 +188,65 @@ ratio, which is 88x here and four to five orders of magnitude for DFT.
 
 Single-point runs additionally pay for parsing the model file (2.8 MB at M = 2000), which is
 why `-sp` timings look worse than the per-step cost above.
+
+## Train on optimised structures, not raw dynamics frames
+
+This is the single biggest lever on how much the model is worth, larger than any
+hyperparameter. Measured on a 66-atom trisaccharide, GFN-FF to GFN2, same molecule, same
+M = 2000, only the training set differs:
+
+| training set | `Delta` span | energy MAE (model / base) | gain |
+|---|---|---|---|
+| 302 raw frames from 30 ps at 400 K | 371 kcal/mol | 27.5 / 12.4 kcal/mol | **1.3x** |
+| 150 GFN-FF-optimised structures | 91 kcal/mol | 2.6 / 12.4 kcal/mol | **4.8x** |
+
+Raw high-temperature frames teach the model about a region of configuration space that is
+both far rougher than, and irrelevant to, the minima you actually optimise into. Worse, a
+model trained that way made the optimised geometry *worse* than bare GFN-FF (0.405 A from
+the reference minimum against 0.288 A). Optimise the sampled structures before labelling
+them -- `curcuma -opt frames.xyz -method gfnff` -- and train on the result.
+
+## Does it survive molecular dynamics?
+
+Energy conservation in NVE is the test that exposes a rippled learned surface: the defect is
+invisible in the energy error and accumulates linearly along a trajectory. **Start each run
+from a structure optimised on that same surface**, otherwise the comparison measures how far
+each surface's minimum is from the shared starting point rather than its conservation.
+
+90-atom conformer molecule, 2 ps, 0.5 fs step, thermostat off, each run started from its own
+optimised minimum:
+
+| surface | drift [kcal/mol/ps] | RMS fluctuation | mean T |
+|---|---|---|---|
+| GFN2 | 0.10 | 0.19 | 154 K |
+| GFN-FF | 1.56 | 4.91 | 153 K |
+| Delta-ML, lambda = 1e-8 | 5.84 | 5.79 | 157 K |
+| Delta-ML, lambda = 1e-4 | 2.71 | 4.77 | 156 K |
+| Delta-ML, lambda = 1e-2 | 1.58 | 4.74 | 153 K |
+
+At `lambda = 1e-2` the learned surface conserves energy as well as the base method it
+corrects. On the trisaccharide with an optimised training set it does better than the base
+(0.96 against 1.22). Regularisation is what buys this, and it costs accuracy -- pick the
+point on the curve your application needs, and check it rather than assuming it.
+
+Skipping the pre-optimisation is not a detail: the same trisaccharide model started from an
+unoptimised geometry drifted 29.9 kcal/mol/ps and heated from 300 K to 544 K.
+
+## Where the improvement shows up, and where it does not
+
+Same 90-atom conformer model, distance of the optimised minimum from the GFN2 minimum
+(Kabsch RMSD over 90 atoms):
+
+| surface | RMSD to the reference minimum |
+|---|---|
+| GFN-FF | 0.377 A |
+| Delta-ML, lambda = 1e-4 | **0.119 A** |
+
+Pre-optimisation on the corrected surface lands 3.2x closer to the reference minimum, which
+is the point of the exercise. But this is system dependent: on the trisaccharide the same
+comparison gave 0.288 A against 0.273 A, a 5 % gain, while its *energies* improved 4.8x. A
+sugar's geometry is dominated by soft dihedrals and hydroxyl rotations that a small energy
+correction barely moves. Do not assume the geometric gain transfers -- measure it.
 
 ## A numerical trap worth knowing about
 
@@ -233,4 +292,6 @@ and any DFT reference. Treat results as provisional until tested on real problem
 - Training cost grows as M^2; centres are capped at 12000 with an explicit error
 - Model files store all centre descriptors as JSON and grow with M (a few MB at M = 1000)
 - Active learning runs but its benefit is unproven; the offline path is the validated one
+- Geometric improvement is system dependent (3.2x on one system, 1.05x on another)
+- MD on the corrected surface needs `lambda` around 1e-2, which costs most of the accuracy
 - No GPU path for the kernel or descriptor evaluation yet

@@ -434,7 +434,21 @@ bool DeltaMLModel::train(
         Kmm.block(start, start, count, count)
             = gaussianKernel(m_centers.middleRows(start, count), m_centers.middleRows(start, count), m_sigma);
     }
-    A += opt.lambda * Kmm;
+    // Scale the RKHS penalty to the data term instead of using it as an absolute weight.
+    //
+    // With W = diag(1/sigma^2) the data block Phi^T W Phi carries the magnitude of both the
+    // assumed noise and the number of observations, and it dwarfs K_MM (whose diagonal is
+    // one for a Gaussian kernel) by ten orders of magnitude on a typical fit. An absolute
+    // lambda is then meaningless: measured on a 66-atom sugar, every value from 1e-8 to 1e2
+    // produced a bit-identical model, and only lambda ~ 1e12 had any effect at all. Scaling
+    // both sides by the same factor is equally inert, because a uniform rescaling of W
+    // cancels out of the solution -- only the energy-to-force ratio survives.
+    //
+    // Referred to the data scale, lambda = 1 means "regulariser as strong as the data" and
+    // small values mean "trust the data", which is a dial that behaves the way its name
+    // suggests.
+    const double data_scale = A.diagonal().mean();
+    A += opt.lambda * data_scale * Kmm;
 
     // Accumulating normal equations squares the condition number of the design matrix, and
     // K_MM is itself near-singular once many centres sit close together in descriptor
