@@ -24,6 +24,7 @@
 
 #include "krr_model.h"
 #include "kernel.h"
+#include "ml_gpu.h"
 
 #include "src/core/curcuma_logger.h"
 
@@ -32,6 +33,7 @@
 #include <cmath>
 #include <fstream>
 #include <numeric>
+#include <memory>
 #include <random>
 #include <set>
 
@@ -350,6 +352,19 @@ bool DeltaMLModel::train(
 
     const bool want_forces = opt.use_forces && data.hasGradients();
 
+    // Optional device-side accumulation of the same system. The rank-k update below is the
+    // single dominant term of the fit, so offloading just that captures most of the cost
+    // without moving descriptors or Jacobians across the bus.
+    std::unique_ptr<GpuAccumulator> gpu;
+    if (!opt.gpu.empty() && opt.gpu != "none" && opt.gpu != "cpu") {
+        gpu = std::make_unique<GpuAccumulator>(opt.gpu, M);
+        if (!gpu->valid())
+            gpu.reset();
+        else if (opt.verbosity >= 2)
+            CurcumaLogger::info_fmt("DeltaMLModel: accumulating the normal equations on '{}'",
+                opt.gpu);
+    }
+
     for (int s = 0; s < N; ++s) {
         const int natoms = data[s].AtomCount();
 
@@ -362,8 +377,13 @@ bool DeltaMLModel::train(
             if (count > 0)
                 phi.segment(start, count) += k;
         }
-        A.selfadjointView<Eigen::Lower>().rankUpdate(phi, wE);
-        b += wE * phi * y_res(s);
+        if (gpu) {
+            const double yv = y_res(s);
+            gpu->add(1, phi.data(), &yv, wE);
+        } else {
+            A.selfadjointView<Eigen::Lower>().rankUpdate(phi, wE);
+            b += wE * phi * y_res(s);
+        }
         report.n_energy_rows += 1;
 
         if (!want_forces)
@@ -412,14 +432,26 @@ bool DeltaMLModel::train(
             for (int g = 0; g < 3; ++g)
                 yg(3 * c2 + g) = dG(c2, g);
 
-        A.selfadjointView<Eigen::Lower>().rankUpdate(PhiG.transpose(), wF);
-        b += wF * PhiG.transpose() * yg;
+        if (gpu) {
+            // PhiG is row-major (3N x M); the device reads the identical buffer as the
+            // column-major PhiG^T it needs, so no repacking happens on either side.
+            gpu->add(3 * natoms, PhiG.data(), yg.data(), wF);
+        } else {
+            A.selfadjointView<Eigen::Lower>().rankUpdate(PhiG.transpose(), wF);
+            b += wF * PhiG.transpose() * yg;
+        }
         report.n_force_rows += 3 * natoms;
     }
 
-    // rankUpdate only touched the lower triangle; materialise the full symmetric matrix
-    // through a temporary, because writing A from a view of A itself would alias.
-    {
+    if (gpu) {
+        if (!gpu->fetch(A, b)) {
+            CurcumaLogger::error("DeltaMLModel: could not read the accumulated system back "
+                                 "from the device");
+            return false;
+        }
+    } else {
+        // rankUpdate only touched the lower triangle; materialise the full symmetric matrix
+        // through a temporary, because writing A from a view of A itself would alias.
         const Matrix full = A.selfadjointView<Eigen::Lower>();
         A = full;
     }

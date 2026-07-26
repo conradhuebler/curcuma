@@ -113,4 +113,13 @@ std::unique_ptr<ComputationalMethod> createGfnff(const std::string& backend, con
     return std::unique_ptr<ComputationalMethod>(method);
 }
 
+void* resolveEntryPoint(const std::string& backend, const std::string& symbol)
+{
+    void* handle = pluginHandle(backend);
+    if (!handle)
+        return nullptr;
+    ::dlerror();
+    return ::dlsym(handle, symbol.c_str());
+}
+
 } // namespace gpu_plugin

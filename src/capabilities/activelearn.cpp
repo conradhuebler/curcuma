@@ -20,6 +20,7 @@
 
 #include "activelearn.h"
 
+#include "src/core/citation_registry.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
 #include "src/core/fileiterator.h"
@@ -318,6 +319,14 @@ bool ActiveLearn::fitAndReport(const MLDataset& train, const MLDataset& test, in
     opt.use_forces = m_use_forces;
     opt.seed = m_seed;
     opt.verbosity = m_verbosity;
+    // The global -gpu setting drives the fit as well, not just the energy methods.
+    if (m_controller.contains("gpu") && m_controller["gpu"].is_string())
+        opt.gpu = m_controller["gpu"].get<std::string>();
+
+    // Fitting a model is as much a use of these methods as evaluating one.
+    CitationRegistry::cite("deltaml");
+    CitationRegistry::cite("acsf", "deltaml");
+    CitationRegistry::cite("gap_sparse", "deltaml");
 
     DeltaMLTrainingReport report;
     if (!model.train(train, opt, report))

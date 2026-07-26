@@ -20,6 +20,7 @@
 
 #include "deltaml_method.h"
 
+#include "src/core/citation_registry.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
 #include "src/core/energy_calculators/method_factory.h"
@@ -217,6 +218,12 @@ bool DeltaMLMethod::updateGeometry(const Matrix& geometry)
 
 double DeltaMLMethod::calculateEnergy(bool gradient)
 {
+    // The correction rests on three distinct pieces of published work; the base method
+    // registers its own citations separately.
+    CitationRegistry::cite("deltaml");
+    CitationRegistry::cite("acsf", "deltaml");
+    CitationRegistry::cite("gap_sparse", "deltaml");
+
     if (!m_base) {
         m_has_error = true;
         m_error_message = "deltaml has no base method";

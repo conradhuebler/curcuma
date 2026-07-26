@@ -554,6 +554,7 @@ set(curcuma_core_SRC
         src/core/ml/descriptor.cpp
         src/core/ml/ml_dataset.cpp
         src/core/ml/krr_model.cpp
+        src/core/ml/ml_gpu.cpp
         src/core/energy_calculators/ml_methods/deltaml_method.cpp
         src/tools/formats.h
         src/tools/geometry.h
@@ -1044,7 +1045,9 @@ if(USE_CUDA)
     add_library(curcuma_cuda SHARED
         ${CUDA_SOURCES}
         src/core/energy_calculators/qm_methods/xtb_gpu_method.cpp
-        src/core/energy_calculators/qm_methods/cuda/gpu_plugin_entry_cuda.cpp)
+        src/core/energy_calculators/qm_methods/cuda/gpu_plugin_entry_cuda.cpp
+        # Delta-ML: cuBLAS accumulation of the normal equations
+        src/core/ml/cuda/ml_accum_cuda.cu)
     target_include_directories(curcuma_cuda PRIVATE ${PROJECT_SOURCE_DIR})
     target_link_libraries(curcuma_cuda PRIVATE CUDA::cudart CUDA::cusolver CUDA::cublas)
     # Match curcuma_core's compile definitions EXACTLY so every shared class (XTB, ...) has

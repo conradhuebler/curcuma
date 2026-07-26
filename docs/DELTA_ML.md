@@ -248,6 +248,33 @@ comparison gave 0.288 A against 0.273 A, a 5 % gain, while its *energies* improv
 sugar's geometry is dominated by soft dihedrals and hydroxyl rotations that a small energy
 correction barely moves. Do not assume the geometric gain transfers -- measure it.
 
+## GPU
+
+`-gpu cuda` offloads the fit. The training cost is dominated by one symmetric rank-k
+update per structure -- `M^2 * 3N`, which is 2.2 GFlop at M = 2000 and N = 90 against
+roughly 0.16 GFlop for building the design block itself -- so that single cuBLAS DSYRK is
+what gets moved, and everything else stays on the CPU.
+
+353 conformers, 90 atoms, RTX 5080:
+
+| M | CPU | CUDA | speedup | held-out MAE (both) |
+|---|---|---|---|---|
+| 2000 | 26.2 s | 16.6 s | 1.6x | 0.2992 kcal/mol |
+| 4000 | 78.6 s | 33.9 s | 2.3x | 0.2903 kcal/mol |
+| 8000 | 246.9 s | 86.6 s | 2.9x | 0.2775 kcal/mol |
+
+The speedup grows with M because the rank-k update's share of the work grows; the ceiling
+is set by the descriptor, Jacobian and design-block construction that remain on the host.
+Accuracy is identical to every printed digit -- cuBLAS sums in a different order, so the
+systems agree to rounding rather than bit-for-bit, and that difference does not survive
+into the reported errors.
+
+The row-major design block is handed to cuBLAS unchanged: read with leading dimension M it
+is already the column-major transpose the call wants, so the two storage conventions cancel
+and nothing is repacked.
+
+Inference is still CPU-only.
+
 ## A numerical trap worth knowing about
 
 The fit accumulates normal equations `(Phi^T W Phi + lambda K_MM) beta = Phi^T W y` rather

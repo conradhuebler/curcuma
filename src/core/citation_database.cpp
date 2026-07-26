@@ -580,6 +580,61 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        // === Delta-Machine-Learning ===
+        { "deltaml", {
+            "Delta-Machine-Learning (Ramakrishnan, Dral, Rupp & von Lilienfeld 2015)",
+            "Ramakrishnan, R.; Dral, P. O.; Rupp, M.; von Lilienfeld, O. A. J. Chem. Theory Comput. 2015, 11, 2087-2096 (DOI: 10.1021/acs.jctc.5b00099)",
+            "ramakrishnan2015delta",
+            "@article{ramakrishnan2015delta,\n"
+            "  author = {Ramakrishnan, Raghunathan and Dral, Pavlo O. and Rupp, Matthias and von Lilienfeld, O. Anatole},\n"
+            "  title = {Big Data Meets Quantum Chemistry Approximations: The {\\Delta}-Machine Learning Approach},\n"
+            "  journal = {J. Chem. Theory Comput.},\n"
+            "  year = {2015},\n"
+            "  volume = {11},\n"
+            "  pages = {2087--2096},\n"
+            "  doi = {10.1021/acs.jctc.5b00099}\n"
+            "}"
+        }},
+
+        { "acsf", {
+            "Atom-Centered Symmetry Functions (Behler & Parrinello 2007; Behler 2011)",
+            "Behler, J.; Parrinello, M. Phys. Rev. Lett. 2007, 98, 146401 (DOI: 10.1103/PhysRevLett.98.146401); Behler, J. J. Chem. Phys. 2011, 134, 074106 (DOI: 10.1063/1.3553717)",
+            "behler2011acsf",
+            "@article{behler2011acsf,\n"
+            "  author = {Behler, J{\\\"o}rg},\n"
+            "  title = {Atom-centered symmetry functions for constructing high-dimensional neural network potentials},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2011},\n"
+            "  volume = {134},\n"
+            "  pages = {074106},\n"
+            "  doi = {10.1063/1.3553717}\n"
+            "}\n\n"
+            "@article{behler2007generalized,\n"
+            "  author = {Behler, J{\\\"o}rg and Parrinello, Michele},\n"
+            "  title = {Generalized Neural-Network Representation of High-Dimensional Potential-Energy Surfaces},\n"
+            "  journal = {Phys. Rev. Lett.},\n"
+            "  year = {2007},\n"
+            "  volume = {98},\n"
+            "  pages = {146401},\n"
+            "  doi = {10.1103/PhysRevLett.98.146401}\n"
+            "}"
+        }},
+
+        { "gap_sparse", {
+            "Sparse Gaussian Approximation Potentials (Bartok & Csanyi 2015)",
+            "Bartok, A. P.; Csanyi, G. Int. J. Quantum Chem. 2015, 115, 1051-1057 (DOI: 10.1002/qua.24927)",
+            "bartok2015gap",
+            "@article{bartok2015gap,\n"
+            "  author = {Bart{\\'o}k, Albert P. and Cs{\\'a}nyi, G{\\'a}bor},\n"
+            "  title = {{Gaussian} Approximation Potentials: A Brief Tutorial Introduction},\n"
+            "  journal = {Int. J. Quantum Chem.},\n"
+            "  year = {2015},\n"
+            "  volume = {115},\n"
+            "  pages = {1051--1057},\n"
+            "  doi = {10.1002/qua.24927}\n"
+            "}"
+        }},
+
         // === Force Fields ===
         { "gfnff", {
             "GFN-FF Force Field (Spicher & Grimme 2020)",

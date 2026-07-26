@@ -68,6 +68,14 @@ struct DeltaMLTrainingOptions {
     bool use_forces = true;     ///< include gradient observations (3N per structure)
     unsigned seed = 42;         ///< seed for the farthest-point-sampling tie-breaks
     int verbosity = 1;
+    /**
+     * @brief GPU backend for the normal-equation accumulation ("cuda", "rocm", ...).
+     *
+     * Empty or "none" fits on the CPU. The fit is dominated by one symmetric rank-k update
+     * per structure (M^2 * 3N), which is what gets offloaded; everything else stays where
+     * it is. Falls back silently to the CPU when the plugin or the device is unavailable.
+     */
+    std::string gpu;
 };
 
 /*! \brief Error metrics of a model on a structure set. */
