@@ -2,7 +2,8 @@
 
 Status: 🤖 AI-generated, ⚙️ machine-tested (Jul 2026). Not ✅ TESTED / ✅ APPROVED.
 
-Four changes to what a conformer search reports and produces, plus one bug they uncovered.
+What a conformer search reports, what it writes and how its files are named — plus two bugs
+these changes uncovered (a non-re-entrant ripser, and optimisation batches that were silent).
 
 ## 1. The reference energy is the optimised INPUT structure
 
@@ -49,26 +50,62 @@ ConfSearch:     ... and 33 more, up to +41.28 kJ/mol
 
 `-ensemble_report N` sets how many conformers are listed (0 = summary line only).
 
-## 3. Per-cycle ensembles and most stable structures, on both levels
+## 3. Every file says which cycle, which purpose, which method
 
-The working files of a cycle (`*.bias.opt.accepted.xyz` and its `opt_method` counterpart) are
-overwritten by the next cycle, so what a given temperature produced was not recoverable afterwards.
-Every cycle now writes, for **each level of theory**:
+The old names described neither the stage nor the method that produced the file, and the per-cycle
+working files overwrote each other, so what a given temperature did was gone as soon as the next one
+started. `input.input.opt.xyz` also just read like a typo.
+
+```
+<base>.<purpose>.<method>[.opt][.accepted].xyz               (before the temperature loop)
+<base>.cycleNN_TxxxK.<purpose>.<method>[.opt][.accepted].xyz (inside a cycle)
+```
+
+The cycle tag comes first so a directory listing groups a cycle together:
+
+| file | what it is |
+|---|---|
+| `input.initial.gfnff.xyz` / `.opt.xyz` | input structures, before / after the pre-optimisation |
+| `input.initial.gfn2.xyz` / `.opt.xyz` | the same at the ranking level (dual-method) |
+| `input.cycle01_T500K.explore.gfnff.xyz` | MD snapshots of that cycle |
+| `input.cycle01_T500K.explore.gfnff.opt.xyz` | after Phase 2 |
+| `input.cycle01_T500K.explore.gfnff.opt.accepted.xyz` | after the Phase 3 dedup |
+| `input.cycle01_T500K.bias_pool.gfnff.xyz` | the full RMSD-MTD bias pool (was `.mtd.xyz`) |
+| `input.cycle01_T500K.refine_crude.gfn2.*` | Phase 3b stage 1 + its dedup (two-stage mode only) |
+| `input.cycle01_T500K.refine.gfn2.xyz` / `.opt.xyz` | Phase 3b accurate stage |
+| `input.cycle01_T500K.ensemble.gfnff.xyz` | the cycle's result on the exploration level |
+| `input.cycle01_T500K.ensemble.gfn2.xyz` | the cycle's result on the ranking level |
+| `input.best_per_cycle.<method>.xyz` | one frame per cycle: its most stable structure |
+| `input.cumulative.opt.xyz` / `.cumulative.opt.accepted.xyz` | **unchanged** — the final deliverable keeps its established name |
+
+Two consequences worth knowing:
+
+- Each Phase-3b stage starts from a **copy** of its input rather than chaining another suffix onto
+  the previous file. One extra write per cycle buys a name that states the method — the old chain
+  ended in `<base>.bias.opt.accepted.opt.accepted.opt.xyz`.
+- Nothing is overwritten between cycles any more, so a long run keeps every intermediate. That is
+  deliberate (it is the run's provenance, and BMT gives each run its own directory), but it does
+  mean a 6-cycle run on a large system writes ~6× more intermediate XYZ than before.
+
+## 4. Per-cycle ensembles and most stable structures, on both levels
+
+Besides the stage files of section 3, every cycle writes its RESULT — the topology-valid structures
+that survived Phase 4 — for **each level of theory**:
 
 | File | Content |
 |---|---|
-| `<base>.cycleNN_TxxxK.<method>.xyz` | the cycle's topology-valid ensemble, **energy-sorted** |
+| `<base>.cycleNN_TxxxK.ensemble.<method>.xyz` | the cycle's topology-valid ensemble, **energy-sorted** |
 | `<base>.best_per_cycle.<method>.xyz` | one frame per cycle: its most stable structure (a trajectory of the search's progress) |
 
 ```
-ConfSearch: cycle01_T500K ensemble [gfnff]: 36 structure(s), most stable -18.742131 Eh, span 41.28 kJ/mol -> <bmt>/input.cycle01_T500K.gfnff.xyz
+ConfSearch: cycle01_T500K ensemble [gfnff]: 36 structure(s), most stable -18.742131 Eh, span 41.28 kJ/mol -> <bmt>/input.cycle01_T500K.ensemble.gfnff.xyz
 ConfSearch:   most stable structure of this cycle appended to <bmt>/input.best_per_cycle.gfnff.xyz
 ```
 
 Switch off with `-cycle_output false`. Ordering is done by a `std::multimap` keyed on the energy —
-the container sorts, there is no explicit sort call (see section 5).
+the container sorts, there is no explicit sort call (see section 6).
 
-## 4. Two-stage high-level re-optimisation (`-phase3b_two_stage`, opt-in)
+## 5. Two-stage high-level re-optimisation (`-phase3b_two_stage`, opt-in)
 
 Phase 3b re-optimises the cycle's deduplicated minima at `opt_method` and is the most expensive step
 of a dual-method run. Its input was deduplicated on a **different** potential-energy surface
@@ -110,7 +147,7 @@ Whether it pays depends on how much the two surfaces disagree — it is off by d
 states which way it is set. It only exists in dual-method runs (Phase 3b is skipped when
 `opt_method == md_method`).
 
-## 5. ConfScan sorting: verified, no `std::sort` needed
+## 6. ConfScan sorting: verified, no `std::sort` needed
 
 Claim under test: *ConfScan should sort automatically; the container should do it.*
 
@@ -165,7 +202,7 @@ possible — not only crashes. ConfScan's own test set is unchanged by the fix (
 `confscan_hybrid`, `confscan_molalign`, all `cli_confscan_*` pass; `confscan_dtemplate` fails before
 and after — a pre-existing, thread-count dependent golden-value test).
 
-## 6. Live progress for the optimisation and MD batches
+## 7. Live progress for the optimisation and MD batches
 
 Two different mechanisms exist, and mixing them up is what caused the silence:
 

@@ -153,6 +153,32 @@ private:
      * @return path of the file holding the opt_method ensemble (empty when nothing was produced) */
     std::string PerformHighLevelOptimisation(const std::string& basename);
 
+    /* Claude Generated (Jul 2026): file stem of one stage, "<basename>.<purpose>.<method>".
+     * Every intermediate file a run writes says WHAT it is and WHICH method produced it --
+     * "input.initial.gfnff.opt.xyz" instead of "input.input.opt.xyz". The ".opt" / ".opt.accepted"
+     * suffixes are still appended by PerformOptimisation / PerformFilter, so the chain stays
+     * readable: <base>.explore.gfnff.opt.accepted.xyz is "the deduplicated gfnff minima of the
+     * exploration phase". The final result keeps its established name
+     * (<base>.cumulative.opt.accepted.xyz) -- that one is the deliverable, not an intermediate. */
+    std::string stageBase(const std::string& purpose, const std::string& method) const
+    {
+        return Basename() + "." + purpose + "." + method;
+    }
+
+    /* Same, but for a file that belongs to ONE temperature cycle:
+     * "<basename>.cycleNN_TxxxK.<purpose>.<method>". The cycle tag comes first so a directory
+     * listing groups every file of a cycle together. Before this, all per-cycle working files were
+     * overwritten by the next cycle -- what a given temperature actually did was gone. */
+    std::string cycleStage(const std::string& purpose, const std::string& method) const
+    {
+        return Basename() + "." + m_cycle_tag + "." + purpose + "." + method;
+    }
+
+    /* Copy every frame of an XYZ file to another name. Used where a stage has to start from the
+     * previous stage's OUTPUT: the copy is what lets the new stage own a file whose name states its
+     * purpose and method instead of inheriting a chain of suffixes. Returns the frame count. */
+    int CopyFrames(const std::string& source, const std::string& destination) const;
+
     /* Claude Generated (Jul 2026): energy summary of an XYZ ensemble on disk. Returns the energies
      * in ascending order (empty when the file is missing or holds no structures). */
     std::vector<double> EnsembleEnergies(const std::string& path) const;
@@ -288,6 +314,9 @@ private:
     double m_bias_couple_factor = 1.0, m_bias_energy_tol = 4.0;
     double m_global_min = std::numeric_limits<double>::infinity(); // running lowest energy across all cycles
     std::vector<std::vector<int>> m_permutation_cache; // Claude Generated (Jun 2026): symmetry reorder rules from ConfScan, fed into MTD
+    /* Claude Generated (Jul 2026): "cycleNN_TxxxK" of the cycle currently running. Set at the top of
+     * every temperature cycle and used by cycleStage() for every file that cycle writes. */
+    std::string m_cycle_tag = "cycle00_T0K";
     Matrix m_topo_matrix;
     /* Claude Generated (Jul 2026): SECOND topology reference, for the opt_method PES.
      * The refinement side used to check the opt_method geometries against the md_method reference.

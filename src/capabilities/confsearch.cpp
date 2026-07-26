@@ -331,18 +331,22 @@ void ConfSearch::start()
     // topology checks compare against the relaxed geometry, not the raw input.
     if (!resumed) {
         CurcumaLogger::section("ConfSearch: Initial Geometry Optimisation (" + m_md_method + ")", true);
+        // Claude Generated (Jul 2026): stage-named files -- "<base>.initial.<method>[.opt].xyz"
+        // instead of the old "<base>.input[.opt].xyz", which said neither what the file is for nor
+        // which method produced it (and "input.input.opt.xyz" read like a typo).
+        const std::string initial_md = stageBase("initial", m_md_method);
         bool first = true;
         for (auto* mol : m_in_stack) {
-            if (first) { mol->writeXYZFile(outputPath(p + ".input.xyz")); first = false; }
-            else          mol->appendXYZFile(outputPath(p + ".input.xyz"));
+            if (first) { mol->writeXYZFile(outputPath(initial_md + ".xyz")); first = false; }
+            else          mol->appendXYZFile(outputPath(initial_md + ".xyz"));
         }
         // pre-optimization at md_method ("die md-methode macht die voroptimierung")
         nlohmann::json opt_init = ChildConfig(m_md_method, m_threads);
-        PerformOptimisation(p + ".input", opt_init);
+        PerformOptimisation(initial_md, opt_init);
 
         for (auto* mol : m_in_stack) delete mol;
         m_in_stack.clear();
-        FileIterator opt_in(outputPath(p + ".input.opt.xyz"));
+        FileIterator opt_in(outputPath(initial_md + ".opt.xyz"));
         while (!opt_in.AtEnd()) {
             Molecule mol = opt_in.Next();
             mol.setCharge(m_charge);
@@ -381,17 +385,18 @@ void ConfSearch::start()
         // for reporting only; m_in_stack keeps the md_method structures (they feed the MD loop).
         if (m_opt_method != m_md_method) {
             CurcumaLogger::section("ConfSearch: Initial Geometry Optimisation (" + m_opt_method + ")", true);
+            const std::string initial_opt = stageBase("initial", m_opt_method);
             bool first_opt = true;
             for (auto* mol : m_in_stack) {
-                if (first_opt) { mol->writeXYZFile(outputPath(p + ".input_mdopt.xyz")); first_opt = false; }
-                else              mol->appendXYZFile(outputPath(p + ".input_mdopt.xyz"));
+                if (first_opt) { mol->writeXYZFile(outputPath(initial_opt + ".xyz")); first_opt = false; }
+                else              mol->appendXYZFile(outputPath(initial_opt + ".xyz"));
             }
             nlohmann::json opt_hi = ChildConfig(m_opt_method, m_threads);
-            PerformOptimisation(p + ".input_mdopt", opt_hi);
+            PerformOptimisation(initial_opt, opt_hi);
 
             // Read back opt_method-optimized structures for energy reporting
             std::vector<Molecule*> opt_init_stack;
-            FileIterator opt_hi_in(outputPath(p + ".input_mdopt.opt.xyz"));
+            FileIterator opt_hi_in(outputPath(initial_opt + ".opt.xyz"));
             while (!opt_hi_in.AtEnd()) {
                 Molecule mol = opt_hi_in.Next();
                 mol.setCharge(m_charge);
@@ -495,6 +500,12 @@ void ConfSearch::start()
     bool stop_requested = false; // set when a 'stop' file is seen at a checkpoint boundary
     for (m_currentT = loop_start_T; m_currentT >= m_endT; m_currentT -= m_deltaT) {
         temperature_cycle++;
+        // Claude Generated (Jul 2026): every file this cycle writes carries this tag, so the cycles
+        // no longer overwrite each other's intermediates and a listing groups them by temperature.
+        m_cycle_tag = fmt::format("cycle{:02d}_T{}K", temperature_cycle, static_cast<int>(m_currentT));
+        // Stem of the exploration files: MD snapshots (<stem>.xyz), their optimisation
+        // (<stem>.opt.xyz) and the dedup result (<stem>.opt.accepted.xyz).
+        const std::string explore = cycleStage("explore", m_md_method);
         // Claude Generated (Jun 2026): per-cycle wall-clock timing
         RunTimer cycle_timer;
         const int entry = pending_entry; // 0 = run MD; 1 = MD already done (resume), skip it
@@ -603,7 +614,7 @@ void ConfSearch::start()
             if (m_bias_pool && !m_in_stack.empty()) {
                 auto snapshot = m_bias_pool->snapshot();
                 const Molecule& ref_mol = *m_in_stack[0];
-                const std::string bias_path = outputPath(p + ".bias.xyz");
+                const std::string bias_path = outputPath(explore + ".xyz");
                 bool first = true;
                 for (const auto& bs : snapshot) {
                     if (bs.persistent)
@@ -630,14 +641,14 @@ void ConfSearch::start()
             // Single-threaded per optimization when ConfSearch parallelizes externally.
             nlohmann::json opt = ChildConfig(m_md_method, (m_threads > 1) ? 1 : m_threads);
             // Bias structures are the primary conformers discovered by RMSD-MTD.
-            PerformOptimisation(p + ".bias", opt);
+            PerformOptimisation(explore, opt);
             int opt_count = 0;
             {
-                FileIterator opt_file(outputPath(p + ".bias.opt.xyz"));
+                FileIterator opt_file(outputPath(explore + ".opt.xyz"));
                 while (!opt_file.AtEnd()) { opt_file.Next(); opt_count++; }
             }
             CurcumaLogger::result_fmt("ConfSearch: Optimisation complete. {} bias structures optimised.", opt_count);
-            ReportEnsemble("Phase 2 optimised bias structures", m_md_method, outputPath(p + ".bias.opt.xyz"));
+            ReportEnsemble("Phase 2 optimised bias structures", m_md_method, outputPath(explore + ".opt.xyz"));
         }
         // Claude Generated (Jun 2026): Phase 2 timing
         CurcumaLogger::result_fmt("ConfSearch: Opt phase took {:.1f} s", cycle_timer.Elapsed() / 1000.0);
@@ -650,15 +661,15 @@ void ConfSearch::start()
             // "filter between": dedup at md level before the accurate re-opt.
             // Single-threaded per ConfScan when ConfSearch parallelizes externally.
             nlohmann::json scan = FilterConfig(m_md_method, (m_threads > 1) ? 1 : m_threads);
-            PerformFilter(p + ".bias", scan);
+            PerformFilter(explore, scan);
             {
-                FileIterator rmsd_file(outputPath(p + ".bias.opt.accepted.xyz"));
+                FileIterator rmsd_file(outputPath(explore + ".opt.accepted.xyz"));
                 while (!rmsd_file.AtEnd()) { rmsd_file.Next(); rmsd_count++; }
             }
             CurcumaLogger::result_fmt("ConfSearch: RMSD filtering complete. {} structures accepted.", rmsd_count);
             // Claude Generated (Jul 2026): the accepted count alone says nothing about WHAT was
             // accepted. Report the energies of the surviving ensemble right where the count is.
-            ReportEnsemble("Phase 3 accepted ensemble", m_md_method, outputPath(p + ".bias.opt.accepted.xyz"));
+            ReportEnsemble("Phase 3 accepted ensemble", m_md_method, outputPath(explore + ".opt.accepted.xyz"));
         }
 
         // Claude Generated (Jul 2026): Phase 3c -- recombine the torsion states of this cycle's
@@ -666,14 +677,14 @@ void ConfSearch::start()
         // structures go through the accurate re-optimisation and the Phase 4 filters like any other).
         if (m_confgen_phase && !no_new_bias_structures && rmsd_count >= 2) {
             CurcumaLogger::section(fmt::format("Phase 3c: Torsion Recombination / ConfGen ({})", m_md_method));
-            const int added = PerformConfGen(p + ".bias.opt.accepted", m_md_method);
+            const int added = PerformConfGen(explore + ".opt.accepted", m_md_method);
             if (added > 0) {
                 rmsd_count += added;
                 CurcumaLogger::success_fmt("ConfSearch: Phase 3c added {} new conformer(s) that the "
                                            "metadynamics had not found ({} structures now in this cycle)",
                     added, rmsd_count);
                 ReportEnsemble("Phase 3c ensemble (metadynamics + recombination)", m_md_method,
-                    outputPath(p + ".bias.opt.accepted.xyz"));
+                    outputPath(explore + ".opt.accepted.xyz"));
             } else {
                 CurcumaLogger::result("ConfSearch: Phase 3c found no new conformer this cycle");
             }
@@ -705,7 +716,7 @@ void ConfSearch::start()
         std::string hi_level_file;
         if (!no_new_bias_structures && m_opt_method != m_md_method) {
             CurcumaLogger::section(fmt::format("Phase 3b: High-Level Re-Optimisation ({})", m_opt_method));
-            hi_level_file = PerformHighLevelOptimisation(p + ".bias.opt.accepted");
+            hi_level_file = PerformHighLevelOptimisation(explore + ".opt.accepted");
         } else if (m_opt_method == m_md_method) {
             // Claude Generated (Jun 2026): explicit skip notice at result level
             CurcumaLogger::result("ConfSearch: Phase 3b skipped (single-method mode)");
@@ -723,9 +734,8 @@ void ConfSearch::start()
         // below and only feed the FINAL ranking + an extra bias geometry -- their energies are
         // never compared to md_method energies.
         const bool dual_method = (m_opt_method != m_md_method);
-        // Claude Generated (Jul 2026): identifies every file this cycle writes for the user.
-        const std::string cycle_tag = fmt::format("cycle{:02d}_T{}K", temperature_cycle, static_cast<int>(m_currentT));
-        const std::string md_accepted = outputPath(p + ".bias.opt.accepted.xyz");
+        const std::string& cycle_tag = m_cycle_tag;
+        const std::string md_accepted = outputPath(explore + ".opt.accepted.xyz");
         double lowest_energy = std::numeric_limits<double>::infinity(); // md_method (exploration)
         int accepted = 0, rejected_topo = 0, rejected_energy = 0;
         std::vector<Molecule*> candidates;
@@ -1198,16 +1208,20 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
     // created here. It hardcoded the basename instead of Basename(), was always written empty
     // and was never read back -- the bias pool is the only conformer source (see Phase 2).
 
-    // Export bias pool structures to confsearch.bias.xyz (primary conformer source).
-    // Only raw MD snapshots (persistent=false) are exported for optimization — persistent
-    // structures are already-optimized fed-back minima and must not be re-optimized every
-    // cycle (would cause false "New best!" triggers via numerical noise).
-    // confsearch.mtd.xyz gets the full unsampled pool (including persistent) for inspection.
+    // Export the bias pool. Only raw MD snapshots (persistent=false) go into the file that Phase 2
+    // optimises -- persistent structures are already-optimised fed-back minima and must not be
+    // re-optimised every cycle (would cause false "New best!" triggers via numerical noise).
+    // The bias-pool file gets the full unsampled pool (including persistent) for inspection.
+    //
+    // Claude Generated (Jul 2026): stage-named files. "<base>.explore.<method>.xyz" (the snapshots
+    // Phase 2 consumes) and "<base>.bias_pool.<method>.xyz" (the full pool, was ".mtd.xyz").
+    const std::string snapshot_file = cycleStage("explore", m_md_method) + ".xyz";
+    const std::string pool_file = cycleStage("bias_pool", m_md_method) + ".xyz";
     if (m_bias_pool && m_bias_pool->biasStructureCount() > 0 && !m_in_stack.empty()) {
         auto snapshot = m_bias_pool->snapshot();
         const Molecule& ref_mol = *m_in_stack[0];
 
-        // .mtd.xyz: full pool for inspection
+        // full pool for inspection
         bool first = true;
         for (const auto& bs : snapshot) {
             Molecule mol(ref_mol);
@@ -1218,8 +1232,8 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
             // labelled -8.985207 Eh is really worth -8.840638 Eh).
             mol.setEnergy(bs.energy);
             mol.setName("bias_" + std::to_string(bs.index) + " t=" + std::to_string(static_cast<int>(bs.time)));
-            if (first) { mol.writeXYZFile(outputPath(Basename() + ".mtd.xyz")); first = false; }
-            else          mol.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
+            if (first) { mol.writeXYZFile(outputPath(pool_file)); first = false; }
+            else          mol.appendXYZFile(outputPath(pool_file));
         }
 
         // .bias.xyz: only new MD snapshots, not already-optimized persistent minima
@@ -1237,12 +1251,12 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
             mol.setGeometry(new_snapshots[i].geometry);
             mol.setEnergy(new_snapshots[i].energy); // see the .mtd.xyz export above
             mol.setName("bias_" + std::to_string(new_snapshots[i].index));
-            if (first) { mol.writeXYZFile(outputPath(Basename() + ".bias.xyz")); first = false; }
-            else          mol.appendXYZFile(outputPath(Basename() + ".bias.xyz"));
+            if (first) { mol.writeXYZFile(outputPath(snapshot_file)); first = false; }
+            else          mol.appendXYZFile(outputPath(snapshot_file));
             exported++;
         }
-        CurcumaLogger::result_fmt("ConfSearch: {} new MD snapshots (of {} total pool, {} persistent skipped, stride={}) written to {}.bias.xyz",
-            exported, static_cast<int>(snapshot.size()), static_cast<int>(snapshot.size()) - bias_count, stride, Basename());
+        CurcumaLogger::result_fmt("ConfSearch: {} new MD snapshots (of {} total pool, {} persistent skipped, stride={}) written to {}",
+            exported, static_cast<int>(snapshot.size()), static_cast<int>(snapshot.size()) - bias_count, stride, snapshot_file);
     }
 
     delete pool; // MDThread sets autoDelete=true, so the pool frees the threads here (no leak)
@@ -1524,9 +1538,14 @@ std::string ConfSearch::PerformFilter(const std::string& f, const nlohmann::json
 // and only then optimises the survivors accurately. The crude stage is not a shortcut in accuracy:
 // its structures are thrown away, only the SELECTION it produces is used.
 //
-// Names follow the "<basename>.opt.xyz" convention of PerformOptimisation / PerformFilter, so the
-// stages chain without renaming:
-//   <f>.xyz -> (crude) <f>.opt.xyz -> (filter) <f>.opt.accepted.xyz -> (accurate) <f>.opt.accepted.opt.xyz
+// Claude Generated (Jul 2026): stage-named files. Each stage COPIES its input to a file whose name
+// states purpose and method instead of chaining another suffix onto the previous stage's name:
+//   single stage: <base>.refine.<opt_method>.xyz -> .opt.xyz
+//   two stage:    <base>.refine_crude.<opt_method>.xyz -> .opt.xyz -> .opt.accepted.xyz
+//                 <base>.refine.<opt_method>.xyz       -> .opt.xyz
+// The copy costs one file write per cycle and is what keeps a dual-method run readable -- the old
+// chain ended in "<base>.bias.opt.accepted.opt.accepted.opt.xyz", which named neither the method
+// nor the stage.
 std::string ConfSearch::PerformHighLevelOptimisation(const std::string& f)
 {
     const int child_threads = (m_threads > 1) ? 1 : m_threads;
@@ -1543,9 +1562,12 @@ std::string ConfSearch::PerformHighLevelOptimisation(const std::string& f)
         return n;
     };
 
+    const std::string refine = cycleStage("refine", m_opt_method);
+
     if (!m_phase3b_two_stage) {
-        PerformOptimisation(f, opt_accurate); // reads "<f>.xyz", writes "<f>.opt.xyz"
-        const std::string out = outputPath(f + ".opt.xyz");
+        CopyFrames(outputPath(f + ".xyz"), outputPath(refine + ".xyz"));
+        PerformOptimisation(refine, opt_accurate); // reads "<refine>.xyz", writes "<refine>.opt.xyz"
+        const std::string out = outputPath(refine + ".opt.xyz");
         CurcumaLogger::result_fmt("ConfSearch: High-level re-optimisation complete. {} structures re-optimised at {} (preset '{}').",
             count_frames(out), m_opt_method, m_phase3b_preset);
         ReportEnsemble("Phase 3b re-optimised ensemble", m_opt_method, out);
@@ -1553,6 +1575,7 @@ std::string ConfSearch::PerformHighLevelOptimisation(const std::string& f)
     }
 
     // --- Stage 1: crude optimisation of every structure ---
+    const std::string crude = cycleStage("refine_crude", m_opt_method);
     nlohmann::json opt_crude = ChildConfig(m_opt_method, child_threads);
     opt_crude["convergence_preset"] = m_phase3b_preopt_preset;
     if (m_phase3b_preopt_max_iter > 0)
@@ -1560,8 +1583,9 @@ std::string ConfSearch::PerformHighLevelOptimisation(const std::string& f)
     CurcumaLogger::result_fmt("ConfSearch: Phase 3b stage 1/2 -- crude pre-optimisation at {} (preset '{}'{})",
         m_opt_method, m_phase3b_preopt_preset,
         m_phase3b_preopt_max_iter > 0 ? fmt::format(", max {} steps", m_phase3b_preopt_max_iter) : "");
-    PerformOptimisation(f, opt_crude);
-    const std::string crude_file = outputPath(f + ".opt.xyz");
+    CopyFrames(outputPath(f + ".xyz"), outputPath(crude + ".xyz"));
+    PerformOptimisation(crude, opt_crude);
+    const std::string crude_file = outputPath(crude + ".opt.xyz");
     const int n_crude = count_frames(crude_file);
     if (n_crude == 0) {
         CurcumaLogger::warn("ConfSearch: Phase 3b stage 1 produced no structures -- skipping the accurate stage");
@@ -1570,7 +1594,7 @@ std::string ConfSearch::PerformHighLevelOptimisation(const std::string& f)
     ReportEnsemble("Phase 3b stage 1 (crude)", m_opt_method, crude_file);
 
     // --- Stage 2: dedup at the crude level, so the accurate stage only pays for distinct minima ---
-    std::string accurate_input = f + ".opt"; // no filter: chain the crude output directly
+    std::string accurate_source = crude_file; // no filter: the crude output goes on directly
     if (m_phase3b_filter) {
         nlohmann::json scan = FilterConfig(m_opt_method, child_threads);
         // The intermediate filter deduplicates, it does NOT rank: its input carries CRUDE energies,
@@ -1579,11 +1603,11 @@ std::string ConfSearch::PerformHighLevelOptimisation(const std::string& f)
         // for good. -1 disables ConfScan's energy cutoff; the real energy window is applied in
         // Phase 4, on fully optimised energies.
         scan["max_energy"] = -1.0;
-        PerformFilter(f, scan); // reads "<f>.opt.xyz", writes "<f>.opt.accepted.xyz"
-        const std::string filtered = outputPath(f + ".opt.accepted.xyz");
+        PerformFilter(crude, scan); // reads "<crude>.opt.xyz", writes "<crude>.opt.accepted.xyz"
+        const std::string filtered = outputPath(crude + ".opt.accepted.xyz");
         const int n_filtered = count_frames(filtered);
         if (n_filtered > 0) {
-            accurate_input = f + ".opt.accepted";
+            accurate_source = filtered;
             CurcumaLogger::result_fmt("ConfSearch: Phase 3b filter at {}: {} of {} crude structures are distinct minima ({} accurate optimisation(s) saved)",
                 m_opt_method, n_filtered, n_crude, n_crude - n_filtered);
         } else {
@@ -1594,12 +1618,35 @@ std::string ConfSearch::PerformHighLevelOptimisation(const std::string& f)
     // --- Stage 3: accurate optimisation of the survivors ---
     CurcumaLogger::result_fmt("ConfSearch: Phase 3b stage 2/2 -- accurate optimisation at {} (preset '{}')",
         m_opt_method, m_phase3b_preset);
-    PerformOptimisation(accurate_input, opt_accurate);
-    const std::string out = outputPath(accurate_input + ".opt.xyz");
+    CopyFrames(accurate_source, outputPath(refine + ".xyz"));
+    PerformOptimisation(refine, opt_accurate);
+    const std::string out = outputPath(refine + ".opt.xyz");
     CurcumaLogger::result_fmt("ConfSearch: High-level re-optimisation complete. {} structures re-optimised at {}.",
         count_frames(out), m_opt_method);
     ReportEnsemble("Phase 3b re-optimised ensemble", m_opt_method, out);
     return out;
+}
+
+// Claude Generated (Jul 2026): copy every frame of an XYZ file (see the header for why a stage
+// starts from a copy rather than chaining another suffix onto the previous stage's output).
+int ConfSearch::CopyFrames(const std::string& source, const std::string& destination) const
+{
+    std::ifstream check(source);
+    if (!check.good())
+        return 0;
+    int frames = 0;
+    FileIterator it(source);
+    while (!it.AtEnd()) {
+        Molecule mol = it.Next();
+        if (mol.AtomCount() == 0)
+            continue;
+        if (frames == 0)
+            mol.writeXYZFile(destination);
+        else
+            mol.appendXYZFile(destination);
+        frames++;
+    }
+    return frames;
 }
 
 // Claude Generated (Jul 2026): energies of an XYZ ensemble on disk, ascending. std::multiset does
@@ -1657,7 +1704,9 @@ void ConfSearch::WriteCycleEnsemble(const std::string& cycle_tag, const std::str
     if (ordered.empty())
         return;
 
-    const std::string ensemble_file = outputPath(Basename() + "." + cycle_tag + "." + method + ".xyz");
+    // "<base>.cycleNN_TxxxK.ensemble.<method>.xyz" -- same purpose+method convention as every other
+    // file of the cycle (Claude Generated, Jul 2026).
+    const std::string ensemble_file = outputPath(Basename() + "." + cycle_tag + ".ensemble." + method + ".xyz");
     bool first = true;
     for (const auto& entry : ordered) {
         if (first) { entry.second->writeXYZFile(ensemble_file); first = false; }
@@ -1855,9 +1904,10 @@ void ConfSearch::CalibrateBias(const std::string& p, nlohmann::json& md)
         while (!f.AtEnd()) { Molecule m = f.Next(); if (m.AtomCount() > 0) v.push_back(m); }
         return v;
     };
-    std::vector<Molecule> pre = load(outputPath(p + ".bias.xyz"));           // pre-optimisation MD snapshots
-    std::vector<Molecule> post = load(outputPath(p + ".bias.opt.xyz"));      // optimised (index-aligned with pre)
-    std::vector<Molecule> minima = load(outputPath(p + ".bias.opt.accepted.xyz")); // distinct minima (deduped)
+    const std::string explore = cycleStage("explore", m_md_method);
+    std::vector<Molecule> pre = load(outputPath(explore + ".xyz"));            // pre-optimisation MD snapshots
+    std::vector<Molecule> post = load(outputPath(explore + ".opt.xyz"));       // optimised (index-aligned with pre)
+    std::vector<Molecule> minima = load(outputPath(explore + ".opt.accepted.xyz")); // distinct minima (deduped)
     if (minima.empty() || post.empty()) {
         CurcumaLogger::warn("ConfSearch: bias calibration skipped (no clusters available this cycle)");
         return;
@@ -2134,7 +2184,7 @@ void ConfSearch::writeCheckpoint(const std::string& phase, double next_T, int te
 
     // Intermediate accepted sets, only needed to resume mid-cycle without redoing the opts.
     if (phase == "post_filter" || phase == "post_refine")
-        state["accepted_md"] = fileFramesToJson(outputPath(Basename() + ".bias.opt.accepted.xyz"));
+        state["accepted_md"] = fileFramesToJson(outputPath(cycleStage("explore", m_md_method) + ".opt.accepted.xyz"));
     if (phase == "post_refine")
         state["accepted_opt"] = fileFramesToJson(outputPath(Basename() + ".bias.opt.accepted.opt.xyz"));
 
@@ -2191,11 +2241,21 @@ bool ConfSearch::loadCheckpoint()
                                                                          : 0; // post_cycle -> next cycle from MD
     st.next_T = s.value("next_T", m_startT);
     st.temperature_cycle = s.value("temperature_cycle", 0);
-    st.global_min = s.value("global_min", std::numeric_limits<double>::infinity());
-    st.best_energy = s.value("best_energy", std::numeric_limits<double>::infinity());
-    st.initial_energy = s.value("initial_energy", std::numeric_limits<double>::infinity());
+    // Claude Generated (Jul 2026): energies that are still infinity when the checkpoint is written
+    // (e.g. initial_energy_opt in a single-method run) are serialised by nlohmann as JSON *null*,
+    // and `value<double>()` THROWS on null instead of returning the fallback. That threw out of
+    // loadCheckpoint, uncaught -> abort: every `-restart` resume of a single-method run died with a
+    // stack trace in get_arithmetic_value. Read them null-tolerantly.
+    auto read_energy = [&s](const char* key) {
+        if (!s.contains(key) || s[key].is_null() || !s[key].is_number())
+            return std::numeric_limits<double>::infinity();
+        return s[key].get<double>();
+    };
+    st.global_min = read_energy("global_min");
+    st.best_energy = read_energy("best_energy");
+    st.initial_energy = read_energy("initial_energy");
     // Missing in checkpoints written before Jul 2026 -> stays infinity, i.e. the old behaviour.
-    st.initial_energy_opt = s.value("initial_energy_opt", std::numeric_limits<double>::infinity());
+    st.initial_energy_opt = read_energy("initial_energy_opt");
 
     if (s.contains("bias") && s["bias"].is_array()) {
         for (const auto& b : s["bias"]) {

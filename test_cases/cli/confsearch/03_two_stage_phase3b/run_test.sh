@@ -57,8 +57,8 @@ validate_results() {
 
     # per-cycle ensembles on BOTH levels of theory
     local md_ens opt_ens md_best opt_best
-    md_ens=$(find_output_file "input.cycle01_T500K.gfnff.xyz")
-    opt_ens=$(find_output_file "input.cycle01_T500K.uff.xyz")
+    md_ens=$(find_output_file "input.cycle01_T500K.ensemble.gfnff.xyz")
+    opt_ens=$(find_output_file "input.cycle01_T500K.ensemble.uff.xyz")
     md_best=$(find_output_file "input.best_per_cycle.gfnff.xyz")
     opt_best=$(find_output_file "input.best_per_cycle.uff.xyz")
     TESTS_RUN=$((TESTS_RUN + 1))
