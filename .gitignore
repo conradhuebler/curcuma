@@ -93,6 +93,10 @@ test_cases/**/curcuma_*.json
 test_cases/**/*.log
 test_cases/**/*.dat
 !test_cases/**/baseline.dat
+!test_cases/MOR41-testset/reactions.dat
+
+# MOR41 validation: track the driver data, ignore generated run artifacts
+test_cases/MOR41-testset/_run/
 
 # GFN-FF / MD topology dumps (generated during runs) - Claude Generated May 2026
 *.topo.json

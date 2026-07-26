@@ -46,38 +46,13 @@ extern __constant__ double d_lattice_inv[9];
 extern __constant__ int    d_has_pbc;
 
 // ============================================================================
-// D3 Covalent radii for angle/dihedral distance damping (Bohr, WITHOUT 4/3 factor)
-// Copied from gfnff_par.h since nvcc has trouble linking static const std::vector
-// Reference: Pyykkö & Atsumi, Chem. Eur. J. 15, 2009, 188-197
-// Values × aatoau where aatoau = 1/0.52917726 (Bohr conversion)
-// ============================================================================
-static const double s_rcov_d3_bohr[87] = {
-    0.32/0.52917726, 0.46/0.52917726,                                         // H, He
-    1.20/0.52917726, 0.94/0.52917726, 0.77/0.52917726, 0.75/0.52917726,       // Li-C
-    0.71/0.52917726, 0.63/0.52917726, 0.64/0.52917726, 0.67/0.52917726,       // N-Ne
-    1.40/0.52917726, 1.25/0.52917726, 1.13/0.52917726, 1.04/0.52917726,       // Na-Si
-    1.10/0.52917726, 1.02/0.52917726, 0.99/0.52917726, 0.96/0.52917726,       // P-Ar
-    1.76/0.52917726, 1.54/0.52917726,                                         // K, Ca
-    1.33/0.52917726, 1.22/0.52917726, 1.21/0.52917726, 1.10/0.52917726,       // Sc-Cr
-    1.07/0.52917726, 1.04/0.52917726, 1.00/0.52917726, 0.99/0.52917726,       // Mn-Ni
-    1.01/0.52917726, 1.09/0.52917726,                                         // Cu, Zn
-    1.12/0.52917726, 1.09/0.52917726, 1.15/0.52917726, 1.10/0.52917726,       // Ga-Se
-    1.14/0.52917726, 1.17/0.52917726,                                         // Br, Kr
-    1.64/0.52917726, 1.46/0.52917726, 1.31/0.52917726, 1.26/0.52917726,       // Rb-Sr
-    1.23/0.52917726, 1.22/0.52917726, 1.22/0.52917726, 1.20/0.52917726,       // Y-Mo
-    1.19/0.52917726, 1.19/0.52917726, 1.18/0.52917726, 1.17/0.52917726,       // Tc-Pd
-    1.18/0.52917726, 1.20/0.52917726, 1.21/0.52917726, 1.23/0.52917726,       // Ag-Cd
-    1.28/0.52917726, 1.28/0.52917726, 1.28/0.52917726, 1.27/0.52917726,       // In-Te
-    1.27/0.52917726, 1.34/0.52917726,                                         // I, Xe
-    1.94/0.52917726, 1.71/0.52917726, 1.58/0.52917726, 1.51/0.52917726,       // Cs-Nd
-    1.44/0.52917726, 1.44/0.52917726, 1.44/0.52917726, 1.43/0.52917726,       // Pm-Eu
-    1.43/0.52917726, 1.43/0.52917726, 1.43/0.52917726, 1.40/0.52917726,       // Gd-Dy
-    1.39/0.52917726, 1.39/0.52917726, 1.40/0.52917726, 1.41/0.52917726,       // Ho-Hg
-    1.39/0.52917726, 1.39/0.52917726, 1.38/0.52917726, 1.38/0.52917726,       // Tl-Po
-    1.38/0.52917726, 1.42/0.52917726,                                         // At, Rn
-    2.01/0.52917726, 1.81/0.52917726,                                         // Fr, Ra
-    1.67/0.52917726, 1.58/0.52917726                                          // Ac, Th
-};
+// GFN-FF covalent radii for the CN and the angle/dihedral distance damping.
+// Built at init from the single source of truth GFNFFParameters::covalent_rad_d3
+// (Å) so it can never drift from the CPU. See buildRcovD3Bohr() at the upload site.
+// (Jul 2026) The previous hand-copied s_rcov_d3_bohr[] had drifted to the *Grimme
+// D3* radii for Z>=37 (metals: Pt 1.38 vs GFN-FF 1.12 Å), so the GPU CN — and thus
+// the metal bond-r0 and angle terms — diverged from the CPU by up to ~8 kcal/mol on
+// MOR41 transition-metal complexes while main-group (identical radii) matched.
 
 // ============================================================================
 // GPU thread launch helpers (Phase 6: Dynamic block size optimization)
@@ -875,8 +850,13 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     checkCuda(cudaEventCreate(&m_impl->timing_p2_end),   "cudaEventCreate timing_p2_end");
     cudaStream_t stream = m_impl->stream;
 
-    // Upload covalent radii to constant memory (used by angle/dihedral distance damping)
-    upload_rcov_d3(s_rcov_d3_bohr, 87);
+    // Upload covalent radii to constant memory (used by the GPU CN and the
+    // angle/dihedral distance damping). Taken directly from GFNFFParameters::covalent_rad_d3,
+    // which is ALREADY in Bohr (raw_Å * gfnff_aatoau) — the SAME table the CPU CN
+    // (CNCalculator::COVALENT_RADII * aatoau, identical values for Z 1..86) and the CPU
+    // damping/ATM use — so the GPU and CPU CN now agree for metals too. The kernel applies
+    // the 4/3 factor itself, matching the CPU's k_scaled.
+    upload_rcov_d3(GFNFFParameters::covalent_rad_d3.data(), 87);
 
     // Upload covalent radii for HB/XB vdW radii lookup (Å units)
     upload_covalent_radii(GFNFFParameters::covalent_radii.data(),

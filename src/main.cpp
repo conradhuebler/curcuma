@@ -1679,8 +1679,20 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         if (v.is_string())  { auto s = v.get<std::string>(); return s == "true" || s == "1" || s == "yes"; }
         return false;
     };
+    // Claude Generated (Jul 2026): -dump_gradient <path> writes the full analytic
+    // gradient vector (Eh/Bohr, one "gx gy gz" row per atom) to a file, so external
+    // scripts can compare gradients component-wise across backends (CPU vs GPU) or
+    // against a reference (xtb/gxtb TM gradient file). Setting it implies -gradient.
+    std::string dump_gradient_path;
+    auto read_dump_path = [&](const json& j) {
+        if (j.is_object() && j.contains("dump_gradient") && j["dump_gradient"].is_string())
+            dump_gradient_path = j["dump_gradient"].get<std::string>();
+    };
+    read_dump_path(controller);                                    // top-level (dotted -opt.dump_gradient)
+    if (controller.contains("opt")) read_dump_path(controller["opt"]); // sp routes flat flags into "opt"
     const bool want_gradient = read_bool(controller, "gradient")
-        || (controller.contains("opt") && read_bool(controller["opt"], "gradient"));
+        || (controller.contains("opt") && read_bool(controller["opt"], "gradient"))
+        || !dump_gradient_path.empty();
 
     Molecule molecule(argv[2]);
     // Claude Generated (Jul 2026): Apply charge/spin from CLI controller to the molecule
@@ -1711,6 +1723,21 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         Geometry gradient = energy_calc.Gradient();
         double grad_norm = Eigen::Map<Eigen::VectorXd>(gradient.data(), gradient.size()).norm();
         CurcumaLogger::param("Gradient norm", fmt::format("{:.6e} Eh/Bohr", grad_norm));
+
+        // Claude Generated (Jul 2026): full-vector dump for backend comparison.
+        if (!dump_gradient_path.empty()) {
+            std::ofstream gf(dump_gradient_path);
+            if (gf) {
+                gf << "# GFN-FF/xTB analytic gradient dE/dx [Eh/Bohr], one atom per row\n";
+                gf << "# energy " << fmt::format("{:.12f}", energy) << " Eh, gnorm "
+                   << fmt::format("{:.12e}", grad_norm) << " Eh/Bohr\n";
+                for (int i = 0; i < gradient.rows(); ++i)
+                    gf << fmt::format("{:.14e} {:.14e} {:.14e}\n",
+                                      gradient(i, 0), gradient(i, 1), gradient(i, 2));
+            } else {
+                CurcumaLogger::error("Could not open -dump_gradient file: " + dump_gradient_path);
+            }
+        }
     }
 
     return 0;

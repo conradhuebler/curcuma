@@ -71,6 +71,17 @@ the evaluator:
 - `getDC6DCN()`, `getGaussianWeights()`, `getC6FlatCache()`, `getRefN()`,
   `getRefCN()` (used by the GFN-FF GPU pipeline)
 
+**C6 precompute is lazy and present-elements-only (Jul 2026).**
+`precomputeC6ReferenceMatrix()` used to sweep all 118 elements (~36 644
+Casimir-Polder integrations) in the **constructor**, before the molecule was
+known — a fixed ~9.7 ms on every run, including CPU-only single points. It is now
+built from `GenerateParameters()` for the elements actually in `m_atoms`, with
+`c6CacheCoversAtoms()` triggering a rebuild when a new element appears (so
+reusing one generator across molecules stays correct). complex/231: **9.68 → 0.79
+ms** (209 values). The cost was serial and fixed, so the relative win grows with
+thread count (Amdahl) — it mattered most for `gfnff`, whose whole `-sp` is ~44 ms.
+Energies bit-identical.
+
 ### `D4Evaluator` (new)
 
 The math kernel. Holds a non-owning `D4ParameterGenerator*` and a

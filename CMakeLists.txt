@@ -516,6 +516,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/qm_driver.cpp
         src/core/energy_calculators/qm_methods/ulyssesinterface.cpp
         src/core/energy_calculators/method_factory.cpp
+        src/core/energy_calculators/gpu_plugin.cpp
         src/core/energy_calculators/qm_methods/eht_method.cpp
         src/core/energy_calculators/qm_methods/native_xtb_method.cpp
         src/core/energy_calculators/qm_methods/nddo.cpp
@@ -1010,25 +1011,41 @@ if(USE_CUDA)
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY LANGUAGE CUDA)
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
-    # Add CUDA sources to curcuma_core
-    target_sources(curcuma_core PRIVATE ${CUDA_SOURCES})
-    target_include_directories(curcuma_core PRIVATE ${PROJECT_SOURCE_DIR})
-    target_link_libraries(curcuma_core CUDA::cudart CUDA::cusolver CUDA::cublas)
+    # Claude Generated (Jul 2026): CUDA is now a RUNTIME-LOADED PLUGIN, not baked into
+    # curcuma_core. cuBLAS/cuSOLVER run ~40 ms of DT_INIT (kernel dispatch tables) at load
+    # time; linking them into the main binary taxed EVERY CPU-only run's startup (~50 ms
+    # vs gxtb's ~1 ms). Now curcuma_core stays CUDA-symbol-free (it drives the GPU only
+    # through the CUDA-free GpuScfBackend seam) and dlopen's libcurcuma_cuda.so on demand
+    # via gpu_plugin.cpp. USE_CUDA on the core only enables the loader calls in
+    # method_factory; the CUDA runtime loads lazily when -gpu cuda is actually used.
     target_compile_definitions(curcuma_core PUBLIC USE_CUDA)
-    # curcuma_core is created before this block, so its CUDA_ARCHITECTURES target
-    # property is still empty (CMP0104). Set it explicitly from the global list.
-    # CUDA_RESOLVE_DEVICE_SYMBOLS: resolve device code within the static library so
-    # the final curcuma binary does not need a device-link step and links as plain PIC.
-    set_target_properties(curcuma_core PROPERTIES
+
+    # The loadable GPU plugin: a shared library holding all CUDA device/host code plus the
+    # concrete GPU ComputationalMethods. It links the CUDA runtime; its undefined core
+    # symbols (XTB, ComputationalMethod, CurcumaLogger, ...) resolve against the curcuma
+    # executable at dlopen time (the executable is built -rdynamic, CMAKE_CXX_FLAGS above).
+    add_library(curcuma_cuda SHARED
+        ${CUDA_SOURCES}
+        src/core/energy_calculators/qm_methods/xtb_gpu_method.cpp
+        src/core/energy_calculators/qm_methods/cuda/gpu_plugin_entry_cuda.cpp)
+    target_include_directories(curcuma_cuda PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(curcuma_cuda PRIVATE CUDA::cudart CUDA::cusolver CUDA::cublas)
+    # Match curcuma_core's compile definitions EXACTLY so every shared class (XTB, ...) has
+    # an identical ABI on both sides of the dlopen boundary. Generator expression captures
+    # the final set (incl. USE_GFNFF/USE_MKL/USE_D4/... set elsewhere in this file).
+    target_compile_definitions(curcuma_cuda PRIVATE
+        $<TARGET_PROPERTY:curcuma_core,COMPILE_DEFINITIONS>)
+    set_target_properties(curcuma_cuda PROPERTIES
         CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
-        CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        POSITION_INDEPENDENT_CODE ON
+        # co-locate the .so with the curcuma executable so gpu_plugin (which looks next to
+        # /proc/self/exe) finds it without LD_LIBRARY_PATH.
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    # Build the plugin whenever the executable is built.
+    add_dependencies(curcuma curcuma_cuda)
 
-    # Claude Generated (2026-06): native xTB GPU host wrapper (gfn1/gfn2 -gpu cuda).
-    target_sources(curcuma_core PRIVATE
-        src/core/energy_calculators/qm_methods/xtb_gpu_method.cpp)
-    message(STATUS "CUDA native xTB enabled: gfn1/gfn2 -gpu cuda available")
-
-    message(STATUS "CUDA support enabled: gfnff -gpu cuda available")
+    message(STATUS "CUDA enabled: gfn1/gfn2/gfnff -gpu cuda via loadable libcurcuma_cuda.so")
     message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 endif()
 

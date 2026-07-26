@@ -913,6 +913,16 @@ public:
         const Eigen::MatrixXd& dp_at,
         const Eigen::MatrixXd& qp_at);
 
+    // Debug (Jul 2026): audit the GFN2 multipole (AES) analytic gradient against a
+    // frozen-density finite difference. Must be called on a converged GFN2 state
+    // (after Calculation(gradient=true)). Isolates the analytic multipole gradient
+    // as g(full)-g(mp_off) [Eh/Bohr], then FDs the multipole energy at R±h with the
+    // density matrix P frozen (moments RECOMPUTED from P via updatePopulations, so
+    // the FD carries both the §5 interaction and the AP5b integral-Pulay response).
+    // Prints a per-term analytic-vs-FD table (multipole/AES, ES2 Coulomb, D4).
+    // GFN2 only; no effect on results.
+    void auditGfn2GradientTerms();
+
     // --- large_system_mode=dc divide-and-conquer DC-SCF (Claude Generated, June 2026) -
     // Energy-only large-system SCF that exploits locality: each outer iteration
     // builds the GLOBAL potential + Fock from the current density (so severed
@@ -1138,6 +1148,36 @@ private:
     std::vector<double> m_mp_qkernel;
     bool m_mp_initialized = false;
 
+    // B0 (Jul 2026): setupMultipole() sub-phase timings (ms), for the verbosity-3
+    // setup report. The single "multipole setup" bucket could not be attributed.
+    double m_mp_t_ao_ints = 0.0;   ///< pass 1: O(nao^2) AO dipole/quadrupole integrals
+    double m_mp_t_d_block = 0.0;   ///< pass 1b: d-touching shell pairs (serial)
+    double m_mp_t_shift   = 0.0;   ///< pass 2: origin shift + traceless transform
+    double m_mp_t_cn_mrad = 0.0;   ///< steps 3-4: CN + damping radii
+    double m_mp_t_amat    = 0.0;   ///< step 5: O(nat^2) interaction matrices
+    // Debug (Jul 2026): when true, calculateGradient() skips the GFN2 multipole
+    // (AES) gradient (§5 direct interaction + mrad/CN chain + AP5b integral Pulay).
+    // Used by auditMultipoleGradient() to isolate the analytic multipole gradient
+    // as g(full) - g(mp_off) and FD-check it against the frozen-density multipole
+    // energy. Zero effect on the default path.
+    bool m_mp_grad_off = false;
+    bool m_coulomb_grad_off = false;   // debug: skip the ES2 Coulomb gradient (section 3)
+    bool m_d4_grad_off = false;        // debug: skip the D4 dispersion gradient (section 3b)
+    bool m_repulsion_grad_off = false; // debug: skip the repulsion gradient (section 1)
+    bool m_sval_h0_only = false;       // debug: sval = 2·P·h_av (drop −2W and the charge-Pulay)
+                                       //   -> with all potential terms gated off, the gradient
+                                       //      becomes exactly Tr(P·dH0/dR) (the band term).
+    bool m_cnchain_off = false;        // debug: skip section 4 (the CN chain-rule that
+                                       //   distributes dEdcn into forces). With m_sval_h0_only
+                                       //   this isolates the band term's overlap+shpoly part
+                                       //   (2·P·h_av·dS + G_shpoly) from its H0/CN chain part.
+    bool m_d4_variational_qresp = false;  // F5: handle the GFN2 self-consistent-D4 q-response
+                                       //   variationally (dE_D4/dq in the gradient v_at → charge-Pulay
+                                       //   + W, exactly like tblite) instead of the separate eeq/cpscf
+                                       //   response. Default ON for d4_charge_source="mulliken" (set in
+                                       //   Calculation before calcDispersionEnergy). CURCUMA_D4_NONVARIATIONAL
+                                       //   forces the legacy separate-response path for A/B validation.
+
     // Energy components
     double m_E_electronic    = 0.0;
     double m_E_repulsion     = 0.0;
@@ -1190,7 +1230,13 @@ private:
     double      m_level_shift   = 0.2;   // virtual-orbital shift magnitude (Eh), LevelShift mode
     std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare)
     std::string m_eigensolver   = "mkl"; // eigensolve backend: "mkl" (dsyevd) | "native"/"dnc"
-    bool        m_scf_mixed_precision = false;   // opt-in FP32 early-iteration eigensolve (MKL path)
+    // FP32 early-iteration eigensolve (MKL path), ON by default since Jul 2026.
+    // The eigensolve is ~58% of native-GFN runtime after the shell-pair-blocked
+    // integrals, so this is the largest single CPU lever: complex/231 single core
+    // gfn2 1077 -> 916 ms, gfn1 1027 -> 787 ms. Convergence is never accepted on an
+    // FP32 step, so the fixed point stays FP64. NOTE the Vulkan wrapper explicitly
+    // turns this back OFF — it is measured net-negative there (see xtb_vulkan_method.cpp).
+    bool        m_scf_mixed_precision = true;
     double      m_scf_fp32_threshold  = 1.0e-3;  // switch FP32→FP64 once max|dq| < this
     bool        m_gpu_partial_diag    = false;   // opt-in GPU partial diagonalisation (AP1; net-neutral, see PARAM)
     // Optional GPU eigensolver; default unset → CPU path unchanged. Claude Generated.
@@ -1242,7 +1288,7 @@ private:
     // D4 charge-response source: "eeq" (dftd4-conform, default) or "mulliken"
     // (CPSCF response on the GFN2 SCF). Empty disables the q-response term
     // (static-prefactor mode). Set from config in the constructor.
-    std::string m_d4_charge_source = "eeq";
+    std::string m_d4_charge_source = "mulliken";
 
     // ── Implicit solvation (Claude Generated, June 2026) ──
     // Self-consistent ALPB (later GBSA/CPCM) coupled into the SCF. The model is

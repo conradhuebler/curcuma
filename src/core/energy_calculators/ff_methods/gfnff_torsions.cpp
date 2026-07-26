@@ -560,13 +560,23 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
         params.periodicity = 3;     // nrot = 3
         params.phase_shift = M_PI;  // phi0 = 180° (keeps acyclic default)
     }
-    // sp²-sp²: Twofold for pi bonds (gfnff_ini.f90:1842)
-    else if (hyb_j == 2 && hyb_k == 2) {
+    // sp²-sp²: Twofold ONLY for a real pi central bond (gfnff_ini.f90:1732 `btyp(m)==2`).
+    // CRITICAL (Jul 24, 2026): the Fortran nrot=2 is keyed on the BOND type btyp==2, not
+    // on both atoms being sp2. A metal M-C bond with a locally-sp2 carbon (hyb=2) is
+    // btyp=5 (metal), not 2, so it keeps nrot=1 — the Ti-C4 torsion of ED40a/ED14 was
+    // wrongly getting nrot=2. Gate on bond_type==2 (btyp of the central bond).
+    else if (hyb_j == 2 && hyb_k == 2 && bond_type == 2) {
         params.periodicity = 2;     // nrot = 2
         params.phase_shift = M_PI;  // phi0 = 180° (planar trans)
     }
-    // Pi-sp³ mixed (gfnff_ini.f90:1843-1854)
-    else if ((hyb_j == 2 && hyb_k == 3) || (hyb_j == 3 && hyb_k == 2)) {
+    // Pi-sp³ mixed (gfnff_ini.f90:1733-1744). CRITICAL (Jul 24, 2026): the Fortran
+    // nrot=3 for sp2-sp3 fires ONLY via the pi-sp3 path, which requires the sp2 atom
+    // to be in a pi system (piadr>0). A NON-pi sp2 atom — e.g. a transition metal with
+    // 3 neighbours (hyb=2 from gfnff_ini2.f90:241, but piadr=0) — keeps the acyclic
+    // default nrot=1 (and f1=torsf(1), not the pi-sp3 0.5). Without the pi gate, the
+    // metal-C torsions of ED40a/PR41/ED14 got nrot=3 AND f1=0.5 (half FC), ~0.4-0.56
+    // kcal too low in the torsion term. Gate on the sp2 atom being pi.
+    else if ((hyb_j == 2 && hyb_k == 3 && j_is_pi) || (hyb_j == 3 && hyb_k == 2 && k_is_pi)) {
         params.periodicity = 3;     // nrot = 3
         params.phase_shift = M_PI;  // phi0 = 180°
     }
@@ -782,7 +792,11 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // the ring case keeps f1=torsf_single (1.0) which is then scaled by the pi-system 0.55,
     // matching Fortran's f1=1.0*0.55=0.55 (native f1=0.5*0.55=0.275 was exactly half).
     // Claude Generated (June 2026).
-    else if (!in_ring && ((eff_hyb_j == 2 && eff_hyb_k == 3) || (eff_hyb_j == 3 && eff_hyb_k == 2))) {
+    // pi gate (Jul 24, 2026): matches the periodicity gate above — the Fortran pi-sp3
+    // f1=0.5 requires the sp2 atom to be in a pi system (piadr>0). A non-pi sp2 atom
+    // (transition metal, hyb=2 but piadr=0) keeps the default f1=torsf_single=1.0.
+    else if (!in_ring && ((eff_hyb_j == 2 && eff_hyb_k == 3 && j_is_pi)
+                          || (eff_hyb_j == 3 && eff_hyb_k == 2 && k_is_pi))) {
         f1 = 0.5;
         if (z_j == 7 || z_k == 7) f1 = 0.2;  // Nitrogen lowers barrier
     }
@@ -792,6 +806,7 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
         // This is handled later in the pi-system contribution section
         f1 = torsf_single;  // 1.0
     }
+
 
     // ---------------------------------------------------------------------------
     // (D) Pi system contribution: f2 (IMPLEMENTED Jan 18, 2026)
@@ -1178,6 +1193,39 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // Now using actual EEQ charges passed as parameters!
     const double qfacTOR = 12.0;  // From gfnff_param.f90:742
     double fqq = 1.0 + std::abs(qa_j * qa_k) * qfacTOR;
+
+    // SP3 specials (Fortran gfnff_ini.f90:1746-1768). Placed here — after the pi-sp3
+    // override above — because in the Fortran the SP3-specials block (:1746) comes AFTER
+    // the pi-sp3 case (:1733) and OVERRIDES it; curcuma moved its pi-sp3 handling to the
+    // end (~line 1150), so the SP3-specials must come after it too. Uses the RAW hyb, so a
+    // bond between two sp3 group-5 atoms (N-N, P-P, N-P) gets nrot=3, phi0=60, f1=3.0 even
+    // when one end is in a pi-system (raw hyb stays 3) — the aminophosphine P-N bonds of
+    // ED30/PR30, which the pi-sp3 override otherwise forced to phi0=180/f1=0.2. Mirror the
+    // Fortran pi f2 f1-scaling (0.55) for the rare conjugated (pibo>0) case.
+    // Claude Generated (Jul 2026).
+    if (hyb_j == 3 && hyb_k == 3) {
+        int g_j = (z_j == 7 || z_j == 15) ? 5 : (z_j == 8 || z_j == 16) ? 6 : 0;
+        int g_k = (z_k == 7 || z_k == 15) ? 5 : (z_k == 8 || z_k == 16) ? 6 : 0;
+        bool sp3_special = true;
+        if (g_j == 5 && g_k == 5) {                                     // N-N, P-P, N-P
+            f1 = 3.0;
+            params.periodicity = 3;
+            params.phase_shift = 60.0 * M_PI / 180.0;
+        } else if ((g_j == 5 && g_k == 6) || (g_j == 6 && g_k == 5)) {  // N-O / P-S ...
+            f1 = 1.0;
+            params.periodicity = 2;
+            params.phase_shift = 90.0 * M_PI / 180.0;
+            if (z_j >= 15 && z_k >= 15) f1 = 20.0;                      // P-S
+        } else if (g_j == 6 && g_k == 6) {                             // O-O, S-S
+            f1 = 5.0;
+            params.periodicity = 2;
+            params.phase_shift = 90.0 * M_PI / 180.0;
+            if (z_j >= 16 && z_k >= 16) f1 = 25.0;                      // S-S
+        } else {
+            sp3_special = false;
+        }
+        if (sp3_special && central_pibo > 0.0) f1 *= 0.55;             // pi f2 scaling (gfnff_ini.f90:1904)
+    }
 
     // ---------------------------------------------------------------------------
     // (F) Final force constant calculation
@@ -1591,11 +1639,12 @@ std::pair<std::vector<Dihedral>, std::vector<Dihedral>> GFNFF::generateTorsionsN
     // For each atom, store all bonded neighbors.
     // This allows O(1) lookup of "which atoms are bonded to j?"
 
-    std::vector<std::vector<int>> neighbors(m_atomcount);
-    for (const auto& bond : bond_list) {
-        neighbors[bond.first].push_back(bond.second);
-        neighbors[bond.second].push_back(bond.first);
-    }
+    // Claude Generated (Jul 2026): enumerate over the topology adjacency (Fortran topo%nb,
+    // i.e. the eta-aware nbdum mixture) rather than rebuilding from the raw bond list.
+    // Fortran builds its torsion list from topo%nb, where an eta-coordinated carbon has its
+    // metal bond stripped; enumerating on the full bond list invents torsions through the
+    // metal centre that the reference never generates. See docs/GFNFF_NEIGHBOR_LISTS.md.
+    const std::vector<std::vector<int>>& neighbors = topo.adjacency_list;
 
     // Debug: Print neighbor counts
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -2085,12 +2134,9 @@ std::vector<GFNFFSTorsion> GFNFF::generateSTorsionsNative() const
     const std::vector<int>& hybridization = topo.hybridization;
     std::vector<GFNFFSTorsion> storsions;
 
-    // Build neighbor list for efficient lookup
-    std::vector<std::vector<int>> neighbors(m_atomcount);
-    for (const auto& bond : bond_list) {
-        neighbors[bond.first].push_back(bond.second);
-        neighbors[bond.second].push_back(bond.first);
-    }
+    // Claude Generated (Jul 2026): use the topology adjacency (Fortran topo%nb = nbdum
+    // mixture), not a rebuild from the raw bond list. See docs/GFNFF_NEIGHBOR_LISTS.md.
+    const std::vector<std::vector<int>>& neighbors = topo.adjacency_list;
 
     for (int i = 0; i < m_atomcount; ++i) {
         // Carbon with two neighbors (potential sp center)

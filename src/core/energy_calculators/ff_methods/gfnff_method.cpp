@@ -200,10 +200,12 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
 // =============================================================================
 void printGFNFFParamGenReport(const GFNFFParamGenReport& r)
 {
+    // A0 (Jul 2026): 2 decimals — the topology phases are sub-ms on small systems
+    // and whole-ms truncation made them unusable for profiling.
     auto fmt_t = [](double t) -> std::string {
-        return (t < 0.0) ? std::string("    --") : fmt::format("{:>6.1f}", t);
+        return (t < 0.0) ? std::string("     --") : fmt::format("{:>7.2f}", t);
     };
-    auto row = [&](const char* name, double t) {
+    auto row = [&](const std::string& name, double t) {
         CurcumaLogger::result(fmt::format("  {:<32}  {} ms", name, fmt_t(t)));
     };
 
@@ -226,7 +228,14 @@ void printGFNFFParamGenReport(const GFNFFParamGenReport& r)
     row("EEQ Phase 1 (topo charges)",   r.t_eeq_phase1);
     row("EEQ Phase 1 corrections",      r.t_eeq_phase1_corr);
     row("EEQ Phase 2 (refinement)",     r.t_eeq_phase2);
-    row("Pi-bond orders + bond types",  r.t_pi_bond_orders);
+    // A0 (Jul 2026): was one "Pi-bond orders + bond types" row; split so the
+    // ipis EEQ re-solves are visible separately from the FT-HMO solve.
+    row(r.n_pi_systems >= 0
+            ? fmt::format("Pi charges: ipis EEQ ({} pi-sys)", r.n_pi_systems)
+            : std::string("Pi charges: ipis EEQ"),
+        r.t_pi_charges_eeq);
+    row("Pi-bond orders (FT-HMO)",      r.t_huckel);
+    row("Bond-type classification",     r.t_bond_types);
     row("Topo distances + BATM list",   r.t_topo_distances);
     row("Topology total",               r.t_topology_total);
     CurcumaLogger::result("  Parameter generation:");
@@ -642,6 +651,8 @@ void GFNFF::forwardEEQSolverParams(json& eeq_params) {
         eeq["eeq_refactor_eps_bohr"] = m_parameters["eeq_refactor_eps_bohr"];
     if (m_parameters.contains("eeq_refactor_force_every") && !eeq.contains("eeq_refactor_force_every"))
         eeq["eeq_refactor_force_every"] = m_parameters["eeq_refactor_force_every"];
+    if (m_parameters.contains("eeq_refine_iters") && !eeq.contains("eeq_refine_iters"))
+        eeq["eeq_refine_iters"] = m_parameters["eeq_refine_iters"];
 }
 
 double GFNFF::getEEQDistanceCutoff() const {
@@ -962,27 +973,57 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::info(fmt::format("GFNFF: Using {} bonds from external topology (geometric detection skipped)", bonds.size()));
         } else {
-            // Default: geometric bond detection
-            double bond_threshold = 1.3;
+            // Fortran getnb bond criterion (Claude Generated, Jul 2026).
+            // Ports gfnff_ini2.f90:111-126 (rtmp setup) + :361-419 (getnb, icase=1):
+            //
+            //   rtmp(i,j) = gfnffrab(Z_i, Z_j, normcn_i, normcn_j)       ! R0 at "normal" CN
+            //   rtmp     -= qa_i*f1 + qa_j*f2                            ! charge shrink, fq doubled for metals
+            //   rtmp     *= fat(Z_i)*fat(Z_j)                            ! element hacks
+            //   bonded if  r < fm * rthr * rtmp
+            //
+            // This replaces the older heuristic `1.3*(rcov_i+rcov_j)*fat_i*fat_j`, which
+            // agreed with Fortran on 94/95 MOR41 structures but over-bonded agostic
+            // contacts to heavy metals (ED07: an extra C-H...W pair).
+            using GFNFFParameters::metal_type;
+            using GFNFFParameters::normcn;
 
-            // Claude Generated (March 2026): Pre-cache per-atom covalent radii and fat factors
-            std::vector<double> rcov(m_atomcount);
+            constexpr double rthr = 1.25;    // gen%rthr    (gfnff_param.f90:718)
+            constexpr double rthr2 = 1.00;   // gen%rthr2   (gfnff_param.f90:720) - no-op for TMs
+            constexpr double rqshrink = 0.23; // gen%rqshrink (gfnff_param.f90:721)
+
             std::vector<double> fat_val(m_atomcount);
+            std::vector<double> qshift(m_atomcount, 0.0);
+            std::vector<double> fm_atom(m_atomcount, 1.0);
+            const bool have_qa = (static_cast<int>(m_bond_qa.size()) == m_atomcount);
             for (int i = 0; i < m_atomcount; ++i) {
-                rcov[i] = getCovalentRadius(m_atoms[i]);
-                fat_val[i] = fat[m_atoms[i]];
+                const int z = m_atoms[i];
+                fat_val[i] = fat[z];
+                const int mt = (z >= 1 && z <= 86) ? metal_type[z - 1] : 0;
+                // f1 = fq, doubled for metals (gfnff_ini2.f90:115/119)
+                const double f1 = rqshrink * (mt > 0 ? 2.0 : 1.0);
+                qshift[i] = have_qa ? m_bond_qa[i] * f1 : 0.0;
+                // icase=1 metal radius scaling (gfnff_ini2.f90:379-384)
+                if (mt == 2) fm_atom[i] = rthr2;
+                else if (mt == 1) fm_atom[i] = rthr2 + 0.025;
             }
 
             for (int i = 0; i < m_atomcount; ++i) {
+                const int zi = m_atoms[i];
+                const double ncn_i = (zi >= 1 && zi <= 86) ? static_cast<double>(normcn[zi - 1]) : 4.0;
                 for (int j = i + 1; j < m_atomcount; ++j) {
-                    double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+                    const int zj = m_atoms[j];
+                    const double ncn_j = (zj >= 1 && zj <= 86) ? static_cast<double>(normcn[zj - 1]) : 4.0;
 
-                    // Phase 3: Apply element-specific fat scaling factors (Claude Generated Jan 2026)
-                    double threshold = bond_threshold * (rcov[i] + rcov[j]) * fat_val[i] * fat_val[j];
+                    double rco = GFNFFParameters::computeRabEstimate(zi, zj, ncn_i, ncn_j);
+                    rco -= qshift[i] + qshift[j];
+                    rco *= fat_val[i] * fat_val[j];
 
-                if (distance < threshold) {
-                    bonds.emplace_back(i, j);
-                }
+                    const double threshold = fm_atom[i] * fm_atom[j] * rthr * rco;
+                    const double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+
+                    if (distance < threshold) {
+                        bonds.emplace_back(i, j);
+                    }
                 }
             }
         }
@@ -1047,7 +1088,7 @@ void GFNFF::updateDynamicState(TopologyInfo& topo) const {
     topo.distance_matrix.resize(0, 0);  // No per-step distance matrix
 
     // P2b (Apr 2026): Configurable CN cutoff — neighbor list, accuracy-based, or full O(N²)
-    double cn_cutoff_bohr = m_parameters.value("cn_cutoff_bohr", 6.0);
+    double cn_cutoff_bohr = m_parameters.value("cn_cutoff_bohr", 10.0);
     double cn_accuracy = m_parameters.value("cn_accuracy", 1.0);
     auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_cutoff_bohr, cn_accuracy, -7.5, 4.4);
     topo.coordination_numbers = Eigen::Map<const Eigen::VectorXd>(cn_vec.data(), cn_vec.size());
@@ -1165,7 +1206,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         } else {
             // WP-D Stage A (May 2026): capture cn_raw for dcn step-1 skip.
             // WP-D Stage C (May 2026): neighbor-list mode also returns the list for dcn step-3.
-            double cn_cutoff_bohr = m_parameters.value("cn_cutoff_bohr", 6.0);
+            double cn_cutoff_bohr = m_parameters.value("cn_cutoff_bohr", 10.0);
 #ifdef GFNFF_CN_DCN_FUSION
             // WP-D Stage D (May 2026): fused CN+DCN path — single pair loop computes both.
             // Only active when gradient is needed on CPU (gpu_only=false) with neighbor-list
@@ -1295,7 +1336,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         // Claude Generated (WP4, May 2026): CNDerivStore replaces std::vector<SpMatrix>.
         // WP-C (May 2026): explicit 40.0 Bohr cutoff (squared) — consistent with the
         // topology-init CN cutoff in lines 3440 / 6766 / 6892. CN derivatives need a
-        // larger range than the per-step CN (cn_cutoff_bohr=6.0) because the gradient
+        // larger range than the per-step CN (cn_cutoff_bohr=10.0) because the gradient
         // of erf-CN extends further than the value itself. This 40 Bohr matches the
         // "standard GFN-FF" topology threshold and is independent from cn_cutoff_bohr.
         // WP6/G2c Phase C (May 2026): if eeq_distance_cutoff > 40, extend the dcn
@@ -2544,7 +2585,7 @@ json GFNFF::exportTopology() const
     const TopologyInfo& topo = *m_cached_topology;
 
     // Version for format compatibility
-    topo_json["version"] = 1;
+    topo_json["version"] = 2;
 
     // Fragment information (for multi-fragment systems)
     topo_json["nfrag"] = topo.nfrag;
@@ -2584,6 +2625,11 @@ json GFNFF::exportTopology() const
     // Pi-system fragments
     if (!topo.pi_fragments.empty()) {
         topo_json["pi_fragments"] = topo.pi_fragments;
+    }
+
+    // Eta(η)-coordination tags (Claude Generated Jul 2026)
+    if (!topo.itag.empty()) {
+        topo_json["itag"] = topo.itag;
     }
 
     // Aromatic flags
@@ -2667,8 +2713,11 @@ bool GFNFF::importTopology(const json& topo_json)
     // This is intentional — topology import happens before m_initialized = true
 
     // Check version compatibility
+    // v2 (Jul 2026): topology now comes from the Fortran four-list neighbour
+    // construction; a v1 cache holds a hybridization from the old full-list heuristic
+    // and an adjacency that is not the nbdum mixture, so it must be rejected.
     int version = topo_json.value("version", 0);
-    if (version < 1) {
+    if (version < 2) {
         CurcumaLogger::warn("GFNFF::importTopology: Unknown topology format version");
         return false;
     }
@@ -2739,6 +2788,11 @@ bool GFNFF::importTopology(const json& topo_json)
     // Pi fragments
     if (topo_json.contains("pi_fragments")) {
         topo.pi_fragments = topo_json["pi_fragments"].get<std::vector<int>>();
+    }
+
+    // Eta(η)-coordination tags (Claude Generated Jul 2026)
+    if (topo_json.contains("itag")) {
+        topo.itag = topo_json["itag"].get<std::vector<int>>();
     }
 
     // Aromatic flags
@@ -2845,7 +2899,7 @@ bool GFNFF::initializeForceField()
     // digging through code. Mirrors docs/wp4/cutoff-inventory.md.
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("GFN-FF cutoff configuration:");
-        const double cn_cut = m_parameters.value("cn_cutoff_bohr", 6.0);
+        const double cn_cut = m_parameters.value("cn_cutoff_bohr", 10.0);
         const double cn_acc = m_parameters.value("cn_accuracy", 1.0);
         const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
         CurcumaLogger::param("  cn_cutoff_bohr",
@@ -3792,29 +3846,27 @@ json GFNFF::generateGFNFFBonds() const
     // Use cached topology information to avoid redundant calculations
     const TopologyInfo& topo_info = getCachedTopology();
 
-    // GFN-FF bond detection with connectivity threshold
-    double bond_threshold = 1.3; // Factor for covalent radii sum
-
+    // BUGFIX (Jul 2026): enumerate the AUTHORITATIVE bond list instead of re-deriving
+    // it here. This function used to apply its own `1.3*(rcov_i+rcov_j)*fat_i*fat_j`
+    // heuristic, independent of getCachedBondList(), which since the Jul 2026 getnb port
+    // implements the Fortran criterion (gfnff_ini2.f90:111-126 + :361-419). The two
+    // disagreed: on MOR41 ED07 getnb gives 68 bonds (== xtb `#bonds: 68`) while this
+    // heuristic gave 70, inventing an agostic W...C and W...H pair that xtb does not
+    // have. Those two bonds carried -0.0704 Eh of spurious binding and were the whole
+    // of ED07's -37.8 kcal/mol error. Fortran likewise builds `blist` from a neighbour
+    // list (gfnff_ini.f90:281-305), never from a second independent distance rule.
     if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info(fmt::format("GFN-FF bond detection: {} atoms, base threshold {:.2f}", m_atomcount, bond_threshold));
-        }
+        CurcumaLogger::info(fmt::format("GFN-FF bond generation: {} atoms, {} bonds from getnb list",
+                                        m_atomcount, getCachedBondList().size()));
+    }
 
-        for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
+    {
+        for (const auto& [i, j] : getCachedBondList()) {
             Vector ri = m_geometry_bohr.row(i);
             Vector rj = m_geometry_bohr.row(j);
             double distance = (ri - rj).norm();
 
-            // Get covalent radii for atoms i and j
-            double rcov_i = getCovalentRadius(m_atoms[i]);
-            double rcov_j = getCovalentRadius(m_atoms[j]);
-
-            // Phase 3: Apply element-specific fat scaling factors (Claude Generated Jan 2026)
-            // Reference: gfnff_ini2.f90:76-97
-            double threshold = bond_threshold * (rcov_i + rcov_j) * fat[m_atoms[i]] * fat[m_atoms[j]];
-
-            if (distance < threshold) {
-                // This is a bond - generate GFN-FF parameters
+            {
                 json bond;
                 bond["type"] = 3; // GFN-FF type
                 bond["i"] = i;
@@ -4350,24 +4402,36 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     else if (hybi == 2 && hybj == 2) bbtyp = 2; // sp2-sp2
     else if (hybi == 3 && hybj == 2 && (z1 == 7 || z2 == 7)) bbtyp = 2; // N-sp2
 
-    // 1. Bond type specific shifts
-    if (bbtyp == 4) shift = hyper_shift;
-    else if (z1 == 1 || z2 == 1) shift = gen_rabshifth;
+    // Claude Generated (Jul 2026): metal bonds take Fortran's mutually-exclusive metal
+    // branch (gfnff_ini.f90:1129-1206) — the hybridization/bbtyp/F-F base shifts below are
+    // in the NON-metal branch only and must NOT apply to a bond touching a metal. The metal
+    // path starts shift=0 and adds only its own shifts (M-CO -0.45, metal2_shift, ...) plus
+    // gen_rabshift (line 1276) and the heavy-heavy shift (line 1268, kept below). Without
+    // this gate, a metal center with hyb=0 (octahedral TM) wrongly triggers the sp (0,1)
+    // correction (+0.14) — inflating the M-CO equilibrium distance and over-binding.
+    bool bond_has_metal = (z1 >= 1 && z1 <= 86 && metal_type[z1 - 1] > 0)
+                       || (z2 >= 1 && z2 <= 86 && metal_type[z2 - 1] > 0);
 
-    // 2. F-F special shift
-    if (z1 == 9 && z2 == 9) shift += 0.22;
+    if (!bond_has_metal) {
+        // 1. Bond type specific shifts
+        if (bbtyp == 4) shift = hyper_shift;
+        else if (z1 == 1 || z2 == 1) shift = gen_rabshifth;
 
-    // 3. X-sp3 hybridization correction
-    if ((hyb1_value == 3 && hyb2_value == 0) || (hyb1_value == 0 && hyb2_value == 3)) {
-        shift -= 0.022;
+        // 2. F-F special shift
+        if (z1 == 9 && z2 == 9) shift += 0.22;
+
+        // 3. X-sp3 hybridization correction
+        if ((hyb1_value == 3 && hyb2_value == 0) || (hyb1_value == 0 && hyb2_value == 3)) {
+            shift -= 0.022;
+        }
+
+        // 4. X-sp hybridization correction
+        if ((hyb1_value == 1 && hyb2_value == 0) || (hyb1_value == 0 && hyb2_value == 1)) {
+            shift += 0.14;
+        }
     }
 
-    // 4. X-sp hybridization correction
-    if ((hyb1_value == 1 && hyb2_value == 0) || (hyb1_value == 0 && hyb2_value == 1)) {
-        shift += 0.14;
-    }
-
-    // 5. Heavy atom shifts (Z > 10)
+    // 5. Heavy atom shifts (Z > 10) — applies to all bonds incl. metal (Fortran gfnff_ini.f90:1268)
     if (z1 > 10 && z2 > 10) {
         shift += hshift3;
         if (z1 > 18) shift += hshift4;
@@ -4696,10 +4760,18 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     double fcn = 1.0;  // Default: no CN correction
 
-    // Phase 2 (January 14, 2026): Use exact nb20 (neighbors within 20 Bohr cutoff)
-    // P2a (April 2026): Use on-the-fly distance computation instead of N×N matrix
-    int nb20_1 = countNeighborsWithin20Bohr(atom1, m_geometry_bohr);
-    int nb20_2 = countNeighborsWithin20Bohr(atom2, m_geometry_bohr);
+    // CRITICAL FIX (Jul 23, 2026): Fortran `topo%nb(20,ii)` is the BONDED-neighbour
+    // COUNT (slot 20 of the nb array holds the degree), NOT a 20-Bohr distance
+    // sphere. The old countNeighborsWithin20Bohr() counted every atom within 20 Bohr
+    // (~40 in a compact complex), collapsing fcn to ~0.007 and nuking non-metal
+    // heavy-heavy bonds (P-P, P-S, S-S, ...). For PR27 the spurious cis P...P bond
+    // lost -18.5 kcal (fc -0.046 -> -0.0002) — the entire +17.7 kcal MOR41 residual.
+    // The metal branch (gfnff_ini.f90:1254-1259) already uses this bonded degree via
+    // topo.neighbor_lists; this makes the normal path (gfnff_ini.f90:1181-1184) match.
+    int nb20_1 = (atom1 >= 0 && atom1 < static_cast<int>(topo.neighbor_lists.size()))
+        ? static_cast<int>(topo.neighbor_lists[atom1].size()) : 0;
+    int nb20_2 = (atom2 >= 0 && atom2 < static_cast<int>(topo.neighbor_lists.size()))
+        ? static_cast<int>(topo.neighbor_lists[atom2].size()) : 0;
 
     // Only apply to heavy atoms (Z > 10, i.e., beyond neon)
     // Fortran gfnff_ini.f90:1181-1184
@@ -4795,6 +4867,10 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         if (pibo_idx >= 0 && pibo_idx < static_cast<int>(topo.pi_bond_orders.size())) {
             pibo = topo.pi_bond_orders[pibo_idx];
 
+            if (std::getenv("CURCUMA_PIBO_DUMP")) {
+                fmt::print("PIBO {:4d} {:4d} {:12.8f}\n", atom1, atom2, pibo);
+            }
+
             // DEBUG: Show pibo values for first few bonds with pi-character
             static int debug_count = 0;
             if (debug_count < 5 && CurcumaLogger::get_verbosity() >= 3 && pibo > 1e-6) {
@@ -4842,16 +4918,113 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     int mtyp1 = 0;  // 0=non-metal, 1=Group1, 2=Group2, 3=main group metal, 4=TM
     int mtyp2 = 0;
 
-    // Hydrogen is explicitly non-metal (Z=1 → mtyp=0)
-    if (z1 > 1 && group1 == 1) mtyp1 = 1;  // Li, Na, K, Rb, Cs (NOT hydrogen!)
-    else if (z1 > 1 && group1 == 2) mtyp1 = 2;  // Be, Mg, Ca, Sr, Ba
+    // mtyp classification, Fortran gfnff_ini.f90:1201-1208. It is purely group-based
+    // for groups 1/2 and imetal-based for 3/4 — NO hydrogen exception. H is group 1,
+    // so Fortran gives H mtyp=1, and this feeds two metal-branch factors of a metal-H
+    // bond: qfacbm[1]=-0.2 in fqq, and the mtyp<3 divisor `fcn /= 1+0.1*nb(20,H)^2`.
+    // BUGFIX (Jul 2026): the old `z1 > 1 &&` guard excluded H from mtyp=1 (mis-reading
+    // Fortran as relying on imetal(H)=0). It does not — mtyp only matters inside the
+    // metal branch, so this changed only metal-H bonds, and made them too strong. On
+    // PR07 (Kubas W-H2) it inflated W-H kbond to -0.0585 vs xtb -0.032 (1.83x). With
+    // the fix, fqq 1.4177->1.0835 and fcn 0.3618->0.2584 (both == the Fortran analyzer
+    // to the qa-charge floor). Non-metal H bonds never enter the metal branch, so they
+    // are unaffected.
+    if (group1 == 1) mtyp1 = 1;  // H, Li, Na, K, Rb, Cs
+    else if (group1 == 2) mtyp1 = 2;  // Be, Mg, Ca, Sr, Ba
     else if (group1 > 2 && imetal1 == 1) mtyp1 = 3;  // Al, Ga, In, Sn, Pb, Bi, Po
     else if (imetal1 == 2) mtyp1 = 4;  // Transition metals
 
-    if (z2 > 1 && group2 == 1) mtyp2 = 1;  // Li, Na, K, Rb, Cs (NOT hydrogen!)
-    else if (z2 > 1 && group2 == 2) mtyp2 = 2;
+    if (group2 == 1) mtyp2 = 1;
+    else if (group2 == 2) mtyp2 = 2;
     else if (group2 > 2 && imetal2 == 1) mtyp2 = 3;
     else if (imetal2 == 2) mtyp2 = 4;
+
+    // ========================================================================
+    // METAL BOND-STRETCH BRANCH (Claude Generated, Jul 2026)
+    // Reference: Fortran gfnff_ini.f90:1188-1264 (the mutually-exclusive
+    // `else` branch taken for every bond touching a metal, bbtyp>=5).
+    //
+    // For metal bonds the Fortran reference recomputes bstrength from
+    // gen%bstren(bbtyp) (M-X=1.00, eta=0.78, M-M=3.40) instead of the
+    // hybridization bsmat value, and uses metal-specific fqq and fcn.
+    // The fheavy / fpi / metal_shift / fsrb2 add-ons that follow already
+    // mirror that branch; here we override the three remaining pieces
+    // (bstrength, fqq, fcn) that were previously left on the normal-bond
+    // path and caused ~1.95x metal-bond over-binding (see
+    // docs/GFNFF_METAL_BOND_ANALYSIS.md).
+    //
+    // Gated on imetal>0, so metal-free bonds are bit-identical to before.
+    // ========================================================================
+    int metal_bbtyp = 0;  // 0 = not a metal bond; 5/6/7 set inside the branch below
+    if (imetal1 > 0 || imetal2 > 0) {
+        // --- Fortran metal bond type (gfnff_ini.f90:1120-1123) ---
+        // btyp 5 = M-X, 6 = M-eta, 7 = TM-TM, assigned in that order so eta (6)
+        // overrides TM-TM (7) when it fires (mutually exclusive in practice — an
+        // eta partner is a non-metal pi ligand). eta needs one TM (imetal==2) and
+        // the OTHER atom eta-coordinated (itag==-1) and in a pi system (piadr>0).
+        // itag/pi_fragments are populated (computeEtaCoordination / Hueckel, Jul 2026).
+        const int nat_t = static_cast<int>(topo.itag.size());
+        auto is_eta_ligand = [&](int a) -> bool {
+            return a >= 0 && a < nat_t && topo.itag[a] == -1
+                && a < static_cast<int>(topo.pi_fragments.size()) && topo.pi_fragments[a] > 0;
+        };
+        metal_bbtyp = 5; // M-X
+        if (imetal1 == 2 && imetal2 == 2) metal_bbtyp = 7; // TM-TM
+        if ((imetal2 == 2 && is_eta_ligand(atom1))         // atom2 TM, atom1 eta ligand
+            || (imetal1 == 2 && is_eta_ligand(atom2)))     // atom1 TM, atom2 eta ligand
+            metal_bbtyp = 6;                               // eta (gfnff_ini.f90:1122-1123)
+
+        // --- bstrength = bstren(bbtyp) (gfnff_ini.f90:1190-1197) ---
+        bstrength = bstren[metal_bbtyp];
+        if (metal_bbtyp == 7) {
+            // TM-TM row corrections. Fortran uses itabrow6; getPeriodicTableRow
+            // returns row 4 for the 3d block (K-Kr) and >4 for 4d/5d, which is
+            // the classification the reference needs (bstren(8)=bstren(9)=3.40).
+            int trow1 = getPeriodicTableRow(z1);
+            int trow2 = getPeriodicTableRow(z2);
+            if (trow1 > 4 && trow2 > 4) bstrength = bstren[8];        // 4/5d-4/5d
+            else if (trow1 == 4 && trow2 > 4) bstrength = bstren[8];  // 3d-4/5d (bstren(9)==3.40)
+            else if (trow2 == 4 && trow1 > 4) bstrength = bstren[8];
+            // "metallic" scaling (gfnff_ini.f90:1195-1197): weaken M-M by the metallic
+            // character of the two atoms, capped at 0.5. topo.metallic_character == mchar.
+            const auto& mchar = topo.metallic_character;
+            if (atom1 < static_cast<int>(mchar.size()) && atom2 < static_cast<int>(mchar.size())) {
+                double dum = 2.0 * mchar[atom1] + 2.0 * mchar[atom2];
+                dum = std::min(dum, 0.5);
+                bstrength *= (1.0 - dum);
+            }
+        }
+
+        // --- metal fqq (gfnff_ini.f90:1209-1211) ---
+        // qfacbm: [0]=1.0 (non-metal), [1:2]=-0.2, [3]=0.70, [4]=0.50.
+        // Charge factor 25.0 (not the normal-bond 70.0).
+        static const double qfacbm[5] = { 1.0, -0.2, -0.2, 0.70, 0.50 };
+        double qafac_m = qa1 * qa2 * 25.0;
+        double dum_m = std::exp(-15.0 * qafac_m) / (1.0 + std::exp(-15.0 * qafac_m));
+        fqq = 1.0 + dum_m * (qfacbm[mtyp1] + qfacbm[mtyp2]) * 0.5;
+
+        // --- metal fcn (gfnff_ini.f90:1254-1259) ---
+        // CRITICAL: uses the BONDED-neighbour count nb(20,i), i.e. the bonded
+        // degree, NOT countNeighborsWithin20Bohr() (a distance-sphere count).
+        // curcuma's topo.neighbor_lists[i] is the bonded adjacency == nb(20,i).
+        int nbb1 = (atom1 >= 0 && atom1 < static_cast<int>(topo.neighbor_lists.size()))
+            ? static_cast<int>(topo.neighbor_lists[atom1].size()) : 0;
+        int nbb2 = (atom2 >= 0 && atom2 < static_cast<int>(topo.neighbor_lists.size()))
+            ? static_cast<int>(topo.neighbor_lists[atom2].size()) : 0;
+        fcn = 1.0; // discard the normal-path fcn (metal branch is mutually exclusive)
+        if (mtyp1 > 0 && mtyp1 < 3) fcn /= (1.0 + 0.100 * static_cast<double>(nbb1) * nbb1); // group 1/2
+        if (mtyp2 > 0 && mtyp2 < 3) fcn /= (1.0 + 0.100 * static_cast<double>(nbb2) * nbb2);
+        if (mtyp1 == 3) fcn /= (1.0 + 0.030 * static_cast<double>(nbb1) * nbb1);            // main-group metal
+        if (mtyp2 == 3) fcn /= (1.0 + 0.030 * static_cast<double>(nbb2) * nbb2);
+        if (mtyp1 == 4) fcn /= (1.0 + 0.036 * static_cast<double>(nbb1) * nbb1);            // transition metal
+        if (mtyp2 == 4) fcn /= (1.0 + 0.036 * static_cast<double>(nbb2) * nbb2);
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format(
+                "METAL_BOND: {:3d}-{:3d} bbtyp={} bstr={:.4f} fqq={:.6f} fcn={:.6f} (nb1={}, nb2={}, mtyp1={}, mtyp2={})",
+                atom1, atom2, metal_bbtyp, bstrength, fqq, fcn, nbb1, nbb2, mtyp1, mtyp2));
+        }
+    }
 
     // Phase 7: Metal-ligand corrections (Fortran gfnff_ini.f90:1212-1245)
     if (mtyp1 == 4 || mtyp2 == 4) {  // At least one atom is a transition metal
@@ -4923,11 +5096,27 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     if (mtyp1 == 3) metal_shift += METAL3_SHIFT;  // Main group metal (Al, Ga, In, Sn, Pb)
     if (mtyp2 == 3) metal_shift += METAL3_SHIFT;
 
+    // eta-coordination r0 shift (Fortran gfnff_ini.f90:1252-1253): for an eta bond,
+    // lengthen r0 by ETA_SHIFT * nb(20, metal) for whichever atom is the TM (metal==2).
+    if (metal_bbtyp == 6) {
+        if (imetal1 == 2 && atom1 < static_cast<int>(topo.neighbor_lists.size()))
+            metal_shift += ETA_SHIFT * static_cast<double>(topo.neighbor_lists[atom1].size());
+        if (imetal2 == 2 && atom2 < static_cast<int>(topo.neighbor_lists.size()))
+            metal_shift += ETA_SHIFT * static_cast<double>(topo.neighbor_lists[atom2].size());
+    }
+
     // Step 10: Final Consolidation of Shifts and Equilibrium Distance
     // CRITICAL: Total rabshift must include pi-shift and metal-shift!
     // Fortran: r0 = (ra + rb + shift) * ff
     double total_rabshift = rabshift + pi_shift + metal_shift;
-    params.equilibrium_distance = (ra + rb + total_rabshift) * ff;
+    // Fortran gfnff_ini.f90:1289 — r0 = rtmp + vbond(1). rtmp is the Goedecker/SK reference
+    // distance (curcuma's (ra+rb)*ff — verified bit-equal to Fortran's rtmp for both metal-C and
+    // the ligand C-O), and vbond(1) = rabshift + shift (+ pi_shift + metal_shift) is added
+    // OUTSIDE the EN factor ff — including the pi shift (Fortran folds the pi-bond-order shift
+    // into vbond(1), NOT into rtmp). curcuma previously multiplied every shift by ff, which only
+    // matched when ff~1 (free light-atom bonds); it mis-scaled by (1-ff) whenever ff departs
+    // from 1 — metal-C bonds (~0.6 kcal), coordinated ligand C-O (~0.1 kcal/CO), and CO2.
+    params.equilibrium_distance = (ra + rb) * ff + total_rabshift;
     params.rabshift = total_rabshift;
 
     // Step 11: Force constant (9 factors)
@@ -4952,17 +5141,20 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // NOTE: CH4 alpha shows 2% discrepancy with XTB 6.6.1 - may be due to different
     // parameter set used in XTB 6.6.1 (commit 8d0f1dd) vs current Fortran source
 
-    // EN-dependence scaling with metal-specific SIGN FLIP (Fortran gfnff_ini.f90:1227-1234)
-    double fsrb2;
-    if (mtyp1 == 4 || mtyp2 == 4) {
-        // Transition metals: INVERSE EN dependence (negative sign!)
-        fsrb2 = -srb2 * 0.22;  // Fortran: -gen.srb2*0.22
-    } else if (mtyp1 > 0 || mtyp2 > 0) {
-        // Other metals: normal but scaled EN dependence
-        fsrb2 = srb2 * 0.28;   // Fortran: gen.srb2*0.28
-    } else {
-        // Non-metals: standard EN dependence (Fortran gfnff_ini.f90:1233)
-        fsrb2 = srb2;  // Just srb2 directly
+    // EN-dependence scaling with metal-specific SIGN FLIP (Fortran gfnff_ini.f90:1260-1264).
+    // In Fortran fsrb2 is initialised to gen%srb2 (:1102) and reassigned ONLY inside the
+    // metal branch (bbtyp>=5, i.e. a bond with at least one metal atom). A non-metal bond
+    // keeps the srb2 default. This MUST be gated on the bond being a metal bond, not on
+    // mtyp>0: mtyp==1 is also true for hydrogen (group 1), so keying on mtyp>0 wrongly put
+    // every C-H/O-H/N-H bond on the srb2*0.28 path once H was correctly classified mtyp=1
+    // (Jul 2026) — shifting every organic molecule by ~1-3 mEh. The metal branch is the
+    // right gate.
+    double fsrb2 = srb2;  // non-metal default (Fortran :1102)
+    if (imetal1 > 0 || imetal2 > 0) {         // metal bond (bbtyp>=5)
+        if (mtyp1 == 4 || mtyp2 == 4)
+            fsrb2 = -srb2 * 0.22;  // TM: inverse EN dependence (Fortran :1261)
+        else
+            fsrb2 = srb2 * 0.28;   // other metal (Fortran :1263)
     }
 
     // Alpha calculation with high precision debug
@@ -5246,55 +5438,69 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // But params.equilibrium_angle is only set at line 1894 (110 lines later!)
     // Result: fbsmall was calculated with garbage data, breaking angle force constants
 
-    // Factor 6: feta = metal η-coordination correction
-    // Claude Generated (January 2026): Implement feta correction for transition metals
-    // Reference: Fortran gfnff_ini.f90:1469-1471
+    // Factor 6: feta = metal η(eta)-coordination correction
+    // Claude Generated (January 2026, rewritten July 2026)
+    // Reference: Fortran gfnff_ini.f90:1392-1394
+    //
+    //   feta = 1.0
+    //   if (imetal(center)==2 .and. itag(outer_j)==-1 .and. piadr(outer_j)>0) feta = 0.3
+    //   if (imetal(center)==2 .and. itag(outer_k)==-1 .and. piadr(outer_k)>0) feta = feta*0.3
     //
     // Educational Documentation:
     // ==========================
-    // feta reduces angle force constants when transition metals coordinate to π-systems
-    // (e.g., ferrocene Fe-C₆H₆, metal-alkene complexes, metal-arene sandwich compounds)
+    // feta reduces the angle force constant when a transition metal is η-coordinated
+    // to a π-ligand (metal-alkene/alkyne/cyclopentadienyl), because side-on π-coordination
+    // is angularly softer than a σ-bond. It fires ONLY for genuine η-ligands.
     //
-    // Physical meaning: π-coordination (η bonding) is more flexible than σ-bonding
-    // Metal-π bonds use diffuse orbitals with softer angular potentials
-    //
-    // Formula:
-    //   feta = 1.0  (default: no correction)
-    //   feta = 0.3  (transition metal + one π-bonded neighbor: 70% reduction)
-    //   feta = 0.09 (transition metal + both neighbors π-bonded: 91% reduction)
-    //
-    // π-bonded atoms: sp or sp² hybridization (hyb=1 or 2) capable of π-overlap
+    // CRITICAL (July 2026 fix): the previous code proxied η by sp/sp² hybridization of the
+    // outer atoms. That wrongly softened σ-bonded π-ligands — e.g. a carbonyl C (sp, in a
+    // π-system, but σ-bonded, itag≠-1) — so Rh-C(O)/Rh-Cl angles in RhCl(CO)2 got feta=0.3/0.09
+    // and the angle energy was ~3.5 mEh too low. The Fortran reference gates on true
+    // η-coordination (itag==-1), which CO/Cl do NOT satisfy → feta=1.0. We now use the
+    // ported itag (computeEtaCoordination) AND the π-system membership check (piadr>0),
+    // exactly as Fortran does.
     //
     // Literature: Spicher, S.; Grimme, S. Angew. Chem. Int. Ed. 2020
     // ============================================================================
 
-    double feta = 1.0;  // Default: no metal-π correction
+    double feta = 1.0;  // Default: no metal-η correction
 
     // Check if central atom is a transition metal (metal_type==2)
     // Note: z_center already declared above at line 1689
     bool is_tm_center = (z_center >= 1 && z_center <= 86) && (metal_type[z_center - 1] == 2);
 
     if (is_tm_center) {
-        // Check if neighbors are π-bonded (sp or sp² hybridization)
-        int hyb_i = topo_info.hybridization[atom_i];
-        int hyb_k = topo_info.hybridization[atom_k];
+        // η-coordination of the OUTER atoms (Fortran itag==-1), NOT hybridization.
+        //
+        // Fortran (gfnff_ini.f90:1393) additionally checks piadr(outer)>0. That check is
+        // redundant with itag==-1 in the reference: an η atom is by construction an
+        // alkene/alkyne/Cp carbon in a π-system, so piadr>0 always holds there. We do NOT
+        // add curcuma's pi_fragments>0 here because curcuma derives π-membership from the
+        // FULL neighbor list (including the metal), so metal-side-on alkene carbons are not
+        // tagged π (pi_fragments==0) even though Fortran's piadr — computed from the
+        // metal-REMOVED list for η atoms (gfnff_ini2.f90:199) — is >0. Gating on
+        // pi_fragments would wrongly drop every genuine η carbon back to feta=1.0.
+        auto is_eta = [&](int atom) -> bool {
+            return (!topo_info.itag.empty() && atom < static_cast<int>(topo_info.itag.size())
+                    && topo_info.itag[atom] == -1);
+        };
 
-        bool is_pi_i = (hyb_i == 1 || hyb_i == 2);  // sp or sp² → π-capable
-        bool is_pi_k = (hyb_k == 1 || hyb_k == 2);
+        bool is_eta_i = is_eta(atom_i);
+        bool is_eta_k = is_eta(atom_k);
 
         // Apply η-coordination corrections
-        if (is_pi_i) feta *= 0.3;  // First neighbor π-bonded: 70% reduction
-        if (is_pi_k) feta *= 0.3;  // Second neighbor π-bonded: additional 70% reduction
+        if (is_eta_i) feta *= 0.3;  // First outer atom η-coordinated: 70% reduction
+        if (is_eta_k) feta *= 0.3;  // Second outer atom η-coordinated: additional 70% reduction
 
         // Result:
-        //   Both π-bonded: feta = 1.0 × 0.3 × 0.3 = 0.09 (91% weaker angles)
-        //   One π-bonded:  feta = 1.0 × 0.3 = 0.3 (70% weaker angles)
-        //   None π-bonded: feta = 1.0 (standard angles)
+        //   Both η: feta = 0.3 × 0.3 = 0.09
+        //   One η:  feta = 0.3
+        //   None η: feta = 1.0 (standard angles — e.g. Rh-C(O), Rh-Cl)
 
-        if (CurcumaLogger::get_verbosity() >= 3 && (is_pi_i || is_pi_k)) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info(fmt::format(
-                "  Metal η-coordination: TM atom {} with π-neighbors: i={} (hyb={}), k={} (hyb={}) → feta={:.3f}",
-                atom_j, is_pi_i, hyb_i, is_pi_k, hyb_k, feta));
+                "  feta: TM center {} outer i={} (eta={}) k={} (eta={}) -> feta={:.3f}",
+                atom_j, atom_i, is_eta_i, atom_k, is_eta_k, feta));
         }
     }
 
@@ -5733,6 +5939,44 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
 
     // NOTE: Nitrogen corrections now handled comprehensively in Phase 2C above (lines 2187-2277)
     // No additional nitrogen corrections needed here
+
+    // ===========================================================================================
+    // Metal-center angle equilibrium (Fortran gfnff_ini.f90:1601-1610)
+    // ===========================================================================================
+    // Claude Generated (Jul 2026): when the angle CENTER is a metal (imetal>0), the equilibrium
+    // angle is set purely by the metal center's hybridization, OVERRIDING every element-specific
+    // rule above (this is Fortran's final word before vangl). With the TM hyb rule in
+    // determineHybridization, an octahedral carbonyl center is hyb=0 -> r0=90, f2=1.35 (matching
+    // the 90 deg cis L-M-L angles), and the linear GEODEP override (phi>linthr) flattens the
+    // 180 deg trans angles to r0=180. Without this branch the metal used r0~100/109.5 -> a
+    // spurious +0.02..0.03 Eh angle energy for Cr(CO)6, Mn(CO)5H, etc.
+    int imetal_ctr = (z_center >= 1 && z_center <= 86) ? metal_type[z_center - 1] : 0;
+    // Fortran gfnff_ini.f90:274 — Sn/Pb/Bi (main-group metals) with small CN are non-metals
+    if (imetal_ctr == 1 && group_center > 3 && nn_center <= 4) imetal_ctr = 0;
+    if (imetal_ctr > 0) {
+        if (hyb_center == 0) {
+            r0_deg = 90.0;
+            f2 = 1.35;  // "important difference to other bends, big effect" (Fortran comment)
+        }
+        if (hyb_center == 1) r0_deg = 180.0;
+        if (hyb_center == 2) r0_deg = 120.0;
+        if (hyb_center == 3) r0_deg = 109.5;
+        double current_angle_deg = current_angle * 180.0 / M_PI;
+        if (current_angle_deg > 160.0) r0_deg = 180.0;  // gen%linthr, change to linear (GEODEP)
+    }
+
+    // Carbene angle equilibrium (Fortran gfnff_ini.f90:1573-1577). A 2-coordinate
+    // group-4 center tagged as a carbene (itag==1) uses a bent equilibrium — 145 deg
+    // for C, 90 deg for heavier group-4 — overriding every hyb/ring rule above (it is
+    // Fortran's carbene branch, applied just before the metal branch). Without it the
+    // central 2-coordinate amidine/carbene C (e.g. ED16b's N-C-N, itag=1) kept the
+    // 5-ring carbon theta0=109 deg, giving ~8.6 kcal too little angle strain vs the
+    // pprcht/gfnff reference. fbsmall (and thus the force constant) is recomputed from
+    // this theta0 below, so both track the reference. Claude Generated (Jul 2026).
+    if (group_center == 4 && nn_center == 2
+        && atom_j < static_cast<int>(topo_info.itag.size()) && topo_info.itag[atom_j] == 1) {
+        r0_deg = (z_center == 6) ? 145.0 : 90.0;
+    }
 
     // Convert to radians
     params.equilibrium_angle = r0_deg * M_PI / 180.0;
@@ -6488,6 +6732,12 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
                 // Fortran gfnff_ini2.f90:294-298 (group 6: O, S) CN=1
                 // Default: sp2 (carbonyl/thiocarbonyl). Exception: sp if sole neighbour
                 // also has CN=1 (CO, CS, OH/SH radical, etc.)
+                // SUPERSEDED (Jul 2026): this function is the LEGACY hybridization path,
+                // kept only for bisection via m_use_fortran_hyb=false. It reads a single
+                // adjacency list and so cannot reproduce Fortran's metal/coordination
+                // dependent CO->sp distinction (O hyb=1 in Cr(CO)6 vs hyb=2 in Fe(CO)4).
+                // The default path is now determineHybridizationFortran(), which reads the
+                // real four-list construction. See docs/GFNFF_NEIGHBOR_LISTS.md.
                 int neighbor_idx = neighbors[0];
                 int neighbor_CN = adjacency_list[neighbor_idx].size();
 
@@ -6579,6 +6829,28 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
             if ((z == 15 || z == 16 || z == 17) && neighbor_count >= 5) {
                 hyb[i] = 3; // Still mark as sp3 for GFN-FF purposes
             }
+        }
+
+        // Claude Generated (Jul 2026): Transition-metal center hybridization.
+        // Reference: gfnff_ini2.f90:319-333 (the "param%group(ati) <= 0" TM branch).
+        // Fortran assigns a TM's hyb from its (H-excluded) coordination, NOT the geometric
+        // sp3 default. This is essential for the angle equilibrium: an octahedral TM
+        // (nni>=6) stays hyb=0 -> r0=90 in the metal angle branch, matching the 90 deg
+        // cis L-M-L angles. Without it the TM fell to hyb=3 -> r0~100 -> spurious angle
+        // energy (Cr(CO)6 / Mn(CO)5H off by +0.02..0.03 Eh). Overrides the geometry rules.
+        if (z >= 1 && z <= 86 && GFNFFParameters::metal_type[z - 1] == 2) {  // transition metal
+            int grp = GFNFFParameters::periodic_group[z - 1];  // negative for TMs (Sc=-3 ... Zn=-12)
+            int nh_metal = 0;
+            for (int j : neighbors) if (m_atoms[j] == 1) nh_metal++;
+            int nni = neighbor_count;
+            if (nh_metal != 0 && nh_metal != nni) nni -= nh_metal;  // don't count H (unless all-H)
+            hyb[i] = 0;  // default "don't know it"
+            if (nni <= 2) hyb[i] = 1;
+            if (nni <= 2 && grp <= -6) hyb[i] = 2;
+            if (nni == 3) hyb[i] = 2;
+            if (nni == 4) hyb[i] = 3;
+            if (nni == 5 && grp == -3) hyb[i] = 3;  // Sc/Y/La CN=5 tetrahedral
+            // nni == 5 (non-Sc) or nni >= 6 -> hyb stays 0 (e.g. octahedral)
         }
     }
 
@@ -7317,6 +7589,438 @@ std::vector<std::vector<int>> GFNFF::buildNeighborLists() const
     return neighbors;
 }
 
+// Claude Generated (July 2026): Detect eta(η)-coordinated atoms.
+// Faithful port of Fortran external/gfnff/src/gfnff_ini2.f90:170-198.
+// curcuma's neighbor_lists[i] is the FULL bonded adjacency (== Fortran nbf, incl. metals);
+// the metal-removed list (nbm) is obtained here by filtering metal_type==0.
+std::vector<int> GFNFF::computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists) const
+{
+    using GFNFFParameters::metal_type;
+    std::vector<int> itag(m_atomcount, 0);
+
+    auto is_metal = [](int z) -> bool {
+        return (z >= 1 && z <= 86) && (metal_type[z - 1] != 0);
+    };
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        int ati = m_atoms[i];
+        if (ati > 10) continue;  // only light atoms (in practice C) can be η-coordinated
+
+        const std::vector<int>& nbf = neighbor_lists[i];
+        int nbf_count = static_cast<int>(nbf.size());
+        int nbm_count = 0;  // neighbors with metals removed
+        for (int kk : nbf) {
+            if (!is_metal(m_atoms[kk])) nbm_count++;
+        }
+
+        bool etacoord = false;
+        // Cp (cyclopentadienyl): full CN >= 4, metal-removed CN == 3
+        if (ati == 6 && nbf_count >= 4 && nbm_count == 3) etacoord = true;
+        // alkyne/alkene side-on: full CN == 3, metal-removed CN == 2
+        if (ati == 6 && nbf_count == 3 && nbm_count == 2) etacoord = true;
+
+        // Count metals among i's full neighbors; im = a bonded metal index
+        int nm = 0, im = -1;
+        for (int kk : nbf) {
+            if (is_metal(m_atoms[kk])) { nm++; im = kk; }
+        }
+
+        if (nm == 0) {
+            etacoord = false;  // η makes no sense without a metal
+        } else if (nm == 1) {
+            // distinguish M-CR2-R (not η): require at least one non-metal neighbor of i
+            // that is ALSO bonded to the same metal im (ncm>=1 => genuine side-on ring/multi-bond)
+            int ncm = 0;
+            for (int kk : nbf) {
+                if (kk == im) continue;  // all neighbors that are not the metal im
+                for (int l : neighbor_lists[kk]) {
+                    if (l == im) ncm++;  // ncm=1 alkyne, =2 cp
+                }
+            }
+            if (ncm == 0) etacoord = false;
+        }
+        // nm >= 2 keeps etacoord as set by the Cp/alkyne base condition
+
+        if (etacoord) itag[i] = -1;
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        int neta = 0;
+        for (int t : itag) if (t == -1) neta++;
+        if (neta > 0)
+            CurcumaLogger::info(fmt::format("computeEtaCoordination: {} eta-coordinated atom(s)", neta));
+    }
+
+    return itag;
+}
+
+int GFNFF::nnNearestNoM(int ii, const std::vector<std::vector<int>>& nb,
+                        const Eigen::MatrixXd& distance_matrix) const
+{
+    /**
+     * Claude Generated (July 2026) - port of gfnff_ini2.f90:431-450 (nn_nearest_noM).
+     * Returns the coordination number of the nearest NON-METAL neighbour of ii, or 0
+     * if ii has no non-metal neighbour. Fortran calls this with topo%nb, i.e. the
+     * HC-filtered list (nb_hc) - NOT the nbdum mixture.
+     */
+    using GFNFFParameters::metal_type;
+
+    double rmin = 1.0e42;
+    int jmin = -1;
+    for (int jj : nb[ii]) {
+        const int z = m_atoms[jj];
+        if (z >= 1 && z <= 86 && metal_type[z - 1] != 0) continue;  // skip metals
+        const double r = distance_matrix(ii, jj);
+        if (r < rmin) {
+            rmin = r;
+            jmin = jj;
+        }
+    }
+    return (jmin >= 0) ? static_cast<int>(nb[jmin].size()) : 0;
+}
+
+std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
+                                                      const std::vector<std::vector<int>>& nbdum,
+                                                      const Eigen::MatrixXd& distance_matrix,
+                                                      std::vector<int>& itag) const
+{
+    /**
+     * Claude Generated (July 2026) - faithful transcription of the Fortran
+     * hybridization loop, external/gfnff/src/gfnff_ini2.f90:211-333.
+     *
+     * THE CRITICAL DETAIL is which list each rule reads. Fortran spells three
+     * different lists "topo%nb"/"nbf"/"nbm"/"nbdum" inside this loop, and topo%nb
+     * here is still the HC-FILTERED list (getnb icase=2) - it is only overwritten
+     * with the nbdum mixture afterwards, at gfnff_ini2.f90:335. So:
+     *   nb20i   = nbdum[i].size()                    the eta-aware mixture
+     *   nbdiff  = nbf[i].size()  - nb_hc[i].size()   how much the HC filter removed
+     *   nbmdiff = nbf[i].size()  - nbm[i].size()     how much the metal filter removed
+     * and the NO2/B-N/N-SO2 rules plus the CO->sp rule index into nb_hc.
+     *
+     * This function also WRITES itag: the eta detection has already set itag=-1 for
+     * eta-coordinated atoms, and the loop additionally sets itag=+1 for carbenes and
+     * for the nitrogen of NO2 (consumed by the Hueckel and HB routines).
+     *
+     * hyb codes: 0 = none/octahedral, 1 = sp, 2 = sp2, 3 = sp3, 5 = hypervalent.
+     */
+    using GFNFFParameters::metal_type;
+    using GFNFFParameters::periodic_group;
+
+    // gen%linthr (gfnff_param.f90:713): "when is an angle close to linear"
+    constexpr double lintr = 160.0;
+
+    auto group_of = [](int z) -> int {
+        return (z >= 1 && z <= 86) ? periodic_group[z - 1] : 0;
+    };
+    auto is_metal = [](int z) -> bool {
+        return (z >= 1 && z <= 86) && (metal_type[z - 1] != 0);
+    };
+    // Angle at vertex j between i and k (gfnff_helpers.f90:587 bangl), in degrees
+    auto bangl_deg = [&](int i, int j, int k) -> double {
+        Eigen::Vector3d a = m_geometry_bohr.row(i) - m_geometry_bohr.row(j);
+        Eigen::Vector3d b = m_geometry_bohr.row(k) - m_geometry_bohr.row(j);
+        const double na = a.norm(), nb2 = b.norm();
+        if (na < 1e-12 || nb2 < 1e-12) return 0.0;
+        double t = a.dot(b) / (na * nb2);
+        t = std::max(-1.0, std::min(1.0, t));
+        return std::acos(t) * 180.0 / M_PI;
+    };
+
+    const auto& nbf = topo.nb_full;
+    const auto& nbhc = topo.nb_hc;
+    const auto& nbm = topo.nb_nometal;
+    const bool have_qa = (topo.topology_charges.size() == m_atomcount);
+
+    std::vector<int> hyb(m_atomcount, 0);
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        const int ati = m_atoms[i];
+        const int grp = group_of(ati);
+        hyb[i] = 0;  // "don't know it"
+
+        const int nbdiff = static_cast<int>(nbf[i].size()) - static_cast<int>(nbhc[i].size());
+        const int nbmdiff = static_cast<int>(nbf[i].size()) - static_cast<int>(nbm[i].size());
+        const int nb20i = static_cast<int>(nbdum[i].size());
+
+        int nh = 0;
+        for (int j : nbdum[i]) {
+            if (m_atoms[j] == 1) nh++;
+        }
+
+        if (grp == 1) {  // H
+            if (nb20i == 2) hyb[i] = 1;   // bridging H
+            if (nb20i > 2) hyb[i] = 3;    // M+ tetra coord
+            if (nb20i > 4) hyb[i] = 0;    // M+ HC
+        } else if (grp == 2) {  // Be
+            if (nb20i == 2) hyb[i] = 1;   // bridging M
+            if (nb20i > 2) hyb[i] = 3;
+            if (nb20i > 4) hyb[i] = 0;
+        } else if (grp == 3) {  // B
+            if (nb20i > 4) hyb[i] = 3;
+            if (nb20i > 4 && ati > 10 && nbdiff == 0) hyb[i] = 5;
+            if (nb20i == 4) hyb[i] = 3;
+            if (nb20i == 3) hyb[i] = 2;
+            if (nb20i == 2) hyb[i] = 1;
+        } else if (grp == 4) {  // C
+            if (nb20i >= 4) hyb[i] = 3;
+            if (nb20i > 4 && ati > 10 && nbdiff == 0) hyb[i] = 5;
+            if (nb20i == 3) hyb[i] = 2;
+            if (nb20i == 2) {
+                const double phi = bangl_deg(nbdum[i][0], i, nbdum[i][1]);
+                if (phi < 150.0) {   // GEODEP: otherwise carbenes are not recognized
+                    hyb[i] = 2;
+                    itag[i] = 1;     // tag for Hueckel and HB routines
+                } else {
+                    hyb[i] = 1;      // linear triple bond etc
+                }
+                if (have_qa && topo.topology_charges(i) < -0.4) {
+                    hyb[i] = 2;
+                    itag[i] = 0;
+                }
+            }
+            if (nb20i == 1) hyb[i] = 1;  // CO
+        } else if (grp == 5) {  // N
+            if (nb20i >= 4) hyb[i] = 3;
+            if (nb20i > 4 && ati > 10 && nbdiff == 0) hyb[i] = 5;
+            if (nb20i == 3) hyb[i] = 3;
+            if (nb20i == 3 && ati == 7) {
+                int kk = 0, ll = 0, nn = 0;
+                for (int j = 0; j < 3; ++j) {
+                    const int jj = nbdum[i][j];
+                    const int nbhc_jj = static_cast<int>(nbhc[jj].size());
+                    if (m_atoms[jj] == 8 && nbhc_jj == 1) kk++;   // NO2 or R2-N=O
+                    if (m_atoms[jj] == 5 && nbhc_jj == 4) ll++;   // B-N, CN(B)=4 -> N loosely bound, sp2
+                    if (m_atoms[jj] == 16 && nbhc_jj == 4) nn++;  // N-SO2-
+                }
+                if (nn == 1 && ll == 0 && kk == 0) hyb[i] = 3;
+                if (ll == 1 && nn == 0) hyb[i] = 2;
+                if (kk >= 1) {
+                    hyb[i] = 2;
+                    itag[i] = 1;  // Hueckel: no electrons for the N in NO2
+                }
+                if (nbmdiff > 0 && nn == 0) hyb[i] = 2;  // pyridine N coord. to heavy atom
+            }
+            if (nb20i == 2) {
+                hyb[i] = 2;
+                const double phi = bangl_deg(nbdum[i][0], i, nbdum[i][1]);
+                const int jj = nbdum[i][0];
+                const int kk = nbdum[i][1];
+                if (nbdum[jj].size() == 1 && m_atoms[jj] == 6) hyb[i] = 1;  // R-N=C
+                if (nbdum[kk].size() == 1 && m_atoms[kk] == 6) hyb[i] = 1;  // R-N=C
+                if (nbdum[jj].size() == 1 && m_atoms[jj] == 7) hyb[i] = 1;  // R-N=N, diazomethane
+                if (nbdum[kk].size() == 1 && m_atoms[kk] == 7) hyb[i] = 1;
+                if (is_metal(m_atoms[jj])) hyb[i] = 1;  // M-NC-R, nitriles
+                if (is_metal(m_atoms[kk])) hyb[i] = 1;
+                if (m_atoms[jj] == 7 && m_atoms[kk] == 7 && nbdum[jj].size() <= 2 && nbdum[kk].size() <= 2)
+                    hyb[i] = 1;  // N=N=N
+                if (phi > lintr) hyb[i] = 1;  // GEODEP
+            }
+            if (nb20i == 1) hyb[i] = 1;
+        } else if (grp == 6) {  // O, S, Se, Te, Po
+            if (nb20i >= 3) hyb[i] = 3;
+            if (nb20i > 3 && ati > 10 && nbdiff == 0) hyb[i] = 5;
+            if (nb20i == 2) hyb[i] = 3;
+            if (nb20i == 2 && nbmdiff > 0) {
+                const int j = nnNearestNoM(i, nbhc, distance_matrix);
+                if (j == 3) hyb[i] = 2;  // M-O-X conjugated
+                if (j == 4) hyb[i] = 3;  // M-O-X non-conjugated
+            }
+            if (nb20i == 1) hyb[i] = 2;
+            if (nb20i == 1 && nbdiff == 0) {
+                // CO: the sole HC-list neighbour must itself have exactly one HC neighbour.
+                // This is the rule that gives O hyb=1 in Cr(CO)6 (where the HC filter strips
+                // the Cr-C bonds so the carbonyl C has nb_hc == 1) but hyb=2 in Fe(CO)4.
+                if (!nbhc[i].empty() && nbhc[nbhc[i][0]].size() == 1) hyb[i] = 1;
+            }
+        } else if (grp == 7) {  // F, Cl, ...
+            if (nb20i == 2) hyb[i] = 1;
+            if (nb20i > 2 && ati > 10) hyb[i] = 5;
+        } else if (grp == 8) {  // Ne, noble gases
+            hyb[i] = 0;
+            if (nb20i > 0 && ati > 2) hyb[i] = 5;
+        } else if (grp <= 0) {  // transition metals
+            int nni = nb20i;
+            if (nh != 0 && nh != nni) nni -= nh;  // don't count Hs
+            if (nni <= 2) hyb[i] = 1;
+            if (nni <= 2 && grp <= -6) hyb[i] = 2;
+            if (nni == 3) hyb[i] = 2;
+            if (nni == 4 && grp > -7) hyb[i] = 3;   // early TM, tetrahedral
+            if (nni == 4 && grp <= -7) hyb[i] = 3;  // late TM, square planar
+            if (nni == 5 && grp == -3) hyb[i] = 3;  // Sc-La are tetrahedral at CN=5
+        }
+    }
+
+    return hyb;
+}
+
+std::vector<double> GFNFF::computeMetallicCharacter() const
+{
+    /**
+     * Claude Generated (July 2026) - port of gfnff_ini.f90:243-250.
+     *
+     *   dum2(i) = sum_j || d logCN_i / d R_j ||        (gfnff_cn.f90:gfnff_dlogcoord)
+     *   mchar(i) = exp(-0.005 * en(Z_i)^8) * dum2(i) / (cn(i) + 1)
+     *
+     * The N x N derivative tensor is never materialised. From gfnff_dlogcoord one gets,
+     * for every neighbour m != i,
+     *     d logCN_i / d R_m = dlogdcn_i * derfCN(i,m) * (x_m - x_i)/r_im
+     * whose norm is simply |dlogdcn_i * derfCN(i,m)|, while the self term collapses to
+     *     d logCN_i / d R_i = dlogdcn_i * sum_m derfCN(i,m) * (x_i - x_m)/r_im.
+     * So the sum of norms needs one O(N*k) pass over the CN neighbour list.
+     *
+     * Radii note: Fortran param%rcov == covalentRadD3 with "* aatoau * 4/3" already
+     * applied in the array literal (gfnff_param.f90:405), which is exactly what
+     * CNCalculator applies (k_scaled * COVALENT_RADII * ANG2BOHR). Same radii.
+     */
+    using GFNFFParameters::gfnff_en;
+
+    constexpr double kn = -7.5;
+    constexpr double cnmax = 4.4;
+    constexpr double sqrtpi = 1.77245385091;
+
+    std::vector<double> mchar(m_atomcount, 0.0);
+
+    // Fortran passes cnthr to gfnff_dlogcoord (gfnff_ini.f90:243), where
+    // cnthr = 100 - log10(accuracy)*50 = 100 at accuracy 1 (gfnff_param.f90:551).
+    // That is a SQUARED threshold (gfnff_cn.f90:73 does thr = sqrt(thr2)), so the
+    // cutoff radius is 10 Bohr - not the 6 Bohr neighbour-list default used elsewhere.
+    // Using 6 here leaves mchar ~1e-4 low; 10 reproduces Fortran mchar exactly.
+    constexpr double mchar_cutoff_bohr = 10.0;
+    auto cn_res = CNCalculator::calculateGFNFFCNWithNeighbors(
+        m_atoms, m_geometry_bohr, mchar_cutoff_bohr, kn, cnmax);
+
+    // Scaled covalent radii in Bohr (must match CNCalculator exactly)
+    const double k_scaled = 4.0 / 3.0;
+    std::vector<double> rcov_bohr(m_atomcount, 0.0);
+    for (int i = 0; i < m_atomcount; ++i) {
+        rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
+    }
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        int zi = m_atoms[i];
+        if (zi < 1 || zi > 86) continue;
+        if (rcov_bohr[i] == 0.0) continue;
+
+        // dlogCN/dCN_i at the raw (pre-log) CN, gfnff_cn.f90:create_dlogCN
+        const double cn_raw_i = cn_res.cn_raw[i];
+        const double dlogdcn_i = std::exp(cnmax) / (std::exp(cnmax) + std::exp(cn_raw_i));
+
+        Eigen::Vector3d self_sum = Eigen::Vector3d::Zero();
+        double offdiag_norm_sum = 0.0;
+
+        for (int m : cn_res.neighbors[i]) {
+            if (m == i || rcov_bohr[m] == 0.0) continue;
+            Eigen::Vector3d d = m_geometry_bohr.row(i) - m_geometry_bohr.row(m);
+            const double r = d.norm();
+            if (r < 1e-12) continue;
+
+            const double r0 = rcov_bohr[i] + rcov_bohr[m];
+            const double dr = (r - r0) / r0;
+            // derfCN/dR, gfnff_cn.f90:create_derfCN
+            const double derf = kn / sqrtpi * std::exp(-kn * kn * dr * dr) / r0;
+
+            self_sum += derf * (d / r);
+            offdiag_norm_sum += std::abs(dlogdcn_i * derf);
+        }
+
+        const double dum2 = (dlogdcn_i * self_sum).norm() + offdiag_norm_sum;
+
+        const double en = gfnff_en[zi - 1];
+        const double en2 = en * en;
+        const double en4 = en2 * en2;
+        const double en8 = en4 * en4;
+        mchar[i] = std::exp(-0.005 * en8) * dum2 / (cn_res.cn_values[i] + 1.0);
+    }
+
+    return mchar;
+}
+
+void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<int>>& nbdum) const
+{
+    /**
+     * Claude Generated (July 2026) - port of gfnff_ini2.f90:128-130 and 197-202.
+     * See the header doc for the meaning of each list.
+     *
+     * Native keeps its own geometric bond criterion as nbf. Verified July 2026 against
+     * an instrumented Fortran build: native nbf reproduces Fortran nbf(20,i) on 94/95
+     * MOR41 structures (the exception, ED07, is an agostic C-H...W contact that native
+     * bonds and Fortran does not; the HC and metal filters below absorb it).
+     */
+    using GFNFFParameters::metal_type;
+    using GFNFFParameters::normcn;
+    using GFNFFParameters::periodic_group;
+
+    auto is_metal = [](int z) -> bool {
+        return (z >= 1 && z <= 86) && (metal_type[z - 1] != 0);
+    };
+    // gfnff_ini2.f90:387-392. periodic_group is NEGATIVE for the d-block, so every
+    // transition metal lands in the "group <= 2" branch and gets hc_crit = 4.
+    auto hc_crit = [](int z) -> int {
+        if (z < 1 || z > 86) return 6;
+        return (periodic_group[z - 1] <= 2) ? 4 : 6;
+    };
+
+    // --- nbf: full connectivity from the cached bond list (icase=1) ---
+    const auto& bond_list = getCachedBondList();
+    topo.nb_full.assign(m_atomcount, {});
+    for (const auto& [a, b] : bond_list) {
+        topo.nb_full[a].push_back(b);
+        topo.nb_full[b].push_back(a);
+    }
+
+    topo.metallic_character = computeMetallicCharacter();
+
+    // --- nb_hc: drop ALL bonds of highly-coordinated atoms (icase=2) ---
+    // Fortran cycles the pair if EITHER endpoint's FULL CN exceeds its cap, so the
+    // bond disappears from both rows.
+    topo.nb_hc.assign(m_atomcount, {});
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (static_cast<int>(topo.nb_full[i].size()) > hc_crit(m_atoms[i])) continue;
+        for (int j : topo.nb_full[i]) {
+            if (static_cast<int>(topo.nb_full[j].size()) > hc_crit(m_atoms[j])) continue;
+            topo.nb_hc[i].push_back(j);
+        }
+    }
+
+    // --- nbm: drop metals and unusually coordinated heavy atoms (icase=3) ---
+    auto nbm_excluded = [&](int a) -> bool {
+        const int z = m_atoms[a];
+        if (topo.metallic_character[a] > 0.25 || is_metal(z)) return true;                 // metal case
+        if (z > 10 && z <= 86 && static_cast<int>(topo.nb_full[a].size()) > normcn[z - 1])
+            return true;                                                                    // HC case
+        return false;
+    };
+    topo.nb_nometal.assign(m_atomcount, {});
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (nbm_excluded(i)) continue;
+        for (int j : topo.nb_full[i]) {
+            if (nbm_excluded(j)) continue;
+            topo.nb_nometal[i].push_back(j);
+        }
+    }
+
+    // --- itag: eta detection needs nbf and nbm (gfnff_ini2.f90:170-195) ---
+    topo.itag = computeEtaCoordination(topo.nb_full);
+
+    // --- nbdum: per-atom mixture (gfnff_ini2.f90:197-202) ---
+    nbdum.assign(m_atomcount, {});
+    for (int i = 0; i < m_atomcount; ++i) {
+        nbdum[i] = (topo.itag[i] == -1) ? topo.nb_nometal[i] : topo.nb_full[i];
+    }
+
+    if (std::getenv("CURCUMA_NBDIAG")) {
+        for (int i = 0; i < m_atomcount; ++i) {
+            fmt::print("NATNB {:5d} {:4d} {:4d} {:4d} {:4d} {:4d} {:12.6f}\n",
+                       i + 1, m_atoms[i],
+                       static_cast<int>(topo.nb_full[i].size()),
+                       static_cast<int>(topo.nb_hc[i].size()),
+                       static_cast<int>(topo.nb_nometal[i].size()),
+                       static_cast<int>(nbdum[i].size()),
+                       topo.metallic_character[i]);
+        }
+    }
+}
+
 int GFNFF::countNeighborsWithin20Bohr(int atom_index, const Eigen::MatrixXd& geometry_bohr) const
 {
     /**
@@ -7354,7 +8058,8 @@ std::vector<double> GFNFF::calculatePiBondOrders(
     const std::vector<int>& pi_fragments,
     const std::vector<double>& charges,
     const Eigen::MatrixXd& geometry_bohr,
-    const std::vector<int>& pi_system_charge) const
+    const std::vector<int>& pi_system_charge,
+    const std::vector<int>& itag_in) const
 {
     /**
      * Claude Generated (January 14, 2026) - Updated for Phase 1: Full Hückel implementation
@@ -7394,8 +8099,16 @@ std::vector<double> GFNFF::calculatePiBondOrders(
             CurcumaLogger::info("Using full iterative Hückel calculation for π-bond orders");
         }
 
-        // Create itag vector (empty for now - can be extended for carbene/NO2 detection)
-        std::vector<int> itag(m_atomcount, 0);
+        // itag drives the FT-HMO π-electron count (carbene C=itag 1 → 0 electrons,
+        // NO2 N=itag 1, eta atoms=itag -1). Use the topology-derived itag from
+        // determineHybridizationFortran/buildNeighborListSet; only fall back to
+        // all-zeros if the caller passed nothing. Claude Generated (Jul 2026):
+        // previously this was hard-coded to zeros, so 2-coordinate carbene carbons
+        // (e.g. the central amidine C of ED16b) were wrongly counted as +1 π-electron
+        // → nelpi off by one → wrong pibo and a spurious pisip>0.40 fallback.
+        std::vector<int> itag = (static_cast<int>(itag_in.size()) == m_atomcount)
+                                    ? itag_in
+                                    : std::vector<int>(m_atomcount, 0);
 
         // Call the HuckelSolver
         std::vector<double> pi_bond_orders = m_huckel_solver->calculatePiBondOrders(
@@ -7559,18 +8272,19 @@ std::vector<Bond> GFNFF::generateBondsNative(const TopologyInfo& topo_info) cons
     auto start_time = std::chrono::high_resolution_clock::now();
 
     std::vector<Bond> bonds;
-    double bond_threshold = 1.3;
 
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
+    // BUGFIX (Jul 2026): enumerate the authoritative getnb bond list rather than a
+    // second, independent `1.3*(rcov_i+rcov_j)` rule. See the matching comment in
+    // generateGFNFFBonds(). Note this variant did not even apply the `fat` element
+    // factors that the JSON path did, so the two generators could disagree with each
+    // other as well as with getCachedBondList().
+    {
+        for (const auto& [i, j] : getCachedBondList()) {
             Vector ri = m_geometry_bohr.row(i);
             Vector rj = m_geometry_bohr.row(j);
             double distance = (ri - rj).norm();
 
-            double rcov_i = getCovalentRadius(m_atoms[i]);
-            double rcov_j = getCovalentRadius(m_atoms[j]);
-
-            if (distance < bond_threshold * (rcov_i + rcov_j)) {
+            {
                 auto bond_params = getGFNFFBondParameters(i, j, m_atoms[i], m_atoms[j], distance, topo_info);
 
                 Bond b;
@@ -8534,6 +9248,39 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     const TopologyInfo& topo_info = getCachedTopology();
     const auto& bonds = getCachedBondList();
 
+    // eta-free topological distance for the X-bond B-filter (bpair(B,X)>3 test below).
+    // Claude Generated (Jul 2026): the Fortran bpair (nbondmat/pairsbond, gfnff_ini2.f90)
+    // only records a distance when reachability is SYMMETRIC (dai .and. daj), and eta
+    // bonds are stored asymmetrically (the metal lists the eta-C, the eta-C omits the
+    // metal, gfnff_ini2.f90:199), so an eta bond never bridges a >=2-bond path in the
+    // reference bpair. curcuma's bpair is a plain BFS that DOES bridge through the eta
+    // Ru-C bond, wrongly shortcutting X...B (ED33: P-Ru-C_eta = 2 vs the reference 5) and
+    // dropping the valid far X-bond. Rebuild the distance matrix on an adjacency with the
+    // eta bonds (metal <-> itag==-1 ligand) removed so they no longer bridge. Normal metal
+    // bonds (Ru-P/Ru-S) are kept, so the S-donor filter of PR34 is unchanged. Only built
+    // when the topology actually has eta atoms; otherwise the normal bpair is used.
+    const bool has_eta = std::any_of(topo_info.itag.begin(), topo_info.itag.end(),
+                                     [](int t) { return t == -1; });
+    std::vector<std::vector<int>> eta_free_dist;
+    if (has_eta && !topo_info.neighbor_lists.empty()) {
+        auto is_metal_atom = [&](int a) {
+            int z = (a >= 0 && a < m_atomcount) ? m_atoms[a] : 0;
+            return z >= 1 && z <= 86 && GFNFFParameters::metal_type[z - 1] > 0;
+        };
+        auto is_eta = [&](int a) {
+            return a >= 0 && a < static_cast<int>(topo_info.itag.size()) && topo_info.itag[a] == -1;
+        };
+        std::vector<std::vector<int>> eta_free_adj = topo_info.neighbor_lists;
+        for (int i = 0; i < static_cast<int>(eta_free_adj.size()); ++i) {
+            auto& nbrs = eta_free_adj[i];
+            nbrs.erase(std::remove_if(nbrs.begin(), nbrs.end(), [&](int j) {
+                return (is_metal_atom(i) && is_eta(j)) || (is_metal_atom(j) && is_eta(i));
+            }), nbrs.end());
+        }
+        eta_free_dist = calculateTopologyDistances(eta_free_adj);
+    }
+    const std::vector<std::vector<int>>& xb_bpair = has_eta ? eta_free_dist : topo_info.bpair;
+
     // Pre-calculate atom-specific basicity with overrides
     std::vector<double> current_basicity(m_atomcount);
 
@@ -8616,13 +9363,23 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
                 if (charges[B] > 0.05) return;
             }
 
-            bool x_bonded_to_b = false;
-            for (const auto& bond : bonds) {
-                if ((bond.first == X && bond.second == B) || (bond.first == B && bond.second == X)) {
-                    x_bonded_to_b = true; break;
+            // Fortran gfnff_ini.f90:872: `if (bpair(lin(j,ix)) .le. 3) cycle` — B must be
+            // topologically A...B, NOT X-B, i.e. MORE than 3 bonds from the X donor. curcuma
+            // previously only excluded B directly bonded to X (topological distance 1), so B
+            // atoms 2-3 bonds from X (e.g. the phosphine P and ring C reachable through the
+            // Ru center from an S donor in PR34) were wrongly admitted -> ~11x too many
+            // X-bonds (-0.0201 vs the reference -0.0018 Eh). bpair==999 is "unconnected/beyond
+            // BFS depth", correctly > 3 so distant B stay valid. Claude Generated (Jul 2026).
+            if (X < static_cast<int>(xb_bpair.size())
+                && B < static_cast<int>(xb_bpair[X].size())) {
+                if (xb_bpair[X][B] <= 3) return;
+            } else {
+                // Fallback if bpair is unavailable: keep the old direct-bond exclusion.
+                for (const auto& bond : bonds) {
+                    if ((bond.first == X && bond.second == B) || (bond.first == B && bond.second == X))
+                        return;
                 }
             }
-            if (x_bonded_to_b) return;
 
             GFNFFHalogenBond xb;
             xb.i = A;
@@ -8812,6 +9569,54 @@ std::pair<int, std::vector<int>> GFNFF::detectMolecularFragments(const std::vect
 
 GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
 {
+    /**
+     * Fortran q-loop (external/gfnff/src/gfnff_ini.f90:258-263, closes :632):
+     *
+     *   topo%qa = 0
+     *   do while (qloop_count < 2 .and. gen%rqshrink > 1e-3)
+     *      call gfnff_neigh(...)   ! bond radii shrink by qa (gfnff_ini2.f90:122)
+     *      ... EEQ -> topo%qa ...
+     *   end do
+     *
+     * Pass 1 runs with qa = 0 (gfnff_ini.f90:258), pass 2 re-derives the topology with the
+     * pass-1 charges shrinking the bond radii.
+     *
+     * The charges only ever reach the rest of the model THROUGH the bond list, so if the
+     * shrink does not change a single bond, pass 2 is a mathematical no-op and pass 1 is
+     * already the converged answer. Verified against an instrumented Fortran build: the
+     * bond list changes between passes on exactly 1 of 95 MOR41 structures (PR40). So the
+     * expensive second pass is gated on the bond list actually changing.
+     *
+     * That gate is also a correctness safeguard: calculateTopologyInfoOnce() is NOT
+     * currently re-entrant (a second invocation converges to a slightly different Coulomb
+     * energy - a pre-existing latent bug, see docs/GFNFF_NEIGHBOR_LISTS.md), so running it
+     * twice unconditionally would perturb every molecule.
+     *
+     * Claude Generated (Jul 2026).
+     */
+    m_bond_qa.clear();
+    TopologyInfo topo = calculateTopologyInfoOnce();
+
+    if (topo.topology_charges.size() != m_atomcount) return topo;
+
+    const std::vector<std::pair<int, int>> bonds_pass1 = getCachedBondList();
+
+    m_bond_qa.assign(topo.topology_charges.data(),
+                     topo.topology_charges.data() + m_atomcount);
+    m_cached_bond_list.reset();  // re-detect with charge-shrunk radii
+
+    if (getCachedBondList() == bonds_pass1) {
+        return topo;  // shrink changed nothing - pass 2 would be a no-op
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("GFN-FF q-loop: charge-shrunk radii changed the bond list, running pass 2");
+    }
+    return calculateTopologyInfoOnce();
+}
+
+GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
+{
     // Claude Generated (February 2026): Add timing for topology calculation
     auto topo_start = std::chrono::high_resolution_clock::now();
 
@@ -8851,7 +9656,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     }
 
     {
-        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
         m_param_gen_report.t_distance_matrix = static_cast<double>(dt.count());
         phase_timer = std::chrono::high_resolution_clock::now();
     }
@@ -8862,14 +9667,39 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         CurcumaLogger::info("Phase 2.2: Building adjacency list");
     }
     const auto& bond_list = getCachedBondList();
-    topo_info.adjacency_list.resize(m_atomcount);
-    for (const auto& [atom_i, atom_j] : bond_list) {
-        topo_info.adjacency_list[atom_i].push_back(atom_j);
-        topo_info.adjacency_list[atom_j].push_back(atom_i);
+
+    // Fortran four-list neighbour construction (gfnff_ini2.f90:128-130, 197-202).
+    // Fills nb_full / nb_hc / nb_nometal / metallic_character / itag and returns the
+    // eta-aware mixture nbdum, which becomes the working adjacency exactly as Fortran
+    // does at gfnff_ini2.f90:335 (topo%nb = nbdum). Claude Generated (Jul 2026).
+    std::vector<std::vector<int>> nbdum;
+    buildNeighborListSet(topo_info, nbdum);
+    topo_info.adjacency_list = nbdum;
+
+    // Optional diff of the two hybridization assignments (energies unaffected).
+    if (std::getenv("CURCUMA_HYBDIFF")) {
+        std::vector<int> itag_probe = topo_info.itag;
+        std::vector<int> hyb_fortran = determineHybridizationFortran(topo_info, nbdum, topo_info.distance_matrix, itag_probe);
+        std::vector<int> hyb_current = determineHybridization(topo_info.nb_full);
+        int ndiff = 0;
+        for (int i = 0; i < m_atomcount; ++i) {
+            if (hyb_current[i] != hyb_fortran[i]) {
+                ndiff++;
+                fmt::print("HYBDIFF {:5d} Z={:3d} current={} fortran={} nbf={} nbhc={} nbm={} nbdum={}\n",
+                           i + 1, m_atoms[i], hyb_current[i], hyb_fortran[i],
+                           static_cast<int>(topo_info.nb_full[i].size()),
+                           static_cast<int>(topo_info.nb_hc[i].size()),
+                           static_cast<int>(topo_info.nb_nometal[i].size()),
+                           static_cast<int>(nbdum[i].size()));
+            }
+        }
+        fmt::print("HYBDIFF_TOTAL {}\n", ndiff);
     }
 
     // Phase 10: Detect molecular fragments for constrained EEQ (Claude Generated - Jan 31, 2026)
-    auto frag_res = detectMolecularFragments(topo_info.adjacency_list);
+    // Fortran fragments on the FULL list (gfnff_ini.f90:468 mrecgff(...,nbf,...)), so an
+    // eta ligand is never split off into its own fragment (which would corrupt qfrag).
+    auto frag_res = detectMolecularFragments(topo_info.nb_full);
     topo_info.nfrag = frag_res.first;
     topo_info.fraglist = frag_res.second;
     topo_info.qfrag.assign(topo_info.nfrag, 0.0);
@@ -8887,15 +9717,25 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
     topo_info.coordination_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
-    // PHASE 2 OPTIMIZED (Feb 7, 2026): Pass adjacency_list to eliminate redundant O(N²) bond detection
-    topo_info.hybridization = determineHybridization(topo_info.adjacency_list);
+    // Hybridization. The Fortran-faithful path reads all four lists (gfnff_ini2.f90:211-333)
+    // and additionally writes itag (+1 for carbenes / NO2 nitrogen) on top of the -1 eta tags
+    // already set by buildNeighborListSet. Claude Generated (Jul 2026).
+    if (m_use_fortran_hyb) {
+        topo_info.hybridization = determineHybridizationFortran(
+            topo_info, nbdum, topo_info.distance_matrix, topo_info.itag);
+    } else {
+        topo_info.hybridization = determineHybridization(topo_info.adjacency_list);
+    }
 
     // NOTE: Removed std::async parallelization (May 2026) to prevent nested thread
     // creation when GFN-FF is called from an external thread pool (e.g. ConfSearch).
     // The overhead is negligible for parameter generation; thread safety is critical.
     topo_info.pi_fragments = detectPiSystems(topo_info.hybridization, topo_info.adjacency_list);
-    topo_info.neighbor_lists = buildNeighborLists();
-    topo_info.ring_sizes = findSmallestRings(topo_info.adjacency_list, topo_info);
+    // neighbor_lists is an alias of adjacency_list (== Fortran topo%nb after gfnff_ini2.f90:335).
+    // itag is already set by buildNeighborListSet (eta) and determineHybridizationFortran (carbene/NO2).
+    topo_info.neighbor_lists = topo_info.adjacency_list;
+    // Fortran perceives rings on the metal-free list (gfnff_ini.f90:692 getring36(...,nbm,...)).
+    topo_info.ring_sizes = findSmallestRings(topo_info.nb_nometal, topo_info);
 
     // Calculate simple neighbor counts for XTB compatibility in torsions
     // XTB uses raw neighbor count (topo%nb(20,i)) rather than effective CN for torsion correction
@@ -8906,7 +9746,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     topo_info.neighbor_counts = Eigen::Map<Vector>(neighbor_counts.data(), neighbor_counts.size());
 
     {
-        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
         m_param_gen_report.t_cn_hyb_pi_rings = static_cast<double>(dt.count());
         phase_timer = std::chrono::high_resolution_clock::now();
     }
@@ -9066,19 +9906,18 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         // BOTH placements, keep the one with lower EEQ electrostatic energy; for nfrag>2
         // put the charge on fragment 0; nfrag==1 and neutral keep the existing path.
         if (topo_info.nfrag == 2 && m_charge != 0) {
-            auto solveWith = [&](std::vector<double> qf) -> Vector {
-                eeq_topology_input.qfrag = qf;
-                m_eeq_solver->clearSolveStatus();
-                m_eeq_solver->invalidateCholeskyCache();
-                m_eeq_solver->invalidateMatrixCache();
-                return m_eeq_solver->calculateTopologyCharges(
-                    m_atoms, m_geometry_bohr, m_charge, topo_info.coordination_numbers,
-                    eeq_topology_input, true, pool_setup, m_threads);
-            };
+            // A1 (Jul 2026): both placements share the same Phase-1 matrix (qfrag
+            // enters only the constraint RHS), so build it once and solve both RHS.
             const double qc = static_cast<double>(m_charge);
-            Vector qa = solveWith({qc, 0.0});
+            m_eeq_solver->clearSolveStatus();
+            m_eeq_solver->invalidateCholeskyCache();
+            m_eeq_solver->invalidateMatrixCache();
+            auto trials = m_eeq_solver->calculateTopologyChargesMultiRHS(
+                m_atoms, m_geometry_bohr, m_charge, topo_info.coordination_numbers,
+                eeq_topology_input, {{qc, 0.0}, {0.0, qc}}, true, pool_setup, m_threads);
+            Vector qa = trials.size() > 0 ? trials[0] : Vector();
+            Vector qb = trials.size() > 1 ? trials[1] : Vector();
             double E_a = (qa.size() == m_atomcount) ? calculateEEQEnergy(qa, topo_info.coordination_numbers) : 1e300;
-            Vector qb = solveWith({0.0, qc});
             double E_b = (qb.size() == m_atomcount) ? calculateEEQEnergy(qb, topo_info.coordination_numbers) : 1e300;
             if (E_a <= E_b) {
                 topo_info.qfrag = {qc, 0.0};
@@ -9121,7 +9960,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         if (m_eeq_solver->lastSolveFailed()) m_eeq_solve_failed = true;
 
         {
-            auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+            std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
             m_param_gen_report.t_eeq_phase1 = static_cast<double>(dt.count());
             phase_timer = std::chrono::high_resolution_clock::now();
         }
@@ -9175,7 +10014,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         }
 
         {
-            auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+            std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
             m_param_gen_report.t_eeq_phase1_corr = static_cast<double>(dt.count());
             phase_timer = std::chrono::high_resolution_clock::now();
         }
@@ -9280,8 +10119,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     }
 
     {
-        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
-        m_param_gen_report.t_eeq_phase2 = static_cast<double>(dt.count());
+        // A0 (Jul 2026): sub-ms resolution, matching the per-step PrepTiming idiom.
+        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
+        m_param_gen_report.t_eeq_phase2 = dt.count();
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -9341,6 +10181,34 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             if (pool) pool->setActiveThreadCount(m_threads);
 
             std::vector<double> qfrag_save = topo_info.qfrag;
+
+            // A1 (Jul 2026): the Phase-1 matrix does not depend on qfrag (it enters
+            // only the constraint RHS), so the old "one full calculateTopologyCharges
+            // per pi-system" loop rebuilt a bit-identical matrix (Dijkstra + N x N erf
+            // fill) every time. Collect the fragment each pi-system neutralises, then
+            // solve the shared system once per DISTINCT assignment.
+            //
+            // Two pi-systems on the same fragment produce the same qfrag and therefore
+            // the same charges, so they share a solve. For a single-fragment molecule
+            // (the common case) all pi-systems collapse to one solve.
+            // A1b (Jul 2026): skip pi-systems whose fragment is ALREADY neutral.
+            //
+            // The block asks "how much charge sits on this pi-system" by re-solving
+            // Phase 1 with the pi-system's fragment neutralised and differencing
+            // against the base charges. If qfrag[ifrag-1] is already 0, the variant
+            // RHS is bit-identical to the base one, so the solve reproduces
+            // topology_charges exactly and dum is exactly 0 — the whole solve is a
+            // no-op computing a known zero. Skipping it is EXACT, not an
+            // approximation.
+            //
+            // This matters enormously for many-fragment systems: mixture.xyz
+            // (6200 atoms, 1400 fragments, all neutral) was issuing one dense
+            // (natoms+nfrag)^2 Cholesky per fragment at ~3 s each — a single point
+            // did not finish in 7 minutes. It now issues zero. Neutral molecules of
+            // any size skip the block entirely; only genuinely charged fragments
+            // still solve.
+            std::vector<int> pis_list;            // pi-system id, in pi_ids order
+            std::vector<int> pis_ifrag;           // fragment it neutralises (1-based)
             for (int pis : pi_ids) {
                 int first_pi_atom = -1;
                 for (int k = 0; k < m_atomcount; ++k)
@@ -9348,21 +10216,54 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
                 if (first_pi_atom < 0) continue;
                 int ifrag = (first_pi_atom < (int)topo_info.fraglist.size()) ? topo_info.fraglist[first_pi_atom] : 1;
                 if (ifrag < 1 || ifrag > (int)topo_info.qfrag.size()) continue;
-                // neutralize this fragment
-                ti.qfrag[ifrag - 1] = 0.0;
+                // Already-neutral fragment => variant RHS == base RHS => dum == 0.
+                // pi_system_charge was zero-initialised above, so just skip.
+                if (qfrag_save[ifrag - 1] == 0.0) continue;
+                pis_list.push_back(pis);
+                pis_ifrag.push_back(ifrag);
+            }
+
+            // Distinct neutralised fragments, first-seen order.
+            std::vector<int> uniq_ifrag;
+            std::vector<int> variant_of;  // index into uniq_ifrag, per pis_list entry
+            variant_of.reserve(pis_list.size());
+            for (int ifrag : pis_ifrag) {
+                auto it = std::find(uniq_ifrag.begin(), uniq_ifrag.end(), ifrag);
+                if (it == uniq_ifrag.end()) {
+                    variant_of.push_back(static_cast<int>(uniq_ifrag.size()));
+                    uniq_ifrag.push_back(ifrag);
+                } else {
+                    variant_of.push_back(static_cast<int>(std::distance(uniq_ifrag.begin(), it)));
+                }
+            }
+
+            std::vector<Vector> qa_neutral_per_variant;
+            if (!uniq_ifrag.empty()) {
+                std::vector<std::vector<double>> qfrag_variants;
+                qfrag_variants.reserve(uniq_ifrag.size());
+                for (int ifrag : uniq_ifrag) {
+                    std::vector<double> qf = qfrag_save;
+                    qf[ifrag - 1] = 0.0;  // neutralize this fragment
+                    qfrag_variants.push_back(std::move(qf));
+                }
+
                 m_eeq_solver->clearSolveStatus();
                 m_eeq_solver->invalidateCholeskyCache();
                 m_eeq_solver->invalidateMatrixCache();
-                Vector qa_neutral = m_eeq_solver->calculateTopologyCharges(
+                qa_neutral_per_variant = m_eeq_solver->calculateTopologyChargesMultiRHS(
                     m_atoms, m_geometry_bohr, 0, topo_info.coordination_numbers,
-                    ti, true, pool, m_threads);
-                ti.qfrag[ifrag - 1] = qfrag_save[ifrag - 1];  // restore
-                Vector qa_neutral_h = qheavy(qa_neutral);
+                    ti, qfrag_variants, true, pool, m_threads);
+            }
+
+            for (size_t n = 0; n < pis_list.size(); ++n) {
+                int vi = variant_of[n];
+                if (vi >= (int)qa_neutral_per_variant.size()) continue;
+                Vector qa_neutral_h = qheavy(qa_neutral_per_variant[vi]);
                 double dum = 0.0;
                 for (int k = 0; k < m_atomcount; ++k)
-                    if (topo_info.pi_fragments[k] == pis) dum += (qah(k) - qa_neutral_h(k));
+                    if (topo_info.pi_fragments[k] == pis_list[n]) dum += (qah(k) - qa_neutral_h(k));
                 dum *= 1.1;
-                topo_info.pi_system_charge[pis] = static_cast<int>(std::round(dum));
+                topo_info.pi_system_charge[pis_list[n]] = static_cast<int>(std::round(dum));
             }
             // restore solver state for the original qfrag
             ti.qfrag = qfrag_save;
@@ -9370,6 +10271,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             m_eeq_solver->invalidateCholeskyCache();
             m_eeq_solver->invalidateMatrixCache();
         }
+        m_param_gen_report.n_pi_systems = static_cast<int>(pi_ids.size());
+    }
+
+    {
+        // A0: ipis per-pi-system EEQ re-solves (one full topology-charge solve each)
+        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
+        m_param_gen_report.t_pi_charges_eeq = dt.count();
+        phase_timer = std::chrono::high_resolution_clock::now();
     }
 
     topo_info.pi_bond_orders = calculatePiBondOrders(
@@ -9378,8 +10287,16 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         topo_info.pi_fragments,
         charges_vec,
         m_geometry_bohr,  // P2a: Pass geometry instead of distance_matrix
-        topo_info.pi_system_charge  // ipis per pi-system (Jul 2026, F3)
+        topo_info.pi_system_charge,  // ipis per pi-system (Jul 2026, F3)
+        topo_info.itag  // carbene(+1)/NO2(+1)/eta(-1) tags for the FT-HMO electron count
     );
+
+    {
+        // A0: the FT-HMO (Hueckel) solve itself
+        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
+        m_param_gen_report.t_huckel = dt.count();
+        phase_timer = std::chrono::high_resolution_clock::now();
+    }
 
     // Initialize metal and aromatic flags
     topo_info.is_metal.resize(m_atomcount, false);
@@ -9466,8 +10383,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     }
 
     {
-        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
-        m_param_gen_report.t_pi_bond_orders = static_cast<double>(dt.count());
+        // A0: bond-type classification loop (is_metal/is_aromatic + classifyBondType)
+        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
+        m_param_gen_report.t_bond_types = dt.count();
         phase_timer = std::chrono::high_resolution_clock::now();
     }
 
@@ -9510,6 +10428,39 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     // bpair is same as topo_distances (topological distance matrix)
     topo_info.bpair = topo_info.topo_distances;
 
+    // eta-aware bpair for the BATM 1,4-pair test. Claude Generated (Jul 24, 2026):
+    // same root cause as the X-bond bpair fix (detectHalogenBondsNative). The Fortran
+    // topo%bpair (nbondmat/pairsbond, gfnff_ini2.f90) only records a distance when
+    // reachability is SYMMETRIC, and eta bonds are stored asymmetrically (the metal
+    // lists the eta-C, the eta-C omits the metal), so an eta bond never bridges a
+    // >=2-bond path. curcuma's topo_distances is a plain BFS that DOES bridge through
+    // the eta Ru-C bond, wrongly shortcutting pairs to bpair==3 and generating hundreds
+    // of spurious BATM triples (PR28 1085 vs the reference 656) -> BATM over-binding
+    // (~1 kcal on PR26/PR28/PR27/ED33, entirely in the bonded-ATM term). Rebuild the
+    // distance on an adjacency with the eta bonds (metal <-> itag==-1 ligand) removed;
+    // normal metal bonds (Ru-P/Ru-Cl) are kept. Only built when eta atoms exist.
+    const bool has_eta = std::any_of(topo_info.itag.begin(), topo_info.itag.end(),
+                                     [](int t) { return t == -1; });
+    std::vector<std::vector<int>> eta_free_dist;
+    if (has_eta && !topo_info.neighbor_lists.empty()) {
+        auto is_metal_atom = [&](int a) {
+            int z = (a >= 0 && a < m_atomcount) ? m_atoms[a] : 0;
+            return z >= 1 && z <= 86 && GFNFFParameters::metal_type[z - 1] > 0;
+        };
+        auto is_eta = [&](int a) {
+            return a >= 0 && a < static_cast<int>(topo_info.itag.size()) && topo_info.itag[a] == -1;
+        };
+        std::vector<std::vector<int>> eta_free_adj = topo_info.neighbor_lists;
+        for (int i = 0; i < static_cast<int>(eta_free_adj.size()); ++i) {
+            auto& nbrs = eta_free_adj[i];
+            nbrs.erase(std::remove_if(nbrs.begin(), nbrs.end(), [&](int j) {
+                return (is_metal_atom(i) && is_eta(j)) || (is_metal_atom(j) && is_eta(i));
+            }), nbrs.end());
+        }
+        eta_free_dist = calculateTopologyDistances(eta_free_adj);
+    }
+    const std::vector<std::vector<int>>& batm_bpair = has_eta ? eta_free_dist : topo_info.bpair;
+
     // Generate b3list for batm calculation
     topo_info.b3list.clear();
     topo_info.nbatm = 0;
@@ -9517,8 +10468,8 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     // Loop over all atom pairs
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = 0; j < i; ++j) {
-            // Check if i-j is a 1,4-pair (bpair[i][j] == 3)
-            if (topo_info.bpair[i][j] == 3) {
+            // Check if i-j is a 1,4-pair (bpair[i][j] == 3), eta-free distance
+            if (batm_bpair[i][j] == 3) {
                 // Add all neighbors of j as batm triples (i, j, k)
                 for (int k : topo_info.adjacency_list[j]) {
                     topo_info.b3list.push_back({i, j, k});
@@ -9539,14 +10490,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     }
 
     {
-        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
         m_param_gen_report.t_topo_distances = static_cast<double>(dt.count());
     }
 
     // Claude Generated (March 2026): Timing summary
     auto topo_end = std::chrono::high_resolution_clock::now();
-    auto topo_duration = std::chrono::duration_cast<std::chrono::milliseconds>(topo_end - topo_start);
-    m_topology_time_ms = static_cast<double>(topo_duration.count());
+    std::chrono::duration<double, std::milli> topo_duration = topo_end - topo_start;  // A0: sub-ms
+    m_topology_time_ms = topo_duration.count();
     m_param_gen_report.t_topology_total = m_topology_time_ms;
     m_param_gen_report.n_atoms = m_atomcount;
 

@@ -34,6 +34,8 @@
 #include <fmt/core.h>
 #include <fmt/format.h>
 
+#include <cstdlib>        // Claude Generated (Jul 2026): getenv for CURCUMA_BOND_CSV_ALL
+#include <limits>         // Claude Generated (Jul 2026): numeric_limits for the uncapped BOND_CSV dump
 #include <unordered_map>  // Claude Generated (Dec 2025): For atom_to_params lookup in Coulomb self-energy
 
 ForceFieldThread::ForceFieldThread(int thread, int threads)
@@ -998,11 +1000,21 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
         m_bond_energy += energy * factor;
 
         // Bond CSV diagnostic (Feb 14, 2026, capped Apr 2026 to first 5 + count)
+        //
+        // The cap keeps -v3 readable, but per-bond comparison against the Fortran
+        // reference (scripts/s30l_bond_compare.py) needs every bond. Set
+        // CURCUMA_BOND_CSV_ALL=1 to lift it. Claude Generated (Jul 2026).
         if (CurcumaLogger::get_verbosity() >= 3) {
+            static const int csv_limit = []() {
+                const char* env = std::getenv("CURCUMA_BOND_CSV_ALL");
+                return (env && std::string(env) != "0") ? std::numeric_limits<int>::max() : 5;
+            }();
             if (index == 0) {
-                CurcumaLogger::info("BOND_CSV (first 5 of N): idx, atom_i, atom_j, Z_i, Z_j, rij, r0, fc, alpha, fqq, energy");
+                CurcumaLogger::info(csv_limit == std::numeric_limits<int>::max()
+                        ? "BOND_CSV (all): idx, atom_i, atom_j, Z_i, Z_j, rij, r0, fc, alpha, fqq, energy"
+                        : "BOND_CSV (first 5 of N; CURCUMA_BOND_CSV_ALL=1 for all): idx, atom_i, atom_j, Z_i, Z_j, rij, r0, fc, alpha, fqq, energy");
             }
-            if (index < 5) {
+            if (index < csv_limit) {
                 CurcumaLogger::info(fmt::format("BOND_CSV: {:3d}, {:3d}, {:3d}, {:2d}, {:2d}, {:.6f}, {:.6f}, {:.9f}, {:.9f}, {:.6f}, {:.12f}",
                                                  index, bond.i, bond.j, bond.z_i, bond.z_j,
                                                  rij, r0_ij, k_b, alpha, bond.fqq, energy * factor));
@@ -1360,6 +1372,12 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         // Reference: gfnff_engrad.F90:1268-1272: et = (1+cos(c1)) * vtors(2,m)
         double et = V * (1.0 + cos(c1));
         double energy = et * damp;
+
+        if (std::getenv("CURCUMA_TORS_DUMP")) {
+            fmt::print("TORS {:3d} {:3d} {:3d} {:3d}  n={:.1f} phi0={:7.2f} phi={:7.2f} V={:.6f} damp={:.5f} E={:.9f}\n",
+                       dihedral.i+1, dihedral.j+1, dihedral.k+1, dihedral.l+1,
+                       n, phi0*180.0/M_PI, phi*180.0/M_PI, V, damp, energy*m_dihedral_scaling);
+        }
 
         primary_torsion_energy += energy * m_dihedral_scaling;  // Claude Generated (Jan 2, 2026): Accumulate primary
 
@@ -3581,10 +3599,12 @@ void ForceFieldThread::CalculateATMContribution()
         //
         // Claude Generated (May 2026, GPU-vs-CPU 8.9 µEh investigation): ATM is a D3/D4
         // dispersion theory. The CPU previously read rcov_bohr (= r0_gfnff, the GFN-FF
-        // bond-r0 array — values like 0.557 Bohr for H, 0.983 for C) instead of D3
-        // covalent radii (covalent_rad_d3 — 0.605 Bohr for H, 1.417 for C, matches GPU's
-        // s_rcov_d3_bohr exactly). Caused the polymer ATM mismatch CPU=+16.74 µEh vs
-        // GPU=+7.52 µEh that drove the gfnff_gpu_vs_cpu_polymer test failure.
+        // bond-r0 array — values like 0.557 Bohr for H, 0.983 for C) instead of the GFN-FF
+        // covalent radii (covalent_rad_d3 — 0.605 Bohr for H, 1.417 for C). Caused the
+        // polymer ATM mismatch CPU=+16.74 µEh vs GPU=+7.52 µEh that drove the
+        // gfnff_gpu_vs_cpu_polymer test failure. (Jul 2026) The GPU now uploads its rcov
+        // directly from covalent_rad_d3 too (was a hand-copied table that had drifted to
+        // the Grimme D3 radii for metals), so both sides share this exact array.
         double r_cov_i = (zi > 0 && zi <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zi - 1] : 1.0;
         double r_cov_j = (zj > 0 && zj <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zj - 1] : 1.0;
         double r_cov_k = (zk > 0 && zk <= static_cast<int>(covalent_rad_d3.size())) ? covalent_rad_d3[zk - 1] : 1.0;

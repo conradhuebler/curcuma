@@ -126,6 +126,7 @@ void XTB::calculateGradient()
     //      E_rep_ij = Z_i·Z_j / R^rexp * exp(-sqrt(α_i·α_j) * R^kexp_ij)
     //      dE/dr    = -(rexp/R + alpha_pair*kexp_ij*R^(kexp_ij-1)) * E_pair
     // ==========================================================================
+    if (!m_repulsion_grad_off)
     for (int i = 0; i < nat; ++i) {
         const int zi = m_atoms[i];
         double alfi, zeffi, kexp, rexp;
@@ -275,6 +276,17 @@ void XTB::calculateGradient()
                                 xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], dDblk, dQblk, 5);
                     }
 
+                    // B8 (Jul 2026): the s/p overlap-gradient kernel used to redo
+                    // the whole primitive loop -- including its pow() and exp() --
+                    // once per AO COMPONENT pair. Those scalars depend only on the
+                    // primitive pair, so build them once per shell pair here.
+                    CGTO::OverlapPrimPair pp[CGTO::kMaxPrimPairs];
+                    int npp = 0;
+                    if (!dpair)
+                        npp = CGTO::buildOverlapPrimPairs(sh_a, sh_b,
+                            xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                            xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], pp);
+
                     // ── hscale hs ────────────────────────────────────────────
                     double hs;
                     if (m_method == MethodType::GFN1) {
@@ -311,7 +323,10 @@ void XTB::calculateGradient()
                                                 + m_h0.shpoly[ish_b] / pi_b) * rr / (2.0 * r2);
 
                     // ── v_ao for this shell pair ─────────────────────────────
-                    // All AOs in shell ish_a share the same v_ao value.
+                    // All AOs in shell ish_a share the same v_ao value. v_at carries the
+                    // ES2/3rd-order/AES-monopole AND (GFN2 gradient) the self-consistent-D4
+                    // dE_D4/dq shift, so the charge-Pulay −P·(v_a+v_b)·dS reproduces the full
+                    // Mulliken charge response of every SCC term.
                     const double v_a = m_pot.v_sh(ish_a) + m_pot.v_at(iat);
                     const double v_b = m_pot.v_sh(ish_b) + m_pot.v_at(jat);
 
@@ -340,7 +355,10 @@ void XTB::calculateGradient()
                             if (dpair) {
                                 const int o = (iao*5 + jao) * 3;
                                 dS[0] = dSblk[o]; dS[1] = dSblk[o+1]; dS[2] = dSblk[o+2];
+                            } else if (npp >= 0) {
+                                CGTO::cgto_overlap_grad_pre(pp, npp, t_a, t_b, dS);
                             } else {
+                                // Shell pair exceeded the pair-table capacity.
                                 CGTO::cgto_overlap_grad(sh_a, sh_b,
                                                         xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
                                                         xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2],
@@ -349,7 +367,9 @@ void XTB::calculateGradient()
 
                             // sval: coefficient for the overlap-gradient term
                             // sval = 2·P·h_av - 2·W - P·(v_a+v_b)
-                            const double sval = 2.0*Pmn*h_av - 2.0*Wmn - Pmn*(v_a + v_b);
+                            const double sval = m_sval_h0_only
+                                ? 2.0*Pmn*h_av                                  // Tr(P·dH0) band only
+                                : 2.0*Pmn*h_av - 2.0*Wmn - Pmn*(v_a + v_b);
 
                             G_sval[0] += sval * dS[0];
                             G_sval[1] += sval * dS[1];
@@ -363,7 +383,7 @@ void XTB::calculateGradient()
                             //   term = d(dp_jat)/dRiat · v_dp(jat) + d(dp_iat)/dRiat · v_dp(iat)
                             //        + d(qp_jat)/dRiat · v_qp(jat) + d(qp_iat)/dRiat · v_qp(iat)
                             // Reference: tblite h0.f90:get_hamiltonian_gradient
-                            if (m_method == MethodType::GFN2 && m_mp_initialized) {
+                            if (m_method == MethodType::GFN2 && m_mp_initialized && !m_mp_grad_off) {
                                 double D_mp[3], Q_mp[6];
                                 double dD_dA[3][3], dQ_dA[3][6];
                                 if (dpair) {
@@ -486,7 +506,7 @@ void XTB::calculateGradient()
     //      Klopman-Ohno kernel: γ(r) = (r^g + gam^{-g})^{-1/g}
     //      dγ/dr = −r^{g−2} · γ^{g+1}
     // ==========================================================================
-    {
+    if (!m_coulomb_grad_off) {
         const double gexp = (m_method == MethodType::GFN1)
                           ? gfn1_params::gexp
                           : gfn2_params::gexp;
@@ -578,7 +598,7 @@ void XTB::calculateGradient()
     //
     //  Must run BEFORE section 4 so that dEdcn is complete when CN loop executes.
     // ==========================================================================
-    if (m_method == MethodType::GFN2 && m_mp_initialized) {
+    if (m_method == MethodType::GFN2 && m_mp_initialized && !m_mp_grad_off) {
         using namespace gfn2_params;
 
         Vector dEdr_mp = Vector::Zero(nat);
@@ -722,7 +742,7 @@ void XTB::calculateGradient()
     //  is not yet implemented; zetac6 is treated as a static prefactor (sub-mEh
     //  residual on the AP test set). See dispersion/CLAUDE.md.
     // ==========================================================================
-    if (m_disp_gradient_valid
+    if (m_disp_gradient_valid && !m_d4_grad_off
         && m_disp_gradient.rows() == nat && m_disp_gradient.cols() == 3) {
         m_gradient += m_disp_gradient;
         if (m_disp_dEdcn.size() == nat) {
@@ -743,7 +763,7 @@ void XTB::calculateGradient()
     //  Covalent radii: D3 parametrisation via covalent_rad_d3_au().
     //  Note: dEdcn now includes H0/Pulay + GFN2 multipole mrad contributions.
     // ==========================================================================
-    {
+    if (!m_cnchain_off) {
         std::vector<double> rcov(nat);
         for (int i = 0; i < nat; ++i)
             rcov[i] = covalent_rad_d3_au(m_atoms[i]);
@@ -858,7 +878,7 @@ bool XTB::calculateGradientGpu()
     // 5. GFN2 direct multipole interaction gradient (host; O(nat²) over the
     // atomic moments dp_at/qp_at — identical to section 5 in calculateGradient).
     // Must precede section 4 so dEdcn carries the mrad/CN chain contribution.
-    if (m_method == MethodType::GFN2 && m_mp_initialized) {
+    if (m_method == MethodType::GFN2 && m_mp_initialized && !m_mp_grad_off) {
         using namespace gfn2_params;
         Vector dEdr_mp = Vector::Zero(nat);
         for (int iat = 0; iat < nat; ++iat) {

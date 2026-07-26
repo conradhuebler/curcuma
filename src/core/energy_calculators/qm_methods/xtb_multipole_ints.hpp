@@ -169,6 +169,121 @@ inline void cgto_multipole(const CGTO::Shell& shell_a, const CGTO::Shell& shell_
     }
 }
 
+// -----------------------------------------------------------------------------
+// B3 (Jul 2026): shell-pair-blocked multipole integrals.
+//
+// cgto_multipole() above is called once per AO-COMPONENT pair, so for a p-p
+// shell pair it runs the whole nprim_a x nprim_b primitive loop nine times,
+// recomputing gamma, the Gaussian product centre P, K = exp(...) and PA/PB every
+// time. Those quantities depend only on the primitive pair, not on the cartesian
+// powers; only the 1-D moments do, and they take just (la, lb) per axis.
+//
+// This emits the whole component block from a single pass over primitive pairs:
+// per pair it builds the 1-D moment table I[la][lb][n] (la, lb in {0,1} for s/p,
+// n in {0,1,2}) once per axis and then assembles every component from it.
+//
+// Bit-identity: gamma, P, K and each moment1d() call receive exactly the same
+// arguments as before, the assembly keeps the same left-to-right association
+// (((K*Sx)*Sy)*Sz), and the accumulation over (i, j) stays i-major/j-minor, so
+// every emitted value is bit-identical to the per-component path.
+//
+// Layout: component (ia, jb) is at c = ia*ncb + jb;
+//   out_S[c], out_D[c*3 + k] (k<3), out_Q[c*6 + k] (k<6, order xx,xy,yy,xz,yz,zz).
+// s/p only (ang <= 1) -> at most 3x3 components; d pairs are handled by
+// sphericalMultipoleBlock().
+// -----------------------------------------------------------------------------
+inline void cgto_multipole_block(const CGTO::Shell& shell_a, int ang_a,
+                                 const CGTO::Shell& shell_b, int ang_b,
+                                 double xa, double ya, double za,
+                                 double xb, double yb, double zb,
+                                 double* out_S, double* out_D, double* out_Q)
+{
+    const int nca = 2 * ang_a + 1;   // s -> 1, p -> 3
+    const int ncb = 2 * ang_b + 1;
+
+    for (int c = 0; c < nca * ncb; ++c) {
+        out_S[c] = 0.0;
+        for (int k = 0; k < 3; ++k) out_D[c * 3 + k] = 0.0;
+        for (int k = 0; k < 6; ++k) out_Q[c * 6 + k] = 0.0;
+    }
+
+    // Cartesian powers per local AO index, via the tblite ordering used by
+    // ao_to_type(): s -> 0 ; p -> [py, pz, px]. Inlined here to keep this header
+    // free of xtb_ao_utils.hpp.
+    static const int p_map[3] = {2, 3, 1};
+    int ca[3][3], cb[3][3];
+    for (int ia = 0; ia < nca; ++ia) {
+        const int t = (ang_a == 0) ? 0 : p_map[ia];
+        type_to_cart(t, ca[ia][0], ca[ia][1], ca[ia][2]);
+    }
+    for (int jb = 0; jb < ncb; ++jb) {
+        const int t = (ang_b == 0) ? 0 : p_map[jb];
+        type_to_cart(t, cb[jb][0], cb[jb][1], cb[jb][2]);
+    }
+
+    // Same R2 as primitive_multipole (dx = A - B); the sign is irrelevant once
+    // squared, and negation is exact in IEEE.
+    const double dx = xa - xb, dy = ya - yb, dz = za - zb;
+    const double R2 = dx * dx + dy * dy + dz * dz;
+
+    const int la_max = (ang_a > 0) ? 1 : 0;
+    const int lb_max = (ang_b > 0) ? 1 : 0;
+
+    for (int i = 0; i < shell_a.nprim; ++i) {
+        const double ai = shell_a.alpha[i];
+        const double ci = shell_a.coeff[i];
+        for (int j = 0; j < shell_b.nprim; ++j) {
+            const double aj = shell_b.alpha[j];
+            const double cj = shell_b.coeff[j];
+
+            const double gamma = ai + aj;
+            const double Px = (ai * xa + aj * xb) / gamma;
+            const double Py = (ai * ya + aj * yb) / gamma;
+            const double Pz = (ai * za + aj * zb) / gamma;
+            const double K  = std::exp(-ai * aj / gamma * R2);
+
+            const double PAx = Px - xa, PAy = Py - ya, PAz = Pz - za;
+            const double PBx = Px - xb, PBy = Py - yb, PBz = Pz - zb;
+
+            // 1-D moment tables, computed once per primitive pair per axis.
+            double Ix[2][2][3], Iy[2][2][3], Iz[2][2][3];
+            for (int la = 0; la <= la_max; ++la)
+                for (int lb = 0; lb <= lb_max; ++lb)
+                    for (int n = 0; n < 3; ++n) {
+                        Ix[la][lb][n] = moment1d(la, lb, n, PAx, PBx, Px, gamma);
+                        Iy[la][lb][n] = moment1d(la, lb, n, PAy, PBy, Py, gamma);
+                        Iz[la][lb][n] = moment1d(la, lb, n, PAz, PBz, Pz, gamma);
+                    }
+
+            const double cc = ci * cj;
+
+            for (int ia = 0; ia < nca; ++ia) {
+                for (int jb = 0; jb < ncb; ++jb) {
+                    const double* Ixp = Ix[ca[ia][0]][cb[jb][0]];
+                    const double* Iyp = Iy[ca[ia][1]][cb[jb][1]];
+                    const double* Izp = Iz[ca[ia][2]][cb[jb][2]];
+
+                    const double Sx0 = Ixp[0], Sx1 = Ixp[1], Sx2 = Ixp[2];
+                    const double Sy0 = Iyp[0], Sy1 = Iyp[1], Sy2 = Iyp[2];
+                    const double Sz0 = Izp[0], Sz1 = Izp[1], Sz2 = Izp[2];
+
+                    const int c = ia * ncb + jb;
+                    out_S[c]         += cc * (K * Sx0 * Sy0 * Sz0);
+                    out_D[c * 3 + 0] += cc * (K * Sx1 * Sy0 * Sz0);
+                    out_D[c * 3 + 1] += cc * (K * Sx0 * Sy1 * Sz0);
+                    out_D[c * 3 + 2] += cc * (K * Sx0 * Sy0 * Sz1);
+                    out_Q[c * 6 + 0] += cc * (K * Sx2 * Sy0 * Sz0);  // xx
+                    out_Q[c * 6 + 1] += cc * (K * Sx1 * Sy1 * Sz0);  // xy
+                    out_Q[c * 6 + 2] += cc * (K * Sx0 * Sy2 * Sz0);  // yy
+                    out_Q[c * 6 + 3] += cc * (K * Sx1 * Sy0 * Sz1);  // xz
+                    out_Q[c * 6 + 4] += cc * (K * Sx0 * Sy1 * Sz1);  // yz
+                    out_Q[c * 6 + 5] += cc * (K * Sx0 * Sy0 * Sz2);  // zz
+                }
+            }
+        }
+    }
+}
+
 // =============================================================================
 // AP5b: Gradient routines for multipole integrals (Pulay integral term)
 //

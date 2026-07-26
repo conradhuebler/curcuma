@@ -138,6 +138,8 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
 
         double E_old = 0.0;
         Eigen::MatrixXd P_old = Eigen::MatrixXd::Constant(npi, npi, 2.0/3.0);  // Benzene reference
+        Eigen::MatrixXd H_converged;  // Hamiltonian (pre-solve) of the last iteration
+        double pisip = 0.0;           // HOMO energy of the converged solve
 
         for (int iter = 0; iter < maxhiter; iter++) {
             // Build Hamiltonian with P-dependent off-diagonal coupling
@@ -146,10 +148,11 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
                 atoms, hybridization, charges, bonds, geometry_bohr,
                 P_old
             );
+            H_converged = H;  // save the Hamiltonian before solve overwrites it with the density
 
             // Solve eigenvalue problem and get density matrix
             // H is modified in place to contain the density matrix
-            double E_new = solveAndBuildDensity(H, nelpi);
+            double E_new = solveAndBuildDensity(H, nelpi, &pisip);
 
             if (m_verbosity >= 3) {
                 CurcumaLogger::info(fmt::format("  Iter {}: E = {:.6f}", iter + 1, E_new));
@@ -166,6 +169,40 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
 
             P_old = H;  // H now contains density matrix
             E_old = E_new;
+        }
+
+        // ====================================================================
+        // Step 2b: "wrong pi occupation" fallback
+        // Port from xtb gfnff_ini.f90:1082-1099 (NOT gated on print, unlike the
+        // pprcht standalone which nests it in `if(pr2)`). If the HOMO energy of the
+        // converged FT-HMO solve is > 0.40, the pi occupation is deemed wrong; redo
+        // the final solve of the converged Hamiltonian with one fewer electron.
+        // This fires for the odd-nelpi=7 metal-coordinated N-heteroaromatic rings
+        // (ED21/PR16/ED16a): without it, all 7 electrons occupy an antibonding
+        // orbital (HOMO eps ~2.3) -> too-weak rings (+180 kcal vs the reference);
+        // with it, nelpi -> 6 reproduces the reference GFN-FF.
+        //
+        // et FIX (Jul 23, 2026): the redo uses et=300, NOT the main solve's et=4000.
+        // The pprcht/gfnff reference (our port source, gfnff_ini.f90:993) re-solves
+        // the reduced-electron Hamiltonian at 300 K (`gfnffqmsolve(...,300.0d0,...)`),
+        // a deliberately colder temperature that sharpens the occupation; only the
+        // FIRST solve uses 4000. Using 4000 for the redo (the xtb variant) left a
+        // systematic ~0.005-0.008 piBO offset on these fragments (PR25/ED25/PR21/
+        // ED21/PR16 +2-3 kcal, all in the bond term). We DO keep the fallback always
+        // firing (xtb-like), NOT print-gated like the pprcht standalone (`if(pr2)`) —
+        // print-gating would make the energy depend on the verbosity flag.
+        // Neutral even-nelpi and no-fallback odd systems (ED36 nelpi=5,
+        // pisip=-1.545) never enter this branch and are unaffected.
+        // ====================================================================
+        if (pisip > 0.40 && nelpi > 1 && H_converged.rows() == npi) {
+            if (m_verbosity >= 3) {
+                CurcumaLogger::info(fmt::format(
+                    "  Wrong pi occupation (HOMO eps={:.4f} > 0.40): second attempt with Nel={} at et=300",
+                    pisip, nelpi - 1));
+            }
+            Eigen::MatrixXd H_redo = H_converged;
+            solveAndBuildDensity(H_redo, nelpi - 1, &pisip, 300.0);  // pprcht redo at 300 K
+            P_old = H_redo;
         }
 
         // ====================================================================
@@ -367,7 +404,7 @@ Eigen::MatrixXd HuckelSolver::buildHamiltonian(
 // Eigenvalue Solver and Density Matrix
 // ============================================================================
 
-double HuckelSolver::solveAndBuildDensity(Eigen::MatrixXd& H, int nel) const
+double HuckelSolver::solveAndBuildDensity(Eigen::MatrixXd& H, int nel, double* pisip_out, double et) const
 {
     // Port from gfnff_qm.f90:39-154
     //
@@ -402,40 +439,52 @@ double HuckelSolver::solveAndBuildDensity(Eigen::MatrixXd& H, int nel) const
     eigenvalues *= 0.1 * hartree_to_ev;
 
     // ========================================
-    // Step 3: Compute occupations via Fermi smearing
-    // Port from gfnff_qm.f90:107-118
+    // Step 3: Compute occupations via two-channel Fermi smearing
+    // Port from gfnff_qm.f90:81-104 (the et>1e-3 branch; GFN-FF always calls with
+    // et=4000, nopen=0 — gfnff_ini.f90:1065,1089).
     //
-    // Fortran approach (closed-shell, nopen=0):
-    //   ihomoa = nel/2, ihomob = nel/2
-    //   fermismear(alpha, ihomoa, ...) → focca [0,1]
-    //   fermismear(beta,  ihomob, ...) → foccb [0,1]
-    //   focc = focca + foccb → [0,2]
+    // occu() (scc_core.f90) splits nel into per-spin occupied counts (nopen=0):
+    //   even nel:  ihomoa = ihomob = nel/2
+    //   odd  nel:  ihomoa = nel/2 + 1, ihomob = nel/2   (alpha keeps the odd e-)
+    // fermismear then runs SEPARATELY per spin channel; focc = focca + foccb.
     //
-    // For closed-shell: focca == foccb, so focc = 2*focca
-    // We implement this as: Fermi target nel/2, then double.
+    // Claude Generated (Jul 2026): the previous port hard-coded the closed-shell
+    // assumption (ihomoa==ihomob==nel/2, one smear doubled). That is exact for EVEN
+    // nel but WRONG for ODD nel (metal-coordinated Cp-type rings, nelpi=5): it
+    // placed only 2*(nel/2)=nel-1 electrons (dropping the odd e-) AND ran the
+    // biradical test at orbital nel/2 instead of the true alpha HOMO nel/2+1, so
+    // curcuma spuriously fired the symmetry-break branch and returned Kekulé-
+    // localized pibo where xtb gives the delocalized aromatic value. For even nel
+    // focca and foccb are identical, so occ = focca+foccb == 2*focca — bit-identical
+    // to the old path (benzene / COT / cyclobutadiene and the real antiaromatic
+    // branch are unchanged; only odd-nel systems are affected).
     // ========================================
 
-    int nel_alpha = nel / 2;  // Electrons per spin channel
-    std::vector<double> occ = fermiSmear(eigenvalues, nel_alpha, fermi_temp);
+    int ihomob = nel / 2;               // beta occupied count (occu, nopen=0)
+    int ihomoa = nel / 2 + (nel % 2);   // alpha keeps the odd electron
 
-    // Double occupations: focc = focca + foccb (both channels identical)
-    for (auto& o : occ) {
-        o *= 2.0;
+    std::vector<double> occ(ndim, 0.0);
+    if (ihomoa > 0 && ihomoa <= ndim) {
+        std::vector<double> focca = fermiSmear(eigenvalues, ihomoa, et);
+        for (int i = 0; i < ndim; i++) occ[i] += focca[i];
+    }
+    if (ihomob > 0 && ihomob <= ndim) {
+        std::vector<double> foccb = fermiSmear(eigenvalues, ihomob, et);
+        for (int i = 0; i < ndim; i++) occ[i] += foccb[i];
     }
 
     // ========================================
     // Step 4: Check for perfect biradical (anti-aromatic)
-    // Port from gfnff_qm.f90:119-129
+    // Port from gfnff_qm.f90:95-104
     //
-    // Fortran checks: if abs(focc(ihomoa) - focc(ihomoa+1)) < 1e-4
-    // where ihomoa = nel/2 (1-based). In 0-based: ihomoa-1 and ihomoa.
-    // focc values are total [0,2] occupations.
+    // Fortran (1-based): if(ihomoa+1.le.ndim) if(abs(focc(ihomoa)-focc(ihomoa+1))<1e-4)
+    // 0-based: compare occ[ihomoa-1] and occ[ihomoa]. ihomoa is the alpha HOMO from
+    // occu (nel/2+1 for odd nel), NOT nel/2. focc values are total [0,2] occupations.
     // ========================================
 
-    int ihomoa = nel / 2;  // 1-based HOMO index = 0-based LUMO index
-    if (ihomoa > 0 && ihomoa < ndim) {
+    if (ihomoa >= 1 && ihomoa + 1 <= ndim) {
         if (std::abs(occ[ihomoa - 1] - occ[ihomoa]) < 1e-4) {
-            // Perfect biradical detected - break symmetry
+            // Perfect biradical detected - break symmetry (COT / cyclobutadiene)
             if (m_verbosity >= 3) {
                 CurcumaLogger::info("  Perfect biradical detected, breaking symmetry");
             }
@@ -454,6 +503,18 @@ double HuckelSolver::solveAndBuildDensity(Eigen::MatrixXd& H, int nel) const
     double E_el = 0.0;
     for (int i = 0; i < ndim; i++) {
         E_el += occ[i] * eigenvalues(i);
+    }
+
+    // pisip = HOMO orbital energy (eV, scaled): the eps of the highest orbital
+    // with occ > 0.5. Port from gfnff_ini.f90:1069-1072 (do i=1,npi; if occ>0.5
+    // pisip=eps(i)). The caller compares it against 0.40 for the "wrong pi
+    // occupation" fallback. eps units match Fortran (both *0.1*27.2114).
+    if (pisip_out) {
+        double pisip = 0.0;
+        for (int i = 0; i < ndim; i++) {
+            if (occ[i] > 0.5) pisip = eigenvalues(i);
+        }
+        *pisip_out = pisip;
     }
 
     // ========================================

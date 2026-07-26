@@ -341,6 +341,13 @@ private:
     // Size: 118 * 118 * 7 * 7 = 406,952 doubles = ~3.1 MB
     std::vector<double> m_c6_flat_cache;
     bool m_c6_reference_cached = false;
+    // Claude Generated (Jul 2026): the C6 reference matrix is now built only for the elements
+    // PRESENT in the molecule (not all 118), cutting a fixed ~9.7 ms to sub-ms. This holds the
+    // sorted 0-indexed element set the cache currently covers; c6CacheCoversAtoms() rebuilds
+    // when a molecule introduces an element not yet cached (so cross-molecule reuse stays correct).
+    std::vector<int> m_c6_present_signature;
+    // True if the C6 flat cache already covers every element in m_atoms.
+    bool c6CacheCoversAtoms() const;
 
     // Dense array index for C6 reference lookup (no hash, just arithmetic)
     inline size_t c6FlatIndex(int elem_i, int elem_j, int ref_i, int ref_j) const {
