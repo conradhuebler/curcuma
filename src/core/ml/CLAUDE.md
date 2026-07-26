@@ -30,18 +30,27 @@ GFN-FF cost with reference-level ranking. See [docs/DELTA_ML.md](../../../docs/D
 
 ## Verification status (AI-generated, machine-tested)
 
+Automated: `ctest -R deltaml` (20 unit checks + 13 CLI assertions).
+
 - Descriptor Jacobian vs. finite differences: h^2 convergence to the roundoff floor
   (1.5e-5 at h=1e-3 down to 6e-10 at h=1e-6); translation invariance 2e-16, rotation 1e-15
 - Model gradient vs. finite differences: 1.2e-11 Eh/Angstrom
 - Energy from the gradient path and the plain path agree bit-for-bit
 - JSON round-trip reproduces energies and gradients exactly
-- Learning curve descends monotonically on synthetic data with a known analytic target
-- **Not tested**: real chemical systems, MD stability, transferability across molecules.
+- Energy-only fit interpolates its training energies to 1.5e-4 kcal/mol, which separates a
+  regression defect from a mere energy/gradient weighting trade-off
+- Real system (353 conformers, 90 atoms, C/H/N, GFN-FF -> GFN2): relative energy MAE
+  0.647 -> 0.167 kcal/mol, gradient RMSE 5.04e-3 -> 0.90e-3 Eh/A, Spearman 0.41 -> 0.89
+- **Not tested**: other molecule classes, charged or open-shell systems, transition metals,
+  transferability across molecules, long-time MD stability, any DFT reference.
   Human production testing pending.
 
 ## Open
 
 - Uncertainty is a descriptor-space distance, not an error estimate - adequate for steering
-  active learning, not a accuracy guarantee
+  active learning, not an accuracy guarantee
+- `sigma_energy` / `sigma_force` set a genuine trade-off, not a formality: on a small rough
+  set the 3N gradient rows outvote the single energy row and energies get traded away
+  (measured: sigma_energy 1e-4 -> 3.01 kcal/mol at gradient 0.0185, 1e-6 -> 0.0039 at 0.0351)
 - Training cost grows as M^2; centres are capped at 12000 with an explicit error
 - GPU port of the kernel and descriptor evaluation not started

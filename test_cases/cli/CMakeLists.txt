@@ -236,6 +236,13 @@ set_tests_properties(cli_sqm_10_gfn2_optimization_smoke PROPERTIES DISABLED TRUE
 # (kept for reference; test is currently DISABLED)
 set_tests_properties(cli_sqm_10_gfn2_optimization_smoke PROPERTIES TIMEOUT 180)
 
+# =============================================================================
+# Delta-ML Tests
+# Claude Generated (July 2026): train a delta model, use it as a method, reload it.
+# Invariants only -- the sharp derivative check lives in the test_deltaml unit test.
+# =============================================================================
+add_cli_test(deltaml 01_train_and_predict)
+
 message(STATUS "Added CLI test scenarios with build directory isolation")
 message(STATUS "  - Tests execute from: ${CMAKE_CURRENT_BINARY_DIR}/category/test_name")
 message(STATUS "  - Source tree remains clean (all outputs in build directory)")

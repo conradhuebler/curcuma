@@ -87,6 +87,19 @@ endif()
 add_test(NAME test_bmt_utils COMMAND test_bmt_utils)
 set_tests_properties(test_bmt_utils PROPERTIES TIMEOUT 10 LABELS "bmt;unit")
 
+# Claude Generated 2026: Delta-ML descriptor and regression unit tests
+add_executable(test_deltaml
+        test_deltaml.cpp)
+
+target_link_libraries(test_deltaml curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_deltaml REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_deltaml COMMAND test_deltaml)
+set_tests_properties(test_deltaml PROPERTIES TIMEOUT 120 LABELS "deltaml;unit")
+
 # Claude Generated 2026: PLUMED init unit test suite (only built with USE_Plumed)
 if(USE_Plumed)
     add_executable(test_plumed_init

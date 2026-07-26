@@ -436,6 +436,15 @@ bool DeltaMLModel::train(
     }
     A += opt.lambda * Kmm;
 
+    // Accumulating normal equations squares the condition number of the design matrix, and
+    // K_MM is itself near-singular once many centres sit close together in descriptor
+    // space. A small ridge relative to the diagonal scale keeps the factorisation
+    // meaningful; without it LDLT can report success and still return a useless solution,
+    // which shows up as accuracy getting *worse* with more centres.
+    const double diag_scale = A.diagonal().mean();
+    if (diag_scale > 0.0 && opt.jitter_relative > 0.0)
+        A.diagonal().array() += opt.jitter_relative * diag_scale;
+
     double jitter = 0.0;
     bool solved = false;
     for (int attempt = 0; attempt < 6 && !solved; ++attempt) {

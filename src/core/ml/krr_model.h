@@ -49,6 +49,8 @@ struct DeltaMLTrainingOptions {
     int n_centers = 1000;       ///< kernel centres M; <= 0 uses every training environment
     double kernel_sigma = 0.0;  ///< kernel width; <= 0 selects the median-distance heuristic
     double lambda = 1e-8;       ///< weight of the RKHS regulariser beta^T K_MM beta
+    double jitter_relative = 1e-8; ///< ridge added to the normal equations, relative to their
+                                   ///< diagonal scale; guards the factorisation at large M
     double sigma_energy = 1e-4; ///< assumed energy noise [Eh], sets the energy row weight
     double sigma_force = 1e-3;  ///< assumed force noise [Eh/Angstrom], sets the force weight
     bool use_forces = true;     ///< include gradient observations (3N per structure)

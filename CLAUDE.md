@@ -227,7 +227,15 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - **Hessian Analysis** - Second derivative calculations
 - **Orbital Analysis** - Molecular orbital visualization and analysis
 
-### 10. Core Computational Libraries
+### 10. Delta-Machine-Learning
+- ⚠️ **Delta-ML** (`-activelearn`, `-method deltaml:<model.json>`, Jul 2026, AI/machine-tested) - learns
+  `E_ref - E_base` so conformer search and pre-optimisation run at base-method cost. ACSF descriptor +
+  sparse kernel ridge (GAP-style), energies and gradients trained jointly. 353-conformer C/H/N set,
+  GFN-FF→GFN2: relative energy MAE 0.65→0.17 kcal/mol, gradient RMSE 5.0e-3→0.9e-3 Eh/A, Spearman
+  0.41→0.89; 16.6x faster than GFN2 per MD step. Fixed topology only, reference must be
+  dispersion-corrected — [docs/DELTA_ML.md](docs/DELTA_ML.md)
+
+### 11. Core Computational Libraries
 - ✅ **MNDO Integrals** - Dewar-Thiel multipole expansion for semi-empirical 2e⁻ integrals, see [docs/MNDO_INTEGRALS.md](docs/MNDO_INTEGRALS.md)
 
 ## Architecture

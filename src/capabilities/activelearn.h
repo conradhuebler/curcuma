@@ -69,6 +69,12 @@ PARAM(lambda, Double, 1e-8,
     "Weight of the RKHS regulariser. Too small interpolates label noise into a rippled "
     "surface, which is invisible in the energy error but destroys molecular dynamics.",
     "Algorithm", {})
+PARAM(jitter_relative, Double, 1e-8,
+    "Ridge added to the normal equations relative to their diagonal scale. Accumulating "
+    "normal equations squares the condition number, and the centre kernel is near-singular "
+    "once many centres crowd together, so without this the factorisation can succeed and "
+    "still return a useless solution. Symptom: accuracy gets worse as n_centers grows.",
+    "Algorithm", {})
 PARAM(sigma_energy, Double, 1e-4,
     "Assumed energy noise [Eh]; sets the weight of energy observations relative to gradients.",
     "Algorithm", {})
@@ -157,6 +163,7 @@ private:
     int m_n_centers = 1000;
     double m_kernel_sigma = 0.0;
     double m_lambda = 1e-8;
+    double m_jitter_relative = 1e-8;
     double m_sigma_energy = 1e-4;
     double m_sigma_force = 1e-3;
     bool m_use_forces = true;

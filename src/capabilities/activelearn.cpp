@@ -161,6 +161,7 @@ void ActiveLearn::LoadControlJson()
     m_n_centers = Json2KeyWord<int>(m_defaults, "n_centers");
     m_kernel_sigma = Json2KeyWord<double>(m_defaults, "kernel_sigma");
     m_lambda = Json2KeyWord<double>(m_defaults, "lambda");
+    m_jitter_relative = Json2KeyWord<double>(m_defaults, "jitter_relative");
     m_sigma_energy = Json2KeyWord<double>(m_defaults, "sigma_energy");
     m_sigma_force = Json2KeyWord<double>(m_defaults, "sigma_force");
     m_use_forces = Json2KeyWord<bool>(m_defaults, "use_forces");
@@ -297,6 +298,7 @@ bool ActiveLearn::fitAndReport(const MLDataset& train, const MLDataset& test, in
     opt.n_centers = n_centers;
     opt.kernel_sigma = m_kernel_sigma;
     opt.lambda = m_lambda;
+    opt.jitter_relative = m_jitter_relative;
     opt.sigma_energy = m_sigma_energy;
     opt.sigma_force = m_sigma_force;
     opt.use_forces = m_use_forces;

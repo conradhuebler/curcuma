@@ -594,6 +594,27 @@ converged = 1 * (abs(fun.m_energy - final_energy) * 2625.5 < dE)
 perform_optimisation = (converged != ConvCount) && (fun.isError() == 0);
 }
 
+## Delta-ML: cheap method, reference-level ranking
+
+Learns the energy difference between a cheap base method and an expensive reference, so
+conformer search and pre-optimisation run at base-method cost while ranking conformers at
+the reference level.
+
+```sh
+# fit a model against an existing conformer set
+curcuma -activelearn conf.xyz -method gfnff -ref_method gfn2 -threads 8
+
+# use it wherever a method is accepted
+curcuma -opt        mol.xyz -method deltaml:conf.deltaml.json
+curcuma -confsearch mol.xyz -method deltaml:conf.deltaml.json
+```
+
+Applies to conformers at fixed topology, not to reactions -- GFN-FF freezes its topology at
+setup and cannot follow bond breaking. The reference must carry the same dispersion
+treatment as the base method. See [docs/DELTA_ML.md](docs/DELTA_ML.md).
+
+> 🤖 AI-generated, machine-tested. Human production testing pending.
+
 ## Reorder and Align trajectories
 To reorder trajectory files with dissordered atomic indicies, for example after merging several minimum energy path files from NEB calculation, use
 ```sh

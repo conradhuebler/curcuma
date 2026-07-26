@@ -41,7 +41,8 @@
 // before reaching MethodFactory.
 static const char* const kEnergyCalcMethodScopes[] = {
     "gfnff", "eeq_solver", "xtb", "tblite", "ulysses",
-    "d3", "d4", "uff", "qmdff", "eht", "orca"
+    "d3", "d4", "uff", "qmdff", "eht", "orca",
+    "deltaml"
 };
 
 
