@@ -31,6 +31,7 @@
 #include "qm_methods/native_xtb_method.h"
 #include "qm_methods/gfnff_method.h"
 #include "qm_methods/nddo_method.h"
+#include "ml_methods/deltaml_method.h"
 // CUDA GPU methods are loaded at runtime from libcurcuma_cuda.so via gpu_plugin (so the
 // cuBLAS/cuSOLVER runtime never touches the CPU startup path). No CUDA headers here.
 #include "gpu_plugin.h"
@@ -425,6 +426,20 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
     CurcumaLogger::param("requested_method", method_name);
     CurcumaLogger::param("normalized_method", method);
 
+    // Delta-ML: a learned correction on top of another method. Accepts both the plain name
+    // (model path from -deltaml.model) and the 'deltaml:<path>' shorthand, which survives
+    // capabilities that rebuild their sub-configuration from the method name alone.
+    if (method == "deltaml" || method.rfind("deltaml:", 0) == 0) {
+        CurcumaLogger::success("Method 'deltaml' resolved to delta-ML corrected method");
+        json ml_config = config;
+        ml_config["method"] = method; // keep the possible ':<path>' suffix reachable
+        auto ml = std::make_unique<DeltaMLMethod>(ml_config);
+        if (ml->hasError()) {
+            throw MethodCreationException(ml->getErrorMessage());
+        }
+        return ml;
+    }
+
     // Priority methods (multiple providers, fallback chains)
     if (method == "gfn2") return createGFN2(config);
     if (method == "gfn1") return createGFN1(config);
@@ -611,7 +626,8 @@ std::vector<std::string> MethodFactory::getAvailableMethods() {
     // Always available: native methods, force fields, and native xTB (gfn1/gfn2)
     available.insert(available.end(), {"eht", "pm3", "mndo", "am1", "pm6",
                                        "gfn1", "gfn2",
-                                       "gfnff", "gfnff-fast", "uff", "uff-d3", "qmdff"});
+                                       "gfnff", "gfnff-fast", "uff", "uff-d3", "qmdff",
+                                       "deltaml"});
 
     if (hasTBLite()) {
         available.push_back("ipea1");

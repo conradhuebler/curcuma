@@ -221,11 +221,18 @@ int main(int argc, char* argv[])
                         std::string(match[6]) // aliases - DON'T trim! We need quotes for parsing
                     });
                     accumulated_line.clear();
-                } else if (accumulated_line.find("PARAM") != std::string::npos && accumulated_line.find(')') != std::string::npos && match.size() == 0) {
-                    // PARAM found but didn't match - likely syntax error
+                } else if (accumulated_line.rfind("PARAM") != accumulated_line.find("PARAM")) {
+                    // A second PARAM started while the first was still incomplete, so the
+                    // first one really is malformed. Resync on the new definition instead
+                    // of dropping everything that follows.
+                    //
+                    // Claude Generated (July 2026): the previous test fired as soon as any
+                    // ')' appeared in the accumulated text, which a help string containing
+                    // parentheses satisfies on its very first line. That silently discarded
+                    // the parameter and every later one in the same block.
                     std::cerr << "Warning: Malformed PARAM in " << filepath
-                              << " around line " << line_number << "\n";
-                    accumulated_line.clear();
+                              << " before line " << line_number << "\n";
+                    accumulated_line = accumulated_line.substr(accumulated_line.rfind("PARAM"));
                 }
             }
         }

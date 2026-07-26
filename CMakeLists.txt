@@ -463,6 +463,7 @@ set(curcuma_core_SRC
         src/capabilities/confsearch.cpp
         src/capabilities/shared_bias_pool.cpp
         src/capabilities/confstat.cpp
+        src/capabilities/activelearn.cpp
         src/capabilities/docking.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/nebdocking.cpp
@@ -553,6 +554,7 @@ set(curcuma_core_SRC
         src/core/ml/descriptor.cpp
         src/core/ml/ml_dataset.cpp
         src/core/ml/krr_model.cpp
+        src/core/energy_calculators/ml_methods/deltaml_method.cpp
         src/tools/formats.h
         src/tools/geometry.h
         src/tools/general.h

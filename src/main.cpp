@@ -25,6 +25,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/citation_registry.h"
 
+#include "src/capabilities/activelearn.h"
 #include "src/capabilities/analysenciplot.h"
 #include "src/capabilities/analysis.h"
 #include "src/capabilities/confscan.h"
@@ -2067,6 +2068,28 @@ int executeCasino(const json& controller, int argc, char** argv) {
     return 0;
 }
 
+// Delta-ML model training and active learning: -activelearn  -- Claude Generated 2026
+//
+//   curcuma -activelearn conf.xyz -method gfnff -ref_method gfn2 -threads 8
+//   curcuma -activelearn conf.xyz -center_sweep 200,500,1000,2000
+//   curcuma -activelearn conf.xyz -al_mode test -model conf.deltaml.json
+//
+// The resulting model plugs into any capability through '-method deltaml:<file.json>'.
+int executeActiveLearn(const json& controller, int argc, char** argv) {
+    if (argc < 3) {
+        ActiveLearn dummy(json{}, true);
+        dummy.printHelp();
+        return 0;
+    }
+
+    auto* learner = new ActiveLearn(controller, false);
+    initializeBMT(learner, argv[2], "activelearn", controller); // also sets the input file
+    learner->start();
+    learner->processBakFiles();
+    delete learner;
+    return 0;
+}
+
 int executeTrajectoryAnalysis(const json& controller, int argc, char** argv) {
     if (argc < 3) {
         TrajectoryAnalysis dummy(json{}, true);
@@ -2369,6 +2392,8 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ", "MOL2", "SDF"}, executeConfScan}},
     {"confstat", {"Conformational statistics and analysis", "conformational",
                   {"XYZ", "MOL2", "SDF"}, executeConfStat}},
+    {"activelearn", {"Delta-ML model training: lift a cheap method to a reference level", "calculation",
+                  {"XYZ", "MOL2", "SDF"}, executeActiveLearn}},
     {"dock", {"Molecular docking calculations", "docking",
               {"XYZ", "MOL2", "SDF"}, executeDocking}},
     {"polymerbuild", {"Iterative polymer assembly from fragments", "assembly",
