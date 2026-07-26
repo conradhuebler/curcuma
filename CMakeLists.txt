@@ -221,6 +221,34 @@ foreach(_fc_dep LBFGSpp CxxThreadPool ripser cpp-d4)
     endif()
 endforeach()
 
+# Claude Generated (Jul 2026): repair a dangling-reference bug in the fetched ripser header.
+#
+# ripser.h declares its simplex enumerators as FUNCTION-LOCAL STATICS:
+#     static simplex_boundary_enumerator facets(0, *this);
+#     static simplex_coboundary_enumerator cofacets(*this);
+# Both enumerators store `const ripser& parent` and `const binomial_coeff_table&`. A function-local
+# static is constructed on the FIRST call and never again, so from the second ripser instance in a
+# process onwards these references point at a DESTROYED object -- `parent.n` and the binomial table
+# are read from freed memory. curcuma builds one ripser instance per structure (ConfScan's
+# persistent-diagram descriptor), so this is hit constantly; it usually goes unnoticed because a
+# fresh instance often lands on the same heap address, and it segfaults as soon as the allocation
+# pattern changes between two ConfScan runs (reproduced: ConfSearch with two ConfScan passes in one
+# cycle crashed in compute_dim_0_pairs; removing `static` fixes it, 0/0 crashes afterwards).
+#
+# The fix belongs upstream in https://github.com/conradhuebler/ripser -- once it is pushed there and
+# the GIT_TAG above is bumped, this step becomes a silent no-op (it only rewrites what it finds).
+set(_ripser_header ${CMAKE_SOURCE_DIR}/external/ripser/ripser.h)
+if(EXISTS ${_ripser_header})
+    file(READ ${_ripser_header} _ripser_src)
+    string(FIND "${_ripser_src}" "static simplex_" _ripser_static_pos)
+    if(NOT _ripser_static_pos EQUAL -1)
+        string(REPLACE "static simplex_boundary_enumerator" "simplex_boundary_enumerator" _ripser_src "${_ripser_src}")
+        string(REPLACE "static simplex_coboundary_enumerator" "simplex_coboundary_enumerator" _ripser_src "${_ripser_src}")
+        file(WRITE ${_ripser_header} "${_ripser_src}")
+        message(STATUS "ripser: removed function-local static simplex enumerators (dangling reference across instances)")
+    endif()
+endif()
+
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
 #if(NOT DEFINED ${CMAKE_BUILD_TYPE})
