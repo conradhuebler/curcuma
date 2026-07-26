@@ -92,13 +92,40 @@ exploration/seeds/bias) and, when the methods differ,
 `*.bias.opt.accepted.opt.xyz` (opt-level, re-optimized; used for the cumulative
 pool + bias). The final `*.cumulative.opt.accepted.xyz` is ranked at `opt_method`.
 
-## Caveats (not yet human-tested)
+## One topology reference per PES (fixed Jul 26, 2026)
 
-- The topology reference is set from the `md_method` pre-optimized geometry. The
-  exploration side checks `md_method` geometries against it; the refinement side
-  checks the `opt_method` geometries against the same reference (0/1 bond
-  connectivity). A method that systematically pushes a bond length across the
-  connectivity cutoff could change topo-reject counts on the refinement side.
+The caveat that used to stand here — "the refinement side checks the `opt_method` geometries against
+the `md_method` reference; a method that systematically pushes a bond length across the connectivity
+cutoff could change topo-reject counts" — turned out to be not a caveat but a defect. Observed on a
+real run:
+
+```
+ConfSearch: opt_method (gfn2) refinement: 0 structures -> cumulative + bias, 38 rejected (topo).
+ConfSearch: gfn2 best: -161.600500 Eh (+0.00 kJ/mol vs. initial -161.600500 Eh)
+```
+
+**Every** re-optimised structure of the cycle was discarded while the exploration side kept 10 of the
+same structures — the whole ranking side of that temperature was lost silently, and the final
+ranking thinned out accordingly. The two methods simply disagree about one contact near the
+covalent-radius cutoff; that is a difference in bond-length prediction, not a chemical reaction.
+
+Now each PES is checked against its own reference:
+
+| side | geometries | reference |
+|---|---|---|
+| exploration | `md_method` minima | input structure optimised at `md_method` |
+| refinement | `opt_method` minima | input structure optimised at `opt_method` |
+
+Both references are taken at the same point of the run (the initial optimisation), both are stored in
+the restart checkpoint (`topo_ref`, `topo_ref_opt`), and a resume from an older checkpoint falls back
+to the single reference. Three diagnostics were added because the failure was silent:
+
+- a warning when the two methods disagree about the input structure's topology at all,
+- the first differing atom pair on the refinement side (the exploration side already had this),
+- a loud warning when *all* structures of a cycle are rejected on either side.
+
+## Other caveats (not yet human-tested)
+
 - Next-cycle MD seeds are the `md_method`-optimized geometries (exploration stays
   on the cheap PES); the next MD also runs at `md_method`.
 - ORCA/r2scan as `opt_method` across many temperature cycles is feasible only

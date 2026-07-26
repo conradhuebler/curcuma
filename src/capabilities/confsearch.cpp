@@ -306,6 +306,10 @@ void ConfSearch::start()
         m_elements = m_restart.elements;
         m_topo_ref = m_restart.topo_ref;
         m_topo_matrix = m_topo_ref.DistanceMatrix().second;
+        if (m_restart.topo_ref_opt.AtomCount() > 0) {
+            m_topo_ref_opt = m_restart.topo_ref_opt;
+            m_topo_matrix_opt = m_topo_ref_opt.DistanceMatrix().second;
+        }
         m_global_min = m_restart.global_min;
         m_initial_energy = m_restart.initial_energy;
         m_initial_energy_opt = m_restart.initial_energy_opt; // opt-PES anchor for the final statistics
@@ -401,6 +405,31 @@ void ConfSearch::start()
             for (const auto* mol : opt_init_stack)
                 if (mol->AtomCount() > 0 && std::abs(mol->Energy()) > 1e-10)
                     m_initial_energy_opt = std::min(m_initial_energy_opt, mol->Energy());
+
+            // Claude Generated (Jul 2026): topology reference for the RANKING PES.
+            //
+            // The refinement side of Phase 4 checked the opt_method geometries against the
+            // md_method reference. Two methods do not agree on bond lengths, so an atom pair
+            // sitting near the covalent-radius cutoff can be bonded for one and not for the other.
+            // The check then fires for EVERY structure the accurate method produces -- measured on
+            // a real run: "opt_method (gfn2) refinement: 0 structures -> cumulative + bias, 38
+            // rejected (topo)", i.e. the entire ranking side of that cycle was thrown away while
+            // the exploration side kept 10 of the same structures. The reference is now taken from
+            // the input structure optimised at opt_method, so like is compared with like.
+            if (!opt_init_stack.empty() && opt_init_stack[0]->AtomCount() > 0) {
+                m_topo_ref_opt = *opt_init_stack[0];
+                m_topo_matrix_opt = m_topo_ref_opt.DistanceMatrix().second;
+                // If the two methods disagree about the topology of the SAME molecule, say so --
+                // it explains any later divergence in the reject counts and is worth knowing.
+                if (m_topo_matrix.rows() == m_topo_matrix_opt.rows()) {
+                    const double diff = (m_topo_matrix - m_topo_matrix_opt).cwiseAbs().sum();
+                    if (diff > 1e-4)
+                        CurcumaLogger::warn_fmt("ConfSearch: {} and {} disagree about the bond topology of the "
+                                                "input structure ({:.0f} bond difference(s)). Each PES is now "
+                                                "checked against its own reference.",
+                            m_md_method, m_opt_method, diff / 2.0);
+                }
+            }
             for (auto* mol : opt_init_stack) delete mol;
         }
 
@@ -818,14 +847,42 @@ void ConfSearch::start()
         if (dual_method && !no_new_bias_structures && !hi_level_file.empty()) {
             std::vector<Molecule*> opt_candidates;
             double opt_lowest = std::numeric_limits<double>::infinity();
-            int opt_rejected_topo = 0;
+            int opt_rejected_topo = 0, opt_total = 0;
+            // Claude Generated (Jul 2026): check against the OPT_METHOD reference (see where it is
+            // set). Falls back to the md reference only when there is none (e.g. a resume from a
+            // checkpoint written before this existed).
+            const Matrix& opt_reference = (m_topo_matrix_opt.rows() == m_topo_matrix.rows())
+                ? m_topo_matrix_opt
+                : m_topo_matrix;
             FileIterator ofile(hi_level_file);
             while (!ofile.AtEnd()) {
                 Molecule* mol = new Molecule(ofile.Next());
                 mol->setCharge(m_charge);
                 mol->setSpin(m_spin);
+                opt_total++;
                 auto topo_cur = mol->DistanceMatrix().second;
-                if ((m_topo_matrix - topo_cur).cwiseAbs().sum() > 1e-4) {
+                const double topo_diff_sum = (opt_reference - topo_cur).cwiseAbs().sum();
+                if (topo_diff_sum > 1e-4) {
+                    // Same diagnostic as the exploration side: name the first differing pair. A
+                    // silent count is exactly what let "38 of 38 rejected" pass unnoticed.
+                    if (opt_rejected_topo == 0) {
+                        const int natoms = mol->AtomCount();
+                        bool found = false;
+                        for (int ii = 0; ii < natoms && !found; ++ii) {
+                            for (int jj = ii + 1; jj < natoms; ++jj) {
+                                if (std::abs(opt_reference(ii, jj) - topo_cur(ii, jj)) > 0.5) {
+                                    CurcumaLogger::warn_fmt("ConfSearch: {} topo reject (first diff): atoms {}-{} "
+                                                            "ref_bond={} cur_bond={} (total bond changes: {:.0f})",
+                                        m_opt_method, ii, jj,
+                                        static_cast<int>(std::round(opt_reference(ii, jj))),
+                                        static_cast<int>(std::round(topo_cur(ii, jj))),
+                                        topo_diff_sum / 2.0);
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     opt_rejected_topo++;
                     delete mol;
                     continue;
@@ -833,6 +890,14 @@ void ConfSearch::start()
                 opt_candidates.push_back(mol);
                 opt_lowest = std::min(opt_lowest, mol->Energy());
             }
+            // Losing the WHOLE ranking side of a cycle is not a detail -- it means the cumulative
+            // pool gets nothing from this temperature and the final ranking silently thins out.
+            if (opt_total > 0 && opt_candidates.empty())
+                CurcumaLogger::warn_fmt("ConfSearch: ALL {} {} structures of this cycle were topology-rejected -- "
+                                        "the ranking side contributes nothing here. If the diff above is a single "
+                                        "bond, {} and {} likely disagree about a contact near the covalent-radius "
+                                        "cutoff rather than a real reaction.",
+                    opt_total, m_opt_method, m_md_method, m_opt_method);
             // Per-cycle ensemble + most stable structure on the ranking level (see the md-level
             // counterpart above). Claude Generated (Jul 2026).
             if (m_cycle_output && !opt_candidates.empty())
@@ -2061,6 +2126,10 @@ void ConfSearch::writeCheckpoint(const std::string& phase, double next_T, int te
     state["seeds"] = molPtrVectorToJson(m_in_stack);
     state["cumulative"] = fileFramesToJson(m_cumulative_file);
     state["topo_ref"] = molToJson(m_topo_ref);
+    // Claude Generated (Jul 2026): the opt-PES topology reference. Without it a resumed dual-method
+    // run would fall back to comparing opt_method geometries against the md_method reference again.
+    if (m_topo_ref_opt.AtomCount() > 0)
+        state["topo_ref_opt"] = molToJson(m_topo_ref_opt);
     state["permutations"] = m_permutation_cache;
 
     // Intermediate accepted sets, only needed to resume mid-cycle without redoing the opts.
@@ -2151,6 +2220,8 @@ bool ConfSearch::loadCheckpoint()
     st.accepted_opt = jsonToMolVector(st.elements, s.value("accepted_opt", nlohmann::json::array()));
     if (s.contains("topo_ref"))
         st.topo_ref = jsonToMol(st.elements, s["topo_ref"]);
+    if (s.contains("topo_ref_opt"))
+        st.topo_ref_opt = jsonToMol(st.elements, s["topo_ref_opt"]);
     st.permutations = s.value("permutations", std::vector<std::vector<int>>{});
 
     st.valid = true;

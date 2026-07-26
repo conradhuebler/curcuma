@@ -214,6 +214,7 @@ private:
         std::vector<Molecule> accepted_md; // gfnff-filtered set (post_filter/post_refine)
         std::vector<Molecule> accepted_opt; // opt_method-reoptimised set (post_refine)
         Molecule topo_ref; // reference structure -> m_topo_matrix
+        Molecule topo_ref_opt; // opt_method reference structure -> m_topo_matrix_opt (dual-method)
         std::vector<std::vector<int>> permutations; // m_permutation_cache
     };
     // Serialise one molecule (geometry + energy + name) given the shared element list is stored once.
@@ -288,6 +289,15 @@ private:
     double m_global_min = std::numeric_limits<double>::infinity(); // running lowest energy across all cycles
     std::vector<std::vector<int>> m_permutation_cache; // Claude Generated (Jun 2026): symmetry reorder rules from ConfScan, fed into MTD
     Matrix m_topo_matrix;
+    /* Claude Generated (Jul 2026): SECOND topology reference, for the opt_method PES.
+     * The refinement side used to check the opt_method geometries against the md_method reference.
+     * Two methods do not agree on bond lengths, so a pair sitting near the covalent-radius cutoff
+     * can be "bonded" for one and not for the other -- and then EVERY re-optimised structure of a
+     * cycle is rejected as a reaction product (observed: 38 of 38 gfn2 structures lost, the whole
+     * ranking side of the cycle silently discarded). Empty until the initial opt_method optimisation
+     * has run; the refinement side falls back to m_topo_matrix while it is. */
+    Matrix m_topo_matrix_opt;
+    Molecule m_topo_ref_opt;
     SharedBiasPool* m_bias_pool = nullptr;  // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
     // Claude Generated (Jun 2026): restart/checkpoint state.
     bool m_do_restart = false;                  // -restart: enable checkpoint write + resume
