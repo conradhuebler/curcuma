@@ -713,7 +713,14 @@ bool SimpleMD::Initialise()
     // than nested inside controller["simplemd"]. Without this forwarding, keys
     // like "gpu" or "charge" are silently dropped.
     for (auto& [key, value] : m_controller.items()) {
-        if (key == "simplemd" || key == "global" || value.is_object())
+        if (key == "simplemd" || key == "global")
+            continue;
+        // Objects used to be skipped wholesale, which silently dropped every method
+        // sub-scope -- '-gfnff.solvent', '-eeq_solver.*', '-deltaml.*' never reached the
+        // energy calculator from a dynamics run, while the identical flag worked from
+        // '-sp'. Forward the scopes the calculator actually consumes; other objects
+        // (other capabilities' blocks) stay out. Claude Generated (July 2026).
+        if (value.is_object() && !EnergyCalculator::isMethodScope(key))
             continue;
         if (!ec_config.contains(key) || ec_config[key].is_null()) {
             ec_config[key] = value;

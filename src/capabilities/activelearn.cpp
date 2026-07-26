@@ -173,6 +173,7 @@ void ActiveLearn::LoadControlJson()
     m_seed = static_cast<unsigned>(Json2KeyWord<int>(m_defaults, "seed"));
     m_write_dataset = Json2KeyWord<bool>(m_defaults, "write_dataset");
     m_al_cycles = Json2KeyWord<int>(m_defaults, "al_cycles");
+    m_al_md_method = Json2KeyWord<std::string>(m_defaults, "al_md_method");
     m_al_temperature = Json2KeyWord<double>(m_defaults, "al_temperature");
     m_al_md_time = Json2KeyWord<double>(m_defaults, "al_md_time");
     m_al_md_runs = Json2KeyWord<int>(m_defaults, "al_md_runs");
@@ -616,7 +617,11 @@ void ActiveLearn::runLearn()
     for (int cycle = 0; cycle < m_al_cycles; ++cycle) {
         CurcumaLogger::result_fmt("activelearn: --- cycle {} of {} ---", cycle + 1, m_al_cycles);
 
-        const std::string md_method = have_model ? ("deltaml:" + model_path) : m_base_method;
+        // Sampling surface: explicit override, else the base method until a model exists
+        // and the corrected surface from then on.
+        std::string md_method = m_al_md_method;
+        if (md_method.empty())
+            md_method = have_model ? ("deltaml:" + model_path) : m_base_method;
         std::vector<Molecule> pool_seeds = seeds;
         if (!data.empty()) {
             // Restart the dynamics from structures already in the set, so later cycles

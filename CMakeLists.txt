@@ -997,11 +997,22 @@ endif()
 # Requires: CUDA toolkit, compute capability >= 6.0 (Pascal / GTX 10xx)
 # Build: cmake -DUSE_CUDA=ON && make -j4
 if(USE_CUDA)
+    # The architecture list has to be decided BEFORE enable_language(CUDA). That call seeds
+    # CMAKE_CUDA_ARCHITECTURES in the cache itself, and a later set(... CACHE ...) without
+    # FORCE is silently ignored -- which is why the list that used to sit below this point
+    # never took effect and every CUDA build silently inherited CMake's own default (75 on
+    # this machine). On a Blackwell card that produces kernels that cannot run at all.
+    #
+    # Turing (7.5) through Blackwell (12.0). Pascal (6.0) and Volta (7.0) are deliberately
+    # absent: CUDA 13 removed them, and listing them is a hard nvcc error rather than a
+    # warning. Build with an older toolkit and pass -DCMAKE_CUDA_ARCHITECTURES explicitly
+    # if you need those cards.
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;120" CACHE STRING "CUDA architectures" FORCE)
+    endif()
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
     set(CMAKE_CUDA_STANDARD 17)
-    # Target: Pascal(6.0), Volta(7.0), Turing(7.5), Ampere(8.0/8.6), Ada(8.9)
-    set(CMAKE_CUDA_ARCHITECTURES "60;70;75;80;86;89;120" CACHE STRING "CUDA architectures")
 
     # CUDA source files - compiled as part of curcuma_core
     set(CUDA_SOURCES

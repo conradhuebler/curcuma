@@ -505,8 +505,11 @@ bool DeltaMLModel::train(
 // Prediction
 // =================================================================================
 
-double DeltaMLModel::predictEnergy(const std::vector<int>& elements, const Geometry& geometry) const
+double DeltaMLModel::predictEnergy(
+    const std::vector<int>& elements, const Geometry& geometry, double* uncertainty) const
 {
+    if (uncertainty)
+        *uncertainty = 1.0;
     if (!m_trained)
         return 0.0;
 
@@ -516,20 +519,29 @@ double DeltaMLModel::predictEnergy(const std::vector<int>& elements, const Geome
     standardise(X);
 
     double energy = baselineEnergy(elements);
+    double worst = 0.0;
     for (int i = 0; i < static_cast<int>(elements.size()); ++i) {
         int start = 0, count = 0;
         const Vector k = kernelRow(X.row(i).transpose(), elements[i], start, count);
-        if (count > 0)
+        if (count > 0) {
             energy += k.dot(m_beta.segment(start, count));
+            worst = std::max(worst, 1.0 - k.maxCoeff());
+        } else {
+            worst = 1.0; // element unknown to the model
+        }
     }
+    if (uncertainty)
+        *uncertainty = worst;
     return energy;
 }
 
-double DeltaMLModel::predictEnergyAndGradient(
-    const std::vector<int>& elements, const Geometry& geometry, Matrix& gradient) const
+double DeltaMLModel::predictEnergyAndGradient(const std::vector<int>& elements,
+    const Geometry& geometry, Matrix& gradient, double* uncertainty) const
 {
     const int natoms = static_cast<int>(elements.size());
     gradient = Matrix::Zero(natoms, 3);
+    if (uncertainty)
+        *uncertainty = 1.0;
     if (!m_trained)
         return 0.0;
 
@@ -545,11 +557,14 @@ double DeltaMLModel::predictEnergyAndGradient(
     const Vector inv_scale = m_feature_scale.cwiseInverse();
 
     double energy = baselineEnergy(elements);
+    double worst = 0.0;
 
     for (int i = 0; i < natoms; ++i) {
         const auto it = m_element_block.find(elements[i]);
-        if (it == m_element_block.end())
+        if (it == m_element_block.end()) {
+            worst = 1.0; // element unknown to the model
             continue;
+        }
         const int start = it->second.first;
         const int count = it->second.second;
 
@@ -564,6 +579,9 @@ double DeltaMLModel::predictEnergyAndGradient(
 
         const double s = k.dot(beta_b);
         energy += s;
+        // Free by-product: the same kernel row already carries the closeness to the
+        // nearest centre, so the indicator costs nothing on top of the prediction.
+        worst = std::max(worst, 1.0 - k.maxCoeff());
 
         // Adjoint in standardised feature space, then chained to raw descriptor space.
         const Vector bk = beta_b.cwiseProduct(k);
@@ -579,6 +597,8 @@ double DeltaMLModel::predictEnergyAndGradient(
         }
     }
 
+    if (uncertainty)
+        *uncertainty = worst;
     return energy;
 }
 

@@ -21,9 +21,15 @@
 #include "deltaml_method.h"
 
 #include "src/core/curcuma_logger.h"
+#include "src/core/elements.h"
 #include "src/core/energy_calculators/method_factory.h"
 
 #include <algorithm>
+#include <cmath>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <mutex>
 
 namespace {
 
@@ -84,7 +90,9 @@ DeltaMLMethod::DeltaMLMethod(const json& config)
 
     m_enabled = readBool(config, "enabled", true);
     m_report_uncertainty = readBool(config, "report_uncertainty", false);
-    m_uncertainty_warn = readDouble(config, "uncertainty_warn", 0.5);
+    m_uncertainty_warn = readDouble(config, "uncertainty_warn", 0.9);
+    m_uncertainty_abort = readDouble(config, "uncertainty_abort", 0.0);
+    m_uncertainty_record = readString(config, "uncertainty_record", "");
 
     if (m_model_path.empty()) {
         m_has_error = true;
@@ -92,6 +100,14 @@ DeltaMLMethod::DeltaMLMethod(const json& config)
                           "or use -method deltaml:<file.json>";
         CurcumaLogger::error(m_error_message);
         return;
+    }
+
+    if (m_uncertainty_record == "auto") {
+        std::string base = m_model_path;
+        const std::size_t dot = base.rfind(".json");
+        if (dot != std::string::npos)
+            base = base.substr(0, dot);
+        m_uncertainty_record = base + ".extrapolation.xyz";
     }
 
     if (!m_model.load(m_model_path)) {
@@ -218,24 +234,49 @@ double DeltaMLMethod::calculateEnergy(bool gradient)
     }
 
     if (m_enabled && m_model.isTrained()) {
+        // The indicator falls out of the prediction, so it is always available at no cost.
+        double indicator = -1.0;
         if (gradient) {
             Matrix dgrad;
-            m_last_correction = m_model.predictEnergyAndGradient(m_elements, m_geometry, dgrad);
+            m_last_correction
+                = m_model.predictEnergyAndGradient(m_elements, m_geometry, dgrad, &indicator);
             m_gradient += dgrad;
         } else {
-            m_last_correction = m_model.predictEnergy(m_elements, m_geometry);
+            m_last_correction = m_model.predictEnergy(m_elements, m_geometry, &indicator);
+        }
+        m_last_uncertainty = indicator;
+
+        if (indicator > m_uncertainty_warn) {
+            if (!m_uncertainty_record.empty())
+                recordExtrapolation(indicator);
+
+            if (!m_warned) {
+                m_warned = true;
+                // Quantitative rather than alarming: state how far out the structure is and
+                // by how much the correction is attenuated there, so the reader can judge
+                // whether it matters instead of taking the word "outside" on trust.
+                const double d_over_sigma = (indicator >= 1.0)
+                    ? std::numeric_limits<double>::infinity()
+                    : std::sqrt(std::max(0.0, -2.0 * std::log(1.0 - indicator)));
+                CurcumaLogger::warn_fmt(
+                    "deltaml: extrapolation indicator {:.3f} above {:.3f} -- nearest kernel "
+                    "centre {:.1f} sigma away, correction attenuated to {:.0f}% there. The "
+                    "correction decays smoothly to zero further out, so results degrade "
+                    "towards the bare base method rather than diverging.{}",
+                    indicator, m_uncertainty_warn, d_over_sigma, 100.0 * (1.0 - indicator),
+                    m_uncertainty_record.empty()
+                        ? " Set -deltaml.uncertainty_record auto to collect these structures."
+                        : "");
+            }
         }
 
-        if (m_report_uncertainty || !m_warned) {
-            m_last_uncertainty = m_model.uncertainty(m_elements, m_geometry);
-            if (!m_warned && m_last_uncertainty > m_uncertainty_warn) {
-                m_warned = true;
-                CurcumaLogger::warn_fmt(
-                    "deltaml: extrapolation indicator {:.3f} exceeds {:.3f}. This geometry is "
-                    "outside the region the model was trained on; the correction decays "
-                    "towards zero there, so the result approaches the bare base method.",
-                    m_last_uncertainty, m_uncertainty_warn);
-            }
+        if (m_uncertainty_abort > 0.0 && indicator > m_uncertainty_abort) {
+            m_has_error = true;
+            m_error_message = fmt::format(
+                "deltaml: extrapolation indicator {:.3f} exceeds the abort threshold {:.3f}; "
+                "refusing to return an unsupported energy",
+                indicator, m_uncertainty_abort);
+            CurcumaLogger::error(m_error_message);
         }
     }
 
@@ -247,6 +288,35 @@ double DeltaMLMethod::calculateEnergy(bool gradient)
     }
 
     return m_last_energy;
+}
+
+void DeltaMLMethod::recordExtrapolation(double indicator) const
+{
+    // Several dynamics threads can share one record file, so serialise the append. The
+    // file is opened per call rather than held open: a run that crashes mid-trajectory
+    // should still leave the structures that led up to it on disk.
+    static std::mutex record_mutex;
+    const std::lock_guard<std::mutex> lock(record_mutex);
+
+    std::ofstream out(m_uncertainty_record, std::ios::app);
+    if (!out.is_open())
+        return;
+
+    const int natoms = static_cast<int>(m_elements.size());
+    out << natoms << "\n";
+    out << std::fixed << std::setprecision(6) << "uncertainty= " << indicator
+        << " E_base= " << std::setprecision(8) << m_last_base_energy
+        << " correction= " << m_last_correction << "\n";
+    for (int i = 0; i < natoms; ++i) {
+        const int z = m_elements[i];
+        const std::string sym = (z > 0 && z < static_cast<int>(Elements::ElementAbbr.size()))
+            ? Elements::ElementAbbr[z]
+            : "X";
+        out << std::left << std::setw(3) << sym << std::right << std::fixed << std::setprecision(8)
+            << std::setw(16) << m_geometry(i, 0) << std::setw(16) << m_geometry(i, 1)
+            << std::setw(16) << m_geometry(i, 2) << "\n";
+    }
+    ++m_recorded;
 }
 
 Vector DeltaMLMethod::getCharges() const

@@ -42,14 +42,29 @@ PARAM(enabled, Bool, true,
     "Evaluate the ML correction. Set false to run the bare base method through the same "
     "code path, for A/B comparisons.",
     "Basic", {})
-PARAM(uncertainty_warn, Double, 0.5,
-    "Warn once per run when the extrapolation indicator exceeds this value (0 = on top of "
-    "a kernel centre, 1 = entirely outside the region the model has seen). A warning means "
-    "the prediction is unsupported by training data, not necessarily wrong.",
+PARAM(uncertainty_warn, Double, 0.9,
+    "Warn once per run when the extrapolation indicator 1 - max_m k(x,z_m) exceeds this. "
+    "Mind the scale before lowering it: the indicator is 1 - exp(-d^2/2 sigma^2) for a "
+    "nearest centre at distance d, so 0.5 is reached at a perfectly ordinary d = 1.18 sigma "
+    "and would fire on almost every structure. 0.9 corresponds to d = 2.1 sigma, where the "
+    "correction is attenuated to about a tenth and the prediction really is extrapolation.",
     "Advanced", {})
 PARAM(report_uncertainty, Bool, false,
-    "Report the extrapolation indicator with every energy evaluation. Costs one extra "
-    "descriptor pass, so it is off during optimisation and dynamics by default.",
+    "Report the extrapolation indicator with every energy evaluation. The indicator itself "
+    "is free (it falls out of the prediction), this only controls the logging.",
+    "Advanced", {})
+PARAM(uncertainty_record, String, "",
+    "Append every structure whose indicator exceeds uncertainty_warn to this multi-XYZ file, "
+    "with the indicator in the comment line. Empty disables it. This is what turns the "
+    "warning into something actionable: the file is a ready-made input for another "
+    "-activelearn run that extends the model exactly where it was out of its depth. "
+    "'auto' derives the name from the model file.",
+    "Advanced", {})
+PARAM(uncertainty_abort, Double, 0.0,
+    "Refuse to return an energy once the indicator exceeds this (0 disables). Intended for "
+    "production optimisation, where a silently unsupported result is worse than no result. "
+    "In dynamics it also serves as the trigger for stop-and-relabel: the run ends at the "
+    "structure that left the trained region, which is precisely the one worth labelling.",
     "Advanced", {})
 END_PARAMETER_DEFINITION
 
@@ -115,8 +130,14 @@ public:
     /*! \brief Extrapolation indicator of the last evaluation, or -1 if not computed. */
     double lastUncertainty() const { return m_last_uncertainty; }
 
+    /*! \brief How many structures were written to the extrapolation record. */
+    long long recordedStructures() const { return m_recorded; }
+
 private:
     bool initialiseBase(const Mol& mol);
+
+    /*! \brief Append the current geometry to the extrapolation record. */
+    void recordExtrapolation(double indicator) const;
 
     std::unique_ptr<ComputationalMethod> m_base;
     curcuma::ml::DeltaMLModel m_model;
@@ -127,8 +148,11 @@ private:
     std::string m_base_method;
     bool m_enabled = true;
     bool m_report_uncertainty = false;
-    double m_uncertainty_warn = 0.5;
+    double m_uncertainty_warn = 0.9;
+    double m_uncertainty_abort = 0.0;
+    std::string m_uncertainty_record;
     bool m_warned = false;
+    mutable long long m_recorded = 0;
 
     std::vector<int> m_elements;
     Geometry m_geometry;

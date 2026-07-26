@@ -100,6 +100,14 @@ PARAM(al_cycles, Int, 5,
     "Active-learning cycles in 'learn' mode. Each cycle samples on the currently corrected "
     "surface, picks the least familiar structures, computes references for them and refits.",
     "ActiveLearning", {})
+PARAM(al_md_method, String, "",
+    "Method driving the sampling dynamics. Empty (default) uses the base method in cycle 0 "
+    "and the corrected surface afterwards, so reference evaluations are spent on labels -- "
+    "where they buy exact values -- rather than on sampling, where approximate geometries "
+    "suffice. Set it explicitly (e.g. gfn2) to sample on the reference instead: that removes "
+    "the self-confirmation bias, at a steep price. Measured on 90 atoms, the default four "
+    "runs of 2000 steps cost about 7 s on gfnff and 11 min on gfn2 -- per cycle.",
+    "ActiveLearning", {})
 PARAM(al_temperature, Double, 500.0,
     "Sampling temperature [K]. Deliberately above the temperature of interest: sampling "
     "happens on the surface being learned, so cycle 0 only ever visits what the base method "
@@ -233,6 +241,7 @@ private:
     bool m_write_dataset = true;
 
     int m_al_cycles = 5;
+    std::string m_al_md_method;
     double m_al_temperature = 500.0;
     double m_al_md_time = 2000.0;
     int m_al_md_runs = 4;

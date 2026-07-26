@@ -46,6 +46,15 @@ static const char* const kEnergyCalcMethodScopes[] = {
 };
 
 
+bool EnergyCalculator::isMethodScope(const std::string& key)
+{
+    for (const char* scope : kEnergyCalcMethodScopes) {
+        if (key == scope)
+            return true;
+    }
+    return false;
+}
+
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
     : m_method_name(method)
     , m_basename("")

@@ -140,16 +140,23 @@ public:
 
     bool isTrained() const { return m_trained; }
 
-    /*! \brief Predicted energy correction [Eh]. */
-    double predictEnergy(const std::vector<int>& elements, const Geometry& geometry) const;
+    /*! \brief Predicted energy correction [Eh]; optionally the extrapolation indicator too. */
+    double predictEnergy(const std::vector<int>& elements, const Geometry& geometry,
+        double* uncertainty = nullptr) const;
 
     /**
      * @brief Predicted correction and its gradient.
      * @param gradient output, natoms x 3 [Eh/Angstrom]; resized by the call
+     * @param uncertainty optional output, the extrapolation indicator
      * @return energy correction [Eh]
+     *
+     * The indicator comes for free: the per-atom kernel row against the element block is
+     * computed for the prediction anyway, and its maximum is exactly what the indicator
+     * needs. Calling uncertainty() separately would repeat the whole descriptor pass, which
+     * in dynamics means paying for it on every single step.
      */
-    double predictEnergyAndGradient(
-        const std::vector<int>& elements, const Geometry& geometry, Matrix& gradient) const;
+    double predictEnergyAndGradient(const std::vector<int>& elements, const Geometry& geometry,
+        Matrix& gradient, double* uncertainty = nullptr) const;
 
     /**
      * @brief Cheap extrapolation indicator, max over atoms of 1 - max_m k(x_i, z_m).

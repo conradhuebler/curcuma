@@ -92,6 +92,17 @@ public:
      */
     ~EnergyCalculator();
 
+    /**
+     * @brief Is this controller key a method sub-scope the energy calculator consumes?
+     *
+     * Capabilities that rebuild a narrower configuration for their calculator have to
+     * forward these, otherwise every '-<module>.<param>' silently disappears on the way
+     * down. Exposed here so the list lives in exactly one place.
+     *
+     * Claude Generated (July 2026)
+     */
+    static bool isMethodScope(const std::string& key);
+
     // =================================================================================
     // Molecular Setup and Geometry Management
     // =================================================================================
