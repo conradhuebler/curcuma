@@ -238,8 +238,13 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - ⚠️ **Not established for pre-optimisation**: the optimised minimum improved 12% on the stiff
   90-atom molecule but got *worse* on a floppy trisaccharide with every training set tested
   (0.55→0.79…1.01 A) — a lower RMS force error does not constrain where the gradient vanishes
-- **Only validated against GFN2** (cost ratio 88x). The DFT case, where the economics actually pay,
-  is untested and is the measurement that should decide any further investment
+- **DFT reference (ORCA r2SCAN-3c, caffeine, Jul 2026)**: energies improve 2.3x (2.998→1.300 kcal/mol)
+  against only 1.16x with GFN2 — the difference to a functional is more learnable than the difference
+  to a related tight-binding method. Cost ratio 2660x, correction 0.33 ms/step, break-even at the
+  training-set size (96 structures), then 10x at 1000 structures and 51x at 5000
+- ⚠️ Residual 1.3 kcal/mol is still above room-temperature thermal energy: this makes GFN-FF about
+  twice as good for a tenth of the cost, it does not yet rank conformers reliably. One rigid
+  molecule, 96 structures, held-out split of 19 — the numbers carry real uncertainty
 - Fixed topology only; reference must be dispersion-corrected; untested for charged/open-shell
   systems, metals, cross-molecule transfer and long MD
 

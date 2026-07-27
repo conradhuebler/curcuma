@@ -208,6 +208,44 @@ all 25380 training environments would have been slower than the reference it rep
 far M can be pushed is set by the reference/base cost ratio, 88x here and four to five
 orders of magnitude for DFT.
 
+## With a DFT reference the case is different
+
+Everything above uses GFN2 as the reference, where the cost ratio to GFN-FF is only 88x.
+That is the wrong regime to judge the method in. Repeated with ORCA r2SCAN-3c on caffeine
+(24 atoms, 96 frames from a 300 K GFN-FF trajectory, M = 400, lambda = 1e-6):
+
+| | GFN-FF | Delta-ML | factor |
+|---|---|---|---|
+| relative energy MAE | 2.998 | 1.300 kcal/mol | **2.3x** |
+| gradient RMSE | 2.17e-2 | 1.05e-2 Eh/A | 2.1x |
+| Spearman | 0.825 | 0.914 | -- |
+| NVE drift | 0.41 | 0.49 kcal/mol/ps | comparable |
+
+The energies improve 2.3x here against 1.16x with GFN2 as reference. That is the more
+interesting number: GFN-FF and GFN2 are built on related approximations, so their difference
+is small and largely unsystematic, while the difference to a density functional carries more
+structure and is correspondingly more learnable.
+
+The economics change even more. r2SCAN-3c costs 31.4 s per gradient on this molecule against
+11.8 ms for GFN-FF -- a ratio of 2660x, thirty times the GFN2 case -- and evaluating the
+correction costs 0.33 ms per step (0.48 against 0.15 for the bare base method), i.e. about
+one hundredth of one percent of a reference calculation.
+
+Building the model cost one reference calculation per training structure, so it breaks even
+at exactly the training-set size and everything past that is close to free:
+
+| structures evaluated | pure DFT | Delta-ML | |
+|---|---|---|---|
+| 200 | 1.74 h | 0.84 h | 2.1x |
+| 1000 | 8.72 h | 0.84 h | 10.4x |
+| 5000 | 43.6 h | 0.85 h | 51x |
+
+**Caveats, and they are not small.** One rigid molecule, 96 structures, a held-out split of
+19, and M = 400 -- all of these numbers carry real uncertainty. A residual of 1.3 kcal/mol is
+still above thermal energy at room temperature, so this does not yet rank conformers
+reliably; it makes GFN-FF roughly twice as good for a tenth of the cost, which is a different
+and more modest claim.
+
 ## Two use cases, and they do not behave alike
 
 Measured on a second system -- a 66-atom trisaccharide, GFN-FF to GFN2, M = 2000,
