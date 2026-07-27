@@ -245,6 +245,25 @@ their optimisation then reported NaN in `hb`/`atm`/`batm` with a finite energy. 
 its covalent radii is a collapsed geometry, bonded or not (for C-H that is 0.59 Å against a real bond
 of 1.09 Å — deeply pathological, never thermal). 0 disables it.
 
+**The structures that still fail are written out.** Whatever survives the screens and then breaks
+the method during the optimisation is saved for analysis instead of only being counted:
+
+```
+ConfSearch: 3 structure(s) the method could not handle written to
+            <bmt>/input.cycle02_T550K.explore.gfnff.failed.xyz (input geometries, named with the
+            reason) -- reproduce with: curcuma -sp <structure> -method gfnff
+```
+
+What is saved is the **input** geometry — that is the thing that makes the force field produce NaN,
+and it is what you reload, inspect and reduce to a bug report; the optimised geometry is the diverged
+one and useless. Each frame is named `failed_007_method_nan [gfnff]`, with the reason being
+`method_nan` (the method reported NaN/Inf), `no_geometry` or `non_finite`. Plain non-convergence is
+deliberately **not** included — ConfSearch accepts unconverged structures on purpose, so that would
+dump most of the batch. The file is per stage and per cycle, like every other output.
+
+Verified end to end: a butane with one H placed exactly on a C is caught, written, and the saved
+frame reproduces the failure on its own (`curcuma -sp` on it fails in the GFN-FF charge setup).
+
 **And NaN defeats numeric guards.** Every comparison with NaN is false, so a diverged optimisation
 sailed past the energy-rise limit and every convergence test, and kept re-evaluating a dead geometry
 (20 line-search evaluations per step). Three places now check explicitly rather than by comparison:

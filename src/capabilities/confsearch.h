@@ -80,6 +80,10 @@ public:
         EnergyCalculator energy_calc(method, m_parameter);
         m_result = Optimization::OptimizationDispatcher::optimizeStructure(
             &m_molecule, Optimization::OptimizerType::LBFGSPP, &energy_calc, m_parameter);
+        // Claude Generated (Jul 2026): did the METHOD itself fail on this structure (NaN energy or
+        // gradient)? The OptimizationResult cannot say -- a NaN gradient reaches it as an ordinary
+        // "did not converge". The calculator knows, and it dies with this thread, so ask it here.
+        m_method_nan = energy_calc.HasNan() || energy_calc.Error();
         if (m_on_complete)
             m_on_complete(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), m_result);
         return m_result.success ? 0 : 1;
@@ -87,10 +91,14 @@ public:
 
     const Optimization::OptimizationResult& result() const { return m_result; }
 
+    /** True when the energy method reported NaN/Inf for this structure (see execute()). */
+    bool methodReportedNaN() const { return m_method_nan; }
+
 private:
     Molecule m_molecule;
     json m_parameter;
     Optimization::OptimizationResult m_result;
+    bool m_method_nan = false;
     std::function<void(double, const Optimization::OptimizationResult&)> m_on_complete;
 };
 

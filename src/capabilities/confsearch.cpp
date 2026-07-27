@@ -1401,6 +1401,24 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
     // Write criterion: accept the final geometry whenever it has atoms,
     // regardless of convergence. For conformational search, a partially
     // optimised structure is still useful as input for the next MD cycle.
+    // Claude Generated (Jul 2026): structures the method could not handle are written out for
+    // analysis instead of only being counted. What is saved is the INPUT geometry -- that is the
+    // thing that makes the force field produce NaN, and it is what one wants to reload, inspect and
+    // reduce to a bug report. The optimised geometry is useless here (it is the diverged one).
+    // "Failed" deliberately does NOT include plain non-convergence: ConfSearch accepts unconverged
+    // structures on purpose, so writing those would dump most of the batch.
+    const std::string failed_file = outputPath(basename + ".failed.xyz");
+    int failed_written = 0;
+    auto save_failed = [&](const Molecule& input, int idx, const std::string& reason) {
+        Molecule copy = input;
+        copy.setName(fmt::format("failed_{:03d}_{} [{}]", idx + 1, reason, opt_method_name));
+        if (failed_written == 0)
+            copy.writeXYZFile(failed_file);
+        else
+            copy.appendXYZFile(failed_file);
+        failed_written++;
+    };
+
     int written = 0;
     auto write_result = [&](const Optimization::OptimizationResult& res, const Molecule& fallback, int idx) {
         double e_start = res.energy_trajectory.empty() ? 0.0 : res.energy_trajectory.front();
@@ -1502,8 +1520,17 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
         if (live_bar)
             CurcumaLogger::progress_done();
         for (int i = 0; i < static_cast<int>(threads.size()); ++i) {
-            if (!threads[i]->result().success) ++failed;
-            write_result(threads[i]->result(), molecules[i], i);
+            const Optimization::OptimizationResult& res = threads[i]->result();
+            if (!res.success) ++failed;
+            // Save the pathological ones (method NaN / no geometry / non-finite result), not the
+            // merely unconverged ones.
+            const bool no_geometry = res.final_molecule.AtomCount() == 0;
+            const bool non_finite = !no_geometry
+                && (!res.final_molecule.getGeometry().allFinite() || !std::isfinite(res.final_energy));
+            if (threads[i]->methodReportedNaN() || no_geometry || non_finite)
+                save_failed(molecules[i], i,
+                    threads[i]->methodReportedNaN() ? "method_nan" : (no_geometry ? "no_geometry" : "non_finite"));
+            write_result(res, molecules[i], i);
         }
     } // pool destroyed here while the threads are still alive -> no use-after-free
     for (auto* t : threads)
@@ -1512,6 +1539,11 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
     const double batch_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - batch_start)
                                      .count();
+    if (failed_written > 0)
+        CurcumaLogger::warn_fmt("ConfSearch: {} structure(s) the method could not handle written to {} "
+                                "(input geometries, named with the reason) -- reproduce with: "
+                                "curcuma -sp <structure> -method {}",
+            failed_written, failed_file, opt_method_name);
     if (failed > 0)
         CurcumaLogger::result_fmt("Optimization batch complete [{}]: {}/{} structures written in {:.1f} s ({} failed: zero step / gradient failure)",
             opt_method_name, written, total, batch_seconds, failed);
