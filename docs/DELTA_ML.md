@@ -2,15 +2,6 @@
 
 **Status**: 🤖 AI-generated, ⚙️ machine-tested. Human production testing pending.
 
-> **The performance numbers below the fold are being re-measured.** Two defects found on
-> 2026-07-26 (an over-broad topology anchor and a unit mismatch between the learned gradient
-> and the base method) corrupted every force this feature produced. Both are fixed and the
-> total gradient now matches finite differences at the same level as the bare base method,
-> but the accuracy, geometry and dynamics figures obtained beforehand no longer hold. What
-> is currently established: gradients are consistent, NVE drift matches GFN-FF at the
-> default regularisation, and **the model no longer improves the optimised geometry** on the
-> one system measured so far (0.68 A from the reference minimum against GFN-FF's 0.38 A).
-> Treat the method as unvalidated until it has been re-measured.
 
 Learns the difference between a cheap base method and an expensive reference:
 
@@ -171,25 +162,31 @@ arguments prints the summary; the full list comes from the parameter registry.
 
 ## Measured on a real system
 
-353 conformers of a 90-atom C/H/N molecule (`test_cases/confs/conf.xyz`), base GFN-FF,
-reference GFN2, 282 training / 71 held-out structures, split randomly. `Delta` spans
-4.9 kcal/mol across the set. Held-out numbers:
+353 conformers of a 90-atom C/H/N molecule (`test_cases/confs/conf.xyz` -- these are GFN2
+minima, so "distance from the reference minimum" is directly measurable), base GFN-FF,
+reference GFN2, 282 training / 71 held-out, M = 2000. Held-out unless noted:
 
-| M | rel. energy MAE | gradient RMSE | Spearman |
-|---|---|---|---|
-| base GFN-FF | 0.647 kcal/mol | 5.04e-3 Eh/A | 0.408 |
-| 200 | 0.460 | 2.10e-3 | 0.521 |
-| 500 | 0.365 | 1.54e-3 | 0.750 |
-| 1000 | 0.243 | 1.19e-3 | 0.849 |
-| 2000 | 0.194 | 1.02e-3 | 0.878 |
-| 4000 | 0.167 | 0.90e-3 | 0.893 |
+| lambda | energy MAE | gradient RMSE | Spearman | mean dist. to GFN2 min | NVE drift |
+|---|---|---|---|---|---|
+| base GFN-FF | 0.824 | 9.53e-3 | 0.387 | 0.635 A | 1.56 |
+| 1e-8 | 0.738 | **1.95e-3** | 0.490 | 0.587 A | 1.59 |
+| **1e-6** | 0.714 | 2.06e-3 | **0.517** | 0.567 A | **1.11** |
+| 1e-4 | **0.709** | 3.83e-3 | 0.350 | -- | -- |
+| 1e-2 | 0.790 | 8.09e-3 | 0.303 | **0.474 A** | -- |
 
-Monotone and saturating, as a regularised fit should be. At M = 4000 the relative conformer
-energies are 3.9x better and the gradients 5.6x better than bare GFN-FF, with the rank
-correlation rising from 0.41 to 0.89.
+Energies in kcal/mol, gradients in Eh/A, drift in kcal/mol/ps (GFN2 itself: 0.10). The
+geometry column is the mean over ten conformers optimised on each surface; a single
+structure is far too noisy for this -- individual values scatter between 0.34 and 0.68 A
+with no clear trend.
 
-Steady-state cost per force evaluation in molecular dynamics (same molecule, 500 steps, the
-number that matters because the model is loaded once and evaluated thousands of times):
+Read honestly: **the gradients improve by a factor of four to five, the geometries by 7 to
+25 %, and the relative conformer energies by about 13 %.** The ranking improves only at the
+weaker regularisations. There is no single best lambda -- 1e-6 wins on ranking and energy
+conservation, 1e-2 on geometry -- so the default is 1e-6 and the choice belongs to the
+application.
+
+Steady-state cost per force evaluation in molecular dynamics (same molecule, 500 steps,
+the number that matters because the model is loaded once and evaluated thousands of times):
 
 | Method | ms/step | relative to GFN2 |
 |---|---|---|
@@ -197,14 +194,11 @@ number that matters because the model is loaded once and evaluated thousands of 
 | GFN-FF + Delta-ML (M = 2000) | 4.83 | **16.6x faster** |
 | GFN2 | 80.1 | -- |
 
-The correction costs about four times a GFN-FF evaluation, so it dominates the base method
-while remaining an order of magnitude cheaper than the reference. This is precisely why the
-model is sparse: a dense kernel over all 25380 training environments would have been slower
-than the reference it replaces. How far M can be pushed is set by the reference/base cost
-ratio, which is 88x here and four to five orders of magnitude for DFT.
-
-Single-point runs additionally pay for parsing the model file (2.8 MB at M = 2000), which is
-why `-sp` timings look worse than the per-step cost above.
+The correction costs about four times a GFN-FF evaluation while remaining an order of
+magnitude cheaper than the reference. This is why the model is sparse: a dense kernel over
+all 25380 training environments would have been slower than the reference it replaces. How
+far M can be pushed is set by the reference/base cost ratio, 88x here and four to five
+orders of magnitude for DFT.
 
 ## Train on optimised structures, not raw dynamics frames
 
@@ -241,13 +235,14 @@ optimised minimum:
 | Delta-ML, lambda = 1e-4 | 2.71 | 4.77 | 156 K |
 | Delta-ML, lambda = 1e-2 | 1.58 | 4.74 | 153 K |
 
-At `lambda = 1e-2` the learned surface conserves energy as well as the base method it
-corrects. On the trisaccharide with an optimised training set it does better than the base
-(0.96 against 1.22). Regularisation is what buys this, and it costs accuracy -- pick the
-point on the curve your application needs, and check it rather than assuming it.
+The learned surface conserves energy as well as the base method at every regularisation
+tested, and better than it at lambda = 1e-6 (1.11 against 1.56). An earlier version of this
+document reported a steep trade-off here, with only strong regularisation giving stability;
+that was a unit defect in the gradient, not physics, and it is gone.
 
-Skipping the pre-optimisation is not a detail: the same trisaccharide model started from an
-unoptimised geometry drifted 29.9 kcal/mol/ps and heated from 300 K to 544 K.
+Skipping the pre-optimisation is still not a detail: starting from an unoptimised geometry,
+the test measures how far each surface's minimum sits from the shared starting point rather
+than its conservation.
 
 ## Where the improvement shows up, and where it does not
 

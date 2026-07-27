@@ -231,11 +231,13 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - ⚠️ **Delta-ML** (`-activelearn`, `-method deltaml:<model.json>`, Jul 2026, AI/machine-tested) - learns
   `E_ref - E_base` so conformer search and pre-optimisation run at base-method cost. ACSF descriptor +
   sparse kernel ridge (GAP-style), energies and gradients trained jointly. 353-conformer C/H/N set,
-  GFN-FF→GFN2: relative energy MAE 0.65→0.17 kcal/mol, gradient RMSE 5.0e-3→0.9e-3 Eh/A, Spearman
-  0.41→0.89; 16.6x faster than GFN2 per MD step. Optimised minimum 3.2x closer to the GFN2
-  minimum (0.377→0.119 A). NVE-stable at `-activelearn.lambda 1e-2` (drift 1.58 vs GFN-FF 1.56).
-  Fitting runs on `-gpu cuda` (2.9x at M=8000). Fixed topology only, train on **optimised**
-  structures (4.8x vs 1.3x for raw MD frames), reference must be dispersion-corrected —
+  GFN-FF→GFN2 (353 conformers, 90 atoms, re-measured after two gradient defects were fixed):
+  gradient RMSE 9.5e-3→2.1e-3 Eh/A (4.6x), mean distance to the GFN2 minimum 0.635→0.567 A,
+  relative energy MAE 0.824→0.714 kcal/mol, Spearman 0.387→0.517; 16.6x faster than GFN2 per
+  MD step, NVE drift 1.11 vs GFN-FF 1.56. **The gain is in the forces, not the energies.**
+  No single best `-activelearn.lambda`: 1e-6 for ranking and dynamics, 1e-2 for geometry
+  (0.474 A). Training and inference run on `-gpu cuda` (2.9x / 2.2x). Fixed topology only,
+  train on **optimised** structures, reference must be dispersion-corrected —
   [docs/DELTA_ML.md](docs/DELTA_ML.md)
 
 ### 11. Core Computational Libraries

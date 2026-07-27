@@ -61,7 +61,7 @@ struct DeltaMLTrainingOptions {
      * interpolation. Too small produces a rippled surface that is invisible in the energy
      * error and fails to conserve energy in dynamics -- raise it if an NVE run drifts.
      */
-    double lambda = 1e-4;
+    double lambda = 1e-6;
     double jitter_relative = 1e-8; ///< ridge added to the normal equations, relative to their
                                    ///< diagonal scale; guards the factorisation at large M
     double sigma_energy = 1e-4; ///< assumed energy noise [Eh], sets the energy row weight
