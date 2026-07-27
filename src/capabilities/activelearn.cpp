@@ -198,6 +198,8 @@ void ActiveLearn::LoadControlJson()
     m_al_candidates = Json2KeyWord<int>(m_defaults, "al_candidates");
     m_al_uncertainty = Json2KeyWord<double>(m_defaults, "al_uncertainty");
     m_al_initial = Json2KeyWord<int>(m_defaults, "al_initial");
+    m_al_onthefly = Json2KeyWord<bool>(m_defaults, "al_onthefly");
+    m_al_onthefly_threshold = Json2KeyWord<double>(m_defaults, "al_onthefly_threshold");
     m_center_sweep = parseIntList(Json2KeyWord<std::string>(m_defaults, "center_sweep"));
 
     // The base method is the global -method setting; that keeps the CLI consistent with
@@ -493,15 +495,49 @@ std::vector<Molecule> ActiveLearn::sampleStructures(
         return frames;
 
     json md = m_controller;
-    md["method"] = md_method;
-    md["temperature"] = m_al_temperature;
-    md["initial_temperature"] = m_al_temperature;
-    md["max_time"] = m_al_md_time;
-    md["dump_frequency"] = m_al_dump_frequency;
-    md["print_frequency"] = 1000000;
-    md["write_xyz"] = true;
-    md["threads"] = 1;
-    md["verbosity"] = 0;
+
+    // SimpleMD reads its settings through ConfigManager("simplemd", ...), which resolves the
+    // module sub-document first. A bare top-level key is not reliably seen -- 'method' in
+    // particular falls back to the module default ("uff") -- and from the command line these
+    // flags only work because the registry routes them into controller["simplemd"] for us.
+    // So write them where the module actually looks, and keep the flat copies for anything
+    // downstream that reads the controller directly.
+    json sim = md.value("simplemd", json::object());
+    const auto set_both = [&md, &sim](const std::string& key, const json& value) {
+        sim[key] = value;
+        md[key] = value;
+    };
+    set_both("method", md_method);
+    set_both("temperature", m_al_temperature);
+    set_both("initial_temperature", m_al_temperature);
+    set_both("max_time", m_al_md_time);
+    set_both("dump_frequency", m_al_dump_frequency);
+    set_both("print_frequency", 1000000);
+    set_both("write_xyz", true);
+    set_both("threads", 1);
+    set_both("verbosity", 0);
+    md["simplemd"] = sim;
+
+    // On-the-fly: end each run where the model first loses its footing, and have the method
+    // write those structures out. They are the candidates -- no separate selection needed,
+    // because the trajectory itself picked them.
+    const bool trigger_mode = m_al_onthefly && md_method.rfind("deltaml", 0) == 0;
+    std::string record_path;
+    if (trigger_mode) {
+        record_path = outputPath(Basename() + ".al" + std::to_string(cycle) + ".triggered.xyz");
+        std::error_code ec;
+        std::filesystem::remove(record_path, ec);
+        json dml = md.value("deltaml", json::object());
+        dml["uncertainty_abort"] = m_al_onthefly_threshold;
+        dml["uncertainty_record"] = record_path;
+        // Record a little before the stop, so the approach to the excursion is captured too.
+        dml["uncertainty_warn"] = 0.9 * m_al_onthefly_threshold;
+        md["deltaml"] = dml;
+        CurcumaLogger::result_fmt(
+            "activelearn: on-the-fly sampling on '{}' -- runs end above indicator {:.2f}, "
+            "trigger structures go to {}",
+            md_method, m_al_onthefly_threshold, record_path);
+    }
 
     // SimpleMD redirects its whole output into "<basename>.snapshots" and then builds file
     // paths as outputDir + "/" + basename. A basename containing a directory separator
@@ -517,6 +553,7 @@ std::vector<Molecule> ActiveLearn::sampleStructures(
         json cfg = md;
         // Distinct seeds, otherwise every run reproduces the same trajectory.
         cfg["seed"] = static_cast<int>(m_seed) + 1000 * cycle + r;
+        cfg["simplemd"]["seed"] = cfg["seed"];
         MDThread* t = new MDThread(cfg);
         t->setAutoDelete(false);
         t->setThreadId(r);
@@ -560,6 +597,16 @@ std::vector<Molecule> ActiveLearn::sampleStructures(
     for (const auto& p : scratch) {
         std::error_code ec;
         std::filesystem::remove_all(p, ec);
+    }
+
+    m_triggered.clear();
+    if (trigger_mode && std::filesystem::exists(record_path)) {
+        FileIterator iter(record_path, true);
+        while (!iter.AtEnd())
+            m_triggered.push_back(iter.Next());
+        CurcumaLogger::result_fmt(
+            "activelearn: {} structures tripped the {:.2f} threshold and ended their run",
+            m_triggered.size(), m_al_onthefly_threshold);
     }
 
     return frames;
@@ -697,8 +744,11 @@ void ActiveLearn::runLearn()
 
         double max_unc = 0.0;
         const int wanted = (cycle == 0) ? m_al_initial : m_al_candidates;
+        // In on-the-fly mode the trajectories already nominated their candidates by stopping
+        // on them; selection then only has to thin them down for diversity.
+        const std::vector<Molecule>& pool = m_triggered.empty() ? frames : m_triggered;
         const std::vector<Molecule> picked
-            = selectCandidates(frames, model, have_model, wanted, max_unc);
+            = selectCandidates(pool, model, have_model, wanted, max_unc);
 
         // Report the indicator together with the descriptor-space distance it corresponds
         // to, in units of the kernel width. The bounded indicator alone saturates near one

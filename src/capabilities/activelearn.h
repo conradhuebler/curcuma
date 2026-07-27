@@ -132,6 +132,17 @@ PARAM(al_uncertainty, Double, 0.5,
     "d = 2.1 sigma. Values below about 0.2 are effectively unreachable. And it measures "
     "descriptor-space distance, not error: it certifies coverage, never accuracy.",
     "ActiveLearning", {})
+PARAM(al_onthefly, Bool, false,
+    "Stop each sampling run at the first structure that leaves the trained region, label it "
+    "immediately and refit before continuing. Batch sampling instead runs a fixed length on "
+    "a model that may already be out of its depth, and only notices afterwards. The stronger "
+    "scheme, at the price of many short trajectories: each run ends where the information is.",
+    "ActiveLearning", {})
+PARAM(al_onthefly_threshold, Double, 0.9,
+    "Extrapolation indicator that ends a sampling run in on-the-fly mode. Same scale as "
+    "al_uncertainty: 0.9 corresponds to a nearest kernel centre 2.1 sigma away. Lower values "
+    "stop sooner and label more often.",
+    "ActiveLearning", {})
 PARAM(al_initial, Int, 15,
     "Structures labelled in cycle 0, before any model exists.", "ActiveLearning", {})
 
@@ -193,6 +204,9 @@ private:
     std::vector<Molecule> sampleStructures(
         const std::string& md_method, const std::vector<Molecule>& seeds, int cycle);
 
+    /*! \brief Structures a stopped sampling run flagged as outside the trained region. */
+    std::vector<Molecule> m_triggered;
+
     /**
      * @brief Pick the structures worth spending reference calculations on.
      *
@@ -249,6 +263,8 @@ private:
     int m_al_candidates = 15;
     double m_al_uncertainty = 0.05;
     int m_al_initial = 15;
+    bool m_al_onthefly = false;
+    double m_al_onthefly_threshold = 0.9;
 
     /* Anchor structure and, more importantly, the bond graph taken from it. Only the graph
        is pinned for later structures; everything geometry dependent is recomputed where it

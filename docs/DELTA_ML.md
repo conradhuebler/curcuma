@@ -119,6 +119,13 @@ Selection is greedy farthest-point in descriptor space among the candidates abov
 uncertainty threshold: maximising uncertainty alone piles every pick onto one pathological
 region and buys almost no new information for the same reference cost.
 
+**On-the-fly (`-al_onthefly`).** Each sampling run is given the extrapolation threshold as
+an abort condition, so it stops at the first structure that leaves the trained region and
+that structure -- rather than a fixed-length batch -- becomes the candidate. The trajectory
+nominates its own labels, and the model is refitted before sampling continues. Measured on
+a 9-atom test: with the threshold at 0.5 a cycle collected 4 frames instead of 44, three of
+which had tripped the threshold.
+
 **The known weakness is structural.** Sampling happens on the surface being learned, so
 cycle 0 only visits what the base method considers relevant. If the reference surface has a
 minimum elsewhere, that region is never sampled and never learned, and the model confirms
