@@ -86,6 +86,16 @@ public:
         // Thousands of per-structure SCF banners would bury the actual result.
         cfg["verbosity"] = 0;
 
+        // External programs that write scratch files under a fixed name cannot share a
+        // working directory. ORCA in particular uses one 'orca_calc' basename, so parallel
+        // labelling would have every thread overwriting the same input and reading back
+        // whichever output happened to survive. Give each thread its own.
+        const std::string tag = "orca_calc_t" + std::to_string(getThreadId());
+        cfg["orca_basename"] = tag;
+        json orca = cfg.value("orca", json::object());
+        orca["orca_basename"] = tag;
+        cfg["orca"] = orca;
+
         try {
             // Each structure gets its own set-up, with only the bond graph carried over --
             // the same treatment the trained model applies later. Initialising once at the
@@ -282,9 +292,12 @@ bool ActiveLearn::labelStructures(const std::vector<Molecule>& molecules, MLData
     const int n_threads = std::max(1, m_threads);
     std::vector<LabelThread*> threads;
     threads.reserve(n_threads);
-    for (int t = 0; t < n_threads; ++t)
-        threads.push_back(
-            new LabelThread(m_base_method, m_ref_method, m_controller, m_anchor, m_anchor_bonds));
+    for (int t = 0; t < n_threads; ++t) {
+        LabelThread* lt
+            = new LabelThread(m_base_method, m_ref_method, m_controller, m_anchor, m_anchor_bonds);
+        lt->setThreadId(t);
+        threads.push_back(lt);
+    }
     for (std::size_t i = 0; i < molecules.size(); ++i)
         threads[i % n_threads]->addStructure(molecules[i], i);
 
