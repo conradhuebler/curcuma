@@ -242,6 +242,8 @@ set_tests_properties(cli_sqm_10_gfn2_optimization_smoke PROPERTIES TIMEOUT 180)
 # Invariants only -- the sharp derivative check lives in the test_deltaml unit test.
 # =============================================================================
 add_cli_test(deltaml 01_train_and_predict)
+add_cli_test(deltaml 02_trajectory_workflow)
+set_tests_properties(cli_deltaml_02_trajectory_workflow PROPERTIES TIMEOUT 300)
 
 message(STATUS "Added CLI test scenarios with build directory isolation")
 message(STATUS "  - Tests execute from: ${CMAKE_CURRENT_BINARY_DIR}/category/test_name")

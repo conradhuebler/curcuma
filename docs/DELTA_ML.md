@@ -64,6 +64,14 @@ curcuma -activelearn conf.xyz -center_sweep 200,500,1000,2000,4000
 curcuma -activelearn other.xyz -al_mode test -model conf.deltaml.json
 ```
 
+Two preset configurations ship with the source and carry the measured reasoning in their
+comments; the command line still overrides anything in them:
+
+```bash
+curcuma -activelearn conformers.xyz -import_config presets/deltaml_conformer.json
+curcuma -activelearn start.xyz      -import_config presets/deltaml_trajectory.json
+```
+
 `-method deltaml -deltaml.model <file>` is equivalent to the `deltaml:<file>` shorthand. The
 shorthand exists because several capabilities rebuild their sub-configuration from the
 method name alone and would otherwise drop the `deltaml` block on the way down.

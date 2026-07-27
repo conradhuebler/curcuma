@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "Delta-ML preset: CONFORMER work -- ranking a conformer ensemble and pre-optimising it.",
+    "Use with:  curcuma -activelearn conformers.xyz -import_config presets/deltaml_conformer.json",
+    "CLI flags still win over anything set here.",
+    "",
+    "Assumes the input is an existing ensemble near minima, so no sampling is needed and",
+    "al_mode stays 'train'. Acceptance criteria for this case are the rank correlation and",
+    "the distance of the optimised structure from the reference minimum -- NOT the raw energy",
+    "error, which barely moves (about 13 % on the system these values were measured on).",
+    "",
+    "lambda: 1e-6 gave the best rank correlation (0.517 against 0.387 for bare GFN-FF) and the",
+    "best energy conservation. If the optimised geometry matters more than the ranking, try",
+    "1e-2 instead: on the same system it gave the closest minima (0.474 A against 0.635 A) but",
+    "the worst ranking (0.303). The two goals genuinely pull in opposite directions.",
+    "",
+    "WARNING: the geometric improvement did NOT transfer to a second, floppier system, where",
+    "every model tested moved the minimum further away than the bare base method. Measure it",
+    "for your system before relying on it."
+  ],
+  "method": "gfnff",
+  "activelearn": {
+    "al_mode": "train",
+    "ref_method": "gfn2",
+    "n_centers": 2000,
+    "lambda": 1e-6,
+    "sigma_energy": 1e-4,
+    "sigma_force": 1e-3,
+    "use_forces": true,
+    "test_fraction": 0.2
+  }
+}
