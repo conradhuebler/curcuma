@@ -103,6 +103,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - Implement timing analysis for complex functions
 - Keep track of significant improvements in AIChangelog.md, one line per fact
 - **Complex Architecture Documentation**: Factory patterns, dispatchers, and multi-step workflows require comprehensive inline documentation following ARCHITECTURE_DOCUMENTATION.md standards
+- **Finite-difference gate for energy methods (MANDATORY, Jul 2026)**: Any method that returns a gradient must pass an FD check of the **fully assembled** surface (`-dump_gradient` vs. central differences on `-sp` energies), not of its components. Component-level unit tests cannot see a unit or convention break at an integration seam: a Delta-ML gradient exact to 1e-11 in isolation was still 1.89x wrong once added to a base method reporting Eh/Bohr instead of Eh/Angstrom, and the error was invisible in every energy.
 - **BMT output compatibility (MANDATORY)**: Every capability that writes output files MUST route them through `outputPath()` (CurcumaMethod subclasses) or `BMTUtils::outputPath()` (standalone handlers). Hardcoded CWD paths are not permitted. Verify with `-no_bmt` (legacy) and default BMT mode before merging.
 - **No UTF symbols in terminal output**: Do not use Unicode box-drawing characters, emoji, arrows (->), checkmarks, or any non-ASCII symbols in fmt::print/std::cout output. Use plain ASCII only. Reason: breaks output in many terminal emulators, log files, and remote shells. CurcumaLogger colored output is exempt (uses ANSI codes, not Unicode).
 
@@ -229,16 +230,18 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 
 ### 10. Delta-Machine-Learning
 - ⚠️ **Delta-ML** (`-activelearn`, `-method deltaml:<model.json>`, Jul 2026, AI/machine-tested) - learns
-  `E_ref - E_base` so conformer search and pre-optimisation run at base-method cost. ACSF descriptor +
-  sparse kernel ridge (GAP-style), energies and gradients trained jointly. 353-conformer C/H/N set,
-  GFN-FF→GFN2 (353 conformers, 90 atoms, re-measured after two gradient defects were fixed):
-  gradient RMSE 9.5e-3→2.1e-3 Eh/A (4.6x), mean distance to the GFN2 minimum 0.635→0.567 A,
-  relative energy MAE 0.824→0.714 kcal/mol, Spearman 0.387→0.517; 16.6x faster than GFN2 per
-  MD step, NVE drift 1.11 vs GFN-FF 1.56. **The gain is in the forces, not the energies.**
-  No single best `-activelearn.lambda`: 1e-6 for ranking and dynamics, 1e-2 for geometry
-  (0.474 A). Training and inference run on `-gpu cuda` (2.9x / 2.2x). Fixed topology only,
-  train on **optimised** structures, reference must be dispersion-corrected —
-  [docs/DELTA_ML.md](docs/DELTA_ML.md)
+  `E_ref - E_base`. ACSF descriptor + sparse KRR (GAP-style), energies and gradients trained jointly,
+  training and inference on `-gpu cuda`. Presets in `presets/` — [docs/DELTA_ML.md](docs/DELTA_ML.md)
+- **The gain is in the forces, not the energies** (353 conformers, 90 atoms, GFN-FF→GFN2): gradient
+  RMSE 9.5e-3→2.1e-3 (4.6x), relative energy MAE 0.824→0.714 (1.16x), Spearman 0.387→0.517,
+  16.6x faster than GFN2 per MD step, NVE drift 1.11 vs GFN-FF 1.56
+- ⚠️ **Not established for pre-optimisation**: the optimised minimum improved 12% on the stiff
+  90-atom molecule but got *worse* on a floppy trisaccharide with every training set tested
+  (0.55→0.79…1.01 A) — a lower RMS force error does not constrain where the gradient vanishes
+- **Only validated against GFN2** (cost ratio 88x). The DFT case, where the economics actually pay,
+  is untested and is the measurement that should decide any further investment
+- Fixed topology only; reference must be dispersion-corrected; untested for charged/open-shell
+  systems, metals, cross-molecule transfer and long MD
 
 ### 11. Core Computational Libraries
 - ✅ **MNDO Integrals** - Dewar-Thiel multipole expansion for semi-empirical 2e⁻ integrals, see [docs/MNDO_INTEGRALS.md](docs/MNDO_INTEGRALS.md)
@@ -453,6 +456,7 @@ ctest -R "cli_rmsd_01" --verbose
 - **Structure**: `controller[keyword][parameter]` - e.g. `controller["opt"]["verbosity"]`, `controller["hessian"]["MaxIter"]`
 - **Global Parameters**: `verbosity`, `threads`, `method`, `gpu` are additionally duplicated at top-level
 - **Flat-flag auto-routing (2026)**: Any registered PARAM is reachable by its flat name (`-cn_cutoff_bohr 5.5` routes to `controller["gfnff"]["cn_cutoff_bohr"]` because the registry records ownership). Same-name in the active command's module wins; truly ambiguous names (multiple owners, none matching) warn and stay in the command module. Dotted form `-<module>.<param>` always works for disambiguation. Unregistered/legacy flags stay in the command module (unchanged).
+- **Sub-scopes must be forwarded explicitly (MANDATORY, Jul 2026)**: A capability that builds a narrower config for its `EnergyCalculator` must forward the method sub-scopes (`EnergyCalculator::isMethodScope()`), and must write settings the sub-method reads into the **module sub-document**, not only as flat keys. Three separate defects came from this: `-gfnff.solvent`/`-eeq_solver.*`/`-deltaml.*` worked from `-sp` and vanished from `-md`; `EnergyCalculator` has an allow-list of scopes that silently drops anything not on it; and `-activelearn` sampling ran on the module default `"uff"` for weeks because only the flat `method` key was set. From the CLI these flags work only because the registry auto-routes them into the command module — that convenience does not exist for code.
 - **JSON round-trip (2026)**: `-export_run file.json` writes the resolved controller plus `_command`, `_input`, and full registry defaults for every touched module. `-import_config file.json` performs a recursive deep merge (CLI wins at every depth). Invoking `curcuma -import_config run.json` reads `_command`/`_input` from the JSON, so the file alone is enough to replay a run. See [docs/CLI_ROUND_TRIP.md](docs/CLI_ROUND_TRIP.md).
 
 ## Planned Development

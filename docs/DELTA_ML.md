@@ -324,6 +324,29 @@ The correction is 2.2x faster; the correction value itself is identical to all t
 digits. Note GFN-FF is *slower* on the GPU at this size, which eats part of the gain --
 `-gpu` is a single global switch, so the best placement per component is not expressible.
 
+## ConfSearch: not established, and the roles do not line up
+
+Untestable on this branch -- ConfSearch currently segfaults here with `gfnff` and `uff` as
+well, so the failure is pre-existing and says nothing about Delta-ML. What can be said from
+the measurements is that the three roles ConfSearch needs a method for do not play to this
+method's strengths:
+
+| role | what it needs | Delta-ML today |
+|---|---|---|
+| metadynamics sampling | forces | strong: 4.6x better gradients, NVE stable |
+| optimising the bias structures | minimum positions | weak and system dependent, went the wrong way on one of two systems |
+| ranking in ConfScan | relative energies | 13 % better, Spearman 0.52 -- not enough to rerank on |
+
+There is also a structural tension: metadynamics exists to drive the system into regions it
+has not visited, which is exactly where a kernel model knows nothing and its correction
+decays to zero. `uncertainty_abort` is the right countermeasure but would end the biased
+runs continuously.
+
+And the economics do not favour it either. ConfSearch already samples with GFN-FF, which is
+cheap; Delta-ML costs four to five times more per step than bare GFN-FF. It would only pay
+by replacing the reference in the optimisation and ranking steps -- the two roles above where
+it is weakest.
+
 ## Open: the anchor freezes more than it should
 
 The topology anchor exists to guarantee that GFN-FF uses one identical bond graph
