@@ -467,20 +467,33 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
                         break;
                     }
         }
+        // Claude Generated (Jul 2026): rate-limit both messages. A line search re-enters the same
+        // pathological geometry up to max_line_search times, so ONE bad structure in a batch printed
+        // 20 identical lines; a ConfSearch cycle drowned in them. The state (m_containsNaN, m_error)
+        // is set every time regardless -- only the printing is throttled.
         if (energy_nan) {
             m_containsNaN = true;
-            CurcumaLogger::error(fmt::format(
-                "NaN/Inf in {} energy — returning 0.0",
-                m_method_name));
+            ++m_nan_energy_reports;
+            if (m_nan_energy_reports == 1 || getEffectiveVerbosity() >= 2)
+                CurcumaLogger::error(fmt::format(
+                    "NaN/Inf in {} energy — returning 0.0",
+                    m_method_name));
+            else if (m_nan_energy_reports == 2)
+                CurcumaLogger::warn(fmt::format(
+                    "NaN/Inf in {} energy: further occurrences on this structure are silent "
+                    "(raise -verbosity to 2 to see them all)",
+                    m_method_name));
             handleMethodError("NaN values detected in energy");
             return 0.0;
         }
         if (grad_nan) {
             m_containsNaN = true;
-            CurcumaLogger::error(fmt::format(
-                "NaN/Inf in {} gradient — energy {:.8f} Eh is finite and returned, "
-                "but the gradient is invalid (optimization/MD should abort or restart)",
-                m_method_name, m_energy));
+            ++m_nan_gradient_reports;
+            if (m_nan_gradient_reports == 1 || getEffectiveVerbosity() >= 2)
+                CurcumaLogger::error(fmt::format(
+                    "NaN/Inf in {} gradient — energy {:.8f} Eh is finite and returned, "
+                    "but the gradient is invalid (optimization/MD should abort or restart)",
+                    m_method_name, m_energy));
             // Do NOT substitute 0.0 for a valid energy. Mark error state so callers
             // checking hasError()/m_containsNaN can refuse to use the gradient.
             m_error = true;

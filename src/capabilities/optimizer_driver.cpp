@@ -447,6 +447,19 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
                 return OptimizationResult::failed_result("Energy evaluation failed during optimization");
             }
 
+            // Claude Generated (Jul 2026): a NaN slips through EVERY numeric guard below, because
+            // every comparison with NaN is false -- the energy-rise limit does not fire, the
+            // convergence tests do not fire, and the loop grinds on re-evaluating a geometry that
+            // has already diverged (observed: 20 line-search evaluations per step, all NaN). Stop
+            // here instead, and stop before the diverged coordinates are written into m_molecule.
+            if (!std::isfinite(new_energy) || !new_coords.allFinite()) {
+                CurcumaLogger::set_verbosity(saved_global_verbosity);
+                CurcumaLogger::warn_fmt("Optimisation diverged at iteration {} (non-finite energy or coordinates) "
+                                        "-- keeping the last valid geometry",
+                    m_current_iteration);
+                break; // the accepted coordinates/energy from the previous iteration stay in place
+            }
+
             // Check for energy rise limit
             energy_change_kjmol = (new_energy - m_current_energy) * CURCUMA_EH_TO_KJMOL;
             if (energy_change_kjmol > m_context.max_energy_rise) {

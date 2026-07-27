@@ -332,6 +332,7 @@ private:
     std::string m_phase3b_preopt_preset = "loose", m_phase3b_preset = "normal";
     int m_phase3b_preopt_max_iter = 0, m_ensemble_report = 3;
     bool m_snapshot_topology_gate = true; // Claude Generated (Jul 2026): pre-Phase-2 topology gate
+    double m_snapshot_clash_ratio = 0.55;  // collapsed-contact screen, fraction of the covalent sum
     // Claude Generated (Jul 2026): restrained repair of near-miss snapshots (see RepairSnapshot)
     bool m_repair_snapshots = false;
     int m_repair_max = 20, m_repair_max_bonds = 2, m_repair_max_iterations = 300;
@@ -454,6 +455,7 @@ private:
 
     // --- Robustness Gates ---
     PARAM(snapshot_topology_gate, Bool, true, "Drop MD snapshots whose bond topology differs from the reference structure BEFORE they are optimised. Such structures are not conformers of this molecule and are rejected by the Phase 4 filter anyway, after a full optimisation has been paid for them; they are also the geometries for which GFN-FF returns a finite energy together with a NaN gradient. Set false to optimise every snapshot as before.", "Robustness", {})
+    PARAM(snapshot_clash_ratio, Double, 0.55, "A snapshot is rejected when any atom pair is closer than this fraction of the sum of their covalent radii. Independent of the topology test: a pair that is ALREADY BONDED forms no new bond when it collapses, so the topology check sees nothing, but the 1/r factors in the hydrogen-bond and three-body terms still blow up (observed as NaN in hb/atm/batm with a finite energy). 0 disables the screen.", "Robustness", {})
     PARAM(repair_snapshots, Bool, false, "Instead of discarding a snapshot whose topology changed, restrain the offending atom pairs back to a sane distance (missing bond -> its reference length, spurious contact -> outside bonding range), optimise, RELEASE the restraints and optimise freely; keep it only if the topology then matches. With GFN-FF a broken bond is often the force field losing a contact near its cutoff rather than real chemistry, and the conformation of such a snapshot can still be worth keeping. Costs two optimisations per attempt.", "Robustness", {})
     PARAM(repair_max, Int, 20, "Maximum repair attempts per cycle, lowest-energy candidates first.", "Robustness", {})
     PARAM(repair_max_bonds, Int, 2, "Only snapshots with at most this many changed bonds are repaired. More changed bonds means a different molecule, not a conformer with an artefact.", "Robustness", {})

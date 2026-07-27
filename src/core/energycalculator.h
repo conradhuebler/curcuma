@@ -458,6 +458,11 @@ private:
     // Status flags
     bool m_initialized = false;                       ///< Initialization status
     bool m_containsNaN = false;                      ///< NaN detection flag
+    /* Claude Generated (Jul 2026): how often this calculator reported a non-finite energy/gradient.
+     * A line search re-enters the same pathological geometry many times, so the message is printed
+     * once per structure (all of them at verbosity >= 2). The error STATE is always set. */
+    int m_nan_energy_reports = 0;
+    int m_nan_gradient_reports = 0;
     bool m_error = false;                            ///< Error state flag
     std::string m_error_message;                     ///< Error description
     bool m_gpu_fallback = false;                    ///< GPU requested but CUDA unavailable

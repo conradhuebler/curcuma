@@ -237,6 +237,21 @@ thermal stretching does not trip it: a C-C bond must exceed 2.28 Å to count as 
 800 K on butane, *all* snapshots pass, so a normal run is unaffected. When nothing survives at all,
 the cycle is skipped with an explicit warning rather than running the phases on an empty file.
 
+**A topology test is not enough.** A pair that is ALREADY BONDED forms no new bond when it
+collapses, so the topology check sees nothing wrong — while the 1/r factors in the hydrogen-bond and
+three-body terms still blow up. That is exactly what was observed: snapshots passed the gate and
+their optimisation then reported NaN in `hb`/`atm`/`batm` with a finite energy. `-snapshot_clash_ratio`
+(default 0.55) therefore screens the raw distances as well: any pair closer than 55 % of the sum of
+its covalent radii is a collapsed geometry, bonded or not (for C-H that is 0.59 Å against a real bond
+of 1.09 Å — deeply pathological, never thermal). 0 disables it.
+
+**And NaN defeats numeric guards.** Every comparison with NaN is false, so a diverged optimisation
+sailed past the energy-rise limit and every convergence test, and kept re-evaluating a dead geometry
+(20 line-search evaluations per step). Three places now check explicitly rather than by comparison:
+the optimiser aborts the structure on a non-finite energy or coordinate and keeps the last valid
+geometry; ConfSearch never writes a non-finite geometry into the pool (it falls back to the input
+structure, or drops the entry and says so); and the gate screens non-finite snapshots up front.
+
 Two related knobs: `-snapshot_topology_gate false` restores the old behaviour (optimise everything),
 and `-topo_check true` makes the MD itself abort as soon as the molecule fragments — the gate stops
 you paying for broken structures, `topo_check` stops the dynamics from producing them.

@@ -1406,7 +1406,13 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
         double e_start = res.energy_trajectory.empty() ? 0.0 : res.energy_trajectory.front();
         double e_end   = res.final_energy;
         double dE_kjmol = (e_end - e_start) * 2625.5;  // Eh -> kJ/mol
-        if (res.final_molecule.AtomCount() > 0) {
+        // Claude Generated (Jul 2026): never write a diverged structure into the pool. A geometry
+        // with NaN/Inf coordinates passes every downstream numeric test (comparisons with NaN are
+        // false), so it would travel through the dedup into the cumulative ensemble and poison the
+        // energy reference. The input geometry is the honest fallback.
+        const bool finite_result = res.final_molecule.AtomCount() > 0
+            && res.final_molecule.getGeometry().allFinite() && std::isfinite(e_end);
+        if (finite_result) {
             res.final_molecule.appendXYZFile(output_file);
             // Claude Generated (Jul 2026): the per-structure table is the detail record and moves to
             // verbosity >= 2. At verbosity 1 the live progress bar during the batch plus the summary
@@ -1416,10 +1422,15 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
                     idx + 1, opt_method_name, res.iterations_performed, e_end, dE_kjmol,
                     res.success ? "" : "  (not converged)");
             ++written;
-        } else if (fallback.AtomCount() > 0) {
+        } else if (fallback.AtomCount() > 0 && fallback.getGeometry().allFinite()) {
             fallback.appendXYZFile(output_file);
-            CurcumaLogger::warn_fmt("  Struct {:2d}: optimizer failed, using input geometry", idx + 1);
+            CurcumaLogger::warn_fmt("  Struct {:2d}: optimisation unusable ({}), using the input geometry",
+                idx + 1,
+                res.final_molecule.AtomCount() == 0 ? "no geometry returned" : "non-finite energy/geometry");
             ++written;
+        } else {
+            CurcumaLogger::warn_fmt("  Struct {:2d}: dropped -- neither the optimised nor the input geometry is finite",
+                idx + 1);
         }
     };
 
@@ -1729,8 +1740,8 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
 
     std::vector<Molecule> keep;
     std::vector<Molecule> broken; // candidates for the restrained repair (m_repair_snapshots)
-    int total = 0, rejected_formed = 0, rejected_broken = 0;
-    bool reported = false;
+    int total = 0, rejected_formed = 0, rejected_broken = 0, rejected_clash = 0, rejected_nonfinite = 0;
+    bool reported = false, reported_clash = false;
     {
         FileIterator it(path);
         while (!it.AtEnd()) {
@@ -1743,8 +1754,43 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
             // difference" and keeps the structure. It then reaches GFN-FF, whose energy and every
             // gradient term come back NaN. Screen it here.
             if (!mol.getGeometry().allFinite()) {
-                rejected_broken++;
+                rejected_nonfinite++;
                 continue;
+            }
+            // Claude Generated (Jul 2026): a clash that does NOT change the topology still breaks
+            // the force field. The 1/r factors in the hb and three-body terms blow up when any pair
+            // gets close enough, and for a pair that is ALREADY BONDED in the reference no bond is
+            // "formed", so the topology test above sees nothing wrong. Observed exactly that: the
+            // gate passed structures whose optimisation then reported NaN in hb/batm/atm while the
+            // energy stayed finite. Screen on the raw distance instead: anything below
+            // clash_ratio x (sum of covalent radii) is a collapsed geometry, bonded or not.
+            if (m_snapshot_clash_ratio > 0.0) {
+                const Geometry geom = mol.getGeometry();
+                bool collapsed = false;
+                for (int i = 0; i < mol.AtomCount() && !collapsed; ++i) {
+                    for (int j = i + 1; j < mol.AtomCount(); ++j) {
+                        const double limit = m_snapshot_clash_ratio
+                            * (Elements::CovalentRadius[mol.Atom(i).first]
+                                + Elements::CovalentRadius[mol.Atom(j).first]);
+                        if ((Eigen::Vector3d(geom.row(i)) - Eigen::Vector3d(geom.row(j))).norm() < limit) {
+                            if (!reported_clash) {
+                                CurcumaLogger::warn_fmt("ConfSearch: clash screen (first reject): atoms {}-{} are "
+                                                        "{:.3f} A apart, below {:.0f}% of their covalent radii sum "
+                                                        "({:.3f} A) -- the force field's 1/r terms break there",
+                                    i, j,
+                                    (Eigen::Vector3d(geom.row(i)) - Eigen::Vector3d(geom.row(j))).norm(),
+                                    m_snapshot_clash_ratio * 100.0, limit);
+                                reported_clash = true;
+                            }
+                            collapsed = true;
+                            break;
+                        }
+                    }
+                }
+                if (collapsed) {
+                    rejected_clash++;
+                    continue;
+                }
             }
             const Matrix topo = mol.DistanceMatrix().second;
             if (topo.rows() != m_topo_matrix.rows()) {
@@ -1789,8 +1835,10 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
         }
     }
 
-    if (rejected_formed + rejected_broken == 0) {
-        CurcumaLogger::result_fmt("ConfSearch: topology gate: all {} MD snapshots keep the reference topology", total);
+    const int rejected_total = rejected_formed + rejected_broken + rejected_clash + rejected_nonfinite;
+    if (rejected_total == 0) {
+        CurcumaLogger::result_fmt("ConfSearch: topology gate: all {} MD snapshots keep the reference topology "
+                                  "and are free of collapsed contacts", total);
         return total;
     }
 
@@ -1840,8 +1888,9 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
     // Report the chain, not two numbers that do not add up: N failed the check, R of them were
     // repaired and kept, N-R are gone.
     CurcumaLogger::result_fmt("ConfSearch: topology gate: {} of {} MD snapshots failed the check ({} formed a bond "
-                              "(collision), {} broke one){} -- {} snapshots go into the optimisation",
-        rejected_formed + rejected_broken, total, rejected_formed, rejected_broken,
+                              "(collision), {} broke one, {} collapsed contact, {} non-finite geometry){} -- {} "
+                              "snapshots go into the optimisation",
+        rejected_total, total, rejected_formed, rejected_broken, rejected_clash, rejected_nonfinite,
         repaired > 0 ? fmt::format(", {} of them repaired and kept", repaired)
                      : std::string(", none repaired"),
         static_cast<int>(keep.size()));
@@ -2561,6 +2610,7 @@ void ConfSearch::LoadControlJson()
     m_rattle_threshold_temp = m_config.get<double>("rattle_threshold_temp");
     m_rattle_hot_mode = m_config.get<int>("rattle_hot_mode");
     m_snapshot_topology_gate = m_config.get<bool>("snapshot_topology_gate"); // Claude Generated (Jul 2026)
+    m_snapshot_clash_ratio = m_config.get<double>("snapshot_clash_ratio");
     m_repair_snapshots = m_config.get<bool>("repair_snapshots");
     m_repair_max = m_config.get<int>("repair_max");
     m_repair_max_bonds = m_config.get<int>("repair_max_bonds");
