@@ -200,22 +200,38 @@ all 25380 training environments would have been slower than the reference it rep
 far M can be pushed is set by the reference/base cost ratio, 88x here and four to five
 orders of magnitude for DFT.
 
-## Train on optimised structures, not raw dynamics frames
+## Two use cases, and they do not behave alike
 
-This is the single biggest lever on how much the model is worth, larger than any
-hyperparameter. Measured on a 66-atom trisaccharide, GFN-FF to GFN2, same molecule, same
-M = 2000, only the training set differs:
+Measured on a second system -- a 66-atom trisaccharide, GFN-FF to GFN2, M = 2000,
+lambda = 1e-6 -- with three training sets differing only in where the structures came from:
 
-| training set | `Delta` span | energy MAE (model / base) | gain |
-|---|---|---|---|
-| 302 raw frames from 30 ps at 400 K | 371 kcal/mol | 27.5 / 12.4 kcal/mol | **1.3x** |
-| 150 GFN-FF-optimised structures | 91 kcal/mol | 2.6 / 12.4 kcal/mol | **4.8x** |
+| training set | `Delta` span | energy MAE (model / base) | gradient RMSE (model / base) | mean dist. to GFN2 min |
+|---|---|---|---|---|
+| 302 raw 400 K dynamics frames | 282 kcal/mol | 15.86 / 27.42 | 2.56e-2 / 4.62e-2 | 0.894 A |
+| 150 GFN-FF-optimised structures | 126 kcal/mol | 10.37 / 12.01 | 1.08e-2 / 2.58e-2 | 0.793 A |
+| 60 GFN2-optimised structures | 430 kcal/mol | 12.08 / 64.76 | 1.75e-2 / 5.80e-2 | 1.012 A |
+| bare GFN-FF | -- | -- | -- | **0.546 A** |
 
-Raw high-temperature frames teach the model about a region of configuration space that is
-both far rougher than, and irrelevant to, the minima you actually optimise into. Worse, a
-model trained that way made the optimised geometry *worse* than bare GFN-FF (0.405 A from
-the reference minimum against 0.288 A). Optimise the sampled structures before labelling
-them -- `curcuma -opt frames.xyz -method gfnff` -- and train on the result.
+Every model improves the energies and the forces. **Every model also moves the optimised
+minimum further from the reference than the uncorrected base method does** -- and the
+training set with the largest energy gain (5.4x) produces the worst geometry.
+
+That is not a contradiction. A lower RMS force error says nothing about *where* the gradient
+vanishes: a correction can be more accurate on average and still displace the stationary
+point, and a floppy sugar with shallow minima amplifies exactly that. The 90-atom conformer
+molecule above, which is stiffer, improves by 7 to 25 % on the same metric.
+
+So the two applications need separate treatment and separate parameters:
+
+- **Conformer work** (training data near minima, used for ranking and pre-optimisation):
+  measure the rank correlation and the distance to the reference minimum. `lambda = 1e-6`
+  for ranking, `1e-2` for geometry, on the system measured here.
+- **Trajectory work** (training data from dynamics, used for forces): measure the gradient
+  RMSE and the NVE drift. Geometry is not the relevant criterion, and on a floppy system it
+  will look bad no matter what.
+
+**Do not assume the geometric gain transfers between systems.** It did not here, and the
+direction of the effect reversed. Measure it for your system before relying on it.
 
 ## Does it survive molecular dynamics?
 
