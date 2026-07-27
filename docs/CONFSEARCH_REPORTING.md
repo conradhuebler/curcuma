@@ -202,7 +202,42 @@ possible — not only crashes. ConfScan's own test set is unchanged by the fix (
 `confscan_hybrid`, `confscan_molalign`, all `cli_confscan_*` pass; `confscan_dtemplate` fails before
 and after — a pre-existing, thread-count dependent golden-value test).
 
-## 7. Topology gate before the optimisation (`-snapshot_topology_gate`, default ON)
+## 7. What counts as "the same molecule": `-topology_factor` (default 1.3)
+
+Every topology comparison in the search used `Molecule::DistanceMatrix()`, whose covalent-radius
+factor is **1.5**. That is far too generous for this decision, and the consequence is not subtle.
+
+Measured on a 107-atom peptide (C34H55N11O7), 10 ps of gfnff MD at 500 K:
+
+| covalent factor | "bonds" in the reference | MD frames counted as topology changes |
+|---|---|---|
+| **1.5** (old) | 110 | **92 %** |
+| 1.4 | 108 | 0 % |
+| **1.3** (now) | 108 | **0 %** |
+| 1.2 | 108 | 8 % |
+
+The molecule never reacted. The two extra "bonds" at 1.5 are **compressed 1-3 contacts**: atoms 5
+and 12, both bonded to atom 4, sit 2.25 Å apart, and the 1.5 criterion calls them bonded at 2.28 Å —
+i.e. as soon as their angle closes from 107° to 109°. A tetrahedral angle is 109.47°, so the "bond"
+appears and disappears on a two-degree thermal fluctuation.
+
+Phase 4 therefore discarded most of the conformers the search had just produced. Same molecule, one
+ConfSearch cycle at 500 K, 4 × 10 ps of MD:
+
+| RMSD-MTD setting | conformers @1.5 | conformers @1.3 | lowest gfnff @1.5 | @1.3 |
+|---|---|---|---|---|
+| defaults, 2 ps | 3 | **34** | −18.748979 | **−18.776946** |
+| defaults, 10 ps | 1 | **54** | −18.759449 | −18.777362 |
+| `bias_calibration couple` | 2 | **25** | −18.755169 | −18.778346 |
+| couple + `rmsd_mtd_k 0.05` | 3 | **33** | −18.756473 | **−18.780005** |
+| couple + `rmsd_mtd_k 0.1` | 1 | **54** | −18.735526 | −18.774007 |
+
+**10 to 50 times more conformers, and a minimum ~55 kJ/mol deeper.** ConfGen had already hit this
+and defined its own `-topology_factor` (1.3); ConfSearch kept using 1.5. It now has the same
+parameter, used for the reference topologies, the snapshot gate, both Phase 4 filters and the
+repair.
+
+## 8. Topology gate before the optimisation (`-snapshot_topology_gate`, default ON)
 
 A conformer search explores ONE molecule. A snapshot that formed or broke a bond is not a conformer
 of it, and the Phase 4 filter rejects it — but only *after* a full optimisation has been paid for it.
@@ -279,7 +314,7 @@ you paying for broken structures, `topo_check` stops the dynamics from producing
 with a NaN gradient went straight into the line search. A non-finite gradient is now an error, which
 makes the driver take a zero step and stop on that structure instead of following garbage.
 
-## 8. Live progress for the optimisation and MD batches
+## 9. Live progress for the optimisation and MD batches
 
 Two different mechanisms exist, and mixing them up is what caused the silence:
 

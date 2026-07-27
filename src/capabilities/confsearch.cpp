@@ -78,7 +78,7 @@ void ConfSearch::setFile(const std::string& filename)
         mol->setCharge(m_charge);
         mol->setSpin(m_spin);
         m_in_stack.push_back(mol);
-        m_topo_matrix = mol->DistanceMatrix().second;
+        m_topo_matrix = TopologyMatrix(*mol);
     }
 }
 
@@ -306,10 +306,10 @@ void ConfSearch::start()
         pending_entry = (m_restart.entry_phase >= 1) ? 1 : 0; // v1: only md / post_md resume granularity
         m_elements = m_restart.elements;
         m_topo_ref = m_restart.topo_ref;
-        m_topo_matrix = m_topo_ref.DistanceMatrix().second;
+        m_topo_matrix = TopologyMatrix(m_topo_ref);
         if (m_restart.topo_ref_opt.AtomCount() > 0) {
             m_topo_ref_opt = m_restart.topo_ref_opt;
-            m_topo_matrix_opt = m_topo_ref_opt.DistanceMatrix().second;
+            m_topo_matrix_opt = TopologyMatrix(m_topo_ref_opt);
         }
         m_global_min = m_restart.global_min;
         m_initial_energy = m_restart.initial_energy;
@@ -356,7 +356,7 @@ void ConfSearch::start()
                 m_in_stack.push_back(new Molecule(mol));
         }
         if (!m_in_stack.empty()) {
-            m_topo_matrix = m_in_stack[0]->DistanceMatrix().second;
+            m_topo_matrix = TopologyMatrix(*m_in_stack[0]);
             m_topo_ref = *m_in_stack[0];           // reference structure for restart topology
             m_elements = m_in_stack[0]->Atoms();   // shared atomic-number list for checkpoint frames
         }
@@ -424,7 +424,7 @@ void ConfSearch::start()
             // the input structure optimised at opt_method, so like is compared with like.
             if (!opt_init_stack.empty() && opt_init_stack[0]->AtomCount() > 0) {
                 m_topo_ref_opt = *opt_init_stack[0];
-                m_topo_matrix_opt = m_topo_ref_opt.DistanceMatrix().second;
+                m_topo_matrix_opt = TopologyMatrix(m_topo_ref_opt);
                 // If the two methods disagree about the topology of the SAME molecule, say so --
                 // it explains any later divergence in the reject counts and is worth knowing.
                 if (m_topo_matrix.rows() == m_topo_matrix_opt.rows()) {
@@ -767,7 +767,7 @@ void ConfSearch::start()
                 // A broken or formed bond changes >=2 entries by 1.0 -> sum >> 1e-4.
                 // Log the first mismatched pair to help distinguish GFN-FF artefacts from
                 // genuine chemical reactions (proton transfer, ring opening, etc.).
-                auto topo_cur = mol->DistanceMatrix().second;
+                auto topo_cur = TopologyMatrix(*mol);
                 double topo_diff_sum = (m_topo_matrix - topo_cur).cwiseAbs().sum();
                 if (topo_diff_sum > 1e-4) {
                     if (rejected_topo == 0) {
@@ -888,7 +888,7 @@ void ConfSearch::start()
                 mol->setCharge(m_charge);
                 mol->setSpin(m_spin);
                 opt_total++;
-                auto topo_cur = mol->DistanceMatrix().second;
+                auto topo_cur = TopologyMatrix(*mol);
                 const double topo_diff_sum = (opt_reference - topo_cur).cwiseAbs().sum();
                 if (topo_diff_sum > 1e-4) {
                     // Same diagnostic as the exploration side: name the first differing pair. A
@@ -1688,10 +1688,30 @@ std::string ConfSearch::PerformHighLevelOptimisation(const std::string& f)
     return out;
 }
 
+// Claude Generated (Jul 2026): bond matrix with an explicit factor -- see the header for why 1.5 is
+// unusable for this decision.
+Matrix ConfSearch::TopologyMatrix(const Molecule& mol) const
+{
+    const int n = mol.AtomCount();
+    Matrix topo = Matrix::Zero(n, n);
+    const Geometry geom = mol.getGeometry();
+    for (int i = 0; i < n; ++i) {
+        for (int j = i + 1; j < n; ++j) {
+            const double cutoff = m_topology_factor
+                * (Elements::CovalentRadius[mol.Atom(i).first] + Elements::CovalentRadius[mol.Atom(j).first]);
+            if ((Eigen::Vector3d(geom.row(i)) - Eigen::Vector3d(geom.row(j))).norm() <= cutoff) {
+                topo(i, j) = 1.0;
+                topo(j, i) = 1.0;
+            }
+        }
+    }
+    return topo;
+}
+
 // Claude Generated (Jul 2026): restrained repair of a snapshot -- see the header for the rationale.
 bool ConfSearch::RepairSnapshot(Molecule& mol, EnergyCalculator& calculator) const
 {
-    const Matrix topo = mol.DistanceMatrix().second;
+    const Matrix topo = TopologyMatrix(mol);
     if (topo.rows() != m_topo_matrix.rows())
         return false;
 
@@ -1756,7 +1776,7 @@ bool ConfSearch::RepairSnapshot(Molecule& mol, EnergyCalculator& calculator) con
     // "topology restored" and handed to the next optimisation, where every GFN-FF term returns NaN.
     if (!repaired.getGeometry().allFinite() || !std::isfinite(stage2.final_energy))
         return false;
-    if ((repaired.DistanceMatrix().second - m_topo_matrix).cwiseAbs().sum() > 1e-4)
+    if ((TopologyMatrix(repaired) - m_topo_matrix).cwiseAbs().sum() > 1e-4)
         return false; // still not this molecule -- the break was real chemistry, not an artefact
 
     mol = repaired;
@@ -1824,7 +1844,7 @@ int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
                     continue;
                 }
             }
-            const Matrix topo = mol.DistanceMatrix().second;
+            const Matrix topo = TopologyMatrix(mol);
             if (topo.rows() != m_topo_matrix.rows()) {
                 rejected_broken++;
                 continue;
@@ -2643,6 +2663,7 @@ void ConfSearch::LoadControlJson()
     m_rattle_hot_mode = m_config.get<int>("rattle_hot_mode");
     m_snapshot_topology_gate = m_config.get<bool>("snapshot_topology_gate"); // Claude Generated (Jul 2026)
     m_snapshot_clash_ratio = m_config.get<double>("snapshot_clash_ratio");
+    m_topology_factor = m_config.get<double>("topology_factor");
     m_repair_snapshots = m_config.get<bool>("repair_snapshots");
     m_repair_max = m_config.get<int>("repair_max");
     m_repair_max_bonds = m_config.get<int>("repair_max_bonds");

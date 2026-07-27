@@ -220,6 +220,20 @@ private:
      * @return true when the repaired structure carries the reference topology */
     bool RepairSnapshot(Molecule& mol, EnergyCalculator& calculator) const;
 
+    /* Claude Generated (Jul 2026): 0/1 bond matrix with an EXPLICIT covalent-radius factor.
+     *
+     * Replaces Molecule::DistanceMatrix().second, whose factor of 1.5 is far too generous to decide
+     * whether a structure is still the same molecule: a compressed 1-3 contact counts as a bond.
+     * Measured on the 107-atom peptide this was found on -- two carbons bonded to the same atom sit
+     * 2.25 A apart, and the 1.5 criterion calls them BONDED at 2.28 A, i.e. as soon as their angle
+     * closes from 107 deg to 109 deg. That is a tetrahedral angle: the "bond" appears and disappears
+     * on a two-degree thermal fluctuation. Consequence, measured on a 10 ps 500 K trajectory:
+     *   factor 1.5 -> 92 % of the frames "changed topology";  factor 1.3/1.4 -> 0 %.
+     * The molecule never reacted. ConfGen already hit this and uses its own factor (1.3); ConfSearch
+     * kept using 1.5 and therefore threw away ~90 % of perfectly good conformers in its Phase 4
+     * topology filter. */
+    Matrix TopologyMatrix(const Molecule& mol) const;
+
     /* Copy every frame of an XYZ file to another name. Used where a stage has to start from the
      * previous stage's OUTPUT: the copy is what lets the new stage own a file whose name states its
      * purpose and method instead of inheriting a chain of suffixes. Returns the frame count. */
@@ -341,6 +355,7 @@ private:
     int m_phase3b_preopt_max_iter = 0, m_ensemble_report = 3;
     bool m_snapshot_topology_gate = true; // Claude Generated (Jul 2026): pre-Phase-2 topology gate
     double m_snapshot_clash_ratio = 0.55;  // collapsed-contact screen, fraction of the covalent sum
+    double m_topology_factor = 1.3;        // covalent-radius factor of every topology comparison
     // Claude Generated (Jul 2026): restrained repair of near-miss snapshots (see RepairSnapshot)
     bool m_repair_snapshots = false;
     int m_repair_max = 20, m_repair_max_bonds = 2, m_repair_max_iterations = 300;
@@ -463,6 +478,7 @@ private:
 
     // --- Robustness Gates ---
     PARAM(snapshot_topology_gate, Bool, true, "Drop MD snapshots whose bond topology differs from the reference structure BEFORE they are optimised. Such structures are not conformers of this molecule and are rejected by the Phase 4 filter anyway, after a full optimisation has been paid for them; they are also the geometries for which GFN-FF returns a finite energy together with a NaN gradient. Set false to optimise every snapshot as before.", "Robustness", {})
+    PARAM(topology_factor, Double, 1.3, "Covalent-radius factor deciding whether two atoms count as bonded in EVERY topology comparison of the search (snapshot gate, Phase 4 filters, repair). Molecule's own default of 1.5 is far too generous here: a compressed 1-3 contact becomes a bond, so a two-degree bending fluctuation of a tetrahedral angle flips the topology. Measured on a 107-atom peptide, 10 ps at 500 K: 92 percent of the frames counted as topology changes at 1.5 and none at 1.3 or 1.4 -- with 1.5 the search discards the overwhelming majority of its own conformers.", "Robustness", {})
     PARAM(snapshot_clash_ratio, Double, 0.55, "A snapshot is rejected when any atom pair is closer than this fraction of the sum of their covalent radii. Independent of the topology test: a pair that is ALREADY BONDED forms no new bond when it collapses, so the topology check sees nothing, but the 1/r factors in the hydrogen-bond and three-body terms still blow up (observed as NaN in hb/atm/batm with a finite energy). 0 disables the screen.", "Robustness", {})
     PARAM(repair_snapshots, Bool, false, "Instead of discarding a snapshot whose topology changed, restrain the offending atom pairs back to a sane distance (missing bond -> its reference length, spurious contact -> outside bonding range), optimise, RELEASE the restraints and optimise freely; keep it only if the topology then matches. With GFN-FF a broken bond is often the force field losing a contact near its cutoff rather than real chemistry, and the conformation of such a snapshot can still be worth keeping. Costs two optimisations per attempt.", "Robustness", {})
     PARAM(repair_max, Int, 20, "Maximum repair attempts per cycle, lowest-energy candidates first.", "Robustness", {})
