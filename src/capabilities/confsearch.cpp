@@ -210,6 +210,8 @@ void ConfSearch::start()
         CurcumaLogger::result_fmt("ConfSearch: Dual-method mode (explore={}, refine={})", m_md_method, m_opt_method);
         CurcumaLogger::result_fmt("ConfSearch: Phase methods: explore={}, pre-opt={}, refine={}, final rank={}",
             m_md_method, m_md_method, m_opt_method, m_opt_method);
+        CurcumaLogger::result_fmt("ConfSearch: next-cycle seeds are picked on the {} PES (-seed_pes {})",
+            m_seed_pes == "opt" ? m_opt_method : m_md_method, m_seed_pes);
         // Claude Generated (Jul 2026): state how Phase 3b is run -- same reasoning as the Phase 3c
         // line below, an absent stage message must never be ambiguous.
         if (m_phase3b_two_stage)
@@ -752,6 +754,14 @@ void ConfSearch::start()
         // below and only feed the FINAL ranking + an extra bias geometry -- their energies are
         // never compared to md_method energies.
         const bool dual_method = (m_opt_method != m_md_method);
+        // Claude Generated (Jul 2026): which PES picks the next cycle's seeds. Default "md": the
+        // exploration stays on the cheap surface and a region it likes is never discarded because
+        // the accurate method ranks it higher. "opt" hands that decision to opt_method -- motivated
+        // by measurement: on a 107-atom peptide the two surfaces correlate at only r = 0.40 and the
+        // gfn2 minimum sat at gfnff rank 59 of 141, so a gfnff-picked seed is close to a random
+        // choice as far as the ranking method is concerned. The MD itself still runs at md_method;
+        // only the starting geometries change.
+        const bool seed_from_opt = dual_method && (m_seed_pes == "opt");
         const std::string& cycle_tag = m_cycle_tag;
         const std::string md_accepted = outputPath(explore + ".opt.accepted.xyz");
         double lowest_energy = std::numeric_limits<double>::infinity(); // md_method (exploration)
@@ -759,10 +769,14 @@ void ConfSearch::start()
         std::vector<Molecule*> candidates;
         if (!no_new_bias_structures) {
             FileIterator file(md_accepted);
+            int md_index = 0;
             while (!file.AtEnd()) {
                 Molecule* mol = new Molecule(file.Next());
                 mol->setCharge(m_charge);
                 mol->setSpin(m_spin);
+                // Claude Generated (Jul 2026): a traceable identity, so a reported seed can be found
+                // again in the cycle's ensemble file instead of printing "(unnamed)".
+                mol->setName(fmt::format("{}.{}#{:03d}", m_cycle_tag, m_md_method, ++md_index));
                 // Topology check: compare bond connectivity (0/1 matrix) against reference.
                 // A broken or formed bond changes >=2 entries by 1.0 -> sum >> 1e-4.
                 // Log the first mismatched pair to help distinguish GFN-FF artefacts from
@@ -849,7 +863,12 @@ void ConfSearch::start()
                 feedback.push_back(std::move(bs));
             }
 
-            if ((mol->Energy() - m_global_min) * 2625.5 < eff_seed_window) {
+            // Claude Generated (Jul 2026): with seed_pes = opt the next cycle is seeded from the
+            // opt_method structures instead (below), so the md_method candidates are only used for
+            // the bias feedback and are released here.
+            if (seed_from_opt) {
+                delete mol;
+            } else if ((mol->Energy() - m_global_min) * 2625.5 < eff_seed_window) {
                 window_seeds.push_back(mol);
             } else {
                 rejected_energy++;
@@ -859,10 +878,12 @@ void ConfSearch::start()
 
         // Seed selection: energy ranking (seed_rank) plus, in "diverse" mode, an RMSD spacing
         // requirement so the seeds do not all sit in the same basin. Deletes what it rejects.
-        rejected_energy += SelectSeeds(window_seeds);
-        for (auto* mol : window_seeds) {
-            m_in_stack.push_back(mol);
-            accepted++;
+        if (!seed_from_opt) {
+            rejected_energy += SelectSeeds(window_seeds, m_md_method, m_global_min);
+            for (auto* mol : window_seeds) {
+                m_in_stack.push_back(mol);
+                accepted++;
+            }
         }
 
         // REFINEMENT side (dual-method only): the opt_method (e.g. gfn2/r2scan) re-optimised
@@ -888,6 +909,7 @@ void ConfSearch::start()
                 mol->setCharge(m_charge);
                 mol->setSpin(m_spin);
                 opt_total++;
+                mol->setName(fmt::format("{}.{}#{:03d}", m_cycle_tag, m_opt_method, opt_total));
                 auto topo_cur = TopologyMatrix(*mol);
                 const double topo_diff_sum = (opt_reference - topo_cur).cwiseAbs().sum();
                 if (topo_diff_sum > 1e-4) {
@@ -930,6 +952,12 @@ void ConfSearch::start()
             // counterpart above). Claude Generated (Jul 2026).
             if (m_cycle_output && !opt_candidates.empty())
                 WriteCycleEnsemble(cycle_tag, m_opt_method, opt_candidates);
+            // Claude Generated (Jul 2026): running opt-PES minimum, the anchor of the opt-side seed
+            // window (mirrors m_global_min on the md side).
+            if (opt_lowest < m_global_min_opt)
+                m_global_min_opt = opt_lowest;
+
+            std::vector<Molecule*> opt_window_seeds;
             for (auto* mol : opt_candidates) {
                 if ((mol->Energy() - opt_lowest) * 2625.5 < m_energy_window)
                     mol->appendXYZFile(cumulative_file);
@@ -942,7 +970,20 @@ void ConfSearch::start()
                     bs.persistent = true;
                     feedback.push_back(std::move(bs));
                 }
-                delete mol;
+                if (seed_from_opt && (mol->Energy() - m_global_min_opt) * 2625.5 < eff_seed_window)
+                    opt_window_seeds.push_back(mol); // ownership moves to the seed selection
+                else
+                    delete mol;
+            }
+            if (seed_from_opt) {
+                rejected_energy += SelectSeeds(opt_window_seeds, m_opt_method, m_global_min_opt);
+                for (auto* mol : opt_window_seeds) {
+                    m_in_stack.push_back(mol);
+                    accepted++;
+                }
+                CurcumaLogger::result_fmt("ConfSearch: next cycle seeded from the {} PES ({} seed(s)) -- "
+                                          "-seed_pes opt",
+                    m_opt_method, static_cast<int>(m_in_stack.size()));
             }
             CurcumaLogger::result_fmt("ConfSearch: opt_method ({}) refinement: {} structures -> cumulative + bias, {} rejected (topo). Energies on the {} PES (not compared to {}).",
                 m_opt_method, static_cast<int>(opt_candidates.size()), opt_rejected_topo, m_opt_method, m_md_method);
@@ -2151,7 +2192,8 @@ double ConfSearch::PermRMSD(const Geometry& reference, const Geometry& target) c
 // and finally dropped altogether, so the MD phase is never starved -- the fallback is exactly the
 // old energy ranking. Cost: O(kept * candidates) Kabsch fits on a handful of structures, i.e.
 // nothing next to one MD step.
-int ConfSearch::SelectSeeds(std::vector<Molecule*>& window_seeds) const
+int ConfSearch::SelectSeeds(std::vector<Molecule*>& window_seeds, const std::string& method,
+    double global_min) const
 {
     const int n = static_cast<int>(window_seeds.size());
     if (n <= 1)
@@ -2166,9 +2208,9 @@ int ConfSearch::SelectSeeds(std::vector<Molecule*>& window_seeds) const
     std::vector<Molecule*> keep;
     if (m_seed_selection != "diverse") {
         keep.assign(window_seeds.begin(), window_seeds.begin() + limit);
-        if (limit < n)
-            CurcumaLogger::result_fmt("ConfSearch: seed selection (energy): keeping the {} lowest-energy seed(s) of {} ({} rejected by rank)",
-                limit, n, n - limit);
+        CurcumaLogger::result_fmt("ConfSearch: seed selection (energy) on the {} PES: {} of {} candidate(s) kept "
+                                  "({} rejected by rank {})",
+            method, limit, n, n - limit, m_seed_rank);
     } else {
         const double r_min = (m_seed_min_rmsd > 0.0) ? m_seed_min_rmsd
                                                      : m_seed_diversity_factor * m_rmsd;
@@ -2197,13 +2239,33 @@ int ConfSearch::SelectSeeds(std::vector<Molecule*>& window_seeds) const
                 relaxed = true;
             }
         }
-        CurcumaLogger::result_fmt("ConfSearch: seed selection (diverse): {} of {} structure(s) kept, spacing >= {:.2f} A{}",
-            static_cast<int>(keep.size()), n, r_min,
+        CurcumaLogger::result_fmt("ConfSearch: seed selection (diverse) on the {} PES: {} of {} candidate(s) kept, "
+                                  "spacing >= {:.2f} A{}",
+            method, static_cast<int>(keep.size()), n, r_min,
             relaxed ? fmt::format(" (relaxed to {:.2f} A -- not enough distinct basins)", r) : "");
-        for (int i = 0; i < static_cast<int>(keep.size()); ++i)
-            CurcumaLogger::result_fmt("ConfSearch:   seed {:>2}: dE = {:+7.2f} kJ/mol, RMSD to closest previous seed = {}",
-                i + 1, (keep[i]->Energy() - e_ref) * 2625.5,
-                i == 0 ? std::string("--") : fmt::format("{:.2f} A", spacing[i]));
+        m_seed_spacing = spacing;
+    }
+
+    // Claude Generated (Jul 2026): say exactly WHICH structures the next cycle starts from -- name,
+    // absolute energy on the PES that picked them, distance to this cycle's best and to the running
+    // global minimum, and how far each seed sits from the ones chosen before it. "seeded from the
+    // opt PES" is otherwise an unverifiable claim.
+    CurcumaLogger::result_fmt("ConfSearch: the next cycle starts from these {} structure(s) [{}]:",
+        static_cast<int>(keep.size()), method);
+    for (int i = 0; i < static_cast<int>(keep.size()); ++i) {
+        const double e = keep[i]->Energy();
+        std::string spacing_str = "--";
+        if (i > 0) {
+            if (m_seed_selection == "diverse" && i < static_cast<int>(m_seed_spacing.size()))
+                spacing_str = fmt::format("{:.2f} A", m_seed_spacing[i]);
+            else
+                spacing_str = fmt::format("{:.2f} A", PermRMSD(keep[0]->getGeometry(), keep[i]->getGeometry()));
+        }
+        CurcumaLogger::result_fmt("ConfSearch:   seed {:>2}: {:<16} E = {:.6f} Eh | {:+7.2f} kJ/mol vs this cycle's "
+                                  "best | {:+7.2f} vs the running best | RMSD to previous seeds: {}",
+            i + 1, keep[i]->Name().empty() ? std::string("(unnamed)") : keep[i]->Name(), e,
+            (e - e_ref) * 2625.5,
+            std::isfinite(global_min) ? (e - global_min) * 2625.5 : 0.0, spacing_str);
     }
 
     // Everything not kept is dropped (and owned here, so deleted).
@@ -2675,6 +2737,11 @@ void ConfSearch::LoadControlJson()
     m_seed_rank = m_config.get<int>("seed_rank");
     // Claude Generated (Jul 2026): RMSD-aware seed selection
     m_seed_selection = m_config.get<std::string>("seed_selection");
+    m_seed_pes = m_config.get<std::string>("seed_pes");
+    if (m_seed_pes != "md" && m_seed_pes != "opt") {
+        CurcumaLogger::warn_fmt("ConfSearch: seed_pes='{}' unknown -- falling back to 'md'", m_seed_pes);
+        m_seed_pes = "md";
+    }
     m_seed_min_rmsd = m_config.get<double>("seed_min_rmsd");
     m_seed_diversity_factor = m_config.get<double>("seed_diversity_factor");
     if (m_seed_selection != "diverse" && m_seed_selection != "energy") {

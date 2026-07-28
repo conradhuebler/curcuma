@@ -128,7 +128,15 @@ bool ConfGen::analyseEnsemble()
     EnergyCalculator& calculator = *m_calculator;
     calculator.setMolecule(input.front().getMolInfo());
 
-    const Matrix reference_topology = input.front().DistanceMatrix().second;
+    // Claude Generated (Jul 2026): use the EXPLICIT topology factor here too, not
+    // Molecule::DistanceMatrix()'s 1.5. ConfGen already knew 1.5 is unusable for this decision (it
+    // is why -topology_factor exists and why the proposal checks use it), but its own ensemble
+    // filter still used the default -- and 1.5 counts a compressed 1-3 contact as a bond, so it
+    // flips on a two-degree bending fluctuation. Measured on a 142-structure peptide ensemble:
+    // 28 structures dropped as "topology differs" at 1.5, ZERO at 1.3 -- including the reference
+    // structure this analysis was run to compare against.
+    const std::vector<std::pair<int, int>> reference_topology
+        = topologyFingerprint(input.front(), m_topology_factor);
     int rejected_topology = 0;
 
     m_frames.clear();
@@ -141,7 +149,7 @@ bool ConfGen::analyseEnsemble()
             rejected_topology++;
             continue;
         }
-        if ((reference_topology - mol.DistanceMatrix().second).cwiseAbs().sum() > 1e-4) {
+        if (topologyFingerprint(mol, m_topology_factor) != reference_topology) {
             rejected_topology++;
             continue;
         }
@@ -685,11 +693,15 @@ std::vector<std::pair<int, int>> ConfGen::topologyFingerprint(const Molecule& mo
 
 bool ConfGen::hasClash(const Molecule& mol, double factor) const
 {
-    const Matrix bonds = m_frames.front().molecule.DistanceMatrix().second;
+    // Claude Generated (Jul 2026): the reference bond list decides which pairs are ALLOWED to be
+    // close. Built with the explicit topology factor, like every other topology decision here --
+    // Molecule::DistanceMatrix()'s 1.5 also exempts compressed 1-3 contacts, which are not bonds.
+    const std::vector<std::pair<int, int>> ref = topologyFingerprint(m_frames.front().molecule, m_topology_factor);
+    std::set<std::pair<int, int>> bonded(ref.begin(), ref.end());
     const Geometry geom = mol.getGeometry();
     for (int i = 0; i < mol.AtomCount(); ++i) {
         for (int j = i + 1; j < mol.AtomCount(); ++j) {
-            if (bonds(i, j) > 0.5)
+            if (bonded.count({ i, j }))
                 continue; // bonded pairs are supposed to be close
             const double limit = factor
                 * (Elements::CovalentRadius[mol.Atom(i).first] + Elements::CovalentRadius[mol.Atom(j).first]);
