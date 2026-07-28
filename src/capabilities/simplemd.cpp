@@ -156,6 +156,7 @@ int BiasThread::execute()
         }
     };
 
+    m_min_rmsd = std::numeric_limits<double>::infinity();
     for (int i = 0; i < m_biased_structures.size(); ++i) {
         // Structure 0 supplies the COLVAR reference RMSD, so it is never skipped.
         bool centered = false;
@@ -179,6 +180,11 @@ int BiasThread::execute()
         m_last_evaluated++;
         m_driver.setTarget(m_target);
         double rmsd = centered ? m_driver.BestFitRMSDCentered() : m_driver.BestFitRMSD();
+        // Claude Generated (Jul 2026): distance to the closest visited structure, for the novelty
+        // target (rmsd_mtd_target). Tracked in BOTH bias paths -- this legacy per-run pool is what a
+        // standalone -md uses, the shared pool is what ConfSearch uses.
+        if (rmsd < m_min_rmsd)
+            m_min_rmsd = rmsd;
         double expr = exp(-rmsd * rmsd * m_alpha);
         double height = m_k * m_biased_structures[i].counter; // W_i = k * counter_i
         double bias_energy = height * expr;
@@ -378,6 +384,7 @@ void SimpleMD::LoadControlJson()
     m_topo_check_interval = m_config.get<int>("topo_check_interval", 0);
     m_epot_abort = m_config.get<bool>("epot_abort", false);
     m_epot_abort_window = m_config.get<double>("epot_abort_window", 250.0);
+    m_rmsd_mtd_target = m_config.get<double>("rmsd_mtd_target", 0.0);
     m_temp_abort = m_config.get<bool>("temp_abort", false);
     m_temp_abort_factor = m_config.get<double>("temp_abort_factor", 1.5);
     m_temp_abort_delta = m_config.get<double>("temp_abort_delta", 300.0);
@@ -2494,6 +2501,29 @@ bool SimpleMD::step()
             return false;
         }
     }
+    // Claude Generated (Jul 2026): novelty target -- end the run once the walker stands at least
+    // rmsd_mtd_target Angstrom away from EVERY structure the bias pool has seen (including its own
+    // start, which is hill 0). This makes "explore until you are somewhere genuinely new" the
+    // termination criterion instead of a fixed number of femtoseconds: a run that escapes early
+    // stops early and hands its budget to the next one, and a run that is still circling its start
+    // keeps going until max_time.
+    //
+    // Why the distance to the POOL and not to the start: measured on a 107-atom peptide, the
+    // conformers a search produces already sit 4-6 A from the input (117 of 141 in that shell) --
+    // the radius is not the problem. What is missing is coverage of DIRECTIONS at that radius; the
+    // closest structure to a reference conformer 5.4 A away was still 2.7 A off. Distance to the
+    // nearest visited point measures exactly that, distance to the start does not.
+    if (m_rmsd_mtd_target > 0 && m_rmsd_mtd && m_step > 0
+        && std::isfinite(m_bias_min_rmsd) && m_bias_min_rmsd >= m_rmsd_mtd_target) {
+        if (m_verbosity >= 1)
+            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold,
+                "MD stopped: novelty target reached -- {:.2f} A from every visited structure "
+                "(target {:.2f} A) after {:.0f} fs\n",
+                m_bias_min_rmsd, m_rmsd_mtd_target, m_currentStep * m_time_step);
+        m_novelty_reached = true;
+        return false;
+    }
+
     // Topology abort: a growth in the connected-component count means the molecule
     // fragmented. Only the fragment count is used (robust against transient bond-length
     // fluctuations at high T). m_eigen_geometry holds the current coordinates.
@@ -3598,6 +3628,7 @@ void SimpleMD::EvaluateBias(bool do_deposit)
         // Evaluate the bias from the snapshot — hill height W_i = k * counter_i,
         // V(x) = Sum_i Sum_p W_i * exp(-alpha*RMSD_{i,p}^2) (p over identity + symmetry images),
         // force = exact negative gradient. Well-tempered (opt-in) only feeds current_bias_wt.
+        m_bias_min_rmsd = std::numeric_limits<double>::infinity();
         for (const auto& bs : bias_snapshot) {
             // Effective hill counter: frozen if inherited at run start (only this run's deposits
             // grow), then capped by rmsd_mtd_max_height. Both default-off -> eff = bs.counter
@@ -3623,6 +3654,11 @@ void SimpleMD::EvaluateBias(bool do_deposit)
                 // two CenterMolecule passes; else the legacy self-centering BestFitRMSD.
                 double rmsd = centered ? m_shared_pool_driver.BestFitRMSDCentered()
                                        : m_shared_pool_driver.BestFitRMSD();
+                // Claude Generated (Jul 2026): distance to the CLOSEST visited structure. Free here
+                // -- the bias evaluates exactly this RMSD for every hill anyway. Hills skipped by
+                // the Gaussian screen are provably far, so they can never hold the minimum.
+                if (rmsd < m_bias_min_rmsd)
+                    m_bias_min_rmsd = rmsd;
                 double expr = exp(-rmsd * rmsd * m_alpha_rmsd);
                 current_bias += height * expr;
                 if (m_wtmtd)
@@ -3856,6 +3892,11 @@ void SimpleMD::EvaluateBias(bool do_deposit)
         m_bias_pool->Reset();
     }
     rmsd_reference = m_bias_threads[0]->RMSDReference();
+    // Claude Generated (Jul 2026): novelty measure for rmsd_mtd_target -- the distance to the
+    // closest visited structure across all bias threads (each thread holds a slice of the pool).
+    m_bias_min_rmsd = std::numeric_limits<double>::infinity();
+    for (auto* t : m_bias_threads)
+        m_bias_min_rmsd = std::min(m_bias_min_rmsd, t->MinRMSD());
     m_rmsd_mtd_molecule.setGeometry(current_geometry);
 
     if (m_nocolvarfile == false) {

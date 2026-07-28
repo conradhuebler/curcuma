@@ -114,6 +114,9 @@ public:
     inline double RMSDReference() const { return m_rmsd_reference; }
     // Exploration bias V(x) = Sum_i k*counter_i*exp(-alpha*RMSD_i^2): drives force + deposition.
     inline double BiasEnergy() const { return m_current_bias; }
+    /* Claude Generated (Jul 2026): best-fit RMSD to the CLOSEST structure in this thread's bias
+     * pool -- how new the walker's current position is. Free: the bias computes it anyway. */
+    inline double MinRMSD() const { return m_min_rmsd; }
     // Optional well-tempered energy (opt-in, output only — never used for force/deposition).
     inline double BiasEnergyWT() const { return m_current_bias_wt; }
     inline void setk(double k) { m_k = k; }
@@ -145,6 +148,7 @@ private:
     Geometry m_gradient;
     double m_k, m_alpha, m_DT, m_currentStep, m_rmsd_reference, m_current_bias, m_rmsd_econv;
     double m_current_bias_wt = 0; // well-tempered bias energy (opt-in, output only)
+    double m_min_rmsd = std::numeric_limits<double>::infinity(); // novelty measure, see MinRMSD()
     double m_counter = 0; // reported soft-counter sum (diagnostic only)
     int m_atoms = 0;
     // Claude Generated (Jul 2026): Gaussian-cutoff screen (see SimpleMD::m_rmsd_mtd_screen).
@@ -451,6 +455,13 @@ private:
     bool m_epot_abort = false;           // abort when running-mean potential climbs too high
     double m_epot_abort_window = 250.0;  // kJ/mol above the starting energy
     double m_epot_ref = 0.0;             // bare potential energy at run start (reference)
+    /* Claude Generated (Jul 2026): novelty target. > 0 ends the run once the walker is at least
+     * this far (best-fit RMSD, Angstrom) from EVERY structure in the bias pool -- "run until you
+     * are somewhere new" instead of "run for N fs". m_bias_min_rmsd is the distance to the closest
+     * visited structure, which the RMSD-MTD bias computes for every hill anyway. */
+    double m_rmsd_mtd_target = 0.0;
+    double m_bias_min_rmsd = std::numeric_limits<double>::infinity();
+    bool m_novelty_reached = false;
     bool m_temp_abort = false;           // abort when running-mean temperature runs away from target
     double m_temp_abort_factor = 1.5;    // abort if <T> > factor * T0 (<= 0 disables)
     double m_temp_abort_delta = 300.0;   // abort if <T> > T0 + delta [K] (<= 0 disables)
@@ -718,6 +729,7 @@ private:
     PARAM(topo_check_interval, Int, 0, "Steps between topology checks (0 -> use dump_frequency).", "ConfSearch", {})
     PARAM(epot_abort, Bool, false, "Abort the MD run when the running-mean potential energy climbs more than epot_abort_window above the run's starting energy.", "ConfSearch", {})
     PARAM(epot_abort_window, Double, 250.0, "Energy window (kJ/mol) above the starting energy for epot_abort. Must exceed the thermal baseline (~N_dof*kT/2) plus typical barriers.", "ConfSearch", {})
+    PARAM(rmsd_mtd_target, Double, 0.0, "End the RMSD-MTD run once the walker stands at least this far (best-fit RMSD in Angstrom) from EVERY structure in the bias pool, its own starting structure included. 0 = off, run for the full max_time. Turns the run length into a property of the exploration instead of a fixed number of femtoseconds: a walker that escapes early stops early, one that is still circling its start keeps going. The distance is measured to the NEAREST visited structure, not to the start -- on a 107-atom peptide the conformers already sat 4-6 Angstrom from the input while the closest approach to a known reference conformer was still 2.7 Angstrom, i.e. the radius was never the limitation, the coverage of directions was.", "ConfSearch", {})
     PARAM(temp_abort, Bool, false, "Abort the MD run when the running-mean temperature runs away from the target (catches bias-driven heating). Uses temp_abort_factor and/or temp_abort_delta.", "ConfSearch", {})
     PARAM(temp_abort_factor, Double, 1.5, "Abort when <T> exceeds temp_abort_factor * target T. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
     PARAM(temp_abort_delta, Double, 300.0, "Abort when <T> exceeds (target T + temp_abort_delta) Kelvin. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})

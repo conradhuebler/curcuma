@@ -73,6 +73,7 @@ capabilities/
 
 ### Molecular Dynamics
 - **SimpleMD**: Basic molecular dynamics with various thermostats
+  - **`-rmsd_mtd_target` (Jul 2026)**: end an RMSD-MTD run once the walker is ≥ X Å from EVERY pool structure (its start included) — "run until somewhere new" instead of a fixed time. Distance to the NEAREST visited structure, because measurement showed the radius is not the limit: on a 107-atom peptide conformers already sit 4–6 Å from the input, yet novelty 3 Å needs 14.8 ps and novelty 5 Å is unreachable in 30 ps. Free — the bias computes this RMSD per hill anyway; tracked in both bias paths
   - ✅ Coarse-graining support with automatic system detection
   - ✅ PBC wrapping for periodic boundary conditions
   - ✅ 10x timestep scaling for pure CG systems
