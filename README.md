@@ -683,7 +683,29 @@ curcuma -md input.xyz
 { "plumed", "plumed.dat" }
 ```
 
-For example, using 
+### NEB-like Molecular Dynamics (`-nebmd`)
+A chain of N independently-thermostatted replicas coupled by spring forces along a
+reaction path between two endpoint structures — the band is driven by MD, not by
+LBFGS. MD parameters for the images must use the `-simplemd.*` prefix.
+```sh
+curcuma -nebmd start.xyz end.xyz -nebmd.nimages 12 \
+    -simplemd.method gfnff -simplemd.time_step 0.5 -simplemd.max_time 200 \
+    -simplemd.temperature 300 -nebmd.k_spring 0.005 -nebmd.dump_frequency 20
+```
+A classical CI-NEB (`-nebmd.optimize true -nebmd.idpp false`) can relax the band onto
+the minimum energy path first, and an externally converged path can be supplied with
+`-nebmd.path_file` (e.g. ORCA's `neb_MEP_trj.xyz`).
+
+**Caveat:** potential-energy barriers are validated on a clean case (ethane rotation,
+GFN2 2.88 vs ~2.9 kcal/mol experimental), but the **free-energy estimators
+(`-nebmd.pmf`, `-nebmd.umbrella`) are not yet usable** — on helicene they miss the
+reference barrier by +45 % and −60 % respectively. Always verify a NEB saddle point
+with a frequency calculation (exactly one imaginary mode).
+
+See [docs/NEB_MD.md](docs/NEB_MD.md) for the force model, the validation record, and
+`(k, dt)` guidance.
+
+For example, using
 ```sh
 curcuma -md input.xyz -method gfnff
 ``` 

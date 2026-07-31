@@ -829,6 +829,135 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        // === Reaction paths / NEB ===
+        { "neb", {
+            "Nudged Elastic Band with improved tangent (Henkelman & Jonsson 2000)",
+            "Henkelman, G.; Jonsson, H., J. Chem. Phys. 2000, 113, 9978-9985 (DOI: 10.1063/1.1323224)",
+            "henkelman2000neb",
+            "@article{henkelman2000neb,\n"
+            "  author = {Henkelman, Graeme and J{\\'o}nsson, Hannes},\n"
+            "  title = {Improved tangent estimate in the nudged elastic band method for\n"
+            "           finding minimum energy paths and saddle points},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2000},\n"
+            "  volume = {113},\n"
+            "  pages = {9978--9985},\n"
+            "  doi = {10.1063/1.1323224}\n"
+            "}"
+        }},
+
+        { "fire", {
+            "FIRE structural optimiser (Bitzek et al. 2006)",
+            "Bitzek, E. et al., Phys. Rev. Lett. 2006, 97, 170201 (DOI: 10.1103/PhysRevLett.97.170201)",
+            "bitzek2006fire",
+            "@article{bitzek2006fire,\n"
+            "  author = {Bitzek, Erik and Koskinen, Pekka and G{\\\"a}hler, Franz\n"
+            "            and Moseler, Michael and Gumbsch, Peter},\n"
+            "  title = {Structural relaxation made simple},\n"
+            "  journal = {Phys. Rev. Lett.},\n"
+            "  year = {2006},\n"
+            "  volume = {97},\n"
+            "  pages = {170201},\n"
+            "  doi = {10.1103/PhysRevLett.97.170201}\n"
+            "}"
+        }},
+
+        { "cineb", {
+            "Climbing-image NEB (Henkelman, Uberuaga & Jonsson 2000)",
+            "Henkelman, G.; Uberuaga, B. P.; Jonsson, H., J. Chem. Phys. 2000, 113, 9901 (DOI: 10.1063/1.1329672)",
+            "henkelman2000cineb",
+            "@article{henkelman2000cineb,\n"
+            "  author = {Henkelman, Graeme and Uberuaga, Blas P. and J{\\'o}nsson, Hannes},\n"
+            "  title = {A climbing image nudged elastic band method for finding saddle\n"
+            "           points and minimum energy paths},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2000},\n"
+            "  volume = {113},\n"
+            "  pages = {9901--9904},\n"
+            "  doi = {10.1063/1.1329672}\n"
+            "}"
+        }},
+
+        { "fixman", {
+            "Metric (Fixman) term for constrained/curvilinear coordinates (Fixman 1974)",
+            "Fixman, M., Proc. Natl. Acad. Sci. USA 1974, 71, 3050-3053 (DOI: 10.1073/pnas.71.8.3050)",
+            "fixman1974metric",
+            "@article{fixman1974metric,\n"
+            "  author = {Fixman, Marshall},\n"
+            "  title = {Classical statistical mechanics of constraints: A theorem and\n"
+            "           application to polymers},\n"
+            "  journal = {Proc. Natl. Acad. Sci. USA},\n"
+            "  year = {1974},\n"
+            "  volume = {71},\n"
+            "  pages = {3050--3053},\n"
+            "  doi = {10.1073/pnas.71.8.3050}\n"
+            "}"
+        }},
+
+        { "denotter", {
+            "Constrained-MD free energy from the mean force (den Otter & Briels 1998)",
+            "den Otter, W. K.; Briels, W. J., J. Chem. Phys. 1998, 109, 4139-4146 (DOI: 10.1063/1.477019)",
+            "denotter1998meanforce",
+            "@article{denotter1998meanforce,\n"
+            "  author = {den Otter, W. K. and Briels, W. J.},\n"
+            "  title = {The calculation of free-energy differences by constrained\n"
+            "           molecular-dynamics simulations},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1998},\n"
+            "  volume = {109},\n"
+            "  pages = {4139--4146},\n"
+            "  doi = {10.1063/1.477019}\n"
+            "}"
+        }},
+
+        { "pathcv", {
+            "Path collective variables (Branduardi, Gervasio & Parrinello 2007)",
+            "Branduardi, D.; Gervasio, F. L.; Parrinello, M., J. Chem. Phys. 2007, 126, 054103 (DOI: 10.1063/1.2432340)",
+            "branduardi2007pathcv",
+            "@article{branduardi2007pathcv,\n"
+            "  author = {Branduardi, Davide and Gervasio, Francesco Luigi and Parrinello, Michele},\n"
+            "  title = {From A to B in free energy space},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2007},\n"
+            "  volume = {126},\n"
+            "  pages = {054103},\n"
+            "  doi = {10.1063/1.2432340}\n"
+            "}"
+        }},
+
+        { "wham", {
+            "Weighted Histogram Analysis Method (Kumar et al. 1992)",
+            "Kumar, S. et al., J. Comput. Chem. 1992, 13, 1011-1021 (DOI: 10.1002/jcc.540130812)",
+            "kumar1992wham",
+            "@article{kumar1992wham,\n"
+            "  author = {Kumar, Shankar and Rosenberg, John M. and Bouzida, Djamal\n"
+            "            and Swendsen, Robert H. and Kollman, Peter A.},\n"
+            "  title = {The weighted histogram analysis method for free-energy calculations\n"
+            "           on biomolecules. I. The method},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {1992},\n"
+            "  volume = {13},\n"
+            "  pages = {1011--1021},\n"
+            "  doi = {10.1002/jcc.540130812}\n"
+            "}"
+        }},
+
+        { "idpp", {
+            "Image-Dependent Pair Potential path interpolation (Smidstrup et al. 2014)",
+            "Smidstrup, S. et al., J. Chem. Phys. 2014, 140, 214106 (DOI: 10.1063/1.4878664)",
+            "smidstrup2014idpp",
+            "@article{smidstrup2014idpp,\n"
+            "  author = {Smidstrup, S{\\o}ren and Pedersen, Andreas and Stokbro, Kurt\n"
+            "            and J{\\'o}nsson, Hannes},\n"
+            "  title = {Improved initial guess for minimum energy path calculations},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2014},\n"
+            "  volume = {140},\n"
+            "  pages = {214106},\n"
+            "  doi = {10.1063/1.4878664}\n"
+            "}"
+        }},
+
         // === Topological data analysis ===
         { "ripser", {
             "Topological Data Analysis / Ripser (Townsend et al. 2020)",

@@ -460,3 +460,16 @@ add_subdirectory(cli)
 # Claude Generated (Phase 0, Apr 2026): reference SCC dumps from tblite
 # for native GFN1/GFN2 validation (see scripts/extract_xtb_params.py + xtb_native.*)
 add_subdirectory(sqm_reference)
+
+# Claude Generated 2026: Path collective variables (Branduardi s,z) validation
+add_executable(test_path_cv
+        test_path_cv.cpp)
+
+target_link_libraries(test_path_cv curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_path_cv REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_path_cv COMMAND test_path_cv)
+set_tests_properties(test_path_cv PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")

@@ -210,6 +210,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - **SimpleMD** - Basic molecular dynamics simulation
 - ⚠️ **Temperature ramps / live T / thermal regions** (Jun 2026, AI/machine-tested) - `setTargetTemperature()` live setpoint; multi-stage `temp_ramp`/`temp_schedule` (`steps`/`reach` modes); per-atom-subset `temp_regions` (Berendsen/CSVR/Andersen; NH falls back to global). No-region path byte-identical to legacy. See [docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md)
 - **NEB Docking** - Nudged elastic band for transition states
+- ⚠️ **NEB-MD (`-nebmd`)** (Jul 2026, AI/machine-tested) - MD-driven NEB band + classical CI-NEB + path collective variables. Potential-energy barriers validated on ethane; **free-energy barriers not yet usable** — always verify a NEB saddle with a frequency calculation. See [docs/NEB_MD.md](docs/NEB_MD.md)
 - **Trajectory Analysis** - Analysis of MD trajectories
 - **PLUMED Metadynamics** - Enhanced sampling via PLUMED2 plugin (`-mtd` flag) — see [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md)
 

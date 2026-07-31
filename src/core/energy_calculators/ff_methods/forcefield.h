@@ -152,6 +152,10 @@ public:
     // Auto-parameter file management: input.xyz -> input.param.json
     bool tryLoadAutoParameters(const std::string& method);
     bool autoSaveParameters() const;
+    // Claude Generated 2026: Geometry signature (atom count + sorted elements + coord hash)
+    // used to reject stale auto-parameter caches whose topology no longer matches the input
+    // geometry (e.g. NEB-MD -no_bmt re-runs, or same basename / different molecule).
+    json geometrySignature() const;
     static std::string generateParameterFileName(const std::string& geometry_file);
     void setParameterCaching(bool enable) { m_enable_caching = enable; }
 

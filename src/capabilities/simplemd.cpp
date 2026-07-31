@@ -2218,12 +2218,12 @@ bool SimpleMD::step()
     }
 
     // Claude Generated 2026 - Inject queued external forces before integration.
-    // The contribution is consumed (cleared) in a single step; callers must
-    // re-apply each step while the user is actively dragging an atom.
+    // The contribution is re-applied by Verlet()/Rattle() after WallPotential() so the
+    // external (e.g. NEB-MD spring) force acts on BOTH velocity half-kicks, making the
+    // scheme time-symmetric for a constant external force. It is cleared after the
+    // integrator returns (below). Callers must re-apply each step.
     if (m_external_forces_pending) {
         m_eigen_gradient += m_external_forces;
-        m_external_forces.setZero();
-        m_external_forces_pending = false;
     }
 
     // Claude Generated 2026 - advance the multi-stage temperature ramp BEFORE the
@@ -2253,6 +2253,12 @@ bool SimpleMD::step()
         Integrator();
     }
     m_last_integrator_ms = integrator_ms;
+    // Claude Generated 2026: clear the external-force buffer now that Verlet/Rattle
+    // have consumed it at both half-kicks.
+    if (m_external_forces_pending) {
+        m_external_forces.setZero();
+        m_external_forces_pending = false;
+    }
     AverageQuantities();
 
     // Claude Generated (Jun 2026): ConfSearch robustness gates (opt-in, default off).
@@ -2648,6 +2654,10 @@ void SimpleMD::Verlet()
     }
 #endif
     WallPotential();
+    // Claude Generated 2026: re-apply the external force so the second velocity half-kick
+    // sees it too (time-symmetric for a constant external force; see step()).
+    if (m_external_forces_pending)
+        m_eigen_gradient += m_external_forces;
     ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
@@ -2893,6 +2903,10 @@ void SimpleMD::Rattle()
     }
 #endif
     WallPotential();
+    // Claude Generated 2026: re-apply the external force so the second velocity half-kick
+    // sees it too (time-symmetric for a constant external force; see step()).
+    if (m_external_forces_pending)
+        m_eigen_gradient += m_external_forces;
 
     for (int i = 0; i < m_natoms; ++i) {
         m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
@@ -3017,6 +3031,15 @@ void SimpleMD::ApplyRMSDMTD()
     std::chrono::time_point<std::chrono::system_clock> m_start, m_end;
     m_start = std::chrono::system_clock::now();
     m_colvar_incr = 0;
+
+    // Claude Generated 2026: snapshot the gradient so the bias contribution added below can be
+    // isolated and (optionally) projected perpendicular to a given direction. Used by NEB-MD
+    // to keep the metadynamics from pushing an image along the reaction path. Costs one
+    // (natoms,3) copy per MTD call and only when a projection is set.
+    const bool project_bias = (m_mtd_projection.rows() == m_natoms && m_mtd_projection.cols() == 3);
+    Geometry gradient_before_bias;
+    if (project_bias)
+        gradient_before_bias = m_eigen_gradient;
 
     // RMSD-subset geometry for bias evaluation
     Geometry current_geometry = m_rmsd_mtd_molecule.getGeometry();
@@ -3343,6 +3366,19 @@ void SimpleMD::ApplyRMSDMTD()
         m_rmsd_mtd_molecule.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
         std::cout << m_bias_structure_count << " stored structures currently" << std::endl;
     }
+    // Claude Generated 2026: restrict the bias force to the plane perpendicular to
+    // m_mtd_projection (NEB-MD transverse metadynamics). The bias contribution is the
+    // difference to the snapshot taken at the top of this function; we project that
+    // difference and re-add it, leaving the physical gradient untouched.
+    if (project_bias) {
+        Geometry bias = m_eigen_gradient - gradient_before_bias;
+        double dot = 0.0;
+        for (int a = 0; a < m_natoms; ++a)
+            dot += bias.row(a).dot(m_mtd_projection.row(a));
+        bias -= dot * m_mtd_projection;
+        m_eigen_gradient = gradient_before_bias + bias;
+    }
+
     m_end = std::chrono::system_clock::now();
     int m_time = std::chrono::duration_cast<std::chrono::milliseconds>(m_end - m_start).count();
     m_mtd_time += m_time;

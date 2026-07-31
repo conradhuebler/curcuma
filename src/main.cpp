@@ -44,6 +44,7 @@
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 #include "src/capabilities/simplemd.h"
+#include "src/capabilities/nebmd.h"  // Claude Generated 2026: NEB-like molecular dynamics
 #include "src/capabilities/trajectory_statistics.h"
 #include "src/capabilities/trajectoryanalysis.h"
 #include "src/capabilities/polymerbuild.h"
@@ -709,7 +710,8 @@ json CLI2Json(int argc, char** argv)
         {"rmsd", "rmsd"},
         {"analysis", "analysis"},
         {"hessian", "hessian"},
-        {"casino", "casino"}
+        {"casino", "casino"},
+        {"nebmd", "nebmd"}  // Claude Generated 2026: NEB-like molecular dynamics
     };
 
     // Get actual module name (for ConfigManager)
@@ -2050,6 +2052,68 @@ int executeSimpleMD(const json& controller, int argc, char** argv) {
     return 0;
 }
 
+// Claude Generated 2026: NEB-like molecular dynamics handler.
+int executeNebMD(const json& controller, int argc, char** argv) {
+    if (argc < 4) {
+        std::cerr << "Please use curcuma for NEB-MD as follows:\n"
+                  << "  curcuma -nebmd start.xyz end.xyz -nebmd.nimages 12 -method uff ..." << std::endl;
+        NebMD help(json::object(), true);
+        help.printHelp();
+        return 0;
+    }
+    Molecule start = Files::LoadFile(argv[2]);
+    Molecule end = Files::LoadFile(argv[3]);
+    if (start.AtomCount() == 0) {
+        CurcumaLogger::error_fmt("Could not load start structure from file: {}", argv[2]);
+        return 1;
+    }
+    if (end.AtomCount() == 0) {
+        CurcumaLogger::error_fmt("Could not load end structure from file: {}", argv[3]);
+        return 1;
+    }
+
+    json ctrl = controller;
+    ctrl["geometry_file"] = std::string(argv[2]);
+
+    // Claude Generated 2026: Forward MD parameters supplied as -md.* (which land in
+    // controller["md"]) and ambiguous bare flags like -temperature (multi-owner
+    // casino+simplemd, kept in the command module) into controller["simplemd"] so
+    // the per-image SimpleMD instances receive them. -simplemd.* wins on conflict.
+    // This makes -md.*, bare -time_step/-max_time/-thermostat/-temperature and
+    // -simplemd.* all work for -nebmd (bare single-owner flags already auto-route).
+    auto ensure_simplemd = [&ctrl]() {
+        if (!ctrl.contains("simplemd") || !ctrl["simplemd"].is_object())
+            ctrl["simplemd"] = json::object();
+    };
+    auto merge_from = [&ctrl, &ensure_simplemd](const std::string& src) {
+        if (!ctrl.contains(src) || !ctrl[src].is_object()) return;
+        ensure_simplemd();
+        for (auto& [k, v] : ctrl[src].items())
+            if (!ctrl["simplemd"].contains(k)) ctrl["simplemd"][k] = v;
+    };
+    merge_from("md"); // -md.* -> controller["md"]
+    // Move ambiguous bare MD flags that the flat-router left in the command module
+    // (controller["nebmd"]) because they are multi-owner and none matched "nebmd".
+    if (ctrl.contains("nebmd") && ctrl["nebmd"].is_object()) {
+        ensure_simplemd();
+        for (auto& [k, v] : ctrl["nebmd"].items()) {
+            if (v.is_object() || ctrl["simplemd"].contains(k)) continue;
+            const auto owners = ParameterRegistry::getInstance().findOwnerModules(k);
+            for (const auto& o : owners)
+                if (o == "simplemd") { ctrl["simplemd"][k] = v; break; }
+        }
+    }
+
+    auto* neb = new NebMD(ctrl, false);
+    initializeBMT(neb, argv[2], "nebmd", controller);
+    neb->setEndpoints(start, end);
+    neb->Initialise();
+    neb->start();
+    neb->processBakFiles();
+    delete neb;
+    return 0;
+}
+
 int executeCasino(const json& controller, int argc, char** argv) {
     if (argc < 3) {
         Casino dummy(json{}, true);
@@ -2413,6 +2477,8 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ.trj", "VTF"}, executeRMSDTraj}},
     {"nebprep", {"Nudged Elastic Band (NEB) geometry preparation", "conformational",
                  {"XYZ"}, executeNEBPrep}},
+    {"nebmd", {"NEB-like molecular dynamics: independently-thermostatted replicas coupled by springs along a reaction path", "dynamics",
+               {"XYZ"}, executeNebMD}},
     {"centroid", {"Calculate centroid of atom fragments", "analysis",
                   {"XYZ", "MOL2", "SDF"}, executeCentroid}},
     {"split", {"Split supramolecular structures into fragments", "analysis",

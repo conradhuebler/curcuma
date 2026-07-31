@@ -250,6 +250,29 @@ public:
     // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
     void setSharedBiasPool(SharedBiasPool* pool) { m_shared_pool = pool; }
 
+    /** Claude Generated (2026): constrain the RMSD-MTD bias force to the plane perpendicular
+     *  to `direction` (a unit vector, shape (natoms,3)). Used by NEB-MD so the metadynamics
+     *  samples an image's transverse degrees of freedom without pushing it along the reaction
+     *  path (which would destroy the string). Empty matrix = no projection (default).
+     *  No effect when rmsd_mtd is off. */
+    void setMTDProjection(const Geometry& direction) { m_mtd_projection = direction; }
+
+    /** Claude Generated (2026): overwrite the current positions between two step() calls.
+     *  Intended for string reparametrisation in NEB-MD, where the images are redistributed
+     *  along the path. This is a DISCONTINUOUS coordinate change: the gradient no longer
+     *  matches the geometry, so the caller must expect one step of transient behaviour
+     *  (the next step() re-evaluates the energy at the new geometry anyway).
+     *  Velocities are left untouched; use rescaleVelocities() to restore the temperature. */
+    void setPositions(const Geometry& positions)
+    {
+        if (positions.rows() == m_natoms && positions.cols() == 3)
+            m_eigen_geometry = positions;
+    }
+
+    /** Claude Generated (2026): scale all velocities by `factor` (used after a
+     *  reparametrisation step to restore the target temperature). */
+    void rescaleVelocities(double factor) { m_eigen_velocities *= factor; }
+
 private:
     std::function<void(void)> ThermostatFunction;
     void PrintStatus() const;
@@ -372,6 +395,7 @@ private:
 #endif
 
     std::string m_snapshots_dir;  // Claude Generated 2026: Snapshots subdirectory inside BMT
+    Geometry m_mtd_projection;    // Claude Generated 2026: if non-empty, RMSD-MTD bias is projected perpendicular to this unit direction
 
     int m_natoms = 0;
     int m_dump = 1;

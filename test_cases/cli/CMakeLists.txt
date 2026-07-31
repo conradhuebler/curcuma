@@ -167,6 +167,15 @@ add_cli_test(simplemd 12_eeq_cutoff_auto)
 set_tests_properties(cli_simplemd_12_eeq_cutoff_auto PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;eeq_cutoff")
 
 # =============================================================================
+# NEB-MD Tests (2 scenarios)
+# =============================================================================
+
+add_cli_test(nebmd 01_gfnff_ethane)
+add_cli_test(nebmd 02_neb_optimize)
+set_tests_properties(cli_nebmd_01_gfnff_ethane cli_nebmd_02_neb_optimize
+    PROPERTIES TIMEOUT 300 LABELS "nebmd;gfnff")
+
+# =============================================================================
 # CG (Coarse Graining) Tests — disabled: -vtf command not implemented in main.cpp
 # =============================================================================
 
