@@ -677,6 +677,27 @@ double RMSDDriver::BestFitRMSD()
     return rmsd;
 }
 
+double RMSDDriver::BestFitRMSDCentered()
+{
+    // Claude Generated (Jul 2026): fast path for the RMSD-MTD screen. Both m_reference and m_target
+    // must already hold geometric-centered coordinates. We skip the two CenterMolecule passes of
+    // BestFitRMSD (the walker is centered once per MD step; hills are pre-centered), compute the
+    // Kabsch rotation, apply it to the target, and store the aligned geometries so Gradient() --
+    // which reads (m_reference - m_target) -- stays correct. The reference is left untouched so it
+    // remains the centered walker across all hills in the step.
+    const Geometry reference = m_reference.getGeometry();
+    const Geometry target = m_target.getGeometry();
+    Eigen::Matrix3d R = RMSDFunctions::BestFitRotation(reference, target, 1);
+    const auto t = RMSDFunctions::applyRotation(target, R);
+    m_reference_aligned.setGeometry(reference);
+    m_target_aligned.setGeometry(t);
+    m_target.setGeometry(t);
+    double rmsd = RMSDFunctions::getRMSD(reference, t);
+    m_rmsd = rmsd;
+    m_rotation = R;
+    return rmsd;
+}
+
 double RMSDDriver::PartialRMSD(const Molecule& ref, const Molecule& tar)
 {
     double rmsd = 0;

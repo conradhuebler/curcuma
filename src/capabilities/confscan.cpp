@@ -69,6 +69,12 @@ int ConfScanThread::execute()
     m_reorder_worked = false;
     m_reused_worked = false;
     m_reorder_rule.clear();
+    // Claude Generated (Jul 2026): reset per-comparison phase timing/outcome, see docs/CONFSCAN_REORDER_TIMING_WP.md
+    m_time_plain_rmsd = 0.0;
+    m_time_reuse = 0.0;
+    m_time_permutation = 0.0;
+    m_plain_rejected = false;
+    m_permutation_attempted = false;
 
     double Ia = abs(m_reference.Ia() - m_target.Ia());
     double Ib = abs(m_reference.Ib() - m_target.Ib());
@@ -83,20 +89,29 @@ int ConfScanThread::execute()
     m_input.dHM = m;
     m_input.dE = std::abs(m_reference.Energy() - m_target.Energy()) * 2625.5;
 
-    m_old_rmsd = m_driver->BestFitRMSD();
+    {
+        // Claude Generated (Jul 2026): time the plain-RMSD short-circuit phase, see docs/CONFSCAN_REORDER_TIMING_WP.md
+        RunTimer timer_plain(false);
+        m_old_rmsd = m_driver->BestFitRMSD();
+        m_time_plain_rmsd = timer_plain.Elapsed();
+    }
     if (m_old_rmsd < m_rmsd_threshold) {
         m_rmsd = m_old_rmsd;
         m_keep_molecule = false;
         m_break_pool = true;
+        m_plain_rejected = true;
         return 0;
     }
 
+    // Claude Generated (Jul 2026): time the reuse-rule phase (stored reorder rules), see docs/CONFSCAN_REORDER_TIMING_WP.md
+    RunTimer timer_reuse(false);
     for (int i = 0; i < m_reorder_rules.size(); ++i) {
         if (m_reorder_rules[i].size() != m_reference.AtomCount() || m_reorder_rules[i].size() == 0)
             continue;
 
         double tmp_rmsd = m_driver->Rules2RMSD(m_reorder_rules[i]);
         if (tmp_rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || m_driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
+            m_time_reuse = timer_reuse.Elapsed();
             m_keep_molecule = false;
             /* early breaks affect the number of finally accepted structures */
             m_break_pool = (m_earlybreak & 1) == 0;
@@ -128,6 +143,7 @@ int ConfScanThread::execute()
             return 0;
         }
     }
+    m_time_reuse = timer_reuse.Elapsed();
 
     if (m_reuse_only) {
         m_driver->clear();
@@ -138,8 +154,11 @@ int ConfScanThread::execute()
         So using a different number of threads effects the number of finally accepted structures.
     */
 
+    m_permutation_attempted = true;
+    RunTimer timer_permutation(false);
     m_driver->start();
     m_rmsd = m_driver->RMSD();
+    m_time_permutation = timer_permutation.Elapsed();
 
     m_input.rmsd = m_rmsd;
 
@@ -215,6 +234,9 @@ void ConfScan::LoadControlJson()
     // Load energy method from controller (separate from RMSD "method" which is alignment)
     if (m_controller.contains("energy_method") && m_controller["energy_method"].is_string())
         m_method = m_controller["energy_method"].get<std::string>();
+
+    // Claude Generated (Jul 2026): opt-in reuse of file energies (see m_reuse_energies)
+    m_reuse_energies = m_config.get<bool>("reuse_energies");
 
     // ConfScan-specific parameters
     m_noname = m_config.get<bool>("noname");
@@ -473,10 +495,17 @@ bool ConfScan::openFile()
             CurcumaLogger::info("  - ripser barcodes");
         CurcumaLogger::info("required");
     }
+    // Claude Generated (Jul 2026): energy provenance accounting for the reuse_energies path
+    int reused_energies = 0, computed_energies = 0;
     while (!file.AtEnd()) {
         Molecule* mol = new Molecule(file.Next());
         double energy = mol->Energy();
-        if (std::abs(energy) < 1e-5 || m_method.compare("") != 0) {
+        // Claude Generated (Jul 2026): recompute only when there is no usable stored energy, or
+        // when an energy method was requested AND reuse was not enabled. Previously the mere
+        // presence of an energy_method forced a full recompute of an already-optimised ensemble.
+        const bool has_stored_energy = std::abs(energy) >= 1e-5;
+        if (!has_stored_energy || (m_method.compare("") != 0 && !m_reuse_energies)) {
+            ++computed_energies;
             // XTBInterface interface; // As long as xtb leaks, we have to put it heare
             if (m_method == "")
                 m_method = "gfnff";
@@ -486,6 +515,8 @@ bool ConfScan::openFile()
 
             interface.setMolecule(mol->getMolInfo());
             energy = interface.CalculateEnergy(false);
+        } else {
+            ++reused_energies;
         }
         m_ordered_list.insert(std::pair<double, int>(energy, molecule));
         molecule++;
@@ -507,6 +538,19 @@ bool ConfScan::openFile()
         m_molecules.push_back(pair);
     }
 
+    // Claude Generated (Jul 2026): make the energy provenance visible -- silently recomputing a
+    // whole ensemble is the single most expensive thing ConfScan can do.
+    if (m_verbosity >= 1 && (reused_energies + computed_energies) > 0) {
+        // openFile() runs outside start(), where the global logger level is not guaranteed to be
+        // synced (the RMSD machinery lowers it to 0) -- same workaround as the descriptor notice
+        // above and logPass().
+        int old_verbosity = CurcumaLogger::get_verbosity();
+        CurcumaLogger::set_verbosity(m_verbosity);
+        CurcumaLogger::result_fmt("ConfScan: {} energies reused from file, {} computed at {}",
+            reused_energies, computed_energies, m_method.empty() ? std::string("-") : m_method);
+        CurcumaLogger::set_verbosity(old_verbosity);
+    }
+
     if (m_prev_accepted != "") {
         double min_energy = 0;
         bool xyzfile = std::string(m_prev_accepted).find(".xyz") != std::string::npos || std::string(m_prev_accepted).find(".trj") != std::string::npos;
@@ -520,7 +564,11 @@ bool ConfScan::openFile()
         while (!file.AtEnd()) {
             Molecule* mol = new Molecule(file.Next());
             double energy = mol->Energy();
-            if (std::abs(energy) < 1e-5 || m_method.compare("") != 0) {
+            // Claude Generated (Jul 2026): same reuse rule as the main ensemble loop above.
+            // NOTE: the no-method fallback here is "gfn2" while the loop above uses "gfnff" --
+            // pre-existing inconsistency, left untouched deliberately.
+            const bool has_stored_energy = std::abs(energy) >= 1e-5;
+            if (!has_stored_energy || (m_method.compare("") != 0 && !m_reuse_energies)) {
                 // XTBInterface interface; // As long as xtb leaks, we have to put it heare
                 if (m_method == "")
                     m_method = "gfn2";
@@ -842,7 +890,53 @@ void ConfScan::start()
     RunTimer timer(false);
     std::ofstream result_file;
 
-    if (!m_skipinit) {
+    // Claude Generated (Jul 2026): force_reorder baseline mode - see docs/CONFSCAN_REORDER_TIMING_WP.md.
+    // Once the descriptor gate is unconditionally bypassed (Reorder(), above), re-running it with
+    // different loose-threshold strategies is redundant (the gate outcome no longer depends on
+    // dLE/dLI/dLH), so the Initial Pass (plain-RMSD-only CheckOnly()) and the whole multi-strategy
+    // Reorder loop collapse into a single full-permutation pass. Ignores m_skipinit/m_skipreorder
+    // (force_reorder takes priority); m_skipreuse still applies below, unchanged.
+    if (m_force_reorder) {
+        if (!m_rmsd_set) {
+            // get_rmsd needs CheckOnly()'s plain-RMSD survey to calibrate the dynamic
+            // m_rmsd_threshold; that calibration also fills m_dLI/m_dLH/m_dLE/m_dTI/m_dTH/m_dTE,
+            // but those go unused here since the descriptor gate is bypassed regardless - this
+            // pass exists purely for the RMSD-threshold parametrization, not descriptor gating.
+            m_pass_label = "Initial Pass";
+            logPass("Initial Pass: Performing RMSD calculation without reordering (rmsd_threshold parametrization only)");
+            m_current_filename = m_1st_filename;
+            if (m_writeFiles && !m_reduced_file) {
+                result_file.open(m_statistic_filename, std::ios_base::app);
+                result_file << "Results of 1st Pass" << std::endl;
+                result_file.close();
+            }
+            CheckOnly(m_sLE[0], m_sLI[0], m_sLH[0]);
+            PrintPassSummary("Result of Initial Pass");
+            logPass(fmt::format("Initial Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0));
+            timer.Reset();
+        } else {
+            for (const auto& i : m_ordered_list)
+                m_stored_structures.push_back(m_molecules.at(i.second).second);
+        }
+
+        if (!CheckStop()) {
+            m_current_filename = m_2nd_filename + ".1.xyz";
+            std::ofstream nd_file;
+            if (m_writeFiles && !m_reduced_file) {
+                nd_file.open(m_current_filename);
+                nd_file.close();
+                result_file.open(m_statistic_filename, std::ios_base::app);
+                result_file << "Results of Reorder Pass #1" << std::endl;
+                result_file.close();
+            }
+            m_pass_label = "Reorder Pass 1";
+            logPass("Reorder Pass: Performing RMSD calculation with reordering (force_reorder, descriptor gate bypassed)");
+            Reorder(0.0, 0.0, 0.0, false);
+            PrintPassSummary("Result of Reorder Pass");
+            logPass(fmt::format("Reorder Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0));
+            timer.Reset();
+        }
+    } else if (!m_skipinit) {
         m_pass_label = "Initial Pass";
         logPass("Initial Pass: Performing RMSD calculation without reordering");
         m_current_filename = m_1st_filename;
@@ -897,7 +991,11 @@ void ConfScan::start()
         m_skipreuse = true;
     }
 
-    if (!m_skipreorder) {
+    // Claude Generated (Jul 2026): the multi-strategy reorder loop is skipped in force_reorder
+    // baseline mode - it already ran its single gate-bypassed pass above, and re-running the loop
+    // here would just redo the same full-permutation work N times for no additional dedup (the
+    // gate ignores dLE/dLI/dLH when bypassed).
+    if (!m_force_reorder && !m_skipreorder) {
         std::ofstream parameters_skip;
         std::ofstream parameters_performed;
 
@@ -997,7 +1095,7 @@ void ConfScan::start()
             parameters_skip.close();
             parameters_performed.close();
         }
-    } else
+    } else if (!m_force_reorder)
         logPass("Reorder Pass skipped");
     if (!m_skipreuse) {
         if (!CheckStop()) {
@@ -1128,6 +1226,12 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
 
     CxxThreadPool* p = new CxxThreadPool;
     p->setActiveThreadCount(m_threads);
+    // Claude Generated (Jul 2026): the per-batch CxxThreadPool bar (stderr, library default
+    // Continously) is per-permutation detail -- show it only at verbosity 3. Lower levels keep
+    // the single overall progress bar (updateProgress, verbosity 1). Gated on m_verbosity (the
+    // stable ConfScan member), not the global logger level which the RMSD machinery lowers.
+    p->setProgressBar(m_verbosity >= 3 ? CxxThreadPool::ProgressBarType::Continously
+                                       : CxxThreadPool::ProgressBarType::None);
 
     for (auto& i : m_ordered_list) {
 
@@ -1334,6 +1438,10 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     m_reorder_successfull_count += m_reordered_worked;
     m_skipped_count += m_skiped;
     m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_reused = 0, m_skiped = 0;
+    // Claude Generated (Jul 2026): reset per-pass phase-timing totals, see docs/CONFSCAN_REORDER_TIMING_WP.md
+    m_time_gate = 0.0, m_time_plain_rmsd = 0.0, m_time_reuse = 0.0, m_time_permutation = 0.0;
+    m_count_plain_rejected = 0, m_count_permutation_attempted = 0;
+    m_did_reorder_pass = true;
     // Export RMSD config from ConfigManager - Claude Generated 2025
     json rmsd = m_config.exportModule("rmsd");
     rmsd["verbosity"] = 0;  // Override for thread silence
@@ -1354,6 +1462,10 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     std::vector<std::vector<int>> rules;
     CxxThreadPool* p = new CxxThreadPool;
     p->setActiveThreadCount(m_threads);
+    // Claude Generated (Jul 2026): per-permutation reorder bar (stderr, library default
+    // Continously) shown only at verbosity 3; see the matching note in CheckOnly().
+    p->setProgressBar(m_verbosity >= 3 ? CxxThreadPool::ProgressBarType::Continously
+                                       : CxxThreadPool::ProgressBarType::None);
 
     std::ofstream parameters_success;
     if (m_analyse) {
@@ -1389,6 +1501,10 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
         }
         bool keep_molecule = true;
         bool reorder = false;
+        // Claude Generated (Jul 2026): time the descriptor-gate loop (dI/dH/dE + looseThresh
+        // decision, one timer per candidate rather than per pair to keep overhead below the
+        // cheap per-pair arithmetic being measured), see docs/CONFSCAN_REORDER_TIMING_WP.md
+        RunTimer timer_gate(false);
         for (int t = 0; t < threads.size(); ++t) {
             if (CheckStop()) {
                 CurcumaLogger::warn("Found stop file, will end now!");
@@ -1408,7 +1524,11 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
              * ripser     = 2
              * energy     = 4 */
             int looseThresh = 1 * (dI < dLI) + 2 * (dH < dLH) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < dLE);
-            if ((looseThresh & m_looseThresh) == m_looseThresh || (dLI <= 1e-8 && dLH <= 1e-8 && dLE <= 1e-8)) {
+            // Claude Generated (Jul 2026): `-confscan.force_reorder` bypasses the loose descriptor
+            // gate entirely, so every candidate-reference pair reaches the plain-RMSD/permutation
+            // evaluation - see docs/CONFSCAN_REORDER_TIMING_WP.md ("baseline" mode). Previously this
+            // flag was loaded/printed but never actually consulted here (dead flag).
+            if ((looseThresh & m_looseThresh) == m_looseThresh || (dLI <= 1e-8 && dLH <= 1e-8 && dLE <= 1e-8) || m_force_reorder) {
                 if (std::find(m_exclude_list.begin(), m_exclude_list.end(), names) != m_exclude_list.end()) {
                     m_duplicated++;
                     m_list_performed.push_back({ std::abs(mol1->Energy() - mol2->Energy()) * 2625.5, dH, dI });
@@ -1416,19 +1536,27 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                 }
                 reorder = true;
                 threads[t]->setEnabled(true);
-                int tightThresh = 1 * (dI < m_dTI) + 2 * (dH < m_dTH) + 4 * ((std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_dTE));
+                // Claude Generated (Jul 2026): skip the tight-threshold direct-reject too when
+                // force_reorder is active - it would otherwise still reject some pairs outright
+                // without ever computing RMSD, defeating the "every pair gets full evaluation"
+                // guarantee the baseline mode relies on (m_dTI/m_dTH/m_dTE default to 0.0 and are
+                // never calibrated when force_reorder skips CheckOnly(), which already makes this
+                // check inert in that case - guarded explicitly here to not depend on that).
+                if (!m_force_reorder) {
+                    int tightThresh = 1 * (dI < m_dTI) + 2 * (dH < m_dTH) + 4 * ((std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_dTE));
 
-                if ((tightThresh & m_tightThresh) == m_tightThresh) {
-                    if (m_verbosity >= 1)
-                        CurcumaLogger::warn_fmt("Differences {:.3f} MHz and {:.3f} below tight threshold, reject molecule directly!", dI, dH);
-                    m_lastDI = dI;
-                    m_lastDH = dH;
-                    writeStatisticFile(mol1, mol2, -1, false);
-                    m_threshold.push_back(mol2);
-                    m_rejected_directly++;
-                    reorder = false;
-                    keep_molecule = false;
-                    break;
+                    if ((tightThresh & m_tightThresh) == m_tightThresh) {
+                        if (m_verbosity >= 1)
+                            CurcumaLogger::warn_fmt("Differences {:.3f} MHz and {:.3f} below tight threshold, reject molecule directly!", dI, dH);
+                        m_lastDI = dI;
+                        m_lastDH = dH;
+                        writeStatisticFile(mol1, mol2, -1, false);
+                        m_threshold.push_back(mol2);
+                        m_rejected_directly++;
+                        reorder = false;
+                        keep_molecule = false;
+                        break;
+                    }
                 }
                 m_list_performed.push_back({ std::abs(mol1->Energy() - mol2->Energy()) * 2625.5, dH, dI });
                 m_exclude_list.push_back(std::pair<std::string, std::string>(mol1->Name(), mol2->Name()));
@@ -1437,6 +1565,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                 m_list_skipped.push_back({ std::abs(mol1->Energy() - mol2->Energy()) * 2625.5, dH, dI });
             }
         }
+        m_time_gate += timer_gate.Elapsed();
 
         if (reorder && keep_molecule) {
             int free_threads = m_threads;
@@ -1475,6 +1604,17 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                 m_dnn_data.push_back(t->getDNNInput());
 #endif
                 m_reordered++;
+                // Claude Generated (Jul 2026): drain per-thread phase timing into pass-level
+                // totals, see docs/CONFSCAN_REORDER_TIMING_WP.md. Additive only - does not affect
+                // KeepMolecule()/ReorderWorked() outcome below.
+                m_time_plain_rmsd += t->TimePlainRMSD();
+                m_time_reuse += t->TimeReuse();
+                if (t->PermutationAttempted()) {
+                    m_time_permutation += t->TimePermutation();
+                    m_count_permutation_attempted++;
+                }
+                if (t->PlainRejected())
+                    m_count_plain_rejected++;
                 if (t->KeepMolecule() == false) {
                     m_reordered_worked += t->ReorderWorked();
                     m_reordered_reused += t->ReusedWorked();
@@ -1769,6 +1909,17 @@ void ConfScan::PrintPassSummary(const std::string& label)
     if (m_molalign_count > 0)
         fmt::print("          MolAlign:         {:5}   (successful {})\n",
             m_molalign_count, m_molalign_success);
+    // Claude Generated (Jul 2026): per-phase wall-clock breakdown for the reorder pass, purely
+    // additive instrumentation - see docs/CONFSCAN_REORDER_TIMING_WP.md. Only printed for passes
+    // that went through Reorder() (m_did_reorder_pass stays false for the Initial Pass, which uses
+    // CheckOnly()/ConfScanThreadNoReorder instead). Gated on the flag rather than m_time_gate > 0
+    // since millisecond RunTimer resolution can truncate a fast/small-ensemble pass to exactly 0.0.
+    if (m_did_reorder_pass) {
+        fmt::print("          Timing (s):       gate {:.3f}   plain-rmsd {:.3f}   reuse {:.3f}   permutation {:.3f}\n",
+            m_time_gate / 1000.0, m_time_plain_rmsd / 1000.0, m_time_reuse / 1000.0, m_time_permutation / 1000.0);
+        fmt::print("                            (plain-rejected {}, permutation attempted {})\n",
+            m_count_plain_rejected, m_count_permutation_attempted);
+    }
     fmt::print("          Processed:        {:5} / {}\n", processed, m_maxmol);
     std::cout << std::endl;
 }
