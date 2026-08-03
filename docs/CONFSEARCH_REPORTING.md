@@ -391,21 +391,30 @@ as a `std::max` over all pairs closer than `getrmsd_thresh`, so **one** outlier 
 190 kJ/mol and 7480 of 7484 structures were rejected as "duplicates" (4 conformers left). The
 `std::max` derivation is still fragile for other callers.
 
-## 11. Holding the polar X-H bonds during REFINE (`-refine_hold_polar_h`, opt-in)
+## 11. Holding the polar X-H bonds during every optimisation (`-hold_polar_h`, opt-in)
 
 A proton transfer turns a conformer into a **tautomer**, which the topology filter then discards —
-after the expensive accurate optimisation has been paid for. Measured on the 107-atom peptide: all
-three rejects of a 600 K stage were the identical transfer, H107 from O57 to N25, and the resulting
-zwitterion was *more stable* on the gfn2 surface (−161.650444 Eh) than any neutral conformer the run
-found, so the optimiser will keep going there.
+after the optimisation has been paid for. Measured on the 107-atom peptide, one 600 K cycle: **32 of
+96** structures were rejected for the identical transfer, H107 from O57 to N25, and those zwitterions
+were the *deepest structures of the cycle* — all ten lowest and 29 of the 32 lowest, the best of them
+72.5 kJ/mol below the best neutral conformer and 17 kJ/mol below the (neutral) GOAT reference. The
+transfer happens **during the relaxation of the snapshot** (step 2), not in the snapshot itself, so
+the snapshot topology gate cannot see it.
 
-`-refine_hold_polar_h true` puts a harmonic distance restraint (`-refine_hold_polar_h_force`,
-default 5 Eh/Å²) on every H bound to N/O/F/S **in the reference structure**, at the reference bond
-length, for the accurate optimisation only:
+Recovering them afterwards does not work: rebuilding the neutral tautomer from all 32 and
+re-optimising sends 30 of 31 straight back into the zwitterion, and with an O–H restraint the neutral
+form sits ~93 kJ/mol higher and returns to the original zwitterion energy to six decimals the moment
+the restraint is released. In those geometries the neutral tautomer is not a minimum at all —
+preventing the transfer is the only useful handling.
+
+`-hold_polar_h true` (old name `-refine_hold_polar_h` still accepted) puts a harmonic distance
+restraint (`-hold_polar_h_force`, default 5 Eh/Å²) on every H bound to N/O/F/S **in the reference
+structure**, at the reference bond length, in **every** optimisation of the search — step 2 RELAX and
+both stages of step 5 REFINE, each against its own surface's reference:
 
 ```
-ConfSearch: holding 7 polar X-H bond(s) at their reference length during REFINE (k = 5 Eh/A^2)
-            -- prevents proton transfer into a tautomer
+ConfSearch: holding 7 polar X-H bond(s) at their reference length in every optimisation
+            (k = 5 Eh/A^2) -- prevents proton transfer into a tautomer
 ```
 
 A bond sitting at its equilibrium feels no force from the restraint, so the reported energies are

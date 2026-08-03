@@ -397,6 +397,20 @@ std::vector<OptimizationResult> OptimizationDispatcher::optimizeBatch(
             if (molecules.size() > 1)
                 CurcumaLogger::result_fmt("--- Structure {}/{} ({} atoms) ---",
                     i + 1, molecules.size(), molecules[i].AtomCount());
+            // Claude Generated (Aug 2026): this path reuses ONE calculator for every structure, and a
+            // warm start is meant for the next geometry step of the SAME structure -- here it would
+            // hand structure i the converged SCC state of structure i-1, a different conformer (with
+            // -scf_extrapolation even a history of them). That is wrong on its own terms, so the
+            // guess is dropped between structures; within a structure the warm start is untouched.
+            //
+            // It is NOT the explanation for the "SCF eigensolver failed at iteration 0" messages this
+            // path produces, which is what it was written for -- measured with this reset in place:
+            // five conformers of a 107-atom peptide give 0 failures optimised one per process and 4
+            // as one batch, and five copies of the IDENTICAL structure still give 2. So the cause is
+            // state that survives in the reused calculator between structures, independent of the
+            // guess. Open.
+            if (energy_calculator)
+                energy_calculator->resetWarmStart();
             curcuma::Molecule mol_copy = molecules[i];
             OptimizationResult result = optimizeStructure(
                 &mol_copy, optimizer_type, energy_calculator, config);

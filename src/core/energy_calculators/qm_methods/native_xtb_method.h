@@ -74,6 +74,7 @@ public:
 
     // ---- SCF warm-start / iterative-mode (Claude Generated) ---------------
     void setWarmStart(bool on) override;
+    void resetWarmStart() override;
     void setIterativeMode(bool on) override;
 
     // Access the underlying dense native solver (null when a large_system_mode

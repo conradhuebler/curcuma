@@ -857,6 +857,19 @@ public:
     // set m_keep_diis=true via -keep_diis true to experiment with history reuse.
     // Claude Generated.
     void setWarmStart(bool on)    { m_warmstart = on; }
+    /** Claude Generated (Aug 2026): forget the saved SCC state.
+     *  The warm start is meant for the NEXT GEOMETRY STEP of the same structure. When one
+     *  calculator is reused for a batch of different conformers, the guess of structure k comes
+     *  from structure k-1 -- a different geometry, and with -scf_extrapolation even a history of
+     *  them -- which can make the first diagonalisation fail outright. Callers that switch
+     *  structures call this in between. */
+    void resetWarmStart()
+    {
+        m_warmstart_q_sh.resize(0);
+        m_warmstart_dp_at.resize(0, 0);
+        m_warmstart_qp_at.resize(0, 0);
+        m_scf_history.clear();
+    }
     bool isWarmStart() const      { return m_warmstart; }
     void setKeepDiis(bool on)     { m_keep_diis = on; }
     bool isKeepDiis() const       { return m_keep_diis; }

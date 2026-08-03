@@ -368,10 +368,14 @@ private:
     /** Cheap pre-filter between RELAX and REDUCE: energy window + identical-minimum collapse.
      *  @return number of structures written to `out` */
     int PrefilterForReduce(const std::string& in_file, const std::string& out_file) const;
-    bool m_refine_hold_polar_h = false;
-    double m_refine_hold_polar_h_force = 5.0;
-    /// Harmonic distance restraints on the reference structure's polar X-H bonds (json form).
-    nlohmann::json PolarHydrogenRestraints() const;
+    bool m_hold_polar_h = false;
+    double m_hold_polar_h_force = 5.0;
+    /** Harmonic distance restraints on the polar X-H bonds of a reference structure (json form).
+     *  @param ref  the reference for THIS surface -- the md-level one for step 2 RELAX, the
+     *              opt-level one for step 5 REFINE, because each side's topology filter
+     *              compares against its own reference and the bond lengths differ. */
+    nlohmann::json PolarHydrogenRestraints(const Molecule& ref) const;
+    mutable bool m_polar_h_reported = false; ///< report the restraint list once, not per stage
     // Claude Generated (Aug 2026): the two additional move sets of Phase 3c.
     bool m_confgen_nci_moves = true, m_confgen_consensus = false;
     std::string m_confgen_method = "auto";
@@ -589,8 +593,8 @@ private:
     PARAM(confgen_consensus, Bool, false, "Phase 3c additionally assembles structures DE NOVO from the individually most favourable torsion states, walking away from the ensemble one torsion at a time. Measured: every chemically valid assembly was a new conformer, but they sit high in energy and each costs a build plus two optimisations -- hence off by default.", "Proposals", {})
     PARAM(reduce_prefilter_window, Double, 100.0, "Energy window in kJ/mol above the cycle minimum that a RELAXED structure must fall into before it enters the RMSD deduplication. The deduplication is quadratic (133 structures take ~170 s, 10000 would take days), while a structure 400 kJ/mol above the minimum is not a relevant conformer. 0 disables the window.", "Filtering", {})
     PARAM(reduce_prefilter_energy_tol, Double, 1.0e-6, "Two relaxed structures whose energies agree to within this many Hartree ended in the SAME minimum and only one is passed to the deduplication. Snapshots from a biased trajectory collapse onto few minima, so this removes the bulk at O(N log N) instead of O(N^2). A tolerance this tight cannot merge two genuinely different conformers by accident; the RMSD pass still decides everything else. 0 disables it.", "Filtering", {})
-    PARAM(refine_hold_polar_h, Bool, false, "Hold every polar X-H bond (X = N, O, F, S) of the reference structure at its reference length during the accurate re-optimisation, with a harmonic distance restraint. Prevents a proton transfer from turning a conformer into a TAUTOMER, which the topology filter then discards after the expensive optimisation has been paid for: measured on a 107-atom peptide, all three rejects of a 600 K stage were the identical transfer H107 from O57 to N25, and the resulting zwitterion was more stable on the gfn2 surface (-161.650444 Eh) than any neutral conformer found. A bond sitting at its equilibrium feels no force from the restraint, so the reported energies are essentially unperturbed.", "Filtering", {})
-    PARAM(refine_hold_polar_h_force, Double, 5.0, "Force constant of that restraint in Eh/Angstrom^2.", "Filtering", {})
+    PARAM(hold_polar_h, Bool, false, "Hold every polar X-H bond (X = N, O, F, S) of the reference structure at its reference length during EVERY optimisation of the search (step 2 RELAX and step 5 REFINE), with a harmonic distance restraint. Prevents a proton transfer from turning a conformer into a TAUTOMER, which the topology filter then discards after the optimisation has been paid for. Measured on a 107-atom peptide, one 600 K cycle: 32 of 96 structures were rejected for the identical transfer (H107 from O57 to N25), and those zwitterions were the DEEPEST structures of the cycle -- all ten lowest and 29 of the 32 lowest, the best of them 72.5 kJ/mol below the best neutral conformer and 17 kJ/mol below the (neutral) GOAT reference. The transfer happens during the optimisation, not in the MD snapshot, so the snapshot topology gate cannot see it. A bond sitting at its equilibrium feels no force from the restraint, so the reported energies are essentially unperturbed.", "Filtering", { "refine_hold_polar_h" })
+    PARAM(hold_polar_h_force, Double, 5.0, "Force constant of that restraint in Eh/Angstrom^2.", "Filtering", { "refine_hold_polar_h_force" })
     PARAM(bias_reset, String, "never", "Opt-in: drop accumulated metadynamics hills at the start of every temperature stage. never = keep everything (default, unchanged behaviour); deposits = drop the MD deposits but KEEP the fed-back optimised minima, so the search still avoids basins it already knows while losing the accumulated hill mass; all = empty the pool completely. Motivation, measured on a 107-atom peptide: over five repetitions the pool grew to 15505 hills, and from repetition 2 on the accumulated bias tore one bond in more than 90 percent of all snapshots, so the topology gate rejected nearly everything the dynamics produced.", "Bias", {})
     PARAM(max_bias_export, Int, 0, "Maximum number of new bias structures handed to the optimisation per cycle. 0 = no limit (every new snapshot is offered). A positive value makes the export SUBSAMPLE with a stride, which silently discards snapshots: measured on a 107-atom peptide with a grown bias pool, a limit of 1000 meant a stride of 16, so 15332 of 16291 new deposits were never even checked. The topology gate and the optimisation cost money, but discarding before them costs structures.", "Bias", {})
     PARAM(rmsd_mtd_max_height, Int, 0, "Cap on the per-structure hill counter in the bias force. 0 is unbounded.", "Bias", {})

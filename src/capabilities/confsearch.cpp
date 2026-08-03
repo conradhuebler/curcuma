@@ -733,6 +733,16 @@ void ConfSearch::start()
             // Fast per-cycle optimization at md_method.
             // Single-threaded per optimization when ConfSearch parallelizes externally.
             nlohmann::json opt = ChildConfig(m_md_method, (m_threads > 1) ? 1 : m_threads);
+            // Claude Generated (Aug 2026): the proton transfer that turns a conformer into a
+            // tautomer happens HERE, during the relaxation of the snapshot -- the snapshot itself
+            // still carries the reference topology, so the snapshot gate cannot see it, and the
+            // structure is only rejected in step 6, after the optimisation has been paid for.
+            // Measured on a 107-atom peptide, one 600 K cycle: 32 of 96 structures, and they were
+            // the DEEPEST ones (all ten lowest). Restraining the polar X-H bonds keeps the
+            // relaxation in the neutral basin. Uses the md-level reference, which is what this
+            // side's topology filter compares against.
+            if (m_hold_polar_h)
+                opt["distance_restraints"] = PolarHydrogenRestraints(m_topo_ref);
             // Bias structures are the primary conformers discovered by RMSD-MTD.
             PerformOptimisation(explore, opt, relax);
             int opt_count = 0;
@@ -903,6 +913,9 @@ void ConfSearch::start()
         const std::string md_accepted = outputPath(reduce + ".xyz");
         double lowest_energy = std::numeric_limits<double>::infinity(); // md_method (exploration)
         int accepted = 0, rejected_topo = 0, rejected_energy = 0;
+        // Claude Generated (Aug 2026): what actually reached the ensemble this cycle -- the number
+        // the closing summary needs, and the one that used to be missing from it.
+        int ensemble_kept = 0;
         std::vector<Molecule*> candidates;
         if (!no_new_bias_structures) {
             FileIterator file(md_accepted);
@@ -987,8 +1000,10 @@ void ConfSearch::start()
             // Cumulative output only when single-method: then md_method IS the ranking level.
             // In dual mode the cumulative pool is filled with the opt_method structures below,
             // so the final ranking never mixes the two PES.
-            if (!dual_method && (mol->Energy() - lowest_energy) * 2625.5 < m_energy_window)
+            if (!dual_method && (mol->Energy() - lowest_energy) * 2625.5 < m_energy_window) {
                 mol->appendXYZFile(cumulative_file);
+                ensemble_kept++;
+            }
 
             // md_method minimum -> bias pool (drives the gfnff MD next cycle).
             if (m_opt_feedback_bias && m_bias_pool) {
@@ -1176,8 +1191,10 @@ void ConfSearch::start()
 
             std::vector<Molecule*> opt_window_seeds;
             for (auto* mol : opt_candidates) {
-                if ((mol->Energy() - opt_lowest) * 2625.5 < m_energy_window)
+                if ((mol->Energy() - opt_lowest) * 2625.5 < m_energy_window) {
                     mol->appendXYZFile(cumulative_file);
+                    ensemble_kept++;
+                }
                 if (m_opt_feedback_bias && m_bias_pool) {
                     BiasStructure bs;
                     bs.geometry = mol->getGeometry();
@@ -1308,8 +1325,18 @@ void ConfSearch::start()
             }
         }
 
-        CurcumaLogger::result_fmt("ConfSearch: T={}K cycle complete -- {} accepted, {} rejected (topo), {} rejected (energy), {} in next cycle",
-            m_currentT, accepted, rejected_topo, rejected_energy, static_cast<int>(m_in_stack.size()));
+        // Claude Generated (Aug 2026): the old wording mixed two different decisions and read as if
+        // almost everything had been thrown away. "accepted" counts only the SEEDS of the next cycle
+        // and "rejected (energy)" everything that did not become a seed -- while those structures are
+        // in the ensemble and in the bias pool. Measured example: 96 structures, 32 topology rejects,
+        // 64 into the cumulative pool, 10 seeds -- reported as "10 accepted, 54 rejected (energy)".
+        // Only the topology rejects are a real loss, so the line now separates the two.
+        CurcumaLogger::result_fmt("ConfSearch: T={}K cycle complete -- {} structure(s) into the ensemble and the "
+                                  "bias pool, {} rejected by the topology check (a real loss); of the survivors "
+                                  "{} become the seeds of the next cycle ({} candidate(s) -- this cycle's plus "
+                                  "the pool of earlier ones -- fell outside the seed window or the spacing "
+                                  "rule; they stay in the ensemble)",
+            m_currentT, ensemble_kept, rejected_topo, static_cast<int>(m_in_stack.size()), rejected_energy);
         // Claude Generated (Jun 2026): report cumulative conformer count so the user can track progress
         {
             int cumulative_count = 0;
@@ -2025,18 +2052,15 @@ std::string ConfSearch::PerformFilter(const std::string& f, const nlohmann::json
 // chain ended in "<base>.bias.opt.accepted.opt.accepted.opt.xyz", which named neither the method
 // nor the stage.
 
-nlohmann::json ConfSearch::PolarHydrogenRestraints() const
+nlohmann::json ConfSearch::PolarHydrogenRestraints(const Molecule& ref) const
 {
     // Every hydrogen bound to N/O/F/S in the REFERENCE structure, held at the reference bond length.
     // Those are the protons that migrate; a C-H never does, and restraining it would only stiffen the
     // molecule. The restraint is harmonic around the equilibrium distance, so a bond that stays where
     // it belongs contributes nothing to the energy -- it only acts once the proton starts to leave.
     std::vector<Optimization::DistanceRestraint> restraints;
-    // The opt-level reference structure (the optimised input on the opt_method surface); it is what
-    // the topology filter of this side compares against, so its bond lengths are the right targets.
-    if (!m_topo_ref_opt.AtomCount())
+    if (!ref.AtomCount())
         return nlohmann::json::array();
-    const Molecule& ref = m_topo_ref_opt;
     const Geometry geom = ref.getGeometry();
     const int n = ref.AtomCount();
     auto polar = [](int z) { return z == 7 || z == 8 || z == 9 || z == 16; };
@@ -2062,13 +2086,15 @@ nlohmann::json ConfSearch::PolarHydrogenRestraints() const
         r.i = h;
         r.j = host;
         r.target = best;
-        r.force = m_refine_hold_polar_h_force;
+        r.force = m_hold_polar_h_force;
         restraints.push_back(r);
     }
-    if (!restraints.empty())
-        CurcumaLogger::result_fmt("ConfSearch: holding {} polar X-H bond(s) at their reference length during "
-                                  "REFINE (k = {} Eh/A^2) -- prevents proton transfer into a tautomer",
-            static_cast<int>(restraints.size()), m_refine_hold_polar_h_force);
+    if (!restraints.empty() && !m_polar_h_reported) {
+        CurcumaLogger::result_fmt("ConfSearch: holding {} polar X-H bond(s) at their reference length in every "
+                                  "optimisation (k = {} Eh/A^2) -- prevents proton transfer into a tautomer",
+            static_cast<int>(restraints.size()), m_hold_polar_h_force);
+        m_polar_h_reported = true;
+    }
     return Optimization::GeometryRestraints::toJson(restraints);
 }
 
@@ -2077,8 +2103,8 @@ std::string ConfSearch::PerformHighLevelOptimisation(const std::string& f)
     const int child_threads = (m_threads > 1) ? 1 : m_threads;
     nlohmann::json opt_accurate = ChildConfig(m_opt_method, child_threads);
     opt_accurate["convergence_preset"] = m_phase3b_preset;
-    if (m_refine_hold_polar_h)
-        opt_accurate["distance_restraints"] = PolarHydrogenRestraints();
+    if (m_hold_polar_h)
+        opt_accurate["distance_restraints"] = PolarHydrogenRestraints(m_topo_ref_opt);
 
     auto count_frames = [](const std::string& path) {
         std::ifstream check(path);
@@ -2108,6 +2134,8 @@ std::string ConfSearch::PerformHighLevelOptimisation(const std::string& f)
     opt_crude["convergence_preset"] = m_phase3b_preopt_preset;
     if (m_phase3b_preopt_max_iter > 0)
         opt_crude["max_iterations"] = m_phase3b_preopt_max_iter;
+    if (m_hold_polar_h)
+        opt_crude["distance_restraints"] = PolarHydrogenRestraints(m_topo_ref_opt);
     CurcumaLogger::result_fmt("ConfSearch: REFINE stage 1/2 -- crude pre-optimisation at {} (preset '{}'{})",
         m_opt_method, m_phase3b_preopt_preset,
         m_phase3b_preopt_max_iter > 0 ? fmt::format(", max {} steps", m_phase3b_preopt_max_iter) : "");
@@ -3230,8 +3258,8 @@ void ConfSearch::LoadControlJson()
     m_bias_reset = m_config.get<std::string>("bias_reset");
     m_reduce_prefilter_window = m_config.get<double>("reduce_prefilter_window");
     m_reduce_prefilter_energy_tol = m_config.get<double>("reduce_prefilter_energy_tol");
-    m_refine_hold_polar_h = m_config.get<bool>("refine_hold_polar_h");
-    m_refine_hold_polar_h_force = m_config.get<double>("refine_hold_polar_h_force");
+    m_hold_polar_h = m_config.get<bool>("hold_polar_h");
+    m_hold_polar_h_force = m_config.get<double>("hold_polar_h_force");
     // Claude Generated (Jun 2026): efficiency/robustness controls
     m_rattle_threshold_temp = m_config.get<double>("rattle_threshold_temp");
     m_rattle_hot_mode = m_config.get<int>("rattle_hot_mode");

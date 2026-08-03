@@ -433,6 +433,8 @@ public:
 
     /** @brief Enable/disable SCF warm-start (reuse converged charges across steps). */
     void setWarmStart(bool on);
+    /// Claude Generated (Aug 2026): drop the saved SCF guess (call when the STRUCTURE changes).
+    void resetWarmStart();
 
     /** @brief Enable/disable iterative mode (raise SCF display threshold by one level). */
     void setIterativeMode(bool on);

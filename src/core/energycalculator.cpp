@@ -792,6 +792,11 @@ void EnergyCalculator::setWarmStart(bool on)
     if (m_method) m_method->setWarmStart(on);
 }
 
+void EnergyCalculator::resetWarmStart()
+{
+    if (m_method) m_method->resetWarmStart();
+}
+
 void EnergyCalculator::setIterativeMode(bool on)
 {
     m_is_iterative = on;
