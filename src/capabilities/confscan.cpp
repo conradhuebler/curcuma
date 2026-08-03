@@ -21,6 +21,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -61,8 +62,12 @@ std::string to_string_with_precision(const T a_value, const int n = 2)
 int ConfScanThread::execute()
 {
     m_driver->setThreads(m_threads);
-    m_driver->setReference(m_reference);
-    m_driver->setTarget(m_target);
+    /* Claude Generated (Aug 2026): in heavy-atom mode these are the proton-depleted
+       copies, so the plain-RMSD short-circuit, the stored-rule reuse loop and the
+       permutation search all operate on the same atom set. Previously only start()
+       depleted (inside the driver), leaving the first two on the full molecules. */
+    m_driver->setReference(cmpReference());
+    m_driver->setTarget(cmpTarget());
 
     m_keep_molecule = true;
     m_break_pool = false;
@@ -106,7 +111,12 @@ int ConfScanThread::execute()
     // Claude Generated (Jul 2026): time the reuse-rule phase (stored reorder rules), see docs/CONFSCAN_REORDER_TIMING_WP.md
     RunTimer timer_reuse(false);
     for (int i = 0; i < m_reorder_rules.size(); ++i) {
-        if (m_reorder_rules[i].size() != m_reference.AtomCount() || m_reorder_rules[i].size() == 0)
+        /* Claude Generated (Aug 2026): compare against the atom count actually being
+           matched. This used to test the FULL reference count, so in heavy-atom mode -
+           where every stored rule is heavy-sized - the condition rejected all of them and
+           the reuse pool was dead, while AddRules kept collecting them (and writing them
+           into the restart file). */
+        if (m_reorder_rules[i].size() != cmpReference().AtomCount() || m_reorder_rules[i].size() == 0)
             continue;
 
         double tmp_rmsd = m_driver->Rules2RMSD(m_reorder_rules[i]);
@@ -206,7 +216,16 @@ int ConfScanThreadNoReorder::execute()
     m_input.dE = std::abs(m_reference.Energy() - m_target.Energy()) * 2625.5;
     if (m_rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || m_driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
         m_keep_molecule = false;
-        m_break_pool = true;
+        /* Claude Generated (Aug 2026): m_break_pool is deliberately NOT set here. It used
+           to be assigned to a member that shadowed CxxThread::m_break_pool, so the write
+           never reached shouldBreakThreadPool() and the early break was dead. Removing the
+           shadow and keeping the write breaks the CheckOnly pass: it dispatches through
+           StaticPool(), and CxxBlockedThread::execute() DOES honour shouldBreakThreadPool()
+           even in worker-pool mode - the remaining threads in the block are then skipped
+           without executing, so they keep the m_keep_molecule from the previous candidate
+           (CxxThreadPool::Reset() only resets base-class state) and the next structure is
+           rejected against a stale result. Initial-pass acceptance dropped 19 -> 4 when
+           this was tried. The comparison must run for every reference. */
     }
 
     m_driver->clear();
@@ -242,10 +261,10 @@ void ConfScan::LoadControlJson()
     m_noname = m_config.get<bool>("noname");
     m_restart = m_config.get<bool>("restart");
 
-    // RMSD parameters from rmsd module (dot notation)
-    // Note: RMSD has "protons" (include protons), ConfScan expects "heavy" (exclude protons) - inverse logic!
-    bool protons_included = m_config.get<bool>("rmsd.protons");
-    m_heavy = !protons_included;  // Invert: protons=false means heavy-only
+    /* RMSD parameters from rmsd module (dot notation). "protons" (include protons) and
+       "heavy" (exclude protons) are inverses; mirror how RMSDDriver combines them
+       (rmsd.cpp) so the reported setting matches what the drivers actually do. */
+    m_heavy = !(m_config.get<bool>("rmsd.protons") && !m_config.get<bool>("rmsd.heavy"));
 
     // Filtering & thresholds
     m_rmsd_threshold = m_config.get<double>("rmsd");
@@ -363,17 +382,15 @@ void ConfScan::LoadControlJson()
     // Performance
     m_threads = m_config.get<int>("threads");  // ConfScan ensemble threads
 
-    // Claude Generated (October 2025): RMSD parameters with inheritance fallback
-    // User can specify RMSD method via:
-    // 1. Explicit: -confscan -rmsd.method subspace
-    // 2. ConfScan-level: -confscan -method subspace  (inherited from parent)
-    // Try explicit rmsd.method first, fall back to confscan-level method if available
-    try {
-        m_RMSDmethod = m_config.get<std::string>("rmsd.method");
-    } catch (...) {
-        // Fallback: try to get method from confscan level (inherited)
-        m_RMSDmethod = m_config.get<std::string>("method", "inertia");
-    }
+    /* The alignment method is set with -rmsd.method (registry default "subspace",
+       rmsd.h). Claude Generated (Aug 2026): this used to sit in a try/catch falling back
+       to m_config.get("method", "inertia") - dead code. "rmsd" is one of this object's
+       ConfigManager modules, so "rmsd.method" always resolves to at least the registry
+       default and never throws. The fallback was also documented as inheriting
+       "-confscan -method X", which does not work either: "method" is a global parameter
+       and confscan owns its own, so it lands in confscan.method while the RMSD drivers
+       are configured from the exported "rmsd" module. */
+    m_RMSDmethod = m_config.get<std::string>("rmsd.method");
     m_update_rotation = m_config.get<bool>("rmsd.update_rotation");
     m_nomunkres = m_config.get<bool>("rmsd.nomunkres", false);  // May not exist in RMSD
     m_molalign = m_config.get<std::string>("rmsd.molalign_bin");
@@ -1350,6 +1367,13 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
     }
     p->clear();
     delete p;
+    /* Claude Generated (Aug 2026): the threads are created with setAutoDelete(false), so
+       neither p->clear() nor ~CxxThreadPool frees them - every pass leaked one
+       ConfScanThreadNoReorder (and its RMSDDriver) per accepted structure. They are not
+       referenced after this point. */
+    for (auto* thread : threads)
+        delete thread;
+    threads.clear();
     // Claude Generated (Jul 2026): the per-thread RMSD config sets CurcumaLogger's global
     // verbosity to 0 for thread silence (rmsd["verbosity"] = 0 above) and nothing restores it
     // afterwards, so any CurcumaLogger call below this point was silently dropped regardless
@@ -1459,8 +1483,16 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     m_stored_structures.clear();
     m_energies.clear();
     std::vector<ConfScanThread*> threads;
+    /* Claude Generated (Aug 2026): the persistent Molecule* each thread was built from,
+       parallel to `threads`. m_threshold outlives this function (Finalise() writes it),
+       so it must not store threads[t]->Reference(), which points into the thread's own
+       copy - that only stayed valid because the threads were leaked. */
+    std::vector<const Molecule*> thread_sources;
     std::vector<std::vector<int>> rules;
-    CxxThreadPool* p = new CxxThreadPool;
+    /* Claude Generated (Aug 2026): unique_ptr - the CheckStop() early return below used
+       to leak the pool and its worker threads outright. */
+    auto pool_owner = std::make_unique<CxxThreadPool>();
+    CxxThreadPool* p = pool_owner.get();
     p->setActiveThreadCount(m_threads);
     // Claude Generated (Jul 2026): per-permutation reorder bar (stderr, library default
     // Continously) shown only at verbosity 3; see the matching note in CheckOnly().
@@ -1477,6 +1509,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
             AcceptMolecule(mol1);
             ConfScanThread* thread = addThread(mol1, rmsd, reuse_only);
             threads.push_back(thread);
+            thread_sources.push_back(mol1);
             p->addThread(thread);
             m_lowest_energy = mol1->Energy();
             if (m_analyse) {
@@ -1509,6 +1542,11 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
             if (CheckStop()) {
                 CurcumaLogger::warn("Found stop file, will end now!");
                 TriggerWriteRestart();
+                // Claude Generated (Aug 2026): this early return used to leak the pool
+                // and every thread. The pool is owned by pool_owner; the threads are
+                // setAutoDelete(false) and must be freed explicitly.
+                for (auto* thread : threads)
+                    delete thread;
                 return;
             }
             const Molecule* mol2 = threads[t]->Reference();
@@ -1551,7 +1589,8 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                         m_lastDI = dI;
                         m_lastDH = dH;
                         writeStatisticFile(mol1, mol2, -1, false);
-                        m_threshold.push_back(mol2);
+                        // persistent molecule, not the thread's internal copy - see thread_sources
+                        m_threshold.push_back(thread_sources[t]);
                         m_rejected_directly++;
                         reorder = false;
                         keep_molecule = false;
@@ -1637,7 +1676,23 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                             // m_nodes_list.push_back(t->Reference()->Name());
                         }
                         writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
-                        mol1->ApplyReorderRule(t->ReorderRule());
+                        /* Claude Generated (Aug 2026): only a rule covering the whole
+                           molecule may be applied. A rule sized to the compared atom set
+                           (heavy-atom mode) or an empty one (plain-RMSD rejection, which
+                           returns before any permutation search) used to rewrite the
+                           molecule with the wrong atom count - the rejected structure was
+                           then written out truncated. ApplyReorderRule now rejects those;
+                           the structure keeps its original, correct geometry. */
+                        if (!mol1->ApplyReorderRule(t->ReorderRule()) && !m_partial_rule_warned) {
+                            m_partial_rule_warned = true;
+                            if (m_verbosity >= 2) {
+                                int old_v = CurcumaLogger::get_verbosity();
+                                CurcumaLogger::set_verbosity(m_verbosity);
+                                CurcumaLogger::warn_fmt("Reorder rule covers {} of {} atoms - rejected structures are written un-reordered (heavy-atom mode or plain-RMSD rejection). Reported further occurrences suppressed.",
+                                    t->ReorderRule().size(), mol1->AtomCount());
+                                CurcumaLogger::set_verbosity(old_v);
+                            }
+                        }
                         // Claude Generated (June 2026): at verbosity 3, report the reference
                         // structure the rejection matched and the deciding RMSD. Inside the
                         // keep_molecule guard so it fires ONLY for the deciding (first) match -
@@ -1700,6 +1755,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
             ConfScanThread* thread = addThread(mol1, rmsd, reuse_only);
             p->addThread(thread);
             threads.push_back(thread);
+            thread_sources.push_back(mol1);
         } else {
             RejectMolecule(mol1);
         }
@@ -1711,7 +1767,13 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
         parameters_success.close();
     }
     p->clear();
-    delete p;
+    /* Claude Generated (Aug 2026): setAutoDelete(false) means neither p->clear() nor
+       ~CxxThreadPool frees these - every reorder pass leaked one ConfScanThread (with its
+       RMSDDriver) per accepted structure. Safe now that m_threshold stores the persistent
+       molecules (thread_sources) instead of thread-internal copies. */
+    for (auto* thread : threads)
+        delete thread;
+    threads.clear();
 
     // ConfStat will be called once at the end in Finalise() to avoid interference with status updates
 }

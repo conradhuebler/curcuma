@@ -224,9 +224,14 @@ real with a gate that actually toggles.
 **This is not a bug** (reproducible across independent runs, isolates cleanly to one
 structure, `Rejected: 29`/`15` + `Accepted:` sums match `44` in both cases) — it's a real
 instance of ConfScan's dedup being a **greedy, incremental, order-dependent** clustering
-process, not a globally consistent equivalence-class computation (the codebase already
-notes elsewhere that even thread count alone changes the final accepted count, for the
-same reason: it changes processing order). The tiered multi-pass pipeline and a single
+process, not a globally consistent equivalence-class computation. (An earlier version of
+this paragraph supported that with "even thread count alone changes the final accepted
+count". **That is no longer true and should not be cited** — measured 2026-08-03, 5 repeats
+of all 7 CLI scenarios at `-confscan.threads 4` reproduce the `threads=1` fingerprints
+exactly, so the tests are no longer pinned to one thread. The early-break path that made
+results thread-count-dependent is inert today: worker-pool mode ignores `m_break_pool`, and
+the default `early_break=3` makes both bit tests false. The pass-structure/order-dependence
+argument below stands on its own.) The tiered multi-pass pipeline and a single
 brute-force pass hand candidates to that greedy process in different groupings, so a
 count difference alone doesn't isolate the descriptor gate as the specific cause — it's
 confounded with the pass-structure/order difference. **This result is itself worth

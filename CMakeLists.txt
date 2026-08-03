@@ -163,7 +163,10 @@ FetchContent_Declare(LBFGSpp
 )
 FetchContent_Declare(CxxThreadPool
     GIT_REPOSITORY https://github.com/conradhuebler/CxxThreadPool.git
-    GIT_TAG        140625c509f245185ec486b5f5424b318c8ccef6
+    # 8b38c00: lost wakeup in the worker pool - m_wp_pending was decremented and
+    # notified without m_wp_mutex, hanging StartAndWait() forever. See AIChangelog
+    # 2026-08-03; ConfScan's threaded reorder was the reproducer.
+    GIT_TAG        8b38c0019f67f5efa33ffd773e132d2c8857adc4
     SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/CxxThreadPool
 )
 # ripser: header-only, no CMakeLists.txt at root — use Populate to avoid add_subdirectory
