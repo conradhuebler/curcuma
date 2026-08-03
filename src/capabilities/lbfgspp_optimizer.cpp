@@ -60,6 +60,21 @@ double LBFGSppObjectiveFunction::operator()(const Vector& x, Vector& grad)
             }
         }
 
+        // Claude Generated (Aug 2026): NaN/Inf is not the only unusable probe. A near-degenerate
+        // L-BFGS update (s.y ~ 0, which is what happens when the structure is ALREADY at its
+        // minimum) produces a search direction of ~1e150, and the resulting coordinates are large
+        // but perfectly FINITE -- so the check above passes them straight to the energy method,
+        // where every overlap exponential overflows. Measured on a batch of 30 peptide conformers
+        // that were already gfn2 minima: 52 such probes, each surfacing as "native SCF eigensolver
+        // failed at iteration 0 (often a singular overlap, e.g. an unsupported basis shell)", which
+        // is a diagnosis of the symptom. Rejecting the probe here costs one comparison and lets the
+        // line search back off; the SCF has its own guard for callers that bypass this one.
+        constexpr double kMaxCoordAngstrom = 1.0e4;
+        if (x.cwiseAbs().maxCoeff() > kMaxCoordAngstrom) {
+            m_error = true;
+            return 0.0;
+        }
+
         // Update geometry only (avoid full GFN-FF reinit via setMolecule)
         m_energy_calculator->updateGeometry(m_molecule->getGeometry());
 

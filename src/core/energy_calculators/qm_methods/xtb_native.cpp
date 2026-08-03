@@ -400,6 +400,33 @@ double XTB::Calculation(bool gradient)
     m_d4_prepared = false;
     m_d4_genparams_calls = 0;
 
+    // Claude Generated (Aug 2026): refuse an absurd geometry HERE, where it can be named.
+    // A coordinate of 1e157 Angstrom is "finite" -- allFinite() passes -- but every overlap
+    // exponential overflows, so S comes out NaN and the failure only surfaces three steps later
+    // in the eigensolver, which then reported "often a singular overlap, e.g. an unsupported
+    // basis shell". That message sent this bug hunt down the wrong road twice. Such geometries
+    // come from a line-search probe of the optimiser, never from an input structure; the caller
+    // is expected to treat the error as "this step is unusable" and back off.
+    {
+        constexpr double kMaxCoordAngstrom = 1.0e4;   // 1 micron; no molecule is this large
+        int worst = -1;
+        double worst_val = 0.0;
+        for (int a = 0; a < m_atomcount; ++a) {
+            const double v = m_geometry.row(a).cwiseAbs().maxCoeff();
+            if (!std::isfinite(v) || v > worst_val) { worst_val = v; worst = a; }
+            if (!std::isfinite(v)) break;
+        }
+        if (worst >= 0 && (!std::isfinite(worst_val) || worst_val > kMaxCoordAngstrom)) {
+            setHardError(fmt::format(
+                "geometry is out of range: atom {} has |coordinate| = {:.3e} Angstrom "
+                "(limit {:.0e}). This is not a chemical structure -- the caller handed over a "
+                "diverged geometry (typically a line-search probe).",
+                worst + 1, worst_val, kMaxCoordAngstrom));
+            m_scf_converged = false;
+            return m_E_total;
+        }
+    }
+
     // 1. Coordination numbers
     Vector cn = computeCoordinationNumbers();
     const auto t_cn = clock::now();
@@ -471,6 +498,65 @@ double XTB::Calculation(bool gradient)
         getHamiltonianH0(se, S, H0);
         m_S  = S;
         m_H0 = H0;
+        // Claude Generated (Aug 2026): catch a corrupt integral build where it happens, not three
+        // steps later in the eigensolver. S is pure geometry, H0 additionally carries the
+        // coordination numbers and self-energies, so this separates "bad geometry" from "bad CN/se".
+        if (!m_S.allFinite() || !m_H0.allFinite()) {
+            // Narrow it down to the first offending AO pair and the shells/atoms behind it, and
+            // check the basis data itself -- S depends on nothing but geometry and the CGTOs.
+            int bad_i = -1, bad_j = -1;
+            for (int i = 0; i < m_S.rows() && bad_i < 0; ++i)
+                for (int j = 0; j < m_S.cols(); ++j)
+                    if (!std::isfinite(m_S(i, j))) { bad_i = i; bad_j = j; break; }
+            int bad_sh = -1;
+            bool cgto_finite = true;
+            for (int s = 0; s < m_basis.nsh; ++s) {
+                for (double a : m_basis.cgto[s].alpha)
+                    if (!std::isfinite(a)) { cgto_finite = false; if (bad_sh < 0) bad_sh = s; }
+                for (double c : m_basis.cgto[s].coeff)
+                    if (!std::isfinite(c)) { cgto_finite = false; if (bad_sh < 0) bad_sh = s; }
+            }
+            auto sh_of_ao = [&](int ao) {
+                for (int s = 0; s < m_basis.nsh; ++s)
+                    if (ao >= m_basis.iao_sh[s] && ao < m_basis.iao_sh[s] + m_basis.nao_sh[s])
+                        return s;
+                return -1;
+            };
+            const int sh_i = bad_i >= 0 ? sh_of_ao(bad_i) : -1;
+            const int sh_j = bad_j >= 0 ? sh_of_ao(bad_j) : -1;
+            CurcumaLogger::error_fmt(
+                "XTB integral build produced non-finite values: S finite={}, H0 finite={}, "
+                "CN finite={}, self-energies finite={}, geometry finite={}, atoms={}, nao={}",
+                m_S.allFinite(), m_H0.allFinite(), cn.allFinite(), se.allFinite(),
+                m_geometry.allFinite(), m_atomcount, m_basis.nao);
+            {
+                int worst = 0;
+                double worst_val = 0.0;
+                for (int a = 0; a < m_atomcount; ++a) {
+                    const double v = m_geometry.row(a).cwiseAbs().maxCoeff();
+                    if (v > worst_val) { worst_val = v; worst = a; }
+                }
+                CurcumaLogger::error_fmt(
+                    "  largest coordinate: atom {} at |x|max = {:.3e} A -- allFinite() is true for such a\n"
+                    "  value, but the overlap exponentials overflow. A geometry like this comes from a\n"
+                    "  line-search probe, not from the input structure.",
+                    worst, worst_val);
+            }
+            CurcumaLogger::error_fmt(
+                "  first non-finite S element: ({},{}) -> shells {}/{} (l={}/{}, nprim={}/{}), "
+                "atoms {}/{} (Z {}/{}), distance {:.3f} A; all CGTO exponents/coefficients finite: {}{}",
+                bad_i, bad_j, sh_i, sh_j,
+                sh_i >= 0 ? m_basis.ang_sh[sh_i] : -1, sh_j >= 0 ? m_basis.ang_sh[sh_j] : -1,
+                sh_i >= 0 ? static_cast<int>(m_basis.cgto[sh_i].alpha.size()) : -1,
+                sh_j >= 0 ? static_cast<int>(m_basis.cgto[sh_j].alpha.size()) : -1,
+                sh_i >= 0 ? m_basis.sh2at[sh_i] : -1, sh_j >= 0 ? m_basis.sh2at[sh_j] : -1,
+                sh_i >= 0 ? m_basis.z[m_basis.sh2at[sh_i]] : -1,
+                sh_j >= 0 ? m_basis.z[m_basis.sh2at[sh_j]] : -1,
+                (sh_i >= 0 && sh_j >= 0)
+                    ? (m_geometry.row(m_basis.sh2at[sh_i]) - m_geometry.row(m_basis.sh2at[sh_j])).norm()
+                    : -1.0,
+                cgto_finite, cgto_finite ? "" : fmt::format(" (first bad shell {})", bad_sh));
+        }
         t_h0 = clock::now();
         // Orthonormalizer X = S^{-1/2}, built once here so every SCF iteration solves
         // the cheap standard eigenproblem instead of re-factorizing the constant S.
@@ -1173,6 +1259,46 @@ double XTB::Calculation(bool gradient)
                 eig_ok = solveEigen(F, m_S);
             }
             if (!eig_ok) {
+                // Claude Generated (Aug 2026): say WHAT was wrong instead of guessing in the message.
+                // The generalized solve reduces F with the cached Cholesky factor m_X of S, so a
+                // failure comes from one of four places: a non-finite Fock matrix (bad charges), a
+                // non-finite or stale overlap/Cholesky (a geometry-derived cache that did not follow
+                // the geometry), a genuinely near-singular overlap (collapsed atoms), or the
+                // eigensolver itself. All four are distinguishable here; the extra O(n^3) for the
+                // smallest overlap eigenvalue is paid only on the failure path.
+                {
+                    const int nao = m_basis.nao;
+                    const bool F_fin = F.allFinite();
+                    const bool S_fin = m_S.allFinite();
+                    const bool X_fin = (m_X.size() > 0) && m_X.allFinite();
+                    const bool q_fin = (m_wfn.q_sh.size() > 0) && m_wfn.q_sh.allFinite();
+                    double s_min = std::numeric_limits<double>::quiet_NaN();
+                    if (S_fin && m_S.rows() == nao && m_S.cols() == nao) {
+                        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(m_S,
+                            Eigen::EigenvaluesOnly);
+                        if (es.info() == Eigen::Success)
+                            s_min = es.eigenvalues()(0);
+                    }
+                    // Is the cached overlap the one belonging to THIS geometry? S_uv for the two
+                    // closest atoms is the most sensitive single number, so compare the cached S
+                    // against the current minimum interatomic distance.
+                    double d_min = std::numeric_limits<double>::max();
+                    for (int a = 0; a < m_atomcount; ++a)
+                        for (int b = a + 1; b < m_atomcount; ++b)
+                            d_min = std::min(d_min,
+                                (m_geometry.row(a) - m_geometry.row(b)).norm());
+                    CurcumaLogger::error_fmt(
+                        "XTB eigen solve failure diagnosis (iter {}): nao={}, "
+                        "finite: F={} S={} X(chol)={} q_sh={}; "
+                        "|F|max={:.3e}, |S|max={:.3e}, smallest S eigenvalue={:.3e}, "
+                        "max|q_sh|={:.3e}, closest atom pair={:.3f} A, X size={}x{}",
+                        iter, nao, F_fin, S_fin, X_fin, q_fin,
+                        F_fin ? F.cwiseAbs().maxCoeff() : std::numeric_limits<double>::quiet_NaN(),
+                        S_fin ? m_S.cwiseAbs().maxCoeff() : std::numeric_limits<double>::quiet_NaN(),
+                        s_min,
+                        q_fin ? m_wfn.q_sh.cwiseAbs().maxCoeff() : std::numeric_limits<double>::quiet_NaN(),
+                        d_min, static_cast<int>(m_X.rows()), static_cast<int>(m_X.cols()));
+                }
                 CurcumaLogger::warn("XTB::Calculation: eigen solve failed at iteration " + std::to_string(iter));
                 m_scf_converged = false;
                 m_scf_iterations = iter;
