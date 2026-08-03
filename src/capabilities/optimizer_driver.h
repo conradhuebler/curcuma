@@ -47,6 +47,13 @@ public:
     double rmsd_threshold = 0.01; // Å - geometric changes
     double gradient_threshold = 5e-4; // Eh/Bohr - gradient norm
     int max_iterations = 5000;
+    // Claude Generated (Aug 2026): size-scaled step cap. The number of steps needed to reach a
+    // minimum grows with the degrees of freedom, so a fixed cap either truncates large molecules or
+    // is pointless for small ones. When per_atom > 0, InitializeOptimization sets
+    // max_iterations = max(max_iterations_floor, max_iterations_per_atom * atoms).
+    // An explicit -max_iterations sets per_atom = 0 and is used verbatim.
+    int max_iterations_floor = 0;    ///< lower bound of the scaled cap (0 = scaling off)
+    int max_iterations_per_atom = 0; ///< steps per atom (0 = scaling off)
     int convergence_count = 7; // Bit field: bits 0(energy)+1(RMSD)+2(gradient) all required
 
     // Performance settings
@@ -76,6 +83,17 @@ public:
      * way, which is what conformer recombination needs (docs/CONFSEARCH_PROPOSALS.md, P0). Read
      * from config["dihedral_restraints"]; empty by default, so every existing run is unchanged. */
     Optimization::GeometryRestraints restraints;
+    /** Claude Generated (Aug 2026): reuse the calculator's existing molecule setup.
+     *
+     * Initialize() normally calls energy_calculator->setMolecule(), which re-derives the whole force
+     * field (topology, parameters, charge model) for every structure. When a caller optimises MANY
+     * geometries of the SAME molecule through ONE shared calculator -- ConfGen does exactly that, on
+     * purpose, so all its energies are comparable -- that work is wasted, and it repeatedly re-enters
+     * the GFN-FF parameter generation, where an intermittent wild-pointer crash lives
+     * (GFNFF::getGFNFFBondParameters, see docs/CONFSEARCH_ROADMAP.md). With this flag the driver only
+     * updates the coordinates. The caller is responsible for having initialised the calculator with a
+     * molecule of identical composition -- hence opt-in, default false. */
+    bool reuse_calculator = false;
     bool use_hessian = false;
     bool use_numerical_gradient = false; // Use numerical gradient instead of analytical (for debugging)
     double numerical_gradient_step = 1e-5; // Step size for numerical gradient (Bohr)

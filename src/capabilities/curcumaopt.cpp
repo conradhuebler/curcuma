@@ -20,6 +20,7 @@
 #include "src/capabilities/hessian.h"
 #include "src/capabilities/rmsd.h"
 
+#include "src/capabilities/optimisation/convergence_presets.h"
 #include "src/capabilities/optimisation/lbfgs.h"
 
 #include "src/core/elements.h"
@@ -151,6 +152,14 @@ CurcumaOpt::CurcumaOpt(const json& controller, bool silent)
     UpdateController(controller);
 }
 
+
+int CurcumaOpt::EffectiveMaxIterations(int atoms) const
+{
+    // Claude Generated (Aug 2026): the step cap grows with the system (see convergence_presets.h).
+    Optimization::ConvergencePreset scale { 0.0, 0.0, 0.0, m_maxiter, m_maxiter_per_atom };
+    return Optimization::scaledMaxIterations(scale, atoms);
+}
+
 void CurcumaOpt::LoadControlJson()
 {
     // WP6/CLI plumbing fix (May 2026): forward method-specific sub-configs into the
@@ -183,29 +192,32 @@ void CurcumaOpt::LoadControlJson()
     m_ConvCount = m_defaults.value("convergence_count", m_defaults.value("ConvCount", 7));
     m_maxiter = m_defaults.value("max_iterations", 5000);
 
-    // Apply convergence preset: overrides defaults, individual params below still win
+    // Apply convergence preset: base layer, an explicitly given threshold still wins (it used to be
+    // the other way round -- the preset is always present, so it silently overrode -max_iterations).
+    // Values live in optimisation/convergence_presets.h -- one definition for all three call sites.
     if (m_defaults.contains("convergence_preset")) {
-        std::string preset = m_defaults["convergence_preset"].get<std::string>();
-        if (preset == "loose") {
-            m_dE = 1.0;
-            m_dRMSD = 0.05;
-            m_GradNorm = 1e-3;
-            m_maxiter = 1000;
-        } else if (preset == "normal") {
-            m_dE = 0.1;
-            m_dRMSD = 0.01;
-            m_GradNorm = 5e-4;
-            m_maxiter = 5000;
-        } else if (preset == "tight") {
-            m_dE = 1e-6 * 2625.5; // 1e-6 Eh in kJ/mol
-            m_dRMSD = 1e-3;
-            m_GradNorm = 1e-5;
-            m_maxiter = 10000;
-        } else if (preset == "verytight") {
-            m_dE = 1e-7 * 2625.5; // 1e-7 Eh in kJ/mol
-            m_dRMSD = 1e-4;
-            m_GradNorm = 1e-6;
-            m_maxiter = 20000;
+        Optimization::ConvergencePreset preset;
+        if (Optimization::lookupConvergencePreset(m_defaults["convergence_preset"].get<std::string>(), preset)) {
+            m_dE = preset.energy_threshold;
+            m_dRMSD = preset.rmsd_threshold;
+            m_GradNorm = preset.gradient_threshold;
+            m_maxiter = preset.max_iterations;
+            m_maxiter_per_atom = preset.iterations_per_atom;
+            // Explicit values (recognised by differing from the registry default) win over the preset.
+            const json& defaults = ParameterRegistry::getInstance().getDefaultJson("opt");
+            auto given = [&](const char* key) {
+                return m_defaults.contains(key) && defaults.contains(key) && m_defaults[key] != defaults[key];
+            };
+            if (given("energy_threshold"))
+                m_dE = m_defaults["energy_threshold"].get<double>();
+            if (given("rmsd_threshold"))
+                m_dRMSD = m_defaults["rmsd_threshold"].get<double>();
+            if (given("gradient_threshold"))
+                m_GradNorm = m_defaults["gradient_threshold"].get<double>();
+            if (given("max_iterations")) {
+                m_maxiter = m_defaults["max_iterations"].get<int>();
+                m_maxiter_per_atom = 0; // a named cap is used verbatim, never scaled
+            }
         }
     }
 
@@ -635,7 +647,9 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
     if (converged)
         perform_optimisation = false;
 
-    for (iteration = 1; iteration <= m_maxiter && perform_optimisation; ++iteration) {
+    // Claude Generated (Aug 2026): step cap scales with the system size (convergence_presets.h)
+    const int max_iter = EffectiveMaxIterations(initial->AtomCount());
+    for (iteration = 1; iteration <= max_iter && perform_optimisation; ++iteration) {
         old_parameter = parameter;
         try {
             solver.SingleStep(fun, parameter, fx);
@@ -794,7 +808,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
     end = std::chrono::system_clock::now();
     charges = interface.Charges();
 
-    if (iteration >= m_maxiter) {
+    if (iteration >= max_iter) {
         output += fmt::format("{0: ^75}\n\n", "*** Maximum number of iterations reached! ***");
         output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 
@@ -963,7 +977,9 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
         gptfgs.setHessian(hessian);
     }
 
-    for (iteration = 1; iteration <= m_maxiter && perform_optimisation; ++iteration) {
+    // Claude Generated (Aug 2026): step cap scales with the system size (convergence_presets.h)
+    const int max_iter = EffectiveMaxIterations(initial->AtomCount());
+    for (iteration = 1; iteration <= max_iter && perform_optimisation; ++iteration) {
         old_parameter = parameter;
 
         parameter = gptfgs.step();
@@ -1077,7 +1093,7 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
     end = std::chrono::system_clock::now();
     charges = interface.Charges();
 
-    if (iteration >= m_maxiter) {
+    if (iteration >= max_iter) {
         output += fmt::format("{0: ^75}\n\n", "*** Maximum number of iterations reached! ***");
         output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 

@@ -22,6 +22,8 @@
 #include "lbfgspp_optimizer.h"
 #include "native_optimizer_adapters.h"
 
+#include "src/capabilities/optimisation/convergence_presets.h"
+
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
 #include "src/core/intra_parallel_context.h"
@@ -201,29 +203,17 @@ static json buildPresetConfig(const json& config)
     if (!config.contains("convergence_preset"))
         return json::object();
 
-    std::string preset = config["convergence_preset"].get<std::string>();
+    std::string name = config["convergence_preset"].get<std::string>();
     json preset_config;
-    preset_config["convergence_preset"] = preset;
-    if (preset == "loose") {
-        preset_config["energy_threshold"] = 1.0;
-        preset_config["rmsd_threshold"] = 0.05;
-        preset_config["gradient_threshold"] = 1e-3;
-        preset_config["max_iterations"] = 1000;
-    } else if (preset == "normal") {
-        preset_config["energy_threshold"] = 0.1;
-        preset_config["rmsd_threshold"] = 0.01;
-        preset_config["gradient_threshold"] = 5e-4;
-        preset_config["max_iterations"] = 5000;
-    } else if (preset == "tight") {
-        preset_config["energy_threshold"] = 1e-6 * 2625.5; // 1e-6 Eh in kJ/mol
-        preset_config["rmsd_threshold"] = 1e-3;
-        preset_config["gradient_threshold"] = 1e-5;
-        preset_config["max_iterations"] = 10000;
-    } else if (preset == "verytight") {
-        preset_config["energy_threshold"] = 1e-7 * 2625.5; // 1e-7 Eh in kJ/mol
-        preset_config["rmsd_threshold"] = 1e-4;
-        preset_config["gradient_threshold"] = 1e-6;
-        preset_config["max_iterations"] = 20000;
+    preset_config["convergence_preset"] = name;
+    // Values live in optimisation/convergence_presets.h -- one definition for all three call sites.
+    Optimization::ConvergencePreset preset;
+    if (Optimization::lookupConvergencePreset(name, preset)) {
+        preset_config["energy_threshold"] = preset.energy_threshold;
+        preset_config["rmsd_threshold"] = preset.rmsd_threshold;
+        preset_config["gradient_threshold"] = preset.gradient_threshold;
+        preset_config["max_iterations"] = preset.max_iterations;
+        preset_config["max_iterations_per_atom"] = preset.iterations_per_atom;
     }
     return preset_config;
 }
@@ -271,6 +261,11 @@ OptimizationResult OptimizationDispatcher::optimizeStructure(
                 merged_config[key] = it.value(); // Explicitly changed from default
             }
         }
+        // Claude Generated (Aug 2026): a user who names a step cap gets that cap. The preset layer
+        // above always carries the size term, so it has to be switched off explicitly here.
+        if (config.contains("max_iterations") && default_config.contains("max_iterations")
+            && default_config["max_iterations"] != config["max_iterations"])
+            merged_config["max_iterations_per_atom"] = 0;
         optimizer->LoadConfiguration(merged_config);
         optimizer->setEnergyCalculator(energy_calculator);
 

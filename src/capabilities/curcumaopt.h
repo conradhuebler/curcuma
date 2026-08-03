@@ -70,7 +70,7 @@ namespace {
     PARAM(verbosity, Int, 1, "Output level: 0=silent, 1=table, 2=detailed, 3=debug", "Basic", { "verbose" })
 
     // Convergence
-    PARAM(convergence_preset, String, "normal", "Convergence preset: loose, normal, tight, verytight (sets all thresholds)", "Convergence", { "conv_preset", "ConvPreset" })
+    PARAM(convergence_preset, String, "normal", "Convergence preset: loose, normal, tight, verytight. Sets all four thresholds, one decade apart per step -- dE 1/0.1/0.01/0.001 kJ/mol, dRMSD 0.1/0.01/1e-3/1e-4 A, gradient norm 5e-3/5e-4/5e-5/5e-6 Eh/Bohr, step cap max(50,1*N)/max(500,10*N)/max(1000,25*N)/max(5000,100*N) for N atoms -- a fixed cap either truncates large molecules or is pointless for small ones (500 steps converge butane but stop a 107-atom peptide 17 kJ/mol short). An explicit -max_iterations switches the scaling off. The step cap is what actually separates the presets in cost: measured on a 107-atom peptide, the thresholds alone cost 656 steps (loose) vs 750 (verytight), because a cartesian L-BFGS spends its work getting NEAR the minimum, not on the last digits.", "Convergence", { "conv_preset", "ConvPreset" })
     PARAM(energy_threshold, Double, 0.1, "Energy change threshold [kJ/mol]", "Convergence", { "d_e", "dE" })
     PARAM(rmsd_threshold, Double, 0.01, "RMSD change threshold [Angstrom]", "Convergence", { "d_rmsd", "dRMSD" })
     PARAM(gradient_threshold, Double, 5e-4, "Gradient norm threshold [Eh/Bohr]", "Convergence", { "grad_norm", "GradNorm" })
@@ -303,4 +303,10 @@ private:
     int m_charge = 0, m_spin = 0;
     int m_serial = false;
     int m_maxiter = 100, m_maxrise = 10, m_optimethod = 1, m_diis_hist = 10, m_diis_start = 10;
+    /* Claude Generated (Aug 2026): size-scaled step cap (see optimisation/convergence_presets.h).
+     * m_maxiter is the floor, m_maxiter_per_atom the size term; the effective cap is computed
+     * per molecule in EffectiveMaxIterations(). An explicit -max_iterations sets the term to 0. */
+    int m_maxiter_per_atom = 0;
+    /// Effective step cap for a molecule of `atoms` atoms.
+    int EffectiveMaxIterations(int atoms) const;
 };
