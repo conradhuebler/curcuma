@@ -126,9 +126,17 @@ public:
 private:
     void PerformMolecularDynamics(const std::vector<Molecule*>& molecules, const nlohmann::json& parameter);
 
-    std::string PerformOptimisation(const std::string& filename, const nlohmann::json& parameter);
+    /* Claude Generated (Aug 2026): `out_stem` gives the result its own name. Without it the output
+     * is "<in_stem>.opt.xyz", which chained every step of a cycle onto the FIRST step's stem --
+     * the deduplicated minima ended up in "...s1_explore.<method>.opt.accepted.xyz" although they
+     * are the product of step 3. Each step now writes "<step>.<method>.xyz". */
+    std::string PerformOptimisation(const std::string& filename, const nlohmann::json& parameter,
+        const std::string& out_stem = std::string());
 
-    std::string PerformFilter(const std::string& filename, const nlohmann::json& parameter);
+    /* Reads "<in_stem>.xyz"; ConfScan writes "<in_stem>.accepted.xyz", which is renamed to
+     * "<out_stem>.xyz" when one is given (see PerformOptimisation). */
+    std::string PerformFilter(const std::string& filename, const nlohmann::json& parameter,
+        const std::string& out_stem = std::string());
 
     /* Claude Generated (Jul 2026): Phase 3c -- torsion recombination on this cycle's deduplicated
      * minima. Runs ConfGen on "<f>.xyz", which enumerates torsion-state vectors the ensemble does
@@ -237,7 +245,9 @@ private:
     /* Copy every frame of an XYZ file to another name. Used where a stage has to start from the
      * previous stage's OUTPUT: the copy is what lets the new stage own a file whose name states its
      * purpose and method instead of inheriting a chain of suffixes. Returns the frame count. */
-    int CopyFrames(const std::string& source, const std::string& destination) const;
+    /* `append` keeps what is already in the destination -- used to accumulate the minima of every
+     * repetition of a temperature stage into one pool (see the stage-repetition loop). */
+    int CopyFrames(const std::string& source, const std::string& destination, bool append = false) const;
 
     /* Claude Generated (Jul 2026): energy summary of an XYZ ensemble on disk. Returns the energies
      * in ascending order (empty when the file is missing or holds no structures). */
@@ -352,6 +362,63 @@ private:
     int m_rattle_hot_mode = 2, m_topo_check_interval = 0, m_opt_feedback_height = 5;
     bool m_confgen_phase = false;
     int m_confgen_max_proposals = 20, m_confgen_templates = 3, m_confgen_depth = 2;
+    std::string m_bias_reset = "never";
+    double m_reduce_prefilter_window = 100.0;
+    double m_reduce_prefilter_energy_tol = 1.0e-6;
+    /** Cheap pre-filter between RELAX and REDUCE: energy window + identical-minimum collapse.
+     *  @return number of structures written to `out` */
+    int PrefilterForReduce(const std::string& in_file, const std::string& out_file) const;
+    bool m_refine_hold_polar_h = false;
+    double m_refine_hold_polar_h_force = 5.0;
+    /// Harmonic distance restraints on the reference structure's polar X-H bonds (json form).
+    nlohmann::json PolarHydrogenRestraints() const;
+    // Claude Generated (Aug 2026): the two additional move sets of Phase 3c.
+    bool m_confgen_nci_moves = true, m_confgen_consensus = false;
+    std::string m_confgen_method = "auto";
+    /// Resolved method for the recombination step (see confgen_method).
+    std::string ConfGenMethod() const;
+
+    /**
+     * @brief Every structure the search has accepted, on each surface -- the pool the seeds come from.
+     *
+     * DESIGN, not a patch: the seeds of a cycle are the `seed_rank` best structures of ALL cycles,
+     * every accepted structure is a bias hill, and a temperature stage is repeated via `repeat`.
+     * Drawing the seeds from the current cycle alone breaks the first rule and was measured to matter:
+     * a structure found once goes into the cumulative pool and into the bias pool as a PERSISTENT
+     * hill, and persistent hills are deliberately never re-optimised, so it never re-enters a cycle
+     * ensemble -- and therefore never again the seed list. On WEKLQ (7 cycles, seed_rank 10) cycle 3
+     * found the global minimum -161.641649, cycle 4 still seeded from it, and from cycle 5 the search
+     * seeded from structures 6-7 kJ/mol worse while the global minimum sat 3.1-3.5 A from anything
+     * those cycles contained. The result was never lost -- only the seeding drifted downhill.
+     *
+     * The energy window (`seed_energy_window`) is applied at SELECTION time, not on insertion,
+     * because the running minimum only ever drops: a structure inside the window today can be
+     * outside it tomorrow, and the pool must not freeze that decision.
+     */
+    std::vector<Molecule> m_seed_pool_md, m_seed_pool_opt;
+
+    /** One row per temperature stage for the closing summary -- what each stage actually
+     *  contributed. Without it the only way to tell whether a cycle was worth its runtime was to
+     *  read back through hundreds of log lines. */
+    struct StageSummary {
+        int cycle = 0;
+        double temperature = 0.0;
+        int repetitions = 0;
+        int structures = 0;      ///< minima the stage handed to the accurate method
+        int recombined = 0;      ///< of those, produced by the recombination step
+        double best_md = 0.0;    ///< lowest md_method energy of the stage
+        double best_opt = 0.0;   ///< lowest opt_method energy of the stage (NaN in single-method runs)
+        double seconds = 0.0;
+        bool new_global_best = false;
+    };
+    std::vector<StageSummary> m_stage_summary;
+    void ReportStageSummary() const;
+
+    /// Add this cycle's candidates to the cross-cycle pool (duplicates by energy dropped).
+    void AccumulateSeedPool(std::vector<Molecule>& pool, const std::vector<Molecule*>& candidates) const;
+    /// Offer the pool as seed candidates, filtered by the energy window (ownership passes on).
+    int OfferSeedPool(std::vector<Molecule*>& seeds, const std::vector<Molecule>& pool,
+        double global_min, double window) const;
     // Claude Generated (Jul 2026): two-stage Phase 3b (crude opt -> dedup -> accurate opt) and the
     // per-cycle ensemble/energy reporting.
     bool m_phase3b_two_stage = false, m_phase3b_filter = true, m_cycle_output = true;
@@ -443,7 +510,7 @@ private:
     PARAM(startT, Double, 600.0, "Temperature of the first exploration cycle in Kelvin.", "Schedule", {})
     PARAM(endT, Double, 300.0, "Temperature of the last exploration cycle in Kelvin.", "Schedule", {})
     PARAM(deltaT, Double, 50.0, "Temperature decrement between cycles in Kelvin.", "Schedule", {})
-    PARAM(repeat, Int, 4, "Independent MD runs started from every seed structure per cycle.", "Schedule", {})
+    PARAM(repeat, Int, 4, "How often a temperature stage is repeated. Each repetition runs ONE MD per seed structure and then re-seeds from the best structures found so far, so repetition 2 starts from what repetition 1 discovered. The high-level re-optimisation runs once per temperature, at the end of the last repetition. Parallelism comes from the number of seeds (seed_rank), not from re-running one seed.", "Schedule", {})
     PARAM(time, Double, 2000.0, "Length of each MD run in femtoseconds.", "Schedule", {"max_time", "MaxTime"})
 
     // --- Filtering ---
@@ -502,7 +569,7 @@ private:
     PARAM(temp_abort_delta, Double, 300.0, "Abort when the mean temperature exceeds the target plus this many Kelvin. Values at or below 0 disable the check.", "Robustness", {})
 
     // --- High-Level Re-Optimisation (Phase 3b) ---
-    PARAM(phase3b_two_stage, Bool, false, "Split the high-level re-optimisation into a crude pre-optimisation of every structure, a dedup filter at that level and an accurate optimisation of the survivors only. Off by default (one accurate optimisation per structure). Pays off when the crude stage collapses several structures onto the same minimum.", "Optimisation", {})
+    PARAM(phase3b_two_stage, Bool, true, "Split the high-level re-optimisation into a crude pre-optimisation of EVERY structure, a deduplication at that level and an accurate optimisation of the survivors. Default since Aug 2026, because deduplicating and selecting on the EXPLORATION surface was measured to be actively wrong for this class of system: on a 107-atom peptide the gfnff and gfn2 energies of one cycle correlate at r = -0.32 (rank -0.13), i.e. the structure gfnff likes best sits at gfn2 rank 10 of 14. A gfn2 single point on the gfnff geometry is better (r = +0.40, best pick at rank 2) but still weak, because the relaxation from the gfnff geometry to the gfn2 minimum spans 149-368 kJ/mol -- several times the conformer differences themselves. Only a crude optimisation on the ranking surface removes that term, which is what this mode does before anything is selected.", "Optimisation", {})
     PARAM(phase3b_preopt_preset, String, "loose", "Convergence preset of the crude stage in the two-stage mode: loose, normal, tight or verytight.", "Optimisation", {})
     PARAM(phase3b_preopt_max_iter, Int, 0, "Maximum optimisation steps in the crude stage. 0 keeps the preset value.", "Optimisation", {})
     PARAM(phase3b_preset, String, "normal", "Convergence preset of the accurate stage (and of the single-stage Phase 3b).", "Optimisation", {})
@@ -517,7 +584,15 @@ private:
     PARAM(confgen_max_proposals, Int, 20, "Maximum number of recombined structures built and optimised per cycle.", "Proposals", {})
     PARAM(confgen_templates, Int, 3, "Number of lowest-energy minima of the cycle used as geometric templates for the recombination.", "Proposals", {})
     PARAM(confgen_depth, Int, 2, "Maximum number of torsions changed simultaneously relative to a template.", "Proposals", {})
-    PARAM(max_bias_export, Int, 1000, "Maximum number of bias structures written out per cycle.", "Bias", {})
+    PARAM(confgen_method, String, "auto", "Energy method for the recombination step. auto = md_method when that is a force field, gfnff otherwise -- the analysis needs a per-term energy decomposition, which only a force field provides, so a search that EXPLORES with gfn2 would otherwise lose the step entirely. When the method differs from md_method the proposals are re-optimised at md_method before they enter the ensemble, unless the accurate re-optimisation runs anyway and does it.", "Proposals", {})
+    PARAM(confgen_nci_moves, Bool, true, "Phase 3c also proposes hydrogen-bond moves (break one bridge, form another observed elsewhere) built with distance restraints, not only torsion recombinations.", "Proposals", {})
+    PARAM(confgen_consensus, Bool, false, "Phase 3c additionally assembles structures DE NOVO from the individually most favourable torsion states, walking away from the ensemble one torsion at a time. Measured: every chemically valid assembly was a new conformer, but they sit high in energy and each costs a build plus two optimisations -- hence off by default.", "Proposals", {})
+    PARAM(reduce_prefilter_window, Double, 100.0, "Energy window in kJ/mol above the cycle minimum that a RELAXED structure must fall into before it enters the RMSD deduplication. The deduplication is quadratic (133 structures take ~170 s, 10000 would take days), while a structure 400 kJ/mol above the minimum is not a relevant conformer. 0 disables the window.", "Filtering", {})
+    PARAM(reduce_prefilter_energy_tol, Double, 1.0e-6, "Two relaxed structures whose energies agree to within this many Hartree ended in the SAME minimum and only one is passed to the deduplication. Snapshots from a biased trajectory collapse onto few minima, so this removes the bulk at O(N log N) instead of O(N^2). A tolerance this tight cannot merge two genuinely different conformers by accident; the RMSD pass still decides everything else. 0 disables it.", "Filtering", {})
+    PARAM(refine_hold_polar_h, Bool, false, "Hold every polar X-H bond (X = N, O, F, S) of the reference structure at its reference length during the accurate re-optimisation, with a harmonic distance restraint. Prevents a proton transfer from turning a conformer into a TAUTOMER, which the topology filter then discards after the expensive optimisation has been paid for: measured on a 107-atom peptide, all three rejects of a 600 K stage were the identical transfer H107 from O57 to N25, and the resulting zwitterion was more stable on the gfn2 surface (-161.650444 Eh) than any neutral conformer found. A bond sitting at its equilibrium feels no force from the restraint, so the reported energies are essentially unperturbed.", "Filtering", {})
+    PARAM(refine_hold_polar_h_force, Double, 5.0, "Force constant of that restraint in Eh/Angstrom^2.", "Filtering", {})
+    PARAM(bias_reset, String, "never", "Opt-in: drop accumulated metadynamics hills at the start of every temperature stage. never = keep everything (default, unchanged behaviour); deposits = drop the MD deposits but KEEP the fed-back optimised minima, so the search still avoids basins it already knows while losing the accumulated hill mass; all = empty the pool completely. Motivation, measured on a 107-atom peptide: over five repetitions the pool grew to 15505 hills, and from repetition 2 on the accumulated bias tore one bond in more than 90 percent of all snapshots, so the topology gate rejected nearly everything the dynamics produced.", "Bias", {})
+    PARAM(max_bias_export, Int, 0, "Maximum number of new bias structures handed to the optimisation per cycle. 0 = no limit (every new snapshot is offered). A positive value makes the export SUBSAMPLE with a stride, which silently discards snapshots: measured on a 107-atom peptide with a grown bias pool, a limit of 1000 meant a stride of 16, so 15332 of 16291 new deposits were never even checked. The topology gate and the optimisation cost money, but discarding before them costs structures.", "Bias", {})
     PARAM(rmsd_mtd_max_height, Int, 0, "Cap on the per-structure hill counter in the bias force. 0 is unbounded.", "Bias", {})
     PARAM(rmsd_mtd_freeze_inherited, Bool, false, "Freeze inherited bias heights each run so only new deposits grow. Off by default under the strided scheme (the soft counter bounds cross-run growth without freezing, which also keeps exploring inherited basins); set true for the legacy cross-run heating bound.", "Bias", {})
     PARAM(rmsd_mtd_max_gaussians, Int, -1, "Cap the shared bias pool to at most this many structures (dropping the lowest-counter non-persistent snapshots between cycles; optimised minima are always kept). -1 = unbounded. Bounds the per-step bias cost as the search accumulates structures.", "Bias", {"max_rmsd_N"})

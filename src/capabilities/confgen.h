@@ -89,6 +89,10 @@ private:
         Molecule molecule;
         std::vector<double> angles;   ///< dihedral of every torsion, degrees
         std::vector<int> states;      ///< discrete state per torsion
+        /// Presence (1) or absence (0) of every non-covalent contact in m_nci_pairs. Second
+        /// descriptor next to the torsion states -- see buildNCISpace().
+        std::vector<int> nci;
+        std::vector<double> charges;  ///< partial charges of the single point (for the NCI detection)
         double energy = 0.0;          ///< total energy, Hartree
         std::map<std::string, double> terms; ///< energy decomposition, Hartree
         bool valid = false;           ///< topology matches the reference structure
@@ -111,6 +115,44 @@ private:
     /* Read the ensemble, run one single point per member (shared calculator -> identical topology
      * and parameters for every frame, so the term differences are comparable), and fill m_frames. */
     bool analyseEnsemble();
+
+    /**
+     * @brief One non-covalent interaction of the NCI pattern -- the second descriptor of a conformer.
+     *
+     * MOTIVATION (Jul 2026). The torsion-state vector describes what the covalent skeleton does and
+     * nothing else. Measured on a 142-structure peptide ensemble, that is the wrong half of the
+     * physics: the per-term attribution of a torsion change is dominated by the H-bond term in 8 of
+     * 16 cases and by Coulomb in 4, by the torsion term in NONE -- and the reference structure of an
+     * independent search shares its torsion-state vector with two ensemble members while lying 2.7 A
+     * away from them. A description that cannot distinguish those structures cannot be the basis for
+     * proposing new ones. The NCI pattern adds exactly the missing half: which non-covalent contacts
+     * a conformer forms. It is built with the same discrete logic as the torsion states (a binary
+     * presence vector over a global list), so every tool downstream -- Hamming distance, matched
+     * pairs, the cross-validated model -- applies to it unchanged.
+     */
+    struct NCIContact {
+        enum Kind { HBond,   ///< D-H...A, directional
+            XBond,           ///< C-X...B halogen bond, directional
+            Ionic,           ///< non-bonded heavy pair with a large attractive charge product
+            Contact };       ///< remaining close heavy-atom pair (dispersion/repulsion)
+        Kind kind = Contact;
+        int first = -1, second = -1; ///< heavy atoms (donor/acceptor, X/B, or the contact pair)
+        int hydrogen = -1;           ///< bridging H for kind == HBond, else -1
+        std::string label() const;   ///< e.g. "HB N38-H90...O12"
+    };
+
+    /// Detect the non-covalent interactions of ONE structure (geometry + partial charges).
+    std::vector<NCIContact> detectNCI(const Molecule& mol, const std::vector<double>& charges) const;
+
+    /// Union of all contacts observed anywhere in the ensemble -> per-frame presence vector.
+    void buildNCISpace();
+
+    /// Which energy term drives the spread of the ensemble: Cov(E_term, E_total) / Var(E_total).
+    void reportTermVariance() const;
+
+    /// Population, pattern count and Hamming statistics of the NCI space.
+    void reportNCISpace() const;
+    void writeNCITable(const std::string& path) const;
 
     /* All Hamming-1 pairs -> per-transition term statistics. */
     std::vector<Transition> matchedPairs() const;
@@ -148,6 +190,10 @@ private:
         double mae_cv = 0.0;  ///< kJ/mol, out-of-sample median absolute error (outlier-robust)
         double rmse_in = 0.0; ///< kJ/mol, in-sample (for reference only -- always improves)
         double r2_cv = 0.0;   ///< fraction of the energy variance explained out of sample
+        /// False when every cross-validation fold had fewer training rows than the model has
+        /// parameters. Such a fit was never tested; reporting its (zero) error as a score would
+        /// invert the meaning of the number.
+        bool evaluated = true;
     };
 
     /**
@@ -156,6 +202,12 @@ private:
      * level 0: constant only (the null model -- its error IS the energy spread)
      * level 1: + one coefficient per torsion state    E ~ c + sum_i h_i(s_i)
      * level 2: + one per state pair of two torsions   E ~ ... + sum_ij J_ij(s_i,s_j)
+     * level 3: one coefficient per NCI contact        E ~ c + sum_k g_k n_k   (torsions NOT used)
+     * level 4: torsion states AND NCI contacts        E ~ c + sum_i h_i + sum_k g_k
+     *
+     * Levels 3 and 4 answer the question the torsion-only analysis cannot: whether the energy of a
+     * conformer is carried by its covalent skeleton or by its non-covalent pattern. Comparing 1 and 3
+     * on the same folds is a like-for-like test of the two descriptions.
      *
      * k-fold cross-validation is not optional here: level 2 has many more parameters and would win
      * any in-sample comparison by construction. Only a better prediction on data the fit has not seen
@@ -180,6 +232,17 @@ private:
         std::vector<int> states;   ///< target state vector
         int template_frame = -1;   ///< ensemble member the geometry was built from
         int distance = 0;          ///< Hamming distance to that template
+        /**
+         * Claude Generated (Aug 2026): an NCI move instead of a torsion move. Entries are
+         * (index into m_nci_pairs, desired presence 0/1) relative to the template. Empty for the
+         * torsion proposals; non-empty marks a proposal that is built by DISTANCE restraints on the
+         * interacting atoms rather than by driving dihedrals. Motivated by the measurement that the
+         * hydrogen-bond term carries +58 % of the ensemble's energy spread and the torsion term
+         * -7 %: the move set has to act on the description that actually distinguishes conformers.
+         */
+        std::vector<std::pair<int, int>> nci_targets;
+        bool nci_move() const { return !nci_targets.empty(); }
+        std::string nci_label;     ///< human-readable move, e.g. "break HB 38-90...12, form HB 5-61...46"
         double predicted = 0.0;    ///< additive-model estimate, kJ/mol (ORDERING ONLY, see below)
         Molecule geometry;         ///< built structure (before optimisation)
         bool restrained_build = false; ///< rigid build clashed; geometry came from the restrained build
@@ -240,7 +303,65 @@ private:
      * @param driven output geometry, valid only when the function returns true
      * @return false when the restrained optimisation failed or left a torsion far from its target
      */
-    bool restrainedBuild(const Proposal& p, Molecule& driven) const;
+    /**
+     * @param start  optional starting geometry. Default (nullptr) = the template, which makes the
+     *               restrained optimisation perform the rotation itself. That is right for one or
+     *               two torsions and WRONG for many: driving 29 dihedrals at once from the template
+     *               stalls at 74 degrees worst deviation and never reaches the target (measured).
+     *               Passing the RIGIDLY BUILT geometry instead turns the same machinery into a clash
+     *               repair -- the fold is already correct, the restraints only hold it while the
+     *               optimiser relieves the overlaps.
+     */
+    bool restrainedBuild(const Proposal& p, Molecule& driven, const Molecule* start = nullptr) const;
+
+    /**
+     * @brief Enumerate NCI moves: break a hydrogen bond the template has, form one it does not.
+     *
+     * The counterpart of generateProposals() on the second descriptor. Only bonds that OCCUR
+     * SOMEWHERE in the ensemble are offered for forming -- like the torsion states, this recombines
+     * what was observed and does not invent geometry. Candidates are ranked by the population of the
+     * target bond (a bond realised in many structures is a plausible one to ask for), which needs no
+     * energy model -- consistent with the measurement that the pattern separates but does not predict.
+     */
+    std::vector<Proposal> generateNCIProposals() const;
+
+    /**
+     * @brief Assemble a structure from the individually most favourable elements (de novo template).
+     *
+     * The mutation stages above are INCREMENTAL: they change one or two torsions of an existing
+     * structure, and the measurements show why that is limiting -- the reference structure this work
+     * chases shares its torsion vector with an ensemble member, so no small mutation points at it,
+     * and it differs from the closest structure in at least seven hydrogen bonds at once.
+     *
+     * This stage does the opposite. For every torsion it takes the state that is on average the
+     * BEST one -- the Boltzmann-weighted mean relative energy of all structures having that state,
+     * the same statistic the state table reports -- and assembles all of them into ONE state vector.
+     * That vector usually occurs nowhere in the ensemble and is far from every member, which is
+     * exactly the point: it is reached in a single concerted build instead of a walk.
+     *
+     * The per-state energies are used ONLY to choose the geometry. They do not rank, predict or
+     * filter anything -- the assembled structure is optimised and judged by the force field like
+     * every other proposal. That distinction matters because those same numbers were measured to be
+     * poor predictors (scatter 3.7 times their mean): as a template recipe they are still useful,
+     * as an energy model they are not.
+     *
+     * Variants beyond the pure consensus are generated by flipping the torsion with the SMALLEST
+     * margin between its best and second-best state -- those are the least certain choices.
+     */
+    std::vector<Proposal> generateConsensusProposals() const;
+
+    /// Boltzmann-weighted mean relative energy per torsion state (kJ/mol); NaN for empty states.
+    std::vector<std::vector<double>> stateEnergies() const;
+
+    /**
+     * @brief Build an NCI proposal with DISTANCE restraints instead of dihedral ones.
+     *
+     * Forming a bond restrains the H...acceptor distance to nci_form_distance, breaking one pushes it
+     * to nci_break_distance -- i.e. outside the detection criterion. The rest of the molecule relaxes
+     * around that, which is precisely the concerted motion a torsion move cannot express. Restraints
+     * are released afterwards; optimiseProposals() reports a freely optimised energy as always.
+     */
+    bool restrainedBuildNCI(const Proposal& p, Molecule& driven) const;
 
     /**
      * @brief Sorted list of bonded atom pairs, with an EXPLICIT covalent-radius factor.
@@ -285,9 +406,27 @@ private:
      */
     mutable std::unique_ptr<EnergyCalculator> m_calculator;
 
+    // Claude Generated (Jul 2026): NCI pattern as the second conformer descriptor.
+    bool m_nci_analysis = true;
+    double m_nci_hbond_distance = 2.60, m_nci_hbond_angle = 120.0;
+    double m_nci_xbond_distance = 4.00, m_nci_xbond_angle = 140.0;
+    double m_nci_contact_distance = 4.00, m_nci_charge_product = 0.05;
+    int m_nci_min_population = 2;
+    // NCI moves in the generation stage
+    bool m_nci_generate = true;
+    int m_nci_max_proposals = 10, m_nci_depth = 1;
+    bool m_consensus_build = false;
+    std::string m_proposal_memory_file;
+    mutable std::set<std::vector<int>> m_proposed_before; ///< loaded from proposal_memory_file
+    void loadProposalMemory();
+    void appendProposalMemory(const std::vector<std::vector<int>>& states) const;
+    int m_consensus_max = 3;
+    double m_nci_form_distance = 1.90, m_nci_break_distance = 3.50, m_nci_restraint_force = 1.0;
+
     std::vector<TorsionSpace::Torsion> m_torsions;
     std::vector<std::vector<double>> m_state_centres; ///< per torsion
     std::vector<Frame> m_frames;
+    std::vector<NCIContact> m_nci_pairs;   ///< union of all contacts seen in the ensemble
     std::vector<std::string> m_term_names; ///< decomposition keys actually present, stable order
     double m_reference_energy = 0.0;       ///< lowest total energy in the ensemble (Hartree)
 
@@ -316,6 +455,26 @@ private:
     PARAM(cv_folds, Int, 5, "Number of cross-validation folds for the model comparison (additive vs. additive+couplings). Values below 2 disable the comparison.", "Analysis", {})
     PARAM(couplings, Bool, true, "Measure torsion-torsion couplings from double-mutant cycles (four ensemble members forming a rectangle in state space) and run the model comparison.", "Analysis", {})
     PARAM(report_threshold, Double, 1.0, "Only transitions whose mean total energy difference exceeds this many kJ/mol are printed in the summary. All of them are written to the CSV.", "Analysis", {})
+
+    PARAM(nci_analysis, Bool, true, "Describe every conformer additionally by its pattern of non-covalent interactions (hydrogen bonds, halogen bonds, electrostatic contacts, close contacts) and compare that description with the torsion states. Needed because the per-term attribution shows the energy of a conformer is carried by the non-covalent terms, not by the torsion term.", "NCI", {})
+    PARAM(nci_hbond_distance, Double, 2.60, "Maximum H...acceptor distance in Angstrom for a hydrogen bond of the NCI pattern.", "NCI", {})
+    PARAM(nci_hbond_angle, Double, 120.0, "Minimum donor-H...acceptor angle in degrees for a hydrogen bond of the NCI pattern.", "NCI", {})
+    PARAM(nci_xbond_distance, Double, 4.00, "Maximum halogen...acceptor distance in Angstrom for a halogen bond of the NCI pattern.", "NCI", {})
+    PARAM(nci_xbond_angle, Double, 140.0, "Minimum C-halogen...acceptor angle in degrees for a halogen bond (sigma hole is directional).", "NCI", {})
+    PARAM(nci_contact_distance, Double, 4.00, "Maximum distance in Angstrom between two heavy atoms that are at least four bonds apart for them to count as a non-covalent contact.", "NCI", {})
+    PARAM(nci_charge_product, Double, 0.05, "A contact whose partial-charge product is more negative than minus this value is classified as an electrostatic (ionic) contact rather than a plain close contact.", "NCI", {})
+    PARAM(nci_min_population, Int, 2, "A contact must occur in at least this many structures to enter the NCI pattern. Contacts seen once carry no contrast and only inflate the model.", "NCI", {})
+
+    PARAM(nci_generate, Bool, true, "With -generate true, additionally propose NCI MOVES: break a hydrogen bond the template has and form one that occurs elsewhere in the ensemble, realised by distance restraints. This is the move set that acts on the description which actually distinguishes the conformers (the H-bond term carries the energy spread, the torsion term does not), and it reaches structures a torsion recombination cannot express.", "NCI", {})
+    PARAM(nci_max_proposals, Int, 10, "Maximum number of NCI moves built and optimised, in addition to the torsion proposals.", "NCI", {})
+    PARAM(nci_depth, Int, 1, "Number of hydrogen bonds changed simultaneously in one NCI move.", "NCI", {})
+    PARAM(nci_form_distance, Double, 1.90, "Target H...acceptor distance in Angstrom when an NCI move FORMS a hydrogen bond.", "NCI", {})
+    PARAM(nci_break_distance, Double, 3.50, "Target H...acceptor distance in Angstrom when an NCI move BREAKS a hydrogen bond. Must be clearly outside nci_hbond_distance, otherwise the bond re-forms during the free optimisation.", "NCI", {})
+    PARAM(nci_restraint_force, Double, 1.0, "Force constant of the distance restraint in Eh/Angstrom^2 during an NCI move.", "NCI", {})
+
+    PARAM(consensus_build, Bool, false, "With -generate true, additionally assemble structures DE NOVO from the individually most favourable torsion states instead of mutating an existing one, walking away from the ensemble one torsion at a time. Reaches state vectors that no sequence of one- or two-torsion mutations can reach: measured, every chemically valid assembly was a new conformer, but they sit high in energy (best +44 kJ/mol) and each costs a build plus two optimisations. Off by default for that cost.", "Generation", {})
+    PARAM(proposal_memory_file, String, "", "Path to a file recording the state vectors that have already been proposed. When set, ConfGen skips combinations listed there and appends the ones it builds. ConfSearch passes one file per run, so a temperature stage does not rebuild what an earlier repetition already tried -- measured: repetitions 2 and 3 of a 600 K stage proposed the same structures again, and 32 of 113 proposals across a 7-cycle run were repeats.", "Generation", {})
+    PARAM(consensus_max, Int, 3, "Number of de-novo assemblies built: the pure consensus plus variants that flip the torsions whose best and second-best state are closest in energy (the least certain choices).", "Generation", {})
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^

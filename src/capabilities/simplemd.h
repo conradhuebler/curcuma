@@ -56,6 +56,13 @@ struct BiasStructure {
     double counter = 0; // Claude Generated (Jul 2026): soft residence-weighted height (strided scheme); was int visit count
     double temperature = 0;  // Claude Generated (Apr 2026): deposition temperature for cross-T propagation
     bool persistent = false; // Claude Generated (Jun 2026): fed-back optimised minimum; exempt from counter pruning
+    /* Claude Generated (Aug 2026): this snapshot has already been handed to the optimisation.
+     * The pool keeps every deposit forever (it IS the bias), so without this mark a stage
+     * repetition re-exports and re-optimises everything the previous ones already processed --
+     * measured: repetitions 2 and 3 of a 600 K stage produced byte-identical results, 148
+     * optimisations and a 215 s deduplication each, because the newly deposited snapshots all
+     * failed the topology gate and the survivors were the same old ones every time. */
+    bool exported = false;
 };
 
 class SharedBiasPool;  // Claude Generated (Apr 2026): forward declaration

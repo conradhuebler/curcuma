@@ -100,6 +100,9 @@ public:
      *  or when resetting between temperature cycles. */
     void clear();
 
+    /** Mark the given pool indices as handed to the optimisation (see BiasStructure::exported). */
+    void markExported(const std::vector<int>& indices);
+
     /** Claude Generated (Jun 2026): full-state restore for ConfSearch restart.
      *  Replaces the pool contents with the given structures (metadata AND geometry),
      *  preserving each BiasStructure::index and counter exactly. Used when resuming a

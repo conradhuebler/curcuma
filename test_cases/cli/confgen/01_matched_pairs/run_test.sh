@@ -120,8 +120,9 @@ validate_results() {
     #    and no model may claim a better in-sample than out-of-sample story silently.
     TESTS_RUN=$((TESTS_RUN + 1))
     # (the log carries ANSI colour codes, so match on the model names, not on line anchors)
-    if grep -q "constant" stdout.log && grep -q "additive (marginals)" stdout.log \
-        && grep -q "additive + pair couplings" stdout.log; then
+    # (model names carry the descriptor since the NCI pattern was added: "torsions ..." vs "NCI ...")
+    if grep -q "constant" stdout.log && grep -q "torsions (marginals)" stdout.log \
+        && grep -q "torsions + pair couplings" stdout.log; then
         echo -e "${GREEN}\xe2\x9c\x93 PASS${NC}: all three model levels scored (constant / additive / +couplings)"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
@@ -137,6 +138,20 @@ validate_results() {
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
         echo -e "${RED}\xe2\x9c\x97 FAIL${NC}: ensemble.couplings.csv missing"
+        TESTS_FAILED=$((TESTS_FAILED + 1)); failed=1
+    fi
+
+    # 7b. the NCI pattern is built and reported. It is the second conformer descriptor next to the
+    #     torsion states, and the variance attribution states which term carries the energy spread --
+    #     both are decision criteria for the recombination stage, so their absence must fail.
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ -n "$(find_output_file ensemble.nci.csv)" ] && grep -q "NCI pattern:" stdout.log \
+        && grep -q "which term carries that spread" stdout.log; then
+        echo -e "${GREEN}\xe2\x9c\x93 PASS${NC}: NCI pattern written and term-variance attribution reported"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        grep -oE "NCI pattern: .*" stdout.log | head -1 | sed 's/^/  /'
+    else
+        echo -e "${RED}\xe2\x9c\x97 FAIL${NC}: NCI pattern missing (ensemble.nci.csv / report lines)"
         TESTS_FAILED=$((TESTS_FAILED + 1)); failed=1
     fi
 

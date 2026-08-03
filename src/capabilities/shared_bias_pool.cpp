@@ -156,6 +156,17 @@ std::vector<double> SharedBiasPool::weights() const
     return m_weights;
 }
 
+void SharedBiasPool::markExported(const std::vector<int>& indices)
+{
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    for (int idx : indices)
+        for (auto& s : m_structures)
+            if (s.index == idx) {
+                s.exported = true;
+                break;
+            }
+}
+
 void SharedBiasPool::clear()
 {
     std::unique_lock<std::shared_mutex> lock(m_mutex);

@@ -236,19 +236,22 @@ torsions on a compact molecule mostly produces collisions. That is the strongest
 restrained pre-optimisation (P0) — build the clashing structure anyway, restrain the target torsions,
 let the optimiser relieve the clash, then release.
 
-## Inside ConfSearch: Phase 3c
+## Inside ConfSearch: Step 4 RECOMBINE (formerly Phase 3c)
 
 `-confgen_phase true` runs the generation as a phase of the conformer search, right after the
 per-cycle dedup and before the accurate re-optimisation:
 
 ```
-Phase 1  MD (RMSD-MTD) from the seeds
-Phase 2  optimise the bias structures        (md_method)
-Phase 3  ConfScan dedup                      -> <base>.bias.opt.accepted.xyz
-Phase 3c TORSION RECOMBINATION (ConfGen)     -> appends its new conformers to that same file
-Phase 3b re-optimisation                     (opt_method, dual-method runs only)
-Phase 4  energy window + topology filter, bias feedback, seed selection
+Step 1 EXPLORE    MD (RMSD-MTD), one run per seed
+Step 2 RELAX      optimise the snapshots             (md_method)
+Step 3 REDUCE     ConfScan dedup                     -> <base>.<cycle>.s3_reduce.<md>.xyz
+Step 4 RECOMBINE  TORSION RECOMBINATION (ConfGen)    -> appends to that same file
+Step 5 REFINE     re-optimisation                    (opt_method, dual-method runs only)
+Step 6 SELECT     energy window + topology filter, bias feedback, seeding
 ```
+
+Steps 1-4 are repeated `repeat` times per temperature and re-seed from the best structures of all
+cycles in between; step 5 runs once, at the end of the last repetition.
 
 The integration is deliberately a single append: a proposal that survives ConfGen's topology and
 novelty checks is written into the cycle's accepted file, and from there it is **indistinguishable
@@ -258,25 +261,49 @@ for a seed slot. No special case anywhere downstream.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `-confgen_phase` | `false` | run the recombination phase (costs one optimisation per proposal) |
+| `-confgen_phase` | `false` | run the recombination step (costs one optimisation per proposal) |
+| `-confgen_max_proposals` | `20` | structures built and optimised per cycle |
+| `-confgen_templates` | `3` | lowest-energy minima of the cycle used as templates |
+| `-confgen_depth` | `2` | torsions changed simultaneously |
+| `-confgen_method` | `auto` | energy method of the step; `auto` = `md_method` if that is a force field, else `gfnff` |
+| `-confgen_nci_moves` | `true` | also propose hydrogen-bond moves (see the NCI section) |
+| `-confgen_consensus` | `false` | also build the de-novo consensus vector |
 
 The phase is **opt-in**, and every run states which way it is set (next to the other ConfSearch
-configuration lines), so an absent Phase 3c line is never ambiguous:
+configuration lines), so an absent RECOMBINE line is never ambiguous:
 
 ```
-ConfSearch: Phase 3c (torsion recombination) OFF -- enable with -confgen_phase true
-ConfSearch: Phase 3c (torsion recombination) ON -- up to 20 proposals per cycle from 3 template(s), depth 2
+ConfSearch: RECOMBINE (step 4, torsion recombination) OFF -- enable with -confgen_phase true
+ConfSearch: RECOMBINE (step 4, torsion recombination) ON -- up to 20 proposals per cycle from 3 template(s), depth 2
 ```
 
 **Which method optimises what.** ConfGen optimises its own proposals -- at `md_method`, the same level
 the cycle's minima are on, because the novelty check compares against them. The survivors are appended
-to the md-level accepted file and then go through Phase 3b at `opt_method` like every other structure.
+to the md-level accepted file and then go through REFINE at `opt_method` like every other structure.
 So in a dual-method run a proposal is optimised twice (md_method inside ConfGen, opt_method in Phase
-3b) -- exactly the same treatment a metadynamics hit gets (Phase 2, then Phase 3b). The two PES are
+REFINE) -- exactly the same treatment a metadynamics hit gets (RELAX, then REFINE). The two PES are
 never mixed.
-| `-confgen_max_proposals` | `20` | structures built and optimised per cycle |
-| `-confgen_templates` | `3` | lowest-energy minima of the cycle used as templates |
-| `-confgen_depth` | `2` | torsions changed simultaneously |
+
+**...unless `md_method` has no energy decomposition** (Aug 2026). The whole analysis rests on
+per-term energies (which torsion state buys what, through which physical term) and on partial
+charges for the NCI pattern -- only a force field provides that, so a search that explores with
+`gfn2` would lose the step entirely. `-confgen_method auto` (the default) falls back to `gfnff` for
+this step and says so:
+
+```
+--- Step 4 RECOMBINE: Torsion Recombination / ConfGen (gfnff) ---
+ConfSearch: RECOMBINE runs at gfnff -- gfn2 provides no per-term energy decomposition,
+            which the analysis needs
+```
+
+The proposals then carry `gfnff` energies, so they are re-optimised at `md_method` before they enter
+the ensemble -- unless REFINE runs anyway (dual-method), which puts everything on one scale in any
+case. Verified on a `-method gfn2` run of butanediol: the step ran at gfnff, recorded 7 tried state
+combinations, and the ensemble stayed on the gfn2 scale.
+
+**Tried combinations are remembered across the run** (`proposal_memory_file`, written to
+`<base>.s4_proposals_tried.txt` in the BMT directory). Without it every stage repetition rebuilds
+and re-optimises the same state vectors the earlier ones already rejected.
 
 ### Measured (90-atom molecule, 500 K -> 400 K, 2 cycles, identical settings)
 
@@ -352,8 +379,182 @@ Output (all through the BMT directory):
   min/max ΔE and the mean ΔE of every term
 - `<base>.couplings.csv` — per torsion pair and state change: number of cycles, J ± sd, J per term
 
+## The NCI pattern: the second descriptor (Aug 2026)
+
+The torsion-state vector describes the covalent skeleton and nothing else. Measured on the WEKLQ
+peptide (107 atoms, 142 structures), that is the **wrong half of the physics**. `-confgen` now also
+reports where the energy spread of an ensemble actually comes from, using the exact variance
+decomposition `Var(E) = sum_i Cov(E_i, E)` over the GFN-FF terms:
+
+| term | share of Var(E) | own spread |
+|---|---|---|
+| **HBond** | **+58.2 %** | 22.83 kJ/mol |
+| Dispersion | +30.1 % | 16.47 |
+| Coulomb | +24.7 % | 14.57 |
+| Repulsion | −15.7 % | 11.45 |
+| Angle | +8.6 % | 9.40 |
+| **Torsion** | **−7.3 %** | 15.41 |
+
+So a description built on torsions models the term that carries −7 % of the spread and ignores the
+one that carries +58 %.
+
+**`-nci_analysis` (default ON)** therefore builds a second, equally discrete descriptor: the pattern
+of non-covalent interactions. Four kinds, each mirroring the criterion of the corresponding term —
+`HBond` (D-H...A, distance + angle), `XBond` (C-X...B, near-linear sigma hole), `Ionic` (close heavy
+pair with an attractive partial-charge product, from the EEQ charges of the same single point) and
+`Contact` (remaining close heavy pair). Pairs closer than four bonds are excluded — the bonded terms
+already carry those. The result is a 0/1 presence vector per structure over the union of everything
+observed, so Hamming distance, matched pairs and the cross-validated model apply unchanged.
+
+Measured on the same 142-structure ensemble (`combined.xyz`, 141 own conformers + the GOAT reference):
+
+| | torsion states | NCI pattern | H-bond subset alone |
+|---|---|---|---|
+| descriptor size | 29 torsions | 1086 contacts | 123 bonds |
+| distinct descriptions of 142 structures | 119 | 141 | 141 |
+| pairs with an IDENTICAL description | **29** | 1 | **1** |
+| mean Hamming distance | 4.2 | 130.1 | — |
+| pairs at Hamming distance 1 | 262 | 0 | — |
+
+**28 of the 29 pairs that the torsion vector cannot tell apart are separated by the hydrogen-bond
+subset alone** — the conclusion does not rest on the dimensionality of the full contact map.
+
+For the GOAT reference structure specifically (the one the search never finds, 75.7 kJ/mol below the
+best own conformer): torsion distance 0 to one ensemble member, 1 to six more, 2 to sixteen more —
+but **never below 6** in H-bond space. The single structure sharing its torsion vector differs in
+9 of 123 hydrogen bonds, sits 4.80 A away and 83 kJ/mol higher. That is the direct, quantitative
+reason a torsion recombination can never build it.
+
+**What the NCI pattern does NOT (yet) do: predict energies.** Model levels 3 (NCI only) and 4
+(torsions + NCI) are cross-validated on the same folds as levels 0-2. Column budget: contacts are
+ranked by contrast `min(pop, n-pop)` and capped at `n/3`, otherwise `p > n` interpolates every
+training fold and the CV is meaningless (a fit that could not be tested is now reported as
+"not testable" instead of scoring 0 kJ error = 100 %).
+
+| ensemble | constant | torsions | +couplings | NCI | torsions+NCI |
+|---|---|---|---|---|---|
+| WEKLQ, 142 conf. (RMSE_cv, kJ/mol) | 24.25 | 26.83 | 73.40 | 29.55 | 34.90 |
+| 44 conf. / 114 atoms (R2_cv) | 0 % | 15 % | −66 % | **+4 %** | −132 % |
+
+Binary presence/absence is evidently the wrong functional form for an energy model — an H-bond energy
+is continuous in distance and angle. The descriptor's value is **separation**, not prediction, and
+that is exactly what a proposal generator needs. Next step: per-contact continuous features (the
+H-bond term's own per-triple energy) instead of indicators.
+
+Output: `<base>.nci.csv` (presence matrix, one row per structure, labelled columns `HB 38-90...12`).
+Flags: `-nci_analysis`, `-nci_hbond_distance/-nci_hbond_angle`, `-nci_xbond_distance/-nci_xbond_angle`,
+`-nci_contact_distance`, `-nci_charge_product`, `-nci_min_population`.
+
+### The NCI move (`-nci_generate`, default ON with `-generate true`)
+
+The descriptor is also a MOVE SET: break a hydrogen bond the template has, form one that occurs
+elsewhere in the ensemble (`-nci_depth 2`: both at once, the concerted re-tie). There is no rigid
+build for this -- it goes straight to a restrained optimisation with **distance restraints** on
+H...acceptor (`-nci_form_distance` 1.9 A, `-nci_break_distance` 3.5 A, `-nci_restraint_force`
+1.0 Eh/A^2), then releases and optimises freely. Same gates afterwards as every other proposal
+(clash, topology, novelty); the report separates the two move sets. Ranking is by population of the
+target bond -- deliberately no energy model, since the pattern was measured to separate but not to
+predict.
+
+**Measured (WEKLQ, 142 structures, budget 20 proposals each):**
+
+| move set | built + valid | new conformers | best new |
+|---|---|---|---|
+| torsions only | 18 | **11** | +8.97 kJ/mol above the minimum |
+| NCI, depth 1 | 13 | 2 | +40.86 |
+| NCI, depth 2 | 13 | 1 | +40.88 |
+| both (20+20) | 31 | 12 (11 torsion + **1 NCI**) | +8.99 |
+
+The move works mechanically: of 20 proposals, 1 is sterically impossible, 6 fail the clash/topology
+gate, 13 build -- and **7 of those 13 keep their target bond pattern after the restraint is
+released** (the run reports this). The yield is nevertheless low, because 6 of those 7 land in a
+minimum the ensemble already contains. Changing one hydrogen bond does not, by itself, change the
+basin.
+
+**And it moves the WRONG WAY.** The one new conformer versus the GOAT reference:
+
+| | new NCI conformer | best value in the 141-structure ensemble |
+|---|---|---|
+| RMSD to GOAT | 4.06 A | 2.61 A |
+| H-bond Hamming distance to GOAT | 13 | 7 (median 11) |
+| shared bridges with GOAT | 1 | 2 |
+| number of H-bonds | 9 | GOAT 6, ensemble mean 5.5 |
+
+The cause is the ranking, not the move: scoring a proposal by `+population` of the bond it FORMS
+drives towards over-bridged structures, while the missing reference has FEWER bridges (6) than the
+proposal (9) -- a different set, not a larger one. Next steps, in order: (a) rank by distance in
+H-bond space to the template instead of by population, so the move set explores the pattern rather
+than saturating it; (b) couple the H-bond move to the torsions that geometrically carry the new
+bridge -- a single restrained bond is released back too easily; (c) drive the move with a short
+restrained MD instead of an optimisation, so the surroundings can reorganise.
+
+### De-novo assembly (`-consensus_build`, default ON with `-generate true`)
+
+The mutation stages are incremental. This one is not: for every torsion it takes the state with the
+best Boltzmann-weighted mean relative energy (the statistic the state table already reports) and
+assembles ALL of them into one vector, reached in a single concerted restrained build. `consensus_max`
+variants follow, each flipping the torsion whose best/second-best margin is smallest. The per-state
+energies choose the geometry ONLY -- every assembly is optimised and judged by the force field, which
+matters because those numbers are poor predictors (scatter 3.7x their mean) but usable as a recipe.
+
+**Measured (WEKLQ/142) -- degenerate on this description:**
+
+| | |
+|---|---|
+| structures already having the consensus vector | **2 of 141** |
+| distance of the consensus to the GOAT vector | 4 torsions |
+| distance GOAT -> nearest own structure | **0** (its vector is already sampled) |
+| torsions with any choice at all | 10 of 29 |
+| yield of 5 variants | 4 valid, **2 new**, best +29.2 kJ/mol |
+
+The composition of the individually best states IS an already sampled structure: only ten torsions
+have a choice, and their best states are the populated ones, so the consensus is the average
+structure. The idea is sound but needs elements that carry the energy -- which the variance
+attribution says are the bridges, not the torsions. Composing over the NCI pattern in turn fails on
+the constraint count: six target distances do not determine 315 degrees of freedom (see below).
+
+### What information would be needed to build the missing reference structure
+
+Measured, not argued. The GOAT structure forms six hydrogen bonds:
+
+| bridge | structures with it (of 141) |
+|---|---|
+| N7...O46 | 6 (4.3 %) |
+| N22...O54 | 6 (4.3 %) |
+| N28...O54 | 10 (7.1 %) |
+| N38...O56 | 11 (7.8 %) |
+| **N53...N25** | **0** |
+| O57...O15 | 6 (4.3 %) |
+
+1. **One bridge never occurs** anywhere in the ensemble. Recombining observed patterns cannot supply
+   it; the enumeration would have to offer chemically POSSIBLE donor-acceptor pairs, not observed ones.
+2. **The move must be concerted over >= 7 flips**: the nearest structure shares 1 of the 6 bridges,
+   the best any structure shares is 2. The implemented move set does 1-2.
+3. **Even that is not enough.** Feasibility test (uses the answer, so it is a test, not a search):
+   taking the closest ensemble structure (2.61 A) as template and pulling all six target bridges shut
+   with staged distance restraints does NOT approach the reference -- RMSD stays at 2.55-2.64 A and
+   the restrained optimisation stalls. Six distances are six conditions in 315 degrees of freedom;
+   the optimiser satisfies them with a local compromise instead of refolding. What is additionally
+   needed is the backbone arrangement that makes those six contacts simultaneously possible -- i.e.
+   the torsion combination, which by itself is not distinctive.
+
+**Neither description alone identifies the structure**: in torsion space it is indistinguishable from
+a sampled member, in bridge space it is unique but not constructible. Only the two together define
+it. That is the sharpest statement of the problem this whole line of work runs into.
+
+**Crash found and fixed on the way**: `cli_confgen_02` reproducibly segfaulted in
+`GFNFF::getGFNFFBondParameters` -- the "avoided, not explained" wild pointer. Cause:
+`OptimizerDriver::Initialize()` calls `energy_calculator->setMolecule()` for EVERY structure and
+re-derives the whole force field, although ConfGen deliberately shares one calculator. New opt-in
+`reuse_calculator` (default false, every other caller unchanged) makes the driver update coordinates
+only; ConfGen sets it at its four optimisation sites. Crash gone, both ConfGen tests green, and one
+full GFN-FF parametrisation saved per proposal.
+
 ## Honest scope
 
+- **The torsion description is incomplete by construction.** It ignores the terms that carry the
+  energy spread (see "The NCI pattern" above). Anything built on torsions alone -- proposals,
+  rankings, novelty tests -- inherits that blind spot.
 - **Recombination, not extrapolation.** States the ensemble never visited stay invisible. On the
   90-atom test case 6 of 12 torsions appear in a *single* state across 108 conformers — they carry no
   information at all, and the report says so explicitly.

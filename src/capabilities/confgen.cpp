@@ -37,6 +37,7 @@
 #include <map>
 #include <numeric>
 #include <set>
+#include <sstream>
 
 namespace {
 /// Hartree -> kJ/mol (same literal as the rest of the conformer code, see confsearch.cpp).
@@ -80,6 +81,204 @@ void ConfGen::LoadControlJson()
     m_restrained_build = m_config.get<bool>("restrained_build");
     m_restraint_force = m_config.get<double>("restraint_force");
     m_restraint_max_iterations = m_config.get<int>("restraint_max_iterations");
+    // Claude Generated (Jul 2026): NCI pattern
+    m_nci_analysis = m_config.get<bool>("nci_analysis");
+    m_nci_hbond_distance = m_config.get<double>("nci_hbond_distance");
+    m_nci_hbond_angle = m_config.get<double>("nci_hbond_angle");
+    m_nci_xbond_distance = m_config.get<double>("nci_xbond_distance");
+    m_nci_xbond_angle = m_config.get<double>("nci_xbond_angle");
+    m_nci_contact_distance = m_config.get<double>("nci_contact_distance");
+    m_nci_charge_product = m_config.get<double>("nci_charge_product");
+    m_nci_min_population = m_config.get<int>("nci_min_population");
+    m_nci_generate = m_config.get<bool>("nci_generate");
+    m_nci_max_proposals = m_config.get<int>("nci_max_proposals");
+    m_nci_depth = m_config.get<int>("nci_depth");
+    m_nci_form_distance = m_config.get<double>("nci_form_distance");
+    m_nci_break_distance = m_config.get<double>("nci_break_distance");
+    m_nci_restraint_force = m_config.get<double>("nci_restraint_force");
+    m_consensus_build = m_config.get<bool>("consensus_build");
+    m_consensus_max = m_config.get<int>("consensus_max");
+    m_proposal_memory_file = m_config.get<std::string>("proposal_memory_file");
+}
+
+std::string ConfGen::NCIContact::label() const
+{
+    const char* tag = (kind == HBond) ? "HB" : (kind == XBond) ? "XB" : (kind == Ionic) ? "EL" : "CT";
+    if (kind == HBond)
+        return fmt::format("{} {}-{}...{}", tag, first + 1, hydrogen + 1, second + 1);
+    return fmt::format("{} {}...{}", tag, first + 1, second + 1);
+}
+
+/**
+ * @brief Detect the non-covalent interactions of one structure.
+ *
+ * Four kinds, each with the criterion that the corresponding GFN-FF term uses in spirit:
+ *
+ *  - HBond   D-H...A with D,A electronegative, r(H...A) below nci_hbond_distance and the
+ *            D-H...A angle above nci_hbond_angle. Directional, because the term is.
+ *  - XBond   C-X...B with X a heavy halogen: the sigma hole sits opposite the covalent bond, so
+ *            the C-X...B angle must be near linear (nci_xbond_angle).
+ *  - Ionic   a close heavy-atom pair whose partial charges attract each other strongly
+ *            (q_i q_j < -nci_charge_product). This is where the Coulomb term lives.
+ *  - Contact any remaining close heavy-atom pair -- dispersion and repulsion.
+ *
+ * Pairs closer than four bonds are excluded throughout: those are 1-2, 1-3 and 1-4 relations, whose
+ * energy the bonded terms already carry. The bond graph comes from the same explicit covalent-radius
+ * criterion as everywhere else in this class.
+ */
+std::vector<ConfGen::NCIContact> ConfGen::detectNCI(const Molecule& mol, const std::vector<double>& charges) const
+{
+    const int n = mol.AtomCount();
+    const Geometry geom = mol.getGeometry();
+    auto element = [&](int i) { return mol.Atom(i).first; };
+    auto position = [&](int i) { return Eigen::Vector3d(geom.row(i)); };
+    auto distance = [&](int i, int j) { return (position(i) - position(j)).norm(); };
+    auto angle = [&](int i, int j, int k) { // angle at j, degrees
+        const Eigen::Vector3d a = position(i) - position(j), b = position(k) - position(j);
+        const double denominator = a.norm() * b.norm();
+        if (denominator < 1e-12)
+            return 0.0;
+        return std::acos(std::max(-1.0, std::min(1.0, a.dot(b) / denominator))) * 180.0 / M_PI;
+    };
+
+    // Bond graph and pairwise bond-count distance (BFS, capped at 4 -- more is not needed).
+    std::vector<std::vector<int>> neighbours(n);
+    for (const auto& [i, j] : topologyFingerprint(mol, m_topology_factor)) {
+        neighbours[i].push_back(j);
+        neighbours[j].push_back(i);
+    }
+    std::vector<std::vector<int>> bond_distance(n, std::vector<int>(n, 99));
+    for (int start = 0; start < n; ++start) {
+        bond_distance[start][start] = 0;
+        std::vector<int> frontier { start };
+        for (int depth = 1; depth <= 4 && !frontier.empty(); ++depth) {
+            std::vector<int> next;
+            for (int atom : frontier)
+                for (int nb : neighbours[atom])
+                    if (bond_distance[start][nb] > depth) {
+                        bond_distance[start][nb] = depth;
+                        next.push_back(nb);
+                    }
+            frontier.swap(next);
+        }
+    }
+
+    auto is_donor_acceptor = [](int z) { return z == 7 || z == 8 || z == 9 || z == 16; };
+    auto is_halogen = [](int z) { return z == 17 || z == 35 || z == 53; };
+    auto is_heavy = [](int z) { return z > 1; };
+
+    std::vector<NCIContact> contacts;
+    std::set<std::pair<int, int>> claimed; // heavy pairs already described by a specific interaction
+
+    // --- hydrogen bonds ---------------------------------------------------------------------------
+    for (int h = 0; h < n; ++h) {
+        if (element(h) != 1 || neighbours[h].empty())
+            continue;
+        const int donor = neighbours[h].front();
+        if (!is_donor_acceptor(element(donor)))
+            continue;
+        for (int a = 0; a < n; ++a) {
+            if (a == donor || !is_donor_acceptor(element(a)) || bond_distance[donor][a] <= 3)
+                continue;
+            if (distance(h, a) > m_nci_hbond_distance || angle(donor, h, a) < m_nci_hbond_angle)
+                continue;
+            NCIContact c;
+            c.kind = NCIContact::HBond;
+            c.first = donor;
+            c.second = a;
+            c.hydrogen = h;
+            contacts.push_back(c);
+            claimed.insert({ std::min(donor, a), std::max(donor, a) });
+        }
+    }
+
+    // --- halogen bonds ----------------------------------------------------------------------------
+    for (int x = 0; x < n; ++x) {
+        if (!is_halogen(element(x)) || neighbours[x].empty())
+            continue;
+        const int carbon = neighbours[x].front();
+        for (int b = 0; b < n; ++b) {
+            if (b == x || !(is_donor_acceptor(element(b)) || is_halogen(element(b))))
+                continue;
+            if (bond_distance[x][b] <= 3)
+                continue;
+            if (distance(x, b) > m_nci_xbond_distance || angle(carbon, x, b) < m_nci_xbond_angle)
+                continue;
+            NCIContact c;
+            c.kind = NCIContact::XBond;
+            c.first = x;
+            c.second = b;
+            contacts.push_back(c);
+            claimed.insert({ std::min(x, b), std::max(x, b) });
+        }
+    }
+
+    // --- electrostatic and plain contacts ---------------------------------------------------------
+    const bool have_charges = static_cast<int>(charges.size()) == n;
+    for (int i = 0; i < n; ++i) {
+        if (!is_heavy(element(i)))
+            continue;
+        for (int j = i + 1; j < n; ++j) {
+            if (!is_heavy(element(j)) || bond_distance[i][j] <= 3)
+                continue;
+            if (distance(i, j) > m_nci_contact_distance)
+                continue;
+            if (claimed.count({ i, j }))
+                continue;
+            NCIContact c;
+            c.first = i;
+            c.second = j;
+            c.kind = (have_charges && charges[i] * charges[j] < -m_nci_charge_product)
+                ? NCIContact::Ionic
+                : NCIContact::Contact;
+            contacts.push_back(c);
+        }
+    }
+    return contacts;
+}
+
+/**
+ * @brief Turn the per-structure contact lists into one binary presence vector per structure.
+ *
+ * The construction mirrors the torsion states exactly: a global, sorted list of everything observed
+ * anywhere (m_nci_pairs) plus a 0/1 vector per frame. Contacts seen in fewer than nci_min_population
+ * structures are dropped -- like a torsion with only one state they carry no contrast, and with a few
+ * hundred structures there are many of them.
+ */
+void ConfGen::buildNCISpace()
+{
+    std::map<std::tuple<int, int, int, int>, int> population; // (kind, first, second, hydrogen) -> count
+    std::vector<std::vector<NCIContact>> per_frame(m_frames.size());
+    for (std::size_t f = 0; f < m_frames.size(); ++f) {
+        per_frame[f] = detectNCI(m_frames[f].molecule, m_frames[f].charges);
+        for (const NCIContact& c : per_frame[f])
+            population[{ static_cast<int>(c.kind), c.first, c.second, -1 }]++;
+    }
+
+    m_nci_pairs.clear();
+    std::map<std::tuple<int, int, int, int>, int> index;
+    for (const auto& [key, count] : population) {
+        if (count < m_nci_min_population || count == static_cast<int>(m_frames.size()))
+            continue; // never seen enough, or always present -- neither distinguishes conformers
+        NCIContact c;
+        c.kind = static_cast<NCIContact::Kind>(std::get<0>(key));
+        c.first = std::get<1>(key);
+        c.second = std::get<2>(key);
+        index[key] = static_cast<int>(m_nci_pairs.size());
+        m_nci_pairs.push_back(c);
+    }
+
+    for (std::size_t f = 0; f < m_frames.size(); ++f) {
+        m_frames[f].nci.assign(m_nci_pairs.size(), 0);
+        for (const NCIContact& c : per_frame[f]) {
+            auto it = index.find({ static_cast<int>(c.kind), c.first, c.second, -1 });
+            if (it != index.end()) {
+                m_frames[f].nci[it->second] = 1;
+                if (c.kind == NCIContact::HBond)
+                    m_nci_pairs[it->second].hydrogen = c.hydrogen;
+            }
+        }
+    }
 }
 
 bool ConfGen::analyseEnsemble()
@@ -164,6 +363,11 @@ bool ConfGen::analyseEnsemble()
         for (auto& [key, value] : decomposition.items())
             if (value.is_number())
                 frame.terms[key] = value.get<double>();
+        // Claude Generated (Jul 2026): keep the partial charges of THIS single point -- the NCI
+        // detection needs them to tell an electrostatic contact from a plain close one, and taking
+        // them here avoids a second single point per structure later.
+        const Vector charges = calculator.Charges();
+        frame.charges.assign(charges.data(), charges.data() + charges.size());
 
         frame.angles = TorsionSpace::dihedrals(mol.getGeometry(), m_torsions);
         frame.valid = true;
@@ -220,6 +424,189 @@ bool ConfGen::analyseEnsemble()
         [](const Frame& a, const Frame& b) { return a.energy < b.energy; })
                              ->energy;
     return true;
+}
+
+/**
+ * @brief Which energy term drives the spread of the ensemble.
+ *
+ * Because the total is the sum of its terms, the variance decomposes exactly:
+ *     Var(E) = sum_i Cov(E_i, E),
+ * so Cov(E_i, E)/Var(E) is the share of the ensemble's energy spread attributable to term i. The
+ * shares add to one and may be negative (a term that anticorrelates with the total damps the spread).
+ * This is a statement about the ENSEMBLE, not about a single structure pair, and it is the cheapest
+ * possible answer to "what makes these conformers differ in energy".
+ */
+void ConfGen::reportTermVariance() const
+{
+    const int n = static_cast<int>(m_frames.size());
+    if (n < 3 || m_term_names.empty())
+        return;
+    double mean_total = 0.0;
+    for (const Frame& f : m_frames)
+        mean_total += f.energy;
+    mean_total /= n;
+    double variance = 0.0;
+    for (const Frame& f : m_frames)
+        variance += (f.energy - mean_total) * (f.energy - mean_total);
+    variance /= (n - 1);
+    if (variance <= 0.0)
+        return;
+
+    std::vector<std::pair<std::string, double>> shares; // term -> Cov(E_i, E)/Var(E)
+    std::vector<std::pair<std::string, double>> spreads; // term -> own standard deviation, kJ/mol
+    for (const std::string& name : m_term_names) {
+        double mean_term = 0.0;
+        for (const Frame& f : m_frames)
+            mean_term += f.terms.at(name);
+        mean_term /= n;
+        double covariance = 0.0, own = 0.0;
+        for (const Frame& f : m_frames) {
+            const double dt = f.terms.at(name) - mean_term;
+            covariance += dt * (f.energy - mean_total);
+            own += dt * dt;
+        }
+        covariance /= (n - 1);
+        own /= (n - 1);
+        shares.emplace_back(name, covariance / variance);
+        spreads.emplace_back(name, std::sqrt(own) * kEh2kJ);
+    }
+    std::sort(shares.begin(), shares.end(),
+        [](const auto& a, const auto& b) { return std::abs(a.second) > std::abs(b.second); });
+
+    CurcumaLogger::result_fmt("ConfGen: energy spread of the ensemble: {:.2f} kJ/mol (standard deviation)",
+        std::sqrt(variance) * kEh2kJ);
+    CurcumaLogger::result("ConfGen: which term carries that spread (Cov(term,total)/Var(total)):");
+    for (const auto& [name, share] : shares) {
+        if (std::abs(share) < 0.005)
+            continue;
+        const double own = std::find_if(spreads.begin(), spreads.end(),
+            [&](const auto& s) { return s.first == name; })
+                               ->second;
+        CurcumaLogger::result_fmt("            {:<14} {:+6.1f} %   (own spread {:6.2f} kJ/mol)",
+            name, 100.0 * share, own);
+    }
+}
+
+/**
+ * @brief Report the NCI pattern as a conformer description and compare it with the torsion states.
+ *
+ * The two descriptions are printed side by side on purpose. A description is only useful if it
+ * SEPARATES the ensemble: if many structures share a description, it cannot be the basis for telling
+ * conformers apart, let alone for proposing new ones.
+ */
+void ConfGen::reportNCISpace() const
+{
+    if (m_nci_pairs.empty()) {
+        CurcumaLogger::warn("ConfGen: no variable non-covalent contact found -- the NCI pattern is "
+                            "identical in every structure and carries no information");
+        return;
+    }
+    int hb = 0, xb = 0, el = 0, ct = 0;
+    for (const NCIContact& c : m_nci_pairs)
+        switch (c.kind) {
+        case NCIContact::HBond: hb++; break;
+        case NCIContact::XBond: xb++; break;
+        case NCIContact::Ionic: el++; break;
+        default: ct++; break;
+        }
+    CurcumaLogger::result_fmt("ConfGen: NCI pattern: {} variable contact(s) -- {} H-bond, {} halogen "
+                              "bond, {} electrostatic, {} close contact",
+        static_cast<int>(m_nci_pairs.size()), hb, xb, el, ct);
+
+    auto hamming = [](const std::vector<int>& a, const std::vector<int>& b) {
+        int d = 0;
+        for (std::size_t i = 0; i < a.size() && i < b.size(); ++i)
+            d += (a[i] != b[i]) ? 1 : 0;
+        return d;
+    };
+    std::set<std::vector<int>> nci_patterns, torsion_patterns;
+    for (const Frame& f : m_frames) {
+        nci_patterns.insert(f.nci);
+        torsion_patterns.insert(f.states);
+    }
+    const int n = static_cast<int>(m_frames.size());
+    int nci_pairs_one = 0, torsion_pairs_one = 0, identical_torsions = 0, identical_nci = 0;
+    long long sum_nci = 0, sum_torsion = 0, count = 0;
+    for (int a = 0; a < n; ++a)
+        for (int b = a + 1; b < n; ++b) {
+            const int dn = hamming(m_frames[a].nci, m_frames[b].nci);
+            const int dt = hamming(m_frames[a].states, m_frames[b].states);
+            nci_pairs_one += (dn == 1);
+            torsion_pairs_one += (dt == 1);
+            identical_nci += (dn == 0);
+            identical_torsions += (dt == 0);
+            sum_nci += dn;
+            sum_torsion += dt;
+            count++;
+        }
+    CurcumaLogger::result_fmt("ConfGen: distinct descriptions of {} structures: {} torsion vector(s), "
+                              "{} NCI pattern(s)",
+        n, static_cast<int>(torsion_patterns.size()), static_cast<int>(nci_patterns.size()));
+    CurcumaLogger::result_fmt("ConfGen: mean Hamming distance: {:.1f} (torsions) vs {:.1f} (NCI); "
+                              "pairs that are identical: {} vs {}",
+        static_cast<double>(sum_torsion) / std::max<long long>(1, count),
+        static_cast<double>(sum_nci) / std::max<long long>(1, count),
+        identical_torsions, identical_nci);
+    CurcumaLogger::result_fmt("ConfGen: pairs at Hamming distance 1 (the ones a matched-pair analysis "
+                              "needs): {} in torsion space, {} in NCI space",
+        torsion_pairs_one, nci_pairs_one);
+
+    // The full contact map is high-dimensional and separates almost anything, which makes "it
+    // separates the ensemble" a weak statement. The hydrogen-bond subset is the chemically specific
+    // and much smaller one -- if it already separates structures that the torsion vector cannot tell
+    // apart, the conclusion does not rest on the dimensionality of the descriptor.
+    std::vector<int> hb_index;
+    for (std::size_t k = 0; k < m_nci_pairs.size(); ++k)
+        if (m_nci_pairs[k].kind == NCIContact::HBond)
+            hb_index.push_back(static_cast<int>(k));
+    if (hb_index.empty())
+        return;
+    auto hb_pattern = [&](const Frame& f) {
+        std::vector<int> pattern;
+        pattern.reserve(hb_index.size());
+        for (int k : hb_index)
+            pattern.push_back(k < static_cast<int>(f.nci.size()) ? f.nci[k] : 0);
+        return pattern;
+    };
+    std::set<std::vector<int>> hb_patterns;
+    for (const Frame& f : m_frames)
+        hb_patterns.insert(hb_pattern(f));
+    int hb_identical = 0, hb_identical_and_torsion_identical = 0, torsion_identical = 0;
+    for (int a = 0; a < n; ++a)
+        for (int b = a + 1; b < n; ++b) {
+            const bool same_torsion = (m_frames[a].states == m_frames[b].states);
+            const bool same_hb = (hb_pattern(m_frames[a]) == hb_pattern(m_frames[b]));
+            hb_identical += same_hb;
+            torsion_identical += same_torsion;
+            hb_identical_and_torsion_identical += (same_hb && same_torsion);
+        }
+    CurcumaLogger::result_fmt("ConfGen: hydrogen-bond subset alone ({} bonds): {} distinct pattern(s); "
+                              "{} identical pair(s) versus {} in torsion space",
+        static_cast<int>(hb_index.size()), static_cast<int>(hb_patterns.size()), hb_identical, torsion_identical);
+    if (torsion_identical > 0)
+        CurcumaLogger::result_fmt("ConfGen: of the {} pair(s) with an identical torsion vector, {} also "
+                                  "share their hydrogen-bond pattern -- the remaining {} are structures "
+                                  "the torsion description cannot tell apart but the H-bond pattern can",
+            torsion_identical, hb_identical_and_torsion_identical,
+            torsion_identical - hb_identical_and_torsion_identical);
+}
+
+void ConfGen::writeNCITable(const std::string& path) const
+{
+    if (m_nci_pairs.empty())
+        return;
+    std::ofstream out(path);
+    out << "# structure,energy_Eh";
+    for (const NCIContact& c : m_nci_pairs)
+        out << "," << c.label();
+    out << "\n";
+    for (std::size_t f = 0; f < m_frames.size(); ++f) {
+        out << (f + 1) << "," << std::fixed << std::setprecision(8) << m_frames[f].energy;
+        for (std::size_t k = 0; k < m_nci_pairs.size(); ++k)
+            out << "," << (k < m_frames[f].nci.size() ? m_frames[f].nci[k] : 0);
+        out << "\n";
+    }
+    CurcumaLogger::info_fmt("ConfGen: NCI pattern written to {}", path);
 }
 
 std::vector<ConfGen::Transition> ConfGen::matchedPairs() const
@@ -397,26 +784,60 @@ std::vector<ConfGen::Coupling> ConfGen::doubleMutantCycles() const
 ConfGen::ModelFit ConfGen::fitModel(int level) const
 {
     ModelFit fit;
-    fit.name = (level == 0) ? "constant" : (level == 1) ? "additive (marginals)" : "additive + pair couplings";
+    switch (level) {
+    case 0: fit.name = "constant"; break;
+    case 1: fit.name = "torsions (marginals)"; break;
+    case 2: fit.name = "torsions + pair couplings"; break;
+    case 3: fit.name = "NCI pattern"; break;
+    default: fit.name = "torsions + NCI pattern"; break;
+    }
 
     const std::vector<int> informative = informativeTorsions();
     // Column layout: [intercept][per torsion: states 1..k-1][per torsion pair: (a,b) with a,b >= 1]
-    // State 0 is the reference level, so the columns stay linearly independent by construction.
+    // [per NCI contact: present/absent]. State 0 is the reference level, so the torsion columns stay
+    // linearly independent by construction; an NCI column is an indicator and needs no reference.
     struct Column {
         int torsion_a = -1, state_a = -1, torsion_b = -1, state_b = -1;
+        int nci = -1; ///< index into m_nci_pairs; >= 0 marks an NCI column
     };
     std::vector<Column> columns;
-    if (level >= 1)
+    const bool use_torsions = (level == 1 || level == 2 || level == 4);
+    const bool use_nci = (level == 3 || level == 4);
+    if (use_torsions)
         for (int t : informative)
             for (std::size_t s = 1; s < m_state_centres[t].size(); ++s)
-                columns.push_back({ t, static_cast<int>(s), -1, -1 });
-    if (level >= 2)
+                columns.push_back({ t, static_cast<int>(s), -1, -1, -1 });
+    if (level == 2)
         for (std::size_t ia = 0; ia < informative.size(); ++ia)
             for (std::size_t ib = ia + 1; ib < informative.size(); ++ib)
                 for (std::size_t sa = 1; sa < m_state_centres[informative[ia]].size(); ++sa)
                     for (std::size_t sb = 1; sb < m_state_centres[informative[ib]].size(); ++sb)
                         columns.push_back({ informative[ia], static_cast<int>(sa),
-                            informative[ib], static_cast<int>(sb) });
+                            informative[ib], static_cast<int>(sb), -1 });
+    if (use_nci) {
+        // Column budget. There are typically far more variable contacts than structures, and an
+        // indicator model with p > n interpolates every training set exactly -- its cross-validation
+        // is then either impossible or meaningless. The contacts are therefore ranked by CONTRAST,
+        // min(population, n - population): an interaction present in half the ensemble separates it,
+        // one present in two structures does not. Only the most contrasting ones enter the model, at
+        // most a third of the structure count, which is the same budget the torsion model gets.
+        std::vector<std::pair<int, int>> ranked; // (contrast, index)
+        for (std::size_t k = 0; k < m_nci_pairs.size(); ++k) {
+            int population = 0;
+            for (const Frame& f : m_frames)
+                population += (k < f.nci.size() && f.nci[k]) ? 1 : 0;
+            const int contrast = std::min(population, static_cast<int>(m_frames.size()) - population);
+            if (contrast > 0)
+                ranked.emplace_back(contrast, static_cast<int>(k));
+        }
+        std::sort(ranked.begin(), ranked.end(),
+            [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
+        const std::size_t budget = std::max<std::size_t>(1, m_frames.size() / 3);
+        if (ranked.size() > budget)
+            ranked.resize(budget);
+        for (const auto& [contrast, k] : ranked)
+            columns.push_back({ -1, -1, -1, -1, k });
+    }
 
     const int n = static_cast<int>(m_frames.size());
     const int p = static_cast<int>(columns.size()) + 1; // + intercept
@@ -427,6 +848,10 @@ ConfGen::ModelFit ConfGen::fitModel(int level) const
         row(0) = 1.0;
         for (int c = 0; c < static_cast<int>(columns.size()); ++c) {
             const Column& col = columns[c];
+            if (col.nci >= 0) {
+                row(c + 1) = (col.nci < static_cast<int>(f.nci.size()) && f.nci[col.nci]) ? 1.0 : 0.0;
+                continue;
+            }
             const bool a_on = (f.states[col.torsion_a] == col.state_a);
             const bool on = (col.torsion_b < 0) ? a_on : (a_on && f.states[col.torsion_b] == col.state_b);
             row(c + 1) = on ? 1.0 : 0.0;
@@ -474,7 +899,15 @@ ConfGen::ModelFit ConfGen::fitModel(int level) const
         for (int i : test)
             residuals.push_back(X.row(i) * beta - y(i));
     }
-    if (!residuals.empty()) {
+    if (residuals.empty()) {
+        // Every fold was skipped because the training part had fewer rows than the model has
+        // parameters. Reporting rmse_cv = 0 here would look like a perfect model; it means the
+        // opposite -- the model could not be tested at all.
+        fit.evaluated = false;
+        return fit;
+    }
+    fit.evaluated = true;
+    {
         double sq = 0.0;
         for (double r : residuals)
             sq += r * r;
@@ -554,6 +987,11 @@ void ConfGen::reportModelComparison(const std::vector<ModelFit>& fits) const
         "model", "params", "rank", "RMSE_cv", "medAE_cv", "R2_cv", "RMSE_in");
     const double null_rmse = fits.empty() ? 0.0 : fits.front().rmse_cv;
     for (const auto& f : fits) {
+        if (!f.evaluated) {
+            CurcumaLogger::result_fmt("  {:<28} {:>7} {:>7} {:>34} {:>9.2f} kJ",
+                f.name, f.columns, f.rank, "not testable (more parameters than data)", f.rmse_in);
+            continue;
+        }
         // R2_cv against the constant model: the fraction of the energy variation that the model
         // predicts on data it has not seen. This is the number that decides whether the torsion-state
         // picture describes this ensemble at all.
@@ -579,12 +1017,38 @@ void ConfGen::reportModelComparison(const std::vector<ModelFit>& fits) const
     //   - RMSE reacts to outliers. If the MEDIAN error moves the other way, the "improvement" is a
     //     handful of structures, not a better description of the ensemble.
     constexpr double kMinRelGain = 0.05; // 5 % of the RMSE
-    const bool add_useful = (add_err < null_err * (1.0 - kMinRelGain)) && (fits[1].mae_cv <= fits[0].mae_cv);
-    const bool pair_useful = (pair_err < add_err * (1.0 - kMinRelGain)) && (fits[2].mae_cv <= fits[1].mae_cv);
+    const bool add_useful = fits[1].evaluated
+        && (add_err < null_err * (1.0 - kMinRelGain)) && (fits[1].mae_cv <= fits[0].mae_cv);
+    const bool pair_useful = fits[2].evaluated
+        && (pair_err < add_err * (1.0 - kMinRelGain)) && (fits[2].mae_cv <= fits[1].mae_cv);
 
-    CurcumaLogger::result_fmt("ConfGen: torsion states explain {:.0f}% of the energy variation out of "
-                              "sample, adding pair couplings takes it to {:.0f}%",
-        r2_add * 100.0, r2_pair * 100.0);
+    // Claude Generated (Aug 2026): a model that could not be cross-validated (more parameters than
+    // training rows in every fold) has rmse_cv = 0, which would print as "explains 100 %" -- the
+    // exact opposite of what it means. Such a model gets no verdict at all.
+    // Report each level only if it was actually tested. A model whose folds were all skipped has
+    // rmse_cv = 0 and would otherwise print as "explains 100 %" -- the opposite of what it means.
+    auto not_testable = [&](const ModelFit& f) {
+        CurcumaLogger::warn_fmt("ConfGen: the '{}' model could not be tested on this ensemble -- {} "
+                                "parameters for {} structures, so every cross-validation fold had fewer "
+                                "training rows than parameters. More structures, or a coarser "
+                                "-state_tolerance, are needed before it can be judged at all.",
+            f.name, f.columns, static_cast<int>(m_frames.size()));
+    };
+    if (!fits[1].evaluated) {
+        not_testable(fits[1]);
+        if (!fits[2].evaluated)
+            not_testable(fits[2]);
+        return;
+    }
+    if (fits[2].evaluated)
+        CurcumaLogger::result_fmt("ConfGen: torsion states explain {:.0f}% of the energy variation out of "
+                                  "sample, adding pair couplings takes it to {:.0f}%",
+            r2_add * 100.0, r2_pair * 100.0);
+    else {
+        CurcumaLogger::result_fmt("ConfGen: torsion states explain {:.0f}% of the energy variation out of "
+                                  "sample", r2_add * 100.0);
+        not_testable(fits[2]);
+    }
 
     if (!add_useful)
         CurcumaLogger::warn_fmt("ConfGen: the additive model is NOT a useful description of this ensemble "
@@ -713,7 +1177,7 @@ bool ConfGen::hasClash(const Molecule& mol, double factor) const
 }
 
 // Claude Generated (Jul 2026, roadmap item P0): restrained build -- see the header for the why.
-bool ConfGen::restrainedBuild(const Proposal& p, Molecule& driven) const
+bool ConfGen::restrainedBuild(const Proposal& p, Molecule& driven, const Molecule* start) const
 {
     if (!m_calculator)
         return false;
@@ -743,13 +1207,18 @@ bool ConfGen::restrainedBuild(const Proposal& p, Molecule& driven) const
     opt_config["charge"] = m_charge;
     opt_config["spin"] = m_spin;
     opt_config["verbosity"] = 0;
+    // Claude Generated (Aug 2026): ONE shared calculator for the whole run (see m_calculator) --
+    // the optimiser must not re-derive the force field per structure. Saves a full GFN-FF setup
+    // per proposal and keeps the run out of the intermittent parameter-generation crash.
+    opt_config["reuse_calculator"] = true;
     opt_config["write_trajectory"] = false;
     opt_config["max_iterations"] = m_restraint_max_iterations;
     opt_config["dihedral_restraints"] = Optimization::GeometryRestraints::toJson(restraints);
 
-    // Start from the TEMPLATE geometry -- clash-free and with the correct topology. The restrained
-    // optimisation itself performs the rotation.
-    Molecule mol = m_frames[p.template_frame].molecule;
+    // Default: start from the TEMPLATE -- clash-free and with the correct topology, so the restrained
+    // optimisation performs the rotation itself. With an explicit start geometry (the rigidly built
+    // one) the same restraints act as a clash repair instead; see the parameter documentation.
+    Molecule mol = start ? *start : m_frames[p.template_frame].molecule;
     auto result = Optimization::OptimizationDispatcher::optimizeStructure(
         &mol, Optimization::OptimizerType::LBFGSPP, m_calculator.get(), opt_config);
     if (result.final_molecule.AtomCount() == 0)
@@ -770,6 +1239,319 @@ bool ConfGen::restrainedBuild(const Proposal& p, Molecule& driven) const
     return true;
 }
 
+
+void ConfGen::loadProposalMemory()
+{
+    m_proposed_before.clear();
+    if (m_proposal_memory_file.empty())
+        return;
+    std::ifstream in(m_proposal_memory_file);
+    if (!in.good())
+        return;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        std::vector<int> states;
+        std::istringstream is(line);
+        int v;
+        while (is >> v)
+            states.push_back(v);
+        if (!states.empty())
+            m_proposed_before.insert(states);
+    }
+    if (!m_proposed_before.empty())
+        CurcumaLogger::result_fmt("ConfGen: {} state vector(s) were already proposed earlier and are skipped",
+            static_cast<int>(m_proposed_before.size()));
+}
+
+void ConfGen::appendProposalMemory(const std::vector<std::vector<int>>& states) const
+{
+    if (m_proposal_memory_file.empty() || states.empty())
+        return;
+    std::ofstream out(m_proposal_memory_file, std::ios::app);
+    for (const auto& s : states) {
+        for (std::size_t i = 0; i < s.size(); ++i)
+            out << s[i] << (i + 1 < s.size() ? " " : "");
+        out << "\n";
+    }
+}
+
+std::vector<std::vector<double>> ConfGen::stateEnergies() const
+{
+    const double kT = kBoltzmannEh * m_temperature;
+    std::vector<std::vector<double>> energies(m_torsions.size());
+    for (std::size_t t = 0; t < m_torsions.size(); ++t) {
+        energies[t].assign(m_state_centres[t].size(), std::numeric_limits<double>::quiet_NaN());
+        for (std::size_t s = 0; s < m_state_centres[t].size(); ++s) {
+            double weight_sum = 0.0, weighted = 0.0;
+            for (const Frame& f : m_frames) {
+                if (f.states[t] != static_cast<int>(s))
+                    continue;
+                const double rel = f.energy - m_reference_energy;
+                const double w = std::exp(-rel / kT);
+                weight_sum += w;
+                weighted += w * rel;
+            }
+            if (weight_sum > 0.0)
+                energies[t][s] = weighted / weight_sum * kEh2kJ;
+        }
+    }
+    return energies;
+}
+
+std::vector<ConfGen::Proposal> ConfGen::generateConsensusProposals() const
+{
+    std::vector<Proposal> proposals;
+    const std::vector<std::vector<double>> energies = stateEnergies();
+
+    // The consensus vector: per torsion the state with the lowest Boltzmann-weighted mean energy.
+    // Torsions with a single populated state contribute that state -- they carry no choice.
+    std::vector<int> consensus(m_torsions.size(), 0);
+    std::vector<std::pair<double, int>> margins; // (energy gap best->second best, torsion)
+    for (std::size_t t = 0; t < m_torsions.size(); ++t) {
+        int best = -1, second = -1;
+        for (std::size_t s = 0; s < energies[t].size(); ++s) {
+            if (std::isnan(energies[t][s]))
+                continue;
+            if (best < 0 || energies[t][s] < energies[t][best]) {
+                second = best;
+                best = static_cast<int>(s);
+            } else if (second < 0 || energies[t][s] < energies[t][second]) {
+                second = static_cast<int>(s);
+            }
+        }
+        if (best < 0)
+            return proposals; // no populated state at all -- nothing to assemble
+        consensus[t] = best;
+        if (second >= 0)
+            margins.emplace_back(energies[t][second] - energies[t][best], static_cast<int>(t));
+    }
+
+    std::set<std::vector<int>> known;
+    for (const Frame& f : m_frames)
+        known.insert(f.states);
+
+    // Template = the ensemble member CLOSEST to the target vector, so the build has to drive as few
+    // torsions as possible. Deliberately not the lowest-energy structure: here the geometry is a
+    // starting point, not a candidate.
+    auto make = [&](const std::vector<int>& states, const std::string& tag) {
+        if (known.count(states))
+            return;
+        int best_frame = 0, best_distance = std::numeric_limits<int>::max();
+        for (std::size_t i = 0; i < m_frames.size(); ++i) {
+            const int d = TorsionSpace::hammingDistance(m_frames[i].states, states);
+            if (d < best_distance) {
+                best_distance = d;
+                best_frame = static_cast<int>(i);
+            }
+        }
+        Proposal p;
+        p.states = states;
+        p.template_frame = best_frame;
+        p.distance = best_distance;
+        p.nci_label = tag; // reused as a label; nci_targets stays empty, so this is a torsion build
+        proposals.push_back(std::move(p));
+    };
+
+    make(consensus, "consensus");
+
+    // Claude Generated (Aug 2026): walk AWAY from the ensemble, not around the consensus.
+    //
+    // Flipping the least certain torsions of the consensus one at a time produced assemblies that
+    // still sat one torsion away from an existing structure -- the consensus itself is usually a
+    // sampled structure, so its neighbours are too, and the whole point of a de-novo build is lost.
+    // What is needed are vectors far from EVERYTHING, and they are reachable: the missing reference
+    // structure of the test system differs from every found conformer in at least 15 of 29 torsions,
+    // yet all 29 of its states occur individually in the ensemble. So the states are there; only
+    // their combination is not.
+    //
+    // Each step therefore takes the flip that gains the most distance to the nearest ensemble member,
+    // breaking ties by the smallest energy penalty, and emits the result. The assemblies form a
+    // trajectory of increasing novelty instead of a cloud around the average structure.
+    auto min_distance = [&](const std::vector<int>& v) {
+        int best = std::numeric_limits<int>::max();
+        for (const Frame& f : m_frames)
+            best = std::min(best, TorsionSpace::hammingDistance(f.states, v));
+        return best;
+    };
+
+    std::vector<int> current = consensus;
+    while (static_cast<int>(proposals.size()) < m_consensus_max) {
+        int best_torsion = -1, best_state = -1, best_gain = -1;
+        double best_penalty = std::numeric_limits<double>::infinity();
+        const int base_distance = min_distance(current);
+        for (std::size_t t = 0; t < m_torsions.size(); ++t) {
+            for (std::size_t s = 0; s < energies[t].size(); ++s) {
+                if (std::isnan(energies[t][s]) || static_cast<int>(s) == current[t])
+                    continue;
+                std::vector<int> trial = current;
+                trial[t] = static_cast<int>(s);
+                const int gain = min_distance(trial) - base_distance;
+                const double penalty = energies[t][s] - energies[t][consensus[t]];
+                if (gain > best_gain || (gain == best_gain && penalty < best_penalty)) {
+                    best_gain = gain;
+                    best_penalty = penalty;
+                    best_torsion = static_cast<int>(t);
+                    best_state = static_cast<int>(s);
+                }
+            }
+        }
+        if (best_torsion < 0)
+            break;
+        current[best_torsion] = best_state;
+        make(current, fmt::format("de-novo, {} torsion(s) from the consensus, {} from the nearest structure",
+                 TorsionSpace::hammingDistance(current, consensus), min_distance(current)));
+    }
+    return proposals;
+}
+
+std::vector<ConfGen::Proposal> ConfGen::generateNCIProposals() const
+{
+    std::vector<Proposal> proposals;
+    // Only hydrogen bonds are moved. They are the directional, chemically specific interactions and
+    // the ones the variance attribution points at; a "close contact" has no well-defined target
+    // geometry to restrain towards.
+    std::vector<int> movable;
+    for (std::size_t k = 0; k < m_nci_pairs.size(); ++k)
+        if (m_nci_pairs[k].kind == NCIContact::HBond && m_nci_pairs[k].hydrogen >= 0)
+            movable.push_back(static_cast<int>(k));
+    if (movable.empty())
+        return proposals;
+
+    std::vector<int> population(m_nci_pairs.size(), 0);
+    for (const Frame& f : m_frames)
+        for (std::size_t k = 0; k < m_nci_pairs.size() && k < f.nci.size(); ++k)
+            population[k] += f.nci[k];
+
+    // Templates: the same lowest-energy members the torsion stage uses, so both move sets start from
+    // the same structures and their yields are comparable.
+    std::vector<int> order(m_frames.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [this](int a, int b) { return m_frames[a].energy < m_frames[b].energy; });
+    const int n_templates = std::min<int>(std::max(1, m_proposal_templates), static_cast<int>(order.size()));
+
+    // Every pattern the ensemble already has -- a move that lands on one of them proposes nothing new.
+    std::set<std::vector<int>> known;
+    for (const Frame& f : m_frames)
+        known.insert(f.nci);
+    std::set<std::vector<int>> proposed;
+
+    for (int t = 0; t < n_templates; ++t) {
+        const int frame = order[t];
+        const std::vector<int>& have = m_frames[frame].nci;
+        // Depth 1: every single flip. Depth 2: one break together with one form -- the concerted move
+        // that a hydrogen bond actually performs, since an opened donor usually finds a new acceptor.
+        std::vector<int> present, absent;
+        for (int k : movable)
+            (k < static_cast<int>(have.size()) && have[k] ? present : absent).push_back(k);
+
+        auto emit = [&](const std::vector<std::pair<int, int>>& targets) {
+            std::vector<int> pattern = have;
+            for (const auto& [k, on] : targets)
+                if (k < static_cast<int>(pattern.size()))
+                    pattern[k] = on;
+            if (known.count(pattern) || proposed.count(pattern))
+                return;
+            proposed.insert(pattern);
+            Proposal p;
+            p.states = m_frames[frame].states; // unchanged: this move does not touch the torsions
+            p.template_frame = frame;
+            p.distance = static_cast<int>(targets.size());
+            p.nci_targets = targets;
+            for (const auto& [k, on] : targets)
+                p.nci_label += fmt::format("{}{} {}", p.nci_label.empty() ? "" : ", ",
+                    on ? "form" : "break", m_nci_pairs[k].label());
+            proposals.push_back(std::move(p));
+        };
+
+        for (int k : present)
+            emit({ { k, 0 } });
+        for (int k : absent)
+            emit({ { k, 1 } });
+        if (m_nci_depth >= 2)
+            for (int b : present)
+                for (int f : absent)
+                    emit({ { b, 0 }, { f, 1 } });
+    }
+
+    // Ranking without an energy model: prefer moves whose TARGET bond is well populated in the
+    // ensemble (a bond many structures realise is a plausible one to ask for) and, at equal
+    // population, the smaller move. Deliberately not the additive model -- it was measured to
+    // explain ~15 % of the energy variation and has no say over the NCI pattern at all.
+    std::sort(proposals.begin(), proposals.end(), [&](const Proposal& a, const Proposal& b) {
+        auto score = [&](const Proposal& p) {
+            int s = 0;
+            for (const auto& [k, on] : p.nci_targets)
+                s += on ? population[k] : -population[k];
+            return s;
+        };
+        const int sa = score(a), sb = score(b);
+        if (sa != sb)
+            return sa > sb;
+        return a.nci_targets.size() < b.nci_targets.size();
+    });
+    if (static_cast<int>(proposals.size()) > m_nci_max_proposals)
+        proposals.resize(m_nci_max_proposals);
+    return proposals;
+}
+
+bool ConfGen::restrainedBuildNCI(const Proposal& p, Molecule& driven) const
+{
+    if (!m_calculator || p.nci_targets.empty())
+        return false;
+
+    std::vector<Optimization::DistanceRestraint> restraints;
+    for (const auto& [k, on] : p.nci_targets) {
+        if (k < 0 || k >= static_cast<int>(m_nci_pairs.size()))
+            continue;
+        const NCIContact& c = m_nci_pairs[k];
+        if (c.hydrogen < 0)
+            continue;
+        Optimization::DistanceRestraint r;
+        r.i = c.hydrogen; // the H...acceptor distance is what the detection criterion uses
+        r.j = c.second;
+        r.target = on ? m_nci_form_distance : m_nci_break_distance;
+        r.force = m_nci_restraint_force;
+        restraints.push_back(r);
+    }
+    if (restraints.empty())
+        return false;
+
+    json opt_config;
+    opt_config["method"] = m_method;
+    opt_config["threads"] = m_threads;
+    opt_config["charge"] = m_charge;
+    opt_config["spin"] = m_spin;
+    opt_config["verbosity"] = 0;
+    // Claude Generated (Aug 2026): ONE shared calculator for the whole run (see m_calculator) --
+    // the optimiser must not re-derive the force field per structure. Saves a full GFN-FF setup
+    // per proposal and keeps the run out of the intermittent parameter-generation crash.
+    opt_config["reuse_calculator"] = true;
+    opt_config["write_trajectory"] = false;
+    opt_config["max_iterations"] = m_restraint_max_iterations;
+    opt_config["distance_restraints"] = Optimization::GeometryRestraints::toJson(restraints);
+
+    Molecule mol = m_frames[p.template_frame].molecule;
+    auto result = Optimization::OptimizationDispatcher::optimizeStructure(
+        &mol, Optimization::OptimizerType::LBFGSPP, m_calculator.get(), opt_config);
+    if (result.final_molecule.AtomCount() == 0)
+        return false;
+
+    // Did the move arrive? A restraint competes with the force field, so a target that the molecule
+    // cannot reach ends up somewhere else -- and then this is not the proposed pattern. Half an
+    // Angstrom is the tolerance; the form and break targets are 1.6 A apart, so it cannot confuse
+    // the two.
+    const Geometry geom = result.final_molecule.getGeometry();
+    for (const auto& r : restraints) {
+        const double d = (Eigen::Vector3d(geom.row(r.i)) - Eigen::Vector3d(geom.row(r.j))).norm();
+        if (std::abs(d - r.target) > 0.5)
+            return false;
+    }
+    driven = result.final_molecule;
+    return true;
+}
+
 std::vector<ConfGen::Proposal> ConfGen::generateProposals() const
 {
     std::vector<Proposal> proposals;
@@ -784,6 +1566,10 @@ std::vector<ConfGen::Proposal> ConfGen::generateProposals() const
     std::set<std::vector<int>> known;
     for (const Frame& f : m_frames)
         known.insert(f.states);
+    // Claude Generated (Aug 2026): combinations an earlier call already built count as known -- a
+    // proposal that was tried and rejected is not in the ensemble, so without this memory every
+    // repetition rebuilds and re-optimises it.
+    known.insert(m_proposed_before.begin(), m_proposed_before.end());
 
     // Templates: the lowest-energy members (their geometry is the starting point).
     std::vector<int> order(m_frames.size());
@@ -846,6 +1632,10 @@ void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
 
     json opt_config = calc_config;
     opt_config["verbosity"] = 0;
+    // Claude Generated (Aug 2026): ONE shared calculator for the whole run (see m_calculator) --
+    // the optimiser must not re-derive the force field per structure. Saves a full GFN-FF setup
+    // per proposal and keeps the run out of the intermittent parameter-generation crash.
+    opt_config["reuse_calculator"] = true;
     opt_config["write_trajectory"] = false;
 
     if (!m_calculator)
@@ -891,6 +1681,10 @@ double ConfGen::referenceEnergyOptimised(double& worst_gain_kJ) const
     calc_config["spin"] = m_spin;
     json opt_config = calc_config;
     opt_config["verbosity"] = 0;
+    // Claude Generated (Aug 2026): ONE shared calculator for the whole run (see m_calculator) --
+    // the optimiser must not re-derive the force field per structure. Saves a full GFN-FF setup
+    // per proposal and keeps the run out of the intermittent parameter-generation crash.
+    opt_config["reuse_calculator"] = true;
     opt_config["write_trajectory"] = false;
 
     if (!m_calculator)
@@ -964,6 +1758,61 @@ void ConfGen::reportProposals(const std::vector<Proposal>& proposals, const std:
     CurcumaLogger::result_fmt("ConfGen: {} of {} chemically valid proposals are NEW conformers "
                               "(best-fit RMSD > {:.2f} A to every input structure)",
         novel, optimised - reacted, m_new_rmsd);
+
+    // Claude Generated (Aug 2026): the two move sets are reported separately. They address different
+    // descriptions -- torsions vs the non-covalent pattern -- so a joint yield would hide which one
+    // is actually producing, and that is the question the NCI stage exists to answer.
+    int nci_total = 0, nci_opt = 0, nci_new = 0;
+    double nci_best = std::numeric_limits<double>::infinity();
+    std::string nci_best_label;
+    for (const Proposal& p : proposals) {
+        if (!p.nci_move())
+            continue;
+        nci_total++;
+        if (p.optimised && p.topology_ok)
+            nci_opt++;
+        if (p.is_new) {
+            nci_new++;
+            if (p.energy < nci_best) {
+                nci_best = p.energy;
+                nci_best_label = p.nci_label;
+            }
+        }
+    }
+    if (nci_total > 0) {
+        CurcumaLogger::result_fmt("ConfGen:   of those, {} came from NCI moves ({} built and valid of {} "
+                                  "proposed), {} from torsion recombination",
+            nci_new, nci_opt, nci_total, novel - nci_new);
+        if (nci_new > 0)
+            CurcumaLogger::result_fmt("ConfGen:   best NCI move: {} -> {:.6f} Eh", nci_best_label, nci_best);
+
+        // Did the moved bond SURVIVE the release? This separates the two ways an NCI move can fail:
+        // the restrained geometry was never a minimum (the bond snaps back), or it was a minimum but
+        // an already known one. Only the first is a defect of the move; the second means the ensemble
+        // already covers that pattern. The H-bond criterion is purely geometric, so no charges are
+        // needed here.
+        int kept = 0, snapped = 0;
+        for (const Proposal& p : proposals) {
+            if (!p.nci_move() || !p.optimised || !p.topology_ok)
+                continue;
+            const std::vector<NCIContact> after = detectNCI(p.geometry, {});
+            bool all_ok = true;
+            for (const auto& [k, on] : p.nci_targets) {
+                if (k < 0 || k >= static_cast<int>(m_nci_pairs.size()))
+                    continue;
+                const NCIContact& target = m_nci_pairs[k];
+                const bool present = std::any_of(after.begin(), after.end(), [&](const NCIContact& c) {
+                    return c.kind == NCIContact::HBond && c.first == target.first && c.second == target.second;
+                });
+                if (present != (on != 0))
+                    all_ok = false;
+            }
+            all_ok ? kept++ : snapped++;
+        }
+        CurcumaLogger::result_fmt("ConfGen:   after releasing the restraint, {} of {} NCI move(s) kept "
+                                  "their target bond pattern, {} snapped back",
+            kept, kept + snapped, snapped);
+    }
 
     if (template_gain_kJ > 5.0)
         CurcumaLogger::warn_fmt("ConfGen: re-optimising the input structures lowers them by up to {:.1f} "
@@ -1039,6 +1888,19 @@ void ConfGen::writeFrameTable(const std::string& path) const
 
 void ConfGen::writeStateStatistics(const std::string& path) const
 {
+    // Claude Generated (Aug 2026): the four atom indices of every torsion, written next to the state
+    // table. Without them the CSV cannot be used to reproduce a geometry -- a torsion is identified
+    // by its central bond in the label, but the two outer atoms are a choice of the detection, and
+    // guessing them wrong silently produces different dihedrals (measured: 0 of 29 reconstructed
+    // correctly from the label alone).
+    {
+        std::ofstream def(path.substr(0, path.rfind(".torsion_states.csv")) + ".torsion_definitions.csv");
+        def << "# torsion,bond,atom_i,atom_j,atom_k,atom_l  (0-based indices into the XYZ)\n";
+        for (std::size_t t = 0; t < m_torsions.size(); ++t)
+            def << t << "," << m_torsions[t].label(m_frames.front().molecule) << ","
+                << m_torsions[t].i << "," << m_torsions[t].j << ","
+                << m_torsions[t].k << "," << m_torsions[t].l << "\n";
+    }
     std::ofstream out(path);
     out << "# torsion,bond,state,centre_deg,population,rel_energy_min_kJ,rel_energy_boltzmann_kJ\n";
     const double kT = kBoltzmannEh * m_temperature;
@@ -1184,8 +2046,16 @@ void ConfGen::start()
     CurcumaLogger::result_fmt("ConfGen: method={}, state_tolerance={} deg, temperature={} K",
         m_method, m_state_tolerance, m_temperature);
 
+    loadProposalMemory();
     if (!analyseEnsemble())
         return;
+
+    // Claude Generated (Jul 2026): the non-covalent description. Built before the torsion analysis is
+    // reported so that both descriptions can be compared in one place.
+    if (m_nci_analysis) {
+        buildNCISpace();
+        writeNCITable(outputPath(base + ".nci.csv"));
+    }
 
     const std::vector<Transition> transitions = matchedPairs();
 
@@ -1193,6 +2063,9 @@ void ConfGen::start()
     writeStateStatistics(outputPath(base + ".torsion_states.csv"));
     writeTransitionTable(outputPath(base + ".matched_pairs.csv"), transitions);
 
+    reportTermVariance();
+    if (m_nci_analysis)
+        reportNCISpace();
     reportTransitions(transitions);
 
     if (m_couplings) {
@@ -1204,18 +2077,75 @@ void ConfGen::start()
             std::vector<ModelFit> fits;
             for (int level = 0; level <= 2; ++level)
                 fits.push_back(fitModel(level));
+            // Levels 3 and 4 use the NCI pattern; on the same folds, so the comparison with level 1
+            // is like-for-like and answers which description carries the energy.
+            if (m_nci_analysis && !m_nci_pairs.empty()) {
+                fits.push_back(fitModel(3));
+                fits.push_back(fitModel(4));
+            }
             reportModelComparison(fits);
         }
     }
 
     if (m_generate) {
         std::vector<Proposal> proposals = generateProposals();
+        // Record what we are about to try, so a later call does not repeat it.
+        {
+            std::vector<std::vector<int>> tried;
+            for (const Proposal& pr : proposals)
+                tried.push_back(pr.states);
+            appendProposalMemory(tried);
+        }
+        // Claude Generated (Aug 2026): the second move set. Appended to the same list, so both kinds
+        // pass through identical build gates, optimisation, topology and novelty checks -- an NCI
+        // proposal is never privileged over a torsion one.
+        const int n_torsion_proposals = static_cast<int>(proposals.size());
+        // Claude Generated (Aug 2026): the de-novo assembly. Not a mutation of an existing structure
+        // but the composition of the individually best elements -- it reaches vectors no short walk
+        // reaches. Runs before the NCI moves so the report reads in order of increasing locality.
+        int n_consensus = 0;
+        if (m_consensus_build) {
+            const std::vector<Proposal> consensus = generateConsensusProposals();
+            n_consensus = static_cast<int>(consensus.size());
+            for (const Proposal& c : consensus)
+                CurcumaLogger::result_fmt("ConfGen: de-novo assembly ({}) differs from its nearest ensemble "
+                                          "member in {} torsion(s)", c.nci_label, c.distance);
+            proposals.insert(proposals.end(), consensus.begin(), consensus.end());
+        }
+        if (m_nci_generate && !m_nci_pairs.empty()) {
+            const std::vector<Proposal> nci = generateNCIProposals();
+            CurcumaLogger::result_fmt("ConfGen: {} torsion proposal(s) + {} de-novo assembly/assemblies + {} "
+                                      "NCI move(s) to build",
+                n_torsion_proposals, n_consensus, static_cast<int>(nci.size()));
+            proposals.insert(proposals.end(), nci.begin(), nci.end());
+        }
 
         // Build the geometries: start from the template and set every torsion whose state differs.
         const std::vector<std::pair<int, int>> reference_bonds
             = topologyFingerprint(m_frames.front().molecule, m_topology_factor);
-        int clashes = 0, restrained = 0, restrained_ok = 0;
+        int clashes = 0, restrained = 0, restrained_ok = 0, nci_built = 0, nci_failed = 0, nci_unreached = 0;
         for (Proposal& p : proposals) {
+            // An NCI move has no rigid-build variant: there is no single coordinate to set. It goes
+            // straight to the restrained build, which is the whole point -- the concerted relaxation
+            // around a re-tied hydrogen bond is what a torsion move cannot express.
+            if (p.nci_move()) {
+                Molecule driven;
+                if (!restrainedBuildNCI(p, driven)) {
+                    nci_unreached++;
+                    continue;
+                }
+                if (hasClash(driven, m_clash_factor)
+                    || topologyFingerprint(driven, m_topology_factor) != reference_bonds) {
+                    nci_failed++;
+                    continue;
+                }
+                driven.setName(fmt::format("nci_from_{}_{}", p.template_frame + 1,
+                    p.nci_targets.size() == 1 ? "d1" : "d2"));
+                p.geometry = driven;
+                p.restrained_build = true;
+                nci_built++;
+                continue;
+            }
             Geometry geom = m_frames[p.template_frame].molecule.getGeometry();
             for (std::size_t t = 0; t < m_torsions.size(); ++t)
                 if (p.states[t] != m_frames[p.template_frame].states[t] && p.states[t] >= 0)
@@ -1244,19 +2174,37 @@ void ConfGen::start()
                     continue; // leave p.geometry empty -> counted as "not built"
                 }
                 restrained++;
+                // Claude Generated (Aug 2026): TWO ways to use the restraints, and which one works
+                // depends on how far the proposal is from its template.
+                //
+                //   REPAIR (mol as start): the rigid build already produced the target FOLD -- only
+                //   some atoms overlap. The restraints hold the torsions where they are while the
+                //   optimiser relieves the clash. This is the only route that scales: measured on a
+                //   107-atom peptide, rigidly setting all 29 dihedrals to a target vector reproduces
+                //   that structure to 0.41 A, and after the free optimisation to 0.75 A.
+                //
+                //   DRIVE (template as start): the restraints must perform the rotation themselves.
+                //   Fine for one or two torsions; for 29 at once it stalls at 74 degrees worst
+                //   deviation and never arrives.
+                //
+                // So repair first, drive second -- the old order was drive-only, which is why the
+                // de-novo assemblies could not be built at all.
                 Molecule driven;
-                if (!restrainedBuild(p, driven)) {
+                bool ok = restrainedBuild(p, driven, &mol)
+                    && !hasClash(driven, m_clash_factor)
+                    && topologyFingerprint(driven, m_topology_factor) == reference_bonds;
+                std::string how = "repaired";
+                if (!ok) {
+                    ok = restrainedBuild(p, driven)
+                        && !hasClash(driven, m_clash_factor)
+                        && topologyFingerprint(driven, m_topology_factor) == reference_bonds;
+                    how = "driven";
+                }
+                if (!ok) {
                     clashes++;
                     continue;
                 }
-                // The driven structure has to pass exactly the same gates -- the restraint is a way
-                // to REACH the geometry, never a licence to skip the chemistry check.
-                if (hasClash(driven, m_clash_factor)
-                    || topologyFingerprint(driven, m_topology_factor) != reference_bonds) {
-                    clashes++;
-                    continue;
-                }
-                driven.setName(fmt::format("proposal_from_{}_d{}_restrained", p.template_frame + 1, p.distance));
+                driven.setName(fmt::format("proposal_from_{}_d{}_{}", p.template_frame + 1, p.distance, how));
                 p.geometry = driven;
                 p.restrained_build = true;
                 restrained_ok++;
@@ -1271,6 +2219,10 @@ void ConfGen::start()
         if (clashes > 0)
             CurcumaLogger::result_fmt("ConfGen: {} built structure(s) rejected before optimisation "
                                       "(clash or changed bond topology)", clashes);
+        if (nci_built + nci_failed + nci_unreached > 0)
+            CurcumaLogger::result_fmt("ConfGen: NCI moves: {} built, {} did not reach their restraint "
+                                      "(sterically impossible), {} rejected by the clash/topology gate",
+                nci_built, nci_unreached, nci_failed);
 
         // Write what was built, then optimise and write the survivors.
         bool first = true;

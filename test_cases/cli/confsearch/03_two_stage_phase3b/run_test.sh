@@ -47,7 +47,7 @@ validate_results() {
 
     # both stages must appear
     TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -q "Phase 3b stage 1/2" stdout.log && grep -q "Phase 3b stage 2/2" stdout.log; then
+    if grep -q "REFINE stage 1/2" stdout.log && grep -q "REFINE stage 2/2" stdout.log; then
         echo -e "${GREEN}\xe2\x9c\x93 PASS${NC}: both optimisation stages ran"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
@@ -57,8 +57,8 @@ validate_results() {
 
     # per-cycle ensembles on BOTH levels of theory
     local md_ens opt_ens md_best opt_best
-    md_ens=$(find_output_file "input.cycle01_T500K.ensemble.gfnff.xyz")
-    opt_ens=$(find_output_file "input.cycle01_T500K.ensemble.uff.xyz")
+    md_ens=$(find_output_file "input.cycle01_T500K.s6_ensemble.gfnff.xyz")
+    opt_ens=$(find_output_file "input.cycle01_T500K.s6_ensemble.uff.xyz")
     md_best=$(find_output_file "input.best_per_cycle.gfnff.xyz")
     opt_best=$(find_output_file "input.best_per_cycle.uff.xyz")
     TESTS_RUN=$((TESTS_RUN + 1))

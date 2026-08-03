@@ -28,20 +28,31 @@ dotted (`-confsearch.md_method ...`) forms both work.
 
 ## Per-cycle pipeline
 
+One temperature stage, repeated `repeat` times (Aug 2026):
+
 ```
-MD exploration            (md_method)
-  -> Phase 2  fast opt          (md_method)
-  -> Phase 3  RMSD/energy filter (md_method)        <- "filter between"
-  -> Phase 3b accurate re-opt    (opt_method) [NEW] <- only if opt_method != md_method
-  -> Phase 4  EXPLORATION (md_method): topo + seed select + global min + bias
-              REFINEMENT  (opt_method): cumulative pool + bias    [dual only]
-...repeat over the temperature schedule...
-Final deduplication / ranking   (opt_method)
+  Step 1 EXPLORE    MD with RMSD bias, one run per seed   (md_method)
+  Step 2 RELAX      geometry optimisation                 (md_method)
+  Step 3 REDUCE     RMSD deduplication                    (md_method)
+  Step 4 RECOMBINE  ConfGen proposals, optional           (md_method)
+  -- re-seed from the cross-cycle pool, next repetition --
+  Step 5 REFINE     accurate re-optimisation              (opt_method)  once per temperature
+  Step 6 SELECT     energy window + topology + seeding
+...next temperature...
+Final deduplication / ranking                             (opt_method)
 ```
 
-The md-level optimize+filter (Phases 2-3) reduces the per-cycle set before the
-accurate method runs, so `opt_method` (incl. expensive ORCA) only sees the
-deduplicated survivors.
+Steps 1-4 are chained: each repetition re-seeds from the best structures of ALL
+cycles, so repetition 2 starts from what repetition 1 found. Every repetition adds
+its minima to a per-stage pool; that pool is deduplicated once and is what step 5
+receives, so the accurate method sees everything the stage produced and not just
+the last batch. Intermediate repetitions seed on the md_method surface even under
+`-seed_pes opt`, because no opt_method structures exist before step 5 has run.
+Step 5 runs once per temperature, at the end of the last repetition -- it accounts for ~61 % of the
+total runtime, so chaining it would roughly triple the cost of `repeat 4` without
+adding a single trajectory. Steps 2-3 reduce the per-cycle set before the accurate
+method runs, so `opt_method` (incl. expensive ORCA) only sees the deduplicated
+survivors.
 
 ### Two PES, never compared
 
@@ -81,16 +92,46 @@ ConfSearch keeps the two energy worlds strictly separate:
 Phase 3b and the separate refinement step are skipped entirely — Phase 4 runs
 its single-PES path and one minimum per conformer is fed back, exactly as before.
 
+### How far the two surfaces agree — measured, and it is worse than "weakly" (Aug 2026)
+
+> 🤖 AI-measured on ONE system (WEKLQ, a 107-atom peptide, gfnff/gfn2). Treat the numbers as a
+> property of that system, not as a general statement about the two methods.
+
+Across a whole 141-structure ensemble the two rankings correlate at r = 0.40, which is the number
+this document carried until now. **Within one cycle — which is the situation that actually decides
+anything — they are anti-correlated:**
+
+| quantity | cycle A (13 structures) | cycle B (14 structures) |
+|---|---|---|
+| Pearson r (gfnff vs gfn2, optimised on both) | **−0.32** | **−0.46** |
+| Spearman rho | −0.13 | −0.16 |
+| gfn2 rank of the deepest gfnff structure | 9 of 13 | 10 of 14 (+68 kJ/mol) |
+
+The structures are chemically valid (0 topology changes), so this is not an artefact of broken
+geometries. The practical consequence was measured directly: a run that reached **121 kJ/mol deeper
+on gfnff** produced a **67 kJ/mol worse** gfn2 result. Exploring deeper on the cheap surface does not
+make the accurate answer better — which is the reason the search now selects on the ranking surface
+before anything is deduplicated (`-phase3b_two_stage`, default since Aug 2026).
+
+**Would a single point be enough?** No. A gfn2 single point on the gfnff geometry ranks better than
+the gfnff energy (r = +0.40, rho = +0.35, best pick at rank 2 of 14) but still not well, because the
+relaxation from the gfnff geometry to the gfn2 minimum spans **149–368 kJ/mol** — several times the
+conformer differences themselves (~80 kJ/mol). The term that has to be removed is exactly the one a
+single point leaves in. Only a crude optimisation on the ranking surface removes it, which is what
+the two-stage mode does.
+
 ## Example
 
 ```bash
 curcuma -confsearch input.xyz -md_method gfnff -opt_method gfn2
 ```
 
-Per cycle this produces `*.bias.opt.accepted.xyz` (md-level, filtered; used for
-exploration/seeds/bias) and, when the methods differ,
-`*.bias.opt.accepted.opt.xyz` (opt-level, re-optimized; used for the cumulative
-pool + bias). The final `*.cumulative.opt.accepted.xyz` is ranked at `opt_method`.
+Per cycle this produces `*.<cycle>[_rN].s3_reduce.<md_method>.xyz` (md-level,
+filtered; used for exploration/seeds/bias) and, when the methods differ,
+`*.<cycle>.s5_refine.<opt_method>.opt.xyz` (opt-level, re-optimised; used for the
+cumulative pool + bias). Every file carries the step that produced it. The final
+`*.cumulative.opt.accepted.xyz` is ranked at `opt_method` and keeps its name -- it
+is the deliverable, not an intermediate.
 
 ## One topology reference per PES (fixed Jul 26, 2026)
 

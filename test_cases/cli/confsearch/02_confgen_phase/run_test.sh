@@ -42,10 +42,10 @@ validate_results() {
 
     # the phase must actually run (or explicitly report why it was skipped)
     TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -q "Phase 3c" stdout.log; then
+    if grep -q "RECOMBINE" stdout.log; then
         echo -e "${GREEN}\xe2\x9c\x93 PASS${NC}: Phase 3c ran"
         TESTS_PASSED=$((TESTS_PASSED + 1))
-        grep -oE "Phase 3c.*" stdout.log | head -2 | sed 's/^/  /'
+        grep -oE "RECOMBINE.*" stdout.log | head -2 | sed 's/^/  /'
     else
         echo -e "${RED}\xe2\x9c\x97 FAIL${NC}: Phase 3c never appeared although -confgen_phase true was given"
         TESTS_FAILED=$((TESTS_FAILED + 1)); failed=1

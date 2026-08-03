@@ -41,7 +41,7 @@ wrote, read back from the file:
 
 ```
 ConfSearch: RMSD filtering complete. 36 structures accepted.
-ConfSearch: Phase 3 accepted ensemble [gfnff]: 36 structure(s), lowest -18.742131 Eh, span 41.28 kJ/mol
+ConfSearch: REDUCE -- accepted ensemble [gfnff]: 36 structure(s), lowest -18.742131 Eh, span 41.28 kJ/mol
 ConfSearch:     #1   -18.742131 Eh  (+0.00 kJ/mol)
 ConfSearch:     #2   -18.741062 Eh  (+2.81 kJ/mol)
 ConfSearch:     #3   -18.74055  Eh  (+4.15 kJ/mol)
@@ -105,12 +105,23 @@ ConfSearch:   most stable structure of this cycle appended to <bmt>/input.best_p
 Switch off with `-cycle_output false`. Ordering is done by a `std::multimap` keyed on the energy —
 the container sorts, there is no explicit sort call (see section 6).
 
-## 5. Two-stage high-level re-optimisation (`-phase3b_two_stage`, opt-in)
+## 5. Two-stage high-level re-optimisation (`-phase3b_two_stage`, **default since Aug 2026**)
 
-Phase 3b re-optimises the cycle's deduplicated minima at `opt_method` and is the most expensive step
-of a dual-method run. Its input was deduplicated on a **different** potential-energy surface
-(`md_method`), so structures that survive as distinct there can collapse onto one another as soon as
-the accurate method relaxes them — and each of those collapses was paid for at full price.
+Step 5 (REFINE) re-optimises the cycle's deduplicated minima at `opt_method` and is the most
+expensive step of a dual-method run. Its input was deduplicated on a **different** potential-energy
+surface (`md_method`), so structures that survive as distinct there can collapse onto one another as
+soon as the accurate method relaxes them — and each of those collapses was paid for at full price.
+
+**Why it became the default.** Deduplicating and selecting on the exploration surface was measured
+to be actively wrong for this class of system, not merely suboptimal: on a 107-atom peptide the
+gfnff and gfn2 energies *within one cycle* correlate at **r = −0.32 / −0.46** (rank −0.13 / −0.16),
+i.e. the structure gfnff likes best sits at gfn2 rank 9–10 of 13–14, +68 kJ/mol above the gfn2
+minimum. A gfn2 single point on the gfnff geometry is better (r = +0.40, best pick at rank 2 of 14)
+but still weak, because the relaxation from the gfnff geometry to the gfn2 minimum spans
+**149–368 kJ/mol** — several times the conformer differences themselves. Only a crude optimisation
+on the ranking surface removes that term, and that is what stage 1 does. Details and the full table:
+[CONFSEARCH_DUAL_METHOD.md](CONFSEARCH_DUAL_METHOD.md). Set `-phase3b_two_stage false` for the old
+single-stage behaviour.
 
 ```
 -phase3b_two_stage true:
@@ -137,15 +148,14 @@ smoke case: with the cutoff active the filter kept 1 of 3, without it 2 of 3.)
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `-phase3b_two_stage` | `false` | run crude -> filter -> accurate instead of one accurate optimisation |
+| `-phase3b_two_stage` | `true` | run crude -> filter -> accurate instead of one accurate optimisation |
 | `-phase3b_preopt_preset` | `loose` | convergence preset of the crude stage |
 | `-phase3b_preopt_max_iter` | `0` | step cap for the crude stage; 0 keeps the preset value |
 | `-phase3b_preset` | `normal` | convergence preset of the accurate stage (also of single-stage Phase 3b) |
 | `-phase3b_filter` | `true` | run the dedup between the stages |
 
-Whether it pays depends on how much the two surfaces disagree — it is off by default and every run
-states which way it is set. It only exists in dual-method runs (Phase 3b is skipped when
-`opt_method == md_method`).
+How much it pays depends on how much the two surfaces disagree; every run states which way the flag
+is set. It only exists in dual-method runs (step 5 is skipped when `opt_method == md_method`).
 
 ## 6. ConfScan sorting: verified, no `std::sort` needed
 
@@ -351,6 +361,56 @@ because the ConfSearch phases run strictly sequentially.
 `curcuma -opt` on a multi-frame file gets a plain `--- Structure 3/17 (114 atoms) ---` header per
 frame instead of a bar: on that path the optimiser prints its per-iteration table at verbosity 1,
 which would shred an in-place bar.
+
+## 10. Cheap pre-filter between RELAX and REDUCE (Aug 2026)
+
+The deduplication in step 3 is quadratic — 133 structures need ~170 s, 10 000 would need days — and
+it is fed by a batch of relaxed MD snapshots that mostly sit in the *same* minima. Two exact, cheap
+criteria therefore run first:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `-reduce_prefilter_window` | `100.0` | drop relaxed structures more than this many kJ/mol above the cycle minimum (0 = off) |
+| `-reduce_prefilter_energy_tol` | `1e-6` | two relaxed energies agreeing to this many Hartree are the SAME minimum; keep one (0 = off) |
+
+```
+ConfSearch: pre-filter before REDUCE: 27 of 37 structure(s) kept (0 outside the 100 kJ/mol window,
+            10 already at an identical minimum)
+```
+
+Both are decisions a human would not argue with: a structure 400 kJ/mol above the minimum is not a
+conformer anyone is looking for, and two optimisations that ended at the same energy to 1e-6 Eh
+ended in the same well. The collapse costs O(N log N) (sort by energy, compare neighbours) instead
+of O(N²) Kabsch fits. The RMSD pass still decides everything else — the tolerance is far too tight
+to merge two genuinely different conformers.
+
+Measured motivation: with `-bias_reset deposits` the topology gate suddenly let 10 751 snapshots
+through in one cycle, all of which would have gone into that quadratic pass. It also removes the
+trigger of a ConfScan pathology, without fixing it: ConfScan derives its adaptive energy threshold
+as a `std::max` over all pairs closer than `getrmsd_thresh`, so **one** outlier pair set ΔE to
+190 kJ/mol and 7480 of 7484 structures were rejected as "duplicates" (4 conformers left). The
+`std::max` derivation is still fragile for other callers.
+
+## 11. Holding the polar X-H bonds during REFINE (`-refine_hold_polar_h`, opt-in)
+
+A proton transfer turns a conformer into a **tautomer**, which the topology filter then discards —
+after the expensive accurate optimisation has been paid for. Measured on the 107-atom peptide: all
+three rejects of a 600 K stage were the identical transfer, H107 from O57 to N25, and the resulting
+zwitterion was *more stable* on the gfn2 surface (−161.650444 Eh) than any neutral conformer the run
+found, so the optimiser will keep going there.
+
+`-refine_hold_polar_h true` puts a harmonic distance restraint (`-refine_hold_polar_h_force`,
+default 5 Eh/Å²) on every H bound to N/O/F/S **in the reference structure**, at the reference bond
+length, for the accurate optimisation only:
+
+```
+ConfSearch: holding 7 polar X-H bond(s) at their reference length during REFINE (k = 5 Eh/A^2)
+            -- prevents proton transfer into a tautomer
+```
+
+A bond sitting at its equilibrium feels no force from the restraint, so the reported energies are
+essentially unperturbed; only a proton that starts to leave feels anything. C-H bonds are left
+alone deliberately — they do not migrate, and restraining them would only stiffen the molecule.
 
 ## Formatting
 

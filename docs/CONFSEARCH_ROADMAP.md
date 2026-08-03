@@ -155,10 +155,33 @@ pair, and whether the crossing should respect the symmetry permutations already 
 ### 6. Open bugs found Jul 26, 2026 (see docs/CONFSEARCH_PROPOSALS.md handover for detail)
 - **`topology_mode=auto` global default**: reproduces a 1312 kJ/mol energy/geometry mismatch in plain
   `-opt`; only ConfSearch children were switched to `constant`.
-- **Uninitialised access in `GFNFF::getGFNFFBondParameters`**: avoided, not explained (ASAN pending).
+- **Uninitialised access in `GFNFF::getGFNFFBondParameters`**: TRIGGER IDENTIFIED (Aug 1, 2026). It fires on
+  repeated force-field re-initialisation: `OptimizerDriver::Initialize()` called `setMolecule()` for every
+  structure, so a caller optimising many geometries of ONE molecule through one shared calculator (ConfGen)
+  re-entered the parameter generation once per proposal and segfaulted reproducibly in `cli_confgen_02`.
+  Worked around with the opt-in `reuse_calculator` (coordinates only). The underlying wild pointer in the
+  parameter generation is still unexplained -- ASAN still pending.
 - **`ecomp_*` tests**: must be checked against the pre-`24c9b8d` state (the `Repulsion` term was added
   to the decomposition they compare).
 - **P0 dihedral restraint** is the pending lever for the recombination phase (72 % clash loss).
+
+### 7. Cumulative bias pool tears the molecule apart — MEASURED Aug 1, 2026 (open)
+Measured on WEKLQ (107 atoms, C34H55N11O7), full 5-cycle dual run, 20 ps/MD, `alpha 0.5`, `k 0.01`,
+14 threads (`scratchpad/weklq/x_t20`):
+- New surviving snapshots per cycle: **62 / 1 / 0 / 0 / 0**. From cycle 3 on, *every* newly deposited
+  pool structure fails the topology gate (152/152, 434/434, 530/562). Cycles 3-5 = 54 MD runs, 1060
+  deposits, **zero** contribution, **56 % of the total runtime**.
+- Cause: all 434 rejects of cycle 4 miss **exactly one and the same bond** (N38-C39, amide N-Calpha,
+  1.462 A in the reference); the fragments end up a median **234 A** apart (max 448 A) at only
+  **+557 kJ/mol** GFN-FF. The RMSD bias saturates the intact conformational space and then buys its
+  reward the cheap way: a departing fragment adds unbounded RMSD for one bond energy.
+- Runtime split of that run (3730 s): MD 6.8 %, topology gate + repair 8.1 %, GFN-FF opt 0.6 %,
+  ConfScan dedup 20.7 %, **GFN2 re-opt 60.9 %**, initial/final 2.9 %. The Phase-3b re-optimisation
+  repeats on the *identical* 52 structures in cycles 1-4 (energies equal to every printed digit).
+- Levers: bound/reset the hill pool per cycle (`rmsd_mtd_max_gaussians` is per-run, not per-search);
+  keep bond lengths in range inside the MD instead of filtering afterwards; use "new survivors per
+  cycle" as a stagnation criterion (detects stagnation, not completeness); skip Phase 3b when the
+  accepted ensemble is unchanged.
 
 ## Verification anchors
 - Bit-identity of the Phase-B MTD refactor (perms off): byte-identical `.mtd.xyz`/`.bias.xyz` vs the
