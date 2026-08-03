@@ -391,6 +391,30 @@ as a `std::max` over all pairs closer than `getrmsd_thresh`, so **one** outlier 
 190 kJ/mol and 7480 of 7484 structures were rejected as "duplicates" (4 conformers left). The
 `std::max` derivation is still fragile for other callers.
 
+## 10b. Keeping the wrong species in the bias (`-bias_rejected`, opt-in)
+
+A structure that fails the topology check is the wrong *species*, so it must not enter the ensemble
+— but the RMSD-MTD bias is purely geometric (the stored energy is metadata and never enters the
+force), so the region it occupies can still be marked as visited. `-bias_rejected true` deposits
+those structures as persistent hills; they stay out of the cumulative pool and out of the seed
+selection.
+
+```
+ConfSearch: 32 topology-rejected structure(s) deposited as persistent hills -- they stay out of the
+            ensemble, but the next trajectory is pushed away from them
+```
+
+Measured on the 107-atom peptide (one 600 K cycle, 32 rejects / 64 valid): the rejects sit
+2.24–3.54 Å (median 2.82) from the nearest valid conformer, while the valid conformers sit
+2.20–4.80 Å from *each other*, and **none** of the 32 is within the 1.25 Å deduplication threshold
+of a valid structure. A hill on a reject is therefore no closer to a good conformer than the hills
+the search already places on its own minima.
+
+What it does not do: the proton transfer that produces those rejects happens during the
+**optimisation** of a snapshot, so the trajectory never visits the rejected geometry itself. Section
+11 addresses the cause — and with `-hold_polar_h` those structures survive as neutral conformers and
+enter the bias on the regular path anyway.
+
 ## 11. Holding the polar X-H bonds during every optimisation (`-hold_polar_h`, opt-in)
 
 A proton transfer turns a conformer into a **tautomer**, which the topology filter then discards —

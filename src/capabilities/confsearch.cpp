@@ -916,6 +916,7 @@ void ConfSearch::start()
         // Claude Generated (Aug 2026): what actually reached the ensemble this cycle -- the number
         // the closing summary needs, and the one that used to be missing from it.
         int ensemble_kept = 0;
+        std::vector<BiasStructure> rejected_bias; // -bias_rejected: hills on the wrong species
         std::vector<Molecule*> candidates;
         if (!no_new_bias_structures) {
             FileIterator file(md_accepted);
@@ -955,6 +956,21 @@ void ConfSearch::start()
                             }
                             if (found) break;
                         }
+                    }
+                    // Claude Generated (Aug 2026): a rejected structure is the wrong SPECIES, not a bad
+                    // geometry -- the RMSD-MTD bias is purely geometric and its stored energy is
+                    // metadata that never enters the force, so the region can still be marked as
+                    // visited. Measured: the rejects sit 2.24-3.54 A from the nearest valid conformer,
+                    // i.e. no closer than the valid conformers sit to each other (2.20-4.80 A), so a
+                    // hill here does not swamp a good structure.
+                    if (m_bias_rejected && m_bias_pool) {
+                        BiasStructure bs;
+                        bs.geometry = mol->getGeometry();
+                        bs.energy = mol->Energy();
+                        bs.counter = m_opt_feedback_height;
+                        bs.temperature = m_currentT;
+                        bs.persistent = true;
+                        rejected_bias.push_back(std::move(bs));
                     }
                     rejected_topo++;
                     delete mol;
@@ -1266,6 +1282,13 @@ void ConfSearch::start()
             }
         }
 
+        if (!rejected_bias.empty() && m_bias_pool) {
+            const int n_rej = static_cast<int>(rejected_bias.size());
+            m_bias_pool->depositBatch(rejected_bias);
+            CurcumaLogger::result_fmt("ConfSearch: {} topology-rejected structure(s) deposited as persistent "
+                                      "hills -- they stay out of the ensemble, but the next trajectory is "
+                                      "pushed away from them", n_rej);
+        }
         if (!feedback.empty()) {
             m_bias_pool->depositBatch(feedback);
             if (m_opt_feedback_prune_snapshots) {
@@ -3258,6 +3281,7 @@ void ConfSearch::LoadControlJson()
     m_bias_reset = m_config.get<std::string>("bias_reset");
     m_reduce_prefilter_window = m_config.get<double>("reduce_prefilter_window");
     m_reduce_prefilter_energy_tol = m_config.get<double>("reduce_prefilter_energy_tol");
+    m_bias_rejected = m_config.get<bool>("bias_rejected");
     m_hold_polar_h = m_config.get<bool>("hold_polar_h");
     m_hold_polar_h_force = m_config.get<double>("hold_polar_h_force");
     // Claude Generated (Jun 2026): efficiency/robustness controls
