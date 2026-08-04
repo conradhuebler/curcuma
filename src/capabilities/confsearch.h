@@ -372,6 +372,10 @@ private:
     /* Claude Generated (Aug 2026): optional per-repetition schedules for the two bias
      * parameters (see mtd_alpha_schedule). Empty = one value for the whole run. */
     std::vector<double> m_mtd_alpha_schedule, m_mtd_k_schedule;
+    double m_verify_best = 1.0;   ///< tolerance in kJ/mol for the recomputed cycle minimum (0 = off)
+    /** Recompute the energy of `mol` with a fresh calculator at `method`.
+     *  @return the recomputed energy, or NaN if it could not be obtained. */
+    double RecomputeEnergy(const Molecule& mol, const std::string& method) const;
     bool m_hold_polar_h = false;
     double m_hold_polar_h_force = 5.0;
     /** Harmonic distance restraints on the polar X-H bonds of a reference structure (json form).
@@ -482,7 +486,12 @@ private:
     RestartState m_restart;                     // populated by loadCheckpoint() on resume
     double m_best_energy = std::numeric_limits<double>::infinity();    // exploration best (md_method), persisted
     double m_initial_energy = std::numeric_limits<double>::infinity(); // cycle-1 exploration reference, persisted
-    std::string m_cumulative_file;              // path to the cumulative output (set in start())
+    std::string m_cumulative_file;
+    /** Claude Generated (Aug 2026): md-side collection of every topology-valid minimum of the run,
+     *  appended per cycle and handed to the recombination as its description basis. Deliberately
+     *  unfiltered -- the state and contact statistics need the higher-lying structures too, and the
+     *  seed pool (which the energy window truncates at 50 kJ/mol) is the wrong source for that. */
+    std::string m_cumulative_md_file;              // path to the cumulative output (set in start())
     std::vector<int> m_elements;                // atomic numbers of the system (set after pre-opt / on resume)
     Molecule m_topo_ref;                        // reference structure defining m_topo_matrix (persisted)
     std::string m_gpu = "none";                 // Claude Generated (Jul 2026): GPU backend, forwarded to every child
@@ -597,6 +606,7 @@ private:
     PARAM(confgen_consensus, Bool, false, "Phase 3c additionally assembles structures DE NOVO from the individually most favourable torsion states, walking away from the ensemble one torsion at a time. Measured: every chemically valid assembly was a new conformer, but they sit high in energy and each costs a build plus two optimisations -- hence off by default.", "Proposals", {})
     PARAM(reduce_prefilter_window, Double, 100.0, "Energy window in kJ/mol above the cycle minimum that a RELAXED structure must fall into before it enters the RMSD deduplication. The deduplication is quadratic (133 structures take ~170 s, 10000 would take days), while a structure 400 kJ/mol above the minimum is not a relevant conformer. 0 disables the window.", "Filtering", {})
     PARAM(reduce_prefilter_energy_tol, Double, 1.0e-6, "Two relaxed structures whose energies agree to within this many Hartree ended in the SAME minimum and only one is passed to the deduplication. Snapshots from a biased trajectory collapse onto few minima, so this removes the bulk at O(N log N) instead of O(N^2). A tolerance this tight cannot merge two genuinely different conformers by accident; the RMSD pass still decides everything else. 0 disables it.", "Filtering", {})
+    PARAM(verify_best, Double, 1.0, "Recompute the energy of the cycle's lowest structure with a FRESH calculator and correct it if it deviates by more than this many kJ/mol; 0 disables the check. The lowest structure sets the energy window and the running best, so a single wrong energy discards the whole cycle -- measured on a 107-atom peptide, a recombination proposal carried -18.968697 Eh while its geometry recomputes to -18.577015 Eh (1028 kJ/mol), passed the topology check, became the \"new best\" and left the cycle with 0 structures in the ensemble. The check costs one single point per cycle and is repeated up to five times, so several corrupted energies in a row are caught too.", "Filtering", {})
     PARAM(mtd_alpha_schedule, String, "", "Per-repetition schedule for the hill width, as a comma-separated list (e.g. \"0.325,0.5,0.7\"). Entry i is used in repetition i of every temperature stage; if the list is shorter than -repeat, the last entry is kept. Empty = the single value from -rmsd_mtd_alpha, unchanged behaviour. Motivated by a 43-run parameter sweep on a 107-atom peptide: the three repetitions have different jobs -- the first starts from ONE structure and should produce seeds cheaply (alpha 0.325 / k 0.1 gave 103 conformers per 1000 s), the last runs on a good seed pool and should buy depth (alpha 0.7 / k 0.05 reached -18.7869 Eh but cost 8072 s). A single value cannot do both.", "MD", {})
     PARAM(mtd_k_schedule, String, "", "Per-repetition schedule for the hill height, same syntax and rules as -mtd_alpha_schedule. Measured: k matters far less than alpha -- 0.05 and 0.1 are equivalent within noise, 0.01 loses depth, 0.2 doubles the runtime without gain.", "MD", {})
     PARAM(bias_rejected, Bool, false, "Deposit structures that FAILED the topology check as persistent hills in the bias pool instead of discarding them. They are chemically the wrong species (a tautomer, a reaction product), so they must not enter the ensemble -- but the metadynamics bias is purely geometric and does not care: a hill there tells the next trajectory that this region has been visited. Measured on a 107-atom peptide, one 600 K cycle: the 32 rejected zwitterions sit 2.24-3.54 A (median 2.82) from the nearest valid conformer, while valid conformers sit 2.20-4.80 A from each other -- so a hill on a reject is no closer to a good structure than the hills the search already places on its own minima. Note what this does NOT do: the proton transfer happens during the OPTIMISATION of a snapshot, so the trajectory never visits the rejected geometry itself; use -hold_polar_h to stop the transfer at its source.", "Filtering", {})

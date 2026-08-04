@@ -478,6 +478,8 @@ void ConfSearch::start()
     // The structures are already optimised, so the file is named ".cumulative.opt.xyz"
     // to match PerformFilter's "<f>.opt.xyz" convention for the final ConfScan below.
     m_cumulative_file = outputPath(p + ".cumulative.opt.xyz");
+    m_cumulative_md_file = outputPath(p + ".cumulative." + m_md_method + ".xyz");
+    std::ofstream(m_cumulative_md_file).close();
     const std::string& cumulative_file = m_cumulative_file; // alias for the existing in-loop appends
     if (resumed)
         writeMolVectorToFile(m_restart.cumulative, m_cumulative_file); // rebuild in the new BMT dir
@@ -996,6 +998,36 @@ void ConfSearch::start()
                 lowest_energy = std::min(lowest_energy, mol->Energy());
             }
         }
+
+        // Claude Generated (Aug 2026): the lowest structure decides everything downstream -- the
+        // energy window of the cumulative pool, the running best, the seed ranking. One wrong energy
+        // therefore discards a whole cycle, and it happens: a recombination proposal was written with
+        // -18.968697 Eh while the same geometry recomputes to -18.577015 Eh (1028 kJ/mol apart). Check
+        // the minimum against a fresh calculator and correct it; repeat, because the structure that
+        // moves up may be followed by another corrupted one.
+        if (m_verify_best > 0.0 && !candidates.empty()) {
+            for (int attempt = 0; attempt < 5; ++attempt) {
+                auto it = std::min_element(candidates.begin(), candidates.end(),
+                    [](const Molecule* a, const Molecule* b) { return a->Energy() < b->Energy(); });
+                if (it == candidates.end())
+                    break;
+                const double stored = (*it)->Energy();
+                const double checked = RecomputeEnergy(**it, m_md_method);
+                if (!std::isfinite(checked))
+                    break;
+                const double dev = std::abs(checked - stored) * 2625.5;
+                if (dev <= m_verify_best)
+                    break;
+                CurcumaLogger::warn_fmt("ConfSearch: the lowest {} structure carried {:.6f} Eh but recomputes to "
+                                        "{:.6f} Eh ({:.1f} kJ/mol apart) -- energy corrected. A stale energy here "
+                                        "would set the energy window and discard the rest of the cycle.",
+                    m_md_method, stored, checked, dev);
+                (*it)->setEnergy(checked);
+            }
+            lowest_energy = std::numeric_limits<double>::infinity();
+            for (const auto* mol : candidates)
+                lowest_energy = std::min(lowest_energy, mol->Energy());
+        }
         // Claude Generated (Jul 2026): per-cycle ensemble + most stable structure on the exploration
         // level. Written here, from the topology-valid candidates, i.e. exactly the set the cycle
         // contributes -- the working files (".bias.opt.accepted.xyz") are overwritten by the next
@@ -1003,6 +1035,14 @@ void ConfSearch::start()
         if (m_cycle_output && !candidates.empty())
             if (last_repetition)
                 WriteCycleEnsemble(cycle_tag, m_md_method, candidates);
+
+        // Claude Generated (Aug 2026): md-side collection over the whole run. It is the description
+        // basis of the recombination -- a single cycle delivers a handful of structures (6 in one
+        // measured case) against 29 torsions and over 100 contacts, which is no basis for a statistic.
+        if (!m_cumulative_md_file.empty() && !candidates.empty()) {
+            for (const auto* mol : candidates)
+                mol->appendXYZFile(m_cumulative_md_file);
+        }
 
         // Update the running global minimum across all cycles (anchor for seed selection).
         if (lowest_energy < m_global_min)
@@ -1765,6 +1805,33 @@ nlohmann::json ConfSearch::FilterConfig(const std::string& energy_method, int th
     // theory -- see the cumulative-append sites in start().
     scan["reuse_energies"] = true;
     return scan;
+}
+
+
+double ConfSearch::RecomputeEnergy(const Molecule& mol, const std::string& method) const
+{
+    // Claude Generated (Aug 2026): a FRESH calculator, deliberately not a shared one -- the point of
+    // the check is to catch an energy that a long-lived calculator produced on a drifted internal
+    // state (GFN-FF topology re-derivation shifts the energy scale, and the shift then survives into
+    // every following structure).
+    try {
+        nlohmann::json cfg = ChildConfig(method, 1);
+        cfg["verbosity"] = 0;
+        EnergyCalculator calc(method, cfg);
+        Molecule copy = mol;
+        copy.setCharge(m_charge);
+        copy.setSpin(m_spin);
+        calc.setMolecule(copy.getMolInfo());
+        const int saved = CurcumaLogger::get_verbosity();
+        CurcumaLogger::set_verbosity(0);
+        const double e = calc.CalculateEnergy(false);
+        CurcumaLogger::set_verbosity(saved);
+        if (calc.HasNan() || calc.Error() || !std::isfinite(e))
+            return std::numeric_limits<double>::quiet_NaN();
+        return e;
+    } catch (...) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
 }
 
 std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann::json& parameter,
@@ -2653,6 +2720,13 @@ int ConfSearch::PerformConfGen(const std::string& f, const std::string& method)
     // Claude Generated (Aug 2026): one memory per run, so a stage repetition does not rebuild
     // the combinations an earlier one already tried.
     cfg["proposal_memory_file"] = outputPath(Basename() + ".s4_proposals_tried.txt");
+    // Description from everything the run has found so far, templates from this cycle (see
+    // ConfGen PARAM analysis_file).
+    if (!m_cumulative_md_file.empty()) {
+        std::ifstream check(m_cumulative_md_file);
+        if (check.good())
+            cfg["analysis_file"] = m_cumulative_md_file;
+    }
 
     int added = 0;
     {
@@ -3298,6 +3372,7 @@ void ConfSearch::LoadControlJson()
     m_reduce_prefilter_window = m_config.get<double>("reduce_prefilter_window");
     m_reduce_prefilter_energy_tol = m_config.get<double>("reduce_prefilter_energy_tol");
     m_bias_rejected = m_config.get<bool>("bias_rejected");
+    m_verify_best = m_config.get<double>("verify_best");
     {
         const std::string a = m_config.get<std::string>("mtd_alpha_schedule");
         const std::string k = m_config.get<std::string>("mtd_k_schedule");

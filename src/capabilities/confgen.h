@@ -96,6 +96,12 @@ private:
         double energy = 0.0;          ///< total energy, Hartree
         std::map<std::string, double> terms; ///< energy decomposition, Hartree
         bool valid = false;           ///< topology matches the reference structure
+        /** Claude Generated (Aug 2026): this frame comes from the file the run was called with (the
+         *  current cycle) rather than from -analysis_file. Only such frames may serve as geometric
+         *  templates: building around a structure of an earlier cycle would re-explore ground the
+         *  search has already covered. The DESCRIPTION uses every frame -- that is the point of the
+         *  separation, since the state and contact statistics need as many structures as possible. */
+        bool from_input = true;
     };
 
     /// Aggregated result for one state transition of one torsion.
@@ -232,6 +238,12 @@ private:
         std::vector<int> states;   ///< target state vector
         int template_frame = -1;   ///< ensemble member the geometry was built from
         int distance = 0;          ///< Hamming distance to that template
+        /** Claude Generated (Aug 2026): smallest Hamming distance to ANY structure the run has
+         *  already seen or already tried -- the coverage half of the selection. Ranking a proposal
+         *  by its predicted energy alone uses the one quantity that three measurements found to be a
+         *  poor predictor; ranking it by novelty alone throws away that the terms do relate to the
+         *  final energy. Both enter the score, see PARAM proposal_ranking. */
+        int novelty = 0;
         /**
          * Claude Generated (Aug 2026): an NCI move instead of a torsion move. Entries are
          * (index into m_nci_pairs, desired presence 0/1) relative to the template. Empty for the
@@ -391,6 +403,12 @@ private:
     bool m_couplings = true;
     bool m_generate = false;
     int m_max_proposals = 50, m_proposal_templates = 5, m_proposal_depth = 2;
+    std::string m_analysis_file;
+    std::string m_proposal_ranking = "mixed";
+    int m_concerted_max = 5;
+    mutable std::map<std::string, double> m_reference_terms; ///< terms of the deepest structure (see fitModel)
+    mutable std::set<std::vector<int>> m_patterns_before; ///< contact patterns from the memory file
+    double m_proposal_novelty_weight = 0.5;   ///< extra structures for the description (see PARAM analysis_file)
     double m_clash_factor = 1.2, m_new_rmsd = 1.0, m_topology_factor = 1.3;
     // Claude Generated (Jul 2026): restrained build (P0). See buildProposalGeometry().
     bool m_restrained_build = true;
@@ -419,7 +437,8 @@ private:
     std::string m_proposal_memory_file;
     mutable std::set<std::vector<int>> m_proposed_before; ///< loaded from proposal_memory_file
     void loadProposalMemory();
-    void appendProposalMemory(const std::vector<std::vector<int>>& states) const;
+    void appendProposalMemory(
+        const std::vector<std::pair<std::vector<int>, std::vector<int>>>& entries) const;
     int m_consensus_max = 3;
     double m_nci_form_distance = 1.90, m_nci_break_distance = 3.50, m_nci_restraint_force = 1.0;
 
@@ -444,6 +463,10 @@ private:
     PARAM(min_pairs, Int, 1, "Minimum number of matched pairs required before a state transition is reported.", "Analysis", {})
     PARAM(generate, Bool, false, "Generate new conformer proposals: enumerate state vectors that the ensemble does not contain, build them, optimise them and report which ones are genuinely new. Off by default because it runs one geometry optimisation per proposal.", "Generation", {})
     PARAM(max_proposals, Int, 50, "Maximum number of proposals built and optimised, ordered by the additive-model estimate.", "Generation", {})
+    PARAM(concerted_max, Int, 5, "Number of CONCERTED proposals: one torsion change and one hydrogen-bond change in the SAME restrained optimisation, built on top of the two separate move sets. Reason from the measurements: the NCI move alone keeps its target pattern in 7 of 13 cases but lands in an already known minimum in 6 of those 7 -- changing one bond does not by itself change the basin, because the backbone has to follow. The torsion move alone ignores the term that carries +58 % of the energy spread. 0 disables them.", "NCI", {})
+    PARAM(proposal_ranking, String, "mixed", "How the enumerated candidates are ordered before the budget cuts them off: energy = by the additive model alone (the behaviour up to Aug 2026), coverage = by the largest Hamming distance to everything already seen or tried, mixed = both, weighted by -proposal_novelty_weight. Measured background: the model predicts energies badly (cross-validated it explains ~30 % of the spread, and a delta model between the two surfaces even degrades the ranking), while the descriptions SEPARATE excellently -- 141 of 142 structures carry a distinct contact pattern. Ordering by energy alone therefore uses the weak property of the description and ignores the strong one.", "Proposals", {})
+    PARAM(proposal_novelty_weight, Double, 0.5, "Weight of the novelty term in -proposal_ranking mixed: 0 = energy only, 1 = coverage only. Both contributions are standardised over the candidate set, so the weight is comparable across systems.", "Proposals", {})
+    PARAM(analysis_file, String, "", "Additional structures used for the DESCRIPTION only -- torsion states, contact patterns, the additive model and the novelty check. Geometric templates still come from the file the run was called with. Motivated by the measured weakness of the statistics: a cycle of a search delivers a handful of structures (6 in one measured case), while 29 torsions with up to 11 states each and over 100 contacts need far more to be estimated at all. The cumulative pool of the whole run is one to two orders of magnitude larger and costs nothing to reuse.", "Proposals", {})
     PARAM(proposal_templates, Int, 5, "Number of lowest-energy ensemble members used as geometric templates.", "Generation", {})
     PARAM(proposal_depth, Int, 2, "Maximum number of torsions changed simultaneously relative to a template (Hamming distance).", "Generation", {})
     PARAM(clash_factor, Double, 1.2, "A built structure is rejected when a non-bonded atom pair comes closer than this factor times the sum of their covalent radii. The default is deliberately close to the BOND-DETECTION criterion (~1.3): a built structure that puts two atoms inside bonding distance makes the force field derive a new bond, and the optimisation then relaxes into a different molecule, not a conformer.", "Generation", {})

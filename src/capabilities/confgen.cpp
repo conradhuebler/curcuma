@@ -73,6 +73,10 @@ void ConfGen::LoadControlJson()
     m_generate = m_config.get<bool>("generate");
     m_max_proposals = m_config.get<int>("max_proposals");
     m_proposal_templates = m_config.get<int>("proposal_templates");
+    m_analysis_file = m_config.get<std::string>("analysis_file");
+    m_proposal_ranking = m_config.get<std::string>("proposal_ranking");
+    m_concerted_max = m_config.get<int>("concerted_max");
+    m_proposal_novelty_weight = m_config.get<double>("proposal_novelty_weight");
     m_proposal_depth = m_config.get<int>("proposal_depth");
     m_clash_factor = m_config.get<double>("clash_factor");
     m_new_rmsd = m_config.get<double>("new_rmsd");
@@ -285,6 +289,7 @@ bool ConfGen::analyseEnsemble()
 {
     // ---- 1. read the ensemble -------------------------------------------------------------------
     std::vector<Molecule> input;
+    std::vector<bool> is_template;      // parallel to `input`: may this frame serve as a template?
     {
         FileIterator file(Filename());
         while (!file.AtEnd()) {
@@ -293,7 +298,38 @@ bool ConfGen::analyseEnsemble()
                 mol.setCharge(m_charge);
                 mol.setSpin(m_spin);
                 input.push_back(mol);
+                is_template.push_back(true);
             }
+        }
+    }
+    // Claude Generated (Aug 2026): additional structures for the DESCRIPTION only. The state and
+    // contact statistics are estimated from a handful of structures when only one cycle is available
+    // -- 6 in one measured case, against 29 torsions and over 100 contacts -- while the cumulative
+    // pool of the run holds one to two orders of magnitude more. Templates stay with the file the
+    // run was called with; the novelty check profits as well, because a proposal that matches an
+    // older structure is then correctly recognised as known.
+    if (!m_analysis_file.empty() && m_analysis_file != Filename()) {
+        std::ifstream check(m_analysis_file);
+        if (check.good()) {
+            int added = 0;
+            FileIterator file(m_analysis_file);
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                if (mol.AtomCount() > 0) {
+                    mol.setCharge(m_charge);
+                    mol.setSpin(m_spin);
+                    input.push_back(mol);
+                    is_template.push_back(false);
+                    added++;
+                }
+            }
+            if (added > 0 && m_verbosity >= 1)
+                CurcumaLogger::result_fmt("ConfGen: description built from {} structure(s) of this call plus "
+                                          "{} from {} -- templates remain the ones of this call",
+                    static_cast<int>(is_template.size()) - added, added, m_analysis_file);
+        } else {
+            CurcumaLogger::warn("ConfGen: -analysis_file not readable, using the input structures only: "
+                + m_analysis_file);
         }
     }
     if (input.size() < 2) {
@@ -323,6 +359,21 @@ bool ConfGen::analyseEnsemble()
     calc_config["threads"] = m_threads;
     calc_config["charge"] = m_charge;
     calc_config["spin"] = m_spin;
+    // Claude Generated (Aug 2026): freeze the GFN-FF topology, as every other child computation of
+    // the search does (ConfSearch::ChildConfig). Without it the "auto" mode re-derives the topology
+    // whenever an atom moved far enough, and each re-derivation shifts the ENERGY SCALE -- with one
+    // calculator shared across all proposals (reuse_calculator) that shift then survives into every
+    // later structure. Measured on a 107-atom peptide: a proposal was written with -18.968697 Eh
+    // while the same geometry recomputes to -18.577015 Eh, a difference of 1028 kJ/mol. It passed
+    // the topology check, became the cycle's "new best", and its energy window then excluded every
+    // real conformer -- the cycle ended with 0 structures in the ensemble.
+    {
+        const json full = m_config.exportConfig();
+        if (full.contains("gfnff") && full["gfnff"].is_object())
+            calc_config["gfnff"] = full["gfnff"];
+        if (!(calc_config.contains("gfnff") && calc_config["gfnff"].contains("topology_mode")))
+            calc_config["gfnff"]["topology_mode"] = "constant";
+    }
     m_calculator = std::make_unique<EnergyCalculator>(m_method, calc_config);
     EnergyCalculator& calculator = *m_calculator;
     calculator.setMolecule(input.front().getMolInfo());
@@ -340,9 +391,11 @@ bool ConfGen::analyseEnsemble()
 
     m_frames.clear();
     m_frames.reserve(input.size());
-    for (const Molecule& mol : input) {
+    for (std::size_t frame_index = 0; frame_index < input.size(); ++frame_index) {
+        const Molecule& mol = input[frame_index];
         Frame frame;
         frame.molecule = mol;
+        frame.from_input = frame_index < is_template.size() ? is_template[frame_index] : true;
 
         if (mol.AtomCount() != input.front().AtomCount()) {
             rejected_topology++;
@@ -784,11 +837,26 @@ std::vector<ConfGen::Coupling> ConfGen::doubleMutantCycles() const
 ConfGen::ModelFit ConfGen::fitModel(int level) const
 {
     ModelFit fit;
+    // Reference for the term columns: the deepest structure of the ensemble. Any fixed member does,
+    // the choice only shifts the intercept -- but a member (rather than the mean) keeps every column
+    // a difference between two REAL structures, which is what the matched-pair analysis reports too.
+    if (m_reference_terms.empty() && !m_frames.empty()) {
+        const Frame* deepest = &m_frames.front();
+        for (const Frame& f : m_frames)
+            if (f.energy < deepest->energy)
+                deepest = &f;
+        m_reference_terms = deepest->terms;
+    }
     switch (level) {
     case 0: fit.name = "constant"; break;
     case 1: fit.name = "torsions (marginals)"; break;
     case 2: fit.name = "torsions + pair couplings"; break;
     case 3: fit.name = "NCI pattern"; break;
+    // Claude Generated (Aug 2026): these two are CONSISTENCY CHECKS, not predictions --
+    // E = sum of its own terms is an identity, so a perfect score is the expected result and
+    // says only that the decomposition is complete and the differences are formed correctly.
+    case 5: fit.name = "[Pruefung] Energieterme (Identitaet)"; break;
+    case 6: fit.name = "[Pruefung] Torsionen + NCI + Terme"; break;
     default: fit.name = "torsions + NCI pattern"; break;
     }
 
@@ -799,10 +867,17 @@ ConfGen::ModelFit ConfGen::fitModel(int level) const
     struct Column {
         int torsion_a = -1, state_a = -1, torsion_b = -1, state_b = -1;
         int nci = -1; ///< index into m_nci_pairs; >= 0 marks an NCI column
+        /** Claude Generated (Aug 2026): name of an energy term of the decomposition. Such a column
+         *  holds the term's VALUE, not an indicator -- the description then contains the physical
+         *  quantities themselves instead of only the discrete pattern that produces them. Ten
+         *  columns for the whole force field, so it costs nothing in degrees of freedom, and the
+         *  terms are what the variance attribution identified as the carriers of the spread. */
+        std::string term;
     };
     std::vector<Column> columns;
-    const bool use_torsions = (level == 1 || level == 2 || level == 4);
-    const bool use_nci = (level == 3 || level == 4);
+    const bool use_torsions = (level == 1 || level == 2 || level == 4 || level == 6);
+    const bool use_nci = (level == 3 || level == 4 || level == 6);
+    const bool use_terms = (level == 5 || level == 6);
     if (use_torsions)
         for (int t : informative)
             for (std::size_t s = 1; s < m_state_centres[t].size(); ++s)
@@ -836,8 +911,11 @@ ConfGen::ModelFit ConfGen::fitModel(int level) const
         if (ranked.size() > budget)
             ranked.resize(budget);
         for (const auto& [contrast, k] : ranked)
-            columns.push_back({ -1, -1, -1, -1, k });
+            columns.push_back({ -1, -1, -1, -1, k, {} });
     }
+    if (use_terms)
+        for (const auto& [name, value] : m_frames.front().terms)
+            columns.push_back({ -1, -1, -1, -1, -1, name });
 
     const int n = static_cast<int>(m_frames.size());
     const int p = static_cast<int>(columns.size()) + 1; // + intercept
@@ -848,7 +926,20 @@ ConfGen::ModelFit ConfGen::fitModel(int level) const
         row(0) = 1.0;
         for (int c = 0; c < static_cast<int>(columns.size()); ++c) {
             const Column& col = columns[c];
-            if (col.nci >= 0) {
+            if (!col.term.empty()) {
+                // Claude Generated (Aug 2026): the CHANGE of the term, not its value. The raw terms
+                // are dominated by their offset -- the bond term sits at -50360 kJ/mol and varies by
+                // 13 -- so as absolute columns they are numerically indistinguishable from the
+                // intercept and the decomposition drops them (measured: rank 1 for twelve columns).
+                // Referenced to the deepest structure of the ensemble, the column holds exactly what
+                // distinguishes the conformers, in the same units as the target.
+                const auto it = f.terms.find(col.term);
+                const auto ir = m_reference_terms.find(col.term);
+                row(c + 1) = ((it != f.terms.end()) ? it->second : 0.0)
+                    - ((ir != m_reference_terms.end()) ? ir->second : 0.0);
+                continue;   // ohne dies liefe der Torsionszweig darunter weiter -- und der liest
+                            // f.states[-1] und ueberschreibt den Wert (Ursache des Rangs 1)
+            } else if (col.nci >= 0) {
                 row(c + 1) = (col.nci < static_cast<int>(f.nci.size()) && f.nci[col.nci]) ? 1.0 : 0.0;
                 continue;
             }
@@ -1001,6 +1092,9 @@ void ConfGen::reportModelComparison(const std::vector<ModelFit>& fits) const
     }
     CurcumaLogger::info("RMSE_cv/medAE_cv are out-of-sample (k-fold). RMSE_in always improves with more "
                         "parameters and is shown for reference only.");
+    CurcumaLogger::info("Rows marked [Pruefung] are not models: the energy is the SUM of its own terms, so "
+                        "reproducing it from them is an identity. A perfect score there confirms that the "
+                        "decomposition is complete -- it predicts nothing.");
 
     if (fits.size() < 3)
         return;
@@ -1252,27 +1346,47 @@ void ConfGen::loadProposalMemory()
     while (std::getline(in, line)) {
         if (line.empty() || line[0] == '#')
             continue;
-        std::vector<int> states;
-        std::istringstream is(line);
-        int v;
-        while (is >> v)
-            states.push_back(v);
+        // Claude Generated (Aug 2026): one line holds BOTH descriptions, separated by '|' --
+        // the torsion state vector and the contact pattern of the structure that was built. Both
+        // move sets read both, so a torsion proposal knows which patterns already exist and an NCI
+        // move knows which state vectors do. Files written before this change carry only the state
+        // vector and are still read correctly.
+        const std::size_t bar = line.find('|');
+        auto parse = [](const std::string& s) {
+            std::vector<int> v;
+            std::istringstream is(s);
+            int x;
+            while (is >> x) v.push_back(x);
+            return v;
+        };
+        std::vector<int> states = parse(bar == std::string::npos ? line : line.substr(0, bar));
         if (!states.empty())
             m_proposed_before.insert(states);
+        if (bar != std::string::npos) {
+            std::vector<int> pattern = parse(line.substr(bar + 1));
+            if (!pattern.empty())
+                m_patterns_before.insert(pattern);
+        }
     }
     if (!m_proposed_before.empty())
         CurcumaLogger::result_fmt("ConfGen: {} state vector(s) were already proposed earlier and are skipped",
             static_cast<int>(m_proposed_before.size()));
 }
 
-void ConfGen::appendProposalMemory(const std::vector<std::vector<int>>& states) const
+void ConfGen::appendProposalMemory(
+    const std::vector<std::pair<std::vector<int>, std::vector<int>>>& entries) const
 {
-    if (m_proposal_memory_file.empty() || states.empty())
+    if (m_proposal_memory_file.empty() || entries.empty())
         return;
     std::ofstream out(m_proposal_memory_file, std::ios::app);
-    for (const auto& s : states) {
-        for (std::size_t i = 0; i < s.size(); ++i)
-            out << s[i] << (i + 1 < s.size() ? " " : "");
+    for (const auto& [states, pattern] : entries) {
+        for (std::size_t i = 0; i < states.size(); ++i)
+            out << states[i] << (i + 1 < states.size() ? " " : "");
+        if (!pattern.empty()) {
+            out << " |";
+            for (int v : pattern)
+                out << " " << v;
+        }
         out << "\n";
     }
 }
@@ -1426,8 +1540,13 @@ std::vector<ConfGen::Proposal> ConfGen::generateNCIProposals() const
 
     // Templates: the same lowest-energy members the torsion stage uses, so both move sets start from
     // the same structures and their yields are comparable.
-    std::vector<int> order(m_frames.size());
-    std::iota(order.begin(), order.end(), 0);
+    std::vector<int> order;
+    for (std::size_t i = 0; i < m_frames.size(); ++i)
+        if (m_frames[i].from_input)
+            order.push_back(static_cast<int>(i));
+    if (order.empty())
+        for (std::size_t i = 0; i < m_frames.size(); ++i)
+            order.push_back(static_cast<int>(i));
     std::sort(order.begin(), order.end(), [this](int a, int b) { return m_frames[a].energy < m_frames[b].energy; });
     const int n_templates = std::min<int>(std::max(1, m_proposal_templates), static_cast<int>(order.size()));
 
@@ -1479,18 +1598,58 @@ std::vector<ConfGen::Proposal> ConfGen::generateNCIProposals() const
     // ensemble (a bond many structures realise is a plausible one to ask for) and, at equal
     // population, the smaller move. Deliberately not the additive model -- it was measured to
     // explain ~15 % of the energy variation and has no say over the NCI pattern at all.
-    std::sort(proposals.begin(), proposals.end(), [&](const Proposal& a, const Proposal& b) {
-        auto score = [&](const Proposal& p) {
+    // Claude Generated (Aug 2026): same two-sided ordering as the torsion proposals. The population
+    // term is the "is this pattern plausible" half -- a bond many structures form is easier to form
+    // again -- and it is exactly the half that was measured to drive TOWARDS over-bridged structures
+    // and AWAY from the reference (9 bridges built, the reference has 6). The coverage term is the
+    // counterweight: distance in contact space to every pattern the run has already produced.
+    {
+        std::vector<double> pop(proposals.size()), nov(proposals.size());
+        for (std::size_t i = 0; i < proposals.size(); ++i) {
             int s = 0;
-            for (const auto& [k, on] : p.nci_targets)
+            for (const auto& [k, on] : proposals[i].nci_targets)
                 s += on ? population[k] : -population[k];
-            return s;
+            pop[i] = -static_cast<double>(s);       // klein ist gut, daher Vorzeichen umdrehen
+            // Muster dieses Vorschlags, und sein Abstand zu allem bereits Beobachteten
+            std::vector<int> pattern = m_frames[proposals[i].template_frame].nci;
+            for (const auto& [k, on] : proposals[i].nci_targets)
+                if (k < static_cast<int>(pattern.size()))
+                    pattern[k] = on;
+            int best = std::numeric_limits<int>::max();
+            for (const Frame& f : m_frames) {
+                if (f.nci.size() != pattern.size())
+                    continue;
+                int d = 0;
+                for (std::size_t j = 0; j < pattern.size() && d < best; ++j)
+                    d += (f.nci[j] != pattern[j]);
+                best = std::min(best, d);
+            }
+            proposals[i].novelty = (best == std::numeric_limits<int>::max()) ? 0 : best;
+            nov[i] = proposals[i].novelty;
+        }
+        auto zscore = [](std::vector<double> v) {
+            const double mean = v.empty() ? 0.0 : std::accumulate(v.begin(), v.end(), 0.0) / v.size();
+            double var = 0.0;
+            for (double x : v) var += (x - mean) * (x - mean);
+            const double sd = v.size() > 1 ? std::sqrt(var / (v.size() - 1)) : 0.0;
+            for (double& x : v) x = (sd > 1e-12) ? (x - mean) / sd : 0.0;
+            return v;
         };
-        const int sa = score(a), sb = score(b);
-        if (sa != sb)
-            return sa > sb;
-        return a.nci_targets.size() < b.nci_targets.size();
-    });
+        pop = zscore(pop); nov = zscore(nov);
+        const double w = (m_proposal_ranking == "energy") ? 0.0
+            : (m_proposal_ranking == "coverage") ? 1.0
+            : std::max(0.0, std::min(1.0, m_proposal_novelty_weight));
+        std::vector<std::size_t> order(proposals.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+            return (1.0 - w) * pop[a] - w * nov[a] < (1.0 - w) * pop[b] - w * nov[b];
+        });
+        std::vector<Proposal> sorted;
+        sorted.reserve(proposals.size());
+        for (std::size_t i : order)
+            sorted.push_back(std::move(proposals[i]));
+        proposals = std::move(sorted);
+    }
     if (static_cast<int>(proposals.size()) > m_nci_max_proposals)
         proposals.resize(m_nci_max_proposals);
     return proposals;
@@ -1532,6 +1691,30 @@ bool ConfGen::restrainedBuildNCI(const Proposal& p, Molecule& driven) const
     opt_config["max_iterations"] = m_restraint_max_iterations;
     opt_config["distance_restraints"] = Optimization::GeometryRestraints::toJson(restraints);
 
+    // Claude Generated (Aug 2026): CONCERTED move. When the proposal also changes torsion states
+    // relative to its template, their dihedral restraints act in the SAME optimisation as the
+    // distance restraints. The two move sets otherwise pull one after the other and each undoes part
+    // of the other's work: a new hydrogen bond usually needs the backbone to turn, and a turned
+    // backbone usually breaks the old bond. Only both together express what actually happens.
+    {
+        std::vector<Optimization::DihedralRestraint> dihedrals;
+        const std::vector<int>& from = m_frames[p.template_frame].states;
+        for (std::size_t k = 0; k < m_torsions.size() && k < p.states.size(); ++k) {
+            if (k < from.size() && p.states[k] == from[k])
+                continue;
+            if (p.states[k] < 0 || p.states[k] >= static_cast<int>(m_state_centres[k].size()))
+                continue;
+            Optimization::DihedralRestraint d;
+            d.i = m_torsions[k].i; d.j = m_torsions[k].j;
+            d.k = m_torsions[k].k; d.l = m_torsions[k].l;
+            d.target = m_state_centres[k][p.states[k]] * M_PI / 180.0;  // Zustandsmitten in Grad
+            d.force = m_restraint_force;
+            dihedrals.push_back(d);
+        }
+        if (!dihedrals.empty())
+            opt_config["dihedral_restraints"] = Optimization::GeometryRestraints::toJson(dihedrals);
+    }
+
     Molecule mol = m_frames[p.template_frame].molecule;
     auto result = Optimization::OptimizationDispatcher::optimizeStructure(
         &mol, Optimization::OptimizerType::LBFGSPP, m_calculator.get(), opt_config);
@@ -1571,9 +1754,15 @@ std::vector<ConfGen::Proposal> ConfGen::generateProposals() const
     // repetition rebuilds and re-optimises it.
     known.insert(m_proposed_before.begin(), m_proposed_before.end());
 
-    // Templates: the lowest-energy members (their geometry is the starting point).
-    std::vector<int> order(m_frames.size());
-    std::iota(order.begin(), order.end(), 0);
+    // Templates: the lowest-energy members OF THIS CALL (their geometry is the starting point).
+    // Frames contributed by -analysis_file describe, they do not seed -- see Frame::from_input.
+    std::vector<int> order;
+    for (std::size_t i = 0; i < m_frames.size(); ++i)
+        if (m_frames[i].from_input)
+            order.push_back(static_cast<int>(i));
+    if (order.empty())
+        for (std::size_t i = 0; i < m_frames.size(); ++i)
+            order.push_back(static_cast<int>(i));
     std::sort(order.begin(), order.end(), [this](int a, int b) { return m_frames[a].energy < m_frames[b].energy; });
     const int n_templates = std::min<int>(std::max(1, m_proposal_templates), static_cast<int>(order.size()));
 
@@ -1609,14 +1798,91 @@ std::vector<ConfGen::Proposal> ConfGen::generateProposals() const
             }
         };
 
-    for (int i = 0; i < n_templates; ++i) {
+    // Claude Generated (Aug 2026): a template whose whole neighbourhood has already been built
+    // contributes nothing but consumes one of the few template slots. Since the deepest structures of
+    // a cycle are largely the same ones from repetition to repetition, the enumeration otherwise
+    // drills the same Hamming ball again and again while the memory quietly rejects every candidate.
+    // Walk the energy ranking and count only the templates that actually produced something.
+    int used = 0, skipped = 0;
+    for (std::size_t i = 0; i < order.size() && used < n_templates; ++i) {
+        const std::size_t before = proposals.size();
         std::vector<int> states = m_frames[order[i]].states;
         mutate(order[i], states, 0, 0);
+        if (proposals.size() > before)
+            used++;
+        else
+            skipped++;
     }
+    if (skipped > 0 && m_verbosity >= 1)
+        CurcumaLogger::result_fmt("ConfGen: {} template(s) skipped -- every combination in their "
+                                  "neighbourhood had already been built; {} productive template(s) used",
+            skipped, used);
 
-    // Order by the model estimate and keep the requested number.
-    std::sort(proposals.begin(), proposals.end(),
-        [](const Proposal& a, const Proposal& b) { return a.predicted < b.predicted; });
+    // Claude Generated (Aug 2026): order by energy AND by coverage. The two properties of the
+    // description are not equally good: predicting the energy from it works poorly (cross-validated
+    // ~30 % of the spread; a delta model between the two surfaces even makes the ranking worse),
+    // while separating structures works very well (141 of 142 carry a distinct contact pattern).
+    // Ordering by the model alone therefore uses the weak property and ignores the strong one --
+    // but the terms DO relate to the final energy, so dropping them would be equally one-sided.
+    // Both contributions are standardised over the candidate set and mixed; the old behaviour is
+    // -proposal_ranking energy.
+    {
+        // "already seen" = every state vector of the description ensemble plus everything the run
+        // has tried before (the memory), so a later repetition does not re-explore the same shell.
+        std::vector<const std::vector<int>*> seen;
+        seen.reserve(m_frames.size() + m_proposed_before.size());
+        for (const Frame& f : m_frames)
+            seen.push_back(&f.states);
+        for (const std::vector<int>& v : m_proposed_before)
+            seen.push_back(&v);
+        for (Proposal& p : proposals) {
+            int best = std::numeric_limits<int>::max();
+            for (const std::vector<int>* v : seen) {
+                if (v->size() != p.states.size())
+                    continue;
+                int d = 0;
+                for (std::size_t i = 0; i < v->size() && d < best; ++i)
+                    d += ((*v)[i] != p.states[i]);
+                best = std::min(best, d);
+            }
+            p.novelty = (best == std::numeric_limits<int>::max()) ? 0 : best;
+        }
+        auto zscore = [](std::vector<double> v) {
+            const double mean = v.empty() ? 0.0 : std::accumulate(v.begin(), v.end(), 0.0) / v.size();
+            double var = 0.0;
+            for (double x : v) var += (x - mean) * (x - mean);
+            const double sd = v.size() > 1 ? std::sqrt(var / (v.size() - 1)) : 0.0;
+            for (double& x : v) x = (sd > 1e-12) ? (x - mean) / sd : 0.0;
+            return v;
+        };
+        std::vector<double> e, d;
+        e.reserve(proposals.size()); d.reserve(proposals.size());
+        for (const Proposal& p : proposals) { e.push_back(p.predicted); d.push_back(p.novelty); }
+        e = zscore(e); d = zscore(d);
+        const double w = (m_proposal_ranking == "energy") ? 0.0
+            : (m_proposal_ranking == "coverage") ? 1.0
+            : std::max(0.0, std::min(1.0, m_proposal_novelty_weight));
+        std::vector<std::size_t> order(proposals.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::vector<double> score(proposals.size());
+        for (std::size_t i = 0; i < proposals.size(); ++i)
+            score[i] = (1.0 - w) * e[i] - w * d[i];   // klein ist gut: tiefe Energie, grosser Abstand
+        std::stable_sort(order.begin(), order.end(),
+            [&](std::size_t a, std::size_t b) { return score[a] < score[b]; });
+        std::vector<Proposal> sorted;
+        sorted.reserve(proposals.size());
+        for (std::size_t i : order)
+            sorted.push_back(std::move(proposals[i]));
+        proposals = std::move(sorted);
+        if (m_verbosity >= 1 && !proposals.empty())
+            CurcumaLogger::result_fmt("ConfGen: candidate ordering '{}' (novelty weight {:.2f}); the {} kept "
+                                      "proposals have Hamming distance {} to {} from everything seen so far",
+                m_proposal_ranking, w, std::min<int>(m_max_proposals, static_cast<int>(proposals.size())),
+                std::min_element(proposals.begin(), proposals.begin() + std::min<std::size_t>(m_max_proposals, proposals.size()),
+                    [](const Proposal& a, const Proposal& b) { return a.novelty < b.novelty; })->novelty,
+                std::max_element(proposals.begin(), proposals.begin() + std::min<std::size_t>(m_max_proposals, proposals.size()),
+                    [](const Proposal& a, const Proposal& b) { return a.novelty < b.novelty; })->novelty);
+    }
     if (static_cast<int>(proposals.size()) > m_max_proposals)
         proposals.resize(m_max_proposals);
     return proposals;
@@ -2083,6 +2349,14 @@ void ConfGen::start()
                 fits.push_back(fitModel(3));
                 fits.push_back(fitModel(4));
             }
+            // Claude Generated (Aug 2026): the energy terms themselves as columns. Ten continuous
+            // numbers against hundreds of indicators -- and unlike the indicators they carry the
+            // physical quantity rather than the pattern that produces it. Whether that is enough is
+            // decided on the same folds as everything else.
+            if (!m_frames.empty() && !m_frames.front().terms.empty()) {
+                fits.push_back(fitModel(5));
+                fits.push_back(fitModel(6));
+            }
             reportModelComparison(fits);
         }
     }
@@ -2091,9 +2365,26 @@ void ConfGen::start()
         std::vector<Proposal> proposals = generateProposals();
         // Record what we are about to try, so a later call does not repeat it.
         {
-            std::vector<std::vector<int>> tried;
-            for (const Proposal& pr : proposals)
-                tried.push_back(pr.states);
+            // Claude Generated (Aug 2026): remember BOTH descriptions. The state vector is known
+            // before the build, the contact pattern only after it -- and exactly that pattern is
+            // what the other move set needs in order not to propose the same thing again.
+            std::vector<std::pair<std::vector<int>, std::vector<int>>> tried;
+            for (const Proposal& pr : proposals) {
+                std::vector<int> pattern;
+                if (pr.geometry.AtomCount() > 0 && !m_nci_pairs.empty()) {
+                    const std::vector<NCIContact> found = detectNCI(pr.geometry, {});
+                    pattern.assign(m_nci_pairs.size(), 0);
+                    std::map<std::string, int> index;
+                    for (std::size_t k = 0; k < m_nci_pairs.size(); ++k)
+                        index[m_nci_pairs[k].label()] = static_cast<int>(k);
+                    for (const NCIContact& c : found) {
+                        const auto it = index.find(c.label());
+                        if (it != index.end() && it->second < static_cast<int>(pattern.size()))
+                            pattern[it->second] = 1;
+                    }
+                }
+                tried.emplace_back(pr.states, std::move(pattern));
+            }
             appendProposalMemory(tried);
         }
         // Claude Generated (Aug 2026): the second move set. Appended to the same list, so both kinds
