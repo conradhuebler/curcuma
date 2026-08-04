@@ -36,6 +36,7 @@
 #include <iomanip>
 #include <map>
 #include <numeric>
+#include <random>
 #include <set>
 #include <sstream>
 
@@ -78,6 +79,8 @@ void ConfGen::LoadControlJson()
     m_concerted_max = m_config.get<int>("concerted_max");
     m_proposal_novelty_weight = m_config.get<double>("proposal_novelty_weight");
     m_proposal_depth = m_config.get<int>("proposal_depth");
+    m_proposal_candidate_cap = m_config.get<int>("proposal_candidate_cap");
+    m_proposal_seed = m_config.get<int>("proposal_seed");
     m_clash_factor = m_config.get<double>("clash_factor");
     m_new_rmsd = m_config.get<double>("new_rmsd");
     m_topology_factor = m_config.get<double>("topology_factor");
@@ -1769,20 +1772,49 @@ std::vector<ConfGen::Proposal> ConfGen::generateProposals() const
     const std::vector<std::vector<double>> coefficients = additiveCoefficients();
     std::set<std::vector<int>> proposed;
 
+    // Claude Generated (Aug 2026): how large is the neighbourhood we are about to walk? The number of
+    // candidates at exactly Hamming distance d is the elementary symmetric polynomial e_d of the
+    // per-torsion alternative counts (how many OTHER states each torsion offers) -- computable in
+    // O(n * depth) before a single candidate is built. Measured on a 107-atom peptide with 29
+    // torsions: ~1e2 at depth 1, 4e3 at depth 2, 1e5 at depth 3, 3e6 at depth 4 and 5e7 at depth 5.
+    // The last one needs about 10 GB for the state vectors alone and aborted with std::bad_alloc,
+    // which is why -proposal_depth was effectively capped at 3.
+    std::vector<double> alternatives;
+    alternatives.reserve(informative.size());
+    for (int t : informative)
+        alternatives.push_back(std::max<int>(0, static_cast<int>(m_state_centres[t].size()) - 1));
+    const int max_depth = std::max(1, m_proposal_depth);
+    std::vector<double> shell(max_depth + 1, 0.0);
+    shell[0] = 1.0;
+    for (double a : alternatives)
+        for (int d = max_depth; d >= 1; --d)
+            shell[d] += shell[d - 1] * a;
+    double ball = 0.0;
+    for (int d = 1; d <= max_depth; ++d)
+        ball += shell[d];
+    const double cap = std::max(1, m_proposal_candidate_cap);
+    const bool sampled = ball > cap;
+
+    // One candidate, whichever way it was produced: enumerated or sampled.
+    auto record = [&](int template_frame, const std::vector<int>& states, int depth) {
+        if (depth <= 0 || known.count(states) || proposed.count(states))
+            return false;
+        Proposal p;
+        p.states = states;
+        p.template_frame = template_frame;
+        p.distance = depth;
+        for (std::size_t t = 0; t < states.size(); ++t)
+            if (states[t] >= 0 && states[t] < static_cast<int>(coefficients[t].size()))
+                p.predicted += coefficients[t][states[t]];
+        proposed.insert(states);
+        proposals.push_back(std::move(p));
+        return true;
+    };
+
     // Enumerate mutations up to the requested Hamming depth around each template.
     std::function<void(int, std::vector<int>&, int, int)> mutate =
         [&](int template_frame, std::vector<int>& states, int start, int depth) {
-            if (depth > 0 && !known.count(states) && !proposed.count(states)) {
-                Proposal p;
-                p.states = states;
-                p.template_frame = template_frame;
-                p.distance = depth;
-                for (std::size_t t = 0; t < states.size(); ++t)
-                    if (states[t] >= 0 && states[t] < static_cast<int>(coefficients[t].size()))
-                        p.predicted += coefficients[t][states[t]];
-                proposed.insert(states);
-                proposals.push_back(std::move(p));
-            }
+            record(template_frame, states, depth);
             if (depth >= m_proposal_depth)
                 return;
             for (std::size_t idx = start; idx < informative.size(); ++idx) {
@@ -1798,20 +1830,83 @@ std::vector<ConfGen::Proposal> ConfGen::generateProposals() const
             }
         };
 
+    // Claude Generated (Aug 2026): the same neighbourhood, drawn instead of walked. Depth is drawn
+    // proportional to the shell sizes and the torsions proportional to how many alternatives they
+    // offer, so the sample follows the ball it replaces rather than favouring the near shells. The
+    // draws are independent, hence duplicates -- they cost one set lookup and are dropped.
+    const unsigned int seed = (m_proposal_seed != 0)
+        ? static_cast<unsigned int>(m_proposal_seed)
+        : static_cast<unsigned int>(1234567u + 977u * m_frames.size() + 131u * m_proposed_before.size());
+    std::mt19937 rng(seed);
+    std::discrete_distribution<int> depth_dist(shell.begin() + 1, shell.end());
+    auto draw = [&](int template_frame, const std::vector<int>& base, int budget) {
+        std::vector<double> weight;
+        for (int attempt = 0; attempt < budget; ++attempt) {
+            const int d = depth_dist(rng) + 1;
+            weight.assign(alternatives.begin(), alternatives.end());
+            std::vector<int> states = base;
+            int changed = 0;
+            for (int k = 0; k < d; ++k) {
+                const double total = std::accumulate(weight.begin(), weight.end(), 0.0);
+                if (total <= 0.0)
+                    break;
+                double x = std::uniform_real_distribution<double>(0.0, total)(rng);
+                std::size_t idx = 0;
+                for (; idx + 1 < weight.size(); ++idx) {
+                    x -= weight[idx];
+                    if (x <= 0.0)
+                        break;
+                }
+                weight[idx] = 0.0;                      // each torsion at most once per candidate
+                const int t = informative[idx];
+                const int n_states = static_cast<int>(m_state_centres[t].size());
+                if (n_states < 2 || t >= static_cast<int>(states.size()))
+                    continue;
+                const int original = states[t];
+                int st = 0;
+                if (original >= 0 && original < n_states) {
+                    st = std::uniform_int_distribution<int>(0, n_states - 2)(rng);
+                    if (st >= original)
+                        st += 1;                         // skip the state the template already has
+                } else {
+                    st = std::uniform_int_distribution<int>(0, n_states - 1)(rng);
+                }
+                states[t] = st;
+                changed++;
+            }
+            record(template_frame, states, changed);
+        }
+    };
+
     // Claude Generated (Aug 2026): a template whose whole neighbourhood has already been built
     // contributes nothing but consumes one of the few template slots. Since the deepest structures of
     // a cycle are largely the same ones from repetition to repetition, the enumeration otherwise
     // drills the same Hamming ball again and again while the memory quietly rejects every candidate.
     // Walk the energy ranking and count only the templates that actually produced something.
+    const int per_template = std::max(1, static_cast<int>(cap) / std::max(1, n_templates));
     int used = 0, skipped = 0;
     for (std::size_t i = 0; i < order.size() && used < n_templates; ++i) {
         const std::size_t before = proposals.size();
         std::vector<int> states = m_frames[order[i]].states;
-        mutate(order[i], states, 0, 0);
+        if (sampled)
+            draw(order[i], states, per_template);
+        else
+            mutate(order[i], states, 0, 0);
         if (proposals.size() > before)
             used++;
         else
             skipped++;
+    }
+    if (m_verbosity >= 1) {
+        if (sampled)
+            CurcumaLogger::result_fmt("ConfGen: the neighbourhood up to depth {} holds {:.3g} combinations -- "
+                                      "too many to enumerate; {} distinct unknown ones were drawn from it "
+                                      "(seed {}), the bound is -proposal_candidate_cap",
+                max_depth, ball, proposals.size(), seed);
+        else if (m_verbosity >= 2)
+            CurcumaLogger::info_fmt("ConfGen: neighbourhood up to depth {} enumerated exactly ({:.0f} combinations, "
+                                    "{} of them not yet known)",
+                max_depth, ball, proposals.size());
     }
     if (skipped > 0 && m_verbosity >= 1)
         CurcumaLogger::result_fmt("ConfGen: {} template(s) skipped -- every combination in their "

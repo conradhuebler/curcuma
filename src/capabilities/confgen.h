@@ -403,6 +403,9 @@ private:
     bool m_couplings = true;
     bool m_generate = false;
     int m_max_proposals = 50, m_proposal_templates = 5, m_proposal_depth = 2;
+    // Claude Generated (Aug 2026): bound on the candidate list, see generateProposals().
+    int m_proposal_candidate_cap = 200000;
+    int m_proposal_seed = 0;
     std::string m_analysis_file;
     std::string m_proposal_ranking = "mixed";
     int m_concerted_max = 5;
@@ -468,7 +471,9 @@ private:
     PARAM(proposal_novelty_weight, Double, 0.5, "Weight of the novelty term in -proposal_ranking mixed: 0 = energy only, 1 = coverage only. Both contributions are standardised over the candidate set, so the weight is comparable across systems.", "Proposals", {})
     PARAM(analysis_file, String, "", "Additional structures used for the DESCRIPTION only -- torsion states, contact patterns, the additive model and the novelty check. Geometric templates still come from the file the run was called with. Motivated by the measured weakness of the statistics: a cycle of a search delivers a handful of structures (6 in one measured case), while 29 torsions with up to 11 states each and over 100 contacts need far more to be estimated at all. The cumulative pool of the whole run is one to two orders of magnitude larger and costs nothing to reuse.", "Proposals", {})
     PARAM(proposal_templates, Int, 5, "Number of lowest-energy ensemble members used as geometric templates.", "Generation", {})
-    PARAM(proposal_depth, Int, 2, "Maximum number of torsions changed simultaneously relative to a template (Hamming distance).", "Generation", {})
+    PARAM(proposal_depth, Int, 2, "Maximum number of torsions changed simultaneously relative to a template (Hamming distance). Depths beyond 3 are only usable together with -proposal_candidate_cap, which switches the enumeration to sampling.", "Generation", {})
+    PARAM(proposal_candidate_cap, Int, 200000, "Upper bound on the number of candidate state vectors held in memory per call. The Hamming ball around a template grows combinatorially with -proposal_depth: measured on a 107-atom peptide with 29 torsions it holds about 4e3 combinations at depth 2, 1e5 at depth 3 and 5e7 at depth 5 -- enumerating the last one exhausted the memory (std::bad_alloc). Below the cap the ball is still enumerated EXACTLY, so nothing changes at the usual depths; above it the same ball is randomly SAMPLED down to the cap. Since the budget keeps only -max_proposals candidates anyway, the sample costs nothing but the guarantee of completeness -- and completeness at depth 5 is unattainable in any case.", "Generation", {})
+    PARAM(proposal_seed, Int, 0, "Seed of the candidate sampling (only used when the ball exceeds -proposal_candidate_cap). 0 = derive a seed from the ensemble size and the number of remembered proposals, so a later repetition of the same run draws a DIFFERENT sample instead of the same one again. Any other value fixes the sample and makes the run reproducible.", "Generation", {})
     PARAM(clash_factor, Double, 1.2, "A built structure is rejected when a non-bonded atom pair comes closer than this factor times the sum of their covalent radii. The default is deliberately close to the BOND-DETECTION criterion (~1.3): a built structure that puts two atoms inside bonding distance makes the force field derive a new bond, and the optimisation then relaxes into a different molecule, not a conformer.", "Generation", {})
     PARAM(topology_factor, Double, 1.3, "Covalent-radius factor for the topology check of optimised proposals. A proposal whose bond list differs from the reference is a reaction product, not a conformer, and is rejected. Lower than Molecule's default 1.5, which counts compressed 1-3 contacts as bonds.", "Generation", {})
     PARAM(new_rmsd, Double, 1.0, "Best-fit RMSD in Angstrom above which an optimised proposal counts as a new conformer.", "Generation", {})

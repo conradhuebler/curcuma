@@ -369,6 +369,9 @@ curcuma -confgen ensemble.xyz -method gfnff
 | `-couplings` | `true` | measure double-mutant cycles and run the model comparison |
 | `-cv_folds` | `5` | cross-validation folds; below 2 disables the model comparison |
 | `-charge` / `-spin` / `-threads` | `0` / `0` / `1` | passed to the energy method |
+| `-proposal_depth` | `2` | torsions changed at once; 4 and beyond need the cap below |
+| `-proposal_candidate_cap` | `200000` | candidates held in memory; below it the ball is enumerated exactly, above it sampled |
+| `-proposal_seed` | `0` | 0 = derive from ensemble + memory size (a repetition draws a different sample), any other value fixes it |
 
 Output (all through the BMT directory):
 
@@ -512,6 +515,51 @@ have a choice, and their best states are the populated ones, so the consensus is
 structure. The idea is sound but needs elements that carry the energy -- which the variance
 attribution says are the bridges, not the torsions. Composing over the NCI pattern in turn fails on
 the constraint count: six target distances do not determine 315 degrees of freedom (see below).
+
+### Depth beyond 3: the ball is sampled, not walked (`-proposal_candidate_cap`, Aug 2026)
+
+The move set is bounded by `-proposal_depth`, and until now that bound was not a choice but a memory
+limit. The number of state vectors at Hamming distance exactly `d` from a template is the elementary
+symmetric polynomial `e_d` of the per-torsion alternative counts; for WEKLQ (29 torsions, ~4.3 states
+each) the ball is:
+
+| depth | combinations | old behaviour |
+|---|---|---|
+| 1 | 9.6e1 | enumerated |
+| 2 | 4.4e3 | enumerated (the default) |
+| 3 | 1.3e5 | enumerated |
+| 4 | 3.0e6 | enumerated, ~1 GB |
+| 5 | 4.9e7 | **`std::bad_alloc`** |
+| 7 | 6.7e9 | hopeless |
+
+Every candidate was materialised twice (the `Proposal` plus the duplicate-check set), although the
+budget keeps only `-max_proposals` of them. The sizes are now computed BEFORE anything is built
+(`O(n * depth)`, exact). Below `-proposal_candidate_cap` (default 200000) the ball is enumerated
+exactly as before -- verified byte-identical at depth 2 -- above it the same ball is randomly
+sampled: the depth is drawn proportional to the shell sizes, the torsions proportional to how many
+alternatives they offer, so the sample follows the ball instead of favouring the near shells.
+`-proposal_seed 0` derives the seed from the ensemble and memory size, so a later repetition draws a
+different sample; any other value fixes it.
+
+Depth 4 now costs 21 s instead of a gigabyte, depth 5 and 7 run at all. **What that buys, measured on
+the same 398-structure ensemble** (30 proposals each, `coverage` ranking, torsion moves only):
+
+| depth | valid | new conformers | best vs ensemble minimum | RMSD to GOAT | H-bond Hamming | torsions apart |
+|---|---|---|---|---|---|---|
+| 2 (default) | 32 | 28 | **-0.4 kJ/mol** | 3.87 A | 10 | 12 |
+| 3 | 29 | 29 | **-9.1 kJ/mol** | 4.28 A | 11 | 14 |
+| 4 | 27 | 27 | -1.6 kJ/mol | 4.17 A | 10 | 12 |
+| 5 | 23 | 23 | +28.4 kJ/mol | **3.28 A** | **8** | **10** |
+| 7 | 22 | 20 | +20.0 kJ/mol | 3.43 A | 10 | 12 |
+| the ensemble itself | 398 | -- | -- | **2.61 A** | **6** | 11 |
+
+Two things follow, and they point in opposite directions. Deep moves produce almost exclusively new
+conformers (23 of 23, 27 of 27 -- against 28 of 32 at depth 2), and depth 5 gives the best contact
+overlap with the reference any generated set has reached. But they are energetically worse the deeper
+they go, and **not one of them beats the ensemble it came from** on any distance to GOAT. The
+diagnostic line `0 kept their target states` holds at every depth above 3: the built vector does not
+survive the free optimisation, the structure relaxes into some other basin. The depth limit was
+therefore real but it was not the binding constraint.
 
 ### What information would be needed to build the missing reference structure
 
