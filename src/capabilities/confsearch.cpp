@@ -584,6 +584,22 @@ void ConfSearch::start()
             m_md_method));
         md["T"] = m_currentT;
         md["temperature"] = m_currentT;
+        // Claude Generated (Aug 2026): per-repetition bias parameters. The repetitions of a stage do
+        // different jobs -- the first starts from a single structure and has to create seeds, the last
+        // works on a full pool and should buy depth -- and the measured optimum differs by a factor of
+        // ~80 in cost between those two ends. A list assigns one value per repetition; a shorter list
+        // holds its last entry, so "0.325,0.5,0.7" also works with -repeat 5.
+        auto schedule_value = [&](const std::vector<double>& sched, int rep) {
+            return sched[std::min(static_cast<std::size_t>(rep), sched.size() - 1)];
+        };
+        if (!m_mtd_alpha_schedule.empty())
+            md["rmsd_mtd_alpha"] = schedule_value(m_mtd_alpha_schedule, stage_rep);
+        if (!m_mtd_k_schedule.empty())
+            md["rmsd_mtd_k"] = schedule_value(m_mtd_k_schedule, stage_rep);
+        if (!m_mtd_alpha_schedule.empty() || !m_mtd_k_schedule.empty())
+            CurcumaLogger::result_fmt("ConfSearch: bias parameters for repetition {}/{}: alpha = {}, k = {}",
+                stage_rep + 1, stage_repeats,
+                md.value("rmsd_mtd_alpha", 10.0), md.value("rmsd_mtd_k", 0.01));
         // Claude Generated (Jun 2026): auto-enable RATTLE for hot cycles. A 1 fs step at high T
         // under-samples X-H stretches (period ~10 fs) -> energy drift / spurious bond breaking;
         // constraining them (mode 2 = H-only) stabilises the dynamics. Cooler cycles keep the
@@ -3282,6 +3298,14 @@ void ConfSearch::LoadControlJson()
     m_reduce_prefilter_window = m_config.get<double>("reduce_prefilter_window");
     m_reduce_prefilter_energy_tol = m_config.get<double>("reduce_prefilter_energy_tol");
     m_bias_rejected = m_config.get<bool>("bias_rejected");
+    {
+        const std::string a = m_config.get<std::string>("mtd_alpha_schedule");
+        const std::string k = m_config.get<std::string>("mtd_k_schedule");
+        if (!a.empty())
+            m_mtd_alpha_schedule = Tools::String2DoubleVec(a, ",");
+        if (!k.empty())
+            m_mtd_k_schedule = Tools::String2DoubleVec(k, ",");
+    }
     m_hold_polar_h = m_config.get<bool>("hold_polar_h");
     m_hold_polar_h_force = m_config.get<double>("hold_polar_h_force");
     // Claude Generated (Jun 2026): efficiency/robustness controls
