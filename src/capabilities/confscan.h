@@ -58,6 +58,13 @@ public:
         m_reorder_rules = reorder_rules;
         m_rmsd_threshold = rmsd_threshold;
         m_MaxHTopoDiff = MaxHTopoDiff;
+        /* Claude Generated (Aug 2026): heavy-atom mode. RMSDDriver::start() depletes the
+           protons inside the driver, so only the permutation search ran on heavy atoms
+           while the plain-RMSD short-circuit and the stored-rule reuse loop still saw the
+           full molecules - two different atom sets in one comparison, and every stored
+           (heavy-sized) rule was discarded by the reuse size check, disabling the reuse
+           pool completely. Reduce once, up front, so all three phases share one atom set. */
+        m_protons = config.value("protons", true) && !config.value("heavy", false);
         setAutoDelete(false);
     }
 
@@ -77,6 +84,8 @@ public:
     {
         m_reference = molecule;
         m_target = molecule;
+        if (!m_protons)
+            m_reference_cmp = m_reference.ProtonDepletedCopy();
     }
     void setTarget(const Molecule* molecule)
     {
@@ -85,7 +94,15 @@ public:
         m_target.CalculateRotationalConstants();
         m_target.setEnergy(molecule->Energy());
         m_target.setName(molecule->Name());
+        if (!m_protons)
+            m_target_cmp = m_target.ProtonDepletedCopy();
     }
+
+    /* Claude Generated (Aug 2026): the molecules the RMSD comparison actually runs on.
+       Identical to the full molecules unless heavy-atom mode is active - the descriptors
+       (Ia/Ib/Ic, persistent image, energy) always stay on the full structures. */
+    const Molecule& cmpReference() const { return m_protons ? m_reference : m_reference_cmp; }
+    const Molecule& cmpTarget() const { return m_protons ? m_target : m_target_cmp; }
     std::vector<int> ReorderRule() const { return m_reorder_rule; }
     void setReorderRules(const std::vector<std::vector<int>>& reorder_rules)
     {
@@ -101,6 +118,15 @@ public:
     double OldRMSD() const { return m_old_rmsd; }
     const Molecule* Reference() const { return &m_reference; }
     const Molecule* Target() const { return &m_target; }
+
+    /* Claude Generated (Jul 2026): per-comparison phase timing (ms) - see
+       docs/CONFSCAN_REORDER_TIMING_WP.md. Purely additive instrumentation, does not
+       affect filtering logic or thresholds. */
+    double TimePlainRMSD() const { return m_time_plain_rmsd; }
+    double TimeReuse() const { return m_time_reuse; }
+    double TimePermutation() const { return m_time_permutation; }
+    bool PlainRejected() const { return m_plain_rejected; }
+    bool PermutationAttempted() const { return m_permutation_attempted; }
 
     double Energy() const { return m_energy; }
 #ifdef WriteMoreInfo
@@ -118,8 +144,13 @@ public:
 
 private:
     bool m_keep_molecule = true, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false, m_refine_reuse = false;
+    bool m_protons = true; //!< false = compare heavy atoms only, see cmpReference()
     Molecule m_reference, m_target;
+    Molecule m_reference_cmp, m_target_cmp; //!< only maintained when m_protons == false
     double m_rmsd = 0, m_old_rmsd = 0, m_rmsd_threshold = 1, m_energy = 0;
+    /* Claude Generated (Jul 2026): per-comparison phase timing/outcome - additive instrumentation, see TimePlainRMSD() etc. above */
+    double m_time_plain_rmsd = 0.0, m_time_reuse = 0.0, m_time_permutation = 0.0;
+    bool m_plain_rejected = false, m_permutation_attempted = false;
     int m_MaxHTopoDiff;
     int m_threads = 1;
     std::vector<int> m_reorder_rule;
@@ -131,7 +162,9 @@ private:
     double m_pred_rmsd = 0;
 #endif
     dnn_input m_input;
-    bool m_verbosity = 1;
+    /* Claude Generated (Aug 2026): was declared bool while an int verbosity level is
+       assigned in the ctor - every level >= 1 collapsed to true. */
+    int m_verbosity = 1;
 };
 
 class ConfScanThreadNoReorder : public CxxThread {
@@ -180,7 +213,11 @@ public:
     }
 
 private:
-    bool m_keep_molecule = true, m_break_pool = false;
+    /* Claude Generated (Aug 2026): a re-declaration of m_break_pool used to live here,
+       shadowing CxxThread::m_break_pool so execute()'s write never reached
+       shouldBreakThreadPool(). The shadow is gone and execute() no longer writes the flag
+       at all - see the comment there for why the early break must stay off. */
+    bool m_keep_molecule = true;
     double m_DI = 0, m_DH = 0;
     Molecule m_reference, m_target;
 
@@ -303,6 +340,17 @@ private:
     std::size_t m_fail = 0, m_start = 0, m_end;
     std::vector<Molecule*> m_global_temp_list;
     int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0, m_skiped = 0, m_duplicated = 0, m_rejected_directly = 0, m_molalign_count = 0, m_molalign_success = 0;
+    /* Claude Generated (Jul 2026): per-pass phase-timing totals (ms) for the reorder pass - see
+       docs/CONFSCAN_REORDER_TIMING_WP.md. Reset at the top of Reorder(), reported in PrintPassSummary(). */
+    double m_time_gate = 0.0, m_time_plain_rmsd = 0.0, m_time_reuse = 0.0, m_time_permutation = 0.0;
+    int m_count_plain_rejected = 0, m_count_permutation_attempted = 0;
+    /* Claude Generated (Jul 2026): set unconditionally at the top of Reorder(), so PrintPassSummary
+       can tell "this pass went through Reorder()" apart from "the timers rounded to 0 ms" (millisecond
+       RunTimer resolution can truncate a fast small-ensemble pass to exactly 0.0). */
+    bool m_did_reorder_pass = false;
+    /* Claude Generated (Aug 2026): one-shot guard so the "reorder rule does not cover the
+       whole molecule" notice is reported once per run, not once per rejected structure. */
+    bool m_partial_rule_warned = false;
 
     std::string m_accepted_filename, m_1st_filename, m_2nd_filename, m_3rd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename, m_param_file, m_skip_file, m_perform_file, m_success_file, m_limit_file;
     std::multimap<double, int> m_ordered_list;
@@ -360,7 +408,7 @@ private:
 
     // --- Advanced Workflow Control ---
     PARAM(check_connections, Bool, false, "Check for changes in connectivity", "Advanced", {"check"})
-    PARAM(force_reorder, Bool, false, "Force reordering of every structure", "Advanced", {"forceReorder"})
+    PARAM(force_reorder, Bool, false, "Baseline/exhaustive mode: bypass the descriptor gate so every candidate-reference pair gets full RMSD/permutation evaluation, and collapse the Initial Pass + multi-strategy reorder loop into a single pass (plus Reuse pass). Slower, but not subject to descriptor-gate mis-filtering; useful to validate the default tiered strategy", "Advanced", {"forceReorder"})
     PARAM(skip_init, Bool, false, "Skip initial pass (no reordering)", "Advanced", {"skipinit"})
     PARAM(skip_reorder, Bool, false, "Skip main reordering pass", "Advanced", {"skipreorder"})
     PARAM(skip_reuse, Bool, false, "Skip final pass reusing found orders", "Advanced", {"skipreuse"})

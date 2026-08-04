@@ -411,7 +411,14 @@ private:
 
     // --- General & Threading ---
     PARAM(threads, Int, 1, "Number of threads for parallel execution.", "Performance", {})
-    PARAM(protons, Bool, true, "Include protons in the calculation (opposite of 'heavy').", "General", {"heavy"})
+    /* Claude Generated (Aug 2026): 'heavy' used to be a plain alias of 'protons', which
+       inverted its meaning - a bare CLI flag becomes true, so '-heavy' asked for
+       protons=true, i.e. the exact opposite of heavy-only, and only '-heavy false'
+       (or -rmsd.protons false) did what the help text promised. It is now its own
+       parameter with the documented polarity; the two are combined as
+       m_protons = protons && !heavy (see rmsd.cpp), so the defaults are unchanged. */
+    PARAM(protons, Bool, true, "Include protons in the calculation (opposite of 'heavy').", "General", {})
+    PARAM(heavy, Bool, false, "Use only heavy atoms, i.e. exclude protons (opposite of 'protons').", "General", {})
     PARAM(force_reorder, Bool, false, "Force reordering even if atom counts match.", "General", {"reorder"})
     PARAM(no_reorder, Bool, false, "Disable all reordering logic.", "General", {"noreorder"})
 

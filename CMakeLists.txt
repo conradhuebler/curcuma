@@ -163,7 +163,10 @@ FetchContent_Declare(LBFGSpp
 )
 FetchContent_Declare(CxxThreadPool
     GIT_REPOSITORY https://github.com/conradhuebler/CxxThreadPool.git
-    GIT_TAG        140625c509f245185ec486b5f5424b318c8ccef6
+    # 8b38c00: lost wakeup in the worker pool - m_wp_pending was decremented and
+    # notified without m_wp_mutex, hanging StartAndWait() forever. See AIChangelog
+    # 2026-08-03; ConfScan's threaded reorder was the reproducer.
+    GIT_TAG        8b38c0019f67f5efa33ffd773e132d2c8857adc4
     SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/CxxThreadPool
 )
 # ripser: header-only, no CMakeLists.txt at root — use Populate to avoid add_subdirectory
@@ -425,9 +428,11 @@ if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/json.hpp)
 endif()
 
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/stb_image_write.h)
-  file(DOWNLOAD https://raw.githubusercontent.com/syoyo/tinygltf/refs/heads/release/stb_image_write.h ${PROJECT_SOURCE_DIR}/external/stb_image_write.h
+  # Pinned to a commit (not "master") so the URL can't move under us again like the
+  # previous tinygltf mirror did (its "release" branch/path was removed upstream).
+  file(DOWNLOAD https://raw.githubusercontent.com/nothings/stb/1ee679ca2ef753a528db5ba6801e1067b40481b8/stb_image_write.h ${PROJECT_SOURCE_DIR}/external/stb_image_write.h
        TIMEOUT 60  # seconds
-       EXPECTED_HASH SHA256=bdbaa2c548ac9bde2913b6b46c4d315a04d2624c81ee1553390eb8fb2de2835d
+       EXPECTED_HASH SHA256=cbd5f0ad7a9cf4468affb36354a1d2338034f2c12473cf1a8e32053cb6914a05
        TLS_VERIFY ON)
 endif()
 

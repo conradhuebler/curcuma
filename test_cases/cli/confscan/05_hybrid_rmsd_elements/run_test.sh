@@ -25,7 +25,7 @@ run_test() {
     $CURCUMA -confscan conformers.xyz \
         -rmsd.method template \
         -rmsd.element 7,8 \
-        -confscan.threads 1 \
+        -confscan.threads 4 \
         -confscan.restart false \
         > stdout.log 2> stderr.log
     local exit_code=$?
