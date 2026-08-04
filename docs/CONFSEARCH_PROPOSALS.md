@@ -264,7 +264,7 @@ for a seed slot. No special case anywhere downstream.
 | `-confgen_phase` | `false` | run the recombination step (costs one optimisation per proposal) |
 | `-confgen_max_proposals` | `20` | structures built and optimised per cycle |
 | `-confgen_templates` | `3` | lowest-energy minima of the cycle used as templates |
-| `-confgen_depth` | `2` | torsions changed simultaneously |
+| `-confgen_depth` | `3` | torsions changed simultaneously (2 until Aug 2026, when the depth was a memory limit — see "Depth beyond 3" below) |
 | `-confgen_method` | `auto` | energy method of the step; `auto` = `md_method` if that is a force field, else `gfnff` |
 | `-confgen_nci_moves` | `true` | also propose hydrogen-bond moves (see the NCI section) |
 | `-confgen_consensus` | `false` | also build the de-novo consensus vector |

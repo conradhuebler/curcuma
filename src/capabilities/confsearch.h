@@ -361,7 +361,7 @@ private:
     int m_seed_rank = 1; // max lowest-energy seeds per cycle (0 = all in window; 1 = only most stable)
     int m_rattle_hot_mode = 2, m_topo_check_interval = 0, m_opt_feedback_height = 5;
     bool m_confgen_phase = false;
-    int m_confgen_max_proposals = 20, m_confgen_templates = 3, m_confgen_depth = 2;
+    int m_confgen_max_proposals = 20, m_confgen_templates = 3, m_confgen_depth = 3;
     std::string m_bias_reset = "never";
     double m_reduce_prefilter_window = 100.0;
     double m_reduce_prefilter_energy_tol = 1.0e-6;
@@ -600,7 +600,7 @@ private:
     PARAM(confgen_phase, Bool, false, "Run the torsion-recombination phase (ConfGen) after the per-cycle dedup: build torsion-state combinations the cycle's minima do not contain, optimise them and add the genuinely new conformers to the cycle. Off by default -- it costs one geometry optimisation per proposal.", "Proposals", {})
     PARAM(confgen_max_proposals, Int, 20, "Maximum number of recombined structures built and optimised per cycle.", "Proposals", {})
     PARAM(confgen_templates, Int, 3, "Number of lowest-energy minima of the cycle used as geometric templates for the recombination.", "Proposals", {})
-    PARAM(confgen_depth, Int, 2, "Maximum number of torsions changed simultaneously relative to a template.", "Proposals", {})
+    PARAM(confgen_depth, Int, 3, "Maximum number of torsions changed simultaneously relative to a template. Raised from 2 to 3 in Aug 2026, when the depth stopped being a memory limit (ConfGen -proposal_candidate_cap): measured on a 398-structure ensemble with 30 proposals per depth, 3 is where the move set is best -- every built structure is a new conformer (29 of 29, against 28 of 32 at depth 2) and the best of them is 9.1 kJ/mol below the ensemble minimum, ten times the gain at depth 2. Deeper still works (4, 5, 7 all run, the ball is then sampled instead of enumerated) and gives the largest descriptor distance, but the structures get energetically worse with every step and none of them came closer to a reference conformer than the ensemble they were built from.", "Proposals", {})
     PARAM(confgen_method, String, "auto", "Energy method for the recombination step. auto = md_method when that is a force field, gfnff otherwise -- the analysis needs a per-term energy decomposition, which only a force field provides, so a search that EXPLORES with gfn2 would otherwise lose the step entirely. When the method differs from md_method the proposals are re-optimised at md_method before they enter the ensemble, unless the accurate re-optimisation runs anyway and does it.", "Proposals", {})
     PARAM(confgen_nci_moves, Bool, true, "Phase 3c also proposes hydrogen-bond moves (break one bridge, form another observed elsewhere) built with distance restraints, not only torsion recombinations.", "Proposals", {})
     PARAM(confgen_consensus, Bool, false, "Phase 3c additionally assembles structures DE NOVO from the individually most favourable torsion states, walking away from the ensemble one torsion at a time. Measured: every chemically valid assembly was a new conformer, but they sit high in energy and each costs a build plus two optimisations -- hence off by default.", "Proposals", {})
