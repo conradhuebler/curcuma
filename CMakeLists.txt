@@ -400,9 +400,11 @@ if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/json.hpp)
 endif()
 
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/stb_image_write.h)
-  file(DOWNLOAD https://raw.githubusercontent.com/syoyo/tinygltf/refs/heads/release/stb_image_write.h ${PROJECT_SOURCE_DIR}/external/stb_image_write.h
+  # Pinned to a commit (not "master") so the URL can't move under us again like the
+  # previous tinygltf mirror did (its "release" branch/path was removed upstream).
+  file(DOWNLOAD https://raw.githubusercontent.com/nothings/stb/1ee679ca2ef753a528db5ba6801e1067b40481b8/stb_image_write.h ${PROJECT_SOURCE_DIR}/external/stb_image_write.h
        TIMEOUT 60  # seconds
-       EXPECTED_HASH SHA256=bdbaa2c548ac9bde2913b6b46c4d315a04d2624c81ee1553390eb8fb2de2835d
+       EXPECTED_HASH SHA256=cbd5f0ad7a9cf4468affb36354a1d2338034f2c12473cf1a8e32053cb6914a05
        TLS_VERIFY ON)
 endif()
 
