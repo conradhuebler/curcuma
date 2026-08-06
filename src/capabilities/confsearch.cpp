@@ -175,8 +175,15 @@ void ConfSearch::start()
 
     // Robustness controls: these self-reference inside SimpleMD (start fragment count / start
     // energy / target T / per-run inherited pool), so only the enable flags and windows are
-    // forwarded. temp_abort and rmsd_mtd_freeze_inherited default to ON in ConfSearch but OFF in
-    // SimpleMD -- pinned here so the divergence survives every layer above.
+    // forwarded, pinned here so they survive every layer above.
+    //
+    // Claude Generated (Aug 2026): temp_abort and rmsd_mtd_freeze_inherited were ON by default here
+    // and are NOT any more (see the PARAMs) -- the strided counter was expected to bound the
+    // cross-cycle growth on its own. Measured, it does not once k is raised: with -rmsd_mtd_k 0.05
+    // to 0.1 the tallest hill reached 2-98 Eh against a conformer spread of 0.03 Eh, and every MD
+    // of a later cycle was torn apart within 10-20 fs. The guards below (fragment gate on the
+    // deposit, geometry abort, the "handed on nothing" warning) make that visible and stop the pool
+    // from being poisoned, but they do not bound the height -- -rmsd_mtd_max_height does.
     md["topo_check"] = m_topo_check;
     md["topo_check_interval"] = m_topo_check_interval;
     md["epot_abort"] = m_epot_abort;
@@ -1604,6 +1611,10 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
     std::atomic<int> done_runs{ 0 };
     std::mutex counter_mtx;
     const auto phase_start = std::chrono::steady_clock::now();
+    // Claude Generated (Aug 2026): baseline for the "this phase produced nothing" diagnosis below.
+    const int pool_before = m_bias_pool ? m_bias_pool->biasStructureCount() : 0;
+    if (m_bias_pool)
+        m_bias_pool->resetRejectedDeposits();
 
     CxxThreadPool* pool = new CxxThreadPool;
     int index = 0;
@@ -1667,6 +1678,7 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
     // Phase 2 consumes) and "<base>.bias_pool.<method>.xyz" (the full pool, was ".mtd.xyz").
     const std::string snapshot_file = cycleStage("s1_explore", m_md_method) + ".xyz";
     const std::string pool_file = cycleStage("s1_bias_pool", m_md_method) + ".xyz";
+    int exported_total = 0;   // Claude Generated (Aug 2026): for the diagnosis after the block
     if (m_bias_pool && m_bias_pool->biasStructureCount() > 0 && !m_in_stack.empty()) {
         auto snapshot = m_bias_pool->snapshot();
         const Molecule& ref_mol = *m_in_stack[0];
@@ -1731,6 +1743,36 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
                                     "stride {} -- {} of {} are discarded unchecked. Set -max_bias_export 0 "
                                     "to keep them all.",
                 m_max_bias_export, stride, bias_count - exported, bias_count);
+        exported_total = exported;
+    }
+
+    // Claude Generated (Aug 2026): a phase that hands nothing on is the single most expensive
+    // silent failure this search has. Measured on a 107-atom peptide: six of seven cycles of four
+    // separate runs produced no snapshot at all, and the only trace was one unremarkable line
+    // among thousands -- the cause (bias hills of 27-98 Eh tearing the molecule apart within
+    // 10-20 fs) was invisible because the MD's own messages run at verbosity 0 inside ConfSearch.
+    // Say it loudly, and say what the pool looks like when it happens.
+    if (exported_total == 0) {
+        const int deposited = (m_bias_pool ? m_bias_pool->biasStructureCount() : 0) - pool_before;
+        const int rejected = m_bias_pool ? m_bias_pool->rejectedDeposits() : 0;
+        const double k = parameter.value("rmsd_mtd_k", 0.01);
+        const double tallest = k * (m_bias_pool ? m_bias_pool->maxCounter() : 0.0);
+        CurcumaLogger::warn_fmt("ConfSearch: this MD phase handed on NO new structure -- {} run(s), "
+                                "{} new deposit(s), {} deposit(s) refused because the molecule had "
+                                "fragmented, pool now {}. Nothing downstream can happen this cycle.",
+            index, deposited, rejected, m_bias_pool ? m_bias_pool->biasStructureCount() : 0);
+        if (tallest > 0.05)
+            CurcumaLogger::warn_fmt("ConfSearch: the tallest bias hill is W = k*counter = {:.2f} Eh "
+                                    "({:.0f} kJ/mol) at k = {:.3f}. That is far above the energy spread of "
+                                    "the conformers themselves, so the dynamics starts inside a mountain "
+                                    "and is torn apart instead of exploring. Bound it with "
+                                    "-rmsd_mtd_max_height, or lower -rmsd_mtd_k.",
+                tallest, tallest * 2625.5, k);
+        else if (rejected > 0)
+            CurcumaLogger::warn_fmt("ConfSearch: every deposit was refused as fragmented -- the dynamics "
+                                    "is destroying the molecule at this temperature ({} K). Lower it, or "
+                                    "set -topo_check true so such runs stop early.",
+                m_currentT);
     }
 
     delete pool; // MDThread sets autoDelete=true, so the pool frees the threads here (no leak)

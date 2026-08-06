@@ -106,12 +106,30 @@ the COLVAR energy, not the force. So each run inherits a taller, non-conservativ
 out-paces the thermostat → `<T>` climbs run-by-run until a NaN blow-up (baseline triose: 552→596
 →654→explode).
 
+> **Status correction (Aug 6, 2026).** The two defaults described below as "ON by default for
+> ConfSearch" are **OFF** today — they were flipped when the strided (soft-counter) scheme came in,
+> on the expectation that it bounds the growth on its own. Measured, it does not once `k` is raised
+> above the default 0.01: with `-rmsd_mtd_k 0.05 … 0.1` and 50 ps per repetition the tallest hill
+> reached **2–98 Eh** (5000–257000 kJ/mol) against a conformer energy spread of 0.03 Eh. From cycle
+> 2 on, every MD started at the centre of that mountain and the molecule was torn apart within
+> 10–20 fs: four production runs of a 107-atom peptide were effectively single-cycle runs, six of
+> seven cycles produced nothing, and 72–99 % of the bias pool were fragments. Three guards now make
+> this visible and stop the pool from poisoning itself (fragment gate before the deposit, geometry
+> sanity abort, a loud warning naming the tallest hill when a phase hands on nothing) — they do not
+> bound the height. `-rmsd_mtd_max_height` does, and whether it should default to something finite
+> is still open.
+>
+> Reproduced end to end: same command line, 3 ps per repetition, cycle 2 before the guards
+> 30–36 % fragments in the pool and "every MD snapshot changed its topology"; after them 419 pool
+> structures, **0.0 % fragments**, 40 deposits refused, and the warning naming `W = 2.04 Eh at
+> k = 0.050`.
+
 **Implemented controls:**
-- `rmsd_mtd_freeze_inherited` (Bool) — **ON by default for ConfSearch**: freeze the heights of
+- `rmsd_mtd_freeze_inherited` (Bool) — was ON by default for ConfSearch, now OFF (see above): freeze the heights of
   structures present at a run's start (snapshot in `prepareRun()`); only this run's own deposits grow
   (and inherited ones are not bumped). Bounds the cross-run escalation while keeping geometry sharing.
-- `temp_abort` + `temp_abort_factor`(1.5) + `temp_abort_delta`(300 K) — **ON by default for
-  ConfSearch**: abort an MD run when the running-mean `<T>` runs away from the target (mirrors
+- `temp_abort` + `temp_abort_factor`(1.5) + `temp_abort_delta`(300 K) — was ON by default for
+  ConfSearch, now OFF (see above): abort an MD run when the running-mean `<T>` runs away from the target (mirrors
   `epot_abort`; either threshold trips, `<=0` disables one). Safety net that catches a runaway run.
 - `rmsd_mtd_max_height` (Int, 0=unbounded) — opt-in: cap the counter in the force,
   `W_i = k·min(counter_i, cap)`. Tightest temperature (triose cap=3 holds `<T>`~500–525 K) but

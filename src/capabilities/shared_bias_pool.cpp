@@ -167,6 +167,15 @@ void SharedBiasPool::markExported(const std::vector<int>& indices)
             }
 }
 
+double SharedBiasPool::maxCounter() const
+{
+    std::shared_lock<std::shared_mutex> lock(m_mutex);
+    double highest = 0.0;
+    for (const auto& s : m_structures)
+        highest = std::max(highest, s.counter);
+    return highest;
+}
+
 void SharedBiasPool::clear()
 {
     std::unique_lock<std::shared_mutex> lock(m_mutex);

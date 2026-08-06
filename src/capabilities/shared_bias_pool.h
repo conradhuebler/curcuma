@@ -103,6 +103,18 @@ public:
     /** Mark the given pool indices as handed to the optimisation (see BiasStructure::exported). */
     void markExported(const std::vector<int>& indices);
 
+    /** Claude Generated (Aug 2026): highest hill counter in the pool. The bias height is
+     *  W_i = k * counter_i, so k * maxCounter() is the tallest Gaussian the walker can meet --
+     *  the number to look at when a search stops producing anything (measured on a 107-atom
+     *  peptide: 27-98 Eh, against a conformer energy spread of 0.03 Eh). */
+    double maxCounter() const;
+
+    /** Claude Generated (Aug 2026): a deposit refused because the molecule had fragmented.
+     *  Counted here rather than per MD run because every run of a phase shares this pool. */
+    void noteRejectedDeposit() { m_rejected_deposits.fetch_add(1, std::memory_order_relaxed); }
+    int rejectedDeposits() const { return m_rejected_deposits.load(std::memory_order_relaxed); }
+    void resetRejectedDeposits() { m_rejected_deposits.store(0, std::memory_order_relaxed); }
+
     /** Claude Generated (Jun 2026): full-state restore for ConfSearch restart.
      *  Replaces the pool contents with the given structures (metadata AND geometry),
      *  preserving each BiasStructure::index and counter exactly. Used when resuming a
@@ -132,4 +144,5 @@ private:
     std::atomic<int> m_global_count{0};
     std::vector<std::vector<int>> m_permutations;  // Claude Generated (Jun 2026): symmetry reorder rules (full-atom)
     std::vector<double> m_weights;                 // Claude Generated (Jun 2026): per-atom RMSF weights (empty = uniform)
+    std::atomic<int> m_rejected_deposits{0};       // Claude Generated (Aug 2026): fragmented deposits refused
 };

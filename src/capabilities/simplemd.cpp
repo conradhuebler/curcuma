@@ -388,6 +388,7 @@ void SimpleMD::LoadControlJson()
     m_temp_abort = m_config.get<bool>("temp_abort", false);
     m_temp_abort_factor = m_config.get<double>("temp_abort_factor", 1.5);
     m_temp_abort_delta = m_config.get<double>("temp_abort_delta", 300.0);
+    m_geometry_abort_factor = m_config.get<double>("geometry_abort_factor", 10.0);
 
     // Claude Generated (2026): global temperature ramp + per-atom-subset regions
     m_temp_ramp = m_config.get<bool>("temp_ramp");
@@ -707,6 +708,13 @@ bool SimpleMD::Initialise()
 
     m_start_fragments = m_molecule.GetFragments();
     m_start_fragment_count = static_cast<int>(m_start_fragments.size());  // Claude Generated (Jun 2026): topo-check reference
+    // Claude Generated (Aug 2026): yardstick for the geometry sanity abort, see m_geometry_abort_factor.
+    {
+        const Geometry start_geometry = m_molecule.getGeometry();
+        m_start_extent = (start_geometry.rows() > 0)
+            ? (start_geometry.colwise().maxCoeff() - start_geometry.colwise().minCoeff()).maxCoeff()
+            : 0.0;
+    }
     m_scaling_vector_linear = std::vector<double>(m_natoms, 1);
     m_scaling_vector_nonlinear = std::vector<double>(m_natoms, 1);
     if (m_scaling_json != "none") {
@@ -2483,6 +2491,28 @@ bool SimpleMD::step()
         m_run_aborted = true;
         return false;
     }
+    // Claude Generated (Aug 2026): geometry sanity abort. Not a chemical criterion like topo_check
+    // (which the user may deliberately leave off for reactive dynamics) but a "this is not a
+    // molecule any more" test: once the largest coordinate span has grown past
+    // geometry_abort_factor times its starting value, every further step is wasted and, worse,
+    // every further deposit poisons the shared bias pool. Measured on a 107-atom peptide (span
+    // 16 A) under an accumulated bias of 27-98 Eh: spans of 1000-9500 A, run continuing to the
+    // last of 50000 steps. The floor of 50 A keeps small molecules from tripping on normal motion.
+    if (m_geometry_abort_factor > 0 && m_step > 0 && m_eigen_geometry.rows() > 0) {
+        const double extent = (m_eigen_geometry.colwise().maxCoeff() - m_eigen_geometry.colwise().minCoeff()).maxCoeff();
+        const double limit = std::max(50.0, m_geometry_abort_factor * m_start_extent);
+        if (extent > limit) {
+            if (m_verbosity >= 1)
+                fmt::print(fg(fmt::color::orange) | fmt::emphasis::bold,
+                    "MD aborted: the structure spans {:.0f} A (start {:.1f} A, limit {:.0f} A) -- it has been "
+                    "torn apart, not deformed. With RMSD-MTD this usually means the accumulated hills "
+                    "(W = k*counter) outweigh the molecule; bound them with -rmsd_mtd_max_height or "
+                    "lower -rmsd_mtd_k.\n",
+                    extent, m_start_extent, limit);
+            m_run_aborted = true;
+            return false;
+        }
+    }
     // Temperature runaway abort: the shared bias pool's hills (W_i = k*counter_i) grow over
     // successive runs and pump energy in faster than the thermostat removes it -> the running-mean
     // temperature climbs above the target. Either an over-factor (relative) or over-delta (absolute)
@@ -2885,6 +2915,13 @@ void SimpleMD::writeMtdProvenance()
     if (m_verbosity >= 1)
         std::cout << "RMSD-MTD provenance: " << m_mtd_deposits.size() << " deposits written to "
                   << base << ".mtd_hills.csv (+ coverage, gnuplot)" << std::endl;
+    // Claude Generated (Aug 2026): a run that keeps proposing hills on a molecule which has come
+    // apart is not exploring any more -- say so, even though the deposits themselves are refused.
+    if (m_deposits_rejected > 0 && m_verbosity >= 1)
+        fmt::print(fg(fmt::color::orange),
+            "RMSD-MTD: {} deposit(s) refused -- the molecule had fragmented at that point "
+            "(they would have biased a structure that no longer exists).\n",
+            m_deposits_rejected);
 }
 
 /* Claude Generated 2026 - Queue external per-atom force contribution for the
@@ -3789,12 +3826,20 @@ void SimpleMD::EvaluateBias(bool do_deposit)
         bool deposit = !m_rmsd_fix_structure
             && (strided ? (do_deposit && RMSDMTD::shouldDeposit(current_bias, m_vmin, pool_count))
                         : (pool_count == 0 || current_bias * m_rmsd_econv < static_cast<double>(pool_count)));
-        // Claude Generated (Jun 2026): never deposit a fragmented structure into the shared
-        // pool (only relevant when topo_check is on; the run aborts shortly after anyway).
-        if (deposit && m_topo_check) {
+        // Claude Generated (Jun 2026, unconditional since Aug 2026): never deposit a fragmented
+        // structure into the shared pool. This used to be gated on -topo_check (default off), so a
+        // trajectory that had been torn apart kept filling the pool with debris -- measured on a
+        // 107-atom peptide, 98.8 % of a 32000-structure pool were fragments of median extent
+        // 1695 Angstrom. Such hills bias nothing useful and make every later cycle worse, whether
+        // or not the user wants the run itself to abort (which is what -topo_check decides).
+        if (deposit) {
             m_molecule.setGeometry(full_geometry);
-            if (static_cast<int>(m_molecule.GetFragments().size()) > m_start_fragment_count)
+            if (static_cast<int>(m_molecule.GetFragments().size()) > m_start_fragment_count) {
                 deposit = false;
+                m_deposits_rejected++;
+                if (m_shared_pool)
+                    m_shared_pool->noteRejectedDeposit();
+            }
         }
         if (deposit) {
             BiasStructure new_bs;
@@ -3920,6 +3965,15 @@ void SimpleMD::EvaluateBias(bool do_deposit)
     bool local_deposit = (m_rmsd_fix_structure == false)
         && (strided ? (do_deposit && RMSDMTD::shouldDeposit(current_bias, m_vmin, m_bias_structure_count))
                     : (current_bias * m_rmsd_econv < m_bias_structure_count));
+    // Claude Generated (Aug 2026): same fragment guard as the shared-pool path above -- a hill on
+    // a molecule that has come apart biases nothing that exists.
+    if (local_deposit) {
+        m_molecule.setGeometry(m_rmsd_mtd_molecule.getGeometry());
+        if (static_cast<int>(m_molecule.GetFragments().size()) > m_start_fragment_count) {
+            local_deposit = false;
+            m_deposits_rejected++;
+        }
+    }
     if (local_deposit) {
         int thread_index = m_bias_structure_count % m_bias_threads.size();
         m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentStep, m_bias_structure_count);

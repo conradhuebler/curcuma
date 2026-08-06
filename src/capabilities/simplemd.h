@@ -469,6 +469,14 @@ private:
     double m_rmsd_mtd_target = 0.0;
     double m_bias_min_rmsd = std::numeric_limits<double>::infinity();
     bool m_novelty_reached = false;
+    /* Claude Generated (Aug 2026): sanity abort on a geometry that has been torn apart. The
+     * largest coordinate span of the starting structure is the yardstick; a run whose span grows
+     * past factor * that is not sampling anything. Measured on a 107-atom peptide (span 16 A)
+     * under an accumulated RMSD-MTD bias of 27-98 Eh: the span reached 1000-9500 A while the run
+     * continued to its last step and kept depositing the debris. */
+    double m_geometry_abort_factor = 10.0;
+    double m_start_extent = 0.0;
+    int m_deposits_rejected = 0;         // deposits refused because the molecule had fragmented
     bool m_temp_abort = false;           // abort when running-mean temperature runs away from target
     double m_temp_abort_factor = 1.5;    // abort if <T> > factor * T0 (<= 0 disables)
     double m_temp_abort_delta = 300.0;   // abort if <T> > T0 + delta [K] (<= 0 disables)
@@ -740,6 +748,7 @@ private:
     PARAM(temp_abort, Bool, false, "Abort the MD run when the running-mean temperature runs away from the target (catches bias-driven heating). Uses temp_abort_factor and/or temp_abort_delta.", "ConfSearch", {})
     PARAM(temp_abort_factor, Double, 1.5, "Abort when <T> exceeds temp_abort_factor * target T. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
     PARAM(temp_abort_delta, Double, 300.0, "Abort when <T> exceeds (target T + temp_abort_delta) Kelvin. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
+    PARAM(geometry_abort_factor, Double, 10.0, "Abort the MD when the molecule's largest coordinate span grows beyond this factor times its span at the start (never below 50 Angstrom, so small molecules keep room). Unlike topo_check this is not about chemistry -- it catches a trajectory that has been torn apart and is no longer sampling anything. Measured on a 107-atom peptide (span 16 Angstrom) whose accumulated RMSD-MTD bias reached 27-98 Eh: the span grew past 1000 Angstrom, the run continued to its last step and kept depositing the debris into the shared bias pool. 0 disables the check.", "ConfSearch", {})
 
     // --- Temperature Ramp (Jun 2026, Claude Generated) ---
     PARAM(temp_ramp, Bool, false, "Enable a multi-stage temperature ramp schedule (see temp_schedule). A live GUI slider / setTargetTemperature() overrides it for the rest of the run.", "Temperature Ramp", {})
