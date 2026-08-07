@@ -1756,18 +1756,38 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
         const int deposited = (m_bias_pool ? m_bias_pool->biasStructureCount() : 0) - pool_before;
         const int rejected = m_bias_pool ? m_bias_pool->rejectedDeposits() : 0;
         const double k = parameter.value("rmsd_mtd_k", 0.01);
-        const double tallest = k * (m_bias_pool ? m_bias_pool->maxCounter() : 0.0);
+        // The counter the FORCE uses is capped by -rmsd_mtd_max_height (simplemd.cpp, shared-pool
+        // path). Reporting the raw counter here told a run with a correctly capped bias to lower
+        // its k for no reason -- measured: cap 1 at k=0.05 was reported as 5.41 Eh instead of the
+        // effective 0.05 Eh. Claude Generated (Aug 2026).
+        const double raw_counter = m_bias_pool ? m_bias_pool->maxCounter() : 0.0;
+        const double eff_counter = (m_rmsd_mtd_max_height > 0)
+            ? std::min(raw_counter, static_cast<double>(m_rmsd_mtd_max_height))
+            : raw_counter;
+        const double tallest = k * eff_counter;
+        const int pool_now = m_bias_pool ? m_bias_pool->biasStructureCount() : 0;
         CurcumaLogger::warn_fmt("ConfSearch: this MD phase handed on NO new structure -- {} run(s), "
                                 "{} new deposit(s), {} deposit(s) refused because the molecule had "
                                 "fragmented, pool now {}. Nothing downstream can happen this cycle.",
-            index, deposited, rejected, m_bias_pool ? m_bias_pool->biasStructureCount() : 0);
+            index, deposited, rejected, pool_now);
         if (tallest > 0.05)
-            CurcumaLogger::warn_fmt("ConfSearch: the tallest bias hill is W = k*counter = {:.2f} Eh "
-                                    "({:.0f} kJ/mol) at k = {:.3f}. That is far above the energy spread of "
+            CurcumaLogger::warn_fmt("ConfSearch: the tallest bias hill is W = k*counter = {:.3f} Eh "
+                                    "({:.0f} kJ/mol) at k = {:.3f}{}. That is far above the energy spread of "
                                     "the conformers themselves, so the dynamics starts inside a mountain "
                                     "and is torn apart instead of exploring. Bound it with "
                                     "-rmsd_mtd_max_height, or lower -rmsd_mtd_k.",
-                tallest, tallest * 2625.5, k);
+                tallest, tallest * 2625.5, k,
+                (m_rmsd_mtd_max_height > 0) ? fmt::format(" (counter capped at {})", m_rmsd_mtd_max_height) : "");
+        else if (tallest > 0.0 && pool_now > 1)
+            // Measured (Aug 2026): capping a SINGLE hill is not enough. The walker feels the SUM
+            // over every hill within the Gaussian width, so a dense inherited pool can still add up
+            // to several Eh even when each hill is small -- cap 1/3/10 at k=0.05 all lost the first
+            // repetition of cycle 2 exactly like the uncapped run.
+            CurcumaLogger::warn_fmt("ConfSearch: the tallest single hill is only {:.3f} Eh ({:.0f} kJ/mol), "
+                                    "so the height alone is not the problem -- with {} hills in the pool "
+                                    "the walker feels their SUM. Lower -rmsd_mtd_k or narrow the hills "
+                                    "(-rmsd_mtd_alpha) if this repeats.",
+                tallest, tallest * 2625.5, pool_now);
         else if (rejected > 0)
             CurcumaLogger::warn_fmt("ConfSearch: every deposit was refused as fragmented -- the dynamics "
                                     "is destroying the molecule at this temperature ({} K). Lower it, or "

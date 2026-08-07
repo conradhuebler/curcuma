@@ -123,6 +123,19 @@ out-paces the thermostat → `<T>` climbs run-by-run until a NaN blow-up (baseli
 > 30–36 % fragments in the pool and "every MD snapshot changed its topology"; after them 419 pool
 > structures, **0.0 % fragments**, 40 deposits refused, and the warning naming `W = 2.04 Eh at
 > k = 0.050`.
+>
+> **The counter cap is NOT the lever (measured Aug 7, 2026).** Four otherwise identical runs at
+> `k = 0.05` differing only in `-rmsd_mtd_max_height` (none / 1 / 3 / 10) all lose the first
+> repetition of cycle 2 (snapshots `0/0/88`, `0/13/181`, `0/0/124`, `0/0/101`; 19–53 deposits
+> refused as fragmented in each). Reason: the walker feels the SUM in `V = Σ k n_i exp(-α R²)`, and
+> a dense inherited pool puts dozens of hills inside one Gaussian width — a hill capped at one
+> visit still weighs 131 kJ/mol at `k = 0.05`, twenty of them are a Hartree again. The bound
+> belongs on `n_overlap · k · n_max ≲ ΔE(conformers)`, and since `n_overlap` is not known in
+> advance, **`k` is the parameter that matters** — the cap is an emergency brake, not a design
+> quantity. Control: the same schedule at the default `k = 0.01` passes cycle 2 with 660 snapshots
+> where `k = 0.05` produced none. Corollary: a bias parameter measured on a SINGLE temperature
+> stage (as in the α/k sweep) does not carry over to a multi-cycle run, because no pool accumulates
+> there.
 
 **Implemented controls:**
 - `rmsd_mtd_freeze_inherited` (Bool) — was ON by default for ConfSearch, now OFF (see above): freeze the heights of
