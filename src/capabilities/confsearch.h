@@ -360,6 +360,10 @@ private:
     double m_rattle_threshold_temp = 400, m_seed_energy_window = 50, m_seed_window_decay = 0.5, m_epot_abort_window = 250;
     int m_seed_rank = 1; // max lowest-energy seeds per cycle (0 = all in window; 1 = only most stable)
     int m_rattle_hot_mode = 2, m_topo_check_interval = 0, m_opt_feedback_height = 5;
+    // Claude Generated (Aug 2026): surface-mismatch feedback + the manual bridge threshold.
+    bool m_surface_feedback = false, m_hbond_excess_reject = false;
+    int m_surface_feedback_min_structures = 20, m_hbond_excess_max = -1, m_reference_hbonds = -1;
+    double m_surface_feedback_min_r = 0.4, m_surface_feedback_strength = 3.0;
     bool m_confgen_phase = false;
     int m_confgen_max_proposals = 20, m_confgen_templates = 3, m_confgen_depth = 3;
     std::string m_bias_reset = "never";
@@ -376,6 +380,18 @@ private:
     /** Recompute the energy of `mol` with a fresh calculator at `method`.
      *  @return the recomputed energy, or NaN if it could not be obtained. */
     double RecomputeEnergy(const Molecule& mol, const std::string& method) const;
+
+    /* Claude Generated (Aug 2026): the two answers to a measured problem -- the exploration surface
+     * and the ranking surface disagree systematically, and the exploration surface then drives the
+     * search into a region the ranking surface rejects (measured: GFN-FF rewards every additional
+     * hydrogen bond, so the cold cycles produced 10-11-bridge folds that GFN-FF put 230 kJ/mol below
+     * everything else and GFN2 put 52-95 kJ/mol above its own best).
+     *
+     * MeasureSurfaceMismatch does NOT know that hydrogen bonds are the coordinate -- it measures
+     * which of four generic shape descriptors correlates with the disagreement and returns a flag
+     * per structure, so the same code finds a different coordinate on a different system. */
+    std::vector<char> MeasureSurfaceMismatch(const std::vector<Molecule*>& structures) const;
+    int HydrogenBondCount(const Molecule& mol) const;
     bool m_hold_polar_h = false;
     double m_hold_polar_h_force = 5.0;
     /** Harmonic distance restraints on the polar X-H bonds of a reference structure (json form).
@@ -622,6 +638,12 @@ private:
     PARAM(rmsd_mtd_screen_margin, Double, 0.0, "Extra safety radius (RMSD length units) added to the rmsd_mtd_screen cutoff. 0 relies on the rigorous lower bound.", "Bias", {})
     PARAM(opt_feedback_bias, Bool, true, "Deposit optimised minima back into the shared bias pool.", "Bias", {})
     PARAM(opt_feedback_height, Int, 5, "Hill counter assigned to fed-back optimised minima.", "Bias", {})
+    PARAM(surface_feedback, Bool, false, "Measure where the exploration surface and the ranking surface disagree, and bias the exploration away from that direction. Only active in a dual-method run. After each cycle every ranked structure also gets a single point on the EXPLORATION surface, so both energies exist for the same geometry; the difference of the two relative energies says which structures the cheap method over-rewards. That difference is then correlated with four generic shape descriptors (hydrogen bonds, close contacts, radius of gyration, buriedness of the polar atoms) and the strongest one -- if any passes -surface_feedback_min_r -- decides which structures get a taller bias hill. The coordinate is deliberately NOT hard-coded: 'too many hydrogen bonds' is true for the 107-atom peptide where this was measured (GFN-FF put 10-11-bridge folds 230 kJ/mol below everything, GFN2 put them 52-95 kJ/mol above its own best) and false for a polyol host. When no descriptor correlates, nothing happens.", "Bias", {})
+    PARAM(surface_feedback_min_structures, Int, 20, "Minimum number of structures with both energies before the correlation is trusted. Below this the feedback stays inactive -- in practice it starts working from the second cycle.", "Bias", {})
+    PARAM(surface_feedback_min_r, Double, 0.4, "Minimum |r| between the surface disagreement and a shape descriptor before that descriptor is used. Higher means fewer, better-founded interventions.", "Bias", {})
+    PARAM(surface_feedback_strength, Double, 3.0, "Factor on the hill counter of a structure the exploration surface over-rewards (W = k*counter*strength). Bounded on purpose: an unbounded penalty repeats the very failure that made this necessary -- see the hill-height measurements in docs/CONFSEARCH_ROADMAP.md.", "Bias", {})
+    PARAM(hbond_excess_max, Int, -1, "MANUAL alternative to -surface_feedback for a system whose behaviour is already known: a structure with more than (reference + this) hydrogen bonds is not used as a seed for the next cycle. -1 = off, and there is deliberately no sensible default -- the useful value depends on the molecule (the reference conformer of the measured peptide has 7 bridges, a polyol host has far more).", "Filtering", {})
+    PARAM(hbond_excess_reject, Bool, false, "With -hbond_excess_max: also keep such structures OUT of the ensemble instead of only barring them from seeding. Off by default because they are real minima -- measured, they optimise to 52-95 kJ/mol above the best and the accurate method removes their excess bridges by itself.", "Filtering", {})
     PARAM(opt_feedback_prune_snapshots, Bool, false, "Remove raw MD snapshots after feeding back optimised minima.", "Bias", {})
     PARAM(mtd_permutation, Bool, true, "Feed the symmetry reorder rules found by ConfScan into the RMSD-MTD bias.", "Bias", {})
     PARAM(bias_calibration, String, "off", "Adaptive MTD hill width: off, couple or cluster. Experimental.", "Bias", {})

@@ -165,6 +165,48 @@ to the single reference. Three diagnostics were added because the failure was si
 - the first differing atom pair on the refinement side (the exploration side already had this),
 - a loud warning when *all* structures of a cycle are rejected on either side.
 
+## When the two surfaces pull in different directions (`-surface_feedback`, Aug 2026)
+
+A dual-method run assumes the cheap surface is a rough version of the accurate one. Measured on the
+107-atom peptide it is not: within a cycle the two rank the same structures at **r = −0.32 … −0.46**,
+and the disagreement is not noise but has a direction. GFN-FF rewards every additional hydrogen bond
+(its HB term carries the largest share of the energy spread), so the cold cycles drifted into
+10–11-bridge folds — GFN-FF put them **230 kJ/mol below everything else it had found**, GFN2 put the
+same structures **52–95 kJ/mol above its own best**, and it removed 3–4 of their bridges during
+optimisation (10–11 → 6–7). The exploration was walking away from the answer, on purpose, guided by
+its own energy.
+
+`-surface_feedback true` measures this instead of assuming it. After each cycle every ranked
+structure also gets a single point on the *exploration* surface, so both energies exist for the same
+geometry, and
+
+```
+delta_i = (E_rank,i - min E_rank) - (E_explore,i - min E_explore)
+```
+
+is positive exactly for the structures the cheap method over-rewards. `delta` is then correlated
+with four **generic** shape descriptors — hydrogen bonds, close contacts, radius of gyration,
+buriedness of the polar atoms — and the strongest one, if it passes `-surface_feedback_min_r` (0.4),
+decides which structures get a `-surface_feedback_strength` (3×, clamped to 10) taller hill in the
+shared bias pool. The exploration then leaves that direction instead of being drawn back into it.
+
+The coordinate is deliberately **not** hard-coded. "Too many hydrogen bonds" is true for this peptide
+(whose reference conformer has 7) and false for a polyol host; a fixed threshold would be an
+algorithm for one molecule. Validated on the measured case: over 60 ranked structures of one cycle
+the detector gives `r(delta, hydrogen bonds) = +0.44` while the other three descriptors sit at
+−0.05, −0.02 and −0.03 — it finds the right coordinate without being told, and stays silent when
+nothing correlates.
+
+Requirements and limits: dual-method only (`md_method != opt_method`), at least
+`-surface_feedback_min_structures` (20) structures with both energies, so it starts working from the
+second cycle. The extra cost is one cheap single point per ranked structure per cycle.
+
+For a system whose behaviour is already known there is the manual alternative `-hbond_excess_max N`
+(off by default, and deliberately without a sensible default): a structure with more than
+`reference + N` hydrogen bonds is not used as a seed for the next cycle, and with
+`-hbond_excess_reject true` it also stays out of the ensemble. The soft form is the recommended one —
+those structures are real minima, they simply are not worth exploring further.
+
 ## Other caveats (not yet human-tested)
 
 - Next-cycle MD seeds are the `md_method`-optimized geometries (exploration stays

@@ -52,6 +52,142 @@
 #include "confsearch.h"
 using curcuma::Molecule;
 
+namespace {
+/* Claude Generated (Aug 2026): generic shape descriptors for the surface-mismatch feedback.
+ *
+ * The point of these four is that they are defined for ANY molecule and carry no chemistry
+ * assumption of their own. Which of them (if any) the exploration surface over-rewards is measured
+ * per run, not assumed -- the alternative, hard-coding "too many hydrogen bonds are bad", would be
+ * an algorithm for one molecule: 11 bridges are many for a 107-atom peptide and normal for a
+ * polyol host, and the reference conformer of that same peptide has 7. See SurfaceMismatch(). */
+struct ShapeDescriptors {
+    double hbonds = 0;     ///< D-H...A count (H on N/O/F/S, acceptor N/O/F/S, <= 2.6 A, >= 120 deg)
+    double contacts = 0;   ///< heavy-atom pairs within 4 A that are not bonded or 1-3
+    double gyration = 0;   ///< radius of gyration [A]
+    double buried = 0;     ///< mean number of heavy neighbours within 5 A of a polar heavy atom
+};
+
+inline bool isPolar(int z) { return z == 7 || z == 8 || z == 9 || z == 16; }
+
+inline double covalentRadius(int z)
+{
+    switch (z) {
+    case 1: return 0.32;
+    case 6: return 0.75;
+    case 7: return 0.71;
+    case 8: return 0.63;
+    case 9: return 0.64;
+    case 15: return 1.11;
+    case 16: return 1.03;
+    case 17: return 0.99;
+    default: return 0.90;
+    }
+}
+
+ShapeDescriptors describeShape(const std::vector<int>& z, const Geometry& g)
+{
+    ShapeDescriptors d;
+    const int n = static_cast<int>(z.size());
+    if (n == 0 || g.rows() != n)
+        return d;
+    Eigen::MatrixXd dist(n, n);
+    std::vector<std::vector<int>> bonded(n);
+    for (int i = 0; i < n; ++i) {
+        dist(i, i) = 0.0;
+        for (int j = i + 1; j < n; ++j) {
+            const double r = (Eigen::Vector3d(g.row(i)) - Eigen::Vector3d(g.row(j))).norm();
+            dist(i, j) = dist(j, i) = r;
+            if (r < 1.3 * (covalentRadius(z[i]) + covalentRadius(z[j]))) {
+                bonded[i].push_back(j);
+                bonded[j].push_back(i);
+            }
+        }
+    }
+    // Hydrogen bonds
+    for (int h = 0; h < n; ++h) {
+        if (z[h] != 1)
+            continue;
+        int donor = -1;
+        for (int x : bonded[h])
+            if (isPolar(z[x])) { donor = x; break; }
+        if (donor < 0)
+            continue;
+        for (int a = 0; a < n; ++a) {
+            if (!isPolar(z[a]) || a == donor || dist(h, a) > 2.60)
+                continue;
+            bool is_bonded = false;
+            for (int x : bonded[h])
+                if (x == a) { is_bonded = true; break; }
+            if (is_bonded)
+                continue;
+            const Eigen::Vector3d v1 = Eigen::Vector3d(g.row(donor)) - Eigen::Vector3d(g.row(h));
+            const Eigen::Vector3d v2 = Eigen::Vector3d(g.row(a)) - Eigen::Vector3d(g.row(h));
+            const double cosine = v1.dot(v2) / (v1.norm() * v2.norm() + 1e-12);
+            if (std::acos(std::max(-1.0, std::min(1.0, cosine))) * 180.0 / M_PI >= 120.0)
+                d.hbonds += 1.0;
+        }
+    }
+    // Close contacts (heavy atoms, not bonded and not 1-3), gyration, buriedness
+    Eigen::Vector3d centre = Eigen::Vector3d::Zero();
+    int heavy = 0;
+    for (int i = 0; i < n; ++i)
+        if (z[i] != 1) { centre += Eigen::Vector3d(g.row(i)); heavy++; }
+    if (heavy == 0)
+        return d;
+    centre /= static_cast<double>(heavy);
+    double rg2 = 0.0;
+    int polar_atoms = 0;
+    for (int i = 0; i < n; ++i) {
+        if (z[i] == 1)
+            continue;
+        rg2 += (Eigen::Vector3d(g.row(i)) - centre).squaredNorm();
+        int near = 0;
+        for (int j = 0; j < n; ++j) {
+            if (i == j || z[j] == 1)
+                continue;
+            if (dist(i, j) < 5.0)
+                near++;
+            if (dist(i, j) >= 4.0 || j <= i)
+                continue;
+            bool close_in_graph = false;
+            for (int x : bonded[i]) {
+                if (x == j) { close_in_graph = true; break; }
+                for (int y : bonded[x])
+                    if (y == j) { close_in_graph = true; break; }
+                if (close_in_graph)
+                    break;
+            }
+            if (!close_in_graph)
+                d.contacts += 1.0;
+        }
+        if (isPolar(z[i])) { d.buried += near; polar_atoms++; }
+    }
+    d.gyration = std::sqrt(rg2 / heavy);
+    if (polar_atoms > 0)
+        d.buried /= polar_atoms;
+    return d;
+}
+
+/// Pearson correlation; returns 0 when either side is constant.
+double correlation(const std::vector<double>& a, const std::vector<double>& b)
+{
+    const std::size_t n = std::min(a.size(), b.size());
+    if (n < 3)
+        return 0.0;
+    double ma = 0, mb = 0;
+    for (std::size_t i = 0; i < n; ++i) { ma += a[i]; mb += b[i]; }
+    ma /= n; mb /= n;
+    double sab = 0, saa = 0, sbb = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const double da = a[i] - ma, db = b[i] - mb;
+        sab += da * db; saa += da * da; sbb += db * db;
+    }
+    if (saa < 1e-12 || sbb < 1e-12)
+        return 0.0;
+    return sab / std::sqrt(saa * sbb);
+}
+} // namespace
+
 ConfSearch::ConfSearch(const json& controller, bool silent)
     : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("confsearch"), controller, silent)
     , m_config("confsearch", controller)
@@ -374,6 +510,13 @@ void ConfSearch::start()
             m_topo_matrix = TopologyMatrix(*m_in_stack[0]);
             m_topo_ref = *m_in_stack[0];           // reference structure for restart topology
             m_elements = m_in_stack[0]->Atoms();   // shared atomic-number list for checkpoint frames
+            // Claude Generated (Aug 2026): the yardstick for -hbond_excess_max. Taken from the
+            // OPTIMISED input, not the raw one, so it is a real minimum's bridge count.
+            m_reference_hbonds = HydrogenBondCount(*m_in_stack[0]);
+            if (m_hbond_excess_max >= 0)
+                CurcumaLogger::result_fmt("ConfSearch: -hbond_excess_max {} -- the optimised input has {} "
+                                          "hydrogen bond(s), so structures above {} are barred from seeding",
+                    m_hbond_excess_max, m_reference_hbonds, m_reference_hbonds + m_hbond_excess_max);
         }
         CurcumaLogger::result_fmt("ConfSearch: {} input structures optimised", m_in_stack.size());
 
@@ -1268,26 +1411,53 @@ void ConfSearch::start()
             if (opt_lowest < m_global_min_opt)
                 m_global_min_opt = opt_lowest;
 
+            // Claude Generated (Aug 2026): both answers to the surface disagreement -- the measured
+            // one (which coordinate does the cheap method over-reward? bias against it) and the
+            // manual one (a user-set bridge threshold for a known system).
+            const std::vector<char> over_rewarded = MeasureSurfaceMismatch(opt_candidates);
+            int barred_seeds = 0, barred_ensemble = 0;
+
             std::vector<Molecule*> opt_window_seeds;
-            for (auto* mol : opt_candidates) {
+            for (std::size_t ci = 0; ci < opt_candidates.size(); ++ci) {
+                auto* mol = opt_candidates[ci];
+                bool over_bridged = false;
+                if (m_hbond_excess_max >= 0 && m_reference_hbonds >= 0)
+                    over_bridged = HydrogenBondCount(*mol) > m_reference_hbonds + m_hbond_excess_max;
                 if ((mol->Energy() - opt_lowest) * 2625.5 < m_energy_window) {
-                    mol->appendXYZFile(cumulative_file);
-                    ensemble_kept++;
+                    if (over_bridged && m_hbond_excess_reject)
+                        barred_ensemble++;
+                    else {
+                        mol->appendXYZFile(cumulative_file);
+                        ensemble_kept++;
+                    }
                 }
                 if (m_opt_feedback_bias && m_bias_pool) {
                     BiasStructure bs;
                     bs.geometry = mol->getGeometry();
                     bs.energy = mol->Energy();   // opt_method energy (metadata only, never in the force)
                     bs.counter = m_opt_feedback_height;
+                    // A structure the exploration surface over-rewards gets a taller hill, so the
+                    // next MD leaves that direction instead of being drawn back into it.
+                    if (ci < over_rewarded.size() && over_rewarded[ci])
+                        bs.counter *= std::max(1.0, std::min(10.0, m_surface_feedback_strength));
                     bs.temperature = m_currentT;
                     bs.persistent = true;
                     feedback.push_back(std::move(bs));
                 }
-                if (seed_from_opt && (mol->Energy() - m_global_min_opt) * 2625.5 < eff_seed_window)
+                if (seed_from_opt && !over_bridged
+                    && (mol->Energy() - m_global_min_opt) * 2625.5 < eff_seed_window)
                     opt_window_seeds.push_back(mol); // ownership moves to the seed selection
-                else
+                else {
+                    if (over_bridged && seed_from_opt)
+                        barred_seeds++;
                     delete mol;
+                }
             }
+            if (barred_seeds > 0 || barred_ensemble > 0)
+                CurcumaLogger::result_fmt("ConfSearch: -hbond_excess_max {} (reference has {} bridges): "
+                                          "{} structure(s) barred from seeding{}",
+                    m_hbond_excess_max, m_reference_hbonds, barred_seeds,
+                    barred_ensemble > 0 ? fmt::format(", {} also kept out of the ensemble", barred_ensemble) : "");
             if (seed_from_opt) {
                 const int md_seeds = static_cast<int>(m_in_stack.size()); // 0 unless seed_pes=both
                 // Claude Generated (Aug 2026): same rule on the ranking surface -- this is where it
@@ -1894,6 +2064,99 @@ double ConfSearch::RecomputeEnergy(const Molecule& mol, const std::string& metho
     } catch (...) {
         return std::numeric_limits<double>::quiet_NaN();
     }
+}
+
+int ConfSearch::HydrogenBondCount(const Molecule& mol) const
+{
+    return static_cast<int>(describeShape(mol.Atoms(), mol.getGeometry()).hbonds + 0.5);
+}
+
+std::vector<char> ConfSearch::MeasureSurfaceMismatch(const std::vector<Molecule*>& structures) const
+{
+    std::vector<char> flag(structures.size(), 0);
+    if (!m_surface_feedback || m_md_method == m_opt_method
+        || static_cast<int>(structures.size()) < std::max(3, m_surface_feedback_min_structures))
+        return flag;
+
+    // The exploration surface's opinion about the RANKING surface's geometries. A single point is
+    // the honest comparison here: the question is not where the cheap method would relax these
+    // structures to, but how it would ORDER them.
+    std::vector<double> e_rank, e_explore;
+    std::vector<ShapeDescriptors> shape;
+    e_rank.reserve(structures.size());
+    e_explore.reserve(structures.size());
+    shape.reserve(structures.size());
+    const int saved_verbosity = CurcumaLogger::get_verbosity();
+    try {
+        nlohmann::json cfg = ChildConfig(m_md_method, 1);
+        cfg["verbosity"] = 0;
+        EnergyCalculator calc(m_md_method, cfg);
+        CurcumaLogger::set_verbosity(0);
+        for (Molecule* mol : structures) {
+            Molecule copy = *mol;
+            copy.setCharge(m_charge);
+            copy.setSpin(m_spin);
+            calc.setMolecule(copy.getMolInfo());
+            const double e = calc.CalculateEnergy(false);
+            if (calc.HasNan() || calc.Error() || !std::isfinite(e))
+                continue;
+            e_rank.push_back(mol->Energy());
+            e_explore.push_back(e);
+            shape.push_back(describeShape(mol->Atoms(), mol->getGeometry()));
+        }
+        CurcumaLogger::set_verbosity(saved_verbosity);
+    } catch (...) {
+        CurcumaLogger::set_verbosity(saved_verbosity);
+        return flag;
+    }
+    if (static_cast<int>(e_rank.size()) < std::max(3, m_surface_feedback_min_structures))
+        return flag;
+
+    // Delta > 0: the exploration surface likes this structure MORE than the ranking surface does.
+    const double rank_min = *std::min_element(e_rank.begin(), e_rank.end());
+    const double explore_min = *std::min_element(e_explore.begin(), e_explore.end());
+    std::vector<double> delta(e_rank.size());
+    for (std::size_t i = 0; i < e_rank.size(); ++i)
+        delta[i] = ((e_rank[i] - rank_min) - (e_explore[i] - explore_min)) * 2625.5;
+
+    const std::array<const char*, 4> names = { "hydrogen bonds", "close contacts", "radius of gyration", "buried polar atoms" };
+    std::array<std::vector<double>, 4> columns;
+    for (const ShapeDescriptors& s : shape) {
+        columns[0].push_back(s.hbonds);
+        columns[1].push_back(s.contacts);
+        columns[2].push_back(s.gyration);
+        columns[3].push_back(s.buried);
+    }
+    int best = -1;
+    double best_r = 0.0;
+    for (int c = 0; c < 4; ++c) {
+        const double r = correlation(delta, columns[c]);
+        if (std::abs(r) > std::abs(best_r)) { best_r = r; best = c; }
+    }
+    if (best < 0 || std::abs(best_r) < m_surface_feedback_min_r) {
+        CurcumaLogger::result_fmt("ConfSearch: surface feedback -- no descriptor explains where the two "
+                                  "surfaces disagree (strongest |r| = {:.2f} over {} structures, threshold "
+                                  "{:.2f}); nothing is biased",
+            std::abs(best_r), static_cast<int>(delta.size()), m_surface_feedback_min_r);
+        return flag;
+    }
+
+    // Median split on the over-rewarded side; only structures the exploration surface actually
+    // favours (delta > 0) are penalised, so a merely large descriptor value is not enough.
+    std::vector<double> sorted = columns[best];
+    std::sort(sorted.begin(), sorted.end());
+    const double median = sorted[sorted.size() / 2];
+    int marked = 0;
+    for (std::size_t i = 0, k = 0; i < structures.size() && k < delta.size(); ++i, ++k) {
+        const bool over_rewarded = (best_r > 0) ? (columns[best][k] > median) : (columns[best][k] < median);
+        if (over_rewarded && delta[k] > 0.0) { flag[i] = 1; marked++; }
+    }
+    CurcumaLogger::result_fmt("ConfSearch: surface feedback -- '{}' explains the disagreement between {} "
+                              "and {} best (r = {:+.2f} over {} structures, median {:.2f}); {} structure(s) "
+                              "get a {:.1f}x taller bias hill so the exploration leaves that direction",
+        names[best], m_md_method, m_opt_method, best_r, static_cast<int>(delta.size()), median, marked,
+        m_surface_feedback_strength);
+    return flag;
 }
 
 std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann::json& parameter,
@@ -3488,6 +3751,13 @@ void ConfSearch::LoadControlJson()
     m_rmsd_mtd_screen_margin = m_config.get<double>("rmsd_mtd_screen_margin");
     m_opt_feedback_bias = m_config.get<bool>("opt_feedback_bias");
     m_opt_feedback_height = m_config.get<int>("opt_feedback_height");
+    // Claude Generated (Aug 2026): surface-mismatch feedback + manual bridge threshold
+    m_surface_feedback = m_config.get<bool>("surface_feedback");
+    m_surface_feedback_min_structures = m_config.get<int>("surface_feedback_min_structures");
+    m_surface_feedback_min_r = m_config.get<double>("surface_feedback_min_r");
+    m_surface_feedback_strength = m_config.get<double>("surface_feedback_strength");
+    m_hbond_excess_max = m_config.get<int>("hbond_excess_max");
+    m_hbond_excess_reject = m_config.get<bool>("hbond_excess_reject");
     m_opt_feedback_prune_snapshots = m_config.get<bool>("opt_feedback_prune_snapshots");
     m_mtd_permutation = m_config.get<bool>("mtd_permutation");
     m_bias_calibration = m_config.get<std::string>("bias_calibration");
