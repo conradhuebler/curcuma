@@ -66,6 +66,11 @@ void FFWorkspace::setInteractionLists(GFNFFParameterSet&& params)
     // UFF/QMDFF non-bonded pairs
     m_vdws = std::move(params.vdws);
 
+    // QMDFF-specific term lists (Claude Generated Aug 2026)
+    m_qmdff_torsions = std::move(params.qmdff_torsions);
+    m_qmdff_ncis = std::move(params.qmdff_ncis);
+    m_qmdff_hbonds = std::move(params.qmdff_hbonds);
+
     m_eeq_charges = std::move(params.eeq_charges);
     m_topology_charges = std::move(params.topology_charges);
 
@@ -148,6 +153,9 @@ void FFWorkspace::partition()
         pr.atm_triples = linearRange(m_atm_triples.size(), t, T);
         pr.batm_triples = linearRange(m_batm_triples.size(), t, T);
         pr.vdws = linearRange(m_vdws.size(), t, T);
+        pr.qmdff_torsions = linearRange(m_qmdff_torsions.size(), t, T);
+        pr.qmdff_ncis = linearRange(m_qmdff_ncis.size(), t, T);
+        pr.qmdff_hbonds = linearRange(m_qmdff_hbonds.size(), t, T);
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {

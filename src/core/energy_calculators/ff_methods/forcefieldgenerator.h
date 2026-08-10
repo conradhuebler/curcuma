@@ -149,6 +149,9 @@ BEGIN_PARAMETER_DEFINITION(forcefield)
     PARAM(inversion_force, Double, 0.001593, "Inversion/improper force constant (Hartree).", "ForceConstants", {})
     PARAM(vdw_force, Double, 0.001593, "Van der Waals force constant (Hartree).", "ForceConstants", {})
 
+    // QMDFF (Claude Generated Aug 2026, port of xtb src/qmdff.f90)
+    PARAM(qmdff_morsethr, Double, 99.0, "QMDFF well-depth threshold above which a bond switches from Lennard-Jones to Morse.", "QMDFF", {})
+
     // Other Parameters
     PARAM(energy_offset, Double, 0.0, "Constant energy offset to add to calculated energy (Hartree).", "General", {"e0"})
 END_PARAMETER_DEFINITION
@@ -185,6 +188,14 @@ private:
     void setNCI();
     // void setESP();
 
+    /**
+     * @brief Build the QMDFF-specific term lists (Claude Generated, Aug 2026).
+     *
+     * Fills m_qmdff_torsions / m_qmdff_ncis / m_qmdff_hbonds, which the FFWorkspace
+     * QMDFF path consumes. Port context and limitations: docs/QMDFF.md.
+     */
+    void setQMDFFTerms();
+
     json Bonds() const;
     json Angles() const;
     json Dihedrals() const;
@@ -208,6 +219,8 @@ private:
     std::vector<int> m_atom_types, m_ff_atom_types, m_coordination;
     std::vector<std::set<int>> m_ignored_vdw, m_1_4_charges;
     std::vector<json> m_bonds, m_angles, m_dihedrals, m_inversions, m_vdws, m_esps;
+    // Claude Generated (Aug 2026): QMDFF term lists (see setQMDFFTerms)
+    std::vector<json> m_qmdff_torsions, m_qmdff_ncis, m_qmdff_hbonds;
     double m_uff_bond_force = 1.0584 /* in Eh kcal/mol = 664.12 */, m_uff_angle_force = 1.0584 /* in Eh kcal/mol = 664.12 */, m_uff_dihedral_force = 1, m_uff_inversion_force = 1, m_vdw_force = 1, m_scaling = 1.4;
 
     double m_au = 1;

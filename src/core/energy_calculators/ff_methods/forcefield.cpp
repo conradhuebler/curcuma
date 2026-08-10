@@ -276,6 +276,14 @@ void ForceField::setParameter(const json& parameters)
         if (parameters.contains("vdws"))
             setvdWs(parameters["vdws"]);
 
+        // Claude Generated (Aug 2026): QMDFF-specific term lists (xtb qmdff.f90 port)
+        if (parameters.contains("qmdff_torsions"))
+            setQMDFFTorsions(parameters["qmdff_torsions"]);
+        if (parameters.contains("qmdff_ncis"))
+            setQMDFFNonCovalents(parameters["qmdff_ncis"]);
+        if (parameters.contains("qmdff_hbonds"))
+            setQMDFFHBonds(parameters["qmdff_hbonds"]);
+
         // Phase 4.2: GFN-FF pairwise non-bonded parameters (Claude Generated 2025)
         // Support "d4_dispersion_pairs"优先 (Native D4 - Dec 25, 2025)
         // Support both "gfnff_dispersions" (from GFNFF) and "d3_dispersion_pairs" (from D3ParameterGenerator)
@@ -408,6 +416,10 @@ void ForceField::setParameter(const json& parameters)
         ws_params.dihedrals  = m_dihedrals;
         ws_params.inversions = m_inversions;
         ws_params.vdws       = m_vdWs;
+        // Claude Generated (Aug 2026): QMDFF torsion / NCI / HB lists (xtb qmdff.f90 port)
+        ws_params.qmdff_torsions = m_qmdff_torsions;
+        ws_params.qmdff_ncis     = m_qmdff_ncis;
+        ws_params.qmdff_hbonds   = m_qmdff_hbonds;
         // uff-d3: pass D3 dispersion pairs (stored in m_gfnff_dispersions via addD3Dispersion path)
         if (m_method == "uff-d3" && !m_gfnff_dispersions.empty()) {
             ws_params.dispersions = m_gfnff_dispersions;
@@ -416,9 +428,13 @@ void ForceField::setParameter(const json& parameters)
         } else {
             ws_params.dispersion_enabled = false;
         }
-        ws_params.hbond_enabled = false;
-        ws_params.repulsion_enabled = false;
-        ws_params.coulomb_enabled = false;
+        // Claude Generated (Aug 2026): QMDFF owns hydrogen/halogen bonds (ff_hb) and
+        // the Born-Mayer repulsion + point-charge electrostatics of ff_nonb; those
+        // terms are driven by the qmdff_* lists, so enable them for QMDFF only.
+        const bool is_qmdff = (m_method == "qmdff" || m_method == "quff");
+        ws_params.hbond_enabled = is_qmdff;
+        ws_params.repulsion_enabled = is_qmdff;
+        ws_params.coulomb_enabled = is_qmdff;
 
         m_workspace = std::make_unique<FFWorkspace>(m_threads);
         m_workspace->setPool(m_threadpool);  // Claude Generated (March 2026): Required for multi-thread execution
@@ -761,6 +777,10 @@ void ForceField::setBonds(const json& bonds)
         b.nr_hb = bond.value("nr_hb", 0);
         b.hb_cn_H = bond.value("hb_cn_H", 0.0);
 
+        // Claude Generated (Aug 2026): QMDFF stretch potential (Fortran bond(3,·))
+        // 0 = Lennard-Jones (default, matches pre-port parameter files), 1 = Morse
+        b.qmdff_potential = bond.value("qmdff_potential", 0);
+
         m_bonds.push_back(b);
     }
 }
@@ -899,6 +919,89 @@ void ForceField::setvdWs(const json& vdws)
 
         m_vdWs.push_back(v);
     }
+}
+
+// =============================================================================
+// QMDFF term setters — Claude Generated (Aug 2026)
+// Port of the term lists of xtb's removed src/qmdff.f90 (tors/vtors, nci, hb/vhb).
+// JSON schema is documented in docs/QMDFF.md.
+// =============================================================================
+
+void ForceField::setQMDFFTorsions(const json& torsions)
+{
+    m_qmdff_torsions.clear();
+    m_qmdff_torsions.reserve(torsions.size());
+
+    for (const auto& entry : torsions) {
+        QMDFFTerms::QMDFFTorsion t;
+        t.i = entry["i"];
+        t.j = entry["j"];
+        t.k = entry["k"];
+        t.l = entry["l"];
+        t.out_of_plane = entry.value("out_of_plane", false);
+        t.phi0 = entry.value("phi0", 0.0);
+        t.scale = entry.value("scale", 1.0);
+
+        const json terms = entry.value("terms", json::array());
+        t.nterm = std::min<int>(static_cast<int>(terms.size()), QMDFFTerms::kMaxTorsionTerms);
+        for (int n = 0; n < t.nterm; ++n) {
+            t.rn[n] = terms[n].value("n", 0.0);
+            t.phase[n] = terms[n].value("phase", 0.0);
+            t.v[n] = terms[n].value("v", 0.0);
+        }
+        // Out-of-plane terms carry a single entry; guarantee rn[0] is defined so
+        // that the single-/double-minimum branch selection is well posed.
+        if (t.out_of_plane && t.nterm == 0)
+            t.nterm = 1;
+
+        m_qmdff_torsions.push_back(t);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::param("qmdff_torsions", fmt::format("{}", m_qmdff_torsions.size()));
+}
+
+void ForceField::setQMDFFNonCovalents(const json& ncis)
+{
+    m_qmdff_ncis.clear();
+    m_qmdff_ncis.reserve(ncis.size());
+
+    for (const auto& entry : ncis) {
+        QMDFFTerms::QMDFFNonCovalent n;
+        n.i = entry["i"];
+        n.j = entry["j"];
+        n.nk = entry.value("nk", 5);
+        n.c6 = entry.value("c6", 0.0);
+        n.r0_bj = entry.value("r0_bj", 0.0);
+        n.sr42 = entry.value("sr42", 0.0);
+        n.zab = entry.value("zab", 0.0);
+        n.alpha = entry.value("alpha", 0.0);
+        n.qq = entry.value("qq", 0.0);
+        m_qmdff_ncis.push_back(n);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::param("qmdff_ncis", fmt::format("{}", m_qmdff_ncis.size()));
+}
+
+void ForceField::setQMDFFHBonds(const json& hbonds)
+{
+    m_qmdff_hbonds.clear();
+    m_qmdff_hbonds.reserve(hbonds.size());
+
+    for (const auto& entry : hbonds) {
+        QMDFFTerms::QMDFFHBond h;
+        h.a = entry["a"];
+        h.b = entry["b"];
+        h.h = entry["h"];
+        h.c1 = entry.value("c1", 0.0);
+        h.c2 = entry.value("c2", 0.0);
+        h.halogen = entry.value("halogen", false);
+        m_qmdff_hbonds.push_back(h);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::param("qmdff_hbonds", fmt::format("{}", m_qmdff_hbonds.size()));
 }
 
 // Phase 4.2: GFN-FF pairwise non-bonded parameter setters (Claude Generated 2025)
@@ -1946,6 +2049,9 @@ json ForceField::exportCurrentParameters() const
         b["nr_hb"] = bond.nr_hb;
         b["hb_cn_H"] = bond.hb_cn_H;
 
+        // Claude Generated (Aug 2026): QMDFF stretch potential selector
+        b["qmdff_potential"] = bond.qmdff_potential;
+
         bonds.push_back(b);
     }
     output["bonds"] = bonds;
@@ -2374,14 +2480,22 @@ double ForceField::Calculate(bool gradient)
         ws_params.dihedrals  = m_dihedrals;
         ws_params.inversions = m_inversions;
         ws_params.vdws       = m_vdWs;
+        // Claude Generated (Aug 2026): QMDFF torsion / NCI / HB lists (xtb qmdff.f90 port)
+        ws_params.qmdff_torsions = m_qmdff_torsions;
+        ws_params.qmdff_ncis     = m_qmdff_ncis;
+        ws_params.qmdff_hbonds   = m_qmdff_hbonds;
         ws_params.dispersion_enabled = (m_method == "uff-d3");
         if (m_method == "uff-d3" && !m_gfnff_dispersions.empty()) {
             ws_params.dispersions = m_gfnff_dispersions;
             ws_params.dispersion_method = "d3";
         }
-        ws_params.hbond_enabled = false;
-        ws_params.repulsion_enabled = false;
-        ws_params.coulomb_enabled = false;
+        // Claude Generated (Aug 2026): QMDFF owns hydrogen/halogen bonds (ff_hb) and
+        // the Born-Mayer repulsion + point-charge electrostatics of ff_nonb; those
+        // terms are driven by the qmdff_* lists, so enable them for QMDFF only.
+        const bool is_qmdff = (m_method == "qmdff" || m_method == "quff");
+        ws_params.hbond_enabled = is_qmdff;
+        ws_params.repulsion_enabled = is_qmdff;
+        ws_params.coulomb_enabled = is_qmdff;
 
         m_workspace = std::make_unique<FFWorkspace>(m_threads);
         m_workspace->setPool(m_threadpool);  // Claude Generated (March 2026): Required for multi-thread execution

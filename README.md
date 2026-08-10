@@ -65,6 +65,23 @@ Native force field (no external dependency required):
 - **gfnff** : Native C++ GFN-FF — full energy and gradient, validated against Fortran reference (see status below)
 - **gfnff** + `-gpu cuda` : CUDA-accelerated variant; topology cached, charges on CPU, all kernels on GPU
 - **xtb-gfnff** : GFN-FF via the xtb Fortran library (USE_GFNFF build flag)
+- **qmdff** : Quantum Mechanically Derived Force Field — the complete QMDFF energy
+  expression (LJ/Morse stretch, damped bend, erf-switched torsion, out-of-plane,
+  D4-BJ dispersion + electrostatics + Born-Mayer repulsion, hydrogen and halogen
+  bonds), ported from the QMDFF evaluator that xtb removed in PR #568.
+  ⚠️ The functional form is the reference one, and there is **no reference-number
+  validation** — only an analytic-vs-finite-difference gradient check.
+  See [docs/QMDFF.md](docs/QMDFF.md).
+- **`-qmdfffit`** : derives the QMDFF force constants from a QM Hessian (default GFN2),
+  i.e. builds a **QMDFF@method** force field. The energy is exactly linear in the fitted
+  constants, so this is a single linear least-squares solve — no force-field Hessian at
+  all, where the previous implementation needed ~10⁶ force-field gradient calls per step
+  (and silently changed nothing). Writes `<input>.param.json`, so a later
+  `curcuma -sp <input> -method qmdff` picks the fit up automatically.
+  First measurement of QMDFF@GFN2 as a conformer-search surface (44 conformers, 114
+  atoms): Spearman ρ against GFN2 rises 0.45 → 0.77 versus GFN-FF, and the true GFN2
+  minimum moves from rank 22/44 to 5/44 — but the energy spread is over-estimated by
+  78 %. See [docs/QMDFF_CONFORMER_USECASE.md](docs/QMDFF_CONFORMER_USECASE.md).
 
 Native GFN methods (no external dependency required, canonical backends since AP3 2026-04-25):
 - **gfn1** : Native GFN1-xTB — 10/12 validation molecules at 1e-8 vs tblite

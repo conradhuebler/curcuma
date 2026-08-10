@@ -268,6 +268,41 @@ add_test(NAME test_polymerbuild_structure
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(test_polymerbuild_structure PROPERTIES TIMEOUT 120)
 
+# Claude Generated (August 2026): QMDFF analytical vs numerical gradient test.
+# Validates the port of xtb's removed src/qmdff.f90 — every term of the QMDFF
+# energy expression is differentiated analytically and by central differences.
+# See docs/QMDFF.md for what this does and does not establish.
+add_executable(test_qmdff_gradients test_qmdff_gradients.cpp)
+target_link_libraries(test_qmdff_gradients curcuma_core test_molecule_registry)
+target_include_directories(test_qmdff_gradients PRIVATE ${CMAKE_SOURCE_DIR})
+
+if(USE_PCH)
+    target_precompile_headers(test_qmdff_gradients REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME qmdff_gradients
+         COMMAND test_qmdff_gradients
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(qmdff_gradients
+    PROPERTIES TIMEOUT 300 LABELS "qmdff;gradient;cpu")
+
+# Claude Generated (August 2026): QMDFF Hessian-fit validation. Synthetic round trip —
+# build a Hessian from known force constants through the real FFWorkspace path, fit it
+# back, require exact recovery. Also covers the parameter-injection path.
+add_executable(test_qmdff_hessian_fit test_qmdff_hessian_fit.cpp)
+target_link_libraries(test_qmdff_hessian_fit curcuma_core curcuma_cap test_molecule_registry)
+target_include_directories(test_qmdff_hessian_fit PRIVATE ${CMAKE_SOURCE_DIR})
+
+if(USE_PCH)
+    target_precompile_headers(test_qmdff_hessian_fit REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME qmdff_hessian_fit
+         COMMAND test_qmdff_hessian_fit
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(qmdff_hessian_fit
+    PROPERTIES TIMEOUT 300 LABELS "qmdff;fit;cpu")
+
 # Claude Generated (April 2026): CPU GFN-FF analytical vs numerical gradient test
 # Tests gradient correctness for all built-in molecules (H2O, CH4, CH3OH, CH3OCH3).
 # gfnff_numgrad_builtin compares the analytical Gradient() against the FULL finite

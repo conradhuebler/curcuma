@@ -28,6 +28,8 @@
 
 #pragma once
 
+#include "qmdff_terms.h"  // QMDFFTorsion / QMDFFNonCovalent / QMDFFHBond
+
 #include <Eigen/Dense>
 #include <string>
 #include <vector>
@@ -270,6 +272,12 @@ struct GFNFFParameterSet {
 
     // UFF/QMDFF specific non-bonded pairs (empty for GFN-FF)
     std::vector<vdW> vdws;
+
+    // QMDFF specific terms (empty for UFF/GFN-FF) — Claude Generated (Aug 2026)
+    // Reference: xtb b7dbd36^:src/qmdff.f90 (tors/vtors, nci, hb/vhb)
+    std::vector<QMDFFTerms::QMDFFTorsion> qmdff_torsions;
+    std::vector<QMDFFTerms::QMDFFNonCovalent> qmdff_ncis;
+    std::vector<QMDFFTerms::QMDFFHBond> qmdff_hbonds;
 
     // Charges
     Eigen::VectorXd eeq_charges;

@@ -755,6 +755,23 @@ public:
      */
     GFNFFParameterSet generateGFNFFParameterSet();
 
+    /**
+     * @brief Use a supplied parameter set instead of generating one.
+     *
+     * Must be called BEFORE InitialiseMolecule(). The topology, coordination numbers and
+     * EEQ charges are still computed normally — only the interaction parameters are taken
+     * from @p params. This is what lets a Hessian-fitted set be evaluated through the
+     * REAL GFN-FF path (FFWorkspace + all the state GFNFFMethod supplies), which a bare
+     * ForceField + setGFNFFParameters does not reproduce (measured 90% different).
+     *
+     * Claude Generated (Aug 2026), for -qmdfffit -potential gfnff.
+     */
+    void setExternalParameterSet(const GFNFFParameterSet& params)
+    {
+        m_external_parameter_set = std::make_unique<GFNFFParameterSet>(params);
+    }
+    bool hasExternalParameterSet() const { return m_external_parameter_set != nullptr; }
+
 
     /**
      * @brief Consume cached parameter set for external use.
@@ -2599,6 +2616,7 @@ private:
         }
     };
 
+    std::unique_ptr<GFNFFParameterSet> m_external_parameter_set; ///< see setExternalParameterSet
     bool m_initialized; ///< Initialization status
     bool m_comparing_gradients = false; ///< Guard to prevent recursion in compareGradients
     bool m_skip_eeq_recalc = false; ///< Skip Phase-2 EEQ recalculation (for charge injection diagnostic)

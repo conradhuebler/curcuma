@@ -152,6 +152,23 @@ public:
     void start() override;
 
     Matrix getHessian() const { return m_hessian; }
+
+    /**
+     * @brief The Cartesian Hessian BEFORE mass-weighting.
+     *
+     * Claude Generated (Aug 2026). `start()` calls `ConvertHessian(m_hessian)`, which
+     * mass-weights the matrix IN PLACE, so `getHessian()` returns H_ij/sqrt(m_i m_j) —
+     * fine for frequencies, wrong for anything that needs the plain second derivative
+     * (force-field parametrisation). This accessor returns the untouched matrix.
+     *
+     * Units: Hartree/Angstrom^2. The finite-difference step `finite_diff_step` is applied
+     * to Angstrom coordinates and curcuma's gradients are Eh/Angstrom, despite the "Bohr"
+     * wording of that parameter's help text.
+     *
+     * @return Raw Cartesian Hessian; empty before `start()` has run.
+     */
+    Matrix getRawHessian() const { return m_hessian_raw; }
+
     void setParameter(const json& parameter) { m_parameter = parameter; }
     Vector Frequencies() { return m_frequencies; }
     Matrix ProjectHessian(const Matrix& hessian);
@@ -184,6 +201,7 @@ private:
     Vector ConvertHessian(Matrix& hessian);
 
     Matrix m_eigen_geometry, m_eigen_gradient, m_hessian;
+    Matrix m_hessian_raw; ///< Claude Generated (Aug 2026): copy taken before mass-weighting
     Vector m_frequencies;
     Molecule m_molecule;
     std::string m_method;

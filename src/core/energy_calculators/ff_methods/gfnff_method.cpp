@@ -2958,7 +2958,15 @@ bool GFNFF::initializeForceField()
     // Claude Generated (March 2026): Native parameter generation path — bypasses JSON entirely
     GFNFFParameterSet ff_params;
     try {
-        ff_params = generateGFNFFParameterSet();
+        // Claude Generated (Aug 2026): an externally supplied set (Hessian-fitted constants)
+        // replaces generation, so the fitted force field runs through the production path.
+        if (m_external_parameter_set) {
+            ff_params = *m_external_parameter_set;
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info("GFN-FF: using externally supplied parameter set");
+        } else {
+            ff_params = generateGFNFFParameterSet();
+        }
     } catch (const std::exception& e) {
         CurcumaLogger::error(std::string("GFN-FF parameter generation failed: ") + e.what());
         return false;

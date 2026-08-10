@@ -348,6 +348,11 @@ void Hessian::start()
         LoadHessian(m_read_file);
     }
 
+    // Claude Generated (Aug 2026): keep the plain Cartesian Hessian before ConvertHessian
+    // mass-weights it in place. getRawHessian() is what the QMDFF force-constant fit needs;
+    // getHessian() keeps returning the mass-weighted matrix used for the frequencies.
+    m_hessian_raw = m_hessian;
+
     m_frequencies = ConvertHessian(m_hessian);
 
     // PrintVibrationsPlain(eigenvalues);

@@ -49,6 +49,10 @@ public:
     /// Claude Generated 2026 — return GFN-FF CN from last calculateEnergy() call
     Vector getCN() const override;
     bool updateGeometry(const Matrix& geometry) override;
+
+    /// Claude Generated (Aug 2026): evaluate a supplied GFN-FF parameter set through the
+    /// production path. Call before setMolecule(); see GFNFF::setExternalParameterSet.
+    void setExternalGFNFFParameters(const GFNFFParameterSet& params);
     bool hasGradient() const override { return true; }
     bool isThreadSafe() const override { return false; }
     std::string getMethodName() const override { return m_method_name; }

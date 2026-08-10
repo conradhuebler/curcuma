@@ -161,8 +161,15 @@ bool ForceFieldMethod::setMolecule(const Mol& mol) {
         // Set molecule in ForceField
         m_forcefield->setMolecule(mol);
 
-        // Generate parameters if needed
-        if (!generateParametersIfNeeded(mol)) {
+        // Claude Generated (Aug 2026): an explicit bonded set (see setParameters) wins over
+        // both generation and the auto-parameter cache. It can only be applied here, not in
+        // setParameters, because ForceField::setParameter builds the FFWorkspace and needs
+        // the atom types that ForceField::setMolecule has only just installed.
+        const bool ok = !m_explicit_ff_parameters.is_null()
+            ? applyExplicitParameters()
+            : generateParametersIfNeeded(mol);
+
+        if (!ok) {
             CurcumaLogger::error("Failed to generate ForceField parameters");
             handleForceFieldError("parameter generation");
             return false;
@@ -283,6 +290,42 @@ void ForceFieldMethod::setThreadCount(int threads) {
 void ForceFieldMethod::setParameters(const json& params) {
     m_parameters = MergeJson(m_parameters, params);
     updateForceFieldConfig();
+
+    // Claude Generated (Aug 2026): an explicitly supplied BONDED parameter set is
+    // authoritative and has to reach ForceField. Previously it was merged into
+    // m_parameters and then thrown away by generateParametersIfNeeded(), which is why
+    // `-qmdfffit` could never change a single force constant.
+    //
+    // Gated on "bonds"/"angles": controller-only JSON (the overwhelmingly common case,
+    // e.g. threads/verbosity/method) keeps the existing generate-or-cache path untouched.
+    if (params.contains("bonds") || params.contains("angles")) {
+        m_explicit_ff_parameters = params;
+        if (!m_explicit_ff_parameters.contains("method"))
+            m_explicit_ff_parameters["method"] = m_method_name;
+        m_calculation_done = false;
+        // If the molecule is already known, apply now; otherwise setMolecule() will.
+        if (m_initialized)
+            applyExplicitParameters();
+    }
+}
+
+bool ForceFieldMethod::applyExplicitParameters() {
+    if (!m_forcefield || m_explicit_ff_parameters.is_null())
+        return false;
+
+    const bool caching = m_parameters.value("parameter_caching", true);
+    m_forcefield->setParameterCaching(false);
+    m_forcefield->setParameter(m_explicit_ff_parameters);
+    m_forcefield->setParameterCaching(caching);
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format(
+            "ForceField: using explicitly supplied parameters ({} bonds, {} angles) — "
+            "generation and auto-parameter cache bypassed",
+            m_explicit_ff_parameters.value("bonds", json::array()).size(),
+            m_explicit_ff_parameters.value("angles", json::array()).size()));
+    }
+    return true;
 }
 
 json ForceFieldMethod::getParameters() const {

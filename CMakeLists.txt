@@ -539,6 +539,8 @@ set(curcuma_core_SRC
         src/core/energy_calculators/ff_methods/forcefield.cpp
         src/core/energy_calculators/ff_methods/forcefieldfunctions.h
         src/core/energy_calculators/ff_methods/forcefieldgenerator.cpp
+        src/core/energy_calculators/ff_methods/qmdff_data.cpp
+        src/core/energy_calculators/ff_methods/qmdff_parametrisation.cpp
         src/core/energy_calculators/ff_methods/d3param_generator.cpp
         src/core/energy_calculators/ff_methods/d3_reference_cn.cpp
         src/core/energy_calculators/ff_methods/d3_reference_c6.cpp

@@ -24,7 +24,14 @@
 
 #include "forcefieldfunctions.h"
 
+// Claude Generated (Aug 2026): QMDFF term generation (port of xtb src/qmdff.f90)
+#include "d3param_generator.h"
+#include "qmdff_data.h"
+#include "qmdff_terms.h"
+#include "src/core/energy_calculators/dispersion/d4param_generator.h"
+
 #include <chrono>
+#include <map>
 #include <fmt/chrono.h>
 #include <fmt/core.h>
 #include <fmt/format.h>
@@ -258,7 +265,10 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
 
     } else if (m_method.compare("qmdff") == 0) {
         m_ff_type = 2;
-        m_parameter["d3"] = 1;
+        // Claude Generated (Aug 2026): NO separate D3/D4 pass here. QMDFF carries its own
+        // dispersion inside the non-covalent block (setQMDFFTerms), and the FFWorkspace
+        // runs QMDFF with dispersion_enabled=false — the former `m_parameter["d3"] = 1`
+        // therefore generated a full D3 parameter set that was then discarded.
         m_parameter["vdw_scaling"] = 0;
     } else if (m_method.compare("gfnff") == 0) {
         m_ff_type = 4;  // GFN-FF type (Phase 3 integration)
@@ -346,6 +356,16 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
     }
     if (m_parameter["d4"].get<int>() == 1) {
         GenerateD4Parameters();
+    }
+
+    // Claude Generated (Aug 2026): QMDFF-specific terms (torsions in QMDFF's Fourier
+    // form, non-covalent pair list, hydrogen/halogen bonds). Only meaningful for the
+    // QMDFF methods; see setQMDFFTerms() for the mapping and its limitations.
+    if (m_ff_type == 2) {
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Generating QMDFF torsion / non-covalent / HB parameters");
+        }
+        setQMDFFTerms();
     }
 
     // Summary output with timing
@@ -950,6 +970,338 @@ void ForceFieldGenerator::AssignUffAtomTypes()
     }
 }
 
+// =============================================================================
+// QMDFF term generation — Claude Generated (August 2026)
+//
+// Reference: xtb b7dbd36^:src/qmdff.f90 (module xtb_qmdff), deleted from xtb in
+// commit b7dbd36 "Refactoring of external drivers (#568)".
+//
+// IMPORTANT SCOPE NOTE
+// --------------------
+// The genuine QMDFF parametrisation is a fit to a QM Hessian performed by
+// Grimme's standalone QMDFF program, which writes a `solvent` parameter file;
+// xtb's qmdff.f90 only ever *evaluated* such a file. Curcuma derives its own
+// parameters from the UFF-style topology (and optionally refines the bond/angle
+// force constants with `-qmdfffit`). The three lists built here therefore differ
+// in origin from a real QMDFF parameter set:
+//
+//   torsions : an EXACT re-expression of curcuma's UFF torsion terms in the
+//              QMDFF Fourier form, so that the QMDFF dissociation damping
+//              applies. The barriers themselves are still UFF-derived.
+//   NCI      : essentially parameter-free — C6 from the validated native D3
+//              tables, R0 from r2r4, Z_A from valelff, alpha from the D3 R0ab
+//              table. Only the atomic charges are external input.
+//   HB/XB    : topological detection plus the reference's charge-dependent
+//              scaling (hbpara). The QMDFF program derives the same list from
+//              the QM topology.
+//
+// In other words: the FUNCTIONAL FORM is now the reference one, the PARAMETERS
+// are curcuma's. That distinction matters when comparing against published
+// QMDFF numbers — see docs/QMDFF.md.
+// =============================================================================
+
+void ForceFieldGenerator::setQMDFFTerms()
+{
+    m_qmdff_torsions.clear();
+    m_qmdff_ncis.clear();
+    m_qmdff_hbonds.clear();
+
+    const int natoms = static_cast<int>(m_mol.m_atoms.size());
+    if (natoms == 0)
+        return;
+
+    // -------------------------------------------------------------------------
+    // 1) Torsions: rewrite E_UFF = V/2 (1 - cos(n phi0) cos(n phi)) as two QMDFF
+    //    Fourier terms. With the QMDFF reference angle set to pi both erf
+    //    branches coincide (dphi1 == dphi2 == phi - pi), so
+    //      v1 (1 + cos(n phi)) + v2 (1 - cos(n phi))
+    //        = (v1 + v2) + (v1 - v2) cos(n phi)
+    //    reproduces the UFF term exactly for
+    //      v1 = V/4 (1 - cos(n phi0)),  v2 = V/4 (1 + cos(n phi0)).
+    //    The phases n*pi and n*pi + pi undo the phi -> phi - pi shift.
+    // -------------------------------------------------------------------------
+    for (const auto& d : m_dihedrals) {
+        if (d.value("type", 1) == 0)
+            continue;
+        const double V = d.value("V", 0.0);
+        const double n = d.value("n", 0.0);
+        const double phi0 = d.value("phi0", 0.0);
+        if (std::abs(V) < 1e-14 || n <= 0.0)
+            continue;
+
+        const double cn0 = std::cos(n * phi0);
+        const double v1 = 0.25 * V * (1.0 - cn0);
+        const double v2 = 0.25 * V * (1.0 + cn0);
+
+        json terms = json::array();
+        terms.push_back({ { "n", n }, { "phase", n * pi }, { "v", v1 } });
+        terms.push_back({ { "n", n }, { "phase", n * pi + pi }, { "v", v2 } });
+
+        json t;
+        t["i"] = d["i"];
+        t["j"] = d["j"];
+        t["k"] = d["k"];
+        t["l"] = d["l"];
+        t["out_of_plane"] = false;
+        t["phi0"] = pi;
+        t["scale"] = 1.0;
+        t["terms"] = terms;
+        m_qmdff_torsions.push_back(t);
+    }
+
+    // -------------------------------------------------------------------------
+    // 1b) Out-of-plane terms. QMDFF keeps them in the torsion list with
+    //     tors(6,·) == 2 (qmdff.f90:466-504) instead of a separate improper term,
+    //     so curcuma's UFF impropers are re-expressed in that form. Index order
+    //     differs: curcuma's Inversion has the CENTRAL atom first, QMDFF has it
+    //     second (its damping runs over the bonds j-i, j-k, j-l), hence the swap.
+    //
+    //     The single-minimum branch (rn > 0) is used:
+    //       E = v (1 + cos(omega - omega0 + pi)) = v (1 - cos(omega - omega0))
+    //     with omega0 taken from the reference structure, consistent with how the
+    //     bond and angle references are taken. The barrier v is curcuma's UFF
+    //     improper force constant — the reference derives it from a QM Hessian,
+    //     so this magnitude is an approximation, not a ported value.
+    // -------------------------------------------------------------------------
+    for (const auto& inv : m_inversions) {
+        if (inv.value("type", 1) == 0)
+            continue;
+        const double fc = inv.value("fc", 0.0);
+        if (std::abs(fc) < 1e-14)
+            continue;
+        const int centre = inv["i"];
+        const int s1 = inv["j"];
+        const int s2 = inv["k"];
+        const int s3 = inv["l"];
+        if (centre >= natoms || s1 >= natoms || s2 >= natoms || s3 >= natoms)
+            continue;
+
+        Eigen::Matrix<double, 4, 3> dummy;
+        const double omega0 = QMDFFTerms::outOfPlaneAngle(
+            m_geometry.row(s1).transpose(), m_geometry.row(centre).transpose(),
+            m_geometry.row(s2).transpose(), m_geometry.row(s3).transpose(),
+            dummy, false);
+
+        json terms = json::array();
+        terms.push_back({ { "n", 1.0 }, { "phase", 0.0 }, { "v", 0.0 } });
+
+        json t;
+        t["i"] = s1;
+        t["j"] = centre;
+        t["k"] = s2;
+        t["l"] = s3;
+        t["out_of_plane"] = true;
+        t["phi0"] = omega0;
+        t["scale"] = fc;
+        t["terms"] = terms;
+        m_qmdff_torsions.push_back(t);
+    }
+
+    // -------------------------------------------------------------------------
+    // 2) Topological distance classes for the non-covalent list.
+    //    BFS over the bond graph; the QMDFF class nk is the bond count:
+    //      1,2 -> 1   1,3 -> 2   1,4 -> 3   1,5 -> 4   further/disconnected -> 5
+    //    Classes 1 and 2 have eps1 = eps2 = 0 in the reference and are omitted.
+    // -------------------------------------------------------------------------
+    constexpr int kUnreachable = 99;
+    std::vector<std::vector<int>> bond_dist(natoms, std::vector<int>(natoms, kUnreachable));
+    for (int start = 0; start < natoms; ++start) {
+        bond_dist[start][start] = 0;
+        std::vector<int> frontier{ start };
+        int depth = 0;
+        while (!frontier.empty() && depth < 5) {
+            std::vector<int> next;
+            ++depth;
+            for (int a : frontier) {
+                if (a < 0 || a >= static_cast<int>(m_stored_bonds.size()))
+                    continue;
+                for (int b : m_stored_bonds[a]) {
+                    if (b < 0 || b >= natoms)
+                        continue;
+                    if (bond_dist[start][b] > depth) {
+                        bond_dist[start][b] = depth;
+                        next.push_back(b);
+                    }
+                }
+            }
+            frontier.swap(next);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 3) Non-covalent pairs. The functional form is ff_ini's (qmdff.f90:132-155):
+    //      sr42 = 3 s8 r2r4_i r2r4_j = s8 * (C8/C6)
+    //      R0   = a1 sqrt(3 r2r4_i r2r4_j) + a2 = a1 sqrt(C8/C6) + a2
+    //
+    //    Claude Generated (Aug 2026): the C6 source is **D4**, not the D3 of the 2014
+    //    reference. D4 gives a charge- AND coordination-number-dependent C6, and we feed
+    //    it the same QM charges the electrostatic term uses, so dispersion and
+    //    electrostatics are consistent. Consequently the damping constants are D4's own
+    //    (s6=1.0, s8=2.0, a1=0.58, a2=4.80 from the `d4param` registry) rather than
+    //    QMDFF's D3-era 2.70/0.45/4.00 — mixing D4 C6 with D3-fitted damping would be
+    //    worse than either. This changes every `-method qmdff` energy; see docs/QMDFF.md.
+    // -------------------------------------------------------------------------
+    const bool have_charges = (m_mol.m_partial_charges.size() == natoms);
+
+    ConfigManager d4_config("d4param", m_parameter);
+    const double d4_s6 = d4_config.get<double>("d4_s6", 1.0);
+    const double d4_s8 = d4_config.get<double>("d4_s8", 2.0);
+    const double d4_a1 = d4_config.get<double>("d4_a1", 0.58);
+    const double d4_a2 = d4_config.get<double>("d4_a2", 4.80);
+
+    D4ParameterGenerator d4(d4_config);
+    d4.setBuildPairLists(false); // we own the pair loop; the JSON list would be discarded
+    if (have_charges) {
+        // Must precede GenerateParameters: reuse the QM charges instead of an internal
+        // EEQ solve, so zeta(q) and the point-charge term see the same charges.
+        d4.setTopologyCharges(m_partial_charges);
+    }
+    {
+        const Matrix geometry_bohr = m_geometry * 1.889726125; // D4 expects Bohr
+        d4.GenerateParameters(m_mol.m_atoms, geometry_bohr);
+    }
+
+    for (int i = 0; i < natoms; ++i) {
+        for (int j = i + 1; j < natoms; ++j) {
+            const int d = bond_dist[i][j];
+            int nk = 5;
+            if (d == 1)
+                nk = 1;
+            else if (d == 2)
+                nk = 2;
+            else if (d == 3)
+                nk = 3;
+            else if (d == 4)
+                nk = 4;
+            if (nk <= 2)
+                continue; // eps1 = eps2 = 0 — the reference contributes nothing here
+
+            const int zi = m_mol.m_atoms[i];
+            const int zj = m_mol.m_atoms[j];
+
+            const double c6 = d4_s6 * d4.getChargeWeightedC6(zi, zj, i, j);
+            // C8/C6 = 3 * sqrtZr4r2_i * sqrtZr4r2_j (the D3/D4 convention)
+            const double c8_over_c6 = 3.0 * d4.getSqrtZr4r2(zi) * d4.getSqrtZr4r2(zj);
+
+            json n;
+            n["i"] = i;
+            n["j"] = j;
+            n["nk"] = nk;
+            n["c6"] = c6;
+            n["r0_bj"] = d4_a1 * std::sqrt(c8_over_c6) + d4_a2;
+            n["sr42"] = d4_s8 * c8_over_c6;
+            n["zab"] = QMDFFData::valenceElectrons(zi) * QMDFFData::valenceElectrons(zj);
+            n["alpha"] = QMDFFData::repulsionAlpha(zi, zj);
+            n["qq"] = have_charges ? (m_mol.m_partial_charges[i] * m_mol.m_partial_charges[j]) : 0.0;
+            m_qmdff_ncis.push_back(n);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 4) Hydrogen and halogen bonds. QMDFF stores triples (A, B, H) where A and B
+    //    are the heavy partners; the strength is charge dependent (qmdff.f90:244-254):
+    //      HB: c_A = hbpara(10, 5, q_A) * scalehb(Z_A), same for B
+    //      XB: c   = hbpara(-6.5, 1, q_X) * scalexb(Z_X)
+    //    Without partial charges the scaling degenerates, so the lists stay empty.
+    // -------------------------------------------------------------------------
+    if (have_charges) {
+        auto isBonded = [&](int a, int b) {
+            if (a < 0 || a >= static_cast<int>(m_stored_bonds.size()))
+                return false;
+            return std::find(m_stored_bonds[a].begin(), m_stored_bonds[a].end(), b) != m_stored_bonds[a].end();
+        };
+
+        // --- hydrogen bonds: H covalently bound to a donor A, acceptor B not bonded to H
+        for (int h = 0; h < natoms; ++h) {
+            if (m_mol.m_atoms[h] != 1)
+                continue;
+            for (int a = 0; a < natoms; ++a) {
+                if (a == h || !isBonded(h, a))
+                    continue;
+                if (QMDFFData::scaleHB(m_mol.m_atoms[a]) <= 0.0)
+                    continue;
+                for (int b = 0; b < natoms; ++b) {
+                    if (b == a || b == h)
+                        continue;
+                    if (QMDFFData::scaleHB(m_mol.m_atoms[b]) <= 0.0)
+                        continue;
+                    if (isBonded(h, b))
+                        continue;
+                    if (bond_dist[a][b] <= 2)
+                        continue; // same functional group, not a hydrogen bridge
+
+                    json e;
+                    e["a"] = a;
+                    e["b"] = b;
+                    e["h"] = h;
+                    e["c1"] = QMDFFTerms::hbpara(10.0, 5.0, m_mol.m_partial_charges[a])
+                        * QMDFFData::scaleHB(m_mol.m_atoms[a]);
+                    e["c2"] = QMDFFTerms::hbpara(10.0, 5.0, m_mol.m_partial_charges[b])
+                        * QMDFFData::scaleHB(m_mol.m_atoms[b]);
+                    e["halogen"] = false;
+                    m_qmdff_hbonds.push_back(e);
+                }
+            }
+        }
+
+        // --- halogen bonds: X covalently bound to A, acceptor B elsewhere
+        for (int x = 0; x < natoms; ++x) {
+            const double sxb = QMDFFData::scaleXB(m_mol.m_atoms[x]);
+            if (sxb <= 0.0)
+                continue;
+            for (int a = 0; a < natoms; ++a) {
+                if (a == x || !isBonded(x, a))
+                    continue;
+                for (int b = 0; b < natoms; ++b) {
+                    if (b == a || b == x)
+                        continue;
+                    if (QMDFFData::scaleHB(m_mol.m_atoms[b]) <= 0.0)
+                        continue;
+                    if (bond_dist[x][b] <= 2)
+                        continue;
+
+                    json e;
+                    e["a"] = a;
+                    e["b"] = b;
+                    e["h"] = x;
+                    e["c1"] = sxb * QMDFFTerms::hbpara(-6.5, 1.0, m_mol.m_partial_charges[x]);
+                    e["c2"] = 0.0;
+                    e["halogen"] = true;
+                    m_qmdff_hbonds.push_back(e);
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 5) LJ -> Morse promotion (qmdff.f90:994-1019, subroutine setmorse):
+    //    bonds whose well depth exceeds morsethr dissociate properly with a Morse
+    //    potential; weaker ones stay Lennard-Jones.
+    // -------------------------------------------------------------------------
+    const double morsethr = m_parameter.value("qmdff_morsethr", 99.0);
+    int morse_count = 0;
+    for (auto& b : m_bonds) {
+        const bool morse = (b.value("fc", 0.0) > morsethr);
+        b["qmdff_potential"] = morse ? 1 : 0;
+        if (morse)
+            ++morse_count;
+    }
+
+    // Visible at verbosity >= 1: silently dropping two of the five non-bonded
+    // contributions would otherwise look like a converged, complete calculation.
+    if (!have_charges && CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::warn("QMDFF: no partial charges available — electrostatics and HB/XB "
+                            "terms are switched off. Use -qmdfffit to derive charges from a "
+                            "QM calculation.");
+    }
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("qmdff_torsions", static_cast<int>(m_qmdff_torsions.size()));
+        CurcumaLogger::param("qmdff_nci_pairs", static_cast<int>(m_qmdff_ncis.size()));
+        CurcumaLogger::param("qmdff_hb_xb_terms", static_cast<int>(m_qmdff_hbonds.size()));
+        CurcumaLogger::param("qmdff_morse_bonds", fmt::format("{} (threshold {:.3f})", morse_count, morsethr));
+    }
+}
+
 json ForceFieldGenerator::getParameter()
 {
     json parameters = m_parameter;
@@ -959,6 +1311,14 @@ json ForceFieldGenerator::getParameter()
     parameters["inversions"] = Inversions();
     parameters["vdws"] = vdWs();
     parameters["esps"] = ESPs();
+
+    // Claude Generated (Aug 2026): QMDFF-specific lists (empty for UFF/D3)
+    if (!m_qmdff_torsions.empty())
+        parameters["qmdff_torsions"] = m_qmdff_torsions;
+    if (!m_qmdff_ncis.empty())
+        parameters["qmdff_ncis"] = m_qmdff_ncis;
+    if (!m_qmdff_hbonds.empty())
+        parameters["qmdff_hbonds"] = m_qmdff_hbonds;
 
     return parameters;
 }

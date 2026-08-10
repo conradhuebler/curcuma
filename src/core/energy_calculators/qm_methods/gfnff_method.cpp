@@ -55,6 +55,12 @@ bool GFNFFComputationalMethod::setMolecule(const Mol& mol) {
     return true;
 }
 
+void GFNFFComputationalMethod::setExternalGFNFFParameters(const GFNFFParameterSet& params)
+{
+    if (m_gfnff)
+        m_gfnff->setExternalParameterSet(params);
+}
+
 bool GFNFFComputationalMethod::updateGeometry(const Matrix& geometry) {
     if (!m_gfnff) {
         CurcumaLogger::error("GFNFFComputationalMethod: m_gfnff is nullptr!");

@@ -255,6 +255,12 @@ private:
     CxxThreadPool* m_threadpool;
     void setvdWs(const json& vdws);
 
+    // Claude Generated (Aug 2026): QMDFF term setters — port of xtb qmdff.f90.
+    // See docs/QMDFF.md for the JSON schema of these three lists.
+    void setQMDFFTorsions(const json& torsions);
+    void setQMDFFNonCovalents(const json& ncis);
+    void setQMDFFHBonds(const json& hbonds);
+
     // Phase 4.2: GFN-FF pairwise non-bonded parameter setters (Claude Generated 2025)
     void setGFNFFDispersions(const json& dispersions);
     void setD4Dispersions(const json& dispersions);  // Claude Generated - Dec 25, 2025: Native D4 dispersion
@@ -329,6 +335,11 @@ private:
     std::vector<Inversion> m_inversions;
     std::vector<vdW> m_vdWs;
     std::vector<EQ> m_EQs;
+
+    // Claude Generated (Aug 2026): QMDFF term storage (xtb qmdff.f90 tors/nci/hb)
+    std::vector<QMDFFTerms::QMDFFTorsion> m_qmdff_torsions;
+    std::vector<QMDFFTerms::QMDFFNonCovalent> m_qmdff_ncis;
+    std::vector<QMDFFTerms::QMDFFHBond> m_qmdff_hbonds;
 
     // Phase 4.2: GFN-FF pairwise non-bonded storage (Claude Generated 2025)
     std::vector<GFNFFDispersion> m_gfnff_dispersions;

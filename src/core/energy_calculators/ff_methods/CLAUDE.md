@@ -773,6 +773,61 @@ std::string method = "d4";  // Matches Fortran reference
 - gfnff GPU validation tests (test_gfnff_gpu) fail with JSON null error — pre-existing, unrelated to pipeline
 - k_dispersion cannot overlap with EEQ in gradient mode (dc6dcn dependency)
 
+## QMDFF (Aug 2026) — port of xtb's removed `src/qmdff.f90`
+
+- **Kernels**: `qmdff_terms.h` (atomic units, self-contained), tables in `qmdff_data.{h,cpp}`
+- **Drivers**: `FFWorkspace::executeQMDFF` + `calcQMDFF{Bonds,Angles,Torsions,NonCovalent,HBonds}`
+- **Parameters**: `ForceFieldGenerator::setQMDFFTerms()` → `qmdff_torsions` / `qmdff_ncis` / `qmdff_hbonds`
+- **Reference**: `git -C external/xtb show b7dbd36^:src/qmdff.f90` (deleted in xtb PR #568)
+- **Two bugs fixed**: bond exponent `0.75a` → `a/2`; `theta0_ijk` is radians but was converted as degrees
+- ⚠️ **Functional form is the reference one**; parameters are curcuma-derived unless `-qmdfffit` has fitted them to a QM Hessian (see below)
+- ⚠️ **No reference-number validation possible** — only analytic-vs-FD gradient consistency
+- Open (pre-existing, not a port bug): the **UFF** analytic gradient is inconsistent with its
+  own finite difference by ~1e-2 Eh/A on every molecule tested, including H2O/CH4 which have
+  only bond and angle terms (`test_qmdff_gradients --method=uff`). Not investigated.
+- Detail: [docs/QMDFF.md](../../../../docs/QMDFF.md)
+
+## QMDFF parametrisation (Aug 2026) — `qmdff_parametrisation.{h,cpp}`
+
+- The QMDFF energy is **exactly linear** in bond `fc`, angle `fc`, torsion/OOP `scale`:
+  `H_FF = sum_p k_p U_p`. The QM-Hessian fit is therefore ONE linear least-squares solve
+  with **zero** force-field Hessians (the old LevMar loop needed ~1.3e6 FF gradient calls
+  per step at 50 atoms — and never changed a single constant).
+- `U_p` = central differences of the analytic term gradients over the term's own 3k
+  coordinates. Stage 1 Seminario (bonds/angles) + Rayleigh quotient (torsions/OOP);
+  stage 2 global normal equations over shared-atom pairs, Tikhonov + bounded NNLS.
+- ⚠️ **Never project T/R out of the target.** A term's Hessian annihilates rotations only
+  where its gradient vanishes; QMDFF torsions are not at a stationary point, so projecting
+  the target but not the model makes the problem inconsistent (`project_tr` default false).
+- ⚠️ **Torsion barriers need `lambda_torsion` (default 1.0)** or they are fitted to zero.
+- ⚠️ `Hessian::getHessian()` is MASS-WEIGHTED after `start()`; the fit needs `getRawHessian()`.
+- `ForceFieldMethod::setParameters` now forwards an explicit bonded set to `ForceField`
+  (gated on `bonds`/`angles`, caching bypassed) — previously it was merged and discarded.
+- Validation: `ctest -R qmdff_hessian_fit` (synthetic round trip, recovery to 1.6e-6)
+
+### GFN-FF term source (`-qmdfffit -potential gfnff`, Aug 2026)
+- Refits GFN-FF's **bonded** constants to the QM Hessian and leaves its non-covalent block
+  (EEQ, D4, HB/XB) untouched — kernels in `gfnff_unit_terms.h`, remainder `H_nb` taken by
+  difference through `GFNFFComputationalMethod` (a bare `ForceField+setGFNFFParameters` is
+  **not** a GFN-FF: no FFWorkspace, measured 90% off).
+- ⚠️ **GFN-FF bond `fc` is negative** — the solver sees `|fc|` via `parameterSign()`.
+- ⚠️ **Torsion tying is invalid for GFN-FF** (per-dihedral `V`, not one scale per bond).
+- ⚠️ **Hydrogen-bridge bonds (`nr_hb>=1`) are excluded** — their exponent is modulated by
+  `hb_cn_H`, which FFWorkspace computes internally and the exported set reports as 0.
+- **The bond unit Hessian is NOT local.** GFN-FF's dynamic `r0 = (r0_base + cnfak*cn +
+  rabshift)*ff` follows the coordination numbers and is propagated as `dE/dcn * dcn/dx`, so
+  the exact `U_p` carries a rank-2 term `-½ d²E/dr² (u wᵀ + w uᵀ)` reaching every CN
+  neighbour (`TermHessian::extra_*`; `w` from the frozen `CNDerivStore`). Still linear in
+  `fc`, so the fit stays one linear solve. Without it the bond kernel is 1.5% off.
+- ⚠️ `setCoordinationNumbers()` / `setCNDerivatives()` **rebuild the term data** — the
+  constructor builds it before either exists, and a GFN-FF bond then silently falls back to
+  the static `r0_ij` (~5e-3 Bohr off: invisible in the longitudinal curvature, 2% error in
+  the transverse one). Multi-basin: set `BasinData::cn`/`dcn` per basin or basin 0's are used.
+- Self-check: `gfnff_kernel_check_<kind>` scales one term kind by 5% and compares the real
+  Hessian change against the model — isolates which kernel disagrees. Measured on CH3OCH3
+  and a 107-atom peptide: all four kinds ~1e-7 (FD floor), end-to-end verification
+  **5.9e-09 / 6.4e-09**.
+
 ## Open Bugs
 
 ### ⚠️ Dead Code: `assignAtomsForSelfEnergy()`

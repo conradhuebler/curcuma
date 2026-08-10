@@ -164,7 +164,24 @@ public:
      * @note Claude Generated: UFF parameter generation integration
      */
     bool generateParametersIfNeeded(const Mol& mol);
-    
+
+    /**
+     * @brief Push an explicitly supplied bonded parameter set into the wrapped ForceField.
+     *
+     * Claude Generated (Aug 2026). `setParameters()` used to merge the JSON into
+     * `m_parameters` and stop there, so a caller handing over fitted bond/angle constants
+     * (the QMDFF Hessian fit, or any `EnergyCalculator::setParameter(bonded_json)` user)
+     * silently got freshly generated defaults instead. This applies the stored set.
+     *
+     * Caching is bypassed for the duration: `ForceField::setParameter` consults
+     * `tryLoadAutoParameters` FIRST and returns on a hit, which would substitute a stale
+     * `<basename>.param.json` for the parameters the caller just supplied.
+     *
+     * @return True if a set was stored and applied.
+     */
+    bool applyExplicitParameters();
+
+
     /**
      * @brief Get supported ForceField methods
      * @return Vector of supported method names
@@ -272,6 +289,10 @@ private:
     bool m_calculation_done;                       ///< Flag if calculation was performed
     double m_last_energy;                          ///< Last calculated energy
     Matrix m_last_gradient;                        ///< Last calculated gradient
+
+    /// Claude Generated (Aug 2026): bonded parameter set supplied explicitly by the caller.
+    /// When set it wins over both generation and the auto-parameter cache.
+    json m_explicit_ff_parameters;
     
     /**
      * @brief Initialize ForceField with current parameters

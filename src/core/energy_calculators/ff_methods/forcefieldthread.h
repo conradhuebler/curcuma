@@ -131,6 +131,11 @@ struct Bond {
     // For X-H bonds participating in HB: alpha_modified = (1 - 0.1*hb_cn_H) * alpha
     int nr_hb = 0;           // Number of HB interactions this bond participates in
     double hb_cn_H = 0.0;    // HB coordination number for hydrogen atom (used if nr_hb >= 1)
+
+    // Claude Generated (Aug 2026): QMDFF stretch potential selector (Fortran bond(3,·))
+    // 0 = Lennard-Jones-like, 1 = Morse. QMDFF's `setmorse` promotes bonds whose
+    // well depth exceeds morsethr to Morse so that they dissociate correctly.
+    int qmdff_potential = 0;
 };
 
 struct Angle {

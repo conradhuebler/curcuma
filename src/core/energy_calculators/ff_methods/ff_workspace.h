@@ -196,6 +196,10 @@ struct PartitionRanges {
     std::pair<int,int> atm_triples = {0,0};
     std::pair<int,int> batm_triples = {0,0};
     std::pair<int,int> vdws = {0,0};            // UFF/QMDFF LJ pairs
+    // QMDFF-specific lists (Claude Generated Aug 2026)
+    std::pair<int,int> qmdff_torsions = {0,0};
+    std::pair<int,int> qmdff_ncis = {0,0};
+    std::pair<int,int> qmdff_hbonds = {0,0};
 };
 
 /**
@@ -363,6 +367,11 @@ private:
     std::vector<HBGradEntry> m_hb_grad_entries;
     std::vector<vdW> m_vdws;                    ///< UFF/QMDFF LJ non-bonded pairs
 
+    // QMDFF-specific lists (Claude Generated Aug 2026) — see qmdff_terms.h
+    std::vector<QMDFFTerms::QMDFFTorsion> m_qmdff_torsions;
+    std::vector<QMDFFTerms::QMDFFNonCovalent> m_qmdff_ncis;
+    std::vector<QMDFFTerms::QMDFFHBond> m_qmdff_hbonds;
+
     // Cached bonded pairs for fast repulsion lookup
     std::set<std::pair<int,int>> m_bonded_pairs;
 
@@ -419,6 +428,10 @@ private:
     void calcUFFvdW(int p);
     void calcQMDFFBonds(int p);
     void calcQMDFFAngles(int p);
+    // Claude Generated (Aug 2026): remaining QMDFF terms, ported from xtb qmdff.f90
+    void calcQMDFFTorsions(int p);    ///< proper torsions + out-of-plane (ff_eg)
+    void calcQMDFFNonCovalent(int p); ///< dispersion + electrostatics + repulsion (ff_nonb)
+    void calcQMDFFHBonds(int p);      ///< hydrogen and halogen bonds (ff_hb)
 
     // === Helpers ===
 

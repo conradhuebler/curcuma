@@ -1293,6 +1293,21 @@ int executeQMDFFFit(const json& controller, int argc, char** argv) {
     initializeBMT(&qmdfffit, argv[2], "qmdfffit", controller);
     Molecule mol1 = Files::LoadFile(argv[2]);
     qmdfffit.setMolecule(mol1);
+    // Claude Generated (Aug 2026): needed for the <input>.param.json output, so that a
+    // later `-sp <input> -method qmdff` picks the fitted constants up automatically.
+    qmdfffit.setInputFile(argv[2]);
+
+    // Claude Generated (Aug 2026): a multi-frame input can be fitted at several basins at
+    // once (-basins N / -basin_frames a,b,c), which adds relative-energy and gradient
+    // residuals to the Hessian fit. Single-frame inputs are unaffected.
+    {
+        std::vector<Molecule> ensemble;
+        FileIterator ensemble_iter(argv[2], true);
+        while (!ensemble_iter.AtEnd())
+            ensemble.push_back(ensemble_iter.Next());
+        if (ensemble.size() > 1)
+            qmdfffit.setEnsemble(ensemble);
+    }
     qmdfffit.start();
     qmdfffit.processBakFiles();
     return 0;
