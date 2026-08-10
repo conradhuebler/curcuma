@@ -201,6 +201,36 @@ Requirements and limits: dual-method only (`md_method != opt_method`), at least
 `-surface_feedback_min_structures` (20) structures with both energies, so it starts working from the
 second cycle. The extra cost is one cheap single point per ranked structure per cycle.
 
+### Measured end to end — it works, and it does not help (Aug 10, 2026)
+
+Two otherwise identical seven-stage runs on the 107-atom peptide, one with the feedback, one
+without. It does what it is built for: the share of over-bridged structures on the exploration side
+falls from **10.6 % to 5.6 %** on average from cycle 2 on — six cycles in a row, with the two ranges
+not overlapping (8.7–13.3 % against 2.6–6.8 %), while cycle 1, where the feedback is still inactive,
+is identical in both (1.3 %).
+
+The result does not move:
+
+| | baseline | with feedback |
+|---|---|---|
+| structures | 1060 | 813 |
+| deepest vs the reference | **+28.4** | **+28.6** kJ/mol |
+| smallest RMSD | 2.40 A | **2.25 A** |
+| smallest H-bond Hamming | **4** | 5 |
+| smallest torsion distance | 7 of 29 | **6 of 29** |
+
+Two numbers marginally better, two marginally worse, the energy equal to 0.2 kJ/mol. The reason is
+in the same data: on the RANKING surface the over-bridging was never a mass phenomenon (0.4–3.7 %
+per cycle) because the accurate re-optimisation discards or repairs those structures anyway — it
+removes 3–4 of the excess bridges by itself. The feedback therefore saves time in a dead end; it
+does not supply what is missing, namely a move that crosses the 6–7 torsions to the reference in one
+step.
+
+**Therefore off by default**, and worth switching on only when the exploration cost in that dead end
+matters (it is one extra single point per ranked structure per cycle). The general lesson is worth
+more than the feature: an intervention that demonstrably improves its own target metric does not
+thereby improve the result — measuring only the target metric would have called this a success.
+
 For a system whose behaviour is already known there is the manual alternative `-hbond_excess_max N`
 (off by default, and deliberately without a sensible default): a structure with more than
 `reference + N` hydrogen bonds is not used as a seed for the next cycle, and with
