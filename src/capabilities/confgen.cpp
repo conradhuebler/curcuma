@@ -81,6 +81,16 @@ void ConfGen::LoadControlJson()
     m_proposal_depth = m_config.get<int>("proposal_depth");
     m_proposal_candidate_cap = m_config.get<int>("proposal_candidate_cap");
     m_proposal_seed = m_config.get<int>("proposal_seed");
+    m_crossover_max = m_config.get<int>("crossover_max");
+    m_crossover_window = m_config.get<int>("crossover_window");
+    m_mode_max = m_config.get<int>("mode_max");
+    m_mode_count = m_config.get<int>("mode_count");
+    m_mode_amplitude = m_config.get<double>("mode_amplitude");
+    m_path_max = m_config.get<int>("path_max");
+    m_path_images = m_config.get<int>("path_images");
+    m_path_min_distance = m_config.get<int>("path_min_distance");
+    m_nci_staged = m_config.get<bool>("nci_staged");
+    m_eval_method = m_config.get<std::string>("eval_method");
     m_clash_factor = m_config.get<double>("clash_factor");
     m_new_rmsd = m_config.get<double>("new_rmsd");
     m_topology_factor = m_config.get<double>("topology_factor");
@@ -1523,6 +1533,389 @@ std::vector<ConfGen::Proposal> ConfGen::generateConsensusProposals() const
     return proposals;
 }
 
+/* Claude Generated (Aug 2026): CROSSOVER -- transfer a CONNECTED WINDOW of torsions from one
+ * conformer into another, instead of changing d torsions independently.
+ *
+ * Why this move exists. The reference conformer of the measured 107-atom peptide differs from the
+ * nearest of ~4600 sampled structures in 6-7 of 29 torsions by more than 60 degrees -- further than
+ * any mutation-style move reaches in one step. Raising -proposal_depth to 5 or 7 does reach that far
+ * and is useless in practice: measured, NOT ONE of the built structures kept its target state vector
+ * through the free optimisation, because a random combination of seven torsions is almost never near
+ * a minimum. "Six to seven torsions at once" is not seven independent events, it is the signature of
+ * one collective rearrangement.
+ *
+ * A window transfer respects that. Every transferred block comes from a geometry that was already
+ * viable, so the local fold it carries is a real one and only its context changes. This is fragment
+ * insertion as used in protein folding, with the ensemble itself as the fragment library -- crossover
+ * rather than mutation.
+ *
+ * Connectivity is defined ON THE TORSIONS: two are neighbours when their central bonds share an
+ * atom, and a window is grown breadth-first from a seed. A window in storage order would be an
+ * arbitrary set of unrelated dihedrals.
+ */
+std::vector<ConfGen::Proposal> ConfGen::generateCrossoverProposals() const
+{
+    std::vector<Proposal> proposals;
+    const std::vector<int> informative = informativeTorsions();
+    if (m_crossover_max <= 0 || informative.size() < 2 || m_frames.size() < 2)
+        return proposals;
+
+    std::set<std::vector<int>> known;
+    for (const Frame& f : m_frames)
+        known.insert(f.states);
+    known.insert(m_proposed_before.begin(), m_proposed_before.end());
+
+    std::vector<int> order;
+    for (std::size_t i = 0; i < m_frames.size(); ++i)
+        if (m_frames[i].from_input)
+            order.push_back(static_cast<int>(i));
+    if (order.empty())
+        for (std::size_t i = 0; i < m_frames.size(); ++i)
+            order.push_back(static_cast<int>(i));
+    std::sort(order.begin(), order.end(), [this](int a, int b) { return m_frames[a].energy < m_frames[b].energy; });
+    const int n_templates = std::min<int>(std::max(1, m_proposal_templates), static_cast<int>(order.size()));
+
+    // Torsion adjacency over the central bonds.
+    std::vector<std::vector<int>> neighbours(informative.size());
+    for (std::size_t a = 0; a < informative.size(); ++a)
+        for (std::size_t b = a + 1; b < informative.size(); ++b) {
+            const auto& ta = m_torsions[informative[a]];
+            const auto& tb = m_torsions[informative[b]];
+            if (ta.j == tb.j || ta.j == tb.k || ta.k == tb.j || ta.k == tb.k) {
+                neighbours[a].push_back(static_cast<int>(b));
+                neighbours[b].push_back(static_cast<int>(a));
+            }
+        }
+
+    // Donors: every structure of this call, thinned evenly so a large cumulative ensemble does not
+    // blow the candidate count up (the thinning keeps the energy range, unlike taking the N lowest).
+    std::vector<int> donors = order;
+    const int donor_cap = 50;
+    if (static_cast<int>(donors.size()) > donor_cap) {
+        std::vector<int> thinned;
+        const double step = static_cast<double>(donors.size()) / donor_cap;
+        for (int n = 0; n < donor_cap; ++n)
+            thinned.push_back(donors[static_cast<std::size_t>(n * step)]);
+        donors = std::move(thinned);
+    }
+
+    const std::vector<std::vector<double>> coefficients = additiveCoefficients();
+    const int window = std::max(1, m_crossover_window);
+    std::set<std::vector<int>> seen_here;
+    for (int t = 0; t < n_templates; ++t) {
+        const std::vector<int>& base = m_frames[order[t]].states;
+        for (int donor : donors) {
+            if (donor == order[t] || m_frames[donor].states.size() != base.size())
+                continue;
+            const std::vector<int>& from = m_frames[donor].states;
+            for (std::size_t seed = 0; seed < informative.size(); ++seed) {
+                std::vector<char> in_window(informative.size(), 0);
+                std::vector<std::size_t> queue = { seed };
+                in_window[seed] = 1;
+                for (std::size_t q = 0; q < queue.size() && static_cast<int>(queue.size()) < window; ++q)
+                    for (int nb : neighbours[queue[q]]) {
+                        if (in_window[nb])
+                            continue;
+                        in_window[nb] = 1;
+                        queue.push_back(static_cast<std::size_t>(nb));
+                        if (static_cast<int>(queue.size()) >= window)
+                            break;
+                    }
+                std::vector<int> states = base;
+                int changed = 0;
+                for (std::size_t idx : queue) {
+                    const int tor = informative[idx];
+                    if (tor >= static_cast<int>(states.size()) || from[tor] == states[tor])
+                        continue;
+                    states[tor] = from[tor];
+                    changed++;
+                }
+                if (changed == 0 || known.count(states) || seen_here.count(states))
+                    continue;
+                seen_here.insert(states);
+                Proposal p;
+                p.states = states;
+                p.template_frame = order[t];
+                p.distance = changed;
+                p.nci_label = fmt::format("crossover, {} torsion(s) from structure {}", changed, donor + 1);
+                for (std::size_t k = 0; k < states.size(); ++k)
+                    if (states[k] >= 0 && states[k] < static_cast<int>(coefficients[k].size()))
+                        p.predicted += coefficients[k][states[k]];
+                proposals.push_back(std::move(p));
+            }
+        }
+    }
+    if (proposals.empty())
+        return proposals;
+
+    // Same ordering rule as the torsion proposals: energy estimate and coverage, mixed.
+    std::vector<const std::vector<int>*> seen;
+    for (const Frame& f : m_frames)
+        seen.push_back(&f.states);
+    for (const std::vector<int>& v : m_proposed_before)
+        seen.push_back(&v);
+    for (Proposal& p : proposals) {
+        int best = std::numeric_limits<int>::max();
+        for (const std::vector<int>* v : seen) {
+            if (v->size() != p.states.size())
+                continue;
+            int d = 0;
+            for (std::size_t i = 0; i < v->size() && d < best; ++i)
+                d += ((*v)[i] != p.states[i]);
+            best = std::min(best, d);
+        }
+        p.novelty = (best == std::numeric_limits<int>::max()) ? 0 : best;
+    }
+    const double w = (m_proposal_ranking == "energy") ? 0.0
+        : (m_proposal_ranking == "coverage") ? 1.0
+        : std::max(0.0, std::min(1.0, m_proposal_novelty_weight));
+    std::stable_sort(proposals.begin(), proposals.end(), [w](const Proposal& a, const Proposal& b) {
+        return (1.0 - w) * a.predicted - w * a.novelty < (1.0 - w) * b.predicted - w * b.novelty;
+    });
+    if (static_cast<int>(proposals.size()) > m_crossover_max)
+        proposals.resize(m_crossover_max);
+    return proposals;
+}
+
+/* Claude Generated (Aug 2026): COLLECTIVE MODES -- displace along the principal components of the
+ * ensemble, computed IN TORSION SPACE.
+ *
+ * The crossover move transfers folds the ensemble already contains. This one is the complement: it
+ * is not restricted to observed combinations. The measured problem is that the reference conformer
+ * sits 6-7 torsions away and that six or seven torsions do not move independently -- a backbone
+ * rearranges collectively. The leading eigenvectors of the ensemble's own covariance ARE those
+ * collective directions, and they cost nothing because the structures are already there.
+ *
+ * Why torsion space and not Cartesian space: measured, a displacement of 2 sigma along a Cartesian
+ * principal component had ALL 20 proposals rejected before optimisation -- a linear displacement of
+ * coordinates does not preserve bond lengths, so it produces stretched bonds and clashes rather than
+ * a conformer. In torsion space bonds and angles are preserved by construction.
+ *
+ * Periodicity is handled by working on (cos, sin) of each dihedral instead of the angle itself; a
+ * PCA over raw angles would be dominated by the 359 -> 1 degree wrap. The displaced angles are then
+ * snapped to the nearest populated state, so the result is a legal state vector that the ordinary
+ * build path can realise -- the mode supplies the DIRECTION, the state table the vocabulary.
+ */
+std::vector<ConfGen::Proposal> ConfGen::generateModeProposals() const
+{
+    std::vector<Proposal> proposals;
+    const std::vector<int> informative = informativeTorsions();
+    if (m_mode_max <= 0 || m_frames.size() < 4 || informative.empty())
+        return proposals;
+
+    std::vector<int> order;
+    for (std::size_t i = 0; i < m_frames.size(); ++i)
+        if (m_frames[i].from_input)
+            order.push_back(static_cast<int>(i));
+    if (order.empty())
+        for (std::size_t i = 0; i < m_frames.size(); ++i)
+            order.push_back(static_cast<int>(i));
+    std::sort(order.begin(), order.end(), [this](int a, int b) { return m_frames[a].energy < m_frames[b].energy; });
+
+    const int T = static_cast<int>(m_torsions.size());
+    const int dim = 2 * T;   // (cos, sin) per torsion
+    std::vector<Eigen::VectorXd> rows;
+    rows.reserve(m_frames.size());
+    for (const Frame& f : m_frames) {
+        if (static_cast<int>(f.angles.size()) != T)
+            continue;
+        Eigen::VectorXd v(dim);
+        for (int t = 0; t < T; ++t) {
+            const double a = f.angles[t] * M_PI / 180.0;
+            v(2 * t) = std::cos(a);
+            v(2 * t + 1) = std::sin(a);
+        }
+        rows.push_back(std::move(v));
+    }
+    if (static_cast<int>(rows.size()) < 4)
+        return proposals;
+
+    Eigen::VectorXd mean = Eigen::VectorXd::Zero(dim);
+    for (const auto& v : rows)
+        mean += v;
+    mean /= static_cast<double>(rows.size());
+    Eigen::MatrixXd cov = Eigen::MatrixXd::Zero(dim, dim);
+    for (const auto& v : rows) {
+        const Eigen::VectorXd d = v - mean;
+        cov.noalias() += d * d.transpose();
+    }
+    cov /= static_cast<double>(rows.size() - 1);
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(cov);
+    if (solver.info() != Eigen::Success)
+        return proposals;
+    const Eigen::VectorXd& lambda = solver.eigenvalues();    // ascending
+    const Eigen::MatrixXd& vectors = solver.eigenvectors();
+    const double total = lambda.sum();
+    if (total <= 0)
+        return proposals;
+
+    std::set<std::vector<int>> known;
+    for (const Frame& f : m_frames)
+        known.insert(f.states);
+    known.insert(m_proposed_before.begin(), m_proposed_before.end());
+    std::set<std::vector<int>> seen_here;
+
+    const int modes = std::max(1, std::min(m_mode_count, dim));
+    const int n_templates = std::min<int>(std::max(1, m_proposal_templates), static_cast<int>(order.size()));
+    for (int t = 0; t < n_templates; ++t) {
+        const Frame& tmpl = m_frames[order[t]];
+        if (static_cast<int>(tmpl.angles.size()) != T)
+            continue;
+        Eigen::VectorXd base(dim);
+        for (int k = 0; k < T; ++k) {
+            const double a = tmpl.angles[k] * M_PI / 180.0;
+            base(2 * k) = std::cos(a);
+            base(2 * k + 1) = std::sin(a);
+        }
+        for (int m = 0; m < modes; ++m) {
+            const int col = dim - 1 - m;
+            const double sigma = std::sqrt(std::max(0.0, lambda(col)));
+            if (sigma < 1e-8)
+                continue;
+            for (int sign = -1; sign <= 1; sign += 2) {
+                Eigen::VectorXd moved = base + sign * m_mode_amplitude * sigma * vectors.col(col);
+                std::vector<int> states = tmpl.states;
+                int changed = 0;
+                for (int k = 0; k < T; ++k) {
+                    if (m_state_centres[k].size() < 2)
+                        continue;
+                    double angle = std::atan2(moved(2 * k + 1), moved(2 * k)) * 180.0 / M_PI;
+                    const int state = TorsionSpace::assignState(angle, m_state_centres[k]);
+                    if (state >= 0 && state != states[k]) {
+                        states[k] = state;
+                        changed++;
+                    }
+                }
+                if (changed == 0 || known.count(states) || seen_here.count(states))
+                    continue;
+                seen_here.insert(states);
+                Proposal p;
+                p.states = states;
+                p.template_frame = order[t];
+                p.distance = changed;
+                p.nci_label = fmt::format("collective mode {} ({:.0f} % of the torsion variance), {}{:.1f} sigma",
+                    m + 1, 100.0 * lambda(col) / total, sign > 0 ? "+" : "-", m_mode_amplitude);
+                proposals.push_back(std::move(p));
+            }
+        }
+    }
+    if (static_cast<int>(proposals.size()) > m_mode_max)
+        proposals.resize(m_mode_max);
+    return proposals;
+}
+
+/* Claude Generated (Aug 2026): PATH IMAGES -- propose the structures that lie BETWEEN two known
+ * conformers instead of around one.
+ *
+ * Every move set so far starts at one structure and steps away from it. The measured gap is
+ * different in kind: the reference conformer is 6-7 torsions from the nearest of ~4600 sampled
+ * structures, and a step of that size does not survive optimisation (measured: not one deep-mutation
+ * proposal kept its target state vector). But two ensemble members that are themselves 6-7 torsions
+ * APART have that same region between them -- and a point halfway along is only 3-4 torsions from
+ * either end, which is a distance the machinery handles well.
+ *
+ * The path here is the straight line in torsion space (circular interpolation per dihedral, snapped
+ * to the populated states), not a minimum-energy path. That is deliberate: it costs nothing and
+ * tests the hypothesis -- do the missing structures lie between the known ones? -- before the NEB
+ * machinery is brought in to replace the straight line with the real path.
+ */
+std::vector<ConfGen::Proposal> ConfGen::generatePathProposals() const
+{
+    std::vector<Proposal> proposals;
+    if (m_path_max <= 0 || m_frames.size() < 2)
+        return proposals;
+
+    std::vector<int> order;
+    for (std::size_t i = 0; i < m_frames.size(); ++i)
+        if (m_frames[i].from_input)
+            order.push_back(static_cast<int>(i));
+    if (order.empty())
+        for (std::size_t i = 0; i < m_frames.size(); ++i)
+            order.push_back(static_cast<int>(i));
+    std::sort(order.begin(), order.end(), [this](int a, int b) { return m_frames[a].energy < m_frames[b].energy; });
+
+    std::set<std::vector<int>> known;
+    for (const Frame& f : m_frames)
+        known.insert(f.states);
+    known.insert(m_proposed_before.begin(), m_proposed_before.end());
+    std::set<std::vector<int>> seen_here;
+
+    const int T = static_cast<int>(m_torsions.size());
+    const int images = std::max(1, m_path_images);
+    const int n_templates = std::min<int>(std::max(1, m_proposal_templates), static_cast<int>(order.size()));
+    int pairs = 0;
+    for (int a = 0; a < n_templates; ++a) {
+        const Frame& A = m_frames[order[a]];
+        if (static_cast<int>(A.angles.size()) != T)
+            continue;
+        for (int idx : order) {
+            const Frame& B = m_frames[idx];
+            if (idx == order[a] || static_cast<int>(B.angles.size()) != T)
+                continue;
+            const int gap = TorsionSpace::hammingDistance(A.states, B.states);
+            if (gap < m_path_min_distance)
+                continue;
+            pairs++;
+            for (int im = 1; im <= images; ++im) {
+                const double f = static_cast<double>(im) / (images + 1);
+                std::vector<int> states = (f < 0.5) ? A.states : B.states;
+                const int template_frame = (f < 0.5) ? order[a] : idx;
+                int changed = 0;
+                for (int t = 0; t < T; ++t) {
+                    if (m_state_centres[t].size() < 2)
+                        continue;
+                    // circular interpolation along the shorter arc
+                    double d = B.angles[t] - A.angles[t];
+                    while (d > 180.0) d -= 360.0;
+                    while (d < -180.0) d += 360.0;
+                    const double angle = A.angles[t] + f * d;
+                    const int state = TorsionSpace::assignState(angle, m_state_centres[t]);
+                    if (state >= 0 && state != states[t]) {
+                        states[t] = state;
+                        changed++;
+                    }
+                }
+                if (changed == 0 || known.count(states) || seen_here.count(states))
+                    continue;
+                seen_here.insert(states);
+                Proposal p;
+                p.states = states;
+                p.template_frame = template_frame;
+                p.distance = changed;
+                p.nci_label = fmt::format("path image {}/{} between structures {} and {} ({} torsions apart)",
+                    im, images, order[a] + 1, idx + 1, gap);
+                proposals.push_back(std::move(p));
+            }
+        }
+    }
+    if (proposals.empty())
+        return proposals;
+
+    std::vector<const std::vector<int>*> seen;
+    for (const Frame& f : m_frames)
+        seen.push_back(&f.states);
+    for (const std::vector<int>& v : m_proposed_before)
+        seen.push_back(&v);
+    for (Proposal& p : proposals) {
+        int best = std::numeric_limits<int>::max();
+        for (const std::vector<int>* v : seen) {
+            if (v->size() != p.states.size())
+                continue;
+            int d = 0;
+            for (std::size_t i = 0; i < v->size() && d < best; ++i)
+                d += ((*v)[i] != p.states[i]);
+            best = std::min(best, d);
+        }
+        p.novelty = (best == std::numeric_limits<int>::max()) ? 0 : best;
+    }
+    // Coverage first here: the point of a path image is to sit where nothing has been.
+    std::stable_sort(proposals.begin(), proposals.end(),
+        [](const Proposal& x, const Proposal& y) { return x.novelty > y.novelty; });
+    if (static_cast<int>(proposals.size()) > m_path_max)
+        proposals.resize(m_path_max);
+    return proposals;
+}
+
 std::vector<ConfGen::Proposal> ConfGen::generateNCIProposals() const
 {
     std::vector<Proposal> proposals;
@@ -1719,6 +2112,44 @@ bool ConfGen::restrainedBuildNCI(const Proposal& p, Molecule& driven) const
     }
 
     Molecule mol = m_frames[p.template_frame].molecule;
+
+    /* Claude Generated (Aug 2026): STAGED realisation of a multi-bridge move.
+     *
+     * Pulling several distance restraints at once is what the feasibility test did that failed:
+     * taking the ensemble structure closest to a reference conformer (2.61 A) and closing all six of
+     * its target hydrogen bonds simultaneously left the RMSD at 2.55-2.64 A and the restrained
+     * optimisation stalled. Six distances are six conditions in 315 degrees of freedom, and the
+     * optimiser satisfies them with a local compromise instead of refolding.
+     *
+     * Staged means: close ONE bridge, let the molecule relax around it, keep it restrained, add the
+     * next. The order is greedy -- always the bridge whose current distance is nearest its target,
+     * so each stage is the smallest possible step and the backbone reorganises gradually instead of
+     * being torn in six directions at once. The final stage is the same simultaneous optimisation as
+     * before, so the acceptance test below is unchanged. */
+    if (m_nci_staged && restraints.size() > 1) {
+        std::vector<Optimization::DistanceRestraint> pending = restraints, active;
+        while (!pending.empty()) {
+            const Geometry current = mol.getGeometry();
+            std::size_t best = 0;
+            double best_gap = std::numeric_limits<double>::max();
+            for (std::size_t k = 0; k < pending.size(); ++k) {
+                const double d = (Eigen::Vector3d(current.row(pending[k].i))
+                    - Eigen::Vector3d(current.row(pending[k].j))).norm();
+                const double gap = std::abs(d - pending[k].target);
+                if (gap < best_gap) { best_gap = gap; best = k; }
+            }
+            active.push_back(pending[best]);
+            pending.erase(pending.begin() + best);
+            json stage = opt_config;
+            stage["distance_restraints"] = Optimization::GeometryRestraints::toJson(active);
+            auto step = Optimization::OptimizationDispatcher::optimizeStructure(
+                &mol, Optimization::OptimizerType::LBFGSPP, m_calculator.get(), stage);
+            if (step.final_molecule.AtomCount() == 0)
+                return false;
+            mol = step.final_molecule;
+        }
+    }
+
     auto result = Optimization::OptimizationDispatcher::optimizeStructure(
         &mol, Optimization::OptimizerType::LBFGSPP, m_calculator.get(), opt_config);
     if (result.final_molecule.AtomCount() == 0)
@@ -1983,10 +2414,61 @@ std::vector<ConfGen::Proposal> ConfGen::generateProposals() const
     return proposals;
 }
 
+
+/* Claude Generated (Aug 2026): the calculator that JUDGES a proposal, which need not be the one that
+ * DESCRIBES the ensemble.
+ *
+ * ConfGen used one method for everything: the per-term decomposition (which only a force field
+ * provides), the geometry building, and the optimisation + energy that decide whether a proposal is
+ * any good. That mixes two surfaces which were measured NOT to agree -- within one cycle of a
+ * 107-atom peptide GFN-FF and GFN2 rank the same structures at r = -0.32 ... -0.46, and every move
+ * set built here was therefore selected on a surface that points elsewhere. The clearest case: the
+ * collective-mode move produced the deepest GFN-FF structure this generator ever made (20.4 kJ/mol
+ * below the ensemble minimum) and the same structures sit 87 to 134 kJ/mol above the reference on
+ * GFN2.
+ *
+ * -eval_method splits the two. The description stays on the force field, so the term decomposition,
+ * the matched pairs and the additive model keep working; the proposals are optimised and compared on
+ * the accurate surface, which is the one that decides. Empty = same method for both (old behaviour).
+ */
+EnergyCalculator* ConfGen::evaluationCalculator() const
+{
+    if (m_eval_method.empty() || m_eval_method == m_method)
+        return m_calculator.get();
+    if (!m_eval_calculator) {
+        json cfg;
+        cfg["method"] = m_eval_method;
+        cfg["threads"] = m_threads;
+        cfg["charge"] = m_charge;
+        cfg["spin"] = m_spin;
+        cfg["verbosity"] = 0;
+        try {
+            m_eval_calculator = std::make_unique<EnergyCalculator>(m_eval_method, cfg);
+            if (!m_frames.empty()) {
+                Molecule ref = m_frames.front().molecule;
+                ref.setCharge(m_charge);
+                ref.setSpin(m_spin);
+                m_eval_calculator->setMolecule(ref.getMolInfo());
+            }
+            CurcumaLogger::result_fmt("ConfGen: proposals are optimised and judged with '{}' while the "
+                                      "description stays on '{}' -- the two surfaces disagree, and the "
+                                      "one that decides should be the accurate one",
+                m_eval_method, m_method);
+        } catch (...) {
+            CurcumaLogger::warn_fmt("ConfGen: could not create the evaluation calculator '{}' -- falling "
+                                    "back to '{}' for the proposals as well", m_eval_method, m_method);
+            m_eval_calculator.reset();
+            return m_calculator.get();
+        }
+    }
+    return m_eval_calculator ? m_eval_calculator.get() : m_calculator.get();
+}
+
 void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
 {
+    const bool split = !m_eval_method.empty() && m_eval_method != m_method;
     json calc_config;
-    calc_config["method"] = m_method;
+    calc_config["method"] = split ? m_eval_method : m_method;
     calc_config["threads"] = m_threads;
     calc_config["charge"] = m_charge;
     calc_config["spin"] = m_spin;
@@ -2001,7 +2483,10 @@ void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
 
     if (!m_calculator)
         return; // analyseEnsemble must have run first
-    EnergyCalculator& calculator = *m_calculator;
+    EnergyCalculator* judge = evaluationCalculator();
+    if (!judge)
+        return;
+    EnergyCalculator& calculator = *judge;
     const std::vector<std::pair<int, int>> reference_bonds
         = topologyFingerprint(m_frames.front().molecule, m_topology_factor);
 
@@ -2035,8 +2520,11 @@ void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
 
 double ConfGen::referenceEnergyOptimised(double& worst_gain_kJ) const
 {
+    // The comparison base has to sit on the SAME surface as the proposals, otherwise "x kJ/mol below
+    // the ensemble minimum" compares two different energy scales. Claude Generated (Aug 2026).
+    const bool split = !m_eval_method.empty() && m_eval_method != m_method;
     json calc_config;
-    calc_config["method"] = m_method;
+    calc_config["method"] = split ? m_eval_method : m_method;
     calc_config["threads"] = m_threads;
     calc_config["charge"] = m_charge;
     calc_config["spin"] = m_spin;
@@ -2050,7 +2538,10 @@ double ConfGen::referenceEnergyOptimised(double& worst_gain_kJ) const
 
     if (!m_calculator)
         return std::numeric_limits<double>::infinity();
-    EnergyCalculator& calculator = *m_calculator;
+    EnergyCalculator* judge = evaluationCalculator();
+    if (!judge)
+        return std::numeric_limits<double>::infinity();
+    EnergyCalculator& calculator = *judge;
 
     std::vector<int> order(m_frames.size());
     std::iota(order.begin(), order.end(), 0);
@@ -2066,7 +2557,21 @@ double ConfGen::referenceEnergyOptimised(double& worst_gain_kJ) const
         if (!result.success)
             continue;
         best = std::min(best, result.final_energy);
-        worst_gain_kJ = std::max(worst_gain_kJ, (m_frames[order[i]].energy - result.final_energy) * kEh2kJ);
+        /* Claude Generated (Aug 2026): the "how far from its own minimum is the input" check needs a
+         * baseline on the SAME surface. With -eval_method the frame energy comes from the
+         * description method and the optimised energy from the evaluation method -- subtracting them
+         * produced a nonsensical 375203 kJ/mol and named the wrong method in the warning. One single
+         * point of the judging method on the unoptimised geometry is the correct baseline. */
+        double before = m_frames[order[i]].energy;
+        if (split) {
+            Molecule original = m_frames[order[i]].molecule;
+            original.setCharge(m_charge);
+            original.setSpin(m_spin);
+            calculator.setMolecule(original.getMolInfo());
+            const double e = calculator.CalculateEnergy(false);
+            before = (calculator.HasNan() || calculator.Error() || !std::isfinite(e)) ? result.final_energy : e;
+        }
+        worst_gain_kJ = std::max(worst_gain_kJ, (before - result.final_energy) * kEh2kJ);
     }
     return best;
 }
@@ -2180,7 +2685,7 @@ void ConfGen::reportProposals(const std::vector<Proposal>& proposals, const std:
                                 "kJ/mol -- the ensemble is NOT at the minimum of '{}' (different method or "
                                 "convergence). Energies below are therefore compared against re-optimised "
                                 "templates, not against the file's own values.",
-            template_gain_kJ, m_method);
+            template_gain_kJ, (!m_eval_method.empty() && m_eval_method != m_method) ? m_eval_method : m_method);
 
     if (novel > 0) {
         const double delta = (best_new - reference_opt) * kEh2kJ;
@@ -2498,6 +3003,51 @@ void ConfGen::start()
                                           "member in {} torsion(s)", c.nci_label, c.distance);
             proposals.insert(proposals.end(), consensus.begin(), consensus.end());
         }
+        // Claude Generated (Aug 2026): the crossover move set, budgeted separately like the others.
+        if (m_crossover_max > 0) {
+            const std::vector<Proposal> cross = generateCrossoverProposals();
+            if (!cross.empty()) {
+                int min_c = cross.front().distance, max_c = cross.front().distance;
+                for (const Proposal& c : cross) {
+                    min_c = std::min(min_c, c.distance);
+                    max_c = std::max(max_c, c.distance);
+                }
+                CurcumaLogger::result_fmt("ConfGen: {} crossover proposal(s), each transferring a connected "
+                                          "window of {} to {} torsion(s) from another conformer -- more "
+                                          "torsions at once than a mutation, but every transferred block "
+                                          "comes from a structure that exists",
+                    static_cast<int>(cross.size()), min_c, max_c);
+                proposals.insert(proposals.end(), cross.begin(), cross.end());
+            } else if (m_verbosity >= 1) {
+                CurcumaLogger::result_fmt("ConfGen: crossover produced nothing -- either every window "
+                                          "transfer reproduces a known state vector, or fewer than two "
+                                          "structures carry different states");
+            }
+        }
+        if (m_mode_max > 0) {
+            const std::vector<Proposal> modes = generateModeProposals();
+            if (!modes.empty()) {
+                CurcumaLogger::result_fmt("ConfGen: {} collective-mode proposal(s) -- displacements along the "
+                                          "principal components of the ensemble itself, which move five to ten "
+                                          "torsions together and are not restricted to observed combinations",
+                    static_cast<int>(modes.size()));
+                for (const Proposal& m : modes)
+                    if (m_verbosity >= 2)
+                        CurcumaLogger::info_fmt("ConfGen:   {} -> {} torsion(s) away from its template",
+                            m.nci_label, m.distance);
+                proposals.insert(proposals.end(), modes.begin(), modes.end());
+            }
+        }
+        if (m_path_max > 0) {
+            const std::vector<Proposal> path = generatePathProposals();
+            if (!path.empty()) {
+                CurcumaLogger::result_fmt("ConfGen: {} path image(s) -- structures BETWEEN two known "
+                                          "conformers that are at least {} torsions apart, where a "
+                                          "halfway point is only half that distance from either end",
+                    static_cast<int>(path.size()), m_path_min_distance);
+                proposals.insert(proposals.end(), path.begin(), path.end());
+            }
+        }
         if (m_nci_generate && !m_nci_pairs.empty()) {
             const std::vector<Proposal> nci = generateNCIProposals();
             CurcumaLogger::result_fmt("ConfGen: {} torsion proposal(s) + {} de-novo assembly/assemblies + {} "
@@ -2530,6 +3080,18 @@ void ConfGen::start()
                 p.geometry = driven;
                 p.restrained_build = true;
                 nci_built++;
+                continue;
+            }
+            // Claude Generated (Aug 2026): a collective-mode displacement arrives with its geometry
+            // already set -- there is no torsion target to drive towards. It still has to pass the
+            // clash and topology gates below, so it is not privileged, only pre-built.
+            if (p.prebuilt) {
+                if (p.geometry.AtomCount() == 0
+                    || hasClash(p.geometry, m_clash_factor)
+                    || topologyFingerprint(p.geometry, m_topology_factor) != reference_bonds) {
+                    p.geometry = Molecule();
+                    clashes++;
+                }
                 continue;
             }
             Geometry geom = m_frames[p.template_frame].molecule.getGeometry();

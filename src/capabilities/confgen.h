@@ -255,6 +255,10 @@ private:
         std::vector<std::pair<int, int>> nci_targets;
         bool nci_move() const { return !nci_targets.empty(); }
         std::string nci_label;     ///< human-readable move, e.g. "break HB 38-90...12, form HB 5-61...46"
+        /** Claude Generated (Aug 2026): the geometry is already there and must not be rebuilt --
+         *  a collective-mode displacement has no torsion target to drive towards. The clash and
+         *  topology gates still apply. */
+        bool prebuilt = false;
         double predicted = 0.0;    ///< additive-model estimate, kJ/mol (ORDERING ONLY, see below)
         Molecule geometry;         ///< built structure (before optimisation)
         bool restrained_build = false; ///< rigid build clashed; geometry came from the restrained build
@@ -337,6 +341,24 @@ private:
      */
     std::vector<Proposal> generateNCIProposals() const;
 
+    /** Claude Generated (Aug 2026): crossover -- transfer a connected window of torsions from one
+     *  conformer into another. The move for the measured 6-7-torsion gap that mutation cannot
+     *  bridge; see the comment at the definition. */
+    std::vector<Proposal> generateCrossoverProposals() const;
+
+    /** Claude Generated (Aug 2026): collective modes -- displace a template along the principal
+     *  components of the ensemble's own coordinate covariance. The complement to crossover: not
+     *  restricted to observed combinations; see the comment at the definition. */
+    std::vector<Proposal> generateModeProposals() const;
+
+    /** Claude Generated (Aug 2026): path images -- the structures BETWEEN two known conformers that
+     *  are far apart, rather than around one. See the comment at the definition. */
+    std::vector<Proposal> generatePathProposals() const;
+
+    /** Claude Generated (Aug 2026): the calculator that judges a proposal (see -eval_method); the
+     *  shared description calculator when the two methods are the same. */
+    EnergyCalculator* evaluationCalculator() const;
+
     /**
      * @brief Assemble a structure from the individually most favourable elements (de novo template).
      *
@@ -406,6 +428,18 @@ private:
     // Claude Generated (Aug 2026): bound on the candidate list, see generateProposals().
     int m_proposal_candidate_cap = 200000;
     int m_proposal_seed = 0;
+    // Claude Generated (Aug 2026): crossover move, see generateProposals().
+    int m_crossover_max = 0, m_crossover_window = 6;
+    // Claude Generated (Aug 2026): collective-mode move, see generateModeProposals().
+    int m_mode_max = 0, m_mode_count = 3;
+    double m_mode_amplitude = 2.0;
+    // Claude Generated (Aug 2026): path images, see generatePathProposals().
+    int m_path_max = 0, m_path_images = 3, m_path_min_distance = 6;
+    // Claude Generated (Aug 2026): staged realisation of a multi-bridge NCI move.
+    bool m_nci_staged = false;
+    // Claude Generated (Aug 2026): the surface that JUDGES a proposal, see evaluationCalculator().
+    std::string m_eval_method;
+    mutable std::unique_ptr<EnergyCalculator> m_eval_calculator;
     std::string m_analysis_file;
     std::string m_proposal_ranking = "mixed";
     int m_concerted_max = 5;
@@ -473,6 +507,16 @@ private:
     PARAM(proposal_templates, Int, 5, "Number of lowest-energy ensemble members used as geometric templates.", "Generation", {})
     PARAM(proposal_depth, Int, 2, "Maximum number of torsions changed simultaneously relative to a template (Hamming distance). Depths beyond 3 are only usable together with -proposal_candidate_cap, which switches the enumeration to sampling.", "Generation", {})
     PARAM(proposal_candidate_cap, Int, 200000, "Upper bound on the number of candidate state vectors held in memory per call. The Hamming ball around a template grows combinatorially with -proposal_depth: measured on a 107-atom peptide with 29 torsions it holds about 4e3 combinations at depth 2, 1e5 at depth 3 and 5e7 at depth 5 -- enumerating the last one exhausted the memory (std::bad_alloc). Below the cap the ball is still enumerated EXACTLY, so nothing changes at the usual depths; above it the same ball is randomly SAMPLED down to the cap. Since the budget keeps only -max_proposals candidates anyway, the sample costs nothing but the guarantee of completeness -- and completeness at depth 5 is unattainable in any case.", "Generation", {})
+    PARAM(crossover_max, Int, 0, "Number of CROSSOVER proposals: transfer a connected window of torsions from one conformer of the ensemble into another, instead of changing torsions independently. 0 = off. Why it exists: the reference conformer of the measured 107-atom peptide differs from the nearest of ~4600 sampled structures in 6-7 of 29 torsions, further than any mutation reaches in one step -- and raising -proposal_depth that far is useless because NOT ONE deep-mutation structure kept its target state vector through the free optimisation (a random combination of seven torsions is almost never near a minimum). A transferred window carries a fold that already exists somewhere, so only its context changes. This is fragment insertion with the ensemble as the fragment library.", "Generation", {})
+    PARAM(crossover_window, Int, 6, "Number of torsions transferred per crossover, grown breadth-first from a seed torsion over the CONNECTIVITY of the central bonds (a window in storage order would be an arbitrary set of unrelated dihedrals). The default matches the measured gap of 6-7 torsions to the reference conformer.", "Generation", {})
+    PARAM(mode_max, Int, 0, "Number of COLLECTIVE-MODE proposals: displace a template along the principal components of the ensemble's own coordinate covariance (essential dynamics), then optimise freely. 0 = off. The complement to -crossover_max: a crossover can only transfer folds the ensemble already contains, a mode displacement is not restricted to observed combinations. Motivation from the same measurement -- the reference conformer sits 6-7 torsions away, and six or seven torsions do not move independently; the leading eigenvectors of the ensemble ARE the collective directions that rotate five to ten of them together.", "Generation", {})
+    PARAM(mode_count, Int, 3, "How many of the leading collective modes are used. Each contributes two proposals per template (plus and minus displacement).", "Generation", {})
+    PARAM(mode_amplitude, Double, 2.0, "Displacement along a mode in units of its own standard deviation sqrt(eigenvalue). 1 stays inside the sampled range, larger values extrapolate beyond it -- which is the point, but also where the clash and topology gates start rejecting.", "Generation", {})
+    PARAM(eval_method, String, "", "Method used to OPTIMISE and JUDGE the proposals, when it should differ from the one that DESCRIBES the ensemble (-method). Empty = same for both. ConfGen used one method for everything, which mixes two surfaces that were measured not to agree: within one cycle of a 107-atom peptide GFN-FF and GFN2 rank the same structures at r = -0.32 ... -0.46, so every proposal was selected on a surface pointing elsewhere. Measured consequence: the collective-mode move produced the deepest GFN-FF structure this generator ever made -- 20.4 kJ/mol below the ensemble minimum -- and the same structures sit 87 to 134 kJ/mol ABOVE the reference on GFN2. With -eval_method the description keeps the force field it needs for the term decomposition while the proposals are optimised and compared on the accurate surface. The comparison base (the re-optimised templates) moves with it, so the reported gain stays on one scale.", "Generation", {})
+    PARAM(nci_staged, Bool, false, "Realise an NCI move with more than one bridge in STAGES instead of pulling every distance restraint at once: close the bridge whose current distance is nearest its target, let the molecule relax around it, keep it restrained and add the next. Only relevant with -nci_depth > 1. Motivated by the measured failure of the simultaneous variant: taking the ensemble structure closest to a reference conformer (2.61 A) and closing all six of its target hydrogen bonds at once left the RMSD at 2.55-2.64 A and the optimisation stalled -- six distances are six conditions in 315 degrees of freedom, and the optimiser meets them with a local compromise instead of refolding. Costs one restrained optimisation per bridge.", "NCI", {})
+    PARAM(path_max, Int, 0, "Number of PATH IMAGE proposals: structures that lie BETWEEN two known conformers instead of around one. 0 = off. Every other move set steps away from a single structure; this one exploits that two ensemble members which are themselves 6-7 torsions apart have that region between them -- and a point halfway along is only 3-4 torsions from either end, a distance the build and optimisation handle well. The path is the straight line in torsion space (circular interpolation per dihedral, snapped to populated states), not a minimum-energy path: it costs nothing and tests whether the missing structures lie between the known ones before the NEB machinery is brought in.", "Generation", {})
+    PARAM(path_images, Int, 3, "Intermediate points generated per pair of endpoints.", "Generation", {})
+    PARAM(path_min_distance, Int, 6, "Minimum torsion Hamming distance between two structures before the region between them is sampled. The default matches the measured gap to the reference conformer.", "Generation", {})
     PARAM(proposal_seed, Int, 0, "Seed of the candidate sampling (only used when the ball exceeds -proposal_candidate_cap). 0 = derive a seed from the ensemble size and the number of remembered proposals, so a later repetition of the same run draws a DIFFERENT sample instead of the same one again. Any other value fixes the sample and makes the run reproducible.", "Generation", {})
     PARAM(clash_factor, Double, 1.2, "A built structure is rejected when a non-bonded atom pair comes closer than this factor times the sum of their covalent radii. The default is deliberately close to the BOND-DETECTION criterion (~1.3): a built structure that puts two atoms inside bonding distance makes the force field derive a new bond, and the optimisation then relaxes into a different molecule, not a conformer.", "Generation", {})
     PARAM(topology_factor, Double, 1.3, "Covalent-radius factor for the topology check of optimised proposals. A proposal whose bond list differs from the reference is a reaction product, not a conformer, and is rejected. Lower than Molecule's default 1.5, which counts compressed 1-3 contacts as bonds.", "Generation", {})
