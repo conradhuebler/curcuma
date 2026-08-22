@@ -3033,6 +3033,21 @@ int ConfSearch::PerformConfGen(const std::string& f, const std::string& method)
     cfg["max_proposals"] = m_confgen_max_proposals;
     cfg["proposal_templates"] = m_confgen_templates;
     cfg["proposal_depth"] = m_confgen_depth;
+    /* Claude Generated (Aug 2026): the surface that JUDGES a proposal. ConfGen needs a force field to
+     * describe the ensemble (only one gives a per-term decomposition), but the force field is not the
+     * surface this search ranks on -- measured, the two disagree at r = -0.32 ... -0.46 within a
+     * cycle, and the proposals that look best on the cheap one land 26 to 88 kJ/mol worse on the
+     * accurate one than the proposals of the plain torsion move. "auto" therefore hands the ranking
+     * method down as ConfGen's evaluation method whenever it differs from the description method. */
+    {
+        std::string eval = m_confgen_eval_method;
+        if (eval == "auto")
+            eval = (m_opt_method != method) ? m_opt_method : std::string();
+        // The method sub-scopes are already in cfg via ChildConfig, so the evaluation method finds
+        // its own settings there (gfnff/xtb/tblite/... are merged for every child).
+        if (!eval.empty() && eval != method)
+            cfg["eval_method"] = eval;
+    }
     cfg["nci_generate"] = m_confgen_nci_moves;
     cfg["consensus_build"] = m_confgen_consensus;
     cfg["new_rmsd"] = m_rmsd;   // "new" means the same thing here as everywhere else in the search
@@ -3770,6 +3785,7 @@ void ConfSearch::LoadControlJson()
     m_confgen_max_proposals = m_config.get<int>("confgen_max_proposals");
     m_confgen_templates = m_config.get<int>("confgen_templates");
     m_confgen_depth = m_config.get<int>("confgen_depth");
+    m_confgen_eval_method = m_config.get<std::string>("confgen_eval_method");
     m_confgen_nci_moves = m_config.get<bool>("confgen_nci_moves");
     m_confgen_consensus = m_config.get<bool>("confgen_consensus");
     m_confgen_method = m_config.get<std::string>("confgen_method");
