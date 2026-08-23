@@ -933,10 +933,22 @@ void ConfSearch::start()
         if (no_new_bias_structures) {
             CurcumaLogger::warn_fmt("ConfSearch: T={}K -- skipping Phase 3 (no new structures).", m_currentT);
         } else {
-            // "filter between": dedup at md level before the accurate re-opt.
-            // Single-threaded per ConfScan when ConfSearch parallelizes externally.
-            nlohmann::json scan = FilterConfig(m_md_method, (m_threads > 1) ? 1 : m_threads);
+            /* "filter between": dedup at md level before the accurate re-opt.
+             *
+             * Claude Generated (Aug 2026): this gets the FULL thread count. The old "single-threaded
+             * per ConfScan when ConfSearch parallelizes externally" is the right rule for the MD runs
+             * and the optimisation batches, where many children run at once and each must stay
+             * serial -- but the deduplication is a single sequential call between the phases, with
+             * nothing else running. It was therefore burning one core while the rest idled:
+             * measured on one repetition of a 107-atom peptide, 297 structures took 17 s + 80 s +
+             * 498 s + 95 s in its four passes, and the stage pool of 776 structures well over
+             * 20 minutes -- all on one thread of ten. */
+            nlohmann::json scan = FilterConfig(m_md_method, m_threads);
             // Claude Generated (Aug 2026): cheap pre-filter, see PrefilterForReduce.
+            // Claude Generated (Aug 2026): the species check belongs HERE, right after the
+            // optimisation that can change it -- not at the end of the cycle. See
+            // FilterOptimisedByTopology().
+            FilterOptimisedByTopology(outputPath(relax + ".xyz"));
             const std::string prefiltered = cycleStage("s2_relax_kept", m_md_method);
             const int kept = PrefilterForReduce(outputPath(relax + ".xyz"), outputPath(prefiltered + ".xyz"));
             PerformFilter(kept > 0 ? prefiltered : relax, scan, reduce);
@@ -999,7 +1011,7 @@ void ConfSearch::start()
             if (last_repetition) {
                 const std::string pooled = cycleStage("s4_stage_pool_reduced", m_md_method);
                 CurcumaLogger::section("Stage pool: deduplication over all repetitions of this temperature");
-                nlohmann::json pool_scan = FilterConfig(m_md_method, (m_threads > 1) ? 1 : m_threads);
+                nlohmann::json pool_scan = FilterConfig(m_md_method, m_threads);   // see the note above
                 PerformFilter(stage_pool, pool_scan, pooled);
                 reduce = pooled;
                 int pooled_count = 0;
@@ -2390,6 +2402,94 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
     return basename;
 }
 
+
+
+/* Claude Generated (Aug 2026): the topology check where the species actually changes.
+ *
+ * The gate before RELAX tests the SNAPSHOTS, and they are fine -- at deposit time the proton is
+ * still in place ("all 614 MD snapshots keep the reference topology"). The transfer happens during
+ * the OPTIMISATION, and until now nothing looked at the result until step 6, at the very end of the
+ * cycle. Everything in between was spent on structures that are a different species: the energy
+ * pre-filter (whose window they anchor, being the deepest), the full deduplication with its reorder
+ * passes (measured on one repetition: 650 s + 500 s), the recombination and its re-optimisation.
+ *
+ * Measured on the same repetition: the five deepest structures were all the same zwitterion
+ * (H107 from O57 to N25), three of them BELOW the reference energy -- so they also set the reported
+ * "lowest" of the cycle. The check costs one bond-matrix comparison per structure.
+ *
+ * No repair attempt here, deliberately: for a proton transfer it was measured useless (30 of 31
+ * restrained structures fall straight back into the zwitterion). -repair_snapshots acts on the
+ * snapshots, where a repair still has a chance.
+ */
+int ConfSearch::FilterOptimisedByTopology(const std::string& path)
+{
+    std::ifstream check(path);
+    if (!check.good() || m_topo_matrix.rows() == 0)
+        return 0;
+
+    std::vector<Molecule> keep, rejected;
+    {
+        FileIterator it(path);
+        while (!it.AtEnd()) {
+            Molecule mol = it.Next();
+            if (mol.AtomCount() == 0)
+                continue;
+            const auto topo_cur = TopologyMatrix(mol);
+            if (topo_cur.rows() != m_topo_matrix.rows()
+                || (m_topo_matrix - topo_cur).cwiseAbs().sum() > 1e-4)
+                rejected.push_back(mol);
+            else
+                keep.push_back(mol);
+        }
+    }
+    if (rejected.empty())
+        return static_cast<int>(keep.size());
+    /* Claude Generated (Aug 2026): if NOTHING survives, leave the file alone. An empty ensemble has
+     * no defined behaviour anywhere downstream (the pre-filter, the deduplication and the seed
+     * selection all assume at least one structure), and forcing one produced first a segfault in the
+     * next MD and then an exception in the file iterator. A whole repetition optimising into another
+     * species is pathological in any case -- then the old order applies and the end-of-cycle check
+     * deals with it. */
+    if (keep.empty()) {
+        CurcumaLogger::warn_fmt("ConfSearch: every optimised structure of this repetition ({}) changed "
+                                "species -- left in place, the end-of-cycle topology check handles them",
+            static_cast<int>(rejected.size()));
+        return 0;
+    }
+
+    bool first = true;
+    for (const Molecule& mol : keep) {
+        if (first) { mol.writeXYZFile(path); first = false; }
+        else         mol.appendXYZFile(path);
+    }
+    const std::string reject_file = path.substr(0, path.rfind(".xyz")) + "_topo_rejected.xyz";
+    first = true;
+    for (const Molecule& mol : rejected) {
+        if (first) { mol.writeXYZFile(reject_file); first = false; }
+        else         mol.appendXYZFile(reject_file);
+    }
+    // The same option as in step 6: a rejected structure is the wrong species, but the region it
+    // occupies has been visited and may be marked as such.
+    if (m_bias_rejected && m_bias_pool) {
+        std::vector<BiasStructure> deposit;
+        for (const Molecule& mol : rejected) {
+            BiasStructure bs;
+            bs.geometry = mol.getGeometry();
+            bs.energy = mol.Energy();
+            bs.counter = m_opt_feedback_height;
+            bs.temperature = m_currentT;
+            bs.persistent = true;
+            deposit.push_back(std::move(bs));
+        }
+        m_bias_pool->depositBatch(deposit);
+    }
+    CurcumaLogger::result_fmt("ConfSearch: topology check after RELAX: {} of {} optimised structure(s) "
+                              "changed species during the optimisation and are dropped here instead of "
+                              "at the end of the cycle -- they are in {}{}",
+        static_cast<int>(rejected.size()), static_cast<int>(rejected.size() + keep.size()), reject_file,
+        m_bias_rejected ? " and were deposited as persistent hills" : "");
+    return static_cast<int>(keep.size());
+}
 
 int ConfSearch::PrefilterForReduce(const std::string& in_file, const std::string& out_file) const
 {

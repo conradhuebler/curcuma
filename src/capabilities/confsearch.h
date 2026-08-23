@@ -214,6 +214,10 @@ private:
      *  already kept, BEFORE the optimisation. Cost saving, not deduplication -- see the definition. */
     int ThinSnapshots(const std::string& path) const;
 
+    /** Claude Generated (Aug 2026): drop structures that changed SPECIES during the RELAX
+     *  optimisation, right after it instead of at the end of the cycle. See the definition. */
+    int FilterOptimisedByTopology(const std::string& path);
+
     /* Claude Generated (Jul 2026): try to REPAIR a snapshot instead of discarding it.
      *
      * A snapshot that broke a bond is not a conformer -- but its CONFORMATION may still be one, and
