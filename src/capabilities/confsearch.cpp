@@ -886,6 +886,10 @@ void ConfSearch::start()
             // rejected by the Phase 4 filter anyway -- but only after a full optimisation was spent
             // on it, and those are exactly the geometries for which GFN-FF returns a finite energy
             // with a NaN gradient (overlapping atoms in the 1/r hb and three-body terms).
+            // Claude Generated (Aug 2026): thin out near-identical snapshots before anything expensive
+            // touches them (see ThinSnapshots). Runs before the topology gate so the gate, too, only
+            // looks at structures that will actually be optimised.
+            ThinSnapshots(outputPath(explore + ".xyz"));
             if (m_snapshot_topology_gate && FilterSnapshotsByTopology(outputPath(explore + ".xyz")) == 0) {
                 // Nothing survived: the MD produced only broken structures this cycle. Treat it like
                 // a cycle without new bias structures instead of running the phases on an empty
@@ -1095,7 +1099,15 @@ void ConfSearch::start()
                 mol->setSpin(m_spin);
                 // Claude Generated (Jul 2026): a traceable identity, so a reported seed can be found
                 // again in the cycle's ensemble file instead of printing "(unnamed)".
-                mol->setName(fmt::format("{}.{}#{:03d}", m_cycle_tag, m_md_method, ++md_index));
+                /* Claude Generated (Aug 2026): keep the provenance. The snapshot carries where it
+                 * came from (stage, walker, hill, time -- see the export in
+                 * PerformMolecularDynamics); replacing that with a running index threw away the
+                 * only link between a final conformer and the trajectory that produced it. */
+                {
+                    const std::string origin = mol->Name();
+                    mol->setName(fmt::format("{}.{}#{:03d}{}", m_cycle_tag, m_md_method, ++md_index,
+                        origin.empty() ? std::string() : " <- " + origin));
+                }
                 // Topology check: compare bond connectivity (0/1 matrix) against reference.
                 // A broken or formed bond changes >=2 entries by 1.0 -> sum >> 1e-4.
                 // Log the first mismatched pair to help distinguish GFN-FF artefacts from
@@ -1294,7 +1306,11 @@ void ConfSearch::start()
                 mol->setCharge(m_charge);
                 mol->setSpin(m_spin);
                 opt_total++;
-                mol->setName(fmt::format("{}.{}#{:03d}", m_cycle_tag, m_opt_method, opt_total));
+                {
+                    const std::string origin = mol->Name();
+                    mol->setName(fmt::format("{}.{}#{:03d}{}", m_cycle_tag, m_opt_method, opt_total,
+                        origin.empty() ? std::string() : " <- " + origin));
+                }
                 auto topo_cur = TopologyMatrix(*mol);
                 const double topo_diff_sum = (opt_reference - topo_cur).cwiseAbs().sum();
                 if (topo_diff_sum > 1e-4) {
@@ -1863,7 +1879,8 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
             // wrong but plausible number attached to a different geometry (measured: a snapshot
             // labelled -8.985207 Eh is really worth -8.840638 Eh).
             mol.setEnergy(bs.energy);
-            mol.setName("bias_" + std::to_string(bs.index) + " t=" + std::to_string(static_cast<int>(bs.time)));
+            mol.setName(fmt::format("{}_w{}_i{}_t{}", m_cycle_tag, bs.origin, bs.index,
+                static_cast<long long>(bs.time)));
             if (first) { mol.writeXYZFile(outputPath(pool_file)); first = false; }
             else          mol.appendXYZFile(outputPath(pool_file));
         }
@@ -1891,7 +1908,13 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
             Molecule mol(ref_mol);
             mol.setGeometry(new_snapshots[i].geometry);
             mol.setEnergy(new_snapshots[i].energy); // see the .mtd.xyz export above
-            mol.setName("bias_" + std::to_string(new_snapshots[i].index));
+            /* Claude Generated (Aug 2026): the provenance of a snapshot, written where it is born.
+             * <cycle>_w<walker>_i<pool index>_t<time in fs>: which temperature stage and repetition,
+             * which MD run of that phase, which hill, and at which point of the trajectory. The name
+             * survives every later stage now that the XYZ comment parser reads it back, so a final
+             * conformer can be traced to the trajectory that produced it. */
+            mol.setName(fmt::format("{}_w{}_i{}_t{}", m_cycle_tag, new_snapshots[i].origin,
+                new_snapshots[i].index, static_cast<long long>(new_snapshots[i].time)));
             if (first) { mol.writeXYZFile(outputPath(snapshot_file)); first = false; }
             else          mol.appendXYZFile(outputPath(snapshot_file));
             exported_indices.push_back(new_snapshots[i].index);
@@ -2027,6 +2050,11 @@ nlohmann::json ConfSearch::FilterConfig(const std::string& energy_method, int th
     scan["energy_method"] = energy_method; // the real energy channel (ConfScan::LoadControlJson)
     scan["rmsdmethod"] = "inertia";        // cross-module alias -> rmsd.method (see rmsd.h)
     scan["fewer_file"] = true;
+    /* Claude Generated (Aug 2026): keep the structure names. ConfScan renames every survivor to "#N"
+     * when noname is on (its own default), which erased the provenance the snapshots carry -- stage,
+     * walker, hill index and trajectory time -- at the deduplication step, i.e. exactly where the
+     * structures that matter are selected. */
+    scan["noname"] = false;
     scan["rmsd"] = m_rmsd;                 // the user's dedup threshold, not confscan's own 0.9
     scan["max_energy"] = m_energy_window;
     // ConfScan's own "restart" default is TRUE. A nested filter must never try to resume a
@@ -2387,19 +2415,41 @@ int ConfSearch::PrefilterForReduce(const std::string& in_file, const std::string
         return 0;
     std::sort(structures.begin(), structures.end(),
         [](const auto& a, const auto& b) { return a.first < b.first; });
-    const double emin = structures.front().first;
+    /* Claude Generated (Aug 2026): the window is measured against the DEEPEST STRUCTURE KNOWN, not
+     * against the minimum of this batch. Anchoring on the batch made the filter mean different
+     * things in different repetitions: a repetition whose own minimum sits 50 kJ/mol above the
+     * global best kept structures 150 kJ/mol above it, while a repetition that happened to contain
+     * a very deep structure cut off everything else. The measured extreme of that second case: one
+     * over-bridged artefact 620 kJ/mol below the rest reduced a 341-structure pool to 10.
+     * (It does not protect against a WRONG energy that is deeper than everything -- verify_best is
+     * the guard for that, and it acts on the cycle minimum.) */
+    const double batch_min = structures.front().first;
+    const double emin = std::isfinite(m_global_min) ? std::min(m_global_min, batch_min) : batch_min;
 
     int dropped_window = 0, dropped_same = 0, written = 0;
+    // Claude Generated (Aug 2026): what the filter throws away is written out. A quarter of the
+    // optimised structures of a cycle left through here without a trace, so the question "was
+    // anything good among them" could not be answered afterwards -- the whole point of a filter that
+    // acts on ALREADY optimised structures is that its decisions are checkable.
+    const std::string dropped_file = out_file.substr(0, out_file.rfind(".xyz")) + "_dropped.xyz";
+    bool first_dropped = true;
+    auto note_dropped = [&](const Molecule& mol) {
+        Molecule out = mol;
+        if (first_dropped) { out.writeXYZFile(dropped_file); first_dropped = false; }
+        else                 out.appendXYZFile(dropped_file);
+    };
     double last_kept = std::numeric_limits<double>::lowest();
     bool first = true;
     for (const auto& [energy, mol] : structures) {
         if (m_reduce_prefilter_window > 0.0 && (energy - emin) * 2625.5 > m_reduce_prefilter_window) {
             dropped_window++;
+            note_dropped(mol);
             continue;
         }
         if (m_reduce_prefilter_energy_tol > 0.0 && written > 0
             && std::abs(energy - last_kept) < m_reduce_prefilter_energy_tol) {
             dropped_same++;
+            note_dropped(mol);
             continue;
         }
         Molecule out = mol;
@@ -2410,8 +2460,9 @@ int ConfSearch::PrefilterForReduce(const std::string& in_file, const std::string
     }
     if (dropped_window + dropped_same > 0)
         CurcumaLogger::result_fmt("ConfSearch: pre-filter before REDUCE: {} of {} structure(s) kept "
-                                  "({} outside the {} kJ/mol window, {} already at an identical minimum)",
-            written, total, dropped_window, m_reduce_prefilter_window, dropped_same);
+                                  "({} outside the {} kJ/mol window above {:.6f} Eh, {} already at an "
+                                  "identical minimum); what was dropped is in {}",
+            written, total, dropped_window, m_reduce_prefilter_window, emin, dropped_same, dropped_file);
     return written;
 }
 
@@ -2710,6 +2761,68 @@ bool ConfSearch::RepairSnapshot(Molecule& mol, EnergyCalculator& calculator) con
 }
 
 // Claude Generated (Jul 2026): pre-optimisation topology gate -- see the header for the rationale.
+
+/* Claude Generated (Aug 2026): drop redundant snapshots BEFORE the expensive optimisation.
+ *
+ * RELAX optimises every snapshot the metadynamics wrote and deduplicates afterwards. On a gfn2 run
+ * that order is expensive the wrong way round: measured on two repetitions of this search, of 638
+ * and 631 snapshots only 177 and 173 were pairwise further apart than 1.0 Angstrom -- 56 and 57 per
+ * cent of the optimisations were spent on geometries that a later stage merges anyway.
+ *
+ * The screen is a plain best-fit RMSD against the snapshots already kept: same molecule, same atom
+ * order, no reordering needed, and it runs in seconds where an optimisation runs in minutes. The
+ * threshold must stay well BELOW the conformer threshold (-rmsd): two snapshots half an Angstrom
+ * apart can still relax into different minima, and this screen cannot know that -- it is a cost
+ * saving, not a deduplication, and it is off by default for that reason.
+ */
+int ConfSearch::ThinSnapshots(const std::string& path) const
+{
+    if (m_snapshot_dedup_rmsd <= 0.0)
+        return 0;
+    std::ifstream check(path);
+    if (!check.good())
+        return 0;
+
+    std::vector<Molecule> keep;
+    int total = 0;
+    {
+        FileIterator it(path);
+        while (!it.AtEnd()) {
+            Molecule mol = it.Next();
+            if (mol.AtomCount() == 0)
+                continue;
+            total++;
+            bool redundant = false;
+            for (const Molecule& k : keep) {
+                if (k.AtomCount() != mol.AtomCount())
+                    continue;
+                if (RMSDFunctions::getRMSD(k.getGeometry(),
+                        RMSDFunctions::getAligned(k.getGeometry(), mol.getGeometry(), 1))
+                    < m_snapshot_dedup_rmsd) {
+                    redundant = true;
+                    break;
+                }
+            }
+            if (!redundant)
+                keep.push_back(mol);
+        }
+    }
+    const int dropped = total - static_cast<int>(keep.size());
+    if (dropped <= 0)
+        return 0;
+    bool first = true;
+    for (const Molecule& mol : keep) {
+        if (first) { mol.writeXYZFile(path); first = false; }
+        else          mol.appendXYZFile(path);
+    }
+    CurcumaLogger::result_fmt("ConfSearch: snapshot screen: {} of {} snapshots are within {:.2f} A of one "
+                              "that is already kept and are dropped BEFORE the optimisation -- {} go into "
+                              "RELAX. This saves optimisations, it does not deduplicate conformers "
+                              "(that happens after the optimisation, at -rmsd {:.2f} A)",
+        dropped, total, m_snapshot_dedup_rmsd, static_cast<int>(keep.size()), m_rmsd);
+    return dropped;
+}
+
 int ConfSearch::FilterSnapshotsByTopology(const std::string& path) const
 {
     std::ifstream check(path);
@@ -3786,6 +3899,7 @@ void ConfSearch::LoadControlJson()
     m_confgen_templates = m_config.get<int>("confgen_templates");
     m_confgen_depth = m_config.get<int>("confgen_depth");
     m_confgen_eval_method = m_config.get<std::string>("confgen_eval_method");
+    m_snapshot_dedup_rmsd = m_config.get<double>("snapshot_dedup_rmsd");
     m_confgen_nci_moves = m_config.get<bool>("confgen_nci_moves");
     m_confgen_consensus = m_config.get<bool>("confgen_consensus");
     m_confgen_method = m_config.get<std::string>("confgen_method");

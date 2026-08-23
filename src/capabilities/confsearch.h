@@ -210,6 +210,10 @@ private:
      * @return number of frames kept */
     int FilterSnapshotsByTopology(const std::string& path) const;
 
+    /** Claude Generated (Aug 2026): drop snapshots that are within -snapshot_dedup_rmsd of one
+     *  already kept, BEFORE the optimisation. Cost saving, not deduplication -- see the definition. */
+    int ThinSnapshots(const std::string& path) const;
+
     /* Claude Generated (Jul 2026): try to REPAIR a snapshot instead of discarding it.
      *
      * A snapshot that broke a bond is not a conformer -- but its CONFORMATION may still be one, and
@@ -368,6 +372,7 @@ private:
     int m_confgen_max_proposals = 20, m_confgen_templates = 3, m_confgen_depth = 3;
     // Claude Generated (Aug 2026): surface that judges ConfGen's proposals, see PerformConfGen().
     std::string m_confgen_eval_method = "none";
+    double m_snapshot_dedup_rmsd = 0.0;   ///< pre-optimisation snapshot screen, see ThinSnapshots()
     std::string m_bias_reset = "never";
     double m_reduce_prefilter_window = 100.0;
     double m_reduce_prefilter_energy_tol = 1.0e-6;
@@ -618,6 +623,7 @@ private:
     PARAM(confgen_phase, Bool, false, "Run the torsion-recombination phase (ConfGen) after the per-cycle dedup: build torsion-state combinations the cycle's minima do not contain, optimise them and add the genuinely new conformers to the cycle. Off by default -- it costs one geometry optimisation per proposal.", "Proposals", {})
     PARAM(confgen_max_proposals, Int, 20, "Maximum number of recombined structures built and optimised per cycle.", "Proposals", {})
     PARAM(confgen_templates, Int, 3, "Number of lowest-energy minima of the cycle used as geometric templates for the recombination.", "Proposals", {})
+    PARAM(snapshot_dedup_rmsd, Double, 0.0, "Drop an MD snapshot before the RELAX optimisation when it is within this best-fit RMSD of a snapshot already kept. 0 = off. Measured on two repetitions of a gfn2 search: of 638 and 631 snapshots only 177 and 173 were pairwise further apart than 1.0 Angstrom, so 56-57 percent of the optimisations were spent on geometries that the later deduplication merges anyway. This is a COST SAVING, not a deduplication -- two snapshots half an Angstrom apart can still relax into different minima, and the screen cannot know that. Keep it well below -rmsd (the conformer threshold) and treat any value as a trade of completeness against time; that is why there is no default.", "Filtering", {})
     PARAM(confgen_eval_method, String, "none", "Method with which the recombination step OPTIMISES and JUDGES its proposals, as opposed to the one it describes the ensemble with (-confgen_method, which must be a force field for the term decomposition). none = same for both, the behaviour up to Aug 2026. auto = the ranking method (-opt_method) whenever it differs. Any method name forces that one. Why it exists: measured on a 107-atom peptide, the exploration and ranking surfaces rank the same structures at r = -0.32 ... -0.46, so proposals chosen on the cheap surface are chosen against the search. The GFN2 cross-check of two new move sets is the clearest case -- their best structures sit +71.7 and +87 kJ/mol above the reference where the plain torsion move reaches +45.8. Costs one optimisation on the accurate surface per proposal; those structures then enter the refinement already relaxed.", "Proposals", {})
     PARAM(confgen_depth, Int, 3, "Maximum number of torsions changed simultaneously relative to a template. Raised from 2 to 3 in Aug 2026, when the depth stopped being a memory limit (ConfGen -proposal_candidate_cap): measured on a 398-structure ensemble with 30 proposals per depth, 3 is where the move set is best -- every built structure is a new conformer (29 of 29, against 28 of 32 at depth 2) and the best of them is 9.1 kJ/mol below the ensemble minimum, ten times the gain at depth 2. Deeper still works (4, 5, 7 all run, the ball is then sampled instead of enumerated) and gives the largest descriptor distance, but the structures get energetically worse with every step and none of them came closer to a reference conformer than the ensemble they were built from.", "Proposals", {})
     PARAM(confgen_method, String, "auto", "Energy method for the recombination step. auto = md_method when that is a force field, gfnff otherwise -- the analysis needs a per-term energy decomposition, which only a force field provides, so a search that EXPLORES with gfn2 would otherwise lose the step entirely. When the method differs from md_method the proposals are re-optimised at md_method before they enter the ensemble, unless the accurate re-optimisation runs anyway and does it.", "Proposals", {})

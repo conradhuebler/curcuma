@@ -55,6 +55,12 @@ struct BiasStructure {
     int index = 0;
     double counter = 0; // Claude Generated (Jul 2026): soft residence-weighted height (strided scheme); was int visit count
     double temperature = 0;  // Claude Generated (Apr 2026): deposition temperature for cross-T propagation
+    /* Claude Generated (Aug 2026): which MD RUN deposited this hill -- the walker index inside the
+     * phase (one MD per seed, see MDThread). Together with `time` it says where a structure came
+     * from, which the pool index alone does not: a search hands its structures through five stages
+     * and several files, and without this the question "which trajectory found the best conformer,
+     * and when" cannot be answered afterwards. -1 = unknown (restart from an older checkpoint). */
+    int origin = -1;
     bool persistent = false; // Claude Generated (Jun 2026): fed-back optimised minimum; exempt from counter pruning
     /* Claude Generated (Aug 2026): this snapshot has already been handed to the optimisation.
      * The pool keeps every deposit forever (it IS the bias), so without this mark a stage
@@ -475,6 +481,7 @@ private:
      * under an accumulated RMSD-MTD bias of 27-98 Eh: the span reached 1000-9500 A while the run
      * continued to its last step and kept depositing the debris. */
     double m_geometry_abort_factor = 10.0;
+    int m_walker_id = -1;                // provenance: which MD run of the phase this is
     double m_start_extent = 0.0;
     int m_deposits_rejected = 0;         // deposits refused because the molecule had fragmented
     bool m_temp_abort = false;           // abort when running-mean temperature runs away from target

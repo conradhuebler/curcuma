@@ -390,6 +390,7 @@ void SimpleMD::LoadControlJson()
     m_temp_abort_delta = m_config.get<double>("temp_abort_delta", 300.0);
     m_geometry_abort_factor = m_config.get<double>("geometry_abort_factor", 10.0);
 
+
     // Claude Generated (2026): global temperature ramp + per-atom-subset regions
     m_temp_ramp = m_config.get<bool>("temp_ramp");
     m_global_ramp.schedule.clear();
@@ -708,6 +709,16 @@ bool SimpleMD::Initialise()
 
     m_start_fragments = m_molecule.GetFragments();
     m_start_fragment_count = static_cast<int>(m_start_fragments.size());  // Claude Generated (Jun 2026): topo-check reference
+    /* Claude Generated (Aug 2026): the walker index for the provenance of a deposit. ConfSearch gives
+     * every MD run a basename ending in ".tN"; N is the walker. Read HERE and not in
+     * LoadControlJson: the basename is overridden by MDThread after the constructor has run. */
+    {
+        const std::string base = Basename();
+        const std::size_t pos = base.rfind(".t");
+        if (pos != std::string::npos) {
+            try { m_walker_id = std::stoi(base.substr(pos + 2)); } catch (...) { m_walker_id = -1; }
+        }
+    }
     // Claude Generated (Aug 2026): yardstick for the geometry sanity abort, see m_geometry_abort_factor.
     {
         const Geometry start_geometry = m_molecule.getGeometry();
@@ -3853,6 +3864,7 @@ void SimpleMD::EvaluateBias(bool do_deposit)
             // number belonging to a different geometry.
             new_bs.energy = m_Epot;
             new_bs.temperature = m_T0;
+            new_bs.origin = m_walker_id;   // provenance, see BiasStructure::origin
             int new_count = m_shared_pool->depositBiasStructure(new_bs);
             m_mtd_deposits.push_back({new_count, double(m_step), m_step * m_dT, m_Epot, rmsd_reference, 'B', 0, false});
             m_bias_structure_count++;
