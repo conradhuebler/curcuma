@@ -1916,6 +1916,104 @@ std::vector<ConfGen::Proposal> ConfGen::generatePathProposals() const
     return proposals;
 }
 
+
+/* Claude Generated (Aug 2026): the CONCERTED move -- one torsion and one hydrogen bond changed in
+ * the SAME restrained optimisation.
+ *
+ * Until now this existed only as a parameter and a promise: -concerted_max was read and never used,
+ * and the two move sets ran strictly separately. That separation is the problem they were supposed
+ * to solve. A torsion move ignores the term that carries most of the energy spread; an NCI move
+ * re-ties a bridge but leaves the backbone where it was, and measured, it then holds its target
+ * pattern in 7 of 13 cases while landing in an already known minimum in 6 of those 7 -- because
+ * changing one bond does not by itself change the basin. The backbone has to follow.
+ *
+ * The coupling is geometric, not statistical: a torsion is chosen whose rotation moves EXACTLY ONE
+ * of the two bridge partners (its `moving` set contains one of them). Rotating it therefore changes
+ * their relative position, which is precisely what a re-tied bridge needs. A torsion that moves both
+ * partners or neither would leave the bridge geometry untouched and reduce the move to the two
+ * separate ones again.
+ *
+ * The build needs no new code: restrainedBuildNCI already applies the dihedral restraints of a
+ * changed state vector together with the distance restraints of the bridge -- it just never received
+ * a proposal that carried both.
+ */
+std::vector<ConfGen::Proposal> ConfGen::generateConcertedProposals() const
+{
+    std::vector<Proposal> proposals;
+    if (m_concerted_max <= 0 || m_nci_pairs.empty())
+        return proposals;
+    const std::vector<Proposal> nci = generateNCIProposals();
+    if (nci.empty())
+        return proposals;
+
+    std::set<std::vector<int>> known;
+    for (const Frame& f : m_frames)
+        known.insert(f.states);
+    known.insert(m_proposed_before.begin(), m_proposed_before.end());
+
+    for (const Proposal& base : nci) {
+        if (static_cast<int>(proposals.size()) >= m_concerted_max)
+            break;
+        if (base.template_frame < 0 || base.template_frame >= static_cast<int>(m_frames.size()))
+            continue;
+        // The heavy partners of every bridge this move touches.
+        std::vector<int> partners;
+        for (const auto& [k, on] : base.nci_targets) {
+            if (k < 0 || k >= static_cast<int>(m_nci_pairs.size()))
+                continue;
+            partners.push_back(m_nci_pairs[k].first);
+            partners.push_back(m_nci_pairs[k].second);
+        }
+        if (partners.size() < 2)
+            continue;
+
+        // A torsion is coupled to the bridge when rotating it moves one partner and not the other.
+        int chosen = -1, chosen_state = -1, best_population = -1;
+        for (std::size_t t = 0; t < m_torsions.size(); ++t) {
+            if (t >= m_state_centres.size() || m_state_centres[t].size() < 2)
+                continue;
+            const std::vector<int>& moving = m_torsions[t].moving;
+            bool couples = false;
+            for (std::size_t k = 0; k + 1 < partners.size(); k += 2) {
+                const bool a = std::find(moving.begin(), moving.end(), partners[k]) != moving.end();
+                const bool b = std::find(moving.begin(), moving.end(), partners[k + 1]) != moving.end();
+                if (a != b) { couples = true; break; }
+            }
+            if (!couples)
+                continue;
+            // Target state: the most populated one that is NOT the template's -- a state the
+            // ensemble actually visits, so the restraint pulls towards a real basin.
+            const int current = (t < base.states.size()) ? base.states[t] : -1;
+            std::vector<int> population(m_state_centres[t].size(), 0);
+            for (const Frame& f : m_frames)
+                if (t < f.states.size() && f.states[t] >= 0 && f.states[t] < static_cast<int>(population.size()))
+                    population[f.states[t]]++;
+            for (std::size_t st = 0; st < population.size(); ++st) {
+                if (static_cast<int>(st) == current)
+                    continue;
+                if (population[st] > best_population) {
+                    best_population = population[st];
+                    chosen = static_cast<int>(t);
+                    chosen_state = static_cast<int>(st);
+                }
+            }
+        }
+        if (chosen < 0 || best_population <= 0)
+            continue;
+
+        Proposal p = base;
+        p.states[chosen] = chosen_state;
+        if (known.count(p.states))
+            continue;
+        p.distance = 1;   // one torsion away from its template, plus the bridge change
+        p.nci_label = fmt::format("{} + torsion {} -> {:.0f} deg (concerted)", base.nci_label,
+            m_torsions[chosen].label(m_frames[base.template_frame].molecule),
+            m_state_centres[chosen][chosen_state]);
+        proposals.push_back(std::move(p));
+    }
+    return proposals;
+}
+
 std::vector<ConfGen::Proposal> ConfGen::generateNCIProposals() const
 {
     std::vector<Proposal> proposals;
@@ -3046,6 +3144,20 @@ void ConfGen::start()
                                           "halfway point is only half that distance from either end",
                     static_cast<int>(path.size()), m_path_min_distance);
                 proposals.insert(proposals.end(), path.begin(), path.end());
+            }
+        }
+        if (m_concerted_max > 0 && m_nci_generate && !m_nci_pairs.empty()) {
+            const std::vector<Proposal> concerted = generateConcertedProposals();
+            if (!concerted.empty()) {
+                CurcumaLogger::result_fmt("ConfGen: {} concerted proposal(s) -- one torsion AND one "
+                                          "hydrogen bond changed in the same restrained optimisation, "
+                                          "the torsion chosen so that it moves one bridge partner and "
+                                          "not the other",
+                    static_cast<int>(concerted.size()));
+                for (const Proposal& c : concerted)
+                    if (m_verbosity >= 2)
+                        CurcumaLogger::info_fmt("ConfGen:   {}", c.nci_label);
+                proposals.insert(proposals.end(), concerted.begin(), concerted.end());
             }
         }
         if (m_nci_generate && !m_nci_pairs.empty()) {

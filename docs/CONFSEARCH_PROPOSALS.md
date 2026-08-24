@@ -1,9 +1,11 @@
 # Targeted conformer proposals from the GFN-FF energy decomposition (`-confgen`)
 
 Status: 🤖 AI-generated, ⚙️ machine-tested (Jul 2026). Not ✅ TESTED/APPROVED.
-Implemented: the **torsion space** (P1), the **matched-pair analysis** (P2) and the **coupling
-measurement + cross-validated model comparison** (P4, pulled forward). The proposal generator is not
-implemented — deliberately, see the measured result below.
+Implemented: the **torsion space** (P1), the **matched-pair analysis** (P2), the **coupling
+measurement + cross-validated model comparison** (P4) and the **proposal generator** with its move
+sets (torsion recombination, NCI moves, concerted moves, crossover, collective modes, path images,
+de-novo assembly). The header of this document claimed until Aug 2026 that the generator was "not
+implemented — deliberately"; that was true when it was written and stopped being true shortly after.
 
 ## Why
 
@@ -458,6 +460,41 @@ H...acceptor (`-nci_form_distance` 1.9 A, `-nci_break_distance` 3.5 A, `-nci_res
 (clash, topology, novelty); the report separates the two move sets. Ranking is by population of the
 target bond -- deliberately no energy model, since the pattern was measured to separate but not to
 predict.
+
+### The concerted move (`-concerted_max`, implemented Aug 2026)
+
+**Correction to earlier versions of this document.** `-concerted_max` was described here and in the
+parameter help as a working move set from Aug 2026 on. It was not: the value was read into
+`m_concerted_max` and never used anywhere, no generator ever emitted a proposal that carried both a
+torsion and a bridge change, and `generateNCIProposals()` set `p.states` to the template's vector
+with the comment "this move does not touch the torsions". The two move sets ran strictly separately
+-- which is the very thing a concerted move is for.
+
+It exists now. `generateConcertedProposals()` takes the NCI proposals and adds ONE torsion to each,
+chosen by geometric coupling: a torsion whose rotation moves **exactly one** of the two bridge
+partners. Only such a torsion changes their relative position; one that moves both, or neither,
+leaves the bridge geometry untouched and the move falls apart into the two separate ones again. The
+target state is the most populated one the template does not already have, so the restraint pulls
+towards a basin the ensemble actually visits.
+
+The build needed no new code: `restrainedBuildNCI()` has always applied the dihedral restraints of a
+changed state vector together with the distance restraints of the bridge -- it simply never received
+a proposal that carried both.
+
+**Measured (WEKLQ, 398-structure ensemble, same bridge budget of 6):**
+
+| | valid | new conformers | deepest | RMSD to the reference | H-bond Hamming |
+|---|---|---|---|---|---|
+| NCI alone | 4 | 2 | −18.796786 | 4.72 A | 13 |
+| NCI + concerted | 6 | **4** | −18.796786 | 4.70 A | **11** |
+
+The concerted proposals double the yield of new conformers and improve the bridge distance to the
+reference from 13 to 11; the energy minimum is unchanged. That matches the diagnosis they came from:
+a pure bridge move usually lands in an already known minimum because the backbone does not follow,
+and letting it follow produces genuinely different structures. Small sample, one ensemble -- and the
+whole family still contributes nothing in the energy range that a metadynamics on the ranking
+surface reaches (measured on a full gfn2 run: 163 ConfGen structures, none below +20 kJ/mol, the
+deepest 37.5 kJ/mol above the metadynamics best).
 
 **Measured (WEKLQ, 142 structures, budget 20 proposals each):**
 
