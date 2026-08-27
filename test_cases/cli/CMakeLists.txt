@@ -191,6 +191,8 @@ add_cli_test(confsearch 02_confgen_phase)
 set_tests_properties(cli_confsearch_02_confgen_phase PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;confgen")
 add_cli_test(confsearch 03_two_stage_phase3b)
 set_tests_properties(cli_confsearch_03_two_stage_phase3b PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;uff;dual_method")
+add_cli_test(confsearch 04_relax_pes_opt)
+set_tests_properties(cli_confsearch_04_relax_pes_opt PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;uff;dual_method")
 
 # =============================================================================
 # CG (Coarse Graining) Tests — disabled: -vtf command not implemented in main.cpp

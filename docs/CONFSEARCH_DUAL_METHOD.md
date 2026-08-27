@@ -28,19 +28,54 @@ dotted (`-confsearch.md_method ...`) forms both work.
 
 ## Per-cycle pipeline
 
-One temperature stage, repeated `repeat` times (Aug 2026):
+One temperature stage, repeated `repeat` times. Since Aug 2026 the surface of steps 2-4
+is a choice — `-relax_pes` — and its **default is `opt`**:
 
 ```
-  Step 1 EXPLORE    MD with RMSD bias, one run per seed   (md_method)
-  Step 2 RELAX      geometry optimisation                 (md_method)
-  Step 3 REDUCE     RMSD deduplication                    (md_method)
-  Step 4 RECOMBINE  ConfGen proposals, optional           (md_method)
+  -relax_pes opt (DEFAULT)                        -relax_pes md (pre-Aug-2026 behaviour)
+
+  Step 1 EXPLORE   MD, one run per seed  (md)     Step 1 EXPLORE   MD               (md)
+  Step 2 RELAX     optimisation          (opt)    Step 2 RELAX     optimisation     (md)
+  Step 3 REDUCE    window + dedup        (opt)    Step 3 REDUCE    window + dedup   (md)
+  Step 4 RECOMBINE ConfGen proposals     (opt)    Step 4 RECOMBINE ConfGen          (md)
   -- re-seed from the cross-cycle pool, next repetition --
-  Step 5 REFINE     accurate re-optimisation              (opt_method)  once per temperature
-  Step 6 SELECT     energy window + topology + seeding
+  Step 5 REFINE    skipped, see below              Step 5 REFINE   accurate re-opt  (opt)
+  Step 6 SELECT    window + topology + seeding     Step 6 SELECT   ...
 ...next temperature...
 Final deduplication / ranking                             (opt_method)
 ```
+
+### Why `opt` is the default (Aug 2026)
+
+`-phase3b_two_stage` moved the **once-per-stage** re-optimisation onto the ranking
+surface, because selecting on the exploration surface was measured to be actively
+wrong for this class of system. The funnel *in front of it* kept doing exactly that,
+once per repetition: every snapshot was optimised, energy-windowed, deduplicated and
+re-scored on `md_method`, and only the survivors ever reached `opt_method`.
+
+Measured on a 107-atom peptide (WEKLQ, GOAT reference at −161.657836 Eh):
+
+| explore / rank | QM optimisations | best |
+|---|---|---|
+| gfnff / gfn2 | 2345 | +28.4 … +38.4 kJ/mol |
+| gfn2 / gfn2 | 7570 | **−19.8 kJ/mol** |
+
+The target is *not* out of reach on the cheap surface — it sits at gfnff rank 5 of
+649, a gfnff optimisation moves it only 0.32 Å, and the gfnff run came within 2.00 Å
+of it (45 structures within 3.0 Å). What was missing is the **basin assignment**:
+those 45 neighbours are +45.5 … +146 kJ/mol on gfn2, while the gfn2 run has 136
+structures in the same radius reaching down to −19.8. Within 2-3 Å RMSD this molecule
+has gfn2 minima spanning 165 kJ/mol, so geometric proximity says nothing about which
+gfn2 basin a snapshot belongs to — and only the ranking surface can decide that.
+
+**Cost.** With `opt`, every snapshot is optimised on the accurate surface, so a
+dual-method run costs roughly what a single-method run of the accurate method costs,
+minus the cheaper dynamics. `REFINE` becomes redundant and is skipped (its input would
+already be its own output). Set `-relax_pes md` for the old, cheap behaviour; the run
+then warns that it discards on the exploration surface.
+
+**Not affected**: single-method runs. There `md_method == opt_method`, both settings
+name the same surface and nothing changes.
 
 Steps 1-4 are chained: each repetition re-seeds from the best structures of ALL
 cycles, so repetition 2 starts from what repetition 1 found. Every repetition adds
@@ -57,14 +92,21 @@ survivors.
 ### Two PES, never compared
 
 `md_method` and `opt_method` live on **different potential energy surfaces**.
-ConfSearch keeps the two energy worlds strictly separate:
+ConfSearch keeps the two energy worlds strictly separate. Under the default
+`-relax_pes opt` there is only ONE surface left in the funnel, so the separation
+below applies to `-relax_pes md`; with `opt` the funnel's reference energy and its
+topology reference move to `opt_method` with it (comparing an `opt_method` minimum
+against an `md_method` reference is not a small error but a category error — gfnff
+−18.7 Eh vs gfn2 −161.6 Eh is 375 000 kJ/mol of different zero point).
 
-- **Exploration decisions stay on `md_method`.** Seed selection for the next
-  cycle, the running exploration global minimum, the per-cycle "new best"
-  progression, and the seed energy window all read the **md_method** minima. A
-  basin discovered by `md_method` is **never discarded because `opt_method`
-  ranks it higher** — e.g. a gfnff-stable conformer that `r2scan` finds less
-  stable is still carried forward.
+- **Exploration decisions stay on `md_method`** (with `-relax_pes md`). Seed
+  selection for the next cycle, the running exploration global minimum, the
+  per-cycle "new best" progression, and the seed energy window all read the
+  **md_method** minima. A basin discovered by `md_method` is **never discarded
+  because `opt_method` ranks it higher** — e.g. a gfnff-stable conformer that
+  `r2scan` finds less stable is still carried forward. This is the property that
+  the measurement above shows to be worth less than it costs for gfnff/gfn2; it
+  may still be the right trade when `opt_method` is very expensive (ORCA).
 - **`opt_method` energies only feed the refinement/ranking.** The re-optimized
   structures fill the cumulative pool (its window is relative to that cycle's
   lowest **opt_method** energy) and the final ranking. They are never subtracted

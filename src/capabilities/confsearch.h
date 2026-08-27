@@ -418,6 +418,41 @@ private:
     std::string ConfGenMethod() const;
 
     /**
+     * @brief The method the per-repetition funnel computes with (RELAX, REDUCE, re-scoring).
+     *
+     * Claude Generated (Aug 2026). Everything between the MD and the stage pool -- optimising a
+     * snapshot, ranking it inside the energy window, deciding whether it duplicates another
+     * structure -- is one decision made on ONE surface, and this returns that surface. The MD
+     * itself always runs at md_method; only what happens to its snapshots changes.
+     * Identical to md_method in a single-method run, so nothing there is affected.
+     */
+    std::string RelaxMethod() const { return m_relax_pes == "opt" ? m_opt_method : m_md_method; }
+
+    /// True when the funnel already produced opt_method minima, so REFINE has nothing left to do.
+    bool FunnelIsRanking() const { return RelaxMethod() == m_opt_method; }
+
+    /**
+     * @brief Topology reference for structures the funnel produced.
+     *
+     * Claude Generated (Aug 2026). Two methods do not agree on bond lengths, so an atom pair near
+     * the covalent-radius cutoff can be bonded for one and not for the other -- measured, checking
+     * opt_method geometries against the md_method reference rejected an entire cycle. The funnel's
+     * structures are optimised at RelaxMethod(), so they are compared against that method's own
+     * optimised input. The MD snapshots keep m_topo_ref: they come from an md_method trajectory.
+     */
+    const Molecule& FunnelTopoRef() const
+    {
+        return (FunnelIsRanking() && m_topo_ref_opt.AtomCount() > 0) ? m_topo_ref_opt : m_topo_ref;
+    }
+    /// Bond matrix belonging to FunnelTopoRef().
+    const Matrix& FunnelTopoMatrix() const
+    {
+        return (FunnelIsRanking() && m_topo_matrix_opt.rows() == m_topo_matrix.rows())
+            ? m_topo_matrix_opt
+            : m_topo_matrix;
+    }
+
+    /**
      * @brief Every structure the search has accepted, on each surface -- the pool the seeds come from.
      *
      * DESIGN, not a patch: the seeds of a cycle are the `seed_rank` best structures of ALL cycles,
@@ -487,6 +522,12 @@ private:
     std::string m_seed_selection = "diverse";
     /* Claude Generated (Jul 2026): which PES selects the next cycle's seeds ("md" | "opt"). */
     std::string m_seed_pes = "md";
+    /* Claude Generated (Aug 2026): divergence guard for optimisation results, see
+     * opt_divergence_factor. A diverged geometry is finite, so allFinite() does not catch it. */
+    double m_opt_divergence_factor = 10.0;
+    /* Claude Generated (Aug 2026): which PES the per-repetition funnel runs on ("md" | "opt").
+     * See the relax_pes parameter for the measurement behind the "opt" default. */
+    std::string m_relax_pes = "opt";
     double m_seed_min_rmsd = 0.0, m_seed_diversity_factor = 2.0;
     std::string m_bias_calibration = "off"; // adaptive MTD width mode: off | couple | cluster
     std::string m_bias_scale_mode = "global"; // global | weighted (RMSF-weighted RMSD)
@@ -563,6 +604,8 @@ private:
     PARAM(seed_rank, Int, 1, "Maximum number of lowest-energy seeds carried into the next cycle. 0 keeps every structure inside seed_energy_window.", "Filtering", {})
     PARAM(seed_energy_window, Double, 50.0, "Energy window in kJ/mol versus the running global minimum for selecting next-cycle MD seeds.", "Filtering", {})
     PARAM(seed_pes, String, "md", "Which potential-energy surface picks the seeds of the next cycle in a dual-method run: md = the cheap exploration method (default; a basin it likes is never dropped because the accurate method ranks it higher), opt = the accurate ranking method, both = seed_rank seeds from EACH (an opt seed in the same basin as an md seed is dropped, since the opt structures are the re-optimised md ones). Motivated by measurement: on a 107-atom peptide the two surfaces correlate at only r = 0.40 and the gfn2 minimum sat at gfnff rank 59 of 141, so a gfnff-picked seed says little about where the accurate method has its minima. The MD still runs at md_method; only the starting geometries change. No effect in a single-method run.", "Filtering", {})
+    PARAM(opt_divergence_factor, Double, 10.0, "An optimisation whose result spans more than this factor times its INPUT structure (never below 50 Angstrom, so small molecules keep room) is treated as diverged: the geometry is not written into the pool, the input geometry is used instead, and both are saved for inspection (<stage>.diverged.xyz for the blown-up result, <stage>.failed.xyz for the input that produced it). Why this exists next to the non-finite guard: a diverged optimisation is FINITE. Measured on a 107-atom peptide, gfn2 re-scoring of the recombination proposals: 72 of 2097 structures came back with coordinates of order 1e242 -- every isfinite() test passes, and the written energy (-161.62 Eh) sits in the middle of the conformer range, so such a structure was reported as the deepest of its cycle. Only the later species check removed it, after a full optimisation had been paid for. 0 disables the check.", "Optimisation", {})
+    PARAM(relax_pes, String, "opt", "Which potential-energy surface the per-repetition selection funnel runs on in a dual-method run -- the RELAX optimisation of every snapshot, the energy window before the deduplication, the deduplication itself and the re-scoring of the recombination proposals. opt = the accurate ranking method (default); md = the cheap exploration method (the behaviour before Aug 2026). No effect in a single-method run, where both are the same surface. Why the default changed: selecting on the exploration surface is measurably wrong for this class of system -- the same reason -phase3b_two_stage carries, one level lower. -phase3b_two_stage only moved the ONCE-PER-STAGE re-optimisation onto the ranking surface; the funnel in front of it kept discarding on the exploration surface, once per repetition. Measured on a 107-atom peptide (WEKLQ): three gfnff/gfn2 runs stayed at +28.4/+28.6/+38.4 kJ/mol against a GOAT reference while gfn2/gfn2 reached -19.8, and the cause is visible in the budget -- the gfnff/gfn2 run spent 2345 QM optimisations, the gfn2/gfn2 run 7570. The target is NOT unreachable on the cheap surface (it sits at gfnff rank 5 of 649, a gfnff optimisation moves it 0.32 A, and the gfnff run came within 2.00 A of it); what the funnel discarded were the structures whose gfn2 basin was never determined. COST: with opt every snapshot is optimised on the accurate surface, so a dual-method run costs about what a single-method run of the accurate method costs, minus the cheaper dynamics. Set md to get the old, cheap behaviour back.", "Filtering", {"funnel_pes"})
     PARAM(seed_selection, String, "diverse", "How the next-cycle seeds are picked from the structures inside seed_energy_window: energy = strictly the seed_rank lowest-energy ones; diverse = lowest-energy first, then only structures at least seed_min_rmsd away (permutation-aware best-fit RMSD) from every seed already chosen.", "Filtering", {})
     PARAM(seed_min_rmsd, Double, 0.0, "Minimum RMSD in Angstrom between two seeds in the diverse selection. 0 derives it as seed_diversity_factor * rmsd.", "Filtering", {})
     PARAM(seed_diversity_factor, Double, 2.0, "Multiplier applied to rmsd when seed_min_rmsd is 0. Values around 2 keep the seeds one dedup radius apart from each other.", "Filtering", {})

@@ -353,7 +353,23 @@ void ConfSearch::start()
     if (m_opt_method != m_md_method) {
         CurcumaLogger::result_fmt("ConfSearch: Dual-method mode (explore={}, refine={})", m_md_method, m_opt_method);
         CurcumaLogger::result_fmt("ConfSearch: Phase methods: explore={}, pre-opt={}, refine={}, final rank={}",
-            m_md_method, m_md_method, m_opt_method, m_opt_method);
+            m_md_method, RelaxMethod(), FunnelIsRanking() ? "-- skipped, see below" : m_opt_method, m_opt_method);
+        /* Claude Generated (Aug 2026): the single most consequential choice of a dual-method run,
+         * so it is stated, not implied. Everything between the MD and the stage pool is one
+         * decision made on one surface -- name it and name what it costs. */
+        if (FunnelIsRanking())
+            CurcumaLogger::result_fmt("ConfSearch: the selection funnel (RELAX + energy window + dedup + "
+                                      "re-scoring) runs at {} -- every snapshot is optimised on the ranking "
+                                      "surface, so this run costs about a {} run minus the cheaper dynamics. "
+                                      "REFINE is then obsolete. Use -relax_pes md for the cheap variant, which "
+                                      "discards on the {} surface.",
+                m_opt_method, m_opt_method, m_md_method);
+        else
+            CurcumaLogger::warn_fmt("ConfSearch: -relax_pes md -- RELAX, the energy window and the dedup run on "
+                                    "the EXPLORATION surface ({}), i.e. structures are discarded before {} ever "
+                                    "sees them. Measured on a 107-atom peptide: three such runs stayed at "
+                                    "+28.4/+28.6/+38.4 kJ/mol where an all-{} run reached -19.8.",
+                m_md_method, m_opt_method, m_opt_method);
         if (m_seed_pes == "both")
             CurcumaLogger::result_fmt("ConfSearch: next-cycle seeds are picked on BOTH PES -- up to {} from {} plus "
                                       "{} from {} (-seed_pes both)",
@@ -595,6 +611,22 @@ void ConfSearch::start()
                 }
             }
             for (auto* mol : opt_init_stack) delete mol;
+
+            /* Claude Generated (Aug 2026): -relax_pes opt moves the whole per-repetition funnel
+             * onto the ranking surface, so its REFERENCE has to move with it. The anchor set above
+             * is an md_method energy; comparing an opt_method minimum against it is not a small
+             * error but a category error -- the two methods have different zeros of energy (gfnff
+             * -18.7 Eh vs gfn2 -161.6 Eh on a 107-atom peptide, i.e. 375 000 kJ/mol apart), so
+             * every energy window, every "gain over the input" and every seed ranking would be
+             * meaningless. Assigned, not min()-ed, for the same reason. */
+            if (FunnelIsRanking() && m_initial_energy_opt < std::numeric_limits<double>::infinity()) {
+                m_initial_energy = m_initial_energy_opt;
+                m_best_energy = m_initial_energy;
+                m_global_min = m_initial_energy;
+                CurcumaLogger::result_fmt("ConfSearch: the selection funnel runs at {} (-relax_pes opt), so its "
+                                          "reference is the {} energy of the optimised input ({:.6f} Eh)",
+                    m_opt_method, m_opt_method, m_initial_energy);
+            }
         }
 
         // Claude Generated (Jul 2026): report the two reference energies WITHOUT a difference.
@@ -628,7 +660,7 @@ void ConfSearch::start()
     // The structures are already optimised, so the file is named ".cumulative.opt.xyz"
     // to match PerformFilter's "<f>.opt.xyz" convention for the final ConfScan below.
     m_cumulative_file = outputPath(p + ".cumulative.opt.xyz");
-    m_cumulative_md_file = outputPath(p + ".cumulative." + m_md_method + ".xyz");
+    m_cumulative_md_file = outputPath(p + ".cumulative." + RelaxMethod() + ".xyz");
     std::ofstream(m_cumulative_md_file).close();
     const std::string& cumulative_file = m_cumulative_file; // alias for the existing in-loop appends
     if (resumed)
@@ -688,8 +720,8 @@ void ConfSearch::start()
         // (<stem>.opt.xyz) and the dedup result (<stem>.opt.accepted.xyz).
         const std::string explore = cycleStage("s1_explore", m_md_method);
         // Claude Generated (Aug 2026): every step owns its file, named after the step.
-        const std::string relax  = cycleStage("s2_relax", m_md_method);
-        std::string reduce = cycleStage("s3_reduce", m_md_method);
+        const std::string relax  = cycleStage("s2_relax", RelaxMethod());
+        std::string reduce = cycleStage("s3_reduce", RelaxMethod());
         // Claude Generated (Aug 2026): everything the STAGE produced, across all repetitions.
         // Without it only the LAST repetition reached the accurate re-optimisation: repetition 1
         // could produce 68 minima including the best of the whole stage, and none of them ever
@@ -697,7 +729,7 @@ void ConfSearch::start()
         // repetitions). REFINE now runs once, on the union.
         const std::string stage_pool = Basename() + "."
             + fmt::format("cycle{:02d}_T{}K", temperature_cycle, static_cast<int>(m_currentT))
-            + ".s4_stage_pool." + m_md_method;
+            + ".s4_stage_pool." + RelaxMethod();
         if (stage_rep == 0)
             std::ofstream(outputPath(stage_pool + ".xyz"), std::ios::trunc).close();
         // Claude Generated (Jun 2026): per-cycle wall-clock timing
@@ -875,7 +907,7 @@ void ConfSearch::start()
             }
         }
 
-        CurcumaLogger::section(fmt::format("Step 2 RELAX: Geometry Optimisation of the Snapshots ({})", m_md_method));
+        CurcumaLogger::section(fmt::format("Step 2 RELAX: Geometry Optimisation of the Snapshots ({})", RelaxMethod()));
         // Skip Phase 2 when no new MD ran (empty in_stack going in) and the bias pool did not grow.
         if (no_new_bias_structures) {
             CurcumaLogger::warn_fmt("ConfSearch: T={}K -- no new MD runs and bias pool unchanged -- skipping Phase 2/3.",
@@ -904,7 +936,7 @@ void ConfSearch::start()
 
             // Fast per-cycle optimization at md_method.
             // Single-threaded per optimization when ConfSearch parallelizes externally.
-            nlohmann::json opt = ChildConfig(m_md_method, (m_threads > 1) ? 1 : m_threads);
+            nlohmann::json opt = ChildConfig(RelaxMethod(), (m_threads > 1) ? 1 : m_threads);
             // Claude Generated (Aug 2026): the proton transfer that turns a conformer into a
             // tautomer happens HERE, during the relaxation of the snapshot -- the snapshot itself
             // still carries the reference topology, so the snapshot gate cannot see it, and the
@@ -914,7 +946,7 @@ void ConfSearch::start()
             // relaxation in the neutral basin. Uses the md-level reference, which is what this
             // side's topology filter compares against.
             if (m_hold_polar_h)
-                opt["distance_restraints"] = PolarHydrogenRestraints(m_topo_ref);
+                opt["distance_restraints"] = PolarHydrogenRestraints(FunnelTopoRef());
             // Bias structures are the primary conformers discovered by RMSD-MTD.
             PerformOptimisation(explore, opt, relax);
             int opt_count = 0;
@@ -923,12 +955,12 @@ void ConfSearch::start()
                 while (!opt_file.AtEnd()) { opt_file.Next(); opt_count++; }
             }
             CurcumaLogger::result_fmt("ConfSearch: Optimisation complete. {} bias structures optimised.", opt_count);
-            ReportEnsemble("Phase 2 optimised bias structures", m_md_method, outputPath(relax + ".xyz"));
+            ReportEnsemble("Phase 2 optimised bias structures", RelaxMethod(), outputPath(relax + ".xyz"));
         }
         // Claude Generated (Jun 2026): Phase 2 timing
         CurcumaLogger::result_fmt("ConfSearch: Opt phase took {:.1f} s", cycle_timer.Elapsed() / 1000.0);
 
-        CurcumaLogger::section(fmt::format("Step 3 REDUCE: RMSD-Based Deduplication ({})", m_md_method));
+        CurcumaLogger::section(fmt::format("Step 3 REDUCE: RMSD-Based Deduplication ({})", RelaxMethod()));
         int rmsd_count = 0;
         if (no_new_bias_structures) {
             CurcumaLogger::warn_fmt("ConfSearch: T={}K -- skipping Phase 3 (no new structures).", m_currentT);
@@ -943,13 +975,13 @@ void ConfSearch::start()
              * measured on one repetition of a 107-atom peptide, 297 structures took 17 s + 80 s +
              * 498 s + 95 s in its four passes, and the stage pool of 776 structures well over
              * 20 minutes -- all on one thread of ten. */
-            nlohmann::json scan = FilterConfig(m_md_method, m_threads);
+            nlohmann::json scan = FilterConfig(RelaxMethod(), m_threads);
             // Claude Generated (Aug 2026): cheap pre-filter, see PrefilterForReduce.
             // Claude Generated (Aug 2026): the species check belongs HERE, right after the
             // optimisation that can change it -- not at the end of the cycle. See
             // FilterOptimisedByTopology().
             FilterOptimisedByTopology(outputPath(relax + ".xyz"));
-            const std::string prefiltered = cycleStage("s2_relax_kept", m_md_method);
+            const std::string prefiltered = cycleStage("s2_relax_kept", RelaxMethod());
             const int kept = PrefilterForReduce(outputPath(relax + ".xyz"), outputPath(prefiltered + ".xyz"));
             PerformFilter(kept > 0 ? prefiltered : relax, scan, reduce);
             {
@@ -959,8 +991,15 @@ void ConfSearch::start()
             CurcumaLogger::result_fmt("ConfSearch: RMSD filtering complete. {} structures accepted.", rmsd_count);
             // Claude Generated (Jul 2026): the accepted count alone says nothing about WHAT was
             // accepted. Report the energies of the surviving ensemble right where the count is.
-            ReportEnsemble("Phase 3 accepted ensemble", m_md_method, outputPath(reduce + ".xyz"));
+            ReportEnsemble("Phase 3 accepted ensemble", RelaxMethod(), outputPath(reduce + ".xyz"));
         }
+
+        /* Claude Generated (Aug 2026): does the accurate re-optimisation still have work?
+         * It does exactly when the funnel above did NOT already run on opt_method. That covers
+         * all three cases in one expression: single-method run (nothing to refine), dual-method
+         * with -relax_pes md (the classic case, REFINE does the accurate optimisation), and
+         * dual-method with -relax_pes opt (the funnel already produced opt_method minima). */
+        const bool refine_needed = (m_opt_method != RelaxMethod());
 
         // Claude Generated (Jul 2026): Phase 3c -- recombine the torsion states of this cycle's
         // minima. Placed after the dedup (so it works on distinct minima) and before Phase 3b (so its
@@ -968,21 +1007,25 @@ void ConfSearch::start()
         if (m_confgen_phase && !no_new_bias_structures && rmsd_count >= 2) {
             const std::string cg_method = ConfGenMethod();
             CurcumaLogger::section(fmt::format("Step 4 RECOMBINE: Torsion Recombination / ConfGen ({})", cg_method));
-            if (cg_method != m_md_method)
+            if (cg_method != RelaxMethod())
                 CurcumaLogger::result_fmt("ConfSearch: RECOMBINE runs at {} -- {} provides no per-term energy "
                                           "decomposition, which the analysis needs",
-                    cg_method, m_md_method);
+                    cg_method, RelaxMethod());
             const int added = PerformConfGen(reduce, cg_method);
-            // The proposals carry cg_method energies. When the accurate re-optimisation runs anyway
-            // it puts everything on one scale; when it does not (single-method run), do it here --
-            // otherwise the ensemble would mix two potential-energy surfaces.
-            if (added > 0 && cg_method != m_md_method && m_opt_method == m_md_method) {
-                const std::string rescored = cycleStage("s4_recombine_rescored", m_md_method);
-                nlohmann::json opt_cg = ChildConfig(m_md_method, m_threads);
+            /* The proposals carry cg_method energies. When the accurate re-optimisation runs
+             * afterwards it puts everything on one scale; when it does not, do it here --
+             * otherwise the ensemble would mix two potential-energy surfaces.
+             * Claude Generated (Aug 2026): the condition is now "does REFINE still run", not
+             * "is this a single-method run". With -relax_pes opt the funnel already produced
+             * opt_method minima and REFINE is skipped, so the proposals would otherwise stay on
+             * the ConfGen surface and be ranked against opt_method energies. */
+            if (added > 0 && cg_method != RelaxMethod() && !refine_needed) {
+                const std::string rescored = cycleStage("s4_recombine_rescored", RelaxMethod());
+                nlohmann::json opt_cg = ChildConfig(RelaxMethod(), m_threads);
                 PerformOptimisation(reduce, opt_cg, rescored);
                 CopyFrames(outputPath(rescored + ".xyz"), outputPath(reduce + ".xyz"));
                 CurcumaLogger::result_fmt("ConfSearch: recombination products re-optimised at {} so the ensemble "
-                                          "stays on one energy scale", m_md_method);
+                                          "stays on one energy scale", RelaxMethod());
             }
             if (added > 0) {
                 rmsd_count += added;
@@ -990,7 +1033,7 @@ void ConfSearch::start()
                 CurcumaLogger::success_fmt("ConfSearch: RECOMBINE added {} new conformer(s) that the "
                                            "metadynamics had not found ({} structures now in this cycle)",
                     added, rmsd_count);
-                ReportEnsemble("RECOMBINE ensemble (metadynamics + recombination)", m_md_method,
+                ReportEnsemble("RECOMBINE ensemble (metadynamics + recombination)", RelaxMethod(),
                     outputPath(reduce + ".xyz"));
             } else {
                 CurcumaLogger::result("ConfSearch: RECOMBINE found no new conformer this cycle");
@@ -1009,9 +1052,9 @@ void ConfSearch::start()
         if (stage_repeats > 1) {
             CopyFrames(outputPath(reduce + ".xyz"), outputPath(stage_pool + ".xyz"), true);
             if (last_repetition) {
-                const std::string pooled = cycleStage("s4_stage_pool_reduced", m_md_method);
+                const std::string pooled = cycleStage("s4_stage_pool_reduced", RelaxMethod());
                 CurcumaLogger::section("Stage pool: deduplication over all repetitions of this temperature");
-                nlohmann::json pool_scan = FilterConfig(m_md_method, m_threads);   // see the note above
+                nlohmann::json pool_scan = FilterConfig(RelaxMethod(), m_threads);   // see the note above
                 PerformFilter(stage_pool, pool_scan, pooled);
                 reduce = pooled;
                 int pooled_count = 0;
@@ -1020,7 +1063,7 @@ void ConfSearch::start()
                 stage_structures = pooled_count;
                 CurcumaLogger::result_fmt("ConfSearch: {} structure(s) from all {} repetitions go into REFINE",
                     pooled_count, stage_repeats);
-                ReportEnsemble("Stage pool (all repetitions)", m_md_method, outputPath(reduce + ".xyz"));
+                ReportEnsemble("Stage pool (all repetitions)", RelaxMethod(), outputPath(reduce + ".xyz"));
             }
         }
 
@@ -1045,9 +1088,16 @@ void ConfSearch::start()
         // Claude Generated (Aug 2026): only once per temperature -- see the stage-repetition loop.
         // Intermediate repetitions chain on the md_method surface alone; the accurate method sees
         // everything the stage collected, at its end.
-        if (!no_new_bias_structures && m_opt_method != m_md_method && last_repetition) {
+        if (!no_new_bias_structures && refine_needed && last_repetition) {
             CurcumaLogger::section(fmt::format("Step 5 REFINE: High-Level Re-Optimisation ({})", m_opt_method));
             hi_level_file = PerformHighLevelOptimisation(reduce);
+        } else if (!refine_needed && m_opt_method != m_md_method) {
+            /* Claude Generated (Aug 2026): -relax_pes opt already optimised, filtered and
+             * deduplicated every snapshot on the ranking surface, so a second pass would only
+             * re-optimise its own minima. */
+            CurcumaLogger::result_fmt("ConfSearch: REFINE skipped -- the funnel already ran at {} "
+                                      "(-relax_pes opt), its minima ARE the accurate ones",
+                m_opt_method);
         } else if (m_opt_method == m_md_method) {
             // Claude Generated (Jun 2026): explicit skip notice at result level
             CurcumaLogger::result("ConfSearch: REFINE skipped (single-method mode)");
@@ -1064,7 +1114,12 @@ void ConfSearch::start()
         // r2scan) ranks it higher. The opt_method structures are handled in the refinement step
         // below and only feed the FINAL ranking + an extra bias geometry -- their energies are
         // never compared to md_method energies.
-        const bool dual_method = (m_opt_method != m_md_method);
+        /* Claude Generated (Aug 2026): "dual" here means "there are TWO structure sets to seed
+         * from", which is a question about REFINE, not about the method names. With
+         * -relax_pes opt the funnel produced opt_method minima and REFINE is skipped, so there
+         * is exactly one set -- the funnel's -- and it already lives on the ranking surface.
+         * Seeding then behaves like a single-method run, which is what it is at this point. */
+        const bool dual_method = refine_needed;
         // Claude Generated (Jul 2026): which PES picks the next cycle's seeds. Default "md": the
         // exploration stays on the cheap surface and a region it likes is never discarded because
         // the accurate method ranks it higher. "opt" hands that decision to opt_method -- motivated
@@ -1117,7 +1172,7 @@ void ConfSearch::start()
                  * only link between a final conformer and the trajectory that produced it. */
                 {
                     const std::string origin = mol->Name();
-                    mol->setName(fmt::format("{}.{}#{:03d}{}", m_cycle_tag, m_md_method, ++md_index,
+                    mol->setName(fmt::format("{}.{}#{:03d}{}", m_cycle_tag, RelaxMethod(), ++md_index,
                         origin.empty() ? std::string() : " <- " + origin));
                 }
                 // Topology check: compare bond connectivity (0/1 matrix) against reference.
@@ -1125,7 +1180,8 @@ void ConfSearch::start()
                 // Log the first mismatched pair to help distinguish GFN-FF artefacts from
                 // genuine chemical reactions (proton transfer, ring opening, etc.).
                 auto topo_cur = TopologyMatrix(*mol);
-                double topo_diff_sum = (m_topo_matrix - topo_cur).cwiseAbs().sum();
+                const Matrix& topo_ref_funnel = FunnelTopoMatrix();
+                double topo_diff_sum = (topo_ref_funnel - topo_cur).cwiseAbs().sum();
                 if (topo_diff_sum > 1e-4) {
                     if (rejected_topo == 0) {
                         // Find first differing bond for diagnostic output
@@ -1133,12 +1189,12 @@ void ConfSearch::start()
                         for (int ii = 0; ii < natoms; ++ii) {
                             bool found = false;
                             for (int jj = ii + 1; jj < natoms; ++jj) {
-                                if (std::abs(m_topo_matrix(ii, jj) - topo_cur(ii, jj)) > 0.5) {
+                                if (std::abs(topo_ref_funnel(ii, jj) - topo_cur(ii, jj)) > 0.5) {
                                     CurcumaLogger::warn_fmt(
                                         "ConfSearch: topo reject (first diff): atoms {}-{} ref_bond={} cur_bond={} "
                                         "(energy {:.0f} kJ/mol above ref; total bond changes: {:.0f})",
                                         ii, jj,
-                                        static_cast<int>(std::round(m_topo_matrix(ii, jj))),
+                                        static_cast<int>(std::round(topo_ref_funnel(ii, jj))),
                                         static_cast<int>(std::round(topo_cur(ii, jj))),
                                         (mol->Energy() - initial_energy) * 2625.5,
                                         topo_diff_sum / 2.0);
@@ -1186,7 +1242,7 @@ void ConfSearch::start()
                 if (it == candidates.end())
                     break;
                 const double stored = (*it)->Energy();
-                const double checked = RecomputeEnergy(**it, m_md_method);
+                const double checked = RecomputeEnergy(**it, RelaxMethod());
                 if (!std::isfinite(checked))
                     break;
                 const double dev = std::abs(checked - stored) * 2625.5;
@@ -1195,7 +1251,7 @@ void ConfSearch::start()
                 CurcumaLogger::warn_fmt("ConfSearch: the lowest {} structure carried {:.6f} Eh but recomputes to "
                                         "{:.6f} Eh ({:.1f} kJ/mol apart) -- energy corrected. A stale energy here "
                                         "would set the energy window and discard the rest of the cycle.",
-                    m_md_method, stored, checked, dev);
+                    RelaxMethod(), stored, checked, dev);
                 (*it)->setEnergy(checked);
             }
             lowest_energy = std::numeric_limits<double>::infinity();
@@ -1208,7 +1264,7 @@ void ConfSearch::start()
         // cycle, so without this the per-cycle result was not recoverable after the run.
         if (m_cycle_output && !candidates.empty())
             if (last_repetition)
-                WriteCycleEnsemble(cycle_tag, m_md_method, candidates);
+                WriteCycleEnsemble(cycle_tag, RelaxMethod(), candidates);
 
         // Claude Generated (Aug 2026): md-side collection over the whole run. It is the description
         // basis of the recombination -- a single cycle delivers a handful of structures (6 in one
@@ -2268,6 +2324,28 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
         failed_written++;
     };
 
+    /* Claude Generated (Aug 2026): the DIVERGED result gets its own file. `.failed.xyz` holds the
+     * input that caused the trouble (that is what one reloads to reproduce it); the blown-up
+     * output is the evidence that it happened and belongs next to it, not in the pool. Kept
+     * separate so a listing tells the two apart without opening them. */
+    const std::string diverged_file = outputPath(basename + ".diverged.xyz");
+    int diverged_written = 0;
+    auto save_diverged = [&](const Molecule& result, int idx, double extent, double limit) {
+        Molecule copy = result;
+        copy.setName(fmt::format("diverged_{:03d}_span{:.0f}A_limit{:.0f}A [{}]",
+            idx + 1, extent, limit, opt_method_name));
+        if (diverged_written == 0)
+            copy.writeXYZFile(diverged_file);
+        else
+            copy.appendXYZFile(diverged_file);
+        diverged_written++;
+    };
+    // Largest coordinate span of a geometry -- the same yardstick SimpleMD uses for its
+    // geometry_abort_factor, so the two checks speak about the same quantity.
+    auto extent_of = [](const Geometry& g) -> double {
+        return g.rows() > 0 ? (g.colwise().maxCoeff() - g.colwise().minCoeff()).maxCoeff() : 0.0;
+    };
+
     int written = 0;
     auto write_result = [&](const Optimization::OptimizationResult& res, const Molecule& fallback, int idx) {
         double e_start = res.energy_trajectory.empty() ? 0.0 : res.energy_trajectory.front();
@@ -2279,7 +2357,29 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
         // energy reference. The input geometry is the honest fallback.
         const bool finite_result = res.final_molecule.AtomCount() > 0
             && res.final_molecule.getGeometry().allFinite() && std::isfinite(e_end);
-        if (finite_result) {
+        /* Claude Generated (Aug 2026): a DIVERGED optimisation is finite, so the test above waves
+         * it through. Measured on a 107-atom peptide: results with coordinates of order 1e242 and
+         * a perfectly plausible energy (-161.62 Eh, mid-conformer-range), which then ranked as the
+         * deepest structure of their cycle until the species check removed them one stage later.
+         * The molecule cannot legitimately grow tenfold during an optimisation, so compare the
+         * span against the INPUT's, with the same 50 A floor SimpleMD uses. */
+        double res_extent = 0.0, extent_limit = 0.0;
+        bool diverged = false;
+        if (finite_result && m_opt_divergence_factor > 0.0 && fallback.AtomCount() > 0) {
+            res_extent = extent_of(res.final_molecule.getGeometry());
+            extent_limit = std::max(50.0, m_opt_divergence_factor * extent_of(fallback.getGeometry()));
+            diverged = res_extent > extent_limit;
+        }
+        if (diverged) {
+            save_diverged(res.final_molecule, idx, res_extent, extent_limit);
+            save_failed(fallback, idx, "diverged");
+            CurcumaLogger::warn_fmt("  Struct {:2d} [{}]: optimisation DIVERGED -- the result spans {:.3g} A "
+                                    "(input {:.1f} A, limit {:.0f} A) while reporting E = {:+.6f} Eh. "
+                                    "Discarded, using the input geometry; result in {}, input in {}.",
+                idx + 1, opt_method_name, res_extent, extent_of(fallback.getGeometry()), extent_limit,
+                e_end, diverged_file, failed_file);
+        }
+        if (finite_result && !diverged) {
             res.final_molecule.appendXYZFile(output_file);
             // Claude Generated (Jul 2026): the per-structure table is the detail record and moves to
             // verbosity >= 2. At verbosity 1 the live progress bar during the batch plus the summary
@@ -2291,9 +2391,10 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
             ++written;
         } else if (fallback.AtomCount() > 0 && fallback.getGeometry().allFinite()) {
             fallback.appendXYZFile(output_file);
-            CurcumaLogger::warn_fmt("  Struct {:2d}: optimisation unusable ({}), using the input geometry",
-                idx + 1,
-                res.final_molecule.AtomCount() == 0 ? "no geometry returned" : "non-finite energy/geometry");
+            if (!diverged)   // the divergence case has already said what happened, in more detail
+                CurcumaLogger::warn_fmt("  Struct {:2d}: optimisation unusable ({}), using the input geometry",
+                    idx + 1,
+                    res.final_molecule.AtomCount() == 0 ? "no geometry returned" : "non-finite energy/geometry");
             ++written;
         } else {
             CurcumaLogger::warn_fmt("  Struct {:2d}: dropped -- neither the optimised nor the input geometry is finite",
@@ -2393,6 +2494,16 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
                                 "(input geometries, named with the reason) -- reproduce with: "
                                 "curcuma -sp <structure> -method {}",
             failed_written, failed_file, opt_method_name);
+    /* Claude Generated (Aug 2026): report divergences as their own number. They are not "failures"
+     * in the sense above -- the method returned an energy and a finite geometry, it simply is not a
+     * molecule any more -- and they used to be invisible: the structure travelled on with a
+     * plausible energy until the species check dropped it a stage later. */
+    if (diverged_written > 0)
+        CurcumaLogger::warn_fmt("ConfSearch: {} of {} optimisation(s) DIVERGED (finite geometry, plausible "
+                                "energy, but the structure is torn apart). Results in {}, their inputs in {} "
+                                "as 'diverged'. Each one cost a full optimisation and would have entered the "
+                                "ensemble; loosen or disable the test with -opt_divergence_factor.",
+            diverged_written, total, diverged_file, failed_file);
     if (failed > 0)
         CurcumaLogger::result_fmt("Optimization batch complete [{}]: {}/{} structures written in {:.1f} s ({} failed: zero step / gradient failure)",
             opt_method_name, written, total, batch_seconds, failed);
@@ -2424,7 +2535,10 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
 int ConfSearch::FilterOptimisedByTopology(const std::string& path)
 {
     std::ifstream check(path);
-    if (!check.good() || m_topo_matrix.rows() == 0)
+    // Claude Generated (Aug 2026): the structures in this file were optimised at RelaxMethod(),
+    // so they are checked against that method's own reference -- see FunnelTopoRef().
+    const Matrix& reference = FunnelTopoMatrix();
+    if (!check.good() || reference.rows() == 0)
         return 0;
 
     std::vector<Molecule> keep, rejected;
@@ -2435,8 +2549,8 @@ int ConfSearch::FilterOptimisedByTopology(const std::string& path)
             if (mol.AtomCount() == 0)
                 continue;
             const auto topo_cur = TopologyMatrix(mol);
-            if (topo_cur.rows() != m_topo_matrix.rows()
-                || (m_topo_matrix - topo_cur).cwiseAbs().sum() > 1e-4)
+            if (topo_cur.rows() != reference.rows()
+                || (reference - topo_cur).cwiseAbs().sum() > 1e-4)
                 rejected.push_back(mol);
             else
                 keep.push_back(mol);
@@ -3488,8 +3602,8 @@ void ConfSearch::CalibrateBias(const std::string& p, nlohmann::json& md)
         return v;
     };
     const std::string explore = cycleStage("s1_explore", m_md_method);
-    const std::string relax = cycleStage("s2_relax", m_md_method);
-    const std::string reduce = cycleStage("s3_reduce", m_md_method);
+    const std::string relax = cycleStage("s2_relax", RelaxMethod());
+    const std::string reduce = cycleStage("s3_reduce", RelaxMethod());
     std::vector<Molecule> pre = load(outputPath(explore + ".xyz"));            // pre-optimisation MD snapshots
     std::vector<Molecule> post = load(outputPath(relax + ".xyz"));             // optimised (index-aligned with pre)
     std::vector<Molecule> minima = load(outputPath(reduce + ".xyz")); // distinct minima (deduped)
@@ -3953,6 +4067,14 @@ void ConfSearch::LoadControlJson()
     m_seed_rank = m_config.get<int>("seed_rank");
     // Claude Generated (Jul 2026): RMSD-aware seed selection
     m_seed_selection = m_config.get<std::string>("seed_selection");
+    /* Claude Generated (Aug 2026): which surface the per-repetition funnel computes on.
+     * Validated here rather than at the call site so an unknown value fails once, loudly. */
+    m_opt_divergence_factor = m_config.get<double>("opt_divergence_factor");
+    m_relax_pes = m_config.get<std::string>("relax_pes");
+    if (m_relax_pes != "md" && m_relax_pes != "opt") {
+        CurcumaLogger::warn_fmt("ConfSearch: relax_pes='{}' unknown -- falling back to 'opt'", m_relax_pes);
+        m_relax_pes = "opt";
+    }
     m_seed_pes = m_config.get<std::string>("seed_pes");
     if (m_seed_pes != "md" && m_seed_pes != "opt" && m_seed_pes != "both") {
         CurcumaLogger::warn_fmt("ConfSearch: seed_pes='{}' unknown -- falling back to 'md'", m_seed_pes);
