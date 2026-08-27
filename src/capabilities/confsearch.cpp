@@ -1022,8 +1022,23 @@ void ConfSearch::start()
             if (added > 0 && cg_method != RelaxMethod() && !refine_needed) {
                 const std::string rescored = cycleStage("s4_recombine_rescored", RelaxMethod());
                 nlohmann::json opt_cg = ChildConfig(RelaxMethod(), m_threads);
+                /* Claude Generated (Aug 2026): this pass re-optimises the WHOLE ensemble, not just
+                 * the proposals -- so it can do everything RELAX can do, including transferring a
+                 * proton. It needs the same two guards RELAX has, and had neither. Measured on a
+                 * 107-atom peptide: the two deepest structures of one repetition (+4.2 and
+                 * +10.4 kJ/mol) were tautomers created HERE, the species check after RELAX reported
+                 * zero rejects because it had already run, and they were only caught by the Phase 4
+                 * check at the end of the cycle -- after they had set the reported cycle minimum,
+                 * anchored the energy window and entered the stage pool. */
+                if (m_hold_polar_h)
+                    opt_cg["distance_restraints"] = PolarHydrogenRestraints(FunnelTopoRef());
                 PerformOptimisation(reduce, opt_cg, rescored);
                 CopyFrames(outputPath(rescored + ".xyz"), outputPath(reduce + ".xyz"));
+                const int kept_cg = FilterOptimisedByTopology(outputPath(reduce + ".xyz"));
+                if (kept_cg > 0 && kept_cg < rmsd_count + added)
+                    CurcumaLogger::warn_fmt("ConfSearch: {} structure(s) changed species during the re-scoring "
+                                            "optimisation and were removed -- see the topo_rejected file",
+                        rmsd_count + added - kept_cg);
                 CurcumaLogger::result_fmt("ConfSearch: recombination products re-optimised at {} so the ensemble "
                                           "stays on one energy scale", RelaxMethod());
             }
