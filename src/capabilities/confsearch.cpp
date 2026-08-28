@@ -3520,6 +3520,63 @@ int ConfSearch::OfferSeedPool(std::vector<Molecule*>& seeds, const std::vector<M
     return offered;
 }
 
+/* Claude Generated (Aug 2026): see seed_rank_cold_factor. */
+int ConfSearch::EffectiveSeedRank() const
+{
+    if (m_seed_rank <= 0 || m_seed_rank_cold_factor == 1.0)
+        return m_seed_rank;
+    const double span = m_startT - m_endT;
+    // A single-temperature run has no ladder to interpolate along -- keep the plain rank.
+    if (!(span > 1e-9) || !std::isfinite(m_currentT))
+        return m_seed_rank;
+    const double frac = std::clamp((m_startT - m_currentT) / span, 0.0, 1.0);
+    const double scaled = m_seed_rank * (1.0 + (m_seed_rank_cold_factor - 1.0) * frac);
+    return std::max(1, static_cast<int>(std::lround(scaled)));
+}
+
+/* Claude Generated (Aug 2026): see seed_bias_penalty and the doc comment in the header. */
+std::vector<double> ConfSearch::SeedBiasDensity(const std::vector<Molecule*>& candidates) const
+{
+    std::vector<double> density(candidates.size(), 0.0);
+    if (!m_bias_pool || candidates.empty())
+        return density;
+    const std::vector<BiasStructure> hills = m_bias_pool->snapshot();
+    if (hills.empty())
+        return density;
+    const double radius = (m_seed_bias_radius > 0.0) ? m_seed_bias_radius : m_rmsd;
+
+    // Radius of gyration as a cheap screen: |Rg(a) - Rg(b)| <= RMSD(a,b), so a candidate and a
+    // hill whose Rg differ by more than the radius cannot possibly be within it.
+    auto gyration = [](const Geometry& g) -> double {
+        if (g.rows() == 0) return 0.0;
+        const Eigen::RowVector3d c = g.colwise().mean();
+        return std::sqrt((g.rowwise() - c).rowwise().squaredNorm().mean());
+    };
+    std::vector<double> rg_hill(hills.size());
+    for (std::size_t h = 0; h < hills.size(); ++h)
+        rg_hill[h] = gyration(hills[h].geometry);
+
+    long screened = 0, evaluated = 0;
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        const Geometry g = candidates[i]->getGeometry();
+        const double rg = gyration(g);
+        for (std::size_t h = 0; h < hills.size(); ++h) {
+            if (std::abs(rg - rg_hill[h]) > radius) { ++screened; continue; }
+            if (hills[h].geometry.rows() != g.rows()) continue;
+            ++evaluated;
+            if (PermRMSD(hills[h].geometry, g) < radius)
+                density[i] += hills[h].counter;
+        }
+    }
+    /* Claude Generated (Aug 2026): result level, not info -- this is an opt-in mechanism that
+     * costs measurable time (one screened RMSD sweep over the whole pool), so a run that pays for
+     * it must say so at the default verbosity. It is only reached when seed_bias_penalty > 0. */
+    CurcumaLogger::result_fmt("ConfSearch: bias density around {} seed candidate(s) from {} hills "
+                              "({} pairs skipped by the Rg screen, {} evaluated)",
+        static_cast<int>(candidates.size()), static_cast<int>(hills.size()), screened, evaluated);
+    return density;
+}
+
 int ConfSearch::SelectSeeds(std::vector<Molecule*>& window_seeds, const std::string& method,
     double global_min) const
 {
@@ -3527,18 +3584,53 @@ int ConfSearch::SelectSeeds(std::vector<Molecule*>& window_seeds, const std::str
     if (n <= 1)
         return 0;
 
+    /* Claude Generated (Aug 2026): the ranking may be shifted by how much metadynamics bias has
+     * already accumulated around a candidate (seed_bias_penalty, off by default). The penalty
+     * enters the SORT KEY only -- Energy() itself is never touched, so every energy that is
+     * reported, compared or written stays the physical one. Rationale: a purely energetic ranking
+     * seeds the same deep basin every cycle until its surroundings are so full of hills that the
+     * trajectory is pushed straight out; measured, the lowest-energy seed contributed none of the
+     * ten deepest structures of the 300 K stage. */
+    std::vector<double> penalty(n, 0.0);
+    if (m_seed_bias_penalty > 0.0) {
+        const std::vector<double> density = SeedBiasDensity(window_seeds);
+        const double dmax = density.empty() ? 0.0 : *std::max_element(density.begin(), density.end());
+        if (dmax > 0.0)
+            for (int i = 0; i < n; ++i)
+                penalty[i] = m_seed_bias_penalty * (density[i] / dmax) / 2625.5;   // kJ/mol -> Eh
+    }
     // Energy ranking is the backbone of both strategies.
-    std::sort(window_seeds.begin(), window_seeds.end(),
-        [](const Molecule* a, const Molecule* b) { return a->Energy() < b->Energy(); });
-    const double e_ref = window_seeds[0]->Energy();
-    const int limit = (m_seed_rank > 0) ? std::min(m_seed_rank, n) : n;
+    {
+        std::vector<std::pair<Molecule*, double>> keyed(n);
+        for (int i = 0; i < n; ++i)
+            keyed[i] = { window_seeds[i], window_seeds[i]->Energy() + penalty[i] };
+        std::stable_sort(keyed.begin(), keyed.end(),
+            [](const auto& a, const auto& b) { return a.second < b.second; });
+        for (int i = 0; i < n; ++i)
+            window_seeds[i] = keyed[i].first;
+    }
+    /* Claude Generated (Aug 2026): the reference for the report is the LOWEST energy, not the
+     * first-ranked structure. With seed_bias_penalty > 0 the two differ, and using the ranking
+     * winner would print "+0.00 kJ/mol vs this cycle's best" next to a structure that is not the
+     * best -- and negative deltas for the ones that are. */
+    const double e_ref = (*std::min_element(window_seeds.begin(), window_seeds.end(),
+                              [](const Molecule* a, const Molecule* b) { return a->Energy() < b->Energy(); }))
+                             ->Energy();
+    /* Claude Generated (Aug 2026): the seed count may grow as the ladder cools -- see
+     * seed_rank_cold_factor. Constant by default. */
+    const int rank = EffectiveSeedRank();
+    const int limit = (rank > 0) ? std::min(rank, n) : n;
+    if (rank != m_seed_rank)
+        CurcumaLogger::result_fmt("ConfSearch: T = {:.0f} K -- seed_rank raised {} -> {} "
+                                  "(-seed_rank_cold_factor {})",
+            m_currentT, m_seed_rank, rank, m_seed_rank_cold_factor);
 
     std::vector<Molecule*> keep;
     if (m_seed_selection != "diverse") {
         keep.assign(window_seeds.begin(), window_seeds.begin() + limit);
         CurcumaLogger::result_fmt("ConfSearch: seed selection (energy) on the {} PES: {} of {} candidate(s) kept "
                                   "({} rejected by rank {})",
-            method, limit, n, n - limit, m_seed_rank);
+            method, limit, n, n - limit, rank);
     } else {
         const double r_min = (m_seed_min_rmsd > 0.0) ? m_seed_min_rmsd
                                                      : m_seed_diversity_factor * m_rmsd;
@@ -4085,6 +4177,9 @@ void ConfSearch::LoadControlJson()
     /* Claude Generated (Aug 2026): which surface the per-repetition funnel computes on.
      * Validated here rather than at the call site so an unknown value fails once, loudly. */
     m_opt_divergence_factor = m_config.get<double>("opt_divergence_factor");
+    m_seed_rank_cold_factor = m_config.get<double>("seed_rank_cold_factor");
+    m_seed_bias_penalty = m_config.get<double>("seed_bias_penalty");
+    m_seed_bias_radius = m_config.get<double>("seed_bias_radius");
     m_relax_pes = m_config.get<std::string>("relax_pes");
     if (m_relax_pes != "md" && m_relax_pes != "opt") {
         CurcumaLogger::warn_fmt("ConfSearch: relax_pes='{}' unknown -- falling back to 'opt'", m_relax_pes);

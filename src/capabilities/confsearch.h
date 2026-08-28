@@ -290,6 +290,26 @@ private:
      * seed_min_rmsd (permutation-aware best-fit RMSD) to a seed already chosen, so MD time is not
      * spent four times on the same basin. Sorts the vector in place, deletes the rejected
      * molecules and shrinks the vector to the kept seeds. Returns the number of rejects. */
+    /**
+     * @brief How many seeds this temperature gets (see seed_rank_cold_factor).
+     *
+     * Claude Generated (Aug 2026). Linear in the temperature between startT and endT, so the
+     * factor is readable off the endpoints: 1.0 keeps the old constant count exactly.
+     */
+    int EffectiveSeedRank() const;
+
+    /**
+     * @brief Accumulated metadynamics hill height around each candidate (see seed_bias_penalty).
+     *
+     * Claude Generated (Aug 2026). Returns, per candidate, the sum of the counters of all pool
+     * hills within seed_bias_radius. The counter IS the hill height (W = k*counter), so this is
+     * "how much bias already sits here" -- the quantity that decides whether a trajectory started
+     * here would be pushed straight out again. Screened by the radius of gyration first
+     * (|Rg(a) - Rg(b)| <= RMSD(a,b) is a valid lower bound), which is what makes it affordable
+     * against a pool of tens of thousands of hills.
+     */
+    std::vector<double> SeedBiasDensity(const std::vector<Molecule*>& candidates) const;
+
     int SelectSeeds(std::vector<Molecule*>& window_seeds, const std::string& method,
         double global_min) const;
 
@@ -529,6 +549,10 @@ private:
      * See the relax_pes parameter for the measurement behind the "opt" default. */
     std::string m_relax_pes = "opt";
     double m_seed_min_rmsd = 0.0, m_seed_diversity_factor = 2.0;
+    /* Claude Generated (Aug 2026): temperature-dependent seed count and bias-density-aware
+     * ranking -- see seed_rank_cold_factor / seed_bias_penalty. Both default to "off". */
+    double m_seed_rank_cold_factor = 1.0, m_seed_bias_penalty = 0.0, m_seed_bias_radius = 0.0;
+
     std::string m_bias_calibration = "off"; // adaptive MTD width mode: off | couple | cluster
     std::string m_bias_scale_mode = "global"; // global | weighted (RMSF-weighted RMSD)
     double m_bias_couple_factor = 1.0, m_bias_energy_tol = 4.0;
@@ -606,6 +630,9 @@ private:
     PARAM(seed_pes, String, "md", "Which potential-energy surface picks the seeds of the next cycle in a dual-method run: md = the cheap exploration method (default; a basin it likes is never dropped because the accurate method ranks it higher), opt = the accurate ranking method, both = seed_rank seeds from EACH (an opt seed in the same basin as an md seed is dropped, since the opt structures are the re-optimised md ones). Motivated by measurement: on a 107-atom peptide the two surfaces correlate at only r = 0.40 and the gfn2 minimum sat at gfnff rank 59 of 141, so a gfnff-picked seed says little about where the accurate method has its minima. The MD still runs at md_method; only the starting geometries change. No effect in a single-method run.", "Filtering", {})
     PARAM(opt_divergence_factor, Double, 10.0, "An optimisation whose result spans more than this factor times its INPUT structure (never below 50 Angstrom, so small molecules keep room) is treated as diverged: the geometry is not written into the pool, the input geometry is used instead, and both are saved for inspection (<stage>.diverged.xyz for the blown-up result, <stage>.failed.xyz for the input that produced it). Why this exists next to the non-finite guard: a diverged optimisation is FINITE. Measured on a 107-atom peptide, gfn2 re-scoring of the recombination proposals: 72 of 2097 structures came back with coordinates of order 1e242 -- every isfinite() test passes, and the written energy (-161.62 Eh) sits in the middle of the conformer range, so such a structure was reported as the deepest of its cycle. Only the later species check removed it, after a full optimisation had been paid for. 0 disables the check.", "Optimisation", {})
     PARAM(relax_pes, String, "opt", "Which potential-energy surface the per-repetition selection funnel runs on in a dual-method run -- the RELAX optimisation of every snapshot, the energy window before the deduplication, the deduplication itself and the re-scoring of the recombination proposals. opt = the accurate ranking method (default); md = the cheap exploration method (the behaviour before Aug 2026). No effect in a single-method run, where both are the same surface. Why the default changed: selecting on the exploration surface is measurably wrong for this class of system -- the same reason -phase3b_two_stage carries, one level lower. -phase3b_two_stage only moved the ONCE-PER-STAGE re-optimisation onto the ranking surface; the funnel in front of it kept discarding on the exploration surface, once per repetition. Measured on a 107-atom peptide (WEKLQ): three gfnff/gfn2 runs stayed at +28.4/+28.6/+38.4 kJ/mol against a GOAT reference while gfn2/gfn2 reached -19.8, and the cause is visible in the budget -- the gfnff/gfn2 run spent 2345 QM optimisations, the gfn2/gfn2 run 7570. The target is NOT unreachable on the cheap surface (it sits at gfnff rank 5 of 649, a gfnff optimisation moves it 0.32 A, and the gfnff run came within 2.00 A of it); what the funnel discarded were the structures whose gfn2 basin was never determined. COST: with opt every snapshot is optimised on the accurate surface, so a dual-method run costs about what a single-method run of the accurate method costs, minus the cheaper dynamics. Set md to get the old, cheap behaviour back.", "Filtering", {"funnel_pes"})
+    PARAM(seed_rank_cold_factor, Double, 1.0, "Scales seed_rank with the temperature: the effective number of seeds runs linearly from seed_rank at startT to seed_rank * this factor at endT. 1.0 (default) keeps the old constant behaviour exactly. Motivated by measurement on a 107-atom peptide: the colder the stage, the less the BEST seed contributes -- of the ten deepest structures per stage, the number NOT coming from the lowest-energy seed rises 1/10 (600 K), 4/10 (500 K), 5/10 (450 K), 7/10 (350 K), 10/10 (300 K). At 300 K the best seed produced none of them. Since a structure that once falls below rank seed_rank can never rise again (the pool only deepens), those basins are lost for the rest of the run. Raising the rank in the cold stages costs little, because the same stages produce far fewer snapshots anyway (measured 352 per repetition at 400 K against 113 at 300 K).", "Filtering", {})
+    PARAM(seed_bias_penalty, Double, 0.0, "Energy penalty in kJ/mol applied to a seed CANDIDATE for the metadynamics hills already accumulated around it, used for the seed ranking only (never for reporting or for the ensemble). 0 (default) disables it and the selection is byte-identical to before. Why: the seed ranking is purely energetic, so the same deep basin is seeded again in every cycle -- and its surroundings fill with hills until the trajectory is pushed straight out of it. Measured on a 107-atom peptide: the lowest-energy seed dominates the early stages and contributes nothing to the ten deepest structures of the 300 K stage. The penalty is scaled by the accumulated hill height near the candidate (sum of counters within seed_bias_radius) relative to the most-covered candidate, so it only ever reorders candidates against each other.", "Filtering", {})
+    PARAM(seed_bias_radius, Double, 0.0, "Radius in Angstrom within which bias hills count towards seed_bias_penalty. 0 derives it as the deduplication radius (rmsd), i.e. hills that the search itself would call the same structure. Only used when seed_bias_penalty > 0.", "Filtering", {})
     PARAM(seed_selection, String, "diverse", "How the next-cycle seeds are picked from the structures inside seed_energy_window: energy = strictly the seed_rank lowest-energy ones; diverse = lowest-energy first, then only structures at least seed_min_rmsd away (permutation-aware best-fit RMSD) from every seed already chosen.", "Filtering", {})
     PARAM(seed_min_rmsd, Double, 0.0, "Minimum RMSD in Angstrom between two seeds in the diverse selection. 0 derives it as seed_diversity_factor * rmsd.", "Filtering", {})
     PARAM(seed_diversity_factor, Double, 2.0, "Multiplier applied to rmsd when seed_min_rmsd is 0. Values around 2 keep the seeds one dedup radius apart from each other.", "Filtering", {})
