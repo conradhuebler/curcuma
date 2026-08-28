@@ -228,6 +228,12 @@ public:
     double currentTime() const { return m_currentStep; }
     const Molecule& currentMolecule() const { return m_molecule; }
 
+    /** Claude Generated (2026): the energy calculator driving this run, for
+     *  read-only inspection between steps (e.g. reading GFN-FF's current
+     *  hydrogen- and halogen-bond lists for a live interaction overlay).
+     *  Null before the run is prepared; never owned by the caller. */
+    EnergyCalculator* energyCalculator() const { return m_interface; }
+
     /** Claude Generated (2026): set the thermostat target temperature live (Kelvin).
      *  Safe to call between step() calls from the driving thread. Setting it marks the
      *  run as manually overridden, so any active temperature ramp stops touching m_T0
