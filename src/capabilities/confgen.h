@@ -376,13 +376,20 @@ private:
      * @brief Flip a torsion the ensemble only ever showed in ONE planar state (isomerise_max).
      *
      * Claude Generated (Aug 2026). Every other move set recombines OBSERVED rotamer states, so a
-     * conformer that needs an unobserved state is unreachable at any depth. The states that go
-     * missing this way are systematically the ones behind a rotation barrier: a partially
-     * conjugated bond (amide, guanidinium, ester) is planar, sits in cis OR trans, and a 2 ps MD
-     * at 450 K crosses its 40-80 kJ/mol barrier only by accident. Measured on a 107-atom peptide:
-     * the deepest structure of a four-day search and the external reference BOTH differ from all
-     * 99 ensemble members in exactly one such torsion, and both were therefore outside the
-     * generator's reach -- which is why raising the proposal depth never helped.
+     * conformer that needs an unobserved state is unreachable at any depth. This is the only move
+     * that can ADD a state to the space.
+     *
+     * OFF BY DEFAULT. It was built on a measurement that turned out to be an artefact of how the
+     * measurement was made: the deepest known structure and an external reference both differ from
+     * all 99 members of ONE CYCLE ensemble in the guanidinium C-N torsion. But ConfSearch hands
+     * ConfGen the CUMULATIVE pool as its description basis (see analysis_file), and there that
+     * torsion has ten states -- including -19 deg (n=109) and +31 deg (n=58), which is where those
+     * two structures sit. Nothing was missing, and the earlier claim that this explains why a
+     * larger proposal_depth never helped is withdrawn. Measured afterwards: 2 of 29 torsions are
+     * single-state in the cumulative ensemble, none at all in a 223-structure force-field one.
+     *
+     * The mechanism itself is verified and cheap, so it stays available for the case it was meant
+     * for -- a degree of freedom the WHOLE run never opened.
      *
      * Nothing here is keyed to a molecule. DETECTION is read off the rotamer analysis: a torsion
      * the ensemble showed in a SINGLE state is a degree of freedom the sampling never opened.
@@ -469,7 +476,7 @@ private:
     int m_proposal_candidate_cap = 200000;
     int m_proposal_seed = 0;
     // Claude Generated (Aug 2026): isomerisation move, see generateIsomerisationProposals().
-    int m_isomerise_max = 4, m_isomerise_scan_steps = 24;
+    int m_isomerise_max = 0, m_isomerise_scan_steps = 24;
     double m_isomerise_min_separation = 60.0, m_isomerise_max_rise = 100.0;
     // Claude Generated (Aug 2026): crossover move, see generateProposals().
     int m_crossover_max = 0, m_crossover_window = 6;
@@ -543,7 +550,7 @@ private:
     PARAM(min_pairs, Int, 1, "Minimum number of matched pairs required before a state transition is reported.", "Analysis", {})
     PARAM(generate, Bool, false, "Generate new conformer proposals: enumerate state vectors that the ensemble does not contain, build them, optimise them and report which ones are genuinely new. Off by default because it runs one geometry optimisation per proposal.", "Generation", {})
     PARAM(max_proposals, Int, 50, "Maximum number of proposals built and optimised, ordered by the additive-model estimate.", "Generation", {})
-    PARAM(isomerise_max, Int, 4, "Number of ISOMERISATION proposals: flip a torsion that the ensemble only ever showed in ONE planar state to the opposite planar value. Every other move set recombines OBSERVED states, so a conformer needing an unobserved one is unreachable at any depth -- and the states that go missing are systematically those behind a rotation barrier (amide, guanidinium, ester: planar, cis OR trans, 40-80 kJ/mol apart, which a 2 ps MD at 450 K crosses only by accident). Measured on a 107-atom peptide: the deepest structure of a four-day search (-19.8 kJ/mol vs the external reference) AND that reference itself differ from all 99 ensemble members in exactly one such torsion -- the guanidinium C-N, held at +174 deg by the entire ensemble while they need -22 and +8 deg. Both were outside the generator's reach for want of a BUILDING BLOCK, not of depth, which is why raising proposal_depth never helped. Detection needs no bond orders: a single observed state whose centre is planar. 0 disables them.", "Proposals", {})
+    PARAM(isomerise_max, Int, 0, "Number of ISOMERISATION proposals: flip a torsion the ensemble only ever showed in ONE state to a second minimum located by a scan. Every other move set recombines OBSERVED states, so a conformer needing an unobserved one is unreachable at any depth -- this is the only move that can ADD a state. OFF BY DEFAULT, because the case it repairs was not found in production. The move was built after measuring that the deepest known structure and an external reference both differ from all 99 members of one CYCLE ensemble in the guanidinium C-N torsion, which those 99 hold at +174 deg. That measurement was made on the wrong ensemble: ConfSearch hands ConfGen the CUMULATIVE pool as its description basis (analysis_file), and there the same torsion has ten states including -19 deg (n=109) and +31 deg (n=58) -- exactly where the two structures sit. Nothing was missing. In the cumulative ensemble only 2 of 29 torsions are single-state, and in a 223-structure force-field ensemble none at all. So the mechanism works (verified: the scan locates the second minimum, the build reaches it, the structure keeps it after free optimisation) but it addresses an impoverishment that only arises when ConfGen is run on a single cycle without analysis_file. Turn it on for that case, or when a rotation barrier is suspected to be uncrossed by the dynamics. 0 disables it.", "Proposals", {})
     PARAM(isomerise_scan_steps, Int, 24, "Points of the rigid torsion scan that LOCATES the second minimum of a single-state torsion (24 = every 15 degrees). The scan replaces an assumption with a measurement: an earlier version proposed 'the opposite planar value', which is chemical knowledge brought in after seeing one system, and it would miss a second minimum that is not planar. One energy per point on the description surface, per frozen torsion -- a handful of single points, not optimisations.", "Proposals", {})
     PARAM(isomerise_max_rise, Double, 100.0, "How far above the known state a scan minimum may sit, in kJ/mol, before it is dropped. The scan is RIGID -- it rotates the moving side and relaxes nothing -- so it overestimates badly and the threshold has to be generous. It still has to exist: measured on a 107-atom peptide, the same scan that correctly located the missing guanidinium state at +4.5 kJ/mol also reported minima at +2251 and +40475 kJ/mol, which are atoms driven into each other, not conformers. Those cost a restrained build each and cannot produce anything.", "Proposals", {})
     PARAM(isomerise_min_separation, Double, 60.0, "How far a scan minimum must lie from the state the ensemble already knows, in degrees, before it counts as a different state. Below this it is the same basin seen from its flank.", "Proposals", {})

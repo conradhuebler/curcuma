@@ -2727,17 +2727,91 @@ void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
     const std::vector<std::pair<int, int>> reference_bonds
         = topologyFingerprint(m_frames.front().molecule, m_topology_factor);
 
+    /* Claude Generated (Aug 2026): the optimisations run in PARALLEL, the checks and the logging
+     * afterwards do not.
+     *
+     * They used to be strictly serial, because ConfGen shares ONE calculator across the whole run
+     * (reuse_calculator, introduced so the force field is not re-derived per structure and to dodge
+     * an intermittent GFN-FF parametrisation crash) -- and one calculator cannot serve several
+     * threads. Measured cost of that: one repetition of a 107-atom peptide spent 28 minutes on 30
+     * proposals while ten threads idled, and over 35 repetitions the production run put ~16 of its
+     * 105 hours into this one phase. It also inflated the +29 % that the ConfGen A/B measured.
+     *
+     * The fix keeps the property that mattered: each WORKER gets its own calculator and reuses it
+     * across its own share of the proposals, so nothing is re-derived per structure -- there are
+     * simply W independent chains instead of one. Each optimisation then runs single-threaded,
+     * which is the same trade ConfSearch already makes for its optimisation batches ("single
+     * threaded per optimisation when the caller parallelises externally").
+     *
+     * Only the optimisation is parallel. Topology check, novelty and the log lines stay in the
+     * original serial loop below: they touch shared state (m_frames, the logger) and they are
+     * cheap, so there is nothing to win and a race to lose. */
+    std::vector<int> todo;
+    for (int i = 0; i < static_cast<int>(proposals.size()); ++i)
+        if (proposals[i].geometry.AtomCount() > 0)
+            todo.push_back(i);
+    const int workers = std::max(1, std::min<int>(m_threads, static_cast<int>(todo.size())));
+    if (workers > 1) {
+        json worker_config = opt_config;
+        worker_config["threads"] = 1;   // W structures at once, one thread each
+        const auto t_start = std::chrono::steady_clock::now();
+        /* Claude Generated (Aug 2026): the child optimisations run at verbosity 0, and the logger
+         * level is a shared static (see the known issue in the ConfSearch docs) -- they leave it at
+         * 0 and every message after the join is swallowed. Measured: the summary below simply never
+         * appeared, which is what made this parallelisation look like it was not running at all.
+         * Save and restore around the batch, exactly as ConfSearch::PerformOptimisation does. */
+        const int verbosity_before = CurcumaLogger::get_verbosity();
+        std::vector<std::thread> pool;
+        for (int w = 0; w < workers; ++w) {
+            pool.emplace_back([&, w]() {
+                // One calculator per worker, reused across its whole share -- the point of
+                // reuse_calculator, preserved.
+                json cfg = calc_config;
+                cfg["threads"] = 1;
+                EnergyCalculator local(split ? m_eval_method : m_method, cfg);
+                if (!m_frames.empty())
+                    local.setMolecule(m_frames.front().molecule.getMolInfo());
+                for (std::size_t idx = w; idx < todo.size(); idx += workers) {
+                    Proposal& q = proposals[todo[idx]];
+                    Molecule mol = q.geometry;
+                    auto r = Optimization::OptimizationDispatcher::optimizeStructure(
+                        &mol, Optimization::OptimizerType::LBFGSPP, &local, worker_config);
+                    if (!r.success)
+                        continue;
+                    q.optimised = true;
+                    q.geometry = r.final_molecule;
+                    q.energy = r.final_energy;
+                }
+            });
+        }
+        for (auto& t : pool)
+            t.join();
+        CurcumaLogger::set_verbosity(verbosity_before);
+        CurcumaLogger::result_fmt("ConfGen: {} proposal(s) optimised on {} worker(s) in {:.1f} s "
+                                  "(one calculator each, reused across its share)",
+            static_cast<int>(todo.size()), workers,
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count());
+    }
+
+    const auto serial_start = std::chrono::steady_clock::now();
+    int serial_done = 0;
     for (Proposal& p : proposals) {
         if (p.geometry.AtomCount() == 0)
             continue; // rejected by the clash filter, never built
-        Molecule mol = p.geometry;
-        auto result = Optimization::OptimizationDispatcher::optimizeStructure(
-            &mol, Optimization::OptimizerType::LBFGSPP, &calculator, opt_config);
-        if (!result.success)
-            continue;
-        p.optimised = true;
-        p.geometry = result.final_molecule;
-        p.energy = result.final_energy;
+        if (workers > 1) {
+            if (!p.optimised)
+                continue;   // already done in parallel above (or failed there)
+        } else {
+            Molecule mol = p.geometry;
+            auto result = Optimization::OptimizationDispatcher::optimizeStructure(
+                &mol, Optimization::OptimizerType::LBFGSPP, &calculator, opt_config);
+            if (!result.success)
+                continue;
+            p.optimised = true;
+            p.geometry = result.final_molecule;
+            p.energy = result.final_energy;
+            ++serial_done;
+        }
         p.states_after = TorsionSpace::stateVector(p.geometry.getGeometry(), m_torsions, m_state_centres);
 
         // MANDATORY topology check. A built structure that brings two atoms close makes the force
@@ -2777,6 +2851,14 @@ void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
             }
         }
     }
+    /* Claude Generated (Aug 2026): the serial path is timed too, so the two are comparable from a
+     * log without rebuilding. It only fires with one worker -- and then each optimisation still has
+     * all the threads internally, which is what the old code did. */
+    if (workers <= 1 && serial_done > 0)
+        CurcumaLogger::result_fmt("ConfGen: {} proposal(s) optimised serially in {:.1f} s "
+                                  "(one shared calculator, {} thread(s) inside each optimisation)",
+            serial_done, std::chrono::duration<double>(std::chrono::steady_clock::now() - serial_start).count(),
+            m_threads);
 }
 
 double ConfGen::referenceEnergyOptimised(double& worst_gain_kJ) const
