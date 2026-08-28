@@ -77,6 +77,10 @@ void ConfGen::LoadControlJson()
     m_analysis_file = m_config.get<std::string>("analysis_file");
     m_proposal_ranking = m_config.get<std::string>("proposal_ranking");
     m_concerted_max = m_config.get<int>("concerted_max");
+    m_isomerise_max = m_config.get<int>("isomerise_max");
+    m_isomerise_scan_steps = m_config.get<int>("isomerise_scan_steps");
+    m_isomerise_min_separation = m_config.get<double>("isomerise_min_separation");
+    m_isomerise_max_rise = m_config.get<double>("isomerise_max_rise");
     m_proposal_novelty_weight = m_config.get<double>("proposal_novelty_weight");
     m_proposal_depth = m_config.get<int>("proposal_depth");
     m_proposal_candidate_cap = m_config.get<int>("proposal_candidate_cap");
@@ -1305,6 +1309,21 @@ bool ConfGen::restrainedBuild(const Proposal& p, Molecule& driven, const Molecul
         r.force = m_restraint_force;
         restraints.push_back(r);
     }
+    /* Claude Generated (Aug 2026): explicit target angles for the isomerisation move. They are not
+     * state centres -- the whole point is that the ensemble never showed this value, so it cannot
+     * be addressed by a state index. */
+    for (const auto& at : p.angle_targets) {
+        if (at.first < 0 || at.first >= static_cast<int>(m_torsions.size()))
+            continue;
+        Optimization::DihedralRestraint r;
+        r.i = m_torsions[at.first].i;
+        r.j = m_torsions[at.first].j;
+        r.k = m_torsions[at.first].k;
+        r.l = m_torsions[at.first].l;
+        r.target = at.second * M_PI / 180.0;
+        r.force = m_restraint_force;
+        restraints.push_back(r);
+    }
     if (restraints.empty())
         return false;
 
@@ -1553,6 +1572,126 @@ std::vector<ConfGen::Proposal> ConfGen::generateConsensusProposals() const
  * atom, and a window is grown breadth-first from a seed. A window in storage order would be an
  * arbitrary set of unrelated dihedrals.
  */
+/* Claude Generated (Aug 2026): see the doc comment in the header. */
+std::vector<ConfGen::Proposal> ConfGen::generateIsomerisationProposals() const
+{
+    std::vector<Proposal> out;
+    if (m_isomerise_max <= 0 || m_frames.empty() || !m_calculator)
+        return out;
+
+    /* Which torsions did the ensemble only ever show in ONE state? That is the whole detection,
+     * and it is read off the rotamer analysis -- no bond orders, no element list, nothing about
+     * amides or guanidinium groups. A single-state torsion is a degree of freedom the sampling
+     * never opened; whether that is a rotation barrier or plain bad luck, the generator cannot
+     * recombine what it has not seen. */
+    std::vector<int> frozen;
+    for (std::size_t t = 0; t < m_torsions.size(); ++t)
+        if (m_state_centres[t].size() == 1)
+            frozen.push_back(static_cast<int>(t));
+    if (frozen.empty()) {
+        CurcumaLogger::result("ConfGen: no isomerisation candidate -- every torsion was sampled in "
+                              "more than one state");
+        return out;
+    }
+
+    /* WHERE to flip to is measured, not assumed. Earlier this used "the opposite planar value",
+     * which is chemical knowledge smuggled in after seeing one system. Instead the frozen torsion
+     * is scanned rigidly (the moving side is rotated, everything else held) and the energy profile
+     * is read: every local minimum that is far enough from the state the ensemble knows is a
+     * candidate target. That finds the cis form of a conjugated bond without being told such a
+     * thing exists, and equally a non-planar second minimum, which the planarity rule would miss. */
+    const Molecule& probe = m_frames.front().molecule;
+    m_calculator->setMolecule(probe.getMolInfo());
+    const int steps = std::max(6, m_isomerise_scan_steps);
+    const double dphi = 360.0 / steps;
+    /* Claude Generated (Aug 2026): the scan is the only part of this move whose cost grows with the
+     * system -- frozen torsions x steps single points, on the DESCRIPTION surface (the force field),
+     * never on the ranking one. Reported, because "how does this scale" must be answerable from a
+     * log rather than from the source. */
+    const auto scan_start = std::chrono::steady_clock::now();
+
+    struct Target { int torsion; double angle; double barrier_kJ; double depth_kJ; };
+    std::vector<Target> targets;
+    for (int t : frozen) {
+        const double known = m_state_centres[t][0];
+        std::vector<double> ang(steps), en(steps);
+        Molecule scan = probe;
+        for (int s = 0; s < steps; ++s) {
+            ang[s] = known + s * dphi;
+            while (ang[s] > 180.0) ang[s] -= 360.0;
+            Geometry g = TorsionSpace::setDihedral(probe.getGeometry(), m_torsions[t], ang[s]);
+            scan.setGeometry(g);
+            m_calculator->setMolecule(scan.getMolInfo());
+            en[s] = m_calculator->CalculateEnergy(false);
+        }
+        const double e0 = en[0];
+        // local minima of the cyclic profile, excluding the neighbourhood of the known state
+        for (int s = 0; s < steps; ++s) {
+            const double prev = en[(s - 1 + steps) % steps], next = en[(s + 1) % steps];
+            if (!(en[s] < prev && en[s] < next))
+                continue;
+            double sep = std::fabs(ang[s] - known);
+            if (sep > 180.0) sep = 360.0 - sep;
+            if (sep < m_isomerise_min_separation)
+                continue;
+            /* The rigid profile's maximum is NOT a barrier -- nothing relaxes along the way, so
+             * it is dominated by atoms driven into each other. Kept only as a coarse flag, and
+             * named for what it is. */
+            double crest = 0.0;
+            for (int q = 1; q < steps; ++q)
+                crest = std::max(crest, en[q] - e0);
+            const double rise = (en[s] - e0) * 2625.4996;
+            if (rise > m_isomerise_max_rise)
+                continue;   // a collision, not a conformer -- see isomerise_max_rise
+            targets.push_back({ t, ang[s], crest * 2625.4996, rise });
+        }
+    }
+    const double scan_seconds
+        = std::chrono::duration<double>(std::chrono::steady_clock::now() - scan_start).count();
+    CurcumaLogger::result_fmt("ConfGen: torsion scan: {} frozen torsion(s) x {} points = {} single "
+                              "point(s) at {} in {:.1f} s ({:.0f} ms each)",
+        static_cast<int>(frozen.size()), steps, static_cast<int>(frozen.size()) * steps, m_method,
+        scan_seconds, frozen.empty() ? 0.0 : 1000.0 * scan_seconds / (frozen.size() * steps));
+    if (targets.empty()) {
+        CurcumaLogger::result_fmt("ConfGen: {} torsion(s) sampled in a single state, but the scan found "
+                                  "no usable second minimum ({:.0f} deg away, at most {:.0f} kJ/mol up) "
+                                  "-- nothing to isomerise",
+            static_cast<int>(frozen.size()), m_isomerise_min_separation, m_isomerise_max_rise);
+        return out;
+    }
+    // The interesting ones are those whose second minimum is not much worse: a target 200 kJ/mol up
+    // is a real minimum and still useless.
+    std::sort(targets.begin(), targets.end(),
+        [](const Target& a, const Target& b) { return a.depth_kJ < b.depth_kJ; });
+
+    CurcumaLogger::result_fmt("ConfGen: {} torsion(s) held in ONE state by the whole ensemble; the scan "
+                              "finds {} second minimum/minima -- states no recombination can invent",
+        static_cast<int>(frozen.size()), static_cast<int>(targets.size()));
+    for (const Target& g : targets)
+        CurcumaLogger::result_fmt("ConfGen:   {} known at {:+.0f} deg -> {:+.0f} deg "
+                                  "({:+.1f} kJ/mol above it; rigid crest {:.0f} kJ/mol, not a barrier)",
+            m_torsions[g.torsion].label(probe), m_state_centres[g.torsion][0], g.angle,
+            g.depth_kJ, g.barrier_kJ);
+
+    /* Templates: the lowest-energy structures. A barrier crossing is worth trying from a good
+     * basin -- the flip changes one degree of freedom, everything else stays the template's. */
+    std::vector<int> order(m_frames.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(),
+        [this](int a, int b) { return m_frames[a].energy < m_frames[b].energy; });
+
+    for (std::size_t g = 0; g < targets.size() && static_cast<int>(out.size()) < m_isomerise_max; ++g) {
+        Proposal p;
+        p.states = m_frames[order.front()].states;  // unchanged -- the target angle has no state
+        p.template_frame = order.front();
+        p.distance = 0;
+        p.novelty = 0;
+        p.angle_targets.emplace_back(targets[g].torsion, targets[g].angle);
+        out.push_back(std::move(p));
+    }
+    return out;
+}
+
 std::vector<ConfGen::Proposal> ConfGen::generateCrossoverProposals() const
 {
     std::vector<Proposal> proposals;
@@ -2612,7 +2751,31 @@ void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
         for (const Frame& f : m_frames)
             p.min_rmsd_to_ensemble = std::min(p.min_rmsd_to_ensemble,
                 bestFitRMSD(f.molecule.getGeometry(), p.geometry.getGeometry()));
+        /* Claude Generated (Aug 2026): novelty is geometric everywhere else, and for an
+         * isomerisation that is the wrong test. Flipping a torsion the ensemble never opened
+         * produces a structure in a rotamer state that NO ensemble member occupies -- new by
+         * construction -- while moving few enough atoms to stay inside the RMSD threshold.
+         * Measured: the guanidinium cis form (+21.8 deg against +174 in all 99 members) was
+         * discarded as a duplicate by the RMSD gate. So an isomerisation counts as new when its
+         * target torsion actually ARRIVED, i.e. sits at least isomerise_min_separation away from
+         * the single state the ensemble knows. The topology gate still applies unchanged. */
         p.is_new = p.topology_ok && p.min_rmsd_to_ensemble > m_new_rmsd;
+        if (p.topology_ok && !p.is_new && p.isomerisation() && p.geometry.AtomCount() > 0) {
+            const int t = p.angle_targets.front().first;
+            if (t >= 0 && t < static_cast<int>(m_torsions.size()) && m_state_centres[t].size() == 1) {
+                const double now = TorsionSpace::dihedral(p.geometry.getGeometry(), m_torsions[t]);
+                double sep = std::fabs(now - m_state_centres[t][0]);
+                if (sep > 180.0) sep = 360.0 - sep;
+                if (sep >= m_isomerise_min_separation) {
+                    p.is_new = true;
+                    CurcumaLogger::result_fmt("ConfGen: isomerisation kept despite RMSD {:.2f} A -- {} now "
+                                              "at {:+.0f} deg against {:+.0f} in every input structure, "
+                                              "a state the ensemble does not contain",
+                        p.min_rmsd_to_ensemble, m_torsions[t].label(m_frames.front().molecule), now,
+                        m_state_centres[t][0]);
+                }
+            }
+        }
     }
 }
 
@@ -3146,6 +3309,18 @@ void ConfGen::start()
                 proposals.insert(proposals.end(), path.begin(), path.end());
             }
         }
+        /* Claude Generated (Aug 2026): the isomerisation move. Placed before the NCI moves
+         * because it is the only one that can ADD a state to the space -- every other move set
+         * recombines what the ensemble already showed. */
+        if (m_isomerise_max > 0) {
+            const std::vector<Proposal> iso = generateIsomerisationProposals();
+            if (!iso.empty()) {
+                CurcumaLogger::result_fmt("ConfGen: {} isomerisation proposal(s) -- flipping a torsion "
+                                          "the whole ensemble holds in one planar state",
+                    static_cast<int>(iso.size()));
+                proposals.insert(proposals.end(), iso.begin(), iso.end());
+            }
+        }
         if (m_concerted_max > 0 && m_nci_generate && !m_nci_pairs.empty()) {
             const std::vector<Proposal> concerted = generateConcertedProposals();
             if (!concerted.empty()) {
@@ -3210,9 +3385,26 @@ void ConfGen::start()
             for (std::size_t t = 0; t < m_torsions.size(); ++t)
                 if (p.states[t] != m_frames[p.template_frame].states[t] && p.states[t] >= 0)
                     geom = TorsionSpace::setDihedral(geom, m_torsions[t], m_state_centres[t][p.states[t]]);
+            /* Claude Generated (Aug 2026): the rigid build knows only STATE INDICES, so an
+             * isomerisation proposal -- whose target angle deliberately has no state -- would be
+             * built as an unchanged copy of its template and then pass every gate as a "new"
+             * structure that is not new at all. Measured before this line existed: the proposals
+             * came out at -157 deg, i.e. the template's own value, instead of the requested +24.
+             * The explicit angles have to be applied here too, exactly as restrainedBuild does. */
+            for (const auto& at : p.angle_targets)
+                if (at.first >= 0 && at.first < static_cast<int>(m_torsions.size()))
+                    geom = TorsionSpace::setDihedral(geom, m_torsions[at.first], at.second);
             Molecule mol = m_frames[p.template_frame].molecule;
             mol.setGeometry(geom);
-            mol.setName(fmt::format("proposal_from_{}_d{}", p.template_frame + 1, p.distance));
+            /* Claude Generated (Aug 2026): the rigid path needs the same honest name as the
+             * restrained one -- an isomerisation has Hamming distance 0 by construction, so
+             * "proposal_from_N_d0" hides the only move that adds a state to the space. */
+            if (p.isomerisation())
+                mol.setName(fmt::format("isomerise_from_{}_{}_{:+.0f}deg", p.template_frame + 1,
+                    m_torsions[p.angle_targets.front().first].label(m_frames.front().molecule),
+                    p.angle_targets.front().second));
+            else
+                mol.setName(fmt::format("proposal_from_{}_d{}", p.template_frame + 1, p.distance));
             // Two gates before a built structure is handed to the force field:
             //   (a) no non-bonded contact inside clash_factor x covalent radii, and
             //   (b) the bond topology must ALREADY match the reference.
@@ -3264,7 +3456,15 @@ void ConfGen::start()
                     clashes++;
                     continue;
                 }
-                driven.setName(fmt::format("proposal_from_{}_d{}_{}", p.template_frame + 1, p.distance, how));
+                /* Claude Generated (Aug 2026): name the isomerisation for what it is -- its Hamming
+                 * distance is 0 (the state vector is the template's), so the generic name would
+                 * read "proposal_from_N_d0" and hide the only move that changes the state space. */
+                if (p.isomerisation())
+                    driven.setName(fmt::format("isomerise_from_{}_{}_{:+.0f}deg_{}", p.template_frame + 1,
+                        m_torsions[p.angle_targets.front().first].label(m_frames.front().molecule),
+                        p.angle_targets.front().second, how));
+                else
+                    driven.setName(fmt::format("proposal_from_{}_d{}_{}", p.template_frame + 1, p.distance, how));
                 p.geometry = driven;
                 p.restrained_build = true;
                 restrained_ok++;

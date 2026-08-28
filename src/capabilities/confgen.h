@@ -254,6 +254,18 @@ private:
          */
         std::vector<std::pair<int, int>> nci_targets;
         bool nci_move() const { return !nci_targets.empty(); }
+        /**
+         * Claude Generated (Aug 2026): explicit target ANGLES in degrees, as (torsion index,
+         * angle). Needed because the isomerisation move drives a torsion to a value that is NOT
+         * an observed rotamer state -- and a state index cannot express what the ensemble has
+         * never shown. Measured on a 107-atom peptide: the two deepest known structures differ
+         * from every one of 99 ensemble members in the guanidinium C-N torsion, which the whole
+         * ensemble holds in a single state at +174 deg while they need -22 and +8 deg. A
+         * recombination generator can only reassemble states it has seen, so no proposal depth
+         * whatever can build them -- the BUILDING BLOCK is missing, not the reach.
+         */
+        std::vector<std::pair<int, double>> angle_targets;
+        bool isomerisation() const { return !angle_targets.empty(); }
         std::string nci_label;     ///< human-readable move, e.g. "break HB 38-90...12, form HB 5-61...46"
         /** Claude Generated (Aug 2026): the geometry is already there and must not be rebuilt --
          *  a collective-mode displacement has no torsion target to drive towards. The clash and
@@ -360,6 +372,29 @@ private:
      *  now -concerted_max was read and never used; see the definition. */
     std::vector<Proposal> generateConcertedProposals() const;
 
+    /**
+     * @brief Flip a torsion the ensemble only ever showed in ONE planar state (isomerise_max).
+     *
+     * Claude Generated (Aug 2026). Every other move set recombines OBSERVED rotamer states, so a
+     * conformer that needs an unobserved state is unreachable at any depth. The states that go
+     * missing this way are systematically the ones behind a rotation barrier: a partially
+     * conjugated bond (amide, guanidinium, ester) is planar, sits in cis OR trans, and a 2 ps MD
+     * at 450 K crosses its 40-80 kJ/mol barrier only by accident. Measured on a 107-atom peptide:
+     * the deepest structure of a four-day search and the external reference BOTH differ from all
+     * 99 ensemble members in exactly one such torsion, and both were therefore outside the
+     * generator's reach -- which is why raising the proposal depth never helped.
+     *
+     * Nothing here is keyed to a molecule. DETECTION is read off the rotamer analysis: a torsion
+     * the ensemble showed in a SINGLE state is a degree of freedom the sampling never opened.
+     * The TARGET is measured, not assumed -- the frozen torsion is scanned rigidly and every local
+     * minimum of that profile at least isomerise_min_separation away from the known state becomes
+     * a candidate. An earlier version proposed "the opposite planar value", which is chemical
+     * knowledge brought in after seeing one system and blind to a non-planar second minimum.
+     * Everything else -- restrained build, release, free optimisation, clash/topology/novelty
+     * gates -- is the common path.
+     */
+    std::vector<Proposal> generateIsomerisationProposals() const;
+
     /** Claude Generated (Aug 2026): the calculator that judges a proposal (see -eval_method); the
      *  shared description calculator when the two methods are the same. */
     EnergyCalculator* evaluationCalculator() const;
@@ -433,6 +468,9 @@ private:
     // Claude Generated (Aug 2026): bound on the candidate list, see generateProposals().
     int m_proposal_candidate_cap = 200000;
     int m_proposal_seed = 0;
+    // Claude Generated (Aug 2026): isomerisation move, see generateIsomerisationProposals().
+    int m_isomerise_max = 4, m_isomerise_scan_steps = 24;
+    double m_isomerise_min_separation = 60.0, m_isomerise_max_rise = 100.0;
     // Claude Generated (Aug 2026): crossover move, see generateProposals().
     int m_crossover_max = 0, m_crossover_window = 6;
     // Claude Generated (Aug 2026): collective-mode move, see generateModeProposals().
@@ -505,6 +543,10 @@ private:
     PARAM(min_pairs, Int, 1, "Minimum number of matched pairs required before a state transition is reported.", "Analysis", {})
     PARAM(generate, Bool, false, "Generate new conformer proposals: enumerate state vectors that the ensemble does not contain, build them, optimise them and report which ones are genuinely new. Off by default because it runs one geometry optimisation per proposal.", "Generation", {})
     PARAM(max_proposals, Int, 50, "Maximum number of proposals built and optimised, ordered by the additive-model estimate.", "Generation", {})
+    PARAM(isomerise_max, Int, 4, "Number of ISOMERISATION proposals: flip a torsion that the ensemble only ever showed in ONE planar state to the opposite planar value. Every other move set recombines OBSERVED states, so a conformer needing an unobserved one is unreachable at any depth -- and the states that go missing are systematically those behind a rotation barrier (amide, guanidinium, ester: planar, cis OR trans, 40-80 kJ/mol apart, which a 2 ps MD at 450 K crosses only by accident). Measured on a 107-atom peptide: the deepest structure of a four-day search (-19.8 kJ/mol vs the external reference) AND that reference itself differ from all 99 ensemble members in exactly one such torsion -- the guanidinium C-N, held at +174 deg by the entire ensemble while they need -22 and +8 deg. Both were outside the generator's reach for want of a BUILDING BLOCK, not of depth, which is why raising proposal_depth never helped. Detection needs no bond orders: a single observed state whose centre is planar. 0 disables them.", "Proposals", {})
+    PARAM(isomerise_scan_steps, Int, 24, "Points of the rigid torsion scan that LOCATES the second minimum of a single-state torsion (24 = every 15 degrees). The scan replaces an assumption with a measurement: an earlier version proposed 'the opposite planar value', which is chemical knowledge brought in after seeing one system, and it would miss a second minimum that is not planar. One energy per point on the description surface, per frozen torsion -- a handful of single points, not optimisations.", "Proposals", {})
+    PARAM(isomerise_max_rise, Double, 100.0, "How far above the known state a scan minimum may sit, in kJ/mol, before it is dropped. The scan is RIGID -- it rotates the moving side and relaxes nothing -- so it overestimates badly and the threshold has to be generous. It still has to exist: measured on a 107-atom peptide, the same scan that correctly located the missing guanidinium state at +4.5 kJ/mol also reported minima at +2251 and +40475 kJ/mol, which are atoms driven into each other, not conformers. Those cost a restrained build each and cannot produce anything.", "Proposals", {})
+    PARAM(isomerise_min_separation, Double, 60.0, "How far a scan minimum must lie from the state the ensemble already knows, in degrees, before it counts as a different state. Below this it is the same basin seen from its flank.", "Proposals", {})
     PARAM(concerted_max, Int, 5, "Number of CONCERTED proposals: one torsion change and one hydrogen-bond change in the SAME restrained optimisation. Implemented Aug 2026 -- before that the value was read and never used, and this help text described a move set that did not exist. The torsion is chosen by geometric coupling: its rotation must move exactly ONE of the two bridge partners, since only then does it change their relative position. Reason from the measurements: the NCI move alone keeps its target pattern in 7 of 13 cases but lands in an already known minimum in 6 of those 7 -- changing one bond does not by itself change the basin, the backbone has to follow. Measured with the move in place, same bridge budget: 4 new conformers instead of 2, bridge distance to the reference 11 instead of 13. 0 disables them.", "NCI", {})
     PARAM(proposal_ranking, String, "mixed", "How the enumerated candidates are ordered before the budget cuts them off: energy = by the additive model alone (the behaviour up to Aug 2026), coverage = by the largest Hamming distance to everything already seen or tried, mixed = both, weighted by -proposal_novelty_weight. Measured background: the model predicts energies badly (cross-validated it explains ~30 % of the spread, and a delta model between the two surfaces even degrades the ranking), while the descriptions SEPARATE excellently -- 141 of 142 structures carry a distinct contact pattern. Ordering by energy alone therefore uses the weak property of the description and ignores the strong one.", "Proposals", {})
     PARAM(proposal_novelty_weight, Double, 0.5, "Weight of the novelty term in -proposal_ranking mixed: 0 = energy only, 1 = coverage only. Both contributions are standardised over the candidate set, so the weight is comparable across systems.", "Proposals", {})
