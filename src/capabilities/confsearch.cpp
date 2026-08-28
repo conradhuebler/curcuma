@@ -3369,6 +3369,20 @@ int ConfSearch::PerformConfGen(const std::string& f, const std::string& method)
     // analysis half of ConfGen and are not needed here -- Phase 3c only wants the structures, and the
     // per-cycle ensembles are far too small for that statistic anyway.
     nlohmann::json cfg = ParameterRegistry::getInstance().getDefaultJson("confgen");
+    /* Claude Generated (Aug 2026): whatever the user set for ConfGen has to reach ConfGen.
+     * Before this, the config was registry defaults plus the handful of parameters ConfSearch
+     * mirrors as -confgen_* -- everything else was dropped without a word. Measured: a run started
+     * with -isomerise_max 4 ran the whole phase with the parameter at its default, because the
+     * flat-flag router had correctly placed it in controller["confgen"] and nothing ever looked
+     * there. Merged BEFORE the structural overrides below, so ConfSearch keeps the last word over
+     * what wires the phase together (generate, the files, the memory) and over its own documented
+     * -confgen_* flags. */
+    if (m_controller.contains("confgen") && m_controller["confgen"].is_object()) {
+        const int before = static_cast<int>(cfg.size());
+        cfg.merge_patch(m_controller["confgen"]);
+        CurcumaLogger::info_fmt("ConfSearch: {} user setting(s) forwarded to ConfGen (cfg now {} keys)",
+            static_cast<int>(m_controller["confgen"].size()), before);
+    }
     cfg.merge_patch(ChildConfig(method, (m_threads > 1) ? 1 : m_threads));
     cfg["generate"] = true;
     cfg["couplings"] = false;
