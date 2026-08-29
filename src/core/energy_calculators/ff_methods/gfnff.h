@@ -234,6 +234,7 @@ BEGIN_PARAMETER_DEFINITION(gfnff)
 PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. Maps to EEQ and CN parameters.", "Basic", {})
 PARAM(allow_unconverged_charges, Bool, false, "Allow calculation to continue with unconverged EEQ charges (warn instead of abort).", "Advanced", {})
 PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 topology charges directly. Faster but less accurate.", "Advanced", {})
+PARAM(topology_mode, String, "constant", "When the bond topology (and with it the whole parameter set) may be re-derived during a running calculation. constant (default since Aug 2026) = derive it once from the input geometry and never again, so every geometry of an optimisation or MD is scored on ONE energy surface. auto = two-tier caching, re-derive the full topology whenever an atom has moved more than 0.5 Bohr since the last derivation. Why constant is the default: a GFN-FF energy is only comparable to another GFN-FF energy if both use the same parameters, and a mid-run re-derivation shifts the whole scale. Measured (Jul 2026): an optimisation of a hot MD snapshot followed those jumps and reported convergence at -9.168083 Eh for a geometry actually worth -8.668213 Eh, with the same 52 bonds -- one such structure in a conformer pool becomes the reference and collapses the result to '1 unique conformer of 482'. Measured (Aug 2026, this is the second reason): with auto, a proton that moves during an optimisation gets a NEW topology derived for it, so the force field follows it into the tautomer instead of holding the bond it was parametrised for; constant makes the transfer impossible on the force-field side, which is what a fixed connectivity is for. ConfSearch has forced constant for its children since Jul 2026; this makes it the behaviour of plain -sp/-opt/-md as well. Use auto only when the connectivity is MEANT to change and you accept that energies before and after are not comparable.", "Advanced", {})
 PARAM(cn_cutoff_bohr, Double, 10.0, "CN neighbor list cutoff radius in Bohr (reference cnthr=100 Bohr^2=10 Bohr). 0 = use accuracy-based threshold instead.", "Advanced", {})
 PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
 PARAM(solve, String, "auto",
@@ -2665,8 +2666,9 @@ private:
 
     std::vector<std::pair<int,int>> m_forced_bonds; ///< External bonds merged with geometric detection
 
-    // Topology caching mode: "auto" (two-tier caching) or "constant" (never recalculate)
-    std::string m_topology_mode = "auto";
+    // Topology caching mode: "constant" (derive once, never again -- default) or "auto" (two-tier
+    // caching, full re-derivation once an atom moved > 0.5 Bohr). See the PARAM help above.
+    std::string m_topology_mode = "constant";
 
     // Claude Generated (March 2026): Topology persistence in param.json
     bool m_cache_topology = true;   ///< Cache Phase-1 EEQ topology in param.json (opt-out)

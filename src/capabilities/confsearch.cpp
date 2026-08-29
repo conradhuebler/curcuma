@@ -3432,6 +3432,49 @@ int ConfSearch::PerformConfGen(const std::string& f, const std::string& method)
         gen.start();
     }
 
+    /* Claude Generated (Aug 2026): count what the step actually produced, at ConfSearch's OWN
+     * verbosity. ConfGen reports "N proposed, M built, K optimised successfully" itself -- but this
+     * call sets the child to verbosity 0 unless the run is at >= 2 (see cfg["verbosity"] above), so
+     * that line is swallowed in every normal run. The return value alone cannot tell the two cases
+     * apart either: it counts NEW conformers, and it is 0 both when the ensemble is saturated (a
+     * legitimate outcome) and when not a single proposal survived its optimisation (a defect).
+     * Measured: a 23-hour production run built 89 proposals across three cycles and optimised NONE
+     * of them; the only message was "RECOMBINE found no new conformer this cycle", which is true in
+     * both cases. Counting the frames of the two files here separates them. */
+    auto count_frames = [](const std::string& path) -> int {
+        std::ifstream probe(path);
+        if (!probe.good())
+            return 0;
+        int n = 0;
+        FileIterator it(path);
+        while (!it.AtEnd()) {
+            it.Next();
+            n++;
+        }
+        return n;
+    };
+    const int built = count_frames(outputPath(f + ".proposals.xyz"));
+    const int optimised = count_frames(outputPath(f + ".proposals.opt.xyz"));
+    if (built > 0 && optimised == 0) {
+        CurcumaLogger::warn_fmt("ConfSearch: RECOMBINE built {} proposal(s) and optimised NONE of them "
+                                "-- the phase produced nothing. Every proposal optimisation reported "
+                                "failure (step cap, non-finite gradient or a rejected geometry); a "
+                                "failed one is skipped silently.",
+            built);
+        CurcumaLogger::warn("ConfSearch: run with -verbosity 2 to see ConfGen's own per-phase counts, "
+                            "or check that <cycle>.proposals.opt.xyz exists at all.");
+    } else if (built > 0) {
+        CurcumaLogger::result_fmt("ConfSearch: RECOMBINE built {} proposal(s), {} survived optimisation",
+            built, optimised);
+    } else {
+        // The third case, and it is NOT a defect: the generator had nothing to build -- every
+        // reachable state combination is already in the ensemble, or no torsion has a second
+        // state. Named explicitly, because "found no new conformer" fits all three.
+        CurcumaLogger::result("ConfSearch: RECOMBINE built no proposal at all -- every reachable "
+                              "state combination is already in the pool, or no torsion has a second "
+                              "state (this is not a failure)");
+    }
+
     // Append what survived ConfGen's own topology and novelty checks. From here on these structures
     // are indistinguishable from metadynamics hits: Phase 3b re-optimises them, Phase 4 topology- and
     // energy-filters them, feeds them into the bias pool and lets them compete as seeds.

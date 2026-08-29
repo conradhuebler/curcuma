@@ -2795,18 +2795,33 @@ void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
 
     const auto serial_start = std::chrono::steady_clock::now();
     int serial_done = 0;
+    /* Claude Generated (Aug 2026): a failed proposal optimisation used to be a bare `continue` --
+     * counted nowhere, reported nowhere. The proposal then simply never appears in
+     * <base>.proposals.opt.xyz, which looks exactly like "the generator had nothing to offer".
+     * Measured: a production run built 89 proposals in three cycles and optimised none of them,
+     * and the only visible message was "no new conformer this cycle". The first failure now names
+     * its reason, and the total is reported below. */
+    int opt_failed = 0;
+    std::string first_failure;
     for (Proposal& p : proposals) {
         if (p.geometry.AtomCount() == 0)
             continue; // rejected by the clash filter, never built
         if (workers > 1) {
-            if (!p.optimised)
-                continue;   // already done in parallel above (or failed there)
+            if (!p.optimised) {
+                ++opt_failed;
+                continue; // already done in parallel above (or failed there)
+            }
         } else {
             Molecule mol = p.geometry;
             auto result = Optimization::OptimizationDispatcher::optimizeStructure(
                 &mol, Optimization::OptimizerType::LBFGSPP, &calculator, opt_config);
-            if (!result.success)
+            if (!result.success) {
+                ++opt_failed;
+                if (first_failure.empty())
+                    first_failure = result.error_message.empty() ? "no reason reported"
+                                                                 : result.error_message;
                 continue;
+            }
             p.optimised = true;
             p.geometry = result.final_molecule;
             p.energy = result.final_energy;
@@ -2859,6 +2874,21 @@ void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
                                   "(one shared calculator, {} thread(s) inside each optimisation)",
             serial_done, std::chrono::duration<double>(std::chrono::steady_clock::now() - serial_start).count(),
             m_threads);
+    if (opt_failed > 0) {
+        const int built_total = static_cast<int>(std::count_if(proposals.begin(), proposals.end(),
+            [](const Proposal& p) { return p.geometry.AtomCount() > 0; }));
+        // ALL of them failing is a different event from a few of them failing: nothing reaches the
+        // ensemble, and every downstream message ("no new conformer") is then misleading.
+        if (opt_failed == built_total)
+            CurcumaLogger::error(fmt::format("ConfGen: ALL {} built proposal(s) failed their optimisation "
+                                             "-- this phase produced nothing{}",
+                built_total, first_failure.empty() ? "" : ". First reason: " + first_failure));
+        else
+            CurcumaLogger::warn_fmt("ConfGen: {} of {} built proposal(s) failed their optimisation and "
+                                    "were dropped{}",
+                opt_failed, built_total,
+                first_failure.empty() ? "" : ". First reason: " + first_failure);
+    }
 }
 
 double ConfGen::referenceEnergyOptimised(double& worst_gain_kJ) const

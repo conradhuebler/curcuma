@@ -1918,6 +1918,27 @@ int executeOptimization(const json& controller, int argc, char** argv) {
                 return 0;
             } else {
                 CurcumaLogger::warn_fmt("{} optimizer failed: {}", optimizer_method, result.error_message);
+                /* Claude Generated (Aug 2026): a non-converged optimisation is not an empty one. The
+                 * single-structure path used to write NOTHING when the step cap was reached, while
+                 * the multi-structure path a few lines below writes every frame that has atoms --
+                 * so the same input produced a file as part of a batch and no file on its own.
+                 * Measured: re-optimising a 419-structure ensemble one file at a time lost 3
+                 * structures to "Did not converge within 1070 iterations", each with a perfectly
+                 * usable geometry, and nothing but the log said so. The geometry is written with an
+                 * explicit NOT CONVERGED marker in the comment line, and the exit code stays
+                 * non-zero so a caller can still tell the two cases apart. */
+                if (result.final_molecule.AtomCount() > 0
+                    && result.final_molecule.getGeometry().allFinite()) {
+                    Molecule out = result.final_molecule;
+                    // Marker FIRST, original name kept -- the provenance of the structure is often
+                    // the only thing that identifies it in an ensemble.
+                    out.setName(fmt::format("NOT_CONVERGED_after_{}_iterations_|g|={:.2e} {}",
+                        result.iterations_performed, result.final_gradient_norm, out.Name()));
+                    out.writeXYZFile(output_file);
+                    CurcumaLogger::warn_fmt("Last geometry written anyway to: {} (marked NOT_CONVERGED "
+                                            "in the comment line, exit code stays non-zero)",
+                        output_file);
+                }
             }
         } else {
             // Multi-structure path: optimise each frame and collect final geometries.

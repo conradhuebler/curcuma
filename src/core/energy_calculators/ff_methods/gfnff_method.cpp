@@ -527,7 +527,11 @@ GFNFF::GFNFF(const json& parameters)
         { "hbond", true },
         { "repulsion_scaling", 1.0 },
         { "solvent", "none" },  // Claude Generated (Mar 2026): ALPB solvation
-        { "topology_mode", "auto" },  // "auto" (two-tier caching) or "constant" (never recalculate)
+        // Claude Generated (Aug 2026): "constant" is the default -- derive the topology once and
+        // score every later geometry with the SAME parameters. See the PARAM help in gfnff.h for
+        // the two measurements behind it (energy-scale jumps during an optimisation; a proton the
+        // force field follows into a tautomer because auto re-derives its bond).
+        { "topology_mode", "constant" }, // "constant" (derive once) or "auto" (two-tier caching)
         { "cache_topology", true },   // Claude Generated (Mar 2026): Cache Phase-1 topology in param.json (opt-out)
         { "print_timing", true }      // Claude Generated (Mar 2026): Print init timing at verbosity >= 1
     };
