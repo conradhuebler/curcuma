@@ -154,6 +154,12 @@ private:
      * Replaces the ad-hoc {method, threads, gpu} JSONs that dropped charge, spin and solvation. */
     nlohmann::json ChildConfig(const std::string& method, int threads) const;
 
+    /* Claude Generated (Aug 2026): cross-child topology lock. Writes the reference geometry,
+     * runs one silent single point so gfnff derives and caches its topology, and returns the
+     * .topo.json path (empty when locking does not apply to this method or the file failed).
+     * ChildConfig then hands the path to every child via -gfnff.topology_file. */
+    std::string PrepareTopologyLock(const std::string& method, const Molecule& ref, const std::string& stage);
+
     /* Claude Generated (Jul 2026): config for a nested ConfScan filter pass. Built from the
      * confscan registry defaults plus explicit, intentional overrides -- NOT from ConfSearch's
      * own defaults, which used to leak "method":"gfnff" into ConfScan's RMSD-alignment parameter
@@ -523,6 +529,8 @@ private:
     double m_topology_factor = 1.3;        // covalent-radius factor of every topology comparison
     // Claude Generated (Jul 2026): restrained repair of near-miss snapshots (see RepairSnapshot)
     bool m_repair_snapshots = false;
+    bool m_topology_lock = true; ///< Claude Generated (Aug 2026): one gfnff parameterisation per search
+    std::string m_topo_lock_md, m_topo_lock_opt; ///< reference .topo.json per PES (empty = unlocked)
     int m_repair_max = 20, m_repair_max_bonds = 2, m_repair_max_iterations = 300;
     double m_repair_force = 2.0;
     bool m_topo_check = false, m_epot_abort = false, m_opt_feedback_bias = true, m_opt_feedback_prune_snapshots = false, m_mtd_permutation = true;
@@ -674,6 +682,7 @@ private:
     PARAM(repair_max_bonds, Int, 2, "Only snapshots with at most this many changed bonds are repaired. More changed bonds means a different molecule, not a conformer with an artefact.", "Robustness", {})
     PARAM(repair_force, Double, 2.0, "Force constant of the distance restraints during a repair, in Eh/Angstrom^2.", "Robustness", {})
     PARAM(repair_max_iterations, Int, 300, "Maximum optimisation steps of the restrained repair stage.", "Robustness", {})
+    PARAM(topology_lock, Bool, true, "Lock the GFN-FF topology PERCEPTION of every child computation to the optimised input structure. After the initial optimisation, one reference .topo.json is written per PES whose method is gfnff, and every child (MD, snapshot optimisations, single points, ConfGen) adopts its hybridisation/itag and Phase-1 EEQ data instead of re-perceiving them from its own start geometry (-gfnff.topology_file; fingerprint-checked, so a structure whose BOND topology differs still derives fresh parameters and is caught by the species check as before). Why: without the lock every snapshot optimisation perceives its own topology -- a thermally distorted snapshot can cross a perception threshold, get parameters that legitimise its own distortion, and found a self-reinforcing artefact family (measured on WEKLQ: one =N-H at 179 deg -> sp via the GEODEP rule, 158 kJ/mol spurious depth, 75 percent of the pool within three temperature stages, all 10 deepest structures; the bonds-only species check passes the flip). It also removes the silently mixed energy scales of per-snapshot parameterisations (~1 kJ/mol routine spread between re-perceptions of the same conformer). Only affects force-field children (gfnff); QM methods have no perceived topology.", "Robustness", {})
     PARAM(topo_check, Bool, false, "Abort an MD run when the molecule fragments.", "Robustness", {})
     PARAM(topo_check_interval, Int, 0, "Steps between topology checks. 0 uses the MD dump frequency.", "Robustness", {})
     PARAM(epot_abort, Bool, false, "Abort an MD run when the running-mean potential climbs past epot_abort_window.", "Robustness", {})

@@ -9772,14 +9772,62 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
     topo_info.coordination_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
+    // Claude Generated (Aug 2026): cross-child topology lock. When -gfnff.topology_file names a
+    // reference .topo.json, the PERCEPTION of this calculation is taken from that file instead of
+    // being re-derived from the current geometry: hybridisation and itag are restored verbatim
+    // (pi systems and rings then follow deterministically, since the fingerprint check guarantees
+    // an identical bond list). This stops a thermally distorted snapshot from crossing a perception
+    // threshold and being parameterised to legitimise its own distortion (measured: a =N-H at 179
+    // deg perceived as sp founded an artefact family covering 75 percent of a search pool).
+    bool hyb_locked = false;
+    const std::string topo_lock_file = m_parameters.value("topology_file", std::string());
+    if (!topo_lock_file.empty()) {
+        std::ifstream lock_in(topo_lock_file);
+        if (lock_in.good()) {
+            try {
+                json lock;
+                lock_in >> lock;
+                if (lock.value("fingerprint", std::string()) == computeTopologyFingerprint()
+                    && lock.contains("hybridization") && lock.contains("itag")) {
+                    auto hyb = lock["hybridization"].get<std::vector<int>>();
+                    auto itag = lock["itag"].get<std::vector<int>>();
+                    if (static_cast<int>(hyb.size()) == m_atomcount
+                        && static_cast<int>(itag.size()) == m_atomcount) {
+                        topo_info.hybridization = hyb;
+                        topo_info.itag = itag;
+                        hyb_locked = true;
+                        if (CurcumaLogger::get_verbosity() >= 2)
+                            CurcumaLogger::info(fmt::format(
+                                "Topology lock: perception restored from {}", topo_lock_file));
+                        // Verification hook (env-gated like CURCUMA_HYBDIFF): children of a
+                        // search run at verbosity 0, so the logger line above is invisible there.
+                        if (std::getenv("CURCUMA_TOPOLOCK_DEBUG"))
+                            fmt::print("TOPOLOCK restored from {}\n", topo_lock_file);
+                    }
+                }
+                if (!hyb_locked && CurcumaLogger::get_verbosity() >= 1)
+                    CurcumaLogger::warn(fmt::format(
+                        "Topology lock: {} does not match this structure (bond topology differs) "
+                        "-- deriving a fresh topology instead",
+                        topo_lock_file));
+            } catch (const std::exception& e) {
+                CurcumaLogger::warn(fmt::format("Topology lock: failed to read {}: {}", topo_lock_file, e.what()));
+            }
+        } else {
+            CurcumaLogger::warn(fmt::format("Topology lock: file {} not found -- deriving a fresh topology", topo_lock_file));
+        }
+    }
+
     // Hybridization. The Fortran-faithful path reads all four lists (gfnff_ini2.f90:211-333)
     // and additionally writes itag (+1 for carbenes / NO2 nitrogen) on top of the -1 eta tags
     // already set by buildNeighborListSet. Claude Generated (Jul 2026).
-    if (m_use_fortran_hyb) {
-        topo_info.hybridization = determineHybridizationFortran(
-            topo_info, nbdum, topo_info.distance_matrix, topo_info.itag);
-    } else {
-        topo_info.hybridization = determineHybridization(topo_info.adjacency_list);
+    if (!hyb_locked) {
+        if (m_use_fortran_hyb) {
+            topo_info.hybridization = determineHybridizationFortran(
+                topo_info, nbdum, topo_info.distance_matrix, topo_info.itag);
+        } else {
+            topo_info.hybridization = determineHybridization(topo_info.adjacency_list);
+        }
     }
 
     // NOTE: Removed std::async parallelization (May 2026) to prevent nested thread
@@ -9867,12 +9915,16 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
 
         // Claude Generated (March 2026): Check .topo.json cache before expensive Phase 1 EEQ
         // The topology cache stores Phase-1 charges, dxi, dgam, alpeeq — all geometry-independent
+        // Claude Generated (Aug 2026): with -gfnff.topology_file set, THAT file is the Phase-1
+        // source (read-only cross-child lock; the per-geometry cache below stays untouched).
         bool topology_from_cache = false;
-        if (m_cache_topology && m_parameters.contains("geometry_file")) {
+        std::string topo_file = m_parameters.value("topology_file", std::string());
+        if (topo_file.empty() && m_cache_topology && m_parameters.contains("geometry_file")) {
             std::string geom_file = m_parameters["geometry_file"].get<std::string>();
             size_t dot = geom_file.find_last_of('.');
-            std::string topo_file = (dot != std::string::npos ? geom_file.substr(0, dot) : geom_file) + ".topo.json";
-
+            topo_file = (dot != std::string::npos ? geom_file.substr(0, dot) : geom_file) + ".topo.json";
+        }
+        if (!topo_file.empty()) {
             std::ifstream topo_in(topo_file);
             if (topo_in.good()) {
                 try {

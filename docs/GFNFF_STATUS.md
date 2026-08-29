@@ -311,6 +311,18 @@ before the angle fallback and are unaffected — normal geometries are bit-ident
 reference behaviour for validation against xtb/pprcht (verified: reproduces −18.85926294 Eh
 on the artefact structure).
 
+**Structural companion fix — cross-child topology lock (Aug 2026):** `-gfnff.topology_file
+<ref.topo.json>` makes a calculation adopt the PERCEPTION of a reference structure
+(hybridisation, itag, Phase-1 EEQ block) instead of re-deriving it from its own input
+geometry; the file is fingerprint-checked (atom count, elements, bond list — a changed bond
+topology falls back to fresh derivation with a warning) and never written to. ConfSearch
+(`-topology_lock`, default ON) prepares one such reference per force-field PES after the
+initial optimisation and hands it to every child, so an entire search runs on ONE
+parameterisation — this removes the whole artefact class (any perception threshold, not just
+the N-H rule) and the silently mixed energy scales of per-snapshot parameterisations.
+Verified: the artefact structure scores −18.768 instead of −18.859 Eh under the lock even
+with `-gfnff.nh_linear_fix false`; `CURCUMA_TOPOLOCK_DEBUG=1` prints every adoption.
+
 ### Bond Energy Size-Dependent Error (Feb 14, 2026) - INVESTIGATED
 
 **Issue**: Bond energy error scales with system size (~7 µEh/bond for complex)

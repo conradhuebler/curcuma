@@ -492,6 +492,14 @@ void ConfSearch::start()
             static_cast<int>(m_restart.next_T), m_restart.temperature_cycle,
             static_cast<int>(m_restart.bias.size()), static_cast<int>(m_in_stack.size()),
             static_cast<int>(m_restart.cumulative.size()));
+
+        // Claude Generated (Aug 2026): regenerate the topology lock from the checkpointed
+        // reference structures -- the lock file itself is not part of the checkpoint.
+        m_topo_lock_md = PrepareTopologyLock(m_md_method, m_topo_ref, stageBase("s0_initial", m_md_method));
+        if (m_opt_method == m_md_method)
+            m_topo_lock_opt = m_topo_lock_md;
+        else if (m_topo_ref_opt.AtomCount() > 0)
+            m_topo_lock_opt = PrepareTopologyLock(m_opt_method, m_topo_ref_opt, stageBase("s0_initial", m_opt_method));
     }
 
     // Optimise all input structures before any MD run (skipped on resume).
@@ -535,6 +543,15 @@ void ConfSearch::start()
                     m_hbond_excess_max, m_reference_hbonds, m_reference_hbonds + m_hbond_excess_max);
         }
         CurcumaLogger::result_fmt("ConfSearch: {} input structures optimised", m_in_stack.size());
+
+        // Claude Generated (Aug 2026): freeze the gfnff perception to the optimised input for
+        // every child of this run (see PARAM topology_lock). Prepared here, after the s0
+        // optimisation, so the reference IS a minimum of the exploration surface.
+        if (!m_in_stack.empty()) {
+            m_topo_lock_md = PrepareTopologyLock(m_md_method, *m_in_stack[0], stageBase("s0_initial", m_md_method));
+            if (m_opt_method == m_md_method)
+                m_topo_lock_opt = m_topo_lock_md;
+        }
 
         // Claude Generated (Jul 2026): THE md-level reference energy is fixed HERE, at the optimised
         // input structure -- not at the lowest structure of the first metadynamics cycle (which is
@@ -599,6 +616,8 @@ void ConfSearch::start()
             if (!opt_init_stack.empty() && opt_init_stack[0]->AtomCount() > 0) {
                 m_topo_ref_opt = *opt_init_stack[0];
                 m_topo_matrix_opt = TopologyMatrix(m_topo_ref_opt);
+                // Claude Generated (Aug 2026): opt-PES topology lock from ITS OWN optimised input.
+                m_topo_lock_opt = PrepareTopologyLock(m_opt_method, m_topo_ref_opt, stageBase("s0_initial", m_opt_method));
                 // If the two methods disagree about the topology of the SAME molecule, say so --
                 // it explains any later divergence in the reject counts and is worth knowing.
                 if (m_topo_matrix.rows() == m_topo_matrix_opt.rows()) {
@@ -643,6 +662,14 @@ void ConfSearch::start()
             CurcumaLogger::result("ConfSearch:   the two are different potential-energy surfaces -- no difference between them is reported");
         }
     }
+
+    // Claude Generated (Aug 2026): the md child config was assembled BEFORE the s0 optimisation,
+    // when the topology-lock reference did not exist yet -- patch the lock in here, after both
+    // the fresh and the resumed path have prepared it. Every other child config is built per
+    // call through ChildConfig() and picks the lock up there.
+    if (!m_topo_lock_md.empty() && m_md_method == "gfnff"
+        && !(md.contains("gfnff") && md["gfnff"].is_object() && md["gfnff"].contains("topology_file")))
+        md["gfnff"]["topology_file"] = m_topo_lock_md;
 
     // Create shared bias pool for parallel ConfSearch.
     // When rmsd_mtd is enabled, workers share bias structures for better exploration.
@@ -2119,7 +2146,57 @@ nlohmann::json ConfSearch::ChildConfig(const std::string& method, int threads) c
     if (!(cfg.contains("gfnff") && cfg["gfnff"].is_object() && cfg["gfnff"].contains("topology_mode")))
         cfg["gfnff"]["topology_mode"] = "constant";
 
+    // Claude Generated (Aug 2026): cross-child topology lock -- every gfnff child adopts the
+    // perception of the optimised input structure (see PARAM topology_lock). An explicit
+    // -gfnff.topology_file from the user always wins; empty lock members mean "not prepared
+    // (yet)", which also covers the s0 optimisation itself and the lock's own single point.
+    if (m_topology_lock && method == "gfnff"
+        && !(cfg.contains("gfnff") && cfg["gfnff"].is_object() && cfg["gfnff"].contains("topology_file"))) {
+        const std::string& lock = (method == m_opt_method && !m_topo_lock_opt.empty())
+            ? m_topo_lock_opt
+            : m_topo_lock_md;
+        if (!lock.empty())
+            cfg["gfnff"]["topology_file"] = lock;
+    }
+
     return cfg;
+}
+
+std::string ConfSearch::PrepareTopologyLock(const std::string& method, const Molecule& ref, const std::string& stage)
+{
+    // Claude Generated (Aug 2026): see header. Only gfnff perceives a topology; every other
+    // method returns unlocked. The reference single point runs silently and costs one gfnff
+    // parameter generation (~seconds); its .topo.json is read-only for all children afterwards.
+    if (!m_topology_lock || method != "gfnff" || ref.AtomCount() == 0)
+        return "";
+    const std::string base = outputPath(stage + ".lockref");
+    const std::string xyz_file = base + ".xyz";
+    const std::string topo_file = base + ".topo.json";
+    try {
+        Molecule copy(ref);
+        copy.writeXYZFile(xyz_file);
+        nlohmann::json cfg = ChildConfig(method, 1);
+        cfg["verbosity"] = 0;
+        cfg["geometry_file"] = xyz_file;
+        const int saved = CurcumaLogger::get_verbosity();
+        CurcumaLogger::set_verbosity(0);
+        EnergyCalculator calc(method, cfg);
+        copy.setCharge(m_charge);
+        copy.setSpin(m_spin);
+        calc.setMolecule(copy.getMolInfo());
+        calc.CalculateEnergy(false);
+        CurcumaLogger::set_verbosity(saved);
+    } catch (...) {
+        CurcumaLogger::warn("ConfSearch: topology lock reference calculation failed -- children re-perceive per snapshot");
+        return "";
+    }
+    std::ifstream check(topo_file);
+    if (!check.good()) {
+        CurcumaLogger::warn(fmt::format("ConfSearch: topology lock file {} was not written -- children re-perceive per snapshot", topo_file));
+        return "";
+    }
+    CurcumaLogger::result_fmt("ConfSearch: gfnff topology locked to the optimised input ({})", topo_file);
+    return topo_file;
 }
 
 nlohmann::json ConfSearch::FilterConfig(const std::string& energy_method, int threads) const
@@ -4232,6 +4309,7 @@ void ConfSearch::LoadControlJson()
     m_snapshot_clash_ratio = m_config.get<double>("snapshot_clash_ratio");
     m_topology_factor = m_config.get<double>("topology_factor");
     m_repair_snapshots = m_config.get<bool>("repair_snapshots");
+    m_topology_lock = m_config.get<bool>("topology_lock"); // Claude Generated (Aug 2026)
     m_repair_max = m_config.get<int>("repair_max");
     m_repair_max_bonds = m_config.get<int>("repair_max_bonds");
     m_repair_force = m_config.get<double>("repair_force");
