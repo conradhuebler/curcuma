@@ -78,12 +78,29 @@ The asymmetry is deliberate:
   fresh forced-bond initialisation, so react mode adds nothing to it. Tracked by
   `test_gfnff_react_fd`, which prints both numbers.
 - GFN-FF is **not parameterized for transition states**. Barrier heights, TS
-  geometries and reaction energetics from this mode are qualitative at best. For
-  the ammonia-synthesis target (N2 + 3 H2), whether N2 dissociates at accessible
-  temperatures on this surface is an open question.
+  geometries and reaction energetics from this mode are qualitative at best.
+  Measured for the ammonia-synthesis target: N2 + 3 H2 at 3500 K in a 3.5 A wall
+  forms N-H bonds (NH2 observed) and splits N2 within 20 ps — but in the
+  event-churn regime described below, so this demonstrates the machinery, not
+  Haber-Bosch energetics.
 - 3-/4-body terms of a fresh bond switch on through the existing distance
   damping `1/(1+r~^4)`, i.e. semi-smoothly; the repulsion re-partition
   (non-bonded alpha -> bonded alpha) jumps at the event.
+- **Formation valence cap (empirical):** a new bond is only formed while both
+  partners are below a hard coordination cap — 2 for H/He (allows the linear
+  exchange intermediate), 6 for everything else (matching the angle generator,
+  which skips centres with more than 6 neighbours). Closest candidate pairs claim
+  the remaining valence first. Without the cap a hot, confined system over-bonds
+  into an unphysical cluster whose energy eventually turns NaN (observed for
+  N2 + 3 H2 at 3500 K in a 3.5 A wall). The cap is empirical; the principled
+  replacement is an over-coordination energy (see Open refinements).
+- **Event churn acts as an energy pump at extreme conditions.** A formation
+  releases the well depth (-450 kJ/mol for H+H) and a later break costs only the
+  decayed tail (+30 kJ/mol), so each form/break cycle injects net potential
+  energy that the thermostat must drain. In a hot, dense system with frequent
+  events (measured: ~300 events / 20 ps for N2 + 3 H2 at 3500 K in a 3.5 A wall)
+  this drives artificial churn. At such conditions results are machinery
+  demonstrations, not thermodynamics.
 - Angles at a centre with more than 6 neighbours are skipped by the generator
   (pre-existing rule); transiently hypervalent atoms during an exchange are
   therefore under-described.
@@ -138,6 +155,15 @@ heap workaround in the workspace constructor), bounded by the number of events.
 - Per-pair energy-based break criterion (`alpha (r-r0)^2 > threshold`) instead of
   a global geometric factor — removes each bond exactly where its own well has
   decayed.
+- Replace the hard formation valence cap by an **over-coordination energy**: a
+  penalty that rises with the coordination number beyond the element valence
+  (ReaxFF-style). Its offset/shape could be parameterized against QM
+  calculations of deliberately hyper-coordinated species — turning the empirical
+  cap into a learned, quantum-mechanically anchored term.
+- **Quality criterion per supported reaction:** benchmark react-mode reaction
+  trajectories against NEB paths at GFN2-xTB or a QM level. Current target:
+  ammonia synthesis (N2 + 3 H2); candidates for later: primordial-soup
+  (Miller-Urey-type) chemistry.
 - Push the force field's live bond list into the qurcuma viewer frames so drawn
   and simulated topology agree exactly during reactive runs (the viewer's own
   hysteresis redraws bonds independently at 1.25/1.45).

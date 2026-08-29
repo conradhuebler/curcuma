@@ -1795,21 +1795,44 @@ bool GFNFF::detectReactiveBondChanges()
         fat_val[i] = fat[m_atoms[i]];
     }
 
+    // Coordination cap for bond FORMATION: hydrogen (and helium) may hold at most 2
+    // bonds (allows the linear exchange intermediate), every other element at most 6
+    // (the angle generator skips centres with more than 6 neighbours). Without this
+    // cap a hot, confined system over-bonds into an unphysical cluster whose energy
+    // eventually turns NaN. Existing bonds are never removed by the cap — only new
+    // formations are refused.
+    auto coord_cap = [&](int a) { return (m_atoms[a] <= 2) ? 2 : 6; };
+    std::vector<int> coord(m_atomcount, 0);
+
+    std::vector<std::pair<double, std::pair<int, int>>> candidates; // (r, pair)
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = i + 1; j < m_atomcount; ++j) {
             double r = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
             double thr = (rcov[i] + rcov[j]) * fat_val[i] * fat_val[j];
             if (current.count({ i, j }) > 0) {
                 // Existing bond survives until it stretches past the break threshold
-                if (r > m_react_break_factor * thr)
+                if (r > m_react_break_factor * thr) {
                     broken.emplace_back(i, j);
-                else
+                } else {
                     next.emplace_back(i, j);
+                    ++coord[i];
+                    ++coord[j];
+                }
             } else if (r < m_react_form_factor * thr) {
-                next.emplace_back(i, j);
-                formed.emplace_back(i, j);
+                candidates.emplace_back(r, std::make_pair(i, j));
             }
         }
+    }
+
+    // Closest candidates claim the remaining valence first.
+    std::sort(candidates.begin(), candidates.end());
+    for (const auto& [r, p] : candidates) {
+        if (coord[p.first] >= coord_cap(p.first) || coord[p.second] >= coord_cap(p.second))
+            continue;
+        next.push_back(p);
+        formed.push_back(p);
+        ++coord[p.first];
+        ++coord[p.second];
     }
 
     if (formed.empty() && broken.empty())
