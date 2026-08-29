@@ -44,13 +44,13 @@ A dedicated build directory (mirrors `release_tblite/`; **not** the canonical
 cmake -S . -B release_cuda -DCMAKE_BUILD_TYPE=Release -DC17=ON \
   -DUSE_MKL=ON -DUSE_BLAS=ON -DMKL_ROOT=/opt/intel/oneapi/mkl/latest \
   -DUSE_AVX2=ON -DUSE_AVX512=ON -DUSE_MARCH_NATIVE=ON -DUSE_PCH=ON \
-  -DUSE_CUDA=ON -DUSE_CUDA_XTB=ON -DCMAKE_CUDA_ARCHITECTURES=120
+  -DUSE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120
 cmake --build release_cuda -j8
 ```
 
-- `USE_CUDA_XTB` (defaults to `USE_CUDA`) selects which `.cu` sources are
+- `USE_CUDA` (defaults to `USE_CUDA`) selects which `.cu` sources are
   compiled — it lets you build the GFN-FF GPU stack without the xTB kernels.
-  The code gate is the single macro `USE_CUDA`; `USE_CUDA_XTB` is only a
+  The code gate is the single macro `USE_CUDA`; `USE_CUDA` is only a
   feature-availability flag for the factory.
 - `-DCMAKE_CUDA_ARCHITECTURES=120` (Blackwell / RTX 5080) keeps compile fast.
 - Reconfiguring an existing build dir offline: add

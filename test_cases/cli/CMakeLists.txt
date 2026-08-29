@@ -84,18 +84,18 @@ if(USE_CUDA)
         PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;cli")
 endif()
 
-# ROCm GFN-FF — only when USE_ROCM_GFNFF=ON. Self-skips at runtime if no HIP device.
-if(USE_ROCM_GFNFF)
+# ROCm GFN-FF — only when USE_ROCM=ON. Self-skips at runtime if no HIP device.
+if(USE_ROCM)
     add_cli_test(gfnff_gpu 02_rocm_singlepoint)
     set_tests_properties(cli_gfnff_gpu_02_rocm_singlepoint
         PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;rocm;cli")
 endif()
 
 # =============================================================================
-# Vulkan native-xTB nuclear gradient (V-AP1) — only when USE_VULKAN_XTB=ON.
+# Vulkan native-xTB nuclear gradient (V-AP1) — only when USE_VULKAN=ON.
 # Self-skips at runtime if no FP64 Vulkan device is present.
 # =============================================================================
-if(USE_VULKAN_XTB)
+if(USE_VULKAN)
     add_cli_test(gpu_gradient 01_vulkan_gfn1_gradient)
     set_tests_properties(cli_gpu_gradient_01_vulkan_gfn1_gradient
         PROPERTIES TIMEOUT 120 LABELS "gpu_gradient;gpu;vulkan;cli")
@@ -169,6 +169,17 @@ add_cli_test(simplemd 14_gfnff_react_h_recombination)
 set_tests_properties(cli_simplemd_13_gfnff_react_noevent PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;react")
 set_tests_properties(cli_simplemd_14_gfnff_react_h_recombination PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;react")
 set_tests_properties(cli_simplemd_12_eeq_cutoff_auto PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;eeq_cutoff")
+# Claude Generated (Jul 2026): RMSD-MTD strided-scheme regression tests (docs/RMSD_MTD_TEXTBOOK.md 6)
+add_cli_test(simplemd 13_rmsd_mtd_legacy_ab)
+set_tests_properties(cli_simplemd_13_rmsd_mtd_legacy_ab PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;rmsd_mtd")
+add_cli_test(simplemd 14_rmsd_mtd_coverage)
+set_tests_properties(cli_simplemd_14_rmsd_mtd_coverage PROPERTIES TIMEOUT 200 LABELS "simplemd;gfnff;rmsd_mtd")
+
+# =============================================================================
+# ConfSearch Tests (Claude Generated, Jul 2026)
+# =============================================================================
+add_cli_test(confsearch 01_gfnff_smoke)
+set_tests_properties(cli_confsearch_01_gfnff_smoke PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;rmsd_mtd")
 
 # =============================================================================
 # CG (Coarse Graining) Tests — disabled: -vtf command not implemented in main.cpp
@@ -191,6 +202,7 @@ set_tests_properties(cli_analysis_01_parallel_equivalence PROPERTIES TIMEOUT 120
 
 add_cli_test(routing 01_flat_param_routing)
 add_cli_test(routing 02_roundtrip_replay)
+add_cli_test(routing 03_confsearch_param_routing)   # ConfSearch registry migration guard
 
 # =============================================================================
 # Error Handling Tests (6 scenarios) - Phase 1-2 Implementation

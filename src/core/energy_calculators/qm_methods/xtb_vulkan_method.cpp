@@ -9,7 +9,7 @@
  * context. Host-compiled (no Vulkan headers — the context is pimpl).
  */
 
-#ifdef USE_VULKAN_XTB
+#ifdef USE_VULKAN
 
 #include "xtb_vulkan_method.h"
 #include "vulkan/xtb_vulkan_context.h"
@@ -342,6 +342,18 @@ XtbVulkanComputationalMethod::XtbVulkanComputationalMethod(MethodType method, co
             // perturbed early iterations occasionally cost an extra SCF cycle (GFN1 14->15),
             // making it slower overall. The real Vulkan lever is the eigensolve algorithm,
             // not its precision. See docs/SQM_GPU_ROADMAP.md X-AP3. Claude Generated.
+            //
+            // This used to rely on the XTB member defaulting to false. That default is
+            // now TRUE (it pays on the CPU/MKL eigensolve), so Vulkan must opt OUT
+            // explicitly. applyXtbScfConfig already ran (inside the NativeXtbMethod
+            // constructor above), so this call would clobber a user-supplied flag —
+            // hence it only fires when the user did NOT ask for mixed precision.
+            const bool mp_user_set
+                = config.contains("scf_mixed_precision")
+                || (config.contains("xtb") && config["xtb"].is_object()
+                    && config["xtb"].contains("scf_mixed_precision"));
+            if (!mp_user_set)
+                xtb->setMixedPrecision(false);
 
             if (CurcumaLogger::get_verbosity() >= 2) {
                 const bool gfn1 = getMethodName() == "gfn1";
@@ -396,4 +408,4 @@ void XtbVulkanComputationalMethod::setIterativeMode(bool on) { m_cpu->setIterati
 
 bool XtbVulkanComputationalMethod::gpuActive() const { return m_gpu && m_gpu->ok(); }
 
-#endif // USE_VULKAN_XTB
+#endif // USE_VULKAN

@@ -75,10 +75,10 @@ D4ParameterGenerator::D4ParameterGenerator(const ConfigManager& config)
         CurcumaLogger::success("D4: Complete data loaded (alphaiw + corrections)");
     }
 
-    // Claude Generated (Dec 27, 2025): Pre-compute C6 reference matrix
-    // This is done ONCE at initialization, independent of molecular geometry
-    // Expected to eliminate ~98% of D4 parameter generation time for large molecules
-    precomputeC6ReferenceMatrix();
+    // Claude Generated (Jul 2026): the C6 reference matrix is NO LONGER precomputed here.
+    // At construction the molecule (m_atoms) is unknown, which forced a full 118-element sweep
+    // (~9.7 ms fixed). It is now built lazily from GenerateParameters — restricted to the
+    // elements actually present — via the c6CacheCoversAtoms() guard.
 }
 
 void D4ParameterGenerator::initializeReferenceData()
@@ -140,8 +140,13 @@ void D4ParameterGenerator::initializeReferenceData()
     m_r4_over_r2.resize(MAX_ELEM, 0.0);
     m_sqrt_z_r4_r2.resize(MAX_ELEM, 0.0);
 
-    // GFN-FF Moment Ratios (r4Overr2) from dftd4param.f90:134-157
-    // These are essential for correct damping radii R0 in GFN-FF
+    // D4 Moment Ratios (r4Overr2), full 118-element table from
+    // external/gfnff/src/dftd4param.f90:134-157 (identical to dftd4 / tblite).
+    // These set the C8/C6 ratio and the BJ damping radius R0 for every element.
+    // NOTE (2026-07): previously only H-Kr (Z<=36) were provided and everything
+    // heavier was silently filled with a placeholder 10.0, which made native D4
+    // dispersion wrong for I and all 4d/5d elements (too-large R0 -> underbinding).
+    // The full array below fixes heavy elements without touching Z<=36.
     m_r4_over_r2 = {
         8.0589, 3.4698,  // H-He
         29.0974, 14.8517, 11.8799, 7.8715, 5.5588, 4.7566, 3.8025, 3.1036,  // Li-Ne
@@ -149,7 +154,23 @@ void D4ParameterGenerator::initializeReferenceData()
         29.2012, 22.3934, // K-Ca
         19.0598, 16.8590, 15.4023, 12.5589, 13.4788, // Sc-Mn
         12.2309, 11.2809, 10.5569, 10.1428, 9.4907,  // Fe-Zn
-        13.4606, 10.8544, 8.9386, 8.1350, 7.1251, 6.1971 // Ga-Kr
+        13.4606, 10.8544, 8.9386, 8.1350, 7.1251, 6.1971, // Ga-Kr
+        30.0162, 24.4103, // Rb-Sr
+        20.3537, 17.4780, 13.5528, 11.8451, 11.0355, // Y-Tc
+        10.1997, 9.5414, 9.0061, 8.6417, 8.9975,     // Ru-Cd
+        14.0834, 11.8333, 10.0179, 9.3844, 8.4110, 7.5152, // In-Xe
+        32.7622, 27.5708, // Cs-Ba
+        23.1671, 21.6003, 20.9615, 20.4562, 20.1010, 19.7475, 19.4828, // La-Eu
+        15.6013, 19.2362, 17.4717, 17.8321, 17.4237, 17.1954, 17.1631, // Gd-Yb
+        14.5716, 15.8758, 13.8989, 12.4834, 11.4421, // Lu-Re
+        10.2671, 8.3549, 7.8496, 7.3278, 7.4820,     // Os-Hg
+        13.5124, 11.6554, 10.0959, 9.7340, 8.8584, 8.0125, // Tl-Rn
+        29.8135, 26.3157, // Fr-Ra
+        19.1885, 15.8542, 16.1305, 15.6161, 15.1226, 16.1576, 0.0000, // Ac-Am
+        0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, // Cm-No
+        0.0000, 0.0000, 0.0000, 0.0000, 0.0000, // Lr-Bh
+        0.0000, 0.0000, 0.0000, 0.0000, 5.4929, // Hs-Cn
+        6.7286, 6.5144, 10.9169, 10.3600, 9.4723, 8.6641 // Nh-Og
     };
     if (m_r4_over_r2.size() < MAX_ELEM) m_r4_over_r2.resize(MAX_ELEM, 10.0);
 
@@ -372,7 +393,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     // the source of the CH4/triose C-path residual (see docs/GFN2_D4_STATUS.md,
     // diag_curcuma_d4_c6). GFN-FF (flag off) is unaffected: computeC6Reference's
     // zeta correction is gated by m_use_d4_covalent_cn.
-    if (!m_c6_reference_cached) precomputeC6ReferenceMatrix();
+    if (!c6CacheCoversAtoms()) precomputeC6ReferenceMatrix();
 
     // Claude Generated (Dec 27, 2025): Pre-compute Gaussian weights ONCE for all atoms
     // This eliminates redundant exp() calls in getChargeWeightedC6()
@@ -878,6 +899,24 @@ double D4ParameterGenerator::getAtomicPolarizability(int atom, int frequency_ind
     return 1.0; // Default value
 }
 
+// Claude Generated (Jul 2026): true iff the C6 reference cache already covers every element in
+// the current molecule. Returns false (→ rebuild) when the cache is empty or a molecule with a
+// new element is seen, so restricting the precompute to present elements stays correct even when
+// the same generator instance is reused across molecules with different element sets.
+bool D4ParameterGenerator::c6CacheCoversAtoms() const
+{
+    if (!m_c6_reference_cached)
+        return false;
+    for (int z : m_atoms) {
+        const int e = z - 1;
+        if (e < 0 || e >= MAX_ELEM)
+            continue;
+        if (!std::binary_search(m_c6_present_signature.begin(), m_c6_present_signature.end(), e))
+            return false;
+    }
+    return true;
+}
+
 void D4ParameterGenerator::precomputeC6ReferenceMatrix()
 {
     // Claude Generated (Dec 27, 2025): Pre-compute C6 reference values via Casimir-Polder integration
@@ -910,12 +949,33 @@ void D4ParameterGenerator::precomputeC6ReferenceMatrix()
     const size_t flat_size = static_cast<size_t>(MAX_ELEM) * MAX_ELEM * MAX_REF * MAX_REF;
     m_c6_flat_cache.assign(flat_size, 0.0);
 
-    // Pre-compute C6 for all element-pair combinations that have alphaiw data
-    for (int elem_i = 0; elem_i < MAX_ELEM && elem_i < static_cast<int>(d4_alphaiw_data.size()); ++elem_i) {
+    // Claude Generated (Jul 2026): only compute C6 references for the elements PRESENT in the
+    // molecule. The full 118-element sweep was a fixed ~9.7 ms per geometry (36k Casimir-Polder
+    // integrations) regardless of size; a typical molecule has ~5 element types → ~25× fewer
+    // combinations, sub-ms. Callers only ever look up C6 for atoms in the molecule (present
+    // elements), so absent-element entries staying 0 is safe; c6CacheCoversAtoms() rebuilds if a
+    // later molecule adds a new element. m_atoms is empty at construction (the ctor no longer
+    // precomputes) — the real build runs lazily from GenerateParameters once m_atoms is set.
+    std::vector<int> present;
+    present.reserve(16);
+    {
+        std::vector<char> seen(MAX_ELEM, 0);
+        for (int z : m_atoms) {
+            const int e = z - 1;
+            if (e >= 0 && e < MAX_ELEM && !seen[e]) { seen[e] = 1; present.push_back(e); }
+        }
+    }
+    std::sort(present.begin(), present.end());
+    m_c6_present_signature = present;
+
+    // Pre-compute C6 for present element-pair combinations that have alphaiw data
+    for (size_t ii = 0; ii < present.size(); ++ii) {
+        const int elem_i = present[ii];
         int nref_i = (elem_i < static_cast<int>(m_refn.size())) ? m_refn[elem_i] : 0;
         if (nref_i == 0 || elem_i >= static_cast<int>(d4_alphaiw_data.size())) continue;
 
-        for (int elem_j = 0; elem_j <= elem_i; ++elem_j) {  // Symmetric, only compute lower triangle
+        for (size_t jj = 0; jj <= ii; ++jj) {  // present sorted → elem_j <= elem_i (lower triangle)
+            const int elem_j = present[jj];
             int nref_j = (elem_j < static_cast<int>(m_refn.size())) ? m_refn[elem_j] : 0;
             if (nref_j == 0 || elem_j >= static_cast<int>(d4_alphaiw_data.size())) continue;
 
@@ -1127,13 +1187,22 @@ void D4ParameterGenerator::precomputeGaussianWeights(CxxThreadPool* pool, int nu
         w_arr.head(n) = w_arr.head(n).exp();
         const double sum_weights = w_arr.head(n).sum();
 
+        // Normalize by the finite sum — faithful port of s-dftd4 weight_references:
+        // 1/sum is finite for ANY nonzero sum (e.g. 1/2.3e-18 for an atom whose
+        // reference CNs are far from the actual CN), so always divide, then guard
+        // EACH normalized weight against NaN/Inf (true underflow: sum rounded to 0),
+        // in which case the reference with the maximal CN gets weight 1. The old
+        // `sum_weights > 1e-10` guard wrongly took the fallback for atoms with sparse
+        // reference CNs, collapsing C6 onto one reference and biasing dispersion
+        // (e.g. GFN2 Ti in MOR41 PR40 over-bound by ~2e-3 Eh).
+        double max_cn_ref = refcn_row[0];
+        for (int ref = 1; ref < n; ++ref) max_cn_ref = std::max(max_cn_ref, refcn_row[ref]);
         std::vector<double> weights(n, 0.0);
-        if (sum_weights > 1e-10) {
-            const double inv = 1.0 / sum_weights;
-            for (int ref = 0; ref < n; ++ref) weights[ref] = w_arr(ref) * inv;
-        } else {
-            // Exceptional case: set first reference to 1.0 (neutral state fallback)
-            weights[0] = 1.0;
+        const double inv = 1.0 / sum_weights;
+        for (int ref = 0; ref < n; ++ref) {
+            double gwk = w_arr(ref) * inv;
+            if (!std::isfinite(gwk)) gwk = (refcn_row[ref] == max_cn_ref) ? 1.0 : 0.0;
+            weights[ref] = gwk;
         }
 
         m_gaussian_weights[i] = std::move(weights);
@@ -1729,12 +1798,16 @@ void D4ParameterGenerator::computeGaussianWeightDerivatives(CxxThreadPool* pool,
         const double norm = expw.head(n).sum();
         const double dnorm = dexpw.head(n).sum();
 
+        // Divide by the finite norm and guard each derivative against NaN/Inf (true
+        // underflow), mirroring the energy-weight fix above so the CN chain-rule is
+        // consistent for atoms with sparse reference CNs (the old `norm > 1e-10`
+        // zeroed legitimate finite derivatives).
         std::vector<double> dgwdcn(n, 0.0);
-        if (norm > 1e-10) {
-            const double inv_norm2 = 1.0 / (norm * norm);
-            for (int ref = 0; ref < n; ++ref) {
-                dgwdcn[ref] = (dexpw(ref) * norm - expw(ref) * dnorm) * inv_norm2;
-            }
+        const double inv_norm2 = 1.0 / (norm * norm);
+        for (int ref = 0; ref < n; ++ref) {
+            double dgwk = (dexpw(ref) * norm - expw(ref) * dnorm) * inv_norm2;
+            if (!std::isfinite(dgwk)) dgwk = 0.0;
+            dgwdcn[ref] = dgwk;
         }
 
         m_gaussian_weight_derivatives[i] = std::move(dgwdcn);
@@ -1980,7 +2053,7 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
 
     // Step 3: Pre-compute Gaussian weights and C6 reference matrix
     if (!m_data_initialized) initializeReferenceData();
-    if (!m_c6_reference_cached) precomputeC6ReferenceMatrix();
+    if (!c6CacheCoversAtoms()) precomputeC6ReferenceMatrix();
     precomputeGaussianWeights();
 
     // WP-A (Jun 2026): with gpu_disp_pairs_on_device the GPU builds the pair list +

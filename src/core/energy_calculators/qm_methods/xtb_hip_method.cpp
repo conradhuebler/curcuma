@@ -9,7 +9,7 @@
  * context. Host-compiled (no device code) — the HIP kernels live in the .hip TU.
  */
 
-#ifdef USE_ROCM_XTB
+#ifdef USE_ROCM
 
 #include "xtb_hip_method.h"
 #include "rocm/xtb_hip_context.h"
@@ -392,4 +392,4 @@ void XtbHipComputationalMethod::setIterativeMode(bool on) { m_cpu->setIterativeM
 
 bool XtbHipComputationalMethod::gpuActive() const { return m_gpu && m_gpu->ok(); }
 
-#endif // USE_ROCM_XTB
+#endif // USE_ROCM

@@ -31,19 +31,16 @@
 #include "qm_methods/native_xtb_method.h"
 #include "qm_methods/gfnff_method.h"
 #include "qm_methods/nddo_method.h"
-#ifdef USE_CUDA
-#include "qm_methods/gfnff_gpu_method.h"
-#endif
-#ifdef USE_ROCM_GFNFF
+// CUDA GPU methods are loaded at runtime from libcurcuma_cuda.so via gpu_plugin (so the
+// cuBLAS/cuSOLVER runtime never touches the CPU startup path). No CUDA headers here.
+#include "gpu_plugin.h"
+#ifdef USE_ROCM
 #include "qm_methods/gfnff_hip_method.h"
 #endif
-#if defined(USE_CUDA) && defined(USE_CUDA_XTB)
-#include "qm_methods/xtb_gpu_method.h"
-#endif
-#if defined(USE_ROCM) && defined(USE_ROCM_XTB)
+#if defined(USE_ROCM)
 #include "qm_methods/xtb_hip_method.h"
 #endif
-#if defined(USE_VULKAN) && defined(USE_VULKAN_XTB)
+#if defined(USE_VULKAN)
 #include "qm_methods/xtb_vulkan_method.h"
 #endif
 #ifdef USE_TBLITE
@@ -184,17 +181,17 @@ static std::string resolveNativeXtbGpuMode(const json& config, const char* label
         return "none";
 
     // Compile-time availability of each native-xTB GPU backend.
-#if defined(USE_CUDA) && defined(USE_CUDA_XTB)
+#if defined(USE_CUDA)
     constexpr bool has_cuda = true;
 #else
     constexpr bool has_cuda = false;
 #endif
-#if defined(USE_ROCM) && defined(USE_ROCM_XTB)
+#if defined(USE_ROCM)
     constexpr bool has_rocm = true;
 #else
     constexpr bool has_rocm = false;
 #endif
-#if defined(USE_VULKAN) && defined(USE_VULKAN_XTB)
+#if defined(USE_VULKAN)
     constexpr bool has_vulkan = true;
 #else
     constexpr bool has_vulkan = false;
@@ -230,19 +227,21 @@ static std::string resolveNativeXtbGpuMode(const json& config, const char* label
 std::unique_ptr<ComputationalMethod> MethodFactory::createGFN2(const json& config) {
     const std::string gpu = resolveNativeXtbGpuMode(config, "GFN2");
     (void)gpu;  // only read inside the GPU-backend #ifdefs below
-#if defined(USE_CUDA) && defined(USE_CUDA_XTB)
+#if defined(USE_CUDA)
     if (gpu == "cuda") {
         CurcumaLogger::info("GFN2: using native xTB on GPU (CUDA)");
-        return std::make_unique<XtbGpuComputationalMethod>(curcuma::xtb::MethodType::GFN2, config);
+        if (auto m = gpu_plugin::createNativeXtb("cuda",
+                static_cast<int>(curcuma::xtb::MethodType::GFN2), config))
+            return m;   // else the plugin was unavailable -> fall through to CPU below
     }
 #endif
-#if defined(USE_ROCM) && defined(USE_ROCM_XTB)
+#if defined(USE_ROCM)
     if (gpu == "rocm") {
         CurcumaLogger::info("GFN2: using native xTB on GPU (ROCm/HIP)");
         return std::make_unique<XtbHipComputationalMethod>(curcuma::xtb::MethodType::GFN2, config);
     }
 #endif
-#if defined(USE_VULKAN) && defined(USE_VULKAN_XTB)
+#if defined(USE_VULKAN)
     if (gpu == "vulkan") {
         CurcumaLogger::info("GFN2: using native xTB on GPU (Vulkan)");
         return std::make_unique<XtbVulkanComputationalMethod>(curcuma::xtb::MethodType::GFN2, config);
@@ -257,19 +256,21 @@ std::unique_ptr<ComputationalMethod> MethodFactory::createGFN2(const json& confi
 std::unique_ptr<ComputationalMethod> MethodFactory::createGFN1(const json& config) {
     const std::string gpu = resolveNativeXtbGpuMode(config, "GFN1");
     (void)gpu;  // only read inside the GPU-backend #ifdefs below
-#if defined(USE_CUDA) && defined(USE_CUDA_XTB)
+#if defined(USE_CUDA)
     if (gpu == "cuda") {
         CurcumaLogger::info("GFN1: using native xTB on GPU (CUDA)");
-        return std::make_unique<XtbGpuComputationalMethod>(curcuma::xtb::MethodType::GFN1, config);
+        if (auto m = gpu_plugin::createNativeXtb("cuda",
+                static_cast<int>(curcuma::xtb::MethodType::GFN1), config))
+            return m;   // else the plugin was unavailable -> fall through to CPU below
     }
 #endif
-#if defined(USE_ROCM) && defined(USE_ROCM_XTB)
+#if defined(USE_ROCM)
     if (gpu == "rocm") {
         CurcumaLogger::info("GFN1: using native xTB on GPU (ROCm/HIP)");
         return std::make_unique<XtbHipComputationalMethod>(curcuma::xtb::MethodType::GFN1, config);
     }
 #endif
-#if defined(USE_VULKAN) && defined(USE_VULKAN_XTB)
+#if defined(USE_VULKAN)
     if (gpu == "vulkan") {
         CurcumaLogger::info("GFN1: using native xTB on GPU (Vulkan)");
         return std::make_unique<XtbVulkanComputationalMethod>(curcuma::xtb::MethodType::GFN1, config);
@@ -490,20 +491,21 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         if (gpu_mode == "cuda") {
 #ifdef USE_CUDA
             CurcumaLogger::info("GFN-FF: using GPU acceleration (CUDA)");
-            return std::make_unique<GFNFFGPUComputationalMethod>("gfnff", gfnff_config);
+            if (auto m = gpu_plugin::createGfnff("cuda", gfnff_config))
+                return m;   // else the plugin was unavailable -> fall through to CPU below
 #else
             CurcumaLogger::warn("GPU acceleration requested (-gpu cuda) but Curcuma was compiled "
                 "without CUDA support. Falling back to CPU.");
             CurcumaLogger::warn("To enable CUDA, recompile with: cmake -DUSE_CUDA=ON");
 #endif
         } else if (gpu_mode == "rocm") {
-#ifdef USE_ROCM_GFNFF
+#ifdef USE_ROCM
             CurcumaLogger::info("GFN-FF: using GPU acceleration (ROCm/HIP)");
             return std::make_unique<GFNFFHipComputationalMethod>("gfnff", gfnff_config);
 #else
             CurcumaLogger::warn("GPU acceleration requested (-gpu rocm) but Curcuma was compiled "
                 "without ROCm GFN-FF support. Falling back to CPU.");
-            CurcumaLogger::warn("To enable ROCm GFN-FF, recompile with: cmake -DUSE_ROCM=ON -DUSE_ROCM_GFNFF=ON");
+            CurcumaLogger::warn("To enable ROCm GFN-FF, recompile with: cmake -DUSE_ROCM=ON");
 #endif
         } else if (gpu_mode == "vulkan") {
             CurcumaLogger::warn("GFN-FF -gpu vulkan: compute shaders not yet ported; using CPU.");

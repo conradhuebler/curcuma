@@ -33,7 +33,7 @@ run_test() {
 
     # Graceful skip if Vulkan is not compiled in or no FP64 device is present.
     if grep -qiE "no usable Vulkan|requires a Vulkan|USE_VULKAN|running CPU path" vk.log 2>/dev/null; then
-        echo -e "${YELLOW}SKIP${NC}: Vulkan native xTB not available (no device or USE_VULKAN_XTB=OFF)"
+        echo -e "${YELLOW}SKIP${NC}: Vulkan native xTB not available (no device or USE_VULKAN=OFF)"
         exit 0
     fi
 

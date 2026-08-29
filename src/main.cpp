@@ -685,13 +685,30 @@ json CLI2Json(int argc, char** argv)
     //   "auto" picks the first compiled GPU backend (cuda > rocm > vulkan), else CPU.
     //   Applies to gfn1/gfn2 (USE_*_XTB builds) and gfnff (USE_* builds); an explicit
     //   backend not compiled in warns and falls back to CPU.
+    // Claude Generated (Jul 2026): Added "charge","spin" — molecular charge/spin must reach
+    // top-level controller["charge"] so -sp/-opt can apply them to the molecule
+    // (setCharge reads controller["charge"], not the command-module namespace).
     std::set<std::string> global_params = {
         "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
-        "export_run", "export-run", // Export current run configuration
-        "import_config", "import-config", // Import custom configuration
+        "charge", "spin",  // molecular charge/spin (top-level, not module-scoped)
+        "export_run", // Export current run configuration
+        "import_config", // Import custom configuration
         "bak",   // Files to copy back from BMT output directory to CWD
         "no_bmt", // Disable BMT output directory (legacy: write to CWD)
         "noprogress" // Disable live progress bars globally (e.g. when redirecting to a file)
+    };
+
+    // Claude Generated (Jul 2026): modules that are sub-scopes of a calculation rather than
+    // commands in their own right. Auto-routing a flat flag into one of these is the intended,
+    // everyday behaviour ("-sp mol.xyz -cn_cutoff_bohr 5.5" -> controller["gfnff"]), so it is
+    // only reported at info level. Moving a flag into another CAPABILITY module means the user
+    // almost certainly aimed it at the active command and it silently went elsewhere -> warn.
+    // This is the safety net for the class of bug where ConfSearch (unregistered) lost
+    // -opt_method to polymerbuild and -thermostat to simplemd without any diagnostic.
+    std::set<std::string> scope_modules = {
+        "gfnff", "eeq_solver", "xtb", "tblite", "ulysses", "d3", "d4", "uff", "qmdff",
+        "eht", "orca", "forcefield", "ripser", "rmsd", "ancopt", "modern_optimizer",
+        "gfnff_external", "native_lbfgs", "d3param", "d4param"
     };
 
     // Claude Generated (October 2025): CLI keyword to module name mapping
@@ -714,12 +731,30 @@ json CLI2Json(int argc, char** argv)
         module_name = keyword_to_module[keyword];
     }
 
+    // Claude Generated (Jul 2026, F2): a token starting with '-' followed by a digit or '.'
+    // is a negative NUMBER value (e.g. "-charge -1", "-threshold -1e-6"), not a flag. The
+    // value-consume logic below treats any '-'-prefixed next arg as a flag, which silently
+    // drops negative numeric values (charge became boolean true -> get<int>()=1, breaking
+    // all negatively-charged species). isFlag() returns false for negative numbers so they
+    // flow into the stod() value branch instead.
+    auto isFlag = [](const std::string& s) -> bool {
+        if (s.empty() || s[0] != '-') return false;
+        if (s.size() < 2) return true;             // lone "-"
+        char c = s[1];
+        // "-3", "-1.5", "-.5", "-1e-6" are numbers, not flags
+        if (std::isdigit(static_cast<unsigned char>(c)) || c == '.') return false;
+        return true;
+    };
+
     for (int i = 2; i < argc; ++i) {
         std::string current = argv[i];
         std::string sub = current.substr(0, 1);
 
         if (sub == "-") {
             current.erase(0, 1);
+            // Claude Generated (Jun 2026): canonicalize hyphens to underscores in CLI
+            // parameter names so "-opt-method" matches the JSON key "opt_method".
+            std::replace(current.begin(), current.end(), '-', '_');
 
             // Handle special verbosity shortcuts - Claude Generated
             if (current == "silent" || current == "quiet") {
@@ -771,7 +806,7 @@ json CLI2Json(int argc, char** argv)
                 }
             }
 
-            if ((i + 1) >= argc || argv[i + 1][0] == '-' || argv[i + 1] == std::string("true") || argv[i + 1] == std::string("+")) {
+            if ((i + 1) >= argc || isFlag(argv[i + 1]) || argv[i + 1] == std::string("true") || argv[i + 1] == std::string("+")) {
                 // Claude Generated (May 2026): Multi-value accumulation for -bak flag
                 if (current == "bak" && key.contains("bak")) {
                     if (key["bak"].is_array()) {
@@ -808,6 +843,34 @@ json CLI2Json(int argc, char** argv)
                 }
                 // std::cout << "isNumber: " << isNumber << std::endl
                 //             << "isVector: " << isVector << std::endl;
+
+                // Claude Generated (Jul 2026): a numeric-looking token (e.g. "1.0", "2.0")
+                // must still be stored as a JSON STRING when the target parameter is
+                // declared String (e.g. confscan.slx: "1.0" or "1.0,2.0" per confscan.h).
+                // Otherwise setNestedJsonValue() below stores a JSON number, and the later
+                // ConfigManager::get<std::string>() -> nlohmann from_json<string> merge
+                // throws json::type_error.302 ("type must be string, but is number"),
+                // which is uncaught in ConfigManager::getFromModule() and aborts (signal 6).
+                // Comma/pipe/colon-separated values ("1.0,2.0") already take the string path
+                // via isVector above; this closes the gap for single bare numbers.
+                if (isNumber) {
+                    std::string mod = module_name, param = current;
+                    size_t dot = current.find('.');
+                    if (dot != std::string::npos) {
+                        std::string pfx = current.substr(0, dot);
+                        mod = keyword_to_module.count(pfx) ? keyword_to_module[pfx] : pfx;
+                        param = current.substr(dot + 1);
+                    }
+                    const ParameterDefinition* def = ParameterRegistry::getInstance().findDefinition(mod, param);
+                    if (!def) {
+                        for (const auto& owner : ParameterRegistry::getInstance().findOwnerModules(param)) {
+                            if ((def = ParameterRegistry::getInstance().findDefinition(owner, param)))
+                                break;
+                        }
+                    }
+                    if (def && def->type == ParamType::String)
+                        isNumber = false;
+                }
                 if (isNumber) {
                     // Claude Generated (May 2026): Multi-value accumulation for -bak
                     if (current == "bak" && key.contains("bak")) {
@@ -889,6 +952,17 @@ json CLI2Json(int argc, char** argv)
                 continue;
             }
 
+            // Claude Generated (Jul 2026): announce the move. Silent rerouting hid the fact that
+            // -opt_method / -thermostat / -restart never reached ConfSearch for months.
+            {
+                const std::string msg = "CLI flag -" + pname + " is not a parameter of the active"
+                    " command's module \"" + module_name + "\"; it is owned by \"" + owners[0]
+                    + "\" and was routed to -" + owners[0] + "." + pname + ".";
+                if (scope_modules.count(owners[0]) > 0)
+                    CurcumaLogger::info(msg);
+                else
+                    CurcumaLogger::warn(msg + " Use the dotted form if that is not what you meant.");
+            }
             reroute_targets[owners[0]][pname] = it.value();
             reroute_remove.push_back(pname);
         }
@@ -946,7 +1020,21 @@ json CLI2Json(int argc, char** argv)
         } else if (is_nested_object && param_name != keyword) {
             // Handle nested structure for OTHER modules (not this command's keyword)
             // param_name = "rmsd", param_value = {"method": "subspace"}
-            module_params[param_name] = param_value;
+            //
+            // Claude Generated (Jul 2026): map CLI keywords to module names here too. Because
+            // setNestedJsonValue() already split "md.rmsd_mtd" into key["md"]["rmsd_mtd"], this
+            // branch (not the flat-dotted one above) is what handles "-md.x" issued from another
+            // command -- and it used to store it verbatim under controller["md"], which no module
+            // reads. So "curcuma -confsearch mol.xyz -md.rmsd_mtd false" was silently ignored.
+            std::string target_module = param_name;
+            if (keyword_to_module.count(param_name) > 0)
+                target_module = keyword_to_module[param_name];
+            if (module_params.contains(target_module) && module_params[target_module].is_object()) {
+                for (auto& [k, v] : param_value.items())
+                    module_params[target_module][k] = v; // merge, do not clobber a sibling block
+            } else {
+                module_params[target_module] = param_value;
+            }
             keys_to_remove.push_back(param_name);
         }
         // NOTE: We KEEP nested structures where param_name == keyword!
@@ -1632,10 +1720,30 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         if (v.is_string())  { auto s = v.get<std::string>(); return s == "true" || s == "1" || s == "yes"; }
         return false;
     };
+    // Claude Generated (Jul 2026): -dump_gradient <path> writes the full analytic
+    // gradient vector (Eh/Bohr, one "gx gy gz" row per atom) to a file, so external
+    // scripts can compare gradients component-wise across backends (CPU vs GPU) or
+    // against a reference (xtb/gxtb TM gradient file). Setting it implies -gradient.
+    std::string dump_gradient_path;
+    auto read_dump_path = [&](const json& j) {
+        if (j.is_object() && j.contains("dump_gradient") && j["dump_gradient"].is_string())
+            dump_gradient_path = j["dump_gradient"].get<std::string>();
+    };
+    read_dump_path(controller);                                    // top-level (dotted -opt.dump_gradient)
+    if (controller.contains("opt")) read_dump_path(controller["opt"]); // sp routes flat flags into "opt"
     const bool want_gradient = read_bool(controller, "gradient")
-        || (controller.contains("opt") && read_bool(controller["opt"], "gradient"));
+        || (controller.contains("opt") && read_bool(controller["opt"], "gradient"))
+        || !dump_gradient_path.empty();
 
     Molecule molecule(argv[2]);
+    // Claude Generated (Jul 2026): Apply charge/spin from CLI controller to the molecule
+    // before the energy calculation. Mirrors the -opt path (see below). Without this,
+    // GFN-FF reads m_charge=0 from the file-parsed molecule (XYZ/Coord set no charge),
+    // giving wrong EEQ charges and energies for charged species (S30L systems 23-30).
+    if (controller.contains("charge"))
+        molecule.setCharge(controller["charge"].get<int>());
+    if (controller.contains("spin"))
+        molecule.setSpin(controller["spin"].get<int>());
     EnergyCalculator energy_calc(method, energy_controller);
     energy_calc.setMolecule(molecule.getMolInfo());
     double energy = energy_calc.CalculateEnergy(want_gradient);
@@ -1656,6 +1764,21 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         Geometry gradient = energy_calc.Gradient();
         double grad_norm = Eigen::Map<Eigen::VectorXd>(gradient.data(), gradient.size()).norm();
         CurcumaLogger::param("Gradient norm", fmt::format("{:.6e} Eh/Bohr", grad_norm));
+
+        // Claude Generated (Jul 2026): full-vector dump for backend comparison.
+        if (!dump_gradient_path.empty()) {
+            std::ofstream gf(dump_gradient_path);
+            if (gf) {
+                gf << "# GFN-FF/xTB analytic gradient dE/dx [Eh/Bohr], one atom per row\n";
+                gf << "# energy " << fmt::format("{:.12f}", energy) << " Eh, gnorm "
+                   << fmt::format("{:.12e}", grad_norm) << " Eh/Bohr\n";
+                for (int i = 0; i < gradient.rows(); ++i)
+                    gf << fmt::format("{:.14e} {:.14e} {:.14e}\n",
+                                      gradient(i, 0), gradient(i, 1), gradient(i, 2));
+            } else {
+                CurcumaLogger::error("Could not open -dump_gradient file: " + dump_gradient_path);
+            }
+        }
     }
 
     return 0;

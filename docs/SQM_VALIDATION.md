@@ -87,12 +87,25 @@ done
 | He2 | 9.7e-10 | ✓ | | acetic_acid_dimer | 1.8e-9 | ✓ |
 | LiH | 4.0e-9 | ✓ | | caffeine | 3.7e-10 | ✓ |
 | H2O | 1.9e-9 | ✓ | | triose | 9.7e-10 | ✓ |
-| CH4 | 4.3e-9 | ✓ | | **complex** (231 at) | **6.95e-5** | ✗ |
+| CH4 | 4.3e-9 | ✓ | | **complex** (231 at) | **7.3e-8** | ✗ |
 | NH3 | 1.4e-9 | ✓ | | C6H6 | 4.2e-10 | ✓ |
 
 Native GFN2 reproduces tblite to numerical noise on every small/medium molecule,
-including the 66-atom `triose`. The single open case is the 231-atom `complex`
-(6.95e-5 Eh ≈ 0.07 mEh) — re-examined in WP2.
+including the 66-atom `triose`. The single open case is the 231-atom `complex`.
+
+**Electronic free-energy (Fermi entropy) fix (2026-07):** the SCF applied Fermi
+smearing (300 K) but never added the Mermin free-energy term `-T*S` that
+xtb/tblite fold into the reported total (`electronicFreeEnergy()`, exact port of
+xtb `fermismear`). Adding it dropped `complex` from **6.95e-5 → 7.3e-8** vs tblite
+(the term is ~0 for the other 11, whose occupations are integer). The **patched-
+tblite fixed-density audit** then proved the 7.3e-8 is **not** a formula bug:
+injecting tblite's exact converged density, every per-term container matches
+tblite to <1e-8 (repulsion 1.4e-14) and the entire disp+elec residual 6.8977e-5
+is *exactly* tblite's own Fermi entropy (computed from the dump's occupations).
+The 7.3e-8 in the full SCF is therefore purely curcuma's vs tblite's **different
+converged density** on the ill-conditioned 0.317 eV gap (gap 0.3177 vs 0.3185 eV;
+HOMO/LUMO ~1e-5) — a code-to-code fixed-point floor, not closable without
+bit-identical linear algebra. Kept WILL_FAIL at the honest 1e-8 gate.
 
 ### GFN1 — does not yet meet 1e-8 on any
 

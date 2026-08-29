@@ -260,6 +260,14 @@ ctest -R test_gfnff_gradients --verbose
 
 #### Topology-Specific Corrections (Not Yet Implemented)
 
+**Neighbour lists**:
+- [x] **Fortran four-list metal-reduced construction** ✅ (Jul 20, 2026) - `nb_full`/`nb_hc`/
+  `nb_nometal` + eta-aware mixture replace the single adjacency list; hybridization now via
+  `determineHybridizationFortran()`. Fixes Cp/alkene C (sp3->sp2) and carbonyl O (sp2->sp).
+  MOR41 gfnff MAD 57.3->16.7, within-1.0 33/95->39/95, protected metal set unmoved.
+  Topology cache bumped to v2. Known deviations: ED07 (nbf criterion), PR40 (q-loop) -
+  both out of scope, both documented. See [docs/GFNFF_NEIGHBOR_LISTS.md](../../../../docs/GFNFF_NEIGHBOR_LISTS.md)
+
 **Angle Bending Corrections**:
 - [ ] **Ring strain factors** - Small rings (3-, 4-membered) need reduced force constants
 - [ ] **Metal coordination** - feta metal correction factor (currently =1.0 for all)
@@ -273,11 +281,40 @@ ctest -R test_gfnff_gradients --verbose
   host A torsion now bit-identical to Fortran; validation set 18/18, no regression.
 - [ ] **Hyperconjugation** - Subtle barrier modulation (documented but not implemented)
 - [ ] **Extra torsion calibration** - Current ff=-2.00 (O) factor overcompensates
+- [x] **is_in_pi_fr → pi_fragments** (Jul 2026, AI/machine-tested) - the `is_in_pi_fr`
+  lambda in `gfnff_torsions.cpp:~723` was rewritten as a direct `topo.pi_fragments[atom]>0`
+  lookup, the faithful mirror of xtb `piadr>0` (replacing the pibo>0.1 + partial
+  N/O/F/S picon inference, which missed B/Cl). Correctness fix; no ctest regression
+  (52/52 gfnff tests pass). No-op for the S30L aromatic hosts (the `f2*=1.3` heavy-outer
+  boost never fires there) so does NOT close the 27/28+7/8 torsion deficit — see below.
+- [x] **S30L 27/28 + 7/8 torsion residuals** ✅ (Jul 2026) - RESOLVED. Root cause was NOT
+  fqq/EEQ (that diagnosis was wrong: `topology_charges` == xtb `topo%qa` to 1e-8; fqq matched
+  the reference exactly). Three torsion-parameter/enumeration fixes, all ground-truthed
+  per-torsion against an instrumented standalone `external/gfnff` build:
+  (1) **CB7 f1=5.0 rule** (`gfnff_ini.f90:1665-1667`, `gfnff_torsions.cpp` ring block) — was
+  "not implemented"; (2) **faithful `isAmide`/`isAlphaCO`** — the old ones used hyb==2 + no
+  carbonyl check (outdated Fortran); reference needs hyb==3 + piadr + a terminal pi =O, so the
+  amide fij*1.3 now fires; (3) **sp-sp2 conjugated torsions** — `classifyBondType` marked any
+  sp atom btyp=3 (skipped); reference promotes sp-sp2 with pibo>0.1 to btyp=2
+  (`gfnff_ini.f90:1168-1178`), AND `generateTorsionsNative` had a curcuma-only `if(hyb==1)
+  continue` central skip — both fixed (buckycatcher S30L 7/8). Results: 27/28 -> ~0.03, 7/8 ->
+  ~0.4 kcal/mol; 5-sys MAD 1.94->0.97; 52/52 gfnff ctests, neutral val byte-identical. See
+  [docs/S30L_GFNNF_VALIDATION.md](../../../../docs/S30L_GFNNF_VALIDATION.md) + memory
+  `project_gfnff_torsion_fqq_eeq`. Remaining: sys 30 (bond pibo), sys 23 (xtb .CHRG quirk).
 
 **Charge (EEQ) Corrections**:
 - [ ] Phase 5B: Metal-specific fqq correction (2.5× factor in charge-dependent terms)
 - [ ] Pi-system/amide detection for nitrogen dgam (enhancement, current EEQ already good)
 - ✅ Fragment-constrained EEQ charges (for multi-fragment systems)
+  - **Jul 2026 (F2)**: molecular charge is distributed across fragments per xtb gfnff_ini.f90:474-502
+    (nfrag==2 & charged → try both placements, keep lower EEQ energy; nfrag>2 → fragment 0).
+    Previously qfrag stayed [0,0] for nfrag>1, forcing total charge 0 (S30L charged complexes
+    broken). See [docs/S30L_GFNNF_VALIDATION.md](../../docs/S30L_GFNNF_VALIDATION.md).
+  - **Jul 2026 (F2-cache-fix)**: the inline topology-cache load in `calculateTopologyInfo`
+    (~gfnff_method.cpp:8947) restored topology_charges/dxi/dgam/alpeeq but NOT qfrag, so a cache
+    hit on a charged nfrag==2 complex left qfrag=[0,…,0] (F2 trial is skipped on a cache hit),
+    Phase-2 EEQ forced charge 0 → wrong Coulomb (~Q²γ) on cached re-runs. Now restores qfrag;
+    write guard checks qfrag SUM (not qfrag[0], so [0,m_charge] placements cache too).
 
 **Dispersion Corrections**:
 - [ ] **Metal-specific C6 parameters** - Transition metals may need special handling
@@ -306,6 +343,37 @@ ctest -R test_gfnff_gradients --verbose
 - 4 threads: 0.120s
 - Speedup: 2.67x ✅
 
+**Jul 2026 — topology setup (A0/A1)**: the verbosity-2 report's
+"Pi-bond orders + bond types" row bracketed three unrelated pieces of work and
+truncated to whole ms. Split into `t_pi_charges_eeq` / `t_huckel` /
+`t_bond_types` with sub-ms resolution + a pi-system count. **This refuted the
+standing premise that the FT-HMO solve is the setup bottleneck: it is 0.13 ms,
+not 11 ms** (so parallelising it cannot pay for the thread dispatch), and the
+"EEQ Phase 2 = 6 ms" figure was actually Phase 1 under truncation (Phase 2 is
+~1 ms). The real cost was the **ipis block**, which ran one full
+`calculateTopologyCharges` — Dijkstra + N×N erf fill + solve — *per pi-system*.
+Since the Phase-1 matrix does not depend on `qfrag` (it enters only the
+constraint RHS), `EEQSolver::calculateTopologyChargesMultiRHS()` now builds the
+system once and solves it per distinct fragment; pi-systems sharing a fragment
+share a solve. complex/231 cold: ipis EEQ **9.3-10.8 → ~1.2 ms**, topology total
+**17.8-18.9 → 9.9-10.4 ms**. Bit-identical (incl. acetic_acid_dimer at charge
+0/±1/+2, which genuinely exercises the multi-variant path).
+
+**Jul 2026 — EEQ iterative refinement (A4, `eeq_refine_iters`, default 1)**:
+when the Phase-2 solve reuses a cached Cholesky factor the charges solve the OLD
+system, so the gradient is inconsistent and MD drifts (the Hellmann-Feynman
+hazard in `docs/wp4/WP-EEQ-Cholesky-Cache.md`). The cached solve already
+satisfies the constraint row exactly for any factor, so only the A-residual needs
+correcting — O(N²). polymer N=1410 / 100 fs: at `refactor_eps=0.50` the drift vs
+the tight reference is **−43.0 mEh (30 µEh/atom) without refinement, −0.041 mEh
+(0.03 µEh/atom) with one step**, −0.009 mEh with three. **Defaults deliberately
+NOT loosened**: (a) there is no speed to gain — the whole cache mechanism is ~6%
+of MD wall time, comparable to noise, since the threaded LAPACK `dpotrf` path
+landed after the WP was written; (b) `eeq_matrix_rebuild_eps_bohr>0` makes
+`A_nn` itself stale, so refinement cannot rescue it (identical Etot at refine
+0/1/3) — it stays disabled. At the default threshold refinement is a numerical
+no-op, so single points are unaffected.
+
 **Jun 2026 — large-system GFN-FF speedups** (see `docs/GFNFF_PERFORMANCE_LEVERS.md`):
 - **HB candidate generation (Lever 1)**: cell-list nhb2 (`hyd_on[]`) + nhb1
   (`forEachNeighbor(i, hbthr2)`) replacing the per-pair full-hydrogen scan. EXACT (energies
@@ -325,6 +393,16 @@ ctest -R test_gfnff_gradients --verbose
 > damping params / code paths, no authoritative s-dftd3 reference. The "<1%"
 > table below is historical and does NOT establish correctness (its references
 > were never tied to s-dftd3); treat it as 🤖 AI-generated, not validated.
+
+### Reference tables live in `.rodata` (2026-07-25)
+
+`d3_reference_c6.cpp` / `d3_reference_cn.cpp` held their 262 444 C6 + 824 CN
+values in global `std::vector`s, so every process start heap-allocated and copied
+them under dynamic initialisation. They are now `const std::array`; only
+`.size()`/`operator[]` were ever used, so all callers are unchanged.
+**Honest caveat**: the startup improvement was below measurement noise — this is
+a correctness/cleanup change (no dynamic init, no static-init-order exposure),
+not a measured speedup. gfn1 energy bit-identical.
 
 ### C8/C6 ratio — exact s-dftd3 form (2026-05-31)
 

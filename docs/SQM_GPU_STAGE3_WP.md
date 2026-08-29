@@ -168,7 +168,7 @@ integrals on device + begin() computes". But implement and validate bottom-up:
 
 - **Component (per sub-stage):** new ctest comparing the device integral to the CPU
   one elementwise @1e-9 (max-abs over the matrix). Add a small executable or extend
-  the `sqm_*` harness; gate behind `if(USE_CUDA_XTB)`, runtime device-skip.
+  the `sqm_*` harness; gate behind `if(USE_CUDA)`, runtime device-skip.
 - **System:** `gpu_gfn{1,2}_validation` @1e-8 vs tblite (existing labels) must stay
   green with the documented xfails (He2, complex). `compute-sanitizer` on ≥1
   molecule per sub-stage (the overlap kernel has data-dependent inner loops — check
@@ -218,7 +218,7 @@ integrals on device + begin() computes". But implement and validate bottom-up:
   calls can be skipped on the GPU-resident path (guard, don't delete — the CPU
   path stays the default and the validation reference).
 - Tests: `test_cases/sqm_reference/CMakeLists.txt` — new component tests behind
-  `if(USE_CUDA_XTB)`.
+  `if(USE_CUDA)`.
 
 ## 7. Suggested order for the next session
 

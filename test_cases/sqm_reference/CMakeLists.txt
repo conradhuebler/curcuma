@@ -234,7 +234,24 @@ if(Python3_Interpreter_FOUND)
     # |dE| = |E_native - E_tblite| (Eh), 2026-05-31 (after the GFN1 third-order
     # double-count fix, the D3 C8/C6 exact-form fix, and the D3 CN 25-Bohr cutoff
     # fix that matches tblite):
-    #   GFN2: only complex (6.95e-5). All others <= 1e-8 (bit-identical).
+    #   GFN2: only complex. The electronic free-energy (-T*S / Fermi entropy)
+    #         fix (2026-07) dropped complex from 6.95e-5 -> 7.3e-8 vs tblite
+    #         (the entropy was the documented "electronic floor"; xtb/tblite
+    #         report the Mermin free energy A = E - T*S, curcuma had reported
+    #         only E). All 15 others stay <= 1e-8 (their fractional occupations
+    #         are < thr, so entropy ~ 0 -> byte-unchanged). The residual 7.3e-8
+    #         is the small-gap fixed-point floor. The patched-tblite fixed-
+    #         density audit (diag_curcuma_energy_components on tblite's exact
+    #         converged density, 2026-07) PROVES there is no per-term formula
+    #         bug: repulsion diff 1.4e-14, and the whole disp+elec diff 6.8977e-5
+    #         is EXACTLY tblite's Fermi entropy (= -T*S from the dump's own
+    #         occupations, matched to <1e-8) which the fixed-density path does
+    #         not add but the full SCF now does. Band Tr(P*H0)/Coulomb-ES2/
+    #         3rd-order/multipole/D4 all match tblite to <1e-8 at the same
+    #         density. The 7.3e-8 is therefore purely the different converged
+    #         density (curcuma's own SCF fixed point vs tblite's, gap 0.3177 vs
+    #         0.3185 eV, HOMO/LUMO ~1e-5) -- not closable without bit-identical
+    #         linear algebra. Kept WILL_FAIL (honest 1e-8 gate, not loosened).
     #   GFN1: 10/12 now <= 1e-8. Two remain at the same ~1.5e-8 numerical floor:
     #         He2 (dispersion-only) and complex (231 atoms). complex was 2.6e-7
     #         until the D3 CN cutoff fix removed the dispersion gap (now exact,
@@ -341,8 +358,8 @@ if(Python3_Interpreter_FOUND)
     # in later stages, the whole SCF/gradient) runs on the device. The GPU energies
     # match the CPU path to <1e-8, so the SAME xfail set applies. Without a CUDA
     # device the wrapper falls back to CPU, so these never false-fail off-GPU.
-    # Labels: gpu_gfn1_validation / gpu_gfn2_validation. Only built with USE_CUDA_XTB.
-    if(USE_CUDA_XTB)
+    # Labels: gpu_gfn1_validation / gpu_gfn2_validation. Only built with USE_CUDA.
+    if(USE_CUDA)
         foreach(_meth gfn1 gfn2)
             if(_meth STREQUAL gfn1)
                 set(_xfail ${_GFN1_XFAIL})
@@ -403,7 +420,7 @@ if(Python3_Interpreter_FOUND)
     # scf_threshold differs ~1e-7, which this energy-only validator does not probe).
     # Without an AMD device the wrapper falls back to CPU, so these never false-fail
     # off-GPU. Labels: gpu_gfn1_validation_rocm / gpu_gfn2_validation_rocm.
-    if(USE_ROCM_XTB)
+    if(USE_ROCM)
         foreach(_meth gfn1 gfn2)
             if(_meth STREQUAL gfn1)
                 set(_xfail ${_GFN1_XFAIL})
@@ -433,7 +450,7 @@ if(Python3_Interpreter_FOUND)
     # applies; without a Vulkan device the wrapper falls back to CPU (env ignored) so these
     # never false-fail off-GPU. Small molecules only (the full-GPU D&C is intentionally slow;
     # complex/triose are validated manually). Label: gpu_vulkan_dc.
-    if(USE_VULKAN_XTB)
+    if(USE_VULKAN)
         set(_DC_MOLS H2 He2 LiH H2O CH4 NH3 C6H6 HCN acetic_acid_dimer caffeine)
         foreach(_meth gfn1 gfn2)
             if(_meth STREQUAL gfn1)
@@ -461,10 +478,10 @@ endif()
 
 # === Stage 3 GPU integral component tests (Claude Generated, GPU port) ======
 # Each compares a device integral kernel to its CPU reference elementwise @1e-9.
-# Built only with USE_CUDA_XTB; the exes runtime-skip (exit 0) without a device,
+# Built only with USE_CUDA; the exes runtime-skip (exit 0) without a device,
 # so they never false-fail off-GPU. Linked against curcuma_core (CPU reference
 # + the compiled device kernels).
-if(USE_CUDA_XTB)
+if(USE_CUDA)
     set(_SQM_CUDA_MOL ${CMAKE_CURRENT_SOURCE_DIR}/molecules)
     set(_SQM_CUDA_COMP_MOLS H2O CH4 NH3 C6H6 HCN triose)
 

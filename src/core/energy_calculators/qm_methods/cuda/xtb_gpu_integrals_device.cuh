@@ -20,7 +20,7 @@
 
 #pragma once
 
-#ifdef USE_CUDA_XTB
+#ifdef USE_CUDA
 
 #include <cuda_runtime.h>
 
@@ -776,4 +776,4 @@ __device__ __forceinline__ double d_coulomb_average(double gi, double gj, bool i
 } // namespace xtb
 } // namespace curcuma
 
-#endif // USE_CUDA_XTB
+#endif // USE_CUDA

@@ -29,14 +29,14 @@ The GPU backends for `gfn1`/`gfn2`/`gfnff` are **off by default** and each needs
 system dependencies (one backend per build dir: `release_cuda/`, `release_rocm/`,
 `release_vulkan/`). The default `release/` build needs none of these.
 
-- **CUDA** (`-gpu cuda`, `-DUSE_CUDA=ON -DUSE_CUDA_XTB=ON`): NVIDIA CUDA toolkit — `nvcc`,
+- **CUDA** (`-gpu cuda`, `-DUSE_CUDA=ON`): NVIDIA CUDA toolkit — `nvcc`,
   cuSOLVER, cuBLAS, cudart (Arch: `cuda`). See [docs/SQM_GPU.md](docs/SQM_GPU.md).
-- **ROCm / HIP** (`-gpu rocm`, `-DUSE_ROCM=ON -DUSE_ROCM_XTB=ON -DUSE_ROCM_GFNFF=ON -DCMAKE_PREFIX_PATH=/opt/rocm`):
+- **ROCm / HIP** (`-gpu rocm`, `-DUSE_ROCM=ON -DCMAKE_PREFIX_PATH=/opt/rocm`):
   `hip-runtime-amd`, `rocm-llvm`, `rocm-device-libs`, `rocminfo`; **`rocblas` + `rocsolver`**
   for the GPU eigensolver (xTB) / EEQ solve (GFN-FF). Set `-DROCM_GPU_ARCH` to your GPU's `gfx`
-  (e.g. `gfx1150`; `rocminfo | grep gfx`). `USE_ROCM_XTB` enables gfn1/gfn2, `USE_ROCM_GFNFF`
+  (e.g. `gfx1150`; `rocminfo | grep gfx`). `USE_ROCM` enables gfn1/gfn2, `USE_ROCM`
   enables gfnff. See [docs/SQM_ROCM.md](docs/SQM_ROCM.md).
-- **Vulkan** (`-gpu vulkan`, `-DUSE_VULKAN=ON -DUSE_VULKAN_XTB=ON`): `vulkan-icd-loader` +
+- **Vulkan** (`-gpu vulkan`, `-DUSE_VULKAN=ON`): `vulkan-icd-loader` +
   `vulkan-headers` + an FP64-capable driver (AMD `vulkan-radeon`/RADV — **no ROCm needed**,
   NVIDIA `nvidia-utils`, Intel `vulkan-intel`); `shaderc`/`glslang` only to regenerate the
   (committed) SPIR-V. Needs a device with `shaderFloat64`. See [docs/SQM_VULKAN.md](docs/SQM_VULKAN.md).
@@ -72,15 +72,17 @@ Native GFN methods (no external dependency required, canonical backends since AP
 
 > Native GFN1/GFN2 are validated against tblite to a 1e-8 Eh target — see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md). For explicit tblite or xtb backends use `tblite-gfn1`/`tblite-gfn2` or `xtb-gfn1`/`xtb-gfn2`.
 
-> **d-shell elements (X-I1, June 2026):** native GFN1/GFN2 now handle d-shell basis functions (S, P, Cl, Si and other main-group d elements), matching tblite to ≤1e-8 Eh; analytic gradients FD-validated. CPU only — on `-gpu` a d-shell system falls back to the CPU integral/SCF path. Transition metals are enabled but not yet validated. See [docs/SQM_DSHELL_WP.md](docs/SQM_DSHELL_WP.md).
+> **Speed:** on a 231-atom complex (single core, energy+gradient) native `gfn1` runs in ~1.02 s and `gfn2` in ~1.08 s, versus xtb 6.7.1 at 1.37 s / 0.98 s — i.e. gfn1 is faster than xtb and gfn2 within ~11%. See [docs/SQM_PERFORMANCE.md](docs/SQM_PERFORMANCE.md) for the single-core record and [docs/SQM_THREADING.md](docs/SQM_THREADING.md) for `-threads N` scaling.
+
+> **d-shell elements (X-I1, June 2026):** native GFN1/GFN2 now handle d-shell basis functions (S, P, Cl, Si and other main-group d elements), matching tblite to ≤1e-8 Eh; analytic gradients FD-validated. CPU only — on `-gpu` a d-shell system falls back to the CPU integral/SCF path. Transition metals: after the Jul 2026 fixes (shell-vs-angular parameter indexing + 6s/6p STO-6G expansion), **native GFN1 and GFN2 reproduce tblite for transition metals** — GFN2 3d exact (1e-8), GFN1 72/95 MOR41 structures exact; both leave a small **~1e-3 Eh** residual for 4d/5d (heavy-element band/multipole/D4, still open). **GFN-FF transition metals are not yet validated.** See [docs/SQM_DSHELL_WP.md](docs/SQM_DSHELL_WP.md) and [docs/MOR41_VALIDATION.md](docs/MOR41_VALIDATION.md).
 
 > Native GFN1/GFN2 can use multiple cores **within one calculation** of a single large molecule: pass `-threads N` to a `-sp`/`-opt`/MD run (default is serial and bit-identical). Integral setup, gradient and Fock build scale ~3–5×; see [docs/SQM_THREADING.md](docs/SQM_THREADING.md).
 
 > Opt-in **MKL-free / GPU-portable eigensolve kernels** are available for the native GFN SCF (MKL stays the default): `-eigensolver native` (own Householder + Cuppen divide-and-conquer), `-eigensolver purify` (0 K density-matrix purification, GEMM-only, no diagonalization), `-eigensolver lobpcg` (seeded block LOBPCG, experimental), and `CURCUMA_EIG_TRED2=blocked` (BLAS-3 blocked tridiagonalization). See [docs/SQM_EIGENSOLVE_GPU.md](docs/SQM_EIGENSOLVE_GPU.md).
 
-> Opt-in **CUDA GPU path** for the native GFN1/GFN2 solver: `-method gfn1|gfn2 -gpu cuda` (build `release_cuda/` with `-DUSE_CUDA_XTB=ON`). Staged cuSOLVER/cuBLAS port (the CPU path is unchanged and `#ifdef`-free); both **GFN1** and **GFN2** run a device-resident SCF under the default Broyden mixing, and **Stage 3 builds the integrals (CN/S/H0/L/γ/multipole) on the device and Stage 4 the nuclear gradient — so `-opt`/`-md` are fully device-resident** (only xyz up, gradient+energy down per step; every device kernel matches the CPU elementwise to ~1e-15). 🤖 AI-generated / ⚙️ machine-tested only. See [docs/SQM_GPU.md](docs/SQM_GPU.md).
+> Opt-in **CUDA GPU path** for the native GFN1/GFN2 solver: `-method gfn1|gfn2 -gpu cuda` (build `release_cuda/` with `-DUSE_CUDA=ON`). Staged cuSOLVER/cuBLAS port (the CPU path is unchanged and `#ifdef`-free); both **GFN1** and **GFN2** run a device-resident SCF under the default Broyden mixing, and **Stage 3 builds the integrals (CN/S/H0/L/γ/multipole) on the device and Stage 4 the nuclear gradient — so `-opt`/`-md` are fully device-resident** (only xyz up, gradient+energy down per step; every device kernel matches the CPU elementwise to ~1e-15). 🤖 AI-generated / ⚙️ machine-tested only. See [docs/SQM_GPU.md](docs/SQM_GPU.md).
 
-> **AMD/ROCm** (`-gpu rocm`, build `release_rocm/` with `-DUSE_ROCM_XTB=ON`) and **Vulkan compute** (`-gpu vulkan`, hand-written SPIR-V, `-DUSE_VULKAN_XTB=ON`) backends for the same `gfn1`/`gfn2`/`gfnff` methods. `-gpu auto` picks the first compiled backend (cuda > rocm > vulkan), else CPU. 🤖 **Vulkan: GFN1 = Stage 2** (device-resident SCF — Fock/eigensolve/density/populations/band on the GPU via a device-built Löwdin S⁻¹ᐟ²; only `v_ao`/`occ` up and `eps`/`pop`/`band` down per iteration), **GFN2 = Stage 1** (per-iteration eigensolve on GPU). gfn1/gfn2 single-point + opt match the CPU bit-for-bit on the validation set (AMD 890M/RADV); integrals/gradient still CPU. **ROCm: GFN1 = Stage 4 (fully device-resident)** — the integral build (CN/S/H0/L/γ), the SCF (Fock/density/eigensolve via HIP kernels + rocBLAS + rocSOLVER) and the nuclear gradient (repulsion/Pulay/Coulomb HIP kernels) all run on the GPU; only the dispersion gradient + CN chain-rule on the host. **GFN2** uses the device integrals + rocSOLVER eigensolver (gradient on host). gfn1/gfn2 single-point + opt match the CPU bit-for-bit, incl. the full `-opt` trajectory (AMD 890M, needs `rocsolver`+`rocblas`). **ROCm GFN-FF** (`-DUSE_ROCM_GFNFF=ON`, June 2026): the full energy + nuclear-gradient kernel stack runs on the GPU (single-TU hipify of the CUDA gfnff kernels; EEQ via rocSOLVER `dpotrf`/`dgetrf` + host CPU-Schur); single-point energy and gradient match CPU ≤1e-7 on water/CH4/caffeine/231-atom complex. **Two opt-in CUDA-only GFN-FF GPU flags (default OFF, ROCm mirrors pending):** `-gfnff.eeq_mixed_precision` (FP32-factor + FP64-refine EEQ solve) and `-gfnff.gpu_disp_pairs_on_device` (on-device D4 pair build) — bit-identical to the host but not a measured speedup (residency milestones). See [docs/SQM_ROCM.md](docs/SQM_ROCM.md) / [docs/SQM_VULKAN.md](docs/SQM_VULKAN.md) / [docs/GFNFF_PERFORMANCE_LEVERS.md](docs/GFNFF_PERFORMANCE_LEVERS.md).
+> **AMD/ROCm** (`-gpu rocm`, build `release_rocm/` with `-DUSE_ROCM=ON`) and **Vulkan compute** (`-gpu vulkan`, hand-written SPIR-V, `-DUSE_VULKAN=ON`) backends for the same `gfn1`/`gfn2`/`gfnff` methods. `-gpu auto` picks the first compiled backend (cuda > rocm > vulkan), else CPU. 🤖 **Vulkan: GFN1 = Stage 2** (device-resident SCF — Fock/eigensolve/density/populations/band on the GPU via a device-built Löwdin S⁻¹ᐟ²; only `v_ao`/`occ` up and `eps`/`pop`/`band` down per iteration), **GFN2 = Stage 1** (per-iteration eigensolve on GPU). gfn1/gfn2 single-point + opt match the CPU bit-for-bit on the validation set (AMD 890M/RADV); integrals/gradient still CPU. **ROCm: GFN1 = Stage 4 (fully device-resident)** — the integral build (CN/S/H0/L/γ), the SCF (Fock/density/eigensolve via HIP kernels + rocBLAS + rocSOLVER) and the nuclear gradient (repulsion/Pulay/Coulomb HIP kernels) all run on the GPU; only the dispersion gradient + CN chain-rule on the host. **GFN2** uses the device integrals + rocSOLVER eigensolver (gradient on host). gfn1/gfn2 single-point + opt match the CPU bit-for-bit, incl. the full `-opt` trajectory (AMD 890M, needs `rocsolver`+`rocblas`). **ROCm GFN-FF** (`-DUSE_ROCM=ON`, June 2026): the full energy + nuclear-gradient kernel stack runs on the GPU (single-TU hipify of the CUDA gfnff kernels; EEQ via rocSOLVER `dpotrf`/`dgetrf` + host CPU-Schur); single-point energy and gradient match CPU ≤1e-7 on water/CH4/caffeine/231-atom complex. **Two opt-in CUDA-only GFN-FF GPU flags (default OFF, ROCm mirrors pending):** `-gfnff.eeq_mixed_precision` (FP32-factor + FP64-refine EEQ solve) and `-gfnff.gpu_disp_pairs_on_device` (on-device D4 pair build) — bit-identical to the host but not a measured speedup (residency milestones). See [docs/SQM_ROCM.md](docs/SQM_ROCM.md) / [docs/SQM_VULKAN.md](docs/SQM_VULKAN.md) / [docs/GFNFF_PERFORMANCE_LEVERS.md](docs/GFNFF_PERFORMANCE_LEVERS.md).
 
 > Opt-in **approximate large-system modes** scale the native GFN SCF beyond ~1000 atoms by exploiting locality (default is the exact dense path): `-large_system_mode fragments` (disconnected-fragment SCF, energy+gradient, `-eigensolver` propagates per fragment), `-large_system_mode dc` (divide-and-conquer, energy-only, `-eigensolver` propagates per sub-block, `-large_system_buffer_bohr` accuracy knob), `-large_system_mode sparse` (non-orthogonal density purification, 0 K gapped, `-eigensolver` ignored, `-large_system_sparse_threshold` knob). Each converges to the dense energy as its knob tightens; combining `-large_system_mode=fragments|dc` with `-eigensolver=purify` requires `-electronic_temperature 0` (hard error otherwise). See [docs/SQM_LARGE_SYSTEMS.md](docs/SQM_LARGE_SYSTEMS.md).
 
@@ -717,6 +719,18 @@ curcuma -md input.xyz -mtd -plumed plumed.dat
 ```
 
 See [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md) for the full PLUMED integration guide (unit conversions, output files, available CVs, thermal equilibration gate, internal RMSD-MTD).
+
+## Conformational Search (dual-method)
+
+The MD-driven conformational search (`-confsearch`) can explore with a cheap method and refine/rank the discovered conformers with a more accurate one:
+
+```sh
+curcuma -confsearch input.xyz -md_method gfnff -opt_method gfn2
+```
+
+`-md_method` runs the MD exploration and the pre-optimization; `-opt_method` runs the per-cycle accurate re-optimization and the final ranking. Both fall back to `-method` when unset, so `curcuma -confsearch input.xyz -method gfnff` keeps the single-method behaviour. See [docs/CONFSEARCH_DUAL_METHOD.md](docs/CONFSEARCH_DUAL_METHOD.md).
+
+The search is **restartable** with `-restart`: a self-contained checkpoint (bias pool, cumulative conformers, seeds, energies, schedule position) is written after every MD phase and every temperature cycle, into the BMT dir and copied back to the start directory. Re-running the same command with `-restart` resumes from it (kill the process to interrupt; the checkpoint persists). See [docs/CONFSEARCH_RESTART.md](docs/CONFSEARCH_RESTART.md).
 
 ## Output Directory System (BMT)
 

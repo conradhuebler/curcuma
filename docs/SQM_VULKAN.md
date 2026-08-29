@@ -67,7 +67,7 @@ vendor SDK is required.
 
 ```
 cmake -S . -B release_vulkan -DCMAKE_BUILD_TYPE=Release \
-      -DUSE_VULKAN=ON -DUSE_VULKAN_XTB=ON
+      -DUSE_VULKAN=ON
 cmake --build release_vulkan -j4
 ```
 
@@ -87,7 +87,7 @@ brought up stage-by-stage and is correct at every step.
 | `qm_methods/vulkan/shaders/*.comp` | Hand-written FP64 GLSL compute shaders (compiled to SPIR-V) |
 
 Dispatch: `method_factory.cpp` `resolveNativeXtbGpuMode()` returns `"vulkan"` when
-`-gpu vulkan` and `USE_VULKAN_XTB` are set, then constructs `XtbVulkanComputationalMethod`.
+`-gpu vulkan` and `USE_VULKAN` are set, then constructs `XtbVulkanComputationalMethod`.
 
 ## Eigensolver choice
 
@@ -145,7 +145,7 @@ packages in [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md) (Vulkan = `V-AP*`).
 ## What was tested
 
 On an **AMD Radeon 890M (RADV, integrated, shaderFloat64)**, build `release_vulkan/`
-(`-DUSE_VULKAN=ON -DUSE_VULKAN_XTB=ON`):
+(`-DUSE_VULKAN=ON`):
 
 - **Eigensolver vs Eigen** (standalone, `prototype/`): random symmetric n=4..128, eigenvalues
   to ~1e-13, reconstruction / orthogonality to ~1e-14. Generalized solve (Löwdin S⁻¹ᐟ²

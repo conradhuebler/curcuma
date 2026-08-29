@@ -20,7 +20,7 @@
 
 #pragma once
 
-#ifdef USE_ROCM_GFNFF
+#ifdef USE_ROCM
 
 #include <cstddef>
 #include <string>
@@ -78,4 +78,4 @@ void logGPUMemoryStatus(int verbosity = 2);
 
 } // namespace GPUUtils
 
-#endif // USE_ROCM_GFNFF
+#endif // USE_ROCM

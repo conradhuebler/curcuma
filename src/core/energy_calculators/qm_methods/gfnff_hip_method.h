@@ -13,7 +13,7 @@
 
 #pragma once
 
-#ifdef USE_ROCM_GFNFF
+#ifdef USE_ROCM
 
 #include "../computational_method.h"
 #include "../ff_methods/gfnff.h"
@@ -197,4 +197,4 @@ private:
     void generateCNPairList(const Matrix& geom_bohr);
 };
 
-#endif // USE_ROCM_GFNFF
+#endif // USE_ROCM

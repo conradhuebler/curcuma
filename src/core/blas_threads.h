@@ -89,11 +89,20 @@ private:
     static void setBlasThreads(int n)
     {
 #ifndef _WIN32
-        static auto mkl_set_lower = detail::resolveBlasSetThreads("mkl_set_num_threads");
+        // Claude Generated (Jul 2026) - calling-convention fix. Prefer the canonical
+        // C by-value MKL interface MKL_Set_Num_Threads. The lowercase mkl_set_num_threads
+        // is ambiguous across MKL builds: in this oneAPI install it is an ALIAS of the
+        // Fortran by-reference symbol mkl_set_num_threads_ (disasm: `mov (%rdi),%edi`),
+        // so calling it with the C by-value signature void(*)(int) passes n=1 in rdi and
+        // the prologue dereferences 0x1 -> SIGSEGV (the GFN-FF EEQ-thread crash). The
+        // mixed-case symbol is a distinct C wrapper (jmp mkl_serv_set_num_threads@plt)
+        // in every MKL build, so it is the safe one to call by value. Keep lowercase as a
+        // last-resort fallback only (correct on builds where it is the proper C symbol).
         static auto mkl_set_upper = detail::resolveBlasSetThreads("MKL_Set_Num_Threads");
+        static auto mkl_set_lower = detail::resolveBlasSetThreads("mkl_set_num_threads");
         static auto openblas_set = detail::resolveBlasSetThreads("openblas_set_num_threads");
-        if (mkl_set_lower) mkl_set_lower(n);
-        else if (mkl_set_upper) mkl_set_upper(n);
+        if (mkl_set_upper) mkl_set_upper(n);
+        else if (mkl_set_lower) mkl_set_lower(n);
         if (openblas_set) openblas_set(n);
 #else
         (void)n;

@@ -580,6 +580,14 @@ void initialize_d4_corrections() {
     d4_sscale_data[7] = 1.00000000000000;
     d4_sscale_data[8] = 1.00000000000000;
     d4_sscale_data[9] = 0.50000000000000;
+    // Na (refsys=11) and Ne (refsys=10) reference-system self-scaling factors were
+    // missing (dftd4 reference.inc: sscale(10)=sscale(11)=0.5). Without sscale[11]
+    // the inner-shell subtraction hcount*sscale*secaiw vanished for every reference
+    // whose reference SYSTEM is Na (refsys=11) — e.g. Ti's 4th reference (cn=4.44) —
+    // leaving its polarizability uncorrected and its C6 ~2.4x too large. This is the
+    // GFN2-D4 PR40 over-binding root cause. (Claude Generated 2026-07)
+    d4_sscale_data[10] = 0.50000000000000;
+    d4_sscale_data[11] = 0.50000000000000;
     d4_sscale_data[17] = 0.50000000000000;
 
     // Reference system polarizabilities (secaiw)

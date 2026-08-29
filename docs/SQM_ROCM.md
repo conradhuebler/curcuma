@@ -71,7 +71,7 @@ All ROCm pieces live under `/opt/rocm`, so pass `-DCMAKE_PREFIX_PATH=/opt/rocm`.
 
 ```
 cmake -S . -B release_rocm -DCMAKE_BUILD_TYPE=Release \
-      -DUSE_ROCM=ON -DUSE_ROCM_XTB=ON \
+      -DUSE_ROCM=ON \
       -DCMAKE_PREFIX_PATH=/opt/rocm \
       -DCMAKE_HIP_ARCHITECTURES=gfx1150     # match your GPU: rocminfo | grep gfx
 cmake --build release_rocm -j4
@@ -95,7 +95,7 @@ as CUDA, correct at every step:
 | `ff_methods/rocm/` | (later stage) hipified GFN-FF kernels + workspace |
 
 Dispatch: `method_factory.cpp` `resolveNativeXtbGpuMode()` returns `"rocm"` when
-`-gpu rocm` and `USE_ROCM_XTB` are set, then constructs `XtbHipComputationalMethod`.
+`-gpu rocm` and `USE_ROCM` are set, then constructs `XtbHipComputationalMethod`.
 
 Unlike the Vulkan path (which hand-writes a Jacobi eigensolver + Löwdin reduction),
 rocSOLVER provides the **generalized** symmetric-definite solver directly, so the host
@@ -149,7 +149,7 @@ The remaining work (GFN-FF, device solvation) is broken into work packages in
 
 ## What was tested
 
-On an **AMD Radeon 890M (gfx1150)**, build `release_rocm/` (`-DUSE_ROCM_XTB=ON`, rocSOLVER):
+On an **AMD Radeon 890M (gfx1150)**, build `release_rocm/` (`-DUSE_ROCM=ON`, rocSOLVER):
 
 - **gfn1 / gfn2 single point** `-gpu rocm` vs `-gpu none` (CN/S/H0/L/γ built on the GPU,
   SCF log "CN/S/H0/L built on GPU; no nao^2 upload"): H2O and benzoic acid (15 atoms)
@@ -191,11 +191,11 @@ What was **NOT** tested (native xTB): large systems (iGPU FP64 is slow — corre
 milestone, not performance), discrete/CDNA GPUs, MD; transition-metal d (enabled but
 unvalidated — only main-group d checked, same as the CPU/CUDA paths).
 
-## GFN-FF on ROCm (`-gpu rocm`, `USE_ROCM_GFNFF`, June 2026) — 🤖 machine-tested
+## GFN-FF on ROCm (`-gpu rocm`, `USE_ROCM`, June 2026) — 🤖 machine-tested
 
 Separate from the native xTB ROCm path above; mirrors the CUDA GFN-FF GPU pipeline.
 
-- **Build**: `cmake -DUSE_ROCM=ON -DUSE_ROCM_GFNFF=ON -DUSE_D4=OFF -DUSE_D3=OFF
+- **Build**: `cmake -DUSE_ROCM=ON -DUSE_D4=OFF -DUSE_D3=OFF
   -DROCM_GPU_ARCH=gfx1150 -DCMAKE_PREFIX_PATH=/opt/rocm` (a dedicated `release_rocm/` dir, not
   the canonical CPU `release/`). Needs `rocsolver` + `rocblas`.
 - **Device code** (`ff_methods/rocm/`): `gfnff_rocm.hip` is a **single** hipcc TU (the

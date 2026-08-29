@@ -7,7 +7,7 @@
  * Claude Generated (2026-06): ComputationalMethod adapter for the Vulkan path of
  * native GFN1/GFN2 — the Vulkan sibling of XtbGpuComputationalMethod (CUDA) /
  * XtbHipComputationalMethod (ROCm). Selected by the factory when `-gpu vulkan` (or
- * `-gpu auto` on a Vulkan-only build) is given and the build has USE_VULKAN_XTB.
+ * `-gpu auto` on a Vulkan-only build) is given and the build has USE_VULKAN.
  *
  * Design (identical to the CUDA/ROCm wrappers): OWNS a NativeXtbMethod (validated CPU
  * pipeline) + an XtbVulkanContext (device handles). Stage 0 forwards every call to the
@@ -21,7 +21,7 @@
 
 #pragma once
 
-#ifdef USE_VULKAN_XTB
+#ifdef USE_VULKAN
 
 #include "native_xtb_method.h"   // NativeXtbMethod + curcuma::xtb::MethodType
 
@@ -89,4 +89,4 @@ private:
     std::unique_ptr<NativeXtbMethod>                     m_cpu;          ///< validated CPU pipeline
 };
 
-#endif // USE_VULKAN_XTB
+#endif // USE_VULKAN

@@ -60,42 +60,72 @@ void XTB::setupMultipole(bool integrals_on_device)
     // are skipped when the GPU backend already filled them via downloadMultipoleInts
     // (Stage 3m). The CN-damping radii + atom-pair interaction matrices (step 3+) are
     // O(nat²) and always run on the host. Claude Generated.
+    // B0 (Jul 2026): sub-phase timers so the "multipole setup" bucket can be
+    // attributed. Reported by Calculation() at verbosity >= 3.
+    using mp_clock = std::chrono::steady_clock;
+    const auto tmp0 = mp_clock::now();
+    auto tmp_ao = tmp0, tmp_d = tmp0, tmp_shift = tmp0, tmp_cn = tmp0;
+
     if (!integrals_on_device) {
+    // B1 (Jul 2026): as_cgto_shell() copies two std::vectors, and it used to be
+    // called once per (mu,nu) AO pair -> ~nao^2 = 311k conversions (622k heap
+    // allocations) on complex/231. The shells are geometry-independent, so build
+    // them once here and index; the kernels see identical values.
+    std::vector<CGTO::Shell> shells(m_basis.nsh);
+    for (int ish = 0; ish < m_basis.nsh; ++ish)
+        shells[ish] = as_cgto_shell(m_basis.cgto[ish]);
+
     // ---- 1. Global-origin raw dipole + raw-Cartesian quadrupole ----
     std::array<Eigen::MatrixXd, 3> dp_global;
     std::array<Eigen::MatrixXd, 6> qp_global_raw;
     for (int k = 0; k < 3; ++k) dp_global[k]     = Eigen::MatrixXd::Zero(nao, nao);
     for (int k = 0; k < 6; ++k) qp_global_raw[k] = Eigen::MatrixXd::Zero(nao, nao);
 
-    // Parallel over the row AO mu (Claude Generated): disjoint rows of dp_global /
-    // qp_global_raw, so the stripes are independent and bit-identical to serial.
-    const int mp_threads = effectiveIntraThreads(nao);
+    // B3 (Jul 2026): iterate SHELL pairs, not AO pairs. The primitive-pair work
+    // (gamma, product centre, K, PA/PB, 1-D moment table) is shared by every
+    // component of the pair, so this runs it once instead of up to 9 times.
+    // Striping moves from mu to ish_a: each ish_a owns the disjoint AO row range
+    // [iao_sh, iao_sh + nao_sh), so writes stay disjoint and every element is
+    // still written exactly once with a decomposition-independent value.
+    const int nsh_ao = m_basis.nsh;
+    const int mp_threads = effectiveIntraThreads(nsh_ao);
     parallelStripes(mp_threads, [&](int tid, int nth) {
-    for (int mu = tid; mu < nao; mu += nth) {
-        const int ish_a = m_basis.ao2sh[mu];
-        const int iat   = m_basis.ao2at[mu];
-        const int local_a = mu - m_basis.iao_sh[ish_a];
-        const int t_a = ao_to_type(m_basis.ang_sh[ish_a], local_a);
-        const CGTO::Shell sh_a = as_cgto_shell(m_basis.cgto[ish_a]);
+    for (int ish_a = tid; ish_a < nsh_ao; ish_a += nth) {
+        const int ang_a = m_basis.ang_sh[ish_a];
+        if (ang_a >= 2) continue;   // d-touching pairs: handled by the block below
+        const int iat = m_basis.sh2at[ish_a];
+        const int ia0 = m_basis.iao_sh[ish_a];
+        const int nca = m_basis.nao_sh[ish_a];
+        const CGTO::Shell& sh_a = shells[ish_a];
 
-        for (int nu = 0; nu < nao; ++nu) {
-            const int ish_b = m_basis.ao2sh[nu];
-            const int jat   = m_basis.ao2at[nu];
-            const int local_b = nu - m_basis.iao_sh[ish_b];
-            const int t_b = ao_to_type(m_basis.ang_sh[ish_b], local_b);
-            if (t_a < 0 || t_b < 0) continue;
-            const CGTO::Shell sh_b = as_cgto_shell(m_basis.cgto[ish_b]);
+        for (int ish_b = 0; ish_b < nsh_ao; ++ish_b) {
+            const int ang_b = m_basis.ang_sh[ish_b];
+            if (ang_b >= 2) continue;
+            const int jat = m_basis.sh2at[ish_b];
+            const int jb0 = m_basis.iao_sh[ish_b];
+            const int ncb = m_basis.nao_sh[ish_b];
+            const CGTO::Shell& sh_b = shells[ish_b];
 
-            double Sx, D[3], Q[6];
-            MI::cgto_multipole(sh_a, sh_b,
-                               xyz_bohr[3*iat+0], xyz_bohr[3*iat+1], xyz_bohr[3*iat+2],
-                               xyz_bohr[3*jat+0], xyz_bohr[3*jat+1], xyz_bohr[3*jat+2],
-                               t_a, t_b, Sx, D, Q);
-            for (int k = 0; k < 3; ++k) dp_global[k](mu, nu)     = D[k];
-            for (int k = 0; k < 6; ++k) qp_global_raw[k](mu, nu) = Q[k];
+            double bS[9], bD[9 * 3], bQ[9 * 6];
+            MI::cgto_multipole_block(sh_a, ang_a, sh_b, ang_b,
+                                     xyz_bohr[3*iat+0], xyz_bohr[3*iat+1], xyz_bohr[3*iat+2],
+                                     xyz_bohr[3*jat+0], xyz_bohr[3*jat+1], xyz_bohr[3*jat+2],
+                                     bS, bD, bQ);
+
+            for (int ia = 0; ia < nca; ++ia) {
+                const int mu = ia0 + ia;
+                for (int jb = 0; jb < ncb; ++jb) {
+                    const int nu = jb0 + jb;
+                    const int c  = ia * ncb + jb;
+                    for (int k = 0; k < 3; ++k) dp_global[k](mu, nu)     = bD[c * 3 + k];
+                    for (int k = 0; k < 6; ++k) qp_global_raw[k](mu, nu) = bQ[c * 6 + k];
+                }
+            }
         }
     }
-    });  // parallelStripes over mu
+    });  // parallelStripes over ish_a
+    tmp_ao = mp_clock::now();
+
 
     // ---- 1b. X-I1: d-touching shell pairs (cartesian multipole block + dtrafo).
     // The per-AO loop above skips d (ao_to_type < 0); fill those AO cells here.
@@ -105,13 +135,13 @@ void XTB::setupMultipole(bool integrals_on_device)
         const int ang_a = m_basis.ang_sh[ish_a];
         const int iat   = m_basis.sh2at[ish_a];
         const int ia0   = m_basis.iao_sh[ish_a];
-        const CGTO::Shell sh_a = as_cgto_shell(m_basis.cgto[ish_a]);
+        const CGTO::Shell& sh_a = shells[ish_a];
         for (int ish_b = 0; ish_b < nsh_mp; ++ish_b) {
             const int ang_b = m_basis.ang_sh[ish_b];
             if (ang_a < 2 && ang_b < 2) continue;  // s/p handled by the loop above
             const int jat = m_basis.sh2at[ish_b];
             const int jb0 = m_basis.iao_sh[ish_b];
-            const CGTO::Shell sh_b = as_cgto_shell(m_basis.cgto[ish_b]);
+            const CGTO::Shell& sh_b = shells[ish_b];
             double Db[5 * 5 * 3], Qb[5 * 5 * 6];
             sphericalMultipoleBlock(sh_a, ang_a, sh_b, ang_b,
                 xyz_bohr[3*iat+0], xyz_bohr[3*iat+1], xyz_bohr[3*iat+2],
@@ -127,6 +157,8 @@ void XTB::setupMultipole(bool integrals_on_device)
                 }
         }
     }
+
+    tmp_d = mp_clock::now();
 
     // ---- 2. Shift to "origin at atom(column)" (tblite convention) ----
     //       and traceless quadrupole transform.
@@ -169,6 +201,7 @@ void XTB::setupMultipole(bool integrals_on_device)
     }
     });  // parallelStripes over mu
     }  // if (!integrals_on_device) — steps 1-2 (AO multipole integral build)
+    tmp_shift = mp_clock::now();
 
     // ---- 3. Coordination numbers (GFN2 double-exp form) ----
     std::vector<double> cn = cn_gfn(std::vector<int>(m_atoms.begin(), m_atoms.end()), xyz_bohr);
@@ -189,6 +222,8 @@ void XTB::setupMultipole(bool integrals_on_device)
         m_mp_dkernel[i]  = p_dkernel[z - 1];
         m_mp_qkernel[i]  = p_qkernel[z - 1];
     }
+
+    tmp_cn = mp_clock::now();
 
     // ---- 5. Interaction matrices ----
     for (int k = 0; k < 3; ++k) m_mp_amat_sd[k] = Eigen::MatrixXd::Zero(nat, nat);
@@ -241,6 +276,19 @@ void XTB::setupMultipole(bool integrals_on_device)
         }
     }
     });  // parallelStripes over i
+
+    // B0: publish the sub-phase split for the verbosity-3 setup report.
+    {
+        auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        const auto tmp_end = mp_clock::now();
+        m_mp_t_ao_ints  = ms(tmp0, tmp_ao);
+        m_mp_t_d_block  = ms(tmp_ao, tmp_d);
+        m_mp_t_shift    = ms(tmp_d, tmp_shift);
+        m_mp_t_cn_mrad  = ms(tmp_shift, tmp_cn);
+        m_mp_t_amat     = ms(tmp_cn, tmp_end);
+    }
 
     m_mp_initialized = true;
 }

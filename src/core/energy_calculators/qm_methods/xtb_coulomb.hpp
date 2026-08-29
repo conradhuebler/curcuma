@@ -170,6 +170,9 @@ inline std::vector<double> reference_shell_populations(Method method, int z)
 {
     std::vector<double> out;
     if (z < 1 || z > 86) return out;
+    // GFN2 reference_occ is indexed by angular momentum, so map each shell to its
+    // angular momentum via ang_shell (transition metals order shells [d,s,p]).
+    // GFN1 keeps per-shell indexing (its valence/polarisation shells share l).
     if (method == Method::GFN1) {
         const int ns = curcuma::xtb::gfn1_params::nshell[z - 1];
         for (int i = 0; i < ns; ++i) out.push_back(
@@ -177,7 +180,7 @@ inline std::vector<double> reference_shell_populations(Method method, int z)
     } else {
         const int ns = curcuma::xtb::gfn2_params::nshell[z - 1];
         for (int i = 0; i < ns; ++i) out.push_back(
-            curcuma::xtb::gfn2_params::reference_occ[z - 1][i]);
+            curcuma::xtb::gfn2_params::reference_occ[z - 1][curcuma::xtb::gfn2_params::ang_shell[z - 1][i]]);
     }
     return out;
 }

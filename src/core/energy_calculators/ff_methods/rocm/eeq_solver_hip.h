@@ -16,7 +16,7 @@
 
 #pragma once
 
-#ifdef USE_ROCM_GFNFF
+#ifdef USE_ROCM
 
 #include <memory>
 #include <vector>
@@ -316,4 +316,4 @@ private:
     int m_last_N = 0;  ///< cached N for workspace reuse
 };
 
-#endif // USE_ROCM_GFNFF
+#endif // USE_ROCM

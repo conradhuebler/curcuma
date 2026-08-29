@@ -192,7 +192,11 @@ void RMSDDriver::LoadFragmentAndThreadingParameters()
     m_molaligntol = m_config.get<int>("molalign_tolerance");
 
     m_force_reorder = m_config.get<bool>("force_reorder");
-    m_protons = m_config.get<bool>("protons");
+    /* Claude Generated (Aug 2026): 'heavy' is the inverse of 'protons' and used to be a
+       plain alias, which made '-heavy' request protons=true - a no-op. Combining them
+       keeps every default and every '-protons false' invocation working, while '-heavy'
+       now means what the help text says. */
+    m_protons = m_config.get<bool>("protons") && !m_config.get<bool>("heavy");
     // Legacy silent parameter removed - using verbosity system instead - Claude Generated
     m_intermedia_storage = m_config.get<double>("storage");
     m_dynamic_center = m_config.get<bool>("dynamic_center");
@@ -677,6 +681,27 @@ double RMSDDriver::BestFitRMSD()
     return rmsd;
 }
 
+double RMSDDriver::BestFitRMSDCentered()
+{
+    // Claude Generated (Jul 2026): fast path for the RMSD-MTD screen. Both m_reference and m_target
+    // must already hold geometric-centered coordinates. We skip the two CenterMolecule passes of
+    // BestFitRMSD (the walker is centered once per MD step; hills are pre-centered), compute the
+    // Kabsch rotation, apply it to the target, and store the aligned geometries so Gradient() --
+    // which reads (m_reference - m_target) -- stays correct. The reference is left untouched so it
+    // remains the centered walker across all hills in the step.
+    const Geometry reference = m_reference.getGeometry();
+    const Geometry target = m_target.getGeometry();
+    Eigen::Matrix3d R = RMSDFunctions::BestFitRotation(reference, target, 1);
+    const auto t = RMSDFunctions::applyRotation(target, R);
+    m_reference_aligned.setGeometry(reference);
+    m_target_aligned.setGeometry(t);
+    m_target.setGeometry(t);
+    double rmsd = RMSDFunctions::getRMSD(reference, t);
+    m_rmsd = rmsd;
+    m_rotation = R;
+    return rmsd;
+}
+
 double RMSDDriver::PartialRMSD(const Molecule& ref, const Molecule& tar)
 {
     double rmsd = 0;
@@ -777,6 +802,12 @@ void RMSDDriver::reset()
     m_prepared_cost_matrices.clear();
     m_intermediate_cost_matrices.clear();
     m_intermedia_rules.clear();
+    /* Claude Generated (Aug 2026): the incremental-alignment loop
+       (rmsd_strategies.cpp) uses m_reorder_reference_geometry.rows() as its entry
+       condition. InitialisePair() re-seeds it only when m_initial is empty, so a driver
+       reused for many pairs (ConfScan) kept the previous pair's row count on the
+       -initial / initial_fragment path and could skip the loop entirely. */
+    m_reorder_reference_geometry = Geometry();
     m_rmsd = 0.0;
 }
 
@@ -794,6 +825,7 @@ void RMSDDriver::clear()
     m_reorder_rules.clear();
     m_reorder_reference.clear();
     m_reorder_target.clear();
+    m_reorder_reference_geometry = Geometry(); // see reset() - stale row count skips the incremental loop
     m_rotation = Eigen::Matrix3d::Identity();
     m_rmsd = 0.0;
 }
@@ -856,21 +888,10 @@ void RMSDDriver::ProtonDepleted()
     if (m_verbosity >= 2)
         CurcumaLogger::info("Will perform calculation on proton depleted structure");
 
-    Molecule reference;
-    for (std::size_t i = 0; i < m_reference.AtomCount(); ++i) {
-        std::pair<int, Position> atom = m_reference.Atom(i);
-        if (atom.first != 1)
-            reference.addPair(atom);
-    }
-
-    Molecule target;
-    for (std::size_t i = 0; i < m_target.AtomCount(); ++i) {
-        std::pair<int, Position> atom = m_target.Atom(i);
-        if (atom.first != 1)
-            target.addPair(atom);
-    }
-    m_reference = reference;
-    m_target = target;
+    // Claude Generated (Aug 2026): shared with ConfScan's heavy-atom path via
+    // Molecule::ProtonDepletedCopy(), so both produce identical heavy-atom indexing.
+    m_reference = m_reference.ProtonDepletedCopy();
+    m_target = m_target.ProtonDepletedCopy();
     m_init_count = m_heavy_init;
 }
 

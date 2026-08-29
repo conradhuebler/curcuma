@@ -93,6 +93,10 @@ test_cases/**/curcuma_*.json
 test_cases/**/*.log
 test_cases/**/*.dat
 !test_cases/**/baseline.dat
+!test_cases/MOR41-testset/reactions.dat
+
+# MOR41 validation: track the driver data, ignore generated run artifacts
+test_cases/MOR41-testset/_run/
 
 # GFN-FF / MD topology dumps (generated during runs) - Claude Generated May 2026
 *.topo.json
@@ -109,6 +113,18 @@ test_cases/molecules/**/*.rejected.xyz
 test_cases/molecules/**/*.reorder.*.xyz
 test_cases/molecules/**/*.reuse.xyz
 test_cases/molecules/**/*.thresh.xyz
+
+# ConfSearch run artifacts (MD/opt trajectories, restart checkpoints) - Claude Generated Jul 2026
+test_cases/**/.snapshots/
+test_cases/**/*_step_*.json
+test_cases/**/*.final.json
+test_cases/**/*.bias.xyz
+test_cases/**/*.bias.opt.accepted.xyz
+test_cases/**/*.cumulative.xyz
+test_cases/**/*.cumulative.opt.accepted.xyz
+test_cases/**/*.input.xyz
+test_cases/**/*_md_params.json
+test_cases/**/*.confsearch.restart.json
 
 # Root-level output files (optimization and trajectory outputs)
 *.opt.xyz

@@ -18,7 +18,7 @@
  * Any Vulkan error returns false so the caller falls back to the CPU.
  */
 
-#ifdef USE_VULKAN_XTB
+#ifdef USE_VULKAN
 
 #include "xtb_vulkan_context.h"
 #include "vk_context.h"
@@ -2018,4 +2018,4 @@ bool XtbVulkanContext::eeqChargeResponseGradient(int N, const double* dEdq, doub
 } // namespace xtb
 } // namespace curcuma
 
-#endif // USE_VULKAN_XTB
+#endif // USE_VULKAN

@@ -21,7 +21,7 @@
 
 #pragma once
 
-#ifdef USE_ROCM_GFNFF
+#ifdef USE_ROCM
 
 #include "src/core/global.h"
 #include "../ff_workspace.h"           // FFEnergyComponents, Matrix, Vector, SpMatrix
@@ -636,4 +636,4 @@ private:
     FFTermTimings m_kernel_timings;
 };
 
-#endif // USE_ROCM_GFNFF
+#endif // USE_ROCM

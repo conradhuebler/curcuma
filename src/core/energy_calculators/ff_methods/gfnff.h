@@ -185,9 +185,16 @@ struct GFNFFParamGenReport {
     double t_eeq_phase1         = -1;
     double t_eeq_phase1_corr    = -1;
     double t_eeq_phase2         = -1;
-    double t_pi_bond_orders     = -1;
+    // A0 (Jul 2026): the old single `t_pi_bond_orders` bucket bracketed three
+    // unrelated pieces of work, which made it useless for guiding optimisation.
+    // Split into the ipis per-pi-system EEQ re-solves, the FT-HMO solve itself,
+    // and the bond-type classification loop.
+    double t_pi_charges_eeq     = -1;
+    double t_huckel             = -1;
+    double t_bond_types         = -1;
     double t_topo_distances     = -1;
     double t_topology_total     = -1;
+    int    n_pi_systems         = -1;  // number of pi-systems (drives the two above)
 
     // Parameter generation phases — all measured in generateGFNFFParameterSet
     double t_bonds       = -1;
@@ -213,14 +220,21 @@ void printGFNFFParamGenReport(const GFNFFParamGenReport& r);
 
 // P2b (Apr 2026): CN cutoff parameters — configurable via CLI
 // Three modes:
-//   cn_cutoff_bohr > 0: Neighbor-list mode (default 6.0 Bohr, fast O(N*k))
+//   cn_cutoff_bohr > 0: Neighbor-list mode (default 10.0 Bohr, fast O(N*k))
 //   cn_cutoff_bohr = 0, cn_accuracy > 0: Fortran accuracy-based threshold (cnthr = 100 - log10(acc)*50)
 //   cn_cutoff_bohr = 0, cn_accuracy = 0: Full O(N²) reference mode (no cutoff)
+// FIX (Jul 23, 2026): default raised 6.0 -> 10.0 Bohr. The reference cnthr
+// (gfnff_param.f90:551, accuracy=1) is 100 Bohr^2 = 10 Bohr; the old 6.0 Bohr was
+// TIGHTER than the reference and truncated erf-CN contributions for heavy/metal atoms
+// (large covalent radii push the erf transition past 6 Bohr). That gave a wrong
+// dynamic-bond-r0 CN in the FFWorkspace energy path — e.g. PR23 (Ir complex) bond
+// energy +1.63 kcal. At 10 Bohr the CN is converged and matches the reference; the SP
+// bond energy is bit-identical to the legacy per-bond path (which used the full CN).
 BEGIN_PARAMETER_DEFINITION(gfnff)
 PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. Maps to EEQ and CN parameters.", "Basic", {})
 PARAM(allow_unconverged_charges, Bool, false, "Allow calculation to continue with unconverged EEQ charges (warn instead of abort).", "Advanced", {})
 PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 topology charges directly. Faster but less accurate.", "Advanced", {})
-PARAM(cn_cutoff_bohr, Double, 6.0, "CN neighbor list cutoff radius in Bohr. 0 = use accuracy-based threshold instead.", "Advanced", {})
+PARAM(cn_cutoff_bohr, Double, 10.0, "CN neighbor list cutoff radius in Bohr (reference cnthr=100 Bohr^2=10 Bohr). 0 = use accuracy-based threshold instead.", "Advanced", {})
 PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
 PARAM(solve, String, "auto",
       "EEQ solver method: lu, schur_cholesky, pcg, auto. Passed to eeq_solver.", "Algorithm", {})
@@ -261,6 +275,7 @@ PARAM(eeq_refactor_force_every, Int, 0,
       "WP-EEQ-Cache: Force EEQ Cholesky refactorization every N steps. "
       "0 = geometry-triggered only. Recommended: 100 for long MD. "
       "Forwarded to eeq_solver.eeq_refactor_force_every.", "Performance", {})
+PARAM(eeq_refine_iters, Int, 1, "A4: iterative-refinement steps when the EEQ solve reuses a cached Cholesky factor. Keeps charges exact for the current geometry at O(N^2) cost, so a loose refactor threshold does not corrupt the gradient. 0 disables. Forwarded to eeq_solver.eeq_refine_iters.", "Performance", {})
 // NOTE: each PARAM is kept on a SINGLE line on purpose. The param_parser clears its
 // buffer on the first ')' it sees, so a multi-line PARAM whose help text contains '(...)'
 // is silently dropped from the registry (see eeq_refactor_* above). Single-line is safe.
@@ -312,6 +327,16 @@ public:
         return m_eeq_solver ? m_eeq_solver->pcgExtrapolationCount() : -1;
     }
 
+    /// Test hook: drop the EEQ Cholesky/matrix caches, exactly as getCachedTopology()
+    /// does before a full topology rebuild. Lets the re-entrancy regression test
+    /// reproduce the MD/opt rebuild path in-process. Claude Generated (Jul 2026).
+    void invalidateEEQCachesForTest() {
+        if (m_eeq_solver) {
+            m_eeq_solver->invalidateCholeskyCache();
+            m_eeq_solver->invalidateMatrixCache();
+        }
+    }
+
     /**
      * @brief Static topology data — computed once at initialization, never changes
      *
@@ -326,6 +351,8 @@ public:
         Vector neighbor_counts;                                  // Simple neighbor counts (integer CN)
         std::vector<int> hybridization;                          // 0=sp3, 1=sp, 2=sp2, 3=terminal, 5=hypervalent
         std::vector<int> pi_fragments;                           // Pi fragment assignment per atom
+        std::vector<int> itag;                                   // -1 iff atom is eta-coordinated to a metal (Fortran itag; gfnff_ini2.f90:170-198) - Claude Generated Jul 2026
+        std::vector<int> pi_system_charge;                       // ipis: charge per pi-system (subtract from nelpi) - Claude Generated Jul 2026
         std::vector<int> ring_sizes;                             // Smallest ring containing each atom
         std::vector<bool> is_metal;                              // Metal atom flags
         std::vector<bool> is_aromatic;                           // Aromatic atom flags
@@ -335,6 +362,14 @@ public:
         std::vector<std::vector<int>> neighbor_lists;            // Full neighbor connectivity
         std::vector<std::vector<int>> adjacency_list;            // Per-atom bonded neighbor list
         std::vector<std::vector<int>> topo_distances;            // N×N shortest-path bond counts
+
+        // Fortran multi-list neighbour construction (gfnff_ini2.f90:128-130, 197-202).
+        // Fortran keeps four lists and assigns hybridization from the metal-reduced,
+        // eta-aware mixture rather than from the full connectivity. Claude Generated (Jul 2026).
+        std::vector<std::vector<int>> nb_full;                   // nbf: getnb(icase=1), no filtering
+        std::vector<std::vector<int>> nb_hc;                     // topo%nb DURING the hyb loop: getnb(icase=2), drops all bonds of highly-coordinated atoms
+        std::vector<std::vector<int>> nb_nometal;                // nbm: getnb(icase=3), metals + unusually coordinated heavy atoms removed
+        std::vector<double> metallic_character;                  // mchar (gfnff_ini.f90:249), gates the nbm metal filter
 
         // Functional groups
         std::vector<FunctionalGroupType> functional_groups;      // Per-atom classification
@@ -714,7 +749,14 @@ public:
      * @brief Calculate full topology information for advanced parametrization
      * @return Complete topology information
      */
+    /// Full topology build. Runs calculateTopologyInfoOnce() twice, mirroring Fortran's
+    /// q-loop (gfnff_ini.f90:258-263): pass 1 with qa=0, pass 2 with the pass-1 charges
+    /// shrinking the bond radii. Claude Generated (Jul 2026).
     TopologyInfo calculateTopologyInfo() const;
+
+    /// One pass of the topology build (bond list -> four neighbour lists -> hybridization
+    /// -> rings/pi/EEQ). Uses m_bond_qa for the getnb radius shrink.
+    TopologyInfo calculateTopologyInfoOnce() const;
 
     /**
      * @brief Generate GFN-FF parameters as native C++ structs (no JSON)
@@ -1806,6 +1848,96 @@ private:
     std::vector<std::vector<int>> buildNeighborLists() const;
 
     /**
+     * @brief Detect eta(η)-coordinated atoms (metal-alkene/alkyne/Cp side-on bonding)
+     *
+     * Claude Generated (July 2026). Faithful port of the Fortran etacoord logic
+     * (external/gfnff/src/gfnff_ini2.f90:170-198). Sets itag[i] = -1 for genuine
+     * η-coordinated carbons (only ati<=10, in practice C), -1 otherwise 0. Used by
+     * the angle-bending feta metal correction so it fires ONLY for real η ligands
+     * (metal-alkene/alkyne/cyclopentadienyl), NOT σ-bonded π ligands like CO.
+     *
+     * @param neighbor_lists Full bonded adjacency (== Fortran nbf, includes metals)
+     * @return itag vector (size m_atomcount): -1 if η-coordinated, else 0
+     */
+    std::vector<int> computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists) const;
+
+    /**
+     * @brief Estimate per-atom "metallic character" mchar
+     *
+     * Claude Generated (July 2026). Port of external/gfnff/src/gfnff_ini.f90:243-250:
+     *   mchar(i) = exp(-0.005 * en(Z_i)^8) * dum2 / (cn(i) + 1)
+     * where dum2 = sum_j || d logCN_i / d R_j || over the GFN-FF logistic CN
+     * (gfnff_cn.f90:gfnff_dlogcoord). Used only to gate the metal filter of the
+     * metal-reduced neighbour list nbm (getnb icase=3: mchar > 0.25 => drop).
+     *
+     * The exp(-0.005*en^8) factor is extremely stiff (en=2.0 -> 0.28, en=3.0 -> ~0),
+     * so it acts as a near-hard electronegativity switch around en ~ 2.4.
+     *
+     * NOTE: uses GFNFFParameters::gfnff_en (Fortran param%en), NOT the rab_en table.
+     *
+     * @return mchar per atom (size m_atomcount)
+     */
+    std::vector<double> computeMetallicCharacter() const;
+
+    /**
+     * @brief Build the Fortran four-list neighbour set (nbf / topo%nb / nbm / nbdum)
+     *
+     * Claude Generated (July 2026). Port of external/gfnff/src/gfnff_ini2.f90:128-130
+     * and 197-202. Fortran derives three lists from the same distance criterion and
+     * then assigns hybridization from a per-atom mixture:
+     *   nbf   (icase=1) full connectivity, no filtering
+     *   nb_hc (icase=2) drops ALL bonds of highly-coordinated atoms
+     *                   (hc_crit = 4 if group <= 2 - which includes every transition
+     *                    metal, since periodic_group is negative for the d-block - else 6)
+     *   nbm   (icase=3) drops metals (mchar > 0.25 or metal_type > 0) and heavy atoms
+     *                   above their normal CN (nbf > normcn and Z > 10)
+     *   nbdum          per-atom mixture: nbm for eta-coordinated atoms, else nbf
+     *
+     * Fills topo.nb_full / nb_hc / nb_nometal / metallic_character / itag. The mixture
+     * is what Fortran finally stores as topo%nb (gfnff_ini2.f90:335).
+     *
+     * @param topo Topology to populate (nb_full etc. are overwritten)
+     * @param[out] nbdum The per-atom eta-aware mixture (Fortran's final topo%nb)
+     */
+    void buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<int>>& nbdum) const;
+
+    /**
+     * @brief CN of the nearest non-metal neighbour of an atom
+     *
+     * Claude Generated (July 2026). Port of gfnff_ini2.f90:431-450 (nn_nearest_noM).
+     * Fortran calls this with topo%nb, i.e. the HC-filtered list nb_hc.
+     *
+     * @param ii Atom index
+     * @param nb Neighbour list to search (pass nb_hc for Fortran parity)
+     * @param distance_matrix Interatomic distances
+     * @return CN of the closest non-metal neighbour, or 0 if there is none
+     */
+    int nnNearestNoM(int ii, const std::vector<std::vector<int>>& nb,
+                     const Eigen::MatrixXd& distance_matrix) const;
+
+    /**
+     * @brief Fortran-faithful hybridization assignment
+     *
+     * Claude Generated (July 2026). Transcription of gfnff_ini2.f90:211-333, replacing
+     * the geometry-first heuristic in determineHybridization(). Reads the four-list
+     * neighbour set: nb20i from the nbdum mixture, nbdiff/nbmdiff from nbf vs nb_hc/nbm,
+     * and indexes the NO2/B-N/N-SO2 and CO->sp rules into nb_hc (which is what Fortran's
+     * topo%nb still holds at this point in the initialization).
+     *
+     * Also WRITES itag: sets +1 for carbenes and NO2 nitrogen (consumed by Hueckel/HB),
+     * on top of the -1 eta tags already set by computeEtaCoordination().
+     *
+     * @param topo Topology holding nb_full / nb_hc / nb_nometal / distance_matrix
+     * @param nbdum The eta-aware per-atom mixture
+     * @param itag In/out tag vector (-1 eta in, +1 carbene/NO2 out)
+     * @return Hybridization per atom (0 none/octahedral, 1 sp, 2 sp2, 3 sp3, 5 hypervalent)
+     */
+    std::vector<int> determineHybridizationFortran(const GFNFFTopology& topo,
+                                                   const std::vector<std::vector<int>>& nbdum,
+                                                   const Eigen::MatrixXd& distance_matrix,
+                                                   std::vector<int>& itag) const;
+
+    /**
      * @brief Count neighbors within 20 Bohr cutoff (nb20)
      *
      * Claude Generated (January 14, 2026) - Phase 2: Exact nb20 implementation
@@ -1855,7 +1987,9 @@ private:
         const std::vector<int>& hybridization,
         const std::vector<int>& pi_fragments,
         const std::vector<double>& charges = {},
-        const Eigen::MatrixXd& geometry_bohr = Eigen::MatrixXd()) const;
+        const Eigen::MatrixXd& geometry_bohr = Eigen::MatrixXd(),
+        const std::vector<int>& pi_system_charge = {},
+        const std::vector<int>& itag = {}) const;
 
     /**
      * @brief Calculate EEQ electrostatic energy
@@ -2637,6 +2771,17 @@ private:
     Vector m_last_cn;    ///< Coordination numbers
     Vector m_last_cnf;   ///< CN-dependent EEQ factors per atom
     bool m_gpu_path_preallocated = false; ///< True after preAllocateForGPUPath()
+
+    /// Use the Fortran-faithful hybridization (determineHybridizationFortran) instead of
+    /// the legacy geometry-first heuristic. Set false to fall back to the pre-Jul-2026
+    /// behaviour for bisection. Claude Generated (Jul 2026).
+    bool m_use_fortran_hyb = true;
+
+    /// Topology charges (Fortran topo%qa) fed back into the getnb bond-radius shrink
+    /// (`rtmp -= qa*fq`, gfnff_ini2.f90:122). Empty on the first pass, which is exactly
+    /// Fortran's pass 1 (gfnff_ini.f90:258 sets qa=0 before the q-loop). Filled by the
+    /// second q-loop pass. Claude Generated (Jul 2026).
+    mutable std::vector<double> m_bond_qa;
     CNDerivStore m_last_dcn; ///< CN derivatives (gradient only). Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
 
     // WP-FF-DistMatrix-Sharing (May 2026): shared packed-triangular distance arrays.

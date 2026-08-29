@@ -10,7 +10,7 @@
  * .cu translation units.
  */
 
-#ifdef USE_CUDA_XTB
+#ifdef USE_CUDA
 
 #include "xtb_gpu_method.h"
 #include "cuda/xtb_gpu_context.h"
@@ -546,4 +546,4 @@ void XtbGpuComputationalMethod::setIterativeMode(bool on) { m_cpu->setIterativeM
 
 bool XtbGpuComputationalMethod::gpuActive() const { return m_gpu && m_gpu->ok(); }
 
-#endif // USE_CUDA_XTB
+#endif // USE_CUDA

@@ -634,6 +634,43 @@ void XTB::occupationsFromEps(const Vector& eps,
 }
 
 /* ------------------------------------------------------------------ *
+ *  electronicFreeEnergy()  (Claude Generated)                        *
+ *                                                                    *
+ *  Electronic free-energy (Mermin) term g = -T*S from the fractional *
+ *  Fermi occupations, a port of xtb's fermismear entropy             *
+ *  (external/xtb/src/scc_core.f90:1047-1058):                        *
+ *                                                                    *
+ *    s  = Σ_i [ f_i·ln f_i + (1-f_i)·ln(1-f_i) ]   (per spin channel,*
+ *              only thr < f_i < 1-thr, f_i in [0,1])                 *
+ *    g  = s · kB·T                                                    *
+ *                                                                    *
+ *  xtb sums both spin channels (ga+gb); for the restricted           *
+ *  closed-shell path the channels are identical, so with m_wfn.focc  *
+ *  stored as 0..2 and the per-channel occupation f = focc/2:         *
+ *                                                                    *
+ *    g = 2 · kB·T · Σ_i [ f·ln f + (1-f)·ln(1-f) ]                   *
+ *                                                                    *
+ *  s ≤ 0, so g ≤ 0 and it lowers the total energy: xtb/tblite report *
+ *  the free energy A = E - T*S. kB·T uses the same constant as the   *
+ *  smearing (solveEigen/occupationsFromEps) so the Fermi level and   *
+ *  entropy are mutually consistent. Returns 0 at T=0 (integer occ).  *
+ * ------------------------------------------------------------------ */
+double XTB::electronicFreeEnergy() const
+{
+    if (m_electronic_temp <= 0.0 || m_wfn.focc.size() == 0)
+        return 0.0;
+    const double kT  = m_electronic_temp * 3.166808e-6;  // K → Hartree (matches smearing)
+    const double thr = 1.0e-9;                            // xtb fermismear cutoff
+    double s = 0.0;
+    for (int i = 0; i < m_wfn.focc.size(); ++i) {
+        const double f = 0.5 * m_wfn.focc(i);            // per spin channel, 0..1
+        if (f > thr && (1.0 - f) > thr)
+            s += f * std::log(f) + (1.0 - f) * std::log(1.0 - f);
+    }
+    return 2.0 * kT * s;   // g = ga + gb (restricted closed shell); ≤ 0
+}
+
+/* ------------------------------------------------------------------ *
  *  updatePopulationsFromPopAo()  (Claude Generated, GPU port Stage 2) *
  *                                                                    *
  *  Shell/atom Mulliken charges from precomputed AO populations        *

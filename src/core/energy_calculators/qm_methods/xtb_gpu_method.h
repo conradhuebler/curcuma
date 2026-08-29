@@ -6,7 +6,7 @@
  *
  * Claude Generated (2026-06): ComputationalMethod adapter for the GPU path of
  * native GFN1/GFN2. Selected by the factory when `-gpu cuda` (or `-gpu auto`)
- * is given and the build has USE_CUDA_XTB.
+ * is given and the build has USE_CUDA.
  *
  * Design (minimal-disruption sibling of NativeXtbMethod):
  *   - OWNS a NativeXtbMethod (the validated CPU pipeline: config, large-system
@@ -26,7 +26,7 @@
 
 #pragma once
 
-#ifdef USE_CUDA_XTB
+#ifdef USE_CUDA
 
 #include "native_xtb_method.h"   // NativeXtbMethod + curcuma::xtb::MethodType
 
@@ -100,4 +100,4 @@ private:
 std::unique_ptr<curcuma::xtb::GpuScfBackend>
 createXtbGpuScfBackend(curcuma::xtb::gpu::XtbGpuContext* ctx);
 
-#endif // USE_CUDA_XTB
+#endif // USE_CUDA

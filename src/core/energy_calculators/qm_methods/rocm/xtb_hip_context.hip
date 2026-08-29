@@ -16,7 +16,7 @@
  * + librocsolver + librocblas.
  */
 
-#ifdef USE_ROCM_XTB
+#ifdef USE_ROCM
 
 #include "xtb_hip_context.h"
 
@@ -1875,4 +1875,4 @@ bool XtbHipContext::eeqChargeResponseGradient(int N, const double* dEdq, double*
 } // namespace xtb
 } // namespace curcuma
 
-#endif // USE_ROCM_XTB
+#endif // USE_ROCM
