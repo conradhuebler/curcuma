@@ -95,6 +95,13 @@ void ConfGen::LoadControlJson()
     m_path_min_distance = m_config.get<int>("path_min_distance");
     m_nci_staged = m_config.get<bool>("nci_staged");
     m_eval_method = m_config.get<std::string>("eval_method");
+    /* Claude Generated (Aug 2026): "none" is the caller-side sentinel for "no split" (that is the
+     * default of ConfSearch's -confgen_eval_method). Normalise it here as well, so a caller that
+     * forwards its sentinel verbatim cannot make this class build a calculator for a method
+     * literally named "none" -- which returns a finite garbage energy with a NaN gradient and
+     * silently kills every proposal. Fixed on the ConfSearch side too; this is the second net. */
+    if (m_eval_method == "none" || m_eval_method == "None" || m_eval_method == "NONE")
+        m_eval_method.clear();
     m_clash_factor = m_config.get<double>("clash_factor");
     m_new_rmsd = m_config.get<double>("new_rmsd");
     m_topology_factor = m_config.get<double>("topology_factor");
@@ -2668,9 +2675,17 @@ std::vector<ConfGen::Proposal> ConfGen::generateProposals() const
  * the matched pairs and the additive model keep working; the proposals are optimised and compared on
  * the accurate surface, which is the one that decides. Empty = same method for both (old behaviour).
  */
-EnergyCalculator* ConfGen::evaluationCalculator() const
+bool ConfGen::useSplitEvaluation() const
 {
     if (m_eval_method.empty() || m_eval_method == m_method)
+        return false;
+    evaluationCalculator(); // creates and PROBES the calculator once; may set m_eval_unusable
+    return !m_eval_unusable;
+}
+
+EnergyCalculator* ConfGen::evaluationCalculator() const
+{
+    if (m_eval_method.empty() || m_eval_method == m_method || m_eval_unusable)
         return m_calculator.get();
     if (!m_eval_calculator) {
         json cfg;
@@ -2686,6 +2701,25 @@ EnergyCalculator* ConfGen::evaluationCalculator() const
                 ref.setCharge(m_charge);
                 ref.setSpin(m_spin);
                 m_eval_calculator->setMolecule(ref.getMolInfo());
+                /* Claude Generated (Aug 2026): PROVE the calculator works before every proposal is
+                 * staked on it. An unusable method name does not necessarily throw -- it can return
+                 * a finite garbage energy with a NaN gradient, and then the optimiser refuses to
+                 * start for EVERY proposal while the phase reports "no new conformer". One energy +
+                 * gradient on the reference structure costs nothing next to one optimisation per
+                 * proposal and converts a silent total loss into a warning plus the old behaviour. */
+                const double e_probe = m_eval_calculator->CalculateEnergy(true);
+                const Matrix g_probe = m_eval_calculator->Gradient();
+                if (!std::isfinite(e_probe) || !g_probe.allFinite() || m_eval_calculator->Error()) {
+                    CurcumaLogger::error(fmt::format(
+                        "ConfGen: the evaluation method '{}' does not produce a usable energy and "
+                        "gradient (E = {}, gradient finite: {}) -- falling back to '{}'. Every "
+                        "proposal would otherwise fail its optimisation and the phase would report "
+                        "'no new conformer'.",
+                        m_eval_method, e_probe, g_probe.allFinite() ? "yes" : "no", m_method));
+                    m_eval_calculator.reset();
+                    m_eval_unusable = true;
+                    return m_calculator.get();
+                }
             }
             CurcumaLogger::result_fmt("ConfGen: proposals are optimised and judged with '{}' while the "
                                       "description stays on '{}' -- the two surfaces disagree, and the "
@@ -2695,6 +2729,7 @@ EnergyCalculator* ConfGen::evaluationCalculator() const
             CurcumaLogger::warn_fmt("ConfGen: could not create the evaluation calculator '{}' -- falling "
                                     "back to '{}' for the proposals as well", m_eval_method, m_method);
             m_eval_calculator.reset();
+            m_eval_unusable = true;
             return m_calculator.get();
         }
     }
@@ -2703,7 +2738,7 @@ EnergyCalculator* ConfGen::evaluationCalculator() const
 
 void ConfGen::optimiseProposals(std::vector<Proposal>& proposals) const
 {
-    const bool split = !m_eval_method.empty() && m_eval_method != m_method;
+    const bool split = useSplitEvaluation();
     json calc_config;
     calc_config["method"] = split ? m_eval_method : m_method;
     calc_config["threads"] = m_threads;
@@ -2895,7 +2930,7 @@ double ConfGen::referenceEnergyOptimised(double& worst_gain_kJ) const
 {
     // The comparison base has to sit on the SAME surface as the proposals, otherwise "x kJ/mol below
     // the ensemble minimum" compares two different energy scales. Claude Generated (Aug 2026).
-    const bool split = !m_eval_method.empty() && m_eval_method != m_method;
+    const bool split = useSplitEvaluation();
     json calc_config;
     calc_config["method"] = split ? m_eval_method : m_method;
     calc_config["threads"] = m_threads;
@@ -3058,7 +3093,7 @@ void ConfGen::reportProposals(const std::vector<Proposal>& proposals, const std:
                                 "kJ/mol -- the ensemble is NOT at the minimum of '{}' (different method or "
                                 "convergence). Energies below are therefore compared against re-optimised "
                                 "templates, not against the file's own values.",
-            template_gain_kJ, (!m_eval_method.empty() && m_eval_method != m_method) ? m_eval_method : m_method);
+            template_gain_kJ, useSplitEvaluation() ? m_eval_method : m_method);
 
     if (novel > 0) {
         const double delta = (best_new - reference_opt) * kEh2kJ;

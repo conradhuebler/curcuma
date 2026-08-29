@@ -406,6 +406,14 @@ private:
      *  shared description calculator when the two methods are the same. */
     EnergyCalculator* evaluationCalculator() const;
 
+    /** Claude Generated (Aug 2026): is a SEPARATE evaluation surface actually in use? The plain
+     *  test `!m_eval_method.empty() && m_eval_method != m_method` was written at three call sites
+     *  and is not enough: it stays true after the evaluation calculator has been rejected as
+     *  unusable, so the method name still reached opt_config and the reference-energy calculator
+     *  while the judge had already fallen back -- which segfaulted on an unknown method name.
+     *  Consulting this instead keeps all sites on one answer, and it triggers the one-off probe. */
+    bool useSplitEvaluation() const;
+
     /**
      * @brief Assemble a structure from the individually most favourable elements (de novo template).
      *
@@ -490,6 +498,8 @@ private:
     // Claude Generated (Aug 2026): the surface that JUDGES a proposal, see evaluationCalculator().
     std::string m_eval_method;
     mutable std::unique_ptr<EnergyCalculator> m_eval_calculator;
+    /// Set once the evaluation method has been proven unusable; every split test then reads false.
+    mutable bool m_eval_unusable = false;
     std::string m_analysis_file;
     std::string m_proposal_ranking = "mixed";
     int m_concerted_max = 5;

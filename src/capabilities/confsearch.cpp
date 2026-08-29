@@ -3397,6 +3397,17 @@ int ConfSearch::PerformConfGen(const std::string& f, const std::string& method)
      * method down as ConfGen's evaluation method whenever it differs from the description method. */
     {
         std::string eval = m_confgen_eval_method;
+        /* Claude Generated (Aug 2026): "none" is this flag's DEFAULT and its documented way of
+         * saying "same method for both". It was never translated -- only "auto" was, and the
+         * emptiness test below then let the literal string through, so ConfGen was told to
+         * optimise and judge its proposals with a method called "none". That calculator returns a
+         * finite garbage energy and a NaN gradient, the optimiser refuses to start, and EVERY
+         * proposal is dropped. Measured: a 23-hour production run built 89 proposals across three
+         * cycles and produced nothing, and the only visible message was "RECOMBINE found no new
+         * conformer this cycle". Runs that passed -confgen_eval_method auto were unaffected, which
+         * is why it survived: with auto the value becomes either opt_method or empty. */
+        if (eval == "none" || eval == "None" || eval == "NONE")
+            eval.clear();
         if (eval == "auto")
             eval = (m_opt_method != method) ? m_opt_method : std::string();
         // The method sub-scopes are already in cfg via ChildConfig, so the evaluation method finds
