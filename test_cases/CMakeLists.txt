@@ -132,6 +132,17 @@ if(USE_PCH)
         target_precompile_headers(test_gfnff_grad_traj REUSE_FROM curcuma_core)
 endif()
 
+# Claude Generated (Aug 2026): analytic vs finite-difference gradient across a
+# react-topology rebuild event (topology_mode=react bond formation).
+add_executable(test_gfnff_react_fd test_gfnff_react_fd.cpp)
+target_link_libraries(test_gfnff_react_fd curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_react_fd REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_react_fd_gradient
+         COMMAND test_gfnff_react_fd
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
 # Copy reference data to build tree so tests can find them
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})

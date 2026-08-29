@@ -164,6 +164,10 @@ set_tests_properties(cli_simplemd_10_gfnff_polymer_md PROPERTIES TIMEOUT 3600 LA
 add_cli_test(simplemd 11_diagnostics_dump)
 set_tests_properties(cli_simplemd_11_diagnostics_dump PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;diagnostics")
 add_cli_test(simplemd 12_eeq_cutoff_auto)
+add_cli_test(simplemd 13_gfnff_react_noevent)
+add_cli_test(simplemd 14_gfnff_react_h_recombination)
+set_tests_properties(cli_simplemd_13_gfnff_react_noevent PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;react")
+set_tests_properties(cli_simplemd_14_gfnff_react_h_recombination PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;react")
 set_tests_properties(cli_simplemd_12_eeq_cutoff_auto PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;eeq_cutoff")
 
 # =============================================================================
