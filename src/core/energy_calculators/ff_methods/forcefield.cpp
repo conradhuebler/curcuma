@@ -2692,6 +2692,15 @@ double ForceField::Calculate(bool gradient)
                 diag["hbond"] = m_energy_hbond;
                 diag["xbond"] = m_energy_xbond;
 
+                // Claude Generated (Aug 2026): per-bridge HB energies {donor, H, acceptor, E_Eh}
+                // for the saturation diagnostics; sum equals diag["hbond"].
+                json bridges = json::array();
+                for (auto* thread : m_stored_threads)
+                    for (const auto& b : thread->HBBridgeEnergies())
+                        bridges.push_back({ static_cast<int>(b[0]), static_cast<int>(b[1]),
+                            static_cast<int>(b[2]), b[3] });
+                diag["hb_bridges"] = bridges;
+
                 diag["n_threads"] = static_cast<int>(m_stored_threads.size());
 
                 std::ofstream diag_file("gfnff_diag_energy.json");

@@ -88,6 +88,7 @@ int ForceFieldThread::execute()
     m_hbond_case2_count = 0;
     m_hbond_case3_count = 0;
     m_hbond_case4_count = 0;
+    m_hb_bridge_energies.clear();
     m_stors_energy = 0.0; // Claude Generated (March 2026): Reset triple bond torsion energy
     m_eq_energy = 0.0;  // Also reset EQ energy for consistency
 
@@ -2848,6 +2849,10 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
         // Claude Generated (May 2026, HB-investigation): per-case split for Fortran comparison.
         // Sum of cases must equal m_energy_hbond — verify in Phase 1 polymer test.
         const double E_HB_final = E_HB * m_final_factor;
+        // Per-bridge record (A, H, B, E) for the saturation diagnostics dumped at
+        // verbosity >= 3 (gfnff_diag_energy.json). A few dozen appends per call.
+        m_hb_bridge_energies.push_back({ static_cast<double>(hb.i), static_cast<double>(hb.j),
+            static_cast<double>(hb.k), E_HB_final });
         switch (hb.case_type) {
             case 1: m_hbond_case1_energy += E_HB_final; ++m_hbond_case1_count; break;
             case 2: m_hbond_case2_energy += E_HB_final; ++m_hbond_case2_count; break;

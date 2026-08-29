@@ -425,6 +425,10 @@ public:
     int HBondCase3Count() { return m_hbond_case3_count; }
     int HBondCase4Count() { return m_hbond_case4_count; }
 
+    // Claude Generated (Aug 2026, HB-saturation diagnostics): every evaluated bridge as
+    // {donor A, hydrogen H, acceptor B, energy}. Sum of energies equals m_energy_hbond.
+    const std::vector<std::array<double, 4>>& HBBridgeEnergies() const { return m_hb_bridge_energies; }
+
     // Claude Generated (December 2025): ATM three-body dispersion energy
     double ATMEnergy() { return m_atm_energy; }
 
@@ -599,6 +603,7 @@ protected:
     int m_hbond_case2_count = 0;
     int m_hbond_case3_count = 0;
     int m_hbond_case4_count = 0;
+    std::vector<std::array<double, 4>> m_hb_bridge_energies; ///< per bridge: {A, H, B, E_Eh}
 
     // Claude Generated (March 2026): Separate bonded/non-bonded repulsion for diagnostics
     double m_bonded_rep_energy = 0.0;    // GFN-FF bonded repulsion (REPSCALB=1.7583)
