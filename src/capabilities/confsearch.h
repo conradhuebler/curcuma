@@ -531,6 +531,12 @@ private:
     bool m_repair_snapshots = false;
     bool m_topology_lock = true; ///< Claude Generated (Aug 2026): one gfnff parameterisation per search
     int m_stage_saturation_abort = 2; ///< Claude Generated (Aug 2026): dry repetitions before a stage is cut short
+    // Claude Generated (Aug 2026): second, differently configured MD step per repetition
+    bool m_refine_md = false;
+    double m_refine_md_time = 400.0, m_refine_md_dt = 2.0, m_refine_md_temperature = 0.0, m_refine_md_k = 0.0005;
+    int m_refine_md_rattle = 2;
+    bool m_md_snapshot_append = false; ///< second MD step of a repetition appends to the snapshot file
+    int m_explore_md_rattle = -1; ///< Claude Generated (Aug 2026): explicit exploration RATTLE mode, -1 = inherit
     int m_rmsd_mtd_cap_eff = 0; ///< Claude Generated (Aug 2026): the bias cap actually in force (resolved from -1 = adaptive)
     std::string m_topo_lock_md, m_topo_lock_opt; ///< reference .topo.json per PES (empty = unlocked)
     int m_repair_max = 20, m_repair_max_bonds = 2, m_repair_max_iterations = 300;
@@ -630,7 +636,7 @@ private:
     PARAM(endT, Double, 300.0, "Temperature of the last exploration cycle in Kelvin.", "Schedule", {})
     PARAM(deltaT, Double, 50.0, "Temperature decrement between cycles in Kelvin.", "Schedule", {})
     PARAM(repeat, Int, 4, "How often a temperature stage is repeated. Each repetition runs ONE MD per seed structure and then re-seeds from the best structures found so far, so repetition 2 starts from what repetition 1 discovered. The high-level re-optimisation runs once per temperature, at the end of the last repetition. Parallelism comes from the number of seeds (seed_rank), not from re-running one seed.", "Schedule", {})
-    PARAM(time, Double, 2000.0, "Length of each MD run in femtoseconds.", "Schedule", {"max_time", "MaxTime"})
+    PARAM(explore_md_time, Double, 2000.0, "Length of each EXPLORATION MD run in femtoseconds (the biased discovery step; its densifying counterpart is refine_md_time).", "Schedule", {"time", "max_time", "MaxTime"})
 
     // --- Filtering ---
     PARAM(rmsd, Double, 1.25, "RMSD threshold in Angstrom used to deduplicate conformers and to size the MTD hills.", "Filtering", {})
@@ -650,7 +656,8 @@ private:
     PARAM(seed_window_decay, Double, 0.5, "Per-cycle multiplier applied to seed_energy_window in the exp schedule.", "Filtering", {})
 
     // --- Molecular Dynamics (canonical SimpleMD names, forwarded to the md json) ---
-    PARAM(time_step, Double, 1.0, "MD integration time step in femtoseconds.", "MD", {"dt"})
+    PARAM(explore_md_dt, Double, 1.0, "Integration time step of the EXPLORATION MD in femtoseconds (counterpart: refine_md_dt). 2 fs requires RATTLE (explore_md_rattle 1 or 2) and doubles the covered trajectory time per force evaluation -- measured reach from one minimum at fixed step count: 2.87 A (dt 1) vs 4.16 A (dt 2). dt 4 is NOT stable against the RMSD-MTD bias force.", "MD", {"time_step", "dt"})
+    PARAM(explore_md_rattle, Int, -1, "RATTLE mode of the EXPLORATION MD (0 off, 1 all bonds, 2 X-H only; counterpart: refine_md_rattle). -1 = inherit (the flat -rattle flag or the hot-cycle auto-enable). A value >= 0 counts as an explicit choice and is never weakened by the hot-cycle automatic.", "MD", {})
     PARAM(thermostat, String, "csvr", "Thermostat: berendsen, andersen, nosehover, csvr or none.", "MD", {})
     PARAM(coupling, Double, 10.0, "Thermostat coupling time in femtoseconds.", "MD", {})
     PARAM(seed, Int, -1, "Random seed for the MD runs. -1 uses the clock.", "MD", {})
@@ -684,6 +691,12 @@ private:
     PARAM(repair_max_bonds, Int, 2, "Only snapshots with at most this many changed bonds are repaired. More changed bonds means a different molecule, not a conformer with an artefact.", "Robustness", {})
     PARAM(repair_force, Double, 2.0, "Force constant of the distance restraints during a repair, in Eh/Angstrom^2.", "Robustness", {})
     PARAM(repair_max_iterations, Int, 300, "Maximum optimisation steps of the restrained repair stage.", "Robustness", {})
+    PARAM(refine_md, Bool, false, "Run a SECOND, differently configured MD step per repetition: after the biased exploration MD, every seed additionally gets a short REFINEMENT trajectory with its own settings (refine_md_time/_dt/_rattle/_temperature) and a near-zero bias constant (refine_md_k). Why: the RMSD-MTD bias is repulsive to everything known -- which is exactly right for DISCOVERY and exactly wrong for DENSIFYING the region around a good (ranking-PES-selected) seed; measured, the best seed is expelled from its own region immediately, and unbiased short gfnff MDs from good seeds outperformed even the gfn2 control (-7.7 vs +0.5 kJ/mol). The refinement step keeps the bias machinery only as its snapshot harvester (deposits still enter the shared pool and later repel future exploration, as any found region should) while its force is negligible. Costs one extra short MD per seed per repetition; the snapshots run through the same RELAX/REDUCE funnel as the exploration ones.", "Exploration", {})
+    PARAM(refine_md_time, Double, 400.0, "Trajectory length of the refinement MD step in fs. Short on purpose -- depth arises 40-160 fs from a good seed (measured), and the step densifies, it does not travel.", "Exploration", {})
+    PARAM(refine_md_dt, Double, 2.0, "Time step of the refinement MD in fs. 2 fs with RATTLE doubles the covered time per force evaluation; dt 4 is NOT bias-stable and is not offered here.", "Exploration", {})
+    PARAM(refine_md_rattle, Int, 2, "RATTLE mode of the refinement MD (0 off, 1 all bonds, 2 X-H only). An explore-side rattle=1 (all bonds) is never weakened.", "Exploration", {})
+    PARAM(refine_md_temperature, Double, 0.0, "Temperature of the refinement MD in K. 0 = the current temperature stage.", "Exploration", {})
+    PARAM(refine_md_k, Double, 0.0005, "Bias constant k (Eh) of the refinement MD. Near zero: the deposits still harvest snapshots into the shared pool, the bias FORCE on the trajectory is negligible, so the walker stays near its seed instead of being pushed away.", "Exploration", {})
     PARAM(stage_saturation_abort, Int, 2, "Skip the remaining MIDDLE repetitions of a temperature stage after this many CONSECUTIVE dry repetitions -- dry meaning: no new best energy on either PES and not one structure added within seed_energy_window of the running global minimum. The LAST repetition of the stage always runs in full, because the once-per-stage finalisation (REFINE, seed selection) is gated on it. So with repeat 5 and saturation after repetition 2, repetitions 3-4 are skipped and repetition 5 finalises the stage. 0 disables. Measured motivation: the WEKLQ production run spent 3434 optimisations on three stages that never improved anything again, and a repeat-10 run stood still for 1500 optimisations; conversely cold stages DO deliver fine structure while their region still yields (four of the ten best conformers came from 300-400 K), which is why the criterion counts in-window additions and not only new minima.", "Efficiency", {})
     PARAM(topology_lock, Bool, true, "Lock the GFN-FF topology PERCEPTION of every child computation to the optimised input structure. After the initial optimisation, one reference .topo.json is written per PES whose method is gfnff, and every child (MD, snapshot optimisations, single points, ConfGen) adopts its hybridisation/itag and Phase-1 EEQ data instead of re-perceiving them from its own start geometry (-gfnff.topology_file; fingerprint-checked, so a structure whose BOND topology differs still derives fresh parameters and is caught by the species check as before). Why: without the lock every snapshot optimisation perceives its own topology -- a thermally distorted snapshot can cross a perception threshold, get parameters that legitimise its own distortion, and found a self-reinforcing artefact family (measured on WEKLQ: one =N-H at 179 deg -> sp via the GEODEP rule, 158 kJ/mol spurious depth, 75 percent of the pool within three temperature stages, all 10 deepest structures; the bonds-only species check passes the flip). It also removes the silently mixed energy scales of per-snapshot parameterisations (~1 kJ/mol routine spread between re-perceptions of the same conformer). Only affects force-field children (gfnff); QM methods have no perceived topology.", "Robustness", {})
     PARAM(topo_check, Bool, false, "Abort an MD run when the molecule fragments.", "Robustness", {})

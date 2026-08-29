@@ -706,6 +706,9 @@ void ConfSearch::start()
 
     // Claude Generated (Jun 2026): baseline RATTLE setting (whatever the user/registry chose).
     // Hot cycles override it with rattle_hot_mode; cooler cycles restore this baseline.
+    // Claude Generated (Aug 2026): explicit exploration RATTLE mode wins over the flat flag.
+    if (m_explore_md_rattle >= 0)
+        md["rattle"] = m_explore_md_rattle;
     nlohmann::json rattle_base = md.contains("rattle") ? md["rattle"] : nlohmann::json(0);
 
     // Save a copy of the initial optimised input structures as fallback seeds.
@@ -844,7 +847,8 @@ void ConfSearch::start()
         // constraint -- mode 1 (all bonds) is a superset of mode 2 (X-H only), and downgrading
         // it made a -dt 4 -rattle 1 -hmass 4 run (all-bond RATTLE is what makes dt 4 stable)
         // blow up with NaN gradients in its hot cycles. Only rattle=0 baselines are upgraded.
-        if (m_currentT >= m_rattle_threshold_temp && rattle_base.get<int>() == 0) {
+        if (m_currentT >= m_rattle_threshold_temp && rattle_base.get<int>() == 0
+            && m_explore_md_rattle < 0) {
             md["rattle"] = m_rattle_hot_mode;
             CurcumaLogger::result_fmt("ConfSearch: T={}K >= {}K -> RATTLE auto-enabled (mode {})",
                 m_currentT, m_rattle_threshold_temp, m_rattle_hot_mode);
@@ -900,6 +904,34 @@ void ConfSearch::start()
                     static_cast<int>(m_permutation_cache.size()));
             }
             PerformMolecularDynamics(m_in_stack, md);
+
+            // Claude Generated (Aug 2026): REFINEMENT MD step -- a second, differently configured
+            // trajectory per seed (see PARAM refine_md). The biased exploration above discovers;
+            // this step densifies the region around each (ranking-selected) seed: short, larger
+            // time step under RATTLE, and a near-zero bias constant so the deposit machinery still
+            // harvests snapshots into the shared pool while the bias force no longer expels the
+            // walker from the very region the seed was chosen for.
+            if (m_refine_md && !m_in_stack.empty()) {
+                nlohmann::json md_refine = md;
+                md_refine["max_time"] = m_refine_md_time;
+                md_refine["time_step"] = m_refine_md_dt;
+                // never weaken an explicit all-bond constraint (mode 1 is the superset of mode 2)
+                if (md.value("rattle", 0) != 1)
+                    md_refine["rattle"] = m_refine_md_rattle;
+                if (m_refine_md_temperature > 0.0) {
+                    md_refine["T"] = m_refine_md_temperature;
+                    md_refine["temperature"] = m_refine_md_temperature;
+                }
+                md_refine["rmsd_mtd_k"] = m_refine_md_k;
+                CurcumaLogger::result_fmt(
+                    "ConfSearch: refinement MD -- {} seed(s), {} fs at dt {} fs (RATTLE {}), T = {} K, k = {} Eh",
+                    static_cast<int>(m_in_stack.size()), m_refine_md_time, m_refine_md_dt,
+                    md_refine.value("rattle", 0),
+                    m_refine_md_temperature > 0.0 ? m_refine_md_temperature : m_currentT, m_refine_md_k);
+                m_md_snapshot_append = true; // append to the exploration snapshots, do not replace them
+                PerformMolecularDynamics(m_in_stack, md_refine);
+                m_md_snapshot_append = false;
+            }
 
             // Cross-temperature: log pool statistics after MD phase and prune
             if (m_bias_pool) {
@@ -2078,7 +2110,12 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
             : static_cast<int>(std::ceil(static_cast<double>(bias_count) / m_max_bias_export));
         int exported = 0;
         std::vector<int> exported_indices;
-        first = true;
+        // Claude Generated (Aug 2026): with the two-step MD (refine_md) this export runs TWICE per
+        // repetition on the same snapshot file; the second call must APPEND, or the refinement
+        // export silently replaces the exploration snapshots (measured: 20 explore snapshots
+        // overwritten by 7 refine ones, and since their pool entries were already marked exported,
+        // they were lost for good).
+        first = !m_md_snapshot_append;
         for (int i = 0; i < bias_count; i += stride) {
             Molecule mol(ref_mol);
             mol.setGeometry(new_snapshots[i].geometry);
@@ -4352,7 +4389,7 @@ void ConfSearch::LoadControlJson()
     // ChildConfig(). "gpu" is a global CLI parameter, so ConfigManager picks it up from the
     // global section even when it was not given as -confsearch.gpu.
     m_gpu = m_config.get<std::string>("gpu", std::string("none"));
-    m_time = m_config.get<double>("time");
+    m_time = m_config.get<double>("explore_md_time");
     m_startT = m_config.get<double>("startT");
     m_endT = m_config.get<double>("endT");
     m_deltaT = m_config.get<double>("deltaT");
@@ -4360,7 +4397,8 @@ void ConfSearch::LoadControlJson()
     m_rmsd = m_config.get<double>("rmsd");
     m_threads = m_config.get<int>("threads");
     m_energy_window = m_config.get<double>("energy_window");
-    m_dT = m_config.get<double>("time_step");
+    m_dT = m_config.get<double>("explore_md_dt");
+    m_explore_md_rattle = m_config.get<int>("explore_md_rattle"); // Claude Generated (Aug 2026)
     m_max_bias_export = m_config.get<int>("max_bias_export");
     m_bias_reset = m_config.get<std::string>("bias_reset");
     m_reduce_prefilter_window = m_config.get<double>("reduce_prefilter_window");
@@ -4386,6 +4424,13 @@ void ConfSearch::LoadControlJson()
     m_repair_snapshots = m_config.get<bool>("repair_snapshots");
     m_topology_lock = m_config.get<bool>("topology_lock"); // Claude Generated (Aug 2026)
     m_stage_saturation_abort = m_config.get<int>("stage_saturation_abort"); // Claude Generated (Aug 2026)
+    // Claude Generated (Aug 2026): explore/refine two-step MD
+    m_refine_md = m_config.get<bool>("refine_md");
+    m_refine_md_time = m_config.get<double>("refine_md_time");
+    m_refine_md_dt = m_config.get<double>("refine_md_dt");
+    m_refine_md_rattle = m_config.get<int>("refine_md_rattle");
+    m_refine_md_temperature = m_config.get<double>("refine_md_temperature");
+    m_refine_md_k = m_config.get<double>("refine_md_k");
     m_repair_max = m_config.get<int>("repair_max");
     m_repair_max_bonds = m_config.get<int>("repair_max_bonds");
     m_repair_force = m_config.get<double>("repair_force");
