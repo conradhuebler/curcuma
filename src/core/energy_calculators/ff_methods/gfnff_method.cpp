@@ -7862,7 +7862,13 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
                 if (is_metal(m_atoms[kk])) hyb[i] = 1;
                 if (m_atoms[jj] == 7 && m_atoms[kk] == 7 && nbdum[jj].size() <= 2 && nbdum[kk].size() <= 2)
                     hyb[i] = 1;  // N=N=N
-                if (phi > lintr) hyb[i] = 1;  // GEODEP
+                // GEODEP angle fallback. Guarded (nh_linear_fix, default true): an N that
+                // carries an H is never promoted to sp by the angle alone -- a thermally
+                // stretched =N-H would otherwise get theta0=180 and lock its own distortion
+                // in as the equilibrium (self-reinforcing artefact in conformer searches).
+                // All genuine sp N-H cases are caught by the structural rules above.
+                if (phi > lintr && !(nh > 0 && m_parameters.value("nh_linear_fix", true)))
+                    hyb[i] = 1;  // GEODEP
             }
             if (nb20i == 1) hyb[i] = 1;
         } else if (grp == 6) {  // O, S, Se, Te, Po
