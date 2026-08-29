@@ -411,6 +411,28 @@ double GFNFFGPUComputationalMethod::calculateEnergy(bool gradient)
     // Runs on GPU where coords already live. Result fed to GFNFF::needsFullTopologyUpdate()
     // to skip CPU O(N) Eigen matrix subtraction.
     m_gpu_workspace->setGeometry(geom_bohr);
+
+    // React topology mode (Claude Generated Aug 2026): run the CPU hysteresis scan;
+    // when it rebuilt the bonded terms, the whole device workspace is stale (bond/angle/
+    // torsion SoAs, repulsion partition, Coulomb params, EEQ fragment topology). Rebuild
+    // it from the refreshed cached parameter set by re-running initGPUWorkspace().
+    // Note: each rebuild leaks one ~100 KB parameter set (pre-existing CUDA heap
+    // workaround in initGPUWorkspace) — bounded by the number of bond-change events.
+    m_gfnff->updateReactiveTopologyIfNeeded();
+    if (m_gfnff->consumeReactRebuild()) {
+        m_gpu_workspace.reset();
+        m_eeq_gpu.reset();
+        if (!initGPUWorkspace()) {
+            m_has_error = true;
+            m_error_message = "react topology rebuild: GPU workspace reconstruction failed";
+            CurcumaLogger::error(m_error_message);
+            return 0.0;
+        }
+        m_gpu_workspace->setGeometry(geom_bohr);
+        m_cn_pairs_generated = false;
+        m_eeq_has_ref_geom = false;
+    }
+
     {
         bool needs_topo_update = m_gpu_workspace->checkDisplacement(0.5);
         m_gfnff->setExternalTopologyDecision(needs_topo_update);
