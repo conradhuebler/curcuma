@@ -3536,6 +3536,9 @@ void SimpleMD::EvaluateBias(bool do_deposit)
     }
 
     double current_bias = 0;    // exploration bias: drives force + deposition
+    double current_bias_unit = 0; // Claude Generated (Aug 2026): k-free sum (counter*Gaussian) --
+                                  // deposit criterion for k=0 harvest-only mode, where current_bias
+                                  // is identically zero and the k-scaled criterion would never fire
     double current_bias_wt = 0; // optional well-tempered energy (opt-in, COLVAR output only)
     double rmsd_reference = 0;
 
@@ -3709,6 +3712,7 @@ void SimpleMD::EvaluateBias(bool do_deposit)
                     m_bias_min_rmsd = rmsd;
                 double expr = exp(-rmsd * rmsd * m_alpha_rmsd);
                 current_bias += height * expr;
+                current_bias_unit += eff_counter * expr;
                 if (m_wtmtd)
                     current_bias_wt += m_k_rmsd * bs.factor * expr;
                 double dEdR = -2.0 * m_alpha_rmsd * height * rmsd * expr;
@@ -3834,9 +3838,15 @@ void SimpleMD::EvaluateBias(bool do_deposit)
         // to the number of existing reference structures → it is a new conformation.
         // First structure (pool empty) is always accepted.
         int pool_count = m_shared_pool->biasStructureCount();
+        // Claude Generated (Aug 2026): k = 0 is harvest-only mode (zero bias force, deposits still
+        // wanted). The k-scaled criterion is then 0 < 0 = never; use the k-free unit-height sums
+        // instead -- for k > 0 both formulations are the same inequality scaled by 1/k, but the
+        // k > 0 path stays untouched to remain bit-identical.
+        const double crit_bias = (m_k_rmsd > 0.0) ? current_bias : current_bias_unit;
+        const double crit_vmin = (m_k_rmsd > 0.0) ? m_vmin : RMSDMTD::vMin(1.0, m_alpha_rmsd, m_r_dep);
         bool deposit = !m_rmsd_fix_structure
-            && (strided ? (do_deposit && RMSDMTD::shouldDeposit(current_bias, m_vmin, pool_count))
-                        : (pool_count == 0 || current_bias * m_rmsd_econv < static_cast<double>(pool_count)));
+            && (strided ? (do_deposit && RMSDMTD::shouldDeposit(crit_bias, crit_vmin, pool_count))
+                        : (pool_count == 0 || crit_bias * m_rmsd_econv < static_cast<double>(pool_count)));
         // Claude Generated (Jun 2026, unconditional since Aug 2026): never deposit a fragmented
         // structure into the shared pool. This used to be gated on -topo_check (default off), so a
         // trajectory that had been torn apart kept filling the pool with debris -- measured on a
