@@ -539,8 +539,26 @@ GFNFF::GFNFF(const json& parameters)
     }
     m_threads = m_parameters.value("threads", 1);  // Claude Generated (WP1, May 2026)
 
-    // Extract topology mode
+    // Extract topology mode: auto (adaptive caching), constant (frozen), react
+    // (dynamic bond topology, Claude Generated Aug 2026). "default" aliases auto.
     m_topology_mode = m_parameters.value("topology_mode", "auto");
+    if (m_topology_mode == "default")
+        m_topology_mode = "auto";
+    if (m_topology_mode != "auto" && m_topology_mode != "constant" && m_topology_mode != "react") {
+        CurcumaLogger::warn(fmt::format("GFNFF: unknown topology_mode '{}', falling back to 'auto'", m_topology_mode));
+        m_topology_mode = "auto";
+    }
+    m_react_form_factor = m_parameters.value("react_bond_form_factor", 1.6);
+    m_react_break_factor = m_parameters.value("react_bond_break_factor", 2.6);
+    m_react_check_every = m_parameters.value("react_check_every", 5);
+    m_react_check_disp = m_parameters.value("react_check_disp_bohr", 0.25);
+    if (m_topology_mode == "react" && m_react_break_factor <= m_react_form_factor) {
+        CurcumaLogger::warn(fmt::format(
+            "GFNFF react: break factor {:.3f} <= form factor {:.3f} leaves no hysteresis; resetting to defaults 1.6/2.6",
+            m_react_break_factor, m_react_form_factor));
+        m_react_form_factor = 1.6;
+        m_react_break_factor = 2.6;
+    }
     m_cache_topology = m_parameters.value("cache_topology", true);
     m_print_timing = m_parameters.value("print_timing", true);
 
@@ -760,6 +778,43 @@ bool GFNFF::InitialiseMolecule()
     m_cached_topology.reset();
     m_cached_bond_list.reset();
     m_static_topology_valid = false;  // Reset static topology cache for new molecule
+
+    // React topology mode (Claude Generated Aug 2026): guards + initial bond-set seed.
+    if (m_topology_mode == "react") {
+        if (m_static_charges || m_static_cn) {
+            CurcumaLogger::error(
+                "GFN-FF topology_mode=react is incompatible with static_charges/static_cn "
+                "(gfnff-fast): frozen CN/charges cannot follow a changing bond topology.");
+            return false;
+        }
+        if (m_atomcount > 2000) {
+            CurcumaLogger::warn(fmt::format(
+                "GFN-FF react mode with {} atoms: each topology rebuild is O(N^3); expect stalls at bond-change events.",
+                m_atomcount));
+        }
+        // Seed the reactive bond set BEFORE parameter generation so bond terms,
+        // adjacency, EEQ fragment constraints and the repulsion partition are all
+        // built from the same list. Mol-provided bonds (m_forced_bonds) act as the
+        // seed if present; otherwise geometric detection at the plain 1.3 factor.
+        m_react_bonds = getCachedBondList();
+        m_forced_bonds = m_react_bonds;
+        // The bond-list call above marked the geometry as seen in the SHARED
+        // m_geometry_tracker, which would make getCachedTopology() return the (empty)
+        // cached topology below. Reset tracker + bond cache so initialisation takes
+        // the full topology path; the list regenerates identically from m_forced_bonds.
+        m_cached_bond_list.reset();
+        m_geometry_tracker.reset();
+        m_react_ref_geometry = m_geometry_bohr;
+        m_react_calls = 0;
+        m_react_rebuild_count = 0;
+        m_react_rebuilt = false;
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::result(fmt::format(
+                "GFN-FF react topology mode: {} initial bonds, form/break hysteresis {:.2f}/{:.2f}, scan every {} calls or {:.2f} Bohr displacement",
+                m_react_bonds.size(), m_react_form_factor, m_react_break_factor,
+                m_react_check_every, m_react_check_disp));
+        }
+    }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Validating molecule structure...");
@@ -1689,6 +1744,180 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     }
 }
 
+// ===========================================================================
+// React topology mode (Claude Generated Aug 2026)
+// Event-driven reactive bond topology: bonds may form and break during MD.
+// The hysteresis scan owns the bond list via m_forced_bonds, so every topology
+// consumer (adjacency, EEQ fragment constraints, repulsion partition, rings,
+// Hueckel, BATM) stays consistent with it. See docs/GFNFF_REACT_TOPOLOGY.md.
+// ===========================================================================
+
+void GFNFF::syncLegacyForceField(const GFNFFParameterSet& ff_params)
+{
+    if (!m_forcefield)
+        return;
+
+    m_forcefield->setGFNFFParameters(ff_params);
+
+    // Phase-1 topology charges for BATM (Fortran gfnff_engrad.F90:620 uses topo%qa).
+    // Must happen AFTER setGFNFFParameters(), which (re)creates threads via AutoRanges().
+    if (m_cached_topology.has_value() && m_cached_topology->topology_charges.size() > 0) {
+        m_forcefield->distributeTopologyCharges(m_cached_topology->topology_charges);
+    }
+
+    // CN, CNF and CN derivatives for Coulomb charge-derivative gradients
+    // (Fortran gfnff_engrad.F90:418-422).
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+    Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+
+    Vector cnf(m_atoms.size());
+    for (size_t i = 0; i < m_atoms.size(); ++i) {
+        int z = m_atoms[i];
+        cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
+                    ? GFNFFParameters::cnf_eeq[z - 1]
+                    : 0.0;
+    }
+
+    CNDerivStore dcn = calculateCoordinationNumberDerivatives(cn);
+    m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
+}
+
+bool GFNFF::detectReactiveBondChanges()
+{
+    const std::set<std::pair<int, int>> current(m_react_bonds.begin(), m_react_bonds.end());
+    std::vector<std::pair<int, int>> next;
+    next.reserve(m_react_bonds.size() + 8);
+    std::vector<std::pair<int, int>> formed, broken;
+
+    std::vector<double> rcov(m_atomcount), fat_val(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        rcov[i] = getCovalentRadius(m_atoms[i]);
+        fat_val[i] = fat[m_atoms[i]];
+    }
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int j = i + 1; j < m_atomcount; ++j) {
+            double r = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+            double thr = (rcov[i] + rcov[j]) * fat_val[i] * fat_val[j];
+            if (current.count({ i, j }) > 0) {
+                // Existing bond survives until it stretches past the break threshold
+                if (r > m_react_break_factor * thr)
+                    broken.emplace_back(i, j);
+                else
+                    next.emplace_back(i, j);
+            } else if (r < m_react_form_factor * thr) {
+                next.emplace_back(i, j);
+                formed.emplace_back(i, j);
+            }
+        }
+    }
+
+    if (formed.empty() && broken.empty())
+        return false;
+
+    m_react_bonds = std::move(next);
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        auto atom_label = [&](int a) {
+            int z = m_atoms[a];
+            const std::string& sym = (z >= 1 && z < static_cast<int>(Elements::ElementAbbr.size()))
+                                       ? Elements::ElementAbbr[z] : "?";
+            return fmt::format("{}{}", sym, a + 1);
+        };
+        for (const auto& [i, j] : formed)
+            CurcumaLogger::result(fmt::format("REACT bond formed: {}-{}", atom_label(i), atom_label(j)));
+        for (const auto& [i, j] : broken)
+            CurcumaLogger::result(fmt::format("REACT bond broken: {}-{}", atom_label(i), atom_label(j)));
+    }
+    return true;
+}
+
+void GFNFF::updateReactiveTopologyIfNeeded()
+{
+    if (m_topology_mode != "react" || !m_initialized)
+        return;
+
+    ++m_react_calls;
+
+    bool scan = (m_react_check_every > 0) && (m_react_calls % m_react_check_every == 0);
+    if (!scan && m_react_check_disp > 0.0
+        && m_react_ref_geometry.rows() == m_geometry_bohr.rows()) {
+        double max_disp = (m_geometry_bohr - m_react_ref_geometry).array().abs().maxCoeff();
+        scan = (max_disp > m_react_check_disp);
+    }
+    if (!scan)
+        return;
+
+    bool changed = detectReactiveBondChanges();
+    m_react_ref_geometry = m_geometry_bohr;
+    if (changed)
+        rebuildReactiveTopology();
+}
+
+bool GFNFF::rebuildReactiveTopology()
+{
+    const int verb = CurcumaLogger::get_verbosity();
+
+    // Diagnostic: energy on the OLD topology at the current geometry, so the
+    // discontinuity introduced by the rebuild (dE_jump) is measured, not hidden.
+    // Requires CN state from a previous step; skipped otherwise.
+    const bool diag = (verb >= 1) && m_workspace && (m_last_cn.size() == m_atomcount);
+    double e_before = 0.0;
+    if (diag) {
+        m_workspace->setGeometry(m_geometry_bohr);
+        e_before = m_workspace->calculate(false);
+    }
+
+    m_forced_bonds = m_react_bonds;
+
+    // Force the full topology path in getCachedTopology(): the bond list changed even
+    // if atoms moved less than the 0.5 Bohr displacement trigger. The react scan keeps
+    // its own reference geometry (m_react_ref_geometry) and never reads this tracker.
+    m_cached_bond_list.reset();
+    m_geometry_tracker.reset();
+    m_static_topology_valid = false;
+
+    GFNFFParameterSet ff_params;
+    try {
+        ff_params = generateGFNFFParameterSet();
+    } catch (const std::exception& e) {
+        CurcumaLogger::error(std::string("REACT rebuild: parameter generation failed: ") + e.what());
+        return false;
+    }
+
+    ff_params.dispersion_enabled = m_parameters.value("dispersion", true);
+    ff_params.hbond_enabled = m_parameters.value("hbond", true);
+    ff_params.repulsion_enabled = m_parameters.value("repulsion", true);
+    ff_params.coulomb_enabled = m_parameters.value("coulomb", true);
+
+    // Legacy ForceField engine: parameters + topology charges + CN/dcn (kept consistent
+    // even though the energy path runs through FFWorkspace).
+    syncLegacyForceField(ff_params);
+
+    // Refresh the heap copy for external consumers (GPU rebuild path reads a clone).
+    m_cached_parameter_set = std::make_unique<GFNFFParameterSet>(ff_params);
+
+    // Active engine: full interaction-list swap + re-partition. Atom types, thread
+    // pool and partition count survive inside the workspace.
+    if (m_workspace) {
+        m_workspace->rebuildInteractionLists(std::move(ff_params));
+    }
+
+    m_react_rebuilt = true;
+    ++m_react_rebuild_count;
+    m_hbxb_updated = true; // HB/XB lists were rebuilt inside parameter generation
+
+    if (diag) {
+        double e_after = m_workspace->calculate(false);
+        double de = e_after - e_before;
+        CurcumaLogger::result(fmt::format(
+            "REACT rebuild #{}: {} bonds, dE_jump = {:.6f} Eh ({:+.1f} kJ/mol)",
+            m_react_rebuild_count, m_react_bonds.size(), de,
+            de * CurcumaUnit::Energy::HARTREE_TO_KJMOL));
+    }
+    return true;
+}
+
 double GFNFF::Calculation(bool gradient)
 {
     // Claude Generated (February 2026): Start total calculation timer for verbosity 1+
@@ -1742,6 +1971,11 @@ double GFNFF::Calculation(bool gradient)
     // forget to refresh m_shared_srab to the CURRENT geometry, Phase 2 sees stale
     // distances from the previous MD step and produces wrong charges → wrong
     // gradient → CSVR thermostat exchange ~2× XTB reference (commit 94bdeec bug).
+    // React topology mode (Claude Generated Aug 2026): re-detect bonds with hysteresis
+    // and rebuild all bonded terms BEFORE distances/CN/EEQ/HB-XB, so every consumer in
+    // this step sees the new topology.
+    updateReactiveTopologyIfNeeded();
+
     computeSharedDistances();
     if (m_forcefield) {
         m_forcefield->setSharedDistances(&m_shared_srab, &m_shared_sqrab);
@@ -2923,12 +3157,14 @@ bool GFNFF::initializeForceField()
     }
 
     try {
-        m_forcefield->setGFNFFParameters(ff_params);
+        // Parameters + Phase-1 topology charges + CN/CNF/dcn for the legacy engine.
+        // Shared with rebuildReactiveTopology() (react mode). Claude Generated Aug 2026.
+        syncLegacyForceField(ff_params);
         if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::success("m_forcefield->setGFNFFParameters() completed successfully");
+            CurcumaLogger::success("syncLegacyForceField() completed successfully");
         }
     } catch (const std::exception& e) {
-        CurcumaLogger::error(std::string("m_forcefield->setGFNFFParameters() failed: ") + e.what());
+        CurcumaLogger::error(std::string("syncLegacyForceField() failed: ") + e.what());
         return false;
     }
 
@@ -2969,41 +3205,9 @@ bool GFNFF::initializeForceField()
         }
     }
 
-    // EEQ charges already distributed by setGFNFFParameters() → no need to call distributeEEQCharges here
-
-    // Claude Generated (Mar 6, 2026): Distribute Phase-1 topology charges for BATM AFTER setParameter()
-    // Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
-    // CRITICAL: Must happen AFTER setParameter() which creates threads via AutoRanges().
-    if (m_cached_topology.has_value() && m_cached_topology->topology_charges.size() > 0) {
-        m_forcefield->distributeTopologyCharges(m_cached_topology->topology_charges);
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format("Phase-1 topology charges distributed for BATM ({} atoms)",
-                                           m_cached_topology->topology_charges.size()));
-        }
-    }
-
-    // Claude Generated (Feb 1, 2026): Calculate and distribute CN, CNF, and CN derivatives
-    // Reference: Fortran gfnff_engrad.F90:418-422 - for Coulomb charge derivative gradients
-    {
-        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-        Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
-
-        Vector cnf(m_atoms.size());
-        for (size_t i = 0; i < m_atoms.size(); ++i) {
-            int z = m_atoms[i];
-            cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
-                        ? GFNFFParameters::cnf_eeq[z - 1]
-                        : 0.0;
-        }
-
-        // Claude Generated (WP4, May 2026): CNDerivStore replaces std::vector<SpMatrix>
-        CNDerivStore dcn = calculateCoordinationNumberDerivatives(cn);
-        m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("CN, CNF, and CN derivatives calculated and distributed for Coulomb gradients");
-        }
-    }
+    // EEQ charges are distributed by syncLegacyForceField() above (parameters +
+    // Phase-1 topology charges for BATM + CN/CNF/dcn for Coulomb charge-derivative
+    // gradients — Fortran refs gfnff_engrad.F90:620 and :418-422).
 
     // Claude Generated (Mar 2026): Create FFWorkspace from copy of ff_params (single generation)
     // CRITICAL: Do NOT call generateGFNFFParameterSet() again — a third call causes heap corruption.
@@ -7509,6 +7713,43 @@ std::vector<Bond> GFNFF::generateBondsNative(const TopologyInfo& topo_info) cons
     std::vector<Bond> bonds;
     double bond_threshold = 1.3;
 
+    auto make_bond = [&](int i, int j, double distance) {
+        auto bond_params = getGFNFFBondParameters(i, j, m_atoms[i], m_atoms[j], distance, topo_info);
+
+        Bond b;
+        b.type = 3;
+        b.i = i;
+        b.j = j;
+        b.k = 0;
+        b.distance = distance;
+        b.fc = bond_params.force_constant;
+        b.r0_ij = bond_params.equilibrium_distance;
+        b.r0_ik = 0.0;
+        b.exponent = bond_params.alpha;
+        b.rabshift = bond_params.rabshift;
+        b.fqq = bond_params.fqq;
+        b.z_i = bond_params.z_i;
+        b.z_j = bond_params.z_j;
+        b.r0_base_i = bond_params.r0_base_i;
+        b.r0_base_j = bond_params.r0_base_j;
+        b.cnfak_i = bond_params.cnfak_i;
+        b.cnfak_j = bond_params.cnfak_j;
+        b.ff = bond_params.ff;
+
+        bonds.push_back(b);
+    };
+
+    // Forced/react topology (Claude Generated Aug 2026): when an external or reactive
+    // bond list owns the topology, generate bond terms for exactly those pairs instead
+    // of re-running the geometric criterion. This keeps the bond-term list identical to
+    // the topology bond list (adjacency, EEQ fragments, repulsion partition). The
+    // geometric branch below stays bit-identical for the default path.
+    if (!m_forced_bonds.empty()) {
+        for (const auto& [i, j] : getCachedBondList()) {
+            double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+            make_bond(i, j, distance);
+        }
+    } else {
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = i + 1; j < m_atomcount; ++j) {
             Vector ri = m_geometry_bohr.row(i);
@@ -7519,31 +7760,10 @@ std::vector<Bond> GFNFF::generateBondsNative(const TopologyInfo& topo_info) cons
             double rcov_j = getCovalentRadius(m_atoms[j]);
 
             if (distance < bond_threshold * (rcov_i + rcov_j)) {
-                auto bond_params = getGFNFFBondParameters(i, j, m_atoms[i], m_atoms[j], distance, topo_info);
-
-                Bond b;
-                b.type = 3;
-                b.i = i;
-                b.j = j;
-                b.k = 0;
-                b.distance = distance;
-                b.fc = bond_params.force_constant;
-                b.r0_ij = bond_params.equilibrium_distance;
-                b.r0_ik = 0.0;
-                b.exponent = bond_params.alpha;
-                b.rabshift = bond_params.rabshift;
-                b.fqq = bond_params.fqq;
-                b.z_i = bond_params.z_i;
-                b.z_j = bond_params.z_j;
-                b.r0_base_i = bond_params.r0_base_i;
-                b.r0_base_j = bond_params.r0_base_j;
-                b.cnfak_i = bond_params.cnfak_i;
-                b.cnfak_j = bond_params.cnfak_j;
-                b.ff = bond_params.ff;
-
-                bonds.push_back(b);
+                make_bond(i, j, distance);
             }
         }
+    }
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();

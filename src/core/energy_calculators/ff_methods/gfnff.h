@@ -290,6 +290,14 @@ PARAM(solvent_model, String, "alpb",
       "GFN-FF implicit solvation model: 'alpb' (default, P16 Born kernel) or 'gbsa' "
       "(Still kernel, no shape term). CPCM is not implemented natively. Legacy numeric "
       "codes (2=gbsa, 3=alpb) are also accepted.", "Solvation", {})
+// React topology mode (Claude Generated Aug 2026): event-driven reactive bond topology.
+// Bonds may form and break during MD; all bonded terms are rebuilt at change events.
+// See docs/GFNFF_REACT_TOPOLOGY.md. PARAMs stay single-line, see note above.
+PARAM(topology_mode, String, "auto", "Topology mode: auto = adaptive two-tier caching, constant = frozen after init, react = bond topology is re-detected with hysteresis during MD and all bonded terms are rebuilt at change events. default is accepted as an alias for auto.", "Basic", {})
+PARAM(react_bond_form_factor, Double, 1.6, "React mode: a non-bonded pair becomes a bond when r < factor * covalent-radius sum * element fat scaling. Optimistic on purpose: the Gaussian bond well is weak at this distance and formation is expected mid-collision. Must stay below react_bond_break_factor and below typical hydrogen-bond contact distances.", "Reactive", {})
+PARAM(react_bond_break_factor, Double, 2.6, "React mode: an existing bond is removed when r > factor * covalent-radius sum * element fat scaling. Conservative on purpose: the bond is kept until its Gaussian well has largely decayed, so removal causes only a small energy jump. The wide gap to react_bond_form_factor is the hysteresis that prevents flicker.", "Reactive", {})
+PARAM(react_check_every, Int, 5, "React mode: run the O N^2 hysteresis bond scan every N energy calls. 0 = displacement-triggered only.", "Reactive", {})
+PARAM(react_check_disp_bohr, Double, 0.25, "React mode: also run the bond scan when any atom moved more than this distance in Bohr since the last scan. 0 disables the displacement trigger.", "Reactive", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -730,6 +738,17 @@ public:
      */
     std::unique_ptr<GFNFFParameterSet> consumeCachedParameterSet() { return std::move(m_cached_parameter_set); }
 
+    /**
+     * @brief Heap clone of the current cached parameter set.
+     *
+     * Claude Generated (Aug 2026): for consumers that must not steal the cached copy,
+     * e.g. the GPU wrapper rebuilding its device workspace after a react-mode topology
+     * change. Returns nullptr if no set is cached.
+     */
+    std::unique_ptr<GFNFFParameterSet> cloneCachedParameterSet() const {
+        return m_cached_parameter_set ? std::make_unique<GFNFFParameterSet>(*m_cached_parameter_set) : nullptr;
+    }
+
     // === GPU orchestration helpers (Claude Generated March 2026) ===
     // These expose internal CN/EEQ computation so that GGFNFFComputationalMethod
     // can orchestrate GPU + CPU-residual without duplicating logic.
@@ -835,6 +854,31 @@ public:
         m_full_topology_recalculated = false;
         return r;
     }
+
+    // === React topology mode (Claude Generated Aug 2026) ===
+    // Event-driven reactive bond topology: the bond list is re-detected with a distance
+    // hysteresis during MD and all bonded terms (bonds, angles, torsions, inversions)
+    // plus the bonded/non-bonded repulsion partition are rebuilt when it changes.
+    // Active only for topology_mode == "react". See docs/GFNFF_REACT_TOPOLOGY.md.
+
+    /**
+     * @brief Run the react-mode bond scan and rebuild all bonded terms if the bond set changed.
+     *
+     * No-op unless topology_mode == "react". Called at the start of Calculation() so
+     * EEQ constraints, HB/XB detection and all force-field terms see the new topology
+     * within the same step.
+     */
+    void updateReactiveTopologyIfNeeded();
+
+    /// One-shot: true if updateReactiveTopologyIfNeeded() rebuilt the topology since the
+    /// last call. Consumed by the GPU/HIP wrappers to trigger a device workspace rebuild.
+    bool consumeReactRebuild() { bool r = m_react_rebuilt; m_react_rebuilt = false; return r; }
+
+    /// Current authoritative react-mode bond set (canonical i<j pairs). Empty unless react mode.
+    const std::vector<std::pair<int,int>>& reactiveBonds() const { return m_react_bonds; }
+
+    /// Number of bonded-term rebuilds since initialisation (react mode).
+    int reactiveRebuildCount() const { return m_react_rebuild_count; }
 
     const std::vector<GFNFFHydrogenBond>& getLastHBonds() const { return m_last_hbonds; }
     const std::vector<GFNFFHalogenBond>& getLastXBonds() const { return m_last_xbonds; }
@@ -2512,6 +2556,39 @@ private:
     mutable std::optional<std::vector<std::pair<int,int>>> m_cached_bond_list;
 
     std::vector<std::pair<int,int>> m_forced_bonds; ///< External bonds merged with geometric detection
+
+    // React topology mode state (Claude Generated Aug 2026). See docs/GFNFF_REACT_TOPOLOGY.md.
+    std::vector<std::pair<int,int>> m_react_bonds; ///< Authoritative bond set (canonical i<j), owns m_forced_bonds in react mode
+    Eigen::MatrixXd m_react_ref_geometry; ///< Geometry (Bohr) at the last hysteresis scan
+    long m_react_calls = 0; ///< Energy calls since init (drives the scan cadence)
+    int m_react_rebuild_count = 0; ///< Bonded-term rebuilds so far
+    bool m_react_rebuilt = false; ///< One-shot flag consumed by the GPU/HIP wrappers
+    double m_react_form_factor = 1.6; ///< Bond-formation threshold factor (optimistic)
+    double m_react_break_factor = 2.6; ///< Bond-keeping threshold factor (conservative)
+    int m_react_check_every = 5; ///< Scan every N energy calls (0 = displacement only)
+    double m_react_check_disp = 0.25; ///< Scan when any atom moved more than this (Bohr)
+
+    /**
+     * @brief React mode: O(N^2) hysteresis scan over all atom pairs; updates m_react_bonds.
+     * An existing bond survives while r < break_factor*thr; a new pair becomes a bond
+     * at r < form_factor*thr, with thr = (rcov_i+rcov_j)*fat_i*fat_j.
+     * @return true if the bond set changed
+     */
+    bool detectReactiveBondChanges();
+
+    /**
+     * @brief React mode: regenerate ALL bonded terms, the repulsion partition, Coulomb
+     * parameters and HB/XB lists from the current m_react_bonds; push into both engines.
+     * @return true on success
+     */
+    bool rebuildReactiveTopology();
+
+    /**
+     * @brief Push a generated parameter set into the legacy ForceField engine
+     * (parameters + Phase-1 topology charges + CN/CNF/dcn). Shared by
+     * initializeForceField() and rebuildReactiveTopology().
+     */
+    void syncLegacyForceField(const GFNFFParameterSet& ff_params);
 
     // Topology caching mode: "auto" (two-tier caching) or "constant" (never recalculate)
     std::string m_topology_mode = "auto";

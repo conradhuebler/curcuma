@@ -169,6 +169,13 @@ void FFWorkspace::setCNDerivatives(const Vector& cn, const Vector& cnf,
     m_dcn = dcn;
 }
 
+// Claude Generated (Aug 2026): react topology mode — full list swap on a live workspace.
+void FFWorkspace::rebuildInteractionLists(GFNFFParameterSet&& params)
+{
+    setInteractionLists(std::move(params));
+    partition();
+}
+
 void FFWorkspace::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds)
 {
     m_hbonds = hbonds;
