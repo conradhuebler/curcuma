@@ -1741,8 +1741,11 @@ void ConfSearch::start()
                 eff_seed_window, m_global_min);
 
         // Energy tracking: cycle 1 sets the initial reference; subsequent cycles compare against both.
-        // This is the EXPLORATION (md_method) energy progression -- it narrates the gfnff search and
-        // is intentionally NOT the opt_method ranking (logged separately above / in the final stats).
+        // This is the FUNNEL-PES energy progression: since -relax_pes opt (the default) the whole
+        // per-repetition funnel -- and with it lowest_energy / best_energy / initial_energy -- lives
+        // on RelaxMethod(), which is opt_method under "opt" and md_method under "md". The labels
+        // below therefore print RelaxMethod(); printing m_md_method here put a gfnff tag on gfn2
+        // numbers in every dual run (Claude Generated, Aug 2026).
         // Claude Generated (Jul 2026): the reference is the optimised INPUT structure, set before the
         // first MD ran (see the initial optimisation). The first cycle is therefore reported like
         // every other one -- it used to overwrite the reference with its own result, which made the
@@ -1752,7 +1755,7 @@ void ConfSearch::start()
             initial_energy = lowest_energy;
             best_energy = lowest_energy;
             CurcumaLogger::warn_fmt("ConfSearch: no energy from the initial optimisation -- using this cycle's lowest {} structure as reference ({:.6f} Eh)",
-                m_md_method, initial_energy);
+                RelaxMethod(), initial_energy);
         }
         if (lowest_energy < std::numeric_limits<double>::infinity()) {
             double delta_best = (best_energy - lowest_energy) * 2625.5;    // >0 = improvement vs. last best
@@ -1764,12 +1767,12 @@ void ConfSearch::start()
             if (lowest_energy < best_energy) {
                 CurcumaLogger::success_fmt("ConfSearch: New best ({})! {:.6f} Eh ({:.2f} kJ/mol below the previous best "
                                            "{:.6f} Eh, {:.2f} kJ/mol below the initial {:.6f} Eh)",
-                    m_md_method, lowest_energy, delta_best, best_energy, delta_initial, initial_energy);
+                    RelaxMethod(), lowest_energy, delta_best, best_energy, delta_initial, initial_energy);
                 best_energy = lowest_energy;
             } else {
                 CurcumaLogger::result_fmt("ConfSearch: No new best this cycle ({}): lowest {:.6f} Eh (best still "
                                           "{:.6f} Eh, {:.2f} kJ/mol below the initial {:.6f} Eh)",
-                    m_md_method, lowest_energy, best_energy, delta_initial, initial_energy);
+                    RelaxMethod(), lowest_energy, best_energy, delta_initial, initial_energy);
             }
             // Claude Generated (Jun 2026): report opt_method best alongside md_method in dual mode
             if (m_opt_method != m_md_method && best_energy_opt < std::numeric_limits<double>::infinity()) {
@@ -1946,13 +1949,16 @@ void ConfSearch::start()
                         CurcumaLogger::result_fmt("ConfSearch: initial structure remains the global minimum ({:.6f} Eh)", e_min);
                 }
             } else {
-                // Exploration side: md_method initial -> md_method running best (both on the md PES).
-                // This narrates the gfnff search; it is NOT the ranking and must not touch e_min.
-                if (initial_energy < std::numeric_limits<double>::infinity()
+                // Funnel side: initial -> running best, both on RelaxMethod(). Under -relax_pes md
+                // this narrates the exploration PES (the historical meaning); under the default
+                // -relax_pes opt the funnel lives on opt_method and this line would only repeat the
+                // ranking line below with a misleading md_method tag (Claude Generated, Aug 2026).
+                if (RelaxMethod() != m_opt_method
+                    && initial_energy < std::numeric_limits<double>::infinity()
                     && best_energy < std::numeric_limits<double>::infinity()) {
                     const double explore_gain_kj = (initial_energy - best_energy) * 2625.5;
                     CurcumaLogger::result_fmt("ConfSearch: exploration ({}) lowered its own minimum by {:.2f} kJ/mol ({:.6f} -> {:.6f} Eh) -- separate PES, not comparable to the {} ranking",
-                        m_md_method, explore_gain_kj, initial_energy, best_energy, m_opt_method);
+                        RelaxMethod(), explore_gain_kj, initial_energy, best_energy, m_opt_method);
                 }
                 // Ranking side: opt_method initial -> opt_method global minimum (both on the opt PES).
                 if (m_initial_energy_opt < std::numeric_limits<double>::infinity()) {
