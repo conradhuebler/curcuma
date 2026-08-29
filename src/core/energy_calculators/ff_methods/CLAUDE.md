@@ -640,6 +640,11 @@ std::string method = "d4";  // Matches Fortran reference
 - **MD speedup**: ~15x for topology phase when topology is constant (typical MD)
 - **Implementation**: `getCachedTopology()` in `gfnff_method.cpp`, `needsFullTopologyUpdate()` checks displacement
 
+### 🤖 React Topology Mode (Aug 2026, machine-tested)
+- **`topology_mode=react`**: dynamic bond topology (bonds form AND break in MD) via hysteresis scan + full bonded-term rebuild — [docs/GFNFF_REACT_TOPOLOGY.md](../../../../docs/GFNFF_REACT_TOPOLOGY.md)
+- NVT-only (dE_jump at rebuild events, logged); rebuild == fresh-init bit-identical (ctest `gfnff_react_fd_gradient`, `cli_simplemd_13/14`)
+- **Recorded pre-existing gradient residual**: analytic vs FD up to 1e-1 Eh/A for H-H (bond dynamic-r0 CN chain 2.4e-2 + partial repulsion gradient) — react-independent, tracked in `test_gfnff_react_fd`
+
 ### ✅ Tuning knobs — GPU CN pair list + HB list (Task #10/#11, Jun 2026)
 - 8 `gfnff` PARAMs trade perf/accuracy; defaults bit-identical to Fortran-parity. See [docs/GPU_GFNNF_DISCREPANCIES.md](../../../../docs/GPU_GFNNF_DISCREPANCIES.md#performanceaccuracy-tuning-knobs-task-10--11-june-2026)
 - Task #10: `gpu_cn_pair_regen` (default ON) rebuilds the stale-prone CN-deriv pair list on topology change; `gpu_cn_pair_cutoff_factor` widens it (`ff_workspace_gpu.cu`)

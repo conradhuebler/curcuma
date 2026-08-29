@@ -137,6 +137,8 @@ The native `gfnff` implementation is **AI-implemented and machine-tested** — h
 - **Gradient accuracy for large systems**: Dispersion gradients show √N accumulation error (expected for O(N²) terms, scientifically acceptable for MD/opt)
 - **GPU energy for polymer (1280 atoms)**: 8.9 µEh vs. 1 µEh tolerance — pre-existing, under investigation
 
+**Reactive MD (experimental)**: `-gfnff.topology_mode react` lets bonds form and break during MD (hysteresis re-detection + bonded-term rebuild, NVT-only) — see [docs/GFNFF_REACT_TOPOLOGY.md](docs/GFNFF_REACT_TOPOLOGY.md).
+
 **Known differences from Fortran reference** (see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)):
 - Sub-mEh agreement for most small/medium molecules
 - EEQ charge environment corrections (dxi) partially implemented
