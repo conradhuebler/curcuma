@@ -298,6 +298,8 @@ PARAM(react_bond_form_factor, Double, 1.6, "React mode: a non-bonded pair become
 PARAM(react_bond_break_factor, Double, 2.6, "React mode: an existing bond is removed when r > factor * covalent-radius sum * element fat scaling. Conservative on purpose: the bond is kept until its Gaussian well has largely decayed, so removal causes only a small energy jump. The wide gap to react_bond_form_factor is the hysteresis that prevents flicker.", "Reactive", {})
 PARAM(react_check_every, Int, 5, "React mode: run the O N^2 hysteresis bond scan every N energy calls. 0 = displacement-triggered only.", "Reactive", {})
 PARAM(react_check_disp_bohr, Double, 0.25, "React mode: also run the bond scan when any atom moved more than this distance in Bohr since the last scan. 0 disables the displacement trigger.", "Reactive", {})
+PARAM(react_refractory_scans, Int, 10, "React mode: a pair whose bond just broke may not re-form for this many scans. Interrupts the form/break cycle that otherwise pumps the recombination energy through the thermostat over and over. 0 disables.", "Reactive", {})
+PARAM(react_valence_cap, Bool, true, "React mode: refuse a new bond while an atom already uses its element valence plus one exchange slack, counting bond orders so multiple bonds consume valence. Prevents unphysical agglomerates; disable to sample unconstrained formation. Refused formations are logged at verbosity 2.", "Reactive", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -2567,6 +2569,9 @@ private:
     double m_react_break_factor = 2.6; ///< Bond-keeping threshold factor (conservative)
     int m_react_check_every = 5; ///< Scan every N energy calls (0 = displacement only)
     double m_react_check_disp = 0.25; ///< Scan when any atom moved more than this (Bohr)
+    int m_react_refractory_scans = 10; ///< Scans a broken pair must wait before re-forming
+    bool m_react_valence_cap = true; ///< Enforce the bond-order-aware valence cap on formation
+    std::map<std::pair<int, int>, int> m_react_refractory; ///< Pair -> remaining blocked scans
 
     /**
      * @brief React mode: O(N^2) hysteresis scan over all atom pairs; updates m_react_bonds.

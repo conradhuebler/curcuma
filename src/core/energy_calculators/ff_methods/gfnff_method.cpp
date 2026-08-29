@@ -552,6 +552,8 @@ GFNFF::GFNFF(const json& parameters)
     m_react_break_factor = m_parameters.value("react_bond_break_factor", 2.6);
     m_react_check_every = m_parameters.value("react_check_every", 5);
     m_react_check_disp = m_parameters.value("react_check_disp_bohr", 0.25);
+    m_react_refractory_scans = m_parameters.value("react_refractory_scans", 10);
+    m_react_valence_cap = m_parameters.value("react_valence_cap", true);
     if (m_topology_mode == "react" && m_react_break_factor <= m_react_form_factor) {
         CurcumaLogger::warn(fmt::format(
             "GFNFF react: break factor {:.3f} <= form factor {:.3f} leaves no hysteresis; resetting to defaults 1.6/2.6",
@@ -1795,14 +1797,56 @@ bool GFNFF::detectReactiveBondChanges()
         fat_val[i] = fat[m_atoms[i]];
     }
 
-    // Coordination cap for bond FORMATION: hydrogen (and helium) may hold at most 2
-    // bonds (allows the linear exchange intermediate), every other element at most 6
-    // (the angle generator skips centres with more than 6 neighbours). Without this
-    // cap a hot, confined system over-bonds into an unphysical cluster whose energy
-    // eventually turns NaN. Existing bonds are never removed by the cap — only new
-    // formations are refused.
-    auto coord_cap = [&](int a) { return (m_atoms[a] <= 2) ? 2 : 6; };
-    std::vector<int> coord(m_atomcount, 0);
+    // Coordination cap for bond FORMATION: normal element valence + 1 (the +1 allows
+    // the exchange intermediate, e.g. linear H-H-H or 5-coordinate carbon in flight).
+    // Strict for the 2nd period and halogens where hypervalence does not exist —
+    // without this, hot confined systems grow unphysical agglomerates (e.g. N with 6
+    // neighbours). Hypervalence-capable elements (Si, P, S, ...) and metals stay at 6,
+    // the angle generator's neighbour limit. Existing bonds are never removed by the
+    // cap — only new formations are refused. Empirical v1; the principled replacement
+    // is an over-coordination energy (docs/GFNFF_REACT_TOPOLOGY.md, Open refinements).
+    // Tick down refractory counters (one unit per scan).
+    for (auto it = m_react_refractory.begin(); it != m_react_refractory.end();) {
+        if (--(it->second) <= 0)
+            it = m_react_refractory.erase(it);
+        else
+            ++it;
+    }
+
+    // Valence cap for bond FORMATION, bond-order aware: an atom may take a new sigma
+    // bond only while its USED valence (sum of bond orders: sigma = 1 plus the Hueckel
+    // pi order of each existing bond) stays below the element valence + 1 exchange
+    // slack. Counting bond orders instead of neighbours matters for multiple bonds:
+    // N in N2 has one neighbour but all three valences used — it may take exactly one
+    // extra bond (the activation step), and more capacity only frees up once the N-N
+    // pi order drops after a rebuild. Strict for 2nd-period elements and halogens
+    // (no hypervalence); Si/P/S and metals keep the angle generator's limit of 6.
+    // Existing bonds are never removed by the cap — only new formations are refused.
+    // Empirical v1; the principled replacement is an over-coordination energy
+    // (docs/GFNFF_REACT_TOPOLOGY.md, Open refinements).
+    auto valence_cap = [&](int a) -> double {
+        switch (m_atoms[a]) {
+        case 1: case 2: return 1.0 + 1.0; // H, He
+        case 5: return 3.0 + 1.0; // B
+        case 6: return 4.0 + 1.0; // C
+        case 7: return 3.0 + 1.0; // N
+        case 8: return 2.0 + 1.0; // O
+        case 9: case 10: return 1.0 + 1.0; // F, Ne
+        case 17: case 35: case 53: return 1.0 + 1.0; // Cl, Br, I
+        default: return 6.0; // hypervalence-capable + metals
+        }
+    };
+    const std::vector<double>* pibo = nullptr;
+    if (m_cached_topology && !m_cached_topology->pi_bond_orders.empty()
+        && static_cast<int>(m_cached_topology->pi_bond_orders.size()) >= m_atomcount * (m_atomcount + 1) / 2)
+        pibo = &m_cached_topology->pi_bond_orders;
+    auto bond_order = [&](int i, int j) {
+        double bo = 1.0; // sigma
+        if (pibo)
+            bo += std::max(0.0, (*pibo)[lin(i, j)]);
+        return bo;
+    };
+    std::vector<double> valence_used(m_atomcount, 0.0);
 
     std::vector<std::pair<double, std::pair<int, int>>> candidates; // (r, pair)
     for (int i = 0; i < m_atomcount; ++i) {
@@ -1815,8 +1859,9 @@ bool GFNFF::detectReactiveBondChanges()
                     broken.emplace_back(i, j);
                 } else {
                     next.emplace_back(i, j);
-                    ++coord[i];
-                    ++coord[j];
+                    double bo = bond_order(i, j);
+                    valence_used[i] += bo;
+                    valence_used[j] += bo;
                 }
             } else if (r < m_react_form_factor * thr) {
                 candidates.emplace_back(r, std::make_pair(i, j));
@@ -1827,16 +1872,42 @@ bool GFNFF::detectReactiveBondChanges()
     // Closest candidates claim the remaining valence first.
     std::sort(candidates.begin(), candidates.end());
     for (const auto& [r, p] : candidates) {
-        if (coord[p.first] >= coord_cap(p.first) || coord[p.second] >= coord_cap(p.second))
+        // Both filters below suppress some real behaviour too (hypervalent
+        // intermediates beyond the +1 slack; geminate re-recombination inside the
+        // refractory window). They are therefore switchable PARAMs and every refusal
+        // is logged, so what they suppress stays measurable.
+        if (m_react_valence_cap
+            && (valence_used[p.first] + 1.0 > valence_cap(p.first) + 1e-6
+                || valence_used[p.second] + 1.0 > valence_cap(p.second) + 1e-6)) {
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info(fmt::format(
+                    "REACT formation refused (valence cap): atoms {}-{} (used {:.2f}/{:.2f} and {:.2f}/{:.2f})",
+                    p.first + 1, p.second + 1, valence_used[p.first], valence_cap(p.first),
+                    valence_used[p.second], valence_cap(p.second)));
             continue;
+        }
+        if (m_react_refractory.count(p) > 0) {
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info(fmt::format(
+                    "REACT formation refused (refractory): atoms {}-{} ({} scans left)",
+                    p.first + 1, p.second + 1, m_react_refractory[p]));
+            continue;
+        }
         next.push_back(p);
         formed.push_back(p);
-        ++coord[p.first];
-        ++coord[p.second];
+        valence_used[p.first] += 1.0;
+        valence_used[p.second] += 1.0;
     }
 
     if (formed.empty() && broken.empty())
         return false;
+
+    // Refractory period: a pair that just broke may not re-form for N scans. This
+    // interrupts the form/break cycle whose event jumps otherwise pump the
+    // recombination energy through the thermostat repeatedly.
+    if (m_react_refractory_scans > 0)
+        for (const auto& b : broken)
+            m_react_refractory[b] = m_react_refractory_scans;
 
     m_react_bonds = std::move(next);
 

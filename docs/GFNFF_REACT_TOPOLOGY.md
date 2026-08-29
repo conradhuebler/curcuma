@@ -86,20 +86,39 @@ The asymmetry is deliberate:
 - 3-/4-body terms of a fresh bond switch on through the existing distance
   damping `1/(1+r~^4)`, i.e. semi-smoothly; the repulsion re-partition
   (non-bonded alpha -> bonded alpha) jumps at the event.
-- **Formation valence cap (empirical):** a new bond is only formed while both
-  partners are below a hard coordination cap — 2 for H/He (allows the linear
-  exchange intermediate), 6 for everything else (matching the angle generator,
-  which skips centres with more than 6 neighbours). Closest candidate pairs claim
-  the remaining valence first. Without the cap a hot, confined system over-bonds
-  into an unphysical cluster whose energy eventually turns NaN (observed for
-  N2 + 3 H2 at 3500 K in a 3.5 A wall). The cap is empirical; the principled
-  replacement is an over-coordination energy (see Open refinements).
+- **Formation valence cap (empirical, bond-order aware, switchable):** a new bond
+  forms only while both partners' USED valence stays within the element valence
+  plus one exchange slack. Used valence sums bond orders (sigma = 1 plus the
+  Hueckel pi order of each existing bond), so multiple bonds consume valence:
+  N in N2 has one neighbour but all three valences used and may take exactly one
+  extra bond (the activation step); more capacity frees up only as the N-N pi
+  order drops after rebuilds. Caps: H/He/F/Ne/halogens 1+1, O 2+1, N 3+1, B 3+1,
+  C 4+1; hypervalence-capable elements and metals 6. Closest candidates claim the
+  remaining valence first. Without the cap a hot, confined system over-bonds into
+  an unphysical cluster whose energy eventually turns NaN (observed for N2 + 3 H2
+  at 3500 K in a 3.5 A wall). `react_valence_cap false` disables it.
+- **Post-break refractory period (switchable):** a pair whose bond broke may not
+  re-form for `react_refractory_scans` scans (default 10, ~25 fs at the default
+  cadence). This interrupts the form/break cycle that otherwise pumps the
+  recombination energy through the thermostat repeatedly. Measured for N2 + 3 H2
+  at 3500 K / 3.5 A wall / 20 ps: 301 events without cap+refractory, 35 with,
+  no NaN, final state N2H2 (diazene) + 4 H — the first hydrogenation step.
+- **Both filters suppress some real behaviour too**: hypervalent intermediates
+  beyond the +1 slack, and geminate re-recombination inside the refractory
+  window. They are deliberately switchable PARAMs, and every refused formation is
+  logged at verbosity >= 2, so what they suppress stays measurable. The pi orders
+  used by the cap stem from the last rebuild and are stale in between. The
+  principled replacement for both is an over-coordination energy (see Open
+  refinements).
 - **Event churn acts as an energy pump at extreme conditions.** A formation
   releases the well depth (-450 kJ/mol for H+H) and a later break costs only the
   decayed tail (+30 kJ/mol), so each form/break cycle injects net potential
   energy that the thermostat must drain. In a hot, dense system with frequent
-  events (measured: ~300 events / 20 ps for N2 + 3 H2 at 3500 K in a 3.5 A wall)
-  this drives artificial churn. At such conditions results are machinery
+  events this drives artificial churn (measured for N2 + 3 H2 at 3500 K in a
+  3.5 A wall: ~300 events / 20 ps without the refractory period, 35 with). The
+  recombination heat itself is real physics — in nature a third body carries it
+  away; here the thermostat plays that role, so use CSVR with a short coupling
+  time for reactive runs. At such conditions results are machinery
   demonstrations, not thermodynamics.
 - Angles at a centre with more than 6 neighbours are skipped by the generator
   (pre-existing rule); transiently hypervalent atoms during an exchange are
@@ -118,6 +137,8 @@ The asymmetry is deliberate:
 | `react_bond_break_factor` | 2.6 | retention radius factor (conservative) |
 | `react_check_every` | 5 | scan every N energy calls (0 = displacement only) |
 | `react_check_disp_bohr` | 0.25 | scan when any atom moved this far (0 = off) |
+| `react_refractory_scans` | 10 | scans a broken pair must wait before re-forming (0 = off) |
+| `react_valence_cap` | true | bond-order-aware valence cap on formation |
 
 CLI: `curcuma -md in.xyz -method gfnff -gfnff.topology_mode react ...`
 
