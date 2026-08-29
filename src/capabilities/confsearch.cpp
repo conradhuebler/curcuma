@@ -327,7 +327,9 @@ void ConfSearch::start()
     md["temp_abort"] = m_temp_abort;
     md["temp_abort_factor"] = m_temp_abort_factor;
     md["temp_abort_delta"] = m_temp_abort_delta;
-    md["rmsd_mtd_max_height"] = m_rmsd_mtd_max_height;
+    // Claude Generated (Aug 2026): -1 = adaptive; the effective cap is computed per repetition
+    // (it depends on the k of that repetition) and overrides this value before every MD phase.
+    md["rmsd_mtd_max_height"] = std::max(0, m_rmsd_mtd_max_height);
     md["rmsd_mtd_freeze_inherited"] = m_freeze_inherited;
     // Claude Generated (Jul 2026): forward the bias-evaluation speedup controls to each MD run.
     md["rmsd_mtd_max_gaussians"] = m_rmsd_mtd_max_gaussians;
@@ -736,6 +738,7 @@ void ConfSearch::start()
       int stage_structures = 0, stage_recombined = 0;
       const double stage_entry_best = m_global_min_opt;
       bool stage_new_best = false;
+      int stage_dry_reps = 0; // Claude Generated (Aug 2026): consecutive dry repetitions of this stage
       for (int stage_rep = 0; stage_rep < stage_repeats; ++stage_rep) {
         const bool last_repetition = (stage_rep == stage_repeats - 1);
         // Claude Generated (Jul 2026): every file this cycle writes carries this tag, so the cycles
@@ -811,6 +814,28 @@ void ConfSearch::start()
             CurcumaLogger::result_fmt("ConfSearch: bias parameters for repetition {}/{}: alpha = {}, k = {}",
                 stage_rep + 1, stage_repeats,
                 md.value("rmsd_mtd_alpha", 10.0), md.value("rmsd_mtd_k", 0.01));
+
+        // Claude Generated (Aug 2026): adaptive bias-height cap (rmsd_mtd_max_height = -1).
+        // The tallest hill W = k*counter is bounded to 2x the retained conformer window --
+        // tall enough to flatten the whole retained energy landscape twice over, far below the
+        // measured 2-98 Eh runaway that tore every later-cycle MD apart. Recomputed here because
+        // k may follow a per-repetition schedule.
+        {
+            const double k_rep = md.value("rmsd_mtd_k", 0.01);
+            if (m_rmsd_mtd_max_height < 0 && k_rep > 0.0) {
+                m_rmsd_mtd_cap_eff = std::max(3,
+                    static_cast<int>(std::ceil(2.0 * (m_energy_window / 2625.5) / k_rep)));
+                md["rmsd_mtd_max_height"] = m_rmsd_mtd_cap_eff;
+                if (stage_rep == 0)
+                    CurcumaLogger::result_fmt(
+                        "ConfSearch: adaptive bias cap -- hill counter limited to {} (tallest hill "
+                        "{:.3f} Eh = 2x the {} kJ/mol conformer window at k = {}); "
+                        "-rmsd_mtd_max_height 0 restores unbounded hills",
+                        m_rmsd_mtd_cap_eff, k_rep * m_rmsd_mtd_cap_eff, m_energy_window, k_rep);
+            } else {
+                m_rmsd_mtd_cap_eff = std::max(0, m_rmsd_mtd_max_height);
+            }
+        }
         // Claude Generated (Jun 2026): auto-enable RATTLE for hot cycles. A 1 fs step at high T
         // under-samples X-H stretches (period ~10 fs) -> energy drift / spurious bond breaking;
         // constraining them (mode 2 = H-only) stabilises the dynamics. Cooler cycles keep the
@@ -1197,6 +1222,12 @@ void ConfSearch::start()
         // Claude Generated (Aug 2026): what actually reached the ensemble this cycle -- the number
         // the closing summary needs, and the one that used to be missing from it.
         int ensemble_kept = 0;
+        // Claude Generated (Aug 2026): stage-saturation bookkeeping -- how many of this
+        // repetition's ensemble additions land within seed_energy_window of the running global
+        // minimum. A repetition that adds none of those AND improves no best energy is "dry".
+        int inwindow_added = 0;
+        const double rep_entry_best = best_energy;
+        const double rep_entry_best_opt = best_energy_opt;
         std::vector<BiasStructure> rejected_bias; // -bias_rejected: hills on the wrong species
         std::vector<Molecule*> candidates;
         if (!no_new_bias_structures) {
@@ -1347,6 +1378,8 @@ void ConfSearch::start()
             if (!dual_method && (mol->Energy() - lowest_energy) * 2625.5 < m_energy_window) {
                 mol->appendXYZFile(cumulative_file);
                 ensemble_kept++;
+                if ((mol->Energy() - m_global_min) * 2625.5 < m_seed_energy_window)
+                    inwindow_added++;
             }
 
             // md_method minimum -> bias pool (drives the gfnff MD next cycle).
@@ -1555,6 +1588,9 @@ void ConfSearch::start()
                     else {
                         mol->appendXYZFile(cumulative_file);
                         ensemble_kept++;
+                        if (m_global_min_opt == std::numeric_limits<double>::infinity()
+                            || (mol->Energy() - m_global_min_opt) * 2625.5 < m_seed_energy_window)
+                            inwindow_added++;
                     }
                 }
                 if (m_opt_feedback_bias && m_bias_pool) {
@@ -1749,6 +1785,31 @@ void ConfSearch::start()
             CurcumaLogger::warn("ConfSearch: 'stop' file detected after cycle -- checkpoint written, halting.");
             stop_requested = true;
             break;
+        }
+
+        // Claude Generated (Aug 2026): stage-saturation abort. Measured motivation: the WEKLQ
+        // production run burnt 3434 optimisations in three temperature stages that never again
+        // improved anything, and a repeat-10 run stood still for 1500 optimisations. A repetition
+        // is "dry" when it neither improved the best energy on either PES nor added a single
+        // structure within seed_energy_window of the running global minimum. After
+        // stage_saturation_abort consecutive dry repetitions the remaining MIDDLE repetitions are
+        // skipped -- the loop jumps to the LAST repetition, which still runs in full, because the
+        // stage finalisation (the once-per-stage REFINE and the seed selection) is gated on it
+        // and skipping that silently lost whole stages before (see the stage-pool comment above).
+        if (m_stage_saturation_abort > 0 && !last_repetition) {
+            const bool productive = (best_energy < rep_entry_best - 1e-9)
+                || (best_energy_opt < rep_entry_best_opt - 1e-9)
+                || inwindow_added > 0;
+            stage_dry_reps = productive ? 0 : stage_dry_reps + 1;
+            if (stage_dry_reps >= m_stage_saturation_abort && stage_rep < stage_repeats - 2) {
+                CurcumaLogger::result_fmt(
+                    "ConfSearch: T={}K stage saturated -- {} consecutive repetition(s) without a new best "
+                    "or an in-window conformer; skipping repetition(s) {}..{} and running the final "
+                    "repetition {} directly (-stage_saturation_abort {}, 0 disables)",
+                    static_cast<int>(m_currentT), stage_dry_reps, stage_rep + 2, stage_repeats - 1,
+                    stage_repeats, m_stage_saturation_abort);
+                stage_rep = stage_repeats - 2; // ++ makes the next iteration the last repetition
+            }
         }
 
       }  // end stage repetitions
@@ -2064,8 +2125,8 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
         // its k for no reason -- measured: cap 1 at k=0.05 was reported as 5.41 Eh instead of the
         // effective 0.05 Eh. Claude Generated (Aug 2026).
         const double raw_counter = m_bias_pool ? m_bias_pool->maxCounter() : 0.0;
-        const double eff_counter = (m_rmsd_mtd_max_height > 0)
-            ? std::min(raw_counter, static_cast<double>(m_rmsd_mtd_max_height))
+        const double eff_counter = (m_rmsd_mtd_cap_eff > 0)
+            ? std::min(raw_counter, static_cast<double>(m_rmsd_mtd_cap_eff))
             : raw_counter;
         const double tallest = k * eff_counter;
         const int pool_now = m_bias_pool ? m_bias_pool->biasStructureCount() : 0;
@@ -2080,7 +2141,7 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
                                     "and is torn apart instead of exploring. Bound it with "
                                     "-rmsd_mtd_max_height, or lower -rmsd_mtd_k.",
                 tallest, tallest * 2625.5, k,
-                (m_rmsd_mtd_max_height > 0) ? fmt::format(" (counter capped at {})", m_rmsd_mtd_max_height) : "");
+                (m_rmsd_mtd_cap_eff > 0) ? fmt::format(" (counter capped at {})", m_rmsd_mtd_cap_eff) : "");
         else if (tallest > 0.0 && pool_now > 1)
             // Measured (Aug 2026): capping a SINGLE hill is not enough. The walker feels the SUM
             // over every hill within the Gaussian width, so a dense inherited pool can still add up
@@ -2145,6 +2206,16 @@ nlohmann::json ConfSearch::ChildConfig(const std::string& method, int threads) c
     // 0.1 kJ/mol. An explicit -gfnff.topology_mode still wins.
     if (!(cfg.contains("gfnff") && cfg["gfnff"].is_object() && cfg["gfnff"].contains("topology_mode")))
         cfg["gfnff"]["topology_mode"] = "constant";
+
+    // Claude Generated (Aug 2026): SCC extrapolation for native GFN children. Measured factor
+    // 2.4 on the WEKLQ production runs with no change to the converged energies (the SCF still
+    // iterates to the same fixpoint; only the initial guess improves), and it had been carried
+    // manually in every production command line. The global default stays 'none' (a single
+    // point has no history to extrapolate from); ConfSearch children ARE geometry series, which
+    // is exactly the case the feature was built for. An explicit -xtb.scf_extrapolation wins.
+    if ((method == "gfn2" || method == "gfn1")
+        && !(cfg.contains("xtb") && cfg["xtb"].is_object() && cfg["xtb"].contains("scf_extrapolation")))
+        cfg["xtb"]["scf_extrapolation"] = "aspc";
 
     // Claude Generated (Aug 2026): cross-child topology lock -- every gfnff child adopts the
     // perception of the optimised input structure (see PARAM topology_lock). An explicit
@@ -4310,6 +4381,7 @@ void ConfSearch::LoadControlJson()
     m_topology_factor = m_config.get<double>("topology_factor");
     m_repair_snapshots = m_config.get<bool>("repair_snapshots");
     m_topology_lock = m_config.get<bool>("topology_lock"); // Claude Generated (Aug 2026)
+    m_stage_saturation_abort = m_config.get<int>("stage_saturation_abort"); // Claude Generated (Aug 2026)
     m_repair_max = m_config.get<int>("repair_max");
     m_repair_max_bonds = m_config.get<int>("repair_max_bonds");
     m_repair_force = m_config.get<double>("repair_force");
