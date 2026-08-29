@@ -554,6 +554,8 @@ GFNFF::GFNFF(const json& parameters)
     m_react_check_disp = m_parameters.value("react_check_disp_bohr", 0.25);
     m_react_refractory_scans = m_parameters.value("react_refractory_scans", 10);
     m_react_valence_cap = m_parameters.value("react_valence_cap", true);
+    m_react_exchange_scans = m_parameters.value("react_exchange_scans", 20);
+    m_react_slack_form_factor = m_parameters.value("react_slack_form_factor", 1.2);
     if (m_topology_mode == "react" && m_react_break_factor <= m_react_form_factor) {
         CurcumaLogger::warn(fmt::format(
             "GFNFF react: break factor {:.3f} <= form factor {:.3f} leaves no hysteresis; resetting to defaults 1.6/2.6",
@@ -1872,6 +1874,7 @@ bool GFNFF::detectReactiveBondChanges()
     };
     std::vector<int> same_el_neighbors(m_atomcount, 0);
     std::vector<int> h_neighbors(m_atomcount, 0);
+    std::vector<int> sigma_count(m_atomcount, 0);
 
     const std::vector<double>* pibo = nullptr;
     if (m_cached_topology && !m_cached_topology->pi_bond_orders.empty()
@@ -1905,6 +1908,8 @@ bool GFNFF::detectReactiveBondChanges()
                     }
                     if (m_atoms[j] == 1) ++h_neighbors[i];
                     if (m_atoms[i] == 1) ++h_neighbors[j];
+                    ++sigma_count[i];
+                    ++sigma_count[j];
                 }
             } else if (r < m_react_form_factor * thr) {
                 candidates.emplace_back(r, std::make_pair(i, j));
@@ -1955,6 +1960,24 @@ bool GFNFF::detectReactiveBondChanges()
                     p.first + 1, p.second + 1, m_react_refractory[p]));
             continue;
         }
+        // A bond that pushes either atom above its nominal sigma valence consumes the
+        // exchange slack: it only forms at the tighter slack radius. Otherwise an H
+        // sitting on one partner keeps re-bridging to the next heavy atom at the
+        // optimistic radius and the exchange resolution has to undo it over and over.
+        {
+            const bool uses_slack = (sigma_count[p.first] >= static_cast<int>(valence_cap(p.first) - 1.0 + 0.5))
+                || (sigma_count[p.second] >= static_cast<int>(valence_cap(p.second) - 1.0 + 0.5));
+            if (uses_slack) {
+                double thr = (rcov[p.first] + rcov[p.second]) * fat_val[p.first] * fat_val[p.second];
+                if (r > m_react_slack_form_factor * thr) {
+                    if (CurcumaLogger::get_verbosity() >= 2)
+                        CurcumaLogger::info(fmt::format(
+                            "REACT formation refused (slack radius): atoms {}-{} at r={:.2f} Bohr",
+                            p.first + 1, p.second + 1, r));
+                    continue;
+                }
+            }
+        }
         next.push_back(p);
         formed.push_back(p);
         valence_used[p.first] += 1.0;
@@ -1965,6 +1988,55 @@ bool GFNFF::detectReactiveBondChanges()
         }
         if (m_atoms[p.second] == 1) ++h_neighbors[p.first];
         if (m_atoms[p.first] == 1) ++h_neighbors[p.second];
+        ++sigma_count[p.first];
+        ++sigma_count[p.second];
+    }
+
+    // Exchange resolution: the +1 valence slack exists for transient intermediates
+    // (H bridging two heavy atoms, 5-coordinate carbon in flight). Combined with the
+    // conservative break radius such states can become geometrically locked — no
+    // single bond ever reaches its break distance while the partners hold the atom
+    // in place. An intermediate must resolve: an atom whose SIGMA bond count stays
+    // above its sigma valence (cap minus the slack, e.g. H > 1, N > 3, C > 4) for
+    // react_exchange_scans consecutive scans has its weakest bond (largest r
+    // relative to the pair threshold) broken. Deliberately counts sigma bonds, not
+    // pi-order-weighted valence: the Hueckel pi bookkeeping lags between rebuilds
+    // and would dismantle genuine activation steps (measured for N2H2 systems:
+    // pi-based triggering forced ~230 breaks / 15 ps).
+    if (m_react_exchange_scans > 0) {
+        for (int a = 0; a < m_atomcount; ++a) {
+            if (sigma_count[a] > static_cast<int>(valence_cap(a) - 1.0 + 0.5)) {
+                if (++m_react_overvalence_streak[a] > m_react_exchange_scans) {
+                    int worst = -1;
+                    double worst_ratio = -1.0;
+                    for (int k = 0; k < static_cast<int>(next.size()); ++k) {
+                        if (next[k].first != a && next[k].second != a)
+                            continue;
+                        int o = (next[k].first == a) ? next[k].second : next[k].first;
+                        double r = (m_geometry_bohr.row(a) - m_geometry_bohr.row(o)).norm();
+                        double ratio = r / ((rcov[a] + rcov[o]) * fat_val[a] * fat_val[o]);
+                        if (ratio > worst_ratio) {
+                            worst_ratio = ratio;
+                            worst = k;
+                        }
+                    }
+                    if (worst >= 0) {
+                        auto pair = next[worst];
+                        broken.push_back(pair);
+                        next.erase(next.begin() + worst);
+                        if (CurcumaLogger::get_verbosity() >= 1)
+                            CurcumaLogger::result(fmt::format(
+                                "REACT exchange resolved: broke {}{}-{}{} (atom {} over-valent for {} scans)",
+                                Elements::ElementAbbr[m_atoms[pair.first]], pair.first + 1,
+                                Elements::ElementAbbr[m_atoms[pair.second]], pair.second + 1,
+                                a + 1, m_react_exchange_scans));
+                    }
+                    m_react_overvalence_streak.erase(a);
+                }
+            } else {
+                m_react_overvalence_streak.erase(a);
+            }
+        }
     }
 
     if (formed.empty() && broken.empty())

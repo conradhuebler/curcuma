@@ -300,6 +300,8 @@ PARAM(react_check_every, Int, 5, "React mode: run the O N^2 hysteresis bond scan
 PARAM(react_check_disp_bohr, Double, 0.25, "React mode: also run the bond scan when any atom moved more than this distance in Bohr since the last scan. 0 disables the displacement trigger.", "Reactive", {})
 PARAM(react_refractory_scans, Int, 10, "React mode: a pair whose bond just broke may not re-form for this many scans. Interrupts the form/break cycle that otherwise pumps the recombination energy through the thermostat over and over. 0 disables.", "Reactive", {})
 PARAM(react_valence_cap, Bool, true, "React mode: refuse a new bond while an atom already uses its element valence plus one exchange slack, counting bond orders so multiple bonds consume valence. Prevents unphysical agglomerates; disable to sample unconstrained formation. Refused formations are logged at verbosity 2.", "Reactive", {})
+PARAM(react_exchange_scans, Int, 20, "React mode: an atom may stay above its nominal valence for at most this many scans, then its weakest bond is broken. Forces exchange intermediates like a hydrogen bridging two heavy atoms to resolve instead of staying geometrically locked. 0 disables.", "Reactive", {})
+PARAM(react_slack_form_factor, Double, 1.2, "React mode: tighter formation radius factor for bonds that push an atom above its nominal sigma valence into the exchange slack. A genuine exchange intermediate has the extra partner near bond distance; the ordinary optimistic factor would re-create bridges endlessly.", "Reactive", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -2571,6 +2573,9 @@ private:
     double m_react_check_disp = 0.25; ///< Scan when any atom moved more than this (Bohr)
     int m_react_refractory_scans = 10; ///< Scans a broken pair must wait before re-forming
     bool m_react_valence_cap = true; ///< Enforce the bond-order-aware valence cap on formation
+    int m_react_exchange_scans = 20; ///< Max scans an atom may stay over nominal valence
+    double m_react_slack_form_factor = 1.2; ///< Tighter formation radius for slack-consuming bonds
+    std::map<int, int> m_react_overvalence_streak; ///< Atom -> consecutive over-valent scans
     std::map<std::pair<int, int>, int> m_react_refractory; ///< Pair -> remaining blocked scans
 
     /**

@@ -114,13 +114,22 @@ The asymmetry is deliberate:
   Suppressed real chemistry: azide/ozone formation, quaternary carbon centres,
   3-ring closures via same-element paths. Gated by `react_valence_cap`,
   refusals logged at verbosity >= 2.
-- **Known remaining locked artefact — hydrogen bridges:** the +1 exchange slack
-  lets an H bind two heavy atoms, and when both partners stay geometrically
-  inside the break radius the "transient" intermediate never resolves: N2 + 2 H
-  ends as a doubly H-bridged N2 (borane-style) instead of trans-diazene.
-  Same trap class as the N3 ring (formation slack + geometrically unreachable
-  break distance). Candidate fix: an exchange-resolution rule that force-breaks
-  the weaker bond after an over-valence state persists for N scans.
+- **Exchange slack handling (bridges):** the +1 valence slack lets an H bind two
+  heavy atoms; combined with the conservative break radius such bridges would
+  stay geometrically locked (N2 + 2 H ended as a doubly H-bridged N2 instead of
+  trans-diazene). Two rules resolve this: (a) a bond that pushes an atom above
+  its nominal sigma valence only forms at the tighter `react_slack_form_factor`
+  radius (default 1.2 — a genuine exchange intermediate has the extra partner
+  near bond distance; the ordinary optimistic radius re-created bridges
+  endlessly), and (b) an atom whose sigma bond count stays above its sigma
+  valence for `react_exchange_scans` scans (default 20) has its weakest bond
+  force-broken ("REACT exchange resolved" events). The trigger deliberately
+  counts sigma bonds, not pi-weighted valence — pi-based triggering dismantled
+  genuine activation steps like N2H (~230 forced breaks / 15 ps). Measured for
+  N4H4, 3500 K, 3.2 A wall, 15 ps: 278 events, 115 resolutions, no NaN, no
+  locked bridges; without the slack radius 736/248. At such violent conditions
+  the remaining churn is collision-driven; at moderate temperatures these rules
+  are expected to fire rarely.
 - **All these filters suppress some real behaviour too**: hypervalent intermediates
   beyond the +1 slack, and geminate re-recombination inside the refractory
   window. They are deliberately switchable PARAMs, and every refused formation is
@@ -157,6 +166,8 @@ The asymmetry is deliberate:
 | `react_check_disp_bohr` | 0.25 | scan when any atom moved this far (0 = off) |
 | `react_refractory_scans` | 10 | scans a broken pair must wait before re-forming (0 = off) |
 | `react_valence_cap` | true | bond-order-aware valence cap on formation |
+| `react_exchange_scans` | 20 | scans an atom may stay above its sigma valence before its weakest bond is broken (0 = off) |
+| `react_slack_form_factor` | 1.2 | tighter formation radius for bonds consuming the exchange slack |
 
 CLI: `curcuma -md in.xyz -method gfnff -gfnff.topology_mode react ...`
 
