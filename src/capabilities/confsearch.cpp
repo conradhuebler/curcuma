@@ -840,7 +840,11 @@ void ConfSearch::start()
         // under-samples X-H stretches (period ~10 fs) -> energy drift / spurious bond breaking;
         // constraining them (mode 2 = H-only) stabilises the dynamics. Cooler cycles keep the
         // user's/registry baseline so flexible low-T sampling is unaffected.
-        if (m_currentT >= m_rattle_threshold_temp) {
+        // Claude Generated (Aug 2026): the auto-enable must never WEAKEN an explicit stronger
+        // constraint -- mode 1 (all bonds) is a superset of mode 2 (X-H only), and downgrading
+        // it made a -dt 4 -rattle 1 -hmass 4 run (all-bond RATTLE is what makes dt 4 stable)
+        // blow up with NaN gradients in its hot cycles. Only rattle=0 baselines are upgraded.
+        if (m_currentT >= m_rattle_threshold_temp && rattle_base.get<int>() == 0) {
             md["rattle"] = m_rattle_hot_mode;
             CurcumaLogger::result_fmt("ConfSearch: T={}K >= {}K -> RATTLE auto-enabled (mode {})",
                 m_currentT, m_rattle_threshold_temp, m_rattle_hot_mode);
