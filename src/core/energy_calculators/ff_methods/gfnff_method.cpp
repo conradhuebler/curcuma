@@ -1836,6 +1836,43 @@ bool GFNFF::detectReactiveBondChanges()
         default: return 6.0; // hypervalence-capable + metals
         }
     };
+    // Element-specific neighbour limits for FORMATION (operator-set chemistry
+    // empirics, v1): catenation limit = max neighbours of the SAME element
+    // (N may bind at most 1 N -> hydrazine/diazene yes, N3 chains/rings no;
+    // O at most 1 O -> peroxide yes, ozone no; C at most 3 C -> chains and
+    // branches yes, quaternary-C clustering no; H at most 2 H covers the linear
+    // exchange intermediate), plus a hydrogen limit per element (C 4, N 3, O 2,
+    // halogens 1). Both only gate NEW bonds; seeded topologies are kept. Both
+    // suppress some real chemistry (azide/ozone formation, quaternary carbon
+    // centres) — switchable via react_valence_cap, refusals logged.
+    auto same_element_limit = [](int z) {
+        switch (z) {
+        case 1: return 2;              // H (H-H-H exchange)
+        case 2: case 10: return 0;     // He, Ne
+        case 6: return 3;              // C
+        case 7: return 1;              // N
+        case 8: return 1;              // O
+        case 9: case 17: case 35: case 53: return 1; // F, Cl, Br, I
+        case 15: return 3;             // P (P4)
+        case 16: return 2;             // S (chains/S8)
+        default: return 6;
+        }
+    };
+    auto hydrogen_limit = [](int z) {
+        switch (z) {
+        case 6: return 4;              // C
+        case 7: return 3;              // N
+        case 8: return 2;              // O
+        case 9: case 17: case 35: case 53: return 1; // halogens
+        case 14: return 4;             // Si
+        case 15: return 3;             // P
+        case 16: return 2;             // S
+        default: return 6;
+        }
+    };
+    std::vector<int> same_el_neighbors(m_atomcount, 0);
+    std::vector<int> h_neighbors(m_atomcount, 0);
+
     const std::vector<double>* pibo = nullptr;
     if (m_cached_topology && !m_cached_topology->pi_bond_orders.empty()
         && static_cast<int>(m_cached_topology->pi_bond_orders.size()) >= m_atomcount * (m_atomcount + 1) / 2)
@@ -1862,6 +1899,12 @@ bool GFNFF::detectReactiveBondChanges()
                     double bo = bond_order(i, j);
                     valence_used[i] += bo;
                     valence_used[j] += bo;
+                    if (m_atoms[i] == m_atoms[j]) {
+                        ++same_el_neighbors[i];
+                        ++same_el_neighbors[j];
+                    }
+                    if (m_atoms[j] == 1) ++h_neighbors[i];
+                    if (m_atoms[i] == 1) ++h_neighbors[j];
                 }
             } else if (r < m_react_form_factor * thr) {
                 candidates.emplace_back(r, std::make_pair(i, j));
@@ -1886,6 +1929,25 @@ bool GFNFF::detectReactiveBondChanges()
                     valence_used[p.second], valence_cap(p.second)));
             continue;
         }
+        if (m_react_valence_cap) {
+            const int zi = m_atoms[p.first], zj = m_atoms[p.second];
+            bool refused = false;
+            if (zi == zj
+                && (same_el_neighbors[p.first] >= same_element_limit(zi)
+                    || same_el_neighbors[p.second] >= same_element_limit(zj)))
+                refused = true;
+            if (!refused && zj == 1 && h_neighbors[p.first] >= hydrogen_limit(zi))
+                refused = true;
+            if (!refused && zi == 1 && h_neighbors[p.second] >= hydrogen_limit(zj))
+                refused = true;
+            if (refused) {
+                if (CurcumaLogger::get_verbosity() >= 2)
+                    CurcumaLogger::info(fmt::format(
+                        "REACT formation refused (neighbor limit): atoms {}-{}",
+                        p.first + 1, p.second + 1));
+                continue;
+            }
+        }
         if (m_react_refractory.count(p) > 0) {
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::info(fmt::format(
@@ -1897,6 +1959,12 @@ bool GFNFF::detectReactiveBondChanges()
         formed.push_back(p);
         valence_used[p.first] += 1.0;
         valence_used[p.second] += 1.0;
+        if (m_atoms[p.first] == m_atoms[p.second]) {
+            ++same_el_neighbors[p.first];
+            ++same_el_neighbors[p.second];
+        }
+        if (m_atoms[p.second] == 1) ++h_neighbors[p.first];
+        if (m_atoms[p.first] == 1) ++h_neighbors[p.second];
     }
 
     if (formed.empty() && broken.empty())

@@ -103,7 +103,25 @@ The asymmetry is deliberate:
   recombination energy through the thermostat repeatedly. Measured for N2 + 3 H2
   at 3500 K / 3.5 A wall / 20 ps: 301 events without cap+refractory, 35 with,
   no NaN, final state N2H2 (diazene) + 4 H — the first hydrogenation step.
-- **Both filters suppress some real behaviour too**: hypervalent intermediates
+- **Element-specific neighbour limits (formation only):** catenation limit per
+  element (max same-element neighbours: H 2 — the linear exchange intermediate —,
+  C 3, N 1, O 1, S 2, P 3, halogens 1) and a hydrogen limit per element (C 4,
+  N 3, O 2, halogens 1). N may bind one N (hydrazine/diazene) but no second —
+  this removes the N3 rings that the pure valence cap allowed and that the
+  conservative break radius then locked shut (in a 1.4 A triangle no bond can
+  ever reach its 2.6x break distance while the third atom bridges the pair).
+  Verified: N4H4 at 3500 K keeps every N at <= 1 N neighbour over the whole run.
+  Suppressed real chemistry: azide/ozone formation, quaternary carbon centres,
+  3-ring closures via same-element paths. Gated by `react_valence_cap`,
+  refusals logged at verbosity >= 2.
+- **Known remaining locked artefact — hydrogen bridges:** the +1 exchange slack
+  lets an H bind two heavy atoms, and when both partners stay geometrically
+  inside the break radius the "transient" intermediate never resolves: N2 + 2 H
+  ends as a doubly H-bridged N2 (borane-style) instead of trans-diazene.
+  Same trap class as the N3 ring (formation slack + geometrically unreachable
+  break distance). Candidate fix: an exchange-resolution rule that force-breaks
+  the weaker bond after an over-valence state persists for N scans.
+- **All these filters suppress some real behaviour too**: hypervalent intermediates
   beyond the +1 slack, and geminate re-recombination inside the refractory
   window. They are deliberately switchable PARAMs, and every refused formation is
   logged at verbosity >= 2, so what they suppress stays measurable. The pi orders
