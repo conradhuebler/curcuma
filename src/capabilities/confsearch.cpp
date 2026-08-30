@@ -1774,8 +1774,17 @@ void ConfSearch::start()
                                           "{:.6f} Eh, {:.2f} kJ/mol below the initial {:.6f} Eh)",
                     RelaxMethod(), lowest_energy, best_energy, delta_initial, initial_energy);
             }
-            // Claude Generated (Jun 2026): report opt_method best alongside md_method in dual mode
-            if (m_opt_method != m_md_method && best_energy_opt < std::numeric_limits<double>::infinity()) {
+            // Claude Generated (Aug 2026): under -relax_pes opt the funnel IS the opt PES, so its
+            // running best is the opt_method best -- keep best_energy_opt in sync (it feeds the
+            // stage-saturation productivity test and used to be updated only by the REFINE phase,
+            // which "opt" skips; observed live: "gfn2 best: -161.600500 (+0.00)" frozen at the
+            // initial value while the funnel best stood 108 kJ/mol lower).
+            if (RelaxMethod() == m_opt_method)
+                best_energy_opt = std::min(best_energy_opt, best_energy);
+            // Claude Generated (Jun 2026): report opt_method best alongside md_method in dual mode.
+            // Skipped under -relax_pes opt, where it would only repeat the funnel line above.
+            if (m_opt_method != m_md_method && RelaxMethod() != m_opt_method
+                && best_energy_opt < std::numeric_limits<double>::infinity()) {
                 double opt_delta_initial = (m_initial_energy_opt - best_energy_opt) * 2625.5;
                 CurcumaLogger::result_fmt("ConfSearch: {} best: {:.6f} Eh ({:+.2f} kJ/mol vs. initial {:.6f} Eh)",
                     m_opt_method, best_energy_opt, opt_delta_initial, m_initial_energy_opt);
