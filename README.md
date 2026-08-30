@@ -141,6 +141,8 @@ The native `gfnff` implementation is **AI-implemented and machine-tested** — h
 
 **Reactive MD (experimental)**: `-gfnff.topology_mode react` lets bonds form and break during MD (hysteresis re-detection + bonded-term rebuild, NVT-only) — see [docs/GFNFF_REACT_TOPOLOGY.md](docs/GFNFF_REACT_TOPOLOGY.md).
 
+**Cross-platform determinism (`-DUSE_PORTABLE_MATH=ON`)**: Wine and native Windows can round `erf`/`acos`/`exp`/`log` differently in the last bit (different CRT-DLL reimplementations), which can flip a GFN-FF classification threshold into a different bond term. Vendored fdlibm-derived replacements close this; off by default, on for the Windows nightly build — see [docs/PORTABLE_ERF.md](docs/PORTABLE_ERF.md).
+
 **Known differences from Fortran reference** (see [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)):
 - Sub-mEh agreement for most small/medium molecules
 - EEQ charge environment corrections (dxi) partially implemented

@@ -54,6 +54,20 @@ option(USE_AVX2
 option(USE_AVX512
     "Enable AVX-512 instructions (Skylake-X+, not portable)" OFF)
 
+# Claude Generated (Aug 2026): self-contained erf()/acos()/exp()/log() (see
+# src/core/portable_{erf,acos,exp,log}.h and src/core/math_compat.h) instead
+# of the platform CRT/libm. On MinGW/Windows, these dynamically import from
+# api-ms-win-crt-math-l1-1-0.dll; Wine's reimplementation of that DLL rounds
+# them differently in the last bit than native Windows' ucrtbase, which can
+# flip GFN-FF/EEQ's angle- and CN-based classification thresholds
+# (hybridisation, bond type, HB donor/acceptor, pi-membership) into a
+# different discrete decision for the same geometry. See docs/PORTABLE_ERF.md.
+# Off by default to keep existing validated golden-value tests bit-for-bit
+# unchanged; the Windows build turns it on (scripts/build_windows.bat) since
+# that is where the divergence was observed.
+option(USE_PORTABLE_MATH
+    "Use vendored fdlibm-derived erf()/acos()/exp()/log() instead of platform CRT/libm (deterministic across Wine/native-Windows)" OFF)
+
 option(USE_BLAS
     "Enable BLAS" OFF)
 
@@ -644,6 +658,12 @@ endif()
 
 if(USE_MKL)
     target_compile_definitions(curcuma_core PRIVATE USE_MKL)
+endif()
+
+# Claude Generated (Aug 2026): see USE_PORTABLE_MATH option above / src/core/math_compat.h
+if(USE_PORTABLE_MATH)
+    target_compile_definitions(curcuma_core PRIVATE CURCUMA_PORTABLE_MATH)
+    message(STATUS "erf()/acos()/exp()/log(): using vendored portable implementations (USE_PORTABLE_MATH=ON)")
 endif()
 
 add_library(curcuma_cap  ${curcuma_cap_SRC})

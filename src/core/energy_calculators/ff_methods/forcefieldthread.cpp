@@ -28,6 +28,7 @@
 #include "forcefield.h"
 #include "src/core/energy_calculators/dispersion/d4_evaluator.h"
 #include "src/core/units.h"
+#include "src/core/math_compat.h"
 
 // Claude Generated (Jan 17, 2026): Required for diagnostic logging in batm calculation
 #include "src/core/curcuma_logger.h"
@@ -887,7 +888,7 @@ void ForceFieldThread::computeHBCoordinationNumbers()
             // erf-based coordination number contribution
             // Fortran: tmp = 0.5*(1 + erf(-kn*(r-rcovij)/rcovij))
             double arg = -kn * (r - rcovij) / rcovij;
-            double tmp = 0.5 * (1.0 + std::erf(arg));
+            double tmp = 0.5 * (1.0 + curcuma_erf(arg));
 
             hb_cn_map[H] += tmp;
 
@@ -2401,7 +2402,7 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
 
         // Pairwise: E_pair = q_i * q_j * erf(γ_ij*r) / r
         double gamma_r = coul.gamma_ij * rij;
-        double erf_term = std::erf(gamma_r);
+        double erf_term = curcuma_erf(gamma_r);
         double energy_pair = qi * qj * erf_term / rij;
 
         E_interaction += energy_pair;

@@ -49,6 +49,7 @@
 
 #include "gfnff.h"
 #include "gfnff_par.h"
+#include "src/core/math_compat.h"
 #include <cmath>
 #include <array>
 #include <set>
@@ -1775,7 +1776,7 @@ std::pair<std::vector<Dihedral>, std::vector<Dihedral>> GFNFF::generateTorsionsN
                 auto calculate_bond_angle = [&](int a, int b, int c) {
                     Eigen::Vector3d v_ba = (m_geometry.row(a).head<3>() - m_geometry.row(b).head<3>()).normalized();
                     Eigen::Vector3d v_bc = (m_geometry.row(c).head<3>() - m_geometry.row(b).head<3>()).normalized();
-                    return std::acos(std::max(-1.0, std::min(1.0, v_ba.dot(v_bc))));
+                    return curcuma_acos(std::max(-1.0, std::min(1.0, v_ba.dot(v_bc))));
                 };
 
                 double angle_ijk = calculate_bond_angle(i, j, k); // Angle at j (central 1)

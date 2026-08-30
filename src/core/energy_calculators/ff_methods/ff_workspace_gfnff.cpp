@@ -31,6 +31,7 @@
 #include "gfnff_geometry.h"
 #include "src/core/units.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/math_compat.h"
 
 #include <fmt/core.h>
 #include <fmt/format.h>
@@ -75,7 +76,7 @@ void FFWorkspace::computeHBCoordinationNumbers(int p)
 
             double rcovij = rcov_scal * rcov_43 * (rcov_base[ati - 1] + rcov_base[atj - 1]);
             double arg = -kn * (r - rcovij) / rcovij;
-            double tmp = 0.5 * (1.0 + std::erf(arg));
+            double tmp = 0.5 * (1.0 + curcuma_erf(arg));
             hb_cn_map[H] += tmp;
 
             double dCN_dr = inv_sqrt_pi * (-kn / rcovij) * std::exp(-arg * arg) / r;
@@ -877,7 +878,7 @@ void FFWorkspace::calcCoulomb(int p)
         }
 
         double gamma_r = coul.gamma_ij * rij;
-        double erf_term = std::erf(gamma_r);
+        double erf_term = curcuma_erf(gamma_r);
         double energy_pair = qi * qj * erf_term / rij;
         acc.energy.coulomb += energy_pair;
 

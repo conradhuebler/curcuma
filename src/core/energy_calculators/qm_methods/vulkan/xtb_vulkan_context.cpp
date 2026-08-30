@@ -24,6 +24,7 @@
 #include "vk_context.h"
 #include "shaders/spirv_kernels.h"
 #include "../parameters/xtb_params_extra.hpp"   // covalent_rad_d3_au / pauling_en / atomic_rad_au
+#include "src/core/math_compat.h"
 
 #include <vulkan/vulkan.h>
 
@@ -1768,8 +1769,8 @@ struct XtbVulkanContext::Impl {
     // CN log-compression (host; GLSL fp64 has no log): cn = log(1+e^CNMAX) − log(1+e^(CNMAX−raw)).
     static double eqCompressCn(double raw) {
         const double CNMAX = 4.4;
-        static const double l = std::log(1.0 + std::exp(CNMAX));
-        return l - std::log(1.0 + std::exp(CNMAX - raw));
+        static const double l = curcuma_log(1.0 + curcuma_exp(CNMAX));
+        return l - curcuma_log(1.0 + curcuma_exp(CNMAX - raw));
     }
     bool eqEnsure(int N) {
         if (N == eq_n && eqM.buf) return true;

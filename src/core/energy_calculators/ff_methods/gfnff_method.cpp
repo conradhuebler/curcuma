@@ -21,6 +21,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
 #include "src/core/units.h"
+#include "src/core/math_compat.h"
 #include "src/core/periodic_table.h"
 #include "src/core/functional_groups.h"  // Claude Generated (January 10, 2026): Amide detection
 #include <chrono>
@@ -6563,7 +6564,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
                     double distance = std::sqrt(distance_sq);
                     double r_cov = rcov_bohr[i] + rcov_bohr[j];
                     double dr = (distance - r_cov) / r_cov;
-                    cn_i += 0.5 * (1.0 + std::erf(kn * dr));
+                    cn_i += 0.5 * (1.0 + curcuma_erf(kn * dr));
                 }
                 cn_raw[i] = cn_i;
             }
@@ -6595,7 +6596,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
                 double distance = std::sqrt(distance_sq);
                 double r_cov = rcov_bohr[i] + rcov_bohr[j];
                 double dr = (distance - r_cov) / r_cov;
-                cn_i += 0.5 * (1.0 + std::erf(kn * dr));
+                cn_i += 0.5 * (1.0 + curcuma_erf(kn * dr));
             }
             cn_raw[i] = cn_i;
         }
@@ -7011,7 +7012,7 @@ GFNFF::CNAndDerivResult GFNFF::computeCNAndDerivativesFused(
                     double dr       = (r_ij - rcov_sum) / rcov_sum;
 
                     // CN contribution (erf-based, same formula as calculateGFNFFCNWithNeighbors)
-                    double erfCN = 0.5 * (1.0 + std::erf(kn * dr));
+                    double erfCN = 0.5 * (1.0 + curcuma_erf(kn * dr));
                     loc.cn_raw[i] += erfCN;
                     loc.cn_raw[j] += erfCN;
 
@@ -7078,7 +7079,7 @@ GFNFF::CNAndDerivResult GFNFF::computeCNAndDerivativesFused(
                 double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
                 double dr       = (r_ij - rcov_sum) / rcov_sum;
 
-                double erfCN = 0.5 * (1.0 + std::erf(kn * dr));
+                double erfCN = 0.5 * (1.0 + curcuma_erf(kn * dr));
                 result.cn_raw[i] += erfCN;
                 result.cn_raw[j] += erfCN;
 
@@ -7102,8 +7103,8 @@ GFNFF::CNAndDerivResult GFNFF::computeCNAndDerivativesFused(
     Vector dlogdcn(N);
     for (int i = 0; i < N; ++i) {
         // Log-compress cn_raw → cn_values (same formula as calculateGFNFFCNWithNeighbors)
-        result.cn_values[i] = std::log(1.0 + std::exp(cnmax))
-                            - std::log(1.0 + std::exp(cnmax - result.cn_raw[i]));
+        result.cn_values[i] = curcuma_log(1.0 + curcuma_exp(cnmax))
+                            - curcuma_log(1.0 + curcuma_exp(cnmax - result.cn_raw[i]));
         // dlogCN/dcn — same formula as calculateCoordinationNumberDerivatives step 2
         dlogdcn[i] = std::exp(cnmax) / (std::exp(cnmax) + std::exp(result.cn_raw[i]));
     }
@@ -7217,7 +7218,7 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
             } else {
                 // For other elements: Check if linear (sp) or bent (sp2)
                 double dot_product = bond_vectors[0].dot(bond_vectors[1]);
-                double angle = std::acos(std::max(-1.0, std::min(1.0, dot_product)));
+                double angle = curcuma_acos(std::max(-1.0, std::min(1.0, dot_product)));
 
                 if (angle > 2.8) { // ~160° - linear geometry
                     hyb[i] = 1; // sp
@@ -7249,7 +7250,7 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
                 for (int j = 0; j < 3; ++j) {
                     int k = (j + 1) % 3;
                     double dot = bond_vectors[j].dot(bond_vectors[k]);
-                    angle_sum += std::acos(std::max(-1.0, std::min(1.0, dot)));
+                    angle_sum += curcuma_acos(std::max(-1.0, std::min(1.0, dot)));
                 }
 
                 // Planar: sum ≈ 2π, Pyramidal: sum < 2π
@@ -7732,7 +7733,7 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
             // Coulomb interaction with error function damping
             // A(i,j) = erf(γ_ij * r_ij) / r_ij
             double erf_arg = gamma_ij * r_ij;
-            double erf_val = std::erf(erf_arg);
+            double erf_val = curcuma_erf(erf_arg);
             double coulomb = erf_val / r_ij;
 
             A(i, j) = coulomb;
@@ -8161,7 +8162,7 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
         if (na < 1e-12 || nb2 < 1e-12) return 0.0;
         double t = a.dot(b) / (na * nb2);
         t = std::max(-1.0, std::min(1.0, t));
-        return std::acos(t) * 180.0 / M_PI;
+        return curcuma_acos(t) * 180.0 / M_PI;
     };
 
     const auto& nbf = topo.nb_full;
@@ -8685,7 +8686,7 @@ double GFNFF::calculateEEQEnergy(const Vector& charges, const Vector& cn) const
 
             // Coulomb interaction with error function damping
             double erf_arg = gamma_ij * r_ij;
-            double erf_val = std::erf(erf_arg);
+            double erf_val = curcuma_erf(erf_arg);
             double coulomb = erf_val / r_ij;
 
             // Pairwise energy contribution
@@ -9135,7 +9136,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             Vector v2 = r_n2 - r_i;
 
             double cos_phi = v1.dot(v2) / (v1.norm() * v2.norm());
-            double phi_deg = std::acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
+            double phi_deg = curcuma_acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
 
             if (phi_deg < 150.0 && charges[i] > -0.4) {
                 current_basicity[i] = 1.46;
@@ -9748,7 +9749,7 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
             Vector v2 = r_n2 - r_i;
 
             double cos_phi = v1.dot(v2) / (v1.norm() * v2.norm());
-            double phi_deg = std::acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
+            double phi_deg = curcuma_acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
 
             if (phi_deg < 150.0 && charges[i] > -0.4) {
                 current_basicity[i] = 1.46;

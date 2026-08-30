@@ -39,6 +39,7 @@
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
+#include "src/core/math_compat.h"
 
 #include <Eigen/Dense>
 #include <atomic>
@@ -359,7 +360,7 @@ static inline double calculateBondAngle(const Matrix& geometry_bohr,
     if (cos_angle > 1.0) cos_angle = 1.0;
     if (cos_angle < -1.0) cos_angle = -1.0;
 
-    return std::acos(cos_angle);
+    return curcuma_acos(cos_angle);
 }
 
 /**
@@ -1376,7 +1377,7 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
             } else {
                 // J_ij = erf(gamma_ij * r) / r
                 double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
-                double erf_gamma = std::erf(gamma_ij * r);
+                double erf_gamma = curcuma_erf(gamma_ij * r);
                 double coulomb = erf_gamma / r;
 
                 A(i, j) = coulomb;
@@ -2907,7 +2908,7 @@ std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
                 // J_ij = erf(gamma_ij * r) / r
                 // gamma_ij = 1/sqrt(alpha_i + alpha_j)
                 double gammij = 1.0 / std::sqrt(alpha(i) + alpha(j));
-                double erf_gamma = std::erf(gammij * r);
+                double erf_gamma = curcuma_erf(gammij * r);
                 double coulomb = erf_gamma / r;
 
                 A(i, j) = coulomb;
@@ -2947,7 +2948,7 @@ std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
                 // J_ij = erf(gamma_ij * r) / r
                 // gamma_ij = 1/sqrt(alpha_i + alpha_j)
                 double gammij = 1.0 / std::sqrt(alpha(i) + alpha(j));
-                double erf_gamma = std::erf(gammij * r);
+                double erf_gamma = curcuma_erf(gammij * r);
                 double coulomb = erf_gamma / r;
 
                 A(i, j) = coulomb;
@@ -3017,7 +3018,7 @@ std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
                 double gammij = 1.0 / std::sqrt(alpha(i) + alpha(j));
                 double r = topology.has_value() ? topo_dist(i, j) : 0.0;
                 std::cerr << fmt::format("  A[{},{}] = {:12.6f}  (gammij={:12.6f}, r={:12.6f}, erf={:12.6f})",
-                    i, j, A(i, j), gammij, r, std::erf(gammij * r)) << std::endl;
+                    i, j, A(i, j), gammij, r, curcuma_erf(gammij * r)) << std::endl;
             }
         }
 
@@ -3733,7 +3734,7 @@ Vector EEQSolver::calculateFinalCharges(
                             continue;
                         }
                         double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
-                        double coulomb = std::erf(gamma_ij * r) / r;
+                        double coulomb = curcuma_erf(gamma_ij * r) / r;
                         A(i, j) = coulomb;
                         A(j, i) = coulomb;
                     }
@@ -3766,7 +3767,7 @@ Vector EEQSolver::calculateFinalCharges(
                         continue;
                     }
                     double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
-                    double coulomb = std::erf(gamma_ij * r) / r;
+                    double coulomb = curcuma_erf(gamma_ij * r) / r;
                     A(i, j) = coulomb;
                     A(j, i) = coulomb;
                 }
@@ -3869,7 +3870,7 @@ Vector EEQSolver::calculateFinalCharges(
                     double gammij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
                     double r = dist(i, j);  // packed lookup
                     std::cerr << fmt::format("  A[{},{}] = {:12.6f}  (gammij={:12.6f}, r={:12.6f}, erf={:12.6f})",
-                        i, j, A(i, j), gammij, r, std::erf(gammij * r)) << std::endl;
+                        i, j, A(i, j), gammij, r, curcuma_erf(gammij * r)) << std::endl;
                 }
             }
 
@@ -4161,7 +4162,7 @@ double EEQSolver::calculateEEQEnergy(
             EEQParameters params_j = getParameters(atoms[j], cn(j));
 
             double gamma_ij = 1.0 / std::sqrt(params_i.alp + params_j.alp);
-            double erf_gamma = std::erf(gamma_ij * r);
+            double erf_gamma = curcuma_erf(gamma_ij * r);
             double coulomb = erf_gamma / r;
 
             energy += charges(i) * charges(j) * coulomb;
@@ -4309,7 +4310,7 @@ Vector EEQSolver::calculateDxi(
                     if (r1 > 1e-10 && r2 > 1e-10) {
                         double cos_angle = (dx1*dx2 + dy1*dy2 + dz1*dz2) / (r1 * r2);
                         cos_angle = std::max(-1.0, std::min(1.0, cos_angle));
-                        double angle_deg = std::acos(cos_angle) * 180.0 / M_PI;
+                        double angle_deg = curcuma_acos(cos_angle) * 180.0 / M_PI;
                         is_carbene = (angle_deg < 150.0);  // Fortran: phi*180/pi < 150
                     }
                 }
