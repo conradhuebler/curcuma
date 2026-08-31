@@ -1093,7 +1093,56 @@ void ConfSearch::start()
             if (m_hold_polar_h)
                 opt["distance_restraints"] = PolarHydrogenRestraints(FunnelTopoRef());
             // Bias structures are the primary conformers discovered by RMSD-MTD.
+            // Claude Generated (Aug 2026): optionally optimise the densification harvest with a
+            // looser preset (see PARAM densify_opt_preset) -- those snapshots start
+            // ~refine_md_r_dep from a known minimum and their value is the basin assignment.
+            int densify_split = 0;
+            const std::string explore_d = explore + ".densify";
+            if (m_refine_md && !m_densify_opt_preset.empty()) {
+                std::vector<Molecule> keep_reg, keep_d;
+                FileIterator split_it(outputPath(explore + ".xyz"));
+                while (!split_it.AtEnd()) {
+                    Molecule mol = split_it.Next();
+                    if (mol.AtomCount() == 0)
+                        continue;
+                    (mol.Name().find("_densify") != std::string::npos ? keep_d : keep_reg).push_back(mol);
+                }
+                if (!keep_d.empty() && keep_reg.empty()) {
+                    // everything is densification harvest -- one batch, loose preset directly
+                    opt["convergence_preset"] = m_densify_opt_preset;
+                    CurcumaLogger::result_fmt("ConfSearch: all {} snapshot(s) are densification harvest -- "
+                                              "optimised with preset '{}' (-densify_opt_preset)",
+                        static_cast<int>(keep_d.size()), m_densify_opt_preset);
+                } else if (!keep_d.empty()) {
+                    densify_split = static_cast<int>(keep_d.size());
+                    bool first = true;
+                    for (const auto& m : keep_reg) {
+                        if (first) { m.writeXYZFile(outputPath(explore + ".xyz")); first = false; }
+                        else          m.appendXYZFile(outputPath(explore + ".xyz"));
+                    }
+                    first = true;
+                    for (const auto& m : keep_d) {
+                        if (first) { m.writeXYZFile(outputPath(explore_d + ".xyz")); first = false; }
+                        else          m.appendXYZFile(outputPath(explore_d + ".xyz"));
+                    }
+                }
+            }
             PerformOptimisation(explore, opt, relax);
+            if (densify_split > 0) {
+                nlohmann::json opt_d = opt;
+                opt_d["convergence_preset"] = m_densify_opt_preset;
+                const std::string relax_d = relax + ".densify";
+                CurcumaLogger::result_fmt("ConfSearch: {} densification snapshot(s) optimised separately "
+                                          "with preset '{}' (-densify_opt_preset)",
+                    densify_split, m_densify_opt_preset);
+                PerformOptimisation(explore_d, opt_d, relax_d);
+                FileIterator dit(outputPath(relax_d + ".xyz"));
+                while (!dit.AtEnd()) {
+                    Molecule mol = dit.Next();
+                    if (mol.AtomCount() > 0)
+                        mol.appendXYZFile(outputPath(relax + ".xyz"));
+                }
+            }
             int opt_count = 0;
             {
                 FileIterator opt_file(outputPath(relax + ".xyz"));
@@ -4522,6 +4571,7 @@ void ConfSearch::LoadControlJson()
     m_refine_md_method = m_config.get<std::string>("refine_md_method");
     m_refine_md_r_dep = m_config.get<double>("refine_md_r_dep");
     m_refine_md_once = m_config.get<bool>("refine_md_once");
+    m_densify_opt_preset = m_config.get<std::string>("densify_opt_preset");
     m_repair_max = m_config.get<int>("repair_max");
     m_repair_max_bonds = m_config.get<int>("repair_max_bonds");
     m_repair_force = m_config.get<double>("repair_force");
