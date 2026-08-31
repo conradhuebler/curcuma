@@ -2031,7 +2031,10 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
     // a TTY the line form is kept, so a redirected log still records the progress.
     const bool live_bar = (m_verbosity == 1) && CurcumaLogger::progress_enabled();
     const bool report_counter = (m_verbosity == 1);
-    const std::string bar_label = fmt::format("MD runs [{}]", m_md_method);
+    // Claude Generated (Aug 2026): label with the method THIS MD phase actually runs -- the
+    // refinement step may use its own (refine_md_method); "MD runs [gfnff]" over a gfn2
+    // trajectory read like a second gfnff run.
+    const std::string bar_label = fmt::format("MD runs [{}]", parameter.value("method", m_md_method));
     nlohmann::json md_param = parameter;
     md_param["verbosity"] = (m_verbosity >= 2) ? m_verbosity : 0;
 
