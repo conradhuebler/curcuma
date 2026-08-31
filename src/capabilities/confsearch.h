@@ -515,6 +515,13 @@ private:
     void ReportStageSummary() const;
 
     /// Add this cycle's candidates to the cross-cycle pool (duplicates by energy dropped).
+    /* Claude Generated (Aug 2026): applies the seed energy window to a candidate list, widening it
+     * (doubling) while fewer than seed_rank candidates would survive -- see PARAM seed_window_relax.
+     * Deletes and counts what it rejects, and returns the window actually used so the cross-cycle
+     * pool offer applies the same one. */
+    double ApplySeedWindow(std::vector<Molecule*>& candidates, double reference, double window,
+        const std::string& method, int& rejected) const;
+
     void AccumulateSeedPool(std::vector<Molecule>& pool, const std::vector<Molecule*>& candidates) const;
     /// Offer the pool as seed candidates, filtered by the energy window (ownership passes on).
     int OfferSeedPool(std::vector<Molecule*>& seeds, const std::vector<Molecule>& pool,
@@ -561,6 +568,7 @@ private:
     std::string m_seed_window_schedule = "static";
     // Claude Generated (Jul 2026): RMSD-aware seed selection (see SelectSeeds).
     std::string m_seed_selection = "diverse";
+    bool m_seed_window_relax = true; ///< Claude Generated (Aug 2026): widen the seed window before it starves
     /* Claude Generated (Jul 2026): which PES selects the next cycle's seeds ("md" | "opt"). */
     std::string m_seed_pes = "md";
     /* Claude Generated (Aug 2026): divergence guard for optimisation results, see
@@ -655,6 +663,7 @@ private:
     PARAM(seed_rank_cold_factor, Double, 1.0, "Scales seed_rank with the temperature: the effective number of seeds runs linearly from seed_rank at startT to seed_rank * this factor at endT. 1.0 (default) keeps the old constant behaviour exactly. Motivated by measurement on a 107-atom peptide: the colder the stage, the less the BEST seed contributes -- of the ten deepest structures per stage, the number NOT coming from the lowest-energy seed rises 1/10 (600 K), 4/10 (500 K), 5/10 (450 K), 7/10 (350 K), 10/10 (300 K). At 300 K the best seed produced none of them. Since a structure that once falls below rank seed_rank can never rise again (the pool only deepens), those basins are lost for the rest of the run. Raising the rank in the cold stages costs little, because the same stages produce far fewer snapshots anyway (measured 352 per repetition at 400 K against 113 at 300 K).", "Filtering", {})
     PARAM(seed_bias_penalty, Double, 0.0, "Energy penalty in kJ/mol applied to a seed CANDIDATE for the metadynamics hills already accumulated around it, used for the seed ranking only (never for reporting or for the ensemble). 0 (default) disables it and the selection is byte-identical to before. Why: the seed ranking is purely energetic, so the same deep basin is seeded again in every cycle -- and its surroundings fill with hills until the trajectory is pushed straight out of it. Measured on a 107-atom peptide: the lowest-energy seed dominates the early stages and contributes nothing to the ten deepest structures of the 300 K stage. The penalty is scaled by the accumulated hill height near the candidate (sum of counters within seed_bias_radius) relative to the most-covered candidate, so it only ever reorders candidates against each other.", "Filtering", {})
     PARAM(seed_bias_radius, Double, 0.0, "Radius in Angstrom within which bias hills count towards seed_bias_penalty. 0 derives it as the deduplication radius (rmsd), i.e. hills that the search itself would call the same structure. Only used when seed_bias_penalty > 0.", "Filtering", {})
+    PARAM(seed_window_relax, Bool, true, "Widen seed_energy_window (repeated doubling) when fewer than seed_rank candidates fall inside it -- the same self-relaxation the diverse selection already applies to its RMSD spacing. Why it is needed: the window is anchored at the RUNNING GLOBAL MINIMUM, so a deep new find raises every other structure's RELATIVE energy and can starve the seed pool at the very moment the search is succeeding. Measured on a hybrid run whose gfn2 densification found a minimum 44 kJ/mol deeper than its sibling run's in the first repetition: 3 of 18 conformers stayed inside the 50 kJ/mol window (the sibling had 16 of 23), so the next repetition ran 3 MD trajectories instead of 10 and harvested 110 instead of 248 snapshots. Simply setting a LARGER fixed window instead is a guess against a spread that changes by orders of magnitude over a run -- too small starves, too large lets the anchor sink into whatever deep funnel the exploration surface offers; the count-based rule is scale-free and stays capped by seed_rank. No effect when seed_rank is 0, where the window IS the criterion by definition.", "Filtering", {})
     PARAM(seed_selection, String, "diverse", "How the next-cycle seeds are picked from the structures inside seed_energy_window: energy = strictly the seed_rank lowest-energy ones; diverse = lowest-energy first, then only structures at least seed_min_rmsd away (permutation-aware best-fit RMSD) from every seed already chosen.", "Filtering", {})
     PARAM(seed_min_rmsd, Double, 0.0, "Minimum RMSD in Angstrom between two seeds in the diverse selection. 0 derives it as seed_diversity_factor * rmsd.", "Filtering", {})
     PARAM(seed_diversity_factor, Double, 2.0, "Multiplier applied to rmsd when seed_min_rmsd is 0. Values around 2 keep the seeds one dedup radius apart from each other.", "Filtering", {})

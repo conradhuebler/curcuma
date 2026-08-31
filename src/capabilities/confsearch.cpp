@@ -1540,11 +1540,10 @@ void ConfSearch::start()
             // the bias feedback and are released here.
             if (!seed_from_md) {
                 delete mol;
-            } else if ((mol->Energy() - m_global_min) * 2625.5 < eff_seed_window) {
-                window_seeds.push_back(mol);
             } else {
-                rejected_energy++;
-                delete mol;
+                // Claude Generated (Aug 2026): the energy window is applied AFTER the loop
+                // (ApplySeedWindow), so it can widen itself instead of starving the seed pool.
+                window_seeds.push_back(mol);
             }
         }
 
@@ -1554,8 +1553,10 @@ void ConfSearch::start()
             // Claude Generated (Aug 2026): the seeds are the best structures of ALL cycles, not of
             // this one -- see m_seed_pool_md. The diversity rule in SelectSeeds still applies, so a
             // pooled structure is dropped again when this cycle already covers its basin.
+            const double used_window_md
+                = ApplySeedWindow(window_seeds, m_global_min, eff_seed_window, m_md_method, rejected_energy);
             AccumulateSeedPool(m_seed_pool_md, window_seeds);
-            const int pooled_md = OfferSeedPool(window_seeds, m_seed_pool_md, m_global_min, eff_seed_window);
+            const int pooled_md = OfferSeedPool(window_seeds, m_seed_pool_md, m_global_min, used_window_md);
             CurcumaLogger::result_fmt("ConfSearch: seed candidates from all cycles [{}]: {} in the pool, "
                                       "{} of them not produced by this cycle",
                 m_md_method, static_cast<int>(m_seed_pool_md.size()), pooled_md);
@@ -1748,8 +1749,9 @@ void ConfSearch::start()
                     bs.persistent = true;
                     feedback.push_back(std::move(bs));
                 }
-                if (seed_from_opt && !over_bridged
-                    && (mol->Energy() - m_global_min_opt) * 2625.5 < eff_seed_window)
+                if (seed_from_opt && !over_bridged)
+                    // Claude Generated (Aug 2026): window applied below via ApplySeedWindow, which
+                    // may widen it rather than let the seed pool starve.
                     opt_window_seeds.push_back(mol); // ownership moves to the seed selection
                 else {
                     if (over_bridged && seed_from_opt)
@@ -1766,9 +1768,11 @@ void ConfSearch::start()
                 const int md_seeds = static_cast<int>(m_in_stack.size()); // 0 unless seed_pes=both
                 // Claude Generated (Aug 2026): same rule on the ranking surface -- this is where it
                 // was measured to matter (see m_seed_pool_opt).
+                const double used_window_opt = ApplySeedWindow(opt_window_seeds, m_global_min_opt,
+                    eff_seed_window, m_opt_method, rejected_energy);
                 AccumulateSeedPool(m_seed_pool_opt, opt_window_seeds);
                 const int pooled_opt = OfferSeedPool(opt_window_seeds, m_seed_pool_opt,
-                    m_global_min_opt, eff_seed_window);
+                    m_global_min_opt, used_window_opt);
                 CurcumaLogger::result_fmt("ConfSearch: seed candidates from all cycles [{}]: {} in the "
                                           "pool, {} of them not produced by this cycle",
                     m_opt_method, static_cast<int>(m_seed_pool_opt.size()), pooled_opt);
@@ -3881,6 +3885,62 @@ double ConfSearch::PermRMSD(const Geometry& reference, const Geometry& target) c
 // and finally dropped altogether, so the MD phase is never starved -- the fallback is exactly the
 // old energy ranking. Cost: O(kept * candidates) Kabsch fits on a handful of structures, i.e.
 // nothing next to one MD step.
+double ConfSearch::ApplySeedWindow(std::vector<Molecule*>& candidates, double reference,
+    double window, const std::string& method, int& rejected) const
+{
+    // Claude Generated (Aug 2026): see PARAM seed_window_relax. The window is anchored at the
+    // running global minimum, so a deep new find pushes everything else up in RELATIVE terms and
+    // can leave fewer candidates than seed_rank -- the search starves its own exploration exactly
+    // when it succeeds. The diverse selection already relaxes its spacing for the same reason;
+    // this does the same for the energy criterion.
+    auto inside = [&](double w) {
+        int c = 0;
+        for (const Molecule* mol : candidates)
+            if (mol && (mol->Energy() - reference) * 2625.5 < w)
+                c++;
+        return c;
+    };
+    double eff = window;
+    const int total = static_cast<int>(candidates.size());
+    if (m_seed_window_relax && m_seed_rank > 0 && total > 0 && inside(eff) < std::min(m_seed_rank, total)) {
+        const int before = inside(eff);
+        if (total <= m_seed_rank) {
+            // Fewer candidates exist than seeds are wanted: the window can only starve here, it
+            // cannot select. Suspend it at the top of the candidate set (finite, so the
+            // cross-cycle pool offer below stays bounded by the same energy).
+            double span = 0.0;
+            for (const Molecule* mol : candidates)
+                span = std::max(span, (mol->Energy() - reference) * 2625.5);
+            eff = span + 1.0;
+            CurcumaLogger::result_fmt("ConfSearch: seed window suspended for this cycle [{}] -- only {} "
+                                      "candidate(s) exist at all, fewer than the {} seeds asked for, and {} "
+                                      "of them were inside the {:.0f} kJ/mol window",
+                method, total, m_seed_rank, before, window);
+        } else {
+            int guard = 0;
+            while (inside(eff) < m_seed_rank && guard++ < 24)
+                eff *= 2.0;
+            CurcumaLogger::result_fmt("ConfSearch: seed window relaxed {:.0f} -> {:.0f} kJ/mol [{}] -- only {} of "
+                                      "{} candidate(s) were inside it, fewer than the {} seeds asked for (a deep "
+                                      "new minimum lowers the anchor and starves the seed pool); "
+                                      "-seed_window_relax false keeps the fixed window",
+                window, eff, method, before, total, m_seed_rank);
+        }
+    }
+    std::vector<Molecule*> keep;
+    keep.reserve(candidates.size());
+    for (Molecule* mol : candidates) {
+        if (mol && (mol->Energy() - reference) * 2625.5 < eff) {
+            keep.push_back(mol);
+        } else {
+            rejected++;
+            delete mol;
+        }
+    }
+    candidates.swap(keep);
+    return eff;
+}
+
 void ConfSearch::AccumulateSeedPool(std::vector<Molecule>& pool, const std::vector<Molecule*>& candidates) const
 {
     for (const Molecule* mol : candidates) {
@@ -4572,6 +4632,7 @@ void ConfSearch::LoadControlJson()
     m_refine_md_r_dep = m_config.get<double>("refine_md_r_dep");
     m_refine_md_once = m_config.get<bool>("refine_md_once");
     m_densify_opt_preset = m_config.get<std::string>("densify_opt_preset");
+    m_seed_window_relax = m_config.get<bool>("seed_window_relax"); // Claude Generated (Aug 2026)
     m_repair_max = m_config.get<int>("repair_max");
     m_repair_max_bonds = m_config.get<int>("repair_max_bonds");
     m_repair_force = m_config.get<double>("repair_force");
