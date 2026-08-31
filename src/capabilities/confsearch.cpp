@@ -923,9 +923,23 @@ void ConfSearch::start()
                     md_refine["temperature"] = m_refine_md_temperature;
                 }
                 md_refine["rmsd_mtd_k"] = m_refine_md_k;
+                // Claude Generated (Aug 2026): three-way method split. The refinement step may run
+                // on its own PES (typically the ranking method): densification dynamics on the
+                // surface that decides, from seeds that surface selected. The method sub-scopes are
+                // already in the md json (ChildConfig copies them all); only the aspc default for
+                // native GFN children has to be repeated here, since ChildConfig applied it for the
+                // EXPLORATION method.
+                const std::string refine_method = m_refine_md_method.empty() ? m_md_method : m_refine_md_method;
+                if (refine_method != m_md_method) {
+                    md_refine["method"] = refine_method;
+                    if ((refine_method == "gfn2" || refine_method == "gfn1")
+                        && !(md_refine.contains("xtb") && md_refine["xtb"].is_object()
+                            && md_refine["xtb"].contains("scf_extrapolation")))
+                        md_refine["xtb"]["scf_extrapolation"] = "aspc";
+                }
                 CurcumaLogger::result_fmt(
-                    "ConfSearch: refinement MD -- {} seed(s), {} fs at dt {} fs (RATTLE {}), T = {} K, k = {} Eh",
-                    static_cast<int>(m_in_stack.size()), m_refine_md_time, m_refine_md_dt,
+                    "ConfSearch: refinement MD ({}) -- {} seed(s), {} fs at dt {} fs (RATTLE {}), T = {} K, k = {} Eh",
+                    refine_method, static_cast<int>(m_in_stack.size()), m_refine_md_time, m_refine_md_dt,
                     md_refine.value("rattle", 0),
                     m_refine_md_temperature > 0.0 ? m_refine_md_temperature : m_currentT, m_refine_md_k);
                 m_md_snapshot_append = true; // append to the exploration snapshots, do not replace them
@@ -4446,6 +4460,7 @@ void ConfSearch::LoadControlJson()
     m_refine_md_rattle = m_config.get<int>("refine_md_rattle");
     m_refine_md_temperature = m_config.get<double>("refine_md_temperature");
     m_refine_md_k = m_config.get<double>("refine_md_k");
+    m_refine_md_method = m_config.get<std::string>("refine_md_method");
     m_repair_max = m_config.get<int>("repair_max");
     m_repair_max_bonds = m_config.get<int>("repair_max_bonds");
     m_repair_force = m_config.get<double>("repair_force");

@@ -533,8 +533,9 @@ private:
     int m_stage_saturation_abort = 2; ///< Claude Generated (Aug 2026): dry repetitions before a stage is cut short
     // Claude Generated (Aug 2026): second, differently configured MD step per repetition
     bool m_refine_md = false;
-    double m_refine_md_time = 400.0, m_refine_md_dt = 2.0, m_refine_md_temperature = 0.0, m_refine_md_k = 0.0005;
+    double m_refine_md_time = 400.0, m_refine_md_dt = 2.0, m_refine_md_temperature = 0.0, m_refine_md_k = 0.0;
     int m_refine_md_rattle = 2;
+    std::string m_refine_md_method; ///< Claude Generated (Aug 2026): refinement MD method, empty = md_method
     bool m_md_snapshot_append = false; ///< second MD step of a repetition appends to the snapshot file
     int m_explore_md_rattle = -1; ///< Claude Generated (Aug 2026): explicit exploration RATTLE mode, -1 = inherit
     int m_rmsd_mtd_cap_eff = 0; ///< Claude Generated (Aug 2026): the bias cap actually in force (resolved from -1 = adaptive)
@@ -623,7 +624,8 @@ private:
 
     // --- Methods ---
     PARAM(method, String, "gfnff", "Energy method used for both phases unless md_method or opt_method override it.", "Methods", {})
-    PARAM(md_method, String, "", "Cheap method driving MD exploration and pre-optimisation. Empty falls back to method.", "Methods", {})
+    PARAM(md_method, String, "", "Cheap method driving MD exploration and pre-optimisation. Empty falls back to method. With the two-step MD this is the EXPLORATION method (alias explore_md_method); the refinement step follows it unless refine_md_method says otherwise. The full three-way split is explore_md_method / refine_md_method / opt_method.", "Methods", {"explore_md_method"})
+    PARAM(refine_md_method, String, "", "Method of the REFINEMENT MD step (requires -refine_md true). Empty = same as the exploration method. Setting it to the ranking method (e.g. gfn2 while exploring with gfnff) runs the densification dynamics on the surface that actually decides -- which is the measured mechanism behind the gfn2/gfn2 successes: depth arises 40-160 fs from a good seed ON THE RIGHT SURFACE. Cost warning: a QM refinement MD pays one gradient per time step (refine_md_time/refine_md_dt steps per seed per repetition); the defaults (400 fs at dt 2 = 200 gradients) keep that comparable to a single geometry optimisation. The default refine_md_rattle 2 (X-H constrained) doubles as the proton-transfer guard that QM dynamics needs (measured: 6 of 28 unconstrained gfn2-MD snapshots tautomerised).", "Exploration", {})
     PARAM(opt_method, String, "", "Accurate method for the per-cycle re-optimisation and the final ranking. Empty falls back to method.", "Methods", {})
 
     // --- System ---
