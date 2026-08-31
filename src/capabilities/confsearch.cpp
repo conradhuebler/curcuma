@@ -923,6 +923,11 @@ void ConfSearch::start()
                     md_refine["temperature"] = m_refine_md_temperature;
                 }
                 md_refine["rmsd_mtd_k"] = m_refine_md_k;
+                // Claude Generated (Aug 2026): densification needs finer deposit spacing than
+                // exploration -- see PARAM refine_md_r_dep (measured: at the exploration spacing a
+                // close-hovering QM walker harvests nothing, its region is already "covered").
+                if (m_refine_md_r_dep > 0.0)
+                    md_refine["rmsd_mtd_r_dep"] = m_refine_md_r_dep;
                 // Claude Generated (Aug 2026): three-way method split. The refinement step may run
                 // on its own PES (typically the ranking method): densification dynamics on the
                 // surface that decides, from seeds that surface selected. The method sub-scopes are
@@ -2154,8 +2159,12 @@ void ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecule
              * which MD run of that phase, which hill, and at which point of the trajectory. The name
              * survives every later stage now that the XYZ comment parser reads it back, so a final
              * conformer can be traced to the trajectory that produced it. */
-            mol.setName(fmt::format("{}_w{}_i{}_t{}", m_cycle_tag, new_snapshots[i].origin,
-                new_snapshots[i].index, static_cast<long long>(new_snapshots[i].time)));
+            // Claude Generated (Aug 2026): densification snapshots (the refinement MD exports with
+            // m_md_snapshot_append set) carry a marker -- the 0.75 A snapshot screen must not thin
+            // them, their sub-Angstrom spacing IS the point (see ThinSnapshots).
+            mol.setName(fmt::format("{}_w{}_i{}_t{}{}", m_cycle_tag, new_snapshots[i].origin,
+                new_snapshots[i].index, static_cast<long long>(new_snapshots[i].time),
+                m_md_snapshot_append ? "_densify" : ""));
             if (first) { mol.writeXYZFile(outputPath(snapshot_file)); first = false; }
             else          mol.appendXYZFile(outputPath(snapshot_file));
             exported_indices.push_back(new_snapshots[i].index);
@@ -3240,14 +3249,23 @@ int ConfSearch::ThinSnapshots(const std::string& path) const
                 continue;
             total++;
             bool redundant = false;
-            for (const Molecule& k : keep) {
-                if (k.AtomCount() != mol.AtomCount())
-                    continue;
-                if (RMSDFunctions::getRMSD(k.getGeometry(),
-                        RMSDFunctions::getAligned(k.getGeometry(), mol.getGeometry(), 1))
-                    < m_snapshot_dedup_rmsd) {
-                    redundant = true;
-                    break;
+            // Claude Generated (Aug 2026): densification snapshots are exempt from the screen.
+            // The screen exists to save optimisations of geometries "the later dedup merges
+            // anyway" -- but refinement-MD snapshots are deposited at refine_md_r_dep (~0.2 A)
+            // BECAUSE their sub-Angstrom differences decide the basin mapping near a good seed
+            // (measured: 0.6 vs 1.0 A from the target basin decides +5 vs +90 kJ/mol). Without
+            // the exemption the screen undid the whole densification harvest.
+            const bool densify = mol.Name().find("_densify") != std::string::npos;
+            if (!densify) {
+                for (const Molecule& k : keep) {
+                    if (k.AtomCount() != mol.AtomCount())
+                        continue;
+                    if (RMSDFunctions::getRMSD(k.getGeometry(),
+                            RMSDFunctions::getAligned(k.getGeometry(), mol.getGeometry(), 1))
+                        < m_snapshot_dedup_rmsd) {
+                        redundant = true;
+                        break;
+                    }
                 }
             }
             if (!redundant)
@@ -4461,6 +4479,7 @@ void ConfSearch::LoadControlJson()
     m_refine_md_temperature = m_config.get<double>("refine_md_temperature");
     m_refine_md_k = m_config.get<double>("refine_md_k");
     m_refine_md_method = m_config.get<std::string>("refine_md_method");
+    m_refine_md_r_dep = m_config.get<double>("refine_md_r_dep");
     m_repair_max = m_config.get<int>("repair_max");
     m_repair_max_bonds = m_config.get<int>("repair_max_bonds");
     m_repair_force = m_config.get<double>("repair_force");
