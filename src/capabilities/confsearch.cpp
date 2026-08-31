@@ -742,6 +742,7 @@ void ConfSearch::start()
       const double stage_entry_best = m_global_min_opt;
       bool stage_new_best = false;
       int stage_dry_reps = 0; // Claude Generated (Aug 2026): consecutive dry repetitions of this stage
+      m_refined_seeds.clear(); // Claude Generated (Aug 2026): refine-once memory is per temperature stage
       for (int stage_rep = 0; stage_rep < stage_repeats; ++stage_rep) {
         const bool last_repetition = (stage_rep == stage_repeats - 1);
         // Claude Generated (Jul 2026): every file this cycle writes carries this tag, so the cycles
@@ -912,6 +913,38 @@ void ConfSearch::start()
             // harvests snapshots into the shared pool while the bias force no longer expels the
             // walker from the very region the seed was chosen for.
             if (m_refine_md && !m_in_stack.empty()) {
+                // Claude Generated (Aug 2026): refine-once memory (see PARAM refine_md_once). No
+                // bias acts in the refinement, so a second pass from the same seed at the same
+                // temperature re-harvests an already-deposited region -- skip it and save the QM
+                // trajectory. Cleared at every new temperature stage.
+                std::vector<Molecule*> fresh_seeds;
+                int already_refined = 0;
+                for (auto* mol : m_in_stack) {
+                    bool seen = false;
+                    if (m_refine_md_once) {
+                        for (const Molecule& r : m_refined_seeds) {
+                            if (r.AtomCount() == mol->AtomCount()
+                                && std::abs(r.Energy() - mol->Energy()) < 1e-5
+                                && RMSDFunctions::getRMSD(r.getGeometry(),
+                                       RMSDFunctions::getAligned(r.getGeometry(), mol->getGeometry(), 1))
+                                    < 0.25) {
+                                seen = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (seen)
+                        already_refined++;
+                    else
+                        fresh_seeds.push_back(mol);
+                }
+                if (fresh_seeds.empty()) {
+                    CurcumaLogger::result_fmt(
+                        "ConfSearch: refinement MD skipped -- all {} seed(s) were already refined in "
+                        "this stage (no bias acts in the refinement; a second pass from the same seed "
+                        "only re-harvests deposited ground. -refine_md_once false disables this)",
+                        already_refined);
+                } else {
                 nlohmann::json md_refine = md;
                 md_refine["max_time"] = m_refine_md_time;
                 md_refine["time_step"] = m_refine_md_dt;
@@ -943,13 +976,18 @@ void ConfSearch::start()
                         md_refine["xtb"]["scf_extrapolation"] = "aspc";
                 }
                 CurcumaLogger::result_fmt(
-                    "ConfSearch: refinement MD ({}) -- {} seed(s), {} fs at dt {} fs (RATTLE {}), T = {} K, k = {} Eh",
-                    refine_method, static_cast<int>(m_in_stack.size()), m_refine_md_time, m_refine_md_dt,
+                    "ConfSearch: refinement MD ({}) -- {} seed(s){}, {} fs at dt {} fs (RATTLE {}), T = {} K, k = {} Eh",
+                    refine_method, static_cast<int>(fresh_seeds.size()),
+                    already_refined > 0 ? fmt::format(" ({} already refined this stage, skipped)", already_refined) : "",
+                    m_refine_md_time, m_refine_md_dt,
                     md_refine.value("rattle", 0),
                     m_refine_md_temperature > 0.0 ? m_refine_md_temperature : m_currentT, m_refine_md_k);
                 m_md_snapshot_append = true; // append to the exploration snapshots, do not replace them
-                PerformMolecularDynamics(m_in_stack, md_refine);
+                PerformMolecularDynamics(fresh_seeds, md_refine);
                 m_md_snapshot_append = false;
+                for (const auto* mol : fresh_seeds)
+                    m_refined_seeds.push_back(*mol);
+                }
             }
 
             // Cross-temperature: log pool statistics after MD phase and prune
@@ -4483,6 +4521,7 @@ void ConfSearch::LoadControlJson()
     m_refine_md_k = m_config.get<double>("refine_md_k");
     m_refine_md_method = m_config.get<std::string>("refine_md_method");
     m_refine_md_r_dep = m_config.get<double>("refine_md_r_dep");
+    m_refine_md_once = m_config.get<bool>("refine_md_once");
     m_repair_max = m_config.get<int>("repair_max");
     m_repair_max_bonds = m_config.get<int>("repair_max_bonds");
     m_repair_force = m_config.get<double>("repair_force");
