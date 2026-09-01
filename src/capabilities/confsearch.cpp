@@ -939,11 +939,41 @@ void ConfSearch::start()
                     else
                         fresh_seeds.push_back(mol);
                 }
+                // Claude Generated (Aug 2026): refine-once frees slots, it must not shrink the fleet.
+                // Top the list back up to the number of trajectories the exploration ran, taking the
+                // next candidates from the cross-cycle seed pool (energy-sorted) that this stage has
+                // not refined yet -- the QM budget stays constant and buys new basins instead of
+                // repeats. The pool outlives this block, so the pointers stay valid.
+                int topped_up = 0;
+                if (m_refine_md_once && already_refined > 0) {
+                    const int want = static_cast<int>(m_in_stack.size());
+                    std::vector<Molecule>& pool
+                        = (m_seed_pes != "md" && !m_seed_pool_opt.empty()) ? m_seed_pool_opt : m_seed_pool_md;
+                    for (Molecule& cand : pool) {
+                        if (static_cast<int>(fresh_seeds.size()) >= want)
+                            break;
+                        auto same = [&](const Molecule& other) {
+                            return other.AtomCount() == cand.AtomCount()
+                                && std::abs(other.Energy() - cand.Energy()) < 1e-5
+                                && RMSDFunctions::getRMSD(other.getGeometry(),
+                                       RMSDFunctions::getAligned(other.getGeometry(), cand.getGeometry(), 1))
+                                    < 0.25;
+                        };
+                        if (std::any_of(m_refined_seeds.begin(), m_refined_seeds.end(), same))
+                            continue;
+                        if (std::any_of(fresh_seeds.begin(), fresh_seeds.end(),
+                                [&](const Molecule* m) { return same(*m); }))
+                            continue;
+                        fresh_seeds.push_back(&cand);
+                        topped_up++;
+                    }
+                }
                 if (fresh_seeds.empty()) {
                     CurcumaLogger::result_fmt(
                         "ConfSearch: refinement MD skipped -- all {} seed(s) were already refined in "
-                        "this stage (no bias acts in the refinement; a second pass from the same seed "
-                        "only re-harvests deposited ground. -refine_md_once false disables this)",
+                        "this stage and the seed pool holds no unrefined candidate (no bias acts in the "
+                        "refinement; a second pass from the same seed only re-harvests deposited "
+                        "ground. -refine_md_once false disables this)",
                         already_refined);
                 } else {
                 nlohmann::json md_refine = md;
@@ -979,7 +1009,10 @@ void ConfSearch::start()
                 CurcumaLogger::result_fmt(
                     "ConfSearch: refinement MD ({}) -- {} seed(s){}, {} fs at dt {} fs (RATTLE {}), T = {} K, k = {} Eh",
                     refine_method, static_cast<int>(fresh_seeds.size()),
-                    already_refined > 0 ? fmt::format(" ({} already refined this stage, skipped)", already_refined) : "",
+                    already_refined > 0
+                        ? fmt::format(" ({} already refined this stage, replaced by {} unrefined candidate(s) from the pool)",
+                              already_refined, topped_up)
+                        : "",
                     m_refine_md_time, m_refine_md_dt,
                     md_refine.value("rattle", 0),
                     m_refine_md_temperature > 0.0 ? m_refine_md_temperature : m_currentT, m_refine_md_k);
