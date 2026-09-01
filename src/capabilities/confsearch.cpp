@@ -912,7 +912,7 @@ void ConfSearch::start()
             // time step under RATTLE, and a near-zero bias constant so the deposit machinery still
             // harvests snapshots into the shared pool while the bias force no longer expels the
             // walker from the very region the seed was chosen for.
-            m_refine_seed_geoms.clear(); // stale seeds must not filter this repetition's snapshots
+            m_refine_seed_mols.clear(); // stale seeds must not filter this repetition's snapshots
             if (m_refine_md && !m_in_stack.empty()) {
                 // Claude Generated (Aug 2026): refine-once memory (see PARAM refine_md_once). No
                 // bias acts in the refinement, so a second pass from the same seed at the same
@@ -986,9 +986,9 @@ void ConfSearch::start()
                 m_md_snapshot_append = true; // append to the exploration snapshots, do not replace them
                 // Claude Generated (Aug 2026): remember what this phase started from, so
                 // DropSelfConfirmingDensify can recognise snapshots that never left their seed.
-                m_refine_seed_geoms.clear();
+                m_refine_seed_mols.clear();
                 for (const auto* mol : fresh_seeds)
-                    m_refine_seed_geoms.push_back(mol->getGeometry());
+                    m_refine_seed_mols.push_back(*mol);
                 PerformMolecularDynamics(fresh_seeds, md_refine);
                 m_md_snapshot_append = false;
                 for (const auto* mol : fresh_seeds)
@@ -1152,6 +1152,11 @@ void ConfSearch::start()
                         mol.appendXYZFile(outputPath(relax + ".xyz"));
                 }
             }
+            // Claude Generated (Aug 2026): a densification product that relaxed back into its own
+            // seed without improving on it is a duplicate of a structure the pool already holds --
+            // drop it before it becomes this cycle's "best", sets the energy window and re-seeds
+            // a basin that is already seeded (see PARAM refine_md_refind_rmsd).
+            DropDensifyRefinds(outputPath(relax + ".xyz"));
             int opt_count = 0;
             {
                 FileIterator opt_file(outputPath(relax + ".xyz"));
@@ -3334,6 +3339,76 @@ bool ConfSearch::RepairSnapshot(Molecule& mol, EnergyCalculator& calculator) con
  * apart can still relax into different minima, and this screen cannot know that -- it is a cost
  * saving, not a deduplication, and it is off by default for that reason.
  */
+int ConfSearch::DropDensifyRefinds(const std::string& path) const
+{
+    // Claude Generated (Aug 2026): see PARAM refine_md_refind_rmsd. The complement of
+    // DropSelfConfirmingDensify: there the TRAJECTORY never left the seed, here the OPTIMISATION
+    // brought the structure back. Nothing can be saved in compute at this point -- the value is a
+    // pool, a cycle-best report and a seed selection that are not polluted with duplicates of
+    // structures an earlier cycle already deposited.
+    const double r_max = (m_refine_md_refind_rmsd < 0.0) ? m_rmsd : m_refine_md_refind_rmsd;
+    if (r_max <= 0.0 || m_refine_seed_mols.empty())
+        return 0;
+    std::ifstream check(path);
+    if (!check.good())
+        return 0;
+    std::vector<Molecule> keep;
+    int total = 0, dropped = 0;
+    double worst_gap = 0.0;
+    {
+        FileIterator it(path);
+        while (!it.AtEnd()) {
+            Molecule mol = it.Next();
+            if (mol.AtomCount() == 0)
+                continue;
+            total++;
+            bool refind = false;
+            if (mol.Name().find("_densify") != std::string::npos) {
+                for (const Molecule& seed : m_refine_seed_mols) {
+                    if (seed.AtomCount() != mol.AtomCount())
+                        continue;
+                    // Claude Generated (Aug 2026): only seeds that live on the SAME surface as the
+                    // optimised product can be compared -- and only those are structures the
+                    // ranking pool already holds. In the first repetition (and under -seed_pes md)
+                    // the seeds still carry exploration-surface energies, 143 Eh away from a gfn2
+                    // product; comparing them would be a category error, and dropping against them
+                    // would discard structures the pool does not have yet. Conformer energies span
+                    // ~0.05 Eh, so 1 Eh separates "same method" from "different method" safely.
+                    if (std::abs(seed.Energy() - mol.Energy()) > 1.0)
+                        continue;
+                    // Deeper than its seed = the better representative of that basin, not a re-find.
+                    if (mol.Energy() < seed.Energy() - 1e-8)
+                        continue;
+                    const double r = RMSDFunctions::getRMSD(seed.getGeometry(),
+                        RMSDFunctions::getAligned(seed.getGeometry(), mol.getGeometry(), 1));
+                    if (r < r_max) {
+                        refind = true;
+                        worst_gap = std::max(worst_gap, (mol.Energy() - seed.Energy()) * 2625.5);
+                        break;
+                    }
+                }
+            }
+            if (refind)
+                dropped++;
+            else
+                keep.push_back(mol);
+        }
+    }
+    if (dropped == 0)
+        return 0;
+    bool first = true;
+    for (const Molecule& mol : keep) {
+        if (first) { mol.writeXYZFile(path); first = false; }
+        else          mol.appendXYZFile(path);
+    }
+    CurcumaLogger::result_fmt("ConfSearch: densification re-finds: {} of {} optimised structure(s) relaxed back into "
+                              "a seed of their own refinement phase (within {:.2f} A, up to {:.2f} kJ/mol above it) "
+                              "and are dropped -- the pool already holds that basin, and the deeper copy holds it "
+                              "better",
+        dropped, total, r_max, worst_gap);
+    return dropped;
+}
+
 int ConfSearch::DropSelfConfirmingDensify(const std::string& path) const
 {
     // Claude Generated (Aug 2026): see PARAM refine_md_min_shift. The refinement MD carries no bias
@@ -3341,7 +3416,7 @@ int ConfSearch::DropSelfConfirmingDensify(const std::string& path) const
     // buy a full QM optimisation to rediscover their own seed. Compared against ALL seeds of the
     // phase, not just the walker's own -- a walker that drifted into a neighbouring seed's basin is
     // just as known.
-    if (m_refine_md_min_shift <= 0.0 || m_refine_seed_geoms.empty())
+    if (m_refine_md_min_shift <= 0.0 || m_refine_seed_mols.empty())
         return 0;
     std::ifstream check(path);
     if (!check.good())
@@ -3357,11 +3432,11 @@ int ConfSearch::DropSelfConfirmingDensify(const std::string& path) const
             total++;
             bool self_confirming = false;
             if (mol.Name().find("_densify") != std::string::npos) {
-                for (const Geometry& seed : m_refine_seed_geoms) {
-                    if (seed.rows() != mol.AtomCount())
+                for (const Molecule& seed : m_refine_seed_mols) {
+                    if (seed.AtomCount() != mol.AtomCount())
                         continue;
-                    if (RMSDFunctions::getRMSD(seed,
-                            RMSDFunctions::getAligned(seed, mol.getGeometry(), 1))
+                    if (RMSDFunctions::getRMSD(seed.getGeometry(),
+                            RMSDFunctions::getAligned(seed.getGeometry(), mol.getGeometry(), 1))
                         < m_refine_md_min_shift) {
                         self_confirming = true;
                         break;
@@ -4697,6 +4772,7 @@ void ConfSearch::LoadControlJson()
     m_densify_opt_preset = m_config.get<std::string>("densify_opt_preset");
     m_seed_window_relax = m_config.get<bool>("seed_window_relax"); // Claude Generated (Aug 2026)
     m_refine_md_min_shift = m_config.get<double>("refine_md_min_shift");
+    m_refine_md_refind_rmsd = m_config.get<double>("refine_md_refind_rmsd");
     m_repair_max = m_config.get<int>("repair_max");
     m_repair_max_bonds = m_config.get<int>("repair_max_bonds");
     m_repair_force = m_config.get<double>("repair_force");
