@@ -912,6 +912,7 @@ void ConfSearch::start()
             // time step under RATTLE, and a near-zero bias constant so the deposit machinery still
             // harvests snapshots into the shared pool while the bias force no longer expels the
             // walker from the very region the seed was chosen for.
+            m_refine_seed_geoms.clear(); // stale seeds must not filter this repetition's snapshots
             if (m_refine_md && !m_in_stack.empty()) {
                 // Claude Generated (Aug 2026): refine-once memory (see PARAM refine_md_once). No
                 // bias acts in the refinement, so a second pass from the same seed at the same
@@ -983,6 +984,11 @@ void ConfSearch::start()
                     md_refine.value("rattle", 0),
                     m_refine_md_temperature > 0.0 ? m_refine_md_temperature : m_currentT, m_refine_md_k);
                 m_md_snapshot_append = true; // append to the exploration snapshots, do not replace them
+                // Claude Generated (Aug 2026): remember what this phase started from, so
+                // DropSelfConfirmingDensify can recognise snapshots that never left their seed.
+                m_refine_seed_geoms.clear();
+                for (const auto* mol : fresh_seeds)
+                    m_refine_seed_geoms.push_back(mol->getGeometry());
                 PerformMolecularDynamics(fresh_seeds, md_refine);
                 m_md_snapshot_append = false;
                 for (const auto* mol : fresh_seeds)
@@ -1066,6 +1072,9 @@ void ConfSearch::start()
             // Claude Generated (Aug 2026): thin out near-identical snapshots before anything expensive
             // touches them (see ThinSnapshots). Runs before the topology gate so the gate, too, only
             // looks at structures that will actually be optimised.
+            // Claude Generated (Aug 2026): densification snapshots that never left their seed cost a
+            // full optimisation to confirm the known -- drop them before the screen looks at anything.
+            DropSelfConfirmingDensify(outputPath(explore + ".xyz"));
             ThinSnapshots(outputPath(explore + ".xyz"));
             if (m_snapshot_topology_gate && FilterSnapshotsByTopology(outputPath(explore + ".xyz")) == 0) {
                 // Nothing survived: the MD produced only broken structures this cycle. Treat it like
@@ -3325,6 +3334,60 @@ bool ConfSearch::RepairSnapshot(Molecule& mol, EnergyCalculator& calculator) con
  * apart can still relax into different minima, and this screen cannot know that -- it is a cost
  * saving, not a deduplication, and it is off by default for that reason.
  */
+int ConfSearch::DropSelfConfirmingDensify(const std::string& path) const
+{
+    // Claude Generated (Aug 2026): see PARAM refine_md_min_shift. The refinement MD carries no bias
+    // force, so part of every trajectory sits in the basin it started from; those snapshots would
+    // buy a full QM optimisation to rediscover their own seed. Compared against ALL seeds of the
+    // phase, not just the walker's own -- a walker that drifted into a neighbouring seed's basin is
+    // just as known.
+    if (m_refine_md_min_shift <= 0.0 || m_refine_seed_geoms.empty())
+        return 0;
+    std::ifstream check(path);
+    if (!check.good())
+        return 0;
+    std::vector<Molecule> keep;
+    int total = 0, dropped = 0;
+    {
+        FileIterator it(path);
+        while (!it.AtEnd()) {
+            Molecule mol = it.Next();
+            if (mol.AtomCount() == 0)
+                continue;
+            total++;
+            bool self_confirming = false;
+            if (mol.Name().find("_densify") != std::string::npos) {
+                for (const Geometry& seed : m_refine_seed_geoms) {
+                    if (seed.rows() != mol.AtomCount())
+                        continue;
+                    if (RMSDFunctions::getRMSD(seed,
+                            RMSDFunctions::getAligned(seed, mol.getGeometry(), 1))
+                        < m_refine_md_min_shift) {
+                        self_confirming = true;
+                        break;
+                    }
+                }
+            }
+            if (self_confirming)
+                dropped++;
+            else
+                keep.push_back(mol);
+        }
+    }
+    if (dropped == 0)
+        return 0;
+    bool first = true;
+    for (const Molecule& mol : keep) {
+        if (first) { mol.writeXYZFile(path); first = false; }
+        else          mol.appendXYZFile(path);
+    }
+    CurcumaLogger::result_fmt("ConfSearch: densification screen: {} of {} snapshot(s) are still within {:.2f} A of "
+                              "a seed of their own refinement phase and are dropped -- they would only rediscover "
+                              "their starting basin ({} go on to the snapshot screen)",
+        dropped, total, m_refine_md_min_shift, static_cast<int>(keep.size()));
+    return dropped;
+}
+
 int ConfSearch::ThinSnapshots(const std::string& path) const
 {
     if (m_snapshot_dedup_rmsd <= 0.0)
@@ -4633,6 +4696,7 @@ void ConfSearch::LoadControlJson()
     m_refine_md_once = m_config.get<bool>("refine_md_once");
     m_densify_opt_preset = m_config.get<std::string>("densify_opt_preset");
     m_seed_window_relax = m_config.get<bool>("seed_window_relax"); // Claude Generated (Aug 2026)
+    m_refine_md_min_shift = m_config.get<double>("refine_md_min_shift");
     m_repair_max = m_config.get<int>("repair_max");
     m_repair_max_bonds = m_config.get<int>("repair_max_bonds");
     m_repair_force = m_config.get<double>("repair_force");

@@ -515,6 +515,12 @@ private:
     void ReportStageSummary() const;
 
     /// Add this cycle's candidates to the cross-cycle pool (duplicates by energy dropped).
+    /* Claude Generated (Aug 2026): drops densification snapshots that are still within
+     * refine_md_min_shift of a seed of their own refinement phase -- they would spend a full
+     * optimisation to rediscover a structure the pool already holds. Rewrites the file, returns
+     * how many were dropped. */
+    int DropSelfConfirmingDensify(const std::string& path) const;
+
     /* Claude Generated (Aug 2026): applies the seed energy window to a candidate list, widening it
      * (doubling) while fewer than seed_rank candidates would survive -- see PARAM seed_window_relax.
      * Deletes and counts what it rejects, and returns the window actually used so the cross-cycle
@@ -546,6 +552,8 @@ private:
     double m_refine_md_r_dep = 0.2; ///< Claude Generated (Aug 2026): finer deposit spacing for densification
     bool m_refine_md_once = true; ///< Claude Generated (Aug 2026): each structure refined at most once per stage
     std::string m_densify_opt_preset; ///< Claude Generated (Aug 2026): looser RELAX preset for _densify snapshots
+    double m_refine_md_min_shift = 0.3; ///< Claude Generated (Aug 2026): drop densify snapshots that are still their own seed
+    std::vector<Geometry> m_refine_seed_geoms; ///< seeds of the current repetition's refinement MD
     std::vector<Molecule> m_refined_seeds; ///< memory of already-refined seeds, cleared per temperature stage
     bool m_md_snapshot_append = false; ///< second MD step of a repetition appends to the snapshot file
     int m_explore_md_rattle = -1; ///< Claude Generated (Aug 2026): explicit exploration RATTLE mode, -1 = inherit
@@ -711,6 +719,7 @@ private:
     PARAM(refine_md_dt, Double, 2.0, "Time step of the refinement MD in fs. 2 fs with RATTLE doubles the covered time per force evaluation; dt 4 is NOT bias-stable and is not offered here.", "Exploration", {})
     PARAM(refine_md_rattle, Int, 2, "RATTLE mode of the refinement MD (0 off, 1 all bonds, 2 X-H only). An explore-side rattle=1 (all bonds) is never weakened.", "Exploration", {})
     PARAM(refine_md_temperature, Double, 0.0, "Temperature of the refinement MD in K. 0 = the current temperature stage.", "Exploration", {})
+    PARAM(refine_md_min_shift, Double, 0.3, "Minimum best-fit RMSD (Angstrom) a densification snapshot must have from EVERY seed of its own refinement phase before it is optimised; closer ones are dropped as self-confirmation. Why: the refinement MD deliberately runs without a bias force, so part of every trajectory stays in the basin it started from -- observed live, the densification walker of the best seed re-found that seed's own minimum at t = 66 fs, 0.043 A away, and spent a full QM optimisation to rediscover a structure the pool already held. Neighbouring basins, the actual point of densification, are untouched: the measured basin-mapping utility radius is ~0.7 A, so 0.3 A stays well inside the range where a snapshot simply IS its seed again. This is a COST filter like snapshot_dedup_rmsd, not a deduplication -- what it drops was never going to be new. 0 disables it.", "Exploration", {})
     PARAM(densify_opt_preset, String, "", "Convergence preset (loose|normal|tight|verytight) used for the RELAX optimisation of DENSIFICATION snapshots only (the _densify harvest of the refinement MD); empty = same preset as every other snapshot. Why it can be looser: a densification snapshot starts ~refine_md_r_dep (0.2 A) from an already known minimum, converges in few steps, and its primary value is the BASIN ASSIGNMENT, not the last decimal of the energy -- while the measured preset economics say the thresholds themselves cost only ~13 percent and the step CAP is what separates the presets, so 'loose' mainly protects against pathological stragglers. Trade-off to know: the pool energy of a loosely converged structure can sit ~0.1-1 kJ/mol high, which can flip a dedup representative choice or a seed rank in close calls; the energy-consistency guard still recomputes the cycle minimum. Off by default -- measure before trusting.", "Exploration", {})
     PARAM(refine_md_once, Bool, true, "Refine every structure at most once PER TEMPERATURE STAGE. Across the repetitions of a stage the refinement MD applies no bias force (refine_md_k 0) at the SAME temperature, so a second refinement from the same seed walks the same thermal neighbourhood and re-harvests a region whose deposits already exist at refine_md_r_dep spacing -- the deposit criterion suppresses them, but the QM gradients of the trajectory are paid anyway. A new (colder) stage clears the memory: the same seed sampled at a lower temperature explores its neighbourhood differently and may harvest fine structure the hot pass stepped over. Seeds are matched by energy (1e-5 Eh) plus RMSD (0.25 A). false disables the memory, e.g. when refine_md_k > 0 gives repeated passes a reason to diverge.", "Exploration", {})
     PARAM(refine_md_r_dep, Double, 0.2, "Hill/deposit spacing (Angstrom RMSD) of the REFINEMENT MD, overriding rmsd_mtd_r_dep for this step. Densification needs FINER spacing than exploration: with the exploration default (~0.5 A at alpha=10) a walker that stays close to its seed -- which is exactly what a QM refinement walker on its own surface does -- finds the whole region already covered by the exploration hills and harvests NOTHING (measured on the first gfn2-refinement production run: 0 deposits in repetition 1). 0.2 A samples below the exploration spacing and inside the measured 0.7 A basin-mapping utility radius. <= 0 inherits the exploration spacing.", "Exploration", {})
