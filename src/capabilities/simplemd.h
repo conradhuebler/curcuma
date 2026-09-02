@@ -324,6 +324,12 @@ private:
 
     void InitVelocities(double scaling = 1.0);
 
+    /* Claude Generated (Sep 2026): seeds m_rng from m_seed and the current start geometry, so a
+     * repeat of the same structure with the same seed is bit-identical while different structures
+     * (the walkers of a search) get different velocities on their own. Called once, after the
+     * geometry is in place. */
+    void seedRandomEngine();
+
     double FastEnergy();
     double CleanEnergy();
 
@@ -613,6 +619,19 @@ private:
 
     int m_mtd_dT = -1;
     int m_seed = -1;
+    /* Claude Generated (Sep 2026): THE random source of this MD instance. Before, every
+     * stochastic site held its own function-local `static` engine: InitVelocities and Andersen
+     * used a default-constructed (i.e. fixed-seed) engine, CSVR a random_device-seeded one, and
+     * none of them ever saw m_seed. Consequences measured: `-seed` was read, logged and ignored,
+     * and two processes with identical input produced BIT-IDENTICAL trajectories (12 runs with
+     * seeds 1..8 agreed to 0.00e+00 in every coordinate), so an MD could not be repeated with a
+     * different realisation. Being function-local statics they were also shared across all
+     * SimpleMD instances of a process, which is where the per-walker variation in ConfSearch
+     * accidentally came from. Seeded in seedRandomEngine() from m_seed AND the start geometry:
+     * same structure + same seed = same trajectory (reproducible), different structures =
+     * different velocities without any extra bookkeeping (the search's diversity comes from the
+     * structures, not from the velocity draw). */
+    std::mt19937 m_rng;
     int m_time_step = 0;
     int m_dof = 0;
     int m_mtd_time = 0, m_loop_time = 0;

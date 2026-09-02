@@ -607,8 +607,6 @@ bool SimpleMD::Initialise()
     m_eigen_masses = Eigen::VectorXd::Zero(3*m_natoms);
     m_eigen_inv_masses = Eigen::VectorXd::Zero(3*m_natoms);
 
-    static std::random_device rd{};
-    static std::mt19937 gen{ rd() };
     if (m_seed == -1) {
         const auto start = std::chrono::high_resolution_clock::now();
         m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
@@ -616,7 +614,9 @@ bool SimpleMD::Initialise()
         m_seed = m_natoms * m_T0;
     if (m_verbosity >= 1)
         std::cout << "Random seed is " << m_seed << std::endl;
-    gen.seed(m_seed);
+    // Claude Generated (Sep 2026): the engine that was seeded here was a function-local static
+    // nothing else ever used -- every stochastic site had its own, unseeded one. m_rng replaces
+    // all of them and is seeded in seedRandomEngine() once the geometry is in place.
 
     if (m_initfile != "none") {
         json md;
@@ -704,7 +704,8 @@ bool SimpleMD::Initialise()
         m_seed = m_T0 * m_natoms;
     if (m_verbosity >= 1)
         std::cout << "Random seed is " << m_seed << std::endl;
-    gen.seed(m_seed);
+    // Claude Generated (Sep 2026): m_rng is seeded in seedRandomEngine() (geometry-dependent),
+    // called from InitVelocities. This second block only resolves the -1/0 sentinels.
 
 
     m_start_fragments = m_molecule.GetFragments();
@@ -1183,9 +1184,24 @@ void SimpleMD::InitConstrainedBonds()
         CurcumaLogger::result_fmt("{} degrees of freedom (no constraints)", m_dof);
 }
 
+void SimpleMD::seedRandomEngine()
+{
+    // Claude Generated (Sep 2026): see the m_rng comment in the header. The geometry enters the
+    // seed so that the walkers of a search differ without needing per-walker seed bookkeeping,
+    // while a rerun of the SAME structure with the SAME -seed reproduces exactly. Coordinates are
+    // quantised to 1e-6 Angstrom first: bitwise noise from a re-read file must not change the seed.
+    std::size_t h = 1469598103934665603ULL;
+    for (int i = 0; i < 3 * m_natoms; ++i) {
+        const long long q = std::llround(m_eigen_geometry.data()[i] * 1e6);
+        h ^= static_cast<std::size_t>(q) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    }
+    m_rng.seed(static_cast<std::mt19937::result_type>(static_cast<std::size_t>(m_seed) ^ h));
+}
+
 void SimpleMD::InitVelocities(double scaling)
 {
-    static std::default_random_engine generator;
+    seedRandomEngine();
+    std::mt19937& generator = m_rng;
     for (size_t i = 0; i < m_natoms; ++i) {
         // Claude Generated (Jun 2026): sample from m_T_init (initial
         // temperature) rather than m_T0 (thermostat target) so callers can
@@ -2387,7 +2403,7 @@ void SimpleMD::ApplyThermostatRegion(const std::vector<int>& atoms, double T0, i
             return;
         const double Ekin_target = 0.5 * kb_Eh * T0 * dof;
         const double c = std::exp(-(m_dT / 2.0 * m_respa) / m_coupling);
-        static std::mt19937 gen{ std::random_device{}() };
+        std::mt19937& gen = m_rng; // Claude Generated (Sep 2026): instance RNG
         std::normal_distribution<double> dnorm{ 0.0, 1.0 };
         std::chi_squared_distribution<double> dchi{ static_cast<double>(dof) };
         const double R = dnorm(gen);
@@ -2402,7 +2418,7 @@ void SimpleMD::ApplyThermostatRegion(const std::vector<int>& atoms, double T0, i
             m_eigen_velocities.data()[3 * i + 2] *= alpha;
         }
     } else if (type == ThermostatType::Andersen) {
-        static std::default_random_engine generator;
+        std::mt19937& generator = m_rng; // Claude Generated (Sep 2026): instance RNG
         const double probability = m_andersen * m_dT;
         std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
         for (int i : atoms) {
@@ -4642,8 +4658,8 @@ void SimpleMD::CSVR()
 {
     double Ekin_target = 0.5 * kb_Eh * (m_T0)*m_dof;
     double c = exp(-(m_dT / 2.0 * m_respa) / m_coupling);
-    static std::default_random_engine rd{};
-    static std::mt19937 gen{ rd() };
+    // Claude Generated (Sep 2026): the instance RNG, not a shared function-local static.
+    std::mt19937& gen = m_rng;
     static std::normal_distribution<> d{ 0, 1 };
     // Lazy-reinit when m_dof changes (e.g. after RATTLE constraint setup or
     // first call with a different molecule). A stale static distribution with
@@ -4671,7 +4687,7 @@ void SimpleMD::CSVR()
 
 void SimpleMD::Andersen()
 {
-    static std::default_random_engine generator;
+    std::mt19937& generator = m_rng; // Claude Generated (Sep 2026): instance RNG
     double probability = m_andersen * m_dT;
     std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
     for (size_t i = 0; i < m_natoms; ++i) {
