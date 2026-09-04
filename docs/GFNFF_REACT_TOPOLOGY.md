@@ -150,6 +150,22 @@ The asymmetry is deliberate:
   away; here the thermostat plays that role, so use CSVR with a short coupling
   time for reactive runs. At such conditions results are machinery
   demonstrations, not thermodynamics.
+- **The container must actually confine.** The harmonic wall's force constant is
+  `k = wall_temp * kB` (`ApplySphericHarmonicWalls`), so at the 298.15 K default
+  it is far too soft for a hot gas. Measured for 2 N2 + 6 H2 at 3000 K in a
+  4.5 A spherical wall over 5 ps, largest final distance from the origin:
+
+  | wall_potential | wall_temp | max \|r\| after 5 ps |
+  |---|---|---|
+  | harmonic | 298.15 (default) | 9.70 A |
+  | harmonic | 10000 | 5.20 A |
+  | logfermi | 298.15 | 4.54 A |
+  | logfermi | 10000 | 3.73 A |
+
+  Only `logfermi` holds the gas at the requested radius; the harmonic default
+  lets atoms escape to twice it, which silently ends the reaction by dilution.
+  Use `-md.wall_potential logfermi` for reactive gas-phase runs (qurcuma's
+  Confinement Walls group defaults to harmonic at 298.15 K).
 - Angles at a centre with more than 6 neighbours are skipped by the generator
   (pre-existing rule); transiently hypervalent atoms during an exchange are
   therefore under-described.
