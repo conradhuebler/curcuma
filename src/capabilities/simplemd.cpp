@@ -284,7 +284,8 @@ static const std::map<std::string, WallGeometry> wall_geometry_map = {
 
 static const std::map<std::string, WallPotentialType> wall_potential_map = {
     {"logfermi", WallPotentialType::LogFermi},
-    {"harmonic", WallPotentialType::Harmonic}
+    {"harmonic", WallPotentialType::Harmonic},
+    {"pbc", WallPotentialType::Periodic}
 };
 
 void SimpleMD::LoadControlJson()
@@ -507,9 +508,18 @@ void SimpleMD::LoadControlJson()
                     return m_wall_potential;
                 };
                 break;
+            case WallPotentialType::Periodic:
+                // No potential: wrapIntoContainer() relocates escaping molecules
+                // after the integration step instead of pushing them back.
+                m_wall_type = 1;
+                m_wall_wrap = true;
+                WallPotential = [=]() -> double { return 0.0; };
+                break;
         }
         if (m_verbosity >= 1)
-            std::cout << "Setting up spherical potential" << std::endl;
+            std::cout << (m_wall_wrap ? "Setting up spherical periodic container"
+                                      : "Setting up spherical potential")
+                      << std::endl;
 
     } else if (wall_geom == WallGeometry::Rect) {
         switch (wall_pot) {
@@ -527,9 +537,16 @@ void SimpleMD::LoadControlJson()
                     return m_wall_potential;
                 };
                 break;
+            case WallPotentialType::Periodic:
+                m_wall_type = 2;
+                m_wall_wrap = true;
+                WallPotential = [=]() -> double { return 0.0; };
+                break;
         }
         if (m_verbosity >= 1)
-            std::cout << "Setting up rectangular potential" << std::endl;
+            std::cout << (m_wall_wrap ? "Setting up rectangular periodic container"
+                                      : "Setting up rectangular potential")
+                      << std::endl;
     } else {
         WallPotential = [=]() -> double {
             return 0;
@@ -1917,6 +1934,32 @@ void SimpleMD::start()
     finalizeRun();
 }
 
+// Claude Generated (Sep 2026): plain-language reason for stopReason(), so a driver
+// can tell the user whether the run finished or fell apart. ASCII only (see the
+// no-UTF-symbols rule in CLAUDE.md).
+std::string SimpleMD::stopReasonText() const
+{
+    switch (m_stop_reason) {
+    case StopReason::Running:
+        return "still running";
+    case StopReason::NotPrepared:
+        return "not started (prepareRun was not called)";
+    case StopReason::MaxTime:
+        return "simulation time reached";
+    case StopReason::StopFile:
+        return "a 'stop' file was found in the working directory";
+    case StopReason::Unstable:
+        return "dynamics became unstable (NaN or Inf in gradient, velocities or energy)";
+    case StopReason::EpotAbort:
+        return "aborted: the mean potential energy left its allowed window (epot_abort)";
+    case StopReason::TempAbort:
+        return "aborted: the mean temperature ran away from the target (temp_abort)";
+    case StopReason::TopoCheck:
+        return "aborted: the molecule broke into more fragments than it started with (topo_check)";
+    }
+    return "unknown";
+}
+
 void SimpleMD::prepareRun()
 {
     if (m_initialised == false) {
@@ -1925,6 +1968,7 @@ void SimpleMD::prepareRun()
         return;
     }
     m_run_aborted = false;
+    m_stop_reason = StopReason::Running;
     m_run_states.clear();
 
     auto unix_timestamp = std::chrono::seconds(std::time(nullptr));
@@ -2375,17 +2419,22 @@ void SimpleMD::ApplyThermostatRegion(const std::vector<int>& atoms, double T0, i
  * very top so the contribution is folded into the upcoming integrator step. */
 bool SimpleMD::step()
 {
-    if (!m_run_prepared)
+    if (!m_run_prepared) {
+        m_stop_reason = StopReason::NotPrepared;
         return false;
+    }
 
-    if (!(m_maxtime <= 0 || m_currentStep < m_maxtime))
+    if (!(m_maxtime <= 0 || m_currentStep < m_maxtime)) {
+        m_stop_reason = StopReason::MaxTime;
         return false;
+    }
 
     auto step0 = std::chrono::system_clock::now();
 
     if (CheckStop() == true) {
         TriggerWriteRestart();
         m_run_aborted = true;
+        m_stop_reason = StopReason::StopFile;
 #ifdef USE_Plumed
         if (m_mtd) {
             plumed_finalize(m_plumedmain);
@@ -2451,6 +2500,7 @@ bool SimpleMD::step()
                 "MD aborted: <Epot> climbed {:.1f} kJ/mol above start (window {:.1f})\n",
                 (m_aver_Epot - m_epot_ref) * 2625.5, m_epot_abort_window);
         m_run_aborted = true;
+        m_stop_reason = StopReason::EpotAbort;
         return false;
     }
     // Temperature runaway abort: the shared bias pool's hills (W_i = k*counter_i) grow over
@@ -2468,6 +2518,7 @@ bool SimpleMD::step()
                     "MD aborted: <T>={:.0f} K ran away from target {:.0f} K (factor limit {}x, delta limit {} K)\n",
                     m_aver_Temp, m_T0, m_temp_abort_factor, m_temp_abort_delta);
             m_run_aborted = true;
+            m_stop_reason = StopReason::TempAbort;
             return false;
         }
     }
@@ -2484,6 +2535,7 @@ bool SimpleMD::step()
                     "MD aborted: topology broke (fragments {} -> {})\n",
                     m_start_fragment_count, nfrag);
             m_run_aborted = true;
+            m_stop_reason = StopReason::TopoCheck;
             return false;
         }
     }
@@ -2591,6 +2643,7 @@ bool SimpleMD::step()
 
         m_time_step = 0;
         m_run_aborted = true;
+        m_stop_reason = StopReason::Unstable;
 
 #ifdef USE_Plumed
         if (m_mtd) {
@@ -2859,6 +2912,154 @@ void SimpleMD::AdjustRattleTolerance()
     m_aver_rattle_Temp = 0;
 }
 
+// Claude Generated (Sep 2026): wall_potential = pbc — see the header for the
+// rationale and the limitation. Whole fragments are relocated, never single atoms.
+void SimpleMD::wrapIntoContainer()
+{
+    if (!m_wall_wrap)
+        return;
+
+    // Cheap O(N) gate: only pay for the fragment analysis when something actually
+    // left. In a well-sized container that is rare.
+    bool any_outside = false;
+    for (int i = 0; i < m_natoms && !any_outside; ++i) {
+        const double x = m_eigen_geometry(i, 0), y = m_eigen_geometry(i, 1), z = m_eigen_geometry(i, 2);
+        if (m_wall_type == 1) {
+            any_outside = (std::sqrt(x * x + y * y + z * z) > m_wall_spheric_radius);
+        } else {
+            any_outside = (x < m_wall_x_min || x > m_wall_x_max
+                || y < m_wall_y_min || y > m_wall_y_max
+                || z < m_wall_z_min || z > m_wall_z_max);
+        }
+    }
+    if (!any_outside)
+        return;
+
+    // Fragments from the CURRENT geometry: in a reactive run molecules combine and
+    // split, so a list cached at start-up would move the wrong atoms together.
+    m_molecule.setGeometry(m_eigen_geometry);
+    const std::vector<std::vector<int>> fragments = m_molecule.GetFragments();
+
+    // Clearance a wrapped fragment must find at its destination (Angstrom): below a
+    // covalent bond length, so a wrap into a gap is still allowed, but a direct hit
+    // is not.
+    constexpr double kWrapClearance = 1.8;
+
+    int wrapped = 0, reflected = 0;
+    for (const std::vector<int>& fragment : fragments) {
+        if (fragment.empty())
+            continue;
+
+        // Centre of mass decides for the whole fragment.
+        double mass_sum = 0.0, cx = 0.0, cy = 0.0, cz = 0.0;
+        for (int a : fragment) {
+            const double m = Elements::AtomicMass[m_atomtype[a]];
+            mass_sum += m;
+            cx += m * m_eigen_geometry(a, 0);
+            cy += m * m_eigen_geometry(a, 1);
+            cz += m * m_eigen_geometry(a, 2);
+        }
+        if (mass_sum <= 0.0)
+            continue;
+        cx /= mass_sum; cy /= mass_sum; cz /= mass_sum;
+
+        double dx = 0.0, dy = 0.0, dz = 0.0;
+        double nx = 0.0, ny = 0.0, nz = 0.0;  // outward normal of the crossed boundary
+        if (m_wall_type == 1) {
+            // Sphere: leave at r, re-enter at the antipodal point, the same distance
+            // inside the boundary. A sphere does not tile space, so this is a
+            // container rule rather than a lattice translation.
+            const double r = std::sqrt(cx * cx + cy * cy + cz * cz);
+            if (r <= m_wall_spheric_radius || r < 1e-12)
+                continue;
+            const double scale = (r - 2.0 * m_wall_spheric_radius) / r;
+            dx = cx * scale - cx;
+            dy = cy * scale - cy;
+            dz = cz * scale - cz;
+            nx = cx / r; ny = cy / r; nz = cz / r;
+        } else {
+            // Box: ordinary per-axis wrap by one box length.
+            const double lx = m_wall_x_max - m_wall_x_min;
+            const double ly = m_wall_y_max - m_wall_y_min;
+            const double lz = m_wall_z_max - m_wall_z_min;
+            if (lx <= 0.0 || ly <= 0.0 || lz <= 0.0)
+                continue;
+            if (cx < m_wall_x_min) { dx = lx * std::ceil((m_wall_x_min - cx) / lx); nx = -1.0; }
+            else if (cx > m_wall_x_max) { dx = -lx * std::ceil((cx - m_wall_x_max) / lx); nx = 1.0; }
+            if (cy < m_wall_y_min) { dy = ly * std::ceil((m_wall_y_min - cy) / ly); ny = -1.0; }
+            else if (cy > m_wall_y_max) { dy = -ly * std::ceil((cy - m_wall_y_max) / ly); ny = 1.0; }
+            if (cz < m_wall_z_min) { dz = lz * std::ceil((m_wall_z_min - cz) / lz); nz = -1.0; }
+            else if (cz > m_wall_z_max) { dz = -lz * std::ceil((cz - m_wall_z_max) / lz); nz = 1.0; }
+            if (dx == 0.0 && dy == 0.0 && dz == 0.0)
+                continue;
+            const double nn = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (nn > 0.0) { nx /= nn; ny /= nn; nz /= nn; }
+        }
+
+        // Would the wrapped fragment land on something? Without a minimum-image
+        // convention in the energy the destination is genuinely occupied space, and
+        // dropping a molecule into it produces an overlap the force field answers
+        // with a diverging repulsion (measured: a 0.02 A contact, then NaN one step
+        // later). Only wrap into free space. Claude Generated (Sep 2026).
+        bool destination_free = true;
+        for (int a : fragment) {
+            const double px = m_eigen_geometry(a, 0) + dx;
+            const double py = m_eigen_geometry(a, 1) + dy;
+            const double pz = m_eigen_geometry(a, 2) + dz;
+            for (int b = 0; b < m_natoms && destination_free; ++b) {
+                if (std::find(fragment.begin(), fragment.end(), b) != fragment.end())
+                    continue;
+                const double ddx = px - m_eigen_geometry(b, 0);
+                const double ddy = py - m_eigen_geometry(b, 1);
+                const double ddz = pz - m_eigen_geometry(b, 2);
+                if (ddx * ddx + ddy * ddy + ddz * ddz < kWrapClearance * kWrapClearance)
+                    destination_free = false;
+            }
+            if (!destination_free)
+                break;
+        }
+
+        if (!destination_free) {
+            // Occupied: reflect the fragment elastically instead. Reversing the
+            // outward component of its centre-of-mass velocity keeps it in the
+            // container and conserves kinetic energy exactly, so this fallback does
+            // not heat the system either. Internal motion is untouched.
+            double vn = 0.0;
+            for (int a : fragment) {
+                const double m = Elements::AtomicMass[m_atomtype[a]];
+                vn += m * (m_eigen_velocities(a, 0) * nx + m_eigen_velocities(a, 1) * ny
+                    + m_eigen_velocities(a, 2) * nz);
+            }
+            vn /= mass_sum;
+            if (vn > 0.0) {  // only when it is actually leaving
+                for (int a : fragment) {
+                    m_eigen_velocities(a, 0) -= 2.0 * vn * nx;
+                    m_eigen_velocities(a, 1) -= 2.0 * vn * ny;
+                    m_eigen_velocities(a, 2) -= 2.0 * vn * nz;
+                }
+                ++reflected;
+            }
+            continue;
+        }
+
+        // One common translation keeps the fragment's internal geometry and its
+        // velocities untouched, so the wrap adds no energy.
+        for (int a : fragment) {
+            m_eigen_geometry(a, 0) += dx;
+            m_eigen_geometry(a, 1) += dy;
+            m_eigen_geometry(a, 2) += dz;
+        }
+        ++wrapped;
+    }
+
+    if (wrapped > 0)
+        m_molecule.setGeometry(m_eigen_geometry);
+    if ((wrapped > 0 || reflected > 0) && m_verbosity >= 2)
+        CurcumaLogger::info(fmt::format(
+            "Container: {} molecule(s) re-entered on the opposite side, {} reflected (destination occupied)",
+            wrapped, reflected));
+}
+
 // Claude Generated (Oct 2025): Apply Periodic Boundary Conditions
 // Wraps all atoms into the central unit cell using fractional coordinates
 void SimpleMD::applyPeriodicBoundaryConditions()
@@ -2984,6 +3185,7 @@ void SimpleMD::Verlet()
 
     // Claude Generated (Oct 2025): Apply PBC wrapping after integration step
     applyPeriodicBoundaryConditions();
+    wrapIntoContainer();
 }
 
 void SimpleMD::Rattle()
@@ -3325,6 +3527,7 @@ void SimpleMD::Rattle()
 
     // Claude Generated (Oct 2025): Apply PBC wrapping after integration step
     applyPeriodicBoundaryConditions();
+    wrapIntoContainer();
 }
 
 // Claude Generated (Jul 2026): Milestone 2 held-force wrapper, called every step. The expensive bias

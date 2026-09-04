@@ -166,6 +166,23 @@ The asymmetry is deliberate:
   lets atoms escape to twice it, which silently ends the reaction by dilution.
   Use `-md.wall_potential logfermi` for reactive gas-phase runs (qurcuma's
   Confinement Walls group defaults to harmonic at 298.15 K).
+
+  A third behaviour, `wall_potential = pbc`, exerts no force at all and instead
+  moves a whole molecule that left the container back in on the opposite side, so
+  it neither heats nor lets anything out. Over 20 ps in the same 4.5 A sphere,
+  largest final distance from the origin and bond events:
+
+  | wall_potential | max \|r\| after 20 ps | REACT bond lines |
+  |---|---|---|
+  | harmonic (298.15) | 11.00 A | 177 |
+  | logfermi (298.15) | 8.76 A | 294 |
+  | pbc | 4.91 A | 601 |
+
+  The event count follows the confinement: molecules that stay in the container
+  keep colliding. Note that `pbc` is a container, not a periodic cell — the energy
+  has no minimum-image convention, so interactions are not continued across the
+  boundary and a molecule whose destination is occupied is reflected elastically
+  instead of wrapped. See `docs/WP-PERIODIC-NONBONDED.md`.
 - Angles at a centre with more than 6 neighbours are skipped by the generator
   (pre-existing rule); transiently hypervalent atoms during an exchange are
   therefore under-described.

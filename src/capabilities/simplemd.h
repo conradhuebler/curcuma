@@ -183,7 +183,11 @@ enum class WallGeometry {
 // Claude Generated 2025: Type-safe wall potential
 enum class WallPotentialType {
     LogFermi,
-    Harmonic
+    Harmonic,
+    /// Claude Generated (Sep 2026): no potential at all — a molecule that leaves
+    /// the container is translated back in on the opposite side, so the container
+    /// keeps its content without doing work on it. See wrapIntoContainer().
+    Periodic
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -226,8 +230,33 @@ public:
 
     /** Execute one MD step (position+velocity update, thermostat, rattle, output
      *  for the current step counter). Returns false when the simulation should
-     *  terminate (m_unstable, maxtime reached, CheckStop()). */
+     *  terminate; stopReason() then says why. */
     bool step();
+
+    /**
+     * @brief Why step() last returned false (Claude Generated Sep 2026).
+     *
+     * A driver that runs the loop itself (the qurcuma GUI) cannot see curcuma's
+     * console output, and every abort message is gated behind verbosity >= 1
+     * while the normal end-of-time exit prints nothing at all. Without this a
+     * finished run and a run that fell apart look identical to the caller.
+     */
+    enum class StopReason {
+        Running,     ///< step() has not returned false yet
+        NotPrepared, ///< prepareRun() was not called, or the run was already torn down
+        MaxTime,     ///< the configured simulation time is reached — the normal end
+        StopFile,    ///< a file named "stop" appeared in the working directory
+        Unstable,    ///< NaN/Inf in gradient, velocities or energy
+        EpotAbort,   ///< epot_abort: the mean potential energy left its window
+        TempAbort,   ///< temp_abort: the mean temperature ran away from the target
+        TopoCheck    ///< topo_check: the molecule broke into more fragments than it started with
+    };
+
+    /// Why the run ended. Meaningful once step() has returned false.
+    StopReason stopReason() const { return m_stop_reason; }
+
+    /// One plain sentence for stopReason(), for a driver that reports to a user.
+    std::string stopReasonText() const;
 
     /** Final printout, final trajectory frame, plumed/metadynamics finalize,
      *  curcuma_final.json. Automatically invoked at end of start(). */
@@ -320,6 +349,34 @@ private:
 
     bool WriteGeometry();
     void applyPeriodicBoundaryConditions();  // Claude Generated (Oct 2025): PBC wrapping
+
+    /**
+     * @brief Re-enter molecules that left the wall container on the opposite side.
+     *
+     * Claude Generated (Sep 2026). Active only for wall_potential = pbc; a no-op
+     * otherwise. Unlike the harmonic and logfermi walls this exerts NO force and
+     * therefore adds no energy: a confining potential has to push a hot atom back,
+     * which heats the system (and, at the harmonic default, is too soft to hold it
+     * at all), whereas wrapping only relocates it.
+     *
+     * Whole fragments are moved by one common vector, never single atoms: tearing a
+     * molecule across the boundary would stretch its bonds to container size, which
+     * the force field would read as a dissociation (and the reactive topology scan
+     * would then actually break the bond).
+     *
+     * A rectangular container wraps per axis, the way a periodic cell does. A sphere
+     * cannot tile space, so a fragment leaving at r is placed at the antipodal point
+     * the same distance inside the boundary; that is a container rule, not a lattice.
+     *
+     * INCOMPLETE, and knowingly so: the GFN-FF energy has no minimum-image
+     * convention, so a wrapped fragment does not continue its interactions across
+     * the boundary and its destination can be genuinely occupied (measured: a wrap
+     * to 0.024 A, NaN one step later). Until the non-bonded terms are periodic this
+     * refuses a wrap into occupied space and reflects the fragment elastically
+     * instead. Contained and free of heating, but not periodic. The real fix is
+     * docs/WP-PERIODIC-NONBONDED.md.
+     */
+    void wrapIntoContainer();
     void Verlet();
     void Rattle();
     void EvaluateBias(bool do_deposit); // Claude Generated (Jul 2026): bias force -> m_bias_force_target
@@ -447,6 +504,8 @@ private:
     bool m_external_forces_pending = false;
     bool m_run_prepared = false;         // true after prepareRun(), false after finalizeRun()
     bool m_run_aborted = false;          // mirrors former local `aborted` flag in start()
+    bool m_wall_wrap = false;            ///< wall_potential=pbc: wrap instead of push (wrapIntoContainer)
+    StopReason m_stop_reason = StopReason::Running;  ///< see stopReason()
     std::vector<json> m_run_states;      // rescue states carried across step() calls
 
     // Claude Generated (Jun 2026): ConfSearch robustness gates (opt-in, default off)
@@ -672,7 +731,7 @@ private:
 
     // --- Wall Potentials ---
     PARAM(wall_type, String, "none", "Wall type: none|spheric|rect.", "Walls", {"wall"})
-    PARAM(wall_potential, String, "harmonic", "Wall potential function: logfermi|harmonic.", "Walls", {})
+    PARAM(wall_potential, String, "harmonic", "Wall behaviour: logfermi|harmonic push escaping atoms back (and do work on them); pbc exerts no force and instead moves a whole molecule that left the container back in on the opposite side. pbc is a container, not a periodic cell: the energy has no minimum image, so interactions are not continued across the boundary and a molecule whose destination is occupied is reflected instead (see docs/WP-PERIODIC-NONBONDED.md).", "Walls", {})
     PARAM(wall_radius, Double, 0.0, "Radius for spherical wall (Å). Auto-sized if 0.", "Walls", {"wall_spheric_radius"})
     PARAM(wall_temp, Double, 298.15, "Wall temperature/strength in K.", "Walls", {})
     PARAM(wall_beta, Double, 6.0, "Steepness parameter for wall potential.", "Walls", {})
