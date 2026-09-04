@@ -714,7 +714,10 @@ std::string method = "d4";  // Matches Fortran reference
 
 ### 🤖 React Topology Mode (Aug 2026, machine-tested)
 - **`topology_mode=react`**: dynamic bond topology (bonds form AND break in MD) via hysteresis scan + full bonded-term rebuild — [docs/GFNFF_REACT_TOPOLOGY.md](../../../../docs/GFNFF_REACT_TOPOLOGY.md)
-- NVT-only (dE_jump at rebuild events, logged); rebuild == fresh-init bit-identical (ctest `gfnff_react_fd_gradient`, `cli_simplemd_13/14`)
+- NVT-only (dE_jump at rebuild events, logged); rebuild == fresh-init bit-identical (ctest `gfnff_react_fd_gradient`, `cli_simplemd_13/14/15`, `gfnff_react_filters`)
+- **Public topology/event API (Sep 2026)**: `reactiveBonds()`, `reactiveBondOrders()` (1/2/3; sp-sp bonds add the Hueckel solver's missing second pi system, so N2 = 3), `reactiveRebuildCount()`, `consumeReactEvents()` (formed/broken pairs + `de_jump_eh`), `topologyMode()`; `getGFNFF()` now also on the CUDA/ROCm wrappers
+- **Scan bookkeeping fixes (Sep 2026)**: react set owns the bond list even when EMPTY (no silent geometric re-detection once all bonds broke); refractory blocks N (not N-1) scans; exchange resolution decrements sigma counts and skips same-scan formations; state cleared on re-initialisation; rollback when a rebuild throws; NaN geometry guard; slack radius gated on `react_valence_cap`; per-atom displacement norm
+- **`rattle` refused with react** (SimpleMD): constraints are frozen at initialisation and cannot follow a changing topology
 - **Recorded pre-existing gradient residual**: analytic vs FD up to 1e-1 Eh/A for H-H (bond dynamic-r0 CN chain 2.4e-2 + partial repulsion gradient) — react-independent, tracked in `test_gfnff_react_fd`
 
 ### ✅ Tuning knobs — GPU CN pair list + HB list (Task #10/#11, Jun 2026)

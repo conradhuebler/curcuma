@@ -64,7 +64,10 @@ The asymmetry is deliberate:
   potential energy by roughly the well depth at the formation radius (measured
   H + H -> H2: about -450 kJ/mol, the recombination energy appearing in one step);
   breaking removes the residual well (+21 to +34 kJ/mol at the default factor).
-  Every rebuild logs its measured jump as `dE_jump` at verbosity >= 1.
+  Every rebuild measures its jump as `dE_jump` and records it in the event list
+  (logged at verbosity >= 1). `dE_jump` is `E(new topology, its EEQ charges) -
+  E(old topology, its charges)` at the same geometry, so it contains the charge
+  update the rebuild performs, not the bonded terms alone.
   **The mode is NVT-only** — a thermostat must absorb the jumps; NVE runs will
   drift at every event.
 - Between events the gradient is exact for the current topology (same code path
@@ -155,6 +158,34 @@ The asymmetry is deliberate:
 - Not tested: ALPB solvation + react, charged/radical species beyond H atoms,
   large systems, long trajectories (> 50 ps).
 
+## Reading the topology and its events from code
+
+The bond list, its bond orders and the change events are public on `GFNFF`, so a
+driver (the qurcuma viewer, an analysis script) can draw and log exactly what the
+force field integrates instead of re-detecting bonds geometrically:
+
+| Accessor | Meaning |
+|---|---|
+| `reactiveBonds()` | authoritative bond set, canonical `i<j` |
+| `reactiveBondOrders()` | parallel to it: 1, 2 or 3 (see below) |
+| `reactiveRebuildCount()` | monotone counter; unchanged == topology unchanged |
+| `consumeReactEvents()` | `ReactEvent{call, formed, broken, de_jump_eh}` since the last call |
+| `topologyMode()` | `"auto"`, `"constant"` or `"react"` |
+
+Reachable through `SimpleMD::energyCalculator()->Interface()`, cast to
+`GFNFFComputationalMethod` (or the CUDA/ROCm wrapper — all three expose
+`getGFNFF()`). Read them after a step, from the thread that ran it: the scan
+mutates this state inside the energy call.
+
+**Bond orders.** The FT-Hueckel solver carries one p orbital per atom, so it
+models a single pi system: the measured pi order is ~1.0 both for an sp2-sp2
+double bond (ethylene C=C 1.000, diazene N=N 0.997) and for an sp-sp triple bond
+(N2 0.999, CO 0.994, acetylene C#C 1.000), while the sp C-H bonds of acetylene
+stay at 0.000. `reactiveBondOrders()` reports `1 + round(pi)` and adds the
+second, degenerate pi system back for a bond whose two atoms are both sp, so N2
+reads 3 and ethylene 2. Bond types cannot serve for this: `btyp = 3` marks every
+bond at an sp atom, the acetylene C-H included. Pinned by `gfnff_react_filters`.
+
 ## Parameters
 
 | Parameter | Default | Meaning |
@@ -174,7 +205,10 @@ CLI: `curcuma -md in.xyz -method gfnff -gfnff.topology_mode react ...`
 Guards: `react` + `static_charges`/`static_cn`/`static_all` (incl. `gfnff-fast`)
 aborts initialisation — frozen CN/charges cannot follow a changing topology.
 `Mol`-provided bonds (e.g. polymerbuild) seed the initial react bond set and are
-owned by the scan afterwards. SimpleMD's `topo_check` / `epot_abort` must stay
+owned by the scan afterwards. **`rattle` is refused with react mode**: SimpleMD
+builds its constraint list once at initialisation from the starting geometry, so
+it would keep constraining bonds that have since broken; the run aborts during
+initialisation. SimpleMD's `topo_check` / `epot_abort` must stay
 off (their defaults) for reactive runs. Unknown mode strings warn and fall back
 to `auto`.
 
@@ -196,6 +230,18 @@ heap workaround in the workspace constructor), bounded by the number of events.
   not perturb non-reactive dynamics; also covers the NH3 inversion terms).
 - `cli_simplemd_14_gfnff_react_h_recombination`: 4 free H atoms at 3000 K in a
   2.5 A spherical wall recombine; every rebuild logs `dE_jump`; run stays stable.
+- `cli_simplemd_15_gfnff_react_water_noevent`: a gfnff-optimised cyclic water
+  hexamer (6 hydrogen bonds, H...O 1.90 A, O...O 2.88 A) at 300 K, react vs auto
+  — zero bond events and a bit-identical trajectory. This is the case the O-H
+  formation radius (1.60 A) comes closest to; it also asserts that `rattle` +
+  react is refused before a single step is integrated.
+- `gfnff_react_filters` (ctest): scan bookkeeping in isolation — a broken pair is
+  blocked for exactly `react_refractory_scans` scans and the force-field topology
+  is bond-free while the react set is empty (no geometric fallback); the
+  re-formed surface is bit-identical to a fresh initialisation; exchange
+  resolution breaks one bond for two over-valent atoms and never reports a pair
+  as formed and broken in the same scan; the event record carries the pairs and a
+  finite `dE_jump`; bond orders read N2 = 3, ethylene C=C = 2, C-H = 1.
 - Manual: 2x H2 at 2500 K, 3 ps — no spurious events at the default factors;
   17/17 `gfnff_val_*` Fortran-parity references and the full `cli_simplemd_*`
   suite unchanged.
@@ -214,8 +260,5 @@ heap workaround in the workspace constructor), bounded by the number of events.
   trajectories against NEB paths at GFN2-xTB or a QM level. Current target:
   ammonia synthesis (N2 + 3 H2); candidates for later: primordial-soup
   (Miller-Urey-type) chemistry.
-- Push the force field's live bond list into the qurcuma viewer frames so drawn
-  and simulated topology agree exactly during reactive runs (the viewer's own
-  hysteresis redraws bonds independently at 1.25/1.45).
 - ROCm/CUDA rebuild long-run stress test; ASAN pass over repeated
   `generateGFNFFParameterSet()` calls on a live object.

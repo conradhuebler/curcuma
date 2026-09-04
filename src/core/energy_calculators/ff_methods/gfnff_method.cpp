@@ -39,6 +39,7 @@
 #include "src/core/energy_calculators/ff_methods/param_generator_thread.h"  // Claude Generated (Feb 2026): Parallel parameter generation
 #include "src/core/config_manager.h"
 #include <cmath>
+#include <algorithm>
 #include <fstream>
 #include <functional>
 #include <future>  // Claude Generated (March 2026): std::async for parallel init phases
@@ -815,6 +816,13 @@ bool GFNFF::InitialiseMolecule()
     ++m_topology_version;
     m_cached_bond_list.reset();
     m_static_topology_valid = false;  // Reset static topology cache for new molecule
+    // React bookkeeping must not survive a re-initialisation (stale atom indices when
+    // one GFNFF object is reused for another molecule). Claude Generated (Sep 2026).
+    m_react_owns_bonds = false;
+    m_react_bond_orders.clear();
+    m_react_events.clear();
+    m_react_refractory.clear();
+    m_react_overvalence_streak.clear();
 
     // React topology mode (Claude Generated Aug 2026): guards + initial bond-set seed.
     if (m_topology_mode == "react") {
@@ -835,6 +843,10 @@ bool GFNFF::InitialiseMolecule()
         // seed if present; otherwise geometric detection at the plain 1.3 factor.
         m_react_bonds = getCachedBondList();
         m_forced_bonds = m_react_bonds;
+        // From here on the react set is authoritative: an EMPTY set must stay empty
+        // (getCachedBondList() would otherwise fall back to geometric detection with a
+        // different criterion once every bond has broken).
+        m_react_owns_bonds = true;
         // The bond-list call above marked the geometry as seen in the SHARED
         // m_geometry_tracker, which would make getCachedTopology() return the (empty)
         // cached topology below. Reset tracker + bond cache so initialisation takes
@@ -1036,9 +1048,11 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
 
         std::vector<std::pair<int,int>> bonds;
 
-        if (!m_forced_bonds.empty()) {
+        if (!m_forced_bonds.empty() || m_react_owns_bonds) {
             // Use externally provided bond list exclusively (e.g. from polymerbuild topology)
             // This prevents spurious inter-monomer bonds from geometric detection — Claude Generated
+            // In react mode the list is owned by the hysteresis scan and is used even when
+            // it is empty (all bonds broken): no silent geometric re-detection.
             for (const auto& fb : m_forced_bonds) {
                 auto canonical = fb.first < fb.second ? fb : std::make_pair(fb.second, fb.first);
                 if (canonical.first < m_atomcount && canonical.second < m_atomcount)
@@ -1781,20 +1795,12 @@ bool GFNFF::detectReactiveBondChanges()
         fat_val[i] = fat[m_atoms[i]];
     }
 
-    // Coordination cap for bond FORMATION: normal element valence + 1 (the +1 allows
-    // the exchange intermediate, e.g. linear H-H-H or 5-coordinate carbon in flight).
-    // Strict for the 2nd period and halogens where hypervalence does not exist —
-    // without this, hot confined systems grow unphysical agglomerates (e.g. N with 6
-    // neighbours). Hypervalence-capable elements (Si, P, S, ...) and metals stay at 6,
-    // the angle generator's neighbour limit. Existing bonds are never removed by the
-    // cap — only new formations are refused. Empirical v1; the principled replacement
-    // is an over-coordination energy (docs/GFNFF_REACT_TOPOLOGY.md, Open refinements).
-    // Tick down refractory counters (one unit per scan).
-    for (auto it = m_react_refractory.begin(); it != m_react_refractory.end();) {
-        if (--(it->second) <= 0)
-            it = m_react_refractory.erase(it);
-        else
-            ++it;
+    // A non-finite coordinate would make every distance comparison false: nothing
+    // forms, nothing breaks, and the scan would silently stand still until the
+    // gradient NaN trap fires. Refuse to scan instead (the trap reports the cause).
+    if (!m_geometry_bohr.allFinite()) {
+        CurcumaLogger::warn("REACT scan skipped: geometry contains NaN/Inf");
+        return false;
     }
 
     // Valence cap for bond FORMATION, bond-order aware: an atom may take a new sigma
@@ -1946,7 +1952,8 @@ bool GFNFF::detectReactiveBondChanges()
         // exchange slack: it only forms at the tighter slack radius. Otherwise an H
         // sitting on one partner keeps re-bridging to the next heavy atom at the
         // optimistic radius and the exchange resolution has to undo it over and over.
-        {
+        // Part of the valence-cap family: react_valence_cap=false samples unconstrained.
+        if (m_react_valence_cap) {
             const bool uses_slack = (sigma_count[p.first] >= static_cast<int>(valence_cap(p.first) - 1.0 + 0.5))
                 || (sigma_count[p.second] >= static_cast<int>(valence_cap(p.second) - 1.0 + 0.5));
             if (uses_slack) {
@@ -1994,6 +2001,10 @@ bool GFNFF::detectReactiveBondChanges()
                     for (int k = 0; k < static_cast<int>(next.size()); ++k) {
                         if (next[k].first != a && next[k].second != a)
                             continue;
+                        // A bond formed in this very scan is not a candidate: breaking it
+                        // here would arm the refractory map for a bond that never existed.
+                        if (std::find(formed.begin(), formed.end(), next[k]) != formed.end())
+                            continue;
                         int o = (next[k].first == a) ? next[k].second : next[k].first;
                         double r = (m_geometry_bohr.row(a) - m_geometry_bohr.row(o)).norm();
                         double ratio = r / ((rcov[a] + rcov[o]) * fat_val[a] * fat_val[o]);
@@ -2006,6 +2017,11 @@ bool GFNFF::detectReactiveBondChanges()
                         auto pair = next[worst];
                         broken.push_back(pair);
                         next.erase(next.begin() + worst);
+                        // Keep the sigma bookkeeping consistent for atoms checked later in
+                        // this scan (the partner must not lose a second bond for a
+                        // count that no longer exists).
+                        --sigma_count[pair.first];
+                        --sigma_count[pair.second];
                         if (CurcumaLogger::get_verbosity() >= 1)
                             CurcumaLogger::result(fmt::format(
                                 "REACT exchange resolved: broke {}{}-{}{} (atom {} over-valent for {} scans)",
@@ -2021,6 +2037,16 @@ bool GFNFF::detectReactiveBondChanges()
         }
     }
 
+    // Tick down the refractory counters AFTER the formation loop: an entry armed with
+    // N below then blocks exactly N subsequent scans (ticking before the loop erased
+    // it one scan early).
+    for (auto it = m_react_refractory.begin(); it != m_react_refractory.end();) {
+        if (--(it->second) <= 0)
+            it = m_react_refractory.erase(it);
+        else
+            ++it;
+    }
+
     if (formed.empty() && broken.empty())
         return false;
 
@@ -2032,6 +2058,20 @@ bool GFNFF::detectReactiveBondChanges()
             m_react_refractory[b] = m_react_refractory_scans;
 
     m_react_bonds = std::move(next);
+
+    // Event record for programmatic consumers (GUI, SimpleMD); dE_jump is filled in by
+    // rebuildReactiveTopology(). Bounded, because a CLI run never consumes the list.
+    // Claude Generated (Sep 2026).
+    {
+        ReactEvent ev;
+        ev.call = m_react_calls;
+        ev.formed = formed;
+        ev.broken = broken;
+        m_react_events.push_back(std::move(ev));
+        if (m_react_events.size() > kReactEventLimit)
+            m_react_events.erase(m_react_events.begin(),
+                m_react_events.begin() + (m_react_events.size() - kReactEventLimit));
+    }
 
     if (CurcumaLogger::get_verbosity() >= 1) {
         auto atom_label = [&](int a) {
@@ -2058,7 +2098,7 @@ void GFNFF::updateReactiveTopologyIfNeeded()
     bool scan = (m_react_check_every > 0) && (m_react_calls % m_react_check_every == 0);
     if (!scan && m_react_check_disp > 0.0
         && m_react_ref_geometry.rows() == m_geometry_bohr.rows()) {
-        double max_disp = (m_geometry_bohr - m_react_ref_geometry).array().abs().maxCoeff();
+        double max_disp = (m_geometry_bohr - m_react_ref_geometry).rowwise().norm().maxCoeff();
         scan = (max_disp > m_react_check_disp);
     }
     if (!scan)
@@ -2074,17 +2114,26 @@ bool GFNFF::rebuildReactiveTopology()
 {
     const int verb = CurcumaLogger::get_verbosity();
 
-    // Diagnostic: energy on the OLD topology at the current geometry, so the
-    // discontinuity introduced by the rebuild (dE_jump) is measured, not hidden.
-    // Requires CN state from a previous step; skipped otherwise.
-    const bool diag = (verb >= 1) && m_workspace && (m_last_cn.size() == m_atomcount);
+    // Energy on the OLD topology at the current geometry, so the discontinuity the
+    // dynamics experiences (dE_jump) is measured, not hidden. Always measured: the
+    // cost is two workspace evaluations per EVENT (not per step), and GUI consumers
+    // read it through the event record at verbosity 0. Requires CN state from a
+    // previous step; NaN otherwise.
+    const bool diag = m_workspace && (m_last_cn.size() == m_atomcount);
     double e_before = 0.0;
     if (diag) {
         m_workspace->setGeometry(m_geometry_bohr);
         e_before = m_workspace->calculate(false);
     }
 
+    // Snapshot for rollback: if parameter generation throws, the engines keep their
+    // old interaction lists, so the bond bookkeeping must return to the old set too;
+    // otherwise the next getCachedTopology() would rebuild from a bond list the force
+    // field never adopted. The dropped change is re-detected at the next scan.
+    const std::vector<std::pair<int, int>> old_bonds = m_forced_bonds;
+
     m_forced_bonds = m_react_bonds;
+    m_react_owns_bonds = true;
 
     // Force the full topology path in getCachedTopology(): the bond list changed even
     // if atoms moved less than the 0.5 Bohr displacement trigger. The react scan keeps
@@ -2097,7 +2146,14 @@ bool GFNFF::rebuildReactiveTopology()
     try {
         ff_params = generateGFNFFParameterSet();
     } catch (const std::exception& e) {
-        CurcumaLogger::error(std::string("REACT rebuild: parameter generation failed: ") + e.what());
+        CurcumaLogger::error(std::string("REACT rebuild: parameter generation failed, keeping the previous topology: ") + e.what());
+        m_forced_bonds = old_bonds;
+        m_react_bonds = old_bonds;
+        m_cached_bond_list.reset();
+        m_geometry_tracker.reset();
+        m_static_topology_valid = false;
+        if (!m_react_events.empty())
+            m_react_events.pop_back();
         return false;
     }
 
@@ -2115,6 +2171,8 @@ bool GFNFF::rebuildReactiveTopology()
         m_workspace->rebuildInteractionLists(std::move(ff_params));
     }
 
+    refreshReactBondOrders();
+
     m_react_rebuilt = true;
     ++m_react_rebuild_count;
     m_hbxb_updated = true; // HB/XB lists were rebuilt inside parameter generation
@@ -2122,12 +2180,45 @@ bool GFNFF::rebuildReactiveTopology()
     if (diag) {
         double e_after = m_workspace->calculate(false);
         double de = e_after - e_before;
-        CurcumaLogger::result(fmt::format(
-            "REACT rebuild #{}: {} bonds, dE_jump = {:.6f} Eh ({:+.1f} kJ/mol)",
-            m_react_rebuild_count, m_react_bonds.size(), de,
-            de * CurcumaUnit::Energy::HARTREE_TO_KJMOL));
+        if (!m_react_events.empty())
+            m_react_events.back().de_jump_eh = de;
+        if (verb >= 1)
+            CurcumaLogger::result(fmt::format(
+                "REACT rebuild #{}: {} bonds, dE_jump = {:.6f} Eh ({:+.1f} kJ/mol)",
+                m_react_rebuild_count, m_react_bonds.size(), de,
+                de * CurcumaUnit::Energy::HARTREE_TO_KJMOL));
     }
     return true;
+}
+
+// Bond orders for the react bond list from the cached FT-HMO pi orders (fresh after a
+// rebuild or the initial parameter generation). Claude Generated (Sep 2026).
+//
+// The FT-Hueckel solver carries ONE p orbital per atom, so it models a single pi
+// system: measured pi orders are ~1.0 for an sp2-sp2 double bond (ethylene C=C,
+// diazene N=N) AND for an sp-sp triple bond (N2 0.999, CO 0.994, acetylene 1.000),
+// while the sp C-H bonds of acetylene stay at 0.0. A linear sp-sp bond carries a
+// SECOND, degenerate pi system that the solver does not represent; it is added back
+// here so the reported order is the chemical one. Bond types cannot be used for this
+// (btyp=3 marks every bond at an sp atom, the acetylene C-H included).
+void GFNFF::refreshReactBondOrders()
+{
+    m_react_bond_orders.assign(m_react_bonds.size(), 1);
+    if (!m_cached_topology)
+        return;
+    const auto& pibo = m_cached_topology->pi_bond_orders;
+    if (static_cast<int>(pibo.size()) < m_atomcount * (m_atomcount + 1) / 2)
+        return;
+    const auto& hyb = m_cached_topology->hybridization;
+    const bool have_hyb = static_cast<int>(hyb.size()) >= m_atomcount;
+    for (size_t k = 0; k < m_react_bonds.size(); ++k) {
+        const int i = m_react_bonds[k].first, j = m_react_bonds[k].second;
+        const double pi = std::max(0.0, pibo[lin(i, j)]);
+        int order = 1 + static_cast<int>(std::lround(pi));
+        if (have_hyb && hyb[i] == 1 && hyb[j] == 1 && pi > 0.5)
+            ++order; // second (degenerate) pi system of a linear sp-sp bond
+        m_react_bond_orders[k] = std::clamp(order, 1, 3);
+    }
 }
 
 double GFNFF::Calculation(bool gradient)
@@ -3215,6 +3306,8 @@ bool GFNFF::initializeForceField()
         CurcumaLogger::error(std::string("GFN-FF parameter generation failed: ") + e.what());
         return false;
     }
+    if (m_topology_mode == "react")
+        refreshReactBondOrders();
 
     // Claude Generated (April 2026): Forward term enable/disable flags from config to parameter set.
     // User flags may be under m_parameters["gfnff"] (controller JSON sub-object).

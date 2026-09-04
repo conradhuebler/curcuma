@@ -663,7 +663,7 @@ private:
     PARAM(no_restart, Bool, false, "Disable automatic loading from restart files.", "Restart", {"norestart"})
 
     // --- RATTLE Constraints ---
-    PARAM(rattle, Int, 0, "RATTLE constraint algorithm (0:off, 1:on, 2:H-only).", "RATTLE", {})
+    PARAM(rattle, Int, 0, "RATTLE constraint algorithm (0:off, 1:on, 2:H-only). Not available with gfnff topology_mode=react (constraints are frozen at initialisation).", "RATTLE", {})
     PARAM(rattle_12, Bool, true, "Constrain 1-2 bond distances.", "RATTLE", {})
     PARAM(rattle_13, Bool, false, "Constrain 1-3 distances (angles).", "RATTLE", {})
     PARAM(rattle_tol_12, Double, 1e-4, "Tolerance for 1-2 constraints (squared Bohr).", "RATTLE", {})

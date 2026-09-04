@@ -143,6 +143,18 @@ add_test(NAME gfnff_react_fd_gradient
          COMMAND test_gfnff_react_fd
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
+# Claude Generated (Sep 2026): react-scan bookkeeping — refractory count, authoritative
+# empty bond set, exchange-resolution sigma counts, event record, bond orders.
+add_executable(test_gfnff_react_filters test_gfnff_react_filters.cpp)
+target_link_libraries(test_gfnff_react_filters curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_react_filters REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_react_filters
+         COMMAND test_gfnff_react_filters
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_react_filters PROPERTIES TIMEOUT 120 LABELS "gfnff;react")
+
 # Copy reference data to build tree so tests can find them
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})

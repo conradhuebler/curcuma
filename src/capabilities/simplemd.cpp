@@ -869,6 +869,21 @@ bool SimpleMD::Initialise()
         }
     }
 
+    // RATTLE builds its constraint list once at initialisation and cannot follow a
+    // bond topology that changes during the run: refuse the combination with the
+    // GFN-FF react topology mode instead of constraining bonds that no longer exist.
+    // Claude Generated (Sep 2026).
+    if (m_config.get<int>("rattle") != 0) {
+        std::string topology_mode = ec_config.value("topology_mode", std::string("auto"));
+        if (ec_config.contains("gfnff") && ec_config["gfnff"].is_object())
+            topology_mode = ec_config["gfnff"].value("topology_mode", topology_mode);
+        if (topology_mode == "react") {
+            CurcumaLogger::error("SimpleMD: rattle is not available with gfnff topology_mode=react "
+                                 "(constraints are frozen at initialisation); set -md.rattle 0.");
+            return false;
+        }
+    }
+
     m_interface = new EnergyCalculator(m_method, ec_config, Basename());
     // Fail loud (Sep 2026): an unknown/unavailable method used to leave a calculator without a
     // backend and the first FastEnergy() call segfaulted. Abort the setup with the reason.

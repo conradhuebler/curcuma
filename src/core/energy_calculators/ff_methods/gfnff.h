@@ -37,6 +37,7 @@
 #include "src/core/periodic_table.h"
 #include <tuple>
 #include <utility>
+#include <limits>
 #include <optional>
 #include <vector>
 #include <memory>
@@ -349,7 +350,7 @@ public:
     struct GFNFFTopology {
         // Atom classification
         Vector neighbor_counts;                                  // Simple neighbor counts (integer CN)
-        std::vector<int> hybridization;                          // 0=sp3, 1=sp, 2=sp2, 3=terminal, 5=hypervalent
+        std::vector<int> hybridization;                          // 0=none/octahedral, 1=sp, 2=sp2, 3=sp3, 5=hypervalent (determineHybridizationFortran)
         std::vector<int> pi_fragments;                           // Pi fragment assignment per atom
         std::vector<int> itag;                                   // -1 iff atom is eta-coordinated to a metal (Fortran itag; gfnff_ini2.f90:170-198) - Claude Generated Jul 2026
         std::vector<int> pi_system_charge;                       // ipis: charge per pi-system (subtract from nelpi) - Claude Generated Jul 2026
@@ -763,17 +764,6 @@ public:
      */
     std::unique_ptr<GFNFFParameterSet> consumeCachedParameterSet() { return std::move(m_cached_parameter_set); }
 
-    /**
-     * @brief Heap clone of the current cached parameter set.
-     *
-     * Claude Generated (Aug 2026): for consumers that must not steal the cached copy,
-     * e.g. the GPU wrapper rebuilding its device workspace after a react-mode topology
-     * change. Returns nullptr if no set is cached.
-     */
-    std::unique_ptr<GFNFFParameterSet> cloneCachedParameterSet() const {
-        return m_cached_parameter_set ? std::make_unique<GFNFFParameterSet>(*m_cached_parameter_set) : nullptr;
-    }
-
     // === GPU orchestration helpers (Claude Generated March 2026) ===
     // These expose internal CN/EEQ computation so that GGFNFFComputationalMethod
     // can orchestrate GPU + CPU-residual without duplicating logic.
@@ -904,6 +894,34 @@ public:
 
     /// Number of bonded-term rebuilds since initialisation (react mode).
     int reactiveRebuildCount() const { return m_react_rebuild_count; }
+
+    /// Bond orders parallel to reactiveBonds(): 1 + round(Hueckel pi order), clamped to
+    /// 1..3, refreshed at every rebuild (react mode). Cheap to read; never recomputes.
+    const std::vector<int>& reactiveBondOrders() const { return m_react_bond_orders; }
+
+    /// Topology mode in effect after parameter parsing: "auto", "constant" or "react".
+    const std::string& topologyMode() const { return m_topology_mode; }
+
+    /**
+     * @brief One react-mode topology change event (Claude Generated Sep 2026).
+     *
+     * Recorded by detectReactiveBondChanges(); de_jump_eh is filled by the rebuild:
+     * E(new topology with its EEQ charges) - E(old topology with its charges) at the
+     * same geometry, i.e. the potential-energy discontinuity the dynamics experiences.
+     * NaN when it could not be measured (no CN state yet, first energy call).
+     */
+    struct ReactEvent {
+        long call = 0;                                    ///< energy-call counter at the scan
+        std::vector<std::pair<int, int>> formed;          ///< canonical i<j pairs
+        std::vector<std::pair<int, int>> broken;          ///< canonical i<j pairs (incl. exchange resolutions)
+        double de_jump_eh = std::numeric_limits<double>::quiet_NaN();
+    };
+
+    /// Move out all events recorded since the last call (react mode; empty otherwise).
+    /// A run that never consumes them (the CLI) keeps only the most recent
+    /// kReactEventLimit; the log line of every event is written regardless.
+    std::vector<ReactEvent> consumeReactEvents() { return std::exchange(m_react_events, {}); }
+    static constexpr size_t kReactEventLimit = 4096;
 
     const std::vector<GFNFFHydrogenBond>& getLastHBonds() const { return m_last_hbonds; }
     const std::vector<GFNFFHalogenBond>& getLastXBonds() const { return m_last_xbonds; }
@@ -2440,6 +2458,12 @@ private:
     double m_react_slack_form_factor = 1.2; ///< Tighter formation radius for slack-consuming bonds
     std::map<int, int> m_react_overvalence_streak; ///< Atom -> consecutive over-valent scans
     std::map<std::pair<int, int>, int> m_react_refractory; ///< Pair -> remaining blocked scans
+    bool m_react_owns_bonds = false; ///< react mode: m_forced_bonds is authoritative even when empty
+    std::vector<int> m_react_bond_orders; ///< Parallel to m_react_bonds, see reactiveBondOrders()
+    std::vector<ReactEvent> m_react_events; ///< Events since the last consumeReactEvents()
+
+    /// Refresh m_react_bond_orders from the cached Hueckel pi orders (after a rebuild / init).
+    void refreshReactBondOrders();
 
     /**
      * @brief React mode: O(N^2) hysteresis scan over all atom pairs; updates m_react_bonds.
