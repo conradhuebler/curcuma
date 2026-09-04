@@ -143,6 +143,15 @@ add_test(NAME gfnff_react_fd_gradient
          COMMAND test_gfnff_react_fd
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
+# Claude Generated (Sep 2026): GeometryTools angle/dihedral/radius of gyration.
+add_executable(test_geometry_tools test_geometry_tools.cpp)
+target_link_libraries(test_geometry_tools curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_geometry_tools REUSE_FROM curcuma_core)
+endif()
+add_test(NAME geometry_tools COMMAND test_geometry_tools)
+set_tests_properties(geometry_tools PROPERTIES TIMEOUT 60)
+
 # Claude Generated (Sep 2026): react-scan bookkeeping — refractory count, authoritative
 # empty bond set, exchange-resolution sigma counts, event record, bond orders.
 add_executable(test_gfnff_react_filters test_gfnff_react_filters.cpp)

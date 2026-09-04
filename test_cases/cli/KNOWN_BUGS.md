@@ -1,5 +1,33 @@
 # Known Bugs in CLI Tests
 
+## cli_simplemd_13_rmsd_mtd_legacy_ab passes only on a repeat run (P2)
+
+**Entdeckt**: 2026-09-04
+**Status**: reproduziert, nicht behoben
+
+Aus sauberem Zustand schlägt der Test fehl, ein zweiter Lauf im selben Verzeichnis
+besteht. Reproduktion:
+
+```
+rm -rf test_cases/cli/simplemd/13_rmsd_mtd_legacy_ab/input.md.* ...
+ctest -R cli_simplemd_13_rmsd_mtd    # 0% passed
+ctest -R cli_simplemd_13_rmsd_mtd    # 100% passed
+```
+
+Der Legacy-RMSD-MTD-Lauf bricht mit `File not found: input.mtd.xyz` ab, obwohl die
+Datei erzeugt wurde — sie liegt im BMT-Verzeichnis `input.md.<timestamp>/`, gesucht
+wird sie im Arbeitsverzeichnis. Der zweite Lauf findet den Rückstand des ersten und
+besteht deshalb. Hügel werden in beiden Fällen abgelegt (das Log ist voll davon),
+es ist reine Pfad-Auflösung.
+
+Verstößt gegen die BMT-Regel in `CLAUDE.md` ("Hardcoded CWD paths are not
+permitted"): der Legacy-Pfad muss die Datei über `outputPath()` suchen. Der
+strided-Pfad im selben Test ist nicht betroffen.
+
+**Nicht** verursacht durch die `BestFitRotation`-Guard-Korrektur vom selben Tag —
+gegen den unveränderten Stand gebaut und geprüft: dort dasselbe Verhalten.
+
+
 ## ConfScan CLI Timeout (P0 - CRITICAL: 7 tests affected)
 
 **Entdeckt**: 2025-10-26
