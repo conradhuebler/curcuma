@@ -107,21 +107,43 @@ points on the 231-atom complex agree with the CPU (GFN-FF 1e-7 Eh as documented 
 to 8 decimals), GFN-FF GPU MD runs. ROCm/HIP could not be compiled here (no SDK); the HIP
 wrapper received the same two-line change as the CUDA wrapper (`setKeepFullParameterSet`).
 
-## Findings not fixed here (deliberately)
+## Round 2 (same day): the open items
 
-- **MD per-step cost of single-fragment GFN-FF is the Phase-2 EEQ solve**: 45-70 ms of ~90 ms
-  at N=1410 (refactorisation + N² matrix build); a single point does not show it because
-  Phase 2 is skipped when the geometry is unchanged. Reusing the Cholesky factor is an
-  approximation (A4 refinement). The many-fragment case is now covered by the projected PCG
-  above; the single-fragment dense factorisation is untouched.
-- **`cli_simplemd_08_gfnff_acetic_acid_dimer_md` is flaky under parallel `ctest -j`**: the
-  OpenMP-parallel Phase-1 EEQ gives charges differing by 1e-13 under thread contention and
-  the 10 ps trajectory is chaotic (drift 0.02 idle vs 0.13 loaded). Baseline and new build
-  are bit-identical when run idle.
-- **`-method cg` is not registered** in the factory (the `08_cg_spheres` script is not a
-  ctest); SimpleMD then segfaults instead of aborting after the failed method creation.
-- **GFN-FF PBC on the CPU path** is silently non-periodic (the unit cell only ever reached the
-  removed engine). `cli_sqm_11_gfn2_provider_check` needs TBLite and fails in a TBLite-less
-  release build (pre-existing).
-- xTB: the three copies of `as_cgto_shell`/`ao_to_type` (X-I5), the audit-only gradient gate
-  flags in hot loops, and the ~50 % duplicated CUDA/HIP/Vulkan host adapters remain.
+- **Load-dependent MD tests fixed at the root.** Phase-1 EEQ (`calculateTopologyChargesMultiRHS`,
+  `solveEEQ`) ran its LAPACK solve without the `ScopedBlasThreads` guard, so OpenBLAS used all
+  cores and its threaded kernels gave topology charges that differed by ~1e-13 with machine
+  load; the chaotic 10 ps trajectories turned that into pass/fail coin flips under `ctest -j`.
+  With the guard both drift tests pass 3/3 rounds under `-j8`. The MD test scripts also remove
+  stale `input.snapshots/` and `input.topo.json` before running.
+- **SimpleMD fails loud** when the energy method cannot be created (was a segfault in
+  `FastEnergy()`): "MD setup failed: <factory reason>", and `prepareRun()` says why nothing runs.
+- **`-method cg` restored** on the workspace engine (`ff_workspace_cg.cpp`, `-load_ff_json FILE`
+  with `cg_default` / `cg_per_atom` / `pair_interactions` / `bonds`): same pair energy as the
+  removed engine, now with an analytic gradient for spheres (finite differences for ellipsoids);
+  `Elements::String2Element` accepts numeric atomic numbers ("226" = CG bead). Two-sphere
+  check reproduces the closed form (E = 0.40328774 Eh, |g| = 1.058157e-1);
+  `cli_simplemd_08_cg_spheres` is a registered ctest now.
+- **Projected PCG is the default Phase-2 EEQ solve above 500 atoms for any fragment count**
+  (`eeq_ppcg_tol` 1e-12): polymer/1410 solve 44 -> 16 ms (62 iterations cold, fewer warm),
+  energy/gradient deviation 1e-12, MD 100 fs 10.4 -> 7.3 s with an identical trajectory.
+  `eeq_ppcg_min_nfrag 0` restores the exact dense path; systems below 500 atoms stay exact.
+- **xTB:** the 17 declared-but-never-defined `XTBMethod` members (X-M1) are gone;
+  `as_cgto_shell`/`ao_to_type` were already shared in `xtb_ao_utils.hpp` (X-I5 was stale).
+- **GPU wrappers:** the duplicated citation block and the stale "CPU residual" header
+  description were removed in both the CUDA and the HIP wrapper.
+
+## Still open (deliberately)
+
+- **CUDA/HIP GFN-FF host wrappers remain two copies** (`gfnff_gpu_method.cpp` /
+  `gfnff_hip_method.cpp`, ~92 % identical). The real differences after name normalisation are
+  ~140 lines: class/type names (`FFWorkspaceGPU`/`FFWorkspaceHip`, `EEQSolverGPU`/`EEQSolverHip`),
+  the includes, the ROCm-only `eeq_rocm_cpu_fragment_threshold` branch (many fragments routed
+  to the CPU solve because the device GPU-Schur is not ported there) and log wording. A shared
+  backend-traits template is the right merge, but it cannot be compiled here (no ROCm SDK), so
+  it was not done blind. Recipe: `sed -E 's/Hip/Gpu/g; s/hip/cuda/g; s/ROCm|rocm/cuda/g'
+  gfnff_hip_method.cpp | diff gfnff_gpu_method.cpp -` shows exactly what a traits struct must carry.
+- **GFN-FF PBC on the CPU path** (unit cell ignored by the workspace) — postponed by the operator.
+- `cli_simplemd_13_rmsd_mtd_legacy_ab` fails only when run in parallel with its sibling
+  (shared output names), `cli_sqm_11` needs TBLite, `cli_curcumaopt_07` has a pre-existing
+  golden-value drift, `test_bmt_utils` / `test_orca_interface` / `xtb_cpscf` / `confscan_dtemplate`
+  fail identically on the baseline.

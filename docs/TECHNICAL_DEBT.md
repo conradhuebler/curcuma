@@ -28,17 +28,17 @@ upstream guard not shown in the snippet.
 | **F-Q3** | resolved | `gfnff_advanced.{h,cpp}` deleted. |
 | **F-E9** | partly | thread-engine statics gone with `forcefieldthread.cpp`; `gfnff_method.cpp` statics untouched. |
 | **F-Q9** | n/a | legacy engine removed; the GPU leak workaround itself is unchanged. |
-| **X-M1** | open | `xtb_method.h` dead declarations untouched (only the stale include path fixed). |
-| **X-I5 / X-G1** | open | `as_cgto_shell` copies remain (only hoisted out of the inner loops). |
+| **X-M1** | resolved | the 17 declared-but-undefined `XTBMethod` members removed (round 2). |
+| **X-I5 / X-G1** | resolved earlier | `as_cgto_shell`/`ao_to_type` live in `xtb_ao_utils.hpp`; the audit entry was stale. |
 | **D-1..D-4** | — | unchanged. |
 | new | resolved | native xTB no longer derives from `QMDriver`; `MakeOverlap/MakeH` stubs gone. |
 | new | resolved | duplicate `gfn1_params.hpp` / `gfn2_xtb_params.hpp` / `gfn2-xtb_param.hpp`, `integrals.h`, `test_parser.cpp`, pre-NDDO `am1/pm3/pm6/mndo` classes, `vulkan/prototype`, `d4_reference_data.cpp`, `qmdff_terms.h` deleted. |
 | new | resolved | `ForceFieldThread` engine + GFN-FF/JSON parts of `ForceField` deleted; shared structs in `ff_terms.h`. |
 | new | resolved | EEQ solver: `EEQSolverCache`, dense Floyd-Warshall, `buildNeighborLists`, `calculateEEQEnergy`, emoji self-test, write-only N x N cache removed; Phase-2 uses `Ref` views. |
 | new | resolved | MethodFactory if-chains -> `MethodDescriptor` table; five sub-scope lists -> `methodParameterScopes()`. |
-| new | **open** | `-method cg` is unregistered and SimpleMD segfaults after the failed method creation (no fail-loud check). |
+| new | resolved | `-method cg` registered again (workspace CG kernel, `-load_ff_json`); SimpleMD aborts with the factory reason instead of segfaulting. |
 | new | **open** | GFN-FF PBC on the CPU path is silently non-periodic (unit cell only reached the removed engine). |
-| new | **open** | `cli_simplemd_08/09` MD drift tests are load-sensitive (OpenMP Phase-1 EEQ differs at 1e-13 under `ctest -j`; 10 ps trajectory chaotic) and reuse stale `input.topo.json` caches in the build tree. |
+| new | resolved | Phase-1 EEQ now runs under the BLAS-thread guard (the 1e-13 load dependence came from unpinned OpenBLAS threads, not OpenMP); MD test scripts clear stale caches. |
 
 ## Resolved (2026-06-26) — fail-loud batch
 

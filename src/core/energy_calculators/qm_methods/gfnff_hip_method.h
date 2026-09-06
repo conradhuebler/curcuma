@@ -24,30 +24,14 @@
 #include <memory>
 
 /**
- * @brief GPU-accelerated GFN-FF via CUDA (method name: "gfnff" with -gpu cuda)
+ * @brief GPU-accelerated native GFN-FF (ComputationalMethod adapter).
  *
- * Claude Generated (March 2026): Clean GPU/CPU separation architecture.
- * GFNFF is a pure CPU class (no GPU knowledge). This wrapper orchestrates:
- *
- * Architecture:
- *   - m_gfnff          : GFNFF instance (CPU topology + EEQ charges + CN)
- *   - m_gpu_workspace  : FFWorkspaceHip (bonds, angles, dihedrals, inversions,
- *                        dispersion, repulsion, Coulomb on GPU)
- *   - m_cpu_residual   : FFWorkspace (HB, XB, ATM, BATM, sTors on CPU)
- *   - FFWorkspaceHip::calculate() automatically adds m_cpu_residual results
- *
- * Initialization flow:
- *   1. setMolecule() → m_gfnff->InitialiseMolecule() (topology, params)
- *   2. consumeCachedParameterSet() → split into GPU params + CPU residual params
- *   3. FFWorkspaceHip(full_params) + FFWorkspace(residual_params)
- *   4. m_gpu_workspace->setCPUResidualWorkspace(m_cpu_residual)
- *
- * Per-step calculation (orchestrated here, NOT delegated to GFNFF::Calculation):
- *   1. GPU: computeCN() — CN on GPU (k_cn_compute kernel)
- *   2. CPU: prepareCNAndEEQ(gradient, gpu_only, &gpu_cn) — EEQ only (CN from GPU)
- *   3. Distribute state (charges, CN, geometry) to GPU workspace
- *   4. m_gfnff->updateHBXBIfNeeded() — dynamic HB/XB re-detection
- *   5. m_gpu_workspace->calculate() — all energy terms on GPU
+ * Every energy term runs on the device (bonded terms, dispersion, repulsion, Coulomb,
+ * H-/X-bonds, ATM/BATM, CN + chain rule, EEQ). The host `GFNFF` object still owns the
+ * topology, FT-HMO pi-bond orders, Phase-1 EEQ, native parameter generation and the
+ * RMSD-gated H-/X-bond re-detection; its results are uploaded through the SoA layout.
+ * The former "CPU residual workspace" design (some terms on the host) is gone —
+ * see docs/GPU_GFNNF_DISCREPANCIES.md and ff_methods/CLAUDE.md "GPU Pipeline".
  */
 class GFNFFHipComputationalMethod : public ComputationalMethod {
 public:

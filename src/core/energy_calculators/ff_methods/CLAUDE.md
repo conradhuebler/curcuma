@@ -23,9 +23,12 @@ Force field implementation system with multi-threading support for UFF, QMDFF, a
 **ff_terms.h**: the shared term structs (`Bond`, `Angle`, `Dihedral`, `Inversion`, `vdW`, `EQ`,
 `CNDerivStore`, `GeoGradMatrix`) used by the workspace, ForceField, GFNFF and the GPU SoA headers.
 
-**ForceField** (`forcefield.cpp/h`, UFF / UFF-D3 / QMDFF only):
+**ForceField** (`forcefield.cpp/h`, UFF / UFF-D3 / QMDFF / CG):
 - Parameter generation via `ForceFieldGenerator`, JSON parameter caching, D3 pairs for `uff-d3`,
   then hands the lists to its own `FFWorkspace`. No thread engine of its own any more.
+  `-method cg` (coarse-grained LJ beads, `-load_ff_json FILE` with `cg_default` etc.) builds one
+  type-3 `vdW` per bead pair; `FFWorkspace::calcCGPairs` (ff_workspace_cg.cpp) evaluates
+  `CGPotentials::calculateCGPairEnergy` with an analytic sphere gradient (FD for ellipsoids).
 
 **GFNFF** (`gfnff_method.cpp/h`, `gfnff_torsions.cpp`, `gfnff_inversions.cpp`):
 - Topology (bonds, hybridisation, rings, fragments), Phase-1 EEQ, FT-HMO pi-bond orders,
@@ -43,7 +46,7 @@ Force field implementation system with multi-threading support for UFF, QMDFF, a
 **EEQSolver** (`eeq_solver.cpp/h`): two-phase EEQ (topological Phase 1, geometric Phase 2 with
 dxi/dgam/alpha corrections); Schur-Cholesky default (`dpotrf` under `ScopedBlasThreads`),
 PCG/LDLT/LU alternatives, cached factor + iterative refinement for MD; **projected PCG**
-(`solveWithProjectedPCG`, auto for nfrag >= 32 & N >= 500) replaces the O(N² nfrag) Schur
+(`solveWithProjectedPCG`, default for N >= 500, tol 1e-12, `eeq_ppcg_min_nfrag 0` = exact) replaces the O(N² nfrag) Schur
 route for many-fragment boxes (water/3000: 887 -> 59 ms per solve, energies identical to 12
 digits, gradients to 3e-10). Phase-2 takes
 `Eigen::Ref` views of the augmented matrix (no N x N copies). The `TopologyInput` it needs is

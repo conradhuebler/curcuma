@@ -167,6 +167,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 ### 2. Force Field Methods
 - **Universal Force Field (UFF)** - General-purpose molecular mechanics
 - **GFN-FF** (`gfnff`) - ✅ **FULLY IMPLEMENTED** - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
+- ⚠️ **Coarse-grained beads** (`cg`, Sep 2026, AI/machine-tested) - LJ spheres/ellipsoids on the workspace engine, input via `-load_ff_json FILE` (`cg_default`, `cg_per_atom`, `pair_interactions`); analytic sphere gradient - see [docs/CLEANUP_2026_09.md](docs/CLEANUP_2026_09.md)
 - **QMDFF** - Quantum Mechanically Derived Force Fields
 - **Universal Parameter Caching** - Automatic save/load for all FF methods
 
