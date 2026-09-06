@@ -39,10 +39,7 @@
 // rebuild the method. ConfigManager("energycalculator", controller) only carries
 // the energycalculator scope; method-specific sub-objects are otherwise dropped
 // before reaching MethodFactory.
-static const char* const kEnergyCalcMethodScopes[] = {
-    "gfnff", "eeq_solver", "xtb", "tblite", "ulysses",
-    "d3", "d4", "uff", "qmdff", "eht", "orca"
-};
+// The scope list lives in MethodFactory::methodParameterScopes() (single source of truth).
 
 
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
@@ -109,7 +106,7 @@ void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config, c
     // on the first (and only) build. Previously this was a post-construction
     // reattachMethodScopes() that rebuilt the whole method a second time.
     if (raw_controller && raw_controller->is_object()) {
-        for (const char* scope : kEnergyCalcMethodScopes) {
+        for (const std::string& scope : MethodFactory::methodParameterScopes()) {
             if (raw_controller->contains(scope) && !m_controller.contains(scope))
                 m_controller[scope] = (*raw_controller)[scope];
         }
@@ -154,8 +151,11 @@ void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config, c
     // Create computational method using factory
     if (!createMethod(m_method_name, m_controller)) {
         m_error = true;
-        m_error_message = fmt::format("Failed to create method: {}", m_method_name);
-        CurcumaLogger::error("Failed to create computational method: " + m_method_name);
+        // Keep the factory's reason (unknown name, missing provider, ...) visible to the user.
+        if (m_error_message.empty())
+            m_error_message = fmt::format("Failed to create method: {}", m_method_name);
+        CurcumaLogger::error("Failed to create computational method: " + m_method_name
+                             + " -- " + m_error_message);
         return;
     }
 

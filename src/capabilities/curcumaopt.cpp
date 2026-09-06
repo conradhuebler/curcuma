@@ -158,14 +158,10 @@ void CurcumaOpt::LoadControlJson()
     // this, CLI overrides like -gfnff.eeq_distance_cutoff are dropped because
     // m_controller["opt"] / ["sp"] don't carry sibling scopes. Add only when missing
     // — explicit per-scope overrides always win.
-    static constexpr const char* kMethodScopes[] = {
-        "gfnff", "eeq_solver", "xtb", "tblite", "ulysses",
-        "d3", "d4", "uff", "qmdff", "eht"
-    };
     for (const char* sub : {"opt", "sp"}) {
         if (!m_controller.contains(sub) || !m_controller[sub].is_object())
             m_controller[sub] = json::object();
-        for (const char* scope : kMethodScopes) {
+        for (const std::string& scope : MethodFactory::methodParameterScopes()) {
             if (m_controller.contains(scope) && !m_controller[sub].contains(scope)) {
                 m_controller[sub][scope] = m_controller[scope];
             }

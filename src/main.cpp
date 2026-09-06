@@ -705,11 +705,9 @@ json CLI2Json(int argc, char** argv)
     // almost certainly aimed it at the active command and it silently went elsewhere -> warn.
     // This is the safety net for the class of bug where ConfSearch (unregistered) lost
     // -opt_method to polymerbuild and -thermostat to simplemd without any diagnostic.
-    std::set<std::string> scope_modules = {
-        "gfnff", "eeq_solver", "xtb", "tblite", "ulysses", "d3", "d4", "uff", "qmdff",
-        "eht", "orca", "forcefield", "ripser", "rmsd", "ancopt", "modern_optimizer",
-        "gfnff_external", "native_lbfgs", "d3param", "d4param"
-    };
+    std::set<std::string> scope_modules(MethodFactory::methodParameterScopes().begin(),
+                                        MethodFactory::methodParameterScopes().end());
+    scope_modules.insert({"ripser", "rmsd", "ancopt", "modern_optimizer", "native_lbfgs"});
 
     // Claude Generated (October 2025): CLI keyword to module name mapping
     // Maps command-line keywords (e.g., -md) to actual module names (e.g., simplemd)
@@ -2755,39 +2753,7 @@ int main(int argc, char **argv) {
 
     // Phase 2: List available computational methods - Claude Generated 2025
     if (command == "methods") {
-        auto methods = MethodFactory::getAvailableMethods();
-        std::cout << "Available computational methods in this build:\n\n";
-
-        std::cout << "Quantum Methods:\n";
-        for (const auto& method : methods) {
-            if (method.find("gfn") != std::string::npos ||
-                method.find("eht") != std::string::npos ||
-                method.find("pm") != std::string::npos ||
-                method.find("am") != std::string::npos ||
-                method.find("mndo") != std::string::npos ||
-                method.find("-3c") != std::string::npos ||
-                method == "orca") {
-                std::cout << "  - " << method << "\n";
-            }
-        }
-
-        std::cout << "\nForce Fields:\n";
-        for (const auto& method : methods) {
-            if (method.find("uff") != std::string::npos ||
-                method.find("ff") != std::string::npos ||
-                method.find("qmdff") != std::string::npos) {
-                std::cout << "  - " << method << "\n";
-            }
-        }
-
-        std::cout << "\nDispersion Corrections:\n";
-        for (const auto& method : methods) {
-            if (method.find("d3") != std::string::npos ||
-                method.find("d4") != std::string::npos) {
-                std::cout << "  - " << method << "\n";
-            }
-        }
-
+        MethodFactory::printAvailableMethods();   // table-driven listing (family, providers)
         return 0;
     }
 

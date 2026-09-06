@@ -854,10 +854,7 @@ bool SimpleMD::Initialise()
     // constructor never sees flat flags like -static_all true or -eeq_distance_cutoff_auto
     // true that the registry routed into controller["gfnff"]. Mirrors the
     // EnergyCalculator::reattachMethodScopes fix used by the opt/sp path (WP6).
-    static const std::vector<std::string> kMethodScopes = {
-        "gfnff", "eeq_solver", "tblite", "xtb", "ulysses", "eht", "dftd3", "dftd4", "orca"
-    };
-    for (const auto& scope : kMethodScopes) {
+    for (const auto& scope : MethodFactory::methodParameterScopes()) {
         if (m_controller.contains(scope) && m_controller[scope].is_object()
             && !ec_config.contains(scope)) {
             ec_config[scope] = m_controller[scope];
