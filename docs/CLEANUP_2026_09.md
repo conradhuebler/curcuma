@@ -39,17 +39,24 @@ Shared term structs now live in `ff_methods/ff_terms.h`.
 | EEQ `TopologyInput` cached per topology version (was a deep copy of all neighbour lists per MD step) | `gfnff_method.cpp` | |
 | Parameter set moved into the workspace; external copy holds bonded terms only unless a GPU wrapper calls `setKeepFullParameterSet(true)` (two 600 MB copies on the water box before) | `gfnff_method.cpp` | |
 
-Measured (release/, -O3, AVX2, OpenBLAS, 8 threads, `OMP_NUM_THREADS=1`; baseline = db0c760f):
+Final measurement (release/, -O3, AVX2, OpenBLAS, `OMP_NUM_THREADS=1`; baseline = db0c760f,
+final = 215b3af1 incl. the projected-PCG EEQ below; run-to-run variance on this box ~10 %):
 
-| System | Run | before | after |
-|---|---|---|---|
-| polymer 1410 | gfnff SP cold / warm | 774 / 560 ms | 489 / 416 ms |
-| water box 3000 | gfnff SP cold / warm | 7.07 / 6.47 s | 4.10 / 3.52 s |
-| polymer 1410 | gfnff MD 100 fs | 12.5 s | 9.4-10.5 s |
-| polymer 1410 | gfn1 SP | 190.9 s | 131.6 s |
-| polymer 1410 | gfn2 SP | 113.1 s | 98.7 s |
-| complex 231 | gfnff SP | 76 ms | 47 ms |
-| triose 66 | gfn2 SP | 134 ms | 99 ms |
+| System | Run | before | after | factor |
+|---|---|---|---|---|
+| polymer 1410 | gfnff SP cold / warm (8 thr) | 774 / 560 ms | 430 / 429 ms | 1.8 / 1.3 |
+| polymer 1410 | gfnff SP cold / warm (1 thr) | 765 / 721 ms | 495 / 439 ms | 1.55 / 1.6 |
+| water box 3000 (999 fragments) | gfnff SP cold / warm (8 thr) | 7.07 / 6.47 s | 2.32 / 2.27 s | 3.05 / 2.85 |
+| water box 3000 | gfnff MD step (8 thr) | 1092 ms | 309 ms | 3.5 |
+| polymer 1410 | gfnff MD 100 fs (8 thr) | 12.5 s | 9.4-11.9 s | 1.05-1.3 |
+| polymer 1410 | gfn1 SP (8 thr) | 190.9 s | 131.6-143.6 s | 1.33-1.45 |
+| polymer 1410 | gfn2 SP (8 thr) | 113.1 s | 82.4-98.7 s | 1.15-1.37 |
+| complex 231 | gfnff SP (1 thr) | 76 ms | 45 ms | 1.7 |
+| triose 66 | gfn2 SP (1 thr) | 134 ms | 111 ms | 1.2 |
+
+Energies: identical to the last digit for every single-fragment run; the water box (projected
+PCG) differs by <= 5e-12 Eh, gradients by <= 5e-10 Eh/Bohr. All three MD runs end with
+identical energies.
 
 Small molecules (< 100 atoms) are dominated by process start-up (20-50 ms) and did not change.
 
