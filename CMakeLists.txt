@@ -523,7 +523,6 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/xtb_gradient.cpp
         src/core/energy_calculators/qm_methods/nddo_params.cpp
         src/core/energy_calculators/ff_methods/gfnff_method.cpp
-        src/core/energy_calculators/ff_methods/gfnff_advanced.cpp
         src/core/energy_calculators/ff_methods/gfnff_torsions.cpp
         src/core/energy_calculators/ff_methods/gfnff_inversions.cpp
         src/core/energy_calculators/ff_methods/ff_workspace.cpp
@@ -551,7 +550,6 @@ set(curcuma_core_SRC
         src/core/molecule.cpp
         src/core/xyz_comment_parser.cpp
         src/core/fileiterator.cpp
-        src/core/energy_calculators/ff_methods/forcefieldthread.cpp
         src/core/energy_calculators/ff_methods/forcefield.cpp
         src/core/energy_calculators/ff_methods/forcefieldfunctions.h
         src/core/energy_calculators/ff_methods/forcefieldgenerator.cpp

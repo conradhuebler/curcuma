@@ -27,7 +27,6 @@
 #include "ff_workspace.h"
 #include "gfnff_par.h"
 #include "forcefieldfunctions.h"
-#include "forcefieldderivaties.h"
 #include "gfnff_geometry.h"
 #include "src/core/units.h"
 #include "src/core/curcuma_logger.h"

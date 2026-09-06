@@ -16,14 +16,14 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  * Claude Generated (March 2026): Extracted GFN-FF specific parameter structs
- * from forcefieldthread.h for clean separation of concerns.
+ * from the old forcefieldthread.h for clean separation of concerns.
  *
  * This header defines all GFN-FF specific interaction parameter structures
  * and the aggregate GFNFFParameterSet used for native in-memory parameter
  * transfer between GFNFF (generator) and ForceField (calculator).
  *
  * Generic structs (Bond, Angle, Dihedral, Inversion, vdW, EQ) remain in
- * forcefieldthread.h as they are shared by UFF/QMDFF/GFN-FF.
+ * ff_terms.h as they are shared by UFF/QMDFF/GFN-FF.
  */
 
 #pragma once
@@ -35,12 +35,8 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
-// Forward-declare generic structs from forcefieldthread.h
-struct Bond;
-struct Angle;
-struct Dihedral;
-struct Inversion;
-struct vdW;
+// Generic term structs (Bond, Angle, Dihedral, Inversion, vdW, EQ, CNDerivStore)
+#include "ff_terms.h"
 
 /**
  * @brief Force field method type for unified parameter set
@@ -245,7 +241,7 @@ struct GFNFFBatmTriple {
  *   json j = params.toJSON();
  */
 struct GFNFFParameterSet {
-    // Bonded terms (use generic structs from forcefieldthread.h)
+    // Bonded terms (use generic structs from ff_terms.h)
     std::vector<Bond> bonds;
     std::vector<Angle> angles;
     std::vector<Dihedral> dihedrals;

@@ -18,7 +18,7 @@
 #include <string>
 #include <vector>
 
-// Forward-declare GFN-FF parameter structs (defined in forcefieldthread.h / gfnff_parameters.h)
+// Forward-declare GFN-FF parameter structs (defined in ff_terms.h / gfnff_parameters.h)
 struct Bond;
 struct Angle;
 struct Dihedral;
