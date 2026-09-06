@@ -44,7 +44,7 @@ using json = nlohmann::json;
  * Claude Generated (March 2026): Distinguishes UFF, QMDFF, and GFN-FF within
  * the shared ForceFieldParameterSet / FFWorkspace architecture.
  */
-enum class FFMethodType { UFF = 1, QMDFF = 2, GFN_FF = 3 };
+enum class FFMethodType { UFF = 1, QMDFF = 2, GFN_FF = 3, CG = 4 };
 
 /**
  * @brief Bond-HB mapping entry for dncoord_erf calculation

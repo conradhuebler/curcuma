@@ -401,6 +401,8 @@ private:
     // === Core execution ===
     void executeGFNFF(int partition);
     void executeUFF(int partition);    ///< Claude Generated (March 2026): UFF energy/gradient
+    void executeCG(int partition);     ///< Sep 2026: coarse-grained LJ spheres/ellipsoids (ff_workspace_cg.cpp)
+    void calcCGPairs(int partition);
     void executeQMDFF(int partition);  ///< Claude Generated (March 2026): QMDFF energy/gradient
     void postProcess(bool gradient);
     void reduce();

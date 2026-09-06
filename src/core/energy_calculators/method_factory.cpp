@@ -551,6 +551,11 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
           [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
               CurcumaLogger::success("Method '" + m + "' resolved to ForceField");
               return std::make_unique<ForceFieldMethod>(m, c); } },
+        { {"cg", "cg-lj"}, "Force Fields (native)", "Coarse-grained LJ spheres/ellipsoids (cg_default via -load_ff_json FILE)",
+          always, {{"ForceField", always}},
+          [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
+              CurcumaLogger::success("Method '" + m + "' resolved to ForceField (coarse-grained)");
+              return std::make_unique<ForceFieldMethod>(m, c); } },
         // ---- external QM providers ----
         { {"ipea1"}, "Quantum Methods (external providers)", "iPEA1-xTB via TBLite",
           hasTBLite, {{"TBLite", hasTBLite}},

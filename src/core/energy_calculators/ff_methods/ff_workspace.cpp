@@ -221,6 +221,8 @@ double FFWorkspace::calculate(bool gradient)
             executeUFF(t);
         else if (m_method_type == FFMethodType::QMDFF)
             executeQMDFF(t);
+        else if (m_method_type == FFMethodType::CG)
+            executeCG(t);
         else
             executeGFNFF(t);
     };

@@ -105,6 +105,12 @@ public:
     void printParameterSummary() const;
 
 private:
+    // Coarse-grained method (Sep 2026, restored from the removed thread engine): one vdW
+    // entry of type 3 per CG-CG pair, parameters from cg_default / cg_per_atom /
+    // pair_interactions of the controller (e.g. -load_ff_json FILE).
+    void generateCGParameters(const json& cg_config);
+    Eigen::Vector3d getCGShapeForAtom(int atom_index, const json& config) const;
+    Eigen::Vector3d getCGOrientationForAtom(int atom_index, const json& config) const;
     void setBonds(const json& bonds);
     void setAngles(const json& angles);
     void setDihedrals(const json& dihedrals);

@@ -18,6 +18,7 @@
  */
 
 #include "forcefield_method.h"
+#include <fstream>
 #include "src/core/citation_registry.h"
 #include "src/tools/general.h"
 #include "src/core/curcuma_logger.h"
@@ -130,7 +131,29 @@ json ForceFieldMethod::generateForceFieldController() const {
     if (m_method_name == "uff-d3") {
         controller["d3_correction"] = true;
     }
-    
+    // Coarse-grained input (Sep 2026): cg_default / cg_per_atom / pair_interactions / bonds
+    // either inline in the method config or from a JSON file (-load_ff_json FILE).
+    auto scoped = [&](const char* key) -> json {
+        if (m_parameters.contains(key)) return m_parameters[key];
+        if (m_parameters.contains("forcefield") && m_parameters["forcefield"].is_object()
+            && m_parameters["forcefield"].contains(key))
+            return m_parameters["forcefield"][key];
+        return json();
+    };
+    const json ff_file = scoped("load_ff_json");
+    if (ff_file.is_string() && ff_file.get<std::string>() != "none" && !ff_file.get<std::string>().empty()) {
+        std::ifstream in(ff_file.get<std::string>());
+        if (!in)
+            throw std::runtime_error("ForceFieldMethod: cannot read -load_ff_json file '" + ff_file.get<std::string>() + "'");
+        json extra = json::parse(in);
+        for (auto& [k, v] : extra.items())
+            if (k != "method") controller[k] = v;
+    }
+    for (const char* key : {"cg_default", "cg_per_atom", "pair_interactions"}) {
+        const json v = scoped(key);
+        if (!v.is_null()) controller[key] = v;
+    }
+
     return controller;
 }
 
@@ -422,7 +445,7 @@ void ForceFieldMethod::setParameterFile(const std::string& filename) {
 std::vector<std::string> ForceFieldMethod::getSupportedMethods() {
     // Claude Generated (Sep 2026): gfnff has its own engine (GFNFF), "d3" is rejected by
     // MethodFactory; ForceField evaluates only these three through FFWorkspace.
-    return {"uff", "uff-d3", "qmdff"};
+    return {"uff", "uff-d3", "qmdff", "cg", "cg-lj"};
 }
 
 bool ForceFieldMethod::isMethodSupported(const std::string& method_name) {
@@ -490,6 +513,17 @@ std::string ForceFieldMethod::normalizeMethodName(const std::string& method_name
 bool ForceFieldMethod::generateParametersIfNeeded(const Mol& mol) {
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Checking if ForceField parameters need to be generated");
+    }
+    // Coarse-grained (Sep 2026): no UFF typing/generator, the pair list comes straight from
+    // cg_default / cg_per_atom / pair_interactions in the controller (-load_ff_json FILE).
+    if (m_method_name == "cg" || m_method_name == "cg-lj") {
+        try {
+            m_forcefield->setParameter(generateForceFieldController());
+        } catch (const std::exception& e) {
+            handleForceFieldError(fmt::format("CG parameter generation: {}", e.what()));
+            return false;
+        }
+        return true;
     }
 
     // Check if parameters are already set

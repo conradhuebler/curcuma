@@ -18,6 +18,7 @@
  */
 
 #include "forcefield.h"
+#include "src/core/elements.h"
 
 #include "ff_workspace.h"
 #include "uff_par.h"  // UFFParameterJson: controller defaults
@@ -114,8 +115,11 @@ void ForceField::setParameter(const json& parameters)
     // Claude Generated (December 2025): Prevent infinite recursion during cache loading
     // Skip cache loading if we're already being called from within loadParametersFromFile
     static thread_local bool loading_from_cache = false;
+    // Coarse-grained parameters come from the user's JSON (cg_default, ...), not from the
+    // UFF/QMDFF parameter cache: never load or save a .param.json for them (Sep 2026).
+    const bool is_cg_method = (method_name == "cg" || method_name == "cg-lj");
 
-    if (!loading_from_cache && !m_in_setParameter && m_enable_caching && parameters.contains("method")) {
+    if (!is_cg_method && !loading_from_cache && !m_in_setParameter && m_enable_caching && parameters.contains("method")) {
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Attempting to load cached parameters");
         }
@@ -182,6 +186,8 @@ void ForceField::setParameter(const json& parameters)
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::param("method_selected", m_method);
         }
+        if (m_method == "cg" || m_method == "cg-lj")
+            generateCGParameters(parameters);
         if (m_parameters.contains("e0"))
             m_e0 = m_parameters["e0"];
 
@@ -190,7 +196,7 @@ void ForceField::setParameter(const json& parameters)
         }
 
         // Auto-save new parameters (only if caching enabled)
-        if (m_enable_caching) {
+        if (m_enable_caching && !is_cg_method) {
             autoSaveParameters();
         }
     }
@@ -231,16 +237,115 @@ void ForceField::setParameterFile(const std::string& file)
 // Claude Generated (Sep 2026): FFWorkspace construction, shared by setParameter() and the
 // Calculate() safety fallback. qmdff/quff select the QMDFF term functions, everything else
 // (uff, uff-d3) the UFF ones. uff-d3 additionally hands the D3 pair list to the workspace.
+// ---------------------------------------------------------------------------
+// Coarse-grained parameters (Sep 2026: restored from the removed thread engine)
+// One vdW entry of type 3 per CG-CG pair; evaluated by FFWorkspace::calcCGPairs.
+// ---------------------------------------------------------------------------
+void ForceField::generateCGParameters(const json& cg_config)
+{
+    if (CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::info("Generating CG parameters for coarse-grained simulation");
+    if (!cg_config.contains("cg_default")) {
+        CurcumaLogger::error("CG config missing required 'cg_default' section (use -load_ff_json FILE)");
+        throw std::invalid_argument("CG configuration missing 'cg_default' section");
+    }
+    const auto& cg_default = cg_config["cg_default"];
+    if (cg_default.contains("shape_vector")) {
+        auto shape = cg_default["shape_vector"];
+        if (shape.size() != 3) {
+            CurcumaLogger::error("CG shape_vector must have exactly 3 elements");
+            throw std::invalid_argument("Invalid shape_vector: expected 3 elements");
+        }
+        if (shape[0] <= 0 || shape[1] <= 0 || shape[2] <= 0)
+            CurcumaLogger::warn("CG shape_vector contains non-positive values");
+    }
+    if (cg_default.contains("epsilon") && cg_default["epsilon"].get<double>() < 0)
+        CurcumaLogger::warn("CG epsilon parameter is negative (unusual for attractive interaction)");
+
+    m_vdWs.clear();
+    if (cg_config.contains("bonds")) {
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info("Loading CG bond parameters");
+        setBonds(cg_config["bonds"]);
+    }
+    json pair_overrides;
+    if (cg_config.contains("pair_interactions"))
+        pair_overrides = cg_config["pair_interactions"];
+
+    int pair_count = 0;
+    for (int i = 0; i < m_natoms; ++i) {
+        for (int j = i + 1; j < m_natoms; ++j) {
+            if (m_atom_types[i] != CG_ELEMENT || m_atom_types[j] != CG_ELEMENT) continue;
+            vdW cg_pair;
+            cg_pair.type = 3;
+            cg_pair.i = i;
+            cg_pair.j = j;
+            cg_pair.shape_i = getCGShapeForAtom(i, cg_config);
+            cg_pair.shape_j = getCGShapeForAtom(j, cg_config);
+            cg_pair.orient_i = getCGOrientationForAtom(i, cg_config);
+            cg_pair.orient_j = getCGOrientationForAtom(j, cg_config);
+            const std::string pair_key = fmt::format("{}-{}", i, j);
+            if (!pair_overrides.empty() && pair_overrides.contains(pair_key)) {
+                const auto& pp = pair_overrides[pair_key];
+                cg_pair.sigma = pp.value("sigma", cg_default.value("sigma", 4.0));
+                cg_pair.epsilon = pp.value("epsilon", cg_default.value("epsilon", 0.0));
+                cg_pair.cg_potential_type = pp.value("potential_type", cg_default.value("potential_type", 1));
+            } else {
+                cg_pair.sigma = cg_default.value("sigma", 4.0);
+                cg_pair.epsilon = cg_default.value("epsilon", 0.0);
+                cg_pair.cg_potential_type = cg_default.value("potential_type", 1);
+            }
+            m_vdWs.push_back(cg_pair);
+            ++pair_count;
+        }
+    }
+    if (CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::success(fmt::format("Generated {} CG pair interactions", pair_count));
+}
+
+Eigen::Vector3d ForceField::getCGShapeForAtom(int atom_index, const json& config) const
+{
+    if (config.contains("cg_per_atom")) {
+        const std::string key = std::to_string(atom_index);
+        if (config["cg_per_atom"].contains(key) && config["cg_per_atom"][key].contains("shape_vector")) {
+            const auto& s = config["cg_per_atom"][key]["shape_vector"];
+            return Eigen::Vector3d(s[0], s[1], s[2]);
+        }
+    }
+    if (config.contains("cg_default") && config["cg_default"].contains("shape_vector")) {
+        const auto& s = config["cg_default"]["shape_vector"];
+        return Eigen::Vector3d(s[0], s[1], s[2]);
+    }
+    return Eigen::Vector3d(2.0, 2.0, 2.0);
+}
+
+Eigen::Vector3d ForceField::getCGOrientationForAtom(int atom_index, const json& config) const
+{
+    if (config.contains("cg_per_atom")) {
+        const std::string key = std::to_string(atom_index);
+        if (config["cg_per_atom"].contains(key) && config["cg_per_atom"][key].contains("orientation")) {
+            const auto& o = config["cg_per_atom"][key]["orientation"];
+            return Eigen::Vector3d(o[0], o[1], o[2]);
+        }
+    }
+    if (config.contains("cg_default") && config["cg_default"].contains("orientation")) {
+        const auto& o = config["cg_default"]["orientation"];
+        return Eigen::Vector3d(o[0], o[1], o[2]);
+    }
+    return Eigen::Vector3d(0.0, 0.0, 0.0);
+}
+
 void ForceField::buildWorkspace()
 {
     const bool is_qmdff = (m_method == "qmdff" || m_method == "quff");
-    if (!is_qmdff && m_method != "uff" && m_method != "uff-d3") {
+    const bool is_cg = (m_method == "cg" || m_method == "cg-lj");
+    if (!is_qmdff && !is_cg && m_method != "uff" && m_method != "uff-d3") {
         CurcumaLogger::warn(fmt::format(
-            "ForceField: method '{}' is not uff/uff-d3/qmdff - evaluating with the UFF term functions", m_method));
+            "ForceField: method '{}' is not uff/uff-d3/qmdff/cg - evaluating with the UFF term functions", m_method));
     }
 
     ForceFieldParameterSet ws_params;
-    ws_params.method_type = is_qmdff ? FFMethodType::QMDFF : FFMethodType::UFF;
+    ws_params.method_type = is_qmdff ? FFMethodType::QMDFF : (is_cg ? FFMethodType::CG : FFMethodType::UFF);
     ws_params.bonds      = m_bonds;
     ws_params.angles     = m_angles;
     ws_params.dihedrals  = m_dihedrals;
