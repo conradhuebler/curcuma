@@ -91,7 +91,7 @@ as CUDA, correct at every step:
 | File | Role |
 |------|------|
 | `qm_methods/rocm/xtb_hip_context.{h,cpp}` | HIP context: device handshake + `solveGeneralized` (rocSOLVER `dsygvd`). Host-callable — device memory via `hipMalloc`/`hipMemcpy`, no device kernels yet, so it compiles as plain C++ |
-| `qm_methods/xtb_hip_method.{h,cpp}` | `ComputationalMethod` wrapper; owns the context + the CPU `NativeXtbMethod`; installs the `ExternalEigensolver` hook |
+| `qm_methods/xtb_hip_method.{h,cpp}` | `ComputationalMethod` wrapper (Sep 2026: a thin instantiation of `XtbGpuAdapter<XtbHipContext>` + `XtbGpuResidentBackend<…>` from `qm_methods/xtb_gpu_adapter.h`, shared with Vulkan); installs the `ExternalEigensolver` hook |
 | `ff_methods/rocm/` | (later stage) hipified GFN-FF kernels + workspace |
 
 Dispatch: `method_factory.cpp` `resolveNativeXtbGpuMode()` returns `"rocm"` when

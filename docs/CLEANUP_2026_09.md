@@ -190,6 +190,31 @@ Operator-approved plan (three tiers; tier 3 "unify kernel bodies" deliberately N
   instead of one shared class name, because `gfnff_rocm.hip` was off-limits and both plugins
   load `RTLD_GLOBAL`.
 
+- **Native-xTB GPU adapters templated + Vulkan eigensolver dedup (Opus agent, merged).**
+  New header-only `qm_methods/xtb_gpu_adapter.h` (427 lines): `XtbGpuAdapter<Context>` is the
+  `ComputationalMethod` half shared by CUDA, ROCm and Vulkan (context handshake, the two log
+  strings parameterised so every message stays byte-identical, the 20 interface forwarders,
+  `gpuActive()`), and `XtbGpuResidentBackend<Context, BasisData>` is the ~40-virtual
+  `GpuScfBackend` seam written once for ROCm + Vulkan (identical pointer-API contexts). The
+  CUDA seam stays hand-written because its context drives stages the other two lack (fused
+  resident SCF loop, device GFN2 potential + in-SCF solvation, device Mulliken/SCC energy).
+  Backend-specific remainder is marked `BACKEND-SPECIFIC` in each file (eigensolver hook,
+  `downloadCholesky`, `supportsDshell`, the Vulkan `CURCUMA_VK_GFN2_CPUGRAD` hatch, mixed-
+  precision policy). `xtb_hip_method.cpp` 395 → 135, `xtb_vulkan_method.cpp` 411 → 152,
+  `xtb_gpu_method.cpp` 549 → 515; HIP-vs-Vulkan differing lines 298 → 171 (what differs now
+  is only the per-backend hooks). The Vulkan context's private copies of `tql2`/`solveTriQL`
+  (66 lines) and the rank-1 deflation/Givens/assembly (72 lines) now call
+  `curcuma::eigsolver::solveTridiagonalQL()` / `rank1EigenDeflate()` in `native_eigensolver.*`
+  (the CPU `rank1Eigen` gained an optional secular-solve hook, default = built-in, so the CPU
+  path is unchanged); `dcRecursive` deliberately stays (device dispatches interleaved with
+  tearing logic). Net −233 source lines. Verified by the agent (pre-edit vs post-edit binaries
+  from the same tree, RTX 5080): the four Vulkan single points identical, 35-step Vulkan `-opt`
+  trajectory and optimised structure byte-identical, CPU `-eigensolver native` identical,
+  host-D&C debug path identical on H2O/CH4/NH3, CUDA `sqm_val_gpu` 32/32, the 6 Vulkan ctest
+  failures pre-existing (same with its reference binary); HIP compiled with `g++ -c -DUSE_ROCM`
+  against the pimpl `XtbHipContext` header (36 template virtuals type-checked; kernels not
+  run). Re-verified here after the merge — see the commit message.
+
 ## Still open (deliberately)
 
 - **GFN-FF PBC on the CPU path** (unit cell ignored by the workspace) — postponed by the operator.

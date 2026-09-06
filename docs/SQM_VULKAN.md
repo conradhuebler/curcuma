@@ -83,7 +83,7 @@ brought up stage-by-stage and is correct at every step.
 |------|------|
 | `qm_methods/vulkan/vk_context.{h,cpp}` | Generic Vulkan compute context: instance / FP64 device / compute queue / command pool |
 | `qm_methods/vulkan/xtb_vulkan_context.{h,cpp}` | xTB device engine over a `VkContext`; mirrors `XtbGpuContext` |
-| `qm_methods/xtb_vulkan_method.{h,cpp}` | `ComputationalMethod` wrapper; owns the context + the CPU `NativeXtbMethod` |
+| `qm_methods/xtb_vulkan_method.{h,cpp}` | `ComputationalMethod` wrapper (Sep 2026: a thin instantiation of `XtbGpuAdapter<XtbVulkanContext>` + `XtbGpuResidentBackend<…>` from `qm_methods/xtb_gpu_adapter.h`; only the eigensolver hook, `downloadCholesky` and the `CURCUMA_VK_GFN2_CPUGRAD` hatch are Vulkan-specific) |
 | `qm_methods/vulkan/shaders/*.comp` | Hand-written FP64 GLSL compute shaders (compiled to SPIR-V) |
 
 Dispatch (Sep 2026): the Vulkan backend is the runtime plugin `libcurcuma_vulkan.so`
