@@ -102,8 +102,9 @@ rocSOLVER provides the **generalized** symmetric-definite solver directly, so th
 reduction/back-transform is unnecessary and the same hook serves GFN1 and GFN2.
 
 The HIP context (`xtb_hip_context.hip`) is compiled by **`hipcc` into a plain relocatable
-object** (CMake `add_custom_command`) and linked into `curcuma_core` with `g++` as an
-`EXTERNAL_OBJECT`. This builds the device kernels while keeping the HIP-only
+object** (CMake `add_custom_command`) and linked with `g++` as an `EXTERNAL_OBJECT` into
+the runtime-loaded plugin `libcurcuma_rocm.so` (Sep 2026; before that into `curcuma_core`
+— see [GPU_PLUGIN_STARTUP.md](GPU_PLUGIN_STARTUP.md)). This builds the device kernels while keeping the HIP-only
 `--offload-arch`/`--hip-link` flags off the GNU link (which would otherwise flip the link
 to `ld.lld` and drop GNU OpenMP / `libgomp`). No `enable_language(HIP)` is used.
 

@@ -134,17 +134,43 @@ wrapper received the same two-line change as the CUDA wrapper (`setKeepFullParam
 - **GPU wrappers:** the duplicated citation block and the stale "CPU residual" header
   description were removed in both the CUDA and the HIP wrapper.
 
+## Round 3 (same day): GPU architecture — every backend is a plugin
+
+Operator-approved plan (three tiers; tier 3 "unify kernel bodies" deliberately NOT done blind):
+
+- **Plugin symmetry.** ROCm and Vulkan were compiled *into* `curcuma_core` while CUDA was a
+  dlopen plugin, so `method_factory.cpp` / `energycalculator.cpp` carried a
+  `#if USE_CUDA … #elif USE_ROCM …` ladder and every backend choice was a different core
+  binary. Now `libcurcuma_{cuda,rocm,vulkan}.so` follow one recipe (entry files
+  `qm_methods/{cuda,rocm,vulkan}/gpu_plugin_entry_*.cpp`, one `add_library(... SHARED)`
+  block each, compile definitions mirrored from the core). The core has **zero** backend
+  `#ifdef`s: `resolveGpuMode()` probes `gpu_plugin::available(backend)` at runtime, `-gpu auto`
+  takes the first plugin found (cuda, rocm, vulkan), a missing plugin warns *"plugin
+  libcurcuma_<b>.so is not present … cmake -DUSE_<B>=ON"* and falls back to CPU, `-methods`
+  lists the plugins next to the binary. Details: [GPU_PLUGIN_STARTUP.md](GPU_PLUGIN_STARTUP.md).
+- **Verified** (RTX 5080): CPU build — `ldd` shows no CUDA/Vulkan/HIP library, energies
+  unchanged (caffeine gfn2 -42.14723025, complex gfnff -37.24064873 Eh), fallback warning
+  shown. Vulkan plugin — caffeine/complex × gfn1/gfn2 identical to the pre-plugin binary to
+  the printed digit (-42.14723025 / -44.50985543 / -329.52714784 / -343.17980354 Eh),
+  35-step caffeine `-opt` on the device, `-gpu vulkan` for GFN-FF reports "shaders not
+  ported" and uses CPU. CUDA plugin — same four xTB numbers plus complex gfnff -37.24064863
+  and water box -328.18429136 Eh, `test_gfnff_gpu` 4/4. ROCm — CMake block mirrors CUDA
+  line by line, **unverified** (no SDK here).
+- **Pre-existing Vulkan test failures, unchanged by this round** (fail identically with the
+  pre-plugin binary of the same commit): `cli_gpu_gradient_01/02_vulkan_*` expect a
+  "Gradient norm" line that `-sp -verbosity 2` no longer prints (the CPU reference run fails
+  the same way; the baseline db0c760f binary does not print it either), and 4 of the 20
+  opt-in `sqm_val_vkdc_*` divide-and-conquer eigensolve tests (C6H6/acetic-acid-dimer/
+  caffeine gfn1, caffeine gfn2) give NaN on this NVIDIA card with `CURCUMA_VK_TRIDIAG_SOLVE=dc`
+  (the D&C was validated on an AMD RADV device, see SQM_VULKAN.md). The default Vulkan
+  eigensolve path is fine.
+- `cli_simplemd_08_cg_spheres` failed only because a stale 0-byte `input.snapshots/input.trj.xyz`
+  from a killed run was picked up by `find_output_file`; the script now starts clean.
+
 ## Still open (deliberately)
 
-- **CUDA/HIP GFN-FF host wrappers remain two copies** (`gfnff_gpu_method.cpp` /
-  `gfnff_hip_method.cpp`, ~92 % identical). The real differences after name normalisation are
-  ~140 lines: class/type names (`FFWorkspaceGPU`/`FFWorkspaceHip`, `EEQSolverGPU`/`EEQSolverHip`),
-  the includes, the ROCm-only `eeq_rocm_cpu_fragment_threshold` branch (many fragments routed
-  to the CPU solve because the device GPU-Schur is not ported there) and log wording. A shared
-  backend-traits template is the right merge, but it cannot be compiled here (no ROCm SDK), so
-  it was not done blind. Recipe: `sed -E 's/Hip/Gpu/g; s/hip/cuda/g; s/ROCm|rocm/cuda/g'
-  gfnff_hip_method.cpp | diff gfnff_gpu_method.cpp -` shows exactly what a traits struct must carry.
 - **GFN-FF PBC on the CPU path** (unit cell ignored by the workspace) — postponed by the operator.
+- **ROCm plugin build** needs a machine with hipcc/rocSOLVER to confirm the converted CMake block.
 - `cli_simplemd_13_rmsd_mtd_legacy_ab` fails only when run in parallel with its sibling
   (shared output names), `cli_sqm_11` needs TBLite, `cli_curcumaopt_07` has a pre-existing
   golden-value drift, `test_bmt_utils` / `test_orca_interface` / `xtb_cpscf` / `confscan_dtemplate`

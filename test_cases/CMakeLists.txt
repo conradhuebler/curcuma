@@ -345,7 +345,11 @@ set_tests_properties(xtb_solvation_numgrad
 # Only built and registered when USE_CUDA=ON
 if(USE_CUDA)
     add_executable(test_gfnff_gpu test_gfnff_gpu.cpp)
-    target_link_libraries(test_gfnff_gpu curcuma_core CUDA::cudart)
+    # Sep 2026: USE_CUDA no longer propagates from curcuma_core (the backend is a
+    # plugin); the test links the plugin directly for the GFNFFGPUComputationalMethod
+    # typeinfo it dynamic_casts to.
+    target_link_libraries(test_gfnff_gpu curcuma_core curcuma_cuda CUDA::cudart)
+    target_compile_definitions(test_gfnff_gpu PRIVATE USE_CUDA)
 
     if(USE_PCH)
         target_precompile_headers(test_gfnff_gpu REUSE_FROM curcuma_core)
@@ -374,6 +378,7 @@ if(USE_CUDA)
     # Claude Generated (March 2026): GPU analytical vs numerical gradient test
     add_executable(test_gpu_numgrad test_gpu_numgrad.cpp)
     target_link_libraries(test_gpu_numgrad curcuma_core CUDA::cudart)
+    target_compile_definitions(test_gpu_numgrad PRIVATE USE_CUDA)
     if(USE_PCH)
         target_precompile_headers(test_gpu_numgrad REUSE_FROM curcuma_core)
     endif()

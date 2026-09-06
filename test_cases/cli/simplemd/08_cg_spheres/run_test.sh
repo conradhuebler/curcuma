@@ -9,6 +9,10 @@ TEST_DIR="$SCRIPT_DIR"
 
 run_test() {
     cd "$TEST_DIR"
+    # Stale outputs from an earlier (killed) run make find_output_file pick an empty
+    # input.snapshots/input.trj.xyz and count 0 frames (Sep 2026). Start clean.
+    rm -f stdout.log stderr.log input.trj.xyz input.trj.vtf input.restart
+    rm -rf input.snapshots
     # Short CG simulation: 2 beads, 20 fs, should use 10x timestep scaling
     $CURCUMA -md input.xyz \
              -method cg \
