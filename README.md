@@ -6,6 +6,11 @@
 
 A simple Open Source molecular modelling tool.
 
+> **Sep 2026:** the native GFN-FF / GFN1 / GFN2 stack was cleaned up (single `FFWorkspace`
+> engine, table-driven method registry, ~20k lines of dead code removed) and sped up with
+> numerically identical results; `curcuma -methods` lists every method with its providers.
+> Details: [docs/CLEANUP_2026_09.md](docs/CLEANUP_2026_09.md).
+
 ## Download and requirements
 Dependencies are fetched automatically via CMake FetchContent (no manual submodule init required).
 - [LBFGSpp](https://github.com/conradhuebler/LBFGSpp) a fork of [yixuan/LBFGSpp](https://github.com/yixuan/LBFGSpp/) provides LBFGS optimiser, the fork allows performing single step optimisation without resetting any calculated optimsation history

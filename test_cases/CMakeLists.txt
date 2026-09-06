@@ -218,6 +218,14 @@ set_tests_properties(test_eeq_extrapolation PROPERTIES TIMEOUT 180 LABELS "eeq_e
 add_test(NAME test_fast_exp
          COMMAND test_fast_exp)
 
+# Claude Generated (Sep 2026): vendored fdlibm erf/acos/exp/log (CURCUMA_PORTABLE_MATH
+# layer, docs/PORTABLE_ERF.md) pinned against the host libm + special values. Header-only
+# functions, so no library link is needed. Run via: ctest -R test_portable_math
+add_executable(test_portable_math test_portable_math.cpp)
+target_include_directories(test_portable_math PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME test_portable_math COMMAND test_portable_math)
+set_tests_properties(test_portable_math PROPERTIES LABELS "portable_math;unit")
+
 # Claude Generated (Session 5): Two-Phase EEQ System Tests
 # Tests Phase 1 topology charges and Phase 2 environment corrections
 add_executable(test_eeq_two_phase

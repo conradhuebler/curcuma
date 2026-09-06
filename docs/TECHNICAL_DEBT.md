@@ -17,6 +17,29 @@ upstream guard not shown in the snippet.
 
 ---
 
+## Resolved (2026-09-06) — cleanup batch (see docs/CLEANUP_2026_09.md)
+
+| ID | Status | Fix |
+|----|--------|-----|
+| **F-E1** | reduced | `gfnff_method.cpp` 13350 -> 10690 lines: legacy engine sync, JSON parameter path, dead diagnostics and 8 uncalled helpers removed. Still one class; split by concern remains open. |
+| **F-E3** | resolved | per-term accessors are workspace-only (macro-generated); no dual-backend fork. |
+| **F-E2** | resolved | NaN-trap / invariance blocks iterate the workspace components only. |
+| **F-Q2** | resolved | dead `calculateFinalCharges` wrapper family removed with the JSON path. |
+| **F-Q3** | resolved | `gfnff_advanced.{h,cpp}` deleted. |
+| **F-E9** | partly | thread-engine statics gone with `forcefieldthread.cpp`; `gfnff_method.cpp` statics untouched. |
+| **F-Q9** | n/a | legacy engine removed; the GPU leak workaround itself is unchanged. |
+| **X-M1** | open | `xtb_method.h` dead declarations untouched (only the stale include path fixed). |
+| **X-I5 / X-G1** | open | `as_cgto_shell` copies remain (only hoisted out of the inner loops). |
+| **D-1..D-4** | — | unchanged. |
+| new | resolved | native xTB no longer derives from `QMDriver`; `MakeOverlap/MakeH` stubs gone. |
+| new | resolved | duplicate `gfn1_params.hpp` / `gfn2_xtb_params.hpp` / `gfn2-xtb_param.hpp`, `integrals.h`, `test_parser.cpp`, pre-NDDO `am1/pm3/pm6/mndo` classes, `vulkan/prototype`, `d4_reference_data.cpp`, `qmdff_terms.h` deleted. |
+| new | resolved | `ForceFieldThread` engine + GFN-FF/JSON parts of `ForceField` deleted; shared structs in `ff_terms.h`. |
+| new | resolved | EEQ solver: `EEQSolverCache`, dense Floyd-Warshall, `buildNeighborLists`, `calculateEEQEnergy`, emoji self-test, write-only N x N cache removed; Phase-2 uses `Ref` views. |
+| new | resolved | MethodFactory if-chains -> `MethodDescriptor` table; five sub-scope lists -> `methodParameterScopes()`. |
+| new | **open** | `-method cg` is unregistered and SimpleMD segfaults after the failed method creation (no fail-loud check). |
+| new | **open** | GFN-FF PBC on the CPU path is silently non-periodic (unit cell only reached the removed engine). |
+| new | **open** | `cli_simplemd_08/09` MD drift tests are load-sensitive (OpenMP Phase-1 EEQ differs at 1e-13 under `ctest -j`; 10 ps trajectory chaotic) and reuse stale `input.topo.json` caches in the build tree. |
+
 ## Resolved (2026-06-26) — fail-loud batch
 
 The highest-priority *silent-wrong-result* items were fixed and verified (build green,

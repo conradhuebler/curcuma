@@ -265,7 +265,7 @@ double energy = method->calculateEnergy();
 
 #### Force Field System (`src/core/forcefield.h/cpp`)
 Modern force field engine with:
-- **Multi-threading support** via `ForceFieldThread`
+- **Threading** via the single `FFWorkspace` engine (the legacy `ForceFieldThread` engine was removed Sep 2026)
 - **Universal parameter caching** - automatic save/load as JSON
 - **Method-aware loading** - validates parameter compatibility
 - **Multi-threading safety** - controllable caching for concurrent calculations
@@ -314,10 +314,9 @@ curcuma/
 │   │   │   └── ff_methods/                # Force field implementations
 │   │   │       ├── forcefield.cpp         # Force field engine + verbosity  
 │   │   │       ├── forcefieldgenerator.cpp # Parameter generation + verbosity
-│   │   │       ├── forcefieldthread.cpp   # Multi-threading support
+│   │   │       ├── ff_workspace*.cpp      # Partitioned energy/gradient engine (all FF methods)
 │   │   │       ├── gfnff_method.cpp      # Native GFN-FF implementation (4329 lines)
 │   │   │       ├── gfnff.h               # GFN-FF class interface
-│   │   │       ├── gfnff_advanced.cpp     # Advanced GFN-FF parameters
 │   │   │       ├── gfnff_inversions.cpp   # GFN-FF inversion terms
 │   │   │       ├── gfnff_torsions.cpp     # GFN-FF torsion terms
 │   │   │       ├── qmdff.cpp              # QMDFF implementation
@@ -333,6 +332,14 @@ curcuma/
 ```
 
 ## Completed Developments (2026)
+
+✅ **GFN-FF / GFN1 / GFN2 cleanup + speedup** (Sep 2026, AI/machine-tested) - one FF engine
+(`FFWorkspace`; legacy `ForceField`/`ForceFieldThread` GFN-FF path and its per-step feed
+removed), native xTB decoupled from `QMDriver`, duplicate parameter headers / old NDDO classes /
+dead EEQ paths deleted (~20k lines), table-driven `MethodFactory` registry + one shared
+sub-scope list, exact hot-path fixes (LAPACK scratch, HB-gradient index, EEQ views). Energies
+identical to the last digit; GFN-FF SP 1.35-1.9x, GFN1 polymer 1.45x. Numbers, method and
+open items in [docs/CLEANUP_2026_09.md](docs/CLEANUP_2026_09.md)
 
 > Older 2025 work (parameter registry, polymorphic EnergyCalculator, native GFN2/GFN1/PM3, MNDO integrals, GFN-FF full implementation, scattering, analysis parallelization, dependency gating) is in `AIChangelog.md` + git history.
 

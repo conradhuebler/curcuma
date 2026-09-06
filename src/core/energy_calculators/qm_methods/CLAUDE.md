@@ -11,11 +11,13 @@ qm_methods/
 ├── interface/
 │   ├── abstract_interface.h  # Base QMInterface class
 │   ├── ulysses.cpp/h         # Ulysses semi-empirical interface
-├── qm_driver.cpp/h           # Base driver for matrix-based QM methods
+├── qm_driver.cpp/h           # Base driver for EHT/NDDO (matrix-based, STO/GTO basis); NOT used by native xTB
 ├── eht.cpp/h                 # Extended Hückel Theory implementation
 ├── eht_parameters.cpp/h      # EHT parameter database
-├── gfnff.cpp/h               # Native GFN-FF implementation (gfnff)
-├── gfnff_advanced.cpp/h      # Advanced GFN-FF features
+├── nddo.cpp/h, nddo_params.cpp # Unified NDDO (MNDO/AM1/PM3/PM6)
+├── xtb_native.cpp/h, xtb_*.cpp # Native GFN1/GFN2-xTB (derives from QMInterface directly)
+├── parameters/gfn{1,2}_params.hpp # the ONLY GFN1/GFN2 parameter tables (duplicates removed Sep 2026)
+├── gfnff_method.cpp/h        # ComputationalMethod adapter for the native GFN-FF in ../ff_methods
 ├── xtbinterface.cpp/h        # XTB method interface
 ├── tbliteinterface.cpp/h     # TBLite method interface
 ├── dftd3interface.cpp/h      # DFT-D3 dispersion corrections
@@ -42,10 +44,10 @@ class QMInterface {
 ```
 
 ### Driver Layer (`QMDriver`)
-Base class for matrix-based quantum methods providing:
-- Common matrix storage (Hamiltonian, overlap, MO coefficients)
-- Threading support and parallel computation
-- Template method pattern for customizable calculation steps
+Base class for the STO/GTO-basis methods (EHT, NDDO) providing common matrix storage
+(Hamiltonian, overlap, MO coefficients) and the `MakeOverlap/MakeH` hooks. The native xTB
+engine (`curcuma::xtb::XTB`) does NOT derive from it (Sep 2026): it implements `QMInterface`
+directly and keeps its own MO/eigenvalue mirrors, so new matrix-based methods can pick either.
 
 ## Method Implementations
 
@@ -197,9 +199,8 @@ if (CurcumaLogger::get_verbosity() >= 3) {
   - CN-dependent radii, EEQ charges, topology detection, hybridization
   - Methods: generateTopologyAwareBonds(), generateGFNFFDispersionPairs(), etc.
 
-- ✅ **Term Calculation** (ForceFieldThread in ../ff_methods/forcefieldthread.cpp)
-  - Multi-threaded energy/gradient calculations
-  - Methods: CalculateGFNFFBondContribution(), CalculateGFNFFDispersionContribution(), etc.
+- ✅ **Term Calculation** (FFWorkspace in ../ff_methods/ff_workspace_gfnff.cpp)
+  - Partitioned, multi-threaded energy/gradient kernels: calcBonds(), calcDispersion(), ...
 
 - ✅ **All 7 Terms Implemented**: Bond, Angle, Torsion, Inversion, Dispersion, Repulsion, Coulomb
 
